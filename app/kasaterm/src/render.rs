@@ -11106,6 +11106,61 @@ impl App {
                     paint_account_flash(g, acct_r, k);
                 }
 
+                // 오른쪽 끝에서 왼쪽으로 자라는 자들의 공통 기준선. 판 번호가
+                // 이 끝을 먼저 먹고, 터널 스위치와 나머지 칩이 그 왼쪽으로 선다.
+                let mut right_edge = win_w - 12.0;
+                    // 판 번호 — 이 줄의 **맨 오른쪽**(2026-09-06 지시: 「하단바
+                    // 버전표시를 맨 오른쪽으로 하자」). 09-05 에 계정 세그먼트
+                    // 꼬리에서 이 그룹으로 옮겼는데, 그때는 그룹 맨 왼쪽이라 왼쪽
+                    // 이웃(포트·클립보드)이 늘고 줄 때마다 판 번호도 따라 움직였다.
+                    // 그룹은 끝에서부터 자라므로 **가장 먼저 그리는 것**이 가장
+                    // 오른쪽이고, 그 자리만이 이웃과 무관하게 고정이다.
+                    //
+                    // 새로 구운 것이 설치를 기다리면 화살표가 붙는다 — 「껐다 켜면
+                    // 반영됩니다」를 사람이 말로 전하던 자리다. 판정은 종료 때 실제로
+                    // 설치를 움직이는 것과 **같은 함수**를 쓴다(갈리면 표시는 떴는데
+                    // 안 바뀌거나 그 반대가 된다).
+                    if win_w >= 720.0 {
+                        let waiting = crate::install_pending()
+                            || matches!(crate::version::state(), crate::version::Check::Newer(_));
+                        // 손수 구운 판은 번호 뒤에 `+` 하나. 릴리스와 번호가 같아서
+                        // 그냥 두면 둘을 구별할 자리가 화면 어디에도 없다.
+                        let mark = if crate::version::is_local_build() { "+" } else { "" };
+                        let s_ver = if waiting {
+                            format!("v{}{mark} ↑", crate::version::CURRENT)
+                        } else {
+                            format!("v{}{mark}", crate::version::CURRENT)
+                        };
+                        let w = g.measure_chrome_text(&s_ver, fs, true);
+                        right_edge -= w + 14.0;
+                        g.draw_text(
+                            right_edge,
+                            ty,
+                            &s_ver,
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: if waiting {
+                                    theme::accent()
+                                } else {
+                                    theme::with_alpha(theme::text_dim(), 150)
+                                },
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        // 눌러서 여는 곳은 그대로 계정 드롭다운이다 — 몇 커밋 앞인지는
+                        // 거기 있고, 자리를 옮겼다고 그 동선까지 잃으면 판 번호는
+                        // 읽을 수만 있고 캐물을 수 없는 글자가 된다.
+                        let vr = (right_edge - 7.0, sy, w + 14.0, status_h);
+                        {
+                            let (hx, hy) = self.cursor_px;
+                            g.hover_pointer |=
+                                hx >= vr.0 && hx <= vr.0 + vr.2 && hy >= vr.1 && hy <= vr.1 + vr.3;
+                        }
+                        self.status_version_rect = Some(vr);
+                    } else {
+                        self.status_version_rect = None;
+                    }
                 // 바깥주소(터널) 스위치 — 이 줄의 **오른쪽 끝**(2026-08-15 지시
                 // 「하단우측」). 폰 하단바는 좁고, 문이 닫히면 폰은 접속 자체가
                 // 안 돼 스위치를 폰에 둘 이유가 없다 — 여닫는 손은 맥이다.
@@ -11122,7 +11177,9 @@ impl App {
                     let on = self.statusbar.tunnel_on == Some(true);
                     let tw = g.measure_chrome_text(label, fs, false);
                     let seg_w = icon + gap + tw + gap + dot;
-                    let tx = win_w - 12.0 - seg_w;
+                    // 판 번호가 이미 오른쪽 끝을 먹었다 — 그 왼쪽에 선다
+                    // (2026-09-06 지시: 버전 표시를 맨 오른쪽으로).
+                    let tx = right_edge - seg_w;
                     let col = if on { theme::text() } else { theme::text_dim() };
                     g.queue_icon("globe", tx, sy + (status_h - icon) / 2.0, icon, col);
                     g.draw_text(
@@ -11436,57 +11493,6 @@ impl App {
                         self.statusbar.port_rect = Some(pr);
                     }
 
-                    // 판 번호 — 이 줄의 **오른쪽 그룹 맨 왼쪽**(거노 2026-09-05
-                    // 「버전표시 우측으로 옮기자」). 전에는 계정 세그먼트 꼬리에
-                    // 붙어 있었는데, 그쪽은 계정이 늘수록 자라는 자리라 판 번호가
-                    // 매번 다른 곳에 섰다. 오른쪽 칩들은 끝에서부터 자라 자리가
-                    // 고정이다.
-                    //
-                    // 새로 구운 것이 설치를 기다리면 화살표가 붙는다 — 「껐다 켜면
-                    // 반영됩니다」를 사람이 말로 전하던 자리다. 판정은 종료 때 실제로
-                    // 설치를 움직이는 것과 **같은 함수**를 쓴다(갈리면 표시는 떴는데
-                    // 안 바뀌거나 그 반대가 된다).
-                    if win_w >= 720.0 {
-                        let waiting = crate::install_pending()
-                            || matches!(crate::version::state(), crate::version::Check::Newer(_));
-                        // 손수 구운 판은 번호 뒤에 `+` 하나. 릴리스와 번호가 같아서
-                        // 그냥 두면 둘을 구별할 자리가 화면 어디에도 없다.
-                        let mark = if crate::version::is_local_build() { "+" } else { "" };
-                        let s_ver = if waiting {
-                            format!("v{}{mark} ↑", crate::version::CURRENT)
-                        } else {
-                            format!("v{}{mark}", crate::version::CURRENT)
-                        };
-                        let w = g.measure_chrome_text(&s_ver, fs, true);
-                        rx -= w + 14.0;
-                        g.draw_text(
-                            rx,
-                            ty,
-                            &s_ver,
-                            gpu::DrawOpts {
-                                font_size: fs,
-                                color: if waiting {
-                                    theme::accent()
-                                } else {
-                                    theme::with_alpha(theme::text_dim(), 150)
-                                },
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                        // 눌러서 여는 곳은 그대로 계정 드롭다운이다 — 몇 커밋 앞인지는
-                        // 거기 있고, 자리를 옮겼다고 그 동선까지 잃으면 판 번호는
-                        // 읽을 수만 있고 캐물을 수 없는 글자가 된다.
-                        let vr = (rx - 7.0, sy, w + 14.0, status_h);
-                        {
-                            let (hx, hy) = self.cursor_px;
-                            g.hover_pointer |=
-                                hx >= vr.0 && hx <= vr.0 + vr.2 && hy >= vr.1 && hy <= vr.1 + vr.3;
-                        }
-                        self.status_version_rect = Some(vr);
-                    } else {
-                        self.status_version_rect = None;
-                    }
                 }
                 // 팝오버는 상태줄 **뒤**다 — 같은 자리 위로 떠야 하고, 칩을 그린
                 // 뒤라야 앵커 사각형이 이번 프레임 값으로 서 있다.
