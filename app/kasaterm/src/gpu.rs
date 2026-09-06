@@ -4053,6 +4053,13 @@ impl GpuRenderer {
             "ft/folder-src" => include_str!("../assets/icons/ft/folder-src.svg"),
             "ft/folder-target" => include_str!("../assets/icons/ft/folder-target.svg"),
             "ft/folder-test" => include_str!("../assets/icons/ft/folder-test.svg"),
+            // Shell picker set (assets/icons/sh): 브랜드색 접시 + 흰 글리프의
+            // filled SVG — ft 와 같이 `queue_icon_colored` 로 그린다. 다섯 줄이
+            // 같은 terminal 글리프였을 땐 이름을 읽어야 구분됐다.
+            "sh/pwsh" => include_str!("../assets/icons/sh/pwsh.svg"),
+            "sh/winps" => include_str!("../assets/icons/sh/winps.svg"),
+            "sh/gitbash" => include_str!("../assets/icons/sh/gitbash.svg"),
+            "sh/wsl" => include_str!("../assets/icons/sh/wsl.svg"),
             _ => return None,
         })
     }

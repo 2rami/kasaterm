@@ -8159,20 +8159,22 @@ pub(crate) fn available_shells() -> Vec<(&'static str, &'static str, String)> {
     {
         let pwsh7 = r"C:\Program Files\PowerShell\7\pwsh.exe";
         if std::path::Path::new(pwsh7).is_file() {
-            out.push(("PowerShell 7", "terminal", pwsh7.to_string()));
+            out.push(("PowerShell 7", "sh/pwsh", pwsh7.to_string()));
         }
         // Windows PowerShell ships with the OS — always present.
         out.push((
             "Windows PowerShell",
-            "terminal",
+            "sh/winps",
             "powershell.exe".to_string(),
         ));
+        // cmd 엔 브랜드 마크가 없다. 색을 박은 SVG 를 두면 밝은/어두운 테마 중
+        // 한쪽에서 반드시 묻히므로, 테마색을 따라가는 기본 글리프로 둔다.
         out.push(("Command Prompt", "terminal", "cmd.exe".to_string()));
         if let Some(bash) = git_bash_path() {
-            out.push(("Git Bash", "terminal", bash));
+            out.push(("Git Bash", "sh/gitbash", bash));
         }
         if std::path::Path::new(r"C:\Windows\System32\wsl.exe").is_file() {
-            out.push(("WSL", "terminal", "wsl.exe".to_string()));
+            out.push(("WSL", "sh/wsl", "wsl.exe".to_string()));
         }
     }
     out

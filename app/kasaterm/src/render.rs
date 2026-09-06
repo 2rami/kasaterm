@@ -3472,33 +3472,82 @@ impl App {
         // Top tabs have room below the button, while the sidebar button lives
         // in the bottom tray and must open upward to stay inside the window.
         let menu_open = self.shell_menu_open;
-        let shell_items: Vec<(&'static str, &'static str, String)> = if menu_open {
-            available_shells()
-        } else {
-            Vec::new()
-        };
-        const SHELL_ITEM_H: f32 = 34.0;
-        let menu_w_for_paint = sb_plus.2.max(210.0);
-        let shell_menu_layout: Vec<(String, &'static str, &'static str, (f32, f32, f32, f32))> = {
-            let (px, py, _, ph) = sb_plus;
-            let menu_h = shell_items.len() as f32 * SHELL_ITEM_H;
-            let mut iy = if self.tabs_on_top {
-                py + ph + 4.0
+        // (label, icon, cmd, chord). `chord` 는 맨 위 «기본 셸» 줄에만 붙는다 —
+        // 그 줄은 새 탭 단축키가 어느 셸을 여는지 알려주는 자리라, 아래 목록에
+        // 같은 셸이 또 나와도 중복이 아니라 안내다.
+        let shell_items: Vec<(&'static str, &'static str, String, Option<&'static str>)> =
+            if menu_open {
+                let all = available_shells();
+                let chord = if cfg!(target_os = "macos") {
+                    "⌘T"
+                } else {
+                    "Ctrl Shift T"
+                };
+                let head = resolve_default_shell().map(|dc| {
+                    // 설정에 적힌 경로가 이 기계에 없는 셸일 수 있다(다른 OS 에서
+                    // 넘어온 값 등). 그때는 목록에서 못 찾으니 일반 라벨로 둔다 —
+                    // 줄을 통째로 빼면 단축키를 알릴 자리가 사라진다.
+                    all.iter()
+                        .find(|(_, _, c)| c.eq_ignore_ascii_case(&dc))
+                        .map(|(l, i, c)| (*l, *i, c.clone(), Some(chord)))
+                        .unwrap_or(("기본 셸", "terminal", dc.clone(), Some(chord)))
+                });
+                head.into_iter()
+                    .chain(all.into_iter().map(|(l, i, c)| (l, i, c, None)))
+                    .collect()
             } else {
-                py - menu_h - 4.0
+                Vec::new()
             };
+        const SHELL_ITEM_H: f32 = 34.0;
+        const SHELL_SEP_H: f32 = 9.0;
+        let shell_has_head = shell_items
+            .first()
+            .is_some_and(|(_, _, _, chord)| chord.is_some());
+        // 단축키가 라벨을 밀지 않도록 폭을 벌렸다.
+        let menu_w_for_paint = sb_plus.2.max(240.0);
+        let mut shell_sep_y: Option<f32> = None;
+        #[allow(clippy::type_complexity)]
+        let shell_menu_layout: Vec<(
+            String,
+            &'static str,
+            &'static str,
+            Option<&'static str>,
+            (f32, f32, f32, f32),
+        )> = {
+            let (px, py, _, ph) = sb_plus;
+            let menu_h = shell_items.len() as f32 * SHELL_ITEM_H
+                + if shell_has_head { SHELL_SEP_H } else { 0.0 };
+            // 위로 열 자리가 모자라면 아래로 뒤집고, 그래도 넘치면 창 안으로
+            // 당긴다. 아래 트레이의 "+" 는 위로 여는 게 기본인데, 항목이 늘거나
+            // 창이 짧으면 첫 줄들이 타이틀바 위로 잘려 나간다 — 잘린 줄은 클릭도
+            // 안 되므로 «메뉴가 짧아 보이는» 게 아니라 항목이 사라진 것이 된다.
+            let below = py + ph + 4.0;
+            let above = py - menu_h - 4.0;
+            let mut iy = if self.tabs_on_top || above < TITLE_HEIGHT {
+                below
+            } else {
+                above
+            };
+            if iy + menu_h > sb_win_h - 4.0 {
+                iy = (sb_win_h - 4.0 - menu_h).max(TITLE_HEIGHT);
+            }
             shell_items
                 .iter()
-                .map(|(label, icon, cmd)| {
+                .enumerate()
+                .map(|(n, (label, icon, cmd, chord))| {
                     let r = (px, iy, menu_w_for_paint, SHELL_ITEM_H);
                     iy += SHELL_ITEM_H;
-                    (cmd.clone(), *label, *icon, r)
+                    if n == 0 && shell_has_head {
+                        shell_sep_y = Some((iy + SHELL_SEP_H / 2.0).round());
+                        iy += SHELL_SEP_H;
+                    }
+                    (cmd.clone(), *label, *icon, *chord, r)
                 })
                 .collect()
         };
         self.shell_menu_hits = shell_menu_layout
             .iter()
-            .map(|(cmd, _, _, r)| (cmd.clone(), *r))
+            .map(|(cmd, _, _, _, r)| (cmd.clone(), *r))
             .collect();
         let sb_active = self.active_window;
         // 방 단위 "작업 중"·"방금 끝남" 플래그는 걷어냈다. 그 둘이 칩 모서리의 점
@@ -4717,13 +4766,16 @@ impl App {
                 if !menu_open || shell_menu_layout.is_empty() {
                     return;
                 }
-                let (px, py, _, ph) = sb_plus;
-                let backdrop_h = shell_menu_layout.len() as f32 * SHELL_ITEM_H + 8.0;
-                let backdrop_y = if self.tabs_on_top {
-                    py + ph
-                } else {
-                    py - backdrop_h
-                };
+                let (px, py, _, _) = sb_plus;
+                let backdrop_h = shell_menu_layout.len() as f32 * SHELL_ITEM_H
+                    + if shell_sep_y.is_some() { SHELL_SEP_H } else { 0.0 }
+                    + 8.0;
+                // 첫 항목에서 되짚는다 — 위/아래 뒤집기와 창 안 당김을 레이아웃이
+                // 이미 정했는데 여기서 같은 분기를 또 쓰면 둘이 어긋난다.
+                let backdrop_y = shell_menu_layout
+                    .first()
+                    .map(|(_, _, _, _, r)| r.1 - 4.0)
+                    .unwrap_or(py);
                 round_rect(
                     g,
                     px - 4.0,
@@ -4733,7 +4785,13 @@ impl App {
                     theme::radius_md(),
                     theme::surface_active(),
                 );
-                for (_, label, icon, (ix, iy, iw, ih)) in &shell_menu_layout {
+                // 기본 셸 줄과 «다른 셸로 열기» 목록을 가르는 선. 둘은 성격이
+                // 달라서(하나는 안내, 아래는 선택지) 붙여 두면 첫 줄이 목록의
+                // 일부로 읽힌다.
+                if let Some(sy) = shell_sep_y {
+                    g.rect(px + 12.0, sy, menu_w_for_paint - 24.0, 1.0, theme::border());
+                }
+                for (_, label, icon, chord, (ix, iy, iw, ih)) in &shell_menu_layout {
                     let hov = sb_cursor.0 >= *ix
                         && sb_cursor.0 <= *ix + *iw
                         && sb_cursor.1 >= *iy
@@ -4741,13 +4799,25 @@ impl App {
                     if hov {
                         hover_rect(g, *ix, *iy, *iw, *ih, theme::radius_md());
                     }
-                    g.queue_icon(
-                        icon,
-                        *ix + 12.0,
-                        *iy + (*ih - theme::ICON_SIZE) / 2.0,
-                        theme::ICON_SIZE,
-                        theme::text_dim(),
-                    );
+                    // 셸 아이콘은 브랜드색을 그대로 쓰는 filled SVG 다 — 모노크롬
+                    // 틴트로 그리면 다섯 줄이 도로 같은 실루엣이 된다.
+                    if icon.starts_with("sh/") {
+                        g.queue_icon_colored(
+                            icon,
+                            *ix + 12.0,
+                            *iy + (*ih - theme::ICON_SIZE) / 2.0,
+                            theme::ICON_SIZE,
+                            1.0,
+                        );
+                    } else {
+                        g.queue_icon(
+                            icon,
+                            *ix + 12.0,
+                            *iy + (*ih - theme::ICON_SIZE) / 2.0,
+                            theme::ICON_SIZE,
+                            theme::text_dim(),
+                        );
+                    }
                     g.draw_text(
                         *ix + 38.0,
                         *iy + (*ih - 14.0) / 2.0,
@@ -4759,6 +4829,20 @@ impl App {
                             italic: false,
                         },
                     );
+                    if let Some(chord) = chord {
+                        let cw = g.measure_chrome_text(chord, 11.5, false);
+                        g.draw_text(
+                            *ix + *iw - 12.0 - cw,
+                            *iy + (*ih - 11.5) / 2.0,
+                            chord,
+                            gpu::DrawOpts {
+                                font_size: 11.5,
+                                color: theme::text_mute(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                    }
                 }
             };
             // Horizontal window tabs in the title strip (Windows Terminal-
