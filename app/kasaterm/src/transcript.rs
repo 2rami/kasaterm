@@ -523,7 +523,6 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         surface_id: surface_id.to_string(),
         // codex·agy 는 claude 의 `custom-title` 레코드를 남기지 않는다 — 손으로
         // 붙인 이름을 여기서 알아낼 길이 없으므로 OSC 우선 그대로 둔다.
-        title_manual: false,
         title: String::new(),
         last_prompt,
         last_reply,
@@ -707,7 +706,6 @@ fn agy_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         surface_id: surface_id.to_string(),
         // codex·agy 는 claude 의 `custom-title` 레코드를 남기지 않는다 — 손으로
         // 붙인 이름을 여기서 알아낼 길이 없으므로 OSC 우선 그대로 둔다.
-        title_manual: false,
         title,
         last_prompt,
         last_reply,
@@ -1035,7 +1033,6 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         reach: String::new(),
         peer_name: None,
         surface_id: surface_id.to_string(),
-        title_manual: !custom_title.is_empty(),
         title: if custom_title.is_empty() { title } else { custom_title },
         last_prompt,
         last_reply,
@@ -1613,29 +1610,25 @@ mod tests {
         assert_eq!(a.title, "x");
         assert_eq!(a.status, "idle");
         assert_eq!(a.intent, "active", "tool_use 없으면 active");
-        assert!(!a.title_manual, "자동 제목은 사람이 붙인 것이 아니다");
     }
 
     #[test]
-    fn hand_typed_title_is_flagged_so_the_osc_summary_cannot_win() {
-        // board 는 살아있는 OSC 터미널 제목을 파싱 제목보다 우선한다. 그 우선이
-        // 사람이 붙인 이름까지 덮으면 개명이 안 먹는 것처럼 보인다 — claude 는
-        // OSC 요약을 한 번 쏘고 `/rename` 에는 다시 쏘지 않기 때문이다
-        // (2026-08-27). 그래서 파서가 「이건 사람이 붙인 것」을 표시해 준다.
+    fn 손으로_붙인_이름이_자동_제목을_이긴다() {
+        // 파서의 우선순위 — 붙인 이름(`/rename`·소켓 개명)이 claude 가 지은
+        // 제목보다 앞선다. board 행이 그 값으로 뜬다.
         let tail = [
             r#"{"type":"ai-title","aiTitle":"활동 요약"}"#,
             r#"{"type":"custom-title","customTitle":"내가 붙인 이름"}"#,
         ]
         .join("\n");
         let a = snapshot_from_tail("%1", &tail, false);
-        assert_eq!(a.title, "내가 붙인 이름", "사람 이름이 자동 제목을 이긴다");
-        assert!(a.title_manual, "OSC 가 못 덮게 표시가 서야 한다");
+        assert_eq!(a.title, "내가 붙인 이름");
 
-        // `/rename` 레코드에는 `nameSource` 가 없다 — 그 표식은 우리 소켓 개명
-        // 경로만 남긴다. 표식 유무로 가르면 정작 `/rename` 이 안 지켜진다.
+        // `/rename` 레코드에는 `nameSource` 가 없다 — 표식 유무로 가르면 정작
+        // 슬래시 명령으로 붙인 이름이 안 지켜진다.
         let bare = r#"{"type":"custom-title","customTitle":"슬래시로 붙인 이름"}"#;
         let b = snapshot_from_tail("%1", bare, false);
-        assert!(b.title_manual, "nameSource 가 없어도 사람이 붙인 이름이다");
+        assert_eq!(b.title, "슬래시로 붙인 이름");
     }
 
     #[test]

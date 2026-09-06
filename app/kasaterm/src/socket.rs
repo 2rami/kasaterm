@@ -1247,7 +1247,6 @@ impl Backend for PtyBackend {
             surface_id.to_string(),
             title.to_string(),
         ));
-        mark_title_manual(&self.bound, surface_id, title);
         Ok(())
     }
 
@@ -1488,6 +1487,60 @@ impl Backend for PtyBackend {
             Ok(Err(why)) => anyhow::bail!("unfold 실패: {why}"),
             Err(_) => anyhow::bail!("unfold 응답 없음(120초) — GUI 스레드를 확인해라"),
         }
+    }
+
+    fn list_machines(&self, from: Option<&str>) -> Result<serde_json::Value> {
+        // 명부·폴링 캐시·원격 링크 표만 읽는다 — GUI 소유물이 없어 스레드 위임이
+        // 필요 없다(home_machine 과 같은 이유).
+        let here = from
+            .and_then(kasa_mcp::remote::remote_info)
+            .map(|i| if i.label.is_empty() { i.base } else { i.label });
+        let mut mirrors: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for id in kasa_pty::live_sessions() {
+            if let Some(i) = kasa_mcp::remote::remote_info(&id) {
+                let key = if i.label.is_empty() { i.base } else { i.label };
+                *mirrors.entry(key).or_default() += 1;
+            }
+        }
+        let snap = kasa_mcp::machines::snapshot();
+        let machines: Vec<serde_json::Value> = kasa_mcp::machines::machines()
+            .into_iter()
+            .map(|m| {
+                let hit = snap
+                    .iter()
+                    .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(m.label.as_str()));
+                let online = hit
+                    .and_then(|v| v.get("online").and_then(|o| o.as_bool()))
+                    .unwrap_or(false);
+                let panes: Vec<&serde_json::Value> = hit
+                    .and_then(|v| v.get("panes").and_then(|p| p.as_array()))
+                    .map(|a| {
+                        a.iter()
+                            .filter(|p| {
+                                p.get("id").and_then(|v| v.as_str()).is_some_and(|s| s.starts_with('%'))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let waiting = panes
+                    .iter()
+                    .filter(|p| {
+                        p.get("status")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|st| st.contains("wait") || st.contains("attention"))
+                    })
+                    .count();
+                serde_json::json!({
+                    "label": m.label,
+                    "online": online,
+                    "ago_secs": hit.and_then(|v| v.get("ago_secs").and_then(|a| a.as_u64())),
+                    "students": panes.len(),
+                    "waiting": waiting,
+                    "mirrored": mirrors.get(&m.label).copied().unwrap_or(0),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "here": here, "machines": machines }))
     }
 
     fn home_machine(&self) -> Result<Option<(String, bool)>> {
@@ -2876,14 +2929,15 @@ impl Backend for PtyBackend {
             // `unwrap_or_default()` 라, 터미널 제목을 안 다는 하네스(agy 는 TUI 라
             // 안 단다)는 파서가 전사본에서 뽑아 온 제목까지 통째로 지워져 board 행이
             // 늘 무제목이었다. OSC 가 있으면 그쪽이 여전히 이긴다 — 살아있는 값이라서다.
-            // ⚠️**사람이 손으로 붙인 이름은 예외다.** claude 는 OSC 요약을 한 번
-            // 쏘고 `/rename` 에는 다시 쏘지 않아서, 개명을 해도 옛 요약이 계속
-            // 이겨 「이름이 안 붙는다」로 보였다(2026-08-27 지적). 자동 제목
-            // 갱신(title-sync)이 한 겹 아래에서 이미 같은 판정을 한다.
-            if !row.title_manual {
-                if let Some(t) = osc_titles.get(&row.surface_id) {
-                    row.title = crate::strip_activity_prefix(t).to_string();
-                }
+            // ⚠️**사람이 손으로 붙인 이름도 여기로 온다.** 개명은 pane 이름표를
+            // 직접 갈아 끼우고(`SocketRename`), claude 안에서 친 `/rename` 은 꼬리
+            // 스캔이 같은 자리에 얹는다 — 그래서 이 값이 언제나 화면에 떠 있는 그
+            // 이름이고, board 와 터미널 탭이 같은 이름을 말한다. 한때는 개명 여부를
+            // 따로 표시해 가려야 했는데, claude 가 OSC 요약을 한 번 쏘고 `/rename`
+            // 에는 다시 쏘지 않아 옛 요약이 계속 이겼기 때문이다(2026-08-27 지적).
+            // 이제 두 통로가 한 자리로 모여 그 가름이 필요 없다.
+            if let Some(t) = osc_titles.get(&row.surface_id) {
+                row.title = crate::strip_activity_prefix(t).to_string();
             }
             row.effort_default = saved_effort.clone();
             if let Some(&pid) = pane_pids.get(&row.surface_id) {
@@ -3683,43 +3737,6 @@ pub fn students_dir() -> Option<std::path::PathBuf> {
         return Some(d.join("sprites"));
     }
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/students"))
-}
-
-/// pane 제목을 **손으로** 바꾼 사실을 그 세션 기록에도 남긴다.
-///
-/// 이게 없으면 앱을 껐다 켤 때 그 이름이 사라진다 — 화면의 이름표는 pane 이 들고 있을
-/// 뿐이고, 다음 실행이 이름을 되찾는 자리는 이 기록뿐이다. 자기 세션을 고치는 CLI
-/// 경로(`kasaterm-cli rename <이름>`)는 처음부터 같은 레코드를 남기고 있었고, **남의
-/// pane 을 고치는 이 경로만 빠져 있었다** — 그래서 오케스트레이터가 소환한 학생에게
-/// 역할 이름을 붙여도 한 턴 뒤 활동 요약으로 되돌아갔다(2026-08-15 지적).
-///
-/// **사람이 붙일 때만 적는다.** 이름을 지어서 적는 일은 2026-09-07 에 통째로 걷어냈다
-/// — claude 는 제 이름을 스스로 짓고, 우리는 그걸 읽어 그리기만 한다.
-///
-/// 기록할 자리를 못 찾으면 조용히 지나간다. 제목 변경 자체는 이미 GUI 로 갔고,
-/// transcript 가 아직 없는 pane(셸만 도는 자리)도 이름은 가질 수 있어야 한다.
-fn mark_title_manual(bound: &Arc<Mutex<HashMap<String, PathBuf>>>, surface_id: &str, title: &str) {
-    use std::io::Write as _;
-    let Some(path) = bound.lock().ok().and_then(|b| b.get(surface_id).cloned()) else {
-        return;
-    };
-    // 파일명(stem)이 곧 세션 id — CLI 가 남기는 레코드와 같은 모양을 맞춘다.
-    let sid = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    let record = serde_json::json!({
-        "type": "custom-title",
-        "customTitle": title,
-        "sessionId": sid,
-        "nameSource": "user",
-    });
-    let Ok(line) = serde_json::to_string(&record) else {
-        return;
-    };
-    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path) {
-        let _ = writeln!(f, "{line}");
-    }
 }
 
 /// User's `default_cwd` preference for where new shells start — mirrors the

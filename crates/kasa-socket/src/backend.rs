@@ -146,17 +146,6 @@ pub struct PaneActivity {
     /// names the session.
     #[serde(default)]
     pub title: String,
-    /// True when `title` came from a name a person typed (`/rename`, or the
-    /// socket rename path), not from the harness's own summary.
-    ///
-    /// The board prefers a live OSC terminal title over the parsed one, because
-    /// OSC tracks what the pane is doing right now. That preference is wrong for
-    /// a hand-typed name: claude emits its OSC summary once and does not re-emit
-    /// it on `/rename`, so the stale summary outlived every rename and the name
-    /// looked like it never took (2026-08-27). Same rule the title-sync hook
-    /// already applies one layer down — a human name outranks a generated one.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub title_manual: bool,
     /// The latest user prompt (`last-prompt` line), i.e. what this pane was
     /// just told to do. Empty if nothing's been asked yet.
     #[serde(default)]
@@ -583,6 +572,12 @@ pub trait Backend: Send + Sync {
     /// `None`. 셰임의 순정 `claude` 디스패치가 이걸 물어 태생지를 고른다.
     fn home_machine(&self) -> Result<Option<(String, bool)>> {
         Ok(None)
+    }
+    /// 명부 기계 목록 — `to`(기계를 cd 처럼 오가는 셰임)의 `ls`. `from` 은 묻는
+    /// pane — 그 pane 이 어느 기계의 거울이면 응답의 `here` 가 그 라벨이다.
+    /// 응답: `{here, machines:[{label, online, ago_secs, students, waiting, mirrored}]}`.
+    fn list_machines(&self, _from: Option<&str>) -> Result<serde_json::Value> {
+        anyhow::bail!("machines: 이 백엔드는 지원하지 않는다")
     }
     /// pane → 작업 폴더. `/term/panes` 의 cwd 폴백 — board(claude 바인딩)가 못
     /// 싣는 순수 셸 pane 의 cwd 를 셸 pid 에서 직접 읽는다. GUI 백엔드 전용.
