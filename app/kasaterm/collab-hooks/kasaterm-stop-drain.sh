@@ -1,9 +1,13 @@
 #!/bin/bash
-# Stop hook: 이 pane 의 claude 가 턴을 끝내려 한다. 두 가지를 한다.
-#   1. 세션 제목을 마지막 사용자 프롬프트로 갱신 — 피커·board 라벨이 첫 프롬프트에
-#      멈춰 뭘 하는 세션인지 헷갈리는 문제. 수동 개명(/rename·kasaterm-cli rename)은
-#      건드리지 않는다(auto 마커로 가른다).
-#   2. 작업 완료 데스크탑 알림.
+# Stop hook: 이 pane 의 claude 가 턴을 끝내려 한다. 작업 완료 데스크탑 알림을 띄운다.
+#
+# **제목 갱신은 2026-09-07 에 걷어냈다.** claude 는 자기 세션 이름(`ai-title`)을 스스로
+# 짓고 `/rename` 이라는 공식 창구도 갖고 있는데, 우리가 그 위에 같은 자리(custom-title)로
+# 덧그리고 있었다. 덧그린 값은 claude 가 매 턴 표식 없이 다시 적어 굳어 버리고, 표식이
+# 지워진 복제본이라 우리 판정("내가 지은 것만 갈아치운다")에도 안 걸려 **실측 스탬프 0개**
+# — 한 번도 안 돈 채 화면의 이름표만 첫 지시 문장에 붙들어 두고 있었다(거노 지시:
+# "공식기능 위에 덧그리지 말고 그냥 그려도 되잖아"). 이제 앱이 claude 가 지은 이름을
+# 그대로 읽어 그린다.
 #
 # **인박스 drain 은 2026-08-15 에 걷어냈다.** 여기서 보던 쪽지함(`kasacollab msg`)은
 # pane 협업이 세션 소켓(SendMessage)으로 옮겨 가면서 아무도 안 쓰게 됐다 — 실측으로
@@ -23,9 +27,6 @@ input=$(cat 2>/dev/null)
 # 두 번 뜨지 않게 조용히 나간다. 우리는 더 이상 막지 않으므로 우리 탓으로는 여기 안
 # 온다. grep 으로 보는 이유는 이 판정 하나에 파이썬을 띄울 값이 없어서다.
 printf '%s' "$input" | grep -q '"stop_hook_active"[[:space:]]*:[[:space:]]*true' && exit 0
-
-HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)"
-printf '%s' "$input" | python3 "$HOOKS_DIR/kasaterm-title-sync.py" >/dev/null 2>&1 || true
 
 dir="${PWD##*/}"
 kasaterm-cli notify "✓ ${dir} — claude 완료" "작업을 마쳤어" >/dev/null 2>&1 || true

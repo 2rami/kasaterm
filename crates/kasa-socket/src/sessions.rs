@@ -286,6 +286,23 @@ pub fn custom_title_of_line(line: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.chars().take(80).collect())
 }
 
+/// jsonl 한 줄이 claude 가 스스로 지은 제목이면 그 제목, 아니면 None.
+///
+/// 세션에 붙인 이름이 하나도 없을 때의 정본이다. claude 는 세션 초반에 이것을 한 번
+/// 짓고 그 뒤로는 같은 값을 계속 다시 적는다(최근 세션 여섯 개 모두 평생 한 종류,
+/// 2026-09-07 실측) — 그래서 꼬리만 봐도 잡히고, 대화가 길어져도 사라지지 않는다.
+pub fn ai_title_of_line(line: &str) -> Option<String> {
+    if !line.contains("\"ai-title\"") {
+        return None;
+    }
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("ai-title") {
+        return None;
+    }
+    let t = v.get("aiTitle").and_then(|t| t.as_str())?.trim();
+    (!t.is_empty()).then(|| t.chars().take(80).collect())
+}
+
 /// 라벨로 부적합한 메타성 user 텍스트(슬래시 명령·시스템 주입·bash 출력 래퍼).
 /// claude 가 첫 턴에 흔히 끼워넣어 라벨을 오염시키므로 건너뛴다.
 fn is_meta_user_text(t: &str) -> bool {
@@ -302,47 +319,6 @@ fn is_meta_user_text(t: &str) -> bool {
         // 전 찰나에 이게 첫 user 폴백으로 새어 인레이에 유출됐다(거노 실측).
         || t.starts_with("아래 대화의 주제를 나타내는")
         || t.starts_with("다음 대화 발췌를 보고")
-}
-
-/// 이미 읽어 둔 transcript 꼬리에서 **첫 유효 user 프롬프트**(= 갓 소환된 학생이
-/// 받은 첫 지시·브리프)를 pane 제목 후보로 뽑는다. `parse_session_label` 의
-/// 첫-user 규칙과 같되 파일을 다시 열지 않고 넘겨받은 꼬리 문자열만 훑는다 —
-/// GUI 의 제목 동기화가 매 틱 이미 읽는 꼬리를 재활용하려는 것이다.
-///
-/// custom-title 이 아직 하나도 없는 학생 pane 에만 의미가 있다(제목이 있으면
-/// 호출부가 이 폴백을 안 탄다). 첫 줄만 60자로 자른다 — 탭 이름표는 좁고,
-/// 여러 줄 브리프의 둘째 줄부터는 맥락이라 제목감이 아니다.
-pub fn first_prompt_label(tail: &str) -> Option<String> {
-    for line in tail.lines() {
-        if !line.contains("\"user\"") {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if v.get("type").and_then(|t| t.as_str()) != Some("user") {
-            continue;
-        }
-        if v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
-            continue;
-        }
-        let Some(txt) = user_message_text(&v) else {
-            continue;
-        };
-        let txt = txt.trim();
-        if txt.is_empty() || is_meta_user_text(txt) {
-            continue;
-        }
-        let first_line = txt
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .unwrap_or(txt);
-        if !first_line.is_empty() {
-            return Some(first_line.chars().take(60).collect());
-        }
-    }
-    None
 }
 
 /// user transcript 라인의 본문 텍스트 — content 가 문자열이면 그대로, 블록 배열이면
@@ -496,32 +472,16 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn first_prompt_label_skips_meta_and_takes_first_line() {
-        // 슬래시 명령(isMeta)·다른 pane 의 SendMessage 래퍼는 건너뛰고, 첫 진짜
-        // 지시의 첫 줄만 라벨이 된다.
-        let tail = concat!(
-            r#"{"type":"user","isMeta":true,"message":{"content":"<command-name>/clear</command-name>"}}"#,
-            "\n",
-            r#"{"type":"user","message":{"content":"<cross-session-message from=\"x\">일 시켜</cross-session-message>"}}"#,
-            "\n",
-            r#"{"type":"user","message":{"content":"로그인 버그 고쳐줘\n맥락은 아래에"}}"#,
-            "\n",
-        );
+    fn ai_title_은_claude_가_지은_제목만_잡는다() {
+        // 붙인 이름이 없는 세션의 이름표가 여기서 온다. 다른 줄에 같은 글자가
+        // 섞여 있어도(툴 결과에 흔하다) 레코드 형태가 맞을 때만 잡아야 한다.
+        let good = r#"{"type":"ai-title","aiTitle":"리네임 기능 하네스 구조"}"#;
         assert_eq!(
-            first_prompt_label(tail).as_deref(),
-            Some("로그인 버그 고쳐줘")
+            ai_title_of_line(good).as_deref(),
+            Some("리네임 기능 하네스 구조")
         );
-    }
-
-    #[test]
-    fn first_prompt_label_none_when_only_meta() {
-        let tail = concat!(
-            r#"{"type":"user","message":{"content":"<system-reminder>x</system-reminder>"}}"#,
-            "\n",
-            r#"{"type":"assistant","message":{"content":"네"}}"#,
-            "\n",
-        );
-        assert_eq!(first_prompt_label(tail), None);
+        assert_eq!(ai_title_of_line(r#"{"type":"user","message":{"content":"\"ai-title\" 얘기"}}"#), None);
+        assert_eq!(ai_title_of_line(r#"{"type":"ai-title","aiTitle":"  "}"#), None);
     }
 
     #[test]
