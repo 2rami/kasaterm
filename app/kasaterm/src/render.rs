@@ -11010,13 +11010,13 @@ impl App {
                             Some(b) if b.stale => (format!("~{:.0}%", b.pct), pct_col(b.pct)),
                             Some(b) => (format!("{:.0}%", b.pct), pct_col(b.pct)),
                             None if signed_out => ("로그인 필요".to_string(), theme::danger()),
-                            None => {
-                                // 아직 못 읽은 것뿐이다. 이름 옆에 `—` 만 붙는 칸은
-                                // 「어디로 옮길까」에 아무 답을 못 주면서 자리만 먹는다
-                                // (2026-08-29 「좌측하단 계정정보 좀 정보량 줄이고」).
-                                dropped += 1;
-                                continue;
-                            }
+                            // 아직 못 읽었어도 **이름은 세운다.** 한동안 이런 칸을
+                            // 통째로 뺐는데(2026-08-29 「정보량 줄이고」), 그 결과
+                            // 설정 화면에는 넷이 있고 이 줄에는 둘만 있는 상태가
+                            // 됐다 — 같은 것을 두 화면이 다르게 말하는 셈이라
+                            // 세 번 되풀이해 지적받았다(2026-09-07). 자리가 정말
+                            // 모자라면 아래 예산이 접고 `+N` 으로 말한다.
+                            None => ("—".to_string(), theme::with_alpha(theme::text_dim(), 150)),
                         };
                         let sep = if first { " │ " } else { " · " };
                         let seg = g.measure_chrome_text(sep, fs, true)
