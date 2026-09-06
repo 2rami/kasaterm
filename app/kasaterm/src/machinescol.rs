@@ -293,12 +293,9 @@ impl App {
         self.info.machines_col.machines = machines;
     }
 
-    /// 이사 진행 한 줄 — 단계마다 불러 화면을 그 자리에서 한 프레임 굴린다.
-    /// 이사는 GUI 스레드 동기라 이걸 안 부르면 「눌렸다」 한 프레임 뒤 끝날 때까지
-    /// 화면이 얼어붙은 채 무소식이다(2026-08-30 지시: 「진행도가 보이면 좋겠어」).
-    ///
-    /// 부르는 곳이 `session.rs` 의 이사 본체뿐이고 그쪽이 `#[cfg(unix)]` 이라
-    /// 게이트를 맞춰 둔다 — 안 맞추면 Windows 빌드에서만 dead_code 경고가 뜬다.
+    /// 데려오기(migrate_pane_back)의 진행 한 줄 — 그쪽은 아직 GUI 스레드 동기라
+    /// 이걸 안 부르면 끝날 때까지 화면이 얼어붙은 채 무소식이다. 보내기는 워커로
+    /// 넘어가 `migrate_stage` 가 대신한다(2026-09-07).
     #[cfg(unix)]
     pub(crate) fn migrate_progress(&mut self, pane: &str, msg: String) {
         self.set_toast(format!("이사 — {msg}"));
@@ -440,6 +437,15 @@ impl App {
             })(),
             state::MachinesColBtn::Bring { pane } => self.migrate_pane_back(&pane, None, false),
         };
+        // 보내기는 워커로 넘어갔다 — busy·note 는 migrate_finish 가 끝에서 정리한다.
+        // 예약·검사 실패·데려오기(아직 동기)만 여기서 마무리한다.
+        if outcome.is_ok() && self.migrate_running(&pane) {
+            if let Ok(msg) = outcome {
+                self.set_toast(msg);
+            }
+            self.chrome_dirty = true;
+            return true;
+        }
         self.info.machines_col.busy = None;
         match outcome {
             Ok(msg) => {

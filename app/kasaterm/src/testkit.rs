@@ -2499,6 +2499,7 @@ impl App {
                     || v == "panemenu"
                     || v == "panethemes"
                     || v == "machinemenu"
+                    || v == "migratestages"
                     || v.starts_with("panechars") =>
             {
                 v
@@ -2517,6 +2518,23 @@ impl App {
         // 골라 캐릭터 목록까지 편 상태로 세운다.
         // 「다른 기계」 줄의 메뉴. 명부 폴링이 몇십 초 걸릴 수 있어 줄이 아직 없으면
         // 다음 프레임에 다시 본다 — 한 번 놓치고 끝내면 빈 화면을 「확인했다」고 찍는다.
+        // 이사 체크리스트 — 실제 이사 없이 단계 상태만 심어 그리기를 본다(진짜 이사는
+        // 저쪽 기계에 학생을 만드는 부작용이 있다). 기계 줄이 아직 없으면 다음 프레임에.
+        if act == "migratestages" {
+            let Some(m) = self.info.machines_col.machines.first().cloned() else {
+                ACTED.store(false, Ordering::Relaxed);
+                return;
+            };
+            use crate::state::MigrateStageState as S;
+            let mut p = crate::state::MigrateProgress::new("%1", &m.label, "코하루", None);
+            p.stages[0] = (S::Done, "이미 있음 — fetch 만".to_string());
+            p.stages[1] = (S::Skipped, "옮길 변경 없음".to_string());
+            p.stages[2] = (S::Done, String::new());
+            p.stages[3] = (S::Running, "12.4MB".to_string());
+            self.info.machines_col.progress = Some(p);
+            eprintln!("[autoinfo] act=migratestages machine={}", m.label);
+            return;
+        }
         if act == "machinemenu" {
             let Some((label, r)) = self.info.machine_rects.first().cloned() else {
                 ACTED.store(false, Ordering::Relaxed);

@@ -11295,25 +11295,6 @@ impl App {
                             self.statusbar.clip_rect = Some(cr);
                         }
                     }
-                    // 펫 — 바탕화면 캐릭터를 켜고 끈다. 펫은 앱과 프로세스가 달라
-                    // 앱을 껐다 켜도 살아 있고, 그래서 이 칩의 상태도 앱 메모리가 아니라
-                    // 그쪽 프로세스가 살아 있는지로 정한다(2026-09-07 지시: 「하단에
-                    // 온오프만」).
-                    self.statusbar.pet_rect = None;
-                    {
-                        let on = crate::chrome::pet_pid().is_some();
-                        let icon = 12.0_f32;
-                        rx -= icon + 12.0;
-                        let col = if on { theme::accent() } else { theme::text_dim() };
-                        g.queue_icon("sparkles", rx, sy + (status_h - icon) / 2.0, icon, col);
-                        let pr = (rx - 6.0, sy, icon + 12.0, status_h);
-                        {
-                            let (hx, hy) = self.cursor_px;
-                            g.hover_pointer |=
-                                hx >= pr.0 && hx <= pr.0 + pr.2 && hy >= pr.1 && hy <= pr.1 + pr.3;
-                        }
-                        self.statusbar.pet_rect = Some(pr);
-                    }
                     // 포트 — 열려 있는 워크스페이스 포트 **개수**다. 예전엔 이 앱의
                     // `:8765` 만 적었는데, 그건 이미 알고 있는 값이라 자리를 쓰면서
                     // 아무것도 안 알렸다. 개수는 "지금 뭔가 떠 있나" 에 답하고, 눌러

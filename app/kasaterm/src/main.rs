@@ -3561,7 +3561,7 @@ enum UserEvent {
         String,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
-    /// `book` — 원격 셸 거울을 **그 자리에서** 로컬 셸로 되돌린다(`mini` 의 역).
+    /// `book` — 원격 셸 거울을 **그 자리에서** 로컬 셸로 되돌린다(거울·방 펼치기의 역).
     /// 원격 셸 안에서 book 이 예약 알림(OSC 777 `kasaterm-home`)을 뱉고, 그 pane 을
     /// 소유한 이 앱의 화면 펌프가 그걸 잡아 올린다. 회신 없음 — book 을 부른 CLI 는
     /// 그 원격 셸의 자식이라 함께 걷힌다(성공의 표시는 화면이 로컬로 바뀌는 것).
@@ -3584,6 +3584,13 @@ enum UserEvent {
         Option<String>,
         bool,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ),
+    /// 이사 워커의 단계 보고 — (pane, 단계 번호, 상태, 한 줄 메모).
+    MigrateStage(String, usize, state::MigrateStageState, String),
+    /// 이사 워커가 끝났다 — Ok 면 GUI 가 자리를 갈아끼우고 켠다(`migrate_finish`).
+    MigrateDone(
+        String,
+        std::result::Result<Box<session::MigrateReady>, String>,
     ),
     /// `machine.unfold` — 기계 라벨 하나로 그 기계 학생 pane 전부를 거울로
     /// **펼친다**(방마다 새 창). (라벨, 회신=요약 문장).
@@ -7417,15 +7424,14 @@ fi\n\
 case \"$1\" in\n\
   kimi|glm|agy) command -v kasa-ai >/dev/null 2>&1 && exec kasa-ai claude \"$@\" ;;\n\
 esac\n\
-# `claude mini` — 학생을 처음부터 다른 기계(명부 첫 기계, 보통 맥미니)에서\n\
-# 태어나게 한다. 실행은 앱이 한다: 이 셸 pane 을 레포 동율 맞춘 원격 학생의\n\
-# 거울로 바꾼다(2026-08-30 지시). 판정은 **첫 비플래그 인자**다 — zshrc 별칭이\n\
-# 플래그를 앞에 끼워 `$1` 은 못 믿는다(실측: --dangerously-skip-permissions 가\n\
-# 앞에 와 case 분기를 지나쳤고, claude 가 「mini」를 질문으로 받아 로컬에 떴다).\n\
-# 값 딸린 플래그 뒤는 못 가른다 — 별칭은 플래그만 얹는다는 전제다.\n\
+# 낱말 스위치(local·classic·noflicker·tasks). `$1` 이 아니라 인자 전부를 훑는다 —\n\
+# zshrc 별칭이 플래그를 앞에 끼워 `$1` 은 못 믿는다(실측: --dangerously-skip-permissions\n\
+# 가 앞에 와 case 분기를 지나쳤다). 값 딸린 플래그 뒤는 못 가른다 — 별칭은 플래그만\n\
+# 얹는다는 전제다. 옛 `claude mini` 는 걷었다(2026-09-07 지시 「자동으로 맥미니에서\n\
+# 켜지는데 mini 치면 미러링되니까 없애자」) — 순정 `claude` 가 이미 본진 태생이라 그\n\
+# 낱말은 거울만 하나 더 만드는 자리였다.\n\
 for _a in \"$@\"; do\n\
   case \"$_a\" in\n\
-    mini) exec kasaterm-cli migrate mini ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} ;;\n\
     local) KASATERM_NO_HOME=1; export KASATERM_NO_HOME; _drop_local=1 ;;\n\
     classic) CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1; export CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN; _drop_classic=1 ;;\n\
     noflicker) unset CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN; _drop_noflicker=1 ;;\n\
@@ -7557,8 +7563,8 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
         eprintln!("[shim] write claude wrapper failed: {e}");
         return;
     }
-    // `book` — 원격 셸 거울을 로컬로 되돌린다(`mini` 의 역, 2026-09-02 지시
-    // 「mini에서 book치면 다시 로컬로」). 원격 셸에서 실행되면 예약 알림 마커를
+    // `book` — 원격 셸 거울을 로컬로 되돌린다(2026-09-02 지시 「mini에서 book치면
+    // 다시 로컬로」. 그 `mini` 는 걷었지만 거울·방 펼치기로 뜬 원격 셸에 그대로 쓴다). 원격 셸에서 실행되면 예약 알림 마커를
     // 뱉고, 그 pane 을 소유한 앱(맥북)의 화면 펌프가 그걸 잡아 로컬 셸로 스왑한다.
     // 서버·프로토콜은 손대지 않는다 — 원격 연결이 raw 바이트 모드라 이 OSC 가
     // 맥북 파서까지 그대로 오고, 맥북이 이미 OSC 777 을 읽는다. sh 한 줄이라
@@ -7573,24 +7579,10 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
             eprintln!("[shim] write book failed: {e}");
         }
     }
-    // `mini` — 이 pane 을 **그 자리에서** 본진(맥미니) 셸의 거울로 바꾼다(2026-09-02
-    // 지시 「mini 라고 치면 맥미니 터미널 보이게」). 폴더는 명부 roots 로 옮긴 자리,
-    // 규칙이 없으면 저쪽 홈. 예전엔 인자 없는 `mini` 가 `claude mini` 였는데, 본진이
-    // 생긴 뒤로는 순정 `claude` 가 이미 저쪽 태생이라 그 자리가 비었다.
-    // `mini <명령...>` 은 종전대로 — 그 명령을 저쪽 학생 pane 에서 돌리고 이 pane 을
-    // 거울로(`mini codex`). 하네스 불문이 요점이다(2026-08-30 「pty 를 그대로 옮기는
-    // 뭐 없을까」의 답: 옮기지 말고 태생부터 저쪽).
-    #[cfg(unix)]
-    {
-        let mini = "#!/bin/sh\n\
-if [ $# -eq 0 ]; then\n\
-  exec kasaterm-cli remote mini --here ${KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}\n\
-fi\n\
-exec kasaterm-cli migrate mini ${KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"} --run \"$*\"\n";
-        if let Err(e) = write_shim(&shim_dir.join("mini"), mini) {
-            eprintln!("[shim] write mini failed: {e}");
-        }
-    }
+    // `mini` 셰임(이 pane 을 본진 셸의 거울로 바꾸던 것)은 2026-09-07 에 걷었다 —
+    // 순정 `claude` 가 본진 태생이 된 뒤로 그 낱말은 거울만 하나 더 만들었다. 원격
+    // 셸이 필요하면 Info 「다른 기계」 메뉴의 거울·방 펼치기, CLI 는 `kasaterm-cli
+    // remote <기계>` 가 그대로 있다.
     #[cfg(windows)]
     {
         // PowerShell does not execute the extensionless POSIX wrapper and
@@ -9472,9 +9464,8 @@ mod tests {
             "--mcp-config 가 prepend 로 돌아갔다 — 사용자 프롬프트를 삼킨다"
         );
         let at = body.find("--mcp-config").unwrap();
-        // 닻은 **진짜 claude 를 부르는 exec**($REAL)다 — 그보다 앞의 exec(kimi 런처,
-        // `claude mini` 원격 스폰 디스패치)는 claude 에 닿지 않는 갈래라 이 검사의
-        // 대상이 아니다. 아무 `exec` 나 잡으면 그 갈래가 하나 늘 때마다 헛경보가 선다.
+        // 닻은 **진짜 claude 를 부르는 exec**($REAL)다 — 그보다 앞의 exec(kimi 런처)는
+        // claude 에 닿지 않는 갈래라 이 검사의 대상이 아니다. 아무 `exec` 나 잡으면 그 갈래가 하나 늘 때마다 헛경보가 선다.
         let exec_at = body.find("exec \"$REAL\"").unwrap();
         assert!(at < exec_at, "--mcp-config 주입이 exec 분기보다 뒤에 있다");
         let _ = std::fs::remove_dir_all(&dir);

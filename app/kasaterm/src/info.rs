@@ -2214,13 +2214,30 @@ pub(crate) fn draw_info_col(
     } else {
         SEC_H + closed.len() as f32 * ROW_H + SEC_GAP
     };
-    // 다른 기계 — 명부가 비면(혼자 쓰는 사람) 섹션째 없다.
+    // 끝난 이사의 체크리스트는 잠시 두었다가 걷는다 — 결과를 읽을 시간은 주되,
+    // 다음 이사 때까지 옛 것이 남아 있으면 지금 것으로 오독한다.
+    if info
+        .machines_col
+        .progress
+        .as_ref()
+        .is_some_and(|p| p.finished.is_some_and(|(t, _)| t.elapsed().as_secs() > 20))
+    {
+        info.machines_col.progress = None;
+    }
+    // 다른 기계 — 명부가 비면(혼자 쓰는 사람) 섹션째 없다. 도는 이사가 있으면 그
+    // 기계 줄 밑에 단계 수만큼 더 선다.
+    let stages_h = info
+        .machines_col
+        .progress
+        .as_ref()
+        .map(|p| p.stages.len() as f32 * STAGE_H + 6.0)
+        .unwrap_or(0.0);
     let machines_h = if info.machines_col.machines.is_empty() {
         0.0
     } else if info.machines_collapsed {
         SEC_H + SEC_GAP
     } else {
-        SEC_H + info.machines_col.machines.len() as f32 * ROW_H + SEC_GAP
+        SEC_H + info.machines_col.machines.len() as f32 * ROW_H + stages_h + SEC_GAP
     };
     let content =
         HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + machines_h + closed_h + 14.0;
@@ -2493,12 +2510,18 @@ pub(crate) fn draw_info_col(
         info.sec_rects.push((state::InfoSection::Machines, r));
         y += SEC_H;
         if !info.machines_collapsed {
+            let prog = info.machines_col.progress.as_ref();
             for m in &info.machines_col.machines {
                 if y + ROW_H > top && y < bottom {
                     draw_machine_row(g, cursor, m, x, w, x0, right, y);
                 }
                 info.machine_rects.push((m.label.clone(), (x, y, w, ROW_H)));
                 y += ROW_H;
+                // 이사 체크리스트 — 그 기계 줄 바로 밑(2026-09-07 지시: 「Info 기계 줄
+                // 아래」). 레포 받기·대화 옮기기·켜기가 따로 보이는 자리다.
+                if let Some(p) = prog.filter(|p| p.machine == m.label) {
+                    y = draw_migrate_stages(g, p, x0, right, y, top, bottom);
+                }
             }
         }
         y += SEC_GAP;
@@ -3492,6 +3515,79 @@ fn draw_machine_row(
             italic: false,
         },
     );
+}
+
+const STAGE_H: f32 = 18.0;
+
+/// 이사 체크리스트 — 단계마다 표(끝남 ✓ · 도는 중 ↻ · 건너뜀 – · 실패 ✗)와 이름,
+/// 그 옆에 워커가 남긴 한 줄. 돌려주는 y 는 마지막 줄 아래.
+fn draw_migrate_stages(
+    g: &mut gpu::GpuRenderer,
+    p: &state::MigrateProgress,
+    x0: f32,
+    right: f32,
+    y: f32,
+    top: f32,
+    bottom: f32,
+) -> f32 {
+    use state::MigrateStageState as S;
+    let mut y = y + 2.0;
+    let ix = x0 + 18.0;
+    let tx = x0 + 36.0;
+    for (i, (st, note)) in p.stages.iter().enumerate() {
+        if y + STAGE_H > top && y < bottom {
+            let (icon, col) = match st {
+                S::Pending => ("square", theme::text_mute()),
+                S::Running => ("rotate-cw", theme::attention()),
+                S::Done => ("square-check", theme::success()),
+                S::Skipped => ("minus", theme::text_mute()),
+                S::Failed => ("x", theme::attention()),
+            };
+            g.queue_icon(icon, ix, y + (STAGE_H - 11.0) / 2.0, 11.0, col);
+            let name = state::MIGRATE_STAGES.get(i).copied().unwrap_or("");
+            let head = if i == 0 && !p.student.is_empty() {
+                format!("{name}  ·  {}", p.student)
+            } else {
+                name.to_string()
+            };
+            let fg = match st {
+                S::Pending | S::Skipped => theme::text_mute(),
+                _ => theme::text(),
+            };
+            let running = *st == S::Running;
+            g.draw_text(
+                tx,
+                y + 2.0,
+                &head,
+                gpu::DrawOpts {
+                    font_size: 10.5,
+                    color: fg,
+                    bold: running,
+                    italic: false,
+                },
+            );
+            if !note.is_empty() {
+                let hw = g.measure_chrome_text(&head, 10.5, running);
+                let room = (right - (tx + hw + 8.0)).max(0.0);
+                if room > 24.0 {
+                    let t = fit_text(g, note, room, 10.0, false);
+                    g.draw_text(
+                        tx + hw + 8.0,
+                        y + 2.5,
+                        &t,
+                        gpu::DrawOpts {
+                            font_size: 10.0,
+                            color: if *st == S::Failed { col } else { theme::text_dim() },
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                }
+            }
+        }
+        y += STAGE_H;
+    }
+    y + 4.0
 }
 
 /// 팝업 메뉴의 한 줄. `face` 는 학생 얼굴(이름), `icon` 은 아이콘 이름 — 둘 중 하나가

@@ -484,7 +484,14 @@ impl ApplicationHandler<UserEvent> for App {
                         };
                         (m.base, cwd)
                     };
-                    self.migrate_pane(pane, &base, cwd.as_deref(), *force, run.as_deref())
+                    self.migrate_pane_with_reply(
+                        pane,
+                        &base,
+                        cwd.as_deref(),
+                        *force,
+                        run.as_deref(),
+                        Some(reply.clone()),
+                    )
                 })()
                 .map_err(|e| format!("{e:#}"));
                 #[cfg(not(unix))]
@@ -493,14 +500,30 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Err(ref why) = outcome {
                     eprintln!("[kasaterm] socket migrate 실패: {why}");
                 }
-                // 이사가 끝났으면(성공·실패 무관) 「바쁨」 잠금을 반드시 푼다 —
-                // migrate_pane 안 migrate_progress 가 세운 것이라, GUI 클릭이 아닌
-                // 이 경로(CLI·셀프·아로나)는 여기서 안 지우면 원격 칼럼이 통째로
-                // 잠긴 채 남아 「거울」 클릭까지 삼킨다(2026-09-03 실측).
+                // 워커가 도는 중이면 답은 migrate_finish 가 보낸다(창구를 맡겨 뒀다).
+                if outcome.is_ok() && self.migrate_running(pane) {
+                    self.chrome_dirty = true;
+                    self.render_frame();
+                    return;
+                }
+                // 예약·검사 실패는 여기서 답한다. 「바쁨」 잠금도 여기서 풀어야 한다 —
+                // GUI 클릭이 아닌 이 경로(CLI·셀프·아로나)에서 안 지우면 원격 메뉴가
+                // 통째로 잠긴 채 남아 「거울」 클릭까지 삼킨다(2026-09-03 실측).
                 self.info.machines_col.busy = None;
                 let _ = reply.send(outcome);
                 self.chrome_dirty = true;
                 self.render_frame();
+                return;
+            }
+            UserEvent::MigrateStage(pane, idx, st, note) => {
+                self.migrate_stage(pane, *idx, *st, note);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+            UserEvent::MigrateDone(pane, res) => {
+                self.migrate_finish(pane, res.clone());
                 return;
             }
             UserEvent::SocketMigrateBack(pane, cwd, force, reply) => {
@@ -5442,6 +5465,7 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
+                    }
                     if let Some(pid) = self
                         .statusbar
                         .toggle_rects

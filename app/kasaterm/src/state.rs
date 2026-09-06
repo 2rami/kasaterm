@@ -282,13 +282,69 @@ pub(crate) struct MachinesColState {
     /// 「이 맥북」 — 원격 링크가 없는 로컬 학생들.
     pub(crate) locals: Vec<MachinesColRow>,
     pub(crate) last_refresh: Option<std::time::Instant>,
-    /// 기계 메뉴 항목의 hit rect(다른 메뉴와 같은 규칙 — 매 paint 재생성)(다른 칼럼과 같은 규칙).
+    /// 기계 메뉴 항목의 hit rect(다른 메뉴와 같은 규칙 — 매 paint 재생성).
     pub(crate) btn_rects: Vec<(MachinesColBtn, (f32, f32, f32, f32))>,
-    /// 이사가 도는 중인 (pane, 진행 문구). 이사는 GUI 스레드 동기라 실제로는
-    /// 시작 직전 한 프레임에만 보이지만, 그 한 프레임이 「눌렸다」를 말해 준다.
+    /// 이사가 도는 중인 (pane, 진행 문구) — 워커가 단계마다 갱신한다. 한 번에 하나.
     pub(crate) busy: Option<(String, String)>,
-    /// 마지막 이사 결과 — (pane, 성공 여부, 문구). 그 행 밑에 한 줄로 남는다.
+    /// 마지막 이사 결과 — (pane, 성공 여부, 문구).
     pub(crate) note: Option<(String, bool, String)>,
+    /// 도는(또는 막 끝난) 이사의 체크리스트 — Info 「다른 기계」의 그 기계 줄 밑에
+    /// 선다. 끝나고 잠시 뒤 걷힌다(그리는 쪽이 판정).
+    pub(crate) progress: Option<MigrateProgress>,
+}
+
+/// 이사 단계 이름 — 워커의 보고 번호와 짝(session.rs `migrate_worker`, 마지막은 GUI).
+pub(crate) const MIGRATE_STAGES: [&str; 7] = [
+    "저쪽 레포 준비",
+    "코드 짐 옮기기",
+    "캐릭터 끄기",
+    "대화 옮기기",
+    "테마 동행",
+    "저쪽에 자리 만들기",
+    "켜기",
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum MigrateStageState {
+    Pending,
+    Running,
+    Done,
+    Skipped,
+    Failed,
+}
+
+/// 이사 하나의 진행 — 단계마다 (상태, 한 줄 메모). `reply` 는 소켓(CLI·보드)이
+/// 최종 결과를 기다리는 창구로, `migrate_finish` 가 끝에서 보낸다.
+pub(crate) struct MigrateProgress {
+    pub(crate) pane: String,
+    /// 목적지 기계의 명부 라벨 — Info 의 어느 줄 밑에 설지.
+    pub(crate) machine: String,
+    pub(crate) student: String,
+    pub(crate) stages: Vec<(MigrateStageState, String)>,
+    /// (끝난 시각, 성공 여부). None 이면 아직 도는 중.
+    pub(crate) finished: Option<(std::time::Instant, bool)>,
+    pub(crate) reply: Option<std::sync::mpsc::Sender<std::result::Result<String, String>>>,
+}
+
+impl MigrateProgress {
+    pub(crate) fn new(
+        pane: &str,
+        machine: &str,
+        student: &str,
+        reply: Option<std::sync::mpsc::Sender<std::result::Result<String, String>>>,
+    ) -> Self {
+        Self {
+            pane: pane.to_string(),
+            machine: machine.to_string(),
+            student: student.to_string(),
+            stages: MIGRATE_STAGES
+                .iter()
+                .map(|_| (MigrateStageState::Pending, String::new()))
+                .collect(),
+            finished: None,
+            reply,
+        }
+    }
 }
 
 #[derive(Clone)]

@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "app/kasaterm",
-    "app/kasapet",
     "crates/kasa-socket",
     "crates/kasa-mcp",
     "crates/kasa-cells",
