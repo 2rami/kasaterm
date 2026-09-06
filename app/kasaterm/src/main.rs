@@ -3561,7 +3561,7 @@ enum UserEvent {
         String,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
-    /// `book` — 원격 셸 거울을 **그 자리에서** 로컬 셸로 되돌린다(거울·방 펼치기의 역).
+    /// `book` — 원격 셸 거울을 **그 자리에서** 로컬 셸로 되돌린다(`mini` 의 역).
     /// 원격 셸 안에서 book 이 예약 알림(OSC 777 `kasaterm-home`)을 뱉고, 그 pane 을
     /// 소유한 이 앱의 화면 펌프가 그걸 잡아 올린다. 회신 없음 — book 을 부른 CLI 는
     /// 그 원격 셸의 자식이라 함께 걷힌다(성공의 표시는 화면이 로컬로 바뀌는 것).
@@ -7424,81 +7424,22 @@ fi\n\
 case \"$1\" in\n\
   kimi|glm|agy) command -v kasa-ai >/dev/null 2>&1 && exec kasa-ai claude \"$@\" ;;\n\
 esac\n\
-# 낱말 스위치(local·classic·noflicker·tasks). `$1` 이 아니라 인자 전부를 훑는다 —\n\
-# zshrc 별칭이 플래그를 앞에 끼워 `$1` 은 못 믿는다(실측: --dangerously-skip-permissions\n\
-# 가 앞에 와 case 분기를 지나쳤다). 값 딸린 플래그 뒤는 못 가른다 — 별칭은 플래그만\n\
-# 얹는다는 전제다. 옛 `claude mini` 는 걷었다(2026-09-07 지시 「자동으로 맥미니에서\n\
-# 켜지는데 mini 치면 미러링되니까 없애자」) — 순정 `claude` 가 이미 본진 태생이라 그\n\
-# 낱말은 거울만 하나 더 만드는 자리였다.\n\
+# `claude mini` — 학생을 처음부터 본진(맥미니, 명부 첫 기계)에서 태어나게 한다.\n\
+# 실행은 앱이 한다: 이 셸 pane 을 레포 동율 맞춘 원격 학생의 거울로 바꾼다\n\
+# (2026-08-30 지시). 순정 `claude` 는 이 기계에서 뜬다 — 본진 자동 태생과 낱말\n\
+# 스위치(local·classic·noflicker·tasks)는 걷었다(2026-09-07 지시 「순정 클로드가\n\
+# 맥미니에서 안 켜지게 … mini 랑 돌아오는 거 두 개 빼고 다 없애줘」). 판정은 인자\n\
+# 전부를 훑는다 — zshrc 별칭이 플래그를 앞에 끼워 `$1` 은 못 믿는다(실측:\n\
+# --dangerously-skip-permissions 가 앞에 와 case 분기를 지나쳤고, claude 가 「mini」를\n\
+# 질문으로 받아 로컬에 떴다). 값 딸린 플래그 뒤는 못 가른다 — 별칭은 플래그만\n\
+# 얹는다는 전제다.\n\
 for _a in \"$@\"; do\n\
   case \"$_a\" in\n\
-    local) KASATERM_NO_HOME=1; export KASATERM_NO_HOME; _drop_local=1 ;;\n\
-    classic) CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1; export CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN; _drop_classic=1 ;;\n\
-    noflicker) unset CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN; _drop_noflicker=1 ;;\n\
-    tasks) CLAUDE_CODE_ENABLE_TODO_TOOLS=1; export CLAUDE_CODE_ENABLE_TODO_TOOLS; _drop_tasks=1 ;;\n\
+    mini) exec kasaterm-cli migrate mini ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} ;;\n\
     -*) ;;\n\
     *) break ;;\n\
   esac\n\
 done\n\
-# `claude local` — 본진이 걸려 있어도 이 pane 은 이 기계에서 연다(2026-09-02 「로컬에서\n\
-# 실행하려면 어떻게?」). env 한 줄(KASATERM_NO_HOME=1 claude)의 사람용 표기다. 그 단어는\n\
-# claude 에 넘기지 않는다 — 안 빼면 「local」이 첫 프롬프트로 들어간다.\n\
-# `claude classic` — 본화면 렌더러. **이제 기본이라 안 쳐도 된다**(2026-09-04 지시:\n\
-# 「클래식을 기본으로 해줘」). 대화가 이 터미널의 스크롤백에 쌓여, 올려다볼 때\n\
-# 붙는 질문 띠가 codex 와 같은 길로 간다 — 절대 줄 번호를 알아 한 번에 그 자리에\n\
-# 선다. 단어를 남겨 둔 것은 `KASATERM_CLAUDE_CLASSIC=0` 으로 꺼 둔 판에서 이 창\n\
-# 하나만 되살리는 길이 필요해서다.\n\
-# `claude noflicker` — 그 반대. 이 창의 claude 만 **대체화면**으로 되돌린다. 깜빡임이\n\
-# 없는 대신 스크롤이 claude 안에서 일어나 터미널이 위치를 몰라, 질문 띠가 화면\n\
-# 글자를 보고 짐작하는 부실한 길로 간다. 변수를 `0` 으로 두지 않고 **지우는** 이유는\n\
-# claude 가 그 값을 존재만으로 읽을지 값으로 읽을지 우리가 정하지 않기 때문이다.\n\
-# 두 단어 모두 다른 것과 함께 쓸 수 있다(`claude local noflicker`).\n\
-# `claude tasks` — 이 창의 claude 에만 **태스크 목록 도구**를 얹는다. 최신 모델은\n\
-# 그 다섯 도구(TaskCreate/Get/List/Update·TodoWrite)를 기본으로 안 싣는다 — 체크리스트\n\
-# 없이도 다단계 작업을 놓치지 않고, 도구 정의와 리마인더가 매 턴 컨텍스트를 먹기\n\
-# 때문이다(claude-code 2.1.233~). 그래서 켜는 것도 창마다 고른다.\n\
-if [ -n \"$_drop_local\" ] || [ -n \"$_drop_classic\" ] || [ -n \"$_drop_noflicker\" ] || [ -n \"$_drop_tasks\" ]; then\n\
-  _n=$#; _i=0\n\
-  while [ $_i -lt $_n ]; do\n\
-    _a=$1; shift\n\
-    if [ \"$_a\" = local ] && [ -n \"$_drop_local\" ]; then _drop_local=\"\";\n\
-    elif [ \"$_a\" = classic ] && [ -n \"$_drop_classic\" ]; then _drop_classic=\"\";\n\
-    elif [ \"$_a\" = noflicker ] && [ -n \"$_drop_noflicker\" ]; then _drop_noflicker=\"\";\n\
-    elif [ \"$_a\" = tasks ] && [ -n \"$_drop_tasks\" ]; then _drop_tasks=\"\";\n\
-    else set -- \"$@\" \"$_a\"; fi\n\
-    _i=$((_i+1))\n\
-  done\n\
-fi\n\
-# 본진(home) — 명부에 home:true 기계가 있으면 순정 실행(플래그만)도 그 기계\n\
-# 태생으로 간다(2026-09-02 「작업 본체를 맥미니로」). 이어받기·헤드리스가 보이면\n\
-# 손대지 않는다 — 로컬 대화를 남의 기계로 보내면 jsonl 이 없어 깨진다. 값 딸린\n\
-# 플래그는 값이 비플래그로 보여 저절로 걸러진다(--model opus 의 opus). 본진이\n\
-# 안 닿으면 한 줄 알리고 이 기계에서 그대로 연다. 이 pane 만 로컬로 열려면\n\
-# KASATERM_NO_HOME=1, 아예 끄려면 명부(machines.json)에서 home 을 빼면 된다.\n\
-if [ -n \"$KASATERM_PANE_ID\" ] && [ -z \"$KASATERM_NO_HOME\" ]; then\n\
-  HOMEOK=1\n\
-  for _a in \"$@\"; do\n\
-    case \"$_a\" in\n\
-      --resume|-r|--continue|-c|--session-id|-p|--print|--bg|--background) HOMEOK=\"\" ;;\n\
-      -*) ;;\n\
-      *) HOMEOK=\"\" ;;\n\
-    esac\n\
-  done\n\
-  if [ -n \"$HOMEOK\" ]; then\n\
-    HOMEM=$(kasaterm-cli home 2>/dev/null)\n\
-    HOMERC=$?\n\
-    if [ \"$HOMERC\" = 0 ] && [ -n \"$HOMEM\" ]; then\n\
-      # 이사 성공 = 이 pane 이 거울로 갈아끼워진다(셸째 걷힘) — 여기서 끝.\n\
-      # 실패면 exec 로 죽지 말고 **로컬로 계속** 연다(독립 리뷰 2026-09-02 ④):\n\
-      # 본진 확인과 이사 사이에 기계가 죽는 틈이 실제로 있다.\n\
-      if HOMEERR=$(kasaterm-cli migrate \"$HOMEM\" \"$KASATERM_PANE_ID\" 2>&1); then\n\
-        exit 0\n\
-      fi\n\
-      echo \"[kasaterm] 본진 이사 실패 — 이 기계에서 엽니다: $HOMEERR\" >&2\n\
-    fi\n\
-    [ \"$HOMERC\" = 3 ] && echo \"[kasaterm] 본진이 지금 안 닿아 이 기계에서 엽니다\" >&2\n\
-  fi\n\
-fi\n\
 {ablk}\
 # 세션끼리 서로를 찾게 한다(ListAgents → SendMessage). 게이트는 서버 플래그\n\
 # tengu_harbor_kite 이거나 이 env 인데, 08-09 확인 시점엔 그 플래그가 이미 켜져 있었다\n\
@@ -7563,8 +7504,8 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
         eprintln!("[shim] write claude wrapper failed: {e}");
         return;
     }
-    // `book` — 원격 셸 거울을 로컬로 되돌린다(2026-09-02 지시 「mini에서 book치면
-    // 다시 로컬로」. 그 `mini` 는 걷었지만 거울·방 펼치기로 뜬 원격 셸에 그대로 쓴다). 원격 셸에서 실행되면 예약 알림 마커를
+    // `book` — 원격 셸 거울을 로컬로 되돌린다(`mini` 의 역, 2026-09-02 지시
+    // 「mini에서 book치면 다시 로컬로」). 원격 셸에서 실행되면 예약 알림 마커를
     // 뱉고, 그 pane 을 소유한 앱(맥북)의 화면 펌프가 그걸 잡아 로컬 셸로 스왑한다.
     // 서버·프로토콜은 손대지 않는다 — 원격 연결이 raw 바이트 모드라 이 OSC 가
     // 맥북 파서까지 그대로 오고, 맥북이 이미 OSC 777 을 읽는다. sh 한 줄이라
@@ -7579,10 +7520,22 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
             eprintln!("[shim] write book failed: {e}");
         }
     }
-    // `mini` 셰임(이 pane 을 본진 셸의 거울로 바꾸던 것)은 2026-09-07 에 걷었다 —
-    // 순정 `claude` 가 본진 태생이 된 뒤로 그 낱말은 거울만 하나 더 만들었다. 원격
-    // 셸이 필요하면 Info 「다른 기계」 메뉴의 거울·방 펼치기, CLI 는 `kasaterm-cli
-    // remote <기계>` 가 그대로 있다.
+    // `mini` — 학생을 본진(맥미니)에서 태어나게 하고 이 pane 을 그 거울로 바꾼다.
+    // 인자 없으면 `claude mini` 와 같고, `mini <명령...>` 은 그 명령을 저쪽 학생 pane
+    // 에서 돌린다(`mini codex`) — 하네스 불문이 요점이다(2026-08-30 「pty 를 그대로
+    // 옮기는 뭐 없을까」의 답: 옮기지 말고 태생부터 저쪽). 본진 자동 태생을 걷은 뒤
+    // (2026-09-07) 저쪽으로 가는 낱말은 이것 하나, 돌아오는 낱말은 `book` 하나다.
+    #[cfg(unix)]
+    {
+        let mini = "#!/bin/sh\n\
+if [ $# -eq 0 ]; then\n\
+  exec kasaterm-cli migrate mini ${KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}\n\
+fi\n\
+exec kasaterm-cli migrate mini ${KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"} --run \"$*\"\n";
+        if let Err(e) = write_shim(&shim_dir.join("mini"), mini) {
+            eprintln!("[shim] write mini failed: {e}");
+        }
+    }
     #[cfg(windows)]
     {
         // PowerShell does not execute the extensionless POSIX wrapper and
@@ -7658,40 +7611,10 @@ fi
 # `plugin add` 는 다음 실행에 사라진다(config 를 매번 새로 복사하므로). 대화 계열
 # (서브커맨드 없음=TUI · exec · resume · fork · review)만 우리 홈을 쓴다.
 SUB=""; for a in "$@"; do case "$a" in -*) ;; *) SUB="$a"; break ;; esac; done
-# `codex local` — 본진이 걸려 있어도 이 pane 은 이 기계에서 연다(claude local 과 짝).
-# 그 단어는 codex 에 넘기지 않는다 — 안 빼면 「local」이 첫 프롬프트로 들어간다.
-if [ "$SUB" = local ]; then
-  KASATERM_NO_HOME=1; export KASATERM_NO_HOME; SUB=""
-  _n=$#; _i=0; _drop=1
-  while [ $_i -lt $_n ]; do
-    a=$1; shift
-    if [ -n "$_drop" ] && [ "$a" = local ]; then _drop=""; else set -- "$@" "$a"; fi
-    _i=$((_i+1))
-  done
-fi
 case "$SUB" in
   login|logout|mcp|plugin|app|app-server|remote-control|completion|update|doctor|sandbox|debug|apply|cloud|exec-server|features|help|archive|delete|unarchive)
     exec "$REAL" "$@" ;;
 esac
-# 본진(home) — claude 셰임과 같은 규칙(독립 리뷰 2026-09-02 ③): 순정 TUI 실행
-# (서브커맨드 없음 = SUB 빈값, 값 딸린 플래그는 값이 SUB 로 잡혀 저절로 제외)이면
-# 명부의 home 기계에서 태어난다. resume·exec 등 대화 지정류는 로컬 유지. 태생
-# 실행은 migrate --run 으로 이 호출의 인자 그대로 — 안 닿거나 실패하면 이
-# 기계에서 그대로 연다(exec 로 죽지 않는다).
-if [ -z "$SUB" ] && [ -n "$KASATERM_PANE_ID" ] && [ -z "$KASATERM_NO_HOME" ]; then
-  HOMEM=$(kasaterm-cli home 2>/dev/null)
-  HOMERC=$?
-  if [ "$HOMERC" = 0 ] && [ -n "$HOMEM" ]; then
-    RUNCMD="codex"
-    [ $# -gt 0 ] && RUNCMD="codex $*"
-    if HOMEERR=$(kasaterm-cli migrate "$HOMEM" "$KASATERM_PANE_ID" --run "$RUNCMD" 2>&1); then
-      exit 0
-    fi
-    echo "[kasaterm] 본진 이사 실패 — 이 기계에서 엽니다: $HOMEERR" >&2
-  elif [ "$HOMERC" = 3 ]; then
-    echo "[kasaterm] 본진이 지금 안 닿아 이 기계에서 엽니다" >&2
-  fi
-fi
 SRC="$HOME/.codex"
 CH="$SELF_DIR/codex-home-${KASATERM_PANE_ID:-solo}"
 mkdir -p "$CH" 2>/dev/null || exec "$REAL" "$@"
@@ -9464,8 +9387,9 @@ mod tests {
             "--mcp-config 가 prepend 로 돌아갔다 — 사용자 프롬프트를 삼킨다"
         );
         let at = body.find("--mcp-config").unwrap();
-        // 닻은 **진짜 claude 를 부르는 exec**($REAL)다 — 그보다 앞의 exec(kimi 런처)는
-        // claude 에 닿지 않는 갈래라 이 검사의 대상이 아니다. 아무 `exec` 나 잡으면 그 갈래가 하나 늘 때마다 헛경보가 선다.
+        // 닻은 **진짜 claude 를 부르는 exec**($REAL)다 — 그보다 앞의 exec(kimi 런처,
+        // `claude mini` 원격 스폰 디스패치)는 claude 에 닿지 않는 갈래라 이 검사의
+        // 대상이 아니다. 아무 `exec` 나 잡으면 그 갈래가 하나 늘 때마다 헛경보가 선다.
         let exec_at = body.find("exec \"$REAL\"").unwrap();
         assert!(at < exec_at, "--mcp-config 주입이 exec 분기보다 뒤에 있다");
         let _ = std::fs::remove_dir_all(&dir);
