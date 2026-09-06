@@ -82,6 +82,8 @@ pub(crate) struct StatusbarState {
     pub(crate) res_rect: Option<(f32, f32, f32, f32)>,
     /// 클립보드 칩(하단바 오른쪽 그룹) — 누르면 최근 복사 목록이 펼쳐진다.
     pub(crate) clip_rect: Option<(f32, f32, f32, f32)>,
+    /// 펫 칩 — 바탕화면 캐릭터를 켜고 끈다.
+    pub(crate) pet_rect: Option<(f32, f32, f32, f32)>,
     /// 물리 메모리 압박 — 위의 `res` 와 **다른 것을 잰다**. `res` 는 우리 트리가
     /// 쓰는 양이라 앱을 닫으면 돌아오고, 이쪽은 기계 전체에서 **안 돌아오는**
     /// 몫이다. 그래서 재시작을 권하는 근거는 이쪽뿐이다(2026-08-27 지시).

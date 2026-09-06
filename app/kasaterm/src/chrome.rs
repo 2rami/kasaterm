@@ -3720,6 +3720,74 @@ fn notify_osascript(title: &str, body: &str) {
 
 /// Set (or clear, when 0) the Dock tile badge to the unread-notification count.
 #[cfg(target_os = "macos")]
+/// 바탕화면 펫이 지금 떠 있나. pid 파일 하나로 판정한다 — 앱을 껐다 켜도 펫은 살아
+/// 있으므로(그게 이 기능의 전부다) 상태를 앱 메모리에 두면 다음 실행이 못 알아본다.
+pub(crate) fn pet_pid() -> Option<u32> {
+    let p = pet_pid_path()?;
+    let pid: u32 = std::fs::read_to_string(&p).ok()?.trim().parse().ok()?;
+    // 죽은 pid 가 남아 있으면 「켜져 있다」로 읽혀 다시 못 켠다 — 살아 있는지 본다.
+    unsafe { (libc::kill(pid as i32, 0) == 0).then_some(pid) }
+}
+
+fn pet_pid_path() -> Option<std::path::PathBuf> {
+    Some(kasa_socket::home_dir()?.join(".config/kasaterm/pet.pid"))
+}
+
+/// 펫을 켜고 끈다. 반환은 켠 쪽인가.
+pub(crate) fn toggle_pet() -> bool {
+    if let Some(pid) = pet_pid() {
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        if let Some(p) = pet_pid_path() {
+            let _ = std::fs::remove_file(p);
+        }
+        return false;
+    }
+    // 펫 실행 파일은 앱 번들 안(Resources 옆) 아니면 개발 트리의 target.
+    let exe = std::env::current_exe().ok();
+    let cand = exe.iter().flat_map(|e| {
+        [
+            e.parent().map(|d| d.join("kasapet")),
+            e.parent().and_then(|d| d.parent()).map(|c| c.join("Resources/kasapet")),
+        ]
+    }).flatten().find(|p| p.is_file());
+    let Some(bin) = cand else {
+        eprintln!("[pet] kasapet 실행 파일을 못 찾았다");
+        return false;
+    };
+    let model = pet_model_path();
+    match std::process::Command::new(&bin).arg(&model).spawn() {
+        Ok(child) => {
+            if let Some(p) = pet_pid_path() {
+                let _ = std::fs::write(p, child.id().to_string());
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("[pet] 못 띄웠다: {e}");
+            false
+        }
+    }
+}
+
+/// 펫이 쓸 모델. 사람이 바꿔 넣을 수 있게 설정 폴더를 먼저 본다.
+fn pet_model_path() -> String {
+    if let Ok(p) = std::env::var("KASATERM_PET_MODEL") {
+        return p;
+    }
+    if let Some(h) = kasa_socket::home_dir() {
+        let d = h.join(".config/kasaterm/pet");
+        if let Ok(rd) = std::fs::read_dir(&d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.to_string_lossy().ends_with(".model3.json") {
+                    return p.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
 fn set_dock_badge(count: usize) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;

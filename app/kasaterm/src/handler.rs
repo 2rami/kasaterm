@@ -5435,6 +5435,13 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    if let Some(r) = self.statusbar.pet_rect {
+                        if sb_hit(&r) {
+                            let on = crate::chrome::toggle_pet();
+                            self.set_toast(if on { "펫을 띄웠습니다".into() } else { "펫을 껐습니다".to_string() });
+                            window.request_redraw();
+                            return;
+                        }
                     if let Some(pid) = self
                         .statusbar
                         .toggle_rects
