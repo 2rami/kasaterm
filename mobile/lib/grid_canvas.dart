@@ -598,9 +598,12 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
   _CellMetrics? _scaled;
 
   /// 좁은 pane(42열)은 기본 글꼴이면 폰 폭의 2/3 만 쓰고 글자도 작다 — pane 열 수가 폰
-  /// 열 수보다 적으면 글꼴을 키워 그 열 수가 폭을 채우게 한다(상한 22pt). 넓은 pane 은
+  /// 열 수보다 적으면 글꼴을 키워 그 열 수가 폭을 채우게 한다(상한은 `_maxFont`). 넓은 pane 은
   /// 기본 글꼴로 접는다.
-  static const _maxFont = 22.0;
+  /// 키우는 상한. 22 이던 때는 30열짜리 pane(맥미니 창을 다섯으로 쪼갠 것)이 폰 폭을
+  /// 꽉 채우는 광고판 글씨가 됐다 — 「데스크톱 화면 그대로」가 읽히지 않는 화면이 됐다.
+  /// 17 이면 42열 pane 은 전과 같고, 그보다 좁은 pane 만 왼쪽에 보통 크기로 선다.
+  static const _maxFont = 17.0;
 
   @override
   void didUpdateWidget(WrappedCanvas old) {
