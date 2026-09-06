@@ -5715,9 +5715,99 @@ fn raw_pane_param(raw: Option<&str>) -> Option<String> {
 /// 한 프레임에 실리는 크기를 묶어 둔다.
 const HISTORY_ROWS_MAX: usize = 2000;
 
+/// 웹 거울이 접을 원본 격자 — 원본 폭 그대로의 전체 행과 마지막 프레임의 나머지
+/// 정보(커서·모드). 프레임은 바뀐 행만 실어 오므로 여기 얹어 전체를 유지한다.
+struct WebSrc {
+    cells: Vec<kasa_bridge::screen::Row>,
+    meta: kasa_bridge::screen::ScreenUpdate,
+}
+
+impl WebSrc {
+    fn from_full(u: &kasa_bridge::screen::ScreenUpdate) -> Self {
+        let mut s = WebSrc {
+            cells: vec![
+                vec![kasa_bridge::screen::Cell::blank(); u.cols as usize];
+                u.rows as usize
+            ],
+            meta: Self::meta_of(u),
+        };
+        s.absorb(u);
+        s
+    }
+    fn meta_of(u: &kasa_bridge::screen::ScreenUpdate) -> kasa_bridge::screen::ScreenUpdate {
+        let mut m = u.clone();
+        m.dirty = Vec::new();
+        m
+    }
+    fn absorb(&mut self, u: &kasa_bridge::screen::ScreenUpdate) {
+        if self.meta.cols != u.cols || self.meta.rows != u.rows || self.cells.len() != u.rows as usize {
+            self.cells = vec![
+                vec![kasa_bridge::screen::Cell::blank(); u.cols as usize];
+                u.rows as usize
+            ];
+        }
+        for (r, row) in &u.dirty {
+            if let Some(dst) = self.cells.get_mut(*r as usize) {
+                *dst = row.clone();
+            }
+        }
+        self.meta = Self::meta_of(u);
+    }
+    /// 원본 폭 그대로, 모든 행을 실은 프레임.
+    fn full_raw(&self) -> String {
+        let mut u = self.meta.clone();
+        u.dirty = self.cells.iter().cloned().enumerate().map(|(i, r)| (i as u16, r)).collect();
+        crate::gridwire::encode(&u).to_string()
+    }
+    /// `cols` 폭으로 다시 접은 프레임 — 행 수는 접힌 줄 수(원본 행 수보다 적으면 그만큼 채움).
+    fn reflowed(&self, cols: u16) -> String {
+        let out = kasa_bridge::reflow::reflow_lines(
+            &self.cells,
+            self.meta.cols,
+            (self.meta.cursor_row, self.meta.cursor_col),
+            cols,
+        );
+        let mut rows = out.rows;
+        let min_rows = self.meta.rows as usize;
+        while rows.len() < min_rows {
+            rows.push(vec![kasa_bridge::screen::Cell::blank(); cols.max(4) as usize]);
+        }
+        let mut u = self.meta.clone();
+        u.cols = cols.max(4);
+        u.rows = rows.len() as u16;
+        u.cursor_row = out.cursor_row.unwrap_or(0);
+        u.cursor_col = out.cursor_col;
+        u.dirty = rows.into_iter().enumerate().map(|(i, r)| (i as u16, r)).collect();
+        crate::gridwire::encode(&u).to_string()
+    }
+}
+
+/// 지난 줄(스크롤백)을 실어 보낼 때 — 거울 폭이 정해져 있으면 행마다 그 폭으로 접는다
+/// (이웃과 되잇지는 않는다). 오래된 순으로 준다.
+fn encode_history_rows(
+    rows: &[kasa_bridge::screen::Row],
+    src_cols: u16,
+    view_cols: u16,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for r in rows.iter().rev() {
+        if view_cols > 0 && view_cols != src_cols {
+            for line in kasa_bridge::reflow::reflow_row(r, src_cols, view_cols) {
+                out.push(crate::gridwire::encode_row(&line));
+            }
+        } else {
+            out.push(crate::gridwire::encode_row(r));
+        }
+    }
+    out
+}
+
 enum Frame {
     Bytes(Vec<u8>),
     Grid(Box<kasa_bridge::screen::ScreenUpdate>),
+    /// 거울 클라가 제 폭(`view`)을 바꿨다 — 새 프레임이 없어도 원본을 그 폭으로 다시
+    /// 접어 통째로 보낸다.
+    Reflow,
     /// 호스트 GUI 가 거울에게 미는 제어 JSON(`{"t":"open-url",…}` 등). 화면과
     /// 같은 채널을 타야 순서가 보장되고, 송신자(`btx`)를 등록부에 두는 것만으로
     /// 「이 pane 을 보는 거울 전부」에 닿는다.
@@ -5918,6 +6008,13 @@ async fn term_ws_run(
     let (btx, mut brx) = tokio::sync::mpsc::channel::<Frame>(64);
     // 거울의 「지난 줄 달라」 응답도 화면과 같은 채널을 탄다 — 순서가 보장된다.
     let btx_shell = btx.clone();
+    // 거울 클라가 알린 제 폭(칸 수). 0 = 원본 그대로. 원본 pane 은 resize 를 안 받으므로
+    // 서버가 격자를 이 폭으로 다시 접어 보낸다(폰 앱·데스크톱 거울과 같은 규칙,
+    // `kasa_bridge::reflow`). 웹은 VT 파서도 접기도 없이 받은 셀을 그리기만 한다.
+    let view_cols = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0));
+    let view_cols_in = view_cols.clone();
+    // 접을 재료 — 원본 폭 그대로의 전체 격자. 프레임은 바뀐 행만 오므로 여기 쌓는다.
+    let mut web_src: Option<WebSrc> = None;
     // 거울(이미 있는 pane 을 보는 접속)도, 이 접속이 새로 띄운 원격 셸도 등록한다 —
     // 후자는 만든 쪽이 곧 보는 사람이라(맥북의 `mini` 창) 거기가 브라우저의 자리다.
     let ctl_token = register_viewer_ctl(&ctl_pane, btx.clone());
@@ -5935,6 +6032,7 @@ async fn term_ws_run(
         Tap::Grid(rx, snap) => {
             let msg = crate::gridwire::encode(&snap).to_string();
             let _ = ws_tx.send(Message::Text(msg.into())).await;
+            web_src = Some(WebSrc::from_full(&snap));
             std::thread::spawn(move || {
                 while let Ok(upd) = rx.recv() {
                     if btx.blocking_send(Frame::Grid(Box::new(upd))).is_err() {
@@ -6019,6 +6117,7 @@ async fn term_ws_run(
                             // 데스크톱이 위로 올라가 있으면 GUI 프레임은 지난 줄 창이다 — 거울에는
                             // 입력상자·상태줄이 있는 바닥 화면을 통째로 다시 떠서 준다.
                             let u = if offset > 0 { Box::new(sess_sz.live_screen()) } else { u };
+                            let vc = view_cols.load(std::sync::atomic::Ordering::Relaxed);
                             if hist > last_hist {
                                 // 이번 프레임에 스크롤백으로 들어간 줄 — 화면보다 먼저 보내야
                                 // 받는 쪽이 「지난 줄 뒤에 새 화면」 순서로 잇는다. 오래된 순.
@@ -6026,7 +6125,7 @@ async fn term_ws_run(
                                 let rows = sess_sz.rows_above_live(k);
                                 let msg = serde_json::json!({
                                     "t": "scrolled",
-                                    "rows": rows.iter().rev().map(|r| crate::gridwire::encode_row(r)).collect::<Vec<_>>(),
+                                    "rows": encode_history_rows(&rows, u.cols, vc),
                                 })
                                 .to_string();
                                 if ws_tx.send(Message::Text(msg.into())).await.is_err() {
@@ -6034,7 +6133,24 @@ async fn term_ws_run(
                                 }
                             }
                             last_hist = hist;
-                            let msg = crate::gridwire::encode(&u).to_string();
+                            let src = web_src.get_or_insert_with(|| WebSrc::from_full(&u));
+                            src.absorb(&u);
+                            let msg = if vc > 0 && vc != u.cols {
+                                src.reflowed(vc)
+                            } else {
+                                crate::gridwire::encode(&u).to_string()
+                            };
+                            ws_tx.send(Message::Text(msg.into())).await
+                        }
+                        Frame::Reflow => {
+                            let vc = view_cols.load(std::sync::atomic::Ordering::Relaxed);
+                            let Some(src) = web_src.as_ref() else { continue };
+                            // 폭이 원본으로 돌아가도 통째로 보낸다 — 접힌 격자를 걷어야 한다.
+                            let msg = if vc > 0 && vc != src.meta.cols {
+                                src.reflowed(vc)
+                            } else {
+                                src.full_raw()
+                            };
                             ws_tx.send(Message::Text(msg.into())).await
                         }
                         Frame::Control(s) => ws_tx.send(Message::Text(s.into())).await,
@@ -6093,12 +6209,24 @@ async fn term_ws_run(
                             .unwrap_or(300)
                             .min(HISTORY_ROWS_MAX as u64) as usize;
                         let rows = sess_in.rows_above_live(n);
+                        let (src_cols, _) = sess_in.size();
+                        let vc = view_cols_in.load(std::sync::atomic::Ordering::Relaxed);
                         let msg = serde_json::json!({
                             "t": "history",
-                            "rows": rows.iter().rev().map(|r| crate::gridwire::encode_row(r)).collect::<Vec<_>>(),
+                            "rows": encode_history_rows(&rows, src_cols, vc),
                         })
                         .to_string();
                         let _ = btx_shell.send(Frame::Control(msg)).await;
+                        continue;
+                    }
+                    // `{"t":"view","cols":N}` — 거울 클라의 제 폭. 원본은 안 건드리고 서버가
+                    // 그 폭으로 다시 접어 보낸다. 0 이면 원본 그대로.
+                    if v.get("t").and_then(|x| x.as_str()) == Some("view") {
+                        let n = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(0).min(400) as u16;
+                        // 같은 폭을 되풀이해 알리면 무시 — 프레임마다 다시 접어 보내는 되먹임 차단.
+                        if mirrored && view_cols_in.swap(n, std::sync::atomic::Ordering::Relaxed) != n {
+                            let _ = btx_shell.send(Frame::Reflow).await;
+                        }
                         continue;
                     }
                     if v.get("t").and_then(|x| x.as_str()) == Some("resize") {

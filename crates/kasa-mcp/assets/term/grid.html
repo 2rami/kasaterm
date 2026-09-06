@@ -104,12 +104,15 @@ function connect() {
       placeInput();
       frames++;
       st.textContent = `${m.cols}×${m.rows} · ${frames}프레임${picture ? ' · 그림' : ''}`;
+      // 첫 프레임에서야 셀 폭을 잰다 — 그때 제 폭을 알린다(바뀐 때만 나간다).
+      syncView();
       fitWidth();
       // 격자가 바뀌었다 = 데스크톱 화면도 바뀌었다. 그림 모드면 새 장을 받는다.
       if (picture) { shotDue = true; takeShot(); }
     } else if (m.t === 'size') {
       isMirror = !!m.mirror;
       st.textContent = `격자 ${m.cols}×${m.rows}${m.mirror ? ' (미러)' : ''}`;
+      sentView = 0; syncView();
     } else if (m.t === 'gone') {
       gone = true;
       st.textContent = '세션이 끝났어요 — ≡ 목록에서 다른 pane 을 고르세요';
@@ -146,6 +149,9 @@ connect();
 // 크기 그대로**라, 폰에서 가로 스크롤바가 남고 세로로도 빈 자리가 생긴다(2026-08-25 실측:
 // scale 일 때 가로스크롤 true, zoom 으로 바꾸니 false). zoom 은 상자까지 줄인다.
 function fitWidth() {
+  // 서버가 제 폭으로 접어 주는 거울은 줄일 게 없다 — 여기서 zoom 을 걸면 잰 셀 폭이
+  // 흔들려 폭 알림과 되먹임이 된다.
+  if (isMirror && sentView > 0) { grid.el.style.zoom = ''; return; }
   const avail = document.documentElement.clientWidth;
   const need = grid.cols * grid.cell.w;
   const s = need > avail ? avail / need : 1;
@@ -170,7 +176,20 @@ function syncSize() {
   ws.send(JSON.stringify({ t: 'resize', cols, rows }));
 }
 
-addEventListener('resize', () => { grid.remeasure(); syncSize(); fitWidth(); placeInput(); });
+// 미러는 PTY 를 못 건드리는 대신 **제 폭을 서버에 알린다** — 서버가 원본 격자를 그 폭으로
+// 다시 접어 준다(폰 앱·데스크톱 거울과 같은 규칙). 그러면 fitWidth 의 축소는 안 걸린다.
+// 그림 모드는 데스크톱 그대로라 알릴 게 없다.
+let sentView = 0;
+function syncView() {
+  if (!ws || ws.readyState !== 1 || !isMirror || !grid.cell.w) return;
+  const w = document.documentElement.clientWidth;
+  const cols = picture ? 0 : Math.max(20, Math.floor(w / grid.cell.w));
+  if (cols === sentView) return;
+  sentView = cols;
+  ws.send(JSON.stringify({ t: 'view', cols }));
+}
+
+addEventListener('resize', () => { grid.remeasure(); syncSize(); syncView(); fitWidth(); placeInput(); });
 
 // ── 그림 모드 ──
 // 격자 화면은 셀을 브라우저 폰트로 다시 그려 테마·폰트·프사가 데스크톱과 다르다. 그림
@@ -235,6 +254,7 @@ function setPicture(on) {
   picBtn.classList.toggle('on', on);
   // 입력창은 보이는 쪽에 있어야 포커스가 잡힌다(display:none 안의 요소는 포커스 불가).
   (on ? shotwrap : grid.el).appendChild(input.el);
+  syncView();
   placeInput();
   if (on) { shotDue = true; takeShot(); }
   input.focus();

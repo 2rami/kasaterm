@@ -420,8 +420,11 @@ fn info_of(t: &[Glyph]) -> Info {
 const JOIN_SLACK: usize = 12;
 
 /// `b` 가 `a` 의 이어지는 줄인가 — `a` 가 원본 폭을 거의 채우고, `b` 가 `a` 의 들여쓰기
-/// 자리에서 글머리 없이 시작하면 저쪽(Ink)이 한 문단을 접어 둔 것이다.
+/// 자리에서 글머리 없이 시작하면 저쪽(Ink)이 한 문단을 접어 둔 것이다. `a` 가 마지막
+/// 칸까지 찼는데 `b` 가 0열에서 시작하면 터미널이 글자 단위로 자른 것(셸 출력) —
+/// 그것도 이어진 줄이다.
 fn continues(a: &Info, b: &Info, src_cols: usize) -> bool {
+    let hard = a.width == src_cols && b.lead == 0;
     a.prose
         && b.prose
         && a.words > 1
@@ -429,7 +432,7 @@ fn continues(a: &Info, b: &Info, src_cols: usize) -> bool {
         && a.width <= src_cols
         // 뒷줄 첫 낱말이 앞줄 남은 자리에 들어갔다면 거기서 접혔을 리가 없다.
         && a.width + 1 + b.first_word > src_cols
-        && b.lead == a.indent
+        && (b.lead == a.indent || hard)
         && !b.marked()
 }
 
@@ -492,6 +495,21 @@ pub struct Reflowed {
     pub cursor_col: u16,
 }
 
+/// 창에 담기 전의 줄 전부 — 세로로 스크롤되는 곳(웹 거울)은 이걸 그대로 쓴다.
+/// 뒤의 빈 줄은 커서가 앉은 줄까지만 남기고 잘라 낸다.
+pub struct ReflowedLines {
+    pub rows: Vec<Row>,
+    pub cursor_row: Option<u16>,
+    pub cursor_col: u16,
+}
+
+/// 행 하나만 `cols` 폭으로 — 지난 줄(스크롤백)처럼 이웃 행과 되이을 수 없는 자리.
+pub fn reflow_row(row: &Row, src_cols: u16, cols: u16) -> Vec<Row> {
+    let cols = cols.max(4) as usize;
+    let rr = reflow_glyphs(&trimmed(row), cols, src_cols as usize);
+    rr.chunks.iter().map(|c| cells_of(c, cols)).collect()
+}
+
 /// `src`(원본 폭 `src_cols`)를 `cols`×`rows` 로. 줄이 남으면 아래를 비우고, 넘치면 커서가
 /// 든 줄이 보이게 아래쪽을 담는다(입력상자가 바닥에 있는 화면이 흔하다).
 pub fn reflow_grid(
@@ -501,8 +519,41 @@ pub fn reflow_grid(
     cols: u16,
     rows: u16,
 ) -> Reflowed {
+    let all = reflow_lines(src, src_cols, cursor, cols);
     let cols = cols.max(4) as usize;
     let rows_n = rows.max(1) as usize;
+    let lines = all.rows;
+    let cursor_line = all.cursor_row.map(|r| r as usize);
+    // 창에 담기 — 넘치면 커서 줄이 보이는 아래쪽.
+    let total = lines.len();
+    let start = if total <= rows_n {
+        0
+    } else {
+        let mut s = total - rows_n;
+        if let Some(cl) = cursor_line {
+            if cl < s {
+                s = cl;
+            }
+        }
+        s
+    };
+    let mut out_rows: Vec<Row> = lines.into_iter().skip(start).take(rows_n).collect();
+    while out_rows.len() < rows_n {
+        out_rows.push(vec![Cell::blank(); cols]);
+    }
+    let cursor_row = cursor_line
+        .map(|cl| cl.saturating_sub(start).min(rows_n - 1))
+        .unwrap_or(0);
+    Reflowed {
+        rows: out_rows,
+        cursor_row: cursor_row as u16,
+        cursor_col: all.cursor_col,
+    }
+}
+
+/// `src` 의 모든 행을 `cols` 폭으로 다시 접은 줄 전부.
+pub fn reflow_lines(src: &[Row], src_cols: u16, cursor: (u16, u16), cols: u16) -> ReflowedLines {
+    let cols = cols.max(4) as usize;
     let sc = src_cols as usize;
     let trimmed: Vec<Vec<Glyph>> = src.iter().map(|r| trimmed(r)).collect();
     let infos: Vec<Info> = trimmed.iter().map(|t| info_of(t)).collect();
@@ -554,33 +605,14 @@ pub fn reflow_grid(
         lines.extend(rr.chunks);
         r += n;
     }
-
-    // 창에 담기 — 넘치면 커서 줄이 보이는 아래쪽.
-    let total = lines.len();
-    let start = if total <= rows_n {
-        0
-    } else {
-        let mut s = total - rows_n;
-        if let Some(cl) = cursor_line {
-            if cl < s {
-                s = cl;
-            }
-        }
-        s
-    };
-    let mut out_rows: Vec<Row> = Vec::with_capacity(rows_n);
-    for line in lines.iter().skip(start).take(rows_n) {
-        out_rows.push(cells_of(line, cols));
+    // 뒤의 빈 줄은 커서 줄까지만.
+    let keep = cursor_line.map(|c| c + 1).unwrap_or(0);
+    while lines.len() > keep && lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
     }
-    while out_rows.len() < rows_n {
-        out_rows.push(vec![Cell::blank(); cols]);
-    }
-    let cursor_row = cursor_line
-        .map(|cl| cl.saturating_sub(start).min(rows_n - 1))
-        .unwrap_or(0);
-    Reflowed {
-        rows: out_rows,
-        cursor_row: cursor_row as u16,
+    ReflowedLines {
+        rows: lines.iter().map(|l| cells_of(l, cols)).collect(),
+        cursor_row: cursor_line.map(|c| c as u16),
         cursor_col: cursor_col as u16,
     }
 }
@@ -708,6 +740,17 @@ mod tests {
     }
 
     #[test]
+    fn terminal_hard_wrap_under_bullet_rejoins_at_col_zero() {
+        // 셸이 60열에서 글자 단위로 자른 글머리 줄: 뒷줄이 0열에서 시작한다.
+        let a = format!("- 경로는 {}", "/Users/kasa/Desktop/momewomo/kasaterm/crates/kasa-b");
+        assert_eq!(a.chars().map(|c| if ('\u{ac00}'..='\u{d7a3}').contains(&c) { 2 } else { 1 }).sum::<usize>(), 60);
+        let src = [&a[..], "ridge/src/reflow.rs 이다."];
+        let out = lines(&src, 60, 100, 5);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("kasa-bridge/src/reflow.rs 이다."), "{}", out[0]);
+    }
+
+    #[test]
     fn two_words_at_edge_keep_a_space() {
         let src = ["- abc abc abc abc abc abc dd", "  next word"];
         assert_eq!(
@@ -737,6 +780,21 @@ mod tests {
         assert_eq!(out.rows.len(), 2);
         assert_eq!(text(&out.rows[1]), "> typing");
         assert_eq!((out.cursor_row, out.cursor_col), (1, 2));
+    }
+
+    #[test]
+    fn lines_keep_everything_and_trim_trailing_blanks() {
+        let g: Vec<Row> = vec![
+            row("  - one two three four five six seven eight nine ten", 60),
+            row("> typing", 60),
+            row("", 60),
+            row("", 60),
+        ];
+        let out = reflow_lines(&g, 60, (1, 2), 30);
+        assert_eq!(out.rows.len(), 3);
+        assert_eq!((out.cursor_row, out.cursor_col), (Some(2), 2));
+        assert_eq!(reflow_row(&row(&format!("╭{}╮", "─".repeat(26)), 28), 28, 44).len(), 1);
+        assert_eq!(reflow_row(&row(&"ab ".repeat(20), 60), 60, 20).len(), 3);
     }
 
     #[test]

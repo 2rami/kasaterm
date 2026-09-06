@@ -58,8 +58,12 @@
 
     function measure() {
       const r = ruler.getBoundingClientRect();
-      if (r.width > 0) cellW = r.width;
-      if (r.height > 0) cellH = r.height;
+      // fitWidth 가 zoom 을 걸어 두면 잰 값도 줄어 있다 — 셀 크기는 zoom 이전 값이어야
+      // 거울이 서버에 알리는 폭이 안 흔들린다(줄어든 셀로 재면 폭을 더 크게 알리고,
+      // 그 폭으로 접히면 zoom 이 풀려 다시 재는 되먹임이 초당 수백 프레임을 만들었다).
+      const z = parseFloat(view.style.zoom) || 1;
+      if (r.width > 0) cellW = r.width / z;
+      if (r.height > 0) cellH = r.height / z;
     }
 
     function resize(c, r) {
