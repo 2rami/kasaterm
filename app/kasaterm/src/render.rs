@@ -11902,7 +11902,36 @@ impl App {
                                         },
                                     );
                                 } else {
-                                    if let Some(t) = usage {
+                                    // 창을 여럿 읽었으면 claude 와 **같은 모양**으로
+                                    // 그린다 — 코덱스만 글자였던 동안, 주간이 꽉 찬
+                                    // 것이 한 줄 요약에 묻혀 눈에 띄지 않았다
+                                    // (2026-09-06 「코덱스 한도도 색으로」).
+                                    let wins: Vec<(String, f32)> = snapshot
+                                        .rate_windows
+                                        .iter()
+                                        .map(|(minutes, pct)| {
+                                            (codex_rate_window_label(Some(*minutes)), *pct)
+                                        })
+                                        .collect();
+                                    let resets = snapshot
+                                        .rate_resets_at
+                                        .filter(|at| *at > 0)
+                                        .and_then(|at| crate::resets_in_label(Some(at as u64)));
+                                    if let Some(t) = resets.filter(|_| !wins.is_empty()) {
+                                        let tf = f - 2.0;
+                                        let tw = g.measure_chrome_text(&t, tf, false);
+                                        g.draw_text(
+                                            right - tw,
+                                            line1 + 1.0,
+                                            &t,
+                                            gpu::DrawOpts {
+                                                font_size: tf,
+                                                color: theme::text_mute(),
+                                                bold: false,
+                                                italic: false,
+                                            },
+                                        );
+                                    } else if let Some(t) = usage {
                                         let tf = f - 2.0;
                                         let tw = g.measure_chrome_text(&t, tf, true);
                                         g.draw_text(
@@ -11919,24 +11948,33 @@ impl App {
                                             },
                                         );
                                     }
-                                    let t = if summary.is_empty() {
-                                        "최근 Codex 실행".to_string()
+                                    let l2 = ry + prow_h - 17.0;
+                                    if wins.is_empty() {
+                                        // 옛 rollout 이라 창을 못 읽은 경우.
+                                        let t = if summary.is_empty() {
+                                            "최근 Codex 실행".to_string()
+                                        } else {
+                                            summary
+                                        };
+                                        let tf = f - 3.0;
+                                        let t =
+                                            crate::info::fit_text(g, &t, right - name_x, tf, false);
+                                        g.draw_text(
+                                            name_x,
+                                            l2,
+                                            &t,
+                                            gpu::DrawOpts {
+                                                font_size: tf,
+                                                color: theme::text_mute(),
+                                                bold: false,
+                                                italic: false,
+                                            },
+                                        );
                                     } else {
-                                        summary
-                                    };
-                                    let tf = f - 3.0;
-                                    let t = crate::info::fit_text(g, &t, right - name_x, tf, false);
-                                    g.draw_text(
-                                        name_x,
-                                        ry + prow_h - 17.0,
-                                        &t,
-                                        gpu::DrawOpts {
-                                            font_size: tf,
-                                            color: theme::text_mute(),
-                                            bold: false,
-                                            italic: false,
-                                        },
-                                    );
+                                        draw_window_gauges(
+                                            g, name_x, l2, right, f - 3.0, &wins, false,
+                                        );
+                                    }
                                 }
                             }
                             None => {
@@ -12411,42 +12449,6 @@ impl App {
                     // 나가야 했다(거노 2026-09-05). 로그인이 도는 중에는 안 그린다 —
                     // 동시에 둘을 띄우면 브라우저 창이 둘 뜨고 어느 창이 어느
                     // 슬롯인지 알 수가 없다.
-                    if !crate::settings::hidden_login_running() {
-                        let on = hmx >= sx && hmx <= sx + sw && hmy >= sry && hmy <= sry + row_h;
-                        g.hover_pointer |= on;
-                        if on {
-                            round_rect(
-                                g,
-                                sx + pad,
-                                sry,
-                                sw - pad * 2.0,
-                                row_h,
-                                theme::radius_sm(),
-                                theme::surface_active(),
-                            );
-                        }
-                        g.queue_icon(
-                            "plus",
-                            sx + pad_x,
-                            sry + (row_h - icon) / 2.0,
-                            icon,
-                            theme::text_dim(),
-                        );
-                        g.draw_text(
-                            sx + pad_x + icon + 7.0,
-                            sry + (row_h - f) / 2.0 - 1.0,
-                            "계정 추가",
-                            gpu::DrawOpts {
-                                font_size: f,
-                                color: theme::text_dim(),
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                        self.account_menu_hits
-                            .push((AccountMenuItem::AddAccount(p), (sx, sry, sw, row_h)));
-                        sry += row_h;
-                    }
                     {
                         let on = hmx >= sx && hmx <= sx + sw && hmy >= sry && hmy <= sry + row_h;
                         g.hover_pointer |= on;
@@ -14584,6 +14586,7 @@ mod tests {
             rate_window_minutes: Some(300),
             rate_resets_at: None,
             plan_type: Some("plus".to_string()),
+            ..Default::default()
         };
         assert_eq!(codex_usage_text(&s).as_deref(), Some("62% 씀 · 5h"));
         assert_eq!(
@@ -14969,17 +14972,32 @@ pub(crate) fn draw_usage_windows(
     font: f32,
     b: &crate::UsageBadge,
 ) -> f32 {
-    const GW: f32 = 28.0;
-    const GH: f32 = 5.0;
-    let gy = y + (font - GH) / 2.0;
     // `windows` 가 비는 건 옛 스냅샷을 되살렸을 때다 — 그때는 가장 급한 창 하나로.
     let wins: Vec<(String, f32)> = if b.windows.is_empty() {
         vec![(b.label.clone(), b.pct)]
     } else {
         b.windows.clone()
     };
+    draw_window_gauges(g, x, y, right, font, &wins, b.stale)
+}
+
+/// 창 목록을 [이름][막대][퍼센트] 로 늘어놓는다. claude 의 배지와 codex 의
+/// rollout 은 자료 모양이 다르지만 **화면에서는 같은 것**이라, 그리는 자리를
+/// 하나로 둔다 — 코덱스만 글자로 나오던 동안 한도가 찬 것이 눈에 안 띄었다.
+pub(crate) fn draw_window_gauges(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    right: f32,
+    font: f32,
+    wins: &[(String, f32)],
+    stale: bool,
+) -> f32 {
+    const GW: f32 = 28.0;
+    const GH: f32 = 5.0;
+    let gy = y + (font - GH) / 2.0;
     let mut bx = x;
-    for (label, pct) in &wins {
+    for (label, pct) in wins {
         let (label, pct) = (label.as_str(), *pct);
         let need = g.measure_chrome_text(label, font, false)
             + 6.0
@@ -15005,7 +15023,7 @@ pub(crate) fn draw_usage_windows(
         let w = (GW * (pct / 100.0).clamp(0.0, 1.0)).max(GH);
         round_rect(g, gx, gy, w, GH, GH / 2.0, usage_bar_color(pct));
         // stale 은 `~` 로만 말한다 — 색까지 흐리면 「급하지 않다」로 읽힌다.
-        let pt = if b.stale {
+        let pt = if stale {
             format!("~{pct:.0}%")
         } else {
             format!("{pct:.0}%")

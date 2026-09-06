@@ -444,6 +444,16 @@ impl PtyBackend {
         self.codex_rollouts.lock().unwrap().get(surface_id).cloned()
     }
 
+    /// 검증 리그에 코덱스 값을 심는다. 이 수치는 rollout 파일을 읽어야 생기는데
+    /// 격리 리그에는 codex 를 돌린 적이 없어, 심지 않으면 코덱스 줄을 **눈으로
+    /// 확인할 길이 자체가 없다**.
+    pub(crate) fn seed_codex_rollout(&self, surface_id: &str, snapshot: CodexRolloutSnapshot) {
+        self.codex_rollouts
+            .lock()
+            .unwrap()
+            .insert(surface_id.to_string(), snapshot);
+    }
+
     /// `attention` is shared with the GUI (`App.collab.attention`): the CLI
     /// hook path (`kasaterm-cli attention`) and the GUI's grid-scan prompt
     /// detection both write it, so the board's `waiting` flag reflects either.

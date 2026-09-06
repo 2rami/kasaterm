@@ -5944,6 +5944,31 @@ impl App {
                 }
                 // acct-3 은 일부러 안 넣는다.
             }
+            // 코덱스도 함께 — 5시간은 비었는데 주간이 꽉 찬 조합이다. 글자로만
+            // 그리던 동안 이 상태가 한 줄 요약에 묻혔다(2026-09-06).
+            if let Some(backend) = self.socket_backend.as_ref() {
+                let ids: Vec<String> = self
+                    .ws
+                    .lock()
+                    .ok()
+                    .map(|ws| ws.panes.keys().cloned().collect())
+                    .unwrap_or_default();
+                for id in ids {
+                    backend.seed_codex_rollout(
+                        &id,
+                        crate::transcript::CodexRolloutSnapshot {
+                            model: "gpt-5.5".to_string(),
+                            effort: "high".to_string(),
+                            collaboration_mode: "default".to_string(),
+                            rate_used_pct: Some(100.0),
+                            rate_window_minutes: Some(10080),
+                            rate_resets_at: Some((now + 71520) as i64),
+                            plan_type: Some("plus".to_string()),
+                            rate_windows: vec![(300, 0.0), (10080, 100.0)],
+                        },
+                    );
+                }
+            }
             self.chrome_dirty = true;
             return;
         }

@@ -4204,22 +4204,6 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.account_menu = true;
                                 return;
                             }
-                            // 계정 추가는 메뉴를 닫는다 — 로그인 진행은 설정창
-                            // 계정 칸에서 보이고, 코드도 거기서 받는다.
-                            Some(AccountMenuItem::AddAccount(p)) => {
-                                self.account_menu = false;
-                                self.account_menu_provider = None;
-                                self.settings_apply(match p {
-                                    AccountProvider::Claude => {
-                                        crate::SettingsAction::AddClaudeAccount
-                                    }
-                                    AccountProvider::Codex => {
-                                        crate::SettingsAction::AddCodexAccount
-                                    }
-                                });
-                                let _ = self.open_settings_room(Some(crate::SettingsCat::Claude));
-                                return;
-                            }
                             // 밀도도 그 자리에서 바뀌는 것을 봐야 하므로 메뉴를 유지한다.
                             Some(AccountMenuItem::Density(c)) => {
                                 self.set_usage_compact = c;
@@ -4253,7 +4237,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.account_menu_provider = None;
                                 self.open_settings_window(
                                     event_loop,
-                                    Some(SettingsCat::Claude),
+                                    Some(SettingsCat::Accounts),
                                     None,
                                 );
                                 self.session_touched = session_touched_before_event;

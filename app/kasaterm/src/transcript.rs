@@ -145,6 +145,10 @@ pub(crate) struct CodexRolloutSnapshot {
     pub rate_used_pct: Option<f32>,
     pub rate_window_minutes: Option<u32>,
     pub rate_resets_at: Option<i64>,
+    /// 한도 창 **전부**를 (창 길이 분, 쓴 비율) 로. 위 세 필드는 그중 가장 급한
+    /// 하나라, 그것만 그리면 5시간이 비어 있는데 주간이 꽉 찬 상태가 화면에서
+    /// 「여유 있음」으로 보인다 — claude 쪽이 2026-08-05 에 겪은 그 사고다.
+    pub rate_windows: Vec<(u32, f32)>,
     pub plan_type: Option<String>,
 }
 
@@ -164,9 +168,10 @@ fn json_string(object: &serde_json::Map<String, serde_json::Value>, key: &str) -
 /// `rate_limits` 한 묶음에서 지금 가장 먼저 닿을 창 하나를 고른다.
 fn codex_rate_limits(
     payload: &serde_json::Map<String, serde_json::Value>,
-) -> Option<(Option<(f32, u32, i64)>, Option<String>)> {
+) -> Option<(Option<(f32, u32, i64)>, Option<String>, Vec<(u32, f32)>)> {
     let limits = payload.get("rate_limits")?.as_object()?;
     let mut rate = None;
+    let mut windows: Vec<(u32, f32)> = Vec::new();
     for key in ["primary", "secondary", "individual_limit"] {
         let Some(window) = limits.get(key).and_then(|value| value.as_object()) else {
             continue;
@@ -179,16 +184,22 @@ fn codex_rate_limits(
             window.get("window_minutes").and_then(|value| value.as_u64()).unwrap_or(0) as u32,
             window.get("resets_at").and_then(|value| value.as_i64()).unwrap_or(0),
         );
+        if candidate.1 > 0 {
+            windows.push((candidate.1, candidate.0));
+        }
         if rate.is_none_or(|(current, _, _)| candidate.0 > current) {
             rate = Some(candidate);
         }
     }
+    // 짧은 창이 왼쪽에 오게 — 「지금 당장」이 먼저 읽혀야 한다.
+    windows.sort_by_key(|(minutes, _)| *minutes);
+    windows.dedup_by_key(|(minutes, _)| *minutes);
     let plan_type = limits
         .get("plan_type")
         .and_then(|value| value.as_str())
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    Some((rate, plan_type))
+    Some((rate, plan_type, windows))
 }
 
 /// `text` 안에서 각 상태의 가장 최근 값을 찾는다. 한 줄이 깨진 tail 시작점은 조용히
@@ -245,12 +256,13 @@ fn codex_rollout_snapshot_part(text: &str) -> CodexRolloutSnapshotParts {
         }
 
         if kind == "event_msg" && sub == "token_count" && (!out.rate_seen || !out.plan_seen) {
-            if let Some((rate, plan_type)) = codex_rate_limits(payload) {
+            if let Some((rate, plan_type, windows)) = codex_rate_limits(payload) {
                 if !out.rate_seen {
                     if let Some((used, window, reset)) = rate {
                         out.snapshot.rate_used_pct = Some(used);
                         out.snapshot.rate_window_minutes = Some(window);
                         out.snapshot.rate_resets_at = Some(reset);
+                        out.snapshot.rate_windows = windows;
                         out.rate_seen = true;
                     }
                 }
@@ -1860,6 +1872,31 @@ mod codex_tests {
         let a = snapshot_from_tail("%1", tail, false);
         assert_eq!(a.rate_used_pct, Some(3.0));
         assert_eq!(a.rate_window_minutes, Some(10080), "10080분 = 7일");
+    }
+
+    #[test]
+    fn 한도창은_전부_짧은것부터_담는다() {
+        // 화면에 그리는 것은 창 **전부**다 — 가장 급한 하나만 그리면 5시간이 비고
+        // 주간이 꽉 찬 상태가 「여유 있음」으로 읽힌다(2026-09-06 「코덱스 한도도
+        // 색으로」). 정렬은 짧은 창이 먼저 — 「지금 당장」이 왼쪽이어야 한다.
+        let tail = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"plan_type":"plus","primary":{"used_percent":3.0,"window_minutes":10080,"resets_at":1786433096},"secondary":{"used_percent":62.5,"window_minutes":300,"resets_at":1786400000}}}}"#;
+        let a = codex_rollout_snapshot("", tail);
+        assert_eq!(
+            a.rate_windows,
+            vec![(300, 62.5), (10080, 3.0)],
+            "5시간이 먼저, 주간이 다음"
+        );
+        assert_eq!(a.rate_used_pct, Some(62.5), "가장 급한 창은 그대로 남는다");
+    }
+
+    #[test]
+    fn 창길이가_없으면_담지_않는다() {
+        // `window_minutes` 가 0 이면 무엇의 한도인지 이름을 못 붙인다 — 이름 없는
+        // 막대는 숫자만 떠 있는 얼룩이 되므로 아예 세우지 않는다.
+        let tail = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"primary":{"used_percent":41.0}}}}"#;
+        let a = codex_rollout_snapshot("", tail);
+        assert!(a.rate_windows.is_empty());
+        assert_eq!(a.rate_used_pct, Some(41.0), "그래도 퍼센트는 읽는다");
     }
 
     #[test]
