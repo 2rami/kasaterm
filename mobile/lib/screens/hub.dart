@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../hub_model.dart';
+import '../hub_prefs.dart';
 import '../server.dart';
 import '../student_art.dart';
 import 'settings.dart';
@@ -14,17 +15,21 @@ class HubScreen extends StatefulWidget {
     super.key,
     required this.server,
     required this.onChangeAddress,
+    this.prefs,
   });
 
   final Server server;
   final Future<void> Function() onChangeAddress;
+
+  /// 보기 설정 저장소. 없으면(테스트) 고른 것이 이 화면에서만 산다.
+  final HubPrefs? prefs;
 
   @override
   State<HubScreen> createState() => _HubScreenState();
 }
 
 class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
-  late final HubModel _model = HubModel(widget.server);
+  late final HubModel _model = HubModel(widget.server, prefs: widget.prefs);
 
   @override
   void initState() {
@@ -100,6 +105,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
                   child: const Icon(Icons.notifications_outlined),
                 ),
               ),
+            _ViewMenu(model: _model),
             IconButton(
               onPressed: _openSettings,
               icon: const Icon(Icons.settings_outlined),
@@ -137,7 +143,8 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
   );
 
   Widget _body(ThemeData theme) {
-    final sections = _model.sections;
+    final sections = _model.visible;
+    final shape = _model.view.shape;
     final children = <Widget>[];
     if (_model.error != null) {
       children.add(
@@ -148,7 +155,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
       children.add(const _Notice(text: '학생 목록을 받는 중…'));
     }
     for (final s in sections) {
-      final title = s.machine ?? '이 기계';
+      final title = s.machine ?? _model.rootName ?? '이 기계';
       children.add(
         _SectionHeader(
           title: title,
@@ -162,9 +169,10 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
         children.add(const _Notice(text: '학생이 없다'));
       }
       for (final room in s.rooms) {
-        children.add(_RoomHeader(title: room.title));
-        if (room.rects.isNotEmpty) {
-          children.add(
+        final inside = <Widget>[_RoomHeader(title: room.title)];
+        final hasMap = room.rects.isNotEmpty && shape != HubShape.list;
+        if (hasMap) {
+          inside.add(
             _MiniMap(
               server: widget.server,
               room: room,
@@ -172,15 +180,19 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
             ),
           );
         }
-        for (final p in room.panes) {
-          children.add(
-            _PaneTile(
-              server: widget.server,
-              pane: p,
-              onTap: s.online ? () => _open(p) : null,
-            ),
-          );
+        // 「지도만」이라도 지도를 못 그리는 방(옛 서버)은 목록으로 — 학생이 사라지면 안 된다.
+        if (!(shape == HubShape.map && hasMap)) {
+          for (final p in room.panes) {
+            inside.add(
+              _PaneTile(
+                server: widget.server,
+                pane: p,
+                onTap: s.online ? () => _open(p) : null,
+              ),
+            );
+          }
         }
+        children.add(_RoomBox(children: inside));
       }
     }
     return ListView(
@@ -189,6 +201,76 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
       children: children,
     );
   }
+}
+
+/// 앱바의 「보기」 메뉴 — 어느 기기를 따라갈지, 지도·목록 중 무엇을 볼지.
+class _ViewMenu extends StatelessWidget {
+  const _ViewMenu({required this.model});
+
+  final HubModel model;
+
+  @override
+  Widget build(BuildContext context) {
+    final view = model.view;
+    final machines = [
+      for (final s in model.sections)
+        if (s.machine != null) s.machine!,
+    ];
+    final rootName = model.rootName ?? '이 기계';
+    final current = view.machine == null
+        ? '전체'
+        : (view.machine!.isEmpty ? rootName : view.machine!);
+    return PopupMenuButton<VoidCallback>(
+      tooltip: '보기',
+      onSelected: (fn) => fn(),
+      icon: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.devices_outlined),
+          const SizedBox(width: 4),
+          Text(
+            current,
+            style: Theme.of(context).textTheme.labelLarge,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+      itemBuilder: (context) => [
+        const PopupMenuItem(enabled: false, height: 32, child: Text('기기')),
+        _pick('전체', view.machine == null, () {
+          model.setView(view.copyWith(clearMachine: true));
+        }),
+        _pick(rootName, view.machine == '', () {
+          model.setView(view.copyWith(machine: ''));
+        }),
+        for (final m in machines)
+          _pick(m, view.machine == m, () {
+            model.setView(view.copyWith(machine: m));
+          }),
+        const PopupMenuDivider(),
+        const PopupMenuItem(enabled: false, height: 32, child: Text('모양')),
+        _pick('지도와 목록', view.shape == HubShape.both, () {
+          model.setView(view.copyWith(shape: HubShape.both));
+        }),
+        _pick('목록만', view.shape == HubShape.list, () {
+          model.setView(view.copyWith(shape: HubShape.list));
+        }),
+        _pick('지도만', view.shape == HubShape.map, () {
+          model.setView(view.copyWith(shape: HubShape.map));
+        }),
+      ],
+    );
+  }
+
+  PopupMenuEntry<VoidCallback> _pick(
+    String label,
+    bool checked,
+    VoidCallback fn,
+  ) => CheckedPopupMenuItem<VoidCallback>(
+    value: fn,
+    checked: checked,
+    child: Text(label),
+  );
 }
 
 class _SectionHeader extends StatelessWidget {
@@ -234,6 +316,31 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
+/// 방 하나를 한 판으로 묶는다 — 방이 여럿 펼쳐졌을 때 어디까지가 한 방인지 보이게.
+class _RoomBox extends StatelessWidget {
+  const _RoomBox({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow.withValues(alpha: 0.85),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.6)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: children,
+      ),
+    );
+  }
+}
+
 class _RoomHeader extends StatelessWidget {
   const _RoomHeader({required this.title});
 
@@ -242,13 +349,31 @@ class _RoomHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // 방 이름은 판의 제목이다 — 회색 한 줄로는 방이 여럿일 때 경계가 안 보였다.
     return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 10, 4, 4),
-      child: Text(
-        title,
-        style: theme.textTheme.labelLarge?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
-        ),
+      padding: const EdgeInsets.fromLTRB(2, 6, 2, 6),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 14,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.primary,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              title,
+              style: theme.textTheme.titleSmall?.copyWith(
+                color: theme.colorScheme.onSurface,
+                fontWeight: FontWeight.w700,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -292,42 +417,46 @@ class _MiniMap extends StatelessWidget {
   final HubRoom room;
   final void Function(Pane)? onOpen;
 
-  static const _height = 108.0;
   static const _gap = 1.5;
+
+  /// 흔한 데스크톱 창 모양. 서버가 비율을 안 주면 이걸로.
+  static const _defaultAspect = 16 / 10;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.fromLTRB(2, 0, 2, 8),
-      child: Container(
-        height: _height,
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: LayoutBuilder(
-          builder: (context, box) {
-            final w = box.maxWidth;
-            final h = box.maxHeight;
-            return Stack(
-              children: [
-                for (final r in room.rects)
-                  Positioned(
-                    left: r.x / 100 * w + _gap,
-                    top: r.y / 100 * h + _gap,
-                    width: math.max(0, r.w / 100 * w - _gap * 2),
-                    height: math.max(0, r.h / 100 * h - _gap * 2),
-                    child: _MiniCell(
-                      server: server,
-                      pane: room.paneOf(r.surface),
-                      onOpen: onOpen,
+      child: AspectRatio(
+        aspectRatio: (room.aspect ?? _defaultAspect).clamp(1.0, 3.2),
+        child: Container(
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: LayoutBuilder(
+            builder: (context, box) {
+              final w = box.maxWidth;
+              final h = box.maxHeight;
+              return Stack(
+                children: [
+                  for (final r in room.rects)
+                    Positioned(
+                      left: r.x / 100 * w + _gap,
+                      top: r.y / 100 * h + _gap,
+                      width: math.max(0, r.w / 100 * w - _gap * 2),
+                      height: math.max(0, r.h / 100 * h - _gap * 2),
+                      child: _MiniCell(
+                        server: server,
+                        pane: room.paneOf(r.surface),
+                        onOpen: onOpen,
+                      ),
                     ),
-                  ),
-              ],
-            );
-          },
+                ],
+              );
+            },
+          ),
         ),
       ),
     );

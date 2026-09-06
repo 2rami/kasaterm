@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'hub_prefs.dart';
 import 'server.dart';
 
 class HubRoom {
@@ -10,12 +11,16 @@ class HubRoom {
     required this.title,
     required this.panes,
     this.rects = const [],
+    this.aspect,
   });
   final String title;
   final List<Pane> panes;
 
   /// 데스크톱에서의 자리 — 비어 있으면 미니맵 없이 목록만.
   final List<PaneRect> rects;
+
+  /// 데스크톱 창의 가로÷세로 — 미니맵을 그 모양대로 그린다.
+  final double? aspect;
 
   Pane? paneOf(String surface) {
     for (final p in panes) {
@@ -42,12 +47,44 @@ class HubSection {
 
 /// 허브 한 화면의 상태. 서버 푸시가 없어 앞에 있을 때만 5초마다 묻는다.
 class HubModel extends ChangeNotifier {
-  HubModel(this.server);
+  HubModel(this.server, {HubPrefs? prefs}) : _prefs = prefs;
 
   final Server server;
+  final HubPrefs? _prefs;
   static const pollEvery = Duration(seconds: 5);
 
   List<HubSection> sections = const [];
+
+  /// 어느 기기를 따라갈지·어떤 모양으로 볼지. 배지는 보기와 무관하게 전부 센다 —
+  /// 맥미니만 보고 있어도 맥북 학생이 기다리면 알아야 한다.
+  HubView view = const HubView();
+
+  /// 주소가 가리키는 기계의 이름(`mobile/me`). 못 받으면 「이 기계」.
+  String? rootName;
+
+  /// 지금 보기로 거른 목록. 고른 기기가 목록에서 사라졌으면(이름이 바뀌거나 꺼짐)
+  /// 빈 화면 대신 전부를 보인다.
+  List<HubSection> get visible => filterSections(sections, view.machine);
+
+  @visibleForTesting
+  static List<HubSection> filterSections(
+    List<HubSection> all,
+    String? machine,
+  ) {
+    if (machine == null) return all;
+    final picked = [
+      for (final s in all)
+        if ((s.machine ?? '') == machine) s,
+    ];
+    return picked.isEmpty ? all : picked;
+  }
+
+  Future<void> setView(HubView next) async {
+    view = next;
+    notifyListeners();
+    await _prefs?.save(next);
+  }
+
   String? error;
   bool loading = false;
   DateTime? updatedAt;
@@ -63,6 +100,28 @@ class HubModel extends ChangeNotifier {
   void start() {
     refresh();
     _timer ??= Timer.periodic(pollEvery, (_) => refresh());
+    _loadPrefs();
+    _loadRootName();
+  }
+
+  Future<void> _loadPrefs() async {
+    final p = _prefs;
+    if (p == null) return;
+    view = await p.load();
+    notifyListeners();
+  }
+
+  Future<void> _loadRootName() async {
+    try {
+      final me = await server.me();
+      final m = me.machine;
+      if (m != null && m.isNotEmpty) {
+        rootName = m;
+        notifyListeners();
+      }
+    } catch (_) {
+      // 이름은 꾸밈이다 — 못 받으면 「이 기계」로 둔다.
+    }
   }
 
   void stop() {
@@ -157,7 +216,7 @@ class HubModel extends ChangeNotifier {
     for (final p in panes) {
       byWindow.putIfAbsent(p.window, () => []).add(p);
     }
-    final rectsOf = {for (final l in layouts) l.idx: l.rects};
+    final layoutOf = {for (final l in layouts) l.idx: l};
     final windows = byWindow.keys.toList()..sort();
     return [
       for (final w in windows)
@@ -165,7 +224,8 @@ class HubModel extends ChangeNotifier {
           title: w < labels.length && labels[w].isNotEmpty
               ? labels[w]
               : '방 ${w + 1}',
-          rects: rectsOf[w] ?? const [],
+          rects: layoutOf[w]?.rects ?? const [],
+          aspect: layoutOf[w]?.aspect,
           panes: byWindow[w]!
             ..sort((a, b) {
               final r = _rank(a).compareTo(_rank(b));

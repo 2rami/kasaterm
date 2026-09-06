@@ -42,7 +42,9 @@ http.Response _answer(http.Request req) {
       },
     ];
   } else if (path.endsWith('sessions')) {
-    body = {'labels': ['게임개발부']};
+    body = {
+      'labels': ['게임개발부'],
+    };
   } else if (path.endsWith('machines')) {
     body = {'machines': []};
   } else if (path.endsWith('windows')) {
@@ -52,6 +54,7 @@ http.Response _answer(http.Request req) {
         {
           'idx': 0,
           'active': true,
+          'aspect': 1.9,
           'panes': [
             {'surface_id': '%1', 'x': 0, 'y': 0, 'w': 60, 'h': 100},
             {'surface_id': '%2', 'x': 60, 'y': 0, 'w': 40, 'h': 55},

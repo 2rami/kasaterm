@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'address_store.dart';
 import 'app_link.dart';
+import 'hub_prefs.dart';
 import 'screens/connect.dart';
 import 'screens/hub.dart';
 import 'screens/terminal.dart';
@@ -286,6 +287,7 @@ class _RootScreenState extends State<RootScreen> {
         key: ValueKey(server.root),
         server: server,
         onChangeAddress: _disconnected,
+        prefs: const HubPrefs(),
       );
     },
   );

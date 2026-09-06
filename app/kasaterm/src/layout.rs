@@ -372,6 +372,8 @@ impl App {
                 }
             }
             ws.window_layouts = wl;
+            let (gw, gh) = (cols as f32 * self.cell.w, rows as f32 * self.cell.h);
+            ws.grid_aspect = (gw > 0.0 && gh > 0.0).then(|| gw / gh);
             // 보조 탭 pid 도 화면 안이다 — 탭은 바깥 pane 자리에 살고 사용자가 탭바로
             // 언제든 본다. leaf 만 실으면 collab_board 가 탭 학생을 전부 detached
             // (화면밖)로 찍고, SendMessage 의 닫힌-pane 가드가 「사용자가 닫았거나

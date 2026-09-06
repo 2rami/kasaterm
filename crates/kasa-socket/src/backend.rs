@@ -466,6 +466,10 @@ pub struct WindowOverview {
     pub active: bool,
     pub surfaces: Vec<String>,
     pub panes: Vec<PaneRect>,
+    /// pane 영역의 가로÷세로(픽셀). 사각형은 백분율뿐이라 이것이 없으면 폰 미니맵이
+    /// 창 모양과 무관한 납작한 상자가 된다. 창이 없으면(헤드리스) 생략.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect: Option<f32>,
 }
 
 /// Plug point for terminal operations. Host apps implement this on a

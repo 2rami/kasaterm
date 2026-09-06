@@ -3385,6 +3385,8 @@ struct Workspace {
     /// 방(윈도우)마다의 화면 배치 — 폰 허브의 미니맵이 「어느 방에 누가 어떤 크기로」를
     /// 그리는 재료. `layout` 은 보고 있는 방 하나뿐이라 따로 둔다.
     window_layouts: HashMap<usize, Layout>,
+    /// pane 영역 가로÷세로(픽셀). 모든 방이 같은 창을 쓰므로 하나면 된다.
+    grid_aspect: Option<f32>,
 }
 
 impl Default for Workspace {
@@ -3399,6 +3401,7 @@ impl Default for Workspace {
             active_window_panes: std::collections::HashSet::new(),
             pane_window: HashMap::new(),
             window_layouts: HashMap::new(),
+            grid_aspect: None,
         }
     }
 }

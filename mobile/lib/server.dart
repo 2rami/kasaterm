@@ -133,17 +133,23 @@ class WindowLayout {
     required this.idx,
     required this.active,
     required this.rects,
+    this.aspect,
   });
 
   final int idx;
   final bool active;
   final List<PaneRect> rects;
 
+  /// 데스크톱 pane 영역의 가로÷세로. 없으면(옛 서버) 흔한 창 모양으로 그린다.
+  final double? aspect;
+
   static WindowLayout fromJson(Map<String, Object?> j) {
     final panes = j['panes'];
+    final a = (j['aspect'] as num?)?.toDouble();
     return WindowLayout(
       idx: (j['idx'] as num?)?.toInt() ?? 0,
       active: j['active'] == true,
+      aspect: a != null && a > 0 ? a : null,
       rects: [
         if (panes is List)
           for (final p in panes)

@@ -1623,6 +1623,7 @@ impl Backend for PtyBackend {
             .iter()
             .map(|(i, l)| (*i, rects_of(l)))
             .collect();
+        let aspect = ws.grid_aspect;
         drop(ws);
         Ok(by_win
             .into_iter()
@@ -1638,6 +1639,7 @@ impl Backend for PtyBackend {
                         others.get(&idx).cloned().unwrap_or_default()
                     },
                     surfaces,
+                    aspect,
                 }
             })
             .collect())
