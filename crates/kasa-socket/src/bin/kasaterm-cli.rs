@@ -1323,7 +1323,9 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 ("eval", None) => {
                     anyhow::bail!("web-eval needs JS (e.g. web-eval 'document.title')")
                 }
-                ("shot", Some(p)) if !p.starts_with('/') => {
+                // Windows 절대경로는 `/` 로 시작하지 않는다(`C:\…`) — 첫 글자
+                // 비교로 판정하면 그 플랫폼에서 web-shot 이 통째로 막힌다.
+                ("shot", Some(p)) if !std::path::Path::new(p).is_absolute() => {
                     anyhow::bail!("web-shot needs an absolute path (got {p})")
                 }
                 ("shot", None) => anyhow::bail!("web-shot needs an absolute .png path"),
