@@ -13,6 +13,7 @@ mod autosuggest;
 mod bridge;
 mod board_room;
 mod cells;
+mod clipboard;
 mod chrome;
 mod claude_auth;
 mod cursor;

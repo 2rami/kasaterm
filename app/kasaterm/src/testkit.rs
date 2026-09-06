@@ -6075,6 +6075,9 @@ impl App {
                 w if w.starts_with("tunnel") => {
                     (crate::state::StatusbarPopover::Tunnel, self.statusbar.tunnel_rect)
                 }
+                w if w.starts_with("clip") => {
+                    (crate::state::StatusbarPopover::Clipboard, self.statusbar.clip_rect)
+                }
                 _ => (crate::state::StatusbarPopover::Ports, self.statusbar.port_rect),
             };
             match anchor {

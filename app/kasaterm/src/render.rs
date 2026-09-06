@@ -11259,6 +11259,53 @@ impl App {
                         }
                         self.statusbar.res_rect = Some(rr);
                     }
+                    // 클립보드 — 지금 담긴 것의 앞머리. 클립보드는 보이지 않는
+                    // 그릇이라, 붙여넣기 전까지 무엇이 들었는지 알 수가 없다. 칩이
+                    // 그걸 늘 보이게 하고, 누르면 지나간 것들이 펼쳐진다(2026-09-06
+                    // 지시: 「하단바에 만들자 클립보드기능 — 최근 복사한 것들 목록」).
+                    //
+                    // 목록이 비었으면 칩도 없다 — 아무것도 복사한 적 없는 창에서
+                    // 빈 아이콘이 자리만 먹는다.
+                    self.statusbar.clip_rect = None;
+                    {
+                        let head = crate::clipboard::history()
+                            .first()
+                            .map(|t| crate::clipboard::preview(t, 18))
+                            .unwrap_or_default();
+                        if !head.is_empty() {
+                            let icon = 12.0_f32;
+                            let gap = 4.0_f32;
+                            let lw = g.measure_chrome_text(&head, fs, false);
+                            let seg = icon + gap + lw;
+                            rx -= seg + 12.0;
+                            let open = matches!(
+                                self.statusbar.popover,
+                                Some((state::StatusbarPopover::Clipboard, _))
+                            );
+                            let col = if open { theme::text() } else { theme::text_dim() };
+                            g.queue_icon("clipboard", rx, sy + (status_h - icon) / 2.0, icon, col);
+                            g.draw_text(
+                                rx + icon + gap,
+                                ty,
+                                &head,
+                                gpu::DrawOpts {
+                                    font_size: fs,
+                                    color: col,
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                            let cr = (rx - 6.0, sy, seg + 12.0, status_h);
+                            {
+                                let (hx, hy) = self.cursor_px;
+                                g.hover_pointer |= hx >= cr.0
+                                    && hx <= cr.0 + cr.2
+                                    && hy >= cr.1
+                                    && hy <= cr.1 + cr.3;
+                            }
+                            self.statusbar.clip_rect = Some(cr);
+                        }
+                    }
                     // 포트 — 열려 있는 워크스페이스 포트 **개수**다. 예전엔 이 앱의
                     // `:8765` 만 적었는데, 그건 이미 알고 있는 값이라 자리를 쓰면서
                     // 아무것도 안 알렸다. 개수는 "지금 뭔가 떠 있나" 에 답하고, 눌러

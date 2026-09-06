@@ -636,6 +636,13 @@ impl App {
                 self.save_session_state();
             }
         }
+        // 사람이 Cmd+C 로 복사한 것도 목록에 담는다 — 캐릭터가 넣은 것만 쌓으면
+        // 「최근 복사한 것」이라는 이름이 거짓이 된다. 클립보드 읽기는 싸지만 매
+        // 프레임 할 일은 아니라 이 틱(≥300ms)에 얹는다. 목록이 늘었을 때만 다시
+        // 그린다 — 노는 화면이 계속 깨어나지 않게.
+        if crate::clipboard::poll() {
+            self.chrome_dirty = true;
+        }
         // 닫아 둔 pane 의 유휴도 같은 박자로 본다 — 판정 재료(`term_is_working`)가
         // 같으니, 화면에서 뗀 pane 만 따로 스캔할 이유가 없다.
         self.reap_idle_closed_panes();

@@ -53,6 +53,92 @@ pub(crate) fn paint_popover(
         state::StatusbarPopover::Usage => {
             paint_usage_popover(g, sb, view, cursor, anchor, win_w, win_h)
         }
+        state::StatusbarPopover::Clipboard => {
+            paint_clipboard_popover(g, sb, cursor, anchor, win_w, win_h)
+        }
+    }
+}
+
+/// 최근 복사한 것들 — 골라서 다시 클립보드에 올린다.
+///
+/// 클립보드는 한 칸짜리 그릇이라 다음 복사가 앞의 것을 지운다. 그 사고는 조용해서
+/// 붙여넣어 봐야 알고, 그때는 이미 잃은 뒤다. 여기서는 지나간 것이 남아 있어 되찾을 수
+/// 있다(2026-09-06 지시).
+///
+/// 줄은 **한 줄로 눕혀** 보인다. 목록은 내용을 알아보는 자리지 읽는 자리가 아니고, 화면
+/// 한 판을 복사한 칸이 목록을 통째로 밀어내면 고르는 일이 붙여넣기보다 오래 걸린다.
+fn paint_clipboard_popover(
+    g: &mut gpu::GpuRenderer,
+    sb: &mut state::StatusbarState,
+    cursor: (f32, f32),
+    anchor: (f32, f32, f32, f32),
+    win_w: f32,
+    win_h: f32,
+) {
+    const HEAD_H: f32 = 34.0;
+    const ROW: f32 = 26.0;
+    let items = crate::clipboard::history();
+    let w = 360.0_f32.min(win_w - 16.0);
+    // 창이 낮으면 목록을 잘라서라도 팝오버가 화면 밖으로 나가지 않게 한다 — 나가면
+    // 아래쪽 줄은 눌러 볼 수조차 없다.
+    let room = ((win_h - 24.0 - HEAD_H) / ROW).floor().max(1.0) as usize;
+    let shown = items.len().min(room);
+    let h = HEAD_H + ROW * shown as f32 + 8.0;
+    let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
+    let y = (anchor.1 - h - 6.0).max(8.0);
+    sb.popover_rect = Some((x, y, w, h));
+    panel_rect_outlined(g, x, y, w, h, theme::radius_md(), theme::surface());
+
+    g.draw_text(
+        x + 12.0,
+        y + 10.0,
+        "최근 복사",
+        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
+    );
+    // 맨 윗줄이 지금 클립보드에 든 것이다 — 그 사실을 말해 두지 않으면 「고르면 무엇이
+    // 달라지나」가 안 보인다.
+    let hint_w = g.measure_chrome_text("맨 위 = 지금 것", 10.0, false);
+    g.draw_text(
+        x + w - 12.0 - hint_w,
+        y + 12.0,
+        "맨 위 = 지금 것",
+        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+    );
+
+    let mut oy = y + HEAD_H;
+    for (i, text) in items.iter().take(shown).enumerate() {
+        let r = (x + 6.0, oy, w - 12.0, ROW);
+        let hov = hit(cursor, &r);
+        if hov {
+            round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
+        }
+        // 지금 것은 굵게 — 목록에서 눈이 먼저 닿아야 하는 줄이다.
+        g.draw_text(
+            r.0 + 8.0,
+            oy + 7.0,
+            &crate::clipboard::preview(text, 46),
+            gpu::DrawOpts {
+                font_size: 11.0,
+                color: if i == 0 { theme::text() } else { theme::text_dim() },
+                bold: i == 0,
+                italic: false,
+            },
+        );
+        sb.popover_hits.push((state::StatusbarHit::PickClip(i), r));
+        oy += ROW;
+    }
+    if items.is_empty() {
+        g.draw_text(
+            x + 12.0,
+            y + HEAD_H + 4.0,
+            "아직 복사한 것이 없다",
+            gpu::DrawOpts {
+                font_size: 11.0,
+                color: theme::text_mute(),
+                bold: false,
+                italic: false,
+            },
+        );
     }
 }
 
@@ -1144,6 +1230,17 @@ impl crate::App {
                 if let Some(h) = self.statusbar.tunnel_host.clone() {
                     self.copy_to_clipboard(tunnel_url(&h, "/arona-ui/"), "아로나 주소 복사됨");
                 }
+                return true;
+            }
+            Some(state::StatusbarHit::PickClip(i)) => {
+                // 고른 줄을 다시 클립보드로. 무엇을 집었는지 앞머리를 함께 띄운다 —
+                // 목록에서 눈으로 고른 것과 실제로 담긴 것이 같은지는 그렇게만 확인된다.
+                if let Some(text) = crate::clipboard::pick(i) {
+                    self.set_toast(format!("복사됨 · {}", crate::clipboard::preview(&text, 30)));
+                }
+                // 골랐으면 목록은 할 일을 마쳤다 — 붙여넣으러 가는 손이 팝오버를 한 번
+                // 더 닫게 하지 않는다.
+                self.statusbar.popover = None;
                 return true;
             }
             None => {}

@@ -2977,6 +2977,9 @@ impl Backend for PtyBackend {
             .map_err(|e| anyhow::anyhow!("클립보드 쓰기 실패: {e}"))?;
         // 무엇이 담겼는지 앞머리를 함께 띄운다 — 「복사됨」만 뜨면 맞는 것을 담았는지
         // 붙여넣기 전까지 알 수가 없다. 줄바꿈은 한 줄 토스트에서 자리를 먹으니 눕힌다.
+        // 하단바 목록에도 담는다 — 폴링이 어차피 주워 가지만, 그건 다음 틱이라
+        // 그 사이에 목록을 펼치면 방금 넣은 것이 빠져 보인다.
+        crate::clipboard::remember(text);
         let head: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
         let head: String = head.chars().take(36).collect();
         let more = text.chars().count() > head.chars().count();

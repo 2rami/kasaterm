@@ -80,6 +80,8 @@ pub(crate) struct StatusbarState {
     /// (CPU %, RSS bytes). ps 폴이라 5초 박자.
     pub(crate) res: Option<(f32, u64)>,
     pub(crate) res_rect: Option<(f32, f32, f32, f32)>,
+    /// 클립보드 칩(하단바 오른쪽 그룹) — 누르면 최근 복사 목록이 펼쳐진다.
+    pub(crate) clip_rect: Option<(f32, f32, f32, f32)>,
     /// 물리 메모리 압박 — 위의 `res` 와 **다른 것을 잰다**. `res` 는 우리 트리가
     /// 쓰는 양이라 앱을 닫으면 돌아오고, 이쪽은 기계 전체에서 **안 돌아오는**
     /// 몫이다. 그래서 재시작을 권하는 근거는 이쪽뿐이다(2026-08-27 지시).
@@ -139,6 +141,9 @@ pub(crate) enum StatusbarPopover {
     Ports,
     Tunnel,
     Usage,
+    /// 최근 복사한 것들. 클립보드는 한 칸짜리 그릇이라 다음 복사가 앞의 것을 지우는데,
+    /// 그 사고는 붙여넣어 봐야 안다 — 지나간 것을 여기서 골라 되찾는다.
+    Clipboard,
 }
 
 /// 팝오버 행을 눌렀을 때 할 일.
@@ -161,6 +166,8 @@ pub(crate) enum StatusbarHit {
     ToggleTunnel,
     /// 열려 있을 때의 주소를 클립보드로.
     CopyTunnelHost,
+    /// 최근 복사 목록의 한 줄 — 그 글을 다시 클립보드에 올린다.
+    PickClip(usize),
     /// 주소 줄 클릭 — 완성 주소(토큰 포함)를 기본 브라우저로 연다. 복사와 열기
     /// 둘 다 있다(2026-08-17 「누르면 바로 열리게, 복사버튼도 괜찮은데 둘다」).
     OpenTunnelUrl,

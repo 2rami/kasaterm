@@ -5399,6 +5399,13 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    if let Some(r) = self.statusbar.clip_rect {
+                        if sb_hit(&r) {
+                            self.toggle_statusbar_popover(state::StatusbarPopover::Clipboard, r);
+                            window.request_redraw();
+                            return;
+                        }
+                    }
                     if let Some(pid) = self
                         .statusbar
                         .toggle_rects

@@ -1881,7 +1881,11 @@ impl App {
     pub(crate) fn copy_to_clipboard(&mut self, text: String, toast: &str) {
         match arboard::Clipboard::new() {
             Ok(mut cb) => {
-                if cb.set_text(text).is_ok() {
+                if cb.set_text(text.clone()).is_ok() {
+                    // 하단바 목록에도 담는다 — 앱이 넣은 것만 빠지면 「최근 복사한
+                    // 것」에 구멍이 난다(터널 주소를 복사해 두고 다른 것을 복사하면
+                    // 되찾을 길이 없어진다).
+                    crate::clipboard::remember(&text);
                     self.set_toast(toast.to_string());
                 }
             }
