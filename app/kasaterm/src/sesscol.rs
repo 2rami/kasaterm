@@ -278,7 +278,7 @@ pub(crate) fn draw_sessions_col(
         let hov = hit(&r);
         g.hover_pointer |= hov;
         g.queue_icon(
-            "refresh-cw",
+            "rotate-cw",
             r.0,
             r.1,
             15.0,

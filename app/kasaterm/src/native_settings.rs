@@ -4040,8 +4040,34 @@ fn account_group(
         .home_accounts
         .as_ref()
         .filter(|_| provider == AccountProvider::Claude && s.account_scope_home);
-    draw_text(g, x, *y, provider.label(), 13.0, theme::text(), true);
-    *y += 24.0;
+    // 진행 상태는 두 곳에서 온다 — 로컬은 프로세스 셀, 본진은 그 기계가 실어
+    // 보낸 문자열. 화면은 같은 모양으로 그린다. 머리에서 미리 재는 것은 로그인이
+    // 도는 동안 「계정 추가」를 감추기 위해서다 — 시작 단추와 진행 안내가 한
+    // 화면에 함께 서면 어느 쪽이 지금인지 읽히지 않는다.
+    let local_state = s.login_job.as_ref().map(|job| &job.state);
+    let needs_code = match home {
+        Some(h) => h.login.as_ref().is_some_and(|(_, st, _)| st == "need_code"),
+        None => local_state == Some(&crate::settings::LoginState::NeedCode),
+    };
+    let running = match home {
+        Some(h) => h.login.as_ref().is_some_and(|(_, st, _)| st == "running"),
+        None => local_state == Some(&crate::settings::LoginState::Running),
+    };
+
+    g.queue_icon(provider.icon(), x, *y - 1.0, 17.0, theme::text());
+    draw_text(g, x + 24.0, *y, provider.label(), 14.5, theme::text(), true);
+    *y += 23.0;
+    let blurb = match provider {
+        AccountProvider::Claude => {
+            "한도가 차면 다음 계정으로 스스로 넘어갑니다. 한 계정만 쓰신다면 더 넣지 않으셔도 됩니다."
+        }
+        AccountProvider::Codex => {
+            "코덱스도 같은 방식으로 여러 계정을 둘 수 있습니다. 인증은 이 기기에 남습니다."
+        }
+    };
+    let blurb = fit(g, blurb, w, 11.0, false);
+    draw_text(g, x, *y, &blurb, 11.0, theme::text_dim(), false);
+    *y += 26.0;
     // 기계를 고르는 두 칸. claude 는 **양쪽에서 돌기 때문에** 한쪽만 보여 주면
     // 하단 상태줄(늘 이 기계 것)과 어긋난다(2026-09-05 거노 「설정창이랑 하단이랑
     // 왜 다른데」). 본진이 없거나 꺼져 있으면 칸을 안 그린다 — 고를 것이 하나뿐인
@@ -4074,10 +4100,41 @@ fn account_group(
             } else {
                 "이 맥북에서 도는 claude 의 계정이에요 — 하단 막대에 뜨는 숫자가 이것".to_string()
             };
-            draw_text(g, x + 2.0, *y, &note, 10.5, theme::text_mute(), false);
-            *y += 20.0;
+            draw_text(g, x, *y, &note, 10.5, theme::text_mute(), false);
+            *y += 24.0;
         }
     }
+
+    // 목록 머리. 추가 단추는 **목록 위 오른쪽** — 새 줄이 어디에 생기는지가
+    // 단추 자리로 설명되고, 계정이 늘어도 단추가 화면 아래로 도망가지 않는다.
+    let add = match provider {
+        AccountProvider::Claude => SettingsAction::AddClaudeAccount,
+        AccountProvider::Codex => SettingsAction::AddCodexAccount,
+    };
+    draw_text(g, x, *y + 5.0, "계정", 12.5, theme::text(), true);
+    if !needs_code && !running {
+        button(
+            g,
+            s,
+            hits,
+            (x + w - 104.0, *y, 104.0, 30.0),
+            "＋ 계정 추가",
+            Target::Setting(add),
+            false,
+        );
+    }
+    *y += 26.0;
+    draw_text(
+        g,
+        x,
+        *y,
+        "한도가 차면 위에서부터 차례로 넘어갑니다",
+        10.5,
+        theme::text_mute(),
+        false,
+    );
+    *y += 22.0;
+
     if let Some(h) = home {
         if let Some(why) = h.error.as_deref() {
             draw_text(g, x + 2.0, *y, why, 10.5, theme::danger(), false);
@@ -4088,7 +4145,7 @@ fn account_group(
                 g,
                 x + 2.0,
                 *y,
-                "아직 등록된 계정이 없어요 — 아래 「계정 추가」로 하나 넣어 주세요",
+                "아직 등록된 계정이 없어요 — 위 「계정 추가」로 하나 넣어 주세요",
                 11.0,
                 theme::text_mute(),
                 false,
@@ -4103,30 +4160,21 @@ fn account_group(
             account_row(g, s, hits, caret, x, y, w, row);
         }
     }
-    // 로그인 진행 상태는 두 곳에서 온다 — 로컬은 프로세스 셀, 본진은 그 기계가
-    // 실어 보낸 문자열. 화면은 같은 모양으로 그린다.
-    let local_state = s.login_job.as_ref().map(|job| &job.state);
-    let needs_code = match home {
-        Some(h) => h.login.as_ref().is_some_and(|(_, st, _)| st == "need_code"),
-        None => local_state == Some(&crate::settings::LoginState::NeedCode),
-    };
-    let running = match home {
-        Some(h) => h.login.as_ref().is_some_and(|(_, st, _)| st == "running"),
-        None => local_state == Some(&crate::settings::LoginState::Running),
-    };
+
     if needs_code {
         // 브라우저가 승인해도 CLI 로 돌아오는 길이 없다 — 화면에 뜬 코드를 여기
         // 붙여넣어야 로그인이 끝난다. 이 칸이 없던 동안 로그인은 전부 실패했다.
+        *y += 4.0;
         draw_text(
             g,
-            x + 2.0,
+            x,
             *y,
             "브라우저에서 「승인」을 누르면 끝나요 — 코드가 보이면 복사만 하셔도 됩니다",
             11.0,
             theme::attention(),
             false,
         );
-        *y += 18.0;
+        *y += 20.0;
         text_field(
             g,
             s,
@@ -4159,8 +4207,10 @@ fn account_group(
             Target::Setting(SettingsAction::CancelLogin),
             false,
         );
+        *y += 42.0;
     } else if running {
-        draw_text(g, x + 2.0, *y + 9.0, "로그인 진행 중", 11.5, theme::text_dim(), false);
+        *y += 4.0;
+        draw_text(g, x, *y + 9.0, "로그인 진행 중", 11.5, theme::text_dim(), false);
         button(
             g,
             s,
@@ -4170,22 +4220,10 @@ fn account_group(
             Target::Setting(SettingsAction::CancelLogin),
             false,
         );
+        *y += 42.0;
     } else {
-        let add = match provider {
-            AccountProvider::Claude => SettingsAction::AddClaudeAccount,
-            AccountProvider::Codex => SettingsAction::AddCodexAccount,
-        };
-        button(
-            g,
-            s,
-            hits,
-            (x, *y, 108.0, 31.0),
-            "계정 추가",
-            Target::Setting(add),
-            false,
-        );
+        *y += 6.0;
     }
-    *y += 42.0;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4203,6 +4241,17 @@ fn account_row(
         .account_label_edit
         .as_ref()
         .is_some_and(|(provider, id, _)| *provider == row.provider && id == &row.id);
+    let busy = s.login_job.as_ref().is_some_and(|job| {
+        matches!(
+            job.state,
+            crate::settings::LoginState::Running | crate::settings::LoginState::NeedCode
+        )
+    }) || s.home_accounts.as_ref().is_some_and(|h| {
+        h.login
+            .as_ref()
+            .is_some_and(|(_, st, _)| st == "running" || st == "need_code")
+    });
+    let show_actions = row.slot && !editing && !busy;
     let rect = (x, *y, w, if editing { 62.0 } else { 54.0 });
     choice_card(
         g,
@@ -4243,95 +4292,154 @@ fn account_row(
             s.settings_caret,
             false,
         );
+        *y += rect.3 + 6.0;
+        return;
+    }
+
+    // 오른쪽 단추 묶음의 폭을 **먼저** 재 둔다 — 이름과 부제가 그 자리를 넘지
+    // 않게 잘라야 하는데, 글자 단추는 라벨 길이에 따라 폭이 달라진다.
+    let w_remove = g.measure_chrome_text("제거", 10.5, false) + 32.0;
+    let w_reauth = g.measure_chrome_text("재인증", 10.5, false) + 32.0;
+    let actions_w = if show_actions {
+        w_remove + w_reauth + 2.0 + 60.0 + 10.0
     } else {
-        let right_reserve = if row.slot { 152.0 } else { 74.0 };
-        let shown = fit(g, &row.name, w - right_reserve, 12.0, false);
-        draw_text(g, rect.0 + 40.0, rect.1 + 8.0, &shown, 12.0, theme::text(), row.active);
-        let home_sub = s.home_accounts.as_ref().and_then(|h| {
-            let (id, state, err) = h.login.as_ref()?;
-            (id == &row.id).then(|| match state.as_str() {
-                "running" => "로그인 진행 중".to_string(),
-                "need_code" => "코드를 기다리는 중".to_string(),
-                "ok" => "로그인을 마쳤어요".to_string(),
-                _ => err.clone().unwrap_or_else(|| "로그인이 실패했어요".to_string()),
-            })
-        });
-        let job_sub = home_sub.or_else(|| s.login_job.as_ref().filter(|job| job.id == row.id).map(|job| {
-            match &job.state {
+        14.0
+    };
+    let text_x = rect.0 + 40.0;
+    let avail = (rect.0 + rect.2 - actions_w - text_x).max(80.0);
+
+    // 첫 줄: 이름 + 「활성」 알약. 카드 테두리 색만으로 지금 쓰이는 줄을 알리던
+    // 것을 낱말로 바꾼다 — 색은 활성과 호버가 서로 비슷해 읽히지 않았다.
+    let badge = if row.active { Some("활성") } else { None };
+    let badge_w = badge
+        .map(|t| g.measure_chrome_text(t, 9.5, false) + 22.0)
+        .unwrap_or(0.0);
+    let shown = fit(g, &row.name, avail - badge_w, 12.0, row.active);
+    let name_w = g.measure_chrome_text(&shown, 12.0, row.active);
+    draw_text(g, text_x, rect.1 + 8.0, &shown, 12.0, theme::text(), row.active);
+    if let Some(t) = badge {
+        pill(g, text_x + name_w + 8.0, rect.1 + 7.0, t, true);
+    }
+
+    // 둘째 줄: 조직·마지막 로그인, 그 뒤에 사용량. 한 줄로 잇는 편이 오른쪽
+    // 빈 자리에 숫자를 따로 띄우는 것보다 시선이 덜 튄다.
+    let home_sub = s.home_accounts.as_ref().and_then(|h| {
+        let (id, state, err) = h.login.as_ref()?;
+        (id == &row.id).then(|| match state.as_str() {
+            "running" => "로그인 진행 중".to_string(),
+            "need_code" => "코드를 기다리는 중".to_string(),
+            "ok" => "로그인을 마쳤어요".to_string(),
+            _ => err.clone().unwrap_or_else(|| "로그인이 실패했어요".to_string()),
+        })
+    });
+    let job_sub = home_sub.or_else(|| {
+        s.login_job
+            .as_ref()
+            .filter(|job| job.id == row.id)
+            .map(|job| match &job.state {
                 crate::settings::LoginState::Running => "로그인 진행 중".to_string(),
                 crate::settings::LoginState::NeedCode => "코드를 기다리는 중".to_string(),
                 crate::settings::LoginState::Ok => "로그인을 마쳤어요".to_string(),
                 crate::settings::LoginState::Err(error) => error.clone(),
-            }
-        }));
-        let sub_value = job_sub.as_deref().unwrap_or(&row.sub);
-        if !sub_value.is_empty() {
-            let sub = fit(g, sub_value, w - right_reserve, 10.5, false);
-            draw_text(
-                g,
-                rect.0 + 40.0,
-                rect.1 + 29.0,
-                &sub,
-                10.5,
-                if row.sub_kind == "danger" { theme::danger() } else { theme::text_mute() },
-                false,
-            );
-        }
-        if let Some(usage) = row.usage.as_ref() {
-            let resets = crate::resets_in_label(usage.resets_at)
-                .map(|value| format!(" · {value}"))
-                .unwrap_or_default();
-            draw_text(
-                g,
-                rect.0 + rect.2 - if row.slot { 232.0 } else { 96.0 },
-                rect.1 + 20.0,
-                &format!("{}{:.0}%{resets}", if usage.stale { "~" } else { "" }, usage.pct),
-                10.5,
-                if usage.pct >= 90.0 { theme::danger() } else if usage.pct >= 70.0 { theme::attention() } else { theme::text_mute() },
-                false,
-            );
-        }
-    }
-    let busy = s.login_job.as_ref().is_some_and(|job| {
-        matches!(
-            job.state,
-            crate::settings::LoginState::Running | crate::settings::LoginState::NeedCode
-        )
-    }) || s.home_accounts.as_ref().is_some_and(|h| {
-        h.login
-            .as_ref()
-            .is_some_and(|(_, st, _)| st == "running" || st == "need_code")
+            })
     });
-    if row.slot && !editing && !busy {
-        let rename = (rect.0 + rect.2 - 131.0, rect.1 + 14.0, 24.0, 24.0);
-        let reauth = (rect.0 + rect.2 - 101.0, rect.1 + 14.0, 24.0, 24.0);
-        let isolated = (rect.0 + rect.2 - 71.0, rect.1 + 14.0, 24.0, 24.0);
-        let remove = (rect.0 + rect.2 - 41.0, rect.1 + 14.0, 24.0, 24.0);
-        mini_icon_button(
+    let usage = row.usage.as_ref().map(|usage| {
+        let resets = crate::resets_in_label(usage.resets_at)
+            .map(|value| format!(" · {value}"))
+            .unwrap_or_default();
+        (
+            format!(
+                "{}{:.0}%{resets}",
+                if usage.stale { "~" } else { "" },
+                usage.pct
+            ),
+            usage.pct,
+        )
+    });
+    let usage_w = usage
+        .as_ref()
+        .map(|(t, _)| g.measure_chrome_text(t, 10.5, false) + 10.0)
+        .unwrap_or(0.0);
+    let sub_value = job_sub.as_deref().unwrap_or(&row.sub);
+    let mut sub_x = text_x;
+    if !sub_value.is_empty() {
+        let sub = fit(g, sub_value, avail - usage_w, 10.5, false);
+        let drawn = g.measure_chrome_text(&sub, 10.5, false);
+        draw_text(
             g,
-            s,
-            hits,
-            rename,
-            "edit-3",
-            Target::Setting(SettingsAction::FocusAccountLabel(row.provider, row.id.clone())),
+            sub_x,
+            rect.1 + 29.0,
+            &sub,
+            10.5,
+            if row.sub_kind == "danger" {
+                theme::danger()
+            } else {
+                theme::text_mute()
+            },
+            false,
         );
-        mini_icon_button(
+        sub_x += drawn + 10.0;
+    }
+    if let Some((text, pct)) = usage.as_ref() {
+        draw_text(
+            g,
+            sub_x,
+            rect.1 + 29.0,
+            text,
+            10.5,
+            if *pct >= 90.0 {
+                theme::danger()
+            } else if *pct >= 70.0 {
+                theme::attention()
+            } else {
+                theme::text_dim()
+            },
+            false,
+        );
+    }
+
+    if show_actions {
+        let by = rect.1 + (rect.3 - 26.0) / 2.0;
+        let mut rx = rect.0 + rect.2 - 8.0 - w_remove;
+        let action = match row.provider {
+            AccountProvider::Claude => SettingsAction::RemoveClaudeAccount(row.id.clone()),
+            AccountProvider::Codex => SettingsAction::RemoveCodexAccount(row.id.clone()),
+        };
+        mini_text_button(
             g,
             s,
             hits,
-            reauth,
-            "refresh-cw",
+            rx,
+            by,
+            "trash-2",
+            "제거",
+            Target::Setting(action),
+            true,
+        );
+        rx -= w_reauth + 2.0;
+        mini_text_button(
+            g,
+            s,
+            hits,
+            rx,
+            by,
+            "rotate-cw",
+            "재인증",
             Target::Setting(SettingsAction::ReauthAccount(
                 row.provider,
                 row.id.clone(),
                 settings::LoginBrowser::Default,
             )),
+            false,
         );
+        // 별명과 격리 로그인은 어쩌다 한 번이라 아이콘으로 남긴다 — 글자까지
+        // 세우면 이름이 들어갈 자리가 사라진다.
+        rx -= 30.0;
         mini_icon_button(
             g,
             s,
             hits,
-            isolated,
+            (rx, by, 26.0, 26.0),
             "shield",
             Target::Setting(SettingsAction::ReauthAccount(
                 row.provider,
@@ -4339,11 +4447,18 @@ fn account_row(
                 settings::LoginBrowser::Isolated,
             )),
         );
-        let action = match row.provider {
-            AccountProvider::Claude => SettingsAction::RemoveClaudeAccount(row.id.clone()),
-            AccountProvider::Codex => SettingsAction::RemoveCodexAccount(row.id.clone()),
-        };
-        mini_icon_button(g, s, hits, remove, "x", Target::Setting(action));
+        rx -= 30.0;
+        mini_icon_button(
+            g,
+            s,
+            hits,
+            (rx, by, 26.0, 26.0),
+            "pencil",
+            Target::Setting(SettingsAction::FocusAccountLabel(
+                row.provider,
+                row.id.clone(),
+            )),
+        );
     }
     *y += rect.3 + 6.0;
 }
@@ -4932,6 +5047,86 @@ fn mini_icon_button(
         },
     );
     register_clipped(g, hits, target, rect, HitCursor::Pointer);
+}
+
+/// 이름 옆에 붙는 알약. 상태를 한 낱말로 못박아 두면 어느 줄이 지금 쓰이는
+/// 것인지 카드 테두리 색을 해석하지 않고도 읽힌다.
+fn pill(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str, accent: bool) -> f32 {
+    let f = 9.5;
+    let w = g.measure_chrome_text(text, f, false) + 14.0;
+    round_rect(
+        g,
+        x,
+        y,
+        w,
+        17.0,
+        8.5,
+        if accent {
+            theme::surface_active()
+        } else {
+            theme::surface_hover()
+        },
+    );
+    draw_text(
+        g,
+        x + 7.0,
+        y + 4.0,
+        text,
+        f,
+        if accent {
+            theme::accent()
+        } else {
+            theme::text_mute()
+        },
+        false,
+    );
+    w
+}
+
+/// 아이콘만 있는 단추는 뜻을 모른 채 나란히 서면 누르기가 무섭다 — 계정 줄처럼
+/// 되돌리기 어려운 것이 섞인 자리에서는 글자를 함께 세운다. 폭을 돌려주므로
+/// 오른쪽 끝에서부터 거꾸로 쌓을 수 있다.
+#[allow(clippy::too_many_arguments)]
+fn mini_text_button(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: f32,
+    icon: &str,
+    label: &str,
+    target: Target,
+    danger: bool,
+) -> f32 {
+    let f = 10.5;
+    let w = g.measure_chrome_text(label, f, false) + 32.0;
+    let rect = (x, y, w, 26.0);
+    let hover = contains(rect, s.cursor);
+    if hover {
+        round_rect(
+            g,
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            theme::radius_sm(),
+            theme::surface_active(),
+        );
+    }
+    let col = if hover {
+        if danger {
+            theme::danger()
+        } else {
+            theme::text()
+        }
+    } else {
+        theme::text_mute()
+    };
+    g.queue_icon(icon, x + 8.0, y + 6.5, 13.0, col);
+    draw_text(g, x + 25.0, y + 7.0, label, f, col, false);
+    register_clipped(g, hits, target, rect, HitCursor::Pointer);
+    g.hover_pointer |= hover;
+    w
 }
 
 fn stroke_rect(g: &mut gpu::GpuRenderer, rect: Rect, color: [u8; 4]) {
