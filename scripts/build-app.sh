@@ -95,10 +95,10 @@ fi
 # Build the binaries. Besides kasaterm we bundle kasaterm-cli so a pane can
 # drive siblings via the socket (install_pane_shims stages it on the pane PATH).
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --release -p kasaterm -p kasa-socket -p kasa-mcp --bins
+  cargo build --release -p kasaterm -p kasa-socket -p kasa-mcp -p kasapet --bins
   BINDIR="target/release"
 else
-  cargo build -p kasaterm -p kasa-socket -p kasa-mcp --bins
+  cargo build -p kasaterm -p kasa-socket -p kasa-mcp -p kasapet --bins
   BINDIR="target/debug"
 fi
 
@@ -110,6 +110,11 @@ cp "$BINDIR/kasaterm" "$APP/Contents/MacOS/kasaterm"
 cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
 # 무중단 승격(promote)의 로컬 상주 데몬 — ensure_local_ptyd 가 현재 exe 옆에서 찾는다.
 cp "$BINDIR/kasa-serve-web" "$APP/Contents/MacOS/kasa-serve-web"
+# 바탕화면 펫 — 본체와 별개 프로세스라 kasaterm 이 꺼져도 남는다(toggle_pet 이 여기서 찾는다).
+cp "$BINDIR/kasapet" "$APP/Contents/Resources/kasapet"
+# 모델은 번들에 안 담는다 — Live2D 공식 캐릭터는 재배포가 금지다. 처음 켤 때 이 스크립트가
+# 쓰는 사람 기계로 권리자에게서 직접 받아 온다.
+cp scripts/fetch-pet-model.sh "$APP/Contents/Resources/fetch-pet-model.sh"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # 협업 훅 정본 — claude PATH shim 이 --settings 로 가리키는 스크립트들
 # (locate_collab_hooks_dir 의 번들 경로). install-hooks.sh 배포 불필요.
