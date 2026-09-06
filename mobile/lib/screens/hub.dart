@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../hub_model.dart';
@@ -161,6 +163,15 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
       }
       for (final room in s.rooms) {
         children.add(_RoomHeader(title: room.title));
+        if (room.rects.isNotEmpty) {
+          children.add(
+            _MiniMap(
+              server: widget.server,
+              room: room,
+              onOpen: s.online ? _open : null,
+            ),
+          );
+        }
         for (final p in room.panes) {
           children.add(
             _PaneTile(
@@ -270,6 +281,140 @@ Color? parseHexColor(String? hex) {
   if (h.length != 6) return null;
   final v = int.tryParse(h, radix: 16);
   return v == null ? null : Color(0xff000000 | v);
+}
+
+/// 데스크톱 창을 축소한 지도 — 방 안에서 누가 어디에 어떤 크기로 앉아 있는지.
+/// 칸을 누르면 목록의 타일과 같은 화면으로 간다.
+class _MiniMap extends StatelessWidget {
+  const _MiniMap({required this.server, required this.room, this.onOpen});
+
+  final Server server;
+  final HubRoom room;
+  final void Function(Pane)? onOpen;
+
+  static const _height = 108.0;
+  static const _gap = 1.5;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(2, 0, 2, 8),
+      child: Container(
+        height: _height,
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: LayoutBuilder(
+          builder: (context, box) {
+            final w = box.maxWidth;
+            final h = box.maxHeight;
+            return Stack(
+              children: [
+                for (final r in room.rects)
+                  Positioned(
+                    left: r.x / 100 * w + _gap,
+                    top: r.y / 100 * h + _gap,
+                    width: math.max(0, r.w / 100 * w - _gap * 2),
+                    height: math.max(0, r.h / 100 * h - _gap * 2),
+                    child: _MiniCell(
+                      server: server,
+                      pane: room.paneOf(r.surface),
+                      onOpen: onOpen,
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniCell extends StatelessWidget {
+  const _MiniCell({required this.server, required this.pane, this.onOpen});
+
+  final Server server;
+  final Pane? pane;
+  final void Function(Pane)? onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final p = pane;
+    final accent = p == null
+        ? scheme.outline
+        : (parseHexColor(p.color) ?? scheme.primary);
+    final waiting = p?.isWaiting ?? false;
+    final busy = p?.isBusy ?? false;
+    return LayoutBuilder(
+      builder: (context, box) {
+        final roomy = box.maxWidth >= 64 && box.maxHeight >= 44;
+        final face = math.min(box.maxHeight * 0.55, 30.0);
+        return Material(
+          color: accent.withValues(alpha: waiting ? 0.32 : 0.12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(5),
+            side: BorderSide(
+              color: accent.withValues(alpha: waiting ? 0.9 : 0.45),
+              width: waiting ? 1.5 : 0.8,
+            ),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: p == null || onOpen == null ? null : () => onOpen!(p),
+            child: Stack(
+              children: [
+                Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (p != null && face >= 14)
+                        StudentFace(
+                          slug: p.slug,
+                          url: p.slug == null
+                              ? null
+                              : server.avatar(p.slug!, machine: p.machine),
+                          shell: p.isShell,
+                          size: face,
+                        ),
+                      if (p != null && roomy)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            p.displayName,
+                            style: Theme.of(context).textTheme.labelSmall
+                                ?.copyWith(color: scheme.onSurface),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                if (waiting || busy)
+                  Positioned(
+                    top: 4,
+                    right: 4,
+                    child: Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(
+                        color: waiting ? scheme.primary : accent,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
 }
 
 class _PaneTile extends StatelessWidget {

@@ -2780,6 +2780,16 @@ async fn paste_active_handler(
 /// `GET /layout` — 현재 윈도우의 pane split 배치(% rect 배열, window_layout 재활용).
 /// BA GUI 가 이걸로 터미널 분할을 그대로 미러한 그리드를 그린다(각 pane = 세션 뷰어 칸).
 /// rect 가 이미 % 좌표라 프론트는 position:absolute 로 배치만 하면 된다.
+/// 방(윈도우)마다의 배치 — 폰 허브 미니맵. 보고 있는 방은 `/layout` 과 같은 사각형이고,
+/// 안 보는 방은 데스크톱이 창 크기로 펴 둔 배치의 비율이다.
+async fn windows_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let body = match backend.windows_overview() {
+        Ok(windows) => serde_json::json!({ "ok": true, "windows": windows }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 async fn layout_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     let body = match backend.window_layout() {
         Ok(panes) => serde_json::json!({ "ok": true, "panes": panes }),
@@ -6305,6 +6315,7 @@ pub fn spawn_http_server_opts(
                 let subagent_transcript_raw_backend = backend.clone();
                 let paste_active_backend = backend.clone();
                 let layout_backend = backend.clone();
+                let windows_backend = backend.clone();
                 let send_backend = backend.clone();
                 let mode_get_backend = backend.clone();
                 let focus_backend = backend.clone();
@@ -6417,6 +6428,10 @@ pub fn spawn_http_server_opts(
                     .route(
                         "/layout",
                         get(move || layout_handler(layout_backend.clone())),
+                    )
+                    .route(
+                        "/windows",
+                        get(move || windows_handler(windows_backend.clone())),
                     )
                     .route("/characters", get(characters_handler))
                     .route("/theme-roster", get(theme_roster_handler))

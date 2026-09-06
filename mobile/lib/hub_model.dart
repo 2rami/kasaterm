@@ -6,9 +6,23 @@ import 'package:flutter/services.dart';
 import 'server.dart';
 
 class HubRoom {
-  const HubRoom({required this.title, required this.panes});
+  const HubRoom({
+    required this.title,
+    required this.panes,
+    this.rects = const [],
+  });
   final String title;
   final List<Pane> panes;
+
+  /// 데스크톱에서의 자리 — 비어 있으면 미니맵 없이 목록만.
+  final List<PaneRect> rects;
+
+  Pane? paneOf(String surface) {
+    for (final p in panes) {
+      if (p.id == surface) return p;
+    }
+    return null;
+  }
 }
 
 class HubSection {
@@ -68,13 +82,22 @@ class HubModel extends ChangeNotifier {
       final panes = results[0] as List<Pane>;
       final labels = results[1] as List<String>;
       final machines = results[2] as List<Machine>;
-      final next = <HubSection>[
-        HubSection(machine: null, online: true, rooms: _rooms(panes, labels)),
+      final layouts = await Future.wait([
+        _layoutsOf(null),
         for (final m in machines)
+          m.online ? _layoutsOf(m.label) : Future.value(const <WindowLayout>[]),
+      ]);
+      final next = <HubSection>[
+        HubSection(
+          machine: null,
+          online: true,
+          rooms: rooms(panes, labels, layouts[0]),
+        ),
+        for (var i = 0; i < machines.length; i++)
           HubSection(
-            machine: m.label,
-            online: m.online,
-            rooms: _rooms(m.panes, const []),
+            machine: machines[i].label,
+            online: machines[i].online,
+            rooms: rooms(machines[i].panes, const [], layouts[i + 1]),
           ),
       ];
       _noteWaiting(next);
@@ -113,13 +136,28 @@ class HubModel extends ChangeNotifier {
     if (fresh > 0) HapticFeedback.mediumImpact();
   }
 
+  /// 배치는 곁들이다 — 못 받아도 학생 목록은 그대로 뜬다.
+  Future<List<WindowLayout>> _layoutsOf(String? machine) async {
+    try {
+      return await server.windows(machine: machine);
+    } catch (_) {
+      return const [];
+    }
+  }
+
   static int _rank(Pane p) => p.isWaiting ? 0 : (p.isBusy ? 1 : 2);
 
-  static List<HubRoom> _rooms(List<Pane> panes, List<String> labels) {
+  @visibleForTesting
+  static List<HubRoom> rooms(
+    List<Pane> panes,
+    List<String> labels, [
+    List<WindowLayout> layouts = const [],
+  ]) {
     final byWindow = <int, List<Pane>>{};
     for (final p in panes) {
       byWindow.putIfAbsent(p.window, () => []).add(p);
     }
+    final rectsOf = {for (final l in layouts) l.idx: l.rects};
     final windows = byWindow.keys.toList()..sort();
     return [
       for (final w in windows)
@@ -127,6 +165,7 @@ class HubModel extends ChangeNotifier {
           title: w < labels.length && labels[w].isNotEmpty
               ? labels[w]
               : '방 ${w + 1}',
+          rects: rectsOf[w] ?? const [],
           panes: byWindow[w]!
             ..sort((a, b) {
               final r = _rank(a).compareTo(_rank(b));

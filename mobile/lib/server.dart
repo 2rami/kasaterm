@@ -103,6 +103,56 @@ class Pane {
   );
 }
 
+/// 데스크톱 창 안에서 pane 이 차지하는 자리 — 창 대비 백분율.
+class PaneRect {
+  const PaneRect({
+    required this.surface,
+    required this.x,
+    required this.y,
+    required this.w,
+    required this.h,
+  });
+
+  final String surface;
+  final int x;
+  final int y;
+  final int w;
+  final int h;
+
+  static PaneRect? fromJson(Map<String, Object?> j) {
+    final id = j['surface_id'] as String?;
+    if (id == null) return null;
+    int n(String k) => (j[k] as num?)?.toInt() ?? 0;
+    return PaneRect(surface: id, x: n('x'), y: n('y'), w: n('w'), h: n('h'));
+  }
+}
+
+/// 방(윈도우) 하나의 배치 — 미니맵 재료. `idx` 가 pane 의 `window` 와 맞는다.
+class WindowLayout {
+  const WindowLayout({
+    required this.idx,
+    required this.active,
+    required this.rects,
+  });
+
+  final int idx;
+  final bool active;
+  final List<PaneRect> rects;
+
+  static WindowLayout fromJson(Map<String, Object?> j) {
+    final panes = j['panes'];
+    return WindowLayout(
+      idx: (j['idx'] as num?)?.toInt() ?? 0,
+      active: j['active'] == true,
+      rects: [
+        if (panes is List)
+          for (final p in panes)
+            if (p is Map) ?PaneRect.fromJson(p.cast<String, Object?>()),
+      ],
+    );
+  }
+}
+
 class Machine {
   const Machine({
     required this.label,
@@ -377,6 +427,17 @@ class Server {
     return [
       if (labels is List)
         for (final l in labels) l is String ? l : '',
+    ];
+  }
+
+  /// 방마다의 pane 배치. 서버가 못 주면(옛 버전) 빈 목록 — 허브는 목록만 그린다.
+  Future<List<WindowLayout>> windows({String? machine}) async {
+    final j = await _getJson('windows', machine: machine);
+    final list = j is Map ? j['windows'] : null;
+    return [
+      if (list is List)
+        for (final w in list)
+          if (w is Map) WindowLayout.fromJson(w.cast<String, Object?>()),
     ];
   }
 
