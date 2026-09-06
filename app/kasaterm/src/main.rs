@@ -4178,6 +4178,10 @@ pub(crate) enum SettingsCat {
     /// 보러 온 사람이 모델·effort·추가 인자를 지나 한참 내려가야 했고, 거기서
     /// 하는 일(로그인·제거)은 위쪽 토글들과 되돌리기 무게가 아예 다르다.
     Accounts,
+    /// 기계 — ssh 로 붙는 다른 컴퓨터의 명부. 터미널의 `to <이름>` 이 여기를 읽고,
+    /// 원격 pane·거울도 같은 명부를 쓴다. 손으로 json 을 고치던 것을 화면으로
+    /// 올렸다(2026-09-07 지시).
+    Machines,
     /// 캐릭터 세트 — 로스터·색·그림·persona 를 한 벌로 고르는 곳. 예전엔
     /// `Students`(그림 override 안내 한 줄)였는데, 테마 팩이 생기면서 「누가
     /// 나오는가」를 통째로 정하는 자리가 됐다.
@@ -4196,12 +4200,13 @@ impl SettingsCat {
     /// 웹과의 칸 이름 대조에만 쓴다 — 값을 새로 만들 때 여기 빠뜨리면 그 칸은
     /// 대조에서 통째로 빠지므로, 변형을 더하면 이 배열도 같이 늘려라.
     #[allow(dead_code)]
-    pub(crate) const ALL: [SettingsCat; 8] = [
+    pub(crate) const ALL: [SettingsCat; 9] = [
         Self::General,
         Self::Appearance,
         Self::Shell,
         Self::Claude,
         Self::Accounts,
+        Self::Machines,
         Self::Theme,
         Self::Students,
         Self::Feedback,
@@ -4218,6 +4223,7 @@ impl SettingsCat {
             Self::Shell => "shell",
             Self::Claude => "claude",
             Self::Accounts => "accounts",
+            Self::Machines => "machines",
             Self::Theme => "theme",
             Self::Students => "students",
             Self::Feedback => "feedback",
@@ -4269,6 +4275,8 @@ pub(crate) enum SettingsInput {
     ThemeGenKey,
     /// 커스텀 팔레트 표시명. 대상 slug 는 `App.custom_theme_label_edit` 이 든다.
     CustomThemeLabel,
+    /// 기계 명부의 이름·ssh 칸. 어느 줄의 어느 칸인지는 `App.machine_edit` 이 든다.
+    MachineField,
     /// Agent 계정 별명. 제공자와 슬롯 id 는 `App.account_label_edit` 이 든다.
     AccountLabel,
     /// 로그인 중인 슬롯에 붙여넣는 OAuth 코드. 어느 슬롯인지는 진행 중인 로그인
@@ -4377,6 +4385,12 @@ pub(crate) enum SettingsAction {
     RemoveClaudeAccount(String),
     /// 한도가 차면 다음 계정으로 알아서 넘어가는 스위치.
     ToggleAccountAutoswitch,
+    /// 기계 명부에 빈 줄을 하나 붙이고 그 이름 칸에 커서를 둔다.
+    AddMachine,
+    /// 기계 명부에서 그 줄을 지운다.
+    RemoveMachine(usize),
+    /// 그 줄의 칸을 고치기 시작한다 — `true` 면 ssh 칸.
+    FocusMachineField(usize, bool),
     /// 하단바에 **안 쓰는 계정의 한도까지** 세우는 스위치.
     /// 그 전환을 부르는 사용률(%).
     AccountAutoswitchPct(u32),
@@ -5436,6 +5450,8 @@ struct App {
     custom_theme_label_edit: Option<(String, String)>,
     /// `(제공자, 슬롯 id, 편집 버퍼)`.
     account_label_edit: Option<(AccountProvider, String, String)>,
+    /// 기계 명부에서 지금 고치는 칸 — (줄 번호, ssh 칸인가, 버퍼).
+    machine_edit: Option<(usize, bool, String)>,
     /// 로그인 중인 슬롯에 붙여넣는 OAuth 코드 버퍼. 진행 중인 로그인은 한 건뿐이라
     /// 슬롯 id 를 함께 들 필요가 없다.
     login_code_edit: String,
@@ -5938,6 +5954,7 @@ impl App {
             theme_label_edit: None,
             custom_theme_label_edit: None,
             account_label_edit: None,
+            machine_edit: None,
             login_code_edit: String::new(),
             settings_caret: 0,
             window_frame_save_due: None,

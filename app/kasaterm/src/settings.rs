@@ -220,6 +220,29 @@ impl App {
 
     /// 붙여넣은 OAuth 코드를 로그인 중인 CLI 로 보낸다. 엔터와 「확인」 버튼이 같은
     /// 길을 탄다.
+    /// 고치던 기계 칸을 명부에 되쓴다. **다른 필드는 손대지 않는다** — 손으로 적은
+    /// 옛 항목(터널 설정이 딸린 것)이 있어서, 화면이 아는 두 칸만 갈아 끼우고
+    /// 나머지는 읽은 그대로 되돌려 쓴다.
+    pub(crate) fn flush_machine_field(&mut self) {
+        let Some((idx, ssh, value)) = self.machine_edit.take() else {
+            return;
+        };
+        let value = value.trim().to_string();
+        let mut list = kasa_mcp::machines::entries();
+        let Some(entry) = list.get_mut(idx).and_then(|e| e.as_object_mut()) else {
+            return;
+        };
+        let key = if ssh { "ssh" } else { "label" };
+        if entry.get(key).and_then(|v| v.as_str()).unwrap_or_default() == value {
+            return;
+        }
+        entry.insert(key.to_string(), serde_json::Value::String(value));
+        if kasa_mcp::machines::save_entries(&list).is_err() {
+            self.set_toast("명부를 저장하지 못했어요".to_string());
+        }
+        self.chrome_dirty = true;
+    }
+
     pub(crate) fn submit_login_code_field(&mut self) {
         let code = self.login_code_edit.trim().to_string();
         if code.is_empty() {
@@ -1021,6 +1044,57 @@ impl App {
                     self.account_label_edit = Some((provider, id, label));
                     self.settings_input = Some(SettingsInput::AccountLabel);
                 }
+            }
+            SettingsAction::AddMachine => {
+                let mut list = kasa_mcp::machines::entries();
+                let idx = list.len();
+                list.push(serde_json::json!({ "label": "", "ssh": "" }));
+                if kasa_mcp::machines::save_entries(&list).is_ok() {
+                    self.settings_caret = 0;
+                    self.machine_edit = Some((idx, false, String::new()));
+                    self.settings_input = Some(SettingsInput::MachineField);
+                } else {
+                    self.set_toast("명부를 저장하지 못했어요".to_string());
+                }
+                self.chrome_dirty = true;
+            }
+            SettingsAction::RemoveMachine(idx) => {
+                let mut list = kasa_mcp::machines::entries();
+                if idx < list.len() {
+                    list.remove(idx);
+                    if kasa_mcp::machines::save_entries(&list).is_err() {
+                        self.set_toast("명부를 저장하지 못했어요".to_string());
+                    }
+                }
+                self.machine_edit = None;
+                self.settings_input = None;
+                self.chrome_dirty = true;
+            }
+            SettingsAction::FocusMachineField(idx, ssh) => {
+                // 고치기 전에 열려 있던 칸을 먼저 확정한다 — 안 그러면 옆 칸을
+                // 누르는 것만으로 방금 친 글자가 사라진다.
+                if self.machine_edit.is_some() {
+                    self.flush_machine_field();
+                }
+                let key = if ssh { "ssh" } else { "label" };
+                // ssh 칸은 옛 항목의 `host` 도 초기값으로 받는다 — 빈칸으로 열면
+                // 사람이 이미 적어 둔 주소를 다시 치게 된다.
+                let entries = kasa_mcp::machines::entries();
+                let entry = entries.get(idx);
+                let value = entry
+                    .and_then(|e| e.get(key))
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.is_empty())
+                    .or_else(|| {
+                        ssh.then(|| entry.and_then(|e| e.get("host")).and_then(|v| v.as_str()))
+                            .flatten()
+                    })
+                    .unwrap_or_default()
+                    .to_string();
+                self.settings_caret = value.chars().count();
+                self.machine_edit = Some((idx, ssh, value));
+                self.settings_input = Some(SettingsInput::MachineField);
+                self.chrome_dirty = true;
             }
             SettingsAction::RemoveClaudeAccount(id) => {
                 self.set_claude_accounts.retain(|a| a.id != id);

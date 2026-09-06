@@ -527,6 +527,7 @@ pub(crate) struct Snapshot {
     pub(crate) account_autoswitch_pct: f32,
     pub(crate) accounts: Arc<Vec<AccountChoice>>,
     pub(crate) account_label_edit: Option<(AccountProvider, String, String)>,
+    pub(crate) machine_edit: Option<(usize, bool, String)>,
     pub(crate) login_job: Option<crate::settings::LoginJob>,
     /// 로그인이 코드를 기다릴 때 그 칸에 든 값.
     pub(crate) login_code: String,
@@ -718,6 +719,7 @@ impl App {
             account_autoswitch_pct: self.set_account_autoswitch_pct,
             accounts: cache.accounts.clone(),
             account_label_edit: self.account_label_edit.clone(),
+            machine_edit: self.machine_edit.clone(),
             login_job: crate::settings::hidden_login_job(),
             login_code: self.login_code_edit.clone(),
             home_accounts: home_accounts_view(),
@@ -955,6 +957,8 @@ impl App {
             }
             SettingsInput::CustomThemeLabel
             | SettingsInput::AccountLabel
+            | SettingsInput::MachineField
+            | SettingsInput::MachineField
             | SettingsInput::LoginCode => {
                 self.settings_caret = self
                     .native_settings_field_value(field)
@@ -1030,6 +1034,13 @@ impl App {
                     .unwrap_or_default(),
                 self.settings_caret,
             ),
+            SettingsInput::MachineField => (
+                self.machine_edit
+                    .as_ref()
+                    .map(|(_, _, value)| value.clone())
+                    .unwrap_or_default(),
+                self.settings_caret,
+            ),
             SettingsInput::LoginCode => (self.login_code_edit.clone(), self.settings_caret),
             SettingsInput::ThemeLabel => (
                 self.theme_label_edit
@@ -1088,6 +1099,11 @@ impl App {
             }
             SettingsInput::AccountLabel => {
                 if let Some((_, _, buffer)) = self.account_label_edit.as_mut() {
+                    crate::lineedit::insert(buffer, &mut self.settings_caret, text);
+                }
+            }
+            SettingsInput::MachineField => {
+                if let Some((_, _, buffer)) = self.machine_edit.as_mut() {
                     crate::lineedit::insert(buffer, &mut self.settings_caret, text);
                 }
             }
@@ -1153,6 +1169,9 @@ impl App {
             self.flush_account_label();
             self.refresh_native_settings_dynamic_cache();
         }
+        if self.settings_input == Some(SettingsInput::MachineField) {
+            self.flush_machine_field();
+        }
         if self.settings_input == Some(SettingsInput::LoginCode) {
             self.submit_login_code_field();
         }
@@ -1191,6 +1210,11 @@ impl App {
             }
             SettingsInput::AccountLabel => {
                 if let Some((_, _, value)) = self.account_label_edit.as_mut() {
+                    *value = backup.value;
+                }
+            }
+            SettingsInput::MachineField => {
+                if let Some((_, _, value)) = self.machine_edit.as_mut() {
                     *value = backup.value;
                 }
             }
@@ -1240,6 +1264,7 @@ impl App {
             Some(SettingsInput::ThemeLabel) => self.theme_label_edit = None,
             Some(SettingsInput::CustomThemeLabel) => self.custom_theme_label_edit = None,
             Some(SettingsInput::AccountLabel) => self.account_label_edit = None,
+            Some(SettingsInput::MachineField) => self.machine_edit = None,
             // 코드는 지우지 않는다 — 붙여넣다 esc 를 눌러도 다시 치게 하지 않는다.
             Some(SettingsInput::LoginCode) => {}
             _ => {}
@@ -1804,6 +1829,10 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
             .account_label_edit
             .as_mut()
             .map(|(_, _, buffer)| (buffer, &mut app.settings_caret)),
+        SettingsInput::MachineField => app
+            .machine_edit
+            .as_mut()
+            .map(|(_, _, buffer)| (buffer, &mut app.settings_caret)),
         SettingsInput::ThemeLabel => app
             .theme_label_edit
             .as_mut()
@@ -1998,6 +2027,15 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             content_w,
         ),
         SettingsCat::Accounts => paint_accounts(
+            g,
+            snapshot,
+            &mut hits,
+            &mut caret_rect,
+            content_x,
+            &mut y,
+            content_w,
+        ),
+        SettingsCat::Machines => paint_machines(
             g,
             snapshot,
             &mut hits,
@@ -3140,6 +3178,291 @@ fn paint_accounts(
         );
         *y += 48.0;
     }
+}
+
+/// 명부 한 줄을 화면에 옮긴 것. 파일 형식(다른 필드가 여럿 딸린 json)을 그대로
+/// 들고 다니지 않는 것은, 화면이 만지는 것이 이름과 ssh 두 칸뿐이고 나머지는
+/// **손대지 않고 되돌려 써야** 하기 때문이다 — 손으로 적은 옛 항목이 있다.
+pub(crate) struct MachineRow {
+    pub(crate) label: String,
+    pub(crate) ssh: String,
+    pub(crate) status: String,
+    pub(crate) online: bool,
+}
+
+/// 명부와 그 연결 상태를 합쳐 읽는다. 파일과 잠금을 매 프레임 건드리지 않게 잠깐
+/// 쥐고 있는다 — 이 화면은 크롬이라 pane 이 출력하는 동안에도 계속 돈다.
+fn machines_view() -> Vec<MachineRow> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    type Cache = Mutex<Option<(Instant, Vec<MachineRow>)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE.get_or_init(Cache::default);
+    if let Ok(g) = cache.lock() {
+        if let Some((at, rows)) = g.as_ref() {
+            if at.elapsed() < Duration::from_secs(2) {
+                return rows
+                    .iter()
+                    .map(|r| MachineRow {
+                        label: r.label.clone(),
+                        ssh: r.ssh.clone(),
+                        status: r.status.clone(),
+                        online: r.online,
+                    })
+                    .collect();
+            }
+        }
+    }
+    let live = kasa_mcp::machines::snapshot();
+    let rows: Vec<MachineRow> = kasa_mcp::machines::entries()
+        .iter()
+        .map(|e| {
+            let label = e.get("label").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            // 손으로 적은 옛 항목은 ssh 대신 `host` 에 주소를 두고 `base` 로
+            // 터널을 따로 든다. 그걸 「비어 있다」고 하면 멀쩡히 붙어 있는 기계에
+            // 붉은 경고가 뜬다 — 실제로 어디로 붙는지를 적는다.
+            let ssh = e
+                .get("ssh")
+                .or_else(|| e.get("host"))
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    e.get("base")
+                        .and_then(|v| v.as_str())
+                        .map(|b| format!("{b} (직접 적은 주소)"))
+                })
+                .unwrap_or_default();
+            let hit = live
+                .iter()
+                .find(|m| m.get("label").and_then(|v| v.as_str()) == Some(label.as_str()));
+            let online = hit
+                .and_then(|m| m.get("online"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // 「언제 마지막으로 닿았나」는 「지금 되나」와 다른 물음이다 — 안 닿는
+            // 기계가 5분 전엔 됐다는 것과 한 번도 안 됐다는 것은 할 일이 다르다.
+            let ago = hit.and_then(|m| m.get("ago_secs")).and_then(|v| v.as_u64());
+            let status = if online {
+                "연결됨".to_string()
+            } else {
+                match ago {
+                    Some(sec) if sec < 90 => "방금 끊김".to_string(),
+                    Some(sec) if sec < 3600 => format!("{}분 전", sec / 60),
+                    Some(sec) => format!("{}시간 전", sec / 3600),
+                    None => "아직 안 닿음".to_string(),
+                }
+            };
+            MachineRow { label, ssh, status, online }
+        })
+        .collect();
+    if let Ok(mut g) = cache.lock() {
+        *g = Some((
+            Instant::now(),
+            rows.iter()
+                .map(|r| MachineRow {
+                    label: r.label.clone(),
+                    ssh: r.ssh.clone(),
+                    status: r.status.clone(),
+                    online: r.online,
+                })
+                .collect(),
+        ));
+    }
+    rows
+}
+
+/// 기계 칸. 계정 칸과 같은 모양이다 — 목록 머리에 추가 단추, 줄마다 고치기와
+/// 지우기. 손으로 json 을 고치던 것을 여기로 올렸다(2026-09-07 지시).
+fn paint_machines(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    let rows = machines_view();
+    draw_text(
+        g,
+        x,
+        *y,
+        "터미널에서 `to <이름>` 으로 오갑니다 — `to` 만 치면 목록이 나옵니다",
+        11.0,
+        theme::text_dim(),
+        false,
+    );
+    *y += 30.0;
+    draw_text(g, x, *y + 5.0, "명부", 12.5, theme::text(), true);
+    button(
+        g,
+        s,
+        hits,
+        (x + w - 104.0, *y, 104.0, 30.0),
+        "＋ 기계 추가",
+        Target::Setting(SettingsAction::AddMachine),
+        false,
+    );
+    *y += 26.0;
+    draw_text(
+        g,
+        x,
+        *y,
+        "이름과 ssh 대상만 적으면 됩니다 — 나머지는 앱이 채웁니다",
+        10.5,
+        theme::text_mute(),
+        false,
+    );
+    *y += 22.0;
+    if rows.is_empty() {
+        draw_text(
+            g,
+            x,
+            *y,
+            "아직 등록된 기계가 없어요 — 위 「기계 추가」로 하나 넣어 주세요",
+            11.0,
+            theme::text_mute(),
+            false,
+        );
+        *y += 24.0;
+    }
+    for (i, m) in rows.iter().enumerate() {
+        machine_row(g, s, hits, caret, x, y, w, i, m);
+    }
+    *y += 8.0;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn machine_row(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    idx: usize,
+    m: &MachineRow,
+) {
+    let editing = s.machine_edit.as_ref().filter(|(i, _, _)| *i == idx);
+    let rect = (x, *y, w, 54.0);
+    round_rect(
+        g,
+        rect.0,
+        rect.1,
+        rect.2,
+        rect.3,
+        theme::radius_md(),
+        if contains(rect, s.cursor) {
+            theme::surface_hover()
+        } else {
+            theme::surface()
+        },
+    );
+    stroke_rect(g, rect, theme::border());
+    g.queue_icon(
+        "server",
+        rect.0 + 12.0,
+        rect.1 + 18.0,
+        17.0,
+        if m.online {
+            theme::accent()
+        } else {
+            theme::text_mute()
+        },
+    );
+
+    let w_del = g.measure_chrome_text("삭제", 10.5, false) + 32.0;
+    let text_x = rect.0 + 40.0;
+    let field_w = ((rect.2 - w_del - 24.0 - (text_x - rect.0)) / 2.0 - 8.0).max(110.0);
+    match editing {
+        // 고치는 중에는 두 칸을 나란히 — 이름만 고치고 ssh 를 못 고치면 결국
+        // 파일을 열게 된다.
+        Some((_, ssh_field, value)) => {
+            text_field(
+                g,
+                s,
+                hits,
+                caret,
+                text_x,
+                rect.1 + 12.0,
+                field_w,
+                "이름",
+                if *ssh_field { &m.label } else { value },
+                SettingsInput::MachineField,
+                s.settings_caret,
+                false,
+            );
+            text_field(
+                g,
+                s,
+                hits,
+                caret,
+                text_x + field_w + 12.0,
+                rect.1 + 12.0,
+                field_w,
+                "user@host",
+                if *ssh_field { value } else { &m.ssh },
+                SettingsInput::MachineField,
+                s.settings_caret,
+                false,
+            );
+        }
+        None => {
+            let avail = rect.2 - w_del - 24.0 - (text_x - rect.0);
+            let name = fit(g, &m.label, avail - 90.0, 12.0, true);
+            draw_text(g, text_x, rect.1 + 8.0, &name, 12.0, theme::text(), true);
+            let nw = g.measure_chrome_text(&name, 12.0, true);
+            pill(g, text_x + nw + 8.0, rect.1 + 7.0, &m.status, m.online);
+            let ssh = if m.ssh.is_empty() {
+                "ssh 대상이 비어 있어요".to_string()
+            } else {
+                fit(g, &m.ssh, avail, 10.5, false)
+            };
+            draw_text(
+                g,
+                text_x,
+                rect.1 + 29.0,
+                &ssh,
+                10.5,
+                if m.ssh.is_empty() {
+                    theme::danger()
+                } else {
+                    theme::text_mute()
+                },
+                false,
+            );
+            // 줄 아무 데나 누르면 이름 칸부터 고친다 — 연필을 따로 찾지 않아도 된다.
+            register_clipped(
+                g,
+                hits,
+                Target::Setting(SettingsAction::FocusMachineField(idx, false)),
+                (rect.0, rect.1, rect.2 - w_del - 34.0, rect.3),
+                HitCursor::Pointer,
+            );
+            mini_icon_button(
+                g,
+                s,
+                hits,
+                (rect.0 + rect.2 - w_del - 36.0, rect.1 + 14.0, 26.0, 26.0),
+                "pencil",
+                Target::Setting(SettingsAction::FocusMachineField(idx, true)),
+            );
+            mini_text_button(
+                g,
+                s,
+                hits,
+                rect.0 + rect.2 - 8.0 - w_del,
+                rect.1 + 14.0,
+                "trash-2",
+                "삭제",
+                Target::Setting(SettingsAction::RemoveMachine(idx)),
+                true,
+            );
+        }
+    }
+    *y += rect.3 + 6.0;
 }
 
 fn paint_themes(
@@ -4522,6 +4845,11 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
             "계정",
             "users",
             "로그인을 넣고, 한도가 차면 넘어갈 차례를 정합니다",
+        ),
+        SettingsCat::Machines => (
+            "기계",
+            "server",
+            "ssh 로 붙는 다른 컴퓨터를 등록합니다",
         ),
         SettingsCat::Theme => ("테마", "image", "캐릭터 명단과 그림을 한 벌로 갈아낍니다"),
         SettingsCat::Students => ("캐릭터", "users", "한 명씩 이름과 성격, 모델을 고칩니다"),

@@ -20,6 +20,7 @@ export const ko = {
     /// 계정은 제 칸이다(2026-09-06) — 로그인·제거는 위 칸의 토글들과 되돌리기
     /// 무게가 다르고, 계정을 보러 온 사람이 모델 설정을 지나쳐야 했다.
     accounts: '계정',
+    machines: '기계',
     /// 「테마」와 「캐릭터」는 다른 칸이다(2026-08-26 지시) — 앞은 어느 세트를
     /// 쓸지, 뒤는 그 안의 한 명을 어떻게 고칠지. 키가 `theme`/`students` 인 것은
     /// 네이티브 `SettingsCat` 과 짝이라서다.
@@ -37,6 +38,7 @@ export const ko = {
     shell: { title: '셸', hint: '셸과 편집기' },
     claude: { title: 'Agent', hint: '모델과 실행 방식' },
     accounts: { title: '계정', hint: '로그인과 한도가 찼을 때 넘어갈 차례' },
+    machines: { title: '기계', hint: 'ssh 로 붙는 다른 컴퓨터' },
     theme: { title: '테마', hint: '누가 나올지 — 캐릭터 세트와 말투' },
     students: { title: '캐릭터', hint: '캐릭터 한 명씩 — 성격과 모델, 그림' },
     feedback: { title: '피드백', hint: '쓰다가 걸린 것을 남겨 주세요' },
@@ -379,6 +381,7 @@ export const en: Strings = {
     shell: 'Shell',
     claude: 'Agent',
     accounts: 'Accounts',
+    machines: 'Machines',
     theme: 'Themes',
     students: 'Characters',
     feedback: 'Feedback',
@@ -392,6 +395,7 @@ export const en: Strings = {
     shell: { title: 'Shell', hint: 'Shell and editor' },
     claude: { title: 'Agent', hint: 'Model and how it runs' },
     accounts: { title: 'Accounts', hint: 'Sign-ins and the order to fall back through' },
+    machines: { title: 'Machines', hint: 'Other computers reached over ssh' },
     theme: { title: 'Themes', hint: 'Who shows up — character sets and personas' },
     students: { title: 'Characters', hint: 'One at a time — persona, model, and art' },
     feedback: { title: 'Feedback', hint: 'Tell us what tripped you up' },
