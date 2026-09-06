@@ -4146,6 +4146,11 @@ pub(crate) enum SettingsCat {
     Appearance,
     Shell,
     Claude,
+    /// 계정 — claude·codex 로그인을 넣고 갈아 끼우는 곳. `Claude`(모델 기본값)
+    /// 안에 얹혀 있던 것을 제 칸으로 뺐다(2026-09-06 「Orca 랑 똑같이」): 계정을
+    /// 보러 온 사람이 모델·effort·추가 인자를 지나 한참 내려가야 했고, 거기서
+    /// 하는 일(로그인·제거)은 위쪽 토글들과 되돌리기 무게가 아예 다르다.
+    Accounts,
     /// 캐릭터 세트 — 로스터·색·그림·persona 를 한 벌로 고르는 곳. 예전엔
     /// `Students`(그림 override 안내 한 줄)였는데, 테마 팩이 생기면서 「누가
     /// 나오는가」를 통째로 정하는 자리가 됐다.
@@ -4164,11 +4169,12 @@ impl SettingsCat {
     /// 웹과의 칸 이름 대조에만 쓴다 — 값을 새로 만들 때 여기 빠뜨리면 그 칸은
     /// 대조에서 통째로 빠지므로, 변형을 더하면 이 배열도 같이 늘려라.
     #[allow(dead_code)]
-    pub(crate) const ALL: [SettingsCat; 7] = [
+    pub(crate) const ALL: [SettingsCat; 8] = [
         Self::General,
         Self::Appearance,
         Self::Shell,
         Self::Claude,
+        Self::Accounts,
         Self::Theme,
         Self::Students,
         Self::Feedback,
@@ -4184,6 +4190,7 @@ impl SettingsCat {
             Self::Appearance => "appearance",
             Self::Shell => "shell",
             Self::Claude => "claude",
+            Self::Accounts => "accounts",
             Self::Theme => "theme",
             Self::Students => "students",
             Self::Feedback => "feedback",

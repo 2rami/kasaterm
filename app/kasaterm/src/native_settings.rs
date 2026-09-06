@@ -1999,6 +1999,15 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             &mut y,
             content_w,
         ),
+        SettingsCat::Accounts => paint_accounts(
+            g,
+            snapshot,
+            &mut hits,
+            &mut caret_rect,
+            content_x,
+            &mut y,
+            content_w,
+        ),
         SettingsCat::Theme => paint_themes(
             g,
             snapshot,
@@ -3066,14 +3075,19 @@ fn paint_claude(
     );
     *y += 66.0;
 
-    section_title(
-        g,
-        x,
-        *y,
-        "계정 작업대",
-        "고르면 실행 중인 작업을 확인한 뒤 안전하게 갈아낍니다",
-    );
-    *y += 48.0;
+}
+
+/// 계정 칸. 모델 기본값과 한 화면에 있던 것을 뺐다 — 로그인과 제거는 위쪽
+/// 토글들과 되돌리기 무게가 다르고, 계정을 보러 온 사람이 스크롤을 내려야 했다.
+fn paint_accounts(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
     account_group(g, s, hits, caret, x, y, w, AccountProvider::Claude);
     *y += 12.0;
     account_group(g, s, hits, caret, x, y, w, AccountProvider::Codex);
@@ -4515,7 +4529,12 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
         SettingsCat::Claude => (
             "Agent",
             "claude",
-            "모델과 계정, 협업 연결의 기본값을 정합니다",
+            "모델과 협업 연결의 기본값을 정합니다",
+        ),
+        SettingsCat::Accounts => (
+            "계정",
+            "users",
+            "로그인을 넣고, 한도가 차면 넘어갈 차례를 정합니다",
         ),
         SettingsCat::Theme => ("테마", "image", "캐릭터 명단과 그림을 한 벌로 갈아낍니다"),
         SettingsCat::Students => ("캐릭터", "users", "한 명씩 이름과 성격, 모델을 고칩니다"),

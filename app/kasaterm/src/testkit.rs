@@ -1422,6 +1422,7 @@ impl App {
             ("모양", SettingsCat::Appearance),
             ("셸", SettingsCat::Shell),
             ("에이전트", SettingsCat::Claude),
+            ("계정", SettingsCat::Accounts),
             ("테마", SettingsCat::Theme),
             ("캐릭터", SettingsCat::Students),
             ("피드백", SettingsCat::Feedback),
@@ -3124,6 +3125,7 @@ impl App {
             "appearance" => SettingsCat::Appearance,
             "shell" => SettingsCat::Shell,
             "claude" => SettingsCat::Claude,
+            "accounts" => SettingsCat::Accounts,
             "theme" => SettingsCat::Theme,
             // 옛 이름 그대로지만 이제 진짜 자기 칸이 있다(2026-08-26 분리) —
             // 이 env 로 「캐릭터 목록」을 보던 밖의 스크립트는 그대로 맞는 화면에 온다.

@@ -17,6 +17,9 @@ export const ko = {
     /// 이름을 칸 이름으로 쓰면 다른 쪽이 곁방살이로 읽힌다. 키가 `claude` 로
     /// 남은 건 서버 JSON 의 키라서다(네이티브 `SettingsCat::Claude` 와 짝).
     claude: 'Agent',
+    /// 계정은 제 칸이다(2026-09-06) — 로그인·제거는 위 칸의 토글들과 되돌리기
+    /// 무게가 다르고, 계정을 보러 온 사람이 모델 설정을 지나쳐야 했다.
+    accounts: '계정',
     /// 「테마」와 「캐릭터」는 다른 칸이다(2026-08-26 지시) — 앞은 어느 세트를
     /// 쓸지, 뒤는 그 안의 한 명을 어떻게 고칠지. 키가 `theme`/`students` 인 것은
     /// 네이티브 `SettingsCat` 과 짝이라서다.
@@ -374,6 +377,7 @@ export const en: Strings = {
     appearance: 'Appearance',
     shell: 'Shell',
     claude: 'Agent',
+    accounts: 'Accounts',
     theme: 'Themes',
     students: 'Characters',
     feedback: 'Feedback',
