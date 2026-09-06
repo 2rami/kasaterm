@@ -10600,6 +10600,28 @@ impl App {
                 let fs = 11.0_f32;
                 let ty = sy + (status_h - fs) / 2.0 - 1.0;
                 let mut x = 12.0_f32;
+                // 커서가 얹히면 배경이 깔린다 — Orca 세그먼트가 그렇다
+                // (`hover:bg-accent/70`, 앱 번들 실측 2026-09-06). 손모양만으로는
+                // 「눌리는 것」이라는 표시가 약했다.
+                //
+                // **직전 프레임의 자리**로 그린다. 세그먼트 폭은 글자를 다 그린
+                // 뒤에야 확정되는데 배경은 글자보다 먼저 깔려야 해서(나중에 그린
+                // 것이 위로 온다) 이번 프레임 폭을 기다릴 수가 없다. 한 프레임 늦지만
+                // 호버는 이어지는 동작이라 눈에 안 띈다.
+                if let Some(r) = self.status_account_rect {
+                    let (hx, hy) = self.cursor_px;
+                    if hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3 {
+                        round_rect(
+                            g,
+                            r.0,
+                            r.1 + 2.0,
+                            r.2,
+                            (r.3 - 4.0).max(1.0),
+                            theme::radius_sm(),
+                            theme::surface_hover(),
+                        );
+                    }
+                }
                 let seg_x0 = x;
                 // 클로드 로고 — 이 숫자가 「클로드 한도」라는 것을 그림이 먼저
                 // 말한다(2026-08-16 「클로드사용량 로고도 넣어주고」). 계정 이름은
@@ -10630,8 +10652,11 @@ impl App {
                 // 게이지는 Orca 처럼 **항상 중립색**이다. 하단바에서까지 빨갛게 하면
                 // 시야 끝에서 늘 깜빡이는 경고가 되어 오히려 안 보게 된다. 위험은
                 // 숫자 색으로만 말한다(드롭다운·Info pill 과 같은 임계값).
-                const GW: f32 = 40.0;
-                const GH: f32 = 6.0;
+                // Orca 하단바와 **같은 규격**이다(`h-[5px] w-7 rounded-full` — 앱
+                // 번들에서 실측, 2026-09-06 「Orca랑 똑같이 해보라니까」). 전에는
+                // 40x6 각진 막대였는데, 그 차이가 이 줄에서 제일 먼저 눈에 띈다.
+                const GW: f32 = 28.0;
+                const GH: f32 = 5.0;
                 let gy = sy + (status_h - GH) / 2.0;
                 let pct_col = |p: f32| {
                     if p >= 90.0 {
@@ -10717,13 +10742,29 @@ impl App {
                         // 트랙이 보여야 «얼마나 남았나»가 읽힌다 — 채움만 그리면 15%
                         // 짜리 짧은 막대가 어디까지 갈 수 있는 것인지 알 수가 없어서
                         // 그냥 얼룩이 된다(첫 캡처에서 실제로 그랬다).
-                        g.rect(x, gy, GW, GH, theme::with_alpha(theme::text_dim(), 90));
+                        round_rect(
+                            g,
+                            x,
+                            gy,
+                            GW,
+                            GH,
+                            GH / 2.0,
+                            theme::with_alpha(theme::text_dim(), 90),
+                        );
                         // 읽는 중이면 **트랙만**. 빈 트랙은 0% 처럼 보일 수 있지만
                         // 옆의 숫자가 `…` 라 「모른다」로 읽힌다 — 채움을 그리면
                         // 그 순간 옛 숫자가 되살아난다.
                         if let Some(p) = pct {
-                            let fw = (GW * (p / 100.0).clamp(0.0, 1.0)).max(2.0);
-                            g.rect(x, gy, fw, GH, theme::with_alpha(theme::text(), 210));
+                            let fw = (GW * (p / 100.0).clamp(0.0, 1.0)).max(GH);
+                            round_rect(
+                                g,
+                                x,
+                                gy,
+                                fw,
+                                GH,
+                                GH / 2.0,
+                                theme::with_alpha(theme::text(), 210),
+                            );
                         }
                         x += GW + 6.0;
                     }
@@ -14829,9 +14870,9 @@ pub(crate) fn draw_usage_windows(
             },
         );
         let gx = bx + g.measure_chrome_text(label, font, false) + 6.0;
-        g.rect(gx, gy, GW, GH, theme::with_alpha(theme::text_dim(), 0x33));
-        let w = (GW * (pct / 100.0).clamp(0.0, 1.0)).max(1.5);
-        g.rect(gx, gy, w, GH, usage_bar_color(pct));
+        round_rect(g, gx, gy, GW, GH, GH / 2.0, theme::with_alpha(theme::text_dim(), 0x33));
+        let w = (GW * (pct / 100.0).clamp(0.0, 1.0)).max(GH);
+        round_rect(g, gx, gy, w, GH, GH / 2.0, usage_bar_color(pct));
         // stale 은 `~` 로만 말한다 — 색까지 흐리면 「급하지 않다」로 읽힌다.
         let pt = if b.stale {
             format!("~{pct:.0}%")
