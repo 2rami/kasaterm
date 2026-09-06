@@ -1,0 +1,25 @@
+[package]
+name = "kasapet"
+version.workspace = true
+edition.workspace = true
+
+# 바탕화면 펫 — kasaterm 창을 내려도 화면에 남는 별도 실행 파일.
+# 본체와 프로세스를 나눈 이유는 창 수명이 다르기 때문이다: 펫은 앱이 꺼져도
+# 살아 있어야 하고, 앱이 죽었다고 함께 사라지면 「내려도 남는다」가 성립하지 않는다.
+[dependencies]
+# 순수 러스트 Cubism 런타임. wgpu 피처는 **켜지 않는다** — 그쪽은 wgpu 30 을 물어
+# 우리 28 과 타입이 안 맞는다. 파싱·모션·물리만 받고 그리기는 우리가 한다.
+mocari = "0.4"
+wgpu = "28"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+png = "0.17"
+libc = "0.2"
+serde_json = "1"
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSResponder", "NSColor", "NSGraphics", "NSEvent", "NSScreen"] }
+objc2-foundation = "0.3"
