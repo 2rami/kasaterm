@@ -7537,9 +7537,16 @@ impl App {
             // 곧바로 재구성하지 않는다 — 「되살리는 중」을 한 프레임 그린 뒤에
             // 시작해야 그 화면이 멈춘 채로 남는다(위 restore_applying 주석).
             RestoreBtn::Restore => {
+                // 유예를 env 로 늘릴 수 있게 둔 건 이 스플래시를 **눈으로 볼
+                // 방법이 달리 없어서**다. 기본 90ms 는 캡처 한 장으로 잡기엔
+                // 너무 짧고, 늘려 두면 헤드리스 검증이 그 화면을 찍을 수 있다.
+                let hold = std::env::var("KASATERM_RESTORE_DELAY_MS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(90);
                 self.restore_applying = Some((
                     state,
-                    std::time::Instant::now() + std::time::Duration::from_millis(90),
+                    std::time::Instant::now() + std::time::Duration::from_millis(hold),
                 ));
             }
             // 복원을 안 하면 부팅 때 걸어 둔 학생 예약을 푼다 — 두면 새로 쪼개는

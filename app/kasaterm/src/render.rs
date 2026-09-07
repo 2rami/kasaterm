@@ -13506,27 +13506,34 @@ impl App {
                 );
                 restore_btn_hits.push((crate::RestoreBtn::Fresh, (fresh_x, btn_y, btn_w, btn_h)));
             }
-            // 복원을 누르고 재구성을 기다리는 동안. 카드와 버튼을 걷고 한 줄만
-            // 남긴다 — 이 프레임이 재구성 내내 화면에 멈춰 있게 된다.
+            // 복원을 누르고 재구성을 기다리는 동안 — 켤 때의 스플래시.
+            //
+            // 카드와 버튼을 걷고 로고 한 장만 남긴다. **이 프레임이 재구성
+            // 내내 화면에 멈춰 있게 된다** — 재구성은 pane 마다 PTY 를 띄우느라
+            // GUI 스레드를 통째로 잡아 그동안 다음 프레임이 없다. 그래서 여기
+            // 그리는 것은 애니메이션이 아니라 「멈춰 있어도 로딩으로 읽히는
+            // 한 장」이어야 한다. 점의 밝기를 흐르게 둔 건 멈추기 **전후**의
+            // 프레임을 위한 것이고, 멈춘 동안에도 한쪽이 밝아 회전 중인 순간을
+            // 포착한 것처럼 보인다.
             if let Some((state, _)) = self.restore_applying.clone() {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
-                g.rect(
-                    0.0,
-                    0.0,
-                    win_w,
-                    win_h,
-                    theme::with_alpha([0, 0, 0, 255], 0xB0),
-                );
+                // 아래를 완전히 가린다. 옅으면 반쯤 만들어진 pane 이 비쳐
+                // 「복원 창이 겹쳤다」로 보인다(2026-09-01 지적).
+                g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xE0));
                 let total = crate::App::count_panes(&state);
                 let msg = format!("창 {total}개를 되살리는 중…");
                 let sub = "다 되면 이 화면이 사라져요";
-                let pad = 22.0_f32;
+                let logo_side = 96.0_f32;
+                let name = "kasaterm";
+                let name_fs = 21.0_f32;
+                let pad = 26.0_f32;
                 let tw = g
-                    .measure_chrome_text(&msg, 16.0, true)
-                    .max(g.measure_chrome_text(sub, 13.0, false));
-                let card_w = (tw + pad * 2.0).clamp(320.0, (win_w - 48.0).max(320.0));
-                let card_h = 92.0_f32;
+                    .measure_chrome_text(&msg, 15.0, false)
+                    .max(g.measure_chrome_text(sub, 12.5, false))
+                    .max(g.measure_chrome_text(name, name_fs, true));
+                let card_w = (tw + pad * 2.0).clamp(340.0, (win_w - 48.0).max(320.0));
+                let card_h = 292.0_f32;
                 let cx0 = ((win_w - card_w) / 2.0).round();
                 let cy0 = ((win_h - card_h) / 2.0).round();
                 panel_rect_outlined(
@@ -13538,24 +13545,76 @@ impl App {
                     theme::radius_md() * 1.5,
                     theme::surface_active(),
                 );
+                // 로고 — 없으면(디코딩 실패) 그 자리를 비우고 나머지는 그대로
+                // 그린다. 그림 하나 때문에 「되살리는 중」을 통째로 잃을 이유가
+                // 없다.
+                let logo_key = "app:logo";
+                if !g.has_image(logo_key) {
+                    if let Some((rgba, lw, lh)) = crate::sprites::app_logo_rgba() {
+                        g.upload_image(logo_key, &rgba, lw, lh);
+                    }
+                }
+                if g.has_image(logo_key) {
+                    g.queue_image_above(
+                        logo_key,
+                        cx0 + ((card_w - logo_side) / 2.0).round(),
+                        cy0 + 30.0,
+                        logo_side,
+                        logo_side,
+                    );
+                }
+                let nw = g.measure_chrome_text(name, name_fs, true);
                 g.draw_text(
-                    cx0 + pad,
-                    cy0 + 34.0,
-                    &msg,
+                    cx0 + ((card_w - nw) / 2.0).round(),
+                    cy0 + 146.0,
+                    name,
                     gpu::DrawOpts {
-                        font_size: 16.0,
+                        font_size: name_fs,
                         color: theme::text(),
                         bold: true,
                         italic: false,
                     },
                 );
+                // 흐르는 점 — 밝은 자리가 왼쪽에서 오른쪽으로 옮아간다.
+                const DOTS: usize = 7;
+                let dot = 7.0_f32;
+                let gap = 8.0_f32;
+                let row_w = DOTS as f32 * dot + (DOTS - 1) as f32 * gap;
+                let dx0 = cx0 + ((card_w - row_w) / 2.0).round();
+                let dy = cy0 + 190.0;
+                for i in 0..DOTS {
+                    let k = ((time_secs * 1.4) + i as f32 / DOTS as f32).fract();
+                    let a = 0x28 + (0xC8 as f32 * (1.0 - k)) as u8;
+                    round_rect(
+                        g,
+                        dx0 + i as f32 * (dot + gap),
+                        dy,
+                        dot,
+                        dot,
+                        dot / 2.0,
+                        theme::with_alpha(theme::text(), a),
+                    );
+                }
+                let mw = g.measure_chrome_text(&msg, 15.0, false);
                 g.draw_text(
-                    cx0 + pad,
-                    cy0 + 60.0,
+                    cx0 + ((card_w - mw) / 2.0).round(),
+                    cy0 + 222.0,
+                    &msg,
+                    gpu::DrawOpts {
+                        font_size: 15.0,
+                        color: theme::text(),
+                        bold: false,
+                        italic: false,
+                    },
+                );
+                let sw = g.measure_chrome_text(sub, 12.5, false);
+                g.draw_text(
+                    cx0 + ((card_w - sw) / 2.0).round(),
+                    cy0 + 248.0,
                     sub,
                     gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: theme::with_alpha(theme::text(), 0xA0),
+                        font_size: 12.5,
+                        color: theme::with_alpha(theme::text(), 0x9A),
                         bold: false,
                         italic: false,
                     },

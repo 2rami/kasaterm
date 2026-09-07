@@ -950,6 +950,21 @@ pub(crate) fn draw_student_walk(
     true
 }
 
+/// 앱 아이콘 → RGBA. 켤 때의 스플래시가 쓴다.
+///
+/// 원본이 1024² 라 그리는 크기 언저리로 줄여서 올린다. 1024 를 그대로 GPU 에
+/// 물리면 스플래시 한 장에 4MB 텍스처가 붙는데, 그 그림은 96px 로 그려질 뿐이라
+/// 값을 못 한다. 줄이는 비용은 켤 때 한 번이고 그것도 몇 ms 다.
+pub(crate) fn app_logo_rgba() -> Option<(Vec<u8>, u32, u32)> {
+    const SIDE: u32 = 256;
+    let img = image::load_from_memory(include_bytes!("../../../assets/AppIcon.png"))
+        .ok()?
+        .resize(SIDE, SIDE, image::imageops::FilterType::Triangle)
+        .to_rgba8();
+    let (w, h) = img.dimensions();
+    Some((img.into_raw(), w, h))
+}
+
 /// SCHALE 로고 PNG → RGBA. agents 뷰 캐시 미스 시 1회 디코딩. 사용자
 /// override(students_dir/schale-logo.png) 우선, 없으면 include_bytes 번들.
 pub(crate) fn schale_logo_rgba() -> Option<(Vec<u8>, u32, u32)> {
