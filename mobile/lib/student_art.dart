@@ -86,10 +86,11 @@ class StudentSprite extends StatelessWidget {
   }
 }
 
-/// 학생 도트 동작 — 데스크톱 사이드바처럼 **일할 땐 걷고, 쉴 땐 서서 숨 쉰다**
-/// (2026-09-07 지시 「walk 이런 것도 넣었어?」). 프레임은 번들 도트
-/// (`walk` 6장·`idle` 4장, 학생 79명 전부 같은 수). 도트가 없는 학생은 얼굴로.
-enum StudentMotion { walk, idle }
+/// 학생 도트 동작 — 데스크톱과 같은 네 갈래(2026-09-07 지시 「wave, idle 구분돼
+/// 있어? 모바일 pc 둘 다?」): walk=일하는 중(제자리 걸음), idle=대기(서서 숨 쉬기),
+/// wave=승인 대기(한 팔 인사), cheer=턴 완료(양팔 만세). 프레임은 번들 도트
+/// (`walk` 6장, 나머지 4장, 학생 79명 전부 같은 수). 도트가 없는 학생은 얼굴로.
+enum StudentMotion { walk, idle, wave, cheer }
 
 class StudentMotionSprite extends StatefulWidget {
   const StudentMotionSprite({
@@ -109,10 +110,17 @@ class StudentMotionSprite extends StatefulWidget {
   final double size;
   final bool shell;
 
-  static const _frames = {StudentMotion.walk: 6, StudentMotion.idle: 4};
+  static const _frames = {
+    StudentMotion.walk: 6,
+    StudentMotion.idle: 4,
+    StudentMotion.wave: 4,
+    StudentMotion.cheer: 4,
+  };
   static const _step = {
     StudentMotion.walk: Duration(milliseconds: 110),
     StudentMotion.idle: Duration(milliseconds: 240),
+    StudentMotion.wave: Duration(milliseconds: 180),
+    StudentMotion.cheer: Duration(milliseconds: 160),
   };
 
   @override

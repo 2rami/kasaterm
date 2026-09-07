@@ -213,13 +213,13 @@ class _TerminalScreenState extends State<TerminalScreen>
             children: [
               Hero(
                 tag: 'face-${pane.machine}-${pane.id}',
-                child: StudentMotionSprite(
+                // 화면의 주인공은 프사(사진) — 목록의 도트가 여기로 날아와 얼굴이 된다.
+                child: StudentFace(
                   slug: slug,
-                  motion:
-                      StatusStyle.of(pane, scheme).motion ?? StudentMotion.idle,
                   url: slug == null
                       ? null
                       : widget.server.avatar(slug, machine: pane.machine),
+                  shell: pane.isShell,
                   size: 40,
                 ),
               ),

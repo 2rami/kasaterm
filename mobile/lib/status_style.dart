@@ -29,12 +29,18 @@ class StatusStyle {
   /// 지금 움직이는가 — 점이 숨 쉬듯 깜빡인다.
   bool get live => mood == PaneMood.working;
 
-  /// 도트가 하는 동작 — 일하면 걷고, 쉬거나 끝냈으면 서서 숨 쉬고, 사람을 기다리면
-  /// 멈춰 선 얼굴(움직이는 것 사이에서 멈춘 것이 더 눈에 띈다). 닫힌 pane 도 얼굴.
+  /// 도트가 하는 동작 — 데스크톱 사이드바와 같은 규칙: 일하면 걷고(walk), 승인을
+  /// 기다리면 손 흔들고(wave), 답·질문을 기다리거나 쉬면 서서 숨 쉬고(idle), 방금
+  /// 끝냈으면 만세(cheer). 닫힌 pane 만 멈춘 얼굴.
   StudentMotion? get motion => switch (mood) {
     PaneMood.working => StudentMotion.walk,
-    PaneMood.done || PaneMood.resting => StudentMotion.idle,
-    PaneMood.waiting || PaneMood.closed => null,
+    PaneMood.waiting =>
+      icon == Icons.pan_tool_alt_rounded
+          ? StudentMotion.wave
+          : StudentMotion.idle,
+    PaneMood.done => StudentMotion.cheer,
+    PaneMood.resting => StudentMotion.idle,
+    PaneMood.closed => null,
   };
 
   static const attention = Color(0xffFA8C2A);
