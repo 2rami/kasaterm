@@ -73,8 +73,10 @@ struct App {
     /// 그림이 실제로 차지하는 범위. 모델이 선언한 캔버스보다 큰 경우가 흔해(마오는 모자가
     /// 30% 삐져나온다) 캔버스에 맞춰 그리면 잘리고, 머리 위 자리 계산도 어긋난다.
     bbox: Option<(f32, f32, f32, f32)>,
-    /// 무리별 모션 파일. 상태가 바뀌면 여기서 하나 고른다.
+    /// 무리별 모션 파일. 상태가 바뀌면 여기서 하나 고르고, 한 판이 끝나면 다음 것으로
+    /// 넘어간다 — 같은 동작만 돌면 살아 있는 것으로 안 보인다.
     motion_files: Vec<std::path::PathBuf>,
+    motion_idx: usize,
     expr_files: Vec<std::path::PathBuf>,
     exprs: mocari::expression::ExpressionManager,
     bufs: Vec<Option<(wgpu::Buffer, wgpu::Buffer, u32)>>, ubs: Vec<wgpu::Buffer>,
@@ -470,7 +472,7 @@ impl App {
         // 상태마다 자리를 하나씩 주고, 모델이 가진 수로 나눠 쓴다.
         if !self.motion_files.is_empty() {
             let i = mood.slot() % self.motion_files.len();
-            self.play_motion(i, true);
+            self.play_motion(i, false);
         }
         // 표정은 이름이 없는 모델이 많아(exp_01…) 뜻으로 못 고른다. 있는 만큼만 갈라 쓰고,
         // 없는 모델은 표정 없이 모션으로만 상태를 보인다.
@@ -500,6 +502,7 @@ impl App {
     /// 어긋나면 자동 효과(숨·눈·시선)가 모션과 싸워 고개가 튀고 눈이 깜빡이다 만다.
     fn play_motion(&mut self, i: usize, looping: bool) {
         let Some(f) = self.motion_files.get(i).cloned() else { return };
+        self.motion_idx = i;
         self.motion_params = std::fs::read_to_string(&f)
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
@@ -526,9 +529,13 @@ impl App {
     fn draw(&mut self) {
         self.poll_cursor();
         self.poll_board();
-        // 쓰다듬기처럼 한 번만 도는 모션이 끝났으면 지금 상태로 돌아간다.
-        if self.motion.as_ref().is_some_and(|m| !m.is_looping() && m.is_finished()) {
-            self.apply_mood(self.mood);
+        // 한 판이 끝나면 다음 모션으로 넘어간다. 한 가지만 물려 두면 몇 초 만에
+        // 「가만히 있는 그림」으로 보인다(2026-09-07 지적 「모션 계속 똑같애」).
+        if self.motion.as_ref().is_some_and(|m| !m.is_looping() && m.is_finished())
+            && !self.motion_files.is_empty()
+        {
+            let next = (self.motion_idx + 1) % self.motion_files.len();
+            self.play_motion(next, false);
         }
         let dt = self.last.elapsed().as_secs_f32().min(0.1);
         self.last = std::time::Instant::now();
@@ -1024,7 +1031,7 @@ fn main() {
         mood: board::Mood::Idle, say: String::new(), board_seen: None,
         board_polled: std::time::Instant::now(), stirred: std::time::Instant::now(),
         bubble_text: None, text_pt: bubble::FONT_PT, head: (0.0, 0.0), bbox: None,
-        motion_files, expr_files, exprs: mocari::expression::ExpressionManager::new(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
+        motion_files, motion_idx: 0, expr_files, exprs: mocari::expression::ExpressionManager::new(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
         shot_path: std::env::var("KASAPET_SHOT").ok(),
         shot_at: std::env::var("KASAPET_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(120) };

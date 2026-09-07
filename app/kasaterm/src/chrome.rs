@@ -3416,6 +3416,9 @@ impl App {
     /// 소켓을 새로 뚫는 대신 파일 한 장으로 넘기는 이유는, 앱이 꺼져 있으면 그 파일이
     /// 안 갱신되고 펫은 그걸 「조용하다」로 읽으면 그만이기 때문이다 — 끊긴 연결을
     /// 다루는 코드가 아예 안 생긴다.
+    ///
+    /// 말은 **한 사람씩 돌아가며** 한다(2026-09-07 지시 「누구는 뭐하고 있고」). 「셋이
+    /// 일하는 중」은 한 번 읽고 나면 더 알 것이 없어 화면에 붙어만 있었다.
     pub(crate) fn pet_publish_board(&self) {
         // 펫이 꺼져 있으면 적을 일이 없다. pid 확인은 syscall 하나라 매 틱 불러도 싸다.
         if pet_pid().is_none() {
@@ -3426,18 +3429,13 @@ impl App {
         // 아는 값은 이 파일 안에서 끝낸다.
         static LAST: std::sync::Mutex<Option<(std::time::Instant, String, String)>> =
             std::sync::Mutex::new(None);
+        static TURN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let now = std::time::Instant::now();
         let mut last = LAST.lock().unwrap();
-        if last
-            .as_ref()
-            .is_some_and(|(t, _, _)| now.duration_since(*t) < std::time::Duration::from_secs(2))
-        {
-            return;
-        }
-    
+
         let mut waiting: Vec<String> = Vec::new();
         let mut stalled: Vec<String> = Vec::new();
-        let mut working = 0usize;
+        let mut busy: Vec<(String, String)> = Vec::new();
         for (id, a) in &self.pane_activity {
             let who = self
                 .pane_character_if_known(id)
@@ -3447,33 +3445,47 @@ impl App {
             } else if a.status == "waiting" || a.status == "blocked" {
                 waiting.push(who);
             } else if a.status == "working" || a.status == "building" || a.bg_active {
-                working += 1;
+                busy.push((who, doing_now(&a.intent)));
             }
         }
         waiting.sort();
         waiting.dedup();
         stalled.sort();
         stalled.dedup();
-    
-        // 급한 것부터. 막힌 사람이 있는데 「셋이 일하는 중」이라고 말하면 그 한 줄이
+        busy.sort();
+
+        // 급한 것부터. 막힌 사람이 있는데 「무엇을 하는 중」이라고 말하면 그 한 줄이
         // 정작 손이 필요한 곳을 덮는다.
+        let urgent = !stalled.is_empty() || !waiting.is_empty();
+        // 한 사람씩 도는 말은 7초에 한 번 넘긴다. 급한 것은 그 사이라도 바로 나간다.
+        let due = last
+            .as_ref()
+            .is_none_or(|(t, _, _)| now.duration_since(*t) >= std::time::Duration::from_secs(7));
+        if !due && !urgent {
+            return;
+        }
+
         let (state, text) = if let Some(who) = stalled.first() {
             ("error", format!("{who}이(가) 막혔어요"))
-        } else if let Some(who) = waiting.first() {
-            let more = waiting.len() - 1;
-            if more > 0 {
-                ("wait", format!("{who} 외 {more}명이 답을 기다려요"))
+        } else if !waiting.is_empty() {
+            let who = &waiting[TURN.load(std::sync::atomic::Ordering::Relaxed) % waiting.len()];
+            ("wait", format!("{who}이(가) 답을 기다려요"))
+        } else if !busy.is_empty() {
+            let (who, what) =
+                &busy[TURN.load(std::sync::atomic::Ordering::Relaxed) % busy.len()];
+            let line = if what.is_empty() {
+                format!("{who}이(가) 일하는 중")
             } else {
-                ("wait", format!("{who}이(가) 답을 기다려요"))
-            }
-        } else if working > 0 {
-            ("busy", format!("{working}명이 일하는 중"))
+                format!("{who} · {what}")
+            };
+            ("busy", line)
         } else {
             ("idle", String::new())
         };
-    
-        // 같은 판을 다시 적지 않는다 — 펫이 mtime 으로 바뀜을 보므로, 매번 쓰면 말풍선이
-        // 2초마다 다시 뜬다.
+        TURN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // 같은 말을 다시 적지 않는다 — 펫이 mtime 으로 바뀜을 보므로, 매번 쓰면 말풍선이
+        // 그때마다 다시 뜬다.
         if last
             .as_ref()
             .is_some_and(|(_, st, tx)| st == state && tx == &text)
@@ -3481,7 +3493,7 @@ impl App {
             return;
         }
         *last = Some((now, state.to_string(), text.clone()));
-    
+
         let Some(dir) = pet_model_dir() else { return };
         let esc = text.replace('\\', "\\\\").replace('"', "\\\"");
         let _ = std::fs::write(
@@ -3812,6 +3824,14 @@ pub(crate) fn pet_characters() -> Vec<String> {
         .unwrap_or_default();
     v.sort();
     v
+}
+
+/// 「지금 뭘 하나」를 한 조각으로. 도구 라벨은 `설명 — 명령` 꼴이라 앞의 설명만 쓴다 —
+/// 뒤는 셸 명령 원문이고, 말풍선에 들어가면 그 줄이 통째로 명령어가 된다.
+fn doing_now(intent: &str) -> String {
+    let head = intent.split(" — ").next().unwrap_or("").trim();
+    let head: String = head.chars().take(22).collect();
+    head.trim().to_string()
 }
 
 /// 펫 실행 파일 — 앱 번들 안(Resources 옆) 아니면 개발 트리의 target.
