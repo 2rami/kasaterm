@@ -301,10 +301,10 @@ impl App {
         // 로그인은 **터미널 없이** 돈다(`spawn_hidden_login` 주석). 그래서 설정창을
         // 닫지도, pane 을 띄우지도 않는다 — 이 자리에 「로그인 중… / 취소」가 뜬다.
         spawn_hidden_login(
+            AccountProvider::Claude,
             id.clone(),
             "claude auth login --claudeai".to_string(),
-            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-            dir,
+            Some(dir),
             login_browser_default(),
         );
         self.set_toast(add_account_toast());
@@ -342,10 +342,10 @@ impl App {
         // 서브커맨드라(우리 홈을 씌우면 엉뚱한 자리를 본다), 여기서 준 CODEX_HOME 이
         // 그대로 진짜 codex 에 닿아 이 슬롯에 auth.json 을 쓴다.
         spawn_hidden_login(
+            AccountProvider::Codex,
             id.clone(),
-            "codex login".to_string(),
-            "CODEX_HOME",
-            dir,
+            account_login_command(AccountProvider::Codex).to_string(),
+            Some(dir),
             login_browser_default(),
         );
         self.set_toast(add_account_toast());
@@ -999,26 +999,21 @@ impl App {
                     self.set_toast("다른 로그인이 끝난 뒤 다시 시도해 주세요".to_string());
                     return;
                 }
-                if hidden_login_running() {
-                    self.set_toast("다른 로그인이 끝난 뒤 다시 시도해 주세요".to_string());
-                    return;
-                }
-                let (argv, key, dir) = match p {
-                    AccountProvider::Claude => (
-                        "claude auth login --claudeai",
-                        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-                        socket::claude_account_dir(&id),
-                    ),
-                    AccountProvider::Codex => {
-                        ("codex login", "CODEX_HOME", socket::codex_account_dir(&id))
-                    }
-                };
-                let Some(dir) = dir else {
+                let dir = account_login_home(p, &id);
+                if !id.is_empty() && dir.is_none() {
                     self.set_toast("계정 폴더 경로를 만들 수 없습니다".to_string());
                     return;
-                };
-                let _ = std::fs::create_dir_all(&dir);
-                spawn_hidden_login(id, argv.to_string(), key, dir, browser);
+                }
+                if let Some(path) = dir.as_ref() {
+                    let _ = std::fs::create_dir_all(path);
+                }
+                spawn_hidden_login(
+                    p,
+                    id,
+                    account_login_command(p).to_string(),
+                    dir,
+                    browser,
+                );
                 self.set_toast(
                     match browser {
                         LoginBrowser::Isolated => "빈 브라우저 창에서 로그인하세요",
@@ -2196,6 +2191,10 @@ impl App {
                 // 진행 중인 로그인. 다른 기계의 설정창이 이걸 보고 「코드를
                 // 기다리는 중」을 그리고, 그 코드를 `login-code` 로 돌려보낸다.
                 "login": hidden_login_job().map(|job| serde_json::json!({
+                    "provider": match job.provider {
+                        AccountProvider::Claude => "claude",
+                        AccountProvider::Codex => "codex",
+                    },
                     "id": job.id,
                     "state": match job.state {
                         LoginState::Running => "running",
@@ -3127,6 +3126,7 @@ pub(crate) fn palette_hex_list(s: &serde_json::Value, slug: Option<&str>) -> Vec
 /// 브라우저 창이 둘 뜨고 어느 창이 어느 슬롯인지 알 수가 없다.
 #[derive(Clone)]
 pub(crate) struct LoginJob {
+    pub(crate) provider: AccountProvider,
     /// 로그인 중인 슬롯 id(`acct-2` · `codex-1`).
     pub(crate) id: String,
     pub(crate) state: LoginState,
@@ -3180,11 +3180,11 @@ pub(crate) fn hidden_login_needs_code() -> bool {
 }
 
 /// CLI 가 코드를 요구하기 시작했다 — 출력 리더 스레드가 부른다.
-fn mark_login_needs_code(id: &str) {
+fn mark_login_needs_code(provider: AccountProvider, id: &str) {
     if let Ok(mut c) = login_cell().lock() {
         if let Some(job) = c.0.as_mut() {
             // 늦게 도착한 옛 작업의 출력이 새 작업 표시를 갈아치우면 안 된다.
-            if job.id == id && job.state == LoginState::Running {
+            if job.provider == provider && job.id == id && job.state == LoginState::Running {
                 job.state = LoginState::NeedCode;
             }
         }
@@ -3282,7 +3282,11 @@ pub(crate) fn seed_login_state_for_probe(id: &str, state: LoginState) -> bool {
     {
         return false;
     }
-    cell.0 = Some(LoginJob { id: id.to_string(), state });
+    cell.0 = Some(LoginJob {
+        provider: AccountProvider::Claude,
+        id: id.to_string(),
+        state,
+    });
     true
 }
 
@@ -3365,9 +3369,43 @@ pub(crate) fn cancel_hidden_login() {
 pub(crate) enum LoginBrowser {
     /// 쿠키 없는 크롬 프로필. URL 을 우리가 주워 그 창으로 연다.
     Isolated,
-    /// 사용자가 쓰던 기본 브라우저. CLI 가 직접 연다 — 지금 로그인된 claude.ai
-    /// 세션이 그대로 승인되므로 **다른 계정을 붙일 수는 없다**.
+    /// 사용자가 쓰던 기본 브라우저. Codex는 CLI가 공식 localhost 콜백과 함께
+    /// 직접 열고, Claude는 앱이 출력의 URL을 열어 코드 폴백을 유지한다.
     Default,
+}
+
+fn account_login_command(provider: AccountProvider) -> &'static str {
+    match provider {
+        AccountProvider::Claude => "claude auth login --claudeai",
+        // 계정 슬롯은 auth.json 한 장으로 격리한다. macOS 키링을 쓰면 CODEX_HOME이
+        // 달라도 모든 슬롯이 같은 자격증명을 보므로 공식 file 저장 모드로 고정한다.
+        AccountProvider::Codex => {
+            "codex login -c 'cli_auth_credentials_store=\"file\"'"
+        }
+    }
+}
+
+fn account_login_home(
+    provider: AccountProvider,
+    id: &str,
+) -> Option<std::path::PathBuf> {
+    match provider {
+        AccountProvider::Claude => socket::claude_account_dir(id),
+        AccountProvider::Codex => socket::codex_account_dir(id),
+    }
+}
+
+fn account_login_env(provider: AccountProvider) -> &'static str {
+    match provider {
+        AccountProvider::Claude => "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        AccountProvider::Codex => "CODEX_HOME",
+    }
+}
+
+/// Claude의 코드 복사 폴백과 격리 프로필은 앱이 URL을 직접 열어야 한다. Codex의
+/// 기본 로그인은 CLI가 localhost 콜백까지 소유해야 브라우저 승인만으로 끝난다.
+fn intercept_login_browser(provider: AccountProvider, browser: LoginBrowser) -> bool {
+    provider == AccountProvider::Claude || browser == LoginBrowser::Isolated
 }
 
 /// 로그인을 처음 시작할 때 여는 브라우저. **새 슬롯 추가도 쓰던 브라우저다**
@@ -3406,15 +3444,16 @@ fn add_account_toast() -> String {
 /// 찍히는 "Paste code here if prompted" 는 콜백이 실패했을 때의 폴백이다. 그래서
 /// **stdin 을 열어둔 채** 둔다 — 닫으면 그 폴백 경로가 통째로 죽는다.
 fn spawn_hidden_login(
+    provider: AccountProvider,
     id: String,
     argv: String,
-    env_key: &'static str,
-    dir: std::path::PathBuf,
+    dir: Option<std::path::PathBuf>,
     browser: LoginBrowser,
 ) {
     use std::io::Read;
     use std::process::Stdio;
     let profile = login_profile(browser, &id);
+    let intercept_browser = intercept_login_browser(provider, browser);
     let Ok(mut cell) = login_cell().lock() else { return };
     if cell
         .0
@@ -3423,7 +3462,11 @@ fn spawn_hidden_login(
     {
         return;
     }
-    cell.0 = Some(LoginJob { id: id.clone(), state: LoginState::Running });
+    cell.0 = Some(LoginJob {
+        provider,
+        id: id.clone(),
+        state: LoginState::Running,
+    });
     cell.1 = None;
     drop(cell);
     std::thread::spawn(move || {
@@ -3433,15 +3476,23 @@ fn spawn_hidden_login(
         let mut cmd = crate::proc::command(shell);
         cmd.arg("-lc")
             .arg(&argv)
-            .env(env_key, &dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        {
-            // **항상** 가로챈다. 예전엔 「쓰던 브라우저」를 고르면 CLI 가 직접 열게
-            // 뒀는데, 이제는 주소의 `redirect_uri` 를 우리 창구로 고쳐야 하므로
-            // (`with_local_redirect`) 여는 일도 우리가 해야 한다. CLI 가 직접 열면
-            // 옛 주소가 열려 승인해도 앱으로 돌아오지 못한다.
+        let env_key = account_login_env(provider);
+        match dir.as_ref() {
+            Some(path) => {
+                cmd.env(env_key, path);
+            }
+            None => {
+                // 기본 로그인은 CLI의 기본 저장소를 써야 한다. kasaterm을 다른
+                // 계정 pane 안에서 띄웠어도 부모의 슬롯 env를 물려받지 않는다.
+                cmd.env_remove(env_key);
+            }
+        }
+        if intercept_browser {
+            // Claude의 코드 폴백과 「빈 창으로」만 앱이 URL을 연다. Codex 기본
+            // 로그인은 CLI가 브라우저와 localhost 콜백을 함께 소유한다.
             cmd.env("BROWSER", "/usr/bin/true");
         }
         #[cfg(unix)]
@@ -3453,7 +3504,11 @@ fn spawn_hidden_login(
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                finish_login(&id, LoginState::Err(format!("로그인 실행 실패: {e}")));
+                finish_login(
+                    provider,
+                    &id,
+                    LoginState::Err(format!("로그인 실행 실패: {e}")),
+                );
                 return;
             }
         };
@@ -3466,6 +3521,7 @@ fn spawn_hidden_login(
         // 두 파이프를 각각 읽어 한 버퍼에 모은다 — URL 이 어느 쪽으로 오는지는
         // CLI 버전에 따라 다르고, 실패 이유는 대개 stderr 로 온다.
         let buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let browser_opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut readers = Vec::new();
         for pipe in [
             child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
@@ -3476,7 +3532,7 @@ fn spawn_hidden_login(
         {
             let buf = buf.clone();
             let profile = profile.clone();
-            let job_id = id.clone();
+            let browser_opened = browser_opened.clone();
             readers.push(std::thread::spawn(move || {
                 // **줄 단위로 읽으면 안 된다.** 코드를 묻는 `Paste code here if
                 // prompted >` 는 개행 없이 오므로 `lines()` 는 그 줄을 EOF 까지
@@ -3485,8 +3541,6 @@ fn spawn_hidden_login(
                 let mut pipe = pipe;
                 let mut chunk = [0u8; 1024];
                 let mut tail = String::new();
-                let mut opened = false;
-                let asked = ();
                 loop {
                     let n = match pipe.read(&mut chunk) {
                         Ok(0) | Err(_) => break,
@@ -3501,7 +3555,9 @@ fn spawn_hidden_login(
                     // 열면 끊긴 주소가 뜬다.
                     while let Some(pos) = tail.find('\n') {
                         let line: String = tail.drain(..=pos).collect();
-                        if opened {
+                        if !intercept_browser
+                            || browser_opened.load(std::sync::atomic::Ordering::Relaxed)
+                        {
                             continue;
                         }
                         if let Some(url) = login_url_in(&line) {
@@ -3513,14 +3569,18 @@ fn spawn_hidden_login(
                             // 400 이 뜨던 원인이 이것이다(2026-09-07 「인증도 안돼
                             // 400떠」). 승인이 끝나면 화면에 코드가 뜨고, 그걸
                             // 복사하는 것만으로 들어간다(아래 클립보드 경로).
-                            match profile.as_deref() {
-                                Some(prof) => {
-                                    let _ = std::fs::create_dir_all(prof);
-                                    open_isolated_browser(&url, prof);
+                            if !browser_opened.swap(
+                                true,
+                                std::sync::atomic::Ordering::SeqCst,
+                            ) {
+                                match profile.as_deref() {
+                                    Some(prof) => {
+                                        let _ = std::fs::create_dir_all(prof);
+                                        open_isolated_browser(&url, prof);
+                                    }
+                                    None => open_default_browser(&url),
                                 }
-                                None => open_default_browser(&url),
                             }
-                            opened = true;
                         }
                     }
                     // 남은 꼬리가 코드를 묻고 있나. CLI 가 다시 물으면(틀린 코드)
@@ -3533,7 +3593,6 @@ fn spawn_hidden_login(
                     // 화면은 늘 「코드를 붙여넣으라」고 말하고 있었다(2026-09-07
                     // 「orca는 되던데 나는 왜 코드복사 그거뜨지」). 되돌림이 올
                     // 만큼 기다린 뒤에도 안 끝났을 때만 손으로 넣는 길을 연다.
-                    let _ = (&asked, &job_id);
                 }
             }));
         }
@@ -3569,7 +3628,7 @@ fn spawn_hidden_login(
             // 시간을 여기서 재는 것은 리더 스레드가 **출력이 없으면 멈춰 있어서**다
             // — 문구를 본 뒤로 아무 말이 없는 것이 정확히 정상 경로의 모습이라,
             // 거기서 재면 영영 안 돈다.
-            if !prompt_armed {
+            if provider == AccountProvider::Claude && !prompt_armed {
                 let saw = buf
                     .lock()
                     .map(|b| b.contains("Paste code"))
@@ -3580,7 +3639,7 @@ fn spawn_hidden_login(
                         if at.elapsed() >= std::time::Duration::from_secs(25) =>
                     {
                         prompt_armed = true;
-                        mark_login_needs_code(&id);
+                        mark_login_needs_code(provider, &id);
                     }
                     _ => {}
                 }
@@ -3613,7 +3672,7 @@ fn spawn_hidden_login(
                 } else {
                     "로그인이 3분 안에 안 끝났어요"
                 };
-                finish_login(&id, LoginState::Err(why.into()));
+                finish_login(provider, &id, LoginState::Err(why.into()));
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -3627,13 +3686,13 @@ fn spawn_hidden_login(
         } else {
             LoginState::Err(login_error_line(&out))
         };
-        finish_login(&id, state);
+        finish_login(provider, &id, state);
     });
 }
 
 /// 결과를 기록한다 — 단, 그 사이 사용자가 취소했거나 다른 슬롯을 시작했으면
 /// 덮지 않는다(늦게 끝난 옛 작업이 새 작업의 표시를 갈아치우면 안 된다).
-fn finish_login(id: &str, state: LoginState) {
+fn finish_login(provider: AccountProvider, id: &str, state: LoginState) {
     // 성공했으면 **그 자리에서** 신원과 한도를 다시 읽는다. 둘 다 캐시가 있어
     // (신원 20초·한도는 폴러 주기) 가만두면 「로그인을 마쳤어요」가 뜬 뒤에도
     // 한동안 옛 계정과 빈 한도가 화면에 남는다(2026-09-07 「로그인을 마쳤어요 뜨고
@@ -3646,7 +3705,11 @@ fn finish_login(id: &str, state: LoginState) {
         crate::codexlimits::invalidate();
     }
     if let Ok(mut c) = login_cell().lock() {
-        if c.0.as_ref().is_some_and(|j| j.id == id) {
+        if c
+            .0
+            .as_ref()
+            .is_some_and(|j| j.provider == provider && j.id == id)
+        {
             if let Some(j) = c.0.as_mut() {
                 j.state = state;
             }
@@ -3673,11 +3736,8 @@ fn login_error_line(out: &str) -> String {
         .unwrap_or_else(|| "로그인이 실패했어요".to_string())
 }
 
-/// 이 로그인이 쓸 격리 프로필. **`None` 이면 URL 가로채기를 통째로 끈다** — 그
-/// 하나가 「우리가 크롬을 연다」와 「CLI 가 기본 브라우저를 연다」를 가른다. 값이
-/// `Some` 인데 `BROWSER` 를 안 덮으면 창이 둘 뜨고, `None` 인데 덮으면 아무 창도
-/// 안 떠 3분을 갇힌다. 격리를 골랐는데 자리를 못 잡는 극단(홈을 못 찾음)에서는
-/// 아무것도 못 여느니 쓰던 브라우저로 떨어뜨린다.
+/// 이 로그인이 쓸 격리 프로필. URL을 누가 여는지는 공급자까지 함께 보는
+/// `intercept_login_browser`가 정한다.
 fn login_profile(browser: LoginBrowser, id: &str) -> Option<std::path::PathBuf> {
     match browser {
         LoginBrowser::Isolated => socket::oauth_profile_dir(id),
@@ -3698,6 +3758,30 @@ fn login_url_in(line: &str) -> Option<String> {
 #[cfg(test)]
 mod login_url_tests {
     use super::login_url_in;
+
+    #[test]
+    fn codex_default_login_keeps_the_official_browser_callback() {
+        assert!(!super::intercept_login_browser(
+            crate::AccountProvider::Codex,
+            super::LoginBrowser::Default
+        ));
+        assert!(super::intercept_login_browser(
+            crate::AccountProvider::Codex,
+            super::LoginBrowser::Isolated
+        ));
+        assert!(super::intercept_login_browser(
+            crate::AccountProvider::Claude,
+            super::LoginBrowser::Default
+        ));
+    }
+
+    #[test]
+    fn codex_slots_use_file_auth_but_default_login_needs_no_custom_home() {
+        let command = super::account_login_command(crate::AccountProvider::Codex);
+        assert!(command.starts_with("codex login"));
+        assert!(command.contains("cli_auth_credentials_store=\"file\""));
+        assert!(super::account_login_home(crate::AccountProvider::Codex, "").is_none());
+    }
 
     /// 2026-08-13 실측 출력 그대로. URL 을 못 뽑으면 격리 브라우저가 안 열리고,
     /// 그러면 CLI 가 기본 브라우저를 열어 지금 계정으로 그대로 승인돼 버린다 —
@@ -3774,9 +3858,8 @@ fn open_isolated_browser(url: &str, profile: &std::path::Path) {
 }
 
 
-/// 사용자가 쓰던 브라우저로 연다. CLI 에게 맡기지 않는 이유는 **주소를 우리가
-/// 고쳐야** 하기 때문이다(`with_local_redirect`) — CLI 가 직접 열면 옛 주소가 열려
-/// 앱으로 돌아오는 길이 없다.
+/// Claude 출력에서 주운 공식 승인 주소를 사용자가 쓰던 브라우저로 연다.
+/// Codex 기본 로그인은 이 함수를 거치지 않고 CLI가 직접 연다.
 fn open_default_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let r = crate::proc::command("open").arg(url).spawn();

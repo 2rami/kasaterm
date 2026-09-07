@@ -4928,7 +4928,7 @@ fn account_row(
     let job_sub = home_sub.or_else(|| {
         s.login_job
             .as_ref()
-            .filter(|job| job.id == row.id)
+            .filter(|job| job.provider == row.provider && job.id == row.id)
             .map(|job| match &job.state {
                 crate::settings::LoginState::Running => "로그인 진행 중".to_string(),
                 crate::settings::LoginState::NeedCode => "코드를 기다리는 중".to_string(),
@@ -4955,10 +4955,10 @@ fn account_row(
         .unwrap_or(0.0);
     let sub_value = job_sub.as_deref().unwrap_or(&row.sub);
     let mut sub_x = text_x;
-    // 도메인 표는 **부제가 그 계정을 말할 때만** — 로그인 진행 같은 상태 문구
-    // 앞에 세우면 그게 주소인 줄로 읽힌다.
+    // 메일 서비스 표지는 **부제가 그 계정을 말할 때만** — 로그인 진행 같은 상태
+    // 문구 앞에 세우면 그게 주소인 줄로 읽힌다.
     if job_sub.is_none() && !row.email.is_empty() {
-        let d = domain_badge(g, sub_x, rect.1 + 27.0, &row.email, 14.0);
+        let d = email_provider_mark(g, sub_x, rect.1 + 27.0, &row.email, 14.0);
         if d > 0.0 {
             sub_x += d + 6.0;
         }
@@ -5707,45 +5707,53 @@ fn mini_icon_button(
 
 /// 이름 옆에 붙는 알약. 상태를 한 낱말로 못박아 두면 어느 줄이 지금 쓰이는
 /// 것인지 카드 테두리 색을 해석하지 않고도 읽힌다.
-/// 이메일 앞에 붙는 도메인 표. 주소는 길어서 목록에서 한눈에 안 갈리는데, 어느
-/// 서비스 계정인지는 도메인 첫 글자로 거의 갈린다(2026-09-07 「메일에 도메인
-/// 아이콘붙여줘」). 색은 도메인에서 뽑으므로 같은 주소는 늘 같은 색이라, 여러
-/// 화면에 흩어진 같은 계정을 눈으로 잇는다.
-fn domain_badge(g: &mut gpu::GpuRenderer, x: f32, y: f32, email: &str, size: f32) -> f32 {
-    const PALETTE: [[u8; 4]; 6] = [
-        [214, 92, 92, 255],
-        [92, 148, 214, 255],
-        [86, 168, 116, 255],
-        [190, 140, 70, 255],
-        [150, 110, 200, 255],
-        [90, 160, 170, 255],
-    ];
-    let domain = match email.rsplit_once('@') {
-        Some((_, d)) if !d.is_empty() => d,
-        _ => return 0.0,
-    };
-    let Some(ch) = domain.chars().next() else {
-        return 0.0;
-    };
-    let mut h: u32 = 2166136261;
-    for b in domain.bytes() {
-        h = (h ^ b as u32).wrapping_mul(16777619);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmailProviderMark {
+    Gmail,
+    Naver,
+    Generic,
+}
+
+fn email_provider(email: &str) -> EmailProviderMark {
+    match email
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("gmail.com" | "googlemail.com") => EmailProviderMark::Gmail,
+        Some("naver.com") => EmailProviderMark::Naver,
+        _ => EmailProviderMark::Generic,
     }
-    let color = PALETTE[(h as usize) % PALETTE.len()];
-    round_rect(g, x, y, size, size, size / 2.0, color);
-    let f = size * 0.62;
-    let letter = ch.to_uppercase().to_string();
-    let tw = g.measure_chrome_text(&letter, f, true);
-    draw_text(
-        g,
-        x + (size - tw) / 2.0,
-        y + (size - f) / 2.0 - 0.5,
-        &letter,
-        f,
-        [255, 255, 255, 255],
-        true,
-    );
-    size
+}
+
+/// 이메일 앞에는 서비스가 제공한 공식 표지만 쓴다. 모르는 도메인을 임의 색과
+/// 첫 글자로 꾸미면 실제 브랜드처럼 보이므로, 그때는 정직한 일반 메일 아이콘으로
+/// 물러난다.
+fn email_provider_mark(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    email: &str,
+    size: f32,
+) -> f32 {
+    match email_provider(email) {
+        EmailProviderMark::Gmail => {
+            g.queue_icon_colored("gmail", x, y, size, 1.0);
+            size
+        }
+        EmailProviderMark::Naver => {
+            // 공식 NAVER 워드마크는 2315:444다. 정사각형 칸에 구기지 않고
+            // 원래 비율 그대로, 부제 글자 높이에 맞춘다.
+            let h = 8.0;
+            let w = h * 2315.0 / 444.0;
+            g.queue_icon_colored_rect("naver", x, y + (size - h) / 2.0, w, h, 1.0);
+            w
+        }
+        EmailProviderMark::Generic => {
+            g.queue_icon("mail", x, y, size, theme::text_mute());
+            size
+        }
+    }
 }
 
 fn pill(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str, accent: bool) -> f32 {
@@ -5918,6 +5926,18 @@ fn color_for_word(word: &str) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn email_marks_use_real_brands_only_for_known_services() {
+        assert_eq!(email_provider("me@gmail.com"), EmailProviderMark::Gmail);
+        assert_eq!(
+            email_provider("me@googlemail.com"),
+            EmailProviderMark::Gmail
+        );
+        assert_eq!(email_provider("me@naver.com"), EmailProviderMark::Naver);
+        assert_eq!(email_provider("me@example.com"), EmailProviderMark::Generic);
+        assert_eq!(email_provider("not-an-email"), EmailProviderMark::Generic);
+    }
 
     #[test]
     fn cursor_cards_cover_every_persisted_shape_once() {

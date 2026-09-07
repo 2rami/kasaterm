@@ -3987,6 +3987,9 @@ impl GpuRenderer {
             "external-link" => include_str!("../assets/icons/external-link.svg"),
             "claude" => include_str!("../assets/icons/claude.svg"),
             "codex" => include_str!("../assets/icons/codex.svg"),
+            "gmail" => include_str!("../assets/icons/gmail.svg"),
+            "naver" => include_str!("../assets/icons/naver.svg"),
+            "mail" => include_str!("../assets/icons/mail.svg"),
             "antigravity" => include_str!("../assets/icons/antigravity.svg"),
             // 마크다운 콜아웃(`> [!NOTE]` …) 표지. 이모지 대신 SVG 를 쓰는 이유는
             // 이모지가 폰트에 따라 흑백 글리프로 떨어지기 때문 — 실제로 `⚠️` 가
@@ -4145,12 +4148,12 @@ impl GpuRenderer {
     /// FLAG_COLOR 경로는 texel.rgb 를 그대로 샘플하므로 tiny_skia 의
     /// premultiplied 출력을 straight alpha 로 되돌려야 반투명 가장자리가
     /// 어두워지지 않는다.
-    fn rasterize_icon_color(svg: &str, px: u32) -> Option<Vec<u8>> {
+    fn rasterize_icon_color(svg: &str, px_w: u32, px_h: u32) -> Option<Vec<u8>> {
         let opt = resvg::usvg::Options::default();
         let tree = resvg::usvg::Tree::from_str(svg, &opt).ok()?;
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(px, px)?;
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(px_w, px_h)?;
         let size = tree.size();
-        let scale = px as f32 / size.width().max(size.height());
+        let scale = (px_w as f32 / size.width()).min(px_h as f32 / size.height());
         let tf = resvg::tiny_skia::Transform::from_scale(scale, scale);
         resvg::render(&tree, tf, &mut pixmap.as_mut());
         let mut data = pixmap.take();
@@ -4225,25 +4228,39 @@ impl GpuRenderer {
     /// 가진 글리프용. FLAG_COLOR(이모지 경로)로 그려 texel 색을 그대로 쓰고,
     /// `alpha` 만 전역 불투명도로 곱한다(ignored/dim 행 표현).
     pub fn queue_icon_colored(&mut self, name: &str, x: f32, y: f32, size: f32, alpha: f32) {
-        let px = (size * self.scale).round() as u32;
-        if px == 0 {
+        self.queue_icon_colored_rect(name, x, y, size, size, alpha);
+    }
+
+    /// 풀컬러 브랜드 워드마크처럼 정사각형이 아닌 SVG를 원래 비율로 그린다.
+    /// 정사각형 버퍼에 억지로 넣으면 NAVER 로고가 2px 높이로 눌려 글자가 사라진다.
+    pub fn queue_icon_colored_rect(
+        &mut self,
+        name: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        alpha: f32,
+    ) {
+        let px_w = (width * self.scale).round() as u32;
+        let px_h = (height * self.scale).round() as u32;
+        if px_w == 0 || px_h == 0 {
             return;
         }
-        let key = format!("__iconc:{name}:{px}");
+        let key = format!("__iconc:{name}:{px_w}x{px_h}");
         if !self.images.contains_key(&key) {
             let Some(svg) = Self::icon_svg(name) else { return };
-            let Some(rgba) = Self::rasterize_icon_color(svg, px) else { return };
-            self.upload_image(&key, &rgba, px, px);
+            let Some(rgba) = Self::rasterize_icon_color(svg, px_w, px_h) else { return };
+            self.upload_image(&key, &rgba, px_w, px_h);
         }
         if !self.images.contains_key(&key) {
             return;
         }
         let (dx, dy) = ((x * self.scale).round(), (y * self.scale).round());
-        let dpx = px as f32;
         self.icon_quads.push((
             key,
             CellInstance {
-                cell_px: [dx, dy, dpx, dpx],
+                cell_px: [dx, dy, px_w as f32, px_h as f32],
                 uv_min: [0.0, 0.0],
                 uv_max: [1.0, 1.0],
                 fg_rgba: [1.0, 1.0, 1.0, alpha],
@@ -6720,3 +6737,23 @@ pub fn remember_unzoomed_frame(window: &Window, saved: &mut Option<(f64, f64, f6
 
 #[cfg(not(target_os = "macos"))]
 pub fn remember_unzoomed_frame(_window: &Window, _saved: &mut Option<(f64, f64, f64, f64)>) {}
+
+#[cfg(test)]
+mod account_icon_tests {
+    use super::GpuRenderer;
+
+    #[test]
+    fn official_email_assets_parse_and_paint_pixels() {
+        for (name, width, height) in [("gmail", 28, 28), ("naver", 84, 16)] {
+            let svg = GpuRenderer::icon_svg(name).expect("registered account icon");
+            let rgba = GpuRenderer::rasterize_icon_color(svg, width, height)
+                .expect("official SVG must parse");
+            assert_eq!(rgba.len(), (width * height * 4) as usize);
+            assert!(
+                rgba.chunks_exact(4).any(|pixel| pixel[3] > 0),
+                "{name} rendered blank"
+            );
+        }
+        assert!(GpuRenderer::icon_svg("mail").is_some());
+    }
+}

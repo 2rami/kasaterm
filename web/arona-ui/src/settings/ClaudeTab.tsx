@@ -113,19 +113,24 @@ function AccountCard({
           </>
         )}
       </div>
-      {/* 첫 행(지금 로그인)은 우리가 만든 슬롯이 아니라 지울 것도 이름 붙일 것도
-          없다 — 그래서 버튼 자체를 안 그린다. */}
-      {row.slot && !renaming && (
+      {/* 기본 로그인도 만료되므로 다시 로그인은 남긴다. 이름·빈 창·빼기만 우리가
+          만든 슬롯에 한정한다. */}
+      {!renaming && (
         <div className="invisible flex shrink-0 gap-1 group-focus-within:visible group-hover:visible">
-          <MiniButton label={t.claude.rename} disabled={busy} onClick={() => setRenaming(true)} />
-          {/* 네이티브 카드와 같은 순서 — 다시 로그인(쓰던 브라우저), 빈 창, 빼기. */}
+          {row.slot && (
+            <MiniButton label={t.claude.rename} disabled={busy} onClick={() => setRenaming(true)} />
+          )}
           <MiniButton label={t.claude.reauth} disabled={busy} onClick={onReauth} />
-          <MiniButton
-            label={t.claude.reauthIsolated}
-            disabled={busy}
-            onClick={onReauthIsolated}
-          />
-          <MiniButton label={t.claude.removeSlot} danger disabled={busy} onClick={onRemove} />
+          {row.slot && (
+            <>
+              <MiniButton
+                label={t.claude.reauthIsolated}
+                disabled={busy}
+                onClick={onReauthIsolated}
+              />
+              <MiniButton label={t.claude.removeSlot} danger disabled={busy} onClick={onRemove} />
+            </>
+          )}
         </div>
       )}
       {/* 한도 — 하단바가 쓰는 우물 그대로라 열자마자 뜬다(2026-08-31 지적

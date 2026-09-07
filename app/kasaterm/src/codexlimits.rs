@@ -95,12 +95,20 @@ pub(crate) fn refresh() -> bool {
     true
 }
 
+fn app_server_command(slot: bool) -> &'static str {
+    if slot {
+        "codex app-server -c 'cli_auth_credentials_store=\"file\"'"
+    } else {
+        "codex app-server"
+    }
+}
+
 fn ask(account_home: Option<&std::path::Path>) -> Option<CodexLimits> {
     // 로그인 셸을 거치는 이유는 auth_probe 와 같다 — Finder 로 뜬 .app 의 PATH 에는
     // codex 가 없어 직접 spawn 하면 늘 실패한다.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut command = crate::proc::command(shell);
-    command.arg("-lc").arg("codex app-server");
+    command.arg("-lc").arg(app_server_command(account_home.is_some()));
     match account_home {
         // `auth.json` 은 CODEX_HOME 아래에 있다는 Codex의 공식 계약을 그대로 쓴다.
         // 설정에서 고른 슬롯을 여기에도 주지 않으면 하단바만 늘 기본 로그인의
@@ -188,6 +196,12 @@ fn parse(result: &serde_json::Value) -> Option<CodexLimits> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_slots_read_the_same_file_auth_that_login_writes() {
+        assert_eq!(app_server_command(false), "codex app-server");
+        assert!(app_server_command(true).contains("cli_auth_credentials_store=\"file\""));
+    }
 
     #[test]
     fn 다른_계정의_캐시는_보이지_않고_즉시_낡는다() {

@@ -7726,6 +7726,12 @@ case " $* " in
   *" --ask-for-approval "*|*" -a "*|*" --sandbox "*|*" -s "*) ;;
   *) set -- --dangerously-bypass-approvals-and-sandbox "$@" ;;
 esac
+# 계정 슬롯은 auth.json 하나로 갈린다. keyring/auto 저장이면 CODEX_HOME이 달라도
+# OS 키링 하나를 함께 보므로, 슬롯을 쓰는 pane만 공식 file 저장 모드로 고정한다.
+# 끝에 붙여 사용자가 앞에서 준 같은 키보다 이 값이 이긴다.
+if [ -n "$ACCT" ]; then
+  set -- "$@" -c 'cli_auth_credentials_store="file"'
+fi
 exec "$REAL" "$@"
 "#;
     let wrapper_path = shim_dir.join("codex");
@@ -9621,6 +9627,10 @@ mod tests {
         assert!(
             body.contains("rm -f \"$CH/hooks.json\""),
             "이전 pane 훅을 걷지 않으면 다음 실행에서 신뢰 경고가 되살아난다"
+        );
+        assert!(
+            body.contains("cli_auth_credentials_store=\"file\""),
+            "계정 슬롯이 keyring을 쓰면 CODEX_HOME을 갈라도 같은 로그인을 공유한다"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
