@@ -30,6 +30,7 @@ pub mod remote;
 pub mod adopt;
 pub mod machines;
 pub mod mobile;
+pub mod notes;
 pub mod uplink;
 pub mod gateway;
 pub mod remoteboard;

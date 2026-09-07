@@ -4300,13 +4300,27 @@ async fn term_shot_get(
 ///
 /// 웹 셸(`web-…`)은 board 에 없다. 그건 이름 없이 id 만 나가고, 클라가 그때 id 를
 /// 그대로 보여 준다.
+/// shim 이 붙이는 자동 이름(`seia-p0-70p` — 슬러그·pane 번호·세 글자)인가. 사람이 붙인
+/// 이름이 아니라 폰 머리의 세션 이름 자리엔 안 어울린다(2026-09-08 지적 「Seia-asdf
+/// 이렇게 칩으로 뜨던데」).
+fn is_auto_peer_name(s: &str) -> bool {
+    let mut it = s.rsplitn(3, '-');
+    let (Some(tail), Some(mid), Some(head)) = (it.next(), it.next(), it.next()) else {
+        return false;
+    };
+    !head.is_empty()
+        && tail.len() == 3
+        && tail.chars().all(|c| c.is_ascii_alphanumeric())
+        && mid.strip_prefix('p').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 /// 폰 머리에 다는 세션 이름. claude 는 `/rename` 이 peer_name 으로 온다. codex 는
 /// 그런 통로가 없어 사람이 pane 에 붙인 이름(핀)이 그 자리다 — 데스크톱이 codex
 /// 화면 안에 배지로 그리는 바로 그 이름. OSC 요약(핀 없음)은 세션 이름이 아니다.
 fn pane_session_name(p: &kasa_socket::backend::PaneActivity) -> Option<String> {
     p.peer_name
         .clone()
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && !is_auto_peer_name(s))
         .or_else(|| {
             (p.title_pinned && !p.title.is_empty()).then(|| p.title.clone())
         })
@@ -5055,6 +5069,57 @@ fn agent_pid_alive(_pid: u32) -> bool {
 /// 안 쓰는 이유도 같다(jsonl 마지막 조각 유실). 인자에서 권한 모드도 읽어 준다:
 /// 로컬은 원격 프로세스의 argv 를 볼 손이 없어서, 여기서 읽어 실어 보내야
 /// 「옮겨오니 오토모드로 바뀌었다」(2026-08-27 지적의 역방향)가 안 생긴다.
+/// 학생 쪽지 목록 — 최근 것부터. 폰 허브의 종 아이콘이 5초마다 읽는다.
+async fn term_notes_get() -> impl IntoResponse {
+    Json(serde_json::json!(crate::notes::list()))
+}
+
+/// 나쵸가 쪽지를 넣는다 — 본문은 notes.rs 의 NoteInput.
+async fn term_notes_post(body: Bytes) -> impl IntoResponse {
+    let err = |m: String| Json(serde_json::json!({ "ok": false, "error": m }));
+    let input: crate::notes::NoteInput = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return err(format!("쪽지 본문을 못 읽었어요: {e}")),
+    };
+    match crate::notes::add(input) {
+        Some(n) => Json(serde_json::json!({ "ok": true, "id": n.id })),
+        None => err("pane 과 summary 는 비면 안 돼요".into()),
+    }
+}
+
+/// 읽음 표시 — `{"ids":[1,2]}` 또는 `{"all":true}`.
+async fn term_notes_read_post(body: Bytes) -> impl IntoResponse {
+    #[derive(serde::Deserialize)]
+    struct Req {
+        #[serde(default)]
+        ids: Vec<u64>,
+        #[serde(default)]
+        all: bool,
+    }
+    let req: Req = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": format!("본문을 못 읽었어요: {e}") })),
+    };
+    let n = crate::notes::mark_read(&req.ids, req.all);
+    Json(serde_json::json!({ "ok": true, "marked": n }))
+}
+
+/// 쪽지에 딸린 pane 사진.
+async fn term_notes_image(AxPath(name): AxPath<String>) -> impl IntoResponse {
+    let id = name
+        .strip_suffix(".png")
+        .and_then(|s| s.parse::<u64>().ok());
+    match id.and_then(crate::notes::image_bytes) {
+        Some(bytes) => (
+            axum::http::StatusCode::OK,
+            [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "private, max-age=86400")],
+            bytes,
+        )
+            .into_response(),
+        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 async fn term_agent_stop_post(
     q: Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -6753,6 +6818,10 @@ pub fn spawn_http_server_opts(
                     )
                     .route("/term/agent-stop", post(term_agent_stop_post))
                     .route("/term/message", post(term_message_post))
+                    // 학생 쪽지 — 나쵸가 넣고 폰 종 목록이 읽는다(notes.rs 머리말).
+                    .route("/term/notes", get(term_notes_get).post(term_notes_post))
+                    .route("/term/notes/read", post(term_notes_read_post))
+                    .route("/term/notes/{name}", get(term_notes_image))
                     // 폰 허브·유저별 주소 관리·다른 기계로 넘기는 문(mobile.rs 머리말).
                     .route("/hub", get(hub_page))
                     .route("/mobile/me", get(mobile_me))
@@ -7272,6 +7341,12 @@ mod tests {
         p.peer_name = Some(String::new());
         p.title.clear();
         assert_eq!(super::pane_session_name(&p), None);
+        p.peer_name = Some("seia-p0-70p".into());
+        assert_eq!(super::pane_session_name(&p), None, "자동 이름은 세션 이름이 아니다");
+        assert!(super::is_auto_peer_name("arona-p4-70p"));
+        assert!(!super::is_auto_peer_name("codex /rename, /resume"));
+        assert!(!super::is_auto_peer_name("wgpu로바꾸기"));
+        assert!(!super::is_auto_peer_name("my-p1-thing"), "꼬리가 세 글자가 아니면 사람 이름");
     }
 
     #[test]
