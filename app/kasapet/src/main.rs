@@ -325,7 +325,7 @@ impl App {
         // 창 두 배 거리에서 최대로 돌아본다 — 더 멀면 고개가 끝까지 돌아간 채 멈춘다.
         let nx = ((gx - cx) / sz.width.max(1.0)).clamp(-1.0, 1.0);
         let ny = ((cy - gy) / sz.height.max(1.0)).clamp(-1.0, 1.0);
-        self.look = (nx as f32, ny as f32);
+        self.look = look_override().unwrap_or((nx as f32, ny as f32));
         let (lx, ly) = (gx - pos.x, gy - pos.y);
         self.local = (lx >= 0.0 && ly >= 0.0 && lx < sz.width && ly < sz.height)
             .then_some((lx as f32, ly as f32));
@@ -557,6 +557,15 @@ impl App {
             let put = |rt: &mut mocari::runtime::ModelRuntime, id: &str, v: f32| {
                 if !owned.contains(id) { rt.set_parameter(id, v); }
             };
+            // 시선처럼 **얹는** 값은 모션이 쥐고 있어도 더한다. 건너뛰면 고개·눈을 쥔
+            // 모션이 도는 동안 마우스를 통째로 안 쳐다본다 — 마오의 대기 모션 하나가
+            // 132개를 쥐고 있어서, 클릭해 다른 모션으로 넘어갈 때만 잠깐 따라봤다
+            // (2026-09-07 지적 「클릭 전에도 마우스 따라오게」). Cubism 도 같은 규약이다:
+            // 끌기(시선)는 모션 결과 **위에 더한다**.
+            let add = |rt: &mut mocari::runtime::ModelRuntime, id: &str, v: f32| {
+                let cur = rt.parameter_value(id).unwrap_or(0.0);
+                rt.set_parameter(id, cur + v);
+            };
             put(rt, "ParamBreath", (t * 1.6).sin() * 0.5 + 0.5);
             // 마우스를 쳐다본다. 창이 포커스를 안 받으므로(with_active(false)) 창 안
             // 이벤트로는 커서를 못 본다 — OS 에 전역 위치를 직접 묻는다.
@@ -565,13 +574,13 @@ impl App {
             self.look_now.0 += (mx - self.look_now.0) * ease;
             self.look_now.1 += (my - self.look_now.1) * ease;
             let (lx, ly) = self.look_now;
-            put(rt, "ParamAngleX", lx * 30.0);
-            put(rt, "ParamAngleY", ly * 30.0);
-            put(rt, "ParamAngleZ", lx * ly * -10.0);
-            put(rt, "ParamEyeBallX", lx);
-            put(rt, "ParamEyeBallY", ly);
-            put(rt, "ParamBodyAngleX", lx * 10.0);
-            put(rt, "ParamBodyAngleY", ly * 5.0);
+            add(rt, "ParamAngleX", lx * 30.0);
+            add(rt, "ParamAngleY", ly * 30.0);
+            add(rt, "ParamAngleZ", lx * ly * -10.0);
+            add(rt, "ParamEyeBallX", lx);
+            add(rt, "ParamEyeBallY", ly);
+            add(rt, "ParamBodyAngleX", lx * 10.0);
+            add(rt, "ParamBodyAngleY", ly * 5.0);
             let blink = { let c = t % 4.0; if c < 0.06 { 1.0 - c / 0.06 } else if c < 0.12 { (c - 0.06) / 0.06 } else { 1.0 } };
             put(rt, "ParamEyeLOpen", blink);
             put(rt, "ParamEyeROpen", blink);
@@ -903,6 +912,14 @@ fn expression_files(model3: &std::path::Path) -> Vec<std::path::PathBuf> {
         .unwrap_or_default()
 }
 
+/// 시선을 손으로 박아 보는 창구(`KASAPET_LOOK=0.9,-0.5`). 커서를 못 움직이는 자리에서
+/// 「정말 따라보는가」를 가르는 유일한 길이다 — 화면 두 장을 견주면 바로 보인다.
+fn look_override() -> Option<(f32, f32)> {
+    let v = std::env::var("KASAPET_LOOK").ok()?;
+    let (a, b) = v.split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
 /// 손 모양 커서를 씌우거나 화살표로 되돌린다.
 ///
 /// 창에 매달지 않고 직접 지운다 — 포커스를 안 받는 창이라 macOS 가 그 창의 커서
@@ -911,12 +928,10 @@ fn expression_files(model3: &std::path::Path) -> Vec<std::path::PathBuf> {
 #[cfg(target_os = "macos")]
 fn set_hand_cursor(hand: bool) {
     use objc2_app_kit::NSCursor;
-    unsafe {
-        if hand {
-            NSCursor::pointingHandCursor().set();
-        } else {
-            NSCursor::arrowCursor().set();
-        }
+    if hand {
+        NSCursor::pointingHandCursor().set();
+    } else {
+        NSCursor::arrowCursor().set();
     }
 }
 

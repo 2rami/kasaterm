@@ -3433,9 +3433,9 @@ impl App {
         let now = std::time::Instant::now();
         let mut last = LAST.lock().unwrap();
 
-        let mut waiting: Vec<String> = Vec::new();
+        let mut waiting: Vec<(String, String)> = Vec::new();
         let mut stalled: Vec<String> = Vec::new();
-        let mut busy: Vec<(String, String)> = Vec::new();
+        let mut busy: Vec<(String, String, u64)> = Vec::new();
         for (id, a) in &self.pane_activity {
             let who = self
                 .pane_character_if_known(id)
@@ -3443,13 +3443,24 @@ impl App {
             if a.stalled.is_some() || a.has_error {
                 stalled.push(who);
             } else if a.status == "waiting" || a.status == "blocked" {
-                waiting.push(who);
+                waiting.push((who, doing_now(a.waiting_for.as_deref().unwrap_or(""))));
             } else if a.status == "working" || a.status == "building" || a.bg_active {
-                busy.push((who, doing_now(&a.intent)));
+                // 몇 분째인지가 「지금 뭐 하나」의 절반이다 — 잠깐 도는 일과 오래 도는
+                // 일이 같은 문장으로 보이면 어느 쪽을 봐야 할지 알 수가 없다.
+                let mins = a
+                    .busy_since
+                    .map(|t| t.elapsed().as_secs() / 60)
+                    .unwrap_or(0);
+                // 대화를 줄이는 중이면 그게 지금 하는 일이다.
+                let what = match a.compact_pct {
+                    Some(p) => format!("대화 줄이는 중 {p}%"),
+                    None => doing_now(&a.intent),
+                };
+                busy.push((who, what, mins));
             }
         }
         waiting.sort();
-        waiting.dedup();
+        waiting.dedup_by(|a, b| a.0 == b.0);
         stalled.sort();
         stalled.dedup();
         busy.sort();
@@ -3466,17 +3477,30 @@ impl App {
         }
 
         let (state, text) = if let Some(who) = stalled.first() {
-            ("error", format!("{who}이(가) 막혔어요"))
+            let why = self
+                .pane_activity
+                .values()
+                .find_map(|a| a.stalled.clone())
+                .unwrap_or_else(|| "막혔어요".to_string());
+            ("error", format!("{who}{} {why}", josa(who, "은", "는")))
         } else if !waiting.is_empty() {
-            let who = &waiting[TURN.load(std::sync::atomic::Ordering::Relaxed) % waiting.len()];
-            ("wait", format!("{who}이(가) 답을 기다려요"))
-        } else if !busy.is_empty() {
-            let (who, what) =
-                &busy[TURN.load(std::sync::atomic::Ordering::Relaxed) % busy.len()];
-            let line = if what.is_empty() {
-                format!("{who}이(가) 일하는 중")
+            let i = TURN.load(std::sync::atomic::Ordering::Relaxed) % waiting.len();
+            let (who, why) = &waiting[i];
+            let line = if why.is_empty() {
+                format!("{who}{} 답을 기다려요", josa(who, "이", "가"))
             } else {
-                format!("{who} · {what}")
+                format!("{who}{} {why} 기다려요", josa(who, "은", "는"))
+            };
+            ("wait", line)
+        } else if !busy.is_empty() {
+            let i = TURN.load(std::sync::atomic::Ordering::Relaxed) % busy.len();
+            let (who, what, mins) = &busy[i];
+            let ja = josa(who, "은", "는");
+            let line = match (what.is_empty(), mins) {
+                (true, 0) => format!("{who}{ja} 일하는 중"),
+                (true, m) => format!("{who}{ja} {m}분째 일하는 중"),
+                (false, 0) => format!("{who}{ja} {what}"),
+                (false, m) => format!("{who}{ja} {what} · {m}분째"),
             };
             ("busy", line)
         } else {
@@ -3824,6 +3848,23 @@ pub(crate) fn pet_characters() -> Vec<String> {
         .unwrap_or_default();
     v.sort();
     v
+}
+
+/// 이름 뒤에 붙는 조사를 고른다 — 받침이 있으면 앞것, 없으면 뒷것.
+///
+/// 「이(가)」처럼 둘 다 적어 두면 읽는 사람이 고르게 떠넘기는 셈이고, 말풍선 한 줄에
+/// 괄호가 끼면 문장이 아니라 서식으로 읽힌다(2026-09-07 지적).
+///
+/// 한글이 아니면 받침이 없는 것으로 친다. 로마자 이름(Mao·huohuo)은 우리말로 읽을 때
+/// 받침이 붙는 경우가 드물고, 틀려도 「마오는」이 「마오은」보다 낫다.
+fn josa(word: &str, with_final: &'static str, without: &'static str) -> &'static str {
+    let Some(c) = word.chars().last() else { return without };
+    let u = c as u32;
+    if (0xAC00..=0xD7A3).contains(&u) && (u - 0xAC00) % 28 != 0 {
+        with_final
+    } else {
+        without
+    }
 }
 
 /// 「지금 뭘 하나」를 한 조각으로. 도구 라벨은 `설명 — 명령` 꼴이라 앞의 설명만 쓴다 —
@@ -4435,5 +4476,31 @@ mod room_rename_tests {
     fn 빈_교실_오버레이는_뒤의_자리표시자를_숨긴다() {
         let view = include_str!("../../../web/arona-ui/src/components/ClassroomView.tsx");
         assert!(view.contains("onAdd && sorted.length > 0 && seats.slice(sorted.length)"));
+    }
+}
+
+#[cfg(test)]
+mod josa_tests {
+    use super::josa;
+
+    /// 받침이 있으면 앞것, 없으면 뒷것 — 「이(가)」로 둘 다 적는 것이 아니라 골라 준다.
+    #[test]
+    fn picks_by_final_consonant() {
+        assert_eq!(josa("유즈", "이", "가"), "가");
+        assert_eq!(josa("코하루", "이", "가"), "가");
+        // 받침 있는 쪽 — 학생 이름은 대개 모음으로 끝나 이 갈래가 드물다.
+        assert_eq!(josa("선생님", "이", "가"), "이");
+        assert_eq!(josa("아리스", "이", "가"), "가");
+        assert_eq!(josa("세이아", "은", "는"), "는");
+        assert_eq!(josa("호두", "은", "는"), "는");
+        assert_eq!(josa("모모이", "은", "는"), "는");
+    }
+
+    /// 한글이 아니면 받침 없는 쪽. 「마오은」보다 「마오는」이 낫다.
+    #[test]
+    fn non_hangul_falls_back_to_the_open_form() {
+        assert_eq!(josa("Mao", "은", "는"), "는");
+        assert_eq!(josa("huohuo", "이", "가"), "가");
+        assert_eq!(josa("", "은", "는"), "는");
     }
 }
