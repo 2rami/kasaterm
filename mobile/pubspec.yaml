@@ -33,8 +33,6 @@ flutter:
     # 데스크톱이 claude 화면에 세우는 도트 그대로 — 작업 중엔 스피너 자리에서 걷고(walk 6장),
     # 쉴 땐 입력상자 위에 선다(idle 4장). 파일명은 데스크톱과 같은 <slug>-N.png.
     - assets/students/walk/
-    - assets/students/wave/
-    - assets/students/cheer/
     - assets/students/idle/
     # 상태줄 모델 표식(U+E0C0·E0C1) 자리에 데스크톱과 같은 로고 — 알파만 쓰고 색은 입힌다.
     - assets/icons/

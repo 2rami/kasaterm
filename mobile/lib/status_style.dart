@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 import 'server.dart';
-import 'student_art.dart';
 
 /// 학생 상태의 갈래 — 색·아이콘·말이 여기 하나로 묶인다.
 enum PaneMood { waiting, working, done, resting, closed }
@@ -28,20 +27,6 @@ class StatusStyle {
 
   /// 지금 움직이는가 — 점이 숨 쉬듯 깜빡인다.
   bool get live => mood == PaneMood.working;
-
-  /// 도트가 하는 동작 — 데스크톱 사이드바와 같은 규칙: 일하면 걷고(walk), 승인을
-  /// 기다리면 손 흔들고(wave), 답·질문을 기다리거나 쉬면 서서 숨 쉬고(idle), 방금
-  /// 끝냈으면 만세(cheer). 닫힌 pane 만 멈춘 얼굴.
-  StudentMotion? get motion => switch (mood) {
-    PaneMood.working => StudentMotion.walk,
-    PaneMood.waiting =>
-      icon == Icons.pan_tool_alt_rounded
-          ? StudentMotion.wave
-          : StudentMotion.idle,
-    PaneMood.done => StudentMotion.cheer,
-    PaneMood.resting => StudentMotion.idle,
-    PaneMood.closed => null,
-  };
 
   static const attention = Color(0xffFA8C2A);
   static const success = Color(0xff3FB950);
@@ -257,5 +242,163 @@ class Appear extends StatelessWidget {
       child: Transform.translate(offset: Offset(0, 10 * (1 - t)), child: child),
     ),
     child: child,
+  );
+}
+
+/// 얼굴 둘레의 상태 테 — 작업 중이면 호 하나가 돌고(진행 중이라는 뜻), 사람을
+/// 기다리면 주황 테가 서 있다. 폰에선 도트가 너무 작아 얼굴에 상태를 얹는다
+/// (2026-09-07 지시 「그냥 프사만 뜨게 하자, 작업 중 애니메이션」).
+class StatusRing extends StatefulWidget {
+  const StatusRing({
+    super.key,
+    required this.style,
+    required this.child,
+    this.size = 40,
+    this.stroke = 2.5,
+  });
+
+  final StatusStyle style;
+  final Widget child;
+  final double size;
+  final double stroke;
+
+  @override
+  State<StatusRing> createState() => _StatusRingState();
+}
+
+class _StatusRingState extends State<StatusRing>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1400),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _sync();
+  }
+
+  @override
+  void didUpdateWidget(StatusRing old) {
+    super.didUpdateWidget(old);
+    if (old.style.mood != widget.style.mood) _sync();
+  }
+
+  void _sync() {
+    if (widget.style.live) {
+      if (!_ctl.isAnimating) _ctl.repeat();
+    } else {
+      _ctl.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final st = widget.style;
+    final pad = widget.stroke + 2;
+    final box = widget.size + pad * 2;
+    return SizedBox(
+      width: box,
+      height: box,
+      child: AnimatedBuilder(
+        animation: _ctl,
+        builder: (context, child) => CustomPaint(
+          painter: _RingPainter(
+            color: st.color,
+            stroke: widget.stroke,
+            // 도는 호는 작업 중에만, 꽉 찬 테는 기다림에만. 나머지는 테 없음.
+            sweep: st.live ? 0.28 : (st.needsYou ? 1.0 : 0.0),
+            turn: _ctl.value,
+          ),
+          child: child,
+        ),
+        child: Padding(padding: EdgeInsets.all(pad), child: widget.child),
+      ),
+    );
+  }
+}
+
+class _RingPainter extends CustomPainter {
+  const _RingPainter({
+    required this.color,
+    required this.stroke,
+    required this.sweep,
+    required this.turn,
+  });
+
+  final Color color;
+  final double stroke;
+
+  /// 테가 차지하는 비율(0~1). 1 이면 온 테, 0 이면 안 그린다.
+  final double sweep;
+
+  /// 호의 시작 각(0~1 바퀴).
+  final double turn;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (sweep <= 0) return;
+    final rect = Rect.fromLTWH(
+      stroke / 2,
+      stroke / 2,
+      size.width - stroke,
+      size.height - stroke,
+    );
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..strokeCap = StrokeCap.round;
+    if (sweep >= 1) {
+      canvas.drawOval(rect, paint);
+      return;
+    }
+    // 뒤에 옅은 온 테를 깔아 호가 어디를 도는지 보이게.
+    canvas.drawOval(
+      rect,
+      Paint()
+        ..color = color.withValues(alpha: 0.18)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = stroke,
+    );
+    const tau = 6.283185307179586;
+    canvas.drawArc(rect, turn * tau - tau / 4, sweep * tau, false, paint);
+  }
+
+  @override
+  bool shouldRepaint(_RingPainter o) =>
+      o.turn != turn || o.sweep != sweep || o.color != color;
+}
+
+/// 타일 바닥의 진행 막대 — 작업 중이면 빛이 흐르고, 아니면 자리를 안 차지한다
+/// (2026-09-07 지시 「프로세스바 애니메이션」). 끝을 모르는 일이라 정해진 길이가
+/// 아니라 흐름으로 보인다.
+class WorkingBar extends StatelessWidget {
+  const WorkingBar({super.key, required this.style});
+
+  final StatusStyle style;
+
+  @override
+  Widget build(BuildContext context) => AnimatedSize(
+    duration: const Duration(milliseconds: 240),
+    curve: Curves.easeOut,
+    alignment: Alignment.topCenter,
+    child: style.live
+        ? SizedBox(
+            height: 3,
+            child: LinearProgressIndicator(
+              minHeight: 3,
+              color: style.color,
+              backgroundColor: style.color.withValues(alpha: 0.16),
+            ),
+          )
+        : const SizedBox(height: 0, width: double.infinity),
   );
 }

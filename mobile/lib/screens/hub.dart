@@ -611,9 +611,8 @@ class _MiniCell extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         if (p != null && face >= 14)
-                          StudentMotionSprite(
+                          StudentFace(
                             slug: p.slug,
-                            motion: st?.motion,
                             url: p.slug == null
                                 ? null
                                 : server.avatar(p.slug!, machine: p.machine),
@@ -679,59 +678,58 @@ class _PaneTile extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           onLongPress: onLongPress,
-          child: Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Container(width: 4, height: 60, color: accent),
-              const SizedBox(width: 10),
-              Hero(
-                tag: 'face-${pane.machine}-${pane.id}',
-                // 기다리는 학생은 멈춰 선 얼굴에 주황 테를 두른다 — 걷는 학생들 사이에서
-                // 「나를 봐 달라」가 한눈에 갈리게.
-                child: Container(
-                  padding: const EdgeInsets.all(2),
-                  decoration: st.needsYou
-                      ? BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(color: st.color, width: 2),
-                        )
-                      : null,
-                  child: StudentMotionSprite(
-                    slug: slug,
-                    motion: st.motion,
-                    url: slug == null
-                        ? null
-                        : server.avatar(slug, machine: pane.machine),
-                    shell: pane.isShell,
-                    size: 40,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      pane.displayName,
-                      style: theme.textTheme.titleSmall,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (pane.subtitle.isNotEmpty)
-                      Text(
-                        pane.subtitle,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: scheme.onSurfaceVariant,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+              Row(
+                children: [
+                  Container(width: 4, height: 60, color: accent),
+                  const SizedBox(width: 10),
+                  // 프사에 상태를 얹는다 — 작업 중이면 테가 돌고, 기다리면 주황 테.
+                  Hero(
+                    tag: 'face-${pane.machine}-${pane.id}',
+                    child: StatusRing(
+                      style: st,
+                      size: 40,
+                      child: StudentFace(
+                        slug: slug,
+                        url: slug == null
+                            ? null
+                            : server.avatar(slug, machine: pane.machine),
+                        shell: pane.isShell,
+                        size: 40,
                       ),
-                  ],
-                ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          pane.displayName,
+                          style: theme.textTheme.titleSmall,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        if (pane.subtitle.isNotEmpty)
+                          Text(
+                            pane.subtitle,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  StatusChip(pane: pane),
+                  const SizedBox(width: 10),
+                ],
               ),
-              const SizedBox(width: 8),
-              StatusChip(pane: pane),
-              const SizedBox(width: 10),
+              WorkingBar(style: st),
             ],
           ),
         ),
