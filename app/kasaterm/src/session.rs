@@ -3453,6 +3453,30 @@ impl App {
         (requested < total).then_some(requested != active)
     }
 
+    /// 방 단축키·사이드바 클릭이 함께 쓰는 「그 방으로」. 설정·보드는 `switch_window`
+    /// 로 트리만 바꿔 넣으면 돌아갈 자리(return_pane)·캐시 새로 읽기 같은 진입 절차가
+    /// 빠지므로 각자의 열기 함수로 보낸다 — 사이드바 카드의 `⌘N` 배지가 그 방에서도
+    /// 참말이려면 이 갈래가 필요했다(2026-09-07 지시 「커맨드 키 있으면 작동하게」).
+    pub(crate) fn goto_room(&mut self, idx: usize) {
+        if idx >= self.windows.len() {
+            return;
+        }
+        match self.internal_room_kind_at(idx) {
+            Some(crate::internal_room::InternalRoomKind::Settings) => {
+                self.commit_room_rename();
+                self.open_settings_room(None);
+            }
+            Some(crate::internal_room::InternalRoomKind::Board) => {
+                self.commit_room_rename();
+                self.open_board_room();
+            }
+            None => {
+                self.commit_room_rename();
+                self.switch_window(idx);
+            }
+        }
+    }
+
     pub(crate) fn switch_window(&mut self, idx: usize) {
         let Some(changes_room) =
             Self::room_selection_changes(idx, self.windows.len(), self.active_window)

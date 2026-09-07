@@ -6715,6 +6715,23 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                // 내부 방(설정·보드)에서도 방 단축키는 산다. 아래 두 갈래는 키를 전부
+                // 그 화면에 넘기므로, 사이드바 카드가 약속한 `⌘N` 이 설정 안에선
+                // 죽어 있었다(2026-09-07 지시 「커맨드 키 있으면 작동하게 하던가
+                // 아니면 빼버리던가」). 글자 입력 중이어도 ⌘숫자는 글자가 아니다.
+                if (self.settings_room_active() || self.board_room_active())
+                    && matches!(event.state, ElementState::Pressed)
+                    && !event.repeat
+                    && self.host_mod()
+                {
+                    if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
+                        if let Some(idx) = crate::input::room_digit(code) {
+                            self.goto_room(idx);
+                            window.request_redraw();
+                            return;
+                        }
+                    }
+                }
                 if self.settings_room_active() {
                     if matches!(event.state, ElementState::Pressed)
                         && !event.repeat

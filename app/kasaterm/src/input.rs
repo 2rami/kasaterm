@@ -3193,21 +3193,9 @@ impl App {
                         }
                         return;
                     }
-                    let win_digit = match code {
-                        KeyCode::Digit1 | KeyCode::Numpad1 => Some(0),
-                        KeyCode::Digit2 | KeyCode::Numpad2 => Some(1),
-                        KeyCode::Digit3 | KeyCode::Numpad3 => Some(2),
-                        KeyCode::Digit4 | KeyCode::Numpad4 => Some(3),
-                        KeyCode::Digit5 | KeyCode::Numpad5 => Some(4),
-                        KeyCode::Digit6 | KeyCode::Numpad6 => Some(5),
-                        KeyCode::Digit7 | KeyCode::Numpad7 => Some(6),
-                        KeyCode::Digit8 | KeyCode::Numpad8 => Some(7),
-                        KeyCode::Digit9 | KeyCode::Numpad9 => Some(8),
-                        _ => None,
-                    };
-                    if let Some(idx) = win_digit {
+                    if let Some(idx) = room_digit(code) {
                         if self.tmux.is_none() {
-                            self.switch_window(idx);
+                            self.goto_room(idx);
                             return;
                         }
                     }
@@ -5066,5 +5054,24 @@ mod zoom_key_tests {
         assert!(!a(99.0, hog_polls() - 1).is_hog());
         // 1분 내내 코어 하나를 태우면 그때부터 팬 이유로 본다.
         assert!(a(99.0, hog_polls()).is_hog());
+    }
+}
+
+/// 방 단축키(⌘1…⌘9, 그 외 OS 는 Ctrl+Shift+숫자)의 숫자 → 방 인덱스. 사이드바 카드의
+/// `⌘N` 배지가 약속하는 그 키다 — `forward_key` 와 내부 방(설정·보드) 키 처리기가
+/// 같은 표를 봐야 배지가 어느 화면에서든 참말이 된다.
+pub(crate) fn room_digit(code: winit::keyboard::KeyCode) -> Option<usize> {
+    use winit::keyboard::KeyCode;
+    match code {
+        KeyCode::Digit1 | KeyCode::Numpad1 => Some(0),
+        KeyCode::Digit2 | KeyCode::Numpad2 => Some(1),
+        KeyCode::Digit3 | KeyCode::Numpad3 => Some(2),
+        KeyCode::Digit4 | KeyCode::Numpad4 => Some(3),
+        KeyCode::Digit5 | KeyCode::Numpad5 => Some(4),
+        KeyCode::Digit6 | KeyCode::Numpad6 => Some(5),
+        KeyCode::Digit7 | KeyCode::Numpad7 => Some(6),
+        KeyCode::Digit8 | KeyCode::Numpad8 => Some(7),
+        KeyCode::Digit9 | KeyCode::Numpad9 => Some(8),
+        _ => None,
     }
 }
