@@ -87,6 +87,50 @@ fn run() -> Result<Option<Response>> {
         run_board_watch(&socket_path, interval)?;
         return Ok(None);
     }
+    // `pet-say` 는 바탕화면 펫에게 한 줄 건네는 문 — 소켓을 **안 거친다**.
+    //
+    // 펫은 kasaterm 이 꺼져 있어도 사는 프로세스이고, 이 줄을 넣는 쪽(나쵸네코)은
+    // 다른 기계에서 ssh 로 들어온다. 소켓을 거치면 앱이 내려간 동안 밀어 넣은 것이
+    // 그냥 사라지므로, 파일에 곧장 덧붙인다 — 그러면 앱이 다음에 켜질 때 읽는다.
+    //
+    //   pet-say [--from <곳>] [--state busy|wait|error] <문안>
+    if cmd == "pet-say" {
+        let mut from = "나쵸".to_string();
+        let mut state = "busy".to_string();
+        let mut rest: Vec<String> = Vec::new();
+        let mut it = args.into_iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--from" => from = it.next().unwrap_or_default(),
+                "--state" => state = it.next().unwrap_or_default(),
+                _ => rest.push(a),
+            }
+        }
+        let text = rest.join(" ");
+        if text.trim().is_empty() {
+            return Err(anyhow!("pet-say 는 건넬 문안이 필요하다"));
+        }
+        let dir = kasa_socket::home_dir()
+            .ok_or_else(|| anyhow!("홈 폴더를 못 찾았다"))?
+            .join(".config/kasaterm/pet");
+        std::fs::create_dir_all(&dir)?;
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let line = serde_json::json!({
+            "from": from,
+            "state": state,
+            "text": text,
+            "at": at,
+        });
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("inbox.jsonl"))?;
+        writeln!(f, "{line}")?;
+        return Ok(None);
+    }
     // `rooms` 는 board 를 방(창)별로 접어 사람이 읽는 표로 낸다 — 위임 상대를 고르는 자리.
     if cmd == "rooms" {
         let socket_path = resolve_socket_path()?;
@@ -1065,6 +1109,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli attention [--surface <id>] [reason]     # flag a pane blocked on a permission/input prompt (Notification hook)");
     eprintln!("  kasaterm-cli done [--surface <id>] <succeeded|failed> [한 줄 요약]  # 브리프 완료 보고 — board 가 idle 추정 대신 이걸 정본으로 싣는다");
     eprintln!("  kasaterm-cli agent-status <start|end|clear> <subagent|background> [key] [라벨]  # 진행 표시 정본(PreToolUse/PostToolUse 훅)");
+    eprintln!("  kasaterm-cli pet-say [--from <곳>] [--state busy|wait|error] <문안>  # 바탕화면 펫에게 한 줄(앱이 꺼져 있어도 쌓인다)");
     eprintln!("  kasaterm-cli sessions [N]                 # 최근 claude 세션 목록(캐릭터색·캐릭터명, /resume 이 숨기는 팀 세션 포함)");
     eprintln!("  kasaterm-cli resume [N]                   # 위 목록에서 번호로 골라 그 자리에서 claude --resume");
     eprintln!("  kasaterm-cli rename [sid|sid8] <이름>     # 세션 제목 변경(teammate 세션 /rename 차단 우회, sid 생략=이 pane)");

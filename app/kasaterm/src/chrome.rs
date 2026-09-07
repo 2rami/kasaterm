@@ -2429,11 +2429,7 @@ impl App {
             self.close_inline_web();
         }
     }
-    fn open_inline_web(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        kind: InlineWebKind,
-    ) -> bool {
+    fn open_inline_web(&mut self, event_loop: &ActiveEventLoop, kind: InlineWebKind) -> bool {
         if self.inline_web.as_ref().is_some_and(|h| h.kind == kind) {
             if let Some(host) = self.inline_web.as_ref() {
                 host.window
@@ -2447,7 +2443,9 @@ impl App {
         let (port, _) = crate::mcp_panel_port_certain();
         if !arona_web_reachable(&port) {
             let label = "아로나";
-            self.set_toast(format!("{label} 화면을 열지 못했어요 — 잠시 뒤 다시 시도해 주세요"));
+            self.set_toast(format!(
+                "{label} 화면을 열지 못했어요 — 잠시 뒤 다시 시도해 주세요"
+            ));
             eprintln!("[inline-web] page unreachable: kind={kind:?} port={port}");
             return false;
         }
@@ -2543,7 +2541,9 @@ impl App {
         {
             self.account_switch_confirm = None;
         }
-        let Some(host) = self.inline_web.take() else { return };
+        let Some(host) = self.inline_web.take() else {
+            return;
+        };
         let restore_sidebar = host.restore_sidebar;
         if let Some(main) = &self.window {
             if let Some(child) = host.window.as_ref().filter(|_| host.visible) {
@@ -2567,8 +2567,12 @@ impl App {
     }
 
     pub(crate) fn sync_inline_web(&mut self) {
-        let Some(main) = self.window.clone() else { return };
-        let Ok(origin) = main.inner_position() else { return };
+        let Some(main) = self.window.clone() else {
+            return;
+        };
+        let Ok(origin) = main.inner_position() else {
+            return;
+        };
         let origin = origin.to_logical::<f64>(main.scale_factor());
         let zoom = (self.ui_zoom as f64).max(0.1);
         let inner = main.inner_size().to_logical::<f64>(main.scale_factor());
@@ -3447,17 +3451,18 @@ impl App {
                 })
                 .collect()
         };
-        let mut waiting: Vec<(String, String)> = Vec::new();
-        let mut stalled: Vec<String> = Vec::new();
-        let mut busy: Vec<(String, String, String, u64)> = Vec::new();
+        let mut waiting: Vec<(String, String, String)> = Vec::new();
+        let mut stalled: Vec<(String, String)> = Vec::new();
+        let mut busy: Vec<(String, String, String, u64, String)> = Vec::new();
         for (id, a) in &self.pane_activity {
             let who = self
                 .pane_character_if_known(id)
                 .unwrap_or_else(|| "누군가".to_string());
+            let pane = id.clone();
             if a.stalled.is_some() || a.has_error {
-                stalled.push(who);
+                stalled.push((who, pane));
             } else if a.status == "waiting" || a.status == "blocked" {
-                waiting.push((who, doing_now(a.waiting_for.as_deref().unwrap_or(""))));
+                waiting.push((who, doing_now(a.waiting_for.as_deref().unwrap_or("")), pane));
             } else if a.status == "working" || a.status == "building" || a.bg_active {
                 // 몇 분째인지가 「지금 뭐 하나」의 절반이다 — 잠깐 도는 일과 오래 도는
                 // 일이 같은 문장으로 보이면 어느 쪽을 봐야 할지 알 수가 없다.
@@ -3470,14 +3475,17 @@ impl App {
                     Some(p) => format!("대화 줄이는 중 {p}%"),
                     None => doing_now(&a.intent),
                 };
-                let task = titles.get(id).map(|t| task_name(t, &who)).unwrap_or_default();
-                busy.push((who, task, what, mins));
+                let task = titles
+                    .get(id)
+                    .map(|t| task_name(t, &who))
+                    .unwrap_or_default();
+                busy.push((who, task, what, mins, pane));
             }
         }
         waiting.sort();
         waiting.dedup_by(|a, b| a.0 == b.0);
         stalled.sort();
-        stalled.dedup();
+        stalled.dedup_by(|a, b| a.0 == b.0);
         busy.sort();
 
         // 급한 것부터. 막힌 사람이 있는데 「무엇을 하는 중」이라고 말하면 그 한 줄이
@@ -3491,7 +3499,23 @@ impl App {
             return;
         }
 
-        let (state, text) = if let Some(who) = stalled.first() {
+        // 바깥(슬랙·디스코드·다른 기계)에서 온 것이 먼저다. 이 창 안의 상태는 화면을
+        // 보면 알 수 있지만, 저쪽 일은 펫이 말하지 않으면 알 길이 없다.
+        let mut subject = String::new();
+        let (state, text) = if let Some((st, from, line)) = pet_inbox_pop() {
+            let st: &'static str = match st.as_str() {
+                "error" => "error",
+                "wait" => "wait",
+                _ => "busy",
+            };
+            let head = if from.trim().is_empty() {
+                line
+            } else {
+                format!("{from}\n{line}")
+            };
+            (st, head)
+        } else if let Some((who, pane)) = stalled.first() {
+            subject = pane.clone();
             let why = self
                 .pane_activity
                 .values()
@@ -3500,7 +3524,8 @@ impl App {
             ("error", format!("{who}{} {why}", josa(who, "은", "는")))
         } else if !waiting.is_empty() {
             let i = TURN.load(std::sync::atomic::Ordering::Relaxed) % waiting.len();
-            let (who, why) = &waiting[i];
+            let (who, why, pane) = &waiting[i];
+            subject = pane.clone();
             let line = if why.is_empty() {
                 format!("{who}{} 답을 기다려요", josa(who, "이", "가"))
             } else {
@@ -3509,7 +3534,8 @@ impl App {
             ("wait", line)
         } else if !busy.is_empty() {
             let i = TURN.load(std::sync::atomic::Ordering::Relaxed) % busy.len();
-            let (who, task, what, mins) = &busy[i];
+            let (who, task, what, mins, pane) = &busy[i];
+            subject = pane.clone();
             let ja = josa(who, "은", "는");
             // 첫 줄은 누가 무슨 일감을, 둘째 줄은 그 안에서 지금 무엇을 몇 분째.
             // 한 줄로 이으면 260px 안에서 어느 쪽도 안 읽힌다.
@@ -3549,7 +3575,9 @@ impl App {
         let esc = text.replace('\\', "\\\\").replace('"', "\\\"");
         let _ = std::fs::write(
             dir.join("board.json"),
-            format!("{{\"state\":\"{state}\",\"text\":\"{esc}\"}}"),
+            // 지금 누구 이야기인지도 싣는다 — 펫이 되받아 말하려면 어디로 보낼지가
+            // 있어야 한다(말풍선은 그 pane 을 가리키고 있다).
+            format!("{{\"state\":\"{state}\",\"text\":\"{esc}\",\"pane\":\"{subject}\"}}"),
         );
     }
 }
@@ -3863,7 +3891,9 @@ fn notify_osascript(title: &str, body: &str) {
 
 /// 받아 둔 캐릭터 이름들(폴더 이름). 설정 화면의 목록이 이걸 그린다.
 pub(crate) fn pet_characters() -> Vec<String> {
-    let Some(d) = pet_model_dir() else { return Vec::new() };
+    let Some(d) = pet_model_dir() else {
+        return Vec::new();
+    };
     let mut v: Vec<String> = std::fs::read_dir(&d)
         .map(|rd| {
             rd.flatten()
@@ -3877,6 +3907,58 @@ pub(crate) fn pet_characters() -> Vec<String> {
     v
 }
 
+/// 바깥에서 들어온 한 줄을 꺼낸다(먼저 온 것부터, 꺼내면 지운다).
+///
+/// 나쵸네코가 슬랙·디스코드를 보고 `kasaterm-cli pet-say` 로 밀어 넣는 자리다. 소켓이
+/// 아니라 파일인 이유는 **앱이 꺼져 있어도 쌓여야** 하기 때문이다 — 펫은 앱과 수명이
+/// 다르고, 넣는 쪽은 다른 기계에서 ssh 로 들어온다.
+///
+/// 한 줄은 **한 번만** 말한다. 남겨 두고 돌리면 지나간 알림이 몇 분씩 되풀이돼, 정작
+/// 새로 온 것이 그 사이에 묻힌다. 오래된 것(10분)은 말도 못 하고 버린다 — 그때쯤이면
+/// 「지금 무슨 일이 있나」에 답을 못 한다.
+fn pet_inbox_pop() -> Option<(String, String, String)> {
+    let path = pet_model_dir()?.join("inbox.jsonl");
+    let body = std::fs::read_to_string(&path).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut rows: Vec<serde_json::Value> = body
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| {
+            let at = v.get("at").and_then(|a| a.as_u64()).unwrap_or(now);
+            now.saturating_sub(at) < 600
+        })
+        .collect();
+    if rows.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    let head = rows.remove(0);
+    let rest = rows
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if rest.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        let _ = std::fs::write(&path, format!("{rest}\n"));
+    }
+    let get = |k: &str| {
+        head.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let text = get("text");
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some((get("state"), get("from"), text))
+}
+
 /// 이름 뒤에 붙는 조사를 고른다 — 받침이 있으면 앞것, 없으면 뒷것.
 ///
 /// 「이(가)」처럼 둘 다 적어 두면 읽는 사람이 고르게 떠넘기는 셈이고, 말풍선 한 줄에
@@ -3885,7 +3967,9 @@ pub(crate) fn pet_characters() -> Vec<String> {
 /// 한글이 아니면 받침이 없는 것으로 친다. 로마자 이름(Mao·huohuo)은 우리말로 읽을 때
 /// 받침이 붙는 경우가 드물고, 틀려도 「마오는」이 「마오은」보다 낫다.
 fn josa(word: &str, with_final: &'static str, without: &'static str) -> &'static str {
-    let Some(c) = word.chars().last() else { return without };
+    let Some(c) = word.chars().last() else {
+        return without;
+    };
     let u = c as u32;
     if (0xAC00..=0xD7A3).contains(&u) && (u - 0xAC00) % 28 != 0 {
         with_final
@@ -3918,7 +4002,9 @@ fn pet_binary() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     [
         exe.parent().map(|d| d.join("kasapet")),
-        exe.parent().and_then(|d| d.parent()).map(|c| c.join("Resources/kasapet")),
+        exe.parent()
+            .and_then(|d| d.parent())
+            .map(|c| c.join("Resources/kasapet")),
     ]
     .into_iter()
     .flatten()
@@ -3960,7 +4046,9 @@ pub(crate) fn ensure_pet_previews() {
     }
     std::thread::spawn(move || {
         for name in todo {
-            let Some(model) = model3_in(&dir.join(&name)) else { continue };
+            let Some(model) = model3_in(&dir.join(&name)) else {
+                continue;
+            };
             let out = dir.join(&name).join("preview.png");
             let _ = std::process::Command::new(&bin)
                 .arg(model)
@@ -4157,7 +4245,10 @@ fn pet_model_dir() -> Option<std::path::PathBuf> {
 /// 모델을 처음 받아 오는 스크립트. 앱 번들 안이거나 개발 트리다.
 fn pet_fetch_script() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let bundled = exe.parent().and_then(|d| d.parent()).map(|c| c.join("Resources/fetch-pet-model.sh"));
+    let bundled = exe
+        .parent()
+        .and_then(|d| d.parent())
+        .map(|c| c.join("Resources/fetch-pet-model.sh"));
     let dev = exe
         .ancestors()
         .find(|a| a.join("scripts/fetch-pet-model.sh").is_file())
