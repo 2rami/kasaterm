@@ -84,6 +84,13 @@ void main() {
     expect(text(out.chunks[1]).startsWith('   xy'), isTrue);
   });
 
+  test('codex 도구 줄(└)은 글머리 아래로 접히고 글줄로 친다', () {
+    final out = reflowRow([r('  └ Search ${'a' * 60}')], 40);
+    expect(out.indent, 4);
+    expect(out.chunks.length, 2);
+    expect(text(out.chunks[1]).startsWith('    a'), isTrue);
+  });
+
   test('빈 행은 빈 줄 하나', () {
     expect(reflowRow(const [], 40).chunks, [<Run>[]]);
   });

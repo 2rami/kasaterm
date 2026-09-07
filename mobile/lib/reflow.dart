@@ -205,6 +205,11 @@ const _marks = {
   0x276f, // ❯
   0x25b8, // ▸
   0x25aa, // ▪
+  // codex 의 도구 호출 줄(「  └ Search …」「  ├ …」) — claude 의 ⎿ 와 같은 자리다.
+  // 없으면 접힌 조각이 글머리 아래가 아니라 앞 빈칸 자리로 가고, 선 그리기 글자라
+  // 글줄이 아닌 것으로 읽혀 되잇기에서도 빠진다(2026-09-07 폰 코덱스 화면).
+  0x2514, // └
+  0x251c, // ├
 };
 
 /// 행의 들여쓰기 — 앞 빈칸에, 글머리(- • ⎿ ❯ 「1.」「2)」)가 있으면 그 뒤 빈칸까지.
@@ -286,9 +291,11 @@ _Info _infoOf(List<Run> runs) {
   while (i < trimmed.length && trimmed[i].rune == 0x20) {
     i++;
   }
+  // 글머리로 쓰는 선 글자(└ ├)는 테두리가 아니라 글줄의 머리다.
   final prose =
       i < trimmed.length &&
-      !(trimmed[i].rune >= 0x2500 && trimmed[i].rune <= 0x259f);
+      (!(trimmed[i].rune >= 0x2500 && trimmed[i].rune <= 0x259f) ||
+          _marks.contains(trimmed[i].rune));
   var words = 0;
   var inWord = false;
   var firstWord = 0;
