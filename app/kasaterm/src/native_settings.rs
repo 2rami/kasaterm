@@ -4589,7 +4589,13 @@ fn account_row(
             .as_ref()
             .is_some_and(|(_, st, _)| st == "running" || st == "need_code")
     });
-    let show_actions = row.slot && !editing && !busy;
+    // 별명·격리·제거는 **등록한 슬롯**의 것이다 — 기본 로그인은 목록에 없는
+    // 암묵적 줄이라 이름을 붙일 데도 지울 대상도 없다.
+    let show_slot_actions = row.slot && !editing && !busy;
+    // 다시 로그인은 **모든 줄**에 있다. 기본 로그인도 만료되면 똑같이 풀리는데,
+    // 그 줄에만 단추가 없어 고치러 갈 데가 없었다(2026-09-07 「코덱슨 왜 재인증
+    // 이런거없어」 — codex 는 등록 슬롯이 없어 늘 이 줄뿐이다).
+    let show_actions = !editing && !busy;
     let rect = (x, *y, w, if editing { 62.0 } else { 54.0 });
     choice_card(
         g,
@@ -4638,8 +4644,10 @@ fn account_row(
     // 않게 잘라야 하는데, 글자 단추는 라벨 길이에 따라 폭이 달라진다.
     let w_remove = g.measure_chrome_text("제거", 10.5, false) + 32.0;
     let w_reauth = g.measure_chrome_text("재인증", 10.5, false) + 32.0;
-    let actions_w = if show_actions {
+    let actions_w = if show_slot_actions {
         w_remove + w_reauth + 2.0 + 60.0 + 10.0
+    } else if show_actions {
+        w_reauth + 10.0
     } else {
         14.0
     };
@@ -4746,23 +4754,26 @@ fn account_row(
 
     if show_actions {
         let by = rect.1 + (rect.3 - 26.0) / 2.0;
-        let mut rx = rect.0 + rect.2 - 8.0 - w_remove;
-        let action = match row.provider {
-            AccountProvider::Claude => SettingsAction::RemoveClaudeAccount(row.id.clone()),
-            AccountProvider::Codex => SettingsAction::RemoveCodexAccount(row.id.clone()),
-        };
-        mini_text_button(
-            g,
-            s,
-            hits,
-            rx,
-            by,
-            "trash-2",
-            "제거",
-            Target::Setting(action),
-            true,
-        );
-        rx -= w_reauth + 2.0;
+        let mut rx = rect.0 + rect.2 - 8.0 - w_reauth;
+        if show_slot_actions {
+            rx = rect.0 + rect.2 - 8.0 - w_remove;
+            let action = match row.provider {
+                AccountProvider::Claude => SettingsAction::RemoveClaudeAccount(row.id.clone()),
+                AccountProvider::Codex => SettingsAction::RemoveCodexAccount(row.id.clone()),
+            };
+            mini_text_button(
+                g,
+                s,
+                hits,
+                rx,
+                by,
+                "trash-2",
+                "제거",
+                Target::Setting(action),
+                true,
+            );
+            rx -= w_reauth + 2.0;
+        }
         mini_text_button(
             g,
             s,
@@ -4780,6 +4791,10 @@ fn account_row(
         );
         // 별명과 격리 로그인은 어쩌다 한 번이라 아이콘으로 남긴다 — 글자까지
         // 세우면 이름이 들어갈 자리가 사라진다.
+        if !show_slot_actions {
+            *y += rect.3 + 6.0;
+            return;
+        }
         rx -= 30.0;
         mini_icon_button(
             g,
