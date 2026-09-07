@@ -213,8 +213,10 @@ class _TerminalScreenState extends State<TerminalScreen>
             children: [
               Hero(
                 tag: 'face-${pane.machine}-${pane.id}',
-                child: StudentSprite(
+                child: StudentMotionSprite(
                   slug: slug,
+                  motion:
+                      StatusStyle.of(pane, scheme).motion ?? StudentMotion.idle,
                   url: slug == null
                       ? null
                       : widget.server.avatar(slug, machine: pane.machine),

@@ -611,8 +611,9 @@ class _MiniCell extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         if (p != null && face >= 14)
-                          StudentFace(
+                          StudentMotionSprite(
                             slug: p.slug,
+                            motion: st?.motion,
                             url: p.slug == null
                                 ? null
                                 : server.avatar(p.slug!, machine: p.machine),
@@ -670,6 +671,7 @@ class _PaneTile extends StatelessWidget {
     final scheme = theme.colorScheme;
     final accent = parseHexColor(pane.color) ?? scheme.primary;
     final slug = pane.slug;
+    final st = StatusStyle.of(pane, scheme);
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Card(
@@ -683,12 +685,25 @@ class _PaneTile extends StatelessWidget {
               const SizedBox(width: 10),
               Hero(
                 tag: 'face-${pane.machine}-${pane.id}',
-                child: StudentFace(
-                  slug: slug,
-                  url: slug == null
-                      ? null
-                      : server.avatar(slug, machine: pane.machine),
-                  shell: pane.isShell,
+                // 기다리는 학생은 멈춰 선 얼굴에 주황 테를 두른다 — 걷는 학생들 사이에서
+                // 「나를 봐 달라」가 한눈에 갈리게.
+                child: Container(
+                  padding: const EdgeInsets.all(2),
+                  decoration: st.needsYou
+                      ? BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(color: st.color, width: 2),
+                        )
+                      : null,
+                  child: StudentMotionSprite(
+                    slug: slug,
+                    motion: st.motion,
+                    url: slug == null
+                        ? null
+                        : server.avatar(slug, machine: pane.machine),
+                    shell: pane.isShell,
+                    size: 40,
+                  ),
                 ),
               ),
               const SizedBox(width: 10),

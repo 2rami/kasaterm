@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'server.dart';
+import 'student_art.dart';
 
 /// 학생 상태의 갈래 — 색·아이콘·말이 여기 하나로 묶인다.
 enum PaneMood { waiting, working, done, resting, closed }
@@ -27,6 +28,14 @@ class StatusStyle {
 
   /// 지금 움직이는가 — 점이 숨 쉬듯 깜빡인다.
   bool get live => mood == PaneMood.working;
+
+  /// 도트가 하는 동작 — 일하면 걷고, 쉬거나 끝냈으면 서서 숨 쉬고, 사람을 기다리면
+  /// 멈춰 선 얼굴(움직이는 것 사이에서 멈춘 것이 더 눈에 띈다). 닫힌 pane 도 얼굴.
+  StudentMotion? get motion => switch (mood) {
+    PaneMood.working => StudentMotion.walk,
+    PaneMood.done || PaneMood.resting => StudentMotion.idle,
+    PaneMood.waiting || PaneMood.closed => null,
+  };
 
   static const attention = Color(0xffFA8C2A);
   static const success = Color(0xff3FB950);
