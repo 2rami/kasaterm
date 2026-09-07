@@ -1699,13 +1699,25 @@ impl Backend for PtyBackend {
         // 자리마다 탭 줄 — 탭이 둘 이상인 pane 만. 보조 탭의 pid 는 `pid_to_pane` 으로
         // 방에는 실리지만 배치도 칸은 바깥 pane 하나라, 폰에서는 탭 학생이 어디 있는지
         // 알 길이 없었다.
-        let tabs_of: HashMap<String, (Vec<String>, usize)> = ws
+        // 첫 탭의 pid 는 비어 있을 수 있다 — 바깥 pane 의 번호가 곧 첫 탭이라 안
+        // 적는 경로가 있다(복원된 pane). 그대로 걸러 내면 탭이 둘이어도 목록엔 하나만
+        // 남아 폰이 탭 줄을 안 그린다(2026-09-08 아리스 실측). 그림·마크다운 탭은
+        // pid 가 없어 빠지므로, 앞 탭 자리는 남은 목록 기준으로 다시 센다.
+        let tabs_of: HashMap<String, (Vec<String>, Option<usize>)> = ws
             .panes
             .iter()
             .filter(|(_, p)| p.tabs.len() > 1)
             .map(|(id, p)| {
-                let pids: Vec<String> = p.tabs.iter().filter_map(|t| t.pid.clone()).collect();
-                (id.clone(), (pids, p.active_tab.min(p.tabs.len().saturating_sub(1))))
+                let kept: Vec<(usize, String)> = p
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, t)| {
+                        t.pid.clone().or_else(|| (i == 0).then(|| id.clone())).map(|pid| (i, pid))
+                    })
+                    .collect();
+                let active = kept.iter().position(|(i, _)| *i == p.active_tab);
+                (id.clone(), (kept.into_iter().map(|(_, pid)| pid).collect(), active))
             })
             .collect();
         drop(ws);
@@ -1713,7 +1725,7 @@ impl Backend for PtyBackend {
             for r in rects.iter_mut() {
                 if let Some((pids, active)) = tabs_of.get(&r.surface_id) {
                     r.tabs = pids.clone();
-                    r.tab_active = Some(*active);
+                    r.tab_active = *active;
                 }
             }
             rects
