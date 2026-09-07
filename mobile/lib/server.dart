@@ -113,7 +113,8 @@ class Pane {
   bool get isShell => name.isEmpty;
   String get displayName => isShell ? '셸' : name;
   String get subtitle {
-    if (title.isNotEmpty) return title;
+    // 붙인 이름이 세션 이름 자리에 이미 떠 있으면 둘째 줄에 한 번 더 안 쓴다.
+    if (title.isNotEmpty && title != session) return title;
     final parts = cwd.split('/').where((s) => s.isNotEmpty).toList();
     return parts.isEmpty ? '' : parts.last;
   }

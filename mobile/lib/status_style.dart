@@ -402,3 +402,86 @@ class WorkingBar extends StatelessWidget {
         : const SizedBox(height: 0, width: double.infinity),
   );
 }
+
+/// 우리가 붙인 세션 이름 — 데스크톱 pane 머리의 이름 옆 자리와 같다. 허브 타일과
+/// 터미널 화면 머리가 같은 모양으로 단다.
+class SessionTag extends StatelessWidget {
+  const SessionTag(this.name, {super.key});
+
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Text(
+      name,
+      style: theme.textTheme.labelSmall?.copyWith(
+        color: theme.colorScheme.primary,
+        fontWeight: FontWeight.w600,
+      ),
+      overflow: TextOverflow.ellipsis,
+    );
+  }
+}
+
+/// 데스크톱 pane 머리의 셋째 줄 — 하네스 아이콘 · 모델 · 브랜치 · 컨텍스트% · effort.
+/// 컨텍스트가 80% 를 넘으면 그 숫자만 주황으로 도드라진다.
+class PaneStatusLine extends StatelessWidget {
+  const PaneStatusLine({super.key, required this.pane});
+
+  final Pane pane;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final mute = theme.textTheme.labelSmall?.copyWith(
+      color: scheme.onSurfaceVariant,
+      fontFamily: 'TermMono',
+    );
+    final parts = pane.statusParts;
+    final pct = pane.contextPct;
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(
+        children: [
+          if (pane.harness == 'claude' || pane.harness == 'codex') ...[
+            Image.asset(
+              'assets/icons/${pane.harness}.png',
+              width: 11,
+              height: 11,
+              color: scheme.onSurfaceVariant,
+              errorBuilder: (_, _, _) => const SizedBox.shrink(),
+            ),
+            const SizedBox(width: 4),
+          ],
+          Flexible(
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  for (final (i, p) in parts.indexed) ...[
+                    if (i > 0) const TextSpan(text: ' · '),
+                    TextSpan(
+                      text: p,
+                      style: pct != null && p == '$pct%' && pct >= 80
+                          ? TextStyle(
+                              color: StatusStyle.attention,
+                              fontWeight: FontWeight.w700,
+                            )
+                          : null,
+                    ),
+                  ],
+                ],
+              ),
+              style: mute,
+              // 폰 폭엔 넷이 한 줄에 안 들어갈 때가 있다 — 컨텍스트%·effort 가 「…」로
+              // 사라지느니 한 줄 더 쓴다.
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

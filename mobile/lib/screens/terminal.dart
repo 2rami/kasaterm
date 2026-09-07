@@ -209,6 +209,8 @@ class _TerminalScreenState extends State<TerminalScreen>
       return Scaffold(
         appBar: AppBar(
           titleSpacing: 0,
+          // 세 줄(이름·세션 / 상태·연결 / 상태줄)이 기본 56 에 안 들어간다.
+          toolbarHeight: pane.statusParts.isEmpty ? kToolbarHeight : 84,
           title: Row(
             children: [
               Hero(
@@ -228,10 +230,20 @@ class _TerminalScreenState extends State<TerminalScreen>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      pane.displayName,
-                      style: theme.textTheme.titleMedium,
-                      overflow: TextOverflow.ellipsis,
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            pane.displayName,
+                            style: theme.textTheme.titleMedium,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if ((pane.session ?? '').isNotEmpty) ...[
+                          const SizedBox(width: 6),
+                          Flexible(child: SessionTag(pane.session!)),
+                        ],
+                      ],
                     ),
                     Row(
                       children: [
@@ -269,6 +281,8 @@ class _TerminalScreenState extends State<TerminalScreen>
                         ),
                       ],
                     ),
+                    // 데스크톱 pane 머리와 같은 셋째 줄 — 하네스·모델·브랜치·컨텍스트·effort.
+                    if (pane.statusParts.isNotEmpty) PaneStatusLine(pane: pane),
                   ],
                 ),
               ),

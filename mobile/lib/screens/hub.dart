@@ -633,13 +633,20 @@ class _MiniCell extends StatelessWidget {
                       ],
                     ),
                   ),
-                  if (waiting || busy)
+                  if (waiting)
                     Positioned(
                       top: 3,
                       right: 3,
-                      child: busy
-                          ? PulseDot(color: st!.color, size: 7)
-                          : Icon(st!.icon, size: 12, color: st.color),
+                      child: Icon(st!.icon, size: 12, color: st.color),
+                    ),
+                  // 작업 중은 칸 바닥에 흐르는 막대 — 허브 타일은 얼굴 테가 돌아
+                  // 같은 뜻을 두 번 말하지 않는다(2026-09-07 지시 「둘 중 하나만」).
+                  if (busy)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: WorkingBar(style: st!),
                     ),
                 ],
               ),
@@ -716,19 +723,9 @@ class _PaneTile extends StatelessWidget {
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            // 우리가 붙인 세션 이름 — 데스크톱 pane 머리와 같은 자리.
                             if ((pane.session ?? '').isNotEmpty) ...[
                               const SizedBox(width: 6),
-                              Flexible(
-                                child: Text(
-                                  pane.session!,
-                                  style: theme.textTheme.labelSmall?.copyWith(
-                                    color: scheme.primary,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
+                              Flexible(child: SessionTag(pane.session!)),
                             ],
                           ],
                         ),
@@ -742,7 +739,7 @@ class _PaneTile extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                           ),
                         if (pane.statusParts.isNotEmpty)
-                          _StatusLine(pane: pane),
+                          PaneStatusLine(pane: pane),
                       ],
                     ),
                   ),
@@ -751,7 +748,6 @@ class _PaneTile extends StatelessWidget {
                   const SizedBox(width: 10),
                 ],
               ),
-              WorkingBar(style: st),
             ],
           ),
         ),
@@ -762,60 +758,3 @@ class _PaneTile extends StatelessWidget {
 
 /// PC 상태줄과 같은 조각들 — 하네스 로고 · 모델 · 브랜치 · 컨텍스트% · effort.
 /// 컨텍스트가 많이 찼으면 그 숫자만 주황(경고색은 상태색과 같은 값).
-class _StatusLine extends StatelessWidget {
-  const _StatusLine({required this.pane});
-
-  final Pane pane;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final mute = theme.textTheme.labelSmall?.copyWith(
-      color: scheme.onSurfaceVariant,
-      fontFamily: 'TermMono',
-    );
-    final parts = pane.statusParts;
-    final pct = pane.contextPct;
-    return Padding(
-      padding: const EdgeInsets.only(top: 2),
-      child: Row(
-        children: [
-          if (pane.harness == 'claude' || pane.harness == 'codex') ...[
-            Image.asset(
-              'assets/icons/${pane.harness}.png',
-              width: 11,
-              height: 11,
-              color: scheme.onSurfaceVariant,
-              errorBuilder: (_, _, _) => const SizedBox.shrink(),
-            ),
-            const SizedBox(width: 4),
-          ],
-          Flexible(
-            child: Text.rich(
-              TextSpan(
-                children: [
-                  for (final (i, p) in parts.indexed) ...[
-                    if (i > 0) const TextSpan(text: '  ·  '),
-                    TextSpan(
-                      text: p,
-                      style: pct != null && p == '$pct%' && pct >= 80
-                          ? TextStyle(
-                              color: StatusStyle.attention,
-                              fontWeight: FontWeight.w700,
-                            )
-                          : null,
-                    ),
-                  ],
-                ],
-              ),
-              style: mute,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
