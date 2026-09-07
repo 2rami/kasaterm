@@ -24,41 +24,96 @@ pub(crate) struct CodexLimits {
     pub reset_credits: Option<String>,
 }
 
-fn cache() -> &'static Mutex<Option<(Instant, CodexLimits)>> {
-    static C: OnceLock<Mutex<Option<(Instant, CodexLimits)>>> = OnceLock::new();
+#[derive(Clone)]
+struct CachedLimits {
+    at: Instant,
+    account_id: String,
+    limits: CodexLimits,
+}
+
+fn cache() -> &'static Mutex<Option<CachedLimits>> {
+    static C: OnceLock<Mutex<Option<CachedLimits>>> = OnceLock::new();
     C.get_or_init(Default::default)
 }
 
-/// 마지막으로 읽은 값. 폴러가 채우고 화면이 읽는다.
+fn current_account_id() -> String {
+    crate::socket::read_codex_account()
+}
+
+fn cached_snapshot(cached: Option<&CachedLimits>, account_id: &str) -> Option<CodexLimits> {
+    cached
+        .filter(|value| value.account_id == account_id)
+        .map(|value| value.limits.clone())
+}
+
+fn cached_stale(cached: Option<&CachedLimits>, account_id: &str, every: Duration) -> bool {
+    cached.is_none_or(|value| value.account_id != account_id || value.at.elapsed() >= every)
+}
+
+/// 마지막으로 읽은 값. **현재 고른 계정에서 읽은 값만** 내준다.
+///
+/// 코덱스 계정을 바꾼 직후 옛 계정의 퍼센트를 새 이메일 옆에 그리면, 한도를 보고
+/// 옮기는 기능이 정반대 답을 준다. Claude 배지가 `account_dir` 을 대조하는 것과 같은
+/// 경계다.
 pub(crate) fn snapshot() -> Option<CodexLimits> {
-    cache().lock().ok()?.as_ref().map(|(_, v)| v.clone())
+    let account_id = current_account_id();
+    let cached = cache().lock().ok()?;
+    cached_snapshot(cached.as_ref(), &account_id)
 }
 
 /// 다시 물을 때가 됐나. app-server 를 띄우는 값이라 자주 부를 자리가 아니다.
 pub(crate) fn stale(every: Duration) -> bool {
+    let account_id = current_account_id();
     cache()
         .lock()
         .ok()
-        .map(|g| g.as_ref().is_none_or(|(at, _)| at.elapsed() >= every))
+        .map(|cached| cached_stale(cached.as_ref(), &account_id, every))
         .unwrap_or(false)
+}
+
+/// 로그인 완료 직후에는 같은 계정이어도 옛 한도를 버리고 바로 다시 묻는다.
+pub(crate) fn invalidate() {
+    if let Ok(mut cached) = cache().lock() {
+        *cached = None;
+    }
 }
 
 /// 코덱스에게 물어 캐시를 채운다. **블로킹이라 폴러 스레드에서만 부른다.**
 pub(crate) fn refresh() -> bool {
-    let Some(limits) = ask() else { return false };
+    let account_id = current_account_id();
+    let account_home = crate::socket::codex_account_dir(&account_id);
+    let Some(limits) = ask(account_home.as_deref()) else {
+        return false;
+    };
     if let Ok(mut g) = cache().lock() {
-        *g = Some((Instant::now(), limits));
+        *g = Some(CachedLimits {
+            at: Instant::now(),
+            account_id,
+            limits,
+        });
     }
     true
 }
 
-fn ask() -> Option<CodexLimits> {
+fn ask(account_home: Option<&std::path::Path>) -> Option<CodexLimits> {
     // 로그인 셸을 거치는 이유는 auth_probe 와 같다 — Finder 로 뜬 .app 의 PATH 에는
     // codex 가 없어 직접 spawn 하면 늘 실패한다.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let mut child = crate::proc::command(shell)
-        .arg("-lc")
-        .arg("codex app-server")
+    let mut command = crate::proc::command(shell);
+    command.arg("-lc").arg("codex app-server");
+    match account_home {
+        // `auth.json` 은 CODEX_HOME 아래에 있다는 Codex의 공식 계약을 그대로 쓴다.
+        // 설정에서 고른 슬롯을 여기에도 주지 않으면 하단바만 늘 기본 로그인의
+        // 한도를 읽고, 실제 pane 은 선택한 계정으로 뜨는 두 세계가 된다.
+        Some(home) => {
+            command.env("CODEX_HOME", home);
+        }
+        None => {
+            // kasaterm 을 Codex pane 안에서 띄웠더라도 기본 로그인은 ~/.codex 여야 한다.
+            command.env_remove("CODEX_HOME");
+        }
+    }
+    let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -81,7 +136,10 @@ fn ask() -> Option<CodexLimits> {
     let stdout = child.stdout.take()?;
     let mut out = None;
     // 응답 사이에 알림(remoteControl/status 등)이 섞여 오므로 id 로 고른다.
-    for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+    for line in std::io::BufReader::new(stdout)
+        .lines()
+        .map_while(Result::ok)
+    {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
@@ -103,7 +161,10 @@ fn parse(result: &serde_json::Value) -> Option<CodexLimits> {
             continue;
         };
         let pct = w.get("usedPercent").and_then(|v| v.as_f64())? as f32;
-        let mins = w.get("windowDurationMins").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let mins = w
+            .get("windowDurationMins")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
         if mins == 0 {
             continue;
         }
@@ -127,6 +188,27 @@ fn parse(result: &serde_json::Value) -> Option<CodexLimits> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 다른_계정의_캐시는_보이지_않고_즉시_낡는다() {
+        let cached = CachedLimits {
+            at: Instant::now(),
+            account_id: "codex-1".to_string(),
+            limits: CodexLimits::default(),
+        };
+        assert!(cached_snapshot(Some(&cached), "codex-1").is_some());
+        assert!(cached_snapshot(Some(&cached), "codex-2").is_none());
+        assert!(!cached_stale(
+            Some(&cached),
+            "codex-1",
+            Duration::from_secs(300)
+        ));
+        assert!(cached_stale(
+            Some(&cached),
+            "codex-2",
+            Duration::from_secs(300)
+        ));
+    }
 
     /// 실측 응답(2026-09-07). 창을 짧은 것부터 담고, 플랜과 초기화권도 함께 든다.
     #[test]

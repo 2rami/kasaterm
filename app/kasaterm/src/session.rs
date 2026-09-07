@@ -2713,12 +2713,12 @@ impl App {
             .iter()
             .position(|account| account.id == id)
         {
-            Some(index) => crate::settings::account_display(
+            Some(index) => crate::settings::codex_account_display(
                 id,
                 &self.set_codex_accounts[index].label,
                 &format!("계정 {}", index + 2),
             ),
-            None => crate::settings::account_display("", "", "기본 계정"),
+            None => crate::settings::codex_account_display("", "", "기본 계정"),
         }
     }
 

@@ -3643,6 +3643,7 @@ fn finish_login(id: &str, state: LoginState) {
         // 활성 계정은 작업대를 물으므로 그쪽 키도 함께 비운다.
         probe_cache().lock().unwrap().remove("");
         crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
+        crate::codexlimits::invalidate();
     }
     if let Ok(mut c) = login_cell().lock() {
         if c.0.as_ref().is_some_and(|j| j.id == id) {
@@ -4051,6 +4052,28 @@ pub(crate) fn codex_identity(id: &str) -> Option<String> {
     (!email.is_empty()).then(|| email.to_string())
 }
 
+/// Codex 슬롯의 화면 이름. Claude용 `account_display`를 쓰면 Codex 슬롯 id로
+/// Claude 인증을 물어 엉뚱한 계정이나 「계정 N」이 나온다. Codex의 auth.json에서
+/// 읽은 이메일과 사람이 붙인 별명을 한 규칙으로 합친다.
+pub(crate) fn codex_account_display(id: &str, label: &str, fallback: &str) -> String {
+    codex_account_display_from_identity(label, codex_identity(id).as_deref(), fallback)
+}
+
+fn codex_account_display_from_identity(
+    label: &str,
+    identity: Option<&str>,
+    fallback: &str,
+) -> String {
+    if label_is_auto(label) {
+        return identity.unwrap_or(fallback).to_string();
+    }
+    let label = label.trim();
+    match identity.filter(|email| !label.contains(email)) {
+        Some(email) => format!("{label} · {email}"),
+        None => label.to_string(),
+    }
+}
+
 /// 슬롯 이메일을 `settings.json` 에 남긴다 — **statusline 이 읽을 유일한 경로**다.
 ///
 /// 그 스크립트는 claude 가 초당 한 번 부르는 파이썬이라 슬롯 신원을 직접 물을 수
@@ -4137,7 +4160,9 @@ pub(crate) fn toggle(g: &mut gpu::GpuRenderer, r: Rect, on: bool, cursor: (f32, 
 
 #[cfg(test)]
 mod account_label_tests {
-    use super::{label_is_auto, merge_web_codes, put_web_code};
+    use super::{
+        codex_account_display_from_identity, label_is_auto, merge_web_codes, put_web_code,
+    };
 
     #[test]
     fn auto_labels_yield_to_email() {
@@ -4149,6 +4174,22 @@ mod account_label_tests {
         for l in ["개인계정", "사이오닉팀플랜", "계정", "계정 팀", "계정 2호"] {
             assert!(!label_is_auto(l), "별명을 자동으로 봤다: {l:?}");
         }
+    }
+
+    #[test]
+    fn codex_labels_use_the_codex_identity() {
+        assert_eq!(
+            codex_account_display_from_identity("", Some("me@example.com"), "계정 2"),
+            "me@example.com"
+        );
+        assert_eq!(
+            codex_account_display_from_identity("회사", Some("me@example.com"), "계정 2"),
+            "회사 · me@example.com"
+        );
+        assert_eq!(
+            codex_account_display_from_identity("", None, "계정 2"),
+            "계정 2"
+        );
     }
 
     #[test]
