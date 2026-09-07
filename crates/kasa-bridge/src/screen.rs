@@ -29,6 +29,12 @@ pub struct Cell {
     /// kasaterm 은 그리드에서 읽고, 사용자는 못 본다. 구버전 스냅샷 호환 위해 default.
     #[serde(default)]
     pub hidden: bool,
+    /// 이 칸에서 줄이 **소프트 랩**됐다(alacritty `WRAPLINE`) — 다음 행 첫 칸이 이
+    /// 줄의 이어짐이라는 뜻. 링크 감지가 좁은 창에서 두 줄로 꺾인 주소를 하나로 잇는
+    /// 근거다(2026-09-07 지적 「창 좁아지면 링크 인식이 이상하게 된다」). 행의 마지막
+    /// 칸에만 선다. 옛 스냅샷·레거시 브리지는 이 표식이 없어 default(false).
+    #[serde(default)]
+    pub wrapped: bool,
 }
 
 impl Cell {
@@ -43,6 +49,7 @@ impl Cell {
             inverse: false,
             dim: false,
             hidden: false,
+            wrapped: false,
         }
     }
 }
@@ -396,5 +403,7 @@ pub(crate) fn vt_cell(c: &vt100::Cell) -> Cell {
         dim: false,
         // vt100 crate 는 conceal 미노출 — 이 경로(레거시 브리지)는 마커 채널 없음.
         hidden: false,
+        // vt100 crate 는 줄넘김 표식도 안 준다 — 링크 감지는 채움 휴리스틱으로 잇는다.
+        wrapped: false,
     }
 }

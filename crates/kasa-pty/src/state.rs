@@ -3571,6 +3571,9 @@ fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
         hidden: cell
             .flags
             .contains(alacritty_terminal::term::cell::Flags::HIDDEN),
+        wrapped: cell
+            .flags
+            .contains(alacritty_terminal::term::cell::Flags::WRAPLINE),
     }
 }
 
