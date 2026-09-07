@@ -35,6 +35,9 @@ pub(crate) struct CustomThemeChoice {
 
 #[derive(Clone)]
 pub(crate) struct AccountChoice {
+    /// 그 슬롯의 이메일. 부제 문자열은 조직명일 수도 있어 거기서 되뽑으면
+    /// 도메인 표를 못 그린다.
+    pub(crate) email: String,
     provider: AccountProvider,
     id: String,
     name: String,
@@ -281,6 +284,7 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
     if active_id.is_empty() {
         let probe = crate::settings::auth_probe("");
         rows.push(AccountChoice {
+            email: probe.as_ref().map(|p| p.email.clone()).unwrap_or_default(),
             provider: AccountProvider::Claude,
             id: String::new(),
             name: "기본 로그인".to_string(),
@@ -324,6 +328,7 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
                 .filter(|badge| account.id == active_id && badge.account_dir == dir)
         });
         rows.push(AccountChoice {
+            email: probe.as_ref().map(|p| p.email.clone()).unwrap_or_default(),
             provider: AccountProvider::Claude,
             id: account.id.clone(),
             name: crate::settings::account_display(
@@ -344,6 +349,7 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
     }
 
     rows.push(AccountChoice {
+        email: crate::settings::codex_identity("").unwrap_or_default(),
         provider: AccountProvider::Codex,
         id: String::new(),
         name: "기본 로그인".to_string(),
@@ -357,6 +363,7 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
     for (index, account) in app.set_codex_accounts.iter().enumerate() {
         let identity = crate::settings::codex_identity(&account.id);
         rows.push(AccountChoice {
+            email: identity.clone().unwrap_or_default(),
             provider: AccountProvider::Codex,
             id: account.id.clone(),
             name: if account.label.trim().is_empty() {
@@ -4322,6 +4329,14 @@ fn home_accounts_view() -> Option<HomeAccountsView> {
                 }
             });
             Some(AccountChoice {
+                // 본진이 보낸 부제가 곧 그 계정의 신원이다 — 주소 꼴일 때만
+                // 도메인 표가 선다.
+                email: v
+                    .get("sub")
+                    .and_then(|x| x.as_str())
+                    .filter(|t| t.contains('@'))
+                    .unwrap_or("")
+                    .to_string(),
                 provider: AccountProvider::Claude,
                 active: id == value.active,
                 name: v.get("name").and_then(|x| x.as_str()).unwrap_or(&id).to_string(),
@@ -4686,6 +4701,14 @@ fn account_row(
         .unwrap_or(0.0);
     let sub_value = job_sub.as_deref().unwrap_or(&row.sub);
     let mut sub_x = text_x;
+    // 도메인 표는 **부제가 그 계정을 말할 때만** — 로그인 진행 같은 상태 문구
+    // 앞에 세우면 그게 주소인 줄로 읽힌다.
+    if job_sub.is_none() && !row.email.is_empty() {
+        let d = domain_badge(g, sub_x, rect.1 + 27.0, &row.email, 14.0);
+        if d > 0.0 {
+            sub_x += d + 6.0;
+        }
+    }
     if !sub_value.is_empty() {
         let sub = fit(g, sub_value, avail - usage_w, 10.5, false);
         let drawn = g.measure_chrome_text(&sub, 10.5, false);
@@ -5385,6 +5408,47 @@ fn mini_icon_button(
 
 /// 이름 옆에 붙는 알약. 상태를 한 낱말로 못박아 두면 어느 줄이 지금 쓰이는
 /// 것인지 카드 테두리 색을 해석하지 않고도 읽힌다.
+/// 이메일 앞에 붙는 도메인 표. 주소는 길어서 목록에서 한눈에 안 갈리는데, 어느
+/// 서비스 계정인지는 도메인 첫 글자로 거의 갈린다(2026-09-07 「메일에 도메인
+/// 아이콘붙여줘」). 색은 도메인에서 뽑으므로 같은 주소는 늘 같은 색이라, 여러
+/// 화면에 흩어진 같은 계정을 눈으로 잇는다.
+fn domain_badge(g: &mut gpu::GpuRenderer, x: f32, y: f32, email: &str, size: f32) -> f32 {
+    const PALETTE: [[u8; 4]; 6] = [
+        [214, 92, 92, 255],
+        [92, 148, 214, 255],
+        [86, 168, 116, 255],
+        [190, 140, 70, 255],
+        [150, 110, 200, 255],
+        [90, 160, 170, 255],
+    ];
+    let domain = match email.rsplit_once('@') {
+        Some((_, d)) if !d.is_empty() => d,
+        _ => return 0.0,
+    };
+    let Some(ch) = domain.chars().next() else {
+        return 0.0;
+    };
+    let mut h: u32 = 2166136261;
+    for b in domain.bytes() {
+        h = (h ^ b as u32).wrapping_mul(16777619);
+    }
+    let color = PALETTE[(h as usize) % PALETTE.len()];
+    round_rect(g, x, y, size, size, size / 2.0, color);
+    let f = size * 0.62;
+    let letter = ch.to_uppercase().to_string();
+    let tw = g.measure_chrome_text(&letter, f, true);
+    draw_text(
+        g,
+        x + (size - tw) / 2.0,
+        y + (size - f) / 2.0 - 0.5,
+        &letter,
+        f,
+        [255, 255, 255, 255],
+        true,
+    );
+    size
+}
+
 fn pill(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str, accent: bool) -> f32 {
     let f = 9.5;
     let w = g.measure_chrome_text(text, f, false) + 14.0;

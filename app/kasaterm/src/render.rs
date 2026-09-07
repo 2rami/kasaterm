@@ -12337,6 +12337,68 @@ impl App {
                                 }
                             }
                         }
+                        // 곁 단추 — 다시 로그인·목록에서 빼기. 설정 화면에만 있던
+                        // 것을 여기에도 둔다(2026-09-07 「하단바랑 설정이랑 완전
+                        // 똑같이 떠야해」): 로그인이 풀린 것을 **여기서** 보게 됐으니
+                        // 고치는 것도 여기여야 한다.
+                        //
+                        // 마우스가 그 줄에 있을 때만 뜬다. 늘 세우면 첫 줄 오른쪽의
+                        // 리셋 시각과 자리를 다투고, 계정이 넷이면 그 줄이 단추밭이
+                        // 된다. 히트는 줄 전체(전환)보다 **먼저** 넣는다 — 찾기가
+                        // 첫 매치를 쓰므로 순서가 곧 우선순위다.
+                        if on {
+                            let bf = tf - 0.5;
+                            let by = sry + 7.0;
+                            let mut bx = right;
+                            for (label, item, skip) in [
+                                (
+                                    "빼기",
+                                    AccountMenuItem::Forget(p, id.clone()),
+                                    // 기본 로그인은 뺄 수 있는 것이 아니다 — 목록에
+                                    // 없는 암묵적 첫 줄이라 지울 대상이 없다.
+                                    id.is_empty(),
+                                ),
+                                ("다시 로그인", AccountMenuItem::Reauth(p, id.clone()), false),
+                            ] {
+                                if skip {
+                                    continue;
+                                }
+                                let tw = g.measure_chrome_text(label, bf, false);
+                                bx -= tw + 14.0;
+                                let r = (bx - 5.0, by - 3.0, tw + 10.0, 18.0);
+                                let hot = hmx >= r.0
+                                    && hmx <= r.0 + r.2
+                                    && hmy >= r.1
+                                    && hmy <= r.1 + r.3;
+                                if hot {
+                                    round_rect(
+                                        g,
+                                        r.0,
+                                        r.1,
+                                        r.2,
+                                        r.3,
+                                        theme::radius_sm(),
+                                        theme::surface_active(),
+                                    );
+                                }
+                                g.draw_text(
+                                    bx,
+                                    by,
+                                    label,
+                                    gpu::DrawOpts {
+                                        font_size: bf,
+                                        color: if hot {
+                                            theme::text()
+                                        } else {
+                                            theme::text_mute()
+                                        },
+                                        bold: false,
+                                        italic: false,
+                                    },
+                                );
+                                self.account_menu_hits.push((item, r));
+                            }
+                        }
                         if !active {
                             self.account_menu_hits
                                 .push((AccountMenuItem::Select(p, id), (sx, sry, sw, arow_h)));

@@ -3792,6 +3792,15 @@ type ProbeCache = std::sync::Mutex<
     std::collections::HashMap<String, (std::time::Instant, Option<AuthProbe>)>,
 >;
 
+/// 신원 조회가 값을 하나 채울 때마다 오른다. 조회는 백그라운드 스레드라 App 의
+/// `chrome_dirty` 를 직접 못 세우는데, 그게 없으면 「로그인을 마쳤어요」가 뜬 뒤에도
+/// 다른 이유로 화면이 다시 그려질 때까지 옛 「로그인 필요」가 남는다(2026-09-07
+/// 「등록했는데 바로 안바뀌어」). 렌더 틱이 이 값을 보고 다시 그린다.
+pub(crate) fn probe_generation() -> &'static std::sync::atomic::AtomicU64 {
+    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    &GEN
+}
+
 fn probe_cache() -> &'static ProbeCache {
     static CACHE: std::sync::OnceLock<ProbeCache> = std::sync::OnceLock::new();
     CACHE.get_or_init(ProbeCache::default)
@@ -3801,6 +3810,7 @@ fn probe_cache() -> &'static ProbeCache {
 /// 리그에는 로그인이 없어, 심지 않으면 「이 줄이 누구인지」를 화면으로 확인할
 /// 길이 자체가 없다.
 pub(crate) fn seed_auth_probe(id: &str, probe: Option<AuthProbe>) {
+    probe_generation().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     probe_cache()
         .lock()
         .unwrap()
@@ -3862,6 +3872,7 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
             }
         };
         {
+            probe_generation().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut m = probe_cache().lock().unwrap();
             // 조회 자체가 실패했으면(셸이 안 뜸·JSON 이 아님) 알던 값을 유지한다 —
             // 답을 못 받은 것과 "로그인 안 됐다" 는 답을 받은 것은 다르다.

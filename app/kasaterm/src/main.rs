@@ -1463,6 +1463,11 @@ pub(crate) enum AccountMenuItem {
     Provider(AccountProvider),
     /// 서브메뉴 안의 계정 행. 빈 문자열 = 기본 로그인(env 를 아예 안 붙임).
     Select(AccountProvider, String),
+    /// 계정 행의 곁 단추 둘 — 다시 로그인, 목록에서 빼기. 설정 화면에만 있던
+    /// 것을 여기에도 둔다(2026-09-07 「하단바랑 설정이랑 완전 똑같이 떠야해」):
+    /// 로그인이 풀린 것을 **여기서** 보게 됐으니 고치는 것도 여기여야 한다.
+    Reauth(AccountProvider, String),
+    Forget(AccountProvider, String),
     /// 로스터 하단 액션 둘. Orca 와 같은 자리·같은 순서.
     UsageDetails,
     ManageAccounts,
@@ -5452,6 +5457,8 @@ struct App {
     account_label_edit: Option<(AccountProvider, String, String)>,
     /// 기계 명부에서 지금 고치는 칸 — (줄 번호, ssh 칸인가, 버퍼).
     machine_edit: Option<(usize, bool, String)>,
+    /// 마지막으로 화면에 반영한 신원 조회 세대. `settings::probe_generation`.
+    probe_seen: u64,
     /// 로그인 중인 슬롯에 붙여넣는 OAuth 코드 버퍼. 진행 중인 로그인은 한 건뿐이라
     /// 슬롯 id 를 함께 들 필요가 없다.
     login_code_edit: String,
@@ -5955,6 +5962,7 @@ impl App {
             custom_theme_label_edit: None,
             account_label_edit: None,
             machine_edit: None,
+            probe_seen: 0,
             login_code_edit: String::new(),
             settings_caret: 0,
             window_frame_save_due: None,
