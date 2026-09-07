@@ -40,6 +40,17 @@ http.Response _answer(http.Request req) {
         'window': 0,
         'cwd': '/w/shell',
       },
+      // 탭 안에 숨은 학생 — 옛 서버는 배치에 탭을 안 실어 어느 칸에도 없다.
+      {
+        'id': '%4',
+        'name': '세이아',
+        'title': '',
+        'status': 'waiting',
+        'kind': 'question',
+        'window': 0,
+        'cwd': '/w',
+        'color': '#b48cff',
+      },
     ];
   } else if (path.endsWith('sessions')) {
     body = {
@@ -58,7 +69,9 @@ http.Response _answer(http.Request req) {
           'panes': [
             {'surface_id': '%1', 'x': 0, 'y': 0, 'w': 60, 'h': 100},
             {'surface_id': '%2', 'x': 60, 'y': 0, 'w': 40, 'h': 55},
-            {'surface_id': '%3', 'x': 60, 'y': 55, 'w': 40, 'h': 45},
+            {'surface_id': '%3', 'x': 60, 'y': 55, 'w': 20, 'h': 45},
+            // 목록에 없는 pane(맨 셸) — 빈 상자가 아니라 터미널 글리프로.
+            {'surface_id': '%5', 'x': 80, 'y': 55, 'w': 20, 'h': 45},
           ],
         },
       ],
@@ -93,6 +106,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 1200));
     expect(find.text('게임개발부'), findsOneWidget);
     expect(find.text('아리스'), findsNWidgets(2));
+    // 숨은 탭 학생은 지도 밑 「탭 안」 줄에 서고, 목록에는 그대로 있다.
+    expect(find.text('탭 안'), findsOneWidget);
+    expect(find.text('세이아'), findsOneWidget);
     await expectLater(
       find.byType(HubScreen),
       matchesGoldenFile('goldens/hub_minimap.png'),

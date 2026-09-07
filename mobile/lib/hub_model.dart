@@ -28,6 +28,20 @@ class HubRoom {
     }
     return null;
   }
+
+  /// 배치도 어느 칸에도 안 앉은 학생 — 탭 안에 숨어 있는데 서버가 탭 목록을 안 주는
+  /// 경우(옛 판)다. 지도가 그를 빠뜨리면 「답 기다림」도 같이 사라지므로 따로 줄 세운다.
+  /// 서버가 탭을 실어 주면 자연히 빈다.
+  List<Pane> get unplaced {
+    if (rects.isEmpty) return const [];
+    final seated = <String>{
+      for (final r in rects) ...[r.surface, ...r.tabs],
+    };
+    return [
+      for (final p in panes)
+        if (!seated.contains(p.id)) p,
+    ];
+  }
 }
 
 class HubSection {

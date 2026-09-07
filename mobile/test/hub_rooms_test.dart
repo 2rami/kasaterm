@@ -43,6 +43,35 @@ void main() {
     expect(rooms[1].paneOf('%9'), isNull);
   });
 
+  test('칸에도 탭에도 안 앉은 학생은 unplaced 로 따로 선다', () {
+    final layouts = [
+      WindowLayout.fromJson({
+        'idx': 0,
+        'panes': [
+          {'surface_id': '%1', 'x': 0, 'y': 0, 'w': 50, 'h': 100},
+          {
+            'surface_id': '%2',
+            'x': 50,
+            'y': 0,
+            'w': 50,
+            'h': 100,
+            'tabs': ['%2', '%3'],
+            'tab_active': 1,
+          },
+        ],
+      }),
+    ];
+    final room = HubModel.rooms(
+      [pane('%1', 0), pane('%3', 0), pane('%4', 0, status: 'waiting')],
+      const [],
+      layouts,
+    ).single;
+    // 탭 목록에 실린 %3 은 자리가 있고, 아무 데도 없는 %4 만 남는다.
+    expect(room.unplaced.map((p) => p.id), ['%4']);
+    // 배치 자체가 없으면 지도도 없으니 줄도 없다.
+    expect(HubModel.rooms([pane('%4', 0)], const []).single.unplaced, isEmpty);
+  });
+
   test('닫아 둔(되살리기) pane 은 방에 안 들어간다', () {
     final closed = Pane(
       id: '%7',

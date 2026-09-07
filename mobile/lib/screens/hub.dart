@@ -138,7 +138,10 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
               icon: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 280),
                 transitionBuilder: (child, anim) => ScaleTransition(
-                  scale: CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
+                  scale: CurvedAnimation(
+                    parent: anim,
+                    curve: Curves.easeOutBack,
+                  ),
                   child: child,
                 ),
                 child: _model.unread > 0
@@ -529,43 +532,78 @@ class _MiniMap extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final hidden = room.unplaced;
     return Padding(
       padding: const EdgeInsets.fromLTRB(2, 0, 2, 8),
-      child: AspectRatio(
-        aspectRatio: (room.aspect ?? _defaultAspect).clamp(1.0, 3.2),
-        child: Container(
-          decoration: BoxDecoration(
-            color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
-            borderRadius: BorderRadius.circular(8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          AspectRatio(
+            aspectRatio: (room.aspect ?? _defaultAspect).clamp(1.0, 3.2),
+            child: _board(scheme),
           ),
-          clipBehavior: Clip.antiAlias,
-          child: LayoutBuilder(
-            builder: (context, box) {
-              final w = box.maxWidth;
-              final h = box.maxHeight;
-              return Stack(
+          if (hidden.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(2, 6, 2, 0),
+              child: Row(
                 children: [
-                  for (final r in room.rects)
-                    Positioned(
-                      left: r.x / 100 * w + _gap,
-                      top: r.y / 100 * h + _gap,
-                      width: math.max(0, r.w / 100 * w - _gap * 2),
-                      height: math.max(0, r.h / 100 * h - _gap * 2),
-                      child: _MiniCell(
-                        server: server,
-                        pane: room.paneOf(r.surface),
-                        // 탭이 둘 이상이면 그 자리의 학생 전부 — 칸 하나에 탭 줄로.
-                        tabs: [for (final t in r.tabs) room.paneOf(t)],
-                        tabActive: r.tabActive,
-                        onOpen: onOpen,
-                        onMore: onMore,
-                      ),
+                  Text(
+                    '탭 안',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
                     ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: _MiniTabRow(
+                      server: server,
+                      tabs: hidden,
+                      active: null,
+                      size: 18,
+                      onOpen: onOpen,
+                      marks: true,
+                    ),
+                  ),
                 ],
-              );
-            },
-          ),
-        ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _board(ColorScheme scheme) {
+    return Container(
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: LayoutBuilder(
+        builder: (context, box) {
+          final w = box.maxWidth;
+          final h = box.maxHeight;
+          return Stack(
+            children: [
+              for (final r in room.rects)
+                Positioned(
+                  left: r.x / 100 * w + _gap,
+                  top: r.y / 100 * h + _gap,
+                  width: math.max(0, r.w / 100 * w - _gap * 2),
+                  height: math.max(0, r.h / 100 * h - _gap * 2),
+                  child: _MiniCell(
+                    server: server,
+                    pane: room.paneOf(r.surface),
+                    // 탭이 둘 이상이면 그 자리의 학생 전부 — 칸 하나에 탭 줄로.
+                    tabs: [for (final t in r.tabs) room.paneOf(t)],
+                    tabActive: r.tabActive,
+                    onOpen: onOpen,
+                    onMore: onMore,
+                  ),
+                ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -659,6 +697,14 @@ class _MiniCell extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         if (tabRow) const SizedBox(height: _tabFace + 2),
+                        // 학생이 안 앉은 칸(맨 셸)도 빈 상자로 두지 않는다 — 깨진 칸으로
+                        // 읽힌다(2026-09-08 폰 실물 점검).
+                        if (p == null && face >= 14)
+                          Icon(
+                            Icons.terminal,
+                            size: face * 0.6,
+                            color: scheme.outline.withValues(alpha: 0.7),
+                          ),
                         if (p != null && face >= 14)
                           StudentFace(
                             slug: p.slug,
@@ -716,6 +762,7 @@ class _MiniTabRow extends StatelessWidget {
     required this.active,
     required this.size,
     this.onOpen,
+    this.marks = false,
   });
 
   final Server server;
@@ -723,6 +770,20 @@ class _MiniTabRow extends StatelessWidget {
   final int? active;
   final double size;
   final void Function(Pane)? onOpen;
+
+  /// 테를 상태색으로 — 칸 밖에 홀로 선 줄에선 얼굴만으론 「답 기다림」이 안 보인다.
+  final bool marks;
+
+  Color _edge(Pane? p, int i, ColorScheme scheme) {
+    if (marks && p != null) {
+      final st = StatusStyle.of(p, scheme);
+      if (st.needsYou) return StatusStyle.attention;
+      if (st.live) return st.color;
+    }
+    return i == active
+        ? scheme.onSurface
+        : scheme.outline.withValues(alpha: 0.35);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -742,10 +803,10 @@ class _MiniTabRow extends StatelessWidget {
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: i == active
-                        ? scheme.onSurface
-                        : scheme.outline.withValues(alpha: 0.35),
-                    width: i == active ? 1.4 : 0.8,
+                    color: _edge(tabs[i], i, scheme),
+                    width: i == active || (marks && tabs[i] != null)
+                        ? 1.4
+                        : 0.8,
                   ),
                 ),
                 child: tabs[i] == null
