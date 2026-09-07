@@ -291,6 +291,8 @@ pub(crate) struct PaneTarget {
     /// 이 pane 이 붙든 claude transcript. 제목을 뽑으려면 jsonl 꼬리를 읽어야
     /// 해서 **경로만** GUI 가 넘기고 읽기는 워커가 한다.
     pub(crate) session_path: Option<std::path::PathBuf>,
+    /// 원격 거울이면 저쪽 pane 의 제목 — 로컬 jsonl 이 없어 세션 제목 자리에 이걸 쓴다.
+    pub(crate) remote_title: String,
     /// 사용자가 닫은 pane — `PaneGroup::closed` 주석 참조.
     pub(crate) closed: bool,
     /// 이 pane 이 **다른 pane 안의 탭**이면 그 바깥 pane id. `collect` 이 맨
@@ -338,7 +340,12 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
         .map(|t| PaneGroup {
             pane: t.id.clone(),
             label: t.label.clone(),
-            session: t.session_path.as_deref().map(session_title).unwrap_or_default(),
+            session: t
+                .session_path
+                .as_deref()
+                .map(session_title)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| t.remote_title.clone()),
             // ⚠️ 원격 pane 의 shell_pid 0 을 그대로 조회하면 pid 0(kernel_task)이
             // 걸린다 — 셸도 프로세스 행도 로컬에 없는 게 맞다.
             shell: if t.shell_pid == 0 {
@@ -1664,6 +1671,16 @@ impl App {
                     // 구멍). 그때 바깥 pane 을 비활성으로 두면 탭이 둘 이상인 pane 에서
                     // **활성 탭이 하나도 없는** 목록이 나온다.
                     .unwrap_or_else(|| (String::new(), outer.is_none(), 0));
+                // 원격 거울은 프로세스가 저쪽이라 이름·제목이 로컬에 없다 — 폴링 캐시의
+                // 저쪽 행이 대신 말한다(2026-09-07 지적 「%0 나쵸네코 이렇게만 뜬다」).
+                let facts = crate::machinescol::remote_pane_facts(id);
+                let remote_str = |k: &str| {
+                    facts
+                        .as_ref()
+                        .and_then(|(_, r)| r.get(k).and_then(|v| v.as_str()))
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                };
                 Some(PaneTarget {
                     // 셸만 도는 pane 엔 학생 이름을 안 붙인다. 배정은 spawn 때 **모든**
                     // pane 에 되지만(`assign_character_env`) 표시는 클로드가 실제로 돌
@@ -1671,10 +1688,16 @@ impl App {
                     // 다른 얼굴을 갖지 않는다. 안 걸었더니 `%1 유우카 zsh` 처럼 셸에
                     // 학생이 붙었다(거노 2026-08-07: "일반pane은 실행전에 학생배정
                     // 안되게하지않았나").
-                    label: s
-                        .active_agent()
-                        .and_then(|_| self.display_pane_char(&ws, id))
-                        .unwrap_or_default(),
+                    label: if facts.is_some() {
+                        self.display_pane_char(&ws, id)
+                            .or_else(|| remote_str("name"))
+                            .unwrap_or_default()
+                    } else {
+                        s.active_agent()
+                            .and_then(|_| self.display_pane_char(&ws, id))
+                            .unwrap_or_default()
+                    },
+                    remote_title: remote_str("title").unwrap_or_default(),
                     // "pane 이 보는 경로"가 셸 cwd 보다 우선 — bg-attach 뷰 pane 은
                     // 셸이 spawn 디렉터리에 머물러 실제 프로젝트와 어긋난다.
                     cwd: self
@@ -3930,6 +3953,22 @@ fn draw_machine_menu(
     for (i, r) in m.mirrored.iter().enumerate() {
         let row = MenuRow::new(format!("{} 데려오기", r.name)).face(&r.name);
         items.push((Some(B::Bring { pane: r.pane.clone() }), if i == 0 { row.sep() } else { row }));
+    }
+    // 저쪽 태생 학생도 이 기계로 — 거울을 열고 그 자리에서 역이사(2026-09-07 지적
+    // 「맥미니에서 여기로 옮기는 것도 없어」).
+    if m.online {
+        for (i, r) in m.remote.iter().filter(|r| !r.remote_id.is_empty()).enumerate() {
+            let row = MenuRow::new(format!("{} 여기로 데려오기", r.name)).face(&r.name);
+            items.push((
+                Some(B::Fetch {
+                    label: m.label.clone(),
+                    remote_id: r.remote_id.clone(),
+                    name: r.name.clone(),
+                    cwd: r.remote_cwd.clone(),
+                }),
+                if i == 0 { row.sep() } else { row },
+            ));
+        }
     }
     if m.online && m.remote.is_empty() && m.mirrored.is_empty() {
         items.push((None, MenuRow::new("캐릭터 없음").sep().muted()));

@@ -94,6 +94,25 @@ fn hung_screen_share_pids() -> Vec<String> {
 }
 
 /// `#RRGGBB` → RGBA. 원격 창구가 주는 학생색(header_color)과 같은 표기만 받는다.
+/// 원격 거울 pane 의 **저쪽 사실** — (기계 라벨, 폴링 캐시의 그 pane 행). 이름·제목·
+/// 상태가 로컬엔 없어(프로세스가 저쪽에서 돈다) 여기서 온다. 링크가 없거나 캐시에
+/// 그 pane 이 없으면 None.
+pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)> {
+    let info = kasa_mcp::remote::remote_info(id)?;
+    let label = if info.label.is_empty() { info.base.clone() } else { info.label.clone() };
+    let snap = kasa_mcp::machines::snapshot();
+    let m = snap
+        .iter()
+        .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(label.as_str()))?;
+    let row = m
+        .get("panes")?
+        .as_array()?
+        .iter()
+        .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(info.remote_id.as_str()))?
+        .clone();
+    Some((label, row))
+}
+
 fn parse_hex(s: &str) -> Option<[u8; 4]> {
     let h = s.strip_prefix('#')?;
     if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -162,10 +181,22 @@ impl App {
             ),
         > = std::collections::HashMap::new();
         for id in &pane_ids {
-            if !self.pane_claude_ready(id) {
+            // 원격 거울은 claude 가 저쪽에서 돌아 로컬 관문(pane_claude_ready·에이전트
+            // 감지)에 걸린다 — 링크가 있으면 그 자체로 학생 자리다. 이름·상태는 폴링
+            // 캐시의 저쪽 행에서(2026-09-07 지적 「맥미니에서 여기로 옮기는 것도 없어」
+            // — 이 관문 탓에 거울이 데려오기 목록에 안 섰다).
+            let facts = remote_pane_facts(id);
+            if facts.is_none() && !self.pane_claude_ready(id) {
                 continue;
             }
-            let Some(name) = self.pane_character_if_known(id) else {
+            let remote_str = |k: &str| {
+                facts
+                    .as_ref()
+                    .and_then(|(_, r)| r.get(k).and_then(|v| v.as_str()))
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            let Some(name) = self.pane_character_if_known(id).or_else(|| remote_str("name")) else {
                 continue;
             };
             let win = pane_window.get(id).copied().unwrap_or(self.active_window);
@@ -180,6 +211,7 @@ impl App {
                     .pane_activity
                     .get(id)
                     .map(|v| v.status.clone())
+                    .or_else(|| remote_str("status"))
                     .unwrap_or_default(),
                 room: room_of(win),
             };
@@ -359,6 +391,38 @@ impl App {
             self.render_frame();
             return true;
         }
+        if let state::MachinesColBtn::Fetch {
+            label,
+            remote_id,
+            name,
+            cwd,
+        } = &btn
+        {
+            // 저쪽 태생 학생 데려오기 = 거울 열기 + 그 자리에서 역이사. 역이사가 sid 를
+            // 저쪽에 물어 오므로(5830da54) 로컬에 기억이 없어도 간다.
+            let (label, rid, name, cwd) = (label.clone(), remote_id.clone(), name.clone(), cwd.clone());
+            self.set_toast(format!("{name} 여기로 데려오는 중 — {label}"));
+            self.render_frame();
+            let outcome = self.mirror_remote_pane(&label, &rid, &name, &cwd).and_then(|id| {
+                #[cfg(unix)]
+                {
+                    self.migrate_pane_back(&id, None, false)
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = id;
+                    Err(anyhow::anyhow!("데려오기는 아직 Windows 에서 안 된다"))
+                }
+            });
+            match outcome {
+                Ok(msg) => self.set_toast(format!("{name} 데려옴 — {msg}")),
+                Err(e) => self.set_toast(format!("데려오기 실패 — {e:#}")),
+            }
+            self.info.machines_col.last_refresh = None;
+            self.chrome_dirty = true;
+            self.render_frame();
+            return true;
+        }
         if let state::MachinesColBtn::Mirror {
             label,
             remote_id,
@@ -385,7 +449,8 @@ impl App {
             state::MachinesColBtn::Bring { pane } => (pane.clone(), "데려오는 중…".to_string()),
             state::MachinesColBtn::Screen { .. }
             | state::MachinesColBtn::Unfold { .. }
-            | state::MachinesColBtn::Mirror { .. } => {
+            | state::MachinesColBtn::Mirror { .. }
+            | state::MachinesColBtn::Fetch { .. } => {
                 unreachable!("위에서 return")
             }
         };
@@ -407,7 +472,8 @@ impl App {
         let outcome = match btn {
             state::MachinesColBtn::Screen { .. }
             | state::MachinesColBtn::Unfold { .. }
-            | state::MachinesColBtn::Mirror { .. } => {
+            | state::MachinesColBtn::Mirror { .. }
+            | state::MachinesColBtn::Fetch { .. } => {
                 unreachable!("위에서 return")
             }
             state::MachinesColBtn::Send { pane, label } => (|| -> anyhow::Result<String> {

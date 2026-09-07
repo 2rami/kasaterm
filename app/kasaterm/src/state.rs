@@ -411,6 +411,13 @@ pub(crate) enum MachinesColBtn {
         name: String,
         cwd: String,
     },
+    /// 저쪽 태생 학생을 이 기계로 — 거울을 열고 그 자리에서 역이사(데려오기).
+    Fetch {
+        label: String,
+        remote_id: String,
+        name: String,
+        cwd: String,
+    },
 }
 
 /// 「+」로 여는 URL 서버 추가 칸. 이름·주소 두 줄뿐이다.
