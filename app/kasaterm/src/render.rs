@@ -10941,16 +10941,17 @@ impl App {
                 // 보이니까 이메일만 나오게하라니까 현재계정하나랑」).
 
 
-                // 코덱스도 같은 줄에 세운다. 이 줄이 답하는 물음은 「지금 어느
-                // 한도가 얼마나 찼나」인데, 코덱스는 그 답의 절반이면서 여태
-                // 여기 없었다 — 펼쳐야만 보였다(2026-09-07 「코덱스는 왜 사용량
-                // 추적이 안돼 하단바에 안떠」).
-                //
-                // 값이 없으면 아무것도 안 그린다. 코덱스를 안 쓰는 창에서 빈
-                // 칸이 자리만 먹는 것은 이 줄이 가장 피해야 할 일이다.
+                // 코덱스는 **사용량 조회에 성공했을 때만** 세우면 안 된다. 인증이
+                // 풀렸거나 막 계정을 바꾼 순간이 오히려 계정 이름을 봐야 할 때인데,
+                // 옛 조건은 그때 세그먼트 전체를 감췄다(2026-09-07 「왜 안 나오지」).
+                // 등록했거나 로그인한 사람에게는 현재 계정과 상태를 늘 남긴다.
                 {
+                    let codex_id = self.set_codex_account.as_str();
+                    let codex_logged_in = crate::settings::codex_logged_in(codex_id);
+                    let codex_configured =
+                        !codex_id.is_empty() || !self.set_codex_accounts.is_empty();
                     let wins = codex_windows();
-                    if !wins.is_empty() && win_w >= 900.0 {
+                    if codex_statusbar_visible(win_w, codex_logged_in, codex_configured) {
                         x += 8.0;
                         g.draw_text(
                             x,
@@ -10973,7 +10974,77 @@ impl App {
                             theme::text_dim(),
                         );
                         x += icon + 6.0;
-                        x = draw_window_gauges(g, x, ty, win_w - 380.0, fs, &wins, false);
+
+                        let all_names: Vec<String> = std::iter::once(codex_account_name(
+                            "",
+                            &self.set_codex_accounts,
+                        ))
+                        .chain(
+                            self.set_codex_accounts
+                                .iter()
+                                .map(|account| {
+                                    codex_account_name(&account.id, &self.set_codex_accounts)
+                                }),
+                        )
+                        .collect();
+                        let full_name = codex_account_name(codex_id, &self.set_codex_accounts);
+                        let short_name = statusbar_account_short(&full_name, &all_names);
+                        let name_w = g.measure_chrome_text(&short_name, fs, false);
+
+                        if wins.is_empty() {
+                            let (status, color) = if codex_logged_in {
+                                ("—", theme::text_dim())
+                            } else {
+                                ("로그인 필요", theme::danger())
+                            };
+                            g.draw_text(
+                                x,
+                                ty,
+                                status,
+                                gpu::DrawOpts {
+                                    font_size: fs,
+                                    color,
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                            x += g.measure_chrome_text(status, fs, false) + 8.0;
+                        } else {
+                            // 오른쪽 상태 칩과 계정 이름 자리를 먼저 남긴다. 폭이
+                            // 모자라면 draw_window_gauges가 긴 창부터 자연스럽게 접는다.
+                            let gauge_x = x;
+                            let right = (win_w - 280.0 - name_w).max(gauge_x);
+                            x = draw_window_gauges(g, gauge_x, ty, right, fs, &wins, false);
+                            if x == gauge_x {
+                                let pct = wins[0].1;
+                                let text = format!("{pct:.0}%");
+                                g.draw_text(
+                                    x,
+                                    ty,
+                                    &text,
+                                    gpu::DrawOpts {
+                                        font_size: fs,
+                                        color: usage_pct_color(pct),
+                                        bold: true,
+                                        italic: false,
+                                    },
+                                );
+                                x += g.measure_chrome_text(&text, fs, true) + 8.0;
+                            }
+                        }
+
+                        g.draw_text(
+                            x,
+                            ty,
+                            &short_name,
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: theme::text_dim(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        x += name_w;
                     }
                 }
 
@@ -11002,6 +11073,9 @@ impl App {
                 // 오른쪽 끝에서 왼쪽으로 자라는 자들의 공통 기준선. 판 번호가
                 // 이 끝을 먼저 먹고, 터널 스위치와 나머지 칩이 그 왼쪽으로 선다.
                 let mut right_edge = win_w - 12.0;
+                // 칩 사이 간격. 12 로는 아이콘·글자가 서로 붙어 어디까지가 한 칩인지
+                // 눈으로 안 갈렸다(2026-09-07 지적 「간격이 너무 없어서」).
+                let chip = 26.0_f32;
                     // 판 번호 — 이 줄의 **맨 오른쪽**(2026-09-06 지시: 「하단바
                     // 버전표시를 맨 오른쪽으로 하자」). 09-05 에 계정 세그먼트
                     // 꼬리에서 이 그룹으로 옮겼는데, 그때는 그룹 맨 왼쪽이라 왼쪽
@@ -11072,7 +11146,7 @@ impl App {
                     let seg_w = icon + gap + tw + gap + dot;
                     // 판 번호가 이미 오른쪽 끝을 먹었다 — 그 왼쪽에 선다
                     // (2026-09-06 지시: 버전 표시를 맨 오른쪽으로).
-                    let tx = right_edge - seg_w;
+                    let tx = right_edge - seg_w - chip;
                     let col = if on { theme::text() } else { theme::text_dim() };
                     g.queue_icon("globe", tx, sy + (status_h - icon) / 2.0, icon, col);
                     g.draw_text(
@@ -11121,7 +11195,7 @@ impl App {
                         let dot = 6.0_f32;
                         let gap = 5.0_f32;
                         let tw = g.measure_chrome_text(label, fs, false);
-                        rx -= tw + gap + dot + 12.0;
+                        rx -= tw + gap + dot + chip;
                         let col = if up { theme::text() } else { theme::text_dim() };
                         g.draw_text(
                             rx,
@@ -11159,7 +11233,7 @@ impl App {
                             format!("{cpu:.0}% · {:.0}M", gb * 1024.0)
                         };
                         let lw = g.measure_chrome_text(&label, fs, false);
-                        rx -= lw + 12.0;
+                        rx -= lw + chip;
                         let open = matches!(
                             self.statusbar.popover,
                             Some((state::StatusbarPopover::Usage, _))
@@ -11288,7 +11362,7 @@ impl App {
                         }
                         // 손잡이는 경고까지 통째로 — 경고를 보고 누르는 것이
                         // 자연스러운 동작인데 아이콘만 죽은 픽셀이면 헛손질이 된다.
-                        let rr = (seg_x - 6.0, sy, label_right - seg_x + 12.0, status_h);
+                        let rr = (seg_x - 6.0, sy, label_right - seg_x + chip, status_h);
                         {
                             let (hx, hy) = self.cursor_px;
                             g.hover_pointer |=
@@ -11307,14 +11381,14 @@ impl App {
                     {
                         let head = crate::clipboard::history()
                             .first()
-                            .map(|t| crate::clipboard::preview(t, 18))
+                            .map(|t| crate::clipboard::preview(t, 8))
                             .unwrap_or_default();
                         if !head.is_empty() {
                             let icon = 12.0_f32;
                             let gap = 4.0_f32;
                             let lw = g.measure_chrome_text(&head, fs, false);
                             let seg = icon + gap + lw;
-                            rx -= seg + 12.0;
+                            rx -= seg + chip;
                             let open = matches!(
                                 self.statusbar.popover,
                                 Some((state::StatusbarPopover::Clipboard, _))
@@ -11332,7 +11406,7 @@ impl App {
                                     italic: false,
                                 },
                             );
-                            let cr = (rx - 6.0, sy, seg + 12.0, status_h);
+                            let cr = (rx - chip / 2.0, sy, seg + chip, status_h);
                             {
                                 let (hx, hy) = self.cursor_px;
                                 g.hover_pointer |= hx >= cr.0
@@ -11350,11 +11424,37 @@ impl App {
                     self.statusbar.pet_rect = None;
                     {
                         let on = crate::chrome::pet_pid().is_some();
+                        // 누가 나와 있는지도 적는다 — 아홉 중 하나라 아이콘만으로는
+                        // 지금 누가 서 있는지 알 길이 없다(2026-09-07 지시).
+                        let name = on
+                            .then(crate::chrome::pet_current_character)
+                            .flatten()
+                            .unwrap_or_default();
                         let icon = 12.0_f32;
-                        rx -= icon + 12.0;
+                        let gap = 4.0_f32;
+                        let lw = if name.is_empty() {
+                            0.0
+                        } else {
+                            gap + g.measure_chrome_text(&name, fs, false)
+                        };
+                        let seg = icon + lw;
+                        rx -= seg + chip;
                         let col = if on { theme::accent() } else { theme::text_dim() };
                         g.queue_icon("sparkles", rx, sy + (status_h - icon) / 2.0, icon, col);
-                        let pr = (rx - 6.0, sy, icon + 12.0, status_h);
+                        if !name.is_empty() {
+                            g.draw_text(
+                                rx + icon + gap,
+                                ty,
+                                &name,
+                                gpu::DrawOpts {
+                                    font_size: fs,
+                                    color: col,
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                        }
+                        let pr = (rx - chip / 2.0, sy, seg + chip, status_h);
                         {
                             let (hx, hy) = self.cursor_px;
                             g.hover_pointer |=
@@ -11374,7 +11474,7 @@ impl App {
                         let gap = 4.0_f32;
                         let lw = g.measure_chrome_text(&label, fs, false);
                         let seg = icon + gap + lw;
-                        rx -= seg + 12.0;
+                        rx -= seg + chip;
                         let open = matches!(
                             self.statusbar.popover,
                             Some((state::StatusbarPopover::Ports, _))
@@ -11396,7 +11496,7 @@ impl App {
                                 italic: false,
                             },
                         );
-                        let pr = (rx - 6.0, sy, seg + 12.0, status_h);
+                        let pr = (rx - chip / 2.0, sy, seg + chip, status_h);
                         {
                             let (hx, hy) = self.cursor_px;
                             g.hover_pointer |=
@@ -12070,28 +12170,19 @@ impl App {
                             v
                         }
                         AccountProvider::Codex => {
-                            // 라벨이 없으면 그 슬롯의 실제 이메일로 부른다 — claude 쪽
-                            // `account_display` 와 같은 규칙이다.
-                            let name = |id: &str, label: &str, fallback: String| -> String {
-                                let ident = crate::settings::codex_identity(id);
-                                match (label.is_empty(), ident) {
-                                    (true, Some(e)) => e,
-                                    (true, None) => fallback,
-                                    (false, Some(e)) if !label.contains(&e) => {
-                                        format!("{label} · {e}")
-                                    }
-                                    (false, _) => label.to_string(),
-                                }
-                            };
                             let mut v = vec![(
                                 String::new(),
-                                name("", "", "기본".to_string()),
+                                crate::settings::codex_account_display("", "", "기본"),
                                 self.set_codex_account.is_empty(),
                             )];
                             v.extend(self.set_codex_accounts.iter().enumerate().map(|(i, a)| {
                                 (
                                     a.id.clone(),
-                                    name(&a.id, &a.label, format!("계정 {}", i + 2)),
+                                    crate::settings::codex_account_display(
+                                        &a.id,
+                                        &a.label,
+                                        &format!("계정 {}", i + 2),
+                                    ),
                                     self.set_codex_account == a.id,
                                 )
                             }));
@@ -14476,6 +14567,21 @@ fn codex_windows() -> Vec<(String, f32)> {
         .unwrap_or_default()
 }
 
+fn codex_statusbar_visible(win_w: f32, logged_in: bool, configured: bool) -> bool {
+    win_w >= 720.0 && (logged_in || configured)
+}
+
+fn codex_account_name(id: &str, accounts: &[crate::socket::CodexAccount]) -> String {
+    match accounts.iter().position(|account| account.id == id) {
+        Some(index) => crate::settings::codex_account_display(
+            id,
+            &accounts[index].label,
+            &format!("계정 {}", index + 2),
+        ),
+        None => crate::settings::codex_account_display("", "", "기본 계정"),
+    }
+}
+
 fn codex_rate_window_label(minutes: Option<u32>) -> String {
     match minutes {
         Some(0) | None => String::new(),
@@ -14548,6 +14654,14 @@ fn codex_header_summary(s: &crate::transcript::CodexRolloutSnapshot) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_statusbar_does_not_depend_on_usage_success() {
+        assert!(codex_statusbar_visible(720.0, true, false));
+        assert!(codex_statusbar_visible(720.0, false, true));
+        assert!(!codex_statusbar_visible(719.0, true, true));
+        assert!(!codex_statusbar_visible(1200.0, false, false));
+    }
 
     #[test]
     fn terminal_preedit_never_follows_focus_to_another_surface() {
