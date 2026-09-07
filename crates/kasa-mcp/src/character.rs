@@ -447,6 +447,21 @@ pub fn header_color_any(name: &str) -> Option<String> {
     None
 }
 
+/// 학생 이름 → 프사 슬러그. agent 이름이 없는 자리(codex 는 셰임 env 를 안 실어
+/// `agent_name` 이 비고, 그래서 폰 목록에 얼굴이 안 떴다 — 2026-09-07 지적)에서
+/// 이름표(`character`)로 대신 찾는다. 색과 같은 이유로 명부 전부를 본다.
+pub fn slug_for_any(name: &str) -> Option<String> {
+    for chars in all_rosters() {
+        if let Some(s) = find_character(&chars, name)
+            .and_then(|m| m.get("slug").and_then(|x| x.as_str()))
+            .filter(|s| !s.is_empty())
+        {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
 /// 그 슬러그가 **아는 학생의 것인가** — 맞으면 그대로 돌려준다.
 ///
 /// agent 이름(`emu-p27-1uc`)의 앞 토막이 곧 슬러그라, 하는 일은 「이게 진짜 슬러그냐」를

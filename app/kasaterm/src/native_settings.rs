@@ -3195,6 +3195,8 @@ pub(crate) struct MachineRow {
     pub(crate) ssh: String,
     pub(crate) status: String,
     pub(crate) online: bool,
+    /// 앱이 찾아 적어 둔 ssh 열쇠 파일 이름(없으면 빈값) — 왜 붙는지 보이게.
+    pub(crate) key: String,
 }
 
 /// 명부와 그 연결 상태를 합쳐 읽는다. 파일과 잠금을 매 프레임 건드리지 않게 잠깐
@@ -3215,6 +3217,7 @@ fn machines_view() -> Vec<MachineRow> {
                         ssh: r.ssh.clone(),
                         status: r.status.clone(),
                         online: r.online,
+                        key: r.key.clone(),
                     })
                     .collect();
             }
@@ -3260,7 +3263,13 @@ fn machines_view() -> Vec<MachineRow> {
                     None => "아직 안 닿음".to_string(),
                 }
             };
-            MachineRow { label, ssh, status, online }
+            let key = e
+                .get("key")
+                .and_then(|v| v.as_str())
+                .and_then(|k| std::path::Path::new(k).file_name())
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            MachineRow { label, ssh, status, online, key }
         })
         .collect();
     if let Ok(mut g) = cache.lock() {
@@ -3272,6 +3281,7 @@ fn machines_view() -> Vec<MachineRow> {
                     ssh: r.ssh.clone(),
                     status: r.status.clone(),
                     online: r.online,
+                    key: r.key.clone(),
                 })
                 .collect(),
         ));
@@ -3501,7 +3511,7 @@ fn paint_machines(
         g,
         x,
         *y,
-        "이름과 ssh 대상만 적으면 됩니다 — 나머지는 앱이 채웁니다",
+        "이름과 ssh 대상(user@host)만 적으면 됩니다 — 열쇠는 ~/.ssh 에서 찾아 짝짓고, 다른 망의 기계는 넷버드(VPN)로 먼저 이어 두세요",
         10.5,
         theme::text_mute(),
         false,
@@ -3620,8 +3630,10 @@ fn machine_row(
             pill(g, text_x + nw + 8.0, rect.1 + 7.0, &m.status, m.online);
             let ssh = if m.ssh.is_empty() {
                 "ssh 대상이 비어 있어요".to_string()
-            } else {
+            } else if m.key.is_empty() {
                 fit(g, &m.ssh, avail, 10.5, false)
+            } else {
+                fit(g, &format!("{}  ·  열쇠 {}", m.ssh, m.key), avail, 10.5, false)
             };
             draw_text(
                 g,

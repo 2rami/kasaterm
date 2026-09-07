@@ -4307,7 +4307,11 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "kind": b.and_then(|p| p.attention_kind.clone()),
                 "waiting_for": b.and_then(|p| p.waiting_for.clone()),
                 "idle_secs": b.and_then(|p| p.idle_secs),
-                "slug": b.and_then(|p| p.agent_name.as_deref()).and_then(avatar_slug),
+                // agent 이름이 없는 하네스(codex)는 이름표로 얼굴을 찾는다.
+                "slug": b
+                    .and_then(|p| p.agent_name.as_deref())
+                    .and_then(avatar_slug)
+                    .or_else(|| b.and_then(|p| p.character.as_deref()).and_then(crate::character::slug_for_any)),
                 "window": pane_windows
                     .get(&id)
                     .copied()

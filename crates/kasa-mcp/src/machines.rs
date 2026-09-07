@@ -57,6 +57,10 @@ pub struct Machine {
     pub home: bool,
     /// ssh 대상(`nachoneko`·`user@10.0.0.5`). 있고 `base` 가 없으면 앱이 터널을 든다.
     pub ssh: Option<String>,
+    /// ssh 열쇠 파일. 비어 있으면 기본 열쇠로 가고, 그게 거절되면 `~/.ssh` 의 열쇠를
+    /// 하나씩 대 보아 맞는 것을 여기 적어 둔다(`ensure_meta`) — 열쇠 로그인만 받는
+    /// 기계(윈도우 sshd)를 별칭 없이 `user@host` 만으로 넣기 위해서(2026-09-07 지시).
+    pub key: Option<String>,
     /// `base` 가 이 앱의 자동 터널(`tunnel_loop`)인가 — 그 항목만 터널을 스폰한다.
     pub tunneled: bool,
 }
@@ -159,6 +163,11 @@ fn parse(v: &Value) -> Vec<Machine> {
                 .map(|k| k.trim().to_string())
                 .filter(|k| !k.is_empty());
             let home = m.get("home").and_then(|h| h.as_bool()).unwrap_or(false);
+            let key = m
+                .get("key")
+                .and_then(|k| k.as_str())
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty());
             Some(Machine {
                 label,
                 base,
@@ -167,6 +176,7 @@ fn parse(v: &Value) -> Vec<Machine> {
                 kvm,
                 home,
                 ssh,
+                key,
                 tunneled,
             })
         })
@@ -239,20 +249,79 @@ const TUNNEL_RETRY: Duration = Duration::from_secs(8);
 const META_RETRY: Duration = Duration::from_secs(60);
 
 fn ssh_output(args: &[&str]) -> Option<String> {
+    ssh_run(args).ok()
+}
+
+/// ssh 한 번 — 성공이면 stdout, 실패면 stderr(거절 이유). 열쇠를 찾을 때 「거절」과
+/// 「안 닿음」을 갈라야 해서 이유를 돌려준다.
+fn ssh_run(args: &[&str]) -> Result<String, String> {
     let out = std::process::Command::new("ssh")
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"])
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// 열쇠를 지정하는 ssh 인자. `IdentitiesOnly` 가 없으면 ssh 가 기본 열쇠들을 먼저
+/// 대 보다 서버 쪽 시도 한도에 걸려 정작 맞는 열쇠 차례가 안 온다.
+fn key_args(key: Option<&str>) -> Vec<String> {
+    match key {
+        Some(k) if !k.is_empty() => vec![
+            "-i".to_string(),
+            k.to_string(),
+            "-o".to_string(),
+            "IdentitiesOnly=yes".to_string(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// `~/.ssh` 의 개인 열쇠 후보 — `.pub` 짝이 있는 파일만(config·known_hosts 는 빠진다).
+fn candidate_keys() -> Vec<String> {
+    let Ok(home) = std::env::var("HOME") else { return Vec::new() };
+    let dir = std::path::Path::new(&home).join(".ssh");
+    let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut keys: Vec<String> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "pub"))
+        .filter_map(|p| {
+            let private = p.with_extension("");
+            private.is_file().then(|| private.to_string_lossy().to_string())
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// 찾아낸 열쇠를 명부에 적는다 — 다음 터널·다음 실행이 그걸로 간다.
+fn remember_key(target: &str, key: &str) {
+    let mut list = entries();
+    let mut changed = false;
+    for e in list.iter_mut() {
+        if e.get("ssh").and_then(|v| v.as_str()) == Some(target) {
+            if let Some(o) = e.as_object_mut() {
+                o.insert("key".into(), Value::String(key.to_string()));
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        if let Err(e) = save_entries(&list) {
+            eprintln!("[machines] {target} 열쇠를 명부에 못 적음: {e}");
+        }
+    }
 }
 
 /// 그 ssh 대상의 hostname(화면공유 주소)과 홈을 한 번 물어 둔다. 실패는 60초에
 /// 한 번만 다시 — 안 닿는 기계에 매 바퀴 ssh 를 쏘지 않게.
-fn ensure_meta(target: &str) {
+fn ensure_meta(target: &str, key: Option<&str>) {
     static TRIED: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
     let tried = TRIED.get_or_init(|| Mutex::new(HashMap::new()));
     let known = meta_cache()
@@ -277,7 +346,47 @@ fn ensure_meta(target: &str) {
                 .map(|h| h.trim().to_string())
         })
         .unwrap_or_default();
-    let home = ssh_output(&[target, "printf %s \"$HOME\""]).unwrap_or_default();
+    let run = |kargs: &[String], cmd: &str| {
+        let mut args: Vec<&str> = kargs.iter().map(String::as_str).collect();
+        args.extend([target, cmd]);
+        ssh_run(&args)
+    };
+    // 로그인 확인은 `exit 0` — 어느 셸(sh·cmd·PowerShell)에서나 성공한다. 홈을
+    // 묻는 명령으로 확인하면 윈도우 sshd(cmd)에선 열쇠가 맞아도 `printf` 가 없어
+    // 실패로 보여 열쇠를 영영 못 찾았다(2026-09-07 실측).
+    let mut kargs = key_args(key);
+    let logged_in = match run(&kargs, "exit 0") {
+        Ok(_) => true,
+        // 기본 열쇠가 거절됐다 — `~/.ssh` 의 열쇠를 하나씩 대 본다. 안 닿는 기계엔
+        // 안 한다(열쇠마다 8초 타임아웃이 쌓인다).
+        Err(why) if key.is_none() && why.contains("Permission denied") => {
+            let mut ok = false;
+            for k in candidate_keys() {
+                let ka = key_args(Some(&k));
+                if run(&ka, "exit 0").is_ok() {
+                    eprintln!("[machines] {target} 열쇠 찾음: {k}");
+                    remember_key(target, &k);
+                    kargs = ka;
+                    ok = true;
+                    break;
+                }
+            }
+            ok
+        }
+        Err(_) => false,
+    };
+    // 홈 — sh 가 먼저, 없으면 cmd(윈도우). 둘 다 안 되면 빈값(roots 규칙 없이 간다).
+    let home = if logged_in {
+        run(&kargs, "printf %s \"$HOME\"")
+            .ok()
+            .filter(|h| !h.is_empty())
+            .or_else(|| run(&kargs, "echo %USERPROFILE%").ok())
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty() && !h.contains("%USERPROFILE%"))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     if let Ok(mut c) = meta_cache().lock() {
         let e = c.entry(target.to_string()).or_default();
         if !hostname.is_empty() {
@@ -290,15 +399,15 @@ fn ensure_meta(target: &str) {
 }
 
 fn tunnel_tick() {
-    let want: Vec<(String, String, u16)> = machines()
+    let want: Vec<(String, String, u16, Option<String>)> = machines()
         .into_iter()
         .filter(|m| m.tunneled)
-        .filter_map(|m| Some((m.label.clone(), m.ssh.clone()?, tunnel_port(&m.label))))
+        .filter_map(|m| Some((m.label.clone(), m.ssh.clone()?, tunnel_port(&m.label), m.key.clone())))
         .collect();
     let Ok(mut t) = tunnels().lock() else { return };
     // 명부에서 빠졌거나 대상이 바뀐 터널은 걷는다.
     t.retain(|label, tun| {
-        let keep = want.iter().any(|(l, tg, p)| l == label && *tg == tun.target && *p == tun.port);
+        let keep = want.iter().any(|(l, tg, p, _)| l == label && *tg == tun.target && *p == tun.port);
         if !keep {
             let _ = tun.child.kill();
             let _ = tun.child.wait();
@@ -306,8 +415,16 @@ fn tunnel_tick() {
         }
         keep
     });
-    for (label, target, port) in want {
-        ensure_meta(&target);
+    for (label, target, port, key) in want {
+        ensure_meta(&target, key.as_deref());
+        // 열쇠는 ensure_meta 가 방금 찾아 적었을 수 있다 — 파일에서 다시 읽는다.
+        let key = key.or_else(|| {
+            entries()
+                .iter()
+                .find(|e| e.get("ssh").and_then(|v| v.as_str()) == Some(target.as_str()))
+                .and_then(|e| e.get("key").and_then(|v| v.as_str()).map(str::to_string))
+        });
+        let kargs = key_args(key.as_deref());
         if let Some(tun) = t.get_mut(&label) {
             match tun.child.try_wait() {
                 Ok(None) => continue, // 살아 있다
@@ -350,6 +467,9 @@ kill $p 2>/dev/null; wait $p 2>/dev/null",
             .arg("kasaterm-tunnel")
             .args([
                 "-N",
+            ])
+            .args(&kargs)
+            .args([
                 "-o",
                 "BatchMode=yes",
                 "-o",
