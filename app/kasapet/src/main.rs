@@ -52,6 +52,11 @@ struct App {
     name: String,
     /// 두 번 누름 판정용. 왼쪽 한 번은 끌기라, 바로 끌어 버리면 두 번째를 못 본다.
     last_click: Option<std::time::Instant>,
+    /// 커서가 캐릭터의 **칠해진 픽셀** 위인가. 창은 네모라 그냥 두면 투명한 여백을
+    /// 눌러도 펫이 잡히고, 그 아래 있던 창은 영영 못 누른다.
+    on_body: bool,
+    /// 창 안 커서 자리(논리 px). 화면 전역 좌표에서 옮겨 둔 값이다.
+    local: Option<(f32, f32)>,
     /// 지금 판. kasaterm 이 적어 두는 파일에서 온다.
     mood: board::Mood,
     say: String,
@@ -319,10 +324,68 @@ impl App {
         let nx = ((gx - cx) / sz.width.max(1.0)).clamp(-1.0, 1.0);
         let ny = ((cy - gy) / sz.height.max(1.0)).clamp(-1.0, 1.0);
         self.look = (nx as f32, ny as f32);
+        let (lx, ly) = (gx - pos.x, gy - pos.y);
+        self.local = (lx >= 0.0 && ly >= 0.0 && lx < sz.width && ly < sz.height)
+            .then_some((lx as f32, ly as f32));
     }
 
     #[cfg(not(target_os = "macos"))]
     fn poll_cursor(&mut self) {}
+
+    /// 커서 자리의 알파를 읽어 캐릭터 위인지 답한다.
+    ///
+    /// 그린 결과를 그대로 보는 것이라 머리카락 한 올까지 윤곽이 맞는다. 화면 전체를
+    /// 되읽지 않고 커서 둘레 한 줌만 가져오므로(16x16) 비용이 거의 없다.
+    fn cursor_on_body(&self, g: &Gfx, tex: &wgpu::Texture) -> bool {
+        const N: u32 = 16;
+        let Some((lx, ly)) = self.local else { return false };
+        let sf = self.win.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
+        let (px, py) = ((lx * sf) as u32, (ly * sf) as u32);
+        let (w, h) = (tex.width(), tex.height());
+        if px >= w || py >= h {
+            return false;
+        }
+        let x0 = px.saturating_sub(N / 2).min(w - N.min(w));
+        let y0 = py.saturating_sub(N / 2).min(h - N.min(h));
+        let (cw, ch) = (N.min(w), N.min(h));
+        // 되읽기 버퍼는 줄마다 256 바이트로 맞춰야 한다(wgpu 규약).
+        let row = 256u32;
+        let buf = g.dev.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (row * ch) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = g.dev.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(ch),
+                },
+            },
+            wgpu::Extent3d { width: cw, height: ch, depth_or_array_layers: 1 },
+        );
+        g.q.submit([enc.finish()]);
+        buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = g.dev.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        let src = buf.slice(..).get_mapped_range();
+        // 반투명한 가장자리까지 잡으면 윤곽이 부풀어 여백을 누른 것이 되므로 문턱을 둔다.
+        let hit = (0..ch).any(|y| {
+            (0..cw).any(|x| src[((y * row + x * 4) + 3) as usize] > 40)
+        });
+        drop(src);
+        buf.unmap();
+        hit
+    }
 
     /// 자리와 크기를 남긴다. 펫은 켤 때마다 같은 데서 뜨는 편이 자연스럽고,
     /// 매번 왼쪽 위로 돌아가면 옮긴 일이 헛일이 된다.
@@ -689,6 +752,20 @@ impl App {
         }
         g.q.submit([enc.finish()]);
         self.frames += 1;
+        // 커서 자리가 캐릭터의 칠해진 픽셀인지 본다. 몇 프레임에 한 번이면 충분하다 —
+        // 손이 움직이는 속도보다 훨씬 잦다.
+        if self.frames % 4 == 0 {
+            let over = self.cursor_on_body(g, &frame.texture);
+            if over != self.on_body {
+                self.on_body = over;
+                if let Some(w) = &self.win {
+                    // 몸 밖이면 창이 마우스를 통째로 흘려보낸다 — 뒤에 있던 창을 누를 수
+                    // 있어야 바탕화면에 얹힌 것이지, 네모난 유리판이 덮인 게 아니다.
+                    set_click_through(w, !over);
+                    w.set_cursor(winit::window::CursorIcon::Pointer);
+                }
+            }
+        }
         if self.frames == self.shot_at {
             if let Some(path) = self.shot_path.clone() {
                 save_shot(g, &frame.texture, &path);
@@ -807,6 +884,23 @@ fn expression_files(model3: &std::path::Path) -> Vec<std::path::PathBuf> {
         .unwrap_or_default()
 }
 
+/// 창이 마우스를 흘려보낼지 정한다. 통째로 흘리면 그 아래 창이 눌린다.
+#[cfg(target_os = "macos")]
+fn set_click_through(win: &Window, through: bool) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(h) = win.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = h.as_raw() else { return };
+    unsafe {
+        let view: &objc2_app_kit::NSView = h.ns_view.cast().as_ref();
+        if let Some(w) = view.window() {
+            w.setIgnoresMouseEvents(through);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_click_through(_win: &Window, _through: bool) {}
+
 /// 그 폴더가 쥔 model3.json. 캐릭터 폴더인지 가르는 기준이기도 하다.
 fn model3_in(dir: &std::path::Path) -> Option<String> {
     std::fs::read_dir(dir)
@@ -894,7 +988,7 @@ fn main() {
     el.set_control_flow(ControlFlow::Poll);
     let mut app = App { win: None, gfx: None,
         x, y, w: 420.0, h: 600.0 + HEADROOM, scale,
-        alpha: wgpu::CompositeAlphaMode::Auto, cursor: (0.0, 0.0), pet_dir, name, last_click: None,
+        alpha: wgpu::CompositeAlphaMode::Auto, cursor: (0.0, 0.0), pet_dir, name, last_click: None, on_body: false, local: None,
         mood: board::Mood::Idle, say: String::new(), board_seen: None,
         board_polled: std::time::Instant::now(), stirred: std::time::Instant::now(),
         bubble_text: None, text_pt: bubble::FONT_PT, head: (0.0, 0.0), bbox: None,
