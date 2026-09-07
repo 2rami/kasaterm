@@ -17,6 +17,10 @@ const LINE_SPACING: f32 = 1.4;
 /// 레티나 — 래스터는 이 배율, 반환은 논리.
 const SCALE: f32 = 2.0;
 
+/// 글자 둘레에 두르는 어두운 테두리의 두께(래스터 픽셀). 말풍선 판을 걷어내고 글자만
+/// 띄우므로, 이게 없으면 밝은 바탕화면 위에서 흰 글자가 통째로 사라진다.
+const HALO: i32 = 3;
+
 fn font_data() -> &'static [u8] {
     static FONT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     FONT.get_or_init(|| std::fs::read(FONT_PATH).unwrap_or_default())
@@ -99,8 +103,10 @@ fn raster(text: &str, max_w: f32) -> Option<(Vec<u8>, u32, u32)> {
     let px = FONT_PT * SCALE;
     let lay = layout(&font, text, px, max_w * SCALE);
     // 글자가 위아래로 삐져나오지 않게 한 줄 높이 안에 ascent+descent 를 가운데 둔다.
-    let w = lay.width.ceil().max(1.0) as u32;
-    let h = (lay.lines.len() as f32 * lay.line_h).ceil().max(1.0) as u32;
+    // 테두리가 잘리지 않게 사방을 그만큼 넓혀 둔다.
+    let pad = HALO as u32 + 1;
+    let w = lay.width.ceil().max(1.0) as u32 + pad * 2;
+    let h = (lay.lines.len() as f32 * lay.line_h).ceil().max(1.0) as u32 + pad * 2;
     let mut buf = vec![0u8; (w * h * 4) as usize];
 
     let mut ctx = ScaleContext::new();
@@ -118,8 +124,8 @@ fn raster(text: &str, max_w: f32) -> Option<(Vec<u8>, u32, u32)> {
         for g in line {
             if let Some(img) = render.render(&mut scaler, g.gid) {
                 let (pw, ph) = (img.placement.width as i32, img.placement.height as i32);
-                let x0 = pen.round() as i32 + img.placement.left;
-                let y0 = baseline.round() as i32 - img.placement.top;
+                let x0 = pen.round() as i32 + img.placement.left + pad as i32;
+                let y0 = baseline.round() as i32 - img.placement.top + pad as i32;
                 for ry in 0..ph {
                     for rx in 0..pw {
                         let (x, y) = (x0 + rx, y0 + ry);
@@ -153,7 +159,38 @@ fn raster(text: &str, max_w: f32) -> Option<(Vec<u8>, u32, u32)> {
         }
         baseline += lay.line_h;
     }
-    Some((buf, w, h))
+
+    // 글자 밑에 어두운 테두리를 깔아 어떤 바탕화면 위에서도 읽힌다. 글자 알파를 조금
+    // 부풀린 것이 테두리이고, 결과는 미리곱 알파라 색은 글자 몫만 남긴다.
+    let mut out = vec![0u8; buf.len()];
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let at = |xx: i32, yy: i32| -> u32 {
+                if xx < 0 || yy < 0 || xx >= w as i32 || yy >= h as i32 {
+                    0
+                } else {
+                    buf[((yy as u32 * w + xx as u32) * 4 + 3) as usize] as u32
+                }
+            };
+            let mut halo = 0u32;
+            for dy in -HALO..=HALO {
+                for dx in -HALO..=HALO {
+                    if dx * dx + dy * dy <= HALO * HALO {
+                        halo = halo.max(at(x + dx, y + dy));
+                    }
+                }
+            }
+            let o = ((y as u32 * w + x as u32) * 4) as usize;
+            let a = buf[o + 3] as u32;
+            // 테두리는 검정이라 RGB 기여가 0 이다 — 글자 색만 그대로 옮긴다.
+            out[o] = buf[o];
+            out[o + 1] = buf[o + 1];
+            out[o + 2] = buf[o + 2];
+            let halo = halo * 200 / 255;
+            out[o + 3] = (a + halo * (255 - a) / 255).min(255) as u8;
+        }
+    }
+    Some((out, w, h))
 }
 
 /// 글자만 그린 투명 텍스처. 반환은 (view, 논리폭, 논리높이).
@@ -237,6 +274,10 @@ mod tests {
         assert!(w > 0 && h > 0);
         let painted = buf.chunks(4).filter(|p| p[3] > 0).count();
         assert!(painted > 20, "찍힌 픽셀 {painted}");
-        assert!(buf.chunks(4).all(|p| p[0] == p[3] && p[1] == p[3] && p[2] == p[3]));
+        // 글자 속은 흰색(RGB = 알파), 둘레는 검은 테두리(RGB 0 에 알파만) — 어느 쪽이든
+        // RGB 가 알파를 넘지 않아야 미리곱 알파가 성립한다.
+        assert!(buf.chunks(4).all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]));
+        let haloed = buf.chunks(4).filter(|p| p[3] > 0 && p[0] == 0).count();
+        assert!(haloed > 20, "테두리 픽셀 {haloed}");
     }
 }

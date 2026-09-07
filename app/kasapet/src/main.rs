@@ -32,10 +32,6 @@ struct Gfx {
     texs: Vec<wgpu::TextureView>, mask_view: wgpu::TextureView, dummy_view: wgpu::TextureView,
     p_normal: wgpu::RenderPipeline, p_add: wgpu::RenderPipeline, p_mul: wgpu::RenderPipeline, p_mask: wgpu::RenderPipeline,
     p_plain: wgpu::RenderPipeline,
-    /// 말풍선 몸통 — 9조각으로 늘려 그리므로 모서리가 안 일그러진다.
-    bubble_body: Option<wgpu::TextureView>,
-    /// 꼬리는 늘리면 안 되니 따로 그린다.
-    bubble_tail: Option<(wgpu::TextureView, f32, f32)>,
     bubble_vb: wgpu::Buffer, bubble_ub: wgpu::Buffer,
 }
 
@@ -189,18 +185,14 @@ impl ApplicationHandler for App {
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add } };
         let mul = wgpu::BlendState { color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Dst, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add } };
-        // 말풍선 — 우리가 그린 PNG 두 장(몸통·꼬리). 글자는 그 위에 따로 얹는다.
-        let bubble_body = asset_path("pet-bubble.png").and_then(|p| load_png(&dev, &q, &p)).map(|(v, _, _)| v);
-        let bubble_tail = asset_path("pet-bubble-tail.png").and_then(|p| load_png(&dev, &q, &p));
-        // 9조각(54) + 꼬리(6) + 글자(6).
-        let bubble_vb = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: 66 * 16,
+        let bubble_vb = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: 6 * 16,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let bubble_ub = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: 160,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         self.gfx = Some(Gfx {
             p_normal: mk("fs", fmt, over), p_add: mk("fs", fmt, add), p_mul: mk("fs", fmt, mul),
             p_mask: mk("fs_mask", wgpu::TextureFormat::Rgba8Unorm, add), p_plain: mk("fs_plain", fmt, over),
-            bubble_body, bubble_tail, bubble_vb, bubble_ub,
+            bubble_vb, bubble_ub,
             dev, q, surf, fmt, bgl, samp, texs, mask_view, dummy_view });
         self.win = Some(win);
     }
@@ -628,75 +620,39 @@ impl App {
                 rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
                 rp.draw_indexed(0..*n, 0, 0..1);
             }
-            // 말풍선 — 머리 위 오른쪽에 붙어 몸을 따라 움직인다. 모양은 PNG 두 장이고
-            // (몸통은 9조각으로 늘려 모서리를 지킨다), 글자는 그 위에 얹는다.
-            if let (Some(body), Some((tail_v, tail_w, tail_h)), Some((text_v, text_w, text_h))) =
-                (&g.bubble_body, &g.bubble_tail, &self.bubble_text)
-            {
+            // 할 말 — 판 없이 글자만 머리 위에 뜬다(2026-09-07 지시). 판을 두면 캐릭터
+            // 위에 네모가 하나 더 얹혀 바탕화면에 얹힌 느낌이 사라진다. 밝은 바탕에서도
+            // 읽히도록 글자 자체가 어두운 테두리를 두르고 온다(bubble.rs).
+            if let Some((text_v, text_w, text_h)) = &self.bubble_text {
                 let win = self.win.as_ref().map(|w| w.inner_size()).unwrap_or_default();
                 let sf = self.win.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
                 let (sw, sh) = (win.width.max(1) as f32 / sf, win.height.max(1) as f32 / sf);
-                // 논리 px → NDC. 화면 폭의 2가 -1..1 이다.
                 let (px, py) = (2.0 / sw, 2.0 / sh);
-                const PAD: f32 = 14.0;
-                const CORNER: f32 = 18.0;
-                let (bw, bh) = (text_w + PAD * 2.0, text_h + PAD * 2.0);
+                let (tw, th) = (*text_w * px, *text_h * py);
 
-                // 머리 꼭대기를 NDC 로. 캐릭터가 숨쉬고 고개를 돌리면 이 값이 따라 움직인다.
-                // 머리도 캐릭터와 같은 변환을 거쳐야 말풍선이 그 자리에 선다.
+                // 머리 꼭대기를 따라간다 — 숨쉬고 고개를 돌리면 글도 함께 움직인다.
                 let (hx, hy) = fit.apply(self.head);
-                // 머리 위 한가운데. 오른쪽으로 비켜 세우면 말풍선이 창 밖으로 밀려 나가
-                // 가장자리에 눌린 채 굳는다 — 그러면 캐릭터를 따라 움직이지도 못한다.
-                let bx = (hx - bw * px / 2.0).clamp(-1.0, 1.0 - bw * px);
-                let by = (hy + (*tail_h + 6.0) * py).min(1.0 - bh * py);
-
-                let mut vs: Vec<V> = Vec::with_capacity(66);
-                let mut quad = |x0: f32, y0: f32, w: f32, h: f32, u0: f32, v0: f32, u1: f32, v1: f32| {
-                    let (x1, y1) = (x0 + w, y0 - h);
-                    vs.extend_from_slice(&[
-                        V { p: [x0, y0], uv: [u0, v0] },
-                        V { p: [x1, y0], uv: [u1, v0] },
-                        V { p: [x0, y1], uv: [u0, v1] },
-                        V { p: [x1, y0], uv: [u1, v0] },
-                        V { p: [x1, y1], uv: [u1, v1] },
-                        V { p: [x0, y1], uv: [u0, v1] },
-                    ]);
-                };
-
-                // 9조각: 모서리는 그대로, 가장자리와 가운데만 늘어난다.
-                let (cwp, chp) = (CORNER * px, CORNER * py);
-                let (bwn, bhn) = (bw * px, bh * py);
-                let xs = [bx, bx + cwp, bx + bwn - cwp];
-                let ws = [cwp, bwn - cwp * 2.0, cwp];
-                let ys = [by + bhn, by + bhn - chp, by + chp];
-                let hs = [chp, bhn - chp * 2.0, chp];
-                // 원본 PNG 는 80px 에 모서리 20px — 0.25 씩이다.
-                let us = [0.0, 0.25, 0.75];
-                let uw = [0.25, 0.5, 0.25];
-                for r in 0..3 {
-                    for c in 0..3 {
-                        quad(xs[c], ys[r], ws[c], hs[r], us[c], us[r], us[c] + uw[c], us[r] + uw[r]);
-                    }
-                }
-                // 꼬리 — 늘리지 않는다. 머리를 가리키므로 말풍선이 밀려도 꼬리는 머리 위다.
-                let tx = (hx - *tail_w * px / 2.0)
-                    .clamp(bx + CORNER * px, bx + bwn - CORNER * px - *tail_w * px);
-                quad(tx, by + 1.0 * py, *tail_w * px, *tail_h * py, 0.0, 0.0, 1.0, 1.0);
-                // 글자
-                quad(bx + PAD * px, by + bhn - PAD * py, *text_w * px, *text_h * py, 0.0, 0.0, 1.0, 1.0);
-
-                g.q.write_buffer(&g.bubble_vb, 0, bytemuck::cast_slice(&vs));
+                let x0 = (hx - tw / 2.0).clamp(-1.0, 1.0 - tw);
+                let y0 = (hy + 10.0 * py + th).min(1.0);
+                let (x1, y1) = (x0 + tw, y0 - th);
+                let quad = [
+                    V { p: [x0, y0], uv: [0.0, 0.0] },
+                    V { p: [x1, y0], uv: [1.0, 0.0] },
+                    V { p: [x0, y1], uv: [0.0, 1.0] },
+                    V { p: [x1, y0], uv: [1.0, 0.0] },
+                    V { p: [x1, y1], uv: [1.0, 1.0] },
+                    V { p: [x0, y1], uv: [0.0, 1.0] },
+                ];
+                g.q.write_buffer(&g.bubble_vb, 0, bytemuck::cast_slice(&quad));
                 let mut m = [0.0f32; 16];
                 m[0] = 1.0; m[5] = 1.0; m[10] = 1.0; m[15] = 1.0;
                 let u = Xf { mvp: m, mask_mtx: m, channel: [0.0; 4], opacity: 1.0, use_mask: 0.0, inverted: 0.0, _pad: 0.0 };
                 g.q.write_buffer(&g.bubble_ub, 0, bytemuck::bytes_of(&u));
+                let bg = bind(&g.bubble_ub, text_v, &g.dummy_view);
                 rp.set_pipeline(&g.p_plain);
+                rp.set_bind_group(0, &bg, &[]);
                 rp.set_vertex_buffer(0, g.bubble_vb.slice(..));
-                for (tex, range) in [(body, 0..54), (tail_v, 54..60), (text_v, 60..66)] {
-                    let bg = bind(&g.bubble_ub, tex, &g.dummy_view);
-                    rp.set_bind_group(0, &bg, &[]);
-                    rp.draw(range, 0..1);
-                }
+                rp.draw(0..6, 0..1);
             }
         }
         g.q.submit([enc.finish()]);
@@ -776,36 +732,7 @@ fn save_shot(g: &Gfx, tex: &wgpu::Texture, path: &str) {
     eprintln!("캡처: {path}");
 }
 
-/// 번들 Resources 아니면 개발 트리의 assets.
-fn asset_path(name: &str) -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let bundled = exe.parent().map(|d| d.join(name));
-    let dev = exe
-        .ancestors()
-        .find(|a| a.join("assets").join(name).is_file())
-        .map(|a| a.join("assets").join(name));
-    bundled.into_iter().chain(dev).find(|p| p.is_file())
-}
 
-fn load_png(
-    dev: &wgpu::Device,
-    q: &wgpu::Queue,
-    path: &std::path::Path,
-) -> Option<(wgpu::TextureView, f32, f32)> {
-    let f = std::fs::File::open(path).ok()?;
-    let mut r = png::Decoder::new(std::io::BufReader::new(f)).read_info().ok()?;
-    let mut buf = vec![0u8; r.output_buffer_size()];
-    let info = r.next_frame(&mut buf).ok()?;
-    let (w, h) = (info.width, info.height);
-    let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
-    let tex = dev.create_texture(&wgpu::TextureDescriptor {
-        label: None, size, mip_level_count: 1, sample_count: 1,
-        dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
-    q.write_texture(tex.as_image_copy(), &buf[..(w * h * 4) as usize],
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) }, size);
-    Some((tex.create_view(&Default::default()), w as f32, h as f32))
-}
 
 /// model3.json 이 적어 둔 모션 파일 전부(무리 순서대로). 공식 샘플은 무리 이름이
 /// `Idle`·`TapBody` 뿐이라 「Busy 모션」 같은 이름으로는 못 고른다 — 자리로 고른다.
