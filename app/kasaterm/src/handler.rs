@@ -784,6 +784,11 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = reply.send(id);
                 return;
             }
+            UserEvent::SocketSpawnShell(cwd, reply) => {
+                let id = self.spawn_shell_pane(cwd.as_deref());
+                let _ = reply.send(id);
+                return;
+            }
             UserEvent::SocketToast(msg) => {
                 self.set_toast(msg.clone());
                 return;
@@ -2028,6 +2033,18 @@ impl ApplicationHandler<UserEvent> for App {
                     // 조회가 같은 판정을 쓰게 한다 — 도중에 닫히면 반쪽만 캐시를
                     // 건너뛰어, 같은 화면의 숫자가 서로 다른 시각의 것이 된다.
                     let menu_open = usage_menu_open().load(std::sync::atomic::Ordering::Relaxed);
+                    // 코덱스 한도는 **코덱스에게 직접 묻는다** — 대화 기록에서
+                    // 읽던 길이 2026-09-05 무렵 막혔다(그 뒤 세션에 한도 줄이
+                    // 없다). app-server 를 띄우는 값이라 자주 부를 자리가 아니라,
+                    // 펼쳐 보는 중이면 1분, 아니면 5분에 한 번.
+                    let codex_every = if menu_open {
+                        std::time::Duration::from_secs(60)
+                    } else {
+                        std::time::Duration::from_secs(300)
+                    };
+                    if crate::codexlimits::stale(codex_every) && crate::codexlimits::refresh() {
+                        let _ = usage_proxy.send_event(UserEvent::Redraw);
+                    }
                     let active_id = socket::read_claude_account();
                     // 도는 세션이 갱신해 둔 토큰을 금고로 되받는다. 안 하면 금고의
                     // refresh token 이 이미 쓴 값으로 굳어, 다음에 그 계정을 꺼낼 때
@@ -4850,6 +4867,11 @@ impl ApplicationHandler<UserEvent> for App {
                                     self.info.pane_menu = None;
                                     self.close_pane(&pane);
                                 }
+                                Some(M::CloseKeep) => {
+                                    self.info.pane_menu = None;
+                                    self.remote_keep.insert(pane.clone());
+                                    self.close_pane(&pane);
+                                }
                                 None => self.info.pane_menu = None,
                             }
                             self.chrome_dirty = true;
@@ -7544,16 +7566,9 @@ impl App {
             // 곧바로 재구성하지 않는다 — 「되살리는 중」을 한 프레임 그린 뒤에
             // 시작해야 그 화면이 멈춘 채로 남는다(위 restore_applying 주석).
             RestoreBtn::Restore => {
-                // 유예를 env 로 늘릴 수 있게 둔 건 이 스플래시를 **눈으로 볼
-                // 방법이 달리 없어서**다. 기본 90ms 는 캡처 한 장으로 잡기엔
-                // 너무 짧고, 늘려 두면 헤드리스 검증이 그 화면을 찍을 수 있다.
-                let hold = std::env::var("KASATERM_RESTORE_DELAY_MS")
-                    .ok()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(90);
                 self.restore_applying = Some((
                     state,
-                    std::time::Instant::now() + std::time::Duration::from_millis(hold),
+                    std::time::Instant::now() + std::time::Duration::from_millis(90),
                 ));
             }
             // 복원을 안 하면 부팅 때 걸어 둔 학생 예약을 푼다 — 두면 새로 쪼개는
