@@ -50,6 +50,17 @@ if [ "$LOCAL_TS" -le "$REMOTE_TS" ]; then say "미니가 이미 같거나 더 �
 say "부치는 중…"
 run "rsync -a --delete -e ssh '$SRC/' '$HOST:$STAGE/kasaterm.app/'"
 
+# 바탕화면 펫이 쓸 캐릭터도 함께 부친다. 모델은 레포에 없고(재배포 금지) 미니는 스스로
+# 받아올 수도 없다 — 공식 샘플이 아닌 것(곽향)은 받을 데가 아예 없다. 폴더째 맞춰 두면
+# 미니에서도 같은 캐릭터가 뜬다. `--delete` 는 안 쓴다: 미니에서 옮긴 자리·고른 캐릭터
+# 같은 그쪽 상태를 지우지 않는다.
+PET="$HOME/.config/kasaterm/pet"
+if [ -d "$PET" ]; then
+  say "펫 캐릭터 부치는 중…"
+  run "ssh '$HOST' 'mkdir -p ~/.config/kasaterm/pet'"
+  run "rsync -a -e ssh --exclude board.json --exclude state.json '$PET/' '$HOST:.config/kasaterm/pet/'"
+fi
+
 # 미니 앱의 조종 소켓은 인스턴스마다 다르다(`/tmp/cmux.sock` 은 미니에 없다).
 # 도는 pid 에서 찾아 쓴다 — pid 는 교체 뒤 바뀌므로 매번 다시 찾는다.
 # 라벨은 **정확히** 맞춘다 — `com.geono.kasaterm-gateway-tunnel` 같은 이웃이 정규식에 같이

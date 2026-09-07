@@ -11,15 +11,41 @@ use swash::scale::{image::Content, Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Format;
 use swash::FontRef;
 
-const FONT_PATH: &str = "/System/Library/Fonts/AppleSDGothicNeo.ttc";
-const FONT_PT: f32 = 13.0;
+/// 기본 글자 크기(pt). 설정에서 바꾸면 `pet/text_pt` 파일이 이 값을 대신한다.
+pub const FONT_PT: f32 = 13.0;
 const LINE_SPACING: f32 = 1.4;
 /// 레티나 — 래스터는 이 배율, 반환은 논리.
 const SCALE: f32 = 2.0;
 
+/// 글자 둘레에 두르는 어두운 테두리의 두께(래스터 픽셀). 말풍선 판을 걷어내고 글자만
+/// 띄우므로, 이게 없으면 밝은 바탕화면 위에서 흰 글자가 통째로 사라진다.
+const HALO: i32 = 3;
+
+/// 시스템 한글 폰트 — 담아 온 메이플스토리체를 못 찾았을 때만.
+const FALLBACK_FONT: &str = "/System/Library/Fonts/AppleSDGothicNeo.ttc";
+
+/// 담아 온 서체. 넥슨이 무료로 배포하는 메이플스토리체이고, 소프트웨어에 함께 담아도
+/// 되는 조건이라 레포에 넣었다(assets/fonts/LICENSE-Maplestory.txt).
+const BUNDLED_FONT: &str = "Maplestory Bold.ttf";
+
 fn font_data() -> &'static [u8] {
     static FONT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    FONT.get_or_init(|| std::fs::read(FONT_PATH).unwrap_or_default())
+    FONT.get_or_init(|| {
+        bundled_font_path()
+            .and_then(|p| std::fs::read(p).ok())
+            .unwrap_or_else(|| std::fs::read(FALLBACK_FONT).unwrap_or_default())
+    })
+}
+
+/// 앱 번들 Resources 아니면 개발 트리의 assets/fonts.
+fn bundled_font_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let beside = exe.parent().map(|d| d.join(BUNDLED_FONT));
+    let dev = exe
+        .ancestors()
+        .find(|a| a.join("assets/fonts").join(BUNDLED_FONT).is_file())
+        .map(|a| a.join("assets/fonts").join(BUNDLED_FONT));
+    beside.into_iter().chain(dev).find(|p| p.is_file())
 }
 
 struct Glyph {
@@ -90,17 +116,19 @@ fn layout(font: &FontRef, text: &str, px: f32, max_w: f32) -> Layout {
 
 /// 글자만 찍은 프리멀티플라이드 RGBA(2배 픽셀) — (버퍼, 폭, 높이). 빈 글이면 None.
 /// `max_w` 는 논리 pt.
-fn raster(text: &str, max_w: f32) -> Option<(Vec<u8>, u32, u32)> {
+fn raster(text: &str, max_w: f32, pt: f32) -> Option<(Vec<u8>, u32, u32)> {
     let text = text.trim();
     if text.is_empty() {
         return None;
     }
     let font = FontRef::from_index(font_data(), 0)?;
-    let px = FONT_PT * SCALE;
+    let px = pt * SCALE;
     let lay = layout(&font, text, px, max_w * SCALE);
     // 글자가 위아래로 삐져나오지 않게 한 줄 높이 안에 ascent+descent 를 가운데 둔다.
-    let w = lay.width.ceil().max(1.0) as u32;
-    let h = (lay.lines.len() as f32 * lay.line_h).ceil().max(1.0) as u32;
+    // 테두리가 잘리지 않게 사방을 그만큼 넓혀 둔다.
+    let pad = HALO as u32 + 1;
+    let w = lay.width.ceil().max(1.0) as u32 + pad * 2;
+    let h = (lay.lines.len() as f32 * lay.line_h).ceil().max(1.0) as u32 + pad * 2;
     let mut buf = vec![0u8; (w * h * 4) as usize];
 
     let mut ctx = ScaleContext::new();
@@ -118,8 +146,8 @@ fn raster(text: &str, max_w: f32) -> Option<(Vec<u8>, u32, u32)> {
         for g in line {
             if let Some(img) = render.render(&mut scaler, g.gid) {
                 let (pw, ph) = (img.placement.width as i32, img.placement.height as i32);
-                let x0 = pen.round() as i32 + img.placement.left;
-                let y0 = baseline.round() as i32 - img.placement.top;
+                let x0 = pen.round() as i32 + img.placement.left + pad as i32;
+                let y0 = baseline.round() as i32 - img.placement.top + pad as i32;
                 for ry in 0..ph {
                     for rx in 0..pw {
                         let (x, y) = (x0 + rx, y0 + ry);
@@ -153,7 +181,38 @@ fn raster(text: &str, max_w: f32) -> Option<(Vec<u8>, u32, u32)> {
         }
         baseline += lay.line_h;
     }
-    Some((buf, w, h))
+
+    // 글자 밑에 어두운 테두리를 깔아 어떤 바탕화면 위에서도 읽힌다. 글자 알파를 조금
+    // 부풀린 것이 테두리이고, 결과는 미리곱 알파라 색은 글자 몫만 남긴다.
+    let mut out = vec![0u8; buf.len()];
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let at = |xx: i32, yy: i32| -> u32 {
+                if xx < 0 || yy < 0 || xx >= w as i32 || yy >= h as i32 {
+                    0
+                } else {
+                    buf[((yy as u32 * w + xx as u32) * 4 + 3) as usize] as u32
+                }
+            };
+            let mut halo = 0u32;
+            for dy in -HALO..=HALO {
+                for dx in -HALO..=HALO {
+                    if dx * dx + dy * dy <= HALO * HALO {
+                        halo = halo.max(at(x + dx, y + dy));
+                    }
+                }
+            }
+            let o = ((y as u32 * w + x as u32) * 4) as usize;
+            let a = buf[o + 3] as u32;
+            // 테두리는 검정이라 RGB 기여가 0 이다 — 글자 색만 그대로 옮긴다.
+            out[o] = buf[o];
+            out[o + 1] = buf[o + 1];
+            out[o + 2] = buf[o + 2];
+            let halo = halo * 200 / 255;
+            out[o + 3] = (a + halo * (255 - a) / 255).min(255) as u8;
+        }
+    }
+    Some((out, w, h))
 }
 
 /// 글자만 그린 투명 텍스처. 반환은 (view, 논리폭, 논리높이).
@@ -162,8 +221,9 @@ pub fn render_text(
     q: &wgpu::Queue,
     text: &str,
     max_w: f32,
+    pt: f32,
 ) -> Option<(wgpu::TextureView, f32, f32)> {
-    let (buf, w, h) = raster(text, max_w)?;
+    let (buf, w, h) = raster(text, max_w, pt)?;
     let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
     let tex = dev.create_texture(&wgpu::TextureDescriptor {
         label: Some("bubble-text"),
@@ -196,8 +256,8 @@ mod tests {
 
     #[test]
     fn empty_text_is_none() {
-        assert!(raster("", 260.0).is_none());
-        assert!(raster("   \n ", 260.0).is_none());
+        assert!(raster("", 260.0, FONT_PT).is_none());
+        assert!(raster("   \n ", 260.0, FONT_PT).is_none());
     }
 
     #[test]
@@ -231,12 +291,25 @@ mod tests {
         assert_eq!(n, 2);
     }
 
+    /// 설정에서 키운 크기가 실제로 더 큰 글자로 나온다.
+    #[test]
+    fn a_bigger_point_size_makes_a_bigger_raster() {
+        let (_, w1, h1) = raster("가나다", 400.0, 13.0).unwrap();
+        let (_, w2, h2) = raster("가나다", 400.0, 26.0).unwrap();
+        assert!(w2 > w1 * 3 / 2, "폭 {w1} → {w2}");
+        assert!(h2 > h1 * 3 / 2, "높이 {h1} → {h2}");
+    }
+
     #[test]
     fn raster_paints_white_premultiplied_pixels() {
-        let (buf, w, h) = raster("가", 260.0).unwrap();
+        let (buf, w, h) = raster("가", 260.0, FONT_PT).unwrap();
         assert!(w > 0 && h > 0);
         let painted = buf.chunks(4).filter(|p| p[3] > 0).count();
         assert!(painted > 20, "찍힌 픽셀 {painted}");
-        assert!(buf.chunks(4).all(|p| p[0] == p[3] && p[1] == p[3] && p[2] == p[3]));
+        // 글자 속은 흰색(RGB = 알파), 둘레는 검은 테두리(RGB 0 에 알파만) — 어느 쪽이든
+        // RGB 가 알파를 넘지 않아야 미리곱 알파가 성립한다.
+        assert!(buf.chunks(4).all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]));
+        let haloed = buf.chunks(4).filter(|p| p[3] > 0 && p[0] == 0).count();
+        assert!(haloed > 20, "테두리 픽셀 {haloed}");
     }
 }
