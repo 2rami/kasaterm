@@ -6234,13 +6234,30 @@ fn codex_state_db_path() -> Option<std::path::PathBuf> {
     Some(kasa_socket::home_dir()?.join(".codex/state_5.sqlite"))
 }
 
-/// 그 db 를 마지막으로 건드린 시각. 이름표 스캔이 「아무도 안 바꿨다」를 stat 한 번으로
-/// 끊는 데 쓴다 — codex pane 전부가 이 파일 하나를 함께 쓴다.
+fn newest_time(
+    times: impl IntoIterator<Item = Option<std::time::SystemTime>>,
+) -> Option<std::time::SystemTime> {
+    times.into_iter().flatten().max()
+}
+
+fn sqlite_wal_path(db: &std::path::Path) -> std::path::PathBuf {
+    let mut wal = db.as_os_str().to_os_string();
+    wal.push("-wal");
+    std::path::PathBuf::from(wal)
+}
+
+/// 그 db 또는 WAL을 마지막으로 건드린 시각. 이름표 스캔이 「아무도 안 바꿨다」를
+/// stat 두 번으로 끊는 데 쓴다 — codex pane 전부가 이 파일 한 벌을 함께 쓴다.
+///
+/// SQLite WAL 모드에서는 새 `threads.name`이 `state_5.sqlite-wal`에 먼저 들어가고
+/// 본파일 mtime은 체크포인트 전까지 그대로다. 본파일만 보면 이름은 이미 바뀌었는데도
+/// 변화 없음으로 오판해 입력창 우측이 늦게 따라간다.
 pub(crate) fn codex_state_db_mtime() -> Option<std::time::SystemTime> {
-    std::fs::metadata(codex_state_db_path()?)
-        .ok()?
-        .modified()
-        .ok()
+    let db = codex_state_db_path()?;
+    let wal = sqlite_wal_path(&db);
+    newest_time([db, wal].map(|path| {
+        std::fs::metadata(path).ok().and_then(|meta| meta.modified().ok())
+    }))
 }
 
 /// 세션 번호 → codex 가 붙인 이름(`/rename`, 그리고 codex 가 스스로 짓는 제목).
@@ -6546,6 +6563,18 @@ pub(crate) fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std:
 #[cfg(test)]
 mod codex_session_lookup_tests {
     use super::*;
+
+    #[test]
+    fn codex_title_clock_uses_the_newer_wal_write() {
+        let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(10);
+        let wal = base + std::time::Duration::from_secs(5);
+        assert_eq!(newest_time([Some(base), Some(wal)]), Some(wal));
+        assert_eq!(newest_time([Some(base), None]), Some(base));
+        assert_eq!(
+            sqlite_wal_path(std::path::Path::new("/tmp/state_5.sqlite")),
+            std::path::Path::new("/tmp/state_5.sqlite-wal")
+        );
+    }
 
     fn temp_root(label: &str) -> std::path::PathBuf {
         let nonce = std::time::SystemTime::now()
