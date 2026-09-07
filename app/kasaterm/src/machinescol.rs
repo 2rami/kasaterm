@@ -445,7 +445,7 @@ impl App {
                 #[cfg(not(unix))]
                 {
                     let _ = id;
-                    Err(anyhow::anyhow!("데려오기는 아직 Windows 에서 안 된다"))
+                    Err::<String, _>(anyhow::anyhow!("데려오기는 아직 Windows 에서 안 된다"))
                 }
             });
             match outcome {

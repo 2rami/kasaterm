@@ -3859,17 +3859,49 @@ pub(crate) fn pet_pid() -> Option<u32> {
     let p = pet_pid_path()?;
     let pid: u32 = std::fs::read_to_string(&p).ok()?.trim().parse().ok()?;
     // 죽은 pid 가 남아 있으면 「켜져 있다」로 읽혀 다시 못 켠다 — 살아 있는지 본다.
-    unsafe { (libc::kill(pid as i32, 0) == 0).then_some(pid) }
+    process_alive(pid).then_some(pid)
 }
 
 fn pet_pid_path() -> Option<std::path::PathBuf> {
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/pet.pid"))
 }
 
+/// 그 pid 가 아직 살아 있나.
+///
+/// 시그널은 유닉스 것이라 `libc` 를 여기 한 곳에 가둔다 — 부르는 쪽이 양쪽
+/// 플랫폼에서 같은 모양이 되게. 맥 전용 크레이트를 공용 코드에서 그대로 쓰면
+/// Windows 빌드가 통째로 선다(`libc` 는 Cargo.toml 의 macos 블록에만 있다).
+///
+/// Windows 는 늘 거짓이다. 펫(`kasapet`)이 아직 맥 전용이라 pid 파일 자체가
+/// 안 생기고, 그러면 「꺼져 있다」가 사실이다.
+fn process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// 그 프로세스에 끝내라고 이른다. Windows 에서는 할 일이 없다 — 위 참조.
+fn terminate_process(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
 /// 펫을 켜고 끈다. 반환은 켠 쪽인가.
 pub(crate) fn toggle_pet() -> bool {
     if let Some(pid) = pet_pid() {
-        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        terminate_process(pid);
         if let Some(p) = pet_pid_path() {
             let _ = std::fs::remove_file(p);
         }
