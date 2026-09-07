@@ -1,0 +1,9 @@
+Maplestory Font (메이플스토리체)
+
+Copyright (c) NEXON Korea Corporation. All rights reserved.
+
+넥슨코리아가 무료로 배포하는 서체다. 개인·기업 모두 자유롭게 쓰고 배포할 수 있으나
+서체 파일 자체를 고치거나 팔 수는 없다. 소프트웨어에 함께 담을 때는 이 저작권 안내를
+포함해야 한다 — 이 파일이 그 안내다.
+
+받은 곳: https://maplestory.nexon.com/Media/Font
