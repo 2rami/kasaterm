@@ -3409,6 +3409,86 @@ impl App {
             PendingClose::Window => {}
         }
     }
+
+    /// 펫이 읽을 「지금 판」을 적는다 — 상태 한 낱말과 말풍선 한 줄.
+    ///
+    /// 펫은 별개 프로세스(앱을 꺼도 살아 있는 것이 이 기능의 전부다)라 App 을 못 본다.
+    /// 소켓을 새로 뚫는 대신 파일 한 장으로 넘기는 이유는, 앱이 꺼져 있으면 그 파일이
+    /// 안 갱신되고 펫은 그걸 「조용하다」로 읽으면 그만이기 때문이다 — 끊긴 연결을
+    /// 다루는 코드가 아예 안 생긴다.
+    pub(crate) fn pet_publish_board(&self) {
+        // 펫이 꺼져 있으면 적을 일이 없다. pid 확인은 syscall 하나라 매 틱 불러도 싸다.
+        if pet_pid().is_none() {
+            return;
+        }
+        // 상태를 App 필드가 아니라 여기 두는 이유는 공유 워킹트리다 — `struct App` 은
+        // 셋이 동시에 만지면 반드시 충돌하는 자리라(CLAUDE.md 병렬 작업 규칙), 이 기능만
+        // 아는 값은 이 파일 안에서 끝낸다.
+        static LAST: std::sync::Mutex<Option<(std::time::Instant, String, String)>> =
+            std::sync::Mutex::new(None);
+        let now = std::time::Instant::now();
+        let mut last = LAST.lock().unwrap();
+        if last
+            .as_ref()
+            .is_some_and(|(t, _, _)| now.duration_since(*t) < std::time::Duration::from_secs(2))
+        {
+            return;
+        }
+    
+        let mut waiting: Vec<String> = Vec::new();
+        let mut stalled: Vec<String> = Vec::new();
+        let mut working = 0usize;
+        for (id, a) in &self.pane_activity {
+            let who = self
+                .pane_character_if_known(id)
+                .unwrap_or_else(|| "누군가".to_string());
+            if a.stalled.is_some() || a.has_error {
+                stalled.push(who);
+            } else if a.status == "waiting" || a.status == "blocked" {
+                waiting.push(who);
+            } else if a.status == "working" || a.status == "building" || a.bg_active {
+                working += 1;
+            }
+        }
+        waiting.sort();
+        waiting.dedup();
+        stalled.sort();
+        stalled.dedup();
+    
+        // 급한 것부터. 막힌 사람이 있는데 「셋이 일하는 중」이라고 말하면 그 한 줄이
+        // 정작 손이 필요한 곳을 덮는다.
+        let (state, text) = if let Some(who) = stalled.first() {
+            ("error", format!("{who}이(가) 막혔어요"))
+        } else if let Some(who) = waiting.first() {
+            let more = waiting.len() - 1;
+            if more > 0 {
+                ("wait", format!("{who} 외 {more}명이 답을 기다려요"))
+            } else {
+                ("wait", format!("{who}이(가) 답을 기다려요"))
+            }
+        } else if working > 0 {
+            ("busy", format!("{working}명이 일하는 중"))
+        } else {
+            ("idle", String::new())
+        };
+    
+        // 같은 판을 다시 적지 않는다 — 펫이 mtime 으로 바뀜을 보므로, 매번 쓰면 말풍선이
+        // 2초마다 다시 뜬다.
+        if last
+            .as_ref()
+            .is_some_and(|(_, st, tx)| st == state && tx == &text)
+        {
+            return;
+        }
+        *last = Some((now, state.to_string(), text.clone()));
+    
+        let Some(dir) = pet_model_dir() else { return };
+        let esc = text.replace('\\', "\\\\").replace('"', "\\\"");
+        let _ = std::fs::write(
+            dir.join("board.json"),
+            format!("{{\"state\":\"{state}\",\"text\":\"{esc}\"}}"),
+        );
+    }
 }
 
 /// File name for the dialog — the full path would blow the card's width.
@@ -3718,8 +3798,6 @@ fn notify_osascript(title: &str, body: &str) {
         .spawn();
 }
 
-/// Set (or clear, when 0) the Dock tile badge to the unread-notification count.
-#[cfg(target_os = "macos")]
 /// 바탕화면 펫이 지금 떠 있나. pid 파일 하나로 판정한다 — 앱을 껐다 켜도 펫은 살아
 /// 있으므로(그게 이 기능의 전부다) 상태를 앱 메모리에 두면 다음 실행이 못 알아본다.
 pub(crate) fn pet_pid() -> Option<u32> {
@@ -3854,6 +3932,8 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// Set (or clear, when 0) the Dock tile badge to the unread-notification count.
+#[cfg(target_os = "macos")]
 fn set_dock_badge(count: usize) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;

@@ -18,18 +18,25 @@ struct Xf { mvp: [f32; 16], mask_mtx: [f32; 16], channel: [f32; 4], opacity: f32
 
 const MASK: u32 = 2048;
 
-fn ortho(cw: f32, ch: f32) -> [f32; 16] {
-    let mut m = [0.0f32; 16];
-    m[0] = 2.0 / cw; m[5] = 2.0 / ch; m[10] = 1.0; m[15] = 1.0;
-    m
-}
+mod board;
+mod bubble;
+
+/// 말풍선이 앉을 자리 — 창 위쪽을 이만큼 비우고 캐릭터를 그 아래에 그린다.
+/// 안 비우면 캐릭터가 창을 꽉 채워 말풍선이 화면 끝에 눌린 채 못 움직인다.
+const HEADROOM: f64 = 110.0;
+
 
 struct Gfx {
     dev: wgpu::Device, q: wgpu::Queue, surf: wgpu::Surface<'static>, fmt: wgpu::TextureFormat,
     bgl: wgpu::BindGroupLayout, samp: wgpu::Sampler,
     texs: Vec<wgpu::TextureView>, mask_view: wgpu::TextureView, dummy_view: wgpu::TextureView,
     p_normal: wgpu::RenderPipeline, p_add: wgpu::RenderPipeline, p_mul: wgpu::RenderPipeline, p_mask: wgpu::RenderPipeline,
-    p_plain: wgpu::RenderPipeline, bubble: Option<(wgpu::TextureView, f32, f32)>, bubble_vb: wgpu::Buffer, bubble_ub: wgpu::Buffer,
+    p_plain: wgpu::RenderPipeline,
+    /// 말풍선 몸통 — 9조각으로 늘려 그리므로 모서리가 안 일그러진다.
+    bubble_body: Option<wgpu::TextureView>,
+    /// 꼬리는 늘리면 안 되니 따로 그린다.
+    bubble_tail: Option<(wgpu::TextureView, f32, f32)>,
+    bubble_vb: wgpu::Buffer, bubble_ub: wgpu::Buffer,
 }
 
 struct App {
@@ -43,6 +50,24 @@ struct App {
     name: String,
     /// 두 번 누름 판정용. 왼쪽 한 번은 끌기라, 바로 끌어 버리면 두 번째를 못 본다.
     last_click: Option<std::time::Instant>,
+    /// 지금 판. kasaterm 이 적어 두는 파일에서 온다.
+    mood: board::Mood,
+    say: String,
+    board_seen: Option<std::time::SystemTime>,
+    board_polled: std::time::Instant,
+    /// 마지막으로 뭔가 벌어진 때. 오래 조용하면 잠든다.
+    stirred: std::time::Instant,
+    /// 글자를 그린 텍스처. 말풍선은 이것이 있을 때만 뜬다.
+    bubble_text: Option<(wgpu::TextureView, f32, f32)>,
+    /// 모델의 맨 윗점(모델 좌표). 말풍선이 이 점을 따라다녀 몸이 흔들리면 함께 흔들린다.
+    head: (f32, f32),
+    /// 그림이 실제로 차지하는 범위. 모델이 선언한 캔버스보다 큰 경우가 흔해(마오는 모자가
+    /// 30% 삐져나온다) 캔버스에 맞춰 그리면 잘리고, 머리 위 자리 계산도 어긋난다.
+    bbox: Option<(f32, f32, f32, f32)>,
+    /// 무리별 모션 파일. 상태가 바뀌면 여기서 하나 고른다.
+    motion_files: Vec<std::path::PathBuf>,
+    expr_files: Vec<std::path::PathBuf>,
+    exprs: mocari::expression::ExpressionManager,
     bufs: Vec<Option<(wgpu::Buffer, wgpu::Buffer, u32)>>, ubs: Vec<wgpu::Buffer>,
     look: (f32, f32), look_now: (f32, f32),
     motion_params: std::collections::HashSet<String>,
@@ -164,29 +189,18 @@ impl ApplicationHandler for App {
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add } };
         let mul = wgpu::BlendState { color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Dst, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add } };
-        // 말풍선 — 미리 그린 PNG 를 텍스처로. 대사는 character.json 이 준다.
-        let bubble = std::env::var("BUBBLE").ok().and_then(|p| {
-            let f = std::fs::File::open(&p).ok()?;
-            let mut r = png::Decoder::new(std::io::BufReader::new(f)).read_info().ok()?;
-            let mut buf = vec![0u8; r.output_buffer_size()];
-            let info = r.next_frame(&mut buf).ok()?;
-            let (bw, bh) = (info.width, info.height);
-            let size = wgpu::Extent3d { width: bw, height: bh, depth_or_array_layers: 1 };
-            let tex = dev.create_texture(&wgpu::TextureDescriptor { label: None, size, mip_level_count: 1, sample_count: 1,
-                dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
-            q.write_texture(tex.as_image_copy(), &buf[..(bw * bh * 4) as usize],
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * bw), rows_per_image: Some(bh) }, size);
-            Some((tex.create_view(&Default::default()), bw as f32, bh as f32))
-        });
-        let bubble_vb = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: 6 * 16,
+        // 말풍선 — 우리가 그린 PNG 두 장(몸통·꼬리). 글자는 그 위에 따로 얹는다.
+        let bubble_body = asset_path("pet-bubble.png").and_then(|p| load_png(&dev, &q, &p)).map(|(v, _, _)| v);
+        let bubble_tail = asset_path("pet-bubble-tail.png").and_then(|p| load_png(&dev, &q, &p));
+        // 9조각(54) + 꼬리(6) + 글자(6).
+        let bubble_vb = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: 66 * 16,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let bubble_ub = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: 160,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         self.gfx = Some(Gfx {
             p_normal: mk("fs", fmt, over), p_add: mk("fs", fmt, add), p_mul: mk("fs", fmt, mul),
             p_mask: mk("fs_mask", wgpu::TextureFormat::Rgba8Unorm, add), p_plain: mk("fs_plain", fmt, over),
-            bubble, bubble_vb, bubble_ub,
+            bubble_body, bubble_tail, bubble_vb, bubble_ub,
             dev, q, surf, fmt, bgl, samp, texs, mask_view, dummy_view });
         self.win = Some(win);
     }
@@ -336,8 +350,79 @@ impl App {
         exec_self(&model);
     }
 
+    /// kasaterm 이 적어 둔 판을 읽는다. 파일이 안 바뀌었으면 아무 일도 안 한다 —
+    /// 앱이 꺼져 있으면 영영 안 바뀌고, 그건 「조용하다」로 읽으면 그만이다.
+    fn poll_board(&mut self) {
+        if self.board_polled.elapsed() < std::time::Duration::from_millis(700) {
+            return;
+        }
+        self.board_polled = std::time::Instant::now();
+        let Some(d) = self.pet_dir.clone() else { return };
+        let f = d.join("board.json");
+        let m = std::fs::metadata(&f).and_then(|m| m.modified()).ok();
+        if m == self.board_seen {
+            // 오래 조용하면 잠든다. 판이 안 바뀌는 동안에만 세므로, 뭔가 벌어지면
+            // 아래에서 stirred 가 갱신돼 잠이 풀린다.
+            if self.mood == board::Mood::Idle && self.stirred.elapsed() > board::SLEEP_AFTER {
+                self.apply_mood(board::Mood::Sleep);
+            }
+            return;
+        }
+        self.board_seen = m;
+        let (mood, text) = board::read(&f);
+        self.stirred = std::time::Instant::now();
+        if text != self.say {
+            self.say = text;
+            self.rebuild_bubble_text();
+        }
+        if mood != self.mood {
+            self.apply_mood(mood);
+        }
+    }
+
+    /// 상태가 바뀌면 몸도 바뀐다 — 모션 하나와 표정 하나.
+    fn apply_mood(&mut self, mood: board::Mood) {
+        self.mood = mood;
+        // 공식 샘플의 모션 무리는 `Idle`·`TapBody` 뿐이라 이름으로는 못 고른다.
+        // 상태마다 자리를 하나씩 주고, 모델이 가진 수로 나눠 쓴다.
+        if !self.motion_files.is_empty() {
+            let f = &self.motion_files[mood.slot() % self.motion_files.len()];
+            self.motion_params = std::fs::read_to_string(f)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|v| {
+                    v.get("Curves").and_then(|c| c.as_array()).map(|a| {
+                        a.iter()
+                            .filter(|c| c.get("Target").and_then(|t| t.as_str()) == Some("Parameter"))
+                            .filter_map(|c| c.get("Id").and_then(|i| i.as_str()).map(str::to_string))
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
+            self.motion = mocari::motion::load_motion(f)
+                .ok()
+                .map(mocari::motion::MotionPlayer::new);
+        }
+        // 표정은 이름이 없는 모델이 많아(exp_01…) 뜻으로 못 고른다. 있는 만큼만 갈라 쓰고,
+        // 없는 모델은 표정 없이 모션으로만 상태를 보인다.
+        self.exprs.stop_all();
+        if !self.expr_files.is_empty() && mood != board::Mood::Idle {
+            let f = &self.expr_files[mood.slot() % self.expr_files.len()];
+            if let Ok(e) = mocari::expression::load_expression(f) {
+                self.exprs.play(e);
+            }
+        }
+    }
+
+    /// 할 말을 글자 텍스처로. 빈 말이면 말풍선이 통째로 사라진다.
+    fn rebuild_bubble_text(&mut self) {
+        let Some(g) = &self.gfx else { return };
+        self.bubble_text = bubble::render_text(&g.dev, &g.q, &self.say, 260.0);
+    }
+
     fn draw(&mut self) {
         self.poll_cursor();
+        self.poll_board();
         let dt = self.last.elapsed().as_secs_f32().min(0.1);
         self.last = std::time::Instant::now();
 
@@ -346,6 +431,8 @@ impl App {
             let rt = self.model.runtime_mut();
             rt.reset_parameters();
             if let Some(m) = &mut self.motion { m.tick(dt); m.apply(rt); }
+            self.exprs.tick(dt);
+            self.exprs.apply(rt);
             // Cubism 런타임이 자동으로 하는 것 — 모션 파일에는 없다.
             self.t += dt;
             let t = self.t;
@@ -416,8 +503,44 @@ impl App {
                 g.q.write_buffer(vb, 0, bytemuck::cast_slice(&verts));
             }
         }
+        // 말풍선이 따라다닐 점, 그리고 그림이 실제로 차지하는 범위.
+        {
+            let (mut top, mut bb) = ((0.0f32, f32::MIN), (f32::MAX, f32::MAX, f32::MIN, f32::MIN));
+            for (i, m) in meshes.iter().enumerate() {
+                // 안 보이는 조각은 빼야 한다 — 모델마다 캔버스를 덮는 투명 판이 하나씩
+                // 있어서, 그것까지 세면 「맨 윗점」이 늘 그 판의 모서리로 굳는다.
+                if !infos.get(i).map(|d| d.is_visible()).unwrap_or(true) {
+                    continue;
+                }
+                for v in rc::vertices_from_drawable(m) {
+                    let q = v.position();
+                    if q[1] > top.1 {
+                        top = (q[0], q[1]);
+                    }
+                    bb.0 = bb.0.min(q[0]);
+                    bb.1 = bb.1.min(q[1]);
+                    bb.2 = bb.2.max(q[0]);
+                    bb.3 = bb.3.max(q[1]);
+                }
+            }
+            // 범위는 한 번만 잡는다. 매 프레임 다시 잡으면 숨쉴 때마다 캐릭터가 커졌다
+            // 작아졌다 한다.
+            if self.bbox.is_none() && bb.2 > bb.0 {
+                self.bbox = Some(bb);
+            }
+            if top.1 > f32::MIN {
+                // 홱홱 튀지 않게 따라간다 — 맨 윗점은 머리카락 한 올에서 다른 올로 건너뛴다.
+                let e = 1.0 - (-dt * 8.0).exp();
+                self.head.0 += (top.0 - self.head.0) * e;
+                self.head.1 += (top.1 - self.head.1) * e;
+            }
+        }
         let bufs = &self.bufs;
-        let base = ortho(cw, ch);
+        // 캐릭터는 창의 아래쪽 몫에만, 그림이 차지하는 범위를 그 안에 꽉 맞춰 그린다.
+        // 위는 말풍선 자리다.
+        let room = ((self.h - HEADROOM) / self.h) as f32;
+        let fit = fit_xform(self.bbox, cw, ch, room);
+        let base = fit.matrix();
         let frame = match g.surf.get_current_texture() { Ok(f) => f, Err(_) => return };
         let view = frame.texture.create_view(&Default::default());
         let mut enc = g.dev.create_command_encoder(&Default::default());
@@ -480,31 +603,75 @@ impl App {
                 rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
                 rp.draw_indexed(0..*n, 0, 0..1);
             }
-            // 말풍선 — 캐릭터 머리 위 오른쪽(character.json 의 offset 규약).
-            if let Some((bv, bw, bh)) = &g.bubble {
+            // 말풍선 — 머리 위 오른쪽에 붙어 몸을 따라 움직인다. 모양은 PNG 두 장이고
+            // (몸통은 9조각으로 늘려 모서리를 지킨다), 글자는 그 위에 얹는다.
+            if let (Some(body), Some((tail_v, tail_w, tail_h)), Some((text_v, text_w, text_h))) =
+                (&g.bubble_body, &g.bubble_tail, &self.bubble_text)
+            {
                 let win = self.win.as_ref().map(|w| w.inner_size()).unwrap_or_default();
-                let (sw, sh) = (win.width.max(1) as f32, win.height.max(1) as f32);
-                // 화면 폭의 4/5 를 넘지 않게 — 넘치면 캐릭터를 가린다.
-                let scale = (sw * 0.8 / bw).min(1.5);
-                let (w2, h2) = (bw * scale / sw, bh * scale / sh);
-                let (x0, y0) = (-0.55, 0.95);
-                let quad = [
-                    V { p: [x0, y0], uv: [0.0, 0.0] },
-                    V { p: [x0 + w2 * 2.0, y0], uv: [1.0, 0.0] },
-                    V { p: [x0, y0 - h2 * 2.0], uv: [0.0, 1.0] },
-                    V { p: [x0 + w2 * 2.0, y0], uv: [1.0, 0.0] },
-                    V { p: [x0 + w2 * 2.0, y0 - h2 * 2.0], uv: [1.0, 1.0] },
-                    V { p: [x0, y0 - h2 * 2.0], uv: [0.0, 1.0] },
-                ];
-                g.q.write_buffer(&g.bubble_vb, 0, bytemuck::cast_slice(&quad));
-                let mut m = [0.0f32; 16]; m[0] = 1.0; m[5] = 1.0; m[10] = 1.0; m[15] = 1.0;
+                let sf = self.win.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
+                let (sw, sh) = (win.width.max(1) as f32 / sf, win.height.max(1) as f32 / sf);
+                // 논리 px → NDC. 화면 폭의 2가 -1..1 이다.
+                let (px, py) = (2.0 / sw, 2.0 / sh);
+                const PAD: f32 = 14.0;
+                const CORNER: f32 = 18.0;
+                let (bw, bh) = (text_w + PAD * 2.0, text_h + PAD * 2.0);
+
+                // 머리 꼭대기를 NDC 로. 캐릭터가 숨쉬고 고개를 돌리면 이 값이 따라 움직인다.
+                // 머리도 캐릭터와 같은 변환을 거쳐야 말풍선이 그 자리에 선다.
+                let (hx, hy) = fit.apply(self.head);
+                // 머리 위 한가운데. 오른쪽으로 비켜 세우면 말풍선이 창 밖으로 밀려 나가
+                // 가장자리에 눌린 채 굳는다 — 그러면 캐릭터를 따라 움직이지도 못한다.
+                let bx = (hx - bw * px / 2.0).clamp(-1.0, 1.0 - bw * px);
+                let by = (hy + (*tail_h + 6.0) * py).min(1.0 - bh * py);
+
+                let mut vs: Vec<V> = Vec::with_capacity(66);
+                let mut quad = |x0: f32, y0: f32, w: f32, h: f32, u0: f32, v0: f32, u1: f32, v1: f32| {
+                    let (x1, y1) = (x0 + w, y0 - h);
+                    vs.extend_from_slice(&[
+                        V { p: [x0, y0], uv: [u0, v0] },
+                        V { p: [x1, y0], uv: [u1, v0] },
+                        V { p: [x0, y1], uv: [u0, v1] },
+                        V { p: [x1, y0], uv: [u1, v0] },
+                        V { p: [x1, y1], uv: [u1, v1] },
+                        V { p: [x0, y1], uv: [u0, v1] },
+                    ]);
+                };
+
+                // 9조각: 모서리는 그대로, 가장자리와 가운데만 늘어난다.
+                let (cwp, chp) = (CORNER * px, CORNER * py);
+                let (bwn, bhn) = (bw * px, bh * py);
+                let xs = [bx, bx + cwp, bx + bwn - cwp];
+                let ws = [cwp, bwn - cwp * 2.0, cwp];
+                let ys = [by + bhn, by + bhn - chp, by + chp];
+                let hs = [chp, bhn - chp * 2.0, chp];
+                // 원본 PNG 는 80px 에 모서리 20px — 0.25 씩이다.
+                let us = [0.0, 0.25, 0.75];
+                let uw = [0.25, 0.5, 0.25];
+                for r in 0..3 {
+                    for c in 0..3 {
+                        quad(xs[c], ys[r], ws[c], hs[r], us[c], us[r], us[c] + uw[c], us[r] + uw[r]);
+                    }
+                }
+                // 꼬리 — 늘리지 않는다. 머리를 가리키므로 말풍선이 밀려도 꼬리는 머리 위다.
+                let tx = (hx - *tail_w * px / 2.0)
+                    .clamp(bx + CORNER * px, bx + bwn - CORNER * px - *tail_w * px);
+                quad(tx, by + 1.0 * py, *tail_w * px, *tail_h * py, 0.0, 0.0, 1.0, 1.0);
+                // 글자
+                quad(bx + PAD * px, by + bhn - PAD * py, *text_w * px, *text_h * py, 0.0, 0.0, 1.0, 1.0);
+
+                g.q.write_buffer(&g.bubble_vb, 0, bytemuck::cast_slice(&vs));
+                let mut m = [0.0f32; 16];
+                m[0] = 1.0; m[5] = 1.0; m[10] = 1.0; m[15] = 1.0;
                 let u = Xf { mvp: m, mask_mtx: m, channel: [0.0; 4], opacity: 1.0, use_mask: 0.0, inverted: 0.0, _pad: 0.0 };
                 g.q.write_buffer(&g.bubble_ub, 0, bytemuck::bytes_of(&u));
-                let bg = bind(&g.bubble_ub, bv, &g.dummy_view);
                 rp.set_pipeline(&g.p_plain);
-                rp.set_bind_group(0, &bg, &[]);
                 rp.set_vertex_buffer(0, g.bubble_vb.slice(..));
-                rp.draw(0..6, 0..1);
+                for (tex, range) in [(body, 0..54), (tail_v, 54..60), (text_v, 60..66)] {
+                    let bg = bind(&g.bubble_ub, tex, &g.dummy_view);
+                    rp.set_bind_group(0, &bg, &[]);
+                    rp.draw(range, 0..1);
+                }
             }
         }
         g.q.submit([enc.finish()]);
@@ -584,6 +751,72 @@ fn save_shot(g: &Gfx, tex: &wgpu::Texture, path: &str) {
     eprintln!("캡처: {path}");
 }
 
+/// 번들 Resources 아니면 개발 트리의 assets.
+fn asset_path(name: &str) -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let bundled = exe.parent().map(|d| d.join(name));
+    let dev = exe
+        .ancestors()
+        .find(|a| a.join("assets").join(name).is_file())
+        .map(|a| a.join("assets").join(name));
+    bundled.into_iter().chain(dev).find(|p| p.is_file())
+}
+
+fn load_png(
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    path: &std::path::Path,
+) -> Option<(wgpu::TextureView, f32, f32)> {
+    let f = std::fs::File::open(path).ok()?;
+    let mut r = png::Decoder::new(std::io::BufReader::new(f)).read_info().ok()?;
+    let mut buf = vec![0u8; r.output_buffer_size()];
+    let info = r.next_frame(&mut buf).ok()?;
+    let (w, h) = (info.width, info.height);
+    let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+    let tex = dev.create_texture(&wgpu::TextureDescriptor {
+        label: None, size, mip_level_count: 1, sample_count: 1,
+        dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+    q.write_texture(tex.as_image_copy(), &buf[..(w * h * 4) as usize],
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) }, size);
+    Some((tex.create_view(&Default::default()), w as f32, h as f32))
+}
+
+/// model3.json 이 적어 둔 모션 파일 전부(무리 순서대로). 공식 샘플은 무리 이름이
+/// `Idle`·`TapBody` 뿐이라 「Busy 모션」 같은 이름으로는 못 고른다 — 자리로 고른다.
+fn motion_files(model3: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let dir = model3.parent().unwrap_or(std::path::Path::new("."));
+    let Ok(t) = std::fs::read_to_string(model3) else { return Vec::new() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { return Vec::new() };
+    let mut out = Vec::new();
+    if let Some(g) = v.get("FileReferences").and_then(|f| f.get("Motions")).and_then(|m| m.as_object()) {
+        for (_, arr) in g {
+            for e in arr.as_array().into_iter().flatten() {
+                if let Some(f) = e.get("File").and_then(|f| f.as_str()) {
+                    out.push(dir.join(f));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn expression_files(model3: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let dir = model3.parent().unwrap_or(std::path::Path::new("."));
+    let Ok(t) = std::fs::read_to_string(model3) else { return Vec::new() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { return Vec::new() };
+    v.get("FileReferences")
+        .and_then(|f| f.get("Expressions"))
+        .and_then(|e| e.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| e.get("File").and_then(|f| f.as_str()))
+                .map(|f| dir.join(f))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// 그 폴더가 쥔 model3.json. 캐릭터 폴더인지 가르는 기준이기도 하다.
 fn model3_in(dir: &std::path::Path) -> Option<String> {
     std::fs::read_dir(dir)
@@ -630,6 +863,7 @@ fn idle_motion(model3: &str) -> Option<String> {
     Some(f.to_string())
 }
 
+
 fn main() {
     let path = std::env::args().nth(1).unwrap();
     let model = mocari::assets::load_model_runtime(&path).expect("모델");
@@ -648,6 +882,9 @@ fn main() {
     eprintln!("모션이 쥔 파라미터 {}개", motion_params.len());
     let motion = mocari::motion::load_motion(dir.join(&file)).ok()
         .map(mocari::motion::MotionPlayer::new);
+    let model3 = std::path::Path::new(&path).to_path_buf();
+    let motion_files = motion_files(&model3);
+    let expr_files = expression_files(&model3);
     eprintln!("모션 파일: {file}");
     eprintln!("모션 로드: {}", if motion.is_some() { "성공" } else { "실패" });
     // 캐릭터 폴더(`<pet>/<이름>/<이름>.model3.json`)에서 왔으면 그 위가 펫 자리다.
@@ -666,10 +903,53 @@ fn main() {
     let el = EventLoop::new().unwrap();
     el.set_control_flow(ControlFlow::Poll);
     let mut app = App { win: None, gfx: None,
-        x, y, w: 420.0, h: 600.0, scale,
-        alpha: wgpu::CompositeAlphaMode::Auto, cursor: (0.0, 0.0), pet_dir, name, last_click: None, bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
+        x, y, w: 420.0, h: 600.0 + HEADROOM, scale,
+        alpha: wgpu::CompositeAlphaMode::Auto, cursor: (0.0, 0.0), pet_dir, name, last_click: None,
+        mood: board::Mood::Idle, say: String::new(), board_seen: None,
+        board_polled: std::time::Instant::now(), stirred: std::time::Instant::now(),
+        bubble_text: None, head: (0.0, 0.0), bbox: None,
+        motion_files, expr_files, exprs: mocari::expression::ExpressionManager::new(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
         shot_path: std::env::var("KASAPET_SHOT").ok(),
         shot_at: std::env::var("KASAPET_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(120) };
     el.run_app(&mut app).unwrap();
+}
+
+/// 그림을 창의 아래쪽 몫에 꽉 맞추는 변환. 가로세로 비를 지키려고 배율은 하나만 쓴다 —
+/// 따로 쓰면 캐릭터가 눌리거나 늘어난다.
+#[derive(Clone, Copy)]
+struct Fit {
+    s: f32,
+    tx: f32,
+    ty: f32,
+}
+
+impl Fit {
+    fn matrix(self) -> [f32; 16] {
+        let mut m = [0.0f32; 16];
+        m[0] = self.s;
+        m[5] = self.s;
+        m[10] = 1.0;
+        m[12] = self.tx;
+        m[13] = self.ty;
+        m[15] = 1.0;
+        m
+    }
+
+    fn apply(self, p: (f32, f32)) -> (f32, f32) {
+        (p.0 * self.s + self.tx, p.1 * self.s + self.ty)
+    }
+}
+
+fn fit_xform(bbox: Option<(f32, f32, f32, f32)>, cw: f32, ch: f32, room: f32) -> Fit {
+    // 범위를 아직 못 잡았으면(첫 프레임) 모델이 선언한 캔버스로 친다.
+    let (x0, y0, x1, y1) = bbox.unwrap_or((-cw / 2.0, -ch / 2.0, cw / 2.0, ch / 2.0));
+    let (w, h) = ((x1 - x0).max(1e-3), (y1 - y0).max(1e-3));
+    let s = (2.0 / w).min(2.0 * room / h);
+    Fit {
+        s,
+        tx: -(x0 + x1) / 2.0 * s,
+        // 발이 창 바닥에 닿게 — 캐릭터가 공중에 뜨면 바탕화면 펫으로 안 보인다.
+        ty: -1.0 - y0 * s,
+    }
 }

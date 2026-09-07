@@ -4276,6 +4276,32 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 return;
                             }
+                            // 다시 로그인·빼기는 그 자리에서 처리하고 메뉴를 닫는다.
+                            // 로그인 진행은 설정 계정 칸에 뜨고 코드도 거기서 받는다.
+                            Some(AccountMenuItem::Reauth(p, id)) => {
+                                self.account_menu = false;
+                                self.account_menu_provider = None;
+                                self.settings_apply(crate::SettingsAction::ReauthAccount(
+                                    p,
+                                    id,
+                                    crate::settings::LoginBrowser::Default,
+                                ));
+                                let _ = self.open_settings_room(Some(crate::SettingsCat::Accounts));
+                                return;
+                            }
+                            Some(AccountMenuItem::Forget(p, id)) => {
+                                self.account_menu = false;
+                                self.account_menu_provider = None;
+                                self.settings_apply(match p {
+                                    AccountProvider::Claude => {
+                                        crate::SettingsAction::RemoveClaudeAccount(id)
+                                    }
+                                    AccountProvider::Codex => {
+                                        crate::SettingsAction::RemoveCodexAccount(id)
+                                    }
+                                });
+                                return;
+                            }
                             Some(AccountMenuItem::UsageDetails)
                             | Some(AccountMenuItem::ManageAccounts) => {
                                 self.account_menu_provider = None;
@@ -6696,6 +6722,17 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // 신원 조회가 값을 채웠으면 그 자리에서 다시 그린다. 조회는 백그라운드
+        // 스레드라 스스로 화면을 못 깨우고, 그게 없으면 로그인을 마친 뒤에도
+        // 옛 「로그인 필요」가 화면에 남는다(2026-09-07).
+        {
+            use std::sync::atomic::Ordering;
+            let gen = crate::settings::probe_generation().load(Ordering::Relaxed);
+            if self.probe_seen != gen {
+                self.probe_seen = gen;
+                self.chrome_dirty = true;
+            }
+        }
         // 프레임 수와 **루프가 도는 횟수**는 다른 값이다. 화면을 안 그리면서도
         // 루프만 계속 돌면 CPU 는 그대로 탄다 — 그때 fps 만 보면 조용해 보인다
         // (2026-08-28 실측: 2fps 인데 68%).
@@ -7028,6 +7065,8 @@ impl ApplicationHandler<UserEvent> for App {
         // Refresh per-pane busy state (Claude's working spinner → header bar +
         // completion toast). Self-throttled, so this is cheap per loop turn.
         self.refresh_pane_activity();
+        // 바탕화면 펫에게 지금 판을 넘긴다. 펫이 꺼져 있으면 즉시 나간다.
+        self.pet_publish_board();
         // 이사 예약 — 턴 중이라 미뤄 둔 이사를, 스피너가 꺼진 것을 보고 실행한다.
         // 큐가 비어 있으면 즉시 나가므로 매 턴 불러도 공짜다.
         self.run_pending_migrations();
