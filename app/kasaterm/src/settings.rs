@@ -58,33 +58,75 @@ impl App {
     /// Persist the current in-memory settings to `settings.json`. Called after
     /// every control change so the choice survives a relaunch.
     pub(crate) fn settings_save(&self) {
-        socket::write_setting("default_cwd", serde_json::Value::String(self.set_cwd_mode.clone()));
-        socket::write_setting("file_open_mode", serde_json::Value::String(self.set_file_open_mode.clone()));
-        socket::write_setting("file_open_app", serde_json::Value::String(self.set_file_open_app.clone()));
-        socket::write_setting("file_open_cmd", serde_json::Value::String(self.set_file_open_cmd.clone()));
-        socket::write_setting("file_tree_default", serde_json::Value::Bool(self.set_file_tree_default));
-        socket::write_setting("pane_footer_default", serde_json::Value::Bool(self.set_footer_default));
+        socket::write_setting(
+            "default_cwd",
+            serde_json::Value::String(self.set_cwd_mode.clone()),
+        );
+        socket::write_setting(
+            "file_open_mode",
+            serde_json::Value::String(self.set_file_open_mode.clone()),
+        );
+        socket::write_setting(
+            "file_open_app",
+            serde_json::Value::String(self.set_file_open_app.clone()),
+        );
+        socket::write_setting(
+            "file_open_cmd",
+            serde_json::Value::String(self.set_file_open_cmd.clone()),
+        );
+        socket::write_setting(
+            "file_tree_default",
+            serde_json::Value::Bool(self.set_file_tree_default),
+        );
+        socket::write_setting(
+            "pane_footer_default",
+            serde_json::Value::Bool(self.set_footer_default),
+        );
         socket::write_setting(
             "editor_autosave_ms",
             serde_json::Value::from(self.set_autosave.map_or(0, |d| d.as_millis() as u64)),
         );
-        socket::write_setting("default_shell", serde_json::Value::String(self.set_shell.clone()));
-        socket::write_setting("claude_persona", serde_json::Value::Bool(self.set_claude_persona));
+        socket::write_setting(
+            "default_shell",
+            serde_json::Value::String(self.set_shell.clone()),
+        );
+        socket::write_setting(
+            "claude_persona",
+            serde_json::Value::Bool(self.set_claude_persona),
+        );
         socket::write_setting("shim_inject", serde_json::Value::Bool(self.set_shim_inject));
-        socket::write_setting("claude_model", serde_json::Value::String(self.set_claude_model.clone()));
-        socket::write_setting("claude_effort", serde_json::Value::String(self.set_claude_effort.clone()));
-        socket::write_setting("claude_extra", serde_json::Value::String(self.set_claude_extra.clone()));
+        socket::write_setting(
+            "claude_model",
+            serde_json::Value::String(self.set_claude_model.clone()),
+        );
+        socket::write_setting(
+            "claude_effort",
+            serde_json::Value::String(self.set_claude_effort.clone()),
+        );
+        socket::write_setting(
+            "claude_extra",
+            serde_json::Value::String(self.set_claude_extra.clone()),
+        );
         socket::write_setting(
             "claude_accounts",
             serde_json::to_value(&self.set_claude_accounts).unwrap_or(serde_json::Value::Null),
         );
-        socket::write_setting("claude_account", serde_json::Value::String(self.set_claude_account.clone()));
+        socket::write_setting(
+            "claude_account",
+            serde_json::Value::String(self.set_claude_account.clone()),
+        );
         socket::write_setting(
             "codex_accounts",
             serde_json::to_value(&self.set_codex_accounts).unwrap_or(serde_json::Value::Null),
         );
-        socket::write_setting("codex_account", serde_json::Value::String(self.set_codex_account.clone()));
-        socket::write_setting("usage_compact", serde_json::Value::Bool(self.set_usage_compact));
+        socket::write_setting(
+            "codex_account",
+            serde_json::Value::String(self.set_codex_account.clone()),
+        );
+        socket::write_setting(
+            "usage_compact",
+            serde_json::Value::Bool(self.set_usage_compact),
+        );
         socket::write_setting(
             "claude_account_autoswitch",
             serde_json::Value::Bool(self.set_account_autoswitch),
@@ -98,7 +140,10 @@ impl App {
             serde_json::Value::from(self.set_wheel_pixel_gain),
         );
         socket::write_setting("status_bar_h", serde_json::Value::from(self.set_status_h));
-        socket::write_setting("pane_footer_h", serde_json::Value::from(self.set_pane_footer_h));
+        socket::write_setting(
+            "pane_footer_h",
+            serde_json::Value::from(self.set_pane_footer_h),
+        );
         self.regen_pane_shims();
         // codex 는 래퍼를 다시 굽지 않는다 — 값이 하나도 안 박힌 정적 문자열이라
         // 다시 구울 이유가 없고, 활성 슬롯 경로만 파일로 갈아 끼우면 **이미 떠 있는
@@ -294,8 +339,10 @@ impl App {
         // 라벨은 비워 둔다 — 이름을 안 붙인 슬롯은 `account_display` 가 그 슬롯의
         // 진짜 이메일로 부른다. "계정 3" 을 미리 박아 두면 거노가 직접 친 별명과
         // 구별이 안 돼 이메일로 대체할 수가 없다.
-        self.set_claude_accounts
-            .push(socket::ClaudeAccount { id: id.clone(), label: String::new() });
+        self.set_claude_accounts.push(socket::ClaudeAccount {
+            id: id.clone(),
+            label: String::new(),
+        });
         self.settings_save();
 
         // 로그인은 **터미널 없이** 돈다(`spawn_hidden_login` 주석). 그래서 설정창을
@@ -303,7 +350,6 @@ impl App {
         spawn_hidden_login(
             AccountProvider::Claude,
             id.clone(),
-            "claude auth login --claudeai".to_string(),
             Some(dir),
             login_browser_default(),
         );
@@ -334,8 +380,10 @@ impl App {
             self.set_toast(format!("계정 폴더 생성 실패: {e}"));
             return;
         }
-        self.set_codex_accounts
-            .push(socket::CodexAccount { id: id.clone(), label: String::new() });
+        self.set_codex_accounts.push(socket::CodexAccount {
+            id: id.clone(),
+            label: String::new(),
+        });
         self.settings_save();
 
         // claude 와 같은 숨은 로그인. `login` 은 shim 이 **순정으로 통과**시키는 관리
@@ -344,7 +392,6 @@ impl App {
         spawn_hidden_login(
             AccountProvider::Codex,
             id.clone(),
-            account_login_command(AccountProvider::Codex).to_string(),
             Some(dir),
             login_browser_default(),
         );
@@ -361,7 +408,9 @@ impl App {
     /// 하나도 없었다는 뜻이다. `open_characters_json` 이 빈 파일 대신 현재 정본을
     /// seed 하는 것과 같은 원칙을 그림에도 적용한다.
     fn open_students_dir(&mut self) {
-        let Some(dir) = socket::students_dir() else { return };
+        let Some(dir) = socket::students_dir() else {
+            return;
+        };
         let _ = std::fs::create_dir_all(&dir);
         let empty = std::fs::read_dir(&dir).map_or(true, |mut it| it.next().is_none());
         if empty {
@@ -381,7 +430,9 @@ impl App {
     /// characters.json(사용자 override 슬롯)을 기본 앱으로 연다. 아직 없으면
     /// 현재 활성 정본을 그 자리에 복사해 seed 한다 — 빈 파일 대신 채워진 걸 편집.
     fn open_characters_json(&self) {
-        let Some(home) = std::env::var_os("HOME") else { return };
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
         let p = std::path::PathBuf::from(home).join(".config/kasaterm/characters.json");
         if !p.exists() {
             if let Some(parent) = p.parent() {
@@ -459,7 +510,11 @@ impl App {
         match socket::create_theme("") {
             Ok(dir) => {
                 socket::invalidate_theme_rows();
-                let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("theme").to_string();
+                let name = dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("theme")
+                    .to_string();
                 // 만들자마자 이름 칸에 포커스를 준다 — 새 테마에서 사용자가 제일
                 // 먼저 하려는 게 이름 짓기고, 안 그러면 `my-theme` 이 그대로 굳는다.
                 self.focus_theme_label(name.clone());
@@ -496,8 +551,12 @@ impl App {
                 // 활성이 아닌 테마를 치웠으면 위 `select_theme` 갈래를 안 타므로 이름·그림
                 // 합집합이 안 비워진다 — 치운 테마의 캐릭터가 계속 조회에 잡힌다.
                 theme::invalidate_roster();
-                let where_to = dest.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str())
-                    .unwrap_or("_trash").to_string();
+                let where_to = dest
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("_trash")
+                    .to_string();
                 self.set_toast(format!("치웠어요 — 지운 건 아니고 {where_to}/ 에 있어요"));
             }
             Err(e) => self.set_toast(format!("못 치웠어요: {e}")),
@@ -522,7 +581,9 @@ impl App {
 
     /// 편집 중이던 테마 이름을 그 테마의 `theme.json` 에 굳힌다.
     pub(crate) fn flush_theme_label(&mut self) {
-        let Some((id, label)) = self.theme_label_edit.clone() else { return };
+        let Some((id, label)) = self.theme_label_edit.clone() else {
+            return;
+        };
         if let Err(e) = socket::rename_theme(&id, &label) {
             self.set_toast(format!("이름을 못 바꿨어요: {e}"));
             return;
@@ -536,7 +597,9 @@ impl App {
     /// 네이티브 팔레트 이름 칸을 저장한다. 웹 액션도 같은 순수 서비스를 써서
     /// 어느 화면에서 이름을 바꾸든 검증과 파일 모양이 갈리지 않는다.
     pub(crate) fn flush_custom_theme_label(&mut self) {
-        let Some((slug, label)) = self.custom_theme_label_edit.clone() else { return };
+        let Some((slug, label)) = self.custom_theme_label_edit.clone() else {
+            return;
+        };
         match rename_custom_theme(&slug, &label) {
             Ok(()) => self.custom_theme_label_edit = None,
             Err(error) => self.set_toast(error),
@@ -545,7 +608,9 @@ impl App {
 
     /// 네이티브 계정 카드의 별명 편집을 계정 목록에 굳힌다.
     pub(crate) fn flush_account_label(&mut self) {
-        let Some((provider, id, label)) = self.account_label_edit.clone() else { return };
+        let Some((provider, id, label)) = self.account_label_edit.clone() else {
+            return;
+        };
         if provider == AccountProvider::Claude
             && self.set_account_scope_home
             && crate::homeaccounts::home_target().is_some()
@@ -719,7 +784,11 @@ impl App {
             }
             SettingsAction::ThemeSystemSlot(light, key) => {
                 socket::write_setting(
-                    if light { "theme_system_light" } else { "theme_system_dark" },
+                    if light {
+                        "theme_system_light"
+                    } else {
+                        "theme_system_dark"
+                    },
                     serde_json::Value::String(key),
                 );
                 if theme::theme_name() == "system" {
@@ -750,10 +819,15 @@ impl App {
                 let s = socket::read_settings();
                 let mut list = theme::custom_themes(&s);
                 let want = theme::active_custom_slug().unwrap_or_default();
-                if let Some(e) = list.iter_mut().find(|e| {
-                    want.is_empty() || theme::custom_slug(e) == want
-                }) {
-                    let base = e.get("base").and_then(|x| x.as_str()).unwrap_or("dark").to_string();
+                if let Some(e) = list
+                    .iter_mut()
+                    .find(|e| want.is_empty() || theme::custom_slug(e) == want)
+                {
+                    let base = e
+                        .get("base")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("dark")
+                        .to_string();
                     *e = theme::custom_theme_seed(
                         &base,
                         &theme::custom_slug(e),
@@ -771,11 +845,12 @@ impl App {
                 // 파일에 적힌 값은 옛 `"custom"` 일 수도 있어 문자열 그대로는 못
                 // 견준다 — `system_slot_theme` 이 실재 카드 키로 굳혀 준다.
                 let doomed = format!("custom:{slug}");
-                let orphaned: Vec<&str> = [("theme_system_light", true), ("theme_system_dark", false)]
-                    .into_iter()
-                    .filter(|(_, light)| theme::system_slot_theme(*light) == doomed)
-                    .map(|(k, _)| k)
-                    .collect();
+                let orphaned: Vec<&str> =
+                    [("theme_system_light", true), ("theme_system_dark", false)]
+                        .into_iter()
+                        .filter(|(_, light)| theme::system_slot_theme(*light) == doomed)
+                        .map(|(k, _)| k)
+                        .collect();
                 let s = socket::read_settings();
                 let mut list = theme::custom_themes(&s);
                 list.retain(|e| theme::custom_slug(e) != slug);
@@ -783,7 +858,11 @@ impl App {
                 // 배정이 떴으면 내장으로 되돌린다. 그냥 두면 팔레트는 프리셋으로
                 // 폴백해 도는데 배정해 둔 사실만 화면에서 사라진다.
                 for key in orphaned {
-                    let fallback = if key.ends_with("light") { "light" } else { "dark" };
+                    let fallback = if key.ends_with("light") {
+                        "light"
+                    } else {
+                        "dark"
+                    };
                     socket::write_setting(key, serde_json::Value::String(fallback.to_string()));
                 }
                 self.settings_input = None;
@@ -854,7 +933,10 @@ impl App {
                 let want_top = pos == "top";
                 if self.tabs_on_top != want_top {
                     self.tabs_on_top = want_top;
-                    socket::write_setting("tab_position", serde_json::Value::String(pos.to_string()));
+                    socket::write_setting(
+                        "tab_position",
+                        serde_json::Value::String(pos.to_string()),
+                    );
                     // The side strip appearing/disappearing changes usable cols.
                     let (cols, rows) = self.window_cells();
                     self.resize_backend(cols, rows);
@@ -886,14 +968,12 @@ impl App {
                 }
             }
             SettingsAction::SwitchAccount(provider, id) => match provider {
-                AccountProvider::Claude => self.ask_or_switch_claude_account(
-                    &id,
-                    crate::session::ConfirmSurface::Main,
-                ),
-                AccountProvider::Codex => self.ask_or_switch_codex_account(
-                    &id,
-                    crate::session::ConfirmSurface::Main,
-                ),
+                AccountProvider::Claude => {
+                    self.ask_or_switch_claude_account(&id, crate::session::ConfirmSurface::Main)
+                }
+                AccountProvider::Codex => {
+                    self.ask_or_switch_codex_account(&id, crate::session::ConfirmSurface::Main)
+                }
             },
             SettingsAction::CursorThickness(px) => {
                 let want = (px as f32).clamp(1.0, 6.0);
@@ -981,8 +1061,7 @@ impl App {
                 }
             }
             SettingsAction::PaneFooterH(px) => {
-                let want =
-                    (px as f32).clamp(socket::PANE_FOOTER_H_MIN, socket::PANE_FOOTER_H_MAX);
+                let want = (px as f32).clamp(socket::PANE_FOOTER_H_MIN, socket::PANE_FOOTER_H_MAX);
                 if (want - self.set_pane_footer_h).abs() > 0.01 {
                     self.set_pane_footer_h = want;
                     self.settings_save();
@@ -1007,19 +1086,15 @@ impl App {
                 if let Some(path) = dir.as_ref() {
                     let _ = std::fs::create_dir_all(path);
                 }
-                spawn_hidden_login(
-                    p,
-                    id,
-                    account_login_command(p).to_string(),
-                    dir,
-                    browser,
-                );
+                spawn_hidden_login(p, id, dir, browser);
                 self.set_toast(
                     match browser {
                         LoginBrowser::Isolated => "빈 브라우저 창에서 로그인하세요",
                         // 쓰던 브라우저는 이미 붙어 있는 계정으로 승인된다 — 다른
                         // 계정을 붙이려던 사람이 결과를 보고 놀라지 않게 미리 말한다.
-                        LoginBrowser::Default => "쓰던 브라우저에서 승인하세요 — 지금 로그인된 계정으로 붙어요",
+                        LoginBrowser::Default => {
+                            "쓰던 브라우저에서 승인하세요 — 지금 로그인된 계정으로 붙어요"
+                        }
                     }
                     .to_string(),
                 );
@@ -1188,14 +1263,24 @@ impl App {
             }
             SettingsAction::SaveStudentRaw => self.save_student_raw(),
             SettingsAction::StudentModel(model, backend) => {
-                let Some(name) = self.students_selected.clone() else { return };
+                let Some(name) = self.students_selected.clone() else {
+                    return;
+                };
                 // 빈 값도 그대로 쓴다(키를 지우지 않는다) — 읽는 쪽이 빈 문자열을
                 // "지정 없음"으로 걸러내므로 결과가 같고, 삭제 경로를 따로 두면
                 // 로스터가 테마 파일일 때와 홈 override 일 때 두 곳을 맞춰야 한다.
                 let _ = kasa_mcp::character::update_member_in_theme(
-                    &self.students_theme, &name, "model", serde_json::Value::String(model.clone()));
+                    &self.students_theme,
+                    &name,
+                    "model",
+                    serde_json::Value::String(model.clone()),
+                );
                 let _ = kasa_mcp::character::update_member_in_theme(
-                    &self.students_theme, &name, "backend", serde_json::Value::String(backend.clone()));
+                    &self.students_theme,
+                    &name,
+                    "backend",
+                    serde_json::Value::String(backend.clone()),
+                );
                 self.students_model = model;
                 self.students_backend = backend;
                 self.regen_pane_shims();
@@ -1359,7 +1444,10 @@ impl App {
             }
             "cwd-path" => {
                 if arg.is_empty() {
-                    return Err(reject("cwd_path_empty", "경로를 비울 수 없어요".to_string()));
+                    return Err(reject(
+                        "cwd_path_empty",
+                        "경로를 비울 수 없어요".to_string(),
+                    ));
                 }
                 self.set_cwd_mode = arg.clone();
                 self.settings_save();
@@ -1385,7 +1473,10 @@ impl App {
             }
             "file-open-cmd" => {
                 if arg.is_empty() {
-                    return Err(reject("file_open_cmd_empty", "명령을 비울 수 없어요".to_string()));
+                    return Err(reject(
+                        "file_open_cmd_empty",
+                        "명령을 비울 수 없어요".to_string(),
+                    ));
                 }
                 self.set_file_open_cmd = arg.clone();
                 self.settings_save();
@@ -1476,7 +1567,11 @@ impl App {
                 let light = action == "theme-system-light";
                 let key = theme_key_or_reject(id)?;
                 socket::write_setting(
-                    if light { "theme_system_light" } else { "theme_system_dark" },
+                    if light {
+                        "theme_system_light"
+                    } else {
+                        "theme_system_dark"
+                    },
                     serde_json::Value::String(key.clone()),
                 );
                 if theme::theme_name() == "system" {
@@ -1493,7 +1588,10 @@ impl App {
             // 커스텀 팔레트 하나 치우기 — id 는 slug.
             "delete-custom-theme" => {
                 let s = socket::read_settings();
-                if !theme::custom_themes(&s).iter().any(|e| theme::custom_slug(e) == id) {
+                if !theme::custom_themes(&s)
+                    .iter()
+                    .any(|e| theme::custom_slug(e) == id)
+                {
                     return Err(reject(
                         "custom_theme_absent",
                         "그 커스텀 팔레트가 없어요".to_string(),
@@ -1518,10 +1616,16 @@ impl App {
             "palette-hex" => {
                 let i: usize = id.parse().map_err(|_| unknown(id))?;
                 if i >= theme::PALETTE_KEYS.len() + 16 {
-                    return Err(reject("palette_slot_missing", "없는 색 칸이에요".to_string()));
+                    return Err(reject(
+                        "palette_slot_missing",
+                        "없는 색 칸이에요".to_string(),
+                    ));
                 }
                 if theme::parse_hex(&arg).is_none() {
-                    return Err(reject("hex_invalid", "#rrggbb 꼴로 적어 주세요".to_string()));
+                    return Err(reject(
+                        "hex_invalid",
+                        "#rrggbb 꼴로 적어 주세요".to_string(),
+                    ));
                 }
                 // 네이티브는 타이핑 버퍼(`set_palette_edit`)를 거쳐 굳힌다. 웹에는 그
                 // 버퍼가 없으니 완성된 값을 심고 같은 커밋을 태운다.
@@ -1536,7 +1640,10 @@ impl App {
             "palette-eyedropper" => {
                 let i: usize = id.parse().map_err(|_| unknown(id))?;
                 if i >= theme::PALETTE_KEYS.len() + 16 {
-                    return Err(reject("palette_slot_missing", "없는 색 칸이에요".to_string()));
+                    return Err(reject(
+                        "palette_slot_missing",
+                        "없는 색 칸이에요".to_string(),
+                    ));
                 }
                 if !crate::eyedropper::supported() {
                     return Err(reject(
@@ -1553,10 +1660,16 @@ impl App {
             "palette-preview" => {
                 let i: usize = id.parse().map_err(|_| unknown(id))?;
                 if i >= theme::PALETTE_KEYS.len() + 16 {
-                    return Err(reject("palette_slot_missing", "없는 색 칸이에요".to_string()));
+                    return Err(reject(
+                        "palette_slot_missing",
+                        "없는 색 칸이에요".to_string(),
+                    ));
                 }
                 let Some(c) = theme::parse_hex(&arg) else {
-                    return Err(reject("hex_invalid", "#rrggbb 꼴로 적어 주세요".to_string()));
+                    return Err(reject(
+                        "hex_invalid",
+                        "#rrggbb 꼴로 적어 주세요".to_string(),
+                    ));
                 };
                 self.preview_palette_edit(i, c);
                 Ok(true)
@@ -1590,7 +1703,10 @@ impl App {
             "font-size-delta" | "ui-zoom-delta" => {
                 let d: i8 = id.parse().map_err(|_| unknown(id))?;
                 if !matches!(d, -1 | 1) {
-                    return Err(reject("step_out_of_range", "한 칸씩만 움직일 수 있어요".to_string()));
+                    return Err(reject(
+                        "step_out_of_range",
+                        "한 칸씩만 움직일 수 있어요".to_string(),
+                    ));
                 }
                 let font = action == "font-size-delta";
                 let before = if font { self.font_size } else { self.ui_zoom };
@@ -1623,7 +1739,10 @@ impl App {
             }
             "shell-custom" => {
                 if arg.is_empty() {
-                    return Err(reject("shell_path_empty", "셸 경로를 비울 수 없어요".to_string()));
+                    return Err(reject(
+                        "shell_path_empty",
+                        "셸 경로를 비울 수 없어요".to_string(),
+                    ));
                 }
                 self.set_shell = arg.clone();
                 self.settings_input = None;
@@ -1660,10 +1779,8 @@ impl App {
                 if !id.is_empty() && !self.set_claude_accounts.iter().any(|a| a.id == id) {
                     return Err(no_slot(id));
                 }
-                let confirm = self.request_web_account_switch(
-                    crate::session::AccountSwitchProvider::Claude,
-                    id,
-                );
+                let confirm = self
+                    .request_web_account_switch(crate::session::AccountSwitchProvider::Claude, id);
                 let awaiting = confirm.is_some();
                 if let Some(confirm) = confirm {
                     put_web_code("confirm", confirm);
@@ -1698,10 +1815,8 @@ impl App {
                 if !id.is_empty() && !self.set_codex_accounts.iter().any(|a| a.id == id) {
                     return Err(no_slot(id));
                 }
-                let confirm = self.request_web_account_switch(
-                    crate::session::AccountSwitchProvider::Codex,
-                    id,
-                );
+                let confirm = self
+                    .request_web_account_switch(crate::session::AccountSwitchProvider::Codex, id);
                 let awaiting = confirm.is_some();
                 if let Some(confirm) = confirm {
                     put_web_code("confirm", confirm);
@@ -1772,8 +1887,11 @@ impl App {
                 if !known {
                     return Err(no_slot(id));
                 }
-                let provider =
-                    if claude { AccountProvider::Claude } else { AccountProvider::Codex };
+                let provider = if claude {
+                    AccountProvider::Claude
+                } else {
+                    AccountProvider::Codex
+                };
                 let browser = if action.ends_with("-isolated") {
                     LoginBrowser::Isolated
                 } else {
@@ -1826,7 +1944,10 @@ impl App {
             }
             "save-feedback" => {
                 if arg.is_empty() {
-                    return Err(reject("feedback_empty", "무엇이 불편했는지 적어 주세요".to_string()));
+                    return Err(reject(
+                        "feedback_empty",
+                        "무엇이 불편했는지 적어 주세요".to_string(),
+                    ));
                 }
                 // 네이티브는 편집 버퍼를 저장한다 — 웹에는 그 버퍼가 없으니 본문을
                 // 심고 같은 저장을 태운다. 성공하면 `save_feedback` 이 버퍼를 비우므로
@@ -1842,21 +1963,29 @@ impl App {
             }
             // ── 캐릭터 생성 ───────────────────────────────────────────────
             "theme-gen-provider" => {
-                let k = pick(&["opengateway", "codex", "nanobanana"], id)
-                    .ok_or_else(|| unknown(id))?;
+                let k =
+                    pick(&["opengateway", "codex", "nanobanana"], id).ok_or_else(|| unknown(id))?;
                 self.settings_apply(SettingsAction::ThemeGenProvider(k.to_string()));
-                Ok(socket::read_settings().get("theme_gen_provider").and_then(|v| v.as_str())
+                Ok(socket::read_settings()
+                    .get("theme_gen_provider")
+                    .and_then(|v| v.as_str())
                     == Some(k))
             }
             "theme-gen-start" => {
                 let slug = id.trim();
                 if slug.is_empty() {
-                    return Err(reject("slug_empty", "누구를 구울지 골라 주세요".to_string()));
+                    return Err(reject(
+                        "slug_empty",
+                        "누구를 구울지 골라 주세요".to_string(),
+                    ));
                 }
                 // 이미 도는 잡을 「눌렸다」고 답하면 안 된다 — 화면은 새로 시작된 줄
                 // 알고 진행을 처음부터 다시 그린다.
                 if self.themegen_view(slug).is_some_and(|v| {
-                    !matches!(v.phase, themegen::GenPhase::Done | themegen::GenPhase::Failed)
+                    !matches!(
+                        v.phase,
+                        themegen::GenPhase::Done | themegen::GenPhase::Failed
+                    )
                 }) {
                     return Err(reject("themegen_busy", "이미 굽는 중이에요".to_string()));
                 }
@@ -1877,7 +2006,9 @@ impl App {
                 // 함께 맞춰 둬야 설정 창을 네이티브로 열었을 때 옛 값이 안 보인다.
                 self.themegen.key_edit = arg.clone();
                 socket::write_setting("gemini_api_key", serde_json::Value::String(arg.clone()));
-                Ok(socket::read_settings().get("gemini_api_key").and_then(|v| v.as_str())
+                Ok(socket::read_settings()
+                    .get("gemini_api_key")
+                    .and_then(|v| v.as_str())
                     == Some(arg.as_str()))
             }
 
@@ -1933,7 +2064,9 @@ impl App {
             sys.map(|(_, _, p)| *p),
         )];
         themes.extend(
-            theme::THEME_PRESETS.iter().map(|(k, l, p)| card(k, l.to_string(), Some(p))),
+            theme::THEME_PRESETS
+                .iter()
+                .map(|(k, l, p)| card(k, l.to_string(), Some(p))),
         );
         // 커스텀들은 **각자의 팔레트로** 그린다 — 라이브 색으로 그리면 지금 입은 한
         // 벌만 제 색이고 나머지가 전부 같은 카드로 보인다.
@@ -1956,8 +2089,12 @@ impl App {
         // 그대로. 설정을 열 때 따로 묻지 않아 즉시 뜬다(2026-08-31 지적 「하단바랑
         // 다르게 사용량 바로 안 뜨고」). 값이 없는 슬롯은 null — 0% 로 그리면
         // 여유 있다는 거짓말이 된다(하단바와 같은 규칙).
-        let usage_table =
-            self.claude_usage_all.lock().ok().map(|g| g.clone()).unwrap_or_default();
+        let usage_table = self
+            .claude_usage_all
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         let active_usage = self.claude_usage.lock().ok().and_then(|g| g.clone());
         let active_acct = self.set_claude_account.clone();
         let claude_rows: Vec<serde_json::Value> = self
@@ -2040,49 +2177,52 @@ impl App {
             })
             .collect();
 
-        let codex_rows: Vec<serde_json::Value> = std::iter::once((String::new(), String::new(), None))
-            .chain(
-                self.set_codex_accounts
-                    .iter()
-                    .enumerate()
-                    .map(|(i, a)| (a.id.clone(), a.label.clone(), Some(i))),
-            )
-            .map(|(id, label, idx)| {
-                // claude 판과 달리 "확인 중" 이 없다 — 신원이 파일 하나에 들어 있어
-                // 즉시 읽힌다. 값이 없으면 정말로 로그인 안 한 슬롯이다.
-                let ident = codex_identity(&id);
-                let logged_in = codex_logged_in(&id);
-                let name = match (idx, label.is_empty()) {
-                    (None, _) => "기본".to_string(),
-                    (Some(i), true) => ident.clone().unwrap_or_else(|| format!("계정 {}", i + 2)),
-                    (Some(_), false) => label.clone(),
-                };
-                let name_code = match (idx, label.is_empty()) {
-                    (None, _) => Some("account_default"),
-                    // 이메일도 라벨도 없어 번호로 부르는 경우만 옮길 말이다.
-                    (Some(_), true) if ident.is_none() => Some("account_numbered"),
-                    _ => None,
-                };
-                let sub = if idx.is_some() && label.is_empty() && ident.is_some() {
-                    String::new()
-                } else {
-                    ident.clone().unwrap_or_else(|| "로그인 필요".to_string())
-                };
-                serde_json::json!({
-                    "id": id,
-                    "label": label,
-                    "name": name,
-                    "name_code": name_code,
-                    "name_args": idx.map(|i| serde_json::json!({ "n": i + 2 })),
-                    "sub": sub,
-                    "sub_kind": if ident.is_some() { "mute" } else { "danger" },
-                    "sub_code": (ident.is_none() && !sub.is_empty())
-                        .then_some("account_login_required"),
-                    "slot": idx.is_some(),
-                    "logged_in": logged_in,
+        let codex_rows: Vec<serde_json::Value> =
+            std::iter::once((String::new(), String::new(), None))
+                .chain(
+                    self.set_codex_accounts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| (a.id.clone(), a.label.clone(), Some(i))),
+                )
+                .map(|(id, label, idx)| {
+                    // claude 판과 달리 "확인 중" 이 없다 — 신원이 파일 하나에 들어 있어
+                    // 즉시 읽힌다. 값이 없으면 정말로 로그인 안 한 슬롯이다.
+                    let ident = codex_identity(&id);
+                    let logged_in = codex_logged_in(&id);
+                    let name = match (idx, label.is_empty()) {
+                        (None, _) => "기본".to_string(),
+                        (Some(i), true) => {
+                            ident.clone().unwrap_or_else(|| format!("계정 {}", i + 2))
+                        }
+                        (Some(_), false) => label.clone(),
+                    };
+                    let name_code = match (idx, label.is_empty()) {
+                        (None, _) => Some("account_default"),
+                        // 이메일도 라벨도 없어 번호로 부르는 경우만 옮길 말이다.
+                        (Some(_), true) if ident.is_none() => Some("account_numbered"),
+                        _ => None,
+                    };
+                    let sub = if idx.is_some() && label.is_empty() && ident.is_some() {
+                        String::new()
+                    } else {
+                        ident.clone().unwrap_or_else(|| "로그인 필요".to_string())
+                    };
+                    serde_json::json!({
+                        "id": id,
+                        "label": label,
+                        "name": name,
+                        "name_code": name_code,
+                        "name_args": idx.map(|i| serde_json::json!({ "n": i + 2 })),
+                        "sub": sub,
+                        "sub_kind": if ident.is_some() { "mute" } else { "danger" },
+                        "sub_code": (ident.is_none() && !sub.is_empty())
+                            .then_some("account_login_required"),
+                        "slot": idx.is_some(),
+                        "logged_in": logged_in,
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
         // 최소 대비 칸의 샘플 글자색. 카드 배경에서 글자색 쪽으로 아주 조금 민
         // 색에서 출발한다 — 고정 회색으로 두면 다크 팔레트에선 이미 잘 보여 네 칸이
@@ -2293,7 +2433,9 @@ impl App {
     /// 두 경우를 먼저 막는다: 빈 이름(그 캐릭터가 로스터에서 사라진다)과 중복
     /// (로스터 빌드가 뒤엣것을 통째로 버려 한 명이 증발한다).
     pub(crate) fn flush_student_name(&mut self) {
-        let Some(old) = self.students_selected.clone() else { return };
+        let Some(old) = self.students_selected.clone() else {
+            return;
+        };
         let new = self.students_name.trim().to_string();
         if new == old {
             return;
@@ -2341,10 +2483,13 @@ impl App {
     /// base 프리셋 값. 포커스 시드·리스트 표시가 같은 곳을 읽어야 「눌렀더니
     /// 다른 값이 뜨는」 어긋남이 없다.
     fn palette_hex_at(&self, i: usize) -> String {
-        palette_hex_list(&socket::read_settings(), theme::active_custom_slug().as_deref())
-            .into_iter()
-            .nth(i)
-            .unwrap_or_else(|| "#000000".to_string())
+        palette_hex_list(
+            &socket::read_settings(),
+            theme::active_custom_slug().as_deref(),
+        )
+        .into_iter()
+        .nth(i)
+        .unwrap_or_else(|| "#000000".to_string())
     }
 
     /// 색 선택기의 한 픽. rect 밖 커서는 클램프해 가장자리 값으로 잇는다: 드래그
@@ -2355,7 +2500,9 @@ impl App {
         r: (f32, f32, f32, f32),
         p: (f32, f32),
     ) {
-        let Some(SettingsInput::PaletteHex(i)) = self.settings_input else { return };
+        let Some(SettingsInput::PaletteHex(i)) = self.settings_input else {
+            return;
+        };
         let rx = ((p.0 - r.0) / r.2.max(1.0)).clamp(0.0, 1.0);
         let ry = ((p.1 - r.1) / r.3.max(1.0)).clamp(0.0, 1.0);
         let (h, s, v) = self.set_picker_hsv;
@@ -2379,7 +2526,9 @@ impl App {
         r: (f32, f32, f32, f32),
         p: (f32, f32),
     ) {
-        let Some(SettingsInput::PaletteHex(i)) = self.settings_input else { return };
+        let Some(SettingsInput::PaletteHex(i)) = self.settings_input else {
+            return;
+        };
         let rx = ((p.0 - r.0) / r.2.max(1.0)).clamp(0.0, 1.0);
         let ry = ((p.1 - r.1) / r.3.max(1.0)).clamp(0.0, 1.0);
         let (h, s, v) = self.set_picker_hsv;
@@ -2423,7 +2572,10 @@ impl App {
         let hex = theme::hex_str(c);
         let n = theme::PALETTE_KEYS.len();
         if i < n {
-            obj.insert(theme::PALETTE_KEYS[i].0.to_string(), serde_json::Value::String(hex));
+            obj.insert(
+                theme::PALETTE_KEYS[i].0.to_string(),
+                serde_json::Value::String(hex),
+            );
         } else {
             // ansi 배열이 없거나 짧을 수 있다 — 지금 유효값으로 16칸을 다 채운
             // 뒤 한 칸만 바꾼다. 부분 배열을 그대로 두면 인덱스가 어긋난다.
@@ -2453,7 +2605,9 @@ impl App {
     /// 칠한다. 6자리 hex 가 아직 아니면(타이핑 중) 아무것도 안 한다 — 반쯤 친
     /// 값으로 화면이 튀는 것보다 완성되는 순간에만 따라오는 쪽이 읽기 좋다.
     pub(crate) fn apply_palette_edit(&mut self, i: usize) {
-        let Some(c) = theme::parse_hex(&self.set_palette_edit) else { return };
+        let Some(c) = theme::parse_hex(&self.set_palette_edit) else {
+            return;
+        };
         self.sync_picker_hsv(c);
         let (list, idx, _) = self.palette_edited_list(i, c);
         let key = format!("custom:{}", theme::custom_slug(&list[idx]));
@@ -2486,7 +2640,9 @@ impl App {
     /// 스포이드가 집어 둔 색이 있으면 그 칸에 굳힌다. GUI 틱이 부른다 — 시스템
     /// 콜백은 `App` 을 못 들고 오므로 색만 통에 놓고 가고, 꺼내는 건 여기다.
     pub(crate) fn pump_eyedropper(&mut self) {
-        let Some((slot, rgb)) = crate::eyedropper::take_picked() else { return };
+        let Some((slot, rgb)) = crate::eyedropper::take_picked() else {
+            return;
+        };
         self.set_palette_edit = theme::hex_str(rgb);
         self.apply_palette_edit(slot);
     }
@@ -2499,7 +2655,9 @@ impl App {
         // 폼에서 고치던 성격이 아직 파일에 안 갔을 수 있다 — 먼저 굳히지 않으면
         // 원본 뷰가 옛 성격을 보여 주고, 그걸 저장하는 순간 방금 친 글이 날아간다.
         self.flush_student_persona();
-        let Some(name) = self.students_selected.clone() else { return };
+        let Some(name) = self.students_selected.clone() else {
+            return;
+        };
         let def = student_roster_for_theme(&self.students_theme)
             .and_then(|c| kasa_mcp::character::member_def(&c, &name));
         self.students_raw.text = match def {
@@ -2514,7 +2672,9 @@ impl App {
     /// 「원본」 버퍼를 로스터에 굳힌다. 형식이 틀리면 저장하지 않고 이유를 남긴다 —
     /// 반쯤 읽어 저장하면 적지 않은 필드가 통째로 사라진다.
     pub(crate) fn save_student_raw(&mut self) {
-        let Some(name) = self.students_selected.clone() else { return };
+        let Some(name) = self.students_selected.clone() else {
+            return;
+        };
         let parsed = if self.students_raw.yaml {
             kasa_mcp::character::member_from_yaml(&self.students_raw.text)
         } else {
@@ -2557,8 +2717,11 @@ impl App {
             .to_string();
         // 폼 버퍼도 새 정의로 맞춘다. 안 맞추면 폼으로 돌아가 편집기를 벗어나는
         // 순간 옛 성격이 다시 저장돼, 원본에서 고친 것이 조용히 되돌아간다.
-        self.students_persona =
-            def.get("persona").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        self.students_persona = def
+            .get("persona")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
         self.students_caret = 0;
         self.students_raw.err = None;
         self.regen_pane_shims();
@@ -2567,7 +2730,9 @@ impl App {
     }
 
     pub(crate) fn flush_student_persona(&mut self) {
-        let Some(name) = self.students_selected.clone() else { return };
+        let Some(name) = self.students_selected.clone() else {
+            return;
+        };
         let cur = student_roster_for_theme(&self.students_theme)
             .and_then(|c| kasa_mcp::character::raw_persona_for(&c, &name))
             .unwrap_or_default();
@@ -2718,7 +2883,9 @@ pub(crate) fn onboarding_provider_logged_in(provider: &str) -> Option<bool> {
             let probes: Vec<Option<AuthProbe>> = ids.iter().map(|id| auth_probe(id)).collect();
             if probes.iter().flatten().any(|p| p.logged_in) {
                 Some(true)
-            } else if crate::onboarding::command_available("claude") && probes.iter().any(Option::is_none) {
+            } else if crate::onboarding::command_available("claude")
+                && probes.iter().any(Option::is_none)
+            {
                 None
             } else {
                 Some(false)
@@ -2741,7 +2908,15 @@ fn onboarding_auth_provider(provider: &str) -> serde_json::Value {
             let probes: Vec<Option<AuthProbe>> = ids.iter().map(|id| auth_probe(id)).collect();
             let logged = probes.iter().flatten().find(|p| p.logged_in);
             let installed = crate::onboarding::command_available("claude");
-            let status = if logged.is_some() { "logged_in" } else if installed && probes.iter().any(Option::is_none) { "checking" } else if installed { "logged_out" } else { "not_installed" };
+            let status = if logged.is_some() {
+                "logged_in"
+            } else if installed && probes.iter().any(Option::is_none) {
+                "checking"
+            } else if installed {
+                "logged_out"
+            } else {
+                "not_installed"
+            };
             let account = logged.and_then(|p| (!p.email.is_empty()).then_some(p.email.clone()));
             let detail = logged.and_then(|p| team_org(&p.email, &p.org));
             serde_json::json!({ "status": status, "account": account, "detail": detail })
@@ -2751,7 +2926,13 @@ fn onboarding_auth_provider(provider: &str) -> serde_json::Value {
             ids.extend(socket::read_codex_accounts().into_iter().map(|a| a.id));
             let logged_id = ids.iter().find(|id| codex_logged_in(id));
             let installed = crate::onboarding::command_available("codex");
-            let status = if logged_id.is_some() { "logged_in" } else if installed { "logged_out" } else { "not_installed" };
+            let status = if logged_id.is_some() {
+                "logged_in"
+            } else if installed {
+                "logged_out"
+            } else {
+                "not_installed"
+            };
             let account = logged_id.and_then(|id| codex_identity(id));
             serde_json::json!({ "status": status, "account": account, "detail": null })
         }
@@ -2765,14 +2946,23 @@ pub(crate) fn onboarding_state_json() -> serde_json::Value {
     let codex = onboarding_auth_provider("codex");
     let mut state = crate::onboarding::base_state_json();
     if let Some(root) = state.as_object_mut() {
-        let stored = root.get("preferred_agent").and_then(|v| v.as_str()).map(str::to_string);
+        let stored = root
+            .get("preferred_agent")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         let detected = stored.or_else(|| {
             (claude.get("status").and_then(|v| v.as_str()) == Some("logged_in"))
                 .then_some("claude".to_string())
-                .or_else(|| (codex.get("status").and_then(|v| v.as_str()) == Some("logged_in")).then_some("codex".to_string()))
+                .or_else(|| {
+                    (codex.get("status").and_then(|v| v.as_str()) == Some("logged_in"))
+                        .then_some("codex".to_string())
+                })
         });
         root.insert("preferred_agent".to_string(), serde_json::json!(detected));
-        root.insert("auth".to_string(), serde_json::json!({ "claude": claude, "codex": codex }));
+        root.insert(
+            "auth".to_string(),
+            serde_json::json!({ "claude": claude, "codex": codex }),
+        );
     }
     state
 }
@@ -2784,9 +2974,8 @@ pub(crate) fn onboarding_state_json() -> serde_json::Value {
 /// 문구를 만들고, 없으면 서버 문구를 그대로 쓴다(2026-08-15 형식 합의) — 그래서
 /// 코드가 안 붙은 자리도 화면이 안 깨지고, 코드화를 한 칸씩 늘려 갈 수 있다.
 fn web_codes_cell() -> &'static std::sync::Mutex<serde_json::Map<String, serde_json::Value>> {
-    static CELL: std::sync::OnceLock<
-        std::sync::Mutex<serde_json::Map<String, serde_json::Value>>,
-    > = std::sync::OnceLock::new();
+    static CELL: std::sync::OnceLock<std::sync::Mutex<serde_json::Map<String, serde_json::Value>>> =
+        std::sync::OnceLock::new();
     CELL.get_or_init(Default::default)
 }
 
@@ -2847,11 +3036,7 @@ fn reject_with(code: &'static str, args: serde_json::Value, msg: String) -> Stri
 
 /// 같은 것을 이 모듈 밖에서. 거부 문구를 만드는 자리가 settings.rs 하나가 아니게
 /// 되면서(캐릭터 고르기는 session.rs) 통로가 필요해졌다.
-pub(crate) fn reject_with_args(
-    code: &'static str,
-    args: serde_json::Value,
-    msg: String,
-) -> String {
+pub(crate) fn reject_with_args(code: &'static str, args: serde_json::Value, msg: String) -> String {
     reject_with(code, args, msg)
 }
 
@@ -2865,11 +3050,15 @@ fn toast_code(msg: &str) -> Option<&'static str> {
         "재시작하면 적용돼요" => "restart_to_apply",
         "배율 100% · 폰트 기본값" => "scale_reset",
         "빈 브라우저 창에서 로그인하세요" => "login_in_browser",
-        "쓰던 브라우저에서 승인하세요 — 지금 로그인된 계정으로 붙어요" => "login_in_default_browser",
+        "쓰던 브라우저에서 승인하세요 — 지금 로그인된 계정으로 붙어요" => {
+            "login_in_default_browser"
+        }
         "쓰던 브라우저에서 로그인하세요 — 다른 계정이면 브라우저에서 먼저 계정을 바꾸세요" => {
             "login_new_slot_in_default_browser"
         }
-        "터미널 편집기를 못 찾았어요 — 명령을 직접 적어 주세요" => "terminal_editor_not_found",
+        "터미널 편집기를 못 찾았어요 — 명령을 직접 적어 주세요" => {
+            "terminal_editor_not_found"
+        }
         "계정 폴더 경로를 만들 수 없습니다" => "account_dir_failed",
         "피드백을 저장했어요" => "feedback_saved",
         "저장됐어요" => "saved",
@@ -2882,12 +3071,24 @@ fn toast_code(msg: &str) -> Option<&'static str> {
 /// `message` 가 비면 코드도 안 붙인다 — 토스트가 안 떴다는 뜻이라, 직전 액션이
 /// 남긴 코드를 여기 붙이면 화면이 엉뚱한 말을 한다.
 pub(crate) fn merge_web_codes(mut v: serde_json::Value) -> serde_json::Value {
-    let codes = web_codes_cell().lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
-    let Some(obj) = v.as_object_mut() else { return v };
+    let codes = web_codes_cell()
+        .lock()
+        .map(|mut c| std::mem::take(&mut *c))
+        .unwrap_or_default();
+    let Some(obj) = v.as_object_mut() else {
+        return v;
+    };
     let has_message = obj.get("message").is_some_and(|m| !m.is_null());
     if has_message {
-        if let Some(code) = obj.get("message").and_then(|m| m.as_str()).and_then(toast_code) {
-            obj.insert("message_code".to_string(), serde_json::Value::String(code.to_string()));
+        if let Some(code) = obj
+            .get("message")
+            .and_then(|m| m.as_str())
+            .and_then(toast_code)
+        {
+            obj.insert(
+                "message_code".to_string(),
+                serde_json::Value::String(code.to_string()),
+            );
         }
     }
     // 성공 회신에 error_* 가 섞이면 웹이 거부로 읽는다 — 코드는 이번 호출 것만 쓰고
@@ -2907,7 +3108,10 @@ pub(crate) fn merge_web_codes(mut v: serde_json::Value) -> serde_json::Value {
 /// 거부 회신을 JSON 으로 만든다. 오류를 `Err` 로 올려보내면 문자열 하나만 남아
 /// 코드를 실을 자리가 없다 — 형식은 HTTP 쪽이 만들던 것과 같다.
 pub(crate) fn reject_json(msg: String) -> serde_json::Value {
-    let codes = web_codes_cell().lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
+    let codes = web_codes_cell()
+        .lock()
+        .map(|mut c| std::mem::take(&mut *c))
+        .unwrap_or_default();
     let mut obj = serde_json::Map::new();
     obj.insert("ok".to_string(), serde_json::Value::Bool(false));
     obj.insert("error".to_string(), serde_json::Value::String(msg));
@@ -3029,7 +3233,11 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
 }
 
 fn rgb_to_hsv(c: [u8; 3]) -> (f32, f32, f32) {
-    let (r, g, b) = (c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0);
+    let (r, g, b) = (
+        c[0] as f32 / 255.0,
+        c[1] as f32 / 255.0,
+        c[2] as f32 / 255.0,
+    );
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
     let d = max - min;
@@ -3156,8 +3364,11 @@ pub(crate) enum LoginState {
 /// - `2` 그 프로세스의 stdin — **OAuth 코드를 여기로 밀어 넣는다.** 예전엔 핸들을
 ///   그냥 붙들고만 있었는데(닫으면 CLI 가 EOF 로 죽어서), 그래서 코드를 넣을 길이
 ///   없었다. 셀에 두면 설정창이 사용자가 붙여넣은 코드를 그대로 전달할 수 있다.
-type LoginCell =
-    std::sync::Mutex<(Option<LoginJob>, Option<u32>, Option<std::process::ChildStdin>)>;
+type LoginCell = std::sync::Mutex<(
+    Option<LoginJob>,
+    Option<u32>,
+    Option<std::process::ChildStdin>,
+)>;
 fn login_cell() -> &'static LoginCell {
     static CELL: std::sync::OnceLock<LoginCell> = std::sync::OnceLock::new();
     CELL.get_or_init(|| std::sync::Mutex::new((None, None, None)))
@@ -3190,8 +3401,6 @@ fn mark_login_needs_code(provider: AccountProvider, id: &str) {
         }
     }
 }
-
-
 
 /// 클립보드 글자가 OAuth 코드처럼 생겼나.
 ///
@@ -3238,11 +3447,11 @@ mod login_code_shape_tests {
             "안녕하세요",
             "https://claude.com/cai/oauth/authorize?code=true#frag",
             "short#short",
-            "aBcD1234efGH5678ijKL",                       // # 이 없다
-            "aBcD1234efGH5678ijKL#short",                 // 뒤가 짧다
-            "short#9PpVOsDxzsxTsoCn-OyJnCFa3gYOXdUKjRG",  // 앞이 짧다
+            "aBcD1234efGH5678ijKL",                        // # 이 없다
+            "aBcD1234efGH5678ijKL#short",                  // 뒤가 짧다
+            "short#9PpVOsDxzsxTsoCn-OyJnCFa3gYOXdUKjRG",   // 앞이 짧다
             "aBcD1234efGH5678ijKL#9PpVOsDxzsxTsoCn#extra", // # 이 둘
-            "aBcD1234efGH5678ijKL #9PpVOsDxzsxTsoCnOyJn", // 공백이 있다
+            "aBcD1234efGH5678ijKL #9PpVOsDxzsxTsoCnOyJn",  // 공백이 있다
             "git commit -m 'aBcD1234efGH5678ijKL#9PpVOsDxzsxTsoCnOyJn'",
         ] {
             assert!(!looks_like_login_code(s), "이건 코드가 아니다: {s:?}");
@@ -3321,8 +3530,12 @@ pub(crate) fn submit_login_code(code: &str) -> bool {
     if code.is_empty() {
         return false;
     }
-    let Ok(mut c) = login_cell().lock() else { return false };
-    let Some(stdin) = c.2.as_mut() else { return false };
+    let Ok(mut c) = login_cell().lock() else {
+        return false;
+    };
+    let Some(stdin) = c.2.as_mut() else {
+        return false;
+    };
     if writeln!(stdin, "{code}").is_err() {
         return false;
     }
@@ -3374,21 +3587,19 @@ pub(crate) enum LoginBrowser {
     Default,
 }
 
-fn account_login_command(provider: AccountProvider) -> &'static str {
+fn account_login_invocation(provider: AccountProvider) -> (std::path::PathBuf, Vec<&'static str>) {
     match provider {
-        AccountProvider::Claude => "claude auth login --claudeai",
+        AccountProvider::Claude => (kasa_mcp::claude_bin(), vec!["auth", "login", "--claudeai"]),
         // 계정 슬롯은 auth.json 한 장으로 격리한다. macOS 키링을 쓰면 CODEX_HOME이
         // 달라도 모든 슬롯이 같은 자격증명을 보므로 공식 file 저장 모드로 고정한다.
-        AccountProvider::Codex => {
-            "codex login -c 'cli_auth_credentials_store=\"file\"'"
-        }
+        AccountProvider::Codex => (
+            crate::codex_binary(),
+            vec!["login", "-c", "cli_auth_credentials_store=\"file\""],
+        ),
     }
 }
 
-fn account_login_home(
-    provider: AccountProvider,
-    id: &str,
-) -> Option<std::path::PathBuf> {
+fn account_login_home(provider: AccountProvider, id: &str) -> Option<std::path::PathBuf> {
     match provider {
         AccountProvider::Claude => socket::claude_account_dir(id),
         AccountProvider::Codex => socket::codex_account_dir(id),
@@ -3427,8 +3638,7 @@ fn login_browser_default() -> LoginBrowser {
 /// 슬롯을 새로 만들고 띄우는 토스트. claude·codex 가 같은 말을 해야 한다 —
 /// 갈리는 건 어느 서비스인가뿐이고, 사용자가 할 일은 똑같다.
 fn add_account_toast() -> String {
-    "쓰던 브라우저에서 로그인하세요 — 다른 계정이면 브라우저에서 먼저 계정을 바꾸세요"
-        .to_string()
+    "쓰던 브라우저에서 로그인하세요 — 다른 계정이면 브라우저에서 먼저 계정을 바꾸세요".to_string()
 }
 
 /// CLI 로그인을 **터미널 없이** 돌린다. pane 을 띄워 사용자가 직접 진행하게 하던
@@ -3446,7 +3656,6 @@ fn add_account_toast() -> String {
 fn spawn_hidden_login(
     provider: AccountProvider,
     id: String,
-    argv: String,
     dir: Option<std::path::PathBuf>,
     browser: LoginBrowser,
 ) {
@@ -3454,7 +3663,9 @@ fn spawn_hidden_login(
     use std::process::Stdio;
     let profile = login_profile(browser, &id);
     let intercept_browser = intercept_login_browser(provider, browser);
-    let Ok(mut cell) = login_cell().lock() else { return };
+    let Ok(mut cell) = login_cell().lock() else {
+        return;
+    };
     if cell
         .0
         .as_ref()
@@ -3470,12 +3681,11 @@ fn spawn_hidden_login(
     cell.1 = None;
     drop(cell);
     std::thread::spawn(move || {
-        // 로그인 셸을 거치는 이유는 `auth_probe` 와 같다 — Finder 로 뜬 .app 의
-        // PATH 에는 claude·codex 가 없어 직접 spawn 하면 항상 실패한다.
-        let shell = resolve_default_shell().unwrap_or_else(|| "/bin/sh".to_string());
-        let mut cmd = crate::proc::command(shell);
-        cmd.arg("-lc")
-            .arg(&argv)
+        // Finder에서 띄운 GUI의 PATH에는 npm 전역 폴더가 없다. 로그인 셸도 그
+        // 설치 위치를 복구하지 못하므로, 공급자별로 찾은 실제 실행 파일을 직접 부른다.
+        let (program, args) = account_login_invocation(provider);
+        let mut cmd = crate::proc::command(program);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -3524,8 +3734,14 @@ fn spawn_hidden_login(
         let browser_opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut readers = Vec::new();
         for pipe in [
-            child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
-            child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+            child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+            child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
         ]
         .into_iter()
         .flatten()
@@ -3569,10 +3785,7 @@ fn spawn_hidden_login(
                             // 400 이 뜨던 원인이 이것이다(2026-09-07 「인증도 안돼
                             // 400떠」). 승인이 끝나면 화면에 코드가 뜨고, 그걸
                             // 복사하는 것만으로 들어간다(아래 클립보드 경로).
-                            if !browser_opened.swap(
-                                true,
-                                std::sync::atomic::Ordering::SeqCst,
-                            ) {
+                            if !browser_opened.swap(true, std::sync::atomic::Ordering::SeqCst) {
                                 match profile.as_deref() {
                                     Some(prof) => {
                                         let _ = std::fs::create_dir_all(prof);
@@ -3635,9 +3848,7 @@ fn spawn_hidden_login(
                     .unwrap_or(false);
                 match (saw, prompt_at) {
                     (true, None) => prompt_at = Some(std::time::Instant::now()),
-                    (true, Some(at))
-                        if at.elapsed() >= std::time::Duration::from_secs(25) =>
-                    {
+                    (true, Some(at)) if at.elapsed() >= std::time::Duration::from_secs(25) => {
                         prompt_armed = true;
                         mark_login_needs_code(provider, &id);
                     }
@@ -3705,8 +3916,7 @@ fn finish_login(provider: AccountProvider, id: &str, state: LoginState) {
         crate::codexlimits::invalidate();
     }
     if let Ok(mut c) = login_cell().lock() {
-        if c
-            .0
+        if c.0
             .as_ref()
             .is_some_and(|j| j.provider == provider && j.id == id)
         {
@@ -3750,7 +3960,10 @@ fn login_profile(browser: LoginBrowser, id: &str) -> Option<std::path::PathBuf> 
 /// 곡예(state 를 정확히 43자로 끊어야 다음 줄 첫 단어가 안 딸려왔다)가 필요 없다.
 fn login_url_in(line: &str) -> Option<String> {
     let at = line.find("https://")?;
-    let url: String = line[at..].chars().take_while(|c| !c.is_whitespace()).collect();
+    let url: String = line[at..]
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .collect();
     let low = url.to_ascii_lowercase();
     (low.contains("authorize") || low.contains("oauth")).then_some(url)
 }
@@ -3777,9 +3990,10 @@ mod login_url_tests {
 
     #[test]
     fn codex_slots_use_file_auth_but_default_login_needs_no_custom_home() {
-        let command = super::account_login_command(crate::AccountProvider::Codex);
-        assert!(command.starts_with("codex login"));
-        assert!(command.contains("cli_auth_credentials_store=\"file\""));
+        let (program, args) = super::account_login_invocation(crate::AccountProvider::Codex);
+        assert_eq!(program, crate::codex_binary());
+        assert_eq!(args.first().copied(), Some("login"));
+        assert!(args.contains(&"cli_auth_credentials_store=\"file\""));
         assert!(super::account_login_home(crate::AccountProvider::Codex, "").is_none());
     }
 
@@ -3799,15 +4013,19 @@ mod login_url_tests {
     /// 프로세스 출력은 PTY 와 달리 접히지 않아, 뒤에 무슨 말이 붙어도 공백에서 끊긴다.
     #[test]
     fn stops_at_whitespace() {
-        let u = login_url_in("visit https://auth.openai.com/oauth/authorize?x=1 and paste the code")
-            .expect("URL");
+        let u =
+            login_url_in("visit https://auth.openai.com/oauth/authorize?x=1 and paste the code")
+                .expect("URL");
         assert!(u.ends_with("x=1"), "뒷말이 딸려 왔다: {u}");
     }
 
     /// 로그인과 무관한 링크는 무시한다 — 안내문에 도움말 URL 이 섞여 나온다.
     #[test]
     fn ignores_unrelated_links() {
-        assert_eq!(login_url_in("see https://docs.claude.com/help for details"), None);
+        assert_eq!(
+            login_url_in("see https://docs.claude.com/help for details"),
+            None
+        );
         assert_eq!(login_url_in("no url here"), None);
     }
 
@@ -3833,7 +4051,6 @@ mod login_url_tests {
     }
 }
 
-
 /// 프로필을 갈라 브라우저를 띄운다. 크롬이 없으면 아무것도 안 한다 — 그 경우
 /// pane 에 URL 이 남아 있으니 사용자가 직접 시크릿 창에 붙여넣으면 된다.
 fn open_isolated_browser(url: &str, profile: &std::path::Path) {
@@ -3857,14 +4074,15 @@ fn open_isolated_browser(url: &str, profile: &std::path::Path) {
     }
 }
 
-
 /// Claude 출력에서 주운 공식 승인 주소를 사용자가 쓰던 브라우저로 연다.
 /// Codex 기본 로그인은 이 함수를 거치지 않고 CLI가 직접 연다.
 fn open_default_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let r = crate::proc::command("open").arg(url).spawn();
     #[cfg(target_os = "windows")]
-    let r = crate::proc::command("cmd").args(["/C", "start", "", url]).spawn();
+    let r = crate::proc::command("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let r = crate::proc::command("xdg-open").arg(url).spawn();
     if let Err(e) = r {
@@ -3915,9 +4133,8 @@ pub(crate) struct AuthProbe {
 /// 초 단위로 걸린다 — TTL 20초마다 그만큼 계정 칸이 빈칸이 되어, 가만히 보고 있으면
 /// 계정이 주기적으로 풀리는 것처럼 깜빡였다(거노 2026-08-03). git 폴러가 일시적
 /// 실패에 마지막 값을 붙드는 것과 같은 이유로, 새 답이 올 때까지는 알던 값을 보인다.
-type ProbeCache = std::sync::Mutex<
-    std::collections::HashMap<String, (std::time::Instant, Option<AuthProbe>)>,
->;
+type ProbeCache =
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<AuthProbe>)>>;
 
 /// 신원 조회가 값을 하나 채울 때마다 오른다. 조회는 백그라운드 스레드라 App 의
 /// `chrome_dirty` 를 직접 못 세우는데, 그게 없으면 「로그인을 마쳤어요」가 뜬 뒤에도
@@ -3987,7 +4204,11 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
         // `read_claude_credentials` 가 계정 칸까지 맞춰 해결), 일시 실패는 표에 남은
         // 마지막 진짜 신원으로 그린다 — 틀린 이메일보다 옛 진짜 값이 낫다.
         let probe = match slot_identity_full(dir.as_deref()) {
-            SlotIdentity::Known { email, org } => Some(AuthProbe { logged_in: true, email, org }),
+            SlotIdentity::Known { email, org } => Some(AuthProbe {
+                logged_in: true,
+                email,
+                org,
+            }),
             SlotIdentity::NoToken => Some(AuthProbe {
                 logged_in: false,
                 email: String::new(),
@@ -3995,7 +4216,11 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
             }),
             SlotIdentity::Unavailable => {
                 let (email, org) = remembered_identity(&key);
-                (!email.is_empty()).then(|| AuthProbe { logged_in: true, email, org })
+                (!email.is_empty()).then(|| AuthProbe {
+                    logged_in: true,
+                    email,
+                    org,
+                })
             }
         };
         {
@@ -4022,7 +4247,10 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
 ///
 /// 반환은 (이메일, 조직명). 조직명은 팀 슬롯을 가르는 유일한 단서라 같이 받는다.
 enum SlotIdentity {
-    Known { email: String, org: String },
+    Known {
+        email: String,
+        org: String,
+    },
     /// 저장소에 토큰이 없다 — 로그인이 필요한 슬롯(껍데기).
     NoToken,
     /// 답을 못 받았다(막 만료돼 갱신 전·upstream 막힘). 로그아웃과 다르다.
@@ -4034,20 +4262,33 @@ fn slot_identity_full(dir: Option<&std::path::Path>) -> SlotIdentity {
     let d = dir.map(|p| p.display().to_string()).unwrap_or_default();
     // -G + --data-urlencode: 경로에 공백이나 한글이 섞여도 쿼리로 안전하게 실린다.
     let Ok(out) = crate::proc::command("curl")
-        .args(["-s", "--max-time", "12", "-G", "--data-urlencode", &format!("dir={d}")])
+        .args([
+            "-s",
+            "--max-time",
+            "12",
+            "-G",
+            "--data-urlencode",
+            &format!("dir={d}"),
+        ])
         .arg(format!("http://127.0.0.1:{port}/claude-identity"))
         .output()
     else {
         return SlotIdentity::Unavailable;
     };
     let field = |v: &serde_json::Value, k: &str| {
-        v.get(k).and_then(|s| s.as_str()).unwrap_or_default().to_string()
+        v.get(k)
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string()
     };
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
         return SlotIdentity::Unavailable;
     };
     if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
-        return SlotIdentity::Known { email: field(&v, "email"), org: field(&v, "org") };
+        return SlotIdentity::Known {
+            email: field(&v, "email"),
+            org: field(&v, "org"),
+        };
     }
     if field(&v, "error") == "no token" {
         SlotIdentity::NoToken
@@ -4111,14 +4352,26 @@ fn codex_auth_path(id: &str) -> Option<std::path::PathBuf> {
 
 /// 토큰 값은 직렬화·저장·로그하지 않고 알려진 자리가 비어 있지 않은지만 본다.
 pub(crate) fn codex_logged_in(id: &str) -> bool {
-    let Some(path) = codex_auth_path(id) else { return false };
-    let Ok(text) = std::fs::read_to_string(path) else { return false };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
-    let nonempty = |p: &str| v.pointer(p).and_then(|x| x.as_str()).is_some_and(|s| !s.is_empty());
+    let Some(path) = codex_auth_path(id) else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let nonempty = |p: &str| {
+        v.pointer(p)
+            .and_then(|x| x.as_str())
+            .is_some_and(|s| !s.is_empty())
+    };
     nonempty("/tokens/access_token")
         || nonempty("/tokens/id_token")
         || nonempty("/tokens/refresh_token")
-        || v.get("OPENAI_API_KEY").and_then(|x| x.as_str()).is_some_and(|s| !s.is_empty())
+        || v.get("OPENAI_API_KEY")
+            .and_then(|x| x.as_str())
+            .is_some_and(|s| !s.is_empty())
 }
 
 pub(crate) fn codex_identity(id: &str) -> Option<String> {
@@ -4164,7 +4417,10 @@ fn codex_account_display_from_identity(
 /// 안 남기면 이름 없는 슬롯의 statusline 이 `acct-1` 같은 내부 id 를 그린다.
 fn remember_account_identity(id: &str, email: &str, org: &str) {
     let settings = socket::read_settings();
-    for (key, val) in [("claude_account_emails", email), ("claude_account_orgs", org)] {
+    for (key, val) in [
+        ("claude_account_emails", email),
+        ("claude_account_orgs", org),
+    ] {
         let mut m = match settings.get(key) {
             Some(serde_json::Value::Object(m)) => m.clone(),
             _ => serde_json::Map::new(),
@@ -4237,7 +4493,11 @@ pub(crate) fn toggle(g: &mut gpu::GpuRenderer, r: Rect, on: bool, cursor: (f32, 
     };
     pill_rect(g, r.0, r.1, r.2, r.3, track);
     let knob = r.3 - 6.0;
-    let kx = if on { r.0 + r.2 - knob - 3.0 } else { r.0 + 3.0 };
+    let kx = if on {
+        r.0 + r.2 - knob - 3.0
+    } else {
+        r.0 + 3.0
+    };
     circle_rect(g, kx, r.1 + 3.0, knob, theme::text());
 }
 

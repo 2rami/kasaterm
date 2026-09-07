@@ -10,13 +10,13 @@
 //! cursor blink, OSC titles, multi-pane render + focus routing.
 
 mod autosuggest;
-mod bridge;
 mod board_room;
+mod bridge;
 mod cells;
-mod clipboard;
-mod codexlimits;
 mod chrome;
 mod claude_auth;
+mod clipboard;
+mod codexlimits;
 mod cursor;
 mod eyedropper;
 mod gpu;
@@ -30,14 +30,14 @@ mod native_board;
 mod native_onboarding;
 mod native_settings;
 mod native_strings;
-mod personacol;
-mod settings_media;
 mod notify_banner;
 mod onboarding;
+mod personacol;
 mod render;
 mod screenread;
 mod session;
 mod settings;
+mod settings_media;
 mod settings_room;
 mod socket;
 mod sprites;
@@ -2157,7 +2157,6 @@ impl PaneTab {
             None
         }
     }
-
 }
 
 struct PaneState {
@@ -3808,7 +3807,10 @@ enum UserEvent {
     SocketClose(String),
     /// `window.close` 위임 → `close_window`. 답을 돌려보낸다 — 마지막 방은 못 닫는
     /// 이유를 부른 쪽(폰의 「방 닫기」)이 그대로 보여 줘야 해서다.
-    SocketCloseWindow(usize, std::sync::mpsc::Sender<std::result::Result<(), String>>),
+    SocketCloseWindow(
+        usize,
+        std::sync::mpsc::Sender<std::result::Result<(), String>>,
+    ),
     /// `POST /settings/character` 위임 — 웹뷰 설정이 고친 성격·이름을 굳힌다.
     ///
     /// 저장 함수(`flush_student_persona`/`flush_student_name`)를 직접 부르지 않고
@@ -8109,6 +8111,84 @@ fn resolve_default_shell() -> Option<String> {
     None
 }
 
+/// GUI 앱의 PATH에는 npm 전역 설치 폴더가 빠질 수 있다. 셸에 `codex`를 맡기면
+/// Finder에서 띄운 앱만 `command not found`가 되므로, 흔한 설치 위치를 직접 찾는다.
+/// `CODEX_BIN`은 패키지 매니저 밖의 설치를 위한 명시적 탈출구다.
+pub(crate) fn codex_binary() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("CODEX_BIN").filter(|value| !value.is_empty()) {
+        return path.into();
+    }
+    let name = if cfg!(windows) { "codex.cmd" } else { "codex" };
+    if let Some(home) = kasa_socket::home_dir() {
+        for root in [
+            home.join(".npm-global/lib/node_modules/@openai/codex"),
+            home.join(".local/lib/node_modules/@openai/codex"),
+            home.join(".npm/lib/node_modules/@openai/codex"),
+        ] {
+            if let Some(path) = npm_codex_binary(&root) {
+                return path;
+            }
+        }
+        for rel in [".npm-global/bin", ".local/bin", ".bun/bin", ".npm/bin"] {
+            let path = home.join(rel).join(name);
+            if path.is_file() {
+                return path;
+            }
+        }
+    }
+    for root in [
+        std::path::PathBuf::from("/opt/homebrew/lib/node_modules/@openai/codex"),
+        std::path::PathBuf::from("/usr/local/lib/node_modules/@openai/codex"),
+    ] {
+        if let Some(path) = npm_codex_binary(&root) {
+            return path;
+        }
+    }
+    for dir in std::env::var_os("PATH")
+        .as_deref()
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+    {
+        // pane shim은 다시 순정 codex를 찾는 래퍼다. GUI의 짧은 PATH에서 그 래퍼를
+        // 고르면 내부 탐색도 같은 이유로 실패하므로 실제 설치 후보로 세지 않는다.
+        if dir.to_string_lossy().contains("kasaterm-shim-") {
+            continue;
+        }
+        let path = dir.join(name);
+        if path.is_file() {
+            return path;
+        }
+    }
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        let path = std::path::Path::new(dir).join(name);
+        if path.is_file() {
+            return path;
+        }
+    }
+    name.into()
+}
+
+fn npm_codex_binary(package_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let relative = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "node_modules/@openai/codex-darwin-x64/vendor/x86_64-apple-darwin/bin/codex"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        "node_modules/@openai/codex-win32-arm64/vendor/aarch64-pc-windows-msvc/codex.exe"
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex.exe"
+    } else {
+        return None;
+    };
+    let path = package_root.join(relative);
+    path.is_file().then_some(path)
+}
+
 /// First installed Git Bash, if any. Git for Windows ships a Unix-like
 /// shell that's the closest match to the macOS zsh workflow kasaterm was
 /// built around (so `ls`/`grep`/`claude` etc. just work).
@@ -8535,7 +8615,10 @@ mod tests {
         let mut memo = None;
         let got = crate::screenread::find_sticky_prompt(&rows, &prompts, &mut memo)
             .expect("맨 윗줄에 본문이 있어도 띠가 나와야 한다");
-        assert!(got.cells.is_none(), "답은 화면 밖의 앞 질문이라 옮겨 올 셀이 없다");
+        assert!(
+            got.cells.is_none(),
+            "답은 화면 밖의 앞 질문이라 옮겨 올 셀이 없다"
+        );
         assert_eq!(got.row, 0);
         // 화면에 보이는 질문의 **바로 앞** 질문 — 그 위는 화면 밖이다.
         assert_eq!(got.text, "codex 작업 상태 알려줘");
@@ -9636,6 +9719,19 @@ mod tests {
     }
 
     #[test]
+    fn codex_binary_finds_the_gui_invisible_npm_install() {
+        let Some(home) = kasa_socket::home_dir() else {
+            return;
+        };
+        let package = home.join(".npm-global/lib/node_modules/@openai/codex");
+        if let Some(native) = npm_codex_binary(&package) {
+            if std::env::var_os("CODEX_BIN").is_none() {
+                assert_eq!(codex_binary(), native);
+            }
+        }
+    }
+
+    #[test]
     fn strip_activity_prefix_removes_claude_glyphs() {
         // claude OSC 제목 "✳ 요약" → "요약"; 별표류·∗·＊·* 접두 + 공백 제거.
         assert_eq!(strip_activity_prefix("✳ 학생 프사 개선"), "학생 프사 개선");
@@ -9649,7 +9745,10 @@ mod tests {
         );
         assert_eq!(strip_activity_prefix("⠐⠑ 이름"), "이름");
         // reduce motion(/config)은 스피너가 ● 하나로 고정된다 — 2026-09-02 실측.
-        assert_eq!(strip_activity_prefix("● 스피너 판독 수리"), "스피너 판독 수리");
+        assert_eq!(
+            strip_activity_prefix("● 스피너 판독 수리"),
+            "스피너 판독 수리"
+        );
         // 별표로 시작 안 하면 원문 그대로(rename 사용자 값 보호).
         assert_eq!(strip_activity_prefix("학생 프사 개선"), "학생 프사 개선");
         assert_eq!(strip_activity_prefix("main.rs · vim"), "main.rs · vim");

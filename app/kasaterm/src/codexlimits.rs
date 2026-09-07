@@ -95,20 +95,19 @@ pub(crate) fn refresh() -> bool {
     true
 }
 
-fn app_server_command(slot: bool) -> &'static str {
+fn app_server_args(slot: bool) -> Vec<&'static str> {
+    let mut args = vec!["app-server"];
     if slot {
-        "codex app-server -c 'cli_auth_credentials_store=\"file\"'"
-    } else {
-        "codex app-server"
+        args.extend(["-c", "cli_auth_credentials_store=\"file\""]);
     }
+    args
 }
 
 fn ask(account_home: Option<&std::path::Path>) -> Option<CodexLimits> {
-    // 로그인 셸을 거치는 이유는 auth_probe 와 같다 — Finder 로 뜬 .app 의 PATH 에는
-    // codex 가 없어 직접 spawn 하면 늘 실패한다.
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let mut command = crate::proc::command(shell);
-    command.arg("-lc").arg(app_server_command(account_home.is_some()));
+    // Finder에서 띄운 앱의 PATH에는 npm 전역 설치가 없다. 로그인과 같은 탐색기를
+    // 써야 계정은 붙었는데 한도만 영영 비는 두 경로가 생기지 않는다.
+    let mut command = crate::proc::command(crate::codex_binary());
+    command.args(app_server_args(account_home.is_some()));
     match account_home {
         // `auth.json` 은 CODEX_HOME 아래에 있다는 Codex의 공식 계약을 그대로 쓴다.
         // 설정에서 고른 슬롯을 여기에도 주지 않으면 하단바만 늘 기본 로그인의
@@ -199,8 +198,8 @@ mod tests {
 
     #[test]
     fn account_slots_read_the_same_file_auth_that_login_writes() {
-        assert_eq!(app_server_command(false), "codex app-server");
-        assert!(app_server_command(true).contains("cli_auth_credentials_store=\"file\""));
+        assert_eq!(app_server_args(false), vec!["app-server"]);
+        assert!(app_server_args(true).contains(&"cli_auth_credentials_store=\"file\""));
     }
 
     #[test]
