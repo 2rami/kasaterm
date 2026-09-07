@@ -39,6 +39,10 @@ pub struct RemoteIdentity {
     /// 이사(migrate)로 떠나온 pane 의 **원래 로컬 경로** — 역이사가 되돌아갈 자리.
     /// 원격에서 태어난 pane 은 None 이고, 그때 역이사는 명부의 roots 매핑으로 정한다.
     pub origin_cwd: Option<String>,
+    /// 이 앱이 `to <기계>` 로 **세운** 자리인가 — 그 기계 창에 진짜 pane 을 만들고
+    /// 여기서 비추는 것. 닫을 때 저쪽 pane 도 함께 걷는 근거다. 남의 pane 을
+    /// 비추는 거울은 false 라 원본을 절대 안 건드린다.
+    pub owned: bool,
 }
 
 /// 원격 pane 하나의 연결 명세.
@@ -149,6 +153,8 @@ pub struct RemoteInfo {
     /// 거울 연결(원본 격자 불변). 세션 저장이 이걸 실어야 재시작 뒤에도
     /// 거울로 되붙는다 — 안 실으면 복원된 pane 이 원본 크기를 뺏는다.
     pub view: bool,
+    /// `to` 로 이 앱이 세운 자리(RemoteIdentity::owned).
+    pub owned: bool,
 }
 
 pub fn remote_info(local_id: &str) -> Option<RemoteInfo> {
@@ -159,6 +165,7 @@ pub fn remote_info(local_id: &str) -> Option<RemoteInfo> {
         remote_cwd: l.identity.remote_cwd.clone(),
         origin_cwd: l.identity.origin_cwd.clone(),
         view: l.view,
+        owned: l.identity.owned,
     })
 }
 
@@ -548,6 +555,50 @@ pub fn spawn_student_pane(base: &str, character: &str, token: Option<&str>) -> R
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .to_string();
+    if id.is_empty() {
+        anyhow::bail!("원격이 pane id 를 안 돌려줬어요");
+    }
+    Ok(id)
+}
+
+/// 원격 kasaterm 창에 **맨 셸 pane** 을 하나 세우고 그 id 를 받는다(`POST /spawn-shell`).
+///
+/// `to <기계>` 가 쓴다 — 창 없는 web 셸은 그 기계 앞에 앉으면 안 보였다(2026-09-07
+/// 지시 「to 로 붙으면 거기도 생기게, 원격을 터미널로 조종한다는 느낌으로」). 창구가
+/// 없는 낡은 서버·kasa-serve-web 은 실패하고, 호출자는 web 셸로 물러선다.
+pub fn spawn_shell_pane(base: &str, cwd: Option<&str>, token: Option<&str>) -> Result<String> {
+    let u = format!(
+        "{}/spawn-shell{}",
+        base.trim_end_matches('/'),
+        cwd.map(|c| format!("?cwd={}", urlencode(c))).unwrap_or_default()
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("spawn runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u);
+        if let Some(t) = token {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("셸 pane 세우기 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격에 셸 pane 세우기 실패: {}",
+            v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    let id = v.get("surface").and_then(|x| x.as_str()).unwrap_or("").to_string();
     if id.is_empty() {
         anyhow::bail!("원격이 pane id 를 안 돌려줬어요");
     }

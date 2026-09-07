@@ -796,6 +796,16 @@ impl App {
         // 원격 web 세션을 폐기한다 — insert 의 Drop 은 detach(살려 둠)라, 명시적
         // kill 이 없으면 저쪽 셸이 남는다. insert **전**에: 스왑 뒤엔 링크가 없다.
         kasa_mcp::remote::kill_remote(pid);
+        // `to` 로 세운 저쪽 pane 은 돌아올 때 함께 걷는다 — ssh 를 나오면 저쪽 셸이
+        // 끝나듯이. 위 kill 은 우리 링크만 끊고 GUI pane 은 저쪽 앱이 쥐고 있다.
+        if info.owned && info.remote_id.starts_with('%') {
+            let (base, rid) = (info.base.clone(), info.remote_id.clone());
+            std::thread::spawn(move || {
+                if let Err(e) = kasa_mcp::remote::close_remote_pane(&base, &rid, None, true) {
+                    eprintln!("[to ..] 원격 pane {rid} 닫기 실패(무시): {e:#}");
+                }
+            });
+        }
         self.pump_pty_screens(
             session.screens.clone(),
             pid.to_string(),
@@ -847,22 +857,51 @@ impl App {
             .and_then(socket::pid_cwd)
             .map(|p| p.to_string_lossy().into_owned());
         let (c, r) = sess.size();
-        let remote = kasa_mcp::remote::connect(
-            kasa_mcp::remote::RemoteSpec {
-                base: base.to_string(),
-                pane: None,
-                cwd: remote_cwd.map(str::to_string),
-                token: None,
-                identity: kasa_mcp::remote::RemoteIdentity {
-                    label: kasa_mcp::machines::label_for_base(base).unwrap_or_default(),
-                    remote_cwd: remote_cwd.map(str::to_string),
-                    origin_cwd: origin,
-                },
-            },
-            pid,
-            c,
-            r,
-        )?;
+        let identity = kasa_mcp::remote::RemoteIdentity {
+            label: kasa_mcp::machines::label_for_base(base).unwrap_or_default(),
+            remote_cwd: remote_cwd.map(str::to_string),
+            origin_cwd: origin,
+            owned: true,
+        };
+        // 저쪽 **창에 진짜 pane** 을 세우고 여기서 비춘다(2026-09-07 지시 「to 로 붙으면
+        // 거기도 생기게 — 원격을 터미널로 조종한다는 느낌으로」). 창 없는 web 셸은 그
+        // 기계 앞에 앉으면 안 보였다. 창구가 없는 낡은 서버·kasa-serve-web 은 옛
+        // 길(web 셸)로 물러선다. 거울(view)로 붙는 이유는 그 pane 의 크기 주인이
+        // 저쪽 창이라서다 — 이쪽 pane 이 작으면 글자 배율로 담는다.
+        let remote = match kasa_mcp::remote::spawn_shell_pane(base, remote_cwd, None) {
+            Ok(rid) => {
+                let spec = kasa_mcp::remote::RemoteSpec {
+                    base: base.to_string(),
+                    pane: Some(rid.clone()),
+                    cwd: None,
+                    token: None,
+                    identity: identity.clone(),
+                };
+                match kasa_mcp::remote::connect_view(spec, pid) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // 세운 자리를 못 비추면 저쪽에 빈 pane 만 남는다 — 걷고 실패.
+                        let _ = kasa_mcp::remote::close_remote_pane(base, &rid, None, true);
+                        return Err(e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[to] {base} 에 pane 을 못 세워 창 없는 셸로 물러섬: {e:#}");
+                kasa_mcp::remote::connect(
+                    kasa_mcp::remote::RemoteSpec {
+                        base: base.to_string(),
+                        pane: None,
+                        cwd: remote_cwd.map(str::to_string),
+                        token: None,
+                        identity,
+                    },
+                    pid,
+                    c,
+                    r,
+                )?
+            }
+        };
         self.pump_pty_screens(
             remote.session.screens.clone(),
             pid.to_string(),
@@ -927,6 +966,7 @@ impl App {
                     label: kasa_mcp::machines::label_for_base(base).unwrap_or_default(),
                     remote_cwd: cwd.map(str::to_string),
                     origin_cwd: None,
+                    owned: false,
                 },
             },
             &new_id,
@@ -1029,6 +1069,7 @@ impl App {
                     label: m.label.clone(),
                     remote_cwd: (!remote_cwd.is_empty()).then(|| remote_cwd.to_string()),
                     origin_cwd: None,
+                    owned: false,
                 },
             },
             &new_id,
@@ -1201,6 +1242,7 @@ impl App {
                             // 이 거울의 레포를 아는 유일한 길이다.
                             remote_cwd: (!rcwd.is_empty()).then(|| rcwd.clone()),
                             origin_cwd: None,
+                            owned: false,
                         },
                     },
                     &local_id,
@@ -1782,6 +1824,7 @@ impl App {
                     label: kasa_mcp::machines::label_for_base(&r.base).unwrap_or_default(),
                     remote_cwd: Some(r.remote_cwd.clone()),
                     origin_cwd: Some(r.cwd.clone()),
+                    owned: false,
                 },
             },
             pid,
@@ -4247,6 +4290,9 @@ impl App {
     /// so the `"last"` setting behaves like other terminals' "reuse previous
     /// directory" mode.
     pub(crate) fn spawn_cwd_from(&self, prev_pane: Option<&str>) -> Option<String> {
+        if let Some(c) = self.pending_spawn_cwd.clone() {
+            return Some(c);
+        }
         let prev = prev_pane.and_then(|id| self.pane_current_cwd(id));
         resolve_spawn_cwd(prev)
     }
@@ -5818,6 +5864,9 @@ impl App {
                     if let Some(c) = &info.origin_cwd {
                         obj.insert("remote_origin_cwd".to_string(), serde_json::json!(c));
                     }
+                    if info.owned {
+                        obj.insert("remote_owned".to_string(), serde_json::json!(true));
+                    }
                 }
                 // Attach the pane's scrollback (text lines) so restore can
                 // repaint what was on screen. Only when we have a real record.
@@ -6480,6 +6529,10 @@ impl App {
                         .unwrap_or_default(),
                     remote_cwd: rec_str("remote_cwd"),
                     origin_cwd: rec_str("remote_origin_cwd"),
+                    owned: rec
+                        .get("remote_owned")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                 },
             };
             // 거울(view)로 살던 pane 은 거울로 되살린다 — 소유자로 붙으면

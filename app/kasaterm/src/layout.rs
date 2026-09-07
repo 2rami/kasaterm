@@ -589,6 +589,41 @@ impl App {
         id
     }
 
+    /// 다른 기계의 `to <이 기계>` 가 비출 **맨 셸 pane** — 캐릭터 지정 없이 활성 pane 을
+    /// 쪼개고 그 폴더에서 셸을 띄운다. 이 창의 사람에겐 「저 기계에서 누가 터미널을
+    /// 열었다」로 보이고, 그 pane 의 입력·출력은 부른 기계의 pane 이 그대로 비춘다.
+    pub(crate) fn spawn_shell_pane(&mut self, cwd: Option<&str>) -> String {
+        let active = self.ws.lock().unwrap().active_pane.clone();
+        if active.as_deref().is_some_and(|pane| {
+            self.ensure_user_mutation_target(
+                pane,
+                crate::settings_room::SettingsMutation::Split,
+            )
+            .is_err()
+        }) {
+            return String::new();
+        }
+        self.pending_character = None;
+        self.pending_spawn_cwd = cwd.map(str::to_string);
+        let out = self.split_pane_auto(None);
+        self.pending_spawn_cwd = None;
+        let id = match out {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("[spawn_shell] split failed: {e:#}");
+                return String::new();
+            }
+        };
+        self.handoff_ime_to_active_surface();
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        id
+    }
+
     /// pane 여러 개를 **한 번에** 배치한다 — 부른 pane 이 크게 남고 학생들이 균등하게.
     ///
     /// 옛 경로는 CLI 가 split 을 N 번 부르면서 **직전에 만든 pane 을 다음 대상으로**
@@ -2018,6 +2053,24 @@ for p in glob.glob(os.path.join(d, '*.json')):
     }
 
     pub(crate) fn remove_pane(&mut self, target: &str) {
+        // `to` 로 저쪽 창에 세운 자리는 그 pane 까지 함께 걷는다 — ssh 를 끊으면
+        // 저쪽 셸도 끝나듯이. 남기고 싶을 때만 메뉴(`remote_keep`)로 예외를 둔다.
+        // kill_remote 는 우리 링크만 끊고 GUI pane 은 저쪽 앱이 Arc 를 쥐어 안 죽는다.
+        // HTTP 라 GUI 스레드 밖에서 — 저쪽이 안 닿으면 10초를 여기서 멈추게 된다.
+        if let Some(info) = kasa_mcp::remote::remote_info(target) {
+            if info.owned && info.remote_id.starts_with('%') && !self.remote_keep.remove(target) {
+                std::thread::spawn(move || {
+                    if let Err(e) = kasa_mcp::remote::close_remote_pane(
+                        &info.base,
+                        &info.remote_id,
+                        None,
+                        true,
+                    ) {
+                        eprintln!("[to] 원격 pane {} 닫기 실패(무시): {e:#}", info.remote_id);
+                    }
+                });
+            }
+        }
         // 원격 pane 이면 원격 셸까지 죽인다 — 여기는 「진짜 끄기」 경로다.
         // detach(앱 종료·재시작)는 이 함수를 안 타고 Arc drop 만으로 끝난다.
         kasa_mcp::remote::kill_remote(target);

@@ -900,6 +900,17 @@ impl Backend for PtyBackend {
             .unwrap_or_default())
     }
 
+    /// `POST /spawn-shell?cwd=` — 다른 기계의 `to` 가 비출 맨 셸 pane.
+    fn spawn_shell(&self, cwd: Option<&str>) -> Result<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy
+            .send_event(UserEvent::SocketSpawnShell(cwd.map(str::to_string), tx))
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        Ok(rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_default())
+    }
+
     /// `POST /swap-character?surface=<id>&character=<name>` — pane 캐릭터 교체(respawn).
     fn swap_character(&self, surface_id: &str, character: &str) -> Result<()> {
         self.proxy

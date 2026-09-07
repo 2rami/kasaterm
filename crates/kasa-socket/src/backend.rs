@@ -684,6 +684,11 @@ pub trait Backend: Send + Sync {
     fn spawn_student(&self, _character: &str) -> Result<String> {
         anyhow::bail!("spawn_student unsupported by this backend")
     }
+    /// 활성 방에 **맨 셸 pane** 하나(캐릭터 없음) — 다른 기계의 `to <이 기계>` 가
+    /// 자기 pane 으로 비출 자리다. 새 pane id 를 돌려주고, 빈 문자열은 못 세운 것.
+    fn spawn_shell(&self, _cwd: Option<&str>) -> Result<String> {
+        anyhow::bail!("spawn_shell unsupported by this backend")
+    }
     /// Swap a pane's character: respawn its PTY with the new persona (the live
     /// claude conversation resets — persona is fixed at shell spawn). Default:
     /// unsupported.
