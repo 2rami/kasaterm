@@ -8466,6 +8466,25 @@ pub(crate) fn restore_agent_command(
 /// `self` 를 안 쓰므로 자유함수다 — 캐릭터를 갈아 끼우는 자리가 GUI(`App`)와 board
 /// 빌드(`PtyBackend`) 양쪽에 있고, 한쪽만 갱신하면 그 경로로 바뀐 pane 만 말투가
 /// 어긋난 채 남는다.
+/// 이 pane 의 학생을 사람이 학생 명령으로 **직접 갈았는가** — override 파일이 그 흔적이다.
+/// 자동 배정만 받은 pane 은 파일이 없다(spawn 이 지운다).
+pub(crate) fn pane_reassigned(pane: &str) -> bool {
+    std::env::var("KASATERM_TMUX_SHIM_DIR").is_ok_and(|shim| {
+        std::path::Path::new(&shim)
+            .join(format!("repersona-{pane}.character"))
+            .is_file()
+    })
+}
+
+/// bind-transcript 에서 세션의 기존 바인딩과 pane 의 현재 학생이 다를 때, pane 쪽이
+/// 정본인가. 사람이 이 pane 을 재배정했거나 바인딩된 학생이 지금 명단에 없을 때만 —
+/// 그 밖엔 세션이 이긴다: 갓 자동 배정된 탭에서 `claude --resume` 으로 남의 대화를
+/// 이으면 그 pane 은 그 대화의 학생이 돼야지, 우연히 앉은 학생으로 대화를 덮으면
+/// 안 된다(2026-09-08 실측: 세이아 대화가 아즈사로 둔갑하고 바인딩까지 덮였다).
+pub(crate) fn pane_pick_wins(reassigned: bool, bound_assignable: bool) -> bool {
+    reassigned || !bound_assignable
+}
+
 pub(crate) fn write_persona_override(pane: &str, character: &str) {
     let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") else {
         return;
@@ -8579,6 +8598,14 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resume_keeps_the_sessions_student_unless_the_pane_was_reassigned() {
+        use super::pane_pick_wins;
+        assert!(!pane_pick_wins(false, true), "자동 배정 pane 이 남의 대화를 이으면 대화의 학생이 이긴다");
+        assert!(pane_pick_wins(true, true), "사람이 재배정한 pane 은 pane 이 이긴다");
+        assert!(pane_pick_wins(false, false), "바인딩된 학생이 명단에 없으면 pane 이 이긴다");
+    }
+
     /// 부팅 예약과 복원이 같은 목록을 봐야 한다 — 되살릴 세션의 leaf 를 트리 깊이와
     /// 무관하게 순서대로 모으고, 빈 이름과 다른 세션은 건너뛴다.
     #[test]

@@ -835,9 +835,18 @@ impl ApplicationHandler<UserEvent> for App {
                     .get(pane.as_str())
                     .cloned()
                 {
+                    // pane 쪽이 이기는 것은 사람이 재배정했거나 바인딩된 학생이 명단에
+                    // 없을 때뿐 — 자동 배정 탭에서 남의 대화를 resume 하면 대화의 학생이
+                    // 이긴다(session.rs `pane_pick_wins`).
+                    let reassigned = crate::session::pane_reassigned(pane.as_str());
                     if !cur.is_empty()
-                        && kasa_mcp::character::session_character(sid)
-                            .is_some_and(|bound| bound != cur)
+                        && kasa_mcp::character::session_character(sid).is_some_and(|bound| {
+                            bound != cur
+                                && crate::session::pane_pick_wins(
+                                    reassigned,
+                                    kasa_mcp::character::is_assignable(&bound),
+                                )
+                        })
                     {
                         let _ = kasa_mcp::character::bind_session_character(sid, &cur);
                     }

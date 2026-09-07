@@ -4314,6 +4314,56 @@ fn is_auto_peer_name(s: &str) -> bool {
         && mid.strip_prefix('p').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// board 가 상태줄을 못 읽은 pane(탭 안의 claude 등)은 `model` 이 실행 설정 원문
+/// (`claude-opus-5`, `claude-fable-5-1[1m]`)으로 남는다. 폰 상태줄엔 사람 말
+/// (「Opus 5」·「Fable 5.1 1M」)로 — 이미 다듬어진 값은 그대로 돌려준다.
+fn pretty_model_id(raw: &str) -> String {
+    let raw = raw.trim();
+    let (id, window) = match raw.strip_suffix("[1m]") {
+        Some(id) => (id, true),
+        None => (raw, false),
+    };
+    let lower = id.to_ascii_lowercase();
+    let title = |s: &str| {
+        let mut c = s.chars();
+        c.next()
+            .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+            .unwrap_or_default()
+    };
+    let pretty = if let Some(rest) = lower.strip_prefix("claude-") {
+        let mut parts = rest.split('-').filter(|p| !p.is_empty());
+        let Some(family) = parts.next() else {
+            return raw.to_string();
+        };
+        // 날짜 꼬리(`20251001`)는 버리고 숫자 조각만 점으로 잇는다: `4-5` → `4.5`.
+        let version: Vec<&str> = parts
+            .filter(|p| p.chars().all(|c| c.is_ascii_digit()) && p.len() < 8)
+            .collect();
+        if version.is_empty() {
+            title(family)
+        } else {
+            format!("{} {}", title(family), version.join("."))
+        }
+    } else if lower.starts_with("gpt-") {
+        let mut pieces = lower.split('-');
+        let _ = pieces.next();
+        let version = pieces.next().unwrap_or_default();
+        let suffix = pieces.map(title).collect::<Vec<_>>().join(" ");
+        if suffix.is_empty() {
+            format!("GPT-{version}")
+        } else {
+            format!("GPT-{version} {suffix}")
+        }
+    } else {
+        return raw.to_string();
+    };
+    if window {
+        format!("{pretty} 1M")
+    } else {
+        pretty
+    }
+}
+
 /// 폰 머리에 다는 세션 이름. claude 는 `/rename` 이 peer_name 으로 온다. codex 는
 /// 그런 통로가 없어 사람이 pane 에 붙인 이름(핀)이 그 자리다 — 데스크톱이 codex
 /// 화면 안에 배지로 그리는 바로 그 이름. OSC 요약(핀 없음)은 세션 이름이 아니다.
@@ -4381,7 +4431,9 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "branch": b.and_then(|p| p.branch.clone()).filter(|s| !s.is_empty()),
                 // 모델 표시명(「Fable 5.1 1M」)은 board 가 이미 사람 말로 다듬어 둔 것 —
                 // 아래 `model` 은 실행 설정의 원문(`claude-fable-5-1[1m]`)이라 둘 다 싣는다.
-                "model_label": b.map(|p| p.model.clone()).filter(|s| !s.is_empty()),
+                "model_label": b
+                    .map(|p| pretty_model_id(&p.model))
+                    .filter(|s| !s.is_empty()),
                 "effort_label": b.map(|p| p.effort_default.clone()).filter(|s| !s.is_empty()),
                 "window": pane_windows
                     .get(&id)
@@ -7327,6 +7379,16 @@ pub fn spawn_http_server_opts(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pretty_model_id_turns_raw_ids_into_status_words() {
+        assert_eq!(super::pretty_model_id("claude-opus-5"), "Opus 5");
+        assert_eq!(super::pretty_model_id("claude-fable-5-1[1m]"), "Fable 5.1 1M");
+        assert_eq!(super::pretty_model_id("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(super::pretty_model_id("gpt-5.6-sol"), "GPT-5.6 Sol");
+        assert_eq!(super::pretty_model_id("Fable 5.1 1M"), "Fable 5.1 1M", "이미 다듬어진 값은 그대로");
+        assert_eq!(super::pretty_model_id(""), "");
+    }
+
     #[test]
     fn pane_session_name_prefers_peer_name_then_pinned_title() {
         let mut p = kasa_socket::backend::PaneActivity {
