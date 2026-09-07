@@ -1696,7 +1696,28 @@ impl Backend for PtyBackend {
             .map(|(i, l)| (*i, rects_of(l)))
             .collect();
         let aspect = ws.grid_aspect;
+        // 자리마다 탭 줄 — 탭이 둘 이상인 pane 만. 보조 탭의 pid 는 `pid_to_pane` 으로
+        // 방에는 실리지만 배치도 칸은 바깥 pane 하나라, 폰에서는 탭 학생이 어디 있는지
+        // 알 길이 없었다.
+        let tabs_of: HashMap<String, (Vec<String>, usize)> = ws
+            .panes
+            .iter()
+            .filter(|(_, p)| p.tabs.len() > 1)
+            .map(|(id, p)| {
+                let pids: Vec<String> = p.tabs.iter().filter_map(|t| t.pid.clone()).collect();
+                (id.clone(), (pids, p.active_tab.min(p.tabs.len().saturating_sub(1))))
+            })
+            .collect();
         drop(ws);
+        let stamp_tabs = |mut rects: Vec<PaneRect>| -> Vec<PaneRect> {
+            for r in rects.iter_mut() {
+                if let Some((pids, active)) = tabs_of.get(&r.surface_id) {
+                    r.tabs = pids.clone();
+                    r.tab_active = Some(*active);
+                }
+            }
+            rects
+        };
         Ok(by_win
             .into_iter()
             .map(|(idx, mut surfaces)| {
@@ -1705,11 +1726,11 @@ impl Backend for PtyBackend {
                 kasa_socket::backend::WindowOverview {
                     idx,
                     active,
-                    panes: if active {
+                    panes: stamp_tabs(if active {
                         active_rects.clone()
                     } else {
                         others.get(&idx).cloned().unwrap_or_default()
-                    },
+                    }),
                     surfaces,
                     aspect,
                 }

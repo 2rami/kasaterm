@@ -7,6 +7,7 @@ import 'screens/connect.dart';
 import 'screens/hub.dart';
 import 'screens/terminal.dart';
 import 'server.dart';
+import 'theme_prefs.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
 
@@ -18,6 +19,7 @@ final designTokens = ValueNotifier<DesignTokens?>(null);
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   AppLinkObserver.instance.install();
+  const ThemePrefs().load().then((m) => phoneThemeMode.value = m);
   runApp(const KasatermApp());
 }
 
@@ -136,20 +138,28 @@ class KasatermApp extends StatelessWidget {
   const KasatermApp({super.key});
 
   @override
-  Widget build(BuildContext context) => ValueListenableBuilder<DesignTokens?>(
-    valueListenable: designTokens,
-    // 데스크톱 색을 받았으면 폰의 라이트·다크 설정과 상관없이 그 얼굴이다.
-    builder: (context, tokens, _) => MaterialApp(
-      navigatorKey: navigatorKey,
-      debugShowCheckedModeBanner: false,
-      title: 'kasaterm',
-      theme: tokens == null
-          ? buildTheme(Brightness.light)
-          : themeFromTokens(tokens),
-      darkTheme: tokens == null
-          ? buildTheme(Brightness.dark)
-          : themeFromTokens(tokens),
-      home: const RootScreen(),
+  Widget build(BuildContext context) => ValueListenableBuilder<ThemeMode>(
+    valueListenable: phoneThemeMode,
+    builder: (context, mode, _) => ValueListenableBuilder<DesignTokens?>(
+      valueListenable: designTokens,
+      // 「데스크톱 따라감」이면 받은 색이 밝기와 상관없이 그 얼굴이다. 폰에서 밝게·
+      // 어둡게를 골랐으면 데스크톱 색을 접고 폰 기본 얼굴을 그 밝기로.
+      builder: (context, tokens, _) {
+        final desktop = mode == ThemeMode.system ? tokens : null;
+        return MaterialApp(
+          navigatorKey: navigatorKey,
+          debugShowCheckedModeBanner: false,
+          title: 'kasaterm',
+          themeMode: mode,
+          theme: desktop == null
+              ? buildTheme(Brightness.light)
+              : themeFromTokens(desktop),
+          darkTheme: desktop == null
+              ? buildTheme(Brightness.dark)
+              : themeFromTokens(desktop),
+          home: const RootScreen(),
+        );
+      },
     ),
   );
 }

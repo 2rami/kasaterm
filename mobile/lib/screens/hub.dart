@@ -554,6 +554,9 @@ class _MiniMap extends StatelessWidget {
                       child: _MiniCell(
                         server: server,
                         pane: room.paneOf(r.surface),
+                        // 탭이 둘 이상이면 그 자리의 학생 전부 — 칸 하나에 탭 줄로.
+                        tabs: [for (final t in r.tabs) room.paneOf(t)],
+                        tabActive: r.tabActive,
                         onOpen: onOpen,
                         onMore: onMore,
                       ),
@@ -572,19 +575,34 @@ class _MiniCell extends StatelessWidget {
   const _MiniCell({
     required this.server,
     required this.pane,
+    this.tabs = const [],
+    this.tabActive,
     this.onOpen,
     this.onMore,
   });
 
   final Server server;
   final Pane? pane;
+
+  /// 이 자리의 탭들(순서대로). 데스크톱 pane 머리의 탭 줄과 같은 것 — 탭 안에 있는
+  /// 학생도 지도에 보여야 한다(2026-09-08 지시). 빈 목록이면 탭이 하나다.
+  final List<Pane?> tabs;
+  final int? tabActive;
   final void Function(Pane)? onOpen;
   final void Function(Pane)? onMore;
+
+  static const _tabFace = 14.0;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final p = pane;
+    final tabbed = tabs.length > 1;
+    // 앞에 나온 탭이 이 칸의 얼굴 — 자리 pane 은 대개 첫 탭이라, 그대로 두면 뒤에
+    // 숨은 학생이 지도에 나오는 셈이다.
+    final front = tabbed && tabActive != null && tabActive! < tabs.length
+        ? tabs[tabActive!]
+        : null;
+    final p = front ?? pane;
     final accent = p == null
         ? scheme.outline
         : (parseHexColor(p.color) ?? scheme.primary);
@@ -596,7 +614,12 @@ class _MiniCell extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, box) {
         final roomy = box.maxWidth >= 64 && box.maxHeight >= 44;
-        final face = math.min(box.maxHeight * 0.55, 30.0);
+        // 탭 줄이 들어갈 자리가 있을 때만 — 좁은 칸에선 얼굴 하나가 낫다.
+        final tabRow = tabbed && box.maxHeight >= 40 && box.maxWidth >= 40;
+        final face = math.min(
+          (box.maxHeight - (tabRow ? _tabFace + 4 : 0)) * 0.55,
+          30.0,
+        );
         return AnimatedContainer(
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeOut,
@@ -618,10 +641,24 @@ class _MiniCell extends StatelessWidget {
                   : () => onMore!(p),
               child: Stack(
                 children: [
+                  if (tabRow)
+                    Positioned(
+                      top: 2,
+                      left: 3,
+                      right: 18,
+                      child: _MiniTabRow(
+                        server: server,
+                        tabs: tabs,
+                        active: tabActive,
+                        size: _tabFace,
+                        onOpen: onOpen,
+                      ),
+                    ),
                   Center(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        if (tabRow) const SizedBox(height: _tabFace + 2),
                         if (p != null && face >= 14)
                           StudentFace(
                             slug: p.slug,
@@ -666,6 +703,77 @@ class _MiniCell extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// 칸 위쪽의 탭 줄 — 탭마다 작은 얼굴, 앞에 나온 탭은 테. 누르면 그 탭이 열린다.
+/// 데스크톱 pane 머리의 탭 줄을 지도 크기로 줄인 것.
+class _MiniTabRow extends StatelessWidget {
+  const _MiniTabRow({
+    required this.server,
+    required this.tabs,
+    required this.active,
+    required this.size,
+    this.onOpen,
+  });
+
+  final Server server;
+  final List<Pane?> tabs;
+  final int? active;
+  final double size;
+  final void Function(Pane)? onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Row(
+      children: [
+        for (var i = 0; i < tabs.length; i++)
+          Padding(
+            padding: const EdgeInsets.only(right: 3),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: tabs[i] == null || onOpen == null
+                  ? null
+                  : () => onOpen!(tabs[i]!),
+              child: Container(
+                padding: const EdgeInsets.all(1),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: i == active
+                        ? scheme.onSurface
+                        : scheme.outline.withValues(alpha: 0.35),
+                    width: i == active ? 1.4 : 0.8,
+                  ),
+                ),
+                child: tabs[i] == null
+                    ? SizedBox(
+                        width: size,
+                        height: size,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: scheme.outlineVariant,
+                          ),
+                        ),
+                      )
+                    : StudentFace(
+                        slug: tabs[i]!.slug,
+                        url: tabs[i]!.slug == null
+                            ? null
+                            : server.avatar(
+                                tabs[i]!.slug!,
+                                machine: tabs[i]!.machine,
+                              ),
+                        shell: tabs[i]!.isShell,
+                        size: size,
+                      ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

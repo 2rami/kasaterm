@@ -424,6 +424,14 @@ pub struct PaneRect {
     pub insertions: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deletions: Option<u32>,
+    /// 이 자리(leaf)에 앉은 탭들의 pid, 탭 순서대로 — 탭이 둘 이상일 때만 싣는다.
+    /// 배치도는 자리 하나에 칸 하나라 탭은 안 보였다(2026-09-08 지시 「탭 안에 있는
+    /// 것도 모바일 미니맵에 반영」). 폰이 칸 안에 탭 줄을 그리고 눌러 연다.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tabs: Vec<String>,
+    /// `tabs` 중 지금 앞에 나온 탭의 자리.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_active: Option<usize>,
 }
 
 /// One shell command block of a pane (Warp-style), delimited by OSC 133 C/D

@@ -152,6 +152,8 @@ class PaneRect {
     required this.y,
     required this.w,
     required this.h,
+    this.tabs = const [],
+    this.tabActive,
   });
 
   final String surface;
@@ -160,11 +162,27 @@ class PaneRect {
   final int w;
   final int h;
 
+  /// 이 자리에 앉은 탭들의 pane id(순서대로). 탭이 둘 이상일 때만 온다 — 탭 하나는
+  /// 곧 `surface` 라 따로 싣지 않는다.
+  final List<String> tabs;
+
+  /// `tabs` 중 지금 앞에 나온 탭의 자리.
+  final int? tabActive;
+
   static PaneRect? fromJson(Map<String, Object?> j) {
     final id = j['surface_id'] as String?;
     if (id == null) return null;
     int n(String k) => (j[k] as num?)?.toInt() ?? 0;
-    return PaneRect(surface: id, x: n('x'), y: n('y'), w: n('w'), h: n('h'));
+    final tabs = j['tabs'];
+    return PaneRect(
+      surface: id,
+      x: n('x'),
+      y: n('y'),
+      w: n('w'),
+      h: n('h'),
+      tabs: tabs is List ? tabs.whereType<String>().toList() : const [],
+      tabActive: (j['tab_active'] as num?)?.toInt(),
+    );
   }
 }
 
@@ -443,6 +461,37 @@ class Server {
       // 무시 — 기본값으로.
     }
     return t;
+  }
+
+  /// 데스크톱 설정 화면의 「외형」 값 그대로 — 테마·강조색·모서리 목록과 지금 고른 것.
+  /// 폰이 그 화면을 흉내 내지 않고 같은 목록을 받아 같은 액션을 보낸다.
+  Future<Map<String, Object?>?> appearance({String? machine}) async {
+    final v = await _getJson('settings/values', machine: machine);
+    if (v is! Map) return null;
+    final a = v['appearance'];
+    return a is Map ? a.cast<String, Object?>() : null;
+  }
+
+  /// 데스크톱 설정 액션 — 이름·인자가 설정 화면의 웹 쪽과 같다(`theme-mode`·`accent`·
+  /// `shape`…). 데스크톱이 그 자리에서 바뀌고 색이 폰으로 되돌아온다.
+  Future<void> settingsAction(
+    String action, {
+    String? id,
+    String? machine,
+  }) async {
+    final http.Response res;
+    try {
+      res = await _client.post(
+        uri('settings/action', machine: machine),
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode({'action': action, 'id': ?id}),
+      );
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    if (res.statusCode != 200) {
+      throw ServerException('설정이 안 바뀌었다 (${res.statusCode})');
+    }
   }
 
   Future<Me> me() async {
