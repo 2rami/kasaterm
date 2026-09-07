@@ -2256,12 +2256,44 @@ pub(crate) fn draw_info_col(
         .as_ref()
         .map(|p| p.stages.len() as f32 * STAGE_H + 6.0)
         .unwrap_or(0.0);
+    // 기계 줄 밑에 서는 것(방 머리줄·pane 줄·닫힌 수·이쪽 거울)까지 그리는 순서
+    // 그대로 센다 — 기계 한 줄씩만 세면 상한이 모자라 맨 아래가 스크롤로 안 닿는다
+    // (2026-09-08 지적 「인포창 스크롤이 밑에까지 안보여」).
     let machines_h = if info.machines_col.machines.is_empty() {
         0.0
     } else if info.machines_collapsed {
         SEC_H + SEC_GAP
     } else {
-        SEC_H + info.machines_col.machines.len() as f32 * ROW_H + stages_h + SEC_GAP
+        let prog = info.machines_col.progress.as_ref();
+        let rows: f32 = info
+            .machines_col
+            .machines
+            .iter()
+            .map(|m| {
+                let mut h = ROW_H;
+                if prog.is_some_and(|p| p.machine == m.label) {
+                    h += stages_h;
+                }
+                if m.online {
+                    let mut last_room = "";
+                    for r in &m.remote {
+                        if !r.room.is_empty() && r.room != last_room {
+                            h += MACHINE_HEAD_H;
+                            last_room = &r.room;
+                        }
+                        h += ROW_H;
+                    }
+                    if m.closed > 0 {
+                        h += MACHINE_HEAD_H;
+                    }
+                    if !m.mirrored.is_empty() {
+                        h += MACHINE_HEAD_H + m.mirrored.len() as f32 * ROW_H;
+                    }
+                }
+                h
+            })
+            .sum();
+        SEC_H + rows + SEC_GAP
     };
     let content =
         HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + machines_h + closed_h + 14.0;
