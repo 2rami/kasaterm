@@ -463,7 +463,9 @@ class PaneStatusLine extends StatelessWidget {
               TextSpan(
                 children: [
                   for (final (i, p) in parts.indexed) ...[
-                    if (i > 0) const TextSpan(text: ' · '),
+                    // 앞 공백은 안 끊어지는 것 — 두 줄로 접힐 때 「· xhigh」처럼
+                    // 구분점이 줄머리에 오지 않고 앞 줄 꼬리에 남는다.
+                    if (i > 0) const TextSpan(text: '\u00A0· '),
                     TextSpan(
                       text: p,
                       style: pct != null && p == '$pct%' && pct >= 80
