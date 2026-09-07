@@ -3607,6 +3607,20 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    // 「다른 기계」 밑 pane 줄 우클릭 — 그 기계의 메뉴(펼치기·데려오기가 거기).
+                    if let Some(label) = self
+                        .info
+                        .machine_pane_rects
+                        .iter()
+                        .find(|(_, _, _, r)| inside(r))
+                        .map(|(l, _, _, _)| l.clone())
+                    {
+                        self.info.machine_menu = Some((cx, cy, label));
+                        self.info.machines_col.last_refresh = None;
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                        return;
+                    }
                     // 「다른 기계」 줄 — 왼쪽 클릭과 같은 메뉴다.
                     if let Some(label) = self
                         .info
@@ -4934,6 +4948,27 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             if self.info.refresh_rect.map(|r| inside(&r)).unwrap_or(false) {
                                 self.info.last_refresh = None;
+                                window.request_redraw();
+                                return;
+                            }
+                            // 「다른 기계」 밑 pane 줄 — 이쪽에 거울이 있으면 그리로, 없으면 연다.
+                            if let Some((_, act, local, _)) = self
+                                .info
+                                .machine_pane_rects
+                                .iter()
+                                .find(|(_, _, _, r)| inside(r))
+                                .cloned()
+                            {
+                                match (local, act) {
+                                    (Some(p), _) => {
+                                        self.focus_pane(&p);
+                                    }
+                                    (None, Some(btn)) => {
+                                        self.machines_col_act(btn);
+                                    }
+                                    (None, None) => {}
+                                }
+                                self.chrome_dirty = true;
                                 window.request_redraw();
                                 return;
                             }

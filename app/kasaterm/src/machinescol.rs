@@ -187,7 +187,9 @@ impl App {
                 remote_id: String::new(),
                 remote_cwd: String::new(),
                 name,
-                title: self.pane_row_label(id),
+                // 거울이면 저쪽이 하던 일 제목 — 로컬 라벨은 이쪽 폴더라 「무엇을 하나」를
+                // 못 말한다(Info 「다른 기계」 pane 목록이 이 값을 그대로 쓴다).
+                title: remote_str("title").unwrap_or_else(|| self.pane_row_label(id)),
                 status: self
                     .pane_activity
                     .get(id)

@@ -2181,6 +2181,7 @@ pub(crate) fn draw_info_col(
     info.closed_kill_rects.clear();
     info.kill_rects.clear();
     info.machine_rects.clear();
+    info.machine_pane_rects.clear();
     info.sec_rects.clear();
     info.dir_btn_rects.clear();
     info.refresh_rect = None;
@@ -2545,6 +2546,51 @@ pub(crate) fn draw_info_col(
                 if let Some(p) = prog.filter(|p| p.machine == m.label) {
                     y = draw_migrate_stages(g, p, x0, right, y, top, bottom);
                 }
+                // 그 기계의 pane 목록 — 메뉴 뒤에 접어 두지 않고 줄로 편다(2026-09-07
+                // 지시 「인포에 다른 기계 pane 목록 나오게」). 방이 바뀌는 자리에 흐린
+                // 머리줄, 줄마다 얼굴·이름·하던 일·기다림. 누르면 거울을 열고, 이쪽에
+                // 이미 거울(`mirrored`)이 있는 pane 은 그 줄을 눌러 거울로 간다.
+                if m.online {
+                    let mut last_room = String::new();
+                    for r in &m.remote {
+                        if !r.room.is_empty() && r.room != last_room {
+                            if y + MACHINE_HEAD_H > top && y < bottom {
+                                draw_machine_room_head(g, &r.room, x0, y);
+                            }
+                            last_room = r.room.clone();
+                            y += MACHINE_HEAD_H;
+                        }
+                        if y + ROW_H > top && y < bottom {
+                            draw_machine_pane_row(g, cursor, r, false, x, w, x0, right, y);
+                        }
+                        let act = (!r.remote_id.is_empty()).then(|| state::MachinesColBtn::Mirror {
+                            label: m.label.clone(),
+                            remote_id: r.remote_id.clone(),
+                            name: r.name.clone(),
+                            cwd: r.remote_cwd.clone(),
+                        });
+                        info.machine_pane_rects.push((m.label.clone(), act, None, (x, y, w, ROW_H)));
+                        y += ROW_H;
+                    }
+                    if !m.mirrored.is_empty() {
+                        if y + MACHINE_HEAD_H > top && y < bottom {
+                            draw_machine_room_head(g, "이쪽 거울", x0, y);
+                        }
+                        y += MACHINE_HEAD_H;
+                        for r in &m.mirrored {
+                            if y + ROW_H > top && y < bottom {
+                                draw_machine_pane_row(g, cursor, r, true, x, w, x0, right, y);
+                            }
+                            info.machine_pane_rects.push((
+                                m.label.clone(),
+                                None,
+                                Some(r.pane.clone()),
+                                (x, y, w, ROW_H),
+                            ));
+                            y += ROW_H;
+                        }
+                    }
+                }
             }
         }
         y += SEC_GAP;
@@ -2608,6 +2654,7 @@ pub(crate) fn draw_info_col(
     clip_rects!(info.closed_rects, 1);
     clip_rects!(info.closed_kill_rects, 1);
     clip_rects!(info.machine_rects, 1);
+    clip_rects!(info.machine_pane_rects, 3);
     info.refresh_rect = info.refresh_rect.and_then(|r| g.clip_hit(r));
     // `action_rects`·`tab_rects` 는 스크롤 밖(고정)이라 건드리지 않는다 — 여기서
     // 자르면 멀쩡한 버튼이 사라진다.
@@ -3891,6 +3938,106 @@ fn draw_pane_menu(
         if let Some(r) = r {
             info.pane_menu_rects.push((item, r));
         }
+    }
+}
+
+/// 「다른 기계」 밑 방 머리줄 높이 — 학생 줄(ROW_H)보다 낮은 흐린 한 줄.
+const MACHINE_HEAD_H: f32 = 16.0;
+
+/// 「다른 기계」 밑의 방 머리줄 — 그 기계 사이드바 규칙의 방 이름을 흐리게.
+fn draw_machine_room_head(g: &mut gpu::GpuRenderer, room: &str, x0: f32, y: f32) {
+    g.draw_text(
+        x0 + IND,
+        y + 2.0,
+        room,
+        gpu::DrawOpts {
+            font_size: 10.0,
+            color: theme::text_dim(),
+            bold: false,
+            italic: false,
+        },
+    );
+}
+
+/// 「다른 기계」 밑 pane 한 줄 — 얼굴·이름, 하던 일 제목(남는 폭에 맞춰 자름), 오른쪽에
+/// 기다림(경고색) 또는 「거울」(이쪽에 이미 있는 것) 표시. 누르면 거울을 연다/간다.
+#[allow(clippy::too_many_arguments)]
+fn draw_machine_pane_row(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    r: &state::MachinesColRow,
+    mirrored: bool,
+    x: f32,
+    w: f32,
+    x0: f32,
+    right: f32,
+    y: f32,
+) {
+    let hov = hit(cursor, &(x, y, w, ROW_H));
+    if hov {
+        g.hover_pointer = true;
+        g.rect(x, y, w, ROW_H, theme::surface_hover());
+    }
+    let face = 16.0_f32;
+    let fx = x0 + IND;
+    if !crate::sprites::draw_student_face(g, &r.name, fx, y + (ROW_H - face) / 2.0, face) {
+        g.queue_icon("terminal", fx + 2.0, y + (ROW_H - 12.0) / 2.0, 12.0, theme::text_dim());
+    }
+    let name = if r.name.is_empty() { "셸" } else { r.name.as_str() };
+    let nx = fx + face + 6.0;
+    g.draw_text(
+        nx,
+        y + 3.0,
+        name,
+        gpu::DrawOpts {
+            font_size: 11.0,
+            color: theme::text(),
+            bold: true,
+            italic: false,
+        },
+    );
+    let nw = g.measure_chrome_text(name, 11.0, true);
+    let waiting = r.status.contains("wait") || r.status.contains("attention");
+    let tail: Option<(&str, [u8; 4], bool)> = if waiting {
+        Some(("기다림", theme::attention(), true))
+    } else if mirrored {
+        Some(("거울", theme::accent(), false))
+    } else if hov {
+        Some(("거울 열기  ›", theme::text_mute(), false))
+    } else {
+        None
+    };
+    let mut rx = right;
+    if let Some((t, c, b)) = tail {
+        let tw = g.measure_chrome_text(t, 10.0, b);
+        rx -= tw;
+        g.draw_text(
+            rx,
+            y + 4.0,
+            t,
+            gpu::DrawOpts {
+                font_size: 10.0,
+                color: c,
+                bold: b,
+                italic: false,
+            },
+        );
+        rx -= 8.0;
+    }
+    let tx = nx + nw + 8.0;
+    if !r.title.is_empty() && rx - tx > 24.0 {
+        let t = fit_text(g, &r.title, rx - tx, 10.5, false);
+        g.draw_text(
+            tx,
+            y + 4.0,
+            &t,
+            gpu::DrawOpts {
+                font_size: 10.5,
+                color: theme::text_mute(),
+                bold: false,
+                italic: false,
+            },
+        );
     }
 }
 
