@@ -700,6 +700,7 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                 project: st.project,
               ),
               t,
+              wrapCols: cols,
             );
       final animated = live is StyledGrid && live.animated;
       WidgetsBinding.instance.addPostFrameCallback((_) {

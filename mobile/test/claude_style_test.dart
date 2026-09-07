@@ -218,6 +218,54 @@ void main() {
     expect(badge.fg, rgb(_accentRgb));
   });
 
+  test('codex 세션 배지·상태줄: 폰이 pane 보다 좁으면 폰 폭 기준', () {
+    final g = Grid()
+      ..apply({
+        'cols': 120,
+        'rows': 3,
+        'dirty': [
+          [
+            0,
+            [
+              // 서버는 뒤 빈칸을 잘라 보낸다 — 띠의 빈 첫 줄은 짧게 온다.
+              ['› Ask Codex to do anything', null, 236, 0],
+            ],
+          ],
+          [1, []],
+          [
+            2,
+            [
+              [
+                '  gpt-5.6-sol xhigh · main · kasaterm · Context 16% used',
+                null,
+                null,
+                0,
+              ],
+            ],
+          ],
+        ],
+        'cursor': [0, 2],
+      });
+    const codex = StudentStyle(
+      slug: 'yuuka',
+      accent: accent,
+      bg: bg,
+      codex: true,
+      session: 'codex',
+      branch: 'main',
+      project: 'kasaterm',
+    );
+    final v = restyleClaude(g, codex, 0, wrapCols: 42);
+    final band = text(v.lines[0]);
+    expect(band.substring(0, 42).trimRight(), endsWith('codex'));
+    expect(cols(v.lines[0]), 42, reason: '폰 폭까지만 띠를 채우고 그 뒤는 없다');
+    final status = text(v.lines[2]).trimRight();
+    expect(cols(v.lines[2]), lessThanOrEqualTo(42));
+    expect(status, contains('GPT-5.6 Sol 1M'));
+    expect(status, contains('16%'));
+    expect(status, isNot(contains('kasaterm')), reason: '좁으면 폴더부터 뺀다');
+  });
+
   test('codex 세션 배지: 입력이 그 자리까지 찼으면 안 그린다', () {
     final g = Grid()
       ..apply({

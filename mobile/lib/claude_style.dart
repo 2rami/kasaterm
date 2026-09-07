@@ -1101,13 +1101,20 @@ void _overlayCodexSessionLabel(
   Set<int> touched,
   String name,
   Color accent,
+  int width,
 ) {
   final bx = _promptBox(rows);
   if (bx is! _Filled) return;
   final row = rows[bx.start];
   name = name.trim();
-  if (name.isEmpty) return;
-  final w = _rowCols(row);
+  if (name.isEmpty || row.isEmpty) return;
+  // 배지는 **폰 화면의** 오른쪽 끝에 — pane 폭(171칸) 끝에 두면 되잇기가 그 행을
+  // 일곱 줄로 접고 들여쓰기 자리가 검게 뜬다(2026-09-08 지적 「입력창이 이상해」).
+  // 서버가 뒤 빈칸을 잘라 보내므로 모자란 칸은 띠 바탕으로 채운다.
+  final w = width;
+  while (_rowCols(row) < w) {
+    row.add(_Cell(0x20, const DefaultColor(), row.last.bg, 0));
+  }
   // 이름이 길다고 줄을 통째로 먹으면 배지가 아니라 문장이다 — 폭의 절반까지.
   final budget = w ~/ 2;
   if (budget < 6) return;
@@ -1154,8 +1161,16 @@ void _overlayCodexSessionLabel(
   touched.add(bx.start);
 }
 
-StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
+/// [wrapCols] 는 폰이 행을 접는 열 수 — codex 상태줄의 단계와 세션 배지 자리는 pane
+/// 폭이 아니라 이걸 본다.
+StyledGrid restyleClaude(
+  GridLines live,
+  StudentStyle st,
+  double t, {
+  int? wrapCols,
+}) {
   final rows = <List<_Cell>>[for (final r in live.lines) _cells(r)];
+  final width = wrapCols == null || wrapCols > live.cols ? live.cols : wrapCols;
   final touched = <int>{};
   final slots = <SpriteSlot>[];
   var animated = false;
@@ -1172,7 +1187,7 @@ StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
     _restyleCodexStatusLine(
       rows,
       touched,
-      cols: live.cols,
+      cols: width,
       branch: st.branch,
       project: st.project,
     );
@@ -1291,7 +1306,7 @@ StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
 
   _stylePromptBox(rows, touched, accent);
   if (st.codex && (st.session ?? '').isNotEmpty) {
-    _overlayCodexSessionLabel(rows, touched, st.session!, accent);
+    _overlayCodexSessionLabel(rows, touched, st.session!, accent, width);
   }
 
   _restyleUserPromptBands(rows, touched, st);
