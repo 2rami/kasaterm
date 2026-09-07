@@ -129,6 +129,20 @@ RowReflow _reflowCells(List<_Cell> cells, int cols, {int paneCols = 0}) {
   final shrunk = _shrinkLines(trimmed, width - cols);
   if (shrunk != null) return RowReflow([_runs(shrunk)], const [0]);
 
+  // 왼쪽 글과 오른쪽 글 사이를 빈칸으로 벌려 둔 줄(codex 바닥줄 「gpt-5.6-sol xhigh ·
+  // main · kasaterm ……… Goal achieved (5m)」)은 그 벌림이 pane 폭 기준이라 폰에선
+  // 오른쪽 글만 다음 줄 끝에 동떨어진다(2026-09-07 폰 코덱스 화면). 긴 빈칸 무리를
+  // 두 칸으로 줄여 글줄처럼 접는다 — 표처럼 칸이 여럿인 줄도 어차피 접히는 줄이다.
+  final gapless = _collapseGaps(trimmed);
+  if (gapless != null) {
+    var w = 0;
+    for (final c in gapless) {
+      w += c.width;
+    }
+    if (w <= cols) return RowReflow([_runs(gapless)], const [0]);
+    return _reflowCells(gapless, cols, paneCols: paneCols);
+  }
+
   // 이어지는 조각은 글머리·들여쓰기 아래로 — 폭의 절반까지만(들여쓰기가 너무 깊으면
   // 한 줄에 낱말 하나씩 남는다).
   final indent = _hangingIndent(trimmed).clamp(0, cols ~/ 2);
@@ -211,6 +225,38 @@ const _marks = {
   0x2514, // └
   0x251c, // ├
 };
+
+/// 글 사이의 긴 빈칸 무리(5칸 이상, 색 없음)를 두 칸으로. 앞쪽 들여쓰기는 그대로 둔다.
+/// 줄일 것이 없으면 null.
+List<_Cell>? _collapseGaps(List<_Cell> cells) {
+  var i = 0;
+  while (i < cells.length && cells[i].rune == 0x20) {
+    i++;
+  }
+  final out = <_Cell>[...cells.sublist(0, i)];
+  var changed = false;
+  while (i < cells.length) {
+    if (cells[i].blank) {
+      var j = i;
+      while (j < cells.length && cells[j].blank) {
+        j++;
+      }
+      final run = j - i;
+      if (run >= 5) {
+        out.add(cells[i]);
+        out.add(cells[i]);
+        changed = true;
+      } else {
+        out.addAll(cells.sublist(i, j));
+      }
+      i = j;
+    } else {
+      out.add(cells[i]);
+      i++;
+    }
+  }
+  return changed ? out : null;
+}
 
 /// 행의 들여쓰기 — 앞 빈칸에, 글머리(- • ⎿ ❯ 「1.」「2)」)가 있으면 그 뒤 빈칸까지.
 int _hangingIndent(List<_Cell> cells) {

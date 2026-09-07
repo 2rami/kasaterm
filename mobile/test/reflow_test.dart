@@ -19,6 +19,17 @@ void main() {
     expect(out.chunks.map(text), ['a  ']);
   });
 
+  test('왼쪽 글과 오른쪽 글 사이의 긴 빈칸은 두 칸으로 — codex 바닥줄이 글줄처럼 접힌다', () {
+    final out = reflowRow([r('gpt xhigh · main${' ' * 30}Goal achieved')], 40);
+    expect(out.chunks.map(text), ['gpt xhigh · main  Goal achieved']);
+  });
+
+  test('앞 들여쓰기와 짧은 빈칸은 그대로', () {
+    // 끝이 한 글자면 상자 줄(「│ 글 … │」) 규칙이 먼저 잡는다 — 두 글자로 글줄임을 분명히.
+    final out = reflowRow([r('    a    b${' ' * 40}cc')], 40);
+    expect(out.chunks.map(text), ['    a    b  cc']);
+  });
+
   test('긴 줄은 열 수로 접고 조각 시작 열을 남긴다', () {
     final out = reflowRow([r('a' * 95)], 40);
     expect(out.chunks.map((c) => text(c).length), [40, 40, 15]);

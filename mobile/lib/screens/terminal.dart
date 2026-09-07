@@ -297,7 +297,14 @@ class _TerminalScreenState extends State<TerminalScreen>
                   children: [
                     // 데스크톱 pane 의 학생색 리본 — 어느 학생 화면인지 색으로 안다.
                     Container(width: 3, color: accent),
-                    Expanded(child: _view(s)),
+                    // 좌우 숨 — 0열이 리본에 붙으면 codex 의 `›` 처럼 왼쪽에 잉크가 있는
+                    // 글자가 잘려 보이고, 접힌 줄 끝이 화면 끝에 닿는다.
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        child: _view(s),
+                      ),
+                    ),
                   ],
                 ),
               ),
