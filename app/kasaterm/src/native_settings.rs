@@ -2068,6 +2068,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             &mut y,
             content_w,
         ),
+        SettingsCat::Pet => paint_pet(g, snapshot, &mut hits, content_x, &mut y, content_w),
         SettingsCat::Feedback => paint_feedback(
             g,
             snapshot,
@@ -3280,6 +3281,102 @@ fn machines_view() -> Vec<MachineRow> {
 
 /// 기계 칸. 계정 칸과 같은 모양이다 — 목록 머리에 추가 단추, 줄마다 고치기와
 /// 지우기. 손으로 json 을 고치던 것을 여기로 올렸다(2026-09-07 지시).
+/// 펫 칸. 켜고 끄기 · 누가 나올까 · 말풍선 글자 크기 셋뿐이다.
+///
+/// 값이 앱 설정이 아니라 **펫 폴더의 파일**로 오간다(`current`·`text_pt`). 펫은 별개
+/// 프로세스라 앱의 설정 저장소를 못 읽고, 파일이면 앱이 꺼져 있어도 그대로 통한다.
+fn paint_pet(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    let on = crate::chrome::pet_pid().is_some();
+    let chars = crate::chrome::pet_characters();
+    let current = crate::chrome::pet_current_character();
+    let pt = crate::chrome::pet_text_pt();
+
+    toggle_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "바탕화면에 띄우기",
+        on,
+        SettingsAction::TogglePet,
+    );
+    draw_text(
+        g,
+        x + 12.0,
+        *y - 4.0,
+        "kasaterm 을 내려도 남습니다. 끌어서 옮기고, 휠로 크기를 바꿉니다",
+        11.0,
+        theme::text_dim(),
+        false,
+    );
+    *y += 24.0;
+
+    draw_text(g, x, *y, "캐릭터", 12.5, theme::text(), true);
+    *y += 24.0;
+    if chars.is_empty() {
+        draw_text(
+            g,
+            x,
+            *y,
+            "받아 둔 캐릭터가 없습니다 — 펫을 처음 켜면 받아 옵니다",
+            11.5,
+            theme::text_dim(),
+            false,
+        );
+        *y += 28.0;
+    } else {
+        let cells: Vec<(String, bool, SettingsAction)> = chars
+            .iter()
+            .map(|n| {
+                (
+                    n.clone(),
+                    Some(n.as_str()) == current.as_deref(),
+                    SettingsAction::PetCharacter(n.clone()),
+                )
+            })
+            .collect();
+        chips_owned(g, s, hits, x, y, w, cells);
+        *y += 8.0;
+    }
+
+    draw_text(g, x, *y, "말풍선 글자 크기", 12.5, theme::text(), true);
+    *y += 26.0;
+    // 숫자를 직접 치게 하지 않는다 — 이건 눈으로 맞추는 값이라, 몇 pt 인지보다
+    // 「지금보다 크게」가 알고 싶은 전부다.
+    let steps: [(&str, u32); 5] = [
+        ("아주 작게", 10),
+        ("작게", 11),
+        ("보통", 13),
+        ("크게", 17),
+        ("아주 크게", 22),
+    ];
+    let cells: Vec<(&str, bool, SettingsAction)> = steps
+        .iter()
+        .map(|(label, v)| (*label, *v == pt, SettingsAction::PetTextPt(*v)))
+        .collect();
+    segmented(g, s, hits, x, *y, w, &cells);
+    *y += 44.0;
+    draw_text(
+        g,
+        x,
+        *y,
+        "펫을 두 번 누르면 다음 캐릭터, 오른쪽 단추로 끕니다",
+        11.0,
+        theme::text_dim(),
+        false,
+    );
+    *y += 24.0;
+}
+
 fn paint_machines(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -4873,6 +4970,11 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
             "커서와 색, 글자 크기를 한 화면에서 맞춥니다",
         ),
         SettingsCat::Shell => ("셸", "terminal", "새 pane이 어떤 셸로 시작할지 정합니다"),
+        SettingsCat::Pet => (
+            "펫",
+            "sparkles",
+            "바탕화면에 서서 학생들 상황을 알려 주는 캐릭터입니다",
+        ),
         SettingsCat::Claude => (
             "Agent",
             "claude",
@@ -5046,7 +5148,9 @@ fn chips_owned(
         }
         let rect = (cx, cy, cw, 32.0);
         choice_card(g, s, hits, rect, selected, Target::Setting(action));
-        let shown = fit(g, &label, rect.2 - 24.0, 11.5, selected);
+        // 반 픽셀을 더 준다. 칸 너비를 같은 함수로 재 놓고 그 값으로 다시 자르는데,
+        // 두 번의 재기가 소수점에서 갈리면 딱 맞는 이름이 「Ma…」로 잘린다(실측).
+        let shown = fit(g, &label, rect.2 - 23.5, 11.5, selected);
         draw_text(
             g,
             rect.0 + 12.0,

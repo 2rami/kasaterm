@@ -678,6 +678,19 @@ impl App {
                     self.resize_backend(cols, rows);
                 }
             }
+            SettingsAction::TogglePet => {
+                let on = crate::chrome::toggle_pet();
+                self.set_toast(if on {
+                    "펫을 띄웠습니다".into()
+                } else {
+                    "펫을 껐습니다".to_string()
+                });
+            }
+            SettingsAction::PetCharacter(name) => {
+                crate::chrome::set_pet_character(&name);
+                self.set_toast(format!("펫 캐릭터: {name}"));
+            }
+            SettingsAction::PetTextPt(pt) => crate::chrome::set_pet_text_pt(pt),
             SettingsAction::ToggleFooter => {
                 self.set_footer_default = !self.set_footer_default;
                 self.settings_save();

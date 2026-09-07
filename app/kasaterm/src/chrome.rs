@@ -3798,6 +3798,61 @@ fn notify_osascript(title: &str, body: &str) {
         .spawn();
 }
 
+/// 받아 둔 캐릭터 이름들(폴더 이름). 설정 화면의 목록이 이걸 그린다.
+pub(crate) fn pet_characters() -> Vec<String> {
+    let Some(d) = pet_model_dir() else { return Vec::new() };
+    let mut v: Vec<String> = std::fs::read_dir(&d)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| model3_in(p).is_some())
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// 지금 고른 캐릭터. 아직 안 골랐으면 첫 칸이 뜨므로 그것을 답한다 — 화면에 아무것도
+/// 안 골라진 채로 두면 「어느 게 나오는 건지」를 알 길이 없다.
+pub(crate) fn pet_current_character() -> Option<String> {
+    let d = pet_model_dir()?;
+    let named = std::fs::read_to_string(d.join("current"))
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|n| !n.is_empty() && d.join(n).is_dir());
+    named.or_else(|| pet_characters().into_iter().next())
+}
+
+/// 캐릭터를 고른다. 켜져 있으면 껐다 켜야 바뀐다 — 펫은 뜰 때 모델을 읽는다.
+pub(crate) fn set_pet_character(name: &str) {
+    let Some(d) = pet_model_dir() else { return };
+    if std::fs::write(d.join("current"), name).is_err() {
+        return;
+    }
+    if pet_pid().is_some() {
+        toggle_pet();
+        toggle_pet();
+    }
+}
+
+/// 말풍선 글자 크기(pt).
+pub(crate) fn pet_text_pt() -> u32 {
+    pet_model_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("text_pt")).ok())
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .map(|v| v.clamp(8, 40))
+        .unwrap_or(13)
+}
+
+/// 글자 크기를 적어 둔다. 펫이 1초 안에 읽어 다시 그리므로 껐다 켤 일이 없다.
+pub(crate) fn set_pet_text_pt(pt: u32) {
+    if let Some(d) = pet_model_dir() {
+        let _ = std::fs::write(d.join("text_pt"), pt.clamp(8, 40).to_string());
+    }
+}
+
 /// 바탕화면 펫이 지금 떠 있나. pid 파일 하나로 판정한다 — 앱을 껐다 켜도 펫은 살아
 /// 있으므로(그게 이 기능의 전부다) 상태를 앱 메모리에 두면 다음 실행이 못 알아본다.
 pub(crate) fn pet_pid() -> Option<u32> {

@@ -3172,6 +3172,7 @@ impl App {
             // 옛 이름 그대로지만 이제 진짜 자기 칸이 있다(2026-08-26 분리) —
             // 이 env 로 「캐릭터 목록」을 보던 밖의 스크립트는 그대로 맞는 화면에 온다.
             "students" => SettingsCat::Students,
+            "pet" => SettingsCat::Pet,
             "feedback" => SettingsCat::Feedback,
             _ => SettingsCat::General,
         };

@@ -3705,6 +3705,8 @@ enum UserEvent {
     /// Sender 로 새 pane id 를 돌려준다(SocketSplit 패턴) — 디스패처가 스폰 직후
     /// 그 pane 에 브리프를 쏘려면 주소가 필요하다. 빈 문자열 = pane 미생성.
     SocketSpawnStudent(String, std::sync::mpsc::Sender<String>),
+    /// 다른 기계의 `to` 가 비출 맨 셸 pane — (cwd, 회신=새 pane id).
+    SocketSpawnShell(Option<String>, std::sync::mpsc::Sender<String>),
     /// `POST /swap-character?surface=<id>&character=<name>` 위임 — (pane, 캐릭터).
     /// 그 pane PTY 를 새 persona 로 respawn(대화 리셋, persona 는 셸 spawn 시 고정).
     SocketSwapCharacter(String, String),
@@ -4197,6 +4199,9 @@ pub(crate) enum SettingsCat {
     /// 고칠까」는 다른 일인데 한 화면에 쌓여 있어, 캐릭터를 고치러 온 사람이
     /// 테마 격자를 지나 한참 내려가야 했다.
     Students,
+    /// 바탕화면 펫 — 창 밖에 서 있는 Live2D 캐릭터. 앱과 프로세스가 달라 kasaterm 을
+    /// 내려도 남으므로, 켜고 끄는 자리와 「누가 나올까」를 여기 둔다(2026-09-07 지시).
+    Pet,
     /// 앱에 말을 거는 쪽 — 불편한 점을 적어 두는 곳. 다른 카테고리와 달리 설정을
     /// 바꾸지 않으므로 nav 맨 아래에 따로 떨어뜨린다.
     Feedback,
@@ -4206,7 +4211,7 @@ impl SettingsCat {
     /// 웹과의 칸 이름 대조에만 쓴다 — 값을 새로 만들 때 여기 빠뜨리면 그 칸은
     /// 대조에서 통째로 빠지므로, 변형을 더하면 이 배열도 같이 늘려라.
     #[allow(dead_code)]
-    pub(crate) const ALL: [SettingsCat; 9] = [
+    pub(crate) const ALL: [SettingsCat; 10] = [
         Self::General,
         Self::Appearance,
         Self::Shell,
@@ -4215,6 +4220,7 @@ impl SettingsCat {
         Self::Machines,
         Self::Theme,
         Self::Students,
+        Self::Pet,
         Self::Feedback,
     ];
 
@@ -4232,6 +4238,7 @@ impl SettingsCat {
             Self::Machines => "machines",
             Self::Theme => "theme",
             Self::Students => "students",
+            Self::Pet => "pet",
             Self::Feedback => "feedback",
         }
     }
@@ -4312,6 +4319,12 @@ pub(crate) enum SettingsAction {
     /// 최소 대비 프리셋 이름 (`theme::CONTRAST_PRESETS`).
     MinContrast(&'static str),
     ToggleFileTree,
+    /// 바탕화면 펫을 켜고 끈다.
+    TogglePet,
+    /// 펫으로 띄울 캐릭터 폴더 이름(`~/.config/kasaterm/pet/<이름>`).
+    PetCharacter(String),
+    /// 펫 말풍선 글자 크기(pt).
+    PetTextPt(u32),
     ToggleFooter,
     /// Editor autosave quiet period in ms; 0 = off.
     AutosaveDelay(u64),
@@ -5264,6 +5277,12 @@ struct App {
     /// 다음 spawn 할 pane 에 강제할 캐릭터(new_room_with_character 가 세팅). None 이면
     /// 빈 슬롯 순환 배정(미도리→모모이→…). 배정 결과는 KASATERM_CHARACTER env + /tmp 마커.
     pending_character: Option<String>,
+    /// 다음 split 이 셸을 띄울 폴더를 강제한다(`spawn_shell_pane` 이 세웠다 걷는다) —
+    /// 다른 기계의 `to` 가 「이 폴더에서」를 실어 오는 유일한 길이다.
+    pending_spawn_cwd: Option<String>,
+    /// 닫을 때 **저쪽 pane 은 남길** 원격 pane(메뉴 「닫기 — 저쪽 pane 은 남김」).
+    /// `to` 로 세운 자리는 기본이 함께 끄기라, 예외만 여기 적는다.
+    remote_keep: std::collections::HashSet<String>,
     /// pane id → claude --session-id(백엔드가 spawn 시 생성). shim 이 env 로 받아 고정,
     /// transcript jsonl 파일명 안정화 → resume 시 같은 대화 복원.
     pane_session_id: HashMap<String, String>,
@@ -5820,6 +5839,8 @@ impl App {
             pending_room: None,
             next_room_seq: 1,
             pending_character: None,
+            pending_spawn_cwd: None,
+            remote_keep: std::collections::HashSet::new(),
             pane_session_id: HashMap::new(),
             pane_claude_sid: HashMap::new(),
             pane_account_stale: HashMap::new(),
@@ -7529,7 +7550,7 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
     }
     // `to` — 기계 사이를 cd 처럼 오간다(2026-09-07 지시 「cd·ls 처럼 하고 싶은데」,
     // 동사는 2026-09-07 지시로 `to`). `to` = ls(명부, 여기가 어디인지 *), `to <기계>`
-    // = cd(이 pane 을 그 기계의 셸 거울로 — 레포를 안 건드린다), `to <기계> <명령...>`
+    // = cd(그 기계 창에 셸 pane 을 세우고 이 pane 이 비춘다 — 레포를 안 건드린다), `to <기계> <명령...>`
     // 은 그 셸에서 그 명령을(to nacho codex), `to ..` 는 이 기계로 돌아오기. 옛
     // `mini`·`book` 두 낱말이 이 하나로 합쳐졌다.
     //
@@ -7553,7 +7574,7 @@ case \"$1\" in\n\
   ..) printf '\\033]777;notify;{};\\033\\\\'; exit 0 ;;\n\
   -h|--help)\n\
     echo 'to                    기계 목록 (여기가 어디인지 *)'\n\
-    echo 'to <기계>             이 pane 을 그 기계의 셸로 (거울 — 레포는 안 건드림)'\n\
+    echo 'to <기계>             그 기계 창에 셸 pane 을 세우고 이 pane 이 비춘다 (레포는 안 건드림)'\n\
     echo 'to <기계> <명령...>   그 셸에서 그 명령을 (to nacho codex)'\n\
     echo 'to ..                 이 기계로 돌아오기'\n\
     exit 0 ;;\n\
