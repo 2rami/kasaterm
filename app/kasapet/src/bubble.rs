@@ -11,7 +11,6 @@ use swash::scale::{image::Content, Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Format;
 use swash::FontRef;
 
-const FONT_PATH: &str = "/System/Library/Fonts/AppleSDGothicNeo.ttc";
 const FONT_PT: f32 = 13.0;
 const LINE_SPACING: f32 = 1.4;
 /// 레티나 — 래스터는 이 배율, 반환은 논리.
@@ -21,9 +20,31 @@ const SCALE: f32 = 2.0;
 /// 띄우므로, 이게 없으면 밝은 바탕화면 위에서 흰 글자가 통째로 사라진다.
 const HALO: i32 = 3;
 
+/// 시스템 한글 폰트 — 담아 온 메이플스토리체를 못 찾았을 때만.
+const FALLBACK_FONT: &str = "/System/Library/Fonts/AppleSDGothicNeo.ttc";
+
+/// 담아 온 서체. 넥슨이 무료로 배포하는 메이플스토리체이고, 소프트웨어에 함께 담아도
+/// 되는 조건이라 레포에 넣었다(assets/fonts/LICENSE-Maplestory.txt).
+const BUNDLED_FONT: &str = "Maplestory Bold.ttf";
+
 fn font_data() -> &'static [u8] {
     static FONT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    FONT.get_or_init(|| std::fs::read(FONT_PATH).unwrap_or_default())
+    FONT.get_or_init(|| {
+        bundled_font_path()
+            .and_then(|p| std::fs::read(p).ok())
+            .unwrap_or_else(|| std::fs::read(FALLBACK_FONT).unwrap_or_default())
+    })
+}
+
+/// 앱 번들 Resources 아니면 개발 트리의 assets/fonts.
+fn bundled_font_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let beside = exe.parent().map(|d| d.join(BUNDLED_FONT));
+    let dev = exe
+        .ancestors()
+        .find(|a| a.join("assets/fonts").join(BUNDLED_FONT).is_file())
+        .map(|a| a.join("assets/fonts").join(BUNDLED_FONT));
+    beside.into_iter().chain(dev).find(|p| p.is_file())
 }
 
 struct Glyph {

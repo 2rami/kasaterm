@@ -115,6 +115,9 @@ cp "$BINDIR/kasapet" "$APP/Contents/Resources/kasapet"
 # 모델은 번들에 안 담는다 — Live2D 공식 캐릭터는 재배포가 금지다. 처음 켤 때 이 스크립트가
 # 쓰는 사람 기계로 권리자에게서 직접 받아 온다.
 cp scripts/fetch-pet-model.sh "$APP/Contents/Resources/fetch-pet-model.sh"
+# 펫 말풍선 글씨 — 넥슨이 무료로 배포하는 메이플스토리체(kasapet 이 자기 옆에서 찾는다).
+cp "assets/fonts/Maplestory Bold.ttf" "$APP/Contents/Resources/"
+cp assets/fonts/LICENSE-Maplestory.txt "$APP/Contents/Resources/"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # 협업 훅 정본 — claude PATH shim 이 --settings 로 가리키는 스크립트들
 # (locate_collab_hooks_dir 의 번들 경로). install-hooks.sh 배포 불필요.
