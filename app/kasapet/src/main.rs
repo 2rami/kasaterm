@@ -762,8 +762,20 @@ impl App {
                     // 몸 밖이면 창이 마우스를 통째로 흘려보낸다 — 뒤에 있던 창을 누를 수
                     // 있어야 바탕화면에 얹힌 것이지, 네모난 유리판이 덮인 게 아니다.
                     set_click_through(w, !over);
-                    w.set_cursor(winit::window::CursorIcon::Pointer);
                 }
+                // 벗어나는 순간에만 화살표로 되돌린다. 계속 되돌리면 남의 창 위에서
+                // 그쪽이 띄운 커서(글자 위의 I 빔 같은 것)를 우리가 계속 지운다.
+                if !over {
+                    set_hand_cursor(false);
+                }
+            }
+            // 커서는 **매번 다시 지운다.** 창이 키가 아니면(포커스를 안 받는 창이라
+            // 늘 그렇다) macOS 는 창의 커서 규칙을 안 돌려서, `set_cursor` 는 한 번
+            // 눌러 창이 활성이 된 뒤에야 먹었다(2026-09-07 지적 「클릭을 한번해야
+            // 커서바뀌고」). 시스템이 움직일 때마다 화살표로 되돌리므로 이쪽도 매번
+            // 덮어써야 이긴다.
+            if self.on_body {
+                set_hand_cursor(true);
             }
         }
         if self.frames == self.shot_at {
@@ -883,6 +895,26 @@ fn expression_files(model3: &std::path::Path) -> Vec<std::path::PathBuf> {
         })
         .unwrap_or_default()
 }
+
+/// 손 모양 커서를 씌우거나 화살표로 되돌린다.
+///
+/// 창에 매달지 않고 직접 지운다 — 포커스를 안 받는 창이라 macOS 가 그 창의 커서
+/// 규칙을 안 돌린다. 몸 밖일 때 화살표로 되돌리는 것도 우리 몫이다: 마지막으로
+/// 지운 것이 그대로 남는다.
+#[cfg(target_os = "macos")]
+fn set_hand_cursor(hand: bool) {
+    use objc2_app_kit::NSCursor;
+    unsafe {
+        if hand {
+            NSCursor::pointingHandCursor().set();
+        } else {
+            NSCursor::arrowCursor().set();
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_hand_cursor(_hand: bool) {}
 
 /// 창이 마우스를 흘려보낼지 정한다. 통째로 흘리면 그 아래 창이 눌린다.
 #[cfg(target_os = "macos")]
