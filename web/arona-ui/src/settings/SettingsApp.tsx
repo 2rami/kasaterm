@@ -38,6 +38,7 @@ const PORT = location.port || '8765';
 const CATS = [
   { key: 'general', Icon: SlidersHorizontal, ready: true },
   { key: 'appearance', Icon: Sparkles, ready: true },
+  { key: 'statusbar', Icon: SlidersHorizontal, ready: false },
   { key: 'shell', Icon: Terminal, ready: true },
   { key: 'claude', Icon: Asterisk, ready: true },
   { key: 'accounts', Icon: KeyRound, ready: false },

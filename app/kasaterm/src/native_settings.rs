@@ -88,6 +88,7 @@ pub(crate) struct SettingsCache {
     themegen_provider: String,
     themegen_key_masked: String,
     themegen_refs: Arc<std::collections::HashSet<String>>,
+    cursor_color_setting: String,
 }
 
 impl std::fmt::Debug for SettingsCache {
@@ -243,6 +244,12 @@ impl SettingsCache {
             &saved,
             (!self.custom_active.is_empty()).then_some(self.custom_active.as_str()),
         ));
+        self.cursor_color_setting = saved
+            .get("terminal_cursor_color")
+            .and_then(|value| value.as_str())
+            .filter(|value| theme::parse_hex(value).is_some())
+            .map(|value| value.to_ascii_lowercase())
+            .unwrap_or_default();
     }
 
     pub(crate) fn refresh_palette(&mut self) {
@@ -524,7 +531,14 @@ pub(crate) struct Snapshot {
     pub(crate) tabs_on_top: bool,
     pub(crate) cursor_shape: cursor::CursorShape,
     pub(crate) cursor_thickness: f32,
+    pub(crate) cursor_color: [u8; 4],
+    pub(crate) cursor_color_setting: String,
     pub(crate) mouse_cursor: String,
+    pub(crate) statusbar_order: Vec<String>,
+    pub(crate) statusbar_hidden: std::collections::HashSet<String>,
+    pub(crate) statusbar_colors: std::collections::HashMap<String, String>,
+    pub(crate) statusbar_usage_fields: std::collections::HashMap<String, Vec<String>>,
+    pub(crate) statusbar_separators: bool,
     pub(crate) claude_persona: bool,
     pub(crate) shim_inject: bool,
     pub(crate) claude_model: String,
@@ -716,7 +730,14 @@ impl App {
             tabs_on_top: self.tabs_on_top,
             cursor_shape: self.cursor_shape,
             cursor_thickness: self.cursor_thickness,
+            cursor_color: theme::cursor(),
+            cursor_color_setting: cache.cursor_color_setting.clone(),
             mouse_cursor: self.mouse_cursor.clone(),
+            statusbar_order: self.set_statusbar.order.clone(),
+            statusbar_hidden: self.set_statusbar.hidden.clone(),
+            statusbar_colors: self.set_statusbar.colors.clone(),
+            statusbar_usage_fields: self.set_statusbar.usage_fields.clone(),
+            statusbar_separators: self.set_statusbar.separators,
             claude_persona: self.set_claude_persona,
             shim_inject: self.set_shim_inject,
             claude_model: self.set_claude_model.clone(),
@@ -1718,6 +1739,7 @@ fn action_refreshes_cache(action: &SettingsAction) -> bool {
         SettingsAction::UiLanguage(_)
             | SettingsAction::ThemeMode(_)
             | SettingsAction::ThemeSystemSlot(_, _)
+            | SettingsAction::CursorColor(_)
             | SettingsAction::StartCustomTheme
             | SettingsAction::ResetCustomTheme
             | SettingsAction::DeleteCustomTheme(_)
@@ -2014,6 +2036,14 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                 content_w,
             )
         }
+        SettingsCat::Statusbar => paint_statusbar(
+            g,
+            snapshot,
+            &mut hits,
+            content_x,
+            &mut y,
+            content_w,
+        ),
         SettingsCat::Shell => paint_shell(
             g,
             snapshot,
@@ -2400,67 +2430,57 @@ fn paint_appearance(
         g,
         x,
         *y,
-        "커서 작업대",
-        "여덟 모양을 같은 전각 셀에서 비교합니다",
+        "터미널 커서",
+        "자주 쓰는 모양과 꾸미기 모양을 나눠 골라요",
     );
     *y += 48.0;
-    let cols = if w >= 620.0 { 4 } else { 2 };
-    let gap = 10.0;
-    let card_w = (w - gap * (cols - 1) as f32) / cols as f32;
-    let card_h = 78.0;
-    let labels = [
-        "블록",
-        "빔",
-        "밑줄",
-        "프레임",
-        "괄호",
-        "쌍선",
-        "윗줄",
-        "모서리",
+    draw_text(g, x + 2.0, *y, "기본", 11.5, theme::text_dim(), true);
+    *y += 24.0;
+    cursor_shape_grid(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        &[
+            (cursor::CursorShape::Block, "블록"),
+            (cursor::CursorShape::Bar, "빔"),
+            (cursor::CursorShape::Underline, "밑줄"),
+        ],
+    );
+    let everyday = [
+        cursor::CursorShape::Block,
+        cursor::CursorShape::Bar,
+        cursor::CursorShape::Underline,
     ];
-    for (i, shape) in cursor::CursorShape::ALL.into_iter().enumerate() {
-        let col = i % cols;
-        let row = i / cols;
-        let rect = (
-            x + col as f32 * (card_w + gap),
-            *y + row as f32 * (card_h + gap),
-            card_w,
-            card_h,
+    if !everyday.contains(&s.cursor_shape) {
+        *y += 8.0;
+        draw_text(
+            g,
+            x + 2.0,
+            *y,
+            "고급 · 기존 설정",
+            11.5,
+            theme::text_dim(),
+            true,
         );
-        choice_card(
+        *y += 24.0;
+        cursor_shape_grid(
             g,
             s,
             hits,
-            rect,
-            s.cursor_shape == shape,
-            Target::Setting(SettingsAction::CursorShape(shape)),
-        );
-        draw_text(
-            g,
-            rect.0 + 12.0,
-            rect.1 + 11.0,
-            labels[i],
-            12.0,
-            theme::text_dim(),
-            s.cursor_shape == shape,
-        );
-        cursor_sample(
-            g,
-            shape,
-            rect.0 + rect.2 - 50.0,
-            rect.1 + 23.0,
-            s.cursor_thickness,
-            true,
+            x,
+            y,
+            w,
+            &[(s.cursor_shape, cursor_shape_label(s.cursor_shape))],
         );
     }
-    let rows = (8 + cols - 1) / cols;
-    *y += rows as f32 * (card_h + gap);
-    let selected_col = cursor::CursorShape::ALL
-        .iter()
-        .position(|shape| *shape == s.cursor_shape)
-        .unwrap_or(0)
-        % cols;
-    let preview = (x + selected_col as f32 * (card_w + gap), *y, card_w, 64.0);
+    *y += 8.0;
+    // 고른 열 밑에만 미리보기를 두면 선택을 바꿀 때 카드가 좌우로 뛰고, 좁은
+    // 화면에서는 다음 섹션과 한 묶음처럼 붙는다. 한 줄 전체를 고정해 결과와
+    // 선택지를 시각적으로 갈라 둔다.
+    let preview = (x, *y, w, 68.0);
     round_rect(
         g,
         preview.0,
@@ -2470,6 +2490,7 @@ fn paint_appearance(
         theme::radius_md(),
         theme::surface(),
     );
+    stroke_rect(g, preview, theme::border());
     draw_text(
         g,
         preview.0 + 12.0,
@@ -2479,17 +2500,39 @@ fn paint_appearance(
         theme::text_dim(),
         false,
     );
+    let selected = cursor_shape_label(s.cursor_shape);
+    draw_text(
+        g,
+        preview.0 + 12.0,
+        preview.1 + 35.0,
+        selected,
+        12.0,
+        theme::text(),
+        true,
+    );
     if s.caret_on {
         cursor_sample(
             g,
             s.cursor_shape,
-            preview.0 + preview.2 - 52.0,
-            preview.1 + 19.0,
+            preview.0 + preview.2 - 55.0,
+            preview.1 + 18.0,
             s.cursor_thickness,
             false,
         );
     }
-    *y += 80.0;
+    *y += 84.0;
+    row_label(g, x, y, "커서 색");
+    cursor_color_choices(g, s, hits, x, y, w);
+    draw_text(
+        g,
+        x + 2.0,
+        *y - 5.0,
+        "커서에만 적용되고 테마 강조색은 그대로예요",
+        10.5,
+        theme::text_mute(),
+        false,
+    );
+    *y += 18.0;
     let thickness: Vec<(&str, bool, SettingsAction)> = [1u8, 2, 3, 4, 6]
         .iter()
         .map(|px| {
@@ -2507,9 +2550,23 @@ fn paint_appearance(
             )
         })
         .collect();
-    row_label(g, x, y, "커서 굵기");
-    segmented(g, s, hits, x, *y, w, &thickness);
-    *y += 48.0;
+    if s.cursor_shape == cursor::CursorShape::Block {
+        draw_text(
+            g,
+            x + 2.0,
+            *y + 10.0,
+            "블록은 셀 전체를 채워 굵기를 쓰지 않아요",
+            11.5,
+            theme::text_mute(),
+            false,
+        );
+        *y += 42.0;
+    } else {
+        row_label(g, x, y, "선 굵기");
+        segmented(g, s, hits, x, *y, w, &thickness);
+        *y += 42.0;
+    }
+    *y += 12.0;
     section_title(
         g,
         x,
@@ -2548,6 +2605,7 @@ fn paint_appearance(
         "현재 테마 토큰을 모든 네이티브 화면이 함께 씁니다",
     );
     *y += 48.0;
+    let gap = 10.0;
     let grid_cols = if w >= 600.0 { 3 } else { 2 };
     let pw = (w - gap * (grid_cols - 1) as f32) / grid_cols as f32;
     let ph = 92.0;
@@ -2702,6 +2760,7 @@ fn paint_appearance(
         *y += 72.0;
         paint_palette_editor(g, s, hits, caret, x, y, w);
     }
+    row_label(g, x, y, "강조색");
     let accents: Vec<(String, bool, SettingsAction)> = theme::ACCENT_PRESETS
         .iter()
         .map(|(name, _)| {
@@ -2713,12 +2772,14 @@ fn paint_appearance(
         })
         .collect();
     chips_owned(g, s, hits, x, y, w, accents);
+    row_label(g, x, y, "모서리 형태");
     let shapes: Vec<(&str, bool, SettingsAction)> = theme::SHAPE_PRESETS
         .iter()
         .map(|(key, label, _)| (*label, s.shape == *key, SettingsAction::Shape(key)))
         .collect();
     segmented(g, s, hits, x, *y, w, &shapes);
     *y += 46.0;
+    row_label(g, x, y, "최소 대비");
     let contrast: Vec<(&str, bool, SettingsAction)> = theme::CONTRAST_PRESETS
         .iter()
         .map(|(label, value)| {
@@ -2786,6 +2847,414 @@ fn paint_appearance(
         false,
     );
     *y += 46.0;
+}
+
+fn paint_statusbar(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    section_title(
+        g,
+        x,
+        *y,
+        "실시간 미리보기 예시",
+        "고른 순서와 색, 구분선을 창 맨 아래와 같은 흐름으로 보여 줍니다",
+    );
+    *y += 48.0;
+    statusbar_preview(g, s, x, *y, w);
+    *y += 80.0;
+
+    section_title(
+        g,
+        x,
+        *y,
+        "표시 항목",
+        "체크는 보이기, 화살표는 순서, 색 칸은 항목의 강조색입니다",
+    );
+    *y += 48.0;
+    for (index, id) in s.statusbar_order.iter().enumerate() {
+        statusbar_widget_row(g, s, hits, x, y, w, id, index);
+    }
+
+    *y += 12.0;
+    section_title(
+        g,
+        x,
+        *y,
+        "사용량에 넣을 정보",
+        "서비스 이름은 유지하고 필요한 수치만 각각 고릅니다",
+    );
+    *y += 48.0;
+    for (provider, title) in [("claude", "Claude"), ("codex", "Codex")] {
+        row_label(g, x, y, title);
+        let selected = s.statusbar_usage_fields.get(provider);
+        let fields = [
+            ("account", "계정 별명"),
+            ("email", "이메일"),
+            ("session", "5시간"),
+            ("weekly", "7일"),
+            ("model", "모델별 한도"),
+        ];
+        let choices = fields
+            .into_iter()
+            .map(|(field, label)| {
+                (
+                    label.to_string(),
+                    selected.is_some_and(|values| values.iter().any(|value| value == field)),
+                    SettingsAction::ToggleStatusbarUsageField(
+                        provider.to_string(),
+                        field.to_string(),
+                    ),
+                )
+            })
+            .collect();
+        chips_owned(g, s, hits, x, y, w, choices);
+        *y += 4.0;
+    }
+
+    toggle_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "묶음 사이 구분선",
+        s.statusbar_separators,
+        SettingsAction::ToggleStatusbarSeparators,
+    );
+    draw_text(
+        g,
+        x + 12.0,
+        *y - 9.0,
+        "계정 · 작업 정보 · 기기 상태가 바뀌는 자리만 얇게 나눕니다",
+        10.5,
+        theme::text_mute(),
+        false,
+    );
+    *y += 16.0;
+    button(
+        g,
+        s,
+        hits,
+        (x, *y, 132.0, 34.0),
+        "기본값으로",
+        Target::Setting(SettingsAction::ResetStatusbar),
+        false,
+    );
+    *y += 48.0;
+}
+
+fn statusbar_widget_label(id: &str) -> &'static str {
+    match id {
+        "claude" => "Claude 사용량",
+        "codex" => "Codex 사용량",
+        "ports" => "열린 포트",
+        "pet" => "펫 상태",
+        "clipboard" => "클립보드",
+        "resources" => "기기 상태",
+        "tunnel" => "원격 연결",
+        "version" => "앱 버전",
+        _ => "알 수 없는 항목",
+    }
+}
+
+fn statusbar_preview_text(s: &Snapshot, id: &str) -> String {
+    if matches!(id, "claude" | "codex") {
+        let mut parts = vec![if id == "claude" { "Claude" } else { "Codex" }.to_string()];
+        let fields = s.statusbar_usage_fields.get(id);
+        for field in crate::statusbar_config::USAGE_FIELDS {
+            if !fields.is_some_and(|values| values.iter().any(|value| value == field)) {
+                continue;
+            }
+            let value = match (id, field) {
+                ("claude", "account") => "지메일",
+                ("codex", "account") => "개인",
+                (_, "email") => "me@example.com",
+                ("claude", "session") => "5h 42%",
+                ("codex", "session") => "5h 미제공",
+                (_, "weekly") => "7d 68%",
+                ("claude", "model") => "Fable 24%",
+                ("codex", "model") => "모델별 미제공",
+                _ => continue,
+            };
+            parts.push(crate::native_strings::text(value).into_owned());
+        }
+        return parts.join(" ");
+    }
+    match id {
+        "ports" => ":3000 · :5173",
+        "pet" => "펫 2명",
+        "clipboard" => "클립보드",
+        "resources" => "CPU 18% · RAM 42%",
+        "tunnel" => "원격 연결됨",
+        "version" => "v0.2.0",
+        _ => "",
+    }
+    .to_string()
+}
+
+fn statusbar_preview_group(id: &str) -> u8 {
+    crate::statusbar_config::group(id)
+}
+
+fn statusbar_item_color(s: &Snapshot, id: &str) -> [u8; 4] {
+    s.statusbar_colors
+        .get(id)
+        .and_then(|value| theme::parse_hex(value))
+        .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+        .unwrap_or_else(theme::text_dim)
+}
+
+fn statusbar_preview(g: &mut gpu::GpuRenderer, s: &Snapshot, x: f32, y: f32, w: f32) {
+    let rect = (x, y, w, 64.0);
+    round_rect(
+        g,
+        rect.0,
+        rect.1,
+        rect.2,
+        rect.3,
+        theme::radius_md(),
+        theme::surface(),
+    );
+    stroke_rect(g, rect, theme::border());
+    draw_text(
+        g,
+        rect.0 + 12.0,
+        rect.1 + 9.0,
+        "창 맨 아래 · 예시",
+        10.5,
+        theme::text_mute(),
+        false,
+    );
+    let bar = (rect.0 + 8.0, rect.1 + 31.0, rect.2 - 16.0, 25.0);
+    round_rect(
+        g,
+        bar.0,
+        bar.1,
+        bar.2,
+        bar.3,
+        theme::radius_sm(),
+        theme::surface_hover(),
+    );
+    g.push_clip(bar.0 + 7.0, bar.1, (bar.2 - 14.0).max(0.0), bar.3);
+    let right = bar.0 + bar.2 - 7.0;
+    let mut cx = bar.0 + 7.0;
+    let mut last_group = None;
+    let visible: Vec<&String> = s
+        .statusbar_order
+        .iter()
+        .filter(|id| !s.statusbar_hidden.contains(id.as_str()))
+        .collect();
+    if visible.is_empty() {
+        draw_text(
+            g,
+            cx,
+            bar.1 + 8.0,
+            "표시 항목 없음",
+            10.5,
+            theme::text_mute(),
+            false,
+        );
+    }
+    for id in visible {
+        let group = statusbar_preview_group(id);
+        if last_group.is_some_and(|previous| previous != group) {
+            cx += 8.0;
+            if s.statusbar_separators {
+                g.rect(cx, bar.1 + 6.0, 1.0, bar.3 - 12.0, theme::border());
+                cx += 9.0;
+            }
+        }
+        let available = right - cx;
+        if available < 28.0 {
+            break;
+        }
+        let text = statusbar_preview_text(s, id);
+        let shown = fit(g, &text, available, 10.5, false);
+        draw_text(
+            g,
+            cx,
+            bar.1 + 8.0,
+            &shown,
+            10.5,
+            statusbar_item_color(s, id),
+            false,
+        );
+        cx += g.measure_chrome_text(&shown, 10.5, false) + 14.0;
+        last_group = Some(group);
+    }
+    g.pop_clip();
+}
+
+fn statusbar_widget_row(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    id: &str,
+    index: usize,
+) {
+    let rect = (x, *y, w, 70.0);
+    round_rect(
+        g,
+        rect.0,
+        rect.1,
+        rect.2,
+        rect.3,
+        theme::radius_md(),
+        theme::surface(),
+    );
+    stroke_rect(g, rect, theme::border());
+    let visible = !s.statusbar_hidden.contains(id);
+    let check = (rect.0 + 10.0, rect.1 + 9.0, 28.0, 28.0);
+    g.queue_icon(
+        if visible { "square-check" } else { "square" },
+        check.0 + 5.0,
+        check.1 + 5.0,
+        17.0,
+        if visible {
+            theme::accent()
+        } else {
+            theme::text_mute()
+        },
+    );
+    register_clipped(
+        g,
+        hits,
+        Target::Setting(SettingsAction::ToggleStatusbarItem(id.to_string())),
+        (rect.0 + 6.0, rect.1 + 5.0, (rect.2 - 86.0).max(38.0), 36.0),
+        HitCursor::Pointer,
+    );
+    g.hover_pointer |= contains(
+        (
+            rect.0 + 6.0,
+            rect.1 + 5.0,
+            (rect.2 - 86.0).max(38.0),
+            36.0,
+        ),
+        s.cursor,
+    );
+    let label = fit(g, statusbar_widget_label(id), (rect.2 - 124.0).max(34.0), 12.0, visible);
+    draw_text(
+        g,
+        rect.0 + 43.0,
+        rect.1 + 17.0,
+        &label,
+        12.0,
+        if visible {
+            theme::text()
+        } else {
+            theme::text_mute()
+        },
+        visible,
+    );
+    let up = (rect.0 + rect.2 - 68.0, rect.1 + 8.0, 28.0, 28.0);
+    let down = (rect.0 + rect.2 - 36.0, rect.1 + 8.0, 28.0, 28.0);
+    let can_up = index > 0
+        && crate::statusbar_config::group(&s.statusbar_order[index - 1])
+            == crate::statusbar_config::group(id);
+    let can_down = index + 1 < s.statusbar_order.len()
+        && crate::statusbar_config::group(&s.statusbar_order[index + 1])
+            == crate::statusbar_config::group(id);
+    statusbar_move_button(g, s, hits, up, id, -1, can_up, "arrow-up");
+    statusbar_move_button(
+        g,
+        s,
+        hits,
+        down,
+        id,
+        1,
+        can_down,
+        "arrow-down",
+    );
+
+    draw_text(g, rect.0 + 12.0, rect.1 + 49.0, "색", 10.5, theme::text_mute(), false);
+    let selected = s.statusbar_colors.get(id).map(String::as_str).unwrap_or("");
+    let mut sx = rect.0 + 39.0;
+    let swatch_w = if rect.2 < 220.0 { 18.0 } else { 22.0 };
+    let swatch_gap = if rect.2 < 220.0 { 4.0 } else { 7.0 };
+    let swatches: Vec<(String, [u8; 4])> = std::iter::once((String::new(), theme::text_dim()))
+        .chain(theme::ACCENT_PRESETS.iter().map(|(_, color)| {
+            (
+                format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]),
+                *color,
+            )
+        }))
+        .collect();
+    for (value, color) in swatches {
+        let sr = (sx, rect.1 + 43.0, swatch_w, 18.0);
+        let on = selected.eq_ignore_ascii_case(&value);
+        round_rect(g, sr.0, sr.1, sr.2, sr.3, 5.0, color);
+        if on {
+            stroke_rect(g, (sr.0 - 2.0, sr.1 - 2.0, sr.2 + 4.0, sr.3 + 4.0), theme::text());
+        }
+        register_clipped(
+            g,
+            hits,
+            Target::Setting(SettingsAction::SetStatusbarColor(id.to_string(), value)),
+            (sr.0 - 2.0, sr.1 - 2.0, sr.2 + 4.0, sr.3 + 4.0),
+            HitCursor::Pointer,
+        );
+        g.hover_pointer |= contains(
+            (sr.0 - 2.0, sr.1 - 2.0, sr.2 + 4.0, sr.3 + 4.0),
+            s.cursor,
+        );
+        sx += swatch_w + swatch_gap;
+    }
+    *y += rect.3 + 7.0;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn statusbar_move_button(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    rect: Rect,
+    id: &str,
+    delta: i8,
+    enabled: bool,
+    icon: &str,
+) {
+    let hover = enabled && contains(rect, s.cursor);
+    if hover {
+        round_rect(
+            g,
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            theme::radius_sm(),
+            theme::surface_active(),
+        );
+    }
+    g.queue_icon(
+        icon,
+        rect.0 + 7.0,
+        rect.1 + 7.0,
+        14.0,
+        if enabled {
+            theme::text_dim()
+        } else {
+            theme::with_alpha(theme::text_mute(), 80)
+        },
+    );
+    if enabled {
+        register_clipped(
+            g,
+            hits,
+            Target::Setting(SettingsAction::MoveStatusbarItem(id.to_string(), delta)),
+            rect,
+            HitCursor::Pointer,
+        );
+        g.hover_pointer |= hover;
+    }
 }
 
 fn paint_palette_editor(
@@ -3202,6 +3671,9 @@ pub(crate) struct MachineRow {
     pub(crate) ssh: String,
     pub(crate) status: String,
     pub(crate) online: bool,
+    pub(crate) build_match: bool,
+    /// 전송 스크립트가 쓸 명부 원문의 ssh/host. 화면용 `ssh`에는 설명이 붙을 수 있다.
+    pub(crate) sync_target: String,
     /// 앱이 찾아 적어 둔 ssh 열쇠 파일 이름(없으면 빈값) — 왜 붙는지 보이게.
     pub(crate) key: String,
     /// 상대가 터널을 들고 알려 온 기계 — 명부 파일에 없어 고치거나 지울 것이 없다.
@@ -3215,6 +3687,8 @@ impl Clone for MachineRow {
             ssh: self.ssh.clone(),
             status: self.status.clone(),
             online: self.online,
+            build_match: self.build_match,
+            sync_target: self.sync_target.clone(),
             key: self.key.clone(),
             guest: self.guest,
         }
@@ -3224,12 +3698,21 @@ impl Clone for MachineRow {
 /// 살아 있고 빌드가 같아야 「연결됨」 한 마디로 끝난다. 빌드가 다르면(또는 옛 판이라
 /// 표식이 없으면) 그 사실을 배지에 같이 쓴다 — 창구가 다른 판끼리는 `to` 가 창 없는
 /// 셸로 물러서거나 조용히 어긋나므로, 보이는 자리에 서야 한다.
-fn machine_status(online: bool, build_match: bool, ago: Option<u64>) -> String {
+fn machine_status(
+    online: bool,
+    build_match: bool,
+    build: Option<&str>,
+    ago: Option<u64>,
+) -> String {
     if online {
         if build_match {
             "연결됨".to_string()
         } else {
-            "연결됨 · 빌드 다름".to_string()
+            let build = build
+                .filter(|value| !value.is_empty())
+                .map(|value| value.chars().take(8).collect::<String>())
+                .unwrap_or_else(|| "표식 없음".to_string());
+            format!("연결됨 · 빌드 {build} ≠ 현재")
         }
     } else {
         match ago {
@@ -3244,6 +3727,20 @@ fn machine_status(online: bool, build_match: bool, ago: Option<u64>) -> String {
 /// 명부와 그 연결 상태를 합쳐 읽는다. 파일과 잠금을 매 프레임 건드리지 않게 잠깐
 /// 쥐고 있는다 — 이 화면은 크롬이라 pane 이 출력하는 동안에도 계속 돈다.
 fn machines_view() -> Vec<MachineRow> {
+    if crate::verification_run()
+        && std::env::var_os("KASATERM_TEST_MACHINE_MISMATCH").is_some()
+    {
+        return vec![MachineRow {
+            label: "본진".to_string(),
+            ssh: "nachoneko".to_string(),
+            status: machine_status(true, false, Some("deadbeef"), None),
+            online: true,
+            build_match: false,
+            sync_target: "nachoneko".to_string(),
+            key: "id_ed25519".to_string(),
+            guest: false,
+        }];
+    }
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
     type Cache = Mutex<Option<(Instant, Vec<MachineRow>)>>;
@@ -3264,12 +3761,15 @@ fn machines_view() -> Vec<MachineRow> {
             // 손으로 적은 옛 항목은 ssh 대신 `host` 에 주소를 두고 `base` 로
             // 터널을 따로 든다. 그걸 「비어 있다」고 하면 멀쩡히 붙어 있는 기계에
             // 붉은 경고가 뜬다 — 실제로 어디로 붙는지를 적는다.
-            let ssh = e
+            let sync_target = e
                 .get("ssh")
                 .or_else(|| e.get("host"))
                 .and_then(|v| v.as_str())
                 .filter(|v| !v.is_empty())
-                .map(str::to_string)
+                .unwrap_or_default()
+                .to_string();
+            let ssh = (!sync_target.is_empty())
+                .then(|| sync_target.clone())
                 .or_else(|| {
                     e.get("base")
                         .and_then(|v| v.as_str())
@@ -3290,14 +3790,15 @@ fn machines_view() -> Vec<MachineRow> {
                 .and_then(|m| m.get("build_match"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            let status = machine_status(online, build_match, ago);
+            let build = hit.and_then(|m| m.get("build")).and_then(|v| v.as_str());
+            let status = machine_status(online, build_match, build, ago);
             let key = e
                 .get("key")
                 .and_then(|v| v.as_str())
                 .and_then(|k| std::path::Path::new(k).file_name())
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_default();
-            MachineRow { label, ssh, status, online, key, guest: false }
+            MachineRow { label, ssh, status, online, build_match, sync_target, key, guest: false }
         })
         .collect();
     // 알려 온 기계 — 파일엔 없지만 `to` 에는 뜨므로 여기도 같이 선다. 이름이 파일
@@ -3307,11 +3808,14 @@ fn machines_view() -> Vec<MachineRow> {
         let online = m.get("online").and_then(|v| v.as_bool()).unwrap_or(false);
         let ago = m.get("ago_secs").and_then(|v| v.as_u64());
         let build_match = m.get("build_match").and_then(|v| v.as_bool()).unwrap_or(true);
+        let build = m.get("build").and_then(|v| v.as_str());
         rows.push(MachineRow {
             label,
             ssh: "그쪽이 터널로 열어 둔 길 — 이 기계 명부엔 안 적혀요".to_string(),
-            status: machine_status(online, build_match, ago),
+            status: machine_status(online, build_match, build, ago),
             online,
+            build_match,
+            sync_target: String::new(),
             key: String::new(),
             guest: true,
         });
@@ -3565,6 +4069,18 @@ fn paint_machines(
     for (i, m) in rows.iter().enumerate() {
         machine_row(g, s, hits, caret, x, y, w, i, m);
     }
+    if rows.iter().any(|machine| machine.online && !machine.build_match) {
+        draw_text(
+            g,
+            x + 2.0,
+            *y,
+            "새 판 보내기: 이 맥에서 다시 굽고, 고른 기기의 앱만 교체해 되띄웁니다",
+            10.5,
+            theme::text_mute(),
+            false,
+        );
+        *y += 20.0;
+    }
     *y += 8.0;
 }
 
@@ -3581,9 +4097,23 @@ fn machine_row(
     m: &MachineRow,
 ) {
     let editing = s.machine_edit.as_ref().filter(|(i, _, _)| *i == idx);
+    let syncable = m.online && !m.build_match && !m.guest && !m.sync_target.is_empty();
     // 고치는 중엔 줄이 자란다 — 라벨(18)+입력칸(36)이 54px 줄을 넘쳐 상자 밖으로
     // 삐져나왔다(2026-09-07 지적). 아래 안내 한 줄까지 담는다.
-    let rect = (x, *y, w, if editing.is_some() { 96.0 } else { 54.0 });
+    // 빌드가 다른 줄도 수리 버튼을 별도 행에 둔다. 이름·상태·수정·삭제와 한 줄에
+    // 몰면 가장 중요한 경고와 복구 버튼이 서로 잘린다.
+    let rect = (
+        x,
+        *y,
+        w,
+        if editing.is_some() {
+            96.0
+        } else if syncable {
+            90.0
+        } else {
+            54.0
+        },
+    );
     round_rect(
         g,
         rect.0,
@@ -3612,7 +4142,7 @@ fn machine_row(
 
     let w_del = g.measure_chrome_text("삭제", 10.5, false) + 32.0;
     let text_x = rect.0 + 40.0;
-    let field_w = ((rect.2 - w_del - 24.0 - (text_x - rect.0)) / 2.0 - 8.0).max(110.0);
+    let field_w = ((rect.2 - w_del - 28.0 - (text_x - rect.0)) / 2.0 - 8.0).max(110.0);
     match editing {
         // 고치는 중에는 두 칸을 나란히 — 이름만 고치고 ssh 를 못 고치면 결국
         // 파일을 열게 된다.
@@ -3656,8 +4186,10 @@ fn machine_row(
             );
         }
         None => {
-            let avail = rect.2 - w_del - 24.0 - (text_x - rect.0);
-            let name = fit(g, &m.label, avail - 90.0, 12.0, true);
+            let actions_w = w_del + 36.0;
+            let avail = rect.2 - actions_w - 12.0 - (text_x - rect.0);
+            let status_w = g.measure_chrome_text(&m.status, 10.5, false) + 22.0;
+            let name = fit(g, &m.label, (avail - status_w - 8.0).max(28.0), 12.0, true);
             draw_text(g, text_x, rect.1 + 8.0, &name, 12.0, theme::text(), true);
             let nw = g.measure_chrome_text(&name, 12.0, true);
             pill(g, text_x + nw + 8.0, rect.1 + 7.0, &m.status, m.online);
@@ -3691,17 +4223,34 @@ fn machine_row(
                 g,
                 hits,
                 Target::Setting(SettingsAction::FocusMachineField(idx, false)),
-                (rect.0, rect.1, rect.2 - w_del - 34.0, rect.3),
+                (rect.0, rect.1, rect.2 - actions_w - 8.0, rect.3),
                 HitCursor::Pointer,
             );
+            let pencil_x = rect.0 + rect.2 - w_del - 36.0;
             mini_icon_button(
                 g,
                 s,
                 hits,
-                (rect.0 + rect.2 - w_del - 36.0, rect.1 + 14.0, 26.0, 26.0),
+                (pencil_x, rect.1 + 14.0, 26.0, 26.0),
                 "pencil",
                 Target::Setting(SettingsAction::FocusMachineField(idx, true)),
             );
+            if syncable {
+                mini_text_button(
+                    g,
+                    s,
+                    hits,
+                    text_x,
+                    rect.1 + 55.0,
+                    "rotate-cw",
+                    "새 판 보내기",
+                    Target::Setting(SettingsAction::SyncMachine(
+                        m.label.clone(),
+                        m.sync_target.clone(),
+                    )),
+                    true,
+                );
+            }
             mini_text_button(
                 g,
                 s,
@@ -5071,6 +5620,174 @@ fn account_row(
     *y += rect.3 + 6.0;
 }
 
+fn cursor_shape_label(shape: cursor::CursorShape) -> &'static str {
+    match shape {
+        cursor::CursorShape::Block => "블록",
+        cursor::CursorShape::Bar => "빔",
+        cursor::CursorShape::Underline => "밑줄",
+        cursor::CursorShape::Frame => "프레임",
+        cursor::CursorShape::Brackets => "괄호",
+        cursor::CursorShape::TwinRails => "쌍선",
+        cursor::CursorShape::Topline => "윗줄",
+        cursor::CursorShape::CornerMarks => "모서리",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cursor_shape_grid(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    shapes: &[(cursor::CursorShape, &str)],
+) {
+    let cols = if w >= 540.0 {
+        3
+    } else if w >= 300.0 {
+        2
+    } else {
+        1
+    };
+    let gap = 8.0;
+    let card_h = 64.0;
+    let card_w = (w - gap * (cols - 1) as f32) / cols as f32;
+    for (index, (shape, label)) in shapes.iter().copied().enumerate() {
+        let col = index % cols;
+        let row = index / cols;
+        let rect = (
+            x + col as f32 * (card_w + gap),
+            *y + row as f32 * (card_h + gap),
+            card_w,
+            card_h,
+        );
+        choice_card(
+            g,
+            s,
+            hits,
+            rect,
+            s.cursor_shape == shape,
+            Target::Setting(SettingsAction::CursorShape(shape)),
+        );
+        let shown = fit(g, label, (rect.2 - 78.0).max(30.0), 12.0, s.cursor_shape == shape);
+        draw_text(
+            g,
+            rect.0 + 12.0,
+            rect.1 + 24.0,
+            &shown,
+            12.0,
+            if s.cursor_shape == shape {
+                theme::text()
+            } else {
+                theme::text_dim()
+            },
+            s.cursor_shape == shape,
+        );
+        cursor_sample(
+            g,
+            shape,
+            rect.0 + rect.2 - 50.0,
+            rect.1 + 17.0,
+            s.cursor_thickness,
+            true,
+        );
+    }
+    let rows = (shapes.len() + cols - 1) / cols;
+    *y += rows as f32 * card_h + rows.saturating_sub(1) as f32 * gap;
+}
+
+fn cursor_color_choices(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    let names = ["파랑", "초록", "주황", "보라", "분홍"];
+    let presets: Vec<(String, String, [u8; 4])> = theme::ACCENT_PRESETS
+        .iter()
+        .zip(names)
+        .map(|((_, color), label)| {
+            (
+                label.to_string(),
+                format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]),
+                *color,
+            )
+        })
+        .collect();
+    let mut choices = vec![("테마".to_string(), String::new(), s.cursor_color)];
+    if !s.cursor_color_setting.is_empty()
+        && !presets
+            .iter()
+            .any(|(_, value, _)| value.eq_ignore_ascii_case(&s.cursor_color_setting))
+    {
+        choices.push((
+            "현재".to_string(),
+            s.cursor_color_setting.clone(),
+            s.cursor_color,
+        ));
+    }
+    choices.extend(presets);
+
+    let cols = if w >= 650.0 {
+        6
+    } else if w >= 360.0 {
+        3
+    } else {
+        2
+    };
+    let gap = 7.0;
+    let card_h = 40.0;
+    let card_w = (w - gap * (cols - 1) as f32) / cols as f32;
+    let choice_count = choices.len();
+    for (index, (label, value, color)) in choices.into_iter().enumerate() {
+        let col = index % cols;
+        let row = index / cols;
+        let rect = (
+            x + col as f32 * (card_w + gap),
+            *y + row as f32 * (card_h + gap),
+            card_w,
+            card_h,
+        );
+        let selected = s.cursor_color_setting.eq_ignore_ascii_case(&value);
+        choice_card(
+            g,
+            s,
+            hits,
+            rect,
+            selected,
+            Target::Setting(SettingsAction::CursorColor(value)),
+        );
+        round_rect(
+            g,
+            rect.0 + 10.0,
+            rect.1 + 11.0,
+            18.0,
+            18.0,
+            9.0,
+            color,
+        );
+        let shown = fit(g, &label, (rect.2 - 44.0).max(18.0), 11.0, selected);
+        draw_text(
+            g,
+            rect.0 + 36.0,
+            rect.1 + 13.0,
+            &shown,
+            11.0,
+            if selected {
+                theme::text()
+            } else {
+                theme::text_dim()
+            },
+            selected,
+        );
+    }
+    let rows = (choice_count + cols - 1) / cols;
+    *y += rows as f32 * card_h + rows.saturating_sub(1) as f32 * gap + 8.0;
+}
+
 fn cursor_sample(
     g: &mut gpu::GpuRenderer,
     shape: cursor::CursorShape,
@@ -5118,6 +5835,11 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
             "모양",
             "sparkles",
             "커서와 색, 글자 크기를 한 화면에서 맞춥니다",
+        ),
+        SettingsCat::Statusbar => (
+            "하단바",
+            "panel-bottom",
+            "보이는 정보와 순서, 색을 내 작업에 맞춥니다",
         ),
         SettingsCat::Shell => ("셸", "terminal", "새 pane이 어떤 셸로 시작할지 정합니다"),
         SettingsCat::Pet => (
@@ -6205,7 +6927,6 @@ mod tests {
         assert!(open.contains("SelectStudentInTheme(theme, arg.clone())"));
     }
 
-    #[test]
     /// 스크롤바는 스크롤되는 영역의 오른쪽에 붙어야 한다. 글자가 앉는 칼럼
     /// (`content_x`/`content_w`)을 그대로 주면 그 좌우 여백만큼 안으로 들어와,
     /// 막대가 패널 가장자리에서 떨어진 허공에 뜬다(2026-09-05 지적 · 실측 58px).

@@ -12,6 +12,7 @@ export const ko = {
     settings: '설정',
     general: '일반',
     appearance: '모양',
+    statusbar: '하단바',
     shell: '셸',
     /// 칸 이름은 「Agent」다 — 안에 Claude 와 Codex 로그인이 나란히 있어서, 한쪽
     /// 이름을 칸 이름으로 쓰면 다른 쪽이 곁방살이로 읽힌다. 키가 `claude` 로
@@ -35,6 +36,7 @@ export const ko = {
   titles: {
     general: { title: '일반', hint: '창·작업 폴더·파일 열기' },
     appearance: { title: '모양', hint: '색·모양·글꼴' },
+    statusbar: { title: '하단바', hint: '표시 항목·순서·색' },
     shell: { title: '셸', hint: '셸과 편집기' },
     claude: { title: 'Agent', hint: '모델과 실행 방식' },
     accounts: { title: '계정', hint: '로그인과 한도가 찼을 때 넘어갈 차례' },
@@ -378,6 +380,7 @@ export const en: Strings = {
     settings: 'Settings',
     general: 'General',
     appearance: 'Appearance',
+    statusbar: 'Status bar',
     shell: 'Shell',
     claude: 'Agent',
     accounts: 'Accounts',
@@ -392,6 +395,7 @@ export const en: Strings = {
   titles: {
     general: { title: 'General', hint: 'Window, working folder, opening files' },
     appearance: { title: 'Appearance', hint: 'Colors, shape, fonts' },
+    statusbar: { title: 'Status bar', hint: 'Visible items, order, and colors' },
     shell: { title: 'Shell', hint: 'Shell and editor' },
     claude: { title: 'Agent', hint: 'Model and how it runs' },
     accounts: { title: 'Accounts', hint: 'Sign-ins and the order to fall back through' },

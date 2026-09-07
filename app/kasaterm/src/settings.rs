@@ -144,6 +144,17 @@ impl App {
             "pane_footer_h",
             serde_json::Value::from(self.set_pane_footer_h),
         );
+        socket::write_setting("statusbar_order", self.set_statusbar.json_order());
+        socket::write_setting("statusbar_hidden", self.set_statusbar.json_hidden());
+        socket::write_setting("statusbar_colors", self.set_statusbar.json_colors());
+        socket::write_setting(
+            "statusbar_usage_fields",
+            self.set_statusbar.json_usage_fields(),
+        );
+        socket::write_setting(
+            "statusbar_separators",
+            serde_json::Value::Bool(self.set_statusbar.separators),
+        );
         self.regen_pane_shims();
         // codex 는 래퍼를 다시 굽지 않는다 — 값이 하나도 안 박힌 정적 문자열이라
         // 다시 구울 이유가 없고, 활성 슬롯 경로만 파일로 갈아 끼우면 **이미 떠 있는
@@ -983,6 +994,24 @@ impl App {
                     self.chrome_dirty = true;
                 }
             }
+            SettingsAction::CursorColor(value) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    socket::write_setting("terminal_cursor_color", serde_json::Value::Null);
+                    theme::apply_from_settings();
+                    self.repaint_all();
+                } else if theme::parse_hex(value).is_some() {
+                    socket::write_setting(
+                        "terminal_cursor_color",
+                        serde_json::Value::String(value.to_ascii_lowercase()),
+                    );
+                    // 터미널 셀 위 커서와 OSC 12 응답을 같은 프레임에 바꾼다.
+                    theme::apply_from_settings();
+                    self.repaint_all();
+                } else {
+                    self.set_toast("커서 색은 #rrggbb 로 적어 주세요".to_string());
+                }
+            }
             SettingsAction::FontSizeDelta(d) => {
                 let new = (self.font_size + d as f32).clamp(9.0, 32.0);
                 if (new - self.font_size).abs() > 0.01 {
@@ -1069,6 +1098,36 @@ impl App {
                     self.resize_backend(cols, rows);
                     self.chrome_dirty = true;
                 }
+            }
+            SettingsAction::ToggleStatusbarItem(id) => {
+                self.set_statusbar.toggle_item(&id);
+                self.settings_save();
+                self.chrome_dirty = true;
+            }
+            SettingsAction::MoveStatusbarItem(id, delta) => {
+                self.set_statusbar.move_item(&id, delta);
+                self.settings_save();
+                self.chrome_dirty = true;
+            }
+            SettingsAction::SetStatusbarColor(id, color) => {
+                self.set_statusbar.set_color(&id, &color);
+                self.settings_save();
+                self.chrome_dirty = true;
+            }
+            SettingsAction::ToggleStatusbarUsageField(provider, field) => {
+                self.set_statusbar.toggle_usage_field(&provider, &field);
+                self.settings_save();
+                self.chrome_dirty = true;
+            }
+            SettingsAction::ToggleStatusbarSeparators => {
+                self.set_statusbar.separators = !self.set_statusbar.separators;
+                self.settings_save();
+                self.chrome_dirty = true;
+            }
+            SettingsAction::ResetStatusbar => {
+                self.set_statusbar = crate::statusbar_config::Prefs::default();
+                self.settings_save();
+                self.chrome_dirty = true;
             }
             SettingsAction::AddClaudeAccount => self.add_claude_account(),
             // 있는 슬롯에 로그인을 다시 돌린다 — 슬롯 dir 을 그대로 쓰므로 그 계정에
@@ -1178,6 +1237,55 @@ impl App {
                 self.machine_edit = Some((idx, ssh, value));
                 self.settings_input = Some(SettingsInput::MachineField);
                 self.chrome_dirty = true;
+            }
+            SettingsAction::SyncMachine(label, expected_target) => {
+                let entries = kasa_mcp::machines::entries();
+                let matching_rows: Vec<&serde_json::Value> = entries
+                    .iter()
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.get("label").and_then(|v| v.as_str()) == Some(&label)
+                    })
+                    .collect();
+                // label만 맞는 첫 행으로 보내면 중복 이름에서 엉뚱한 기기를 멈춘다.
+                // 화면이 그릴 때 본 target과 현재 명부의 유일한 한 행이 모두 같아야 한다.
+                let target = (matching_rows.len() == 1)
+                    .then(|| {
+                        matching_rows[0]
+                            .get("ssh")
+                            .or_else(|| matching_rows[0].get("host"))
+                            .and_then(|v| v.as_str())
+                            .filter(|value| !value.trim().is_empty())
+                    })
+                    .flatten()
+                    .filter(|target| *target == expected_target)
+                    .map(str::to_string);
+                let still_mismatched = kasa_mcp::machines::snapshot().iter().any(|machine| {
+                    machine.get("label").and_then(|v| v.as_str()) == Some(&label)
+                        && machine.get("online").and_then(|v| v.as_bool()) == Some(true)
+                        && machine.get("build_match").and_then(|v| v.as_bool()) == Some(false)
+                });
+                let root = kasaterm_build_root();
+                match (target.filter(|_| still_mismatched), root) {
+                    (Some(target), Some(root)) => {
+                        // 사용자 클릭이 실행 허가다. 별도 셸 pane에서 빌드부터 전송까지
+                        // 보여 주고, 정확한 ssh 대상은 셸 인자로 안전하게 감싼다.
+                        let pane = self.spawn_shell_pane(root.to_str());
+                        if !pane.is_empty() {
+                            let command = format!(
+                                "cd {root} && bash scripts/build-app.sh && KASATERM_MINI_HOST={target} bash scripts/sync-mini.sh 2>&1 | tee /tmp/kasaterm-sync-machine.log; echo '---DONE---'\r",
+                                root = crate::shell_quote_path(&root.to_string_lossy()),
+                                target = crate::shell_quote_path(&target),
+                            );
+                            self.send_bytes_to_surface(Some(&pane), command.as_bytes());
+                            self.set_toast(format!("{label} 새 판 작업을 옆 pane에서 시작했어요"));
+                        }
+                    }
+                    (None, _) => self.set_toast(format!(
+                        "{label}의 대상이나 빌드 상태가 바뀌었어요 — 목록을 다시 확인해 주세요"
+                    )),
+                    (_, None) => self.set_toast("이 판의 빌드 폴더를 찾지 못했어요".to_string()),
+                }
             }
             SettingsAction::RemoveClaudeAccount(id) => {
                 self.set_claude_accounts.retain(|a| a.id != id);
@@ -4236,6 +4344,20 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
         }
     });
     stale
+}
+
+/// 다른 기계에 새 판을 보낼 때 쓸 작업 루트. 설치 앱은 빌드 때 남긴 표가 정본이고,
+/// 개발 실행은 Cargo manifest의 모노레포 루트로 떨어진다.
+fn kasaterm_build_root() -> Option<std::path::PathBuf> {
+    let installed = kasa_socket::home_dir()?
+        .join("Applications/kasaterm.app/Contents/Resources/build-root");
+    let root = std::fs::read_to_string(installed)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    root.join("scripts/build-app.sh").is_file().then_some(root)
 }
 
 /// 그 슬롯이 **정말로** 어느 계정인지. 로컬 `/claude-identity` 가 슬롯 토큰으로

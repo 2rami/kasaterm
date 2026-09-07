@@ -63,6 +63,7 @@ mod proc;
 mod sesscol;
 mod state;
 mod statusbar;
+mod statusbar_config;
 mod syntax;
 mod turnjump;
 // 배포 피드의 최신판 확인 — 상태줄 버전 조각과 계정 메뉴 바닥 줄이 읽는다.
@@ -4185,6 +4186,7 @@ enum GitModalBtn {
 pub(crate) enum SettingsCat {
     General,
     Appearance,
+    Statusbar,
     Shell,
     Claude,
     /// 계정 — claude·codex 로그인을 넣고 갈아 끼우는 곳. `Claude`(모델 기본값)
@@ -4217,9 +4219,10 @@ impl SettingsCat {
     /// 웹과의 칸 이름 대조에만 쓴다 — 값을 새로 만들 때 여기 빠뜨리면 그 칸은
     /// 대조에서 통째로 빠지므로, 변형을 더하면 이 배열도 같이 늘려라.
     #[allow(dead_code)]
-    pub(crate) const ALL: [SettingsCat; 10] = [
+    pub(crate) const ALL: [SettingsCat; 11] = [
         Self::General,
         Self::Appearance,
+        Self::Statusbar,
         Self::Shell,
         Self::Claude,
         Self::Accounts,
@@ -4238,6 +4241,7 @@ impl SettingsCat {
         match self {
             Self::General => "general",
             Self::Appearance => "appearance",
+            Self::Statusbar => "statusbar",
             Self::Shell => "shell",
             Self::Claude => "claude",
             Self::Accounts => "accounts",
@@ -4377,6 +4381,8 @@ pub(crate) enum SettingsAction {
     /// `SettingsAction` 이 `Eq` 를 derive 하므로 f32 를 실을 수 없다 — 굵기는 어차피
     /// 픽셀 정수라 u8 로 나른다.
     CursorThickness(u8),
+    /// 터미널 커서 전용 색. 빈 문자열이면 테마 기본색을 다시 따른다.
+    CursorColor(String),
     /// 터미널 셀 위 마우스 포인터 — `"arrow"` · `"ibeam"`.
     MouseCursor(&'static str),
     /// 떠 있는 pane 보호·확인 카드를 포함한 계정 전환. 빈 id는 기본 로그인.
@@ -4416,6 +4422,8 @@ pub(crate) enum SettingsAction {
     RemoveMachine(usize),
     /// 그 줄의 칸을 고치기 시작한다 — `true` 면 ssh 칸.
     FocusMachineField(usize, bool),
+    /// 빌드가 다른 기계 한 대에 현재 dist를 보낸다. 값은 명부의 정확한 ssh 대상.
+    SyncMachine(String, String),
     /// 하단바에 **안 쓰는 계정의 한도까지** 세우는 스위치.
     /// 그 전환을 부르는 사용률(%).
     AccountAutoswitchPct(u32),
@@ -4428,6 +4436,13 @@ pub(crate) enum SettingsAction {
     StatusBarH(u32),
     /// pane 하단바(경로·브랜치·diff 칩) 높이(logical px).
     PaneFooterH(u32),
+    ToggleStatusbarItem(String),
+    MoveStatusbarItem(String, i8),
+    /// 빈 색은 해당 위젯의 테마 기본색으로 복귀한다.
+    SetStatusbarColor(String, String),
+    ToggleStatusbarUsageField(String, String),
+    ToggleStatusbarSeparators,
+    ResetStatusbar,
     /// 위 넷의 codex(ChatGPT) 판. 로그인 수단이 달라 동작이 갈리므로(claude 는
     /// `claude auth login`, codex 는 `CODEX_HOME=<슬롯> codex login`) 액션도 가른다.
     AddCodexAccount,
@@ -5437,6 +5452,8 @@ struct App {
     set_codex_account: String,
     /// 계정 메뉴 표시 밀도 — `true` = Compact(가장 빡빡한 창 하나만, 막대 없이).
     set_usage_compact: bool,
+    /// 창 하단바 표시 순서·숨김·색·사용량 세부 항목. 프레임마다 파일을 읽지 않는다.
+    set_statusbar: statusbar_config::Prefs,
     /// 하단바에 **활성 계정 말고 나머지 슬롯의 한도까지** 세운다. 활성 하나만
     /// 보이면 「지금 계정이 찼을 때 어디로 옮기나」에 답하려고 매번 드롭다운을
     /// 열어야 하는데, 그 손이 아까워 안 열다가 다 찬 계정을 계속 쓴다
@@ -5962,6 +5979,7 @@ impl App {
             set_codex_accounts: socket::read_codex_accounts(),
             set_codex_account: socket::read_codex_account(),
             set_usage_compact: socket::read_usage_compact(),
+            set_statusbar: statusbar_config::Prefs::from_settings(&socket::read_settings()),
             account_menu_provider: None,
             set_account_autoswitch: socket::read_account_autoswitch(),
             set_account_autoswitch_pct: socket::read_account_autoswitch_pct(),

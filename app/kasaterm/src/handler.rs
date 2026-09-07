@@ -2045,13 +2045,39 @@ impl ApplicationHandler<UserEvent> for App {
                     // 코덱스 한도는 **코덱스에게 직접 묻는다** — 대화 기록에서
                     // 읽던 길이 2026-09-05 무렵 막혔다(그 뒤 세션에 한도 줄이
                     // 없다). app-server 를 띄우는 값이라 자주 부를 자리가 아니라,
-                    // 펼쳐 보는 중이면 1분, 아니면 5분에 한 번.
+                    // 평소에는 활성 계정만 5분에 한 번 묻는다. 계정 메뉴를 펼친
+                    // 동안에만 기본+등록 슬롯을 1분마다 채운다 — Claude와 마찬가지로
+                    // 누르기 전에 어느 계정으로 옮길지 숫자를 보고 골라야 한다.
                     let codex_every = if menu_open {
                         std::time::Duration::from_secs(60)
                     } else {
                         std::time::Duration::from_secs(300)
                     };
-                    if crate::codexlimits::stale(codex_every) && crate::codexlimits::refresh() {
+                    let codex_changed = if menu_open {
+                        // 기본 로그인도 목록의 첫 행이다. 현재 슬롯과 겹칠 수 있으니
+                        // 정렬·중복 제거 뒤 묻는다.
+                        let mut codex_ids = vec![String::new()];
+                        codex_ids.extend(
+                            socket::read_codex_accounts()
+                                .into_iter()
+                                .map(|account| account.id),
+                        );
+                        codex_ids.sort();
+                        codex_ids.dedup();
+                        let mut changed = false;
+                        for id in codex_ids {
+                            if crate::codexlimits::stale_for(&id, codex_every)
+                                && crate::codexlimits::refresh_for(&id)
+                            {
+                                changed = true;
+                            }
+                        }
+                        changed
+                    } else {
+                        crate::codexlimits::stale(codex_every)
+                            && crate::codexlimits::refresh()
+                    };
+                    if codex_changed {
                         let _ = usage_proxy.send_event(UserEvent::Redraw);
                     }
                     let active_id = socket::read_claude_account();
@@ -4259,15 +4285,20 @@ impl ApplicationHandler<UserEvent> for App {
                     let inside = |r: &(f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
+                    // 판 번호는 계정 메뉴의 보조 손잡이가 아니다. 기계별 판이 같은지
+                    // 확인하는 자리이므로 누르면 곧장 기계 설정으로 간다.
+                    if self.status_version_rect.as_ref().is_some_and(&inside) {
+                        self.account_menu = false;
+                        self.account_menu_provider = None;
+                        self.account_menu_anchor = None;
+                        let _ = self.open_settings_room(Some(crate::SettingsCat::Machines));
+                        window.request_redraw();
+                        return;
+                    }
                     // 손잡이가 둘이다 — Info 탭의 계정 행과, 늘 보이는 상태줄 세그먼트.
                     // 어느 쪽으로 열었는지 기억해 두고 메뉴를 그 자리에 붙인다.
                     let chip_hit = self.account_chip_rect.as_ref().is_some_and(&inside);
-                    // 손잡이가 셋이다 — Info 탭 계정 행, 상태줄 계정 세그먼트, 그리고
-                    // 오른쪽으로 옮긴 판 번호(2026-09-05). 앵커는 계정 세그먼트로
-                    // 둔다: 메뉴가 계정 목록이라 그 옆에 서야 읽히고, 판 번호 자리에
-                    // 붙이면 화면 오른쪽 끝에서 열려 목록이 창 밖으로 밀린다.
-                    let status_hit = self.status_account_rect.as_ref().is_some_and(&inside)
-                        || self.status_version_rect.as_ref().is_some_and(&inside);
+                    let status_hit = self.status_account_rect.as_ref().is_some_and(&inside);
                     if chip_hit {
                         self.account_menu_anchor = self.account_chip_rect;
                     } else if status_hit {

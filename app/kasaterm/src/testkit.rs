@@ -3164,6 +3164,7 @@ impl App {
         let cat_env = std::env::var("KASATERM_AUTOSETTINGS").unwrap_or_default();
         let cat = match cat_env.as_str() {
             "appearance" => SettingsCat::Appearance,
+            "statusbar" => SettingsCat::Statusbar,
             "shell" => SettingsCat::Shell,
             "claude" => SettingsCat::Claude,
             "accounts" => SettingsCat::Accounts,
@@ -3189,6 +3190,48 @@ impl App {
         // 부른다 — 검증 때마다 Finder 창이 튀어나오면 그게 더 방해다.
         match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
             "" => {}
+            "statusbar-all-off" => {
+                self.set_statusbar.hidden = crate::statusbar_config::WIDGETS
+                    .iter()
+                    .map(|id| (*id).to_string())
+                    .collect();
+                self.chrome_dirty = true;
+                eprintln!("[autosettings] 하단바 항목 전부 끔");
+            }
+            "statusbar-custom" => {
+                self.set_statusbar.order = [
+                    "resources",
+                    "claude",
+                    "codex",
+                    "ports",
+                    "clipboard",
+                    "tunnel",
+                    "version",
+                    "pet",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+                self.set_statusbar
+                    .colors
+                    .insert("claude".to_string(), "#5a8ce6".to_string());
+                self.set_statusbar
+                    .colors
+                    .insert("resources".to_string(), "#3faa5a".to_string());
+                for provider in ["claude", "codex"] {
+                    self.set_statusbar
+                        .toggle_usage_field(provider, "email");
+                    self.set_statusbar
+                        .toggle_usage_field(provider, "model");
+                }
+                self.chrome_dirty = true;
+                eprintln!("[autosettings] 하단바 순서·색·상세 항목 시드");
+            }
+            "cursor-legacy" => {
+                self.cursor_shape = crate::cursor::CursorShape::Frame;
+                self.chrome_dirty = true;
+                eprintln!("[autosettings] 기존 고급 커서 시드");
+            }
             // 파일 쓰기만 부르지 않고 UI 액션을 그대로 태운다 — 복제는 만든 뒤
             // 이름 칸에 포커스를 옮기는 것까지가 한 동작이라, `create_theme` 만
             // 부르면 정작 사람이 겪는 절반을 안 지나간다.
@@ -5944,6 +5987,42 @@ impl App {
         if want == "switching" {
             return;
         }
+        // Codex 계정별 상세. 기본 계정은 5h·7d 둘 다, 둘째 계정은 실물처럼
+        // 7d 하나만 심어 「5h 미제공」과 그래프가 같은 줄을 다투지 않는지 본다.
+        if step == 0 && want.starts_with("accounts-codex") {
+            self.set_usage_compact = want.ends_with("compact");
+            self.set_codex_accounts = vec![crate::socket::CodexAccount {
+                id: "codex-1".to_string(),
+                label: "업무용".to_string(),
+            }];
+            self.set_codex_account = String::new();
+            let _ = crate::codexlimits::seed_for_probe(
+                "",
+                vec![(300, 12.0, None), (10080, 64.0, None)],
+            );
+            let _ = crate::codexlimits::seed_for_probe(
+                "codex-1",
+                vec![(10080, 31.0, None)],
+            );
+            self.chrome_dirty = true;
+            return;
+        }
+        if step == 1 && want.starts_with("accounts-codex") {
+            match self.status_account_rect {
+                Some(r) => {
+                    self.account_menu = true;
+                    self.account_menu_anchor = Some(r);
+                    self.account_menu_provider = Some(crate::AccountProvider::Codex);
+                    self.chrome_dirty = true;
+                    eprintln!("[autoportpop] Codex 계정 목록 anchor={r:?}");
+                }
+                None => eprintln!("[autoportpop] FAIL — 계정 칩이 아직 안 그려졌다"),
+            }
+            return;
+        }
+        if want.starts_with("accounts-codex") {
+            return;
+        }
         // 계정 목록(서브메뉴). **고르기 전에** 각 슬롯의 5h·7일이 다 보이는지 보는
         // 것이 목적이라, 슬롯마다 다른 값을 심고 하나는 값 자체를 비워 둔다
         // (「한도 모름」 자리 표시가 나와야 한다 — 빈칸은 「여유 있음」으로 읽힌다).
@@ -5977,7 +6056,12 @@ impl App {
                     windows: w.into_iter().map(|(l, p)| (l.to_string(), p)).collect(),
                 }
             };
-            let base = mk("", vec![("5h", 12.0), ("7d", 95.0)], false, 7980);
+            let base = mk(
+                "",
+                vec![("5h", 12.0), ("7d", 95.0), ("7d Fable", 64.0)],
+                false,
+                7980,
+            );
             if let Ok(mut g) = self.claude_usage.lock() {
                 *g = Some(base.clone());
             }
