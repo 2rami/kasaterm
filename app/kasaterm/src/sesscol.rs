@@ -81,8 +81,22 @@ impl App {
             // 목록을 만드는 `kasa-socket` 이 아니라 여기서 채우는 건 순환 때문이다 —
             // 표를 쥔 `kasa-mcp` 가 `kasa-socket` 을 의존한다.
             for s in next.iter_mut() {
-                if let Some(n) = kasa_mcp::character::session_character(&s.id) {
+                // codex 갈래 대화는 자기 id 로는 표에 없다 — 부모를 맡은 학생이 곧
+                // 이 대화의 학생이다(2026-09-08 지시 「세션탭에 코덱스도 학생이미지」).
+                let found = kasa_mcp::character::session_character(&s.id).or_else(|| {
+                    (!s.parent.is_empty())
+                        .then(|| kasa_mcp::character::session_character(&s.parent))
+                        .flatten()
+                });
+                if let Some(n) = found {
                     s.student = n;
+                }
+                // 살아 있는 claude 세션은 `/rename` 이름을 라벨로 — 명부가 정본이다
+                // (2026-09-08 지시 「클로드세션도 /rename해놓은거 뜨게」).
+                if s.harness == "claude" {
+                    if let Some(n) = crate::screenread::peer_name_by_sid(&s.id) {
+                        s.label = n;
+                    }
                 }
             }
             // RecentSession 에 PartialEq 가 없어 (하네스, id, mtime, 학생) 으로 비교한다 —
@@ -90,7 +104,9 @@ impl App {
             // 건 방금 시작한 세션의 바인딩이 목록보다 늦게 자리잡는 경우가 있어서다.
             let key = |v: &[kasa_socket::backend::RecentSession]| {
                 v.iter()
-                    .map(|s| (s.harness.clone(), s.id.clone(), s.mtime, s.student.clone()))
+                    .map(|s| {
+                        (s.harness.clone(), s.id.clone(), s.mtime, s.student.clone(), s.label.clone())
+                    })
                     .collect::<Vec<_>>()
             };
             let changed = match snap.lock() {
@@ -139,6 +155,36 @@ impl App {
                 }
                 return true;
             }
+        }
+        // ── 되살리기 ── (Info 탭에서 옮겨 온 것. 규칙은 그대로다.)
+        if self.sessions_col.closed_sec_rect.is_some_and(|r| inside(&r)) {
+            self.sessions_col.closed_collapsed = !self.sessions_col.closed_collapsed;
+            return true;
+        }
+        // × → 목록에서 지우고 프로세스도 끈다. 줄 자체보다 먼저 본다 — × 는 그 줄
+        // 위에 얹혀 있어, 순서가 반대면 끄려던 것이 되살아난다.
+        if let Some(idx) = self
+            .sessions_col
+            .closed_kill_rects
+            .iter()
+            .find(|(_, r)| inside(r))
+            .map(|(i, _)| *i)
+        {
+            // 지우기 **전에** 지금 높이를 잡아 둔다 — 항목이 빠지면 본문이 줄고
+            // 스크롤이 그만큼 끌려 올라와, 다음 × 가 손가락 밑에서 달아난다.
+            self.freeze_closing(CloseFreezeKind::Info(self.sessions_col.content_h));
+            self.discard_closed_pane_at(idx);
+            return true;
+        }
+        if let Some(idx) = self
+            .sessions_col
+            .closed_rects
+            .iter()
+            .find(|(_, r)| inside(r))
+            .map(|(i, _)| *i)
+        {
+            self.reopen_closed_pane_at(idx);
+            return true;
         }
         for (idx, r) in self.sessions_col.row_rects.clone() {
             if inside(&r) {
@@ -208,14 +254,20 @@ fn tail(path: &str) -> &str {
 /// 세션 기록 본문. `App` 메서드가 아니라 자유 함수인 건 `draw_info_col` 과 같은
 /// 빌림 문제 때문이다 — 호출부가 이미 `self.gpu.as_mut()` 를 쥐고 있어 `self` 를
 /// 통째로 다시 빌릴 수 없다.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_sessions_col(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     sc: &mut state::SessionsColState,
+    // 되살리기 대기 중인 pane(최근이 뒤). 되살릴 게 있을 때만 나타나는 섹션이다 —
+    // 되돌릴 수 있다는 걸 알리지 않으면 ⌘⇧T 는 아는 사람만 쓰는 기능이 된다.
+    closed: &[crate::ClosedPane],
     x: f32,
     w: f32,
     top: f32,
     bottom: f32,
+    // 되살리기 × 를 연달아 누르는 동안 붙잡아 둘 본문 높이. None = 평소.
+    frozen_content: Option<f32>,
 ) {
     let x0 = x + 14.0;
     let right = x + w - 12.0;
@@ -231,6 +283,9 @@ pub(crate) fn draw_sessions_col(
     sc.row_rects.clear();
     sc.scope_rects.clear();
     sc.refresh_rect = None;
+    sc.closed_rects.clear();
+    sc.closed_kill_rects.clear();
+    sc.closed_sec_rect = None;
     let hit = |r: &(f32, f32, f32, f32)| {
         cursor.0 >= r.0 && cursor.0 <= r.0 + r.2 && cursor.1 >= r.1 && cursor.1 <= r.1 + r.3
     };
@@ -292,16 +347,80 @@ pub(crate) fn draw_sessions_col(
     let vis_h = (bottom - body_top).max(0.0);
     sc.body_rect = (x, body_top, w, vis_h);
     let rows = sc.view.len();
-    sc.content_h = if rows == 0 { EMPTY_H } else { rows as f32 * ROW_H };
+    // 되살릴 게 없으면 섹션 머리조차 안 그린다 — 늘 비어 있는 섹션이 자리를
+    // 차지하면 알려주는 게 없다.
+    let closed_h = if closed.is_empty() {
+        0.0
+    } else if sc.closed_collapsed {
+        info::SEC_H + info::SEC_GAP
+    } else {
+        info::SEC_H + closed.len() as f32 * info::ROW_H + info::SEC_GAP
+    };
+    sc.content_h = closed_h + if rows == 0 { EMPTY_H } else { rows as f32 * ROW_H };
     // 스크롤은 그리기 **전에** clamp 한다 — 나중에 하면 목록이 줄어든 프레임에서
-    // 한 번 빈 공간이 보였다가 다음 프레임에 튄다.
-    let max_scroll = (sc.content_h - vis_h).max(0.0);
+    // 한 번 빈 공간이 보였다가 다음 프레임에 튄다. × 를 연달아 누르는 동안엔 상한을
+    // 안 줄인다 — 줄이면 스크롤이 끌려 올라와 다음 × 가 방금 누른 자리에 없다.
+    let max_scroll = (frozen_content.unwrap_or(sc.content_h) - vis_h).max(0.0);
     sc.scroll = sc.scroll.clamp(0.0, max_scroll);
+
+    // 본문은 여기서부터 시저로 가둔다. 스크롤로 위에 반쯤 걸친 행은 예전엔 통째로
+    // 그려져 범위 칩을 덮었다 — 「화면 밖이면 건너뛴다」로는 **반쯤** 걸친 것을 막을
+    // 수가 없기 때문이다. 루프 **밖**에서 한 번만 세운다: 안에서 세우면 행마다
+    // 세그먼트가 둘씩 쌓여 draw call 이 행 수만큼 는다.
+    g.push_clip(x, body_top, w, vis_h);
+    let mut y = body_top - sc.scroll;
+
+    // ── 되살리기 ── 최근 닫은 것이 위. 줄을 누르면 그것만, ⌘⇧T 는 언제나 맨 위
+    // (=가장 최근) 것을 되살린다. Info 탭에서 옮겨 왔다(2026-09-08 지시 「인포탭에
+    // 너무 많으니까 되살리기는 세션 탭으로」) — 잇고 싶은 옛 대화와 되돌리고 싶은
+    // 닫은 pane 은 같은 물음이라 한 탭에 둔다.
+    if !closed.is_empty() {
+        // 시저는 픽셀만 자르지 호버는 안 자른다 — 잘려 안 보이는 자리의 커서는 없는
+        // 것으로 친다(Info 탭과 같은 규칙).
+        let ccur = match g.clip_hit((cursor.0, cursor.1, 1.0, 1.0)) {
+            Some(_) => cursor,
+            None => (f32::MIN, f32::MIN),
+        };
+        let r = info::draw_section(
+            g,
+            ccur,
+            "되살리기",
+            Some(closed.len()),
+            None,
+            sc.closed_collapsed,
+            x,
+            w,
+            y,
+            bottom,
+            body_top,
+        );
+        sc.closed_sec_rect = g.clip_hit(r);
+        y += info::SEC_H;
+        if !sc.closed_collapsed {
+            for (i, c) in closed.iter().enumerate().rev() {
+                if g.clip_visible(x, y, w, info::ROW_H) {
+                    let newest = i + 1 == closed.len();
+                    if let Some(br) =
+                        info::draw_closed_row(g, ccur, c, newest, x, w, x0, right, y)
+                    {
+                        if let Some(br) = g.clip_hit(br) {
+                            sc.closed_kill_rects.push((i, br));
+                        }
+                    }
+                }
+                if let Some(hr) = g.clip_hit((x, y, w, info::ROW_H)) {
+                    sc.closed_rects.push((i, hr));
+                }
+                y += info::ROW_H;
+            }
+        }
+        y += info::SEC_GAP;
+    }
 
     if rows == 0 {
         g.draw_text(
             x0,
-            body_top + 12.0,
+            y + 12.0,
             if sc.scope_all { "기록이 없다" } else { "이 방에 기록이 없다" },
             gpu::DrawOpts {
                 font_size: 12.0,
@@ -312,7 +431,7 @@ pub(crate) fn draw_sessions_col(
         );
         g.draw_text(
             x0,
-            body_top + 34.0,
+            y + 34.0,
             if sc.scope_all {
                 "+ 새 방에서 claude나 codex를 시작하면 기록이 생겨요"
             } else {
@@ -325,15 +444,10 @@ pub(crate) fn draw_sessions_col(
                 italic: false,
             },
         );
+        g.pop_clip();
         return;
     }
 
-    // 본문은 여기서부터 시저로 가둔다. 스크롤로 위에 반쯤 걸친 행은 예전엔 통째로
-    // 그려져 범위 칩을 덮었다 — 「화면 밖이면 건너뛴다」로는 **반쯤** 걸친 것을 막을
-    // 수가 없기 때문이다. 루프 **밖**에서 한 번만 세운다: 안에서 세우면 행마다
-    // 세그먼트가 둘씩 쌓여 draw call 이 행 수만큼 는다.
-    g.push_clip(x, body_top, w, vis_h);
-    let mut y = body_top - sc.scroll;
     for (i, s) in sc.view.iter().enumerate() {
         let row_bottom = y + ROW_H;
         // 완전히 밖인 행만 건너뛴다(컬링). 반쯤 걸친 행은 그리고, 삐져나온 픽셀은

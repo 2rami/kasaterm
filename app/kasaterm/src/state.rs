@@ -558,6 +558,19 @@ pub(crate) struct SessionsColState {
     /// 직전 프레임의 본문 영역 — 스크롤 clamp 가 실제 그려진 높이를 알아야 한다.
     pub(crate) body_rect: (f32, f32, f32, f32),
     pub(crate) content_h: f32,
+    /// 「되살리기」(닫아서 물러난 pane) — Info 탭에서 이리로 옮겼다(2026-09-08 지시
+    /// 「인포탭에 너무 많으니까 되살리기는 세션 탭으로」). 지난 대화를 잇는 자리와
+    /// 닫은 pane 을 되돌리는 자리는 같은 물음(「아까 그거」)이라 한 탭에 둔다.
+    pub(crate) closed_collapsed: bool,
+    /// 섹션 머리 rect — 누르면 접고 편다.
+    pub(crate) closed_sec_rect: Option<(f32, f32, f32, f32)>,
+    /// 닫힌 pane 줄의 hit rect `(스택 인덱스, rect)` — 누르면 그 줄만 되살린다.
+    /// 매 paint 재생성(다른 hit target 과 같은 규칙).
+    pub(crate) closed_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// 그 줄의 × `(스택 인덱스, rect)` — 되살리기를 포기하고 **프로세스까지** 끈다.
+    /// 커서가 얹힌 줄에만 생기므로 `closed_rects` 보다 성기고, 겹치는 자리라 클릭
+    /// 판정을 먼저 받아야 한다.
+    pub(crate) closed_kill_rects: Vec<(usize, (f32, f32, f32, f32))>,
 }
 
 impl Default for SessionsColState {
@@ -577,6 +590,10 @@ impl Default for SessionsColState {
             refresh_rect: None,
             body_rect: (0.0, 0.0, 0.0, 0.0),
             content_h: 0.0,
+            closed_collapsed: false,
+            closed_sec_rect: None,
+            closed_rects: Vec::new(),
+            closed_kill_rects: Vec::new(),
         }
     }
 }
@@ -587,9 +604,6 @@ impl Default for SessionsColState {
 pub(crate) enum InfoSection {
     Dir,
     Procs,
-    /// 닫아서 물러난 pane. 되살릴 게 있을 때만 나타나는 섹션이라, 다른 셋과 달리
-    /// 자리를 상시 차지하지 않는다.
-    Closed,
     /// 다른 기계(명부) — 기계별 학생·거울·방 펼치기·화면 보기(machinescol.rs). 명부가 비면 없다.
     Machines,
 }
@@ -702,7 +716,6 @@ pub(crate) struct InfoState {
     pub(crate) root_is_repo: bool,
     pub(crate) dir_collapsed: bool,
     pub(crate) procs_collapsed: bool,
-    pub(crate) closed_collapsed: bool,
     pub(crate) machines_collapsed: bool,
     /// 우클릭 메뉴 — `(화면 좌표, 대상)`.
     /// 열렸으면 (좌상단 x, y, 겨눈 프로세스 pid). pid 를 들고 다니는 건 메뉴가
@@ -730,13 +743,6 @@ pub(crate) struct InfoState {
     /// 방 몇 개만 돼도 화면을 넘겨야 "누가 무슨 포트를 쥐었나"에 닿는다. 접힌 학생도
     /// 포트를 쥔 줄은 남으므로(그리기 참조) 접는다고 서버를 놓치지는 않는다.
     pub(crate) pane_expanded: std::collections::HashSet<String>,
-    /// 닫힌 pane 줄의 hit rect `(스택 인덱스, rect)` — 누르면 그 줄만 되살린다.
-    /// 매 paint 재생성(다른 hit target 과 같은 규칙).
-    pub(crate) closed_rects: Vec<(usize, (f32, f32, f32, f32))>,
-    /// 그 줄의 × `(스택 인덱스, rect)` — 되살리기를 포기하고 **프로세스까지** 끈다.
-    /// 커서가 얹힌 줄에만 생기므로 `closed_rects` 보다 성기고, 겹치는 자리라 클릭
-    /// 판정을 먼저 받아야 한다.
-    pub(crate) closed_kill_rects: Vec<(usize, (f32, f32, f32, f32))>,
     /// 그룹 머리 직전 클릭 `(시각, 열쇠)` — 더블클릭(=그 학생으로 포커스) 판정용.
     /// 한 번 클릭은 접기라, 두 번째 클릭이 접기를 되돌리고 포커스까지 옮긴다.
     pub(crate) last_group_click: Option<(std::time::Instant, String)>,
@@ -789,13 +795,10 @@ impl Default for InfoState {
             root_is_repo: false,
             dir_collapsed: false,
             procs_collapsed: false,
-            closed_collapsed: false,
             machines_collapsed: false,
             ctx_menu: None,
             group_collapsed: std::collections::HashSet::new(),
             pane_expanded: std::collections::HashSet::new(),
-            closed_rects: Vec::new(),
-            closed_kill_rects: Vec::new(),
             last_group_click: None,
             tab_rects: Vec::new(),
             group_rects: Vec::new(),

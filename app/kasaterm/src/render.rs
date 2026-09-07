@@ -8380,12 +8380,10 @@ impl App {
                     g,
                     self.cursor_px,
                     &mut self.info,
-                    &self.closed_panes,
                     git_col_x,
                     git_col_w,
                     body_top,
                     bottom,
-                    frozen_info,
                 );
             }
             // 세션 기록 탭 — git/Info 와 형제 블록. 같은 칼럼·같은 머리를 쓰고
@@ -8416,10 +8414,12 @@ impl App {
                     g,
                     self.cursor_px,
                     &mut self.sessions_col,
+                    &self.closed_panes,
                     git_col_x,
                     git_col_w,
                     body_top,
                     bottom,
+                    frozen_info,
                 );
             }
             // MCP·Skill 탭 — 위 둘과 형제 블록.

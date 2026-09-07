@@ -1462,6 +1462,47 @@ pub(crate) fn peer_sid_by_name(label: &str) -> Option<String> {
     guard.as_ref()?.1.get(label).cloned().flatten()
 }
 
+/// 살아 있는 claude 세션이 `/rename` 으로 붙인 이름 — 명부(`~/.claude/sessions/*.json`)의
+/// `name` 을 sessionId 로 찾는다. transcript 의 custom-title 로 가면 우리 CLI 개명
+/// (`nameSource: user`)이 뒤에 쌓여 `/rename` 을 덮는다(2026-09-08 지적 「/rename은
+/// mobile이잖아」 — pane 에는 학생이 붙인 「폰 미니맵 화면」이 떠 있었다). 명부는 claude
+/// 가 남에게 말하는 자기 이름이라 그쪽이 정본이다. 명부에 없는(끝난) 세션은 None.
+pub(crate) fn peer_name_by_sid(sid: &str) -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    type Cache = Mutex<Option<(Instant, std::collections::HashMap<String, String>)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let sid = sid.trim();
+    if sid.is_empty() {
+        return None;
+    }
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().ok()?;
+    let fresh = guard
+        .as_ref()
+        .is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(2));
+    if !fresh {
+        let mut map = std::collections::HashMap::new();
+        if let Some(rd) = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .and_then(|h| std::fs::read_dir(h.join(".claude/sessions")).ok())
+        {
+            for e in rd.flatten() {
+                let path = e.path();
+                if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                if let (Some(name), Some(id)) = peer_ident_from_json(&text) {
+                    map.insert(id, name);
+                }
+            }
+        }
+        *guard = Some((Instant::now(), map));
+    }
+    guard.as_ref()?.1.get(sid).cloned()
+}
+
 /// 명부 한 바퀴 → 이름별 sessionId. 파일 훑기와 접기를 갈라 둔 것은 검증 때문이다 —
 /// 충돌 규칙이 틀리면 남의 얼굴이 조용히 붙을 뿐 아무 오류도 안 난다.
 fn scan_peer_names() -> std::collections::HashMap<String, Option<String>> {

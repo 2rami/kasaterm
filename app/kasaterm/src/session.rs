@@ -7247,10 +7247,14 @@ impl App {
             // 따로 읽는 건 중복이지만, 캐시를 하나로 묶으면 `struct App` 에 필드가
             // 붙는다(병렬 작업 핫스팟, CLAUDE.md). 같은 파일이라 페이지 캐시가 받는다.
             let (tail, _) = crate::socket::read_tail(&path, WINDOW);
-            let found = tail
-                .lines()
-                .filter_map(kasa_socket::sessions::custom_title_of_line)
-                .last()
+            // 명부의 `/rename` 이름이 먼저다. transcript 꼬리로만 가면 학생이 CLI 로 붙인
+            // 이름이 뒤에 쌓여 사람이 친 `/rename` 을 덮는다(2026-09-08 지적).
+            let found = crate::screenread::peer_name_by_sid(&sid)
+                .or_else(|| {
+                    tail.lines()
+                        .filter_map(kasa_socket::sessions::custom_title_of_line)
+                        .last()
+                })
                 .or_else(|| {
                     // 붙인 이름이 아직 없으면 claude 가 스스로 지은 제목을 쓴다.
                     //

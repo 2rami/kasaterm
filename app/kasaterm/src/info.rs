@@ -2118,11 +2118,11 @@ pub(crate) fn draw_info_actions(
     (y + 9.0, acct_rect)
 }
 
-const ROW_H: f32 = 22.0;
-const SEC_H: f32 = 26.0;
+pub(crate) const ROW_H: f32 = 22.0;
+pub(crate) const SEC_H: f32 = 26.0;
 /// 섹션 본문과 다음 섹션 머리 사이 숨. 없으면 목록 마지막 행과 다음 머리가
 /// 붙어 두 섹션이 한 덩어리로 읽힌다.
-const SEC_GAP: f32 = 8.0;
+pub(crate) const SEC_GAP: f32 = 8.0;
 const HEAD_H: f32 = 30.0;
 /// pane 그룹 머리.
 const GROUP_H: f32 = 24.0;
@@ -2154,16 +2154,10 @@ pub(crate) fn draw_info_col(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     info: &mut state::InfoState,
-    // 되살리기 대기 중인 pane(최근이 뒤). 되살릴 게 있을 때만 나타나는 독립
-    // 섹션이다 — 프로세스 목록 꼬리에 달아 두면 목록이 길 때 통째로 묻히고,
-    // 되돌릴 수 있다는 걸 알리지 않으면 ⌘⇧T 는 아는 사람만 쓰는 기능이 된다.
-    closed: &[crate::ClosedPane],
     x: f32,
     w: f32,
     top: f32,
     bottom: f32,
-    // 되살리기 × 를 연달아 누르는 동안 붙잡아 둘 본문 높이. None = 평소.
-    frozen_content: Option<f32>,
 ) {
     let prof = profiling().then(Instant::now);
     // 커서가 이 안에 있는 동안은 목록을 갈아끼우지 않는다(pump_info 참고).
@@ -2177,8 +2171,6 @@ pub(crate) fn draw_info_col(
     let snap = std::mem::take(&mut info.view);
     info.group_rects.clear();
     info.proc_rects.clear();
-    info.closed_rects.clear();
-    info.closed_kill_rects.clear();
     info.kill_rects.clear();
     info.machine_rects.clear();
     info.machine_pane_rects.clear();
@@ -2228,15 +2220,6 @@ pub(crate) fn draw_info_col(
             h += visible_row_count(info, gp) as f32 * ROW_H;
         }
         h
-    };
-    // 되살릴 게 없으면 섹션 머리조차 안 그린다 — 늘 비어 있는 섹션이 자리를
-    // 차지하면 알려주는 게 없다.
-    let closed_h = if closed.is_empty() {
-        0.0
-    } else if info.closed_collapsed {
-        SEC_H + SEC_GAP
-    } else {
-        SEC_H + closed.len() as f32 * ROW_H + SEC_GAP
     };
     // 끝난 이사의 체크리스트는 잠시 두었다가 걷는다 — 결과를 읽을 시간은 주되,
     // 다음 이사 때까지 옛 것이 남아 있으면 지금 것으로 오독한다.
@@ -2295,13 +2278,9 @@ pub(crate) fn draw_info_col(
             .sum();
         SEC_H + rows + SEC_GAP
     };
-    let content =
-        HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + machines_h + closed_h + 14.0;
+    let content = HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + machines_h + 14.0;
     info.content_h = content;
-    // × 를 연달아 누르는 동안엔 상한을 안 줄인다. 줄이면 스크롤이 그만큼 끌려 올라와
-    // 목록 전체가 밀리고, 다음 × 가 방금 누른 자리에 없다.
-    let limit = frozen_content.unwrap_or(content);
-    info.scroll = info.scroll.clamp(0.0, (limit - (bottom - top)).max(0.0));
+    info.scroll = info.scroll.clamp(0.0, (content - (bottom - top)).max(0.0));
     // 본문 전체를 시저로 가둔다. 지금까지는 섹션·행마다 `y + H > top && y < bottom`
     // 으로 걸렀는데, 그건 **완전히** 밖인 것만 막는다 — 위로 반쯤 걸친 행은 통째로
     // 그려져 탭 줄 위로 올라탔다. 그 검사들은 컬링으로 그대로 남기고(안 남기면
@@ -2653,40 +2632,6 @@ pub(crate) fn draw_info_col(
                 }
             }
         }
-        y += SEC_GAP;
-    }
-
-    // ── 되살리기 ── 최근 닫은 것이 위. 줄을 누르면 그것만, ⌘⇧T 는 언제나
-    // 맨 위(=가장 최근) 것을 되살린다. 되살릴 게 없으면 통째로 없다.
-    if !closed.is_empty() {
-        let r = draw_section(
-            g,
-            cursor,
-            "되살리기",
-            Some(closed.len()),
-            None,
-            info.closed_collapsed,
-            x,
-            w,
-            y,
-            bottom,
-            top,
-        );
-        info.sec_rects.push((state::InfoSection::Closed, r));
-        y += SEC_H;
-        if !info.closed_collapsed {
-            for (i, c) in closed.iter().enumerate().rev() {
-                if y + ROW_H > top && y < bottom {
-                    if let Some(br) =
-                        draw_closed_row(g, cursor, c, i + 1 == closed.len(), x, w, x0, right, y)
-                    {
-                        info.closed_kill_rects.push((i, br));
-                    }
-                }
-                info.closed_rects.push((i, (x, y, w, ROW_H)));
-                y += ROW_H;
-            }
-        }
     }
 
     // ── 히트렉트를 본문과 교집합 ──
@@ -2711,8 +2656,6 @@ pub(crate) fn draw_info_col(
     clip_rects!(info.group_rects, 1);
     clip_rects!(info.proc_rects, 1);
     clip_rects!(info.kill_rects, 1);
-    clip_rects!(info.closed_rects, 1);
-    clip_rects!(info.closed_kill_rects, 1);
     clip_rects!(info.machine_rects, 1);
     clip_rects!(info.machine_pane_rects, 3);
     info.refresh_rect = info.refresh_rect.and_then(|r| g.clip_hit(r));
@@ -2736,14 +2679,14 @@ pub(crate) fn draw_info_col(
     }
 }
 
-fn hit(cursor: (f32, f32), r: &(f32, f32, f32, f32)) -> bool {
+pub(crate) fn hit(cursor: (f32, f32), r: &(f32, f32, f32, f32)) -> bool {
     cursor.0 >= r.0 && cursor.0 <= r.0 + r.2 && cursor.1 >= r.1 && cursor.1 <= r.1 + r.3
 }
 
 /// 접히는 섹션 머리 — 셰브런 + 이름 + (개수 배지 | 상태 배지). 반환값은 클릭
 /// 판정 rect.
 #[allow(clippy::too_many_arguments)]
-fn draw_section(
+pub(crate) fn draw_section(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     label: &str,
@@ -3297,7 +3240,7 @@ fn draw_tab_row(
 /// 두되, 누를 수 있다는 것과 ⌘⇧T 가 **어느 줄**을 되살리는지는 분명해야 한다 —
 /// 스택이 여럿일 때 그 키가 무엇을 꺼낼지 모르면 누르기가 망설여진다.
 #[allow(clippy::too_many_arguments)]
-fn draw_closed_row(
+pub(crate) fn draw_closed_row(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     c: &crate::ClosedPane,

@@ -126,6 +126,7 @@ pub fn recent_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
                 mtime: mtime_secs,
                 cwd: cwd_str.clone(),
                 student: String::new(),
+                parent: String::new(),
             })
         })
         .collect()
@@ -868,6 +869,7 @@ pub fn recent_claude_sessions_all(limit: usize) -> Vec<RecentSession> {
                 cwd,
                 preview: String::new(),
                 student: String::new(),
+                parent: String::new(),
             };
             Some((s, path))
         })
@@ -909,7 +911,8 @@ fn collect_jsonl(dir: &Path, depth: usize, out: &mut Vec<(u64, PathBuf)>) {
 ///
 /// 새 포맷은 모든 필드가 `payload` 아래에 있고 옛 포맷은 최상위에 평면으로 있다.
 /// `payload` 가 있으면 그쪽을, 없으면 자기 자신을 보는 것으로 둘을 한 벌로 읽는다.
-fn codex_head(v: &serde_json::Value) -> (String, String, bool) {
+/// 롤아웃 머리 한 줄 → (id, cwd, exec 인가, 부모 스레드 id, 서브에이전트 스레드인가).
+fn codex_head(v: &serde_json::Value) -> (String, String, bool, String, bool) {
     let p = v.get("payload").unwrap_or(v);
     let s = |k: &str| {
         p.get(k)
@@ -934,7 +937,21 @@ fn codex_head(v: &serde_json::Value) -> (String, String, bool) {
         .and_then(|x| x.as_str())
         .is_some_and(|o| o.contains("exec"))
         || p.get("source").and_then(|x| x.as_str()) == Some("exec");
-    (id, s("cwd"), exec)
+    // 갈래 대화의 부모 — 포크(`forked_from_id`)든 서브에이전트(`parent_thread_id`)든,
+    // 옛 표기(`session_id` 가 부모)든 자기 id 와 다른 첫 값이다.
+    let parent = ["forked_from_id", "parent_thread_id", "session_id"]
+        .into_iter()
+        .map(s)
+        .find(|x| !x.is_empty() && *x != id)
+        .unwrap_or_default();
+    // codex 가 제 일을 나눠 준 서브에이전트 스레드(`source.subagent`). 사람이 시작한
+    // 대화가 아니라 목록에 안 세운다 — 부모의 첫 말을 그대로 물려받아 같은 라벨의
+    // 얼굴 없는 줄이 수십 개 서고(2026-09-08 실측 60개 중 40개), 이어갈 것도 아니다.
+    let subagent = p
+        .get("source")
+        .and_then(|x| x.get("subagent"))
+        .is_some();
+    (id, s("cwd"), exec, parent, subagent)
 }
 
 /// user 롤로 들어왔지만 사람이 한 말이 아닌 것.
@@ -962,6 +979,7 @@ fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
     let f = std::fs::File::open(path).ok()?;
     let mut id = String::new();
     let mut cwd = String::new();
+    let mut parent = String::new();
     let mut label = String::new();
     // 앞 200줄이면 헤더와 첫 사람 발화를 지나친다. 주입 맥락이 서너 줄 앞에
     // 끼므로 옛 코드보다 더 걸어야 하지만, 그래도 파일 앞머리다.
@@ -981,14 +999,15 @@ fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
             continue;
         };
         if id.is_empty() {
-            let (i, c, exec) = codex_head(&v);
+            let (i, c, exec, par, subagent) = codex_head(&v);
             // 이어갈 대화가 아니다. 임시폴더에서 돌고 끝나는데 수가 압도적이라
             // (2026-08 실측 최근 120개 중 113개) 진짜 대화를 목록 밖으로 민다.
-            if exec {
+            if exec || subagent {
                 return None;
             }
             id = i;
             cwd = c;
+            parent = par;
         }
         let p = v.get("payload").unwrap_or(&v);
         if label.is_empty()
@@ -1038,6 +1057,7 @@ fn codex_session_of(path: &Path, mtime: u64) -> Option<RecentSession> {
         cwd,
         preview,
         student: String::new(),
+        parent,
     })
 }
 
@@ -1494,6 +1514,7 @@ pub fn recent_agy_sessions_in(root: &Path, limit: usize) -> Vec<RecentSession> {
                 cwd,
                 preview,
                 student: String::new(),
+                parent: String::new(),
             }
         })
         .collect()

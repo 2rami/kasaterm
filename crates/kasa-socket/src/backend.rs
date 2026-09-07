@@ -93,6 +93,11 @@ pub struct RecentSession {
     /// 빈 문자열로 남는다 — 짐작해 아무나 붙이면 남의 대화가 남의 얼굴로 보인다.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub student: String,
+    /// codex 갈래 대화의 부모 스레드 id(`forked_from_id`/`parent_thread_id`). 갈래는
+    /// 자기 id 로는 학생 표에 없다 — 부모를 맡은 학생이 곧 이 대화의 학생이라, 받은
+    /// 쪽이 이 값으로 한 번 더 찾는다. claude·agy 와 갈래가 아닌 codex 는 빈 문자열.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent: String,
 }
 
 /// Multi-session (tmux-style tab) state for the session panel. `count`
