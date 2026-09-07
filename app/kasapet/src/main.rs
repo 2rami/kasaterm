@@ -241,6 +241,7 @@ impl ApplicationHandler for App {
                     self.next_character();
                     return;
                 }
+                self.touch();
                 if let Some(w) = &self.win { let _ = w.drag_window(); }
             }
             WindowEvent::CursorMoved { position, .. } => { self.cursor = (position.x, position.y); }
@@ -386,22 +387,8 @@ impl App {
         // 공식 샘플의 모션 무리는 `Idle`·`TapBody` 뿐이라 이름으로는 못 고른다.
         // 상태마다 자리를 하나씩 주고, 모델이 가진 수로 나눠 쓴다.
         if !self.motion_files.is_empty() {
-            let f = &self.motion_files[mood.slot() % self.motion_files.len()];
-            self.motion_params = std::fs::read_to_string(f)
-                .ok()
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                .and_then(|v| {
-                    v.get("Curves").and_then(|c| c.as_array()).map(|a| {
-                        a.iter()
-                            .filter(|c| c.get("Target").and_then(|t| t.as_str()) == Some("Parameter"))
-                            .filter_map(|c| c.get("Id").and_then(|i| i.as_str()).map(str::to_string))
-                            .collect()
-                    })
-                })
-                .unwrap_or_default();
-            self.motion = mocari::motion::load_motion(f)
-                .ok()
-                .map(mocari::motion::MotionPlayer::new);
+            let i = mood.slot() % self.motion_files.len();
+            self.play_motion(i, true);
         }
         // 표정은 이름이 없는 모델이 많아(exp_01…) 뜻으로 못 고른다. 있는 만큼만 갈라 쓰고,
         // 없는 모델은 표정 없이 모션으로만 상태를 보인다.
@@ -414,6 +401,40 @@ impl App {
         }
     }
 
+    /// 쓰다듬으면 반응한다 — 마지막 모션 자리를 이 몫으로 둔다. `TapBody` 무리가
+    /// 목록 뒤쪽에 오므로 대개 그 안에서 걸린다.
+    fn touch(&mut self) {
+        self.stirred = std::time::Instant::now();
+        if self.motion_files.is_empty() {
+            return;
+        }
+        // 마지막 자리를 쓰다듬기 몫으로 둔다 — `TapBody` 무리가 목록 뒤쪽에 오므로
+        // 대개 그 안에서 걸린다. 한 번만 돌고 끝나면 원래 상태로 돌아간다.
+        let i = self.motion_files.len() - 1;
+        self.play_motion(i, false);
+    }
+
+    /// 모션을 갈아 끼운다. 파일과 「그 모션이 쥔 파라미터」는 늘 짝이어야 한다 —
+    /// 어긋나면 자동 효과(숨·눈·시선)가 모션과 싸워 고개가 튀고 눈이 깜빡이다 만다.
+    fn play_motion(&mut self, i: usize, looping: bool) {
+        let Some(f) = self.motion_files.get(i).cloned() else { return };
+        self.motion_params = std::fs::read_to_string(&f)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| {
+                v.get("Curves").and_then(|c| c.as_array()).map(|a| {
+                    a.iter()
+                        .filter(|c| c.get("Target").and_then(|t| t.as_str()) == Some("Parameter"))
+                        .filter_map(|c| c.get("Id").and_then(|i| i.as_str()).map(str::to_string))
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        self.motion = mocari::motion::load_motion(&f)
+            .ok()
+            .map(|m| mocari::motion::MotionPlayer::with_looping(m, looping));
+    }
+
     /// 할 말을 글자 텍스처로. 빈 말이면 말풍선이 통째로 사라진다.
     fn rebuild_bubble_text(&mut self) {
         let Some(g) = &self.gfx else { return };
@@ -423,6 +444,10 @@ impl App {
     fn draw(&mut self) {
         self.poll_cursor();
         self.poll_board();
+        // 쓰다듬기처럼 한 번만 도는 모션이 끝났으면 지금 상태로 돌아간다.
+        if self.motion.as_ref().is_some_and(|m| !m.is_looping() && m.is_finished()) {
+            self.apply_mood(self.mood);
+        }
         let dt = self.last.elapsed().as_secs_f32().min(0.1);
         self.last = std::time::Instant::now();
 
