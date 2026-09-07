@@ -34,6 +34,27 @@ use std::path::Path;
 fn main() {
     match run() {
         Ok(Some(resp)) => {
+            // 사람이 터미널에서 직접 쳤으면(`to 나쵸네코` 같은 셰임) JSON 덩어리 대신
+            // 문장 한 줄 — 실패는 그 이유, 성공은 요약/원격 id. 파이프·스크립트엔
+            // 종전대로 wire 응답을 준다(`| jq .result`).
+            use std::io::IsTerminal;
+            if std::io::stdout().is_terminal() {
+                if !resp.ok {
+                    let why = resp.error.as_ref().map(|e| e.message.as_str()).unwrap_or("실패");
+                    eprintln!("{why}");
+                    std::process::exit(1);
+                }
+                let human = resp.result.as_ref().and_then(|r| {
+                    r.get("summary")
+                        .or_else(|| r.get("remote_id"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                });
+                if let Some(line) = human {
+                    println!("{line}");
+                    std::process::exit(0);
+                }
+            }
             // Print the wire response so scripts can `| jq .result`.
             println!("{}", serde_json::to_string(&resp).unwrap());
             std::process::exit(if resp.ok { 0 } else { 1 });

@@ -1609,6 +1609,7 @@ impl App {
         let label = kasa_mcp::machines::label_for_base(base).unwrap_or_else(|| base.to_string());
         let plan = MigratePlan {
             pid: pid.to_string(),
+            label: label.clone(),
             base: base.to_string(),
             remote_cwd,
             cwd: cwd.to_string_lossy().into_owned(),
@@ -9696,6 +9697,8 @@ mod inline_room_selection_tests {
 #[cfg(unix)]
 struct MigratePlan {
     pid: String,
+    /// 명부 라벨 — 오류 문장에 어느 기계인지 박는다.
+    label: String,
     base: String,
     remote_cwd: String,
     cwd: String,
@@ -9756,7 +9759,8 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
                     Some(origin.as_str()),
                     p.branch.as_deref(),
                     None,
-                )?;
+                )
+                .map_err(|e| anyhow::anyhow!("{}({}) 쪽 레포 준비: {e:#}", p.label, p.remote_cwd))?;
                 stage(0, S::Done, what);
             }
             None => stage(0, S::Skipped, "git 레포가 아니라 건너뜀".to_string()),
