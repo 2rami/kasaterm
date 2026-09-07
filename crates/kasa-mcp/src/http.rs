@@ -4312,6 +4312,18 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                     .and_then(|p| p.agent_name.as_deref())
                     .and_then(avatar_slug)
                     .or_else(|| b.and_then(|p| p.character.as_deref()).and_then(crate::character::slug_for_any)),
+                // 폰이 PC 처럼 세 줄(이름·세션 이름 / 제목 / 상태줄)을 그리는 재료
+                // (2026-09-07 지시 「코덱스 학생이랑 우리가 붙인 세션 이름, 상태줄 3개
+                // pc 처럼」). session = `/rename` 으로 붙인 세션 이름(codex 는 없다),
+                // harness = claude/codex, context_pct·branch = 상태줄의 그것.
+                "session": b.and_then(|p| p.peer_name.clone()).filter(|s| !s.is_empty()),
+                "harness": b.and_then(|p| p.harness.clone()),
+                "context_pct": b.map(|p| p.context_pct).filter(|v| *v > 0),
+                "branch": b.and_then(|p| p.branch.clone()).filter(|s| !s.is_empty()),
+                // 모델 표시명(「Fable 5.1 1M」)은 board 가 이미 사람 말로 다듬어 둔 것 —
+                // 아래 `model` 은 실행 설정의 원문(`claude-fable-5-1[1m]`)이라 둘 다 싣는다.
+                "model_label": b.map(|p| p.model.clone()).filter(|s| !s.is_empty()),
+                "effort_label": b.map(|p| p.effort_default.clone()).filter(|s| !s.is_empty()),
                 "window": pane_windows
                     .get(&id)
                     .copied()

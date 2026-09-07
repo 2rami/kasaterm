@@ -27,6 +27,12 @@ class Pane {
     this.waitingFor,
     this.idleSecs,
     this.closed = false,
+    this.session,
+    this.harness,
+    this.contextPct,
+    this.branch,
+    this.modelLabel,
+    this.effortLabel,
   });
 
   final String id;
@@ -53,6 +59,29 @@ class Pane {
 
   /// 닫았지만 살아 있는 pane(데스크톱의 되살리기 목록) — 방에 없다.
   final bool closed;
+
+  /// `/rename` 으로 붙인 세션 이름 — 데스크톱 pane 머리의 그것. codex 는 없다.
+  final String? session;
+
+  /// claude·codex — 상태줄 앞의 작은 로고.
+  final String? harness;
+  final int? contextPct;
+  final String? branch;
+
+  /// 사람 말로 다듬은 모델 이름(「Fable 5.1 1M」)과 effort — 상태줄 재료.
+  final String? modelLabel;
+  final String? effortLabel;
+
+  /// PC 상태줄의 조각들 — 모델 · 브랜치 · 컨텍스트% · effort. 빈 것은 뺀다.
+  List<String> get statusParts => [
+    if ((modelLabel ?? '').isNotEmpty)
+      modelLabel!
+    else if ((model ?? '').isNotEmpty)
+      model!,
+    if ((branch ?? '').isNotEmpty) branch!,
+    if (contextPct != null) '$contextPct%',
+    if ((effortLabel ?? effort ?? '').isNotEmpty) (effortLabel ?? effort)!,
+  ];
 
   /// 사람 손이 필요한가 — 답·승인·질문 어느 쪽이든.
   bool get isWaiting => status == 'waiting' || status == 'blocked';
@@ -105,6 +134,12 @@ class Pane {
     waitingFor: j['waiting_for'] as String?,
     idleSecs: (j['idle_secs'] as num?)?.toInt(),
     closed: j['closed'] == true,
+    session: j['session'] as String?,
+    harness: j['harness'] as String?,
+    contextPct: (j['context_pct'] as num?)?.toInt(),
+    branch: j['branch'] as String?,
+    modelLabel: j['model_label'] as String?,
+    effortLabel: j['effort_label'] as String?,
   );
 }
 

@@ -707,10 +707,30 @@ class _PaneTile extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          pane.displayName,
-                          style: theme.textTheme.titleSmall,
-                          overflow: TextOverflow.ellipsis,
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                pane.displayName,
+                                style: theme.textTheme.titleSmall,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            // 우리가 붙인 세션 이름 — 데스크톱 pane 머리와 같은 자리.
+                            if ((pane.session ?? '').isNotEmpty) ...[
+                              const SizedBox(width: 6),
+                              Flexible(
+                                child: Text(
+                                  pane.session!,
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: scheme.primary,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                         if (pane.subtitle.isNotEmpty)
                           Text(
@@ -721,6 +741,8 @@ class _PaneTile extends StatelessWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
+                        if (pane.statusParts.isNotEmpty)
+                          _StatusLine(pane: pane),
                       ],
                     ),
                   ),
@@ -733,6 +755,66 @@ class _PaneTile extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// PC 상태줄과 같은 조각들 — 하네스 로고 · 모델 · 브랜치 · 컨텍스트% · effort.
+/// 컨텍스트가 많이 찼으면 그 숫자만 주황(경고색은 상태색과 같은 값).
+class _StatusLine extends StatelessWidget {
+  const _StatusLine({required this.pane});
+
+  final Pane pane;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final mute = theme.textTheme.labelSmall?.copyWith(
+      color: scheme.onSurfaceVariant,
+      fontFamily: 'TermMono',
+    );
+    final parts = pane.statusParts;
+    final pct = pane.contextPct;
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(
+        children: [
+          if (pane.harness == 'claude' || pane.harness == 'codex') ...[
+            Image.asset(
+              'assets/icons/${pane.harness}.png',
+              width: 11,
+              height: 11,
+              color: scheme.onSurfaceVariant,
+              errorBuilder: (_, _, _) => const SizedBox.shrink(),
+            ),
+            const SizedBox(width: 4),
+          ],
+          Flexible(
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  for (final (i, p) in parts.indexed) ...[
+                    if (i > 0) const TextSpan(text: '  ·  '),
+                    TextSpan(
+                      text: p,
+                      style: pct != null && p == '$pct%' && pct >= 80
+                          ? TextStyle(
+                              color: StatusStyle.attention,
+                              fontWeight: FontWeight.w700,
+                            )
+                          : null,
+                    ),
+                  ],
+                ],
+              ),
+              style: mute,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
       ),
     );
   }
