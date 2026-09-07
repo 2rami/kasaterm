@@ -7088,6 +7088,9 @@ impl App {
             Ok(port) => {
                 eprintln!("[kasaspace-mcp] HTTP MCP on 127.0.0.1:{port}/mcp");
                 std::env::set_var("KASASPACE_MCP_PORT", port.to_string());
+                // 다른 기계가 `/version` 으로 묻는 빌드 표식 — 앱 build.rs 가 박은
+                // git 리비전. kasa-mcp 는 자기 것이 없어 여기서 넘긴다.
+                kasa_mcp::machines::set_build_id(env!("KASATERM_GIT_REV"));
                 // No MCP auto-discovery: write our address into each AI
                 // client's config so any agent on this machine finds us.
                 kasa_mcp::register_clients(port, CANONICAL_MCP_PORT);

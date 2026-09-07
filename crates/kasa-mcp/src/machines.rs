@@ -63,6 +63,144 @@ pub struct Machine {
     pub key: Option<String>,
     /// `base` 가 이 앱의 자동 터널(`tunnel_loop`)인가 — 그 항목만 터널을 스폰한다.
     pub tunneled: bool,
+    /// 명부 파일이 아니라 **상대가 알려 와서** 생긴 항목(`announce_guest`). 그쪽 ssh 가
+    /// 여기로 되돌아오는 포트(-R)를 열어 두어 이쪽은 ssh 없이도 그 카사텀에 닿는다.
+    /// 알림이 끊기면 저절로 빠지고, 설정 화면에서 고치거나 지울 것이 없다.
+    pub guest: bool,
+}
+
+/// 되돌아오는 포트 — 상대 기계에서 이쪽 카사텀(8765)으로 오는 `-R` 의 번호.
+/// 이쪽 이름에서 결정적으로 뽑아 재시작·고아 ssh 재사용 뒤에도 같은 번호를 알린다
+/// (`-R 0:` 으로 받아 오면 stderr 를 읽어야 하고, 고아를 그대로 쓰는 길에선 번호를
+/// 잃는다). 앞쪽 터널(18900 대)과 겹치지 않게 19000 대.
+pub fn reverse_port(self_label: &str) -> u16 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in self_label.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    19000 + (h % 500) as u16
+}
+
+/// 이 기계가 남에게 알릴 이름 — 컴퓨터 이름(설정 > 공유의 그 이름). 검증용 인스턴스는
+/// `KASATERM_SELF_LABEL` 로 바꿔 단다(두 리그가 같은 이름으로 서로 알리면 한 항목이 된다).
+pub fn self_label() -> String {
+    static L: OnceLock<String> = OnceLock::new();
+    L.get_or_init(|| {
+        if let Ok(v) = std::env::var("KASATERM_SELF_LABEL") {
+            if !v.trim().is_empty() {
+                return v.trim().to_string();
+            }
+        }
+        let by_scutil = std::process::Command::new("scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        by_scutil
+            .or_else(|| {
+                std::process::Command::new("hostname")
+                    .arg("-s")
+                    .output()
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| "이 기계".to_string())
+    })
+    .clone()
+}
+
+/// 지금 도는 판의 빌드 표식. 앱이 부팅 때 git 리비전(`KASATERM_GIT_REV`)을 넣어 준다 —
+/// kasa-mcp 는 자기 build.rs 가 없고, 앱과 같은 워크스페이스 커밋에서 구워지므로 앱의
+/// 것이 곧 이 크레이트의 것이다. 안 넣었으면 크레이트 버전으로 물러선다.
+pub fn set_build_id(id: &str) {
+    let _ = build_slot().set(id.trim().to_string());
+}
+pub fn build_id() -> String {
+    build_slot()
+        .get()
+        .cloned()
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+fn build_slot() -> &'static OnceLock<String> {
+    static B: OnceLock<String> = OnceLock::new();
+    &B
+}
+
+/// 상대가 알려 온 기계. `at` 이 GUEST_STALE 을 넘으면 목록에서 빠진다 — 알림은 상대의
+/// 폴링(5초)마다 오므로, 터널이 죽으면 반 분 안에 사라진다.
+#[derive(Clone)]
+struct Guest {
+    base: String,
+    host: String,
+    home: String,
+    build: String,
+    at: Instant,
+}
+const GUEST_STALE: Duration = Duration::from_secs(30);
+fn guests() -> &'static Mutex<HashMap<String, Guest>> {
+    static G: OnceLock<Mutex<HashMap<String, Guest>>> = OnceLock::new();
+    G.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `POST /machines/announce` 의 본체 — 상대가 「나는 <label>, 이 포트로 오면 된다」고
+/// 알려 온다. 포트는 상대 ssh 가 이 기계에 열어 둔 `-R` 이라 루프백으로 닿는다.
+pub fn announce_guest(label: &str, port: u16, host: &str, home: &str, build: &str) {
+    let label = label.trim();
+    if label.is_empty() || port == 0 {
+        return;
+    }
+    if let Ok(mut g) = guests().lock() {
+        let fresh = !g.contains_key(label);
+        g.insert(
+            label.to_string(),
+            Guest {
+                base: format!("http://127.0.0.1:{port}"),
+                host: host.trim().to_string(),
+                home: home.trim().to_string(),
+                build: build.trim().to_string(),
+                at: Instant::now(),
+            },
+        );
+        if fresh {
+            eprintln!("[machines] {label} 이(가) 알려 옴: 127.0.0.1:{port} (빌드 {build})");
+        }
+    }
+}
+
+/// 알려 온 기계들을 명부 항목으로. 파일 명부와 이름이 겹치면 파일 쪽이 이긴다 —
+/// 손으로 적은 ssh·roots 가 더 많은 것을 안다.
+fn guest_machines(taken: &[String]) -> Vec<Machine> {
+    let Ok(mut g) = guests().lock() else { return Vec::new() };
+    g.retain(|_, v| v.at.elapsed() < GUEST_STALE);
+    let my_home = std::env::var("HOME").unwrap_or_default();
+    g.iter()
+        .filter(|(label, _)| !taken.contains(label))
+        .map(|(label, v)| Machine {
+            label: label.clone(),
+            base: v.base.clone(),
+            host: v.host.clone(),
+            kvm: None,
+            roots: if my_home.is_empty() || v.home.is_empty() {
+                Vec::new()
+            } else {
+                vec![(my_home.clone(), v.home.clone())]
+            },
+            home: false,
+            ssh: None,
+            key: None,
+            tunneled: false,
+            guest: true,
+        })
+        .collect()
+}
+
+/// 알려 온 기계의 빌드 표식(알림에 실려 온 것) — 폴링이 `/version` 을 못 물었을 때의 폴백.
+fn guest_build(label: &str) -> Option<String> {
+    guests().lock().ok()?.get(label).map(|g| g.build.clone())
 }
 
 /// 자동 터널의 로컬 포트 — 라벨에서 결정적으로 뽑는다(파일에 안 적어도 재시작마다
@@ -178,6 +316,7 @@ fn parse(v: &Value) -> Vec<Machine> {
                 ssh,
                 key,
                 tunneled,
+                guest: false,
             })
         })
         .collect()
@@ -399,7 +538,7 @@ fn ensure_meta(target: &str, key: Option<&str>) {
 }
 
 fn tunnel_tick() {
-    let want: Vec<(String, String, u16, Option<String>)> = machines()
+    let want: Vec<(String, String, u16, Option<String>)> = listed_machines()
         .into_iter()
         .filter(|m| m.tunneled)
         .filter_map(|m| Some((m.label.clone(), m.ssh.clone()?, tunnel_port(&m.label), m.key.clone())))
@@ -482,20 +621,39 @@ kill $p 2>/dev/null; wait $p 2>/dev/null",
                 "ConnectTimeout=8",
                 "-L",
                 &format!("{port}:127.0.0.1:8765"),
-                &target,
             ])
+            // 되돌아오는 길도 같이 연다 — 저쪽에서 이쪽 카사텀으로 오는 `-R`. 이 포트를
+            // 폴링이 `/machines/announce` 로 알려 주면 저쪽 명부에 손을 안 대도 그쪽
+            // `to` 에 이 기계가 뜬다(2026-09-07 지시 「안 넣어도 양방향」). 이쪽 MCP
+            // 포트를 아직 모르면(정본 포트를 못 잡은 검증 인스턴스 등) 앞쪽만 연다.
+            .args(
+                local_mcp_port()
+                    .map(|lp| vec!["-R".to_string(), format!("{}:127.0.0.1:{lp}", reverse_port(&self_label()))])
+                    .unwrap_or_default(),
+            )
+            .arg(&target)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();
         match spawned {
             Ok(child) => {
-                eprintln!("[machines] {label} 터널 염: 127.0.0.1:{port} → {target}:8765");
+                eprintln!(
+                    "[machines] {label} 터널 염: 127.0.0.1:{port} → {target}:8765{}",
+                    local_mcp_port()
+                        .map(|lp| format!(" · 되돌아옴 {}→{lp}", reverse_port(&self_label())))
+                        .unwrap_or_default()
+                );
                 t.insert(label, Tunnel { child, target, port });
             }
             Err(e) => eprintln!("[machines] {label} 터널 스폰 실패: {e}"),
         }
     }
+}
+
+/// 이쪽 카사텀의 MCP 포트 — 앱이 서버를 띄우며 env 에 적는다(session.rs).
+fn local_mcp_port() -> Option<u16> {
+    std::env::var("KASASPACE_MCP_PORT").ok()?.parse().ok()
 }
 
 /// 백그라운드 — `ssh` 만 적힌 기계마다 8765 터널을 들고 있는다. 끊기면 8초 뒤
@@ -518,6 +676,15 @@ pub fn stop_tunnels() {
 }
 
 pub fn machines() -> Vec<Machine> {
+    let mut list = listed_machines();
+    let taken: Vec<String> = list.iter().map(|m| m.label.clone()).collect();
+    list.extend(guest_machines(&taken));
+    list
+}
+
+/// 명부 파일(또는 env)의 항목만 — 알려 온 기계는 뺀다. 터널 스폰이 이걸 본다:
+/// 알려 온 기계로는 이쪽이 터널을 들 필요가 없다(그쪽이 이미 들고 있다).
+fn listed_machines() -> Vec<Machine> {
     if let Ok(s) = std::env::var("KASATERM_MACHINES") {
         if let Ok(v) = serde_json::from_str::<Value>(&s) {
             let m = parse(&v);
@@ -586,10 +753,18 @@ pub fn map_remote_to_local(m: &Machine, remote: &str) -> Option<String> {
     hits.into_iter().next()
 }
 
-/// 캐시: 라벨 → (마지막으로 닿은 시각, /term/panes 행들, 싱크 창구 유무).
-/// 셋째 값이 false 면 그 기계의 프로그램이 낡아(repo-sync 창구 없음) 변경 실은
-/// 이사가 선다 — 이사 탭이 「프로그램 낡음」 경고를 그리는 근거다.
-type Cache = HashMap<String, (Instant, Vec<Value>, bool)>;
+/// 캐시: 라벨 → 마지막으로 닿은 시각, /term/panes 행들, 싱크 창구 유무, 그쪽 빌드.
+/// `sync` 가 false 면 그 기계의 프로그램이 낡아(repo-sync 창구 없음) 변경 실은
+/// 이사가 선다 — 이사 탭이 「프로그램 낡음」 경고를 그리는 근거다. `build` 는
+/// `/version` 응답(없는 옛 판이면 None) — 이쪽과 다르면 기계 탭·`to` 가 경고한다.
+#[derive(Clone)]
+struct Seen {
+    at: Instant,
+    panes: Vec<Value>,
+    sync: bool,
+    build: Option<String>,
+}
+type Cache = HashMap<String, Seen>;
 
 fn cache() -> &'static Mutex<Cache> {
     static C: OnceLock<Mutex<Cache>> = OnceLock::new();
@@ -609,6 +784,46 @@ async fn probe_sync(client: &reqwest::Client, base: &str) -> bool {
         Ok(r) => r.status().as_u16() != 404 && r.status().as_u16() != 405,
         Err(_) => true,
     }
+}
+
+/// 그 기계 프로그램의 빌드 표식. 옛 판은 라우트가 없어 None — 「모름」도 경고 대상이다
+/// (같다고 확인된 것만 조용하다).
+async fn fetch_build(client: &reqwest::Client, base: &str) -> Option<String> {
+    let resp = client
+        .get(format!("{base}/version"))
+        .timeout(FETCH_TIMEOUT)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&resp.text().await.ok()?).ok()?;
+    v.get("build")?.as_str().map(str::to_string)
+}
+
+/// 「나는 여기 있다」 — 이쪽이 터널을 든 기계에 이쪽 이름·되돌아오는 포트·빌드를
+/// 알린다. 매 폴링마다 보내는 것이 곧 살아 있다는 신호다(저쪽은 반 분 못 받으면 뺀다).
+async fn announce_to(client: &reqwest::Client, base: &str) {
+    let Some(_) = local_mcp_port() else { return };
+    let body = serde_json::json!({
+        "label": self_label(),
+        "port": reverse_port(&self_label()),
+        "host": std::process::Command::new("hostname")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default(),
+        "home": std::env::var("HOME").unwrap_or_default(),
+        "build": build_id(),
+    });
+    let _ = client
+        .post(format!("{base}/machines/announce"))
+        .timeout(FETCH_TIMEOUT)
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await;
 }
 
 async fn fetch_panes(client: &reqwest::Client, base: &str) -> Option<Vec<Value>> {
@@ -646,8 +861,14 @@ pub async fn poll_loop() {
         for m in &list {
             if let Some(panes) = fetch_panes(&client, &m.base).await {
                 let sync = probe_sync(&client, &m.base).await;
+                let build = fetch_build(&client, &m.base)
+                    .await
+                    .or_else(|| guest_build(&m.label));
                 if let Ok(mut c) = cache().lock() {
-                    c.insert(m.label.clone(), (Instant::now(), panes, sync));
+                    c.insert(m.label.clone(), Seen { at: Instant::now(), panes, sync, build });
+                }
+                if m.tunneled {
+                    announce_to(&client, &m.base).await;
                 }
             }
         }
@@ -662,17 +883,23 @@ pub fn snapshot() -> Vec<Value> {
         .into_iter()
         .map(|m| {
             let hit = c.as_ref().and_then(|c| c.get(&m.label));
-            let age = hit.map(|(at, _, _)| at.elapsed());
+            let age = hit.map(|h| h.at.elapsed());
             let online = age.is_some_and(|a| a < STALE_AFTER);
+            let build = hit.and_then(|h| h.build.clone());
             serde_json::json!({
                 "label": m.label,
                 "base": m.base,
                 "ssh": m.ssh,
+                "guest": m.guest,
                 "online": online,
                 "ago_secs": age.map(|a| a.as_secs()),
-                "sync_capable": hit.map(|(_, _, s)| *s).unwrap_or(true),
+                "sync_capable": hit.map(|h| h.sync).unwrap_or(true),
+                // 빌드 대조 — 같다고 확인된 것만 true. 모르는 것(옛 판·아직 못 물음)은
+                // false 로 두어 경고가 서게 한다. 오프라인이면 물을 게 없어 true.
+                "build": build,
+                "build_match": !online || build.as_deref() == Some(build_id().as_str()),
                 "panes": if online {
-                    hit.map(|(_, p, _)| p.clone()).unwrap_or_default()
+                    hit.map(|h| h.panes.clone()).unwrap_or_default()
                 } else {
                     Vec::new()
                 },
@@ -684,6 +911,32 @@ pub fn snapshot() -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn announced_guest_joins_the_roster_without_a_file_entry() {
+        std::env::set_var("KASATERM_MACHINES", r#"[{"label":"명부","ssh":"listed"}]"#);
+        announce_guest("손님", 19123, "guest.local", "/Users/guest", "abc123");
+        let all = machines();
+        let g = all.iter().find(|m| m.label == "손님").expect("알려 온 기계가 목록에 선다");
+        assert!(g.guest);
+        assert_eq!(g.base, "http://127.0.0.1:19123");
+        assert!(!g.tunneled, "알려 온 기계로는 이쪽이 터널을 들지 않는다");
+        assert!(g.roots.iter().any(|(_, r)| r == "/Users/guest"));
+        // 파일 항목과 이름이 겹치면 파일 쪽이 이긴다.
+        announce_guest("명부", 19124, "", "", "");
+        let listed = machines().into_iter().filter(|m| m.label == "명부").collect::<Vec<_>>();
+        assert_eq!(listed.len(), 1);
+        assert!(!listed[0].guest);
+        std::env::remove_var("KASATERM_MACHINES");
+    }
+
+    #[test]
+    fn reverse_port_is_stable_and_out_of_the_forward_range() {
+        assert_eq!(reverse_port("맥북"), reverse_port("맥북"));
+        let p = reverse_port("맥북");
+        assert!((19000..19500).contains(&p));
+        assert!(!(18900..18990).contains(&tunnel_port("맥북")) || p != tunnel_port("맥북"));
+    }
 
     #[test]
     fn ssh_only_entry_gets_a_tunnel_base() {

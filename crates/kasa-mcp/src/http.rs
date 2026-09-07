@@ -1023,6 +1023,39 @@ async fn machines_handler() -> impl IntoResponse {
     )
 }
 
+/// `GET /version` — 이 프로그램의 판과 빌드 표식. 다른 기계의 폴링이 이걸 물어
+/// 자기 것과 견준다(기계 탭 「빌드 다름」·`to` 경고). 옛 판은 이 라우트가 없어
+/// 404 — 묻는 쪽은 그것도 「다름」으로 친다.
+async fn version_handler() -> impl IntoResponse {
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({
+            "ok": true,
+            "version": env!("CARGO_PKG_VERSION"),
+            "build": crate::machines::build_id(),
+        })),
+    )
+}
+
+/// `POST /machines/announce` body `{label, port, host?, home?, build?}` — 이쪽으로
+/// 터널을 든 기계가 「나는 이 이름, 이 포트로 오면 된다」고 알려 온다. 포트는 그쪽
+/// ssh 가 이 기계에 열어 둔 되돌아오는 길(-R)이라 루프백으로 닿는다. 명부 파일엔
+/// 안 적고 메모리에만 — 알림이 끊기면 반 분 안에 빠진다.
+async fn machines_announce_handler(body: axum::body::Bytes) -> impl IntoResponse {
+    let err = |m: &str| Json(serde_json::json!({ "ok": false, "error": m }));
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return err("JSON body 가 필요해요");
+    };
+    let label = v.get("label").and_then(|x| x.as_str()).unwrap_or_default();
+    let port = v.get("port").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
+    if label.trim().is_empty() || port == 0 {
+        return err("`label` 과 `port` 가 필요해요");
+    }
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default();
+    crate::machines::announce_guest(label, port, s("host"), s("home"), s("build"));
+    Json(serde_json::json!({ "ok": true }))
+}
+
 /// `POST /pane-migrate` body `{pane, target, cwd?, force?}` — 이사를 웹 UI 에서.
 /// `target` 은 기계 라벨 또는 `"local"`(데려오기). 주소·경로 매핑은 여기(서버)가
 /// 푼다 — UI 가 기계의 파일시스템 구조를 알 이유가 없다.
@@ -6605,6 +6638,8 @@ pub fn spawn_http_server_opts(
                         get(move || board_handler(board_backend.clone())),
                     )
                     .route("/machines", get(machines_handler))
+                    .route("/machines/announce", post(machines_announce_handler))
+                    .route("/version", get(version_handler))
                     .route(
                         "/pane-migrate",
                         post(move |body: axum::body::Bytes| {

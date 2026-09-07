@@ -1546,8 +1546,13 @@ impl Backend for PtyBackend {
                 serde_json::json!({
                     "label": m.label,
                     "ssh": m.ssh,
+                    "guest": m.guest,
                     "online": online,
                     "ago_secs": hit.and_then(|v| v.get("ago_secs").and_then(|a| a.as_u64())),
+                    "build": hit.and_then(|v| v.get("build").cloned()),
+                    "build_match": hit
+                        .and_then(|v| v.get("build_match").and_then(|b| b.as_bool()))
+                        .unwrap_or(true),
                     "students": panes.len(),
                     "waiting": waiting,
                     "mirrored": mirrors.get(&m.label).copied().unwrap_or(0),

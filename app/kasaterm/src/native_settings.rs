@@ -3204,6 +3204,41 @@ pub(crate) struct MachineRow {
     pub(crate) online: bool,
     /// 앱이 찾아 적어 둔 ssh 열쇠 파일 이름(없으면 빈값) — 왜 붙는지 보이게.
     pub(crate) key: String,
+    /// 상대가 터널을 들고 알려 온 기계 — 명부 파일에 없어 고치거나 지울 것이 없다.
+    pub(crate) guest: bool,
+}
+
+impl Clone for MachineRow {
+    fn clone(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            ssh: self.ssh.clone(),
+            status: self.status.clone(),
+            online: self.online,
+            key: self.key.clone(),
+            guest: self.guest,
+        }
+    }
+}
+
+/// 살아 있고 빌드가 같아야 「연결됨」 한 마디로 끝난다. 빌드가 다르면(또는 옛 판이라
+/// 표식이 없으면) 그 사실을 배지에 같이 쓴다 — 창구가 다른 판끼리는 `to` 가 창 없는
+/// 셸로 물러서거나 조용히 어긋나므로, 보이는 자리에 서야 한다.
+fn machine_status(online: bool, build_match: bool, ago: Option<u64>) -> String {
+    if online {
+        if build_match {
+            "연결됨".to_string()
+        } else {
+            "연결됨 · 빌드 다름".to_string()
+        }
+    } else {
+        match ago {
+            Some(sec) if sec < 90 => "방금 끊김".to_string(),
+            Some(sec) if sec < 3600 => format!("{}분 전", sec / 60),
+            Some(sec) => format!("{}시간 전", sec / 3600),
+            None => "아직 안 닿음".to_string(),
+        }
+    }
 }
 
 /// 명부와 그 연결 상태를 합쳐 읽는다. 파일과 잠금을 매 프레임 건드리지 않게 잠깐
@@ -3217,21 +3252,12 @@ fn machines_view() -> Vec<MachineRow> {
     if let Ok(g) = cache.lock() {
         if let Some((at, rows)) = g.as_ref() {
             if at.elapsed() < Duration::from_secs(2) {
-                return rows
-                    .iter()
-                    .map(|r| MachineRow {
-                        label: r.label.clone(),
-                        ssh: r.ssh.clone(),
-                        status: r.status.clone(),
-                        online: r.online,
-                        key: r.key.clone(),
-                    })
-                    .collect();
+                return rows.clone();
             }
         }
     }
     let live = kasa_mcp::machines::snapshot();
-    let rows: Vec<MachineRow> = kasa_mcp::machines::entries()
+    let mut rows: Vec<MachineRow> = kasa_mcp::machines::entries()
         .iter()
         .map(|e| {
             let label = e.get("label").and_then(|v| v.as_str()).unwrap_or_default().to_string();
@@ -3260,38 +3286,38 @@ fn machines_view() -> Vec<MachineRow> {
             // 「언제 마지막으로 닿았나」는 「지금 되나」와 다른 물음이다 — 안 닿는
             // 기계가 5분 전엔 됐다는 것과 한 번도 안 됐다는 것은 할 일이 다르다.
             let ago = hit.and_then(|m| m.get("ago_secs")).and_then(|v| v.as_u64());
-            let status = if online {
-                "연결됨".to_string()
-            } else {
-                match ago {
-                    Some(sec) if sec < 90 => "방금 끊김".to_string(),
-                    Some(sec) if sec < 3600 => format!("{}분 전", sec / 60),
-                    Some(sec) => format!("{}시간 전", sec / 3600),
-                    None => "아직 안 닿음".to_string(),
-                }
-            };
+            let build_match = hit
+                .and_then(|m| m.get("build_match"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let status = machine_status(online, build_match, ago);
             let key = e
                 .get("key")
                 .and_then(|v| v.as_str())
                 .and_then(|k| std::path::Path::new(k).file_name())
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_default();
-            MachineRow { label, ssh, status, online, key }
+            MachineRow { label, ssh, status, online, key, guest: false }
         })
         .collect();
+    // 알려 온 기계 — 파일엔 없지만 `to` 에는 뜨므로 여기도 같이 선다. 이름이 파일
+    // 항목과 겹치면 스냅샷이 이미 파일 쪽만 남겼다.
+    for m in live.iter().filter(|m| m.get("guest").and_then(|v| v.as_bool()).unwrap_or(false)) {
+        let label = m.get("label").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let online = m.get("online").and_then(|v| v.as_bool()).unwrap_or(false);
+        let ago = m.get("ago_secs").and_then(|v| v.as_u64());
+        let build_match = m.get("build_match").and_then(|v| v.as_bool()).unwrap_or(true);
+        rows.push(MachineRow {
+            label,
+            ssh: "그쪽이 터널로 열어 둔 길 — 이 기계 명부엔 안 적혀요".to_string(),
+            status: machine_status(online, build_match, ago),
+            online,
+            key: String::new(),
+            guest: true,
+        });
+    }
     if let Ok(mut g) = cache.lock() {
-        *g = Some((
-            Instant::now(),
-            rows.iter()
-                .map(|r| MachineRow {
-                    label: r.label.clone(),
-                    ssh: r.ssh.clone(),
-                    status: r.status.clone(),
-                    online: r.online,
-                    key: r.key.clone(),
-                })
-                .collect(),
-        ));
+        *g = Some((Instant::now(), rows.clone()));
     }
     rows
 }
@@ -3655,6 +3681,11 @@ fn machine_row(
                 },
                 false,
             );
+            // 알려 온 기계는 고칠 칸도 지울 항목도 없다 — 저쪽이 알림을 끊으면 빠진다.
+            if m.guest {
+                *y += rect.3 + 6.0;
+                return;
+            }
             // 줄 아무 데나 누르면 이름 칸부터 고친다 — 연필을 따로 찾지 않아도 된다.
             register_clipped(
                 g,

@@ -257,6 +257,12 @@ fn run() -> Result<Option<Response>> {
                 if n("mirrored") > 0 {
                     s.push_str(&format!(" · 거울 {}", n("mirrored")));
                 }
+                if m.get("guest").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    s.push_str(" · 그쪽이 열어 둔 길");
+                }
+                if !m.get("build_match").and_then(|v| v.as_bool()).unwrap_or(true) {
+                    s.push_str(" · 빌드 다름");
+                }
                 s
             };
             let mark = if label == here { "*" } else { " " };
@@ -1344,6 +1350,36 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                         .ok()
                         .filter(|s| !s.is_empty())
                 });
+            // 붙기 전에 빌드를 견준다 — 저쪽 프로그램이 다른 판이면 새 창구가 없어
+            // 창 없는 셸로 물러서거나 조용히 어긋난다. 막지는 않고 한 줄만 알린다.
+            if let Ok(sp) = resolve_socket_path() {
+                if let Ok(resp) = roundtrip(
+                    &sp,
+                    &Request {
+                        id: "machines".into(),
+                        method: "machine.list".into(),
+                        params: json!({ "from": from }),
+                    },
+                ) {
+                    let rows = resp
+                        .result
+                        .and_then(|r| r.get("machines").and_then(|v| v.as_array()).cloned())
+                        .unwrap_or_default();
+                    if let Some(m) = rows
+                        .iter()
+                        .find(|m| m.get("label").and_then(|v| v.as_str()) == Some(base.as_str()))
+                    {
+                        let online = m.get("online").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let same = m.get("build_match").and_then(|v| v.as_bool()).unwrap_or(true);
+                        if online && !same {
+                            eprintln!(
+                                "⚠ {base} 의 카사텀 빌드가 이쪽과 달라요({}) — 새 판을 부치세요(scripts/sync-mini.sh)",
+                                m.get("build").and_then(|v| v.as_str()).unwrap_or("옛 판, 표식 없음")
+                            );
+                        }
+                    }
+                }
+            }
             (
                 "surface.remote",
                 json!({ "base": base, "cwd": flagval("--cwd"), "pane": flagval("--attach"), "from": from, "here": here, "run": flagval("--run") }),
