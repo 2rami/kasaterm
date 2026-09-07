@@ -540,15 +540,6 @@ pub trait Backend: Send + Sync {
         focus: bool,
         from: Option<&str>,
     ) -> Result<SurfaceInfo>;
-    /// 활성 방에 **맨 셸 pane** 하나 — 캐릭터도 코딩 프로그램도 없이. 다른 기계의
-    /// `to <이 기계>` 가 자기 pane 으로 비출 자리를 세우는 창구다(창 없는
-    /// `/term/spawn` 과 달리 이 창에 진짜로 보인다). GUI 백엔드 전용.
-    ///
-    /// 돌려주는 것은 새 pane 의 surface id. 빈 문자열이면 세울 자리가 없었다는
-    /// 뜻이라 부르는 쪽이 그것도 실패로 읽는다.
-    fn spawn_shell(&self, _cwd: Option<&str>) -> Result<String> {
-        anyhow::bail!("spawn_shell: 이 백엔드는 지원하지 않는다")
-    }
     /// pane 의 PTY 를 로컬 상주 데몬으로 **무중단 이관**(승격). GUI 백엔드 전용.
     fn promote_pane(&self, _pane: &str) -> Result<String> {
         anyhow::bail!("promote: 이 백엔드는 지원하지 않는다")
