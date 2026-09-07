@@ -587,7 +587,8 @@ pub trait Backend: Send + Sync {
     /// 원격 PTY 호스트(`kasa-serve-web`)의 세션을 이 창의 pane 으로 앉힌다 —
     /// 스폰(`pane` 없음) 또는 이어받기(`pane` = `web-…`). GUI 백엔드만 구현한다.
     /// `here` 면 기준 pane 옆에 새로 쪼개지 않고 **그 pane 자체**를 원격 셸의
-    /// 거울로 갈아끼운다(`mini` 한 마디 = 이 자리가 맥미니 터미널).
+    /// 거울로 갈아끼운다(`to <기계>` 한 마디 = 이 자리가 그 기계의 터미널).
+    /// `run` 이 있으면 앉힌 셸에 그 명령을 한 줄 쳐 준다(`to <기계> codex`).
     fn remote_pane(
         &self,
         _base: &str,
@@ -595,6 +596,7 @@ pub trait Backend: Send + Sync {
         _pane: Option<&str>,
         _from: Option<&str>,
         _here: bool,
+        _run: Option<&str>,
     ) -> Result<SurfaceInfo> {
         anyhow::bail!("remote_pane: 이 백엔드는 원격 pane 을 지원하지 않는다")
     }

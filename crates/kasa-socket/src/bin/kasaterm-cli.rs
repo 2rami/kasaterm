@@ -1312,7 +1312,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             let mut i = 0usize;
             while i < args.len() {
                 let a = &args[i];
-                if a == "--cwd" || a == "--attach" {
+                if a == "--cwd" || a == "--attach" || a == "--run" {
                     i += 2;
                     continue;
                 }
@@ -1324,7 +1324,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 i += 1;
             }
             let base = positional.first().cloned().ok_or_else(|| {
-                anyhow!("remote 는 호스트 주소나 기계 이름이 필요해요 (예: remote mini --here · remote http://127.0.0.1:18766 --cwd /Users/miku)")
+                anyhow!("remote 는 호스트 주소나 기계 이름이 필요해요 (예: remote 나쵸네코 --here · remote 나쵸네코 --here --run codex · remote http://127.0.0.1:18766 --cwd /Users/miku)")
             })?;
             // `--here` — 옆에 쪼개지 않고 기준 pane 자체를 거울로 갈아끼운다. 그 pane
             // 의 셸에서 부른 것이면 이 프로세스도 셸과 함께 걷히므로 회신은 안 온다.
@@ -1346,7 +1346,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 });
             (
                 "surface.remote",
-                json!({ "base": base, "cwd": flagval("--cwd"), "pane": flagval("--attach"), "from": from, "here": here }),
+                json!({ "base": base, "cwd": flagval("--cwd"), "pane": flagval("--attach"), "from": from, "here": here, "run": flagval("--run") }),
             )
         }
         // 쪼개지 않고 **이 pane 안에** 새 탭. 학생을 더 띄워도 화면이 안 줄어든다.

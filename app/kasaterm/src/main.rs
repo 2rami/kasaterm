@@ -3559,6 +3559,7 @@ enum UserEvent {
         Option<String>,
         Option<String>,
         bool,
+        Option<String>,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
     /// pane 을 로컬 상주 데몬으로 **무중단 승격** — (pane, 회신=원격 세션 id).
@@ -7527,10 +7528,15 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
         return;
     }
     // `to` — 기계 사이를 cd 처럼 오간다(2026-09-07 지시 「cd·ls 처럼 하고 싶은데」,
-    // 동사는 거노가 `to` 로 골랐다). `to` = ls(명부, 여기가 어디인지 *), `to <기계>`
-    // = cd(이 pane 을 그 기계로 — 새 셸이면 거기서 학생이 태어나고 도는 학생이면
-    // 이사), `to <기계> <명령...>` 은 그 명령을 저쪽에서(to nacho codex), `to ..` 는
-    // 이 기계로 돌아오기. 옛 `mini`·`book` 두 낱말이 이 하나로 합쳐졌다.
+    // 동사는 2026-09-07 지시로 `to`). `to` = ls(명부, 여기가 어디인지 *), `to <기계>`
+    // = cd(이 pane 을 그 기계의 셸 거울로 — 레포를 안 건드린다), `to <기계> <명령...>`
+    // 은 그 셸에서 그 명령을(to nacho codex), `to ..` 는 이 기계로 돌아오기. 옛
+    // `mini`·`book` 두 낱말이 이 하나로 합쳐졌다.
+    //
+    // `to <기계>` 는 **이사(`migrate`)가 아니라 거울(`remote --here`)** 이다 — 처음엔
+    // 이사에 물려 있어서 저쪽 레포를 맞추다 「커밋 안 한 변경」에 막혀 셸 하나도 못
+    // 열었다(2026-09-07 지적 「그냥 미러링인데 왜 안닿았던거야?」). 도는 학생을
+    // 통째로 옮기는 것은 Info 의 이사 메뉴가 한다.
     //
     // `..` 는 원격 셸 거울 **안에서** 치는 것이라 명령이 저쪽 기계에서 돈다 — 그래서
     // 소켓을 부르지 않고 예약 알림 마커(OSC 777)만 뱉는다. 그 pane 을 소유한 앱
@@ -7547,16 +7553,16 @@ case \"$1\" in\n\
   ..) printf '\\033]777;notify;{};\\033\\\\'; exit 0 ;;\n\
   -h|--help)\n\
     echo 'to                    기계 목록 (여기가 어디인지 *)'\n\
-    echo 'to <기계>             이 pane 을 그 기계로 (새 셸이면 거기서 claude 가 뜬다)'\n\
-    echo 'to <기계> <명령...>   그 명령을 저쪽에서 (to nacho codex)'\n\
+    echo 'to <기계>             이 pane 을 그 기계의 셸로 (거울 — 레포는 안 건드림)'\n\
+    echo 'to <기계> <명령...>   그 셸에서 그 명령을 (to nacho codex)'\n\
     echo 'to ..                 이 기계로 돌아오기'\n\
     exit 0 ;;\n\
 esac\n\
 M=$1; shift\n\
 if [ $# -eq 0 ]; then\n\
-  exec kasaterm-cli migrate \"$M\" ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}}\n\
+  exec kasaterm-cli remote \"$M\" --here ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}}\n\
 fi\n\
-exec kasaterm-cli migrate \"$M\" ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} --run \"$*\"\n",
+exec kasaterm-cli remote \"$M\" --here ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} --run \"$*\"\n",
             crate::BRING_HOME_MARKER
         );
         if let Err(e) = write_shim(&shim_dir.join("to"), to) {

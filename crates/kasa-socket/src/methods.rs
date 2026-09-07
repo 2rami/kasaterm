@@ -953,7 +953,12 @@ fn surface_remote(backend: &dyn Backend, id: Value, params: &Value) -> Response 
     let pane = params.get("pane").and_then(|v| v.as_str());
     let from = params.get("from").and_then(|v| v.as_str());
     let here = params.get("here").and_then(|v| v.as_bool()).unwrap_or(false);
-    match backend.remote_pane(base, cwd, pane, from, here) {
+    let run = params
+        .get("run")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match backend.remote_pane(base, cwd, pane, from, here, run) {
         Ok(s) => Response::success(id, json!({"surface": s})),
         Err(e) => backend_err(id, e),
     }

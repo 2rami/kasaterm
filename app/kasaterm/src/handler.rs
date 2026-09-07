@@ -346,7 +346,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::SocketRemotePane(base, cwd, rpane, from, here, reply) => {
+            UserEvent::SocketRemotePane(base, cwd, rpane, from, here, run, reply) => {
                 // 주소 대신 기계 **이름**(「나쵸네코」)이나 별칭 `mini`/`home`(본진)도
                 // 받는다 — `mini` 셰임이 주소를 외울 필요가 없게. 이름이면 명부에서
                 // 주소를 찾고, cwd 가 없으면 기준 pane 의 폴더를 roots 로 옮긴다.
@@ -384,14 +384,25 @@ impl ApplicationHandler<UserEvent> for App {
                         });
                         (m.base, cwd)
                     };
-                    if *here {
+                    let pid = if *here {
                         let pid = from
                             .as_deref()
                             .ok_or_else(|| anyhow::anyhow!("--here 는 기준 pane 이 있어야 한다"))?;
-                        self.remote_shell_here(pid, &base, cwd.as_deref())
+                        self.remote_shell_here(pid, &base, cwd.as_deref())?
                     } else {
-                        self.spawn_remote_pane(&base, cwd.as_deref(), rpane.as_deref(), from.as_deref())
+                        self.spawn_remote_pane(&base, cwd.as_deref(), rpane.as_deref(), from.as_deref())?
+                    };
+                    // `to <기계> <명령>` — 거울이 앉은 뒤 그 셸에 명령 한 줄. 부른 쪽
+                    // 셸은 스왑과 함께 걷히므로 여기서 대신 쳐야 한다. 이사(`migrate`)
+                    // 처럼 레포를 맞추지 않는다 — 거울은 저쪽 폴더를 그대로 쓴다.
+                    if let Some(cmd) = run.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                        if let Some(sess) = self.pty.get(&pid).cloned() {
+                            let at = std::time::Instant::now()
+                                + std::time::Duration::from_millis(900);
+                            self.pending_restores.push((sess, format!("{cmd}\r"), at));
+                        }
                     }
+                    anyhow::Ok(pid)
                 })()
                 .map_err(|e| format!("{e:#}"));
                 if let Err(ref why) = outcome {
