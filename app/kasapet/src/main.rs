@@ -68,6 +68,13 @@ struct App {
     bubble_text: Option<(wgpu::TextureView, f32, f32)>,
     /// 글자 크기(pt). 설정 화면이 `pet/text_pt` 에 적어 두면 그것을 따른다.
     text_pt: f32,
+    /// 지금 말풍선이 가리키는 pane — 되받아 말하면 이리로 간다.
+    subject: String,
+    /// 말 거는 중이면 친 글. None 이면 평소처럼 듣기만 한다.
+    typing: Option<String>,
+    typed_tex: Option<(wgpu::TextureView, f32, f32)>,
+    /// 조합 중인 한글. 확정 전이라 `typing` 에 아직 안 붙은 글자다.
+    preedit: String,
     /// 모델의 맨 윗점(모델 좌표). 말풍선이 이 점을 따라다녀 몸이 흔들리면 함께 흔들린다.
     head: (f32, f32),
     /// 그림이 실제로 차지하는 범위. 모델이 선언한 캔버스보다 큰 경우가 흔해(마오는 모자가
@@ -286,8 +293,57 @@ impl ApplicationHandler for App {
                     self.save_state();
                 }
             }
-            // 오른쪽 단추 = 끝내기(장식이 없어 닫기 단추가 없다).
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => el.exit(),
+            // 오른쪽 단추 = 말 걸기. 끄기는 하단바 칩과 설정 「펫」 칸에 있으므로 이
+            // 자리를 그쪽에 내줬다 — 창에 대고 말할 길이 아예 없던 것이 더 아쉬웠다.
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
+                self.toggle_typing();
+            }
+            // 친 글자. 포커스를 받은 동안에만 온다(말 걸기를 열 때만 키 창이 된다).
+            WindowEvent::KeyboardInput { event, .. } if self.typing.is_some() => {
+                use winit::keyboard::{Key, NamedKey};
+                if event.state != ElementState::Pressed {
+                    return;
+                }
+                match &event.logical_key {
+                    Key::Named(NamedKey::Escape) => self.toggle_typing(),
+                    Key::Named(NamedKey::Enter) => self.send_typed(),
+                    Key::Named(NamedKey::Backspace) => {
+                        if let Some(t) = self.typing.as_mut() {
+                            t.pop();
+                        }
+                        self.rebuild_typed();
+                    }
+                    Key::Named(NamedKey::Space) => {
+                        if let Some(t) = self.typing.as_mut() {
+                            t.push(' ');
+                        }
+                        self.rebuild_typed();
+                    }
+                    _ => {
+                        if let Some(txt) = event.text.as_ref() {
+                            if let Some(t) = self.typing.as_mut() {
+                                t.push_str(txt);
+                            }
+                            self.rebuild_typed();
+                        }
+                    }
+                }
+            }
+            // 한글 조합 — 조합 중인 글자를 그대로 보여 주고, 확정되면 붙인다.
+            WindowEvent::Ime(ime) if self.typing.is_some() => {
+                use winit::event::Ime;
+                match ime {
+                    Ime::Commit(txt) => {
+                        if let Some(t) = self.typing.as_mut() {
+                            t.push_str(&txt);
+                        }
+                        self.preedit.clear();
+                    }
+                    Ime::Preedit(txt, _) => self.preedit = txt,
+                    _ => {}
+                }
+                self.rebuild_typed();
+            }
             WindowEvent::RedrawRequested => self.draw(),
             _ => {}
         }
@@ -389,6 +445,57 @@ impl App {
         hit
     }
 
+    /// 말 걸기를 열고 닫는다. 열 때만 창이 키를 받는다 — 평소에 포커스를 쥐면
+    /// 남의 타이핑에 끼어든다(그게 `with_active(false)` 의 전부다).
+    fn toggle_typing(&mut self) {
+        if self.typing.is_some() {
+            self.typing = None;
+            self.preedit.clear();
+            self.typed_tex = None;
+            if let Some(w) = &self.win {
+                w.set_ime_allowed(false);
+            }
+            resign_key();
+            return;
+        }
+        self.typing = Some(String::new());
+        if let Some(w) = &self.win {
+            w.set_ime_allowed(true);
+            w.focus_window();
+        }
+        self.rebuild_typed();
+    }
+
+    /// 친 글을 그 캐릭터의 pane 으로 보낸다. 보내는 길은 사람이 쓰는 것과 **같은
+    /// 명령**이다 — 따로 두면 한쪽만 고쳐지는 날이 온다.
+    fn send_typed(&mut self) {
+        let text = self.typing.clone().unwrap_or_default();
+        let text = text.trim().to_string();
+        if text.is_empty() || self.subject.is_empty() {
+            self.toggle_typing();
+            return;
+        }
+        if let Some(cli) = cli_path() {
+            let _ = std::process::Command::new(cli)
+                .arg("send")
+                .arg("--surface")
+                .arg(&self.subject)
+                .arg(format!("{text}\n"))
+                .status();
+        }
+        self.toggle_typing();
+    }
+
+    fn rebuild_typed(&mut self) {
+        let Some(g) = &self.gfx else { return };
+        let body = format!(
+            "› {}{}",
+            self.typing.clone().unwrap_or_default(),
+            self.preedit
+        );
+        self.typed_tex = bubble::render_text(&g.dev, &g.q, &body, 260.0, self.text_pt);
+    }
+
     /// 자리와 크기를 남긴다. 펫은 켤 때마다 같은 데서 뜨는 편이 자연스럽고,
     /// 매번 왼쪽 위로 돌아가면 옮긴 일이 헛일이 된다.
     fn save_state(&self) {
@@ -454,7 +561,8 @@ impl App {
             return;
         }
         self.board_seen = m;
-        let (mood, text) = board::read(&f);
+        let (mood, text, pane) = board::read(&f);
+        self.subject = pane;
         self.stirred = std::time::Instant::now();
         if text != self.say {
             self.say = text;
@@ -765,6 +873,36 @@ impl App {
                 rp.set_vertex_buffer(0, g.bubble_vb.slice(..));
                 rp.draw(0..6, 0..1);
             }
+            // 말 걸기 줄 — 캐릭터 발치에. 머리 위는 펫이 말하는 자리라 겹치면
+            // 누가 한 말인지 안 갈린다.
+            if let Some((tv, tw, th)) = &self.typed_tex {
+                let win = self.win.as_ref().map(|w| w.inner_size()).unwrap_or_default();
+                let sf = self.win.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
+                let (sw, sh) = (win.width.max(1) as f32 / sf, win.height.max(1) as f32 / sf);
+                let (px, py) = (2.0 / sw, 2.0 / sh);
+                let (w2, h2) = (*tw * px, *th * py);
+                let x0 = (-w2 / 2.0).max(-1.0);
+                let y0 = -1.0 + h2 + 8.0 * py;
+                let (x1, y1) = (x0 + w2, y0 - h2);
+                let quad = [
+                    V { p: [x0, y0], uv: [0.0, 0.0] },
+                    V { p: [x1, y0], uv: [1.0, 0.0] },
+                    V { p: [x0, y1], uv: [0.0, 1.0] },
+                    V { p: [x1, y0], uv: [1.0, 0.0] },
+                    V { p: [x1, y1], uv: [1.0, 1.0] },
+                    V { p: [x0, y1], uv: [0.0, 1.0] },
+                ];
+                g.q.write_buffer(&g.bubble_vb, 0, bytemuck::cast_slice(&quad));
+                let mut m = [0.0f32; 16];
+                m[0] = 1.0; m[5] = 1.0; m[10] = 1.0; m[15] = 1.0;
+                let u = Xf { mvp: m, mask_mtx: m, channel: [0.0; 4], opacity: 1.0, use_mask: 0.0, inverted: 0.0, _pad: 0.0 };
+                g.q.write_buffer(&g.bubble_ub, 0, bytemuck::bytes_of(&u));
+                let bg = bind(&g.bubble_ub, tv, &g.dummy_view);
+                rp.set_pipeline(&g.p_plain);
+                rp.set_bind_group(0, &bg, &[]);
+                rp.set_vertex_buffer(0, g.bubble_vb.slice(..));
+                rp.draw(0..6, 0..1);
+            }
         }
         g.q.submit([enc.finish()]);
         self.frames += 1;
@@ -920,6 +1058,34 @@ fn look_override() -> Option<(f32, f32)> {
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
+/// `kasaterm-cli` 자리 — 펫 옆(번들 Resources) 아니면 PATH.
+fn cli_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let beside = exe.parent().map(|d| d.join("kasaterm-cli"));
+    let macos = exe
+        .parent()
+        .and_then(|d| d.parent())
+        .map(|c| c.join("MacOS/kasaterm-cli"));
+    beside
+        .into_iter()
+        .chain(macos)
+        .find(|p| p.is_file())
+        .or_else(|| Some(std::path::PathBuf::from("kasaterm-cli")))
+}
+
+/// 키 창 자리를 내려놓는다 — 말 걸기를 닫으면 곧바로 하던 창으로 돌아가야 한다.
+#[cfg(target_os = "macos")]
+fn resign_key() {
+    use objc2_app_kit::NSApplication;
+    if let Some(mtm) = objc2_foundation::MainThreadMarker::new() {
+        // `hide` 를 쓰면 펫 창까지 사라진다 — 자리만 내려놓는다.
+        NSApplication::sharedApplication(mtm).deactivate();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resign_key() {}
+
 /// 손 모양 커서를 씌우거나 화살표로 되돌린다.
 ///
 /// 창에 매달지 않고 직접 지운다 — 포커스를 안 받는 창이라 macOS 가 그 창의 커서
@@ -1045,7 +1211,7 @@ fn main() {
         alpha: wgpu::CompositeAlphaMode::Auto, cursor: (0.0, 0.0), pet_dir, name, last_click: None, on_body: false, local: None,
         mood: board::Mood::Idle, say: String::new(), board_seen: None,
         board_polled: std::time::Instant::now(), stirred: std::time::Instant::now(),
-        bubble_text: None, text_pt: bubble::FONT_PT, head: (0.0, 0.0), bbox: None,
+        bubble_text: None, text_pt: bubble::FONT_PT, subject: String::new(), typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
         motion_files, motion_idx: 0, expr_files, exprs: mocari::expression::ExpressionManager::new(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
         shot_path: std::env::var("KASAPET_SHOT").ok(),

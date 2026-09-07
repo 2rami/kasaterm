@@ -45,20 +45,22 @@ impl Mood {
 }
 
 /// 파일 한 장을 읽어 상태와 할 말로. 파일이 없거나 깨졌으면 조용한 것으로 친다.
-pub fn read(path: &std::path::Path) -> (Mood, String) {
+pub fn read(path: &std::path::Path) -> (Mood, String, String) {
     let Ok(t) = std::fs::read_to_string(path) else {
-        return (Mood::Idle, String::new());
+        return (Mood::Idle, String::new(), String::new());
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
-        return (Mood::Idle, String::new());
+        return (Mood::Idle, String::new(), String::new());
     };
     let mood = Mood::parse(v.get("state").and_then(|s| s.as_str()).unwrap_or(""));
-    let text = v
-        .get("text")
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
-    (mood, text)
+    let str_of = |k: &str| {
+        v.get(k)
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    // 지금 누구 이야기인지 — 되받아 말할 때 그 pane 으로 보낸다.
+    (mood, str_of("text"), str_of("pane"))
 }
 
 /// 오래 조용하면 잠든다. 8분은 대화 탭이 「먼저 말 걸기」에 쓰는 것과 같은 기준이라
@@ -71,9 +73,10 @@ mod tests {
 
     #[test]
     fn missing_or_broken_file_reads_as_quiet() {
-        let (m, t) = read(std::path::Path::new("/그런/파일/없다.json"));
+        let (m, t, pane) = read(std::path::Path::new("/그런/파일/없다.json"));
         assert_eq!(m, Mood::Idle);
         assert!(t.is_empty());
+        assert!(pane.is_empty());
     }
 
     #[test]
