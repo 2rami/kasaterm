@@ -4025,6 +4025,33 @@ impl App {
                 self.active_window -= 1;
             }
         }
+        // 뒤쪽 방의 인덱스가 한 칸 당겨지므로 인덱스를 키로 쓰는 chrome 상태도
+        // 같이 옮긴다 — 설정·보드 방을 닫을 때와 같은 규칙이다. 안 옮기면 닫은
+        // 방의 펼침·알림·이름이 다음 방에 그대로 얹혀, 엉뚱한 방이 펴져 있거나
+        // 남의 이름을 달고 있었다.
+        let remap = |i: usize| crate::internal_room::remap_after_removal(i, idx).unwrap_or(0);
+        self.window_name_override = std::mem::take(&mut self.window_name_override)
+            .into_iter()
+            .filter(|(i, _)| *i != idx)
+            .map(|(i, name)| (remap(i), name))
+            .collect();
+        self.window_alert = std::mem::take(&mut self.window_alert)
+            .into_iter()
+            .filter(|i| *i != idx)
+            .map(remap)
+            .collect();
+        self.expanded_windows = std::mem::take(&mut self.expanded_windows)
+            .into_iter()
+            .filter(|i| *i != idx)
+            .map(remap)
+            .collect();
+        self.expand_anim = self
+            .expand_anim
+            .filter(|(i, _, _)| *i != idx)
+            .map(|(i, opening, at)| (remap(i), opening, at));
+        for closed in &mut self.closed_panes {
+            closed.window = remap(closed.window);
+        }
         // 픽셀 스크롤이라 인덱스를 당길 것이 없다 — 닫는 동안은 `close_freeze` 가
         // 그 위치를 붙잡고, 범위 밖 값은 `sidebar_layout` 이 클램프한다.
         // 여기서 활성 방을 보이게 끌어오지 않는다 — 방을 하나 닫을 때마다 목록이
@@ -5192,6 +5219,14 @@ impl App {
     /// 배치 루프와 스크롤 한계가 **같은 값**을 봐야 한다. 갈라지면 스크롤은 되는데
     /// 목록 끝이 영영 안 나오는 종류로 어긋난다 — 실제로 그랬다(아래 참조).
     fn sidebar_card_metrics(&self, i: usize) -> (f32, f32, Vec<String>) {
+        // 설정·보드 카드는 펴지 않는다. 배치도는 「어느 학생이 어디 있나」를 그리는
+        // 자리인데 내부 방의 leaf 는 화면 표식 하나뿐이라, 펴면 아이콘 한 칸짜리
+        // 빈 지도가 남는다(2026-09-07 지적 「설정창 방미니맵 그건 필요없으니까」).
+        // 배지가 없어 손으로는 못 펴지만, 방을 닫거나 옮기며 인덱스가 당겨지면
+        // 옆 방의 펼침 상태를 물려받아 저절로 펴졌다.
+        if self.internal_room_kind_at(i).is_some() {
+            return (0.0, 0.0, Vec::new());
+        }
         let leaves = self.window_leaves(i);
         // 숨긴 pane 은 트리에 없어 배치도에 칸이 없다 — 지도 아래 꼬리 줄로 둔다.
         // 어디에도 안 보이면 되살릴 길이 없고, 트리에서 빠졌을 뿐 PTY 는 돈다.

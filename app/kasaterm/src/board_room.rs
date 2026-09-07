@@ -79,7 +79,7 @@ impl App {
 
         let mut tab = PaneTab::default();
         tab.content = PaneContent::Board;
-        tab.title = Some("Board".to_string());
+        tab.title = Some(crate::internal_room::InternalRoomKind::Board.label().to_string());
         tab.title_pinned = true;
         let pane = PaneState {
             tabs: vec![tab],

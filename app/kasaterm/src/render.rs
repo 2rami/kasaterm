@@ -3405,6 +3405,17 @@ impl App {
             .flatten();
         self.refresh_window_labels();
         let sb_labels = self.window_labels.clone();
+        // 방마다 탭 글리프 — 내부 방(설정·보드)은 셸이 아니라 자기 아이콘을 단다.
+        // 이름으로 고르는 `tab_icon_glyph` 는 「설정」에도 터미널 글리프를 줘서
+        // 타이틀 알약이 `>_ Settings` 였다. 페인트 루프는 `&self` 를 못 빌리므로
+        // 여기서 인덱스별로 늘어놓는다.
+        let sb_icons: Vec<&'static str> = (0..sb_labels.len())
+            .map(|i| match self.internal_room_kind_at(i) {
+                Some(crate::internal_room::InternalRoomKind::Settings) => "settings-2",
+                Some(crate::internal_room::InternalRoomKind::Board) => "rows-2",
+                None => tab_icon_glyph(&sb_labels[i].0),
+            })
+            .collect();
         let (sb_tabs, sb_closes, sb_plus, sb_rows, sb_mini) = self.sidebar_layout(sb_win_h);
         // Windowed strip: publish the effective first/visible-count for the
         // wheel handler's clamp, and note per-side overflow for the chevron
@@ -4695,12 +4706,12 @@ impl App {
                 let start = ((win_w - pw) / 2.0).clamp(left_lim, (right_lim - pw).max(left_lim));
                 if !title_text.is_empty() {
                     round_rect(g, start, py, pw, ph, theme::radius_md(), theme::surface());
-                    let icon_name = sb_labels
+                    let icon_name = sb_icons
                         .get(sb_active)
-                        .map(|(n, _)| n.as_str())
-                        .unwrap_or(title_text.as_str());
+                        .copied()
+                        .unwrap_or_else(|| tab_icon_glyph(&title_text));
                     g.queue_icon(
-                        tab_icon_glyph(icon_name),
+                        icon_name,
                         start + pad,
                         py + (ph - gl) / 2.0,
                         gl,
@@ -4901,7 +4912,7 @@ impl App {
                     let icon_x = *tx + 8.0;
                     let icon_y = *ty + (*th - isz) / 2.0;
                     g.queue_icon(
-                        tab_icon_glyph(&name),
+                        sb_icons.get(*i).copied().unwrap_or_else(|| tab_icon_glyph(&name)),
                         icon_x,
                         icon_y,
                         isz,
@@ -5202,11 +5213,20 @@ impl App {
                         .flatten()
                         .map_or(0.0, |r| r.2 + 14.0);
                     let cwd_budget = (tab_right - 8.0 - badge_w - text_x).max(0.0);
+                    // 경로 줄이 서는가 — 아래 cwd 분기와 같은 조건이어야 한다.
+                    // 내부 방(설정·보드)은 경로가 없어 이름을 윗줄에 두면 카드 아래
+                    // 절반이 빈 상자로 남았다. 줄이 없으면 이름을 카드 가운데로.
+                    let cwd_shown = !cwd.is_empty() && sb_dens.at_least_compact();
+                    let name_y = if cwd_shown {
+                        *ty + 11.0
+                    } else {
+                        *ty + ((SIDEBAR_TAB_H - 17.0) / 2.0).round()
+                    };
                     // Clip before drawing — `draw_text` also borrows `g`.
                     let name_txt = clip_px(g, &name, 13.5, is_active, name_budget);
                     g.draw_text(
                         text_x,
-                        *ty + 11.0,
+                        name_y,
                         &name_txt,
                         gpu::DrawOpts {
                             font_size: 13.5,
@@ -5218,7 +5238,7 @@ impl App {
                     if let Some(k) = kbd {
                         g.draw_text(
                             tab_right - 8.0 - kbd_w,
-                            *ty + 12.0,
+                            name_y + 1.0,
                             &k,
                             gpu::DrawOpts {
                                 font_size: kfs,
@@ -5231,7 +5251,7 @@ impl App {
                     // 경로는 방을 가르는 좋은 단서지만, 「…」 몇 글자로 잘리면
                     // 가르지도 못하면서 이름과 자리만 다툰다. 그 폭에서는 아예 접고
                     // 이름을 카드 가운데로 놓는다.
-                    if !cwd.is_empty() && sb_dens.at_least_compact() {
+                    if cwd_shown {
                         let cwd_txt = clip_px(g, &cwd, 11.0, false, cwd_budget);
                         g.draw_text(
                             text_x,

@@ -2191,6 +2191,7 @@ fn paint_general(
         "새 작업 방과 파일을 여는 기본 동작입니다",
     );
     *y += 48.0;
+    row_label(g, x, y, "새 방의 시작 폴더");
     segmented(
         g,
         s,
@@ -2230,6 +2231,7 @@ fn paint_general(
         );
         *y += 58.0;
     }
+    row_label(g, x, y, "파일을 여는 곳");
     segmented(
         g,
         s,
@@ -2335,9 +2337,11 @@ fn paint_general(
             )
         })
         .collect();
+    row_label(g, x, y, "편집기 자동 저장");
     segmented(g, s, hits, x, *y, w, &autosave_cells);
     *y += 42.0;
     let gain = (s.wheel_gain * 100.0).round() as u32;
+    row_label(g, x, y, "휠 스크롤 속도");
     segmented(
         g,
         s,
@@ -2503,6 +2507,7 @@ fn paint_appearance(
             )
         })
         .collect();
+    row_label(g, x, y, "커서 굵기");
     segmented(g, s, hits, x, *y, w, &thickness);
     *y += 48.0;
     section_title(
@@ -3081,6 +3086,7 @@ fn paint_claude(
             )
         })
         .collect();
+    row_label(g, x, y, "모델");
     segmented(g, s, hits, x, *y, w, &model_cells);
     *y += 42.0;
     let efforts = [
@@ -3100,6 +3106,7 @@ fn paint_claude(
             )
         })
         .collect();
+    row_label(g, x, y, "생각 깊이");
     segmented(g, s, hits, x, *y, w, &effort_cells);
     *y += 44.0;
     text_field(
@@ -3506,17 +3513,17 @@ fn paint_machines(
         Target::Setting(SettingsAction::AddMachine),
         false,
     );
-    *y += 26.0;
-    draw_text(
-        g,
-        x,
-        *y,
+    // 버튼(30px) 아래로 내려서 시작하고, 폭에 맞춰 접는다 — 한 줄로 두면 버튼
+    // 밑을 지나 오른쪽 경계 너머까지 흘렀다(2026-09-07 지적 「박스 마감」).
+    *y += 34.0;
+    let guide = crate::native_strings::text(
         "이름과 ssh 대상(user@host)만 적으면 됩니다 — 열쇠는 ~/.ssh 에서 찾아 짝짓고, 다른 망의 기계는 넷버드(VPN)로 먼저 이어 두세요",
-        10.5,
-        theme::text_mute(),
-        false,
     );
-    *y += 22.0;
+    for line in wrap_words(g, &guide, w, 10.5) {
+        draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
+        *y += 16.0;
+    }
+    *y += 6.0;
     if rows.is_empty() {
         draw_text(
             g,
@@ -5117,6 +5124,14 @@ fn section_title(g: &mut gpu::GpuRenderer, x: f32, y: f32, title: &str, desc: &s
     draw_text(g, x, y + 24.0, desc, 11.5, theme::text_dim(), false);
 }
 
+/// 선택 줄(`segmented`) 위에 서는 한 줄 이름표. 줄이 둘 이상 잇달아 서면 어느 줄이
+/// 무엇을 고르는지 칸 글자만으로는 안 읽혔다(「끔 · 1초 · 3초」가 무엇의 간격인지) —
+/// 2026-09-07 「자잘한 것들 다 수정」.
+fn row_label(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, label: &str) {
+    draw_text(g, x + 2.0, *y, label, 11.5, theme::text_dim(), false);
+    *y += 20.0;
+}
+
 fn info_slab(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, text: &str) {
     let rect = (x, *y, w, 48.0);
     round_rect(
@@ -5494,6 +5509,29 @@ fn draw_preedit_and_caret(
         g.rect(pos.0, pos.1, 1.5, h, theme::cursor());
     }
     *caret_out = Some((pos.0, pos.1, 2.0, h));
+}
+
+/// 안내문을 낱말 경계에서 접는다. `wrap_text` 는 글자 단위라 편집 중인 입력에는
+/// 맞지만, 읽기만 하는 안내문에 쓰면 「넷버드(VP / N)」처럼 낱말 가운데가 갈린다.
+fn wrap_words(g: &mut gpu::GpuRenderer, text: &str, max_w: f32, font: f32) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let next = if line.is_empty() {
+            word.to_string()
+        } else {
+            format!("{line} {word}")
+        };
+        if !line.is_empty() && g.measure_chrome_text(&next, font, false) > max_w {
+            out.push(std::mem::replace(&mut line, word.to_string()));
+        } else {
+            line = next;
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
 }
 
 fn wrap_text(g: &mut gpu::GpuRenderer, text: &str, max_w: f32, font: f32) -> Vec<(String, usize)> {
