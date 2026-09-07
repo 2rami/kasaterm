@@ -3433,9 +3433,23 @@ impl App {
         let now = std::time::Instant::now();
         let mut last = LAST.lock().unwrap();
 
+        // pane 마다 붙은 일감 이름(터미널 탭과 같은 값). 「일하는 중」만으로는 무슨 일을
+        // 하는지 알 수 없어, 이름과 지금 부른 도구를 함께 싣는다(2026-09-07 지시).
+        let titles: std::collections::HashMap<String, String> = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .iter()
+                .filter_map(|(id, p)| {
+                    p.title
+                        .clone()
+                        .filter(|t| !t.is_empty())
+                        .map(|t| (id.clone(), t))
+                })
+                .collect()
+        };
         let mut waiting: Vec<(String, String)> = Vec::new();
         let mut stalled: Vec<String> = Vec::new();
-        let mut busy: Vec<(String, String, u64)> = Vec::new();
+        let mut busy: Vec<(String, String, String, u64)> = Vec::new();
         for (id, a) in &self.pane_activity {
             let who = self
                 .pane_character_if_known(id)
@@ -3456,7 +3470,8 @@ impl App {
                     Some(p) => format!("대화 줄이는 중 {p}%"),
                     None => doing_now(&a.intent),
                 };
-                busy.push((who, what, mins));
+                let task = titles.get(id).map(|t| task_name(t, &who)).unwrap_or_default();
+                busy.push((who, task, what, mins));
             }
         }
         waiting.sort();
@@ -3494,13 +3509,25 @@ impl App {
             ("wait", line)
         } else if !busy.is_empty() {
             let i = TURN.load(std::sync::atomic::Ordering::Relaxed) % busy.len();
-            let (who, what, mins) = &busy[i];
+            let (who, task, what, mins) = &busy[i];
             let ja = josa(who, "은", "는");
-            let line = match (what.is_empty(), mins) {
-                (true, 0) => format!("{who}{ja} 일하는 중"),
-                (true, m) => format!("{who}{ja} {m}분째 일하는 중"),
-                (false, 0) => format!("{who}{ja} {what}"),
-                (false, m) => format!("{who}{ja} {what} · {m}분째"),
+            // 첫 줄은 누가 무슨 일감을, 둘째 줄은 그 안에서 지금 무엇을 몇 분째.
+            // 한 줄로 이으면 260px 안에서 어느 쪽도 안 읽힌다.
+            let head = if task.is_empty() {
+                format!("{who}{ja} 일하는 중")
+            } else {
+                format!("{who} · {task}")
+            };
+            let tail = match (what.is_empty(), mins) {
+                (true, 0) => String::new(),
+                (true, m) => format!("{m}분째"),
+                (false, 0) => what.clone(),
+                (false, m) => format!("{what} · {m}분째"),
+            };
+            let line = if tail.is_empty() {
+                head
+            } else {
+                format!("{head}\n{tail}")
             };
             ("busy", line)
         } else {
@@ -3865,6 +3892,17 @@ fn josa(word: &str, with_final: &'static str, without: &'static str) -> &'static
     } else {
         without
     }
+}
+
+/// 탭에 붙은 이름에서 일감만 뽑는다. 그 이름은 「캐릭터 · 일감」 꼴이라, 그대로 실으면
+/// 말풍선에 이름이 두 번 나온다.
+fn task_name(title: &str, who: &str) -> String {
+    let t = title
+        .split_once(" · ")
+        .map(|(a, b)| if a.trim() == who { b } else { title })
+        .unwrap_or(title)
+        .trim();
+    t.chars().take(26).collect()
 }
 
 /// 「지금 뭘 하나」를 한 조각으로. 도구 라벨은 `설명 — 명령` 꼴이라 앞의 설명만 쓴다 —
