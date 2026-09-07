@@ -694,6 +694,10 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                 bg: st.bg,
                 hasWalk: slug != null && spriteCache.available(slug, 'walk'),
                 hasIdle: slug != null && spriteCache.available(slug, 'idle'),
+                codex: st.codex,
+                session: st.session,
+                branch: st.branch,
+                project: st.project,
               ),
               t,
             );

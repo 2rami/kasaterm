@@ -66,6 +66,10 @@ class StudentStyle {
     this.name,
     this.hasWalk = true,
     this.hasIdle = true,
+    this.codex = false,
+    this.session,
+    this.branch,
+    this.project,
   });
 
   /// 도트 파일명의 학생 슬러그 — 없으면 색만 입힌다.
@@ -77,6 +81,18 @@ class StudentStyle {
   final Color bg;
   final bool hasWalk;
   final bool hasIdle;
+
+  /// codex pane 인가 — 바닥 상태줄 되그리기와 세션 배지는 codex 에만 있다.
+  final bool codex;
+
+  /// 우리가 붙인 세션 이름 — codex 입력창 첫 줄 오른쪽 배지(데스크톱
+  /// `overlay_codex_session_label` 과 같은 자리).
+  final String? session;
+
+  /// 상태줄에 보탤 브랜치·폴더 이름 — 데스크톱은 cwd/Git 에서 알고, 폰은 허브가
+  /// 준 값을 넣는다.
+  final String? branch;
+  final String? project;
 }
 
 class _Cell {
@@ -878,6 +894,266 @@ void _restyleUserPromptBands(
 }
 
 /// 데스크톱과 같은 순서로 꾸민다. `t` 는 초 단위 애니 시계.
+const _efforts = {'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'};
+
+/// 데스크톱 `restyle_codex_status_line` 의 색 — Tokyo Night 계열, claude statusline 과 같다.
+const _cModel = RgbColor(0x7a, 0xa2, 0xf7);
+const _cGit = RgbColor(0x73, 0xda, 0xca);
+const _cDir = RgbColor(0xbb, 0x9a, 0xf7);
+const _cCtx = RgbColor(0xff, 0x9e, 0x64);
+const _cSep = RgbColor(0x56, 0x5f, 0x89);
+const _cDanger = RgbColor(0xf7, 0x76, 0x8e);
+
+RgbColor _effortColor(String level) => switch (level) {
+  'low' => const RgbColor(0x56, 0x5f, 0x89),
+  'medium' => _cModel,
+  'high' => const RgbColor(0xe0, 0xaf, 0x68),
+  'xhigh' => _cDanger,
+  'max' => _cDir,
+  _ => _cModel,
+};
+
+String _titleCase(String part) =>
+    part.isEmpty ? part : part[0].toUpperCase() + part.substring(1);
+
+/// `gpt-5.6-sol` → `GPT-5.6 Sol` — 데스크톱과 같은 표기.
+String prettyModel(String raw) {
+  final lower = raw.toLowerCase();
+  switch (lower) {
+    case 'gpt-5.6' || 'gpt-5.6-sol':
+      return 'GPT-5.6 Sol';
+    case 'gpt-5.6-terra':
+      return 'GPT-5.6 Terra';
+    case 'gpt-5.6-luna':
+      return 'GPT-5.6 Luna';
+  }
+  if (lower.startsWith('gpt-')) {
+    final pieces = lower.split('-');
+    final version = pieces.length > 1 ? pieces[1] : '';
+    final suffix = pieces.skip(2).map(_titleCase).join(' ');
+    return suffix.isEmpty ? 'GPT-$version' : 'GPT-$version $suffix';
+  }
+  if (lower.startsWith('claude-') || lower.startsWith('codex-')) {
+    return lower.split('-').map(_titleCase).join(' ');
+  }
+  return raw;
+}
+
+class _Span {
+  const _Span(this.text, {this.fg, this.bold = false, this.dim = false});
+  final String text;
+  final CellColor? fg;
+  final bool bold;
+  final bool dim;
+}
+
+int _rowCols(List<_Cell> row) {
+  var w = 0;
+  for (final c in row) {
+    w += cellWidth(c.rune);
+  }
+  return w;
+}
+
+/// codex 바닥줄(「gpt-5.6-sol xhigh · main · kasaterm · Context 16% used」)을 claude
+/// statusline 과 같은 말로 다시 쓴다 — 데스크톱 `restyle_codex_status_line` 과 같은
+/// 규칙·색. codex 는 항목 순서만 받고 아이콘·구분자를 못 바꾸므로 PTY 가 준 값을
+/// 읽어 표현만 바꾸고, 못 읽으면 원본을 둔다. 모델 표식은 로고 자리표로 심어
+/// 뒤의 표식 치환이 codex 로고를 앉힌다.
+bool _restyleCodexStatusLine(
+  List<List<_Cell>> rows,
+  Set<int> touched, {
+  required int cols,
+  String? branch,
+  String? project,
+}) {
+  for (var r = rows.length - 1; r >= 0; r--) {
+    final parts = _text(rows[r])
+        .trim()
+        .split(' · ')
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+    if (parts.isEmpty) continue;
+    final words = parts.first.split(RegExp(r'\s+'));
+    final effort = words.last;
+    if (!_efforts.contains(effort)) continue;
+    final model = words.sublist(0, words.length - 1).join(' ');
+    final lower = model.toLowerCase();
+    final known =
+        lower.startsWith('gpt-') ||
+        lower.startsWith('codex-') ||
+        lower.startsWith('claude-') ||
+        (lower.length > 1 &&
+            lower[0] == 'o' &&
+            lower.codeUnitAt(1) >= 0x30 &&
+            lower.codeUnitAt(1) <= 0x39);
+    if (model.isEmpty || !known) continue;
+    String? context;
+    for (final part in parts) {
+      for (final word in part.split(RegExp(r'\s+'))) {
+        final m = RegExp(r'^\D*(\d+%)\D*$').firstMatch(word);
+        if (m != null) {
+          context = m.group(1);
+          break;
+        }
+      }
+      if (context != null) break;
+    }
+    final middle = parts
+        .skip(1)
+        .where(
+          (p) =>
+              !p.contains('%') &&
+              !const {
+                'never',
+                'on-request',
+                'untrusted',
+                'on-failure',
+              }.contains(p),
+        )
+        .toList();
+    var b = (branch ?? '').isEmpty ? null : branch;
+    var d = (project ?? '').isEmpty ? null : project;
+    if (b == null && d == null) {
+      b = middle.isNotEmpty ? middle[0] : null;
+      d = middle.length > 1 ? middle[1] : null;
+    }
+    final marker = lower.startsWith('claude-')
+        ? statusModelClaude
+        : statusModelGpt;
+    List<_Span> line(
+      bool window,
+      bool showBranch,
+      bool showProject,
+      bool showCtx,
+    ) {
+      final out = <_Span>[
+        const _Span(' '),
+        _Span(String.fromCharCode(marker), fg: _cModel, bold: true),
+        const _Span(' '),
+        _Span(prettyModel(model), fg: _cModel, bold: true),
+        if (window && lower.startsWith('gpt-5.6'))
+          const _Span(' 1M', dim: true),
+      ];
+      void sep() => out
+        ..add(const _Span(' '))
+        ..add(const _Span('┃', fg: _cSep, dim: true))
+        ..add(const _Span(' '));
+      if (showBranch && b != null) {
+        sep();
+        out.add(_Span(' $b', fg: _cGit));
+      }
+      if (showProject && d != null) {
+        sep();
+        out.add(_Span(' $d', fg: _cDir));
+      }
+      if (showCtx && context != null) {
+        sep();
+        final pct = int.tryParse(context.substring(0, context.length - 1)) ?? 0;
+        out.add(_Span(context, fg: pct >= 90 ? _cDanger : _cCtx));
+      }
+      sep();
+      out.add(_Span(' $effort', fg: _effortColor(effort)));
+      return out;
+    }
+
+    // 서버가 뒤 빈칸을 잘라 보내므로 행의 칸 수가 아니라 화면 폭이 기준이다.
+    final width = cols;
+    final candidates = [
+      line(true, true, true, true),
+      line(true, true, false, true),
+      line(true, true, false, false),
+      line(false, false, false, false),
+    ];
+    for (final spans in candidates) {
+      final cells = <_Cell>[
+        for (final sp in spans)
+          for (final rune in sp.text.runes)
+            _Cell(
+              rune,
+              sp.fg ?? const DefaultColor(),
+              const DefaultColor(),
+              (sp.bold ? flagBold : 0) | (sp.dim ? flagDim : 0),
+            ),
+      ];
+      final used = _rowCols(cells);
+      if (used > width) continue;
+      for (var pad = used; pad < width; pad++) {
+        cells.add(_Cell(0x20, const DefaultColor(), const DefaultColor(), 0));
+      }
+      rows[r]
+        ..clear()
+        ..addAll(cells);
+      touched.add(r);
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+/// codex 입력창 첫 줄 오른쪽에 세션 이름 배지 — 데스크톱 `overlay_codex_session_label`.
+/// claude 는 CLI 가 위보더 끝에 `/rename` 이름을 스스로 그리지만 codex 는 안 그려서,
+/// 화면만 보고는 무슨 일을 하는 자리인지 몰랐다. 그 구간이 비어 있을 때만 심는다.
+void _overlayCodexSessionLabel(
+  List<List<_Cell>> rows,
+  Set<int> touched,
+  String name,
+  Color accent,
+) {
+  final bx = _promptBox(rows);
+  if (bx is! _Filled) return;
+  final row = rows[bx.start];
+  name = name.trim();
+  if (name.isEmpty) return;
+  final w = _rowCols(row);
+  // 이름이 길다고 줄을 통째로 먹으면 배지가 아니라 문장이다 — 폭의 절반까지.
+  final budget = w ~/ 2;
+  if (budget < 6) return;
+  final shown = <int>[];
+  var used = 0;
+  for (final ch in name.runes) {
+    final cw = cellWidth(ch).clamp(1, 2);
+    if (used + cw > budget - 1) {
+      shown.add(0x2026);
+      used += 1;
+      break;
+    }
+    shown.add(ch);
+    used += cw;
+  }
+  // 오른쪽 한 칸은 비워 둔다 — claude 가 위보더 끝에 대시 한 칸을 남기듯.
+  final end = w - 1;
+  final start = end - used;
+  if (start <= 0 || used == 0) return;
+  final head = <_Cell>[];
+  final tail = <_Cell>[];
+  _Cell? sample;
+  var col = 0;
+  for (final c in row) {
+    final at = col;
+    col += cellWidth(c.rune);
+    // 앞 한 칸까지 함께 본다 — 옆 글자에 딱 붙으면 배지로 안 읽힌다.
+    if (at >= start - 1 && at < end && !c.blank) return;
+    if (at < start) {
+      head.add(c);
+    } else if (at >= end) {
+      tail.add(c);
+    } else {
+      sample ??= c;
+    }
+  }
+  final fg = _rgb(accent);
+  final bg = sample?.bg ?? const DefaultColor();
+  row
+    ..clear()
+    ..addAll(head)
+    ..addAll([for (final r in shown) _Cell(r, fg, bg, 0)])
+    ..addAll(tail);
+  touched.add(bx.start);
+}
+
 StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
   final rows = <List<_Cell>>[for (final r in live.lines) _cells(r)];
   final touched = <int>{};
@@ -890,6 +1166,17 @@ StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
   // 학생 프사 자리표(U+FFFC)는 어느 행이든 비운다 — 글꼴에 없어 빈 상자로 뜬다.
   final face = _findStatuslineFace(rows);
   _blankFacePlaceholders(rows, touched);
+
+  // codex 바닥줄은 claude statusline 의 말로 — 표식 치환보다 먼저라야 로고가 앉는다.
+  if (st.codex) {
+    _restyleCodexStatusLine(
+      rows,
+      touched,
+      cols: live.cols,
+      branch: st.branch,
+      project: st.project,
+    );
+  }
 
   // 상태줄 모델 표식 — 글리프 대신 로고. 아래→위, 마지막 상태줄이 이긴다.
   for (var r = rows.length - 1; r >= 0; r--) {
@@ -1003,6 +1290,9 @@ StyledGrid restyleClaude(GridLines live, StudentStyle st, double t) {
   }
 
   _stylePromptBox(rows, touched, accent);
+  if (st.codex && (st.session ?? '').isNotEmpty) {
+    _overlayCodexSessionLabel(rows, touched, st.session!, accent);
+  }
 
   _restyleUserPromptBands(rows, touched, st);
 

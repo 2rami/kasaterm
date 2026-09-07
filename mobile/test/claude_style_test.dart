@@ -7,6 +7,7 @@ import 'package:kasaterm_mobile/reflow.dart';
 
 const accent = Color(0xff4c6ef5);
 const bg = Color(0xff252c35);
+const _accentRgb = RgbColor(0x4c, 0x6e, 0xf5);
 const st = StudentStyle(slug: 'arisu', accent: accent, bg: bg);
 
 Grid gridOf(List<String> rows, {int cols = 60, List<int>? cursor}) =>
@@ -128,6 +129,120 @@ void main() {
     final marker = v.lines[5].first;
     expect(marker.text.startsWith('❯'), isTrue);
     expect((marker.fg as RgbColor).b, fg.b);
+  });
+
+  test('codex 바닥줄: claude statusline 의 말로 — 로고 자리·GPT-5.6 Sol 1M·%·effort', () {
+    final g = gridOf([
+      '  gpt-5.6-sol xhigh · main · kasaterm · never · Context 16% used'
+          '${' ' * 20}Pursuing goal (2m)',
+    ], cols: 120);
+    const codex = StudentStyle(
+      slug: 'yuuka',
+      accent: accent,
+      bg: bg,
+      codex: true,
+      branch: 'main',
+      project: 'kasaterm',
+    );
+    final v = restyleClaude(g, codex, 0);
+    final line = text(v.lines[0]);
+    expect(line, contains('GPT-5.6 Sol 1M'));
+    expect(line, contains('main'));
+    expect(line, contains('kasaterm'));
+    expect(line, contains('16%'));
+    expect(line.trimRight(), endsWith('xhigh'));
+    expect(line, isNot(contains('Pursuing')));
+    expect(line, isNot(contains('never')));
+    expect(v.slots.map((s) => s.motion), contains('icon:codex'));
+    // 색: 모델은 파랑 굵게, effort xhigh 는 붉게.
+    final model = v.lines[0].firstWhere((r) => r.text.contains('GPT'));
+    expect(model.fg, rgb(const RgbColor(0x7a, 0xa2, 0xf7)));
+    expect(model.flags & flagBold, flagBold);
+    final eff = v.lines[0].lastWhere((r) => r.text.contains('xhigh'));
+    expect(eff.fg, rgb(const RgbColor(0xf7, 0x76, 0x8e)));
+  });
+
+  test('codex 바닥줄이 아닌 줄(claude statusline)은 손대지 않는다', () {
+    final g = gridOf([
+      '  Fable 5.1 1M │ main │ kasaterm │ 42% │ xhigh',
+    ], cols: 60);
+    const codex = StudentStyle(
+      slug: 'yuuka',
+      accent: accent,
+      bg: bg,
+      codex: true,
+    );
+    final v = restyleClaude(g, codex, 0);
+    expect(
+      text(v.lines[0]).trim(),
+      'Fable 5.1 1M │ main │ kasaterm │ 42% │ xhigh',
+    );
+  });
+
+  test('codex 세션 배지: 입력창 첫 줄 오른쪽 끝 한 칸 앞에 학생색으로', () {
+    final g = Grid()
+      ..apply({
+        'cols': 40,
+        'rows': 3,
+        'dirty': [
+          [
+            0,
+            [
+              ['› Ask Codex to do anything', null, 236, 0],
+              [' ' * 14, null, 236, 0],
+            ],
+          ],
+          [
+            1,
+            [
+              [' ' * 40, null, 236, 0],
+            ],
+          ],
+          [2, []],
+        ],
+        'cursor': [0, 2],
+      });
+    const codex = StudentStyle(
+      slug: 'yuuka',
+      accent: accent,
+      bg: bg,
+      codex: true,
+      session: '개명함',
+    );
+    final v = restyleClaude(g, codex, 0);
+    final line = text(v.lines[0]);
+    expect(line, startsWith('› Ask Codex to do anything'));
+    expect(line.trimRight(), endsWith('개명함'));
+    expect(cols(v.lines[0]), 40, reason: '한글 두 칸까지 세서 오른쪽 한 칸이 남는다');
+    final badge = v.lines[0].lastWhere((r) => r.text.contains('개명함'));
+    expect(badge.fg, rgb(_accentRgb));
+  });
+
+  test('codex 세션 배지: 입력이 그 자리까지 찼으면 안 그린다', () {
+    final g = Grid()
+      ..apply({
+        'cols': 20,
+        'rows': 2,
+        'dirty': [
+          [
+            0,
+            [
+              ['› typing all the way', null, 236, 0],
+            ],
+          ],
+          [1, []],
+        ],
+        'cursor': [0, 2],
+      });
+    const codex = StudentStyle(
+      slug: 'yuuka',
+      accent: accent,
+      bg: bg,
+      codex: true,
+      session: 'x',
+    );
+    final v = restyleClaude(g, codex, 0);
+    expect(text(v.lines[0]).trimRight(), '› typing all the way');
   });
 
   test('사용자 프롬프트 띠: 본문 폭까지만 학생색 바탕, ❯ 는 학생색', () {

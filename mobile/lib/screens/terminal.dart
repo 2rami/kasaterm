@@ -377,6 +377,13 @@ class _TerminalScreenState extends State<TerminalScreen>
                 name: pane.name,
                 accent: studentAccent(context, pane, tokens),
                 bg: palette.bg,
+                codex: pane.harness == 'codex',
+                session: pane.session,
+                branch: pane.branch,
+                project: pane.cwd
+                    .split('/')
+                    .where((s) => s.isNotEmpty)
+                    .lastOrNull,
               ),
       );
     }
