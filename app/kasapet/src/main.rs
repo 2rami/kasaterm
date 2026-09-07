@@ -194,6 +194,17 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, ev: WindowEvent) {
         match ev {
             WindowEvent::CloseRequested => el.exit(),
+            // 배율이 다른 모니터로 끌고 가면 이것이 먼저 온다. 안 받으면 창이 옛 배율의
+            // 물리 크기를 그대로 쥐고 있어 캐릭터가 반쪽이 되거나 흐릿해진다 — 논리 크기를
+            // 다시 걸어 주면 뒤따르는 Resized 가 맞는 물리 크기를 들고 온다.
+            WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(w) = &self.win {
+                    let _ = w.request_inner_size(winit::dpi::LogicalSize::new(
+                        self.w * self.scale as f64,
+                        self.h * self.scale as f64,
+                    ));
+                }
+            }
             WindowEvent::Resized(sz) => {
                 if let Some(g) = &self.gfx {
                     let caps_alpha = self.alpha;
@@ -262,19 +273,30 @@ impl App {
     fn poll_cursor(&mut self) {
         let Some(w) = &self.win else { return };
         let Ok(pos) = w.outer_position() else { return };
-        let sz = w.inner_size();
         let sf = w.scale_factor();
+        // 전부 논리 좌표(pt)로 계산한다. AppKit 의 마우스 좌표가 pt 이고, 물리 픽셀로
+        // 맞추려면 배율을 곱해야 하는데 그 배율은 **창이 있는 화면**의 것이라 배율이 다른
+        // 모니터가 섞이면 어긋난다(맥북 2배 + 외장 4K 1배).
+        let pos = pos.to_logical::<f64>(sf);
+        let sz = w.inner_size().to_logical::<f64>(sf);
         let p = objc2_app_kit::NSEvent::mouseLocation();
-        // AppKit 은 왼쪽 **아래**가 원점이라 y 를 뒤집어야 winit 좌표와 만난다.
-        let screen_h = objc2_app_kit::NSScreen::mainScreen(objc2_foundation::MainThreadMarker::new().unwrap())
-            .map(|s| s.frame().size.height).unwrap_or(1080.0);
-        let (gx, gy) = (p.x * sf, (screen_h - p.y) * sf);
-        let (cx, cy) = (pos.x as f64 + sz.width as f64 / 2.0, pos.y as f64 + sz.height as f64 / 2.0);
+        // AppKit 은 왼쪽 **아래**가 원점이라 y 를 뒤집어야 winit 좌표와 만난다. 기준은
+        // **주 화면**(메뉴바가 있는 화면)의 높이다 — mainScreen 은 「지금 활성인 화면」이라
+        // 외장 모니터에서는 다른 값이 나와 시선이 엉뚱한 데를 본다.
+        let mtm = objc2_foundation::MainThreadMarker::new().unwrap();
+        let screen_h = objc2_app_kit::NSScreen::screens(mtm)
+            .iter()
+            .next()
+            .map(|s| s.frame().size.height)
+            .unwrap_or(1080.0);
+        let (gx, gy) = (p.x, screen_h - p.y);
+        let (cx, cy) = (pos.x + sz.width / 2.0, pos.y + sz.height / 2.0);
         // 창 두 배 거리에서 최대로 돌아본다 — 더 멀면 고개가 끝까지 돌아간 채 멈춘다.
-        let nx = ((gx - cx) / (sz.width as f64)).clamp(-1.0, 1.0);
-        let ny = ((cy - gy) / (sz.height as f64)).clamp(-1.0, 1.0);
+        let nx = ((gx - cx) / sz.width.max(1.0)).clamp(-1.0, 1.0);
+        let ny = ((cy - gy) / sz.height.max(1.0)).clamp(-1.0, 1.0);
         self.look = (nx as f32, ny as f32);
     }
+
     #[cfg(not(target_os = "macos"))]
     fn poll_cursor(&mut self) {}
 
