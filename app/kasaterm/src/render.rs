@@ -3608,11 +3608,23 @@ impl App {
             {
                 // 얼굴은 claude 가 붙은 pane 에만 — 셸만 도는 자리에 학생이 먼저 앉아
                 // 있으면 목록이 "이미 일하는 중"이라고 거짓말한다.
-                let who = self
-                    .pane_claude_ready(id)
-                    .then(|| self.pane_character_if_known(id))
-                    .flatten()
-                    .unwrap_or_default();
+                // 거울 pane 은 저쪽 claude 가 로컬 프로세스 표에 없어 `pane_claude_ready`
+                // 도 `pane_character_if_known` 의 관문도 못 넘는다 — 그래서 맥미니 방의
+                // 칸이 전부 빈 터미널 아이콘이었다(2026-09-07 「미니맵 테마 적용 안 돼」).
+                // 화면의 statusline 표식으로 저쪽 claude 를 확인하고, 배정(unfold 가
+                // 원격 명부에서 옮겨 적은 이름)을 그대로 얼굴로 쓴다.
+                let who = {
+                    let ws = self.ws.lock().unwrap();
+                    crate::screenread::mirror_runs_claude(&ws, id)
+                        .then(|| ws.pane_character.get(&ws.active_tab_pid(id)).cloned())
+                        .flatten()
+                }
+                .or_else(|| {
+                    self.pane_claude_ready(id)
+                        .then(|| self.pane_character_if_known(id))
+                        .flatten()
+                })
+                .unwrap_or_default();
                 let machine = kasa_mcp::remote::remote_info(id).map(|i| {
                     if i.label.is_empty() {
                         i.base

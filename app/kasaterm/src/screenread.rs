@@ -3762,6 +3762,22 @@ pub(crate) fn paint_student_overlays(
 /// 중요하다: statusline 은 늘 화면 바닥 쪽인데, 대화 출력에 U+FFFC 원문이 섞이면
 /// (statusline 디버그 출력 등) 위쪽 행이 앵커를 가로채 얼굴이 엉뚱한 데 붙는다
 /// (실사고). 모든 호출부가 같은 자리를 찍도록 한 곳에 둔다.
+/// 거울 pane 에서 **저쪽 기계의 claude 가 도는가** — 원격 링크로 확정된 pane 의 화면에
+/// statusline 훅이 심는 U+FFFC 표식이 있으면 참. 렌더 루프의 `mirror_claude_panes` 와
+/// 같은 규칙인데, 그 집합은 **활성 창의 pane 만** 돌아 모든 방을 그리는 사이드바가
+/// 못 쓴다. 로컬 프로세스 표(`active_agent`)로는 애초에 판정이 안 되는 자리다 —
+/// claude 가 남의 기계에서 돌아 이쪽 셸엔 자식이 없다.
+pub(crate) fn mirror_runs_claude(ws: &Workspace, id: &str) -> bool {
+    if !kasa_mcp::remote::is_remote_pane(id) {
+        return false;
+    }
+    ws.panes
+        .get(id)
+        .and_then(|p| p.tabs.get(p.active_tab.min(p.tabs.len().saturating_sub(1))))
+        .and_then(|t| t.term())
+        .is_some_and(|t| find_statusline_face(&t.cells).is_some())
+}
+
 pub(crate) fn find_statusline_face(rows: &[Vec<GridCell>]) -> Option<(usize, usize, usize)> {
     rows.iter().enumerate().rev().find_map(|(r, row)| {
         row.iter().position(|c| c.ch == '\u{fffc}').map(|c0| {

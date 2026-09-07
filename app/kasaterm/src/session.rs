@@ -4041,12 +4041,32 @@ impl App {
                 })
                 .collect();
             let home = room_home_cwd(&cwds);
+            // 거울 방 — pane 전부가 같은 남의 기계면 그 기계 이름이 방 이름이다. 거울
+            // pane 은 로컬 cwd 도 프로세스도 없어 아래 사슬이 전부 비고 「win 6」으로
+            // 떨어졌다(2026-09-07 지적). 둘째 줄은 저쪽 작업 폴더.
+            let mirror_room: Option<(String, Option<String>)> = {
+                let infos: Vec<kasa_mcp::remote::RemoteInfo> = leaves
+                    .iter()
+                    .filter_map(|id| kasa_mcp::remote::remote_info(id))
+                    .collect();
+                (!leaves.is_empty()
+                    && infos.len() == leaves.len()
+                    && !infos[0].label.is_empty()
+                    && infos.iter().all(|x| x.label == infos[0].label))
+                .then(|| {
+                    (
+                        infos[0].label.clone(),
+                        infos.iter().find_map(|x| x.remote_cwd.clone()),
+                    )
+                })
+            };
             // 손으로 붙인 이름은 파생을 항상 이긴다 — 지정 pane 이 대표 leaf 가
             // 아니어도, 방을 옮겨도 유지돼야 한다.
             let name = self
                 .window_name_override
                 .get(&i)
                 .cloned()
+                .or_else(|| mirror_room.as_ref().map(|(l, _)| l.clone()))
                 .or_else(|| {
                     home.as_ref()
                         .and_then(|p| p.file_name())
@@ -4085,6 +4105,11 @@ impl App {
             let cwd = home
                 .as_ref()
                 .map(|p| Self::shorten_cwd(p))
+                .or_else(|| {
+                    mirror_room
+                        .and_then(|(_, c)| c)
+                        .map(|c| Self::shorten_cwd(std::path::Path::new(&c)))
+                })
                 .unwrap_or_default();
             out.push((name, cwd));
         }
