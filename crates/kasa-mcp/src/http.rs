@@ -4290,7 +4290,13 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     let rows: Vec<serde_json::Value> = kasa_pty::live_sessions()
         .into_iter()
         .map(|id| {
-            let b = board.iter().find(|p| p.surface_id == id);
+            let raw = board.iter().find(|p| p.surface_id == id);
+            // 학생이 지금 돌고 있는 자리만 학생이다. 이름표(`pane_character`)는 claude 가
+            // 끝나도 자리에 남아, 셸만 남은 pane 이 「우사기」로 떴다(2026-09-07 지적
+            // 「아무것도 없는 pane 셸인데 우사기라고 뜨지」). `harness` 는 셸 밑에 살아
+            // 있는 하네스 프로세스를 본 것이라 그 판정에 맞다. 거울 pane 은 하네스가
+            // 저쪽 기계에 있어 이 관문을 안 탄다(이름은 저쪽 목록에서 온다).
+            let b = raw.filter(|p| p.harness.is_some() || crate::remote::is_remote_pane(&id));
             serde_json::json!({
                 "id": id,
                 "name": b.and_then(|p| p.character.clone()),
@@ -4305,14 +4311,14 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "window": pane_windows
                     .get(&id)
                     .copied()
-                    .or_else(|| b.map(|p| p.window_idx)),
+                    .or_else(|| raw.map(|p| p.window_idx)),
                 // 닫았지만 살아 있는 pane(되살리기 목록) — 어느 창에도 없다. 폰이 이걸
                 // 「1번방」에 올렸다(2026-09-07 지적). 웹 셸(`web-`)은 원래 창이 없다.
                 "closed": !pane_windows.contains_key(&id) && !id.starts_with("web-"),
                 // 방 이름 재료 — 원격에서 이 목록을 보는 쪽(이사 탭)은 window 번호만으론
                 // 「어느 방」인지 못 말한다. 사람이 읽는 방 이름 규칙(폴더 꼬리)과 같은
                 // 원천을 실어 준다.
-                "cwd": b
+                "cwd": raw
                     .map(|p| p.cwd.clone())
                     .filter(|s| !s.is_empty())
                     .or_else(|| pane_cwds.get(&id).cloned()),
