@@ -10941,6 +10941,46 @@ impl App {
                 // 보이니까 이메일만 나오게하라니까 현재계정하나랑」).
 
 
+                // 코덱스도 같은 줄에 세운다. 이 줄이 답하는 물음은 「지금 어느
+                // 한도가 얼마나 찼나」인데, 코덱스는 그 답의 절반이면서 여태
+                // 여기 없었다 — 펼쳐야만 보였다(2026-09-07 「코덱스는 왜 사용량
+                // 추적이 안돼 하단바에 안떠」).
+                //
+                // 값이 없으면 아무것도 안 그린다. 코덱스를 안 쓰는 창에서 빈
+                // 칸이 자리만 먹는 것은 이 줄이 가장 피해야 할 일이다.
+                if let Some(snapshot) = codex_rollout.as_ref() {
+                    let wins: Vec<(String, f32)> = snapshot
+                        .rate_windows
+                        .iter()
+                        .map(|(minutes, pct)| (codex_rate_window_label(Some(*minutes)), *pct))
+                        .collect();
+                    if !wins.is_empty() && win_w >= 900.0 {
+                        x += 8.0;
+                        g.draw_text(
+                            x,
+                            ty,
+                            "│",
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: theme::with_alpha(theme::text_dim(), 120),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        x += g.measure_chrome_text("│", fs, true) + 8.0;
+                        let icon = theme::ICON_SIZE - 3.0;
+                        g.queue_icon(
+                            AccountProvider::Codex.icon(),
+                            x,
+                            ty + (fs - icon) / 2.0,
+                            icon,
+                            theme::text_dim(),
+                        );
+                        x += icon + 6.0;
+                        x = draw_window_gauges(g, x, ty, win_w - 380.0, fs, &wins, false);
+                    }
+                }
+
                 // 세그먼트 전체가 손잡이다 — 게이지든 숫자든 이름이든 판 번호든
                 // 누르면 열린다. 자세한 것은 전부 그 안에 있다.
                 let acct_r = (seg_x0 - 6.0, sy, (x - seg_x0 + 12.0).max(24.0), status_h);
