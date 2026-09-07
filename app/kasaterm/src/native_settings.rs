@@ -3538,7 +3538,9 @@ fn machine_row(
     m: &MachineRow,
 ) {
     let editing = s.machine_edit.as_ref().filter(|(i, _, _)| *i == idx);
-    let rect = (x, *y, w, 54.0);
+    // 고치는 중엔 줄이 자란다 — 라벨(18)+입력칸(36)이 54px 줄을 넘쳐 상자 밖으로
+    // 삐져나왔다(2026-09-07 지적). 아래 안내 한 줄까지 담는다.
+    let rect = (x, *y, w, if editing.is_some() { 96.0 } else { 54.0 });
     round_rect(
         g,
         rect.0,
@@ -3594,10 +3596,19 @@ fn machine_row(
                 text_x + field_w + 12.0,
                 rect.1 + 12.0,
                 field_w,
-                "user@host",
+                "ssh 대상 — user@host 또는 ~/.ssh/config 별칭",
                 if *ssh_field { value } else { &m.ssh },
                 SettingsInput::MachineField,
                 s.settings_caret,
+                false,
+            );
+            draw_text(
+                g,
+                text_x + 2.0,
+                rect.1 + 72.0,
+                "Enter 저장 · Esc 취소 · 열쇠 로그인만 받는 기계는 별칭에 열쇠를 짝지어 두세요",
+                10.5,
+                theme::text_dim(),
                 false,
             );
         }

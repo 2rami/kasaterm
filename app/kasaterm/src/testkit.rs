@@ -3195,6 +3195,11 @@ impl App {
             // 원본 뷰는 전환을 눌러야 열린다. 상태만 켜지 않고 액션을 그대로
             // 태우는 이유는 버퍼 채우기(reload_student_raw)가 그 액션 안에 있어서다
             // — 플래그만 세우면 빈 편집기를 찍고는 "잘 뜬다"고 읽게 된다.
+            // 기계 명부의 빈 줄을 편집 상태로 — 편집 칸이 줄을 넘치던 것(2026-09-07)을
+            // 캡처로 보기 위한 자리.
+            "add-machine" => {
+                self.settings_apply(SettingsAction::AddMachine);
+            }
             "student-raw" => {
                 eprintln!("[autosettings] 원본 뷰 열기");
                 self.settings_apply(SettingsAction::ToggleStudentRaw(true));
