@@ -2560,8 +2560,19 @@ pub(crate) fn draw_info_col(
                             last_room = r.room.clone();
                             y += MACHINE_HEAD_H;
                         }
+                        let mut close_rect = None;
                         if y + ROW_H > top && y < bottom {
-                            draw_machine_pane_row(g, cursor, r, false, x, w, x0, right, y);
+                            close_rect = draw_machine_pane_row(g, cursor, r, false, x, w, x0, right, y);
+                        }
+                        // × 는 줄보다 먼저 싣는다 — 클릭은 먼저 맞은 rect 가 잡는다.
+                        if let Some(cr) = close_rect.filter(|_| !r.remote_id.is_empty()) {
+                            let close = state::MachinesColBtn::Close {
+                                label: m.label.clone(),
+                                remote_id: r.remote_id.clone(),
+                                name: r.name.clone(),
+                                pane: String::new(),
+                            };
+                            info.machine_pane_rects.push((m.label.clone(), Some(close), None, cr));
                         }
                         let act = (!r.remote_id.is_empty()).then(|| state::MachinesColBtn::Mirror {
                             label: m.label.clone(),
@@ -2572,14 +2583,31 @@ pub(crate) fn draw_info_col(
                         info.machine_pane_rects.push((m.label.clone(), act, None, (x, y, w, ROW_H)));
                         y += ROW_H;
                     }
+                    // 닫힌 pane 은 세우지 않는다 — 개수만, 왜 목록이 짧은지 알 수 있게.
+                    if m.closed > 0 {
+                        if y + MACHINE_HEAD_H > top && y < bottom {
+                            draw_machine_room_head(g, &format!("닫힌 pane {} — 목록엔 안 세움", m.closed), x0, y);
+                        }
+                        y += MACHINE_HEAD_H;
+                    }
                     if !m.mirrored.is_empty() {
                         if y + MACHINE_HEAD_H > top && y < bottom {
                             draw_machine_room_head(g, "이쪽 거울", x0, y);
                         }
                         y += MACHINE_HEAD_H;
                         for r in &m.mirrored {
+                            let mut close_rect = None;
                             if y + ROW_H > top && y < bottom {
-                                draw_machine_pane_row(g, cursor, r, true, x, w, x0, right, y);
+                                close_rect = draw_machine_pane_row(g, cursor, r, true, x, w, x0, right, y);
+                            }
+                            if let Some(cr) = close_rect {
+                                let close = state::MachinesColBtn::Close {
+                                    label: m.label.clone(),
+                                    remote_id: String::new(),
+                                    name: r.name.clone(),
+                                    pane: r.pane.clone(),
+                                };
+                                info.machine_pane_rects.push((m.label.clone(), Some(close), None, cr));
                             }
                             info.machine_pane_rects.push((
                                 m.label.clone(),
@@ -3961,6 +3989,8 @@ fn draw_machine_room_head(g: &mut gpu::GpuRenderer, room: &str, x0: f32, y: f32)
 
 /// 「다른 기계」 밑 pane 한 줄 — 얼굴·이름, 하던 일 제목(남는 폭에 맞춰 자름), 오른쪽에
 /// 기다림(경고색) 또는 「거울」(이쪽에 이미 있는 것) 표시. 누르면 거울을 연다/간다.
+/// 마우스가 올라가면 맨 오른쪽에 × — 그 기계의 pane 을 닫는 자리(2026-09-07 지시
+/// 「맥북에서도 맥미니 pane 닫을 수 있게」). 반환은 그 × 의 rect(호버 때만).
 #[allow(clippy::too_many_arguments)]
 fn draw_machine_pane_row(
     g: &mut gpu::GpuRenderer,
@@ -3972,11 +4002,28 @@ fn draw_machine_pane_row(
     x0: f32,
     right: f32,
     y: f32,
-) {
+) -> Option<(f32, f32, f32, f32)> {
     let hov = hit(cursor, &(x, y, w, ROW_H));
+    let mut right = right;
+    let mut close_rect = None;
     if hov {
         g.hover_pointer = true;
         g.rect(x, y, w, ROW_H, theme::surface_hover());
+        let cw = 18.0_f32;
+        let cr = (right - cw, y, cw + 4.0, ROW_H);
+        let on_x = hit(cursor, &cr);
+        if on_x {
+            g.rect(cr.0, y + 3.0, cw, ROW_H - 6.0, theme::raised_on(theme::surface_hover(), true));
+        }
+        g.queue_icon(
+            "x",
+            right - cw + 3.0,
+            y + (ROW_H - 12.0) / 2.0,
+            12.0,
+            if on_x { theme::attention() } else { theme::text_mute() },
+        );
+        right -= cw + 8.0;
+        close_rect = Some(cr);
     }
     let face = 16.0_f32;
     let fx = x0 + IND;
@@ -3998,7 +4045,9 @@ fn draw_machine_pane_row(
     );
     let nw = g.measure_chrome_text(name, 11.0, true);
     let waiting = r.status.contains("wait") || r.status.contains("attention");
-    let tail: Option<(&str, [u8; 4], bool)> = if waiting {
+    let tail: Option<(&str, [u8; 4], bool)> = if mirrored && r.closed {
+        Some(("저쪽에서 닫힘", theme::text_dim(), false))
+    } else if waiting {
         Some(("기다림", theme::attention(), true))
     } else if mirrored {
         Some(("거울", theme::accent(), false))
@@ -4039,6 +4088,7 @@ fn draw_machine_pane_row(
             },
         );
     }
+    close_rect
 }
 
 /// 「다른 기계」 줄을 누르면 뜨는 메뉴 — 방 펼치기·화면 보기, 그 기계 학생마다
@@ -4068,13 +4118,19 @@ fn draw_machine_menu(
     if m.online && !m.remote.is_empty() {
         items.push((Some(B::Unfold { label: m.label.clone() }), MenuRow::new("방 펼치기").sep().icon("columns-2")));
     }
-    // 문이 둘 중 하나라도 있으면 선다 — kvm(IP KVM 웹) 또는 host(화면공유). 연결이
-    // 끊겨도 세운다: KVM·화면공유는 카사텀 창구와 다른 문이라 따로 살 수 있고, KVM 은
-    // 오히려 기계가 죽었을 때 보라고 있는 문이다.
-    if m.kvm.is_some() || !m.host.is_empty() {
+    // 문이 둘이면 둘 다 세운다 — 「화면 보기」는 화면공유(host), 「KVM 보기」는 IP KVM
+    // 웹(kvm). 한 항목이 KVM 을 먼저 열던 것을 갈랐다(2026-09-07 지시 「화면보기는
+    // 화면공유 열리게」). 연결이 끊겨도 세운다: 둘 다 카사텀 창구와 다른 문이고,
+    // KVM 은 오히려 기계가 죽었을 때 보라고 있는 문이다.
+    if !m.host.is_empty() {
         let row = MenuRow::new("화면 보기").icon("external-link");
         let row = if items.len() == 1 { row.sep() } else { row };
-        items.push((Some(B::Screen { host: m.host.clone(), kvm: m.kvm.clone() }), row));
+        items.push((Some(B::Screen { host: m.host.clone(), kvm: None }), row));
+    }
+    if let Some(kvm) = m.kvm.clone() {
+        let row = MenuRow::new("KVM 보기").icon("external-link");
+        let row = if items.len() == 1 { row.sep() } else { row };
+        items.push((Some(B::Screen { host: String::new(), kvm: Some(kvm) }), row));
     }
     if m.online && m.outdated {
         items.push((None, MenuRow::new("⚠ 프로그램 낡음 — sync-mini 로 갱신").muted()));

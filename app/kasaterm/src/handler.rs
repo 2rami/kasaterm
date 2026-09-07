@@ -4959,12 +4959,14 @@ impl ApplicationHandler<UserEvent> for App {
                                 .find(|(_, _, _, r)| inside(r))
                                 .cloned()
                             {
+                                // 동작(거울 열기·닫기)이 실려 있으면 그것이 먼저 — 거울 행의
+                                // × 도 여기로 온다. 동작 없는 거울 행만 그 pane 으로 간다.
                                 match (local, act) {
-                                    (Some(p), _) => {
-                                        self.focus_pane(&p);
-                                    }
-                                    (None, Some(btn)) => {
+                                    (_, Some(btn)) => {
                                         self.machines_col_act(btn);
+                                    }
+                                    (Some(p), None) => {
+                                        self.focus_pane(&p);
                                     }
                                     (None, None) => {}
                                 }

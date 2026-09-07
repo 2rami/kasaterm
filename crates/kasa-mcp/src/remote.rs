@@ -963,13 +963,16 @@ pub fn remote_pane_session(base: &str, pane: &str, token: Option<&str>) -> Optio
 /// 부른다 — `kill_remote` 는 세션의 keep 참조만 놓는데 GUI pane 은 앱이 제 Arc 를
 /// 쥐고 있어 셸이 안 죽고, 그 기계엔 학생 이름표만 남은 빈 pane 이 좀비로 선다
 /// (2026-09-02 2-앱 리그 실측: 데려온 뒤 원격에 「Resume this session with」 셸이 남았다).
-pub fn close_remote_pane(base: &str, pane: &str, token: Option<&str>) -> Result<()> {
-    // kill=1 — 되살리기 대열에서도 걷는다. 낡은 원격은 그 인자를 몰라 닫기만 하고,
-    // 그 셸은 되살리기 목록에 산 채 남는다(다음 배포까지의 한계).
+///
+/// `kill` — 되살리기 대열에서도 걷어 진짜 끝낸다(데려오기 뒤). false 면 그 기계에서
+/// 사람이 pane 을 닫은 것과 같아 셸이 되살리기 대열에 남는다(Info 의 pane 닫기).
+/// 낡은 원격은 그 인자를 몰라 어느 쪽이든 닫기만 한다.
+pub fn close_remote_pane(base: &str, pane: &str, token: Option<&str>, kill: bool) -> Result<()> {
     let u = format!(
-        "{}/close-pane?surface={}&kill=1",
+        "{}/close-pane?surface={}{}",
         base.trim_end_matches('/'),
-        urlencode(pane)
+        urlencode(pane),
+        if kill { "&kill=1" } else { "" }
     );
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

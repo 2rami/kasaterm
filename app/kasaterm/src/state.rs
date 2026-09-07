@@ -361,8 +361,12 @@ pub(crate) struct MachinesColMachine {
     pub(crate) kvm: Option<String>,
     /// 이 기계로 이사 간 학생(로컬에 원격 링크 pane 이 있는 것) — 데려오기 가능.
     pub(crate) mirrored: Vec<MachinesColRow>,
-    /// 그 기계 자체의 pane — 이 맥북에 자리가 없어 버튼이 안 붙는다.
+    /// 그 기계 자체의 pane — 이 맥북에 자리가 없어 버튼이 안 붙는다. 그 기계에서
+    /// 닫힌(되살리기 대열의) pane 은 여기 안 선다 — 개수만 `closed` 에.
     pub(crate) remote: Vec<MachinesColRow>,
+    /// 그 기계에서 닫힌 pane 수 — 화면엔 없는데 목록에 서 있으면 「하나도 없는데
+    /// 왜 뜨나」가 된다(2026-09-07 지적). 흐린 한 줄로 개수만 알린다.
+    pub(crate) closed: usize,
 }
 
 #[derive(Clone)]
@@ -379,6 +383,9 @@ pub(crate) struct MachinesColRow {
     /// 소속 방 표시명(사이드바 규칙: 손수 붙인 이름 → 폴더 꼬리). 같은 값끼리
     /// 이어 앉히고 바뀌는 자리에 방 머리줄을 그린다. 빈값 = 방 미상.
     pub(crate) room: String,
+    /// 저쪽에서 닫힌 pane(되살리기 대열) — 거울 행에만 뜬다: 원격 목록은 닫힌 것을
+    /// 아예 안 세우지만, 이쪽 거울은 pane 이 남아 있어 「닫힘」으로 표시한다.
+    pub(crate) closed: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -390,11 +397,20 @@ pub(crate) enum MachinesColBtn {
     Bring {
         pane: String,
     },
-    /// 그 기계 화면 보기 — kvm(IP KVM 웹 주소)이 있으면 그 문을 열고, 없으면
-    /// host(명부의 진짜 주소, `user@ip` 허용)로 macOS 화면공유를 연다.
+    /// 그 기계 화면 보기 — host(명부의 진짜 주소, `user@ip` 허용)가 있으면 macOS
+    /// 화면공유를 열고, 없을 때만 kvm(IP KVM 웹 주소)을 연다. 메뉴는 둘을 따로
+    /// 세운다(「화면 보기」= host 만, 「KVM 보기」= kvm 만).
     Screen {
         host: String,
         kvm: Option<String>,
+    },
+    /// 그 기계의 pane 닫기 — 거기서 사람이 닫은 것과 같다(되살리기 대열에 남는다).
+    /// `pane` 이 있으면 이쪽 거울도 함께 닫는다(원격이 사라진 거울은 멈춘 화면이다).
+    Close {
+        label: String,
+        remote_id: String,
+        name: String,
+        pane: String,
     },
     /// 방 펼치기 — 그 기계 학생 pane 전부를 이 창의 거울로(원격 방마다 새 창).
     Unfold {

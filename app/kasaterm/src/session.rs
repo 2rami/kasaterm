@@ -1126,6 +1126,11 @@ impl App {
                 if !rid.starts_with('%') || mirrored.contains(&rid) {
                     return None;
                 }
+                // 그 기계에서 닫힌 pane(되살리기 대열)은 화면에 없는 학생이다 — 거울로
+                // 세우면 저쪽엔 없는 방이 이쪽에 생긴다(2026-09-07 지적).
+                if p.get("closed").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    return None;
+                }
                 let name = p
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -2102,7 +2107,7 @@ impl App {
         let _ = kasa_mcp::remote::kill_remote(pid);
         // GUI pane 은 위 kill 로 안 걷힌다(앱이 제 Arc 를 쥔다) — 그 기계의 pane 자체를
         // 닫는다. 실패해도 이사는 성립한다(저쪽에 빈 셸 pane 이 남을 뿐): 로그만.
-        if let Err(e) = kasa_mcp::remote::close_remote_pane(&info.base, &info.remote_id, None) {
+        if let Err(e) = kasa_mcp::remote::close_remote_pane(&info.base, &info.remote_id, None, true) {
             eprintln!("[migrate-back] 원격 pane {} 닫기 실패(무시): {e:#}", info.remote_id);
         }
         // 같은 pane id 로 로컬 PTY 스왑(swap_character 골격).
