@@ -6513,11 +6513,14 @@ fn install_pane_shims() {
     // re-wrapping a static PS1 while still re-wrapping themes that rebuild it
     // each precmd (powerlevel10k / starship). zsh-only — other shells ignore
     // ZDOTDIR and just get the PATH prepend.
+    // (3) `to` 의 탭 완성 — 첫 인자는 명부 기계 이름(+`..`), 둘째부터는 명령 이름.
+    // 사용자 .zshrc 가 compinit 을 안 돌렸으면 우리 덤프 파일로 조용히 돌린다
+    // (2026-09-07 지시 「자동완성 되나 → 붙여줘」).
     write_rc(
         ".zshrc",
         format!(
             "[ -f \"${{HOME}}/.zshrc\" ] && source \"${{HOME}}/.zshrc\"\n\
-             export PATH=\"{}:${{PATH}}\"\n\
+             export PATH=\"{0}:${{PATH}}\"\n\
              _kasaterm_osc133(){{ local __ec=$?; \
              [[ -n $_kasaterm_ran ]] && {{ printf $'\\e]133;D;%d\\a' \"$__ec\"; _kasaterm_ran=; }}; \
              [[ \"$PS1\" == *$'\\e]133;B'* ]] && return; \
@@ -6525,7 +6528,15 @@ fn install_pane_shims() {
              _kasaterm_preexec133(){{ printf $'\\e]133;C\\a'; _kasaterm_ran=1; }}\n\
              autoload -Uz add-zsh-hook 2>/dev/null && {{ \
              add-zsh-hook precmd _kasaterm_osc133 2>/dev/null; \
-             add-zsh-hook preexec _kasaterm_preexec133 2>/dev/null; }}\n",
+             add-zsh-hook preexec _kasaterm_preexec133 2>/dev/null; }}\n\
+             _kasaterm_to_complete(){{ \
+             if (( CURRENT == 2 )); then local -a names; \
+             names=(${{(f)\"$(kasaterm-cli machines --names 2>/dev/null)\"}} '..'); \
+             _describe -t machines '기계' names; \
+             else _command_names -e; fi; }}\n\
+             (( $+functions[compdef] )) || {{ autoload -Uz compinit 2>/dev/null && \
+             compinit -C -d \"{0}/.zcompdump\" 2>/dev/null; }}\n\
+             (( $+functions[compdef] )) && compdef _kasaterm_to_complete to 2>/dev/null\n",
             shim_dir.display()
         ),
     );

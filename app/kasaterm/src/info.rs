@@ -3933,13 +3933,27 @@ fn draw_machine_menu(
         items.push((None, MenuRow::new("⚠ 프로그램 낡음 — sync-mini 로 갱신").muted()));
     }
     if m.online {
+        // 방(폴더)마다 흐린 머리줄, 학생 줄엔 하던 일 제목 — 「맥미니도 뭔지 알 수
+        // 있게」(2026-09-07). 제목은 짧게 자른다, 메뉴가 칼럼 폭을 넘으면 잘려서다.
+        let mut last_room = String::new();
         for (i, r) in m.remote.iter().enumerate() {
+            if !r.room.is_empty() && r.room != last_room {
+                let head = MenuRow::new(r.room.clone()).muted();
+                items.push((None, if i == 0 { head.sep() } else { head }));
+                last_room = r.room.clone();
+            }
             let waiting = r.status.contains("wait") || r.status.contains("attention");
-            let text = if waiting {
-                format!("{} 거울 열기 · 기다림", r.name)
-            } else {
-                format!("{} 거울 열기", r.name)
-            };
+            let mut text = format!("{} 거울 열기", r.name);
+            if waiting {
+                text.push_str(" · 기다림");
+            }
+            let title: String = r.title.chars().take(14).collect();
+            if !title.is_empty() {
+                text.push_str(&format!(" — {title}"));
+                if r.title.chars().count() > 14 {
+                    text.push('…');
+                }
+            }
             let row = MenuRow::new(text).face(&r.name);
             let act = (!r.remote_id.is_empty()).then(|| B::Mirror {
                 label: m.label.clone(),
@@ -3947,7 +3961,7 @@ fn draw_machine_menu(
                 name: r.name.clone(),
                 cwd: r.remote_cwd.clone(),
             });
-            items.push((act, if i == 0 { row.sep() } else { row }));
+            items.push((act, if i == 0 && last_room.is_empty() { row.sep() } else { row }));
         }
     }
     for (i, r) in m.mirrored.iter().enumerate() {

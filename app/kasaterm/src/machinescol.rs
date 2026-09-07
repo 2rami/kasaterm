@@ -113,24 +113,6 @@ pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)>
     Some((label, row))
 }
 
-fn parse_hex(s: &str) -> Option<[u8; 4]> {
-    let h = s.strip_prefix('#')?;
-    if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let v = u32::from_str_radix(h, 16).ok()?;
-    Some([(v >> 16) as u8, (v >> 8) as u8, v as u8, 255])
-}
-
-/// 상태점 색 — 앱 상태 언어 그대로: 기다림=attention, 도는 중=accent, 그 외=success.
-fn status_color(status: &str) -> [u8; 4] {
-    match status {
-        "waiting" | "blocked" => theme::attention(),
-        "working" | "thinking" | "building" => theme::accent(),
-        _ => theme::success(),
-    }
-}
-
 impl App {
     /// 이사 칼럼 데이터를 다시 조립한다. 탭이 보일 때만, 1초 스로틀 —
     /// 기계 쪽은 폴링 캐시(`machines::snapshot`)라 읽기 자체는 공짜다.
@@ -204,7 +186,6 @@ impl App {
                 pane: id.clone(),
                 remote_id: String::new(),
                 remote_cwd: String::new(),
-                color: theme::character_accent_any(&name),
                 name,
                 title: self.pane_row_label(id),
                 status: self
@@ -271,11 +252,6 @@ impl App {
                                     .map(str::to_string)
                                     .or_else(|| win.map(|w| format!("방 {}", w + 1)))
                                     .unwrap_or_default();
-                                let color = p
-                                    .get("color")
-                                    .and_then(|v| v.as_str())
-                                    .and_then(parse_hex)
-                                    .or_else(|| theme::character_accent_any(name));
                                 Some((
                                     win.unwrap_or(u64::MAX),
                                     state::MachinesColRow {
@@ -300,7 +276,6 @@ impl App {
                                             .unwrap_or("")
                                             .to_string(),
                                         room,
-                                        color,
                                     },
                                 ))
                             })

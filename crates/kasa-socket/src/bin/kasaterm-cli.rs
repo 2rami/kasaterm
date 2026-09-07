@@ -199,6 +199,15 @@ fn run() -> Result<Option<Response>> {
         let r = resp.result.unwrap_or(Value::Null);
         let here = r.get("here").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let rows = r.get("machines").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        // `--names` — 라벨만 한 줄씩. `to` 의 zsh 탭 완성이 후보로 읽는다.
+        if std::env::args().any(|a| a == "--names") {
+            for m in &rows {
+                if let Some(l) = m.get("label").and_then(|v| v.as_str()) {
+                    println!("{l}");
+                }
+            }
+            return Ok(None);
+        }
         if rows.is_empty() {
             println!("등록된 기계가 없어요 — ~/.config/kasaterm/machines.json 에 적으면 여기 떠요");
             return Ok(None);
@@ -993,7 +1002,7 @@ fn print_help() {
   kasaterm-cli promote <%surface>            # 도는 pane 을 로컬 상주 데몬으로 무중단 승격 — 앱을 굽고 껐다 켜도 그 캐릭터는 안 죽는다
   kasaterm-cli migrate [%surface] <기계이름|http://호스트:포트|local> [--cwd /레포] [--force]  # pane 의 claude 를 그 기계로 이사(대화·미커밋 변경까지 운반+같은 자리 재개). 기계이름(예: 맥미니)이면 주소·경로를 명부(machines.json)에서 알아서 정한다. %surface 를 빼면 **이 명령을 친 pane 자신**이 간다 — 학생이 자기 이사를 신청하는 길. `local` 이면 역이사: 원격 pane 을 이 기계로 데려온다
   kasaterm-cli unfold <라벨>                  # 기계의 캐릭터 pane 전부를 거울로 펼침
-  kasaterm-cli machines                       # 명부 기계 목록 — `to` 셰임의 ls. 이 pane 이 거울이면 그 기계 줄에 *
+  kasaterm-cli machines [--names]             # 명부 기계 목록 — `to` 셰임의 ls. 이 pane 이 거울이면 그 기계 줄에 *. --names 는 라벨만(탭 완성용)
   kasaterm-cli home                           # 명부의 본진(home:true) 기계 — 살아 있으면 라벨만 출력(종료 0)·미설정은 조용히 1·설정됐는데 안 닿으면 3. 셰임의 순정 claude 디스패치용
   kasaterm-cli remote <http://호스트:포트> [--cwd /원격/경로] [--attach web-id] [%surface]  # 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 앱을 꺼도 원격 셸은 산다
   kasaterm-cli tab   [%surface] [--focus]    # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다). 서브에이전트는 여기에 — 응답의 agent 로 바로 SendMessage. --focus 만 탭을 앞으로
