@@ -556,7 +556,12 @@ impl App {
         // 캐릭터는 창의 아래쪽 몫에만, 그림이 차지하는 범위를 그 안에 꽉 맞춰 그린다.
         // 위는 말풍선 자리다.
         let room = ((self.h - HEADROOM) / self.h) as f32;
-        let fit = fit_xform(self.bbox, cw, ch, room);
+        let (win_w, win_h) = {
+            let sz = self.win.as_ref().map(|w| w.inner_size()).unwrap_or_default();
+            let sf = self.win.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
+            (sz.width.max(1) as f32 / sf, sz.height.max(1) as f32 / sf)
+        };
+        let fit = fit_xform(self.bbox, cw, ch, win_w, win_h, room);
         let base = fit.matrix();
         let frame = match g.surf.get_current_texture() { Ok(f) => f, Err(_) => return };
         let view = frame.texture.create_view(&Default::default());
@@ -867,11 +872,11 @@ fn main() {
     el.run_app(&mut app).unwrap();
 }
 
-/// 그림을 창의 아래쪽 몫에 꽉 맞추는 변환. 가로세로 비를 지키려고 배율은 하나만 쓴다 —
-/// 따로 쓰면 캐릭터가 눌리거나 늘어난다.
+/// 그림을 창의 아래쪽 몫에 꽉 맞추는 변환.
 #[derive(Clone, Copy)]
 struct Fit {
-    s: f32,
+    sx: f32,
+    sy: f32,
     tx: f32,
     ty: f32,
 }
@@ -879,8 +884,8 @@ struct Fit {
 impl Fit {
     fn matrix(self) -> [f32; 16] {
         let mut m = [0.0f32; 16];
-        m[0] = self.s;
-        m[5] = self.s;
+        m[0] = self.sx;
+        m[5] = self.sy;
         m[10] = 1.0;
         m[12] = self.tx;
         m[13] = self.ty;
@@ -889,19 +894,33 @@ impl Fit {
     }
 
     fn apply(self, p: (f32, f32)) -> (f32, f32) {
-        (p.0 * self.s + self.tx, p.1 * self.s + self.ty)
+        (p.0 * self.sx + self.tx, p.1 * self.sy + self.ty)
     }
 }
 
-fn fit_xform(bbox: Option<(f32, f32, f32, f32)>, cw: f32, ch: f32, room: f32) -> Fit {
+/// `room` 은 창에서 캐릭터가 쓸 세로 몫(나머지 위쪽은 말풍선 자리).
+///
+/// ⚠️ **배율은 픽셀로 재고 NDC 로 옮긴다.** NDC 는 축마다 따로 정규화되므로 x·y 에 같은
+/// NDC 배율을 주면 창 비율만큼 눌린다 — 세로로 긴 창에서는 캐릭터가 홀쭉해진다.
+fn fit_xform(
+    bbox: Option<(f32, f32, f32, f32)>,
+    cw: f32,
+    ch: f32,
+    sw: f32,
+    sh: f32,
+    room: f32,
+) -> Fit {
     // 범위를 아직 못 잡았으면(첫 프레임) 모델이 선언한 캔버스로 친다.
     let (x0, y0, x1, y1) = bbox.unwrap_or((-cw / 2.0, -ch / 2.0, cw / 2.0, ch / 2.0));
     let (w, h) = ((x1 - x0).max(1e-3), (y1 - y0).max(1e-3));
-    let s = (2.0 / w).min(2.0 * room / h);
+    // 모델 한 칸이 화면에서 몇 픽셀인가 — 가로세로 같은 값이라 비율이 안 망가진다.
+    let ppu = (sw / w).min(sh * room / h);
+    let (sx, sy) = (ppu * 2.0 / sw, ppu * 2.0 / sh);
     Fit {
-        s,
-        tx: -(x0 + x1) / 2.0 * s,
+        sx,
+        sy,
+        tx: -(x0 + x1) / 2.0 * sx,
         // 발이 창 바닥에 닿게 — 캐릭터가 공중에 뜨면 바탕화면 펫으로 안 보인다.
-        ty: -1.0 - y0 * s,
+        ty: -1.0 - y0 * sy,
     }
 }
