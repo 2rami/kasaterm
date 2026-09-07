@@ -86,6 +86,15 @@ struct App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.win.is_some() { return; }
+        // 독에 아이콘을 안 낸다. 펫은 앱 안에 든 기능인데 프로세스를 나눠 놓은 것뿐이라,
+        // 독에 또 서면 kasaterm 과 별개의 앱으로 보인다(2026-09-07 지시). `accessory` 는
+        // 독·앱 전환기에서 빠지되 창은 그대로 뜬다.
+        #[cfg(target_os = "macos")]
+        if let Some(mtm) = objc2_foundation::MainThreadMarker::new() {
+            use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+            NSApplication::sharedApplication(mtm)
+                .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        }
         // 배너 창과 같은 규약: 다른 앱 위에 뜨되 **키 포커스를 안 뺏는다**.
         // 그 한 줄이 「타이핑 중에 끼어들지 않는다」의 전제다(notify_banner.rs).
         let win = Arc::new(el.create_window(
