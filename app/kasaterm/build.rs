@@ -5,6 +5,7 @@
 use std::process::Command;
 
 fn main() {
+    assert_assets_are_real();
     gen_character_slugs();
     let rev = git_rev().unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=KASATERM_GIT_REV={rev}");
@@ -32,6 +33,42 @@ fn main() {
         res.set_icon("../../assets/app.ico");
         if let Err(e) = res.compile() {
             println!("cargo:warning=winresource icon embed failed: {e}");
+        }
+    }
+}
+
+/// 그림 에셋이 **실물인지** 본다 — git-lfs 포인터면 빌드를 세운다.
+///
+/// 이 레포는 그림을 git-lfs 로 담는다(`.gitattributes`, 3300여 개). `git lfs
+/// pull` 이 안 된 트리에서 구우면 `include_bytes!` 는 실물 대신 130바이트짜리
+/// 포인터 텍스트를 담고, **컴파일은 멀쩡히 통과한다**. 그 판은 실행 중 디코딩에서
+/// 조용히 실패해 학생 얼굴·로고가 하나도 안 뜨는데, 화면에는 오류 한 줄 없이
+/// 그냥 빈자리로 보인다 — 사람이 「에셋이 없나」로만 알 수 있다(2026-09-07
+/// 실측: 그렇게 구워진 설치본 exe 안 PNG 가 14장, 정상 빌드는 1596장이었다).
+///
+/// 표본 몇 개만 본다. LFS 가 안 받아진 트리는 그림이 **전부** 포인터라 한 장만
+/// 봐도 갈리고, 3300개를 매 빌드 열면 그 값을 못 한다.
+fn assert_assets_are_real() {
+    const SAMPLES: &[&str] = &[
+        "assets/students/idle/arisu-0.png",
+        "assets/students/profile/arisu.png",
+        "assets/students/schale-logo.png",
+        "assets/schale-classroom.png",
+        "../../assets/AppIcon.png",
+    ];
+    for rel in SAMPLES {
+        println!("cargo:rerun-if-changed={rel}");
+        let mut head = [0u8; 8];
+        let read = std::fs::File::open(rel)
+            .and_then(|mut f| std::io::Read::read(&mut f, &mut head))
+            .unwrap_or_else(|e| panic!("에셋 {rel} 를 못 읽었다: {e}"));
+        if read < 8 || head[..4] != [0x89, b'P', b'N', b'G'] {
+            panic!(
+                "에셋 {rel} 가 실물 PNG 가 아니다 — git-lfs 포인터로 보인다.\n\
+                 `git lfs pull` 로 그림을 받은 뒤 다시 구워라. 이대로 구우면 학생\n\
+                 얼굴도 로고도 하나 없는 판이 나오고, 그건 실행 중에 오류 없이\n\
+                 빈자리로만 보인다."
+            );
         }
     }
 }
