@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../hub_model.dart';
 import '../hub_prefs.dart';
 import '../server.dart';
+import '../status_style.dart';
 import '../student_art.dart';
 import 'pane_actions.dart';
 import 'settings.dart';
@@ -123,14 +124,25 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
             ],
           ),
           actions: [
-            if (_model.waiting > 0)
-              Padding(
-                padding: const EdgeInsets.only(right: 4),
-                child: Badge.count(
-                  count: _model.waiting,
-                  child: const Icon(Icons.notifications_outlined),
-                ),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 280),
+              transitionBuilder: (child, anim) => ScaleTransition(
+                scale: CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
+                child: child,
               ),
+              child: _model.waiting > 0
+                  ? Padding(
+                      key: ValueKey(_model.waiting),
+                      padding: const EdgeInsets.only(right: 4),
+                      child: Badge.count(
+                        count: _model.waiting,
+                        backgroundColor: StatusStyle.attention,
+                        textColor: Colors.white,
+                        child: const Icon(Icons.notifications_outlined),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
             _ViewMenu(model: _model),
             IconButton(
               onPressed: _openSettings,
@@ -215,13 +227,17 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
         }
         // 「지도만」이라도 지도를 못 그리는 방(옛 서버)은 목록으로 — 학생이 사라지면 안 된다.
         if (!(shape == HubShape.map && hasMap)) {
-          for (final p in room.panes) {
+          for (final (i, p) in room.panes.indexed) {
             inside.add(
-              _PaneTile(
-                server: widget.server,
-                pane: p,
-                onTap: s.online ? () => _open(p) : null,
-                onLongPress: s.online ? () => _paneSheet(s, room, p) : null,
+              Appear(
+                key: ValueKey('tile-${p.machine}-${p.id}'),
+                delayIndex: i,
+                child: _PaneTile(
+                  server: widget.server,
+                  pane: p,
+                  onTap: s.online ? () => _open(p) : null,
+                  onLongPress: s.online ? () => _paneSheet(s, room, p) : null,
+                ),
               ),
             );
           }
@@ -560,68 +576,73 @@ class _MiniCell extends StatelessWidget {
     final accent = p == null
         ? scheme.outline
         : (parseHexColor(p.color) ?? scheme.primary);
-    final waiting = p?.isWaiting ?? false;
-    final busy = p?.isBusy ?? false;
+    final st = p == null ? null : StatusStyle.of(p, scheme);
+    final waiting = st?.needsYou ?? false;
+    final busy = st?.live ?? false;
+    // 칸 바탕은 학생색, 테두리·점은 상태색 — 「누구」와 「어떤 상태」를 다른 채널로.
+    final edge = waiting ? StatusStyle.attention : accent;
     return LayoutBuilder(
       builder: (context, box) {
         final roomy = box.maxWidth >= 64 && box.maxHeight >= 44;
         final face = math.min(box.maxHeight * 0.55, 30.0);
-        return Material(
-          color: accent.withValues(alpha: waiting ? 0.32 : 0.12),
-          shape: RoundedRectangleBorder(
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+          decoration: BoxDecoration(
+            color: accent.withValues(alpha: waiting ? 0.26 : 0.12),
             borderRadius: BorderRadius.circular(5),
-            side: BorderSide(
-              color: accent.withValues(alpha: waiting ? 0.9 : 0.45),
+            border: Border.all(
+              color: edge.withValues(alpha: waiting ? 0.95 : 0.45),
               width: waiting ? 1.5 : 0.8,
             ),
           ),
           clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: p == null || onOpen == null ? null : () => onOpen!(p),
-            onLongPress: p == null || onMore == null ? null : () => onMore!(p),
-            child: Stack(
-              children: [
-                Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (p != null && face >= 14)
-                        StudentFace(
-                          slug: p.slug,
-                          url: p.slug == null
-                              ? null
-                              : server.avatar(p.slug!, machine: p.machine),
-                          shell: p.isShell,
-                          size: face,
-                        ),
-                      if (p != null && roomy)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 2),
-                          child: Text(
-                            p.displayName,
-                            style: Theme.of(context).textTheme.labelSmall
-                                ?.copyWith(color: scheme.onSurface),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: p == null || onOpen == null ? null : () => onOpen!(p),
+              onLongPress: p == null || onMore == null
+                  ? null
+                  : () => onMore!(p),
+              child: Stack(
+                children: [
+                  Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (p != null && face >= 14)
+                          StudentFace(
+                            slug: p.slug,
+                            url: p.slug == null
+                                ? null
+                                : server.avatar(p.slug!, machine: p.machine),
+                            shell: p.isShell,
+                            size: face,
                           ),
-                        ),
-                    ],
-                  ),
-                ),
-                if (waiting || busy)
-                  Positioned(
-                    top: 4,
-                    right: 4,
-                    child: Container(
-                      width: 7,
-                      height: 7,
-                      decoration: BoxDecoration(
-                        color: waiting ? scheme.primary : accent,
-                        shape: BoxShape.circle,
-                      ),
+                        if (p != null && roomy)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: Text(
+                              p.displayName,
+                              style: Theme.of(context).textTheme.labelSmall
+                                  ?.copyWith(color: scheme.onSurface),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
                     ),
                   ),
-              ],
+                  if (waiting || busy)
+                    Positioned(
+                      top: 3,
+                      right: 3,
+                      child: busy
+                          ? PulseDot(color: st!.color, size: 7)
+                          : Icon(st!.icon, size: 12, color: st.color),
+                    ),
+                ],
+              ),
             ),
           ),
         );
@@ -660,12 +681,15 @@ class _PaneTile extends StatelessWidget {
             children: [
               Container(width: 4, height: 60, color: accent),
               const SizedBox(width: 10),
-              StudentFace(
-                slug: slug,
-                url: slug == null
-                    ? null
-                    : server.avatar(slug, machine: pane.machine),
-                shell: pane.isShell,
+              Hero(
+                tag: 'face-${pane.machine}-${pane.id}',
+                child: StudentFace(
+                  slug: slug,
+                  url: slug == null
+                      ? null
+                      : server.avatar(slug, machine: pane.machine),
+                  shell: pane.isShell,
+                ),
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -691,54 +715,11 @@ class _PaneTile extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              _StatusChip(pane: pane, accent: accent),
+              StatusChip(pane: pane),
               const SizedBox(width: 10),
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.pane, required this.accent});
-
-  final Pane pane;
-  final Color accent;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final label = pane.kindLabel;
-    final filled = pane.isWaiting;
-    final fg = filled ? scheme.onPrimary : scheme.onSurfaceVariant;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-      decoration: BoxDecoration(
-        color: filled ? scheme.primary : null,
-        border: filled ? null : Border.all(color: scheme.outline),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (!filled && pane.isBusy) ...[
-            Container(
-              width: 7,
-              height: 7,
-              decoration: BoxDecoration(color: accent, shape: BoxShape.circle),
-            ),
-            const SizedBox(width: 5),
-          ],
-          Text(
-            label,
-            style: Theme.of(context).textTheme.labelMedium?.copyWith(
-              color: fg,
-              fontWeight: filled ? FontWeight.w600 : FontWeight.w500,
-            ),
-          ),
-        ],
       ),
     );
   }

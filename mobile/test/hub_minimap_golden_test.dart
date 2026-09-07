@@ -89,7 +89,8 @@ void main() {
       ),
     );
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
+    // 떠오르기(Appear)가 끝난 뒤를 찍는다 — 중간 프레임을 골든으로 굳히면 안 된다.
+    await tester.pump(const Duration(milliseconds: 1200));
     expect(find.text('게임개발부'), findsOneWidget);
     expect(find.text('아리스'), findsNWidgets(2));
     await expectLater(

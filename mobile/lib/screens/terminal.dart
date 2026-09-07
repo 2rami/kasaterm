@@ -4,6 +4,7 @@ import '../claude_style.dart';
 import '../grid_canvas.dart';
 import '../live_input.dart';
 import '../server.dart';
+import '../status_style.dart';
 import '../student_art.dart';
 import '../term_session.dart';
 
@@ -210,12 +211,15 @@ class _TerminalScreenState extends State<TerminalScreen>
           titleSpacing: 0,
           title: Row(
             children: [
-              StudentSprite(
-                slug: slug,
-                url: slug == null
-                    ? null
-                    : widget.server.avatar(slug, machine: pane.machine),
-                size: 40,
+              Hero(
+                tag: 'face-${pane.machine}-${pane.id}',
+                child: StudentSprite(
+                  slug: slug,
+                  url: slug == null
+                      ? null
+                      : widget.server.avatar(slug, machine: pane.machine),
+                  size: 40,
+                ),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -227,11 +231,41 @@ class _TerminalScreenState extends State<TerminalScreen>
                       style: theme.textTheme.titleMedium,
                       overflow: TextOverflow.ellipsis,
                     ),
-                    Text(
-                      _stateText(s),
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
+                    Row(
+                      children: [
+                        // 열 때의 상태 — 허브 칩과 같은 색·말. 연결 상태는 그 뒤에.
+                        Builder(
+                          builder: (context) {
+                            final st = StatusStyle.of(pane, scheme);
+                            return Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (st.live)
+                                  PulseDot(color: st.color, size: 6)
+                                else
+                                  Icon(st.icon, size: 11, color: st.color),
+                                const SizedBox(width: 3),
+                                Text(
+                                  st.label,
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: st.color,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                        Flexible(
+                          child: Text(
+                            '  ·  ${_stateText(s)}',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
