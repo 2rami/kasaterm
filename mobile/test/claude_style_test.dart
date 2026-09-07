@@ -266,6 +266,48 @@ void main() {
     expect(status, isNot(contains('kasaterm')), reason: '좁으면 폴더부터 뺀다');
   });
 
+  test('claude 바닥줄: 폰 폭에 넘치면 폴더·괄호 힌트부터 빼고 접지 않는다', () {
+    final g = gridOf([
+      '이 줄은 대화 본문이라 길어도 그대로 두고 폰이 접는다 — 바닥줄 규칙의 대상이 아니다.',
+      '─' * 60,
+      '❯',
+      '─' * 60,
+      '  \uFFFC\uE0C0 Fable 5.1 1M ┃ \uE0A0 main ┃ \uF07B kasaterm ┃ 42% ┃ \uF0E7 xhigh',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ], cols: 90);
+    final v = restyleClaude(g, st, 0, wrapCols: 42);
+    final status = text(v.lines[4]).trimRight();
+    expect(cols(v.lines[4]), lessThanOrEqualTo(42));
+    expect(status, contains('Fable 5.1'));
+    expect(status, contains('42%'));
+    expect(status, endsWith('xhigh'));
+    expect(status, isNot(contains('kasaterm')), reason: '폴더부터 뺀다');
+    expect(status, contains('main'), reason: '브랜치는 아직 들어간다');
+    expect(v.slots.map((s) => s.motion), contains('icon:claude'));
+    expect(text(v.lines[5]).trimRight(), '  ⏵⏵ bypass permissions on');
+    expect(cols(v.lines[0]), greaterThan(42), reason: '본문은 손대지 않는다');
+  });
+
+  test('claude 바닥줄: 아주 좁으면 브랜치·1M 까지 빼고 컨텍스트%는 남긴다', () {
+    final g = gridOf([
+      '─' * 60,
+      '❯',
+      '─' * 60,
+      '  \uFFFC\uE0C0 Fable 5.1 1M ┃ \uE0A0 main ┃ \uF07B kasaterm ┃ 42% ┃ \uF0E7 xhigh',
+      '  hint that is far too long to fit anywhere at all',
+    ], cols: 90);
+    final v = restyleClaude(g, st, 0, wrapCols: 30);
+    final status = text(v.lines[3]).trimRight();
+    expect(cols(v.lines[3]), lessThanOrEqualTo(30));
+    expect(status, isNot(contains('main')));
+    expect(status, isNot(contains('1M')));
+    expect(status, contains('42%'));
+    expect(status, endsWith('xhigh'));
+    final hint = text(v.lines[4]);
+    expect(cols(v.lines[4]), lessThanOrEqualTo(30));
+    expect(hint, endsWith('…'));
+  });
+
   test('codex 세션 배지: 입력이 그 자리까지 찼으면 안 그린다', () {
     final g = Grid()
       ..apply({

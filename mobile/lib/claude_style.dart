@@ -1060,10 +1060,13 @@ bool _restyleCodexStatusLine(
 
     // 서버가 뒤 빈칸을 잘라 보내므로 행의 칸 수가 아니라 화면 폭이 기준이다.
     final width = cols;
+    // 좁으면 폴더 → 브랜치 → 1M → 컨텍스트 순으로 뺀다. 컨텍스트%는 폰에서 제일
+    // 자주 보는 값이라 마지막까지 남긴다(claude 상태줄도 같은 순서).
     final candidates = [
       line(true, true, true, true),
       line(true, true, false, true),
-      line(true, true, false, false),
+      line(true, false, false, true),
+      line(false, false, false, true),
       line(false, false, false, false),
     ];
     for (final spans in candidates) {
@@ -1161,6 +1164,126 @@ void _overlayCodexSessionLabel(
   touched.add(bx.start);
 }
 
+int _trimmedCols(List<_Cell> row) {
+  var end = row.length;
+  while (end > 0 && row[end - 1].blank) {
+    end--;
+  }
+  return _rowCols(row.sublist(0, end));
+}
+
+/// 상태줄 조각의 종류 — 아이콘 글리프로 안다(statusline.py 가 찍는 Nerd 글리프).
+const _glyphBranch = 0xE0A0;
+const _glyphFolder = 0xF07B;
+
+/// ` ┃ ` 로 나뉜 조각의 [시작, 끝) 목록. 첫 조각은 모델이다.
+List<(int, int)> _statusSegments(List<_Cell> row) {
+  final segs = <(int, int)>[];
+  var start = 0;
+  for (var i = 1; i + 1 < row.length; i++) {
+    if (row[i].rune == 0x2503 && row[i - 1].blank && row[i + 1].blank) {
+      segs.add((start, i - 1));
+      start = i + 2;
+    }
+  }
+  segs.add((start, row.length));
+  return segs;
+}
+
+/// claude statusline(「모델 1M ┃ 브랜치 ┃ 폴더 ┃ 42% ┃ xhigh」)을 폰 폭에 맞춘다 —
+/// 폴더 → 브랜치 → 1M → 컨텍스트 순으로 빼고 모델·effort 는 남긴다. 칸을 지울 뿐
+/// 색·글꼴은 원래 것이라 데스크톱과 같은 옷이다.
+bool _shrinkStatusRow(List<_Cell> row, int width) {
+  var changed = false;
+  bool has(List<_Cell> seg, int rune) => seg.any((c) => c.rune == rune);
+  bool dropSeg(bool Function(List<_Cell>) pick) {
+    final segs = _statusSegments(row);
+    for (var k = segs.length - 1; k >= 1; k--) {
+      final (a, b) = segs[k];
+      if (!pick(row.sublist(a, b))) continue;
+      // 앞의 ` ┃ ` 까지 함께 걷는다.
+      row.removeRange(a - 3, b);
+      return true;
+    }
+    return false;
+  }
+
+  bool dropWindow() {
+    final (a, b) = _statusSegments(row).first;
+    final t = _text(row.sublist(a, b));
+    final at = t.lastIndexOf(' 1M');
+    if (at < 0) return false;
+    row.removeRange(a + at, a + at + 3);
+    return true;
+  }
+
+  final steps = <bool Function()>[
+    () => dropSeg((seg) => has(seg, _glyphFolder)),
+    () => dropSeg((seg) => has(seg, _glyphBranch)),
+    dropWindow,
+    () => dropSeg((seg) => _text(seg).contains('%')),
+  ];
+  for (final step in steps) {
+    if (_trimmedCols(row) <= width) break;
+    if (step()) changed = true;
+  }
+  return changed;
+}
+
+/// 힌트 줄(「⏵⏵ bypass permissions on (shift+tab to cycle)」)은 괄호 힌트부터 떼고,
+/// 그래도 넘치면 「…」로 자른다 — 접혀서 두 줄이 되느니 한 줄에 요점만.
+bool _fitPlainRow(List<_Cell> row, int width) {
+  var end = row.length;
+  while (end > 0 && row[end - 1].blank) {
+    end--;
+  }
+  if (end > 0 && row[end - 1].rune == 0x29) {
+    var open = end - 1;
+    while (open > 0 && row[open].rune != 0x28) {
+      open--;
+    }
+    if (open > 0 && row[open].rune == 0x28 && row[open - 1].blank) {
+      row.removeRange(open - 1, row.length);
+      if (_trimmedCols(row) <= width) return true;
+      end = row.length;
+    }
+  }
+  var keep = 0;
+  var used = 0;
+  while (keep < end && used + cellWidth(row[keep].rune) <= width - 1) {
+    used += cellWidth(row[keep].rune);
+    keep++;
+  }
+  final last = keep > 0 ? row[keep - 1] : null;
+  row.removeRange(keep, row.length);
+  row.add(
+    _Cell(0x2026, last?.fg ?? const DefaultColor(), const DefaultColor(), 0),
+  );
+  return true;
+}
+
+/// 입력상자 아래 바닥줄(상태줄·힌트)은 폰에서 접지 않는다 — 넘치면 덜 중요한 조각부터
+/// 뺀다(2026-09-08 지시 「상태줄이랑 밑에 여러 줄 안 되게」). 대화 본문은 안 건드린다.
+void _fitFooterRows(List<List<_Cell>> rows, Set<int> touched, int width) {
+  final bx = _promptBox(rows);
+  if (bx == null) return;
+  final from = switch (bx) {
+    _Bordered(:final bottom) => bottom + 1,
+    _Filled(:final end) => end,
+  };
+  for (var r = from; r < rows.length; r++) {
+    final row = rows[r];
+    if (_trimmedCols(row) <= width) continue;
+    final status = row.any(
+      (c) => c.rune == statusModelClaude || c.rune == statusModelGpt,
+    );
+    final changed = status
+        ? _shrinkStatusRow(row, width)
+        : _fitPlainRow(row, width);
+    if (changed) touched.add(r);
+  }
+}
+
 /// [wrapCols] 는 폰이 행을 접는 열 수 — codex 상태줄의 단계와 세션 배지 자리는 pane
 /// 폭이 아니라 이걸 본다.
 StyledGrid restyleClaude(
@@ -1192,6 +1315,8 @@ StyledGrid restyleClaude(
       project: st.project,
     );
   }
+
+  _fitFooterRows(rows, touched, width);
 
   // 상태줄 모델 표식 — 글리프 대신 로고. 아래→위, 마지막 상태줄이 이긴다.
   for (var r = rows.length - 1; r >= 0; r--) {
