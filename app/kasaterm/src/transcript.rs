@@ -569,6 +569,7 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         done_ago_secs: None,
         detached: false,
         machine: None,
+        title_pinned: false,
     }
 }
 
@@ -757,6 +758,7 @@ fn agy_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         done_ago_secs: None,
         detached: false,
         machine: None,
+        title_pinned: false,
     }
 }
 
@@ -1083,6 +1085,7 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         done_ago_secs: None,
         detached: false,
         machine: None,
+        title_pinned: false,
     }
 }
 

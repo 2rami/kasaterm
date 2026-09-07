@@ -146,6 +146,12 @@ pub struct PaneActivity {
     /// names the session.
     #[serde(default)]
     pub title: String,
+    /// 사람이나 에이전트가 이 pane 에 **직접 붙인** 이름인가. 데스크톱은 codex
+    /// pane 안에 이 이름을 배지로 그리는데(claude 는 `/rename` 이 `peer_name` 으로
+    /// 온다), 폰은 화면 셀만 받아 그 배지가 없다 — 폰 머리가 같은 이름을 달려면
+    /// OSC 요약과 붙인 이름을 가를 표가 필요하다.
+    #[serde(default)]
+    pub title_pinned: bool,
     /// The latest user prompt (`last-prompt` line), i.e. what this pane was
     /// just told to do. Empty if nothing's been asked yet.
     #[serde(default)]

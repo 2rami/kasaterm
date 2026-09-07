@@ -4300,6 +4300,18 @@ async fn term_shot_get(
 ///
 /// 웹 셸(`web-…`)은 board 에 없다. 그건 이름 없이 id 만 나가고, 클라가 그때 id 를
 /// 그대로 보여 준다.
+/// 폰 머리에 다는 세션 이름. claude 는 `/rename` 이 peer_name 으로 온다. codex 는
+/// 그런 통로가 없어 사람이 pane 에 붙인 이름(핀)이 그 자리다 — 데스크톱이 codex
+/// 화면 안에 배지로 그리는 바로 그 이름. OSC 요약(핀 없음)은 세션 이름이 아니다.
+fn pane_session_name(p: &kasa_socket::backend::PaneActivity) -> Option<String> {
+    p.peer_name
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            (p.title_pinned && !p.title.is_empty()).then(|| p.title.clone())
+        })
+}
+
 async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     let board = backend.collab_board().unwrap_or_default();
     // 방별 그룹핑(폰 목록을 사이드바처럼) — board 는 claude 바인딩 pane 만 담아
@@ -4349,7 +4361,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 // (2026-09-07 지시 「코덱스 학생이랑 우리가 붙인 세션 이름, 상태줄 3개
                 // pc 처럼」). session = `/rename` 으로 붙인 세션 이름(codex 는 없다),
                 // harness = claude/codex, context_pct·branch = 상태줄의 그것.
-                "session": b.and_then(|p| p.peer_name.clone()).filter(|s| !s.is_empty()),
+                "session": b.and_then(pane_session_name),
                 "harness": b.and_then(|p| p.harness.clone()),
                 "context_pct": b.map(|p| p.context_pct).filter(|v| *v > 0),
                 "branch": b.and_then(|p| p.branch.clone()).filter(|s| !s.is_empty()),
@@ -7246,6 +7258,22 @@ pub fn spawn_http_server_opts(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pane_session_name_prefers_peer_name_then_pinned_title() {
+        let mut p = kasa_socket::backend::PaneActivity {
+            title: "kasaterm".into(),
+            ..Default::default()
+        };
+        assert_eq!(super::pane_session_name(&p), None, "OSC 요약은 세션 이름이 아니다");
+        p.title_pinned = true;
+        assert_eq!(super::pane_session_name(&p).as_deref(), Some("kasaterm"));
+        p.peer_name = Some("wgpu로바꾸기".into());
+        assert_eq!(super::pane_session_name(&p).as_deref(), Some("wgpu로바꾸기"));
+        p.peer_name = Some(String::new());
+        p.title.clear();
+        assert_eq!(super::pane_session_name(&p), None);
+    }
+
     #[test]
     fn token_cookie_is_lax_not_strict() {
         // Strict 면 슬랙·디스코드 링크에서 건너오는 첫 화면에 쿠키가 안 실려 403 이다.

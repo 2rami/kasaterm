@@ -2936,19 +2936,27 @@ impl Backend for PtyBackend {
         // 화면 스냅샷은 in-memory(visible_text)라 싸다 — 락 짧게.
         // 화면 스냅샷 + OSC title 을 한 락에서. title 은 board row 라벨을 터미널 탭
         // 렌더(render.rs)와 같은 소스(OSC title)로 통일 — 양쪽 "미도리 · 작업명".
-        let (screens, osc_titles): (HashMap<String, String>, HashMap<String, String>) = {
+        let (screens, osc_titles, pinned): (
+            HashMap<String, String>,
+            HashMap<String, String>,
+            std::collections::HashSet<String>,
+        ) = {
             let ws = self.ws.lock().unwrap();
             let mut screens = HashMap::new();
             let mut osc_titles = HashMap::new();
+            let mut pinned = std::collections::HashSet::new();
             for r in &board {
                 if let Some(p) = ws.panes.get(&r.surface_id) {
                     screens.insert(r.surface_id.clone(), p.visible_text(8));
                     if let Some(t) = p.title.clone().filter(|t| !t.is_empty()) {
                         osc_titles.insert(r.surface_id.clone(), t);
                     }
+                    if p.title_pinned {
+                        pinned.insert(r.surface_id.clone());
+                    }
                 }
             }
-            (screens, osc_titles)
+            (screens, osc_titles, pinned)
         };
         // claude saved default effort(settings.json) — resume 직후 effort 카드 폴백(거노). 작은 파일
         // 1회 읽어 모든 행에 동일 적용(글로벌 설정이라 pane 무관).
@@ -2970,6 +2978,7 @@ impl Backend for PtyBackend {
             if let Some(t) = osc_titles.get(&row.surface_id) {
                 row.title = crate::strip_activity_prefix(t).to_string();
             }
+            row.title_pinned = pinned.contains(&row.surface_id);
             row.effort_default = saved_effort.clone();
             if let Some(&pid) = pane_pids.get(&row.surface_id) {
                 if let Some(cwd) = self.pane_cwd_live(pid) {
