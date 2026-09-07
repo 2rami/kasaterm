@@ -1921,6 +1921,68 @@ async fn spawn_student_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `POST /spawn-shell?cwd=<dir>` — 활성 방에 **맨 셸 pane** 하나(캐릭터 없음). 다른
+/// 기계의 `to <이 기계>` 가 자기 pane 으로 비출 자리를 세우는 창구다 — 창 없는
+/// `/term/spawn` 과 달리 이 창에 진짜로 보인다.
+async fn spawn_shell_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cwd = params.get("cwd").map(String::as_str).filter(|s| !s.is_empty());
+    let body = match backend.spawn_shell(cwd) {
+        Ok(surface) if !surface.is_empty() => {
+            serde_json::json!({ "ok": true, "surface": surface })
+        }
+        Ok(_) => serde_json::json!({
+            "ok": false,
+            "error": "pane 을 못 세웠어요(설정 화면이 앞이거나 쪼갤 자리가 없음)"
+        }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `POST /cmd` body `{"method": "surface.split", "params": {…}}` — 소켓 명령 몇 개를
+/// HTTP 로 연다. 폰이 pane 을 닫고·쪼개고·자리 바꾸고·방을 만들 창구다(2026-09-07
+/// 지시 「모바일에서도 pane 닫고 추가하고 정렬하고 방 만들고」). 소켓(`kasaterm-cli`)과
+/// 같은 이름·같은 인자라 규약이 둘로 안 갈리고, `/m/<label>/cmd` 로 다른 기계에도 간다.
+///
+/// 허용 목록만 통과시킨다 — 소켓은 같은 사용자 계정의 프로세스만 붙지만 HTTP 는 폰
+/// 주소(slug)만 알면 닿는 문이라, 화면 배치를 만지는 것 밖(send·session·profile)은
+/// 기존 창구를 그대로 쓰게 둔다.
+async fn cmd_handler(
+    backend: Arc<dyn Backend>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    const ALLOWED: &[&str] = &[
+        "surface.split",
+        "surface.close",
+        "surface.swap",
+        "surface.move",
+        "surface.focus",
+        "window.new",
+        "window.close",
+        "window.rename",
+        "window.reorder",
+        "window.switch",
+        "window.list",
+    ];
+    let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let body = if !ALLOWED.contains(&method.as_str()) {
+        serde_json::json!({ "ok": false, "error": format!("cmd: `{method}` 는 이 창구로 못 부른다") })
+    } else {
+        let params = req.get("params").cloned().unwrap_or(serde_json::Value::Null);
+        let r = kasa_socket::methods::dispatch(
+            &*backend,
+            kasa_socket::Request { id: serde_json::json!("http"), method, params },
+        );
+        serde_json::to_value(&r).unwrap_or_else(|e| {
+            serde_json::json!({ "ok": false, "error": format!("응답 직렬화 실패: {e}") })
+        })
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// `POST /swap-character?surface=<id>&character=<name>` — pane 캐릭터 교체(PTY respawn,
 /// 대화 리셋). persona 가 셸 spawn 시 고정이라 그 pane 을 새 persona 로 다시 띄운다.
 async fn swap_character_handler(
@@ -6423,6 +6485,8 @@ pub fn spawn_http_server_opts(
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
                 let spawn_student_backend = backend.clone();
+                let spawn_shell_backend = backend.clone();
+                let cmd_backend = backend.clone();
                 let character_theme_backend = backend.clone();
                 let dispatch_backend = backend.clone();
                 let task_add_backend = backend.clone();
@@ -6815,6 +6879,18 @@ pub fn spawn_http_server_opts(
                         "/spawn-student",
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
                             spawn_student_handler(spawn_student_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/spawn-shell",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            spawn_shell_handler(spawn_shell_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/cmd",
+                        post(move |body: Json<serde_json::Value>| {
+                            cmd_handler(cmd_backend.clone(), body)
                         }),
                     )
                     .route(

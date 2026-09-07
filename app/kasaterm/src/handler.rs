@@ -1057,6 +1057,13 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketCloseWindow(idx, reply) => {
+                let r = self.close_window(*idx).map_err(|e| format!("{e:#}"));
+                let _ = reply.send(r);
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketSaveCharacter(req, reply) => {
                 let kasa_socket::backend::CharacterSave {
                     name,

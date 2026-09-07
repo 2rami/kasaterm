@@ -164,6 +164,37 @@ class _TerminalScreenState extends State<TerminalScreen>
     TermState.gone => '끝난 화면',
   };
 
+  /// 데스크톱의 × 와 같다 — 되살리기 대열에 남는다. 닫히면 허브로 돌아간다.
+  Future<void> _closePane(Pane pane) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        content: Text('${pane.displayName} 을(를) 닫을까?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('아니'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('닫기'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      await widget.server.closePane(pane.id, machine: pane.machine);
+    } on ServerException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
+      return;
+    }
+    if (mounted) Navigator.of(context).pop();
+  }
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: _session,
@@ -213,6 +244,11 @@ class _TerminalScreenState extends State<TerminalScreen>
               isSelected: _wrap,
               onPressed: () => setState(() => _wrap = !_wrap),
               icon: const Icon(Icons.wrap_text),
+            ),
+            IconButton(
+              tooltip: 'pane 닫기',
+              onPressed: () => _closePane(pane),
+              icon: const Icon(Icons.close),
             ),
           ],
         ),

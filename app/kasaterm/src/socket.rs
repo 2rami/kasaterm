@@ -1778,6 +1778,18 @@ impl Backend for PtyBackend {
         }
     }
 
+    fn close_window(&self, idx: usize) -> Result<()> {
+        // 방(창) 닫기 — 폰 허브의 「방 닫기」가 `/cmd` 로 부른다(2026-09-07). 결과를
+        // 기다리는 이유는 close_surface 와 달리 거절이 있어서다(마지막 사용자 방).
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketCloseWindow(idx, tx));
+        match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(why)) => anyhow::bail!("{why}"),
+            Err(_) => anyhow::bail!("방 닫기 응답 없음(20초) — GUI 스레드가 막혀 있다"),
+        }
+    }
+
     fn close_surface(&self, surface_id: &str) -> Result<()> {
         // 로컬 PTY 모드: close 도 split/focus 처럼 GUI 스레드에 위임(App.pty 는
         // 별도 스레드서 못 만짐). layout.rs close_pane 이 leaf 제거 + 다음 pane

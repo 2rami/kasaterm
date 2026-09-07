@@ -6,6 +6,7 @@ import '../hub_model.dart';
 import '../hub_prefs.dart';
 import '../server.dart';
 import '../student_art.dart';
+import 'pane_actions.dart';
 import 'settings.dart';
 import 'terminal.dart';
 
@@ -66,6 +67,31 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
       ),
     );
   }
+
+  Future<void> _paneSheet(HubSection s, HubRoom room, Pane p) => showPaneSheet(
+    context,
+    server: widget.server,
+    room: room,
+    pane: p,
+    machine: s.machine,
+    onOpen: _open,
+    onChanged: _model.refresh,
+  );
+
+  Future<void> _roomSheet(HubSection s, HubRoom room) => showRoomSheet(
+    context,
+    server: widget.server,
+    room: room,
+    machine: s.machine,
+    onChanged: _model.refresh,
+  );
+
+  Future<void> _newRoom(HubSection s) => newRoom(
+    context,
+    server: widget.server,
+    machine: s.machine,
+    onChanged: _model.refresh,
+  );
 
   void _openSettings() {
     Navigator.of(context).push(
@@ -163,13 +189,19 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
               ? null
               : (s.online ? '${s.paneCount}명' : '안 닿음'),
           muted: !s.online,
+          onAdd: s.online ? () => _newRoom(s) : null,
         ),
       );
       if (s.online && s.rooms.isEmpty) {
         children.add(const _Notice(text: '학생이 없다'));
       }
       for (final room in s.rooms) {
-        final inside = <Widget>[_RoomHeader(title: room.title)];
+        final inside = <Widget>[
+          _RoomHeader(
+            title: room.title,
+            onMenu: s.online ? () => _roomSheet(s, room) : null,
+          ),
+        ];
         final hasMap = room.rects.isNotEmpty && shape != HubShape.list;
         if (hasMap) {
           inside.add(
@@ -177,6 +209,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
               server: widget.server,
               room: room,
               onOpen: s.online ? _open : null,
+              onMore: s.online ? (p) => _paneSheet(s, room, p) : null,
             ),
           );
         }
@@ -188,6 +221,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
                 server: widget.server,
                 pane: p,
                 onTap: s.online ? () => _open(p) : null,
+                onLongPress: s.online ? () => _paneSheet(s, room, p) : null,
               ),
             );
           }
@@ -278,11 +312,15 @@ class _SectionHeader extends StatelessWidget {
     required this.title,
     this.trailing,
     this.muted = false,
+    this.onAdd,
   });
 
   final String title;
   final String? trailing;
   final bool muted;
+
+  /// 「새 방」 — 그 기계에 빈 창 하나. 안 닿는 기계엔 안 단다.
+  final VoidCallback? onAdd;
 
   @override
   Widget build(BuildContext context) {
@@ -308,6 +346,18 @@ class _SectionHeader extends StatelessWidget {
               trailing!,
               style: theme.textTheme.labelMedium?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          if (onAdd != null)
+            // 줄 높이를 안 바꾸는 크기 — 기본 IconButton 은 48px 라 목록 전체가 밀린다.
+            SizedBox.square(
+              dimension: 22,
+              child: IconButton(
+                tooltip: '새 방',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                onPressed: onAdd,
+                icon: Icon(Icons.add_box_outlined, size: 20, color: color),
               ),
             ),
         ],
@@ -342,9 +392,12 @@ class _RoomBox extends StatelessWidget {
 }
 
 class _RoomHeader extends StatelessWidget {
-  const _RoomHeader({required this.title});
+  const _RoomHeader({required this.title, this.onMenu});
 
   final String title;
+
+  /// 방 메뉴(pane 추가·이름·닫기). 안 닿는 기계엔 안 단다.
+  final VoidCallback? onMenu;
 
   @override
   Widget build(BuildContext context) {
@@ -373,6 +426,21 @@ class _RoomHeader extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
+          if (onMenu != null)
+            SizedBox.square(
+              dimension: 20,
+              child: IconButton(
+                tooltip: '방 메뉴',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                onPressed: onMenu,
+                icon: Icon(
+                  Icons.more_horiz,
+                  size: 18,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -411,11 +479,19 @@ Color? parseHexColor(String? hex) {
 /// 데스크톱 창을 축소한 지도 — 방 안에서 누가 어디에 어떤 크기로 앉아 있는지.
 /// 칸을 누르면 목록의 타일과 같은 화면으로 간다.
 class _MiniMap extends StatelessWidget {
-  const _MiniMap({required this.server, required this.room, this.onOpen});
+  const _MiniMap({
+    required this.server,
+    required this.room,
+    this.onOpen,
+    this.onMore,
+  });
 
   final Server server;
   final HubRoom room;
   final void Function(Pane)? onOpen;
+
+  /// 길게 누름 — pane 판(닫기·추가·자리 바꾸기). 「지도만」 보기에서도 닿게.
+  final void Function(Pane)? onMore;
 
   static const _gap = 1.5;
 
@@ -451,6 +527,7 @@ class _MiniMap extends StatelessWidget {
                         server: server,
                         pane: room.paneOf(r.surface),
                         onOpen: onOpen,
+                        onMore: onMore,
                       ),
                     ),
                 ],
@@ -464,11 +541,17 @@ class _MiniMap extends StatelessWidget {
 }
 
 class _MiniCell extends StatelessWidget {
-  const _MiniCell({required this.server, required this.pane, this.onOpen});
+  const _MiniCell({
+    required this.server,
+    required this.pane,
+    this.onOpen,
+    this.onMore,
+  });
 
   final Server server;
   final Pane? pane;
   final void Function(Pane)? onOpen;
+  final void Function(Pane)? onMore;
 
   @override
   Widget build(BuildContext context) {
@@ -495,6 +578,7 @@ class _MiniCell extends StatelessWidget {
           clipBehavior: Clip.antiAlias,
           child: InkWell(
             onTap: p == null || onOpen == null ? null : () => onOpen!(p),
+            onLongPress: p == null || onMore == null ? null : () => onMore!(p),
             child: Stack(
               children: [
                 Center(
@@ -547,11 +631,17 @@ class _MiniCell extends StatelessWidget {
 }
 
 class _PaneTile extends StatelessWidget {
-  const _PaneTile({required this.server, required this.pane, this.onTap});
+  const _PaneTile({
+    required this.server,
+    required this.pane,
+    this.onTap,
+    this.onLongPress,
+  });
 
   final Server server;
   final Pane pane;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -565,6 +655,7 @@ class _PaneTile extends StatelessWidget {
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onTap,
+          onLongPress: onLongPress,
           child: Row(
             children: [
               Container(width: 4, height: 60, color: accent),

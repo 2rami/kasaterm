@@ -485,6 +485,78 @@ class Server {
     }
   }
 
+  /// 화면 배치를 만지는 소켓 명령 — `POST cmd` 는 `kasaterm-cli` 와 이름·인자가 같다
+  /// (surface.split·swap·close, window.new·rename·close). 서버가 허용 목록으로 거른다.
+  Future<Map<String, dynamic>> cmd(
+    String method,
+    Map<String, Object?> params, {
+    String? machine,
+  }) async {
+    final http.Response res;
+    try {
+      res = await _client.post(
+        uri('cmd', machine: machine),
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode({'method': method, 'params': params}),
+      );
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    Object? body;
+    try {
+      body = jsonDecode(res.body);
+    } catch (_) {
+      body = null;
+    }
+    final map = body is Map<String, dynamic> ? body : <String, dynamic>{};
+    if (res.statusCode != 200 || map['ok'] != true) {
+      final err = map['error'];
+      final why = err is Map
+          ? (err['message'] ?? err.toString())
+          : (err ?? 'HTTP ${res.statusCode}');
+      throw ServerException('$why');
+    }
+    return map;
+  }
+
+  /// pane 닫기 — 데스크톱에서 × 를 누른 것과 같다(되살리기 대열에 남는다).
+  Future<void> closePane(String pane, {String? machine}) async {
+    final http.Response res;
+    try {
+      res = await _client.post(
+        uri('close-pane', query: {'surface': pane}, machine: machine),
+      );
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    if (res.statusCode != 200) {
+      throw ServerException('pane 을 못 닫았다 (${res.statusCode})');
+    }
+  }
+
+  /// `from` 옆에 셸 pane 하나 — 방향은 서버가 pane 모양을 보고 고른다.
+  Future<void> splitPane(String from, {String? machine}) => cmd(
+    'surface.split',
+    {'from': from, 'direction': 'auto'},
+    machine: machine,
+  );
+
+  Future<void> swapPanes(String a, String b, {String? machine}) =>
+      cmd('surface.swap', {'a': a, 'b': b}, machine: machine);
+
+  Future<void> newWindow({String? machine}) =>
+      cmd('window.new', const {}, machine: machine);
+
+  /// 방 이름은 그 방의 pane 하나로 짚는다 — 소켓 규약이 창 번호 대신 surface 를 받는다.
+  Future<void> renameWindow(String surface, String title, {String? machine}) =>
+      cmd('window.rename', {
+        'surface_id': surface,
+        'title': title,
+      }, machine: machine);
+
+  Future<void> closeWindow(int idx, {String? machine}) =>
+      cmd('window.close', {'idx': idx}, machine: machine);
+
   Uri avatar(String slug, {String? machine}) =>
       uri('term/avatar/${Uri.encodeComponent(slug)}.png', machine: machine);
 

@@ -3805,6 +3805,9 @@ enum UserEvent {
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
+    /// `window.close` 위임 → `close_window`. 답을 돌려보낸다 — 마지막 방은 못 닫는
+    /// 이유를 부른 쪽(폰의 「방 닫기」)이 그대로 보여 줘야 해서다.
+    SocketCloseWindow(usize, std::sync::mpsc::Sender<std::result::Result<(), String>>),
     /// `POST /settings/character` 위임 — 웹뷰 설정이 고친 성격·이름을 굳힌다.
     ///
     /// 저장 함수(`flush_student_persona`/`flush_student_name`)를 직접 부르지 않고
