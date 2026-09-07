@@ -632,10 +632,29 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
   /// 좁은 pane 에 맞춰 키운 글꼴인가 — 그때는 열 수를 pane 열 수와 **정확히** 맞춘다.
   bool _fitsPane(double maxWidth) => _fitSize(maxWidth) != null;
 
+  /// 넓은 pane(폰 열 수 이상)을 접을 때 기준으로 삼는 열 수 — 데스크톱의 보통 학생
+  /// pane(42열)과 같다. 전에는 넓은 pane 을 **기본 글꼴**로 접어, 늘 넓은 pane 에서 도는
+  /// 코덱스가 폰에서 42열 클로드보다 글자가 한 치수 작았다(2026-09-07 지시 「코덱스도
+  /// 모바일에서 비율 조정」). 같은 폰에서 pane 폭에 따라 글자 크기가 달라질 이유가 없다 —
+  /// 42열을 맞출 때와 같은 글꼴로 접어 두 화면의 비율을 맞춘다.
+  static const _refCols = 42;
+
+  /// 넓은 pane 의 접기 글꼴 — `_refCols` 열이 폰 폭을 채우는 크기(상한 `_maxFont`).
+  double _wideSize(double maxWidth) {
+    final ratio = _base.width / _base.fontSize;
+    final size = maxWidth / (_refCols * ratio);
+    return size.clamp(widget.fontSize, _maxFont);
+  }
+
   _CellMetrics _metricsFor(double maxWidth) {
     final paneCols = widget.grid.cols;
     final fit = _fitSize(maxWidth);
-    if (fit == null) return _base;
+    if (fit == null) {
+      final size = _wideSize(maxWidth);
+      final cached = _scaled;
+      if (cached != null && (cached.fontSize - size).abs() < 0.01) return cached;
+      return _scaled = _CellMetrics(size);
+    }
     var size = fit;
     final cached = _scaled;
     if (cached != null && (cached.fontSize - size).abs() < 0.01) return cached;
