@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'claude_style.dart';
 import 'server.dart';
 
 /// 학생 상태의 갈래 — 색·아이콘·말이 여기 하나로 묶인다.
@@ -445,15 +446,17 @@ class PaneStatusLine extends StatelessWidget {
       padding: const EdgeInsets.only(top: 2),
       child: Row(
         children: [
+          // 하네스 로고 — 데스크톱 상태줄의 모델 표식과 같은 파랑(2026-09-08 지시
+          // 「상태줄에 로고 뜨는 거도」). 회색으로 작게 두니 안 보였다.
           if (pane.harness == 'claude' || pane.harness == 'codex') ...[
             Image.asset(
               'assets/icons/${pane.harness}.png',
-              width: 11,
-              height: 11,
-              color: scheme.onSurfaceVariant,
+              width: 13,
+              height: 13,
+              color: statusModelColor,
               errorBuilder: (_, _, _) => const SizedBox.shrink(),
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: 5),
           ],
           Flexible(
             child: Text.rich(

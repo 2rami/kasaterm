@@ -596,5 +596,100 @@ class Server {
   Uri avatar(String slug, {String? machine}) =>
       uri('term/avatar/${Uri.encodeComponent(slug)}.png', machine: machine);
 
+  /// 학생 쪽지 — 나쵸가 남긴 「시킨 것 → 한 것」 한 줄. 최근 것부터.
+  Future<List<Note>> notes({String? machine}) async {
+    final j = await _getJson('term/notes', machine: machine);
+    return [
+      if (j is List)
+        for (final e in j)
+          if (e is Map)
+            Note.fromJson(e.cast<String, Object?>(), machine: machine),
+    ];
+  }
+
+  Future<void> markNotesRead({
+    List<int> ids = const [],
+    bool all = false,
+    String? machine,
+  }) async {
+    try {
+      await _client.post(
+        uri('term/notes/read', machine: machine),
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode({'ids': ids, 'all': all}),
+      );
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+  }
+
+  Uri noteImage(int id, {String? machine}) =>
+      uri('term/notes/$id.png', machine: machine);
+
   void close() => _client.close();
+}
+
+/// 나쵸가 남긴 학생 쪽지 한 장(서버 notes.rs).
+class Note {
+  const Note({
+    required this.id,
+    required this.pane,
+    required this.character,
+    required this.kind,
+    required this.summary,
+    required this.asked,
+    required this.did,
+    required this.when,
+    required this.read,
+    required this.image,
+    this.machine,
+  });
+
+  final int id;
+  final String pane;
+  final String character;
+
+  /// permission · question · waiting · idle · done_ok · done_fail · dead
+  final String kind;
+  final String summary;
+  final String asked;
+  final String did;
+  final DateTime when;
+  final bool read;
+
+  /// pane 사진이 딸렸는가 — `Server.noteImage`.
+  final bool image;
+  final String? machine;
+
+  String get key => '${machine ?? ''}|$id';
+
+  Note copyWith({bool? read}) => Note(
+    id: id,
+    pane: pane,
+    character: character,
+    kind: kind,
+    summary: summary,
+    asked: asked,
+    did: did,
+    when: when,
+    read: read ?? this.read,
+    image: image,
+    machine: machine,
+  );
+
+  static Note fromJson(Map<String, Object?> j, {String? machine}) => Note(
+    id: (j['id'] as num?)?.toInt() ?? 0,
+    pane: j['pane'] as String? ?? '',
+    character: j['character'] as String? ?? '',
+    kind: j['kind'] as String? ?? '',
+    summary: j['summary'] as String? ?? '',
+    asked: j['asked'] as String? ?? '',
+    did: j['did'] as String? ?? '',
+    when: DateTime.fromMillisecondsSinceEpoch(
+      ((j['when'] as num?)?.toInt() ?? 0) * 1000,
+    ),
+    read: j['read'] == true,
+    image: j['image'] == true,
+    machine: machine,
+  );
 }

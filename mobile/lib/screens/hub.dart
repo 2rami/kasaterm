@@ -7,6 +7,7 @@ import '../hub_prefs.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
+import 'notes_sheet.dart';
 import 'pane_actions.dart';
 import 'settings.dart';
 import 'terminal.dart';
@@ -124,24 +125,35 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
             ],
           ),
           actions: [
-            AnimatedSwitcher(
-              duration: const Duration(milliseconds: 280),
-              transitionBuilder: (child, anim) => ScaleTransition(
-                scale: CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
-                child: child,
+            // 종 = 나쵸가 남긴 학생 쪽지. 배지는 안 읽은 쪽지 수(2026-09-08 지시 —
+            // 전엔 기다리는 학생 수만 세고 눌러도 아무것도 없었다).
+            IconButton(
+              tooltip: '학생 쪽지',
+              onPressed: () => NotesSheet.show(
+                context,
+                model: _model,
+                server: widget.server,
+                onOpen: _open,
               ),
-              child: _model.waiting > 0
-                  ? Padding(
-                      key: ValueKey(_model.waiting),
-                      padding: const EdgeInsets.only(right: 4),
-                      child: Badge.count(
-                        count: _model.waiting,
+              icon: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 280),
+                transitionBuilder: (child, anim) => ScaleTransition(
+                  scale: CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
+                  child: child,
+                ),
+                child: _model.unread > 0
+                    ? Badge.count(
+                        key: ValueKey(_model.unread),
+                        count: _model.unread,
                         backgroundColor: StatusStyle.attention,
                         textColor: Colors.white,
-                        child: const Icon(Icons.notifications_outlined),
+                        child: const Icon(Icons.notifications_rounded),
+                      )
+                    : const Icon(
+                        Icons.notifications_outlined,
+                        key: ValueKey(0),
                       ),
-                    )
-                  : const SizedBox.shrink(),
+              ),
             ),
             _ViewMenu(model: _model),
             IconButton(

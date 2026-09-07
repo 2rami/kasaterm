@@ -94,6 +94,11 @@ class HubModel extends ChangeNotifier {
   /// 떴다. 서버가 말하는 지금 수가 늘 맞고, 목록이 길 때 위에서 한눈에 보인다.
   int waiting = 0;
 
+  /// 나쵸가 남긴 학생 쪽지 — 모든 기계 것을 합쳐 최근 것부터. 종 아이콘 목록.
+  List<Note> notes = const [];
+  int get unread => notes.where((n) => !n.read).length;
+  Set<String> _seenNotes = const {};
+
   Map<String, String> _lastStatus = const {};
   Timer? _timer;
 
@@ -161,6 +166,7 @@ class HubModel extends ChangeNotifier {
       ];
       _noteWaiting(next);
       sections = next;
+      await _refreshNotes(machines);
       error = null;
       updatedAt = DateTime.now();
     } on ServerException catch (e) {
@@ -193,6 +199,60 @@ class HubModel extends ChangeNotifier {
     _lastStatus = status;
     waiting = now;
     if (fresh > 0) HapticFeedback.mediumImpact();
+  }
+
+  /// 쪽지도 곁들이다 — 못 받으면 직전 목록을 둔다. 새로 온 쪽지엔 진동 한 번.
+  Future<void> _refreshNotes(List<Machine> machines) async {
+    final lists = await Future.wait([
+      _notesOf(null),
+      for (final m in machines)
+        m.online ? _notesOf(m.label) : Future.value(const <Note>[]),
+    ]);
+    final all = [for (final l in lists) ...l]
+      ..sort((a, b) => b.when.compareTo(a.when));
+    final fresh = all.where((n) => !n.read && !_seenNotes.contains(n.key));
+    if (_seenNotes.isNotEmpty && fresh.isNotEmpty) HapticFeedback.lightImpact();
+    _seenNotes = {for (final n in all) n.key};
+    notes = all;
+  }
+
+  Future<List<Note>> _notesOf(String? machine) async {
+    try {
+      return await server.notes(machine: machine);
+    } catch (_) {
+      return [
+        for (final n in notes)
+          if (n.machine == machine) n,
+      ];
+    }
+  }
+
+  /// 종 목록을 열어 봤으면 전부 읽음 — 기계마다 따로 표시한다.
+  Future<void> markAllRead() async {
+    final machines = {
+      for (final n in notes)
+        if (!n.read) n.machine,
+    };
+    for (final m in machines) {
+      try {
+        await server.markNotesRead(all: true, machine: m);
+      } catch (_) {}
+    }
+    notes = [for (final n in notes) n.copyWith(read: true)];
+    notifyListeners();
+  }
+
+  /// 쪽지의 pane 을 지금 목록에서 찾는다 — 닫혔으면 null.
+  Pane? paneOfNote(Note n) {
+    for (final s in sections) {
+      if (s.machine != n.machine) continue;
+      for (final r in s.rooms) {
+        for (final p in r.panes) {
+          if (p.id == n.pane) return p;
+        }
+      }
+    }
+    return null;
   }
 
   /// 배치는 곁들이다 — 못 받아도 학생 목록은 그대로 뜬다.
