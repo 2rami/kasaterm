@@ -3334,37 +3334,25 @@ fn paint_pet(
         );
         *y += 28.0;
     } else {
-        let cells: Vec<(String, bool, SettingsAction)> = chars
-            .iter()
-            .map(|n| {
-                (
-                    n.clone(),
-                    Some(n.as_str()) == current.as_deref(),
-                    SettingsAction::PetCharacter(n.clone()),
-                )
-            })
-            .collect();
-        chips_owned(g, s, hits, x, y, w, cells);
-        *y += 8.0;
+        // 그림이 없는 캐릭터가 있으면 그리는 김에 만들어 둔다 — 펫을 잠깐 띄웠다
+        // 끄는 일이라 화면에 한 번 스친다. 다 있으면 아무 일도 안 한다.
+        crate::chrome::ensure_pet_previews();
+        pet_cards(g, s, hits, x, y, w, &chars, current.as_deref());
     }
 
     draw_text(g, x, *y, "말풍선 글자 크기", 12.5, theme::text(), true);
+    draw_text(
+        g,
+        x + w - 40.0,
+        *y,
+        &format!("{pt}pt"),
+        12.0,
+        theme::text_dim(),
+        false,
+    );
     *y += 26.0;
-    // 숫자를 직접 치게 하지 않는다 — 이건 눈으로 맞추는 값이라, 몇 pt 인지보다
-    // 「지금보다 크게」가 알고 싶은 전부다.
-    let steps: [(&str, u32); 5] = [
-        ("아주 작게", 10),
-        ("작게", 11),
-        ("보통", 13),
-        ("크게", 17),
-        ("아주 크게", 22),
-    ];
-    let cells: Vec<(&str, bool, SettingsAction)> = steps
-        .iter()
-        .map(|(label, v)| (*label, *v == pt, SettingsAction::PetTextPt(*v)))
-        .collect();
-    segmented(g, s, hits, x, *y, w, &cells);
-    *y += 44.0;
+    pet_size_slider(g, s, hits, x, y, w, pt);
+
     draw_text(
         g,
         x,
@@ -3375,6 +3363,107 @@ fn paint_pet(
         false,
     );
     *y += 24.0;
+}
+
+/// 캐릭터 카드 — 그림과 이름. 이름만 늘어놓으면 「Ren 이 누구였더라」가 되는데,
+/// 이건 눈으로 고르는 값이다.
+fn pet_cards(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    names: &[String],
+    current: Option<&str>,
+) {
+    const CARD_W: f32 = 92.0;
+    const CARD_H: f32 = 132.0;
+    let gap = 8.0;
+    let per_row = (((w + gap) / (CARD_W + gap)).floor() as usize).max(1);
+    for (i, name) in names.iter().enumerate() {
+        let (col, row) = (i % per_row, i / per_row);
+        let rect = (
+            x + col as f32 * (CARD_W + gap),
+            *y + row as f32 * (CARD_H + gap),
+            CARD_W,
+            CARD_H,
+        );
+        let selected = Some(name.as_str()) == current;
+        choice_card(
+            g,
+            s,
+            hits,
+            rect,
+            selected,
+            Target::Setting(SettingsAction::PetCharacter(name.clone())),
+        );
+        // 그림은 카드보다 조금 작게 — 테두리에 딱 붙으면 골라진 표시가 안 보인다.
+        if let Some(path) = crate::chrome::pet_preview_path(name) {
+            let key = format!("pet:{name}");
+            if !g.has_image(&key) {
+                if let Some((rgba, iw, ih)) =
+                    crate::sprites::user_asset_rgba_in(path.parent().unwrap_or(&path), "preview.png")
+                {
+                    g.upload_image(&key, &rgba, iw, ih);
+                }
+            }
+            if g.has_image(&key) {
+                g.queue_image_above(&key, rect.0 + 8.0, rect.1 + 6.0, CARD_W - 16.0, CARD_H - 34.0);
+            }
+        }
+        let shown = fit(g, name, CARD_W - 12.0, 11.0, selected);
+        let tw = g.measure_chrome_text(&shown, 11.0, selected);
+        draw_text(
+            g,
+            rect.0 + (CARD_W - tw) / 2.0,
+            rect.1 + CARD_H - 22.0,
+            &shown,
+            11.0,
+            if selected { theme::text() } else { theme::text_dim() },
+            selected,
+        );
+    }
+    let rows = names.len().div_ceil(per_row) as f32;
+    *y += rows * (CARD_H + gap) + 8.0;
+}
+
+/// 글자 크기 슬라이더. 끌기가 아니라 **눌러서 놓는** 것이다 — 설정 화면의 입력 경로는
+/// 누른 자리를 안 알려 주므로, 눈금마다 제 몫의 자리를 두고 누른 눈금을 받는다.
+/// 손끝에는 그냥 슬라이더로 보인다.
+fn pet_size_slider(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    pt: u32,
+) {
+    const MIN: u32 = 8;
+    const MAX: u32 = 32;
+    let track_h = 6.0;
+    let ty = *y + 12.0;
+    round_rect(g, x, ty, w, track_h, track_h / 2.0, theme::surface_active());
+    let frac = ((pt.clamp(MIN, MAX) - MIN) as f32) / ((MAX - MIN) as f32);
+    round_rect(g, x, ty, (w * frac).max(track_h), track_h, track_h / 2.0, theme::accent());
+    // 손잡이
+    round_rect(g, x + w * frac - 8.0, ty - 5.0, 16.0, 16.0, 8.0, [255, 255, 255, 255]);
+    // 눈금마다 누를 자리. 칸이 좁아도 손가락이 닿게 세로를 넉넉히 준다.
+    let n = MAX - MIN + 1;
+    let cw = w / n as f32;
+    for i in 0..n {
+        let v = MIN + i;
+        register_clipped(
+            g,
+            hits,
+            Target::Setting(SettingsAction::PetTextPt(v)),
+            (x + i as f32 * cw, *y, cw, 30.0),
+            HitCursor::Pointer,
+        );
+    }
+    *y += 34.0;
+    let _ = s;
 }
 
 fn paint_machines(

@@ -25,6 +25,12 @@ mod bubble;
 /// 안 비우면 캐릭터가 창을 꽉 채워 말풍선이 화면 끝에 눌린 채 못 움직인다.
 const HEADROOM: f64 = 110.0;
 
+/// 설정 화면에 걸 미리보기를 뜨는 판인가. 말풍선 자리를 안 비우고(캐릭터만 꽉 차게)
+/// 한 장 찍은 뒤 스스로 끝낸다 — 사람 눈에 창이 잠깐 스치는 것으로 끝난다.
+fn preview_mode() -> bool {
+    std::env::var("KASAPET_PREVIEW").is_ok()
+}
+
 
 struct Gfx {
     dev: wgpu::Device, q: wgpu::Queue, surf: wgpu::Surface<'static>, fmt: wgpu::TextureFormat,
@@ -567,7 +573,7 @@ impl App {
         let bufs = &self.bufs;
         // 캐릭터는 창의 아래쪽 몫에만, 그림이 차지하는 범위를 그 안에 꽉 맞춰 그린다.
         // 위는 말풍선 자리다.
-        let room = ((self.h - HEADROOM) / self.h) as f32;
+        let room = if preview_mode() { 1.0 } else { ((self.h - HEADROOM) / self.h) as f32 };
         let (win_w, win_h) = {
             let sz = self.win.as_ref().map(|w| w.inner_size()).unwrap_or_default();
             let sf = self.win.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
@@ -640,7 +646,7 @@ impl App {
             // 할 말 — 판 없이 글자만 머리 위에 뜬다(2026-09-07 지시). 판을 두면 캐릭터
             // 위에 네모가 하나 더 얹혀 바탕화면에 얹힌 느낌이 사라진다. 밝은 바탕에서도
             // 읽히도록 글자 자체가 어두운 테두리를 두르고 온다(bubble.rs).
-            if let Some((text_v, text_w, text_h)) = &self.bubble_text {
+            if let (Some((text_v, text_w, text_h)), false) = (&self.bubble_text, preview_mode()) {
                 let win = self.win.as_ref().map(|w| w.inner_size()).unwrap_or_default();
                 let sf = self.win.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
                 let (sw, sh) = (win.width.max(1) as f32 / sf, win.height.max(1) as f32 / sf);
@@ -677,6 +683,12 @@ impl App {
         if self.frames == self.shot_at {
             if let Some(path) = self.shot_path.clone() {
                 save_shot(g, &frame.texture, &path);
+                if preview_mode() {
+                    // 프레임을 내보내고 나가야 한다 — 여기서 곧장 죽으면 방금 그린 것이
+                    // 화면에도 파일에도 안 남는 판이 있다.
+                    frame.present();
+                    std::process::exit(0);
+                }
             }
         }
         frame.present();

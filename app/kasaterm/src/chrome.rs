@@ -3814,6 +3814,66 @@ pub(crate) fn pet_characters() -> Vec<String> {
     v
 }
 
+/// 펫 실행 파일 — 앱 번들 안(Resources 옆) 아니면 개발 트리의 target.
+fn pet_binary() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    [
+        exe.parent().map(|d| d.join("kasapet")),
+        exe.parent().and_then(|d| d.parent()).map(|c| c.join("Resources/kasapet")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|p| p.is_file())
+}
+
+/// 그 캐릭터의 미리보기 그림. 없으면 None — 설정 화면은 이름만 그린다.
+pub(crate) fn pet_preview_path(name: &str) -> Option<std::path::PathBuf> {
+    let p = pet_model_dir()?.join(name).join("preview.png");
+    p.is_file().then_some(p)
+}
+
+/// 미리보기가 없는 캐릭터를 위해 펫을 잠깐 띄워 한 장씩 뜬다.
+///
+/// 그림을 미리 만들어 둘 수는 없다 — 모델은 레포에 없고 사람마다 다른 것이 들어온다.
+/// 그릴 수 있는 것은 그리는 쪽뿐이라 펫에게 시킨다(`KASAPET_PREVIEW`: 말풍선 자리를
+/// 안 비우고 한 장 찍은 뒤 스스로 끝낸다). 한 번에 하나씩, 다 되면 스레드가 끝난다.
+pub(crate) fn ensure_pet_previews() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Some(dir) = pet_model_dir() else {
+        RUNNING.store(false, Ordering::SeqCst);
+        return;
+    };
+    let Some(bin) = pet_binary() else {
+        RUNNING.store(false, Ordering::SeqCst);
+        return;
+    };
+    let todo: Vec<String> = pet_characters()
+        .into_iter()
+        .filter(|n| pet_preview_path(n).is_none())
+        .collect();
+    if todo.is_empty() {
+        RUNNING.store(false, Ordering::SeqCst);
+        return;
+    }
+    std::thread::spawn(move || {
+        for name in todo {
+            let Some(model) = model3_in(&dir.join(&name)) else { continue };
+            let out = dir.join(&name).join("preview.png");
+            let _ = std::process::Command::new(&bin)
+                .arg(model)
+                .env("KASAPET_PREVIEW", "1")
+                .env("KASAPET_SHOT", &out)
+                .env("KASAPET_SHOT_FRAME", "90")
+                .status();
+        }
+        RUNNING.store(false, Ordering::SeqCst);
+    });
+}
+
 /// 지금 고른 캐릭터. 아직 안 골랐으면 첫 칸이 뜨므로 그것을 답한다 — 화면에 아무것도
 /// 안 골라진 채로 두면 「어느 게 나오는 건지」를 알 길이 없다.
 pub(crate) fn pet_current_character() -> Option<String> {
@@ -3907,15 +3967,7 @@ pub(crate) fn toggle_pet() -> bool {
         }
         return false;
     }
-    // 펫 실행 파일은 앱 번들 안(Resources 옆) 아니면 개발 트리의 target.
-    let exe = std::env::current_exe().ok();
-    let cand = exe.iter().flat_map(|e| {
-        [
-            e.parent().map(|d| d.join("kasapet")),
-            e.parent().and_then(|d| d.parent()).map(|c| c.join("Resources/kasapet")),
-        ]
-    }).flatten().find(|p| p.is_file());
-    let Some(bin) = cand else {
+    let Some(bin) = pet_binary() else {
         eprintln!("[pet] kasapet 실행 파일을 못 찾았다");
         return false;
     };
