@@ -8073,11 +8073,23 @@ fn resolve_default_shell() -> Option<String> {
     // User's explicit choice in the settings screen wins over `$SHELL` so it
     // overrides the inherited login shell, but stays below the env launch
     // override above.
+    //
+    // ⚠️ 적힌 셸이 **이 기계에 실재할 때만** 쓴다. 설정 파일은 기계를 옮겨
+    // 다닌다(맥에서 쓰던 것을 Windows 로 들고 오거나 그 반대). 남의 플랫폼
+    // 경로가 그대로 남으면 pane 을 새로 만들 때마다 spawn 이 실패하는데, 그
+    // 실패는 화면 어디에도 안 뜬다 — 사람 눈에는 **창 나누기와 새 탭이 통째로
+    // 먹통**으로만 보인다(2026-09-07 실측: Windows 설정에 `/bin/bash` 가 남아
+    // `CreateProcessW … os error 3`, 눌러도 아무 일이 없었다).
     if let Some(s) = socket::read_default_shell() {
-        return Some(s);
+        if shell_command_exists(&s) {
+            return Some(s);
+        }
+        eprintln!("[kasaterm] 설정의 기본 셸 `{s}` 을 찾을 수 없다 — 이 기계의 기본 셸로 되돌린다");
     }
+    // `$SHELL` 도 같은 위험을 진다. Git Bash 에서 앱을 띄우면 `/usr/bin/bash`
+    // 같은 MSYS 경로가 물려오는데, 그건 네이티브 CreateProcessW 가 못 찾는다.
     if let Ok(s) = std::env::var("SHELL") {
-        if !s.is_empty() {
+        if !s.is_empty() && shell_command_exists(&s) {
             return Some(s);
         }
     }
@@ -8097,6 +8109,27 @@ fn resolve_default_shell() -> Option<String> {
     }
     #[allow(unreachable_code)]
     None
+}
+
+/// 이 명령을 지금 이 기계에서 띄울 수 있는가.
+///
+/// 경로 꼴(`/` 나 `\` 를 품은 것)이면 그 파일이 실재해야 참이다. 이름 꼴
+/// (`pwsh`·`powershell.exe`·`zsh`)은 PATH 해석에 맡기고 그대로 통과시킨다 —
+/// 여기서 PATH 를 직접 뒤지면 셸을 이름으로만 적어 둔 멀쩡한 설정이 되레
+/// 막힌다.
+///
+/// 첫 토큰만 본다. 설정이나 `$SHELL` 에 인자가 붙어 있어도(`/bin/bash -il`)
+/// 실재 여부는 실행 파일 하나로 갈리기 때문이다.
+fn shell_command_exists(cmd: &str) -> bool {
+    // 빈 값과 공백뿐인 값은 여기서 걸린다 — `split_whitespace` 가 둘 다 빈
+    // 이터레이터를 준다.
+    let Some(first) = cmd.split_whitespace().next() else {
+        return false;
+    };
+    if first.contains('/') || first.contains('\\') {
+        return std::path::Path::new(first).is_file();
+    }
+    true
 }
 
 /// First installed Git Bash, if any. Git for Windows ships a Unix-like
@@ -8412,6 +8445,27 @@ fn stage_shim(src: &std::path::Path, target: &std::path::Path) -> std::io::Resul
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// 설정에 남은 **남의 플랫폼 셸**은 걸러지고, 이름 꼴은 통과해야 한다.
+    ///
+    /// 이걸 놓치면 창 나누기와 새 탭이 통째로 먹통이 된다 — spawn 실패는 화면
+    /// 어디에도 안 뜨므로 사람 눈에는 「눌러도 아무 일이 없다」로만 보인다.
+    #[test]
+    fn shell_command_exists_checks_only_path_shaped_values() {
+        // 이름 꼴은 PATH 해석에 맡긴다. 여기서 막으면 셸을 이름으로만 적어 둔
+        // 멀쩡한 설정이 되레 죽는다.
+        assert!(shell_command_exists("pwsh"));
+        assert!(shell_command_exists("powershell.exe"));
+        // 경로 꼴은 실재해야 통과한다(어느 플랫폼에도 없을 경로로 본다).
+        assert!(!shell_command_exists("/no/such/shell-9d3f"));
+        assert!(!shell_command_exists(r"C:\no\such\shell-9d3f.exe"));
+        // 인자가 붙어 와도 첫 토큰으로 가른다 — `$SHELL` 과 설정에는 `-il` 같은
+        // 꼬리가 붙어 오는 일이 있다.
+        assert!(!shell_command_exists("/no/such/shell-9d3f -il"));
+        assert!(shell_command_exists("zsh -l"));
+        assert!(!shell_command_exists(""));
+        assert!(!shell_command_exists("   "));
+    }
 
     /// 화면 한 줄을 실제 그리드처럼 만든다 — 넓은 글자 뒤에 뒷칸(진짜 공백)이 붙는다.
     fn grid_row(s: &str, width: usize) -> Vec<GridCell> {
