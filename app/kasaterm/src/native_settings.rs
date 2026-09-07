@@ -965,7 +965,6 @@ impl App {
             SettingsInput::CustomThemeLabel
             | SettingsInput::AccountLabel
             | SettingsInput::MachineField
-            | SettingsInput::MachineField
             | SettingsInput::LoginCode => {
                 self.settings_caret = self
                     .native_settings_field_value(field)
