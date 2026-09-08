@@ -876,18 +876,6 @@ async fn announce_to(client: &reqwest::Client, base: &str) {
         .post(format!("{base}/machines/announce"))
         .timeout(FETCH_TIMEOUT)
         .header("content-type", "application/json")
-/// 그 기계의 `/term/panes` 행 하나(캐시). 거울 pane 은 몸통이 저쪽이라 이쪽 board 에
-/// 줄이 없다 — 폰 목록이 거울을 「셸」로 그렸다(2026-09-08 지적 「푸리나가 그냥 셸이라고
-/// 떠, 미니 미러링된 건데」). 폴링 캐시라 기계가 방금 죽었어도 마지막 모습이 남는다.
-pub fn cached_pane(label: &str, pane: &str) -> Option<Value> {
-    let c = cache().lock().ok()?;
-    c.get(label)?
-        .panes
-        .iter()
-        .find(|row| row.get("id").and_then(Value::as_str) == Some(pane))
-        .cloned()
-}
-
         .body(body.to_string())
         .send()
         .await;
