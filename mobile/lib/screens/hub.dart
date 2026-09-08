@@ -75,7 +75,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     server: widget.server,
     room: room,
     pane: p,
-    machine: s.machine,
+    machine: s.route,
     onOpen: _open,
     onChanged: _model.refresh,
   );
@@ -84,14 +84,14 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     context,
     server: widget.server,
     room: room,
-    machine: s.machine,
+    machine: s.route,
     onChanged: _model.refresh,
   );
 
   Future<void> _newRoom(HubSection s) => newRoom(
     context,
     server: widget.server,
-    machine: s.machine,
+    machine: s.route,
     onChanged: _model.refresh,
   );
 

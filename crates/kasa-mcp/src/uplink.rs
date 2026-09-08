@@ -34,6 +34,17 @@ pub const WS_PING: u8 = 7;
 pub const WS_PONG: u8 = 8;
 pub const CLOSE: u8 = 9; // 스트림 종료(어느 쪽이든). payload = 사유(utf8, 선택)
 
+pub(crate) const CONTEXT_HEADER: &str = "x-kasa-uplink-context";
+pub(crate) const MACHINES_HEADER: &str = "x-kasa-uplink-machines";
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct GatewayMachine {
+    pub id: String,
+    pub machine: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
 /// 바디 조각 상한 — 한 프레임에 너무 크게 실으면 다른 스트림이 그만큼 기다린다.
 pub const CHUNK: usize = 64 * 1024;
 
@@ -67,6 +78,59 @@ pub fn skip_header(name: &str) -> bool {
             | "trailer"
             | "proxy-connection"
     ) || name.starts_with("sec-websocket-")
+}
+
+pub(crate) fn is_internal_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case(CONTEXT_HEADER) || name.eq_ignore_ascii_case(MACHINES_HEADER)
+}
+
+fn context_token() -> &'static str {
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+}
+
+fn encode_machines(machines: &[GatewayMachine]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(machines).unwrap_or_default())
+}
+
+/// 공용 관문이 같은 slug/key에서 확인한 살아 있는 기계 목록.
+///
+/// 두 헤더는 업링크가 loopback 요청을 만들 때만 붙인다. 인터넷이나 로컬 HTTP에서
+/// 이름 헤더만 흉내 내도 프로세스 안의 일회성 context 값이 없어 신뢰하지 않는다.
+pub(crate) fn verified_machines(headers: &axum::http::HeaderMap) -> Vec<GatewayMachine> {
+    use base64::Engine as _;
+    let trusted = headers
+        .get(CONTEXT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == context_token());
+    if !trusted {
+        return Vec::new();
+    }
+    let Some(encoded) = headers
+        .get(MACHINES_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Vec::new();
+    };
+    let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded) else {
+        return Vec::new();
+    };
+    serde_json::from_slice::<Vec<GatewayMachine>>(&bytes)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|machine| {
+            (8..=128).contains(&machine.id.len())
+                && machine
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+                && !machine.machine.is_empty()
+                && machine.machine.chars().count() <= 80
+                && !machine.machine.chars().any(char::is_control)
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -106,6 +170,7 @@ fn set_status(f: impl FnOnce(&mut Status)) {
 
 fn hello_json() -> Option<String> {
     let key = crate::mobile::machine_key()?;
+    let machine_id = crate::mobile::machine_identity()?;
     // 주인 주소는 여기서 생긴다 — 앱을 처음 켠 사람도 관문에 붙는 순간 주소 하나를 받는다.
     // 안 만들고 빈 목록으로 hello 하면 「붙었는데 주소 0개」가 된다(리그에서 실제로 났다).
     let _ = crate::mobile::owner();
@@ -116,6 +181,8 @@ fn hello_json() -> Option<String> {
             "key": key,
             "slugs": slugs,
             "machine": crate::mobile::machine_name(),
+            "machine_id": machine_id,
+            "machine_aliases": crate::mobile::machine_aliases(),
             "version": env!("CARGO_PKG_VERSION"),
         })
         .to_string(),
@@ -329,6 +396,11 @@ async fn handle_stream(
                 .collect()
         })
         .unwrap_or_default();
+    let gateway_machines: Vec<GatewayMachine> = open
+        .get("machines")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
     // 로컬 관문(`mobile_prefix_mw`)이 slug 로 자격을 매긴다 — 여기서 토큰을 붙일 일이 없다.
     let local = format!(
         "127.0.0.1:{local_port}{}{slug}{path}",
@@ -349,6 +421,9 @@ async fn handle_stream(
             }
         };
         for (k, v) in &headers {
+            if is_internal_header(k) {
+                continue;
+            }
             // Origin 은 안 넘긴다 — 로컬 `ws_origin_ok` 는 Origin 이 있으면 Host 와 같기를 요구한다.
             if k == "origin" || k == "cookie" || skip_header(k) {
                 continue;
@@ -424,11 +499,14 @@ async fn handle_stream(
     let client = client();
     let mut rb = client.request(method, format!("http://{local}")).body(body);
     for (k, v) in &headers {
-        if skip_header(k) {
+        if skip_header(k) || is_internal_header(k) {
             continue;
         }
         rb = rb.header(k.as_str(), v.as_str());
     }
+    rb = rb
+        .header(CONTEXT_HEADER, context_token())
+        .header(MACHINES_HEADER, encode_machines(&gateway_machines));
     let resp = match rb.send().await {
         Ok(r) => r,
         Err(e) => {
@@ -499,5 +577,30 @@ mod tests {
         for h in ["content-type", "accept", "cookie", "x-kasa-token"] {
             assert!(!skip_header(h), "{h}");
         }
+    }
+
+    #[test]
+    fn machine_context_rejects_spoofed_headers() {
+        let machines = vec![
+            GatewayMachine {
+                id: "machine-book-1".to_string(),
+                machine: "맥북".to_string(),
+                aliases: vec!["geno".to_string()],
+            },
+            GatewayMachine {
+                id: "machine-mini-1".to_string(),
+                machine: "미니".to_string(),
+                aliases: vec!["nachoneko".to_string()],
+            },
+        ];
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(MACHINES_HEADER, encode_machines(&machines).parse().unwrap());
+        assert!(verified_machines(&headers).is_empty(), "이름 헤더만으로 통과했다");
+
+        headers.insert(CONTEXT_HEADER, "fake".parse().unwrap());
+        assert!(verified_machines(&headers).is_empty(), "가짜 context가 통과했다");
+
+        headers.insert(CONTEXT_HEADER, context_token().parse().unwrap());
+        assert_eq!(verified_machines(&headers), machines);
     }
 }

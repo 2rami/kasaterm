@@ -22,7 +22,7 @@
 //! 몇 초마다 폴링하는데 기계가 꺼져 있으면 그 폴링마다 타임아웃만큼 응답이 선다.
 //! 백그라운드 루프가 미리 받아 두고, `snapshot()` 은 캐시만 즉시 읽는다.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,8 @@ const STALE_AFTER: Duration = Duration::from_secs(20);
 #[derive(Clone, Debug, PartialEq)]
 pub struct Machine {
     pub label: String,
+    /// 공용 관문의 업링크가 쓰는 영구 id. 설정에 직접 있거나 `/version`에서 배운다.
+    pub machine_id: Option<String>,
     /// pane 호스트 주소(`http://127.0.0.1:18791`) — /term/* 가 사는 곳.
     pub base: String,
     /// 그 기계의 **진짜** 주소(`user@10.1.2.3` 꼴 허용) — 화면공유(vnc://) 등
@@ -181,6 +183,7 @@ fn guest_machines(taken: &[String]) -> Vec<Machine> {
         .filter(|(label, _)| !taken.contains(label))
         .map(|(label, v)| Machine {
             label: label.clone(),
+            machine_id: None,
             base: v.base.clone(),
             host: v.host.clone(),
             kvm: None,
@@ -306,8 +309,20 @@ fn parse(v: &Value) -> Vec<Machine> {
                 .and_then(|k| k.as_str())
                 .map(|k| k.trim().to_string())
                 .filter(|k| !k.is_empty());
+            let machine_id = m
+                .get("machine_id")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| {
+                    (8..=128).contains(&value.len())
+                        && value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+                })
+                .map(str::to_string);
             Some(Machine {
                 label,
+                machine_id,
                 base,
                 host,
                 roots,
@@ -707,6 +722,26 @@ pub fn find(label: &str) -> Option<Machine> {
     machines().into_iter().find(|m| m.label == label)
 }
 
+/// 폰의 새 경로는 `~<stable id>`, 옛 링크는 표시 label. stable id는 설정값이나
+/// direct `/version`에서 배운 값이 정확히 한 기계와 맞을 때만 쓴다.
+pub fn find_route(route: &str) -> Option<Machine> {
+    let Some(id) = route.strip_prefix('~') else {
+        return find(route);
+    };
+    let list = machines();
+    let cached = cache().lock().ok();
+    let mut matches = list.into_iter().filter(|machine| {
+        machine.machine_id.as_deref() == Some(id)
+            || cached
+                .as_ref()
+                .and_then(|cache| cache.get(&machine.label))
+                .and_then(|seen| seen.machine_id.as_deref())
+                == Some(id)
+    });
+    let found = matches.next()?;
+    matches.next().is_none().then_some(found)
+}
+
 /// 본진(home:true) 기계 — 여럿이면 첫 항목이 이긴다(걸 일이 없어야 하는 상태라
 /// 굳이 오류로 만들지 않는다).
 pub fn home_machine() -> Option<Machine> {
@@ -763,6 +798,7 @@ struct Seen {
     panes: Vec<Value>,
     sync: bool,
     build: Option<String>,
+    machine_id: Option<String>,
 }
 type Cache = HashMap<String, Seen>;
 
@@ -788,7 +824,13 @@ async fn probe_sync(client: &reqwest::Client, base: &str) -> bool {
 
 /// 그 기계 프로그램의 빌드 표식. 옛 판은 라우트가 없어 None — 「모름」도 경고 대상이다
 /// (같다고 확인된 것만 조용하다).
-async fn fetch_build(client: &reqwest::Client, base: &str) -> Option<String> {
+#[derive(Default)]
+struct VersionInfo {
+    build: Option<String>,
+    machine_id: Option<String>,
+}
+
+async fn fetch_version(client: &reqwest::Client, base: &str) -> Option<VersionInfo> {
     let resp = client
         .get(format!("{base}/version"))
         .timeout(FETCH_TIMEOUT)
@@ -799,7 +841,20 @@ async fn fetch_build(client: &reqwest::Client, base: &str) -> Option<String> {
         return None;
     }
     let v: Value = serde_json::from_str(&resp.text().await.ok()?).ok()?;
-    v.get("build")?.as_str().map(str::to_string)
+    Some(VersionInfo {
+        build: v.get("build").and_then(|value| value.as_str()).map(str::to_string),
+        machine_id: v
+            .get("machine_id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| {
+                (8..=128).contains(&value.len())
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+            })
+            .map(str::to_string),
+    })
 }
 
 /// 「나는 여기 있다」 — 이쪽이 터널을 든 기계에 이쪽 이름·되돌아오는 포트·빌드를
@@ -861,11 +916,19 @@ pub async fn poll_loop() {
         for m in &list {
             if let Some(panes) = fetch_panes(&client, &m.base).await {
                 let sync = probe_sync(&client, &m.base).await;
-                let build = fetch_build(&client, &m.base)
-                    .await
-                    .or_else(|| guest_build(&m.label));
+                let version = fetch_version(&client, &m.base).await.unwrap_or_default();
+                let build = version.build.or_else(|| guest_build(&m.label));
                 if let Ok(mut c) = cache().lock() {
-                    c.insert(m.label.clone(), Seen { at: Instant::now(), panes, sync, build });
+                    c.insert(
+                        m.label.clone(),
+                        Seen {
+                            at: Instant::now(),
+                            panes,
+                            sync,
+                            build,
+                            machine_id: version.machine_id,
+                        },
+                    );
                 }
                 if m.tunneled {
                     announce_to(&client, &m.base).await;
@@ -876,34 +939,124 @@ pub async fn poll_loop() {
     }
 }
 
+/// 그 기계의 `/term/panes` 행 하나(캐시). 거울 pane 은 몸통이 저쪽이라 이쪽 board 에
+/// 줄이 없다 — 폰 목록이 거울을 「셸」로 그렸다(2026-09-08 지적 「푸리나가 그냥 셸이라고
+/// 떠, 미니 미러링된 건데」). 폴링 캐시라 기계가 방금 죽었어도 마지막 모습이 남는다.
+pub fn cached_pane(label: &str, pane: &str) -> Option<Value> {
+    let c = cache().lock().ok()?;
+    c.get(label)?
+        .panes
+        .iter()
+        .find(|row| row.get("id").and_then(Value::as_str) == Some(pane))
+        .cloned()
+}
+
 /// GET /machines 응답 본체. 캐시만 읽으므로 기계가 죽어 있어도 즉시다.
 pub fn snapshot() -> Vec<Value> {
+    snapshot_with_uplinks(&[])
+}
+
+fn availability(age: Option<Duration>, uplink: bool) -> (bool, Option<&'static str>) {
+    if age.is_some_and(|value| value < STALE_AFTER) {
+        (true, Some("direct"))
+    } else if uplink {
+        (true, Some("uplink"))
+    } else {
+        (false, None)
+    }
+}
+
+fn known_aliases(m: &Machine) -> HashSet<String> {
+    let mut aliases = HashSet::from([m.label.clone()]);
+    for value in [m.ssh.as_deref(), Some(m.host.as_str())]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        aliases.insert(value.to_string());
+        let host = value.rsplit_once('@').map(|(_, host)| host).unwrap_or(value);
+        aliases.insert(host.split(':').next().unwrap_or(host).to_string());
+    }
+    aliases
+}
+
+fn matching_uplink<'a>(
+    m: &Machine,
+    hit: Option<&Seen>,
+    uplinks: &'a [crate::uplink::GatewayMachine],
+) -> Option<&'a crate::uplink::GatewayMachine> {
+    if let Some(id) = m
+        .machine_id
+        .as_deref()
+        .or_else(|| hit.and_then(|seen| seen.machine_id.as_deref()))
+    {
+        return uplinks.iter().find(|uplink| uplink.id == id);
+    }
+    let aliases = known_aliases(m);
+    let matches: Vec<&crate::uplink::GatewayMachine> = uplinks
+        .iter()
+        .filter(|uplink| {
+            aliases.contains(&uplink.machine)
+                || uplink.aliases.iter().any(|alias| aliases.contains(alias))
+        })
+        .collect();
+    let last = matches.last()?;
+    matches.iter().all(|uplink| uplink.id == last.id).then_some(*last)
+}
+
+fn snapshot_machine(
+    m: Machine,
+    hit: Option<&Seen>,
+    uplink: Option<&crate::uplink::GatewayMachine>,
+    local_build: &str,
+) -> Value {
+    let age = hit.map(|seen| seen.at.elapsed());
+    let direct_online = age.is_some_and(|value| value < STALE_AFTER);
+    let (online, via) = availability(age, uplink.is_some());
+    // 업링크 생존은 그 기계에 닿는다는 증거지만 판 번호까지 말해 주진 않는다.
+    // 직통이 stale이면 예전에 읽은 build를 현재 값처럼 되살리지 않는다.
+    let build = direct_online
+        .then(|| hit.and_then(|seen| seen.build.clone()))
+        .flatten();
+    let route_id = uplink
+        .map(|value| value.id.as_str())
+        .or(m.machine_id.as_deref())
+        .or_else(|| hit.and_then(|seen| seen.machine_id.as_deref()));
+    let route = route_id.map_or_else(|| m.label.clone(), |id| format!("~{id}"));
+    serde_json::json!({
+        "label": m.label,
+        "route": route,
+        "base": m.base,
+        "ssh": m.ssh,
+        "guest": m.guest,
+        "online": online,
+        "online_via": via,
+        "ago_secs": age.map(|value| value.as_secs()),
+        "sync_capable": hit.map(|seen| seen.sync).unwrap_or(true),
+        // 빌드 대조 — 같다고 확인된 것만 true. 모르는 것(옛 판·아직 못 물음)은
+        // false 로 두어 경고가 서게 한다. 오프라인이면 물을 게 없어 true.
+        "build": build,
+        "build_match": !online || build.as_deref() == Some(local_build),
+        "panes": if direct_online {
+            hit.map(|seen| seen.panes.clone()).unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+/// 공용 주소 관문이 같은 slug/key 범위에서 확인한 살아 있는 업링크까지 합친 스냅샷.
+/// 이름 목록은 `uplink::verified_machines`를 통과한 요청에서만 들어온다.
+pub(crate) fn snapshot_with_uplinks(uplinks: &[crate::uplink::GatewayMachine]) -> Vec<Value> {
     let c = cache().lock().ok();
+    let local_build = build_id();
     machines()
         .into_iter()
         .map(|m| {
             let hit = c.as_ref().and_then(|c| c.get(&m.label));
-            let age = hit.map(|h| h.at.elapsed());
-            let online = age.is_some_and(|a| a < STALE_AFTER);
-            let build = hit.and_then(|h| h.build.clone());
-            serde_json::json!({
-                "label": m.label,
-                "base": m.base,
-                "ssh": m.ssh,
-                "guest": m.guest,
-                "online": online,
-                "ago_secs": age.map(|a| a.as_secs()),
-                "sync_capable": hit.map(|h| h.sync).unwrap_or(true),
-                // 빌드 대조 — 같다고 확인된 것만 true. 모르는 것(옛 판·아직 못 물음)은
-                // false 로 두어 경고가 서게 한다. 오프라인이면 물을 게 없어 true.
-                "build": build,
-                "build_match": !online || build.as_deref() == Some(build_id().as_str()),
-                "panes": if online {
-                    hit.map(|h| h.panes.clone()).unwrap_or_default()
-                } else {
-                    Vec::new()
-                },
-            })
+            let uplink = matching_uplink(&m, hit, uplinks);
+            snapshot_machine(m, hit, uplink, &local_build)
         })
         .collect()
 }
@@ -936,6 +1089,85 @@ mod tests {
         let p = reverse_port("맥북");
         assert!((19000..19500).contains(&p));
         assert!(!(18900..18990).contains(&tunnel_port("맥북")) || p != tunnel_port("맥북"));
+    }
+
+    #[test]
+    fn direct와_uplink_생존을_구분한다() {
+        assert_eq!(availability(Some(Duration::from_secs(1)), false), (true, Some("direct")));
+        assert_eq!(availability(Some(STALE_AFTER), true), (true, Some("uplink")));
+        assert_eq!(availability(None, true), (true, Some("uplink")));
+        assert_eq!(availability(None, false), (false, None));
+    }
+
+    #[test]
+    fn uplink_only는_online이지만_stale_direct_자료를_되살리지_않는다() {
+        let stale = Seen {
+            at: Instant::now() - STALE_AFTER,
+            panes: vec![serde_json::json!({"id":"old"})],
+            sync: true,
+            build: Some("same-build".to_string()),
+            machine_id: Some("stable-mini-1".to_string()),
+        };
+        let uplink = crate::uplink::GatewayMachine {
+            id: "stable-mini-1".to_string(),
+            machine: "nachoneko".to_string(),
+            aliases: vec!["nachoneko".to_string()],
+        };
+        let relayed = snapshot_machine(m(), Some(&stale), Some(&uplink), "same-build");
+        assert_eq!(relayed["online"], true);
+        assert_eq!(relayed["online_via"], "uplink");
+        assert_eq!(relayed["route"], "~stable-mini-1");
+        assert_eq!(relayed["panes"], serde_json::json!([]));
+        assert!(relayed["build"].is_null());
+        assert_eq!(relayed["build_match"], false);
+
+        let down = snapshot_machine(m(), Some(&stale), None, "same-build");
+        assert_eq!(down["online"], false);
+        assert!(down["online_via"].is_null());
+    }
+
+    #[test]
+    fn 표시별명과_달라도_학습한_stable_id로만_잇는다() {
+        let seen = Seen {
+            at: Instant::now() - STALE_AFTER,
+            panes: Vec::new(),
+            sync: true,
+            build: None,
+            machine_id: Some("stable-mini-1".to_string()),
+        };
+        let live = vec![crate::uplink::GatewayMachine {
+            id: "stable-mini-1".to_string(),
+            machine: "nachoneko".to_string(),
+            aliases: vec!["nachoneko.local".to_string()],
+        }];
+        let machine = m();
+        assert_eq!(machine.label, "미니");
+        assert_eq!(matching_uplink(&machine, Some(&seen), &live).map(|up| up.id.as_str()), Some("stable-mini-1"));
+
+        let wrong = vec![crate::uplink::GatewayMachine {
+            id: "other-machine".to_string(),
+            machine: "nachoneko".to_string(),
+            aliases: Vec::new(),
+        }];
+        assert!(matching_uplink(&machine, Some(&seen), &wrong).is_none());
+    }
+
+    #[test]
+    fn 같은_별명이_서로_다른_id면_uplink_online으로_치지_않는다() {
+        let machine = m();
+        let live = vec![
+            crate::uplink::GatewayMachine {
+                id: "mini-one".to_string(),
+                machine: "미니".to_string(),
+                aliases: Vec::new(),
+            },
+            crate::uplink::GatewayMachine {
+                id: "mini-two".to_string(),
+                machine: "미니".to_string(),
+                aliases: Vec::new(),
+            },
+        ];
+        assert!(matching_uplink(&machine, None, &live).is_none());
     }
 
     #[test]

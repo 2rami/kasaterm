@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -34,9 +34,124 @@ type Frame = (u8, Vec<u8>);
 struct Uplink {
     conn: u64,
     machine: String,
+    machine_id: String,
+    aliases: Vec<String>,
+    last_seen: Mutex<Instant>,
     tx: mpsc::Sender<Message>,
     streams: Mutex<HashMap<u32, mpsc::Sender<Frame>>>,
     next: AtomicU32,
+}
+
+const UPLINK_STALE_AFTER: Duration = Duration::from_secs(75);
+
+impl Uplink {
+    fn fresh(&self) -> bool {
+        self.last_seen
+            .lock()
+            .is_ok_and(|seen| seen.elapsed() < UPLINK_STALE_AFTER)
+    }
+
+    fn touch(&self) {
+        if let Ok(mut seen) = self.last_seen.lock() {
+            *seen = Instant::now();
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Candidate<'a> {
+    index: usize,
+    machine: &'a str,
+    machine_id: &'a str,
+    aliases: &'a [String],
+    fresh: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoutePick {
+    /// 대상 기계의 업링크를 직접 쓴다 — `/m/<기계>` 접두를 벗긴다.
+    Machine(usize),
+    /// 대상 업링크가 없어 기존 최신 업링크의 로컬 direct proxy로 보낸다.
+    Fallback(usize),
+    Missing,
+    Ambiguous,
+}
+
+fn pick_route(candidates: &[Candidate<'_>], target: Option<&str>) -> RoutePick {
+    let default = candidates
+        .iter()
+        .rev()
+        .find(|candidate| candidate.fresh)
+        .map(|candidate| candidate.index);
+    let Some(target) = target else {
+        return default.map_or(RoutePick::Missing, RoutePick::Fallback);
+    };
+    let stable_id = target.strip_prefix('~');
+    let matching: Vec<&Candidate<'_>> = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.fresh
+                && stable_id.map_or_else(
+                    || {
+                        candidate.machine == target
+                            || candidate.aliases.iter().any(|alias| alias == target)
+                    },
+                    |id| candidate.machine_id == id,
+                )
+        })
+        .collect();
+    let Some(last) = matching.last() else {
+        if stable_id.is_some() {
+            return RoutePick::Missing;
+        }
+        return default.map_or(RoutePick::Missing, RoutePick::Fallback);
+    };
+    if matching
+        .iter()
+        .any(|candidate| candidate.machine_id != last.machine_id)
+    {
+        return RoutePick::Ambiguous;
+    }
+    RoutePick::Machine(last.index)
+}
+
+fn live_machines(candidates: &[Candidate<'_>]) -> Vec<crate::uplink::GatewayMachine> {
+    let mut by_id: HashMap<&str, crate::uplink::GatewayMachine> = HashMap::new();
+    for candidate in candidates.iter().filter(|candidate| {
+        candidate.fresh && !candidate.machine.is_empty() && !candidate.machine_id.starts_with("legacy-")
+    }) {
+        by_id.insert(
+            candidate.machine_id,
+            crate::uplink::GatewayMachine {
+                id: candidate.machine_id.to_string(),
+                machine: candidate.machine.to_string(),
+                aliases: candidate.aliases.to_vec(),
+            },
+        );
+    }
+    let mut machines: Vec<_> = by_id.into_values().collect();
+    machines.sort_by(|a, b| a.id.cmp(&b.id));
+    machines
+}
+
+fn machine_route(rest: &str) -> Option<(&str, &str)> {
+    let route = rest.strip_prefix("m/")?;
+    let (machine, tail) = route.split_once('/')?;
+    (!machine.is_empty() && !tail.is_empty()).then_some((machine, tail))
+}
+
+fn candidates_of(uplinks: &[Arc<Uplink>]) -> Vec<Candidate<'_>> {
+    uplinks
+        .iter()
+        .enumerate()
+        .map(|(index, uplink)| Candidate {
+            index,
+            machine: &uplink.machine,
+            machine_id: &uplink.machine_id,
+            aliases: &uplink.aliases,
+            fresh: uplink.fresh(),
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -115,7 +230,9 @@ async fn uplink_ws(State(gate): State<Gate>, ws: WebSocketUpgrade) -> impl IntoR
     ws.on_upgrade(move |s| uplink_run(gate, s))
 }
 
-fn parse_hello(v: &serde_json::Value) -> Option<(String, Vec<String>, String)> {
+fn parse_hello(
+    v: &serde_json::Value,
+) -> Option<(String, Vec<String>, String, Option<String>, Vec<String>)> {
     if v.get("t")?.as_str()? != "hello" {
         return None;
     }
@@ -131,14 +248,42 @@ fn parse_hello(v: &serde_json::Value) -> Option<(String, Vec<String>, String)> {
         .filter(|s| crate::mobile::valid_slug(s))
         .map(str::to_string)
         .collect();
-    let machine = v
+    let machine: String = v
         .get("machine")
         .and_then(|m| m.as_str())
         .unwrap_or("")
         .chars()
         .take(40)
         .collect();
-    Some((key, slugs, machine))
+    let machine_id = v
+        .get("machine_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| {
+            (8..=128).contains(&value.len())
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
+        .map(str::to_string);
+    let mut aliases: Vec<String> = v
+        .get("machine_aliases")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.chars().count() <= 80
+                && !value.chars().any(char::is_control)
+        })
+        .map(str::to_string)
+        .collect();
+    aliases.push(machine.clone());
+    aliases.sort();
+    aliases.dedup();
+    Some((key, slugs, machine, machine_id, aliases))
 }
 
 /// 연결 `conn` 만 그 slug 에서 뗀다 — 같은 slug 의 다른 살아 있는 연결은 남는다.
@@ -158,7 +303,8 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<serde_json::Value>(t.as_str()).ok(),
         _ => None,
     };
-    let Some((key, slugs, machine)) = hello.as_ref().and_then(parse_hello) else {
+    let Some((key, slugs, machine, machine_id, aliases)) = hello.as_ref().and_then(parse_hello)
+    else {
         let _ = tx
             .send(Message::Text(r#"{"t":"err","error":"hello 가 없거나 이상해요"}"#.into()))
             .await;
@@ -166,10 +312,16 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
     };
     let hash = key_hash(&key);
     let conn = gate.seq.fetch_add(1, Ordering::Relaxed);
+    // 옛 앱은 stable id를 안 보낸다. 연결별 id로 두면 같은 표시 이름이 둘 뜬 순간
+    // 모호함으로 닫히고, 이름만 보고 임의의 기계를 고르는 것보다 안전하다.
+    let machine_id = machine_id.unwrap_or_else(|| format!("legacy-{conn}"));
     let (wtx, mut wrx) = mpsc::channel::<Message>(256);
     let up = Arc::new(Uplink {
         conn,
         machine: machine.clone(),
+        machine_id,
+        aliases,
+        last_seen: Mutex::new(Instant::now()),
         tx: wtx.clone(),
         streams: Mutex::new(HashMap::new()),
         next: AtomicU32::new(1),
@@ -220,6 +372,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
     while let Some(m) = rx.next().await {
         match m {
             Ok(Message::Binary(b)) => {
+                up.touch();
                 let Some((kind, id, payload)) = decode(&b) else { continue };
                 let s = up.streams.lock().unwrap().get(&id).cloned();
                 if let Some(s) = s {
@@ -229,8 +382,9 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
                 }
             }
             Ok(Message::Text(t)) => {
+                up.touch();
                 // hello 를 다시 보내면 slug 목록 갱신(유저가 늘었다).
-                if let Some((k2, slugs2, _)) = serde_json::from_str::<serde_json::Value>(t.as_str())
+                if let Some((k2, slugs2, _, _, _)) = serde_json::from_str::<serde_json::Value>(t.as_str())
                     .ok()
                     .as_ref()
                     .and_then(parse_hello)
@@ -256,10 +410,11 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
                 }
             }
             Ok(Message::Ping(p)) => {
+                up.touch();
                 let _ = wtx.send(Message::Pong(p)).await;
             }
+            Ok(Message::Pong(_)) => up.touch(),
             Ok(Message::Close(_)) | Err(_) => break,
-            Ok(_) => {}
         }
     }
     writer.abort();
@@ -323,15 +478,40 @@ async fn forward(gate: Gate, slug: String, rest: String, req: axum::extract::Req
     if !crate::mobile::valid_slug(&slug) {
         return offline_page(false);
     }
-    let up = gate.by_slug.lock().unwrap().get(&slug).and_then(|v| v.last().cloned());
-    let Some(up) = up else {
+    let uplinks = gate
+        .by_slug
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&slug).cloned())
+        .unwrap_or_default();
+    let candidates = candidates_of(&uplinks);
+    let requested_machine = machine_route(&rest).map(|(machine, _)| machine);
+    let route = pick_route(&candidates, requested_machine);
+    if route == RoutePick::Ambiguous {
+        return (
+            StatusCode::CONFLICT,
+            "같은 이름의 기계가 둘이라 어느 쪽인지 고를 수 없어요",
+        )
+            .into_response();
+    }
+    let index = match route {
+        RoutePick::Machine(index) | RoutePick::Fallback(index) => index,
+        RoutePick::Missing | RoutePick::Ambiguous => {
         // 한 번도 등록된 적 없는 slug 는 「없는 주소」, 등록됐다 떨어진 slug 는 「안 붙어 있음」
         // — 폰에서 할 일이 다르다(주소를 다시 받기 vs 그 기계 앱 켜기).
         let known = gate.keys.lock().map(|k| k.contains_key(&slug)).unwrap_or(false);
         return offline_page(known);
+        }
     };
+    let up = uplinks[index].clone();
+    let routed_rest = if matches!(route, RoutePick::Machine(_)) {
+        machine_route(&rest).map(|(_, tail)| tail).unwrap_or(rest.as_str())
+    } else {
+        rest.as_str()
+    };
+    let live_machines = live_machines(&candidates);
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
-    let path = format!("/{rest}{query}");
+    let path = format!("/{routed_rest}{query}");
     let is_ws = req
         .headers()
         .get(header::UPGRADE)
@@ -343,6 +523,7 @@ async fn forward(gate: Gate, slug: String, rest: String, req: axum::extract::Req
         .filter(|(k, _)| {
             let k = k.as_str();
             !skip_header(k)
+                && !crate::uplink::is_internal_header(k)
                 && !matches!(k, "cookie" | "origin" | "referer" | "x-forwarded-for" | "x-forwarded-proto" | "x-forwarded-host" | "cf-connecting-ip" | "cf-ray" | "cf-visitor" | "cdn-loop")
                 && !k.starts_with("sec-")
         })
@@ -353,7 +534,8 @@ async fn forward(gate: Gate, slug: String, rest: String, req: axum::extract::Req
     up.streams.lock().unwrap().insert(id, stx);
     let guard = StreamGuard { up: up.clone(), id };
     let open = serde_json::json!({
-        "slug": slug, "method": req.method().as_str(), "path": path, "headers": headers, "ws": is_ws,
+        "slug": slug, "method": req.method().as_str(), "path": path, "headers": headers,
+        "machines": live_machines, "ws": is_ws,
     })
     .to_string();
     if up.tx.send(Message::Binary(encode(OPEN, id, open.as_bytes()).into())).await.is_err() {
@@ -485,6 +667,20 @@ async fn ws_pipe(guard: StreamGuard, mut srx: mpsc::Receiver<Frame>, sock: WebSo
 mod tests {
     use super::*;
 
+    fn mock_uplink(machine: &str, machine_id: &str, age: Duration) -> Arc<Uplink> {
+        let (tx, _rx) = mpsc::channel(1);
+        Arc::new(Uplink {
+            conn: 1,
+            machine: machine.to_string(),
+            machine_id: machine_id.to_string(),
+            aliases: vec![machine.to_string()],
+            last_seen: Mutex::new(Instant::now() - age),
+            tx,
+            streams: Mutex::new(HashMap::new()),
+            next: AtomicU32::new(1),
+        })
+    }
+
     #[test]
     fn slug_belongs_to_first_key() {
         let g = Gate::new(None);
@@ -496,12 +692,100 @@ mod tests {
 
     #[test]
     fn hello_needs_key_and_valid_slugs() {
-        let v = serde_json::json!({"t":"hello","key":"0123456789abcdef0123","slugs":["abcdefghijklmnopqrstuvwxy","BAD","short"],"machine":"맥북"});
-        let (_, slugs, m) = parse_hello(&v).unwrap();
+        let v = serde_json::json!({
+            "t":"hello", "key":"0123456789abcdef0123",
+            "slugs":["abcdefghijklmnopqrstuvwxy","BAD","short"],
+            "machine":"맥북", "machine_id":"machine-macbook-1"
+        });
+        let (_, slugs, m, id, aliases) = parse_hello(&v).unwrap();
         assert_eq!(slugs, vec!["abcdefghijklmnopqrstuvwxy".to_string()]);
         assert_eq!(m, "맥북");
+        assert_eq!(id.as_deref(), Some("machine-macbook-1"));
+        assert!(aliases.contains(&"맥북".to_string()));
         assert!(parse_hello(&serde_json::json!({"t":"hello","key":"short","slugs":[]})).is_none());
         assert!(parse_hello(&serde_json::json!({"t":"nope"})).is_none());
+    }
+
+    #[test]
+    fn live_machine_route_bypasses_direct_for_http_and_ws_paths() {
+        let candidates = [
+            Candidate { index: 0, machine: "맥북", machine_id: "book-1", aliases: &[], fresh: true },
+            Candidate { index: 1, machine: "미니", machine_id: "mini-1", aliases: &[], fresh: true },
+        ];
+        assert_eq!(pick_route(&candidates, Some("맥북")), RoutePick::Machine(0));
+        assert_eq!(pick_route(&candidates, Some("미니")), RoutePick::Machine(1));
+        assert_eq!(machine_route("m/미니/term/panes"), Some(("미니", "term/panes")));
+        assert_eq!(machine_route("m/미니/term/ws"), Some(("미니", "term/ws")));
+        assert_eq!(live_machines(&candidates).len(), 2);
+    }
+
+    #[test]
+    fn missing_target_preserves_the_existing_direct_fallback() {
+        let candidates = [Candidate {
+            index: 0,
+            machine: "맥북",
+            machine_id: "book-1",
+            aliases: &[],
+            fresh: true,
+        }];
+        assert_eq!(pick_route(&candidates, Some("미니")), RoutePick::Fallback(0));
+        assert_eq!(pick_route(&candidates, None), RoutePick::Fallback(0));
+        assert_eq!(pick_route(&candidates, Some("~unknown-id")), RoutePick::Missing);
+    }
+
+    #[test]
+    fn display_label_can_route_by_exact_alias_or_stable_id() {
+        let aliases = vec!["맥미니".to_string(), "nachoneko".to_string()];
+        let candidates = [Candidate {
+            index: 0,
+            machine: "nachoneko",
+            machine_id: "stable-mini-1",
+            aliases: &aliases,
+            fresh: true,
+        }];
+        assert_eq!(pick_route(&candidates, Some("맥미니")), RoutePick::Machine(0));
+        assert_eq!(
+            pick_route(&candidates, Some("~stable-mini-1")),
+            RoutePick::Machine(0)
+        );
+    }
+
+    #[test]
+    fn stale_and_ambiguous_routes_fail_closed() {
+        let stale = [Candidate {
+            index: 0,
+            machine: "미니",
+            machine_id: "mini-1",
+            aliases: &[],
+            fresh: false,
+        }];
+        assert_eq!(pick_route(&stale, Some("미니")), RoutePick::Missing);
+        assert!(live_machines(&stale).is_empty());
+
+        let ambiguous = [
+            Candidate { index: 0, machine: "미니", machine_id: "mini-1", aliases: &[], fresh: true },
+            Candidate { index: 1, machine: "미니", machine_id: "other-mini", aliases: &[], fresh: true },
+        ];
+        assert_eq!(pick_route(&ambiguous, Some("미니")), RoutePick::Ambiguous);
+        assert_eq!(live_machines(&ambiguous).len(), 2);
+
+        let restarted = [
+            Candidate { index: 0, machine: "미니", machine_id: "mini-1", aliases: &[], fresh: true },
+            Candidate { index: 1, machine: "미니", machine_id: "mini-1", aliases: &[], fresh: true },
+        ];
+        assert_eq!(pick_route(&restarted, Some("미니")), RoutePick::Machine(1));
+        assert_eq!(live_machines(&restarted).len(), 1);
+    }
+
+    #[test]
+    fn actual_uplink_freshness_expires_without_messages_or_pong() {
+        let live = mock_uplink("맥북", "book-1", Duration::from_secs(1));
+        let stale = mock_uplink("미니", "mini-1", UPLINK_STALE_AFTER);
+        let uplinks = vec![live, stale];
+        let candidates = candidates_of(&uplinks);
+        assert_eq!(pick_route(&candidates, Some("맥북")), RoutePick::Machine(0));
+        assert_eq!(pick_route(&candidates, Some("미니")), RoutePick::Fallback(0));
+        assert_eq!(live_machines(&candidates).len(), 1);
     }
 
     #[test]

@@ -47,7 +47,8 @@ class Pane {
   final String? model;
   final String? effort;
 
-  /// 다른 기계의 pane 이면 그 기계 이름 — 요청마다 `m/<이름>/` 접두가 붙는다.
+  /// 다른 기계의 pane 이면 그 기계 route — 요청마다 `m/<route>/` 접두가 붙는다.
+  /// 새 서버는 `~<stable id>`, 옛 서버는 표시 이름이다.
   final String? machine;
 
   /// 무엇을 기다리나 — permission(승인) · question(질문·선택) · idle(답 없이 방치).
@@ -236,10 +237,14 @@ class WindowLayout {
 class Machine {
   const Machine({
     required this.label,
+    String? route,
     required this.online,
     required this.panes,
-  });
+  }) : route = route ?? label;
   final String label;
+
+  /// HTTP/WS `m/<route>/`에 쓸 안정 식별자. 옛 응답은 표시 이름으로 폴백한다.
+  final String route;
   final bool online;
   final List<Pane> panes;
 }
@@ -561,8 +566,12 @@ class Server {
           if (m is Map)
             Machine(
               label: m['label'] as String? ?? '',
+              route: m['route'] as String? ?? m['label'] as String? ?? '',
               online: m['online'] == true,
-              panes: _panesFrom(m['panes'], machine: m['label'] as String?),
+              panes: _panesFrom(
+                m['panes'],
+                machine: m['route'] as String? ?? m['label'] as String?,
+              ),
             ),
     ];
   }

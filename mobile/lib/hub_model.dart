@@ -47,12 +47,16 @@ class HubRoom {
 class HubSection {
   const HubSection({
     required this.machine,
+    this.route,
     required this.online,
     required this.rooms,
   });
 
   /// null 이면 주소가 가리키는 그 기계.
   final String? machine;
+
+  /// 요청에 쓰는 안정 route. `machine`은 사람에게 보여 줄 이름으로만 남긴다.
+  final String? route;
   final bool online;
   final List<HubRoom> rooms;
 
@@ -160,22 +164,35 @@ class HubModel extends ChangeNotifier {
       final panes = results[0] as List<Pane>;
       final labels = results[1] as List<String>;
       final machines = results[2] as List<Machine>;
-      final layouts = await Future.wait([
-        _layoutsOf(null),
+      final rootLayouts = await _layoutsOf(null);
+      // `/machines`가 uplink 생존으로 online을 알 수 있어도 pane 목록은 direct
+      // 폴러 캐시에 없을 수 있다. online 기기는 pane과 배치를 모두 같은
+      // `/m/<label>/…` 경로로 직접 읽어 실제 공용 relay route를 탄다.
+      final remote = await Future.wait([
         for (final m in machines)
-          m.online ? _layoutsOf(m.label) : Future.value(const <WindowLayout>[]),
+          m.online
+              ? Future.wait<Object>([
+                  _panesOf(m.route, _cachedPanes(m.route, m.panes)),
+                  _layoutsOf(m.route),
+                ])
+              : Future.value(<Object>[m.panes, const <WindowLayout>[]]),
       ]);
       final next = <HubSection>[
         HubSection(
           machine: null,
           online: true,
-          rooms: rooms(panes, labels, layouts[0]),
+          rooms: rooms(panes, labels, rootLayouts),
         ),
         for (var i = 0; i < machines.length; i++)
           HubSection(
             machine: machines[i].label,
+            route: machines[i].route,
             online: machines[i].online,
-            rooms: rooms(machines[i].panes, const [], layouts[i + 1]),
+            rooms: rooms(
+              remote[i][0] as List<Pane>,
+              const [],
+              remote[i][1] as List<WindowLayout>,
+            ),
           ),
       ];
       _noteWaiting(next);
@@ -220,7 +237,7 @@ class HubModel extends ChangeNotifier {
     final lists = await Future.wait([
       _notesOf(null),
       for (final m in machines)
-        m.online ? _notesOf(m.label) : Future.value(const <Note>[]),
+        m.online ? _notesOf(m.route) : Future.value(const <Note>[]),
     ]);
     final all = [for (final l in lists) ...l]
       ..sort((a, b) => b.when.compareTo(a.when));
@@ -259,7 +276,7 @@ class HubModel extends ChangeNotifier {
   /// 쪽지의 pane 을 지금 목록에서 찾는다 — 닫혔으면 null.
   Pane? paneOfNote(Note n) {
     for (final s in sections) {
-      if (s.machine != n.machine) continue;
+      if (s.route != n.machine) continue;
       for (final r in s.rooms) {
         for (final p in r.panes) {
           if (p.id == n.pane) return p;
@@ -275,6 +292,27 @@ class HubModel extends ChangeNotifier {
       return await server.windows(machine: machine);
     } catch (_) {
       return const [];
+    }
+  }
+
+  List<Pane> _cachedPanes(String route, List<Pane> fallback) {
+    for (final section in sections) {
+      if (section.route == route) {
+        final cached = [for (final room in section.rooms) ...room.panes];
+        if (cached.isNotEmpty) return cached;
+        break;
+      }
+    }
+    return fallback;
+  }
+
+  /// 원격 pane 조회만 실패하면 직전 유효 목록을 유지한다. `/machines`가 online이라
+  /// 답한 사실까지 이 한 요청의 실패로 뒤집으면 화면이 5초마다 깜빡인다.
+  Future<List<Pane>> _panesOf(String route, List<Pane> fallback) async {
+    try {
+      return await server.panes(machine: route);
+    } catch (_) {
+      return fallback;
     }
   }
 

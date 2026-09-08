@@ -131,6 +131,7 @@ void main() {
                 'machines': [
                   {
                     'label': '맥미니',
+                    'route': '~mini-stable',
                     'online': true,
                     'panes': [
                       {'id': '%1', 'name': '유즈', 'status': 'idle', 'window': 0},
@@ -152,7 +153,9 @@ void main() {
       expect(await s.sessions(), ['', '아이폰']);
       final machines = await s.machines();
       expect(machines.length, 2);
-      expect(machines.first.panes.single.machine, '맥미니');
+      expect(machines.first.route, '~mini-stable');
+      expect(machines.first.panes.single.machine, '~mini-stable');
+      expect(machines.last.route, '집', reason: '옛 payload는 label로 폴백');
       expect(machines.last.online, isFalse);
     });
 

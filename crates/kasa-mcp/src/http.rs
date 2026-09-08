@@ -1016,10 +1016,14 @@ async fn sessions_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
 }
 
 /// `GET /machines` — 기계 명부와 기계별 세션 목록(캐시). 아로나 이사 탭이 폴링한다.
-async fn machines_handler() -> impl IntoResponse {
+async fn machines_handler(headers: HeaderMap) -> impl IntoResponse {
+    let uplinks = crate::uplink::verified_machines(&headers);
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
-        Json(serde_json::json!({ "ok": true, "machines": crate::machines::snapshot() })),
+        Json(serde_json::json!({
+            "ok": true,
+            "machines": crate::machines::snapshot_with_uplinks(&uplinks),
+        })),
     )
 }
 
@@ -1033,6 +1037,7 @@ async fn version_handler() -> impl IntoResponse {
             "ok": true,
             "version": env!("CARGO_PKG_VERSION"),
             "build": crate::machines::build_id(),
+            "machine_id": crate::mobile::machine_identity(),
         })),
     )
 }
@@ -4406,6 +4411,27 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
             // 있는 하네스 프로세스를 본 것이라 그 판정에 맞다. 거울 pane 은 하네스가
             // 저쪽 기계에 있어 이 관문을 안 탄다(이름은 저쪽 목록에서 온다).
             let b = raw.filter(|p| p.harness.is_some() || crate::remote::is_remote_pane(&id));
+            // 거울 pane 은 이쪽 board 에 줄이 없다(몸통이 저쪽). 저 기계의 목록 캐시에서
+            // 같은 pane 의 줄을 그대로 가져와 이쪽 자리·창 번호만 덮는다 — 이름·얼굴·
+            // 상태·상태줄이 저쪽과 똑같이 나온다. `mirror_of` 로 어느 기계의 거울인지.
+            if raw.is_none() {
+                if let Some((label, mut row)) =
+                    crate::remote::remote_info(&id).and_then(|i| {
+                        let label = if i.label.is_empty() {
+                            crate::machines::label_for_base(&i.base)?
+                        } else {
+                            i.label
+                        };
+                        crate::machines::cached_pane(&label, &i.remote_id).map(|r| (label, r))
+                    })
+                {
+                    row["id"] = serde_json::Value::String(id.clone());
+                    row["window"] = serde_json::json!(pane_windows.get(&id).copied());
+                    row["closed"] = serde_json::json!(!pane_windows.contains_key(&id));
+                    row["mirror_of"] = serde_json::Value::String(label);
+                    return row;
+                }
+            }
             serde_json::json!({
                 "id": id,
                 "name": b.and_then(|p| p.character.clone()),
@@ -5808,6 +5834,9 @@ fn proxy_client() -> &'static reqwest::Client {
 /// 쿠키·Origin·sec-fetch 는 대상 입장에서 남의 사이트처럼 보이고, X-Forwarded-For 는
 /// 대상이 「원격이니 토큰 내라」고 막는다(터널 안쪽은 양끝 loopback 이라 토큰이 없다).
 fn proxy_skip_request_header(k: &axum::http::HeaderName) -> bool {
+    if crate::uplink::is_internal_header(k.as_str()) {
+        return true;
+    }
     matches!(
         k.as_str(),
         "host"
@@ -5837,7 +5866,7 @@ async fn machine_proxy(
     AxPath((label, rest)): AxPath<(String, String)>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
-    let Some(m) = crate::machines::find(&label) else {
+    let Some(m) = crate::machines::find_route(&label) else {
         return (axum::http::StatusCode::NOT_FOUND, "no such machine").into_response();
     };
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
