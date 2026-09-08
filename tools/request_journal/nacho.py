@@ -13,7 +13,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, build_opener, ProxyHandler
 import uuid
 
-from .remote_helper import SYSTEM, bounded_payload, load_client, summarize_with_client
+from .remote_helper import SYSTEM, bounded_payload, completion_payload, load_client, summarize_with_client
 
 
 
@@ -35,6 +35,9 @@ class NachoProvider:
     def summarize(self, payload: str) -> str:
         return asyncio.run(summarize_with_client(self.client, payload))
 
+    def complete(self, payload: str) -> str:
+        return self.summarize(completion_payload(payload))
+
 
 class SSHNachoProvider:
     """Opt-in only after remote helper installation; no implicit network probing."""
@@ -47,16 +50,23 @@ class SSHNachoProvider:
         self.host = host
 
     def summarize(self, payload):
+        complete = json.loads(payload).get("mode") in ("chat", "checklist")
         result = subprocess.run(
             ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", self.host, self.command],
-            input=bounded_payload(payload), text=True, capture_output=True, timeout=45,
+            input=bounded_payload(payload), text=True, capture_output=True, timeout=130 if complete else 45,
         )
-        if result.returncode or len(result.stdout) > 16000:
+        if result.returncode or len(result.stdout) > 96000:
             raise RuntimeError("remote summary unavailable")
         response = json.loads(result.stdout)
         if response.get("ok") is not True or not isinstance(response.get("text"), str) or not response["text"].strip():
             raise RuntimeError("remote summary unavailable")
-        return response["text"].strip()[:400]
+        text = response["text"].strip()
+        if complete and len(text) > 12000:
+            raise RuntimeError("completion response too large")
+        return text if complete else text[:400]
+
+    def complete(self, payload: str) -> str:
+        return self.summarize(completion_payload(payload))
 
 
 class HTTPNachoProvider:
@@ -90,7 +100,7 @@ class HTTPNachoProvider:
             raise RuntimeError("terminal input unavailable")
 
     def _screen(self, pane):
-        return self._call("GET", "/term/screen?" + urlencode({"pane": pane, "lines": 200}), raw=True)
+        return self._call("GET", "/term/screen?" + urlencode({"pane": pane, "lines": 1000}), raw=True)
 
     def _wait(self, pane, pattern, seconds):
         deadline = time.monotonic() + seconds
@@ -105,6 +115,7 @@ class HTTPNachoProvider:
 
     def summarize(self, payload):
         payload = bounded_payload(payload)
+        complete = json.loads(payload).get("mode") in ("chat", "checklist")
         if self.cancel_event.is_set():
             raise RuntimeError("summary cancelled")
         pane = directory = None
@@ -134,16 +145,19 @@ class HTTPNachoProvider:
                 f"printf '\\n{marker}_BEGIN\\n'; base64 <{directory}/output.json; printf '\\n{marker}_END\\n')\n"
             )
             self._input(pane, command)
-            found = self._wait(pane, rf"^{marker}_BEGIN\r?\n(.*?)\r?\n{marker}_END\r?$", 45)
+            found = self._wait(pane, rf"^{marker}_BEGIN\r?\n(.*?)\r?\n{marker}_END\r?$", 120 if complete else 45)
             encoded = "".join(found.group(1).split())
-            if len(encoded) > 12000:
+            if len(encoded) > 96000:
                 raise RuntimeError("invalid summary")
             response = json.loads(base64.b64decode(encoded, validate=True))
             if response.get("ok") is not True or not isinstance(response.get("text"), str) or not response["text"].strip():
                 stage = response.get("stage")
                 stage = stage if stage in ("invalid_input", "runtime_unavailable", "credentials_unavailable", "inference_unavailable") else "unknown"
                 raise RuntimeError("remote summary unavailable: " + stage)
-            return response["text"].strip()[:400]
+            text = response["text"].strip()
+            if complete and len(text) > 12000:
+                raise RuntimeError("completion response too large")
+            return text if complete else text[:400]
         finally:
             if pane:
                 try:
@@ -168,3 +182,6 @@ class HTTPNachoProvider:
                         cleanup_error = True
                 if cleanup_error:
                     raise RuntimeError("private summary cleanup unconfirmed")
+
+    def complete(self, payload: str) -> str:
+        return self.summarize(completion_payload(payload))

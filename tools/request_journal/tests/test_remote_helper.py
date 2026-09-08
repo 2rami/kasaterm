@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from tools.request_journal.nacho import HTTPNachoProvider, SSHNachoProvider
-from tools.request_journal.remote_helper import main
+from tools.request_journal.remote_helper import main, completion_payload
 
 
 PAYLOAD = json.dumps({"prompt": "펫 기능을 만들어줘", "student_reports": ["반영은 확인하지 못했어요."]}, ensure_ascii=False)
@@ -113,6 +113,22 @@ class RemoteHelperTests(unittest.TestCase):
                 provider.summarize(PAYLOAD)
         with self.assertRaises(ValueError):
             HTTPNachoProvider("http://external.example")
+
+    def test_complete_preserves_long_answers_and_rejects_oversized_input(self):
+        from tools.request_journal.nacho import NachoProvider
+        testcase = self
+        class Client:
+            async def messages(self, **kwargs):
+                testcase.assertIsNone(kwargs["tools"])
+                testcase.assertEqual(kwargs["max_tokens"], 4096)
+                testcase.assertIn("입력에 없는 요청 ID", kwargs["system"])
+                return {"stop_reason": "end_turn", "content": []}
+            def extract_text(self, response):
+                return "확인할 것\n" * 200
+        answer = NachoProvider(Client()).complete(json.dumps({"mode":"chat", "question":"뭘 확인해요?", "requests":[]}))
+        self.assertGreater(len(answer), 400)
+        with self.assertRaises(ValueError):
+            completion_payload(json.dumps({"mode":"chat", "question":"x" * 32001}))
 
 
 if __name__ == "__main__":
