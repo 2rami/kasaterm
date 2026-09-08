@@ -151,6 +151,10 @@ pub(crate) enum StatusbarPopover {
     /// 최근 복사한 것들. 클립보드는 한 칸짜리 그릇이라 다음 복사가 앞의 것을 지우는데,
     /// 그 사고는 붙여넣어 봐야 안다 — 지나간 것을 여기서 골라 되찾는다.
     Clipboard,
+    /// 판 번호(「빌드 다름」) — 새 판 굽기 · 다른 기계로 보내기 · 기계 설정.
+    /// 미니는 굽지 못해 맥북이 구운 것을 부쳐야 하는데, 그때마다 학생에게 말로 시키던
+    /// 것을 단추로(2026-09-08 지시 「빌드 다름 누르면 메뉴 열려서 빌드 버튼」).
+    Build,
 }
 
 /// 팝오버 행을 눌렀을 때 할 일.
@@ -186,6 +190,11 @@ pub(crate) enum StatusbarHit {
     /// 맥에서도 같은 페이지가 열린다(폰에 보내기 전에 눈으로 확인하는 손).
     OpenAppUrl,
     CopyAppUrl,
+    /// 새 판 팝오버 — 이 맥에서 굽기(build-app.sh) / 그 기계로 보내기(sync-mini.sh) /
+    /// 기계 설정 열기. 스크립트는 새 탭에서 돌아 과정이 보인다.
+    BuildBake,
+    BuildSend(String),
+    OpenMachines,
     /// 예약 한 줄의 멈춤/켜기.
     ScheduleToggle(String),
     /// 예약 한 줄의 ×.

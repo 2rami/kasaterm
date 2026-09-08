@@ -53,6 +53,7 @@ pub(crate) fn paint_popover(
             paint_schedules_popover(g, sb, view, cursor, anchor, win_w, win_h)
         }
         state::StatusbarPopover::Tunnel => paint_tunnel_popover(g, sb, cursor, anchor, win_w),
+        state::StatusbarPopover::Build => paint_build_popover(g, sb, cursor, anchor, win_w),
         state::StatusbarPopover::Usage => {
             paint_usage_popover(g, sb, view, cursor, anchor, win_w, win_h)
         }
@@ -895,6 +896,83 @@ fn paint_tunnel_popover(
     }
 }
 
+/// 새 판 팝오버 — 굽기 · 다른 기계로 보내기 · 기계 설정. 판 번호를 누르면 뜬다.
+fn paint_build_popover(
+    g: &mut gpu::GpuRenderer,
+    sb: &mut state::StatusbarState,
+    cursor: (f32, f32),
+    anchor: (f32, f32, f32, f32),
+    win_w: f32,
+) {
+    const HEAD_H: f32 = 48.0;
+    const ROW: f32 = 30.0;
+    let mismatched = crate::statusbar_config::mismatched_machines();
+    let rows: Vec<(String, state::StatusbarHit)> = std::iter::once((
+        "이 맥에서 새 판 굽기".to_string(),
+        state::StatusbarHit::BuildBake,
+    ))
+    .chain(mismatched.iter().map(|m| {
+        (format!("{m} 에 새 판 보내기"), state::StatusbarHit::BuildSend(m.clone()))
+    }))
+    .chain(std::iter::once(("기계 설정 열기".to_string(), state::StatusbarHit::OpenMachines)))
+    .collect();
+    let w = 300.0_f32.min(win_w - 16.0);
+    let h = HEAD_H + ROW * rows.len() as f32 + 8.0;
+    let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
+    let y = (anchor.1 - h - 6.0).max(8.0);
+    sb.popover_rect = Some((x, y, w, h));
+    panel_rect_outlined(g, x, y, w, h, theme::radius_md(), theme::surface());
+    g.draw_text(
+        x + 12.0,
+        y + 10.0,
+        "새 판",
+        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
+    );
+    // 미니는 굽지 못한다(cargo·node 없음) — 맥북이 구운 것을 부친다. 굽든 부치든
+    // 새 탭에서 스크립트가 돌고, 이쪽 앱은 껐다 켜야 갈아입는다.
+    let sub = if mismatched.is_empty() {
+        "새 탭에서 굽는다 · 끝나면 앱을 껐다 켜면 새 판".to_string()
+    } else {
+        format!("{} 판이 다르다 · 보내면 그쪽 앱이 잠깐 껐다 켜진다", mismatched.join("·"))
+    };
+    g.draw_text(
+        x + 12.0,
+        y + 28.0,
+        &sub,
+        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+    );
+    let mut oy = y + HEAD_H;
+    for (label, hit_kind) in rows {
+        let r = (x + 6.0, oy, w - 12.0, ROW);
+        let hov = hit(cursor, &r);
+        g.hover_pointer |= hov;
+        if hov {
+            round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
+        }
+        g.draw_text(
+            r.0 + 8.0,
+            oy + 8.0,
+            &label,
+            gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
+        );
+        sb.popover_hits.push((hit_kind, r));
+        oy += ROW;
+    }
+}
+
+/// 스크립트를 돌릴 레포 — 구운 쪽이 번들에 남긴 표(`Resources/build-root`)가 먼저고,
+/// 없으면(개발 실행) 컴파일 시점 경로. `install_pending_paths` 와 같은 규칙.
+fn repo_root() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent()?.parent().map(|c| c.join("Resources/build-root")))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+}
+
 /// QR 모듈(한 변 n, 행 우선 n×n). 주소가 같으면 다시 안 만든다 — 팝오버는 열려 있는
 /// 동안 매 프레임 그리고, 부호화는 프레임 예산에 넣을 일이 아니다.
 fn qr_modules(text: &str) -> Option<(usize, Vec<bool>)> {
@@ -1531,6 +1609,22 @@ impl crate::App {
                 }
                 return true;
             }
+            Some(state::StatusbarHit::BuildBake) => {
+                self.statusbar.popover = None;
+                self.run_script_in_new_tab("scripts/build-app.sh", "새 탭에서 굽는 중 — 끝나면 앱을 껐다 켜면 된다");
+                return true;
+            }
+            Some(state::StatusbarHit::BuildSend(machine)) => {
+                self.statusbar.popover = None;
+                let msg = format!("{machine} 에 새 판 보내는 중 — 새 탭에서 진행");
+                self.run_script_in_new_tab("scripts/sync-mini.sh", &msg);
+                return true;
+            }
+            Some(state::StatusbarHit::OpenMachines) => {
+                self.statusbar.popover = None;
+                let _ = self.open_settings_room(Some(crate::SettingsCat::Machines));
+                return true;
+            }
             Some(state::StatusbarHit::PickClip(i)) => {
                 // 고른 줄을 다시 클립보드로. 무엇을 집었는지 앞머리를 함께 띄운다 —
                 // 목록에서 눈으로 고른 것과 실제로 담긴 것이 같은지는 그렇게만 확인된다.
@@ -1555,6 +1649,25 @@ impl crate::App {
 
     /// 칩 토글. 같은 것을 다시 누르면 닫고, 다른 것을 누르면 갈아탄다 — 칩들이
     /// 8px 간격으로 붙어 있어 둘이 동시에 열리면 서로를 덮는다.
+    /// 레포 스크립트를 활성 pane 의 새 탭에서 돌린다 — 과정이 화면에 보이고, 실패도
+    /// 거기 남는다. 셸이 뜨기 전에 보낸 글자도 PTY 가 쥐고 있다가 셸이 읽는다.
+    fn run_script_in_new_tab(&mut self, script: &str, toast: &str) {
+        let Some(outer) = self.ws.lock().unwrap().active_pane.clone() else {
+            self.set_toast("활성 pane 이 없다".to_string());
+            return;
+        };
+        let root = repo_root();
+        match self.spawn_new_tab(&outer, true) {
+            Ok(pid) => {
+                let cmd = format!("cd '{}' && bash {script}\n", root.display());
+                self.send_bytes_to_surface(Some(&pid), cmd.as_bytes());
+                self.set_toast(toast.to_string());
+            }
+            Err(e) => self.set_toast(format!("탭을 못 열었다: {e:#}")),
+        }
+        self.chrome_dirty = true;
+    }
+
     pub(crate) fn toggle_statusbar_popover(
         &mut self,
         kind: state::StatusbarPopover,

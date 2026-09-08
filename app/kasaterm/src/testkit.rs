@@ -6840,6 +6840,9 @@ impl App {
                 w if w.starts_with("clip") => {
                     (crate::state::StatusbarPopover::Clipboard, self.statusbar.clip_rect)
                 }
+                w if w.starts_with("build") => {
+                    (crate::state::StatusbarPopover::Build, self.status_version_rect)
+                }
                 _ => (crate::state::StatusbarPopover::Ports, self.statusbar.port_rect),
             };
             match anchor {

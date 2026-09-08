@@ -4314,13 +4314,14 @@ impl ApplicationHandler<UserEvent> for App {
                     let inside = |r: &(f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
-                    // 판 번호는 계정 메뉴의 보조 손잡이가 아니다. 기계별 판이 같은지
-                    // 확인하는 자리이므로 누르면 곧장 기계 설정으로 간다.
-                    if self.status_version_rect.as_ref().is_some_and(&inside) {
+                    // 판 번호는 계정 메뉴의 보조 손잡이가 아니다. 누르면 「새 판」
+                    // 팝오버 — 굽기·다른 기계로 보내기·기계 설정(2026-09-08 지시
+                    // 「빌드 다름 누르면 메뉴 열려서 빌드 버튼」). 전엔 곧장 기계 설정.
+                    if let Some(r) = self.status_version_rect.filter(|r| inside(r)) {
                         self.account_menu = false;
                         self.account_menu_provider = None;
                         self.account_menu_anchor = None;
-                        let _ = self.open_settings_room(Some(crate::SettingsCat::Machines));
+                        self.toggle_statusbar_popover(state::StatusbarPopover::Build, r);
                         window.request_redraw();
                         return;
                     }
