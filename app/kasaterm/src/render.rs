@@ -5995,10 +5995,21 @@ impl App {
                         .closed_panes
                         .iter()
                         .any(|c| c.stashed && c.alive && c.pane_id == pane);
-                    let items: [(SidebarMenuAction, &str); 1] = if hidden {
-                        [(SidebarMenuAction::Unhide, "다시 보이기")]
+                    // pane 이 비면 방 메뉴 — 본문 보기 전환·이름·닫기(2026-09-08 지시).
+                    let items: Vec<(SidebarMenuAction, &str)> = if pane.is_empty() {
+                        vec![
+                            if self.sidebar_list_body {
+                                (SidebarMenuAction::MapBody, "배치도로 보기")
+                            } else {
+                                (SidebarMenuAction::ListBody, "목록으로 보기")
+                            },
+                            (SidebarMenuAction::RenameRoom, "이름 바꾸기"),
+                            (SidebarMenuAction::CloseRoom, "방 닫기"),
+                        ]
+                    } else if hidden {
+                        vec![(SidebarMenuAction::Unhide, "다시 보이기")]
                     } else {
-                        [(SidebarMenuAction::Hide, "pane 숨기기")]
+                        vec![(SidebarMenuAction::Hide, "pane 숨기기")]
                     };
                     const MIH: f32 = 28.0;
                     let widest = items

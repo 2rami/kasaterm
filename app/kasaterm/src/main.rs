@@ -4109,6 +4109,14 @@ enum SidebarMenuAction {
     Hide,
     /// 숨겨 둔 것을 제자리로.
     Unhide,
+    /// 방 카드 본문을 학생 줄 목록으로(모든 방 공통, settings.json `sidebar_body`).
+    ListBody,
+    /// 방 카드 본문을 배치도로.
+    MapBody,
+    /// 방 이름 편집 — 두 번 느리게 누르는 것과 같은 길.
+    RenameRoom,
+    /// 방 닫기 — × 와 같은 길(도는 claude 가 있으면 묻는다).
+    CloseRoom,
 }
 
 /// 한글 조합기(`App::hangul`)를 쓰는 입력 문맥. 조합기는 App 에 **하나뿐인데**
@@ -5652,6 +5660,9 @@ struct App {
     /// and `tab_strip_w()` pins the side strip to 0, so render + click routing
     /// follow automatically. Persisted as settings.json `tab_position`.
     tabs_on_top: bool,
+    /// 사이드바 방 카드 본문 — 참이면 배치도 대신 학생 줄 목록(2026-09-08 지시 「방
+    /// 우클릭하면 목록·미니맵 전환」). settings.json `sidebar_body` = "list".
+    sidebar_list_body: bool,
     /// settings.json 의 모르는 값은 읽는 경계에서 block 으로 떨어뜨린다.
     cursor_shape: cursor::CursorShape,
     cursor_thickness: f32,
@@ -6056,6 +6067,10 @@ impl App {
             // 기본은 side(사이드바 탭) — read_tab_position 이 "top" 만 top 으로,
             // 그 외/키없음은 side 로 폴백한다.
             tabs_on_top: socket::read_tab_position() == "top",
+            sidebar_list_body: socket::read_settings()
+                .get("sidebar_body")
+                .and_then(|v| v.as_str())
+                == Some("list"),
             cursor_shape: socket::read_cursor_shape(),
             cursor_thickness: socket::read_cursor_thickness(),
             mouse_cursor: socket::read_mouse_cursor(),

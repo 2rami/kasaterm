@@ -5276,7 +5276,12 @@ impl App {
         };
         // 칸이 얼굴을 담아야 하므로 높이가 pane 수를 따라간다 — 여섯 칸을 46px
         // 안에 우겨넣으면 한 칸이 7px 이라 얼굴이 안 들어간다.
-        let body_h = (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0);
+        // 목록 보기면 본문은 학생 줄이 pane 수만큼 — 배치도 대신이다(2026-09-08 지시).
+        let body_h = if self.sidebar_list_body {
+            leaves.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD
+        } else {
+            (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0)
+        };
         let full_h = body_h + hidden.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
         (body_h, (full_h * t).round(), hidden)
     }
@@ -5468,7 +5473,16 @@ impl App {
                     tab_w - 20.0,
                     body_h - 8.0,
                 );
-                if ma.1 + ma.3 <= bottom && ma.2 > 0.0 {
+                if self.sidebar_list_body {
+                    // 목록 보기 — 배치도 자리에 학생 줄. 숨긴 줄은 그 아래 이어진다.
+                    for (k, id) in self.window_leaves(i).into_iter().enumerate() {
+                        let ry = y + SIDEBAR_TAB_H + SIDEBAR_ROW_PAD / 2.0 + k as f32 * SIDEBAR_ROW_H;
+                        if ry + SIDEBAR_ROW_H > bottom {
+                            break;
+                        }
+                        rows.push((i, id, (tab_x + 8.0, ry, tab_w - 16.0, SIDEBAR_ROW_H)));
+                    }
+                } else if ma.1 + ma.3 <= bottom && ma.2 > 0.0 {
                     // 활성 방의 트리는 `windows[i]` 가 아니라 `pty_layout` 에 있다
                     // (그 슬롯은 None 이다) — `window_leaves` 와 같은 갈래를 쓴다.
                     let tree = if i == self.active_window {

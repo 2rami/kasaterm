@@ -1661,17 +1661,47 @@ impl App {
     pub(crate) fn sidebar_row_right_click(&mut self, cx: f32, cy: f32) -> bool {
         let inside =
             |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
-        let Some((wi, pane)) = self
+        let hit = self
             .sidebar_row_rects
             .iter()
             .find(|(_, _, r)| inside(r))
             .map(|(i, p, _)| (*i, p.clone()))
-        else {
+            .or_else(|| {
+                // 줄·칸이 아닌 카드 자리(머리)면 방 메뉴 — pane 이 빈 문자열인 것이
+                // 표식이다(2026-09-08 지시 「방쪽에서 우클릭하면 목록·미니맵 전환 메뉴」).
+                // 설정·보드 같은 안쪽 방은 이름도 목록도 없어 메뉴가 없다.
+                self.window_tab_rects
+                    .iter()
+                    .find(|(_, r)| inside(r))
+                    .map(|(i, _)| *i)
+                    .filter(|i| self.internal_room_kind_at(*i).is_none())
+                    .map(|i| (i, String::new()))
+            });
+        let Some((wi, pane)) = hit else {
             return false;
         };
         self.sidebar_menu = Some((cx, cy, wi, pane));
         self.chrome_dirty = true;
         true
+    }
+
+    /// 방 이름 편집을 연다 — 카드를 느리게 두 번 누르는 것과 메뉴 「이름 바꾸기」가
+    /// 같은 길을 타야 한쪽만 고쳐지는 쌍이 안 된다.
+    pub(crate) fn begin_room_rename(&mut self, idx: usize) {
+        // 손으로 붙인 이름이 없으면 **지금 화면에 보이는 라벨**로 시작한다. 빈칸으로
+        // 열면 cwd 에서 파생된 이름이 눈앞에서 사라져, 고치려던 사람이 이름을 통째로
+        // 다시 쳐야 한다(Finder 는 현 이름을 채워 준다).
+        let cur = self
+            .window_name_override
+            .get(&idx)
+            .cloned()
+            .or_else(|| self.window_labels.get(idx).map(|(n, _)| n.clone()))
+            .unwrap_or_default();
+        self.room_rename.cursor = cur.chars().count();
+        self.room_rename.editing = Some((idx, cur));
+        self.room_rename.last_click = None;
+        let _ = self.hangul.flush();
+        self.mark_room_label_dirty();
     }
 
     /// 떠 있는 사이드바 메뉴에 좌클릭. 메뉴가 떠 있었으면 true — 항목을 맞혔든
@@ -1723,6 +1753,20 @@ impl App {
                     self.reopen_closed_pane_at(i);
                 }
             }
+            SidebarMenuAction::ListBody | SidebarMenuAction::MapBody => {
+                let list = action == SidebarMenuAction::ListBody;
+                if self.sidebar_list_body != list {
+                    self.sidebar_list_body = list;
+                    socket::write_setting(
+                        "sidebar_body",
+                        serde_json::Value::String(if list { "list" } else { "map" }.to_string()),
+                    );
+                    // 카드 높이가 바뀌므로 펼친 방이 있으면 스크롤 상한도 같이 바뀐다.
+                    self.mark_room_label_dirty();
+                }
+            }
+            SidebarMenuAction::RenameRoom => self.begin_room_rename(wi),
+            SidebarMenuAction::CloseRoom => self.confirm_or_close_session(wi),
         }
     }
 
@@ -1860,20 +1904,7 @@ impl App {
             // 전환보다 먼저 본다 — 전환은 같은 방이면 어차피 무동작이다.
             let now = std::time::Instant::now();
             if starts_room_rename(self.room_rename.last_click, idx, self.active_window, now) {
-                // 손으로 붙인 이름이 없으면 **지금 화면에 보이는 라벨**로 시작한다.
-                // 빈칸으로 열면 cwd 에서 파생된 이름이 눈앞에서 사라져, 고치려던
-                // 사람이 이름을 통째로 다시 쳐야 한다(Finder 는 현 이름을 채워 준다).
-                let cur = self
-                    .window_name_override
-                    .get(&idx)
-                    .cloned()
-                    .or_else(|| self.window_labels.get(idx).map(|(n, _)| n.clone()))
-                    .unwrap_or_default();
-                self.room_rename.cursor = cur.chars().count();
-                self.room_rename.editing = Some((idx, cur));
-                self.room_rename.last_click = None;
-                let _ = self.hangul.flush();
-                self.mark_room_label_dirty();
+                self.begin_room_rename(idx);
                 return true;
             }
             self.room_rename.last_click = Some((idx, now));
