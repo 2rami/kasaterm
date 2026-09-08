@@ -86,7 +86,7 @@ class SummaryTests(unittest.TestCase):
                 return {"stop_reason": "tool_use", "content": [{"type": "tool_use"}]}
         self_test = self
         with self.assertRaises(ValueError):
-            NachoProvider(Client()).summarize("{}")
+            NachoProvider(Client()).summarize('{"prompt":"요청","student_reports":[]}')
 
     def test_sqlite_cursor_cache_and_evidence_round_trip(self):
         from tools.request_journal.store import Store as SQLiteStore
