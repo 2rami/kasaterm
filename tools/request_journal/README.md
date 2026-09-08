@@ -4,6 +4,55 @@ A separate, loopback-only request journal. It does not restart kasaterm or agent
 sessions. Student completion reports and actual application status remain separate.
 The database is operational app data, not a MEMORY vault note.
 
+## Chat and restart checks
+
+The main web surface asks Nacho about this project's requests and restart checks;
+raw journal records remain in a collapsed evidence section. The native pet uses
+the same server-owned `pet` conversation. Neither surface executes model output.
+
+The baseline is the observed operating-system app process start time, never the
+journal service's start time. A separate background RuntimeObserver records that
+epoch and artifact evidence. A verified historical manifest is not a currently
+ready build when the present bundle no longer matches its hashes. A main process
+match does not certify the separate pet process or user-visible behavior.
+
+Every request in the runtime window participates, without a recent-50/500 cutoff.
+Long prompts and final reports are split without dropping text. Source/session,
+timestamp, and the previous request in that same source travel with each part.
+Code changes use the observer's fixed git evidence and validated revision queries.
+The model's checklist JSON is parsed and its request/evidence IDs checked against
+known records. It may refine grouping and observation steps, never promote a
+state to built, running, or user-confirmed. Partial failures retain default checks.
+
+Only previously generated unresolved checklist items and explicitly pending older
+requests carry across app runs. `chat_pending_checks` preserves them through the
+second and subsequent questions and journal restarts; old unknown requests are
+not all converted into pending work. All chat tables use a `chat_` prefix and do
+not change SQLite `user_version` or overwrite core request evidence.
+
+| Route | Contract |
+| --- | --- |
+| `POST /api/chat` | `{text,conversation_id?,client_request_id?}` → 202 `{job_id,conversation_id,status,user_message_id}` |
+| `GET /api/chat/jobs/<id>` | Bounded status/progress, text preview, provider, context, `checklist_url`, `history_after` |
+| `DELETE /api/chat/jobs/<id>` | Empty JSON object cancels that job; question history remains |
+| `GET /api/chat/history` | `conversation_id`, `limit` up to 20, `before` or `after`; returns messages plus `next_before`/`next_after` |
+| `GET /api/checklist` | `job_id?`, `offset`, `limit` up to 20; returns items, compact coverage, context and `next_offset` |
+| `GET /api/checklist/evidence` | `job_id?`, `item_id`, `offset`; pages all source/evidence IDs in groups of 100 |
+
+POST and DELETE require the same JSON, Host, Origin, and `X-Journal-Request: 1`
+checks as acknowledgements. One inference job runs at a time and four may wait.
+Repeated client request IDs are idempotent within their project/conversation.
+Cancellation and a 180-second time budget signal the provider to clean up its
+temporary work. Cache keys cover app epoch, build evidence, and changed requests.
+
+Restart answers always save concrete checklist titles and steps into assistant
+history, including fallback/error answers. Large answers are preserved as ordered
+messages of at most about 32 KiB JSON each. After a job completes, clients read
+history forward from `after=user_message_id-1` until `next_after` is null. Older
+conversation pages use `before`/`next_before`. Job metadata never carries the full
+checklist; the checklist/evidence endpoints page it separately so a large UTF-8
+conversation cannot exceed the native pet's response budget.
+
 ## Run
 
 From the repository root, Python 3.10 or newer, no third-party packages:

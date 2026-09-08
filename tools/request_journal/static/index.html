@@ -5,11 +5,23 @@
   <title>요청 장부 · kasaterm</title><link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header><div><h1>요청 장부</h1><p id="project">프로젝트를 확인하고 있습니다</p></div><div class="actions"><button id="pet-summary" type="button">곽향에 요약 표시</button><button id="refresh" type="button">새로고침</button></div></header>
+<header><div><h1>나쵸와 확인하기</h1><p id="project">프로젝트를 확인하고 있습니다</p></div><div class="actions"><button id="pet-summary" type="button">곽향에 요약 표시</button><button id="refresh" type="button">새로고침</button></div></header>
 <main>
   <p class="notice">학생의 완료 보고와 실제 반영 여부를 따로 확인합니다. <span id="provider">구조 요약 · 나쵸 미연결</span></p>
   <div id="error" role="alert" hidden></div>
   <p id="pet-status" class="notice" role="status" hidden></p>
+  <div class="chat-layout">
+    <section class="chat-panel" aria-label="나쵸와 대화">
+      <h2>재시작 전에 물어보세요</h2>
+      <p class="muted">요청한 내용과 실제 수정·빌드 근거를 함께 확인합니다.</p>
+      <button id="restart-check" type="button">재시작하면 뭘 확인해야 해?</button>
+      <button id="chat-older" type="button" hidden>이전 대화 보기</button><div id="chat-messages" role="log" aria-live="polite"></div><button id="chat-next" type="button" hidden>답변 이어보기</button>
+      <p id="chat-progress" class="notice" role="status"></p>
+      <form id="chat-form"><label for="chat-input">나쵸에게 질문</label><textarea id="chat-input" rows="2" maxlength="4000" placeholder="지금 수정한 게 새 앱에 들어갔어?" required></textarea><div class="actions"><button id="chat-send" class="primary" type="submit">보내기</button><button id="chat-cancel" type="button" hidden>답변 멈추기</button></div></form>
+    </section>
+    <section class="checklist-panel" aria-label="재시작 확인 목록"><h2>확인할 것</h2><p id="checklist-context" class="notice">질문하면 마지막 앱 실행 시점을 기준으로 정리합니다.</p><div id="checklist-items"><p class="empty">아직 만든 확인 목록이 없습니다.</p></div><button id="checklist-more" type="button" hidden>확인 목록 더 보기</button></section>
+  </div>
+  <details id="records"><summary>요청 기록과 근거 보기</summary>
   <div class="workspace">
     <section class="requests" aria-label="요청 목록">
       <div class="filters"><label for="status">상태</label><select id="status"><option value="">전체 요청</option><option value="reported_done">완료 보고</option><option value="needs_attention">확인 필요</option><option value="working">진행 중</option><option value="received">접수됨</option></select></div>
@@ -17,5 +29,6 @@
     </section>
     <section id="detail" class="detail" aria-label="요청 상세"><div class="empty"><h2>요청을 선택해 주세요</h2><p>요약과 완료 보고, 반영 상태를 여기에서 봅니다.</p></div></section>
   </div>
-</main><script src="/app.js" defer></script>
+  </details>
+</main><script src="/app.js" defer></script><script src="/chat.js" defer></script>
 </body></html>

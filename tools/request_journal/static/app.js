@@ -7,7 +7,7 @@ const applied = {unknown:'반영 미확인',pending:'아직 반영 안 됨',rest
 let rows = [], selected = null, next = null, loading = false;
 const el = (tag, text, cls) => {const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(cls)node.className=cls;return node;};
 const plain = value => typeof value==='string'?value:Array.isArray(value)?value.map(plain).filter(Boolean).join('\n\n'):value&&typeof value==='object'?plain(value.text??value.content??value.summary??value.message??value.note??JSON.stringify(value,null,2)):'';
-const date = value => {if(!value)return '';const d=new Date(typeof value==='number'?value*1000:value);return Number.isNaN(d.valueOf())?'':d.toLocaleString('ko-KR',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});};
+const date = value => {if(!value)return '시간 미확인';const d=new Date(typeof value==='number'?value*1000:value);return Number.isNaN(d.valueOf())?'':d.toLocaleString('ko-KR',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});};
 function error(text=''){$('error').textContent=text;$('error').hidden=!text;}
 async function api(path,options){const response=await fetch(path,options);if(!response.ok)throw new Error('요청 장부에 연결하지 못했습니다. 잠시 후 새로고침해 주세요.');return response.json();}
 function title(row){const text=((plain(row.summary).split('\n').find(line=>line.trim()&&!/^(나쵸 요약|실제 반영)/.test(line))||'').replace(/^요청:\s*/, '')||plain(row.prompt).split('\n')[0]||'내용 없는 요청');return text.length>90?text.slice(0,89)+'…':text;}

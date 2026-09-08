@@ -149,7 +149,10 @@ def run(args):
         json.dump(discovery, file)
     os.replace(temporary, data_dir / "service.json")
     stopped = threading.Event()
+    from .chat import ChatManager
+    server.chat = ChatManager(store, server.project, provider_factory=lambda cancel: summary_provider(args, cancel))
     worker = None
+    runtime_worker = None
     if args.collect:
         from .collector import Collector
         def collect():
@@ -169,6 +172,21 @@ def run(args):
                 stopped.wait(args.interval)
         worker = threading.Thread(target=collect, name="journal-collector", daemon=True)
         worker.start()
+        def observe_runtime():
+            try:
+                from .runtime import RuntimeObserver
+                observer = RuntimeObserver(store, project=server.project, base_url=args.base_url, machine="local")
+                while not stopped.is_set():
+                    try:
+                        observer.poll_once()
+                        server.runtime_status = "running"
+                    except Exception:
+                        server.runtime_status = "retrying"
+                    stopped.wait(10)
+            except Exception:
+                server.runtime_status = "unavailable"
+        runtime_worker = threading.Thread(target=observe_runtime, name="journal-runtime", daemon=True)
+        runtime_worker.start()
     def summarize():
         try:
             from .summarizer import Summarizer
@@ -198,12 +216,15 @@ def run(args):
         server.serve_forever(poll_interval=0.25)
     finally:
         stopped.set()
+        server.chat.close()
         server.server_close()
         if worker:
             worker.join(timeout=2)
         # HTTP summaries own a temporary remote terminal and must have time to
         # delete it after cancellation before the process exits.
         summary_worker.join(timeout=15)
+        if runtime_worker:
+            runtime_worker.join(timeout=2)
     return 0
 
 

@@ -5,6 +5,8 @@ import tempfile
 from tools.request_journal.server import JournalServer
 from tools.request_journal.store import Store
 from tools.request_journal.summarizer import Summarizer
+from tools.request_journal.chat import ChatManager
+from tools.request_journal.tests.test_chat import JSONProvider
 
 
 def main():
@@ -23,11 +25,14 @@ def main():
             if status != "received":
                 store.set_reported_status(result["last_request_id"], status, {"fixture": True})
         Summarizer().update(store, project=project)
+        store.record_app_run({"project": project, "machine": "local", "pid": 777777, "started_at": "2026-09-08T04:13:51.000Z", "executable": "/synthetic/kasaterm", "evidence": {"kind": "synthetic_fixture"}})
         server = JournalServer(lambda: store, project, port=0)
+        server.chat = ChatManager(store, project, provider_factory=lambda _cancel: JSONProvider())
         print(f"http://127.0.0.1:{server.server_port}/", flush=True)
         try:
             server.serve_forever()
         finally:
+            server.chat.close()
             server.server_close()
 
 

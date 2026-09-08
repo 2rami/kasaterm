@@ -94,6 +94,46 @@ def send_pet_summary(text):
     return {"ok": True, "pet_running": running, "state": "sent" if running else "queued", "message": "곽향에 요약을 전달했습니다" if running else "펫이 꺼져 있어 요약을 알림 대기열에 넣었습니다"}
 
 
+def chat_context_view(context):
+    if not isinstance(context, dict):
+        return None
+    result = {key: context[key] for key in ("build_count", "ready_build_count", "since_start_count", "carryover_count", "timestamp_unknown_count") if key in context}
+    result["artifact_states"] = context.get("artifact_states", [])[:10]
+    for name in ("current_run", "last_run", "previous_run"):
+        run = context.get(name)
+        result[name] = {key: str(run[key])[:160] if isinstance(run[key], str) else run[key] for key in ("id", "pid", "machine", "started_at", "build_id", "linked_build_id") if key in run} if isinstance(run, dict) else None
+    return result
+
+
+def chat_job_view(job):
+    result = {key: job[key] for key in ("id", "job_id", "conversation_id", "status", "user_message_id", "provider", "progress", "error", "errors", "partial") if key in job}
+    result["context"] = chat_context_view(job.get("context"))
+    result["text"] = str(job.get("text", ""))[:1500]
+    result["text_is_preview"] = len(str(job.get("text", ""))) > 1500
+    result["checklist_url"] = "/api/checklist?job_id=" + job["id"]
+    result["history_after"] = max(0, (job.get("user_message_id") or 1) - 1)
+    return result
+
+
+def checklist_page(checklist, offset=0, limit=20):
+    offset, limit = max(0, int(offset)), min(20, max(1, int(limit)))
+    all_items = checklist.get("items", [])
+    items = []
+    for original in all_items[offset:offset + limit]:
+        item = dict(original)
+        for key in ("source_request_ids", "evidence_ids"):
+            item[key + "_count"] = len(item.get(key, []))
+            item[key] = item.get(key, [])[:100]
+        item["context_note_count"] = len(item.get("context_notes", []))
+        item["context_notes"] = item.get("context_notes", [])[:10]
+        items.append(item)
+    coverage = {key: value for key, value in checklist.get("coverage", {}).items() if not isinstance(value, list)}
+    for key, value in checklist.get("coverage", {}).items():
+        if isinstance(value, list):
+            coverage[key.removesuffix("_ids") + "_count"] = len(value)
+    return {"status": checklist.get("status", "completed"), "items": items, "groups": checklist.get("groups", {}), "coverage": coverage, "context": chat_context_view(checklist.get("context")), "total_items": len(all_items), "offset": offset, "next_offset": offset + len(items) if offset + len(items) < len(all_items) else None}
+
+
 class JournalServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -102,6 +142,8 @@ class JournalServer(ThreadingHTTPServer):
         self.project = str(Path(project).resolve())
         self.summarizer_status = {"provider": "unavailable", "updated": 0, "skipped": 0}
         self.collector_status = "disabled"
+        self.runtime_status = "disabled"
+        self.chat = None
         self.pet_sender = pet_sender or send_pet_summary
         super().__init__(("127.0.0.1", port), Handler)
 
@@ -141,7 +183,7 @@ class Handler(BaseHTTPRequestHandler):
         route = unquote(parsed.path)
         if route == "/health":
             return self.reply(200, {"ok": True, "service": "request-journal", "version": 1, "collector": self.server.collector_status})
-        assets = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8")}
+        assets = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/chat.js": ("chat.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8")}
         if route in assets:
             filename, kind = assets[route]
             return self.reply(200, (STATIC / filename).read_bytes(), kind)
@@ -151,6 +193,30 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": "project_out_of_scope"})
         try:
             store = self.server.store_factory()
+            if route.startswith("/api/chat/") or route.startswith("/api/checklist"):
+                if self.server.chat is None:
+                    return self.reply(503, {"error": "chat_unavailable"})
+                if route == "/api/chat/history":
+                    conversation = query.get("conversation_id", ["pet"])[0]
+                    return self.reply(200, self.server.chat.chat.history_page(project, conversation, before=query.get("before", [None])[0], after=query.get("after", [None])[0], limit=query.get("limit", [20])[0]))
+                if route.startswith("/api/chat/jobs/"):
+                    job = self.server.chat.chat.get(project, route.rsplit("/", 1)[1])
+                    return self.reply(200, chat_job_view(job)) if job else self.reply(404, {"error": "not_found"})
+                if route in ("/api/checklist", "/api/checklist/evidence"):
+                    job_id = query.get("job_id", [None])[0]
+                    job = self.server.chat.chat.get(project, job_id) if job_id else None
+                    if job_id and not job:
+                        return self.reply(404, {"error": "not_found"})
+                    checks = (job or {}).get("checklist") or self.server.chat.checklist()
+                    if route == "/api/checklist/evidence":
+                        item_id = query.get("item_id", [""])[0]
+                        item = next((item for item in checks.get("items", []) if item["id"] == item_id), None)
+                        if not item:
+                            return self.reply(404, {"error": "not_found"})
+                        offset = max(0, int(query.get("offset", [0])[0]))
+                        source, evidence = item.get("source_request_ids", []), item.get("evidence_ids", [])
+                        return self.reply(200, {"source_request_ids": source[offset:offset + 100], "evidence_ids": evidence[offset:offset + 100], "next_offset": offset + 100 if max(len(source), len(evidence)) > offset + 100 else None})
+                    return self.reply(200, checklist_page(checks, query.get("offset", [0])[0], query.get("limit", [20])[0]))
             if route == "/api/requests":
                 limit = min(100, max(1, int(query.get("limit", [50])[0])))
                 status = query.get("reported_status", [None])[0]
@@ -184,13 +250,21 @@ class Handler(BaseHTTPRequestHandler):
         route = unquote(urlsplit(self.path).path)
         parts = route.strip("/").split("/")
         pet_request = route == "/api/pet-summary"
-        if not pet_request and (len(parts) != 4 or parts[:2] != ["api", "requests"] or parts[3] != "ack"):
+        chat_request = route == "/api/chat"
+        if not pet_request and not chat_request and (len(parts) != 4 or parts[:2] != ["api", "requests"] or parts[3] != "ack"):
             return self.reply(404, {"error": "not_found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= 65536 or self.headers.get("Transfer-Encoding"):
                 return self.reply(413, {"error": "invalid_body_size"})
             body = json.loads(self.rfile.read(length))
+            if chat_request:
+                if self.server.chat is None:
+                    return self.reply(503, {"error": "chat_unavailable"})
+                if not isinstance(body, dict) or set(body) - {"text", "conversation_id", "client_request_id"}:
+                    return self.reply(400, {"error": "invalid_chat_request"})
+                job = self.server.chat.submit(body.get("text"), body.get("conversation_id", "pet"), body.get("client_request_id"))
+                return self.reply(202, {"job_id": job["id"], "conversation_id": job["conversation_id"], "status": job["status"], "user_message_id": job["user_message_id"]})
             if pet_request:
                 if body != {}:
                     return self.reply(400, {"error": "empty_object_required"})
@@ -210,5 +284,26 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, request_view(store.get_request(parts[2])))
         except (ValueError, TypeError, UnicodeDecodeError):
             self.reply(400, {"error": "invalid_json"})
+        except OverflowError:
+            self.reply(429, {"error": "chat_queue_full"})
         except Exception:
             self.reply(500, {"error": "journal_unavailable"})
+
+    def do_DELETE(self):
+        if not self.guard():
+            return
+        if self.headers.get("Content-Type", "").split(";", 1)[0].strip() != "application/json" or self.headers.get("X-Journal-Request") != "1":
+            return self.reply(415, {"error": "json_request_required"})
+        route = unquote(urlsplit(self.path).path)
+        if not route.startswith("/api/chat/jobs/") or self.server.chat is None:
+            return self.reply(404, {"error": "not_found"})
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 128 or self.headers.get("Transfer-Encoding"):
+                return self.reply(413, {"error": "invalid_body_size"})
+            if json.loads(self.rfile.read(length)) != {}:
+                return self.reply(400, {"error": "empty_object_required"})
+            job = self.server.chat.cancel(route.rsplit("/", 1)[1])
+            return self.reply(200, chat_job_view(job)) if job else self.reply(404, {"error": "not_found"})
+        except (ValueError, UnicodeDecodeError):
+            self.reply(400, {"error": "invalid_json"})
