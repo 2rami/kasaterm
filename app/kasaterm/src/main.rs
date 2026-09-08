@@ -1098,10 +1098,9 @@ pub(crate) const SESSION_AUTOSAVE_PERIOD: std::time::Duration = std::time::Durat
 /// lines and drops the trailing blank rows so a restored pane doesn't carry an
 /// empty tail. v1 saves text only (color/attrs dropped) — the content is what
 /// "what I typed/saw is still there" needs.
-fn scrollback_lines(pane: &PaneState) -> Vec<String> {
-    let Some(t) = pane.term() else {
-        return Vec::new();
-    };
+/// pane 이 아니라 **화면 하나**를 받는다. `PaneState` 는 활성 탭으로 Deref 하므로,
+/// pane 을 그대로 읽으면 탭마다 제 스크롤백을 저장할 수가 없다.
+fn term_scrollback_lines(t: &TerminalPane) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for row in t.history.iter().chain(t.cells.iter()) {
         let mut s = String::new();

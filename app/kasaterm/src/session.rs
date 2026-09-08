@@ -5755,9 +5755,15 @@ impl App {
     /// 실측: 도는 claude 가 `ps` 의 command 에서 통째로 사라졌다). 글리프 접두까지
     /// 정확히 맞춰 본다 — 대화 본문이 그 문구를 말하는 것과 갈라야 해서다.
     pub(crate) fn pane_bypass_on(ws: &Workspace, pane_id: &str) -> bool {
-        let Some(t) = ws.panes.get(pane_id).and_then(|p| p.term()) else {
-            return false;
-        };
+        ws.panes
+            .get(pane_id)
+            .and_then(|p| p.term())
+            .is_some_and(Self::term_bypass_on)
+    }
+
+    /// 같은 판정을 화면 하나에 대고 한다. pane 은 활성 탭으로 Deref 하므로, 탭마다
+    /// 제 권한 모드를 저장하려면 그 탭의 화면을 직접 줘야 한다.
+    pub(crate) fn term_bypass_on(t: &crate::TerminalPane) -> bool {
         // claude 가 방금 죽었으면 셸 프롬프트가 몇 줄 밀어 올린다 — 바닥 12줄까지 본다.
         let from = t.cells.len().saturating_sub(12);
         t.cells[from..].iter().any(|row| {
@@ -5867,6 +5873,130 @@ impl App {
         }
     }
 
+    /// leaf 와 탭이 함께 쓰는 「이 surface 의 복원 재료」를 채운다.
+    ///
+    /// `surface` 는 leaf 면 바깥 pane id, 탭이면 그 탭의 pid 다 — 대화 번호·모델·
+    /// 캐릭터가 전부 그 키로 잡힌다. `term` 은 그 화면(권한 모드 판정·스크롤백 폴백):
+    /// `PaneState` 는 **활성 탭**으로 Deref 하므로 pane 을 그대로 읽으면 둘째 탭을
+    /// 보던 중에 저장했을 때 남의 화면이 leaf 에 실린다.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_surface_record(
+        obj: &mut serde_json::Map<String, serde_json::Value>,
+        surface: &str,
+        title: Option<&str>,
+        term: Option<&crate::TerminalPane>,
+        pty: &HashMap<String, Arc<kasa_pty::PtySession>>,
+        ws: &Workspace,
+        pane_claude_sid: &HashMap<String, String>,
+        agent_cfg: &HashMap<String, (String, String)>,
+    ) {
+        // 캐릭터 영속(거노: 재시작하면 미도리로 둔갑): pane_character 는
+        // claude 프로세스 감지(was_claude)와 무관하게 살아있으므로, 감지가
+        // 실패해도 캐릭터는 여기서 확실히 저장한다.
+        if let Some(name) = ws.pane_character.get(surface) {
+            obj.insert("character".to_string(), serde_json::json!(name));
+        }
+        // 붙인 이름(`/rename`·`surface.rename`·`kasaspace_rename`). 이게
+        // 없으면 재시작마다 이름이 증발해 OSC 제목으로 되돌아갔다 — 이 앱은
+        // 종료 시 자기 설치를 하므로 껐다 켜는 일이 잦고, 그래서 이름을
+        // 붙이는 행위 자체가 몇 분짜리가 됐다.
+        //
+        // ⚠️ **핀이 섰을 때만 저장한다.** 핀 없는 `title` 은 안에서 도는
+        // 프로그램이 쏜 OSC 라, 그걸 굳혀 두면 다음에 켤 때 「사람이 정한
+        // 이름」인 척하면서 그 뒤의 OSC 를 영영 막는다.
+        if let Some(t) = title.filter(|s| !s.trim().is_empty()) {
+            obj.insert("title".to_string(), serde_json::json!(t));
+        }
+        // per-pane 실제 세션은 SocketSessionBound 로 채워진 pane_claude_sid
+        // (정본)로 최우선 확정한다. 예전엔 argv(pane_record)·cwd 최신 jsonl 로
+        // 폴백했는데, argv 없는 fresh `claude` 여럿이 같은 cwd 면 전부 cwd 최신
+        // 세션 하나로 뭉쳐 재시작 시 여러 pane 이 다 같은 대화+캐릭터(미도리)로
+        // 복원됐다(거노: 다른 세션이 다 미도리로 뭉침). cwd 최신 폴백을 제거하고
+        // pane_claude_sid 로만 session_id 를 확정한다 — 없으면 pane_record 의
+        // argv sid, 그것도 없으면 restore_leaf 가 fresh claude 로 복원.
+        if let Some(sid) = pane_claude_sid.get(surface) {
+            obj.insert("session_id".to_string(), serde_json::json!(sid));
+        }
+        // Codex가 업데이트를 고른 뒤 종료하면 셸만 남아 live process 감지는
+        // `null`이지만, 직전에 정확히 결속한 root rollout UUID는 남아 있다.
+        // 그 둘이 함께 있을 때만 종류를 복원해 다음 저장이 fresh Claude로
+        // 오염되지 않게 한다. cwd 최신 파일은 같은 폴더 pane을 섞으므로 보지 않는다.
+        normalize_saved_agent_map_with(obj, |sid| {
+            socket::codex_root_rollout_for_session(sid).is_some()
+        });
+        // 하네스를 갈아 끼운 자리에 남은 **옛 대화 번호**를 여기서 뺀다.
+        // `pane_claude_sid` 는 claude sid 와 codex rollout uuid 를 한 칸에
+        // 담고 전환을 신호로 걷지 않아, claude 를 끄고 codex 를 띄운 pane 이
+        // 옛 claude 번호를 그대로 들고 저장된다. 복원은 자기 창고에서 그
+        // 번호를 못 찾아 새 대화로 떨어지고, 그 fresh 세션의 번호가 다시
+        // 저장되면서 옛 대화는 영영 안 열린다(2026-09-05: codex pane 에
+        // 실린 claude 번호 탓에 4.3MB 대화가 통째로 묻혔다).
+        let saved_agent = obj
+            .get("was_agent")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if let Some(sid) = obj
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            if !saved_sid_fits_agent(saved_agent.as_deref(), &sid) {
+                eprintln!(
+                    "[save] pane {surface}: {} 자리에 남은 옛 대화 번호({sid})를 빼고 저장한다",
+                    saved_agent.as_deref().unwrap_or("claude")
+                );
+                obj.insert("session_id".to_string(), serde_json::Value::Null);
+            }
+        }
+        // 끄기 직전 쓰던 모델·effort. 없으면 키를 아예 안 넣는다 — 복원은
+        // "없으면 플래그를 안 붙인다"라, 빈 문자열을 남기면 되살릴 때
+        // `--model ''` 같은 게 나갈 위험만 는다.
+        //
+        // 모델도 대화 번호와 같은 이유로 하네스와 대조한다 — 어긋나면
+        // effort 까지 함께 버린다. 두 값은 같은 자리의 한 벌이라, 모델만
+        // 빼면 codex 자리에 claude 의 `ultracode` 같은 값이 남는다.
+        if let Some((model, effort)) = agent_cfg
+            .get(surface)
+            .filter(|(m, _)| saved_model_fits_agent(saved_agent.as_deref(), m))
+        {
+            if !model.is_empty() {
+                obj.insert("model".to_string(), serde_json::json!(model));
+            }
+            if !effort.is_empty() {
+                obj.insert("effort".to_string(), serde_json::json!(effort));
+            }
+        }
+        // 권한 모드 영속 — 복원 resume 이 이 플래그를 안 실으면 학생이
+        // 전부 물어보는 모드로 깨어난다(2026-08-29 미니 재시작 실측:
+        // 셋 다 auto — 라이브 재기동으로 복구했다).
+        if term.is_some_and(Self::term_bypass_on) {
+            obj.insert("bypass".to_string(), serde_json::json!(true));
+        }
+        // Agent TUI는 새 화면을 다시 그리므로 옛 터미널 행을 넣지 않는다.
+        // 일반 셸은 실제 PTY history를 저장해야 재시작 뒤 출력이 남는다.
+        let restores_agent = obj
+            .get("was_agent")
+            .and_then(|v| v.as_str())
+            .is_some_and(|agent| matches!(agent, "claude" | "codex" | "agy"))
+            || obj
+                .get("was_claude")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            || obj
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|sid| !sid.is_empty());
+        let sb = if restores_agent {
+            Vec::new()
+        } else {
+            pty.get(surface)
+                .map(|p| p.scrollback_text(SCROLLBACK_SAVE_MAX))
+                .or_else(|| term.map(term_scrollback_lines))
+                .unwrap_or_default()
+        };
+        obj.insert("scrollback".to_string(), serde_json::json!(sb));
+    }
+
     /// Walk a live PtyLayout into the nested JSON the restore loader reads,
     /// resolving each leaf's pane id to its cwd/claude record.
     pub(crate) fn layout_to_json(
@@ -5943,117 +6073,65 @@ impl App {
                     // pane 이거나 그 사이 다른 pane 이 물려받은 번호로 배달된다
                     // (거노: "재시작하면 학생들이 tell 을 이상한 pane 에 쓴다").
                     obj.insert("pane_id".to_string(), serde_json::json!(pane_id));
-                    // 캐릭터 영속(거노: 재시작하면 미도리로 둔갑): pane_character 는
-                    // claude 프로세스 감지(was_claude)와 무관하게 살아있으므로, 감지가
-                    // 실패해도 캐릭터는 여기서 확실히 저장한다.
-                    if let Some(name) = ws.pane_character.get(pane_id) {
-                        obj.insert("character".to_string(), serde_json::json!(name));
+                    let pane = ws.panes.get(pane_id);
+                    // leaf 의 몫은 **첫 탭**이다 — 바깥 pane id 가 곧 첫 탭의 pid 다.
+                    let first = pane.and_then(|p| p.tabs.first());
+                    Self::fill_surface_record(
+                        obj,
+                        pane_id,
+                        first
+                            .filter(|t| t.title_pinned)
+                            .and_then(|t| t.title.as_deref()),
+                        first.and_then(|t| t.term()),
+                        pty,
+                        ws,
+                        pane_claude_sid,
+                        agent_cfg,
+                    );
+                    // 탭 — leaf 에는 첫 탭만 실렸다. 둘째 탭부터는 자기 PtySession 을
+                    // 갖는데(PaneTab.pid) 그게 저장에 안 실려, 앱을 껐다 켜면 탭에서
+                    // 돌던 학생이 통째로 사라졌다(2026-09-08 지시 「탭 안의 복원하는
+                    // 거 해」 — 그날 실제로 탭에서 돌던 학생을 잃었다). 웹 탭만 살아
+                    // 남던 것은 위 web_url 갈래가 따로 건져 주기 때문이다.
+                    let tabs: Vec<serde_json::Value> = pane
+                        .map(|p| {
+                            p.tabs
+                                .iter()
+                                .skip(1)
+                                .filter_map(|t| {
+                                    let tab_pid = t.pid.as_deref()?;
+                                    let mut trec =
+                                        pty.get(tab_pid).map(|s| socket::pane_record(s))?;
+                                    let o = trec.as_object_mut()?;
+                                    o.insert(
+                                        "pane_id".to_string(),
+                                        serde_json::json!(tab_pid),
+                                    );
+                                    Self::fill_surface_record(
+                                        o,
+                                        tab_pid,
+                                        t.title
+                                            .as_deref()
+                                            .filter(|_| t.title_pinned),
+                                        t.term(),
+                                        pty,
+                                        ws,
+                                        pane_claude_sid,
+                                        agent_cfg,
+                                    );
+                                    Some(trec)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !tabs.is_empty() {
+                        obj.insert("tabs".to_string(), serde_json::json!(tabs));
+                        // 보던 탭도 되살린다 — 안 실으면 재시작마다 첫 탭으로 돌아간다.
+                        obj.insert(
+                            "active_tab".to_string(),
+                            serde_json::json!(pane.map(|p| p.active_tab).unwrap_or(0)),
+                        );
                     }
-                    // 붙인 이름(`/rename`·`surface.rename`·`kasaspace_rename`). 이게
-                    // 없으면 재시작마다 이름이 증발해 OSC 제목으로 되돌아갔다 — 이 앱은
-                    // 종료 시 자기 설치를 하므로 껐다 켜는 일이 잦고, 그래서 이름을
-                    // 붙이는 행위 자체가 몇 분짜리가 됐다.
-                    //
-                    // ⚠️ **핀이 섰을 때만 저장한다.** 핀 없는 `title` 은 안에서 도는
-                    // 프로그램이 쏜 OSC 라, 그걸 굳혀 두면 다음에 켤 때 「사람이 정한
-                    // 이름」인 척하면서 그 뒤의 OSC 를 영영 막는다.
-                    if let Some(t) = ws
-                        .panes
-                        .get(pane_id)
-                        .filter(|p| p.title_pinned)
-                        .and_then(|p| p.title.as_deref())
-                        .filter(|s| !s.trim().is_empty())
-                    {
-                        obj.insert("title".to_string(), serde_json::json!(t));
-                    }
-                    // per-pane 실제 세션은 SocketSessionBound 로 채워진 pane_claude_sid
-                    // (정본)로 최우선 확정한다. 예전엔 argv(pane_record)·cwd 최신 jsonl 로
-                    // 폴백했는데, argv 없는 fresh `claude` 여럿이 같은 cwd 면 전부 cwd 최신
-                    // 세션 하나로 뭉쳐 재시작 시 여러 pane 이 다 같은 대화+캐릭터(미도리)로
-                    // 복원됐다(거노: 다른 세션이 다 미도리로 뭉침). cwd 최신 폴백을 제거하고
-                    // pane_claude_sid 로만 session_id 를 확정한다 — 없으면 pane_record 의
-                    // argv sid, 그것도 없으면 restore_leaf 가 fresh claude 로 복원.
-                    if let Some(sid) = pane_claude_sid.get(pane_id) {
-                        obj.insert("session_id".to_string(), serde_json::json!(sid));
-                    }
-                    // Codex가 업데이트를 고른 뒤 종료하면 셸만 남아 live process 감지는
-                    // `null`이지만, 직전에 정확히 결속한 root rollout UUID는 남아 있다.
-                    // 그 둘이 함께 있을 때만 종류를 복원해 다음 저장이 fresh Claude로
-                    // 오염되지 않게 한다. cwd 최신 파일은 같은 폴더 pane을 섞으므로 보지 않는다.
-                    normalize_saved_agent_map_with(obj, |sid| {
-                        socket::codex_root_rollout_for_session(sid).is_some()
-                    });
-                    // 하네스를 갈아 끼운 자리에 남은 **옛 대화 번호**를 여기서 뺀다.
-                    // `pane_claude_sid` 는 claude sid 와 codex rollout uuid 를 한 칸에
-                    // 담고 전환을 신호로 걷지 않아, claude 를 끄고 codex 를 띄운 pane 이
-                    // 옛 claude 번호를 그대로 들고 저장된다. 복원은 자기 창고에서 그
-                    // 번호를 못 찾아 새 대화로 떨어지고, 그 fresh 세션의 번호가 다시
-                    // 저장되면서 옛 대화는 영영 안 열린다(2026-09-05: codex pane 에
-                    // 실린 claude 번호 탓에 4.3MB 대화가 통째로 묻혔다).
-                    let saved_agent = obj
-                        .get("was_agent")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
-                    if let Some(sid) = obj
-                        .get("session_id")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                    {
-                        if !saved_sid_fits_agent(saved_agent.as_deref(), &sid) {
-                            eprintln!(
-                                "[save] pane {pane_id}: {} 자리에 남은 옛 대화 번호({sid})를 빼고 저장한다",
-                                saved_agent.as_deref().unwrap_or("claude")
-                            );
-                            obj.insert("session_id".to_string(), serde_json::Value::Null);
-                        }
-                    }
-                    // 끄기 직전 쓰던 모델·effort. 없으면 키를 아예 안 넣는다 — 복원은
-                    // "없으면 플래그를 안 붙인다"라, 빈 문자열을 남기면 되살릴 때
-                    // `--model ''` 같은 게 나갈 위험만 는다.
-                    //
-                    // 모델도 대화 번호와 같은 이유로 하네스와 대조한다 — 어긋나면
-                    // effort 까지 함께 버린다. 두 값은 같은 자리의 한 벌이라, 모델만
-                    // 빼면 codex 자리에 claude 의 `ultracode` 같은 값이 남는다.
-                    if let Some((model, effort)) = agent_cfg
-                        .get(pane_id)
-                        .filter(|(m, _)| saved_model_fits_agent(saved_agent.as_deref(), m))
-                    {
-                        if !model.is_empty() {
-                            obj.insert("model".to_string(), serde_json::json!(model));
-                        }
-                        if !effort.is_empty() {
-                            obj.insert("effort".to_string(), serde_json::json!(effort));
-                        }
-                    }
-                    // 권한 모드 영속 — 복원 resume 이 이 플래그를 안 실으면 학생이
-                    // 전부 물어보는 모드로 깨어난다(2026-08-29 미니 재시작 실측:
-                    // 셋 다 auto — 라이브 재기동으로 복구했다).
-                    if Self::pane_bypass_on(ws, pane_id) {
-                        obj.insert("bypass".to_string(), serde_json::json!(true));
-                    }
-                    // Agent TUI는 새 화면을 다시 그리므로 옛 터미널 행을 넣지 않는다.
-                    // 일반 셸은 실제 PTY history를 저장해야 재시작 뒤 출력이 남는다.
-                    let restores_agent = obj
-                        .get("was_agent")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|agent| matches!(agent, "claude" | "codex" | "agy"))
-                        || obj
-                            .get("was_claude")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                        || obj
-                            .get("session_id")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|sid| !sid.is_empty());
-                    let sb = if restores_agent {
-                        Vec::new()
-                    } else {
-                        pty.get(pane_id)
-                            .map(|p| p.scrollback_text(SCROLLBACK_SAVE_MAX))
-                            .or_else(|| ws.panes.get(pane_id).map(scrollback_lines))
-                            .unwrap_or_default()
-                    };
-                    obj.insert("scrollback".to_string(), serde_json::json!(sb));
                 }
                 serde_json::json!({ "leaf": rec })
             }
@@ -6536,6 +6614,48 @@ impl App {
     /// agent, queue the command that brings it back. Returns the new pane id, or
     /// None if the PTY failed to start (caller then collapses the split).
     fn restore_leaf(&mut self, rec: &serde_json::Value, cols: u16, rows: u16) -> Option<String> {
+        let id = self.restore_surface(rec, cols, rows, None)?;
+        // pane 안에 겹쳐 둔 탭들(저장은 layout_to_json 의 `tabs`). leaf 와 **같은
+        // 길**로 되살린다 — 이어갈 대화가 실재하는지, 캐릭터를 되살릴지, 권한
+        // 모드를 승계할지가 한 함수에 있어야 둘이 어긋나지 않는다.
+        let tabs = rec
+            .get("tabs")
+            .and_then(|v| v.as_array())
+            .filter(|a| !a.is_empty());
+        if tabs.is_some() {
+            // ⚠️ 자리를 **먼저** 세운다. leaf 의 `PaneState` 는 첫 화면 프레임이 와야
+            // 생기는데(apply_screen_update), 그건 남의 스레드라 여기 올 때까지 아직
+            // 없을 수 있다 — 그러면 탭이 붙을 데가 없어 조용히 빠진다. `pane_mut` 이
+            // 기본 탭 하나로 자리를 세우고, 첫 프레임은 그 탭에 제 pid 를 채운다.
+            self.ws.lock().unwrap().pane_mut(&id);
+        }
+        for t in tabs.into_iter().flatten() {
+            self.restore_surface(t, cols, rows, Some(&id));
+        }
+        // 보던 탭으로 되돌린다. 하나가 못 살아났을 수 있으므로 실제 개수로 자른다.
+        if let Some(n) = rec.get("active_tab").and_then(|v| v.as_u64()) {
+            let mut ws = self.ws.lock().unwrap();
+            if let Some(pane) = ws.panes.get_mut(&id) {
+                pane.active_tab = (n as usize).min(pane.tabs.len().saturating_sub(1));
+                pane.tab_last_active = pane.active_tab;
+                pane.dirty = true;
+            }
+        }
+        Some(id)
+    }
+
+    /// leaf 하나, 또는 그 pane 안의 탭 하나를 되살린다.
+    ///
+    /// `tab_of` 가 있으면 바깥 pane 의 탭으로 앉는다. 웹·원격 갈래는 그때 건너뛴다
+    /// — 둘 다 자기 이름의 pane 을 새로 세우는 길이라, 탭으로 태우면 바깥 pane 옆에
+    /// 남의 자리가 하나 더 생긴다(탭 저장도 PTY 가 있는 탭만 싣는다).
+    fn restore_surface(
+        &mut self,
+        rec: &serde_json::Value,
+        cols: u16,
+        rows: u16,
+        tab_of: Option<&str>,
+    ) -> Option<String> {
         let saved = rec.get("pane_id").and_then(|v| v.as_str());
         // 저장된 번호를 되살릴 수 있는지는 alloc 과 **같은 기준**으로 본다 — `self.pty`
         // 만 보면 이미 복원된 미리보기 pane 의 번호를 빼앗는다.
@@ -6545,7 +6665,11 @@ impl App {
         // 웹 pane — PTY 를 안 띄운다. 그리드 자리(WebPane)만 앉히고 자식 창은
         // pending_web_hosts 로 미룬다: 복원 경로엔 ActiveEventLoop 가 없어
         // 창을 만들 수 없다(about_to_wait 의 drain 이 다음 턴에 만든다).
-        if let Some(url) = rec.get("web_url").and_then(|v| v.as_str()) {
+        if let Some(url) = rec
+            .get("web_url")
+            .and_then(|v| v.as_str())
+            .filter(|_| tab_of.is_none())
+        {
             let host_id = self.alloc_web_host_id();
             let mut tab = crate::PaneTab::default();
             tab.content = crate::PaneContent::Web(crate::WebPane {
@@ -6573,7 +6697,9 @@ impl App {
         // 내려갔거나 세션이 끝났으면(gone) 아래 일반 셸 복원으로 떨어진다 —
         // 저장해 둔 스크롤백이 자리를 지키고, toast 로 잃음을 알린다.
         if let (Some(base), Some(rpane)) = (
-            rec.get("remote_base").and_then(|v| v.as_str()),
+            rec.get("remote_base")
+                .and_then(|v| v.as_str())
+                .filter(|_| tab_of.is_none()),
             rec.get("remote_pane").and_then(|v| v.as_str()),
         ) {
             let rec_str = |k: &str| rec.get(k).and_then(|v| v.as_str()).map(str::to_string);
@@ -6758,8 +6884,44 @@ impl App {
         }
         let restores_agent = was_agent.is_some() || (saved_char.is_some() && session_id.is_some());
         let scrollback = restored_scrollback(rec, restores_agent);
+        // 탭은 PTY 를 띄우기 **전에** 자리를 잡아야 한다 — 출력은 `pid_to_pane` 으로
+        // 길을 찾으므로(apply_screen_update), 등록이 늦으면 첫 프레임이 바깥 pane 을
+        // 새로 만들어 탭이 pane 하나로 떨어져 나간다. 방은 바깥에서 물려받는다
+        // (spawn_new_tab 과 같은 대접 — 안 물려주면 collab 훅이 다른 slug 를 쓴다).
+        let room = match tab_of {
+            Some(outer) => {
+                let mut ws = self.ws.lock().unwrap();
+                ws.panes.get(outer)?; // 바깥 pane 이 없으면 탭도 없다
+                let room = ws.pane_room.get(outer).cloned();
+                ws.pid_to_pane.insert(id.clone(), outer.to_string());
+                if let Some(r) = room.clone() {
+                    ws.pane_room.insert(id.clone(), r);
+                }
+                let mut tab = crate::PaneTab::default();
+                tab.pid = Some(id.clone());
+                // 붙인 이름은 탭에 붙는다 — pane 은 활성 탭으로 Deref 하므로 pane 에
+                // 쓰면 지금 보이는 탭의 이름을 덮는다.
+                if let Some(t) = rec
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    tab.title = Some(t.to_string());
+                    tab.title_pinned = true;
+                }
+                if let Some(pane) = ws.panes.get_mut(outer) {
+                    pane.tabs.push(tab);
+                    pane.dirty = true;
+                }
+                room
+            }
+            None => None,
+        };
         let mut env = crate::proxy_env(&id);
-        env.extend(self.assign_character_env(&id, cwd.as_deref(), None));
+        if let Some(ref r) = room {
+            env.push(("KASATERM_ROOM".to_string(), r.clone()));
+        }
+        env.extend(self.assign_character_env(&id, cwd.as_deref(), room.as_deref()));
         // 저장된 학생을 **안 쓰기로 했으면 옛 세션 바인딩도 갈아 끼운다.** claude 는
         // `--resume <옛 sid>` 로 돌아오고, board 는 그 sid 의 바인딩을 최우선으로 읽어
         // pane 색·이름·프사를 정한다. 옛 이름이 남아 있으면 방금 새로 뽑은 학생을 매
@@ -6815,6 +6977,7 @@ impl App {
             .get("title")
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
+            .filter(|_| tab_of.is_none())
         {
             let mut ws = self.ws.lock().unwrap();
             let pane = ws.pane_mut(&id);
