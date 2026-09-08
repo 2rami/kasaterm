@@ -425,10 +425,8 @@ pub struct PtySession {
     /// (last_query_at, cached_name). Throttle the ps(1) shellout to
     /// ~500ms so a 60Hz render loop doesn't fork-exec on every frame.
     proc_cache: Arc<Mutex<(Instant, Option<String>)>>,
-    /// (last_query_at, is_agents_view). `claude agents`(에이전트 목록 뷰) 여부를
-    /// argv 로 판정한 캐시 — process_cmdline(ps) 비용을 proc_cache 와 같은 500ms
-    /// 로 스로틀. agents 뷰면 render 가 학생 대신 샬레 로고를 그린다.
-    agents_cache: Arc<Mutex<(Instant, bool)>>,
+    // argv scans must never hold up rendering, including the first lookup.
+    agents_cache: Arc<AgentsViewCache>,
     /// Shared Term so `scroll()` can drive alacritty's own scrollback
     /// (display_offset) from the main thread and re-snapshot. Using
     /// alacritty's scrollback — instead of a hand-rolled shift
@@ -775,10 +773,7 @@ impl PtySession {
                 Instant::now() - std::time::Duration::from_secs(1),
                 None,
             ))),
-            agents_cache: Arc::new(Mutex::new((
-                Instant::now() - std::time::Duration::from_secs(1),
-                false,
-            ))),
+            agents_cache: Arc::default(),
             term,
             screens_tx: tx,
             byte_taps,
@@ -868,10 +863,7 @@ impl PtySession {
                 Instant::now() - std::time::Duration::from_secs(1),
                 None,
             ))),
-            agents_cache: Arc::new(Mutex::new((
-                Instant::now() - std::time::Duration::from_secs(1),
-                false,
-            ))),
+            agents_cache: Arc::default(),
             term,
             screens_tx: tx,
             byte_taps,
@@ -975,10 +967,7 @@ impl PtySession {
                 Instant::now() - std::time::Duration::from_secs(1),
                 None,
             ))),
-            agents_cache: Arc::new(Mutex::new((
-                Instant::now() - std::time::Duration::from_secs(1),
-                false,
-            ))),
+            agents_cache: Arc::default(),
             term,
             screens_tx: tx,
             byte_taps,
@@ -1135,24 +1124,15 @@ impl PtySession {
     }
 
     /// `claude agents`(에이전트 목록 뷰)로 도는 pane 인지 — argv 서브커맨드로 판정.
-    /// render 가 이 pane 에 개별 학생 대신 샬레 로고를 그릴지 결정한다. process_cmdline
-    /// (ps) 은 비싸 active_process_name 과 같은 500ms 캐시. 대화(일반 claude/--resume)
-    /// 는 argv 에 `agents` 가 없어 false → render 가 배정 학생을 그린다(실시간 전환).
+    /// Cold and expired lookups return the last answer while one shared worker
+    /// refreshes argv; a slow process scan must not stall the GUI thread.
     pub fn is_claude_agents(&self) -> bool {
         let Some(pid) = self.shell_pid else {
             return false;
         };
-        let now = Instant::now();
-        let Ok(mut cache) = self.agents_cache.lock() else {
-            return false;
-        };
-        if now.duration_since(cache.0).as_millis() < 500 {
-            return cache.1;
-        }
-        cache.0 = now;
-        let val = claude_agents_argv(pid);
-        cache.1 = val;
-        val
+        self.agents_cache.get_or_refresh(Instant::now(), queue_agents_lookup, move || {
+            claude_agents_argv(pid)
+        })
     }
 
     /// True when the shell has a child process (a command/claude/build/editor is
@@ -4417,10 +4397,11 @@ pub fn process_table_shared() -> ProcessTable {
 /// --resume 은 실제 대화라 여기 해당 없음). argv 에 독립 토큰 `agents` 가 있으면
 /// true — 일반 대화 argv 엔 없다.
 fn claude_agents_argv(shell_pid: u32) -> bool {
-    let claude_pid = process_table()
-        .into_iter()
+    let table = process_table_shared();
+    let claude_pid = table
+        .iter()
         .filter(|(_, ppid, name)| *ppid == shell_pid && name.contains("claude"))
-        .map(|(pid, _, _)| pid)
+        .map(|(pid, _, _)| *pid)
         .max();
     let Some(pid) = claude_pid else {
         return false;
@@ -4431,7 +4412,78 @@ fn claude_agents_argv(shell_pid: u32) -> bool {
     // attach 도 뷰 — agents 목록과 마찬가지로 "남의 세션을 보는 pane"이라, 학생 표시를
     // 파싱 결과로만 하는 게이트(display_pane_char)가 같은 판정을 공유한다. 일반 세션
     // 부팅은 --session-id/--resume/persona 가 붙어 이 토큰이 나올 일이 없다.
+    argv_is_agents_view(&argv)
+}
+
+fn argv_is_agents_view(argv: &str) -> bool {
     argv.split_whitespace().any(|t| t == "agents" || t == "attach")
+}
+
+type AgentsLookup = Box<dyn FnOnce() + Send>;
+
+fn queue_agents_lookup(job: AgentsLookup) -> bool {
+    static WORKER: Mutex<Option<Sender<AgentsLookup>>> = Mutex::new(None);
+    let Ok(mut worker) = WORKER.try_lock() else { return false };
+    if worker.is_none() {
+        let (tx, rx) = crossbeam_channel::unbounded::<AgentsLookup>();
+        // One sleeping worker avoids a thread per pane per refresh and lets the
+        // existing global argv cache serve a whole batch of panes from one scan.
+        if std::thread::Builder::new().name("agents-view-cache".into()).spawn(move || {
+            for job in rx {
+                job();
+            }
+        }).is_err() {
+            return false;
+        }
+        *worker = Some(tx);
+    }
+    if worker.as_ref().is_some_and(|tx| tx.send(job).is_ok()) {
+        true
+    } else {
+        *worker = None;
+        false
+    }
+}
+
+#[derive(Default)]
+struct AgentsViewCache {
+    value: std::sync::atomic::AtomicBool,
+    refresh: Mutex<(Option<Instant>, bool)>,
+}
+
+impl AgentsViewCache {
+    fn get_or_refresh(
+        self: &Arc<Self>,
+        now: Instant,
+        schedule: impl FnOnce(AgentsLookup) -> bool,
+        lookup: impl FnOnce() -> bool + Send + 'static,
+    ) -> bool {
+        use std::sync::atomic::Ordering;
+        let previous = self.value.load(Ordering::Acquire);
+        let Ok(mut state) = self.refresh.try_lock() else { return previous };
+        if state.1 || state.0.is_some_and(|at| now.saturating_duration_since(at).as_millis() < 500) {
+            return previous;
+        }
+        state.1 = true;
+        drop(state);
+        let weak = Arc::downgrade(self);
+        if !schedule(Box::new(move || {
+            let Some(cache) = weak.upgrade() else { return };
+            // A failed scan must not strand the in-flight flag or kill the shared worker.
+            let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(lookup));
+            if let Ok(mut state) = cache.refresh.lock() {
+                if let Ok(value) = value {
+                    cache.value.store(value, Ordering::Release);
+                }
+                *state = (Some(Instant::now()), false);
+            };
+        })) {
+            if let Ok(mut state) = self.refresh.lock() {
+                *state = (Some(now), false);
+            }
+        }
+        previous
+    }
 }
 
 /// The full command line (argv, space-joined) of a single process, or None if
@@ -4607,6 +4659,117 @@ pub fn process_env_var(_pid: u32, _key: &str) -> Option<String> {
 #[cfg(not(unix))]
 pub fn process_env_vars(_pid: u32, _keys: &[&str]) -> std::collections::HashMap<String, String> {
     std::collections::HashMap::new()
+}
+
+#[cfg(test)]
+mod agents_view_cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn cold_and_expired_reads_return_without_running_lookup_and_deduplicate() {
+        let cache = Arc::new(AgentsViewCache::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut jobs = VecDeque::new();
+        let now = Instant::now();
+        for _ in 0..20 {
+            let calls = calls.clone();
+            assert!(!cache.get_or_refresh(now, |job| { jobs.push_back(job); true }, move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                true
+            }));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(jobs.len(), 1);
+        jobs.pop_front().unwrap()();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(cache.get_or_refresh(Instant::now(), |_| panic!("fresh cache scheduled work"), || false));
+
+        let expired = Instant::now() + std::time::Duration::from_secs(1);
+        for _ in 0..20 {
+            let calls = calls.clone();
+            assert!(cache.get_or_refresh(expired, |job| { jobs.push_back(job); true }, move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                false
+            }));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(jobs.len(), 1);
+        jobs.pop_front().unwrap()();
+        assert!(!cache.get_or_refresh(Instant::now(), |_| panic!("fresh cache scheduled work"), || true));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn busy_publication_lock_returns_previous_value() {
+        let cache = Arc::new(AgentsViewCache::default());
+        cache.value.store(true, Ordering::Release);
+        let _guard = cache.refresh.lock().unwrap();
+        assert!(cache.get_or_refresh(Instant::now(), |_| panic!("lock held"), || false));
+    }
+
+    #[test]
+    fn shared_worker_can_block_without_blocking_reads() {
+        let cache = Arc::new(AgentsViewCache::default());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        assert!(!cache.get_or_refresh(Instant::now(), queue_agents_lookup, move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            true
+        }));
+        started_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        for _ in 0..100 {
+            assert!(!cache.get_or_refresh(Instant::now(), |_| panic!("duplicate job"), || false));
+        }
+        release_tx.send(()).unwrap();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        assert!(queue_agents_lookup(Box::new(move || { finished_tx.send(()).unwrap(); })));
+        finished_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(cache.value.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn dropped_pane_skips_queued_scan() {
+        let cache = Arc::new(AgentsViewCache::default());
+        let mut pending = None;
+        cache.get_or_refresh(Instant::now(), |job| { pending = Some(job); true }, || panic!("pane gone"));
+        drop(cache);
+        pending.unwrap()();
+    }
+
+    #[test]
+    fn schedule_failure_can_retry_after_ttl() {
+        let cache = Arc::new(AgentsViewCache::default());
+        let now = Instant::now();
+        assert!(!cache.get_or_refresh(now, |_| false, || true));
+        assert!(!cache.refresh.lock().unwrap().1);
+        let mut pending = None;
+        cache.get_or_refresh(now + std::time::Duration::from_secs(1), |job| { pending = Some(job); true }, || true);
+        pending.unwrap()();
+        assert!(cache.value.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn failed_lookup_keeps_previous_answer_and_clears_inflight() {
+        let cache = Arc::new(AgentsViewCache::default());
+        cache.value.store(true, Ordering::Release);
+        let mut pending = None;
+        assert!(cache.get_or_refresh(Instant::now(), |job| { pending = Some(job); true }, || panic!("scan failed")));
+        pending.unwrap()();
+        assert!(cache.value.load(Ordering::Acquire));
+        assert!(!cache.refresh.lock().unwrap().1);
+    }
+
+    #[test]
+    fn agents_and_attach_keep_existing_token_classification() {
+        for argv in ["claude agents", "/bin/claude attach abc", "claude --verbose agents"] {
+            assert!(argv_is_agents_view(argv));
+        }
+        for argv in ["claude", "claude --resume abc", "claude --session-id abc", "claude agents-extra", "claude --agents"] {
+            assert!(!argv_is_agents_view(argv));
+        }
+    }
 }
 
 #[cfg(test)]
