@@ -118,6 +118,27 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn(b"innerHTML", source)
         self.assertIn(b"textContent", source)
 
+    def test_megabyte_transcripts_do_not_expand_native_summary_response(self):
+        giant = "긴 원문 " + "x" * (1024 * 1024) + "PRIVATE_FULL_TRANSCRIPT_END"
+        for index in range(7):
+            result = self.store.ingest(f"long-{index}", [
+                {"event_key": "u", "kind": "user", "text": giant, "created_at": f"2026-09-08T02:0{index}:00Z"},
+                {"event_key": "f", "kind": "assistant_final", "text": giant},
+            ], len(giant), {"project": self.project})
+            self.store.set_reported_status(result["last_request_id"], "reported_done", {"long_evidence": giant})
+        status, _, raw = self.call("/api/summary")
+        summary = json.loads(raw)
+        self.assertEqual(status, 200)
+        self.assertLess(len(raw), 8192)
+        self.assertEqual(len(summary["needs_confirmation"]), 5)
+        for row in [summary["latest"]] + summary["needs_confirmation"]:
+            self.assertEqual(set(row), {"id", "summary", "prompt_preview", "created_at", "reported_status", "applied_status"})
+        self.assertNotIn(b"PRIVATE_FULL_TRANSCRIPT_END", raw)
+        _, _, detail = self.call(f"/api/requests/{result['last_request_id']}")
+        self.assertEqual(json.loads(detail)["prompt"], giant)
+        _, _, answer = self.call("/api/ask?q=restart")
+        self.assertLess(len(answer), 2048)
+
 
 if __name__ == "__main__":
     unittest.main()

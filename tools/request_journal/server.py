@@ -29,6 +29,21 @@ def request_view(row):
     return result
 
 
+def summary_view(row):
+    if row is None:
+        return None
+    # The native pet has a small response budget; transcript evidence belongs
+    # exclusively to the full request endpoint, never this discovery summary.
+    return {
+        "id": str(row.get("id", ""))[:128],
+        "summary": str(row.get("summary", ""))[:120],
+        "prompt_preview": str(row.get("prompt", ""))[:80],
+        "created_at": str(row.get("created_at", ""))[:64],
+        "reported_status": str(row.get("reported_status", "received"))[:32],
+        "applied_status": str(row.get("applied_status", "unknown"))[:32],
+    }
+
+
 def waiting_summary(rows):
     restart = [row for row in rows if row.get("applied_status") == "restart_required"]
     pending = [row for row in rows if row.get("applied_status") == "pending"]
@@ -119,7 +134,7 @@ class Handler(BaseHTTPRequestHandler):
                     question = query.get("q", [""])[0][:300]
                     answer = waiting if any(word in question for word in ("남", "대기", "아직", "재시작", "wait", "left", "restart")) else text
                     return self.reply(200, {"version": 1, "project": project, "text": answer[:250], "url": url})
-                return self.reply(200, {"version": 1, "project": project, "counts": counts, "latest": rows[0] if rows else None, "needs_confirmation": pending, "text": text[:250], "waiting_text": waiting[:250], "url": url, "summarizer": self.server.summarizer_status})
+                return self.reply(200, {"version": 1, "project": project, "counts": counts, "latest": summary_view(rows[0]) if rows else None, "needs_confirmation": [summary_view(row) for row in pending[:5]], "text": text[:250], "waiting_text": waiting[:250], "url": url, "summarizer": self.server.summarizer_status})
             if route.startswith("/api/requests/") and "/" not in route[len("/api/requests/"):]:
                 row = store.get_request(route.rsplit("/", 1)[1])
                 if not row or row.get("project") != project:

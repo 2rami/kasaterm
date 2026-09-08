@@ -59,8 +59,12 @@ and `X-Journal-Request: 1`. Bodies are limited to 64 KiB.
 The list accepts `limit` (1–100), `before` (opaque request ID),
 `reported_status`, and `project`. The project must match the service's configured
 project; one running service does not expose other projects from its database.
-The summary's `counts` comes from `Store.stats`; `needs_confirmation` is the
-latest 50 requests with a completion report but no confirmed application. This
+The summary's `counts` comes from `Store.stats`; `needs_confirmation` contains
+at most 5 matches from the latest 50 requests with a completion report but no
+confirmed application. `latest` and these matches are bounded objects containing
+only `id`, `summary` (120 characters), `prompt_preview` (80 characters),
+`created_at`, `reported_status`, and `applied_status`. Full prompts, final reports,
+and update evidence remain available from `/api/requests/<id>`. This
 endpoint is intended for later native pet integration; it sends no pet messages.
 It also returns `text` and `waiting_text` (each at most 250 characters), a `url`
 for the detailed journal, and `summarizer` provider status. `/api/ask` chooses
