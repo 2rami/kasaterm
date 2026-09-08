@@ -3913,17 +3913,39 @@ pub(crate) fn find_standing_anchor(
     Some((anchor, stand_left_col(rows, anchor, cols)?))
 }
 
-/// 앵커 행이 정해진 뒤의 가로 자리 — 그 행에 이미 뭐가 떠 있으면(effort 칩·
-/// context 경고) 그 왼쪽으로 비켜선다. 하네스마다 세로 앵커를 찾는 법은 다르지만
-/// 가로 규칙은 같아서 여기 한 곳에만 둔다.
+/// The entire sprite must fit in whitespace, including the rows above its feet.
+/// Checking only the anchor row let a wrapped message end hide behind its body.
 pub(crate) fn stand_left_col(rows: &[Vec<GridCell>], anchor: usize, cols: usize) -> Option<f32> {
-    let first = rows[anchor].iter().position(|c| !matches!(c.ch, ' ' | '\0'));
+    use unicode_width::UnicodeWidthChar;
+    let anchor_row = rows.get(anchor)?;
+    let first = anchor_row
+        .iter()
+        .position(|c| !c.hidden && !matches!(c.ch, ' ' | '\0'));
     let right_c = match first {
         Some(f) => f as f32 - 1.5,
         None => cols as f32 - 1.0,
     };
-    let left_c = right_c - STAND_CELLS;
-    (left_c > 2.0).then_some(left_c)
+    let mut occupied = vec![false; cols];
+    let first_row = (anchor + 1).saturating_sub(INPUT_STANDING_ROWS);
+    for row in &rows[first_row..=anchor] {
+        for (col, cell) in row.iter().enumerate().take(cols) {
+            if cell.hidden || matches!(cell.ch, ' ' | '\0') {
+                continue;
+            }
+            let end = (col + cell.ch.width().unwrap_or(1).max(1)).min(cols);
+            occupied[col..end].fill(true);
+        }
+    }
+    let mut left = right_c - STAND_CELLS;
+    while left > 2.0 {
+        let start = left.floor() as usize;
+        let end = (left + STAND_CELLS).ceil() as usize;
+        if end <= cols && occupied[start..end].iter().all(|cell| !cell) {
+            return Some(left);
+        }
+        left -= 1.0;
+    }
+    None
 }
 
 /// 테두리 없는 입력창(`PromptBox::Filled`, codex) 위 standing 앵커.
@@ -3947,6 +3969,24 @@ pub(crate) fn find_filled_standing_anchor(
 
 /// standing 학생이 차지하는 가로 칸수 — 앵커 계산과 그리기가 같은 값을 써야 한다.
 pub(crate) const STAND_CELLS: f32 = 4.0;
+
+pub(crate) fn standing_slot_rect(
+    anchor: usize,
+    left_col: f32,
+    rows: usize,
+    origin: (f32, f32),
+    cell: (f32, f32),
+) -> (f32, f32, f32, f32) {
+    // Near the viewport top, keep the feet on the checked anchor row rather
+    // than shifting a full-height sprite down onto the input beneath it.
+    let height = INPUT_STANDING_ROWS.min(anchor + 1).min(rows) as f32 * cell.1;
+    (
+        origin.0 + left_col * cell.0,
+        origin.1 + (anchor + 1) as f32 * cell.1 - height,
+        STAND_CELLS * cell.0,
+        height,
+    )
+}
 
 /// Claude Code 라이브 스피너("✻ Verbing…" 별 dingbat, 또는 braille) 위치 감지 —
 /// `rows_show_working`(input.rs)과 같은 신호를 행·열 좌표로 돌려준다. 마지막
@@ -6723,6 +6763,41 @@ mod prompt_box_tests {
     /// (U+FFFC)에서 출발할 수 없어서다 — `[tui] status_line` 은 정해진 세그먼트
     /// 이름 배열이라 모르는 항목을 넣으면 `Ignored invalid status line item` 으로
     /// 버려진다(0.146.0 실측). 앵커가 입력행에 직접 매이는지 못박는다.
+    #[test]
+    fn standing_avoids_message_text_above_its_anchor_row() {
+        let mut rows = vec![vec![GridCell::blank(); 59]; 6];
+        for (cell, ch) in rows[4][52..59].iter_mut().zip("3156d31".chars()) {
+            cell.ch = ch;
+        }
+        let left = stand_left_col(&rows, 5, 59).expect("room left of the message");
+        assert_eq!(left, 48.0);
+        assert!(left + STAND_CELLS <= 52.0);
+        let rect = standing_slot_rect(5, left, 41, (0.0, 0.0), (6.506, 17.540));
+        assert!(rect.0 + rect.2 <= 52.0 * 6.506 + 0.001);
+        assert!((rect.1 / 17.540 - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn standing_checks_wide_glyph_spacers_and_skips_a_filled_region() {
+        let mut rows = vec![vec![GridCell::blank(); 56]; 3];
+        rows[0][50].ch = '가';
+        assert_eq!(stand_left_col(&rows, 2, 56), Some(46.0));
+        for cell in &mut rows[1] {
+            cell.ch = 'x';
+        }
+        assert_eq!(stand_left_col(&rows, 2, 56), None);
+    }
+
+    #[test]
+    fn standing_top_clip_does_not_push_its_feet_into_the_input() {
+        for anchor in [0, 1, 2, 5] {
+            let rect = standing_slot_rect(anchor, 10.0, 41, (4.0, 8.0), (9.0, 18.0));
+            assert!(rect.1 >= 8.0);
+            assert_eq!(rect.1 + rect.3, 8.0 + (anchor + 1) as f32 * 18.0);
+            assert_eq!(rect.3 / 18.0, INPUT_STANDING_ROWS.min(anchor + 1) as f32);
+        }
+    }
+
     #[test]
     fn codex_student_stands_on_the_row_above_the_input() {
         let filled = |s: &str| {

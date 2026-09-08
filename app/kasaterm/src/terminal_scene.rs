@@ -773,6 +773,36 @@ mod visual_scene_tests {
     }
 
     #[test]
+    fn visual_scene_standing_clearance_survives_web_cell_ratio_changes() {
+        let pane = "%standing-clearance";
+        let _subscription = visual::subscribe(pane);
+        let mut rows = vec![vec![GridCell::blank(); 59]; 6];
+        for (cell, ch) in rows[4][52..59].iter_mut().zip("3156d31".chars()) {
+            cell.ch = ch;
+        }
+        let left = stand_left_col(&rows, 5, 59).unwrap();
+        for cell in [(9.0, 18.0), (6.506, 17.540)] {
+            let scene = TerminalComposition {
+                rows: rows.clone(),
+                standing_slots: vec![(
+                    "arona",
+                    "idle",
+                    standing_slot_rect(5, left, 41, (0.0, 0.0), cell),
+                )],
+                ..Default::default()
+            };
+            let overlays = scene
+                .web_overlays(pane, 59, 41, cell, 1234, &mut VisualPump::default())
+                .unwrap();
+            let overlay = &overlays[0];
+            assert!(overlay.rect.x + overlay.rect.width <= 52.001);
+            assert!((overlay.rect.y - 3.0).abs() < 0.001);
+            assert_eq!(overlay.fit, "contain");
+            assert_eq!(overlay.anchor, "bottom");
+        }
+    }
+
+    #[test]
     fn visual_scene_gpu_fit_preserves_aspect_and_bottom_anchor() {
         for slot in [(0.0, 0.0, 20.0, 60.0), (4.0, 8.0, 100.0, 20.0)] {
             let (x, y, w, h) = gpu::fit_terminal_art(slot, (96, 96), 2.0, true);
@@ -1638,7 +1668,6 @@ impl App {
             {
                 if !pet_busy {
                     if let Some((anchor, left_c)) = stand_anchor {
-                        let h = (INPUT_STANDING_ROWS as f32 * sch).min(rows_now as f32 * sch);
                         {
                             // 턴 완료 직후 ~1.8s(notify_flash)는 양팔 만세
                             // cheer, 그 뒤로 계속 대기하면 손 흔들며 기다리는
@@ -1660,11 +1689,12 @@ impl App {
                                 standing_slots.push((
                                     slug,
                                     motion,
-                                    (
-                                        body_left + left_c * scw,
-                                        (body_top + (anchor + 1) as f32 * sch - h).max(body_top),
-                                        STAND_CELLS * scw,
-                                        h,
+                                    standing_slot_rect(
+                                        anchor,
+                                        left_c,
+                                        rows_now,
+                                        (body_left, body_top),
+                                        (scw, sch),
                                     ),
                                 ));
                             }
