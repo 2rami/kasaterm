@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "app/kasaterm",
     "app/kasapet",
+    "crates/kasa-pet-config",
     "crates/kasa-socket",
     "crates/kasa-mcp",
     "crates/kasa-cells",
@@ -37,4 +38,3 @@ kasa-bridge = { path = "crates/kasa-bridge" }
 # with no perceptible runtime cost.
 [profile.release.package.kasa-mcp]
 opt-level = 0
-
