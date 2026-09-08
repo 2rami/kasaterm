@@ -6285,6 +6285,62 @@ fn codex_state_db_path() -> Option<std::path::PathBuf> {
     Some(kasa_socket::home_dir()?.join(".codex/state_5.sqlite"))
 }
 
+/// codex 상태 db 의 죽은 rollout 경로를 실체 자리로 고친다. 몇 줄을 고쳤는지 돌려준다.
+///
+/// shim 은 pane 마다 CODEX_HOME 을 GUI pid 이름의 임시 폴더 아래 세우고, codex 는
+/// `threads.rollout_path` 에 **그 경로**를 적는다. 앱을 껐다 켜면 pid 가 바뀌어 그
+/// 폴더가 없어지고, codex 0.153 부터는 `resume <id>` 가 이 열을 믿어 「no rollout
+/// found」로 죽는다(2026-09-08 실측 — 코덱스 pane 여섯이 재시작에 전부 셸로 떨어졌다).
+/// 실체는 `sessions` 심볼릭이 가리키는 `~/.codex/sessions/…` 에 그대로 있으니, 사라진
+/// shim 경로만 그 자리로 옮겨 적는다. 존재하는 경로·실체가 없는 줄은 손대지 않는다.
+pub(crate) fn codex_repair_thread_paths() -> usize {
+    let (Some(db), Some(home)) = (codex_state_db_path(), kasa_socket::home_dir()) else {
+        return 0;
+    };
+    codex_repair_thread_paths_at(&db, &home.join(".codex/sessions"))
+}
+
+fn codex_repair_thread_paths_at(db: &std::path::Path, sessions: &std::path::Path) -> usize {
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return 0;
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(300));
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, rollout_path FROM threads WHERE rollout_path LIKE '%/kasaterm-shim-%'",
+    ) else {
+        return 0;
+    };
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map(|it| it.flatten().collect())
+        .unwrap_or_default();
+    drop(stmt);
+    let mut fixed = 0;
+    for (id, path) in rows {
+        if std::path::Path::new(&path).exists() {
+            continue;
+        }
+        let Some(at) = path.find("/sessions/") else { continue };
+        let real = sessions.join(&path[at + "/sessions/".len()..]);
+        if !real.exists() {
+            continue;
+        }
+        if conn
+            .execute(
+                "UPDATE threads SET rollout_path = ?1 WHERE id = ?2",
+                rusqlite::params![real.to_string_lossy().as_ref(), id],
+            )
+            .is_ok()
+        {
+            fixed += 1;
+        }
+    }
+    fixed
+}
+
 fn newest_time(
     times: impl IntoIterator<Item = Option<std::time::SystemTime>>,
 ) -> Option<std::time::SystemTime> {
@@ -7390,4 +7446,39 @@ fn rects_of(layout: &Layout) -> Vec<PaneRect> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod codex_repair_tests {
+    use super::codex_repair_thread_paths_at;
+
+    #[test]
+    fn 죽은_shim_경로만_실체_자리로_옮긴다() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-codex-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sessions = dir.join("sessions/2026/09/08");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("rollout-a.jsonl"), "x").unwrap();
+        let alive = dir.join("alive/sessions/2026/09/08");
+        std::fs::create_dir_all(&alive).unwrap();
+        std::fs::write(alive.join("rollout-b.jsonl"), "y").unwrap();
+        let db = dir.join("state.sqlite");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)").unwrap();
+        let dead = "/tmp/kasaterm-shim-1/codex-home-%3/sessions/2026/09/08/rollout-a.jsonl";
+        // 실재하는 경로는 이름에 shim 이 들어도 안 건드린다.
+        let live_real = alive.join("rollout-b.jsonl").to_string_lossy().into_owned();
+        let gone = "/tmp/kasaterm-shim-2/codex-home-%4/sessions/2026/09/08/rollout-none.jsonl";
+        conn.execute("INSERT INTO threads VALUES ('a', ?1), ('b', ?2), ('c', ?3)", rusqlite::params![dead, live_real, gone]).unwrap();
+        drop(conn);
+        assert_eq!(codex_repair_thread_paths_at(&db, &dir.join("sessions")), 1);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let a: String = conn.query_row("SELECT rollout_path FROM threads WHERE id='a'", [], |r| r.get(0)).unwrap();
+        assert_eq!(a, sessions.join("rollout-a.jsonl").to_string_lossy());
+        let b: String = conn.query_row("SELECT rollout_path FROM threads WHERE id='b'", [], |r| r.get(0)).unwrap();
+        assert_eq!(b, live_real, "실재하는 경로는 그대로");
+        let c: String = conn.query_row("SELECT rollout_path FROM threads WHERE id='c'", [], |r| r.get(0)).unwrap();
+        assert_eq!(c, gone, "실체가 없으면 손대지 않는다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

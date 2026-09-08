@@ -6255,6 +6255,12 @@ impl App {
     }
 
     pub(crate) fn restore_session_state(&mut self, state: &serde_json::Value) {
+        // codex 는 재시작마다 옛 pid 의 pane 홈 경로를 물고 있어 `resume` 이 죽는다 —
+        // 되살리기 전에 그 색인을 실체 자리로 고친다(2026-09-08, 아래 함수 주석).
+        let fixed = crate::socket::codex_repair_thread_paths();
+        if fixed > 0 {
+            eprintln!("[restore] codex rollout 경로 {fixed}줄을 실체 자리로 고침");
+        }
         // 복원 직전 저장본을 곁에 남긴다 — 복원에서 창이 빠졌을 때(2026-08-30
         // 「재시작했는데 세션이 없어진 것 같다」, %0 미도리가 소리 없이 빠짐)
         // 무엇이 저장돼 있었는지 되짚을 증거가 이것뿐이다. 원본 session.json 은
@@ -8504,6 +8510,9 @@ fn saved_effort(rec: &serde_json::Value) -> Option<&str> {
 ///   pane 별 CODEX_HOME 은 GUI pid 별이라 재시작이면 통째로 없어지는데, `sessions` 가
 ///   `~/.codex/sessions` 심볼릭이라 실체가 남고 codex 가 거기서 찾아낸다(홈을 치우고
 ///   다른 pane 홈에서 resume 해 첫 질문까지 그대로 복원되는 것을 확인).
+///   ⚠️ codex 0.153 부터는 상태 db 의 `rollout_path`(옛 pane 홈 경로)를 먼저 믿어
+///   그 자리가 없으면 죽는다 — `restore_session_state` 가 되살리기 전에
+///   `codex_repair_thread_paths` 로 그 열을 실체 자리로 고친다(2026-09-08).
 /// - 세션 id 는 `pane_claude_sid`(PID→열린 rollout 결속)로 들어온다 — rollout
 ///   파일명에서 uuid 를 떼어낸 값이다. argv 로는 fresh thread를 못 집는다.
 /// - `resume --last` 는 쓰지 않는다. 그건 미러된 `~/.codex/sessions` 전체에서 최신 하나를
