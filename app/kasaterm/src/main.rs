@@ -3997,6 +3997,15 @@ fn is_git_repo(p: &std::path::Path) -> bool {
 /// 들고 다니다 (가) 어느 창인지 몰라 0% 를 이상하게 여기지 않았고 (나) upstream 이
 /// 막혀 며칠 묵은 값을 보여줘도 화면이 똑같아 보였기 때문이다(거노 2026-08-05).
 #[derive(Clone, PartialEq)]
+pub(crate) struct UsageWindowBadge {
+    pub(crate) label: String,
+    pub(crate) pct: f32,
+    /// 이 창 자체가 풀리는 시각. 다른 창의 시각으로 메우면 모델별 한도를 잘못
+    /// 안내하므로, 응답에 없으면 None을 그대로 둔다.
+    pub(crate) resets_at: Option<u64>,
+}
+
+#[derive(Clone, PartialEq)]
 pub(crate) struct UsageBadge {
     pub(crate) pct: f32,
     /// `5h`/`7d`/`7d <모델>` — `socket::usage_pressure` 가 `limits[]` 에서 고른 라벨.
@@ -4011,10 +4020,9 @@ pub(crate) struct UsageBadge {
     /// 그 창이 풀리는 시각(epoch 초). 화면은 이걸 **남은 시간**으로 바꿔 그린다 —
     /// 퍼센트만으로는 "지금 아껴야 하나 곧 풀리나"를 못 고른다(거노 2026-08-07).
     pub(crate) resets_at: Option<u64>,
-    /// 모든 한도 창 — `(라벨, %)`, 5시간이 앞. 위의 `pct`/`label` 은 **가장 급한**
-    /// 창이라 자동 전환 판정에 쓰고, 이건 화면이 5시간과 주간을 나란히 그리는 데
-    /// 쓴다. 둘을 한 필드로 합치면 그 두 물음 중 하나가 반드시 틀린 답을 받는다.
-    pub(crate) windows: Vec<(String, f32)>,
+    /// 모든 한도 창. 5시간이 앞이고, 모델별 주간 창까지 각자 초기화 시각을 보존한다.
+    /// 위의 `pct`/`label`은 자동 전환용 최고 압박이고, 이 목록은 상세 화면용이다.
+    pub(crate) windows: Vec<UsageWindowBadge>,
 }
 
 /// `resets_at` → `2h13m` / `47m` / `곧`. 남은 시간이 없으면 None(자리 자체를 비운다).

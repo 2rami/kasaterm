@@ -17,9 +17,22 @@ use std::time::{Duration, Instant};
 /// 한 창의 한도. `(창 길이 분, 쓴 비율, 풀리는 시각)`.
 pub(crate) type Window = (u32, f32, Option<i64>);
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NamedWindow {
+    /// 서버 `limitName` 원문. 모델 이름으로 추측하거나 바꾸지 않는다.
+    pub name: String,
+    pub minutes: u32,
+    pub pct: f32,
+    pub resets_at: Option<i64>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct CodexLimits {
     pub windows: Vec<Window>,
+    /// `rateLimitsByLimitId`의 이름 달린 추가 bucket. 기본 하단에는 숨고 상세만 쓴다.
+    pub named_windows: Vec<NamedWindow>,
+    /// 마지막 조회가 실패해 이전 성공값을 보여 주는 중이다.
+    pub stale: bool,
     /// 구독 플랜(`pro` 등). 같은 퍼센트도 플랜에 따라 뜻이 다르다.
     pub plan: Option<String>,
     /// 한도 초기화권 잔액 — 코덱스가 문자열로 준다("0"·"2").
@@ -74,16 +87,48 @@ fn store_result(
     if started_generation != current_generation {
         return false;
     }
-    let changed = limits.is_some();
-    cached.insert(
-        account_id.to_string(),
-        CachedLimits {
-            at: Instant::now(),
-            limits,
-            probe: false,
+    let now = Instant::now();
+    match limits {
+        Some(mut limits) => {
+            limits.stale = false;
+            cached.insert(
+                account_id.to_string(),
+                CachedLimits {
+                    at: now,
+                    limits: Some(limits),
+                    probe: false,
+                },
+            );
+            true
+        }
+        None => match cached.get_mut(account_id) {
+            Some(previous) => {
+                previous.at = now;
+                previous.probe = false;
+                let changed = previous
+                    .limits
+                    .as_ref()
+                    .is_some_and(|limits| !limits.stale);
+                if let Some(limits) = previous.limits.as_mut() {
+                    limits.stale = true;
+                }
+                changed
+            }
+            None => {
+                // 값이 없는 실패도 기록한다. 화면은 이를 첫 조회 전과 구분하고,
+                // 폴러는 메뉴가 열려 있어도 같은 로그아웃 슬롯을 5초마다 안 띄운다.
+                cached.insert(
+                    account_id.to_string(),
+                    CachedLimits {
+                        at: now,
+                        limits: None,
+                        probe: false,
+                    },
+                );
+                true
+            }
         },
-    );
-    changed
+    }
 }
 
 /// 마지막으로 읽은 값. **현재 고른 계정에서 읽은 값만** 내준다.
@@ -102,6 +147,15 @@ pub(crate) fn snapshot_for(account_id: &str) -> Option<CodexLimits> {
     cached_snapshot(&cached, account_id)
 }
 
+/// 이 계정에 한 번이라도 물어봤나. `snapshot_for == None`만으로는 아직 조회 전과
+/// 조회 실패를 가를 수 없어 설정 카드가 영원히 「확인 중」으로 남는다.
+pub(crate) fn attempted_for(account_id: &str) -> bool {
+    cache()
+        .lock()
+        .ok()
+        .is_some_and(|cached| cached.contains_key(account_id))
+}
+
 /// 화면 리그가 계정별 그래프를 확인할 때만 쓰는 값 주입구.
 pub(crate) fn seed_for_probe(account_id: &str, windows: Vec<Window>) -> bool {
     if std::env::var_os("KASATERM_AUTOPORTPOP_MS").is_none() {
@@ -116,11 +170,36 @@ pub(crate) fn seed_for_probe(account_id: &str, windows: Vec<Window>) -> bool {
             at: Instant::now(),
             limits: Some(CodexLimits {
                 windows,
+                stale: std::env::var_os("KASATERM_TEST_USAGE_STALE").is_some(),
                 ..Default::default()
             }),
             probe: true,
         },
     );
+    true
+}
+
+/// 화면 리그가 서버 이름을 보존한 추가 bucket까지 상세 카드에 심는 입구.
+pub(crate) fn seed_named_for_probe(account_id: &str, windows: Vec<NamedWindow>) -> bool {
+    if std::env::var_os("KASATERM_AUTOPORTPOP_MS").is_none() {
+        return false;
+    }
+    let Some(mut cached) = cache().lock().ok() else {
+        return false;
+    };
+    let entry = cached
+        .entry(account_id.to_string())
+        .or_insert_with(|| CachedLimits {
+            at: Instant::now(),
+            limits: Some(CodexLimits::default()),
+            probe: true,
+        });
+    entry.at = Instant::now();
+    entry.probe = true;
+    entry
+        .limits
+        .get_or_insert_with(CodexLimits::default)
+        .named_windows = windows;
     true
 }
 
@@ -276,8 +355,51 @@ fn parse(result: &serde_json::Value) -> Option<CodexLimits> {
     }
     // 짧은 창이 왼쪽 — 「지금 당장」이 먼저 읽혀야 한다.
     windows.sort_by_key(|(m, _, _)| *m);
+    let mut named_windows = Vec::new();
+    if let Some(buckets) = result
+        .get("rateLimitsByLimitId")
+        .and_then(|value| value.as_object())
+    {
+        for (id, bucket) in buckets {
+            if id == "codex" {
+                continue;
+            }
+            let Some(name) = bucket
+                .get("limitName")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            for key in ["primary", "secondary"] {
+                let Some(window) = bucket.get(key).filter(|value| value.is_object()) else {
+                    continue;
+                };
+                let Some(pct) = window.get("usedPercent").and_then(|value| value.as_f64()) else {
+                    continue;
+                };
+                let minutes = window
+                    .get("windowDurationMins")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0) as u32;
+                if minutes == 0 {
+                    continue;
+                }
+                named_windows.push(NamedWindow {
+                    name: name.to_string(),
+                    minutes,
+                    pct: pct as f32,
+                    resets_at: window.get("resetsAt").and_then(|value| value.as_i64()),
+                });
+            }
+        }
+    }
+    named_windows.sort_by(|a, b| a.name.cmp(&b.name).then(a.minutes.cmp(&b.minutes)));
     Some(CodexLimits {
         windows,
+        named_windows,
+        stale: false,
         plan: rl
             .get("planType")
             .and_then(|v| v.as_str())
@@ -336,6 +458,34 @@ mod tests {
     }
 
     #[test]
+    fn 일시_실패는_다른_계정이나_빈값으로_바꾸지_않는다() {
+        let mut cached = HashMap::new();
+        assert!(store_result(
+            &mut cached,
+            "codex-1",
+            Some(CodexLimits {
+                windows: vec![(300, 17.0, Some(123))],
+                ..Default::default()
+            }),
+            1,
+            1,
+        ));
+        assert!(store_result(&mut cached, "codex-1", None, 1, 1));
+        let kept = cached_snapshot(&cached, "codex-1").expect("마지막 성공값 유지");
+        assert_eq!(kept.windows, vec![(300, 17.0, Some(123))]);
+        assert!(kept.stale, "실패 뒤에는 낡은 값임을 표시");
+        assert!(cached_snapshot(&cached, "codex-2").is_none());
+    }
+
+    #[test]
+    fn 첫_실패도_조회완료로_기록한다() {
+        let mut cached = HashMap::new();
+        assert!(store_result(&mut cached, "logged-out", None, 1, 1));
+        assert!(cached.contains_key("logged-out"));
+        assert!(cached_snapshot(&cached, "logged-out").is_none());
+    }
+
+    #[test]
     fn invalidate_뒤에_도착한_응답은_버린다() {
         let mut cached = HashMap::new();
         assert!(!store_result(
@@ -357,8 +507,8 @@ mod tests {
         assert!(cached_snapshot(&cached, "codex-1").is_some());
     }
 
-    /// 다중 응답에는 Reserve·Spark 같은 별도 bucket도 섞인다. 이 화면은 공용 Codex
-    /// 한도만 다루므로 명시적인 `codex`를 고르고 옛 단일 값보다 우선한다.
+    /// 공용 Codex는 명시적인 `codex`를 고르고, 이름 달린 추가 bucket은 서버 원문을
+    /// 보존한다. 어떤 모델에 해당하는지는 추측하지 않는다.
     #[test]
     fn 다중_응답에서_codex_bucket만_고른다() {
         let v: serde_json::Value = serde_json::from_str(
@@ -373,8 +523,9 @@ mod tests {
                     "base_model_inference":{
                         "limitName":"gpt-reserve",
                         "primary":{"usedPercent":88,"windowDurationMins":10080}
+                    },
+                    "nameless":{"primary":{"usedPercent":55,"windowDurationMins":300}}
                     }
-                }
             }"#,
         )
         .unwrap();
@@ -387,6 +538,15 @@ mod tests {
             ]
         );
         assert_eq!(got.plan.as_deref(), Some("pro"));
+        assert_eq!(
+            got.named_windows,
+            vec![NamedWindow {
+                name: "gpt-reserve".to_string(),
+                minutes: 10080,
+                pct: 88.0,
+                resets_at: None,
+            }]
+        );
     }
 
     /// 실측 응답(2026-09-07). 창을 짧은 것부터 담고, 플랜과 초기화권도 함께 든다.

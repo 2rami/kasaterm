@@ -2053,30 +2053,25 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         std::time::Duration::from_secs(300)
                     };
-                    let codex_changed = if menu_open {
-                        // 기본 로그인도 목록의 첫 행이다. 현재 슬롯과 겹칠 수 있으니
-                        // 정렬·중복 제거 뒤 묻는다.
-                        let mut codex_ids = vec![String::new()];
-                        codex_ids.extend(
-                            socket::read_codex_accounts()
-                                .into_iter()
-                                .map(|account| account.id),
-                        );
-                        codex_ids.sort();
-                        codex_ids.dedup();
-                        let mut changed = false;
-                        for id in codex_ids {
-                            if crate::codexlimits::stale_for(&id, codex_every)
-                                && crate::codexlimits::refresh_for(&id)
-                            {
-                                changed = true;
-                            }
+                    // 설정의 계정 카드는 드롭다운을 먼저 열지 않아도 전부 보여야 한다.
+                    // 닫힌 동안에도 전 슬롯을 묻되 5분 캐시를 지켜 호출량은 Claude의
+                    // 비활성 슬롯과 같은 상한이다. 펼친 동안만 1분으로 좁아진다.
+                    let mut codex_ids = vec![String::new()];
+                    codex_ids.extend(
+                        socket::read_codex_accounts()
+                            .into_iter()
+                            .map(|account| account.id),
+                    );
+                    codex_ids.sort();
+                    codex_ids.dedup();
+                    let mut codex_changed = false;
+                    for id in codex_ids {
+                        if crate::codexlimits::stale_for(&id, codex_every)
+                            && crate::codexlimits::refresh_for(&id)
+                        {
+                            codex_changed = true;
                         }
-                        changed
-                    } else {
-                        crate::codexlimits::stale(codex_every)
-                            && crate::codexlimits::refresh()
-                    };
+                    }
                     if codex_changed {
                         let _ = usage_proxy.send_event(UserEvent::Redraw);
                     }
@@ -2103,6 +2098,7 @@ impl ApplicationHandler<UserEvent> for App {
                         .map_or(String::new(), |p| p.to_string_lossy().into_owned());
                     let fetched =
                         fetch_claude_usage(&crate::mcp_panel_port(), &active_dir, menu_open);
+                    record_claude_usage_attempt(&active_dir, fetched.is_some());
                     let usage = fetched.as_ref().map(|(u, _, _)| u);
                     let next = fetched.as_ref().and_then(|(u, stale, dir)| {
                         socket::usage_pressure(u).map(|p| crate::UsageBadge {
@@ -2113,7 +2109,11 @@ impl ApplicationHandler<UserEvent> for App {
                             resets_at: p.resets_at,
                             windows: socket::usage_windows(u)
                                 .into_iter()
-                                .map(|w| (w.label, w.pct))
+                                .map(|w| crate::UsageWindowBadge {
+                                    label: w.label,
+                                    pct: w.pct,
+                                    resets_at: w.resets_at,
+                                })
                                 .collect(),
                         })
                     });
@@ -2126,6 +2126,29 @@ impl ApplicationHandler<UserEvent> for App {
                             Ok(mut g) => {
                                 if *g != next {
                                     *g = next;
+                                    drop(g);
+                                    if usage_proxy.send_event(UserEvent::Redraw).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    } else {
+                        // 요청 자체가 실패하면 마지막 성공값을 지우지 않되, 지금 값인
+                        // 것처럼 두지도 않는다. 프록시까지 못 닿은 실패는 `stale:true`
+                        // 응답조차 없으므로 소비자가 여기서 표시를 바꿔야 한다.
+                        match usage_cache.lock() {
+                            Ok(mut g) => {
+                                let changed = g.as_mut().is_some_and(|badge| {
+                                    if badge.stale {
+                                        false
+                                    } else {
+                                        badge.stale = true;
+                                        true
+                                    }
+                                });
+                                if changed {
                                     drop(g);
                                     if usage_proxy.send_event(UserEvent::Redraw).is_err() {
                                         break;
@@ -2209,13 +2232,24 @@ impl ApplicationHandler<UserEvent> for App {
                             .filter(|d| !all.contains_key(d) && seen.insert(d.clone()))
                             .map(|d| {
                                 let port = port.clone();
-                                std::thread::spawn(move || fetch_claude_usage(&port, &d, menu_open))
+                                let query_dir = d.clone();
+                                (
+                                    d,
+                                    std::thread::spawn(move || {
+                                        fetch_claude_usage(&port, &query_dir, menu_open)
+                                    }),
+                                )
                             })
                             .collect();
-                        for j in jobs {
+                        for (asked_dir, j) in jobs {
                             // 스레드가 패닉했으면 그 슬롯만 건너뛴다 — 한 슬롯의 사고가
                             // 나머지 표를 통째로 못 가져오게 두면 병렬화가 손해가 된다.
-                            let Ok(Some((u, stale, dir))) = j.join() else {
+                            let Ok(result) = j.join() else {
+                                record_claude_usage_attempt(&asked_dir, false);
+                                continue;
+                            };
+                            record_claude_usage_attempt(&asked_dir, result.is_some());
+                            let Some((u, stale, dir)) = result else {
                                 continue;
                             };
                             if let Some(p) = socket::usage_pressure(&u) {
@@ -2229,7 +2263,11 @@ impl ApplicationHandler<UserEvent> for App {
                                         resets_at: p.resets_at,
                                         windows: socket::usage_windows(&u)
                                             .into_iter()
-                                            .map(|w| (w.label, w.pct))
+                                            .map(|w| crate::UsageWindowBadge {
+                                                label: w.label,
+                                                pct: w.pct,
+                                                resets_at: w.resets_at,
+                                            })
                                             .collect(),
                                     },
                                 );
@@ -2246,22 +2284,18 @@ impl ApplicationHandler<UserEvent> for App {
                         //
                         // 대신 **이번에 물어보지도 않은** dir 은 지운다. 그게 설정에서
                         // 빠진 계정이고, 안 지우면 지운 계정이 표에 영영 남는다.
-                        if !all.is_empty() {
-                            match usage_all.lock() {
-                                Ok(mut g) => {
-                                    let mut next = g.clone();
-                                    next.retain(|k, _| asked.contains(k));
-                                    next.extend(all);
-                                    if *g != next {
-                                        *g = next;
-                                        drop(g);
-                                        if usage_proxy.send_event(UserEvent::Redraw).is_err() {
-                                            break;
-                                        }
+                        match usage_all.lock() {
+                            Ok(mut g) => {
+                                let next = merge_usage_badges(g.clone(), &asked, all);
+                                if *g != next {
+                                    *g = next;
+                                    drop(g);
+                                    if usage_proxy.send_event(UserEvent::Redraw).is_err() {
+                                        break;
                                     }
                                 }
-                                Err(_) => break,
                             }
+                            Err(_) => break,
                         }
                         others_at = Some(std::time::Instant::now());
                     }
@@ -7625,6 +7659,24 @@ pub(crate) fn usage_poke() -> &'static std::sync::atomic::AtomicBool {
     &POKE
 }
 
+fn claude_usage_states() -> &'static std::sync::Mutex<HashMap<String, bool>> {
+    static STATES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    STATES.get_or_init(Default::default)
+}
+
+fn record_claude_usage_attempt(dir: &str, succeeded: bool) {
+    if let Ok(mut states) = claude_usage_states().lock() {
+        states.insert(dir.to_string(), succeeded);
+    }
+}
+
+/// `None`=아직 조회 전, `Some(true)`=값을 받음, `Some(false)`=조회했지만 실패.
+/// 설정 계정 카드가 「확인 중」과 「한도를 못 읽음」을 영구히 혼동하지 않게 한다.
+pub(crate) fn claude_usage_attempt(dir: &str) -> Option<bool> {
+    claude_usage_states().lock().ok()?.get(dir).copied()
+}
+
 /// 계정 목록이 **펼쳐져 있다**. 폴러는 GUI 상태를 직접 못 보므로 원자값으로
 /// 건넨다(`usage_poke` 와 같은 이유).
 ///
@@ -7638,6 +7690,65 @@ pub(crate) fn usage_poke() -> &'static std::sync::atomic::AtomicBool {
 pub(crate) fn usage_menu_open() -> &'static std::sync::atomic::AtomicBool {
     static OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     &OPEN
+}
+
+fn merge_usage_badges(
+    mut previous: HashMap<String, crate::UsageBadge>,
+    asked: &std::collections::HashSet<String>,
+    fresh: HashMap<String, crate::UsageBadge>,
+) -> HashMap<String, crate::UsageBadge> {
+    previous.retain(|dir, _| asked.contains(dir));
+    // 답이 없던 슬롯의 마지막 성공값은 남기되 낡았다고 표시한다. 다른 슬롯의
+    // 성공값으로 빈칸을 메우면 계정별 한도를 보여 주는 의미가 사라진다.
+    for dir in asked.iter().filter(|dir| !fresh.contains_key(*dir)) {
+        if let Some(badge) = previous.get_mut(dir) {
+            badge.stale = true;
+        }
+    }
+    previous.extend(fresh);
+    previous
+}
+
+#[cfg(test)]
+mod usage_badge_merge_tests {
+    use super::*;
+
+    fn badge(dir: &str, pct: f32) -> crate::UsageBadge {
+        crate::UsageBadge {
+            pct,
+            label: "5h".to_string(),
+            stale: false,
+            account_dir: dir.to_string(),
+            resets_at: None,
+            windows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn partial_failure_keeps_only_its_own_old_value_and_marks_it_stale() {
+        let previous = HashMap::from([
+            ("a".to_string(), badge("a", 10.0)),
+            ("b".to_string(), badge("b", 20.0)),
+            ("removed".to_string(), badge("removed", 30.0)),
+        ]);
+        let asked = std::collections::HashSet::from(["a".to_string(), "b".to_string()]);
+        let fresh = HashMap::from([("a".to_string(), badge("a", 11.0))]);
+        let got = merge_usage_badges(previous, &asked, fresh);
+        assert_eq!(got["a"].pct, 11.0);
+        assert!(!got["a"].stale);
+        assert_eq!(got["b"].pct, 20.0);
+        assert!(got["b"].stale);
+        assert!(!got.contains_key("removed"));
+    }
+
+    #[test]
+    fn total_failure_does_not_empty_the_known_table() {
+        let previous = HashMap::from([("a".to_string(), badge("a", 10.0))]);
+        let asked = std::collections::HashSet::from(["a".to_string()]);
+        let got = merge_usage_badges(previous, &asked, HashMap::new());
+        assert_eq!(got["a"].pct, 10.0);
+        assert!(got["a"].stale);
+    }
 }
 
 /// `dir` 은 조회할 **계정 저장소 경로** — 빈 문자열이 기본 로그인이다.

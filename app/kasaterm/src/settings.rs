@@ -2200,20 +2200,24 @@ impl App {
             )
             .map(|(id, label, idx)| {
                 let probe = auth_probe(&id);
-                let usage = (!id.is_empty())
-                    .then(|| {
-                        let dir = crate::claude_auth::runtime_dir_for_cached(&id, &active_acct)
-                            .map_or(String::new(), |p| p.to_string_lossy().into_owned());
-                        usage_table.get(&dir).cloned().or_else(|| {
-                            // 활성 계정은 활성 게이지와 같은 원천 — 계정 전환 직후
-                            // 옛 값을 새 계정 것으로 보이지 않게 하는 account_dir
-                            // 대조까지 하단바와 같은 규칙이다.
-                            active_usage
-                                .clone()
-                                .filter(|b| id == active_acct && b.account_dir == dir)
-                        })
-                    })
-                    .flatten();
+                let dir = crate::claude_auth::runtime_dir_for_cached(&id, &active_acct)
+                    .map_or(String::new(), |p| p.to_string_lossy().into_owned());
+                // 활성 게이지가 표보다 새로우므로 먼저 본다. 순서를 뒤집으면
+                // 방금 실패해 stale=true가 된 값 위로 옛 stale=false 표가 덮인다.
+                // account_dir 대조는 전환 직후 떠나온 계정 값이 새 이름에 붙는 것을 막는다.
+                let usage = active_usage
+                    .clone()
+                    .filter(|b| id == active_acct && b.account_dir == dir)
+                    .or_else(|| usage_table.get(&dir).cloned());
+                let usage_state = if probe.as_ref().is_some_and(|value| !value.logged_in) {
+                    "logged_out"
+                } else if usage.is_some() {
+                    "ready"
+                } else if crate::handler::claude_usage_attempt(&dir) == Some(false) {
+                    "failed"
+                } else {
+                    "loading"
+                };
                 // 답이 아직 없는 두 경우(첫 조회 중 · 토큰 갱신 중)에 비우지 않는다.
                 // 비우면 계정이 사라진 것처럼 보인다 — 없다고 말하지 말고 아직
                 // 모른다고 말한다.
@@ -2262,6 +2266,13 @@ impl App {
                     "usage_stale": usage.as_ref().map(|b| b.stale),
                     "usage_label": usage.as_ref().map(|b| b.label.clone()),
                     "usage_resets": usage.as_ref().and_then(|b| crate::resets_in_label(b.resets_at)),
+                    "usage_resets_at": usage.as_ref().and_then(|b| b.resets_at),
+                    "usage_state": usage_state,
+                    "usage_windows": usage.as_ref().map(|badge| badge.windows.iter().map(|window| serde_json::json!({
+                        "label": window.label.clone(),
+                        "pct": window.pct,
+                        "resets_at": window.resets_at,
+                    })).collect::<Vec<_>>()),
                     "logged_in": probe.as_ref().map(|p| p.logged_in),
                 })
             })
@@ -2280,6 +2291,55 @@ impl App {
                     // 즉시 읽힌다. 값이 없으면 정말로 로그인 안 한 슬롯이다.
                     let ident = codex_identity(&id);
                     let logged_in = codex_logged_in(&id);
+                    let limits = logged_in
+                        .then(|| crate::codexlimits::snapshot_for(&id))
+                        .flatten();
+                    let duration = |minutes: u32| {
+                        if minutes > 0 && minutes % 1440 == 0 {
+                            format!("{}d", minutes / 1440)
+                        } else if minutes > 0 && minutes % 60 == 0 {
+                            format!("{}h", minutes / 60)
+                        } else {
+                            format!("{minutes}m")
+                        }
+                    };
+                    let usage_windows: Vec<(String, f32, Option<u64>)> = limits
+                        .as_ref()
+                        .map(|limits| {
+                            limits
+                                .windows
+                                .iter()
+                                .map(|(minutes, pct, at)| {
+                                    (
+                                        duration(*minutes),
+                                        *pct,
+                                        at.and_then(|value| u64::try_from(value).ok()),
+                                    )
+                                })
+                                .chain(limits.named_windows.iter().map(|window| {
+                                    (
+                                        format!("{} {}", duration(window.minutes), window.name),
+                                        window.pct,
+                                        window
+                                            .resets_at
+                                            .and_then(|value| u64::try_from(value).ok()),
+                                    )
+                                }))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let pressure = limits.as_ref().and_then(|limits| {
+                        limits.windows.iter().max_by(|a, b| a.1.total_cmp(&b.1))
+                    });
+                    let usage_state = if !logged_in {
+                        "logged_out"
+                    } else if limits.is_some() {
+                        "ready"
+                    } else if crate::codexlimits::attempted_for(&id) {
+                        "failed"
+                    } else {
+                        "loading"
+                    };
                     let name = match (idx, label.is_empty()) {
                         (None, _) => "기본".to_string(),
                         (Some(i), true) => {
@@ -2310,6 +2370,20 @@ impl App {
                             .then_some("account_login_required"),
                         "slot": idx.is_some(),
                         "logged_in": logged_in,
+                        "usage": pressure.map(|(_, pct, _)| *pct),
+                        "usage_stale": limits.as_ref().map(|limits| limits.stale),
+                        "usage_label": pressure.map(|(minutes, _, _)| duration(*minutes)),
+                        "usage_resets": pressure
+                            .and_then(|(_, _, at)| at.and_then(|value| u64::try_from(value).ok()))
+                            .and_then(|at| crate::resets_in_label(Some(at))),
+                        "usage_resets_at": pressure
+                            .and_then(|(_, _, at)| at.and_then(|value| u64::try_from(value).ok())),
+                        "usage_state": usage_state,
+                        "usage_windows": limits.as_ref().map(|_| usage_windows.iter().map(|(label, pct, at)| serde_json::json!({
+                            "label": label,
+                            "pct": pct,
+                            "resets_at": at,
+                        })).collect::<Vec<_>>()),
                     })
                 })
                 .collect();

@@ -22,6 +22,19 @@ pub(crate) fn text(value: &str) -> Cow<'_, str> {
     if let Some(translated) = english(value) {
         return Cow::Borrowed(translated);
     }
+    if let Some(value) = value.strip_prefix("최근 값 · ") {
+        let value = value
+            .strip_suffix(" 뒤 초기화")
+            .map(|time| format!("resets in {time}"))
+            .unwrap_or_else(|| value.to_string());
+        return Cow::Owned(format!("Last value · {value}"));
+    }
+    if let Some(value) = value.strip_suffix(" 뒤 초기화") {
+        return Cow::Owned(format!("Resets in {value}"));
+    }
+    if let Some(model) = value.strip_suffix(" · 7일") {
+        return Cow::Owned(format!("{model} · 7 days"));
+    }
     if let Some(name) = value.strip_suffix(" 명단") {
         return Cow::Owned(format!("{name} roster"));
     }
@@ -147,6 +160,13 @@ fn english(value: &str) -> Option<&'static str> {
         "5시간" => "5 hours",
         "7일" => "7 days",
         "모델별 한도" => "Per-model limit",
+        "한도 조회 중…" => "Loading limits…",
+        "한도를 읽지 못했어요" => "Could not load limits",
+        "로그인 후 사용량을 볼 수 있어요" => "Sign in to view usage",
+        "한도 미제공" => "Limits unavailable",
+        "미제공" => "Unavailable",
+        "초기화 정보 미제공" => "Reset time unavailable",
+        "최근 값" => "Last value",
         "묶음 사이 구분선" => "Separators between groups",
         "계정 · 작업 정보 · 기기 상태가 바뀌는 자리만 얇게 나눕니다" => "Adds a thin divider only between accounts, work, and device status",
         "Claude 사용량" => "Claude usage",
@@ -194,6 +214,7 @@ fn english(value: &str) -> Option<&'static str> {
         "아주 높게" => "Extra high",
         "추가 인자" => "Extra arguments",
         "계정 작업대" => "Account workbench",
+        "검증용 예시" => "Verification example",
         "고르면 실행 중인 작업을 확인한 뒤 안전하게 갈아낍니다" => "Checks running work before switching safely",
         "기본 로그인" => "Default login",
         "계정 추가" => "Add account",

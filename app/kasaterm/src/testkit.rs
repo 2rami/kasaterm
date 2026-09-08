@@ -3229,6 +3229,93 @@ impl App {
                 self.chrome_dirty = true;
                 eprintln!("[autosettings] 기존 고급 커서 시드");
             }
+            "account-usage-claude" => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |duration| duration.as_secs());
+                self.set_account_scope_home = false;
+                self.set_claude_account.clear();
+                self.set_claude_accounts = vec![crate::socket::ClaudeAccount {
+                    id: "acct-1".to_string(),
+                    label: "아주 긴 업무 계정 별명".to_string(),
+                }];
+                let badge = crate::UsageBadge {
+                    pct: 74.0,
+                    label: "7d".to_string(),
+                    stale: false,
+                    account_dir: String::new(),
+                    resets_at: Some(now + 7200),
+                    windows: vec![
+                        crate::UsageWindowBadge {
+                            label: "5h".to_string(),
+                            pct: 18.0,
+                            resets_at: None,
+                        },
+                        crate::UsageWindowBadge {
+                            label: "7d".to_string(),
+                            pct: 74.0,
+                            resets_at: Some(now + 7200),
+                        },
+                        crate::UsageWindowBadge {
+                            label: "7d Fable".to_string(),
+                            pct: 41.0,
+                            resets_at: Some(now + 14400),
+                        },
+                    ],
+                };
+                if let Ok(mut usage) = self.claude_usage.lock() {
+                    *usage = Some(badge.clone());
+                }
+                if let Ok(mut usage) = self.claude_usage_all.lock() {
+                    usage.insert(String::new(), badge);
+                }
+                crate::settings::seed_auth_probe(
+                    "",
+                    Some(crate::settings::AuthProbe {
+                        logged_in: true,
+                        email: "teacher@example.com".to_string(),
+                        org: String::new(),
+                    }),
+                );
+                self.refresh_native_settings_dynamic_cache();
+                self.settings_scene
+                    .toggle_account_usage("claude\0".to_string());
+                self.chrome_dirty = true;
+                eprintln!("[autosettings] Claude 계정 사용량 상세 시드");
+            }
+            "account-usage-codex" => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |duration| duration.as_secs()) as i64;
+                self.set_account_scope_home = false;
+                self.set_codex_account.clear();
+                self.set_codex_accounts = vec![crate::socket::CodexAccount {
+                    id: "codex-1".to_string(),
+                    label: "업무용".to_string(),
+                }];
+                let _ = crate::codexlimits::seed_for_probe(
+                    "",
+                    vec![(10080, 64.0, Some(now + 7200))],
+                );
+                let _ = crate::codexlimits::seed_named_for_probe(
+                    "",
+                    vec![crate::codexlimits::NamedWindow {
+                        name: "gpt-reserve".to_string(),
+                        minutes: 10080,
+                        pct: 22.0,
+                        resets_at: Some(now + 14400),
+                    }],
+                );
+                self.refresh_native_settings_dynamic_cache();
+                self.settings_scene
+                    .toggle_account_usage("codex\0".to_string());
+                // 좁은 화면에서는 세 번째 추가 한도가 접힘 아래에 놓인다. 한 프레임
+                // 먼저 재서 scroll_max를 갱신한 뒤 내려, 최종 캡처가 세 줄 전부를 본다.
+                self.render_frame();
+                let _ = self.settings_scene.scroll_by(150.0);
+                self.chrome_dirty = true;
+                eprintln!("[autosettings] Codex 계정 사용량 상세 시드");
+            }
             // 파일 쓰기만 부르지 않고 UI 액션을 그대로 태운다 — 복제는 만든 뒤
             // 이름 칸에 포커스를 옮기는 것까지가 한 동작이라, `create_theme` 만
             // 부르면 정작 사람이 겪는 절반을 안 지나간다.
@@ -5897,7 +5984,14 @@ impl App {
                 stale,
                 account_dir: dir.to_string(),
                 resets_at: Some(now + 3 * 3600 + 54 * 60),
-                windows: w.into_iter().map(|(l, p)| (l.to_string(), p)).collect(),
+                windows: w
+                    .into_iter()
+                    .map(|(label, pct)| crate::UsageWindowBadge {
+                        label: label.to_string(),
+                        pct,
+                        resets_at: Some(now + 3 * 3600 + 54 * 60),
+                    })
+                    .collect(),
             };
             // 활성 슬롯의 키는 **작업대 경로**다 — 상태줄이 「전환 중」을 가르는
             // 근거가 그 경로라, 금고 경로로 심으면 게이지가 영영 `…` 로 남는다.
@@ -5975,7 +6069,18 @@ impl App {
                     // 떠나온 슬롯의 값 — 활성(acct-3)과 다르니 「읽는 중」이 되어야 한다.
                     account_dir: "/tmp/kasaterm-rig-acct-2".to_string(),
                     resets_at: None,
-                    windows: vec![("5h".to_string(), 12.0), ("7d".to_string(), 95.0)],
+                    windows: vec![
+                        crate::UsageWindowBadge {
+                            label: "5h".to_string(),
+                            pct: 12.0,
+                            resets_at: None,
+                        },
+                        crate::UsageWindowBadge {
+                            label: "7d".to_string(),
+                            pct: 95.0,
+                            resets_at: None,
+                        },
+                    ],
                 });
             }
             self.chrome_dirty = true;
@@ -6050,7 +6155,14 @@ impl App {
                     stale,
                     account_dir: dir.to_string(),
                     resets_at: Some(now + in_secs),
-                    windows: w.into_iter().map(|(l, p)| (l.to_string(), p)).collect(),
+                    windows: w
+                        .into_iter()
+                        .map(|(label, pct)| crate::UsageWindowBadge {
+                            label: label.to_string(),
+                            pct,
+                            resets_at: Some(now + in_secs),
+                        })
+                        .collect(),
                 }
             };
             let base = mk(
@@ -6157,7 +6269,18 @@ impl App {
                         + 3 * 3600
                         + 54 * 60,
                 ),
-                windows: vec![("5h".to_string(), 12.0), ("7d".to_string(), 95.0)],
+                windows: vec![
+                    crate::UsageWindowBadge {
+                        label: "5h".to_string(),
+                        pct: 12.0,
+                        resets_at: None,
+                    },
+                    crate::UsageWindowBadge {
+                        label: "7d".to_string(),
+                        pct: 95.0,
+                        resets_at: None,
+                    },
+                ],
             };
             if let Ok(mut g) = self.claude_usage.lock() {
                 *g = Some(badge.clone());

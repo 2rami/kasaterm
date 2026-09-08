@@ -44,6 +44,8 @@ pub(crate) struct SettingsScene {
     media_started: std::time::Instant,
     multiline_layouts: Vec<crate::native_settings::MultilineLayout>,
     motion_preview_visible: bool,
+    /// 제공자+계정 id별 사용량 상세 펼침. 같은 id가 Claude/Codex에 있어도 갈라진다.
+    account_usage_expanded: std::collections::HashSet<String>,
 }
 
 impl Default for SettingsScene {
@@ -69,6 +71,7 @@ impl Default for SettingsScene {
             media_started: std::time::Instant::now(),
             multiline_layouts: Vec::new(),
             motion_preview_visible: false,
+            account_usage_expanded: std::collections::HashSet::new(),
         }
     }
 }
@@ -138,6 +141,16 @@ impl SettingsScene {
         accounts: Vec<crate::native_settings::AccountChoice>,
     ) {
         self.cache.set_accounts(accounts);
+    }
+
+    pub(crate) fn account_usage_expanded(&self) -> &std::collections::HashSet<String> {
+        &self.account_usage_expanded
+    }
+
+    pub(crate) fn toggle_account_usage(&mut self, key: String) {
+        if !self.account_usage_expanded.remove(&key) {
+            self.account_usage_expanded.insert(key);
+        }
     }
 
     pub(crate) fn category(&self) -> SettingsCat {

@@ -10795,7 +10795,9 @@ impl App {
                     let codex_logged_in = crate::settings::codex_logged_in(codex_id);
                     let codex_configured =
                         !codex_id.is_empty() || !self.set_codex_accounts.is_empty();
+                    let codex_snapshot = crate::codexlimits::snapshot_for(codex_id);
                     let codex_limits = codex_windows_for(codex_id);
+                    let codex_stale = codex_snapshot.as_ref().is_some_and(|limits| limits.stale);
                     if codex_statusbar_visible(win_w, codex_logged_in, codex_configured) {
                         account_drawn = true;
                         if x > seg_x0 {
@@ -10886,10 +10888,18 @@ impl App {
                             // 모자라면 draw_window_gauges가 긴 창부터 자연스럽게 접는다.
                             let gauge_x = x;
                             let right = (win_w - 280.0 - name_w).max(gauge_x);
-                            x = draw_window_gauges(g, gauge_x, ty, right, fs, &wins, false);
+                            x = draw_window_gauges(
+                                g,
+                                gauge_x,
+                                ty,
+                                right,
+                                fs,
+                                &wins,
+                                codex_stale,
+                            );
                             if x == gauge_x && !wins.is_empty() {
                                 let pct = wins[0].1;
-                                let text = format!("{pct:.0}%");
+                                let text = format!("{}{pct:.0}%", if codex_stale { "~" } else { "" });
                                 g.draw_text(
                                     x,
                                     ty,
@@ -11616,7 +11626,11 @@ impl App {
                         if badge.windows.is_empty() {
                             vec![(badge.label.clone(), badge.pct)]
                         } else {
-                            badge.windows.clone()
+                            badge
+                                .windows
+                                .iter()
+                                .map(|window| (window.label.clone(), window.pct))
+                                .collect()
                         }
                     })
                     .unwrap_or_default();
@@ -11980,7 +11994,8 @@ impl App {
                                 if compact {
                                     let usage = pressure.map(|(minutes, pct, _)| {
                                         format!(
-                                            "{pct:.0}% 씀 · {}",
+                                            "{}{pct:.0}% 씀 · {}",
+                                            if limits.stale { "~" } else { "" },
                                             codex_rate_window_label(Some(*minutes))
                                         )
                                     });
@@ -12052,7 +12067,7 @@ impl App {
                                             right,
                                             f - 3.0,
                                             chunk,
-                                            false,
+                                            limits.stale,
                                         );
                                         line += 1;
                                     }
@@ -12496,7 +12511,10 @@ impl App {
                                     let wins: Vec<(String, f32)> = if b.windows.is_empty() {
                                         vec![(b.label.clone(), b.pct)]
                                     } else {
-                                        b.windows.clone()
+                                        b.windows
+                                            .iter()
+                                            .map(|window| (window.label.clone(), window.pct))
+                                            .collect()
                                     };
                                     for (line, chunk) in wins.chunks(2).enumerate() {
                                         draw_window_gauges(
@@ -12630,7 +12648,7 @@ impl App {
                                                 right,
                                                 tf,
                                                 chunk,
-                                                false,
+                                                limits.stale,
                                             );
                                             line += 1;
                                         }
@@ -12648,7 +12666,8 @@ impl App {
                                             .collect();
                                         let usage = pressure.map(|(minutes, pct, _)| {
                                             format!(
-                                                "{pct:.0}% 씀 · {}",
+                                                "{}{pct:.0}% 씀 · {}",
+                                                if limits.stale { "~" } else { "" },
                                                 codex_rate_window_label(Some(*minutes))
                                             )
                                         });
@@ -14804,6 +14823,16 @@ fn codex_windows_for(id: &str) -> Option<Vec<(String, f32)>> {
             .windows
             .iter()
             .map(|(minutes, pct, _)| (codex_rate_window_label(Some(*minutes)), *pct))
+            .chain(limits.named_windows.iter().map(|window| {
+                (
+                    format!(
+                        "{} {}",
+                        codex_rate_window_label(Some(window.minutes)),
+                        window.name
+                    ),
+                    window.pct,
+                )
+            }))
             .collect()
     })
 }
@@ -14818,7 +14847,11 @@ fn selected_status_usage_windows(
     let source: Vec<(String, f32)> = if badge.windows.is_empty() {
         vec![(badge.label.clone(), badge.pct)]
     } else {
-        badge.windows.clone()
+        badge
+            .windows
+            .iter()
+            .map(|window| (window.label.clone(), window.pct))
+            .collect()
     };
     source
         .into_iter()
@@ -14863,8 +14896,14 @@ fn missing_codex_windows(
     [("session", "5h"), ("weekly", "7d"), ("model", "모델별")]
         .into_iter()
         .filter(|(field, label)| {
-            prefs.has_usage_field("codex", field)
-                && !windows.iter().any(|(value, _)| value == label)
+            let present = if *field == "model" {
+                windows
+                    .iter()
+                    .any(|(value, _)| value != "5h" && value != "7d")
+            } else {
+                windows.iter().any(|(value, _)| value == label)
+            };
+            prefs.has_usage_field("codex", field) && !present
         })
         .map(|(_, label)| label)
         .collect()
@@ -15333,8 +15372,13 @@ pub(crate) fn status_usage_windows(
             .windows
             .iter()
             .enumerate()
-            .filter(|(i, (_, p))| *i == 0 || *p >= LOUD_PCT)
-            .map(|(_, (l, p))| (l.clone(), (!switching).then_some(*p)))
+            .filter(|(i, window)| *i == 0 || window.pct >= LOUD_PCT)
+            .map(|(_, window)| {
+                (
+                    window.label.clone(),
+                    (!switching).then_some(window.pct),
+                )
+            })
             .collect(),
         // 좁은 창이거나 창이 하나면 **가장 급한** 것 하나로 접는다.
         Some(b) => vec![(b.label.clone(), (!switching).then_some(b.pct))],
@@ -15353,7 +15397,14 @@ mod status_usage_window_tests {
             stale: false,
             account_dir: String::new(),
             resets_at: None,
-            windows: windows.iter().map(|(l, p)| ((*l).to_string(), *p)).collect(),
+            windows: windows
+                .iter()
+                .map(|(label, pct)| crate::UsageWindowBadge {
+                    label: (*label).to_string(),
+                    pct: *pct,
+                    resets_at: None,
+                })
+                .collect(),
         }
     }
 

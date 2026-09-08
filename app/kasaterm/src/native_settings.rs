@@ -46,6 +46,18 @@ pub(crate) struct AccountChoice {
     active: bool,
     slot: bool,
     usage: Option<UsageBadge>,
+    /// 상세에 그릴 창 전부. Codex의 이름 달린 추가 bucket은 대표 사용률로
+    /// 승격하지 않고 여기에서만 보인다.
+    usage_windows: Vec<crate::UsageWindowBadge>,
+    usage_state: AccountUsageState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccountUsageState {
+    Ready,
+    Loading,
+    Failed,
+    LoggedOut,
 }
 
 /// 본진(홈 기계)의 계정 칸. 이 값이 있으면 계정 화면은 **그 기계 것**을 그린다.
@@ -270,6 +282,78 @@ fn palette_choice(key: &str, label: &str, palette: &theme::Palette) -> PaletteCh
     }
 }
 
+fn account_usage_key(provider: AccountProvider, id: &str) -> String {
+    let provider = match provider {
+        AccountProvider::Claude => "claude",
+        AccountProvider::Codex => "codex",
+    };
+    format!("{provider}\0{id}")
+}
+
+fn account_usage_state(
+    logged_in: Option<bool>,
+    has_usage: bool,
+    attempted: Option<bool>,
+) -> AccountUsageState {
+    if logged_in == Some(false) {
+        AccountUsageState::LoggedOut
+    } else if has_usage || attempted == Some(true) {
+        AccountUsageState::Ready
+    } else if attempted == Some(false) {
+        AccountUsageState::Failed
+    } else {
+        AccountUsageState::Loading
+    }
+}
+
+fn codex_window_label(minutes: u32) -> String {
+    match minutes {
+        m if m > 0 && m % (60 * 24) == 0 => format!("{}d", m / (60 * 24)),
+        m if m > 0 && m % 60 == 0 => format!("{}h", m / 60),
+        m if m > 0 => format!("{m}m"),
+        _ => String::new(),
+    }
+}
+
+fn codex_usage_windows(limits: &crate::codexlimits::CodexLimits) -> Vec<crate::UsageWindowBadge> {
+    let mut windows: Vec<crate::UsageWindowBadge> = limits
+        .windows
+        .iter()
+        .filter_map(|(minutes, pct, resets_at)| {
+            let label = codex_window_label(*minutes);
+            (!label.is_empty()).then(|| crate::UsageWindowBadge {
+                label,
+                pct: *pct,
+                resets_at: resets_at.and_then(|at| u64::try_from(at).ok()),
+            })
+        })
+        .collect();
+    windows.extend(limits.named_windows.iter().filter_map(|window| {
+        let duration = codex_window_label(window.minutes);
+        (!duration.is_empty()).then(|| crate::UsageWindowBadge {
+            label: format!("{duration} {}", window.name),
+            pct: window.pct,
+            resets_at: window.resets_at.and_then(|at| u64::try_from(at).ok()),
+        })
+    }));
+    windows
+}
+
+fn codex_usage_badge(id: &str, limits: &crate::codexlimits::CodexLimits) -> Option<UsageBadge> {
+    let pressure = limits
+        .windows
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(&b.1))?;
+    Some(UsageBadge {
+        pct: pressure.1,
+        label: codex_window_label(pressure.0),
+        stale: limits.stale,
+        account_dir: id.to_string(),
+        resets_at: pressure.2.and_then(|at| u64::try_from(at).ok()),
+        windows: codex_usage_windows(limits),
+    })
+}
+
 fn account_choices(app: &App) -> Vec<AccountChoice> {
     let usage_table = app
         .claude_usage_all
@@ -283,6 +367,16 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
 
     if active_id.is_empty() {
         let probe = crate::settings::auth_probe("");
+        let usage = active_usage.clone().filter(|badge| badge.account_dir.is_empty());
+        let usage_state = account_usage_state(
+            probe.as_ref().map(|value| value.logged_in),
+            usage.is_some(),
+            crate::handler::claude_usage_attempt(""),
+        );
+        let usage_windows = usage
+            .as_ref()
+            .map(|badge| badge.windows.clone())
+            .unwrap_or_default();
         rows.push(AccountChoice {
             email: probe.as_ref().map(|p| p.email.clone()).unwrap_or_default(),
             provider: AccountProvider::Claude,
@@ -305,7 +399,9 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
             },
             active: true,
             slot: false,
-            usage: active_usage.clone().filter(|badge| badge.account_dir.is_empty()),
+            usage,
+            usage_windows,
+            usage_state,
         });
     }
     for (index, account) in app.set_claude_accounts.iter().enumerate() {
@@ -322,11 +418,19 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
             .unwrap_or_else(|| "확인 중…".to_string());
         let dir = crate::claude_auth::runtime_dir_for_cached(&account.id, &active_id)
             .map_or(String::new(), |path| path.to_string_lossy().into_owned());
-        let usage = usage_table.get(&dir).cloned().or_else(|| {
-            active_usage
-                .clone()
-                .filter(|badge| account.id == active_id && badge.account_dir == dir)
-        });
+        let usage = active_usage
+            .clone()
+            .filter(|badge| account.id == active_id && badge.account_dir == dir)
+            .or_else(|| usage_table.get(&dir).cloned());
+        let usage_state = account_usage_state(
+            probe.as_ref().map(|value| value.logged_in),
+            usage.is_some(),
+            crate::handler::claude_usage_attempt(&dir),
+        );
+        let usage_windows = usage
+            .as_ref()
+            .map(|badge| badge.windows.clone())
+            .unwrap_or_default();
         rows.push(AccountChoice {
             email: probe.as_ref().map(|p| p.email.clone()).unwrap_or_default(),
             provider: AccountProvider::Claude,
@@ -345,23 +449,56 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
             active: account.id == active_id,
             slot: true,
             usage,
+            usage_windows,
+            usage_state,
         });
     }
 
+    let default_codex_logged_in = crate::settings::codex_logged_in("")
+        || crate::codexlimits::seeded_for_probe("");
+    let default_codex_limits = crate::codexlimits::snapshot_for("");
+    let default_codex_usage = default_codex_limits
+        .as_ref()
+        .and_then(|limits| codex_usage_badge("", limits));
+    let default_codex_windows = default_codex_limits
+        .as_ref()
+        .map(codex_usage_windows)
+        .unwrap_or_default();
     rows.push(AccountChoice {
         email: crate::settings::codex_identity("").unwrap_or_default(),
         provider: AccountProvider::Codex,
         id: String::new(),
         name: "기본 로그인".to_string(),
-        sub: crate::settings::codex_identity("")
-            .unwrap_or_else(|| "로그인 필요".to_string()),
-        sub_kind: if crate::settings::codex_logged_in("") { "mute" } else { "danger" },
+        sub: crate::settings::codex_identity("").unwrap_or_else(|| {
+            if default_codex_logged_in {
+                "로그인됨".to_string()
+            } else {
+                "로그인 필요".to_string()
+            }
+        }),
+        sub_kind: if default_codex_logged_in { "mute" } else { "danger" },
         active: app.set_codex_account.is_empty(),
         slot: false,
-        usage: None,
+        usage_state: account_usage_state(
+            Some(default_codex_logged_in),
+            default_codex_limits.is_some(),
+            crate::codexlimits::attempted_for("").then_some(false),
+        ),
+        usage: default_codex_usage,
+        usage_windows: default_codex_windows,
     });
     for (index, account) in app.set_codex_accounts.iter().enumerate() {
         let identity = crate::settings::codex_identity(&account.id);
+        let logged_in = crate::settings::codex_logged_in(&account.id)
+            || crate::codexlimits::seeded_for_probe(&account.id);
+        let limits = crate::codexlimits::snapshot_for(&account.id);
+        let usage = limits
+            .as_ref()
+            .and_then(|limits| codex_usage_badge(&account.id, limits));
+        let usage_windows = limits
+            .as_ref()
+            .map(codex_usage_windows)
+            .unwrap_or_default();
         rows.push(AccountChoice {
             email: identity.clone().unwrap_or_default(),
             provider: AccountProvider::Codex,
@@ -374,12 +511,24 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
             sub: if account.label.trim().is_empty() {
                 String::new()
             } else {
-                identity.unwrap_or_else(|| "로그인 필요".to_string())
+                identity.unwrap_or_else(|| {
+                    if logged_in {
+                        "로그인됨".to_string()
+                    } else {
+                        "로그인 필요".to_string()
+                    }
+                })
             },
-            sub_kind: if crate::settings::codex_logged_in(&account.id) { "mute" } else { "danger" },
+            sub_kind: if logged_in { "mute" } else { "danger" },
             active: account.id == app.set_codex_account,
             slot: true,
-            usage: None,
+            usage_state: account_usage_state(
+                Some(logged_in),
+                limits.is_some(),
+                crate::codexlimits::attempted_for(&account.id).then_some(false),
+            ),
+            usage,
+            usage_windows,
         });
     }
     rows
@@ -405,6 +554,7 @@ pub(crate) enum Target {
     Category(SettingsCat),
     Setting(SettingsAction),
     Focus(SettingsInput),
+    AccountUsage(String),
     Close,
     Onboarding(crate::native_onboarding::Action),
 }
@@ -539,6 +689,7 @@ pub(crate) struct Snapshot {
     pub(crate) account_autoswitch: bool,
     pub(crate) account_autoswitch_pct: f32,
     pub(crate) accounts: Arc<Vec<AccountChoice>>,
+    pub(crate) account_usage_expanded: std::collections::HashSet<String>,
     pub(crate) account_label_edit: Option<(AccountProvider, String, String)>,
     pub(crate) machine_edit: Option<(usize, bool, String)>,
     pub(crate) login_job: Option<crate::settings::LoginJob>,
@@ -751,6 +902,7 @@ impl App {
             account_autoswitch: self.set_account_autoswitch,
             account_autoswitch_pct: self.set_account_autoswitch_pct,
             accounts: cache.accounts.clone(),
+            account_usage_expanded: scene.account_usage_expanded().clone(),
             account_label_edit: self.account_label_edit.clone(),
             machine_edit: self.machine_edit.clone(),
             login_job: crate::settings::hidden_login_job(),
@@ -890,6 +1042,11 @@ impl App {
                 if let Some(rect) = hit.map(|hit| hit.rect) {
                     self.native_settings_place_caret(field, rect, (x, y));
                 }
+            }
+            Some(Target::AccountUsage(key)) => {
+                self.native_settings_blur();
+                self.settings_scene.toggle_account_usage(key);
+                self.chrome_dirty = true;
             }
             Some(Target::Close) => {
                 self.native_settings_blur();
@@ -5099,6 +5256,22 @@ fn home_accounts_view() -> Option<HomeAccountsView> {
         .iter()
         .filter_map(|v| {
             let id = v.get("id")?.as_str()?.to_string();
+            let windows: Vec<crate::UsageWindowBadge> = v
+                .get("usage_windows")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|window| {
+                    Some(crate::UsageWindowBadge {
+                        label: window.get("label")?.as_str()?.to_string(),
+                        pct: window.get("pct")?.as_f64()? as f32,
+                        resets_at: window
+                            .get("resets_at")
+                            .and_then(serde_json::Value::as_u64),
+                    })
+                })
+                .collect();
+            let usage_windows = windows.clone();
             let usage = v.get("usage").and_then(serde_json::Value::as_f64).map(|pct| {
                 crate::UsageBadge {
                     pct: pct as f32,
@@ -5112,10 +5285,22 @@ fn home_accounts_view() -> Option<HomeAccountsView> {
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false),
                     account_dir: id.clone(),
-                    resets_at: v.get("usage_resets").and_then(serde_json::Value::as_u64),
-                    windows: Vec::new(),
+                    resets_at: v
+                        .get("usage_resets_at")
+                        .and_then(serde_json::Value::as_u64),
+                    windows,
                 }
             });
+            let usage_state = match v
+                .get("usage_state")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("ready") => AccountUsageState::Ready,
+                Some("failed") => AccountUsageState::Failed,
+                Some("logged_out") => AccountUsageState::LoggedOut,
+                _ if usage.is_some() => AccountUsageState::Ready,
+                _ => AccountUsageState::Loading,
+            };
             Some(AccountChoice {
                 // 본진이 보낸 부제가 곧 그 계정의 신원이다 — 주소 꼴일 때만
                 // 도메인 표가 선다.
@@ -5137,6 +5322,8 @@ fn home_accounts_view() -> Option<HomeAccountsView> {
                 slot: v.get("slot").and_then(serde_json::Value::as_bool).unwrap_or(false),
                 id,
                 usage,
+                usage_windows,
+                usage_state,
             })
         })
         .collect();
@@ -5183,6 +5370,22 @@ fn account_group(
 
     g.queue_icon(provider.icon(), x, *y - 1.0, 17.0, theme::text());
     draw_text(g, x + 24.0, *y, provider.label(), 14.5, theme::text(), true);
+    if crate::verification_run()
+        && std::env::var("KASATERM_AUTOSETTINGS_ACTION")
+            .is_ok_and(|value| value.starts_with("account-usage-"))
+    {
+        let label = "검증용 예시";
+        let label_w = g.measure_chrome_text(label, 10.5, false);
+        draw_text(
+            g,
+            x + w - label_w,
+            *y + 2.0,
+            label,
+            10.5,
+            theme::text_mute(),
+            false,
+        );
+    }
     *y += 23.0;
     let blurb = match provider {
         AccountProvider::Claude => {
@@ -5385,7 +5588,18 @@ fn account_row(
     // 그 줄에만 단추가 없어 고치러 갈 데가 없었다(2026-09-07 「코덱슨 왜 재인증
     // 이런거없어」 — codex 는 등록 슬롯이 없어 늘 이 줄뿐이다).
     let show_actions = !editing && !busy;
-    let rect = (x, *y, w, if editing { 62.0 } else { 54.0 });
+    let usage_key = account_usage_key(row.provider, &row.id);
+    let expanded = !editing && s.account_usage_expanded.contains(&usage_key);
+    let detail_lines = expanded.then(|| account_usage_lines(row)).unwrap_or_default();
+    let detail_h = if expanded {
+        match row.usage_state {
+            AccountUsageState::Ready => 16.0 + detail_lines.len().max(1) as f32 * 54.0,
+            _ => 58.0,
+        }
+    } else {
+        0.0
+    };
+    let rect = (x, *y, w, if editing { 62.0 } else { 54.0 + detail_h });
     choice_card(
         g,
         s,
@@ -5456,8 +5670,8 @@ fn account_row(
         pill(g, text_x + name_w + 8.0, rect.1 + 7.0, t, true);
     }
 
-    // 둘째 줄: 조직·마지막 로그인, 그 뒤에 사용량. 한 줄로 잇는 편이 오른쪽
-    // 빈 자리에 숫자를 따로 띄우는 것보다 시선이 덜 튄다.
+    // 둘째 줄: 신원과 사용량 요약. 사용량은 계정 전환과 다른 클릭이므로 오른쪽에
+    // 고정하고 chevron을 붙인다. 값이 없어도 상태를 눌러 이유를 펼칠 수 있다.
     let home_sub = s.home_accounts.as_ref().and_then(|h| {
         let (id, state, err) = h.login.as_ref()?;
         (id == &row.id).then(|| match state.as_str() {
@@ -5478,36 +5692,24 @@ fn account_row(
                 crate::settings::LoginState::Err(error) => error.clone(),
             })
     });
-    let usage = row.usage.as_ref().map(|usage| {
-        let resets = crate::resets_in_label(usage.resets_at)
-            .map(|value| format!(" · {value}"))
-            .unwrap_or_default();
-        (
-            format!(
-                "{}{:.0}%{resets}",
-                if usage.stale { "~" } else { "" },
-                usage.pct
-            ),
-            usage.pct,
-        )
-    });
-    let usage_w = usage
-        .as_ref()
-        .map(|(t, _)| g.measure_chrome_text(t, 10.5, false) + 10.0)
-        .unwrap_or(0.0);
+    let (usage_text, usage_pct) = account_usage_summary(row);
+    let usage_text = fit(g, &usage_text, (avail - 20.0).max(24.0), 10.5, false);
+    let usage_w = g.measure_chrome_text(&usage_text, 10.5, false) + 22.0;
+    let usage_right = text_x + avail;
+    let usage_left = (usage_right - usage_w).max(text_x);
     let sub_value = job_sub.as_deref().unwrap_or(&row.sub);
     let mut sub_x = text_x;
     // 메일 서비스 표지는 **부제가 그 계정을 말할 때만** — 로그인 진행 같은 상태
     // 문구 앞에 세우면 그게 주소인 줄로 읽힌다.
-    if job_sub.is_none() && !row.email.is_empty() {
+    if job_sub.is_none() && !row.email.is_empty() && usage_left - sub_x >= 32.0 {
         let d = email_provider_mark(g, sub_x, rect.1 + 27.0, &row.email, 14.0);
         if d > 0.0 {
             sub_x += d + 6.0;
         }
     }
-    if !sub_value.is_empty() {
-        let sub = fit(g, sub_value, avail - usage_w, 10.5, false);
-        let drawn = g.measure_chrome_text(&sub, 10.5, false);
+    let sub_room = usage_left - sub_x - 8.0;
+    if !sub_value.is_empty() && sub_room >= 24.0 {
+        let sub = fit(g, sub_value, sub_room, 10.5, false);
         draw_text(
             g,
             sub_x,
@@ -5521,28 +5723,77 @@ fn account_row(
             },
             false,
         );
-        sub_x += drawn + 10.0;
     }
-    if let Some((text, pct)) = usage.as_ref() {
-        draw_text(
+    draw_text(
+        g,
+        usage_left,
+        rect.1 + 29.0,
+        &usage_text,
+        10.5,
+        usage_pct.map_or_else(
+            || account_usage_state_color(row.usage_state),
+            account_usage_pct_color,
+        ),
+        false,
+    );
+    g.queue_icon(
+        if expanded { "chevron-up" } else { "chevron-down" },
+        usage_right - 14.0,
+        rect.1 + 28.0,
+        13.0,
+        theme::text_mute(),
+    );
+    let usage_hit = (
+        usage_left - 6.0,
+        rect.1 + 23.0,
+        (usage_right - usage_left + 8.0).max(34.0),
+        27.0,
+    );
+    register_clipped(
+        g,
+        hits,
+        Target::AccountUsage(usage_key.clone()),
+        usage_hit,
+        HitCursor::Pointer,
+    );
+    g.hover_pointer |= contains(usage_hit, s.cursor);
+
+    if expanded {
+        let detail = (rect.0 + 8.0, rect.1 + 55.0, rect.2 - 16.0, detail_h - 8.0);
+        g.rect(detail.0, detail.1 - 1.0, detail.2, 1.0, theme::border());
+        match row.usage_state {
+            AccountUsageState::Ready => {
+                let mut line_y = detail.1 + 10.0;
+                for line in &detail_lines {
+                    draw_account_usage_line(g, line, detail.0 + 32.0, line_y, detail.2 - 44.0, row.usage.as_ref().is_some_and(|usage| usage.stale));
+                    line_y += 54.0;
+                }
+            }
+            state => {
+                let text = account_usage_state_text(state);
+                draw_text(
+                    g,
+                    detail.0 + 32.0,
+                    detail.1 + 18.0,
+                    text,
+                    11.5,
+                    account_usage_state_color(state),
+                    false,
+                );
+            }
+        }
+        register_clipped(
             g,
-            sub_x,
-            rect.1 + 29.0,
-            text,
-            10.5,
-            if *pct >= 90.0 {
-                theme::danger()
-            } else if *pct >= 70.0 {
-                theme::attention()
-            } else {
-                theme::text_dim()
-            },
-            false,
+            hits,
+            Target::AccountUsage(usage_key),
+            detail,
+            HitCursor::Pointer,
         );
+        g.hover_pointer |= contains(detail, s.cursor);
     }
 
     if show_actions {
-        let by = rect.1 + (rect.3 - 26.0) / 2.0;
+        let by = rect.1 + 14.0;
         let mut rx = rect.0 + rect.2 - 8.0 - w_reauth;
         if show_slot_actions {
             rx = rect.0 + rect.2 - 8.0 - w_remove;
@@ -5611,6 +5862,185 @@ fn account_row(
         );
     }
     *y += rect.3 + 6.0;
+}
+
+#[derive(Clone)]
+struct AccountUsageLine {
+    label: String,
+    pct: Option<f32>,
+    resets_at: Option<u64>,
+}
+
+fn account_usage_lines(row: &AccountChoice) -> Vec<AccountUsageLine> {
+    let mut source = row.usage_windows.clone();
+    if source.is_empty() {
+        if let Some(usage) = row.usage.as_ref() {
+            source.push(crate::UsageWindowBadge {
+                label: usage.label.clone(),
+                pct: usage.pct,
+                resets_at: usage.resets_at,
+            });
+        }
+    }
+    let pick = |kind: &str| {
+        source.iter().find(|window| match kind {
+            "5h" => window.label == "5h",
+            "7d" => window.label == "7d",
+            _ => false,
+        })
+    };
+    let mut out = vec![
+        pick("5h").map_or(
+            AccountUsageLine {
+                label: "5시간".to_string(),
+                pct: None,
+                resets_at: None,
+            },
+            |window| AccountUsageLine {
+                label: "5시간".to_string(),
+                pct: Some(window.pct),
+                resets_at: window.resets_at,
+            },
+        ),
+        pick("7d").map_or(
+            AccountUsageLine {
+                label: "7일".to_string(),
+                pct: None,
+                resets_at: None,
+            },
+            |window| AccountUsageLine {
+                label: "7일".to_string(),
+                pct: Some(window.pct),
+                resets_at: window.resets_at,
+            },
+        ),
+    ];
+    let mut models: Vec<AccountUsageLine> = source
+        .iter()
+        .filter(|window| window.label != "5h" && window.label != "7d")
+        .map(|window| AccountUsageLine {
+            label: window
+                .label
+                .strip_prefix("7d ")
+                .map(|model| format!("{model} · 7일"))
+                .or_else(|| {
+                    window
+                        .label
+                        .strip_prefix("5h ")
+                        .map(|model| format!("{model} · 5시간"))
+                })
+                .unwrap_or_else(|| window.label.clone()),
+            pct: Some(window.pct),
+            resets_at: window.resets_at,
+        })
+        .collect();
+    if models.is_empty() {
+        models.push(AccountUsageLine {
+            label: "모델별 한도".to_string(),
+            pct: None,
+            resets_at: None,
+        });
+    }
+    out.extend(models);
+    out
+}
+
+fn account_usage_state_text(state: AccountUsageState) -> &'static str {
+    match state {
+        AccountUsageState::Ready => "한도 미제공",
+        AccountUsageState::Loading => "한도 조회 중…",
+        AccountUsageState::Failed => "한도를 읽지 못했어요",
+        AccountUsageState::LoggedOut => "로그인 후 사용량을 볼 수 있어요",
+    }
+}
+
+fn account_usage_summary(row: &AccountChoice) -> (String, Option<f32>) {
+    match (row.usage_state, row.usage.as_ref()) {
+        (AccountUsageState::Ready, Some(usage)) => (
+            format!("{}{:.0}%", if usage.stale { "~" } else { "" }, usage.pct),
+            Some(usage.pct),
+        ),
+        (state, _) => (account_usage_state_text(state).to_string(), None),
+    }
+}
+
+fn account_usage_pct_color(pct: f32) -> [u8; 4] {
+    if pct >= 90.0 {
+        theme::danger()
+    } else if pct >= 70.0 {
+        theme::attention()
+    } else {
+        theme::text_dim()
+    }
+}
+
+fn account_usage_state_color(state: AccountUsageState) -> [u8; 4] {
+    match state {
+        AccountUsageState::Failed | AccountUsageState::LoggedOut => theme::danger(),
+        _ => theme::text_mute(),
+    }
+}
+
+fn draw_account_usage_line(
+    g: &mut gpu::GpuRenderer,
+    line: &AccountUsageLine,
+    x: f32,
+    y: f32,
+    w: f32,
+    stale: bool,
+) {
+    let pct_text = line.pct.map(|pct| {
+        format!("{}{pct:.0}%", if stale { "~" } else { "" })
+    });
+    let pct_w = pct_text
+        .as_ref()
+        .map(|text| g.measure_chrome_text(text, 11.0, true))
+        .unwrap_or_else(|| g.measure_chrome_text("미제공", 10.5, false));
+    let label = fit(g, &line.label, (w - pct_w - 14.0).max(30.0), 11.5, true);
+    draw_text(g, x, y, &label, 11.5, theme::text(), true);
+    match (line.pct, pct_text) {
+        (Some(pct), Some(text)) => {
+            draw_text(
+                g,
+                x + w - pct_w,
+                y,
+                &text,
+                11.0,
+                account_usage_pct_color(pct),
+                true,
+            );
+            let bar_y = y + 21.0;
+            round_rect(g, x, bar_y, w, 5.0, 2.5, theme::surface_active());
+            round_rect(
+                g,
+                x,
+                bar_y,
+                (w * (pct / 100.0).clamp(0.0, 1.0)).max(5.0),
+                5.0,
+                2.5,
+                account_usage_pct_color(pct),
+            );
+            let reset = line
+                .resets_at
+                .and_then(|at| crate::resets_in_label(Some(at)))
+                .map(|value| format!("{value} 뒤 초기화"))
+                .unwrap_or_else(|| "초기화 정보 미제공".to_string());
+            let reset = if stale { format!("최근 값 · {reset}") } else { reset };
+            let reset = fit(g, &reset, w, 10.0, false);
+            draw_text(g, x, y + 34.0, &reset, 10.0, theme::text_mute(), false);
+        }
+        _ => {
+            draw_text(
+                g,
+                x + w - pct_w,
+                y,
+                "미제공",
+                10.5,
+                theme::text_mute(),
+                false,
+            );
+        }
+    }
 }
 
 fn cursor_shape_label(shape: cursor::CursorShape) -> &'static str {
@@ -6553,6 +6983,30 @@ fn color_for_word(word: &str) -> [u8; 4] {
 mod tests {
     use super::*;
 
+    fn usage_account(windows: Vec<crate::UsageWindowBadge>) -> AccountChoice {
+        let usage_windows = windows.clone();
+        AccountChoice {
+            email: String::new(),
+            provider: AccountProvider::Claude,
+            id: "acct-1".to_string(),
+            name: "업무".to_string(),
+            sub: String::new(),
+            sub_kind: "mute",
+            active: true,
+            slot: true,
+            usage: Some(crate::UsageBadge {
+                pct: 70.0,
+                label: "7d".to_string(),
+                stale: false,
+                account_dir: "acct-1".to_string(),
+                resets_at: None,
+                windows,
+            }),
+            usage_windows,
+            usage_state: AccountUsageState::Ready,
+        }
+    }
+
     #[test]
     fn email_marks_use_real_brands_only_for_known_services() {
         assert_eq!(email_provider("me@gmail.com"), EmailProviderMark::Gmail);
@@ -6563,6 +7017,56 @@ mod tests {
         assert_eq!(email_provider("me@naver.com"), EmailProviderMark::Naver);
         assert_eq!(email_provider("me@example.com"), EmailProviderMark::Generic);
         assert_eq!(email_provider("not-an-email"), EmailProviderMark::Generic);
+    }
+
+    #[test]
+    fn usage_states_keep_loading_failure_and_logout_distinct() {
+        assert_eq!(
+            account_usage_state(Some(true), false, None),
+            AccountUsageState::Loading
+        );
+        assert_eq!(
+            account_usage_state(Some(true), false, Some(false)),
+            AccountUsageState::Failed
+        );
+        assert_eq!(
+            account_usage_state(Some(false), true, Some(true)),
+            AccountUsageState::LoggedOut,
+            "로그아웃이 옛 캐시보다 우선해야 한다"
+        );
+    }
+
+    #[test]
+    fn account_details_keep_each_window_reset_and_wrap_models_after_core_windows() {
+        let row = usage_account(vec![
+            crate::UsageWindowBadge {
+                label: "5h".to_string(),
+                pct: 12.0,
+                resets_at: None,
+            },
+            crate::UsageWindowBadge {
+                label: "7d".to_string(),
+                pct: 70.0,
+                resets_at: Some(200),
+            },
+            crate::UsageWindowBadge {
+                label: "7d Fable".to_string(),
+                pct: 41.0,
+                resets_at: Some(300),
+            },
+        ]);
+        let lines = account_usage_lines(&row);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].label, "5시간");
+        assert_eq!(lines[0].resets_at, None, "5h에 없는 reset을 7d에서 빌리면 안 된다");
+        assert_eq!(lines[1].label, "7일");
+        assert_eq!(lines[1].resets_at, Some(200));
+        assert_eq!(lines[2].label, "Fable · 7일");
+        assert_eq!(lines[2].resets_at, Some(300));
+        assert_ne!(
+            account_usage_key(AccountProvider::Claude, "acct-1"),
+            account_usage_key(AccountProvider::Codex, "acct-1")
+        );
     }
 
     #[test]

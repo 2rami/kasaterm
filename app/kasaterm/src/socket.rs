@@ -5517,14 +5517,18 @@ pub struct UsagePressure {
 fn usage_window_label(e: &serde_json::Value) -> String {
     match e.get("group").and_then(|g| g.as_str()) {
         Some("session") => "5h".to_string(),
-        Some("weekly") => match e
-            .pointer("/scope/model/display_name")
-            .and_then(|m| m.as_str())
-            .filter(|m| !m.is_empty())
-        {
-            Some(model) => format!("7d {model}"),
-            None => "7d".to_string(),
-        },
+        Some("weekly") => {
+            let scoped = e.get("kind").and_then(|kind| kind.as_str()) == Some("weekly_scoped");
+            match e
+                .pointer("/scope/model/display_name")
+                .and_then(|m| m.as_str())
+                .filter(|m| !m.is_empty())
+            {
+                Some(model) => format!("7d {model}"),
+                None if scoped => "7d 모델별".to_string(),
+                None => "7d".to_string(),
+            }
+        }
         _ => "한도".to_string(),
     }
 }
@@ -7044,11 +7048,12 @@ mod account_autoswitch_tests {
             ["5h", "7d", "7d Fable"],
             "전체 주간이 앞, 스코프 창은 모델명"
         );
-        // 모델명이 안 온 스코프 창에 이름을 지어 붙이지 않는다.
+        // 모델명이 안 와도 전체 주간과 같은 이름으로 합치지 않는다. 특정 모델의
+        // 창이라는 사실만 말하고 모델명은 지어내지 않는다.
         let v2 = serde_json::json!({
             "limits": [{ "group": "weekly", "kind": "weekly_scoped", "percent": 74 }]
         });
-        assert_eq!(usage_windows(&v2)[0].label, "7d");
+        assert_eq!(usage_windows(&v2)[0].label, "7d 모델별");
     }
 
     fn accts(ids: &[&str]) -> Vec<ClaudeAccount> {
