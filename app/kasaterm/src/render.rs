@@ -5332,7 +5332,7 @@ impl App {
                 // 삐져나온다(사이드바는 원래 클립을 안 세웠다).
                 g.push_clip(0.0, sb_view.0, tab_strip_w, sb_view.1);
                 for ((_, id, r), info) in sb_mini.iter().zip(sb_mini_info.iter()) {
-                    let (mx, mut my, mut mw, mut mh) = *r;
+                    let (mx, my, mw, mh) = *r;
                     let cur = sb_active_pane.as_deref() == Some(id.as_str());
                     // 히트 판정은 **레이아웃이 준 칸 그대로** 본다 — 아래에서 덱만큼
                     // 줄이는 건 그림일 뿐이고, 클릭/드래그는 `sb_hits` 에 들어간 원래
@@ -5351,91 +5351,6 @@ impl App {
                         *FORCE_TIP.get_or_init(|| std::env::var("KASATERM_AUTODECKTIP").is_ok());
                     if (hov || (force_tip && deck_tip.is_none())) && info.tab_peeks.len() > 1 {
                         deck_tip = Some((mx + mw + 6.0, my, info.tab_peeks.clone()));
-                    }
-                    // 탭이 여럿인 pane 은 칸을 **카드 덱**으로 그린다(거노 2026-08-20
-                    // 「탭 안에 있으면 … 미니맵에 겹친다든지」). 배치도 칸은 pane 하나당
-                    // 하나뿐이고 그 칸은 활성 탭만 대표한다 — 그래서 한 pane 안에
-                    // 학생이 셋 들어 있어도 배치도에는 하나로만 보이고 나머지는 화면
-                    // 어디에도 흔적이 없었다.
-                    //
-                    // 뒷장은 칸 **안쪽** 우상단으로 계단진다. 바깥으로 밀면 옆 칸을
-                    // 침범한다 — 칸 사이는 1px 밖에 안 띄어 놔서(`leaf_rects` 에서
-                    // 깎는 그 1px) 바로 남의 자리에 얹힌다. 대신 앞장이 그만큼 좌하단
-                    // 으로 줄고, 아래 그림 전부(테두리·활성 판·숨쉬기·얼굴)가 좌표만
-                    // 바뀐 채 따라온다 — 덱을 위해 따로 손볼 자리가 없다.
-                    //
-                    // 탭이 하나면 `back == 0` 이라 **지금까지와 완전히 같은 그림**이다.
-                    // 거의 모든 pane 이 그쪽이고, 거기에 장식이 붙으면 배치도가 통째로
-                    // 시끄러워진다.
-                    let back = if mw > 12.0 && mh > 12.0 {
-                        info.tab_peeks.len().saturating_sub(1).min(3)
-                    } else {
-                        // 칸이 이만 못하면 계단이 칸을 다 먹는다. 얼굴도 못 들어가는
-                        // 크기라 여기서 포기하는 게 낫다.
-                        0
-                    };
-                    if back > 0 {
-                        // 계단은 **칸에 비례하되 덱 전체가 칸의 30% 안에** 들어오게
-                        // 나눠 갖는다. 고정폭으로 두면 탭이 넷일 때 앞장이 얼굴도 못
-                        // 담을 만큼 깎이고, 비례만 두면 큰 칸에서 계단이 벌어져 덱이
-                        // 아니라 어긋난 사각 셋으로 읽힌다.
-                        let step = ((mw.min(mh) * 0.34) / back as f32).clamp(1.5, 4.5);
-                        let inset = step * back as f32;
-                        let (cw, ch) = (mw - inset, mh - inset);
-                        // 카드는 **통짜로** 칠한다 — 비활성 칸이 원래 통짜라(아래
-                        // `round_rect` 한 방이 칸을 통째로 채운다) 뒷장만 속을 파면
-                        // 「빈 액자」가 되어 다른 종류로 읽히고, 그 윤곽선은 실제
-                        // 크기에서 배경에 묻혀 아예 사라진다(실측 캡처에서 확대해야만
-                        // 보였다). 대신 카드마다 **한 겹 큰 배경색 테**를 먼저 깔아
-                        // 장을 가른다 — 같은 색 통짜가 겹치면 한 덩어리가 되고, 그러면
-                        // 「여러 개다」는 말해도 「몇 개나」는 못 말한다.
-                        let gap = |g: &mut _, x: f32, y: f32| {
-                            round_rect(
-                                g,
-                                x - 0.7,
-                                y - 0.7,
-                                cw + 1.4,
-                                ch + 1.4,
-                                2.2,
-                                theme::panel_bg(),
-                            );
-                        };
-                        // 앞장은 활성 탭이므로 뒷장은 **나머지를 순서대로** 맡는다.
-                        // k == 1 이 앞장 바로 뒤이고 k 가 클수록 더 뒤다.
-                        let others: Vec<&TabPeek> =
-                            info.tab_peeks.iter().filter(|t| !t.active).collect();
-                        // 뒤에서 앞으로. k 가 클수록 우상단이고, k == 0 이 아래 코드가
-                        // 이어서 그리는 앞장(= 활성 탭)이다.
-                        for k in (1..=back).rev() {
-                            let (x, y) = (mx + step * k as f32, my + step * (back - k) as f32);
-                            gap(g, x, y);
-                            // 장마다 **그 탭 학생의 색**으로 칠한다 — 덱이 장 수는
-                            // 말하면서 누구인지는 못 말했다(2026-08-24 지시). 계단이
-                            // 1.5~4.5px 라 얼굴도 글자도 못 들어가고 색만 들어간다.
-                            //
-                            // 학생이 없는 장(이미지·md·웹, 아직 claude 가 안 뜬 자리)은
-                            // 옆 칸(비활성 = `border` 0x66)보다 **한 단 어두운** 원래
-                            // 회색이다. 같은 값으로 뒀더니 뒷장이 위 칸과 색이 붙어
-                            // 「남의 칸이 여기까지 온 것」처럼 읽혔다(실측).
-                            //
-                            // 학생색도 그 어두운 규칙을 따라 알파를 눌러 둔다. 원색
-                            // 그대로면 뒷장이 앞장보다 밝아 덱의 앞뒤가 뒤집힌다 —
-                            // 뒤로 물러나 보이는 것이 이 그림의 뼈대다.
-                            let col = others
-                                .get(k - 1)
-                                .and_then(|t| t.who.as_deref())
-                                .and_then(theme::character_accent)
-                                .map(|c| [c[0], c[1], c[2], 0xa8])
-                                .unwrap_or_else(|| theme::with_alpha(theme::border(), 0x4a));
-                            round_rect(g, x, y, cw, ch, 2.0, col);
-                        }
-                        // 앞장 자리의 테. 이게 없으면 앞장과 바로 뒷장이 붙어 버린다
-                        // — 활성 칸은 테두리가 accent 라 저절로 갈리지만, 비활성 칸은
-                        // 둘 다 같은 회색이라 두 장이 한 장으로 보인다.
-                        gap(g, mx, my + inset);
-                        my += inset;
-                        mw = cw;
-                        mh = ch;
                     }
                     // 손이 필요한 칸은 **칸째 숨쉰다**(2026-08-11 지시: "점 말고 칸이
                     // 빛나게"). 모서리 점으로도 말해 봤는데 6px 짜리가 얼굴 옆에 붙으니
@@ -5657,6 +5572,32 @@ impl App {
                         // 명단의 값이고, 색이 어긋나면 두 그림이 딴 말을 한다.
                         if let Some(c) = who.and_then(theme::character_accent) {
                             circle_rect(g, bx + pad, ly + fs / 2.0 - dot / 2.0, dot, c);
+                    // 탭이 여럿인 pane 은 칸 바닥 왼쪽에 **점 줄** — 몇째 탭이 앞에
+                    // 나와 있는지. 전엔 뒷장이 우상단으로 계단지는 카드 덱이었는데,
+                    // 폰 배치도가 점으로 말하게 되면서 데스크톱도 같은 말로 맞췄다
+                    // (2026-09-08 지시 「점 표시 있으니까 겹침은 빼고 pc 도 모바일처럼」).
+                    // 명단은 그대로 마우스를 올리면 편다(`deck_tip`).
+                    let n_tabs = info.tab_peeks.len();
+                    if n_tabs > 1 && mw > 16.0 && mh > 16.0 {
+                        let (dot, gap) = (2.5, 1.5);
+                        let dy = if minimap_has_bar(mw, mh) {
+                            my + mh - MINI_BAR_H - MINI_BAR_PAD - dot - 2.0
+                        } else {
+                            my + mh - dot - 2.0
+                        };
+                        let shown = n_tabs.min(6);
+                        let mut dx = mx + 3.0;
+                        for t in info.tab_peeks.iter().take(shown) {
+                            let w = if t.active { dot * 1.8 } else { dot };
+                            let col = if t.active {
+                                theme::text_dim()
+                            } else {
+                                theme::with_alpha(theme::text_mute(), 0x70)
+                            };
+                            round_rect(g, dx, dy, w, dot, dot / 2.0, col);
+                            dx += w + gap;
+                        }
+                    }
                         }
                         let (name_col, bold) = if t.active {
                             (theme::text(), true)

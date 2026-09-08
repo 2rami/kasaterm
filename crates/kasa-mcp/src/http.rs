@@ -4410,6 +4410,27 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
             // 「아무것도 없는 pane 셸인데 우사기라고 뜨지」). `harness` 는 셸 밑에 살아
             // 있는 하네스 프로세스를 본 것이라 그 판정에 맞다. 거울 pane 은 하네스가
             // 저쪽 기계에 있어 이 관문을 안 탄다(이름은 저쪽 목록에서 온다).
+            // 거울 pane 은 이쪽 board 에 줄이 없다(몸통이 저쪽). 저 기계의 목록 캐시에서
+            // 같은 pane 의 줄을 그대로 가져와 이쪽 자리·창 번호만 덮는다 — 이름·얼굴·
+            // 상태·상태줄이 저쪽과 똑같이 나온다. `mirror_of` 로 어느 기계의 거울인지.
+            if raw.is_none() {
+                if let Some((label, mut row)) =
+                    crate::remote::remote_info(&id).and_then(|i| {
+                        let label = if i.label.is_empty() {
+                            crate::machines::label_for_base(&i.base)?
+                        } else {
+                            i.label
+                        };
+                        crate::machines::cached_pane(&label, &i.remote_id).map(|r| (label, r))
+                    })
+                {
+                    row["id"] = serde_json::Value::String(id.clone());
+                    row["window"] = serde_json::json!(pane_windows.get(&id).copied());
+                    row["closed"] = serde_json::json!(!pane_windows.contains_key(&id));
+                    row["mirror_of"] = serde_json::Value::String(label);
+                    return row;
+                }
+            }
             let b = raw.filter(|p| p.harness.is_some() || crate::remote::is_remote_pane(&id));
             // 거울 pane 은 이쪽 board 에 줄이 없다(몸통이 저쪽). 저 기계의 목록 캐시에서
             // 같은 pane 의 줄을 그대로 가져와 이쪽 자리·창 번호만 덮는다 — 이름·얼굴·
