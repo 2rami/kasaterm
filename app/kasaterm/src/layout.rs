@@ -251,7 +251,13 @@ impl App {
             .clone()
             .or_else(|| ws.panes.keys().next().cloned())?;
         let pane = ws.panes.get(&id)?;
-        let t = pane.term()?;
+        // PTY 없는 pane(마크다운·이미지)은 셀 격자가 없다 — 그래도 pane 은 맞혀야
+        // 체크박스·링크·선택이 그 pane 으로 간다. 셀 좌표는 쓰는 곳이 없어 0 이다.
+        // 마크다운만 있는 창(오토메모리 링크)에서 클릭이 통째로 사라지던 원인
+        // (2026-09-08 지적 「체크표시 하려고 눌러도 안 돼」).
+        let Some(t) = pane.term() else {
+            return Some((id, 0, 0));
+        };
         if t.cols == 0 || t.rows == 0 {
             return None;
         }

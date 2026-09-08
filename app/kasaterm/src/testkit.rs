@@ -4352,6 +4352,84 @@ impl App {
     /// 눈으로 한 번은 확인해야 한다. autoshellmenu 처럼 함수-로컬 static.
     pub(crate) fn run_pending_autoftmenu(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
+    /// Headless 마크다운 할 일 체크박스 repro: `KASATERM_AUTOMDTASK=<md 경로>` 를
+    /// `KASATERM_AUTOMDTASK_MS` 뒤에 뷰어로 열고, 1.5초 뒤 첫 체크박스 한가운데를
+    /// 손으로 누른 것과 같은 순서(자리→pane→포커스→토글)로 밟으며 관문마다 값을
+    /// 찍는다. 「눌러도 안 된다」(2026-09-08)는 어느 관문이 삼켰는지가 화면에 안
+    /// 보여서, 관문별 값을 남겨야 원인이 갈린다. autoshellmenu 처럼 함수-로컬 static.
+    pub(crate) fn run_pending_automdtask(&mut self) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, std::path::PathBuf)>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        static CLICK_AT: OnceLock<Instant> = OnceLock::new();
+        let due = DUE.get_or_init(|| {
+            let p = std::env::var("KASATERM_AUTOMDTASK").ok()?;
+            let ms: u64 = std::env::var("KASATERM_AUTOMDTASK_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(4000);
+            Some((
+                Instant::now() + std::time::Duration::from_millis(ms),
+                std::path::PathBuf::from(p),
+            ))
+        });
+        let Some((due, path)) = due else { return };
+        match STEP.load(Ordering::Relaxed) {
+            0 if Instant::now() >= *due => {
+                STEP.store(1, Ordering::Relaxed);
+                eprintln!("[automdtask] open {}", path.display());
+                self.open_markdown_window(path.clone());
+                let _ = CLICK_AT.set(Instant::now() + std::time::Duration::from_millis(1500));
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            1 if CLICK_AT.get().is_some_and(|t| Instant::now() >= *t) => {
+                STEP.store(2, Ordering::Relaxed);
+                let rects: Vec<(f32, f32, f32, f32, usize)> =
+                    self.gpu.as_ref().map(|g| g.md_task_rects.clone()).unwrap_or_default();
+                let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
+                eprintln!(
+                    "[automdtask] rects={} body={:?} active={active:?}",
+                    rects.len(),
+                    self.md_body_rects.keys().collect::<Vec<_>>()
+                );
+                let Some(r) = rects.first().copied() else {
+                    eprintln!("[automdtask] FAIL 체크박스 영역 없음");
+                    return;
+                };
+                let (cx, cy) = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                self.cursor_px = (cx, cy);
+                let hit = self.px_to_pane_cell(cx, cy);
+                eprintln!("[automdtask] click=({cx:.1},{cy:.1}) hit={hit:?}");
+                let Some((pid, _, _)) = hit else {
+                    eprintln!("[automdtask] FAIL pane 없음");
+                    return;
+                };
+                let switched = active.as_deref() != Some(pid.as_str());
+                let focused = self.focus_pane(&pid);
+                eprintln!(
+                    "[automdtask] switched={switched} focus={focused} body_has={}",
+                    self.md_body_rects.contains_key(&pid)
+                );
+                let toggled = self.md_task_click(&pid, cx, cy);
+                let first = std::fs::read_to_string(&path).ok().and_then(|t| {
+                    t.lines()
+                        .find(|l| l.trim_start().starts_with("- ["))
+                        .map(|l| l.chars().take(40).collect::<String>())
+                });
+                eprintln!(
+                    "[automdtask] {} toggled={toggled} first_task={first:?}",
+                    if toggled { "PASS" } else { "FAIL" }
+                );
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            _ => {}
+        }
+    }
         use std::sync::OnceLock;
         static DUE: OnceLock<Option<Instant>> = OnceLock::new();
         static FIRED: AtomicBool = AtomicBool::new(false);

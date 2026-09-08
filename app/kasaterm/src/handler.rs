@@ -5973,17 +5973,6 @@ impl ApplicationHandler<UserEvent> for App {
                                             window.request_redraw();
                                             return;
                                         }
-                                        // 렌더 뷰 체크박스 — 캐럿 배치보다 먼저.
-                                        // 상자를 눌렀는데 캐럿만 옮겨 가고 체크는
-                                        // 안 되면 「눌리지 않는다」로 읽힌다.
-                                        if self.md_task_click(
-                                            &pane_id,
-                                            self.cursor_px.0,
-                                            self.cursor_px.1,
-                                        ) {
-                                            window.request_redraw();
-                                            return;
-                                        }
                                         // 거터의 접기 삼각형은 캐럿 배치보다 먼저
                                         // 본다 — 삼각형 위에서 손을 떼는 순간
                                         // 본문에 엉뚱한 선택이 생기면 안 된다.
@@ -6017,6 +6006,19 @@ impl ApplicationHandler<UserEvent> for App {
                                         }
                                         self.md_select_drag = Some(pane_id.clone());
                                     } else {
+                                        // 렌더 뷰의 할 일 체크박스 — 선택 앵커보다 먼저.
+                                        // 상자는 렌더 뷰에서만 그려지는데(md_task_rects)
+                                        // 처리는 원문 편집 분기(md_body_rects 가 있을 때)
+                                        // 안에 있어서 눌러도 선택 앵커만 잡혔다
+                                        // (2026-09-08 지적 「체크표시 하려고 눌러도 안 돼」).
+                                        if self.md_task_click(
+                                            &pane_id,
+                                            self.cursor_px.0,
+                                            self.cursor_px.1,
+                                        ) {
+                                            window.request_redraw();
+                                            return;
+                                        }
                                         // 렌더 뷰: 문서 좌표로 선택 앵커를 잡는다.
                                         // 링크 열기는 Released 로 미룬다 — 링크 위에서
                                         // 드래그를 시작할 수도 있어서, 누르는 순간
@@ -7272,6 +7274,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoinfodbl(event_loop);
         self.run_pending_autosettings(event_loop);
         self.run_pending_autoshellmenu();
+        self.run_pending_automdtask();
         self.run_pending_autoftmenu();
         self.run_pending_automdselect();
         self.run_pending_automdscript(event_loop);
