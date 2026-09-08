@@ -731,9 +731,24 @@ class _MiniCellState extends State<_MiniCell> {
     final edge = waiting ? StatusStyle.attention : accent;
     return LayoutBuilder(
       builder: (context, box) {
-        final roomy = box.maxWidth >= 64 && box.maxHeight >= 44;
-        final dots = tabbed && box.maxHeight >= 36;
-        final face = math.min((box.maxHeight - (dots ? 8 : 0)) * 0.55, 30.0);
+        // 탭이 여럿이면 카드 덱 — 뒷장이 우상단으로 계단처럼 비치고, 앞장(보고 있는
+        // 탭)은 그만큼 좌하단으로 준다. 데스크톱 배치도와 같은 그림(2026-09-08 지시
+        // 「pc 처럼 겹침 표시」). 장마다 그 탭 학생의 색이라 누가 뒤에 있는지도 보인다.
+        final back = tabbed && box.maxWidth > 24 && box.maxHeight > 24
+            ? math.min(tabs.length - 1, 3)
+            : 0;
+        final step = back == 0
+            ? 0.0
+            : (math.min(box.maxWidth, box.maxHeight) * 0.34 / back).clamp(
+                2.0,
+                6.0,
+              );
+        final inset = step * back;
+        final cw = box.maxWidth - inset;
+        final ch = box.maxHeight - inset;
+        final roomy = cw >= 64 && ch >= 44;
+        final dots = tabbed && ch >= 36;
+        final face = math.min((ch - (dots ? 8 : 0)) * 0.55, 30.0);
         Widget student(Pane? q) => Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -771,7 +786,7 @@ class _MiniCellState extends State<_MiniCell> {
             ],
           ),
         );
-        return AnimatedContainer(
+        final front = AnimatedContainer(
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeOut,
           decoration: BoxDecoration(
@@ -847,7 +862,59 @@ class _MiniCellState extends State<_MiniCell> {
             ),
           ),
         );
+        if (back == 0) return front;
+        // 뒷장은 보고 있는 탭을 뺀 나머지를 순서대로 — 앞장 바로 뒤가 첫째.
+        final others = [
+          for (var i = 0; i < tabs.length; i++)
+            if (i != _page) tabs[i],
+        ];
+        return Stack(
+          children: [
+            for (var k = back; k >= 1; k--)
+              Positioned(
+                left: step * k,
+                top: step * (back - k),
+                width: cw,
+                height: ch,
+                child: _DeckCard(pane: others[k - 1]),
+              ),
+            Positioned(
+              left: 0,
+              top: inset,
+              width: cw,
+              height: ch,
+              child: front,
+            ),
+          ],
+        );
       },
+    );
+  }
+}
+
+/// 덱의 뒷장 — 그 탭 학생의 색을 눌러 칠한 통짜 카드. 앞장과 겹치는 자리는 바탕색
+/// 테로 한 겹 갈라, 같은 색이 붙어 한 덩어리로 읽히지 않게 한다.
+class _DeckCard extends StatelessWidget {
+  const _DeckCard({required this.pane});
+
+  final Pane? pane;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final p = pane;
+    final color = p == null
+        ? scheme.outlineVariant
+        : (parseHexColor(p.color) ?? scheme.primary);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Color.alphaBlend(
+          color.withValues(alpha: p == null ? 0.35 : 0.45),
+          scheme.surfaceContainerLow,
+        ),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: scheme.surfaceContainerLow, width: 1),
+      ),
     );
   }
 }

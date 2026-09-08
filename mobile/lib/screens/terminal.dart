@@ -206,148 +206,142 @@ class _TerminalScreenState extends State<TerminalScreen>
       final pane = widget.pane;
       final accent = studentAccent(context, pane, s.tokens);
       final slug = pane.slug;
-      return Scaffold(
-        appBar: AppBar(
-          titleSpacing: 0,
-          // 세 줄(이름·세션 / 상태·연결 / 상태줄)이 기본 56 에 안 들어간다.
-          toolbarHeight: pane.statusParts.isEmpty ? kToolbarHeight : 84,
-          title: Row(
-            children: [
-              Hero(
-                tag: 'face-${pane.machine}-${pane.id}',
-                // 화면의 주인공은 프사(사진) — 목록의 도트가 여기로 날아와 얼굴이 된다.
-                child: StudentFace(
-                  slug: slug,
-                  url: slug == null
-                      ? null
-                      : widget.server.avatar(slug, machine: pane.machine),
-                  shell: pane.isShell,
-                  size: 40,
+      return _StudentFrame(
+        accent: accent,
+        child: Scaffold(
+          appBar: AppBar(
+            titleSpacing: 0,
+            // 세 줄(이름·세션 / 상태·연결 / 상태줄)이 기본 56 에 안 들어간다.
+            toolbarHeight: pane.statusParts.isEmpty ? kToolbarHeight : 84,
+            title: Row(
+              children: [
+                Hero(
+                  tag: 'face-${pane.machine}-${pane.id}',
+                  // 화면의 주인공은 프사(사진) — 목록의 도트가 여기로 날아와 얼굴이 된다.
+                  child: StudentFace(
+                    slug: slug,
+                    url: slug == null
+                        ? null
+                        : widget.server.avatar(slug, machine: pane.machine),
+                    shell: pane.isShell,
+                    size: 40,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Flexible(
-                          child: Text(
-                            pane.displayName,
-                            style: theme.textTheme.titleMedium,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        if ((pane.session ?? '').isNotEmpty) ...[
-                          const SizedBox(width: 6),
-                          Flexible(child: SessionTag(pane.session!)),
-                        ],
-                      ],
-                    ),
-                    Row(
-                      children: [
-                        // 열 때의 상태 — 허브 칩과 같은 색·말. 연결 상태는 그 뒤에.
-                        Builder(
-                          builder: (context) {
-                            final st = StatusStyle.of(pane, scheme);
-                            return Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                if (st.live)
-                                  PulseDot(color: st.color, size: 6)
-                                else
-                                  Icon(st.icon, size: 11, color: st.color),
-                                const SizedBox(width: 3),
-                                Text(
-                                  st.label,
-                                  style: theme.textTheme.labelSmall?.copyWith(
-                                    color: st.color,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ],
-                            );
-                          },
-                        ),
-                        Flexible(
-                          child: Text(
-                            '  ·  ${_stateText(s)}',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: scheme.onSurfaceVariant,
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              pane.displayName,
+                              style: theme.textTheme.titleMedium,
+                              overflow: TextOverflow.ellipsis,
                             ),
-                            overflow: TextOverflow.ellipsis,
                           ),
-                        ),
-                      ],
-                    ),
-                    // 데스크톱 pane 머리와 같은 셋째 줄 — 하네스·모델·브랜치·컨텍스트·effort.
-                    if (pane.statusParts.isNotEmpty) PaneStatusLine(pane: pane),
-                  ],
+                          if ((pane.session ?? '').isNotEmpty) ...[
+                            const SizedBox(width: 6),
+                            Flexible(child: SessionTag(pane.session!)),
+                          ],
+                        ],
+                      ),
+                      Row(
+                        children: [
+                          // 열 때의 상태 — 허브 칩과 같은 색·말. 연결 상태는 그 뒤에.
+                          Builder(
+                            builder: (context) {
+                              final st = StatusStyle.of(pane, scheme);
+                              return Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (st.live)
+                                    PulseDot(color: st.color, size: 6)
+                                  else
+                                    Icon(st.icon, size: 11, color: st.color),
+                                  const SizedBox(width: 3),
+                                  Text(
+                                    st.label,
+                                    style: theme.textTheme.labelSmall?.copyWith(
+                                      color: st.color,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
+                          Flexible(
+                            child: Text(
+                              '  ·  ${_stateText(s)}',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: scheme.onSurfaceVariant,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                      // 데스크톱 pane 머리와 같은 셋째 줄 — 하네스·모델·브랜치·컨텍스트·effort.
+                      if (pane.statusParts.isNotEmpty)
+                        PaneStatusLine(pane: pane),
+                    ],
+                  ),
                 ),
+              ],
+            ),
+            actions: [
+              IconButton(
+                tooltip: _wrap ? '데스크톱 격자 그대로 보기' : '폰 폭에 맞춰 보기',
+                isSelected: _wrap,
+                onPressed: () => setState(() => _wrap = !_wrap),
+                icon: const Icon(Icons.wrap_text),
+              ),
+              IconButton(
+                tooltip: 'pane 닫기',
+                onPressed: () => _closePane(pane),
+                icon: const Icon(Icons.close),
               ),
             ],
           ),
-          actions: [
-            IconButton(
-              tooltip: _wrap ? '데스크톱 격자 그대로 보기' : '폰 폭에 맞춰 보기',
-              isSelected: _wrap,
-              onPressed: () => setState(() => _wrap = !_wrap),
-              icon: const Icon(Icons.wrap_text),
-            ),
-            IconButton(
-              tooltip: 'pane 닫기',
-              onPressed: () => _closePane(pane),
-              icon: const Icon(Icons.close),
-            ),
-          ],
-        ),
-        body: SafeArea(
-          child: Column(
-            children: [
-              // 학생색 테두리 — 데스크톱 pane 의 색 테를 폰 화면 전체에 두른 것.
-              // 글자가 화면 오른쪽 끝에 닿아 답답하던 것도 이 숨으로 푼다
-              // (2026-09-08 지시 「앱 전체에 아웃라인을 캐릭터 색별로」).
-              Expanded(
-                child: Container(
-                  margin: const EdgeInsets.fromLTRB(8, 6, 8, 4),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 4,
+          body: SafeArea(
+            child: Column(
+              children: [
+                // 좌우 숨 — 글자가 화면 끝에 닿으면 답답하고, 0열에 잉크가 있는 글자가
+                // 잘려 보인다. 학생색 테는 화면 가장자리의 _StudentFrame 이 두른다.
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+                    child: _view(s),
                   ),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: accent, width: 1.5),
+                ),
+                if (s.note != null) _NoteBar(text: s.note!),
+                _KeyBar(
+                  session: s,
+                  ctrl: _ctrl,
+                  onCtrl: () => setState(() => _ctrl = !_ctrl),
+                  onKey: _toBottom,
+                ),
+                if (_live)
+                  _LiveBar(
+                    controller: _input,
+                    focusNode: _inputFocus,
+                    enabled: s.state != TermState.gone,
+                    onChanged: _onLiveChanged,
+                    onSubmit: _liveSubmit,
+                    onDraft: _toggleLive,
+                  )
+                else
+                  _ReplyBar(
+                    controller: _input,
+                    focusNode: _inputFocus,
+                    enabled: s.state != TermState.gone && !_sending,
+                    onSend: _send,
+                    onLive: _toggleLive,
                   ),
-                  clipBehavior: Clip.antiAlias,
-                  child: _view(s),
-                ),
-              ),
-              if (s.note != null) _NoteBar(text: s.note!),
-              _KeyBar(
-                session: s,
-                ctrl: _ctrl,
-                onCtrl: () => setState(() => _ctrl = !_ctrl),
-                onKey: _toBottom,
-              ),
-              if (_live)
-                _LiveBar(
-                  controller: _input,
-                  focusNode: _inputFocus,
-                  enabled: s.state != TermState.gone,
-                  onChanged: _onLiveChanged,
-                  onSubmit: _liveSubmit,
-                  onDraft: _toggleLive,
-                )
-              else
-                _ReplyBar(
-                  controller: _input,
-                  focusNode: _inputFocus,
-                  enabled: s.state != TermState.gone && !_sending,
-                  onSend: _send,
-                  onLive: _toggleLive,
-                ),
-            ],
+              ],
+            ),
           ),
         ),
       );
@@ -627,6 +621,46 @@ class _LiveBar extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// 학생색 테를 폰 화면 가장자리 전체에 — 상태바·홈 막대까지 한 겹으로 감싸 그 학생의
+/// 화면 안에 들어와 있는 느낌을 준다(2026-09-08 지시 「폰 화면 전체에 뜨게, 몰입감 있게」).
+/// 바깥 선 하나에 안쪽으로 옅은 빛띠 하나. 모서리는 아이폰 화면 모서리를 따라 둥글다.
+class _StudentFrame extends StatelessWidget {
+  const _StudentFrame({required this.accent, required this.child});
+
+  final Color accent;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final radius = BorderRadius.circular(46);
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        child,
+        IgnorePointer(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              border: Border.all(
+                color: accent.withValues(alpha: 0.10),
+                width: 9,
+              ),
+            ),
+          ),
+        ),
+        IgnorePointer(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              border: Border.all(color: accent, width: 2.5),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
