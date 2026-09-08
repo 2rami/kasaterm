@@ -6941,6 +6941,7 @@ pub fn spawn_http_server_opts(
                     .route("/term/notes/{name}", get(term_notes_image))
                     // 폰 허브·유저별 주소 관리·다른 기계로 넘기는 문(mobile.rs 머리말).
                     .route("/hub", get(hub_page))
+                    .route("/app", get(app_page))
                     .route("/mobile/me", get(mobile_me))
                     .route(
                         "/mobile/users",
@@ -6951,7 +6952,6 @@ pub fn spawn_http_server_opts(
                     .route("/m/{label}/{*rest}", axum::routing::any(machine_proxy))
                     .route("/peer-registry", get(peer_registry_get))
                     .route(
-                    .route("/app", get(app_page))
                         "/term/character-theme",
                         post(move |q: Query<std::collections::HashMap<String, String>>,
                                    body: axum::body::Bytes| {
