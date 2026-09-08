@@ -16,6 +16,7 @@ pub enum Action {
     ResetExpressions,
     RepeatMotion,
     Automatic,
+    Journal(crate::journal::Action),
 }
 
 pub fn show(
@@ -48,6 +49,16 @@ pub fn show(
     ] {
         let item = MenuItem::new(title, enabled, None);
         actions.push((item.id().clone(), action));
+        menu.append(&item).ok()?;
+    }
+    menu.append(&PredefinedMenuItem::separator()).ok()?;
+    for (title, action) in [
+        ("시킨 일 요약", crate::journal::Action::Summary),
+        ("반영 기다리는 일", crate::journal::Action::Waiting),
+        ("요청 장부 열기", crate::journal::Action::Open),
+    ] {
+        let item = MenuItem::new(title, true, None);
+        actions.push((item.id().clone(), Action::Journal(action)));
         menu.append(&item).ok()?;
     }
     menu.append(&PredefinedMenuItem::separator()).ok()?;

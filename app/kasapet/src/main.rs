@@ -22,6 +22,7 @@ mod board;
 mod bubble;
 mod menu;
 mod catalog;
+mod journal;
 #[cfg(target_os = "macos")]
 mod native_cursor;
 
@@ -85,6 +86,8 @@ struct App {
     bounce: Option<(std::time::Instant, f64)>,
     /// 말 거는 중이면 친 글. None 이면 평소처럼 듣기만 한다.
     typing: Option<String>,
+    journal: journal::Client,
+    journal_shown: bool,
     typed_tex: Option<(wgpu::TextureView, f32, f32)>,
     /// 조합 중인 한글. 확정 전이라 `typing` 에 아직 안 붙은 글자다.
     preedit: String,
@@ -397,6 +400,7 @@ impl App {
         self.last_click = None;
         match action {
             Some(menu::Action::Talk) => self.toggle_typing(),
+            Some(menu::Action::Journal(action)) => self.request_journal(action),
             Some(menu::Action::Touch) => self.touch(),
             Some(menu::Action::Rest) => {
                 self.resting = !(self.resting || self.mood == board::Mood::Sleep);
@@ -609,6 +613,11 @@ impl App {
     fn send_typed(&mut self) {
         let text = self.typing.clone().unwrap_or_default();
         let text = text.trim().to_string();
+        if let Some(action) = journal::intent(&text) {
+            self.toggle_typing();
+            self.request_journal(action);
+            return;
+        }
         if text.is_empty() || self.subject.is_empty() {
             self.toggle_typing();
             return;
@@ -632,6 +641,34 @@ impl App {
             self.preedit
         );
         self.typed_tex = bubble::render_text(&g.dev, &g.q, &body, 260.0, self.text_pt);
+    }
+
+    fn request_journal(&mut self, action: journal::Action) {
+        let path = self.pet_dir.as_ref().and_then(|dir| dir.parent())
+            .map(|dir| dir.join("request-journal/service.json"))
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config/kasaterm/request-journal/service.json")));
+        let Some(path) = path else { return };
+        if self.journal.request(action, path) {
+            self.say = "요청 장부를 읽고 있어요…".into();
+            self.journal_shown = true;
+            self.said_at = std::time::Instant::now();
+            self.urgent = false;
+            self.rebuild_bubble_text();
+        }
+    }
+
+    fn poll_journal(&mut self) {
+        if self.journal_shown && self.said_at.elapsed().as_secs_f32() > self.preferences.say_seconds as f32 {
+            self.journal_shown = false;
+            self.board_seen = None;
+        }
+        if let Some(text) = self.journal.poll() {
+            self.say = text;
+            self.journal_shown = true;
+            self.said_at = std::time::Instant::now();
+            self.urgent = false;
+            self.rebuild_bubble_text();
+        }
     }
 
     /// 자리와 크기를 남긴다. 펫은 켤 때마다 같은 데서 뜨는 편이 자연스럽고,
@@ -693,6 +730,9 @@ impl App {
         let (mood, text, pane) = board::read(&f);
         self.subject = pane;
         self.stirred = std::time::Instant::now();
+        let urgent = matches!(mood, board::Mood::Wait | board::Mood::Error);
+        if self.journal_shown && !urgent { return; }
+        self.journal_shown = false;
         if text != self.say {
             self.say = text;
             self.said_at = std::time::Instant::now();
@@ -700,7 +740,6 @@ impl App {
         }
         // 사람 손이 필요한 말은 안 접는다 — 12초 뒤 사라지면 자리를 비운 사이의 승인
         // 요청을 통째로 놓친다. 그리고 그런 말이 새로 뜰 땐 한 번 튄다.
-        let urgent = matches!(mood, board::Mood::Wait | board::Mood::Error);
         if urgent && !self.urgent && !self.resting && self.preferences.animations {
             self.start_bounce();
         }
@@ -731,6 +770,7 @@ impl App {
     }
 
     fn action_error(&mut self, message: &str) {
+        self.journal_shown = false;
         self.say = message.to_string();
         self.said_at = std::time::Instant::now();
         self.urgent = true;
@@ -791,6 +831,10 @@ impl App {
     /// 말풍선이 가리키는 pane 을 앞으로 꺼낸다. pane 고르기와 창 올리기는 따로다 —
     /// 앱이 뒤에 있으면 고르기만 해서는 화면에 안 뜬다.
     fn jump_to_subject(&mut self) {
+        if self.journal_shown {
+            self.request_journal(journal::Action::Open);
+            return;
+        }
         self.touch();
         if self.subject.is_empty() {
             return;
@@ -863,6 +907,7 @@ impl App {
     fn draw(&mut self) {
         self.poll_cursor();
         self.poll_board();
+        self.poll_journal();
         self.tick_bounce();
         let finished = self.motion.as_ref().is_some_and(|m| m.is_finished());
         if self.playback.finish_once(finished) { self.resume_automatic(); }
@@ -1429,6 +1474,8 @@ fn main() {
         mood: board::Mood::Idle, say: String::new(), board_seen: None,
         board_polled: std::time::Instant::now(), stirred: std::time::Instant::now(),
         bubble_text: None, text_pt, subject: String::new(),
+        journal: journal::Client::default(),
+        journal_shown: false,
         said_at: std::time::Instant::now(), urgent: false, bounce: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
         catalog, expressions: catalog::Expressions::default(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
