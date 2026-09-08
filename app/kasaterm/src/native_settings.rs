@@ -3977,11 +3977,7 @@ fn machines_view() -> Vec<MachineRow> {
 }
 
 /// 기계 칸. 계정 칸과 같은 모양이다 — 목록 머리에 추가 단추, 줄마다 고치기와
-/// 지우기. 손으로 json 을 고치던 것을 여기로 올렸다(2026-09-07 지시).
-/// 펫 칸. 켜고 끄기 · 누가 나올까 · 말풍선 글자 크기 셋뿐이다.
-///
-/// 값이 앱 설정이 아니라 **펫 폴더의 파일**로 오간다(`current`·`text_pt`). 펫은 별개
-/// 프로세스라 앱의 설정 저장소를 못 읽고, 파일이면 앱이 꺼져 있어도 그대로 통한다.
+// 펫은 별도 프로세스라 양쪽이 공유하는 설정을 읽어 우클릭 변경도 여기 반영한다.
 fn paint_pet(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -3993,7 +3989,9 @@ fn paint_pet(
     let on = crate::chrome::pet_pid().is_some();
     let chars = crate::chrome::pet_characters();
     let current = crate::chrome::pet_current_character();
-    let pt = crate::chrome::pet_text_pt();
+    use kasa_pet_config::PreferenceChange as Change;
+    let prefs = crate::chrome::pet_preferences();
+    let scale = crate::chrome::pet_scale_percent(&prefs);
 
     toggle_row(
         g,
@@ -4010,7 +4008,7 @@ fn paint_pet(
         g,
         x + 12.0,
         *y - 4.0,
-        "kasaterm 을 내려도 남습니다. 끌어서 옮기고, 휠로 크기를 바꿉니다",
+        "kasaterm을 내려도 바탕화면에 남습니다",
         11.0,
         theme::text_dim(),
         false,
@@ -4037,29 +4035,78 @@ fn paint_pet(
         pet_cards(g, s, hits, x, y, w, &chars, current.as_deref());
     }
 
-    draw_text(g, x, *y, "말풍선 글자 크기", 12.5, theme::text(), true);
-    draw_text(
-        g,
-        x + w - 40.0,
-        *y,
-        &format!("{pt}pt"),
-        12.0,
-        theme::text_dim(),
-        false,
-    );
-    *y += 26.0;
-    pet_size_slider(g, s, hits, x, y, w, pt);
+    pet_section(g, x, y, "모습");
+    pet_value_row(g, s, hits, x, y, w, "펫 크기", &format!("{scale}%"),
+        Change::ScalePercent(Some(scale.saturating_sub(10).max(40))),
+        Change::ScalePercent(Some((scale + 10).min(300))));
+    pet_value_row(g, s, hits, x, y, w, "말풍선 글자 크기", &format!("{}pt", prefs.text_pt),
+        Change::TextPt(prefs.text_pt.saturating_sub(1).max(8)),
+        Change::TextPt((prefs.text_pt + 1).min(40)));
+    toggle_row(g, s, hits, x, y, w, "항상 위에 표시", prefs.always_on_top,
+        SettingsAction::PetPreference(Change::AlwaysOnTop(!prefs.always_on_top)));
 
-    draw_text(
-        g,
-        x,
-        *y,
-        "펫을 두 번 누르면 다음 캐릭터, 오른쪽 단추로 끕니다",
-        11.0,
-        theme::text_dim(),
-        false,
-    );
+    pet_section(g, x, y, "움직임");
+    for (label, on, change) in [
+        ("마우스 시선 따라가기", prefs.follow_cursor, Change::FollowCursor(!prefs.follow_cursor)),
+        ("자동 움직임", prefs.animations, Change::Animations(!prefs.animations)),
+        ("위치 고정", prefs.lock_position, Change::LockPosition(!prefs.lock_position)),
+    ] {
+        toggle_row(g, s, hits, x, y, w, label, on, SettingsAction::PetPreference(change));
+    }
+    let sleep = if prefs.sleep_minutes == 0 {
+        crate::native_strings::text("안 함").into_owned()
+    } else {
+        format!("{}{}", prefs.sleep_minutes, crate::native_strings::text("분"))
+    };
+    pet_value_row(g, s, hits, x, y, w, "자동 휴식", &sleep,
+        Change::SleepMinutes(prefs.sleep_minutes.saturating_sub(1)),
+        Change::SleepMinutes((prefs.sleep_minutes + 1).min(60)));
+
+    pet_section(g, x, y, "알림");
+    toggle_row(g, s, hits, x, y, w, "말풍선 표시", prefs.bubbles,
+        SettingsAction::PetPreference(Change::Bubbles(!prefs.bubbles)));
+    toggle_row(g, s, hits, x, y, w, "작업 상태에 반응", prefs.activity_reactions,
+        SettingsAction::PetPreference(Change::ActivityReactions(!prefs.activity_reactions)));
+    pet_value_row(g, s, hits, x, y, w, "말풍선 표시 시간",
+        &format!("{}{}", prefs.say_seconds, crate::native_strings::text("초")),
+        Change::SaySeconds(prefs.say_seconds.saturating_sub(1).max(3)),
+        Change::SaySeconds((prefs.say_seconds + 1).min(60)));
+
+    pet_section(g, x, y, "펫 조작");
+    for text in [
+        "클릭으로 쓰다듬기 · 끌어서 자리 옮기기",
+        "두 번 클릭해 캐릭터 바꾸기 · 휠로 크기 조절",
+        "우클릭으로 행동 선택과 기능 켜고 끄기",
+    ] {
+        let text = fit(g, text, w, 11.0, false);
+        draw_text(g, x, *y, &text, 11.0, theme::text_dim(), false);
+        *y += 22.0;
+    }
+}
+
+fn pet_section(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, title: &str) {
+    *y += 18.0;
+    draw_text(g, x, *y, title, 12.5, theme::text(), true);
     *y += 24.0;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pet_value_row(
+    g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>,
+    x: f32, y: &mut f32, w: f32, label: &str, value: &str,
+    minus: kasa_pet_config::PreferenceChange, plus: kasa_pet_config::PreferenceChange,
+) {
+    let translated = crate::native_strings::text(label);
+    let label = if g.measure_chrome_text(&translated, 12.5, false) + 120.0 > w {
+        let shown = fit(g, label, w, 12.5, false);
+        draw_text(g, x + 2.0, *y + 8.0, &shown, 12.5, theme::text(), false);
+        *y += 28.0;
+        ""
+    } else {
+        label
+    };
+    stepper_row(g, s, hits, x, y, w, label, value,
+        SettingsAction::PetPreference(minus), SettingsAction::PetPreference(plus));
 }
 
 /// 캐릭터 카드 — 그림과 이름. 이름만 늘어놓으면 「Ren 이 누구였더라」가 되는데,
@@ -4123,44 +4170,6 @@ fn pet_cards(
     }
     let rows = names.len().div_ceil(per_row) as f32;
     *y += rows * (CARD_H + gap) + 8.0;
-}
-
-/// 글자 크기 슬라이더. 끌기가 아니라 **눌러서 놓는** 것이다 — 설정 화면의 입력 경로는
-/// 누른 자리를 안 알려 주므로, 눈금마다 제 몫의 자리를 두고 누른 눈금을 받는다.
-/// 손끝에는 그냥 슬라이더로 보인다.
-fn pet_size_slider(
-    g: &mut gpu::GpuRenderer,
-    s: &Snapshot,
-    hits: &mut Vec<Hit>,
-    x: f32,
-    y: &mut f32,
-    w: f32,
-    pt: u32,
-) {
-    const MIN: u32 = 8;
-    const MAX: u32 = 32;
-    let track_h = 6.0;
-    let ty = *y + 12.0;
-    round_rect(g, x, ty, w, track_h, track_h / 2.0, theme::surface_active());
-    let frac = ((pt.clamp(MIN, MAX) - MIN) as f32) / ((MAX - MIN) as f32);
-    round_rect(g, x, ty, (w * frac).max(track_h), track_h, track_h / 2.0, theme::accent());
-    // 손잡이
-    round_rect(g, x + w * frac - 8.0, ty - 5.0, 16.0, 16.0, 8.0, [255, 255, 255, 255]);
-    // 눈금마다 누를 자리. 칸이 좁아도 손가락이 닿게 세로를 넉넉히 준다.
-    let n = MAX - MIN + 1;
-    let cw = w / n as f32;
-    for i in 0..n {
-        let v = MIN + i;
-        register_clipped(
-            g,
-            hits,
-            Target::Setting(SettingsAction::PetTextPt(v)),
-            (x + i as f32 * cw, *y, cw, 30.0),
-            HitCursor::Pointer,
-        );
-    }
-    *y += 34.0;
-    let _ = s;
 }
 
 fn paint_machines(

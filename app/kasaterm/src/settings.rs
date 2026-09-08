@@ -766,7 +766,11 @@ impl App {
                 crate::chrome::set_pet_character(&name);
                 self.set_toast(format!("펫 캐릭터: {name}"));
             }
-            SettingsAction::PetTextPt(pt) => crate::chrome::set_pet_text_pt(pt),
+            SettingsAction::PetPreference(change) => {
+                if crate::chrome::set_pet_preference(change).is_err() {
+                    self.set_toast(crate::native_strings::text("펫 설정을 저장하지 못했습니다. 다시 눌러 주세요").into_owned());
+                }
+            }
             SettingsAction::ToggleFooter => {
                 self.set_footer_default = !self.set_footer_default;
                 self.settings_save();

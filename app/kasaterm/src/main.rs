@@ -4346,8 +4346,7 @@ pub(crate) enum SettingsAction {
     TogglePet,
     /// 펫으로 띄울 캐릭터 폴더 이름(`~/.config/kasaterm/pet/<이름>`).
     PetCharacter(String),
-    /// 펫 말풍선 글자 크기(pt).
-    PetTextPt(u32),
+    PetPreference(kasa_pet_config::PreferenceChange),
     ToggleFooter,
     /// Editor autosave quiet period in ms; 0 = off.
     AutosaveDelay(u64),

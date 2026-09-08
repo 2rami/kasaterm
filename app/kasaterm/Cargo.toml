@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 kasa-bridge.workspace = true
 kasa-pty = { path = "../../crates/kasa-pty" }
+kasa-pet-config = { path = "../../crates/kasa-pet-config" }
 # 계정 전환의 keychain 서비스명 계산 — claude 실물(2.1.233 WZ())과 같은 식으로
 # sha256(저장 경로 NFC).hex[..8] 을 접미로 쓴다. 둘 다 이미 워크스페이스에 있다.
 sha2 = "0.10"

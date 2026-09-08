@@ -4115,20 +4115,27 @@ pub(crate) fn set_pet_character(name: &str) {
     }
 }
 
-/// 말풍선 글자 크기(pt).
-pub(crate) fn pet_text_pt() -> u32 {
-    pet_model_dir()
-        .and_then(|d| std::fs::read_to_string(d.join("text_pt")).ok())
-        .and_then(|t| t.trim().parse::<u32>().ok())
-        .map(|v| v.clamp(8, 40))
-        .unwrap_or(13)
+pub(crate) fn pet_preferences() -> kasa_pet_config::PetPreferences {
+    pet_model_dir().map(|dir| kasa_pet_config::read(&dir)).unwrap_or_default()
 }
 
-/// 글자 크기를 적어 둔다. 펫이 1초 안에 읽어 다시 그리므로 껐다 켤 일이 없다.
-pub(crate) fn set_pet_text_pt(pt: u32) {
-    if let Some(d) = pet_model_dir() {
-        let _ = std::fs::write(d.join("text_pt"), pt.clamp(8, 40).to_string());
-    }
+pub(crate) fn pet_scale_percent(preferences: &kasa_pet_config::PetPreferences) -> u32 {
+    preferences.scale_percent.unwrap_or_else(|| {
+        pet_model_dir()
+            .and_then(|dir| std::fs::read(dir.join("state.json")).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|state| state.get("scale").and_then(|scale| scale.as_f64()))
+            .map(|scale| (scale * 100.0).round() as u32)
+            .unwrap_or(100)
+            .clamp(40, 300)
+    })
+}
+
+pub(crate) fn set_pet_preference(change: kasa_pet_config::PreferenceChange) -> std::io::Result<()> {
+    let dir = pet_model_dir().ok_or_else(|| std::io::Error::new(
+        std::io::ErrorKind::NotFound, "pet settings directory unavailable",
+    ))?;
+    kasa_pet_config::update(&dir, change).map(|_| ())
 }
 
 /// 바탕화면 펫이 지금 떠 있나. pid 파일 하나로 판정한다 — 앱을 껐다 켜도 펫은 살아
@@ -4141,6 +4148,9 @@ pub(crate) fn pet_pid() -> Option<u32> {
 }
 
 fn pet_pid_path() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("KASATERM_PET_DIR").filter(|dir| !dir.is_empty()) {
+        return Some(std::path::PathBuf::from(dir).join("pet.pid"));
+    }
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/pet.pid"))
 }
 
@@ -4270,6 +4280,9 @@ fn model3_in(dir: &std::path::Path) -> Option<String> {
 }
 
 fn pet_model_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("KASATERM_PET_DIR").filter(|dir| !dir.is_empty()) {
+        return Some(dir.into());
+    }
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/pet"))
 }
 
