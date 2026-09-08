@@ -61,6 +61,17 @@ http.Response _answer(http.Request req) {
         'cwd': '/w',
         'color': '#b48cff',
       },
+      // 별도 OS 창으로 뗀 학생 — 방은 그대로, 배치 칸엔 없다.
+      {
+        'id': '%7',
+        'name': '유즈',
+        'title': '',
+        'status': 'busy',
+        'window': 0,
+        'cwd': '/w',
+        'color': '#ffd27c',
+        'undocked': true,
+      },
     ];
   } else if (path.endsWith('sessions')) {
     body = {
@@ -129,6 +140,9 @@ void main() {
     // 숨은 탭 학생은 지도 밑 「탭 안」 줄에 서고, 목록에는 그대로 있다.
     expect(find.text('탭 안'), findsOneWidget);
     expect(find.text('세이아'), findsOneWidget);
+    // 별도창 학생은 지도 밑 「별도창」 줄에 서고, 목록에는 그대로 있다.
+    expect(find.text('별도창'), findsOneWidget);
+    expect(find.text('유즈'), findsOneWidget);
     await expectLater(
       find.byType(HubScreen),
       matchesGoldenFile('goldens/hub_minimap.png'),

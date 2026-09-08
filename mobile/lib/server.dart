@@ -27,6 +27,7 @@ class Pane {
     this.waitingFor,
     this.idleSecs,
     this.closed = false,
+    this.undocked = false,
     this.session,
     this.harness,
     this.mirrorOf,
@@ -64,6 +65,9 @@ class Pane {
 
   /// 닫았지만 살아 있는 pane(데스크톱의 되살리기 목록) — 방에 없다.
   final bool closed;
+
+  /// 별도 OS 창으로 뗀 pane — 방은 떠나온 방 그대로지만 배치도 칸엔 없다.
+  final bool undocked;
 
   /// `/rename` 으로 붙인 세션 이름 — 데스크톱 pane 머리의 그것. codex 는 없다.
   final String? session;
@@ -179,6 +183,7 @@ class Pane {
     waitingFor: j['waiting_for'] as String?,
     idleSecs: (j['idle_secs'] as num?)?.toInt(),
     closed: j['closed'] == true,
+    undocked: j['undocked'] == true,
     session: j['session'] as String?,
     harness: j['harness'] as String?,
     mirrorOf: j['mirror_of'] as String?,

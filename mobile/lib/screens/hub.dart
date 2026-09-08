@@ -610,6 +610,7 @@ class _MiniMap extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final hidden = room.unplaced;
+    final undocked = room.undocked;
     return Padding(
       padding: const EdgeInsets.fromLTRB(2, 0, 2, 8),
       child: Column(
@@ -639,6 +640,35 @@ class _MiniMap extends StatelessWidget {
                       size: 24,
                       onOpen: onOpen,
                       marks: true,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          // 별도 OS 창으로 뗀 학생 — 데스크톱 배치도의 점선 칸과 같은 말(점선 테).
+          if (undocked.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(2, 6, 2, 0),
+              child: Row(
+                children: [
+                  Icon(Icons.open_in_new, size: 11, color: scheme.onSurfaceVariant),
+                  const SizedBox(width: 3),
+                  Text(
+                    '별도창',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: _MiniTabRow(
+                      server: server,
+                      tabs: undocked,
+                      active: null,
+                      size: 24,
+                      onOpen: onOpen,
+                      marks: true,
+                      dashed: true,
                     ),
                   ),
                 ],
@@ -913,10 +943,14 @@ class _MiniTabRow extends StatelessWidget {
     required this.size,
     this.onOpen,
     this.marks = false,
+    this.dashed = false,
   });
 
   final Server server;
   final List<Pane?> tabs;
+
+  /// 테를 점선으로 — 별도 OS 창에 나가 있는 학생(데스크톱 배치도와 같은 표시).
+  final bool dashed;
   final int? active;
   final double size;
   final void Function(Pane)? onOpen;
@@ -950,14 +984,19 @@ class _MiniTabRow extends StatelessWidget {
                   : () => onOpen!(tabs[i]!),
               child: Container(
                 padding: const EdgeInsets.all(1),
+                foregroundDecoration: dashed
+                    ? _DashRing(_edge(tabs[i], i, scheme))
+                    : null,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  border: Border.all(
-                    color: _edge(tabs[i], i, scheme),
-                    width: i == active || (marks && tabs[i] != null)
-                        ? 1.4
-                        : 0.8,
-                  ),
+                  border: dashed
+                      ? null
+                      : Border.all(
+                          color: _edge(tabs[i], i, scheme),
+                          width: i == active || (marks && tabs[i] != null)
+                              ? 1.4
+                              : 0.8,
+                        ),
                 ),
                 child: tabs[i] == null
                     ? SizedBox(
@@ -986,6 +1025,45 @@ class _MiniTabRow extends StatelessWidget {
           ),
       ],
     );
+  }
+}
+
+/// 점선 원 테 — 패키지 없이 `Path` 를 잘라 긋는다(3px 긋고 2px 쉼).
+class _DashRing extends Decoration {
+  const _DashRing(this.color);
+  final Color color;
+
+  @override
+  BoxPainter createBoxPainter([VoidCallback? onChanged]) =>
+      _DashRingPainter(color);
+}
+
+class _DashRingPainter extends BoxPainter {
+  _DashRingPainter(this.color);
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Offset offset, ImageConfiguration configuration) {
+    final size = configuration.size ?? Size.zero;
+    if (size.isEmpty) return;
+    final rect = (offset & size).deflate(0.7);
+    final ring = Path()..addOval(rect);
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.4;
+    const on = 3.0;
+    const off = 2.0;
+    for (final metric in ring.computeMetrics()) {
+      var at = 0.0;
+      while (at < metric.length) {
+        canvas.drawPath(
+          metric.extractPath(at, math.min(at + on, metric.length)),
+          paint,
+        );
+        at += on + off;
+      }
+    }
   }
 }
 

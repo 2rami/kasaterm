@@ -39,9 +39,15 @@ class HubRoom {
     };
     return [
       for (final p in panes)
-        if (!seated.contains(p.id)) p,
+        if (!seated.contains(p.id) && !p.undocked) p,
     ];
   }
+
+  /// 별도 OS 창으로 뗀 학생 — 배치도 칸엔 없고 지도 밑 「별도창」 줄에 선다.
+  List<Pane> get undocked => [
+    for (final p in panes)
+      if (p.undocked) p,
+  ];
 }
 
 class HubSection {
