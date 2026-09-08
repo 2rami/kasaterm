@@ -38,7 +38,8 @@ cargo build -p kasa-mcp --bin kasa-serve-web
 
 | 라우트 | 하는 일 |
 |---|---|
-| `GET /term` | xterm.js 페이지 |
+| `GET /term` | pane 선택을 보존한 뒤 앱 본문 grid 보기로 이동 |
+| `GET /term?renderer=ansi` | 기존 xterm.js 기본 문자 보기 |
 | `GET /term/ws` | **웹 전용 셸을 새로 띄운다.** 연결이 끊기면 셸도 끝난다 |
 | `GET /term/ws?pane=%1` | 기존 kasaterm pane 을 **미러**한다 (아래 ⚠️) |
 | `GET /term/panes` | 살아 있는 pane 목록(미러 대상 고르기용) |
@@ -100,6 +101,30 @@ FontFaceSet의 로드된 얼굴과 실제 폰트 요청을 함께 확인한다. 
 
 색 검증용 fixture는 `env -u NO_COLOR`로 시작한다. 도구 셸의 `NO_COLOR`를 물려주면
 실제 하네스가 무색 출력을 내므로, 서버 grid의 fg/bg와 브라우저 색을 비교해야 원인을 구분한다.
+
+### 본문 scene 공유 (2026-09-08)
+
+헤더 얼굴만으로는 native 본문이 같아지지 않는다. native producer가 있는 서버는 첫 size에
+`capabilities.native_scene:1`을 알린다. `t:grid`의 full `dirty`는 native가 보정한 셀이고,
+같은 패킷의 `scene`이 배너·프로필·standing·spinner·inline 장식을 담는다. grid와 scene의
+`sourceKey`/`sceneRevision`, pane·크기가 일치해야 함께 적용한다. `scene:null`은 full raw와
+함께 장식을 제거하는 명시적 폴백이다. 서버 epoch가 바뀌면 revision 순서는 새로 시작한다.
+
+장식은 cell 단위 slot·clip·z와 fit/anchor를 따른다. PNG 원래 비율을 보존하며 native에서
+처리한 Inline/Animation asset ID로 받는다. 본문에서 Clawd나 spinner 문자열을 웹이 다시
+찾아 바꾸지 않는다. 자산 URL은 ROOT 아래 허용된 route만 만들고, inline ID는 pane에 묶인다.
+이미지 layer는 입력·선택을 가로채지 않는다. motion epoch로 프레임을 고르고 숨김·reduced
+motion에서는 멈춘다. 늦은 자산 응답에는 scene 세대 가드를 둔다. 같은 idle scene의 일시
+실패도 제한된 backoff로 회복하되, 계속 실패하면 visibility/online 복귀까지 재시도를 쉰다.
+
+`/term` 기본 전환은 WebSocket을 열기 전이므로 owned 셸을 중복 생성하지 않는다.
+서버가 알려준 셸 ID는 URL과 재접속에 유지한다. `renderer=ansi`에서는 원래 문자 로고가
+보이는 기본 터미널임을 표시하고, 같은 세션을 앱 보기로 여는 링크를 제공한다.
+
+실측: 격리 GUI의 실제 Claude 첫 응답을 고정 60×41에서 추적해 native 67회, raw 폴백
+0회를 확인했다. 이 구간에는 창 캡처와 `/term/shot`을 실행하지 않았다. 작업 중 창 캡처를
+겹친 이전 관측과 분리해야 한다. inactive Codex 탭과 숨겨진 원본 창에서도 새 viewport에
+맞는 scene·처리 PNG가 도착했다. 이미지 비교는 응답이 끝난 idle에서만 수행했다.
 
 ## 유저별 주소 `/u/<slug>/` — 주소가 곧 자격 (2026-09-02)
 

@@ -9,6 +9,7 @@
   --kg-bg: #12161c;
   --kg-fg: #c8d0d9;
   position: relative;
+  isolation: isolate;
   background: var(--kg-bg);
   color: var(--kg-fg);
   font: 13px/1.35 'KasaTerm', ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -16,7 +17,13 @@
   font-variant-ligatures: none;  /* 리거처가 붙으면 칸이 어긋난다 */
   tab-size: 8;
 }
-.kg-row { height: 1.35em; }
+.kg-row { position: relative; z-index: 1; height: 1.35em; }
+.kg-scene{position:absolute;inset:0;overflow:hidden;pointer-events:none;user-select:none}
+.kg-scene-back{z-index:0}
+.kg-scene-front{z-index:2}
+.kg-scene-item{position:absolute;overflow:hidden;pointer-events:none}
+.kg-scene-content{position:absolute;display:block;max-width:none;pointer-events:none;user-select:none}
+.kg-scene-content[hidden]{display:none}
 .kg-row:empty::after { content: ' '; }  /* 빈 행도 높이를 차지해야 줄이 안 밀린다 */
 .kg-cursor {
   position: absolute;
@@ -25,6 +32,7 @@
   opacity: .75;
   pointer-events: none;
   mix-blend-mode: difference;   /* 글자 위에 얹혀도 글자가 보인다 */
+  z-index: 3;
 }
 /* 셀 크기 자[ruler] — 재기만 하고 보이지는 않는다. display:none 이면 못 잰다. */
 .kg-ruler {
@@ -41,6 +49,7 @@
   position: absolute;
   top: 0; left: 0;
   width: 2em;
+  z-index: 4;
   padding: 0; margin: 0; border: 0;
   outline: none; resize: none; overflow: hidden;
   font: inherit;

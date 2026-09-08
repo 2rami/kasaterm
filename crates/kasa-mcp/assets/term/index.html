@@ -180,6 +180,7 @@
 </head>
 <body>
 <div id="term"></div>
+<div class="term-mode-note">기본 문자 보기 <a id="native-view">앱 보기</a></div>
 <div id="status" class="term-heading" role="button" tabindex="0" aria-haspopup="dialog" aria-expanded="false" aria-label="세션 전환">
   <span class="term-avatar"><img id="avatar" alt=""><span id="ahole"></span></span>
   <span class="term-labels"><span id="who"></span><span id="whot"></span></span>
@@ -204,6 +205,10 @@
   // 주소 접두(`/u/<slug>` · `/u/<slug>/m/<기계>` · 없음)를 그대로 물려받는다 — fetch 도 WS 도
   // 같은 문으로 나가야 자격이 따라간다.
   const ROOT = location.pathname.replace(/\/term\/?$/, '');
+  const ansiRequested = location.search.slice(1).split('&').some(part => {
+    const [key, value] = part.split('=');
+    return key === 'renderer' && value === 'ansi';
+  });
   // pane id 는 `%151` 처럼 생겼는데, URLSearchParams 는 그 `%15` 를 퍼센트 인코딩으로
   // 읽어 0x15 로 디코딩한다 — 남는 건 제어문자+`1` 이라 목록 매칭도 칩도 조용히 깨진다.
   // (오류가 안 나서 「이름이 원래 안 뜨나 보다」로 보인다.) raw 쿼리에서 직접 꺼낸다.
@@ -226,13 +231,30 @@
       if (pick) {
         paneId = pick.id;
         // 주소도 따라간다 — 새로고침이 같은 pane 을 가리키게. 토큰은 이미 쿠키다.
-        history.replaceState(null, '', `?pane=${encodeURIComponent(paneId)}`);
+        const parts = location.search.slice(1).split('&').filter(part => part && !part.startsWith('pane='));
+        parts.push(`pane=${encodeURIComponent(paneId)}`);
+        history.replaceState(null, '', `${location.pathname}?${parts.join('&')}${location.hash}`);
       }
     } catch {}
   }
+  // The default enters the composed grid before opening any socket or accepting input.
+  if (!ansiRequested) {
+    location.replace(`${ROOT}/term/grid${location.search}${location.hash}`);
+    return;
+  }
+  document.body.classList.add('ansi-view');
   // 이 연결이 실제로 붙은 세션 id. 서버가 size 메시지로 확정해 준다 —
   // 목록에서 「보는 중」을 제 행에 붙이는 근거다.
   let selfId = paneId;
+  let connectedPane = null;
+  const nativeView = document.getElementById('native-view');
+  function sessionQuery(id, keepRenderer = true) {
+    const parts = location.search.slice(1).split('&').filter(part => part && !part.startsWith('pane=')
+      && (keepRenderer || !part.startsWith('renderer=')));
+    parts.push(`pane=${encodeURIComponent(id)}`);
+    return `?${parts.join('&')}`;
+  }
+  nativeView.addEventListener('click', event => event.stopPropagation());
   // 웹 셸의 uuid 는 사람이 읽을 이름이 아니다 — 「웹 셸 · e0de」로 접는다.
   const prettyId = (id) =>
     id.startsWith('web-') ? `웹 셸 · ${id.slice(4, 8)}` : id;
@@ -334,7 +356,7 @@
     },
   });
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const WS_URL = `${proto}://${location.host}${ROOT}/term/ws${location.search}`;
+  const socketURL = () => `${proto}://${location.host}${ROOT}/term/ws${connectedPane ? sessionQuery(connectedPane) : location.search}`;
   let ws = null;
   let gone = false, backoff = 1000, retryTimer = null, reconnects = 0;
   const handlers = {};
@@ -342,7 +364,7 @@
     if (gone || document.visibilityState !== 'visible') return;
     if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
     clearTimeout(retryTimer);
-    const socket = new WebSocket(WS_URL);
+    const socket = new WebSocket(socketURL());
     ws = socket;
     mirror = false; confirmed = null; orig = null; fitted = false; legacyTarget = null;
     viewport.bind(socket);
@@ -386,7 +408,12 @@
         term.write('\r\n\x1b[33m● 이 세션은 끝났어요 — 위 이름을 눌러 다른 pane 을 고르세요\x1b[0m\r\n');
       } else if (m.t === 'size') {
         mirror = !!m.mirror;
-        if (m.id) { selfId = m.id; refreshChip(); chrome.setPane(m.id); }
+        if (m.id) {
+          selfId = m.id; connectedPane = m.id;
+          history.replaceState(null, '', `${location.pathname}${sessionQuery(m.id)}${location.hash}`);
+          nativeView.href = `${ROOT}/term/grid${sessionQuery(m.id, false)}${location.hash}`;
+          refreshChip(); chrome.setPane(m.id);
+        }
         if (!orig) orig = { cols: m.cols, rows: m.rows };
         if (fitted && legacyTarget && (m.cols !== legacyTarget.cols || m.rows !== legacyTarget.rows)) fitted = false;
         confirmed = { cols: m.cols, rows: m.rows };

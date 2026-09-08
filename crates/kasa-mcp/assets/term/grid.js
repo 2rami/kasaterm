@@ -36,6 +36,218 @@
     return `rgb(${c[0]},${c[1]},${c[2]})`;
   }
 
+  const validSlug = value => typeof value === 'string' && /^[a-z0-9_-]{1,128}$/i.test(value);
+  const validKey = value => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
+  const validRect = rect => rect && ['x', 'y', 'width', 'height'].every(key =>
+    Number.isFinite(rect[key]) && Math.abs(rect[key]) <= 10000) && rect.width > 0 && rect.height > 0;
+  const builtins = new Set(['claude', 'codex', 'terminal', 'server', 'laptop', 'schale-logo', 'schale-classroom']);
+
+  function validAsset(asset) {
+    if (!asset) return false;
+    switch (asset.kind) {
+      case 'sprite': return validSlug(asset.slug) && validSlug(asset.motion)
+        && Number.isInteger(asset.frame) && asset.frame >= 0 && asset.frame < 512;
+      case 'avatar': return validSlug(asset.slug);
+      case 'inline': return validKey(asset.id);
+      case 'animation': return Array.isArray(asset.frames) && asset.frames.length > 0
+        && asset.frames.length <= 512 && asset.frames.every(validKey);
+      case 'builtin': return builtins.has(asset.name);
+      case 'solid': return Array.isArray(asset.color) && asset.color.length === 4
+        && asset.color.every(channel => Number.isInteger(channel) && channel >= 0 && channel <= 255);
+      default: return false;
+    }
+  }
+
+  function validScenePacket(msg, pane, revision, key) {
+    const scene = msg.scene;
+    if (scene === null || scene === undefined) return true;
+    if (!pane || scene.paneId !== pane || scene.cols !== msg.cols || scene.rows !== msg.rows
+        || scene.offset !== 0 || !validKey(scene.sourceKey) || msg.sourceKey !== scene.sourceKey
+        || !Number.isSafeInteger(scene.revision) || scene.revision < 0
+        || msg.sceneRevision !== scene.revision || scene.revision < revision
+        || (scene.revision === revision && key !== scene.sourceKey)
+        || !Array.isArray(scene.overlays) || scene.overlays.length > 128
+        || msg.dirty.length !== msg.rows || new Set(msg.dirty.map(row => row[0])).size !== msg.rows) return false;
+    const ids = new Set();
+    return scene.overlays.every(overlay => {
+      const motion = overlay.motion;
+      if (typeof overlay.id !== 'string' || !overlay.id || overlay.id.length > 128 || ids.has(overlay.id)
+          || !validRect(overlay.rect) || (overlay.clip != null && !validRect(overlay.clip))
+          || !Number.isInteger(overlay.z) || Math.abs(overlay.z) > 2147483647
+          || !['contain', 'cover', 'fill', 'scale-down'].includes(overlay.fit)
+          || !['center', 'bottom'].includes(overlay.anchor) || !validAsset(overlay.asset)) return false;
+      ids.add(overlay.id);
+      return !motion || ((overlay.asset.kind === 'sprite' || overlay.asset.kind === 'animation')
+        && Number.isInteger(motion.frames) && motion.frames > 0 && motion.frames <= 512
+        && (overlay.asset.kind !== 'animation' || overlay.asset.frames.length === motion.frames)
+        && Number.isInteger(motion.frameMs) && motion.frameMs >= 10 && motion.frameMs <= 4294967295
+        && Number.isSafeInteger(motion.startedAtMs) && motion.startedAtMs >= 0
+        && typeof motion.looping === 'boolean');
+    });
+  }
+
+  function SceneLayer(view, root, cell) {
+    root = typeof root === 'string' && (!root || /^\/(?!\/)/.test(root)) && !/[?#\\\r\n]/.test(root) ? root.replace(/\/$/, '') : '';
+    const back = document.createElement('div'), front = document.createElement('div');
+    back.className = 'kg-scene kg-scene-back'; front.className = 'kg-scene kg-scene-front';
+    back.setAttribute('aria-hidden', 'true'); front.setAttribute('aria-hidden', 'true');
+    view.append(back, front);
+    const reduced = global.matchMedia?.('(prefers-reduced-motion: reduce)');
+    const assets = new Map();
+    let records = new Map(), scene = null, pane = null, revision = -1, sourceKey = null;
+    let generation = 0, timer = null, shown = true;
+    const retryDelays = [500, 1000, 2000, 5000];
+
+    function assetURL(asset, frame) {
+      if (asset.kind === 'sprite') return `${root}/character-sprite?slug=${encodeURIComponent(asset.slug)}&motion=${encodeURIComponent(asset.motion)}&frame=${frame}`;
+      if (asset.kind === 'avatar') return `${root}/term/avatar/${encodeURIComponent(asset.slug)}.png`;
+      if (asset.kind === 'builtin') return `${root}/term/visual-builtin/${asset.name}`;
+      const id = asset.kind === 'animation' ? asset.frames[frame] : asset.id;
+      return `${root}/term/visual-asset?pane=${encodeURIComponent(scene.paneId)}&id=${id}`;
+    }
+    function load(url) {
+      const requestedScene = `${scene.sourceKey}:${scene.revision}`;
+      let attempt = 0;
+      if (assets.has(url)) {
+        const cached = assets.get(url);
+        if (!cached.failed || (cached.failedScene === requestedScene && Date.now() < cached.retryAt)) {
+          assets.delete(url); assets.set(url, cached); return cached.promise;
+        }
+        if (cached.failedScene === requestedScene) attempt = cached.attempt + 1;
+        assets.delete(url);
+      }
+      const entry = { controller: new AbortController(), blobURL: null, bytes: 0, attempt };
+      const timeout = setTimeout(() => entry.controller.abort(), 8000);
+      entry.promise = fetch(url, { credentials: 'same-origin', signal: entry.controller.signal })
+        .then(response => { if (!response.ok) throw new Error('asset unavailable'); return response.blob(); })
+        .then(blob => {
+          const mime = blob.type.split(';')[0].trim().toLowerCase();
+          if (!/^image\/(png|jpeg|gif|webp|svg\+xml)$/.test(mime) || blob.size > 32 * 1024 * 1024) throw new Error('invalid asset');
+          if (assets.get(url) !== entry) return null;
+          entry.bytes = blob.size;
+          entry.blobURL = URL.createObjectURL(blob);
+          return entry.blobURL;
+        }).catch(() => {
+          entry.failed = true; entry.failedScene = requestedScene;
+          entry.retryAt = attempt < retryDelays.length ? Date.now() + retryDelays[attempt] : Infinity;
+          return null;
+        }).finally(() => {
+          clearTimeout(timeout);
+          if (entry.failed && assets.get(url) === entry && scene && shown && document.visibilityState === 'visible') paint();
+        });
+      assets.set(url, entry);
+      return entry.promise;
+    }
+    function evict(protectedURLs) {
+      let bytes = [...assets.values()].reduce((total, entry) => total + entry.bytes, 0);
+      for (const [url, entry] of assets) {
+        if (assets.size <= 256 && bytes <= 64 * 1024 * 1024) break;
+        if (protectedURLs.has(url)) continue;
+        entry.controller.abort(); if (entry.blobURL) URL.revokeObjectURL(entry.blobURL);
+        bytes -= entry.bytes; assets.delete(url);
+      }
+    }
+    function stop() { clearTimeout(timer); timer = null; }
+    function frameOf(overlay, now) {
+      const motion = overlay.motion;
+      const initial = overlay.asset.kind === 'sprite' ? overlay.asset.frame : 0;
+      if (!motion || reduced?.matches) return initial;
+      const frame = Math.floor(Math.max(0, now - motion.startedAtMs) / motion.frameMs);
+      return motion.looping ? frame % motion.frames : Math.min(frame, motion.frames - 1);
+    }
+    function position(record) {
+      const { w, h } = cell();
+      const overlay = record.overlay, rect = overlay.rect;
+      const clip = overlay.clip || { x: 0, y: 0, width: scene.cols, height: scene.rows };
+      Object.assign(record.el.style, { left: `${clip.x * w}px`, top: `${clip.y * h}px`,
+        width: `${clip.width * w}px`, height: `${clip.height * h}px`, zIndex: String(overlay.z) });
+      Object.assign(record.content.style, { left: `${(rect.x - clip.x) * w}px`, top: `${(rect.y - clip.y) * h}px`,
+        width: `${rect.width * w}px`, height: `${rect.height * h}px`,
+        objectFit: overlay.fit, objectPosition: overlay.anchor === 'bottom' ? '50% 100%' : '50% 50%' });
+    }
+    function paint() {
+      stop();
+      if (!scene) return;
+      const now = Date.now(), active = shown && document.visibilityState === 'visible';
+      let delay = Infinity;
+      const protectedURLs = new Set();
+      for (const record of records.values()) {
+        const overlay = record.overlay, asset = overlay.asset;
+        position(record);
+        if (asset.kind === 'solid') {
+          record.content.style.backgroundColor = `rgba(${asset.color[0]},${asset.color[1]},${asset.color[2]},${asset.color[3] / 255})`;
+          continue;
+        }
+        if (!active) continue;
+        const frame = frameOf(overlay, now), url = assetURL(asset, frame);
+        protectedURLs.add(url);
+        const cached = assets.get(url);
+        if (record.url !== url || record.generation !== generation || (cached?.failed && now >= cached.retryAt)) {
+          record.url = url; record.generation = generation;
+          const version = generation;
+          load(url).then(blobURL => {
+            if (!blobURL || generation !== version || records.get(overlay.id) !== record || record.url !== url) return;
+            record.content.src = blobURL; record.content.hidden = false;
+          });
+        }
+        const retry = assets.get(url);
+        if (retry?.failed && Number.isFinite(retry.retryAt)) delay = Math.min(delay, retry.retryAt - now);
+        const motion = overlay.motion;
+        if (active && motion && !reduced?.matches
+            && (motion.looping || now < motion.startedAtMs + motion.frames * motion.frameMs)) {
+          delay = Math.min(delay, motion.frameMs - Math.max(0, now - motion.startedAtMs) % motion.frameMs);
+          const next = assetURL(asset, motion.looping ? (frame + 1) % motion.frames : Math.min(frame + 1, motion.frames - 1));
+          protectedURLs.add(next); load(next);
+        }
+      }
+      evict(protectedURLs);
+      if (active && Number.isFinite(delay)) timer = setTimeout(paint, Math.max(10, Math.min(delay, 60000)));
+    }
+    function clear(reset = false) {
+      generation++; stop(); scene = null; records.clear(); back.replaceChildren(); front.replaceChildren();
+      delete view.dataset.sceneRevision; delete view.dataset.sourceKey;
+      if (reset) {
+        pane = null; revision = -1; sourceKey = null;
+        for (const entry of assets.values()) { entry.controller.abort(); if (entry.blobURL) URL.revokeObjectURL(entry.blobURL); }
+        assets.clear();
+      }
+    }
+    function apply(next) {
+      if (!next) { clear(); return; }
+      generation++; scene = next; revision = next.revision; sourceKey = next.sourceKey;
+      const nextRecords = new Map();
+      for (const overlay of [...next.overlays].sort((a, b) => a.z - b.z)) {
+        const solid = overlay.asset.kind === 'solid', family = JSON.stringify(overlay.asset);
+        let record = records.get(overlay.id);
+        if (!record || record.solid !== solid || record.family !== family) {
+          const el = document.createElement('div'), content = document.createElement(solid ? 'div' : 'img');
+          el.className = 'kg-scene-item'; el.dataset.overlayId = overlay.id;
+          content.className = 'kg-scene-content';
+          if (!solid) { content.alt = ''; content.draggable = false; content.hidden = true; }
+          el.appendChild(content); record = { el, content, solid, family, url: null };
+        }
+        record.overlay = overlay; nextRecords.set(overlay.id, record);
+      }
+      records = nextRecords;
+      back.replaceChildren(...[...records.values()].filter(record => record.overlay.z < 0).map(record => record.el));
+      front.replaceChildren(...[...records.values()].filter(record => record.overlay.z >= 0).map(record => record.el));
+      view.dataset.sceneRevision = String(revision); view.dataset.sourceKey = sourceKey;
+      paint();
+    }
+    function resume() {
+      for (const entry of assets.values()) if (entry.failed) { entry.attempt = -1; entry.retryAt = 0; }
+      paint();
+    }
+    document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' ? resume() : stop());
+    reduced?.addEventListener('change', paint);
+    global.addEventListener('pagehide', stop);
+    global.addEventListener('pageshow', resume);
+    global.addEventListener('online', resume);
+    return { valid: msg => validScenePacket(msg, pane, revision, sourceKey), apply, clear,
+      measure: paint, setPane(id) { if (pane && pane !== id) clear(true); pane = id; },
+      setVisible(value) { shown = value; if (shown) paint(); else stop(); }, get active() { return !!scene; } };
+  }
+
   function KasaGrid(root, opts) {
     opts = opts || {};
     const view = document.createElement('div');
@@ -57,6 +269,7 @@
     let cols = 0, rowCount = 0;
     let cellW = 8, cellH = 17;
     let cursor = null;
+    const scene = SceneLayer(view, opts.assetRoot || '', () => ({ w: cellW, h: cellH }));
 
     function positionCursor() {
       if (!cursor) return;
@@ -90,6 +303,7 @@
       if (r.height > 0) cellH = r.height / z;
       if (cols) view.style.width = `${cols * cellW}px`;
       positionCursor();
+      scene.measure();
     }
 
     function resize(c, r) {
@@ -132,6 +346,11 @@
 
     // 프레임 하나를 화면에 반영한다. `dirty` 는 바뀐 행만 온다.
     function apply(msg) {
+      if (!Number.isInteger(msg.cols) || !Number.isInteger(msg.rows) || msg.cols < 1 || msg.rows < 1
+          || msg.cols > 1000 || msg.rows > 1000 || !Array.isArray(msg.dirty)
+          || !msg.dirty.every(row => Array.isArray(row) && Number.isInteger(row[0]) && row[0] >= 0
+            && row[0] < msg.rows && Array.isArray(row[1])) || !Array.isArray(msg.cursor)
+          || !scene.valid(msg)) return false;
       resize(msg.cols, msg.rows);
       for (const [i, runs] of msg.dirty) {
         const row = rows[i];
@@ -142,6 +361,8 @@
       }
       cursor = [msg.cursor[0], msg.cursor[1], msg.cursorVisible];
       positionCursor();
+      scene.apply(msg.scene);
+      return true;
     }
 
     return {
@@ -151,6 +372,10 @@
       get rows() { return rowCount; },
       get cell() { return { w: cellW, h: cellH }; },
       remeasure: measure,
+      resetScene: () => scene.clear(true),
+      setPane: id => scene.setPane(id),
+      setSceneVisible: value => scene.setVisible(value),
+      get hasScene() { return scene.active; },
       setTheme(tokens) {
         if (Array.isArray(tokens?.ansi) && tokens.ansi.length === 16) {
           tokens.ansi.forEach((color, index) => {

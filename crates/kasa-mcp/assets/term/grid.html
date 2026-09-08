@@ -85,7 +85,7 @@ const shotwrap = document.getElementById('shotwrap');
 const shot = document.getElementById('shot');
 const shotnote = document.getElementById('shotnote');
 const picBtn = document.getElementById('pic');
-const grid = KasaGrid(wrap);
+const grid = KasaGrid(wrap, { assetRoot: ROOT });
 const chrome = KasaTermChrome.create({ root: ROOT, onTheme: tokens => grid.setTheme(tokens) });
 const enc = new TextEncoder();
 // 키 입력은 바이너리 프레임으로만 간다 — 텍스트 프레임은 resize JSON 으로 읽혀 버려진다.
@@ -96,11 +96,20 @@ const modes = { appCursor: false, bracketedPaste: false };
 const input = KasaGridInput(grid, send, modes);
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 // 쿼리를 재조립하지 않고 그대로 넘긴다 — pane id 의 `%` 가 여기서 또 깎일 자리다.
-const sep = location.search ? '&' : '?';
-const WS_URL = `${proto}://${location.host}${ROOT}/term/ws${location.search}${sep}grid=1`;
+let connectedPane = null;
+function paneQuery(id) {
+  const parts = location.search.slice(1).split('&').filter(part => part && !part.startsWith('pane=') && !part.startsWith('grid='));
+  if (id) parts.push(`pane=${encodeURIComponent(id)}`);
+  return parts.length ? `?${parts.join('&')}` : '';
+}
+function socketURL() {
+  const query = connectedPane ? paneQuery(connectedPane) : location.search;
+  return `${proto}://${location.host}${ROOT}/term/ws${query}${query ? '&' : '?'}grid=1`;
+}
 let ws = null;
 let frames = 0;
 let isMirror = false;
+let nativeSceneSupported = false;
 let lastCursor = [0, 0];
 let gone = false, backoff = 1000, retryTimer = null, sentView = 0;
 const viewport = KasaViewport.create({
@@ -117,22 +126,24 @@ function connect() {
   if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
   clearTimeout(retryTimer);
   st.textContent = '연결 중…';
-  const socket = new WebSocket(WS_URL);
+  const socket = new WebSocket(socketURL());
   ws = socket;
+  grid.resetScene();
   viewport.bind(socket);
   sentView = 0;
   isMirror = false;
+  nativeSceneSupported = false;
   socket.onmessage = (e) => {
     if (ws !== socket || typeof e.data !== 'string') return;
     let m;
     try { m = JSON.parse(e.data); } catch { return; }
     if (m.t === 'grid') {
-      grid.apply(m);
+      if (!grid.apply(m)) return;
       modes.appCursor = m.appCursor;
       modes.bracketedPaste = m.bracketedPaste;
       lastCursor = m.cursor;
       frames++;
-      st.textContent = '연결됨';
+      st.textContent = grid.hasScene ? '연결됨' : nativeSceneSupported ? '본문 준비 중…' : '기본 문자 보기';
       syncSize();
       syncView();
       fitWidth();
@@ -140,8 +151,13 @@ function connect() {
       if (picture) { shotDue = true; takeShot(); }
     } else if (m.t === 'size') {
       isMirror = !!m.mirror;
+      if (!viewport.state().ready) nativeSceneSupported = m.capabilities?.native_scene === 1;
       viewport.receive(m, socket);
-      if (m.id) chrome.setPane(m.id);
+      if (m.id) {
+        connectedPane = m.id;
+        history.replaceState(null, '', `${location.pathname}${paneQuery(m.id)}${location.hash}`);
+        grid.setPane(m.id); chrome.setPane(m.id);
+      }
       st.textContent = '연결됨';
       syncView();
     } else if (m.t === 'viewport') {
@@ -149,6 +165,7 @@ function connect() {
       fitWidth();
     } else if (m.t === 'gone') {
       gone = true;
+      grid.setSceneVisible(false);
       viewport.release();
       st.textContent = '세션이 끝났어요 — ≡ 목록에서 다른 pane 을 고르세요';
     }
@@ -250,7 +267,7 @@ async function takeShot() {
   shotBusy = true; shotDue = false; shotAt = Date.now();
   const socket = ws;
   try {
-    const r = await fetch(`${ROOT}/term/shot${location.search}${sep}w=0&n=${shotAt}`, { cache: 'no-store' });
+    const r = await fetch(`${ROOT}/term/shot${location.search}${location.search ? '&' : '?'}w=0&n=${shotAt}`, { cache: 'no-store' });
     if (!r.ok) {
       const why = (await r.text()).trim();
       // 격자 없는 헤드리스 셸이나 가려진 pane — 글자 화면으로 돌아간다.
@@ -289,6 +306,7 @@ function fitPicture() {
 shot.addEventListener('load', () => { fitPicture(); placeInput(); });
 function setPicture(on) {
   picture = on;
+  grid.setSceneVisible(!on);
   document.body.classList.toggle('picture-mode', on);
   input.el.classList.toggle('picture-input', on);
   input.el.placeholder = on ? '터미널에 입력' : '';

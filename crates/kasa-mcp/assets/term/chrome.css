@@ -37,6 +37,12 @@ html,body{background:var(--kt-bg);color:var(--kt-text)}
 .term-heading #chev{width:14px;height:14px;flex:none;color:var(--kt-text-mute)}
 .term-heading:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--kt-accent);outline-offset:-2px}
 body #term{top:calc(var(--term-header) + env(safe-area-inset-top,0px) + 8px)}
+.term-mode-note{display:none}
+body.ansi-view .term-mode-note{display:flex;justify-content:space-between;align-items:center;position:fixed;
+  top:calc(var(--term-header) + env(safe-area-inset-top,0px));left:8px;right:8px;height:26px;
+  font:12px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--kt-text-dim)}
+.term-mode-note a{color:var(--kt-accent);text-decoration:none}
+body.ansi-view #term{top:calc(var(--term-header) + env(safe-area-inset-top,0px) + 30px)}
 body #wrap,body #shotwrap{top:calc(var(--term-header) + env(safe-area-inset-top,0px) + 8px);background:var(--kt-bg)}
 body #status:not(.term-heading),body #bar{background:var(--kt-bg);border-top:1px solid var(--kt-border);color:var(--kt-text-dim)}
 body #status a,body #status button,body #bar button{color:var(--kt-text);border-color:var(--kt-border);background:var(--kt-surface-hover)}
