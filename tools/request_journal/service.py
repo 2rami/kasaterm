@@ -152,7 +152,7 @@ def main(argv=None):
         command = commands.add_parser(name)
         command.add_argument("--project", default=str(Path.cwd()))
         command.add_argument("--data-dir", type=Path, default=DEFAULT_DATA)
-        command.add_argument("--port", type=int, default=18769)
+        command.add_argument("--port", type=int, default=0)
         command.add_argument("--interval", type=float, default=5)
         command.add_argument("--base-url", default="http://127.0.0.1:8765")
         command.add_argument("--llm", action="store_true")
@@ -160,8 +160,8 @@ def main(argv=None):
         command.add_argument("--collect" if name == "run" else "--apply", action="store_true")
     commands.add_parser("stop").add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
-    if getattr(args, "port", 1) not in range(1, 65536):
-        parser.error("port must be between 1 and 65535")
+    if getattr(args, "port", 0) not in range(0, 65536):
+        parser.error("port must be between 0 (automatic) and 65535")
     if getattr(args, "interval", 1) < 0.5:
         parser.error("interval must be at least 0.5 seconds")
     try:

@@ -5,7 +5,6 @@ from pathlib import Path
 import tempfile
 import unittest
 import json
-import socket
 import subprocess
 import sys
 import time
@@ -17,10 +16,7 @@ from tools.request_journal import service
 class LifecycleTests(unittest.TestCase):
     def test_run_publishes_private_discovery_and_stops_cleanly(self):
         with tempfile.TemporaryDirectory() as root:
-            with socket.socket() as listener:
-                listener.bind(("127.0.0.1", 0))
-                port = listener.getsockname()[1]
-            command = [sys.executable, "-m", "tools.request_journal", "run", "--project", root, "--data-dir", root, "--port", str(port)]
+            command = [sys.executable, "-m", "tools.request_journal", "run", "--project", root, "--data-dir", root, "--port", "0"]
             process = subprocess.Popen(command, cwd=service.ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
                 discovery = Path(root) / "service.json"
@@ -30,7 +26,8 @@ class LifecycleTests(unittest.TestCase):
                     self.assertIsNone(process.poll(), "service exited before publishing discovery")
                     time.sleep(.05)
                 data = json.loads(discovery.read_text())
-                self.assertEqual(data["base_url"], f"http://127.0.0.1:{port}")
+                self.assertTrue(data["base_url"].startswith("http://127.0.0.1:"))
+                self.assertGreater(int(data["base_url"].rsplit(":", 1)[1]), 0)
                 self.assertEqual(discovery.stat().st_mode & 0o777, 0o600)
                 process.terminate()
                 self.assertEqual(process.wait(timeout=4), 0)

@@ -12,7 +12,9 @@ From the repository root, Python 3.10 or newer, no third-party packages:
 python3 -m tools.request_journal run --project "$PWD"
 ```
 
-Open `http://127.0.0.1:18769`. This mode reads the journal without collecting live
+The service prints its URL and records it in `service.json`. Port 0 (the default)
+asks the operating system for an unused port; no existing tunnel or listener is
+stopped. A fixed port can be requested with `--port`. This mode reads without collecting live
 transcripts. Add `--collect` to explicitly enable the project-scoped poller.
 The collector's kasaterm endpoint defaults to `http://127.0.0.1:8765`; override it
 with `--base-url`. Structured summaries run in a separate 30-second worker.
@@ -65,6 +67,9 @@ for the detailed journal, and `summarizer` provider status. `/api/ask` chooses
 between these cached-status answers; it does not issue LLM calls. On startup,
 `service.json` in the data directory records `{version:1,base_url,project}` with
 owner-only permissions (0600), allowing a native pet to discover this service.
+Only explicit `pending` and `restart_required` evidence is called application or
+restart waiting. `unknown` is described as needing confirmation, never as proof
+that restarting the app will implement a request.
 
 Acknowledgement body:
 

@@ -29,6 +29,22 @@ def request_view(row):
     return result
 
 
+def waiting_summary(rows):
+    restart = [row for row in rows if row.get("applied_status") == "restart_required"]
+    pending = [row for row in rows if row.get("applied_status") == "pending"]
+    unknown = [row for row in rows if row.get("applied_status") == "unknown"]
+    parts = []
+    if restart:
+        parts.append("최근 재시작 대기: " + " · ".join(request_title(row, 55) for row in restart[:2]))
+    else:
+        parts.append("재시작으로 바뀔 항목은 아직 확인 못했어요")
+    if pending:
+        parts.append("최근 반영 대기(재시작 효과는 미확인): " + " · ".join(request_title(row, 55) for row in pending[:2]))
+    elif unknown:
+        parts.append("상태 확인이 필요한 최근 요청: " + " · ".join(request_title(row, 55) for row in unknown[:2]))
+    return ". ".join(parts)[:249] + "."
+
+
 class JournalServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -97,12 +113,11 @@ class Handler(BaseHTTPRequestHandler):
                 pending = [row for row in rows if row.get("reported_status") == "reported_done" and row.get("applied_status") not in ("applied", "not_applicable")]
                 counts = store.stats(project=project)
                 text = "최근 요청: " + " · ".join(request_title(row) for row in rows[:3]) + ". 반영 확인은 별도입니다." if rows else "아직 기록된 요청이 없습니다."
-                awaiting = [row for row in rows if row.get("applied_status") not in ("applied", "not_applicable")]
-                waiting = "최근 반영 미확인: " + " · ".join(request_title(row) for row in awaiting[:3]) + ". 요청 장부에서 확인해 주세요." if awaiting else "현재 기록된 요청 중 반영 미확인 항목은 없습니다."
+                waiting = waiting_summary(rows)
                 url = f"http://127.0.0.1:{self.server.server_port}/"
                 if route == "/api/ask":
                     question = query.get("q", [""])[0][:300]
-                    answer = waiting if any(word in question for word in ("남", "대기", "아직", "wait", "left")) else text
+                    answer = waiting if any(word in question for word in ("남", "대기", "아직", "재시작", "wait", "left", "restart")) else text
                     return self.reply(200, {"version": 1, "project": project, "text": answer[:250], "url": url})
                 return self.reply(200, {"version": 1, "project": project, "counts": counts, "latest": rows[0] if rows else None, "needs_confirmation": pending, "text": text[:250], "waiting_text": waiting[:250], "url": url, "summarizer": self.server.summarizer_status})
             if route.startswith("/api/requests/") and "/" not in route[len("/api/requests/"):]:

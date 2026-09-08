@@ -86,6 +86,19 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(len(ids), 3)
         self.assertEqual(len(set(ids)), 3)
 
+    def test_unknown_and_pending_are_not_promised_as_restart_changes(self):
+        _, _, raw = self.call("/api/summary")
+        waiting = json.loads(raw)["waiting_text"]
+        self.assertIn("재시작으로 바뀔 항목은 아직 확인 못했어요", waiting)
+        self.assertIn("상태 확인이 필요한", waiting)
+        self.assertNotIn("최근 재시작 대기:", waiting)
+        self.ack("pending")
+        _, _, raw = self.call("/api/summary")
+        self.assertIn("반영 대기(재시작 효과는 미확인)", json.loads(raw)["waiting_text"])
+        self.store.acknowledge(self.id, "restart_required", {"fixture_build": True}, origin="verified_build")
+        _, _, raw = self.call("/api/ask?q=restart")
+        self.assertIn("최근 재시작 대기:", json.loads(raw)["text"])
+
     def test_summary_contract_and_static_content_policy(self):
         self.store.set_reported_status(self.id, "reported_done", {"fixture": True})
         status, headers, body = self.call("/api/summary")
