@@ -92,6 +92,7 @@ pub(crate) struct AuxWindows {
     pub(crate) windows: Vec<AuxWindow>,
     pending: Vec<PendingAuxOpen>,
     unopened: Vec<RestoreRecord>,
+    saved: std::cell::RefCell<Option<SavedState>>,
 }
 
 impl AuxWindows {
@@ -111,6 +112,7 @@ impl AuxWindows {
             windows: Vec::new(),
             pending,
             unopened: Vec::new(),
+            saved: Default::default(),
         }
     }
 }
@@ -400,29 +402,107 @@ fn state_path() -> Option<std::path::PathBuf> {
     Some(session.with_file_name(format!("{stem}.documents.json")))
 }
 
-fn write_state(records: &[RestoreRecord]) {
+#[derive(PartialEq, Eq)]
+struct StateStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+impl StateStamp {
+    fn read(path: &std::path::Path) -> std::io::Result<Self> {
+        std::fs::metadata(path).map(Self::from_metadata)
+    }
+
+    fn from_metadata(metadata: std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            identity: {
+                use std::os::unix::fs::MetadataExt;
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            },
+        }
+    }
+}
+
+struct SavedState {
+    path: std::path::PathBuf,
+    bytes: Vec<u8>,
+    stamp: StateStamp,
+}
+
+fn write_state(
+    path: &std::path::Path,
+    records: &[RestoreRecord],
+    saved: &mut Option<SavedState>,
+) -> std::io::Result<bool> {
+    write_state_after_rename(path, records, saved, || {})
+}
+
+fn write_state_after_rename(
+    path: &std::path::Path,
+    records: &[RestoreRecord],
+    saved: &mut Option<SavedState>,
+    after_rename: impl FnOnce(),
+) -> std::io::Result<bool> {
     use std::io::Write;
-    let Some(path) = state_path() else { return };
+
+    #[derive(serde::Serialize)]
+    struct BorrowedWindows<'a> {
+        windows: &'a [RestoreRecord],
+    }
+    let bytes = serde_json::to_vec(&BorrowedWindows { windows: records })?;
+    if saved.as_ref().is_some_and(|saved| {
+        saved.path == path
+            && saved.bytes == bytes
+            && StateStamp::read(path).is_ok_and(|stamp| stamp == saved.stamp)
+    }) {
+        return Ok(false);
+    }
+    // A failed replacement must not leave an earlier snapshot eligible for a
+    // cache hit; the next autosave must retry even if the editor changes back.
+    *saved = None;
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    let Ok(bytes) = serde_json::to_vec(&StoredWindows {
-        windows: records.to_vec(),
-    }) else {
-        return;
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        after_rename();
+        file.metadata().map(StateStamp::from_metadata)
+    })();
+    let stamp = match result {
+        Ok(stamp) => stamp,
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
     };
-    let Ok(mut file) = std::fs::File::create(&tmp) else {
-        return;
-    };
-    if file.write_all(&bytes).is_err() || file.sync_all().is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return;
+    // Checking the destination stamp also invalidates hits after external
+    // deletion/replacement without rereading the whole document every tick.
+    // The open handle identifies our bytes even if another writer replaces
+    // the destination between rename and this check.
+    if StateStamp::read(path).is_ok_and(|current| current == stamp) {
+        *saved = Some(SavedState {
+            path: path.to_owned(),
+            bytes,
+            stamp,
+        });
     }
-    drop(file);
-    if std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
+    Ok(true)
 }
 
 fn source_for_restore(
@@ -964,17 +1044,19 @@ impl App {
                     let editor = tab.markdown()?;
                     let missing = editor.doc.path.is_empty()
                         || !std::path::Path::new(&editor.doc.path).exists();
-                    let lines = if editor.edit_lines.is_empty() {
-                        editor.doc.raw.split('\n').map(String::from).collect()
-                    } else {
-                        editor.edit_lines.as_ref().clone()
-                    };
+                    let buffer = (editor.modified || missing).then(|| {
+                        if editor.edit_lines.is_empty() {
+                            editor.doc.raw.split('\n').map(String::from).collect()
+                        } else {
+                            editor.edit_lines.as_ref().clone()
+                        }
+                    });
                     Some(RestoreRecord {
                         path: editor.doc.path.clone(),
                         is_md_doc: editor.is_md_doc,
                         raw_mode: editor.raw_mode,
                         modified: editor.modified,
-                        buffer: (editor.modified || missing).then_some(lines),
+                        buffer,
                         cur_line: editor.cur_line,
                         cur_col: editor.cur_col,
                         sel_anchor: editor.sel_anchor,
@@ -994,7 +1076,9 @@ impl App {
         records.extend(self.aux.unopened.iter().cloned());
         let mut seen = std::collections::HashSet::new();
         records.retain(|record| record.path.is_empty() || seen.insert(record.path.clone()));
-        write_state(&records);
+        if let Some(path) = state_path() {
+            let _ = write_state(&path, &records, &mut self.aux.saved.borrow_mut());
+        }
     }
 
     fn aux_render(&mut self, index: usize) {
@@ -1575,6 +1659,162 @@ pub(crate) fn clamped_document_scroll(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct StateDir(std::path::PathBuf);
+
+    impl StateDir {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "kasaterm-aux-save-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> std::path::PathBuf {
+            self.0.join("documents.json")
+        }
+    }
+
+    impl Drop for StateDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn unchanged_state_skips_even_opening_the_temporary_file() {
+        let dir = StateDir::new();
+        let path = dir.path();
+        let mut saved = None;
+        assert!(write_state(&path, &[], &mut saved).unwrap());
+        let original = StateStamp::read(&path).unwrap();
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::create_dir(&tmp).unwrap();
+        for _ in 0..100 {
+            assert!(!write_state(&path, &[], &mut saved).unwrap());
+        }
+        assert!(original == StateStamp::read(&path).unwrap());
+        assert!(tmp.is_dir());
+    }
+
+    #[test]
+    fn changed_state_preserves_scroll_carets_mode_order_and_final_close() {
+        let dir = StateDir::new();
+        let path = dir.path();
+        let mut saved = None;
+        let mut records = vec![
+            RestoreRecord {
+                path: "a".into(),
+                ..Default::default()
+            },
+            RestoreRecord {
+                path: "b".into(),
+                ..Default::default()
+            },
+        ];
+        assert!(write_state(&path, &records, &mut saved).unwrap());
+        records[0].scroll = 41.5;
+        records[0].h_scroll = 8.0;
+        records[0].cur_line = 3;
+        records[0].cur_col = 7;
+        records[0].sel_anchor = Some((1, 2));
+        records[0].extra = vec![CaretRecord {
+            line: 5,
+            col: 6,
+            anchor: Some((4, 1)),
+        }];
+        records[0].raw_mode = true;
+        records[0].wrap = true;
+        records[0].modified = true;
+        records[0].buffer = Some(vec![String::new()]);
+        records.swap(0, 1);
+        assert!(write_state(&path, &records, &mut saved).unwrap());
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            bytes,
+            serde_json::to_vec(&StoredWindows { windows: records }).unwrap()
+        );
+        let restored: StoredWindows = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored.windows[0].path, "b");
+        assert_eq!(restored.windows[1].scroll, 41.5);
+        assert_eq!(restored.windows[1].extra[0].anchor, Some((4, 1)));
+        assert!(write_state(&path, &[], &mut saved).unwrap());
+        let restored: StoredWindows =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(restored.windows.is_empty());
+        assert!(!write_state(&path, &[], &mut saved).unwrap());
+    }
+
+    #[test]
+    fn same_bytes_at_a_new_destination_are_saved() {
+        let dir = StateDir::new();
+        let mut saved = None;
+        assert!(write_state(&dir.path(), &[], &mut saved).unwrap());
+        let other = dir.0.join("other.json");
+        assert!(write_state(&other, &[], &mut saved).unwrap());
+        assert_eq!(
+            std::fs::read(other).unwrap(),
+            std::fs::read(dir.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn failed_atomic_replace_retries_identical_state() {
+        let dir = StateDir::new();
+        let path = dir.path();
+        std::fs::create_dir(&path).unwrap();
+        let mut saved = None;
+        assert!(write_state(&path, &[], &mut saved).is_err());
+        assert!(saved.is_none());
+        std::fs::remove_dir(&path).unwrap();
+        assert!(write_state(&path, &[], &mut saved).unwrap());
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::create_dir(&tmp).unwrap();
+        let records = [RestoreRecord::default()];
+        assert!(write_state(&path, &records, &mut saved).is_err());
+        assert!(saved.is_none());
+        std::fs::remove_dir(&tmp).unwrap();
+        assert!(write_state(&path, &records, &mut saved).unwrap());
+    }
+
+    #[test]
+    fn replacement_during_save_is_not_cached_as_our_snapshot() {
+        let dir = StateDir::new();
+        let path = dir.path();
+        let mut saved = None;
+        assert!(write_state_after_rename(&path, &[], &mut saved, || {
+            let replacement = dir.0.join("replacement.json");
+            std::fs::write(&replacement, b"{\"windows\":{}}").unwrap();
+            std::fs::rename(replacement, &path).unwrap();
+        })
+        .unwrap());
+        assert!(saved.is_none());
+        assert!(write_state(&path, &[], &mut saved).unwrap());
+        assert_eq!(std::fs::read(path).unwrap(), b"{\"windows\":[]}");
+    }
+
+    #[test]
+    fn external_deletion_or_replacement_invalidates_the_cache() {
+        let dir = StateDir::new();
+        let path = dir.path();
+        let mut saved = None;
+        assert!(write_state(&path, &[], &mut saved).unwrap());
+        std::fs::remove_file(&path).unwrap();
+        assert!(write_state(&path, &[], &mut saved).unwrap());
+        let replacement = dir.0.join("replacement.json");
+        std::fs::write(&replacement, "{\"windows\":0}").unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(write_state(&path, &[], &mut saved).unwrap());
+        assert_eq!(std::fs::read(path).unwrap(), b"{\"windows\":[]}");
+    }
 
     #[test]
     fn dirty_empty_buffer_wins_over_existing_disk_text() {
