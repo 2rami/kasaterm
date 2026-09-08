@@ -18,6 +18,137 @@ const LINE_SPACING: f32 = 1.4;
 /// 레티나 — 래스터는 이 배율, 반환은 논리.
 const SCALE: f32 = 2.0;
 
+#[derive(Clone, Copy, Debug)]
+pub struct Geometry {
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+    viewport: (f32, f32),
+}
+impl Geometry {
+    pub fn contains(self, point: (f32, f32)) -> bool {
+        point.0 >= self.left
+            && point.0 <= self.left + self.width
+            && point.1 >= self.top
+            && point.1 <= self.top + self.height
+    }
+    pub fn ndc(self) -> (f32, f32, f32, f32) {
+        (
+            self.left / self.viewport.0 * 2.0 - 1.0,
+            1.0 - self.top / self.viewport.1 * 2.0,
+            (self.left + self.width) / self.viewport.0 * 2.0 - 1.0,
+            1.0 - (self.top + self.height) / self.viewport.1 * 2.0,
+        )
+    }
+}
+
+/// A stale texture can briefly outlive a surface resize. Fit its actual extent
+/// before positioning it, and share these exact bounds with mouse hit testing.
+pub fn geometry(viewport: (f32, f32), texture: (f32, f32), head: (f32, f32)) -> Option<Geometry> {
+    if ![viewport.0, viewport.1, texture.0, texture.1]
+        .into_iter()
+        .all(|v| v.is_finite() && v > 0.0)
+        || !head.0.is_finite()
+        || !head.1.is_finite()
+    {
+        return None;
+    }
+    let margin = 8.0_f32.min(viewport.0 / 4.0).min(viewport.1 / 4.0);
+    let available = (viewport.0 - 2.0 * margin, viewport.1 - 2.0 * margin);
+    let scale = 1.0_f32
+        .min(available.0 / texture.0)
+        .min(available.1 / texture.1);
+    let (width, height) = (texture.0 * scale, texture.1 * scale);
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let x = (head.0 + 1.0) * 0.5 * viewport.0 - width * 0.5;
+    let y = (1.0 - head.1) * 0.5 * viewport.1 - 10.0 - height;
+    Some(Geometry {
+        left: x.clamp(margin, (viewport.0 - margin - width).max(margin)),
+        top: y.clamp(margin, (viewport.1 - margin - height).max(margin)),
+        width,
+        height,
+        viewport,
+    })
+}
+
+pub struct Preview {
+    pub text: String,
+    pub width: f32,
+    pub pt: f32,
+}
+
+/// Keep notifications as previews. Wrapping respects the current viewport and
+/// the chosen font size; an ellipsis marks content available in the full view.
+pub fn preview(text: &str, viewport: (f32, f32), requested_pt: f32) -> Option<Preview> {
+    if text.trim().is_empty()
+        || ![viewport.0, viewport.1, requested_pt]
+            .into_iter()
+            .all(|v| v.is_finite() && v > 0.0)
+    {
+        return None;
+    }
+    let margin = 8.0_f32.min(viewport.0 / 4.0).min(viewport.1 / 4.0);
+    let pad = (HALO + 1) as f32 * 2.0 / SCALE;
+    let width = (260.0_f32.min(viewport.0 - 2.0 * margin) - pad).floor();
+    let height = 110.0_f32.min(viewport.1 - 2.0 * margin);
+    if width < 1.0 || height <= pad {
+        return None;
+    }
+    let font = FontRef::from_index(font_data(), 0)?;
+    let mut chars: Vec<char> = text.trim().chars().take(2049).collect();
+    let input_cut = chars.len() > 2048;
+    chars.truncate(2048);
+    let mut pt = requested_pt.min((height - pad) / LINE_SPACING);
+    let metrics = font.glyph_metrics(&[]).scale(pt * SCALE);
+    let map = font.charmap();
+    let widest = chars
+        .iter()
+        .copied()
+        .chain(['…'])
+        .map(|c| metrics.advance_width(map.map(c as u32)) / SCALE)
+        .fold(0.0_f32, f32::max);
+    if widest > width {
+        pt *= width / widest;
+    }
+    if !pt.is_finite() || pt <= 0.0 {
+        return None;
+    }
+    let fits = |body: &str| {
+        let layout = layout(&font, body, pt * SCALE, width * SCALE);
+        layout.width.ceil() / SCALE + pad <= width + pad
+            && (layout.lines.len() as f32 * layout.line_h).ceil() / SCALE + pad <= height
+    };
+    let all: String = chars.iter().collect();
+    if !input_cut && fits(&all) {
+        return Some(Preview {
+            text: all,
+            width,
+            pt,
+        });
+    }
+    if !fits("…") {
+        return None;
+    }
+    let (mut low, mut high) = (0, chars.len());
+    while low < high {
+        let mid = (low + high + 1) / 2;
+        let candidate = format!("{}…", chars[..mid].iter().collect::<String>().trim_end());
+        if fits(&candidate) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    Some(Preview {
+        text: format!("{}…", chars[..low].iter().collect::<String>().trim_end()),
+        width,
+        pt,
+    })
+}
+
 /// 글자 둘레에 두르는 어두운 테두리의 두께(래스터 픽셀). 말풍선 판을 걷어내고 글자만
 /// 띄우므로, 이게 없으면 밝은 바탕화면 위에서 흰 글자가 통째로 사라진다.
 const HALO: i32 = 3;
@@ -163,7 +294,10 @@ fn raster(text: &str, max_w: f32, pt: f32) -> Option<(Vec<u8>, u32, u32)> {
                         let (cov, rgb) = match img.content {
                             Content::Color => {
                                 let i = ((ry * pw + rx) * 4) as usize;
-                                (img.data[i + 3], [img.data[i], img.data[i + 1], img.data[i + 2]])
+                                (
+                                    img.data[i + 3],
+                                    [img.data[i], img.data[i + 1], img.data[i + 2]],
+                                )
                             }
                             _ => {
                                 let c = img.data[(ry * pw + rx) as usize];
@@ -233,7 +367,11 @@ pub fn render_text(
     pt: f32,
 ) -> Option<(wgpu::TextureView, f32, f32)> {
     let (buf, w, h) = raster(text, max_w, pt)?;
-    let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+    let size = wgpu::Extent3d {
+        width: w,
+        height: h,
+        depth_or_array_layers: 1,
+    };
     let tex = dev.create_texture(&wgpu::TextureDescriptor {
         label: Some("bubble-text"),
         size,
@@ -247,10 +385,29 @@ pub fn render_text(
     q.write_texture(
         tex.as_image_copy(),
         &buf,
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) },
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * w),
+            rows_per_image: Some(h),
+        },
         size,
     );
-    Some((tex.create_view(&Default::default()), w as f32 / SCALE, h as f32 / SCALE))
+    Some((
+        tex.create_view(&Default::default()),
+        w as f32 / SCALE,
+        h as f32 / SCALE,
+    ))
+}
+
+pub fn render_preview(
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    text: &str,
+    viewport: (f32, f32),
+    pt: f32,
+) -> Option<(wgpu::TextureView, f32, f32)> {
+    let plan = preview(text, viewport, pt)?;
+    render_text(dev, q, &plan.text, plan.width, plan.pt)
 }
 
 #[cfg(test)]
@@ -289,7 +446,10 @@ mod tests {
 
     #[test]
     fn text_without_spaces_wraps_by_character() {
-        let (n, w) = lines_of("띄어쓰기없이아주길게이어지는한국어문장이라도상한을넘으면잘라야한다", 100.0);
+        let (n, w) = lines_of(
+            "띄어쓰기없이아주길게이어지는한국어문장이라도상한을넘으면잘라야한다",
+            100.0,
+        );
         assert!(n >= 4, "줄 {n}");
         assert!(w <= 100.0, "폭 {w}");
     }
@@ -317,8 +477,75 @@ mod tests {
         assert!(painted > 20, "찍힌 픽셀 {painted}");
         // 글자 속은 흰색(RGB = 알파), 둘레는 검은 테두리(RGB 0 에 알파만) — 어느 쪽이든
         // RGB 가 알파를 넘지 않아야 미리곱 알파가 성립한다.
-        assert!(buf.chunks(4).all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]));
+        assert!(buf
+            .chunks(4)
+            .all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]));
         let haloed = buf.chunks(4).filter(|p| p[3] > 0 && p[0] == 0).count();
         assert!(haloed > 20, "테두리 픽셀 {haloed}");
+    }
+
+    #[test]
+    fn recorded_crash_width_fits_before_clamping_and_hit_matches_draw() {
+        let viewport = (168.0, 284.0);
+        let rect = geometry(viewport, (168.0 * 2.1073446 / 2.0, 70.0), (0.0, 0.9)).unwrap();
+        let (left, top, right, bottom) = rect.ndc();
+        assert!([left, top, right, bottom]
+            .iter()
+            .all(|v| v.is_finite() && *v >= -1.0 && *v <= 1.0));
+        assert!(rect.width <= viewport.0 - 16.0);
+        let center = (
+            ((left + right) * 0.25 + 0.5) * viewport.0,
+            (0.5 - (top + bottom) * 0.25) * viewport.1,
+        );
+        assert!(rect.contains(center));
+        assert!(!rect.contains((rect.left - 0.1, rect.top)));
+        assert!(!rect.contains((rect.left, rect.top + rect.height + 0.1)));
+    }
+
+    #[test]
+    fn long_korean_large_font_and_resizes_only_shorten_the_preview() {
+        let raw = "재시작한뒤곽향말풍선과나쵸대화를확인해주세요 긴 한글 안내입니다. ".repeat(100);
+        let original = raw.clone();
+        for viewport in [
+            (168.0, 284.0),
+            (420.0, 710.0),
+            (210.0, 355.0),
+            (168.0, 284.0),
+            (32.0, 24.0),
+        ] {
+            for pt in [8.0, 13.0, 40.0, 120.0] {
+                let Some(plan) = preview(&raw, viewport, pt) else {
+                    continue;
+                };
+                assert!(plan.text.ends_with('…') && plan.text.len() < raw.len());
+                let (_, w, h) = raster(&plan.text, plan.width, plan.pt).unwrap();
+                assert!(w as f32 / SCALE <= viewport.0);
+                assert!(h as f32 / SCALE <= 110.0_f32.min(viewport.1));
+                let rect =
+                    geometry(viewport, (w as f32 / SCALE, h as f32 / SCALE), (1.5, -1.5)).unwrap();
+                assert!(
+                    rect.left >= 0.0
+                        && rect.top >= 0.0
+                        && rect.left + rect.width <= viewport.0
+                        && rect.top + rect.height <= viewport.1
+                );
+            }
+        }
+        assert_eq!(raw, original);
+    }
+
+    #[test]
+    fn invalid_or_zero_surfaces_never_create_text_geometry() {
+        for viewport in [
+            (0.0, 100.0),
+            (100.0, 0.0),
+            (f32::NAN, 100.0),
+            (100.0, f32::INFINITY),
+        ] {
+            assert!(preview("안내", viewport, 40.0).is_none());
+            assert!(geometry(viewport, (260.0, 110.0), (0.0, 0.0)).is_none());
+        }
+        assert!(geometry((168.0, 284.0), (f32::NAN, 20.0), (0.0, 0.0)).is_none());
+        assert!(preview("안내", (168.0, 284.0), f32::NAN).is_none());
     }
 }

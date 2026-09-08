@@ -47,6 +47,7 @@ struct Gfx {
     p_normal: wgpu::RenderPipeline, p_add: wgpu::RenderPipeline, p_mul: wgpu::RenderPipeline, p_mask: wgpu::RenderPipeline,
     p_plain: wgpu::RenderPipeline,
     bubble_vb: wgpu::Buffer, bubble_ub: wgpu::Buffer,
+    typed_vb: wgpu::Buffer, typed_ub: wgpu::Buffer,
 }
 
 struct App {
@@ -77,6 +78,9 @@ struct App {
     stirred: std::time::Instant,
     /// 글자를 그린 텍스처. 말풍선은 이것이 있을 때만 뜬다.
     bubble_text: Option<(wgpu::TextureView, f32, f32)>,
+    bubble_geometry: Option<bubble::Geometry>,
+    typed_geometry: Option<bubble::Geometry>,
+    text_viewport: Option<(u32,u32,u64)>,
     /// 글자 크기(pt). 설정 화면이 `pet/text_pt` 에 적어 두면 그것을 따른다.
     text_pt: f32,
     /// 지금 말풍선이 가리키는 pane — 되받아 말하거나 말풍선을 누르면 이리로 간다.
@@ -253,10 +257,16 @@ impl ApplicationHandler for App {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let bubble_ub = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: 160,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        // Queue writes happen before the shared submit, so the two text draws
+        // must not overwrite each other's persistent geometry and uniforms.
+        let typed_vb = dev.create_buffer(&wgpu::BufferDescriptor { label: Some("typed-text-vertices"), size: 6 * 16,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let typed_ub = dev.create_buffer(&wgpu::BufferDescriptor { label: Some("typed-text-uniforms"), size: 160,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         self.gfx = Some(Gfx {
             p_normal: mk("fs", fmt, over), p_add: mk("fs", fmt, add), p_mul: mk("fs", fmt, mul),
             p_mask: mk("fs_mask", wgpu::TextureFormat::Rgba8Unorm, add), p_plain: mk("fs_plain", fmt, over),
-            bubble_vb, bubble_ub,
+            bubble_vb, bubble_ub, typed_vb, typed_ub,
             dev, q, surf, fmt, bgl, samp, texs, mask_view, dummy_view });
         self.win = Some(win);
         if std::env::args().any(|arg| arg == "--chat") { self.toggle_chat(); }
@@ -269,6 +279,7 @@ impl ApplicationHandler for App {
             // 물리 크기를 그대로 쥐고 있어 캐릭터가 반쪽이 되거나 흐릿해진다 — 논리 크기를
             // 다시 걸어 주면 뒤따르는 Resized 가 맞는 물리 크기를 들고 온다.
             WindowEvent::ScaleFactorChanged { .. } => {
+                self.bubble_geometry=None;self.typed_geometry=None;self.text_viewport=None;
                 if let Some(w) = &self.win {
                     let _ = w.request_inner_size(winit::dpi::LogicalSize::new(
                         self.w * self.scale as f64,
@@ -277,6 +288,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(sz) => {
+                self.bubble_geometry=None;self.typed_geometry=None;self.text_viewport=None;
                 if let Some(g) = &self.gfx {
                     let caps_alpha = self.alpha;
                     g.surf.configure(&g.dev, &wgpu::SurfaceConfiguration {
@@ -292,6 +304,7 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 // 비활성 창의 첫 클릭은 마지막 그리기 이후 들어올 수 있어 말풍선 위치를 다시 잰다.
                 self.poll_cursor();
+                if self.cursor_on_typed() {self.last_click=None;if let Some(win)=&self.win {win.focus_window();}return;}
                 let double = self
                     .last_click
                     .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400));
@@ -702,13 +715,16 @@ impl App {
     }
 
     fn rebuild_typed(&mut self) {
+        self.typed_geometry=None;
+        if self.typing.is_none(){self.typed_tex=None;return;}
+        let Some(viewport)=self.bubble_viewport() else{self.typed_tex=None;return;};
         let Some(g) = &self.gfx else { return };
         let body = format!(
             "› {}{}",
             self.typing.clone().unwrap_or_default(),
             self.preedit
         );
-        self.typed_tex = bubble::render_text(&g.dev, &g.q, &body, 260.0, self.text_pt);
+        self.typed_tex = bubble::render_preview(&g.dev, &g.q, &body, viewport, self.text_pt);
     }
 
     fn request_journal(&mut self, action: journal::Action) {
@@ -988,10 +1004,13 @@ impl App {
         self.say_alpha() > 0.0
     }
 
-    /// 커서가 말풍선 자리인가 — 창 맨 위, 머리 위로 비워 둔 띠. 글자 알파로 잡지 않는
-    /// 이유는 획 사이가 비어 있어 획을 정확히 짚어야만 눌리기 때문이다.
+    /// Glyph gaps stay clickable, but only within the rectangle actually painted.
     fn cursor_on_bubble(&self) -> bool {
-        self.saying() && self.local.is_some_and(|(_, y)| y < HEADROOM as f32)
+        self.saying() && self.bubble_geometry.zip(self.local).is_some_and(|(rect,p)|rect.contains(p))
+    }
+
+    fn cursor_on_typed(&self)->bool {
+        self.typing.is_some()&&self.typed_geometry.zip(self.local).is_some_and(|(rect,p)|rect.contains(p))
     }
 
     /// 말풍선이 가리키는 pane 을 앞으로 꺼낸다. pane 고르기와 창 올리기는 따로다 —
@@ -1066,11 +1085,25 @@ impl App {
 
     /// 할 말을 글자 텍스처로. 빈 말이면 말풍선이 통째로 사라진다.
     fn rebuild_bubble_text(&mut self) {
+        self.bubble_geometry=None;
+        let Some(viewport)=self.bubble_viewport() else {self.bubble_text=None;return;};
         let Some(g) = &self.gfx else { return };
-        self.bubble_text = bubble::render_text(&g.dev, &g.q, &self.say, 260.0, self.text_pt);
+        self.bubble_text = bubble::render_preview(&g.dev, &g.q, &self.say, viewport, self.text_pt);
+    }
+
+    fn bubble_viewport(&self)->Option<(f32,f32)> {
+        let win=self.win.as_ref()?;let size=win.inner_size();let scale=win.scale_factor() as f32;
+        if size.width==0||size.height==0||!scale.is_finite()||scale<=0.0{return None;}
+        Some((size.width as f32/scale,size.height as f32/scale))
+    }
+
+    fn refresh_text_viewport(&mut self) {
+        let key=self.win.as_ref().map(|win|{let size=win.inner_size();(size.width,size.height,win.scale_factor().to_bits())});
+        if self.text_viewport!=key {self.text_viewport=key;self.rebuild_bubble_text();self.rebuild_typed();}
     }
 
     fn draw(&mut self) {
+        self.refresh_text_viewport();
         #[cfg(target_os="macos")]
         if self.frames==10&&self.pet_dir.is_none()&&std::env::var_os("KASAPET_MENU_PROBE").is_some(){self.show_menu();self.menu_probe_started=Some(std::time::Instant::now());self.menu_probe_motion=self.motion.as_ref().map(|m|m.time()).unwrap_or(0.0);self.menu_probe_mesh=self.probe_mesh_signature();if let Some(popup)=&self.popup{eprintln!("MENU_PROBE_WINDOW_ID:{}",popup.probe_window_number());}}
         self.poll_cursor();
@@ -1217,8 +1250,11 @@ impl App {
             (sz.width.max(1) as f32 / sf, sz.height.max(1) as f32 / sf)
         };
         let fit = fit_xform(self.bbox, cw, ch, win_w, win_h, room);
+        let viewport=self.bubble_viewport();
+        self.bubble_geometry=if preview_mode(){None}else{self.bubble_text.as_ref().and_then(|(_,w,h)|bubble::geometry(viewport?,(*w,*h),fit.apply(self.head)))};
+        self.typed_geometry=self.typed_tex.as_ref().and_then(|(_,w,h)|bubble::geometry(viewport?,(*w,*h),(0.0,-1.0)));
         let base = fit.matrix();
-        let frame = match g.surf.get_current_texture() { Ok(f) => f, Err(_) => return };
+        let frame = match g.surf.get_current_texture() { Ok(f) => f, Err(_) => {self.bubble_geometry=None;self.typed_geometry=None;return;} };
         let view = frame.texture.create_view(&Default::default());
         let mut enc = g.dev.create_command_encoder(&Default::default());
         let bind = |ub: &wgpu::Buffer, tex: &wgpu::TextureView, mask: &wgpu::TextureView| g.dev.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1284,20 +1320,10 @@ impl App {
             // 위에 네모가 하나 더 얹혀 바탕화면에 얹힌 느낌이 사라진다. 밝은 바탕에서도
             // 읽히도록 글자 자체가 어두운 테두리를 두르고 온다(bubble.rs).
             let say_alpha = self.say_alpha();
-            if let (Some((text_v, text_w, text_h)), false, true) =
-                (&self.bubble_text, preview_mode(), say_alpha > 0.0)
+            if let (Some((text_v, _, _)), Some(geometry), true) =
+                (&self.bubble_text, self.bubble_geometry, say_alpha > 0.0)
             {
-                let win = self.win.as_ref().map(|w| w.inner_size()).unwrap_or_default();
-                let sf = self.win.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
-                let (sw, sh) = (win.width.max(1) as f32 / sf, win.height.max(1) as f32 / sf);
-                let (px, py) = (2.0 / sw, 2.0 / sh);
-                let (tw, th) = (*text_w * px, *text_h * py);
-
-                // 머리 꼭대기를 따라간다 — 숨쉬고 고개를 돌리면 글도 함께 움직인다.
-                let (hx, hy) = fit.apply(self.head);
-                let x0 = (hx - tw / 2.0).clamp(-1.0, 1.0 - tw);
-                let y0 = (hy + 10.0 * py + th).min(1.0);
-                let (x1, y1) = (x0 + tw, y0 - th);
+                let (x0,y0,x1,y1)=geometry.ndc();
                 let quad = [
                     V { p: [x0, y0], uv: [0.0, 0.0] },
                     V { p: [x1, y0], uv: [1.0, 0.0] },
@@ -1319,15 +1345,8 @@ impl App {
             }
             // 말 걸기 줄 — 캐릭터 발치에. 머리 위는 펫이 말하는 자리라 겹치면
             // 누가 한 말인지 안 갈린다.
-            if let Some((tv, tw, th)) = &self.typed_tex {
-                let win = self.win.as_ref().map(|w| w.inner_size()).unwrap_or_default();
-                let sf = self.win.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
-                let (sw, sh) = (win.width.max(1) as f32 / sf, win.height.max(1) as f32 / sf);
-                let (px, py) = (2.0 / sw, 2.0 / sh);
-                let (w2, h2) = (*tw * px, *th * py);
-                let x0 = (-w2 / 2.0).max(-1.0);
-                let y0 = -1.0 + h2 + 8.0 * py;
-                let (x1, y1) = (x0 + w2, y0 - h2);
+            if let (Some((tv, _, _)),Some(geometry)) = (&self.typed_tex,self.typed_geometry) {
+                let (x0,y0,x1,y1)=geometry.ndc();
                 let quad = [
                     V { p: [x0, y0], uv: [0.0, 0.0] },
                     V { p: [x1, y0], uv: [1.0, 0.0] },
@@ -1336,15 +1355,15 @@ impl App {
                     V { p: [x1, y1], uv: [1.0, 1.0] },
                     V { p: [x0, y1], uv: [0.0, 1.0] },
                 ];
-                g.q.write_buffer(&g.bubble_vb, 0, bytemuck::cast_slice(&quad));
+                g.q.write_buffer(&g.typed_vb, 0, bytemuck::cast_slice(&quad));
                 let mut m = [0.0f32; 16];
                 m[0] = 1.0; m[5] = 1.0; m[10] = 1.0; m[15] = 1.0;
                 let u = Xf { mvp: m, mask_mtx: m, channel: [0.0; 4], opacity: 1.0, use_mask: 0.0, inverted: 0.0, _pad: 0.0 };
-                g.q.write_buffer(&g.bubble_ub, 0, bytemuck::bytes_of(&u));
-                let bg = bind(&g.bubble_ub, tv, &g.dummy_view);
+                g.q.write_buffer(&g.typed_ub, 0, bytemuck::bytes_of(&u));
+                let bg = bind(&g.typed_ub, tv, &g.dummy_view);
                 rp.set_pipeline(&g.p_plain);
                 rp.set_bind_group(0, &bg, &[]);
-                rp.set_vertex_buffer(0, g.bubble_vb.slice(..));
+                rp.set_vertex_buffer(0, g.typed_vb.slice(..));
                 rp.draw(0..6, 0..1);
             }
         }
@@ -1355,7 +1374,7 @@ impl App {
         // 커서 자리가 캐릭터의 칠해진 픽셀인지 본다. 몇 프레임에 한 번이면 충분하다 —
         // 손이 움직이는 속도보다 훨씬 잦다.
         if self.frames % 4 == 0 {
-            let over = self.cursor_on_body(g, &frame.texture) || self.cursor_on_bubble();
+            let over = self.cursor_on_body(g, &frame.texture) || self.cursor_on_bubble() || self.cursor_on_typed();
             #[cfg(target_os = "macos")]
             let over = over && self.win.as_ref().is_some_and(|w| native_cursor::is_frontmost_at_cursor(w));
             #[cfg(target_os = "macos")]
@@ -1671,6 +1690,7 @@ fn main() {
         mood: board::Mood::Idle, say: String::new(), board_seen: None,
         board_polled: std::time::Instant::now(), stirred: std::time::Instant::now(),
         bubble_text: None, text_pt, subject: String::new(),
+        bubble_geometry:None,typed_geometry:None,text_viewport:None,
         journal: journal::Client::default(),
         journal_shown: false,
         chat: chat::Chat::default(), chat_restore_scale: None,
