@@ -462,6 +462,7 @@ impl App {
     /// 통째로 evict 한다 — upload_image 는 키가 있으면 no-op 이라 이 축출 없이는
     /// 교체가 화면에 안 먹는다.
     fn refresh_student_assets(&mut self) {
+        self.web_visual.invalidate_assets();
         if let Some(g) = self.gpu.as_mut() {
             g.drop_images_with_prefix("student:");
             // 테마 카드 미리보기는 키가 갈려 있어 위 한 줄로는 안 걷힌다 — 남겨

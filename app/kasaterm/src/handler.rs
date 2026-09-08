@@ -6837,6 +6837,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.flush_aux_opens(event_loop);
+        let web_visual_deadline = self.publish_web_visual_scenes();
         // 신원 조회가 값을 채웠으면 그 자리에서 다시 그린다. 조회는 백그라운드
         // 스레드라 스스로 화면을 못 깨우고, 그게 없으면 로그인을 마친 뒤에도
         // 옛 「로그인 필요」가 화면에 남는다(2026-09-07).
@@ -7524,6 +7525,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 자체 배너가 유일한 애니메이션/미확인 상태여도 정확히 수명 만기에
                 // 깨어나야 한다. hover 중에는 deadline이 None이라 타이머가 멈춘다.
                 .chain(self.next_banner_deadline())
+                .chain(web_visual_deadline)
                 .min();
             event_loop.set_control_flow(match deadline {
                 Some(at) => ControlFlow::WaitUntil(at),

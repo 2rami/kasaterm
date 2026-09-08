@@ -393,8 +393,16 @@ pub(crate) fn take_status_model_provider(
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StatusModelIconSlot {
-    provider: StatusModelProvider,
-    rect: (f32, f32, f32, f32),
+    pub(crate) provider: StatusModelProvider,
+    pub(crate) rect: (f32, f32, f32, f32),
+}
+
+impl StatusModelIconSlot {
+    pub(crate) fn image_rect(self) -> (f32, f32, f32, f32) {
+        let (x, y, w, h) = self.rect;
+        let size = (h * 0.72).min(w * 0.78);
+        (x + (w - size) * 0.5, y + (h - size) * 0.5, size, size)
+    }
 }
 
 /// 셀 표식을 지우고 SVG가 앉을 논리 px 박스로 바꾼다. 표식 다음 한 칸은 모델명
@@ -427,12 +435,11 @@ pub(crate) fn paint_status_model_icons(
     slots: &[StatusModelIconSlot],
 ) {
     for slot in slots {
-        let (x, y, w, h) = slot.rect;
-        let size = (h * 0.72).min(w * 0.78);
+        let (x, y, size, _) = slot.image_rect();
         g.queue_icon(
             slot.provider.icon_name(),
-            x + (w - size) * 0.5,
-            y + (h - size) * 0.5,
+            x,
+            y,
             size,
             STATUS_MODEL_COLOR,
         );

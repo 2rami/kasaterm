@@ -21,6 +21,30 @@ use winit::window::Window;
 
 const ATLAS_SIZE: u32 = 2048;
 
+/// The native fit corresponds to the cell-slot fit/anchor contract sent to viewers.
+pub(crate) fn fit_terminal_art(
+    rect: (f32, f32, f32, f32),
+    image: (u32, u32),
+    scale: f32,
+    foreground: bool,
+) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = rect;
+    let (iw, ih) = (image.0.max(1) as f32, image.1.max(1) as f32);
+    let fit = (w / iw).min(h / ih);
+    let fit = if foreground {
+        fit
+    } else {
+        fit.min(1.0 / scale.max(0.01))
+    };
+    let (dw, dh) = (iw * fit, ih * fit);
+    (
+        x + (w - dw) * 0.5,
+        y + (h - dh) * if foreground { 1.0 } else { 0.5 },
+        dw,
+        dh,
+    )
+}
+
 /// Bundled pixel face for chrome labels under a pixel Shape (SIL OFL 1.1 — see
 /// assets/fonts/OFL-Galmuri.txt). Shipped verbatim, not subset: a subset is a
 /// Modified Version under that license, and the few MB saved aren't worth it.
@@ -4307,13 +4331,13 @@ impl GpuRenderer {
         if bw <= 0.0 || bh <= 0.0 {
             return;
         }
-        let (iw, ih) = (entry.w as f32, entry.h as f32);
         // Contain fit, but never upscale past native — a small icon stays
         // crisp at 1:1 instead of blowing up blurry to fill the pane.
-        let fit = (bw / iw).min(bh / ih).min(1.0);
+        let (_, _, fitted_w, fitted_h) =
+            fit_terminal_art((bx, by, bw, bh), (entry.w, entry.h), 1.0, false);
         let z = zoom.max(1.0);
-        let raw_dw = iw * fit * z;
-        let raw_dh = ih * fit * z;
+        let raw_dw = fitted_w * z;
+        let raw_dh = fitted_h * z;
         // Per-axis: if the zoomed image fits, center it (pan has no room to
         // act); if it overflows, clip the dest to the pane edge and crop the
         // UV — shifted by the clamped pan so the visible window slides over
@@ -4393,14 +4417,12 @@ impl GpuRenderer {
         if bw <= 0.0 || bh <= 0.0 {
             return;
         }
-        let (iw, ih) = (entry.w as f32, entry.h as f32);
-        let fit = (bw / iw).min(bh / ih);
-        let dw = iw * fit;
-        let dh = ih * fit;
+        let (dx, dy, dw, dh) =
+            fit_terminal_art((bx, by, bw, bh), (entry.w, entry.h), 1.0, true);
         self.icon_quads.push((
             id.to_string(),
             CellInstance {
-                cell_px: [bx + (bw - dw) * 0.5, by + (bh - dh), dw, dh],
+                cell_px: [dx, dy, dw, dh],
                 uv_min: [0.0, 0.0],
                 uv_max: [1.0, 1.0],
                 fg_rgba: [1.0, 1.0, 1.0, 1.0],

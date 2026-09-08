@@ -4655,6 +4655,7 @@ struct RethemeState {
 }
 
 struct App {
+    web_visual: render::terminal_scene::VisualPump,
     window: Option<Arc<Window>>,
     /// Set when `KASATERM_RENDERER=gpu`. Mutually exclusive with
     /// `sugarloaf` — both own a wgpu Surface, only one can present.
@@ -5719,7 +5720,12 @@ struct App {
 
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
+        let visual_proxy = proxy.clone();
+        kasa_mcp::visual::register_producer(Arc::new(move || {
+            let _ = visual_proxy.send_event(UserEvent::Redraw);
+        }));
         Self {
+            web_visual: Default::default(),
             window: None,
             gpu: None,
             lsp: None,
