@@ -144,10 +144,6 @@ def run(args):
     factory = lambda: store
     server = JournalServer(factory, args.project, args.port)
     discovery = {"version": 1, "base_url": f"http://127.0.0.1:{server.server_port}", "project": str(Path(args.project).resolve())}
-    fd, temporary = tempfile.mkstemp(prefix=".service-", dir=data_dir)
-    with os.fdopen(fd, "w") as file:
-        json.dump(discovery, file)
-    os.replace(temporary, data_dir / "service.json")
     stopped = threading.Event()
     from .chat import ChatManager
     server.chat = ChatManager(store, server.project, provider_factory=lambda cancel: summary_provider(args, cancel))
@@ -214,6 +210,9 @@ def run(args):
         threading.Thread(target=server.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
+    # Discovery is also the readiness signal; publish only after cleanup handlers
+    # can safely stop every initialized worker.
+    write_private(data_dir / "service.json", json.dumps(discovery).encode())
     print(json.dumps({"service": LABEL, "url": f"http://127.0.0.1:{server.server_port}", "collecting": args.collect}), flush=True)
     try:
         server.serve_forever(poll_interval=0.25)

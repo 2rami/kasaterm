@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from tools.request_journal.chat import ChatManager, ChatStore
+from tools.request_journal.chat import ChatManager, ChatStore, render_checklist
 from tools.request_journal.checklist import apply_semantic, context_hash, make_checklist, requests_in
 from tools.request_journal.server import JournalServer
 from tools.request_journal.server import chat_job_view, checklist_page
@@ -151,6 +151,61 @@ class ChatTests(unittest.TestCase):
         self.assertTrue(wire_request["request_id"].startswith("r"))
         self.assertNotEqual(wire_request["request_id"], "request-1")
         self.assertEqual(ChatStore(self.store.db_path).history(self.project, "pet"), manager.chat.history(self.project, "pet"))
+
+    def test_saved_display_compaction_preserves_original_and_evidence(self):
+        chat = ChatStore(self.store.db_path)
+        checks = make_checklist(context([request(1), request(2)]))
+        checks["items"].insert(0, {"id": "semantic-main", "title": "펫 채팅 확인", "steps": ["펫 아래에서 채팅창을 열어 봅니다."], "source_request_ids": ["request-1"], "evidence_ids": [], "buildstate": "implementation_unverified", "uncertain": True, "context_notes": []})
+        checks["items"][1]["steps"] = ["긴 추가 근거 " * 4000]
+        original_text = "마지막 앱 실행 이후 요청을 검토했습니다." + render_checklist(checks)
+        job_id = chat.create(self.project, "pet", "재시작 확인", "format-test")
+        chat.update(self.project, job_id, "completed", {"text": original_text, "checklist": checks, "provider": "nacho-http", "partial": False})
+        before_ids = [item["id"] for item in checks["items"]]
+        chat.compact_saved_answers(self.project)
+        compact = chat.get(self.project, job_id)
+        self.assertEqual(len(compact["checklist"]["items"]), 1)
+        self.assertEqual(compact["checklist"]["supplementary_count"], 2)
+        self.assertEqual(compact["previous_render_text"], original_text)
+        self.assertEqual(before_ids, [item["id"] for item in compact["checklist"]["items"] + compact["checklist"]["supplementary_items"]])
+        self.assertIn("추가 근거 2건", compact["text"])
+        self.assertNotIn("긴 추가 근거", compact["text"])
+        shown = "".join(row["text"] for row in chat.history(self.project, "pet") if row["role"] == "assistant")
+        self.assertEqual(shown, compact["text"])
+        self.assertEqual(checklist_page(compact["checklist"], view="supplementary")["total_items"], 2)
+        chat.compact_saved_answers(self.project)
+        self.assertEqual(chat.get(self.project, job_id)["text"], compact["text"])
+
+    def test_readonly_validation_never_becomes_user_pending_on_reload(self):
+        manager = self.manager()
+        self.wait(manager, manager.submit("재시작 확인", conversation="verify-owned", read_only=True))
+        self.assertEqual(manager.chat.pending(self.project), [])
+        manager.close()
+        restarted = self.manager()
+        self.assertEqual(restarted.chat.pending(self.project), [])
+        self.wait(restarted, restarted.submit("재시작 확인"))
+        self.assertEqual(len(restarted.chat.pending(self.project)), 2)
+
+    def test_archiving_exact_validation_preserves_shared_user_pending_and_history(self):
+        chat = ChatStore(self.store.db_path)
+        checks = make_checklist(context([request(1), request(2)]))
+        owned = chat.create(self.project, "verify-owned", "검증", "owned")
+        chat.update(self.project, owned, "completed", {"text": "검증 결과", "checklist": checks})
+        chat.save_pending(self.project, checks)
+        user = chat.create(self.project, "pet", "사용자 질문", "user")
+        user_checks = make_checklist(context([request(1)]))
+        chat.update(self.project, user, "completed", {"text": "사용자 답변", "checklist": user_checks})
+        chat.save_pending(self.project, user_checks)
+        result = chat.archive_validation_pending(self.project, ["verify-owned"])
+        self.assertEqual(result["shared_user_item_ids"], 1)
+        self.assertEqual(result["archived_validation_only_ids"], 1)
+        self.assertEqual([row["item_id"] for row in chat.pending(self.project)], ["check-request-1"])
+        self.assertEqual(len(chat.history(self.project, "verify-owned")), 2)
+        self.assertEqual(len(chat.history(self.project, "pet")), 2)
+        checks["context"]["current_run"]["id"] = "run-2"
+        chat.save_pending(self.project, checks)
+        restored = {row["item_id"]: row for row in chat.pending(self.project)}
+        self.assertEqual(len(restored), 2)
+        self.assertEqual(restored["check-request-2"]["first_run_id"], "run-2")
 
     def test_matching_nacho_notes_are_reused_across_build_epochs(self):
         from tools.request_journal.summarizer import source, fingerprint

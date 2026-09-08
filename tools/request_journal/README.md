@@ -62,6 +62,20 @@ conversation pages use `before`/`next_before`. Job metadata never carries the fu
 checklist; the checklist/evidence endpoints page it separately so a large UTF-8
 conversation cannot exceed the native pet's response budget.
 
+Successful synthesis shows its main feature checks rather than appending each
+unmapped commit as another user task. Additional records remain in
+`supplementary_items`, available through `/api/checklist?view=supplementary` with
+the same paging contract. History names their preserved count. A display-only
+migration keeps the original generated rendering in `previous_render_text`,
+archives surplus presentation fragments, and preserves the actual completion
+time, model response meaning, request records, and every evidence reference.
+
+Validation clients can pass `read_only:true` with a separate conversation ID.
+These jobs may reuse meaning caches but never create user pending checks. Exact
+legacy validation conversations can be excluded by the operator without deleting
+their requests or chat history; any item also shown in a real user conversation
+is retained. Reading a cached checklist alone does not turn it into pending work.
+
 ## Run
 
 From the repository root, Python 3.10 or newer, no third-party packages:

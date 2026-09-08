@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from .checklist import apply_semantic, build_id, context_hash, make_checklist, requests_in
+from .checklist import apply_semantic, build_id, compact_checklist, context_hash, make_checklist, requests_in
 
 
 def render_checklist(checklist):
@@ -25,7 +25,20 @@ def render_checklist(checklist):
             lines.extend("  - " + step for step in item.get("steps", []))
             if item.get("uncertain"):
                 lines.append("  - 포함 여부와 실제 동작은 아직 확인이 필요합니다.")
+    if checklist.get("supplementary_items"):
+        lines.extend(["", f"추가 근거 {len(checklist['supplementary_items'])}건은 상세에 보존했습니다. 주요 기능 목록에서 빠진 원문이나 근거가 삭제된 것은 아닙니다."])
     return "\n".join(lines)
+
+
+def rendered_answer(text, checklist):
+    marker = "\n재시작 확인 목록"
+    if marker not in text:
+        return text
+    prefix = text.split(marker, 1)[0]
+    lines = prefix.split("\n")
+    if "마지막 앱 실행 이후" in lines[0]:
+        lines[0] = re.sub(r"마지막 앱 실행 이후.*", f"마지막 앱 실행 이후 요청 {checklist['coverage']['total_requests']}개를 주요 기능 {len(checklist['items'])}개로 묶었습니다.", lines[0])
+    return "\n".join(lines) + render_checklist(checklist)
 
 
 def text_parts(text):
@@ -71,6 +84,14 @@ class ChatStore:
                     request_id TEXT NOT NULL, source_hash TEXT NOT NULL,
                     summary_signature TEXT NOT NULL, note TEXT NOT NULL,
                     PRIMARY KEY(request_id,source_hash)
+                );
+                CREATE TABLE IF NOT EXISTS chat_readonly_scopes (
+                    project TEXT NOT NULL, conversation_id TEXT NOT NULL,
+                    PRIMARY KEY(project,conversation_id)
+                );
+                CREATE TABLE IF NOT EXISTS chat_validation_exclusions (
+                    project TEXT NOT NULL, item_id TEXT NOT NULL,
+                    PRIMARY KEY(project,item_id)
                 );
             """)
 
@@ -123,7 +144,7 @@ class ChatStore:
 
     def history(self, project, conversation):
         with self.connection() as db:
-            return [dict(row) for row in db.execute("SELECT id,role,text,job_id,created_at FROM chat_messages WHERE project=? AND conversation_id=? ORDER BY id", (project, conversation))]
+            return [dict(row) for row in db.execute("SELECT id,role,text,job_id,created_at FROM chat_messages WHERE project=? AND conversation_id=? AND role IN ('user','assistant') ORDER BY id", (project, conversation))]
 
     def history_page(self, project, conversation, before=None, limit=20, after=None):
         limit = min(20, max(1, int(limit)))
@@ -131,21 +152,23 @@ class ChatStore:
             raise ValueError("choose before or after")
         with self.connection() as db:
             if after is not None:
-                messages = [dict(row) for row in db.execute("SELECT id,role,text,job_id,created_at FROM chat_messages WHERE project=? AND conversation_id=? AND id>? ORDER BY id LIMIT ?", (project, conversation, int(after), limit))]
-                later = bool(messages and db.execute("SELECT 1 FROM chat_messages WHERE project=? AND conversation_id=? AND id>? LIMIT 1", (project, conversation, messages[-1]["id"])).fetchone())
+                messages = [dict(row) for row in db.execute("SELECT id,role,text,job_id,created_at FROM chat_messages WHERE project=? AND conversation_id=? AND role IN ('user','assistant') AND id>? ORDER BY id LIMIT ?", (project, conversation, int(after), limit))]
+                later = bool(messages and db.execute("SELECT 1 FROM chat_messages WHERE project=? AND conversation_id=? AND role IN ('user','assistant') AND id>? LIMIT 1", (project, conversation, messages[-1]["id"])).fetchone())
                 return {"conversation_id": conversation, "messages": messages, "next_after": messages[-1]["id"] if later else None, "next_before": None}
-            rows = list(db.execute("SELECT id,role,text,job_id,created_at FROM chat_messages WHERE project=? AND conversation_id=? AND id<? ORDER BY id DESC LIMIT ?", (project, conversation, int(before) if before else 2**63 - 1, limit)))
+            rows = list(db.execute("SELECT id,role,text,job_id,created_at FROM chat_messages WHERE project=? AND conversation_id=? AND role IN ('user','assistant') AND id<? ORDER BY id DESC LIMIT ?", (project, conversation, int(before) if before else 2**63 - 1, limit)))
             messages = [dict(row) for row in reversed(rows)]
-            earlier = bool(messages and db.execute("SELECT 1 FROM chat_messages WHERE project=? AND conversation_id=? AND id<? LIMIT 1", (project, conversation, messages[0]["id"])).fetchone())
+            earlier = bool(messages and db.execute("SELECT 1 FROM chat_messages WHERE project=? AND conversation_id=? AND role IN ('user','assistant') AND id<? LIMIT 1", (project, conversation, messages[0]["id"])).fetchone())
             return {"conversation_id": conversation, "messages": messages, "next_before": messages[0]["id"] if earlier else None, "next_after": None}
 
     def pending(self, project):
         with self.connection() as db:
-            return [dict(row, content=json.loads(row["content"])) for row in db.execute("SELECT * FROM chat_pending_checks WHERE project=?", (project,))]
+            return [dict(row, content=json.loads(row["content"])) for row in db.execute("SELECT * FROM chat_pending_checks p WHERE project=? AND NOT EXISTS(SELECT 1 FROM chat_validation_exclusions x WHERE x.project=p.project AND x.item_id=p.item_id)", (project,))]
 
-    def save_pending(self, project, checklist):
+    def save_pending(self, project, checklist, job_id=None):
         run = checklist.get("context", {}).get("current_run") or checklist.get("context", {}).get("last_run") or {}
         with self.connection() as db:
+            if job_id and db.execute("SELECT 1 FROM chat_jobs j JOIN chat_readonly_scopes s ON s.project=j.project AND s.conversation_id=j.conversation_id WHERE j.id=? AND j.project=?", (job_id, project)).fetchone():
+                return
             context_only = set(checklist.get("coverage", {}).get("context_only_request_ids", []))
             if context_only:
                 for old in db.execute("SELECT item_id,content FROM chat_pending_checks WHERE project=?", (project,)).fetchall():
@@ -154,8 +177,40 @@ class ChatStore:
                     if ids and ids <= context_only:
                         item["buildstate"] = "context_only"
                         db.execute("UPDATE chat_pending_checks SET content=?,updated_at=? WHERE project=? AND item_id=?", (json.dumps(item, ensure_ascii=False), time.time(), project, old["item_id"]))
-            for item in checklist.get("items", []):
-                db.execute("INSERT INTO chat_pending_checks VALUES(?,?,?,?,?) ON CONFLICT(project,item_id) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at", (project, item["id"], run.get("id"), json.dumps(item, ensure_ascii=False), time.time()))
+            for item in checklist.get("items", []) + checklist.get("supplementary_items", []):
+                db.execute("INSERT INTO chat_pending_checks(project,item_id,first_run_id,content,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(project,item_id) DO UPDATE SET first_run_id=CASE WHEN EXISTS(SELECT 1 FROM chat_validation_exclusions x WHERE x.project=excluded.project AND x.item_id=excluded.item_id) THEN excluded.first_run_id ELSE chat_pending_checks.first_run_id END,content=excluded.content,updated_at=excluded.updated_at", (project, item["id"], run.get("id"), json.dumps(item, ensure_ascii=False), time.time()))
+                db.execute("DELETE FROM chat_validation_exclusions WHERE project=? AND item_id=?", (project, item["id"]))
+
+    def readonly_scope(self, project, conversation):
+        if conversation == "pet":
+            raise ValueError("use a separate validation conversation")
+        with self.connection() as db:
+            existing = db.execute("SELECT 1 FROM chat_jobs WHERE project=? AND conversation_id=?", (project, conversation)).fetchone()
+            registered = db.execute("SELECT 1 FROM chat_readonly_scopes WHERE project=? AND conversation_id=?", (project, conversation)).fetchone()
+            if existing and not registered:
+                raise ValueError("existing user conversation cannot become read-only implicitly")
+            db.execute("INSERT OR IGNORE INTO chat_readonly_scopes VALUES(?,?)", (project, conversation))
+
+    def archive_validation_pending(self, project, conversations):
+        """Explicit operator migration for exact known validation conversations."""
+        if not conversations or "pet" in conversations:
+            raise ValueError("explicit validation conversations required")
+        owned, user_visible = set(), set()
+        with self.connection() as db:
+            for conversation in conversations:
+                db.execute("INSERT OR IGNORE INTO chat_readonly_scopes VALUES(?,?)", (project, conversation))
+            readonly = {row[0] for row in db.execute("SELECT conversation_id FROM chat_readonly_scopes WHERE project=?", (project,))}
+            for row in db.execute("SELECT conversation_id,result FROM chat_jobs WHERE project=?", (project,)):
+                checks = json.loads(row["result"]).get("checklist") or {}
+                ids = {item["id"] for item in checks.get("items", []) + checks.get("supplementary_items", [])}
+                if row["conversation_id"] in conversations:
+                    owned.update(ids)
+                elif row["conversation_id"] not in readonly:
+                    user_visible.update(ids)
+            targets = owned - user_visible
+            for item_id in targets:
+                db.execute("INSERT OR IGNORE INTO chat_validation_exclusions VALUES(?,?)", (project, item_id))
+            return {"validation_item_ids": len(owned), "shared_user_item_ids": len(owned & user_visible), "archived_validation_only_ids": len(targets)}
 
     def request_note(self, row):
         from .summarizer import source, fingerprint, short
@@ -199,11 +254,42 @@ class ChatStore:
             row = db.execute("SELECT result FROM chat_cache WHERE project=? ORDER BY updated_at DESC LIMIT 1", (project,)).fetchone()
             return json.loads(row[0]) if row else None
 
+    def compact_saved_answers(self, project):
+        with self.connection() as db:
+            for row in db.execute("SELECT id,result,updated_at,conversation_id FROM chat_jobs WHERE project=? AND status='completed'", (project,)).fetchall():
+                result = json.loads(row["result"])
+                original = result.get("checklist")
+                if result.get("partial") or not isinstance(original, dict):
+                    continue
+                checklist = compact_checklist(original)
+                if checklist is original:
+                    continue
+                result["previous_render_text"] = result.get("text", "")
+                result["checklist"] = checklist
+                result["text"] = rendered_answer(result.get("text", ""), checklist)
+                db.execute("UPDATE chat_jobs SET result=? WHERE id=?", (json.dumps(result, ensure_ascii=False), row["id"]))
+                messages = db.execute("SELECT id,text FROM chat_messages WHERE job_id=? AND role='assistant' ORDER BY id", (row["id"],)).fetchall()
+                parts = text_parts(result["text"])
+                for index, part in enumerate(parts):
+                    text = f"답변 {index+1}/{len(parts)}\n{part}" if len(parts) > 1 else part
+                    if index < len(messages):
+                        db.execute("UPDATE chat_messages SET text=? WHERE id=?", (text, messages[index]["id"]))
+                    else:
+                        db.execute("INSERT INTO chat_messages(project,conversation_id,role,text,job_id,created_at) VALUES(?,?,'assistant',?,?,?)", (project, row["conversation_id"], text, row["id"], row["updated_at"]))
+                for message in messages[len(parts):]:
+                    db.execute("UPDATE chat_messages SET role='assistant_archive' WHERE id=?", (message["id"],))
+            for row in db.execute("SELECT cache_key,result FROM chat_cache WHERE project=?", (project,)).fetchall():
+                original = json.loads(row["result"])
+                compact = compact_checklist(original)
+                if compact is not original:
+                    db.execute("UPDATE chat_cache SET result=? WHERE project=? AND cache_key=?", (json.dumps(compact, ensure_ascii=False), project, row["cache_key"]))
+
 
 class ChatManager:
     def __init__(self, store, project, provider_factory=None, max_seconds=180):
         self.store, self.project = store, project
         self.chat = ChatStore(store.db_path)
+        self.chat.compact_saved_answers(project)
         self.provider_factory = provider_factory or (lambda _cancel: None)
         self.max_seconds = max_seconds
         self.pending = queue.Queue(maxsize=4)
@@ -212,20 +298,22 @@ class ChatManager:
         self.fallbacks = {}
         self.stopped = threading.Event()
         self.latest_checklist = self.chat.cache_latest(project)
-        if self.latest_checklist:
-            self.chat.save_pending(project, self.latest_checklist)
         self.chat.interrupt_pending(project)
         self.worker = threading.Thread(target=self._work, name="journal-chat", daemon=True)
         self.worker.start()
 
-    def submit(self, text, conversation="pet", client_id=None):
+    def submit(self, text, conversation="pet", client_id=None, read_only=False):
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 4000:
             raise ValueError("question must contain 1–4000 characters")
         if not isinstance(conversation, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", conversation):
             raise ValueError("invalid conversation id")
         if client_id is not None and (not isinstance(client_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", client_id)):
             raise ValueError("invalid client request id")
+        if type(read_only) is not bool:
+            raise ValueError("invalid read-only flag")
         with self.lock:
+            if read_only:
+                self.chat.readonly_scope(self.project, conversation)
             existing = self.chat.find_client_job(self.project, conversation, client_id)
             if existing:
                 if existing["question"] != text:
@@ -304,7 +392,7 @@ class ChatManager:
                     result.update(checklist=checks, context=checks["context"])
                     result["text"] += render_checklist(checks)
                 if self.chat.update(self.project, job_id, "failed", result) and checks:
-                    self.chat.save_pending(self.project, checks)
+                    self.chat.save_pending(self.project, checks, job_id=job_id)
             finally:
                 timer.cancel()
                 with self.lock:
@@ -321,7 +409,7 @@ class ChatManager:
             result.update(checklist=checklist, context=checklist["context"])
             result["text"] += render_checklist(checklist)
         if self.chat.update(self.project, job_id, "failed", result) and checklist:
-            self.chat.save_pending(self.project, checklist)
+            self.chat.save_pending(self.project, checklist, job_id=job_id)
 
     def _answer(self, job_id, question, cancel):
         from collections import Counter
@@ -503,6 +591,8 @@ class ChatManager:
         if cancel.is_set():
             return
         checklist = component_checks(checklist, context)
+        if not errors:
+            checklist = compact_checklist(checklist)
         total = checklist["coverage"]["total_requests"]
         counts = {group: sum(item["buildstate"] == group for item in checklist["items"]) for group in checklist["groups"]}
         text = f"마지막 앱 실행 이후 요청과 이전 확인 목록 {total}개를 검토했습니다. 새 빌드 확인 {counts['built_not_running']}개, 일부만 빌드 {counts['mixed']}개, 빌드 파일 검증 필요 {counts['build_unverified']}개, 아직 빌드되지 않은 수정 {counts['not_built']}개, 구현 확인 필요 {counts['implementation_unverified']}개, 이전부터 남은 확인 {counts['carryover']}개입니다."
@@ -518,7 +608,8 @@ class ChatManager:
                 job = self.chat.get(self.project, job_id)
                 history = self.chat.history(self.project, job["conversation_id"])
                 recent = [{"role": row["role"], "text": row["text"][:800]} for row in history[-4:]]
-                text = complete({"mode": "chat", "question": question, "partials": [{"text": final_summary or text}], "history": recent, "runtime": runtime}, structured=False)
+                details = [{"id": item["id"], "change": item["title"], "state": item["buildstate"], "build_ids": item.get("evidence_ids", [])} for item in checklist.get("supplementary_items", [])]
+                text = complete({"mode": "chat", "question": question, "partials": [{"text": final_summary or text}], "builds": details, "history": recent, "runtime": runtime}, structured=False)
             except Exception:
                 errors.append("chat_answer_unavailable")
                 text = "질문에 대한 나쵸 답변을 만들지 못했습니다. 확인 가능한 요청·빌드 상태는 아래 목록에 남겼습니다.\n" + text
@@ -533,4 +624,4 @@ class ChatManager:
         if not errors:
             self.chat.cache_put(self.project, key, dict(checklist, provider=provider_name, semantic_summary=final_summary))
         if self.chat.update(self.project, job_id, "completed", result):
-            self.chat.save_pending(self.project, checklist)
+            self.chat.save_pending(self.project, checklist, job_id=job_id)

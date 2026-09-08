@@ -115,9 +115,11 @@ def chat_job_view(job):
     return result
 
 
-def checklist_page(checklist, offset=0, limit=20):
+def checklist_page(checklist, offset=0, limit=20, view="main"):
+    if view not in ("main", "supplementary"):
+        raise ValueError("invalid checklist view")
     offset, limit = max(0, int(offset)), min(20, max(1, int(limit)))
-    all_items = checklist.get("items", [])
+    all_items = checklist.get("supplementary_items", []) if view == "supplementary" else checklist.get("items", [])
     items = []
     for original in all_items[offset:offset + limit]:
         item = dict(original)
@@ -131,7 +133,7 @@ def checklist_page(checklist, offset=0, limit=20):
     for key, value in checklist.get("coverage", {}).items():
         if isinstance(value, list):
             coverage[key.removesuffix("_ids") + "_count"] = len(value)
-    return {"status": checklist.get("status", "completed"), "items": items, "groups": checklist.get("groups", {}), "coverage": coverage, "context": chat_context_view(checklist.get("context")), "total_items": len(all_items), "offset": offset, "next_offset": offset + len(items) if offset + len(items) < len(all_items) else None}
+    return {"status": checklist.get("status", "completed"), "view": view, "items": items, "groups": checklist.get("groups", {}), "coverage": coverage, "context": chat_context_view(checklist.get("context")), "total_items": len(all_items), "supplementary_count": len(checklist.get("supplementary_items", [])), "offset": offset, "next_offset": offset + len(items) if offset + len(items) < len(all_items) else None}
 
 
 class JournalServer(ThreadingHTTPServer):
@@ -211,13 +213,13 @@ class Handler(BaseHTTPRequestHandler):
                     checks = (job or {}).get("checklist") or self.server.chat.checklist()
                     if route == "/api/checklist/evidence":
                         item_id = query.get("item_id", [""])[0]
-                        item = next((item for item in checks.get("items", []) if item["id"] == item_id), None)
+                        item = next((item for item in checks.get("items", []) + checks.get("supplementary_items", []) if item["id"] == item_id), None)
                         if not item:
                             return self.reply(404, {"error": "not_found"})
                         offset = max(0, int(query.get("offset", [0])[0]))
                         source, evidence = item.get("source_request_ids", []), item.get("evidence_ids", [])
                         return self.reply(200, {"source_request_ids": source[offset:offset + 100], "evidence_ids": evidence[offset:offset + 100], "next_offset": offset + 100 if max(len(source), len(evidence)) > offset + 100 else None})
-                    return self.reply(200, checklist_page(checks, query.get("offset", [0])[0], query.get("limit", [20])[0]))
+                    return self.reply(200, checklist_page(checks, query.get("offset", [0])[0], query.get("limit", [20])[0], query.get("view", ["main"])[0]))
             if route == "/api/requests":
                 limit = min(100, max(1, int(query.get("limit", [50])[0])))
                 status = query.get("reported_status", [None])[0]
@@ -262,9 +264,9 @@ class Handler(BaseHTTPRequestHandler):
             if chat_request:
                 if self.server.chat is None:
                     return self.reply(503, {"error": "chat_unavailable"})
-                if not isinstance(body, dict) or set(body) - {"text", "conversation_id", "client_request_id"}:
+                if not isinstance(body, dict) or set(body) - {"text", "conversation_id", "client_request_id", "read_only"}:
                     return self.reply(400, {"error": "invalid_chat_request"})
-                job = self.server.chat.submit(body.get("text"), body.get("conversation_id", "pet"), body.get("client_request_id"))
+                job = self.server.chat.submit(body.get("text"), body.get("conversation_id", "pet"), body.get("client_request_id"), read_only=body.get("read_only", False))
                 return self.reply(202, {"job_id": job["id"], "conversation_id": job["conversation_id"], "status": job["status"], "user_message_id": job["user_message_id"]})
             if pet_request:
                 if body != {}:

@@ -81,6 +81,16 @@ def component_checks(checklist, context):
     return checklist
 
 
+def compact_checklist(checklist):
+    if checklist.get("supplementary_items") is not None:
+        return checklist
+    primary = [item for item in checklist.get("items", []) if item["id"].startswith("semantic-")]
+    supplementary = [item for item in checklist.get("items", []) if not item["id"].startswith("semantic-")]
+    if not primary or not supplementary:
+        return checklist
+    return dict(checklist, items=primary, supplementary_items=supplementary, supplementary_count=len(supplementary))
+
+
 def enrich_code_evidence(context, project):
     context = dict(context)
     run = context.get("current_run") or context.get("last_run") or {}

@@ -73,6 +73,8 @@ function drawChecklist(value) {
   if (value.coverage?.fallback_request_count) target.append(el('p', `의미 정리를 끝내지 못한 요청 ${value.coverage.fallback_request_count}개도 기본 확인 항목으로 보존했습니다.`, 'notice'));
   $('checklist-more').hidden = value.next_offset === null || value.next_offset === undefined;
   $('checklist-more').textContent = `확인 목록 더 보기 (${value.items.length}/${value.total_items || value.items.length})`;
+  $('checklist-supplement').hidden = !value.supplementary_count;
+  $('checklist-supplement').textContent = value.view === 'supplementary' ? '주요 기능 목록으로' : `추가 근거 ${value.supplementary_count}건 보기`;
 }
 async function loadChecklist(url = '/api/checklist', append = false) {
   checklistUrl = url;
@@ -125,6 +127,13 @@ $('chat-cancel').addEventListener('click', async () => {
 $('chat-older').addEventListener('click', () => chatHistory(null, chatBefore));
 $('chat-next').addEventListener('click', () => chatHistory(chatAfter));
 $('checklist-more').addEventListener('click', () => loadChecklist(checklistUrl, true));
+$('checklist-supplement').addEventListener('click', () => {
+  const url = new URL(checklistUrl, location.origin);
+  url.searchParams.delete('offset');
+  if (checklistCache?.view === 'supplementary') url.searchParams.delete('view');
+  else url.searchParams.set('view', 'supplementary');
+  loadChecklist(url.pathname + url.search);
+});
 Promise.all([chatHistory(), loadChecklist()]).then(([messages]) => {
   if (messages.at(-1)?.role === 'user') {activeChatJob = messages.at(-1).job_id; activeChatUserMessage = messages.at(-1).id; chatBusy(true); pollChat();}
 }).catch(() => {$('chat-progress').textContent = '채팅 서비스를 준비하고 있습니다.';});
