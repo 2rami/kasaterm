@@ -21,6 +21,16 @@ def stable_id(*parts):
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 
+def event_time(value):
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    except (AttributeError, ValueError, TypeError, OverflowError):
+        pass
+    return ""
+
+
 def default_db_path():
     return Path.home() / ".config/kasaterm/request-journal/journal.sqlite3"
 
@@ -78,6 +88,37 @@ class Store:
                     origin TEXT NOT NULL, created_at TEXT NOT NULL
                 );
             """)
+            if db.execute("PRAGMA user_version").fetchone()[0] < 1:
+                db.executescript("""
+                    BEGIN IMMEDIATE;
+                    CREATE TABLE IF NOT EXISTS builds (
+                        id TEXT PRIMARY KEY, project TEXT NOT NULL, completed_at TEXT NOT NULL,
+                        manifest TEXT NOT NULL, observed_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS app_runs (
+                        id TEXT PRIMARY KEY, project TEXT NOT NULL, machine TEXT NOT NULL,
+                        pid INTEGER NOT NULL, started_at TEXT NOT NULL, executable TEXT NOT NULL,
+                        build_id TEXT, component_sha256 TEXT, linked_build_id TEXT,
+                        previous_run_id TEXT REFERENCES app_runs(id),
+                        evidence TEXT NOT NULL, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+                        UNIQUE(project,machine,pid,started_at)
+                    );
+                    CREATE TABLE IF NOT EXISTS runtime_state (
+                        project TEXT NOT NULL, machine TEXT NOT NULL,
+                        last_run_id TEXT REFERENCES app_runs(id), observed_at TEXT NOT NULL,
+                        backend_reachable INTEGER NOT NULL DEFAULT 0, process_alive INTEGER,
+                        PRIMARY KEY(project,machine)
+                    );
+                    CREATE TABLE IF NOT EXISTS observations (
+                        id TEXT PRIMARY KEY, project TEXT NOT NULL, machine TEXT NOT NULL,
+                        kind TEXT NOT NULL, evidence TEXT NOT NULL,
+                        first_seen_at TEXT NOT NULL, observed_at TEXT NOT NULL, sightings INTEGER NOT NULL DEFAULT 1
+                    );
+                    CREATE INDEX IF NOT EXISTS app_runs_project_time ON app_runs(project,machine,started_at);
+                    CREATE INDEX IF NOT EXISTS observations_project_time ON observations(project,machine,observed_at);
+                    PRAGMA user_version=1;
+                    COMMIT;
+                """)
         self._secure_sidecars()
 
     def _secure_sidecars(self):
@@ -163,7 +204,7 @@ class Store:
                 text = event.get("text", "")
                 if not isinstance(text, str):
                     raise ValueError("event text must be a string")
-                stamp = event.get("created_at") or utc_now()
+                stamp = event_time(event.get("created_at"))
                 evidence = json.dumps(event.get("evidence", {}), ensure_ascii=False)
                 added = db.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?,?,?,?)", (eid, source_id, key, kind, text, stamp, evidence)).rowcount
                 if not added:
@@ -199,6 +240,8 @@ class Store:
         if row is None:
             return None
         result = dict(row)
+        result["timestamp_known"] = bool(result["created_at"])
+        result["created_at"] = result["created_at"] or None
         result["summary_evidence"] = json.loads(result["summary_evidence"])
         result["finals"] = []
         for final in db.execute("SELECT e.* FROM events e JOIN request_finals f ON f.event_id=e.id WHERE f.request_id=? ORDER BY e.created_at,e.rowid", (row["id"],)):
@@ -276,3 +319,108 @@ class Store:
         if origin not in {"user", "verified_build"}:
             raise ValueError("only user confirmation or verified build evidence can acknowledge application")
         return self._update(request_id, "applied_status", applied_status, evidence, origin)
+
+    def record_build(self, manifest):
+        if not isinstance(manifest, dict) or manifest.get("success") is not True or not isinstance(manifest.get("signature"), dict) or manifest["signature"].get("verified") is not True:
+            raise ValueError("Only a completed, signature-verified bundle is a ready build")
+        for key in ("id", "project", "completed_at", "components"):
+            if not manifest.get(key):
+                raise ValueError("Build evidence is incomplete")
+        with self._connection() as db:
+            db.execute("INSERT OR IGNORE INTO builds VALUES(?,?,?,?,?)", (manifest["id"], manifest["project"], manifest["completed_at"], json.dumps(manifest, ensure_ascii=False), utc_now()))
+        return dict(manifest)
+
+    def list_builds(self, project=None, since=None):
+        terms, args = [], []
+        if project:
+            terms.append("project=?"); args.append(project)
+        if since:
+            terms.append("completed_at>=?"); args.append(since)
+        query = "SELECT manifest FROM builds" + (" WHERE " + " AND ".join(terms) if terms else "") + " ORDER BY completed_at DESC,id DESC"
+        with self._connection() as db:
+            return [json.loads(row[0]) for row in db.execute(query, args)]
+
+    @staticmethod
+    def _run(row):
+        if row is None:
+            return None
+        result = dict(row)
+        result["evidence"] = json.loads(result["evidence"])
+        return result
+
+    def record_app_run(self, run):
+        required = ("project", "machine", "pid", "started_at", "executable", "evidence")
+        if any(not run.get(key) for key in required) or not isinstance(run["pid"], int) or run["pid"] < 1:
+            raise ValueError("An app run requires its actual OS process identity")
+        started = datetime.fromisoformat(run["started_at"].replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            raise ValueError("OS start time must have a timezone")
+        stamp = started.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        rid = stable_id(run["project"], run["machine"], run["pid"], stamp)
+        observed = utc_now()
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = db.execute("SELECT last_run_id FROM runtime_state WHERE project=? AND machine=?", (run["project"], run["machine"])).fetchone()
+            previous_id = previous[0] if previous and previous[0] != rid else None
+            db.execute("INSERT OR IGNORE INTO app_runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (rid, run["project"], run["machine"], run["pid"], stamp, run["executable"], run.get("build_id"),
+                        run.get("component_sha256"), run.get("linked_build_id"), previous_id,
+                        json.dumps(run["evidence"], ensure_ascii=False), observed, observed))
+            # The file at an executable path may have been replaced since launch.
+            # Once observed, running-code evidence is never overwritten by it.
+            db.execute("UPDATE app_runs SET last_seen_at=?,build_id=COALESCE(build_id,?),component_sha256=COALESCE(component_sha256,?),linked_build_id=COALESCE(linked_build_id,?) WHERE id=?",
+                       (observed, run.get("build_id"), run.get("component_sha256"), run.get("linked_build_id"), rid))
+            db.execute("INSERT INTO runtime_state VALUES(?,?,?,?,?,?) ON CONFLICT(project,machine) DO UPDATE SET last_run_id=excluded.last_run_id,observed_at=excluded.observed_at,backend_reachable=excluded.backend_reachable,process_alive=excluded.process_alive",
+                       (run["project"], run["machine"], rid, observed, int(run.get("backend_reachable", True)), 1))
+            return self._run(db.execute("SELECT * FROM app_runs WHERE id=?", (rid,)).fetchone())
+
+    def record_observation(self, kind, evidence, machine="local", project=None):
+        if not isinstance(evidence, dict):
+            raise ValueError("Observation evidence must be an object")
+        project = project or evidence.get("project")
+        if not project:
+            raise ValueError("Observation must be project-scoped")
+        value = {k: v for k, v in evidence.items() if k != "observed_at"}
+        oid = stable_id(project, machine, kind, value)
+        observed = evidence.get("observed_at") or utc_now()
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("INSERT INTO observations VALUES(?,?,?,?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET observed_at=excluded.observed_at,sightings=observations.sightings+1",
+                       (oid, project, machine, kind, json.dumps(value, ensure_ascii=False), observed, observed))
+            if kind == "runtime_unavailable":
+                # Losing HTTP alone is not proof that the app stopped.
+                alive = evidence.get("process_alive")
+                db.execute("INSERT INTO runtime_state VALUES(?,?,NULL,?,0,?) ON CONFLICT(project,machine) DO UPDATE SET observed_at=excluded.observed_at,backend_reachable=0,process_alive=excluded.process_alive",
+                           (project, machine, observed, None if alive is None else int(alive)))
+        return oid
+
+    def runtime_context(self, project=None, machine="local"):
+        if not project:
+            raise ValueError("Runtime context requires a project")
+        with self._connection() as db:
+            state_row = db.execute("SELECT * FROM runtime_state WHERE project=? AND machine=?", (project, machine)).fetchone()
+            state = dict(state_row) if state_row else None
+            last = self._run(db.execute("SELECT * FROM app_runs WHERE id=?", (state["last_run_id"],)).fetchone()) if state and state["last_run_id"] else None
+            previous = self._run(db.execute("SELECT * FROM app_runs WHERE id=?", (last["previous_run_id"],)).fetchone()) if last and last["previous_run_id"] else None
+            latest = db.execute("SELECT * FROM observations WHERE project=? AND machine=? ORDER BY observed_at DESC,rowid DESC LIMIT 1", (project, machine)).fetchone()
+            observation = dict(latest) if latest else None
+            if observation:
+                observation["evidence"] = json.loads(observation["evidence"])
+            def requests(condition, args):
+                rows = db.execute("SELECT * FROM requests WHERE project=? AND " + condition + " ORDER BY created_at,id", (project, *args)).fetchall()
+                return [self._request(db, row) for row in rows]
+            since = requests("created_at>=?", (last["started_at"],)) if last else []
+            carry = requests("created_at<>'' AND created_at<? AND applied_status IN ('pending','restart_required')", (last["started_at"],)) if last else requests("created_at<>'' AND applied_status IN ('pending','restart_required')", ())
+            unknown_time = requests("created_at=''", ())
+            previous_requests = requests("created_at>=? AND created_at<?", (previous["started_at"], last["started_at"])) if previous else []
+            builds = [json.loads(row[0]) for row in db.execute("SELECT manifest FROM builds WHERE project=? ORDER BY completed_at DESC,id DESC", (project,))]
+            return {"current_run": last if state and state["process_alive"] == 1 else None,
+                    "last_run": last, "previous_run": previous, "state": state,
+                    "requests_since_start": since, "carryover": carry,
+                    "timestamp_unknown": unknown_time,
+                    "previous_run_requests": previous_requests, "builds": builds,
+                    "latest_observation": observation}
+
+    def get_last_run(self, project, machine="local"):
+        with self._connection() as db:
+            return self._run(db.execute("SELECT r.* FROM app_runs r JOIN runtime_state s ON s.last_run_id=r.id WHERE s.project=? AND s.machine=?", (project, machine)).fetchone())

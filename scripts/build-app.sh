@@ -94,6 +94,10 @@ fi
 
 # Build the binaries. Besides kasaterm we bundle kasaterm-cli so a pane can
 # drive siblings via the socket (install_pane_shims stages it on the pane PATH).
+BUILD_PROVENANCE_STATE="$(mktemp /tmp/kasaterm-build-proof.XXXXXX)"
+if ! python3 "$ROOT/tools/request_journal/build_manifest.py" begin --project "$ROOT" --profile "$PROFILE" --output "$BUILD_PROVENANCE_STATE"; then
+  echo "[build-app] source provenance unavailable; this build will not claim a source commit" >&2
+fi
 if [[ "$PROFILE" == "release" ]]; then
   cargo build --release -p kasaterm -p kasa-socket -p kasa-mcp -p kasapet --bins
   BINDIR="target/release"
@@ -452,6 +456,12 @@ codesign --force --sign "$SIGN" "$APP" 2>/dev/null \
 # Bust the icon cache so the new .icns shows immediately in Finder /
 # Dock instead of waiting for macOS to notice on its own.
 touch "$APP"
+
+# The proof stays outside the signed bundle; codesign verification, not this
+# script's exit status, decides whether a ready manifest may be published.
+python3 "$ROOT/tools/request_journal/build_manifest.py" finish --snapshot "$BUILD_PROVENANCE_STATE" \
+  --bundle "$APP" --output "dist/kasaterm.build.json" \
+  || echo "[build-app] no verified ready-build manifest for this bundle" >&2
 
 echo "built $APP ($PROFILE)"
 
