@@ -280,17 +280,27 @@ pub(crate) fn overlay_codex_session_label(
 /// `bg` 를 공유하는 행. 배경 없이 `›` 만 보면 인용문·diff 를 입력창으로 오인한다.
 pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     fn is_border(r: &[GridCell]) -> bool {
-        let (mut dash, mut glyph) = (0usize, 0usize);
+        let (mut dash, mut glyph, mut lead, mut first, mut last) = (0usize, 0usize, 0usize, None, ' ');
         for c in r {
             if c.ch == '\0' || c.ch == ' ' {
                 continue;
             }
             glyph += 1;
+            last = c.ch;
             if c.ch == '─' {
                 dash += 1;
+                if first.is_none() || lead == glyph - 1 {
+                    lead += 1;
+                }
             }
+            first.get_or_insert(c.ch);
         }
-        dash >= 10 && dash * 2 >= glyph
+        // 대시가 과반이거나, **대시 줄에 라벨이 박힌 것** — 팀메이트가 뜨면 claude 가
+        // 입력창 윗줄에 `── View teammates: \`tmux -L …\` ─` 를 새기는데, 좁은 pane
+        // 에선 라벨 글자가 대시보다 많아 과반 판정이 깨지고 입력창 장식이 통째로
+        // 빠졌다(2026-09-09 실측 86열: 대시 39 대 글자 40). 앞이 대시 열 개 이상으로
+        // 시작해 대시로 끝나면 라벨이 무엇이든 그 줄은 테두리다.
+        dash >= 10 && (dash * 2 >= glyph || (lead >= 10 && last == '─'))
     }
     // claude 입력박스 마커는 `❯`(U+276F, 또는 옛 `›`)뿐 — ASCII `>` 는 제외한다.
     // diff·git·노트 TUI 는 대시줄 사이에 ASCII `>`(인용·프롬프트) 를 흔히 둬서,
@@ -6767,6 +6777,30 @@ mod prompt_box_tests {
         assert_eq!(ultracode_breath(Some(student), trough), student);
         assert_eq!(ultracode_breath(Some(student), peak), [0xbb, 0x9a, 0xf7, 255]);
         assert_eq!(ultracode_breath(None, peak), ultracode_accent(peak));
+    }
+
+    // 팀메이트가 떠 있으면 윗 대시줄에 라벨이 박힌다. 86열이면 대시 39 대 글자 40
+    // 이라 과반 규칙만으로는 테두리가 아니게 되어 입력창 장식이 빠졌다(2026-09-09).
+    #[test]
+    fn teammate_labelled_top_border_still_detected() {
+        let top = format!("{} View teammates: `tmux -L claude-swarm-1943 a` ─", "─".repeat(38));
+        let rows = vec![
+            row_from("some output above"),
+            row_from(&top),
+            row_from(&format!("❯ 껐다 켰어{}", " ".repeat(70))),
+            row_from(&"─".repeat(86)),
+            row_from("  ￼ Fable 5.1 1M ┃  main ┃  kasaterm ┃ 38% ┃  xhigh"),
+            row_from("  ⏺ main"),
+            row_from("  ◯ auxterm-port  Repo: /Users/kasa/Desktop/momewomo/kasaterm"),
+        ];
+        assert!(matches!(
+            prompt_box(&rows),
+            Some(PromptBox::Bordered { ref rows, top: 1, bottom: 3 }) if *rows == (2..3)
+        ));
+        // 라벨이 있어도 대시로 시작하지 않는 줄은 여전히 테두리가 아니다.
+        let not = row_from(&format!("View teammates and a long label here {}", "─".repeat(12)));
+        let rows2 = vec![not, row_from("❯ x"), row_from(&"─".repeat(40))];
+        assert!(prompt_box(&rows2).is_none());
     }
 
     // 진짜 claude 입력박스: 대시줄 사이 ❯ 마커행 → 감지된다(실제 composed 는
