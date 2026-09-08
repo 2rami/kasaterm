@@ -1543,14 +1543,32 @@ fn idle_motion(model3: &str) -> Option<String> {
 }
 
 
+fn positional_arguments(args: impl Iterator<Item = String>) -> (Option<String>, Option<String>) {
+    // Character switching carries the chat flag through exec; it is not a motion file.
+    let mut positional = args.skip(1).filter(|arg| arg != "--chat");
+    (positional.next(), positional.next())
+}
+
+#[cfg(test)]
+mod argument_tests {
+    #[test]
+    fn chat_flag_never_replaces_the_default_or_explicit_motion() {
+        let parse = |args: &[&str]| super::positional_arguments(args.iter().map(|s| s.to_string()));
+        assert_eq!(parse(&["kasapet", "model.json", "--chat"]), (Some("model.json".into()), None));
+        assert_eq!(parse(&["kasapet", "model.json", "idle.motion3.json", "--chat"]), (Some("model.json".into()), Some("idle.motion3.json".into())));
+        assert_eq!(parse(&["kasapet", "--chat", "model.json", "idle.motion3.json"]), (Some("model.json".into()), Some("idle.motion3.json".into())));
+        assert_eq!(parse(&["kasapet", "model.json"]), (Some("model.json".into()), None));
+    }
+}
+
 fn main() {
     #[cfg(all(target_os = "macos", debug_assertions))]
     if std::env::args().any(|arg| arg == "--chat-panel-probe") { chat_panel::probe(); return; }
-    let path = std::env::args().nth(1).unwrap();
+    let (model_arg, motion_arg) = positional_arguments(std::env::args());
+    let path = model_arg.unwrap();
     let model = mocari::assets::load_model_runtime(&path).expect("모델");
     let dir = std::path::Path::new(&path).parent().unwrap().to_path_buf();
-    let file = std::env::args()
-        .nth(2)
+    let file = motion_arg.clone()
         .or_else(|| idle_motion(&path))
         .unwrap_or_default();
     // 그 모션이 쥐고 있는 파라미터 — 자동 효과가 이것들을 피해 간다.
@@ -1565,7 +1583,7 @@ fn main() {
         .map(mocari::motion::MotionPlayer::new);
     let model3 = std::path::Path::new(&path).to_path_buf();
     let mut catalog = catalog::Catalog::load(&model3);
-    let requested_motion = std::env::args().nth(2).map(|file| catalog.requested_motion(&dir, &file));
+    let requested_motion = motion_arg.map(|file| catalog.requested_motion(&dir, &file));
     eprintln!("모션 파일: {file}");
     eprintln!("모션 로드: {}", if motion.is_some() { "성공" } else { "실패" });
     // 캐릭터 폴더(`<pet>/<이름>/<이름>.model3.json`)에서 왔으면 그 위가 펫 자리다.
