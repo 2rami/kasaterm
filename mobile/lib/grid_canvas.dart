@@ -700,6 +700,7 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                 session: st.session,
                 branch: st.branch,
                 project: st.project,
+                cwd: st.cwd,
               ),
               t,
               wrapCols: cols,

@@ -384,6 +384,7 @@ class _TerminalScreenState extends State<TerminalScreen>
                     .split('/')
                     .where((s) => s.isNotEmpty)
                     .lastOrNull,
+                cwd: pane.cwd,
               ),
       );
     }

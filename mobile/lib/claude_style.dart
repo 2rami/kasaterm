@@ -70,6 +70,7 @@ class StudentStyle {
     this.session,
     this.branch,
     this.project,
+    this.cwd,
   });
 
   /// 도트 파일명의 학생 슬러그 — 없으면 색만 입힌다.
@@ -93,6 +94,11 @@ class StudentStyle {
   /// 준 값을 넣는다.
   final String? branch;
   final String? project;
+
+  /// pane 의 작업 폴더 전체 경로. 있으면 바닥 상태줄을 **로고 + 경로**만으로 다시 쓴다 —
+  /// 모델·브랜치·컨텍스트%·effort 는 폰 화면 머리(앱바)가 이미 말하고, 경로는 거기
+  /// 없는데 좁은 폭에서 제일 먼저 빠지던 조각이었다(2026-09-08 지시 「경로만 나오게」).
+  final String? cwd;
 }
 
 class _Cell {
@@ -1271,7 +1277,12 @@ bool _fitPlainRow(List<_Cell> row, int width) {
 
 /// 입력상자 아래 바닥줄(상태줄·힌트)은 폰에서 접지 않는다 — 넘치면 덜 중요한 조각부터
 /// 뺀다(2026-09-08 지시 「상태줄이랑 밑에 여러 줄 안 되게」). 대화 본문은 안 건드린다.
-void _fitFooterRows(List<List<_Cell>> rows, Set<int> touched, int width) {
+void _fitFooterRows(
+  List<List<_Cell>> rows,
+  Set<int> touched,
+  int width, {
+  String? cwd,
+}) {
   final bx = _promptBox(rows);
   if (bx == null) return;
   final from = switch (bx) {
@@ -1280,15 +1291,56 @@ void _fitFooterRows(List<List<_Cell>> rows, Set<int> touched, int width) {
   };
   for (var r = from; r < rows.length; r++) {
     final row = rows[r];
-    if (_trimmedCols(row) <= width) continue;
     final status = row.any(
       (c) => c.rune == statusModelClaude || c.rune == statusModelGpt,
     );
+    if (status && cwd != null && cwd.isNotEmpty) {
+      if (_pathOnlyStatusRow(row, width, cwd)) touched.add(r);
+      continue;
+    }
+    if (_trimmedCols(row) <= width) continue;
     final changed = status
         ? _shrinkStatusRow(row, width)
         : _fitPlainRow(row, width);
     if (changed) touched.add(r);
   }
+}
+
+/// 상태줄을 「로고 · 폴더 아이콘 · 경로」로 다시 쓴다. 홈은 `~`, 그래도 넘치면 앞
+/// 폴더부터 `…/` 로 접는다 — 끝 폴더가 「어디서 도는지」의 답이라 끝을 남긴다.
+bool _pathOnlyStatusRow(List<_Cell> row, int width, String cwd) {
+  final at = row.indexWhere(
+    (c) => c.rune == statusModelClaude || c.rune == statusModelGpt,
+  );
+  if (at < 0) return false;
+  final head = row.sublist(0, at + 1);
+  final fixed = _rowCols(head) + 3; // ' ' + 폴더 글리프 + ' '
+  var path = shortHomePath(cwd);
+  var segs = path.split('/');
+  while (_textCols(path) > width - fixed && segs.length > 1) {
+    segs = segs.sublist(1);
+    path = '…/${segs.join('/')}';
+  }
+  row
+    ..clear()
+    ..addAll(head)
+    ..add(_Cell(0x20, const DefaultColor(), const DefaultColor(), 0))
+    ..add(_Cell(_glyphFolder, _cDir, const DefaultColor(), 0))
+    ..add(_Cell(0x20, const DefaultColor(), const DefaultColor(), 0));
+  for (final rune in path.runes) {
+    row.add(_Cell(rune, _cDir, const DefaultColor(), 0));
+  }
+  return true;
+}
+
+int _textCols(String s) => s.runes.fold(0, (n, r) => n + cellWidth(r));
+
+/// `/Users/이름/…`·`/home/이름/…` 을 `~/…` 로 — 폰은 저쪽 홈 경로를 모르니 모양으로 안다.
+String shortHomePath(String cwd) {
+  final m = RegExp(r'^/(Users|home)/[^/]+(/|$)').firstMatch(cwd);
+  if (m == null) return cwd;
+  final rest = cwd.substring(m.end);
+  return rest.isEmpty ? '~' : '~/$rest';
 }
 
 /// [wrapCols] 는 폰이 행을 접는 열 수 — codex 상태줄의 단계와 세션 배지 자리는 pane
@@ -1323,7 +1375,7 @@ StyledGrid restyleClaude(
     );
   }
 
-  _fitFooterRows(rows, touched, width);
+  _fitFooterRows(rows, touched, width, cwd: st.cwd);
 
   // 상태줄 모델 표식 — 글리프 대신 로고. 아래→위, 마지막 상태줄이 이긴다.
   for (var r = rows.length - 1; r >= 0; r--) {

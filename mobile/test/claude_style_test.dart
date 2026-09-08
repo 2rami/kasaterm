@@ -529,4 +529,31 @@ void historyTests() {
     expect(c.slots.first.row, 2);
     expect(c.slots.last.row, greaterThanOrEqualTo(5));
   });
+
+  test('바닥줄에 경로만 — 앱바가 모델·브랜치·%·effort 를 말하니 홈은 ~, 좁으면 …/', () {
+    final g = gridOf([
+      '─' * 60,
+      '❯',
+      '─' * 60,
+      '  \uFFFC\uE0C0 Fable 5.1 1M ┃ \uE0A0 main ┃ \uF07B kasaterm ┃ 42% ┃ \uF0E7 xhigh',
+    ], cols: 90);
+    const withCwd = StudentStyle(
+      slug: 'aris',
+      accent: accent,
+      bg: bg,
+      cwd: '/Users/kasa/Desktop/momewomo/kasaterm',
+    );
+    final v = restyleClaude(g, withCwd, 0, wrapCols: 42);
+    final status = text(v.lines[3]).trimRight();
+    expect(status, endsWith('\uF07B ~/Desktop/momewomo/kasaterm'));
+    expect(status, isNot(contains('Fable')));
+    expect(status, isNot(contains('42%')));
+    expect(v.slots.map((s) => s.motion), contains('icon:claude'));
+    final narrow = restyleClaude(g, withCwd, 0, wrapCols: 20);
+    expect(text(narrow.lines[3]).trimRight(), endsWith('\uF07B …/kasaterm'));
+    expect(cols(narrow.lines[3]), lessThanOrEqualTo(20));
+    expect(shortHomePath('/home/pi/x'), '~/x');
+    expect(shortHomePath('/Users/kasa'), '~');
+    expect(shortHomePath('/opt/app'), '/opt/app');
+  });
 }
