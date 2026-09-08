@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>요청 장부 · kasaterm</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header><div><h1>요청 장부</h1><p id="project">프로젝트를 확인하고 있습니다</p></div><button id="refresh" type="button">새로고침</button></header>
+<main>
+  <p class="notice">학생의 완료 보고와 실제 반영 여부를 따로 확인합니다. <span id="provider">구조 요약 · 나쵸 미연결</span></p>
+  <div id="error" role="alert" hidden></div>
+  <div class="workspace">
+    <section class="requests" aria-label="요청 목록">
+      <div class="filters"><label for="status">상태</label><select id="status"><option value="">전체 요청</option><option value="reported_done">완료 보고</option><option value="needs_attention">확인 필요</option><option value="working">진행 중</option><option value="received">접수됨</option></select></div>
+      <p id="count" role="status">불러오는 중…</p><div id="list"></div><button id="more" type="button" hidden>이전 요청 더 보기</button>
+    </section>
+    <section id="detail" class="detail" aria-label="요청 상세"><div class="empty"><h2>요청을 선택해 주세요</h2><p>요약과 완료 보고, 반영 상태를 여기에서 봅니다.</p></div></section>
+  </div>
+</main><script src="/app.js" defer></script>
+</body></html>
