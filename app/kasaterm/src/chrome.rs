@@ -205,10 +205,16 @@ impl App {
                     // 것을 **탭 pid 로** 묻는다. pane 이 아니라 탭마다
                     // 물어야 하는 건, 한 pane 의 탭들이 각각 다른 학생일
                     // 수 있어서다.
+                    // ⚠️ **`display_tab_char`(알맹이)로 물어야 한다.** 겉옷
+                    // (`display_pane_char`)은 받은 id 를 `active_tab_pid` 로 한 번
+                    // 접는데, **첫 탭의 pid 는 바깥 pane id 와 같아서** 그 접기가
+                    // 지금 보이는 탭으로 되돌아간다 — 둘째 탭을 보는 동안 첫 탭까지
+                    // 그 학생 이름으로 그려졌다(2026-09-08 지적: 탭 두 개가 같은
+                    // 이름으로 뜬다).
                     let student = sess
                         .filter(|s| s.active_agent().is_some())
                         .and(t.pid.as_deref())
-                        .and_then(|p| self.display_pane_char(ws, p));
+                        .and_then(|p| self.display_tab_char(ws, p));
                     let name = match (student, task) {
                         // pane id 는 안 붙인다 — 헤더가 이미 들고 있고,
                         // 한 pane 의 탭끼리는 그 값이 전부 같아 구분에
