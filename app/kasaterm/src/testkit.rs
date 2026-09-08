@@ -4346,12 +4346,6 @@ impl App {
             w.request_redraw();
         }
     }
-    /// Headless 파일트리 우클릭 메뉴 repro: `KASATERM_TEST_FTMENU_MS` 후 트리
-    /// 첫 파일을 선택하고 컨텍스트 메뉴를 연다. 우클릭은 마우스 이벤트라 헤드리스
-    /// 주입이 안 되는데, "…에서 열기" 항목은 기기에 설치된 앱 수만큼 늘어나므로
-    /// 눈으로 한 번은 확인해야 한다. autoshellmenu 처럼 함수-로컬 static.
-    pub(crate) fn run_pending_autoftmenu(&mut self) {
-        use std::sync::atomic::{AtomicBool, Ordering};
     /// Headless 마크다운 할 일 체크박스 repro: `KASATERM_AUTOMDTASK=<md 경로>` 를
     /// `KASATERM_AUTOMDTASK_MS` 뒤에 뷰어로 열고, 1.5초 뒤 첫 체크박스 한가운데를
     /// 손으로 누른 것과 같은 순서(자리→pane→포커스→토글)로 밟으며 관문마다 값을
