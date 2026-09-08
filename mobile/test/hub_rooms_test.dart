@@ -115,4 +115,16 @@ void filterTests() {
     expect(v.copyWith(shape: HubShape.list).machine, '맥미니');
     expect(v.copyWith(machine: '').machine, '');
   });
+
+  test('기계 접기 — 머리글마다 따로, 주소 기계는 빈 이름, 저장 왕복', () {
+    const v = HubView();
+    final one = v.toggleFolded('맥미니');
+    expect(one.isFolded('맥미니'), isTrue);
+    expect(one.isFolded(null), isFalse);
+    final two = one.toggleFolded(null);
+    expect(two.isFolded(null), isTrue);
+    expect(two.toggleFolded('맥미니').isFolded('맥미니'), isFalse);
+    expect(decodeFolded(encodeFolded(two.folded)), two.folded);
+    expect(decodeFolded(null), isEmpty);
+  });
 }

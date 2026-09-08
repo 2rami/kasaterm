@@ -652,8 +652,9 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
     if (fit == null) {
       final size = _wideSize(maxWidth);
       final cached = _scaled;
-      if (cached != null && (cached.fontSize - size).abs() < 0.01)
+      if (cached != null && (cached.fontSize - size).abs() < 0.01) {
         return cached;
+      }
       return _scaled = _CellMetrics(size);
     }
     var size = fit;

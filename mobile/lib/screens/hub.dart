@@ -210,15 +210,22 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     for (final s in sections) {
       final title = s.machine ?? _model.rootName ?? '이 기계';
       final tint = machineColor(title, theme.colorScheme);
+      final folded = _model.view.isFolded(s.machine);
       children.add(
         _SectionHeader(
           title: title,
           color: tint,
           online: s.online,
-          trailing: s.machine == null || !s.online ? null : '${s.paneCount}명',
+          folded: folded,
+          // 접힌 기계는 안이 안 보이니 주소 기계라도 몇 명인지는 남긴다.
+          trailing: !s.online || (s.machine == null && !folded)
+              ? null
+              : '${s.paneCount}명',
+          onTap: () => _model.toggleFold(s),
           onAdd: s.online ? () => _newRoom(s) : null,
         ),
       );
+      if (folded) continue;
       if (s.online && s.rooms.isEmpty) {
         children.add(const _Notice(text: '학생이 없다'));
       }
@@ -345,7 +352,9 @@ class _SectionHeader extends StatelessWidget {
     required this.title,
     required this.color,
     this.online = true,
+    this.folded = false,
     this.trailing,
+    this.onTap,
     this.onAdd,
   });
 
@@ -354,7 +363,11 @@ class _SectionHeader extends StatelessWidget {
   /// 그 기계의 색 — 아래 방 상자의 왼쪽 줄과 같은 색.
   final Color color;
   final bool online;
+  final bool folded;
   final String? trailing;
+
+  /// 머리글 자체를 누르면 접고 편다. 「새 방」 단추는 자기 탭을 먼저 먹는다.
+  final VoidCallback? onTap;
 
   /// 「새 방」 — 그 기계에 빈 창 하나. 안 닿는 기계엔 안 단다.
   final VoidCallback? onAdd;
@@ -365,62 +378,78 @@ class _SectionHeader extends StatelessWidget {
     final scheme = theme.colorScheme;
     final ink = online ? scheme.onSurface : scheme.onSurfaceVariant;
     final tint = online ? color : scheme.outline;
+    final radius = BorderRadius.circular(10);
     return Container(
-      margin: const EdgeInsets.fromLTRB(0, 14, 0, 8),
-      padding: const EdgeInsets.fromLTRB(10, 7, 8, 7),
+      margin: EdgeInsets.fromLTRB(0, 14, 0, folded ? 0 : 8),
       decoration: BoxDecoration(
         color: tint.withValues(alpha: online ? 0.13 : 0.08),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: radius,
       ),
-      child: Row(
-        children: [
-          Icon(machineIcon(title), size: 18, color: tint),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              title,
-              style: theme.textTheme.titleMedium?.copyWith(
-                color: ink,
-                fontWeight: FontWeight.w600,
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          if (!online)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-              decoration: BoxDecoration(
-                color: scheme.error.withValues(alpha: 0.14),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                '연결 안 됨',
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: scheme.error,
-                  fontWeight: FontWeight.w600,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: radius,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 7, 8, 7),
+          child: Row(
+            children: [
+              Icon(machineIcon(title), size: 18, color: tint),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    color: ink,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-            ),
-          if (trailing != null)
-            Text(
-              trailing!,
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: scheme.onSurfaceVariant,
+              if (!online)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 7,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: scheme.error.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '연결 안 됨',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: scheme.error,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              if (trailing != null)
+                Text(
+                  trailing!,
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              if (onAdd != null)
+                // 줄 높이를 안 바꾸는 크기 — 기본 IconButton 은 48px 라 목록 전체가 밀린다.
+                SizedBox.square(
+                  dimension: 22,
+                  child: IconButton(
+                    tooltip: '새 방',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    onPressed: onAdd,
+                    icon: Icon(Icons.add_box_outlined, size: 20, color: ink),
+                  ),
+                ),
+              const SizedBox(width: 4),
+              AnimatedRotation(
+                turns: folded ? -0.25 : 0,
+                duration: const Duration(milliseconds: 160),
+                child: Icon(Icons.expand_more, size: 20, color: ink),
               ),
-            ),
-          if (onAdd != null)
-            // 줄 높이를 안 바꾸는 크기 — 기본 IconButton 은 48px 라 목록 전체가 밀린다.
-            SizedBox.square(
-              dimension: 22,
-              child: IconButton(
-                tooltip: '새 방',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-                onPressed: onAdd,
-                icon: Icon(Icons.add_box_outlined, size: 20, color: ink),
-              ),
-            ),
-        ],
+            ],
+          ),
+        ),
       ),
     );
   }

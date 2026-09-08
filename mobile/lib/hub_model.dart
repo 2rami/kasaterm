@@ -103,6 +103,9 @@ class HubModel extends ChangeNotifier {
     await _prefs?.save(next);
   }
 
+  Future<void> toggleFold(HubSection s) =>
+      setView(view.toggleFolded(s.machine));
+
   String? error;
   bool loading = false;
   DateTime? updatedAt;
