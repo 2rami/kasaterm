@@ -263,8 +263,6 @@ pub(crate) struct InfoSnap {
     /// (2026-09-08 지시 「보드에서 보이는 작업내용 … 인포에서」). 학생 줄 머리의
     /// 세션 제목 자리에 이것이 먼저 선다.
     pub(crate) tasks: HashMap<String, TaskLine>,
-    /// pane 밖에서 도는 백그라운드 에이전트 — 학생 목록 꼬리에 한 묶음으로.
-    pub(crate) background: Vec<BgLine>,
     /// 예약(반복·타이머) — 하단바 「예약」 칩과 팝오버가 읽는다.
     pub(crate) schedules: Vec<kasa_mcp::ScheduleItem>,
 }
@@ -276,17 +274,7 @@ pub(crate) struct TaskLine {
     pub(crate) attention: bool,
 }
 
-/// 백그라운드 에이전트 한 줄 — 이름·상태·어디서.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct BgLine {
-    pub(crate) name: String,
-    pub(crate) state: String,
-    pub(crate) place: String,
-}
-
-/// 수집 결과에 보드 쪽 정보를 덧댄다 — 작업 한 줄(collab board)·백그라운드 에이전트·예약.
-/// 백그라운드는 `claude agents` 를 띄우는 일이라 15초에 한 번만 새로 묻고 그 사이는
-/// 지난 답을 되쓴다(Info 는 1.5초마다 도는데 그때마다 프로세스를 띄울 일이 아니다).
+/// 수집 결과에 보드 쪽 정보를 덧댄다 — 작업 한 줄(collab board)·예약.
 fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>>) -> InfoSnap {
     if let Some(b) = backend {
         if let Ok(rows) = kasa_socket::backend::Backend::collab_board(&*b) {
@@ -300,37 +288,6 @@ fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>
                 );
             }
         }
-        static BG: std::sync::Mutex<Option<(std::time::Instant, Vec<BgLine>)>> =
-            std::sync::Mutex::new(None);
-        let cached = BG.lock().ok().and_then(|g| {
-            g.as_ref()
-                .filter(|(t, _)| t.elapsed() < std::time::Duration::from_secs(15))
-                .map(|(_, v)| v.clone())
-        });
-        snap.background = match cached {
-            Some(v) => v,
-            None => {
-                let dynb: std::sync::Arc<dyn kasa_socket::backend::Backend> = b.clone();
-                let v: Vec<BgLine> = crate::native_board::collect_background(&dynb)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|r| BgLine {
-                        name: r.name.clone(),
-                        state: crate::native_board::background_state(r).to_string(),
-                        place: r
-                            .cwd
-                            .rsplit(std::path::MAIN_SEPARATOR)
-                            .next()
-                            .unwrap_or_default()
-                            .to_string(),
-                    })
-                    .collect();
-                if let Ok(mut g) = BG.lock() {
-                    *g = Some((std::time::Instant::now(), v.clone()));
-                }
-                v
-            }
-        };
     }
     snap.schedules = kasa_mcp::schedule_snapshot();
     snap
@@ -2122,9 +2079,6 @@ pub(crate) fn draw_info_col(
             h += GROUP_H;
             h += visible_row_count(info, gp) as f32 * ROW_H;
         }
-        if !snap.background.is_empty() {
-            h += GROUP_H + snap.background.len() as f32 * ROW_H;
-        }
         h
     };
     // 끝난 이사의 체크리스트는 잠시 두었다가 걷는다 — 결과를 읽을 시간은 주되,
@@ -2411,20 +2365,6 @@ pub(crate) fn draw_info_col(
                     info.proc_rects.push((p.pid, (x, y, w, ROW_H)));
                     y += ROW_H;
                 }
-            }
-        }
-        // 백그라운드 에이전트 — pane 이 없어 위 목록엔 안 잡히지만 이 기계에서 도는
-        // 대화다(2026-09-08 지시 「백그라운드도 캐릭터 목록에 넣어」).
-        if !snap.background.is_empty() {
-            if y + GROUP_H > top && y < bottom {
-                draw_bg_head(g, snap.background.len(), x, w, x0, right, y);
-            }
-            y += GROUP_H;
-            for b in &snap.background {
-                if y + ROW_H > top && y < bottom {
-                    draw_bg_row(g, b, x0, right, y);
-                }
-                y += ROW_H;
             }
         }
     }
@@ -2844,53 +2784,6 @@ fn draw_window_head(
 /// pane 의 학생 색으로, 터미널 헤더·테두리가 이미 쓰는 색과 같다(같은 pane 은
 /// 어디서든 같은 색). 활성 pane 은 왼쪽 띠로 한 번 더 표시한다 — 목록이 전 pane
 /// 공유라 "내가 지금 있는 곳"이 안 보이면 매번 번호를 대조하게 된다.
-/// 백그라운드 묶음 머리 — 학생 줄과 같은 높이, 얼굴 대신 반짝이.
-fn draw_bg_head(g: &mut gpu::GpuRenderer, n: usize, x: f32, w: f32, x0: f32, right: f32, y: f32) {
-    g.rect(x, y, w, GROUP_H, theme::with_alpha(theme::border(), 0x22));
-    g.queue_icon("sparkles", x0 + 11.0, y + 6.0, 12.0, theme::text_mute());
-    g.draw_text(
-        x0 + 30.0,
-        y + 4.0,
-        "백그라운드",
-        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
-    );
-    let s = n.to_string();
-    let nw = g.measure_chrome_text(&s, 10.0, true);
-    g.draw_text(
-        right - nw,
-        y + 6.0,
-        &s,
-        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: true, italic: false },
-    );
-}
-
-/// 백그라운드 에이전트 한 줄 — 상태 점·이름·상태·어디서.
-fn draw_bg_row(g: &mut gpu::GpuRenderer, b: &BgLine, x0: f32, right: f32, y: f32) {
-    let dot = match b.state.as_str() {
-        "작업 중" => theme::success(),
-        "막힘" => theme::attention(),
-        _ => theme::text_dim(),
-    };
-    circle_rect(g, x0 + 14.0, y + ROW_H / 2.0 - 3.0, 6.0, dot);
-    let tx = x0 + 26.0;
-    let name = fit_text(g, &b.name, ((right - tx) * 0.5).max(0.0), 11.0, true);
-    let nw = g.measure_chrome_text(&name, 11.0, true);
-    g.draw_text(
-        tx,
-        y + 5.0,
-        &name,
-        gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: true, italic: false },
-    );
-    let meta = if b.place.is_empty() { b.state.clone() } else { format!("{} · {}", b.state, b.place) };
-    let meta = fit_text(g, &meta, (right - tx - nw - 8.0).max(0.0), 10.5, false);
-    g.draw_text(
-        tx + nw + 8.0,
-        y + 5.5,
-        &meta,
-        gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false },
-    );
-}
-
 #[allow(clippy::too_many_arguments)]
 fn draw_group_head(
     g: &mut gpu::GpuRenderer,

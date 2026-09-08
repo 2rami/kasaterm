@@ -834,7 +834,7 @@ fn collect_data(
     }
 }
 
-pub(crate) fn collect_background(backend: &Arc<dyn Backend>) -> anyhow::Result<Vec<BackgroundRow>> {
+fn collect_background(backend: &Arc<dyn Backend>) -> anyhow::Result<Vec<BackgroundRow>> {
     let output = crate::proc::command(kasa_mcp::claude_bin())
         .args(["agents", "--json", "--all"])
         .output()?;
@@ -1862,7 +1862,7 @@ fn agent_name(row: &PaneActivity) -> String {
         .to_string()
 }
 
-pub(crate) fn background_state(row: &BackgroundRow) -> &str {
+fn background_state(row: &BackgroundRow) -> &str {
     match row.state.as_str() {
         "done" => "완료",
         "blocked" => "막힘",
