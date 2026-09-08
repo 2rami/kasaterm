@@ -1,5 +1,6 @@
 //! Shared terminal composition before the GPU or the web consumes a frame.
 use super::*;
+use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 #[allow(clippy::too_many_arguments)]
@@ -73,10 +74,30 @@ use kasa_mcp::visual::{
 pub(crate) struct VisualPump {
     last_tick: Option<Instant>,
     fingerprints: std::collections::HashMap<String, (String, Vec<Vec<GridCell>>, Vec<u8>)>,
+    sources: std::collections::HashMap<String, SourceStamp>,
+    registered: std::collections::HashMap<(String, u64, usize), (Arc<[u8]>, String)>,
     assets: std::collections::HashMap<String, Option<(Arc<[u8]>, u32, u32)>>,
     animations: std::collections::HashMap<String, Option<Vec<Arc<[u8]>>>>,
     epoch_ms: Option<u64>,
     revision: u64,
+}
+
+struct SourceStamp {
+    key: String,
+    context: u64,
+    checked_at: Instant,
+    animated_cells: bool,
+    revision: u64,
+}
+
+impl SourceStamp {
+    fn reusable(&self, key: &str, context: u64, now: Instant, published: Option<u64>) -> bool {
+        published == Some(self.revision)
+            && self.key == key
+            && self.context == context
+            && !self.animated_cells
+            && now.saturating_duration_since(self.checked_at) < Duration::from_secs(1)
+    }
 }
 
 impl VisualPump {
@@ -84,6 +105,20 @@ impl VisualPump {
         self.assets.clear();
         self.animations.clear();
         self.fingerprints.clear();
+        self.sources.clear();
+        self.registered.clear();
+    }
+
+    fn register(&mut self, pane: &str, image_id: u64, bytes: Arc<[u8]>) -> Option<String> {
+        let key = (pane.to_string(), image_id, bytes.as_ptr() as usize);
+        if let Some((_, id)) = self.registered.get(&key) {
+            if visual::inline_asset_exists(pane, id) {
+                return Some(id.clone());
+            }
+        }
+        let id = visual::register_inline_asset(pane, image_id, bytes.clone())?;
+        self.registered.insert(key, (bytes, id.clone()));
+        Some(id)
     }
 
     fn image(
@@ -144,7 +179,7 @@ impl TerminalComposition {
             if let Some((bytes, _, _)) =
                 cache.image("schale-classroom", || png_asset(schale_classroom_rgba()?))
             {
-                if let Some(id) = visual::register_inline_asset(pane, 0, bytes) {
+                if let Some(id) = cache.register(pane, 0, bytes) {
                     add(
                         full_clip,
                         full_clip,
@@ -175,7 +210,7 @@ impl TerminalComposition {
             } else {
                 *w
             };
-            if let Some(id) = visual::register_inline_asset(pane, index as u64 + 1, bytes) {
+            if let Some(id) = cache.register(pane, index as u64 + 1, bytes) {
                 add(
                     (*x, *y, width, *h),
                     (*x, *c0, width, *c1 - *c0),
@@ -196,14 +231,13 @@ impl TerminalComposition {
                         .into_iter()
                         .map(|frame| png_asset(frame).map(|(bytes, _, _)| Arc::<[u8]>::from(bytes)))
                         .collect::<Option<Vec<_>>>()
-                });
+                })
+                .clone();
             let Some(frames) = frames else { return };
             let Some(ids) = frames
                 .iter()
                 .enumerate()
-                .map(|(index, bytes)| {
-                    visual::register_inline_asset(pane, 10_000 + index as u64, bytes.clone())
-                })
+                .map(|(index, bytes)| cache.register(pane, 10_000 + index as u64, bytes.clone()))
                 .collect::<Option<Vec<_>>>()
             else {
                 return;
@@ -245,7 +279,7 @@ impl TerminalComposition {
             if let Some((bytes, _, _)) = cache.image(&format!("profile:{slug}"), || {
                 png_asset(student_profile_rgba(slug)?)
             }) {
-                if let Some(id) = visual::register_inline_asset(pane, 20_000, bytes) {
+                if let Some(id) = cache.register(pane, 20_000, bytes) {
                     add(
                         *rect,
                         full_clip,
@@ -262,7 +296,7 @@ impl TerminalComposition {
             if let Some((bytes, _, _)) =
                 cache.image("schale-logo", || png_asset(schale_logo_rgba()?))
             {
-                if let Some(id) = visual::register_inline_asset(pane, 30_000, bytes) {
+                if let Some(id) = cache.register(pane, 30_000, bytes) {
                     add(
                         *rect,
                         full_clip,
@@ -285,7 +319,7 @@ impl TerminalComposition {
                 }
                 png_asset((rgba, 96, 96))
             }) {
-                if let Some(id) = visual::register_inline_asset(pane, 40_000, bytes) {
+                if let Some(id) = cache.register(pane, 40_000, bytes) {
                     add(
                         icon.image_rect(),
                         full_clip,
@@ -333,6 +367,44 @@ impl TerminalComposition {
 }
 
 impl App {
+    fn web_visual_context(&self, ws: &Workspace, pane: &PaneState, id: &str) -> u64 {
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.cell.w.to_bits().hash(&mut hash);
+        self.cell.h.to_bits().hash(&mut hash);
+        theme::theme_name().hash(&mut hash);
+        theme::shape_name().hash(&mut hash);
+        theme::bg().hash(&mut hash);
+        theme::text().hash(&mut hash);
+        theme::accent_name().hash(&mut hash);
+        self.display_tab_char(ws, id).hash(&mut hash);
+        theme::character_ordinal(&ws.pane_character, id).hash(&mut hash);
+        pane.color.hash(&mut hash);
+        pane.title.hash(&mut hash);
+        self.pane_claude_sid.get(id).hash(&mut hash);
+        self.pane_cwd_cache.get(id).hash(&mut hash);
+        self.pane_view_cwd.get(id).hash(&mut hash);
+        self.pane_activity
+            .get(id)
+            .map(|a| (a.status.as_str(), a.stalled.is_some()))
+            .hash(&mut hash);
+        self.pane_ultracode.contains(id).hash(&mut hash);
+        self.turn_done_panes.contains(id).hash(&mut hash);
+        self.notify_flash_factor(id).is_some().hash(&mut hash);
+        self.spinner_probe
+            .get(id)
+            .map(|(_, _, confirmed, _)| *confirmed)
+            .hash(&mut hash);
+        if let Some(session) = self.pty.get(id) {
+            format!("{:?}", session.active_agent()).hash(&mut hash);
+            session
+                .last_submit()
+                .is_some_and(|at| at.elapsed() < Self::SUBMIT_TRUST)
+                .hash(&mut hash);
+            session.output_heartbeat_fresh().hash(&mut hash);
+        }
+        hash.finish()
+    }
+
     /// Subscription wakes the event loop once; only subscribed panes keep this timer alive.
     pub(crate) fn publish_web_visual_scenes(&mut self) -> Option<Instant> {
         let panes = visual::subscribed_panes();
@@ -350,11 +422,15 @@ impl App {
         let mut cache = std::mem::take(&mut self.web_visual);
         cache.last_tick = Some(now);
         cache.fingerprints.retain(|id, _| panes.contains(id));
+        cache.sources.retain(|id, _| panes.contains(id));
+        cache.registered.retain(|(id, _, _), _| panes.contains(id));
         if cache.assets.len() > 128 {
             cache.assets.clear();
+            cache.registered.clear();
         }
         if cache.animations.len() > 128 {
             cache.animations.clear();
+            cache.registered.clear();
         }
         let epoch = *cache.epoch_ms.get_or_insert_with(|| {
             (std::time::SystemTime::now()
@@ -382,6 +458,15 @@ impl App {
             let Some(source_key) = visual::source_key(&raw, 0) else {
                 continue;
             };
+            let context = self.web_visual_context(&ws, pane, &id);
+            let published = visual::cached_revision(&id);
+            if cache
+                .sources
+                .get(&id)
+                .is_some_and(|stamp| stamp.reusable(&source_key, context, now, published))
+            {
+                continue;
+            }
             let mut term = TerminalPane {
                 cols: raw.cols,
                 rows: raw.rows,
@@ -410,26 +495,36 @@ impl App {
                 false,
                 &Default::default(),
             );
-            ready.push((id, raw, source_key, composition));
+            ready.push((id, raw, source_key, context, composition));
         }
         drop(ws);
         // Decoding a newly encountered image must not hold up PTY screen delivery.
-        for (id, raw, source_key, composition) in ready {
+        for (id, raw, source_key, context, composition) in ready {
             let Some(overlays) =
                 composition.web_overlays(&id, raw.cols, raw.rows, cell, epoch, &mut cache)
             else {
                 continue;
             };
             let overlay_key = serde_json::to_vec(&overlays).unwrap_or_default();
-            if cache
-                .fingerprints
+            let published = visual::cached_revision(&id);
+            let same_publication = cache
+                .sources
                 .get(&id)
-                .is_some_and(|(old_source, old_cells, old_overlays)| {
-                    *old_source == source_key
-                        && *old_cells == composition.rows
-                        && *old_overlays == overlay_key
-                })
+                .is_some_and(|stamp| published == Some(stamp.revision));
+            if same_publication
+                && cache.fingerprints.get(&id).is_some_and(
+                    |(old_source, old_cells, old_overlays)| {
+                        *old_source == source_key
+                            && *old_cells == composition.rows
+                            && *old_overlays == overlay_key
+                    },
+                )
             {
+                if let Some(stamp) = cache.sources.get_mut(&id) {
+                    stamp.checked_at = now;
+                    stamp.context = context;
+                    stamp.animated_cells = composition.animated_cells;
+                }
                 continue;
             }
             cache.revision += 1;
@@ -440,10 +535,21 @@ impl App {
                 cols: raw.cols,
                 rows: raw.rows,
                 offset: 0,
+                raw_snapshot: raw,
                 composed_cells: composition.rows.clone(),
                 overlays,
             };
             if visual::publish(frame) {
+                cache.sources.insert(
+                    id.clone(),
+                    SourceStamp {
+                        key: source_key.clone(),
+                        context,
+                        checked_at: now,
+                        animated_cells: composition.animated_cells,
+                        revision: cache.revision,
+                    },
+                );
                 cache
                     .fingerprints
                     .insert(id, (source_key, composition.rows, overlay_key));
@@ -474,6 +580,7 @@ pub(crate) type TurnSlot = (
 
 #[derive(Default)]
 pub(crate) struct TerminalComposition {
+    pub(crate) animated_cells: bool,
     pub(crate) rows: Vec<Vec<GridCell>>,
     pub(crate) banner_slots: Vec<(&'static str, (f32, f32, f32, f32), (f32, f32))>,
     pub(crate) spinner_slots: Vec<(&'static str, (f32, f32, f32, f32))>,
@@ -499,6 +606,60 @@ pub(crate) struct TerminalComposition {
 #[cfg(test)]
 mod visual_scene_tests {
     use super::*;
+
+    #[test]
+    fn visual_scene_reconnect_rebuilds_even_when_source_fingerprint_is_unchanged() {
+        let now = Instant::now();
+        let stamp = SourceStamp {
+            key: "raw".into(),
+            context: 4,
+            checked_at: now,
+            animated_cells: false,
+            revision: 9,
+        };
+        assert!(stamp.reusable("raw", 4, now, Some(9)));
+        assert!(!stamp.reusable("raw", 4, now, None));
+        assert!(!stamp.reusable("raw", 4, now, Some(10)));
+    }
+
+    #[test]
+    fn visual_scene_idle_reuse_expires_on_metadata_changes_or_cell_animation() {
+        let now = Instant::now();
+        let mut stamp = SourceStamp {
+            key: "raw".into(),
+            context: 4,
+            checked_at: now,
+            animated_cells: false,
+            revision: 9,
+        };
+        assert!(stamp.reusable("raw", 4, now + Duration::from_millis(50), Some(9)));
+        assert!(!stamp.reusable("new-output", 4, now, Some(9)));
+        assert!(!stamp.reusable("raw", 5, now, Some(9)));
+        assert!(!stamp.reusable("raw", 4, now + Duration::from_secs(1), Some(9)));
+        stamp.animated_cells = true;
+        assert!(!stamp.reusable("raw", 4, now, Some(9)));
+    }
+
+    #[test]
+    fn visual_scene_asset_registration_survives_fast_unsubscribe_and_resubscribe() {
+        let pane = "%scene-asset-resubscribe";
+        let first = visual::subscribe(pane);
+        let mut cache = VisualPump::default();
+        let bytes: Arc<[u8]> = png_asset((vec![255, 0, 0, 255], 1, 1)).unwrap().0.into();
+        let id = cache.register(pane, 1, bytes.clone()).unwrap();
+        assert_eq!(
+            cache.register(pane, 1, bytes.clone()).as_deref(),
+            Some(id.as_str())
+        );
+        drop(first);
+        assert!(!visual::inline_asset_exists(pane, &id));
+        let _second = visual::subscribe(pane);
+        assert_eq!(cache.register(pane, 1, bytes).as_deref(), Some(id.as_str()));
+        assert!(visual::inline_asset_exists(pane, &id));
+        cache.invalidate_assets();
+        assert!(cache.registered.is_empty());
+        assert!(cache.sources.is_empty());
+    }
 
     fn banner(cols: usize, visible_rows: usize) -> Vec<Vec<GridCell>> {
         [
@@ -665,6 +826,7 @@ impl App {
         let mut tip_hit: Option<(String, u32, (f32, f32, f32, f32))> = Default::default();
         let mut agents_view_panes: std::collections::HashSet<String> = Default::default();
         let mut mirror_claude_panes: std::collections::HashSet<String> = Default::default();
+        let mut animated_cells = false;
         let mut composed: Vec<Vec<GridCell>> = match term {
             Some(t) => t.cells.iter().take(rows_now).map(normalise).collect(),
             None => Vec::new(),
@@ -1305,6 +1467,7 @@ impl App {
                 // working 중엔 walk 애니 33ms 펌프가 재렌더를 이미 돌려
                 // 애니 비용이 추가로 들지 않는다.
                 if let Some(a) = accent {
+                    animated_cells = true;
                     use kasa_bridge::screen::Color;
                     let t = self.version_anim_start.elapsed().as_secs_f32();
                     let row = &composed[sr];
@@ -2031,6 +2194,7 @@ impl App {
                 .and_then(|p| p.active_agent())
                 .is_some();
         if ultra {
+            animated_cells = true;
             let t = self.version_anim_start.elapsed().as_secs_f32();
             // 학생색 ↔ 보라 **순환** 숨쉬기(2026-08-17 「학생색 유지되면서
             // 순환하는 형식으로」 — 통보라 숨쉬기는 누구 pane 인지 잃어서
@@ -2105,6 +2269,7 @@ impl App {
             }
         }
         TerminalComposition {
+            animated_cells,
             rows: composed,
             banner_slots,
             spinner_slots,
