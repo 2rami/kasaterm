@@ -12,6 +12,7 @@ import { dirname, join, isAbsolute, extname } from 'node:path'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { PORT } from '../extension/port.js'
+import { HOST, HOST_ID } from '../bridge/host.mjs'
 
 // 서버 이름은 한 곳에만. 배포판은 이 한 줄만 치환하면 로그·MCP 핸드셰이크가 함께 따라온다.
 const NAME = 'kasachrome'
@@ -35,6 +36,8 @@ let nextId = 1
 const pending = new Map()
 let extensionUp = false
 let browserStarting = null
+// 지금 붙어 있는 브리지가 도는 기계. 옛 브리지는 이 값을 안 보내므로 null 로 남는다.
+let bridgeMachine = null
 const IDENTITY = resolveIdentity()
 const BROWSER_EXECUTABLE = process.env.KASACHROME_BROWSER_EXECUTABLE || ''
 let BROWSER_ARGS = []
@@ -65,13 +68,20 @@ function open(url = LOCAL_BRIDGE_URL) {
       sock.on('message', (raw) => {
         let msg
         try { msg = JSON.parse(raw.toString()) } catch { return }
-        if (msg.type === 'status') { extensionUp = !!msg.extension; return }
+        if (msg.type === 'status') {
+          extensionUp = !!msg.extension
+          if (msg.bridge) bridgeMachine = msg.bridge
+          return
+        }
         if (msg.type === 'profiles' || msg.type === 'select') {
           const q = pending.get(msg.id)
           if (!q) return
           pending.delete(msg.id)
           if (msg.ok === false) q.reject(new Error(msg.error || 'select failed'))
-          else q.resolve({ profiles: msg.profiles || [], selected: msg.selected ?? null })
+          else {
+            if (msg.bridge) bridgeMachine = msg.bridge
+            q.resolve({ profiles: msg.profiles || [], selected: msg.selected ?? null })
+          }
           return
         }
         if (msg.type !== 'result') return
@@ -84,6 +94,8 @@ function open(url = LOCAL_BRIDGE_URL) {
       sock.on('close', () => {
         ws = null
         ready = null
+        // 다음 연결은 후보 목록 맨 앞부터 다시 시도하므로 다른 기계에 붙을 수 있다.
+        bridgeMachine = null
         for (const [, p] of pending) p.reject(new Error('BRIDGE_CLOSED: 브리지 연결이 끊겼습니다. 다시 시도하면 자동 재연결됩니다.'))
         pending.clear()
       })
@@ -178,6 +190,25 @@ function text(value) {
   return { content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] }
 }
 
+// 지금 이 세션이 조작하는 크롬이 **어느 기계** 것인지. 프로필 목록만으로는 알 수 없다 —
+// KASACHROME_BRIDGE_URLS 로 터널 너머 남의 브리지에 붙으면 목록에 뜨는 크롬이 통째로 남의
+// 기계 것이고, 계정 라벨(2rami@sionic.ai 같은)은 같은 계정으로 로그인한 두 기계에서 똑같이
+// 생겨서 그것만으로는 갈리지 않는다.
+function where() {
+  const remote = !!activeUrl && activeUrl !== LOCAL_BRIDGE_URL
+  // 확장은 자기 기계의 브리지에만 붙으므로(extension/background.js 의 BRIDGE_URL 이
+  // 127.0.0.1 하드코딩) 브리지가 도는 기계가 곧 그 크롬의 기계다.
+  const chrome = bridgeMachine
+    ? { ...bridgeMachine, bridgeUrl: activeUrl, remote }
+    : remote
+      // 옛 브리지는 이 값을 안 보낸다. 원격이면 저쪽을 갱신하기 전까지 알 길이 없다.
+      ? { host: null, hostId: null, bridgeUrl: activeUrl, remote: true,
+          note: '저쪽 브리지가 옛 코드라 기계 이름을 안 보냅니다 — 그 기계의 카사크롬을 갱신하세요.' }
+      // 이 기계의 브리지라면 답을 이미 아는 셈이다.
+      : { host: HOST, hostId: HOST_ID, bridgeUrl: activeUrl, remote: false }
+  return { chrome, session: { host: HOST, hostId: HOST_ID } }
+}
+
 const server = new McpServer({ name: NAME, version: '0.1.0' })
 
 const tabId = z.number().int().optional().describe('Target tab id from list_tabs. Omit to use the active tab.')
@@ -194,11 +225,20 @@ function tool(name, description, schema, run, { timeoutMs = 30000 } = {}) {
   void timeoutMs
 }
 
-tool('browser_status', 'Check the bridge/extension connection and which tabs currently have the debugger attached. Call this first if any other tool errors.', {},
-  async () => text(await call('status')))
+tool('browser_status', 'Check the bridge/extension connection and which tabs currently have the debugger attached. Call this first if any other tool errors. Also reports WHICH MACHINE the Chrome you are driving runs on: `chrome.host` is that machine (with `chrome.remote` true when you are driving a Chrome across a tunnel on another machine, and `chrome.bridgeUrl` the bridge you reached), while `session.host` is the machine this Claude session itself runs on. When they differ, your screenshots and logins come from the other machine.', {},
+  async () => {
+    try {
+      const s = await call('status')
+      return text({ ...(s && typeof s === 'object' && !Array.isArray(s) ? s : { status: s }), ...where() })
+    } catch (e) {
+      // 확장이 안 붙어 있어도 「어느 기계의 브리지에 붙었나」는 답할 수 있다. 이 도구는 무엇이
+      // 고장났는지 가리려고 부르는 것이라, 확장 하나가 없다고 아는 것까지 함께 잃으면 안 된다.
+      return text({ error: e.message, ...where() })
+    }
+  })
 
-tool('browser_list_profiles', 'List the Chrome profiles currently connected — one entry per profile that has the extension loaded. Each has an id, a label (the profile\'s Google account email when signed in) and a hint (tab count and the most common domains) so you can tell them apart when the label is empty. `selected` is the profile THIS session sends commands to; when it is null, commands go to the first-connected profile. Use this before browser_select_profile, and whenever a page you expect to be signed in appears signed out — that usually means you are driving the wrong profile.', {},
-  async () => text(await ask('profiles')))
+tool('browser_list_profiles', 'List the Chrome profiles currently connected — one entry per profile that has the extension loaded. Each has an id, a label (the profile\'s Google account email when signed in) and a hint (tab count and the most common domains) so you can tell them apart when the label is empty. Each entry also carries `host` — the MACHINE that Chrome runs on (`hostId` tells two machines apart even when they were given the same name). All profiles in one listing come from the same machine, because the extension only ever connects to the bridge on its own machine; which machine that is depends on the bridge this session reached, reported as `chrome`. `session` is the machine this Claude session itself runs on — when `chrome.host` differs from it you are driving a Chrome across a tunnel, so its screenshots, cookies and logins are the other machine\'s. `selected` is the profile THIS session sends commands to; when it is null, commands go to the first-connected profile. Use this before browser_select_profile, and whenever a page you expect to be signed in appears signed out — that usually means you are driving the wrong profile, or the right profile on the wrong machine.', {},
+  async () => text({ ...(await ask('profiles')), ...where() }))
 
 tool('browser_select_profile', 'Point this session\'s browser tools at a specific Chrome profile. Pass an id from browser_list_profiles; pass null to go back to the default (first-connected). The choice is per-session, so other panes keep whatever profile they picked — switching here never moves anyone else. Tab ids belong to the profile that issued them, so re-list tabs after switching instead of reusing ids from before.', { profile: z.string().nullable().optional().describe('Profile id from browser_list_profiles, or null to unset') },
   async (a) => text(await ask('select', { profile: a.profile ?? null })))
