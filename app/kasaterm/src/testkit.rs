@@ -3993,8 +3993,12 @@ impl App {
                     pane.dirty = true;
                     let Some(m) = pane.markdown_mut() else { return };
                     match v {
-                        "tab" => m.indent(false),
-                        "untab" => m.indent(true),
+                        "tab" => {
+                            m.indent(false);
+                        }
+                        "untab" => {
+                            m.indent(true);
+                        }
                         "enter" => m.newline(),
                         // 되돌리기가 **한 번의 undo 로 통째로** 취소되는지 보려면
                         // 여기 있어야 한다 — 헝크 되돌리기는 여러 줄을 한꺼번에
@@ -4456,6 +4460,380 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+    }
+
+    /// Detached-document product-route E2E. The first pass opens one document
+    /// through the human path and moves an explicit preview tab through the
+    /// real header hit target. A second process restores the resulting window
+    /// records. All paths must point at disposable fixtures.
+    pub(crate) fn run_pending_autoauxdocs(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase};
+
+        static START: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicUsize = AtomicUsize::new(0);
+        let mode = match std::env::var("KASATERM_TEST_AUXE2E") {
+            Ok(mode) => mode,
+            Err(_) => return,
+        };
+        let start = START.get_or_init(|| {
+            let ms = std::env::var("KASATERM_TEST_AUXE2E_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(1800);
+            Some(Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(start) = start else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        if mode == "restore" && step > 0 {
+            MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+            return;
+        }
+        MDSCRIPT_LEFT.store(true, Ordering::Relaxed);
+        if Instant::now()
+            < *start + std::time::Duration::from_millis(step as u64 * 650)
+        {
+            return;
+        }
+        let cap_dir = match std::env::var("KASATERM_TEST_AUXCAP_DIR") {
+            Ok(path) => std::path::PathBuf::from(path),
+            Err(_) => {
+                eprintln!("[auxe2e] FAIL capture dir 없음");
+                MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+                return;
+            }
+        };
+        let _ = std::fs::create_dir_all(&cap_dir);
+
+        if mode == "restore" {
+            if self.aux_probe_ids().len() < 2 {
+                return;
+            }
+            let find_query = std::env::var("KASATERM_TEST_AUXFIND").ok();
+            if let Some(query) = find_query.as_deref() {
+                let summary = self.aux_probe_summary();
+                let frame = summary
+                    .as_array()
+                    .and_then(|rows| rows.first())
+                    .and_then(|row| row.get("frame"));
+                let width = frame
+                    .and_then(|value| value.get("width"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(760) as f64;
+                let height = frame
+                    .and_then(|value| value.get("height"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(560) as f64;
+                let Some(id) = self.aux_probe_ids().first().copied() else { return };
+                self.aux_window_event(
+                    id,
+                    WindowEvent::CursorMoved {
+                        device_id: DeviceId::dummy(),
+                        position: winit::dpi::PhysicalPosition::new(width * 0.5, height * 0.5),
+                    },
+                    event_loop,
+                );
+                for state in [ElementState::Pressed, ElementState::Released] {
+                    self.aux_window_event(
+                        id,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state,
+                            button: MouseButton::Left,
+                        },
+                        event_loop,
+                    );
+                }
+                let opened = self.aux_probe_open_find(0, &query);
+                let captured = self.aux_capture(
+                    0,
+                    cap_dir.join("find-bar.png").to_string_lossy().into_owned(),
+                );
+                eprintln!("[auxe2e] FIND opened={opened} capture={captured}");
+            }
+            eprintln!("[auxe2e] RESTORE {}", self.aux_probe_summary());
+            for index in 0..self.aux_probe_ids().len().min(2) {
+                if index == 0 && find_query.is_some() {
+                    continue;
+                }
+                let path = cap_dir.join(format!("restore-{index}.png"));
+                let ok = self.aux_capture(index, path.to_string_lossy().into_owned());
+                eprintln!("[auxe2e] restore capture {index}={ok}");
+            }
+            STEP.store(step + 1, Ordering::Relaxed);
+            MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+            return;
+        }
+        if mode != "first" {
+            eprintln!("[auxe2e] FAIL mode={mode:?}");
+            MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+            return;
+        }
+        let Some(doc1) = std::env::var_os("KASATERM_TEST_AUXDOC1").map(std::path::PathBuf::from)
+        else {
+            eprintln!("[auxe2e] FAIL doc1 없음");
+            MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+            return;
+        };
+        let doc1 = std::fs::canonicalize(&doc1).unwrap_or(doc1);
+        let Some(doc2) = std::env::var_os("KASATERM_TEST_AUXDOC2").map(std::path::PathBuf::from)
+        else {
+            eprintln!("[auxe2e] FAIL doc2 없음");
+            MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+            return;
+        };
+        let doc2 = std::fs::canonicalize(&doc2).unwrap_or(doc2);
+        let index_for = |summary: &serde_json::Value, path: &std::path::Path| {
+            summary.as_array()?.iter().position(|row| {
+                row.get("path").and_then(serde_json::Value::as_str)
+                    == Some(path.to_string_lossy().as_ref())
+            })
+        };
+        let click_aux_header =
+            |app: &mut App, index: usize, kind: &str, event_loop: &ActiveEventLoop| {
+                let Some((id, position)) = app.aux_probe_header_center(index, kind) else {
+                    return false;
+                };
+                app.aux_window_event(
+                    id,
+                    WindowEvent::CursorMoved {
+                        device_id: DeviceId::dummy(),
+                        position,
+                    },
+                    event_loop,
+                );
+                for state in [ElementState::Pressed, ElementState::Released] {
+                    app.aux_window_event(
+                        id,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state,
+                            button: MouseButton::Left,
+                        },
+                        event_loop,
+                    );
+                }
+                true
+            };
+        let click_main_action =
+            |app: &mut App, action: ActionKind, event_loop: &ActiveEventLoop| {
+                app.render_frame();
+                let Some((_, _, rect)) = app
+                    .pane_action_hits
+                    .iter()
+                    .find(|(_, candidate, _)| *candidate == action)
+                    .cloned()
+                else {
+                    return false;
+                };
+                let Some(id) = app.window.as_ref().map(|window| window.id()) else {
+                    return false;
+                };
+                app.cursor_px = (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+                for state in [ElementState::Pressed, ElementState::Released] {
+                    app.window_event(
+                        event_loop,
+                        id,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state,
+                            button: MouseButton::Left,
+                        },
+                    );
+                }
+                true
+            };
+
+        match step {
+            0 => {
+                self.open_file(doc1.clone(), None, false);
+                eprintln!("[auxe2e] human open {}", doc1.display());
+            }
+            1 => {
+                let summary = self.aux_probe_summary();
+                let Some(index) = index_for(&summary, &doc1) else { return };
+                let ok = self.aux_capture(
+                    index,
+                    cap_dir.join("human-view.png").to_string_lossy().into_owned(),
+                );
+                eprintln!("[auxe2e] HUMAN {summary} capture={ok}");
+            }
+            2 => {
+                let Some(outer) = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone())
+                else {
+                    return;
+                };
+                self.open_file(doc2.clone(), Some(outer.clone()), true);
+                let tab = {
+                    let mut ws = self.ws.lock().unwrap();
+                    let Some(pane) = ws.panes.get_mut(&outer) else { return };
+                    let Some(tab) = pane.tabs.iter().position(|tab| {
+                        tab.preview_path.as_deref() == Some(doc2.as_path())
+                    }) else {
+                        return;
+                    };
+                    pane.active_tab = tab;
+                    pane.dirty = true;
+                    ws.active_pane = Some(outer);
+                    tab
+                };
+                if !click_main_action(self, ActionKind::MdRaw, event_loop) {
+                    return;
+                }
+                eprintln!("[auxe2e] explicit tab={tab} raw header click");
+            }
+            3 => {
+                let Some(outer) = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone())
+                else {
+                    return;
+                };
+                self.md_insert_into(&outer, " [tab-draft]");
+                if !click_main_action(self, ActionKind::MdPopout, event_loop) {
+                    return;
+                }
+                eprintln!("[auxe2e] explicit tab popout click");
+            }
+            4 => {
+                let summary = self.aux_probe_summary();
+                let Some(index) = index_for(&summary, &doc2) else { return };
+                let ok = self.aux_capture(
+                    index,
+                    cap_dir.join("popout-raw.png").to_string_lossy().into_owned(),
+                );
+                let Some(id) = self.aux_probe_ids().get(index).copied() else { return };
+                self.aux_window_event(id, WindowEvent::CloseRequested, event_loop);
+                eprintln!(
+                    "[auxe2e] POPOUT {summary} capture={ok} dirty_modal={}",
+                    self.confirm_close.is_some()
+                );
+            }
+            5 => {
+                self.confirm_dialog_pick(ConfirmBtn::Cancel, event_loop);
+                let summary = self.aux_probe_summary();
+                let Some(index) = index_for(&summary, &doc2) else { return };
+                if !click_aux_header(self, index, "view", event_loop) {
+                    return;
+                }
+                eprintln!("[auxe2e] cancel kept target; view header click {summary}");
+            }
+            6 => {
+                let summary = self.aux_probe_summary();
+                let Some(index) = index_for(&summary, &doc2) else { return };
+                let ok = self.aux_capture(
+                    index,
+                    cap_dir.join("unsaved-view.png").to_string_lossy().into_owned(),
+                );
+                if !click_aux_header(self, index, "edit", event_loop) {
+                    return;
+                }
+                let Some(id) = self.aux_probe_ids().get(index).copied() else { return };
+                self.aux_insert_id(id, " [header-save]");
+                eprintln!("[auxe2e] unsaved view capture={ok}; edit header click");
+            }
+            7 => {
+                let summary = self.aux_probe_summary();
+                let Some(index) = index_for(&summary, &doc2) else { return };
+                if !click_aux_header(self, index, "save", event_loop) {
+                    return;
+                }
+                let Some(id) = self.aux_probe_ids().get(index).copied() else { return };
+                self.aux_insert_id(id, " [modal-save]");
+                self.aux_window_event(id, WindowEvent::CloseRequested, event_loop);
+                let modal = self.confirm_close.is_some();
+                self.confirm_dialog_pick(ConfirmBtn::Save, event_loop);
+                eprintln!(
+                    "[auxe2e] header save + modal save modal={modal} now={}",
+                    self.aux_probe_summary()
+                );
+            }
+            8 => {
+                let summary = self.aux_probe_summary();
+                let Some(index) = index_for(&summary, &doc1) else { return };
+                if !click_aux_header(self, index, "edit", event_loop) {
+                    return;
+                }
+                let Some(id) = self.aux_probe_ids().get(index).copied() else { return };
+                self.aux_window_event(
+                    id,
+                    WindowEvent::MouseWheel {
+                        device_id: DeviceId::dummy(),
+                        delta: MouseScrollDelta::LineDelta(0.0, -18.0),
+                        phase: TouchPhase::Moved,
+                    },
+                    event_loop,
+                );
+                let summary = self.aux_probe_summary();
+                let frame = summary
+                    .as_array()
+                    .and_then(|rows| rows.get(index))
+                    .and_then(|row| row.get("frame"));
+                let width = frame
+                    .and_then(|value| value.get("width"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(760) as f64;
+                let height = frame
+                    .and_then(|value| value.get("height"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(560) as f64;
+                self.aux_window_event(
+                    id,
+                    WindowEvent::CursorMoved {
+                        device_id: DeviceId::dummy(),
+                        position: winit::dpi::PhysicalPosition::new(width * 0.55, height * 0.72),
+                    },
+                    event_loop,
+                );
+                for state in [ElementState::Pressed, ElementState::Released] {
+                    self.aux_window_event(
+                        id,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state,
+                            button: MouseButton::Left,
+                        },
+                        event_loop,
+                    );
+                }
+                self.aux_insert_id(id, "[restore-draft]");
+                let gone = doc1.with_extension("gone.md");
+                let moved = std::fs::rename(&doc1, &gone).is_ok()
+                    && std::fs::create_dir(&doc1).is_ok();
+                self.aux_window_event(id, WindowEvent::CloseRequested, event_loop);
+                let modal = self.confirm_close.is_some();
+                self.confirm_dialog_pick(ConfirmBtn::Save, event_loop);
+                eprintln!(
+                    "[auxe2e] save failure moved={moved} modal={modal} retained={}",
+                    self.aux_probe_summary()
+                );
+            }
+            9 => {
+                eprintln!("[auxe2e] READY_AGENT {}", doc2.display());
+            }
+            10 => {
+                let summary = self.aux_probe_summary();
+                if self.aux_probe_ids().len() < 2 {
+                    return;
+                }
+                let main_focus = self.window.as_ref().is_some_and(|window| window.has_focus());
+                for index in 0..2 {
+                    let _ = self.aux_capture(
+                        index,
+                        cap_dir
+                            .join(format!("before-restart-{index}.png"))
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+                eprintln!("[auxe2e] AGENT main_focus={main_focus} {summary}");
+                MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+            }
+            _ => {
+                MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+                return;
+            }
+        }
+        STEP.store(step + 1, Ordering::Relaxed);
     }
     /// Headless file-open repro: schedule `open_file_split` on the path in
     /// `KASATERM_AUTOOPEN` after `KASATERM_AUTOOPEN_MS` (default 4000ms), so a

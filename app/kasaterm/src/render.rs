@@ -811,8 +811,12 @@ impl App {
             color: Option<[u8; 4]>,
             /// Markdown panes get Render/Raw toggle pills in the header.
             is_markdown: bool,
+            /// Markdown, code and plain-text panes share the source editor.
+            is_editor: bool,
             /// Current markdown mode (true = Raw editor) for pill highlighting.
             md_raw_mode: bool,
+            /// The editor buffer differs from its last successful save.
+            md_modified: bool,
             /// Image panes get zoom/rotate buttons instead of the terminal-action cluster.
             is_image: bool,
             /// Web panes get back/forward/reload/open-external instead of the
@@ -3085,7 +3089,9 @@ impl App {
                         codex_status,
                         color: pane.color,
                         is_markdown: pane.markdown().map_or(false, |m| m.is_md_doc),
+                        is_editor: pane.markdown().is_some(),
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
+                        md_modified: pane.markdown().is_some_and(|m| m.modified),
                         is_image: pane.image().is_some(),
                         is_web: pane.web().is_some(),
                         web_url: pane.web().map(|w| w.url.clone()),
@@ -8524,21 +8530,63 @@ impl App {
                 let abw = icon_size + 2.0;
                 let agap = 2.0;
                 let n_btn: f32 = if h.is_image || h.is_web { 4.0 } else { 3.0 };
-                // Markdown panes show a "Rendered | Raw" segmented toggle instead
-                // of an icon cluster; reserve its measured width on the right.
+                // Markdown panes show explicit view/edit, save and separate-window
+                // controls instead of the terminal icon cluster.
                 let seg_font = 11.0_f32;
                 let seg_pad = 9.0_f32;
                 let (md_rendered_w, md_raw_w) = if h.is_markdown {
                     (
-                        g.measure_chrome_text("Rendered", seg_font, false),
-                        g.measure_chrome_text("Raw", seg_font, false),
+                        g.measure_chrome_text("보기", seg_font, false),
+                        g.measure_chrome_text("편집", seg_font, false),
                     )
                 } else {
                     (0.0, 0.0)
                 };
-                let seg_w = md_rendered_w + md_raw_w + seg_pad * 4.0;
-                let btn_cluster = if h.is_markdown {
-                    seg_w + 12.0
+                let seg_w = if h.is_markdown {
+                    md_rendered_w + md_raw_w + seg_pad * 4.0
+                } else {
+                    0.0
+                };
+                let md_compact = h.w < 520.0;
+                let md_save_w = if h.is_editor {
+                    g.measure_chrome_text("저장", seg_font, false) + seg_pad * 2.0
+                } else {
+                    0.0
+                };
+                let md_popout_w = if h.is_editor {
+                    if md_compact {
+                        icon_size + 6.0
+                    } else {
+                        g.measure_chrome_text("새 창", seg_font, false) + icon_size + seg_pad * 2.0
+                    }
+                } else {
+                    0.0
+                };
+                let md_state_w = if h.is_editor && !md_compact {
+                    g.measure_chrome_text(
+                        if h.md_modified { "저장 안 됨" } else { "저장됨" },
+                        seg_font,
+                        false,
+                    ) + 8.0
+                } else {
+                    0.0
+                };
+                let md_gap_count = if !h.is_editor {
+                    0.0
+                } else if h.is_markdown {
+                    if md_compact { 2.0 } else { 3.0 }
+                } else if md_compact {
+                    1.0
+                } else {
+                    2.0
+                };
+                let md_tools_w = seg_w
+                    + md_save_w
+                    + md_popout_w
+                    + md_state_w
+                    + md_gap_count * 4.0;
+                let btn_cluster = if h.is_editor {
+                    md_tools_w + 12.0
                 } else {
                     abw * n_btn + agap * (n_btn - 1.0) + 12.0
                 };
@@ -8634,9 +8682,8 @@ impl App {
                         (reload_icon, None, Some(ActionKind::WebReload)),
                         ("external-link", None, Some(ActionKind::WebOpenExternal)),
                     ]
-                } else if h.is_markdown {
-                    // Markdown panes use a text "Rendered | Raw" segmented
-                    // toggle (drawn below), not an icon cluster.
+                } else if h.is_editor {
+                    // Document panes use the controls drawn below.
                     vec![]
                 } else {
                     // The status-bar toggle reads "filled" (panel-bottom) when the
@@ -8835,67 +8882,150 @@ impl App {
                         (ax, ay, addr_w, ah),
                     ));
                 }
-                // ── Markdown "Rendered | Raw" segmented toggle ── outer pill
-                // with the active half filled; each half is its own hit rect so
-                // a click sets that exact mode (vs flipping).
-                if h.is_markdown {
+                // ── Markdown document controls ── View and Edit never imply a
+                // save; Save is a separate action and the dirty state stays
+                // visible until a write succeeds. Narrow panes retain every
+                // action, shortening only the separate-window label to its icon.
+                if h.is_editor {
                     let seg_h = icon_size + 6.0;
                     let seg_y = h.y + (PANE_HEADER_HEIGHT - seg_h) / 2.0;
-                    let mut sx = h.x + h.w - 8.0 - seg_w;
-                    round_rect(
-                        g,
-                        sx,
-                        seg_y,
-                        seg_w,
-                        seg_h,
-                        theme::radius_sm(),
-                        theme::surface(),
-                    );
-                    let ty = seg_y + (seg_h - seg_font) / 2.0;
-                    for (label, lw, raw) in
-                        [("Rendered", md_rendered_w, false), ("Raw", md_raw_w, true)]
-                    {
-                        let cell_w = lw + seg_pad * 2.0;
-                        let active = h.md_raw_mode == raw;
-                        let hover = inside(sx, seg_y, cell_w, seg_h);
-                        g.hover_pointer |= hover;
-                        if active {
-                            round_rect(
-                                g,
-                                sx,
-                                seg_y,
-                                cell_w,
-                                seg_h,
-                                theme::radius_sm(),
-                                theme::surface_hover(),
-                            );
-                        } else if hover {
-                            hover_rect(g, sx, seg_y, cell_w, seg_h, theme::radius_sm());
-                        }
-                        let color = if active {
-                            theme::text()
-                        } else {
-                            theme::text_dim()
-                        };
+                    let mut sx = h.x + h.w - 8.0 - md_tools_w;
+                    if !md_compact {
+                        let state = if h.md_modified { "저장 안 됨" } else { "저장됨" };
                         g.draw_text(
-                            sx + seg_pad,
-                            ty,
-                            label,
+                            sx + 4.0,
+                            seg_y + (seg_h - seg_font) / 2.0,
+                            state,
                             gpu::DrawOpts {
                                 font_size: seg_font,
-                                color,
+                                color: if h.md_modified {
+                                    theme::attention()
+                                } else {
+                                    theme::text_mute()
+                                },
                                 bold: false,
                                 italic: false,
                             },
                         );
-                        let act = if raw {
-                            ActionKind::MdRaw
-                        } else {
-                            ActionKind::MdRender
-                        };
-                        pane_action_hits.push((h.id.clone(), act, (sx, seg_y, cell_w, seg_h)));
-                        sx += cell_w;
+                        sx += md_state_w + 4.0;
                     }
+                    let save_hover = inside(sx, seg_y, md_save_w, seg_h);
+                    g.hover_pointer |= save_hover;
+                    round_rect(
+                        g,
+                        sx,
+                        seg_y,
+                        md_save_w,
+                        seg_h,
+                        theme::radius_sm(),
+                        if save_hover { theme::surface_hover() } else { theme::surface() },
+                    );
+                    g.draw_text(
+                        sx + seg_pad,
+                        seg_y + (seg_h - seg_font) / 2.0,
+                        "저장",
+                        gpu::DrawOpts {
+                            font_size: seg_font,
+                            color: if h.md_modified || save_hover {
+                                theme::text()
+                            } else {
+                                theme::text_dim()
+                            },
+                            bold: h.md_modified,
+                            italic: false,
+                        },
+                    );
+                    pane_action_hits.push((h.id.clone(), ActionKind::MdSave, (sx, seg_y, md_save_w, seg_h)));
+                    sx += md_save_w;
+                    if h.is_markdown {
+                        sx += 4.0;
+                        round_rect(
+                            g,
+                            sx,
+                            seg_y,
+                            seg_w,
+                            seg_h,
+                            theme::radius_sm(),
+                            theme::surface(),
+                        );
+                        let ty = seg_y + (seg_h - seg_font) / 2.0;
+                        for (label, lw, raw) in
+                            [("보기", md_rendered_w, false), ("편집", md_raw_w, true)]
+                        {
+                            let cell_w = lw + seg_pad * 2.0;
+                            let active = h.md_raw_mode == raw;
+                            let hover = inside(sx, seg_y, cell_w, seg_h);
+                            g.hover_pointer |= hover;
+                            if active {
+                                round_rect(
+                                    g,
+                                    sx,
+                                    seg_y,
+                                    cell_w,
+                                    seg_h,
+                                    theme::radius_sm(),
+                                    theme::surface_hover(),
+                                );
+                            } else if hover {
+                                hover_rect(g, sx, seg_y, cell_w, seg_h, theme::radius_sm());
+                            }
+                            let color = if active {
+                                theme::text()
+                            } else {
+                                theme::text_dim()
+                            };
+                            g.draw_text(
+                                sx + seg_pad,
+                                ty,
+                                label,
+                                gpu::DrawOpts {
+                                    font_size: seg_font,
+                                    color,
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                            let act = if raw {
+                                ActionKind::MdRaw
+                            } else {
+                                ActionKind::MdRender
+                            };
+                            pane_action_hits.push((h.id.clone(), act, (sx, seg_y, cell_w, seg_h)));
+                            sx += cell_w;
+                        }
+                    }
+                    sx += 4.0;
+                    let pop_hover = inside(sx, seg_y, md_popout_w, seg_h);
+                    g.hover_pointer |= pop_hover;
+                    if pop_hover {
+                        hover_rect(g, sx, seg_y, md_popout_w, seg_h, theme::radius_sm());
+                    }
+                    let pop_color = if pop_hover { theme::text() } else { theme::text_dim() };
+                    g.queue_icon(
+                        "external-link",
+                        sx + seg_pad.min(6.0),
+                        seg_y + (seg_h - icon_size) / 2.0,
+                        icon_size,
+                        pop_color,
+                    );
+                    if !md_compact {
+                        g.draw_text(
+                            sx + seg_pad.min(6.0) + icon_size + 5.0,
+                            seg_y + (seg_h - seg_font) / 2.0,
+                            "새 창",
+                            gpu::DrawOpts {
+                                font_size: seg_font,
+                                color: pop_color,
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                    }
+                    pane_action_hits.push((
+                        h.id.clone(),
+                        ActionKind::MdPopout,
+                        (sx, seg_y, md_popout_w, seg_h),
+                    ));
                 }
             }
             // Focus by contrast: unfocused panes fade their text only (via
@@ -13285,6 +13415,7 @@ impl App {
                     crate::PendingClose::Session(_) => "이 세션을",
                     crate::PendingClose::Pane { .. } => "이 pane 을",
                     crate::PendingClose::Tab { .. } => "이 탭을",
+                    crate::PendingClose::AuxEditor(_) => "이 문서 창을",
                 };
                 let (title, subtitle) = match &dlg.why {
                     crate::CloseWhy::Busy(proc) => {
@@ -14181,7 +14312,7 @@ impl App {
 
     /// It overlays rather than pushing the text down, so opening it never
     /// reflows what you were reading — the same reason VS Code floats its own.
-    fn draw_find_bar(
+    pub(crate) fn draw_find_bar(
         g: &mut gpu::GpuRenderer,
         f: &FindState,
         x: f32,

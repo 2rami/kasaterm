@@ -2410,6 +2410,7 @@ impl App {
         match prev {
             crate::ImeFocus::Pane(id) => self.send_bytes_to_surface(Some(&id), text.as_bytes()),
             crate::ImeFocus::Editor(id) => self.md_insert_into(&id, &text),
+            crate::ImeFocus::AuxEditor(id) => self.aux_insert_id(id, &text),
             crate::ImeFocus::GitCommit => self.git_commit_insert(&text),
             crate::ImeFocus::McpAdd => self.mcp_add_insert(&text),
             crate::ImeFocus::RoomRename(_) => self.room_rename_insert(&text),
@@ -2913,6 +2914,16 @@ impl App {
         };
         if is_md {
             if self.host_mod() || self.modifiers.control_key() {
+                if !is_raw
+                    && matches!(
+                        event.physical_key,
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyS)
+                    )
+                {
+                    self.md_flush_preedit();
+                    self.save_active_editor();
+                    return;
+                }
                 if is_raw && self.md_editor_shortcut(event) {
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -2922,6 +2933,65 @@ impl App {
                 // 터미널용 잔재 제안이 아래 Ctrl+E 수락 경로에 낚이지 않게 비운다.
                 self.current_suggestion = None;
             } else {
+                // 보기 화면도 키보드로 읽을 수 있어야 한다. Space 는 여기서
+                // 페이지 이동으로 먼저 소비해, 편집 전환과 공백 삽입으로
+                // 오해되지 않게 한다.
+                if !is_raw {
+                    let id = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone());
+                    let visible = id.as_deref().and_then(|id| {
+                        let (cols, rows) = self.window_cells();
+                        let pane_h = self
+                            .effective_leaf_rects(cols, rows)
+                            .into_iter()
+                            .find(|(pane, ..)| pane == id)
+                            .map(|(_, _, _, _, h)| h as f32 * self.cell.h)
+                            .unwrap_or_else(|| rows.max(1) as f32 * self.cell.h);
+                        let ws = self.ws.lock().ok()?;
+                        let pane = ws.panes.get(id)?;
+                        Some(
+                            (pane_h
+                                - pane.header_px()
+                                - self.statusbar_px(id)
+                                - PANE_INNER_Y * 2.0)
+                                .max(self.cell.h),
+                        )
+                    });
+                    let delta = visible.and_then(|page| match &event.logical_key {
+                        Key::Named(NamedKey::ArrowUp) => Some(-self.cell.h),
+                        Key::Named(NamedKey::ArrowDown) => Some(self.cell.h),
+                        Key::Named(NamedKey::PageUp) => Some(-page),
+                        Key::Named(NamedKey::PageDown) => Some(page),
+                        Key::Named(NamedKey::Space) => {
+                            Some(if self.modifiers.shift_key() { -page } else { page })
+                        }
+                        _ => None,
+                    });
+                    if let (Some(id), Some(visible), Some(delta)) = (id, visible, delta) {
+                        let content = self.md_content_h.get(&id).copied().unwrap_or(0.0);
+                        let mut moved = false;
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.panes.get_mut(&id) {
+                                if let Some(markdown) = pane.markdown_mut() {
+                                    let next = crate::auxwin::clamped_document_scroll(
+                                        markdown.scroll,
+                                        delta,
+                                        content,
+                                        visible,
+                                    );
+                                    moved = (next - markdown.scroll).abs() > 0.01;
+                                    markdown.scroll = next;
+                                }
+                                pane.dirty |= moved;
+                            }
+                        }
+                        if moved {
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
+                        }
+                        return;
+                    }
+                }
                 // Rendered 모드에서 글자를 치면 삼키는 대신 raw 로 넘어가 그
                 // 글자를 살린다. 편집하려는 의도가 분명한데 아무 일도 안 일어나면
                 // 왜 안 써지는지 화면이 설명해 주지 못한다. 방향키·PageUp 같은

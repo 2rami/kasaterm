@@ -2943,10 +2943,12 @@ impl GpuRenderer {
         lines: &[String],
         x: f32,
         y: f32,
+        w: f32,
         scroll: f32,
         click_x: f32,
         click_y: f32,
         folds: &[(usize, usize)],
+        wrap: bool,
     ) -> Option<usize> {
         let base = self.font_size_px as f32 / self.scale;
         let (pad, lh) = self.raw_editor_metrics();
@@ -2960,8 +2962,13 @@ impl GpuRenderer {
             return None;
         }
         let top0 = (y - scroll) + pad;
-        let row = ((click_y - top0) / lh).floor().max(0.0) as usize;
-        Some(crate::markdown::buffer_line(folds, row, lines.len()))
+        let row = ((click_y - top0) / lh).floor();
+        if row < 0.0 {
+            return None;
+        }
+        let wrap_cols = self.raw_editor_wrap_cols(w, lines.len(), wrap);
+        let rows = crate::markdown::layout_rows(lines, folds, wrap_cols);
+        rows.get(row as usize).map(|&(line, _)| line)
     }
 
     /// Raw-editor row metrics for the current font: (top pad, line height) in

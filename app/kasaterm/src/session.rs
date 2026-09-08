@@ -4585,7 +4585,7 @@ impl App {
     /// instead of stacking duplicate splits. PTY-less — `resize_backend` skips
     /// leaves with no `self.pty` entry, so the new pane never spawns a shell.
     pub(crate) fn open_file_split(&mut self, path: std::path::PathBuf) {
-        self.open_file(path, None, false);
+        self.open_file_routed(path, None, false, false);
     }
 
     /// 파일 미리보기를 연다. `as_tab`이면 `target`(=요청자 pid, `$KASATERM_PANE_ID`)
@@ -4597,6 +4597,16 @@ impl App {
         path: std::path::PathBuf,
         target: Option<String>,
         as_tab: bool,
+    ) {
+        self.open_file_routed(path, target, as_tab, !as_tab);
+    }
+
+    fn open_file_routed(
+        &mut self,
+        path: std::path::PathBuf,
+        target: Option<String>,
+        as_tab: bool,
+        detach_default: bool,
     ) {
         if self.tmux.is_some() {
             return;
@@ -4612,6 +4622,10 @@ impl App {
         // 소켓의 미리보기 요청이라, 그것까지 pane 을 새로 열면 파일을 보여 달랄
         // 때마다 화면이 쪼개진다.
         if !as_tab && !crate::is_image_path(&path) && self.open_file_elsewhere(&path) {
+            return;
+        }
+        if detach_default && !crate::is_image_path(&path) {
+            self.queue_aux_file(path, true);
             return;
         }
         // Already open? Focus that pane + tab rather than spawning a duplicate.
@@ -4795,107 +4809,11 @@ impl App {
             w.request_redraw();
         }
     }
-    /// macOS `.md` 더블클릭(odoc Apple Event)/argv → 새 워크스페이스(사이드바 탭)에
-    /// 마크다운 뷰어를 단독 pane(풀스크린)으로 띄운다. `open_file_split`(현재 창
-    /// split)과 달리 기존 워크스페이스를 안 건드리고 새 윈도우 슬롯을 만든다.
-    /// PTY 없는 pane이라 셸 spawn 은 안 한다 — `resize_backend`/키 입력은 PTY miss
-    /// 로 자동 skip(이미지 pane 과 같은 PTY-less 선례).
+    /// macOS odoc/argv uses the same default detached-document route as a
+    /// person opening a text file from the tree. Window creation is deferred
+    /// until winit supplies an ActiveEventLoop.
     pub(crate) fn open_markdown_window(&mut self, path: std::path::PathBuf) {
-        if self.tmux.is_some() {
-            return;
-        }
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
-        // 이미 열려 있으면 그 워크스페이스로 전환만(중복 탭 방지).
-        let existing = {
-            let ws = self.ws.lock().unwrap();
-            ws.panes.iter().find_map(|(id, p)| {
-                p.tabs
-                    .iter()
-                    .any(|t| t.preview_path.as_deref() == Some(path.as_path()))
-                    .then(|| id.clone())
-            })
-        };
-        if let Some(pid) = existing {
-            self.focus_pane(&pid);
-            self.chrome_dirty = true;
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
-            return;
-        }
-
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("[open-md] 파일 읽기 실패 {}: {e}", path.display());
-                return;
-            }
-        };
-        let new_id = self.alloc_pane_id();
-        let doc = Arc::new(build_markdown_doc(&path, &raw));
-        let title = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string());
-        let mut tab = PaneTab::default();
-        // `.md` 는 렌더뷰(raw_mode=false) — 거노 확정. open_file_split 의 .md 분기 동일.
-        tab.content = PaneContent::Markdown(MarkdownPane {
-            doc,
-            is_md_doc: true,
-            raw_mode: false,
-            edit_lines: Arc::default(),
-            cur_line: 0,
-            cur_col: 0,
-            scroll: 0.0,
-            h_scroll: 0.0,
-            modified: false,
-            sel_anchor: None,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            last_edit: EditKind::Break,
-            find: None,
-            complete: None,
-            longest_cache: None,
-            edit_gen: 0,
-            diff: None,
-            diff_peek: None,
-            diff_head: None,
-            wrap: false,
-            extra: Vec::new(),
-            undo_locked: false,
-            folds: Vec::new(),
-            folds_gen: 0,
-            edited_at: None,
-        });
-        tab.title = title;
-        tab.title_pinned = true;
-        tab.preview_path = Some(path.clone());
-        let ps = PaneState {
-            tabs: vec![tab],
-            dirty: true,
-            ..Default::default()
-        };
-
-        // 새 윈도우 슬롯 — new_window 의 슬롯 스왑만 차용(spawn_session_pane 제외).
-        self.windows[self.active_window] = self.pty_layout.take();
-        self.windows.push(None);
-        self.active_window = self.windows.len() - 1;
-        self.win_tab_reveal(self.active_window);
-
-        // 마크다운 pane = 새 윈도우의 유일한 leaf → ws.layout=None → 풀스크린 fallback.
-        self.ws.lock().unwrap().panes.insert(new_id.clone(), ps);
-        self.pty_layout = Some(kasa_pty::PtyLayout::single(new_id.as_str()));
-        self.ws.lock().unwrap().active_pane = Some(new_id);
-        self.handoff_ime_to_active_surface();
-
-        let (cols, rows) = self.window_cells();
-        self.resize_backend(cols, rows); // PTY 없는 leaf 는 self.pty miss → no-op
-        self.publish_pty_layout();
-        self.window_labels_at = None; // 다음 paint 에 사이드바 라벨 재계산(파일명 폴백)
-        self.chrome_dirty = true;
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
+        self.queue_aux_file(path, true);
     }
     /// Walk the root + every expanded folder into the flat `file_tree_nodes`.
     pub(crate) fn rebuild_file_tree_nodes(&mut self) {
@@ -5732,6 +5650,7 @@ impl App {
     /// 덮어써** 영영 잃는다(복원할지 말지 못 정하고 그냥 껐을 때). autosave_session
     /// 과 같은 이유.
     pub(crate) fn save_session_state(&self) {
+        self.save_aux_windows_state();
         if self.restore_prompt.is_some() {
             return;
         }
@@ -5749,6 +5668,7 @@ impl App {
     pub(crate) fn autosave_session(&mut self) {
         self.session_saved_at = std::time::Instant::now();
         self.session_touched = false;
+        self.save_aux_windows_state();
         // 복원 창이 떠 있는 동안은 절대 저장하지 않는다 — 사용자가 "복원"을 고르기
         // 전의 화면은 빈 새 세션이라, 자동 저장이 복원 대상 자체를 덮어써 버린다
         // (되돌릴 수 없는 자해). 선택이 끝나면 그 클릭이 다시 touched 를 세운다.

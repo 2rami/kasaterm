@@ -396,6 +396,8 @@ impl MarkdownPane {
             f(self);
             return;
         }
+        let undo_before = self.snapshot();
+        let undo_len = self.undo_stack.len();
         let mut todo = self.carets();
         let mut done: Vec<Caret> = Vec::with_capacity(todo.len());
         let mut first = true;
@@ -407,6 +409,15 @@ impl MarkdownPane {
             self.undo_locked = !first;
             f(self);
             self.undo_locked = false;
+            if first && self.undo_stack.len() > undo_len {
+                // The first edit runs at the bottom-most caret, but undo must
+                // restore the complete pre-edit caret set and its true primary.
+                // Replace only the snapshot just pushed; coalesced later keys
+                // intentionally keep the typing run's original checkpoint.
+                if let Some(snapshot) = self.undo_stack.last_mut() {
+                    *snapshot = undo_before.clone();
+                }
+            }
             first = false;
             if !Arc::ptr_eq(&before, &self.edit_lines) {
                 let r = Remap::between(&before, &self.edit_lines);
@@ -545,7 +556,14 @@ impl MarkdownPane {
     }
     /// O(1) now that the buffer is shared — this used to deep-copy the file.
     fn snapshot(&self) -> EditSnapshot {
-        EditSnapshot { lines: Arc::clone(&self.edit_lines), cur: (self.cur_line, self.cur_col) }
+        let mut carets = Vec::with_capacity(self.extra.len() + 1);
+        carets.push(Caret {
+            line: self.cur_line,
+            col: self.cur_col,
+            anchor: self.sel_anchor,
+        });
+        carets.extend_from_slice(&self.extra);
+        EditSnapshot { lines: Arc::clone(&self.edit_lines), carets }
     }
     /// Push the pre-edit state onto the undo stack. Consecutive same-kind
     /// edits (a typing run, a backspace run) coalesce into the run's first
@@ -582,9 +600,19 @@ impl MarkdownPane {
         if self.edit_lines.is_empty() {
             self.lines_mut().push(String::new());
         }
-        self.cur_line = snap.cur.0.min(self.edit_lines.len() - 1);
-        self.cur_col = snap.cur.1.min(self.edit_lines[self.cur_line].chars().count());
-        self.sel_anchor = None;
+        let clamp = |(line, col): (usize, usize)| {
+            let line = line.min(self.edit_lines.len() - 1);
+            (line, col.min(self.edit_lines[line].chars().count()))
+        };
+        let carets: Vec<Caret> = snap
+            .carets
+            .into_iter()
+            .map(|caret| {
+                let (line, col) = clamp((caret.line, caret.col));
+                Caret { line, col, anchor: caret.anchor.map(clamp) }
+            })
+            .collect();
+        self.set_carets(carets);
         self.last_edit = EditKind::Break;
         self.touch();
     }
@@ -605,6 +633,11 @@ impl MarkdownPane {
             self.push_undo(EditKind::Other);
             self.delete_selection();
         } else {
+            // A click drag starts with anchor == caret. Release normally drops
+            // that empty anchor, but restore or a missed release can leave it
+            // behind. Typing must never turn the newly inserted text into a
+            // selection that later seeds Find with the wrong query.
+            self.sel_anchor = None;
             self.push_undo(EditKind::Typing);
         }
         let line = self.cur_line.min(self.edit_lines.len() - 1);
@@ -641,11 +674,23 @@ impl MarkdownPane {
     /// text. Without one, Shift+Tab outdents the caret's line; Tab indents the
     /// whole line when it's a list item — that's how a bullet nests — and
     /// otherwise inserts a step at the caret.
-    pub(crate) fn indent(&mut self, outdent: bool) {
+    pub(crate) fn indent(&mut self, outdent: bool) -> bool {
         if self.edit_lines.is_empty() {
             self.lines_mut().push(String::new());
         }
         if let Some((s, e)) = self.sel_range() {
+            let will_change = (s.0..=e.0).any(|li| {
+                self.edit_lines.get(li).is_some_and(|line| {
+                    if outdent {
+                        outdent_width(line) > 0
+                    } else {
+                        !line.is_empty()
+                    }
+                })
+            });
+            if !will_change {
+                return false;
+            }
             self.push_undo(EditKind::Other);
             let deltas: Vec<i64> = (s.0..=e.0).map(|li| self.shift_line(li, outdent)).collect();
             let fix = |(l, c): (usize, usize)| -> (usize, usize) {
@@ -660,6 +705,9 @@ impl MarkdownPane {
             (self.cur_line, self.cur_col) = fix((self.cur_line, self.cur_col));
         } else {
             let line = self.cur_line.min(self.edit_lines.len() - 1);
+            if outdent && outdent_width(&self.edit_lines[line]) == 0 {
+                return false;
+            }
             self.push_undo(EditKind::Other);
             if outdent || line_prefix(&self.edit_lines[line]).list {
                 let d = self.shift_line(line, outdent);
@@ -674,6 +722,7 @@ impl MarkdownPane {
             self.cur_line = line;
         }
         self.touch();
+        true
     }
 
     /// Enter — split the line, carrying the indent and list/quote marker onto
@@ -884,10 +933,23 @@ impl MarkdownPane {
         self.edited_at = None;
     }
 
+    /// Text represented by this editor even before the lazy raw buffer has
+    /// been seeded. A fresh document can still be in View with zero edit
+    /// lines; treating that as an intentionally empty buffer would erase the
+    /// file when the header Save button is pressed.
+    pub(crate) fn text_for_save(&self) -> String {
+        if !self.raw_mode && self.edit_lines.is_empty() {
+            self.doc.raw.clone()
+        } else {
+            self.edit_lines.join("\n")
+        }
+    }
+
     /// Open the bar, or expand it to replace if it's already open. The query
     /// seeds from the selection — "find what I just highlighted" is the common
     /// case, and re-pressing Cmd+F on a new selection re-seeds it.
     pub(crate) fn find_open(&mut self, replacing: bool) {
+        let seed_range = self.sel_range().filter(|(s, e)| s.0 == e.0);
         let seed = self.selected_text().filter(|s| !s.contains('\n'));
         let f = self.find.get_or_insert_with(|| FindState {
             query: String::new(),
@@ -903,6 +965,21 @@ impl MarkdownPane {
         f.replacing |= replacing;
         f.focus_replace = replacing && !f.query.is_empty();
         self.find_refresh(true);
+        // A selection-seeded search starts on that selection. Seeking from the
+        // caret (the selection's far edge) used to jump immediately to the
+        // next occurrence, making Cmd+F appear to lose what was highlighted.
+        if let Some((start, end)) = seed_range {
+            let idx = self
+                .find
+                .as_ref()
+                .and_then(|f| f.hits.iter().position(|&(l, c0, c1)| (l, c0) == start && c1 == end.1));
+            if let Some(idx) = idx {
+                if let Some(f) = self.find.as_mut() {
+                    f.idx = idx;
+                }
+                self.find_reveal();
+            }
+        }
     }
 
     /// Close the bar and hand typing back to the buffer.
@@ -1055,6 +1132,7 @@ impl MarkdownPane {
         shift: bool,
         alt: bool,
         page_lines: usize,
+        visual_rows: Option<&Rows>,
     ) {
         use winit::keyboard::{Key, NamedKey};
         if self.edit_lines.is_empty() {
@@ -1148,10 +1226,9 @@ impl MarkdownPane {
                 edited = true;
             }
             Key::Named(NamedKey::Tab) => {
-                self.indent(shift);
+                edited = self.indent(shift);
                 line = self.cur_line;
                 col = self.cur_col;
-                edited = true;
             }
             Key::Named(NamedKey::ArrowLeft) => {
                 if !shift && sel.is_some() {
@@ -1193,33 +1270,35 @@ impl MarkdownPane {
             // Opt+↑↓ = 줄 이동, Shift+Opt+↑↓ = 줄 복제. 이 두 팔이 없어 `alt` 가
             // 버려지고 "커서만 한 줄 이동" 이 되던 자리다.
             Key::Named(NamedKey::ArrowUp) if is_line_cmd => {
-                if shift {
-                    self.duplicate_lines(true);
+                edited = if shift {
+                    self.duplicate_lines(true)
                 } else {
-                    self.move_lines(true);
-                }
+                    self.move_lines(true)
+                };
                 line = self.cur_line;
                 col = self.cur_col;
-                edited = true;
             }
             Key::Named(NamedKey::ArrowDown) if is_line_cmd => {
-                if shift {
-                    self.duplicate_lines(false);
+                edited = if shift {
+                    self.duplicate_lines(false)
                 } else {
-                    self.move_lines(false);
-                }
+                    self.move_lines(false)
+                };
                 line = self.cur_line;
                 col = self.cur_col;
-                edited = true;
             }
             Key::Named(NamedKey::ArrowUp) => {
-                if line > 0 {
+                if let Some(rows) = visual_rows {
+                    (line, col) = visual_row_move(&self.edit_lines, rows, (line, col), -1);
+                } else if line > 0 {
                     line -= 1;
                     col = col.min(self.edit_lines[line].chars().count());
                 }
             }
             Key::Named(NamedKey::ArrowDown) => {
-                if line + 1 < self.edit_lines.len() {
+                if let Some(rows) = visual_rows {
+                    (line, col) = visual_row_move(&self.edit_lines, rows, (line, col), 1);
+                } else if line + 1 < self.edit_lines.len() {
                     line += 1;
                     col = col.min(self.edit_lines[line].chars().count());
                 }
@@ -1231,12 +1310,30 @@ impl MarkdownPane {
                 col = self.edit_lines[line].chars().count();
             }
             Key::Named(NamedKey::PageUp) => {
-                line = line.saturating_sub(page_lines);
-                col = col.min(self.edit_lines[line].chars().count());
+                if let Some(rows) = visual_rows {
+                    (line, col) = visual_row_move(
+                        &self.edit_lines,
+                        rows,
+                        (line, col),
+                        -(page_lines as isize),
+                    );
+                } else {
+                    line = line.saturating_sub(page_lines);
+                    col = col.min(self.edit_lines[line].chars().count());
+                }
             }
             Key::Named(NamedKey::PageDown) => {
-                line = (line + page_lines).min(self.edit_lines.len() - 1);
-                col = col.min(self.edit_lines[line].chars().count());
+                if let Some(rows) = visual_rows {
+                    (line, col) = visual_row_move(
+                        &self.edit_lines,
+                        rows,
+                        (line, col),
+                        page_lines as isize,
+                    );
+                } else {
+                    line = (line + page_lines).min(self.edit_lines.len() - 1);
+                    col = col.min(self.edit_lines[line].chars().count());
+                }
             }
             Key::Named(NamedKey::Space) => {
                 if sel.is_some() {
@@ -1535,6 +1632,9 @@ impl MarkdownPane {
     /// Splice already-normalized (`\n`-only) clipboard text at the caret as one
     /// undo unit, replacing any selection.
     pub(crate) fn paste_at_caret(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
         if self.edit_lines.is_empty() {
             self.lines_mut().push(String::new());
         }
@@ -2134,6 +2234,55 @@ pub(crate) fn row_span(rows: &Rows, row: usize, lines: &[String]) -> (usize, usi
     (li, from, end)
 }
 
+/// Move a caret by rendered rows, preserving its screen-column as closely as
+/// the target row allows. Source-line math is wrong once wrapping adds rows or
+/// folding removes them: Down could otherwise enter a hidden block, while a
+/// long wrapped line was skipped in one jump.
+pub(crate) fn visual_row_move(
+    lines: &[String],
+    rows: &Rows,
+    at: (usize, usize),
+    delta: isize,
+) -> (usize, usize) {
+    if rows.is_empty() {
+        return (0, 0);
+    }
+    let row = row_of(rows, at.0, at.1);
+    let (line, from, _) = row_span(rows, row, lines);
+    let col = at.1.min(lines.get(line).map_or(0, |text| text.chars().count()));
+    let wanted = lines.get(line).map_or(0, |text| {
+        crate::gpu::cell_cols(
+            &text
+                .chars()
+                .skip(from)
+                .take(col.saturating_sub(from))
+                .collect::<String>(),
+        )
+    });
+    let target = (row as isize + delta).clamp(0, rows.len().saturating_sub(1) as isize) as usize;
+    let (target_line, target_from, target_to) = row_span(rows, target, lines);
+    let Some(text) = lines.get(target_line) else {
+        return (0, 0);
+    };
+    let continued = rows.get(target + 1).is_some_and(|&(next_line, _)| next_line == target_line);
+    let max_col = if continued {
+        target_to.saturating_sub(1).max(target_from)
+    } else {
+        target_to
+    };
+    let mut used = 0usize;
+    let mut target_col = target_from;
+    for ch in text.chars().skip(target_from).take(max_col.saturating_sub(target_from)) {
+        let width = 1 + usize::from(crate::gpu::is_wide_char(ch));
+        if used + width > wanted {
+            break;
+        }
+        used += width;
+        target_col += 1;
+    }
+    (target_line, target_col)
+}
+
 /// 구간 하나를 접힘 목록에 넣는다. 이미 그 머리가 접혀 있으면 **펴고** false.
 ///
 /// 겹치는 구간은 통째로 걷어낸다 — 바깥 블록을 접었는데 안쪽 접힘이 남아 있으면,
@@ -2454,6 +2603,37 @@ impl App {
         } else {
             0
         };
+        let needs_visual_rows = matches!(
+            event.logical_key,
+            Key::Named(
+                NamedKey::ArrowUp
+                    | NamedKey::ArrowDown
+                    | NamedKey::PageUp
+                    | NamedKey::PageDown
+            )
+        ) && !(alt
+            && matches!(
+                event.logical_key,
+                Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)
+            ));
+        let visual_rows = if needs_visual_rows {
+            let snap = {
+                let ws = self.ws.lock().ok();
+                ws.and_then(|ws| {
+                    let id = ws.active_pane.as_ref()?;
+                    let m = ws.panes.get(id)?.markdown()?;
+                    let &(_, _, width, _) = self.md_body_rects.get(id)?;
+                    Some((m.edit_lines.clone(), m.folds.clone(), m.wrap, width))
+                })
+            };
+            snap.and_then(|(lines, folds, wrap, width)| {
+                let gpu = self.gpu.as_mut()?;
+                let cols = gpu.raw_editor_wrap_cols(width, lines.len(), wrap);
+                Some(layout_rows(&lines, &folds, cols))
+            })
+        } else {
+            None
+        };
         let mut multi = true;
         {
             let mut ws = self.ws.lock().unwrap();
@@ -2493,7 +2673,9 @@ impl App {
                 // 것이지 캐럿이 움직이는 게 아니다.
                 multi = false;
             } else {
-                m.each_caret(|m| m.apply_edit_key(event, shift, alt, page_lines));
+                m.each_caret(|m| {
+                    m.apply_edit_key(event, shift, alt, page_lines, visual_rows.as_ref())
+                });
                 m.complete_after_key(event);
             }
             multi &= !m.extra.is_empty();
@@ -2817,18 +2999,14 @@ impl App {
             }
         }
     }
-    /// Cmd+S: write the active raw-editor buffer back to its file. This is the
-    /// only save path for code/text files (the .md Raw→Render toggle is the
-    /// other, .md-only one). Returns true when the active pane was a raw
-    /// editor, whether or not the write succeeded (the event is consumed).
+    /// Write the active editor buffer back to its file. Markdown preview and
+    /// saving are separate actions, so the header Save button can commit the
+    /// same buffer while either View or Edit is showing.
     pub(crate) fn save_active_editor(&mut self) -> bool {
         let outcome = {
             let mut ws = self.ws.lock().unwrap();
             let Some(pane) = ws.active_mut() else { return false };
-            let job = pane.markdown().and_then(|m| {
-                m.raw_mode
-                    .then(|| (m.edit_lines.join("\n"), m.doc.path.clone()))
-            });
+            let job = pane.markdown().map(|m| (m.text_for_save(), m.doc.path.clone()));
             let Some((text, path)) = job else { return false };
             match write_atomic(&path, &text) {
                 Ok(()) => {
@@ -2883,7 +3061,7 @@ impl App {
             let Some(pane) = ws.active_mut() else { return };
             pane.dirty = true;
             let Some(m) = pane.markdown_mut() else { return };
-            m.paste_at_caret(&text);
+            m.each_caret(|m| m.paste_at_caret(&text));
         }
         self.md_ensure_caret_visible();
     }
@@ -3115,6 +3293,9 @@ impl App {
                 m.diff = Some(diff);
                 p.dirty = true;
             }
+            // Detached editors are not part of this polling pass yet. Their
+            // buffers still edit/save normally; only the HEAD gutter is absent.
+            crate::DirtyDoc::Aux(_) => return,
         }
     }
 
@@ -3478,7 +3659,7 @@ impl App {
     /// 거터의 접기 삼각형을 눌렀으면 접거나 펴고 true. 본문을 눌렀으면 false —
     /// 호출자는 평소 캐럿 배치로 넘어간다.
     pub(crate) fn md_fold_click(&mut self, id: &str, px: f32, py: f32) -> bool {
-        let Some(&(bx, by, _, _)) = self.md_body_rects.get(id) else {
+        let Some(&(bx, by, bw, _)) = self.md_body_rects.get(id) else {
             return false;
         };
         let snap = {
@@ -3486,17 +3667,19 @@ impl App {
             ws.and_then(|w| {
                 w.panes.get(id).and_then(|p| p.markdown()).and_then(|m| {
                     m.raw_mode
-                        .then(|| (m.edit_lines.clone(), m.scroll, m.folds.clone()))
+                        .then(|| (m.edit_lines.clone(), m.scroll, m.folds.clone(), m.wrap))
                 })
             })
         };
-        let Some((lines, scroll, folds)) = snap else {
+        let Some((lines, scroll, folds, wrap)) = snap else {
             return false;
         };
         let Some(gpu) = self.gpu.as_mut() else {
             return false;
         };
-        let Some(li) = gpu.raw_editor_fold_hit(&lines, bx, by, scroll, px, py, &folds) else {
+        let Some(li) =
+            gpu.raw_editor_fold_hit(&lines, bx, by, bw, scroll, px, py, &folds, wrap)
+        else {
             return false;
         };
         let Ok(mut ws) = self.ws.lock() else { return false };
@@ -3649,30 +3832,29 @@ impl App {
     /// two modes scroll in different coordinate systems (block layout vs. fixed
     /// row height), and a line number is the only thing they both agree on.
     pub(crate) fn md_anchor_line(&mut self, id: &str) -> Option<usize> {
-        let (raw_mode, scroll, block_line_at) = {
+        let (scroll, lines, folds, wrap) = {
             let ws = self.ws.lock().unwrap();
             let m = ws.panes.get(id)?.markdown()?;
-            let scroll = m.scroll;
-            if m.raw_mode {
-                (true, scroll, None)
-            } else {
+            if !m.raw_mode {
                 // Last block whose top is at or above the viewport top.
                 let ys = self.md_block_ys.get(id)?;
-                let i = ys.partition_point(|&y| y <= scroll).saturating_sub(1);
-                (false, scroll, m.doc.block_lines.get(i).copied())
+                let i = ys.partition_point(|&y| y <= m.scroll).saturating_sub(1);
+                return m.doc.block_lines.get(i).copied();
             }
+            (m.scroll, m.edit_lines.clone(), m.folds.clone(), m.wrap)
         };
-        if !raw_mode {
-            return block_line_at;
-        }
-        let (pad, lh) = self.gpu.as_mut()?.raw_editor_metrics();
-        Some((((scroll - pad) / lh).floor().max(0.0)) as usize)
+        let &(_, _, width, _) = self.md_body_rects.get(id)?;
+        let gpu = self.gpu.as_mut()?;
+        let (pad, lh) = gpu.raw_editor_metrics();
+        let cols = gpu.raw_editor_wrap_cols(width, lines.len(), wrap);
+        let rows = layout_rows(&lines, &folds, cols);
+        let row = (((scroll - pad) / lh).floor().max(0.0)) as usize;
+        Some(row_at(&rows, row).0)
     }
 
     /// Set a markdown pane's view mode from the header "Rendered | Raw" toggle.
-    /// No-op if already in `want_raw`. Render → Raw seeds the edit buffer from
-    /// the doc source; Raw → Render writes the buffer back to disk and re-parses
-    /// so the laid-out view reflects the edits.
+    /// No-op if already in `want_raw`. Render → Raw restores the edit buffer
+    /// shown by the preview; Raw → Render re-parses that buffer without saving.
     ///
     /// Both directions carry the reading position across. Resetting to the top
     /// was the single most grating thing about the editor — you lost your place
@@ -4202,6 +4384,18 @@ mod tests {
     }
 
     #[test]
+    fn visual_row_motion_walks_wraps_and_skips_folded_lines() {
+        let lines = strs(&["가나다라", "hidden", "tail"]);
+        let wrapped = layout_rows(&lines, &[], 4);
+        assert_eq!(visual_row_move(&lines, &wrapped, (0, 1), 1), (0, 3));
+        assert_eq!(visual_row_move(&lines, &wrapped, (0, 3), 1), (1, 2));
+
+        let folded = layout_rows(&lines, &[(0, 1)], 0);
+        assert_eq!(visual_row_move(&lines, &folded, (0, 1), 1), (2, 2));
+        assert_eq!(visual_row_move(&lines, &folded, (2, 2), -1), (0, 1));
+    }
+
+    #[test]
     fn fold_mapping_skips_hidden_lines_both_ways() {
         // 줄 2 를 머리로 3·4·5 가 접혔다.
         let f = vec![(2usize, 5usize)];
@@ -4726,6 +4920,16 @@ mod tests {
     }
 
     #[test]
+    fn selection_seeded_find_stays_on_that_selection() {
+        let mut m = pane(&["foo then foo"]);
+        m.sel_anchor = Some((0, 0));
+        m.cur_col = 3;
+        m.find_open(false);
+        assert_eq!(m.find.as_ref().map(|f| f.idx), Some(0));
+        assert_eq!(m.sel_range(), Some(((0, 0), (0, 3))));
+    }
+
+    #[test]
     fn replace_all_keeps_later_columns_valid() {
         let mut m = pane(&["ab ab ab", "ab"]);
         m.find_open(false);
@@ -4840,22 +5044,30 @@ mod tests {
     fn undo_snapshot_roundtrip() {
         let mut m = pane(&["one"]);
         m.cur_col = 3;
+        m.sel_anchor = Some((0, 1));
+        m.extra = vec![Caret::at(0, 0)];
         m.push_undo(EditKind::Other);
         m.edit_lines = Arc::new(vec!["two".into(), "three".into()]);
         m.cur_line = 1;
         m.cur_col = 5;
+        m.sel_anchor = None;
+        m.extra = vec![Caret::at(1, 2)];
         let before = m.snapshot();
         let snap = m.undo_stack.pop().unwrap();
         m.redo_stack.push(before);
         m.apply_snapshot(snap);
         assert_eq!(*m.edit_lines, vec!["one".to_string()]);
         assert_eq!((m.cur_line, m.cur_col), (0, 3));
+        assert_eq!(m.sel_anchor, Some((0, 1)));
+        assert_eq!(m.extra, vec![Caret::at(0, 0)]);
         assert_eq!(m.last_edit, EditKind::Break);
         // Redo restores the edited state.
         let snap = m.redo_stack.pop().unwrap();
         m.apply_snapshot(snap);
         assert_eq!(*m.edit_lines, vec!["two".to_string(), "three".to_string()]);
         assert_eq!((m.cur_line, m.cur_col), (1, 5));
+        assert_eq!(m.sel_anchor, None);
+        assert_eq!(m.extra, vec![Caret::at(1, 2)]);
     }
 
     #[test]
@@ -4890,12 +5102,47 @@ mod tests {
     }
 
     #[test]
+    fn typing_clears_a_stale_empty_click_anchor() {
+        let mut m = pane(&["ab"]);
+        m.cur_col = 1;
+        m.sel_anchor = Some((0, 1));
+        m.insert_at_caret("X");
+        assert_eq!(m.edit_lines[0], "aXb");
+        assert_eq!(m.sel_range(), None);
+        assert_eq!(m.sel_anchor, None);
+    }
+
+    #[test]
     fn paste_at_caret_splices_multiline() {
         let mut m = pane(&["abcd"]);
         m.cur_col = 2; // caret between b and c
         m.paste_at_caret("X\nY");
         assert_eq!(*m.edit_lines, vec!["abX".to_string(), "Ycd".to_string()]);
         assert_eq!((m.cur_line, m.cur_col), (1, 1));
+    }
+
+    #[test]
+    fn paste_reaches_every_caret_and_undoes_as_one_edit() {
+        let mut m = pane(&["ab", "cd"]);
+        m.cur_col = 1;
+        m.extra = vec![Caret::at(1, 1)];
+        m.each_caret(|m| m.paste_at_caret("X"));
+        assert_eq!(*m.edit_lines, strs(&["aXb", "cXd"]));
+        assert_eq!(m.undo_stack.len(), 1);
+        assert!(m.do_undo());
+        assert_eq!(*m.edit_lines, strs(&["ab", "cd"]));
+        assert_eq!(m.carets(), vec![Caret::at(0, 1), Caret::at(1, 1)]);
+    }
+
+    #[test]
+    fn empty_paste_and_empty_outdent_do_not_create_unsaved_work() {
+        let mut m = pane(&["plain"]);
+        m.paste_at_caret("");
+        assert!(!m.modified);
+        assert!(m.undo_stack.is_empty());
+        assert!(!m.indent(true));
+        assert!(!m.modified);
+        assert!(m.undo_stack.is_empty());
     }
 
     #[test]
@@ -4996,6 +5243,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn preview_mode_keeps_unsaved_buffer_off_disk() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.md");
+        std::fs::write(&path, "saved").unwrap();
+
+        let mut m = pane(&["draft"]);
+        m.doc = Arc::new(build_markdown_doc(&path, "saved"));
+        m.is_md_doc = true;
+        m.modified = true;
+        assert!(switch_md_mode(&mut m, false, Some(0), None, None));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "saved");
+        assert_eq!(m.doc.raw, "draft");
+        assert!(m.modified);
+        assert!(switch_md_mode(&mut m, true, Some(0), Some((4.0, 20.0)), None));
+        assert_eq!(m.edit_lines.join("\n"), "draft");
+        assert!(m.modified);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fresh_view_saves_the_document_instead_of_an_empty_lazy_buffer() {
+        let mut m = pane(&[]);
+        m.raw_mode = false;
+        m.doc = Arc::new(build_markdown_doc(std::path::Path::new("/tmp/note.md"), "kept"));
+        assert_eq!(m.text_for_save(), "kept");
+
+        m.raw_mode = true;
+        assert_eq!(m.text_for_save(), "");
+    }
+
     /// 같은 폴더 우선, 없으면 한 단계 아래 폴더. 볼트가 주제 폴더로 갈라져 있어
     /// 인덱스의 `[[이름]]` 은 대개 아래 폴더를 가리킨다.
     #[test]
@@ -5027,8 +5307,8 @@ mod tests {
 /// 마크다운 뷰 모드 전환의 **본체**. 이 파일이 이미 겪은 함정 셋이 전부
 /// 여기 들어 있어, 사본을 뜨면 한쪽만 고쳐진 채 남는다:
 ///
-/// - **저장 실패인데 modified 를 내리면 안 된다.** 내리는 순간 dirty 표시도 닫기
-///   확인도 사라져 편집분이 조용히 증발한다.
+/// - **보기와 저장을 섞지 않는다.** 미리보기를 눌렀다고 파일이 쓰이면 저장
+///   버튼과 미저장 표시가 거짓말이 된다. 뷰는 메모리 버퍼만 다시 파싱한다.
 /// - **읽던 자리를 이월한다.** 맨 위로 되돌아가는 게 이 편집기에서 가장 거슬리는
 ///   동작이었다 — 오타 하나 고치러 갈 때마다 제자리를 잃었다.
 /// - **커서도 같이 옮긴다.** 스크롤만 옮기고 커서를 0 에 두면 타이핑하는 순간
@@ -5047,16 +5327,9 @@ pub(crate) fn switch_md_mode(
         return false;
     }
     if m.raw_mode {
-        // Raw → Render: 먼저 디스크에 쓰고 다시 파싱한다.
+        // Raw → Render: 편집 버퍼를 미리보기로만 다시 파싱한다. 저장은 별도다.
         let text = m.edit_lines.join("\n");
         let path = m.doc.path.clone();
-        let saved = match write_atomic(&path, &text) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("[editor] 저장 실패 {path}: {e}");
-                false
-            }
-        };
         let doc = build_markdown_doc(std::path::Path::new(&path), &text);
         let guess = anchor.zip(old_ys).and_then(|(line, ys)| {
             let i = doc.block_lines.partition_point(|&l| l <= line).saturating_sub(1);
@@ -5064,11 +5337,6 @@ pub(crate) fn switch_md_mode(
         });
         m.doc = Arc::new(doc);
         m.raw_mode = false;
-        if saved {
-            m.mark_saved();
-        } else {
-            m.touch();
-        }
         m.scroll = guess.unwrap_or(0.0).max(0.0);
     } else {
         // Render → Raw: 원문에서 편집 버퍼를 채운다.

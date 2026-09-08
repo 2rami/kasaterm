@@ -1225,6 +1225,10 @@ impl App {
         }
         // pane_window 미러에서 닫힌 탭 pid 를 걷는다(스폰 쪽과 대칭).
         self.publish_pty_layout();
+        // PTY-less document tabs are restored from the document-window store,
+        // not the layout JSON. Update it at the same close boundary so a file
+        // the user just closed is not reopened after an immediate relaunch.
+        self.save_aux_windows_state();
     }
     /// Drain `dead_panes` and remove each from the BSP tree + pty map.
     /// Called on the main thread from `about_to_wait` so the mutation

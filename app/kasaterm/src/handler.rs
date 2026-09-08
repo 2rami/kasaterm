@@ -75,6 +75,9 @@ impl ApplicationHandler<UserEvent> for App {
     /// committed-Hangul echo / backspace / space show up without lag.
     // event_loop 는 SocketOpenWeb(자식 창 생성) 한 곳만 쓴다.
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        if matches!(&event, UserEvent::Redraw) {
+            self.aux_request_redraws();
+        }
         // 어떤 이벤트가 루프를 깨우는지 — 종류별로 센다. 「UserEvent 쪽이
         // 원인」까지는 옆 계측이 말해 주지만, 그 다음 질문(무엇이)에는 답이 없다.
         if std::env::var_os("KASATERM_PUMP_DEBUG").is_some() {
@@ -1369,10 +1372,16 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketOpenPreview(path, target) => {
-                // imgopen/mdopen·SendUserFile 훅 → 요청 pane 의 보조 탭으로(크롬 탭).
-                // target = 요청자 pid($KASATERM_PANE_ID); open_file 이 그 pane 을 찾아
-                // 탭으로 붙인다(못 찾으면 active split 폴백).
-                self.open_file(std::path::PathBuf::from(path), target.clone(), true);
+                let path = std::path::PathBuf::from(path);
+                if crate::is_image_path(&path) {
+                    // Images keep the established background preview-tab path.
+                    self.open_file(path, target.clone(), true);
+                } else {
+                    // Agent-requested documents detach without taking keyboard
+                    // focus; explicit tab requests still call open_file(true).
+                    self.queue_aux_file(path, false);
+                    self.flush_aux_opens(event_loop);
+                }
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;
@@ -1437,14 +1446,12 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::OpenMarkdownWindow(path) => {
-                // macOS `.md` 더블클릭(odoc)/argv → 새 워크스페이스에 마크다운 풀.
-                // cold-launch(앱 꺼진 채)면 window·pty_layout 이 아직 없어 디퍼했다가
-                // start_pty 직후 flush, 켜진 채면 즉시 연다.
                 let p = std::path::PathBuf::from(path);
-                if self.window.is_none() || self.pty_layout.is_none() {
+                if self.window.is_none() {
                     self.pending_open_md.push(p);
                 } else {
                     self.open_markdown_window(p);
+                    self.flush_aux_opens(event_loop);
                 }
                 self.chrome_dirty = true;
                 self.render_frame();
@@ -1632,6 +1639,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.save_aux_windows_state();
         self.close_inline_web();
         // 자동 ssh 터널(명부의 ssh 항목)이 고아로 남지 않게.
         kasa_mcp::machines::stop_tunnels();
@@ -2646,6 +2654,7 @@ impl ApplicationHandler<UserEvent> for App {
         for p in std::mem::take(&mut self.pending_open_md) {
             self.open_markdown_window(p);
         }
+        self.flush_aux_opens(event_loop);
         self.schedule_autosend();
         self.schedule_autoturnscroll();
         self.schedule_autocapture();
@@ -2669,6 +2678,10 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.aux_owns_window(id) {
+            self.aux_window_event(id, event, event_loop);
+            return;
+        }
         // 실제 이벤트로 깨어났다 = 저장할 거리가 생겼을 수 있다. 우리가 건
         // 자동 저장 타이머(new_events 의 ResumeTimeReached)로는 세우지 않는다 —
         // 그러면 idle 상태에서도 5초마다 wake→touched→wake 가 영구히 돈다.
@@ -4647,7 +4660,7 @@ impl ApplicationHandler<UserEvent> for App {
                             if self.modifiers.alt_key() {
                                 self.open_file_split(path);
                             } else {
-                                self.open_file(path, None, true);
+                                self.open_file(path, None, false);
                             }
                             window.request_redraw();
                             return;
@@ -4769,7 +4782,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     if self.modifiers.alt_key() {
                                         self.open_file_split(path.clone());
                                     } else {
-                                        self.open_file_split(path.clone());
+                                        self.open_file(path.clone(), None, false);
                                     }
                                 } else {
                                     self.last_tree_click = Some((now, path.clone()));
@@ -5373,6 +5386,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 // 그랬다) — 컴파일 에러로 잡히게 남김없이 적는다.
                                 ActionKind::MdRender
                                 | ActionKind::MdRaw
+                                | ActionKind::MdSave
+                                | ActionKind::MdPopout
                                 | ActionKind::WebBack
                                 | ActionKind::WebForward
                                 | ActionKind::WebReload
@@ -5441,10 +5456,27 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.toggle_statusbar(&pid);
                             }
                             ActionKind::MdRender => {
+                                self.md_flush_preedit();
                                 self.set_md_mode(&pid, false);
                             }
                             ActionKind::MdRaw => {
+                                self.md_flush_preedit();
                                 self.set_md_mode(&pid, true);
+                            }
+                            ActionKind::MdSave => {
+                                self.md_flush_preedit();
+                                self.save_active_editor();
+                            }
+                            ActionKind::MdPopout => {
+                                self.md_flush_preedit();
+                                let tab = self
+                                    .ws
+                                    .lock()
+                                    .ok()
+                                    .and_then(|ws| ws.panes.get(&pid).map(|pane| pane.active_tab));
+                                if let Some(tab) = tab {
+                                    self.popout_pane_tab(&pid, tab, event_loop);
+                                }
                             }
                             ActionKind::Close => {
                                 self.confirm_or_close_pane(&pid);
@@ -5501,7 +5533,7 @@ impl ApplicationHandler<UserEvent> for App {
                                         self.statusbar_cd(&pid, &path);
                                     } else {
                                         self.statusbar.menu = None;
-                                        self.open_file_split(path);
+                                        self.open_file(path, None, false);
                                     }
                                     window.request_redraw();
                                     return;
@@ -6804,6 +6836,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.flush_aux_opens(event_loop);
         // 신원 조회가 값을 채웠으면 그 자리에서 다시 그린다. 조회는 백그라운드
         // 스레드라 스스로 화면을 못 깨우고, 그게 없으면 로그인을 마친 뒤에도
         // 옛 「로그인 필요」가 화면에 남는다(2026-09-07).
@@ -7256,6 +7289,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoftmenu();
         self.run_pending_automdselect();
         self.run_pending_automdscript(event_loop);
+        self.run_pending_autoauxdocs(event_loop);
         // 배너: 줄 선 요청을 창으로 만들고(여기가 `ActiveEventLoop` 를 쥔 첫 자리다),
         // 수명이 다한 것을 걷는다.
         // 알림은 전부 `notify_desktop` 을 지나 `banner_inbox` 에 줄 선다. 창을
@@ -7530,6 +7564,9 @@ impl App {
         };
         self.chrome_dirty = true;
         if btn == ConfirmBtn::Cancel {
+            if let PendingClose::AuxEditor(id) = dlg.action {
+                self.focus_aux_window(id);
+            }
             return;
         }
         if let CloseWhy::Dirty(docs) = &dlg.why {
@@ -7537,6 +7574,9 @@ impl App {
                 // 쓰기가 실패했으면 닫지 않는다 — 여기서 밀고 나가면 저장하려던
                 // 편집분을 그대로 버리는 셈이다(토스트가 이유를 띄운다).
                 if !self.save_dirty_docs(docs) {
+                    if let PendingClose::AuxEditor(id) = dlg.action {
+                        self.focus_aux_window(id);
+                    }
                     return;
                 }
             } else {
@@ -7551,11 +7591,13 @@ impl App {
                 PendingClose::Tab { pane, idx } => self.confirm_or_close_tab(&pane, idx),
                 PendingClose::Pane { pane } => self.confirm_or_close_pane(&pane),
                 PendingClose::Session(i) => self.confirm_or_close_session(i),
+                PendingClose::AuxEditor(id) => self.close_aux_by_id(id),
             }
             return;
         }
         match dlg.action {
             PendingClose::Window => event_loop.exit(),
+            PendingClose::AuxEditor(id) => self.close_aux_by_id(id),
             other => self.do_close(other),
         }
     }

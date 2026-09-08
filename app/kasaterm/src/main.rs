@@ -10,6 +10,7 @@
 //! cursor blink, OSC titles, multi-pane render + focus routing.
 
 mod autosuggest;
+mod auxwin;
 mod board_room;
 mod bridge;
 mod cells;
@@ -1338,6 +1339,9 @@ enum PendingClose {
     /// Close one sidebar session (window `idx`) — the app stays open. Distinct
     /// from `Window` (whole-app quit): only this session's panes are killed.
     Session(usize),
+    /// Close one detached document window. The WindowId stays stable while
+    /// Vec indices move when another auxiliary window closes.
+    AuxEditor(WindowId),
     /// Quit the app (window red-light / Cmd+W on the last pane).
     Window,
 }
@@ -1348,6 +1352,8 @@ enum PendingClose {
 enum DirtyDoc {
     /// Tab `tab` of pane `pane` in the main window.
     Tab { pane: String, tab: usize },
+    /// A document owned by a detached OS window.
+    Aux(WindowId),
 }
 
 /// Why a close is being held up.
@@ -1422,10 +1428,14 @@ enum ActionKind {
     /// the split buttons; collapsing the bar gives the cell grid its rows back.
     ToggleStatusbar,
     /// Markdown panes only: the "Rendered | Raw" header segmented toggle.
-    /// `MdRender` shows the laid-out doc; `MdRaw` opens the wgpu source editor
-    /// (and `MdRender` from Raw writes the buffer back to disk + re-parses).
+    /// `MdRender` shows the laid-out doc; `MdRaw` opens the wgpu source editor.
+    /// View changes never write the file; `MdSave` is the only save action.
     MdRender,
     MdRaw,
+    /// Markdown panes only: save without changing view mode.
+    MdSave,
+    /// Move this exact MarkdownPane into a detached OS window.
+    MdPopout,
     /// ghostty ⋮ 메뉴의 "닫기" — 이 pane을 닫는다.
     Close,
     /// ··· 메뉴의 "새 탭" — 이 pane(outer)에 in-pane 탭을 추가한다. 탭이 둘
@@ -1886,7 +1896,9 @@ struct FindState {
 #[derive(Clone)]
 struct EditSnapshot {
     lines: Arc<Vec<String>>,
-    cur: (usize, usize),
+    /// Primary and secondary carets, including each selection anchor. Keeping
+    /// only the primary cursor left stale selections behind after undo.
+    carets: Vec<crate::markdown::Caret>,
 }
 
 /// Coalescing class for `MarkdownPane::last_edit`. `Break` = no run in
@@ -4129,6 +4141,8 @@ pub(crate) enum ImeFocus {
     Pane(String),
     /// 메인창 raw 편집기(pane id).
     Editor(String),
+    /// Raw editor in a detached document window.
+    AuxEditor(WindowId),
     GitCommit,
     /// MCP 탭의 URL 서버 추가 칸(이름·주소 두 칸을 한 문맥으로 본다 — 조합 중에
     /// Tab 으로 칸을 옮기면 그 음절은 옮기기 전 칸에 확정되는 것이 맞다).
@@ -5673,6 +5687,9 @@ struct App {
     /// 쌓아두고 start_pty 직후 flush 한다(빈손이면 무비용). 앱 켜진 채 더블클릭은
     /// 디퍼 없이 바로 `open_markdown_window`.
     pending_open_md: Vec<std::path::PathBuf>,
+    /// Detached document windows and their launch/restore queue. Kept behind
+    /// one field so editor-window lifetime does not spread across App.
+    aux: auxwin::AuxWindows,
     /// 떠 있는 완료 알림 배너들(가장 오래된 것이 앞). macOS 알림 센터를 자체 서명
     /// 번들이 못 쓰기 때문에 우리가 그린다 — 사연은 `notify_banner` 모듈 doc.
     banners: Vec<notify_banner::Banner>,
@@ -6074,6 +6091,7 @@ impl App {
             cursor_thickness: socket::read_cursor_thickness(),
             mouse_cursor: socket::read_mouse_cursor(),
             pending_open_md: Vec::new(),
+            aux: auxwin::AuxWindows::load(),
             banners: Vec::new(),
             web_hosts: HashMap::new(),
             web_host_seq: 0,

@@ -1003,7 +1003,7 @@ impl App {
                 self.statusbar_cd(&pid, &path);
             } else {
                 self.statusbar.menu = None;
-                self.open_file_split(path);
+                self.open_file(path, None, false);
             }
         }
     }
@@ -3243,6 +3243,13 @@ impl App {
                     .unwrap_or_default();
             }
             PendingClose::Pane { pane } => vec![pane.clone()],
+            PendingClose::AuxEditor(id) => {
+                return self
+                    .aux_doc(*id)
+                    .filter(|editor| editor.modified)
+                    .map(|editor| vec![(DirtyDoc::Aux(*id), doc_name(&editor.doc.path))])
+                    .unwrap_or_default();
+            }
             PendingClose::Session(i) => {
                 let layout = if *i == self.active_window {
                     self.pty_layout.as_ref()
@@ -3268,7 +3275,7 @@ impl App {
             }
         };
         let ws = self.ws.lock().unwrap();
-        let out: Vec<(DirtyDoc, String)> = panes
+        let mut out: Vec<(DirtyDoc, String)> = panes
             .iter()
             .filter_map(|id| Some((id, ws.panes.get(id)?)))
             .flat_map(|(id, p)| {
@@ -3284,12 +3291,30 @@ impl App {
                 })
             })
             .collect();
+        drop(ws);
+        if matches!(action, PendingClose::Window) {
+            out.extend(self.aux.windows.iter().filter_map(|aux| {
+                aux.editor.modified.then(|| {
+                    (
+                        DirtyDoc::Aux(aux.window.id()),
+                        doc_name(&aux.editor.doc.path),
+                    )
+                })
+            }));
+        }
         out
     }
 
     /// Raise the unsaved-changes dialog if `action` would throw work away.
     /// Returns true when the caller must stop and wait for the answer.
     pub(crate) fn guard_dirty(&mut self, action: &PendingClose) -> bool {
+        if matches!(action, PendingClose::Window) {
+            if let Some(crate::ImeFocus::AuxEditor(id)) = self.ime_focus.clone() {
+                if let Some(index) = self.aux_index(id) {
+                    self.aux_flush_hangul(index);
+                }
+            }
+        }
         let docs = self.dirty_docs(action);
         if docs.is_empty() {
             return false;
@@ -3312,6 +3337,9 @@ impl App {
             if let Err(e) = crate::markdown::write_atomic(&path, &text) {
                 eprintln!("[editor] 저장 실패 {path}: {e}");
                 self.set_toast(format!("⚠ {name} 저장 실패: {e}"));
+                if let DirtyDoc::Aux(id) = doc {
+                    self.set_aux_status(*id, format!("저장 실패: {e}"));
+                }
                 ok = false;
                 continue;
             }
@@ -3371,6 +3399,18 @@ impl App {
                 }
             }
         }
+        for aux in &self.aux.windows {
+            if aux.missing_source {
+                continue;
+            }
+            let Some(at) = aux.editor.edited_at else { continue };
+            if now.duration_since(at) >= delay {
+                ready.push(DirtyDoc::Aux(aux.window.id()));
+            } else {
+                let due = at + delay;
+                next = Some(next.map_or(due, |current| current.min(due)));
+            }
+        }
         if !ready.is_empty() {
             self.save_dirty_docs_quiet(&ready);
             self.chrome_dirty = true;
@@ -3403,6 +3443,9 @@ impl App {
                     .and_then(|t| t.markdown())
                     .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone()))
             }
+            DirtyDoc::Aux(id) => self
+                .aux_doc(*id)
+                .map(|editor| (editor.text_for_save(), editor.doc.path.clone())),
         }
     }
 
@@ -3418,6 +3461,16 @@ impl App {
                     // 미저장 점이 사라지려면 이 pane 이 다시 그려져야 한다.
                     p.dirty = true;
                 }
+            }
+            DirtyDoc::Aux(id) => {
+                if let Some(editor) = self.aux_doc_mut(*id) {
+                    editor.mark_saved();
+                }
+                if let Some(index) = self.aux_index(*id) {
+                    self.aux.windows[index].missing_source = false;
+                }
+                self.set_aux_status(*id, "저장했어요".to_string());
+                self.save_aux_windows_state();
             }
         }
     }
@@ -3438,6 +3491,7 @@ impl App {
                     eprintln!("[window] close failed: {e:#}");
                 }
             }
+            PendingClose::AuxEditor(id) => self.close_aux_by_id(id),
             PendingClose::Window => {}
         }
     }
