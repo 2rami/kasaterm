@@ -7,6 +7,21 @@ use super::*;
 /// 가장자리 split 을 노릴 때 중앙이 걸린다.
 const DROP_CENTER_R: f32 = 0.42;
 
+fn contained_cell_scale(manual: f32, usable: (f32, f32), grid: (f32, f32), cell: (f32, f32)) -> f32 {
+    let manual = manual.max(0.1);
+    let fit = (usable.0 / (grid.0.max(1.0) * cell.0.max(1.0)))
+        .min(usable.1 / (grid.1.max(1.0) * cell.1.max(1.0)));
+    if !fit.is_finite() || fit >= manual {
+        manual
+    } else {
+        (fit * 0.999).max(0.001)
+    }
+}
+
+fn pixel_cell(offset: f32, cell: f32, scale: f32) -> u16 {
+    (offset.max(0.0) / (cell * scale).max(f32::EPSILON)).floor() as u16
+}
+
 /// pane 중심 기준 정규화 offset → 드롭 존. 순수 함수(단위테스트 대상).
 ///
 /// 4방향 판정은 raw 픽셀 거리가 아니라 정규화 offset 으로 한다 — 픽셀 거리를
@@ -105,6 +120,40 @@ impl App {
         set
     }
 
+    /// 렌더·포인터·IME가 같은 셀 간격을 써야 축소된 원본 창의 끝열을
+    /// 눌렀을 때도 그 열에 입력이 간다. 사용자가 고른 수동배율은 보존한다.
+    pub(crate) fn pane_display_scale(&self, ws: &Workspace, id: &str) -> f32 {
+        let manual = self.pane_font_scales.get(id).copied().unwrap_or(1.0).max(0.1);
+        let Some(pane) = ws.panes.get(id) else { return manual };
+        let active_pid = pane.tabs.get(pane.active_tab)
+            .and_then(|tab| tab.pid.as_deref()).unwrap_or(id);
+        let needs_fit = kasa_mcp::remote::is_view_pane(active_pid)
+            || self.pty.get(active_pid).is_some_and(|session| session.has_viewer_size_control());
+        if !needs_fit {
+            return manual;
+        }
+        let Some(term) = pane.term() else { return manual };
+        let (cols, rows) = self.window_cells();
+        let bounds = self.effective_leaf_rects(cols, rows).into_iter()
+            .find(|(pane_id, ..)| pane_id == id)
+            .map(|(_, _, _, w, h)| (w, h))
+            .or_else(|| ws.layout.as_ref().and_then(|layout| {
+                layout.leaves().into_iter().find_map(|leaf| match leaf {
+                    Layout::Pane { id: pane_id, w, h, .. } if format!("%{pane_id}") == id => Some((*w, *h)),
+                    _ => None,
+                })
+            }))
+            .unwrap_or((cols, rows));
+        let cw = self.cell.w.max(1.0);
+        let ch = self.cell.h.max(1.0);
+        let usable = (
+            (bounds.0 as f32 * cw - 2.0 * PANE_INNER_X).max(cw),
+            (bounds.1 as f32 * ch - pane.header_px() - self.statusbar_px(id) - 2.0 * PANE_INNER_Y).max(ch),
+        );
+        contained_cell_scale(manual, usable,
+            (term.cols.max(1) as f32, term.cells.len().max(1) as f32), (cw, ch))
+    }
+
     /// Convert logical-pixel position into a (pane_id, col, row) cell
     /// inside the pane the click landed in. Multi-pane aware: walks the
     /// parsed Layout to find the pane whose rect contains the click,
@@ -132,12 +181,7 @@ impl App {
                 if t.cols == 0 || t.rows == 0 {
                     return None;
                 }
-                let fs = self
-                    .pane_font_scales
-                    .get(z)
-                    .copied()
-                    .unwrap_or(1.0)
-                    .max(0.1);
+                let fs = self.pane_display_scale(&ws, z);
                 // 줌 pane 은 「떠 있는 카드」라 가장자리에서 zoom_inset_cells 만큼
                 // 들여 그려진다(render_frame_gpu·effective_leaf_rects 와 같은 함수).
                 // 그 원점을 안 빼면 클릭·드래그 선택이 inset 셀수(가로 ~2·세로 1)
@@ -147,11 +191,8 @@ impl App {
                 let (ix, iy) = self.zoom_inset_cells(gc, gr);
                 let box_left = sb + WINDOW_PADDING + ix as f32 * self.cell.w;
                 let box_top = TITLE_HEIGHT + iy as f32 * self.cell.h;
-                let lc =
-                    ((px - box_left - PANE_INNER_X).max(0.0) / (self.cell.w * fs)).floor() as u16;
-                let lr = ((py - box_top - pane.header_px() - PANE_INNER_Y).max(0.0)
-                    / (self.cell.h * fs))
-                    .floor() as u16;
+                let lc = pixel_cell(px - box_left - PANE_INNER_X, self.cell.w, fs);
+                let lr = pixel_cell(py - box_top - pane.header_px() - PANE_INNER_Y, self.cell.h, fs);
                 return Some((z.to_string(), lc.min(t.cols - 1), lr.min(t.rows - 1)));
             }
         }
@@ -179,22 +220,15 @@ impl App {
                         // font-bumped pane maps the cursor to the wrong row/col
                         // (selection + mouse-report drift). The box origin stays
                         // on the shared grid — only the in-pane step scales.
-                        let fs = self
-                            .pane_font_scales
-                            .get(&pid)
-                            .copied()
-                            .unwrap_or(1.0)
-                            .max(0.1);
+                        let fs = self.pane_display_scale(&ws, &pid);
                         let box_left = sb + WINDOW_PADDING + bx as f32 * self.cell.w;
                         let box_top = TITLE_HEIGHT + by as f32 * self.cell.h;
                         // 본문(셀)은 헤더 띠 아래에서 시작 — 헤더 있는 pane은 그만큼
                         // 빼야 마우스가 실제 그려진 행에 맞는다(render origin과 동일).
                         // grow(박스 hit-test)는 헤더 포함 박스라 header_h=0 그대로.
                         let hdr = ws.panes.get(&pid).map(|p| p.header_px()).unwrap_or(0.0);
-                        let lc = ((px - box_left - PANE_INNER_X).max(0.0) / (self.cell.w * fs))
-                            .floor() as u16;
-                        let lr = ((py - box_top - hdr - PANE_INNER_Y).max(0.0) / (self.cell.h * fs))
-                            .floor() as u16;
+                        let lc = pixel_cell(px - box_left - PANE_INNER_X, self.cell.w, fs);
+                        let lr = pixel_cell(py - box_top - hdr - PANE_INNER_Y, self.cell.h, fs);
                         let (mc, mr) =
                             ws.panes
                                 .get(&pid)
@@ -221,19 +255,12 @@ impl App {
         if t.cols == 0 || t.rows == 0 {
             return None;
         }
-        let fs = self
-            .pane_font_scales
-            .get(&id)
-            .copied()
-            .unwrap_or(1.0)
-            .max(0.1);
+        let fs = self.pane_display_scale(&ws, &id);
         // 단일 pane(layout 없음)도 이미지/마크다운/2탭이면 헤더 띠가 있다 —
         // 본문 셀은 그 아래에서 시작하므로 multi-pane 경로와 동일하게 보정.
         let hdr = pane.header_px();
-        let lc = ((px - sb - WINDOW_PADDING - PANE_INNER_X).max(0.0) / (self.cell.w * fs)).floor()
-            as u16;
-        let lr =
-            ((py - TITLE_HEIGHT - hdr - PANE_INNER_Y).max(0.0) / (self.cell.h * fs)).floor() as u16;
+        let lc = pixel_cell(px - sb - WINDOW_PADDING - PANE_INNER_X, self.cell.w, fs);
+        let lr = pixel_cell(py - TITLE_HEIGHT - hdr - PANE_INNER_Y, self.cell.h, fs);
         Some((id, lc.min(t.cols - 1), lr.min(t.rows - 1)))
     }
     /// Convenience wrapper that returns only the active pane's local
@@ -446,12 +473,12 @@ impl App {
         // from leaf_cells — no dependency on ws.panes being populated. A
         // freshly split pane has no PaneState until its first output, so the
         // old ws.panes walk left it at 80×24 spawn size (화면 겹침/하단 잘림).
-        // 거울(뷰어) pane 은 원본 세션의 격자를 못 바꾼다 — 로컬 창을 줄였다고
-        // 저쪽 기계 화면까지 쪼그라들면 안 된다(tmux 최소-클라이언트 문제). 대신
-        // 이쪽 칸 수를 적어 두고 원본 격자를 그 폭으로 다시 접는다.
+        // 거울은 목표만 전송한다. 서버의 size 확정 전에 로컬 파서를 바꾸면
+        // 구 호스트나 소유권을 거절한 호스트의 바이트가 엉뚱한 폭에 접힌다.
         let mut views: Vec<(String, (u16, u16))> = Vec::new();
         for (id, (pc, pr)) in &leaf_cells {
             if kasa_mcp::remote::is_view_pane(id) {
+                kasa_mcp::remote::set_viewport(id, *pc, *pr);
                 views.push((id.clone(), (*pc, *pr)));
                 continue;
             }
@@ -482,6 +509,7 @@ impl App {
             };
             for pid in pids {
                 if kasa_mcp::remote::is_view_pane(&pid) {
+                    kasa_mcp::remote::set_viewport(&pid, pc, pr);
                     views.push((pid, (pc, pr)));
                     continue;
                 }
@@ -2726,6 +2754,29 @@ fn leaf_is_orphan(has_pty: bool, has_grid: bool, grid_needs_pty: bool) -> bool {
     // 에 그 자리가 30분 넘게 `Puzzling… (16m 29s)` 를 그대로 띄운 채 앉아 있었고,
     // board 에도 안 잡혀 사용자가 치울 방법이 없었다.
     !has_grid || grid_needs_pty
+}
+
+#[cfg(test)]
+mod contain_scale_tests {
+    use super::{contained_cell_scale, pixel_cell};
+
+    #[test]
+    fn last_cell_hit_matches_contained_grid_with_manual_zoom() {
+        let cell = (8.0, 16.0);
+        let grid = (120.0, 40.0);
+        for usable in [(24.0, 16.0), (168.0, 96.0), (640.0, 384.0), (1200.0, 800.0)] {
+            for manual in [0.5, 1.0, 2.0] {
+                let scale = contained_cell_scale(manual, usable, grid, cell);
+                assert!(grid.0 * cell.0 * scale <= usable.0);
+                assert!(grid.1 * cell.1 * scale <= usable.1);
+                let px = (grid.0 - 0.5) * cell.0 * scale;
+                let py = (grid.1 - 0.5) * cell.1 * scale;
+                assert_eq!(pixel_cell(px, cell.0, scale), 119);
+                assert_eq!(pixel_cell(py, cell.1, scale), 39);
+                assert!(scale <= manual);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

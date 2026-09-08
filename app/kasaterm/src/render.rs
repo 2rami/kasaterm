@@ -278,7 +278,7 @@ impl App {
         // pane's zoomed glyphs, not the base grid.
         let pane_font_scale = self
             .target_pane()
-            .and_then(|id| self.pane_font_scales.get(&id).copied())
+            .map(|id| self.pane_display_scale(&self.ws.lock().unwrap(), &id))
             .unwrap_or(1.0);
         let snap = {
             let ws = self.ws.lock().unwrap();
@@ -1120,39 +1120,9 @@ impl App {
             // 하고, 루프 뒤 타이틀바 패스가 학생 이름을 올릴 때 다시 읽는다.
             let mut mirror_claude_panes: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
-            // 거울(뷰어) pane 은 원본 세션의 격자를 못 바꾼다(resize 를 안 보낸다).
-            // 그래서 로컬 pane 이 원본보다 작으면 오른쪽·아래가 잘려 나가므로, 그
-            // pane 만 글자 배율을 줄여 원본 격자를 통째로 담는다. 원본이 리사이즈되면
-            // 다음 프레임의 격자가 달라져 자동으로 다시 맞춰진다.
-            for (id, _x, _y, w_cells, h_cells) in &leaves {
-                if *w_cells == 0 || *h_cells == 0 || !kasa_mcp::remote::is_view_pane(id) {
-                    continue;
-                }
-                let Some(pane) = ws.panes.get(id) else {
-                    continue;
-                };
-                let Some((gc, gr)) = pane
-                    .term()
-                    .map(|t| (t.cols.max(1) as f32, t.cells.len().max(1) as f32))
-                else {
-                    continue;
-                };
-                let cw = self.cell.w.max(1.0);
-                let ch = self.cell.h.max(1.0);
-                let usable_w = (*w_cells as f32 * cw - 2.0 * PANE_INNER_X).max(cw);
-                let usable_h = (*h_cells as f32 * ch
-                    - pane.header_px()
-                    - self.statusbar_px(id.as_str())
-                    - 2.0 * PANE_INNER_Y)
-                    .max(ch);
-                // 아래 클립 계산이 floor 라, 딱 맞는 배율은 부동소수 오차 한 번에
-                // 한 칸을 잃는다 — 아주 살짝 접어 그 경계를 피한다.
-                let fit = ((usable_w / (gc * cw)).min(usable_h / (gr * ch)) * 0.999).min(1.0);
-                if !fit.is_finite() || fit >= 1.0 {
-                    continue;
-                }
-                let manual = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
-                pane_scales.insert(id.clone(), (manual * fit).max(0.05));
+            // 포인터와 IME도 같은 관문에서 최종 셀 배율을 얻는다.
+            for (id, ..) in &leaves {
+                pane_scales.insert(id.clone(), self.pane_display_scale(&ws, id));
             }
             for (id, x_cells, y_cells, w_cells, h_cells) in leaves {
                 let Some(pane) = ws.panes.get(&id) else {
@@ -1190,8 +1160,7 @@ impl App {
                     let fs = pane_scales
                         .get(id.as_str())
                         .copied()
-                        .unwrap_or(1.0)
-                        .max(0.1);
+                        .unwrap_or(1.0);
                     let cw = self.cell.w.max(1.0);
                     let ch = self.cell.h.max(1.0);
                     let scaled_cw = cw * fs;

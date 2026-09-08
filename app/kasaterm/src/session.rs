@@ -73,6 +73,7 @@ impl App {
         view_target: Option<(u16, u16)>,
     ) -> Option<&'a crate::MirrorSrc> {
         if !is_view {
+            tp.mirror_src = None;
             return None;
         }
         let nc = update.cols as usize;
@@ -106,6 +107,9 @@ impl App {
     /// 창 크기가 바뀌어 거울 pane 의 칸 수가 달라졌을 때 — 원본 격자를 새 폭으로 다시
     /// 접는다. 원본이 아직 없으면(첫 갱신 전) 다음 갱신이 접는다.
     pub(crate) fn reflow_view_pane(ws: &mut Workspace, pid: &str) {
+        if kasa_mcp::remote::view_supports_viewport(pid) {
+            return;
+        }
         let Some((tc, tr)) = ws.view_cells.get(pid).copied() else { return };
         let Some((pane, tab_idx)) = ws.find_tab_by_pty(pid) else { return };
         let Some(tp) = pane.tabs[tab_idx].term_mut() else { return };
@@ -153,7 +157,8 @@ impl App {
         // `pid_to_pane`. Falls back to creating an outer pane entry
         // when the first update from a freshly-spawned shell arrives.
         // 거울 pane 이면 이쪽 칸 수 — 원본 폭과 다를 때만 다시 접는다.
-        let is_view = kasa_mcp::remote::is_view_pane(&update.pane_id);
+        let is_view = kasa_mcp::remote::is_view_pane(&update.pane_id)
+            && !kasa_mcp::remote::view_supports_viewport(&update.pane_id);
         let view_target = if is_view {
             ws.view_cells.get(&update.pane_id).copied()
         } else {
