@@ -4595,6 +4595,83 @@ impl App {
                 }
                 true
             };
+        let click_outline =
+            |app: &mut App, index: usize, heading: usize, event_loop: &ActiveEventLoop| -> bool {
+                let Some((id, position)) = app.aux_probe_outline_center(index, heading) else {
+                    return false;
+                };
+                app.aux_window_event(
+                    id,
+                    WindowEvent::CursorMoved {
+                        device_id: DeviceId::dummy(),
+                        position,
+                    },
+                    event_loop,
+                );
+                for state in [ElementState::Pressed, ElementState::Released] {
+                    app.aux_window_event(
+                        id,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state,
+                            button: MouseButton::Left,
+                        },
+                        event_loop,
+                    );
+                }
+                true
+            };
+
+        if mode == "design" {
+            if self.aux_probe_ids().len() != 1 {
+                return;
+            }
+            match step {
+                0 => {
+                    capture_all(self, "design-view");
+                    if !click_header(self, 0, "outline", event_loop) {
+                        return;
+                    }
+                }
+                1 => {
+                    let heading = std::env::var("KASATERM_TEST_VIEWER_OUTLINE_INDEX")
+                        .ok()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    capture_all(self, "design-outline");
+                    if !click_outline(self, 0, heading, event_loop) {
+                        return;
+                    }
+                }
+                2 => {
+                    capture_all(self, "design-jump");
+                    if !click_header(self, 0, "outline", event_loop) {
+                        return;
+                    }
+                    let query = std::env::var("KASATERM_TEST_VIEWER_FIND")
+                        .unwrap_or_else(|_| "문서".to_string());
+                    if !self.aux_probe_open_find(0, &query) {
+                        return;
+                    }
+                }
+                3 => {
+                    capture_all(self, "design-find");
+                    if !self.aux_probe_resize(0, 320, 520) {
+                        return;
+                    }
+                }
+                4 => {
+                    capture_all(self, "design-narrow");
+                    eprintln!("[viewere2e] DESIGN {}", self.aux_probe_summary());
+                    STEP.store(5, Ordering::Relaxed);
+                    event_loop.exit();
+                    return;
+                }
+                _ => return,
+            }
+            STEP.store(step + 1, Ordering::Relaxed);
+            return;
+        }
 
         if mode == "restore" {
             if step == 0 {

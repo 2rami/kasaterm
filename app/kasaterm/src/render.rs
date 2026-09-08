@@ -13023,17 +13023,34 @@ impl App {
         caret_on: bool,
         cursor: (f32, f32),
     ) -> Vec<(FindBtn, (f32, f32, f32, f32))> {
+        Self::draw_find_bar_with_options(g, f, x, y, w, preedit, caret_on, cursor, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_find_bar_with_options(
+        g: &mut gpu::GpuRenderer,
+        f: &FindState,
+        x: f32,
+        y: f32,
+        w: f32,
+        preedit: &str,
+        caret_on: bool,
+        cursor: (f32, f32),
+        allow_replace: bool,
+    ) -> Vec<(FindBtn, (f32, f32, f32, f32))> {
         const PAD: f32 = 8.0;
         const ROW: f32 = 26.0;
         const BTN: f32 = 24.0;
-        const FIELD_W: f32 = 190.0;
         const COUNT_W: f32 = 58.0;
         const TOGGLE_W: f32 = 16.0;
         const FS: f32 = 12.0;
         let mut hits = Vec::new();
 
-        let bar_w = PAD + TOGGLE_W + 6.0 + FIELD_W + COUNT_W + 6.0 + BTN * 3.0 + PAD;
-        let rows = if f.replacing { 2.0 } else { 1.0 };
+        let toggle_slot = if allow_replace { TOGGLE_W + 6.0 } else { 0.0 };
+        let fixed_w = PAD * 2.0 + toggle_slot + COUNT_W + 6.0 + BTN * 3.0;
+        let field_w = ((w - 20.0).max(1.0) - fixed_w).clamp(72.0, 190.0);
+        let bar_w = fixed_w + field_w;
+        let rows = if allow_replace && f.replacing { 2.0 } else { 1.0 };
         let bar_h = PAD + ROW * rows + (rows - 1.0) * 4.0 + PAD;
         let x0 = (x + w - bar_w - 10.0).max(x + 4.0);
         let y0 = y + 6.0;
@@ -13066,39 +13083,41 @@ impl App {
         };
 
         // 바꾸기 행 펼침/접기.
-        let tg = (x0 + PAD, row1 + (ROW - TOGGLE_W) * 0.5, TOGGLE_W, TOGGLE_W);
-        let tg_hit = (tg.0 - 2.0, row1, TOGGLE_W + 4.0, ROW);
-        let tg_hov = hot(tg_hit);
-        if tg_hov {
-            hover_rect(
-                g,
-                tg_hit.0,
-                tg_hit.1,
-                tg_hit.2,
-                tg_hit.3,
-                theme::radius_sm(),
-            );
-        }
-        g.queue_icon(
-            if f.replacing {
-                "chevron-down"
-            } else {
-                "chevron-right"
-            },
-            tg.0,
-            tg.1,
-            TOGGLE_W,
+        if allow_replace {
+            let tg = (x0 + PAD, row1 + (ROW - TOGGLE_W) * 0.5, TOGGLE_W, TOGGLE_W);
+            let tg_hit = (tg.0 - 2.0, row1, TOGGLE_W + 4.0, ROW);
+            let tg_hov = hot(tg_hit);
             if tg_hov {
-                theme::text()
-            } else {
-                theme::text_dim()
-            },
-        );
-        hits.push((FindBtn::ToggleReplace, tg_hit));
+                hover_rect(
+                    g,
+                    tg_hit.0,
+                    tg_hit.1,
+                    tg_hit.2,
+                    tg_hit.3,
+                    theme::radius_sm(),
+                );
+            }
+            g.queue_icon(
+                if f.replacing {
+                    "chevron-down"
+                } else {
+                    "chevron-right"
+                },
+                tg.0,
+                tg.1,
+                TOGGLE_W,
+                if tg_hov {
+                    theme::text()
+                } else {
+                    theme::text_dim()
+                },
+            );
+            hits.push((FindBtn::ToggleReplace, tg_hit));
+        }
 
         // 입력칸 하나를 그린다. 넘치는 글자는 왼쪽으로 밀어 끝(캐럿 쪽)을
         // 보여 준다 — 앞머리만 남으면 지금 뭘 치고 있는지 안 보인다.
-        let field_x = x0 + PAD + TOGGLE_W + 6.0;
+        let field_x = x0 + PAD + toggle_slot;
         let field = |g: &mut gpu::GpuRenderer,
                      row_y: f32,
                      width: f32,
@@ -13191,7 +13210,7 @@ impl App {
         field(
             g,
             row1,
-            FIELD_W,
+            field_w,
             &f.query,
             "찾기",
             !f.focus_replace,
@@ -13214,7 +13233,7 @@ impl App {
             };
             let cw = g.measure_chrome_text(&count, FS, false);
             g.draw_text(
-                field_x + FIELD_W + COUNT_W - 8.0 - cw,
+                field_x + field_w + COUNT_W - 8.0 - cw,
                 text_baseline(row1),
                 &count,
                 gpu::DrawOpts {
@@ -13226,7 +13245,7 @@ impl App {
             );
         }
 
-        let btn_x = field_x + FIELD_W + COUNT_W + 6.0;
+        let btn_x = field_x + field_w + COUNT_W + 6.0;
         for (i, (icon, btn)) in [
             ("chevron-up", FindBtn::Prev),
             ("chevron-down", FindBtn::Next),
@@ -13255,10 +13274,10 @@ impl App {
             hits.push((btn, (bx, row1, BTN, ROW)));
         }
 
-        if f.replacing {
+        if allow_replace && f.replacing {
             let row2 = row1 + ROW + 4.0;
-            field(g, row2, FIELD_W, &f.replace, "바꾸기", f.focus_replace, "");
-            let mut lx = field_x + FIELD_W + 6.0;
+            field(g, row2, field_w, &f.replace, "바꾸기", f.focus_replace, "");
+            let mut lx = field_x + field_w + 6.0;
             for (label, btn) in [
                 ("바꾸기", FindBtn::ReplaceOne),
                 ("전부", FindBtn::ReplaceAll),

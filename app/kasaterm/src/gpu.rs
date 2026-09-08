@@ -234,6 +234,12 @@ pub struct GpuRenderer {
     /// a scroll offset in one mode to the other. Filled by `draw_markdown`;
     /// render.rs moves it out per pane id.
     pub md_block_ys: Vec<f32>,
+    md_find_query: Option<String>,
+    md_find_target: Option<(usize, usize)>,
+    md_find_block: usize,
+    md_find_seen: usize,
+    md_find_top: f32,
+    pub md_find_target_y: Option<f32>,
     /// Tree-sitter span cache for raw-editor buffers, content-addressed by a
     /// hash of (lang, lines) — no pane id needed, and a tiny LRU keeps a few
     /// split editors from thrashing each other's entries.
@@ -738,6 +744,12 @@ impl GpuRenderer {
             md_word_rects: Vec::new(),
             md_sel_screen: None,
             md_block_ys: Vec::new(),
+            md_find_query: None,
+            md_find_target: None,
+            md_find_block: usize::MAX,
+            md_find_seen: 0,
+            md_find_top: 0.0,
+            md_find_target_y: None,
             raw_hl: Vec::new(),
             raw_hl_pending: None,
             raw_hl_cost: std::time::Duration::ZERO,
@@ -1674,6 +1686,12 @@ impl GpuRenderer {
         self.rect(x, y - size * 0.1, w, size * 1.22, col);
     }
 
+    fn md_find_band(&mut self, x: f32, y: f32, w: f32, size: f32, active: bool) {
+        let mut col = crate::theme::accent();
+        col[3] = if active { 120 } else { 62 };
+        self.rect(x, y - size * 0.1, w.max(1.0), size * 1.22, col);
+    }
+
     fn md_runs(
         &mut self,
         spans: &[crate::MdSpan],
@@ -1692,6 +1710,20 @@ impl GpuRenderer {
         let lh = (self.md_shaper.line_height(size * self.scale).ceil() / self.scale) * 1.5;
         // Real space advance, not the 'M' cell width (that over-spaced words).
         let space_w = self.measure_run(" ", size, false, false, false, false);
+        let track_find = clip_top <= clip_bot;
+        let find_ranges = if track_find {
+            self.md_find_query.as_ref().map_or_else(Vec::new, |query| {
+                let text = spans.iter().map(|span| span.text.as_str()).collect::<String>();
+                crate::markdown::find_hits(std::slice::from_ref(&text), query)
+                    .into_iter()
+                    .map(|(_, start, end)| (start, end))
+                    .collect()
+            })
+        } else {
+            Vec::new()
+        };
+        let find_base = self.md_find_seen;
+        let mut text_col = 0usize;
         let mut pen_x = x_start;
         let mut pen_y = y_start;
         // 앞 낱말이 같은 줄의 인라인 코드였고, 그 칩이 사이 공백까지 덮었는가.
@@ -1702,6 +1734,8 @@ impl GpuRenderer {
             for word in span.text.split_inclusive(' ') {
                 let trailing_space = word.ends_with(' ');
                 let trimmed = word.trim_end_matches(' ');
+                let word_start = text_col;
+                let word_end = word_start + trimmed.chars().count();
                 if trimmed.is_empty() {
                     // 스팬 경계의 공백은 코드 런 *안쪽*이 아니다(`a` `b` 는 칩
                     // 두 개다) — 이음매를 끊어 별개의 칩이 하나로 붙지 않게 한다.
@@ -1724,6 +1758,16 @@ impl GpuRenderer {
                         pen_y += lh;
                         // 줄이 바뀌면 앞 칩은 다른 줄에 있다 — 이음매 없음.
                         code_joint = false;
+                    }
+                    for (occurrence, &(start, end)) in find_ranges.iter().enumerate() {
+                        if start >= word_end || end <= word_start {
+                            continue;
+                        }
+                        let active = self.md_find_target
+                            == Some((self.md_find_block, find_base + occurrence));
+                        if active && self.md_find_target_y.is_none() {
+                            self.md_find_target_y = Some((pen_y - self.md_find_top).max(0.0));
+                        }
                     }
                     if pen_y + lh > clip_top && pen_y < clip_bot {
                         // 선택은 셀 격자가 없어 "그려진 낱말" 이 유일한 기준이다 —
@@ -1784,6 +1828,39 @@ impl GpuRenderer {
                                 crate::theme::surface_active(),
                             );
                         }
+                        for (occurrence, &(start, end)) in find_ranges.iter().enumerate() {
+                            if start >= word_end || end <= word_start {
+                                continue;
+                            }
+                            let local_start = start.max(word_start) - word_start;
+                            let local_end = end.min(word_end) - word_start;
+                            let prefix: String = trimmed.chars().take(local_start).collect();
+                            let matched: String = trimmed
+                                .chars()
+                                .skip(local_start)
+                                .take(local_end - local_start)
+                                .collect();
+                            let bx = pen_x
+                                + self.measure_run(
+                                    &prefix,
+                                    size,
+                                    bold,
+                                    span.italic,
+                                    span.code,
+                                    span.code,
+                                );
+                            let bw = self.measure_run(
+                                &matched,
+                                size,
+                                bold,
+                                span.italic,
+                                span.code,
+                                span.code,
+                            );
+                            let active = self.md_find_target
+                                == Some((self.md_find_block, find_base + occurrence));
+                            self.md_find_band(bx, pen_y, bw, size, active);
+                        }
                         if span.code {
                             // Inline code: syntax-highlight the word token by
                             // token (same lexer as code blocks; language is
@@ -1840,7 +1917,11 @@ impl GpuRenderer {
                 if trailing_space {
                     pen_x += space_w;
                 }
+                text_col += word.chars().count();
             }
+        }
+        if track_find {
+            self.md_find_seen += find_ranges.len();
         }
         pen_y + lh
     }
@@ -1982,6 +2063,22 @@ impl GpuRenderer {
         // 좌표로 바꿔 둔다.
         sel_doc: Option<(f32, f32, f32, f32)>,
     ) -> f32 {
+        self.draw_markdown_with_find(blocks, doc_gen, x, y, w, h, scroll, sel_doc, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_markdown_with_find(
+        &mut self,
+        blocks: &[crate::MdBlock],
+        doc_gen: u64,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        scroll: f32,
+        sel_doc: Option<(f32, f32, f32, f32)>,
+        find: Option<(&str, usize, usize)>,
+    ) -> f32 {
         use crate::MdBlock;
         // Link / copy-button rects are rebuilt from scratch each frame so
         // they track the current scroll offset; main.rs hit-tests clicks.
@@ -1989,6 +2086,9 @@ impl GpuRenderer {
         self.md_copy_rects.clear();
         self.md_task_rects.clear();
         self.md_word_rects.clear();
+        self.md_find_query = find.map(|(query, _, _)| query.to_string());
+        self.md_find_target = find.map(|(_, block, ordinal)| (block, ordinal));
+        self.md_find_target_y = None;
         // 문서 좌표 = 화면 좌표 + scroll (본문 박스 오프셋은 낱말 사각형과 선택에
         // 똑같이 들어가므로 비교에서 상쇄된다 — 뺄 필요가 없다).
         self.md_sel_screen = sel_doc.map(|(ax, ay, bx, by)| (ax, ay - scroll, bx, by - scroll));
@@ -2026,6 +2126,7 @@ impl GpuRenderer {
         // 픽셀만 자른다.
         self.push_clip(pane_x, y, pane_w, h.max(0.0));
         let top0 = y - scroll;
+        self.md_find_top = top0;
         let mut pen_y = top0 + base * 1.1;
         // 지난 프레임에 잰 블록 높이. 스크롤은 레이아웃을 바꾸지 않으므로
         // (문서·폭·글자크기·dpi 가 같으면) 그대로 쓸 수 있고, 화면 밖 블록은
@@ -2044,6 +2145,8 @@ impl GpuRenderer {
             heights.resize(blocks.len(), f32::NAN);
         }
         for (bi, block) in blocks.iter().enumerate() {
+            self.md_find_block = bi;
+            self.md_find_seen = 0;
             // 이 블록이 문서 어디쯤에 놓였는지(스크롤 뺀 좌표) 적어 둔다. 레이아웃
             // 은 여기서만 계산되므로, 모드 토글이 쓸 위치는 실제 그린 값이어야
             // 한다 — 따로 추정하면 헤딩 간격·이미지 높이에서 어긋난다.
@@ -2056,7 +2159,13 @@ impl GpuRenderer {
             // 알림의 첫 조각은 건너뛰지 않는다 — 상자 배경을 이 조각이 통째로
             // 그리므로, 조각이 화면 위로 벗어난 순간 나머지 문단의 배경까지 사라진다.
             let draws_for_others = matches!(block, MdBlock::Callout { first: true, .. });
-            if !draws_for_others && known.is_finite() && (pen_y + known < clip_top || pen_y > clip_bot)
+            let find_target = self
+                .md_find_target
+                .is_some_and(|(target, _)| target == bi);
+            if !draws_for_others
+                && !find_target
+                && known.is_finite()
+                && (pen_y + known < clip_top || pen_y > clip_bot)
             {
                 pen_y += known;
                 continue;
@@ -2096,6 +2205,22 @@ impl GpuRenderer {
                     let pad_top = base * 1.8;
                     let inner_w = (w - pad * 2.0).max(base);
                     let lines: Vec<&str> = code.trim_end_matches('\n').split('\n').collect();
+                    let code_find_ranges = self.md_find_query.as_ref().map_or_else(
+                        Vec::new,
+                        |query| {
+                            crate::markdown::find_hits(std::slice::from_ref(code), query)
+                                .into_iter()
+                                .map(|(_, start, end)| (start, end))
+                                .collect()
+                        },
+                    );
+                    let find_base = self.md_find_seen;
+                    let mut line_offsets = Vec::with_capacity(lines.len());
+                    let mut offset = 0usize;
+                    for line in &lines {
+                        line_offsets.push(offset);
+                        offset += line.chars().count() + 1;
+                    }
                     let cell = self.mono_advance(' ', size);
                     // 논리 줄 하나를 상자 폭에 맞는 시각 줄들로 접는다: (줄 번호,
                     // 들여쓰기, 문자 범위). 접기 전에는 넘친 코드가 상자·읽기 열·
@@ -2162,6 +2287,18 @@ impl GpuRenderer {
                     // 때만 다시 돈다.
                     let mut hl: Option<(usize, Vec<(char, [u8; 4])>)> = None;
                     for (li, ox, from, to) in &plans {
+                        let slice_start = line_offsets[*li] + *from;
+                        let slice_end = line_offsets[*li] + *to;
+                        for (occurrence, &(start, end)) in code_find_ranges.iter().enumerate() {
+                            if start < slice_end && end > slice_start {
+                                let active = self.md_find_target
+                                    == Some((self.md_find_block, find_base + occurrence));
+                                if active && self.md_find_target_y.is_none() {
+                                    self.md_find_target_y =
+                                        Some((ly - self.md_find_top).max(0.0));
+                                }
+                            }
+                        }
                         if ly + lh > clip_top && ly < clip_bot {
                             if hl.as_ref().map(|(i, _)| i != li).unwrap_or(true) {
                                 let mut cells: Vec<(char, [u8; 4])> = Vec::new();
@@ -2174,6 +2311,33 @@ impl GpuRenderer {
                             }
                             let cells = &hl.as_ref().unwrap().1;
                             let mut tx = x + pad + ox;
+                            for (occurrence, &(start, end)) in
+                                code_find_ranges.iter().enumerate()
+                            {
+                                if start >= slice_end || end <= slice_start {
+                                    continue;
+                                }
+                                let local_start = start.max(slice_start) - line_offsets[*li];
+                                let local_end = end.min(slice_end) - line_offsets[*li];
+                                let bx = x
+                                    + pad
+                                    + ox
+                                    + lines[*li]
+                                        .chars()
+                                        .skip(*from)
+                                        .take(local_start.saturating_sub(*from))
+                                        .map(|ch| self.mono_advance(ch, size))
+                                        .sum::<f32>();
+                                let bw = lines[*li]
+                                    .chars()
+                                    .skip(local_start)
+                                    .take(local_end - local_start)
+                                    .map(|ch| self.mono_advance(ch, size))
+                                    .sum::<f32>();
+                                let active = self.md_find_target
+                                    == Some((self.md_find_block, find_base + occurrence));
+                                self.md_find_band(bx, ly, bw, size, active);
+                            }
                             let mut k = *from;
                             let end = (*to).min(cells.len());
                             while k < end {
@@ -2202,6 +2366,7 @@ impl GpuRenderer {
                         }
                         ly += lh;
                     }
+                    self.md_find_seen += code_find_ranges.len();
                     if visible {
                         // Copy button, top-right; language label to its left.
                         let btn = base * 1.5;
