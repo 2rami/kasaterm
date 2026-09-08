@@ -9,6 +9,7 @@ import {
   Sparkles,
   Terminal,
   Users,
+  PawPrint,
 } from 'lucide-react';
 import { useT } from './lang';
 import { useTokens } from './useTokens';
@@ -45,6 +46,7 @@ const CATS = [
   { key: 'machines', Icon: Server, ready: false },
   { key: 'theme', Icon: Images, ready: true },
   { key: 'students', Icon: Users, ready: true },
+  { key: 'pet', Icon: PawPrint, ready: false },
   { key: 'feedback', Icon: MessageSquare, ready: true },
 ] as const;
 
