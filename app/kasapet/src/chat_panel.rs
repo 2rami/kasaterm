@@ -9,7 +9,7 @@ use objc2_app_kit::*;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSRect, NSSize, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-pub enum Event { Send(String), Close, Retry }
+pub enum Event { Send(String), Close, Retry, Older }
 struct Ivars { input: Retained<NSTextField>, events: Rc<RefCell<Vec<Event>>> }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -30,6 +30,8 @@ define_class!(
         fn hide(&self, _sender: &AnyObject) { self.ivars().events.borrow_mut().push(Event::Close); }
         #[unsafe(method(retry:))]
         fn retry(&self, _sender: &AnyObject) { self.ivars().events.borrow_mut().push(Event::Retry); }
+        #[unsafe(method(older:))]
+        fn older(&self, _sender: &AnyObject) { self.ivars().events.borrow_mut().push(Event::Older); }
     }
 );
 
@@ -41,6 +43,7 @@ pub struct Panel {
     status: Retained<NSTextField>,
     send: Retained<NSButton>,
     retry: Retained<NSButton>,
+    older: Retained<NSButton>,
     _actions: Retained<Actions>,
     events: Rc<RefCell<Vec<Event>>>,
     frame: NSRect,
@@ -81,11 +84,13 @@ impl Panel {
         text.setBackgroundColor(&NSColor::textBackgroundColor());
         text.setVerticallyResizable(true);
         text.setHorizontallyResizable(false);
-        text.setMaxSize(NSSize::new(316.0, 1_000_000.0));
+        // The document grows independently from the fixed-height panel so long
+        // server replies remain scrollable rather than ending at a layout cap.
+        text.setMaxSize(NSSize::new(316.0, f64::MAX));
         text.setTextContainerInset(NSSize::new(8.0, 8.0));
         if let Some(container) = unsafe { text.textContainer() } {
             container.setWidthTracksTextView(true);
-            container.setContainerSize(NSSize::new(316.0, 1_000_000.0));
+            container.setContainerSize(NSSize::new(316.0, f64::MAX));
         }
         scroll.setDocumentView(Some(&text));
         content.addSubview(&scroll);
@@ -109,6 +114,10 @@ impl Panel {
         retry.setFrame(rect(190.0, 44.0, 96.0, 24.0));
         retry.setHidden(true);
         content.addSubview(&retry);
+        let older = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str("이전 대화"), Some(&actions), Some(sel!(older:)), mtm) };
+        older.setFrame(rect(190.0, 44.0, 96.0, 24.0));
+        older.setHidden(true);
+        content.addSubview(&older);
         let status = NSTextField::labelWithString(&NSString::from_str("질문과 답변이 여기에 남아요."), mtm);
         status.setFrame(rect(12.0, 47.0, 178.0, 18.0));
         status.setFont(Some(&NSFont::systemFontOfSize(11.0)));
@@ -116,7 +125,7 @@ impl Panel {
         content.addSubview(&status);
         unsafe { parent.addChildWindow_ordered(&panel, NSWindowOrderingMode::Above); }
         panel.orderOut(None);
-        Some(Self { panel, parent, input, text, status, send, retry, _actions: actions, events, frame, transcript: RefCell::new(String::new()) })
+        Some(Self { panel, parent, input, text, status, send, retry, older, _actions: actions, events, frame, transcript: RefCell::new(String::new()) })
     }
 
     pub fn show(&self) {
@@ -127,15 +136,17 @@ impl Panel {
     pub fn visible(&self) -> bool { self.panel.isVisible() }
     pub fn clear_input(&self) { self.input.setStringValue(&NSString::new()); }
     pub fn events(&self) -> Vec<Event> { self.events.borrow_mut().drain(..).collect() }
-    pub fn render(&self, transcript: &str, pending: bool, failed: bool, progress: &str) {
+    pub fn render(&self, transcript: &str, pending: bool, failed: bool, progress: &str, has_older: bool, showing_older: bool) {
         if *self.transcript.borrow() != transcript {
             *self.transcript.borrow_mut() = transcript.to_string();
             self.text.setString(&NSString::from_str(transcript));
             self.text.sizeToFit();
-            self.text.scrollRangeToVisible(NSRange::new(transcript.encode_utf16().count(), 0));
+            self.text.scrollRangeToVisible(NSRange::new(if showing_older { 0 } else { transcript.encode_utf16().count() }, 0));
         }
         self.send.setEnabled(!pending);
         self.retry.setHidden(!failed);
+        self.older.setHidden(!has_older || failed);
+        self.older.setEnabled(!pending);
         self.status.setStringValue(&NSString::from_str(if pending { progress } else if failed { "연결하지 못했어요." } else { "Enter로 보내기 · Esc로 닫기" }));
     }
     pub fn contains_cursor(&self) -> bool {
@@ -181,7 +192,7 @@ pub fn probe() {
     parent.setTitle(&NSString::from_str("펫 위치 · 대화창 격리 검증"));
     parent.orderFront(None);
     let mut panel = Panel::from_parent(parent.clone(), mtm).unwrap();
-    panel.render("나\n재시작하면 뭐 확인해야 돼?\n\n나쵸\n1. 펫을 우클릭해 ‘나쵸와 대화’를 열어 주세요.\n2. 한글 질문을 입력하고 답변이 오는지 확인해 주세요.\n3. 대화창을 닫았다 열어도 이전 대화가 남는지 봐 주세요.\n\n실제 반영 여부는 아직 확인이 필요해요.\n\n긴 답변도 스크롤해서 읽을 수 있어요.\n아래쪽 확인 항목입니다.\n마지막 항목입니다.", false, false, "");
+    panel.render("나\n재시작하면 뭐 확인해야 돼?\n\n나쵸\n1. 펫을 우클릭해 ‘나쵸와 대화’를 열어 주세요.\n2. 한글 질문을 입력하고 답변이 오는지 확인해 주세요.\n3. 대화창을 닫았다 열어도 이전 대화가 남는지 봐 주세요.\n\n실제 반영 여부는 아직 확인이 필요해요.\n\n긴 답변도 스크롤해서 읽을 수 있어요.\n아래쪽 확인 항목입니다.\n마지막 항목입니다.", false, false, "", true, false);
     panel.show();
     panel.sync();
     println!("CHAT_PROBE_WINDOW_ID:{}", panel.panel.windowNumber());

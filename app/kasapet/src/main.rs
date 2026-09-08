@@ -736,7 +736,7 @@ impl App {
 
     fn render_chat(&self) {
         #[cfg(target_os = "macos")]
-        if let Some(panel) = &self.chat_panel { panel.render(&self.chat.transcript(), self.chat.busy(), self.chat.failed, &self.chat.progress); }
+        if let Some(panel) = &self.chat_panel { panel.render(&self.chat.transcript(), self.chat.busy(), self.chat.failed, &self.chat.progress, self.chat.has_older(), self.chat.showing_older); }
     }
 
     fn poll_chat(&mut self) {
@@ -756,6 +756,7 @@ impl App {
                         }
                     }
                     chat_panel::Event::Retry => { if let Some(path) = self.journal_path() { self.chat.retry(path); } self.render_chat(); }
+                    chat_panel::Event::Older => { if let Some(path) = self.journal_path() { self.chat.older(path); } self.render_chat(); }
                 }
             }
             if self.chat.poll() { self.render_chat(); }
