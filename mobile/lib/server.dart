@@ -29,6 +29,7 @@ class Pane {
     this.closed = false,
     this.session,
     this.harness,
+    this.mirrorOf,
     this.contextPct,
     this.branch,
     this.modelLabel,
@@ -65,6 +66,9 @@ class Pane {
 
   /// claude·codex — 상태줄 앞의 작은 로고.
   final String? harness;
+
+  /// 이 자리가 다른 기계 pane 의 거울이면 그 기계 이름. 몸통은 저쪽에 있다.
+  final String? mirrorOf;
   final int? contextPct;
   final String? branch;
 
@@ -147,6 +151,7 @@ class Pane {
     closed: j['closed'] == true,
     session: j['session'] as String?,
     harness: j['harness'] as String?,
+    mirrorOf: j['mirror_of'] as String?,
     contextPct: (j['context_pct'] as num?)?.toInt(),
     branch: j['branch'] as String?,
     modelLabel: j['model_label'] as String?,

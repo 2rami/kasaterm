@@ -43,4 +43,9 @@ void main() {
     expect(p.statusParts, ['Fable 5.1 1M', 'main', '40%', 'xhigh']);
     expect(p.briefStatusParts, ['Fable 5.1 1M', 'xhigh']);
   });
+
+  test('거울 pane 은 어느 기계의 거울인지 안다', () {
+    expect(Pane.fromJson({'id': '%9', 'mirror_of': '나쵸네코'}).mirrorOf, '나쵸네코');
+    expect(Pane.fromJson({'id': '%9'}).mirrorOf, isNull);
+  });
 }

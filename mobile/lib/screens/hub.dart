@@ -1029,6 +1029,10 @@ class _PaneTile extends StatelessWidget {
                               const SizedBox(width: 6),
                               Flexible(child: SessionTag(pane.session!)),
                             ],
+                            if ((pane.mirrorOf ?? '').isNotEmpty) ...[
+                              const SizedBox(width: 6),
+                              MirrorTag(pane.mirrorOf!),
+                            ],
                           ],
                         ),
                         if (pane.subtitle.isNotEmpty)

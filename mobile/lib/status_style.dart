@@ -525,3 +525,39 @@ IconData machineIcon(String label) {
   if (l.contains('미니') || l.contains('mini')) return Icons.desktop_mac;
   return Icons.computer_outlined;
 }
+
+/// 「이 자리는 저 기계 pane 의 거울」 — 기계색 작은 칩. 이름 옆에 붙는다.
+class MirrorTag extends StatelessWidget {
+  const MirrorTag(this.machine, {super.key});
+
+  final String machine;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = machineColor(machine, theme.colorScheme);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(machineIcon(machine), size: 11, color: color),
+          const SizedBox(width: 3),
+          Text(
+            machine,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: color,
+              fontWeight: FontWeight.w600,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+  }
+}
