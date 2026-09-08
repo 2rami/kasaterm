@@ -55,6 +55,15 @@ class LifecycleTests(unittest.TestCase):
                 run.assert_not_called()
             self.assertEqual(list(Path(root).iterdir()), [])
 
+    def test_install_precreates_private_launchd_log(self):
+        with tempfile.TemporaryDirectory() as root:
+            args = argparse.Namespace(project=root, data_dir=Path(root) / "data", port=0, interval=5, apply=True, base_url="http://127.0.0.1:8765", llm=False, nacho_repo=None)
+            result = subprocess.CompletedProcess([], 0)
+            with patch.object(Path, "home", return_value=Path(root)), patch.object(service.sys, "platform", "darwin"), patch.object(service.subprocess, "run", return_value=result), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(service.install(args), 0)
+            self.assertEqual((args.data_dir / "service.log").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((Path(root) / "Library/LaunchAgents/com.kasaterm.request-journal.plist").stat().st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()

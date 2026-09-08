@@ -46,6 +46,10 @@ def install(args):
     if sys.platform != "darwin":
         raise RuntimeError("launchd requires macOS")
     Path(args.data_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
+    log_file = Path(args.data_dir) / "service.log"
+    fd = os.open(log_file, os.O_CREAT | os.O_WRONLY, 0o600)
+    os.close(fd)
+    log_file.chmod(0o600)
     target.parent.mkdir(parents=True, exist_ok=True)
     # Refuse to replace another running installation before its owner stops it.
     if target.exists():
