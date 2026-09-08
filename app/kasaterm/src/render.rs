@@ -5537,6 +5537,32 @@ impl App {
                             g.pulse_bar(bx, by, bw, bar_h, theme::accent());
                         }
                     }
+                    // 탭이 여럿인 pane 은 칸 바닥 왼쪽에 **점 줄** — 몇째 탭이 앞에
+                    // 나와 있는지. 전엔 뒷장이 우상단으로 계단지는 카드 덱이었는데,
+                    // 폰 배치도가 점으로 말하게 되면서 데스크톱도 같은 말로 맞췄다
+                    // (2026-09-08 지시 「점 표시 있으니까 겹침은 빼고 pc 도 모바일처럼」).
+                    // 명단은 그대로 마우스를 올리면 편다(`deck_tip`).
+                    let n_tabs = info.tab_peeks.len();
+                    if n_tabs > 1 && mw > 16.0 && mh > 16.0 {
+                        let (dot, gap) = (2.5, 1.5);
+                        let dy = if minimap_has_bar(mw, mh) {
+                            my + mh - MINI_BAR_H - MINI_BAR_PAD - dot - 2.0
+                        } else {
+                            my + mh - dot - 2.0
+                        };
+                        let shown = n_tabs.min(6);
+                        let mut dx = mx + 3.0;
+                        for t in info.tab_peeks.iter().take(shown) {
+                            let w = if t.active { dot * 1.8 } else { dot };
+                            let col = if t.active {
+                                theme::text_dim()
+                            } else {
+                                theme::with_alpha(theme::text_mute(), 0x70)
+                            };
+                            round_rect(g, dx, dy, w, dot, dot / 2.0, col);
+                            dx += w + gap;
+                        }
+                    }
                 }
                 g.pop_clip();
                 if let Some((tx, ty, peeks)) = deck_tip {
@@ -5569,32 +5595,6 @@ impl App {
                         // 명단의 값이고, 색이 어긋나면 두 그림이 딴 말을 한다.
                         if let Some(c) = who.and_then(theme::character_accent) {
                             circle_rect(g, bx + pad, ly + fs / 2.0 - dot / 2.0, dot, c);
-                    // 탭이 여럿인 pane 은 칸 바닥 왼쪽에 **점 줄** — 몇째 탭이 앞에
-                    // 나와 있는지. 전엔 뒷장이 우상단으로 계단지는 카드 덱이었는데,
-                    // 폰 배치도가 점으로 말하게 되면서 데스크톱도 같은 말로 맞췄다
-                    // (2026-09-08 지시 「점 표시 있으니까 겹침은 빼고 pc 도 모바일처럼」).
-                    // 명단은 그대로 마우스를 올리면 편다(`deck_tip`).
-                    let n_tabs = info.tab_peeks.len();
-                    if n_tabs > 1 && mw > 16.0 && mh > 16.0 {
-                        let (dot, gap) = (2.5, 1.5);
-                        let dy = if minimap_has_bar(mw, mh) {
-                            my + mh - MINI_BAR_H - MINI_BAR_PAD - dot - 2.0
-                        } else {
-                            my + mh - dot - 2.0
-                        };
-                        let shown = n_tabs.min(6);
-                        let mut dx = mx + 3.0;
-                        for t in info.tab_peeks.iter().take(shown) {
-                            let w = if t.active { dot * 1.8 } else { dot };
-                            let col = if t.active {
-                                theme::text_dim()
-                            } else {
-                                theme::with_alpha(theme::text_mute(), 0x70)
-                            };
-                            round_rect(g, dx, dy, w, dot, dot / 2.0, col);
-                            dx += w + gap;
-                        }
-                    }
                         }
                         let (name_col, bold) = if t.active {
                             (theme::text(), true)
