@@ -206,8 +206,9 @@ impl Catalog {
         }
         if let Some(unlinked) = unlinked_parameters(dir, &v) {
             for expression in &mut out.expressions {
-                expression.unlinked =
-                    !expression.parameters.is_empty() && expression.parameters.is_subset(&unlinked);
+                expression.unlinked = !expression.parameters.is_empty()
+                    && expression.parameters.is_subset(&unlinked)
+                    && verified_expression_file(&expression.path);
             }
         }
         out
@@ -262,9 +263,9 @@ impl Catalog {
     }
 }
 
-/// A negative native binding means the exported parameter has no keyforms.
-/// Physics can still consume it; custom schemas and pose/user-data extensions
-/// are left undecided rather than incorrectly disabling third-party effects.
+/// Official Core and this renderer both show no cheek effect for this exact
+/// export. Other models stay undecided: an absent normal keyform does not mean
+/// a blend-shape is unused. Extensions and physics may add their own binding.
 fn unlinked_parameters(dir: &Path, model: &Value) -> Option<BTreeSet<String>> {
     let standard_root = ["Version", "FileReferences", "Groups", "HitAreas", "Layout"];
     if model
@@ -297,44 +298,40 @@ fn unlinked_parameters(dir: &Path, model: &Value) -> Option<BTreeSet<String>> {
         }
     }
     let bytes = std::fs::read(dir.join(refs.get("Moc")?.as_str()?)).ok()?;
-    use mocari::moc3::{Endianness, Moc3Header, Moc3Ids, Moc3KeyformBindings, Moc3SectionOffsets};
-    let header = Moc3Header::parse(&bytes).ok()?;
-    let offsets = Moc3SectionOffsets::parse(&bytes).ok()?;
-    let ids = Moc3Ids::parse(&bytes).ok()?;
-    Moc3KeyformBindings::parse(&bytes).ok()?;
-    let start = offsets.section_offset(56)? as usize;
-    if start == 0 {
+    if !verified_model(&bytes) || physics_inputs.contains("ParamCheek") {
         return None;
     }
-    let end = start.checked_add(ids.parameters().len().checked_mul(4)?)?;
-    let next = offsets
-        .section_offsets()
-        .iter()
-        .map(|n| *n as usize)
-        .filter(|n| *n > start)
-        .min()
-        .unwrap_or(bytes.len());
-    if end > next || end > bytes.len() {
-        return None;
+    Some(BTreeSet::from(["ParamCheek".to_owned()]))
+}
+
+fn verified_model(bytes: &[u8]) -> bool {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+        == "103488e72a0f57dabebd4f1a0b92c040a08df6ef6ebc974332792f4a028719ad"
+}
+
+fn verified_expression_file(path: &Path) -> bool {
+    std::fs::read(path)
+        .ok()
+        .is_some_and(|bytes| verified_expression(&bytes))
+}
+
+fn verified_expression(bytes: &[u8]) -> bool {
+    use sha2::{Digest, Sha256};
+    if format!("{:x}", Sha256::digest(bytes))
+        != "f5eab93d46a4a0e34c0179773ab71efd899d66f74b57345c0e093ffcbb1e0a9a"
+    {
+        return false;
     }
-    let mut unlinked = BTreeSet::new();
-    for (i, id) in ids.parameters().iter().enumerate() {
-        let raw: [u8; 4] = bytes
-            .get(start + i * 4..start + (i + 1) * 4)?
-            .try_into()
-            .ok()?;
-        let binding = match header.endianness() {
-            Endianness::Little => i32::from_le_bytes(raw),
-            Endianness::Big => i32::from_be_bytes(raw),
-        };
-        if binding < -1 {
-            return None;
-        }
-        if binding == -1 && !physics_inputs.contains(id) {
-            unlinked.insert(id.clone());
-        }
-    }
-    Some(unlinked)
+    let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
+        return false;
+    };
+    v["Parameters"].as_array().is_some_and(|p| {
+        p.len() == 1
+            && p[0]["Id"].as_str() == Some("ParamCheek")
+            && p[0]["Blend"].as_str() == Some("Add")
+            && p[0]["Value"].as_f64() == Some(1.0)
+    })
 }
 
 fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -366,6 +363,21 @@ fn stem(file: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unknown_models_and_changed_expressions_stay_enabled() {
+        for version in 1..=6 {
+            let mut header = [0u8; 64];
+            header[..4].copy_from_slice(b"MOC3");
+            header[4] = version;
+            assert!(!verified_model(&header));
+        }
+        assert!(!verified_expression(
+            br#"{"Parameters":[{"Id":"ParamCheek","Value":0.5,"Blend":"Add"}]}"#
+        ));
+        assert!(!verified_expression(
+            br#"{"Parameters":[{"Id":"ParamCheek","Value":1,"Blend":"Add"}]}"#
+        ));
+    }
     #[test]
     fn preserves_names_and_missing_entries_and_never_guesses_unknown_group() {
         let dir = std::env::temp_dir().join(format!("pet-catalog-{}", std::process::id()));
