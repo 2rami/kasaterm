@@ -480,12 +480,14 @@ fn write_state_after_rename(
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
+        let before = StateStamp::from_metadata(file.metadata()?);
         std::fs::rename(&tmp, path)?;
         after_rename();
-        file.metadata().map(StateStamp::from_metadata)
+        file.metadata()
+            .map(|metadata| (before, StateStamp::from_metadata(metadata)))
     })();
-    let stamp = match result {
-        Ok(stamp) => stamp,
+    let (before, stamp) = match result {
+        Ok(stamps) => stamps,
         Err(error) => {
             let _ = std::fs::remove_file(&tmp);
             return Err(error);
@@ -495,7 +497,10 @@ fn write_state_after_rename(
     // deletion/replacement without rereading the whole document every tick.
     // The open handle identifies our bytes even if another writer replaces
     // the destination between rename and this check.
-    if StateStamp::read(path).is_ok_and(|current| current == stamp) {
+    if before.len == stamp.len
+        && before.modified == stamp.modified
+        && StateStamp::read(path).is_ok_and(|current| current == stamp)
+    {
         *saved = Some(SavedState {
             path: path.to_owned(),
             bytes,
@@ -1794,6 +1799,25 @@ mod tests {
             let replacement = dir.0.join("replacement.json");
             std::fs::write(&replacement, b"{\"windows\":{}}").unwrap();
             std::fs::rename(replacement, &path).unwrap();
+        })
+        .unwrap());
+        assert!(saved.is_none());
+        assert!(write_state(&path, &[], &mut saved).unwrap());
+        assert_eq!(std::fs::read(path).unwrap(), b"{\"windows\":[]}");
+    }
+
+    #[test]
+    fn in_place_overwrite_during_save_is_not_cached_as_our_snapshot() {
+        let dir = StateDir::new();
+        let path = dir.path();
+        let mut saved = None;
+        assert!(write_state_after_rename(&path, &[], &mut saved, || {
+            std::fs::write(&path, b"{\"windows\":{}}").unwrap();
+            // Deliberately change mtime so this regression is independent of
+            // the temporary filesystem's clock precision.
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+                .unwrap();
         })
         .unwrap());
         assert!(saved.is_none());
