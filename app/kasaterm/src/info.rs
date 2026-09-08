@@ -2101,11 +2101,11 @@ pub(crate) fn draw_info_actions(
     (y + 9.0, acct_rect)
 }
 
-pub(crate) const ROW_H: f32 = 22.0;
-pub(crate) const SEC_H: f32 = 26.0;
+const ROW_H: f32 = 22.0;
+const SEC_H: f32 = 26.0;
 /// 섹션 본문과 다음 섹션 머리 사이 숨. 없으면 목록 마지막 행과 다음 머리가
 /// 붙어 두 섹션이 한 덩어리로 읽힌다.
-pub(crate) const SEC_GAP: f32 = 8.0;
+const SEC_GAP: f32 = 8.0;
 const HEAD_H: f32 = 30.0;
 /// pane 그룹 머리.
 const GROUP_H: f32 = 24.0;
@@ -2662,14 +2662,14 @@ pub(crate) fn draw_info_col(
     }
 }
 
-pub(crate) fn hit(cursor: (f32, f32), r: &(f32, f32, f32, f32)) -> bool {
+fn hit(cursor: (f32, f32), r: &(f32, f32, f32, f32)) -> bool {
     cursor.0 >= r.0 && cursor.0 <= r.0 + r.2 && cursor.1 >= r.1 && cursor.1 <= r.1 + r.3
 }
 
 /// 접히는 섹션 머리 — 셰브런 + 이름 + (개수 배지 | 상태 배지). 반환값은 클릭
 /// 판정 rect.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn draw_section(
+fn draw_section(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     label: &str,
@@ -3217,103 +3217,6 @@ fn draw_tab_row(
             gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
         );
     }
-}
-
-/// 되살리기 대기 줄 — `%3 시로코 · tmuxify`. 살아 있는 프로세스가 아니니 흐리게
-/// 두되, 누를 수 있다는 것과 ⌘⇧T 가 **어느 줄**을 되살리는지는 분명해야 한다 —
-/// 스택이 여럿일 때 그 키가 무엇을 꺼낼지 모르면 누르기가 망설여진다.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn draw_closed_row(
-    g: &mut gpu::GpuRenderer,
-    cursor: (f32, f32),
-    c: &crate::ClosedPane,
-    newest: bool,
-    x: f32,
-    w: f32,
-    x0: f32,
-    right: f32,
-    y: f32,
-) -> Option<(f32, f32, f32, f32)> {
-    let row = (x, y, w, ROW_H);
-    let hov = hit(cursor, &row);
-    g.hover_pointer |= hov;
-    if hov {
-        g.rect(x, y, w, ROW_H, theme::surface_hover());
-    }
-    // 아직 도는 pane 이 기본이다 — 닫아도 죽지 않으니까. 프로세스가 사라진 것만
-    // 흐리게 두고 꼬리표를 달아, 되살리기가 재부착이 아니라 `--resume` 이라는 걸
-    // 누르기 전에 알 수 있게 한다.
-    let base = if c.alive { 0x99 } else { 0x66 };
-    let fg = theme::with_alpha(theme::text_mute(), if hov { base + 0x57 } else { base });
-    // 커서가 얹힌 줄에만 × — 상시 노출하면 되살리려다 잘못 끄기 쉽다(프로세스 행과
-    // 같은 규칙).
-    let mut right = right;
-    let mut kill = None;
-    if hov {
-        let br = (right - 16.0, y + 3.0, 16.0, 16.0);
-        let bhov = hit(cursor, &br);
-        g.hover_pointer |= bhov;
-        if bhov {
-            round_rect(
-                g,
-                br.0,
-                br.1,
-                br.2,
-                br.3,
-                theme::radius_sm(),
-                theme::with_alpha(theme::danger(), 0x33),
-            );
-        }
-        g.queue_icon(
-            "x",
-            br.0 + 3.0,
-            br.1 + 3.0,
-            10.0,
-            if bhov { theme::danger() } else { theme::text_mute() },
-        );
-        kill = Some(br);
-        right = br.0 - 6.0;
-    }
-    // ⌘⇧T 는 맨 위 한 줄에만 적는다 — 그 키가 되살리는 건 언제나 가장 최근 것이다.
-    let kbd = newest.then(|| "\u{2318}\u{21E7}T".to_string());
-    let kfs = 10.0_f32;
-    let kbd_w = kbd.as_deref().map_or(0.0, |k| g.measure_chrome_text(k, kfs, false));
-    let isz = 12.0_f32;
-    g.queue_icon("terminal", x0 + 2.0, y + (ROW_H - isz) / 2.0, isz, fg);
-    let mut label = c.pane_id.clone();
-    if !c.character.is_empty() {
-        label.push(' ');
-        label.push_str(&c.character);
-    }
-    if !c.folder.is_empty() {
-        label.push_str(" · ");
-        label.push_str(&c.folder);
-    }
-    if !c.alive {
-        label.push_str(" · resume");
-    }
-    let tx = x0 + isz + 8.0;
-    let label = fit_text(g, &label, (right - kbd_w - 8.0 - tx).max(0.0), 11.0, false);
-    g.draw_text(
-        tx,
-        y + (ROW_H - 11.0) / 2.0,
-        &label,
-        gpu::DrawOpts { font_size: 11.0, color: fg, bold: false, italic: false },
-    );
-    if let Some(k) = kbd {
-        g.draw_text(
-            right - kbd_w,
-            y + (ROW_H - kfs) / 2.0,
-            &k,
-            gpu::DrawOpts {
-                font_size: kfs,
-                color: theme::with_alpha(theme::text_mute(), 0x88),
-                bold: false,
-                italic: false,
-            },
-        );
-    }
-    kill
 }
 
 /// 프로세스 한 줄 — `├─ mcp playwright  --cdp-endpoint …    :9222  2% · 90 MB  pid`.

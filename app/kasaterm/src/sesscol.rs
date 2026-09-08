@@ -19,6 +19,10 @@ const ROW_H: f32 = 58.0;
 const HEAD_H: f32 = 30.0;
 /// 목록이 비었을 때 안내가 차지하는 높이.
 const EMPTY_H: f32 = 44.0;
+/// 묶음 머리(「되살리기」·「기록」) 한 줄.
+const GROUP_H: f32 = 24.0;
+/// 묶음과 묶음 사이 숨.
+const SEC_GAP: f32 = 8.0;
 /// 재수집 간격. 기록은 대화가 끝나야 바뀌므로 Info 탭(1.5초)보다 훨씬 성기다 —
 /// 저장소 전체를 stat 하는 비용이라 자주 돌 이유가 없다.
 const REFRESH_MS: u64 = 8000;
@@ -193,10 +197,14 @@ impl App {
                     // pane 을 띄우고 프롬프트가 뜰 즈음 명령을 주입하는 절차가
                     // handler.rs 한 곳에 있고, 그 절차를 여기서 베끼면 한쪽만
                     // 고쳐지는 쌍이 된다.
+                    // 새 방에 연다(2026-09-08 지시 「세션탭에서 누르면 별도창으로」).
+                    // 지금 방의 활성 pane 을 쪼개면 보던 화면이 반으로 접히고, 이어
+                    // 온 대화는 원래 다른 일감이라 자기 방이 맞다. 방은 저장·복원되므로
+                    // 껐다 켜도 그대로 돌아온다.
                     let _ = self.proxy.send_event(UserEvent::ResumeSession {
                         id: s.id.clone(),
                         cwd: (!s.cwd.is_empty()).then(|| s.cwd.clone()),
-                        newroom: false,
+                        newroom: true,
                         attach: false,
                         harness: s.harness.clone(),
                         reply: None,
@@ -347,16 +355,16 @@ pub(crate) fn draw_sessions_col(
     let vis_h = (bottom - body_top).max(0.0);
     sc.body_rect = (x, body_top, w, vis_h);
     let rows = sc.view.len();
-    // 되살릴 게 없으면 섹션 머리조차 안 그린다 — 늘 비어 있는 섹션이 자리를
+    // 되살릴 게 없으면 묶음 머리조차 안 그린다 — 늘 비어 있는 묶음이 자리를
     // 차지하면 알려주는 게 없다.
     let closed_h = if closed.is_empty() {
         0.0
     } else if sc.closed_collapsed {
-        info::SEC_H + info::SEC_GAP
+        GROUP_H + SEC_GAP
     } else {
-        info::SEC_H + closed.len() as f32 * info::ROW_H + info::SEC_GAP
+        GROUP_H + closed.len() as f32 * ROW_H + SEC_GAP
     };
-    sc.content_h = closed_h + if rows == 0 { EMPTY_H } else { rows as f32 * ROW_H };
+    sc.content_h = closed_h + GROUP_H + if rows == 0 { EMPTY_H } else { rows as f32 * ROW_H };
     // 스크롤은 그리기 **전에** clamp 한다 — 나중에 하면 목록이 줄어든 프레임에서
     // 한 번 빈 공간이 보였다가 다음 프레임에 튄다. × 를 연달아 누르는 동안엔 상한을
     // 안 줄인다 — 줄이면 스크롤이 끌려 올라와 다음 × 가 방금 누른 자리에 없다.
@@ -370,52 +378,46 @@ pub(crate) fn draw_sessions_col(
     g.push_clip(x, body_top, w, vis_h);
     let mut y = body_top - sc.scroll;
 
-    // ── 되살리기 ── 최근 닫은 것이 위. 줄을 누르면 그것만, ⌘⇧T 는 언제나 맨 위
+    // 시저는 픽셀만 자르지 호버는 안 자른다 — 잘려 안 보이는 자리의 커서는 없는
+    // 것으로 친다.
+    let ccur = match g.clip_hit((cursor.0, cursor.1, 1.0, 1.0)) {
+        Some(_) => cursor,
+        None => (f32::MIN, f32::MIN),
+    };
+    let gutter = Gutter { icon_x, text_x, face_sz, narrow };
+
+    // ── 되살리기 ── 최근 닫은 것이 위. 카드를 누르면 그것만, ⌘⇧T 는 언제나 맨 위
     // (=가장 최근) 것을 되살린다. Info 탭에서 옮겨 왔다(2026-09-08 지시 「인포탭에
     // 너무 많으니까 되살리기는 세션 탭으로」) — 잇고 싶은 옛 대화와 되돌리고 싶은
-    // 닫은 pane 은 같은 물음이라 한 탭에 둔다.
+    // 닫은 pane 은 같은 물음이라 한 탭에 둔다. 카드는 기록 줄과 같은 옷(얼굴·세 줄)
+    // 이되 강조색 띠를 둘러 갈린다(같은 날 지시 「둘이 시각적으로 구분되게」).
     if !closed.is_empty() {
-        // 시저는 픽셀만 자르지 호버는 안 자른다 — 잘려 안 보이는 자리의 커서는 없는
-        // 것으로 친다(Info 탭과 같은 규칙).
-        let ccur = match g.clip_hit((cursor.0, cursor.1, 1.0, 1.0)) {
-            Some(_) => cursor,
-            None => (f32::MIN, f32::MIN),
-        };
-        let r = info::draw_section(
-            g,
-            ccur,
-            "되살리기",
-            Some(closed.len()),
-            None,
-            sc.closed_collapsed,
-            x,
-            w,
-            y,
-            bottom,
-            body_top,
-        );
-        sc.closed_sec_rect = g.clip_hit(r);
-        y += info::SEC_H;
+        let hr = draw_group_head(g, ccur, "되살리기", closed.len(), true, Some(sc.closed_collapsed), x, x0, w, right, y);
+        sc.closed_sec_rect = g.clip_hit(hr);
+        y += GROUP_H;
         if !sc.closed_collapsed {
             for (i, c) in closed.iter().enumerate().rev() {
-                if g.clip_visible(x, y, w, info::ROW_H) {
+                if g.clip_visible(x, y, w, ROW_H) {
                     let newest = i + 1 == closed.len();
-                    if let Some(br) =
-                        info::draw_closed_row(g, ccur, c, newest, x, w, x0, right, y)
-                    {
+                    if let Some(br) = draw_closed_card(g, ccur, c, newest, &gutter, x, w, right, y) {
                         if let Some(br) = g.clip_hit(br) {
                             sc.closed_kill_rects.push((i, br));
                         }
                     }
                 }
-                if let Some(hr) = g.clip_hit((x, y, w, info::ROW_H)) {
+                if let Some(hr) = g.clip_hit((x, y, w, ROW_H)) {
                     sc.closed_rects.push((i, hr));
                 }
-                y += info::ROW_H;
+                y += ROW_H;
             }
         }
-        y += info::SEC_GAP;
+        y += SEC_GAP;
     }
+
+    // ── 기록 ── 머리는 늘 선다. 되살리기가 위에 있을 때 어디서부터가 지난 대화인지
+    // 눈이 갈라야 하고, 없을 때도 이 목록이 무엇인지 한 줄은 있어야 한다.
+    draw_group_head(g, ccur, "기록", rows, false, None, x, x0, w, right, y);
+    y += GROUP_H;
 
     if rows == 0 {
         g.draw_text(
@@ -557,6 +559,197 @@ pub(crate) fn draw_sessions_col(
         y = row_bottom;
     }
     g.pop_clip();
+}
+
+/// 행 왼쪽 거터의 치수 — 기록 줄과 되살리기 카드가 같은 값을 써야 얼굴이 한 줄로 선다.
+struct Gutter {
+    icon_x: f32,
+    text_x: f32,
+    face_sz: f32,
+    narrow: bool,
+}
+
+fn inside(cursor: (f32, f32), r: &(f32, f32, f32, f32)) -> bool {
+    cursor.0 >= r.0 && cursor.0 <= r.0 + r.2 && cursor.1 >= r.1 && cursor.1 <= r.1 + r.3
+}
+
+/// 묶음 머리 한 줄 — 왼쪽에 점·이름·개수, 접을 수 있으면 오른쪽에 화살표. `tinted` 는
+/// 되살리기 쪽(강조색 점과 옅은 띠), 아니면 흐린 점만 — 두 묶음이 같은 글씨로 나란히
+/// 서면 어디서 갈리는지 안 보인다.
+#[allow(clippy::too_many_arguments)]
+fn draw_group_head(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    label: &str,
+    count: usize,
+    tinted: bool,
+    collapsed: Option<bool>,
+    x: f32,
+    x0: f32,
+    w: f32,
+    right: f32,
+    y: f32,
+) -> (f32, f32, f32, f32) {
+    let r = (x, y, w, GROUP_H);
+    let hov = collapsed.is_some() && inside(cursor, &r);
+    g.hover_pointer |= hov;
+    if tinted {
+        g.rect(x, y, w, GROUP_H, theme::with_alpha(theme::accent(), 0x16));
+    }
+    if hov {
+        g.rect(x, y, w, GROUP_H, theme::surface_hover());
+    }
+    let dot = if tinted { theme::accent() } else { theme::text_dim() };
+    round_rect(g, x0, y + GROUP_H / 2.0 - 3.0, 6.0, 6.0, 3.0, dot);
+    let ink = if tinted { theme::text() } else { theme::text_mute() };
+    g.draw_text(
+        x0 + 12.0,
+        y + 5.0,
+        label,
+        gpu::DrawOpts { font_size: 11.0, color: ink, bold: true, italic: false },
+    );
+    let lw = g.measure_chrome_text(label, 11.0, true);
+    g.draw_text(
+        x0 + 12.0 + lw + 6.0,
+        y + 5.5,
+        &count.to_string(),
+        gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
+    );
+    if let Some(c) = collapsed {
+        g.queue_icon(
+            if c { "chevron-right" } else { "chevron-down" },
+            right - 14.0,
+            y + (GROUP_H - 12.0) / 2.0,
+            12.0,
+            theme::text_mute(),
+        );
+    }
+    r
+}
+
+/// 되살리기 카드 — 기록 줄과 같은 세 줄(누구·어디·상태)에 강조색 띠. 셋째 줄이 이
+/// 카드만의 것이다: 프로세스가 아직 돌면 초록 점과 「돌아가는 중」(2026-09-08 지시
+/// 「되살리기에 있는 세션이 돌아가고있으면 그거 표시도」), 꺼졌으면 「꺼짐」. 커서가
+/// 올라가면 오른쪽 위에 × — 되살리기를 포기하고 프로세스까지 끄는 자리. 반환은 그
+/// × 의 rect(호버 때만). 맨 위(최신) 카드에는 ⌘⇧T 표시.
+#[allow(clippy::too_many_arguments)]
+fn draw_closed_card(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    c: &crate::ClosedPane,
+    newest: bool,
+    gutter: &Gutter,
+    x: f32,
+    w: f32,
+    right: f32,
+    y: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let row = (x, y, w, ROW_H);
+    let hov = inside(cursor, &row);
+    g.hover_pointer |= hov;
+    g.rect(x, y, w, ROW_H, theme::with_alpha(theme::accent(), 0x0E));
+    if hov {
+        g.rect(x, y, w, ROW_H, theme::surface_hover());
+    }
+    // 왼쪽 띠 — 기록 줄엔 없는 것. 목록을 훑는 눈이 「이건 되돌리는 카드」를 색으로 안다.
+    g.rect(x, y + 4.0, 3.0, ROW_H - 8.0, theme::with_alpha(theme::accent(), 0xB0));
+
+    let mut kill = None;
+    let mut right = right;
+    if hov {
+        let br = (right - 16.0, y + 5.0, 16.0, 16.0);
+        let bhov = inside(cursor, &br);
+        g.hover_pointer |= bhov;
+        if bhov {
+            round_rect(g, br.0, br.1, br.2, br.3, theme::radius_sm(), theme::with_alpha(theme::danger(), 0x33));
+        }
+        g.queue_icon(
+            "x",
+            br.0 + 3.0,
+            br.1 + 3.0,
+            10.0,
+            if bhov { theme::danger() } else { theme::text_mute() },
+        );
+        kill = Some(br);
+        right = br.0 - 6.0;
+    }
+
+    // 거터 — 학생 얼굴, 없으면 터미널 글리프. 얼굴엔 기록 줄처럼 하네스 로고를 겹친다.
+    let harness = c.rec.get("was_agent").and_then(|v| v.as_str()).unwrap_or("");
+    let fy = y + (ROW_H - gutter.face_sz) / 2.0;
+    let face = !c.character.is_empty()
+        && sprites::draw_student_face(g, &c.character, gutter.icon_x, fy, gutter.face_sz);
+    if face {
+        if !harness.is_empty() {
+            let bs = if gutter.narrow { 11.0 } else { 13.0 };
+            let bx = gutter.icon_x + gutter.face_sz - bs;
+            let by = fy + gutter.face_sz - bs;
+            round_rect(g, bx, by, bs, bs, bs / 2.0, theme::panel_bg());
+            g.queue_icon(harness_icon(harness), bx + 1.5, by + 1.5, bs - 3.0, harness_color(harness));
+        }
+    } else {
+        g.queue_icon(
+            "terminal",
+            gutter.icon_x + 3.0,
+            y + (ROW_H - 16.0) / 2.0,
+            16.0,
+            theme::text_mute(),
+        );
+    }
+
+    let avail = (right - gutter.text_x).max(0.0);
+    let name = if c.character.is_empty() { c.pane_id.clone() } else { c.character.clone() };
+    let title = c.rec.get("title").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let label = if title.is_empty() { name } else { format!("{name} · {title}") };
+    let label = info::fit_text(g, &label, avail, 13.0, false);
+    g.draw_text(
+        gutter.text_x,
+        y + 8.0,
+        &label,
+        gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
+    );
+    let mut place = c.folder.clone();
+    if !place.is_empty() {
+        place.push_str(" · ");
+    }
+    place.push_str(&c.pane_id);
+    let place = info::fit_text(g, &place, avail, 11.0, false);
+    g.draw_text(
+        gutter.text_x,
+        y + 25.0,
+        &place,
+        gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
+    );
+    // 셋째 줄 — 상태. 도는 것은 되돌리면 그 자리 그대로고, 꺼진 것은 대화 파일로 다시 띄운다.
+    let kbd = newest.then_some("\u{2318}\u{21E7}T");
+    let kbd_w = kbd.map_or(0.0, |k| g.measure_chrome_text(k, 10.0, false) + 8.0);
+    let (dot, ink, text) = if c.alive {
+        (Some(theme::success()), theme::success(), "돌아가는 중 · 누르면 되돌린다")
+    } else {
+        (None, theme::text_mute(), "꺼짐 · 누르면 다시 띄운다")
+    };
+    let mut sx = gutter.text_x;
+    if let Some(col) = dot {
+        round_rect(g, sx, y + 44.5, 6.0, 6.0, 3.0, col);
+        sx += 10.0;
+    }
+    let status = info::fit_text(g, text, (right - kbd_w - sx).max(0.0), 10.0, false);
+    g.draw_text(
+        sx,
+        y + 41.0,
+        &status,
+        gpu::DrawOpts { font_size: 10.0, color: ink, bold: false, italic: false },
+    );
+    if let Some(k) = kbd {
+        let kw = g.measure_chrome_text(k, 10.0, false);
+        g.draw_text(
+            right - kw,
+            y + 41.0,
+            k,
+            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+        );
+    }
+    kill
 }
 
 #[cfg(test)]
