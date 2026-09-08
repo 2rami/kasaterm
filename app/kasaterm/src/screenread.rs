@@ -491,7 +491,7 @@ pub(crate) fn restyle_codex_status_line(
         .enumerate()
         .rev()
         .find_map(|(row_idx, row)| {
-            let (text, _) = row_text_cells(row);
+            let text = row_text_only(row);
             let parts: Vec<&str> = text
                 .trim()
                 .split(" · ")
@@ -2094,19 +2094,100 @@ pub(crate) fn find_agents_header_anchor(rows: &[Vec<GridCell>], logo_cols: usize
 pub(crate) fn row_text_cells(row: &[GridCell]) -> (String, Vec<usize>) {
     let mut text = String::new();
     let mut cols = Vec::new();
+    for (i, ch) in row_text_chars(row) {
+        text.push(ch);
+        cols.push(i);
+    }
+    (text, cols)
+}
+
+// 텍스트만 읽는 매 프레임 판독에서는 쓰지 않는 셀 위치 배열을 만들지 않는다.
+fn row_text_only(row: &[GridCell]) -> String {
+    row_text_chars(row).map(|(_, ch)| ch).collect()
+}
+
+fn row_text_chars(row: &[GridCell]) -> impl Iterator<Item = (usize, char)> + '_ {
     let mut spacer_pending = false;
-    for (i, cell) in row.iter().enumerate() {
+    row.iter().enumerate().filter_map(move |(i, cell)| {
         match cell.ch {
             '\0' => spacer_pending = false,
             ' ' if spacer_pending => spacer_pending = false,
             ch => {
-                text.push(ch);
-                cols.push(i);
                 spacer_pending = (ch as u32) >= 0x1100;
+                return Some((i, ch));
             }
         }
+        None
+    })
+}
+
+#[cfg(test)]
+mod text_extraction_equivalence_tests {
+    use super::*;
+
+    fn cells(chars: impl IntoIterator<Item = char>) -> Vec<GridCell> {
+        chars.into_iter().map(|ch| {
+            let mut cell = GridCell::blank();
+            cell.ch = ch;
+            cell
+        }).collect()
     }
-    (text, cols)
+
+    fn legacy_row(row: &[GridCell]) -> (String, Vec<usize>) {
+        let mut text = String::new();
+        let mut cols = Vec::new();
+        let mut spacer_pending = false;
+        for (i, cell) in row.iter().enumerate() {
+            match cell.ch {
+                '\0' => spacer_pending = false,
+                ' ' if spacer_pending => spacer_pending = false,
+                ch => {
+                    text.push(ch);
+                    cols.push(i);
+                    spacer_pending = (ch as u32) >= 0x1100;
+                }
+            }
+        }
+        (text, cols)
+    }
+
+    #[test]
+    fn text_only_and_cell_mapping_preserve_all_spacer_combinations() {
+        let alphabet = ['a', ' ', '\0', '한', '─', '\t', '\u{301}', '\u{2003}'];
+        for encoded in 0..alphabet.len().pow(4) {
+            let mut n = encoded;
+            let row = cells((0..4).map(|_| {
+                let ch = alphabet[n % alphabet.len()];
+                n /= alphabet.len();
+                ch
+            }));
+            let expected = legacy_row(&row);
+            assert_eq!(row_text_only(&row), expected.0);
+            assert_eq!(row_text_cells(&row), expected);
+        }
+        assert_eq!(row_text_only(&[]), "");
+    }
+
+    #[test]
+    fn single_pass_squash_preserves_unicode_whitespace_and_wrapped_rows() {
+        let alphabet = ['a', '한', ' ', '\0', '\t', '\n', '\u{2003}', '\u{a0}'];
+        for encoded in 0..alphabet.len().pow(4) {
+            let mut n = encoded;
+            let row = cells((0..4).map(|_| {
+                let ch = alphabet[n % alphabet.len()];
+                n /= alphabet.len();
+                ch
+            }));
+            for split in 0..=row.len() {
+                let rows = vec![row[..split].to_vec(), Vec::new(), row[split..].to_vec()];
+                let full: String = rows.iter().flatten().map(|cell| cell.ch).collect();
+                let expected = full.split(|ch: char| ch.is_whitespace() || ch == '\0')
+                    .filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ");
+                assert_eq!(squash_screen(&rows), expected);
+            }
+        }
+        assert_eq!(squash_screen(&[]), "");
+    }
 }
 
 pub(crate) fn picker_student_tag(row: &[GridCell]) -> Option<(usize, usize, &'static str)> {
@@ -2187,7 +2268,7 @@ pub(crate) fn find_image_blocks(rows: &[Vec<GridCell>]) -> Vec<ImageBlock> {
             r += 1;
             continue;
         }
-        let (mut text, _) = row_text_cells(&rows[r]);
+        let mut text = row_text_only(&rows[r]);
         let Some(at) = text.find(HEAD) else {
             r += 1;
             continue;
@@ -2200,7 +2281,7 @@ pub(crate) fn find_image_blocks(rows: &[Vec<GridCell>]) -> Vec<ImageBlock> {
             while text.ends_with(' ') {
                 text.pop();
             }
-            let (next, _) = row_text_cells(&rows[r + span]);
+            let next = row_text_only(&rows[r + span]);
             text.push_str(next.trim_start());
             span += 1;
         }
@@ -3645,11 +3726,21 @@ pub(crate) fn tint_welcome_box(
 /// 매칭하기 위한 정규화. 좁은 창에선 한 문구가 여러 셀 행으로 갈리고 사이에 행끝
 /// 패딩이 껴 직접 매칭이 깨진다(거노: 특정 창 크기에서만 사각형 잔상 재발).
 fn squash_screen(rows: &[Vec<GridCell>]) -> String {
-    let full: String = rows.iter().flat_map(|r| r.iter().map(|c| c.ch)).collect();
-    full.split(|c: char| c.is_whitespace() || c == '\0')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+    // 화면 원문과 단어 배열을 따로 쌓으면 학생 수만큼 프레임마다 할당이 늘어난다.
+    let mut text = String::new();
+    let mut gap = false;
+    for ch in rows.iter().flat_map(|row| row.iter().map(|cell| cell.ch)) {
+        if ch.is_whitespace() || ch == '\0' {
+            gap = !text.is_empty();
+        } else {
+            if gap {
+                text.push(' ');
+                gap = false;
+            }
+            text.push(ch);
+        }
+    }
+    text
 }
 
 /// 조각들이 이 순서로, 각 조각이 직전 조각 끝에서 `gap` 자 이내에 오는지.
@@ -4011,7 +4102,7 @@ pub(crate) fn find_connection_trouble(rows: &[Vec<GridCell>]) -> Option<&'static
         .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
     let start = (last + 1).saturating_sub(CONNECTION_TROUBLE_ROWS);
     for row in rows[start..=last].iter() {
-        let (text, _) = row_text_cells(row);
+        let text = row_text_only(row);
         if let Some(hit) = connection_trouble_in(&text) {
             return Some(hit);
         }
