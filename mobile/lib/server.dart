@@ -113,8 +113,9 @@ class Pane {
   bool get isShell => name.isEmpty;
   String get displayName => isShell ? '셸' : name;
   String get subtitle {
-    // 붙인 이름이 세션 이름 자리에 이미 떠 있으면 둘째 줄에 한 번 더 안 쓴다.
-    if (title.isNotEmpty && title != session) return title;
+    // 목록엔 /rename 으로 붙인 이름(session)만 — 에이전트가 제 대화를 요약한 제목은
+    // 안 보인다(2026-09-08 지시). 이름 없는 셸만 어느 폴더인지 한 마디.
+    if (!isShell) return '';
     final parts = cwd.split('/').where((s) => s.isNotEmpty).toList();
     return parts.isEmpty ? '' : parts.last;
   }

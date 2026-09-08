@@ -209,13 +209,13 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     }
     for (final s in sections) {
       final title = s.machine ?? _model.rootName ?? '이 기계';
+      final tint = machineColor(title, theme.colorScheme);
       children.add(
         _SectionHeader(
           title: title,
-          trailing: s.machine == null
-              ? null
-              : (s.online ? '${s.paneCount}명' : '안 닿음'),
-          muted: !s.online,
+          color: tint,
+          online: s.online,
+          trailing: s.machine == null || !s.online ? null : '${s.paneCount}명',
           onAdd: s.online ? () => _newRoom(s) : null,
         ),
       );
@@ -257,7 +257,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
             );
           }
         }
-        children.add(_RoomBox(children: inside));
+        children.add(_RoomBox(accent: tint, children: inside));
       }
     }
     return ListView(
@@ -338,17 +338,23 @@ class _ViewMenu extends StatelessWidget {
   );
 }
 
+/// 기계 머리글 — 기계색 띠에 그 기계 모양 아이콘. 안 닿는 기계는 빨간 「연결 안 됨」
+/// 칩을 달아, 밖에서 열었을 때 어느 기계가 빠졌는지 한눈에 갈린다.
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader({
     required this.title,
+    required this.color,
+    this.online = true,
     this.trailing,
-    this.muted = false,
     this.onAdd,
   });
 
   final String title;
+
+  /// 그 기계의 색 — 아래 방 상자의 왼쪽 줄과 같은 색.
+  final Color color;
+  final bool online;
   final String? trailing;
-  final bool muted;
 
   /// 「새 방」 — 그 기계에 빈 창 하나. 안 닿는 기계엔 안 단다.
   final VoidCallback? onAdd;
@@ -356,27 +362,50 @@ class _SectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final color = muted
-        ? theme.colorScheme.onSurfaceVariant
-        : theme.colorScheme.onSurface;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 18, 4, 6),
+    final scheme = theme.colorScheme;
+    final ink = online ? scheme.onSurface : scheme.onSurfaceVariant;
+    final tint = online ? color : scheme.outline;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(0, 14, 0, 8),
+      padding: const EdgeInsets.fromLTRB(10, 7, 8, 7),
+      decoration: BoxDecoration(
+        color: tint.withValues(alpha: online ? 0.13 : 0.08),
+        borderRadius: BorderRadius.circular(10),
+      ),
       child: Row(
         children: [
-          Icon(Icons.computer_outlined, size: 18, color: color),
+          Icon(machineIcon(title), size: 18, color: tint),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               title,
-              style: theme.textTheme.titleMedium?.copyWith(color: color),
+              style: theme.textTheme.titleMedium?.copyWith(
+                color: ink,
+                fontWeight: FontWeight.w600,
+              ),
               overflow: TextOverflow.ellipsis,
             ),
           ),
+          if (!online)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              decoration: BoxDecoration(
+                color: scheme.error.withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                '연결 안 됨',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: scheme.error,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
           if (trailing != null)
             Text(
               trailing!,
               style: theme.textTheme.labelMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+                color: scheme.onSurfaceVariant,
               ),
             ),
           if (onAdd != null)
@@ -388,7 +417,7 @@ class _SectionHeader extends StatelessWidget {
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
                 onPressed: onAdd,
-                icon: Icon(Icons.add_box_outlined, size: 20, color: color),
+                icon: Icon(Icons.add_box_outlined, size: 20, color: ink),
               ),
             ),
         ],
@@ -399,24 +428,43 @@ class _SectionHeader extends StatelessWidget {
 
 /// 방 하나를 한 판으로 묶는다 — 방이 여럿 펼쳐졌을 때 어디까지가 한 방인지 보이게.
 class _RoomBox extends StatelessWidget {
-  const _RoomBox({required this.children});
+  const _RoomBox({required this.children, this.accent});
 
   final List<Widget> children;
+
+  /// 기계색 — 왼쪽 줄로 「어느 기계의 방」인지 머리글과 잇는다.
+  final Color? accent;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // 색줄은 따로 얹는다 — 둥근 모서리 상자엔 변마다 다른 색의 테를 못 준다.
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerLow.withValues(alpha: 0.85),
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.6)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: children,
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        children: [
+          if (accent != null)
+            Positioned(
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: 3,
+              child: ColoredBox(color: accent!.withValues(alpha: 0.9)),
+            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: children,
+            ),
+          ),
+        ],
       ),
     );
   }

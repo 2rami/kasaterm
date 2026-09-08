@@ -305,21 +305,22 @@ class _TerminalScreenState extends State<TerminalScreen>
         body: SafeArea(
           child: Column(
             children: [
+              // 학생색 테두리 — 데스크톱 pane 의 색 테를 폰 화면 전체에 두른 것.
+              // 글자가 화면 오른쪽 끝에 닿아 답답하던 것도 이 숨으로 푼다
+              // (2026-09-08 지시 「앱 전체에 아웃라인을 캐릭터 색별로」).
               Expanded(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    // 데스크톱 pane 의 학생색 리본 — 어느 학생 화면인지 색으로 안다.
-                    Container(width: 3, color: accent),
-                    // 좌우 숨 — 0열이 리본에 붙으면 codex 의 `›` 처럼 왼쪽에 잉크가 있는
-                    // 글자가 잘려 보이고, 접힌 줄 끝이 화면 끝에 닿는다.
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
-                        child: _view(s),
-                      ),
-                    ),
-                  ],
+                child: Container(
+                  margin: const EdgeInsets.fromLTRB(8, 6, 8, 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: accent, width: 1.5),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: _view(s),
                 ),
               ),
               if (s.note != null) _NoteBar(text: s.note!),

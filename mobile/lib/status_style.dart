@@ -144,13 +144,15 @@ class _PulseDotState extends State<PulseDot>
                   width: s * (1.0 + 0.6 * t),
                   height: s * (1.0 + 0.6 * t),
                   decoration: BoxDecoration(
-                    color: widget.color.withValues(alpha: 0.28 * (1 - t)),
+                    color: widget.color.withValues(alpha: 0.35 * (1 - t)),
                     shape: BoxShape.circle,
                   ),
                 ),
+              // 점 자체가 커졌다 작아진다 — 물결만으론 칩 바탕에 묻혀 멈춘 점으로
+              // 보였다(2026-09-08 지적 「커졌다가 작아지는 애니메이션 왜 안 해줘」).
               Container(
-                width: s,
-                height: s,
+                width: widget.live ? s * (0.72 + 0.42 * t) : s,
+                height: widget.live ? s * (0.72 + 0.42 * t) : s,
                 decoration: BoxDecoration(
                   color: widget.color,
                   shape: BoxShape.circle,
@@ -489,4 +491,29 @@ class PaneStatusLine extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 기계마다 다른 색 — 이름으로 정해져서 켤 때마다 같다. 폰에선 「어느 기계 학생인지」가
+/// 머리글 한 줄뿐이라 색으로도 갈라 둔다(2026-09-08 지시 「기기별로도 잘 구분되게」).
+Color machineColor(String label, ColorScheme scheme) {
+  const hues = <double>[212, 168, 282, 24, 340, 96];
+  var h = 0;
+  for (final r in label.runes) {
+    h = (h * 31 + r) & 0x7fffffff;
+  }
+  final dark = scheme.brightness == Brightness.dark;
+  return HSLColor.fromAHSL(
+    1,
+    hues[h % hues.length],
+    0.55,
+    dark ? 0.68 : 0.42,
+  ).toColor();
+}
+
+/// 이름이 말해 주는 만큼만 — 맥북은 노트북, 미니는 데스크톱, 나머지는 그냥 컴퓨터.
+IconData machineIcon(String label) {
+  final l = label.toLowerCase();
+  if (l.contains('북') || l.contains('book')) return Icons.laptop_mac;
+  if (l.contains('미니') || l.contains('mini')) return Icons.desktop_mac;
+  return Icons.computer_outlined;
 }
