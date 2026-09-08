@@ -181,6 +181,10 @@ pub(crate) struct PaneGroup {
     pub(crate) pane: String,
     /// 학생 이름. 없으면 빈 문자열이고 렌더가 셸 이름으로 대신한다.
     pub(crate) label: String,
+    /// 이 pane 의 claude·codex 에 **실제로 실린 말투**의 주인. `None` 은 학생
+    /// 프로세스가 없는 것, 빈 문자열은 프로세스는 도는데 말투가 안 실린 것이다.
+    /// 얼굴(`label`)과 다르면 재시작·재배정에서 어긋난 자리다(2026-09-09 지시).
+    pub(crate) persona: Option<String>,
     /// 이 pane 의 claude 세션 제목 — `/rename` 이름이 있으면 그것, 없으면
     /// aiTitle(요약). 학생 이름은 "누가"고 이건 "무엇을" 이라 둘 다 필요하다.
     pub(crate) session: String,
@@ -356,6 +360,7 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
         .map(|t| PaneGroup {
             pane: t.id.clone(),
             label: t.label.clone(),
+            persona: None,
             session: t
                 .session_path
                 .as_deref()
@@ -398,6 +403,28 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     // 때도 있어"). 자리는 고정해 두고 활성은 색으로만 알린다 — 목록은 위치가
     // 기억되는 지도여야지 매번 다시 읽어야 하는 피드가 아니다.
     panes.sort_by_key(|g| (g.window, pane_ord(&g.pane), g.pane.clone()));
+
+    // 학생 프로세스에 실린 말투의 주인을 되짚는다 — 얼굴과 다른 자리를 드러내려는 것.
+    let agent_of = |g: &PaneGroup| {
+        g.rows.iter().find(|r| matches!(r.kind, ProcKind::Claude | ProcKind::Codex)).map(|r| (r.pid, r.kind))
+    };
+    let (claude_pids, codex_pids): (Vec<u32>, Vec<u32>) = panes.iter().filter_map(agent_of).fold(
+        (Vec::new(), Vec::new()),
+        |(mut c, mut x), (pid, kind)| {
+            if kind == ProcKind::Claude { c.push(pid) } else { x.push(pid) }
+            (c, x)
+        },
+    );
+    let personas = personas_of(&claude_pids, &codex_pids);
+    for g in panes.iter_mut() {
+        let Some((pid, _)) = agent_of(g) else { continue };
+        let Some(who) = personas.get(&pid) else { continue };
+        g.persona = Some(who.clone());
+        let tag = if who.is_empty() { "말투 없음".to_string() } else { format!("말투 {who}") };
+        if let Some(r) = g.rows.iter_mut().find(|r| r.pid == pid) {
+            r.rest = if r.rest.is_empty() { tag } else { format!("{tag} · {}", r.rest) };
+        }
+    }
 
     // pid → 소유 pane. 포트를 쥔 프로세스를 pane 으로 되짚는 역인덱스다.
     let mut owner: HashMap<u32, String> = HashMap::new();
@@ -1242,6 +1269,77 @@ fn panes_of(pids: &[u32]) -> HashMap<u32, String> {
 #[cfg(not(unix))]
 fn panes_of(_pids: &[u32]) -> HashMap<u32, String> {
     HashMap::new()
+}
+
+/// 학생 프로세스 pid → 실린 말투의 주인 이름(없으면 빈 문자열).
+///
+/// claude 는 `--append-system-prompt` 로 argv 에 말투가 통째로 실리므로 argv 를 읽고,
+/// codex 는 등가물이 없어 shim 이 pane 별 `CODEX_HOME/AGENTS.md` 끝에 붙이므로 env 의
+/// 홈을 따라가 그 파일을 읽는다. 어느 학생 것인지는 말투 첫 줄 앞머리로 대조한다
+/// (`persona_prefixes`) — 이름이 argv 에 따로 실리지 않아서다.
+#[cfg(unix)]
+fn personas_of(claude: &[u32], codex: &[u32]) -> HashMap<u32, String> {
+    let mut out = HashMap::new();
+    if claude.is_empty() && codex.is_empty() {
+        return out;
+    }
+    let table = kasa_mcp::character::persona_prefixes();
+    let who = |text: &str| -> String {
+        table
+            .iter()
+            .find(|(_, head)| text.contains(head.as_str()))
+            .map(|(name, _)| name.clone())
+            .unwrap_or_default()
+    };
+    for (pid, cmd) in ps_records(&["-ww", "-o", "pid=,command="], claude) {
+        let injected = cmd.contains("--append-system-prompt");
+        out.insert(pid, if injected { who(&cmd) } else { String::new() });
+    }
+    const KEY: &str = "CODEX_HOME=";
+    for (pid, cmd) in ps_records(&["eww", "-o", "pid=,command="], codex) {
+        let text = cmd
+            .find(KEY)
+            .and_then(|i| cmd[i + KEY.len()..].split_whitespace().next())
+            .and_then(|home| std::fs::read_to_string(std::path::Path::new(home).join("AGENTS.md")).ok())
+            .unwrap_or_default();
+        out.insert(pid, who(&text));
+    }
+    out
+}
+
+#[cfg(not(unix))]
+fn personas_of(_claude: &[u32], _codex: &[u32]) -> HashMap<u32, String> {
+    HashMap::new()
+}
+
+/// `ps <flags> -p <pids>` 를 pid 별 레코드로. argv 안의 개행(말투 본문)은 다음 줄로
+/// 이어지므로, 아는 pid 로 시작하지 않는 줄은 앞 레코드에 붙인다.
+#[cfg(unix)]
+fn ps_records(flags: &[&str], pids: &[u32]) -> Vec<(u32, String)> {
+    if pids.is_empty() {
+        return Vec::new();
+    }
+    let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let Ok(o) = proc::command("ps").args(flags).args(["-p", &list]).output() else {
+        return Vec::new();
+    };
+    let mut recs: Vec<(u32, String)> = Vec::new();
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        let head = line
+            .trim_start()
+            .split_once(' ')
+            .and_then(|(p, rest)| p.parse::<u32>().ok().filter(|p| pids.contains(p)).map(|p| (p, rest)));
+        match head {
+            Some((pid, rest)) => recs.push((pid, rest.to_string())),
+            None => {
+                if let Some(last) = recs.last_mut() {
+                    last.1.push('\n');
+                    last.1.push_str(line);
+                }
+            }
+        }
+    }
+    recs
 }
 
 #[cfg(unix)]
@@ -2859,6 +2957,27 @@ fn draw_group_head(
     // 먼저 가져간다(폭이 모자라면 밀려나는 건 셸·pid 쪽).
     budget -= tw + 8.0;
     let mut cx = tx + tw + 8.0;
+    // 실린 말투가 얼굴과 다르면 그 사실을 이름 바로 옆에 — 재시작·재배정 뒤 「얼굴은
+    // 새 학생, 말투는 옛 학생」인 자리가 여기 말고는 드러날 데가 없다(2026-09-09 지시).
+    // 맞는 자리엔 안 그린다(펼치면 프로세스 줄에 있다).
+    if let Some(who) = gp.persona.as_deref().filter(|w| *w != gp.label) {
+        let (badge, col) = if who.is_empty() {
+            ("말투 없음".to_string(), theme::text_mute())
+        } else {
+            (format!("말투 {who}"), theme::attention())
+        };
+        let bw = g.measure_chrome_text(&badge, 10.0, true);
+        if budget > bw + 48.0 {
+            g.draw_text(
+                cx,
+                y + 6.0,
+                &badge,
+                gpu::DrawOpts { font_size: 10.0, color: col, bold: true, italic: false },
+            );
+            cx += bw + 8.0;
+            budget -= bw + 8.0;
+        }
+    }
     // 원격 pane 은 셸·pid 대신 어느 기계 것인지 — 이 줄의 존재 이유가 「그
     // pane 에서 무엇이 도나」인데, 원격은 그 답이 기계 이름이다.
     let shell = match gp.machine.as_deref() {

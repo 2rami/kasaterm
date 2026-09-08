@@ -2189,10 +2189,14 @@ async fn persona_handler(
     let body = if sid.is_empty() || !crate::character::persona_enabled() {
         String::new()
     } else {
+        // 활성 명부에 없는 이름(다른 테마 팩에서 고른 학생)도 합집합으로 찾는다 —
+        // 활성만 보면 그 학생의 resume 부팅에 빈 답이 가서 shim 이 spawn 때의 말투를
+        // 빈 것으로 덮고, 얼굴은 있는데 말투만 없는 pane 이 된다(2026-09-09).
         crate::character::session_character(sid)
             .and_then(|name| {
                 crate::character::characters_json()
                     .and_then(|c| crate::character::persona_for(&c, &name))
+                    .or_else(|| crate::character::persona_for_any(&name))
             })
             .map(|p| format!("[페르소나 유지] {p}"))
             .unwrap_or_default()

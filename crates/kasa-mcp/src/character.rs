@@ -404,6 +404,27 @@ pub fn all_rosters() -> Vec<Value> {
     out
 }
 
+/// 말투 판독표 — 전 명부의 (이름, 말투 첫 줄 앞머리). 도는 claude 의 argv 나 codex 의
+/// AGENTS.md 에 **어느 학생의 말투가 실제로 실렸는지** 되짚을 때 쓴다(2026-09-09 지시:
+/// 재시작 뒤 얼굴은 새 학생인데 말투는 옛 학생인 자리를 인포에서 보이게). 앞머리가
+/// 같은 두 이름은 먼저 온 쪽만 남는다 — 판독이 갈리는 것보다 하나로 고정되는 게 낫다.
+pub fn persona_prefixes() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    for chars in all_rosters() {
+        for m in entries_of(&chars) {
+            let Some(name) = name_of(m) else { continue };
+            let Some(p) = m.get("persona").and_then(|x| x.as_str()) else { continue };
+            let head: String = p.trim().lines().next().unwrap_or("").trim().chars().take(48).collect();
+            if head.chars().count() < 12 || !seen.insert(head.clone()) {
+                continue;
+            }
+            out.push((name.to_string(), head));
+        }
+    }
+    out
+}
+
 /// `<root>/*/theme.json` 전부 — root 주입이라 테스트가 env 없이 검증한다
 /// (`active_theme_dir_in` 과 같은 결).
 pub fn theme_roster_paths(root: &Path) -> Vec<PathBuf> {
