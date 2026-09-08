@@ -736,7 +736,7 @@ impl App {
 
     fn render_chat(&self) {
         #[cfg(target_os = "macos")]
-        if let Some(panel) = &self.chat_panel { panel.render(&self.chat.transcript(), self.chat.busy(), self.chat.failed); }
+        if let Some(panel) = &self.chat_panel { panel.render(&self.chat.transcript(), self.chat.busy(), self.chat.failed, &self.chat.progress); }
     }
 
     fn poll_chat(&mut self) {

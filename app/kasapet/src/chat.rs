@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, mpsc, Arc};
 use std::time::{Duration, Instant};
 
-enum Update { Progress, Done(Result<Vec<(String, String)>, ()>) }
+enum Update { Progress(String), Done(Result<Vec<(String, String)>, ()>) }
 
 #[derive(Default)]
 pub struct Chat {
@@ -12,6 +12,7 @@ pub struct Chat {
     pending: Option<mpsc::Receiver<Update>>,
     cancel: Option<Arc<AtomicBool>>,
     pub failed: bool,
+    pub progress: String,
     question: Option<String>,
     snapshot: Option<PathBuf>,
     active: Arc<AtomicUsize>,
@@ -52,6 +53,7 @@ impl Chat {
     }
     fn start(&mut self, service: PathBuf, question: Option<String>) {
         self.failed = false;
+        self.progress = "나쵸가 확인하고 있어요…".into();
         let (sender, receiver) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = Some(cancel.clone());
@@ -73,7 +75,7 @@ impl Chat {
     pub fn poll(&mut self) -> bool {
         let Some(receiver) = &self.pending else { return false };
         match receiver.try_recv() {
-            Ok(Update::Progress) => false,
+            Ok(Update::Progress(text)) => { self.progress = text; true }
             Ok(Update::Done(result)) => {
                 self.pending = None;
                 self.cancel = None;
@@ -132,7 +134,12 @@ fn run(service: &Path, question: Option<String>, cancel: &AtomicBool, progress: 
             match job["status"].as_str() {
                 Some("completed") => break,
                 Some("failed" | "cancelled") => return Err(()),
-                Some("queued" | "running") => { let _ = progress.send(Update::Progress); }
+                Some("queued" | "running") => {
+                    let done = job["progress"]["completed_batches"].as_u64().unwrap_or(0);
+                    let total = job["progress"]["total_batches"].as_u64().unwrap_or(0);
+                    let text = if total > 0 { format!("나쵸 확인 중 · {done}/{total}") } else { "나쵸가 확인하고 있어요…".into() };
+                    let _ = progress.send(Update::Progress(text));
+                }
                 _ => return Err(()),
             }
             for _ in 0..10 {
