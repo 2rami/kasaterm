@@ -40,7 +40,7 @@ mode=chat이면 일반 텍스트로 답한다. 긴 체크리스트가 필요하�
 
 
 def completion_payload(payload):
-    value = json.loads(payload)
+    value = payload if isinstance(payload, dict) else json.loads(payload)
     allowed = {"mode", "question", "requests", "builds", "partials", "history", "runtime"}
     if not isinstance(value, dict) or value.get("mode") not in ("chat", "checklist") or set(value) - allowed:
         raise ValueError("invalid completion payload")
