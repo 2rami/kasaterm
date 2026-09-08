@@ -182,6 +182,10 @@ pub(crate) enum StatusbarHit {
     /// 터미널은 직접 타자, 아로나는 대화 읽기·학생 전환(2026-08-25 「링크를 따로」).
     OpenAronaUrl,
     CopyAronaUrl,
+    /// QR 이 여는 안내 페이지(`/app`) — 앱으로 열기·앱 설치·웹에서 보기. QR 을 누르면
+    /// 맥에서도 같은 페이지가 열린다(폰에 보내기 전에 눈으로 확인하는 손).
+    OpenAppUrl,
+    CopyAppUrl,
     /// 예약 한 줄의 멈춤/켜기.
     ScheduleToggle(String),
     /// 예약 한 줄의 ×.

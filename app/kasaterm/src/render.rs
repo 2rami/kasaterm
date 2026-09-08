@@ -10970,15 +10970,18 @@ impl App {
                 // 점이 상태다: 초록=열림, 흐림=닫힘. 누르면 handler 가 토글한다.
                 macro_rules! draw_tunnel_widget {
                     () => {{
-                    // 「바깥」이었다 — 무엇이 바깥인지 말해 주지 않는 이름이라
-                    // 바꿨다(2026-08-15 지시 「바깥이라는거 좀 이상한데」). 지구본이
-                    // 뜻을 지고, 두 글자가 그걸 못 읽는 경우를 받치고, 나머지 설명은
-                    // 팝오버 제목이 한다.
-                    let label = "원격";
+                    // 「바깥」→「원격」이었다가 「모바일」— 원격 접속과 크롬 다리를 한
+                    // 칩으로 합치며(2026-09-08 지시 「크롬다리랑 원격을 통합」) 이 칩이
+                    // 말하는 것은 「이 맥 밖의 기기」가 됐다. 폰 아이콘이 뜻을 지고,
+                    // 나머지 설명(QR·주소·다리)은 팝오버가 한다.
+                    let label = "모바일";
                     let icon = 12.0_f32;
                     let dot = 6.0_f32;
                     let gap = 5.0_f32;
                     let on = self.statusbar.tunnel_on == Some(true);
+                    // 점 하나에 두 상태 — 열림이면 초록, 열렸는데 크롬 다리가 끊겼으면
+                    // 주황(미니 학생이 미니 크롬으로 폴백 중). 닫힘은 흐림.
+                    let bridge_down = on && self.statusbar.chrome_bridge == Some(false);
                     let tw = g.measure_chrome_text(label, fs, false);
                     let seg_w = icon + gap + tw + gap + dot;
                     // 판 번호가 이미 오른쪽 끝을 먹었다 — 그 왼쪽에 선다
@@ -10994,7 +10997,7 @@ impl App {
                         if on { theme::text() } else { theme::text_dim() },
                     );
                     if tunnel_visible {
-                        g.queue_icon("globe", tx, sy + (status_h - icon) / 2.0, icon, col);
+                        g.queue_icon("smartphone", tx, sy + (status_h - icon) / 2.0, icon, col);
                         g.draw_text(
                             tx + icon + gap,
                             ty,
@@ -11017,7 +11020,9 @@ impl App {
                             dot,
                             dot,
                             dot / 2.0,
-                            if on {
+                            if bridge_down {
+                                theme::attention()
+                            } else if on {
                                 theme::success()
                             } else {
                                 theme::with_alpha(theme::text_dim(), 140)
@@ -11041,44 +11046,7 @@ impl App {
 
                     // 바깥 스위치 왼쪽으로 리소스 → 포트 순서(Orca 하단바처럼 —
                     // 2026-08-15 지시 「포트 하단바로」·「리소스사용량도」).
-                    // 미니→맥북 크롬 다리 — 초록=미니 상주 학생이 이 맥북의 크롬
-                    // (로그인 살아 있는 것)을 쓴다 / 주황=끊겨 미니 크롬 폴백.
-                    // 폴백이 실패 기반이라 지금 어느 쪽인지 사람이 볼 창이 필요하다
-                    // (2026-08-30 지시). 기계 명부가 없으면 None 이라 안 그린다.
-                    if tunnel_visible {
-                        if let Some(up) = self.statusbar.chrome_bridge {
-                            let label = "크롬다리";
-                            let dot = 6.0_f32;
-                            let gap = 5.0_f32;
-                            let tw = g.measure_chrome_text(label, fs, false);
-                            rx -= tw + gap + dot + chip;
-                            let col = if up { theme::text() } else { theme::text_dim() };
-                            g.draw_text(
-                                rx,
-                                ty,
-                                label,
-                                gpu::DrawOpts {
-                                    font_size: fs,
-                                    color: col,
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                            round_rect(
-                                g,
-                                rx + tw + gap,
-                                sy + (status_h - dot) / 2.0,
-                                dot,
-                                dot,
-                                dot / 2.0,
-                                if up {
-                                    theme::success()
-                                } else {
-                                    theme::attention()
-                                },
-                            );
-                        }
-                    }
+                    // 크롬 다리 칩은 이 칩 안으로 들어갔다 — 점 색과 팝오버 한 줄.
                     }};
                 }
                     // 리소스 — 앱 + 학생 트리 합. 폭이 좁으면 먼저 버린다:

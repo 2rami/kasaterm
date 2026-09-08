@@ -22,6 +22,17 @@ fn read_setting_str(key: &str) -> Option<String> {
     read_setting_value(key)?.as_str().map(String::from)
 }
 
+/// 폰 앱을 내려받는 주소(TestFlight 공개 링크 같은 것). 하단바 「기기」 QR 이 여는
+/// 안내 페이지가 「설치」 단추에 단다. 없으면 페이지가 케이블 설치 안내로 대신한다 —
+/// 무료 Apple ID 로는 공중 설치 경로가 없어서다. env 가 설정을 이긴다(헤드리스 검증).
+pub fn app_install_url() -> Option<String> {
+    match std::env::var("KASATERM_APP_INSTALL_URL") {
+        Ok(v) if !v.trim().is_empty() => return Some(v.trim().to_string()),
+        _ => {}
+    }
+    read_setting_str("app_install_url").filter(|s| !s.trim().is_empty())
+}
+
 /// 테마 팩 루트 — `~/.config/kasaterm/themes/`. **폴더 하나가 테마 하나**다:
 /// `theme.json`(로스터 + 팔레트) + `sprites/`(캐릭터 그림). 지금까지 흩어져 있던
 /// 세 override(`students/`·`characters.json`·`custom_theme`)를 한 단위로 묶은 것이라,

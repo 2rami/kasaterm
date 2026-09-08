@@ -3107,7 +3107,7 @@ fn statusbar_widget_label(id: &str) -> &'static str {
         "pet" => "펫 상태",
         "clipboard" => "클립보드",
         "resources" => "기기 상태",
-        "tunnel" => "원격 연결",
+        "tunnel" => "모바일 연결",
         "version" => "앱 버전",
         _ => "알 수 없는 항목",
     }
@@ -3141,7 +3141,7 @@ fn statusbar_preview_text(s: &Snapshot, id: &str) -> String {
         "pet" => "펫 2명",
         "clipboard" => "클립보드",
         "resources" => "CPU 18% · RAM 42%",
-        "tunnel" => "원격 연결됨",
+        "tunnel" => "모바일 연결됨",
         "version" => "v0.2.0",
         _ => "",
     }

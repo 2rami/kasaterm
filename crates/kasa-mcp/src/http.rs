@@ -5716,6 +5716,20 @@ async fn mobile_prefix_mw(
             let need_cookie = !has_remote_token(req.headers(), None);
             *req.uri_mut() = uri;
             req.extensions_mut().insert(MobileAuth(user));
+/// 하단바 「기기」 QR 이 여는 안내 — 앱으로 열기 · 앱 설치 · 웹(허브)에서 보기.
+/// 폰 카메라는 주소 하나만 열 수 있어 세 갈래를 한 페이지에 둔다(2026-09-08 지시).
+/// 설치 주소는 설정에서 읽어 서버가 심는다 — 페이지가 따로 묻는 왕복을 안 만든다.
+async fn app_page() -> impl IntoResponse {
+    let install = crate::character::app_install_url().unwrap_or_default();
+    let html = include_str!("../assets/term/app.html")
+        .replace("__INSTALL_URL__", &html_escape(&install));
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
             let mut res = next.run(req).await;
             if need_cookie {
                 if let Some(v) = remote_token()
@@ -6937,6 +6951,7 @@ pub fn spawn_http_server_opts(
                     .route("/m/{label}/{*rest}", axum::routing::any(machine_proxy))
                     .route("/peer-registry", get(peer_registry_get))
                     .route(
+                    .route("/app", get(app_page))
                         "/term/character-theme",
                         post(move |q: Query<std::collections::HashMap<String, String>>,
                                    body: axum::body::Bytes| {

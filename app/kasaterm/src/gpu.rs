@@ -3965,6 +3965,7 @@ impl GpuRenderer {
             // 뜬다. 라이선스가 다른 세트라 원본에 없는 아이콘을 손으로 그려 넣지 않는다.
             "plug" => include_str!("../assets/icons/plug.svg"),
             "globe" => include_str!("../assets/icons/globe.svg"),
+            "smartphone" => include_str!("../assets/icons/smartphone.svg"),
             "server" => include_str!("../assets/icons/server.svg"),
             "laptop" => include_str!("../assets/icons/laptop.svg"),
             "monitor" => include_str!("../assets/icons/monitor.svg"),

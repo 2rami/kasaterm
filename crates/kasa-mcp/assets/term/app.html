@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>kasaterm</title>
+<style>
+  /* 하단바 「기기」 QR 을 찍은 폰이 처음 보는 화면 — 앱 열기·설치·웹 보기 세 갈래.
+     허브와 같은 색으로, 단추는 엄지 크기(52px). */
+  :root { --bg:#12161c; --panel:#1a2130; --line:#243044; --fg:#c8d0d9; --dim:#7c8798; --acc:#7aa2f7; }
+  html,body { margin:0; background:var(--bg); color:var(--fg);
+    font:15px/1.45 -apple-system,BlinkMacSystemFont,system-ui,'Apple SD Gothic Neo',sans-serif;
+    min-height:100dvh; -webkit-text-size-adjust:100%; }
+  main { max-width:420px; margin:0 auto; padding:calc(env(safe-area-inset-top) + 40px) 20px 40px; }
+  h1 { font-size:22px; margin:0 0 6px; }
+  p { margin:0 0 22px; color:var(--dim); }
+  a.btn { display:flex; align-items:center; justify-content:center; min-height:52px; margin:10px 0;
+    border-radius:12px; background:var(--panel); border:1px solid var(--line); color:var(--fg);
+    font-size:16px; font-weight:600; text-decoration:none; }
+  a.btn.primary { background:var(--acc); border-color:var(--acc); color:#0b1018; }
+  a.btn[hidden] { display:none; }
+  section { margin-top:28px; padding-top:18px; border-top:1px solid var(--line); }
+  h2 { font-size:13px; font-weight:600; color:var(--dim); margin:0 0 8px; letter-spacing:.2px; }
+  small { display:block; color:var(--dim); font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>kasaterm</h1>
+  <p>이 맥의 학생들을 폰에서 본다.</p>
+  <a class="btn primary" id="open" href="#">앱으로 열기</a>
+  <a class="btn" id="web" href="#">웹에서 보기</a>
+  <section>
+    <h2>앱 설치</h2>
+    <a class="btn" id="install" href="__INSTALL_URL__" hidden>앱 설치</a>
+    <small id="no-install" hidden>설치 링크가 아직 없다 — 맥에 케이블로 꽂아 설치한다. 이미 깔려 있으면 위 「앱으로 열기」.</small>
+  </section>
+</main>
+<script>
+// `/u/<slug>/app`(폰) 또는 `/app`(로컬) 로 열린다. 그 접두가 곧 자격이라 링크 전부가
+// 그걸 물려받아야 한다 — 허브(hub.html)와 같은 규칙.
+const ROOT = location.pathname.replace(/\/app$/, '');
+const $ = (id) => document.getElementById(id);
+const root = `${location.origin}${ROOT}/`;
+$('web').href = root;
+const install = $('install');
+if (install.getAttribute('href')) install.hidden = false; else $('no-install').hidden = false;
+
+// 앱 스킴은 앱이 없는 폰에서 사파리 경고를 띄운다 — 단추로만 가고, 한 번 성공한 폰은
+// 허브와 같은 표식을 공유해 다음부터 저절로 간다.
+const link = `kasaterm://open?root=${encodeURIComponent(root)}`;
+const KEY = 'kasaterm-app';
+const go = () => {
+  location.href = link;
+  setTimeout(() => {
+    if (document.visibilityState === 'hidden') localStorage.setItem(KEY, '1');
+    else localStorage.removeItem(KEY);
+  }, 1500);
+};
+$('open').addEventListener('click', (e) => { e.preventDefault(); go(); });
+if (localStorage.getItem(KEY) === '1') go();
+</script>
+</body>
+</html>

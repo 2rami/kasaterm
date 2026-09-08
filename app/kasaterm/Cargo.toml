@@ -98,6 +98,7 @@ tree-sitter-yaml = "0.7.2"
 # 어디든 쓸 수 있다. default-features off: 테마 zip 은 deflate 뿐이라 bzip2·
 # zstd·lzma·AES 해독기를 함께 들일 이유가 없다(공격면도 그만큼 준다).
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+qrcodegen = "1.8"
 
 # macOS-only: patch the wgpu CAMetalLayer's contentsGravity to topLeft so
 # AppKit doesn't stretch stale layer contents during live window resize.
