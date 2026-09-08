@@ -251,9 +251,8 @@ mod tests {
     /// pane 이라 그 방에서 열면 대상이 내부 id 로 굳고, 아래 작업이 엉뚱한 곳을
     /// 가리킨다. 그래서 여는 쪽이 사용자 방 복귀를 먼저 태운다.
     ///
-    /// 단축키도 같은 사고의 다른 면이다 — 내부 방은 키를 잡으면 무조건 return 하고
-    /// `persona_key` 는 host_mod 조합을 전부 삼키므로, 토글이 그 뒤에 있으면 그
-    /// 화면들에서 영영 안 먹는다(`Cmd+,` 는 이미 앞에 있어 먹는다).
+    /// 단축키도 같은 사고의 다른 면이다 — 내부 방은 키를 잡으면 무조건 return 하므로,
+    /// 토글이 그 뒤에 있으면 그 화면들에서 영영 안 먹는다(`Cmd+,` 는 이미 앞에 있어 먹는다).
     #[test]
     fn arona_leaves_internal_rooms_and_its_shortcut_outranks_them() {
         let chrome = include_str!("chrome.rs");
@@ -275,7 +274,6 @@ mod tests {
         for (label, marker) in [
             ("설정 방", "self.native_settings_key(&event);"),
             ("보드 방", "self.native_board_key(&event);"),
-            ("persona 입력칸", "self.persona_key(&event)"),
         ] {
             let at = handler.find(marker).expect(marker);
             assert!(

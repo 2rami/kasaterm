@@ -32,7 +32,6 @@ mod native_settings;
 mod native_strings;
 mod notify_banner;
 mod onboarding;
-mod personacol;
 mod render;
 mod screenread;
 mod session;
@@ -4132,9 +4131,6 @@ pub(crate) enum ImeFocus {
     /// PTY 없는 보드 방의 입력. 필드를 함께 실어 조합 중 탭 이동도 떠나는 칸에
     /// 확정되게 한다.
     Board(native_board::BoardInput),
-    /// 우측 네이티브 대화 칼럼의 입력. draft와 로스터 검색을 갈라야 포커스 이동
-    /// 때 조합 중인 마지막 음절이 떠나는 칸에 확정된다.
-    Persona(personacol::PersonaInput),
 }
 
 impl ImeFocus {
@@ -5364,7 +5360,6 @@ struct App {
     /// App definition — CLAUDE.md 병렬 규칙. (badge poller `git_poll_cwds` and
     /// the file-tree `git_ignore_*` stay separate — different domains.)
     git: state::GitState,
-    persona: personacol::PersonaColState,
     /// 우측 칼럼의 Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. 칼럼
     /// 폭/닫기는 `git` 과 공유하고 본문과 갱신 스레드만 여기 있다(state.rs).
     info: state::InfoState,
@@ -5874,24 +5869,10 @@ impl App {
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             pane_status_pub: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            persona: personacol::PersonaColState::with_sources(
-                {
-                    let proxy = proxy.clone();
-                    move || {
-                        let _ = proxy.send_event(UserEvent::Redraw);
-                    }
-                },
-                |slug| {
-                    crate::sprites::student_sprite_png(slug, "idle")
-                        .and_then(|frames| frames.first().copied())
-                        .map(<[u8]>::to_vec)
-                },
-            ),
             git: state::GitState {
                 col_visible: std::env::var("KASASPACE_GIT_PANEL")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false)
-                    || std::env::var_os("KASATERM_PERSONA").is_some(),
+                    .unwrap_or(false),
                 col_w_logical: GIT_COL_W,
                 // KASATERM_FORCE_ACCOUNT_MENU 와 같은 헤드리스 검증용 — 클릭 합성
                 // 없이 모달이 열린 프레임을 캡처한다(모달은 창 안 모든 것 위에
@@ -5908,8 +5889,6 @@ impl App {
                     state::SideTab::Info
                 } else if std::env::var("KASATERM_TEST_SESSIONS").is_ok() {
                     state::SideTab::Sessions
-                } else if std::env::var("KASATERM_PERSONA").is_ok() {
-                    state::SideTab::Persona
                 } else if std::env::var("KASATERM_TEST_MCP").is_ok() {
                     state::SideTab::Mcp
                 } else {

@@ -2839,8 +2839,6 @@ impl ApplicationHandler<UserEvent> for App {
                     self.native_settings_wheel(delta);
                 } else if self.board_room_active() {
                     self.native_board_wheel(delta);
-                } else if self.persona_contains(self.cursor_px.0, self.cursor_px.1) {
-                    self.persona_wheel(delta);
                 } else {
                     self.handle_wheel(delta);
                 }
@@ -2906,14 +2904,6 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if self.native_board_contains(self.cursor_px.0, self.cursor_px.1) {
                     let cursor = self.native_board_cursor(self.cursor_px.0, self.cursor_px.1);
-                    self.text_cursor_shown = cursor == CursorIcon::Text;
-                    window.set_cursor(cursor);
-                    self.chrome_dirty = true;
-                    window.request_redraw();
-                    return;
-                }
-                if self.persona_contains(self.cursor_px.0, self.cursor_px.1) {
-                    let cursor = self.persona_cursor(self.cursor_px.0, self.cursor_px.1);
                     self.text_cursor_shown = cursor == CursorIcon::Text;
                     window.set_cursor(cursor);
                     self.chrome_dirty = true;
@@ -4041,14 +4031,6 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
-                if self.persona_contains(self.cursor_px.0, self.cursor_px.1) {
-                    if matches!(state, ElementState::Pressed) {
-                        self.last_input_at = Instant::now();
-                        self.persona_click(self.cursor_px.0, self.cursor_px.1);
-                    }
-                    window.request_redraw();
-                    return;
-                }
                 // Settings: the sidebar entry toggles the screen. While it's
                 // open, clicks in the view area (right of the sidebar) route to
                 // the form; a click on the session sidebar closes settings and
@@ -4954,9 +4936,6 @@ impl ApplicationHandler<UserEvent> for App {
                             .map(|(t, r)| (*t, *r))
                         {
                             if self.info.tab != tab {
-                                if self.info.tab == state::SideTab::Persona {
-                                    self.persona_blur();
-                                }
                                 self.info.tab = tab;
                                 // Info 로 막 넘어왔으면 목록이 비어 있다 — 다음
                                 // 프레임의 pump_info 가 즉시 채우도록 놓아둔다.
@@ -6461,13 +6440,6 @@ impl ApplicationHandler<UserEvent> for App {
                     self.native_board_ime(ime);
                     return;
                 }
-                if self.persona_active()
-                    && matches!(self.ime_focus, Some(crate::ImeFocus::Persona(_)))
-                {
-                    self.persona_ime(ime);
-                    window.request_redraw();
-                    return;
-                }
                 match ime {
                     Ime::Enabled => {
                         // OS IME just took ownership of the keyboard
@@ -6705,8 +6677,7 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
-                // 설정·보드 방과 persona 입력칸은 아래에서 키를 통째로 삼킨다
-                // (내부 방은 무조건 return, `persona_key` 는 host_mod 를 전부 소비).
+                // 설정·보드 방은 아래에서 키를 통째로 삼킨다(무조건 return).
                 // 아로나 토글이 그 뒤에 있으면 그 화면들에서 영영 안 먹으므로,
                 // `Cmd+,`(설정) 와 같은 자리에서 먼저 잡는다.
                 if matches!(event.state, ElementState::Pressed)
@@ -6762,10 +6733,6 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         self.native_board_key(&event);
                     }
-                    window.request_redraw();
-                    return;
-                }
-                if self.persona_active() && self.persona_key(&event) {
                     window.request_redraw();
                     return;
                 }
@@ -6859,7 +6826,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.themegen_poll();
         self.native_settings_tick();
         self.native_board_tick();
-        self.persona_tick();
         self.pump_native_onboarding();
         // 창 이동/리사이즈 1초 뒤 프레임 저장(디바운스) — exit 훅에만 맡기면
         // 크래시·강제종료 때 크기·위치가 유실된다. about_to_wait 는 블링크

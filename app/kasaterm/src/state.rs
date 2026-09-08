@@ -267,8 +267,6 @@ pub(crate) enum SideTab {
     Sessions,
     /// 하네스별 MCP 서버와 스킬 — 무엇이 붙어 있고 무엇이 꺼져 있나.
     Mcp,
-    /// 상주 페르소나 — 지금 pane 들 상황을 아는 말상대. 본문은 wgpu 네이티브.
-    Persona,
 }
 
 /// Info 탭 「다른 기계」 절의 재료 — 조립은 `refresh_machines_col`. 절에는 기계마다

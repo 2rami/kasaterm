@@ -745,12 +745,6 @@ impl App {
     pub(crate) fn effective_right_chrome_w(&self) -> f32 {
         self.git_col_w()
     }
-    /// 페르소나 탭이 지금 화면에 있어야 하나 — 우측 패널이 열려 있고 그 탭이 선택된 때.
-    pub(crate) fn persona_active(&self) -> bool {
-        !self.internal_room_active_any()
-            && self.git.col_visible
-            && self.info.tab == state::SideTab::Persona
-    }
     /// 「다른 기계」 절이 지금 화면에 있어야 하나 — Info 탭이 열려 있으면. 접혀
     /// 있어도 머리의 수·배지는 그리므로 접힘은 안 본다. (본문은 machinescol.rs.)
     pub(crate) fn machines_section_active(&self) -> bool {
@@ -833,9 +827,6 @@ impl App {
     pub(crate) fn toggle_git_col(&mut self) {
         if self.internal_room_active_any() {
             return;
-        }
-        if self.persona_active() {
-            self.persona_blur();
         }
         self.git.col_visible = !self.git.col_visible;
         if self.git.col_visible {
