@@ -3169,9 +3169,6 @@ impl App {
         let toast_alpha = self.copy_toast_alpha();
         // Collab completion toast (top-right). Pre-read here like toast_alpha so
         // the render block below never re-borrows self while g is held.
-        // 한도 배지 — g 생성 전에 읽어 borrow 충돌을 피한다(다른 pre-read 와 동일).
-        // 쓰는 곳은 Info 탭 머리의 계정 행(info::draw_info_actions).
-        let claude_usage_pct = self.claude_usage.lock().ok().and_then(|v| v.clone());
         let collab_toast_alpha = self.collab_toast_alpha();
         let collab_toast_msg = self.collab.toast.as_ref().map(|(m, _)| m.clone());
         let collab_toast_action_on = self.collab.toast_action.is_some();
@@ -8226,31 +8223,10 @@ impl App {
                     git_col_w,
                     top,
                 );
-                // 계정을 하나라도 추가했을 때만 이름을 붙인다.
-                let acct_label = (!self.set_claude_accounts.is_empty()).then(|| {
-                    let id = self.set_claude_account.as_str();
-                    match self.set_claude_accounts.iter().position(|a| a.id == id) {
-                        Some(i) => crate::settings::account_display(
-                            id,
-                            &self.set_claude_accounts[i].label,
-                            &format!("계정 {}", i + 2),
-                        ),
-                        None => crate::settings::account_display("", "", "기본"),
-                    }
-                });
-                let (body_top, acct_rect) = info::draw_info_actions(
-                    g,
-                    self.cursor_px,
-                    &mut self.info,
-                    acct_label.as_deref(),
-                    claude_usage_pct.as_ref(),
-                    self.account_menu,
-                    crate::socket::read_shim_inject(),
-                    git_col_x,
-                    git_col_w,
-                    body_top,
-                );
-                self.account_chip_rect = acct_rect;
+                // 머리의 단추 줄(보드·아로나·설정·피드백·계정)은 걷었다(2026-09-08 지시)
+                // — 계정·웹은 하단바가 맡고, 보드가 보여 주던 작업 한 줄은 아래 학생 줄에
+                // 붙었다. 계정 칩 자리가 없으니 그 드롭다운 앵커도 없다.
+                self.account_chip_rect = None;
                 info::draw_info_col(
                     g,
                     self.cursor_px,
@@ -11350,6 +11326,48 @@ impl App {
                     // 앱을 껐다 켜도 살아 있고, 그래서 이 칩의 상태도 앱 메모리가 아니라
                     // 그쪽 프로세스가 살아 있는지로 정한다(2026-09-07 지시: 「하단에
                     // 온오프만」).
+                    // 예약 칩 — 보드 방 「등록됨」의 켜진 것 수. 팝오버에서 멈춤·켜기·지우기.
+                    macro_rules! draw_schedules_widget {
+                        () => {{
+                    self.statusbar.schedule_rect = None;
+                    if status_prefs.visible("schedules") {
+                        let n = self.info.view.schedules.iter().filter(|s| s.enabled).count();
+                        let label = n.to_string();
+                        let icon = 12.0_f32;
+                        let gap = 4.0_f32;
+                        let lw = g.measure_chrome_text(&label, fs, false);
+                        let seg = icon + gap + lw;
+                        rx -= seg + chip;
+                        let open = matches!(
+                            self.statusbar.popover,
+                            Some((state::StatusbarPopover::Schedules, _))
+                        );
+                        let col = status_prefs.color(
+                            "schedules",
+                            if open || n > 0 { theme::text() } else { theme::text_dim() },
+                        );
+                        g.queue_icon("rotate-cw", rx, sy + (status_h - icon) / 2.0, icon, col);
+                        g.draw_text(
+                            rx + icon + gap,
+                            ty,
+                            &label,
+                            gpu::DrawOpts {
+                                font_size: fs,
+                                color: col,
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        let pr = (rx - chip / 2.0, sy, seg + chip, status_h);
+                        {
+                            let (hx, hy) = self.cursor_px;
+                            g.hover_pointer |=
+                                hx >= pr.0 && hx <= pr.0 + pr.2 && hy >= pr.1 && hy <= pr.1 + pr.3;
+                        }
+                        self.statusbar.schedule_rect = Some(pr);
+                    }
+                        }};
+                    }
                     macro_rules! draw_pet_widget {
                         () => {{
                     self.statusbar.pet_rect = None;
@@ -11450,10 +11468,13 @@ impl App {
                         .order
                         .iter()
                         .rev()
-                        .filter(|id| matches!(id.as_str(), "ports" | "pet" | "clipboard"))
+                        .filter(|id| {
+                            matches!(id.as_str(), "ports" | "schedules" | "pet" | "clipboard")
+                        })
                     {
                         match id.as_str() {
                             "ports" => draw_ports_widget!(),
+                            "schedules" => draw_schedules_widget!(),
                             "pet" => draw_pet_widget!(),
                             "clipboard" => draw_clipboard_widget!(),
                             _ => {}

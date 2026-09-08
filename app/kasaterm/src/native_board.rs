@@ -834,7 +834,7 @@ fn collect_data(
     }
 }
 
-fn collect_background(backend: &Arc<dyn Backend>) -> anyhow::Result<Vec<BackgroundRow>> {
+pub(crate) fn collect_background(backend: &Arc<dyn Backend>) -> anyhow::Result<Vec<BackgroundRow>> {
     let output = crate::proc::command(kasa_mcp::claude_bin())
         .args(["agents", "--json", "--all"])
         .output()?;
@@ -1826,7 +1826,7 @@ fn status_color(row: &PaneActivity) -> [u8; 4] {
     }
 }
 
-fn status_label(row: &PaneActivity) -> String {
+pub(crate) fn status_label(row: &PaneActivity) -> String {
     if agent_needs_attention(row) {
         "확인 필요".to_string()
     } else if let Some(outcome) = &row.done_outcome {
@@ -1842,7 +1842,7 @@ fn status_label(row: &PaneActivity) -> String {
     }
 }
 
-fn agent_needs_attention(row: &PaneActivity) -> bool {
+pub(crate) fn agent_needs_attention(row: &PaneActivity) -> bool {
     row.waiting_for.is_some() || row.status == "blocked"
 }
 
@@ -1862,7 +1862,7 @@ fn agent_name(row: &PaneActivity) -> String {
         .to_string()
 }
 
-fn background_state(row: &BackgroundRow) -> &str {
+pub(crate) fn background_state(row: &BackgroundRow) -> &str {
     match row.state.as_str() {
         "done" => "완료",
         "blocked" => "막힘",

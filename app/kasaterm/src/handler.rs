@@ -4999,35 +4999,6 @@ impl ApplicationHandler<UserEvent> for App {
                         // Git 탭에서는 낡은 좌표가 남아 있다 — 탭을 확인하지
                         // 않으면 git 목록 클릭을 Info 행이 가로챈다.
                         if self.info.tab == state::SideTab::Info {
-                            // 머리의 전역 진입점(아로나·설정). 계정 행은 여기가 아니라
-                            // 타이틀바 시절과 같은 `account_chip_rect` 경로로 잡힌다 —
-                            // 드롭다운을 여는 클릭이라 pane 라우팅보다 앞서야 한다.
-                            if let Some(act) = self
-                                .info
-                                .action_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(a, _)| *a)
-                            {
-                                match act {
-                                    state::InfoAction::Board => self.toggle_board_room(),
-                                    state::InfoAction::Arona => self.toggle_arona_panel(event_loop),
-                                    state::InfoAction::Settings => {
-                                        self.open_settings_window(event_loop, None, None);
-                                        self.session_touched = session_touched_before_event;
-                                    }
-                                    state::InfoAction::Feedback => {
-                                        self.open_settings_window(
-                                            event_loop,
-                                            Some(SettingsCat::Feedback),
-                                            None,
-                                        );
-                                        self.session_touched = session_touched_before_event;
-                                    }
-                                }
-                                window.request_redraw();
-                                return;
-                            }
                             if self.info.refresh_rect.map(|r| inside(&r)).unwrap_or(false) {
                                 self.info.last_refresh = None;
                                 window.request_redraw();
@@ -5563,6 +5534,13 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(r) = self.statusbar.port_rect {
                         if sb_hit(&r) {
                             self.toggle_statusbar_popover(state::StatusbarPopover::Ports, r);
+                            window.request_redraw();
+                            return;
+                        }
+                    }
+                    if let Some(r) = self.statusbar.schedule_rect {
+                        if sb_hit(&r) {
+                            self.toggle_statusbar_popover(state::StatusbarPopover::Schedules, r);
                             window.request_redraw();
                             return;
                         }

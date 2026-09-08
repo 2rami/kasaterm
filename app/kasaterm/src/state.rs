@@ -76,6 +76,9 @@ pub(crate) struct StatusbarState {
     /// 터널 폴과 같은 5초 박자로 읽어 여기 캐시한다. 클릭 = /term 열기.
     pub(crate) port: Option<String>,
     pub(crate) port_rect: Option<(f32, f32, f32, f32)>,
+    /// 예약(반복·타이머) 칩 — 보드 방의 「등록됨」을 여기로 옮겼다(2026-09-08 지시
+    /// 「켜져 있는 거는 포트 하단바로」). 클릭 = 팝오버.
+    pub(crate) schedule_rect: Option<(f32, f32, f32, f32)>,
     /// 리소스 사용량 — kasaterm 자신 + 자식 트리(PTY 셸·claude 들) 합.
     /// (CPU %, RSS bytes). ps 폴이라 5초 박자.
     pub(crate) res: Option<(f32, u64)>,
@@ -141,6 +144,8 @@ pub(crate) enum UsageTab {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum StatusbarPopover {
     Ports,
+    /// 예약(반복·타이머) 목록 — 멈추거나 다시 켜고, 지운다.
+    Schedules,
     Tunnel,
     Usage,
     /// 최근 복사한 것들. 클립보드는 한 칸짜리 그릇이라 다음 복사가 앞의 것을 지우는데,
@@ -177,6 +182,10 @@ pub(crate) enum StatusbarHit {
     /// 터미널은 직접 타자, 아로나는 대화 읽기·학생 전환(2026-08-25 「링크를 따로」).
     OpenAronaUrl,
     CopyAronaUrl,
+    /// 예약 한 줄의 멈춤/켜기.
+    ScheduleToggle(String),
+    /// 예약 한 줄의 ×.
+    ScheduleDelete(String),
 }
 
 /// Right-hand git column + commit modal + path/branch dropdowns (the in-window
@@ -606,22 +615,6 @@ pub(crate) enum InfoSection {
     Machines,
 }
 
-/// Info 탭 머리의 앱 전역 진입점. 우상단 아이콘 클러스터에 흩어져 있던 것들이라
-/// 프로세스·포트와 달리 pane 상태와 무관하다 — 스크롤 위, 탭 머리 바로 아래 고정.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InfoAction {
-    /// 운영 방(보드) 토글. 메뉴막대에만 있던 진입점을 여기로 끌어왔다 — 「보기」
-    /// 메뉴 안쪽은 단축키도 없어 찾을 길이 없었다(2026-09-05 지시).
-    Board,
-    /// SCHALE OS(아로나) 패널 토글.
-    Arona,
-    /// 설정 화면.
-    Settings,
-    /// 피드백 작성(설정 창의 Feedback 페이지). 사이드바 트레이에도 있지만,
-    /// 사이드바를 접으면 트레이째 사라져 여기가 유일한 진입점이 된다.
-    Feedback,
-}
-
 /// 프로젝트 디렉터리 섹션의 액션 버튼.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InfoDirBtn {
@@ -754,9 +747,6 @@ pub(crate) struct InfoState {
     pub(crate) kill_rects: Vec<(u32, (f32, f32, f32, f32))>,
     pub(crate) sec_rects: Vec<(InfoSection, (f32, f32, f32, f32))>,
     pub(crate) dir_btn_rects: Vec<(InfoDirBtn, (f32, f32, f32, f32))>,
-    /// 머리의 전역 진입점 버튼. 스크롤 밖(고정)이라 본문 rect 들과 달리
-    /// `draw_info_col` 이 아니라 그 위 블록이 채운다.
-    pub(crate) action_rects: Vec<(InfoAction, (f32, f32, f32, f32))>,
     pub(crate) ctx_menu_rects: Vec<(InfoMenuAction, (f32, f32, f32, f32))>,
     /// 학생 줄 우클릭 메뉴 — `(x, y, pane id, 단)`.
     pub(crate) pane_menu: Option<(f32, f32, String, PaneMenuPage)>,
@@ -804,7 +794,6 @@ impl Default for InfoState {
             kill_rects: Vec::new(),
             sec_rects: Vec::new(),
             dir_btn_rects: Vec::new(),
-            action_rects: Vec::new(),
             ctx_menu_rects: Vec::new(),
             pane_menu: None,
             pane_menu_rects: Vec::new(),

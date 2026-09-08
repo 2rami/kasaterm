@@ -259,6 +259,81 @@ pub(crate) struct InfoSnap {
     /// 개수라도 밝히지 않으면 "내 3000 은 왜 없지" 와 "이 기계가 여는 게 이게
     /// 전부인가" 를 구별할 수 없다 — 시스템·다른 앱이 쥔 것이 대부분이다.
     pub(crate) outside: usize,
+    /// pane 별 「지금 뭘 하나」 한 줄 — 보드 방의 현황 줄을 그대로 가져온 것
+    /// (2026-09-08 지시 「보드에서 보이는 작업내용 … 인포에서」). 학생 줄 머리의
+    /// 세션 제목 자리에 이것이 먼저 선다.
+    pub(crate) tasks: HashMap<String, TaskLine>,
+    /// pane 밖에서 도는 백그라운드 에이전트 — 학생 목록 꼬리에 한 묶음으로.
+    pub(crate) background: Vec<BgLine>,
+    /// 예약(반복·타이머) — 하단바 「예약」 칩과 팝오버가 읽는다.
+    pub(crate) schedules: Vec<kasa_mcp::ScheduleItem>,
+}
+
+/// 학생 줄에 붙는 작업 한 줄. `attention` 이면 줄이 주황으로 튄다(승인·질문 대기).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TaskLine {
+    pub(crate) label: String,
+    pub(crate) attention: bool,
+}
+
+/// 백그라운드 에이전트 한 줄 — 이름·상태·어디서.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct BgLine {
+    pub(crate) name: String,
+    pub(crate) state: String,
+    pub(crate) place: String,
+}
+
+/// 수집 결과에 보드 쪽 정보를 덧댄다 — 작업 한 줄(collab board)·백그라운드 에이전트·예약.
+/// 백그라운드는 `claude agents` 를 띄우는 일이라 15초에 한 번만 새로 묻고 그 사이는
+/// 지난 답을 되쓴다(Info 는 1.5초마다 도는데 그때마다 프로세스를 띄울 일이 아니다).
+fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>>) -> InfoSnap {
+    if let Some(b) = backend {
+        if let Ok(rows) = kasa_socket::backend::Backend::collab_board(&*b) {
+            for r in rows {
+                snap.tasks.insert(
+                    r.surface_id.clone(),
+                    TaskLine {
+                        label: crate::native_board::status_label(&r),
+                        attention: crate::native_board::agent_needs_attention(&r),
+                    },
+                );
+            }
+        }
+        static BG: std::sync::Mutex<Option<(std::time::Instant, Vec<BgLine>)>> =
+            std::sync::Mutex::new(None);
+        let cached = BG.lock().ok().and_then(|g| {
+            g.as_ref()
+                .filter(|(t, _)| t.elapsed() < std::time::Duration::from_secs(15))
+                .map(|(_, v)| v.clone())
+        });
+        snap.background = match cached {
+            Some(v) => v,
+            None => {
+                let dynb: std::sync::Arc<dyn kasa_socket::backend::Backend> = b.clone();
+                let v: Vec<BgLine> = crate::native_board::collect_background(&dynb)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|r| BgLine {
+                        name: r.name.clone(),
+                        state: crate::native_board::background_state(r).to_string(),
+                        place: r
+                            .cwd
+                            .rsplit(std::path::MAIN_SEPARATOR)
+                            .next()
+                            .unwrap_or_default()
+                            .to_string(),
+                    })
+                    .collect();
+                if let Ok(mut g) = BG.lock() {
+                    *g = Some((std::time::Instant::now(), v.clone()));
+                }
+                v
+            }
+        };
+    }
+    snap.schedules = kasa_mcp::schedule_snapshot();
+    snap
 }
 
 /// 수집할 pane 하나. GUI 스레드가 채워 워커로 넘긴다 — 워커는 `App` 을 못 보고,
@@ -497,7 +572,7 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     // 사라지고 그 탭만 최상위에 고아로 남는다.
     fold_tabs(&mut panes, targets);
     panes.retain(|g| !g.closed);
-    InfoSnap { panes, ports, outside }
+    InfoSnap { panes, ports, outside, ..Default::default() }
 }
 
 /// 탭 그룹을 바깥 pane 그룹 **안으로** 옮겨 담는다.
@@ -1572,8 +1647,9 @@ impl App {
         let rev = self.info.rev.clone();
         let sites = self.info.sites.clone();
         let proxy = self.proxy.clone();
+        let backend = self.socket_backend.clone();
         std::thread::spawn(move || {
-            let next = collect(&targets, &sites);
+            let next = enrich(collect(&targets, &sites), backend);
             let changed = match snap.lock() {
                 Ok(mut g) => {
                     let differs = *g != next;
@@ -1945,162 +2021,6 @@ pub(crate) fn draw_side_tabs(
     ty + 27.0
 }
 
-/// 탭 머리와 본문 사이의 전역 진입점 — 계정·사용량 행, 그리고 아로나/설정 버튼.
-/// 셋 다 우상단 아이콘 클러스터에 있던 것으로, 거기서는 제목·경로와 자리를 다퉜다.
-///
-/// 본문(`draw_info_col`)이 아니라 그 위에 있는 건 스크롤 때문이다 — 프로세스가
-/// 수십이면 진입점이 화면 밖으로 밀려나는데, 이것들은 목록의 일부가 아니라 늘
-/// 같은 자리에 있어야 하는 버튼이다.
-///
-/// 계정 드롭다운은 여기서 안 그린다. 패널 위로 떠야 하고 그리려면 계정 목록 전체가
-/// 필요해서, 반환한 행 rect 를 앵커로 호출부(render.rs)가 마지막에 그린다.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn draw_info_actions(
-    g: &mut gpu::GpuRenderer,
-    cursor: (f32, f32),
-    info: &mut state::InfoState,
-    acct_label: Option<&str>,
-    usage: Option<&crate::UsageBadge>,
-    menu_open: bool,
-    arona_on: bool,
-    x: f32,
-    w: f32,
-    top: f32,
-) -> (f32, Option<(f32, f32, f32, f32)>) {
-    info.action_rects.clear();
-    let x0 = x + 14.0;
-    let right = x + w - 12.0;
-    let avail = (right - x0).max(0.0);
-    let mut y = top + 2.0;
-
-    // ── 계정 · 사용량 ──
-    // 여기 보이는 한도가 **활성 계정의** 것이라 이름과 한 행에 둔다. 계정을 안 쓰면
-    // 이름 없이 사용률만 — 안 쓰는 사람 행에 "기본" 을 얹는 건 잡음이다.
-    let acct_rect = (acct_label.is_some() || usage.is_some()).then(|| {
-        let h = 30.0_f32;
-        let r = (x0, y, avail, h);
-        let hov = menu_open || hit(cursor, &r);
-        g.hover_pointer |= hov;
-        // 한도가 코앞이면 행 전체가 물든다. 숫자 색만 바꾸면 11px 글자 하나가
-        // 빨개질 뿐이라, 정작 알아야 할 때(작업 중 한도가 닫히는 것) 눈에 안 든다.
-        let danger = usage.is_some_and(|u| u.pct >= 90.0);
-        round_rect(
-            g, r.0, r.1, r.2, r.3, theme::radius_sm(),
-            match (danger, hov) {
-                (true, true) => theme::with_alpha(theme::danger(), 0x44),
-                (true, false) => theme::with_alpha(theme::danger(), 0x2A),
-                (false, true) => theme::surface_hover(),
-                (false, false) => theme::surface(),
-            },
-        );
-        let f = 11.5_f32;
-        let ty = y + (h - f) / 2.0 - 1.0;
-        let chev = 11.0_f32;
-        g.queue_icon(
-            "chevron-down",
-            right - 10.0 - chev,
-            y + (h - chev) / 2.0,
-            chev,
-            if hov { theme::text() } else { theme::text_mute() },
-        );
-        let mut tx = x0 + 10.0;
-        if let Some(l) = acct_label {
-            let lw = g.measure_chrome_text(l, f, true);
-            g.draw_text(tx, ty, l,
-                gpu::DrawOpts { font_size: f, color: theme::text(), bold: true, italic: false });
-            tx += lw + 8.0;
-        }
-        if let Some(u) = usage {
-            // 70%↑ 주의·90%↑ 위험(웹뷰 UsagePill 과 같은 임계). 세 색 다 테마
-            // 토큰이다 — 하드코딩한 청록/산호는 팔레트를 갈아도 그대로 남아,
-            // 호박색 화면에서 이 숫자 하나만 딴 데서 온 것처럼 떴다.
-            let col = if u.pct >= 90.0 {
-                theme::danger()
-            } else if u.pct >= 70.0 {
-                theme::syn_number()
-            } else {
-                theme::success()
-            };
-            // 창 라벨을 숫자와 함께 — `5h 0%` 로 고정 표기하던 시절엔 실제 압박이
-            // 주간 창 95% 인데도 「5h 0%」 가 떠서 "다 0퍼로 뜬다"가 됐다(거노
-            // 2026-08-05). 이제 라벨은 그 숫자가 나온 창을 말한다.
-            //
-            // stale(upstream 막혀 재사용된 값)이면 흐리게 + `~` 를 앞에 붙인다.
-            // 숨기지 않는 것은 빈칸이 "한도 여유"로 읽히기 때문이다.
-            // 퍼센트 뒤에 그 창이 풀리기까지 남은 시간 — 드롭다운과 같은 표기다.
-            let l = if u.stale {
-                format!("~{} {:.0}%", u.label, u.pct)
-            } else {
-                format!("{} {:.0}%", u.label, u.pct)
-            };
-            // 남은 시간은 자리가 있을 때만 — 좁은 칼럼에선 이게 붙는 순간 정작
-            // 알아야 할 퍼센트가 chevron 밑으로 밀린다.
-            let room = (right - 10.0 - 11.0 - 6.0 - tx).max(0.0);
-            let l = match crate::resets_in_label(u.resets_at) {
-                Some(r) => {
-                    let long = format!("{l} · {r}");
-                    if g.measure_chrome_text(&long, f, true) <= room { long } else { l }
-                }
-                None => l,
-            };
-            let l = fit_text(g, &l, room, f, true);
-            let col = if u.stale { theme::with_alpha(col, 0x99) } else { col };
-            g.draw_text(tx, ty, &l,
-                gpu::DrawOpts { font_size: f, color: col, bold: true, italic: false });
-        }
-        y += h + 6.0;
-        r
-    });
-
-    // ── 전역 진입점 ──
-    // 아로나는 shim OFF 면 진입점 자체가 없다(빈 웹뷰로 들어갈 길을 원천 차단).
-    // 그때는 설정이 그 자리를 마저 쓴다 — 반 폭짜리 버튼 하나가 남으면 잘린 것처럼
-    // 보인다.
-    let mut btns: Vec<(state::InfoAction, &str, &str)> = Vec::new();
-    // 보드가 먼저다 — 아로나와 나란한 「지금 뭐가 도나」 쪽이고, 설정·피드백은
-    // 뒤쪽 잡무다. 여는 데 조건이 없어 아로나처럼 감추지 않는다(사용자 방이 하나도
-    // 없으면 `open_board_room` 이 스스로 물러난다).
-    btns.push((state::InfoAction::Board, "users", "보드"));
-    if arona_on {
-        btns.push((state::InfoAction::Arona, "sparkles", "아로나"));
-    }
-    btns.push((state::InfoAction::Settings, "settings-2", "설정"));
-    btns.push((state::InfoAction::Feedback, "message-square-warning", "피드백"));
-    let bh = 28.0_f32;
-    let gap = 6.0;
-    let bw = ((avail - gap * (btns.len() - 1) as f32) / btns.len() as f32).max(0.0);
-    let f = 11.0_f32;
-    // 라벨은 **셋 다** 들어갈 때만 붙인다. 하나만 잘려 아이콘이 되면 같은 줄에서
-    // 어떤 버튼은 글자를, 어떤 버튼은 그림을 말하게 되어 줄이 고장 난 것처럼 읽힌다.
-    let labels_fit = btns
-        .iter()
-        .all(|(_, _, l)| 13.0 + 5.0 + g.measure_chrome_text(l, f, false) + 10.0 <= bw);
-    for (i, (kind, icon, label)) in btns.into_iter().enumerate() {
-        let bx = x0 + i as f32 * (bw + gap);
-        let hov = hit(cursor, &(bx, y, bw, bh));
-        g.hover_pointer |= hov;
-        panel_rect_outlined(
-            g, bx, y, bw, bh, theme::radius_sm(),
-            theme::raised_on(theme::panel_bg(), hov),
-        );
-        let col = if hov { theme::text() } else { theme::text_dim() };
-        if labels_fit {
-            let lw = g.measure_chrome_text(label, f, false);
-            let inner = 13.0 + 5.0 + lw;
-            let ix = bx + (bw - inner) / 2.0;
-            g.queue_icon(icon, ix, y + (bh - 13.0) / 2.0, 13.0, col);
-            g.draw_text(ix + 18.0, y + (bh - f) / 2.0 - 1.0, label,
-                gpu::DrawOpts { font_size: f, color: col, bold: false, italic: false });
-        } else {
-            g.queue_icon(icon, bx + (bw - 13.0) / 2.0, y + (bh - 13.0) / 2.0, 13.0, col);
-        }
-        info.action_rects.push((kind, (bx, y, bw, bh)));
-    }
-    y += bh + 10.0;
-    g.rect(x0, y, avail, 1.0, theme::border());
-    (y + 9.0, acct_rect)
-}
-
 const ROW_H: f32 = 22.0;
 const SEC_H: f32 = 26.0;
 /// 섹션 본문과 다음 섹션 머리 사이 숨. 없으면 목록 마지막 행과 다음 머리가
@@ -2201,6 +2121,9 @@ pub(crate) fn draw_info_col(
             }
             h += GROUP_H;
             h += visible_row_count(info, gp) as f32 * ROW_H;
+        }
+        if !snap.background.is_empty() {
+            h += GROUP_H + snap.background.len() as f32 * ROW_H;
         }
         h
     };
@@ -2451,7 +2374,7 @@ pub(crate) fn draw_info_col(
             // 학생은 접힌 게 기본 — 펴 둔 것만 `pane_expanded` 에 있다.
             let collapsed = !info.pane_expanded.contains(&gp.pane);
             if y + GROUP_H > top && y < bottom {
-                draw_group_head(g, cursor, gp, collapsed, x, w, x0, right, y);
+                draw_group_head(g, cursor, gp, collapsed, snap.tasks.get(&gp.pane), x, w, x0, right, y);
             }
             info.group_rects.push((gp.pane.clone(), (x, y, w, GROUP_H)));
             y += GROUP_H;
@@ -2488,6 +2411,20 @@ pub(crate) fn draw_info_col(
                     info.proc_rects.push((p.pid, (x, y, w, ROW_H)));
                     y += ROW_H;
                 }
+            }
+        }
+        // 백그라운드 에이전트 — pane 이 없어 위 목록엔 안 잡히지만 이 기계에서 도는
+        // 대화다(2026-09-08 지시 「백그라운드도 캐릭터 목록에 넣어」).
+        if !snap.background.is_empty() {
+            if y + GROUP_H > top && y < bottom {
+                draw_bg_head(g, snap.background.len(), x, w, x0, right, y);
+            }
+            y += GROUP_H;
+            for b in &snap.background {
+                if y + ROW_H > top && y < bottom {
+                    draw_bg_row(g, b, x0, right, y);
+                }
+                y += ROW_H;
             }
         }
     }
@@ -2907,12 +2844,60 @@ fn draw_window_head(
 /// pane 의 학생 색으로, 터미널 헤더·테두리가 이미 쓰는 색과 같다(같은 pane 은
 /// 어디서든 같은 색). 활성 pane 은 왼쪽 띠로 한 번 더 표시한다 — 목록이 전 pane
 /// 공유라 "내가 지금 있는 곳"이 안 보이면 매번 번호를 대조하게 된다.
+/// 백그라운드 묶음 머리 — 학생 줄과 같은 높이, 얼굴 대신 반짝이.
+fn draw_bg_head(g: &mut gpu::GpuRenderer, n: usize, x: f32, w: f32, x0: f32, right: f32, y: f32) {
+    g.rect(x, y, w, GROUP_H, theme::with_alpha(theme::border(), 0x22));
+    g.queue_icon("sparkles", x0 + 11.0, y + 6.0, 12.0, theme::text_mute());
+    g.draw_text(
+        x0 + 30.0,
+        y + 4.0,
+        "백그라운드",
+        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
+    );
+    let s = n.to_string();
+    let nw = g.measure_chrome_text(&s, 10.0, true);
+    g.draw_text(
+        right - nw,
+        y + 6.0,
+        &s,
+        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: true, italic: false },
+    );
+}
+
+/// 백그라운드 에이전트 한 줄 — 상태 점·이름·상태·어디서.
+fn draw_bg_row(g: &mut gpu::GpuRenderer, b: &BgLine, x0: f32, right: f32, y: f32) {
+    let dot = match b.state.as_str() {
+        "작업 중" => theme::success(),
+        "막힘" => theme::attention(),
+        _ => theme::text_dim(),
+    };
+    circle_rect(g, x0 + 14.0, y + ROW_H / 2.0 - 3.0, 6.0, dot);
+    let tx = x0 + 26.0;
+    let name = fit_text(g, &b.name, ((right - tx) * 0.5).max(0.0), 11.0, true);
+    let nw = g.measure_chrome_text(&name, 11.0, true);
+    g.draw_text(
+        tx,
+        y + 5.0,
+        &name,
+        gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: true, italic: false },
+    );
+    let meta = if b.place.is_empty() { b.state.clone() } else { format!("{} · {}", b.state, b.place) };
+    let meta = fit_text(g, &meta, (right - tx - nw - 8.0).max(0.0), 10.5, false);
+    g.draw_text(
+        tx + nw + 8.0,
+        y + 5.5,
+        &meta,
+        gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false },
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_group_head(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     gp: &PaneGroup,
     collapsed: bool,
+    task: Option<&TaskLine>,
     x: f32,
     w: f32,
     x0: f32,
@@ -2920,6 +2905,10 @@ fn draw_group_head(
     y: f32,
 ) {
     let r = (x, y, w, GROUP_H);
+    // 승인·질문을 기다리는 학생은 줄째 주황으로 — 보드의 「확인 필요」가 이리로 왔다.
+    if task.is_some_and(|t| t.attention) {
+        g.rect(x, y, w, GROUP_H, theme::with_alpha(theme::attention(), 0x22));
+    }
     if hit(cursor, &r) {
         g.rect(x, y, w, GROUP_H, theme::surface_hover());
     }
@@ -3018,14 +3007,23 @@ fn draw_group_head(
     } else {
         budget
     };
-    if !gp.session.is_empty() && title_budget > 40.0 {
-        let s = fit_text(g, &gp.session, title_budget, 10.5, false);
+    // 작업 한 줄이 있으면 세션 제목보다 먼저다 — 제목은 「무엇으로 시작했나」고
+    // 작업 줄은 「지금 뭘 하나」라, 훑는 눈이 찾는 건 뒤쪽이다(2026-09-08 지시).
+    let (line, line_col) = match task {
+        Some(t) => (
+            t.label.clone(),
+            if t.attention { theme::attention() } else { theme::text_dim() },
+        ),
+        None => (gp.session.clone(), theme::text_dim()),
+    };
+    if !line.is_empty() && title_budget > 40.0 {
+        let s = fit_text(g, &line, title_budget, 10.5, false);
         let sw = g.measure_chrome_text(&s, 10.5, false);
         g.draw_text(
             cx,
             y + 6.0,
             &s,
-            gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false },
+            gpu::DrawOpts { font_size: 10.5, color: line_col, bold: false, italic: false },
         );
         cx += sw + 8.0;
         budget -= sw + 8.0;

@@ -49,6 +49,9 @@ pub(crate) fn paint_popover(
         state::StatusbarPopover::Ports => {
             paint_ports_popover(g, sb, view, cursor, anchor, win_w, win_h)
         }
+        state::StatusbarPopover::Schedules => {
+            paint_schedules_popover(g, sb, view, cursor, anchor, win_w, win_h)
+        }
         state::StatusbarPopover::Tunnel => paint_tunnel_popover(g, sb, cursor, anchor, win_w),
         state::StatusbarPopover::Usage => {
             paint_usage_popover(g, sb, view, cursor, anchor, win_w, win_h)
@@ -1007,6 +1010,150 @@ fn paint_ports_popover(
 /// 번호 칼럼을 **고정폭**으로 잡는 것이 이 그림의 핵심이다. 번호는 네 자리와 다섯
 /// 자리가 섞이는데(3000 · 62292), 폭을 재서 이어 붙이면 다음 칼럼이 행마다 들쭉날쭉
 /// 해져 눈이 세로로 못 훑는다. 자릿수가 칸을 넘으면 그건 포트가 아니므로 걱정이 없다.
+/// 예약(반복·타이머) 팝오버 — 보드 방 「등록됨」을 옮긴 것(2026-09-08 지시 「켜져
+/// 있는 거는 포트 하단바로」). 줄마다 켜짐 점·지시문·종류/대상/다음 시각, 오른쪽에
+/// 멈춤/켜기와 ×. 새로 거는 건 여전히 보드 방이다 — 입력칸까지 하단바에 두면 팝오버가
+/// 화면 절반이 된다.
+fn paint_schedules_popover(
+    g: &mut gpu::GpuRenderer,
+    sb: &mut state::StatusbarState,
+    view: &crate::info::InfoSnap,
+    cursor: (f32, f32),
+    anchor: (f32, f32, f32, f32),
+    win_w: f32,
+    win_h: f32,
+) {
+    let items = &view.schedules;
+    let body = 2.0 + items.len().max(1) as f32 * ROW_H;
+    let max_h = (win_h * 0.5).max(200.0);
+    let inner = body.min(max_h);
+    let h = HEAD_H + inner + PAD;
+    let w = POP_W.min(win_w - 16.0);
+    let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
+    let y = (anchor.1 - h - 6.0).max(8.0);
+    sb.popover_rect = Some((x, y, w, h));
+    panel_rect_outlined(g, x, y, w, h, theme::radius_md(), theme::surface());
+
+    g.queue_icon("rotate-cw", x + PADX, y + (HEAD_H - 13.0) / 2.0, 13.0, theme::text());
+    g.draw_text(
+        x + PADX + 19.0,
+        y + (HEAD_H - 13.0) / 2.0 - 1.0,
+        "예약",
+        gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: true, italic: false },
+    );
+    let on = items.iter().filter(|s| s.enabled).count();
+    let sub = format!("{on} 켜짐 · {} 전체", items.len());
+    let sw = g.measure_chrome_text(&sub, 11.0, false);
+    g.draw_text(
+        x + w - PADX - sw,
+        y + (HEAD_H - 11.0) / 2.0 - 1.0,
+        &sub,
+        gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
+    );
+    let top = y + HEAD_H;
+    g.rect(x + 1.0, top, w - 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
+
+    let bottom = y + h - PAD;
+    sb.popover_scroll = sb.popover_scroll.clamp(0.0, (body - inner).max(0.0));
+    g.push_clip(x, top, w, (bottom - top).max(0.0));
+    let mut ry = top + 2.0 - sb.popover_scroll;
+    if items.is_empty() {
+        g.draw_text(
+            x + PADX,
+            ry + 10.0,
+            "예약된 작업이 없어요 — 새 예약은 보드 방에서 건다",
+            gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
+        );
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    for it in items {
+        let r = (x, ry, w, ROW_H);
+        let hov = hit(cursor, &r);
+        if hov {
+            hover_rect(g, r.0, r.1, r.2, r.3, 0.0);
+        }
+        crate::circle_rect(
+            g,
+            x + PADX,
+            ry + 12.0,
+            6.0,
+            if it.enabled { theme::success() } else { theme::text_dim() },
+        );
+        // 오른쪽 단추 둘 — 멈춤/켜기(글자)와 ×. 줄 폭에서 그만큼을 뗀 자리에 글을 쓴다.
+        let tb = (x + w - PADX - 28.0 - 6.0 - 46.0, ry + 10.0, 46.0, 24.0);
+        let xb = (x + w - PADX - 28.0, ry + 10.0, 24.0, 24.0);
+        let thov = hit(cursor, &tb);
+        let xhov = hit(cursor, &xb);
+        g.hover_pointer |= thov || xhov;
+        panel_rect_outlined(
+            g, tb.0, tb.1, tb.2, tb.3, theme::radius_sm(),
+            theme::raised_on(theme::surface(), thov),
+        );
+        let tl = if it.enabled { "멈춤" } else { "켜기" };
+        let tlw = g.measure_chrome_text(tl, 11.0, false);
+        g.draw_text(
+            tb.0 + (tb.2 - tlw) / 2.0,
+            tb.1 + (tb.3 - 11.0) / 2.0 - 1.0,
+            tl,
+            gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
+        );
+        if xhov {
+            round_rect(g, xb.0, xb.1, xb.2, xb.3, theme::radius_sm(), theme::with_alpha(theme::danger(), 0x33));
+        }
+        g.queue_icon(
+            "x",
+            xb.0 + 7.0,
+            xb.1 + 7.0,
+            10.0,
+            if xhov { theme::danger() } else { theme::text_mute() },
+        );
+        let text_w = (tb.0 - 8.0 - (x + PADX + 14.0)).max(0.0);
+        let head = if it.label.is_empty() { it.text.as_str() } else { it.label.as_str() };
+        let head = crate::info::fit_text(g, head, text_w, 12.0, false);
+        g.draw_text(
+            x + PADX + 14.0,
+            ry + 6.0,
+            &head,
+            gpu::DrawOpts {
+                font_size: 12.0,
+                color: if it.enabled { theme::text() } else { theme::text_mute() },
+                bold: false,
+                italic: false,
+            },
+        );
+        let when = if !it.enabled {
+            "멈춤".to_string()
+        } else if it.kind == "loop" {
+            format!("매 {}분", (it.interval_sec / 60).max(1))
+        } else {
+            let left = it.next_ts - now;
+            if left <= 0.0 { "곧".to_string() } else if left < 3600.0 { format!("{}분 뒤", (left / 60.0).ceil() as u64) } else { format!("{}시간 뒤", (left / 3600.0).floor() as u64) }
+        };
+        let meta = format!("{} · {} · {when}", it.kind, it.surface);
+        let meta = crate::info::fit_text(g, &meta, text_w, 10.5, false);
+        g.draw_text(
+            x + PADX + 14.0,
+            ry + 24.0,
+            &meta,
+            gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false },
+        );
+        sb.popover_hits.push((state::StatusbarHit::ScheduleToggle(it.id.clone()), tb));
+        sb.popover_hits.push((state::StatusbarHit::ScheduleDelete(it.id.clone()), xb));
+        ry += ROW_H;
+    }
+    sb.popover_hits.retain_mut(|(_, r)| match g.clip_hit(*r) {
+        Some(h) => {
+            *r = h;
+            true
+        }
+        None => false,
+    });
+    g.pop_clip();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn port_row(
     g: &mut gpu::GpuRenderer,
@@ -1181,6 +1328,19 @@ impl crate::App {
             }
             Some(state::StatusbarHit::OpenPort(port)) => {
                 self.open_localhost(port);
+                return true;
+            }
+            Some(state::StatusbarHit::ScheduleToggle(id)) => {
+                let _ = kasa_mcp::schedule_toggle(&id);
+                // 목록은 Info 수집이 다시 읽어 온다 — 바로 다시 돌게 문을 연다.
+                self.info.last_refresh = None;
+                self.chrome_dirty = true;
+                return true;
+            }
+            Some(state::StatusbarHit::ScheduleDelete(id)) => {
+                let _ = kasa_mcp::schedule_delete(&id);
+                self.info.last_refresh = None;
+                self.chrome_dirty = true;
                 return true;
             }
             Some(state::StatusbarHit::OpenWebTerm) => {
