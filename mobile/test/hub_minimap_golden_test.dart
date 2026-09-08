@@ -40,6 +40,16 @@ http.Response _answer(http.Request req) {
         'window': 0,
         'cwd': '/w/shell',
       },
+      // 아리스 자리의 둘째 탭 — 칸을 좌우로 넘겨 본다.
+      {
+        'id': '%6',
+        'name': '호시노',
+        'title': '',
+        'status': 'idle',
+        'window': 0,
+        'cwd': '/w',
+        'color': '#7cc4ff',
+      },
       // 탭 안에 숨은 학생 — 옛 서버는 배치에 탭을 안 실어 어느 칸에도 없다.
       {
         'id': '%4',
@@ -67,7 +77,15 @@ http.Response _answer(http.Request req) {
           'active': true,
           'aspect': 1.9,
           'panes': [
-            {'surface_id': '%1', 'x': 0, 'y': 0, 'w': 60, 'h': 100},
+            {
+              'surface_id': '%1',
+              'x': 0,
+              'y': 0,
+              'w': 60,
+              'h': 100,
+              'tabs': ['%1', '%6'],
+              'tab_active': 1,
+            },
             {'surface_id': '%2', 'x': 60, 'y': 0, 'w': 40, 'h': 55},
             {'surface_id': '%3', 'x': 60, 'y': 55, 'w': 20, 'h': 45},
             // 목록에 없는 pane(맨 셸) — 빈 상자가 아니라 터미널 글리프로.
@@ -105,7 +123,9 @@ void main() {
     // 떠오르기(Appear)가 끝난 뒤를 찍는다 — 중간 프레임을 골든으로 굳히면 안 된다.
     await tester.pump(const Duration(milliseconds: 1200));
     expect(find.text('게임개발부'), findsOneWidget);
-    expect(find.text('아리스'), findsNWidgets(2));
+    // 지도 칸은 앞 탭(호시노)을 보이고, 아리스는 목록에만 — 칸은 넘겨야 나온다.
+    expect(find.text('호시노'), findsNWidgets(2));
+    expect(find.text('아리스'), findsAtLeastNWidgets(1));
     // 숨은 탭 학생은 지도 밑 「탭 안」 줄에 서고, 목록에는 그대로 있다.
     expect(find.text('탭 안'), findsOneWidget);
     expect(find.text('세이아'), findsOneWidget);

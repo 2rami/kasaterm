@@ -607,7 +607,7 @@ class _MiniMap extends StatelessWidget {
                       server: server,
                       tabs: hidden,
                       active: null,
-                      size: 18,
+                      size: 24,
                       onOpen: onOpen,
                       marks: true,
                     ),
@@ -657,7 +657,7 @@ class _MiniMap extends StatelessWidget {
   }
 }
 
-class _MiniCell extends StatelessWidget {
+class _MiniCell extends StatefulWidget {
   const _MiniCell({
     required this.server,
     required this.pane,
@@ -677,18 +677,50 @@ class _MiniCell extends StatelessWidget {
   final void Function(Pane)? onOpen;
   final void Function(Pane)? onMore;
 
-  static const _tabFace = 14.0;
+  @override
+  State<_MiniCell> createState() => _MiniCellState();
+}
+
+/// 탭이 여럿인 칸은 좌우로 넘겨 본다 — 탭마다 작은 얼굴을 줄 세우면 손가락으로 못
+/// 집는다(2026-09-08 지적 「터치하기 너무 작잖아」). 한 번에 한 학생, 밑에 점으로 몇째인지.
+class _MiniCellState extends State<_MiniCell> {
+  late int _page = _initialPage;
+  late final PageController _pages = PageController(initialPage: _page);
+
+  int get _initialPage {
+    final a = widget.tabActive;
+    return a != null && a >= 0 && a < widget.tabs.length ? a : 0;
+  }
+
+  @override
+  void didUpdateWidget(_MiniCell old) {
+    super.didUpdateWidget(old);
+    // 데스크톱에서 앞 탭이 바뀌면 따라간다 — 손으로 넘겨 둔 자리는 그때만 밀린다.
+    if (old.tabActive != widget.tabActive ||
+        old.tabs.length != widget.tabs.length) {
+      final next = _initialPage;
+      if (next != _page && _pages.hasClients) {
+        _page = next;
+        _pages.jumpToPage(next);
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _pages.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final tabs = widget.tabs;
     final tabbed = tabs.length > 1;
-    // 앞에 나온 탭이 이 칸의 얼굴 — 자리 pane 은 대개 첫 탭이라, 그대로 두면 뒤에
-    // 숨은 학생이 지도에 나오는 셈이다.
-    final front = tabbed && tabActive != null && tabActive! < tabs.length
-        ? tabs[tabActive!]
-        : null;
-    final p = front ?? pane;
+    // 넘겨서 보고 있는 탭이 이 칸의 얼굴 — 자리 pane 은 대개 첫 탭이라, 그대로 두면
+    // 뒤에 숨은 학생이 지도에 안 나온다.
+    final shown = tabbed && _page < tabs.length ? tabs[_page] : null;
+    final p = shown ?? widget.pane;
     final accent = p == null
         ? scheme.outline
         : (parseHexColor(p.color) ?? scheme.primary);
@@ -700,11 +732,44 @@ class _MiniCell extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, box) {
         final roomy = box.maxWidth >= 64 && box.maxHeight >= 44;
-        // 탭 줄이 들어갈 자리가 있을 때만 — 좁은 칸에선 얼굴 하나가 낫다.
-        final tabRow = tabbed && box.maxHeight >= 40 && box.maxWidth >= 40;
-        final face = math.min(
-          (box.maxHeight - (tabRow ? _tabFace + 4 : 0)) * 0.55,
-          30.0,
+        final dots = tabbed && box.maxHeight >= 36;
+        final face = math.min((box.maxHeight - (dots ? 8 : 0)) * 0.55, 30.0);
+        Widget student(Pane? q) => Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (q == null && face >= 14)
+                // 학생이 안 앉은 칸(맨 셸)도 빈 상자로 두지 않는다 — 깨진 칸으로
+                // 읽힌다(2026-09-08 폰 실물 점검).
+                Icon(
+                  Icons.terminal,
+                  size: face * 0.6,
+                  color: scheme.outline.withValues(alpha: 0.7),
+                ),
+              if (q != null && face >= 14)
+                StudentFace(
+                  slug: q.slug,
+                  url: q.slug == null
+                      ? null
+                      : widget.server.avatar(q.slug!, machine: q.machine),
+                  shell: q.isShell,
+                  size: face,
+                ),
+              if (q != null && roomy)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(
+                    q.displayName,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.labelSmall?.copyWith(color: scheme.onSurface),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              if (dots) const SizedBox(height: 8),
+            ],
+          ),
         );
         return AnimatedContainer(
           duration: const Duration(milliseconds: 300),
@@ -721,61 +786,47 @@ class _MiniCell extends StatelessWidget {
           child: Material(
             color: Colors.transparent,
             child: InkWell(
-              onTap: p == null || onOpen == null ? null : () => onOpen!(p),
-              onLongPress: p == null || onMore == null
+              onTap: p == null || widget.onOpen == null
                   ? null
-                  : () => onMore!(p),
+                  : () => widget.onOpen!(p),
+              onLongPress: p == null || widget.onMore == null
+                  ? null
+                  : () => widget.onMore!(p),
               child: Stack(
                 children: [
-                  if (tabRow)
+                  if (tabbed)
+                    PageView(
+                      controller: _pages,
+                      onPageChanged: (i) => setState(() => _page = i),
+                      children: [for (final q in tabs) student(q)],
+                    )
+                  else
+                    student(p),
+                  if (dots)
                     Positioned(
-                      top: 2,
-                      left: 3,
-                      right: 18,
-                      child: _MiniTabRow(
-                        server: server,
-                        tabs: tabs,
-                        active: tabActive,
-                        size: _tabFace,
-                        onOpen: onOpen,
+                      left: 0,
+                      right: 0,
+                      bottom: busy ? 5 : 3,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          for (var i = 0; i < tabs.length; i++)
+                            Container(
+                              width: i == _page ? 6 : 4,
+                              height: 4,
+                              margin: const EdgeInsets.symmetric(
+                                horizontal: 1.5,
+                              ),
+                              decoration: BoxDecoration(
+                                color: i == _page
+                                    ? scheme.onSurface
+                                    : scheme.onSurface.withValues(alpha: 0.3),
+                                borderRadius: BorderRadius.circular(2),
+                              ),
+                            ),
+                        ],
                       ),
                     ),
-                  Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (tabRow) const SizedBox(height: _tabFace + 2),
-                        // 학생이 안 앉은 칸(맨 셸)도 빈 상자로 두지 않는다 — 깨진 칸으로
-                        // 읽힌다(2026-09-08 폰 실물 점검).
-                        if (p == null && face >= 14)
-                          Icon(
-                            Icons.terminal,
-                            size: face * 0.6,
-                            color: scheme.outline.withValues(alpha: 0.7),
-                          ),
-                        if (p != null && face >= 14)
-                          StudentFace(
-                            slug: p.slug,
-                            url: p.slug == null
-                                ? null
-                                : server.avatar(p.slug!, machine: p.machine),
-                            shell: p.isShell,
-                            size: face,
-                          ),
-                        if (p != null && roomy)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 2),
-                            child: Text(
-                              p.displayName,
-                              style: Theme.of(context).textTheme.labelSmall
-                                  ?.copyWith(color: scheme.onSurface),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
                   if (waiting)
                     Positioned(
                       top: 3,
