@@ -4,6 +4,10 @@ use super::*;
 pub(crate) use crate::screenread::*;
 pub(crate) use crate::sprites::*;
 
+#[path = "pane_identity.rs"]
+mod pane_identity;
+use pane_identity::{MachineIdentity, PaneIdentity};
+
 fn terminal_preedit_for_active<'a>(
     preedit: &'a str,
     owner_surface: Option<&str>,
@@ -845,11 +849,6 @@ impl App {
             /// 화면의 `▰▰▱ N%` 에서 읽은 compact 진행률. Some 이면 바를 이 값으로
             /// 채우고(진짜 진행률), None 이면 시간 루프로 폴백한다.
             compact_pct: Option<u8>,
-            /// 원격 pane 이면 그 기계 이름 — 헤더에 ⇄ 칩을 띄우고 바탕을 물들인다.
-            /// 얼굴·이름이 로컬과 똑같아서, pane 자체에 표가 없으면 「입력이 어느
-            /// 기계로 가는가」를 활성 pane(타이틀바 배지)에서만 알 수 있다
-            /// (2026-08-29 지시 「맥북에서 맥미니 세션을 다르게 보이게」).
-            machine: Option<String>,
             /// Codex rollout이 보고한 추론 강도·협업 모드. 모델은 상태줄에 있어
             /// 헤더에서는 지금 고른 두 값을 짧게 보인다.
             codex_status: Option<String>,
@@ -3115,18 +3114,6 @@ impl App {
                             .get(&id)
                             .is_some_and(|a| a.status == "compacting"),
                         compact_pct: self.pane_activity.get(&id).and_then(|a| a.compact_pct),
-                        // 원격 링크는 kasa-mcp 자체 레지스트리라 ws 락과 무관 — 이
-                        // 락 블록 안에서 불러도 안전하다(사이드바 2909 와 같은 원천).
-                        machine: kasa_mcp::remote::remote_info(&id).map(|i| {
-                            if i.label.is_empty() {
-                                i.base
-                                    .trim_start_matches("http://")
-                                    .trim_start_matches("https://")
-                                    .to_string()
-                            } else {
-                                i.label
-                            }
-                        }),
                         codex_status,
                         color: pane.color,
                         is_markdown: pane.markdown().map_or(false, |m| m.is_md_doc),
@@ -3931,47 +3918,34 @@ impl App {
                 self.display_pane_char(&ws, &pane_id).unwrap_or(pane_id)
             })
         };
-        // Alt 오버레이의 부제도 같은 이유로 여기서 뜬다(위 주석 참고).
-        // 켜져 있을 때만 훑는다 — 평소 프레임에서 전 pane 을 도는 값이 아깝다.
-        //
-        // 부제는 **사람이 붙인 제목**이 정본이다. 번호 아래에서 알고 싶은 것은
-        // 「그 창이 무슨 일을 하는가」지 누가 앉아 있는가가 아니다(2026-08-24
-        // 지시). 학생 이름은 제목이 아직 없을 때의 폴백 — 그것도 없는 것보다는
-        // 창을 가른다.
-        let pane_number_subs: HashMap<String, String> = if self.show_pane_numbers {
+        // 번호·제목·기기를 같은 활성 탭에서 떠야 탭 전환 때 서로 다른 창을
+        // 가리키지 않는다. 기기 이름은 준비된 캐시만 읽어 GUI에서 fork하지 않는다.
+        let pane_identities: HashMap<String, PaneIdentity> = {
             let ws = self.ws.lock().unwrap();
-            let ids: Vec<String> = ws.panes.keys().cloned().collect();
-            ids.into_iter()
-                .filter_map(|id| {
-                    let pinned = ws
-                        .panes
-                        .get(&id)
-                        .filter(|p| p.title_pinned)
-                        .and_then(|p| p.title.clone())
-                        .filter(|s| !s.trim().is_empty());
-                    let base = pinned.or_else(|| self.display_pane_char(&ws, &id));
-                    // 헤더 띠도 발치 상태줄도 없는 pane 은 어느 기계의 몸인지 말할
-                    // 자리가 여기밖에 남지 않는다(단일 pane + 상태줄 끔). 그 조합에서만
-                    // 부제 꼬리에 기계를 얹는다 — Alt 를 누른 순간에만 뜨는 자리라,
-                    // 크롬을 걷어내려고 상태줄을 끈 선택과도 싸우지 않는다.
-                    //
-                    // 꼬리에 두는 이유는 정본이 제목이어서다. 앞에 두면 창마다 같은
-                    // 기계 이름이 먼저 읽혀, 창을 가르려고 부제를 켠 뜻이 죽는다.
-                    let machine = (!headers.iter().any(|h| h.id == id)
-                        && !self.statusbar_visible(&id))
-                    .then(|| crate::info::pane_machine_label(&id))
-                    .flatten()
-                    .map(|(label, _)| label);
-                    match (base, machine) {
-                        (Some(b), Some(m)) => Some((id, format!("{b}  ·  {m}"))),
-                        (Some(b), None) => Some((id, b)),
-                        (None, Some(m)) => Some((id, m)),
-                        (None, None) => None,
-                    }
+            let local_name = crate::info::cached_local_machine_name();
+            footer_slots.iter()
+                .filter_map(|(id, ..)| ws.panes.get(id).map(|pane| (id, pane)))
+                .map(|(id, pane)| {
+                    let tab = pane.tabs.get(pane.active_tab);
+                    let shown = tab.and_then(|t| t.pid.clone()).unwrap_or_else(|| id.clone());
+                    let title = if self.show_pane_numbers {
+                        tab.and_then(|t| t.title.clone())
+                            .filter(|s| !s.trim().is_empty())
+                            .or_else(|| (shown == *id && pane.title_pinned)
+                                .then(|| pane.title.clone()).flatten()
+                                .filter(|s| !s.trim().is_empty()))
+                            .or_else(|| self.display_tab_char(&ws, &shown))
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    let machine = MachineIdentity::for_pane(
+                        tab.and_then(|t| t.pid.as_deref()),
+                        local_name,
+                    );
+                    (id.clone(), PaneIdentity { shown, title, machine })
                 })
                 .collect()
-        } else {
-            HashMap::new()
         };
         let settings_room_active = self.settings_room_active();
         // 본진 계정 조작은 백그라운드 스레드에서 끝나므로 그 자리에서 말풍선을
@@ -8476,7 +8450,9 @@ impl App {
                     // 원격 pane 은 헤더 바탕을 강조색으로 은은히 물들인다 — 칩 하나로는
                     // 여러 pane 이 깔린 화면에서 훑을 때 안 걸린다(어느 pane 이 저
                     // 기계 것인지는 바탕색이 먼저 말해야 한다).
-                    None if h.machine.is_some() => theme::lerp(theme::bg(), theme::accent(), 0.10),
+                    None if pane_identities.get(&h.id).is_some_and(|p| p.machine.remote) => {
+                        pane_identities[&h.id].machine.background(theme::bg())
+                    }
                     None => theme::bg(),
                 };
                 g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, hdr_bg);
@@ -8573,75 +8549,28 @@ impl App {
                         chip_right = cx - 6.0;
                     }
                 }
-                // 원격 pane 칩 — 타이틀바 배지와 같은 말(⇄ 기계)을 pane 자체에도.
-                // 활성 pane 이 아니어도 어느 기계 것인지 pane 만 보고 알 수 있게.
-                if let Some(m) = h.machine.as_deref() {
-                    let label = format!("⇄ {m}");
-                    let pad = 6.0;
-                    let cw = g.measure_chrome_text(&label, chrome_font, true) + pad * 2.0;
-                    let ch = PANE_HEADER_HEIGHT - 6.0;
-                    let cx = chip_right - cw;
-                    if cx > h.x + 8.0 {
-                        let cy = h.y + 3.0;
-                        g.round_rect_fill(
-                            cx,
-                            cy,
-                            cw,
-                            ch,
-                            4.0,
-                            theme::with_alpha(theme::accent(), 0x2a),
-                        );
-                        g.draw_text(
-                            cx + pad,
-                            h.y + (PANE_HEADER_HEIGHT - chrome_font) / 2.0,
-                            &label,
-                            gpu::DrawOpts {
-                                font_size: chrome_font,
-                                color: theme::accent(),
-                                bold: true,
-                                italic: false,
-                            },
-                        );
-                        chip_right = cx - 6.0;
-                    }
-                } else if !crate::info::local_machine_name().is_empty() {
-                    // 로컬 pane 도 어느 기계의 몸인지 말한다 — 원격에만 칩이 있으면
-                    // 「칩이 없다 = 이 기계」를 아는 사람만 읽고, 원격이 하나도 없는
-                    // 창에서는 화면 어디에도 답이 없다(2026-09-02 감사).
-                    //
-                    // 원격 칩과 자리·좌표 규칙은 같게 두되 톤을 한 단계 죽인다. 이쪽은
-                    // 거의 모든 pane 에 늘 떠 있는 표시라, 강조색으로 두면 훑을 때
-                    // 눈이 먼저 가야 할 ⇄ 칩과 무게가 같아진다.
-                    let label = crate::info::local_machine_name();
+                if let Some(identity) = pane_identities.get(&h.id) {
+                    let machine = &identity.machine;
                     let font = chrome_font - 1.0;
+                    let icon = 12.0;
                     let pad = 6.0;
-                    let cw = g.measure_chrome_text(label, font, false) + pad * 2.0;
-                    let ch = PANE_HEADER_HEIGHT - 8.0;
-                    let cx = chip_right - cw;
-                    // 원격 칩과 달리 이쪽은 **늘** 떠 있는 표시라, 탭 자리를 빼앗으면
-                    // 좁은 pane 의 탭 이름이 상시로 한 글자만 남는다. 탭이 읽힐 만큼
-                    // (웹 주소 pill 과 같은 140px) 남을 때만 그린다 — 이 기계 이름은
-                    // 창 전체가 같은 값이라 한 pane 에서 빠져도 옆 pane 이 말해 준다.
-                    if cx > h.x + 8.0 + 140.0 {
+                    let room = (chip_right - h.x - 140.0 - pad * 2.0 - icon - 5.0)
+                        .max(0.0).min(156.0);
+                    let label = crate::info::fit_text(g, &machine.label, room, font, false);
+                    if !label.is_empty() {
+                        let cw = g.measure_chrome_text(&label, font, false) + pad * 2.0 + icon + 5.0;
+                        let ch = PANE_HEADER_HEIGHT - 8.0;
+                        let cx = chip_right - cw;
                         let cy = h.y + 4.0;
-                        g.round_rect_fill(
-                            cx,
-                            cy,
-                            cw,
-                            ch,
-                            4.0,
-                            theme::with_alpha(theme::surface_active(), 0x70),
-                        );
+                        let bg = machine.background(theme::bg());
+                        let fg = machine.foreground(bg);
+                        g.round_rect_fill(cx, cy, cw, ch, 4.0, bg);
+                        g.queue_icon(machine.icon(), cx + pad, cy + (ch - icon) / 2.0, icon, fg);
                         g.draw_text(
-                            cx + pad,
+                            cx + pad + icon + 5.0,
                             h.y + (PANE_HEADER_HEIGHT - font) / 2.0,
-                            label,
-                            gpu::DrawOpts {
-                                font_size: font,
-                                color: theme::text_mute(),
-                                bold: false,
-                                italic: false,
-                            },
+                            &label,
+                            gpu::DrawOpts { font_size: font, color: fg, bold: false, italic: false },
                         );
                         chip_right = cx - 6.0;
                     }
@@ -9521,11 +9450,11 @@ impl App {
                 // 기계인가」에 답하는 자리가 여기밖에 없다(2026-09-02 감사 ⑤).
                 // 나머지 칩이 말하는 것(경로·브랜치·변경 수)은 파일트리와 Git 탭에도
                 // 있는 중복이지만, 기계는 이 띠가 접히면 화면에서 통째로 사라진다.
-                let machine = crate::info::pane_machine_label(fid)
-                    .map(|(label, remote)| {
+                let machine = pane_identities.get(fid)
+                    .map(|identity| {
                         // 칩 하나만 남는 폭까지 좁아져도 이름 앞머리는 읽히게 자른다.
                         let room = (avail - pad_x * 2.0 - icon_sz - icon_gap).max(0.0);
-                        (crate::info::fit_text(g, &label, room, font, false), remote)
+                        (crate::info::fit_text(g, &identity.machine.label, room, font, false), &identity.machine)
                     })
                     .filter(|(l, _)| !l.is_empty());
                 let machine_w = machine
@@ -9593,62 +9522,18 @@ impl App {
                     font,
                     false,
                 );
-                // 기계 칩 — 서버 아이콘 + 이름. 원격은 헤더 배지와 **같은 말**
-                // (⇄ 라벨)에 같은 강조색을 쓰고, 로컬은 거의 모든 pane 에 늘 떠 있는
-                // 표시라 한 단계 죽인 톤으로 둔다. 누를 데가 없으니 hover 도 없다.
-                if let Some((label, remote)) = &machine {
+                if let Some((label, machine)) = &machine {
                     let pw = machine_w;
-                    round_rect(
-                        g,
-                        cx,
-                        pill_y,
-                        pw,
-                        pill_h,
-                        theme::radius_sm(),
-                        if *remote {
-                            theme::with_alpha(theme::accent(), 0x66)
-                        } else {
-                            theme::border()
-                        },
-                    );
-                    round_rect(
-                        g,
-                        cx + 1.0,
-                        pill_y + 1.0,
-                        pw - 2.0,
-                        pill_h - 2.0,
-                        theme::radius_sm() - 1.0,
-                        if *remote {
-                            theme::with_alpha(theme::accent(), 0x2a)
-                        } else {
-                            theme::surface_hover()
-                        },
-                    );
+                    let bg = machine.background(theme::bg());
+                    let fg = machine.foreground(bg);
+                    round_rect(g, cx, pill_y, pw, pill_h, theme::radius_sm(), bg);
                     g.queue_icon(
-                        "server",
-                        cx + pad_x,
-                        pill_y + (pill_h - icon_sz) / 2.0,
-                        icon_sz,
-                        if *remote {
-                            theme::accent()
-                        } else {
-                            theme::text_dim()
-                        },
+                        machine.icon(), cx + pad_x, pill_y + (pill_h - icon_sz) / 2.0,
+                        icon_sz, fg,
                     );
                     g.draw_text(
-                        cx + pad_x + icon_sz + icon_gap,
-                        txt_y,
-                        label,
-                        gpu::DrawOpts {
-                            font_size: font,
-                            color: if *remote {
-                                theme::accent()
-                            } else {
-                                theme::text_mute()
-                            },
-                            bold: false,
-                            italic: false,
-                        },
+                        cx + pad_x + icon_sz + icon_gap, txt_y, label,
+                        gpu::DrawOpts { font_size: font, color: fg, bold: false, italic: false },
                     );
                     cx += pw + chip_gap;
                 }
@@ -10430,74 +10315,10 @@ impl App {
                     }
                 }
             }
-            // Alt/Option held → tmux "display-panes": each pane shows its %N
-            // big + centered on an accent pill, so the user can read the id
-            // (for `tell %N`, focus, etc.) without it crowding the header.
-            // Works in single-pane too — body_rects covers every pane.
             if self.show_pane_numbers {
-                // `body_rects` keys on the pane leaf id (== first tab's pid), so a
-                // pane with several tabs would flash the same number on every tab.
-                // Show the *active tab's* real id instead — that's the `%N` its
-                // claude sees in KASATERM_PANE_ID and the one `tell`/`rename`
-                // target. Falls back to the leaf id for image/markdown tabs (no pid).
-                let ws = self.ws.lock().unwrap();
                 for (id, rect) in &body_rects {
-                    let (rx, ry, rw, rh) = *rect;
-                    if rw < 24.0 || rh < 24.0 {
-                        continue;
-                    }
-                    let shown: String = ws
-                        .panes
-                        .get(id)
-                        .and_then(|p| p.tabs.get(p.active_tab).and_then(|t| t.pid.clone()))
-                        .unwrap_or_else(|| id.clone());
-                    // 번호만으로는 어느 창이 무슨 일이었는지 안 떠올라, 그
-                    // pane 의 제목(없으면 학생 이름)을 번호 아래 작게 얹는다.
-                    let sub = pane_number_subs.get(id);
-                    let font = (rh * 0.4).clamp(24.0, 72.0);
-                    let sub_font = (font * 0.34).clamp(11.0, 22.0);
-                    let tw = g.measure_chrome_text(&shown, font, true);
-                    let sw = sub
-                        .map(|s| g.measure_chrome_text(s, sub_font, false))
-                        .unwrap_or(0.0);
-                    let pad = font * 0.4;
-                    let sub_h = if sub.is_some() { sub_font * 1.3 } else { 0.0 };
-                    let box_w = tw.max(sw) + pad * 2.0;
-                    let box_h = font + sub_h + pad * 2.0;
-                    let bx = rx + (rw - box_w) / 2.0;
-                    let by = ry + (rh - box_h) / 2.0;
-                    round_rect(
-                        g,
-                        bx,
-                        by,
-                        box_w,
-                        box_h,
-                        theme::radius_md(),
-                        theme::with_alpha(theme::accent(), 0xE6),
-                    );
-                    g.draw_text(
-                        bx + (box_w - tw) / 2.0,
-                        by + pad,
-                        &shown,
-                        gpu::DrawOpts {
-                            font_size: font,
-                            color: [0xFF, 0xFF, 0xFF, 0xFF],
-                            bold: true,
-                            italic: false,
-                        },
-                    );
-                    if let Some(name) = sub {
-                        g.draw_text(
-                            bx + (box_w - sw) / 2.0,
-                            by + pad + font + sub_font * 0.2,
-                            name,
-                            gpu::DrawOpts {
-                                font_size: sub_font,
-                                color: [0xFF, 0xFF, 0xFF, 0xCC],
-                                bold: false,
-                                italic: false,
-                            },
-                        );
+                    if let Some(identity) = pane_identities.get(id) {
+                        pane_identity::draw_card(g, identity, *rect);
                     }
                 }
             }

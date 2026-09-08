@@ -6282,6 +6282,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // `open`-launched instance. Loaded (and deleted) before anything
     // reads KASATERM_* vars.
     load_capture_config();
+    // 기기 이름 수집은 첫 화면을 준비하는 동안 끝낸다. Info를 열어야
+    // 이름·기기색이 생기거나 렌더 스레드에서 scutil을 띄우지 않도록 한다.
+    std::thread::spawn(info::local_machine_name);
     // 첫 설치 여부는 어떤 부팅 작업도 ~/.config/kasaterm 을 만들기 전에 확정한다.
     // 기존 설정 파일이 있던 사용자는 완료 표식만 보강하고 화면을 띄우지 않는다.
     onboarding::prepare_boot();
