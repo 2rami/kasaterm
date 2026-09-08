@@ -5,6 +5,8 @@ use winit::window::Window;
 
 #[derive(Clone, Copy)]
 pub enum Action {
+    Chat,
+    ChatAsk(&'static str),
     Talk,
     Touch,
     Rest,
@@ -24,6 +26,7 @@ pub fn show(
     prefs: &PetPreferences,
     resting: bool,
     typing: bool,
+    chatting: bool,
     can_touch: bool,
     can_next: bool,
     can_save: bool,
@@ -34,11 +37,13 @@ pub fn show(
     let menu = Menu::new();
     let mut actions: Vec<(MenuId, Action)> = Vec::new();
     for (title, enabled, action) in [
+        (if chatting { "나쵸 대화 닫기" } else { "나쵸와 대화" }, cfg!(target_os = "macos"), Action::Chat),
+        ("재시작 확인할 일", cfg!(target_os = "macos"), Action::ChatAsk("나 재시작하면 뭐 확인해야 돼?")),
         (
             if typing {
-                "말 걸기 닫기"
+                "학생 말 걸기 닫기"
             } else {
-                "말 걸기"
+                "학생에게 말 걸기"
             },
             true,
             Action::Talk,
@@ -53,12 +58,12 @@ pub fn show(
     }
     menu.append(&PredefinedMenuItem::separator()).ok()?;
     for (title, action) in [
-        ("시킨 일 요약", crate::journal::Action::Summary),
-        ("반영 기다리는 일", crate::journal::Action::Waiting),
-        ("요청 장부 열기", crate::journal::Action::Open),
+        ("시킨 일 요약", Action::ChatAsk("내가 시킨 일들을 요약해줘.")),
+        ("반영 기다리는 일", Action::ChatAsk("반영을 기다리는 일은 뭐야?")),
+        ("요청 기록 열기", Action::Journal(crate::journal::Action::Open)),
     ] {
         let item = MenuItem::new(title, true, None);
-        actions.push((item.id().clone(), Action::Journal(action)));
+        actions.push((item.id().clone(), action));
         menu.append(&item).ok()?;
     }
     menu.append(&PredefinedMenuItem::separator()).ok()?;

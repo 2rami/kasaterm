@@ -23,6 +23,9 @@ mod bubble;
 mod menu;
 mod catalog;
 mod journal;
+mod chat;
+#[cfg(target_os = "macos")]
+mod chat_panel;
 #[cfg(target_os = "macos")]
 mod native_cursor;
 
@@ -88,6 +91,11 @@ struct App {
     typing: Option<String>,
     journal: journal::Client,
     journal_shown: bool,
+    chat: chat::Chat,
+    #[cfg(target_os = "macos")]
+    chat_panel: Option<chat_panel::Panel>,
+    chat_restore_scale: Option<f32>,
+    chat_prefill: Option<String>,
     typed_tex: Option<(wgpu::TextureView, f32, f32)>,
     /// 조합 중인 한글. 확정 전이라 `typing` 에 아직 안 붙은 글자다.
     preedit: String,
@@ -243,6 +251,7 @@ impl ApplicationHandler for App {
             bubble_vb, bubble_ub,
             dev, q, surf, fmt, bgl, samp, texs, mask_view, dummy_view });
         self.win = Some(win);
+        if std::env::args().any(|arg| arg == "--chat") { self.toggle_chat(); }
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, ev: WindowEvent) {
@@ -394,12 +403,17 @@ impl App {
             .unwrap_or(false);
         if let Some(d) = &self.pet_dir { self.apply_preferences(kasa_pet_config::read(d)); }
         let action = menu::show(&win, &self.preferences, self.resting || self.mood == board::Mood::Sleep,
-            self.typing.is_some(), self.catalog.touch().is_some(), can_next, self.pet_dir.is_some(),
+            self.typing.is_some(), self.chat_open(), self.catalog.touch().is_some(), can_next, self.pet_dir.is_some(),
             &self.catalog, &self.playback, &self.expressions.indices());
         // Menu tracking is synchronous; its mouse-up is not a double click on the pet.
         self.last_click = None;
         match action {
             Some(menu::Action::Talk) => self.toggle_typing(),
+            Some(menu::Action::Chat) => self.toggle_chat(),
+            Some(menu::Action::ChatAsk(question)) => {
+                if !self.chat_open() { self.toggle_chat(); }
+                self.chat_prefill = Some(question.to_string());
+            }
             Some(menu::Action::Journal(action)) => self.request_journal(action),
             Some(menu::Action::Touch) => self.touch(),
             Some(menu::Action::Rest) => {
@@ -450,7 +464,12 @@ impl App {
             }
         }
         if let Some(percent) = self.preferences.scale_percent {
-            let scale = percent as f32 / 100.0;
+            let mut scale = percent as f32 / 100.0;
+            #[cfg(target_os = "macos")]
+            if let Some(panel) = self.chat_panel.as_ref().filter(|p| p.visible()) {
+                self.chat_restore_scale = Some(scale);
+                scale = scale.min((panel.max_pet_height() / self.h) as f32).max(0.4);
+            }
             if (scale - self.scale).abs() > 0.001 {
                 self.scale = scale;
                 if let Some(w) = &self.win {
@@ -598,6 +617,7 @@ impl App {
             if self.playback.selected.is_none() { self.resume_automatic(); }
             return;
         }
+        self.close_chat();
         self.typing = Some(String::new());
         self.resting = false;
         if self.playback.selected.is_none() && (self.preferences.animations || self.typing.is_some()) { self.resume_automatic(); }
@@ -657,6 +677,97 @@ impl App {
         }
     }
 
+    fn chat_open(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        { self.chat_panel.as_ref().is_some_and(|panel| panel.visible()) }
+        #[cfg(not(target_os = "macos"))]
+        { false }
+    }
+
+    fn journal_path(&self) -> Option<std::path::PathBuf> {
+        self.pet_dir.as_ref().and_then(|dir| dir.parent()).map(|dir| dir.join("request-journal/service.json"))
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config/kasaterm/request-journal/service.json")))
+    }
+
+    fn toggle_chat(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            if self.chat_open() { self.close_chat(); return; }
+            if self.typing.is_some() { self.toggle_typing(); }
+            if self.chat_panel.is_none() {
+                self.chat_panel = self.win.as_ref().and_then(|win| chat_panel::Panel::new(win));
+            }
+            let Some(panel) = &self.chat_panel else { self.action_error("대화창을 열지 못했어요."); return };
+            self.chat_restore_scale = Some(self.scale);
+            set_hand_cursor(false);
+            panel.show();
+            if let Some(path) = self.journal_path() {
+                let snapshot = path.with_file_name("pet-chat-history.json");
+                self.chat.load(path, snapshot);
+            }
+            self.fit_chat();
+            self.render_chat();
+        }
+    }
+
+    fn close_chat(&mut self) {
+        self.chat.close();
+        self.chat_prefill = None;
+        #[cfg(target_os = "macos")]
+        if let Some(panel) = &self.chat_panel { panel.hide(); }
+        if let Some(scale) = self.chat_restore_scale.take() {
+            self.scale = scale;
+            if let Some(win) = &self.win { let _ = win.request_inner_size(winit::dpi::LogicalSize::new(self.w * scale as f64, self.h * scale as f64)); }
+            self.save_state();
+        }
+    }
+
+    fn fit_chat(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(panel) = self.chat_panel.as_mut().filter(|p| p.visible()) {
+            let scale = self.chat_restore_scale.unwrap_or(self.scale).min((panel.max_pet_height() / self.h) as f32).max(0.4);
+            if (scale - self.scale).abs() > 0.001 {
+                self.scale = scale;
+                if let Some(win) = &self.win { let _ = win.request_inner_size(winit::dpi::LogicalSize::new(self.w * scale as f64, self.h * scale as f64)); }
+            }
+            panel.sync();
+        }
+    }
+
+    fn render_chat(&self) {
+        #[cfg(target_os = "macos")]
+        if let Some(panel) = &self.chat_panel { panel.render(&self.chat.transcript(), self.chat.busy(), self.chat.failed); }
+    }
+
+    fn poll_chat(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            let events = self.chat_panel.as_ref().map(|panel| panel.events()).unwrap_or_default();
+            for event in events {
+                match event {
+                    chat_panel::Event::Close => self.close_chat(),
+                    chat_panel::Event::Send(text) => {
+                        if !self.chat.busy() {
+                            if let Some(path) = self.journal_path() {
+                                self.chat.send(path, text);
+                                if let Some(panel) = &self.chat_panel { panel.clear_input(); }
+                            }
+                            self.render_chat();
+                        }
+                    }
+                    chat_panel::Event::Retry => { if let Some(path) = self.journal_path() { self.chat.retry(path); } self.render_chat(); }
+                }
+            }
+            if self.chat.poll() { self.render_chat(); }
+            if self.chat_open() && !self.chat.busy() {
+                if let Some(question) = self.chat_prefill.take() {
+                    if let Some(path) = self.journal_path() { self.chat.send(path, question); self.render_chat(); }
+                }
+            }
+            self.fit_chat();
+        }
+    }
+
     fn poll_journal(&mut self) {
         if self.journal_shown && self.said_at.elapsed().as_secs_f32() > self.preferences.say_seconds as f32 {
             self.journal_shown = false;
@@ -677,7 +788,7 @@ impl App {
         let Some(d) = &self.pet_dir else { return };
         let j = format!(
             "{{\"x\":{:.0},\"y\":{:.0},\"scale\":{:.3}}}",
-            self.x, self.y, self.scale
+            self.x, self.y, self.chat_restore_scale.unwrap_or(self.scale)
         );
         let _ = std::fs::write(d.join("state.json"), j);
     }
@@ -685,6 +796,10 @@ impl App {
     /// 다음 캐릭터로. 프로세스를 바꿔치기(`execv`)하는 이유는 **pid 를 지키기 위해서**다 —
     /// 하단바 칩은 pid 파일로 켜짐을 판정하므로, 새로 spawn 하면 그 칩이 꺼진 것으로 읽힌다.
     fn next_character(&mut self) {
+        if self.chat.network_active() {
+            self.action_error("나쵸 답변이나 취소가 끝나면 캐릭터를 바꿀 수 있어요.");
+            return;
+        }
         let Some(d) = self.pet_dir.clone() else { return };
         let mut names: Vec<String> = std::fs::read_dir(&d)
             .map(|rd| {
@@ -704,7 +819,9 @@ impl App {
         let Some(model) = model3_in(&d.join(next)) else { return };
         let _ = std::fs::write(d.join("current"), next);
         self.save_state();
-        exec_self(&model);
+        let reopen_chat = self.chat_open();
+        self.chat.close();
+        exec_self(&model, reopen_chat);
     }
 
     /// kasaterm 이 적어 둔 판을 읽는다. 파일이 안 바뀌었으면 아무 일도 안 한다 —
@@ -908,6 +1025,7 @@ impl App {
         self.poll_cursor();
         self.poll_board();
         self.poll_journal();
+        self.poll_chat();
         self.tick_bounce();
         let finished = self.motion.as_ref().is_some_and(|m| m.is_finished());
         if self.playback.finish_once(finished) { self.resume_automatic(); }
@@ -1187,6 +1305,11 @@ impl App {
             let over = self.cursor_on_body(g, &frame.texture) || self.cursor_on_bubble();
             #[cfg(target_os = "macos")]
             let over = over && self.win.as_ref().is_some_and(|w| native_cursor::is_frontmost_at_cursor(w));
+            #[cfg(target_os = "macos")]
+            let chat_hover = self.chat_panel.as_ref().is_some_and(|panel| panel.contains_cursor());
+            #[cfg(not(target_os = "macos"))]
+            let chat_hover = false;
+            let over = over && !chat_hover;
             if over != self.on_body {
                 self.on_body = over;
                 if let Some(w) = &self.win {
@@ -1196,7 +1319,7 @@ impl App {
                 }
                 // 벗어나는 순간에만 화살표로 되돌린다. 계속 되돌리면 남의 창 위에서
                 // 그쪽이 띄운 커서(글자 위의 I 빔 같은 것)를 우리가 계속 지운다.
-                if !over {
+                if !over && !chat_hover {
                     set_hand_cursor(false);
                 }
             }
@@ -1383,7 +1506,7 @@ fn model3_in(dir: &std::path::Path) -> Option<String> {
 
 /// 같은 자리에서 다른 모델로 다시 시작한다. pid 가 그대로라 하단바 칩이 계속 켜짐으로 보인다.
 #[cfg(unix)]
-fn exec_self(model: &str) {
+fn exec_self(model: &str, chat: bool) {
     use std::ffi::CString;
     let Ok(exe) = std::env::current_exe() else { return };
     let (Ok(a0), Ok(a1)) = (
@@ -1392,12 +1515,13 @@ fn exec_self(model: &str) {
     ) else {
         return;
     };
-    let argv = [a0.as_ptr(), a1.as_ptr(), std::ptr::null()];
+    let flag = CString::new("--chat").unwrap();
+    let argv = [a0.as_ptr(), a1.as_ptr(), if chat { flag.as_ptr() } else { std::ptr::null() }, std::ptr::null()];
     unsafe { libc::execv(a0.as_ptr(), argv.as_ptr()) };
 }
 
 #[cfg(not(unix))]
-fn exec_self(model: &str) {
+fn exec_self(model: &str, _chat: bool) {
     if let Ok(exe) = std::env::current_exe() {
         if std::process::Command::new(exe).arg(model).spawn().is_ok() {
             std::process::exit(0);
@@ -1419,6 +1543,8 @@ fn idle_motion(model3: &str) -> Option<String> {
 
 
 fn main() {
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if std::env::args().any(|arg| arg == "--chat-panel-probe") { chat_panel::probe(); return; }
     let path = std::env::args().nth(1).unwrap();
     let model = mocari::assets::load_model_runtime(&path).expect("모델");
     let dir = std::path::Path::new(&path).parent().unwrap().to_path_buf();
@@ -1476,6 +1602,10 @@ fn main() {
         bubble_text: None, text_pt, subject: String::new(),
         journal: journal::Client::default(),
         journal_shown: false,
+        chat: chat::Chat::default(), chat_restore_scale: None,
+        chat_prefill: None,
+        #[cfg(target_os = "macos")]
+        chat_panel: None,
         said_at: std::time::Instant::now(), urgent: false, bounce: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
         catalog, expressions: catalog::Expressions::default(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,

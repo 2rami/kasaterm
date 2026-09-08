@@ -53,30 +53,35 @@ impl Client {
     }
 }
 
-fn port(base: &str) -> Result<u16, ()> {
+pub(crate) fn port(base: &str) -> Result<u16, ()> {
     // The descriptor is data, never an arbitrary URL to open or connect to.
     base.strip_prefix("http://127.0.0.1:").ok_or(())?
         .trim_end_matches('/').parse::<u16>().ok().filter(|p| *p != 0).ok_or(())
 }
 
-fn get(port: u16, route: &str) -> Result<Value, ()> {
+pub(crate) fn get(port: u16, route: &str) -> Result<Value, ()> {
+    request(port, "GET", route, None)
+}
+
+pub(crate) fn request(port: u16, method: &str, route: &str, body: Option<&Value>) -> Result<Value, ()> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|_| ())?;
     stream.set_read_timeout(Some(Duration::from_secs(3))).map_err(|_| ())?;
     stream.set_write_timeout(Some(Duration::from_secs(2))).map_err(|_| ())?;
-    write!(stream, "GET {route} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").map_err(|_| ())?;
+    let body = body.map(Value::to_string).unwrap_or_default();
+    write!(stream, "{method} {route} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nX-Journal-Request: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).map_err(|_| ())?;
     let mut bytes = Vec::new();
     stream.take(1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|_| ())?;
     if bytes.len() > 1024 * 1024 { return Err(()); }
     let split = bytes.windows(4).position(|w| w == b"\r\n\r\n").ok_or(())?;
     let headers = std::str::from_utf8(&bytes[..split]).map_err(|_| ())?;
-    if !matches!(headers.lines().next().and_then(|s| s.split_whitespace().nth(1)), Some("200")) {
+    if !matches!(headers.lines().next().and_then(|s| s.split_whitespace().nth(1)), Some("200" | "202")) {
         return Err(());
     }
     serde_json::from_slice(&bytes[split + 4..]).map_err(|_| ())
 }
 
-fn load(action: Action, path: &std::path::Path) -> Result<String, ()> {
+pub(crate) fn service(path: &std::path::Path) -> Result<u16, ()> {
     let bytes = std::fs::read(path).map_err(|_| ())?;
     if bytes.len() > 8192 { return Err(()); }
     let descriptor: Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
@@ -87,6 +92,11 @@ fn load(action: Action, path: &std::path::Path) -> Result<String, ()> {
     if health["ok"] != true || health["version"] != 1 || health["service"] != "request-journal" {
         return Err(());
     }
+    Ok(port)
+}
+
+fn load(action: Action, path: &std::path::Path) -> Result<String, ()> {
+    let port = service(path)?;
     if action == Action::Open {
         #[cfg(target_os = "macos")]
         let result = std::process::Command::new("open").arg(format!("http://127.0.0.1:{port}/")).status();
