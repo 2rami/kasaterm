@@ -11,6 +11,7 @@ GROUPS = {
     "built_not_running": "새 빌드에서 확인할 것",
     "not_built": "아직 빌드되지 않은 것",
     "build_unverified": "새 빌드 파일을 확인할 것",
+    "mixed": "일부 수정만 새 빌드에 포함된 것",
     "implementation_unverified": "구현 확인이 필요한 것",
     "carryover": "이전부터 남은 확인",
 }
@@ -62,6 +63,11 @@ def verified(build):
 
 def pet_related(text):
     return any(word in str(text).lower() for word in ("펫", "곽향", "kasapet"))
+
+
+def conversational_only(text):
+    normalized = re.sub(r"[\s.!?…~]+", "", str(text).lower())
+    return normalized in {"안녕", "안녕하세요", "여보세요", "hello", "hi", "아지금하고있는겨", "지금하고있는겨", "지금하고있어", "하고있어", "진행중이야", "뭐하고있어", "어디까지했어", "언제끝나"}
 
 
 def component_checks(checklist, context):
@@ -139,11 +145,17 @@ def make_checklist(context):
     for row in rows:
         source = row.get("source_id") or row.get("session_id") or row["id"]
         prior = previous_by_source.get(source)
+        if conversational_only(row.get("prompt")):
+            context_only.append(row["id"])
+            continue
         if row.get("applied_status") in ("applied", "not_applicable"):
             previous_by_source[source] = (row, None)
             continue
         text = str(row.get("prompt") or "")
         short_reply = "".join(text.split()).rstrip(".!?…") in {"ㄱ", "ㄱㄱ", "ㅇㅇ", "응", "네", "좋아", "오케이", "진행해", "해줘", "우클릭메뉴에"}
+        if short_reply and not prior:
+            context_only.append(row["id"])
+            continue
         if short_reply and prior and row["id"] not in unknown_time and prior[0]["id"] not in unknown_time:
             if prior[1] is not None:
                 items[prior[1]]["source_request_ids"].append(row["id"])
@@ -176,36 +188,13 @@ def make_checklist(context):
             "context": {"current_run": context.get("current_run"), "last_run": context.get("last_run"), "previous_run": context.get("previous_run"), "build_count": len(builds), "ready_build_count": len(current_ready), "artifact_states": [item.get("status") for item in artifacts], "since_start_count": len(context.get("requests_since_start", [])), "carryover_count": len(carries), "timestamp_unknown_count": len(unknown_time)}, "context_hash": context_hash(context)}
 
 
-def semantic_batches(context, budget=5000):
-    """Every request and every byte of its prompt participates, even large ones."""
-    batch, size = [], 0
-    previous_by_source = {}
-    for row in requests_in(context):
-        source = row.get("source_id") or row.get("session_id") or row["id"]
-        previous = previous_by_source.get(source)
-        texts = [("prompt", str(row.get("prompt") or ""))]
-        texts.extend(("student_report", str(final.get("text") or "")) for final in row.get("finals", []) if isinstance(final, dict) and final.get("kind") in (None, "assistant_final"))
-        for kind, text in texts:
-            chunks = [text[pos:pos + 3000] for pos in range(0, len(text), 3000)] or [""]
-            for index, chunk in enumerate(chunks):
-                item = {"request_id": row["id"], "source_id": source, "session_id": row.get("session_id"), "created_at": row.get("created_at"), "previous_request_id": previous["id"] if previous else None, "previous_request_preview": title(previous.get("prompt"), 180) if previous else None, "kind": kind, "part": index + 1, "parts": len(chunks), "text": chunk}
-                length = len(json.dumps(item, ensure_ascii=False))
-                if batch and size + length > budget:
-                    yield batch
-                    batch, size = [], 0
-                batch.append(item)
-                size += length
-        previous_by_source[source] = row
-    if batch:
-        yield batch
-
-
-def apply_semantic(checklist, proposals, known_requests, known_builds):
+def apply_semantic(checklist, proposals, known_requests, known_builds, context_only=None):
     """A model can improve wording; only validated IDs may enter an item."""
     accepted = []
     covered = set()
     covered_code = set()
     seen_proposals = set()
+    context_only = set(checklist["coverage"].get("context_only_request_ids", [])) | (set(context_only or []) & known_requests)
     for item in proposals:
         if not isinstance(item, dict):
             continue
@@ -228,16 +217,18 @@ def apply_semantic(checklist, proposals, known_requests, known_builds):
             continue
         # Semantic associations alone cannot prove that a feature entered a binary.
         states = {old["buildstate"] for old in originals}
-        state = next(iter(states)) if len(states) == 1 else "built_not_running" if any(old.get("basis") == "code_change" and old["buildstate"] == "built_not_running" for old in originals) else "implementation_unverified"
+        ready_code = any(old.get("basis") == "code_change" and old["buildstate"] == "built_not_running" for old in originals)
+        state = next(iter(states)) if len(states) == 1 else "mixed" if ready_code and states & {"not_built", "build_unverified"} else "built_not_running" if ready_code else "implementation_unverified"
         stable = json.dumps({"requests": sorted(ids), "evidence": sorted(set(key for old in originals for key in old["evidence_ids"]))}, sort_keys=True)
         accepted.append({"id": "semantic-" + hashlib.sha256(stable.encode()).hexdigest()[:20], "title": title(item.get("title")), "steps": [title(step, 240) for step in steps[:5]],
-                         "source_request_ids": ids, "evidence_ids": sorted(set(key for old in originals for key in old["evidence_ids"])), "buildstate": state, "uncertain": any(old["uncertain"] for old in originals), "context_notes": []})
+                         "source_request_ids": ids, "evidence_ids": sorted(set(key for old in originals for key in old["evidence_ids"])), "buildstate": state, "uncertain": any(old["uncertain"] for old in originals), "context_notes": ["새 빌드에 든 부분과 아직 포함 여부를 확인해야 하는 수정이 함께 있습니다."] if state == "mixed" else []})
         covered.update(ids)
         covered_code.update(old["id"] for old in originals if not old["source_request_ids"])
     for item in checklist["items"]:
-        remaining = [key for key in item["source_request_ids"] if key not in covered]
+        remaining = [key for key in item["source_request_ids"] if key not in covered and key not in context_only]
         if remaining or (not item["source_request_ids"] and item["id"] not in covered_code):
             accepted.append(dict(item, source_request_ids=remaining))
     checklist["items"] = accepted
     checklist["coverage"]["semantic_request_ids"] = sorted(covered)
+    checklist["coverage"]["context_only_request_ids"] = sorted(context_only - covered)
     return checklist

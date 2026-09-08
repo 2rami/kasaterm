@@ -17,15 +17,20 @@ ready build when the present bundle no longer matches its hashes. A main process
 match does not certify the separate pet process or user-visible behavior.
 
 Every request in the runtime window participates, without a recent-50/500 cutoff.
-Long prompts and final reports are split without dropping text. Source/session,
-timestamp, and the previous request in that same source travel with each part.
+Long prompts and final reports remain intact in the core journal. A request's
+existing Nacho summary is reused only when its source hash still matches; otherwise
+the note is explicitly labelled an unverified excerpt. Source/session, original
+timestamp, and the previous request in that same source travel with each note.
+Notes are cached independently of app epochs and build classification. If the
+compact complete context fits 28,000 characters, it is synthesized in one call;
+only larger contexts use hierarchical batches. Coverage includes every request.
 Code changes use the observer's fixed git evidence and validated revision queries.
 The model's checklist JSON is parsed and its request/evidence IDs checked against
 known records. It may refine grouping and observation steps, never promote a
 state to built, running, or user-confirmed. Partial failures retain default checks.
 During model calls only, long evidence/request hashes use compact job-local
 aliases. Replies are expanded back to the original IDs before validation or
-storage; prompt text and source/session identity remain intact. This prevents
+storage; original text remains in the journal and source identity is preserved. This prevents
 repeated hashes from exhausting the model's response and merge budgets.
 
 Only previously generated unresolved checklist items and explicitly pending older

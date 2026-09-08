@@ -7,9 +7,10 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from tools.request_journal.chat import ChatManager, ChatStore
-from tools.request_journal.checklist import apply_semantic, context_hash, make_checklist, semantic_batches
+from tools.request_journal.checklist import apply_semantic, context_hash, make_checklist, requests_in
 from tools.request_journal.server import JournalServer
 from tools.request_journal.server import chat_job_view, checklist_page
 from tools.request_journal.store import Store
@@ -42,13 +43,22 @@ class JSONProvider:
         data = json.loads(serialized)
         if data["mode"] == "chat":
             return "현재 실행본과 새 빌드를 구분해서 답했습니다."
-        items = [{"title": "펫 메뉴 확인", "steps": ["펫을 우클릭해 요청한 메뉴가 보이는지 확인합니다."], "source_request_ids": [row["request_id"]], "evidence_ids": []} for row in data.get("requests", [])]
+        records = data.get("requests", [])
+        if isinstance(records, dict):
+            records = [dict(zip(records["columns"], row)) for row in records["rows"]]
+        items = [{"title": "펫 메뉴 확인", "steps": ["펫을 우클릭해 요청한 메뉴가 보이는지 확인합니다."], "source_request_ids": [row["request_id"]], "evidence_ids": []} for row in records]
         for partial in data.get("partials", []):
             items.extend(partial.get("items", []))
         return json.dumps({"text": "학생 보고와 실제 반영은 별도입니다.", "items": items}, ensure_ascii=False)
 
 
 class ChecklistTests(unittest.TestCase):
+    def test_greetings_and_progress_questions_are_context_not_work_items(self):
+        checks = make_checklist(context([request(1, "여보세요"), request(2, "아 지금 하고 있는겨?")]))
+        self.assertEqual(checks["items"], [])
+        self.assertEqual(checks["coverage"]["context_only_request_ids"], ["request-1", "request-2"])
+        self.assertEqual(checks["coverage"]["total_requests"], 2)
+
     def test_short_followup_only_joins_the_same_source(self):
         a = request(1, "펫 우클릭 메뉴 추가", source_id="student-a")
         b = request(2, "폰 화면 수정", source_id="student-b")
@@ -56,10 +66,6 @@ class ChecklistTests(unittest.TestCase):
         checks = make_checklist(context([a, b, c]))
         self.assertEqual(checks["items"][0]["source_request_ids"], ["request-1", "request-3"])
         self.assertEqual(checks["items"][1]["source_request_ids"], ["request-2"])
-        parts = [part for batch in semantic_batches(context([a, b, c])) for part in batch]
-        followup = next(part for part in parts if part["request_id"] == "request-3")
-        self.assertEqual(followup["previous_request_id"], "request-1")
-        self.assertEqual(followup["source_id"], "student-a")
 
     def test_missing_request_time_is_not_classified_as_this_app_run(self):
         snapshot = context([request(1)])
@@ -70,15 +76,13 @@ class ChecklistTests(unittest.TestCase):
         item = next(item for item in checks["items"] if "request-2" in item["source_request_ids"])
         self.assertIn("단정할 수 없습니다", item["context_notes"][0])
 
-    def test_os_epoch_cache_and_every_request_part_are_preserved(self):
+    def test_os_epoch_cache_and_every_request_are_preserved(self):
         rows = [request(index) for index in range(601)]
         rows[-1]["prompt"] = "처음" + "한" * 17000 + "마지막"
         snapshot = context(rows)
-        batches = list(semantic_batches(snapshot))
-        parts = [part for batch in batches for part in batch]
-        self.assertEqual({row["id"] for row in rows}, {part["request_id"] for part in parts})
-        self.assertEqual("".join(part["text"] for part in parts if part["request_id"] == rows[-1]["id"]), rows[-1]["prompt"])
-        self.assertTrue(all(len(json.dumps(batch, ensure_ascii=False)) < 6000 for batch in batches))
+        preserved = requests_in(snapshot)
+        self.assertEqual({row["id"] for row in rows}, {row["id"] for row in preserved})
+        self.assertEqual(preserved[-1]["prompt"], rows[-1]["prompt"])
         changed = copy.deepcopy(snapshot)
         changed["current_run"]["last_seen_at"] = "later service poll"
         self.assertEqual(context_hash(snapshot), context_hash(changed))
@@ -141,11 +145,52 @@ class ChatTests(unittest.TestCase):
         self.wait(manager, manager.submit("재시작 확인", client_id="second"))
         self.assertEqual(len(provider.inputs), call_count)
         self.assertEqual(len(manager.chat.history(self.project, "pet")), 4)
-        self.assertTrue(all(len(value) <= 12000 for value in provider.inputs))
-        wire_request = next(json.loads(value)["requests"][0] for value in provider.inputs if json.loads(value).get("requests"))
+        self.assertTrue(all(len(value) <= 28000 for value in provider.inputs))
+        table = next(json.loads(value)["requests"] for value in provider.inputs if json.loads(value).get("requests"))
+        wire_request = dict(zip(table["columns"], table["rows"][0]))
         self.assertTrue(wire_request["request_id"].startswith("r"))
         self.assertNotEqual(wire_request["request_id"], "request-1")
         self.assertEqual(ChatStore(self.store.db_path).history(self.project, "pet"), manager.chat.history(self.project, "pet"))
+
+    def test_matching_nacho_notes_are_reused_across_build_epochs(self):
+        from tools.request_journal.summarizer import source, fingerprint
+        row = request(1, "펫 원문 " + "긴내용" * 2000)
+        row["summary"] = "나쵸 요약 · 학생 보고 기준\n펫 메뉴를 화면 아래 채팅으로 연결해 달라는 요청입니다.\n실제 반영은 별도 확인이 필요해요."
+        row["summary_evidence"] = {"provider": "nacho-http", "source_hash": fingerprint(source(row))}
+        self.store.fixture = context([row])
+        provider = JSONProvider()
+        manager = self.manager(lambda _cancel: provider)
+        done = self.wait(manager, manager.submit("재시작 확인"))
+        self.assertEqual(done["checklist"]["coverage"]["reused_summary_count"], 1)
+        self.assertEqual(len(provider.inputs), 1)
+        self.assertNotIn("긴내용" * 100, provider.inputs[0])
+        self.assertIn("화면 아래 채팅", provider.inputs[0])
+        self.store.fixture["current_run"]["id"] = "new-run"
+        next_done = self.wait(manager, manager.submit("재시작 확인"))
+        self.assertEqual(next_done["checklist"]["coverage"]["reused_summary_count"], 1)
+        with manager.chat.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM chat_request_notes").fetchone()[0], 1)
+        changed = dict(row, prompt="완전히 다른 새 요구")
+        note = manager.chat.request_note(changed)
+        self.assertEqual(note["basis"], "unverified_excerpt_original_retained")
+        self.assertIn("완전히 다른 새 요구", note["text"])
+
+    def test_sixty_one_cached_requests_and_eighty_changes_use_one_completion(self):
+        from tools.request_journal.summarizer import source, fingerprint
+        rows = [request(index, source_id=f"source-{index % 8}", session_id=f"session-{index % 8}") for index in range(61)]
+        for row in rows:
+            row["summary"] = "나쵸 요약 · 학생 보고 기준\n" + "펫의 메뉴와 채팅 동작을 확인해 달라는 요청이며 실제 반영은 별도로 확인해야 합니다. " * 3
+            row["summary_evidence"] = {"provider": "nacho-http", "source_hash": fingerprint(source(row))}
+        self.store.fixture = context(rows)
+        self.store.fixture["git_changes"] = [{"id": f"commit:{index:040x}", "title": f"펫 메뉴 변경 {index}", "build_ids": []} for index in range(80)]
+        provider = JSONProvider()
+        with patch("tools.request_journal.checklist.enrich_code_evidence", side_effect=lambda value, _project: value):
+            manager = self.manager(lambda _: provider)
+            done = self.wait(manager, manager.submit("나 재시작하면 뭐 확인해야 돼?"))
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(done["checklist"]["coverage"]["reused_summary_count"], 61)
+        self.assertEqual(len(provider.inputs), 1)
+        self.assertLessEqual(len(provider.inputs[0]), 28000)
 
     def test_partial_failure_keeps_all_requests_in_fallback(self):
         class Broken:
@@ -167,7 +212,7 @@ class ChatTests(unittest.TestCase):
         expected = {f"request-{index}" for index in range(605)}
         self.assertEqual(set(done["checklist"]["coverage"]["semantic_request_ids"]), expected)
         self.assertEqual({key for item in done["checklist"]["items"] for key in item["source_request_ids"]}, expected)
-        self.assertTrue(all(len(value) <= 12000 for value in provider.inputs))
+        self.assertTrue(all(len(value) <= 28000 for value in provider.inputs))
 
     def test_previous_generated_checks_survive_new_epoch_until_confirmed(self):
         self.store.fixture = context([request(1)])
@@ -264,6 +309,7 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(done["checklist"]["coverage"]["total_requests"], 2)
         self.assertIn("펫 기능 1", done["text"])
         self.assertIn("실제 수정·빌드 근거", done["text"])
+        self.assertIn("메인 앱과 펫은 별도 실행", done["text"])
 
 
 if __name__ == "__main__":

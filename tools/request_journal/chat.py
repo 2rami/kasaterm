@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from .checklist import apply_semantic, build_id, context_hash, make_checklist, requests_in, semantic_batches
+from .checklist import apply_semantic, build_id, context_hash, make_checklist, requests_in
 
 
 def render_checklist(checklist):
@@ -66,6 +66,11 @@ class ChatStore:
                     project TEXT NOT NULL, item_id TEXT NOT NULL, first_run_id TEXT,
                     content TEXT NOT NULL, updated_at REAL NOT NULL,
                     PRIMARY KEY(project,item_id)
+                );
+                CREATE TABLE IF NOT EXISTS chat_request_notes (
+                    request_id TEXT NOT NULL, source_hash TEXT NOT NULL,
+                    summary_signature TEXT NOT NULL, note TEXT NOT NULL,
+                    PRIMARY KEY(request_id,source_hash)
                 );
             """)
 
@@ -141,8 +146,40 @@ class ChatStore:
     def save_pending(self, project, checklist):
         run = checklist.get("context", {}).get("current_run") or checklist.get("context", {}).get("last_run") or {}
         with self.connection() as db:
+            context_only = set(checklist.get("coverage", {}).get("context_only_request_ids", []))
+            if context_only:
+                for old in db.execute("SELECT item_id,content FROM chat_pending_checks WHERE project=?", (project,)).fetchall():
+                    item = json.loads(old["content"])
+                    ids = set(item.get("source_request_ids", []))
+                    if ids and ids <= context_only:
+                        item["buildstate"] = "context_only"
+                        db.execute("UPDATE chat_pending_checks SET content=?,updated_at=? WHERE project=? AND item_id=?", (json.dumps(item, ensure_ascii=False), time.time(), project, old["item_id"]))
             for item in checklist.get("items", []):
                 db.execute("INSERT INTO chat_pending_checks VALUES(?,?,?,?,?) ON CONFLICT(project,item_id) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at", (project, item["id"], run.get("id"), json.dumps(item, ensure_ascii=False), time.time()))
+
+    def request_note(self, row):
+        from .summarizer import source, fingerprint, short
+        data = source(row)
+        digest = fingerprint(data)
+        evidence = row.get("summary_evidence") or {}
+        trusted = isinstance(evidence, dict) and evidence.get("source_hash") == digest and evidence.get("provider") in ("nacho-http", "nacho-llm", "nacho-ssh") and bool(row.get("summary"))
+        signature = fingerprint({"summary": row.get("summary") if trusted else None})
+        with self.connection() as db:
+            cached = db.execute("SELECT note FROM chat_request_notes WHERE request_id=? AND source_hash=? AND summary_signature=?", (row["id"], digest, signature)).fetchone()
+            if cached:
+                return json.loads(cached[0])
+            if trusted:
+                text = "\n".join(line for line in row["summary"].splitlines() if not line.startswith(("나쵸 요약", "실제 반영"))).strip()
+                basis = "source_hash_matched_nacho_summary"
+            else:
+                text = "요청: " + short(data["prompt"], 240)
+                if data["student_reports"]:
+                    text += " / 학생 보고: " + short(data["student_reports"][-1], 180)
+                basis = "unverified_excerpt_original_retained"
+            note = {"request_id": row["id"], "source_id": row.get("source_id"), "session_id": row.get("session_id"), "created_at": row.get("created_at"), "text": text,
+                    "basis": basis, "original_retained": True}
+            db.execute("INSERT INTO chat_request_notes VALUES(?,?,?,?) ON CONFLICT(request_id,source_hash) DO UPDATE SET summary_signature=excluded.summary_signature,note=excluded.note", (row["id"], digest, signature, json.dumps(note, ensure_ascii=False)))
+            return note
 
     def interrupt_pending(self, project):
         with self.connection() as db:
@@ -223,6 +260,8 @@ class ChatManager:
             if pending["first_run_id"] == run.get("id"):
                 continue
             item = pending["content"]
+            if item.get("buildstate") == "context_only":
+                continue
             if not item.get("source_request_ids"):
                 context["carryover_items"].append(item)
             for request_id in item.get("source_request_ids", []):
@@ -288,7 +327,7 @@ class ChatManager:
         from collections import Counter
         from .checklist import enrich_code_evidence, component_checks
         context = enrich_code_evidence(self.context(), self.project)
-        checklist = make_checklist(context)
+        checklist = component_checks(make_checklist(context), context)
         with self.lock:
             self.fallbacks[job_id] = checklist
         self.chat.update(self.project, job_id, "running", {"text": "앱을 마지막으로 켠 뒤의 요청과 빌드 근거를 확인하고 있습니다.", "context": checklist["context"]})
@@ -306,28 +345,43 @@ class ChatManager:
         known_evidence.update(build_id(build) for build in context.get("builds", []))
         request_aliases = {value: f"r{index}" for index, value in enumerate(sorted(known_requests), 1)}
         evidence_aliases = {value: f"e{index}" for index, value in enumerate(sorted(known_evidence), 1)}
-        request_keys = {"request_id", "previous_request_id", "source_request_ids"}
-        evidence_keys = {"id", "evidence_id", "evidence_ids", "build_id", "linked_build_id", "ready_build_ids"}
+        source_values = {str(row[key]) for row in requests_in(context) for key in ("source_id", "session_id") if row.get(key)}
+        source_aliases = {value: f"s{index}" for index, value in enumerate(sorted(source_values), 1)}
+        request_keys = {"request_id", "previous_request_id", "previous", "source_request_ids", "context_only_request_ids"}
+        evidence_keys = {"id", "evidence_id", "evidence_ids", "build_ids", "build_id", "linked_build_id", "ready_build_ids"}
         def identifiers(value, decode=False, key=None):
             if isinstance(value, dict):
                 return {name: identifiers(child, decode, name) for name, child in value.items()}
             if isinstance(value, list):
                 return [identifiers(child, decode, key) for child in value]
-            mapping = request_aliases if key in request_keys else evidence_aliases if key in evidence_keys else {}
+            mapping = request_aliases if key in request_keys else evidence_aliases if key in evidence_keys else source_aliases if key in ("source_id", "session_id") else {}
             if decode:
                 mapping = {alias: original for original, alias in mapping.items()}
             return mapping.get(value, value) if isinstance(value, str) else value
+        def wire(payload):
+            value = identifiers(payload)
+            records = value.get("requests")
+            if isinstance(records, list) and records and all(isinstance(row, dict) and "request_id" in row for row in records):
+                columns = ["request_id", "source_id", "at", "previous", "text", "basis"]
+                value["requests"] = {"columns": columns, "rows": [[row.get(key) for key in columns] for row in records]}
+            builds = value.get("builds")
+            if isinstance(builds, list) and builds:
+                columns = ["id", "change", "state", "build_ids"]
+                changes = [row for row in builds if isinstance(row, dict) and "change" in row]
+                value["builds"] = {"changes": {"columns": columns, "rows": [[row.get(key) for key in columns] for row in changes]}, "artifacts": [row for row in builds if not isinstance(row, dict) or "change" not in row]}
+            return value
         planned, processed = Counter(), Counter()
         final_summary = ""
         error_details = []
+        context_only_ids = set(checklist["coverage"].get("context_only_request_ids", []))
 
         def complete(payload, structured=True):
             if cancel.is_set():
                 raise InterruptedError("cancelled")
             if time.monotonic() >= deadline:
                 raise TimeoutError("semantic_time_budget")
-            serialized = json.dumps(identifiers(payload), ensure_ascii=False)
-            if len(serialized) > 12000:
+            serialized = json.dumps(wire(payload), ensure_ascii=False)
+            if len(serialized) > 28000:
                 raise ValueError("completion_input_budget")
             raw = provider.complete(serialized)
             if not structured:
@@ -342,7 +396,7 @@ class ChatManager:
                 raise ValueError("invalid_checklist_response")
             return identifiers(value, decode=True)
 
-        def packs(records, budget=8000):
+        def packs(records, budget=24000):
             pack, length = [], 0
             for record in records:
                 size = len(json.dumps(identifiers(record), ensure_ascii=False))
@@ -367,24 +421,51 @@ class ChatManager:
             checklist = cached
             final_summary = cached.get("semantic_summary", "")
         elif provider and hasattr(provider, "complete"):
-            input_budget = min(8000, max(3000, 10800 - len(question) - len(json.dumps(runtime, ensure_ascii=False))))
-            records = [part for batch in semantic_batches(context, budget=5000) for part in batch]
-            batches = [(batch, []) for batch in packs(records, budget=input_budget)]
-            code = [{"evidence_id": item["id"], "title": item["title"], "buildstate": item["buildstate"], "evidence_ids": item["evidence_ids"], "uncertain": item["uncertain"]} for item in checklist["items"] if item.get("basis") == "code_change"]
+            records, previous, reused, sources = [], {}, 0, {}
+            for row in requests_in(context):
+                note = self.chat.request_note(row)
+                source = row.get("source_id") or row.get("session_id") or row["id"]
+                cached_note = note["basis"] == "source_hash_matched_nacho_summary"
+                reused += int(cached_note)
+                record = {"request_id": note["request_id"], "source_id": note["source_id"], "at": note["created_at"], "previous": previous.get(source), "text": note["text"]}
+                if not cached_note:
+                    record["basis"] = "unverified_excerpt"
+                records.append(record)
+                sources[source] = {"source_id": note["source_id"], "session_id": note["session_id"]}
+                previous[source] = row["id"]
+            checklist["coverage"].update({"reused_summary_count": reused, "excerpt_note_count": len(records) - reused, "originals_retained": True})
+            runtime["request_notes"] = "기본은source_hash일치 나쵸메모, basis가있으면미검증발췌. at=원래시각, previous=같은source직전요청. 원문DB보존."
+            runtime["sources"] = list(sources.values())
+            states = {"built_not_running": "ready", "not_built": "unbuilt", "build_unverified": "file_unverified", "carryover": "carryover"}
+            runtime["code_states"] = "ready=현재파일검증된새빌드에드는코드, 동작/실행확정아님. unbuilt=빌드근거없음. file_unverified=현재파일과검증불일치."
+            code = [{"id": item["id"], "change": item["title"], "state": states.get(item["buildstate"], item["buildstate"]), "build_ids": [value for value in item["evidence_ids"] if value != item["id"]]} for item in checklist["items"] if item.get("basis") == "code_change"]
             facts = [{"id": build_id(build), "completed_at": build.get("completed_at"), "success": build.get("success"), "signature_verified": build.get("signature", {}).get("verified"), "source": build.get("source")} for build in context.get("builds", [])]
-            batches.extend(([], batch) for batch in packs(code + facts, budget=input_budget))
+            compact_question = "같은 기능의 요청·짧은 추가조건·코드 변경을 묶어 확인 목록을 8개 안팎으로 종합하세요. 인사/진행문의는 할일로 만들지 말고 context_only_request_ids 배열에 ID를 반환하세요. 나머지 모든 요청/근거 ID를 항목에 연결하고 포함 여부 미확인은 명시하세요. " + question
+            input_budget = min(26000, max(8000, 27500 - len(compact_question) - len(json.dumps(identifiers(runtime), ensure_ascii=False))))
+            combined = {"mode": "checklist", "question": compact_question, "requests": records, "builds": code + facts, "runtime": runtime}
+            if len(json.dumps(wire(combined), ensure_ascii=False)) <= 28000:
+                batches = [(records, code + facts)]
+            else:
+                batches = [(batch, []) for batch in packs(records, budget=input_budget)]
+                batches.extend(([], batch) for batch in packs(code + facts, budget=input_budget))
             for records, _ in batches:
                 planned.update(item["request_id"] for item in records)
             for index, (records, builds) in enumerate(batches):
                 if cancel.is_set():
                     return
                 try:
-                    reply = complete({"mode": "checklist", "question": question, "requests": records, "builds": builds, "runtime": runtime})
+                    input_chars = len(json.dumps(wire({"mode": "checklist", "question": compact_question, "requests": records, "builds": builds, "runtime": runtime}), ensure_ascii=False))
+                    self.chat.update(self.project, job_id, "running", {"text": "저장된 나쵸 메모와 빌드 근거를 종합하고 있습니다.", "progress": {"completed_batches": index, "total_batches": len(batches), "input_chars": input_chars}, "context": checklist["context"]})
+                    reply = complete({"mode": "checklist", "question": compact_question, "requests": records, "builds": builds, "runtime": runtime})
                     proposals.extend(reply.get("items", []))
+                    context_only_ids.update(key for key in reply.get("context_only_request_ids", []) if isinstance(key, str) and key in known_requests)
                     partials.append(reply)
                     processed.update(item["request_id"] for item in records)
                 except Exception as exc:
                     error_details.append({"stage": "batch", "batch": index, "kind": type(exc).__name__})
+                    diagnostic = getattr(exc, "diagnostic", None)
+                    if isinstance(diagnostic, dict):
+                        error_details[-1]["provider"] = {key: diagnostic[key] for key in ("stage", "exception_type", "input_chars", "input_bytes", "output_chars") if key in diagnostic}
                     errors.append("partial_summary_unavailable" if time.monotonic() < deadline else "semantic_time_budget")
                     break
                 self.chat.update(self.project, job_id, "running", {"text": "요청 묶음을 정리하고 있습니다.", "progress": {"completed_batches": index + 1, "total_batches": len(batches)}, "context": checklist["context"]})
@@ -403,6 +484,7 @@ class ChatManager:
                     merged = next_level
                 if len(merged) == 1:
                     final_summary = merged[0].get("text", "")
+                    context_only_ids.update(key for key in merged[0].get("context_only_request_ids", []) if isinstance(key, str) and key in known_requests)
                     merged_items = merged[0].get("items", [])
                     merged_ids = {key for item in merged_items if isinstance(item, dict) for key in item.get("source_request_ids", []) if isinstance(key, str) and key in known_requests}
                     merged_evidence = {key for item in merged_items if isinstance(item, dict) for key in item.get("evidence_ids", []) if isinstance(key, str) and key in known_evidence}
@@ -410,7 +492,7 @@ class ChatManager:
             except Exception as exc:
                 error_details.append({"stage": "merge", "kind": type(exc).__name__})
                 errors.append("partial_merge_unavailable")
-            checklist = apply_semantic(checklist, proposals, known_requests, known_evidence)
+            checklist = apply_semantic(checklist, proposals, known_requests, known_evidence, context_only=context_only_ids)
             complete_ids = {key for key, amount in planned.items() if processed[key] == amount}
             checklist["coverage"].update({"semantic_request_ids": sorted(complete_ids), "fallback_request_ids": sorted(known_requests - complete_ids), "total_parts": sum(planned.values()), "processed_parts": sum(processed.values())})
         else:
@@ -420,11 +502,13 @@ class ChatManager:
         checklist = component_checks(checklist, context)
         total = checklist["coverage"]["total_requests"]
         counts = {group: sum(item["buildstate"] == group for item in checklist["items"]) for group in checklist["groups"]}
-        text = f"마지막 앱 실행 이후 요청과 이전 확인 목록 {total}개를 검토했습니다. 새 빌드 확인 {counts['built_not_running']}개, 빌드 파일 검증 필요 {counts['build_unverified']}개, 아직 빌드되지 않은 수정 {counts['not_built']}개, 구현 확인 필요 {counts['implementation_unverified']}개, 이전부터 남은 확인 {counts['carryover']}개입니다."
+        text = f"마지막 앱 실행 이후 요청과 이전 확인 목록 {total}개를 검토했습니다. 새 빌드 확인 {counts['built_not_running']}개, 일부만 빌드 {counts['mixed']}개, 빌드 파일 검증 필요 {counts['build_unverified']}개, 아직 빌드되지 않은 수정 {counts['not_built']}개, 구현 확인 필요 {counts['implementation_unverified']}개, 이전부터 남은 확인 {counts['carryover']}개입니다."
         if not context.get("current_run"):
             text = "현재 앱 실행 시점을 확인하지 못했습니다. 서비스 시작 시각을 앱 재시작으로 간주하지 않습니다. " + text
         if final_summary:
             text += "\n나쵸의 근거 기반 정리:\n" + final_summary
+        if checklist["coverage"].get("reused_summary_count") is not None:
+            text += f"\n기존 나쵸 메모 {checklist['coverage']['reused_summary_count']}개를 재사용했습니다. 원문은 요청 근거에 보존되어 있습니다."
         restart_question = any(word in question for word in ("재시작", "다시 켜", "확인", "체크", "restart", "checklist"))
         if not restart_question and provider and hasattr(provider, "complete"):
             try:
