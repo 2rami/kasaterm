@@ -11,6 +11,10 @@ INJECTION_PREFIXES = (
     "<environment_context>", "<skills_instructions>", "<recommended_plugins>",
     "<teammate-message", "<system-reminder>", "<local-command-caveat>",
     "<local-command-stdout>", "<command-name>", "[Request interrupted",
+    "<cross-session-message", "<task-notification", "<command-message>",
+    "<command-args>", "<local-command-stderr>", "<bash-input>",
+    "<bash-stdout>", "<bash-stderr>", "Caveat:", "Your tool call was malformed",
+    "This session is being continued from a previous conversation",
     "Message Type: NEW_TASK", "Message Type: MESSAGE", "Message Type: FINAL_ANSWER",
     "You are a worker agent", "You are an agent in a team of agents",
 )
@@ -119,7 +123,7 @@ def parse_record(raw, harness, position, generation, state, project=None):
         return [event("assistant_final" if final else "assistant_note", text)]
 
     if harness == "claude":
-        if raw.get("isMeta") or raw.get("isSidechain"):
+        if any(raw.get(flag) is True for flag in ("isMeta", "isSidechain", "isCompactSummary", "isVisibleInTranscriptOnly")):
             return []
         message = raw.get("message") if isinstance(raw.get("message"), dict) else raw
         role = raw.get("type") or message.get("role")

@@ -1,4 +1,5 @@
 import concurrent.futures
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -62,6 +63,25 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(len(events3), 1)
         self.assertNotEqual(events[0]["event_key"], events3[0]["event_key"])
 
+    def test_unflagged_peer_briefs_and_native_injection_markers_are_not_requests(self):
+        injected = [
+            '<cross-session-message from="other">브리프</cross-session-message>',
+            '<task-notification>백그라운드 작업 종료</task-notification>',
+            '<command-message>명령 설명</command-message>', '<command-args>인자</command-args>',
+            '<local-command-stderr>오류</local-command-stderr>', '<bash-input>echo example</bash-input>',
+            '<bash-stdout>도구 출력</bash-stdout>', '<bash-stderr>도구 오류</bash-stderr>',
+            'Caveat: injected command output', 'Your tool call was malformed; retry',
+            'This session is being continued from a previous conversation that ran out of context.',
+        ]
+        records = [user(str(i), "  " + text) for i, text in enumerate(injected)]
+        records.extend([dict(user("summary", "기억 요약"), isCompactSummary=True),
+                        dict(user("visible", "내부 주입"), isVisibleInTranscriptOnly=True),
+                        user("real", "동료가 보낸 내용을 확인해 줘")])
+        events, _, _ = parse_lines(encoded(*records), harness="claude")
+        self.assertEqual([e["text"] for e in events], ["동료가 보낸 내용을 확인해 줘"])
+        codex = [{"type": "event_msg", "payload": {"type": "user_message", "message": text}} for text in injected]
+        self.assertEqual(parse_lines(encoded(*codex), harness="codex")[0], [])
+
     def test_real_final_is_distinct_from_notes_and_reasoning(self):
         data = encoded({"type": "response_item", "timestamp": STAMP, "payload": {"type": "message", "role": "assistant", "channel": "analysis", "content": [{"type": "output_text", "text": "private reasoning"}]}},
                        {"type": "response_item", "timestamp": STAMP, "payload": {"type": "message", "role": "assistant", "channel": "final", "content": [{"type": "output_text", "text": "아직 확인 못 했습니다"}]}})
@@ -119,7 +139,7 @@ class StoreTests(unittest.TestCase):
             self.store.ingest("source", [{"kind": "user", "event_key": "new", "text": "valid"}, {"kind": "user", "event_key": "bad", "text": {}}], 999)
         self.assertEqual(self.store.get_source("source")["offset"], before)
         self.assertEqual(self.store.stats()["total"], 1)
-        with sqlite3.connect(self.store.db_path) as db:
+        with closing(sqlite3.connect(self.store.db_path)) as db:
             with self.assertRaises(sqlite3.IntegrityError):
                 db.execute("UPDATE requests SET prompt='changed'")
 
