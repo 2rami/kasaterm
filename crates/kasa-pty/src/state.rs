@@ -344,6 +344,64 @@ impl Read for ExtReader {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ViewerSizeLease {
+    token: u64,
+    size: Option<(u16, u16)>,
+}
+
+#[derive(Clone, Debug)]
+struct ViewportSizes {
+    gui: (u16, u16),
+    next_token: u64,
+    viewers: Vec<ViewerSizeLease>,
+}
+
+impl ViewportSizes {
+    fn new(cols: u16, rows: u16) -> Self {
+        Self { gui: (cols, rows), next_token: 1, viewers: Vec::new() }
+    }
+
+    fn open(&mut self) -> u64 {
+        let token = self.next_token;
+        self.next_token = token.checked_add(1).expect("viewer token exhausted");
+        self.viewers.push(ViewerSizeLease { token, size: None });
+        token
+    }
+
+    fn owner(&self) -> Option<u64> {
+        self.viewers.iter().rev().find(|v| v.size.is_some()).map(|v| v.token)
+    }
+
+    fn effective(&self) -> (u16, u16) {
+        self.viewers.iter().rev().find_map(|v| v.size).unwrap_or(self.gui)
+    }
+
+    fn update(&mut self, token: u64, size: (u16, u16), acquire: bool) -> bool {
+        let Some(i) = self.viewers.iter().position(|v| v.token == token) else {
+            return false;
+        };
+        if acquire {
+            let mut viewer = self.viewers.remove(i);
+            viewer.size = Some(size);
+            self.viewers.push(viewer);
+        } else if self.viewers[i].size.is_some() {
+            self.viewers[i].size = Some(size);
+        }
+        self.owner() == Some(token)
+    }
+
+    fn release(&mut self, token: u64) {
+        if let Some(viewer) = self.viewers.iter_mut().find(|v| v.token == token) {
+            viewer.size = None;
+        }
+    }
+
+    fn close(&mut self, token: u64) {
+        self.viewers.retain(|v| v.token != token);
+    }
+}
+
 pub struct PtySession {
     /// Channel the renderer consumes — one ScreenUpdate per dirty
     /// frame after VT processing landed new state.
@@ -353,6 +411,9 @@ pub struct PtySession {
     /// Shared cell-dim state used by the resize path so we can reshape
     /// the VT grid without re-creating the Term.
     size: Arc<Mutex<(u16, u16)>>,
+    // GUI layout remains the fallback while a viewer supplies the logical grid.
+    // Hold this lock through ioctl and publication so concurrent owners cannot interleave.
+    viewport_sizes: Mutex<ViewportSizes>,
     /// Held so the renderer thread doesn't get GC'd; never read from
     /// after start().
     _reader_thread: std::thread::JoinHandle<()>,
@@ -707,6 +768,7 @@ impl PtySession {
             },
             writer: writer_arc,
             size,
+            viewport_sizes: Mutex::new(ViewportSizes::new(opts.cols, opts.rows)),
             _reader_thread: reader_thread,
             shell_pid,
             proc_cache: Arc::new(Mutex::new((
@@ -799,6 +861,7 @@ impl PtySession {
             },
             writer: writer_arc,
             size,
+            viewport_sizes: Mutex::new(ViewportSizes::new(opts.cols, opts.rows)),
             _reader_thread: reader_thread,
             shell_pid: None,
             proc_cache: Arc::new(Mutex::new((
@@ -905,6 +968,7 @@ impl PtySession {
             io: SessionIo::Adopted { fd, child_pid },
             writer: writer_arc,
             size,
+            viewport_sizes: Mutex::new(ViewportSizes::new(opts.cols, opts.rows)),
             _reader_thread: reader_thread,
             shell_pid: child_pid,
             proc_cache: Arc::new(Mutex::new((
@@ -1482,6 +1546,66 @@ impl PtySession {
         (rx, bytes)
     }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        let mut sizes = self.viewport_sizes.lock().unwrap();
+        sizes.gui = (cols.max(2), rows.max(1));
+        let (cols, rows) = sizes.effective();
+        self.resize_effective(cols, rows)
+    }
+
+    pub fn has_viewer_size_control(&self) -> bool {
+        self.viewport_sizes.lock().unwrap().owner().is_some()
+    }
+
+    pub fn open_viewer_size(&self) -> u64 {
+        self.viewport_sizes.lock().unwrap().open()
+    }
+
+    pub fn acquire_viewer_size(&self, token: u64, cols: u16, rows: u16) -> Result<bool> {
+        self.update_viewer_size(token, cols, rows, true)
+    }
+
+    pub fn resize_viewer_size(&self, token: u64, cols: u16, rows: u16) -> Result<bool> {
+        self.update_viewer_size(token, cols, rows, false)
+    }
+
+    fn update_viewer_size(&self, token: u64, cols: u16, rows: u16, acquire: bool) -> Result<bool> {
+        let mut sizes = self.viewport_sizes.lock().unwrap();
+        let previous = sizes.clone();
+        let granted = sizes.update(token, (cols.max(2), rows.max(1)), acquire);
+        if !granted {
+            return Ok(false);
+        }
+        let (cols, rows) = sizes.effective();
+        if let Err(err) = self.resize_effective(cols, rows) {
+            *sizes = previous;
+            return Err(err);
+        }
+        Ok(granted)
+    }
+
+    pub fn release_viewer_size(&self, token: u64) -> Result<()> {
+        let mut sizes = self.viewport_sizes.lock().unwrap();
+        let controlled = sizes.owner() == Some(token);
+        sizes.release(token);
+        if !controlled {
+            return Ok(());
+        }
+        let (cols, rows) = sizes.effective();
+        self.resize_effective(cols, rows)
+    }
+
+    pub fn close_viewer_size(&self, token: u64) -> Result<()> {
+        let mut sizes = self.viewport_sizes.lock().unwrap();
+        let controlled = sizes.owner() == Some(token);
+        sizes.close(token);
+        if !controlled {
+            return Ok(());
+        }
+        let (cols, rows) = sizes.effective();
+        self.resize_effective(cols, rows)
+    }
+
+    fn resize_effective(&self, cols: u16, rows: u16) -> Result<()> {
         // alacritty 격자 하한(MIN_COLUMNS=2) 밑을 부르면 wide 글자(한글) reflow 가
         // upstream 이 한 번도 안 밟는 경로로 들어간다 — 호출자(GUI floor 1열·
         // auxwin·웹텀)가 최소를 제각각 계산하므로 여기서 한 번에 막는다.
@@ -5636,6 +5760,81 @@ mod external_session_tests {
     }
 
     #[test]
+    fn viewer_viewport_preserves_gui_size_and_publishes_the_entire_grid() {
+        let (sess, etx, _wrx, resized) = ext_session(21, 6);
+        let viewer = sess.open_viewer_size();
+        assert!(sess.acquire_viewer_size(viewer, 120, 40).unwrap());
+        sess.resize(21, 6).unwrap();
+        assert_eq!(sess.size(), (120, 40));
+        assert!(sess.has_viewer_size_control());
+        assert_eq!(resized.lock().unwrap().as_slice(), &[(120, 40)]);
+
+        etx.send(ExtEvent::Bytes(b"\x1b[?1049h\x1b[40;115HBOTTOM".to_vec())).unwrap();
+        assert!(wait_text(&sess, "BOTTOM"));
+        let (_, frame) = sess.tap_screens_with_snapshot();
+        assert_eq!((frame.cols, frame.rows), (120, 40));
+        assert_eq!(frame.dirty.len(), 40);
+
+        sess.resize(30, 8).unwrap();
+        sess.close_viewer_size(viewer).unwrap();
+        assert_eq!(sess.size(), (30, 8), "restore the latest GUI layout, not the connection snapshot");
+        assert!(!sess.has_viewer_size_control());
+    }
+
+    #[test]
+    fn viewer_viewport_passive_resize_cannot_steal_and_active_close_restores_previous() {
+        let (sess, _etx, _wrx, _resized) = ext_session(21, 6);
+        let first = sess.open_viewer_size();
+        let second = sess.open_viewer_size();
+        assert!(!sess.resize_viewer_size(first, 100, 30).unwrap());
+        assert_eq!(sess.size(), (21, 6), "resize before acquisition grants no control");
+        assert!(sess.acquire_viewer_size(first, 100, 30).unwrap());
+        assert!(sess.acquire_viewer_size(second, 140, 45).unwrap());
+        assert!(!sess.resize_viewer_size(first, 110, 35).unwrap());
+        assert_eq!(sess.size(), (140, 45));
+        sess.close_viewer_size(second).unwrap();
+        assert_eq!(sess.size(), (110, 35), "a waiting viewer retains its latest desired size");
+        sess.close_viewer_size(first).unwrap();
+        assert_eq!(sess.size(), (21, 6));
+    }
+
+    #[test]
+    fn viewer_viewport_same_size_and_reverse_disconnect_do_not_restore_stale_owner() {
+        let (sess, _etx, _wrx, resized) = ext_session(21, 6);
+        let first = sess.open_viewer_size();
+        let second = sess.open_viewer_size();
+        assert!(sess.acquire_viewer_size(first, 100, 30).unwrap());
+        assert!(sess.acquire_viewer_size(second, 100, 30).unwrap());
+        assert_eq!(resized.lock().unwrap().as_slice(), &[(100, 30)]);
+        sess.close_viewer_size(first).unwrap();
+        assert_eq!(sess.size(), (100, 30));
+        assert!(sess.has_viewer_size_control(), "equal dimensions are not ownership");
+        sess.close_viewer_size(second).unwrap();
+        assert_eq!(sess.size(), (21, 6));
+    }
+
+    #[test]
+    fn viewer_viewport_release_can_reacquire_but_closed_tokens_stay_closed() {
+        let (sess, _etx, _wrx, _resized) = ext_session(21, 6);
+        let first = sess.open_viewer_size();
+        let second = sess.open_viewer_size();
+        assert!(sess.acquire_viewer_size(first, 100, 30).unwrap());
+        assert!(sess.acquire_viewer_size(second, 120, 40).unwrap());
+        assert!(sess.acquire_viewer_size(first, 110, 35).unwrap());
+        sess.release_viewer_size(first).unwrap();
+        assert_eq!(sess.size(), (120, 40));
+        assert!(!sess.resize_viewer_size(first, 130, 45).unwrap());
+        assert!(sess.acquire_viewer_size(first, 110, 35).unwrap());
+        sess.close_viewer_size(first).unwrap();
+        assert!(!sess.acquire_viewer_size(first, 200, 60).unwrap());
+        assert!(!sess.resize_viewer_size(first, 200, 60).unwrap());
+        sess.close_viewer_size(first).unwrap();
+        assert_eq!(sess.size(), (120, 40));
+        sess.close_viewer_size(second).unwrap();
+        assert_eq!(sess.size(), (21, 6));
+    }
+
+    #[test]
     fn external_setsize_applies_before_following_bytes() {
         // SetSize 가 같은 채널에 실리므로, 뒤따르는 바이트는 반드시 새 격자로
         // 파싱된다 — 이 순서 보장이 ExtEvent 설계의 요점이다.
@@ -5644,6 +5843,22 @@ mod external_session_tests {
         etx.send(ExtEvent::Bytes(b"resized-frame".to_vec())).unwrap();
         assert!(wait_text(&sess, "resized-frame"));
         assert_eq!(sess.size(), (40, 10));
+    }
+
+    #[test]
+    fn viewer_viewport_passive_close_never_resizes_external_source() {
+        let (sess, etx, _wrx, resized) = ext_session(21, 6);
+        etx.send(ExtEvent::SetSize(120, 40)).unwrap();
+        etx.send(ExtEvent::Bytes(b"remote-size".to_vec())).unwrap();
+        assert!(wait_text(&sess, "remote-size"));
+        let token = sess.open_viewer_size();
+        assert!(!sess.resize_viewer_size(token, 80, 24).unwrap());
+        sess.release_viewer_size(token).unwrap();
+        sess.close_viewer_size(token).unwrap();
+        assert!(!sess.acquire_viewer_size(token, 80, 24).unwrap());
+        sess.close_viewer_size(token).unwrap();
+        assert_eq!(sess.size(), (120, 40));
+        assert!(resized.lock().unwrap().is_empty(), "a passive viewer must not resize upstream");
     }
 
     #[test]

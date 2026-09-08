@@ -6154,6 +6154,35 @@ enum Tap {
     ),
 }
 
+struct ViewerViewport {
+    session: Arc<kasa_pty::PtySession>,
+    token: u64,
+}
+
+impl ViewerViewport {
+    fn new(session: Arc<kasa_pty::PtySession>) -> Self {
+        let token = session.open_viewer_size();
+        Self { session, token }
+    }
+}
+
+impl Drop for ViewerViewport {
+    fn drop(&mut self) {
+        // Cancellation can skip the normal disconnect tail; the lease must still expire.
+        let _ = self.session.close_viewer_size(self.token);
+    }
+}
+
+fn viewport_dimensions(v: &serde_json::Value) -> Option<(u16, u16)> {
+    let cols = v.get("cols")?.as_u64()?;
+    let rows = v.get("rows")?.as_u64()?;
+    // Bound allocation before integer conversion; a wrapped dimension is a different request.
+    if !(2..=1000).contains(&cols) || !(1..=1000).contains(&rows) {
+        return None;
+    }
+    Some((cols as u16, rows as u16))
+}
+
 async fn term_ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
@@ -6244,6 +6273,8 @@ async fn term_ws_run(
             }
         }
     };
+    let viewport = ViewerViewport::new(sess.clone());
+    let viewport_token = viewport.token;
     // `grid=1` 이면 우리가 파싱해 둔 셀 그리드를 그대로 보낸다 — 받는 쪽에 VT 파서가
     // 필요 없다. 그리드를 ANSI 로 되돌려 보내면 브라우저가 그걸 또 파싱해야 하고, 그
     // 파서(xterm.js)가 키 입력까지 자기 방식으로 가로채 모바일 IME 를 깨뜨렸다.
@@ -6272,6 +6303,7 @@ async fn term_ws_run(
         .send(Message::Text(
             serde_json::json!({
                 "t": "size", "cols": c, "rows": r, "mirror": mirrored, "id": self_id,
+                "capabilities": { "mirror_viewport": 1 },
             })
             .to_string()
             .into(),
@@ -6321,27 +6353,6 @@ async fn term_ws_run(
         }
     }
 
-    // 폰은 pane 격자(196열)를 축소로 담을 수가 없어서 PTY 자체를 줄여야 읽힌다.
-    // 그런데 PTY 는 winsize 가 하나뿐이라 그 순간 kasaterm 쪽 pane 도 같이 좁아진다 —
-    // 자동으로 줄이지 못했던 이유가 그것이고, **되돌릴 방법이 없다는 것**이 진짜
-    // 문제였다. 원래 격자를 들고 있다가 연결이 끝날 때 되돌리면, 폰 탭을 닫는 것만으로
-    // 여기가 복구되므로 자동으로 켜도 안전해진다.
-    //
-    // ⚠️ 되돌리는 건 **내가 바꿔 놓은 그 크기가 아직 그대로일 때만**이다. 미러가 둘
-    // 붙어 있으면 남이 그 사이 또 바꿨을 수 있는데, 그때 내 원본을 밀어 넣으면 보고
-    // 있는 쪽 화면을 내가 깨뜨린다.
-    // ⚠️ 접속 시점 고정값이 아니다 — 내가 force 한 뒤 남(kasaterm divider·다른
-    // 미러)이 격자를 바꿨으면 그쪽이 새 원본이라, 끊길 때 낡은 접속 시점 크기를
-    // 밀어 넣으면 kasaterm 의 새 레이아웃을 되레 덮는다. force 직전마다 갱신한다.
-    // 소유자(own) 연결은 복원 대상이 아니다 — GUI 가 정한 크기가 곧 원본이라,
-    // detach 후 크기를 「원래」로 되돌리면 이어받은 화면이 도리어 어긋난다.
-    let restore = std::sync::Arc::new(std::sync::Mutex::new(
-        (mirrored && !own).then_some((c, r)),
-    ));
-    let restore_in = restore.clone();
-    // (cols<<16 | rows). 0 = 이 연결은 격자를 건드린 적이 없다.
-    let forced = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let forced_in = forced.clone();
     // 브라우저가 Ping 에 자동으로 돌려주는 Pong 의 마지막 시각. 폰 탭이
     // 백그라운드로 잠들면 TCP 는 한참 살아 있어서, 이걸 봐야 끊김-복원(아래)이
     // 언젠가는 돈다 — 안 보면 폰을 주머니에 넣은 것만으로 pane 이 좁은 채 남는다.
@@ -6507,36 +6518,40 @@ async fn term_ws_run(
                         }
                         continue;
                     }
+                    if v.get("t").and_then(|x| x.as_str()) == Some("viewport") {
+                        let granted = match v.get("op").and_then(|x| x.as_str()) {
+                            Some("acquire" | "resize") => {
+                                viewport_dimensions(&v).map_or(false, |(cols, rows)| {
+                                    let result = if v["op"] == "acquire" {
+                                        sess_in.acquire_viewer_size(viewport_token, cols, rows)
+                                    } else {
+                                        sess_in.resize_viewer_size(viewport_token, cols, rows)
+                                    };
+                                    result.unwrap_or(false)
+                                })
+                            }
+                            Some("release") => {
+                                let _ = sess_in.release_viewer_size(viewport_token);
+                                false
+                            }
+                            _ => false,
+                        };
+                        let reply = serde_json::json!({"t": "viewport", "granted": granted});
+                        let _ = btx_shell.send(Frame::Control(reply.to_string())).await;
+                        continue;
+                    }
                     if v.get("t").and_then(|x| x.as_str()) == Some("resize") {
-                        // ⚠️ 미러일 땐 창 크기를 따라 **저절로** 바꾸지 않는다 — 같은 PTY 를
-                        // 보고 있는 kasaterm pane 이 같이 좁아진다. 폰은 그 규칙을 깨야만
-                        // 읽히므로 `force` 로 명시한 요청만 통과시키고, 그렇게 바꾼 격자는
-                        // 연결이 끝날 때 아래에서 되돌린다(그 복구가 있어야 클라이언트가
-                        // 이걸 자동으로 켤 수 있다).
                         let force = v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
                         if !mirrored || force || own {
-                            let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
-                            let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
-                            let (c, r) = (c.max(20), r.max(5));
-                            // 내 직전 force 이후 격자가 남의 손으로 바뀌어 있으면
-                            // 그 크기가 새 원본이다 — 복원 목표를 거기로 옮긴다.
-                            let packed =
-                                forced_in.load(std::sync::atomic::Ordering::Relaxed);
-                            if mirrored && packed != 0 {
-                                let mine =
-                                    ((packed >> 16) as u16, (packed & 0xffff) as u16);
-                                let cur = sess_in.size();
-                                if cur != mine {
-                                    if let Ok(mut g) = restore_in.lock() {
-                                        *g = Some(cur);
-                                    }
-                                }
-                            }
-                            if sess_in.resize(c, r).is_ok() && mirrored {
-                                forced_in.store(
-                                    (c as u32) << 16 | r as u32,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                );
+                            let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80)
+                                .clamp(20, 1000) as u16;
+                            let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24)
+                                .clamp(5, 1000) as u16;
+                            if mirrored && !own {
+                                // Legacy explicit fit also gets an identity, never a size-based restore.
+                                let _ = sess_in.acquire_viewer_size(viewport_token, c, r);
+                            } else {
+                                let _ = sess_in.resize(c, r);
                             }
                         }
                     }
@@ -6569,21 +6584,7 @@ async fn term_ws_run(
         _ = &mut to_shell => to_browser.abort(),
     }
     unregister_viewer_ctl(&ctl_pane, ctl_token);
-
-    // 폰이 줄여 놓은 격자를 돌려준다. 안 하면 폰 탭을 닫은 뒤에도 kasaterm pane 이
-    // 좁아진 채로 남아, 「폰으로 잠깐 봤더니 내 화면이 줄었다」가 된다.
-    let restore_to = restore.lock().ok().and_then(|g| *g);
-    if let Some((oc, or)) = restore_to {
-        let packed = forced.load(std::sync::atomic::Ordering::Relaxed);
-        if packed != 0 {
-            let mine = ((packed >> 16) as u16, (packed & 0xffff) as u16);
-            // 내가 마지막으로 넣은 크기가 아직 살아 있을 때만 되돌린다 — 그 사이 남이
-            // (다른 미러든 kasaterm 이든) 바꿨다면 그쪽이 최신이고, 내 원본은 낡았다.
-            if sess.size() == mine && mine != (oc, or) {
-                let _ = sess.resize(oc, or);
-            }
-        }
-    }
+    drop(viewport);
 }
 
 pub fn spawn_http_server(
@@ -7408,6 +7409,96 @@ pub fn spawn_http_server_opts(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn viewport_websocket_disconnect_releases_only_its_own_lease() {
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::{json, Value};
+        use std::sync::Arc;
+        use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
+
+        async fn read_kind(
+            ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+            kind: &str,
+        ) -> Value {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(Ok(message)) = ws.next().await {
+                    if let Message::Text(text) = message {
+                        let value: Value = serde_json::from_str(&text).unwrap();
+                        if value["t"] == kind {
+                            return value;
+                        }
+                    }
+                }
+                panic!("websocket ended before {kind}");
+            }).await.expect("websocket response timeout")
+        }
+
+        let id = format!("viewport-test-{}", uuid::Uuid::new_v4());
+        let (events_tx, events_rx) = crossbeam_channel::unbounded();
+        let sess = Arc::new(kasa_pty::PtySession::start_external(
+            kasa_pty::PtyOptions { pane_id: id.clone(), cols: 21, rows: 6, ..Default::default() },
+            kasa_pty::ExternalIo {
+                events: events_rx,
+                writer: Box::new(std::io::sink()),
+                on_resize: Arc::new(|_, _| {}),
+            },
+        ).unwrap());
+        kasa_pty::register_session(&id, &sess);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = axum::Router::new().route("/term/ws", axum::routing::get(super::term_ws_handler));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let url = format!("ws://{addr}/term/ws?pane={id}&grid=1");
+        let (mut first, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let size = read_kind(&mut first, "size").await;
+        assert_eq!(size["capabilities"]["mirror_viewport"], 1);
+        let acquire = json!({"t":"viewport", "op":"acquire", "cols":120, "rows":40});
+        first.send(Message::Text(acquire.to_string().into())).await.unwrap();
+        assert_eq!(read_kind(&mut first, "viewport").await["granted"], true);
+        assert_eq!(sess.size(), (120, 40));
+
+        let (mut second, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        read_kind(&mut second, "size").await;
+        second.send(Message::Text(acquire.to_string().into())).await.unwrap();
+        assert_eq!(read_kind(&mut second, "viewport").await["granted"], true);
+        first.send(Message::Text(json!({
+            "t":"viewport", "op":"resize", "cols":100, "rows":30,
+        }).to_string().into())).await.unwrap();
+        assert_eq!(read_kind(&mut first, "viewport").await["granted"], false);
+        sess.resize(30, 8).unwrap();
+        first.close(None).await.unwrap();
+        second.send(Message::Text(json!({
+            "t":"viewport", "op":"resize", "cols":120, "rows":40,
+        }).to_string().into())).await.unwrap();
+        assert_eq!(read_kind(&mut second, "viewport").await["granted"], true);
+        assert_eq!(sess.size(), (120, 40));
+        second.close(None).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while sess.has_viewer_size_control() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.expect("disconnect did not release the viewport");
+        assert_eq!(sess.size(), (30, 8));
+        events_tx.send(kasa_pty::ExtEvent::Eof).unwrap();
+        server.abort();
+    }
+
+    #[test]
+    fn viewport_dimensions_reject_overflow_and_unbounded_allocations() {
+        use serde_json::json;
+        assert_eq!(super::viewport_dimensions(&json!({"cols": 120, "rows": 40})), Some((120, 40)));
+        for value in [
+            json!({"cols": 65536, "rows": 40}),
+            json!({"cols": 120, "rows": 65536}),
+            json!({"cols": 1, "rows": 40}),
+            json!({"cols": 120, "rows": 0}),
+            json!({"cols": "120", "rows": 40}),
+            json!({"cols": 120}),
+        ] {
+            assert_eq!(super::viewport_dimensions(&value), None, "{value}");
+        }
+    }
+
     #[test]
     fn pretty_model_id_turns_raw_ids_into_status_words() {
         assert_eq!(super::pretty_model_id("claude-opus-5"), "Opus 5");
