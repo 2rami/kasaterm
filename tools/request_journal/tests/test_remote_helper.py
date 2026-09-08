@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from tools.request_journal.nacho import HTTPNachoProvider, SSHNachoProvider
-from tools.request_journal.remote_helper import main, completion_payload
+from tools.request_journal.remote_helper import main, completion_payload, ProviderFailure, clean_diagnostic
 
 
 PAYLOAD = json.dumps({"prompt": "펫 기능을 만들어줘", "student_reports": ["반영은 확인하지 못했어요."]}, ensure_ascii=False)
@@ -55,7 +55,7 @@ class RemoteHelperTests(unittest.TestCase):
     def test_ssh_error_details_do_not_escape(self):
         output = subprocess.CompletedProcess([], 1, "SECRET", "SECRET")
         with patch("tools.request_journal.nacho.subprocess.run", return_value=output):
-            with self.assertRaisesRegex(RuntimeError, "^remote summary unavailable$"):
+            with self.assertRaisesRegex(ProviderFailure, "^request journal provider failed$"):
                 SSHNachoProvider().summarize(PAYLOAD)
         with self.assertRaises(ValueError):
             SSHNachoProvider("-oProxyCommand=bad")
@@ -73,7 +73,8 @@ class RemoteHelperTests(unittest.TestCase):
                 if route.startswith("/term/spawn"):
                     return {"ok": True, "id": "web-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
                 if route.startswith("/term/screen"):
-                    return self.screen
+                    limit = int(re.search(r"lines=(\d+)",route).group(1))
+                    return "\n".join(self.screen.splitlines()[-limit:])
                 if route.startswith("/term/input") and isinstance(data, str):
                     marker = re.search(r"RJ_[0-9a-f]+", data)
                     if marker:
@@ -81,16 +82,21 @@ class RemoteHelperTests(unittest.TestCase):
                         if "_DIR" in data:
                             self.screen = f"{marker}_DIR:/tmp/kasaterm-journal.ABC123\n"
                         elif "_BEGIN" in data:
-                            encoded = base64.b64encode(json.dumps(self.response).encode()).decode()
+                            encoded = base64.b64encode(json.dumps(self.response,ensure_ascii=False).encode()).decode()
+                            encoded = "\n".join(encoded[i:i+120] for i in range(0,len(encoded),120))
                             self.screen = f"{marker}_BEGIN\n{encoded}\n{marker}_END\n"
                         elif "_CLEAN" in data:
                             self.screen = f"{marker}_CLEAN\n"
                 return {"ok": True}
 
-        for response in ({"ok": True, "text": "학생 보고에 따르면 미반영이에요."}, {"ok": False, "stage": "inference_unavailable"}):
+        maximum = (chr(0x20000) * 11980 + "한글 공백\n줄바꿈 검증 마지막 글자!")[:12000]
+        for response in ({"ok": True, "text": "학생 보고에 따르면 미반영이에요."}, {"ok": False, "stage": "inference_unavailable"}, {"ok":True,"text":maximum}):
             provider = Fake(response)
             if response["ok"]:
-                self.assertIn("미반영", provider.summarize(PAYLOAD))
+                if response["text"] == maximum:
+                    self.assertEqual(provider.complete({"mode":"chat","question":"transport fixture"}),maximum)
+                else:
+                    self.assertIn("미반영", provider.summarize(PAYLOAD))
             else:
                 with self.assertRaises(RuntimeError):
                     provider.summarize(PAYLOAD)
@@ -109,8 +115,9 @@ class RemoteHelperTests(unittest.TestCase):
         event.set()
         provider = HTTPNachoProvider(cancel_event=event)
         with patch.object(provider, "_call", side_effect=AssertionError("no remote call")):
-            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            with self.assertRaises(ProviderFailure) as caught:
                 provider.summarize(PAYLOAD)
+            self.assertEqual(caught.exception.diagnostic["stage"],"cancel")
         with self.assertRaises(ValueError):
             HTTPNachoProvider("http://external.example")
 
@@ -127,8 +134,29 @@ class RemoteHelperTests(unittest.TestCase):
                 return "확인할 것\n" * 200
         answer = NachoProvider(Client()).complete(json.dumps({"mode":"chat", "question":"뭘 확인해요?", "requests":[]}))
         self.assertGreater(len(answer), 400)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ProviderFailure) as caught:
             completion_payload(json.dumps({"mode":"chat", "question":"x" * 32001}))
+        self.assertEqual(caught.exception.diagnostic["stage"],"input_size")
+
+    def test_diagnostic_contains_only_enums_and_counts(self):
+        value=clean_diagnostic({"stage":["SECRET"],"exception_type":"SECRET","input_chars":"SECRET","input_bytes":5,"output_chars":True,"text":"SECRET"})
+        self.assertEqual(set(value),{"stage","exception_type","input_chars","input_bytes","output_chars"})
+        self.assertNotIn("SECRET",json.dumps(value))
+        self.assertIsNone(value["output_chars"])
+
+    def test_model_truncation_reports_counts_without_response_or_error_text(self):
+        class Client:
+            async def messages(self,**kwargs):
+                return {"stop_reason":"max_tokens","content":[]}
+            def extract_text(self,response):
+                return "SECRET"
+        output=io.StringIO()
+        self.assertEqual(main(io.StringIO(PAYLOAD),output,Client),1)
+        result=json.loads(output.getvalue())
+        self.assertEqual(result["diagnostic"]["stage"],"model_truncated")
+        self.assertEqual(result["diagnostic"]["output_chars"],6)
+        self.assertGreater(result["diagnostic"]["input_bytes"],result["diagnostic"]["input_chars"])
+        self.assertNotIn("SECRET",output.getvalue())
 
 
 if __name__ == "__main__":

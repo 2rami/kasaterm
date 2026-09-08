@@ -13,7 +13,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, build_opener, ProxyHandler
 import uuid
 
-from .remote_helper import SYSTEM, bounded_payload, completion_payload, load_client, summarize_with_client
+from .remote_helper import SYSTEM, ProviderFailure, bounded_payload, completion_payload, diagnostic, load_client, summarize_with_client
 
 
 
@@ -56,17 +56,23 @@ class SSHNachoProvider:
             input=bounded_payload(payload), text=True, capture_output=True, timeout=130 if complete else 45,
         )
         if result.returncode or len(result.stdout) > 96000:
-            raise RuntimeError("remote summary unavailable")
+            raise ProviderFailure(diagnostic("transport_size" if len(result.stdout)>96000 else "transport",RuntimeError(),payload))
         response = json.loads(result.stdout)
         if response.get("ok") is not True or not isinstance(response.get("text"), str) or not response["text"].strip():
-            raise RuntimeError("remote summary unavailable")
+            raise ProviderFailure(response.get("diagnostic",diagnostic("transport_parse",ValueError(),payload)))
         text = response["text"].strip()
         if complete and len(text) > 12000:
-            raise RuntimeError("completion response too large")
+            raise ProviderFailure(diagnostic("output_size",ValueError(),payload,text))
         return text if complete else text[:400]
 
     def complete(self, payload: str) -> str:
-        return self.summarize(completion_payload(payload))
+        encoded = completion_payload(payload)
+        try:
+            return self.summarize(encoded)
+        except ProviderFailure:
+            raise
+        except Exception as exc:
+            raise ProviderFailure(diagnostic("transport_parse" if isinstance(exc,json.JSONDecodeError) else "transport",exc,encoded)) from None
 
 
 class HTTPNachoProvider:
@@ -117,7 +123,7 @@ class HTTPNachoProvider:
         payload = bounded_payload(payload)
         complete = json.loads(payload).get("mode") in ("chat", "checklist")
         if self.cancel_event.is_set():
-            raise RuntimeError("summary cancelled")
+            raise ProviderFailure(diagnostic("cancel",RuntimeError(),payload))
         pane = directory = None
         marker = "RJ_" + uuid.uuid4().hex
         cleanup_error = False
@@ -148,16 +154,21 @@ class HTTPNachoProvider:
             found = self._wait(pane, rf"^{marker}_BEGIN\r?\n(.*?)\r?\n{marker}_END\r?$", 120 if complete else 45)
             encoded = "".join(found.group(1).split())
             if len(encoded) > 96000:
-                raise RuntimeError("invalid summary")
-            response = json.loads(base64.b64decode(encoded, validate=True))
+                raise ProviderFailure(diagnostic("transport_size",ValueError(),payload))
+            try:
+                response = json.loads(base64.b64decode(encoded, validate=True))
+            except Exception as exc:
+                raise ProviderFailure(diagnostic("transport_parse",exc,payload)) from None
             if response.get("ok") is not True or not isinstance(response.get("text"), str) or not response["text"].strip():
-                stage = response.get("stage")
-                stage = stage if stage in ("invalid_input", "runtime_unavailable", "credentials_unavailable", "inference_unavailable") else "unknown"
-                raise RuntimeError("remote summary unavailable: " + stage)
+                raise ProviderFailure(response.get("diagnostic",diagnostic("model_response",ValueError(),payload)))
             text = response["text"].strip()
             if complete and len(text) > 12000:
-                raise RuntimeError("completion response too large")
+                raise ProviderFailure(diagnostic("output_size",ValueError(),payload,text))
             return text if complete else text[:400]
+        except ProviderFailure:
+            raise
+        except Exception as exc:
+            raise ProviderFailure(diagnostic("transport",exc,payload)) from None
         finally:
             if pane:
                 try:
@@ -181,7 +192,7 @@ class HTTPNachoProvider:
                     except Exception:
                         cleanup_error = True
                 if cleanup_error:
-                    raise RuntimeError("private summary cleanup unconfirmed")
+                    raise ProviderFailure(diagnostic("cleanup",RuntimeError(),payload))
 
     def complete(self, payload: str) -> str:
         return self.summarize(completion_payload(payload))

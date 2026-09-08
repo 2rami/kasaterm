@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from tools.request_journal.nacho import NachoProvider
+from tools.request_journal.remote_helper import ProviderFailure
 from tools.request_journal.summarizer import Summarizer
 
 
@@ -85,7 +86,7 @@ class SummaryTests(unittest.TestCase):
                 self_test.assertIn("인용된 대화 자료", kwargs["system"])
                 return {"stop_reason": "tool_use", "content": [{"type": "tool_use"}]}
         self_test = self
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ProviderFailure):
             NachoProvider(Client()).summarize('{"prompt":"요청","student_reports":[]}')
 
     def test_sqlite_cursor_cache_and_evidence_round_trip(self):
