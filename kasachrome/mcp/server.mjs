@@ -34,7 +34,16 @@ let ready = null
 let nextId = 1
 const pending = new Map()
 let extensionUp = false
+let browserStarting = null
 const IDENTITY = resolveIdentity()
+const BROWSER_EXECUTABLE = process.env.KASACHROME_BROWSER_EXECUTABLE || ''
+let BROWSER_ARGS = []
+try {
+  BROWSER_ARGS = JSON.parse(process.env.KASACHROME_BROWSER_ARGS || '[]')
+  if (!Array.isArray(BROWSER_ARGS) || !BROWSER_ARGS.every((a) => typeof a === 'string')) BROWSER_ARGS = []
+} catch {
+  BROWSER_ARGS = []
+}
 
 function log(...a) { process.stderr.write(`[${NAME}] ${a.join(' ')}\n`) }
 
@@ -105,8 +114,42 @@ async function connect() {
   try { return await ready } finally { if (!ws) ready = null }
 }
 
+async function waitForExtension(ms) {
+  const until = Date.now() + ms
+  while (!extensionUp && Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 200))
+  }
+  return extensionUp
+}
+
+// 브라우저를 상주시키지 않는 기계는 첫 도구 호출 때만 띄운다. MCP/브리지는
+// 봇 시작 때 먼저 떠도 가볍고, 실제 창은 사람이 브라우저 기능을 쓸 때만 필요하다.
+// 원격 브리지에 붙은 경우에는 남의 기계 브라우저를 이 기계에서 살릴 수 없으므로
+// 로컬 브리지일 때만 이 경로를 연다.
+async function ensureBrowser() {
+  if (extensionUp || !BROWSER_EXECUTABLE || activeUrl !== LOCAL_BRIDGE_URL) return
+  if (await waitForExtension(400)) return
+  if (!browserStarting) {
+    browserStarting = (async () => {
+      log(`extension not connected — starting ${BROWSER_EXECUTABLE}`)
+      const child = spawn(BROWSER_EXECUTABLE, BROWSER_ARGS, { detached: true, stdio: 'ignore' })
+      child.on('error', (e) => log(`browser start failed: ${e.message}`))
+      child.unref()
+      if (!await waitForExtension(15000)) {
+        throw new Error('EXTENSION_NOT_CONNECTED: 브라우저를 열었지만 확장이 붙지 않았습니다. chrome://extensions 를 확인하세요.')
+      }
+    })()
+  }
+  try {
+    await browserStarting
+  } finally {
+    browserStarting = null
+  }
+}
+
 async function call(tool, args = {}, timeoutMs = 30000) {
   const sock = await connect()
+  await ensureBrowser()
   const id = nextId++
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject })
@@ -120,6 +163,7 @@ async function call(tool, args = {}, timeoutMs = 30000) {
 // call 과 달리 확장을 거치지 않고 브리지가 직접 답한다 — 확장이 하나도 없어도 목록은 나온다.
 async function ask(type, extra = {}, timeoutMs = 5000) {
   const sock = await connect()
+  await ensureBrowser()
   const id = nextId++
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject })
