@@ -439,8 +439,8 @@ class ChatManager:
             states = {"built_not_running": "ready", "not_built": "unbuilt", "build_unverified": "file_unverified", "carryover": "carryover"}
             runtime["code_states"] = "ready=현재파일검증된새빌드에드는코드, 동작/실행확정아님. unbuilt=빌드근거없음. file_unverified=현재파일과검증불일치."
             code = [{"id": item["id"], "change": item["title"], "state": states.get(item["buildstate"], item["buildstate"]), "build_ids": [value for value in item["evidence_ids"] if value != item["id"]]} for item in checklist["items"] if item.get("basis") == "code_change"]
-            facts = [{"id": build_id(build), "completed_at": build.get("completed_at"), "success": build.get("success"), "signature_verified": build.get("signature", {}).get("verified"), "source": build.get("source")} for build in context.get("builds", [])]
-            compact_question = "같은 기능의 요청·짧은 추가조건·코드 변경을 묶어 확인 목록을 8개 안팎으로 종합하세요. 인사/진행문의는 할일로 만들지 말고 context_only_request_ids 배열에 ID를 반환하세요. 나머지 모든 요청/근거 ID를 항목에 연결하고 포함 여부 미확인은 명시하세요. " + question
+            facts = [{"id": build_id(build), "completed_at": build.get("completed_at"), "success": build.get("success"), "signature_verified": build.get("signature", {}).get("verified"), "components": list(build.get("components", {})), "source": {key: build.get("source", {}).get(key) for key in ("status", "observed_head", "source_commit")}} for build in context.get("builds", [])]
+            compact_question = "같은 기능의 요청·짧은 추가조건·코드 변경을 묶어 확인 목록을 최대8개로 종합하세요. 항목당steps는화면에서할짧은행동2~3개(각60자안팎),text는3문장이내. 인사/진행문의는할일이아니며context_only_request_ids에ID반환. 나머지모든요청/근거ID는항목에연결하고포함미확인은명시하세요. " + question
             input_budget = min(26000, max(8000, 27500 - len(compact_question) - len(json.dumps(identifiers(runtime), ensure_ascii=False))))
             combined = {"mode": "checklist", "question": compact_question, "requests": records, "builds": code + facts, "runtime": runtime}
             if len(json.dumps(wire(combined), ensure_ascii=False)) <= 28000:
@@ -465,7 +465,7 @@ class ChatManager:
                     error_details.append({"stage": "batch", "batch": index, "kind": type(exc).__name__})
                     diagnostic = getattr(exc, "diagnostic", None)
                     if isinstance(diagnostic, dict):
-                        error_details[-1]["provider"] = {key: diagnostic[key] for key in ("stage", "exception_type", "input_chars", "input_bytes", "output_chars") if key in diagnostic}
+                        error_details[-1]["provider"] = {key: diagnostic[key] for key in ("stage", "exception_type", "input_chars", "input_bytes", "output_chars", "input_tokens", "output_tokens", "reasoning_tokens") if key in diagnostic}
                     errors.append("partial_summary_unavailable" if time.monotonic() < deadline else "semantic_time_budget")
                     break
                 self.chat.update(self.project, job_id, "running", {"text": "요청 묶음을 정리하고 있습니다.", "progress": {"completed_batches": index + 1, "total_batches": len(batches)}, "context": checklist["context"]})
@@ -491,6 +491,9 @@ class ChatManager:
                     proposals = merged_items + [item for item in proposals if isinstance(item, dict) and (set(item.get("source_request_ids", [])) - merged_ids or (not item.get("source_request_ids") and set(item.get("evidence_ids", [])) - merged_evidence))]
             except Exception as exc:
                 error_details.append({"stage": "merge", "kind": type(exc).__name__})
+                diagnostic = getattr(exc, "diagnostic", None)
+                if isinstance(diagnostic, dict):
+                    error_details[-1]["provider"] = {key: diagnostic[key] for key in ("stage", "exception_type", "input_chars", "input_bytes", "output_chars", "input_tokens", "output_tokens", "reasoning_tokens") if key in diagnostic}
                 errors.append("partial_merge_unavailable")
             checklist = apply_semantic(checklist, proposals, known_requests, known_evidence, context_only=context_only_ids)
             complete_ids = {key for key, amount in planned.items() if processed[key] == amount}

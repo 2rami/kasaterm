@@ -183,6 +183,7 @@ class ChatTests(unittest.TestCase):
             row["summary_evidence"] = {"provider": "nacho-http", "source_hash": fingerprint(source(row))}
         self.store.fixture = context(rows)
         self.store.fixture["git_changes"] = [{"id": f"commit:{index:040x}", "title": f"펫 메뉴 변경 {index}", "build_ids": []} for index in range(80)]
+        self.store.fixture["builds"] = [{"id": "fixture-build", "source": {"status": "stable_dirty", "observed_head": "a" * 40, "source_commit": None, "configuration": {"unused": "irrelevant-large-metadata" * 1000}}}]
         provider = JSONProvider()
         with patch("tools.request_journal.checklist.enrich_code_evidence", side_effect=lambda value, _project: value):
             manager = self.manager(lambda _: provider)
@@ -191,6 +192,7 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(done["checklist"]["coverage"]["reused_summary_count"], 61)
         self.assertEqual(len(provider.inputs), 1)
         self.assertLessEqual(len(provider.inputs[0]), 28000)
+        self.assertNotIn("irrelevant-large-metadata", provider.inputs[0])
 
     def test_partial_failure_keeps_all_requests_in_fallback(self):
         class Broken:
