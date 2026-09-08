@@ -683,9 +683,10 @@ class _MiniCell extends StatefulWidget {
 
 /// 탭이 여럿인 칸은 좌우로 넘겨 본다 — 탭마다 작은 얼굴을 줄 세우면 손가락으로 못
 /// 집는다(2026-09-08 지적 「터치하기 너무 작잖아」). 한 번에 한 학생, 밑에 점으로 몇째인지.
+/// 넘기면 뒷장이 앞으로 올라오고 앞장은 뒤로 물러나는 카드 섞기 — 장마다 자리를
+/// 기억하므로(탭 id 열쇠) 자리만 바꿔 주면 알아서 미끄러진다.
 class _MiniCellState extends State<_MiniCell> {
   late int _page = _initialPage;
-  late final PageController _pages = PageController(initialPage: _page);
 
   int get _initialPage {
     final a = widget.tabActive;
@@ -698,18 +699,14 @@ class _MiniCellState extends State<_MiniCell> {
     // 데스크톱에서 앞 탭이 바뀌면 따라간다 — 손으로 넘겨 둔 자리는 그때만 밀린다.
     if (old.tabActive != widget.tabActive ||
         old.tabs.length != widget.tabs.length) {
-      final next = _initialPage;
-      if (next != _page && _pages.hasClients) {
-        _page = next;
-        _pages.jumpToPage(next);
-      }
+      _page = _initialPage;
     }
   }
 
-  @override
-  void dispose() {
-    _pages.dispose();
-    super.dispose();
+  void _flip(int dir) {
+    final n = widget.tabs.length;
+    if (n < 2) return;
+    setState(() => _page = (_page + dir + n) % n);
   }
 
   @override
@@ -809,14 +806,7 @@ class _MiniCellState extends State<_MiniCell> {
                   : () => widget.onMore!(p),
               child: Stack(
                 children: [
-                  if (tabbed)
-                    PageView(
-                      controller: _pages,
-                      onPageChanged: (i) => setState(() => _page = i),
-                      children: [for (final q in tabs) student(q)],
-                    )
-                  else
-                    student(p),
+                  student(p),
                   if (dots)
                     Positioned(
                       left: 0,
@@ -863,37 +853,45 @@ class _MiniCellState extends State<_MiniCell> {
           ),
         );
         if (back == 0) return front;
-        // 뒷장은 보고 있는 탭을 뺀 나머지를 순서대로 — 앞장 바로 뒤가 첫째.
-        final others = [
+        // 앞장 뒤로 나머지를 순서대로 — 앞장 바로 뒤가 첫째. 장의 열쇠는 탭 id 라,
+        // 넘길 때 같은 장이 새 자리로 미끄러진다(앞으로 올라오고, 뒤로 물러난다).
+        final order = [
+          _page,
           for (var i = 0; i < tabs.length; i++)
-            if (i != _page) tabs[i],
+            if (i != _page) i,
         ];
-        return Stack(
-          children: [
-            for (var k = back; k >= 1; k--)
-              Positioned(
-                left: step * k,
-                top: step * (back - k),
-                width: cw,
-                height: ch,
-                child: _DeckCard(pane: others[k - 1]),
-              ),
-            Positioned(
-              left: 0,
-              top: inset,
-              width: cw,
-              height: ch,
-              child: front,
-            ),
-          ],
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onHorizontalDragEnd: (d) {
+            final v = d.primaryVelocity ?? 0;
+            if (v.abs() < 120) return;
+            _flip(v < 0 ? 1 : -1);
+          },
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              for (var r = back; r >= 0; r--)
+                AnimatedPositioned(
+                  key: ValueKey('deck-${tabs[order[r]]?.id ?? order[r]}'),
+                  duration: const Duration(milliseconds: 320),
+                  curve: Curves.easeOutCubic,
+                  left: step * r,
+                  top: step * (back - r),
+                  width: cw,
+                  height: ch,
+                  child: r == 0 ? front : _DeckCard(pane: tabs[order[r]]),
+                ),
+            ],
+          ),
         );
       },
     );
   }
 }
 
-/// 덱의 뒷장 — 그 탭 학생의 색을 눌러 칠한 통짜 카드. 앞장과 겹치는 자리는 바탕색
-/// 테로 한 겹 갈라, 같은 색이 붙어 한 덩어리로 읽히지 않게 한다.
+/// 덱의 뒷장 — 그 탭 학생의 색으로 칠한 통짜 카드(2026-09-08 지적 「겹침 학생색 안
+/// 되고 회색」— 눌러 칠했더니 회색으로 읽혔다). 앞장과 겹치는 자리는 바탕색 테로 한 겹
+/// 갈라, 같은 색이 붙어 한 덩어리로 읽히지 않게 한다.
 class _DeckCard extends StatelessWidget {
   const _DeckCard({required this.pane});
 
@@ -909,7 +907,7 @@ class _DeckCard extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: Color.alphaBlend(
-          color.withValues(alpha: p == null ? 0.35 : 0.45),
+          color.withValues(alpha: p == null ? 0.35 : 0.78),
           scheme.surfaceContainerLow,
         ),
         borderRadius: BorderRadius.circular(5),
