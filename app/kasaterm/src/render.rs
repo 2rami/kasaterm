@@ -2980,10 +2980,9 @@ impl App {
                 // 옅게 물들이고 왼쪽 가장자리에 색 리본을 세운다 — 활성이든 아니든.
                 {
                     let tab_pid = pane.tabs.get(pane.active_tab).and_then(|t| t.pid.clone());
-                    if kasa_mcp::remote::is_remote_pane(&id)
-                        || tab_pid
-                            .as_deref()
-                            .is_some_and(kasa_mcp::remote::is_remote_pane)
+                    if tab_pid
+                        .as_deref()
+                        .is_some_and(kasa_mcp::remote::is_remote_pane)
                     {
                         remote_slots.push((id.clone(), box_x, box_y, box_w, box_h));
                     }
