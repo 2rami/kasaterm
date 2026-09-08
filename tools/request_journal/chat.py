@@ -304,15 +304,29 @@ class ChatManager:
         known_requests = {row["id"] for row in requests_in(context)}
         known_evidence = {key for item in checklist["items"] for key in item["evidence_ids"]}
         known_evidence.update(build_id(build) for build in context.get("builds", []))
+        request_aliases = {value: f"r{index}" for index, value in enumerate(sorted(known_requests), 1)}
+        evidence_aliases = {value: f"e{index}" for index, value in enumerate(sorted(known_evidence), 1)}
+        request_keys = {"request_id", "previous_request_id", "source_request_ids"}
+        evidence_keys = {"id", "evidence_id", "evidence_ids", "build_id", "linked_build_id", "ready_build_ids"}
+        def identifiers(value, decode=False, key=None):
+            if isinstance(value, dict):
+                return {name: identifiers(child, decode, name) for name, child in value.items()}
+            if isinstance(value, list):
+                return [identifiers(child, decode, key) for child in value]
+            mapping = request_aliases if key in request_keys else evidence_aliases if key in evidence_keys else {}
+            if decode:
+                mapping = {alias: original for original, alias in mapping.items()}
+            return mapping.get(value, value) if isinstance(value, str) else value
         planned, processed = Counter(), Counter()
         final_summary = ""
+        error_details = []
 
         def complete(payload, structured=True):
             if cancel.is_set():
                 raise InterruptedError("cancelled")
             if time.monotonic() >= deadline:
                 raise TimeoutError("semantic_time_budget")
-            serialized = json.dumps(payload, ensure_ascii=False)
+            serialized = json.dumps(identifiers(payload), ensure_ascii=False)
             if len(serialized) > 12000:
                 raise ValueError("completion_input_budget")
             raw = provider.complete(serialized)
@@ -320,17 +334,20 @@ class ChatManager:
                 if not isinstance(raw, str):
                     raise ValueError("invalid_chat_response")
                 return raw
+            if isinstance(raw, str) and raw.strip().startswith("```"):
+                match = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\n?```", raw.strip(), re.DOTALL)
+                raw = match.group(1) if match else raw
             value = json.loads(raw) if isinstance(raw, str) else raw
             if not isinstance(value, dict) or not isinstance(value.get("items", []), list) or not isinstance(value.get("text", ""), str):
                 raise ValueError("invalid_checklist_response")
-            return value
+            return identifiers(value, decode=True)
 
-        def packs(records, budget=5000):
+        def packs(records, budget=8000):
             pack, length = [], 0
             for record in records:
-                size = len(json.dumps(record, ensure_ascii=False))
+                size = len(json.dumps(identifiers(record), ensure_ascii=False))
                 if size > budget:
-                    encoded = json.dumps(record, ensure_ascii=False)
+                    encoded = json.dumps(identifiers(record), ensure_ascii=False)
                     split = [{"part": index + 1, "parts": (len(encoded) + 2499) // 2500, "text": encoded[pos:pos + 2500]} for index, pos in enumerate(range(0, len(encoded), 2500))]
                     if pack:
                         yield pack
@@ -350,10 +367,12 @@ class ChatManager:
             checklist = cached
             final_summary = cached.get("semantic_summary", "")
         elif provider and hasattr(provider, "complete"):
-            batches = [(batch, []) for batch in semantic_batches(context, budget=5000)]
+            input_budget = min(8000, max(3000, 10800 - len(question) - len(json.dumps(runtime, ensure_ascii=False))))
+            records = [part for batch in semantic_batches(context, budget=5000) for part in batch]
+            batches = [(batch, []) for batch in packs(records, budget=input_budget)]
             code = [{"evidence_id": item["id"], "title": item["title"], "buildstate": item["buildstate"], "evidence_ids": item["evidence_ids"], "uncertain": item["uncertain"]} for item in checklist["items"] if item.get("basis") == "code_change"]
             facts = [{"id": build_id(build), "completed_at": build.get("completed_at"), "success": build.get("success"), "signature_verified": build.get("signature", {}).get("verified"), "source": build.get("source")} for build in context.get("builds", [])]
-            batches.extend(([], batch) for batch in packs(code + facts))
+            batches.extend(([], batch) for batch in packs(code + facts, budget=input_budget))
             for records, _ in batches:
                 planned.update(item["request_id"] for item in records)
             for index, (records, builds) in enumerate(batches):
@@ -364,7 +383,8 @@ class ChatManager:
                     proposals.extend(reply.get("items", []))
                     partials.append(reply)
                     processed.update(item["request_id"] for item in records)
-                except Exception:
+                except Exception as exc:
+                    error_details.append({"stage": "batch", "batch": index, "kind": type(exc).__name__})
                     errors.append("partial_summary_unavailable" if time.monotonic() < deadline else "semantic_time_budget")
                     break
                 self.chat.update(self.project, job_id, "running", {"text": "요청 묶음을 정리하고 있습니다.", "progress": {"completed_batches": index + 1, "total_batches": len(batches)}, "context": checklist["context"]})
@@ -373,7 +393,7 @@ class ChatManager:
             # reduced to the last few requests or last few summaries.
             try:
                 while len(merged) > 1:
-                    groups = list(packs(merged))
+                    groups = list(packs(merged, budget=input_budget))
                     next_level = []
                     for group in groups:
                         next_level.append(complete({"mode": "checklist", "question": "부분 확인 목록을 중복 없이 합치세요. 알려진 요청과 근거 ID만 유지하세요. " + question, "partials": group, "runtime": runtime}))
@@ -387,7 +407,8 @@ class ChatManager:
                     merged_ids = {key for item in merged_items if isinstance(item, dict) for key in item.get("source_request_ids", []) if isinstance(key, str) and key in known_requests}
                     merged_evidence = {key for item in merged_items if isinstance(item, dict) for key in item.get("evidence_ids", []) if isinstance(key, str) and key in known_evidence}
                     proposals = merged_items + [item for item in proposals if isinstance(item, dict) and (set(item.get("source_request_ids", [])) - merged_ids or (not item.get("source_request_ids") and set(item.get("evidence_ids", [])) - merged_evidence))]
-            except Exception:
+            except Exception as exc:
+                error_details.append({"stage": "merge", "kind": type(exc).__name__})
                 errors.append("partial_merge_unavailable")
             checklist = apply_semantic(checklist, proposals, known_requests, known_evidence)
             complete_ids = {key for key, amount in planned.items() if processed[key] == amount}
@@ -420,7 +441,7 @@ class ChatManager:
             text += "\n나쵸 연결이 없어 저장된 근거를 기본 목록으로 보여 드립니다."
         if restart_question:
             text += render_checklist(checklist)
-        result = {"text": text, "provider": provider_name, "checklist": checklist, "context": checklist["context"], "partial": bool(errors), "errors": errors}
+        result = {"text": text, "provider": provider_name, "checklist": checklist, "context": checklist["context"], "partial": bool(errors), "errors": errors, "error_details": error_details}
         self.latest_checklist = checklist
         if not errors:
             self.chat.cache_put(self.project, key, dict(checklist, provider=provider_name, semantic_summary=final_summary))

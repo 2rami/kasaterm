@@ -191,6 +191,9 @@ def run(args):
         try:
             from .summarizer import Summarizer
             provider = summary_provider(args, stopped)
+            screen = getattr(provider, "_screen", None)
+            code = getattr(screen, "__code__", None)
+            server.summary_transport = {"provider": getattr(provider, "name", "structured-fallback"), "screen_lines": max((value for value in code.co_consts if type(value) is int and value >= 100), default=None) if code else None}
             summarizer = Summarizer(provider=provider)
         except Exception:
             server.summarizer_status = {"provider": "unavailable", "error": "summary_initialization_failed"}

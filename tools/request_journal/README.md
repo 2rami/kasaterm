@@ -23,6 +23,10 @@ Code changes use the observer's fixed git evidence and validated revision querie
 The model's checklist JSON is parsed and its request/evidence IDs checked against
 known records. It may refine grouping and observation steps, never promote a
 state to built, running, or user-confirmed. Partial failures retain default checks.
+During model calls only, long evidence/request hashes use compact job-local
+aliases. Replies are expanded back to the original IDs before validation or
+storage; prompt text and source/session identity remain intact. This prevents
+repeated hashes from exhausting the model's response and merge budgets.
 
 Only previously generated unresolved checklist items and explicitly pending older
 requests carry across app runs. `chat_pending_checks` preserves them through the

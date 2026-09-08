@@ -142,6 +142,9 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(len(provider.inputs), call_count)
         self.assertEqual(len(manager.chat.history(self.project, "pet")), 4)
         self.assertTrue(all(len(value) <= 12000 for value in provider.inputs))
+        wire_request = next(json.loads(value)["requests"][0] for value in provider.inputs if json.loads(value).get("requests"))
+        self.assertTrue(wire_request["request_id"].startswith("r"))
+        self.assertNotEqual(wire_request["request_id"], "request-1")
         self.assertEqual(ChatStore(self.store.db_path).history(self.project, "pet"), manager.chat.history(self.project, "pet"))
 
     def test_partial_failure_keeps_all_requests_in_fallback(self):

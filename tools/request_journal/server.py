@@ -141,6 +141,7 @@ class JournalServer(ThreadingHTTPServer):
         self.store_factory = store_factory
         self.project = str(Path(project).resolve())
         self.summarizer_status = {"provider": "unavailable", "updated": 0, "skipped": 0}
+        self.summary_transport = None
         self.collector_status = "disabled"
         self.runtime_status = "disabled"
         self.chat = None
@@ -182,7 +183,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         route = unquote(parsed.path)
         if route == "/health":
-            return self.reply(200, {"ok": True, "service": "request-journal", "version": 1, "collector": self.server.collector_status})
+            return self.reply(200, {"ok": True, "service": "request-journal", "version": 1, "collector": self.server.collector_status, "runtime": self.server.runtime_status, "summary_transport": self.server.summary_transport})
         assets = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/chat.js": ("chat.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8")}
         if route in assets:
             filename, kind = assets[route]
