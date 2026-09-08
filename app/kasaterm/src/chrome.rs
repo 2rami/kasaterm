@@ -3569,14 +3569,17 @@ impl App {
         *last = Some((now, state.to_string(), text.clone()));
 
         let Some(dir) = pet_model_dir() else { return };
-        let esc = text.replace('\\', "\\\\").replace('"', "\\\"");
-        let _ = std::fs::write(
-            dir.join("board.json"),
-            // 지금 누구 이야기인지도 싣는다 — 펫이 되받아 말하려면 어디로 보낼지가
-            // 있어야 한다(말풍선은 그 pane 을 가리키고 있다).
-            format!("{{\"state\":\"{state}\",\"text\":\"{esc}\",\"pane\":\"{subject}\"}}"),
-        );
+        let _ = std::fs::write(dir.join("board.json"), pet_board_json(state, &text, &subject));
     }
+}
+
+/// 펫이 읽을 판 한 장.
+///
+/// 이어 붙이지 않고 직렬화기에 맡기는 이유는 두 줄짜리 말 때문이다 — 따옴표와 역슬래시만
+/// 손으로 막고 개행을 그대로 넣었더니 JSON 규격을 벗어나, 펫이 파일 **전체**를 못 읽고
+/// 통째로 입을 다물었다(2026-09-08 실측: 「무엇을 하는 중」이 두 줄이 된 날부터 조용해졌다).
+fn pet_board_json(state: &str, text: &str, subject: &str) -> String {
+    serde_json::json!({ "state": state, "text": text, "pane": subject }).to_string()
 }
 
 /// File name for the dialog — the full path would blow the card's width.
@@ -4628,5 +4631,20 @@ mod josa_tests {
         assert_eq!(josa("Mao", "은", "는"), "는");
         assert_eq!(josa("huohuo", "이", "가"), "가");
         assert_eq!(josa("", "은", "는"), "는");
+    }
+}
+
+#[cfg(test)]
+mod pet_board_tests {
+    #[test]
+    fn a_two_line_remark_survives_the_round_trip() {
+        // 「무엇을 하는 중」은 두 줄이다(누구·무엇 / 몇 분째). 손으로 이어 붙이던 시절
+        // 그 개행이 규격을 깨서 펫이 판을 통째로 못 읽었다.
+        let text = "유즈 · 설정 화면\n7분째 \"굽는 중\" — C:\\경로";
+        let j = super::pet_board_json("busy", text, "%5");
+        let v: serde_json::Value = serde_json::from_str(&j).expect("다시 읽힌다");
+        assert_eq!(v["text"], text);
+        assert_eq!(v["state"], "busy");
+        assert_eq!(v["pane"], "%5");
     }
 }

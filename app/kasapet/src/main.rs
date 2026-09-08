@@ -68,8 +68,14 @@ struct App {
     bubble_text: Option<(wgpu::TextureView, f32, f32)>,
     /// 글자 크기(pt). 설정 화면이 `pet/text_pt` 에 적어 두면 그것을 따른다.
     text_pt: f32,
-    /// 지금 말풍선이 가리키는 pane — 되받아 말하면 이리로 간다.
+    /// 지금 말풍선이 가리키는 pane — 되받아 말하거나 말풍선을 누르면 이리로 간다.
     subject: String,
+    /// 지금 말이 뜬 때. 급하지 않은 말은 잠깐 뒤 접는다.
+    said_at: std::time::Instant,
+    /// 사람 손이 필요한 말인가. 이런 말은 안 접고, 뜨는 순간 캐릭터가 한 번 튄다.
+    urgent: bool,
+    /// 튀는 중 — 시작한 때와 제자리 y. 튀는 동안 오는 `Moved` 는 자리로 안 친다.
+    bounce: Option<(std::time::Instant, f64)>,
     /// 말 거는 중이면 친 글. None 이면 평소처럼 듣기만 한다.
     typing: Option<String>,
     typed_tex: Option<(wgpu::TextureView, f32, f32)>,
@@ -264,6 +270,12 @@ impl ApplicationHandler for App {
                     self.next_character();
                     return;
                 }
+                // 말풍선을 누르면 그 이야기의 pane 으로 간다 — 「누가 무엇을 하고 있다」를
+                // 읽고 그 자리를 화면에서 찾아 헤매는 것이 이 펫이 없애려던 일이다.
+                if self.cursor_on_bubble() {
+                    self.jump_to_subject();
+                    return;
+                }
                 self.touch();
                 if let Some(w) = &self.win { let _ = w.drag_window(); }
             }
@@ -271,6 +283,10 @@ impl ApplicationHandler for App {
             // 끌어 옮긴 자리는 그 자리에서 적어 둔다 — 종료를 기다리면 SIGTERM(하단바
             // 끄기)으로 죽을 때 못 남긴다.
             WindowEvent::Moved(pos) => {
+                // 튀는 동안의 움직임은 우리가 만든 것이라 「사람이 옮긴 자리」로 안 친다.
+                if self.bounce.is_some() {
+                    return;
+                }
                 let f = self.win.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
                 self.x = pos.x as f64 / f;
                 self.y = pos.y as f64 / f;
@@ -566,8 +582,16 @@ impl App {
         self.stirred = std::time::Instant::now();
         if text != self.say {
             self.say = text;
+            self.said_at = std::time::Instant::now();
             self.rebuild_bubble_text();
         }
+        // 사람 손이 필요한 말은 안 접는다 — 12초 뒤 사라지면 자리를 비운 사이의 승인
+        // 요청을 통째로 놓친다. 그리고 그런 말이 새로 뜰 땐 한 번 튄다.
+        let urgent = matches!(mood, board::Mood::Wait | board::Mood::Error);
+        if urgent && !self.urgent {
+            self.start_bounce();
+        }
+        self.urgent = urgent;
         if mood != self.mood {
             self.apply_mood(mood);
         }
@@ -597,6 +621,9 @@ impl App {
     /// 목록 뒤쪽에 오므로 대개 그 안에서 걸린다.
     fn touch(&mut self) {
         self.stirred = std::time::Instant::now();
+        // 접힌 말을 다시 띄운다 — 「방금 뭐라고 했더라」를 누르면 볼 수 있어야, 말이
+        // 잠깐 뒤 사라지는 것이 손해가 아니게 된다.
+        self.said_at = std::time::Instant::now();
         if self.motion_files.is_empty() {
             return;
         }
@@ -604,6 +631,66 @@ impl App {
         // 대개 그 안에서 걸린다. 한 번만 돌고 끝나면 원래 상태로 돌아간다.
         let i = self.motion_files.len() - 1;
         self.play_motion(i, false);
+    }
+
+    /// 말풍선이 지금 얼마나 진한가. 0 이면 없는 것이다.
+    fn say_alpha(&self) -> f32 {
+        if self.say.is_empty() {
+            return 0.0;
+        }
+        board::say_alpha(self.said_at.elapsed(), self.urgent)
+    }
+
+    /// 말풍선이 지금 떠 있어야 하나.
+    fn saying(&self) -> bool {
+        self.say_alpha() > 0.0
+    }
+
+    /// 커서가 말풍선 자리인가 — 창 맨 위, 머리 위로 비워 둔 띠. 글자 알파로 잡지 않는
+    /// 이유는 획 사이가 비어 있어 획을 정확히 짚어야만 눌리기 때문이다.
+    fn cursor_on_bubble(&self) -> bool {
+        self.saying() && self.local.is_some_and(|(_, y)| y < HEADROOM as f32)
+    }
+
+    /// 말풍선이 가리키는 pane 을 앞으로 꺼낸다. pane 고르기와 창 올리기는 따로다 —
+    /// 앱이 뒤에 있으면 고르기만 해서는 화면에 안 뜬다.
+    fn jump_to_subject(&mut self) {
+        self.touch();
+        if self.subject.is_empty() {
+            return;
+        }
+        if let Some(cli) = cli_path() {
+            let _ = std::process::Command::new(cli)
+                .arg("focus")
+                .arg(&self.subject)
+                .status();
+        }
+        raise_kasaterm();
+    }
+
+    /// 급한 소식이 오면 한 번 튄다. 말풍선만으로는 다른 창을 보는 동안 못 알아채지만
+    /// 움직임은 곁눈으로도 잡힌다.
+    fn start_bounce(&mut self) {
+        if self.bounce.is_none() {
+            self.bounce = Some((std::time::Instant::now(), self.y));
+        }
+    }
+
+    /// 튀기 한 걸음. 잦아드는 반동으로 0.6초, 끝나면 제자리에 정확히 놓는다 — 몇 픽셀씩
+    /// 어긋난 채 끝나면 튈 때마다 펫이 화면을 기어간다.
+    fn tick_bounce(&mut self) {
+        let Some((t0, base)) = self.bounce else { return };
+        let s = t0.elapsed().as_secs_f64();
+        const DUR: f64 = 0.6;
+        let dy = if s >= DUR {
+            self.bounce = None;
+            0.0
+        } else {
+            -(s * 18.0).sin().abs() * 14.0 * (1.0 - s / DUR)
+        };
+        if let Some(w) = &self.win {
+            let _ = w.set_outer_position(winit::dpi::LogicalPosition::new(self.x, base + dy));
+        }
     }
 
     /// 모션을 갈아 끼운다. 파일과 「그 모션이 쥔 파라미터」는 늘 짝이어야 한다 —
@@ -637,6 +724,7 @@ impl App {
     fn draw(&mut self) {
         self.poll_cursor();
         self.poll_board();
+        self.tick_bounce();
         // 한 판이 끝나면 다음 모션으로 넘어간다. 한 가지만 물려 두면 몇 초 만에
         // 「가만히 있는 그림」으로 보인다(2026-09-07 지적 「모션 계속 똑같애」).
         if self.motion.as_ref().is_some_and(|m| !m.is_looping() && m.is_finished())
@@ -842,7 +930,10 @@ impl App {
             // 할 말 — 판 없이 글자만 머리 위에 뜬다(2026-09-07 지시). 판을 두면 캐릭터
             // 위에 네모가 하나 더 얹혀 바탕화면에 얹힌 느낌이 사라진다. 밝은 바탕에서도
             // 읽히도록 글자 자체가 어두운 테두리를 두르고 온다(bubble.rs).
-            if let (Some((text_v, text_w, text_h)), false) = (&self.bubble_text, preview_mode()) {
+            let say_alpha = self.say_alpha();
+            if let (Some((text_v, text_w, text_h)), false, true) =
+                (&self.bubble_text, preview_mode(), say_alpha > 0.0)
+            {
                 let win = self.win.as_ref().map(|w| w.inner_size()).unwrap_or_default();
                 let sf = self.win.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
                 let (sw, sh) = (win.width.max(1) as f32 / sf, win.height.max(1) as f32 / sf);
@@ -865,7 +956,7 @@ impl App {
                 g.q.write_buffer(&g.bubble_vb, 0, bytemuck::cast_slice(&quad));
                 let mut m = [0.0f32; 16];
                 m[0] = 1.0; m[5] = 1.0; m[10] = 1.0; m[15] = 1.0;
-                let u = Xf { mvp: m, mask_mtx: m, channel: [0.0; 4], opacity: 1.0, use_mask: 0.0, inverted: 0.0, _pad: 0.0 };
+                let u = Xf { mvp: m, mask_mtx: m, channel: [0.0; 4], opacity: say_alpha, use_mask: 0.0, inverted: 0.0, _pad: 0.0 };
                 g.q.write_buffer(&g.bubble_ub, 0, bytemuck::bytes_of(&u));
                 let bg = bind(&g.bubble_ub, text_v, &g.dummy_view);
                 rp.set_pipeline(&g.p_plain);
@@ -909,7 +1000,7 @@ impl App {
         // 커서 자리가 캐릭터의 칠해진 픽셀인지 본다. 몇 프레임에 한 번이면 충분하다 —
         // 손이 움직이는 속도보다 훨씬 잦다.
         if self.frames % 4 == 0 {
-            let over = self.cursor_on_body(g, &frame.texture);
+            let over = self.cursor_on_body(g, &frame.texture) || self.cursor_on_bubble();
             if over != self.on_body {
                 self.on_body = over;
                 if let Some(w) = &self.win {
@@ -1092,6 +1183,23 @@ fn resign_key() {}
 /// 규칙을 안 돌린다. 몸 밖일 때 화살표로 되돌리는 것도 우리 몫이다: 마지막으로
 /// 지운 것이 그대로 남는다.
 #[cfg(target_os = "macos")]
+/// kasaterm 창을 앞으로. 펫은 독에 안 서므로(accessory) 자기가 활성이 될 일이 없고,
+/// 남의 앱을 올리는 것이라 번들 id 로 찾아 부른다. 개발 실행(번들 아님)에서는 못 찾는데,
+/// 그때는 pane 고르기까지만 되고 창은 사람이 올린다.
+#[cfg(target_os = "macos")]
+fn raise_kasaterm() {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+    let id = objc2_foundation::NSString::from_str("com.kasa.kasaterm");
+    let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&id);
+    if let Some(a) = apps.iter().next() {
+        a.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn raise_kasaterm() {}
+
+#[cfg(target_os = "macos")]
 fn set_hand_cursor(hand: bool) {
     use objc2_app_kit::NSCursor;
     if hand {
@@ -1206,17 +1314,53 @@ fn main() {
 
     let el = EventLoop::new().unwrap();
     el.set_control_flow(ControlFlow::Poll);
+    // 저장된 자리가 지금 없는 화면을 가리키면 펫이 어디에도 안 뜬다 — 외장 모니터에
+    // 두고 뽑았거나 배치를 바꾼 다음이 그렇다. 켜자마자 안 보이면 사람은 「꺼졌다」로
+    // 읽고 다시 켜는데, 그래도 같은 자리로 간다.
+    if let Some((sx, sy)) = onscreen(x, y, 420.0 * scale as f64) {
+        x = sx;
+        y = sy;
+    }
     let mut app = App { win: None, gfx: None,
         x, y, w: 420.0, h: 600.0 + HEADROOM, scale,
         alpha: wgpu::CompositeAlphaMode::Auto, cursor: (0.0, 0.0), pet_dir, name, last_click: None, on_body: false, local: None,
         mood: board::Mood::Idle, say: String::new(), board_seen: None,
         board_polled: std::time::Instant::now(), stirred: std::time::Instant::now(),
-        bubble_text: None, text_pt: bubble::FONT_PT, subject: String::new(), typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
+        bubble_text: None, text_pt: bubble::FONT_PT, subject: String::new(),
+        said_at: std::time::Instant::now(), urgent: false, bounce: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
         motion_files, motion_idx: 0, expr_files, exprs: mocari::expression::ExpressionManager::new(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
         shot_path: std::env::var("KASAPET_SHOT").ok(),
         shot_at: std::env::var("KASAPET_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(120) };
     el.run_app(&mut app).unwrap();
+}
+
+/// 그 자리가 어느 화면에도 안 걸치면 주 화면 안쪽 자리를 새로 준다. 걸쳐 있으면
+/// `None` — 사람이 둔 자리를 그대로 둔다.
+#[cfg(target_os = "macos")]
+fn onscreen(x: f64, y: f64, w: f64) -> Option<(f64, f64)> {
+    let mtm = objc2_foundation::MainThreadMarker::new()?;
+    let screens = objc2_app_kit::NSScreen::screens(mtm);
+    // AppKit 은 왼쪽 **아래**가 원점이고 winit 은 왼쪽 위다. 주 화면 높이를 기준으로
+    // 뒤집어야 두 좌표계가 만난다(poll_cursor 와 같은 규약).
+    let main_h = screens.iter().next()?.frame().size.height;
+    // 머리만 걸쳐도 잡을 수 있으면 「보인다」로 친다 — 살짝 내민 채 둔 것도 사람의 뜻이다.
+    const EDGE: f64 = 80.0;
+    let visible = screens.iter().any(|s| {
+        let f = s.frame();
+        let (l, t) = (f.origin.x, main_h - (f.origin.y + f.size.height));
+        x + w - EDGE > l && x + EDGE < l + f.size.width && y + EDGE > t && y + EDGE < t + f.size.height
+    });
+    if visible {
+        return None;
+    }
+    let f = screens.iter().next()?.visibleFrame();
+    Some((f.origin.x + 60.0, main_h - (f.origin.y + f.size.height) + 60.0))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn onscreen(_x: f64, _y: f64, _w: f64) -> Option<(f64, f64)> {
+    None
 }
 
 /// 그림을 창의 아래쪽 몫에 꽉 맞추는 변환.
