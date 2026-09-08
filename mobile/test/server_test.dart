@@ -281,6 +281,36 @@ void kindTests() {
     expect(pane({'status': 'blocked'}).kindLabel, '답 기다림');
   });
 
+  test('작업 중이면 무엇을 하는지 — 백그라운드 설명 > 서브에이전트 > 도구 라벨', () {
+    expect(pane({'status': 'working'}).kindLabel, '작업 중');
+    expect(
+      pane({'status': 'working', 'doing': 'Bash cargo check'}).kindLabel,
+      'Bash cargo check',
+    );
+    expect(
+      pane({
+        'status': 'working',
+        'doing': 'Edit a.dart',
+        'background': ['애플 메일 감시'],
+      }).kindLabel,
+      '백그라운드 · 애플 메일 감시',
+    );
+    expect(
+      pane({
+        'status': 'working',
+        'background': ['a', 'b'],
+      }).kindLabel,
+      '백그라운드 2개 · a',
+    );
+    expect(
+      pane({
+        'status': 'working',
+        'subagents': ['정찰'],
+      }).kindLabel,
+      '서브에이전트 1 · 정찰',
+    );
+  });
+
   test('쉰 지 10분 안이면 「방금 끝냄」, 넘으면 「쉼」', () {
     expect(pane({'status': 'idle', 'idle_secs': 30}).kindLabel, '방금 끝냄');
     expect(pane({'status': 'idle', 'idle_secs': 3600}).kindLabel, '쉼');

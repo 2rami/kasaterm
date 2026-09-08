@@ -4528,6 +4528,13 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "kind": b.and_then(|p| p.attention_kind.clone()),
                 "waiting_for": b.and_then(|p| p.waiting_for.clone()),
                 "idle_secs": b.and_then(|p| p.idle_secs),
+                // 무엇을 하는 중인가 — 폰이 「작업 중」 대신 정확한 말을 쓴다(2026-09-08 지시
+                // 「모니터링이나 백그라운드 셸 돌아가면 … 작업 중 말고 정확히」). doing 은
+                // 최신 도구 라벨, background 는 아직 안 끝난 백그라운드 셸·감시의 설명,
+                // subagents 는 도는 서브에이전트의 설명.
+                "doing": b.map(|p| p.intent.clone()).filter(|s| !s.is_empty()),
+                "background": b.map(|p| p.background.clone()).unwrap_or_default(),
+                "subagents": b.map(|p| p.subagents.clone()).unwrap_or_default(),
                 // agent 이름이 없는 하네스(codex)는 이름표로 얼굴을 찾는다.
                 "slug": b
                     .and_then(|p| p.agent_name.as_deref())

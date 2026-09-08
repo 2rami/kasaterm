@@ -34,6 +34,9 @@ class Pane {
     this.branch,
     this.modelLabel,
     this.effortLabel,
+    this.doing,
+    this.background = const [],
+    this.subagents = const [],
   });
 
   final String id;
@@ -77,6 +80,32 @@ class Pane {
   final String? modelLabel;
   final String? effortLabel;
 
+  /// 지금 하는 일 — 최신 도구 라벨(「Bash cargo check」·「Edit hub.dart」). 작업 중일 때만 뜻이 있다.
+  final String? doing;
+
+  /// 아직 안 끝난 백그라운드 셸·감시의 설명. 작업 중 표시가 이것 때문일 때가 많다 —
+  /// 감시 알림이 대화에 들어와 「움직이는 중」으로 보인다(2026-09-08 지시).
+  final List<String> background;
+
+  /// 도는 서브에이전트의 설명.
+  final List<String> subagents;
+
+  /// 작업 중일 때 정확한 한 마디. 백그라운드가 있으면 그 설명이 먼저다 — 최신 도구
+  /// 라벨은 턴이 끝난 뒤에도 남아, 감시만 도는 pane 에 옛 「Edit …」가 붙는다.
+  String get busyLabel {
+    if (background.isNotEmpty) {
+      final n = background.length;
+      return n == 1
+          ? '백그라운드 · ${background.first}'
+          : '백그라운드 $n개 · ${background.first}';
+    }
+    if (subagents.isNotEmpty) {
+      return '서브에이전트 ${subagents.length} · ${subagents.first}';
+    }
+    final d = doing ?? '';
+    return d.isEmpty ? '작업 중' : d;
+  }
+
   /// PC 상태줄의 조각들 — 모델 · 브랜치 · 컨텍스트% · effort. 빈 것은 뺀다.
   List<String> get statusParts => [
     if ((modelLabel ?? '').isNotEmpty)
@@ -114,7 +143,7 @@ class Pane {
         _ => '답 기다림',
       };
     }
-    if (isBusy) return '작업 중';
+    if (isBusy) return busyLabel;
     if (justDone) return '방금 끝냄';
     return '쉼';
   }
@@ -157,6 +186,9 @@ class Pane {
     branch: j['branch'] as String?,
     modelLabel: j['model_label'] as String?,
     effortLabel: j['effort_label'] as String?,
+    doing: j['doing'] as String?,
+    background: [for (final s in (j['background'] as List?) ?? const []) '$s'],
+    subagents: [for (final s in (j['subagents'] as List?) ?? const []) '$s'],
   );
 }
 

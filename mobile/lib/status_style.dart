@@ -58,7 +58,7 @@ class StatusStyle {
     if (p.isBusy) {
       return StatusStyle(
         mood: PaneMood.working,
-        label: '작업 중',
+        label: p.busyLabel,
         icon: Icons.bolt_rounded,
         color: scheme.primary,
       );
@@ -210,11 +210,16 @@ class StatusChip extends StatelessWidget {
             lead,
             if (!compact) ...[
               const SizedBox(width: 5),
-              Text(
-                st.label,
-                style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: fg,
-                  fontWeight: filled ? FontWeight.w700 : FontWeight.w600,
+              // 「백그라운드 · 설명」처럼 긴 말은 칩 폭에서 잘린다 — 줄을 늘리면 타일이 흔들린다.
+              Flexible(
+                child: Text(
+                  st.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: fg,
+                    fontWeight: filled ? FontWeight.w700 : FontWeight.w600,
+                  ),
                 ),
               ),
             ],

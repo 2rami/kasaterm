@@ -266,11 +266,16 @@ class _TerminalScreenState extends State<TerminalScreen>
                                   else
                                     Icon(st.icon, size: 11, color: st.color),
                                   const SizedBox(width: 3),
-                                  Text(
-                                    st.label,
-                                    style: theme.textTheme.labelSmall?.copyWith(
-                                      color: st.color,
-                                      fontWeight: FontWeight.w600,
+                                  Flexible(
+                                    child: Text(
+                                      st.label,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: theme.textTheme.labelSmall
+                                          ?.copyWith(
+                                            color: st.color,
+                                            fontWeight: FontWeight.w600,
+                                          ),
                                     ),
                                   ),
                                 ],
