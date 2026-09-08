@@ -6139,8 +6139,8 @@ impl WebSrc {
         self.meta = Self::meta_of(u);
     }
     /// 원본 폭 그대로, 모든 행을 실은 프레임.
-    fn full_raw(&self) -> String {
-        crate::gridwire::encode(&self.full_snapshot()).to_string()
+    fn full_raw(&self, glyphs: bool) -> String {
+        crate::gridwire::encode_with_glyphs(&self.full_snapshot(), glyphs).to_string()
     }
     fn full_snapshot(&self) -> kasa_bridge::screen::ScreenUpdate {
         let mut u = self.meta.clone();
@@ -6148,7 +6148,7 @@ impl WebSrc {
         u
     }
     /// `cols` 폭으로 다시 접은 프레임 — 행 수는 접힌 줄 수(원본 행 수보다 적으면 그만큼 채움).
-    fn reflowed(&self, cols: u16) -> String {
+    fn reflowed(&self, cols: u16, glyphs: bool) -> String {
         let out = kasa_bridge::reflow::reflow_lines(
             &self.cells,
             self.meta.cols,
@@ -6166,7 +6166,7 @@ impl WebSrc {
         u.cursor_row = out.cursor_row.unwrap_or(0);
         u.cursor_col = out.cursor_col;
         u.dirty = rows.into_iter().enumerate().map(|(i, r)| (i as u16, r)).collect();
-        crate::gridwire::encode(&u).to_string()
+        crate::gridwire::encode_with_glyphs(&u, glyphs).to_string()
     }
 }
 
@@ -6176,15 +6176,16 @@ fn encode_history_rows(
     rows: &[kasa_bridge::screen::Row],
     src_cols: u16,
     view_cols: u16,
+    glyphs: bool,
 ) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     for r in rows.iter().rev() {
         if view_cols > 0 && view_cols != src_cols {
             for line in kasa_bridge::reflow::reflow_row(r, src_cols, view_cols) {
-                out.push(crate::gridwire::encode_row(&line));
+                out.push(crate::gridwire::encode_row_with_glyphs(&line, glyphs));
             }
         } else {
-            out.push(crate::gridwire::encode_row(r));
+            out.push(crate::gridwire::encode_row_with_glyphs(r, glyphs));
         }
     }
     out
@@ -6195,6 +6196,7 @@ enum VisualEvent { Raw, Published, Deadline }
 
 #[derive(Default)]
 struct VisualDelivery {
+    glyphs: bool,
     last_scene: Option<u64>,
     last_dimensions: Option<(u16, u16)>,
     pending_since: Option<std::time::Instant>,
@@ -6219,7 +6221,7 @@ impl VisualDelivery {
             self.last_dimensions = None;
             self.pending_since = None;
             self.fallback = false;
-            let mut value: serde_json::Value = serde_json::from_str(&WebSrc::from_full(raw).reflowed(view_cols)).unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&WebSrc::from_full(raw).reflowed(view_cols, self.glyphs)).unwrap();
             value["scene"] = serde_json::Value::Null;
             return Some(value.to_string());
         }
@@ -6233,14 +6235,14 @@ impl VisualDelivery {
             // A completed frame is valid even when more PTY output is already pending.
             self.pending_since = (crate::visual::source_key(raw, 0).as_deref()
                 != Some(scene.source_key.as_str())).then_some(now);
-            return Some(crate::gridwire::encode_scene(scene).to_string());
+            return Some(crate::gridwire::encode_scene_with_glyphs(scene, self.glyphs).to_string());
         }
         if self.last_dimensions.is_some_and(|old| old != dimensions) {
             self.last_dimensions = Some(dimensions);
             self.last_scene = None;
             self.pending_since = Some(now);
             self.fallback = false;
-            return Some(crate::gridwire::encode_raw_visual(raw).to_string());
+            return Some(crate::gridwire::encode_raw_visual_with_glyphs(raw, self.glyphs).to_string());
         }
         if event == VisualEvent::Deadline {
             // Unchanged raw notifications do not imply that the producer has stalled.
@@ -6255,7 +6257,7 @@ impl VisualDelivery {
         if self.fallback {
             if event == VisualEvent::Published { return None; }
             self.last_dimensions = Some(dimensions);
-            return Some(crate::gridwire::encode_raw_visual(raw).to_string());
+            return Some(crate::gridwire::encode_raw_visual_with_glyphs(raw, self.glyphs).to_string());
         }
         self.pending_since.get_or_insert(now);
         None
@@ -6389,11 +6391,12 @@ async fn term_ws_handler(
     let cwd = q.get("cwd").cloned();
     // 셀 그리드로 받을지(웹텀 자체 렌더) 원시 바이트로 받을지.
     let grid = q.get("grid").map_or(false, |v| v == "1" || v == "true");
+    let glyphs = grid && q.get("glyphs").is_some_and(|v| v == "1" || v == "true");
     // own=1 — 이 연결이 pane 의 **소유자**(원격 kasaterm GUI)다. 미러 규칙 셋이
     // 뒤집힌다: resize 를 force 없이 받고, 끊겨도 격자를 되돌리지 않으며(소유자가
     // 정한 크기가 곧 원본), kill 제어 메시지를 받는다.
     let own = q.get("own").map_or(false, |v| v == "1" || v == "true");
-    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own))
+    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own, glyphs))
         .into_response()
 }
 
@@ -6404,6 +6407,7 @@ async fn term_ws_run(
     cwd: Option<String>,
     want_grid: bool,
     own: bool,
+    glyphs: bool,
 ) {
     use futures_util::{SinkExt, StreamExt};
     // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
@@ -6514,7 +6518,7 @@ async fn term_ws_run(
     let view_cols_in = view_cols.clone();
     // 접을 재료 — 원본 폭 그대로의 전체 격자. 프레임은 바뀐 행만 오므로 여기 쌓는다.
     let mut web_src: Option<WebSrc> = None;
-    let mut visual_delivery = VisualDelivery::default();
+    let mut visual_delivery = VisualDelivery { glyphs, ..Default::default() };
     // 거울(이미 있는 pane 을 보는 접속)도, 이 접속이 새로 띄운 원격 셸도 등록한다 —
     // 후자는 만든 쪽이 곧 보는 사람이라(맥북의 `mini` 창) 거기가 브라우저의 자리다.
     let ctl_token = register_viewer_ctl(&ctl_pane, btx.clone());
@@ -6532,7 +6536,7 @@ async fn term_ws_run(
         Tap::Grid(rx, snap) => {
             let msg = if native_scene {
                 visual_delivery.encode(&sess.live_screen(), 0, VisualEvent::Raw)
-            } else { Some(crate::gridwire::encode(&snap).to_string()) };
+            } else { Some(crate::gridwire::encode_with_glyphs(&snap, glyphs).to_string()) };
             if let Some(msg) = msg { let _ = ws_tx.send(Message::Text(msg.into())).await; }
             web_src = Some(WebSrc::from_full(&snap));
             std::thread::spawn(move || {
@@ -6628,7 +6632,7 @@ async fn term_ws_run(
                                 let rows = sess_sz.rows_above_live(k);
                                 let msg = serde_json::json!({
                                     "t": "scrolled",
-                                    "rows": encode_history_rows(&rows, u.cols, vc),
+                                    "rows": encode_history_rows(&rows, u.cols, vc, glyphs),
                                 })
                                 .to_string();
                                 if ws_tx.send(Message::Text(msg.into())).await.is_err() {
@@ -6642,9 +6646,9 @@ async fn term_ws_run(
                                 let Some(msg) = visual_delivery.encode(&u, vc, VisualEvent::Raw) else { continue };
                                 msg
                             } else if vc > 0 && vc != u.cols {
-                                src.reflowed(vc)
+                                src.reflowed(vc, glyphs)
                             } else {
-                                crate::gridwire::encode(&u).to_string()
+                                crate::gridwire::encode_with_glyphs(&u, glyphs).to_string()
                             };
                             ws_tx.send(Message::Text(msg.into())).await
                         }
@@ -6661,9 +6665,9 @@ async fn term_ws_run(
                                 let Some(msg) = visual_delivery.encode(&src.full_snapshot(), vc, VisualEvent::Raw) else { continue };
                                 msg
                             } else if vc > 0 && vc != src.meta.cols {
-                                src.reflowed(vc)
+                                src.reflowed(vc, glyphs)
                             } else {
-                                src.full_raw()
+                                src.full_raw(glyphs)
                             };
                             ws_tx.send(Message::Text(msg.into())).await
                         }
@@ -6739,7 +6743,7 @@ async fn term_ws_run(
                         let vc = view_cols_in.load(std::sync::atomic::Ordering::Relaxed);
                         let msg = serde_json::json!({
                             "t": "history",
-                            "rows": encode_history_rows(&rows, src_cols, vc),
+                            "rows": encode_history_rows(&rows, src_cols, vc, glyphs),
                         })
                         .to_string();
                         let _ = btx_shell.send(Frame::Control(msg)).await;
@@ -7666,6 +7670,64 @@ pub fn spawn_http_server_opts(
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn websocket_glyph_segments_are_opt_in_for_full_and_delta_grids() {
+        use futures_util::StreamExt;
+        use serde_json::{json, Value};
+        use std::sync::Arc;
+        use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
+
+        async fn next_grid(ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>) -> Value {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let value: Value = serde_json::from_str(&text).unwrap();
+                    if value["t"] == "grid" { return value; }
+                }
+                panic!("grid stream ended");
+            }).await.unwrap()
+        }
+
+        let pane = format!("glyph-http-test-{}", uuid::Uuid::new_v4());
+        let (events, receiver) = crossbeam_channel::unbounded();
+        let source = Arc::new(kasa_pty::PtySession::start_external(
+            kasa_pty::PtyOptions { pane_id: pane.clone(), cols: 20, rows: 3, ..Default::default() },
+            kasa_pty::ExternalIo {
+                events: receiver, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}),
+            },
+        ).unwrap());
+        kasa_pty::register_session(&pane, &source);
+        events.send(kasa_pty::ExtEvent::Bytes("A⎿B가".as_bytes().to_vec())).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !source.visible_text(3).contains("A⎿B가") {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        }).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = axum::Router::new().route("/term/ws", axum::routing::get(super::term_ws_handler));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let url = format!("ws://{address}/term/ws?pane={pane}&grid=1");
+        let (mut legacy, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (mut glyphs, _) = tokio_tungstenite::connect_async(format!("{url}&glyphs=1")).await.unwrap();
+        let old = next_grid(&mut legacy).await;
+        let segmented = next_grid(&mut glyphs).await;
+        let old_run = old["dirty"][0][1][0].as_array().unwrap();
+        let new_run = segmented["dirty"][0][1][0].as_array().unwrap();
+        assert_eq!(old_run.len(), 4);
+        assert_eq!(&new_run[..4], old_run);
+        assert_eq!(new_run[4], json!([["A", 1], ["⎿", 1], ["B", 1], ["가", 2]]));
+        events.send(kasa_pty::ExtEvent::Bytes(b"X".to_vec())).unwrap();
+        assert_eq!(next_grid(&mut legacy).await["dirty"][0][1][0].as_array().unwrap().len(), 4);
+        assert_eq!(next_grid(&mut glyphs).await["dirty"][0][1][0].as_array().unwrap().len(), 5);
+        source.resize(30, 4).unwrap();
+        assert_eq!(next_grid(&mut legacy).await["dirty"][0][1][0].as_array().unwrap().len(), 4);
+        assert_eq!(next_grid(&mut glyphs).await["dirty"][0][1][0].as_array().unwrap().len(), 5);
+        legacy.close(None).await.unwrap();
+        glyphs.close(None).await.unwrap();
+        let _ = events.send(kasa_pty::ExtEvent::Eof);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn native_scene_websocket_is_atomic_clears_stale_output_and_scopes_assets() {
         use futures_util::StreamExt;
         use serde_json::{json, Value};
@@ -7701,7 +7763,7 @@ mod tests {
             .route("/term/visual-asset", axum::routing::get(super::term_visual_asset))
             .route("/term/visual-builtin/{name}", axum::routing::get(super::term_visual_builtin));
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let url = format!("ws://{address}/term/ws?pane={pane}&grid=1");
+        let url = format!("ws://{address}/term/ws?pane={pane}&grid=1&glyphs=1");
         let (mut standalone, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         assert!(next_kind(&mut standalone, "size").await["capabilities"].get("native_scene").is_none());
         standalone.close(None).await.unwrap();
@@ -7726,6 +7788,7 @@ mod tests {
             }],
         }));
         let decorated = next_kind(&mut ws, "grid").await;
+        assert_eq!(decorated["dirty"][0][1][0].as_array().unwrap().len(), 5);
         assert_eq!(decorated["dirty"][0][1][0][0], "X");
         assert_eq!(decorated["scene"]["overlays"][0]["asset"]["id"], asset);
         assert_eq!(decorated["sourceKey"], decorated["scene"]["sourceKey"]);

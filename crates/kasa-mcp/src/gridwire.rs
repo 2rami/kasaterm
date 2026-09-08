@@ -51,14 +51,38 @@ fn style_of(c: &Cell) -> (Value, Value, u8) {
 /// 실측: `echo 가나다` → `'가 나 다'`). 문자로는 진짜 공백과 구분이 안 되므로 **앞 글자의
 /// 폭**으로 판정해야 한다 — 폭 2짜리 뒤의 한 칸이 그 글자의 자리다.
 pub(crate) fn encode_row(row: &[Cell]) -> Value {
+    encode_row_with_glyphs(row, false)
+}
+
+fn append_segment(segments: &mut Vec<(String, usize)>, ch: char, width: usize) {
+    let regional = |ch: char| ('\u{1f1e6}'..='\u{1f1ff}').contains(&ch);
+    if let Some((text, logical_width)) = segments.last_mut() {
+        let regional_pair = regional(ch) && text.chars().count() == 1
+            && text.chars().next().is_some_and(regional);
+        let modifier = ('\u{1f3fb}'..='\u{1f3ff}').contains(&ch);
+        if width == 0 || text.ends_with('\u{200d}') || regional_pair || modifier
+            || (width == 1 && ch.is_ascii() && text.is_ascii() && *logical_width == text.len())
+        {
+            text.push(ch);
+            *logical_width += width;
+            return;
+        }
+    }
+    segments.push((ch.to_string(), width));
+}
+
+pub(crate) fn encode_row_with_glyphs(row: &[Cell], glyphs: bool) -> Value {
     let mut runs: Vec<Value> = Vec::new();
     let mut text = String::new();
     let mut style: Option<(Value, Value, u8)> = None;
+    let mut segments = Vec::new();
 
-    let mut push = |text: &mut String, style: &mut Option<(Value, Value, u8)>| {
+    let mut push = |text: &mut String, style: &mut Option<(Value, Value, u8)>, segments: &mut Vec<(String, usize)>| {
         if let Some((fg, bg, fl)) = style.take() {
             if !text.is_empty() {
-                runs.push(json!([std::mem::take(text), fg, bg, fl]));
+                let mut run = vec![json!(std::mem::take(text)), fg, bg, json!(fl)];
+                if glyphs { run.push(json!(std::mem::take(segments))); }
+                runs.push(Value::Array(run));
             } else {
                 text.clear();
             }
@@ -79,19 +103,21 @@ pub(crate) fn encode_row(row: &[Cell]) -> Value {
         }
         let st = style_of(cell);
         if style.as_ref() != Some(&st) {
-            push(&mut text, &mut style);
+            push(&mut text, &mut style, &mut segments);
             style = Some(st);
         }
         // SGR 8(conceal)은 자리는 차지하되 글리프를 감춘다.
-        text.push(if cell.hidden { ' ' } else { cell.ch });
+        let ch = if cell.hidden { ' ' } else { cell.ch };
+        text.push(ch);
+        if glyphs { append_segment(&mut segments, ch, cell.ch.width().unwrap_or(1)); }
     }
-    push(&mut text, &mut style);
+    push(&mut text, &mut style, &mut segments);
 
     // 행 끝의 빈 칸은 굳이 실어 보내지 않는다 — 대부분의 행이 그 상태다. 꼬리 공백은
     // 앞 글자와 **같은 런에 묶여 있으므로**(속성이 같다) 런 통째로 비교하면 안 걸린다.
     // ⚠️ 배경색이 칠해진 공백은 눈에 보이는 것이라 자르지 않는다 — 상태바·선택 영역.
     loop {
-        let Some(Value::Array(a)) = runs.last() else { break };
+        let Some(Value::Array(a)) = runs.last_mut() else { break };
         if !(a[1].is_null() && a[2].is_null() && a[3] == json!(0)) {
             break;
         }
@@ -100,8 +126,28 @@ pub(crate) fn encode_row(row: &[Cell]) -> Value {
             runs.pop();
             continue;
         }
-        let i = runs.len() - 1;
-        runs[i] = json!([trimmed, Value::Null, Value::Null, 0]);
+        if glyphs {
+            let mut remaining = trimmed.chars().count();
+            let mut trimmed_segments = Vec::new();
+            for segment in a[4].as_array().unwrap() {
+                if remaining == 0 { break; }
+                let original = segment[0].as_str().unwrap();
+                let count = original.chars().count();
+                if remaining >= count {
+                    trimmed_segments.push(segment.clone());
+                    remaining -= count;
+                } else {
+                    let text = original.chars().take(remaining).collect::<String>();
+                    let removed_width: usize = original.chars().skip(remaining)
+                        .map(|ch| ch.width().unwrap_or(1)).sum();
+                    let width = (segment[1].as_u64().unwrap() as usize).saturating_sub(removed_width);
+                    trimmed_segments.push(json!([text, width]));
+                    remaining = 0;
+                }
+            }
+            a[4] = json!(trimmed_segments);
+        }
+        a[0] = json!(trimmed);
         break;
     }
     Value::Array(runs)
@@ -111,11 +157,17 @@ pub(crate) fn encode_row(row: &[Cell]) -> Value {
 ///
 /// `dirty` 는 바뀐 행만 담긴다(크기가 바뀌면 전체). 받는 쪽은 그 행만 교체하면 된다.
 pub fn encode(u: &ScreenUpdate) -> Value {
+    encode_with_glyphs(u, false)
+}
+
+pub fn encode_with_glyphs(u: &ScreenUpdate, glyphs: bool) -> Value {
     json!({
         "t": "grid",
         "rows": u.rows,
         "cols": u.cols,
-        "dirty": u.dirty.iter().map(|(i, row)| json!([i, encode_row(row)])).collect::<Vec<_>>(),
+        "dirty": u.dirty.iter().map(|(i, row)| json!([i,
+            if glyphs { encode_row_with_glyphs(row, true) } else { encode_row(row) }
+        ])).collect::<Vec<_>>(),
         "cursor": [u.cursor_row, u.cursor_col],
         "cursorVisible": u.cursor_visible,
         "alt": u.alt_screen,
@@ -131,10 +183,14 @@ pub fn encode(u: &ScreenUpdate) -> Value {
 }
 
 pub fn encode_scene(frame: &crate::visual::PaneVisualFrame) -> Value {
+    encode_scene_with_glyphs(frame, false)
+}
+
+pub fn encode_scene_with_glyphs(frame: &crate::visual::PaneVisualFrame, glyphs: bool) -> Value {
     let mut composed = frame.raw_snapshot.clone();
     composed.dirty = frame.composed_cells.iter().cloned().enumerate()
         .map(|(index, row)| (index as u16, row)).collect();
-    let mut result = encode(&composed);
+    let mut result = encode_with_glyphs(&composed, glyphs);
     result["sourceKey"] = json!(frame.source_key);
     result["sceneRevision"] = json!(frame.scene_revision);
     result["scene"] = json!({
@@ -146,7 +202,11 @@ pub fn encode_scene(frame: &crate::visual::PaneVisualFrame) -> Value {
 
 /// The full raw fallback restores cells erased by an earlier native composition.
 pub fn encode_raw_visual(source: &ScreenUpdate) -> Value {
-    let mut result = encode(source);
+    encode_raw_visual_with_glyphs(source, false)
+}
+
+pub fn encode_raw_visual_with_glyphs(source: &ScreenUpdate, glyphs: bool) -> Value {
+    let mut result = encode_with_glyphs(source, glyphs);
     result["sourceKey"] = json!(crate::visual::source_key(source, 0));
     result["sceneRevision"] = Value::Null;
     result["scene"] = Value::Null;
@@ -159,6 +219,41 @@ mod tests {
 
     fn cell(ch: char) -> Cell {
         Cell { ch, ..Cell::blank() }
+    }
+
+    #[test]
+    fn opted_in_segments_keep_mixed_symbol_columns_without_changing_legacy_fields() {
+        let row: Vec<_> = "A⎿B".chars().map(cell).collect();
+        let legacy = encode_row(&row);
+        let segmented = encode_row_with_glyphs(&row, true);
+        assert_eq!(legacy[0].as_array().unwrap().len(), 4);
+        assert_eq!(&segmented[0].as_array().unwrap()[..4], legacy[0].as_array().unwrap());
+        assert_eq!(segmented[0][4], json!([["A", 1], ["⎿", 1], ["B", 1]]));
+    }
+
+    #[test]
+    fn segments_preserve_wide_spacers_hidden_width_and_trimmed_ascii() {
+        let row = vec![cell('가'), cell(' '), cell(' '), cell('A')];
+        assert_eq!(encode_row_with_glyphs(&row, true)[0][4], json!([["가", 2], [" A", 2]]));
+        let mut hidden = cell('가');
+        hidden.hidden = true;
+        assert_eq!(encode_row_with_glyphs(&[hidden, cell('\0'), cell('A')], true)[0][4],
+            json!([[" ", 2], ["A", 1]]));
+        let ascii: Vec<_> = "abc   ".chars().map(cell).collect();
+        let encoded = encode_row_with_glyphs(&ascii, true);
+        assert_eq!(encoded[0][0], "abc");
+        assert_eq!(encoded[0][4], json!([["abc", 3]]));
+    }
+
+    #[test]
+    fn segments_keep_available_combining_and_joined_emoji_in_one_cluster() {
+        let combining = vec![cell('e'), cell('\u{301}'), cell('B')];
+        assert_eq!(encode_row_with_glyphs(&combining, true)[0][4], json!([["e\u{301}", 1], ["B", 1]]));
+        let joined = vec![cell('👩'), cell('\0'), cell('\u{200d}'), cell('💻'), cell('\0'), cell('A')];
+        assert_eq!(encode_row_with_glyphs(&joined, true)[0][4], json!([["👩‍💻", 4], ["A", 1]]),
+            "the cluster retains the sum of widths actually supplied by the server cells");
+        let flag = vec![cell('🇺'), cell('🇸'), cell('A')];
+        assert_eq!(encode_row_with_glyphs(&flag, true)[0][4], json!([["🇺🇸", 2], ["A", 1]]));
     }
 
     #[test]
