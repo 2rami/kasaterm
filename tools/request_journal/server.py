@@ -1,6 +1,9 @@
 """Loopback-only request journal API. Request content never enters access logs."""
 
 import json
+import os
+import shutil
+import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -13,7 +16,7 @@ def request_title(row, limit=65):
     summary = row.get("summary")
     candidate = summary.splitlines()[0] if isinstance(summary, str) and summary.strip() else row.get("prompt", "")
     if candidate.startswith(("나쵸 요약", "학생 보고 기준")):
-        candidate = row.get("prompt", "")
+        candidate = next((line for line in summary.splitlines()[1:] if line.strip() and not line.startswith("실제 반영")), row.get("prompt", ""))
     text = " ".join(str(candidate).removeprefix("요청:").split()) or "내용 없는 요청"
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
@@ -60,14 +63,46 @@ def waiting_summary(rows):
     return ". ".join(parts)[:249] + "."
 
 
+def summary_payload(store, project, port, provider):
+    rows = store.list_requests(project=project, limit=50)
+    pending = [row for row in rows if row.get("reported_status") == "reported_done" and row.get("applied_status") not in ("applied", "not_applicable")]
+    text = "최근 요청: " + " · ".join(request_title(row) for row in rows[:3]) + ". 반영 확인은 별도입니다." if rows else "아직 기록된 요청이 없습니다."
+    sources = [(row.get("summary_evidence") or {}).get("provider") if isinstance(row.get("summary_evidence"), dict) else None for row in rows[:3]]
+    text_source = "nacho" if sources and all(source in ("nacho-http", "nacho-llm") for source in sources) else "structured-fallback"
+    return {"version": 1, "project": project, "counts": store.stats(project=project), "latest": summary_view(rows[0]) if rows else None,
+            "needs_confirmation": [summary_view(row) for row in pending[:5]], "text": text[:250], "waiting_text": waiting_summary(rows),
+            "url": f"http://127.0.0.1:{port}/", "summarizer": provider, "text_source": text_source}
+
+
+def send_pet_summary(text):
+    root = Path(__file__).resolve().parents[2]
+    candidates = [Path.home() / "Applications/kasaterm.app/Contents/MacOS/kasaterm-cli", root / "target/release/kasaterm-cli"]
+    binary = next((str(path) for path in candidates if path.is_file() and os.access(path, os.X_OK)), None) or shutil.which("kasaterm-cli")
+    if not binary:
+        raise RuntimeError("pet transport unavailable")
+    running = False
+    try:
+        pid = int((Path.home() / ".config/kasaterm/pet.pid").read_text().strip())
+        if 0 < pid < 2**31:
+            os.kill(pid, 0)
+            running = True
+    except (OSError, ValueError):
+        pass
+    result = subprocess.run([binary, "pet-say", "--from", "요청장부", "--state", "wait", text[:250]], capture_output=True, timeout=8)
+    if result.returncode:
+        raise RuntimeError("pet transport unavailable")
+    return {"ok": True, "pet_running": running, "state": "sent" if running else "queued", "message": "곽향에 요약을 전달했습니다" if running else "펫이 꺼져 있어 요약을 알림 대기열에 넣었습니다"}
+
+
 class JournalServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, store_factory, project, port=18769):
+    def __init__(self, store_factory, project, port=0, pet_sender=None):
         self.store_factory = store_factory
         self.project = str(Path(project).resolve())
         self.summarizer_status = {"provider": "unavailable", "updated": 0, "skipped": 0}
         self.collector_status = "disabled"
+        self.pet_sender = pet_sender or send_pet_summary
         super().__init__(("127.0.0.1", port), Handler)
 
 
@@ -124,17 +159,12 @@ class Handler(BaseHTTPRequestHandler):
                 rows = store.list_requests(project=project, limit=limit, before=query.get("before", [None])[0], reported_status=status)
                 return self.reply(200, {"requests": [request_view(row) for row in rows], "next_before": rows[-1]["id"] if len(rows) == limit else None, "project": project})
             if route in ("/api/summary", "/api/ask"):
-                rows = store.list_requests(project=project, limit=50)
-                pending = [row for row in rows if row.get("reported_status") == "reported_done" and row.get("applied_status") not in ("applied", "not_applicable")]
-                counts = store.stats(project=project)
-                text = "최근 요청: " + " · ".join(request_title(row) for row in rows[:3]) + ". 반영 확인은 별도입니다." if rows else "아직 기록된 요청이 없습니다."
-                waiting = waiting_summary(rows)
-                url = f"http://127.0.0.1:{self.server.server_port}/"
+                payload = summary_payload(store, project, self.server.server_port, self.server.summarizer_status)
                 if route == "/api/ask":
                     question = query.get("q", [""])[0][:300]
-                    answer = waiting if any(word in question for word in ("남", "대기", "아직", "재시작", "wait", "left", "restart")) else text
-                    return self.reply(200, {"version": 1, "project": project, "text": answer[:250], "url": url})
-                return self.reply(200, {"version": 1, "project": project, "counts": counts, "latest": summary_view(rows[0]) if rows else None, "needs_confirmation": [summary_view(row) for row in pending[:5]], "text": text[:250], "waiting_text": waiting[:250], "url": url, "summarizer": self.server.summarizer_status})
+                    answer = payload["waiting_text"] if any(word in question for word in ("남", "대기", "아직", "재시작", "wait", "left", "restart")) else payload["text"]
+                    return self.reply(200, {"version": 1, "project": project, "text": answer, "url": payload["url"]})
+                return self.reply(200, payload)
             if route.startswith("/api/requests/") and "/" not in route[len("/api/requests/"):]:
                 row = store.get_request(route.rsplit("/", 1)[1])
                 if not row or row.get("project") != project:
@@ -153,13 +183,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(415, {"error": "json_request_required"})
         route = unquote(urlsplit(self.path).path)
         parts = route.strip("/").split("/")
-        if len(parts) != 4 or parts[:2] != ["api", "requests"] or parts[3] != "ack":
+        pet_request = route == "/api/pet-summary"
+        if not pet_request and (len(parts) != 4 or parts[:2] != ["api", "requests"] or parts[3] != "ack"):
             return self.reply(404, {"error": "not_found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= 65536 or self.headers.get("Transfer-Encoding"):
                 return self.reply(413, {"error": "invalid_body_size"})
             body = json.loads(self.rfile.read(length))
+            if pet_request:
+                if body != {}:
+                    return self.reply(400, {"error": "empty_object_required"})
+                payload = summary_payload(self.server.store_factory(), self.server.project, self.server.server_port, self.server.summarizer_status)
+                source = "나쵸 요약" if payload["text_source"] == "nacho" else "기본 정리"
+                return self.reply(200, self.server.pet_sender(f"{source} · {payload['text']}"[:250]))
             if not isinstance(body, dict) or body.get("applied_status") not in ("applied", "pending"):
                 return self.reply(400, {"error": "invalid_acknowledgement"})
             evidence = body.get("evidence", "")

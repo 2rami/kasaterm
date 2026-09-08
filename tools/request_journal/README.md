@@ -22,6 +22,10 @@ External LLM calls are disabled unless `--llm` is explicitly passed. That mode
 uses only already-injected process environment credentials; it never opens a
 key file. `--nacho-repo` optionally selects Nacho's existing transport repository.
 The UI explicitly shows when the Nacho summary provider is unavailable.
+Alternatively, `--nacho-http http://127.0.0.1:18795` explicitly uses Nacho through
+an existing local tunnel. This does not require `--llm` or copying a key; the
+remote bot's existing client handles authentication. The two provider options
+are mutually exclusive. A failed provider falls back to structured summaries.
 `--data-dir` defaults to `~/.config/kasaterm/request-journal`. `--interval` defaults
 to 5 seconds. Tests use temporary databases and an ephemeral loopback port.
 
@@ -38,6 +42,11 @@ Installation starts collection and loads `com.kasaterm.request-journal` into the
 current user's launchd domain. Stop unloads that exact service; it does not kill
 kasaterm, agents, or delete journal data. A retained launch agent loads again at
 the next login. Existing installations are not overwritten implicitly.
+Use `install --replace --apply` to reload this journal with changed provider
+options. Replacement checks the existing label, module, project, and data path;
+another installation is refused. The database and collection offsets remain in
+place. If loading the new configuration fails, the previous configuration is
+restored and launchd is asked to restart it. No app, student, or bot is restarted.
 
 ## API v1
 
@@ -55,6 +64,7 @@ and `X-Journal-Request: 1`. Bodies are limited to 64 KiB.
 | `GET /api/summary` | `{version:1, project, counts, latest, needs_confirmation:[]}` |
 | `GET /api/ask?q=...` | `{version:1, project, text, url}` |
 | `POST /api/requests/<id>/ack` | Updated full request |
+| `POST /api/pet-summary` | `{ok,pet_running,state,message}` |
 
 The list accepts `limit` (1–100), `before` (opaque request ID),
 `reported_status`, and `project`. The project must match the service's configured
@@ -84,6 +94,13 @@ Acknowledgement body:
 The UI's “아직이에요” uses `pending`. Acknowledgements never change student
 reported status, and a final answer never automatically confirms application.
 Request text is inserted through DOM `textContent`, never interpreted as HTML.
+The “곽향에 요약 표시” button explicitly posts an empty JSON object to
+`/api/pet-summary`. Only that user action sends the saved, source-labelled
+summary through the existing local `kasaterm-cli pet-say` path. Collection and
+summarization never send pet messages automatically. When the pet is stopped,
+the result says the summary is queued, not visible. It never starts or restarts
+the pet and never sends Slack messages. `text_source` in the summary response
+distinguishes Nacho-generated excerpts from the structured fallback.
 HTTP access logs are suppressed, and service errors do not contain transcript
 text. Local processes and the current user's browser can read the journal;
 this is not an authentication boundary against other local software.

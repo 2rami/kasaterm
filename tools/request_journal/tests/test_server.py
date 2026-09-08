@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import Mock
 
 from tools.request_journal.server import JournalServer
 from tools.request_journal.store import Store
@@ -98,6 +99,24 @@ class ServerTests(unittest.TestCase):
         self.store.acknowledge(self.id, "restart_required", {"fixture_build": True}, origin="verified_build")
         _, _, raw = self.call("/api/ask?q=restart")
         self.assertIn("최근 재시작 대기:", json.loads(raw)["text"])
+
+    def test_pet_display_requires_explicit_local_post_and_uses_saved_summary(self):
+        sender = Mock(return_value={"ok": True, "state": "queued", "pet_running": False, "message": "펫이 꺼져 있어 대기 중"})
+        self.server.pet_sender = sender
+        self.call("/api/summary")
+        sender.assert_not_called()
+        headers = {"Content-Type": "application/json", "X-Journal-Request": "1"}
+        self.assertEqual(self.call("/api/pet-summary", "POST", "{}", dict(headers, Origin="https://elsewhere.test"))[0], 403)
+        sender.assert_not_called()
+        status, _, body = self.call("/api/pet-summary", "POST", "{}", headers)
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body)["pet_running"])
+        self.assertTrue(sender.call_args.args[0].startswith("기본 정리"))
+        self.assertLessEqual(len(sender.call_args.args[0]), 250)
+        self.store.set_summary(self.id, "나쵸 요약 · 학생 보고 기준\n펫 메뉴의 저장 연동을 보고했습니다.\n실제 반영은 별도 확인이 필요해요.", {"provider": "nacho-http"})
+        self.call("/api/pet-summary", "POST", "{}", headers)
+        self.assertTrue(sender.call_args.args[0].startswith("나쵸 요약"))
+        self.assertIn("저장 연동", sender.call_args.args[0])
 
     def test_summary_contract_and_static_content_policy(self):
         self.store.set_reported_status(self.id, "reported_done", {"fixture": True})
