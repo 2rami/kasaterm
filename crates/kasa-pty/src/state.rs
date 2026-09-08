@@ -4328,30 +4328,74 @@ fn table_cache() -> &'static std::sync::Mutex<CachedTable> {
 /// 켜면 캐릭터 학생테마 적용안돼」). Enter 는 「새 전경 프로세스가 곧 뜬다」의
 /// 가장 이른 신호지만 exec 사슬이 끝나기 전에 읽으면 헛스캔이 `at` 시계만
 /// 되돌려 오히려 다음 정기 갱신을 늦춘다 — 그래서 사슬이 끝났을 100ms 뒤와,
-/// 느린 런처(래퍼 스크립트→node) 대비 400ms 뒤 두 번 읽는다.
+/// 느린 런처(래퍼 스크립트→node) 대비 마지막 입력 400ms 뒤에도 읽는다.
+#[derive(Default)]
+struct ProcessTablePokes {
+    next: Option<Instant>,
+    last: Option<Instant>,
+}
+
+impl ProcessTablePokes {
+    fn submit(&mut self, now: Instant) -> bool {
+        self.last = Some(now);
+        if self.next.is_some() {
+            return false;
+        }
+        self.next = Some(now + std::time::Duration::from_millis(100));
+        true
+    }
+
+    fn scanned(&mut self, now: Instant) {
+        let trailing = self.last.unwrap() + std::time::Duration::from_millis(400);
+        self.next = (now < trailing)
+            .then(|| trailing.min(now + std::time::Duration::from_millis(400)));
+    }
+}
+
 fn process_table_poke() {
-    std::thread::spawn(|| {
-        let mut slept = 0u64;
-        for at in [100u64, 400] {
-            std::thread::sleep(std::time::Duration::from_millis(at - slept));
-            slept = at;
-            {
-                let Ok(mut g) = table_cache().lock() else { return };
-                if g.refreshing {
-                    continue;
-                }
+    static POKES: Mutex<ProcessTablePokes> = Mutex::new(ProcessTablePokes {
+        next: None,
+        last: None,
+    });
+    if !POKES.lock().unwrap_or_else(|e| e.into_inner()).submit(Instant::now()) {
+        return;
+    }
+    // Concurrent submissions share one sleeper and process scan. Keeping the
+    // last submission preserves the slow-launcher trailing scan for every burst.
+    let spawned = std::thread::Builder::new().name("process-table-poke".into()).spawn(|| {
+        loop {
+            let next = POKES.lock().unwrap_or_else(|e| e.into_inner()).next;
+            let Some(next) = next else { return };
+            std::thread::sleep(next.saturating_duration_since(Instant::now()));
+            let finished = {
+                let mut pokes = POKES.lock().unwrap_or_else(|e| e.into_inner());
+                pokes.scanned(Instant::now());
+                pokes.next.is_none()
+            };
+            let refresh = {
+                let mut g = table_cache().lock().unwrap_or_else(|e| e.into_inner());
+                let refresh = !g.refreshing;
                 g.refreshing = true;
-            }
-            let fresh = process_table_raw();
-            if let Ok(mut g) = table_cache().lock() {
-                if !fresh.is_empty() {
-                    g.at = Instant::now();
-                    g.table = std::sync::Arc::new(fresh);
+                refresh
+            };
+            if refresh {
+                let fresh = process_table_raw();
+                if let Ok(mut g) = table_cache().lock() {
+                    if !fresh.is_empty() {
+                        g.at = Instant::now();
+                        g.table = std::sync::Arc::new(fresh);
+                    }
+                    g.refreshing = false;
                 }
-                g.refreshing = false;
+            }
+            if finished {
+                return;
             }
         }
     });
+    if spawned.is_err() {
+        POKES.lock().unwrap_or_else(|e| e.into_inner()).next = None;
+    }
 }
 
 pub fn process_table_shared() -> ProcessTable {
@@ -4774,7 +4818,55 @@ mod agents_view_cache_tests {
 
 #[cfg(test)]
 mod process_table_tests {
-    use super::{process_table_shared, ProcessTable};
+    use super::{process_table_shared, ProcessTable, ProcessTablePokes};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn concurrent_submissions_share_initial_and_trailing_scans() {
+        let now = Instant::now();
+        let mut pokes = ProcessTablePokes::default();
+        assert!(pokes.submit(now));
+        for _ in 0..1000 {
+            assert!(!pokes.submit(now));
+        }
+        assert_eq!(pokes.next, Some(now + Duration::from_millis(100)));
+        pokes.scanned(now + Duration::from_millis(100));
+        assert_eq!(pokes.next, Some(now + Duration::from_millis(400)));
+        pokes.scanned(now + Duration::from_millis(400));
+        assert_eq!(pokes.next, None);
+        assert!(pokes.submit(now + Duration::from_millis(401)));
+    }
+
+    #[test]
+    fn late_burst_keeps_trailing_scan_without_extra_worker() {
+        let now = Instant::now();
+        let mut pokes = ProcessTablePokes::default();
+        assert!(pokes.submit(now));
+        pokes.scanned(now + Duration::from_millis(100));
+        assert!(!pokes.submit(now + Duration::from_millis(390)));
+        pokes.scanned(now + Duration::from_millis(400));
+        assert_eq!(pokes.next, Some(now + Duration::from_millis(790)));
+        pokes.scanned(now + Duration::from_millis(790));
+        assert_eq!(pokes.next, None);
+    }
+
+    #[test]
+    fn sustained_submissions_do_not_starve_refresh() {
+        let now = Instant::now();
+        let mut pokes = ProcessTablePokes::default();
+        pokes.submit(now);
+        for tick in 1..=30 {
+            let at = now + Duration::from_millis(tick * 100);
+            assert!(!pokes.submit(at));
+            let due = pokes.next.unwrap();
+            if at >= due {
+                pokes.scanned(at);
+            }
+            assert!(pokes.next.unwrap() <= at + Duration::from_millis(400));
+        }
+        pokes.scanned(now + Duration::from_millis(3400));
+        assert_eq!(pokes.next, None);
+    }
 
     /// 표 자체가 맞는지 — 자기 프로세스는 반드시 들어 있다. `ps` 출력 파싱이
     /// 깨지면(열 순서·comm 공백) 여기서 잡힌다.
