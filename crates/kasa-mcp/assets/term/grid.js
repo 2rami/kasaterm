@@ -42,6 +42,17 @@
     Number.isFinite(rect[key]) && Math.abs(rect[key]) <= 10000) && rect.width > 0 && rect.height > 0;
   const builtins = new Set(['claude', 'codex', 'terminal', 'server', 'laptop', 'schale-logo', 'schale-classroom']);
 
+  function validRun(run, cols) {
+    if (!Array.isArray(run) || typeof run[0] !== 'string') return false;
+    if (run[4] === undefined) return true;
+    const segments = run[4];
+    return Array.isArray(segments) && segments.length <= cols * 2
+      && segments.every(segment => Array.isArray(segment) && typeof segment[0] === 'string'
+        && Number.isInteger(segment[1]) && segment[1] >= 0 && segment[1] <= cols)
+      && segments.map(segment => segment[0]).join('') === run[0]
+      && segments.reduce((width, segment) => width + segment[1], 0) <= cols;
+  }
+
   function validAsset(asset) {
     if (!asset) return false;
     switch (asset.kind) {
@@ -301,6 +312,8 @@
       }
       if (r.width > 0) cellW = r.width / z;
       if (r.height > 0) cellH = r.height / z;
+      view.style.setProperty('--kg-cell-w', `${cellW}px`);
+      view.style.setProperty('--kg-cell-h', `${cellH}px`);
       if (cols) view.style.width = `${cols * cellW}px`;
       positionCursor();
       scene.measure();
@@ -323,9 +336,17 @@
     }
 
     function runToSpan(run) {
-      const [text, fg, bg, flags] = run;
+      const [text, fg, bg, flags, segments] = run;
       const s = document.createElement('span');
-      s.textContent = text;
+      if (segments) {
+        for (const [glyph, width] of segments) {
+          const segment = document.createElement('span');
+          segment.className = 'kg-glyph';
+          segment.textContent = glyph;
+          segment.style.width = `calc(var(--kg-cell-w) * ${width})`;
+          s.appendChild(segment);
+        }
+      } else s.textContent = text;
       const st = s.style;
       // inverse 는 색을 서로 바꾼다. 한쪽이 기본색이면 CSS 변수가 받아 준다.
       const f = css(flags & INVERSE ? bg : fg);
@@ -349,7 +370,8 @@
       if (!Number.isInteger(msg.cols) || !Number.isInteger(msg.rows) || msg.cols < 1 || msg.rows < 1
           || msg.cols > 1000 || msg.rows > 1000 || !Array.isArray(msg.dirty)
           || !msg.dirty.every(row => Array.isArray(row) && Number.isInteger(row[0]) && row[0] >= 0
-            && row[0] < msg.rows && Array.isArray(row[1])) || !Array.isArray(msg.cursor)
+            && row[0] < msg.rows && Array.isArray(row[1])
+            && row[1].every(run => validRun(run, msg.cols))) || !Array.isArray(msg.cursor)
           || !scene.valid(msg)) return false;
       resize(msg.cols, msg.rows);
       for (const [i, runs] of msg.dirty) {

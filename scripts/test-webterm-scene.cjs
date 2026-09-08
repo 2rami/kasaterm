@@ -7,7 +7,7 @@ function fixture() {
   const timers = new Map(), listeners = {}, requests = [], revoked = [];
   const metrics = { w: 8, h: 16 };
   class Element {
-    constructor(tag) { this.tagName = tag; this.children = []; this.style = {}; this.dataset = {}; this.attributes = {}; this.hidden = false; }
+    constructor(tag) { this.tagName = tag; this.children = []; this.style = { setProperty(key, value) { this[key] = value; } }; this.dataset = {}; this.attributes = {}; this.hidden = false; }
     appendChild(node) { node.remove(); this.children.push(node); node.parent = this; return node; }
     append(...nodes) { nodes.forEach(node => this.appendChild(node)); }
     replaceChildren(...nodes) { this.children.forEach(node => { node.parent = null; }); this.children = []; this.append(...nodes); }
@@ -58,6 +58,22 @@ function packet(revision = 1, key = keyA, asset = { kind: 'inline', id: keyA }) 
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 
 (async () => {
+  {
+    const f = fixture(), m = raw();
+    m.dirty[0][1] = [['A⎿B한e\u0301Z', null, null, 0,
+      [['A', 1], ['⎿', 1], ['B', 1], ['한', 2], ['e\u0301', 1], ['Z', 1]]]];
+    assert.equal(f.grid.apply(m), true);
+    const glyphs = f.find('kg-row').children[0].children;
+    assert.equal(glyphs.map(g => g.textContent).join(''), 'A⎿B한e\u0301Z', 'selection text changed');
+    assert.deepEqual(glyphs.map(g => g.style.width), [1, 1, 1, 2, 1, 1].map(w => `calc(var(--kg-cell-w) * ${w})`));
+    assert.equal(glyphs[2].textContent, 'B', 'same-run following glyph lost its own cell slot');
+    f.metrics.w = 10; f.grid.remeasure();
+    assert.equal(f.grid.el.style['--kg-cell-w'], '10px', 'font changes did not update glyph slots');
+    const malformed = raw(); malformed.dirty[0][1][0].push([['wrong text', 2]]);
+    assert.equal(f.grid.apply(malformed), false, 'mismatched glyph metadata mutated the row');
+    assert.equal(f.grid.apply(raw('legacy')), true);
+    assert.equal(f.find('kg-row').children[0].textContent, 'legacy', 'old four-field host stopped rendering');
+  }
   {
     const f = fixture();
     assert.equal(f.grid.apply(raw()), true);

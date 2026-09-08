@@ -40,6 +40,10 @@ async function route(search, panes = []) {
   const context = { connectedPane: 'web-owned', proto: 'wss', ROOT: '/u/fixture/m/device', encodeURIComponent,
     location: { host: 'fixture.test', search: '?pane=%251&t=opaque%2Bvalue&pic=1' } };
   vm.runInNewContext(`${helpers}\nresult=socketURL();`, context);
-  assert.equal(context.result, 'wss://fixture.test/u/fixture/m/device/term/ws?t=opaque%2Bvalue&pic=1&pane=web-owned&grid=1');
+  assert.equal(context.result, 'wss://fixture.test/u/fixture/m/device/term/ws?t=opaque%2Bvalue&pic=1&pane=web-owned&grid=1&glyphs=1');
+  context.connectedPane = null;
+  context.location.search = '?pane=%151&glyphs=0&grid=0&t=opaque%2Bvalue';
+  vm.runInNewContext('result=socketURL();', context);
+  assert.equal(context.result, 'wss://fixture.test/u/fixture/m/device/term/ws?pane=%151&t=opaque%2Bvalue&grid=1&glyphs=1');
   console.log('webterm default view, ANSI opt-in, opaque query and owned-session reconnect checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

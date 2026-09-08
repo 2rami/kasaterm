@@ -15,9 +15,11 @@
   font: 13px/1.35 'KasaTerm', ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: pre;              /* 셀 공백을 그대로 — 서버가 자리를 이미 맞췄다 */
   font-variant-ligatures: none;  /* 리거처가 붙으면 칸이 어긋난다 */
+  font-kerning: none;
   tab-size: 8;
 }
 .kg-row { position: relative; z-index: 1; height: 1.35em; }
+.kg-glyph { display: inline-block; vertical-align: top; overflow: hidden; height: var(--kg-cell-h); }
 .kg-scene{position:absolute;inset:0;overflow:hidden;pointer-events:none;user-select:none}
 .kg-scene-back{z-index:0}
 .kg-scene-front{z-index:2}

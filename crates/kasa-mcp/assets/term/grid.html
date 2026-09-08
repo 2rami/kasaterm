@@ -98,13 +98,14 @@ const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 // 쿼리를 재조립하지 않고 그대로 넘긴다 — pane id 의 `%` 가 여기서 또 깎일 자리다.
 let connectedPane = null;
 function paneQuery(id) {
-  const parts = location.search.slice(1).split('&').filter(part => part && !part.startsWith('pane=') && !part.startsWith('grid='));
+  const parts = location.search.slice(1).split('&').filter(part => part && !part.startsWith('pane=') && !part.startsWith('grid=') && !part.startsWith('glyphs='));
   if (id) parts.push(`pane=${encodeURIComponent(id)}`);
   return parts.length ? `?${parts.join('&')}` : '';
 }
 function socketURL() {
-  const query = connectedPane ? paneQuery(connectedPane) : location.search;
-  return `${proto}://${location.host}${ROOT}/term/ws${query}${query ? '&' : '?'}grid=1`;
+  const parts = location.search.slice(1).split('&').filter(part => part && !part.startsWith('grid=') && !part.startsWith('glyphs='));
+  const query = connectedPane ? paneQuery(connectedPane) : parts.length ? `?${parts.join('&')}` : '';
+  return `${proto}://${location.host}${ROOT}/term/ws${query}${query ? '&' : '?'}grid=1&glyphs=1`;
 }
 let ws = null;
 let frames = 0;
