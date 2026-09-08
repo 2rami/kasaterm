@@ -94,6 +94,14 @@ struct App {
     chat: chat::Chat,
     #[cfg(target_os = "macos")]
     chat_panel: Option<chat_panel::Panel>,
+    #[cfg(target_os = "macos")]
+    popup: Option<menu::Popup>,
+    menu_probe_started: Option<std::time::Instant>,
+    menu_probe_phase: u8,
+    menu_probe_frames: u32,
+    menu_probe_motion: f32,
+    menu_probe_mesh: u64,
+    menu_probe_motion_checked: bool,
     chat_restore_scale: Option<f32>,
     chat_prefill: Option<String>,
     typed_tex: Option<(wgpu::TextureView, f32, f32)>,
@@ -336,7 +344,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
-                self.show_menu(el);
+                self.show_menu();
             }
             // 친 글자. 포커스를 받은 동안에만 온다(말 걸기를 열 때만 키 창이 된다).
             WindowEvent::KeyboardInput { event, .. } if self.typing.is_some() => {
@@ -389,24 +397,64 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _el: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        self.poll_menu(el);
+        #[cfg(target_os="macos")]
+        if let (Some(started),Some(popup))=(self.menu_probe_started,self.popup.as_ref()) {
+            let elapsed=started.elapsed().as_secs_f32();
+            if elapsed>1.5&&!self.menu_probe_motion_checked {eprintln!("MENU_PROBE_MOTION_CHANGED:{} MESH_CHANGED:{}",self.motion.as_ref().is_some_and(|m|(m.time()-self.menu_probe_motion).abs()>0.05),self.probe_mesh_signature()!=self.menu_probe_mesh);self.menu_probe_motion_checked=true;}
+            if elapsed>2.0&&self.menu_probe_phase==0 {popup.probe_click_row(3);self.menu_probe_phase=1;}
+            else if elapsed>3.0&&self.menu_probe_phase==1 {popup.probe_click_row(0);self.menu_probe_phase=2;}
+            else if elapsed>4.0&&self.menu_probe_phase==2 {popup.probe_key(125);popup.probe_key(36);self.menu_probe_phase=3;}
+            else if elapsed>6.0&&self.menu_probe_phase==3 {eprintln!("MENU_PROBE_RENDER_FRAMES:{} VISIBLE:{}",self.menu_probe_frames,popup.visible());popup.probe_key(53);self.menu_probe_phase=4;}
+            else if self.menu_probe_phase==4&&!popup.visible(){eprintln!("MENU_PROBE_ESCAPE_CLOSED:true");self.menu_probe_phase=5;el.exit();}
+            if elapsed>10.0 {eprintln!("MENU_PROBE_TIMEOUT");el.exit();}
+        }
         if let Some(w) = &self.win { w.request_redraw(); }
     }
 }
 
 impl App {
-    fn show_menu(&mut self, el: &ActiveEventLoop) {
-        self.poll_cursor();
-        let Some(win) = self.win.clone() else { return };
+    fn probe_mesh_signature(&self)->u64 {
+        use std::hash::{Hash,Hasher};
+        let mut hash=std::collections::hash_map::DefaultHasher::new();
+        for mesh in self.model.runtime().meshes() {for vertex in rc::vertices_from_drawable(mesh).iter().take(4) {for coordinate in vertex.position(){coordinate.to_bits().hash(&mut hash);}}}
+        hash.finish()
+    }
+    fn menu_content(&mut self) -> menu::Content {
         let can_next = self.pet_dir.as_ref().and_then(|d| std::fs::read_dir(d).ok())
             .map(|rd| rd.flatten().filter(|e| model3_in(&e.path()).is_some()).take(2).count() > 1)
             .unwrap_or(false);
         if let Some(d) = &self.pet_dir { self.apply_preferences(kasa_pet_config::read(d)); }
-        let action = menu::show(&win, &self.preferences, self.resting || self.mood == board::Mood::Sleep,
+        menu::content(&self.preferences, self.resting || self.mood == board::Mood::Sleep,
             self.typing.is_some(), self.chat_open(), self.catalog.touch().is_some(), can_next, self.pet_dir.is_some(),
-            &self.catalog, &self.playback, &self.expressions.indices());
-        // Menu tracking is synchronous; its mouse-up is not a double click on the pet.
+            &self.catalog, &self.playback, &self.expressions.indices())
+    }
+
+    fn show_menu(&mut self) {
+        self.poll_cursor();
         self.last_click = None;
+        #[cfg(target_os = "macos")]
+        {
+            if self.popup.is_none() {let content=self.menu_content();self.popup=menu::Popup::new(content);}
+            let content=self.menu_content();
+            if let Some(popup)=&mut self.popup {set_hand_cursor(false);popup.show(content);}
+        }
+    }
+
+    fn poll_menu(&mut self, el: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        {
+            let action=self.popup.as_mut().and_then(|popup|popup.poll());
+            if action.is_some() {
+                self.apply_menu_action(el,action);
+                if self.popup.as_ref().is_some_and(|p|p.visible()) {let content=self.menu_content();if let Some(popup)=&mut self.popup{popup.refresh(content);}}
+            }
+        }
+    }
+
+    fn apply_menu_action(&mut self, el: &ActiveEventLoop, action: Option<menu::Action>) {
+        if self.menu_probe_started.is_some()&&matches!(action,Some(menu::Action::Motion(_))){eprintln!("MENU_PROBE_CLICK_APPLIED:true");}
         match action {
             Some(menu::Action::Talk) => self.toggle_typing(),
             Some(menu::Action::Chat) => self.toggle_chat(),
@@ -1023,6 +1071,8 @@ impl App {
     }
 
     fn draw(&mut self) {
+        #[cfg(target_os="macos")]
+        if self.frames==10&&self.pet_dir.is_none()&&std::env::var_os("KASAPET_MENU_PROBE").is_some(){self.show_menu();self.menu_probe_started=Some(std::time::Instant::now());self.menu_probe_motion=self.motion.as_ref().map(|m|m.time()).unwrap_or(0.0);self.menu_probe_mesh=self.probe_mesh_signature();if let Some(popup)=&self.popup{eprintln!("MENU_PROBE_WINDOW_ID:{}",popup.probe_window_number());}}
         self.poll_cursor();
         self.poll_board();
         self.poll_journal();
@@ -1300,6 +1350,8 @@ impl App {
         }
         g.q.submit([enc.finish()]);
         self.frames += 1;
+        #[cfg(target_os="macos")]
+        if self.menu_probe_started.is_some()&&self.popup.as_ref().is_some_and(|p|p.visible()){self.menu_probe_frames+=1;}
         // 커서 자리가 캐릭터의 칠해진 픽셀인지 본다. 몇 프레임에 한 번이면 충분하다 —
         // 손이 움직이는 속도보다 훨씬 잦다.
         if self.frames % 4 == 0 {
@@ -1307,7 +1359,7 @@ impl App {
             #[cfg(target_os = "macos")]
             let over = over && self.win.as_ref().is_some_and(|w| native_cursor::is_frontmost_at_cursor(w));
             #[cfg(target_os = "macos")]
-            let chat_hover = self.chat_panel.as_ref().is_some_and(|panel| panel.contains_cursor());
+            let chat_hover = self.chat_panel.as_ref().is_some_and(|panel| panel.contains_cursor()) || self.popup.as_ref().is_some_and(|popup|popup.contains_cursor());
             #[cfg(not(target_os = "macos"))]
             let chat_hover = false;
             let over = over && !chat_hover;
@@ -1625,6 +1677,10 @@ fn main() {
         chat_prefill: None,
         #[cfg(target_os = "macos")]
         chat_panel: None,
+        #[cfg(target_os = "macos")]
+        popup: None,
+        menu_probe_started:None,menu_probe_phase:0,menu_probe_frames:0,
+        menu_probe_motion:0.0,menu_probe_mesh:0,menu_probe_motion_checked:false,
         said_at: std::time::Instant::now(), urgent: false, bounce: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
         catalog, expressions: catalog::Expressions::default(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,

@@ -1,7 +1,4 @@
 use kasa_pet_config::{PetPreferences, PreferenceChange};
-use muda::{CheckMenuItem, ContextMenu, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use winit::window::Window;
 
 #[derive(Clone, Copy)]
 pub enum Action {
@@ -20,9 +17,56 @@ pub enum Action {
     Automatic,
     Journal(crate::journal::Action),
 }
+#[derive(Clone)]
+pub enum Item {
+    Action(Action, bool),
+    Page(usize),
+    Heading,
+}
+#[derive(Clone)]
+pub struct Row {
+    pub label: String,
+    pub enabled: bool,
+    pub checked: Option<bool>,
+    pub item: Item,
+}
+pub struct Content {
+    pub pages: Vec<(String, Vec<Row>)>,
+}
+fn action(label: impl Into<String>, enabled: bool, value: Action) -> Row {
+    Row {
+        label: label.into(),
+        enabled,
+        checked: None,
+        item: Item::Action(value, false),
+    }
+}
+fn check(label: impl Into<String>, enabled: bool, checked: bool, value: Action) -> Row {
+    Row {
+        label: label.into(),
+        enabled,
+        checked: Some(checked),
+        item: Item::Action(value, true),
+    }
+}
+fn page(label: &str, index: usize) -> Row {
+    Row {
+        label: label.into(),
+        enabled: true,
+        checked: None,
+        item: Item::Page(index),
+    }
+}
+fn heading(label: &str) -> Row {
+    Row {
+        label: label.into(),
+        enabled: false,
+        checked: None,
+        item: Item::Heading,
+    }
+}
 
-pub fn show(
-    win: &Window,
+pub fn content(
     prefs: &PetPreferences,
     resting: bool,
     typing: bool,
@@ -32,84 +76,101 @@ pub fn show(
     can_save: bool,
     catalog: &crate::catalog::Catalog,
     playback: &crate::catalog::Playback,
-    active_expressions: &[usize],
-) -> Option<Action> {
-    let menu = Menu::new();
-    let mut actions: Vec<(MenuId, Action)> = Vec::new();
-    for (title, enabled, action) in [
-        (if chatting { "나쵸 대화 닫기" } else { "나쵸와 대화" }, cfg!(target_os = "macos"), Action::Chat),
-        ("재시작 확인할 일", cfg!(target_os = "macos"), Action::ChatAsk("나 재시작하면 뭐 확인해야 돼?")),
-        (
-            if typing {
-                "학생 말 걸기 닫기"
+    expressions: &[usize],
+) -> Content {
+    let home = vec![
+        action(
+            if chatting {
+                "나쵸 대화 닫기"
             } else {
-                "학생에게 말 걸기"
+                "나쵸와 대화"
             },
             true,
-            Action::Talk,
+            Action::Chat,
         ),
-        ("쓰다듬기", can_touch, Action::Touch),
-        (if resting { "깨우기" } else { "쉬기" }, true, Action::Rest),
-        ("다음 캐릭터", can_next, Action::Next),
-    ] {
-        let item = MenuItem::new(title, enabled, None);
-        actions.push((item.id().clone(), action));
-        menu.append(&item).ok()?;
-    }
-    menu.append(&PredefinedMenuItem::separator()).ok()?;
-    for (title, action) in [
-        ("시킨 일 요약", Action::ChatAsk("내가 시킨 일들을 요약해줘.")),
-        ("반영 기다리는 일", Action::ChatAsk("반영을 기다리는 일은 뭐야?")),
-        ("요청 기록 열기", Action::Journal(crate::journal::Action::Open)),
-    ] {
-        let item = MenuItem::new(title, true, None);
-        actions.push((item.id().clone(), action));
-        menu.append(&item).ok()?;
-    }
-    menu.append(&PredefinedMenuItem::separator()).ok()?;
-    let motions = Submenu::new("모션", !catalog.motions.is_empty());
-    for (i, motion) in catalog.motions.iter().enumerate() {
-        let item = CheckMenuItem::new(
-            motion.label(),
-            motion.available,
-            playback.selected == Some(i),
-            None,
-        );
-        actions.push((item.id().clone(), Action::Motion(i)));
-        motions.append(&item).ok()?;
-    }
-    menu.append(&motions).ok()?;
-    let expressions = Submenu::new("표정·소품", !catalog.expressions.is_empty());
-    let reset = MenuItem::new("기본 표정", !active_expressions.is_empty(), None);
-    actions.push((reset.id().clone(), Action::ResetExpressions));
-    expressions.append(&reset).ok()?;
-    expressions
-        .append(&MenuItem::new(
-            "겹치는 효과는 자동으로 바뀝니다",
-            false,
-            None,
-        ))
-        .ok()?;
-    expressions.append(&PredefinedMenuItem::separator()).ok()?;
-    for (i, expression) in catalog.expressions.iter().enumerate() {
-        let item = CheckMenuItem::new(
-            expression.label(),
-            expression.available && !expression.unlinked,
-            active_expressions.contains(&i),
-            None,
-        );
-        actions.push((item.id().clone(), Action::Expression(i)));
-        expressions.append(&item).ok()?;
-    }
-    menu.append(&expressions).ok()?;
-    let repeat = CheckMenuItem::new("선택한 모션 반복", true, playback.repeat, None);
-    actions.push((repeat.id().clone(), Action::RepeatMotion));
-    menu.append(&repeat).ok()?;
-    let automatic = MenuItem::new("자동 동작으로 돌아가기", true, None);
-    actions.push((automatic.id().clone(), Action::Automatic));
-    menu.append(&automatic).ok()?;
-    menu.append(&PredefinedMenuItem::separator()).ok()?;
-    for (title, checked, change) in [
+        action(
+            "재시작 확인할 일",
+            true,
+            Action::ChatAsk("나 재시작하면 뭐 확인해야 돼?"),
+        ),
+        heading("펫"),
+        page("모션", 1),
+        page("표정 · 소품", 2),
+        page("빠른 설정", 3),
+        heading("더 보기"),
+        page("다른 행동 · 작업 기록", 4),
+        action("펫 끄기", true, Action::Quit),
+    ];
+    let mut motions: Vec<Row> = catalog
+        .motions
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            check(
+                if catalog
+                    .motions
+                    .iter()
+                    .filter(|other| other.group == m.group)
+                    .count()
+                    > 1
+                {
+                    m.label()
+                } else {
+                    format!(
+                        "{}{}",
+                        m.label().split(" · ").next().unwrap_or(&m.group),
+                        if m.available { "" } else { " (파일 없음)" }
+                    )
+                },
+                m.available,
+                playback.selected == Some(i),
+                Action::Motion(i),
+            )
+        })
+        .collect();
+    motions.push(check(
+        "선택한 모션 반복",
+        true,
+        playback.repeat,
+        Action::RepeatMotion,
+    ));
+    motions.push(check(
+        "자동 동작",
+        true,
+        playback.selected.is_none(),
+        Action::Automatic,
+    ));
+    let mut effects: Vec<Row> = catalog
+        .expressions
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            check(
+                format!(
+                    "{}{}",
+                    e.label().split(" · ").next().unwrap_or(&e.name),
+                    if e.unlinked {
+                        " (모델 연결 없음)"
+                    } else if !e.available {
+                        " (파일 없음)"
+                    } else {
+                        ""
+                    }
+                ),
+                e.available && !e.unlinked,
+                expressions.contains(&i),
+                Action::Expression(i),
+            )
+        })
+        .collect();
+    effects.push(check(
+        "기본 표정으로",
+        true,
+        expressions.is_empty(),
+        Action::ResetExpressions,
+    ));
+    effects.push(heading("겹치는 효과는 자동으로 바뀝니다"));
+    let settings = [
         (
             "말풍선 표시",
             prefs.bubbles,
@@ -140,36 +201,100 @@ pub fn show(
             prefs.lock_position,
             PreferenceChange::LockPosition(!prefs.lock_position),
         ),
-    ] {
-        let item = CheckMenuItem::new(title, can_save, checked, None);
-        actions.push((item.id().clone(), Action::Preference(change)));
-        menu.append(&item).ok()?;
+    ]
+    .into_iter()
+    .map(|(s, on, p)| check(s, can_save, on, Action::Preference(p)))
+    .collect();
+    let more = vec![
+        action(
+            if typing {
+                "학생 말 걸기 닫기"
+            } else {
+                "학생에게 말 걸기"
+            },
+            true,
+            Action::Talk,
+        ),
+        action("쓰다듬기", can_touch, Action::Touch),
+        action(if resting { "깨우기" } else { "쉬기" }, true, Action::Rest),
+        action("다음 캐릭터", can_next, Action::Next),
+        heading("작업 기록"),
+        action(
+            "시킨 일 요약",
+            true,
+            Action::ChatAsk("내가 시킨 일들을 요약해줘."),
+        ),
+        action(
+            "반영 기다리는 일",
+            true,
+            Action::ChatAsk("반영을 기다리는 일은 뭐야?"),
+        ),
+        action(
+            "요청 기록 열기",
+            true,
+            Action::Journal(crate::journal::Action::Open),
+        ),
+    ];
+    Content {
+        pages: vec![
+            ("펫".into(), home),
+            ("모션".into(), motions),
+            ("표정 · 소품".into(), effects),
+            ("빠른 설정".into(), settings),
+            ("다른 행동 · 작업 기록".into(), more),
+        ],
     }
-    menu.append(&PredefinedMenuItem::separator()).ok()?;
-    let quit = MenuItem::new("펫 끄기", true, None);
-    actions.push((quit.id().clone(), Action::Quit));
-    menu.append(&quit).ok()?;
-    let handle = win.window_handle().ok()?;
-    // Native tracking keeps keyboard navigation and dismissal without activating
-    // the pet merely to show its menu. Only Talk requests the keyboard afterward.
-    unsafe {
-        match handle.as_raw() {
-            #[cfg(target_os = "macos")]
-            RawWindowHandle::AppKit(h) => {
-                menu.show_context_menu_for_nsview(h.ns_view.as_ptr().cast(), None);
-            }
-            #[cfg(target_os = "windows")]
-            RawWindowHandle::Win32(h) => {
-                menu.show_context_menu_for_hwnd(h.hwnd.get(), None);
-            }
-            _ => return None,
-        }
+}
+
+#[cfg(target_os = "macos")]
+#[path = "menu_popup.rs"]
+mod popup;
+#[cfg(target_os = "macos")]
+pub use popup::Popup;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pages_preserve_actions_and_keep_effects_open() {
+        let mut catalog = crate::catalog::Catalog::default();
+        catalog.expressions.push(crate::catalog::Expression {
+            name: "blush".into(),
+            file: "blush.exp3.json".into(),
+            path: Default::default(),
+            parameters: Default::default(),
+            available: true,
+            unlinked: true,
+        });
+        let data = content(
+            &PetPreferences::default(),
+            false,
+            false,
+            false,
+            true,
+            true,
+            true,
+            &catalog,
+            &crate::catalog::Playback::default(),
+            &[],
+        );
+        assert!(matches!(
+            data.pages[0].1[0].item,
+            Item::Action(Action::Chat, false)
+        ));
+        assert!(matches!(
+            data.pages[0].1[1].item,
+            Item::Action(Action::ChatAsk(_), false)
+        ));
+        assert!(!data.pages[2].1[0].enabled);
+        assert!(data.pages[2].1[0].label.contains("모델 연결 없음"));
+        assert!(data.pages[3]
+            .1
+            .iter()
+            .all(|row| matches!(row.item, Item::Action(Action::Preference(_), true))));
+        assert!(data.pages[4]
+            .1
+            .iter()
+            .any(|row| matches!(row.item, Item::Action(Action::Talk, false))));
     }
-    let mut selected = None;
-    while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
-        if let Some((_, action)) = actions.iter().find(|(id, _)| *id == event.id) {
-            selected = Some(*action);
-        }
-    }
-    selected
 }

@@ -21,10 +21,9 @@ serde_json = "1"
 swash = "0.2"
 raw-window-handle = "0.6"
 kasa-pet-config = { path = "../../crates/kasa-pet-config" }
-muda = "0.19.2"
 sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSCursor", "NSWindow", "NSView", "NSResponder", "NSColor", "NSGraphics", "NSEvent", "NSScreen", "NSRunningApplication", "NSPanel", "NSTextField", "NSTextView", "NSText", "NSTextContainer", "NSScrollView", "NSButton", "NSControl", "NSFont"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSCursor", "NSWindow", "NSView", "NSResponder", "NSColor", "NSGraphics", "NSEvent", "NSScreen", "NSRunningApplication", "NSPanel", "NSTextField", "NSTextView", "NSText", "NSTextContainer", "NSScrollView", "NSButton", "NSControl", "NSFont", "NSBezierPath", "NSStringDrawing", "NSAttributedString"] }
 objc2-foundation = "0.3"
