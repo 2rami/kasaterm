@@ -6183,6 +6183,78 @@ fn encode_history_rows(
     out
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum VisualEvent { Raw, Published, Deadline }
+
+#[derive(Default)]
+struct VisualDelivery {
+    last_scene: Option<u64>,
+    last_dimensions: Option<(u16, u16)>,
+    pending_since: Option<std::time::Instant>,
+    fallback: bool,
+}
+
+impl VisualDelivery {
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.pending_since.map(|since| (since + std::time::Duration::from_millis(500)).into())
+    }
+
+    fn encode(
+        &mut self,
+        raw: &kasa_bridge::screen::ScreenUpdate,
+        view_cols: u16,
+        event: VisualEvent,
+    ) -> Option<String> {
+        let now = std::time::Instant::now();
+        let dimensions = (raw.cols, raw.rows);
+        if view_cols > 0 && view_cols != raw.cols {
+            self.last_scene = None;
+            self.last_dimensions = None;
+            self.pending_since = None;
+            self.fallback = false;
+            let mut value: serde_json::Value = serde_json::from_str(&WebSrc::from_full(raw).reflowed(view_cols)).unwrap();
+            value["scene"] = serde_json::Value::Null;
+            return Some(value.to_string());
+        }
+        let scene = crate::visual::latest_scene(&raw.pane_id, raw.cols, raw.rows);
+        if let Some(scene) = scene.as_ref().filter(|scene| {
+            self.last_scene.is_none_or(|revision| scene.scene_revision > revision)
+        }) {
+            self.last_scene = Some(scene.scene_revision);
+            self.last_dimensions = Some(dimensions);
+            self.fallback = false;
+            // A completed frame is valid even when more PTY output is already pending.
+            self.pending_since = (crate::visual::source_key(raw, 0).as_deref()
+                != Some(scene.source_key.as_str())).then_some(now);
+            return Some(crate::gridwire::encode_scene(scene).to_string());
+        }
+        if self.last_dimensions.is_some_and(|old| old != dimensions) {
+            self.last_dimensions = Some(dimensions);
+            self.last_scene = None;
+            self.pending_since = Some(now);
+            self.fallback = false;
+            return Some(crate::gridwire::encode_raw_visual(raw).to_string());
+        }
+        if event == VisualEvent::Deadline {
+            // Unchanged raw notifications do not imply that the producer has stalled.
+            if scene.as_ref().is_some_and(|scene| self.last_scene == Some(scene.scene_revision)
+                && crate::visual::source_key(raw, 0).as_deref() == Some(scene.source_key.as_str())) {
+                self.pending_since = None;
+                return None;
+            }
+            self.pending_since = None;
+            self.fallback = true;
+        }
+        if self.fallback {
+            if event == VisualEvent::Published { return None; }
+            self.last_dimensions = Some(dimensions);
+            return Some(crate::gridwire::encode_raw_visual(raw).to_string());
+        }
+        self.pending_since.get_or_insert(now);
+        None
+    }
+}
+
 enum Frame {
     Bytes(Vec<u8>),
     Grid(Box<kasa_bridge::screen::ScreenUpdate>),
@@ -6190,6 +6262,7 @@ enum Frame {
     /// 접어 통째로 보낸다.
     Reflow,
     Visual,
+    VisualDeadline,
     /// 호스트 GUI 가 거울에게 미는 제어 JSON(`{"t":"open-url",…}` 등). 화면과
     /// 같은 채널을 타야 순서가 보장되고, 송신자(`btx`)를 등록부에 두는 것만으로
     /// 「이 pane 을 보는 거울 전부」에 닿는다.
@@ -6434,6 +6507,7 @@ async fn term_ws_run(
     let view_cols_in = view_cols.clone();
     // 접을 재료 — 원본 폭 그대로의 전체 격자. 프레임은 바뀐 행만 오므로 여기 쌓는다.
     let mut web_src: Option<WebSrc> = None;
+    let mut visual_delivery = VisualDelivery::default();
     // 거울(이미 있는 pane 을 보는 접속)도, 이 접속이 새로 띄운 원격 셸도 등록한다 —
     // 후자는 만든 쪽이 곧 보는 사람이라(맥북의 `mini` 창) 거기가 브라우저의 자리다.
     let ctl_token = register_viewer_ctl(&ctl_pane, btx.clone());
@@ -6449,9 +6523,10 @@ async fn term_ws_run(
             });
         }
         Tap::Grid(rx, snap) => {
-            let msg = if native_scene { crate::gridwire::encode_visual(&snap) }
-                else { crate::gridwire::encode(&snap) }.to_string();
-            let _ = ws_tx.send(Message::Text(msg.into())).await;
+            let msg = if native_scene {
+                visual_delivery.encode(&sess.live_screen(), 0, VisualEvent::Raw)
+            } else { Some(crate::gridwire::encode(&snap).to_string()) };
+            if let Some(msg) = msg { let _ = ws_tx.send(Message::Text(msg.into())).await; }
             web_src = Some(WebSrc::from_full(&snap));
             std::thread::spawn(move || {
                 while let Ok(upd) = rx.recv() {
@@ -6480,11 +6555,17 @@ async fn term_ws_run(
             // 조용할 때 ping 을 끼운다. 터널·리버스 프록시는 유휴 WebSocket 을
             // 끊는데(Cloudflare 무료 플랜 ~100초), 터미널은 아무 출력 없는 시간이
             // 길어서 반드시 걸린다. 30초면 그 절반이라 여유가 있다.
+            let visual_deadline = visual_delivery.deadline();
             let incoming = tokio::time::timeout(std::time::Duration::from_secs(30), async {
                 if let Some(subscription) = visual_subscription.as_mut() {
                     tokio::select! {
                         frame = brx.recv() => frame,
                         changed = subscription.changed.changed() => changed.ok().map(|_| Frame::Visual),
+                        _ = async {
+                            if let Some(deadline) = visual_deadline {
+                                tokio::time::sleep_until(deadline).await;
+                            } else { std::future::pending::<()>().await; }
+                        } => Some(Frame::VisualDeadline),
                     }
                 } else {
                     brx.recv().await
@@ -6550,12 +6631,11 @@ async fn term_ws_run(
                             last_hist = hist;
                             let src = web_src.get_or_insert_with(|| WebSrc::from_full(&u));
                             src.absorb(&u);
-                            let msg = if vc > 0 && vc != u.cols {
-                                let mut value: serde_json::Value = serde_json::from_str(&src.reflowed(vc)).unwrap();
-                                if native_scene { value["scene"] = serde_json::Value::Null; }
-                                value.to_string()
-                            } else if native_scene {
-                                crate::gridwire::encode_visual(&src.full_snapshot()).to_string()
+                            let msg = if native_scene {
+                                let Some(msg) = visual_delivery.encode(&u, vc, VisualEvent::Raw) else { continue };
+                                msg
+                            } else if vc > 0 && vc != u.cols {
+                                src.reflowed(vc)
                             } else {
                                 crate::gridwire::encode(&u).to_string()
                             };
@@ -6570,29 +6650,25 @@ async fn term_ws_run(
                             }
                             let Some(src) = web_src.as_ref() else { continue };
                             // 폭이 원본으로 돌아가도 통째로 보낸다 — 접힌 격자를 걷어야 한다.
-                            let msg = if vc > 0 && vc != src.meta.cols {
-                                let mut value: serde_json::Value = serde_json::from_str(&src.reflowed(vc)).unwrap();
-                                if native_scene { value["scene"] = serde_json::Value::Null; }
-                                value.to_string()
-                            } else if native_scene {
-                                crate::gridwire::encode_visual(&src.full_snapshot()).to_string()
+                            let msg = if native_scene {
+                                let Some(msg) = visual_delivery.encode(&src.full_snapshot(), vc, VisualEvent::Raw) else { continue };
+                                msg
+                            } else if vc > 0 && vc != src.meta.cols {
+                                src.reflowed(vc)
                             } else {
                                 src.full_raw()
                             };
                             ws_tx.send(Message::Text(msg.into())).await
                         }
-                        Frame::Visual => {
+                        Frame::Visual | Frame::VisualDeadline => {
+                            let event = if matches!(chunk, Frame::VisualDeadline) {
+                                VisualEvent::Deadline
+                            } else { VisualEvent::Published };
                             let raw = sess_sz.live_screen();
                             let src = WebSrc::from_full(&raw);
                             let vc = view_cols.load(std::sync::atomic::Ordering::Relaxed);
-                            let msg = if vc > 0 && vc != raw.cols {
-                                let mut value: serde_json::Value = serde_json::from_str(&src.reflowed(vc)).unwrap();
-                                value["scene"] = serde_json::Value::Null;
-                                value.to_string()
-                            } else {
-                                crate::gridwire::encode_visual(&raw).to_string()
-                            };
                             web_src = Some(src);
+                            let Some(msg) = visual_delivery.encode(&raw, vc, event) else { continue };
                             ws_tx.send(Message::Text(msg.into())).await
                         }
                         Frame::Control(s) => ws_tx.send(Message::Text(s.into())).await,
@@ -7634,6 +7710,7 @@ mod tests {
             Arc::from(&b"\x89PNG\r\n\x1a\nfixture"[..])).unwrap();
         assert!(crate::visual::publish(crate::visual::PaneVisualFrame {
             pane_id: pane.clone(), source_key: crate::visual::source_key(&raw, 0).unwrap(),
+            raw_snapshot: raw.clone(),
             scene_revision: 1, cols: raw.cols, rows: raw.rows, offset: 0, composed_cells: composed,
             overlays: vec![crate::visual::VisualOverlay {
                 id: "fixture-picture".into(), rect: crate::visual::VisualRect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 },
@@ -7647,6 +7724,38 @@ mod tests {
         assert_eq!(decorated["sourceKey"], decorated["scene"]["sourceKey"]);
         assert_eq!(decorated["sceneRevision"], 1);
 
+        // Each native composition intentionally trails one more PTY write at the same size.
+        // Completed native frames must keep arriving without raw-logo frames between them.
+        for revision in 2..8 {
+            let marker = format!("L{revision}");
+            events.send(kasa_pty::ExtEvent::Bytes(format!("\r{marker}").into_bytes())).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while !source.visible_text(6).contains(&marker) {
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+            }).await.unwrap();
+            let captured = source.live_screen();
+            let captured_key = crate::visual::source_key(&captured, 0).unwrap();
+            events.send(kasa_pty::ExtEvent::Bytes(b".".to_vec())).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while crate::visual::source_key(&source.live_screen(), 0).as_ref() == Some(&captured_key) {
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+            }).await.unwrap();
+            let mut next = crate::visual::latest_scene(&pane, 21, 6).unwrap().as_ref().clone();
+            next.raw_snapshot = captured.clone();
+            next.source_key = captured_key;
+            next.scene_revision = revision;
+            next.composed_cells = captured.dirty.iter().map(|(_, row)| row.clone()).collect();
+            next.composed_cells[0][0].ch = 'N';
+            assert!(crate::visual::publish(next));
+            let rendered = next_kind(&mut ws, "grid").await;
+            assert_eq!(rendered["sceneRevision"], revision, "streaming raw output displaced a completed scene");
+            assert!(rendered["dirty"][0][1][0][0].as_str().unwrap().starts_with('N'));
+            assert_eq!(rendered["cursor"], json!([captured.cursor_row, captured.cursor_col]),
+                "composed cells must retain their own source cursor metadata");
+        }
+
         let client = reqwest::Client::new();
         let asset_url = format!("http://{address}/term/visual-asset?pane={pane}&id={asset}");
         let response = client.get(&asset_url).send().await.unwrap();
@@ -7659,7 +7768,7 @@ mod tests {
         assert_eq!(client.get(format!("http://{address}/term/visual-builtin/unknown"))
             .send().await.unwrap().status(), 404);
 
-        events.send(kasa_pty::ExtEvent::Bytes(b"A".to_vec())).unwrap();
+        events.send(kasa_pty::ExtEvent::Bytes(b"\x1b[2J\x1b[HA".to_vec())).unwrap();
         let cleared = next_kind(&mut ws, "grid").await;
         assert!(cleared["scene"].is_null());
         assert_eq!(cleared["dirty"][0][1][0][0], "A");

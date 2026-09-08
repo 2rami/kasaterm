@@ -54,6 +54,7 @@ pub struct VisualOverlay {
 pub struct PaneVisualFrame {
     pub pane_id: String,
     pub source_key: String,
+    pub raw_snapshot: ScreenUpdate,
     pub scene_revision: u64,
     pub cols: u16,
     pub rows: u16,
@@ -213,6 +214,9 @@ fn asset_ids(asset: &VisualAsset) -> &[String] {
 
 pub fn publish(frame: PaneVisualFrame) -> bool {
     if frame.offset != 0 || !valid_key(&frame.source_key) || frame.cols == 0 || frame.rows == 0
+        || frame.raw_snapshot.pane_id != frame.pane_id
+        || (frame.raw_snapshot.cols, frame.raw_snapshot.rows) != (frame.cols, frame.rows)
+        || source_key(&frame.raw_snapshot, frame.offset).as_deref() != Some(frame.source_key.as_str())
         || frame.composed_cells.len() != frame.rows as usize
         || frame.composed_cells.iter().any(|row| row.len() != frame.cols as usize)
         || frame.overlays.len() > 128
@@ -251,16 +255,17 @@ pub fn publish(frame: PaneVisualFrame) -> bool {
     true
 }
 
-pub fn matching_scene(source: &ScreenUpdate, offset: usize) -> Option<Arc<PaneVisualFrame>> {
-    if offset != 0 { return None; }
-    let key = source_key(source, offset)?;
-    matching_source_key(source, &key)
+pub fn cached_revision(pane: &str) -> Option<u64> {
+    registry().lock().unwrap().panes.get(pane)?.frame.as_ref().map(|frame| frame.scene_revision)
 }
 
-pub(crate) fn matching_source_key(source: &ScreenUpdate, key: &str) -> Option<Arc<PaneVisualFrame>> {
-    registry().lock().unwrap().panes.get(&source.pane_id)?.frame.as_ref()
-        .filter(|frame| frame.offset == 0 && frame.cols == source.cols && frame.rows == source.rows
-            && frame.source_key == key).cloned()
+pub fn latest_scene(pane: &str, cols: u16, rows: u16) -> Option<Arc<PaneVisualFrame>> {
+    registry().lock().unwrap().panes.get(pane)?.frame.as_ref()
+        .filter(|frame| frame.offset == 0 && (frame.cols, frame.rows) == (cols, rows)).cloned()
+}
+
+pub fn inline_asset_exists(pane: &str, id: &str) -> bool {
+    registry().lock().unwrap().panes.get(pane).is_some_and(|entry| entry.assets.contains_key(id))
 }
 
 /// Bytes come from the native image cache, never a caller-supplied filesystem path.
@@ -324,6 +329,7 @@ mod tests {
     fn frame(raw: &ScreenUpdate, revision: u64) -> PaneVisualFrame {
         PaneVisualFrame {
             pane_id: raw.pane_id.clone(), source_key: source_key(raw, 0).unwrap(),
+            raw_snapshot: raw.clone(),
             scene_revision: revision, cols: raw.cols, rows: raw.rows, offset: 0,
             composed_cells: vec![vec![Cell::blank(); raw.cols as usize]; raw.rows as usize],
             overlays: vec![VisualOverlay {
@@ -362,29 +368,29 @@ mod tests {
     }
 
     #[test]
-    fn composed_cells_and_overlay_are_atomic_and_mismatch_restores_raw_logo() {
+    fn completed_scene_is_atomic_and_explicit_fallback_restores_raw_logo() {
         let source = raw();
         let _subscription = subscribe(&source.pane_id);
         assert!(publish(frame(&source, 1)));
-        let encoded = crate::gridwire::encode_visual(&source);
+        let scene = latest_scene(&source.pane_id, source.cols, source.rows).unwrap();
+        let encoded = crate::gridwire::encode_scene(&scene);
         assert_eq!(encoded["scene"]["revision"], 1);
         assert_eq!(encoded["sourceKey"], encoded["scene"]["sourceKey"]);
         assert_eq!(encoded["sceneRevision"], encoded["scene"]["revision"]);
         assert!(encoded["dirty"][0][1].as_array().unwrap().is_empty());
         let mut changed = source.clone();
         changed.cursor_row = 1;
-        let raw = crate::gridwire::encode_visual(&changed);
+        let raw = crate::gridwire::encode_raw_visual(&changed);
         assert!(raw["scene"].is_null());
         assert!(raw["sceneRevision"].is_null());
         assert_eq!(raw["dirty"][0][1][0][0], "LOGO");
         assert_eq!(raw["dirty"].as_array().unwrap().len(), 2);
-        assert!(matching_scene(&source, 1).is_none());
         let mut resized = source.clone();
         resized.rows = 1;
         resized.dirty.pop();
-        assert!(crate::gridwire::encode_visual(&resized)["scene"].is_null());
+        assert!(latest_scene(&resized.pane_id, resized.cols, resized.rows).is_none());
         let other_pane = raw_for_other_pane(&source);
-        assert!(crate::gridwire::encode_visual(&other_pane)["scene"].is_null());
+        assert!(latest_scene(&other_pane.pane_id, other_pane.cols, other_pane.rows).is_none());
     }
 
     fn raw_for_other_pane(source: &ScreenUpdate) -> ScreenUpdate {
@@ -407,11 +413,11 @@ mod tests {
         scrollback.offset = 1;
         assert!(!publish(scrollback));
         drop(first);
-        assert!(matching_scene(&source, 0).is_some());
+        assert!(cached_revision(&source.pane_id).is_some());
         drop(second);
-        assert!(matching_scene(&source, 0).is_none());
+        assert!(cached_revision(&source.pane_id).is_none());
         let _reconnected = subscribe(&source.pane_id);
-        assert!(matching_scene(&source, 0).is_none(), "old connection cache must not reappear");
+        assert!(cached_revision(&source.pane_id).is_none(), "old connection cache must not reappear");
     }
 
     #[test]
@@ -452,5 +458,20 @@ mod tests {
         assert!(!subscription.changed.has_changed().unwrap(), "asset fetches must not emit new scenes");
         assert!(publish(frame(&source, 2)));
         for id in &ids { assert!(inline_asset(&source.pane_id, id).is_none()); }
+    }
+
+    #[test]
+    fn publication_rejects_cells_from_a_different_source_snapshot() {
+        let source = raw();
+        let subscription = subscribe(&source.pane_id);
+        let mut mismatched = frame(&source, 1);
+        mismatched.raw_snapshot.cursor_col += 1;
+        assert!(!publish(mismatched));
+        assert!(cached_revision(&source.pane_id).is_none());
+        assert!(publish(frame(&source, 2)));
+        assert_eq!(cached_revision(&source.pane_id), Some(2));
+        assert!(latest_scene(&source.pane_id, source.cols + 1, source.rows).is_none());
+        drop(subscription);
+        assert!(cached_revision(&source.pane_id).is_none());
     }
 }

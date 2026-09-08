@@ -130,27 +130,26 @@ pub fn encode(u: &ScreenUpdate) -> Value {
     })
 }
 
-/// The full raw fallback restores cells erased by an earlier native composition.
-pub fn encode_visual(source: &ScreenUpdate) -> Value {
-    let key = crate::visual::source_key(source, 0);
-    let scene = key.as_deref().and_then(|key| crate::visual::matching_source_key(source, key));
-    let mut composed = source.clone();
-    if let Some(frame) = &scene {
-        composed.dirty = frame.composed_cells.iter().cloned().enumerate()
-            .map(|(index, row)| (index as u16, row)).collect();
-    }
+pub fn encode_scene(frame: &crate::visual::PaneVisualFrame) -> Value {
+    let mut composed = frame.raw_snapshot.clone();
+    composed.dirty = frame.composed_cells.iter().cloned().enumerate()
+        .map(|(index, row)| (index as u16, row)).collect();
     let mut result = encode(&composed);
-    result["sourceKey"] = json!(key);
-    result["sceneRevision"] = scene.as_ref().map_or(Value::Null, |frame| json!(frame.scene_revision));
-    result["scene"] = scene.map_or(Value::Null, |frame| json!({
-        "paneId": frame.pane_id,
-        "sourceKey": frame.source_key,
-        "revision": frame.scene_revision,
-        "cols": frame.cols,
-        "rows": frame.rows,
-        "offset": frame.offset,
-        "overlays": frame.overlays,
-    }));
+    result["sourceKey"] = json!(frame.source_key);
+    result["sceneRevision"] = json!(frame.scene_revision);
+    result["scene"] = json!({
+        "paneId": frame.pane_id, "sourceKey": frame.source_key, "revision": frame.scene_revision,
+        "cols": frame.cols, "rows": frame.rows, "offset": frame.offset, "overlays": frame.overlays,
+    });
+    result
+}
+
+/// The full raw fallback restores cells erased by an earlier native composition.
+pub fn encode_raw_visual(source: &ScreenUpdate) -> Value {
+    let mut result = encode(source);
+    result["sourceKey"] = json!(crate::visual::source_key(source, 0));
+    result["sceneRevision"] = Value::Null;
+    result["scene"] = Value::Null;
     result
 }
 
