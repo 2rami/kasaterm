@@ -1,10 +1,13 @@
 import io
+import base64
 import json
+import re
 import subprocess
+import threading
 import unittest
 from unittest.mock import patch
 
-from tools.request_journal.nacho import SSHNachoProvider
+from tools.request_journal.nacho import HTTPNachoProvider, SSHNachoProvider
 from tools.request_journal.remote_helper import main
 
 
@@ -33,7 +36,10 @@ class RemoteHelperTests(unittest.TestCase):
         for payload in [PAYLOAD, '{"system":"SECRET"}', '"SECRET"']:
             output = io.StringIO()
             self.assertEqual(main(io.StringIO(payload), output, fail), 1)
-            self.assertEqual(json.loads(output.getvalue()), {"ok": False, "error": "summary_unavailable"})
+            result = json.loads(output.getvalue())
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "summary_unavailable")
+            self.assertNotIn("SECRET", output.getvalue())
 
     def test_ssh_sends_prompt_on_stdin_not_shell_command(self):
         output = subprocess.CompletedProcess([], 0, '{"ok":true,"text":"요약"}', "")
@@ -53,6 +59,60 @@ class RemoteHelperTests(unittest.TestCase):
                 SSHNachoProvider().summarize(PAYLOAD)
         with self.assertRaises(ValueError):
             SSHNachoProvider("-oProxyCommand=bad")
+
+    def test_http_owns_only_new_uuid_and_cleans_input_on_success_and_failure(self):
+        class Fake(HTTPNachoProvider):
+            def __init__(self, response):
+                super().__init__()
+                self.response = response
+                self.calls = []
+                self.screen = ""
+
+            def _call(self, method, route, data=None, raw=False):
+                self.calls.append((method, route, data))
+                if route.startswith("/term/spawn"):
+                    return {"ok": True, "id": "web-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+                if route.startswith("/term/screen"):
+                    return self.screen
+                if route.startswith("/term/input") and isinstance(data, str):
+                    marker = re.search(r"RJ_[0-9a-f]+", data)
+                    if marker:
+                        marker = marker.group(0)
+                        if "_DIR" in data:
+                            self.screen = f"{marker}_DIR:/tmp/kasaterm-journal.ABC123\n"
+                        elif "_BEGIN" in data:
+                            encoded = base64.b64encode(json.dumps(self.response).encode()).decode()
+                            self.screen = f"{marker}_BEGIN\n{encoded}\n{marker}_END\n"
+                        elif "_CLEAN" in data:
+                            self.screen = f"{marker}_CLEAN\n"
+                return {"ok": True}
+
+        for response in ({"ok": True, "text": "학생 보고에 따르면 미반영이에요."}, {"ok": False, "stage": "inference_unavailable"}):
+            provider = Fake(response)
+            if response["ok"]:
+                self.assertIn("미반영", provider.summarize(PAYLOAD))
+            else:
+                with self.assertRaises(RuntimeError):
+                    provider.summarize(PAYLOAD)
+            self.assertEqual(provider.calls[-1][0], "DELETE")
+            for method, route, data in provider.calls:
+                if "pane=" in route:
+                    self.assertIn("pane=web-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", route)
+                if route.startswith("/term/input"):
+                    self.assertNotIn("펫 기능", data)
+                if route == "/save-markdown":
+                    self.assertTrue(data["path"].startswith("/tmp/kasaterm-journal.ABC123/"))
+            self.assertTrue(any("_CLEAN" in str(data) and "[ ! -d /tmp/kasaterm-journal.ABC123 ]" in data for _, _, data in provider.calls if isinstance(data, str)))
+
+    def test_http_cancel_before_start_has_no_remote_effect(self):
+        event = threading.Event()
+        event.set()
+        provider = HTTPNachoProvider(cancel_event=event)
+        with patch.object(provider, "_call", side_effect=AssertionError("no remote call")):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                provider.summarize(PAYLOAD)
+        with self.assertRaises(ValueError):
+            HTTPNachoProvider("http://external.example")
 
 
 if __name__ == "__main__":

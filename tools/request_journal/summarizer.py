@@ -64,7 +64,7 @@ class Summarizer:
             if not isinstance(evidence, dict):
                 evidence = {}
             if evidence.get("source_hash") == digest and (evidence.get("provider") == provider_name
-                    or (self.provider is None and evidence.get("provider") in ("nacho-llm", "nacho-ssh"))):
+                    or (self.provider is None and evidence.get("provider") in ("nacho-llm", "nacho-ssh", "nacho-http"))):
                 result["skipped"] += 1
                 continue
             if (evidence.get("source_hash") == digest

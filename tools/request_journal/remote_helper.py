@@ -1,14 +1,16 @@
 """Standalone stdin/stdout helper for the existing Nacho Python environment.
 
-Prepared locally; copying this file does not start or restart the bot.
-Install, when the host is reachable, as ~/nacho-neko/bin/request-journal-summary.py.
+HTTP mode uploads this file into a private temporary directory and removes it
+after each call; it does not install a helper or start/restart the bot.
+Optional SSH installation target: ~/nacho-neko/bin/request-journal-summary.py.
 The existing bootstrap supplies environment variables to this child only:
   cd "$HOME/nacho-neko"
   set -a; [ ! -f .env ] || . ./.env; set +a
   exec .venv/bin/python bin/request-journal-summary.py
 
 Do not import main.py/agent.py or invoke student-inbox/nacho-tell: those routes
-can send Slack/Discord messages. No credential is copied to the client.
+can send Slack/Discord messages. The standalone helper uses Nacho's existing
+credential loader inside the remote process. No credential is copied to the client.
 """
 from __future__ import annotations
 
@@ -54,32 +56,38 @@ async def summarize_with_client(client, payload):
     return result[:400]
 
 
-def load_client(repo):
+def load_client(repo, use_existing_runtime=False):
     key = os.environ.get("OPENGATEWAY_API_KEY") or os.environ.get("LLM_API_KEY")
-    if not key or not key.strip():
+    if (not key or not key.strip()) and not use_existing_runtime:
         return None
     spec = importlib.util.spec_from_file_location("request_journal_nacho_llm", Path(repo) / "llm.py")
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.LLMClient(api_key=key.strip(), max_tokens=700, timeout_sec=12.0)
+    # Only the remote helper may use Nacho's normal credential loader. Its result
+    # stays in that process and never enters stdout or the journal database.
+    return module.LLMClient(api_key=key.strip() if key else None, max_tokens=700, timeout_sec=12.0)
 
 
 def main(stdin=None, stdout=None, client_factory=None):
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
+    stage = "invalid_input"
     try:
         payload = stdin.read(96001)
         if len(payload.encode()) > 96000:
             raise ValueError("payload too large")
         payload = bounded_payload(payload)
-        client = (client_factory or (lambda: load_client(Path.home() / "nacho-neko")))()
+        stage = "runtime_unavailable"
+        client = (client_factory or (lambda: load_client(Path.home() / "nacho-neko", use_existing_runtime=True)))()
         if client is None:
+            stage = "credentials_unavailable"
             raise RuntimeError("unavailable")
+        stage = "inference_unavailable"
         result = {"ok": True, "text": asyncio.run(summarize_with_client(client, payload))}
     except Exception:
-        result = {"ok": False, "error": "summary_unavailable"}
+        result = {"ok": False, "error": "summary_unavailable", "stage": stage}
     stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
     return 0 if result["ok"] else 1
 
