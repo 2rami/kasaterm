@@ -452,8 +452,8 @@ class PaneStatusLine extends StatelessWidget {
       padding: const EdgeInsets.only(top: 2),
       child: Row(
         children: [
-          // 하네스 로고 — 데스크톱 상태줄의 모델 표식과 같은 파랑(2026-09-08 지시
-          // 「상태줄에 로고 뜨는 거도」). 회색으로 작게 두니 안 보였다.
+          // 하네스 로고 — 제 색으로(harnessLogoColor). 회색으로 작게 두니 안 보였다
+          // (2026-09-08 지시 「상태줄에 로고 뜨는 거도」).
           if (pane.harness == 'claude' || pane.harness == 'codex') ...[
             // 256px 원본을 13px 로 그냥 줄이면 가는 획이 뭉개져 깨진 점으로 보였다
             // (2026-09-08 지적) — 작게 미리 풀고 밉맵으로 줄인다.
@@ -463,7 +463,7 @@ class PaneStatusLine extends StatelessWidget {
               height: 14,
               cacheWidth: 56,
               filterQuality: FilterQuality.medium,
-              color: statusModelColor,
+              color: harnessLogoColor(pane.harness ?? '', scheme.onSurface),
               errorBuilder: (_, _, _) => const SizedBox.shrink(),
             ),
             const SizedBox(width: 5),

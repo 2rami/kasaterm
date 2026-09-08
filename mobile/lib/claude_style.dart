@@ -526,6 +526,13 @@ const statusModelClaude = 0xE0C0;
 const statusModelGpt = 0xE0C1;
 const statusModelColor = Color(0xff7aa2f7);
 
+/// 하네스 로고의 제 색 — 클로드는 브랜드 주황(프레스킷 「Clay」), 오픈AI 는 단색 로고라
+/// 바탕 위 글자색을 따른다(2026-09-08 지시 「로고 색 원본처럼 뜨게」). 상태줄 파랑으로
+/// 통일하니 어느 하네스인지 색으로는 못 갈랐다.
+const claudeBrand = Color(0xffd97757);
+Color harnessLogoColor(String name, Color ink) =>
+    name == 'claude' ? claudeBrand : ink;
+
 int? _idxAtCol(List<_Cell> row, int col) {
   var c = 0;
   for (var i = 0; i < row.length; i++) {

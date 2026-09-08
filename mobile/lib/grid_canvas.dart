@@ -399,8 +399,8 @@ class _GridPainter extends CustomPainter {
           ),
           Paint()
             ..filterQuality = FilterQuality.medium
-            ..colorFilter = const ColorFilter.mode(
-              statusModelColor,
+            ..colorFilter = ColorFilter.mode(
+              harnessLogoColor(s.motion.substring(5), palette.fg),
               BlendMode.srcIn,
             ),
         );
@@ -652,7 +652,8 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
     if (fit == null) {
       final size = _wideSize(maxWidth);
       final cached = _scaled;
-      if (cached != null && (cached.fontSize - size).abs() < 0.01) return cached;
+      if (cached != null && (cached.fontSize - size).abs() < 0.01)
+        return cached;
       return _scaled = _CellMetrics(size);
     }
     var size = fit;
