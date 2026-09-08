@@ -376,7 +376,9 @@ impl App {
         theme::bg().hash(&mut hash);
         theme::text().hash(&mut hash);
         theme::accent_name().hash(&mut hash);
-        self.display_tab_char(ws, id).hash(&mut hash);
+        // The full display gate may refresh argv with ps; idle invalidation only
+        // needs the cached binding and agent state, not another process query.
+        ws.pane_character.get(id).hash(&mut hash);
         theme::character_ordinal(&ws.pane_character, id).hash(&mut hash);
         pane.color.hash(&mut hash);
         pane.title.hash(&mut hash);
