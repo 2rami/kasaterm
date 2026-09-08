@@ -1022,6 +1022,8 @@ struct GpuOverlay {
     cursor_w: u16,
     cursor_shape: cursor::CursorShape,
     cursor_thickness: f32,
+    /// 지금 보이는 탭의 캐릭터색. 미배정 셸만 테마 커서색으로 떨어진다.
+    cursor_color: [u8; 4],
     cursor_visible: bool,
     cols: u16,
     blink_on: bool,
@@ -4376,8 +4378,6 @@ pub(crate) enum SettingsAction {
     /// `SettingsAction` 이 `Eq` 를 derive 하므로 f32 를 실을 수 없다 — 굵기는 어차피
     /// 픽셀 정수라 u8 로 나른다.
     CursorThickness(u8),
-    /// 터미널 커서 전용 색. 빈 문자열이면 테마 기본색을 다시 따른다.
-    CursorColor(String),
     /// 터미널 셀 위 마우스 포인터 — `"arrow"` · `"ibeam"`.
     MouseCursor(&'static str),
     /// 떠 있는 pane 보호·확인 카드를 포함한 계정 전환. 빈 id는 기본 로그인.

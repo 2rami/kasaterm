@@ -88,7 +88,6 @@ pub(crate) struct SettingsCache {
     themegen_provider: String,
     themegen_key_masked: String,
     themegen_refs: Arc<std::collections::HashSet<String>>,
-    cursor_color_setting: String,
 }
 
 impl std::fmt::Debug for SettingsCache {
@@ -244,12 +243,6 @@ impl SettingsCache {
             &saved,
             (!self.custom_active.is_empty()).then_some(self.custom_active.as_str()),
         ));
-        self.cursor_color_setting = saved
-            .get("terminal_cursor_color")
-            .and_then(|value| value.as_str())
-            .filter(|value| theme::parse_hex(value).is_some())
-            .map(|value| value.to_ascii_lowercase())
-            .unwrap_or_default();
     }
 
     pub(crate) fn refresh_palette(&mut self) {
@@ -532,7 +525,6 @@ pub(crate) struct Snapshot {
     pub(crate) cursor_shape: cursor::CursorShape,
     pub(crate) cursor_thickness: f32,
     pub(crate) cursor_color: [u8; 4],
-    pub(crate) cursor_color_setting: String,
     pub(crate) mouse_cursor: String,
     pub(crate) statusbar_order: Vec<String>,
     pub(crate) statusbar_hidden: std::collections::HashSet<String>,
@@ -690,6 +682,20 @@ impl App {
         }
         let scene = &self.settings_scene;
         let cache = scene.cache();
+        let cursor_color = self
+            .ws
+            .lock()
+            .ok()
+            .and_then(|ws| {
+                let outer = scene.return_pane()?;
+                let tab_pid = ws.active_tab_pid(outer);
+                let name = ws.pane_character.get(&tab_pid)?;
+                theme::character_accent_n(
+                    name,
+                    theme::character_ordinal(&ws.pane_character, &tab_pid),
+                )
+            })
+            .unwrap_or_else(theme::cursor);
         Some(Snapshot {
             area,
             cat: scene.category(),
@@ -730,8 +736,7 @@ impl App {
             tabs_on_top: self.tabs_on_top,
             cursor_shape: self.cursor_shape,
             cursor_thickness: self.cursor_thickness,
-            cursor_color: theme::cursor(),
-            cursor_color_setting: cache.cursor_color_setting.clone(),
+            cursor_color,
             mouse_cursor: self.mouse_cursor.clone(),
             statusbar_order: self.set_statusbar.order.clone(),
             statusbar_hidden: self.set_statusbar.hidden.clone(),
@@ -1739,7 +1744,6 @@ fn action_refreshes_cache(action: &SettingsAction) -> bool {
         SettingsAction::UiLanguage(_)
             | SettingsAction::ThemeMode(_)
             | SettingsAction::ThemeSystemSlot(_, _)
-            | SettingsAction::CursorColor(_)
             | SettingsAction::StartCustomTheme
             | SettingsAction::ResetCustomTheme
             | SettingsAction::DeleteCustomTheme(_)
@@ -2431,7 +2435,7 @@ fn paint_appearance(
         x,
         *y,
         "터미널 커서",
-        "자주 쓰는 모양과 꾸미기 모양을 나눠 골라요",
+        "모양만 고르면 색은 현재 캐릭터를 따라가요",
     );
     *y += 48.0;
     draw_text(g, x + 2.0, *y, "기본", 11.5, theme::text_dim(), true);
@@ -2518,21 +2522,10 @@ fn paint_appearance(
             preview.1 + 18.0,
             s.cursor_thickness,
             false,
+            s.cursor_color,
         );
     }
     *y += 84.0;
-    row_label(g, x, y, "커서 색");
-    cursor_color_choices(g, s, hits, x, y, w);
-    draw_text(
-        g,
-        x + 2.0,
-        *y - 5.0,
-        "커서에만 적용되고 테마 강조색은 그대로예요",
-        10.5,
-        theme::text_mute(),
-        false,
-    );
-    *y += 18.0;
     let thickness: Vec<(&str, bool, SettingsAction)> = [1u8, 2, 3, 4, 6]
         .iter()
         .map(|px| {
@@ -5691,101 +5684,11 @@ fn cursor_shape_grid(
             rect.1 + 17.0,
             s.cursor_thickness,
             true,
+            s.cursor_color,
         );
     }
     let rows = (shapes.len() + cols - 1) / cols;
     *y += rows as f32 * card_h + rows.saturating_sub(1) as f32 * gap;
-}
-
-fn cursor_color_choices(
-    g: &mut gpu::GpuRenderer,
-    s: &Snapshot,
-    hits: &mut Vec<Hit>,
-    x: f32,
-    y: &mut f32,
-    w: f32,
-) {
-    let names = ["파랑", "초록", "주황", "보라", "분홍"];
-    let presets: Vec<(String, String, [u8; 4])> = theme::ACCENT_PRESETS
-        .iter()
-        .zip(names)
-        .map(|((_, color), label)| {
-            (
-                label.to_string(),
-                format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]),
-                *color,
-            )
-        })
-        .collect();
-    let mut choices = vec![("테마".to_string(), String::new(), s.cursor_color)];
-    if !s.cursor_color_setting.is_empty()
-        && !presets
-            .iter()
-            .any(|(_, value, _)| value.eq_ignore_ascii_case(&s.cursor_color_setting))
-    {
-        choices.push((
-            "현재".to_string(),
-            s.cursor_color_setting.clone(),
-            s.cursor_color,
-        ));
-    }
-    choices.extend(presets);
-
-    let cols = if w >= 650.0 {
-        6
-    } else if w >= 360.0 {
-        3
-    } else {
-        2
-    };
-    let gap = 7.0;
-    let card_h = 40.0;
-    let card_w = (w - gap * (cols - 1) as f32) / cols as f32;
-    let choice_count = choices.len();
-    for (index, (label, value, color)) in choices.into_iter().enumerate() {
-        let col = index % cols;
-        let row = index / cols;
-        let rect = (
-            x + col as f32 * (card_w + gap),
-            *y + row as f32 * (card_h + gap),
-            card_w,
-            card_h,
-        );
-        let selected = s.cursor_color_setting.eq_ignore_ascii_case(&value);
-        choice_card(
-            g,
-            s,
-            hits,
-            rect,
-            selected,
-            Target::Setting(SettingsAction::CursorColor(value)),
-        );
-        round_rect(
-            g,
-            rect.0 + 10.0,
-            rect.1 + 11.0,
-            18.0,
-            18.0,
-            9.0,
-            color,
-        );
-        let shown = fit(g, &label, (rect.2 - 44.0).max(18.0), 11.0, selected);
-        draw_text(
-            g,
-            rect.0 + 36.0,
-            rect.1 + 13.0,
-            &shown,
-            11.0,
-            if selected {
-                theme::text()
-            } else {
-                theme::text_dim()
-            },
-            selected,
-        );
-    }
-    let rows = (choice_count + cols - 1) / cols;
-    *y += rows as f32 * card_h + rows.saturating_sub(1) as f32 * gap + 8.0;
 }
 
 fn cursor_sample(
@@ -5795,6 +5698,7 @@ fn cursor_sample(
     y: f32,
     thickness: f32,
     compact: bool,
+    color: [u8; 4],
 ) {
     let cw = if compact { 9.0 } else { 11.0 };
     let ch = if compact { 23.0 } else { 29.0 };
@@ -5817,7 +5721,7 @@ fn cursor_sample(
         theme::text_dim(),
         false,
     );
-    let mut color = theme::cursor();
+    let mut color = color;
     color[3] = if compact { 210 } else { 175 };
     for quad in cursor::cursor_primitives(shape, x, y, cw, ch, 2, thickness).as_slice() {
         g.rect(quad.x, quad.y, quad.width, quad.height, color);

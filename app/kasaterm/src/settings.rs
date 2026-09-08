@@ -994,24 +994,6 @@ impl App {
                     self.chrome_dirty = true;
                 }
             }
-            SettingsAction::CursorColor(value) => {
-                let value = value.trim();
-                if value.is_empty() {
-                    socket::write_setting("terminal_cursor_color", serde_json::Value::Null);
-                    theme::apply_from_settings();
-                    self.repaint_all();
-                } else if theme::parse_hex(value).is_some() {
-                    socket::write_setting(
-                        "terminal_cursor_color",
-                        serde_json::Value::String(value.to_ascii_lowercase()),
-                    );
-                    // 터미널 셀 위 커서와 OSC 12 응답을 같은 프레임에 바꾼다.
-                    theme::apply_from_settings();
-                    self.repaint_all();
-                } else {
-                    self.set_toast("커서 색은 #rrggbb 로 적어 주세요".to_string());
-                }
-            }
             SettingsAction::FontSizeDelta(d) => {
                 let new = (self.font_size + d as f32).clamp(9.0, 32.0);
                 if (new - self.font_size).abs() > 0.01 {

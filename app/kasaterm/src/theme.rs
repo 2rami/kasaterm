@@ -468,17 +468,16 @@ fn store_palette(p: &Palette) {
     // pane 안에서 도는 TUI 도 같은 색을 봐야 한다. 이 셋(fg/bg/cursor)이 OSC
     // 10/11/12 질의의 답이 되고, Claude Code 의 `theme: auto` 는 그 배경색으로
     // 밝은 테마와 어두운 테마를 가른다 — 안 넘기면 라이트로 바꿔도 안쪽만 어둡다.
-    let imported_cursor = crate::socket::read_settings()
-        .get("terminal_cursor_color")
-        .and_then(|v| v.as_str())
-        .and_then(parse_hex);
-    let host_cursor = imported_cursor.unwrap_or_else(|| {
+    // 화면 커서는 활성 pane의 캐릭터색을 프레임마다 직접 고른다. 여기 값은
+    // 캐릭터가 없는 셸과 OSC 12 응답의 테마 폴백뿐이다. 예전 수동 커서색 키는
+    // 남아 있어도 읽지 않아, 캐릭터를 바꿨는데 옛 색이 붙는 일을 막는다.
+    let host_cursor = {
         if is_light(p.bg) { [p.fg[0], p.fg[1], p.fg[2]] } else { p.ansi[7] }
-    });
-    let visible_cursor = imported_cursor.unwrap_or_else(|| {
+    };
+    let visible_cursor = {
         let c = accent();
         [c[0], c[1], c[2]]
-    });
+    };
     S_CURSOR.store(
         pack([visible_cursor[0], visible_cursor[1], visible_cursor[2], 255]),
         Ordering::Relaxed,
@@ -972,14 +971,7 @@ pub fn custom_theme_seed(base_key: &str, slug: &str, label: &str) -> serde_json:
 pub fn set_accent(name: &str) {
     let value = accent_color(name);
     S_ACCENT.store(pack(value), Ordering::Relaxed);
-    if crate::socket::read_settings()
-        .get("terminal_cursor_color")
-        .and_then(|v| v.as_str())
-        .and_then(parse_hex)
-        .is_none()
-    {
-        S_CURSOR.store(pack(value), Ordering::Relaxed);
-    }
+    S_CURSOR.store(pack(value), Ordering::Relaxed);
     // 강조색은 팔레트 적용 경로(`apply_palette`)를 안 지난다 — 그래서 claude 쪽
     // 커스텀 테마도 여기서 따로 다시 구워야 한다. 안 그러면 강조색만 바꿨을 때
     // 터미널은 새 색인데 claude 는 옛 색으로 남는다.

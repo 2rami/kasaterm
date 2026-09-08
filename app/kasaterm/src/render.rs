@@ -301,6 +301,17 @@ impl App {
                 .unwrap_or((0u16, 0u16));
             ws.active_pane.clone().and_then(|id| {
                 ws.panes.get(&id).map(|pane| {
+                    let tab_pid = ws.active_tab_pid(&id);
+                    let cursor_color = ws
+                        .pane_character
+                        .get(&tab_pid)
+                        .and_then(|name| {
+                            theme::character_accent_n(
+                                name,
+                                theme::character_ordinal(&ws.pane_character, &tab_pid),
+                            )
+                        })
+                        .unwrap_or_else(theme::cursor);
                     // Preedit sits exactly on the reported PTY cursor —
                     // that's where the next char lands. We used to bump
                     // the column to the row's last filled cell to dodge
@@ -365,6 +376,7 @@ impl App {
                         pane_origin.0,
                         pane_origin.1,
                         pane.header_px(),
+                        cursor_color,
                     )
                 })
             })
@@ -381,7 +393,21 @@ impl App {
             pane_x,
             pane_y,
             header_shift,
-        ) = snap.unwrap_or((0, 0, false, 80, 1, 0, 0, preedit_text.clone(), 0, 0, 0.0));
+            cursor_color,
+        ) = snap.unwrap_or((
+            0,
+            0,
+            false,
+            80,
+            1,
+            0,
+            0,
+            preedit_text.clone(),
+            0,
+            0,
+            0.0,
+            theme::cursor(),
+        ));
         // When split OR any pane is multi-tab, every pane body is pushed
         // down by its header band. The cursor / preedit / selection
         // overlays anchor off the same origin as the cells, so they must
@@ -403,6 +429,7 @@ impl App {
             cursor_w,
             cursor_shape: self.cursor_shape,
             cursor_thickness: self.cursor_thickness,
+            cursor_color,
             cursor_visible,
             cols,
             blink_on: self.cursor_blink_on(Instant::now()),
@@ -464,7 +491,7 @@ impl App {
         if ov.cursor_visible && ov.blink_on && ov.preedit.is_empty() {
             let cx = ov.pad_x + ov.cursor_col as f32 * cw;
             let cy = ov.pad_y + ov.cursor_row as f32 * ch;
-            let mut c = cells::iterm_cursor();
+            let mut c = ov.cursor_color;
             c[3] = 140; // ~0.55 alpha
             for quad in crate::cursor::cursor_primitives(
                 ov.cursor_shape,
@@ -497,7 +524,7 @@ impl App {
             // Route preedit through the cell-grid path so the composing
             // syllable sits on the same baseline as committed text
             // instead of floating above the row.
-            g.draw_preedit(px, py, &ov.preedit, cells::iterm_cursor(), ov.font_scale);
+            g.draw_preedit(px, py, &ov.preedit, ov.cursor_color, ov.font_scale);
         }
         if let Some(sel) = ov.selection {
             let (start, stop) = if (sel.anchor.1, sel.anchor.0) <= (sel.end.1, sel.end.0) {
