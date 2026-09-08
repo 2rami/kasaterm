@@ -21,6 +21,10 @@ const SCALE: f32 = 2.0;
 /// 띄우므로, 이게 없으면 밝은 바탕화면 위에서 흰 글자가 통째로 사라진다.
 const HALO: i32 = 3;
 
+/// 글자도 테두리도 없는 자리의 알파. 0 이면 macOS 가 그 픽셀의 마우스를 아래 창으로
+/// 넘겨 버려 말풍선을 누를 수 없다 — 눌러서 그 pane 으로 가는 길이 거기서 끊긴다.
+const FLOOR_A: u32 = 6;
+
 /// 시스템 한글 폰트 — 담아 온 메이플스토리체를 못 찾았을 때만.
 const FALLBACK_FONT: &str = "/System/Library/Fonts/AppleSDGothicNeo.ttc";
 
@@ -209,7 +213,11 @@ fn raster(text: &str, max_w: f32, pt: f32) -> Option<(Vec<u8>, u32, u32)> {
             out[o + 1] = buf[o + 1];
             out[o + 2] = buf[o + 2];
             let halo = halo * 200 / 255;
-            out[o + 3] = (a + halo * (255 - a) / 255).min(255) as u8;
+            // 바닥 알파를 0 이 아니라 아주 작은 값으로 둔다. macOS 는 투명 창에서 알파가
+            // **정확히 0** 인 픽셀의 마우스를 아래 창으로 통과시켜서, 0 으로 두면 글자 획을
+            // 정확히 짚지 않는 한 말풍선을 누를 수도 없고 커서도 손모양이 안 된다
+            // (2026-09-08 실측: 말풍선 띠 전체에서 화살표였다). 눈에는 안 보인다.
+            out[o + 3] = (a + halo * (255 - a) / 255).clamp(FLOOR_A, 255) as u8;
         }
     }
     Some((out, w, h))
