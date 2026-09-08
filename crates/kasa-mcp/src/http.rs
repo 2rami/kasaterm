@@ -4160,6 +4160,38 @@ async fn term_icon(AxPath(name): AxPath<String>) -> axum::response::Response {
     ([(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")], icon).into_response()
 }
 
+async fn term_visual_builtin(AxPath(name): AxPath<String>) -> axum::response::Response {
+    match crate::visual::builtin_asset(&name) {
+        Some((bytes, mime)) => ([(header::CONTENT_TYPE, mime)], bytes).into_response(),
+        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn term_visual_asset(
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let missing = || (
+        axum::http::StatusCode::NOT_FOUND,
+        [(header::CACHE_CONTROL, "no-store")],
+    ).into_response();
+    let Some(pane) = query.get("pane") else {
+        return missing();
+    };
+    let Some(id) = query.get("id") else {
+        return missing();
+    };
+    if kasa_pty::lookup_session(pane).is_none() {
+        return missing();
+    }
+    match crate::visual::inline_asset(pane, id) {
+        Some((bytes, mime)) => (
+            [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "private, max-age=31536000, immutable")],
+            bytes.to_vec(),
+        ).into_response(),
+        None => missing(),
+    }
+}
+
 async fn term_grid_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
@@ -6101,9 +6133,12 @@ impl WebSrc {
     }
     /// 원본 폭 그대로, 모든 행을 실은 프레임.
     fn full_raw(&self) -> String {
+        crate::gridwire::encode(&self.full_snapshot()).to_string()
+    }
+    fn full_snapshot(&self) -> kasa_bridge::screen::ScreenUpdate {
         let mut u = self.meta.clone();
         u.dirty = self.cells.iter().cloned().enumerate().map(|(i, r)| (i as u16, r)).collect();
-        crate::gridwire::encode(&u).to_string()
+        u
     }
     /// `cols` 폭으로 다시 접은 프레임 — 행 수는 접힌 줄 수(원본 행 수보다 적으면 그만큼 채움).
     fn reflowed(&self, cols: u16) -> String {
@@ -6154,6 +6189,7 @@ enum Frame {
     /// 거울 클라가 제 폭(`view`)을 바꿨다 — 새 프레임이 없어도 원본을 그 폭으로 다시
     /// 접어 통째로 보낸다.
     Reflow,
+    Visual,
     /// 호스트 GUI 가 거울에게 미는 제어 JSON(`{"t":"open-url",…}` 등). 화면과
     /// 같은 채널을 타야 순서가 보장되고, 송신자(`btx`)를 등록부에 두는 것만으로
     /// 「이 pane 을 보는 거울 전부」에 닿는다.
@@ -6343,6 +6379,9 @@ async fn term_ws_run(
     };
     let viewport = ViewerViewport::new(sess.clone());
     let viewport_token = viewport.token;
+    let mut visual_subscription = (want_grid && crate::visual::producer_available())
+        .then(|| crate::visual::subscribe(&self_id));
+    let native_scene = visual_subscription.is_some();
     // `grid=1` 이면 우리가 파싱해 둔 셀 그리드를 그대로 보낸다 — 받는 쪽에 VT 파서가
     // 필요 없다. 그리드를 ANSI 로 되돌려 보내면 브라우저가 그걸 또 파싱해야 하고, 그
     // 파서(xterm.js)가 키 입력까지 자기 방식으로 가로채 모바일 IME 를 깨뜨렸다.
@@ -6371,7 +6410,9 @@ async fn term_ws_run(
         .send(Message::Text(
             serde_json::json!({
                 "t": "size", "cols": c, "rows": r, "mirror": mirrored, "id": self_id,
-                "capabilities": { "mirror_viewport": 1 },
+                "capabilities": if native_scene {
+                    serde_json::json!({ "mirror_viewport": 1, "native_scene": 1 })
+                } else { serde_json::json!({ "mirror_viewport": 1 }) },
             })
             .to_string()
             .into(),
@@ -6408,7 +6449,8 @@ async fn term_ws_run(
             });
         }
         Tap::Grid(rx, snap) => {
-            let msg = crate::gridwire::encode(&snap).to_string();
+            let msg = if native_scene { crate::gridwire::encode_visual(&snap) }
+                else { crate::gridwire::encode(&snap) }.to_string();
             let _ = ws_tx.send(Message::Text(msg.into())).await;
             web_src = Some(WebSrc::from_full(&snap));
             std::thread::spawn(move || {
@@ -6438,7 +6480,17 @@ async fn term_ws_run(
             // 조용할 때 ping 을 끼운다. 터널·리버스 프록시는 유휴 WebSocket 을
             // 끊는데(Cloudflare 무료 플랜 ~100초), 터미널은 아무 출력 없는 시간이
             // 길어서 반드시 걸린다. 30초면 그 절반이라 여유가 있다.
-            match tokio::time::timeout(std::time::Duration::from_secs(30), brx.recv()).await {
+            let incoming = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                if let Some(subscription) = visual_subscription.as_mut() {
+                    tokio::select! {
+                        frame = brx.recv() => frame,
+                        changed = subscription.changed.changed() => changed.ok().map(|_| Frame::Visual),
+                    }
+                } else {
+                    brx.recv().await
+                }
+            }).await;
+            match incoming {
                 Ok(Some(chunk)) => {
                     // PTY 격자가 바뀌었으면(divider·⤢·다른 미러) 바이트보다 먼저
                     // 알린다 — 미러 xterm 이 낡은 격자로 새 바이트를 그리면 글자가
@@ -6474,7 +6526,8 @@ async fn term_ws_run(
                             // 데스크톱이 위로 올라가 있으면 GUI 프레임은 지난 줄 창이다 — 거울에는
                             // 입력상자·상태줄이 있는 바닥 화면을 통째로 다시 떠서 준다.
                             // A reader frame queued before resize can arrive after its full snapshot.
-                            let u = if offset > 0 || (u.cols, u.rows) != sess_sz.size() {
+                            // Scene notifications can overtake queued deltas at the same dimensions.
+                            let u = if native_scene || offset > 0 || (u.cols, u.rows) != sess_sz.size() {
                                 Box::new(sess_sz.live_screen())
                             } else {
                                 u
@@ -6498,7 +6551,11 @@ async fn term_ws_run(
                             let src = web_src.get_or_insert_with(|| WebSrc::from_full(&u));
                             src.absorb(&u);
                             let msg = if vc > 0 && vc != u.cols {
-                                src.reflowed(vc)
+                                let mut value: serde_json::Value = serde_json::from_str(&src.reflowed(vc)).unwrap();
+                                if native_scene { value["scene"] = serde_json::Value::Null; }
+                                value.to_string()
+                            } else if native_scene {
+                                crate::gridwire::encode_visual(&src.full_snapshot()).to_string()
                             } else {
                                 crate::gridwire::encode(&u).to_string()
                             };
@@ -6506,7 +6563,7 @@ async fn term_ws_run(
                         }
                         Frame::Reflow => {
                             let vc = view_cols.load(std::sync::atomic::Ordering::Relaxed);
-                            if web_src.as_ref().is_some_and(|src| {
+                            if native_scene || web_src.as_ref().is_some_and(|src| {
                                 (src.meta.cols, src.meta.rows) != sess_sz.size()
                             }) {
                                 web_src = Some(WebSrc::from_full(&sess_sz.live_screen()));
@@ -6514,10 +6571,28 @@ async fn term_ws_run(
                             let Some(src) = web_src.as_ref() else { continue };
                             // 폭이 원본으로 돌아가도 통째로 보낸다 — 접힌 격자를 걷어야 한다.
                             let msg = if vc > 0 && vc != src.meta.cols {
-                                src.reflowed(vc)
+                                let mut value: serde_json::Value = serde_json::from_str(&src.reflowed(vc)).unwrap();
+                                if native_scene { value["scene"] = serde_json::Value::Null; }
+                                value.to_string()
+                            } else if native_scene {
+                                crate::gridwire::encode_visual(&src.full_snapshot()).to_string()
                             } else {
                                 src.full_raw()
                             };
+                            ws_tx.send(Message::Text(msg.into())).await
+                        }
+                        Frame::Visual => {
+                            let raw = sess_sz.live_screen();
+                            let src = WebSrc::from_full(&raw);
+                            let vc = view_cols.load(std::sync::atomic::Ordering::Relaxed);
+                            let msg = if vc > 0 && vc != raw.cols {
+                                let mut value: serde_json::Value = serde_json::from_str(&src.reflowed(vc)).unwrap();
+                                value["scene"] = serde_json::Value::Null;
+                                value.to_string()
+                            } else {
+                                crate::gridwire::encode_visual(&raw).to_string()
+                            };
+                            web_src = Some(src);
                             ws_tx.send(Message::Text(msg.into())).await
                         }
                         Frame::Control(s) => ws_tx.send(Message::Text(s.into())).await,
@@ -6952,6 +7027,8 @@ pub fn spawn_http_server_opts(
                     .route("/term/chrome.js", get(term_chrome_js))
                     .route("/term/chrome.css", get(term_chrome_css))
                     .route("/term/icon/{name}", get(term_icon))
+                    .route("/term/visual-builtin/{name}", get(term_visual_builtin))
+                    .route("/term/visual-asset", get(term_visual_asset))
                     .route("/term/grid.css", get(term_grid_css))
                     .route("/term/font.woff2", get(term_asset_font))
                     .route("/term/avatar/{slug}", get(term_avatar))
@@ -7505,6 +7582,105 @@ pub fn spawn_http_server_opts(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn native_scene_websocket_is_atomic_clears_stale_output_and_scopes_assets() {
+        use futures_util::StreamExt;
+        use serde_json::{json, Value};
+        use std::sync::Arc;
+        use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
+
+        async fn next_kind(
+            ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+            kind: &str,
+        ) -> Value {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let value: Value = serde_json::from_str(&text).unwrap();
+                    if value["t"] == kind { return value; }
+                }
+                panic!("websocket ended before {kind}");
+            }).await.expect("scene frame timeout")
+        }
+
+        let pane = format!("scene-http-test-{}", uuid::Uuid::new_v4());
+        let (events, receiver) = crossbeam_channel::unbounded();
+        let source = Arc::new(kasa_pty::PtySession::start_external(
+            kasa_pty::PtyOptions { pane_id: pane.clone(), cols: 21, rows: 6, ..Default::default() },
+            kasa_pty::ExternalIo {
+                events: receiver, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}),
+            },
+        ).unwrap());
+        kasa_pty::register_session(&pane, &source);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = axum::Router::new()
+            .route("/term/ws", axum::routing::get(super::term_ws_handler))
+            .route("/term/visual-asset", axum::routing::get(super::term_visual_asset))
+            .route("/term/visual-builtin/{name}", axum::routing::get(super::term_visual_builtin));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let url = format!("ws://{address}/term/ws?pane={pane}&grid=1");
+        let (mut standalone, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        assert!(next_kind(&mut standalone, "size").await["capabilities"].get("native_scene").is_none());
+        standalone.close(None).await.unwrap();
+
+        crate::visual::register_producer(Arc::new(|| {}));
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        assert_eq!(next_kind(&mut ws, "size").await["capabilities"]["native_scene"], 1);
+        assert!(next_kind(&mut ws, "grid").await["scene"].is_null());
+        let raw = source.live_screen();
+        let mut composed: Vec<_> = raw.dirty.iter().map(|(_, row)| row.clone()).collect();
+        composed[0][0].ch = 'X';
+        let asset = crate::visual::register_inline_asset(&pane, 7,
+            Arc::from(&b"\x89PNG\r\n\x1a\nfixture"[..])).unwrap();
+        assert!(crate::visual::publish(crate::visual::PaneVisualFrame {
+            pane_id: pane.clone(), source_key: crate::visual::source_key(&raw, 0).unwrap(),
+            scene_revision: 1, cols: raw.cols, rows: raw.rows, offset: 0, composed_cells: composed,
+            overlays: vec![crate::visual::VisualOverlay {
+                id: "fixture-picture".into(), rect: crate::visual::VisualRect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 },
+                clip: None, z: 1, fit: "scale-down".into(), anchor: "center".into(),
+                asset: crate::visual::VisualAsset::Inline { id: asset.clone() }, motion: None,
+            }],
+        }));
+        let decorated = next_kind(&mut ws, "grid").await;
+        assert_eq!(decorated["dirty"][0][1][0][0], "X");
+        assert_eq!(decorated["scene"]["overlays"][0]["asset"]["id"], asset);
+        assert_eq!(decorated["sourceKey"], decorated["scene"]["sourceKey"]);
+        assert_eq!(decorated["sceneRevision"], 1);
+
+        let client = reqwest::Client::new();
+        let asset_url = format!("http://{address}/term/visual-asset?pane={pane}&id={asset}");
+        let response = client.get(&asset_url).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert_eq!(client.get(format!("http://{address}/term/visual-asset?pane=other&id={asset}"))
+            .send().await.unwrap().status(), 404);
+        assert_eq!(client.get(format!("http://{address}/term/visual-asset?pane={pane}&id=not-a-file"))
+            .send().await.unwrap().status(), 404);
+        assert_eq!(client.get(format!("http://{address}/term/visual-builtin/unknown"))
+            .send().await.unwrap().status(), 404);
+
+        events.send(kasa_pty::ExtEvent::Bytes(b"A".to_vec())).unwrap();
+        let cleared = next_kind(&mut ws, "grid").await;
+        assert!(cleared["scene"].is_null());
+        assert_eq!(cleared["dirty"][0][1][0][0], "A");
+        assert_eq!(cleared["dirty"].as_array().unwrap().len(), 6);
+        source.resize(30, 8).unwrap();
+        let resized = next_kind(&mut ws, "grid").await;
+        assert!(resized["scene"].is_null());
+        assert_eq!((resized["cols"].clone(), resized["rows"].clone()), (json!(30), json!(8)));
+        ws.close(None).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while crate::visual::subscribed_panes().contains(&pane) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        let expired = client.get(&asset_url).send().await.unwrap();
+        assert_eq!(expired.status(), 404);
+        assert_eq!(expired.headers()["cache-control"], "no-store");
+        let _ = events.send(kasa_pty::ExtEvent::Eof);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn viewport_quiet_grid_tracks_acquire_resize_release_after_legacy_view() {
         use futures_util::{SinkExt, StreamExt};

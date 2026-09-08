@@ -19,6 +19,7 @@ pub mod codexhome;
 pub mod dispatch;
 pub mod git;
 pub mod gridwire;
+pub mod visual;
 mod http;
 pub mod persona;
 mod proxy;

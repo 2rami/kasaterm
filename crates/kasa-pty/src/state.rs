@@ -1475,7 +1475,7 @@ impl PtySession {
         let (cols, rows) = *self.size.lock().unwrap();
         let t = self.term.lock().unwrap();
         let mut update = live_snapshot(&t, cols, rows, &self.pane_id, &self.title_handle);
-        attach_inline_views(&mut update, &t, &self.inline_imgs);
+        attach_inline_views_at_offset(&mut update, &t, &self.inline_imgs, 0);
         update
     }
 
@@ -3300,6 +3300,15 @@ fn attach_inline_views(
     term: &Term<PtyEventForwarder>,
     imgs: &Mutex<InlineImgs>,
 ) {
+    attach_inline_views_at_offset(update, term, imgs, term.grid().display_offset());
+}
+
+fn attach_inline_views_at_offset(
+    update: &mut ScreenUpdate,
+    term: &Term<PtyEventForwarder>,
+    imgs: &Mutex<InlineImgs>,
+    display_offset: usize,
+) {
     let mut lock = imgs.lock().unwrap();
     let grid = term.grid();
     let cols = grid.columns() as u16;
@@ -3348,7 +3357,7 @@ fn attach_inline_views(
         }
         alive
     });
-    let top_abs = hist - grid.display_offset() as i64;
+    let top_abs = hist - display_offset as i64;
     update.inline_images = lock
         .imgs
         .iter()
@@ -5924,6 +5933,26 @@ mod external_session_tests {
         etx.send(ExtEvent::Bytes(b"\x1bcfresh".to_vec())).unwrap();
         assert!(wait_text(&sess, "fresh"));
         assert_eq!(sess.view_state().1, 0, "RIS 뒤 히스토리는 0 이어야 한다");
+    }
+
+    #[test]
+    fn live_inline_images_ignore_host_scrollback_offset() {
+        let (sess, events, _writer, _resized) = ext_session(20, 5);
+        let lines = (0..15).map(|line| format!("L{line:02}\r\n")).collect::<String>();
+        events.send(ExtEvent::Bytes(lines.into_bytes())).unwrap();
+        assert!(wait_text(&sess, "L14"));
+        let history = sess.view_state().1 as i64;
+        sess.inline_imgs.lock().unwrap().imgs.push(InlineImg {
+            id: 1, key: ("fixture".into(), 0),
+            path: std::path::PathBuf::from("/nonexistent-kasaterm-inline-fixture.png"),
+            abs_line: history + 1, col: 2, cols: 4, rows: 1, row_sig: None,
+        });
+        assert_eq!(sess.live_screen().inline_images[0].row, 1);
+        sess.scroll(3);
+        assert_eq!(sess.view_state().0, 3);
+        assert_eq!(sess.full_snapshot().inline_images[0].row, 4);
+        assert_eq!(sess.live_screen().inline_images[0].row, 1,
+            "live cells and inline placement must use the same zero offset");
     }
 }
 
