@@ -1,6 +1,7 @@
 import io
 import base64
 import json
+import os
 import re
 import subprocess
 import threading
@@ -8,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from tools.request_journal.nacho import HTTPNachoProvider, SSHNachoProvider
-from tools.request_journal.remote_helper import main, completion_payload, ProviderFailure, clean_diagnostic
+from tools.request_journal.remote_helper import main, completion_payload, ProviderFailure, clean_diagnostic, load_client
 
 
 PAYLOAD = json.dumps({"prompt": "펫 기능을 만들어줘", "student_reports": ["반영은 확인하지 못했어요."]}, ensure_ascii=False)
@@ -127,7 +128,7 @@ class RemoteHelperTests(unittest.TestCase):
         class Client:
             async def messages(self, **kwargs):
                 testcase.assertIsNone(kwargs["tools"])
-                testcase.assertEqual(kwargs["max_tokens"], 4096)
+                testcase.assertEqual(kwargs["max_tokens"], 8192)
                 testcase.assertIn("입력에 없는 요청 ID", kwargs["system"])
                 return {"stop_reason": "end_turn", "content": []}
             def extract_text(self, response):
@@ -140,14 +141,14 @@ class RemoteHelperTests(unittest.TestCase):
 
     def test_diagnostic_contains_only_enums_and_counts(self):
         value=clean_diagnostic({"stage":["SECRET"],"exception_type":"SECRET","input_chars":"SECRET","input_bytes":5,"output_chars":True,"text":"SECRET"})
-        self.assertEqual(set(value),{"stage","exception_type","input_chars","input_bytes","output_chars"})
+        self.assertEqual(set(value),{"stage","exception_type","input_chars","input_bytes","output_chars","input_tokens","output_tokens","reasoning_tokens"})
         self.assertNotIn("SECRET",json.dumps(value))
         self.assertIsNone(value["output_chars"])
 
     def test_model_truncation_reports_counts_without_response_or_error_text(self):
         class Client:
             async def messages(self,**kwargs):
-                return {"stop_reason":"max_tokens","content":[]}
+                return {"stop_reason":"max_tokens","content":[],"usage":{"input_tokens":123,"output_tokens":8192,"completion_tokens_details":{"reasoning_tokens":7000,"private":"SECRET"}}}
             def extract_text(self,response):
                 return "SECRET"
         output=io.StringIO()
@@ -155,8 +156,36 @@ class RemoteHelperTests(unittest.TestCase):
         result=json.loads(output.getvalue())
         self.assertEqual(result["diagnostic"]["stage"],"model_truncated")
         self.assertEqual(result["diagnostic"]["output_chars"],6)
+        self.assertEqual(result["diagnostic"]["output_tokens"],8192)
+        self.assertEqual(result["diagnostic"]["reasoning_tokens"],7000)
         self.assertGreater(result["diagnostic"]["input_bytes"],result["diagnostic"]["input_chars"])
         self.assertNotIn("SECRET",output.getvalue())
+
+    def test_short_summary_keeps_its_original_budget(self):
+        from tools.request_journal.nacho import NachoProvider
+        testcase=self
+        class Client:
+            async def messages(self,**kwargs):
+                testcase.assertEqual(kwargs["max_tokens"],700)
+                testcase.assertIsNone(kwargs["tools"])
+                return {"stop_reason":"end_turn","content":[]}
+            def extract_text(self,response):return "짧은 요약"
+        self.assertEqual(NachoProvider(Client()).summarize(PAYLOAD),"짧은 요약")
+
+    def test_low_effort_is_only_captured_by_opted_in_remote_import(self):
+        from types import SimpleNamespace
+        seen=[]
+        class Loader:
+            def exec_module(self,module):
+                seen.append(os.environ.get("NACHO_REASONING_EFFORT"))
+                module.LLMClient=lambda **kwargs:object()
+        spec=SimpleNamespace(loader=Loader())
+        with patch.dict(os.environ,{"OPENGATEWAY_API_KEY":"test-key","NACHO_REASONING_EFFORT":"high"}), patch("tools.request_journal.remote_helper.importlib.util.spec_from_file_location",return_value=spec), patch("tools.request_journal.remote_helper.importlib.util.module_from_spec",side_effect=lambda _:SimpleNamespace()):
+            load_client("/unused",use_existing_runtime=True,reasoning_effort="low")
+            self.assertEqual(os.environ["NACHO_REASONING_EFFORT"],"high")
+            load_client("/unused",use_existing_runtime=False,reasoning_effort="low")
+            load_client("/unused",use_existing_runtime=True)
+        self.assertEqual(seen,["low","high","high"])
 
 
 if __name__ == "__main__":

@@ -30,21 +30,27 @@ def clean_diagnostic(value):
     stage, kind = value.get("stage"), value.get("exception_type")
     result = {"stage": stage if isinstance(stage,str) and stage in STAGES else "other",
               "exception_type": kind if isinstance(kind,str) and kind in EXCEPTION_TYPES else "Other"}
-    for key in ("input_chars", "input_bytes", "output_chars"):
+    for key in ("input_chars", "input_bytes", "output_chars", "input_tokens", "output_tokens", "reasoning_tokens"):
         number = value.get(key)
         result[key] = number if type(number) is int and 0 <= number <= 1_000_000_000 else None
     return result
 
 
-def diagnostic(stage, exception, payload="", output=None):
+def diagnostic(stage, exception, payload="", output=None, usage=None):
     try:
         text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
         chars, size = len(text), len(text.encode("utf-8"))
     except Exception:
         chars, size = None, None
+    usage = usage if isinstance(usage,dict) else {}
+    details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
+    details = details if isinstance(details,dict) else {}
     return clean_diagnostic({"stage":stage,"exception_type":type(exception).__name__,
                              "input_chars":chars,"input_bytes":size,
-                             "output_chars":len(output) if isinstance(output,str) else None})
+                             "output_chars":len(output) if isinstance(output,str) else None,
+                             "input_tokens":usage.get("input_tokens",usage.get("prompt_tokens")),
+                             "output_tokens":usage.get("output_tokens",usage.get("completion_tokens")),
+                             "reasoning_tokens":usage.get("reasoning_tokens",details.get("reasoning_tokens"))})
 
 
 class ProviderFailure(RuntimeError):
@@ -108,27 +114,27 @@ async def summarize_with_client(client, payload):
     try:
         response = await asyncio.wait_for(client.messages(
             system=COMPLETE_SYSTEM if complete else SYSTEM, messages=[{"role": "user", "content": payload}],
-            tools=None, max_tokens=4096 if complete else 700, temperature=0.1,
+            tools=None, max_tokens=8192 if complete else 700, temperature=0.1,
         ), timeout=110.0 if complete else 35.0)
     except Exception as exc:
         raise ProviderFailure(diagnostic("model_call", exc, payload)) from None
     try:
         result = client.extract_text(response).strip()
     except Exception as exc:
-        raise ProviderFailure(diagnostic("model_response",exc,payload)) from None
+        raise ProviderFailure(diagnostic("model_response",exc,payload,usage=response.get("usage"))) from None
     if response.get("stop_reason") != "end_turn":
         stage = "model_truncated" if response.get("stop_reason") == "max_tokens" else "model_response"
-        raise ProviderFailure(diagnostic(stage, ValueError(), payload, result))
+        raise ProviderFailure(diagnostic(stage, ValueError(), payload, result, response.get("usage")))
     if any(block.get("type") == "tool_use" for block in response.get("content", [])):
-        raise ProviderFailure(diagnostic("model_response", ValueError(), payload, result))
+        raise ProviderFailure(diagnostic("model_response", ValueError(), payload, result, response.get("usage")))
     if not result:
-        raise ProviderFailure(diagnostic("model_response", ValueError(), payload, result))
+        raise ProviderFailure(diagnostic("model_response", ValueError(), payload, result, response.get("usage")))
     if complete and len(result) > 12000:
-        raise ProviderFailure(diagnostic("output_size", ValueError(), payload, result))
+        raise ProviderFailure(diagnostic("output_size", ValueError(), payload, result, response.get("usage")))
     return result if complete else result[:400]
 
 
-def load_client(repo, use_existing_runtime=False):
+def load_client(repo, use_existing_runtime=False, reasoning_effort=None):
     key = os.environ.get("OPENGATEWAY_API_KEY") or os.environ.get("LLM_API_KEY")
     if (not key or not key.strip()) and not use_existing_runtime:
         return None
@@ -136,7 +142,20 @@ def load_client(repo, use_existing_runtime=False):
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Nacho captures this supported option at import time. Only the isolated
+    # helper opts in; the bot and local provider keep their existing settings.
+    previous_effort = os.environ.get("NACHO_REASONING_EFFORT")
+    override_effort = use_existing_runtime and reasoning_effort == "low"
+    try:
+        if override_effort:
+            os.environ["NACHO_REASONING_EFFORT"] = "low"
+        spec.loader.exec_module(module)
+    finally:
+        if override_effort:
+            if previous_effort is None:
+                os.environ.pop("NACHO_REASONING_EFFORT",None)
+            else:
+                os.environ["NACHO_REASONING_EFFORT"] = previous_effort
     # Only the remote helper may use Nacho's normal credential loader. Its result
     # stays in that process and never enters stdout or the journal database.
     return module.LLMClient(api_key=key.strip() if key else None, max_tokens=700, timeout_sec=110.0)
@@ -152,7 +171,8 @@ def main(stdin=None, stdout=None, client_factory=None):
             raise ProviderFailure(diagnostic("input_size",ValueError(),payload))
         payload = bounded_payload(payload)
         stage = "runtime_unavailable"
-        client = (client_factory or (lambda: load_client(Path.home() / "nacho-neko", use_existing_runtime=True)))()
+        effort = "low" if json.loads(payload).get("mode") in ("chat","checklist") else None
+        client = (client_factory or (lambda: load_client(Path.home() / "nacho-neko", use_existing_runtime=True, reasoning_effort=effort)))()
         if client is None:
             stage = "credentials_unavailable"
             raise RuntimeError("unavailable")
