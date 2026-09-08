@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { PORT } from '../extension/port.js'
+import { HOST, HOST_ID } from './host.mjs'
 
 // 배포판이 개인판과 같은 로그 폴더를 쓰지 않도록 패키지 이름을 따라간다
 const PKG = JSON.parse(readFileSync(join(dirname(dirname(fileURLToPath(import.meta.url))), 'package.json'), 'utf8'))
@@ -31,6 +32,11 @@ function log(...parts) {
   process.stderr.write(line)
 }
 
+// 이 브리지가 도는 기계. 여기 붙은 확장은 전부 이 기계의 크롬이다 — 확장은 자기 기계의
+// 브리지에만 붙기 때문(extension/background.js 의 BRIDGE_URL). 클라이언트가 터널 너머
+// 남의 브리지에 붙었을 때 「지금 조작하는 크롬이 어느 기계 것인지」를 알려주는 값이다.
+const MACHINE = { host: HOST, hostId: HOST_ID }
+
 // 프로필마다 확장 하나. 예전 확장은 profile 을 안 보내므로 DEFAULT_PROFILE 로 접어 넣는다.
 const DEFAULT_PROFILE = 'default'
 const extensions = new Map() // profileId -> {sock, label, hint, since}
@@ -42,7 +48,10 @@ const clients = new Map() // sock -> {key, identity, profile}
 // 목록 순서는 붙은 순. 클라이언트가 프로필을 안 고르면 첫 번째를 쓰므로, 순서가 흔들리면
 // 같은 pane 의 연속 호출이 서로 다른 크롬으로 갈라진다 — Map 의 삽입 순서에 기댄다.
 function profileList() {
-  return [...extensions.entries()].map(([id, e]) => ({ id, label: e.label, hint: e.hint, since: e.since }))
+  // 기계 이름은 항목마다 싣는다 — 목록 한 번만 보고도 「이 크롬이 어느 기계 것인지」가 읽혀야 한다.
+  // 여기 붙은 확장은 전부 이 브리지의 기계 것이라 값은 다 같지만, 클라이언트가 프로필을 하나씩
+  // 훑을 때 상위 필드를 따로 들고 다니지 않아도 되게 한다.
+  return [...extensions.entries()].map(([id, e]) => ({ id, label: e.label, hint: e.hint, since: e.since, ...MACHINE }))
 }
 
 // 프로필을 안 고른 클라이언트가 어디로 갈지. 파일이 없으면 먼저 붙은 확장인데, 크롬을
@@ -116,7 +125,7 @@ function send(sock, obj) {
 function broadcastStatus() {
   const profiles = profileList()
   for (const sock of clients.keys()) {
-    send(sock, { type: 'status', extension: extensions.size > 0, profiles, selected: clients.get(sock)?.profile || null })
+    send(sock, { type: 'status', extension: extensions.size > 0, profiles, selected: clients.get(sock)?.profile || null, bridge: MACHINE })
   }
 }
 
@@ -263,13 +272,13 @@ wss.on('connection', (sock) => {
           const ext = extFor(sock)
           if (ext) send(ext, { type: 'session', action: 'open', client: key, identity })
         }
-        send(sock, { type: 'status', extension: extensions.size > 0, client: key, profiles: profileList(), selected: clients.get(sock).profile })
+        send(sock, { type: 'status', extension: extensions.size > 0, client: key, profiles: profileList(), selected: clients.get(sock).profile, bridge: MACHINE })
       }
       return
     }
 
     if (role === 'client' && msg.type === 'profiles') {
-      send(sock, { type: 'profiles', id: msg.id, profiles: profileList(), selected: clients.get(sock)?.profile || null })
+      send(sock, { type: 'profiles', id: msg.id, profiles: profileList(), selected: clients.get(sock)?.profile || null, bridge: MACHINE })
       return
     }
 
@@ -289,7 +298,7 @@ wss.on('connection', (sock) => {
         if (before) send(before, { type: 'session', action: 'close', client: info.key })
         if (after) send(after, { type: 'session', action: 'open', client: info.key, identity: info.identity })
       }
-      send(sock, { type: 'select', id: msg.id, ok: true, profiles: profileList(), selected: info.profile })
+      send(sock, { type: 'select', id: msg.id, ok: true, profiles: profileList(), selected: info.profile, bridge: MACHINE })
       return
     }
 
