@@ -1,5 +1,5 @@
 use kasa_pet_config::{PetPreferences, PreferenceChange};
-use muda::{CheckMenuItem, ContextMenu, Menu, MenuId, MenuItem, PredefinedMenuItem};
+use muda::{CheckMenuItem, ContextMenu, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
@@ -11,6 +11,11 @@ pub enum Action {
     Next,
     Quit,
     Preference(PreferenceChange),
+    Motion(usize),
+    Expression(usize),
+    ResetExpressions,
+    RepeatMotion,
+    Automatic,
 }
 
 pub fn show(
@@ -21,6 +26,9 @@ pub fn show(
     can_touch: bool,
     can_next: bool,
     can_save: bool,
+    catalog: &crate::catalog::Catalog,
+    playback: &crate::catalog::Playback,
+    active_expressions: &[usize],
 ) -> Option<Action> {
     let menu = Menu::new();
     let mut actions: Vec<(MenuId, Action)> = Vec::new();
@@ -42,6 +50,48 @@ pub fn show(
         actions.push((item.id().clone(), action));
         menu.append(&item).ok()?;
     }
+    menu.append(&PredefinedMenuItem::separator()).ok()?;
+    let motions = Submenu::new("모션", !catalog.motions.is_empty());
+    for (i, motion) in catalog.motions.iter().enumerate() {
+        let item = CheckMenuItem::new(
+            motion.label(),
+            motion.available,
+            playback.selected == Some(i),
+            None,
+        );
+        actions.push((item.id().clone(), Action::Motion(i)));
+        motions.append(&item).ok()?;
+    }
+    menu.append(&motions).ok()?;
+    let expressions = Submenu::new("표정·소품", !catalog.expressions.is_empty());
+    let reset = MenuItem::new("기본 표정", !active_expressions.is_empty(), None);
+    actions.push((reset.id().clone(), Action::ResetExpressions));
+    expressions.append(&reset).ok()?;
+    expressions
+        .append(&MenuItem::new(
+            "겹치는 효과는 자동으로 바뀝니다",
+            false,
+            None,
+        ))
+        .ok()?;
+    expressions.append(&PredefinedMenuItem::separator()).ok()?;
+    for (i, expression) in catalog.expressions.iter().enumerate() {
+        let item = CheckMenuItem::new(
+            expression.label(),
+            expression.available && !expression.unlinked,
+            active_expressions.contains(&i),
+            None,
+        );
+        actions.push((item.id().clone(), Action::Expression(i)));
+        expressions.append(&item).ok()?;
+    }
+    menu.append(&expressions).ok()?;
+    let repeat = CheckMenuItem::new("선택한 모션 반복", true, playback.repeat, None);
+    actions.push((repeat.id().clone(), Action::RepeatMotion));
+    menu.append(&repeat).ok()?;
+    let automatic = MenuItem::new("자동 동작으로 돌아가기", true, None);
+    actions.push((automatic.id().clone(), Action::Automatic));
+    menu.append(&automatic).ok()?;
     menu.append(&PredefinedMenuItem::separator()).ok()?;
     for (title, checked, change) in [
         (

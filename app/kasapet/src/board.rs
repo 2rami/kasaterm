@@ -31,15 +31,13 @@ impl Mood {
         }
     }
 
-    /// 모션을 고를 때 쓰는 자리 번호. 모델이 가진 모션 수로 나눠 쓴다 — 공식 샘플은
-    /// 무리 이름이 `Idle`·`TapBody` 뿐이라 「Busy 모션」 같은 것이 애초에 없다.
-    pub fn slot(self) -> usize {
+    pub fn group(self) -> &'static str {
         match self {
-            Mood::Idle => 0,
-            Mood::Busy => 1,
-            Mood::Wait => 2,
-            Mood::Error => 3,
-            Mood::Sleep => 4,
+            Mood::Idle => "Idle",
+            Mood::Busy => "Busy",
+            Mood::Wait => "Think",
+            Mood::Error => "Error",
+            Mood::Sleep => "Sleep",
         }
     }
 }
@@ -94,12 +92,10 @@ mod tests {
     }
 
     #[test]
-    fn every_state_gets_its_own_motion_slot() {
-        let all = [Mood::Idle, Mood::Busy, Mood::Wait, Mood::Error, Mood::Sleep];
-        let mut slots: Vec<usize> = all.iter().map(|m| m.slot()).collect();
-        slots.sort();
-        slots.dedup();
-        assert_eq!(slots.len(), all.len(), "상태마다 자리가 달라야 갈린다");
+    fn board_states_use_named_groups() {
+        assert_eq!(Mood::Wait.group(), "Think");
+        assert_eq!(Mood::Busy.group(), "Busy");
+        assert_eq!(Mood::Sleep.group(), "Sleep");
     }
 
     #[test]

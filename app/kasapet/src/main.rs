@@ -21,6 +21,7 @@ const MASK: u32 = 2048;
 mod board;
 mod bubble;
 mod menu;
+mod catalog;
 #[cfg(target_os = "macos")]
 mod native_cursor;
 
@@ -54,8 +55,7 @@ struct App {
     pet_dir: Option<std::path::PathBuf>,
     preferences: kasa_pet_config::PetPreferences,
     resting: bool,
-    manual_motion: bool,
-    touch_motion: Option<usize>,
+    playback: catalog::Playback,
     name: String,
     /// 두 번 누름 판정용. 왼쪽 한 번은 끌기라, 바로 끌어 버리면 두 번째를 못 본다.
     last_click: Option<std::time::Instant>,
@@ -93,12 +93,9 @@ struct App {
     /// 그림이 실제로 차지하는 범위. 모델이 선언한 캔버스보다 큰 경우가 흔해(마오는 모자가
     /// 30% 삐져나온다) 캔버스에 맞춰 그리면 잘리고, 머리 위 자리 계산도 어긋난다.
     bbox: Option<(f32, f32, f32, f32)>,
-    /// 무리별 모션 파일. 상태가 바뀌면 여기서 하나 고르고, 한 판이 끝나면 다음 것으로
-    /// 넘어간다 — 같은 동작만 돌면 살아 있는 것으로 안 보인다.
-    motion_files: Vec<std::path::PathBuf>,
-    motion_idx: usize,
-    expr_files: Vec<std::path::PathBuf>,
-    exprs: mocari::expression::ExpressionManager,
+    /// 파일 순서로 표정이나 소품을 추측하지 않도록 모델의 이름과 그룹을 보존한다.
+    catalog: catalog::Catalog,
+    expressions: catalog::Expressions,
     bufs: Vec<Option<(wgpu::Buffer, wgpu::Buffer, u32)>>, ubs: Vec<wgpu::Buffer>,
     look: (f32, f32), look_now: (f32, f32),
     motion_params: std::collections::HashSet<String>,
@@ -394,7 +391,8 @@ impl App {
             .unwrap_or(false);
         if let Some(d) = &self.pet_dir { self.apply_preferences(kasa_pet_config::read(d)); }
         let action = menu::show(&win, &self.preferences, self.resting || self.mood == board::Mood::Sleep,
-            self.typing.is_some(), self.touch_motion.is_some(), can_next, self.pet_dir.is_some());
+            self.typing.is_some(), self.catalog.touch().is_some(), can_next, self.pet_dir.is_some(),
+            &self.catalog, &self.playback, &self.expressions.indices());
         // Menu tracking is synchronous; its mouse-up is not a double click on the pet.
         self.last_click = None;
         match action {
@@ -402,12 +400,28 @@ impl App {
             Some(menu::Action::Touch) => self.touch(),
             Some(menu::Action::Rest) => {
                 self.resting = !(self.resting || self.mood == board::Mood::Sleep);
-                self.manual_motion = false;
+                self.playback.selected = None;
                 self.stirred = std::time::Instant::now();
                 self.apply_mood(if self.resting { board::Mood::Sleep } else { board::Mood::Idle });
                 self.stop_bounce();
             }
             Some(menu::Action::Next) => self.next_character(),
+            Some(menu::Action::Motion(i)) => self.select_motion(i),
+            Some(menu::Action::Expression(i)) => self.select_expression(i),
+            Some(menu::Action::ResetExpressions) => self.expressions.clear(),
+            Some(menu::Action::RepeatMotion) => {
+                let repeat = !self.playback.repeat;
+                if let Some(i) = self.playback.selected {
+                    if self.play_motion(i, repeat) { self.playback.repeat = repeat; }
+                } else { self.playback.repeat = repeat; }
+            }
+            Some(menu::Action::Automatic) => {
+                self.playback.selected = None;
+                self.expressions.clear();
+                self.resting = false;
+                self.stirred = std::time::Instant::now();
+                self.resume_automatic();
+            }
             Some(menu::Action::Preference(change)) => self.change_preference(change),
             Some(menu::Action::Quit) => { self.save_state(); set_hand_cursor(false); el.exit(); }
             None => {}
@@ -577,9 +591,12 @@ impl App {
                 w.set_ime_allowed(false);
             }
             resign_key();
+            if self.playback.selected.is_none() { self.resume_automatic(); }
             return;
         }
         self.typing = Some(String::new());
+        self.resting = false;
+        if self.playback.selected.is_none() && (self.preferences.animations || self.typing.is_some()) { self.resume_automatic(); }
         if let Some(w) = &self.win {
             w.set_ime_allowed(true);
             w.focus_window();
@@ -688,29 +705,51 @@ impl App {
             self.start_bounce();
         }
         self.urgent = urgent;
-        if mood != self.mood && !self.resting && !self.manual_motion {
+        if mood != self.mood {
             self.apply_mood(mood);
         }
     }
 
-    /// 상태가 바뀌면 몸도 바뀐다 — 모션 하나와 표정 하나.
     fn apply_mood(&mut self, mood: board::Mood) {
         self.mood = mood;
-        if mood == board::Mood::Sleep || !self.preferences.animations { return; }
-        // 공식 샘플의 모션 무리는 `Idle`·`TapBody` 뿐이라 이름으로는 못 고른다.
-        // 상태마다 자리를 하나씩 주고, 모델이 가진 수로 나눠 쓴다.
-        if !self.motion_files.is_empty() {
-            let i = mood.slot() % self.motion_files.len();
-            self.play_motion(i, false);
+        if self.playback.selected.is_none() && (self.preferences.animations || self.typing.is_some()) { self.resume_automatic(); }
+    }
+
+    fn automatic_group(&self) -> &'static str {
+        if self.resting { "Sleep" }
+        else if self.typing.is_some() { "Talk" }
+        else { self.mood.group() }
+    }
+
+    fn resume_automatic(&mut self) {
+        if let Some(i) = self.playback.target(&self.catalog, self.automatic_group()) {
+            if !self.play_motion(i, true) { self.motion = None; }
+        } else {
+            self.motion = None;
+            self.motion_params.clear();
         }
-        // 표정은 이름이 없는 모델이 많아(exp_01…) 뜻으로 못 고른다. 있는 만큼만 갈라 쓰고,
-        // 없는 모델은 표정 없이 모션으로만 상태를 보인다.
-        self.exprs.stop_all();
-        if !self.expr_files.is_empty() && mood != board::Mood::Idle {
-            let f = &self.expr_files[mood.slot() % self.expr_files.len()];
-            if let Ok(e) = mocari::expression::load_expression(f) {
-                self.exprs.play(e);
-            }
+    }
+
+    fn action_error(&mut self, message: &str) {
+        self.say = message.to_string();
+        self.said_at = std::time::Instant::now();
+        self.urgent = true;
+        self.rebuild_bubble_text();
+        eprintln!("{message}");
+    }
+
+    fn select_motion(&mut self, i: usize) {
+        if self.play_motion(i, self.playback.repeat) {
+            self.playback.selected = Some(i);
+            self.resting = false;
+            self.stirred = std::time::Instant::now();
+            self.stop_bounce();
+        }
+    }
+
+    fn select_expression(&mut self, i: usize) {
+        if self.expressions.toggle(&self.catalog, i).is_err() {
+            self.action_error("표정 파일을 읽지 못했어요. 모델 파일을 확인해 주세요.");
         }
     }
 
@@ -722,9 +761,12 @@ impl App {
         // 접힌 말을 다시 띄운다 — 「방금 뭐라고 했더라」를 누르면 볼 수 있어야, 말이
         // 잠깐 뒤 사라지는 것이 손해가 아니게 된다.
         self.said_at = std::time::Instant::now();
-        let Some(i) = self.touch_motion else { return };
-        self.manual_motion = true;
-        self.play_motion(i, false);
+        let Some(i) = self.catalog.touch() else { return };
+        if self.play_motion(i, false) {
+            self.playback.selected = Some(i);
+            // Touch is one action even when the explicit motion menu is looping.
+            self.playback.repeat = false;
+        }
     }
 
     /// 말풍선이 지금 얼마나 진한가. 0 이면 없는 것이다.
@@ -789,10 +831,13 @@ impl App {
 
     /// 모션을 갈아 끼운다. 파일과 「그 모션이 쥔 파라미터」는 늘 짝이어야 한다 —
     /// 어긋나면 자동 효과(숨·눈·시선)가 모션과 싸워 고개가 튀고 눈이 깜빡이다 만다.
-    fn play_motion(&mut self, i: usize, looping: bool) {
-        let Some(f) = self.motion_files.get(i).cloned() else { return };
-        self.motion_idx = i;
-        self.motion_params = std::fs::read_to_string(&f)
+    fn play_motion(&mut self, i: usize, looping: bool) -> bool {
+        let Some(f) = self.catalog.motions.get(i).map(|m| m.path.clone()) else { return false };
+        let Ok(motion) = mocari::motion::load_motion(&f) else {
+            self.action_error("모션 파일을 읽지 못했어요. 모델 파일을 확인해 주세요.");
+            return false;
+        };
+        let params = std::fs::read_to_string(&f)
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .and_then(|v| {
@@ -804,9 +849,9 @@ impl App {
                 })
             })
             .unwrap_or_default();
-        self.motion = mocari::motion::load_motion(&f)
-            .ok()
-            .map(|m| mocari::motion::MotionPlayer::with_looping(m, looping));
+        self.motion_params = params;
+        self.motion = Some(mocari::motion::MotionPlayer::with_looping(motion, looping));
+        true
     }
 
     /// 할 말을 글자 텍스처로. 빈 말이면 말풍선이 통째로 사라진다.
@@ -819,17 +864,10 @@ impl App {
         self.poll_cursor();
         self.poll_board();
         self.tick_bounce();
-        // 한 판이 끝나면 다음 모션으로 넘어간다. 한 가지만 물려 두면 몇 초 만에
-        // 「가만히 있는 그림」으로 보인다(2026-09-07 지적 「모션 계속 똑같애」).
-        let moving = !self.resting && self.mood != board::Mood::Sleep
-            && (self.preferences.animations || self.manual_motion);
-        if moving && self.motion.as_ref().is_some_and(|m| !m.is_looping() && m.is_finished())
-            && !self.motion_files.is_empty()
-        {
-            let next = (self.motion_idx + 1) % self.motion_files.len();
-            self.manual_motion = false;
-            if self.preferences.animations { self.play_motion(next, false); }
-        }
+        let finished = self.motion.as_ref().is_some_and(|m| m.is_finished());
+        if self.playback.finish_once(finished) { self.resume_automatic(); }
+        let moving = self.playback.selected.is_some() || self.typing.is_some() || (self.preferences.animations
+            && (!self.resting || self.catalog.group("Sleep").is_some()));
         let dt = self.last.elapsed().as_secs_f32().min(0.1);
         self.last = std::time::Instant::now();
         let motion_dt = if moving { dt } else { 0.0 };
@@ -839,8 +877,6 @@ impl App {
             let rt = self.model.runtime_mut();
             rt.reset_parameters();
             if let Some(m) = &mut self.motion { m.tick(motion_dt); m.apply(rt); }
-            self.exprs.tick(motion_dt);
-            self.exprs.apply(rt);
             // Cubism 런타임이 자동으로 하는 것 — 모션 파일에는 없다.
             self.t += motion_dt;
             let t = self.t;
@@ -881,6 +917,9 @@ impl App {
             put(rt, "ParamEyeLOpen", blink);
             put(rt, "ParamEyeROpen", blink);
             if moving { rt.apply_physics(motion_dt); }
+            // Explicit choices are applied last, every frame, even when automatic
+            // motion is paused. ModelRuntime clamps Add/Multiply to model bounds.
+            self.expressions.apply(rt, dt);
             rt.update_meshes();
         }
         let Some(g) = &self.gfx else { return };
@@ -1205,50 +1244,6 @@ fn save_shot(g: &Gfx, tex: &wgpu::Texture, path: &str) {
 
 
 
-/// model3.json 이 적어 둔 모션 파일 전부(무리 순서대로). 공식 샘플은 무리 이름이
-/// `Idle`·`TapBody` 뿐이라 「Busy 모션」 같은 이름으로는 못 고른다 — 자리로 고른다.
-fn motion_files(model3: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let dir = model3.parent().unwrap_or(std::path::Path::new("."));
-    let Ok(t) = std::fs::read_to_string(model3) else { return Vec::new() };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { return Vec::new() };
-    let mut out = Vec::new();
-    if let Some(g) = v.get("FileReferences").and_then(|f| f.get("Motions")).and_then(|m| m.as_object()) {
-        for (_, arr) in g {
-            for e in arr.as_array().into_iter().flatten() {
-                if let Some(f) = e.get("File").and_then(|f| f.as_str()) {
-                    out.push(dir.join(f));
-                }
-            }
-        }
-    }
-    out
-}
-
-fn touch_motion_index(model3: &std::path::Path, files: &[std::path::PathBuf]) -> Option<usize> {
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(model3).ok()?).ok()?;
-    let groups = v.get("FileReferences")?.get("Motions")?.as_object()?;
-    let file = groups.iter().find(|(name, _)| name.eq_ignore_ascii_case("TapBody") || name.eq_ignore_ascii_case("Touch"))?
-        .1.as_array()?.first()?.get("File")?.as_str()?;
-    let full = model3.parent()?.join(file);
-    files.iter().position(|p| p == &full)
-}
-
-fn expression_files(model3: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let dir = model3.parent().unwrap_or(std::path::Path::new("."));
-    let Ok(t) = std::fs::read_to_string(model3) else { return Vec::new() };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { return Vec::new() };
-    v.get("FileReferences")
-        .and_then(|f| f.get("Expressions"))
-        .and_then(|e| e.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|e| e.get("File").and_then(|f| f.as_str()))
-                .map(|f| dir.join(f))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// 시선을 손으로 박아 보는 창구(`KASAPET_LOOK=0.9,-0.5`). 커서를 못 움직이는 자리에서
 /// 「정말 따라보는가」를 가르는 유일한 길이다 — 화면 두 장을 견주면 바로 보인다.
 fn look_override() -> Option<(f32, f32)> {
@@ -1397,9 +1392,8 @@ fn main() {
     let motion = mocari::motion::load_motion(dir.join(&file)).ok()
         .map(mocari::motion::MotionPlayer::new);
     let model3 = std::path::Path::new(&path).to_path_buf();
-    let motion_files = motion_files(&model3);
-    let touch_motion = touch_motion_index(&model3, &motion_files);
-    let expr_files = expression_files(&model3);
+    let mut catalog = catalog::Catalog::load(&model3);
+    let requested_motion = std::env::args().nth(2).map(|file| catalog.requested_motion(&dir, &file));
     eprintln!("모션 파일: {file}");
     eprintln!("모션 로드: {}", if motion.is_some() { "성공" } else { "실패" });
     // 캐릭터 폴더(`<pet>/<이름>/<이름>.model3.json`)에서 왔으면 그 위가 펫 자리다.
@@ -1431,15 +1425,19 @@ fn main() {
     let mut app = App { win: None, gfx: None,
         x, y, w: 420.0, h: 600.0 + HEADROOM, scale,
         alpha: wgpu::CompositeAlphaMode::Auto, cursor: (0.0, 0.0), pet_dir, name, last_click: None, on_body: false, local: None,
-        preferences, resting: false, manual_motion: false, touch_motion,
+        preferences, resting: false, playback: catalog::Playback::default(),
         mood: board::Mood::Idle, say: String::new(), board_seen: None,
         board_polled: std::time::Instant::now(), stirred: std::time::Instant::now(),
         bubble_text: None, text_pt, subject: String::new(),
         said_at: std::time::Instant::now(), urgent: false, bounce: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
-        motion_files, motion_idx: 0, expr_files, exprs: mocari::expression::ExpressionManager::new(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
+        catalog, expressions: catalog::Expressions::default(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
         shot_path: std::env::var("KASAPET_SHOT").ok(),
         shot_at: std::env::var("KASAPET_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(120) };
+    if let Some(i) = requested_motion {
+        app.playback.repeat = app.motion.as_ref().is_some_and(|m| m.is_looping());
+        app.select_motion(i);
+    } else { app.resume_automatic(); }
     el.run_app(&mut app).unwrap();
 }
 
