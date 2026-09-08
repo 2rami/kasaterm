@@ -6969,6 +6969,13 @@ impl App {
                 .insert(id.clone(), std::path::PathBuf::from(c));
         }
         self.insert_pty(id.clone(), session.clone());
+        // 복원은 부팅 pane 을 통째로 놓고(`pty.clear`) 시작하는데, 그 셸의 EOF 는 복원이
+        // 도는 **도중**에 도착한다. 그때 명부에 그 번호가 없으면 `pane_replaced` 가
+        // 「바뀐 적 없다」로 답해 죽음표시가 그대로 실리고, 저장본이 같은 번호(%0)로
+        // 되살린 pane 을 다음 턴 reap 이 걷는다 — 2026-09-08 13:13 재시작에서 4번방
+        // 미도리(%0)가 그렇게 사라졌다(격리 앱에선 EOF 가 늦어 안 걸린다). 같은 번호로
+        // 다시 띄운 자리(`swap_character`)와 같은 규칙으로 옛 표시를 지운다.
+        self.dead_panes.lock().unwrap().retain(|x| x != &id);
         // 붙인 이름을 되살린다. 핀도 같이 세워야 한다 — 안 세우면 되살린 이름이
         // pane 안 프로그램의 첫 OSC 에 곧바로 덮여, 저장한 보람이 몇 초 만에 사라진다
         // (claude 는 뜨자마자 제목을 쏜다). 저장 쪽이 핀 선 것만 넣으므로 여기 온
