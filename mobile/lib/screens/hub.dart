@@ -683,8 +683,7 @@ class _MiniCell extends StatefulWidget {
 
 /// 탭이 여럿인 칸은 좌우로 넘겨 본다 — 탭마다 작은 얼굴을 줄 세우면 손가락으로 못
 /// 집는다(2026-09-08 지적 「터치하기 너무 작잖아」). 한 번에 한 학생, 밑에 점으로 몇째인지.
-/// 넘기면 뒷장이 앞으로 올라오고 앞장은 뒤로 물러나는 카드 섞기 — 장마다 자리를
-/// 기억하므로(탭 id 열쇠) 자리만 바꿔 주면 알아서 미끄러진다.
+/// 넘기면 새 학생이 아래에서 올라온다.
 class _MiniCellState extends State<_MiniCell> {
   late int _page = _initialPage;
 
@@ -728,22 +727,8 @@ class _MiniCellState extends State<_MiniCell> {
     final edge = waiting ? StatusStyle.attention : accent;
     return LayoutBuilder(
       builder: (context, box) {
-        // 탭이 여럿이면 카드 덱 — 뒷장이 우상단으로 계단처럼 비치고, 앞장(보고 있는
-        // 탭)은 그만큼 좌하단으로 준다. 데스크톱 배치도와 같은 그림(2026-09-08 지시
-        // 「pc 처럼 겹침 표시」). 장마다 그 탭 학생의 색이라 누가 뒤에 있는지도 보인다.
-        final back = tabbed && box.maxWidth > 24 && box.maxHeight > 24
-            ? math.min(tabs.length - 1, 3)
-            : 0;
-        final step = back == 0
-            ? 0.0
-            : (math.min(box.maxWidth, box.maxHeight) * 0.34 / back).clamp(
-                2.0,
-                6.0,
-              );
-        final inset = step * back;
-        final cw = box.maxWidth - inset;
-        final ch = box.maxHeight - inset;
-        final roomy = cw >= 64 && ch >= 44;
+        final ch = box.maxHeight;
+        final roomy = box.maxWidth >= 64 && ch >= 44;
         final dots = tabbed && ch >= 36;
         final face = math.min((ch - (dots ? 8 : 0)) * 0.55, 30.0);
         Widget student(Pane? q) => Center(
@@ -806,7 +791,27 @@ class _MiniCellState extends State<_MiniCell> {
                   : () => widget.onMore!(p),
               child: Stack(
                 children: [
-                  student(p),
+                  // 넘길 때 새 학생이 아래에서 올라온다 — 카드가 위로 올라오는 느낌
+                  // (2026-09-08 지시).
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 260),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeIn,
+                    transitionBuilder: (child, anim) => FadeTransition(
+                      opacity: anim,
+                      child: SlideTransition(
+                        position: Tween(
+                          begin: const Offset(0, 0.35),
+                          end: Offset.zero,
+                        ).animate(anim),
+                        child: child,
+                      ),
+                    ),
+                    child: KeyedSubtree(
+                      key: ValueKey('face-${p?.id ?? 'shell'}'),
+                      child: student(p),
+                    ),
+                  ),
                   if (dots)
                     Positioned(
                       left: 0,
@@ -852,14 +857,9 @@ class _MiniCellState extends State<_MiniCell> {
             ),
           ),
         );
-        if (back == 0) return front;
-        // 앞장 뒤로 나머지를 순서대로 — 앞장 바로 뒤가 첫째. 장의 열쇠는 탭 id 라,
-        // 넘길 때 같은 장이 새 자리로 미끄러진다(앞으로 올라오고, 뒤로 물러난다).
-        final order = [
-          _page,
-          for (var i = 0; i < tabs.length; i++)
-            if (i != _page) i,
-        ];
+        if (!tabbed) return front;
+        // 좌우로 쓸면 다음·이전 탭. 겹친 뒷장은 두지 않는다 — 몇째인지는 밑의 점이
+        // 말하고, 칸이 작아 덱까지 들어가면 얼굴이 밀린다(2026-09-08 지시).
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onHorizontalDragEnd: (d) {
@@ -867,52 +867,9 @@ class _MiniCellState extends State<_MiniCell> {
             if (v.abs() < 120) return;
             _flip(v < 0 ? 1 : -1);
           },
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              for (var r = back; r >= 0; r--)
-                AnimatedPositioned(
-                  key: ValueKey('deck-${tabs[order[r]]?.id ?? order[r]}'),
-                  duration: const Duration(milliseconds: 320),
-                  curve: Curves.easeOutCubic,
-                  left: step * r,
-                  top: step * (back - r),
-                  width: cw,
-                  height: ch,
-                  child: r == 0 ? front : _DeckCard(pane: tabs[order[r]]),
-                ),
-            ],
-          ),
+          child: front,
         );
       },
-    );
-  }
-}
-
-/// 덱의 뒷장 — 그 탭 학생의 색으로 칠한 통짜 카드(2026-09-08 지적 「겹침 학생색 안
-/// 되고 회색」— 눌러 칠했더니 회색으로 읽혔다). 앞장과 겹치는 자리는 바탕색 테로 한 겹
-/// 갈라, 같은 색이 붙어 한 덩어리로 읽히지 않게 한다.
-class _DeckCard extends StatelessWidget {
-  const _DeckCard({required this.pane});
-
-  final Pane? pane;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final p = pane;
-    final color = p == null
-        ? scheme.outlineVariant
-        : (parseHexColor(p.color) ?? scheme.primary);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: Color.alphaBlend(
-          color.withValues(alpha: p == null ? 0.35 : 0.78),
-          scheme.surfaceContainerLow,
-        ),
-        borderRadius: BorderRadius.circular(5),
-        border: Border.all(color: scheme.surfaceContainerLow, width: 1),
-      ),
     );
   }
 }
@@ -1083,8 +1040,8 @@ class _PaneTile extends StatelessWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
-                        if (pane.statusParts.isNotEmpty)
-                          PaneStatusLine(pane: pane),
+                        if (pane.briefStatusParts.isNotEmpty)
+                          PaneStatusLine(pane: pane, brief: true),
                       ],
                     ),
                   ),

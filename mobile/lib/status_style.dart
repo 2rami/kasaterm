@@ -430,9 +430,13 @@ class SessionTag extends StatelessWidget {
 /// 데스크톱 pane 머리의 셋째 줄 — 하네스 아이콘 · 모델 · 브랜치 · 컨텍스트% · effort.
 /// 컨텍스트가 80% 를 넘으면 그 숫자만 주황으로 도드라진다.
 class PaneStatusLine extends StatelessWidget {
-  const PaneStatusLine({super.key, required this.pane});
+  const PaneStatusLine({super.key, required this.pane, this.brief = false});
 
   final Pane pane;
+
+  /// 목록용 — 모델과 effort 만(2026-09-08 지시). 브랜치·컨텍스트% 는 방 머리와
+  /// 터미널 화면이 말한다.
+  final bool brief;
 
   @override
   Widget build(BuildContext context) {
@@ -442,7 +446,7 @@ class PaneStatusLine extends StatelessWidget {
       color: scheme.onSurfaceVariant,
       fontFamily: 'TermMono',
     );
-    final parts = pane.statusParts;
+    final parts = brief ? pane.briefStatusParts : pane.statusParts;
     final pct = pane.contextPct;
     return Padding(
       padding: const EdgeInsets.only(top: 2),
@@ -451,10 +455,14 @@ class PaneStatusLine extends StatelessWidget {
           // 하네스 로고 — 데스크톱 상태줄의 모델 표식과 같은 파랑(2026-09-08 지시
           // 「상태줄에 로고 뜨는 거도」). 회색으로 작게 두니 안 보였다.
           if (pane.harness == 'claude' || pane.harness == 'codex') ...[
+            // 256px 원본을 13px 로 그냥 줄이면 가는 획이 뭉개져 깨진 점으로 보였다
+            // (2026-09-08 지적) — 작게 미리 풀고 밉맵으로 줄인다.
             Image.asset(
               'assets/icons/${pane.harness}.png',
-              width: 13,
-              height: 13,
+              width: 14,
+              height: 14,
+              cacheWidth: 56,
+              filterQuality: FilterQuality.medium,
               color: statusModelColor,
               errorBuilder: (_, _, _) => const SizedBox.shrink(),
             ),

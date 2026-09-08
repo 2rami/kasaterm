@@ -30,4 +30,17 @@ void main() {
     expect(p('아리스', '폰 미니맵 화면').subtitle, '');
     expect(p('', 'zsh').subtitle, 'kasaterm');
   });
+
+  test('목록 상태줄은 모델과 effort 만', () {
+    final p = Pane.fromJson({
+      'id': '%1',
+      'name': '아리스',
+      'model_label': 'Fable 5.1 1M',
+      'branch': 'main',
+      'context_pct': 40,
+      'effort_label': 'xhigh',
+    });
+    expect(p.statusParts, ['Fable 5.1 1M', 'main', '40%', 'xhigh']);
+    expect(p.briefStatusParts, ['Fable 5.1 1M', 'xhigh']);
+  });
 }

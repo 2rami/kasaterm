@@ -83,6 +83,15 @@ class Pane {
     if ((effortLabel ?? effort ?? '').isNotEmpty) (effortLabel ?? effort)!,
   ];
 
+  /// 목록 한 줄용 — 모델과 effort 만.
+  List<String> get briefStatusParts => [
+    if ((modelLabel ?? '').isNotEmpty)
+      modelLabel!
+    else if ((model ?? '').isNotEmpty)
+      model!,
+    if ((effortLabel ?? effort ?? '').isNotEmpty) (effortLabel ?? effort)!,
+  ];
+
   /// 사람 손이 필요한가 — 답·승인·질문 어느 쪽이든.
   bool get isWaiting => status == 'waiting' || status == 'blocked';
   bool get isIdle => status == 'idle';
