@@ -65,6 +65,7 @@ pub fn read(path: &std::path::Path) -> (Mood, String, String) {
 
 /// 급하지 않은 말이 떠 있는 시간. 계속 띄워 두면 바탕화면에 글자 판을 얹어 둔 꼴이 되고,
 /// 사람은 그 판을 읽지 않게 된다 — 늘 있는 것은 안 보인다.
+#[cfg(test)]
 pub const SAY_LINGER: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// 말이 뜬 지 그만큼 지났을 때 말풍선의 진하기. 0 이면 접힌 것이다.
@@ -72,17 +73,13 @@ pub const SAY_LINGER: std::time::Duration = std::time::Duration::from_secs(12);
 /// 사람 손이 필요한 말은 안 접는다 — 12초 뒤 사라지면 자리를 비운 사이의 승인 요청을
 /// 통째로 놓친다. 나머지는 끝에서 흐려진다: 툭 사라지면 눈이 그 변화를 놀람으로 읽어
 /// 하던 일에서 시선을 뺏긴다.
-pub fn say_alpha(since: std::time::Duration, urgent: bool) -> f32 {
+pub fn say_alpha(since: std::time::Duration, urgent: bool, linger_seconds: u32) -> f32 {
     if urgent {
         return 1.0;
     }
     const FADE: f32 = 1.5;
-    ((SAY_LINGER.as_secs_f32() - since.as_secs_f32()) / FADE).clamp(0.0, 1.0)
+    ((linger_seconds as f32 - since.as_secs_f32()) / FADE).clamp(0.0, 1.0)
 }
-
-/// 오래 조용하면 잠든다. 8분은 대화 탭이 「먼저 말 걸기」에 쓰는 것과 같은 기준이라
-/// 화면 두 곳이 서로 다른 시각에 잠들지 않는다.
-pub const SLEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(8 * 60);
 
 #[cfg(test)]
 mod tests {
@@ -108,16 +105,18 @@ mod tests {
     #[test]
     fn an_urgent_line_never_fades() {
         let long = SAY_LINGER * 100;
-        assert_eq!(say_alpha(long, true), 1.0);
+        assert_eq!(say_alpha(long, true, 12), 1.0);
     }
 
     #[test]
     fn an_ordinary_line_fades_out_and_then_is_gone() {
         use std::time::Duration;
-        assert_eq!(say_alpha(Duration::ZERO, false), 1.0);
-        let mid = say_alpha(SAY_LINGER - Duration::from_millis(750), false);
+        assert_eq!(say_alpha(Duration::ZERO, false, 12), 1.0);
+        let mid = say_alpha(SAY_LINGER - Duration::from_millis(750), false, 12);
         assert!((0.0..1.0).contains(&mid), "끝 무렵엔 반쯤 흐려진다: {mid}");
-        assert_eq!(say_alpha(SAY_LINGER, false), 0.0);
+        assert_eq!(say_alpha(SAY_LINGER, false, 12), 0.0);
+        assert_eq!(say_alpha(Duration::from_secs(4), false, 3), 0.0);
+        assert_eq!(say_alpha(Duration::from_secs(4), false, 30), 1.0);
     }
 
     #[test]

@@ -1,0 +1,109 @@
+use kasa_pet_config::{PetPreferences, PreferenceChange};
+use muda::{CheckMenuItem, ContextMenu, Menu, MenuId, MenuItem, PredefinedMenuItem};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use winit::window::Window;
+
+#[derive(Clone, Copy)]
+pub enum Action {
+    Talk,
+    Touch,
+    Rest,
+    Next,
+    Quit,
+    Preference(PreferenceChange),
+}
+
+pub fn show(
+    win: &Window,
+    prefs: &PetPreferences,
+    resting: bool,
+    typing: bool,
+    can_touch: bool,
+    can_next: bool,
+    can_save: bool,
+) -> Option<Action> {
+    let menu = Menu::new();
+    let mut actions: Vec<(MenuId, Action)> = Vec::new();
+    for (title, enabled, action) in [
+        (
+            if typing {
+                "말 걸기 닫기"
+            } else {
+                "말 걸기"
+            },
+            true,
+            Action::Talk,
+        ),
+        ("쓰다듬기", can_touch, Action::Touch),
+        (if resting { "깨우기" } else { "쉬기" }, true, Action::Rest),
+        ("다음 캐릭터", can_next, Action::Next),
+    ] {
+        let item = MenuItem::new(title, enabled, None);
+        actions.push((item.id().clone(), action));
+        menu.append(&item).ok()?;
+    }
+    menu.append(&PredefinedMenuItem::separator()).ok()?;
+    for (title, checked, change) in [
+        (
+            "말풍선 표시",
+            prefs.bubbles,
+            PreferenceChange::Bubbles(!prefs.bubbles),
+        ),
+        (
+            "시선 따라가기",
+            prefs.follow_cursor,
+            PreferenceChange::FollowCursor(!prefs.follow_cursor),
+        ),
+        (
+            "자동 움직임",
+            prefs.animations,
+            PreferenceChange::Animations(!prefs.animations),
+        ),
+        (
+            "작업 상태에 반응",
+            prefs.activity_reactions,
+            PreferenceChange::ActivityReactions(!prefs.activity_reactions),
+        ),
+        (
+            "항상 위에 표시",
+            prefs.always_on_top,
+            PreferenceChange::AlwaysOnTop(!prefs.always_on_top),
+        ),
+        (
+            "위치 고정",
+            prefs.lock_position,
+            PreferenceChange::LockPosition(!prefs.lock_position),
+        ),
+    ] {
+        let item = CheckMenuItem::new(title, can_save, checked, None);
+        actions.push((item.id().clone(), Action::Preference(change)));
+        menu.append(&item).ok()?;
+    }
+    menu.append(&PredefinedMenuItem::separator()).ok()?;
+    let quit = MenuItem::new("펫 끄기", true, None);
+    actions.push((quit.id().clone(), Action::Quit));
+    menu.append(&quit).ok()?;
+    let handle = win.window_handle().ok()?;
+    // Native tracking keeps keyboard navigation and dismissal without activating
+    // the pet merely to show its menu. Only Talk requests the keyboard afterward.
+    unsafe {
+        match handle.as_raw() {
+            #[cfg(target_os = "macos")]
+            RawWindowHandle::AppKit(h) => {
+                menu.show_context_menu_for_nsview(h.ns_view.as_ptr().cast(), None);
+            }
+            #[cfg(target_os = "windows")]
+            RawWindowHandle::Win32(h) => {
+                menu.show_context_menu_for_hwnd(h.hwnd.get(), None);
+            }
+            _ => return None,
+        }
+    }
+    let mut selected = None;
+    while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
+        if let Some((_, action)) = actions.iter().find(|(id, _)| *id == event.id) {
+            selected = Some(*action);
+        }
+    }
+    selected
+}

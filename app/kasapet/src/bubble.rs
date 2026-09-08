@@ -12,6 +12,7 @@ use swash::zeno::Format;
 use swash::FontRef;
 
 /// 기본 글자 크기(pt). 설정에서 바꾸면 `pet/text_pt` 파일이 이 값을 대신한다.
+#[cfg(test)]
 pub const FONT_PT: f32 = 13.0;
 const LINE_SPACING: f32 = 1.4;
 /// 레티나 — 래스터는 이 배율, 반환은 논리.

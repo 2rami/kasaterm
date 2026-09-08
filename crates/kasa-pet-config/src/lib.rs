@@ -145,9 +145,11 @@ pub fn update(dir: &Path, change: PreferenceChange) -> io::Result<PetPreferences
 mod tests {
     use super::*;
     fn scratch() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
-            "pet-config-test-{}-{}",
+            "pet-config-test-{}-{}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

@@ -20,6 +20,7 @@ const MASK: u32 = 2048;
 
 mod board;
 mod bubble;
+mod menu;
 #[cfg(target_os = "macos")]
 mod native_cursor;
 
@@ -51,6 +52,10 @@ struct App {
     /// 캐릭터 폴더들이 모인 자리(`~/.config/kasaterm/pet`). 자리·크기 저장과 캐릭터
     /// 바꾸기가 여기를 본다. 모델을 env 로 직접 준 검증 실행에서는 없다.
     pet_dir: Option<std::path::PathBuf>,
+    preferences: kasa_pet_config::PetPreferences,
+    resting: bool,
+    manual_motion: bool,
+    touch_motion: Option<usize>,
     name: String,
     /// 두 번 누름 판정용. 왼쪽 한 번은 끌기라, 바로 끌어 버리면 두 번째를 못 본다.
     last_click: Option<std::time::Instant>,
@@ -122,12 +127,12 @@ impl ApplicationHandler for App {
         let win = Arc::new(el.create_window(
             Window::default_attributes()
                 .with_title(&self.name)
-                .with_inner_size(winit::dpi::LogicalSize::new(self.w, self.h))
+                .with_inner_size(winit::dpi::LogicalSize::new(self.w * self.scale as f64, self.h * self.scale as f64))
                 .with_position(winit::dpi::LogicalPosition::new(self.x, self.y))
                 .with_decorations(false)
                 .with_transparent(true)
                 .with_resizable(false)
-                .with_window_level(winit::window::WindowLevel::AlwaysOnTop)
+                .with_window_level(if self.preferences.always_on_top { winit::window::WindowLevel::AlwaysOnTop } else { winit::window::WindowLevel::Normal })
                 .with_active(false)
         ).unwrap());
         #[cfg(target_os = "macos")]
@@ -285,7 +290,9 @@ impl ApplicationHandler for App {
                     return;
                 }
                 self.touch();
-                if let Some(w) = &self.win { let _ = w.drag_window(); }
+                if !self.preferences.lock_position {
+                    if let Some(w) = &self.win { let _ = w.drag_window(); }
+                }
             }
             WindowEvent::CursorMoved { position, .. } => { self.cursor = (position.x, position.y); }
             // 끌어 옮긴 자리는 그 자리에서 적어 둔다 — 종료를 기다리면 SIGTERM(하단바
@@ -315,12 +322,12 @@ impl ApplicationHandler for App {
                             self.w * self.scale as f64, self.h * self.scale as f64));
                     }
                     self.save_state();
+                    self.change_preference(kasa_pet_config::PreferenceChange::ScalePercent(
+                        Some((self.scale * 100.0).round() as u32)));
                 }
             }
-            // 오른쪽 단추 = 말 걸기. 끄기는 하단바 칩과 설정 「펫」 칸에 있으므로 이
-            // 자리를 그쪽에 내줬다 — 창에 대고 말할 길이 아예 없던 것이 더 아쉬웠다.
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
-                self.toggle_typing();
+                self.show_menu(el);
             }
             // 친 글자. 포커스를 받은 동안에만 온다(말 걸기를 열 때만 키 창이 된다).
             WindowEvent::KeyboardInput { event, .. } if self.typing.is_some() => {
@@ -379,6 +386,96 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    fn show_menu(&mut self, el: &ActiveEventLoop) {
+        self.poll_cursor();
+        let Some(win) = self.win.clone() else { return };
+        let can_next = self.pet_dir.as_ref().and_then(|d| std::fs::read_dir(d).ok())
+            .map(|rd| rd.flatten().filter(|e| model3_in(&e.path()).is_some()).take(2).count() > 1)
+            .unwrap_or(false);
+        if let Some(d) = &self.pet_dir { self.apply_preferences(kasa_pet_config::read(d)); }
+        let action = menu::show(&win, &self.preferences, self.resting || self.mood == board::Mood::Sleep,
+            self.typing.is_some(), self.touch_motion.is_some(), can_next, self.pet_dir.is_some());
+        // Menu tracking is synchronous; its mouse-up is not a double click on the pet.
+        self.last_click = None;
+        match action {
+            Some(menu::Action::Talk) => self.toggle_typing(),
+            Some(menu::Action::Touch) => self.touch(),
+            Some(menu::Action::Rest) => {
+                self.resting = !(self.resting || self.mood == board::Mood::Sleep);
+                self.manual_motion = false;
+                self.stirred = std::time::Instant::now();
+                self.apply_mood(if self.resting { board::Mood::Sleep } else { board::Mood::Idle });
+                self.stop_bounce();
+            }
+            Some(menu::Action::Next) => self.next_character(),
+            Some(menu::Action::Preference(change)) => self.change_preference(change),
+            Some(menu::Action::Quit) => { self.save_state(); set_hand_cursor(false); el.exit(); }
+            None => {}
+        }
+    }
+
+    fn change_preference(&mut self, change: kasa_pet_config::PreferenceChange) {
+        let Some(d) = &self.pet_dir else { return };
+        match kasa_pet_config::update(d, change) {
+            Ok(prefs) => self.apply_preferences(prefs),
+            Err(error) => eprintln!("pet preference could not be saved: {error}"),
+        }
+    }
+
+    fn apply_preferences(&mut self, prefs: kasa_pet_config::PetPreferences) {
+        let previous = std::mem::replace(&mut self.preferences, prefs);
+        if self.preferences.always_on_top != previous.always_on_top {
+            if let Some(w) = &self.win {
+                w.set_window_level(if self.preferences.always_on_top {
+                    winit::window::WindowLevel::AlwaysOnTop
+                } else { winit::window::WindowLevel::Normal });
+            }
+        }
+        if let Some(percent) = self.preferences.scale_percent {
+            let scale = percent as f32 / 100.0;
+            if (scale - self.scale).abs() > 0.001 {
+                self.scale = scale;
+                if let Some(w) = &self.win {
+                    let _ = w.request_inner_size(winit::dpi::LogicalSize::new(
+                        self.w * scale as f64, self.h * scale as f64));
+                }
+                self.save_state();
+            }
+        }
+        if self.preferences.text_pt as f32 != self.text_pt {
+            self.text_pt = self.preferences.text_pt as f32;
+            self.rebuild_bubble_text();
+            self.rebuild_typed();
+        }
+        if !self.preferences.follow_cursor { self.look_now = (0.0, 0.0); }
+        if !self.preferences.animations || !self.preferences.activity_reactions || self.preferences.lock_position {
+            self.stop_bounce();
+        }
+        if self.preferences.activity_reactions != previous.activity_reactions {
+            self.board_seen = None;
+            if !self.preferences.activity_reactions && !self.resting {
+                self.apply_mood(board::Mood::Idle);
+            }
+            if !self.preferences.activity_reactions {
+                self.say.clear();
+                self.urgent = false;
+                self.rebuild_bubble_text();
+            }
+        }
+        if self.preferences.sleep_minutes == 0 && !self.resting && self.mood == board::Mood::Sleep {
+            self.apply_mood(board::Mood::Idle);
+        }
+    }
+
+    fn stop_bounce(&mut self) {
+        if let Some((_, base)) = self.bounce.take() {
+            self.y = base;
+            if let Some(w) = &self.win {
+                w.set_outer_position(winit::dpi::LogicalPosition::new(self.x, base));
+            }
+        }
+    }
+
     /// 화면 전체 기준 커서 — 창 밖에 있어도 안다. 창 중심을 원점으로 -1..1 로 준다.
     #[cfg(target_os = "macos")]
     fn poll_cursor(&mut self) {
@@ -564,24 +661,15 @@ impl App {
         }
         self.board_polled = std::time::Instant::now();
         let Some(d) = self.pet_dir.clone() else { return };
-        // 글자 크기는 설정 화면이 파일 한 줄로 적어 둔다 — 판과 같은 틱에 본다.
-        let pt = std::fs::read_to_string(d.join("text_pt"))
-            .ok()
-            .and_then(|t| t.trim().parse::<f32>().ok())
-            .map(|v| v.clamp(8.0, 40.0))
-            .unwrap_or(bubble::FONT_PT);
-        if (pt - self.text_pt).abs() > 0.01 {
-            self.text_pt = pt;
-            self.rebuild_bubble_text();
+        self.apply_preferences(kasa_pet_config::read(&d));
+        if self.preferences.sleep_minutes > 0 && self.mood == board::Mood::Idle
+            && self.stirred.elapsed().as_secs() >= self.preferences.sleep_minutes as u64 * 60 {
+            self.apply_mood(board::Mood::Sleep);
         }
+        if !self.preferences.activity_reactions { return; }
         let f = d.join("board.json");
         let m = std::fs::metadata(&f).and_then(|m| m.modified()).ok();
         if m == self.board_seen {
-            // 오래 조용하면 잠든다. 판이 안 바뀌는 동안에만 세므로, 뭔가 벌어지면
-            // 아래에서 stirred 가 갱신돼 잠이 풀린다.
-            if self.mood == board::Mood::Idle && self.stirred.elapsed() > board::SLEEP_AFTER {
-                self.apply_mood(board::Mood::Sleep);
-            }
             return;
         }
         self.board_seen = m;
@@ -596,11 +684,11 @@ impl App {
         // 사람 손이 필요한 말은 안 접는다 — 12초 뒤 사라지면 자리를 비운 사이의 승인
         // 요청을 통째로 놓친다. 그리고 그런 말이 새로 뜰 땐 한 번 튄다.
         let urgent = matches!(mood, board::Mood::Wait | board::Mood::Error);
-        if urgent && !self.urgent {
+        if urgent && !self.urgent && !self.resting && self.preferences.animations {
             self.start_bounce();
         }
         self.urgent = urgent;
-        if mood != self.mood {
+        if mood != self.mood && !self.resting && !self.manual_motion {
             self.apply_mood(mood);
         }
     }
@@ -608,6 +696,7 @@ impl App {
     /// 상태가 바뀌면 몸도 바뀐다 — 모션 하나와 표정 하나.
     fn apply_mood(&mut self, mood: board::Mood) {
         self.mood = mood;
+        if mood == board::Mood::Sleep || !self.preferences.animations { return; }
         // 공식 샘플의 모션 무리는 `Idle`·`TapBody` 뿐이라 이름으로는 못 고른다.
         // 상태마다 자리를 하나씩 주고, 모델이 가진 수로 나눠 쓴다.
         if !self.motion_files.is_empty() {
@@ -625,28 +714,25 @@ impl App {
         }
     }
 
-    /// 쓰다듬으면 반응한다 — 마지막 모션 자리를 이 몫으로 둔다. `TapBody` 무리가
-    /// 목록 뒤쪽에 오므로 대개 그 안에서 걸린다.
+    /// 이름이 명시된 Touch/TapBody 모션만 쓰므로 임의 동작을 쓰다듬기로 오인하지 않는다.
     fn touch(&mut self) {
+        self.resting = false;
+        if self.mood == board::Mood::Sleep { self.apply_mood(board::Mood::Idle); }
         self.stirred = std::time::Instant::now();
         // 접힌 말을 다시 띄운다 — 「방금 뭐라고 했더라」를 누르면 볼 수 있어야, 말이
         // 잠깐 뒤 사라지는 것이 손해가 아니게 된다.
         self.said_at = std::time::Instant::now();
-        if self.motion_files.is_empty() {
-            return;
-        }
-        // 마지막 자리를 쓰다듬기 몫으로 둔다 — `TapBody` 무리가 목록 뒤쪽에 오므로
-        // 대개 그 안에서 걸린다. 한 번만 돌고 끝나면 원래 상태로 돌아간다.
-        let i = self.motion_files.len() - 1;
+        let Some(i) = self.touch_motion else { return };
+        self.manual_motion = true;
         self.play_motion(i, false);
     }
 
     /// 말풍선이 지금 얼마나 진한가. 0 이면 없는 것이다.
     fn say_alpha(&self) -> f32 {
-        if self.say.is_empty() {
+        if self.say.is_empty() || !self.preferences.bubbles {
             return 0.0;
         }
-        board::say_alpha(self.said_at.elapsed(), self.urgent)
+        board::say_alpha(self.said_at.elapsed(), self.urgent, self.preferences.say_seconds)
     }
 
     /// 말풍선이 지금 떠 있어야 하나.
@@ -679,7 +765,7 @@ impl App {
     /// 급한 소식이 오면 한 번 튄다. 말풍선만으로는 다른 창을 보는 동안 못 알아채지만
     /// 움직임은 곁눈으로도 잡힌다.
     fn start_bounce(&mut self) {
-        if self.bounce.is_none() {
+        if self.bounce.is_none() && !self.preferences.lock_position {
             self.bounce = Some((std::time::Instant::now(), self.y));
         }
     }
@@ -735,24 +821,28 @@ impl App {
         self.tick_bounce();
         // 한 판이 끝나면 다음 모션으로 넘어간다. 한 가지만 물려 두면 몇 초 만에
         // 「가만히 있는 그림」으로 보인다(2026-09-07 지적 「모션 계속 똑같애」).
-        if self.motion.as_ref().is_some_and(|m| !m.is_looping() && m.is_finished())
+        let moving = !self.resting && self.mood != board::Mood::Sleep
+            && (self.preferences.animations || self.manual_motion);
+        if moving && self.motion.as_ref().is_some_and(|m| !m.is_looping() && m.is_finished())
             && !self.motion_files.is_empty()
         {
             let next = (self.motion_idx + 1) % self.motion_files.len();
-            self.play_motion(next, false);
+            self.manual_motion = false;
+            if self.preferences.animations { self.play_motion(next, false); }
         }
         let dt = self.last.elapsed().as_secs_f32().min(0.1);
         self.last = std::time::Instant::now();
+        let motion_dt = if moving { dt } else { 0.0 };
 
         // 모션 → 파라미터 → 메시
         {
             let rt = self.model.runtime_mut();
             rt.reset_parameters();
-            if let Some(m) = &mut self.motion { m.tick(dt); m.apply(rt); }
-            self.exprs.tick(dt);
+            if let Some(m) = &mut self.motion { m.tick(motion_dt); m.apply(rt); }
+            self.exprs.tick(motion_dt);
             self.exprs.apply(rt);
             // Cubism 런타임이 자동으로 하는 것 — 모션 파일에는 없다.
-            self.t += dt;
+            self.t += motion_dt;
             let t = self.t;
             // 모션이 쓰는 파라미터는 건드리지 않는다. 덮어쓰면 연출과 싸워서
             // 고개가 튀고 눈이 깜빡이다 만다 — 모션 하나가 8개를 쥐고 있다(실측).
@@ -773,7 +863,9 @@ impl App {
             put(rt, "ParamBreath", (t * 1.6).sin() * 0.5 + 0.5);
             // 마우스를 쳐다본다. 창이 포커스를 안 받으므로(with_active(false)) 창 안
             // 이벤트로는 커서를 못 본다 — OS 에 전역 위치를 직접 묻는다.
-            let (mx, my) = self.look;
+            let (mx, my) = if self.preferences.follow_cursor && !self.resting && self.mood != board::Mood::Sleep {
+                self.look
+            } else { (0.0, 0.0) };
             let ease = 1.0 - (-dt * 6.0).exp();
             self.look_now.0 += (mx - self.look_now.0) * ease;
             self.look_now.1 += (my - self.look_now.1) * ease;
@@ -788,7 +880,7 @@ impl App {
             let blink = { let c = t % 4.0; if c < 0.06 { 1.0 - c / 0.06 } else if c < 0.12 { (c - 0.06) / 0.06 } else { 1.0 } };
             put(rt, "ParamEyeLOpen", blink);
             put(rt, "ParamEyeROpen", blink);
-            rt.apply_physics(dt);
+            if moving { rt.apply_physics(motion_dt); }
             rt.update_meshes();
         }
         let Some(g) = &self.gfx else { return };
@@ -1009,6 +1101,8 @@ impl App {
         // 손이 움직이는 속도보다 훨씬 잦다.
         if self.frames % 4 == 0 {
             let over = self.cursor_on_body(g, &frame.texture) || self.cursor_on_bubble();
+            #[cfg(target_os = "macos")]
+            let over = over && self.win.as_ref().is_some_and(|w| native_cursor::is_frontmost_at_cursor(w));
             if over != self.on_body {
                 self.on_body = over;
                 if let Some(w) = &self.win {
@@ -1128,6 +1222,15 @@ fn motion_files(model3: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+fn touch_motion_index(model3: &std::path::Path, files: &[std::path::PathBuf]) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(model3).ok()?).ok()?;
+    let groups = v.get("FileReferences")?.get("Motions")?.as_object()?;
+    let file = groups.iter().find(|(name, _)| name.eq_ignore_ascii_case("TapBody") || name.eq_ignore_ascii_case("Touch"))?
+        .1.as_array()?.first()?.get("File")?.as_str()?;
+    let full = model3.parent()?.join(file);
+    files.iter().position(|p| p == &full)
 }
 
 fn expression_files(model3: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -1295,6 +1398,7 @@ fn main() {
         .map(mocari::motion::MotionPlayer::new);
     let model3 = std::path::Path::new(&path).to_path_buf();
     let motion_files = motion_files(&model3);
+    let touch_motion = touch_motion_index(&model3, &motion_files);
     let expr_files = expression_files(&model3);
     eprintln!("모션 파일: {file}");
     eprintln!("모션 로드: {}", if motion.is_some() { "성공" } else { "실패" });
@@ -1310,6 +1414,10 @@ fn main() {
             scale = v.get("scale").and_then(|n| n.as_f64()).unwrap_or(scale as f64) as f32;
         }
     }
+    let preferences = pet_dir.as_ref().map(|d| kasa_pet_config::read(d)).unwrap_or_default();
+    if let Some(percent) = preferences.scale_percent { scale = percent as f32 / 100.0; }
+    scale = scale.clamp(0.4, 3.0);
+    let text_pt = preferences.text_pt as f32;
 
     let el = EventLoop::new().unwrap();
     el.set_control_flow(ControlFlow::Poll);
@@ -1323,9 +1431,10 @@ fn main() {
     let mut app = App { win: None, gfx: None,
         x, y, w: 420.0, h: 600.0 + HEADROOM, scale,
         alpha: wgpu::CompositeAlphaMode::Auto, cursor: (0.0, 0.0), pet_dir, name, last_click: None, on_body: false, local: None,
+        preferences, resting: false, manual_motion: false, touch_motion,
         mood: board::Mood::Idle, say: String::new(), board_seen: None,
         board_polled: std::time::Instant::now(), stirred: std::time::Instant::now(),
-        bubble_text: None, text_pt: bubble::FONT_PT, subject: String::new(),
+        bubble_text: None, text_pt, subject: String::new(),
         said_at: std::time::Instant::now(), urgent: false, bounce: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
         motion_files, motion_idx: 0, expr_files, exprs: mocari::expression::ExpressionManager::new(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
