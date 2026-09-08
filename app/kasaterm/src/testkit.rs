@@ -1938,7 +1938,7 @@ impl App {
                 .as_ref()
                 .map(|w| w.inner_size().height as f32 / app.effective_scale())
                 .unwrap_or(800.0);
-            let (_, _, _, rows, mini) = app.sidebar_layout(win_h);
+            let (_, _, _, rows, mini, _) = app.sidebar_layout(win_h);
             (mini.len(), rows.len())
         };
         let wi = self.active_window;
@@ -7700,5 +7700,158 @@ impl App {
             }
             None => eprintln!("[autoportpop] FAIL — 포트 행 히트렉트가 없다"),
         }
+    }
+}
+
+// ── KASATERM_AUTOUNDOCK ── 터미널 pane 별도창(auxterm.rs) 하네스.
+//
+// `_MS` 뒤에 활성 pane 을 undock 하고(`_TAB=<idx>` 면 그 탭만), +1900ms 에 그 창을
+// `_CAP`(기본 `$TMPDIR/undock-window.png`)로 캡처하고, `_DOCK_MS` 뒤에 되돌린다.
+// 상태는 전부 함수 지역·정적 슬롯 — `struct App` 을 늘리지 않는다(병렬 작업 규칙).
+
+static AUTO_UNDOCK_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `KASATERM_AUTOUNDOCK_DOCK_MS` 예약 슬롯 — (발사 시각, pane).
+static AUTO_UNDOCK_DOCK: std::sync::OnceLock<std::sync::Mutex<Option<(Instant, String)>>> =
+    std::sync::OnceLock::new();
+
+fn auto_undock_dock_slot() -> &'static std::sync::Mutex<Option<(Instant, String)>> {
+    AUTO_UNDOCK_DOCK.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 캡처가 걸린 창이 그 PNG 를 뽑을 때까지 펌프를 붙들어 두는 기한.
+static AUTO_UNDOCK_CAP_UNTIL: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// 하네스가 아직 할 일이 남았나 — `about_to_wait` 펌프 게이팅용. undock 전,
+/// 캡처 기한 전, dock 예약이 남은 동안 true.
+pub(crate) fn autoundock_pending() -> bool {
+    static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ARMED.get_or_init(|| std::env::var("KASATERM_AUTOUNDOCK_MS").is_ok()) {
+        return false;
+    }
+    if !AUTO_UNDOCK_FIRED.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    let cap_live = AUTO_UNDOCK_CAP_UNTIL
+        .lock()
+        .unwrap()
+        .is_some_and(|until| Instant::now() < until);
+    cap_live || auto_undock_dock_slot().lock().unwrap().is_some()
+}
+
+impl App {
+    pub(crate) fn run_pending_autoundock(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::Ordering;
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOUNDOCK_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if AUTO_UNDOCK_FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        AUTO_UNDOCK_FIRED.store(true, Ordering::Relaxed);
+        let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else {
+            eprintln!("[autoundock] FAIL — 활성 pane 이 없다");
+            return;
+        };
+        let before = self.aux.terminals.len();
+        // `_TAB=<idx>` 면 그 탭만 꺼낸다 — 「셸+셸 두 탭짜리 pane 에서 둘째 탭만
+        // 나가나」는 이 길로만 보인다. 없으면 진입점 그대로(활성 탭 종류로 분기).
+        match std::env::var("KASATERM_AUTOUNDOCK_TAB")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            Some(tab) => {
+                eprintln!("[autoundock] undock tab {tab} of {pid}");
+                self.undock_pane_tab(&pid, tab, event_loop, None);
+            }
+            None => {
+                eprintln!("[autoundock] undock pane {pid}");
+                self.undock_active_tab_of(&pid, event_loop);
+            }
+        }
+        if self.aux.terminals.len() <= before {
+            eprintln!("[autoundock] FAIL — 별도창이 안 생겼다(pty 없음·tmux·트리 밖?)");
+            return;
+        }
+        let idx = self.aux.terminals.len() - 1;
+        let undocked = self.aux.terminals[idx].pane_id.clone();
+        let cap = std::env::var("KASATERM_AUTOUNDOCK_CAP").unwrap_or_else(|_| {
+            std::env::temp_dir()
+                .join("undock-window.png")
+                .to_string_lossy()
+                .into_owned()
+        });
+        // 창이 자리를 잡고 PTY 가 새 크기로 리플로우한 뒤 찍는다 — 직후에 찍으면
+        // 스냅샷이 아직 갈아엎히는 중이라 「셀은 멀쩡한데 화면만 빈다」로 잘못 읽힌다.
+        let at = Instant::now() + std::time::Duration::from_millis(1900);
+        self.aux.terminals[idx].capture_at = Some((at, cap.clone()));
+        *AUTO_UNDOCK_CAP_UNTIL.lock().unwrap() = Some(at + std::time::Duration::from_millis(800));
+        eprintln!(
+            "[autoundock] pane={undocked} 별도창={} 트리leaf={:?} 캡처={cap}",
+            self.aux.terminals.len(),
+            self.pty_layout.as_ref().map(|t| t.leaves().len()).unwrap_or(0)
+        );
+        // `_DOCK_MS=<ms>` 면 그만큼 뒤에 되돌린다 — 창 수만 세면 「돌아왔다」와
+        // 「돌아왔는데 남이 됐다」가 똑같아 보이므로 되돌린 뒤 상태도 찍는다.
+        if let Some(ms) = std::env::var("KASATERM_AUTOUNDOCK_DOCK_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            *auto_undock_dock_slot().lock().unwrap() =
+                Some((Instant::now() + std::time::Duration::from_millis(ms), undocked));
+        }
+    }
+
+    pub(crate) fn run_pending_autoundock_dock(&mut self) {
+        let due = {
+            let mut slot = auto_undock_dock_slot().lock().unwrap();
+            match slot.as_ref() {
+                Some((at, pid)) if Instant::now() >= *at => {
+                    let pid = pid.clone();
+                    *slot = None;
+                    Some(pid)
+                }
+                _ => None,
+            }
+        };
+        let Some(pid) = due else { return };
+        let Some(idx) = self.aux_terminal_index(&pid) else {
+            eprintln!("[autoundock] FAIL — {pid} 별도창이 이미 없다");
+            return;
+        };
+        // 되돌리기 전에 배치도 「별도창」 띠가 이 pane 을 칸으로 냈는지 — 그림 판정
+        // 없이 숫자로 남긴다(사이드바가 접혀 있으면 0 이 정상).
+        {
+            let win_h = self
+                .window
+                .as_ref()
+                .map(|w| w.inner_size().height as f32 / self.effective_scale())
+                .unwrap_or(800.0);
+            let (_, _, _, _, _, strip) = self.sidebar_layout(win_h);
+            eprintln!(
+                "[autoundock] 배치도 별도창 칸={} (pane={:?}) 사이드바={}",
+                strip.len(),
+                strip.iter().map(|(_, p, _)| p.as_str()).collect::<Vec<_>>(),
+                self.sidebar_visible
+            );
+        }
+        self.dock_pane_terminal(idx);
+        let in_tree = self
+            .pty_layout
+            .as_ref()
+            .is_some_and(|t| t.leaves().iter().any(|l| *l == pid));
+        eprintln!(
+            "[autoundock] dock {pid} → 별도창={} PTY생존={} 트리복귀={}",
+            self.aux.terminals.len(),
+            self.pty.contains_key(&pid),
+            in_tree
+        );
+        eprintln!("[autoundock] 기대: 별도창=0·PTY생존=true·트리복귀=true");
     }
 }

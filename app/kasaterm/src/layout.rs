@@ -404,6 +404,14 @@ impl App {
                     wl.insert(i, l.to_tmux_layout(cols, rows));
                 }
             }
+            // 별도창으로 뗀 pane 은 트리 밖이지만 사용자 눈앞에 있다 — 떠나온 방으로
+            // 실어 폰 목록·board 화면밖 판정·SendMessage 가드가 닫힌 pane 으로 안 본다.
+            let mut undocked = std::collections::HashSet::new();
+            for (pane, home) in self.undocked_panes() {
+                pw.insert(pane.clone(), home);
+                undocked.insert(pane);
+            }
+            ws.undocked = undocked;
             ws.window_layouts = wl;
             let (gw, gh) = (cols as f32 * self.cell.w, rows as f32 * self.cell.h);
             ws.grid_aspect = (gw > 0.0 && gh > 0.0).then(|| gw / gh);
@@ -1377,7 +1385,11 @@ impl App {
                     // 보조 탭은 애초에 leaf 가 아니다 — 화면을 든 것은 그 탭이 사는
                     // 바깥 pane 이라 트리에 없는 게 정상이다.
                     let is_tab = ws.pid_to_pane.get(*id).is_some_and(|outer| outer != *id);
-                    !is_tab && !self.leaf_lingers_anywhere(id) && self.stashed_record(id).is_none()
+                    // 별도창으로 뗀 pane 도 트리엔 없지만 사용자 눈앞에 있다.
+                    !is_tab
+                        && !self.leaf_lingers_anywhere(id)
+                        && self.stashed_record(id).is_none()
+                        && self.aux_terminal_index(id).is_none()
                 })
                 .cloned()
                 .collect()

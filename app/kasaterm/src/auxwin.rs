@@ -48,11 +48,11 @@ struct ScrollbarGeometry {
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
-struct FrameRecord {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
+pub(crate) struct FrameRecord {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
@@ -116,6 +116,14 @@ enum PendingAuxOpen {
         active: bool,
     },
     Restore(RestoreRecord),
+    /// 세션 복원이 되살린 별도창 터미널 pane — 트리에 안 꽂고 창만 기다린다.
+    /// `restore_session_state` 는 event loop 없이 돌아 창을 못 만들기 때문에
+    /// 문서와 같은 길로 다음 틱의 `flush_aux_opens` 에서 연다.
+    Terminal {
+        pane_id: String,
+        home_window: usize,
+        frame: Option<FrameRecord>,
+    },
 }
 
 /// All detached-document state lives behind this one App field. The launch
@@ -123,6 +131,11 @@ enum PendingAuxOpen {
 /// lose the file merely because winit has not supplied an ActiveEventLoop yet.
 pub(crate) struct AuxWindows {
     pub(crate) windows: Vec<AuxWindow>,
+    /// 별도 OS 창으로 뗀 터미널 pane(auxterm.rs). 문서 창과 달리 내용을 안 들고
+    /// `pane_id` 만 든다 — PTY 와 화면은 App.pty / App.ws 에 그대로 산다.
+    pub(crate) terminals: Vec<crate::auxterm::AuxTerminal>,
+    /// 사이드바 배치도의 「별도창」 칸 명중 영역(방, pane, rect) — 렌더가 채운다.
+    pub(crate) undock_hits: Vec<(usize, String, (f32, f32, f32, f32))>,
     pending: Vec<PendingAuxOpen>,
     unopened: Vec<RestoreRecord>,
     saved: std::cell::RefCell<Option<SavedState>>,
@@ -147,6 +160,8 @@ impl AuxWindows {
             .unwrap_or_default();
         Self {
             windows: Vec::new(),
+            terminals: Vec::new(),
+            undock_hits: Vec::new(),
             pending,
             unopened: Vec::new(),
             saved: Default::default(),
@@ -1095,7 +1110,7 @@ fn make_editor(
     }
 }
 
-fn create_untabbed(
+pub(crate) fn create_untabbed(
     event_loop: &ActiveEventLoop,
     attrs: WindowAttributes,
 ) -> std::result::Result<Window, winit::error::OsError> {
@@ -1199,6 +1214,20 @@ impl App {
         }
     }
 
+    /// 세션 복원이 살린 별도창 pane 을 다음 틱에 열도록 줄 세운다.
+    pub(crate) fn queue_aux_terminal(
+        &mut self,
+        pane_id: String,
+        home_window: usize,
+        frame: Option<FrameRecord>,
+    ) {
+        self.aux.pending.push(PendingAuxOpen::Terminal {
+            pane_id,
+            home_window,
+            frame,
+        });
+    }
+
     pub(crate) fn flush_aux_opens(&mut self, event_loop: &ActiveEventLoop) {
         let pending = std::mem::take(&mut self.aux.pending);
         let had_pending = !pending.is_empty();
@@ -1280,6 +1309,11 @@ impl App {
                         Err(_) => self.aux.unopened.push(keep),
                     }
                 }
+                PendingAuxOpen::Terminal {
+                    pane_id,
+                    home_window,
+                    frame,
+                } => self.open_restored_aux_terminal(pane_id, home_window, frame, event_loop),
             }
         }
         if had_pending {
@@ -1489,6 +1523,13 @@ impl App {
         event: WindowEvent,
         event_loop: &ActiveEventLoop,
     ) -> bool {
+        if let WindowEvent::ModifiersChanged(modifiers) = &event {
+            self.modifiers = modifiers.state();
+        }
+        if let Some(term) = self.aux_terminal_window_index(id) {
+            self.aux_terminal_event(term, event, event_loop);
+            return true;
+        }
         let Some(index) = self
             .aux
             .windows
@@ -1497,9 +1538,6 @@ impl App {
         else {
             return false;
         };
-        if let WindowEvent::ModifiersChanged(modifiers) = &event {
-            self.modifiers = modifiers.state();
-        }
         match event {
             WindowEvent::CloseRequested => self.close_aux_editor(index, event_loop),
             WindowEvent::Moved(_) => self.save_aux_windows_state(),
@@ -1614,6 +1652,11 @@ impl App {
             {
                 aux.window.request_redraw();
             }
+        }
+        // 터미널 별도창은 PTY 에코가 곧 바뀐 것이라 포커스와 무관하게 다시 그린다
+        // (winit 이 같은 프레임의 요청을 합친다).
+        for term in &self.aux.terminals {
+            term.window.request_redraw();
         }
     }
 
@@ -1835,7 +1878,7 @@ impl App {
         }
         records.extend(self.aux.pending.iter().filter_map(|pending| match pending {
             PendingAuxOpen::Restore(record) => Some(record.clone()),
-            PendingAuxOpen::File { .. } => None,
+            PendingAuxOpen::File { .. } | PendingAuxOpen::Terminal { .. } => None,
         }));
         records.extend(self.aux.unopened.iter().cloned());
         let mut seen = std::collections::HashSet::new();
@@ -1873,7 +1916,7 @@ impl App {
     }
 
     pub(crate) fn aux_owns_window(&self, id: WindowId) -> bool {
-        self.aux_index(id).is_some()
+        self.aux_index(id).is_some() || self.aux_terminal_window_index(id).is_some()
     }
 
     pub(crate) fn focus_aux_window(&self, id: WindowId) {

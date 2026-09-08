@@ -3605,6 +3605,10 @@ impl App {
         for c in self.closed_panes.iter_mut() {
             c.window = remap(c.window);
         }
+        // 별도창 터미널도 떠나온 방을 인덱스로 든다 — dock 이 돌아갈 곳.
+        for t in self.aux.terminals.iter_mut() {
+            t.home_window = remap(t.home_window);
+        }
         self.pty_layout = self.windows[self.active_window].take();
         // 라벨은 인덱스 병렬 배열이라 캐시를 버려 다음 paint 에 다시 뽑게 한다.
         self.window_labels_at = None;
@@ -3982,6 +3986,14 @@ impl App {
             ws.outer_for_pty(requested)
                 .unwrap_or_else(|| requested.to_string())
         };
+        // 별도창으로 뗀 pane 은 어느 트리에도 없다 — 그 OS 창을 앞으로 보내는 것이
+        // 「거기로 가기」다(알림 클릭·소켓 focus 가 조용히 실패하지 않게).
+        if let Some(ai) = self.aux_terminal_index(&outer) {
+            let w = &self.aux.terminals[ai].window;
+            w.set_minimized(false);
+            w.focus_window();
+            return true;
+        }
         let Some(wi) = self.window_of_pane(&outer) else {
             return false;
         };
@@ -4088,6 +4100,12 @@ impl App {
         for closed in &mut self.closed_panes {
             closed.window = remap(closed.window);
         }
+        // 별도창 터미널은 방이 닫혀도 살아남는다(leaf 가 아니라 안 죽는다) — 집이
+        // 없어졌으면 활성 방을 새 집으로 삼는다.
+        for t in self.aux.terminals.iter_mut() {
+            t.home_window = crate::internal_room::remap_after_removal(t.home_window, idx)
+                .unwrap_or(self.active_window);
+        }
         // 픽셀 스크롤이라 인덱스를 당길 것이 없다 — 닫는 동안은 `close_freeze` 가
         // 그 위치를 붙잡고, 범위 밖 값은 `sidebar_layout` 이 클램프한다.
         // 여기서 활성 방을 보이게 끌어오지 않는다 — 방을 하나 닫을 때마다 목록이
@@ -4132,9 +4150,12 @@ impl App {
                 } else {
                     self.windows.get(i).and_then(|o| o.as_ref())
                 };
-                layout.map_or(Vec::new(), |l| {
+                let mut v: Vec<String> = layout.map_or(Vec::new(), |l| {
                     l.leaves().iter().map(|s| s.to_string()).collect()
-                })
+                });
+                // 별도창으로 뗀 pane 도 이 방 식구다 — 빠지면 방 이름이 흔들린다.
+                v.extend(self.room_undocked(i));
+                v
             };
             let repr = leaves.first().cloned();
             // 방을 대표하는 cwd — 첫 leaf 가 아니라 **학생이 앉은 곳의 최빈값**이다.
@@ -5167,21 +5188,23 @@ impl App {
             l.leaves().iter().map(|s| s.to_string()).collect()
         })
     }
-    /// 방 카드 한 장의 치수 — `(body_h, list_h, hidden)`. 카드 전체 높이는
+    /// 방 카드 한 장의 치수 — `(body_h, list_h, hidden, undocked)`. 카드 전체 높이는
     /// `SIDEBAR_TAB_H + list_h` 이고, 접힌 방은 `list_h == 0` 이다.
     ///
     /// 배치 루프와 스크롤 한계가 **같은 값**을 봐야 한다. 갈라지면 스크롤은 되는데
     /// 목록 끝이 영영 안 나오는 종류로 어긋난다 — 실제로 그랬다(아래 참조).
-    fn sidebar_card_metrics(&self, i: usize) -> (f32, f32, Vec<String>) {
+    fn sidebar_card_metrics(&self, i: usize) -> (f32, f32, Vec<String>, Vec<String>) {
         // 설정·보드 카드는 펴지 않는다. 배치도는 「어느 학생이 어디 있나」를 그리는
         // 자리인데 내부 방의 leaf 는 화면 표식 하나뿐이라, 펴면 아이콘 한 칸짜리
         // 빈 지도가 남는다(2026-09-07 지적 「설정창 방미니맵 그건 필요없으니까」).
         // 배지가 없어 손으로는 못 펴지만, 방을 닫거나 옮기며 인덱스가 당겨지면
         // 옆 방의 펼침 상태를 물려받아 저절로 펴졌다.
         if self.internal_room_kind_at(i).is_some() {
-            return (0.0, 0.0, Vec::new());
+            return (0.0, 0.0, Vec::new(), Vec::new());
         }
         let leaves = self.window_leaves(i);
+        // 별도 OS 창으로 뗀 pane 도 트리에 없다 — 배치도 밑 띠에 칸으로 둔다.
+        let undocked = self.room_undocked(i);
         // 숨긴 pane 은 트리에 없어 배치도에 칸이 없다 — 지도 아래 꼬리 줄로 둔다.
         // 어디에도 안 보이면 되살릴 길이 없고, 트리에서 빠졌을 뿐 PTY 는 돈다.
         let hidden: Vec<String> = self
@@ -5194,7 +5217,7 @@ impl App {
         // 그 한 줄이 **누가 있고 무슨 상태인지의 전부**라 접어 두면 학생 하나짜리
         // 방에선 그 학생을 볼 길이 통째로 사라졌다(2026-08 지적, 두 번).
         // 펴는 중이면 0..1 사이 — 카드가 그만큼만 자란다.
-        let t = if leaves.is_empty() {
+        let t = if leaves.is_empty() && undocked.is_empty() {
             0.0
         } else {
             self.expand_progress(i)
@@ -5207,8 +5230,9 @@ impl App {
         } else {
             (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0)
         };
-        let full_h = body_h + hidden.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
-        (body_h, (full_h * t).round(), hidden)
+        let strip_h = if undocked.is_empty() { 0.0 } else { UNDOCK_STRIP_H };
+        let full_h = body_h + strip_h + hidden.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
+        (body_h, (full_h * t).round(), hidden, undocked)
     }
 
     /// 방 카드 전체 높이 목록(갭 제외). 스크롤 한계·막대 위치·굴림 한 칸이
@@ -5281,6 +5305,9 @@ impl App {
         // 배치도 칸 — 목록 행과 **같은 모양**이라 히트 벡터에 그대로 합칠 수 있다.
         // 그러면 칸 클릭·드래그·우클릭이 행과 똑같이 동작한다(공짜로 따라온다).
         Vec<(usize, String, (f32, f32, f32, f32))>,
+        // 「별도창」 띠 칸 — 모양은 같지만 히트 벡터엔 **안 합친다**. 행 경로는
+        // 드래그·focus_pane 을 켜는데 트리 밖 pane 엔 둘 다 틀린 동작이다.
+        Vec<(usize, String, (f32, f32, f32, f32))>,
     ) {
         let n = self.windows.len();
         if self.tabs_on_top {
@@ -5323,7 +5350,7 @@ impl App {
             }
             let plus = (x0 + tabs.len() as f32 * (tab_w + gap), y, plus_w, tab_h);
             // 가로 탭엔 아래로 펼 자리가 없다 — pane 목록도 배치도도 세로 전용.
-            return (tabs, closes, plus, Vec::new(), Vec::new());
+            return (tabs, closes, plus, Vec::new(), Vec::new(), Vec::new());
         }
         let tab_x = SIDEBAR_TAB_INSET;
         let tab_w = (self.tab_strip_w() - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
@@ -5352,6 +5379,7 @@ impl App {
         let mut closes = Vec::new();
         let mut rows = Vec::new();
         let mut mini = Vec::new();
+        let mut undock = Vec::new();
         // 펼친 방은 카드가 pane 수만큼 길어진다 — 고정 stride 를 쓰던 자리를 누적
         // y 로 바꾼 이유가 이것이다. 넘치는 방은 그리지 않는다(사이드바는 클립을
         // 안 세워서 반쪽 카드가 트레이를 침범한다).
@@ -5365,7 +5393,7 @@ impl App {
             // 사본이었다(2026-08-24 지시: "목록표시는 info에서 보면되고").
             // 치수는 `sidebar_card_metrics` 하나에서 나온다 — 스크롤 한계도 같은
             // 함수를 보므로 배치와 한계가 갈릴 수 없다.
-            let (body_h, list_h, hidden) = self.sidebar_card_metrics(i);
+            let (body_h, list_h, hidden, undocked) = self.sidebar_card_metrics(i);
             let h = SIDEBAR_TAB_H + list_h;
             // 뷰포트에 조금도 안 걸치면 rect 를 아예 안 낸다. **시저는 픽셀만 자르지
             // 클릭은 안 자르므로**, 밖에 있는 카드를 등록하면 화면엔 없는 방이
@@ -5434,12 +5462,28 @@ impl App {
                         ));
                     }
                 }
+                // 별도창 띠 — 배치도와 숨김 꼬리 사이. 칸은 방 폭을 pane 수로 나눈다.
+                let strip_h = if undocked.is_empty() { 0.0 } else { UNDOCK_STRIP_H };
+                let sy = y + SIDEBAR_TAB_H + body_h;
+                if strip_h > 0.0 && sy + strip_h <= bottom {
+                    let cnt = undocked.len() as f32;
+                    let gap = 3.0;
+                    let cw = ((tab_w - 20.0 - gap * (cnt - 1.0)) / cnt).clamp(2.0, 40.0);
+                    for (k, id) in undocked.iter().enumerate() {
+                        undock.push((
+                            i,
+                            id.clone(),
+                            (tab_x + 10.0 + k as f32 * (cw + gap), sy + 2.0, cw, strip_h - 4.0),
+                        ));
+                    }
+                }
                 // 배치도 아래 꼬리에는 숨긴 pane 만 줄로 남는다 — 숨긴 것은 트리에
                 // 없어 칸이 없으므로 배치도로는 말할 방법이 아예 없다.
                 for (k, id) in hidden.iter().enumerate() {
                     let ry = y
                         + SIDEBAR_TAB_H
                         + body_h
+                        + strip_h
                         + SIDEBAR_ROW_PAD / 2.0
                         + k as f32 * SIDEBAR_ROW_H;
                     if ry + SIDEBAR_ROW_H > bottom {
@@ -5460,7 +5504,7 @@ impl App {
         let plus = self
             .sidebar_tray_rects(win_h)
             .map_or_else(|| (tab_x, y, tab_w, 28.0), |(_, p, ..)| p);
-        (tabs, closes, plus, rows, mini)
+        (tabs, closes, plus, rows, mini, undock)
     }
     pub(crate) fn start_pty(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before pty");
@@ -5578,6 +5622,9 @@ impl App {
             // active_layout; the rest sit in `windows[j]` (active slot None).
             let mut windows_json = Vec::new();
             let mut new_active = 0usize;
+            // 원래 방 인덱스 → 저장된 인덱스. 트리 없는 방·안쪽 방은 건너뛰어 번호가
+            // 밀리므로, 별도창의 `home_window` 는 이 맵으로 환산해 싣는다.
+            let mut persisted_idx: Vec<Option<usize>> = vec![None; windows.len()];
             for (j, slot) in windows.iter().enumerate() {
                 let layout = if j == active_window {
                     active_layout
@@ -5591,6 +5638,7 @@ impl App {
                 if j == persisted_active_window {
                     new_active = windows_json.len();
                 }
+                persisted_idx[j] = Some(windows_json.len());
                 windows_json.push(Self::layout_to_json(
                     layout,
                     pty,
@@ -5602,9 +5650,40 @@ impl App {
             if windows_json.is_empty() {
                 continue;
             }
+            // 별도 OS 창으로 뗀 pane — 트리에 없어 위 루프가 못 싣는다. leaf 기록은
+            // 같은 함수로 뽑고(스크롤백·cwd·세션 id·탭까지), 떠나온 방과 창 틀을
+            // 곁들인다. 옛 별도창(09-03 이전)은 이걸 안 실어 재시작마다 사라졌다.
+            let undocked_json: Vec<serde_json::Value> = if i == self.active_session {
+                self.undocked_frames()
+                    .into_iter()
+                    .filter_map(|(pane, home, frame)| {
+                        let node = Self::layout_to_json(
+                            &kasa_pty::PtyLayout::single(pane.as_str()),
+                            pty,
+                            &ws_guard,
+                            &self.pane_claude_sid,
+                            &agent_cfg,
+                        );
+                        let rec = node.get("leaf").cloned().filter(|r| !r.is_null())?;
+                        let home = persisted_idx
+                            .get(home)
+                            .copied()
+                            .flatten()
+                            .unwrap_or(new_active);
+                        Some(serde_json::json!({
+                            "leaf": rec,
+                            "home_window": home,
+                            "frame": frame,
+                        }))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             sessions_json.push(serde_json::json!({
                 "windows": windows_json,
                 "active_window": new_active,
+                "undocked": undocked_json,
             }));
         }
         if sessions_json.is_empty() {
@@ -6137,6 +6216,9 @@ impl App {
                         walk(w, &mut n);
                     }
                 }
+                for u in s.get("undocked").and_then(|u| u.as_array()).into_iter().flatten() {
+                    walk(u, &mut n);
+                }
             }
         }
         n
@@ -6166,6 +6248,9 @@ impl App {
                     for w in windows {
                         walk(w, &mut n);
                     }
+                }
+                for u in s.get("undocked").and_then(|u| u.as_array()).into_iter().flatten() {
+                    walk(u, &mut n);
                 }
             }
         }
@@ -6202,6 +6287,21 @@ impl App {
         Some((windows.as_slice(), active_window))
     }
 
+    /// 활성 세션의 별도창 기록(`undocked`) — `saved_windows` 와 같은 세션을 본다.
+    fn saved_undocked(state: &serde_json::Value) -> &[serde_json::Value] {
+        let active = state
+            .get("active_session")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as usize;
+        state
+            .get("sessions")
+            .and_then(|s| s.as_array())
+            .and_then(|sessions| sessions.get(active).or_else(|| sessions.first()))
+            .and_then(|s| s.get("undocked"))
+            .and_then(|u| u.as_array())
+            .map_or(&[], |v| v.as_slice())
+    }
+
     /// 저장본의 leaf 가 쥐고 있던 학생 이름 — 트리 순서대로, 빈 이름은 뺀다.
     pub(crate) fn saved_characters(state: &serde_json::Value) -> Vec<String> {
         fn walk(n: &serde_json::Value, out: &mut Vec<String>) {
@@ -6232,6 +6332,9 @@ impl App {
             for w in windows {
                 walk(w, &mut out);
             }
+        }
+        for u in Self::saved_undocked(state) {
+            walk(u, &mut out);
         }
         out
     }
@@ -6382,6 +6485,27 @@ impl App {
             .and_then(|l| l.leaves().first().map(|s| s.to_string()))
         {
             self.ws.lock().unwrap().active_pane = Some(first);
+        }
+        // 별도창으로 뗀 pane — 트리에 안 꽂고 pane 만 살린 뒤(셸·`--resume` 큐잉은
+        // leaf 와 같은 길) 창은 다음 틱의 `flush_aux_opens` 가 연다(여기엔 event
+        // loop 가 없다). 방 번호는 방 복원이 끝나 인덱스가 굳은 지금 환산한다.
+        for u in Self::saved_undocked(state) {
+            if crate::internal_room::is_saved_window(u) {
+                continue;
+            }
+            let Some(leaf) = u.get("leaf").filter(|l| !l.is_null()) else {
+                continue;
+            };
+            let Some(id) = self.restore_leaf(leaf, cols, rows) else {
+                continue;
+            };
+            let home = (u.get("home_window").and_then(|v| v.as_u64()).unwrap_or(0) as usize)
+                .min(self.windows.len().saturating_sub(1));
+            let frame = u
+                .get("frame")
+                .cloned()
+                .and_then(|f| serde_json::from_value(f).ok());
+            self.queue_aux_terminal(id, home, frame);
         }
         self.release_reserved_characters();
         // 숨겨 둔 pane 을 되살리기 목록으로 되돌린다. **띄우지는 않는다** — 숨긴

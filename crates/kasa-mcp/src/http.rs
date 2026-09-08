@@ -4452,6 +4452,9 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     // 순수 셸이 빠지므로, 트리 전체를 아는 pane_windows 가 정본이다.
     let pane_windows: std::collections::HashMap<String, usize> =
         backend.pane_windows().into_iter().collect();
+    // 별도 OS 창으로 뗀 pane — 방엔 속하지만 배치 칸엔 없어 폰이 따로 표시한다.
+    let undocked: std::collections::HashSet<String> =
+        backend.undocked_panes().into_iter().collect();
     // cwd 도 board 만으론 순수 셸이 빠진다 — 셸 pid 에서 직접 읽는 폴백. 이 값이
     // 비면 그 pane 의 거울은 레포를 몰라 재접속 자동 따라잡기가 통째로 건너뛴다.
     let pane_cwds: std::collections::HashMap<String, String> =
@@ -4492,6 +4495,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                     row["id"] = serde_json::Value::String(id.clone());
                     row["window"] = serde_json::json!(pane_windows.get(&id).copied());
                     row["closed"] = serde_json::json!(!pane_windows.contains_key(&id));
+                    row["undocked"] = serde_json::json!(undocked.contains(&id));
                     row["mirror_of"] = serde_json::Value::String(label);
                     return row;
                 }
@@ -4514,6 +4518,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                     row["id"] = serde_json::Value::String(id.clone());
                     row["window"] = serde_json::json!(pane_windows.get(&id).copied());
                     row["closed"] = serde_json::json!(!pane_windows.contains_key(&id));
+                    row["undocked"] = serde_json::json!(undocked.contains(&id));
                     row["mirror_of"] = serde_json::Value::String(label);
                     return row;
                 }
@@ -4561,6 +4566,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 // 닫았지만 살아 있는 pane(되살리기 목록) — 어느 창에도 없다. 폰이 이걸
                 // 「1번방」에 올렸다(2026-09-07 지적). 웹 셸(`web-`)은 원래 창이 없다.
                 "closed": !pane_windows.contains_key(&id) && !id.starts_with("web-"),
+                "undocked": undocked.contains(&id),
                 // 방 이름 재료 — 원격에서 이 목록을 보는 쪽(이사 탭)은 window 번호만으론
                 // 「어느 방」인지 못 말한다. 사람이 읽는 방 이름 규칙(폴더 꼬리)과 같은
                 // 원천을 실어 준다.

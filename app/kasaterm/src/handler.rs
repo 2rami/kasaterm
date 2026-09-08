@@ -5425,6 +5425,9 @@ impl ApplicationHandler<UserEvent> for App {
                                     let _ = self.spawn_new_tab(&menu_pid, true);
                                 }
                                 ActionKind::Close => self.confirm_or_close_pane(&menu_pid),
+                                ActionKind::Undock => {
+                                    self.undock_active_tab_of(&menu_pid, event_loop)
+                                }
                                 ActionKind::RefreshRenderer => self.refresh_renderer(),
                                 // md 토글·웹 컨트롤은 헤더 전용이라 ⋮ 메뉴엔 없다.
                                 // 와일드카드로 두지 않는 이유: ⋮ 항목을 늘렸는데
@@ -5525,6 +5528,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     self.popout_pane_tab(&pid, tab, event_loop);
                                 }
                             }
+                            ActionKind::Undock => self.undock_active_tab_of(&pid, event_loop),
                             ActionKind::Close => {
                                 self.confirm_or_close_pane(&pid);
                             }
@@ -7157,6 +7161,8 @@ impl ApplicationHandler<UserEvent> for App {
                 w.request_redraw();
             }
         }
+        // 별도창 터미널의 캡처 예약(`KASATERM_AUTOUNDOCK_CAP`)도 같은 박자로 소비.
+        self.consume_aux_terminal_captures();
         // Headless verification: auto-resolve the launch restore prompt so a
         // capture can exercise the full 복원 rebuild (or 새로 시작 discard)
         // without a click. KASATERM_AUTORESTORE=restore|fresh. No-op unless a
@@ -7246,6 +7252,8 @@ impl ApplicationHandler<UserEvent> for App {
         // should disappear from the layout on the very next loop turn
         // so the user sees the gap collapse immediately.
         self.reap_dead_panes(event_loop);
+        // 셸이 끝난 별도창 pane 은 트리에 없어 위 청소가 못 본다 — 창을 따로 걷는다.
+        self.reap_dead_aux_terminals();
         // Refresh per-pane busy state (Claude's working spinner → header bar +
         // completion toast). Self-throttled, so this is cheap per loop turn.
         self.refresh_pane_activity();
@@ -7360,6 +7368,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_automdselect();
         self.run_pending_automdscript(event_loop);
         self.run_pending_autoauxdocs(event_loop);
+        self.run_pending_autoundock(event_loop);
+        self.run_pending_autoundock_dock();
         self.run_pending_autoremotecolor();
         // 배너: 줄 선 요청을 창으로 만들고(여기가 `ActiveEventLoop` 를 쥔 첫 자리다),
         // 수명이 다한 것을 걷는다.
@@ -7431,6 +7441,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             if crate::testkit::mdscript_pending() {
                 why.push("mdscript");
+            }
+            if crate::testkit::autoundock_pending() {
+                why.push("autoundock");
             }
             if crate::render::sticky_seek_active() {
                 why.push("sticky_seek");
@@ -7527,6 +7540,8 @@ impl ApplicationHandler<UserEvent> for App {
             || self.autoquit_at.is_some()
             // 남은 md 스크립트 단계는 about_to_wait 이 다시 돌아야 발화한다.
             || crate::testkit::mdscript_pending()
+            // 별도창 하네스의 undock·캡처·dock 단계도 틱이 이어져야 발화한다.
+            || crate::testkit::autoundock_pending()
             // sticky 클릭 seek 이 도는 동안엔 스크롤이 목표 프롬프트에 닿을 때까지
             // 프레임을 펌프해야 노치가 계속 나가고 화면 관찰이 이어진다.
             || crate::render::sticky_seek_active()
@@ -7620,6 +7635,8 @@ impl ApplicationHandler<UserEvent> for App {
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
+            // 별도창(문서·터미널)의 커서도 같은 박자로 깜빡인다.
+            self.aux_request_redraws();
         }
     }
 }

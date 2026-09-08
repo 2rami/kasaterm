@@ -939,6 +939,11 @@ pub trait Backend: Send + Sync {
     fn pane_windows(&self) -> Vec<(String, usize)> {
         Vec::new()
     }
+    /// 별도 OS 창으로 뗀 pane — `pane_windows` 엔 떠나온 방으로 실리지만 그 방의
+    /// 배치 칸엔 없다. 폰 허브가 「별도창」 줄로 따로 그린다. 기본은 빈 목록.
+    fn undocked_panes(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// Switch the visible session to index `idx`. Default unsupported.
     fn switch_session(&self, _idx: usize) -> Result<()> {
         anyhow::bail!("switch_session not supported")

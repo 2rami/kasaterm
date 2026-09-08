@@ -1667,6 +1667,13 @@ impl App {
             .find(|(_, _, r)| inside(r))
             .map(|(i, p, _)| (*i, p.clone()))
             .or_else(|| {
+                self.aux
+                    .undock_hits
+                    .iter()
+                    .find(|(_, _, r)| inside(r))
+                    .map(|(i, p, _)| (*i, p.clone()))
+            })
+            .or_else(|| {
                 // 줄·칸이 아닌 카드 자리(머리)면 방 메뉴 — pane 이 빈 문자열인 것이
                 // 표식이다(2026-09-08 지시 「방쪽에서 우클릭하면 목록·미니맵 전환 메뉴」).
                 // 설정·보드 같은 안쪽 방은 이름도 목록도 없어 메뉴가 없다.
@@ -1753,6 +1760,11 @@ impl App {
                     self.reopen_closed_pane_at(i);
                 }
             }
+            SidebarMenuAction::Dock => {
+                if let Some(i) = self.aux_terminal_index(pane) {
+                    self.dock_pane_terminal(i);
+                }
+            }
             SidebarMenuAction::ListBody | SidebarMenuAction::MapBody => {
                 let list = action == SidebarMenuAction::ListBody;
                 if self.sidebar_list_body != list {
@@ -1801,7 +1813,7 @@ impl App {
         if self.internal_room_kind_at(idx).is_some() {
             return None;
         }
-        let n = self.window_leaves(idx).len();
+        let n = self.window_leaves(idx).len() + self.room_undocked(idx).len();
         // pane 이 하나뿐인 방도 편다. 예전엔 `n < 2` 로 막았는데 — 한 줄짜리 목록은
         // 펼 값어치가 없다는 판단이었다 — 그 한 줄이 **누가 거기 있고 무슨 상태인지**
         // 다. 학생 하나를 방 하나에 두고 쓰면 사이드바에서 그 학생을 볼 길이 통째로
@@ -1834,6 +1846,22 @@ impl App {
             // 죽는다. 같은 동작의 가운데 클릭은 confirm_or_close_session 으로
             // 물어보는데, 이 ×(사이드바/상단 strip 공용)만 확인을 건너뛰고 있었다.
             self.confirm_or_close_session(idx);
+            return true;
+        }
+        // 별도창 칸 — 그 OS 창을 앞으로. 행 경로(방 전환·focus_pane)는 트리 밖 pane
+        // 엔 맞지 않아 따로 잡는다.
+        if let Some(pane) = self
+            .aux
+            .undock_hits
+            .iter()
+            .find(|(_, _, r)| inside(r))
+            .map(|(_, p, _)| p.clone())
+        {
+            if let Some(ai) = self.aux_terminal_index(&pane) {
+                let w = &self.aux.terminals[ai].window;
+                w.set_minimized(false);
+                w.focus_window();
+            }
             return true;
         }
         // 펼쳐 둔 pane 줄이 먼저다 — 줄은 탭 카드 **안에** 그려지므로, 탭을 먼저

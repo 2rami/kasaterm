@@ -180,7 +180,8 @@ upstream PR `https://github.com/2rami/kasaterm/pull/2` 는 **2026-08-14 에 머�
 - `markdown.rs` — `md_editor_*`·md 링크/블록
 - `testkit.rs` — `schedule_auto*`·`arm_auto*`·`run_pending_auto*` (env 자동테스트 하네스)
 - `gpu.rs` — `KASATERM_RENDERER=gpu` 경로. 자체 wgpu Surface + 셀 파이프라인(sugarloaf 경로와 상호배타)
-- `auxwin.rs` — 자체 wgpu Surface 기반 **별도 OS 창**(chrome.rs 의 wry webview 패널들과 다름): 편집기/파일뷰 + pane undock(`AuxWindowKind::Terminal`)
+- `auxwin.rs` — 자체 wgpu Surface 기반 **별도 OS 창**(chrome.rs 의 wry webview 패널들과 다름): 문서(마크다운) 창 + 별도창 공용 틀(`AuxWindows`, 이벤트 위임, documents.json)
+- `auxterm.rs` — 터미널 pane 을 별도 OS 창으로 뗀다(undock/dock). 창은 `pane_id` 만 들고 셀·PTY 는 App.ws/App.pty 에 그대로 — 그리기는 본창과 같은 `compose_terminal_pane`
 - `settings.rs` — 설정 화면(타이틀바 기어 → pane 그리드 대체 전체 뷰, 좌 카테고리 nav + 우 폼)
 - `socket.rs` — agent-socket ↔ TmuxSession 브리지(`PtyBackend`)·`open_preview`·`pane_record`/`window.json` IO
 - `transcript.rs` — claude-code transcript(jsonl) → board 스냅샷 추출
@@ -213,4 +214,4 @@ upstream PR `https://github.com/2rami/kasaterm/pull/2` 는 **2026-08-14 에 머�
 - **working bar status** — `refresh_pane_activity`(input.rs:335)가 `handler.rs` 틱에서 `App.pane_activity` 를 채우고, 렌더가 그걸 읽어 헤더 busy 바 / bg 펄스를 그린다. render.rs 의 "the daemon's transcript watcher" 주석은 낡은 문구고 동작은 로컬이다.
 - **파일 미리보기·cross-window drag** — `/open-image`·`/open-markdown` → `SocketOpenPreview` → `open_file`(session.rs:1549)이 확장자로 분기해 **pane 또는 보조 탭**으로 띄운다(별도 OS 창이 필요한 편집기/파일뷰는 auxwin.rs 의 `aux_windows`). 창 간 pane 이동은 `move_pane_cross_window`(layout.rs:1435) + 헤드리스 하네스 `KASATERM_AUTOPANEMOVE`.
 
-**undock(2026-07-24)**: 헤더 pop-out 아이콘 → `undock_pane_terminal`(auxwin.rs, aux wgpu 창이 App.ws 셀 그리드를 뷰·PTY는 App.pty에 잔존이라 세션 무중단), 창 닫기/Cmd+W = dock(활성 pane 오른쪽 split 재삽입). 헤드리스 검증은 `KASATERM_AUTOUNDOCK_MS`(+`_CAP`, testkit.rs). 상세 [[project_kasaterm_session_lifecycle]] · [[reference_kasaterm_daemon_removal]].
+**undock(2026-07-24, 09-03 에 걷었다가 09-09 되살림)**: 헤더 `external-link` 단추·⋮ 메뉴 → `undock_active_tab_of`(auxterm.rs; aux wgpu 창이 App.ws 셀 그리드를 뷰·PTY는 App.pty에 잔존이라 세션 무중단, 트리에서 leaf 만 뺀다 — `remove_pane` 금지), 창 닫기/Cmd+W/헤더 되돌리기 = dock(활성 pane 오른쪽 split 재삽입). 별도창 pane 은 사이드바 방 카드 밑 점선 「별도창」 칸(클릭=창 앞으로·우클릭=되돌리기)과 폰 허브 「별도창」 줄에 뜨고, session.json `sessions[].undocked` 로 재시작에 되살아난다(`restore_leaf` 뒤 `flush_aux_opens` 가 창을 연다). 헤드리스 검증은 `KASATERM_AUTOUNDOCK_MS`(+`_CAP`·`_TAB`·`_DOCK_MS` — DOCK_MS 는 undock 시점 기준, testkit.rs; 사이드바는 `KASATERM_AUTODECKTIP=1`·`KASATERM_AUTOEXPAND=0` 로 편다). 상세 [[project_kasaterm_session_lifecycle]] · [[reference_kasaterm_daemon_removal]].

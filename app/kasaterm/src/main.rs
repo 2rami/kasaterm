@@ -10,6 +10,7 @@
 //! cursor blink, OSC titles, multi-pane render + focus routing.
 
 mod autosuggest;
+mod auxterm;
 mod auxwin;
 mod board_room;
 mod bridge;
@@ -608,6 +609,8 @@ const SIDEBAR_TAB_H: f32 = 54.0;
 const SIDEBAR_TAB_GAP: f32 = 3.0;
 /// 방을 펼쳤을 때 그 안 pane 한 줄의 높이와, 목록 위아래 숨통.
 const SIDEBAR_ROW_H: f32 = 22.0;
+/// 방 카드 배치도 아래 「별도창」 띠 — 별도 OS 창으로 뗀 pane 이 한 칸씩 앉는다.
+const UNDOCK_STRIP_H: f32 = 30.0;
 const SIDEBAR_ROW_PAD: f32 = 8.0;
 /// 방을 펴고 접는 데 걸리는 시간. 사이드바는 하루에도 여러 번 여닫는 곳이라
 /// 테마 전환(0.34)보다 짧다 — 여기서 기다려야 하면 곧 안 쓰게 된다.
@@ -1436,6 +1439,8 @@ enum ActionKind {
     MdSave,
     /// Move this exact MarkdownPane into a detached OS window.
     MdPopout,
+    /// 터미널 pane(또는 활성 탭)을 별도 OS 창으로 뗀다 — auxterm.rs.
+    Undock,
     /// ghostty ⋮ 메뉴의 "닫기" — 이 pane을 닫는다.
     Close,
     /// ··· 메뉴의 "새 탭" — 이 pane(outer)에 in-pane 탭을 추가한다. 탭이 둘
@@ -3413,6 +3418,9 @@ struct Workspace {
     /// collab_board(PtyBackend, 별 스레드)가 App 의 windows/pty_layout 을 못 봐서 ws 로
     /// 미러 — board 가 전 방 학생을 window_idx 와 함께 실어 arona 좌측 방별 트리를 영속한다.
     pane_window: HashMap<String, usize>,
+    /// 별도 OS 창으로 뗀 pane(auxterm.rs). `pane_window` 에는 떠나온 방으로 실리고
+    /// 여기엔 「트리 밖」이라는 표시만 — 폰·board 가 닫힌 pane 과 가른다.
+    undocked: std::collections::HashSet<String>,
     /// 방(윈도우)마다의 화면 배치 — 폰 허브의 미니맵이 「어느 방에 누가 어떤 크기로」를
     /// 그리는 재료. `layout` 은 보고 있는 방 하나뿐이라 따로 둔다.
     window_layouts: HashMap<usize, Layout>,
@@ -3434,6 +3442,7 @@ impl Default for Workspace {
             pane_character: HashMap::new(),
             active_window_panes: std::collections::HashSet::new(),
             pane_window: HashMap::new(),
+            undocked: std::collections::HashSet::new(),
             window_layouts: HashMap::new(),
             grid_aspect: None,
             view_cells: HashMap::new(),
@@ -4121,6 +4130,8 @@ enum SidebarMenuAction {
     Hide,
     /// 숨겨 둔 것을 제자리로.
     Unhide,
+    /// 별도 OS 창으로 뗀 pane 을 본창으로 되꽂는다(auxterm.rs).
+    Dock,
     /// 방 카드 본문을 학생 줄 목록으로(모든 방 공통, settings.json `sidebar_body`).
     ListBody,
     /// 방 카드 본문을 배치도로.

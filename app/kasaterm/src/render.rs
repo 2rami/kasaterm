@@ -145,6 +145,27 @@ pub(crate) fn minimap_has_bar(mw: f32, mh: f32) -> bool {
 ///
 /// 띠가 **실제로 서는 동안만** 자리를 빼면 걷기 시작·끝마다 얼굴이 튀므로, 띠를
 /// 그릴 수 있는 칸이면 도는 중이든 아니든 늘 뺀다.
+/// 점선 사각 — 배치도의 「별도창」 칸 테두리. 실선 칸(트리 안)과 한눈에 갈리도록
+/// 3px 긋고 2px 쉰다. 얇은 1px 선을 gpu.rect 조각으로 잇는다.
+pub(crate) fn dashed_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, col: [u8; 4]) {
+    const ON: f32 = 3.0;
+    const OFF: f32 = 2.0;
+    let mut t = 0.0;
+    while t < w {
+        let seg = ON.min(w - t);
+        g.rect(x + t, y, seg, 1.0, col);
+        g.rect(x + t, y + h - 1.0, seg, 1.0, col);
+        t += ON + OFF;
+    }
+    let mut t = 0.0;
+    while t < h {
+        let seg = ON.min(h - t);
+        g.rect(x, y + t, 1.0, seg, col);
+        g.rect(x + w - 1.0, y + t, 1.0, seg, col);
+        t += ON + OFF;
+    }
+}
+
 pub(crate) fn minimap_face_box(mx: f32, my: f32, mw: f32, mh: f32) -> (f32, f32, f32) {
     let room = if minimap_has_bar(mw, mh) {
         MINI_BAR_H + MINI_BAR_PAD
@@ -1917,7 +1938,8 @@ impl App {
                 None => tab_icon_glyph(&sb_labels[i].0),
             })
             .collect();
-        let (sb_tabs, sb_closes, sb_plus, sb_rows, sb_mini) = self.sidebar_layout(sb_win_h);
+        let (sb_tabs, sb_closes, sb_plus, sb_rows, sb_mini, sb_undock) =
+            self.sidebar_layout(sb_win_h);
         // Windowed strip: publish the effective first/visible-count for the
         // wheel handler's clamp, and note per-side overflow for the chevron
         // hints painted with the tabs below.
@@ -1965,6 +1987,15 @@ impl App {
             sb_rows
                 .iter()
                 .chain(sb_mini.iter())
+                .filter_map(|(i, id, r)| clip_y(*r).map(|c| (*i, id.clone(), c)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // 별도창 띠 칸은 따로 — 클릭은 그 OS 창을 앞으로, 우클릭은 되돌리기뿐.
+        self.aux.undock_hits = if sidebar_shown {
+            sb_undock
+                .iter()
                 .filter_map(|(i, id, r)| clip_y(*r).map(|c| (*i, id.clone(), c)))
                 .collect()
         } else {
@@ -2080,6 +2111,7 @@ impl App {
             .map(|i| {
                 self.window_leaves(i)
                     .iter()
+                    .chain(self.room_undocked(i).iter())
                     .map(|id| self.pane_state_color(id))
                     .collect()
             })
@@ -2254,6 +2286,9 @@ impl App {
             sb_rows.iter().map(|(_, id, _)| pane_info(id)).collect();
         let sb_mini_info: Vec<SidebarRowInfo> =
             sb_mini.iter().map(|(_, id, _)| pane_info(id)).collect();
+        // 별도창 칸도 같은 정보로 — pane_info 는 트리를 안 보므로 트리 밖 pane 에도 된다.
+        let sb_undock_info: Vec<SidebarRowInfo> =
+            sb_undock.iter().map(|(_, id, _)| pane_info(id)).collect();
         // 펼친 방에서 그 방의 알림·대기를 **줄이 이미 말하고 있는가**. 말하고 있으면
         // 카드 머리는 조용히 둔다 — 같은 뜻을 두 겹으로 칠하면 결국 방 전체가 빛나
         // 고치기 전으로 돌아간다. 접힌 방은 줄이 없으니 여기에 안 들고, 머리가 계속
@@ -2266,7 +2301,8 @@ impl App {
         let signalled = sb_rows
             .iter()
             .zip(sb_row_info.iter())
-            .chain(sb_mini.iter().zip(sb_mini_info.iter()));
+            .chain(sb_mini.iter().zip(sb_mini_info.iter()))
+            .chain(sb_undock.iter().zip(sb_undock_info.iter()));
         for ((wi, _, _), info) in signalled {
             if info.alert {
                 sb_row_alert_win.insert(*wi);
@@ -2282,6 +2318,7 @@ impl App {
             .map(|i| {
                 self.window_leaves(i)
                     .iter()
+                    .chain(self.room_undocked(i).iter())
                     .any(|id| self.pane_needs_you(id))
             })
             .collect();
@@ -4097,7 +4134,115 @@ impl App {
                         }
                     }
                 }
+                // 「별도창」 띠 — 별도 OS 창으로 뗀 pane 이 떠나온 방 아래에 점선 칸으로
+                // 앉는다. 얼굴·진행 바는 배치도 칸과 같은 말을 하고, 점선과 모서리의
+                // 나가기 아이콘이 「지금 다른 창에 있다」를 말한다.
+                let mut undock_tip: Option<(f32, f32, String)> = None;
+                for ((_, id, r), info) in sb_undock.iter().zip(sb_undock_info.iter()) {
+                    let (mx, my, mw, mh) = *r;
+                    let hov = sb_cursor.0 >= mx
+                        && sb_cursor.0 <= mx + mw
+                        && sb_cursor.1 >= my
+                        && sb_cursor.1 <= my + mh;
+                    g.hover_pointer |= hov;
+                    if hov {
+                        let who = if info.who.is_empty() { id.as_str() } else { info.who.as_str() };
+                        undock_tip = Some((mx + mw + 6.0, my, format!("별도창 · {who}")));
+                    }
+                    let signal = if info.waiting {
+                        Some((theme::attention(), 0.9))
+                    } else if info.alert {
+                        Some((theme::accent(), 1.6))
+                    } else {
+                        None
+                    };
+                    round_rect(
+                        g,
+                        mx,
+                        my,
+                        mw,
+                        mh,
+                        2.0,
+                        if hov {
+                            theme::surface_hover()
+                        } else {
+                            theme::with_alpha(theme::surface(), 0x80)
+                        },
+                    );
+                    if let Some((col, period)) = signal {
+                        if mw > 5.0 && mh > 5.0 {
+                            let mut c = col;
+                            c[3] = (30.0 + 120.0 * blink(anim_phase_secs(), period)) as u8;
+                            round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5, c);
+                        }
+                    }
+                    dashed_rect(
+                        g,
+                        mx,
+                        my,
+                        mw,
+                        mh,
+                        match signal {
+                            Some((c, _)) => c,
+                            None => theme::with_alpha(theme::border(), 0xaa),
+                        },
+                    );
+                    let (fx, fy, face) = minimap_face_box(mx, my, mw, mh);
+                    if info.error {
+                        let size = face.min(18.0);
+                        g.queue_icon(
+                            "triangle-alert",
+                            fx + (face - size) / 2.0,
+                            fy + (face - size) / 2.0,
+                            size,
+                            theme::danger(),
+                        );
+                    } else {
+                        let walked = info.busy
+                            && draw_student_walk(
+                                g,
+                                &info.who,
+                                fx - 2.0,
+                                fy - 2.0,
+                                face + 4.0,
+                                anim_phase_secs(),
+                            );
+                        if !walked
+                            && !draw_student_face_anim(g, &info.who, fx, fy, face, anim_phase_secs())
+                        {
+                            let isz = face.min(16.0);
+                            g.queue_icon(
+                                info.icon,
+                                mx + (mw - isz) / 2.0,
+                                my + (mh - isz) / 2.0,
+                                isz,
+                                theme::text_dim(),
+                            );
+                        }
+                    }
+                    if minimap_has_bar(mw, mh) {
+                        let bar_h = MINI_BAR_H;
+                        let (bx, by, bw) = (mx + 2.0, my + mh - bar_h - MINI_BAR_PAD, mw - 4.0);
+                        if let Some(pct) = info.compact_pct {
+                            g.rect(bx, by, bw, bar_h, theme::with_alpha(theme::accent(), 0x3a));
+                            let done = bw * (pct as f32 / 100.0).clamp(0.0, 1.0);
+                            if done > 0.5 {
+                                g.rect(bx, by, done, bar_h, theme::accent());
+                            }
+                        } else if info.busy {
+                            g.working_bar(bx, by, bw, bar_h, theme::accent());
+                        } else if info.bg_active {
+                            g.pulse_bar(bx, by, bw, bar_h, theme::accent());
+                        }
+                    }
+                    if mw >= 22.0 {
+                        g.queue_icon("external-link", mx + mw - 10.0, my + 2.0, 8.0, theme::text_mute());
+                    }
+                }
                 g.pop_clip();
+                if let Some((tx, ty, text)) = undock_tip {
+                    Self::draw_hover_tip(g, &text, tx, ty, win_px.0 / scale, win_px.1 / scale);
+                }
                 if let Some((tx, ty, peeks)) = deck_tip {
                     let fs = 11.0;
                     let (pad, line, dot) = (7.0, fs + 5.0, 5.0);
@@ -4538,6 +4683,10 @@ impl App {
                         ]
                     } else if hidden {
                         vec![(SidebarMenuAction::Unhide, "다시 보이기")]
+                    } else if self.aux.terminals.iter().any(|t| t.pane_id == pane) {
+                        // 별도창 pane 에 「숨기기」를 주면 stash 가 remove_pane 으로 새어
+                        // 트리 밖 pane 을 죽인다 — 되돌리기 하나만.
+                        vec![(SidebarMenuAction::Dock, "본창으로 되돌리기")]
                     } else {
                         vec![(SidebarMenuAction::Hide, "pane 숨기기")]
                     };
@@ -7056,7 +7205,8 @@ impl App {
                 // keep the 4-button zoom/rotate set.
                 let abw = icon_size + 2.0;
                 let agap = 2.0;
-                let n_btn: f32 = if h.is_image || h.is_web { 4.0 } else { 3.0 };
+                // 터미널 묶음은 별도창(external-link)까지 넷.
+                let n_btn: f32 = if h.is_image || h.is_web { 4.0 } else { 4.0 };
                 // Markdown panes show explicit view/edit, save and separate-window
                 // controls instead of the terminal icon cluster.
                 let seg_font = 11.0_f32;
@@ -7226,6 +7376,7 @@ impl App {
                         "panel-bottom-dashed"
                     };
                     vec![
+                        ("external-link", None, Some(ActionKind::Undock)),
                         (sb_icon, None, Some(ActionKind::ToggleStatusbar)),
                         ("columns-2", None, Some(ActionKind::SplitV)),
                         ("rows-2", None, Some(ActionKind::SplitH)),
@@ -7852,9 +8003,16 @@ impl App {
                         // 상단바(헤더 띠)도 같은 방식 — 지금 보이는 상태를 아이콘이
                         // 그대로 드러낸다. hdr_vis 는 has_header() 와 같은 답이어야
                         // 하므로 pane 에 직접 물어본다(override 포함).
-                        let hdr_vis = {
+                        // 별도창은 터미널 탭에만 — 그림·문서·웹 탭은 창이 못 그린다.
+                        let (hdr_vis, term_tab) = {
                             let ws = self.ws.lock().unwrap();
-                            ws.panes.get(fid.as_str()).is_some_and(|p| p.has_header())
+                            let p = ws.panes.get(fid.as_str());
+                            (
+                                p.is_some_and(|p| p.has_header()),
+                                p.is_some_and(|p| {
+                                    p.tabs.get(p.active_tab).is_some_and(|t| t.term().is_some())
+                                }),
+                            )
                         };
                         let hdr_icon = if hdr_vis {
                             "panel-top"
@@ -7872,8 +8030,13 @@ impl App {
                             (sb_icon, ActionKind::ToggleStatusbar),
                             ("maximize", ActionKind::ToggleZoom),
                             ("rotate-cw", ActionKind::RefreshRenderer),
+                            ("external-link", ActionKind::Undock),
                             ("x", ActionKind::Close),
                         ];
+                        let items: Vec<(&str, ActionKind)> = items
+                            .into_iter()
+                            .filter(|(_, a)| term_tab || *a != ActionKind::Undock)
+                            .collect();
                         let bw = 30.0_f32;
                         let bh = 28.0_f32;
                         let gap = 2.0_f32;
