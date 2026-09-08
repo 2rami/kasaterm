@@ -13,6 +13,10 @@ pub(super) struct MachineIdentity {
     tint: [u8; 4],
 }
 
+pub(super) fn terminal_identity_pid(pane_id: &str, active_is_terminal: bool) -> Option<&str> {
+    active_is_terminal.then_some(pane_id)
+}
+
 impl MachineIdentity {
     pub fn for_pane(pane_id: Option<&str>, local_name: Option<&str>) -> Self {
         let remote = pane_id.and_then(kasa_mcp::remote::remote_info);
@@ -58,6 +62,10 @@ impl MachineIdentity {
 
     pub fn background(&self, base: [u8; 4]) -> [u8; 4] {
         theme::lerp(base, self.tint, 0.12)
+    }
+
+    pub fn marker(&self) -> [u8; 4] {
+        self.tint
     }
 
     pub fn foreground(&self, background: [u8; 4]) -> [u8; 4] {
@@ -204,4 +212,15 @@ pub(super) fn draw_card(
         );
     }
     g.pop_clip();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_identity_pid;
+
+    #[test]
+    fn non_terminal_tab_does_not_inherit_outer_terminal_identity() {
+        assert_eq!(terminal_identity_pid("%remote", false), None);
+        assert_eq!(terminal_identity_pid("%remote", true), Some("%remote"));
+    }
 }

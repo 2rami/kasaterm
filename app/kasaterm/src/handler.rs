@@ -7292,6 +7292,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_automdselect();
         self.run_pending_automdscript(event_loop);
         self.run_pending_autoauxdocs(event_loop);
+        self.run_pending_autoremotecolor();
         // 배너: 줄 선 요청을 창으로 만들고(여기가 `ActiveEventLoop` 를 쥔 첫 자리다),
         // 수명이 다한 것을 걷는다.
         // 알림은 전부 `notify_desktop` 을 지나 `banner_inbox` 에 줄 선다. 창을

@@ -4835,6 +4835,327 @@ impl App {
         }
         STEP.store(step + 1, Ordering::Relaxed);
     }
+
+    /// Loopback-only remote color lifecycle: a real remote view is attached as
+    /// a tab, switched away and back, then replaced through `bring_pane_home`.
+    /// The live machine list and user panes are never consulted.
+    pub(crate) fn run_pending_autoremotecolor(&mut self) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex, OnceLock};
+
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicUsize = AtomicUsize::new(0);
+        static BASE: OnceLock<String> = OnceLock::new();
+        static ORIGIN: OnceLock<String> = OnceLock::new();
+        static OUTER: OnceLock<String> = OnceLock::new();
+        static REMOTE: OnceLock<String> = OnceLock::new();
+        static OTHER: OnceLock<String> = OnceLock::new();
+        static OWNER: OnceLock<Mutex<Option<Arc<kasa_pty::PtySession>>>> = OnceLock::new();
+        static MARKER: OnceLock<Mutex<Option<Arc<kasa_pty::PtySession>>>> = OnceLock::new();
+
+        let due = DUE.get_or_init(|| {
+            let ms = std::env::var("KASATERM_TEST_REMOTECOLOR_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())?;
+            Some(Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        MDSCRIPT_LEFT.store(true, Ordering::Relaxed);
+        if Instant::now()
+            < *due + std::time::Duration::from_millis(step as u64 * 900)
+        {
+            return;
+        }
+        let cap_dir = match std::env::var("KASATERM_TEST_REMOTECOLOR_CAP_DIR") {
+            Ok(path) => std::path::PathBuf::from(path),
+            Err(_) => {
+                eprintln!("[remote-color] FAIL capture dir 없음");
+                MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+                return;
+            }
+        };
+        let _ = std::fs::create_dir_all(&cap_dir);
+        let capture = |app: &mut App, name: &str| {
+            if let Some(gpu) = app.gpu.as_mut() {
+                gpu.capture_next = Some(cap_dir.join(name).to_string_lossy().into_owned());
+            }
+            app.chrome_dirty = true;
+            app.render_frame();
+        };
+
+        match step {
+            0 => {
+                let backend = Arc::new(kasa_mcp::standalone::StandaloneBackend::new(
+                    std::env::temp_dir()
+                        .join(format!("kasaterm-remote-color-{}", std::process::id())),
+                ));
+                let port = match kasa_mcp::spawn_http_server_opts(backend, 0, false) {
+                    Ok(port) => port,
+                    Err(error) => {
+                        eprintln!("[remote-color] FAIL loopback server: {error}");
+                        MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                };
+                let base = format!("http://127.0.0.1:{port}");
+                let owner = match kasa_mcp::remote::connect(
+                    kasa_mcp::remote::RemoteSpec {
+                        base: base.clone(),
+                        pane: None,
+                        cwd: None,
+                        token: None,
+                        identity: Default::default(),
+                    },
+                    "%remote-color-owner",
+                    60,
+                    16,
+                ) {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        eprintln!("[remote-color] FAIL owner connect: {error:#}");
+                        MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                };
+                let _ = owner.session.send_bytes(
+                    b"printf '\\033[0mDEFAULT-REMOTE\\n\\033[38;2;255;120;20mCUSTOM-RGB\\033[0m\\n\\033[48;2;20;80;120m EXPLICIT-BG \\033[0m\\n'\r",
+                );
+                let _ = BASE.set(base);
+                let _ = ORIGIN.set(owner.remote_id);
+                *OWNER.get_or_init(Default::default).lock().unwrap() = Some(owner.session);
+                eprintln!("[remote-color] loopback owner ready");
+            }
+            1 => {
+                let (Some(base), Some(origin)) = (BASE.get(), ORIGIN.get()) else { return };
+                let Some(outer) = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone())
+                else {
+                    return;
+                };
+                let remote_id = self.alloc_pane_id();
+                let remote = match kasa_mcp::remote::connect_view(
+                    kasa_mcp::remote::RemoteSpec {
+                        base: base.clone(),
+                        pane: Some(origin.clone()),
+                        cwd: None,
+                        token: None,
+                        identity: kasa_mcp::remote::RemoteIdentity {
+                            label: "격리 원격".to_string(),
+                            remote_cwd: None,
+                            origin_cwd: None,
+                            owned: false,
+                        },
+                    },
+                    &remote_id,
+                ) {
+                    Ok(remote) => remote,
+                    Err(error) => {
+                        eprintln!("[remote-color] FAIL view connect: {error:#}");
+                        MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                };
+                self.pump_pty_screens(
+                    remote.session.screens.clone(),
+                    remote_id.clone(),
+                    Arc::downgrade(&remote.session),
+                );
+                self.insert_pty(remote_id.clone(), remote.session);
+                {
+                    let mut ws = self.ws.lock().unwrap();
+                    ws.pid_to_pane.insert(remote_id.clone(), outer.clone());
+                    let Some(pane) = ws.panes.get_mut(&outer) else { return };
+                    let mut tab = PaneTab::default();
+                    tab.pid = Some(remote_id.clone());
+                    pane.tabs.push(tab);
+                    pane.active_tab = pane.tabs.len() - 1;
+                    pane.dirty = true;
+                    ws.active_pane = Some(outer.clone());
+                }
+                let _ = OUTER.set(outer);
+                let _ = REMOTE.set(remote_id);
+                eprintln!("[remote-color] remote tab attached");
+            }
+            2 => {
+                let (Some(base), Some(origin), Some(outer), Some(remote_id)) =
+                    (BASE.get(), ORIGIN.get(), OUTER.get(), REMOTE.get())
+                else {
+                    return;
+                };
+                if !self
+                    .pty
+                    .get(remote_id)
+                    .is_some_and(|session| session.visible_text(20).contains("DEFAULT-REMOTE"))
+                {
+                    return;
+                }
+                let marker = match kasa_mcp::remote::connect_view(
+                    kasa_mcp::remote::RemoteSpec {
+                        base: base.clone(),
+                        pane: Some(origin.clone()),
+                        cwd: None,
+                        token: None,
+                        identity: kasa_mcp::remote::RemoteIdentity {
+                            label: "격리 원격".to_string(),
+                            remote_cwd: None,
+                            origin_cwd: None,
+                            owned: false,
+                        },
+                    },
+                    outer,
+                ) {
+                    Ok(marker) => marker,
+                    Err(error) => {
+                        eprintln!("[remote-color] FAIL fallback marker: {error:#}");
+                        MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                };
+                *MARKER.get_or_init(Default::default).lock().unwrap() = Some(marker.session);
+                let tab_index = {
+                    let mut ws = self.ws.lock().unwrap();
+                    let Some(pane) = ws.panes.get_mut(outer) else { return };
+                    let Some(index) = pane
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.pid.as_deref() == Some(remote_id))
+                    else {
+                        return;
+                    };
+                    pane.tabs[index].pid = None;
+                    pane.active_tab = index;
+                    pane.dirty = true;
+                    index
+                };
+                let fallback = self.ws.lock().unwrap().active_tab_pid(outer);
+                let detected = kasa_mcp::remote::is_remote_pane(&fallback);
+                capture(self, "1-remote-none-pid-focused.png");
+                if let Ok(mut ws) = self.ws.lock() {
+                    if let Some(pane) = ws.panes.get_mut(outer) {
+                        pane.tabs[tab_index].pid = Some(remote_id.clone());
+                    }
+                }
+                MARKER.get().unwrap().lock().unwrap().take();
+                eprintln!(
+                    "[remote-color] none-pid fallback={fallback} detected={detected}"
+                );
+            }
+            3 => {
+                let (Some(outer), Some(remote_id)) = (OUTER.get(), REMOTE.get()) else { return };
+                if kasa_mcp::remote::is_remote_pane(outer) {
+                    return;
+                }
+                let active = self.ws.lock().unwrap().active_tab_pid(outer);
+                let detected = active == *remote_id && kasa_mcp::remote::is_remote_pane(&active);
+                capture(self, "2-remote-focused.png");
+                eprintln!("[remote-color] focused active={active} detected={detected}");
+            }
+            4 => {
+                let Some(outer) = OUTER.get() else { return };
+                let other = match self.split_active_pane_focused(kasa_pty::SplitDir::Horizontal) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        eprintln!("[remote-color] FAIL split: {error:#}");
+                        MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                };
+                let _ = OTHER.set(other);
+                capture(self, "3-remote-unfocused.png");
+                eprintln!(
+                    "[remote-color] unfocused outer={outer} active={:?}",
+                    self.ws.lock().ok().and_then(|ws| ws.active_pane.clone())
+                );
+            }
+            5 => {
+                let Some(outer) = OUTER.get() else { return };
+                self.focus_pane(outer);
+                let preview = std::env::temp_dir()
+                    .join(format!("kasaterm-remote-color-{}.md", std::process::id()));
+                if std::fs::write(&preview, "# 로컬 미리보기\n\n원격 색이 없어야 합니다.\n")
+                    .is_err()
+                {
+                    eprintln!("[remote-color] FAIL preview fixture");
+                    MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+                    return;
+                }
+                self.open_file(preview.clone(), Some(outer.clone()), true);
+                {
+                    let mut ws = self.ws.lock().unwrap();
+                    let Some(pane) = ws.panes.get_mut(outer) else { return };
+                    let Some(index) = pane
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.preview_path.as_deref() == Some(preview.as_path()))
+                    else {
+                        return;
+                    };
+                    pane.active_tab = index;
+                    pane.dirty = true;
+                }
+                let active = self.ws.lock().unwrap().active_tab_pid(outer);
+                let remote = kasa_mcp::remote::is_remote_pane(&active);
+                capture(self, "4-local-markdown.png");
+                eprintln!("[remote-color] local markdown active={active} remote={remote}");
+            }
+            6 => {
+                let (Some(outer), Some(remote_id)) = (OUTER.get(), REMOTE.get()) else { return };
+                {
+                    let mut ws = self.ws.lock().unwrap();
+                    let Some(pane) = ws.panes.get_mut(outer) else { return };
+                    let Some(index) = pane
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.pid.as_deref() == Some(remote_id))
+                    else {
+                        return;
+                    };
+                    pane.active_tab = index;
+                    pane.dirty = true;
+                    ws.active_pane = Some(outer.clone());
+                }
+                capture(self, "5-remote-return.png");
+                eprintln!(
+                    "[remote-color] remote tab restored={}",
+                    kasa_mcp::remote::is_remote_pane(remote_id)
+                );
+            }
+            7 => {
+                let Some(remote_id) = REMOTE.get() else { return };
+                match self.bring_pane_home(remote_id) {
+                    Ok(()) => {
+                        let remote = kasa_mcp::remote::is_remote_pane(remote_id);
+                        capture(self, "6-home-immediate.png");
+                        eprintln!("[remote-color] bring home immediate remote={remote}");
+                    }
+                    Err(error) => {
+                        eprintln!("[remote-color] FAIL bring home: {error:#}");
+                        MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            }
+            8 => {
+                let Some(remote_id) = REMOTE.get() else { return };
+                let (remote, stale_text) = (
+                    kasa_mcp::remote::is_remote_pane(remote_id),
+                    self.pty
+                        .get(remote_id)
+                        .is_some_and(|session| session.visible_text(20).contains("DEFAULT-REMOTE")),
+                );
+                capture(self, "7-home-stable.png");
+                eprintln!(
+                    "[remote-color] PASS home stable remote={remote} stale_remote_text={stale_text}"
+                );
+                MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+            }
+            _ => {
+                MDSCRIPT_LEFT.store(false, Ordering::Relaxed);
+                return;
+            }
+        }
+        STEP.store(step + 1, Ordering::Relaxed);
+    }
     /// Headless file-open repro: schedule `open_file_split` on the path in
     /// `KASATERM_AUTOOPEN` after `KASATERM_AUTOOPEN_MS` (default 4000ms), so a
     /// background run can prove the preview pane + file-tree highlight without

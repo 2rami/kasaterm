@@ -227,15 +227,14 @@ pub fn remote_info(local_id: &str) -> Option<RemoteInfo> {
 /// 안 부르고 닫으면 원격 셸은 살아남아 나중에 이어받을 수 있다.
 pub fn kill_remote(local_id: &str) -> bool {
     let mut map = links().lock().unwrap();
-    let Some(link) = map.get(local_id) else {
+    let Some(link) = map.remove(local_id) else {
         return false;
     };
-    if link.kill.send(()).is_err() {
-        // 매니저가 이미 죽었다 — 낡은 항목을 걷는다.
-        map.remove(local_id);
-        return false;
-    }
-    true
+    // 종료 신호를 받아들인 순간부터 이 local pane 은 원격이 아니다. 매니저의
+    // 비동기 Drop 까지 명부를 남기면 `to ..`가 로컬 PTY를 끼운 첫 프레임도
+    // 옛 기계색을 칠한다. Unlink의 token 가드는 같은 id에 새 링크가 생겨도
+    // 옛 매니저가 그것을 걷지 못하게 그대로 지킨다.
+    link.kill.send(()).is_ok()
 }
 
 /// `send_bytes` 가 쓰는 송신로 — WS 매니저의 출력 큐로 밀어 넣는다.
@@ -1833,6 +1832,31 @@ pub fn settings_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kill_removes_remote_state_before_manager_cleanup() {
+        let local = "%remote-state-boundary";
+        let (kill, mut killed) = tokio::sync::mpsc::unbounded_channel();
+        let (outgoing, _out) = tokio::sync::mpsc::unbounded_channel::<Out>();
+        let outgoing = Arc::new(outgoing);
+        links().lock().unwrap().insert(
+            local.to_string(),
+            Link {
+                kill,
+                base: "http://127.0.0.1:1".into(),
+                remote_id: "%remote".into(),
+                identity: RemoteIdentity::default(),
+                view: true,
+                viewport: Arc::new(ViewportState::default()),
+                outgoing: Arc::downgrade(&outgoing),
+                token: u64::MAX,
+            },
+        );
+        assert!(is_remote_pane(local));
+        assert!(kill_remote(local));
+        assert!(!is_remote_pane(local));
+        assert!(killed.try_recv().is_ok());
+    }
 
     fn wait_visible(sess: &PtySession, needle: &str, secs: u64) -> bool {
         let deadline = std::time::Instant::now() + Duration::from_secs(secs);

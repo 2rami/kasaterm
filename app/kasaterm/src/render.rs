@@ -1467,9 +1467,10 @@ impl App {
                 // 시각적으로 맥북인지 맥미니인지」). 몸통 바탕을 헤더와 같은 강조색으로
                 // 옅게 물들이고 왼쪽 가장자리에 색 리본을 세운다 — 활성이든 아니든.
                 {
-                    let tab_pid = pane.tabs.get(pane.active_tab).and_then(|t| t.pid.clone());
-                    if tab_pid
-                        .as_deref()
+                    // `tab_pid` 는 active_tab_pid 의 outer fallback 을 이미 지난 값이다.
+                    // 첫 ScreenUpdate 전 `PaneTab.pid=None` 인 원격 pane 도 링크 정본을
+                    // 놓치지 않아야, 헤더 없는 첫 프레임부터 몸통 표식이 보인다.
+                    if pane_identity::terminal_identity_pid(&tab_pid, pane.term().is_some())
                         .is_some_and(kasa_mcp::remote::is_remote_pane)
                     {
                         remote_slots.push((id.clone(), box_x, box_y, box_w, box_h));
@@ -2413,7 +2414,7 @@ impl App {
                 .filter_map(|(id, ..)| ws.panes.get(id).map(|pane| (id, pane)))
                 .map(|(id, pane)| {
                     let tab = pane.tabs.get(pane.active_tab);
-                    let shown = tab.and_then(|t| t.pid.clone()).unwrap_or_else(|| id.clone());
+                    let shown = ws.active_tab_pid(id);
                     let title = if self.show_pane_numbers {
                         tab.and_then(|t| t.title.clone())
                             .filter(|s| !s.trim().is_empty())
@@ -2426,7 +2427,10 @@ impl App {
                         String::new()
                     };
                     let machine = MachineIdentity::for_pane(
-                        tab.and_then(|t| t.pid.as_deref()),
+                        pane_identity::terminal_identity_pid(
+                            &shown,
+                            tab.is_some_and(|tab| tab.term().is_some()),
+                        ),
                         local_name,
                     );
                     (id.clone(), PaneIdentity { shown, title, machine })
@@ -2487,11 +2491,19 @@ impl App {
                     g.upload_image(&key, &rgba, w, h);
                 }
             }
-            // 원격 pane 바탕 물들임 — 셀보다 먼저 깔아야 기본 배경 자리에서만 비친다
-            // (글자·색 배경 셀은 그대로). 헤더 물들임과 같은 강조색을 반투명으로 —
-            // 불투명이면 셀 아래 이미지 패스(인라인 이미지)를 통째로 가린다.
-            for (_, bx, by, bw, bh) in &remote_slots {
-                g.rect(*bx, *by, *bw, *bh, theme::with_alpha(theme::accent(), 0x16));
+            // 원격 pane 바탕 물들임 — 셀·이미지보다 먼저 깔아 기본 배경 자리에서만
+            // 보인다. 글자·ANSI 배경·인라인 이미지는 뒤 패스가 그대로 덮으므로 색을
+            // 바꾸지 않고, 헤더와 같은 기기색 12% 혼합만 빈 바탕에 남는다.
+            for (id, bx, by, bw, bh) in &remote_slots {
+                if let Some(identity) = pane_identities.get(id) {
+                    g.rect(
+                        *bx,
+                        *by,
+                        *bw,
+                        *bh,
+                        identity.machine.background(crate::cells::default_bg()),
+                    );
+                }
             }
             g.draw_cells(&slot_views);
             paint_status_model_icons(g, &status_model_icons);
@@ -7662,7 +7674,18 @@ impl App {
                     // 「저 pane 은 다른 기계」가 헤더를 읽기 전에 걸리게. 포커스 링이
                     // 이기도록 그보다 먼저 그린다.
                     if remote_slots.iter().any(|(rid, ..)| rid == fid) {
-                        g.rect(*fx, *fy, 3.0, *fbox_h, theme::accent());
+                        if let Some(identity) = pane_identities.get(fid) {
+                            // 셀 시작선 바로 왼쪽의 padding 안에 둔다. 바깥 focus
+                            // ring과 겹치지 않고 첫 글자/ANSI 배경도 가리지 않는다.
+                            let ribbon_x = fx + PANE_INNER_X - 3.0;
+                            g.rect(
+                                ribbon_x,
+                                *fy,
+                                3.0,
+                                *fbox_h,
+                                identity.machine.marker(),
+                            );
+                        }
                     }
                     // pane 테두리 — 포커스된(active) claude pane 만 자기 학생 고정색
                     // 테두리(지금 어느 pane 을 보고 있는지 한눈에). 비활성·순수 셸은

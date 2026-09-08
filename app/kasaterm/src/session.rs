@@ -399,6 +399,13 @@ impl App {
                         Err(_) => break,
                     }
                 }
+                // 같은 pane id에 로컬/새 원격 세션이 이미 앉았으면, 여기까지
+                // 도착한 갱신은 갈아끼우기 전 세션의 마지막 프레임이다. EOF에만
+                // 세대 가드를 두면 `to ..` 직후 새 로컬 화면을 옛 원격 한 프레임이
+                // 다시 덮는다.
+                if pane_replaced(&update.pane_id, &sess_weak) {
+                    return;
+                }
                 // 세션 진입 즉시 감지(거노): dirty 행에 statusline 세션 id 마커가 있으면
                 // 그 자리에서 rebind — 3s 폴러를 기다리지 않는다. 마커는 세션 화면의
                 // 일부라 agents 피커로 진입한 첫 리드로우에 반드시 실려 온다. '⟦' 스캔은
