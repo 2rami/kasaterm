@@ -27,7 +27,7 @@
   #term {
     position: absolute;
     inset: calc(50px + env(safe-area-inset-top, 0px)) 8px
-      calc(var(--bar) + env(safe-area-inset-bottom, 0px)) 8px;
+      calc(var(--bar) + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px)) 8px;
   }
   :root { --bar: 8px; }
   body.has-bar { --bar: 58px; }
@@ -176,11 +176,15 @@
   /* 격자 전환은 성격이 다른 버튼 — 키가 아니라 모드다. accent 로 가른다. */
   #fitbtn { flex: 0 0 52px; color: #7aa2f7; border-color: rgba(122, 162, 247, .35); }
 </style>
+<link rel="stylesheet" href="term/chrome.css">
 </head>
 <body>
 <div id="term"></div>
-<div id="status" role="button" aria-haspopup="dialog" aria-expanded="false" aria-label="세션 전환">
-  <img id="avatar" alt=""><span id="ahole">❯</span><span id="who"></span><span id="whot"></span><span id="chev">▼</span>
+<div id="status" class="term-heading" role="button" tabindex="0" aria-haspopup="dialog" aria-expanded="false" aria-label="세션 전환">
+  <span class="term-avatar"><img id="avatar" alt=""><span id="ahole"></span></span>
+  <span class="term-labels"><span id="who"></span><span id="whot"></span></span>
+  <span class="term-context"><span id="machine-badge"><span id="machine-name"></span></span><span id="model-label"></span><span id="pane-state"></span></span>
+  <svg id="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
 </div>
 <div id="dim"></div>
 <div id="sheet" role="dialog" aria-label="세션 목록"><div id="rows"></div></div>
@@ -193,6 +197,8 @@
   <button data-seq="\x1b[B" aria-label="아래">↓</button>
 </div>
 <script src="term/xterm.js"></script>
+<script src="term/viewport.js"></script>
+<script src="term/chrome.js"></script>
 <script>
 (async () => {
   // 주소 접두(`/u/<slug>` · `/u/<slug>/m/<기계>` · 없음)를 그대로 물려받는다 — fetch 도 WS 도
@@ -279,45 +285,71 @@
   term.loadAddon(fit);
   term.open(document.getElementById('term'));
   fit.fit();
+  const chrome = KasaTermChrome.create({ root: ROOT, pane: selfId,
+    onTheme: tokens => { term.options.theme = { ...term.options.theme, ...KasaTermChrome.xtermTheme(tokens) }; },
+  });
 
-  // 미러 모드에서는 PTY 크기를 우리가 바꾸면 안 된다 — 같은 PTY 를 보고 있는
-  // kasaterm pane 의 화면이 같이 깨진다. 서버가 알려준 크기에 우리를 맞춘다.
-  let mirror = false;
-  let cols = 0;
-  let orig = null;      // 미러가 원래 쓰던 격자 — 되돌릴 때 쓴다
-  let fitted = false;
-
-  // 미러는 격자를 못 줄이므로, 대신 우리 글자를 줄여 그 격자를 화면 안에 넣는다.
-  // 안 그러면 80열이 폰 폭을 넘어 가로 스크롤이 생긴다(§⑤ 실패).
-  const fitFontToCols = () => {
-    if (!mirror || !cols) return;
-    const avail = document.getElementById('term').clientWidth;
-    const size = Math.max(5, Math.min(13, Math.floor(avail / (cols * 0.62))));
-    if (size !== term.options.fontSize) {
-      term.options.fontSize = size;
-      term.resize(cols, term.rows);
+  const terminalRoot = document.getElementById('term');
+  const BASE_FONT = 13;
+  let baseCell = null;
+  let mirror = false, confirmed = null, orig = null, fitted = false, legacyTarget = null;
+  function rememberBaseCell() {
+    const cell = term._core?._renderService?.dimensions?.css?.cell;
+    if (term.options.fontSize === BASE_FONT && cell?.width > 0 && cell?.height > 0) {
+      baseCell = { width: cell.width, height: cell.height };
     }
-  };
-
+    return baseCell;
+  }
+  function targetSize() {
+    const cell = baseCell || rememberBaseCell();
+    if (!cell) return null;
+    const area = KasaViewport.visibleArea(terminalRoot);
+    const scrollbar = term._core?.viewport?.scrollBarWidth || 0;
+    return {
+      cols: Math.floor(Math.max(0, area.width - scrollbar) / cell.width),
+      rows: Math.floor(area.height / cell.height),
+    };
+  }
+  function containConfirmed() {
+    if (!confirmed || !baseCell) return;
+    const area = KasaViewport.visibleArea(terminalRoot);
+    if (!area.width || !area.height) return;
+    const scrollbar = term._core?.viewport?.scrollBarWidth || 0;
+    const scale = Math.min(1,
+      Math.max(0, area.width - scrollbar) / (confirmed.cols * baseCell.width),
+      area.height / (confirmed.rows * baseCell.height));
+    // Change the font itself: CSS scaling would leave xterm mouse coordinates unscaled.
+    const size = Math.max(0.1, Math.floor(BASE_FONT * scale * 100) / 100);
+    if (size !== term.options.fontSize) term.options.fontSize = size;
+  }
+  rememberBaseCell();
+  const viewport = KasaViewport.create({
+    measure: targetSize,
+    onState: (state) => {
+      if (!state.ready) return;
+      const active = state.capable ? state.granted && state.wanted : fitted;
+      fitBtn.setAttribute('aria-pressed', String(active));
+      fitBtn.style.background = active ? 'rgba(122, 162, 247, .28)' : '';
+      fitBtn.setAttribute('aria-label', active ? '이 화면 크기 맞춤 해제' : '이 화면 크기로 맞추기');
+    },
+  });
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  // 쿼리를 재조립하지 않고 그대로 넘긴다 — 여기서도 `%` 가 한 번 더 깎일 자리다.
   const WS_URL = `${proto}://${location.host}${ROOT}/term/ws${location.search}`;
-  // 끊기면 다시 붙는다(grid.html 과 같은 규칙). 화면을 끄거나 앱을 바꾸면 소켓이
-  // 죽는데 예전엔 「끊겼습니다」만 찍고 새로고침을 기다렸다. `gone`(세션이 정말
-  // 끝남)만 멈춘다. 핸들러는 아래에서 채우고, connect 가 새 소켓마다 다시 건다.
   let ws = null;
   let gone = false, backoff = 1000, retryTimer = null, reconnects = 0;
   const handlers = {};
   const connect = () => {
-    if (gone) return;
+    if (gone || document.visibilityState !== 'visible') return;
     if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
     clearTimeout(retryTimer);
-    ws = new WebSocket(WS_URL);
-    ws.binaryType = 'arraybuffer';
-    ws.onmessage = handlers.message;
-    ws.onopen = handlers.open;
-    ws.onclose = handlers.close;
-    ws.onerror = handlers.error;
+    const socket = new WebSocket(WS_URL);
+    ws = socket;
+    mirror = false; confirmed = null; orig = null; fitted = false; legacyTarget = null;
+    viewport.bind(socket);
+    socket.binaryType = 'arraybuffer';
+    for (const [event, handler] of Object.entries(handlers)) {
+      socket[`on${event}`] = (e) => { if (ws === socket) handler(e, socket); };
+    }
   };
   const schedule = () => {
     clearTimeout(retryTimer);
@@ -326,89 +358,72 @@
     backoff = Math.min(backoff * 2, 10000);
   };
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { backoff = 1000; connect(); }
+    viewport.visibilityChanged();
+    if (document.visibilityState === 'visible') {
+      backoff = 1000; connect(); syncSize();
+    } else if (mirror && fitted && !viewport.state().capable) {
+      // Old servers only restore an explicit force-fit safely when its socket leaves.
+      ws?.close();
+    }
   });
   window.addEventListener('online', () => { backoff = 1000; connect(); });
-  window.addEventListener('pageshow', (e) => { if (e.persisted) connect(); });
-
-  handlers.message = (e) => {
-    // 텍스트 = 제어 메시지, 바이너리 = PTY 바이트. 채널이 갈려 있어 파싱이 없다.
+  window.addEventListener('pageshow', () => { connect(); viewport.visibilityChanged(); });
+  window.addEventListener('pagehide', () => {
+    viewport.release();
+    const socket = ws;
+    viewport.disconnected(socket);
+    ws = null;
+    socket?.close();
+    clearTimeout(retryTimer);
+  });
+  handlers.message = (e, socket) => {
     if (typeof e.data === 'string') {
-      const m = JSON.parse(e.data);
+      let m;
+      try { m = JSON.parse(e.data); } catch { return; }
       if (m.t === 'gone') {
         gone = true;
+        viewport.release();
         term.write('\r\n\x1b[33m● 이 세션은 끝났어요 — 위 이름을 눌러 다른 pane 을 고르세요\x1b[0m\r\n');
-        return;
-      }
-      if (m.t === 'size') {
+      } else if (m.t === 'size') {
         mirror = !!m.mirror;
-        if (m.id) { selfId = m.id; refreshChip(); }
-        // 서버가 크기 변경을 밀어 준 경우(kasaterm divider·다른 미러): 내가 ⤢ 로
-        // 줄여 둔 격자를 남이 되찾은 것이니 버튼 상태도 함께 접는다 — 안 접으면
-        // 다음 회전(syncSize)이 또 줄이며 씨름하고, 그 씨름 동안 xterm 격자와
-        // PTY 격자가 어긋나 글자가 한 자씩 세로로 꺾인다.
-        if (fitted && (m.cols !== term.cols || m.rows !== term.rows)) {
-          fitted = false;
-          fitBtn.setAttribute('aria-pressed', 'false');
-          fitBtn.style.background = '';
-        }
-        cols = m.cols;
+        if (m.id) { selfId = m.id; refreshChip(); chrome.setPane(m.id); }
         if (!orig) orig = { cols: m.cols, rows: m.rows };
+        if (fitted && legacyTarget && (m.cols !== legacyTarget.cols || m.rows !== legacyTarget.rows)) fitted = false;
+        confirmed = { cols: m.cols, rows: m.rows };
+        rememberBaseCell();
         term.resize(m.cols, m.rows);
-        fitFontToCols();
-        // 이름은 /term/panes 가 오면 덮어쓴다. id 는 사람 말이 아니니 안 보여준다.
+        viewport.receive(m, socket);
+        containConfirmed();
         if (mirror && !named) setWho('');
-        // 새 셸은 이미 우리 크기로 뜨므로 맞출 것이 없다.
-        if (!mirror) { setWho(''); fitBtn.style.display = 'none'; }
-        // 붙는 것만으로 PTY 를 줄이지 않는다 — 데스크톱 pane 이 같이 좁아져서
-        // 「폰으로 봤더니 내 화면이 줄었다」가 됐다(2026-08-20 지적). 줄여서
-        // 크게 볼지는 ⤢ 로 사람이 정하고, 기본은 글자 축소(fitFontToCols)다.
+        fitBtn.style.display = mirror ? '' : 'none';
+        if (!mirror) setWho('');
+      } else if (m.t === 'viewport') {
+        viewport.receive(m, socket);
+        containConfirmed();
       }
       return;
     }
     term.write(new Uint8Array(e.data));
   };
-
   const enc = new TextEncoder();
   const send = (s) => { if (ws && ws.readyState === 1) ws.send(enc.encode(s)); };
   term.onData(send);
-
-  // 넓은 pane(193열)은 폰에서 축소로 안 들어간다 — 읽을 만한 크기면 1158px 가
-  // 필요한데 화면은 374px 다. 그래서 PTY 자체를 폰 격자로 줄이는 길을 열어 두되,
-  // ⚠️ **누른 순간에만** 한다. 자동으로 하면 폰으로 잠깐 들여다본 것만으로 데스크톱
-  // kasaterm 쪽 화면이 같이 줄어든다.
-  const applyFit = () => {
-    if (!ws || ws.readyState !== 1) return;
-    term.options.fontSize = 13;
-    if (fitted) {
-      fit.fit();
-      ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows, force: true }));
-    } else if (orig) {
-      term.resize(orig.cols, orig.rows);
-      ws.send(JSON.stringify({ t: 'resize', cols: orig.cols, rows: orig.rows, force: true }));
-      cols = orig.cols;
-      fitFontToCols();
-    }
-    fitBtn.setAttribute('aria-pressed', String(fitted));
-    fitBtn.style.background = fitted ? 'rgba(122, 162, 247, .28)' : '';
-  };
   fitBtn.addEventListener('pointerdown', (ev) => {
     ev.preventDefault();
-    fitted = !fitted;
-    applyFit();
-  });
-
-  // 폰 탭이 숨거나 닫히면 ⤢ 로 줄여 둔 격자를 즉시 돌려준다 — WS 가 TCP 로는
-  // 한참 살아 있어서 서버의 끊김-복원만 믿으면 그동안 데스크톱 pane 이 좁다.
-  const restoreGrid = () => {
-    if (mirror && fitted && orig && ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ t: 'resize', cols: orig.cols, rows: orig.rows, force: true }));
+    if (!ws || ws.readyState !== 1 || !viewport.state().ready || !mirror) return;
+    if (viewport.state().capable) {
+      if (viewport.state().granted && viewport.state().wanted) viewport.setWanted(false);
+      else viewport.acquire();
+    } else {
+      fitted = !fitted;
+      const target = fitted ? targetSize() : orig;
+      if (!target) return;
+      legacyTarget = { cols: Math.max(20, target.cols), rows: Math.max(5, target.rows) };
+      ws.send(JSON.stringify({ t: 'resize', ...legacyTarget, force: true }));
+      fitBtn.setAttribute('aria-pressed', String(fitted));
+      fitBtn.style.background = fitted ? 'rgba(122, 162, 247, .28)' : '';
     }
-  };
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') restoreGrid();
   });
-  window.addEventListener('pagehide', () => { restoreGrid(); if (ws) ws.close(); });
 
   // 스와이프 스크롤은 xterm 내장 터치에 맡긴다(viewport.handleTouchStart/Move).
   // 여기서 터치를 가로채 합성 WheelEvent 로 바꾸는 시도는 두 번 죽는다 —
@@ -600,6 +615,7 @@
         me.title || '',
         me.color,
       );
+      chrome.updatePane(me);
       statusEl.classList.toggle('waiting', me.status === 'waiting');
     }
   };
@@ -609,20 +625,18 @@
   }).catch(() => {});
 
   const syncSize = () => {
-    if (mirror) {
-      if (fitted) applyFit();
-      else fitFontToCols();
-      return;
-    }
-    if (!ws || ws.readyState !== 1) return;
-    fit.fit();
-    ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
+    rememberBaseCell();
+    viewport.schedule();
+    containConfirmed();
   };
   handlers.open = () => {
     // 재접속이면 곧 올 스냅샷 앞에 화면을 비운다 — 옛 화면 위에 겹쳐 그리면 줄이 섞인다.
     if (reconnects > 0) term.reset();
     reconnects++;
     backoff = 1000;
+    term.options.fontSize = BASE_FONT;
+    term._core?._charSizeService?.measure();
+    rememberBaseCell();
     term.focus();
     setTimeout(syncSize, 0);
   };
@@ -632,7 +646,12 @@
   // 두므로, 폰트가 바뀐 뒤 다시 재지 않으면 글자가 칸에서 어긋난 채 남는다.
   if (document.fonts?.load) {
     document.fonts.load(`${term.options.fontSize}px KasaTerm`)
-      .then(() => { term.clearTextureAtlas?.(); syncSize(); })
+      .then(() => {
+        term.options.fontSize = BASE_FONT;
+        term._core?._charSizeService?.measure();
+        term.clearTextureAtlas?.();
+        requestAnimationFrame(() => { rememberBaseCell(); syncSize(); });
+      })
       .catch(() => {});
   }
 
@@ -642,7 +661,9 @@
   if (vv) {
     const lift = () => {
       const hidden = Math.max(0, innerHeight - vv.height - vv.offsetTop);
+      document.documentElement.style.setProperty('--keyboard-inset', `${hidden}px`);
       bar.style.transform = `translateY(${-hidden}px)`;
+      syncSize();
     };
     vv.addEventListener('resize', lift);
     vv.addEventListener('scroll', lift);
@@ -650,7 +671,9 @@
   }
 
   // 헤더는 지우지 않는다 — 연결이 죽어도 헤더가 곧 다른 pane 으로 가는 길이다.
-  handlers.close = () => {
+  handlers.close = (_event, socket) => {
+    viewport.disconnected(socket);
+    ws = null;
     if (gone) return;
     term.write('\r\n\x1b[31m● 연결이 끊겼어요 — 다시 붙는 중…\x1b[0m\r\n');
     schedule();

@@ -1,0 +1,53 @@
+:root {
+  --kt-bg:#252c35;--kt-fg:#fff;--kt-surface:#1a1d23;
+  --kt-surface-hover:#303843;--kt-surface-active:#3c4654;
+  --kt-border:#505c6e6e;--kt-accent:#5a8ce6;--kt-text:#eceef3;
+  --kt-text-dim:#a0a6b0;--kt-text-mute:#787e8a;
+  --kt-attention:#fa8c2a;--kt-success:#3fb950;--kt-danger:#e0584e;
+  --kt-radius-sm:6px;--kt-radius-md:12px;--term-header:64px;
+}
+html,body{background:var(--kt-bg);color:var(--kt-text)}
+.term-heading,#status.term-heading {
+  box-sizing:border-box;position:fixed;top:0;left:0;right:0;bottom:auto;
+  display:flex;align-items:center;gap:12px;min-height:var(--term-header);
+  height:calc(var(--term-header) + env(safe-area-inset-top,0px));
+  padding:env(safe-area-inset-top,0px) 16px 0;
+  color:var(--kt-text);background:var(--kt-bg);border-bottom:1px solid var(--kt-border);
+  font:14px/1.3 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  text-decoration:none;z-index:5;
+}
+.term-avatar{flex:none;width:34px;height:34px}
+.term-heading #avatar,.term-heading #ahole{width:34px;height:34px;border-radius:var(--kt-radius-md)}
+.term-heading #avatar{object-fit:cover}
+.term-heading #ahole{align-items:center;justify-content:center;background:var(--kt-surface-hover);color:var(--kt-text-dim)}
+.term-heading #ahole::after{content:"";width:21px;height:21px;background:currentColor;mask:var(--harness-icon) center/contain no-repeat}
+.term-labels{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px}
+.term-heading #who{font-size:14px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.term-heading #whot{font-size:12px;color:var(--kt-text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.term-context{display:flex;flex:none;align-items:flex-end;flex-direction:column;gap:4px;max-width:35%}
+#machine-badge{display:flex;align-items:center;gap:5px;min-width:0;max-width:100%;color:var(--kt-text-dim);font-size:11px}
+#machine-badge::before{content:"";width:13px;height:13px;flex:none;background:currentColor;mask:var(--machine-icon) center/contain no-repeat}
+#machine-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#model-label{color:var(--kt-text-mute);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+#pane-state{color:var(--kt-text-dim);font-size:11px;white-space:nowrap}
+#pane-state:empty{display:none}
+#pane-state[data-state="waiting"]{color:var(--kt-attention)}
+#pane-state[data-state="working"],#pane-state[data-state="busy"],#pane-state[data-state="running"]{color:var(--kt-accent)}
+#pane-state[data-state="done"],#pane-state[data-state="completed"]{color:var(--kt-success)}
+.term-heading #chev{width:14px;height:14px;flex:none;color:var(--kt-text-mute)}
+.term-heading:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--kt-accent);outline-offset:-2px}
+body #term{top:calc(var(--term-header) + env(safe-area-inset-top,0px) + 8px)}
+body #wrap,body #shotwrap{top:calc(var(--term-header) + env(safe-area-inset-top,0px) + 8px);background:var(--kt-bg)}
+body #status:not(.term-heading),body #bar{background:var(--kt-bg);border-top:1px solid var(--kt-border);color:var(--kt-text-dim)}
+body #status a,body #status button,body #bar button{color:var(--kt-text);border-color:var(--kt-border);background:var(--kt-surface-hover)}
+body #fitbtn,body #status button.on{color:var(--kt-accent)}
+body #sheet{background:var(--kt-bg);border-color:var(--kt-border)}
+body .shead,body .srow{color:var(--kt-text)}
+body .shead .cwd,body .srow .sub{color:var(--kt-text-dim)}
+body .srow:active,body .srow.cur{background:var(--kt-surface-hover)}
+body #shotnote{background:var(--kt-surface-hover);color:var(--kt-attention)}
+body .kg{--kg-bg:var(--kt-bg);--kg-fg:var(--kt-fg)}
+body .kg-cursor{background:var(--kt-accent)}
+body .kg-input.picture-input{background:var(--kt-surface-hover);color:var(--kt-text);border-color:var(--kt-border);caret-color:var(--kt-accent)}
+@media(min-width:800px){:root{--term-header:56px}.term-context{flex-direction:row;align-items:center;gap:16px;max-width:48%}.term-heading #whot{font-size:13px}}
+@media(max-width:420px){.term-heading,#status.term-heading{gap:9px;padding-left:10px;padding-right:10px}.term-context{max-width:31%}#model-label{display:none}}

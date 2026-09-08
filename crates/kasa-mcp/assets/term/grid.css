@@ -1,5 +1,10 @@
 /* 셀 그리드 렌더러 스타일. xterm.css 를 대체한다 — 여기는 캔버스가 아니라 DOM 이라
    글자 선택·복사가 브라우저 기본으로 동작한다(xterm 은 자체 구현이 필요했다). */
+@font-face {
+  font-family: 'KasaTerm';
+  src: url('font.woff2') format('woff2');
+  font-display: swap;
+}
 .kg {
   --kg-bg: #12161c;
   --kg-fg: #c8d0d9;

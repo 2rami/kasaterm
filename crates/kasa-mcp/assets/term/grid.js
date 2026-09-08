@@ -53,17 +53,43 @@
     view.appendChild(ruler);
 
     let rows = [];       // 행 DOM
+    let rowRuns = [];
     let cols = 0, rowCount = 0;
     let cellW = 8, cellH = 17;
+    let cursor = null;
+
+    function positionCursor() {
+      if (!cursor) return;
+      const [row, col, visible] = cursor;
+      cursorEl.style.display = visible && row < rowCount ? '' : 'none';
+      cursorEl.style.transform = `translate(${col * cellW}px, ${row * cellH}px)`;
+      cursorEl.style.width = `${cellW}px`;
+      cursorEl.style.height = `${cellH}px`;
+    }
 
     function measure() {
-      const r = ruler.getBoundingClientRect();
+      let r = ruler.getBoundingClientRect();
       // fitWidth 가 zoom 을 걸어 두면 잰 값도 줄어 있다 — 셀 크기는 zoom 이전 값이어야
       // 거울이 서버에 알리는 폭이 안 흔들린다(줄어든 셀로 재면 폭을 더 크게 알리고,
       // 그 폭으로 접히면 zoom 이 풀려 다시 재는 되먹임이 초당 수백 프레임을 만들었다).
-      const z = parseFloat(view.style.zoom) || 1;
+      let z = parseFloat(view.style.zoom) || 1;
+      // Picture mode hides the grid before its first frame; measure its font
+      // outside that hidden ancestor instead of retaining guessed cell sizes.
+      if (!r.width || !r.height) {
+        const probe = ruler.cloneNode(true);
+        const style = getComputedStyle(view);
+        for (const property of ['fontFamily', 'fontSize', 'lineHeight', 'fontWeight', 'letterSpacing']) {
+          probe.style[property] = style[property];
+        }
+        document.body.appendChild(probe);
+        r = probe.getBoundingClientRect();
+        probe.remove();
+        z = 1;
+      }
       if (r.width > 0) cellW = r.width / z;
       if (r.height > 0) cellH = r.height / z;
+      if (cols) view.style.width = `${cols * cellW}px`;
+      positionCursor();
     }
 
     function resize(c, r) {
@@ -71,6 +97,7 @@
       cols = c; rowCount = r;
       for (const el of rows) el.remove();
       rows = [];
+      rowRuns = [];
       for (let i = 0; i < r; i++) {
         const d = document.createElement('div');
         d.className = 'kg-row';
@@ -109,18 +136,12 @@
       for (const [i, runs] of msg.dirty) {
         const row = rows[i];
         if (!row) continue;
+        rowRuns[i] = runs;
         if (runs.length === 0) row.replaceChildren();
         else row.replaceChildren(...runs.map(runToSpan));
       }
-      const [cr, cc] = msg.cursor;
-      if (msg.cursorVisible && cr < rowCount) {
-        cursorEl.style.display = '';
-        cursorEl.style.transform = `translate(${cc * cellW}px, ${cr * cellH}px)`;
-        cursorEl.style.width = `${cellW}px`;
-        cursorEl.style.height = `${cellH}px`;
-      } else {
-        cursorEl.style.display = 'none';
-      }
+      cursor = [msg.cursor[0], msg.cursor[1], msg.cursorVisible];
+      positionCursor();
     }
 
     return {
@@ -130,6 +151,14 @@
       get rows() { return rowCount; },
       get cell() { return { w: cellW, h: cellH }; },
       remeasure: measure,
+      setTheme(tokens) {
+        if (Array.isArray(tokens?.ansi) && tokens.ansi.length === 16) {
+          tokens.ansi.forEach((color, index) => {
+            if (typeof color === 'string' && CSS.supports('color', color)) BASE16[index] = color;
+          });
+          rows.forEach((row, index) => row.replaceChildren(...(rowRuns[index] || []).map(runToSpan)));
+        }
+      },
     };
   }
 

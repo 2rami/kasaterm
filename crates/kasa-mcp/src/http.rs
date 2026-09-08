@@ -4127,6 +4127,39 @@ async fn term_grid_js() -> impl IntoResponse {
     )
 }
 
+async fn term_viewport_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        include_str!("../assets/term/viewport.js"),
+    )
+}
+
+async fn term_chrome_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        include_str!("../assets/term/chrome.js"),
+    )
+}
+
+async fn term_chrome_css() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../assets/term/chrome.css"),
+    )
+}
+
+async fn term_icon(AxPath(name): AxPath<String>) -> axum::response::Response {
+    let icon = match name.as_str() {
+        "claude.svg" => include_str!("../../../app/kasaterm/assets/icons/claude.svg"),
+        "codex.svg" => include_str!("../../../app/kasaterm/assets/icons/codex.svg"),
+        "terminal.svg" => include_str!("../../../app/kasaterm/assets/icons/terminal.svg"),
+        "server.svg" => include_str!("../../../app/kasaterm/assets/icons/server.svg"),
+        "laptop.svg" => include_str!("../../../app/kasaterm/assets/icons/laptop.svg"),
+        _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
+    };
+    ([(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")], icon).into_response()
+}
+
 async fn term_grid_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
@@ -6440,7 +6473,12 @@ async fn term_ws_run(
                             let (offset, hist) = sess_sz.view_state();
                             // 데스크톱이 위로 올라가 있으면 GUI 프레임은 지난 줄 창이다 — 거울에는
                             // 입력상자·상태줄이 있는 바닥 화면을 통째로 다시 떠서 준다.
-                            let u = if offset > 0 { Box::new(sess_sz.live_screen()) } else { u };
+                            // A reader frame queued before resize can arrive after its full snapshot.
+                            let u = if offset > 0 || (u.cols, u.rows) != sess_sz.size() {
+                                Box::new(sess_sz.live_screen())
+                            } else {
+                                u
+                            };
                             let vc = view_cols.load(std::sync::atomic::Ordering::Relaxed);
                             if hist > last_hist {
                                 // 이번 프레임에 스크롤백으로 들어간 줄 — 화면보다 먼저 보내야
@@ -6468,6 +6506,11 @@ async fn term_ws_run(
                         }
                         Frame::Reflow => {
                             let vc = view_cols.load(std::sync::atomic::Ordering::Relaxed);
+                            if web_src.as_ref().is_some_and(|src| {
+                                (src.meta.cols, src.meta.rows) != sess_sz.size()
+                            }) {
+                                web_src = Some(WebSrc::from_full(&sess_sz.live_screen()));
+                            }
                             let Some(src) = web_src.as_ref() else { continue };
                             // 폭이 원본으로 돌아가도 통째로 보낸다 — 접힌 격자를 걷어야 한다.
                             let msg = if vc > 0 && vc != src.meta.cols {
@@ -6514,6 +6557,7 @@ async fn term_ws_run(
     });
     let pong_shell = last_pong.clone();
     let mut to_shell = tokio::spawn(async move {
+        let mut logical_viewport = false;
         while let Some(Ok(msg)) = ws_rx.next().await {
             match msg {
                 // 키 입력은 binary — 텍스트 채널과 섞이지 않아 파싱이 필요 없다.
@@ -6547,6 +6591,9 @@ async fn term_ws_run(
                     // 그 폭으로 다시 접어 보낸다. 0 이면 원본 그대로.
                     if v.get("t").and_then(|x| x.as_str()) == Some("view") {
                         let n = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(0).min(400) as u16;
+                        if logical_viewport && n != 0 {
+                            continue;
+                        }
                         // 같은 폭을 되풀이해 알리면 무시 — 프레임마다 다시 접어 보내는 되먹임 차단.
                         if mirrored && view_cols_in.swap(n, std::sync::atomic::Ordering::Relaxed) != n {
                             let _ = btx_shell.send(Frame::Reflow).await;
@@ -6554,10 +6601,16 @@ async fn term_ws_run(
                         continue;
                     }
                     if v.get("t").and_then(|x| x.as_str()) == Some("viewport") {
+                        let mut clear_reflow = false;
                         let granted = match v.get("op").and_then(|x| x.as_str()) {
                             Some("acquire" | "resize") => {
                                 viewport_dimensions(&v).map_or(false, |(cols, rows)| {
                                     let result = if v["op"] == "acquire" {
+                                        // Legacy wrapping must not reshape a newly negotiated PTY grid.
+                                        logical_viewport = true;
+                                        clear_reflow = view_cols_in.swap(
+                                            0, std::sync::atomic::Ordering::Relaxed,
+                                        ) != 0;
                                         sess_in.acquire_viewer_size(viewport_token, cols, rows)
                                     } else {
                                         sess_in.resize_viewer_size(viewport_token, cols, rows)
@@ -6571,6 +6624,9 @@ async fn term_ws_run(
                             }
                             _ => false,
                         };
+                        if clear_reflow {
+                            let _ = btx_shell.send(Frame::Reflow).await;
+                        }
                         let reply = serde_json::json!({"t": "viewport", "granted": granted});
                         let _ = btx_shell.send(Frame::Control(reply.to_string())).await;
                         continue;
@@ -6892,6 +6948,10 @@ pub fn spawn_http_server_opts(
                     .route("/term/xterm.css", get(term_asset_css))
                     .route("/term/grid", get(term_grid_page))
                     .route("/term/grid.js", get(term_grid_js))
+                    .route("/term/viewport.js", get(term_viewport_js))
+                    .route("/term/chrome.js", get(term_chrome_js))
+                    .route("/term/chrome.css", get(term_chrome_css))
+                    .route("/term/icon/{name}", get(term_icon))
                     .route("/term/grid.css", get(term_grid_css))
                     .route("/term/font.woff2", get(term_asset_font))
                     .route("/term/avatar/{slug}", get(term_avatar))
@@ -7445,6 +7505,88 @@ pub fn spawn_http_server_opts(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn viewport_quiet_grid_tracks_acquire_resize_release_after_legacy_view() {
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::{json, Value};
+        use std::sync::Arc;
+        use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
+
+        async fn next_grid(
+            ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+        ) -> Value {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let value: Value = serde_json::from_str(&text).unwrap();
+                    if value["t"] == "grid" {
+                        return value;
+                    }
+                }
+                panic!("websocket ended before grid");
+            }).await.expect("quiet PTY did not publish a grid")
+        }
+
+        async fn assert_full_grid(
+            ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+            cols: u16,
+            rows: u16,
+        ) {
+            let frame = next_grid(ws).await;
+            assert_eq!((frame["cols"].as_u64(), frame["rows"].as_u64()),
+                (Some(cols as u64), Some(rows as u64)), "{frame}");
+            let dirty = frame["dirty"].as_array().expect("grid has rows");
+            assert_eq!(dirty.len(), rows as usize, "every row must arrive without PTY output");
+            for (index, row) in dirty.iter().enumerate() {
+                assert_eq!(row[0], index);
+            }
+            // A delayed reader/control frame must not undo the newly delivered dimensions.
+            while let Ok(Some(Ok(Message::Text(text)))) = tokio::time::timeout(
+                std::time::Duration::from_millis(60), ws.next(),
+            ).await {
+                let value: Value = serde_json::from_str(&text).unwrap();
+                if value["t"] == "grid" {
+                    assert_eq!((value["cols"].as_u64(), value["rows"].as_u64()),
+                        (Some(cols as u64), Some(rows as u64)), "stale grid: {value}");
+                }
+            }
+        }
+
+        for legacy_cols in [0, 162] {
+            let id = format!("quiet-viewport-test-{}", uuid::Uuid::new_v4());
+            let (_events_tx, events_rx) = crossbeam_channel::unbounded();
+            let sess = Arc::new(kasa_pty::PtySession::start_external(
+                kasa_pty::PtyOptions { pane_id: id.clone(), cols: 21, rows: 6, ..Default::default() },
+                kasa_pty::ExternalIo {
+                    events: events_rx,
+                    writer: Box::new(std::io::sink()),
+                    on_resize: Arc::new(|_, _| {}),
+                },
+            ).unwrap());
+            kasa_pty::register_session(&id, &sess);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let router = axum::Router::new()
+                .route("/term/ws", axum::routing::get(super::term_ws_handler));
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let (mut ws, _) = tokio_tungstenite::connect_async(
+                format!("ws://{addr}/term/ws?pane={id}&grid=1"),
+            ).await.unwrap();
+            assert_full_grid(&mut ws, 21, 6).await;
+            if legacy_cols != 0 {
+                ws.send(Message::Text(json!({"t":"view", "cols":legacy_cols}).to_string().into()))
+                    .await.unwrap();
+                assert_full_grid(&mut ws, legacy_cols, 6).await;
+            }
+            for (op, cols, rows) in [("acquire", 162, 43), ("resize", 49, 45), ("release", 21, 6)] {
+                ws.send(Message::Text(json!({"t":"viewport", "op":op, "cols":cols, "rows":rows})
+                    .to_string().into())).await.unwrap();
+                assert_full_grid(&mut ws, cols, rows).await;
+            }
+            ws.close(None).await.unwrap();
+            server.abort();
+        }
+    }
+
     #[tokio::test]
     async fn viewport_websocket_disconnect_releases_only_its_own_lease() {
         use futures_util::{SinkExt, StreamExt};

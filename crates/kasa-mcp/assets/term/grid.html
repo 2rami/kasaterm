@@ -8,13 +8,21 @@
 <style>
   html,body{margin:0;background:#12161c;color:#c8d0d9;
     font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overscroll-behavior:none}
-  #wrap{overflow:auto;-webkit-overflow-scrolling:touch}
+  #wrap{position:fixed;left:0;right:0;top:0;
+    bottom:calc(44px + env(safe-area-inset-bottom) + var(--keyboard-inset,0px));
+    overflow:auto;-webkit-overflow-scrolling:touch}
   /* 그림 모드 — PNG 를 폰 폭에 맞춰 두고 두 손가락으로 키운다. 브라우저 핀치는 메타로
      꺼 두었으므로(입력창 포커스 때 화면이 튀는 것을 막는다) 배율은 우리가 잰다. */
-  #shotwrap{position:fixed;left:0;right:0;top:0;bottom:calc(44px + env(safe-area-inset-bottom));
+  #shotwrap{position:fixed;left:0;right:0;top:0;bottom:calc(44px + env(safe-area-inset-bottom) + var(--keyboard-inset,0px));
     overflow:auto;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y;background:#12161c}
   #shot{display:block;width:100%;max-width:none;user-select:none;-webkit-user-select:none}
   #shotnote{position:absolute;left:0;right:0;top:0;padding:10px 12px;background:#1a2130;color:#e0af68;font-size:13px}
+  body.picture-mode #shotwrap{bottom:calc(100px + env(safe-area-inset-bottom) + var(--keyboard-inset,0px))}
+  .kg-input.picture-input{position:fixed;top:auto;left:10px;right:10px;
+    bottom:calc(52px + env(safe-area-inset-bottom) + var(--keyboard-inset,0px));
+    box-sizing:border-box;width:calc(100% - 20px);height:42px;padding:10px 12px;
+    border:1px solid #46546a;border-radius:8px;background:#1a2130;color:#c8d0d9;
+    caret-color:#7aa2f7;font-size:16px;line-height:20px;z-index:3}
   #status{position:fixed;left:0;right:0;bottom:0;display:flex;align-items:center;gap:4px;
     padding:0 6px;padding-bottom:env(safe-area-inset-bottom);min-height:44px;background:#1a2130;
     font-size:12px;color:#7aa2f7}
@@ -23,6 +31,13 @@
   #status button.on{color:#7aa2f7;text-shadow:0 0 6px #7aa2f7}
   #st{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style>
+<link rel="stylesheet" href="chrome.css">
+<a id="term-heading" class="term-heading" href="./" aria-label="세션 목록">
+  <span class="term-avatar"><img id="avatar" alt=""><span id="ahole"></span></span>
+  <span class="term-labels"><span id="who">터미널</span><span id="whot"></span></span>
+  <span class="term-context"><span id="machine-badge"><span id="machine-name"></span></span><span id="model-label"></span><span id="pane-state"></span></span>
+  <svg id="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+</a>
 <div id="wrap"></div>
 <div id="shotwrap" hidden><img id="shot" alt=""><div id="shotnote" hidden></div></div>
 <div id="status">
@@ -32,12 +47,15 @@
   <button id="app" type="button" title="이 학생을 앱에서 열기" hidden>앱</button>
 </div>
 <script src="grid.js"></script>
+<script src="viewport.js"></script>
+<script src="chrome.js"></script>
 <script>
 // 주소 접두(`/u/<slug>` · `/u/<slug>/m/<기계>` · 없음)를 그대로 물려받는다 — WS 도 같은 문으로.
 const ROOT = location.pathname.replace(/\/term\/grid\/?$/, '');
 // 허브: 유저 주소 아래면 그 뿌리(`/u/<slug>/`), 로컬이면 `/hub`.
 const hubRoot = ROOT.replace(/\/m\/[^/]+$/, '');
 document.getElementById('hub').href = hubRoot ? `${hubRoot}/` : '/hub';
+document.getElementById('term-heading').href = document.getElementById('hub').href;
 // 아이폰이면 이 학생을 앱에서 연다(kasaterm:// 스킴). 규율은 허브와 같다 — 처음엔 단추,
 // 한 번 성공한 뒤부터 저절로. 슬랙 알림 링크로 들어와도 앱으로 넘어간다.
 (function appJump() {
@@ -68,6 +86,7 @@ const shot = document.getElementById('shot');
 const shotnote = document.getElementById('shotnote');
 const picBtn = document.getElementById('pic');
 const grid = KasaGrid(wrap);
+const chrome = KasaTermChrome.create({ root: ROOT, onTheme: tokens => grid.setTheme(tokens) });
 const enc = new TextEncoder();
 // 키 입력은 바이너리 프레임으로만 간다 — 텍스트 프레임은 resize JSON 으로 읽혀 버려진다.
 const send = (s) => { if (ws && ws.readyState === 1) ws.send(enc.encode(s)); };
@@ -81,115 +100,133 @@ const sep = location.search ? '&' : '?';
 const WS_URL = `${proto}://${location.host}${ROOT}/term/ws${location.search}${sep}grid=1`;
 let ws = null;
 let frames = 0;
-let isMirror = false;       // 네이티브 pane 을 같이 보는 중 — 크기는 그쪽이 주인이다
+let isMirror = false;
 let lastCursor = [0, 0];
-// 끊기면 다시 붙는다. 폰은 화면을 끄거나 앱을 바꾸는 것만으로 소켓이 죽고, 예전엔
-// 「끊김」만 찍고 새로고침을 기다렸다(2026-09-02 지적 「연결도 끊기고」). 세션이 정말
-// 끝난 것(`gone`)만 멈춘다 — 연결 유실은 멈출 이유가 아니다.
-let gone = false, backoff = 1000, retryTimer = null;
+let gone = false, backoff = 1000, retryTimer = null, sentView = 0;
+const viewport = KasaViewport.create({
+  measure: () => {
+    const area = KasaViewport.visibleArea(picture ? shotwrap : wrap);
+    const cell = grid.cell;
+    return cell.w > 0 && cell.h > 0
+      ? { cols: Math.floor(area.width / cell.w), rows: Math.floor(area.height / cell.h) }
+      : null;
+  },
+});
 function connect() {
-  if (gone) return;
+  if (gone || document.visibilityState !== 'visible') return;
   if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
   clearTimeout(retryTimer);
   st.textContent = '연결 중…';
-  ws = new WebSocket(WS_URL);
-  ws.onmessage = (e) => {
-    if (typeof e.data !== 'string') return;   // 그리드 모드에선 바이너리가 안 온다
-    const m = JSON.parse(e.data);
+  const socket = new WebSocket(WS_URL);
+  ws = socket;
+  viewport.bind(socket);
+  sentView = 0;
+  isMirror = false;
+  socket.onmessage = (e) => {
+    if (ws !== socket || typeof e.data !== 'string') return;
+    let m;
+    try { m = JSON.parse(e.data); } catch { return; }
     if (m.t === 'grid') {
       grid.apply(m);
       modes.appCursor = m.appCursor;
       modes.bracketedPaste = m.bracketedPaste;
       lastCursor = m.cursor;
-      placeInput();
       frames++;
-      st.textContent = `${m.cols}×${m.rows} · ${frames}프레임${picture ? ' · 그림' : ''}`;
-      // 첫 프레임에서야 셀 폭을 잰다 — 그때 제 폭을 알린다(바뀐 때만 나간다).
+      st.textContent = '연결됨';
+      syncSize();
       syncView();
       fitWidth();
-      // 격자가 바뀌었다 = 데스크톱 화면도 바뀌었다. 그림 모드면 새 장을 받는다.
+      placeInput();
       if (picture) { shotDue = true; takeShot(); }
     } else if (m.t === 'size') {
       isMirror = !!m.mirror;
-      st.textContent = `격자 ${m.cols}×${m.rows}${m.mirror ? ' (미러)' : ''}`;
-      sentView = 0; syncView();
+      viewport.receive(m, socket);
+      if (m.id) chrome.setPane(m.id);
+      st.textContent = '연결됨';
+      syncView();
+    } else if (m.t === 'viewport') {
+      viewport.receive(m, socket);
+      fitWidth();
     } else if (m.t === 'gone') {
       gone = true;
+      viewport.release();
       st.textContent = '세션이 끝났어요 — ≡ 목록에서 다른 pane 을 고르세요';
     }
   };
-  ws.onopen = () => {
-    backoff = 1000; sentSize = { cols: 0, rows: 0 }; input.focus(); syncSize();
+  socket.onopen = () => {
+    if (ws !== socket) return;
+    backoff = 1000;
+    grid.remeasure();
+    input.focus();
+    syncSize();
     if (picture) { shotDue = true; takeShot(); }
   };
-  ws.onclose = (e) => {
+  socket.onclose = (e) => {
+    if (ws !== socket) return;
+    viewport.disconnected(socket);
+    ws = null;
     if (gone) return;
-    st.textContent = `끊김 (${e.code}) — 다시 연결 중…`;
+    st.textContent = '연결이 끊겼어요 — 다시 연결 중…';
     schedule();
   };
-  ws.onerror = () => {};
+  socket.onerror = () => {};
 }
 function schedule() {
   clearTimeout(retryTimer);
-  // 화면이 꺼져 있으면 기다린다 — 켜지는 순간(visibilitychange) 바로 붙는다.
   if (document.visibilityState !== 'visible') return;
   retryTimer = setTimeout(connect, backoff);
   backoff = Math.min(backoff * 2, 10000);
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') { backoff = 1000; connect(); if (picture) { shotDue = true; takeShot(); } }
+  viewport.visibilityChanged();
+  if (document.visibilityState === 'visible') {
+    backoff = 1000; connect(); syncSize();
+    if (picture) { shotDue = true; takeShot(); }
+  }
 });
 addEventListener('online', () => { backoff = 1000; connect(); });
-addEventListener('pageshow', (e) => { if (e.persisted) connect(); });
-connect();
+addEventListener('pageshow', () => { connect(); viewport.visibilityChanged(); });
+addEventListener('pagehide', () => {
+  viewport.release();
+  const socket = ws;
+  viewport.disconnected(socket);
+  ws = null;
+  socket?.close();
+  clearTimeout(retryTimer);
+});
 
-// 넓은 pane(196열)은 폰 폭에 안 들어간다. PTY 를 건드리면 kasaterm 쪽이 같이 좁아지므로
-// 글자만 줄여 담는다.
-// ⚠️ `transform: scale()` 을 쓰면 안 된다 — 그리는 크기만 줄이고 **레이아웃 상자는 원래
-// 크기 그대로**라, 폰에서 가로 스크롤바가 남고 세로로도 빈 자리가 생긴다(2026-08-25 실측:
-// scale 일 때 가로스크롤 true, zoom 으로 바꾸니 false). zoom 은 상자까지 줄인다.
+// zoom changes the layout box as well as pixels, preserving DOM input coordinates.
 function fitWidth() {
-  // 서버가 제 폭으로 접어 주는 거울은 줄일 게 없다 — 여기서 zoom 을 걸면 잰 셀 폭이
-  // 흔들려 폭 알림과 되먹임이 된다.
-  if (isMirror && sentView > 0) { grid.el.style.zoom = ''; return; }
-  const avail = document.documentElement.clientWidth;
-  const need = grid.cols * grid.cell.w;
-  const s = need > avail ? avail / need : 1;
-  grid.el.style.zoom = s < 1 ? s : '';
+  const area = KasaViewport.visibleArea(wrap);
+  const needW = grid.cols * grid.cell.w, needH = grid.rows * grid.cell.h;
+  if (picture || !needW || !needH || !area.width || !area.height) return;
+  const scale = Math.min(1, area.width / needW, area.height / needH);
+  grid.el.style.zoom = scale < 1 ? scale : '';
 }
+function syncSize() { viewport.schedule(); }
 
-// 웹 전용 셸이면 폰 화면에 맞는 격자를 서버에 요청한다. 안 하면 PTY 기본값 80×24 가
-// 그대로라 폰 세로 화면의 2/3 가 빈 채로 남는다.
-// ⚠️ 미러(네이티브 pane 을 같이 보는 것)일 땐 보내지 않는다 — 같은 PTY 를 보는 kasaterm
-// pane 이 함께 좁아지고, 설령 `force` 로 밀어도 데스크톱이 제 배치 크기로 곧장 되돌린다
-// (2026-09-02 실측: 폰 격자만 잠시 48열이 됐다가 화면이 멈췄다). 그래서 fitWidth() 가 늘 남는다.
-let sentSize = { cols: 0, rows: 0 };
-function syncSize() {
-  if (!ws || ws.readyState !== 1 || !grid.cell.w || !grid.cell.h) return;
-  if (isMirror) return;
-  const w = document.documentElement.clientWidth;
-  const h = document.documentElement.clientHeight - document.getElementById('status').offsetHeight;
-  const cols = Math.max(20, Math.floor(w / grid.cell.w));
-  const rows = Math.max(5, Math.floor(h / grid.cell.h));
-  if (cols === sentSize.cols && rows === sentSize.rows) return;
-  sentSize = { cols, rows };
-  ws.send(JSON.stringify({ t: 'resize', cols, rows }));
-}
-
-// 미러는 PTY 를 못 건드리는 대신 **제 폭을 서버에 알린다** — 서버가 원본 격자를 그 폭으로
-// 다시 접어 준다(폰 앱·데스크톱 거울과 같은 규칙). 그러면 fitWidth 의 축소는 안 걸린다.
-// 그림 모드는 데스크톱 그대로라 알릴 게 없다.
-let sentView = 0;
+// Only old hosts use server-side text reflow; a leased grid must remain authoritative.
 function syncView() {
-  if (!ws || ws.readyState !== 1 || !isMirror || !grid.cell.w) return;
-  const w = document.documentElement.clientWidth;
-  const cols = picture ? 0 : Math.max(20, Math.floor(w / grid.cell.w));
+  if (!ws || ws.readyState !== 1 || !viewport.state().ready || !isMirror || !grid.cell.w) return;
+  const cols = picture || viewport.state().capable ? 0
+    : Math.max(20, Math.floor(KasaViewport.visibleArea(wrap).width / grid.cell.w));
   if (cols === sentView) return;
   sentView = cols;
   ws.send(JSON.stringify({ t: 'view', cols }));
 }
-
-addEventListener('resize', () => { grid.remeasure(); syncSize(); syncView(); fitWidth(); placeInput(); });
+function syncLayout() {
+  const vv = window.visualViewport;
+  const hidden = vv ? Math.max(0, innerHeight - vv.height - vv.offsetTop) : 0;
+  document.documentElement.style.setProperty('--keyboard-inset', `${hidden}px`);
+  document.getElementById('status').style.transform = `translateY(${-hidden}px)`;
+  grid.remeasure();
+  syncSize(); syncView(); fitWidth(); fitPicture(); placeInput();
+}
+addEventListener('resize', syncLayout);
+window.visualViewport?.addEventListener('resize', syncLayout);
+window.visualViewport?.addEventListener('scroll', syncLayout);
+document.fonts?.ready.then(syncLayout);
+document.fonts?.addEventListener('loadingdone', syncLayout);
 
 // ── 그림 모드 ──
 // 격자 화면은 셀을 브라우저 폰트로 다시 그려 테마·폰트·프사가 데스크톱과 다르다. 그림
@@ -211,6 +248,7 @@ async function takeShot() {
   const wait = SHOT_MIN_MS - (Date.now() - shotAt);
   if (wait > 0) { clearTimeout(shotTimer); shotTimer = setTimeout(takeShot, wait); return; }
   shotBusy = true; shotDue = false; shotAt = Date.now();
+  const socket = ws;
   try {
     const r = await fetch(`${ROOT}/term/shot${location.search}${sep}w=0&n=${shotAt}`, { cache: 'no-store' });
     if (!r.ok) {
@@ -221,6 +259,7 @@ async function takeShot() {
       return;
     }
     const blob = await r.blob();
+    if (!picture || ws !== socket) return;
     const url = URL.createObjectURL(blob);
     const old = shot.src;
     shot.src = url;
@@ -233,28 +272,35 @@ async function takeShot() {
     if (shotDue) takeShot();
   }
 }
-// 입력창(textarea)은 IME 후보창이 뜰 자리다 — 그림 위의 커서 자리에 놓는다. 그림의
-// 셀 크기는 「그림 폭 ÷ 열 수」로 안다(서버가 pane 격자 그대로 그린다).
+// PNG는 pane 여백과 크롬을 포함할 수 있어 논리 셀 좌표를 역산할 수 없다.
+// 그림에서는 읽을 수 있는 고정 입력칸, 글자에서는 원래 커서 위치를 쓴다.
 function placeInput() {
   const [row, col] = lastCursor;
   if (!picture) { input.moveTo(row, col); return; }
-  if (!shot.naturalWidth || !grid.cols || !grid.rows) return;
-  const s = shot.clientWidth / shot.naturalWidth;
-  const cw = (shot.naturalWidth / grid.cols) * s;
-  const ch = (shot.naturalHeight / grid.rows) * s;
-  input.el.style.transform = `translate(${col * cw}px, ${row * ch}px)`;
-  input.el.style.height = `${ch}px`;
+  input.el.style.transform = 'none';
+  input.el.style.height = '42px';
 }
-shot.addEventListener('load', placeInput);
+function fitPicture() {
+  if (!picture || !shot.naturalWidth || !shot.naturalHeight) return;
+  const area = KasaViewport.visibleArea(shotwrap);
+  const scale = Math.min(area.width / shot.naturalWidth, area.height / shot.naturalHeight);
+  if (scale > 0) shot.style.width = `${shot.naturalWidth * scale * zoom}px`;
+}
+shot.addEventListener('load', () => { fitPicture(); placeInput(); });
 function setPicture(on) {
   picture = on;
+  document.body.classList.toggle('picture-mode', on);
+  input.el.classList.toggle('picture-input', on);
+  input.el.placeholder = on ? '터미널에 입력' : '';
+  input.el.setAttribute('aria-label', on ? '그림 보기 터미널 입력' : '터미널 입력');
   wrap.hidden = on;
   shotwrap.hidden = !on;
   picBtn.textContent = on ? '글자' : '그림';
   picBtn.classList.toggle('on', on);
   // 입력창은 보이는 쪽에 있어야 포커스가 잡힌다(display:none 안의 요소는 포커스 불가).
   (on ? shotwrap : grid.el).appendChild(input.el);
-  syncView();
+  grid.remeasure();
+  syncSize(); syncView(); fitWidth(); fitPicture();
   placeInput();
   if (on) { shotDue = true; takeShot(); }
   input.focus();
@@ -272,7 +318,7 @@ shotwrap.addEventListener('touchmove', (e) => {
   if (!pinch || e.touches.length !== 2) return;
   e.preventDefault();
   zoom = Math.min(6, Math.max(1, pinch.z * dist(e.touches) / pinch.d));
-  shot.style.width = `${zoom * 100}%`;
+  fitPicture();
   placeInput();
 }, { passive: false });
 shotwrap.addEventListener('touchend', () => { pinch = null; });
@@ -283,4 +329,6 @@ shotwrap.addEventListener('touchend', () => { pinch = null; });
   if (new URLSearchParams(location.search).get('pic') === '1') want = true;
   if (want) setPicture(true);
 }
+syncLayout();
+connect();
 </script>
