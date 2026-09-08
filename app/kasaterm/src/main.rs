@@ -4655,6 +4655,8 @@ struct RethemeState {
 }
 
 struct App {
+    viewer_only: bool,
+    viewer_resumed: bool,
     web_visual: render::terminal_scene::VisualPump,
     window: Option<Arc<Window>>,
     /// Set when `KASATERM_RENDERER=gpu`. Mutually exclusive with
@@ -5719,12 +5721,16 @@ struct App {
 }
 
 impl App {
-    fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
-        let visual_proxy = proxy.clone();
-        kasa_mcp::visual::register_producer(Arc::new(move || {
-            let _ = visual_proxy.send_event(UserEvent::Redraw);
-        }));
+    fn new(proxy: EventLoopProxy<UserEvent>, viewer_only: bool) -> Self {
+        if !viewer_only {
+            let visual_proxy = proxy.clone();
+            kasa_mcp::visual::register_producer(Arc::new(move || {
+                let _ = visual_proxy.send_event(UserEvent::Redraw);
+            }));
+        }
         Self {
+            viewer_only,
+            viewer_resumed: false,
             web_visual: Default::default(),
             window: None,
             gpu: None,
@@ -6097,7 +6103,7 @@ impl App {
             cursor_thickness: socket::read_cursor_thickness(),
             mouse_cursor: socket::read_mouse_cursor(),
             pending_open_md: Vec::new(),
-            aux: auxwin::AuxWindows::load(),
+            aux: auxwin::AuxWindows::load(viewer_only),
             banners: Vec::new(),
             web_hosts: HashMap::new(),
             web_host_seq: 0,
@@ -6317,42 +6323,78 @@ fn install_panic_logger() {
     }));
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ViewerLaunch {
+    viewer_only: bool,
+    paths: Vec<std::path::PathBuf>,
+}
+
+impl ViewerLaunch {
+    fn detect(executable: Option<&std::ffi::OsStr>, mut args: Vec<std::ffi::OsString>) -> Self {
+        let named_viewer = executable
+            .and_then(|name| std::path::Path::new(name).file_stem())
+            == Some(std::ffi::OsStr::new("kasaterm-viewer"));
+        let flagged = args.first().is_some_and(|arg| arg == "--viewer");
+        if flagged {
+            args.remove(0);
+        }
+        Self {
+            viewer_only: named_viewer || flagged,
+            paths: args.into_iter().map(std::path::PathBuf::from).collect(),
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    install_panic_logger();
-    install_stderr_log();
-    scrub_inherited_claude_markers();
+    // Viewer mode is decided before the first logger/config/shim write. A
+    // renamed bundle executable and `kasaterm --viewer` share the same code,
+    // but only the terminal app may perform startup maintenance.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let executable = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_name().map(std::ffi::OsStr::to_owned));
+    let launch = ViewerLaunch::detect(executable.as_deref(), args);
+    if !launch.viewer_only {
+        install_panic_logger();
+        install_stderr_log();
+        scrub_inherited_claude_markers();
     // `open`(1) doesn't forward shell env to the launched .app, but the
     // .app's screen-recording TCC permission only applies when launched
     // via `open` (not when the binary runs directly). So a capture/test
     // config file is how we still drive autocapture/autosplit through an
     // `open`-launched instance. Loaded (and deleted) before anything
     // reads KASATERM_* vars.
-    load_capture_config();
+        load_capture_config();
     // 기기 이름 수집은 첫 화면을 준비하는 동안 끝낸다. Info를 열어야
     // 이름·기기색이 생기거나 렌더 스레드에서 scutil을 띄우지 않도록 한다.
-    std::thread::spawn(info::local_machine_name);
+        std::thread::spawn(info::local_machine_name);
     // 첫 설치 여부는 어떤 부팅 작업도 ~/.config/kasaterm 을 만들기 전에 확정한다.
     // 기존 설정 파일이 있던 사용자는 완료 표식만 보강하고 화면을 띄우지 않는다.
-    onboarding::prepare_boot();
+        onboarding::prepare_boot();
     // Apply the persisted theme + accent into the global color slots before any
     // window or pane paints, so the first frame is already in the right palette.
-    theme::apply_from_settings();
+        theme::apply_from_settings();
     // Install pane shims before anything spawns a shell — every PtySession
     // reads KASATERM_TMUX_SHIM_DIR we set here (kasaterm-cli/preview/OSC133).
     // best-effort: failures just log and skip, the rest still works.
-    install_pane_shims();
+        install_pane_shims();
     // 죽은 인스턴스가 남긴 소켓 잔재 청소(재시작·빌드 반복 누적). 살아있는
     // 소켓은 connect 로 가려 건드리지 않으므로 멀티 인스턴스에서도 안전.
     // 그렇게 얻은 live pid 목록으로 죽은 인스턴스의 캐릭터 마커도 지운다 — 예전엔
     // "다른 인스턴스가 하나도 없을 때만" 이라는 게이트를 뒀는데, 개발용 `cargo run`
     // 하나만 떠 있어도 청소가 통째로 건너뛰어져 마커가 재시작마다 쌓였다(그 끝이
     // 배정 풀 고갈 = 같은 학생 중복). 이제 주인 pid 로 가리므로 게이트가 필요 없다.
-    {
-        let live = live_kasaterm_pids();
-        kasa_mcp::character::sweep_stale_markers(|pid| live.contains(&pid));
+        {
+            let live = live_kasaterm_pids();
+            kasa_mcp::character::sweep_stale_markers(|pid| live.contains(&pid));
+        }
+        prune_finished_tasks();
+        prune_empty_inboxes();
+    } else {
+        // Palette reads are required by the shared document renderer; unlike
+        // onboarding/shims this path does not write or start a service.
+        theme::apply_from_settings_read_only();
     }
-    prune_finished_tasks();
-    prune_empty_inboxes();
     // 헤드리스 검증 실행이 거노 화면을 뺏지 않게 한다. 스스로 종료하는 실행
     // (`KASATERM_AUTOQUIT_MS`)은 정의상 테스트라 자동으로 배경에 띄운다 —
     // Accessory 정책이면 Dock/⌘Tab 에도 안 올라오고 활성 앱도 안 바뀌므로,
@@ -6360,7 +6402,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 로 직접 켜고 끌 수도 있다(0/false 면 강제로 평소처럼 뜬다).
     let mut builder = EventLoop::<UserEvent>::with_user_event();
     #[cfg(target_os = "macos")]
-    if background_launch() {
+    if !launch.viewer_only && background_launch() {
         use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
         builder
             .with_activation_policy(ActivationPolicy::Accessory)
@@ -6369,7 +6411,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = builder.build()?;
     let proxy = event_loop.create_proxy();
     // 원격 호스트의 `open-url` 되돌림을 GUI 이벤트로 — kasa-mcp 는 창을 모른다.
-    {
+    if !launch.viewer_only {
         let p = std::sync::Mutex::new(proxy.clone());
         kasa_mcp::remote::set_open_url_sink(Box::new(move |pane, url| {
             if let Ok(p) = p.lock() {
@@ -6380,24 +6422,62 @@ fn main() -> Result<(), Box<dyn Error>> {
     // argv 폴백: `kasaterm file.md` / 커맨드라인. `.md` 인자면 새 워크스페이스
     // 마크다운으로 위임(resumed 전이면 디퍼됐다 start_pty 후 flush). `open`(1)은
     // odoc 로만 오므로 둘이 겹쳐도 open_markdown_window 의 dedup 이 흡수한다.
-    for arg in std::env::args().skip(1) {
-        let p = std::path::PathBuf::from(&arg);
-        let is_md = p
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
-            .unwrap_or(false);
-        if is_md && p.is_file() {
-            if let Ok(abs) = std::fs::canonicalize(&p) {
-                let _ = proxy.send_event(UserEvent::OpenMarkdownWindow(
-                    abs.to_string_lossy().into_owned(),
-                ));
+    if !launch.viewer_only {
+        for p in &launch.paths {
+            let is_md = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+                .unwrap_or(false);
+            if is_md && p.is_file() {
+                if let Ok(abs) = std::fs::canonicalize(p) {
+                    let _ = proxy.send_event(UserEvent::OpenMarkdownWindow(
+                        abs.to_string_lossy().into_owned(),
+                    ));
+                }
             }
         }
     }
-    let mut app = App::new(proxy);
+    let mut app = App::new(proxy, launch.viewer_only);
+    if launch.viewer_only {
+        for path in launch.paths {
+            app.queue_aux_file(path, true);
+        }
+    }
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod viewer_launch_tests {
+    use super::ViewerLaunch;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn executable_name_and_flag_select_viewer_without_consuming_paths() {
+        let named = ViewerLaunch::detect(
+            Some(OsStr::new("kasaterm-viewer")),
+            vec!["one.md".into()],
+        );
+        assert!(named.viewer_only);
+        assert_eq!(named.paths, vec![std::path::PathBuf::from("one.md")]);
+
+        let flagged = ViewerLaunch::detect(
+            Some(OsStr::new("kasaterm")),
+            vec!["--viewer".into(), "two.md".into()],
+        );
+        assert!(flagged.viewer_only);
+        assert_eq!(flagged.paths, vec![std::path::PathBuf::from("two.md")]);
+    }
+
+    #[test]
+    fn ordinary_kasaterm_stays_in_terminal_mode() {
+        let launch = ViewerLaunch::detect(
+            Some(OsStr::new("kasaterm")),
+            vec!["note.md".into()],
+        );
+        assert!(!launch.viewer_only);
+    }
 }
 
 /// Load `$TMPDIR/kasaterm-capture.env` (KEY=VALUE lines) into the

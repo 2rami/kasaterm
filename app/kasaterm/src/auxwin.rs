@@ -6,14 +6,45 @@
 //! intact when the user presses "별도창으로".
 use super::*;
 
-const HEADER_H: f32 = 36.0;
-const BODY_PAD: f32 = 4.0;
+const HEADER_H: f32 = 78.0;
+const BODY_PAD: f32 = 6.0;
+const AUX_FONT_SCALE_MIN: f32 = 0.75;
+const AUX_FONT_SCALE_MAX: f32 = 1.60;
+const AUX_FONT_SCALE_STEP: f32 = 0.10;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HeaderButton {
+    Open,
     View,
     Edit,
+    Find,
+    Wrap,
+    ZoomOut,
+    ZoomIn,
     Save,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewerPromptAction {
+    Close,
+    Quit,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewerPromptButton {
+    Cancel,
+    Discard,
+    Save,
+}
+
+#[derive(Clone, Copy)]
+struct ScrollbarGeometry {
+    x: f32,
+    track_y: f32,
+    track_h: f32,
+    thumb_y: f32,
+    thumb_h: f32,
+    max_scroll: f32,
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -68,6 +99,8 @@ struct RestoreRecord {
     scroll: f32,
     h_scroll: f32,
     wrap: bool,
+    #[serde(default)]
+    font_scale: Option<f32>,
     frame: Option<FrameRecord>,
 }
 
@@ -93,11 +126,15 @@ pub(crate) struct AuxWindows {
     pending: Vec<PendingAuxOpen>,
     unopened: Vec<RestoreRecord>,
     saved: std::cell::RefCell<Option<SavedState>>,
+    viewer_only: bool,
+    viewer_quit_requested: bool,
+    viewer_message: Option<String>,
+    focus_on_open: std::collections::HashSet<String>,
 }
 
 impl AuxWindows {
-    pub(crate) fn load() -> Self {
-        let pending = state_path()
+    pub(crate) fn load(viewer_only: bool) -> Self {
+        let pending = state_path(viewer_only)
             .and_then(|path| std::fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice::<StoredWindows>(&bytes).ok())
             .map(|saved| {
@@ -113,6 +150,10 @@ impl AuxWindows {
             pending,
             unopened: Vec::new(),
             saved: Default::default(),
+            viewer_only,
+            viewer_quit_requested: false,
+            viewer_message: None,
+            focus_on_open: std::collections::HashSet::new(),
         }
     }
 }
@@ -129,8 +170,14 @@ pub(crate) struct AuxWindow {
     preedit: String,
     last_title: String,
     md_content_h: f32,
+    font_scale: f32,
     header_hits: Vec<(HeaderButton, (f32, f32, f32, f32))>,
     find_hits: Vec<(FindBtn, (f32, f32, f32, f32))>,
+    viewer_prompt: Option<ViewerPromptAction>,
+    viewer_prompt_hits: Vec<(ViewerPromptButton, (f32, f32, f32, f32))>,
+    scrollbar: Option<ScrollbarGeometry>,
+    scrollbar_drag_offset: Option<f32>,
+    welcome: bool,
     pub(crate) missing_source: bool,
     status: Option<String>,
     pub(crate) window: Arc<Window>,
@@ -201,6 +248,7 @@ impl AuxWindow {
             scroll: self.editor.scroll,
             h_scroll: self.editor.h_scroll,
             wrap: self.editor.wrap,
+            font_scale: Some(self.font_scale),
             frame: Some(FrameRecord {
                 x: pos.x,
                 y: pos.y,
@@ -245,7 +293,7 @@ impl AuxWindow {
                         .filter(|(_, old)| !old.is_empty()),
                 });
             let find_open = self.editor.find.is_some();
-            self.gpu.draw_raw_editor(
+            self.md_content_h = self.gpu.draw_raw_editor(
                 &self.editor.edit_lines,
                 (self.editor.cur_line, self.editor.cur_col),
                 selection,
@@ -280,6 +328,12 @@ impl AuxWindow {
             });
         } else {
             self.find_hits.clear();
+            for image in &self.editor.doc.images {
+                if !self.gpu.has_image(&image.key) {
+                    self.gpu
+                        .upload_image(&image.key, &image.rgba, image.w, image.h);
+                }
+            }
             self.md_content_h = self.gpu.draw_markdown(
                 &self.editor.doc.blocks,
                 self.editor.doc.gen,
@@ -291,97 +345,246 @@ impl AuxWindow {
                 None,
             );
         }
+        self.draw_scroll_indicator(x, y, bw, bh);
+        if self.viewer_prompt.is_some() {
+            self.draw_viewer_prompt(w, h);
+        } else {
+            self.viewer_prompt_hits.clear();
+        }
         let _ = self.gpu.render(&[], scale, 0.0, true);
         self.dirty = false;
     }
 
     fn draw_header(&mut self, width: f32) {
+        const INFO_H: f32 = 44.0;
+        const CONTROL_H: f32 = 28.0;
+        const GAP: f32 = 4.0;
         self.header_hits.clear();
         self.gpu
             .rect(0.0, 0.0, width, HEADER_H, crate::theme::surface());
+        self.gpu.rect(
+            0.0,
+            INFO_H,
+            width,
+            HEADER_H - INFO_H,
+            crate::theme::panel_bg(),
+        );
+        self.gpu
+            .rect(0.0, INFO_H, width, 1.0, crate::theme::border());
         self.gpu
             .rect(0.0, HEADER_H - 1.0, width, 1.0, crate::theme::border());
-        let mut x = 10.0;
+
+        let compact = width < 560.0;
+        let control_y = INFO_H + 3.0;
+        let mut hovered = None;
+
+        if self.welcome {
+            let open_label = if compact { "열기" } else { "문서 열기" };
+            let open_w = self.gpu.measure_chrome_text(open_label, 12.0, true) + 22.0;
+            let open_rect = (width - open_w - 10.0, control_y, open_w, CONTROL_H);
+            if self.paint_header_button(
+                HeaderButton::Open,
+                open_rect,
+                open_label,
+                false,
+                true,
+                true,
+            ) {
+                hovered = Some(HeaderButton::Open);
+            }
+            self.gpu.queue_icon(
+                "file-text",
+                12.0,
+                12.0,
+                16.0,
+                if self.focused {
+                    crate::theme::text_dim()
+                } else {
+                    crate::theme::text_mute()
+                },
+            );
+            self.gpu.draw_text(
+                36.0,
+                10.0,
+                "Kasaterm Viewer",
+                gpu::DrawOpts {
+                    font_size: 13.0,
+                    color: crate::theme::text(),
+                    bold: true,
+                    italic: false,
+                },
+            );
+            let message = self
+                .status
+                .as_deref()
+                .unwrap_or("Cmd+O 또는 파일을 끌어놓아 문서를 여세요");
+            let detail = hovered
+                .map(|button| self.header_tooltip(button))
+                .unwrap_or(message);
+            let color = if message.contains("못했") || message.contains("실패") {
+                crate::theme::danger()
+            } else {
+                crate::theme::text_dim()
+            };
+            let available = (open_rect.0 - 22.0).max(0.0);
+            let clipped = crate::screenread::clip_px(&mut self.gpu, detail, 11.0, false, available);
+            self.gpu.draw_text(
+                12.0,
+                control_y + 7.0,
+                &clipped,
+                gpu::DrawOpts {
+                    font_size: 11.0,
+                    color,
+                    bold: false,
+                    italic: false,
+                },
+            );
+            return;
+        }
+
+        let save_label = if self.editor.modified {
+            if compact {
+                "저장"
+            } else {
+                "변경 내용 저장"
+            }
+        } else {
+            "저장됨"
+        };
+        let save_w = self
+            .gpu
+            .measure_chrome_text(save_label, 12.0, self.editor.modified)
+            + 22.0;
+        let save_rect = (width - save_w - 10.0, 8.0, save_w, CONTROL_H);
+        if self.paint_header_button(
+            HeaderButton::Save,
+            save_rect,
+            save_label,
+            false,
+            self.editor.modified,
+            self.editor.modified,
+        ) {
+            hovered = Some(HeaderButton::Save);
+        }
+
+        self.gpu.queue_icon(
+            "file-text",
+            12.0,
+            11.0,
+            16.0,
+            if self.focused {
+                crate::theme::text_dim()
+            } else {
+                crate::theme::text_mute()
+            },
+        );
+        let name = std::path::Path::new(&self.editor.doc.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("새 문서");
+        let title_x = if self.editor.modified { 43.0 } else { 36.0 };
+        if self.editor.modified {
+            crate::round_rect(
+                &mut self.gpu,
+                35.0,
+                17.0,
+                5.0,
+                5.0,
+                2.5,
+                crate::theme::accent(),
+            );
+        }
+        let title_w = (save_rect.0 - title_x - 10.0).max(0.0);
+        let title = crate::screenread::clip_px(&mut self.gpu, name, 13.0, true, title_w);
+        self.gpu.draw_text(
+            title_x,
+            9.0,
+            &title,
+            gpu::DrawOpts {
+                font_size: 13.0,
+                color: crate::theme::text(),
+                bold: true,
+                italic: false,
+            },
+        );
+
+        let mut left_x = 10.0;
         if self.editor.is_md_doc {
+            let segment_w = if compact { 43.0 } else { 48.0 };
+            crate::round_rect(
+                &mut self.gpu,
+                left_x,
+                control_y,
+                segment_w * 2.0,
+                CONTROL_H,
+                crate::theme::radius_sm(),
+                crate::theme::surface(),
+            );
             for (kind, label, active) in [
                 (HeaderButton::View, "보기", !self.editor.raw_mode),
                 (HeaderButton::Edit, "편집", self.editor.raw_mode),
             ] {
-                let tw = self.gpu.measure_chrome_text(label, 12.0, false);
-                let rect = (x, 6.0, tw + 20.0, 24.0);
-                if active {
-                    crate::round_rect(
-                        &mut self.gpu,
-                        rect.0,
-                        rect.1,
-                        rect.2,
-                        rect.3,
-                        crate::theme::radius_sm(),
-                        crate::theme::surface_active(),
-                    );
+                let rect = (left_x, control_y, segment_w, CONTROL_H);
+                if self.paint_header_button(kind, rect, label, active, false, true) {
+                    hovered = Some(kind);
                 }
-                self.gpu.draw_text(
-                    rect.0 + 10.0,
-                    rect.1 + 4.0,
-                    label,
-                    gpu::DrawOpts {
-                        font_size: 12.0,
-                        color: if active {
-                            crate::theme::text()
-                        } else {
-                            crate::theme::text_dim()
-                        },
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                self.header_hits.push((kind, rect));
-                x += rect.2 + 4.0;
+                left_x += segment_w;
             }
+            left_x += 8.0;
         }
-        let save_label = if self.editor.modified {
-            "저장 안 됨 · 저장"
-        } else {
-            "저장됨"
-        };
-        let save_w = self.gpu.measure_chrome_text(save_label, 12.0, false) + 20.0;
-        let save_rect = ((width - save_w - 10.0).max(x), 6.0, save_w, 24.0);
-        crate::round_rect(
-            &mut self.gpu,
-            save_rect.0,
-            save_rect.1,
-            save_rect.2,
-            save_rect.3,
-            crate::theme::radius_sm(),
-            if self.editor.modified {
-                crate::theme::surface_active()
-            } else {
-                crate::theme::panel_bg()
-            },
-        );
-        self.gpu.draw_text(
-            save_rect.0 + 10.0,
-            save_rect.1 + 4.0,
-            save_label,
-            gpu::DrawOpts {
-                font_size: 12.0,
-                color: if self.editor.modified {
-                    crate::theme::text()
-                } else {
-                    crate::theme::text_dim()
-                },
-                bold: false,
-                italic: false,
-            },
-        );
-        self.header_hits.push((HeaderButton::Save, save_rect));
-        if let Some(message) = self.status.as_deref() {
-            let available = (save_rect.0 - x - 12.0).max(0.0);
-            let label = crate::screenread::clip_px(&mut self.gpu, message, 11.0, false, available);
+
+        let small_label = width < 440.0;
+        let find_label = "찾기";
+        let wrap_label = if small_label { "줄" } else { "줄바꿈" };
+        let find_w = self.gpu.measure_chrome_text(find_label, 12.0, false) + 18.0;
+        let wrap_w = self.gpu.measure_chrome_text(wrap_label, 12.0, false) + 18.0;
+        let zoom_w = 28.0;
+        let zoom_label_w = if compact { 0.0 } else { 48.0 };
+        let tools_w = find_w + GAP + wrap_w + 8.0 + zoom_w * 2.0 + zoom_label_w + GAP;
+        let mut tool_x = (width - 10.0 - tools_w).max(left_x);
+        let find_active = self.editor.find.is_some();
+        let find_rect = (tool_x, control_y, find_w, CONTROL_H);
+        if self.paint_header_button(
+            HeaderButton::Find,
+            find_rect,
+            find_label,
+            find_active,
+            false,
+            true,
+        ) {
+            hovered = Some(HeaderButton::Find);
+        }
+        tool_x += find_w + GAP;
+        let wrap_rect = (tool_x, control_y, wrap_w, CONTROL_H);
+        if self.paint_header_button(
+            HeaderButton::Wrap,
+            wrap_rect,
+            wrap_label,
+            self.editor.raw_mode && self.editor.wrap,
+            false,
+            self.editor.raw_mode,
+        ) {
+            hovered = Some(HeaderButton::Wrap);
+        }
+        tool_x += wrap_w + 8.0;
+        let out_rect = (tool_x, control_y, zoom_w, CONTROL_H);
+        if self.paint_header_icon_button(
+            HeaderButton::ZoomOut,
+            out_rect,
+            "minus",
+            self.font_scale > AUX_FONT_SCALE_MIN + 0.01,
+        ) {
+            hovered = Some(HeaderButton::ZoomOut);
+        }
+        tool_x += zoom_w;
+        if zoom_label_w > 0.0 {
+            let zoom = format!("{}%", (self.font_scale * 100.0).round() as i32);
+            let tw = self.gpu.measure_chrome_text(&zoom, 11.0, false);
             self.gpu.draw_text(
-                x + 6.0,
-                10.0,
-                &label,
+                tool_x + (zoom_label_w - tw) * 0.5,
+                control_y + 8.0,
+                &zoom,
                 gpu::DrawOpts {
                     font_size: 11.0,
                     color: crate::theme::text_dim(),
@@ -389,11 +592,320 @@ impl AuxWindow {
                     italic: false,
                 },
             );
+            tool_x += zoom_label_w;
+        }
+        let in_rect = (tool_x, control_y, zoom_w, CONTROL_H);
+        if self.paint_header_icon_button(
+            HeaderButton::ZoomIn,
+            in_rect,
+            "plus",
+            self.font_scale < AUX_FONT_SCALE_MAX - 0.01,
+        ) {
+            hovered = Some(HeaderButton::ZoomIn);
+        }
+
+        let detail = hovered
+            .map(|button| self.header_tooltip(button))
+            .or(self.status.as_deref());
+        if let Some(detail) = detail {
+            let available = title_w;
+            let detail = crate::screenread::clip_px(&mut self.gpu, detail, 10.5, false, available);
+            let color = if detail.contains("실패") || detail.contains("찾지 못") {
+                crate::theme::danger()
+            } else if detail.contains("저장했") {
+                crate::theme::success()
+            } else {
+                crate::theme::text_dim()
+            };
+            self.gpu.draw_text(
+                title_x,
+                26.0,
+                &detail,
+                gpu::DrawOpts {
+                    font_size: 10.5,
+                    color,
+                    bold: false,
+                    italic: false,
+                },
+            );
+        }
+    }
+
+    fn paint_header_button(
+        &mut self,
+        kind: HeaderButton,
+        rect: (f32, f32, f32, f32),
+        label: &str,
+        active: bool,
+        primary: bool,
+        enabled: bool,
+    ) -> bool {
+        let hot = enabled && hit(self.cursor_px, rect);
+        let fill = if primary {
+            crate::theme::accent()
+        } else if active {
+            crate::theme::surface_active()
+        } else if hot {
+            crate::theme::surface_hover()
+        } else {
+            crate::theme::surface()
+        };
+        crate::round_rect(
+            &mut self.gpu,
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            crate::theme::radius_sm(),
+            fill,
+        );
+        let tw = self.gpu.measure_chrome_text(label, 12.0, primary);
+        self.gpu.draw_text(
+            rect.0 + (rect.2 - tw) * 0.5,
+            rect.1 + 7.0,
+            label,
+            gpu::DrawOpts {
+                font_size: 12.0,
+                color: if primary {
+                    crate::theme::foreground_on(crate::theme::accent())
+                } else if !enabled || !self.focused {
+                    crate::theme::text_mute()
+                } else if active || hot {
+                    crate::theme::text()
+                } else {
+                    crate::theme::text_dim()
+                },
+                bold: primary || active,
+                italic: false,
+            },
+        );
+        if enabled {
+            self.header_hits.push((kind, rect));
+        }
+        hot
+    }
+
+    fn paint_header_icon_button(
+        &mut self,
+        kind: HeaderButton,
+        rect: (f32, f32, f32, f32),
+        icon: &str,
+        enabled: bool,
+    ) -> bool {
+        let hot = enabled && hit(self.cursor_px, rect);
+        crate::round_rect(
+            &mut self.gpu,
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            crate::theme::radius_sm(),
+            if hot {
+                crate::theme::surface_hover()
+            } else {
+                crate::theme::surface()
+            },
+        );
+        self.gpu.queue_icon(
+            icon,
+            rect.0 + (rect.2 - 14.0) * 0.5,
+            rect.1 + (rect.3 - 14.0) * 0.5,
+            14.0,
+            if !enabled || !self.focused {
+                crate::theme::text_mute()
+            } else if hot {
+                crate::theme::text()
+            } else {
+                crate::theme::text_dim()
+            },
+        );
+        if enabled {
+            self.header_hits.push((kind, rect));
+        }
+        hot
+    }
+
+    fn header_tooltip(&self, button: HeaderButton) -> &'static str {
+        match button {
+            HeaderButton::Open => "문서 열기 (⌘O)",
+            HeaderButton::View => "읽기 화면으로 전환",
+            HeaderButton::Edit => "원문 편집으로 전환",
+            HeaderButton::Find => "문서에서 찾기 (⌘F)",
+            HeaderButton::Wrap if self.editor.wrap => "긴 줄 줄바꿈 끄기",
+            HeaderButton::Wrap => "긴 줄 줄바꿈 켜기",
+            HeaderButton::ZoomOut => "보기 축소 (⌘−)",
+            HeaderButton::ZoomIn => "보기 확대 (⌘+)",
+            HeaderButton::Save => "변경 내용 저장 (⌘S)",
+        }
+    }
+
+    fn draw_scroll_indicator(&mut self, x: f32, y: f32, width: f32, height: f32) {
+        let content = self.md_content_h.max(height);
+        let max_scroll = (content - height).max(0.0);
+        if max_scroll <= 1.0 || height < 48.0 {
+            self.scrollbar = None;
+            self.scrollbar_drag_offset = None;
+            return;
+        }
+        let track_y = y + 8.0;
+        let track_h = (height - 16.0).max(1.0);
+        let thumb_h = (track_h * height / content).clamp(32.0, track_h);
+        let thumb_y =
+            track_y + (self.editor.scroll / max_scroll).clamp(0.0, 1.0) * (track_h - thumb_h);
+        let track_x = x + width - 5.0;
+        self.scrollbar = Some(ScrollbarGeometry {
+            x: track_x,
+            track_y,
+            track_h,
+            thumb_y,
+            thumb_h,
+            max_scroll,
+        });
+        let hot = self.cursor_px.0 >= track_x - 5.0
+            && self.cursor_px.0 <= track_x + 5.0
+            && self.cursor_px.1 >= y
+            && self.cursor_px.1 <= y + height;
+        crate::round_rect(
+            &mut self.gpu,
+            track_x,
+            thumb_y,
+            3.0,
+            thumb_h,
+            1.5,
+            crate::theme::with_alpha(crate::theme::text_dim(), if hot { 0xb8 } else { 0x72 }),
+        );
+    }
+
+    fn draw_viewer_prompt(&mut self, width: f32, height: f32) {
+        self.viewer_prompt_hits.clear();
+        self.gpu.rect(
+            0.0,
+            0.0,
+            width,
+            height,
+            crate::theme::with_alpha([0, 0, 0, 255], 0x88),
+        );
+        let panel_w = (width - 24.0).min(460.0).max(280.0);
+        let panel_h = 172.0;
+        let x = (width - panel_w) * 0.5;
+        let y = (height - panel_h) * 0.5;
+        crate::round_rect(
+            &mut self.gpu,
+            x - 1.0,
+            y - 1.0,
+            panel_w + 2.0,
+            panel_h + 2.0,
+            crate::theme::radius_md() + 1.0,
+            crate::theme::border(),
+        );
+        crate::round_rect(
+            &mut self.gpu,
+            x,
+            y,
+            panel_w,
+            panel_h,
+            crate::theme::radius_md(),
+            crate::theme::surface(),
+        );
+        let name = std::path::Path::new(&self.editor.doc.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("이 문서");
+        let prompt = format!("{name}에 저장하지 않은 내용이 있어요");
+        let prompt = crate::screenread::clip_px(&mut self.gpu, &prompt, 14.0, true, panel_w - 44.0);
+        self.gpu.draw_text(
+            x + 22.0,
+            y + 24.0,
+            &prompt,
+            gpu::DrawOpts {
+                font_size: 14.0,
+                color: crate::theme::text(),
+                bold: true,
+                italic: false,
+            },
+        );
+        let detail = self
+            .status
+            .as_deref()
+            .filter(|message| message.contains("실패"))
+            .unwrap_or("저장할까요? 저장 실패 시 창과 내용은 그대로 남습니다.");
+        let detail = crate::screenread::clip_px(&mut self.gpu, detail, 12.0, false, panel_w - 44.0);
+        self.gpu.draw_text(
+            x + 22.0,
+            y + 56.0,
+            &detail,
+            gpu::DrawOpts {
+                font_size: 12.0,
+                color: if detail.contains("실패") {
+                    crate::theme::danger()
+                } else {
+                    crate::theme::text_dim()
+                },
+                bold: false,
+                italic: false,
+            },
+        );
+        let labels = [
+            (ViewerPromptButton::Cancel, "취소"),
+            (ViewerPromptButton::Discard, "저장 안 함"),
+            (ViewerPromptButton::Save, "저장"),
+        ];
+        let button_h = 36.0;
+        let gap = 8.0;
+        let widths: Vec<f32> = labels
+            .iter()
+            .map(|(_, label)| self.gpu.measure_chrome_text(label, 12.0, true) + 24.0)
+            .collect();
+        let total: f32 = widths.iter().sum::<f32>() + gap * 2.0;
+        let mut button_x = x + panel_w - 20.0 - total;
+        let button_y = y + panel_h - button_h - 20.0;
+        for ((button, label), button_w) in labels.into_iter().zip(widths) {
+            let rect = (button_x, button_y, button_w, button_h);
+            let hot = hit(self.cursor_px, rect);
+            let color = if button == ViewerPromptButton::Save {
+                crate::theme::accent()
+            } else if hot {
+                crate::theme::surface_active()
+            } else {
+                crate::theme::surface_hover()
+            };
+            crate::round_rect(
+                &mut self.gpu,
+                button_x,
+                button_y,
+                button_w,
+                button_h,
+                crate::theme::radius_sm(),
+                color,
+            );
+            self.gpu.draw_text(
+                button_x + 12.0,
+                button_y + 10.0,
+                label,
+                gpu::DrawOpts {
+                    font_size: 12.0,
+                    color: if button == ViewerPromptButton::Save {
+                        crate::theme::foreground_on(crate::theme::accent())
+                    } else {
+                        crate::theme::text()
+                    },
+                    bold: true,
+                    italic: false,
+                },
+            );
+            self.viewer_prompt_hits.push((button, rect));
+            button_x += button_w + gap;
         }
     }
 }
 
-fn state_path() -> Option<std::path::PathBuf> {
+fn state_path(viewer_only: bool) -> Option<std::path::PathBuf> {
+    if viewer_only {
+        if let Some(path) = std::env::var_os("KASATERM_VIEWER_STATE_FILE") {
+            return Some(std::path::PathBuf::from(path));
+        }
+        return Some(kasa_socket::home_dir()?.join(".config/kasaterm/viewer-documents.json"));
+    }
     if crate::verification_run() && std::env::var_os("KASATERM_SESSION_FILE").is_none() {
         return None;
     }
@@ -530,6 +1042,17 @@ fn source_for_restore(
     }
 }
 
+fn is_markdown_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "md" | "markdown" | "mdown" | "mkd"
+            )
+        })
+}
+
 fn make_editor(
     path: &std::path::Path,
     text: &str,
@@ -603,14 +1126,64 @@ fn disallow_tabbing(window: &Window) {
 impl App {
     pub(crate) fn queue_aux_file(&mut self, path: std::path::PathBuf, active: bool) {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
-        if let Some(aux) = self
+        if let Some(index) = self
             .aux
             .windows
             .iter()
-            .find(|aux| std::path::Path::new(&aux.editor.doc.path) == path.as_path())
+            .position(|aux| std::path::Path::new(&aux.editor.doc.path) == path.as_path())
         {
+            if !self.aux.windows[index].editor.modified {
+                match std::fs::read_to_string(&path) {
+                    Ok(raw) if raw != self.aux.windows[index].editor.text_for_save() => {
+                        let old = &self.aux.windows[index].editor;
+                        let raw_mode = old.raw_mode;
+                        let cur_line = old.cur_line;
+                        let cur_col = old.cur_col;
+                        let scroll = old.scroll;
+                        let h_scroll = old.h_scroll;
+                        let wrap = old.wrap;
+                        let is_md = is_markdown_path(&path);
+                        let lines = Arc::new(raw.split('\n').map(String::from).collect());
+                        let mut editor =
+                            make_editor(&path, &raw, lines, is_md, raw_mode || !is_md, false);
+                        editor.cur_line = cur_line.min(editor.edit_lines.len().saturating_sub(1));
+                        editor.cur_col =
+                            cur_col.min(editor.edit_lines[editor.cur_line].chars().count());
+                        editor.scroll = scroll.max(0.0);
+                        editor.h_scroll = h_scroll.max(0.0);
+                        editor.wrap = wrap;
+                        let aux = &mut self.aux.windows[index];
+                        aux.editor = editor;
+                        aux.missing_source = false;
+                        aux.status = Some("디스크의 최신 내용을 다시 읽었어요".to_string());
+                        aux.dirty = true;
+                        aux.window.request_redraw();
+                        self.save_aux_windows_state();
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        let aux = &mut self.aux.windows[index];
+                        aux.status = Some(format!("문서를 다시 읽지 못했어요: {error}"));
+                        aux.dirty = true;
+                        aux.window.request_redraw();
+                    }
+                }
+            }
             if active {
-                aux.window.focus_window();
+                self.aux.windows[index].window.focus_window();
+            }
+            return;
+        }
+        if let Some(record_path) = self.aux.pending.iter().find_map(|pending| match pending {
+            PendingAuxOpen::Restore(record)
+                if std::path::Path::new(&record.path) == path.as_path() =>
+            {
+                Some(record.path.clone())
+            }
+            _ => None,
+        }) {
+            if active {
+                self.aux.focus_on_open.insert(record_path);
             }
             return;
         }
@@ -628,22 +1201,26 @@ impl App {
 
     pub(crate) fn flush_aux_opens(&mut self, event_loop: &ActiveEventLoop) {
         let pending = std::mem::take(&mut self.aux.pending);
+        let had_pending = !pending.is_empty();
         for request in pending {
             match request {
                 PendingAuxOpen::File { path, active } => {
                     let raw = match std::fs::read_to_string(&path) {
                         Ok(raw) => raw,
                         Err(error) => {
-                            self.set_toast(format!("문서를 열지 못했어요: {error}"));
+                            let message = format!("문서를 열지 못했어요: {error}");
+                            if self.viewer_only {
+                                self.viewer_status(message);
+                            } else {
+                                self.set_toast(message);
+                            }
                             continue;
                         }
                     };
-                    let is_md = path
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .is_some_and(|ext| {
-                            matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown")
-                        });
+                    if self.viewer_only {
+                        self.aux.windows.retain(|aux| !aux.welcome);
+                    }
+                    let is_md = is_markdown_path(&path);
                     let lines = Arc::new(raw.split('\n').map(String::from).collect());
                     let editor = make_editor(&path, &raw, lines, is_md, !is_md, false);
                     let _ = self.spawn_aux_editor(editor, event_loop, active, None, false);
@@ -651,6 +1228,7 @@ impl App {
                 PendingAuxOpen::Restore(record) => {
                     let keep = record.clone();
                     let path = std::path::PathBuf::from(&record.path);
+                    let active = self.aux.focus_on_open.remove(&record.path);
                     let disk = std::fs::read_to_string(&path).ok();
                     let Some((text, lines, missing_source)) = source_for_restore(&record, disk)
                     else {
@@ -679,25 +1257,82 @@ impl App {
                     editor.scroll = record.scroll.max(0.0);
                     editor.h_scroll = record.h_scroll.max(0.0);
                     editor.wrap = record.wrap;
+                    let font_scale = record
+                        .font_scale
+                        .unwrap_or(1.0)
+                        .clamp(AUX_FONT_SCALE_MIN, AUX_FONT_SCALE_MAX);
                     match self.spawn_aux_editor(
                         editor,
                         event_loop,
-                        false,
+                        active,
                         record.frame,
                         missing_source,
                     ) {
-                        Ok(index) if missing_source => {
-                            self.aux.windows[index].status =
-                                Some("원본이 없어 복원본만 보관 중이에요".to_string());
-                            self.aux.windows[index].window.request_redraw();
+                        Ok(index) => {
+                            let aux = &mut self.aux.windows[index];
+                            aux.font_scale = font_scale;
+                            aux.gpu.set_font_size(FONT_SIZE * font_scale);
+                            if missing_source {
+                                aux.status = Some("원본이 없어 복원본만 보관 중이에요".to_string());
+                            }
+                            aux.window.request_redraw();
                         }
-                        Ok(_) => {}
                         Err(_) => self.aux.unopened.push(keep),
                     }
                 }
             }
         }
-        self.save_aux_windows_state();
+        if had_pending {
+            self.save_aux_windows_state();
+        }
+    }
+
+    pub(crate) fn prepare_viewer_windows(&mut self, event_loop: &ActiveEventLoop) {
+        self.flush_aux_opens(event_loop);
+        if !self.aux.windows.is_empty() || !self.aux.pending.is_empty() {
+            return;
+        }
+        let text = "# kasaterm 문서 뷰어\n\nCmd+O로 문서를 열거나 이 창에 파일을 끌어놓으세요.\n\n열어 둔 문서는 다음 실행에 같은 위치와 읽던 자리로 돌아옵니다.";
+        let editor = make_editor(
+            std::path::Path::new(""),
+            text,
+            Arc::new(text.split('\n').map(String::from).collect()),
+            true,
+            false,
+            false,
+        );
+        if let Ok(index) = self.spawn_aux_editor(editor, event_loop, true, None, false) {
+            let message = self.aux.viewer_message.take();
+            let aux = &mut self.aux.windows[index];
+            aux.welcome = true;
+            aux.status = message;
+            aux.last_title = "kasaterm 문서 뷰어".to_string();
+            aux.window.set_title(&aux.last_title);
+            aux.window.request_redraw();
+        }
+    }
+
+    pub(crate) fn viewer_has_work(&self) -> bool {
+        !self.aux.windows.is_empty()
+            || !self.aux.pending.is_empty()
+            || !self.aux.unopened.is_empty()
+    }
+
+    pub(crate) fn viewer_needs_blink(&self) -> bool {
+        self.aux.windows.iter().any(|aux| {
+            aux.focused && aux.editor.raw_mode && !aux.welcome && aux.viewer_prompt.is_none()
+        })
+    }
+
+    fn viewer_status(&mut self, message: String) {
+        if let Some(aux) = self.aux.windows.first_mut() {
+            aux.status = Some(message);
+            aux.dirty = true;
+            aux.window.request_redraw();
+        } else {
+            eprintln!("[viewer] {message}");
+            self.aux.viewer_message = Some(message);
+        }
     }
 
     fn spawn_aux_editor(
@@ -729,7 +1364,11 @@ impl App {
         };
         let mut attrs = WindowAttributes::default()
             .with_title(title.clone())
-            .with_theme(Some(Theme::Dark))
+            .with_theme(Some(if crate::theme::current_is_light() {
+                Theme::Light
+            } else {
+                Theme::Dark
+            }))
             .with_active(wants_focus);
         if let Some(frame) = frame {
             attrs = attrs
@@ -769,8 +1408,14 @@ impl App {
             preedit: String::new(),
             last_title: title,
             md_content_h: 0.0,
+            font_scale: 1.0,
             header_hits: Vec::new(),
             find_hits: Vec::new(),
+            viewer_prompt: None,
+            viewer_prompt_hits: Vec::new(),
+            scrollbar: None,
+            scrollbar_drag_offset: None,
+            welcome: false,
             missing_source,
             status: None,
             window,
@@ -842,7 +1487,7 @@ impl App {
         &mut self,
         id: WindowId,
         event: WindowEvent,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
     ) -> bool {
         let Some(index) = self
             .aux
@@ -856,7 +1501,7 @@ impl App {
             self.modifiers = modifiers.state();
         }
         match event {
-            WindowEvent::CloseRequested => self.close_aux_editor(index),
+            WindowEvent::CloseRequested => self.close_aux_editor(index, event_loop),
             WindowEvent::Moved(_) => self.save_aux_windows_state(),
             WindowEvent::Resized(size) => {
                 let aux = &mut self.aux.windows[index];
@@ -869,7 +1514,7 @@ impl App {
                 let aux = &mut self.aux.windows[index];
                 let scale = aux.window.scale_factor() as f32;
                 aux.gpu.set_scale(scale);
-                aux.gpu.set_font_size(FONT_SIZE);
+                aux.gpu.set_font_size(FONT_SIZE * aux.font_scale);
                 let size = aux.window.inner_size();
                 aux.gpu.resize(size.width, size.height);
                 aux.dirty = true;
@@ -889,16 +1534,56 @@ impl App {
                 let scale = self.aux.windows[index].gpu.scale().max(0.5);
                 self.aux.windows[index].cursor_px =
                     (position.x as f32 / scale, position.y as f32 / scale);
-                self.aux_drag_selection(index);
+                let hover_chrome = self.aux.windows[index].cursor_px.1 <= HEADER_H
+                    || self.aux.windows[index].viewer_prompt.is_some()
+                    || self.aux.windows[index].scrollbar.is_some_and(|bar| {
+                        self.aux.windows[index].cursor_px.0 >= bar.x - 7.0
+                            && self.aux.windows[index].cursor_px.0 <= bar.x + 7.0
+                    });
+                let point = self.aux.windows[index].cursor_px;
+                let over_action = self.aux.windows[index]
+                    .header_hits
+                    .iter()
+                    .any(|(_, rect)| hit(point, *rect))
+                    || self.aux.windows[index]
+                        .viewer_prompt_hits
+                        .iter()
+                        .any(|(_, rect)| hit(point, *rect));
+                let over_scrollbar = self.aux.windows[index].scrollbar.is_some_and(|bar| {
+                    point.0 >= bar.x - 7.0
+                        && point.0 <= bar.x + 7.0
+                        && point.1 >= bar.track_y
+                        && point.1 <= bar.track_y + bar.track_h
+                });
+                let cursor = if self.aux.windows[index].scrollbar_drag_offset.is_some() {
+                    winit::window::CursorIcon::Grabbing
+                } else if over_scrollbar {
+                    winit::window::CursorIcon::Grab
+                } else if over_action {
+                    winit::window::CursorIcon::Pointer
+                } else if self.aux.windows[index].editor.raw_mode && point.1 >= HEADER_H {
+                    winit::window::CursorIcon::Text
+                } else {
+                    winit::window::CursorIcon::Default
+                };
+                self.aux.windows[index].window.set_cursor(cursor);
+                if !self.aux_scrollbar_drag(index) {
+                    self.aux_drag_selection(index);
+                }
+                if hover_chrome {
+                    self.aux.windows[index].dirty = true;
+                    self.aux.windows[index].window.request_redraw();
+                }
             }
             WindowEvent::MouseInput {
                 state,
                 button: MouseButton::Left,
                 ..
             } => match state {
-                ElementState::Pressed => self.aux_mouse_press(index),
+                ElementState::Pressed => self.aux_mouse_press(index, event_loop),
                 ElementState::Released => {
                     let aux = &mut self.aux.windows[index];
+                    aux.scrollbar_drag_offset = None;
                     aux.selecting = false;
                     if aux.editor.sel_anchor == Some((aux.editor.cur_line, aux.editor.cur_col)) {
                         aux.editor.sel_anchor = None;
@@ -907,7 +1592,11 @@ impl App {
                 }
             },
             WindowEvent::MouseWheel { delta, .. } => self.aux_wheel(index, delta),
-            WindowEvent::KeyboardInput { event, .. } => self.aux_key(index, &event),
+            WindowEvent::KeyboardInput { event, .. } => self.aux_key(index, &event, event_loop),
+            WindowEvent::DroppedFile(path) if self.viewer_only => {
+                self.queue_aux_file(path, true);
+                self.flush_aux_opens(event_loop);
+            }
             WindowEvent::Ime(ime) => self.aux_ime(index, ime),
             WindowEvent::RedrawRequested => self.aux_render(index),
             _ => {}
@@ -917,7 +1606,12 @@ impl App {
 
     pub(crate) fn aux_request_redraws(&mut self) {
         for aux in &mut self.aux.windows {
-            if aux.focused || aux.dirty {
+            if aux.dirty
+                || (aux.focused
+                    && aux.editor.raw_mode
+                    && !aux.welcome
+                    && aux.viewer_prompt.is_none())
+            {
                 aux.window.request_redraw();
             }
         }
@@ -946,9 +1640,17 @@ impl App {
                         "cursor": [aux.editor.cur_line, aux.editor.cur_col],
                         "scroll": aux.editor.scroll,
                         "h_scroll": aux.editor.h_scroll,
+                        "wrap": aux.editor.wrap,
+                        "font_scale": aux.font_scale,
+                        "scrollbar": aux.scrollbar.is_some(),
                         "buffer_lines": aux.editor.edit_lines.len(),
                         "buffer_hash": hash.finish(),
                         "focused": aux.focused,
+                        "welcome": aux.welcome,
+                        "viewer_prompt": aux.viewer_prompt.map(|prompt| match prompt {
+                            ViewerPromptAction::Close => "close",
+                            ViewerPromptAction::Quit => "quit",
+                        }),
                         "find": aux.editor.find.as_ref().map(|find| serde_json::json!({
                             "hits": find.hits.len(),
                             "index": find.idx,
@@ -1001,13 +1703,61 @@ impl App {
         }
         let aux = self.aux.windows.get(index)?;
         let wanted = match kind {
+            "open" => HeaderButton::Open,
             "view" => HeaderButton::View,
             "edit" => HeaderButton::Edit,
+            "find" => HeaderButton::Find,
+            "wrap" => HeaderButton::Wrap,
+            "zoom-out" => HeaderButton::ZoomOut,
+            "zoom-in" => HeaderButton::ZoomIn,
             "save" => HeaderButton::Save,
             _ => return None,
         };
         let (_, rect) = aux
             .header_hits
+            .iter()
+            .find(|(button, _)| *button == wanted)?;
+        let scale = aux.gpu.scale() as f64;
+        Some((
+            aux.window.id(),
+            winit::dpi::PhysicalPosition::new(
+                (rect.0 + rect.2 * 0.5) as f64 * scale,
+                (rect.1 + rect.3 * 0.5) as f64 * scale,
+            ),
+        ))
+    }
+
+    pub(crate) fn aux_probe_resize(&self, index: usize, width: u32, height: u32) -> bool {
+        if !crate::verification_run() {
+            return false;
+        }
+        let Some(aux) = self.aux.windows.get(index) else {
+            return false;
+        };
+        let _ = aux.window.request_inner_size(winit::dpi::PhysicalSize::new(
+            width.max(320),
+            height.max(240),
+        ));
+        true
+    }
+
+    pub(crate) fn aux_probe_viewer_prompt_center(
+        &self,
+        index: usize,
+        kind: &str,
+    ) -> Option<(WindowId, winit::dpi::PhysicalPosition<f64>)> {
+        if !crate::verification_run() {
+            return None;
+        }
+        let aux = self.aux.windows.get(index)?;
+        let wanted = match kind {
+            "cancel" => ViewerPromptButton::Cancel,
+            "discard" => ViewerPromptButton::Discard,
+            "save" => ViewerPromptButton::Save,
+            _ => return None,
+        };
+        let (_, rect) = aux
+            .viewer_prompt_hits
             .iter()
             .find(|(button, _)| *button == wanted)?;
         let scale = aux.gpu.scale() as f64;
@@ -1037,13 +1787,21 @@ impl App {
     }
 
     pub(crate) fn save_aux_windows_state(&self) {
-        let mut records: Vec<RestoreRecord> =
-            self.aux.windows.iter().map(AuxWindow::record).collect();
+        let mut records: Vec<RestoreRecord> = self
+            .aux
+            .windows
+            .iter()
+            .filter(|aux| !aux.welcome)
+            .map(AuxWindow::record)
+            .collect();
         // Explicit in-pane previews are intentionally absent from the PTY
         // layout JSON. Save them beside aux windows so choosing tab/split does
         // not make a dirty document less recoverable; restore may reopen them
         // as detached windows without reviving a fake PTY leaf.
-        if let Ok(ws) = self.ws.lock() {
+        if !self.viewer_only {
+            let Ok(ws) = self.ws.lock() else {
+                return;
+            };
             records.extend(ws.panes.values().flat_map(|pane| {
                 pane.tabs.iter().filter_map(|tab| {
                     let editor = tab.markdown()?;
@@ -1069,6 +1827,7 @@ impl App {
                         scroll: editor.scroll,
                         h_scroll: editor.h_scroll,
                         wrap: editor.wrap,
+                        font_scale: None,
                         frame: None,
                     })
                 })
@@ -1081,7 +1840,7 @@ impl App {
         records.extend(self.aux.unopened.iter().cloned());
         let mut seen = std::collections::HashSet::new();
         records.retain(|record| record.path.is_empty() || seen.insert(record.path.clone()));
-        if let Some(path) = state_path() {
+        if let Some(path) = state_path(self.aux.viewer_only) {
             let _ = write_state(&path, &records, &mut self.aux.saved.borrow_mut());
         }
     }
@@ -1137,11 +1896,23 @@ impl App {
         }
     }
 
-    fn close_aux_editor(&mut self, index: usize) {
+    fn close_aux_editor(&mut self, index: usize, event_loop: &ActiveEventLoop) {
         self.aux_flush_hangul(index);
         let Some(id) = self.aux.windows.get(index).map(|aux| aux.window.id()) else {
             return;
         };
+        if self.viewer_only {
+            if self.aux.windows[index].editor.modified {
+                self.aux.windows[index].viewer_prompt = Some(ViewerPromptAction::Close);
+                self.aux_redraw(index);
+                return;
+            }
+            self.close_aux_by_id(id);
+            if !self.viewer_has_work() {
+                event_loop.exit();
+            }
+            return;
+        }
         if self.guard_dirty(&PendingClose::AuxEditor(id)) {
             if let Some(main) = &self.window {
                 main.focus_window();
@@ -1150,6 +1921,125 @@ impl App {
             return;
         }
         self.close_aux_by_id(id);
+    }
+
+    fn viewer_prompt_pick(
+        &mut self,
+        index: usize,
+        button: ViewerPromptButton,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let Some(action) = self
+            .aux
+            .windows
+            .get_mut(index)
+            .and_then(|aux| aux.viewer_prompt.take())
+        else {
+            return;
+        };
+        if button == ViewerPromptButton::Cancel {
+            self.aux.viewer_quit_requested = false;
+            self.aux_redraw(index);
+            return;
+        }
+        let id = self.aux.windows[index].window.id();
+        if button == ViewerPromptButton::Save && !self.aux_save(index) {
+            self.aux.windows[index].viewer_prompt = Some(action);
+            self.aux.windows[index].window.focus_window();
+            self.aux_redraw(index);
+            return;
+        }
+        match action {
+            ViewerPromptAction::Close => {
+                self.close_aux_by_id(id);
+                if !self.viewer_has_work() {
+                    event_loop.exit();
+                }
+            }
+            ViewerPromptAction::Quit => {
+                if button == ViewerPromptButton::Discard {
+                    self.viewer_discard_for_quit(index);
+                }
+                self.viewer_continue_quit(event_loop);
+            }
+        }
+    }
+
+    fn viewer_discard_for_quit(&mut self, index: usize) {
+        let path = self.aux.windows[index].editor.doc.path.clone();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let editor = &mut self.aux.windows[index].editor;
+                editor.edit_lines = Arc::new(text.split('\n').map(String::from).collect());
+                if editor.edit_lines.is_empty() {
+                    editor.edit_lines = Arc::new(vec![String::new()]);
+                }
+                editor.doc = Arc::new(build_markdown_doc(std::path::Path::new(&path), &text));
+                editor.cur_line = editor.cur_line.min(editor.edit_lines.len() - 1);
+                editor.cur_col = editor
+                    .cur_col
+                    .min(editor.edit_lines[editor.cur_line].chars().count());
+                editor.sel_anchor = None;
+                editor.extra.clear();
+                editor.mark_saved();
+                self.aux.windows[index].missing_source = false;
+            }
+            Err(_) => {
+                self.aux.windows.remove(index);
+            }
+        }
+    }
+
+    pub(crate) fn viewer_begin_quit(&mut self, event_loop: &ActiveEventLoop) {
+        self.aux.viewer_quit_requested = true;
+        self.viewer_continue_quit(event_loop);
+    }
+
+    fn viewer_continue_quit(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(index) = self
+            .aux
+            .windows
+            .iter()
+            .position(|aux| !aux.welcome && aux.editor.modified)
+        {
+            self.aux.windows[index].viewer_prompt = Some(ViewerPromptAction::Quit);
+            self.aux.windows[index].window.focus_window();
+            self.aux_redraw(index);
+            return;
+        }
+        self.save_aux_windows_state();
+        event_loop.exit();
+    }
+
+    fn viewer_choose_file(&mut self, index: usize) {
+        #[cfg(target_os = "macos")]
+        {
+            let proxy = self.proxy.clone();
+            self.aux.windows[index].status = Some("파일 선택 중…".to_string());
+            self.aux_redraw(index);
+            std::thread::spawn(move || {
+                let output = std::process::Command::new("/usr/bin/osascript")
+                    .args([
+                        "-e",
+                        "POSIX path of (choose file with prompt \"kasaterm 문서 열기\")",
+                    ])
+                    .output();
+                let Ok(output) = output else { return };
+                if !output.status.success() {
+                    return;
+                }
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    let _ = proxy.send_event(UserEvent::OpenMarkdownWindow(path));
+                }
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.aux.windows[index].status =
+                Some("파일을 이 창에 끌어놓아 열 수 있어요".to_string());
+            self.aux_redraw(index);
+        }
     }
 
     pub(crate) fn aux_doc(&self, id: WindowId) -> Option<&MarkdownPane> {
@@ -1168,7 +2058,7 @@ impl App {
             .map(|aux| &mut aux.editor)
     }
 
-    fn aux_key(&mut self, index: usize, event: &KeyEvent) {
+    fn aux_key(&mut self, index: usize, event: &KeyEvent, event_loop: &ActiveEventLoop) {
         use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
         if event.state != ElementState::Pressed || crate::input::is_modifier_key(event) {
             return;
@@ -1176,13 +2066,57 @@ impl App {
         self.last_input_at = Instant::now();
         let id = self.aux.windows[index].window.id();
         self.ime_retarget(ImeFocus::AuxEditor(id));
+        if self.viewer_only && self.aux.windows[index].viewer_prompt.is_some() {
+            match event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.viewer_prompt_pick(index, ViewerPromptButton::Cancel, event_loop)
+                }
+                Key::Named(NamedKey::Enter) => {
+                    self.viewer_prompt_pick(index, ViewerPromptButton::Save, event_loop)
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.viewer_only && self.host_mod() {
+            match event.physical_key {
+                PhysicalKey::Code(KeyCode::KeyQ) => {
+                    self.viewer_begin_quit(event_loop);
+                    return;
+                }
+                PhysicalKey::Code(KeyCode::KeyO) => {
+                    self.viewer_choose_file(index);
+                    return;
+                }
+                _ => {}
+            }
+        }
         if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW)) {
-            self.close_aux_editor(index);
+            self.close_aux_editor(index, event_loop);
+            return;
+        }
+        if self.aux.windows[index].welcome {
             return;
         }
         if self.host_mod() {
             self.aux_flush_hangul(index);
             if let PhysicalKey::Code(code) = event.physical_key {
+                let logical = match &event.logical_key {
+                    Key::Character(text) => Some(text.as_str()),
+                    _ => None,
+                };
+                if let Some(zoom) = crate::input::zoom_key(Some(code), logical) {
+                    match zoom {
+                        crate::input::ZoomKey::In => {
+                            self.aux_adjust_zoom(index, AUX_FONT_SCALE_STEP)
+                        }
+                        crate::input::ZoomKey::Out => {
+                            self.aux_adjust_zoom(index, -AUX_FONT_SCALE_STEP)
+                        }
+                        crate::input::ZoomKey::Reset => self.aux_set_zoom(index, 1.0),
+                    }
+                    return;
+                }
                 if self.aux_shortcut(index, code) {
                     self.aux_redraw(index);
                     self.save_aux_windows_state();
@@ -1339,6 +2273,9 @@ impl App {
                 true
             }
             KeyCode::KeyF => {
+                if !self.aux.windows[index].editor.raw_mode {
+                    self.aux_set_mode(index, true);
+                }
                 self.aux.windows[index]
                     .editor
                     .find_open(self.modifiers.alt_key());
@@ -1499,9 +2436,23 @@ impl App {
         )
     }
 
-    fn aux_mouse_press(&mut self, index: usize) {
+    fn aux_mouse_press(&mut self, index: usize, event_loop: &ActiveEventLoop) {
         self.aux_flush_hangul(index);
         let cursor = self.aux.windows[index].cursor_px;
+        if self.viewer_only && self.aux.windows[index].viewer_prompt.is_some() {
+            if let Some(button) = self.aux.windows[index]
+                .viewer_prompt_hits
+                .iter()
+                .find(|(_, rect)| hit(cursor, *rect))
+                .map(|(button, _)| *button)
+            {
+                self.viewer_prompt_pick(index, button, event_loop);
+            }
+            return;
+        }
+        if self.aux_scrollbar_press(index) {
+            return;
+        }
         if let Some(button) = self.aux.windows[index]
             .header_hits
             .iter()
@@ -1509,8 +2460,38 @@ impl App {
             .map(|(button, _)| *button)
         {
             match button {
+                HeaderButton::Open => self.viewer_choose_file(index),
                 HeaderButton::View => self.aux_set_mode(index, false),
                 HeaderButton::Edit => self.aux_set_mode(index, true),
+                HeaderButton::Find => {
+                    if !self.aux.windows[index].editor.raw_mode {
+                        self.aux_set_mode(index, true);
+                    }
+                    if self.aux.windows[index].editor.find.is_some() {
+                        self.aux.windows[index].editor.find_close();
+                    } else {
+                        self.aux.windows[index].editor.find_open(false);
+                    }
+                    self.aux.windows[index].status = None;
+                    self.aux_redraw(index);
+                    self.save_aux_windows_state();
+                }
+                HeaderButton::Wrap => {
+                    let editor = &mut self.aux.windows[index].editor;
+                    editor.wrap = !editor.wrap;
+                    if editor.wrap {
+                        editor.h_scroll = 0.0;
+                    }
+                    self.aux.windows[index].status = Some(if self.aux.windows[index].editor.wrap {
+                        "긴 줄 줄바꿈을 켰어요".to_string()
+                    } else {
+                        "긴 줄 줄바꿈을 껐어요".to_string()
+                    });
+                    self.aux_redraw(index);
+                    self.save_aux_windows_state();
+                }
+                HeaderButton::ZoomOut => self.aux_adjust_zoom(index, -AUX_FONT_SCALE_STEP),
+                HeaderButton::ZoomIn => self.aux_adjust_zoom(index, AUX_FONT_SCALE_STEP),
                 HeaderButton::Save => {
                     self.aux_save(index);
                 }
@@ -1571,15 +2552,75 @@ impl App {
         self.save_aux_windows_state();
     }
 
+    fn aux_scrollbar_press(&mut self, index: usize) -> bool {
+        let aux = &mut self.aux.windows[index];
+        let Some(bar) = aux.scrollbar else {
+            return false;
+        };
+        let point = aux.cursor_px;
+        if point.0 < bar.x - 7.0
+            || point.0 > bar.x + 7.0
+            || point.1 < bar.track_y
+            || point.1 > bar.track_y + bar.track_h
+        {
+            return false;
+        }
+        aux.scrollbar_drag_offset = Some(
+            if point.1 >= bar.thumb_y && point.1 <= bar.thumb_y + bar.thumb_h {
+                point.1 - bar.thumb_y
+            } else {
+                bar.thumb_h * 0.5
+            },
+        );
+        self.aux_scrollbar_drag(index);
+        true
+    }
+
+    fn aux_scrollbar_drag(&mut self, index: usize) -> bool {
+        let aux = &mut self.aux.windows[index];
+        let (Some(bar), Some(offset)) = (aux.scrollbar, aux.scrollbar_drag_offset) else {
+            return false;
+        };
+        let travel = (bar.track_h - bar.thumb_h).max(1.0);
+        let thumb_y =
+            (aux.cursor_px.1 - offset).clamp(bar.track_y, bar.track_y + bar.track_h - bar.thumb_h);
+        aux.editor.scroll = ((thumb_y - bar.track_y) / travel) * bar.max_scroll;
+        aux.dirty = true;
+        aux.window.request_redraw();
+        self.save_aux_windows_state();
+        true
+    }
+
+    fn aux_adjust_zoom(&mut self, index: usize, delta: f32) {
+        let current = self.aux.windows[index].font_scale;
+        let next = ((current + delta) * 10.0).round() / 10.0;
+        self.aux_set_zoom(index, next);
+    }
+
+    fn aux_set_zoom(&mut self, index: usize, scale: f32) {
+        let aux = &mut self.aux.windows[index];
+        aux.font_scale = scale.clamp(AUX_FONT_SCALE_MIN, AUX_FONT_SCALE_MAX);
+        aux.gpu.set_font_size(FONT_SIZE * aux.font_scale);
+        aux.status = Some(format!(
+            "보기 크기 {}%",
+            (aux.font_scale * 100.0).round() as i32
+        ));
+        aux.dirty = true;
+        aux.window.request_redraw();
+        self.save_aux_windows_state();
+    }
+
     fn aux_wheel(&mut self, index: usize, delta: MouseScrollDelta) {
         let aux = &mut self.aux.windows[index];
-        let line_h = aux.gpu.raw_editor_line_h();
+        let (top_pad, line_h) = aux.gpu.raw_editor_metrics();
         let dy = match delta {
             MouseScrollDelta::LineDelta(_, y) => y * line_h * 3.0,
             MouseScrollDelta::PixelDelta(point) => point.y as f32,
         };
         let body_h = aux.body_box().3;
-        let content_h = if aux.editor.raw_mode {
+        let content_h = if aux.md_content_h > 0.0 {
+            aux.md_content_h
+        } else if aux.editor.raw_mode {
             let width = aux.body_box().2;
             let wrap_cols =
                 aux.gpu
@@ -1587,8 +2628,7 @@ impl App {
             crate::markdown::layout_rows(&aux.editor.edit_lines, &aux.editor.folds, wrap_cols).len()
                 as f32
                 * line_h
-        } else if aux.md_content_h > 0.0 {
-            aux.md_content_h
+                + top_pad
         } else {
             aux.editor.edit_lines.len() as f32 * line_h
         };
@@ -1901,6 +2941,7 @@ mod tests {
             scroll: 12.5,
             h_scroll: 7.0,
             wrap: true,
+            font_scale: Some(1.2),
             frame: Some(FrameRecord {
                 x: -20,
                 y: 40,
@@ -1911,6 +2952,7 @@ mod tests {
         let bytes = serde_json::to_vec(&record).unwrap();
         let got: RestoreRecord = serde_json::from_slice(&bytes).unwrap();
         assert!(got.raw_mode && got.wrap && got.modified);
+        assert_eq!(got.font_scale, Some(1.2));
         assert_eq!(got.sel_anchor, Some((1, 1)));
         assert_eq!(got.extra[0].anchor, Some((4, 1)));
         assert_eq!(got.frame.unwrap().width, 800);
@@ -1922,5 +2964,13 @@ mod tests {
         assert_eq!(clamped_document_scroll(10.0, -50.0, 500.0, 100.0), 0.0);
         assert_eq!(clamped_document_scroll(390.0, 50.0, 500.0, 100.0), 400.0);
         assert_eq!(clamped_document_scroll(5.0, 10.0, 80.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn viewer_markdown_extensions_match_bundle_declarations() {
+        for name in ["note.md", "note.markdown", "note.mdown", "note.mkd"] {
+            assert!(is_markdown_path(std::path::Path::new(name)), "{name}");
+        }
+        assert!(!is_markdown_path(std::path::Path::new("note.txt")));
     }
 }

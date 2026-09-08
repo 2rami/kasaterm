@@ -439,9 +439,9 @@ pub const THEME_PRESETS: &[(&str, &str, &Palette)] = &[
     ("nacho", "Nachoneko", &NACHO),
 ];
 
-/// 지금 store_palette 가 **미리보기** 픽으로 불렸나. OS 색 패널의 휠을 돌리는
-/// 동안 초당 수십 번 오는 경로라, 화면 밖으로 나가는 쓰기(claude 설정 파일)는
-/// 이때 건너뛴다 — 손을 뗄 때 진짜 커밋이 같은 값으로 한 번 더 지나간다.
+/// 지금 store_palette 가 화면 밖 쓰기를 하지 않는 호출에서 불렸나. OS 색 패널의
+/// 미리보기와 독립 Viewer 시작은 원자 색 슬롯만 필요하고, Claude 설정 파일은
+/// 건드리면 안 된다. 미리보기는 손을 뗄 때 진짜 커밋이 같은 값을 다시 적용한다.
 static PREVIEWING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn store_palette(p: &Palette) {
@@ -968,10 +968,14 @@ pub fn custom_theme_seed(base_key: &str, slug: &str, label: &str) -> serde_json:
     serde_json::Value::Object(o)
 }
 
-pub fn set_accent(name: &str) {
+fn store_accent(name: &str) {
     let value = accent_color(name);
     S_ACCENT.store(pack(value), Ordering::Relaxed);
     S_CURSOR.store(pack(value), Ordering::Relaxed);
+}
+
+pub fn set_accent(name: &str) {
+    store_accent(name);
     // 강조색은 팔레트 적용 경로(`apply_palette`)를 안 지난다 — 그래서 claude 쪽
     // 커스텀 테마도 여기서 따로 다시 구워야 한다. 안 그러면 강조색만 바꿨을 때
     // 터미널은 새 색인데 claude 는 옛 색으로 남는다.
@@ -980,6 +984,17 @@ pub fn set_accent(name: &str) {
 
 /// Apply persisted theme + accent from settings.json at launch.
 pub fn apply_from_settings() {
+    apply_from_settings_inner(true);
+}
+
+/// Viewer startup uses the same palette slots without rewriting Claude's
+/// generated theme file. Merely opening a document must be read-only outside
+/// the viewer's own document-state file.
+pub fn apply_from_settings_read_only() {
+    apply_from_settings_inner(false);
+}
+
+fn apply_from_settings_inner(sync_claude_theme: bool) {
     let s = crate::socket::read_settings();
     // 처음 켠 사람이 보는 팔레트. Windows 만 Catppuccin Latte 로 갈라진다 —
     // 밝은 바탕이 그쪽 시스템 팝업·창 그림자와 훨씬 덜 부딪힌다(2026-08-31 거노:
@@ -990,9 +1005,21 @@ pub fn apply_from_settings() {
     // 꺼 둔 갈래는 파싱 뒤 통째로 버려져서 맥에서 Windows 쪽 오타가 안 잡힌다.
     let fallback = if cfg!(windows) { "catppuccin-latte" } else { "dark" };
     let mode = s.get("theme").and_then(|x| x.as_str()).unwrap_or(fallback);
-    set_theme(mode);
+    if sync_claude_theme {
+        set_theme(mode);
+    } else {
+        // Every palette kind eventually reaches `store_palette`, whose normal
+        // contract includes regenerating Claude's theme file. Viewer startup
+        // needs the identical in-memory colors without that external write.
+        let was_previewing = PREVIEWING.swap(true, Ordering::Relaxed);
+        set_theme(mode);
+        PREVIEWING.store(was_previewing, Ordering::Relaxed);
+    }
     let accent = s.get("accent").and_then(|x| x.as_str()).unwrap_or("blue");
-    set_accent(accent);
+    store_accent(accent);
+    if sync_claude_theme {
+        crate::socket::write_claude_custom_theme(is_light(bg()));
+    }
     // KASATERM_SHAPE overrides the stored key so a silhouette can be previewed
     // (or screenshot-verified) without editing the live settings file — the
     // settings file is shared with the running app, so a test that rewrote it

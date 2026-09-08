@@ -75,6 +75,17 @@ impl ApplicationHandler<UserEvent> for App {
     /// committed-Hangul echo / backspace / space show up without lag.
     // event_loop 는 SocketOpenWeb(자식 창 생성) 한 곳만 쓴다.
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        if self.viewer_only {
+            match event {
+                UserEvent::Redraw => self.aux_request_redraws(),
+                UserEvent::OpenMarkdownWindow(path) => {
+                    self.queue_aux_file(std::path::PathBuf::from(path), true);
+                    self.flush_aux_opens(event_loop);
+                }
+                _ => {}
+            }
+            return;
+        }
         if matches!(&event, UserEvent::Redraw) {
             self.aux_request_redraws();
         }
@@ -1640,6 +1651,9 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.save_aux_windows_state();
+        if self.viewer_only {
+            return;
+        }
         self.close_inline_web();
         // 자동 ssh 터널(명부의 ssh 항목)이 고아로 남지 않게.
         kasa_mcp::machines::stop_tunnels();
@@ -1654,6 +1668,38 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.viewer_only {
+            if self.viewer_resumed {
+                return;
+            }
+            self.viewer_resumed = true;
+            #[cfg(target_os = "macos")]
+            crate::macos_open::install_open_doc_handler(self.proxy.clone());
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS),
+            ));
+            #[cfg(target_os = "macos")]
+            if self.menu.is_none() {
+                use muda::accelerator::Accelerator;
+                use muda::{Menu, MenuItem, Submenu};
+                let menu = Menu::new();
+                let app_menu = Submenu::new("Kasaterm Viewer", true);
+                // The predefined Quit item asks AppKit to terminate before
+                // winit can show the owning document's unsaved-changes prompt.
+                let quit_item = MenuItem::new(
+                    "Kasaterm Viewer 종료",
+                    true,
+                    "CmdOrCtrl+Q".parse::<Accelerator>().ok(),
+                );
+                let _ = app_menu.append(&quit_item);
+                let _ = menu.append(&app_menu);
+                menu.init_for_nsapp();
+                self.quit_menu_item = Some(quit_item);
+                self.menu = Some(menu);
+            }
+            self.prepare_viewer_windows(event_loop);
+            return;
+        }
         if self.window.is_some() {
             return;
         }
@@ -6837,6 +6883,28 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.viewer_only {
+            self.flush_aux_opens(event_loop);
+            while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
+                if self.quit_menu_item.as_ref().map(|item| item.id()) == Some(&event.id) {
+                    self.viewer_begin_quit(event_loop);
+                    return;
+                }
+            }
+            self.run_pending_autoviewer(event_loop);
+            if !self.viewer_has_work() {
+                event_loop.exit();
+            } else if self.viewer_needs_blink()
+                || std::env::var_os("KASATERM_TEST_VIEWER_E2E").is_some()
+            {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS),
+                ));
+            } else {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+            return;
+        }
         self.flush_aux_opens(event_loop);
         let web_visual_deadline = self.publish_web_visual_scenes();
         // 신원 조회가 값을 채웠으면 그 자리에서 다시 그린다. 조회는 백그라운드
@@ -7542,6 +7610,10 @@ impl ApplicationHandler<UserEvent> for App {
         // so the cursor block toggles its phase. Other wake causes
         // (input, redraw, init) drive their own redraws.
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            if self.viewer_only {
+                self.aux_request_redraws();
+                return;
+            }
             if self.settings_media_animating() {
                 self.chrome_dirty = true;
             }

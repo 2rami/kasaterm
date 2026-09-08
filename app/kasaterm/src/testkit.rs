@@ -4462,6 +4462,437 @@ impl App {
         }
     }
 
+    /// Viewer-only product-route E2E. The driver opens disposable files through
+    /// the real command-line/LaunchServices entrances; this hook only records
+    /// what those entrances produced and exercises close confirmation through
+    /// the ordinary aux-window handlers.
+    pub(crate) fn run_pending_autoviewer(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{
+            DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase,
+        };
+
+        static START: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicUsize = AtomicUsize::new(0);
+        static DIRTY_HASH: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        static PIXEL_SCROLL_BITS: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        static SAVE_PENDING: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        let mode = match std::env::var("KASATERM_TEST_VIEWER_E2E") {
+            Ok(mode) => mode,
+            Err(_) => return,
+        };
+        let start = START.get_or_init(|| {
+            let ms = std::env::var("KASATERM_TEST_VIEWER_STEP_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(900);
+            Some(Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(start) = start else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        if Instant::now()
+            < *start + std::time::Duration::from_millis(step as u64 * 500)
+        {
+            return;
+        }
+        let cap_dir = match std::env::var_os("KASATERM_TEST_VIEWER_CAP_DIR") {
+            Some(path) => std::path::PathBuf::from(path),
+            None => {
+                eprintln!("[viewere2e] FAIL capture dir 없음");
+                return;
+            }
+        };
+        let fixture_root = cap_dir
+            .parent()
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .unwrap_or_else(|| cap_dir.clone());
+        let doc = |name: &str| {
+            let path = std::env::var_os(name).map(std::path::PathBuf::from)?;
+            let absolute = std::fs::canonicalize(&path).ok()?;
+            absolute.starts_with(&fixture_root).then_some(absolute)
+        };
+        let Some(doc1) = doc("KASATERM_TEST_VIEWER_DOC1") else {
+            eprintln!("[viewere2e] FAIL disposable doc1 아님");
+            return;
+        };
+        let Some(doc2) = doc("KASATERM_TEST_VIEWER_DOC2") else {
+            eprintln!("[viewere2e] FAIL disposable doc2 아님");
+            return;
+        };
+        let _ = std::fs::create_dir_all(&cap_dir);
+        let index_for = |summary: &serde_json::Value, path: &std::path::Path| {
+            summary.as_array()?.iter().position(|row| {
+                row.get("path").and_then(serde_json::Value::as_str)
+                    == Some(path.to_string_lossy().as_ref())
+            })
+        };
+        let capture_all = |app: &mut App, prefix: &str| {
+            for index in 0..app.aux_probe_ids().len() {
+                let path = cap_dir.join(format!("{prefix}-{index}.png"));
+                let ok = app.aux_capture(index, path.to_string_lossy().into_owned());
+                eprintln!("[viewere2e] capture {prefix}-{index}={ok}");
+            }
+        };
+        let click_prompt =
+            |app: &mut App,
+             index: usize,
+             kind: &str,
+             event_loop: &ActiveEventLoop|
+             -> bool {
+                let Some((id, position)) =
+                    app.aux_probe_viewer_prompt_center(index, kind)
+                else {
+                    return false;
+                };
+                app.aux_window_event(
+                    id,
+                    WindowEvent::CursorMoved {
+                        device_id: DeviceId::dummy(),
+                        position,
+                    },
+                    event_loop,
+                );
+                for state in [ElementState::Pressed, ElementState::Released] {
+                    app.aux_window_event(
+                        id,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state,
+                            button: MouseButton::Left,
+                        },
+                        event_loop,
+                    );
+                }
+                true
+            };
+        let click_header =
+            |app: &mut App, index: usize, kind: &str, event_loop: &ActiveEventLoop| -> bool {
+                let Some((id, position)) = app.aux_probe_header_center(index, kind) else {
+                    return false;
+                };
+                app.aux_window_event(
+                    id,
+                    WindowEvent::CursorMoved {
+                        device_id: DeviceId::dummy(),
+                        position,
+                    },
+                    event_loop,
+                );
+                for state in [ElementState::Pressed, ElementState::Released] {
+                    app.aux_window_event(
+                        id,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state,
+                            button: MouseButton::Left,
+                        },
+                        event_loop,
+                    );
+                }
+                true
+            };
+
+        if mode == "restore" {
+            if step == 0 {
+                if self.aux_probe_ids().len() != 2 {
+                    return;
+                }
+                capture_all(self, "restore");
+                eprintln!(
+                    "[viewere2e] RESTORE main={} work={} {}",
+                    self.window.is_some(),
+                    self.viewer_has_work(),
+                    self.aux_probe_summary()
+                );
+                STEP.store(1, Ordering::Relaxed);
+                return;
+            }
+            if step == 1 {
+                let summary = self.aux_probe_summary();
+                let Some(index) = index_for(&summary, &doc1) else { return };
+                if self
+                    .aux_probe_viewer_prompt_center(index, "discard")
+                    .is_none()
+                {
+                    return;
+                }
+                capture_all(self, "restore-discard-prompt");
+                if !click_prompt(self, index, "discard", event_loop) {
+                    return;
+                }
+                eprintln!("[viewere2e] RESTORE_DISCARD {}", self.aux_probe_summary());
+                eprintln!("[viewere2e] RESTORE_DONE");
+                STEP.store(2, Ordering::Relaxed);
+            }
+            return;
+        }
+        if mode != "first" {
+            eprintln!("[viewere2e] FAIL mode={mode:?}");
+            return;
+        }
+
+        match step {
+            0 => {
+                if self.aux_probe_ids().len() != 1 {
+                    return;
+                }
+                capture_all(self, "cold");
+                eprintln!(
+                    "[viewere2e] COLD main={} work={} {}",
+                    self.window.is_some(),
+                    self.viewer_has_work(),
+                    self.aux_probe_summary()
+                );
+            }
+            1 => {
+                if !cap_dir.join("warm.done").is_file() || self.aux_probe_ids().len() != 2 {
+                    return;
+                }
+                let summary = self.aux_probe_summary();
+                if let Some(index) = index_for(&summary, &doc2) {
+                    if let Some(id) = self.aux_probe_ids().get(index).copied() {
+                        self.aux_window_event(
+                            id,
+                            WindowEvent::MouseWheel {
+                                device_id: DeviceId::dummy(),
+                                delta: MouseScrollDelta::PixelDelta(
+                                    winit::dpi::PhysicalPosition::new(0.0, -360.0),
+                                ),
+                                phase: TouchPhase::Moved,
+                            },
+                            event_loop,
+                        );
+                        self.focus_aux_window(id);
+                    }
+                }
+                capture_all(self, "warm");
+                let after = self.aux_probe_summary();
+                if let Some(scroll) = index_for(&after, &doc2)
+                    .and_then(|index| after.as_array()?.get(index))
+                    .and_then(|row| row.get("scroll"))
+                    .and_then(serde_json::Value::as_f64)
+                {
+                    PIXEL_SCROLL_BITS.store((scroll as f32).to_bits(), Ordering::Relaxed);
+                }
+                eprintln!("[viewere2e] WARM {after}");
+            }
+            2 => {
+                if !cap_dir.join("dedup.done").is_file() {
+                    return;
+                }
+                if SAVE_PENDING.load(Ordering::Relaxed) {
+                    let summary = self.aux_probe_summary();
+                    let Some(doc1_index) = index_for(&summary, &doc1) else { return };
+                    let Some(doc2_index) = index_for(&summary, &doc2) else { return };
+                    if !click_header(self, doc2_index, "save", event_loop) {
+                        return;
+                    }
+                    let saved_summary = self.aux_probe_summary();
+                    let persisted = std::fs::read_to_string(&doc2)
+                        .is_ok_and(|text| text.contains("[viewer-saved]"))
+                        && saved_summary
+                            .as_array()
+                            .and_then(|rows| rows.get(doc2_index))
+                            .and_then(|row| row.get("modified"))
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(false);
+                    eprintln!("[viewere2e] SAVE persisted={persisted}");
+                    if !persisted {
+                        event_loop.exit();
+                        return;
+                    }
+                    SAVE_PENDING.store(false, Ordering::Relaxed);
+                    if !click_header(self, doc1_index, "edit", event_loop) {
+                        return;
+                    }
+                    let Some(id) = self.aux_probe_ids().get(doc1_index).copied() else { return };
+                    self.aux_insert_id(id, " [viewer-unsaved]");
+                    let dirty_summary = self.aux_probe_summary();
+                    let dirty_hash = dirty_summary
+                        .as_array()
+                        .and_then(|rows| rows.get(doc1_index))
+                        .and_then(|row| row.get("buffer_hash"))
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    DIRTY_HASH.store(dirty_hash, Ordering::Relaxed);
+                    self.aux_window_event(id, WindowEvent::CloseRequested, event_loop);
+                    capture_all(self, "dirty-prompt");
+                    eprintln!("[viewere2e] DIRTY_PROMPT {}", self.aux_probe_summary());
+                    STEP.store(3, Ordering::Relaxed);
+                    return;
+                }
+                let summary = self.aux_probe_summary();
+                eprintln!(
+                    "[viewere2e] DEDUP count={} {}",
+                    self.aux_probe_ids().len(),
+                    summary
+                );
+                if self.aux_probe_ids().len() != 2 {
+                    eprintln!("[viewere2e] FAIL duplicate window");
+                    event_loop.exit();
+                    return;
+                }
+                let Some(doc1_index) = index_for(&summary, &doc1) else { return };
+                let Some(doc2_index) = index_for(&summary, &doc2) else { return };
+                let pixel_scrolled = summary
+                    .as_array()
+                    .and_then(|rows| rows.get(doc2_index))
+                    .and_then(|row| row.get("scroll"))
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(|scroll| scroll > 0.0);
+                eprintln!("[viewere2e] PIXEL_SCROLL moved={pixel_scrolled}");
+                if !pixel_scrolled {
+                    event_loop.exit();
+                    return;
+                }
+                let pixel_scroll =
+                    f32::from_bits(PIXEL_SCROLL_BITS.load(Ordering::Relaxed)) as f64;
+                let key_scrolled = summary
+                    .as_array()
+                    .and_then(|rows| rows.get(doc2_index))
+                    .and_then(|row| row.get("scroll"))
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(|scroll| scroll > pixel_scroll + 10.0);
+                eprintln!("[viewere2e] KEY_SCROLL moved={key_scrolled}");
+                if !key_scrolled {
+                    event_loop.exit();
+                    return;
+                }
+                let expected_lines = std::fs::read_to_string(&doc2)
+                    .ok()
+                    .map(|text| text.split('\n').count() as u64);
+                let reloaded = summary
+                    .as_array()
+                    .and_then(|rows| rows.get(doc2_index))
+                    .is_some_and(|row| {
+                        row.get("buffer_lines").and_then(serde_json::Value::as_u64)
+                            == expected_lines
+                            && row.get("modified").and_then(serde_json::Value::as_bool)
+                                == Some(false)
+                    });
+                eprintln!("[viewere2e] CLEAN_RELOAD refreshed={reloaded}");
+                if !reloaded {
+                    event_loop.exit();
+                    return;
+                }
+                if !click_header(self, doc2_index, "edit", event_loop) {
+                    return;
+                }
+                let Some(doc2_id) = self.aux_probe_ids().get(doc2_index).copied() else { return };
+                self.aux_insert_id(doc2_id, " [viewer-saved]");
+                SAVE_PENDING.store(true, Ordering::Relaxed);
+                return;
+            }
+            3 => {
+                let summary = self.aux_probe_summary();
+                let Some(index) = index_for(&summary, &doc1) else { return };
+                if !click_prompt(self, index, "cancel", event_loop) {
+                    return;
+                }
+                capture_all(self, "dirty-cancel");
+                eprintln!("[viewere2e] DIRTY_CANCEL {}", self.aux_probe_summary());
+            }
+            4 => {
+                if !cap_dir.join("dirty-reopen.done").is_file() {
+                    return;
+                }
+                let summary = self.aux_probe_summary();
+                let Some(doc1_index) = index_for(&summary, &doc1) else { return };
+                let protected = summary
+                    .as_array()
+                    .and_then(|rows| rows.get(doc1_index))
+                    .is_some_and(|row| {
+                        row.get("buffer_hash").and_then(serde_json::Value::as_u64)
+                            == Some(DIRTY_HASH.load(Ordering::Relaxed))
+                            && row.get("modified").and_then(serde_json::Value::as_bool)
+                                == Some(true)
+                    });
+                eprintln!("[viewere2e] DIRTY_RELOAD protected={protected}");
+                if !protected {
+                    event_loop.exit();
+                    return;
+                }
+                let Some(index) = index_for(&summary, &doc2) else { return };
+                let Some(id) = self.aux_probe_ids().get(index).copied() else { return };
+                self.aux_window_event(id, WindowEvent::CloseRequested, event_loop);
+                eprintln!(
+                    "[viewere2e] CLOSE count={} work={} {}",
+                    self.aux_probe_ids().len(),
+                    self.viewer_has_work(),
+                    self.aux_probe_summary()
+                );
+            }
+            5 => {
+                if !cap_dir.join("reopen.done").is_file() || self.aux_probe_ids().len() != 2 {
+                    return;
+                }
+                let summary = self.aux_probe_summary();
+                let Some(index) = index_for(&summary, &doc1) else { return };
+                let find_opened = self.aux_probe_open_find(index, "문서");
+                capture_all(self, "before-quit");
+                eprintln!(
+                    "[viewere2e] WAIT_CMDQ find={find_opened} {}",
+                    self.aux_probe_summary()
+                );
+            }
+            6 => {
+                let summary = self.aux_probe_summary();
+                let Some(index) = index_for(&summary, &doc1) else { return };
+                if self
+                    .aux_probe_viewer_prompt_center(index, "cancel")
+                    .is_none()
+                {
+                    return;
+                }
+                capture_all(self, "quit-prompt");
+                eprintln!("[viewere2e] QUIT_PROMPT {summary}");
+            }
+            7 => {
+                let summary = self.aux_probe_summary();
+                let Some(index) = index_for(&summary, &doc1) else { return };
+                if !click_prompt(self, index, "save", event_loop) {
+                    return;
+                }
+                let retained = self
+                    .aux_probe_summary()
+                    .as_array()
+                    .and_then(|rows| rows.get(index))
+                    .and_then(|row| row.get("viewer_prompt"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("quit");
+                capture_all(self, "save-failure");
+                eprintln!("[viewere2e] SAVE_FAILURE retained={retained}");
+                if !retained {
+                    event_loop.exit();
+                    return;
+                }
+            }
+            8 => {
+                let summary = self.aux_probe_summary();
+                let Some(index) = index_for(&summary, &doc1) else { return };
+                if !click_prompt(self, index, "cancel", event_loop) {
+                    return;
+                }
+                capture_all(self, "quit-cancel");
+                eprintln!(
+                    "[viewere2e] QUIT_CANCEL work={} {}",
+                    self.viewer_has_work(),
+                    self.aux_probe_summary()
+                );
+            }
+            9 => {
+                eprintln!("[viewere2e] FIRST_DONE {}", self.aux_probe_summary());
+                event_loop.exit();
+            }
+            _ => return,
+        }
+        STEP.store(step + 1, Ordering::Relaxed);
+    }
+
     /// Detached-document product-route E2E. The first pass opens one document
     /// through the human path and moves an explicit preview tab through the
     /// real header hit target. A second process restores the resulting window
