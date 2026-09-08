@@ -1,3 +1,4 @@
+import '../device_shape.dart';
 import 'package:flutter/material.dart';
 
 import '../claude_style.dart';
@@ -640,30 +641,25 @@ class _StudentFrame extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final radius = BorderRadius.circular(46);
+    // 테는 창 전체에 두고 키보드가 그 위를 덮게 둔다 — 키보드 위로 테를 끌어올리면 밑변이
+    // 따로 생겨 틀 안의 틀이 된다(2026-09-08 지시, Setlog 앱 참고: 키보드가 떠도 테는 그대로).
+    final radius = BorderRadius.circular(
+      screenCornerRadius(MediaQuery.sizeOf(context)),
+    );
+    Widget line(Color color, double width) => IgnorePointer(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: radius,
+          border: Border.all(color: color, width: width),
+        ),
+      ),
+    );
     return Stack(
       fit: StackFit.expand,
       children: [
         child,
-        IgnorePointer(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: radius,
-              border: Border.all(
-                color: accent.withValues(alpha: 0.10),
-                width: 9,
-              ),
-            ),
-          ),
-        ),
-        IgnorePointer(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: radius,
-              border: Border.all(color: accent, width: 2.5),
-            ),
-          ),
-        ),
+        line(accent.withValues(alpha: 0.10), 9),
+        line(accent, 2.5),
       ],
     );
   }
