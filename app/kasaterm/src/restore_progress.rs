@@ -47,6 +47,17 @@ struct RestoreEntry {
     agent: bool,
     web: bool,
     ready: bool,
+    // Agent startup and terminal input readiness are not the same thing. A
+    // resumed CLI may be at login/error/permission UI or process detection may
+    // lag; its live local PTY must remain usable after dismissing the modal.
+    local_input_ready: bool,
+}
+
+impl RestoreEntry {
+    fn update_local(&mut self, has_live_grid: bool, commands_pending: bool, agent_seen: bool) {
+        self.local_input_ready = has_live_grid && !commands_pending;
+        self.ready = self.local_input_ready && (!self.agent || agent_seen);
+    }
 }
 
 fn surface_count(node: &serde_json::Value) -> usize {
@@ -63,7 +74,9 @@ impl RestoreProgress {
     }
 
     fn blocks_surface(&self, id: &str) -> bool {
-        self.entries.get(id).is_some_and(|entry| !entry.ready)
+        self.entries.get(id).is_some_and(|entry| {
+            !entry.ready && (entry.remote || entry.web || !entry.local_input_ready)
+        })
     }
 
     pub fn new(state: serde_json::Value) -> Self {
@@ -85,6 +98,7 @@ impl RestoreProgress {
             agent: record.get("was_agent").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()),
             web: record.get("web_url").is_some(),
             ready: false,
+            local_input_ready: false,
         });
     }
 
@@ -193,6 +207,7 @@ impl App {
         let ws = self.ws.lock().unwrap();
         for (id, entry) in &mut progress.entries {
             entry.ready = false;
+            entry.local_input_ready = false;
             if entry.web {
                 if ws.panes.contains_key(id) && self.pending_web_hosts.is_empty() {
                     entry.ready = true;
@@ -220,8 +235,8 @@ impl App {
                 }
             } else {
                 let commands_pending = self.pending_restores.iter().any(|(pending, _, _)| Arc::ptr_eq(pending, session));
-                if has_grid && !commands_pending && (!entry.agent || session.active_agent().is_some()) {
-                    entry.ready = true;
+                entry.update_local(has_grid, commands_pending, session.active_agent().is_some());
+                if entry.ready {
                     ready += 1;
                 }
             }
@@ -289,6 +304,71 @@ pub(crate) fn with_file_time(mut state: serde_json::Value) -> serde_json::Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_restore_accepts_local_input_without_claiming_agent_ready() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track("%local", &serde_json::json!({"was_agent": "claude"}));
+        progress.built = true;
+        progress.dismiss_modal();
+        progress.entries.get_mut("%local").unwrap().update_local(true, false, false);
+        assert!(!progress.blocks_surface("%local"), "live local terminal must accept recovery/login input");
+        assert!(!progress.entries["%local"].ready, "shell output alone is not successful agent restoration");
+        assert!(progress.retry_pending(Instant::now()).is_empty(), "retry must not relaunch its agent");
+        assert!(!progress.blocks_surface("%local"));
+        progress.entries.get_mut("%local").unwrap().update_local(true, false, true);
+        assert!(progress.entries["%local"].ready, "late process detection can still complete restore");
+    }
+
+    #[test]
+    fn local_input_remains_blocked_until_live_output_and_queued_commands_finish() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track("%local", &serde_json::json!({"was_agent": "claude"}));
+        progress.track("%remote", &serde_json::json!({"remote_base": "http://restore.invalid"}));
+        progress.dismiss_modal();
+        for (live, pending) in [(false, false), (false, true), (true, true)] {
+            progress.entries.get_mut("%local").unwrap().update_local(live, pending, true);
+            assert!(progress.blocks_surface("%local"));
+        }
+        progress.entries.get_mut("%local").unwrap().update_local(true, false, false);
+        assert!(!progress.blocks_surface("%local"));
+        assert!(progress.blocks_surface("%remote"), "unconnected mirrors must not leak input");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_local_pty_accepts_recovery_input_while_agent_restore_is_pending() {
+        // /bin/cat is our isolated local process, not a user's shell/account.
+        // It models an agent that printed a login/error screen but is not yet
+        // detectable as Claude/Codex. Restored scrollback alone cannot unlock it.
+        let id = format!("restore-input-test-{}", std::process::id());
+        let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
+            shell: Some("/bin/cat".into()), cwd: Some("/tmp".into()),
+            cols: 80, rows: 8, env: Vec::new(), pane_id: id.clone(),
+            initial_scrollback: Vec::new(),
+        }).unwrap();
+        session.send_bytes(b"LOCAL_RESTORE_SCREEN\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "isolated PTY produced no live frame");
+            if session.screens.recv_timeout(Duration::from_millis(100))
+                .is_ok_and(|frame| frame.live_output) { break; }
+        }
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track(&id, &serde_json::json!({"was_agent": "claude"}));
+        progress.dismiss_modal();
+        progress.entries.get_mut(&id).unwrap().update_local(true, false, false);
+        assert!(!progress.entries[&id].ready);
+        assert!(!progress.blocks_surface(&id));
+        if !progress.blocks_surface(&id) {
+            session.send_bytes(b"RECOVERY_INPUT_ACCEPTED\n").unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !session.visible_text(8).contains("RECOVERY_INPUT_ACCEPTED") {
+            assert!(Instant::now() < deadline, "local recovery input was swallowed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
     #[test]
     fn progress_actions_stay_inside_small_and_large_windows_without_overlap() {
         for (width, height) in [(240.0, 320.0), (320.0, 200.0), (480.0, 260.0), (1280.0, 720.0)] {
