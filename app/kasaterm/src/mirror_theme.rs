@@ -1,5 +1,4 @@
-//! Appearance of the focused remote pane. Host settings remain local; remote
-//! palettes and character images live only in this viewer's memory.
+//! Remote character identity and images, without replacing the viewer's theme.
 use super::*;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -37,6 +36,15 @@ struct Cache {
 fn cache() -> &'static Mutex<Cache> {
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
+}
+
+fn focus_source(c: &mut Cache, base: Option<&str>) -> bool {
+    let active = base.map(str::to_owned);
+    let marker = base.and_then(|base| c.sources.get(base).map(|a| (base.to_owned(), a.revision)));
+    let changed = c.active != active || c.applied != marker;
+    c.active = active;
+    c.applied = marker;
+    changed
 }
 
 pub(crate) fn character_slug(name: &str) -> Option<&'static str> {
@@ -183,41 +191,16 @@ impl App {
             ws.active_pane.as_ref().and_then(|id| kasa_mcp::remote::remote_info(&ws.active_tab_pid(id)))
         };
         let mut c = cache().lock().unwrap();
-        c.active = target.as_ref().map(|v| v.base.clone());
-        let Some(target) = target else {
-            if c.applied.take().is_some() {
-                drop(c);
-                crate::theme::apply_from_settings_read_only();
-                self.theme_light_last = Some(crate::theme::current_is_light());
-                self.web_visual.invalidate_assets();
-                self.repaint_all();
-                if let Some(w) = &self.window { w.request_redraw(); }
-            }
-            return;
-        };
-        if c.applied.as_ref().is_some_and(|(base, _)| base != &target.base) {
-            c.applied = None;
+        if focus_source(&mut c, target.as_ref().map(|v| v.base.as_str())) {
             drop(c);
-            crate::theme::apply_from_settings_read_only();
-            self.theme_light_last = Some(crate::theme::current_is_light());
+            // Only the selected character assets changed. Palette, mode,
+            // contrast, shape and active local previews belong to this device.
+            self.web_visual.invalidate_assets();
             self.repaint_all();
+            if let Some(w) = &self.window { w.request_redraw(); }
             c = cache().lock().unwrap();
         }
-        if let Some(a) = c.sources.get(&target.base) {
-            let marker = (target.base.clone(), a.revision);
-            if c.applied.as_ref() != Some(&marker) || crate::theme::theme_name() != "mirror" {
-                let tokens = a.tokens.clone();
-                drop(c);
-                if crate::theme::apply_mirror_tokens(&tokens) {
-                    cache().lock().unwrap().applied = Some(marker);
-                    self.theme_light_last = Some(crate::theme::current_is_light());
-                    self.web_visual.invalidate_assets();
-                    self.repaint_all();
-                    if let Some(w) = &self.window { w.request_redraw(); }
-                }
-                c = cache().lock().unwrap();
-            }
-        }
+        let Some(target) = target else { return; };
         if c.pending.is_some() || c.sources.get(&target.base).and_then(|a| a.fetched).is_some_and(|t| t.elapsed() < Duration::from_secs(5)) { return; }
         let old = c.sources.get(&target.base).cloned().unwrap_or_default();
         c.pending = Some(target.base.clone());
@@ -252,27 +235,27 @@ mod tests {
     use std::io::{Read, Write};
 
     #[test]
-    fn mirror_runtime_applies_host_face_and_palette_then_restores_local_settings() {
+    fn mirror_runtime_keeps_viewer_mode_and_palette_while_loading_host_character() {
         const CHILD: &str = "KASATERM_MIRROR_RUNTIME_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
-            // Palette slots are process-global. Running the real apply path in
-            // a child keeps concurrently running theme tests uncontaminated.
+            // Palette slots are process-global. Isolate each local mode.
             let dir = std::env::temp_dir().join(format!("kasaterm-mirror-runtime-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir(&dir).unwrap();
             let settings = dir.join("settings.json");
-            let contents = br#"{"theme":"dark","accent":"blue","shape":"rounded","unrelated":"keep-me"}"#;
-            std::fs::write(&settings, contents).unwrap();
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "mirror_theme::tests::mirror_runtime_applies_host_face_and_palette_then_restores_local_settings", "--nocapture"])
-                .env(CHILD, "1")
-                .env("KASATERM_SETTINGS_FILE", &settings)
-                .env_remove("KASATERM_SHAPE")
-                .output().unwrap();
-            let unchanged = std::fs::read(&settings).unwrap() == contents;
+            for mode in ["dark", "light"] {
+                let contents = serde_json::json!({"theme": mode, "accent": "blue", "shape": "rounded", "unrelated": "keep-me"}).to_string();
+                std::fs::write(&settings, &contents).unwrap();
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "mirror_theme::tests::mirror_runtime_keeps_viewer_mode_and_palette_while_loading_host_character", "--nocapture"])
+                    .env(CHILD, "1")
+                    .env("KASATERM_SETTINGS_FILE", &settings)
+                    .env_remove("KASATERM_SHAPE")
+                    .output().unwrap();
+                assert!(output.status.success(), "{mode} child failed:\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                assert_eq!(std::fs::read_to_string(&settings).unwrap(), contents, "viewing a mirror rewrote local settings");
+            }
             std::fs::remove_file(&settings).unwrap();
             std::fs::remove_dir(&dir).unwrap();
-            assert!(output.status.success(), "child failed:\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-            assert!(unchanged, "viewing a mirror rewrote local settings");
             return;
         }
 
@@ -280,7 +263,7 @@ mod tests {
         let local = crate::theme::tokens_json();
         assert_eq!(crate::theme::min_contrast(), 2.5);
         let mut remote = local.clone();
-        remote["palette"]["bg"] = serde_json::json!("#fafafa");
+        remote["palette"]["bg"] = serde_json::json!(if crate::theme::current_is_light() { "#121212" } else { "#fafafa" });
         remote["palette"]["fg"] = serde_json::json!("#123456");
         remote["palette"]["border"] = serde_json::json!("#abcdef70");
         remote["palette"]["accent"] = serde_json::json!("#cc5500");
@@ -299,15 +282,12 @@ mod tests {
         {
             let mut c = cache().lock().unwrap();
             c.sources.insert("test-host".into(), appearance);
-            c.active = Some("test-host".into());
+            assert!(focus_source(&mut c, Some("test-host")));
         }
-        assert!(crate::theme::apply_mirror_tokens(&remote));
-        assert_eq!(crate::theme::bg(), [250, 250, 250, 255]);
-        assert_eq!(crate::theme::fg(), [0x12, 0x34, 0x56, 255]);
-        assert_eq!(crate::theme::border(), [0xab, 0xcd, 0xef, 0x70]);
-        assert_eq!(crate::theme::accent(), [204, 85, 0, 255]);
-        assert_eq!(crate::theme::ansi16(4), [0x24, 0x68, 0xac]);
-        assert_eq!(crate::theme::min_contrast(), 7.0);
+        for key in ["theme", "accent_name", "palette", "ansi", "shape", "min_contrast"] {
+            assert_eq!(crate::theme::tokens_json()[key], local[key], "remote focus changed local {key}");
+        }
+        assert_eq!(character_color("모모이"), Some([204, 85, 0, 255]));
         assert_eq!(crate::theme::character_slug_any("모모이"), Some(remote_slug));
         // Rendering resolves the host's actual image, not the viewer's bundled
         // Momoi or stale Yuuka profile. Inbox identities retain canonical slugs.
@@ -322,8 +302,14 @@ mod tests {
         assert_eq!(ws.pane_character.get("%local-42").map(String::as_str), Some("모모이"));
         assert!(!apply_remote_assignments(&mut ws, [("%local-42".into(), "모모이".into())]));
 
-        cache().lock().unwrap().active = None;
-        crate::theme::apply_from_settings_read_only();
+        {
+            let mut c = cache().lock().unwrap();
+            assert!(!focus_source(&mut c, Some("test-host")));
+            c.sources.get_mut("test-host").unwrap().revision += 1;
+            assert!(focus_source(&mut c, Some("test-host")));
+            assert!(focus_source(&mut c, Some("second-host")));
+            assert!(focus_source(&mut c, None));
+        }
         assert_eq!(crate::theme::tokens_json(), local);
         assert_eq!(crate::theme::min_contrast(), 2.5);
         assert_ne!(crate::theme::character_slug_any("모모이"), Some(remote_slug));
