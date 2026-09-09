@@ -25,8 +25,11 @@ lib/
   hub_model.dart       기계→방→학생 트리 · 5초 폴링 · 대기→작업중→쉼 정렬 · 대기 전이 배지+햅틱
   grid.dart            순수 Dart 격자 모델 — dirty 행 교체 · 글자 폭 표 · 256 팔레트
   term_session.dart    WS 수명(백오프·gone·pause/resume) · 키 바이트 · 답장 · 그림 폴링
+  control_session.dart 폰 제어 채널(`mobile/ws`) — hello/open-url 프레임 파싱 · opened 답장 · 백오프·pause/resume
+  device_info.dart     이 폰의 모양(논리 크기·배율·platform·기종 추정) → `POST mobile/device`
   grid_canvas.dart     CustomPainter 렌더러(행 캐시) + InteractiveViewer 폭 맞춤·핀치
-  screens/             connect · hub · terminal · settings
+  screens/             connect · hub · terminal · settings(브라우징 카드 포함)
+  screens/web.dart     앱 안 웹 화면(webview_flutter) — 주소·뒤로·새로고침·사파리로 열기 · `open-url` 분기
 tool/devproxy.dart     크롬 개발용 같은 출처 역프록시
 test/                  유닛 · 골든(goldens/) · live/(실서버, KASA_ROOT 있을 때만)
 ```

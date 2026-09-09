@@ -62,6 +62,146 @@ void main() {
     });
   });
 
+  group('브라우징 기기', () {
+    test('registerDevice 는 mobile/device 에 논리 크기·배율·플랫폼을 싣고 id 를 받는다', () async {
+      http.Request? seen;
+      final s = Server(
+        Uri.parse(publicRoot),
+        client: MockClient((req) async {
+          seen = req;
+          return http.Response(
+            jsonEncode({'ok': true, 'id': 'phone:geono'}),
+            200,
+            headers: _json,
+          );
+        }),
+      );
+      final id = await s.registerDevice(
+        const DeviceInfo(
+          width: 393,
+          height: 852,
+          dpr: 3,
+          platform: 'ios',
+          model: 'iPhone 15',
+        ),
+      );
+      expect(id, 'phone:geono');
+      expect(seen!.method, 'POST');
+      expect(seen!.url.path, '/u/$slug/mobile/device');
+      expect(jsonDecode(seen!.body), {
+        'width': 393,
+        'height': 852,
+        'dpr': 3.0,
+        'platform': 'ios',
+        'model': 'iPhone 15',
+      });
+    });
+
+    test('registerDevice 는 ok 가 아니면 예외(slug 없이)', () async {
+      final s = Server(
+        Uri.parse(publicRoot),
+        client: MockClient(
+          (_) async => http.Response('{"ok":false}', 200, headers: _json),
+        ),
+      );
+      try {
+        await s.registerDevice(
+          const DeviceInfo(width: 1, height: 1, dpr: 1, platform: 'web'),
+        );
+        fail('예외가 나야 한다');
+      } on ServerException catch (e) {
+        expect(e.message.contains(slug), isFalse);
+      }
+    });
+
+    test('browseDevices 는 목록·고른 것·자동 여부를 모양대로 읽는다', () async {
+      final s = Server(
+        Uri.parse(publicRoot),
+        client: MockClient((req) async {
+          expect(req.url.path, '/u/$slug/browse/devices');
+          return http.Response(
+            jsonEncode({
+              'ok': true,
+              'open': 'web',
+              'selected': 'phone:geono',
+              'auto': false,
+              'devices': [
+                {'id': '', 'label': '이 기기', 'kind': 'desktop', 'online': true},
+                {
+                  'id': '~1a2b',
+                  'label': 'MacBook',
+                  'kind': 'desktop',
+                  'online': true,
+                },
+                {
+                  'id': 'phone:geono',
+                  'label': 'geono 폰',
+                  'kind': 'phone',
+                  'online': true,
+                  'model': 'iPhone',
+                  'viewport': {'width': 393, 'height': 852, 'dpr': 3},
+                },
+                {'label': 'id 없음'},
+              ],
+            }),
+            200,
+            headers: _json,
+          );
+        }),
+      );
+      final b = await s.browseDevices();
+      expect(b.open, 'web');
+      expect(b.selected, 'phone:geono');
+      expect(b.auto, isFalse);
+      expect(b.selectedItem, 'phone:geono');
+      expect(b.devices.map((d) => d.id), ['', '~1a2b', 'phone:geono']);
+      final phone = b.devices.last;
+      expect(phone.isPhone, isTrue);
+      expect(phone.model, 'iPhone');
+      expect(phone.viewport!.width, 393);
+      expect(phone.viewport!.height, 852);
+      expect(phone.viewport!.dpr, 3);
+      expect(b.devices.first.isPhone, isFalse);
+      expect(b.devices.first.viewport, isNull);
+    });
+
+    test('auto 면 selectedItem 이 auto', () {
+      final b = BrowseDevices.fromJson({
+        'ok': true,
+        'open': 'chrome',
+        'selected': '',
+        'auto': true,
+        'devices': [],
+      });
+      expect(b!.selectedItem, BrowseDevices.autoId);
+      expect(BrowseDevices.fromJson('x'), isNull);
+    });
+
+    test('setBrowseDevice·setBrowseOpen 은 settings/action 으로 간다', () async {
+      final bodies = <Map<String, Object?>>[];
+      final s = Server(
+        Uri.parse(publicRoot),
+        client: MockClient((req) async {
+          expect(req.url.path, '/u/$slug/settings/action');
+          bodies.add((jsonDecode(req.body) as Map).cast<String, Object?>());
+          return http.Response('{"ok":true}', 200, headers: _json);
+        }),
+      );
+      await s.setBrowseDevice('auto');
+      await s.setBrowseOpen('web');
+      expect(bodies, [
+        {'action': 'browse-device', 'id': 'auto'},
+        {'action': 'browse-open', 'id': 'web'},
+      ]);
+    });
+
+    test('controlUri 는 mobile/ws 이고 ws 스킴', () {
+      final u = Server(Uri.parse(publicRoot)).controlUri();
+      expect(u.scheme, 'wss');
+      expect(u.path, '/u/$slug/mobile/ws');
+    });
+  });
+
   group('요청', () {
     test('실패 문구에 slug 가 없다', () async {
       final s = Server(
