@@ -134,6 +134,7 @@ impl App {
     /// 이사 칼럼 데이터를 다시 조립한다. 탭이 보일 때만, 1초 스로틀 —
     /// 기계 쪽은 폴링 캐시(`machines::snapshot`)라 읽기 자체는 공짜다.
     pub(crate) fn refresh_machines_col(&mut self) {
+        self.poll_mirror_sync();
         if !self.machines_section_active() {
             return;
         }
