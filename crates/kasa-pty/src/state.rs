@@ -254,6 +254,16 @@ pub struct PromptAnchor {
     pub text: String,
 }
 
+/// One parser generation for a viewer's screen, history and pinned live input.
+/// Reading these independently can join old GUI rows to a new scroll offset.
+pub struct ViewerSnapshot {
+    pub screen: ScreenUpdate,
+    pub live: Vec<Row>,
+    pub above: Vec<Row>,
+    pub display_offset: usize,
+    pub history_size: usize,
+}
+
 /// PTY 의 실체가 어디 있는가 — 이 프로세스(Local)인가 원격 호스트(External)인가.
 ///
 /// External 은 소유권이 원격에 있는 세션의 **로컬 파서 사본**이다: 바이트가 그대로
@@ -1532,6 +1542,21 @@ impl PtySession {
 
     pub fn publish_full_snapshot(&self) {
         self.publish_screen(self.full_snapshot());
+    }
+
+    pub fn viewer_snapshot(&self, viewer_cols: usize, viewer_rows: usize) -> ViewerSnapshot {
+        let t = self.term.lock().unwrap();
+        let (cols, rows) = (t.grid().columns() as u16, t.grid().screen_lines() as u16);
+        let display_offset = t.grid().display_offset();
+        let budget = viewer_rows.saturating_mul(viewer_cols.div_ceil(usize::from(cols).max(2))).min(4096);
+        ViewerSnapshot {
+            screen: build_update(&t, cols, rows, &self.pane_id, &self.title_handle,
+                &(0..rows).collect::<Vec<_>>(), display_offset as i32),
+            live: read_live_tail(&t, rows as usize),
+            above: read_rows_above(&t, budget),
+            display_offset,
+            history_size: t.grid().history_size(),
+        }
     }
 
     /// GUI 채널과 모든 그리드 tap 에 한 프레임을 내보낸다.

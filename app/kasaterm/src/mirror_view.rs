@@ -141,12 +141,51 @@ fn codex_tool_continuation(previous: &[GridCell], next: &[GridCell]) -> Option<(
     Some((4, !token_split))
 }
 
+/// Explored entries are labelled widgets, not arbitrary indented code. Their
+/// continuation starts at the argument column (Read: 9, Search: 11). Old rows
+/// may have been padded after a source resize: infer the occupied edge within
+/// this one entry, without merging adjacent Read/Search/List entries.
+fn explored_entry(source: &[Vec<GridCell>], first: usize, end: usize) -> Option<(usize, usize)> {
+    let text: String = source[first].iter().map(|c| c.ch).collect();
+    let body = text.strip_prefix("  └ ").or_else(|| text.strip_prefix("    "))?;
+    let verb = ["Read ", "Search ", "List "].into_iter().find(|verb| body.starts_with(verb))?;
+    let indent = 4 + verb.len();
+    let mut edge = occupied(&source[first]);
+    let mut continuations = 0;
+    for row in &source[first + 1..end] {
+        if row.len() != source[first].len() || row.iter().take_while(|c| c.ch == ' ').count() != indent
+            || occupied(row) <= indent { break; }
+        edge = edge.max(occupied(row));
+        continuations += 1;
+    }
+    (continuations > 0).then_some((indent, edge))
+}
+
+fn occupied(row: &[GridCell]) -> usize {
+    row.iter().rposition(|c| !matches!(c.ch, ' ' | '\0')).map_or(0, |i| i + 1)
+}
+
+fn explored_continuation(previous: &[GridCell], next: &[GridCell], indent: usize, edge: usize) -> Option<(usize, bool)> {
+    if next.iter().take_while(|c| c.ch == ' ').count() != indent || occupied(next) <= indent { return None; }
+    let a: String = previous.iter().take(occupied(previous)).map(|c| c.ch).collect();
+    let b: String = next.iter().skip(indent).map(|c| c.ch).collect();
+    let a = a.split_whitespace().next_back()?;
+    let b = b.split_whitespace().next()?;
+    let split_token = occupied(previous) == edge && !a.ends_with(',')
+        && a.chars().chain(b.chars()).any(|c| "_./:*|\\[]{}^$?=".contains(c));
+    Some((indent, !split_token))
+}
+
 fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: SourcePos, cols: usize, input_borders: &[usize], prose: bool) -> Vec<ProjectedLine> {
     let mut output = Vec::new();
     let mut row_index = start;
     let mut fence: Option<char> = None;
+    let mut explored = false;
     while row_index < end {
         let row_text: String = source[row_index].iter().map(|cell| cell.ch).collect();
+        if row_text.trim().is_empty() || !row_text.starts_with(' ') {
+            explored = matches!(row_text.trim(), "• Explored" | "• Exploring");
+        }
         let fence_marker = if row_text.trim_start().starts_with("```") { Some('`') }
             else if row_text.trim_start().starts_with("~~~") { Some('~') } else { None };
         let fenced = fence.is_some() || fence_marker.is_some();
@@ -174,6 +213,7 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
         let first_row = row_index;
         let tool_title = claude_tool_title(&source[first_row]);
         let codex_title = codex_tool_title(&source[first_row]);
+        let exploration = explored.then(|| explored_entry(source, first_row, end)).flatten();
         let diff_indent = crate::mirror_diff::gutter(&source[first_row]);
         let indented_code = source[first_row].iter().take_while(|cell| cell.ch == ' ').count() >= 4;
         let mut logical: Vec<(GridCell, Option<SourcePos>)> = Vec::new();
@@ -187,13 +227,15 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
             // Reuse the mobile continuation rule only inside a recognised agent
             // body. Explicit input newlines, code fences/indentation and tables
             // retain their hard breaks; ordinary shell grids stay strict VT.
-            let paragraph = (!soft_wrap && prose && !fenced && (!indented_code || diff_indent.is_some()) && row.len() != cols
+            let paragraph = (!soft_wrap && prose && !fenced && (!indented_code || diff_indent.is_some() || exploration.is_some())
+                && (row.len() != cols || diff_indent.is_some() || exploration.is_some())
                 && row_index + 1 < end
                 && (codex_title || (!code_or_table(row) && !code_or_table(&source[row_index + 1]))))
                 .then(|| {
                     let next = &source[row_index + 1];
                     if let Some(indent) = diff_indent { return crate::mirror_diff::continuation(row, next, indent); }
                     if codex_title { return codex_tool_continuation(row, next); }
+                    if let Some((indent, edge)) = exploration { return explored_continuation(row, next, indent, edge); }
                     (tool_title.then(|| tool_title_continuation(row, next)).flatten())
                         .or_else(|| kasa_bridge::reflow::paragraph_continuation(row, next, row.len()))
                 })
@@ -366,25 +408,29 @@ pub(crate) fn project_session_history(
 }
 
 pub(crate) fn project_session_history_target(
-    session: &kasa_pty::PtySession, source: &[Vec<GridCell>], cursor: SourcePos,
+    session: &kasa_pty::PtySession, _source: &[Vec<GridCell>], _cursor: SourcePos,
     cols: usize, rows: usize, scroll: Option<usize>, target_abs: Option<i64>,
 ) -> Option<Projection> {
     // Native PTY scrolling lives in the parser. TerminalPane.scroll_offset is
     // legacy fallback state and is not updated by socket/wheel parser scrolls.
-    let history_offset = session.view_state().0;
-    let (source_cols, source_rows) = session.size();
-    let live = if history_offset > 0 { session.live_tail_rows(source_rows as usize) }
-        else { source.to_vec() };
+    let snapshot = session.viewer_snapshot(cols, rows);
+    let cursor = (snapshot.screen.cursor_row as usize, snapshot.screen.cursor_col as usize);
+    let source: Vec<_> = snapshot.screen.dirty.into_iter().map(|(_, row)| row).collect();
+    let history_offset = snapshot.display_offset;
+    let live = snapshot.live;
     if history_offset == 0 && !crate::screenread::pinned_input_top(&live)
-        .is_some_and(|top| top <= cursor.0) { return None; }
+        .is_some_and(|top| top <= cursor.0) {
+        let mut view = project(&source, cursor, cols, rows, None, scroll);
+        view.top_abs = view.top_source_row.map(|r| snapshot.history_size as i64 + r as i64);
+        return Some(view);
+    }
     // Include enough local history for this viewer before reflow. Canonical
     // source height/width do not limit how much earlier text we can display.
-    let budget = rows.saturating_mul(cols.div_ceil(usize::from(source_cols).max(2))).min(4096);
-    let mut history = session.rows_above(budget);
+    let mut history = snapshot.above;
     history.reverse();
     let offset = history_offset.saturating_add(history.len());
-    let first_abs = session.view_state().1 as i64 - offset as i64;
-    history.extend_from_slice(source);
+    let first_abs = snapshot.history_size as i64 - offset as i64;
+    history.extend_from_slice(&source);
     let target_row = target_abs.and_then(|abs| usize::try_from(abs - first_abs).ok());
     let mut view = project_history_target(&history, &live, cursor, offset, cols, rows, scroll, target_row);
     view.top_abs = view.top_source_row.map(|row| first_abs + row as i64);
@@ -468,6 +514,25 @@ mod tests {
     }
 
     #[test]
+    fn old_narrow_patch_rows_expand_after_source_grid_grows() {
+        use kasa_bridge::screen::Color;
+        let mut source = codex_screen(&[
+            " 1562 +",
+            "           abov",
+            "       e: read_",
+            "       rows_abo",
+            "       ve(&t, b",
+            "       udget),",
+            " 1563 +    next,",
+        ], 90);
+        for row in &mut source[..7] { for cell in row { cell.bg = Color::Rgb(221,250,224); } }
+        let view = project(&source, (8,3), 140, 20, Some(7), None);
+        assert_eq!(view.body_lines.len(), 2);
+        assert!(text(&view.rows).iter().any(|r| r.contains("1562 +    above: read_rows_above(&t, budget),")), "{:?}",text(&view.rows));
+        assert!(text(&view.rows).iter().any(|r| r.contains("1563 +    next,")));
+    }
+
+    #[test]
     fn prompt_target_lands_at_top_at_different_viewer_widths() {
         let live = codex_screen(&["recent answer"], 60);
         let mut history: Vec<_> = (0..50).map(|i| {
@@ -539,6 +604,11 @@ mod tests {
         let source = ws.panes[&id].tabs[0].term().unwrap();
         let live = project_session_history(&session, &source.cells,
             (source.cursor_row as usize, source.cursor_col as usize), 180, 30, None).unwrap();
+        // Focus/scroll can repaint before the async GUI pump applies its frame.
+        // Cached blank or old-width cells must not replace the parser's view.
+        let stale = vec![vec![GridCell::blank(); 5]; 2];
+        let refreshed = project_session_history(&session, &stale, (0,0), 180, 30, None).unwrap();
+        assert_eq!(refreshed.rows, live.rows);
         assert!(text(&live.rows).iter().any(|row| row == "› ready"));
         assert!(text(&live.rows).iter().any(|row| row == "footer"));
 
@@ -551,6 +621,14 @@ mod tests {
         assert!(crate::screenread::pinned_input_top(&source.cells).is_none());
         let scrolled = project_session_history(&session, &source.cells,
             (source.cursor_row as usize, source.cursor_col as usize), 180, 30, None).unwrap();
+        let refreshed = project_session_history(&session, &stale, (0,0), 180, 30, None).unwrap();
+        assert_eq!(refreshed.rows, scrolled.rows);
+        for _ in 0..4 {
+            session.publish_full_snapshot();
+            let focus = project_session_history(&session, &stale, (0,0), 180, 30, None).unwrap();
+            assert_eq!(focus.rows, scrolled.rows);
+            assert_eq!(focus.top_abs, scrolled.top_abs);
+        }
         assert_eq!(text(&scrolled.rows)[26..], text(&live.rows)[26..]);
         assert_eq!(scrolled.cursor, live.cursor);
         assert!(text(&scrolled.rows).iter().any(|row| row.contains("word continued event")),
@@ -777,6 +855,35 @@ mod tests {
         let source = agent_screen(&["⏺ Bash(python3 - <<'EOF'", "      print('explicit command newline'))"], 96, false);
         let view = project(&source, (3, 3), 180, 8, Some(2), None);
         assert_eq!(view.body_lines.len(), 2);
+    }
+
+    #[test]
+    fn narrow_explored_entries_expand_without_merging_separate_tools_or_paths() {
+        let source = codex_screen(&[
+            "• Explored", "  └ Read lib.rs,", "         main.rs,", "         terminal_",
+            "         scene.rs,", "         mirror_vi", "         ew.rs",
+            "    Search pub", "           fn.*age", "           nt|agen", "           t_statu", "           s in",
+            "           state.r", "           s", "    Read session.rs",
+        ], 81);
+        let original = source.clone();
+        let view = project(&source, (source.len() - 2, 3), 140, 22, Some(15), None);
+        let lines: Vec<_> = view.body_lines.iter().map(|line| text(&[line.cells.clone()])[0].clone()).collect();
+        assert_eq!(lines, ["• Explored", "  └ Read lib.rs, main.rs, terminal_scene.rs, mirror_view.rs",
+            "    Search pub fn.*agent|agent_status in state.rs", "    Read session.rs"]);
+        assert_eq!(source, original);
+        assert!(view.body_lines[1].source_map.contains(&Some((6, 9))));
+        let same_width = project(&source, (source.len() - 2, 3), 81, 22, Some(15), None);
+        assert_eq!(same_width.body_lines.len(), 4, "padded history also expands at matching current widths");
+    }
+
+    #[test]
+    fn explored_shaped_shell_output_and_fenced_code_keep_explicit_newlines() {
+        for body in [vec!["    Read short", "         continuation"],
+            vec!["```", "• Explored", "  └ Read short", "         continuation", "```"]] {
+            let source = codex_screen(&body, 40);
+            let view = project(&source, (source.len() - 2, 3), 100, 12, Some(body.len()), None);
+            assert_eq!(view.body_lines.len(), body.len());
+        }
     }
 
     #[test]

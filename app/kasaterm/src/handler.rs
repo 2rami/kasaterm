@@ -3109,8 +3109,10 @@ impl ApplicationHandler<UserEvent> for App {
                     // point, and same-size PTY resizes are no-ops.
                     let (cols, rows) = self.window_cells();
                     self.resize_backend(cols, rows);
-                    for pane in self.pty.values() {
-                        pane.publish_full_snapshot();
+                    for (id, pane) in &self.pty {
+                        // A passive mirror's grid never resized. Repaint its
+                        // local projection without injecting a replacement frame.
+                        if !kasa_mcp::remote::is_view_pane(id) { pane.publish_full_snapshot(); }
                     }
                 }
                 self.repaint_all();
@@ -7500,6 +7502,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.tick_restore_progress();
         self.run_restore_probe();
+        self.run_mirror_focus_probe(event_loop);
         // 지글 원복 — NudgePaneResize 가 1행 줄인 pane 을 원 크기로 되돌린다.
         if !self.pending_unjiggle.is_empty() {
             let now = std::time::Instant::now();

@@ -88,6 +88,13 @@ struct RestoreEntry {
 }
 
 impl RestoreEntry {
+    fn begin_readiness_check(&mut self) -> bool {
+        // Completion is latched while other panes are still starting.
+        if self.ready { return false; }
+        self.local_input_ready = false;
+        true
+    }
+
     fn update_local(&mut self, has_live_grid: bool, commands_pending: bool, agent_seen: bool) {
         self.local_input_ready = has_live_grid && !commands_pending;
         self.ready = self.local_input_ready && (!self.agent || agent_seen);
@@ -426,8 +433,10 @@ impl App {
         let mut failure = None;
         for id in &progress.entry_order {
             let Some(entry) = progress.entries.get_mut(id) else { continue; };
-            entry.ready = false;
-            entry.local_input_ready = false;
+            // This is launch progress, not a perpetual health monitor. Once a
+            // pane became usable, a later shell/tool transition or reconnect
+            // must not put it back into the restoration loading screen.
+            if !entry.begin_readiness_check() { ready += 1; continue; }
             // Switching sessions parks the whole workspace. Pending restore
             // entries still belong to that workspace, not the new active one.
             let host = find_restore_host(std::iter::once((&self.pty, &self.ws))
@@ -535,6 +544,25 @@ pub(crate) fn with_file_time(mut state: serde_json::Value) -> serde_json::Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_pane_is_not_reprobed_while_sibling_reconnects_or_retries() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track("%ready", &serde_json::json!({"was_agent":"codex"}));
+        progress.track("%pending", &serde_json::json!({"remote_base":"http://restore.invalid"}));
+        progress.built = true;
+        progress.entries.get_mut("%ready").unwrap().update_local(true, false, true);
+        for _ in 0..3 {
+            assert!(!progress.entries.get_mut("%ready").unwrap().begin_readiness_check(),
+                "a later foreground-process change must not reopen startup progress");
+            assert!(progress.entries.get_mut("%pending").unwrap().begin_readiness_check());
+            assert!(!progress.blocks_surface("%ready"));
+            assert_eq!(progress.retry_pending(Instant::now()), ["%pending"]);
+        }
+        progress.entries.get_mut("%pending").unwrap().ready = true;
+        assert!(progress.entries.values_mut().all(|entry| !entry.begin_readiness_check()));
+        assert!(progress.retry_pending(Instant::now()).is_empty());
+    }
 
     #[test]
     fn pending_readiness_uses_parked_workspace_after_switching_sessions() {

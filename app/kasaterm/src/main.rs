@@ -63,6 +63,7 @@ mod lsp;
 mod machinescol;
 mod mirror_theme;
 mod mirror_view;
+mod mirror_focus_probe;
 mod restore_progress;
 mod mirror_close;
 mod close_grace;

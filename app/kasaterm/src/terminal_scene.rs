@@ -13,6 +13,14 @@ fn active_prompt_accent(
     accent.filter(|_| agent.is_some() && !blocked)
 }
 
+fn codex_session_label(local_pinned: Option<&str>, remote: Option<&serde_json::Value>) -> Option<String> {
+    local_pinned.filter(|s| !s.trim().is_empty()).map(str::to_owned).or_else(|| {
+        let remote = remote.filter(|row| row["harness"] == "codex")?;
+        ["title", "session"].into_iter().find_map(|key| remote.get(key)?.as_str()
+            .filter(|s| !s.trim().is_empty()).map(str::to_owned))
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compose_student_banners(
     composed: &mut Vec<Vec<GridCell>>,
@@ -620,6 +628,29 @@ mod visual_scene_tests {
     use super::*;
 
     #[test]
+    fn mirrored_codex_title_uses_host_metadata_without_local_transcript() {
+        let remote = serde_json::json!({"harness":"codex", "title":"세션 복원 오류 해결", "session":"older"});
+        assert_eq!(codex_session_label(None, Some(&remote)).as_deref(), Some("세션 복원 오류 해결"));
+        assert_eq!(codex_session_label(Some("local rename"), Some(&remote)).as_deref(), Some("local rename"));
+        assert_eq!(codex_session_label(None, None), None);
+        assert_eq!(codex_session_label(None, Some(&serde_json::json!({"harness":null,"title":"folder"}))), None);
+    }
+
+    #[test]
+    fn source_and_mirror_prompt_use_same_theme_before_student_tint() {
+        use kasa_bridge::screen::Color;
+        let mut outputs = Vec::new();
+        for source in [Color::Rgb(240,240,240), Color::Rgb(63,69,77)] {
+            let mut rows: Vec<Vec<GridCell>> = ["                    ", "› ready             ", "                    "].iter()
+                .map(|text| text.chars().map(|ch| GridCell {ch,bg:source.clone(),..GridCell::blank()}).collect()).collect();
+            localize_codex_prompt_background(&mut rows, [34,37,44,255]);
+            style_prompt_box(&mut rows, [242,123,155,255]);
+            outputs.push(rows);
+        }
+        assert_eq!(outputs[0], outputs[1]);
+    }
+
+    #[test]
     fn mirrored_prompt_uses_resolved_harness_and_student_accent() {
         use kasa_bridge::screen::Color;
         let accent = [51, 221, 153, 255];
@@ -1092,6 +1123,10 @@ impl App {
                 .and_then(|badges| badges.get(path).map(|badge| badge.branch.clone()))
         });
         let codex_status = restyle_codex_status_line(&mut composed, project.as_deref(), branch.as_deref());
+        // Normalize the neutral filled prompt before applying student tint on
+        // BOTH source and viewer. Harness polling must not flash a light CLI
+        // background into a dark viewer, and raw CLI defaults are not a theme.
+        localize_codex_prompt_background(&mut composed, theme::surface());
         if kasa_mcp::remote::is_remote_pane(tab_pid.as_str()) {
             let facts = kasa_mcp::remote::cached_pane(tab_pid.as_str());
             // 기본 Codex는 상태줄이 없을 수 있다. 호스트가 셸이라고 보고했다면
@@ -1101,7 +1136,6 @@ impl App {
                 None => agent_kind == Some(kasa_pty::AgentKind::Codex) || codex_status,
             };
             if codex_live {
-                localize_codex_prompt_background(&mut composed, theme::surface());
                 crate::mirror_diff::localize(&mut composed, theme::bg(), theme::success(), theme::danger());
             }
         }
@@ -2343,15 +2377,13 @@ impl App {
         if !(agents_view || resume_picker || ask_picker)
             && agent_kind == Some(kasa_pty::AgentKind::Codex)
         {
-            if let Some(name) = ws
-                .panes
-                .get(tab_pid.as_str())
-                .filter(|p| p.title_pinned)
-                .and_then(|p| p.title.as_deref())
-            {
+            let remote = kasa_mcp::remote::cached_pane(&tab_pid);
+            if let Some(name) = codex_session_label(
+                pane.title_pinned.then(|| pane.title.as_deref()).flatten(), remote.as_ref(),
+            ) {
                 overlay_codex_session_label(
                     &mut composed,
-                    name,
+                    &name,
                     prompt_accent.unwrap_or_else(|| theme::accent_color(theme::accent_name())),
                 );
             }

@@ -31,10 +31,12 @@ pub(crate) fn continuation(previous: &[GridCell], next: &[GridCell], indent: usi
     let fill = previous.iter().find(|c| kind(&c.bg).is_some())?.bg.clone();
     if !next.iter().any(|c| c.bg == fill) { return None; }
     let lead = next.iter().take_while(|c| matches!(c.ch, ' ' | '\0')).count();
-    if lead < indent || lead > indent + 1 { return None; }
-    let occupied = previous.iter().rposition(|c| !matches!(c.ch, ' ' | '\0'))? + 1;
-    if occupied + 2 < previous.len() { return None; }
-    Some((indent, occupied < previous.len().saturating_sub(1)))
+    if lead < indent || lead == next.len() { return None; }
+    // A hard-drawn patch continuation has no line number and retains the
+    // patch's fill. After a source resize the old short rows are padded to the
+    // NEW terminal width, so proximity to that right edge proves nothing.
+    // Remove only the gutter; extra indentation is real code, not padding.
+    Some((indent, false))
 }
 
 /// Only colors actually used by a numbered patch are candidates. Recolor their

@@ -842,7 +842,7 @@ mod codex_status_line_tests {
     }
 }
 
-/// 원격 Codex가 호스트 밝기로 고른 입력창 채움색은 보는 쪽 테마와 무관하다.
+/// Codex가 시작할 때 고른 입력창 채움색보다 현재 보는 쪽 테마를 우선한다.
 /// 입력창과 같은 중립 배경만 바꿔 코드·diff의 의미색과 원격 원본은 보존한다.
 pub(crate) fn localize_codex_prompt_background(rows: &mut [Vec<GridCell>], background: [u8; 4]) {
     use kasa_bridge::screen::Color;
