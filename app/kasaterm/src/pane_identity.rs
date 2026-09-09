@@ -168,14 +168,20 @@ fn assign_defaults(roster: &[(String, Option<String>)]) -> HashMap<String, [u8; 
     order.dedup_by(|a, b| a.1 == b.1);
     let n = DEVICE_COLOR_PRESETS.len();
     let mut taken = vec![false; n];
+    let mut by_identity = HashMap::new();
     let mut out = HashMap::new();
     for (key, label) in order {
+        if let Some(color) = by_identity.get(&key) {
+            out.insert(label, *color);
+            continue;
+        }
         let start = device_hash(&key) % n;
         let pick = (0..n)
             .map(|step| (start + step) % n)
             .find(|slot| !taken[*slot])
             .unwrap_or(start);
         taken[pick] = true;
+        by_identity.insert(key, DEVICE_COLOR_PRESETS[pick].1);
         out.insert(label, DEVICE_COLOR_PRESETS[pick].1);
     }
     out
@@ -579,6 +585,23 @@ mod tests {
         let b = assign_defaults(&other_side);
         assert_eq!(a["nachoneko의 mac mini"], b["맥미니"]);
         assert_eq!(a["맥북"], b["macbook pro"]);
+    }
+
+    #[test]
+    fn aliases_of_one_machine_do_not_consume_extra_colors() {
+        let mut roster = vec![
+            ("Mini".to_string(), Some("id-mini".to_string())),
+            ("Book".to_string(), Some("id-book".to_string())),
+        ];
+        let before = assign_defaults(&roster);
+        roster.push(("Mini via SSH".to_string(), Some("id-mini".to_string())));
+        roster.push(("Book Bonjour".to_string(), Some("id-book".to_string())));
+        let after = assign_defaults(&roster);
+        assert_eq!(after["mini"], after["mini via ssh"]);
+        assert_eq!(after["book"], after["book bonjour"]);
+        assert_eq!(before["mini"], after["mini"]);
+        assert_eq!(before["book"], after["book"]);
+        assert_ne!(after["mini"], after["book"]);
     }
 
     #[test]
