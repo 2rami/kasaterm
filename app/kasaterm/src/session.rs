@@ -51,6 +51,20 @@ pub(crate) struct PendingMigration {
     pub(crate) transfer: Option<kasa_socket::transfer::MigrateRequest>,
 }
 
+fn ensure_migration_slot(queue: &[PendingMigration], pane: &str) -> Result<()> {
+    if queue.iter().any(|pending| pending.pane == pane) {
+        anyhow::bail!("이 세션에는 이미 예약된 이사가 있어요. 기존 요청이 끝난 뒤 다시 시도해 주세요");
+    }
+    Ok(())
+}
+
+fn ensure_transfer_agent(expected: Option<u32>, current: Option<u32>) -> Result<()> {
+    if expected != current {
+        anyhow::bail!("이사 준비 중 세션 프로세스가 바뀌었어요. 현재 작업을 유지하고 이사를 중단했어요");
+    }
+    Ok(())
+}
+
 impl App {
     /// Drain a PtySession's screen-update channel into shared workspace
     /// state. Used both by `start_pty` (initial pane) and by
@@ -1546,6 +1560,7 @@ impl App {
             pid,
             crate::settings_room::SettingsMutation::Migrate,
         )?;
+        ensure_migration_slot(&self.migrate_queue, pid)?;
         if self.migrate_running_any() {
             anyhow::bail!("이사가 이미 도는 중이다 — 끝나면 다시");
         }
@@ -1586,7 +1601,6 @@ impl App {
                 Self::pane_agent_working(&ws, pid)
             };
             if working {
-                self.migrate_queue.retain(|q| q.pane != pid);
                 self.migrate_queue.push(PendingMigration {
                     pane: pid.to_string(),
                     base: base.to_string(),
@@ -10185,6 +10199,35 @@ mod migrate_back_tests {
 }
 
 #[cfg(test)]
+mod transfer_concurrency_tests {
+    use super::*;
+
+    #[test]
+    fn another_request_cannot_replace_the_first_queued_destination() {
+        let request = kasa_socket::transfer::MigrateRequest {
+            session: kasa_socket::transfer::SessionIdentity { pane_id: "%4".into(), ..Default::default() },
+            destination_machine: "mini".into(), room: kasa_socket::transfer::RoomTarget::New("첫 방".into()),
+        };
+        let queue = vec![PendingMigration {
+            pane: "%4".into(), base: "mini".into(), cwd: None, force: false, run: None,
+            idle_since: None, transfer: Some(request.clone()),
+        }];
+        assert!(ensure_migration_slot(&queue, "%4").is_err());
+        assert!(ensure_migration_slot(&queue, "%5").is_ok());
+        assert_eq!(queue[0].transfer.as_ref().unwrap().room, request.room);
+    }
+
+    #[test]
+    fn same_session_restarted_with_a_different_process_is_rejected() {
+        assert!(ensure_transfer_agent(Some(100), Some(101)).is_err());
+        assert!(ensure_transfer_agent(Some(100), None).is_err());
+        assert!(ensure_transfer_agent(None, Some(100)).is_err());
+        assert!(ensure_transfer_agent(Some(100), Some(100)).is_ok());
+        assert!(ensure_transfer_agent(None, None).is_ok());
+    }
+}
+
+#[cfg(test)]
 mod inline_room_selection_tests {
     use super::App;
 
@@ -10336,6 +10379,15 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
             })?);
             // 긴 복사·도착 방 생성 사이 출발 세션이 바뀌거나 일을 재개할 수 있다.
             validate()?;
+        }
+        if p.transfer.is_some() {
+            let table = kasa_pty::fresh_process_table();
+            let shell = kasa_pty::lookup_session(&p.pid).and_then(|session| session.shell_pid());
+            let current = shell.and_then(|shell| kasa_pty::agent_pid_for_shell(&table, shell)).map(|(_, pid)| pid);
+            ensure_transfer_agent(p.agent_pid, current)?;
+            if p.agent_pid.is_none() && !crate::transfer_endpoints::idle_shell(shell, &table) {
+                anyhow::bail!("이사 준비 중 셸에서 작업이 시작됐어요. 현재 작업을 유지하고 이사를 중단했어요");
+            }
         }
         // ③ 곱게 끈다 — SIGKILL 은 jsonl 마지막 조각을 유실할 수 있다. 안 죽으면
         // 강행하지 않고 세운다: 반쯤 산 claude 와 원격 resume 이 같은 대화를

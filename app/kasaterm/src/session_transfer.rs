@@ -33,6 +33,27 @@ fn deduplicate(rows: Vec<SessionRow>) -> Vec<SessionRow> {
     out
 }
 
+fn import_remote_sessions(snapshot: MachineSnapshot) -> Vec<SessionRow> {
+    snapshot.sessions.into_iter().filter(|row| row.identity.machine_id == snapshot.machine_id)
+        .map(|mut row| {
+            // 원격 응답의 local_panes는 상대 기계의 번호라 이쪽 포커스 주소가 아니다.
+            row.local_panes.clear();
+            row
+        }).collect()
+}
+
+fn attach_local_mirror(rows: &mut Vec<SessionRow>, machine: &str, origin: &str, local: String, cwd: String) {
+    if let Some(row) = rows.iter_mut().find(|row| row.identity.machine_id == machine && row.identity.pane_id == origin) {
+        if !row.local_panes.contains(&local) { row.local_panes.push(local); }
+    } else {
+        rows.push(SessionRow {
+            identity: SessionIdentity { machine_id: machine.into(), pane_id: origin.into(), ..Default::default() },
+            local_panes: vec![local], cwd, status: "unknown".into(),
+            unavailable_reason: Some("원본 세션의 현재 상태를 확인하지 못했어요".into()), ..Default::default()
+        });
+    }
+}
+
 pub(crate) fn collect(backend: &Arc<dyn Backend>) -> TransferSnapshot {
     let mut result = TransferSnapshot::default();
     match backend.transfer_snapshot() {
@@ -56,7 +77,7 @@ pub(crate) fn collect(backend: &Arc<dyn Backend>) -> TransferSnapshot {
             Ok(snapshot) => {
                 bases.insert(machine.base.clone(), snapshot.machine_id.clone());
                 result.machines.push(machine_row(&snapshot, false));
-                result.sessions.extend(snapshot.sessions.into_iter().filter(|row| row.identity.machine_id == snapshot.machine_id));
+                result.sessions.extend(import_remote_sessions(snapshot));
             }
             Err(error) => {
                 let old = cached.iter().find(|row| row.get("label").and_then(|v| v.as_str()) == Some(&machine.label));
@@ -88,18 +109,7 @@ pub(crate) fn collect(backend: &Arc<dyn Backend>) -> TransferSnapshot {
     for pane in kasa_pty::live_sessions() {
         let Some(info) = kasa_mcp::remote::remote_info(&pane) else { continue };
         let Some(machine_id) = bases.get(&info.base) else { continue };
-        if let Some(row) = result.sessions.iter_mut().find(|row| {
-            row.identity.machine_id == *machine_id && row.identity.pane_id == info.remote_id
-        }) {
-            if !row.local_panes.contains(&pane) { row.local_panes.push(pane); }
-        } else {
-            result.sessions.push(SessionRow {
-                identity: SessionIdentity { machine_id: machine_id.clone(), pane_id: info.remote_id, ..Default::default() },
-                local_panes: vec![pane], cwd: info.remote_cwd.unwrap_or_default(),
-                status: "unknown".into(), unavailable_reason: Some("원본 세션의 현재 상태를 확인하지 못했어요".into()),
-                ..Default::default()
-            });
-        }
+        attach_local_mirror(&mut result.sessions, machine_id, &info.remote_id, pane, info.remote_cwd.unwrap_or_default());
     }
     result.sessions = deduplicate(result.sessions);
     result
@@ -119,6 +129,17 @@ fn snapshot_at(backend: &Arc<dyn Backend>, machine: Option<&kasa_mcp::machines::
 fn current_row(snapshot: &MachineSnapshot, identity: &SessionIdentity) -> Result<SessionRow> {
     snapshot.sessions.iter().find(|row| row.identity == *identity).cloned()
         .ok_or_else(|| anyhow!("선택 뒤 세션이 바뀌거나 종료됐어요. 목록을 다시 확인해 주세요"))
+}
+
+fn verify_destination_room(target: &RoomTarget, actual: &str, rooms: &[RoomInfo]) -> Result<()> {
+    let room = rooms.iter().find(|room| room.id == actual)
+        .ok_or_else(|| anyhow!("도착 세션의 방을 확인하지 못했어요"))?;
+    let matches = match target {
+        RoomTarget::Existing(expected) => actual == expected,
+        RoomTarget::New(expected) => room.title.trim() == expected.trim(),
+    };
+    if !matches { anyhow::bail!("기계는 옮겨졌지만 확인한 도착 방과 달라요. 결과를 확인해 주세요"); }
+    Ok(())
 }
 
 fn report(source: &SessionIdentity, status: TransferStatus, message: impl Into<String>, destination: Option<SessionIdentity>) -> TransferResult {
@@ -179,9 +200,7 @@ pub(crate) fn execute_with_progress(
                 });
                 if let Some(found) = found {
                     let Some(actual_room) = &found.room_id else { anyhow::bail!("도착 세션의 방을 확인하지 못했어요"); };
-                    if let RoomTarget::Existing(expected) = &room {
-                        if actual_room != expected { anyhow::bail!("기계는 옮겨졌지만 선택한 방에 도착하지 않았어요"); }
-                    }
+                    verify_destination_room(&room, actual_room, &dest.rooms)?;
                     room = RoomTarget::Existing(actual_room.clone());
                     return Ok(report(&source, TransferStatus::Succeeded, "선택한 기계의 방에 도착했어요", Some(found.identity.clone())));
                 }
@@ -271,5 +290,28 @@ mod tests {
         assert!(current_row(&snapshot, &old.identity).is_err());
         snapshot.sessions[0] = old.clone();
         assert!(current_row(&snapshot, &old.identity).is_ok());
+    }
+
+    #[test]
+    fn remote_pane_number_is_not_a_local_address() {
+        let mut local = row("macbook", "%4", "local");
+        local.local_panes = vec!["%4".into()];
+        let mut remote = row("mini", "%4", "remote");
+        remote.local_panes = vec!["%4".into()];
+        let mut rows = vec![local];
+        rows.extend(import_remote_sessions(MachineSnapshot { machine_id: "mini".into(), sessions: vec![remote], ..Default::default() }));
+        assert_eq!(rows[0].local_panes, vec!["%4"]);
+        assert!(rows[1].local_panes.is_empty());
+        attach_local_mirror(&mut rows, "mini", "%4", "%18".into(), "/project".into());
+        assert_eq!(rows[0].local_panes, vec!["%4"]);
+        assert_eq!(rows[1].local_panes, vec!["%18"]);
+    }
+
+    #[test]
+    fn a_matching_session_in_a_different_new_room_is_not_success() {
+        let rooms = vec![RoomInfo { id: "actual".into(), title: "다른 요청의 방".into() }];
+        assert!(verify_destination_room(&RoomTarget::New("먼저 확인한 방".into()), "actual", &rooms).is_err());
+        assert!(verify_destination_room(&RoomTarget::Existing("missing".into()), "actual", &rooms).is_err());
+        assert!(verify_destination_room(&RoomTarget::New("다른 요청의 방".into()), "actual", &rooms).is_ok());
     }
 }
