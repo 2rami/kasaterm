@@ -1411,10 +1411,16 @@ mod tests {
         assert_eq!(rows.iter().map(|r| r.remote_id.as_str()).collect::<Vec<_>>(),
             vec!["%2", "%7", "%12"]);
         assert_eq!(rows[1].pane, "%99"); // Navigation retains the viewer's ID.
+        assert_eq!(machine_open_count(&machine), 3);
+        machine.mirrored[0].closed = true;
+        let rows = machine_rows(&machine);
+        assert_eq!(rows.last().unwrap().pane, "%99");
+        assert_eq!(machine_open_count(&machine), 2);
         machine.online = false;
         let rows = machine_rows(&machine);
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].pane.as_str(), rows[0].remote_id.as_str()), ("%99", "%7"));
+        assert_eq!(machine_open_count(&machine), 0);
     }
 
     fn raw(pid: u32, ppid: u32, zombie: bool, args: &str) -> Raw {
@@ -2499,7 +2505,7 @@ pub(crate) fn draw_info_col(
     for m in &info.machines_col.machines {
         let shut = info.machine_collapsed.contains(&m.label);
         let r = draw_device_section(
-            g, cursor, &m.label, Some(m.remote.len() + m.mirrored.len()),
+            g, cursor, &m.label, Some(machine_open_count(m)),
             shut, x, w, y, bottom, top,
         );
         info.machine_rects.push((m.label.clone(), r));
@@ -2543,7 +2549,7 @@ pub(crate) fn draw_info_col(
                 }
                 if m.closed > 0 {
                     if y + MACHINE_HEAD_H > top && y < bottom {
-                        draw_machine_room_head(g, &format!("닫힌 pane {}", m.closed), x0, y);
+                        draw_machine_room_head(g, &format!("닫힌 pane {} · 원본 기기에서 되살리기", m.closed), x0, y);
                     }
                     y += MACHINE_HEAD_H;
                 }
@@ -2696,12 +2702,16 @@ fn draw_device_section(
 /// Existing mirrors stay in their source room instead of a second mirror list.
 fn machine_rows(m: &state::MachinesColMachine) -> Vec<&state::MachinesColRow> {
     let mut rows: Vec<_> = m.remote.iter().filter(|_| m.online).chain(&m.mirrored).collect();
-    rows.sort_by(|a, b| a.room.cmp(&b.room).then_with(|| {
+    rows.sort_by(|a, b| a.closed.cmp(&b.closed).then_with(|| a.room.cmp(&b.room)).then_with(|| {
         let number = |r: &state::MachinesColRow|
             r.remote_id.trim_start_matches('%').parse::<u64>().unwrap_or(u64::MAX);
         number(a).cmp(&number(b))
     }));
     rows
+}
+
+fn machine_open_count(m: &state::MachinesColMachine) -> usize {
+    machine_rows(m).into_iter().filter(|row| !row.closed).count()
 }
 
 fn draw_empty(g: &mut gpu::GpuRenderer, x0: f32, y: f32, top: f32, bottom: f32, text: &str) {
@@ -3795,10 +3805,12 @@ fn draw_machine_pane_row(
         machine: Some(String::new()),
         ..Default::default()
     };
-    let task = waiting.then(|| TaskLine {
+    let task = if r.closed { Some(TaskLine {
+        label: "닫힘 · 원본 기기에서 되살리기".into(), attention: false,
+    }) } else { waiting.then(|| TaskLine {
         label: if r.title.is_empty() { "기다림".into() } else { format!("기다림 · {}", r.title) },
         attention: true,
-    });
+    }) };
     draw_group_head(g, cursor, &group, true, task.as_ref(), x, w, x0, content_right, y);
     if let Some(cr) = close_rect {
         g.hover_pointer = true;
@@ -3889,7 +3901,7 @@ fn draw_machine_menu(
             items.push((act, if i == 0 && last_room.is_empty() { row.sep() } else { row }));
         }
     }
-    for (i, r) in m.mirrored.iter().enumerate() {
+    for (i, r) in m.mirrored.iter().filter(|r| !r.closed).enumerate() {
         let row = MenuRow::new(format!("{} 데려오기", r.name)).face(&r.name);
         items.push((Some(B::Bring { pane: r.pane.clone() }), if i == 0 { row.sep() } else { row }));
     }

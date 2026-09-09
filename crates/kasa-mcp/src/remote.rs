@@ -92,9 +92,18 @@ struct ViewportState {
     detached: AtomicBool,
     received_frame: AtomicBool,
     generation: std::sync::atomic::AtomicU64,
+    // A restore retry can need a new snapshot even after transport bytes
+    // arrived: the GUI may still lack an applied frame for this generation.
+    refresh_generation: std::sync::atomic::AtomicU64,
     connection_error: Mutex<Option<String>>,
     retry: tokio::sync::Notify,
     surface_key: Mutex<Option<String>>,
+}
+
+impl ViewportState {
+    fn take_snapshot_refresh(&self, generation: u64) -> bool {
+        self.refresh_generation.swap(0, Ordering::AcqRel) == generation
+    }
 }
 
 /// A handshake alone is not ready: restoration waits for the live snapshot.
@@ -109,10 +118,26 @@ pub fn connection_readiness(local_id: &str) -> Option<(bool, u64, Option<String>
 /// Returns false for an absent link or an already live stream. A retry racing
 /// with the first frame is also ignored by the manager after that frame arrives.
 pub fn retry_connection(local_id: &str) -> bool {
+    retry_connection_inner(local_id, false)
+}
+
+/// Refresh an existing link whose current frame has not become ready in the
+/// GUI. Call only for pending restore entries, after refreshing GUI readiness.
+/// The request is tied to this connection generation so it cannot interrupt a
+/// later connection that recovered while the notification was queued.
+pub fn retry_pending_restore(local_id: &str) -> bool {
+    retry_connection_inner(local_id, true)
+}
+
+fn retry_connection_inner(local_id: &str, pending_restore: bool) -> bool {
     let viewport = links().lock().unwrap().get(local_id).map(|link| link.viewport.clone());
     let Some(viewport) = viewport else { return false };
-    if viewport.detached.load(Ordering::Acquire) || viewport.received_frame.load(Ordering::Acquire) {
+    if viewport.detached.load(Ordering::Acquire)
+        || (!pending_restore && viewport.received_frame.load(Ordering::Acquire)) {
         return false;
+    }
+    if pending_restore {
+        viewport.refresh_generation.store(viewport.generation.load(Ordering::Acquire), Ordering::Release);
     }
     *viewport.connection_error.lock().unwrap() = None;
     viewport.retry.notify_one();
@@ -578,7 +603,8 @@ async fn manager(
                 loop {
                     tokio::select! {
                         _ = viewport.retry.notified() => {
-                            if !viewport.received_frame.load(Ordering::Acquire) {
+                            let refresh = viewport.take_snapshot_refresh(generation);
+                            if refresh || !viewport.received_frame.load(Ordering::Acquire) {
                                 // Manual retry should not wait through the backoff.
                                 *viewport.connection_error.lock().unwrap() = None;
                                 backoff_ms = 500;
@@ -2367,6 +2393,70 @@ mod tests {
         mirror.session.send_bytes(b"same ready stream").unwrap();
         server.join().unwrap();
         assert!(!retry_connection("nonexistent-retry-target"));
+    }
+
+    #[test]
+    fn pending_restore_refresh_only_consumes_its_requested_generation() {
+        let viewport = ViewportState::default();
+        viewport.refresh_generation.store(3, Ordering::Release);
+        assert!(!viewport.take_snapshot_refresh(4), "a stale retry must preserve a recovered stream");
+        viewport.refresh_generation.store(4, Ordering::Release);
+        assert!(viewport.take_snapshot_refresh(4));
+        assert!(!viewport.take_snapshot_refresh(4), "one request causes at most one reconnect");
+    }
+
+    #[test]
+    fn pending_restore_retry_refreshes_received_but_unapplied_frame_on_same_link() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (report, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut first = accept_retry_test(&listener).await;
+                first.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"pending-render-target"}"#.into())).await.unwrap();
+                first.send(Message::Binary(b"UNAPPLIED FRAME".to_vec().into())).await.unwrap();
+                report.send(()).unwrap();
+                match tokio::time::timeout(Duration::from_secs(5), first.next()).await.unwrap().unwrap().unwrap() {
+                    Message::Binary(bytes) => assert_eq!(&bytes[..], b"input before refresh"),
+                    other => panic!("unexpected first-stream input: {other:?}"),
+                }
+                report.send(()).unwrap();
+                let mut second = accept_retry_test(&listener).await;
+                drop(first);
+                second.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"pending-render-target"}"#.into())).await.unwrap();
+                second.send(Message::Binary(b"REFRESHED FRAME".to_vec().into())).await.unwrap();
+                match tokio::time::timeout(Duration::from_secs(5), second.next()).await.unwrap().unwrap().unwrap() {
+                    Message::Binary(bytes) => assert_eq!(&bytes[..], b"input after refreshed frame"),
+                    other => panic!("unexpected control or lost refreshed stream: {other:?}"),
+                }
+            });
+        });
+        let local = format!("retry-unapplied-{}", uuid::Uuid::new_v4());
+        let mirror = restore_connection(RemoteSpec { base: format!("http://{address}"), pane: Some("pending-render-target".into()),
+            cwd: None, token: None, identity: Default::default() }, &local, 80, 24, true).unwrap();
+        let token = links().lock().unwrap()[&local].token;
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        wait_remote_test(|| connection_readiness(&local).is_some_and(|(ready, _, _)| ready));
+        mirror.session.send_bytes(b"input before refresh").unwrap();
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Deliberately leave the screen receiver undrained: transport readiness
+        // alone cannot prove the GUI applied this frame. The old retry was a
+        // no-op in precisely this state.
+        let generation = connection_readiness(&local).unwrap().1;
+        assert!(!retry_connection(&local));
+        assert!(retry_pending_restore(&local));
+        wait_remote_test(|| connection_readiness(&local).is_some_and(|(ready, next, _)| ready && next > generation)
+            && mirror.session.visible_text(4).contains("REFRESHED FRAME"));
+        assert_eq!(links().lock().unwrap()[&local].token, token, "restore retry replaced the PTY link");
+        assert_eq!(remote_meta(&local).unwrap().1, "pending-render-target");
+        // The server must see this exactly once and must not see a replay of
+        // "input before refresh" from the previous connection.
+        mirror.session.send_bytes(b"input after refreshed frame").unwrap();
+        server.join().unwrap();
+        assert!(!retry_pending_restore("nonexistent-restore-target"));
     }
 
     #[test]

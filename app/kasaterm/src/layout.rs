@@ -1,6 +1,43 @@
 //! pane 레이아웃 조작 — split/move/close/focus/swap/drop/divider/zoom/tab + 좌표·resize. daemon-authoritative.
 use super::*;
 
+/// Rebuild visibility even when the active room has lost its last pane. Live
+/// PTYs may remain in the revive list, but must no longer be published as open.
+fn publish_workspace_layout<'a>(
+    ws: &mut Workspace,
+    active: Option<&kasa_pty::PtyLayout>,
+    layouts: impl Iterator<Item = (usize, &'a kasa_pty::PtyLayout)>,
+    undocked: Vec<(String, usize)>,
+    (cols, rows): (u16, u16),
+) {
+    ws.layout = active.filter(|tree| tree.leaves().len() > 1)
+        .map(|tree| tree.to_tmux_layout(cols, rows));
+    ws.active_window_panes = active.into_iter().flat_map(|tree| tree.leaves())
+        .map(str::to_string).collect();
+    let mut pane_windows = HashMap::new();
+    let mut window_layouts = HashMap::new();
+    for (index, layout) in layouts {
+        for leaf in layout.leaves() {
+            pane_windows.insert(leaf.to_string(), index);
+        }
+        window_layouts.insert(index, layout.to_tmux_layout(cols, rows));
+    }
+    // Detached OS windows are still visible; hidden panes are not.
+    ws.undocked.clear();
+    for (pane, home) in undocked {
+        pane_windows.insert(pane.clone(), home);
+        ws.undocked.insert(pane);
+    }
+    // Tabs inherit visibility only from a currently visible outer pane.
+    for (pid, outer) in &ws.pid_to_pane {
+        if let Some(index) = pane_windows.get(outer).copied() {
+            pane_windows.entry(pid.clone()).or_insert(index);
+        }
+    }
+    ws.window_layouts = window_layouts;
+    ws.pane_window = pane_windows;
+}
+
 const REMOTE_PENDING_INPUT_LIMIT: usize = 64 * 1024;
 const REMOTE_PENDING_INPUT_ERROR: &str = "연결 대기 중 입력이 너무 커서 새 셸 생성을 취소했어요";
 
@@ -489,58 +526,17 @@ impl App {
     /// A single-leaf tree leaves `ws.layout` empty — the render path's
     /// single-pane fallback handles that case.
     pub(crate) fn publish_pty_layout(&self) {
-        if let Some(tree) = self.pty_layout.as_ref() {
-            let (cols, rows) = self.window_cells();
-            let mut ws = self.ws.lock().unwrap();
-            if tree.leaves().len() <= 1 {
-                ws.layout = None;
-            } else {
-                ws.layout = Some(tree.to_tmux_layout(cols, rows));
-            }
-            // 활성 방(윈도우)의 leaf pane 집합 — 일부 경로가 아직 참조.
-            ws.active_window_panes = tree.leaves().iter().map(|l| l.to_string()).collect();
-            // 전 윈도우(방) pane → window_idx — collab_board 가 전 방 학생을 방별로 그룹핑.
-            // window_of_pane 과 같은 패턴(활성=pty_layout, 그 외=windows[i]). PtyBackend 가
-            // App 의 windows 를 못 봐서 ws 로 미러한다(거노: 좌측 통합·전 방 영속).
-            let mut pw: HashMap<String, usize> = HashMap::new();
-            let mut wl: HashMap<usize, Layout> = HashMap::new();
-            for i in 0..self.windows.len() {
-                let layout = if i == self.active_window {
-                    self.pty_layout.as_ref()
-                } else {
-                    self.windows[i].as_ref()
-                };
-                if let Some(l) = layout {
-                    for leaf in l.leaves() {
-                        pw.insert(leaf.to_string(), i);
-                    }
-                    // 안 보는 방도 창 크기로 펴 둔다 — 비율만 쓰는 미니맵엔 그걸로 충분하다.
-                    wl.insert(i, l.to_tmux_layout(cols, rows));
-                }
-            }
-            // 별도창으로 뗀 pane 은 트리 밖이지만 사용자 눈앞에 있다 — 떠나온 방으로
-            // 실어 폰 목록·board 화면밖 판정·SendMessage 가드가 닫힌 pane 으로 안 본다.
-            let mut undocked = std::collections::HashSet::new();
-            for (pane, home) in self.undocked_panes() {
-                pw.insert(pane.clone(), home);
-                undocked.insert(pane);
-            }
-            ws.undocked = undocked;
-            ws.window_layouts = wl;
-            let (gw, gh) = (cols as f32 * self.cell.w, rows as f32 * self.cell.h);
-            ws.grid_aspect = (gw > 0.0 && gh > 0.0).then(|| gw / gh);
-            // 보조 탭 pid 도 화면 안이다 — 탭은 바깥 pane 자리에 살고 사용자가 탭바로
-            // 언제든 본다. leaf 만 실으면 collab_board 가 탭 학생을 전부 detached
-            // (화면밖)로 찍고, SendMessage 의 닫힌-pane 가드가 「사용자가 닫았거나
-            // 숨긴 자리」라며 차단했다(거노 2026-08-18: 탭에 넣으면 인식을 못 한다).
-            // 바깥 pane 이 pw 에 없으면(숨김·stash) 탭도 안 싣는다 — 그건 진짜 화면밖.
-            for (pid, outer) in &ws.pid_to_pane {
-                if let Some(i) = pw.get(outer).copied() {
-                    pw.entry(pid.clone()).or_insert(i);
-                }
-            }
-            ws.pane_window = pw;
-        }
+        let (cols, rows) = self.window_cells();
+        let mut ws = self.ws.lock().unwrap();
+        publish_workspace_layout(
+            &mut ws, self.pty_layout.as_ref(),
+            self.windows.iter().enumerate().filter_map(|(i, layout)| {
+                (if i == self.active_window { self.pty_layout.as_ref() } else { layout.as_ref() })
+                    .map(|layout| (i, layout))
+            }), self.undocked_panes(), (cols, rows),
+        );
+        let (gw, gh) = (cols as f32 * self.cell.w, rows as f32 * self.cell.h);
+        ws.grid_aspect = (gw > 0.0 && gh > 0.0).then(|| gw / gh);
         // Keep the socket snapshot in lockstep with the renderer view —
         // every code path that adds/removes panes or moves focus goes
         // through publish_pty_layout, so this is the one spot we have
@@ -3187,6 +3183,38 @@ mod auto_split_tests {
 #[cfg(test)]
 mod drop_zone_tests {
     use super::*;
+
+    #[test]
+    fn hiding_last_active_pane_clears_visibility_but_keeps_other_rooms_and_undocked_tabs() {
+        let active = kasa_pty::PtyLayout::single("%0");
+        let other = kasa_pty::PtyLayout::single("%2");
+        let mut ws = Workspace::default();
+        ws.pid_to_pane.extend([
+            ("%1".into(), "%0".into()),
+            ("%3".into(), "%2".into()),
+            ("%5".into(), "%4".into()),
+        ]);
+        let detached = || vec![("%4".into(), 2)];
+        publish_workspace_layout(&mut ws, Some(&active), [(0, &active), (1, &other)].into_iter(), detached(), (80, 24));
+        assert_eq!(ws.pane_window.len(), 6);
+        publish_workspace_layout(&mut ws, None, [(1, &other)].into_iter(), detached(), (80, 24));
+        assert!(!ws.pane_window.contains_key("%0"));
+        assert!(!ws.pane_window.contains_key("%1"));
+        assert_eq!(ws.pane_window.len(), 4);
+        assert_eq!(ws.pane_window["%3"], 1);
+        assert_eq!(ws.pane_window["%5"], 2);
+        assert!(ws.undocked.contains("%4"));
+        assert!(ws.active_window_panes.is_empty());
+        assert!(ws.layout.is_none());
+        assert!(!ws.window_layouts.contains_key(&0));
+        // Publishing the same retained pane again is revival, not a new process.
+        publish_workspace_layout(&mut ws, Some(&active), [(0, &active), (1, &other)].into_iter(), detached(), (80, 24));
+        assert_eq!(ws.pane_window["%1"], 0);
+        publish_workspace_layout(&mut ws, None, std::iter::empty(), Vec::new(), (80, 24));
+        assert!(ws.pane_window.is_empty());
+        assert!(ws.window_layouts.is_empty());
+        assert!(ws.undocked.is_empty());
+    }
 
     #[test]
     fn center_is_a_zone_of_its_own_not_a_split() {

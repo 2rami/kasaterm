@@ -21,6 +21,11 @@ can be handled. Other unfinished surfaces reject text and image input.
 Only initial layout construction blocks the main window globally. Afterwards,
 ready surfaces and app controls remain usable while the card is visible.
 Retry reconnects unfinished links without reconstructing existing panes.
+If transport bytes arrived but the current frame is still unapplied, retry
+requests a fresh snapshot on that link. The request expires when its connection
+generation changes, and already ready panes are left connected.
+Creating a pane or room on a source device does not automatically add a viewer
+on another device. Each device retains its explicitly selected mirrors and layout.
 Pointer actions on the card do not pass through to the terminal behind it;
 dropping an existing drag on the card cancels the gesture.
 

@@ -401,12 +401,15 @@ impl App {
     }
 
     pub(crate) fn retry_restore(&mut self) {
+        // A frame may have arrived since the last progress tick. Preserve
+        // those newly ready panes before selecting links to refresh.
+        self.tick_restore_progress();
         let Some(progress) = self.restore_progress.as_mut() else { return };
         let pending_remote = progress.retry_pending(Instant::now());
         for id in pending_remote {
             // Wake only existing unfinished links, never replace their parser
             // or attach a new source pane when an old source has disappeared.
-            kasa_mcp::remote::retry_connection(&id);
+            kasa_mcp::remote::retry_pending_restore(&id);
         }
         // Keep each PTY/parser and queued local resume commands alive.
         // Never schedule restore_session_state: it clears every current pane.

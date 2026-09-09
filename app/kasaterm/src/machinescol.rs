@@ -17,6 +17,25 @@
 
 use super::*;
 
+fn remote_pane_closed(row: &serde_json::Value) -> bool {
+    row.get("closed").and_then(serde_json::Value::as_bool) == Some(true)
+        || row.get("detached").and_then(serde_json::Value::as_bool) == Some(true)
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+
+    #[test]
+    fn closed_and_legacy_detached_sources_are_not_active() {
+        for row in [serde_json::json!({"closed":true}), serde_json::json!({"detached":true})] {
+            assert!(remote_pane_closed(&row));
+        }
+        assert!(!remote_pane_closed(&serde_json::json!({"closed":false, "undocked":true})));
+        assert!(!remote_pane_closed(&serde_json::json!({"window":0})));
+    }
+}
+
 /// Room identity comes from the source device, including for an existing mirror.
 fn remote_room(p: &serde_json::Value) -> String {
     let window = p.get("window").and_then(|v| v.as_u64());
@@ -134,7 +153,8 @@ impl App {
     /// 이사 칼럼 데이터를 다시 조립한다. 탭이 보일 때만, 1초 스로틀 —
     /// 기계 쪽은 폴링 캐시(`machines::snapshot`)라 읽기 자체는 공짜다.
     pub(crate) fn refresh_machines_col(&mut self) {
-        self.poll_mirror_sync();
+        // Source layout changes never add viewers automatically. Each device
+        // keeps its own layout; existing mirrors reconnect independently.
         if !self.machines_section_active() {
             return;
         }
@@ -181,6 +201,11 @@ impl App {
             ),
         > = std::collections::HashMap::new();
         for id in &pane_ids {
+            // Hidden PTYs keep running for revival, including mirror parsers.
+            // They are not open local rows or representatives of source rows.
+            if !pane_window.contains_key(id) {
+                continue;
+            }
             // 원격 거울은 claude 가 저쪽에서 돌아 로컬 관문(pane_claude_ready·에이전트
             // 감지)에 걸린다 — 링크가 있으면 그 자체로 학생 자리다. 이름·상태는 폴링
             // 캐시의 저쪽 행에서(2026-09-07 지적 「맥미니에서 여기로 옮기는 것도 없어」
@@ -202,6 +227,7 @@ impl App {
                 continue;
             };
             let win = pane_window.get(id).copied().unwrap_or(self.active_window);
+            let closed = facts.as_ref().is_some_and(|(_, row)| remote_pane_closed(row));
             let row = state::MachinesColRow {
                 pane: id.clone(),
                 remote_id: remote.as_ref().map(|i| i.remote_id.clone()).unwrap_or_default(),
@@ -215,11 +241,9 @@ impl App {
                     .get(id)
                     .map(|v| v.status.clone()))
                     .unwrap_or_default(),
-                room: facts.as_ref().map(|(_, p)| remote_room(p)).unwrap_or_else(|| room_of(win)),
-                closed: facts
-                    .as_ref()
-                    .and_then(|(_, r)| r.get("closed").and_then(|v| v.as_bool()))
-                    .unwrap_or(false),
+                room: if closed { "닫힌 pane · 되살리기 대기".into() }
+                    else { facts.as_ref().map(|(_, p)| remote_room(p)).unwrap_or_else(|| room_of(win)) },
+                closed,
             };
             match remote {
                 Some(info) => {
@@ -252,11 +276,8 @@ impl App {
                 let panes = m.get("panes").and_then(|p| p.as_array());
                 // 그 기계에서 닫힌 pane(되살리기 대열) — 화면에 없는 학생을 목록에 세우면
                 // 「하나도 없는데 왜 뜨나」가 된다(2026-09-07 지적). 개수만 남긴다.
-                let is_closed = |p: &serde_json::Value| {
-                    p.get("closed").and_then(|v| v.as_bool()).unwrap_or(false)
-                };
                 let closed = panes
-                    .map(|arr| arr.iter().filter(|p| is_closed(p)).count())
+                    .map(|arr| arr.iter().filter(|p| remote_pane_closed(p)).count())
                     .unwrap_or(0);
                 let remote = panes
                     .map(|arr| {
@@ -271,7 +292,7 @@ impl App {
                                 if mirror_ids.contains(rid) {
                                     return None; // 이사 간 학생의 원격 반쪽 — 미러 행이 대표한다.
                                 }
-                                if is_closed(p) {
+                                if remote_pane_closed(p) {
                                     return None;
                                 }
                                 // 헤드리스 웹 셸(`web-…`)은 그 기계 화면의 방이 아니다 —
