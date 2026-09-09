@@ -1,5 +1,6 @@
 //! Nonblocking launch progress; only unfinished surfaces keep an input guard.
 use super::*;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 pub(crate) struct ProgressLayout {
@@ -65,6 +66,7 @@ pub(crate) struct RestoreProgress {
     pub background: bool,
     entries: HashMap<String, RestoreEntry>,
     entry_order: Vec<String>,
+    cancelled_ids: HashSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -82,6 +84,7 @@ struct RestoreEntry {
     character: Option<String>,
     remote_label: Option<String>,
     stage: RestoreStage,
+    record: serde_json::Value,
 }
 
 impl RestoreEntry {
@@ -151,6 +154,98 @@ impl RestoreProgress {
             .find(|entry| !entry.ready).map_or_else(|| "pane을 복원하는 중…".into(), RestoreEntry::status_line)
     }
 
+    /// Preserve execution identity while taking layout/presentation from the
+    /// current workspace. A half-started shell is not a new saved session.
+    pub(crate) fn preserve_record(&self, record: &mut serde_json::Value) {
+        let id = record.get("pane_id").and_then(|v| v.as_str()).unwrap_or("");
+        if let Some(entry) = self.entries.get(id).filter(|entry| !entry.ready) {
+            let current = record.clone();
+            *record = entry.record.clone();
+            if let Some(obj) = record.as_object_mut() {
+                // Tabs belong to the current layout, not the old outer leaf.
+                obj.remove("tabs");
+                obj.remove("active_tab");
+                obj.remove("title");
+                for key in ["pane_id", "surface_key", "title", "character", "tabs", "active_tab",
+                    "remote_base", "remote_pane", "remote_surface_key", "remote_label", "remote_view",
+                    "remote_owned", "remote_cwd", "remote_origin_cwd"] {
+                    if let Some(value) = current.get(key) { obj.insert(key.into(), value.clone()); }
+                }
+                // An exact newly bound conversation is authoritative even if
+                // foreground-process detection still has not caught up.
+                if let Some(sid) = current.get("session_id").filter(|v| v.as_str().is_some_and(|s| !s.is_empty())) {
+                    obj.insert("session_id".into(), sid.clone());
+                    if let Some(agent) = current.get("was_agent").filter(|v| v.as_str().is_some_and(|s| !s.is_empty())) {
+                        obj.insert("was_agent".into(), agent.clone());
+                    }
+                }
+            }
+        }
+        if let Some(tabs) = record.get_mut("tabs").and_then(|v| v.as_array_mut()) {
+            for tab in tabs { self.preserve_record(tab); }
+        }
+    }
+
+    pub(crate) fn preserve_snapshot(&self, state: &mut serde_json::Value) {
+        fn walk(progress: &RestoreProgress, node: &mut serde_json::Value, seen: &mut HashSet<String>) {
+            if let Some(record) = node.get_mut("leaf") {
+                progress.preserve_record(record);
+                collect_record_ids(record, seen);
+            } else if let Some(split) = node.get_mut("split") {
+                walk(progress, &mut split["a"], seen);
+                walk(progress, &mut split["b"], seen);
+            }
+        }
+        if !self.built { return; }
+        let mut seen = HashSet::new();
+        if let Some(sessions) = state.get_mut("sessions").and_then(|v| v.as_array_mut()) {
+            for session in sessions {
+                for key in ["windows", "undocked"] {
+                    for node in session.get_mut(key).and_then(|v| v.as_array_mut()).into_iter().flatten() {
+                        walk(self, node, &mut seen);
+                    }
+                }
+            }
+        }
+        for closed in state.get_mut("stashed_panes").and_then(|v| v.as_array_mut()).into_iter().flatten() {
+            if let Some(record) = closed.get_mut("rec") {
+                self.preserve_record(record);
+                collect_record_ids(record, &mut seen);
+            }
+        }
+        // A failed spawn may never have entered the live layout. Keep its
+        // original record in an extra saved window, without creating anything
+        // in the running app or rolling back the user's current rooms/tabs.
+        let active = state["active_session"].as_u64().unwrap_or(0) as usize;
+        let Some(sessions) = state.get_mut("sessions").and_then(|v| v.as_array_mut()) else { return; };
+        let index = active.min(sessions.len().saturating_sub(1));
+        let Some(windows) = sessions.get_mut(index).and_then(|s| s.get_mut("windows")).and_then(|v| v.as_array_mut()) else { return; };
+        for id in &self.entry_order {
+            let Some(entry) = self.entries.get(id).filter(|entry| !entry.ready && !seen.contains(id)) else { continue; };
+            let mut record = entry.record.clone();
+            if let Some(obj) = record.as_object_mut() {
+                // If the outer pane never spawned, restore_leaf never reached
+                // its tabs. Keep those unattempted records too, but do not
+                // resurrect tabs explicitly closed or already saved elsewhere.
+                if let Some(tabs) = obj.get_mut("tabs").and_then(|v| v.as_array_mut()) {
+                    tabs.retain(|tab| tab.get("pane_id").and_then(|v| v.as_str()).is_none_or(|id|
+                        !seen.contains(id) && !self.entries.contains_key(id) && !self.cancelled_ids.contains(id)));
+                }
+                obj.remove("active_tab");
+            }
+            windows.push(serde_json::json!({"leaf": record}));
+        }
+    }
+
+    fn forget_surface(&mut self, id: &str) {
+        if self.entries.remove(id).is_some() {
+            self.cancelled_ids.insert(id.into());
+            self.entry_order.retain(|entry| entry != id);
+            self.expected = self.expected.saturating_sub(1);
+            self.ready = self.entries.values().filter(|entry| entry.ready).count();
+        }
+    }
+
     fn dismiss_modal(&mut self) {
         self.background = true;
     }
@@ -171,13 +266,15 @@ impl RestoreProgress {
                     .map_or(0, |nodes| nodes.iter().map(surface_count).sum::<usize>())
             }).sum()
         });
-        Self { state, expected, ready: 0, failure: None, started: Instant::now(), built: false, background: false, entries: HashMap::new(), entry_order: Vec::new() }
+        Self { state, expected, ready: 0, failure: None, started: Instant::now(), built: false, background: false, entries: HashMap::new(), entry_order: Vec::new(), cancelled_ids: HashSet::new() }
     }
 
     pub fn track(&mut self, id: &str, record: &serde_json::Value) {
         if !self.entries.contains_key(id) { self.entry_order.push(id.to_string()); }
         let remote = record.get("remote_base").and_then(|v| v.as_str()).is_some();
         let web = record.get("web_url").is_some();
+        let mut saved_record = record.clone();
+        if let Some(obj) = saved_record.as_object_mut() { obj.insert("pane_id".into(), serde_json::json!(id)); }
         self.entries.insert(id.to_string(), RestoreEntry {
             remote,
             agent: record.get("was_agent").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()),
@@ -187,6 +284,7 @@ impl RestoreProgress {
             character: record.get("character").and_then(|v| v.as_str()).and_then(character_label),
             remote_label: record.get("remote_label").and_then(|v| v.as_str()).and_then(display_label),
             stage: if web { RestoreStage::Web } else if remote { RestoreStage::RemoteConnection } else { RestoreStage::Pane },
+            record: saved_record,
         });
     }
 
@@ -205,7 +303,36 @@ impl RestoreProgress {
     }
 }
 
+fn collect_record_ids(record: &serde_json::Value, ids: &mut HashSet<String>) {
+    if let Some(id) = record.get("pane_id").and_then(|v| v.as_str()) { ids.insert(id.into()); }
+    for tab in record.get("tabs").and_then(|v| v.as_array()).into_iter().flatten() { collect_record_ids(tab, ids); }
+}
+
+type RestoreHost<'a> = (&'a HashMap<String, Arc<kasa_pty::PtySession>>, &'a Arc<Mutex<Workspace>>);
+
+fn find_restore_host<'a>(mut hosts: impl Iterator<Item = RestoreHost<'a>>, id: &str) -> Option<RestoreHost<'a>> {
+    hosts.find(|(pty, ws)| pty.contains_key(id) || ws.lock().unwrap().panes.contains_key(id))
+}
+
 impl App {
+    pub(crate) fn cancel_restore_surface(&mut self, id: &str) {
+        if let Some(progress) = self.restore_progress.as_mut() { progress.forget_surface(id); }
+        self.chrome_dirty = true;
+    }
+
+    /// Explicit user close/hide only. Automatic PTY failure must retain its
+    /// original restore record and must not be mistaken for a cancellation.
+    pub(crate) fn cancel_restore_pane(&mut self, id: &str) {
+        if self.restore_progress.is_none() { return; }
+        let mut ids = vec![id.to_string()];
+        for ws in std::iter::once(&self.ws).chain(self.sessions.iter().flatten().map(|s| &s.ws)) {
+            if let Some(pane) = ws.lock().unwrap().panes.get(id) {
+                ids.extend(pane.tabs.iter().filter_map(|tab| tab.pid.clone()));
+            }
+        }
+        for id in ids { self.cancel_restore_surface(&id); }
+    }
+
     /// Explicit isolated harness only; never reads the user's saved session.
     pub(crate) fn run_restore_probe(&mut self) {
         if !crate::verification_run() { return; }
@@ -230,6 +357,7 @@ impl App {
                 eprintln!("[restore-probe] blocked={} expected={}", self.restoration_blocks_input(), self.restore_progress.as_ref().map_or(0, |p| p.expected));
             }
             1 if self.restore_progress.as_ref().is_some_and(|p| p.failure.is_some()) => {
+                if std::env::var_os("KASATERM_AUTORESTORE_HOLD_FAILURE").is_some() { return; }
                 eprintln!("[restore-probe] failure=visible input-blocked={} ready={}", self.restoration_blocks_input(), self.restore_progress.as_ref().map_or(0, |p| p.ready));
                 PHASE.store(2, Ordering::Relaxed);
                 if std::env::var_os("KASATERM_AUTORESTORE_BACKGROUND_PROBE").is_some() {
@@ -292,11 +420,19 @@ impl App {
         let old_status = progress.status_line();
         let mut ready = 0;
         let mut failure = None;
-        let ws = self.ws.lock().unwrap();
         for id in &progress.entry_order {
             let Some(entry) = progress.entries.get_mut(id) else { continue; };
             entry.ready = false;
             entry.local_input_ready = false;
+            // Switching sessions parks the whole workspace. Pending restore
+            // entries still belong to that workspace, not the new active one.
+            let host = find_restore_host(std::iter::once((&self.pty, &self.ws))
+                .chain(self.sessions.iter().flatten().map(|s| (&s.pty, &s.ws))), id);
+            let Some((pty, ws)) = host else {
+                failure.get_or_insert_with(|| format!("{id} 창을 되살리지 못했어요"));
+                continue;
+            };
+            let ws = ws.lock().unwrap();
             if entry.web {
                 if ws.panes.contains_key(id) && self.pending_web_hosts.is_empty() {
                     entry.ready = true;
@@ -304,7 +440,7 @@ impl App {
                 }
                 continue;
             }
-            let Some(session) = self.pty.get(id) else {
+            let Some(session) = pty.get(id) else {
                 failure.get_or_insert_with(|| format!("{id} 창을 되살리지 못했어요"));
                 continue;
             };
@@ -333,7 +469,6 @@ impl App {
                 }
             }
         }
-        drop(ws);
         if progress.entries.len() != progress.expected {
             failure.get_or_insert_with(|| "저장된 창·탭 일부를 되살리지 못했어요".to_string());
         }
@@ -396,6 +531,146 @@ pub(crate) fn with_file_time(mut state: serde_json::Value) -> serde_json::Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_readiness_uses_parked_workspace_after_switching_sessions() {
+        let active = Arc::new(Mutex::new(Workspace::default()));
+        let parked = Arc::new(Mutex::new(Workspace::default()));
+        App::apply_screen_update(&mut parked.lock().unwrap(), kasa_bridge::screen::ScreenUpdate {
+            pane_id:"%parked".into(), cols:4, rows:1, live_output:true, output_generation:7,
+            ..Default::default()
+        });
+        let pty = HashMap::new();
+        let (_, found) = find_restore_host([(&pty, &active), (&pty, &parked)].into_iter(), "%parked").unwrap();
+        assert!(Arc::ptr_eq(found, &parked));
+        let ws = found.lock().unwrap();
+        let term = ws.panes["%parked"].tabs[0].term().unwrap();
+        assert!(term.live_output);
+        assert_eq!(term.output_generation, 7);
+        drop(ws);
+        assert!(find_restore_host([(&pty, &active), (&pty, &parked)].into_iter(), "%missing").is_none());
+    }
+
+    #[test]
+    fn closing_one_surface_keeps_sibling_restore_and_does_not_preserve_closed_tab() {
+        let mut progress = RestoreProgress::new(serde_json::json!({"sessions":[{"windows":[{"leaf":{"tabs":[{}]}}]}]}));
+        progress.track("%outer", &serde_json::json!({"pane_id":"%outer", "was_agent":"claude", "tabs":[{"pane_id":"%tab"}]}));
+        progress.track("%tab", &serde_json::json!({"pane_id":"%tab", "remote_base":"http://restore.invalid"}));
+        progress.built = true;
+        progress.forget_surface("%outer");
+        assert_eq!(progress.expected, 1);
+        assert_eq!(progress.entry_order, ["%tab"]);
+        assert!(progress.blocks_surface("%tab"));
+        assert_eq!(progress.retry_pending(Instant::now()), ["%tab"]);
+        let mut current = serde_json::json!({"sessions":[{"windows":[{"leaf":{"pane_id":"%tab"}}]}]});
+        progress.preserve_snapshot(&mut current);
+        assert_eq!(current["sessions"][0]["windows"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn saving_during_restore_keeps_current_layout_and_original_pending_session() {
+        let original = serde_json::json!({"pane_id":"%1", "was_agent":"codex", "session_id":"old-conversation",
+            "cwd":"/original", "model":"gpt-model", "effort":"high", "bypass":true, "character":"아즈사",
+            "tabs":[{"pane_id":"%2", "was_agent":"claude", "session_id":"tab-conversation"}], "active_tab":0});
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track("%1", &original);
+        progress.track("%2", &original["tabs"][0]);
+        progress.built = true;
+        let mut current = serde_json::json!({"active_session":0, "last_used_unix":123,
+            "sessions":[{"active_window":1, "windows":[{"split":{"dir":"h", "ratio":0.73,
+                "a":{"leaf":{"pane_id":"%1", "was_agent":null, "session_id":null, "cwd":"/shell",
+                    "title":"새 이름", "surface_key":"live-key", "tabs":[{"pane_id":"%new-tab", "cwd":"/new"}], "active_tab":1}},
+                "b":{"leaf":{"pane_id":"%new", "was_agent":"claude", "session_id":"new-work"}}
+            }}, {"leaf":{"pane_id":"%2", "was_agent":null, "session_id":null}}],
+                "undocked":[{"leaf":{"pane_id":"%undocked", "cwd":"/undocked"}, "frame":[1,2,300,400]}]}]});
+        progress.preserve_snapshot(&mut current);
+        let session = &current["sessions"][0];
+        assert_eq!(session["active_window"], 1);
+        assert_eq!(session["windows"].as_array().unwrap().len(), 2);
+        assert_eq!(session["windows"][0]["split"]["ratio"], 0.73);
+        let first = &session["windows"][0]["split"]["a"]["leaf"];
+        assert_eq!(first["session_id"], "old-conversation");
+        assert_eq!(first["was_agent"], "codex");
+        assert_eq!(first["cwd"], "/original");
+        assert_eq!(first["bypass"], true);
+        assert_eq!(first["surface_key"], "live-key");
+        assert_eq!(first["title"], "새 이름");
+        assert_eq!(first["tabs"][0]["pane_id"], "%new-tab");
+        assert_eq!(first["active_tab"], 1);
+        assert_eq!(session["windows"][1]["leaf"]["session_id"], "tab-conversation");
+        assert_eq!(session["windows"][0]["split"]["b"]["leaf"]["session_id"], "new-work");
+        assert_eq!(session["undocked"][0]["frame"], serde_json::json!([1,2,300,400]));
+        assert_eq!(current["last_used_unix"], 123);
+        let once = current.clone();
+        progress.preserve_snapshot(&mut current);
+        assert_eq!(current, once, "repeated autosaves must not append duplicate recovery panes");
+    }
+
+    #[test]
+    fn saving_missing_spawn_keeps_unattempted_tabs_without_replacing_new_work() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track("%7", &serde_json::json!({"pane_id":"%old", "remote_base":"http://original.invalid",
+            "remote_pane":"%source", "remote_surface_key":"original-source-key",
+            "tabs":[{"pane_id":"%8", "session_id":"unattempted-conversation", "was_agent":"claude"}]}));
+        progress.built = true;
+        let new_work = serde_json::json!({"leaf":{"pane_id":"%new", "session_id":"new-conversation"}});
+        let mut current = serde_json::json!({"active_session":1, "sessions":[
+            {"windows":[{"leaf":{"pane_id":"%other-session"}}]}, {"windows":[new_work.clone()], "active_window":0}]});
+        progress.preserve_snapshot(&mut current);
+        assert_eq!(current["sessions"][1]["windows"][0], new_work);
+        assert_eq!(current["sessions"][1]["windows"][1]["leaf"]["pane_id"], "%7");
+        assert_eq!(current["sessions"][1]["windows"][1]["leaf"]["remote_surface_key"], "original-source-key");
+        assert_eq!(current["sessions"][1]["windows"][1]["leaf"]["tabs"][0]["session_id"], "unattempted-conversation");
+        assert_eq!(current["sessions"][0]["windows"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn current_remote_identity_and_new_binding_override_stale_restore_metadata() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track("%1", &serde_json::json!({"pane_id":"%old", "was_agent":"claude", "session_id":"old",
+            "remote_base":"http://old.invalid", "remote_pane":"%old-source", "remote_surface_key":"old-key"}));
+        let mut record = serde_json::json!({"pane_id":"%1", "was_agent":"codex", "session_id":"new",
+            "remote_base":"http://new.invalid", "remote_pane":"%new-source", "remote_surface_key":"new-key"});
+        let current = record.clone();
+        progress.preserve_record(&mut record);
+        assert_eq!(record, current);
+        progress.entries.get_mut("%1").unwrap().ready = true;
+        let mut ready_record = serde_json::json!({"pane_id":"%1", "cwd":"/new-work", "was_agent":null});
+        let ready = ready_record.clone();
+        progress.preserve_record(&mut ready_record);
+        assert_eq!(ready_record, ready, "completed panes serialize only current truth");
+    }
+
+    #[test]
+    fn explicit_close_cancels_progress_but_hidden_record_keeps_pending_resume() {
+        let mut progress = RestoreProgress::new(serde_json::json!({"sessions":[{"windows":[{"leaf":{}}]}]}));
+        progress.track("%1", &serde_json::json!({"pane_id":"%1", "was_agent":"claude", "session_id":"resume-me"}));
+        progress.built = true;
+        let mut closed = serde_json::json!({"pane_id":"%1", "was_agent":null, "session_id":null});
+        progress.preserve_record(&mut closed);
+        progress.forget_surface("%1");
+        progress.forget_surface("%1");
+        assert_eq!((progress.expected, progress.ready), (0, 0));
+        assert!(progress.entry_order.is_empty());
+        assert!(progress.retry_pending(Instant::now()).is_empty());
+        assert!(!progress.blocks_surface("%1"));
+        let mut state = serde_json::json!({"sessions":[{"windows":[{"leaf":{"pane_id":"%new"}}]}],
+            "stashed_panes":[{"rec":closed}]});
+        progress.preserve_snapshot(&mut state);
+        assert_eq!(state["sessions"][0]["windows"].as_array().unwrap().len(), 1, "explicitly closed panes never resurrect as recovery windows");
+        assert_eq!(state["stashed_panes"][0]["rec"]["session_id"], "resume-me");
+    }
+
+    #[test]
+    fn unbuilt_restore_does_not_overlay_or_enable_saving() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track("%1", &serde_json::json!({"pane_id":"%1", "session_id":"old"}));
+        let mut state = serde_json::json!({"sessions":[{"windows":[{"leaf":{"pane_id":"%new"}}]}]});
+        let original = state.clone();
+        progress.preserve_snapshot(&mut state);
+        assert_eq!(state, original);
+        assert!(progress.blocks_all_input());
+    }
 
     #[test]
     fn toast_reserves_bottom_chrome_and_clamps_every_rectangle() {

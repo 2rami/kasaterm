@@ -3712,9 +3712,10 @@ impl App {
                 .unwrap_or_default();
             (rec, ch)
         };
-        let Some(rec) = rec.get("leaf").cloned().filter(|r| !r.is_null()) else {
+        let Some(mut rec) = rec.get("leaf").cloned().filter(|r| !r.is_null()) else {
             return;
         };
+        if let Some(progress) = &self.restore_progress { progress.preserve_record(&mut rec); }
         // cwd 캐시는 `lsof` 로 채워져 갓 만든 pane 에선 아직 비어 있다 — 그때는
         // 레코드에 실린 cwd 로 되짚는다(복원도 그 값을 쓰므로 어긋날 일이 없다).
         let folder = self
@@ -4086,6 +4087,7 @@ impl App {
             self.windows[idx].take()
         };
         if let Some(layout) = layout {
+            for pane_id in layout.leaves() { self.cancel_restore_pane(pane_id); }
             let mut ws = self.ws.lock().unwrap();
             for pane_id in layout.leaves() {
                 self.pty.remove(pane_id);
@@ -5765,12 +5767,14 @@ impl App {
                 })
             })
             .collect();
-        Some(serde_json::json!({
+        let mut state = serde_json::json!({
             "active_session": self.active_session,
             "sessions": sessions_json,
             "stashed_panes": closed_json,
             "last_used_unix": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
-        }))
+        });
+        if let Some(progress) = &self.restore_progress { progress.preserve_snapshot(&mut state); }
+        Some(state)
     }
     /// Write the restore snapshot on exit.
     ///
@@ -5780,7 +5784,9 @@ impl App {
     /// 과 같은 이유.
     pub(crate) fn save_session_state(&self) {
         self.save_aux_windows_state();
-        if self.restore_prompt.is_some() || self.restore_applying.is_some() || self.restore_progress.is_some() {
+        // Once the layout exists, keep new work while preserving the original
+        // execution records of unfinished surfaces in session_state_json.
+        if self.restore_prompt.is_some() || self.restoration_blocks_input() {
             return;
         }
         if let Some(state) = self.session_state_json() {
@@ -5801,7 +5807,7 @@ impl App {
         // 복원 창이 떠 있는 동안은 절대 저장하지 않는다 — 사용자가 "복원"을 고르기
         // 전의 화면은 빈 새 세션이라, 자동 저장이 복원 대상 자체를 덮어써 버린다
         // (되돌릴 수 없는 자해). 선택이 끝나면 그 클릭이 다시 touched 를 세운다.
-        if self.restore_prompt.is_some() || self.restore_applying.is_some() || self.restore_progress.is_some() {
+        if self.restore_prompt.is_some() || self.restoration_blocks_input() {
             return;
         }
         let Some(state) = self.session_state_json() else {

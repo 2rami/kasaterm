@@ -1408,7 +1408,11 @@ impl App {
             })
         };
         if last_primary {
+            let restore_ids: Vec<String> = self.ws.lock().unwrap().panes.get(outer)
+                .map(|pane| pane.tabs.iter().filter_map(|tab| tab.pid.clone()).collect())
+                .unwrap_or_default();
             self.remove_pane(outer);
+            for id in restore_ids { self.cancel_restore_surface(&id); }
             return;
         }
         let (pid_opt, preview_opt, preview_path): (
@@ -1425,6 +1429,7 @@ impl App {
             )
         };
         if let Some(pid) = pid_opt.as_deref() {
+            self.cancel_restore_surface(pid);
             if pid != outer {
                 self.close_owned_remote_surface(pid);
                 kasa_mcp::remote::kill_remote(pid);
@@ -1505,6 +1510,7 @@ impl App {
             ws.panes.get(outer).is_some_and(|p| p.tabs.is_empty())
         };
         if emptied {
+            self.cancel_restore_surface(outer);
             self.collapse_layout_only(outer);
         }
         // pane_window 미러에서 닫힌 탭 pid 를 걷는다(스폰 쪽과 대칭).
@@ -2323,6 +2329,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             return;
         }
         self.record_closed_pane(target, true, stashed);
+        self.cancel_restore_pane(target);
         let was_active = self
             .ws
             .lock()
@@ -2528,6 +2535,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             .as_ref()
             .is_some_and(|t| t.leaves().iter().any(|l| *l == pid));
         if !in_active {
+            self.cancel_restore_pane(pid);
             self.remove_pane(pid);
             return;
         }
