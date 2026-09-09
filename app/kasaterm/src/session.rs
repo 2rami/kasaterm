@@ -593,6 +593,7 @@ impl App {
                 .filter(|c| c.alive)
                 .map(|c| c.pane_id.clone()),
         );
+        used.extend(self.mirror_sync.reserved_ids());
         used
     }
     /// 지금 안 쓰는 **가장 작은** pane 번호. 예전엔 단조 증가 카운터라 열고 닫기를
@@ -2295,7 +2296,7 @@ impl App {
 
     /// pane 캐릭터 이름표 교정 — pane_character + board /tmp 마커 + redraw. 부모
     /// 상속·세션 매핑 두 경로가 공유한다. 실존 pane 만(훅 오호출·죽은 pane 가드).
-    fn relabel_pane(&mut self, pane: &str, character: &str) {
+    pub(crate) fn relabel_pane(&mut self, pane: &str, character: &str) {
         if self.ws.lock().unwrap().outer_for_pty(pane).is_none() {
             return;
         }

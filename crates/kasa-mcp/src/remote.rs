@@ -328,13 +328,18 @@ pub fn restore_connection(
 }
 
 fn connect_inner(
-    spec: RemoteSpec,
+    mut spec: RemoteSpec,
     local_pane_id: &str,
     cols: u16,
     rows: u16,
     view: bool,
     deferred: bool,
 ) -> Result<RemoteSession> {
+    // Additional mirrors use the same authenticated host connection without
+    // putting its credential into pane/session snapshots.
+    if spec.token.is_none() {
+        spec.token = connection_auth_token(&spec.base);
+    }
     let (etx, erx) = crossbeam_channel::unbounded::<ExtEvent>();
     let (otx, orx) = tokio::sync::mpsc::unbounded_channel::<Out>();
     let otx = Arc::new(otx);

@@ -63,6 +63,7 @@ mod lsp;
 mod machinescol;
 mod mirror_theme;
 mod mirror_close;
+mod mirror_sync;
 mod mcpcol;
 mod proc;
 mod sesscol;
@@ -5744,6 +5745,7 @@ struct App {
     /// `themegen.rs` 에 있다 — 이 struct 에 필드를 평평하게 늘리면 서로 다른 기능을
     /// 만지는 작업끼리 같은 정의 줄에서 충돌한다.
     themegen: themegen::ThemeGenState,
+    mirror_sync: mirror_sync::MirrorSyncState,
 }
 
 impl App {
@@ -6137,6 +6139,7 @@ impl App {
             web_find: None,
             pending_web_hosts: Vec::new(),
             themegen: Default::default(),
+            mirror_sync: Default::default(),
         }
     }
 }
