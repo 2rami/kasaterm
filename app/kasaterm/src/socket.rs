@@ -941,7 +941,7 @@ impl Backend for PtyBackend {
         let plan = rx.recv_timeout(std::time::Duration::from_secs(5))?.map_err(anyhow::Error::msg)?;
         let spawned = Arc::new(crate::transfer_endpoints::spawn(plan));
         let (tx, rx) = std::sync::mpsc::channel();
-        self.proxy.send_event(UserEvent::TransferFinishSpawn(spawned, machine, tx))
+        self.proxy.send_event(UserEvent::TransferFinishSpawn(spawned, machine, tx, false))
             .map_err(|_| anyhow::anyhow!("앱의 응답을 받을 수 없어요"))?;
         rx.recv_timeout(std::time::Duration::from_secs(10))?.map_err(anyhow::Error::msg)
     }

@@ -841,8 +841,29 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
-            UserEvent::TransferFinishSpawn(spawned, machine, sender) => {
-                transfer_endpoints::reply(sender, self.finish_transfer_spawn(spawned, machine));
+            UserEvent::TransferFinishSpawn(spawned, machine, sender, delayed) => {
+                #[cfg(debug_assertions)]
+                if !*delayed {
+                    if let Some(ms) = std::env::var("KASATERM_TEST_TRANSFER_FINISH_DELAY_MS").ok()
+                        .and_then(|v| v.parse::<u64>().ok()).filter(|ms| *ms > 0 && *ms <= 20000) {
+                        let (spawned, machine, sender, proxy) = (spawned.clone(), machine.clone(), sender.clone(), self.proxy.clone());
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(ms));
+                            let _ = proxy.send_event(UserEvent::TransferFinishSpawn(spawned, machine, sender, true));
+                        });
+                        return;
+                    }
+                }
+                let _ = delayed;
+                if let Some(identity) = transfer_endpoints::deliver_spawn(sender, self.finish_transfer_spawn(spawned, machine)) {
+                    self.reclaim_unreceived_spawn(identity);
+                }
+                return;
+            }
+            UserEvent::TransferReclaimSpawn(identity) => {
+                if let Err(error) = self.close_transfer_shell(identity) {
+                    self.set_toast(format!("응답이 끊겨 만든 셸 {}을 남겼어요 — {error}", identity.pane_id));
+                }
                 return;
             }
             UserEvent::TransferClose(identity, sender) => {

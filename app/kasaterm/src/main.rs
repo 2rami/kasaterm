@@ -3742,7 +3742,8 @@ enum UserEvent {
     SocketSpawnShell(Option<String>, std::sync::mpsc::Sender<String>),
     TransferSnapshot((String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::MachineSnapshot, String>>),
     TransferPrepareSpawn(kasa_socket::transfer::SpawnRequest, std::sync::mpsc::Sender<std::result::Result<transfer_endpoints::SpawnPlan, String>>),
-    TransferFinishSpawn(Arc<transfer_endpoints::Spawned>, (String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::SessionRow, String>>),
+    TransferFinishSpawn(Arc<transfer_endpoints::Spawned>, (String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::SessionRow, String>>, bool),
+    TransferReclaimSpawn(kasa_socket::transfer::SessionIdentity),
     TransferClose(kasa_socket::transfer::SessionIdentity, std::sync::mpsc::Sender<std::result::Result<(), String>>),
     /// `POST /swap-character?surface=<id>&character=<name>` 위임 — (pane, 캐릭터).
     /// 그 pane PTY 를 새 persona 로 respawn(대화 리셋, persona 는 셸 spawn 시 고정).

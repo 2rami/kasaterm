@@ -275,6 +275,7 @@ impl App {
         if !idle_shell(session.shell_pid(), &kasa_pty::fresh_process_table()) {
             anyhow::bail!("작업이 있거나 상태를 확인할 수 없는 셸은 닫지 않아요");
         }
+        let windows_before = self.windows.len();
         let room_before = self.window_of_pane(&identity.pane_id).and_then(|idx| self.transfer_rooms().into_iter().find(|(_, at, _)| *at == idx));
         let location = {
             let ws = self.ws.lock().unwrap();
@@ -292,7 +293,10 @@ impl App {
         }
         if let Some((_, idx, Some(room))) = room_before {
             if self.window_leaves(idx).is_empty() && created_rooms().lock().unwrap().remove(&room) {
-                self.close_window(idx)?;
+                // 배경 방은 remove_pane_stashed가 이미 방까지 걷는다.
+                if self.windows.len() == windows_before && idx < self.windows.len() && self.windows.len() > 1 {
+                    self.close_window(idx)?;
+                }
             }
         }
         Ok(())
@@ -303,9 +307,31 @@ impl App {
             self.pty.remove(&plan.pane);
         }
     }
+
+    pub(crate) fn reclaim_unreceived_spawn(&self, identity: SessionIdentity) {
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            // 셸 초기화 자식이 끝나길 잠깐 기다리되, 새 작업을 시작했다면 강제 종료하지 않는다.
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let session = kasa_pty::lookup_session(&identity.pane_id);
+                if session.as_ref().is_none_or(|session| token_for(&identity.pane_id, session) != identity.token) { return; }
+                if idle_shell(session.and_then(|s| s.shell_pid()), &kasa_pty::fresh_process_table()) || Instant::now() >= deadline { break; }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let _ = proxy.send_event(UserEvent::TransferReclaimSpawn(identity));
+        });
+    }
 }
 
 pub(crate) fn reply<T>(sender: &Reply<T>, value: Result<T>) { let _ = sender.send(value.map_err(|e| e.to_string())); }
+
+pub(crate) fn deliver_spawn(sender: &Reply<SessionRow>, result: Result<SessionRow>) -> Option<SessionIdentity> {
+    match sender.send(result.map_err(|error| error.to_string())) {
+        Err(std::sync::mpsc::SendError(Ok(row))) => Some(row.identity),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -323,5 +349,17 @@ mod tests {
             assert!(!idle_shell(Some(100), &table), "{child}");
             assert!(!idle_shell(Some(100), &[(100, 1, child.into())]), "exec {child}");
         }
+    }
+
+    #[test]
+    fn disconnected_spawn_receiver_returns_only_the_created_identity_for_cleanup() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(receiver);
+        let identity = SessionIdentity { pane_id: "%42".into(), token: "created-only".into(), ..Default::default() };
+        assert_eq!(deliver_spawn(&sender, Ok(SessionRow { identity: identity.clone(), ..Default::default() })), Some(identity));
+        assert!(deliver_spawn(&sender, Err(anyhow::anyhow!("spawn failed"))).is_none());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        assert!(deliver_spawn(&sender, Ok(SessionRow::default())).is_none());
+        assert!(receiver.recv().unwrap().is_ok());
     }
 }
