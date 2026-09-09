@@ -17,7 +17,9 @@
 #   scripts/sync-mini.sh             전부: 부치기 → 승격 → 교체 → 되띄우기
 set -euo pipefail
 
-HOST="${KASATERM_MINI_HOST:-macmini-nacho}"
+# 기본은 랙 미니(정본, 2026-09-06 이후) — 옛 미니(macmini-nacho)로 보내면 아무도 없는
+# 곳에 새 판만 쌓인다(2026-09-09 실측: 「학생: 없음」·bootstrap 실패).
+HOST="${KASATERM_MINI_HOST:-nachoneko}"
 LABEL="com.geono.kasaterm"
 STAGE="kasaterm-dist"          # 미니 홈 아래. 레포 밖에 둔다 — 레포를 더럽히면
                                # 세션 시작 훅이 「미커밋이 있다」며 pull 을 멈춘다.
