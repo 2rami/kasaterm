@@ -3620,6 +3620,7 @@ enum UserEvent {
         String,
         std::result::Result<Box<session::MigrateReady>, String>,
     ),
+    RemoteShellReady(Arc<layout::RemoteShellReady>),
     /// `machine.unfold` — 기계 라벨 하나로 그 기계 학생 pane 전부를 거울로
     /// **펼친다**(방마다 새 창). (라벨, 회신=요약 문장).
     SocketUnfold(

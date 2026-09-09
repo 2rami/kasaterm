@@ -1,6 +1,46 @@
 //! pane 레이아웃 조작 — split/move/close/focus/swap/drop/divider/zoom/tab + 좌표·resize. daemon-authoritative.
 use super::*;
 
+struct PendingRemoteInput(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for PendingRemoteInput {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+pub(crate) struct RemoteShellReady {
+    pane: String,
+    expected: std::sync::Weak<kasa_pty::PtySession>,
+    input: Arc<Mutex<Vec<u8>>>,
+    base: String,
+    remote_id: Option<String>,
+    outcome: Mutex<Option<std::result::Result<Arc<kasa_pty::PtySession>, String>>>,
+}
+
+impl std::fmt::Debug for RemoteShellReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteShellReady").field("pane", &self.pane).finish()
+    }
+}
+
+impl Drop for RemoteShellReady {
+    fn drop(&mut self) {
+        // 창이 닫혀 완료 이벤트가 소비되지 못해도 생성한 원격 셸은 회수한다.
+        if self.outcome.get_mut().unwrap().is_some() {
+            if let Some(remote_id) = self.remote_id.take() {
+                let base = self.base.clone();
+                std::thread::spawn(move || {
+                    let _ = kasa_mcp::remote::close_remote_pane(&base, &remote_id, None, true);
+                });
+            }
+        }
+    }
+}
+
 /// 본문 중앙의 "안에 넣기" 존 반경 — pane 반폭·반높이를 1.0 으로 본 정규화 좌표.
 /// 0.42 면 중앙 사각형이 pane 의 42%×42% 를 먹고, 네 쐐기는 여전히 각 변을
 /// 통째로 낀다. 더 좁히면(0.25) 조준이 어려워 "안 붙는다"로 읽히고, 더 넓히면
@@ -871,6 +911,9 @@ impl App {
         }
         let source_pid = self.ws.lock().unwrap().active_tab_pid(source);
         let Some(info) = kasa_mcp::remote::remote_info(&source_pid) else {
+            if self.pty.get(&source_pid).is_some_and(|session| session.shell_pid().is_none()) {
+                anyhow::bail!("원격 셸을 여는 중이에요. 연결된 뒤 다시 나눠 주세요");
+            }
             return Ok(None);
         };
         let cwd = self
@@ -883,33 +926,106 @@ impl App {
                     .and_then(|pane| pane.get("cwd").and_then(|v| v.as_str()).map(str::to_string))
             })
             .or(info.remote_cwd);
-        let remote_id = kasa_mcp::remote::spawn_shell_pane(&info.base, cwd.as_deref(), None)?;
-        let remote = match kasa_mcp::remote::connect_view(
-            kasa_mcp::remote::RemoteSpec {
-                base: info.base.clone(),
-                pane: Some(remote_id.clone()),
-                cwd: None,
-                token: None,
-                identity: kasa_mcp::remote::RemoteIdentity {
-                    label: info.label,
-                    remote_cwd: cwd,
-                    origin_cwd: info.origin_cwd,
-                    owned: true,
-                },
+        let input = Arc::new(Mutex::new(Vec::new()));
+        let (events, receiver) = crossbeam_channel::unbounded();
+        let _ = events.send(kasa_pty::ExtEvent::Bytes("원격 셸 연결 중…\r\n".as_bytes().to_vec()));
+        let pending = Arc::new(kasa_pty::PtySession::start_external(
+            kasa_pty::PtyOptions { pane_id: new_id.to_string(), ..Default::default() },
+            kasa_pty::ExternalIo {
+                events: receiver,
+                writer: Box::new(PendingRemoteInput(input.clone())),
+                on_resize: Arc::new(move |_, _| {
+                    let _keep_open = &events;
+                }),
             },
-            new_id,
-        ) {
-            Ok(remote) => remote,
-            Err(error) => {
-                let _ = kasa_mcp::remote::close_remote_pane(&info.base, &remote_id, None, true);
-                return Err(error);
+        )?);
+        let expected = Arc::downgrade(&pending);
+        let pane = new_id.to_string();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            if expected.strong_count() == 0 { return; }
+            let mut remote_id = None;
+            let outcome = (|| -> Result<Arc<kasa_pty::PtySession>> {
+                let id = kasa_mcp::remote::spawn_shell_pane(&info.base, cwd.as_deref(), None)?;
+                remote_id = Some(id.clone());
+                if expected.strong_count() == 0 {
+                    anyhow::bail!("생성 중인 pane이 닫혔어요");
+                }
+                let remote = kasa_mcp::remote::connect_view(
+                    kasa_mcp::remote::RemoteSpec {
+                        base: info.base.clone(),
+                        pane: Some(id),
+                        cwd: None,
+                        token: None,
+                        identity: kasa_mcp::remote::RemoteIdentity {
+                            label: info.label,
+                            remote_cwd: cwd,
+                            origin_cwd: info.origin_cwd,
+                            owned: true,
+                        },
+                    },
+                    &pane,
+                )?;
+                Ok(remote.session)
+            })().map_err(|error| format!("{error:#}"));
+            if outcome.is_err() {
+                if let Some(id) = remote_id.take() {
+                    let _ = kasa_mcp::remote::close_remote_pane(&info.base, &id, None, true);
+                }
             }
-        };
+            let ready = Arc::new(RemoteShellReady {
+                pane, expected, input, base: info.base, remote_id,
+                outcome: Mutex::new(Some(outcome)),
+            });
+            let _ = proxy.send_event(UserEvent::RemoteShellReady(ready));
+        });
         let mut ws = self.ws.lock().unwrap();
         if let Some(room) = ws.pane_room.get(source).cloned() {
             ws.pane_room.insert(new_id.to_string(), room);
         }
-        Ok(Some(remote.session))
+        Ok(Some(pending))
+    }
+
+    pub(crate) fn finish_remote_shell(&mut self, ready: &RemoteShellReady) {
+        let current = self.pty.get(&ready.pane);
+        if !current.zip(ready.expected.upgrade().as_ref())
+            .is_some_and(|(current, expected)| Arc::ptr_eq(current, expected)) {
+            return;
+        }
+        let Some(outcome) = ready.outcome.lock().unwrap().take() else { return };
+        match outcome {
+            Ok(session) => {
+                self.insert_pty(ready.pane.clone(), session.clone());
+                self.pump_pty_screens(session.screens.clone(), ready.pane.clone(), Arc::downgrade(&session));
+                self.dead_panes.lock().unwrap().retain(|pane| pane != &ready.pane);
+                let input = std::mem::take(&mut *ready.input.lock().unwrap());
+                if !input.is_empty() {
+                    let _ = session.send_bytes(&input);
+                }
+                let (cols, rows) = self.window_cells();
+                self.resize_backend(cols, rows);
+                self.publish_pty_layout();
+            }
+            Err(error) => {
+                let tab = {
+                    let ws = self.ws.lock().unwrap();
+                    ws.outer_for_pty(&ready.pane).and_then(|outer| {
+                        ws.panes.get(&outer).and_then(|pane| {
+                            pane.tabs.iter().position(|tab| tab.pid.as_deref() == Some(&ready.pane))
+                                .map(|index| (outer, index))
+                        })
+                    })
+                };
+                if let Some((outer, index)) = tab.filter(|(outer, _)| outer != &ready.pane) {
+                    self.close_tab(&outer, index);
+                } else {
+                    self.remove_pane(&ready.pane);
+                }
+                self.set_toast(format!("원격 셸을 열지 못했어요 — {error}"));
+            }
+        }
+        self.chrome_dirty = true;
+        if let Some(window) = &self.window { window.request_redraw(); }
     }
 
     /// 포커스된 pane 을 쪼갠다. 실패는 **전부 `Err` + 사유**다.

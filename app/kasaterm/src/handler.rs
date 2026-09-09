@@ -551,6 +551,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.migrate_finish(pane, res.clone());
                 return;
             }
+            UserEvent::RemoteShellReady(ready) => {
+                self.finish_remote_shell(ready);
+                return;
+            }
             UserEvent::SocketMigrateBack(pane, cwd, force, reply) => {
                 #[cfg(unix)]
                 let outcome = self
