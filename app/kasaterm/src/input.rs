@@ -1,6 +1,33 @@
 //! 키/마우스/휠 입력 + 클립보드 + claude 상태 글리프/타이틀.
 use super::*;
 
+fn image_paste_restore_error(layout_blocked: bool, surface_blocked: bool) -> Option<&'static str> {
+    (layout_blocked || surface_blocked)
+        .then_some("아직 복원 중인 pane이에요. 준비되면 사진을 다시 붙여 주세요")
+}
+
+#[cfg(test)]
+mod restore_image_input_tests {
+    use super::image_paste_restore_error;
+
+    #[test]
+    fn image_paste_respects_both_layout_and_target_readiness() {
+        for (layout_blocked, target_blocked) in [(true, false), (true, true), (false, true)] {
+            assert!(image_paste_restore_error(layout_blocked, target_blocked).is_some(),
+                "clipboard images and dropped photos must not bypass terminal input protection");
+        }
+    }
+
+    #[test]
+    fn ready_target_accepts_images_while_other_panes_restore() {
+        assert!(image_paste_restore_error(false, false).is_none(),
+            "visible restore progress is not itself a reason to block a ready target");
+        assert!(image_paste_restore_error(false, true).is_some());
+        assert!(image_paste_restore_error(false, false).is_none(),
+            "retrying after this target becomes ready must not retain a global lock");
+    }
+}
+
 /// None means the viewer already exhausted its local rows toward older history.
 fn mirror_scroll_offset(current: usize, maximum: usize, lines: i32) -> Option<usize> {
     let current = current.min(maximum);
@@ -1820,6 +1847,15 @@ impl App {
         }
     }
     pub(crate) fn paste_image_to_surface(&self, surface: String, bytes: Vec<u8>) {
+        // Images bypass send_bytes_to_surface: remote images use HTTP and local
+        // images dispatch a clipboard event. Guard before either path can
+        // transfer bytes, modify a clipboard or send the harness paste key.
+        if let Some(error) = image_paste_restore_error(
+            self.restoration_blocks_input(), self.restoration_blocks_surface(&surface),
+        ) {
+            let _ = self.proxy.send_event(UserEvent::ImagePasteDone(Err(error.into())));
+            return;
+        }
         if let Some(remote) = kasa_mcp::remote::remote_info(&surface) {
             let proxy = self.proxy.clone();
             std::thread::spawn(move || {
