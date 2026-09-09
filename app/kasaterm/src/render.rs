@@ -3281,16 +3281,20 @@ impl App {
                             },
                         );
                     }
-                    if let Some(b) = machine_badge.as_deref() {
-                        // 기계 배지는 dim 이 아니라 강조색 — bg 배지(부가 정보)와 달리
-                        // 이건 「입력이 어디로 가는가」라 흐리면 안 보이는 게 낫지 않다.
+                    if let (Some(b), Some(machine)) =
+                        (machine_badge.as_deref(), title_machine.as_deref())
+                    {
+                        // The title strip must use the same device identity as
+                        // the pane header and minimap, not the theme accent.
                         g.draw_text(
                             tx + tw + bw,
                             ty,
                             b,
                             gpu::DrawOpts {
                                 font_size: chrome_font,
-                                color: theme::accent(),
+                                color: theme::enforce_contrast_at(
+                                    machine_tint(machine), theme::surface(), 4.5,
+                                ),
                                 bold: true,
                                 italic: false,
                             },
