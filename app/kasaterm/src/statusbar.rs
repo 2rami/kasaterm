@@ -660,277 +660,125 @@ fn paint_tunnel_popover(
 ) {
     let on = sb.tunnel_on == Some(true);
     let host = on.then(|| sb.tunnel_host.clone()).flatten();
-    let w = 288.0_f32.min(win_w - 16.0);
-    // 모듈 판 한 변. 흰 여백은 규격의 quiet zone(4모듈)을 대신한다 — 어두운 테마
-    // 위에 바로 그리면 카메라가 판의 끝을 못 찾는다.
-    const QR: f32 = 120.0;
-    const QUIET: f32 = 8.0;
-    let qr_box = QR + QUIET * 2.0;
-    // 닫혀 있으면 주소 줄이 통째로 빠진다 — 높이를 안 줄이면 그만큼이 빈 여백으로
-    // 남아 팝오버가 이유 없이 커 보인다. 열려 있으면 QR 판 + 주소 두 벌이 들어간다.
-    let h = if host.is_some() { 50.0 + 8.0 + qr_box + 10.0 + 84.0 + 4.0 + 14.0 + 10.0 } else { 86.0 };
+    let w = 344.0_f32.min((win_w - 16.0).max(200.0));
+    let narrow = w < 320.0;
+    let qr_box = 152.0;
+    let h = if host.is_some() {
+        if sb.chrome_reach.is_some() { 404.0 } else { 378.0 }
+    } else { 148.0 };
     let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
     let y = (anchor.1 - h - 6.0).max(8.0);
     sb.popover_rect = Some((x, y, w, h));
     panel_rect_outlined(g, x, y, w, h, theme::radius_md(), theme::surface());
-
-    // 제목이 이름을 대신 설명한다 — 칩에는 아이콘과 세 글자밖에 안 들어가서,
-    // 그것만으로 "무엇이 밖으로 열리나" 를 알 수는 없다.
-    g.draw_text(
-        x + 12.0,
-        y + 10.0,
-        "모바일 연결",
-        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
-    );
-    // 관문(중계소) 모드면 스위치가 켜진 것과 실제로 붙은 것이 다르다 — 켰는데 관문이
-    // 안 닿으면 폰 주소는 「안 붙어 있음」 화면이라, 그 상태를 여기서 말해 준다.
-    let sub: String = if on {
-        let st = kasa_mcp::uplink::status();
-        if st.gateway.is_none() {
-            "폰·다른 기기에서 이 kasaterm 에 붙는다".to_string()
-        } else if st.connected {
-            format!("관문에 붙음 · 주소 {}개 — 폰에서 열면 바로 이 화면", st.accepted)
-        } else {
-            "관문에 붙는 중… (안 닿으면 폰 주소가 잠시 안 열린다)".to_string()
-        }
-    } else {
-        "폰·다른 기기에서 이 kasaterm 에 붙는다".to_string()
+    g.queue_icon("smartphone", x + 16.0, y + 15.0, 18.0, theme::accent());
+    let text = |g: &mut gpu::GpuRenderer, xx, yy, value: &str, size, color, bold| {
+        g.draw_text(xx, yy, value, gpu::DrawOpts { font_size: size, color, bold, italic: false });
     };
-    g.draw_text(
-        x + 12.0,
-        y + 28.0,
-        &sub,
-        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
-    );
-    let sw = (x + w - 12.0 - 36.0, y + 10.0, 36.0, 20.0);
+    text(g, x + 42.0, y + 15.0, "모바일에서 이어보기", 13.0, theme::text(), true);
+    let uplink = kasa_mcp::uplink::status();
+    let ready = on && host.is_some() && (uplink.gateway.is_none() || uplink.connected);
+    let status = if ready { "연결 준비됨" } else if on { "연결 준비 중…" } else { "연결 꺼짐" };
+    let status_color = if ready { theme::success() } else { theme::text_mute() };
+    round_rect(g, x + 43.0, y + 38.0, 5.0, 5.0, 2.5, status_color);
+    text(g, x + 54.0, y + 35.0, status, 10.0, status_color, false);
+    let sw = (x + w - 52.0, y + 15.0, 36.0, 20.0);
     crate::settings::toggle(g, sw, on, cursor);
     sb.popover_hits.push((state::StatusbarHit::ToggleTunnel, sw));
 
-    let line = y + 50.0;
-    g.rect(x + 12.0, line, w - 24.0, 1.0, theme::with_alpha(theme::border(), 0x88));
-    match host {
-        Some(host) => {
-            // QR 판 — 흰 바탕에 검정 모듈. 테마색으로 그리면 밝은 테마에서 판과 바탕이
-            // 붙어 카메라가 못 읽는다. 누르면 맥에서 같은 안내 페이지가 열린다.
-            let qx = x + 12.0;
-            let qy = line + 8.0;
-            round_rect(g, qx, qy, qr_box, qr_box, 6.0, [255, 255, 255, 255]);
-            if let Some((n, modules)) = qr_modules(&tunnel_url(&host, "/app")) {
-                let cell = QR / n as f32;
-                for r in 0..n {
-                    for c in 0..n {
-                        if modules[r * n + c] {
-                            // 0.3 겹침 — 셀 경계가 픽셀 사이에 떨어지면 흰 실금이 생긴다.
-                            g.rect(
-                                qx + QUIET + c as f32 * cell,
-                                qy + QUIET + r as f32 * cell,
-                                cell + 0.3,
-                                cell + 0.3,
-                                [18, 22, 30, 255],
-                            );
-                        }
-                    }
-                }
-            }
-            let qr_rect = (qx, qy, qr_box, qr_box);
-            g.hover_pointer |= hit(cursor, &qr_rect);
-            sb.popover_hits.push((state::StatusbarHit::OpenAppUrl, qr_rect));
+    round_rect(g, x + 12.0, y + 60.0, w - 24.0, 38.0, theme::radius_sm(), theme::panel_bg());
+    g.queue_icon("monitor-smartphone", x + 23.0, y + 71.0, 16.0, theme::text_dim());
+    text(g, x + 48.0, y + 66.0, "현재 기기", 9.0, theme::text_mute(), false);
+    let device = crate::info::cached_local_machine_name().unwrap_or("이 기기");
+    let device = crate::info::fit_text(g, device, w - 72.0, 11.0, true);
+    text(g, x + 48.0, y + 79.0, &device, 11.0, theme::text(), true);
 
-            // 오른쪽 — QR 이 무엇을 여는지. 세 갈래를 한 줄씩 적어야 「설치도 되나」를
-            // 폰을 꺼내기 전에 안다.
-            let cx = qx + qr_box + 12.0;
-            g.draw_text(
-                cx,
-                qy + 2.0,
-                "폰 카메라로 찍는다",
-                gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
-            );
-            for (i, s) in ["앱으로 열기", "앱 설치", "웹에서 보기"].into_iter().enumerate() {
-                g.draw_text(
-                    cx,
-                    qy + 20.0 + i as f32 * 16.0,
-                    s,
-                    gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
-                );
-            }
-            // 카사크롬 — 이 맥의 학생이 쓰는 크롬(설정 「카사크롬이 쓰는 크롬」). 초록=
-            // 고른 다리가 닿는다 / 주황=안 닿아 이 기계 크롬으로 물러난 중.
-            if let Some(reach) = sb.chrome_reach {
-                let by = qy + qr_box - 52.0;
-                round_rect(
-                    g,
-                    cx,
-                    by + 4.0,
-                    6.0,
-                    6.0,
-                    3.0,
-                    if reach { theme::success() } else { theme::attention() },
-                );
-                let who = if sb.chrome_machine.is_empty() {
-                    "이 기계".to_string()
-                } else {
-                    sb.chrome_machine.clone()
-                };
-                let text = if reach {
-                    format!("카사크롬 · {who} 크롬")
-                } else if sb.chrome_machine.is_empty() {
-                    "카사크롬 · 이 기계 다리 안 뜸".to_string()
-                } else {
-                    format!("카사크롬 · {who} 안 닿음 → 이 기계 크롬")
-                };
-                g.draw_text(
-                    cx + 11.0,
-                    by,
-                    &text,
-                    gpu::DrawOpts {
-                        font_size: 10.0,
-                        color: if reach { theme::text_mute() } else { theme::attention() },
-                        bold: false,
-                        italic: false,
-                    },
-                );
-            }
-            // 본진→이 맥 카사크롬 다리 — 초록=본진 상주 학생이 이 맥의 크롬(로그인 살아
-            // 있는 것)을 쓴다 / 주황=끊겨 저쪽 크롬 폴백. 폴백이 실패 기반이라 지금
-            // 어느 쪽인지 사람이 볼 창이 필요하다(2026-08-30 지시). 명부가 없으면 안 적는다.
-            if let Some(up) = sb.chrome_bridge {
-                let by = qy + qr_box - 36.0;
-                round_rect(
-                    g,
-                    cx,
-                    by + 4.0,
-                    6.0,
-                    6.0,
-                    3.0,
-                    if up { theme::success() } else { theme::attention() },
-                );
-                g.draw_text(
-                    cx + 11.0,
-                    by,
-                    if up { "본진 → 이 맥 카사크롬 다리 열림" } else { "본진 → 이 맥 카사크롬 다리 끊김" },
-                    gpu::DrawOpts {
-                        font_size: 10.0,
-                        color: if up { theme::text_mute() } else { theme::attention() },
-                        bold: false,
-                        italic: false,
-                    },
-                );
-            }
-            // 안내 주소 복사 — 카메라 없이 메시지로 보낼 때.
-            {
-                let label = "안내 주소 복사";
-                let tw = g.measure_chrome_text(label, 10.0, false);
-                let br = (cx - 4.0, qy + qr_box - 18.0, tw + 8.0, 18.0);
-                let bh = hit(cursor, &br);
-                g.hover_pointer |= bh;
-                if bh {
-                    hover_rect(g, br.0, br.1, br.2, br.3, theme::radius_sm());
-                }
-                g.draw_text(
-                    cx,
-                    br.1 + 3.0,
-                    label,
-                    gpu::DrawOpts {
-                        font_size: 10.0,
-                        color: if bh { theme::text() } else { theme::accent() },
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                sb.popover_hits.push((state::StatusbarHit::CopyAppUrl, br));
-            }
+    let Some(host) = host else {
+        let message = if on { "접속 주소를 준비하고 있어." } else { "연결을 켜면 QR과 접속 주소가 보여." };
+        let message = crate::info::fit_text(g, message, w - 32.0, 11.0, false);
+        text(g, x + 16.0, y + 119.0, &message, 11.0, theme::text_dim(), false);
+        return;
+    };
+    let qx = if narrow { x + (w - qr_box) / 2.0 } else { x + 16.0 };
+    let qy = y + 112.0;
+    let qr_rect = (qx, qy, qr_box, qr_box);
+    paint_mobile_qr(g, &tunnel_url(&host, "/app"), qr_rect);
+    g.hover_pointer |= hit(cursor, &qr_rect);
+    sb.popover_hits.push((state::StatusbarHit::OpenAppUrl, qr_rect));
+    if !narrow {
+        let tx = qx + qr_box + 16.0;
+        text(g, tx, qy + 12.0, "카메라로 스캔", 12.0, theme::text(), true);
+        text(g, tx, qy + 35.0, "앱으로 열거나", 11.0, theme::text_dim(), false);
+        text(g, tx, qy + 52.0, "웹에서 이어보기", 11.0, theme::text_dim(), false);
+        text(g, tx, qy + 78.0, "처음이면 앱 설치도", 10.0, theme::text_mute(), false);
+        text(g, tx, qy + 93.0, "여기서 할 수 있어.", 10.0, theme::text_mute(), false);
+        let button = (tx - 4.0, qy + 118.0, w - (tx - x) - 12.0, 27.0);
+        let hovered = hit(cursor, &button);
+        round_rect(g, button.0, button.1, button.2, button.3, theme::radius_sm(),
+            if hovered { theme::surface_hover() } else { theme::panel_bg() });
+        g.queue_icon("copy", tx + 4.0, button.1 + 7.0, 12.0, theme::text_dim());
+        text(g, tx + 23.0, button.1 + 7.0, "링크 복사", 10.0, theme::text(), false);
+        g.hover_pointer |= hovered;
+        sb.popover_hits.push((state::StatusbarHit::CopyAppUrl, button));
+    } else {
+        text(g, x + 16.0, y + 269.0, "카메라로 스캔해 앱 또는 웹으로 연결", 10.0, theme::text_dim(), false);
+    }
 
-            // **완성 주소**를 준다 — 호스트만 주면 그 주소는 문전에서 막힌다. 사용자가
-            // 폰으로 열어 보고 정확히 그 화면을 만났다(2026-08-16 「원격주소 제대로
-            // 나오게」). 자격은 이제 토큰 쿼리가 아니라 주소의 `/u/<slug>/` 부분이고
-            // (`tunnel_url`), 복사·표시 둘 다 같은 주소여야 「복사한 것이 열리는 것」이
-            // 성립한다. 표시에서는 slug 를 `…` 로 접는다 — 남이 어깨너머로 볼 자리다.
-            //
-            // 두 줄인 이유: 폰에서 하는 일이 갈린다 — 학생 고르기와 타자는 허브→터미널,
-            // 대화 읽기와 학생 전환은 아로나다. 라벨 없이 주소만 두 개면 어느 게 무엇인지 모른다.
-            let below = qy + qr_box + 10.0;
-            let rows: [(&str, &str, state::StatusbarHit, state::StatusbarHit); 2] = [
-                (
-                    "폰 허브 — 웹에서 보기 · 캐릭터 목록·터미널",
-                    "/u/…/",
-                    state::StatusbarHit::OpenTunnelUrl,
-                    state::StatusbarHit::CopyTunnelHost,
-                ),
-                (
-                    "아로나 — 대화 읽기",
-                    "/u/…/arona-ui/",
-                    state::StatusbarHit::OpenAronaUrl,
-                    state::StatusbarHit::CopyAronaUrl,
-                ),
-            ];
-            for (i, (label, path, open_hit, copy_hit)) in rows.into_iter().enumerate() {
-                let top = below + i as f32 * 42.0;
-                g.draw_text(
-                    x + 12.0,
-                    top + 4.0,
-                    label,
-                    gpu::DrawOpts {
-                        font_size: 10.0,
-                        color: theme::text_mute(),
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                let cr = (x + w - 12.0 - 22.0, top + 20.0, 22.0, 22.0);
-                let ch = hit(cursor, &cr);
-                g.hover_pointer |= ch;
-                if ch {
-                    round_rect(g, cr.0, cr.1, cr.2, cr.3, theme::radius_sm(), theme::surface_hover());
-                }
-                g.queue_icon(
-                    "copy",
-                    cr.0 + 5.0,
-                    cr.1 + 5.0,
-                    12.0,
-                    if ch { theme::text() } else { theme::text_mute() },
-                );
-                sb.popover_hits.push((copy_hit, cr));
-                let s = fit_addr(g, &host, path, (cr.0 - x - 24.0).max(0.0));
-                let ar = (x + 8.0, top + 18.0, cr.0 - x - 16.0, 20.0);
-                let ah = hit(cursor, &ar);
-                g.hover_pointer |= ah;
-                if ah {
-                    hover_rect(g, ar.0, ar.1, ar.2, ar.3, theme::radius_sm());
-                }
-                g.draw_text(
-                    x + 12.0,
-                    top + 25.0,
-                    &s,
-                    gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
-                );
-                // 주소를 누르면 바로 연다 — 폰으로 보내기 전에 맥에서 먼저 열어 확인하는
-                // 손이 복사보다 잦다. 복사 버튼은 그대로 옆에 있다(둘 다).
-                sb.popover_hits.push((open_hit, ar));
+    let below = y + 286.0;
+    let rows = [
+        ("웹 터미널", "/u/…/", state::StatusbarHit::OpenTunnelUrl, state::StatusbarHit::CopyTunnelHost),
+        ("대화 보기", "/u/…/arona-ui/", state::StatusbarHit::OpenAronaUrl, state::StatusbarHit::CopyAronaUrl),
+    ];
+    for (index, (label, path, open_hit, copy_hit)) in rows.into_iter().enumerate() {
+        let top = below + index as f32 * 42.0;
+        text(g, x + 16.0, top, label, 10.0, theme::text_mute(), false);
+        let copy = (x + w - 40.0, top + 13.0, 26.0, 25.0);
+        let hovered = hit(cursor, &copy);
+        if hovered { hover_rect(g, copy.0, copy.1, copy.2, copy.3, theme::radius_sm()); }
+        g.queue_icon("copy", copy.0 + 7.0, copy.1 + 6.0, 12.0, theme::text_dim());
+        sb.popover_hits.push((copy_hit, copy));
+        let address_rect = (x + 12.0, top + 13.0, w - 60.0, 25.0);
+        let address_hovered = hit(cursor, &address_rect);
+        if address_hovered { hover_rect(g, address_rect.0, address_rect.1, address_rect.2, address_rect.3, theme::radius_sm()); }
+        let address = fit_addr(g, &host, path, w - 68.0);
+        text(g, x + 16.0, top + 20.0, &address, 11.0, theme::text(), false);
+        g.hover_pointer |= hovered || address_hovered;
+        sb.popover_hits.push((open_hit, address_rect));
+    }
+    if let Some(reachable) = sb.chrome_reach {
+        let fy = y + 376.0;
+        g.rect(x + 16.0, fy - 4.0, w - 32.0, 1.0, theme::border());
+        g.queue_icon("globe", x + 16.0, fy + 6.0, 12.0, theme::text_mute());
+        let device = if sb.chrome_machine.is_empty() { "이 기기" } else { &sb.chrome_machine };
+        let label = if reachable { format!("브라우저 · {device}") } else { format!("브라우저 · {device} 연결 확인 필요") };
+        let label = crate::info::fit_text(g, &label, w - 64.0, 10.0, false);
+        text(g, x + 35.0, fy + 6.0, &label, 10.0,
+            if reachable { theme::text_mute() } else { theme::attention() }, false);
+    }
+}
+
+/// Four full quiet-zone modules surround the square code. Only a small central
+/// area is covered by the umbrella; finder patterns remain untouched.
+fn paint_mobile_qr(g: &mut gpu::GpuRenderer, address: &str, rect: (f32, f32, f32, f32)) {
+    let (x, y, side, _) = rect;
+    g.rect(x, y, side, side, [255, 255, 255, 255]);
+    let Some((n, modules)) = qr_modules(address) else { return };
+    let cell = side / (n + 8) as f32;
+    let quiet = 4.0 * cell;
+    for row in 0..n {
+        for col in 0..n {
+            if modules[row * n + col] {
+                g.rect(x + quiet + col as f32 * cell, y + quiet + row as f32 * cell,
+                    cell, cell, [18, 22, 30, 255]);
             }
-            g.draw_text(
-                x + 12.0,
-                below + 88.0,
-                "이 주소를 아는 사람은 누구나 붙을 수 있다",
-                gpu::DrawOpts {
-                    font_size: 10.0,
-                    color: theme::with_alpha(theme::text_mute(), 0xB0),
-                    bold: false,
-                    italic: false,
-                },
-            );
-        }
-        None => {
-            // 켜져 있는데 주소가 없으면 아직 무는 중이다 — "닫힘" 으로 적으면
-            // 스위치와 어긋나 보인다.
-            let msg = if on { "주소를 받는 중…" } else { "닫혀 있다 — 이 기계에서만 열린다" };
-            g.draw_text(
-                x + 12.0,
-                line + 14.0,
-                msg,
-                gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
-            );
         }
     }
+    let cover_modules = ((n as f32 * 0.15).floor() as usize | 1).clamp(3, 9);
+    let cover = cover_modules as f32 * cell;
+    let center_x = x + side * 0.5;
+    let center_y = y + side * 0.5;
+    g.rect(center_x - cover * 0.5, center_y - cover * 0.5, cover, cover, [255, 255, 255, 255]);
+    let logo = (cover - 4.0).max(8.0);
+    g.queue_icon("umbrella", center_x - logo * 0.5, center_y - logo * 0.5, logo, [18, 22, 30, 255]);
 }
 
 /// 새 판 팝오버 — 굽기 · 다른 기계로 보내기 · 기계 설정. 판 번호를 누르면 뜬다.
@@ -1021,7 +869,7 @@ fn qr_modules(text: &str) -> Option<(usize, Vec<bool>)> {
             return Some((*n, m.clone()));
         }
     }
-    let qr = qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Medium).ok()?;
+    let qr = qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::High).ok()?;
     let n = qr.size() as usize;
     let mut m = Vec::with_capacity(n * n);
     for r in 0..n {

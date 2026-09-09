@@ -4157,6 +4157,7 @@ impl GpuRenderer {
     /// 수 있어야 해서다 — 없는 이름은 `queue_icon` 이 조용히 그냥 돌아간다.
     pub(crate) fn icon_svg(name: &str) -> Option<&'static str> {
         Some(match name {
+            "umbrella" => include_str!("../assets/icons/umbrella.svg"),
             "folder" => include_str!("../assets/icons/folder.svg"),
             "square" => include_str!("../assets/icons/square.svg"),
             "square-check" => include_str!("../assets/icons/square-check.svg"),
