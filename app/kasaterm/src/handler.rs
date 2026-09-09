@@ -7669,6 +7669,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // 깨어나야 한다. hover 중에는 deadline이 None이라 타이머가 멈춘다.
                 .chain(self.next_banner_deadline())
                 .chain(web_visual_deadline)
+                // 조용한 셸에서도 이사·복원 명령이 제때 발사되어야 한다. 이 만기를
+                // 빼면 다음 키 입력이나 무관한 출력이 올 때까지 실행이 밀린다.
+                .chain(self.pending_restores.iter().map(|(_, _, at)| *at))
+                .chain(self.restore_applying.as_ref().map(|(_, at)| *at))
                 .min();
             event_loop.set_control_flow(match deadline {
                 Some(at) => ControlFlow::WaitUntil(at),
