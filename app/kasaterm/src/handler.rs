@@ -15,7 +15,7 @@ fn restore_toast_captures_pointer(
     card: Option<(f32, f32, f32, f32)>,
 ) -> bool {
     let point = match event {
-        WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
+        WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. }
         | WindowEvent::DroppedFile(_) => cursor,
         WindowEvent::Touch(touch) => (
             touch.location.x as f32 / scale.max(f32::EPSILON),
@@ -1502,6 +1502,12 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketPasteImage(surface, bytes, reply) => {
+                if self.restoration_blocks_input() || self.restoration_blocks_surface(surface) {
+                    let error = "아직 pane을 복원하는 중이에요. 연결이 준비되면 다시 첨부해 주세요.".to_string();
+                    if let Some(reply) = reply { let _ = reply.send(Err(error)); }
+                    else { self.set_toast(error); }
+                    return;
+                }
                 // Forward bytes across another mirror, or fill the clipboard on
                 // the actual harness host. Acknowledge only after target input.
                 if let Some(remote) = kasa_mcp::remote::remote_info(surface) {
@@ -2882,8 +2888,11 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let main_window = self.window.as_ref().is_some_and(|window| window.id() == id);
         if main_window && (self.restore_applying.is_some() || self.restore_progress.is_some()) {
-            let scale = self.window.as_ref().map_or(1.0, |window| window.scale_factor() as f32);
+            let scale = self.effective_scale();
             if restore_toast_captures_pointer(&event, self.cursor_px, scale, self.restore_toast_rect) {
+                if matches!(&event, WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. }) {
+                    self.cancel_drag_over_restore_toast();
+                }
                 if matches!(&event, WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. })
                     && self.restore_retry_rect.is_some_and(|rect| restore_rect_contains(rect, self.cursor_px))
                 {
@@ -7884,6 +7893,46 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
+    /// A drop onto progress UI is not a drop onto the terminal behind it.
+    /// Disarm existing gestures so their next release cannot move files, type
+    /// a path, open a link, or complete an old pane relocation unexpectedly.
+    fn cancel_drag_over_restore_toast(&mut self) {
+        self.native_settings_end_drag();
+        self.file_tree.drag = None;
+        self.titlebar_drag_pending = None;
+        self.link_armed = None;
+        self.md_select_drag = None;
+        if let Some(selection) = self.md_render_sel.as_mut() { selection.dragging = false; }
+        self.sidebar_row_drag = None;
+        self.win_tab_drag = None;
+        self.image_pan_drag = None;
+        self.tab_drag = None;
+        self.header_drag = None;
+        let resized = self.resize_drag.take().is_some();
+        self.last_divider_pos = None;
+        self.last_divider_pty_resize = None;
+        let original = self.drag_orig_layout.take();
+        let restore_layout = original.is_some();
+        if let Some(original) = original { self.pty_layout = Some(original); }
+        self.drag_live_applied = None;
+        if restore_layout || resized {
+            let (cols, rows) = self.window_cells();
+            self.resize_backend(cols, rows);
+        }
+        // If the TUI saw the original press, it still needs a matching release.
+        if let Some(pane_id) = self.mouse_forward_pane.take() {
+            if let Some((col, row)) = self.px_to_cell_active(self.cursor_px.0, self.cursor_px.1) {
+                self.send_mouse_sgr(&pane_id, 0, col, row, false);
+            }
+        }
+        self.drag_anchor = None;
+        self.chrome_dirty = true;
+        if let Some(window) = &self.window {
+            window.set_cursor(CursorIcon::Default);
+            window.request_redraw();
+        }
+    }
+
     /// Resolve a confirm-close modal: 취소 just dismisses; 닫기 runs the pending
     /// action (a `Window` close needs the event loop to exit, the rest go
     /// through `do_close`).

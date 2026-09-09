@@ -264,11 +264,10 @@ impl App {
 
     pub(crate) fn continue_restore_in_background(&mut self) {
         let Some(progress) = self.restore_progress.as_mut() else { return; };
-        // Keep every PTY, pending resume and original saved layout. This only
-        // dismisses the modal; unfinished surfaces remain protected from input.
+        // Legacy recovery probe compatibility. The toast is already nonmodal;
+        // unfinished surfaces remain protected and every PTY stays intact.
         progress.dismiss_modal();
         self.restore_retry_rect = None;
-        self.restore_continue_rect = None;
         self.chrome_dirty = true;
         if let Some(window) = &self.window { window.request_redraw(); }
     }
