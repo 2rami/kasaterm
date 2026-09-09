@@ -2,18 +2,29 @@
 use super::*;
 
 fn latest_restored_state(dir: &std::path::Path) -> Option<serde_json::Value> {
-    let latest = std::fs::read_dir(dir).ok()?.flatten().filter_map(|entry| {
+    let mut backups: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().filter_map(|entry| {
         let name = entry.file_name();
         let name = name.to_str()?;
         let stamp = name.strip_prefix("session-restored-")?.strip_suffix(".json")?
             .parse::<u64>().ok()?;
         let metadata = entry.metadata().ok()?;
         if !metadata.is_file() { return None; }
-        Some((metadata.modified().unwrap_or(std::time::UNIX_EPOCH), stamp, entry.path()))
-    }).max_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)))?;
-    // Do not silently choose a different older identity table if the newest
-    // backup is corrupt: ambiguous legacy mapping must remain unresolved.
-    serde_json::from_slice(&std::fs::read(latest.2).ok()?).ok()
+        Some((stamp, entry.path()))
+    }).collect();
+    // Filename timestamps reflect restore order even if backups were copied
+    // later and acquired different mtimes. Propagate identities through every
+    // intermediate legacy snapshot, not just the already-renumbered last one.
+    backups.sort_by_key(|(stamp, _)| *stamp);
+    let mut previous = None;
+    for (_, path) in backups {
+        let state = std::fs::read(path).ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .filter(serde_json::Value::is_object);
+        // A corrupt checkpoint breaks the lineage. Later valid checkpoints
+        // start independently; a corrupt final checkpoint returns None.
+        previous = state.map(|state| kasa_mcp::surface_keys::prepare_restore_state(&state, previous.as_ref()));
+    }
+    previous
 }
 
 fn append_surface_record_metadata(obj: &mut serde_json::Map<String, serde_json::Value>, surface: &str) {
@@ -8970,13 +8981,53 @@ mod tests {
         std::fs::write(&backup, previous.to_string()).unwrap();
         std::fs::write(dir.join("session.json"), current.to_string()).unwrap();
         let saved = super::latest_restored_state(&dir).unwrap();
-        assert_eq!(saved, previous);
+        assert_eq!(saved["leaf"]["pane_id"], "%4");
+        assert_eq!(saved["leaf"]["surface_key"], "legacy:%4");
         let prepared = kasa_mcp::surface_keys::prepare_restore_state(&current, Some(&saved));
         assert_eq!(prepared["leaf"]["pane_id"], "%3");
         assert_eq!(prepared["leaf"]["surface_key"], "legacy:%4");
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&backup).unwrap()).unwrap(), previous);
         std::fs::write(dir.join("session-restored-300.json"), b"invalid").unwrap();
         assert!(super::latest_restored_state(&dir).is_none(), "do not guess from an older table after corruption");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn surface_key_backup_lineage_survives_multiple_legacy_restarts_and_new_pane() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-surface-lineage-fixture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let records = |pairs: &[(&str, &str)]| serde_json::json!({"windows": pairs.iter()
+            .map(|(id, sid)| serde_json::json!({"leaf":{"pane_id":id,"session_id":sid}})).collect::<Vec<_>>()});
+        let old = records(&[("%4", "a"), ("%2", "b"), ("%7", "c"), ("%8", "d")]);
+        let renamed = records(&[("%3", "a"), ("%0", "b"), ("%1", "c"), ("%2", "d")]);
+        // Write the oldest last, deliberately reversing mtimes: ordering must
+        // follow the restore timestamp, not when a backup happened to be copied.
+        std::fs::write(dir.join("session-restored-1788966036.json"), renamed.to_string()).unwrap();
+        std::fs::write(dir.join("session-restored-1788966035.json"), renamed.to_string()).unwrap();
+        std::fs::write(dir.join("session-restored-1788964315.json"), old.to_string()).unwrap();
+        let previous = super::latest_restored_state(&dir).unwrap();
+        let current = records(&[("%4", "new-session"), ("%3", "a"), ("%0", "b"), ("%1", "c"), ("%2", "d")]);
+        let prepared = kasa_mcp::surface_keys::prepare_restore_state(&current, Some(&previous));
+        for (index, old_id) in ["%4", "%2", "%7", "%8"].iter().enumerate() {
+            assert_eq!(prepared["windows"][index + 1]["leaf"]["surface_key"], format!("legacy:{old_id}"));
+        }
+        assert!(uuid::Uuid::parse_str(prepared["windows"][0]["leaf"]["surface_key"].as_str().unwrap()).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn surface_key_corrupt_checkpoint_breaks_lineage_and_corrupt_latest_returns_none() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-surface-corrupt-fixture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("session-restored-100.json"),
+            serde_json::json!({"leaf":{"pane_id":"%4","session_id":"same"}}).to_string()).unwrap();
+        std::fs::write(dir.join("session-restored-200.json"), b"corrupt").unwrap();
+        std::fs::write(dir.join("session-restored-300.json"),
+            serde_json::json!({"leaf":{"pane_id":"%3","session_id":"same"}}).to_string()).unwrap();
+        let restarted = super::latest_restored_state(&dir).unwrap();
+        assert_eq!(restarted["leaf"]["surface_key"], "legacy:%3", "never bridge across a corrupt identity checkpoint");
+        std::fs::write(dir.join("session-restored-400.json"), b"corrupt").unwrap();
+        assert!(super::latest_restored_state(&dir).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

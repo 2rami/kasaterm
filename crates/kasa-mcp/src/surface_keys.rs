@@ -109,16 +109,36 @@ pub fn prepare_restore_state(state: &Value, previous: Option<&Value>) -> Value {
     let previous = previous.map(index).unwrap_or_default();
     let current = index(state);
     let mut prepared = state.clone();
+    let mut reserved = HashSet::new();
+    // Reserve explicit and uniquely inherited identities before allocating any
+    // legacy fallback. Traversal order must not let a newly reused pane number
+    // steal a key belonging to an older, renumbered surface later in the tree.
     walk(&mut prepared, &mut |rec| {
-        if text(rec, "surface_key").is_some() { return; }
-        let Some(id) = text(rec, "pane_id") else { return };
+        if let Some(key) = text(rec, "surface_key") {
+            reserved.insert(key.to_owned());
+            return;
+        }
+        if text(rec, "pane_id").is_none() { return; }
         let inherited = text(rec, "session_id")
             .filter(|sid| current.get(*sid).is_some_and(|rows| rows.len() == 1))
             .and_then(|sid| previous.get(sid))
             .filter(|rows| rows.len() == 1)
             .and_then(|rows| rows.iter().next())
             .map(|(_, key)| key.clone());
-        let key = inherited.unwrap_or_else(|| format!("legacy:{id}"));
+        if let Some(key) = inherited {
+            reserved.insert(key.clone());
+            rec["surface_key"] = Value::String(key);
+        }
+    });
+    walk(&mut prepared, &mut |rec| {
+        // Existing duplicates remain duplicates so the resolver fails closed;
+        // never silently relabel one claimant and resolve an ambiguous source.
+        if text(rec, "surface_key").is_some() { return; }
+        let Some(id) = text(rec, "pane_id") else { return };
+        let mut key = format!("legacy:{id}");
+        while !reserved.insert(key.clone()) {
+            key = uuid::Uuid::new_v4().to_string();
+        }
         rec["surface_key"] = Value::String(key);
     });
     prepared
@@ -168,6 +188,41 @@ mod tests {
         let previous = json!({"leaf":{"pane_id":"%4","session_id":"old","surface_key":"original"}});
         let current = json!({"leaf":{"pane_id":"%3","session_id":"new","surface_key":"original"}});
         assert_eq!(prepare_restore_state(&current, Some(&previous)), current);
+    }
+
+    #[test]
+    fn multiple_restarts_reserve_inherited_keys_before_a_reused_number() {
+        let records = |pairs: &[(&str, &str)]| json!({"windows": pairs.iter()
+            .map(|(id, sid)| json!({"leaf":{"pane_id":id,"session_id":sid}})).collect::<Vec<_>>()});
+        let old = records(&[("%4", "a"), ("%2", "b"), ("%7", "c"), ("%8", "d")]);
+        let renamed = records(&[("%3", "a"), ("%0", "b"), ("%1", "c"), ("%2", "d")]);
+        let first = prepare_restore_state(&old, None);
+        let second = prepare_restore_state(&renamed, Some(&first));
+        // Put the new pane first: fallback allocation cannot claim legacy:%4
+        // before the actual owner (now %3) is visited.
+        let current = records(&[("%4", "new-session"), ("%3", "a"), ("%0", "b"), ("%1", "c"), ("%2", "d")]);
+        let third = prepare_restore_state(&current, Some(&second));
+        for (index, old_id) in ["%4", "%2", "%7", "%8"].iter().enumerate() {
+            assert_eq!(third["windows"][index + 1]["leaf"]["surface_key"], format!("legacy:{old_id}"));
+        }
+        let fresh = third["windows"][0]["leaf"]["surface_key"].as_str().unwrap();
+        assert_eq!(uuid::Uuid::parse_str(fresh).unwrap().get_version_num(), 4);
+        assert_eq!(prepare_restore_state(&third, Some(&second)), third);
+        assert!(current["windows"][0]["leaf"].get("surface_key").is_none());
+    }
+
+    #[test]
+    fn explicit_keys_are_reserved_and_existing_duplicates_remain_ambiguous() {
+        let state = json!({"windows":[
+            {"leaf":{"pane_id":"%4"}},
+            {"leaf":{"pane_id":"%3","surface_key":"legacy:%4"}},
+            {"leaf":{"pane_id":"%6","surface_key":"legacy:%4"}}
+        ]});
+        let prepared = prepare_restore_state(&state, None);
+        assert!(uuid::Uuid::parse_str(prepared["windows"][0]["leaf"]["surface_key"].as_str().unwrap()).is_ok());
+        assert_eq!(prepared["windows"][1], state["windows"][1]);
+        assert_eq!(prepared["windows"][2], state["windows"][2]);
+        assert_eq!(prepared["windows"][1]["leaf"]["surface_key"], prepared["windows"][2]["leaf"]["surface_key"]);
     }
 
     #[test]
