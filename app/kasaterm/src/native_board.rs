@@ -568,6 +568,11 @@ impl Scene {
                     self.transfer.destination = machine.id.clone();
                     self.transfer.room = machine.rooms.first().map(|room| room.id.clone());
                 }
+                if let Ok(name) = std::env::var("KASATERM_TEST_TRANSFER_ROOM_NAME") {
+                    self.transfer.new_room = true;
+                    self.transfer.room = None;
+                    self.transfer.room_name = name;
+                }
                 match std::env::var("KASATERM_TEST_TRANSFER_STEP").as_deref() {
                     Ok("destination") => self.transfer.step = TransferStep::Destination,
                     Ok("confirm") => self.review_transfer(false),
@@ -1828,8 +1833,9 @@ fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, c
                     }
                     TransferConfirmation::Close(ids) => ("셸 닫기 확인", "선택한 셸만 닫습니다. 실행 중인 학생은 유지돼요.".into(), ids, "확인하고 셸 닫기"),
                 };
-                let summary = fit(g, &summary, w, 10.5, false);
-                section(g, x, y, title, &summary);
+                section(g, x, y, title, "선택한 항목만 처리하며, 나머지는 그대로 남아요");
+                transfer_message(g, x, y, w, &summary);
+                *y += 16.0;
                 for id in ids {
                     if let Some(row) = data.sessions.iter().find(|row| &row.identity == id) {
                         let label = fit(g, &format!("{} · {}", transfer_session_name(row), transfer_room_label(data, row)), w - 24.0, 11.5, false);
