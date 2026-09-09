@@ -2,6 +2,77 @@
 //! main.rs 에서 분리. impl App 메서드·타입은 crate root 그대로 참조.
 use super::*;
 
+fn restore_rect_contains((x, y, w, h): (f32, f32, f32, f32), point: (f32, f32)) -> bool {
+    w > 0.0 && h > 0.0 && point.0 >= x && point.0 <= x + w && point.1 >= y && point.1 <= y + h
+}
+
+/// Consume only pointer actions on the toast, never keyboard input or events
+/// outside it. In particular, a toast button must not also click the terminal.
+fn restore_toast_captures_pointer(
+    event: &WindowEvent,
+    cursor: (f32, f32),
+    scale: f32,
+    card: Option<(f32, f32, f32, f32)>,
+) -> bool {
+    let point = match event {
+        WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
+        | WindowEvent::DroppedFile(_) => cursor,
+        WindowEvent::Touch(touch) => (
+            touch.location.x as f32 / scale.max(f32::EPSILON),
+            touch.location.y as f32 / scale.max(f32::EPSILON),
+        ),
+        _ => return false,
+    };
+    card.is_some_and(|rect| restore_rect_contains(rect, point))
+}
+
+#[cfg(test)]
+mod restore_toast_input_tests {
+    use super::*;
+
+    const CARD: Option<(f32, f32, f32, f32)> = Some((100.0, 80.0, 360.0, 132.0));
+
+    #[test]
+    fn toast_consumes_both_click_edges_and_wheel_only_inside_card() {
+        for state in [ElementState::Pressed, ElementState::Released] {
+            let event = WindowEvent::MouseInput {
+                device_id: winit::event::DeviceId::dummy(), state, button: MouseButton::Left,
+            };
+            assert!(restore_toast_captures_pointer(&event, (110.0, 90.0), 2.0, CARD));
+            assert!(!restore_toast_captures_pointer(&event, (90.0, 90.0), 2.0, CARD));
+            assert!(!restore_toast_captures_pointer(&event, (110.0, 90.0), 2.0, None));
+        }
+        let wheel = WindowEvent::MouseWheel {
+            device_id: winit::event::DeviceId::dummy(),
+            delta: winit::event::MouseScrollDelta::LineDelta(0.0, 1.0),
+            phase: winit::event::TouchPhase::Moved,
+        };
+        assert!(restore_toast_captures_pointer(&wheel, (110.0, 90.0), 2.0, CARD));
+        assert!(!restore_toast_captures_pointer(&wheel, (500.0, 90.0), 2.0, CARD));
+    }
+
+    #[test]
+    fn text_input_is_not_trapped_and_drop_does_not_reach_terminal() {
+        let ime = WindowEvent::Ime(winit::event::Ime::Commit("입력".into()));
+        assert!(!restore_toast_captures_pointer(&ime, (110.0, 90.0), 2.0, CARD));
+        let drop = WindowEvent::DroppedFile(std::path::PathBuf::from("photo.png"));
+        assert!(restore_toast_captures_pointer(&drop, (110.0, 90.0), 2.0, CARD));
+        assert!(!restore_toast_captures_pointer(&drop, (90.0, 90.0), 2.0, CARD));
+    }
+
+    #[test]
+    fn touch_coordinates_are_converted_from_physical_pixels() {
+        let touch = WindowEvent::Touch(winit::event::Touch {
+            device_id: winit::event::DeviceId::dummy(),
+            phase: winit::event::TouchPhase::Started,
+            location: winit::dpi::PhysicalPosition::new(220.0, 180.0),
+            force: None, id: 1,
+        });
+        assert!(restore_toast_captures_pointer(&touch, (0.0, 0.0), 2.0, CARD));
+        assert!(!restore_toast_captures_pointer(&touch, (110.0, 90.0), 4.0, CARD));
+    }
+}
+
 fn create_main_window(
     event_loop: &ActiveEventLoop,
     attrs: WindowAttributes,
@@ -2809,29 +2880,24 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        if self.restoration_blocks_input() {
+        let main_window = self.window.as_ref().is_some_and(|window| window.id() == id);
+        if main_window && (self.restore_applying.is_some() || self.restore_progress.is_some()) {
+            let scale = self.window.as_ref().map_or(1.0, |window| window.scale_factor() as f32);
+            if restore_toast_captures_pointer(&event, self.cursor_px, scale, self.restore_toast_rect) {
+                if matches!(&event, WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. })
+                    && self.restore_retry_rect.is_some_and(|rect| restore_rect_contains(rect, self.cursor_px))
+                {
+                    self.retry_restore();
+                }
+                return;
+            }
+        }
+        // Only layout construction is global. Once surfaces exist, each pending
+        // surface protects its own input; a progress toast never traps the user.
+        if main_window && self.restoration_blocks_input() {
             match &event {
-                WindowEvent::KeyboardInput { event, .. } => {
-                    if event.state == ElementState::Pressed
-                        && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter)
-                        && self.restore_progress.as_ref().is_some_and(|p| p.failure.is_some())
-                    { self.retry_restore(); }
-                    if event.state == ElementState::Pressed
-                        && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
-                    { self.continue_restore_in_background(); }
-                    return;
-                }
-                WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                    let (x, y) = self.cursor_px;
-                    if self.window.as_ref().is_some_and(|window| window.id() == id)
-                        && self.restore_retry_rect.is_some_and(|(rx, ry, w, h)| x >= rx && x <= rx + w && y >= ry && y <= ry + h)
-                    { self.retry_restore(); }
-                    if self.window.as_ref().is_some_and(|window| window.id() == id)
-                        && self.restore_continue_rect.is_some_and(|(rx, ry, w, h)| x >= rx && x <= rx + w && y >= ry && y <= ry + h)
-                    { self.continue_restore_in_background(); }
-                    return;
-                }
-                WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
+                WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
                 | WindowEvent::Ime(_) | WindowEvent::DroppedFile(_) | WindowEvent::Touch(_) => return,
                 _ => {}
             }
