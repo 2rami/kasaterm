@@ -574,6 +574,7 @@ async fn manager(
                 // 이 연결에서 size 핸드셰이크를 받았는가 — 재접속 RIS 는 연결마다
                 // 첫 size 에서 딱 한 번.
                 let mut sized_this_conn = false;
+                let mut connection_size = None;
                 loop {
                     tokio::select! {
                         _ = viewport.retry.notified() => {
@@ -615,6 +616,16 @@ async fn manager(
                                         }
                                         let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
                                         let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
+                                        if connection_size.is_some_and(|previous| previous != (c, r)) {
+                                            // Old hosts send size+raw deltas on
+                                            // resize, without replacing their
+                                            // reflowed scrollback. Reconnect to
+                                            // obtain its authoritative history.
+                                            // Leave queued input in orx: no
+                                            // replay of previously sent bytes.
+                                            break;
+                                        }
+                                        connection_size = Some((c, r));
                                         if remote_id.is_none() {
                                             remote_id = v
                                                 .get("id")
@@ -2220,6 +2231,83 @@ mod tests {
         while !predicate() {
             assert!(std::time::Instant::now() < deadline, "remote test condition timed out");
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn resize_reconnect_replaces_history_for_legacy_and_keyed_hosts_without_replaying_input() {
+        use axum::{extract::{WebSocketUpgrade, ws::Message as WsMessage}, routing::get, Router};
+        for mode in ["legacy", "keyed", "missing-key"] {
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let inputs = Arc::new(Mutex::new(Vec::<String>::new()));
+            let (address_tx, address_rx) = std::sync::mpsc::channel();
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+            let server_count = count.clone();
+            let server_inputs = inputs.clone();
+            let server = std::thread::spawn(move || {
+                tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                    let app = Router::new()
+                        .route("/term/panes", get(|| async {
+                            axum::Json(serde_json::json!([{"id":"resize-source", "surface_key":"same-source"}]))
+                        }))
+                        .route("/term/ws", get(move |upgrade: WebSocketUpgrade| {
+                            let count = server_count.clone();
+                            let inputs = server_inputs.clone();
+                            async move { upgrade.on_upgrade(move |mut socket| async move {
+                                let index = count.fetch_add(1, Ordering::AcqRel);
+                                assert!(index < 2, "same-size control caused a reconnect loop");
+                                let mut size = serde_json::json!({"t":"size", "cols":if index==0 {26} else {93}, "rows":4, "id":"resize-source"});
+                                if mode != "legacy" { size["surface_key"] = serde_json::json!("same-source"); }
+                                socket.send(WsMessage::Text(size.to_string().into())).await.unwrap();
+                                let text = if index == 0 { b"OLD_NARROW_HISTORY\r\n\n\n\nOLD_SCREEN".as_slice() }
+                                    else { b"CANONICAL_WIDE_HISTORY\r\n\n\n\nNEW_SCREEN".as_slice() };
+                                socket.send(WsMessage::Binary(text.to_vec().into())).await.unwrap();
+                                // Duplicate handshakes at unchanged size are harmless.
+                                socket.send(WsMessage::Text(size.to_string().into())).await.unwrap();
+                                while let Some(Ok(message)) = socket.recv().await {
+                                    if let WsMessage::Binary(bytes) = message {
+                                        let text = String::from_utf8(bytes.to_vec()).unwrap();
+                                        inputs.lock().unwrap().push(text.clone());
+                                        if text == "resize" {
+                                            size["cols"] = serde_json::json!(93);
+                                            if mode == "missing-key" { size.as_object_mut().unwrap().remove("surface_key"); }
+                                            socket.send(WsMessage::Text(size.to_string().into())).await.unwrap();
+                                            let _ = socket.send(WsMessage::Binary(b"STALE_DELTA".to_vec().into())).await;
+                                        }
+                                    }
+                                }
+                            }) }
+                        }));
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    address_tx.send(listener.local_addr().unwrap()).unwrap();
+                    axum::serve(listener, app).with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap();
+                });
+            });
+            let address = address_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let local = format!("resize-{mode}-{}", uuid::Uuid::new_v4());
+            let mirror = connect_view(RemoteSpec { base: format!("http://{address}"), pane: Some("resize-source".into()),
+                cwd: None, token: None, identity: Default::default() }, &local).unwrap();
+            wait_remote_test(|| mirror.session.visible_text(10).contains("OLD_SCREEN"));
+            mirror.session.send_bytes(b"before").unwrap();
+            wait_remote_test(|| inputs.lock().unwrap().len() == 1);
+            assert_eq!(count.load(Ordering::Acquire), 1);
+            mirror.session.send_bytes(b"resize").unwrap();
+            wait_remote_test(|| mirror.session.visible_text(10).contains("NEW_SCREEN"));
+            mirror.session.send_bytes(b"after").unwrap();
+            wait_remote_test(|| inputs.lock().unwrap().len() == 3);
+            assert_eq!(*inputs.lock().unwrap(), ["before", "resize", "after"]);
+            assert_eq!(count.load(Ordering::Acquire), 2);
+            assert_eq!(mirror.session.size(), (93, 4));
+            let history: String = mirror.session.rows_above_live(100).iter()
+                .map(|row| row.iter().map(|cell| cell.ch).collect::<String>())
+                .collect::<Vec<_>>().join("\n");
+            let all = format!("{history}\n{}", mirror.session.visible_text(100));
+            assert!(all.contains("CANONICAL_WIDE_HISTORY"));
+            assert!(!all.contains("OLD_NARROW_HISTORY"), "RIS did not clear stale history");
+            assert!(!all.contains("STALE_DELTA"), "old-width queued bytes leaked into new snapshot");
+            drop(mirror);
+            let _ = stop_tx.send(());
+            server.join().unwrap();
         }
     }
 

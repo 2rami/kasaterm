@@ -6415,7 +6415,7 @@ pub fn push_viewer_control(pane: &str, text: &str) -> usize {
 /// 구독 시작 시점의 "지금 화면"과 이후 스트림. 둘을 한 락에서 받아야 그 사이
 /// 프레임이 유실되지 않는다(`tap_bytes_with_snapshot` 주석).
 enum Tap {
-    Bytes(kasa_pty::ScreenReceiver<Vec<u8>>, Vec<u8>),
+    Bytes(kasa_pty::ScreenReceiver<Vec<u8>>, Vec<u8>, (u16, u16)),
     Grid(
         kasa_pty::ScreenReceiver<kasa_bridge::screen::ScreenUpdate>,
         Box<kasa_bridge::screen::ScreenUpdate>,
@@ -6570,8 +6570,8 @@ async fn term_ws_run(
         let snap = if sess.view_state().0 > 0 { sess.live_screen() } else { snap };
         Tap::Grid(rx, Box::new(snap))
     } else {
-        let (rx, bytes) = sess.tap_bytes_with_snapshot();
-        Tap::Bytes(rx, bytes)
+        let (rx, bytes, size) = sess.tap_bytes_with_sized_snapshot();
+        Tap::Bytes(rx, bytes, size)
     };
     // kill 제어가 놓아 줄 대상 — self_id 는 아래 size 메시지에 실려 move 된다.
     let kill_id = self_id.clone();
@@ -6579,7 +6579,12 @@ async fn term_ws_run(
     let (mut ws_tx, mut ws_rx) = socket.split();
     // 붙자마자 현재 격자 크기를 알려 준다 — 미러는 이 크기에 자기를 맞춰야
     // 줄바꿈이 어긋나지 않는다(웹이 PTY 를 바꾸면 kasaterm 쪽이 깨지므로).
-    let (c, r) = sess.size();
+    // Captured bytes must be parsed at their capture dimensions. Reading
+    // sess.size() here races a resize after subscription/snapshot capture.
+    let (c, r) = match &tap {
+        Tap::Bytes(_, _, size) => *size,
+        Tap::Grid(_, snap) => (snap.cols, snap.rows),
+    };
     // `id` 는 이 연결이 실제로 붙은 세션 — 새 셸은 서버가 지은 web-uuid 라 클라가
     // 이걸 받아야 목록에서 자기 행(「보는 중」)을 안다.
     let _ = ws_tx
@@ -6616,7 +6621,7 @@ async fn term_ws_run(
     // 후자는 만든 쪽이 곧 보는 사람이라(맥북의 `mini` 창) 거기가 브라우저의 자리다.
     let ctl_token = register_viewer_ctl(&ctl_pane, btx.clone());
     match tap {
-        Tap::Bytes(rx, screen) => {
+        Tap::Bytes(rx, screen, _) => {
             let _ = ws_tx.send(Message::Binary(screen.into())).await;
             std::thread::spawn(move || {
                 while let Ok(chunk) = rx.recv() {
@@ -6721,6 +6726,15 @@ async fn term_ws_run(
                     // full snapshot 출력을 동반하므로(chunk) 여기서 보면 놓치지 않는다.
                     let now = sess_sz.size();
                     if now != last_size {
+                        if !want_grid {
+                            // A byte delta can beat the quiet-resize timer.
+                            // It cannot repair already-reflowed source history,
+                            // and can itself have been queued at the old width.
+                            // Reattach for an atomic history+screen snapshot;
+                            // do not advance last_size and bypass the timer.
+                            let _ = ws_tx.send(Message::Close(None)).await;
+                            break;
+                        }
                         last_size = now;
                         let msg = serde_json::json!({
                             "t": "size", "cols": now.0, "rows": now.1, "mirror": mirrored,
@@ -7859,6 +7873,58 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         }).await.expect("replacement screen did not arrive");
+    }
+
+    #[tokio::test]
+    async fn raw_resize_reconnects_before_new_size_or_delta_for_quiet_and_busy_sources() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        for emit_delta in [false, true] {
+            let id = format!("raw-resize-http-{}", uuid::Uuid::new_v4());
+            let (source, events, _) = replacement_source(&id, 26);
+            events.send(kasa_pty::ExtEvent::Bytes(b"ORIGINAL".to_vec())).unwrap();
+            wait_replacement_text(&source, "ORIGINAL").await;
+            kasa_pty::register_session(&id, &source);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let router = axum::Router::new().route("/term/ws", axum::routing::get(super::term_ws_handler));
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let url = format!("ws://{addr}/term/ws?pane={id}&own=0");
+            let (mut client, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(Ok(message)) = client.next().await {
+                    if matches!(message, Message::Binary(ref bytes) if String::from_utf8_lossy(bytes).contains("ORIGINAL")) { return; }
+                }
+                panic!("initial raw snapshot missing");
+            }).await.unwrap();
+            // Let the watcher's initial tick run. The busy case then wakes
+            // the byte branch before its next interval rather than relying
+            // exclusively on quiet-resize polling.
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            source.resize(93, 6).unwrap();
+            if emit_delta { events.send(kasa_pty::ExtEvent::Bytes(b"RESIZED_OUTPUT".to_vec())).unwrap(); }
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(Ok(message)) = client.next().await {
+                    match message {
+                        Message::Close(_) => return,
+                        Message::Text(text) => assert_ne!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["t"], "size",
+                            "raw size+delta bypassed authoritative history resubscription"),
+                        Message::Binary(_) => panic!("queued raw delta crossed resize before snapshot"),
+                        _ => {},
+                    }
+                }
+                panic!("source did not close raw stream for resnapshot");
+            }).await.unwrap();
+            drop(client);
+            let (mut fresh, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            let first = tokio::time::timeout(std::time::Duration::from_secs(3), fresh.next()).await.unwrap().unwrap().unwrap();
+            let Message::Text(size) = first else { panic!("snapshot missing its size handshake") };
+            let size: serde_json::Value = serde_json::from_str(&size).unwrap();
+            assert_eq!(size["cols"], 93);
+            drop(fresh);
+            server.abort();
+            let _ = events.send(kasa_pty::ExtEvent::Eof);
+        }
     }
 
     #[tokio::test]

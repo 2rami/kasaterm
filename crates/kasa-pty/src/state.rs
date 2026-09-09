@@ -1528,8 +1528,18 @@ impl PtySession {
     /// 두 번 그려진다(중복 — `abc` 뒤에 `c` 가 또 찍히는 식). reader 도 같은 락
     /// 안에서 뿌리므로(`spawn_reader_thread`) 이 순서면 어느 쪽도 일어나지 않는다.
     pub fn tap_bytes_with_snapshot(&self) -> (Receiver<Vec<u8>>, Vec<u8>) {
-        let (cols, rows) = *self.size.lock().unwrap();
+        let (rx, bytes, _) = self.tap_bytes_with_sized_snapshot();
+        (rx, bytes)
+    }
+
+    /// The dimensions belong to these exact snapshot bytes, not a later
+    /// `size()` read. A resize between capture and WS handshake otherwise
+    /// replays narrow rows at a wide margin, destroying their soft-wrap flags.
+    pub fn tap_bytes_with_sized_snapshot(&self) -> (Receiver<Vec<u8>>, Vec<u8>, (u16, u16)) {
         let t = self.term.lock().unwrap();
+        // resize_effective reshapes the parser before publishing self.size.
+        // The parser is canonical while holding its lock.
+        let (cols, rows) = (t.grid().columns() as u16, t.grid().screen_lines() as u16);
         let hist = history_ansi(&t, cols, rows);
         // A subscriber starts at the live screen, independently of where the
         // source GUI is reading. Its damage belongs to that GUI, not this tap.
@@ -1540,7 +1550,7 @@ impl PtySession {
         // 실으면 ?1049h 앞에 찍혀 primary 를 더럽힌다.
         let mut bytes = if snap.alt_screen { Vec::new() } else { hist };
         bytes.extend_from_slice(&raw_screen_ansi(&snap));
-        (rx, bytes)
+        (rx, bytes, (cols, rows))
     }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let mut sizes = self.viewport_sizes.lock().unwrap();
@@ -6489,6 +6499,49 @@ mod external_session_tests {
                     "replayed live/history cell changed at {row}:{col}");
             }
         }
+    }
+
+    #[test]
+    fn byte_snapshot_dimensions_stay_bound_to_captured_history_across_resize() {
+        let (source, _events, _writer, _resize) = ext_session(8, 4);
+        {
+            let mut term = source.term.lock().unwrap();
+            let mut parser: Processor<StdSyncHandler> = Processor::new();
+            parser.advance(&mut *term, b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefgh\r\nLIVE");
+        }
+        let history = source.rows_above_live(100);
+        assert!(history.iter().any(|row| row.last().is_some_and(|cell| cell.wrapped)));
+        let (_tap, bytes, captured_size) = source.tap_bytes_with_sized_snapshot();
+        source.resize(93, 4).unwrap();
+        assert_eq!(captured_size, (8, 4));
+        assert_ne!(captured_size, source.size(), "later dimensions do not describe the captured ANSI");
+        let (replay, _events, _writer, _resize) = ext_session(captured_size.0, captured_size.1);
+        {
+            let mut term = replay.term.lock().unwrap();
+            let mut parser: Processor<StdSyncHandler> = Processor::new();
+            parser.advance(&mut *term, &bytes);
+        }
+        assert_eq!(replay.rows_above_live(100), history, "soft-wrap flags or source history were lost");
+
+        // The old HTTP handshake used this later width: replaying the exact
+        // same bytes at it loses their right-margin soft-wrap semantics.
+        let (wrong, _events, _writer, _resize) = ext_session(93, 4);
+        {
+            let mut term = wrong.term.lock().unwrap();
+            let mut parser: Processor<StdSyncHandler> = Processor::new();
+            parser.advance(&mut *term, &bytes);
+        }
+        assert_ne!(wrong.rows_above_live(100), history);
+    }
+
+    #[test]
+    fn byte_snapshot_reads_locked_parser_size_during_resize_publication_gap() {
+        let (source, _events, _writer, _resize) = ext_session(8, 4);
+        // resize_effective updates the parser and public size in two steps.
+        // Simulate a stale size slot without involving a real user's PTY.
+        *source.size.lock().unwrap() = (26, 9);
+        let (_tap, _bytes, size) = source.tap_bytes_with_sized_snapshot();
+        assert_eq!(size, (8, 4));
     }
 
     #[test]
