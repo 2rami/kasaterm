@@ -3570,6 +3570,10 @@ impl App {
                     }
                 }
             }
+            // 배치도 칸의 hover 팝업(별도창 띠·탭 명단). 사이드바 안에서 정하고 칼럼들
+            // 뒤에 그린다 — 안에서 그리면 파일트리가 위에 얹혀 가린다.
+            let mut sb_tips: (Option<(f32, f32, String)>, Option<(f32, f32, Vec<TabPeek>)>) =
+                (None, None);
             // Window-tab sidebar, Warp-style. Painted first so per-pane
             // headers / rings layer on top at the seam.
             if tab_strip_w > 0.0 {
@@ -4240,69 +4244,10 @@ impl App {
                     }
                 }
                 g.pop_clip();
-                if let Some((tx, ty, text)) = undock_tip {
-                    Self::draw_hover_tip(g, &text, tx, ty, win_px.0 / scale, win_px.1 / scale);
-                }
-                if let Some((tx, ty, peeks)) = deck_tip {
-                    let fs = 11.0;
-                    let (pad, line, dot) = (7.0, fs + 5.0, 5.0);
-                    let name_w = peeks
-                        .iter()
-                        .map(|t| g.measure_chrome_text(t.who.as_deref().unwrap_or("-"), fs, true))
-                        .fold(0.0_f32, f32::max);
-                    let label_w = peeks
-                        .iter()
-                        .map(|t| g.measure_chrome_text(&t.label, fs, false))
-                        .fold(0.0_f32, f32::max);
-                    let bw = pad * 2.0 + dot + 5.0 + name_w + 8.0 + label_w;
-                    let bh = pad * 2.0 + line * peeks.len() as f32;
-                    // 사이드바가 왼쪽이라 칸 오른쪽이 기본 자리지만, 창이 좁으면 팝업이
-                    // 화면 밖으로 나간다. 그땐 칸 왼쪽으로 접고, 아래로 넘치면 끌어올린다.
-                    let (vw, vh) = (win_px.0 / scale, win_px.1 / scale);
-                    let bx = if tx + bw + 4.0 > vw {
-                        (tx - bw - 12.0).max(4.0)
-                    } else {
-                        tx
-                    };
-                    let by = ty.min((vh - bh - 4.0).max(4.0));
-                    round_rect(g, bx, by, bw, bh, theme::radius_md(), theme::panel_bg());
-                    for (i, t) in peeks.iter().enumerate() {
-                        let ly = by + pad + line * i as f32;
-                        let who = t.who.as_deref();
-                        // 점은 배치도 칸의 그 장과 **같은 색**이다. 둘을 잇는 것이 이
-                        // 명단의 값이고, 색이 어긋나면 두 그림이 딴 말을 한다.
-                        if let Some(c) = who.and_then(theme::character_accent) {
-                            circle_rect(g, bx + pad, ly + fs / 2.0 - dot / 2.0, dot, c);
-                        }
-                        let (name_col, bold) = if t.active {
-                            (theme::text(), true)
-                        } else {
-                            (theme::text_dim(), false)
-                        };
-                        g.draw_text(
-                            bx + pad + dot + 5.0,
-                            ly,
-                            who.unwrap_or("-"),
-                            gpu::DrawOpts {
-                                font_size: fs,
-                                color: name_col,
-                                bold,
-                                italic: false,
-                            },
-                        );
-                        g.draw_text(
-                            bx + pad + dot + 5.0 + name_w + 8.0,
-                            ly,
-                            &t.label,
-                            gpu::DrawOpts {
-                                font_size: fs,
-                                color: theme::text_mute(),
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                    }
-                }
+                // 팝업은 여기서 안 그린다 — 파일트리·git 칼럼이 뒤에 그려져 그 위를
+                // 덮는다(2026-09-09 지적 「마우스오버 명단이 파일트리창에 가려져」).
+                // 칼럼들 뒤에 한 번 그린다(`paint_shell_menu` 앞).
+                sb_tips = (undock_tip, deck_tip);
                 for (k, ((wi, _, r), info)) in sb_rows.iter().zip(sb_row_info.iter()).enumerate() {
                     let (who, label, col, is_cur) =
                         (&info.who, &info.label, &info.color, info.is_cur);
@@ -5598,6 +5543,70 @@ impl App {
             }
             // "+" 피커 팝업 — 사이드바 Settings 행·파일트리 위로 뜨는 오버레이라 그 뒤에
             // 한 번만 그린다(먼저 그리면 나중에 그린 chrome 텍스트가 팝업 위로 비친다).
+            // 배치도 hover 팝업 — 파일트리 칼럼까지 그린 뒤라 그 위에 뜬다.
+            if let Some((tx, ty, text)) = sb_tips.0 {
+                Self::draw_hover_tip(g, &text, tx, ty, win_px.0 / scale, win_px.1 / scale);
+            }
+            if let Some((tx, ty, peeks)) = sb_tips.1 {
+                let fs = 11.0;
+                let (pad, line, dot) = (7.0, fs + 5.0, 5.0);
+                let name_w = peeks
+                    .iter()
+                    .map(|t| g.measure_chrome_text(t.who.as_deref().unwrap_or("-"), fs, true))
+                    .fold(0.0_f32, f32::max);
+                let label_w = peeks
+                    .iter()
+                    .map(|t| g.measure_chrome_text(&t.label, fs, false))
+                    .fold(0.0_f32, f32::max);
+                let bw = pad * 2.0 + dot + 5.0 + name_w + 8.0 + label_w;
+                let bh = pad * 2.0 + line * peeks.len() as f32;
+                // 사이드바가 왼쪽이라 칸 오른쪽이 기본 자리지만, 창이 좁으면 팝업이
+                // 화면 밖으로 나간다. 그땐 칸 왼쪽으로 접고, 아래로 넘치면 끌어올린다.
+                let (vw, vh) = (win_px.0 / scale, win_px.1 / scale);
+                let bx = if tx + bw + 4.0 > vw {
+                    (tx - bw - 12.0).max(4.0)
+                } else {
+                    tx
+                };
+                let by = ty.min((vh - bh - 4.0).max(4.0));
+                round_rect(g, bx, by, bw, bh, theme::radius_md(), theme::panel_bg());
+                for (i, t) in peeks.iter().enumerate() {
+                    let ly = by + pad + line * i as f32;
+                    let who = t.who.as_deref();
+                    // 점은 배치도 칸의 그 장과 **같은 색**이다. 둘을 잇는 것이 이
+                    // 명단의 값이고, 색이 어긋나면 두 그림이 딴 말을 한다.
+                    if let Some(c) = who.and_then(theme::character_accent) {
+                        circle_rect(g, bx + pad, ly + fs / 2.0 - dot / 2.0, dot, c);
+                    }
+                    let (name_col, bold) = if t.active {
+                        (theme::text(), true)
+                    } else {
+                        (theme::text_dim(), false)
+                    };
+                    g.draw_text(
+                        bx + pad + dot + 5.0,
+                        ly,
+                        who.unwrap_or("-"),
+                        gpu::DrawOpts {
+                            font_size: fs,
+                            color: name_col,
+                            bold,
+                            italic: false,
+                        },
+                    );
+                    g.draw_text(
+                        bx + pad + dot + 5.0 + name_w + 8.0,
+                        ly,
+                        &t.label,
+                        gpu::DrawOpts {
+                            font_size: fs,
+                            color: theme::text_mute(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                }
+            }
             paint_shell_menu(g);
             // ── Git column ── right-hand chrome mirroring the file-tree column
             // on the left, but native instead of the old floating webview: the
