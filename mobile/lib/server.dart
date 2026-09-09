@@ -3,7 +3,7 @@ import 'package:http/http.dart' as http;
 
 /// 사용자에게 보여도 되는 오류 — 주소(slug)가 들어 있지 않다.
 class ServerException implements Exception {
-  ServerException(this.message);
+  const ServerException(this.message);
   final String message;
 
   @override
@@ -628,6 +628,45 @@ class Server {
     }
     if (res.statusCode != 200) {
       throw ServerException('답장이 안 갔다 (${res.statusCode})');
+    }
+  }
+
+  /// Existing native paste path sets the clipboard on the actual harness host;
+  /// the server also forwards through nested mirrors. This does not press Enter.
+  static const maxImageBytes = 32 << 20;
+
+  Future<void> pasteImage(String pane, List<int> png, {String? machine}) async {
+    if (pane.isEmpty || png.isEmpty || png.length > maxImageBytes) {
+      throw const ServerException(
+        '사진이나 첨부할 창을 확인해 주세요. 사진은 32 MB까지 첨부할 수 있어요.',
+      );
+    }
+    final http.Response res;
+    try {
+      res = await _client
+          .post(
+            uri('paste-image', query: {'surface': pane}, machine: machine),
+            headers: {'content-type': 'image/png'},
+            body: png,
+          )
+          .timeout(const Duration(seconds: 30));
+    } catch (_) {
+      // Do not automatically retry: the server may already have attached it.
+      throw const ServerException('사진 전송을 확인하지 못했어요. 창을 확인한 뒤 다시 시도해 주세요.');
+    }
+    if (res.statusCode != 200) {
+      throw ServerException('사진이 첨부되지 않았어요 (${res.statusCode}).');
+    }
+    final Object? result;
+    try {
+      result = jsonDecode(utf8.decode(res.bodyBytes));
+    } catch (_) {
+      throw const ServerException('사진 첨부 응답을 읽지 못했어요. 창을 먼저 확인해 주세요.');
+    }
+    if (result is! Map || result['ok'] != true) {
+      // Server errors can include local paths/tunnel credentials: show a safe
+      // actionable message rather than reflecting arbitrary response text.
+      throw const ServerException('사진을 붙이지 못했어요. 연결과 학생 입력창을 확인해 주세요.');
     }
   }
 

@@ -1,9 +1,12 @@
 import '../device_shape.dart';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../claude_style.dart';
 import '../grid_canvas.dart';
 import '../live_input.dart';
+import '../image_attachment.dart';
+import '../photo_attachment_button.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
@@ -17,6 +20,8 @@ class TerminalScreen extends StatefulWidget {
     required this.server,
     required this.pane,
     this.initialScroll,
+    this.session,
+    this.pickImage,
   });
 
   final Server server;
@@ -24,6 +29,10 @@ class TerminalScreen extends StatefulWidget {
 
   /// 검증용 — 열자마자 위로 이만큼(px) 넘긴 상태로.
   final double? initialScroll;
+  @visibleForTesting
+  final TermSession? session;
+  @visibleForTesting
+  final Future<Uint8List?> Function()? pickImage;
 
   @override
   State<TerminalScreen> createState() => _TerminalScreenState();
@@ -31,11 +40,14 @@ class TerminalScreen extends StatefulWidget {
 
 class _TerminalScreenState extends State<TerminalScreen>
     with WidgetsBindingObserver {
-  late final TermSession _session = TermSession(widget.server, widget.pane);
+  late final TermSession _session =
+      widget.session ?? TermSession(widget.server, widget.pane);
   final _input = TextEditingController();
   final _inputFocus = FocusNode();
   bool _ctrl = false;
   bool _sending = false;
+  bool _attaching = false;
+  bool _pendingAttachment = false;
 
   /// 바로 치기(기본) — 확정된 글자가 곧바로 화면의 입력상자에 붙는다. 끄면 아래
   /// 칸에 적어 두었다 한 번에 보낸다(긴 글을 다듬을 때).
@@ -88,19 +100,22 @@ class _TerminalScreenState extends State<TerminalScreen>
   /// 보낼 때 입력창의 글 전체만 읽는다 — 조합 중인 자모가 새어 나갈 길이 없다.
   Future<void> _send() async {
     final text = _input.text;
-    if (text.isEmpty || _sending) return;
+    if (_sending || _attaching || (text.isEmpty && !_pendingAttachment)) return;
     setState(() {
       _sending = true;
       _bottomTick++;
     });
     try {
-      if (_ctrl && text.length == 1) {
+      if (text.isEmpty && _pendingAttachment) {
+        _session.sendText('\r');
+      } else if (_ctrl && text.length == 1) {
         _session.ctrl(text);
       } else {
         await _session.reply(text);
       }
       _input.clear();
       _ctrl = false;
+      _pendingAttachment = false;
     } on ServerException catch (e) {
       _toast(e.message);
     } finally {
@@ -125,6 +140,7 @@ class _TerminalScreenState extends State<TerminalScreen>
   /// 엔터 — 글자 바로 뒤에 붙여 보내면 Ink 가 엔터를 먹는다(서버 `send` 가 140ms 를
   /// 기다리는 이유와 같다). 마지막 글자에서 조금 떨어뜨려 보낸다.
   Future<void> _liveSubmit() async {
+    if (_sending || _attaching) return;
     _sendLive(_liveInput.flush(_input.value));
     _resetting = true;
     _liveInput.reset();
@@ -134,6 +150,7 @@ class _TerminalScreenState extends State<TerminalScreen>
     final gap = DateTime.now().difference(_lastLiveSend);
     if (gap < _enterGap) await Future<void>.delayed(_enterGap - gap);
     _session.sendText('\r');
+    _pendingAttachment = false;
     _toBottom();
     _inputFocus.requestFocus();
   }
@@ -328,17 +345,42 @@ class _TerminalScreenState extends State<TerminalScreen>
                   ),
                 ),
                 if (s.note != null) _NoteBar(text: s.note!),
-                _KeyBar(
-                  session: s,
-                  ctrl: _ctrl,
-                  onCtrl: () => setState(() => _ctrl = !_ctrl),
-                  onKey: _toBottom,
+                Row(
+                  children: [
+                    PhotoAttachmentButton(
+                      server: widget.server,
+                      pane: pane,
+                      pickImage: widget.pickImage ?? pickAttachmentImage,
+                      enabled:
+                          s.state == TermState.connected &&
+                          !_sending &&
+                          !pane.isShell &&
+                          !pane.isWebShell,
+                      onBusy: (busy) => setState(() => _attaching = busy),
+                      onAttached: () => setState(() {
+                        _pendingAttachment = true;
+                        _bottomTick++;
+                      }),
+                    ),
+                    Expanded(
+                      child: AbsorbPointer(
+                        absorbing: _attaching,
+                        child: _KeyBar(
+                          session: s,
+                          ctrl: _ctrl,
+                          onCtrl: () => setState(() => _ctrl = !_ctrl),
+                          onKey: _toBottom,
+                          onSubmit: () => _pendingAttachment = false,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
                 if (_live)
                   _LiveBar(
                     controller: _input,
                     focusNode: _inputFocus,
-                    enabled: s.state != TermState.gone,
+                    enabled: s.state != TermState.gone && !_attaching,
                     onChanged: _onLiveChanged,
                     onSubmit: _liveSubmit,
                     onDraft: _toggleLive,
@@ -347,7 +389,8 @@ class _TerminalScreenState extends State<TerminalScreen>
                   _ReplyBar(
                     controller: _input,
                     focusNode: _inputFocus,
-                    enabled: s.state != TermState.gone && !_sending,
+                    enabled:
+                        s.state != TermState.gone && !_sending && !_attaching,
                     onSend: _send,
                     onLive: _toggleLive,
                   ),
@@ -428,6 +471,7 @@ class _KeyBar extends StatelessWidget {
     required this.ctrl,
     required this.onCtrl,
     required this.onKey,
+    required this.onSubmit,
   });
 
   final TermSession session;
@@ -436,6 +480,7 @@ class _KeyBar extends StatelessWidget {
 
   /// 키를 보낸 뒤 — 화면을 맨 아래로.
   final VoidCallback onKey;
+  final VoidCallback onSubmit;
 
   @override
   Widget build(BuildContext context) {
@@ -457,7 +502,13 @@ class _KeyBar extends StatelessWidget {
         icon: Icons.backspace_outlined,
         onTap: tap(() => s.sendText('\x7f')),
       ),
-      _Key(icon: Icons.keyboard_return, onTap: tap(() => s.sendText('\r'))),
+      _Key(
+        icon: Icons.keyboard_return,
+        onTap: tap(() {
+          s.sendText('\r');
+          onSubmit();
+        }),
+      ),
     ];
     return SizedBox(
       height: 44,

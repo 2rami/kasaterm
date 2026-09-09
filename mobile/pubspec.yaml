@@ -15,6 +15,7 @@ dependencies:
   web_socket_channel: ^3.0.1
   # 주소에 든 slug 가 곧 자격이라 평문 저장소가 아니라 Keychain 에 둔다.
   flutter_secure_storage: ^9.2.2
+  image_picker: ^1.2.3
 
 dev_dependencies:
   flutter_test:
