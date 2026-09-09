@@ -649,7 +649,7 @@ fn fit_addr(g: &mut gpu::GpuRenderer, host: &str, path: &str, avail: f32) -> Str
 ///
 /// QR 은 하나다 — 폰 카메라가 열 수 있는 주소가 하나뿐이라, `/app` 안내 페이지로 가서
 /// 앱으로 열기·앱 설치·웹에서 보기를 거기서 고른다(2026-09-08 지시 「QR 코드로 앱 설치
-/// 가능하고 웹에서 보기 가능하게」). 하단바의 「원격」과 「크롬다리」도 이 칩 하나로
+/// 가능하고 웹에서 보기 가능하게」). 하단바의 「원격」과 「카사크롬 다리」도 이 칩 하나로
 /// 합쳤다 — 둘 다 「이 맥 밖의 기기와 어떻게 이어져 있나」라서, 다리 상태는 여기 한 줄.
 fn paint_tunnel_popover(
     g: &mut gpu::GpuRenderer,
@@ -753,8 +753,45 @@ fn paint_tunnel_popover(
                     gpu::DrawOpts { font_size: 11.0, color: theme::text(), bold: false, italic: false },
                 );
             }
-            // 미니→맥북 크롬 다리 — 초록=미니 상주 학생이 이 맥북의 크롬(로그인 살아
-            // 있는 것)을 쓴다 / 주황=끊겨 미니 크롬 폴백. 폴백이 실패 기반이라 지금
+            // 카사크롬 — 이 맥의 학생이 쓰는 크롬(설정 「카사크롬이 쓰는 크롬」). 초록=
+            // 고른 다리가 닿는다 / 주황=안 닿아 이 기계 크롬으로 물러난 중.
+            if let Some(reach) = sb.chrome_reach {
+                let by = qy + qr_box - 52.0;
+                round_rect(
+                    g,
+                    cx,
+                    by + 4.0,
+                    6.0,
+                    6.0,
+                    3.0,
+                    if reach { theme::success() } else { theme::attention() },
+                );
+                let who = if sb.chrome_machine.is_empty() {
+                    "이 기계".to_string()
+                } else {
+                    sb.chrome_machine.clone()
+                };
+                let text = if reach {
+                    format!("카사크롬 · {who} 크롬")
+                } else if sb.chrome_machine.is_empty() {
+                    "카사크롬 · 이 기계 다리 안 뜸".to_string()
+                } else {
+                    format!("카사크롬 · {who} 안 닿음 → 이 기계 크롬")
+                };
+                g.draw_text(
+                    cx + 11.0,
+                    by,
+                    &text,
+                    gpu::DrawOpts {
+                        font_size: 10.0,
+                        color: if reach { theme::text_mute() } else { theme::attention() },
+                        bold: false,
+                        italic: false,
+                    },
+                );
+            }
+            // 본진→이 맥 카사크롬 다리 — 초록=본진 상주 학생이 이 맥의 크롬(로그인 살아
+            // 있는 것)을 쓴다 / 주황=끊겨 저쪽 크롬 폴백. 폴백이 실패 기반이라 지금
             // 어느 쪽인지 사람이 볼 창이 필요하다(2026-08-30 지시). 명부가 없으면 안 적는다.
             if let Some(up) = sb.chrome_bridge {
                 let by = qy + qr_box - 36.0;
@@ -770,7 +807,7 @@ fn paint_tunnel_popover(
                 g.draw_text(
                     cx + 11.0,
                     by,
-                    if up { "크롬 다리 · 맥북 크롬 씀" } else { "크롬 다리 끊김 · 미니 크롬" },
+                    if up { "본진 → 이 맥 카사크롬 다리 열림" } else { "본진 → 이 맥 카사크롬 다리 끊김" },
                     gpu::DrawOpts {
                         font_size: 10.0,
                         color: if up { theme::text_mute() } else { theme::attention() },

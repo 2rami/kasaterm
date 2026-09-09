@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, isAbsolute, extname } from 'node:path'
 import { mkdir, writeFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { PORT } from '../extension/port.js'
 import { HOST, HOST_ID } from '../bridge/host.mjs'
@@ -26,8 +27,23 @@ const LOCAL_BRIDGE_URL = `ws://127.0.0.1:${PORT}`
 // 그대로 조작하고, 맥북이 덮여 닿지 않을 때만 미니 크롬으로 물러난다(2026-08-30
 // 지시). 끊겼다 다시 붙을 때도 목록 맨 앞부터 다시 시도하므로, 맥북이 다시 열리면
 // 다음 재연결에서 저절로 맥북 크롬으로 돌아온다.
-const BRIDGE_URLS = (process.env.KASACHROME_BRIDGE_URLS || LOCAL_BRIDGE_URL)
+//
+// 카사텀 설정(`~/.config/kasaterm/settings.json` 의 `kasachrome_bridge_urls`)이
+// 있으면 그것이 env 보다 앞선다 — 설정 화면의 「카사크롬이 쓰는 크롬」이 쓰는 값이라
+// 사람이 고른 것이 env 에 박힌 옛 값에 눌리면 안 된다(2026-09-09 지시). 붙을 때마다
+// 다시 읽으므로 고친 값은 다음 재연결부터 먹는다(MCP 재시작 불필요).
+const ENV_BRIDGE_URLS = (process.env.KASACHROME_BRIDGE_URLS || LOCAL_BRIDGE_URL)
   .split(',').map((s) => s.trim()).filter(Boolean)
+const KASATERM_SETTINGS = process.env.KASATERM_SETTINGS_FILE || join(homedir(), '.config', 'kasaterm', 'settings.json')
+function bridgeUrls() {
+  try {
+    const raw = JSON.parse(readFileSync(KASATERM_SETTINGS, 'utf8'))?.kasachrome_bridge_urls
+    const list = (Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : [])
+      .map((s) => String(s).trim()).filter(Boolean)
+    if (list.length) return list
+  } catch { /* 설정이 없거나 깨짐 — env 로 */ }
+  return ENV_BRIDGE_URLS
+}
 let activeUrl = null
 
 let ws = null
@@ -112,7 +128,7 @@ async function connect() {
   if (ws && ws.readyState === 1) return ws
   if (ready) return ready
   ready = (async () => {
-    for (const url of BRIDGE_URLS) {
+    for (const url of bridgeUrls()) {
       try { return await open(url) } catch { /* 다음 후보로 */ }
     }
     log('bridge not running — starting it')

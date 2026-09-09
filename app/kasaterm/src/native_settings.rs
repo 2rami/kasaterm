@@ -4192,6 +4192,40 @@ fn paint_machines(
         false,
     );
     *y += 30.0;
+    // 카사크롬(브라우저 도구)이 어느 기계의 크롬을 조작할지 — 이 기계가 기본이고,
+    // 명부에 ssh 나 chrome_port 가 있는 기계만 고를 수 있다(다리로 갈 길이 있어야 한다).
+    // 고른 기계가 안 닿으면 MCP 는 이 기계 크롬으로 물러난다(하단바 「모바일」 칩이 말한다).
+    draw_text(g, x, *y + 5.0, "카사크롬이 쓰는 크롬", 12.5, theme::text(), true);
+    *y += 28.0;
+    {
+        let chosen = kasa_mcp::machines::kasachrome_machine();
+        let candidates: Vec<String> = kasa_mcp::machines::listed_machines()
+            .into_iter()
+            .filter(|m| m.ssh.is_some() || m.chrome_port.is_some())
+            .map(|m| m.label)
+            .collect();
+        let mut cells: Vec<(&str, bool, SettingsAction)> = vec![(
+            "이 기계",
+            chosen.is_empty(),
+            SettingsAction::ChromeMachine(String::new()),
+        )];
+        for label in &candidates {
+            cells.push((
+                label.as_str(),
+                chosen == *label,
+                SettingsAction::ChromeMachine(label.clone()),
+            ));
+        }
+        segmented(g, s, hits, x, *y, w, &cells);
+        *y += 40.0;
+        let note = if chosen.is_empty() {
+            "학생의 브라우저 도구가 이 맥의 크롬을 씁니다".to_string()
+        } else {
+            format!("학생의 브라우저 도구가 {chosen} 의 크롬(로그인 그대로)을 쓰고, 안 닿으면 이 맥 크롬으로 물러납니다")
+        };
+        draw_text(g, x, *y, &note, 10.5, theme::text_mute(), false);
+        *y += 26.0;
+    }
     draw_text(g, x, *y + 5.0, "명부", 12.5, theme::text(), true);
     button(
         g,

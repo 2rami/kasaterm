@@ -70,6 +70,7 @@ kasaterm 이 `claude` 를 감쌀 때 `~/.config/kasaterm/claude-mcp.json` 을 `-
 
 | 값 | 출처 (위에서부터 먼저) |
 |---|---|
+| 다리 후보 | 카사텀 설정 `kasachrome_bridge_urls`(설정 화면 「카사크롬이 쓰는 크롬」이 적음) → `KASACHROME_BRIDGE_URLS` → 이 기계 `ws://127.0.0.1:8777` |
 | 이름 | `KASACHROME_NAME` → `KASATERM_CHARACTER` → OS 사용자명 → `claude` |
 | 세션 키 | `KASACHROME_PANE` → `KASATERM_PANE_ID` → `WEZTERM_PANE` → `TMUX_PANE` → `ITERM_SESSION_ID` → 프로세스 고유 태그 |
 | 색 | 신원에 색이 없으면 **이름 해시 → 크롬 탭 그룹 8색**. 결정적이라 같은 이름은 어느 기기에서든 같은 색 |

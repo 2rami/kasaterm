@@ -455,10 +455,40 @@ impl App {
         self.statusbar.tunnel_checked = Some(now);
         self.statusbar.tunnel_on = Some(kasa_mcp::tunnel::is_on());
         self.statusbar.tunnel_host = kasa_mcp::tunnel::host();
-        // 미니→맥북 크롬 다리 — 미니 상주 학생이 지금 어느 크롬을 쓰게 되는지.
+        // 「카사크롬이 쓰는 크롬」 — 고른 기계의 다리가 지금 닿는지. 안 닿으면 MCP 가
+        // 이 기계 크롬으로 물러나므로(폴백은 실패 기반) 사람이 볼 창이 필요하다.
+        // 다리 후보 목록은 여기서 설정 파일에 적어 둔다 — MCP 가 붙을 때마다 읽는다.
+        // 바뀔 때만 쓴다(5초마다 파일을 갈아엎지 않게).
+        {
+            let chosen = kasa_mcp::machines::kasachrome_machine();
+            let urls = kasa_mcp::machines::kasachrome_bridge_urls();
+            let joined = urls.join(",");
+            let stored = socket::read_settings()
+                .get("kasachrome_bridge_urls")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if stored != joined {
+                socket::write_setting("kasachrome_bridge_urls", serde_json::json!(joined));
+            }
+            let port = if chosen.is_empty() {
+                Some(kasa_mcp::machines::KASACHROME_PORT)
+            } else {
+                kasa_mcp::machines::kasachrome_target_port(&chosen)
+            };
+            self.statusbar.chrome_machine = chosen;
+            self.statusbar.chrome_reach = port.map(|p| {
+                std::net::TcpStream::connect_timeout(
+                    &std::net::SocketAddr::from(([127, 0, 0, 1], p)),
+                    std::time::Duration::from_millis(250),
+                )
+                .is_ok()
+            });
+        }
+        // 본진→이 맥 카사크롬 다리 — 본진 상주 학생이 지금 어느 크롬을 쓰게 되는지.
         // 폴백은 실패 기반이라 사람이 상태를 볼 창이 따로 필요하다(2026-08-30
         // 지시 「하단에 맥북 열림 닫힘을 표시해둬서 나도 볼 수 있게」). 다리의
-        // 실체 = 이 맥북의 크롬 브리지(8777)가 듣고 있고 + 역방향 터널
+        // 실체 = 이 맥의 크롬 브리지(8777)가 듣고 있고 + 역방향 터널
         // (-R 18800→8777)을 실은 ssh 가 살아 있는 것. 기계 명부가 비면 잴 이유가
         // 없다(칩도 안 그린다).
         self.statusbar.chrome_bridge = if kasa_mcp::machines::machines().is_empty() {

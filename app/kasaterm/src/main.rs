@@ -4359,6 +4359,8 @@ pub(crate) enum SettingsInput {
 pub(crate) enum SettingsAction {
     /// 설정과 웹 화면이 쓸 언어(`ko`/`en`).
     UiLanguage(&'static str),
+    /// 「카사크롬이 쓰는 크롬」 — 명부의 기계 라벨, 빈 문자열=이 기계.
+    ChromeMachine(String),
     CwdMode(&'static str),
     /// 파일트리에서 파일을 열 때 쓸 방식 — `"builtin"` · `"app"` · `"terminal"`.
     FileOpenMode(&'static str),

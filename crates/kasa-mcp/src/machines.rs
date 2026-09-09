@@ -59,6 +59,10 @@ pub struct Machine {
     pub home: bool,
     /// ssh 대상(`nachoneko`·`user@10.0.0.5`). 있고 `base` 가 없으면 앱이 터널을 든다.
     pub ssh: Option<String>,
+    /// 그 기계의 카사크롬 다리(8777)가 **이쪽에서** 닿는 로컬 포트. 손으로 든 터널
+    /// (미니에서 본 맥북 = 18800)이면 여기 적고, 없으면 `ssh` 가 있을 때 앱이
+    /// `chrome_tunnel_port` 로 포워드를 든다. 「카사크롬이 쓰는 크롬」 설정이 본다.
+    pub chrome_port: Option<u16>,
     /// ssh 열쇠 파일. 비어 있으면 기본 열쇠로 가고, 그게 거절되면 `~/.ssh` 의 열쇠를
     /// 하나씩 대 보아 맞는 것을 여기 적어 둔다(`ensure_meta`) — 열쇠 로그인만 받는
     /// 기계(윈도우 sshd)를 별칭 없이 `user@host` 만으로 넣기 위해서(2026-09-07 지시).
@@ -196,6 +200,7 @@ fn guest_machines(taken: &[String]) -> Vec<Machine> {
             ssh: None,
             key: None,
             tunneled: false,
+            chrome_port: None,
             guest: true,
         })
         .collect()
@@ -215,6 +220,46 @@ pub fn tunnel_port(label: &str) -> u16 {
         h = h.wrapping_mul(0x0100_0193);
     }
     18900 + (h % 90) as u16
+}
+
+/// 그 기계 카사크롬 다리(8777)로 가는 앱 포워드의 로컬 포트 — `tunnel_port` 와 같은
+/// 규칙, 다른 대역(19600). 명부에 `chrome_port` 를 적으면 그것이 이긴다.
+pub fn chrome_tunnel_port(label: &str) -> u16 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in label.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    19600 + (h % 90) as u16
+}
+
+/// 이 기계의 카사크롬 다리 포트(확장 ↔ 브리지, kasachrome/extension/port.js 와 같다).
+pub const KASACHROME_PORT: u16 = 8777;
+
+/// 설정 「카사크롬이 쓰는 크롬」 — 명부의 기계 라벨, 빈 문자열이면 이 기계.
+pub fn kasachrome_machine() -> String {
+    crate::character::read_setting_str("kasachrome_machine")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// 고른 기계의 크롬 다리가 이쪽에서 닿는 로컬 포트. 명부에 없거나 갈 길이 없으면 None.
+pub fn kasachrome_target_port(label: &str) -> Option<u16> {
+    let m = find(label)?;
+    m.chrome_port
+        .or_else(|| m.ssh.as_ref().map(|_| chrome_tunnel_port(&m.label)))
+}
+
+/// 카사크롬 MCP 가 앞에서부터 시도할 다리 주소 — 고른 기계가 먼저, 이 기계가 폴백.
+/// 앱이 이 목록을 설정 `kasachrome_bridge_urls` 로 적어 두고 MCP 가 붙을 때마다 읽는다
+/// (kasachrome/mcp/server.mjs). 고른 기계가 없거나 갈 길이 없으면 이 기계 하나.
+pub fn kasachrome_bridge_urls() -> Vec<String> {
+    let local = format!("ws://127.0.0.1:{KASACHROME_PORT}");
+    let chosen = kasachrome_machine();
+    match kasachrome_target_port(&chosen) {
+        Some(port) if !chosen.is_empty() => vec![format!("ws://127.0.0.1:{port}"), local],
+        _ => vec![local],
+    }
 }
 
 /// ssh 로 한 번 물어 둔 그 기계의 정체 — 화면공유 주소(hostname)와 홈 폴더.
@@ -249,6 +294,7 @@ fn parse(v: &Value) -> Vec<Machine> {
                 .map(|b| b.trim().trim_end_matches('/').to_string())
                 .filter(|b| !b.is_empty());
             let tunneled = explicit_base.is_none() && ssh.is_some();
+            let chrome_port = m.get("chrome_port").and_then(|v| v.as_u64()).map(|n| n as u16);
             let base = match explicit_base {
                 Some(b) => b,
                 None if ssh.is_some() => format!("http://127.0.0.1:{}", tunnel_port(&label)),
@@ -331,6 +377,7 @@ fn parse(v: &Value) -> Vec<Machine> {
                 ssh,
                 key,
                 tunneled,
+                chrome_port,
                 guest: false,
             })
         })
@@ -552,6 +599,139 @@ fn ensure_meta(target: &str, key: Option<&str>) {
     }
 }
 
+/// 감시꾼(sh)을 걷는다 — **TERM 으로**. `Child::kill` 은 SIGKILL 이라 trap 이 못 돌아
+/// 밑의 ssh 가 고아로 남는다(2026-09-09 실측: 앱을 곱게 끝냈는데 크롬 포워드 ssh 가
+/// 살아 있었다). TERM 뒤 잠깐 기다리고, 그래도 남으면 그때 KILL.
+fn stop_watched(tun: &mut Tunnel) {
+    let pid = tun.child.id();
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    for _ in 0..40 {
+        if let Ok(Some(_)) = tun.child.try_wait() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = tun.child.kill();
+    let _ = tun.child.wait();
+}
+
+/// ssh 를 sh 감시꾼 밑에 띄운다 — 앱이 SIGTERM·크래시로 죽으면 `exiting`
+/// (stop_tunnels)이 안 돌아 ssh 가 고아로 남는다(2026-09-07 실측: 격리 앱을
+/// kill 하니 18945 터널이 그대로 살아 있었다). macOS 엔 부모 죽음 신호가 없어
+/// 감시꾼이 앱 pid($PPID)를 3초마다 보고 없어지면 ssh 를 걷는다. 감시꾼 자신이
+/// TERM 을 받아도(stop_tunnels) trap 이 ssh 를 같이 걷는다. `forwards` 는
+/// `-L`/`-R` 인자 그대로.
+fn spawn_watched_ssh(
+    kargs: &[String],
+    forwards: &[String],
+    target: &str,
+) -> std::io::Result<std::process::Child> {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(
+            // `sleep 3 & wait $!` — 그냥 `sleep 3` 이면 TERM 이 와도 sleep 이 끝나야
+            // trap 이 돌아, 3초 안에 KILL 폴백이 먼저 오면 ssh 가 고아로 남는다.
+            "p=\"\"; trap 'kill $p 2>/dev/null; exit 0' TERM INT\n\
+ssh \"$@\" & p=$!\n\
+while kill -0 $PPID 2>/dev/null && kill -0 $p 2>/dev/null; do sleep 3 & wait $!; done\n\
+kill $p 2>/dev/null; wait $p 2>/dev/null",
+        )
+        .arg("kasaterm-tunnel")
+        .arg("-N")
+        .args(kargs)
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "ServerAliveInterval=20",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-o",
+            "ConnectTimeout=8",
+        ])
+        .args(forwards)
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+}
+
+/// 「카사크롬이 쓰는 크롬」이 다른 기계면 그 기계의 다리(8777)로 가는 포워드를 든다.
+/// 명부에 `chrome_port` 가 적힌 기계(손으로 든 터널)나 `ssh` 없는 기계는 앱이 들
+/// 것이 없다. 고른 기계가 바뀌면 옛 포워드는 걷는다.
+fn chrome_tunnel_tick() {
+    let chosen = kasachrome_machine();
+    let want = find(&chosen).filter(|m| m.chrome_port.is_none()).and_then(|m| {
+        Some((m.label.clone(), m.ssh.clone()?, chrome_tunnel_port(&m.label), m.key.clone()))
+    });
+    let Ok(mut t) = chrome_tunnels().lock() else { return };
+    t.retain(|label, tun| {
+        let keep = want
+            .as_ref()
+            .is_some_and(|(l, tg, p, _)| l == label && *tg == tun.target && *p == tun.port);
+        if !keep {
+            stop_watched(tun);
+            eprintln!("[machines] {label} 크롬 포워드 걷음(설정이 바뀜)");
+        }
+        keep
+    });
+    let Some((label, target, port, key)) = want else { return };
+    // 열쇠는 8765 터널과 같은 길 — 기본 열쇠가 거절되면 ~/.ssh 에서 맞는 것을 찾아
+    // 명부에 적어 둔다(base 가 손 터널이라 8765 터널이 안 도는 기계는 여기서 처음 찾는다).
+    ensure_meta(&target, key.as_deref());
+    let key = key.or_else(|| {
+        entries()
+            .iter()
+            .find(|e| e.get("ssh").and_then(|v| v.as_str()) == Some(target.as_str()))
+            .and_then(|e| e.get("key").and_then(|v| v.as_str()).map(str::to_string))
+    });
+    let kargs = key_args(key.as_deref());
+    if let Some(tun) = t.get_mut(&label) {
+        match tun.child.try_wait() {
+            Ok(None) => return,
+            _ => {
+                eprintln!("[machines] {label} 크롬 포워드 끊김 — 다시 연다");
+                t.remove(&label);
+            }
+        }
+    }
+    let retry_key = format!("chrome:{label}");
+    if let Ok(mut l) = last_spawn().lock() {
+        if l.get(&retry_key).is_some_and(|at| at.elapsed() < TUNNEL_RETRY) {
+            return;
+        }
+        l.insert(retry_key, Instant::now());
+    }
+    if std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(300),
+    )
+    .is_ok()
+    {
+        return;
+    }
+    let forwards = vec!["-L".to_string(), format!("{port}:127.0.0.1:{KASACHROME_PORT}")];
+    match spawn_watched_ssh(&kargs, &forwards, &target) {
+        Ok(child) => {
+            eprintln!("[machines] {label} 크롬 포워드 염: 127.0.0.1:{port} → {target}:{KASACHROME_PORT}");
+            t.insert(label, Tunnel { child, target, port });
+        }
+        Err(e) => eprintln!("[machines] {label} 크롬 포워드 스폰 실패: {e}"),
+    }
+}
+
+fn chrome_tunnels() -> &'static Mutex<HashMap<String, Tunnel>> {
+    static T: OnceLock<Mutex<HashMap<String, Tunnel>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn tunnel_tick() {
     let want: Vec<(String, String, u16, Option<String>)> = listed_machines()
         .into_iter()
@@ -563,8 +743,7 @@ fn tunnel_tick() {
     t.retain(|label, tun| {
         let keep = want.iter().any(|(l, tg, p, _)| l == label && *tg == tun.target && *p == tun.port);
         if !keep {
-            let _ = tun.child.kill();
-            let _ = tun.child.wait();
+            stop_watched(tun);
             eprintln!("[machines] {label} 터널 걷음(명부에서 빠짐)");
         }
         keep
@@ -605,52 +784,16 @@ fn tunnel_tick() {
         {
             continue;
         }
-        // ssh 를 sh 감시꾼 밑에 띄운다 — 앱이 SIGTERM·크래시로 죽으면 `exiting`
-        // (stop_tunnels)이 안 돌아 ssh 가 고아로 남는다(2026-09-07 실측: 격리 앱을
-        // kill 하니 18945 터널이 그대로 살아 있었다). macOS 엔 부모 죽음 신호가 없어
-        // 감시꾼이 앱 pid($PPID)를 3초마다 보고 없어지면 ssh 를 걷는다. 감시꾼 자신이
-        // TERM 을 받아도(stop_tunnels) trap 이 ssh 를 같이 걷는다.
-        let spawned = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(
-                "p=\"\"; trap 'kill $p 2>/dev/null' TERM INT\n\
-ssh \"$@\" & p=$!\n\
-while kill -0 $PPID 2>/dev/null && kill -0 $p 2>/dev/null; do sleep 3; done\n\
-kill $p 2>/dev/null; wait $p 2>/dev/null",
-            )
-            .arg("kasaterm-tunnel")
-            .args([
-                "-N",
-            ])
-            .args(&kargs)
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-o",
-                "ServerAliveInterval=20",
-                "-o",
-                "ServerAliveCountMax=3",
-                "-o",
-                "ConnectTimeout=8",
-                "-L",
-                &format!("{port}:127.0.0.1:8765"),
-            ])
-            // 되돌아오는 길도 같이 연다 — 저쪽에서 이쪽 카사텀으로 오는 `-R`. 이 포트를
-            // 폴링이 `/machines/announce` 로 알려 주면 저쪽 명부에 손을 안 대도 그쪽
-            // `to` 에 이 기계가 뜬다(2026-09-07 지시 「안 넣어도 양방향」). 이쪽 MCP
-            // 포트를 아직 모르면(정본 포트를 못 잡은 검증 인스턴스 등) 앞쪽만 연다.
-            .args(
-                local_mcp_port()
-                    .map(|lp| vec!["-R".to_string(), format!("{}:127.0.0.1:{lp}", reverse_port(&self_label()))])
-                    .unwrap_or_default(),
-            )
-            .arg(&target)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let mut forwards = vec!["-L".to_string(), format!("{port}:127.0.0.1:8765")];
+        // 되돌아오는 길도 같이 연다 — 저쪽에서 이쪽 카사텀으로 오는 `-R`. 이 포트를
+        // 폴링이 `/machines/announce` 로 알려 주면 저쪽 명부에 손을 안 대도 그쪽
+        // `to` 에 이 기계가 뜬다(2026-09-07 지시 「안 넣어도 양방향」). 이쪽 MCP
+        // 포트를 아직 모르면(정본 포트를 못 잡은 검증 인스턴스 등) 앞쪽만 연다.
+        if let Some(lp) = local_mcp_port() {
+            forwards.push("-R".to_string());
+            forwards.push(format!("{}:127.0.0.1:{lp}", reverse_port(&self_label())));
+        }
+        let spawned = spawn_watched_ssh(&kargs, &forwards, &target);
         match spawned {
             Ok(child) => {
                 eprintln!(
@@ -676,16 +819,18 @@ fn local_mcp_port() -> Option<u16> {
 pub async fn tunnel_loop() {
     loop {
         let _ = tokio::task::spawn_blocking(tunnel_tick).await;
+        let _ = tokio::task::spawn_blocking(chrome_tunnel_tick).await;
         tokio::time::sleep(TUNNEL_TICK).await;
     }
 }
 
 /// 앱을 끌 때 — 자식 ssh 가 고아로 남지 않게.
 pub fn stop_tunnels() {
-    if let Ok(mut t) = tunnels().lock() {
-        for (_, mut tun) in t.drain() {
-            let _ = tun.child.kill();
-            let _ = tun.child.wait();
+    for map in [tunnels(), chrome_tunnels()] {
+        if let Ok(mut t) = map.lock() {
+            for (_, mut tun) in t.drain() {
+                stop_watched(&mut tun);
+            }
         }
     }
 }
@@ -699,7 +844,7 @@ pub fn machines() -> Vec<Machine> {
 
 /// 명부 파일(또는 env)의 항목만 — 알려 온 기계는 뺀다. 터널 스폰이 이걸 본다:
 /// 알려 온 기계로는 이쪽이 터널을 들 필요가 없다(그쪽이 이미 들고 있다).
-fn listed_machines() -> Vec<Machine> {
+pub fn listed_machines() -> Vec<Machine> {
     if let Ok(s) = std::env::var("KASATERM_MACHINES") {
         if let Ok(v) = serde_json::from_str::<Value>(&s) {
             let m = parse(&v);

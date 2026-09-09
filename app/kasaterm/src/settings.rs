@@ -691,6 +691,16 @@ impl App {
             SettingsAction::UiLanguage(language) => {
                 socket::write_setting("language", serde_json::json!(language));
             }
+            SettingsAction::ChromeMachine(machine) => {
+                socket::write_setting("kasachrome_machine", serde_json::json!(machine));
+                // MCP 가 읽는 다리 목록은 즉시 다시 적는다 — 5초 폴을 기다리면 그 사이
+                // 붙는 학생이 옛 목록을 읽는다. 상태 칩도 다음 폴에 새로 잰다.
+                socket::write_setting(
+                    "kasachrome_bridge_urls",
+                    serde_json::json!(kasa_mcp::machines::kasachrome_bridge_urls().join(",")),
+                );
+                self.statusbar.tunnel_checked = None;
+            }
             SettingsAction::CwdMode(m) => {
                 // "last"/"home" are literal; "custom" keeps any existing path or
                 // seeds $HOME so the field isn't empty.

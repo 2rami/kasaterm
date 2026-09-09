@@ -18,7 +18,7 @@ fn home() -> Option<PathBuf> {
 /// 봐야 한다 — kasa-mcp → app 은 없는 의존 방향이라 부를 수 없어 경로 규칙만 옮겨
 /// 왔다. `KASATERM_SETTINGS_FILE` 을 빠뜨렸더니 설정 화면은 이 파일을, 로더는 저
 /// 파일을 읽어 「테마를 바꿨는데 아무 일도 안 일어나는」 상태가 됐다(2026-08-13 실측).
-fn read_setting_str(key: &str) -> Option<String> {
+pub(crate) fn read_setting_str(key: &str) -> Option<String> {
     read_setting_value(key)?.as_str().map(String::from)
 }
 

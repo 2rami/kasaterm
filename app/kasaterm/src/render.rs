@@ -9801,7 +9801,7 @@ impl App {
                 // 점이 상태다: 초록=열림, 흐림=닫힘. 누르면 handler 가 토글한다.
                 macro_rules! draw_tunnel_widget {
                     () => {{
-                    // 「바깥」→「원격」이었다가 「모바일」— 원격 접속과 크롬 다리를 한
+                    // 「바깥」→「원격」이었다가 「모바일」— 원격 접속과 카사크롬 다리를 한
                     // 칩으로 합치며(2026-09-08 지시 「크롬다리랑 원격을 통합」) 이 칩이
                     // 말하는 것은 「이 맥 밖의 기기」가 됐다. 폰 아이콘이 뜻을 지고,
                     // 나머지 설명(QR·주소·다리)은 팝오버가 한다.
@@ -9810,9 +9810,11 @@ impl App {
                     let dot = 6.0_f32;
                     let gap = 5.0_f32;
                     let on = self.statusbar.tunnel_on == Some(true);
-                    // 점 하나에 두 상태 — 열림이면 초록, 열렸는데 크롬 다리가 끊겼으면
-                    // 주황(미니 학생이 미니 크롬으로 폴백 중). 닫힘은 흐림.
-                    let bridge_down = on && self.statusbar.chrome_bridge == Some(false);
+                    // 점 하나에 두 상태 — 열림이면 초록, 열렸는데 카사크롬 다리(고른
+                    // 기계 크롬이 안 닿음 / 본진→이 맥 다리 끊김)면 주황. 닫힘은 흐림.
+                    let bridge_down = on
+                        && (self.statusbar.chrome_bridge == Some(false)
+                            || self.statusbar.chrome_reach == Some(false));
                     let tw = g.measure_chrome_text(label, fs, false);
                     let seg_w = icon + gap + tw + gap + dot;
                     // 판 번호가 이미 오른쪽 끝을 먹었다 — 그 왼쪽에 선다
