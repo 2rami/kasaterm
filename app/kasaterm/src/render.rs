@@ -13034,7 +13034,7 @@ impl App {
         caret_on: bool,
         cursor: (f32, f32),
     ) -> Vec<(FindBtn, (f32, f32, f32, f32))> {
-        Self::draw_find_bar_with_options(g, f, x, y, w, preedit, caret_on, cursor, true)
+        Self::draw_find_bar_with_options(g, f, x, y, w, preedit, caret_on, cursor, true, false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -13048,6 +13048,7 @@ impl App {
         caret_on: bool,
         cursor: (f32, f32),
         allow_replace: bool,
+        polished_group: bool,
     ) -> Vec<(FindBtn, (f32, f32, f32, f32))> {
         const PAD: f32 = 8.0;
         const ROW: f32 = 26.0;
@@ -13058,7 +13059,9 @@ impl App {
         let mut hits = Vec::new();
 
         let toggle_slot = if allow_replace { TOGGLE_W + 6.0 } else { 0.0 };
-        let fixed_w = PAD * 2.0 + toggle_slot + COUNT_W + 6.0 + BTN * 3.0;
+        let nav_gap = if polished_group { 4.0 } else { 0.0 };
+        let nav_w = BTN * 3.0 + nav_gap * 2.0;
+        let fixed_w = PAD * 2.0 + toggle_slot + COUNT_W + 6.0 + nav_w;
         let field_w = ((w - 20.0).max(1.0) - fixed_w).clamp(72.0, 190.0);
         let bar_w = fixed_w + field_w;
         let rows = if allow_replace && f.replacing { 2.0 } else { 1.0 };
@@ -13243,8 +13246,13 @@ impl App {
                 theme::text_dim()
             };
             let cw = g.measure_chrome_text(&count, FS, false);
+            let count_x = if polished_group {
+                field_x + field_w + (COUNT_W - cw) * 0.5
+            } else {
+                field_x + field_w + COUNT_W - 8.0 - cw
+            };
             g.draw_text(
-                field_x + field_w + COUNT_W - 8.0 - cw,
+                count_x,
                 text_baseline(row1),
                 &count,
                 gpu::DrawOpts {
@@ -13265,7 +13273,7 @@ impl App {
         .into_iter()
         .enumerate()
         {
-            let bx = btn_x + BTN * i as f32;
+            let bx = btn_x + (BTN + nav_gap) * i as f32;
             let dim = f.hits.is_empty() && btn != FindBtn::Close;
             let hov = hot((bx, row1, BTN, ROW));
             if hov {
