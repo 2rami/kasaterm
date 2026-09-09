@@ -244,10 +244,47 @@ pub fn kasachrome_machine() -> String {
 }
 
 /// 고른 기계의 크롬 다리가 이쪽에서 닿는 로컬 포트. 명부에 없거나 갈 길이 없으면 None.
+/// `chrome_port` 만 적힌 항목(base·ssh 없음 — 미니에서 본 맥북처럼 손 터널 `-R` 로만
+/// 닿는 기계)은 `parse` 가 기계로 안 세우므로 원문 명부에서 따로 찾는다.
 pub fn kasachrome_target_port(label: &str) -> Option<u16> {
-    let m = find(label)?;
-    m.chrome_port
-        .or_else(|| m.ssh.as_ref().map(|_| chrome_tunnel_port(&m.label)))
+    if let Some(m) = find(label) {
+        return m
+            .chrome_port
+            .or_else(|| m.ssh.as_ref().map(|_| chrome_tunnel_port(&m.label)));
+    }
+    chrome_only_entries()
+        .into_iter()
+        .find(|(l, _)| l == label)
+        .map(|(_, p)| p)
+}
+
+/// 명부에서 `chrome_port` 만 있는 항목 — (라벨, 포트).
+fn chrome_only_entries() -> Vec<(String, u16)> {
+    entries()
+        .iter()
+        .filter(|e| e.get("base").and_then(|v| v.as_str()).is_none_or(str::is_empty))
+        .filter(|e| e.get("ssh").and_then(|v| v.as_str()).is_none_or(str::is_empty))
+        .filter_map(|e| {
+            let label = e.get("label")?.as_str()?.trim().to_string();
+            let port = e.get("chrome_port")?.as_u64()? as u16;
+            (!label.is_empty()).then_some((label, port))
+        })
+        .collect()
+}
+
+/// 「카사크롬이 쓰는 크롬」 후보 — 다리로 갈 길이 있는 기계(ssh 나 chrome_port)만.
+pub fn kasachrome_candidates() -> Vec<String> {
+    let mut out: Vec<String> = listed_machines()
+        .into_iter()
+        .filter(|m| m.ssh.is_some() || m.chrome_port.is_some())
+        .map(|m| m.label)
+        .collect();
+    for (label, _) in chrome_only_entries() {
+        if !out.contains(&label) {
+            out.push(label);
+        }
+    }
+    out
 }
 
 /// 카사크롬 MCP 가 앞에서부터 시도할 다리 주소 — 고른 기계가 먼저, 이 기계가 폴백.

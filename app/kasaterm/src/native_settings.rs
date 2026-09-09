@@ -4199,11 +4199,7 @@ fn paint_machines(
     *y += 28.0;
     {
         let chosen = kasa_mcp::machines::kasachrome_machine();
-        let candidates: Vec<String> = kasa_mcp::machines::listed_machines()
-            .into_iter()
-            .filter(|m| m.ssh.is_some() || m.chrome_port.is_some())
-            .map(|m| m.label)
-            .collect();
+        let candidates = kasa_mcp::machines::kasachrome_candidates();
         let mut cells: Vec<(&str, bool, SettingsAction)> = vec![(
             "이 기계",
             chosen.is_empty(),
