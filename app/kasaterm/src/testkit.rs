@@ -1683,7 +1683,7 @@ impl App {
     /// 조용히 죽는 종류라 화면으로는 영영 안 보인다 — 그래서 대조군을 같이 둔다:
     /// 하나는 숨기고 하나는 그냥 닫은 뒤 **같은 정리 한 번**을 돌린다. 닫은 것만 죽고
     /// 숨긴 것이 남아야 통과다(둘 다 살면 정리가 안 돈 것이라 증명이 아니다).
-    /// `KASATERM_CLOSED_IDLE_SECS=1` 과 함께 쓴다 — 안 주면 15분을 기다려야 한다.
+    /// `KASATERM_CLOSED_GRACE_SECS=1` shortens the normal ten-second close grace.
     /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
     pub(crate) fn run_pending_autostash(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1808,8 +1808,8 @@ impl App {
         // 대조군 — 같은 스택에 평범하게 닫은 것을 하나 넣는다.
         self.close_pane(&control);
         self.render_frame();
-        // idle_since 는 첫 정리에서 찍힌다. 한 번 돌리고 상한을 넘긴 뒤 다시 돌려야
-        // 실제로 놓는 자리까지 간다 — 헤드리스라 루프를 잠깐 세워도 된다.
+        // The deadline starts at close, independent of activity. Cross it once
+        // in this isolated harness; explicit stashes must remain alive.
         self.reap_idle_closed_panes();
         std::thread::sleep(std::time::Duration::from_millis(
             crate::closed_pane_idle_reap().as_millis() as u64 + 300,

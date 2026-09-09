@@ -3505,6 +3505,7 @@ impl App {
     /// 종류의 구멍이 난다 — 그래서 통로를 하나로 묶었다. 레지스트리는 Weak 이라
     /// 해제는 App 이 Arc 를 떨어뜨리는 것으로 저절로 된다.
     pub(crate) fn insert_pty(&mut self, id: String, sess: std::sync::Arc<kasa_pty::PtySession>) {
+        crate::close_grace::clear_marker(&id);
         kasa_mcp::surface_keys::ensure(&id);
         kasa_pty::register_session(&id, &sess);
         self.pty.insert(id, sess);
@@ -3747,9 +3748,7 @@ impl App {
             window,
             alive,
             stashed,
-            // 놀고 있는지는 다음 활동 스캔이 판정한다 — 닫는 순간의 상태로 못 박으면
-            // 마침 응답 중이던 pane 이 곧바로 유휴로 몰린다.
-            idle_since: None,
+            idle_since: (alive && !stashed).then(Instant::now),
             preview: None,
         });
         self.chrome_dirty = true;
@@ -3809,63 +3808,9 @@ impl App {
         }
     }
 
-    /// 닫아 둔 pane 중 **잊힌 것**을 놓는다 — 내리 노는 상태가 `CLOSED_PANE_IDLE_REAP`
-    /// 를 넘으면 프로세스를 끈다.
-    ///
-    /// 닫아도 안 죽이는 건 의도다(`hide_pane`): 그 안의 claude 가 하던 일을 계속하고,
-    /// 되살리기가 재부착이 된다. 문제는 놓는 계기가 개수 상한뿐이었다는 것 — 그건
-    /// **다음 닫기가 있어야** 도니, 몇 개 닫고 손 떼면 그 셸들이 무기한 남았다.
-    ///
-    /// 그래서 일하는 것과 잊힌 것을 가른다. 일하는 중이면 타이머가 매번 풀리므로
-    /// 닫아 두고 계속 돌리는 용법은 그대로 산다.
+    /// Absolute close deadline. Keep recovery metadata after stopping execution.
     pub(crate) fn reap_idle_closed_panes(&mut self) {
-        if self.closed_panes.is_empty() {
-            return;
-        }
-        let now = Instant::now();
-        // ws 락과 `closed_panes` 를 동시에 빌릴 수 없어 판정을 먼저 걷어 온다.
-        let working: Vec<bool> = {
-            let ws = self.ws.lock().unwrap();
-            self.closed_panes
-                .iter()
-                .map(|c| {
-                    ws.panes
-                        .get(&c.pane_id)
-                        .and_then(|p| p.term())
-                        .is_some_and(crate::input::term_is_working)
-                })
-                .collect()
-        };
-        let limit = crate::closed_pane_idle_reap();
-        let mut doomed: Vec<usize> = Vec::new();
-        for (i, c) in self.closed_panes.iter_mut().enumerate() {
-            // 이미 죽은 pane 은 레코드로만 되살아나므로 셀 것이 없다.
-            // 숨긴 것도 시간을 안 센다 — **놀고 있는 게 정상이고 그래서 치운 것**이다.
-            // 여기서 세면 15분 뒤 조용히 죽어, 돌아온 사용자가 빈 셸을 보게 된다.
-            if !c.alive || c.stashed {
-                continue;
-            }
-            if working[i] {
-                c.idle_since = None;
-                continue;
-            }
-            let since = *c.idle_since.get_or_insert(now);
-            if now.duration_since(since) >= limit {
-                doomed.push(i);
-            }
-        }
-        if doomed.is_empty() {
-            return;
-        }
-        // 뒤에서부터 — 앞을 지우면 뒤 인덱스가 밀린다.
-        for i in doomed.into_iter().rev() {
-            let c = self.closed_panes.remove(i);
-            self.kill_hidden_pane(&c.pane_id);
-        }
-        self.chrome_dirty = true;
-        if let Some(w) = &self.window {
-            w.request_redraw();
-        }
+        self.finish_close_grace();
     }
 
     /// 인포의 × — 되살리기 목록에서 지우고, 아직 돌고 있으면 프로세스까지 끈다.
@@ -3955,6 +3900,7 @@ impl App {
         // 셸이 스스로 끝났을 수 있어서다(그때는 아래 레코드 경로로 흘러간다).
         let attached = c.alive && self.pty.contains_key(&c.pane_id);
         let new_id = if attached {
+            self.close_grace_input(&c.pane_id, false);
             c.pane_id.clone()
         } else {
             let (cols, rows) = self.window_cells();
@@ -5763,16 +5709,15 @@ impl App {
         // 있어 `restore_leaf` 가 `--resume` 까지 붙여 준다. 살아 있다고 적어 두면
         // 되살리기가 「있지도 않은 PTY 에 재부착」을 시도한다.
         //
-        // 숨긴 것(`stashed`)만 싣는다. ⌘W 로 닫은 것은 두 정리 루프가 언젠가 놓는
-        // 임시 기록이라 앱 수명을 넘겨 되살릴 값이 아니고, 그것까지 실으면 껐다 켤
-        // 때마다 되살리기 목록이 옛 묘비로 불어난다.
+        // Both stashes and the bounded closed-pane history survive app restart.
+        // Expiring execution must not also erase the user's recovery record.
         let internal_windows: Vec<usize> = (0..self.windows.len())
             .filter(|idx| self.internal_room_kind_at(*idx).is_some())
             .collect();
         let closed_json: Vec<serde_json::Value> = self
             .closed_panes
             .iter()
-            .filter(|c| c.stashed && !c.rec.is_null())
+            .filter(|c| !c.rec.is_null())
             .map(|c| {
                 let window = c.window.saturating_sub(
                     internal_windows.iter().filter(|idx| **idx < c.window).count(),
@@ -5784,6 +5729,7 @@ impl App {
                     "folder": c.folder,
                     "neighbor": c.neighbor,
                     "window": window,
+                    "stashed": c.stashed,
                 })
             })
             .collect();
@@ -6616,7 +6562,7 @@ impl App {
                 // 활성 방으로 떨어뜨린다(`window` 를 쓰는 쪽의 기존 규칙).
                 window: c.get("window").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
                 alive: false,
-                stashed: true,
+                stashed: c.get("stashed").and_then(|v| v.as_bool()).unwrap_or(true),
                 idle_since: None,
                 preview: None,
             });

@@ -1946,6 +1946,10 @@ impl Backend for PtyBackend {
             if !known {
                 anyhow::bail!("surface {sid} 없음 — 재시작·종료로 사라진 pane (오발송 방지)");
             }
+            let pid = self.ws.lock().unwrap().active_tab_pid(sid);
+            if kasa_pty::lookup_session(&pid).is_some_and(|p| p.input_closed()) {
+                anyhow::bail!("surface {sid} is closed — reopen it before assigning work");
+            }
         }
         let _ = self.proxy.send_event(UserEvent::SocketBytes(
             surface_id.map(|s| s.to_string()),
@@ -1955,6 +1959,12 @@ impl Backend for PtyBackend {
     }
 
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()> {
+        if let Some(sid) = surface_id {
+            let pid = self.ws.lock().unwrap().active_tab_pid(sid);
+            if kasa_pty::lookup_session(&pid).is_some_and(|p| p.input_closed()) {
+                anyhow::bail!("surface {sid} is closed — reopen it before sending keys");
+            }
+        }
         let _ = self.proxy.send_event(UserEvent::SocketBytes(
             surface_id.map(|s| s.to_string()),
             key_to_bytes(key),

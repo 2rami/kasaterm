@@ -196,6 +196,11 @@ impl ApplicationHandler<UserEvent> for App {
         // Local cmux socket backend delegated a pane write / split / focus to
         // this GUI thread (the socket server can't touch self.pty directly).
         match &event {
+            UserEvent::CloseGraceExpired => {
+                self.finish_close_grace();
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketBytes(sid, bytes) => {
                 {
                     let target = match sid.as_deref() {
@@ -7588,6 +7593,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoclosereopen();
         self.run_pending_autopreviewreopen();
         self.run_pending_autostash();
+        self.run_pending_close_grace_probe();
         self.run_pending_autolonestash();
         self.run_pending_autohitaudit();
         self.run_pending_autoghost();

@@ -2145,7 +2145,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 그 자리는 그릴 것이 없는 유령 pane 이다. 활성 창만 봐서는 안 된다: 다른
     /// 윈도우로 전환해 둔 pane 은 stash 슬롯에 있고, 백그라운드 세션은 자기 트리를
     /// 따로 쥔다. 실제로 빈 칸이 남은 자리가 활성 창이 아니라 **다른 윈도우**였다.
-    fn leaf_lingers_anywhere(&self, target: &str) -> bool {
+    pub(crate) fn leaf_lingers_anywhere(&self, target: &str) -> bool {
         if Self::stashed_leaf_exists(&self.pty_layout, target) {
             return true;
         }
@@ -2291,22 +2291,18 @@ for p in glob.glob(os.path.join(d, '*.json')):
         self.set_toast(format!("{target} 이 끝나 자리를 접었다 — ⌘⇧T 로 되살린다"));
     }
 
-    /// 사용자가 닫은 pane — **죽이지 않고 화면에서만 뗀다.** BSP 트리에서 leaf 를
-    /// 빼는 것이 전부라 PTY 도 화면 상태도 남고, 그래서 그 안의 claude 는 하던 일을
-    /// 계속한다(거노: resume 로 잇는 게 아니라 데몬처럼 돌기를 원함). 출력이 유실될
-    /// 걱정은 없다 — 화면 갱신은 pane 마다 붙은 전용 스레드(`pump_pty_screens`)라
-    /// 트리와 무관하게 계속 돈다. 리사이즈는 `leaf_cells` 기반이라 트리 밖 pane 을
-    /// 건드리지 않아 마지막 크기가 그대로 유지된다.
-    ///
-    /// 되살리기는 `reopen_pane_record` 의 재부착 경로, 정말 끄는 것은 인포의 ×
-    /// (`discard_closed_pane_at`)다.
+    /// Ordinary close blocks input, requests cancellation and retains the PTY
+    /// for ten seconds of undo. Afterwards only the recovery record remains.
     pub(crate) fn hide_pane(&mut self, target: &str) {
         self.tuck_pane(target, false);
+        if self.stashed_record(target).is_some_and(|c| !c.stashed) {
+            self.set_toast("창을 닫았어요 · 10초 뒤 실행 종료 · ⌘⇧T로 되살리기".into());
+        }
     }
 
     /// 사이드바 「pane 숨기기」 — 닫기와 같은 자리에 넣되 **절대 정리하지 않는다.**
     ///
-    /// 닫기(`hide_pane`)는 개수 상한과 15분 idle 로 언젠가 프로세스를 놓는다. 그런데
+    /// 닫기(`hide_pane`)는 10초 유예 뒤 프로세스를 놓는다. 그런데
     /// 숨기기는 *작업이 도는 중에* 화면에서만 치우는 것이라(2026-08-11 지시), 돌아왔을
     /// 때 대화가 끊겨 있으면 쓸모가 없다. 그래서 같은 스택에 `stashed` 로 넣고 두 정리
     /// 루프가 건너뛰게 한다.
@@ -2330,6 +2326,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             return;
         }
         self.record_closed_pane(target, true, stashed);
+        if !stashed { self.close_grace_input(target, true); }
         self.notify_source_closed(target);
         self.cancel_restore_pane(target);
         let was_active = self

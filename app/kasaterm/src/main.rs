@@ -65,6 +65,7 @@ mod mirror_theme;
 mod mirror_view;
 mod restore_progress;
 mod mirror_close;
+mod close_grace;
 mod mirror_sync;
 mod mirror_diff;
 mod mcpcol;
@@ -1638,8 +1639,7 @@ pub(crate) struct ClosedPane {
     /// 돌아왔을 때 대화가 끊겨 있으면 쓸모가 없다(2026-08-11 지시). 대신 숨긴 만큼
     /// 메모리를 계속 문다 — 그건 사용자가 고른 값이다.
     pub(crate) stashed: bool,
-    /// 놀기 시작한 시각 — 여기서부터 `CLOSED_PANE_IDLE_REAP` 을 세다 넘으면 놓는다.
-    /// 다시 일하기 시작하면 `None` 으로 풀려 처음부터 다시 센다.
+    /// Ordinary close began here. Activity never extends the undo grace.
     pub(crate) idle_since: Option<Instant>,
     /// 이미지·마크다운 미리보기 **탭**이었나 — `(붙어 있던 pane, 파일 경로)`.
     /// 참이면 되살리기는 `restore_leaf` 가 아니라 `open_file` 재호출이고 `rec` 는
@@ -1657,19 +1657,13 @@ const CLOSED_PANE_KEEP: usize = 10;
 /// 화면 펌프(`pump_pty_screens`)가 같은 문자열을 써야 하므로 한 곳에 둔다.
 pub(crate) const BRING_HOME_MARKER: &str = "kasaterm-home";
 
-/// 닫아 둔 pane 이 이만큼 내리 놀면 스스로 놓는다.
-///
-/// 닫아도 안 죽이는 건 의도지만(`hide_pane`), 개수 상한은 **다음 닫기가 있어야만**
-/// 걷어내서 몇 개 닫고 손 떼면 그 셸들이 계속 남는다(실측: 닫힌 pane 4개가 살아
-/// 있었고 그중 셋은 놀고 있었다). 실수로 닫은 걸 알아채는 데는 몇 분이면 충분하고,
-/// 그 뒤로도 노는 pane 은 잊힌 것이다.
-const CLOSED_PANE_IDLE_REAP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// Ordinary close gets ten seconds to undo, regardless of ongoing activity.
+/// Explicit stash remains a separate background-execution action.
+const CLOSED_PANE_IDLE_REAP: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// 위 시간을 초 단위로 덮는다(`KASATERM_CLOSED_IDLE_SECS`). 15분을 기다리지 않고
-/// 회수를 확인할 수 있는 유일한 길이라 테스트가 이걸 쓰고, 15분이 길거나 짧게
-/// 느껴질 때 손대는 곳도 여기다. 0 이나 파싱 실패는 무시하고 기본값으로 돌아간다.
+/// Isolated tests may shorten the grace. Invalid/zero values use ten seconds.
 fn closed_pane_idle_reap() -> std::time::Duration {
-    std::env::var("KASATERM_CLOSED_IDLE_SECS")
+    std::env::var("KASATERM_CLOSED_GRACE_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|s| *s > 0)
@@ -3576,6 +3570,7 @@ impl Workspace {
 #[derive(Debug, Clone)]
 enum UserEvent {
     Redraw,
+    CloseGraceExpired,
     MirrorCloseDone {
         action: PendingClose,
         targets: Vec<mirror_close::MirrorTarget>,
@@ -7360,7 +7355,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // 가야 보이고, 안 보고 보내는 것이 사고의 형태다.
             "PreToolUse": [
                 { "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] },
-                { "matcher": "SendMessage", "hooks": [cmd("kasaterm-closed-pane-guard.py", 5000)] },
+                { "hooks": [cmd("kasaterm-closed-pane-guard.py", 5000)] },
                 { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
             ],
             "PostToolUse": [
@@ -7385,6 +7380,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // stdout 에 JSON 을 내므로 ultracode-mark 와 **다른 그룹**에 둔다(Stop 의
             // stop-drain 과 같은 이유 — 한 그룹에 섞이면 결정이 깨질 수 있다).
             "UserPromptSubmit": [
+                { "hooks": [cmd("kasaterm-closed-pane-guard.py", 5000)] },
                 { "hooks": [cmd("ultracode-mark.py", 3000)] },
                 { "hooks": [cmd("kasaterm-peer-name.py", 5000)] }
             ],
