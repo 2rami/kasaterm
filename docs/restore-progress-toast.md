@@ -24,5 +24,12 @@ Retry reconnects unfinished links without reconstructing existing panes.
 Pointer actions on the card do not pass through to the terminal behind it;
 dropping an existing drag on the card cancels the gesture.
 
+After layout construction, saving retains newly opened/moved panes and rooms.
+Unfinished surfaces keep their original resume information instead of saving a
+temporary shell as the restored conversation. Explicit close/hide removes only
+those targets from progress; automatic process failure is not treated as a
+user cancellation. Failed spawns absent from the live layout remain recoverable
+in the saved snapshot without creating another running pane.
+
 Verification uses isolated state, fixture connections and helper shells only.
 Never restart either user's desktop app automatically to test restoration.
