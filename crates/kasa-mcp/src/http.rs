@@ -2051,6 +2051,9 @@ async fn cmd_handler(
 ) -> impl IntoResponse {
     const ALLOWED: &[&str] = &[
         "surface.split",
+        // 폰 세션 화면의 「탭으로 추가」 — 데스크톱 pane 머리의 + 와 같다(쪼개지 않아
+        // 원본 배치가 안 줄어든다).
+        "surface.new_tab",
         "surface.close",
         "surface.swap",
         "surface.move",

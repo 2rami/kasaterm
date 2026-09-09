@@ -22,10 +22,14 @@ class TerminalScreen extends StatefulWidget {
     this.initialScroll,
     this.session,
     this.pickImage,
+    this.onPaneCreated,
   });
 
   final Server server;
   final Pane pane;
+
+  /// 상단바 「pane 추가」로 pane 을 만들었을 때 — 허브가 목록을 폴링 전에 다시 받는다.
+  final Future<void> Function()? onPaneCreated;
 
   /// 검증용 — 열자마자 위로 이만큼(px) 넘긴 상태로.
   final double? initialScroll;
@@ -215,6 +219,99 @@ class _TerminalScreenState extends State<TerminalScreen>
     if (mounted) Navigator.of(context).pop();
   }
 
+  /// 상단바의 「pane 추가」 — 데스크톱 pane 머리의 쪼개기·+ 와 같다. 보는 pane 옆에
+  /// 쪼개거나 그 pane 안에 탭으로. 셸만 뜬다(claude 는 들어가서 켠다). 거울 pane 이면
+  /// 원본 기계가 아니라 거울이 사는 기계에 명령이 가고, 그쪽 데스크톱이 「거울 옆
+  /// split = 로컬 셸」 규칙(docs/mirror-viewer-lifecycle.md)을 지킨다. 만든 pane 으로
+  /// 바로 옮겨 간다(뒤로 가면 허브).
+  Future<void> _addPane(Pane pane) async {
+    final how = await showModalBottomSheet<_AddHow>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(title: Text('${pane.displayName} 에 pane 추가')),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.vertical_split_outlined),
+              title: const Text('옆에 쪼개기'),
+              subtitle: const Text('셸 하나를 이 pane 옆에 — 데스크톱 배치가 갈린다'),
+              onTap: () => Navigator.pop(ctx, _AddHow.split),
+            ),
+            ListTile(
+              leading: const Icon(Icons.tab_outlined),
+              title: const Text('탭으로'),
+              subtitle: const Text('이 pane 안에 탭 하나 — 배치는 그대로'),
+              onTap: () => Navigator.pop(ctx, _AddHow.tab),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (how == null || !mounted) return;
+    String? id;
+    try {
+      id = switch (how) {
+        _AddHow.split => await widget.server.splitPane(
+          pane.id,
+          machine: pane.machine,
+        ),
+        _AddHow.tab => await widget.server.newTab(
+          pane.id,
+          machine: pane.machine,
+        ),
+      };
+    } on ServerException catch (e) {
+      if (mounted) _toast(e.message);
+      return;
+    }
+    await widget.onPaneCreated?.call();
+    if (!mounted) return;
+    if (id == null) {
+      _toast('pane 을 만들었다 — 목록에서 열어라');
+      return;
+    }
+    final made = await _findPane(pane, id);
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute<void>(
+        builder: (_) => TerminalScreen(
+          server: widget.server,
+          pane: made,
+          onPaneCreated: widget.onPaneCreated,
+        ),
+      ),
+    );
+  }
+
+  /// 새 pane 을 목록에서 찾아 온다 — 데스크톱이 한 박자 늦게 실을 수 있어 몇 번 되묻고,
+  /// 끝내 없으면 자리(id)만으로 셸 화면을 연다.
+  Future<Pane> _findPane(Pane from, String id) async {
+    for (var i = 0; i < 3; i++) {
+      try {
+        final panes = await widget.server.panes(machine: from.machine);
+        for (final p in panes) {
+          if (p.id == id) return p;
+        }
+      } on ServerException {
+        break;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+    }
+    return Pane(
+      id: id,
+      name: '',
+      title: '',
+      status: '',
+      window: from.window,
+      cwd: from.cwd,
+      machine: from.machine,
+    );
+  }
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: _session,
@@ -325,6 +422,11 @@ class _TerminalScreenState extends State<TerminalScreen>
                 isSelected: _wrap,
                 onPressed: () => setState(() => _wrap = !_wrap),
                 icon: const Icon(Icons.wrap_text),
+              ),
+              IconButton(
+                tooltip: 'pane 추가',
+                onPressed: () => _addPane(pane),
+                icon: const Icon(Icons.add_box_outlined),
               ),
               IconButton(
                 tooltip: 'pane 닫기',
@@ -724,3 +826,6 @@ class _StudentFrame extends StatelessWidget {
     );
   }
 }
+
+/// 「pane 추가」의 두 길 — 옆에 쪼개기 / 탭으로.
+enum _AddHow { split, tab }

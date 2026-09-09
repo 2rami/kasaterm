@@ -349,6 +349,90 @@ void main() {
 }
 
 void _designTokensTests() {
+  group('pane 추가', () {
+    Server withCmd(
+      List<http.Request> seen, {
+      Object? result = const {
+        'surface': {'id': '%9'},
+      },
+    }) => Server(
+      Uri.parse(publicRoot),
+      client: MockClient((req) async {
+        seen.add(req);
+        return http.Response(
+          jsonEncode({'ok': true, 'result': result}),
+          200,
+          headers: _json,
+        );
+      }),
+    );
+
+    test('splitPane 은 cmd 로 surface.split 을 보내고 새 pane id 를 돌려준다', () async {
+      final seen = <http.Request>[];
+      final id = await withCmd(seen).splitPane('%3');
+      expect(id, '%9');
+      final req = seen.single;
+      expect(req.method, 'POST');
+      expect(req.url.path, '/u/$slug/cmd');
+      expect(jsonDecode(req.body), {
+        'method': 'surface.split',
+        'params': {'from': '%3', 'direction': 'auto'},
+      });
+    });
+
+    test('newTab 은 surface.new_tab 을 outer·focus 로 보내고 id 를 돌려준다', () async {
+      final seen = <http.Request>[];
+      final id = await withCmd(seen).newTab('%3', machine: '~mini-stable');
+      expect(id, '%9');
+      final req = seen.single;
+      expect(req.url.path, '/u/$slug/m/~mini-stable/cmd');
+      expect(jsonDecode(req.body), {
+        'method': 'surface.new_tab',
+        'params': {'outer': '%3', 'focus': true},
+      });
+    });
+
+    test('옛 서버가 id 를 안 실으면 null — 실패가 아니다', () async {
+      final seen = <http.Request>[];
+      expect(await withCmd(seen, result: const {}).splitPane('%3'), isNull);
+      expect(Server.newSurfaceId({'ok': true}), isNull);
+      expect(
+        Server.newSurfaceId({
+          'result': {
+            'surface': {'id': ''},
+          },
+        }),
+        isNull,
+      );
+    });
+
+    test('ok 가 아니면 서버 문구로 예외', () async {
+      final s = Server(
+        Uri.parse(publicRoot),
+        client: MockClient(
+          (req) async => http.Response(
+            jsonEncode({
+              'ok': false,
+              'error': {'code': 1, 'message': '탭을 열 pane %3 이 없다'},
+            }),
+            200,
+            headers: _json,
+          ),
+        ),
+      );
+      await expectLater(
+        s.newTab('%3'),
+        throwsA(
+          isA<ServerException>().having(
+            (e) => e.message,
+            'message',
+            '탭을 열 pane %3 이 없다',
+          ),
+        ),
+      );
+    });
+  });
+
   group('DesignTokens', () {
     test('design-tokens 응답을 팔레트로 — 알파는 버리고 theme 이 light 가 아니면 다크', () {
       final t = DesignTokens.fromJson({

@@ -80,10 +80,13 @@ Future<void> showPaneSheet(
     case _PaneAct.open:
       onOpen(pane);
     case _PaneAct.split:
-      await _run(
+      await addPane(
         context,
-        onChanged,
-        () => server.splitPane(pane.id, machine: machine),
+        server: server,
+        machine: machine,
+        onChanged: onChanged,
+        onOpen: onOpen,
+        splitFrom: pane,
       );
     case _PaneAct.swap:
       final other = await _pickPane(context, server, room, pane);
@@ -110,6 +113,7 @@ Future<void> showRoomSheet(
   required HubRoom room,
   required String? machine,
   required Future<void> Function() onChanged,
+  void Function(Pane)? onOpen,
 }) async {
   final scheme = Theme.of(context).colorScheme;
   final first = room.panes.isEmpty ? null : room.panes.first;
@@ -154,10 +158,13 @@ Future<void> showRoomSheet(
   if (act == null || first == null || !context.mounted) return;
   switch (act) {
     case _RoomAct.add:
-      await _run(
+      await addPane(
         context,
-        onChanged,
-        () => server.splitPane(first.id, machine: machine),
+        server: server,
+        machine: machine,
+        onChanged: onChanged,
+        onOpen: onOpen,
+        splitFrom: first,
       );
     case _RoomAct.rename:
       final name = await _askText(context, '방 이름', room.title);
@@ -186,7 +193,171 @@ Future<void> newRoom(
   required Server server,
   required String? machine,
   required Future<void> Function() onChanged,
-}) => _run(context, onChanged, () => server.newWindow(machine: machine));
+  void Function(Pane)? onOpen,
+  HubModel? model,
+}) => addPane(
+  context,
+  server: server,
+  machine: machine,
+  onChanged: onChanged,
+  onOpen: onOpen,
+  model: model,
+);
+
+/// 폰 허브의 「+」 — 기계·방을 고르면 그 방에 pane 하나(셸). 「새 방」이면 방부터
+/// 만든다(데스크톱의 새 window 는 셸 pane 하나를 품고 뜬다). 데스크톱 pane 머리의
+/// 쪼개기·+ 와 같은 명령이라 claude 는 안 켠다 — 화면에 들어가 사람이 켠다.
+Future<void> showAddPaneSheet(
+  BuildContext context, {
+  required Server server,
+  required HubModel model,
+  required void Function(Pane) onOpen,
+}) async {
+  final sections = [
+    for (final s in model.sections)
+      if (s.online) s,
+  ];
+  if (sections.isEmpty) {
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(const SnackBar(content: Text('닿는 기계가 없다')));
+    return;
+  }
+  // 기계가 하나면 고를 것이 없다 — 바로 방 고르기.
+  HubSection? section = sections.length == 1 ? sections.single : null;
+  section ??= await _pickSection(context, sections, model.rootName);
+  if (section == null || !context.mounted) return;
+  final choice = await _pickRoom(context, section, model.rootName);
+  if (choice == null || !context.mounted) return;
+  await addPane(
+    context,
+    server: server,
+    machine: section.route,
+    onChanged: model.refresh,
+    onOpen: onOpen,
+    model: model,
+    splitFrom: choice.panes.isEmpty ? null : choice.panes.first,
+  );
+}
+
+/// 새 방을 뜻하는 자리표시자 — pane 이 없다.
+const _newRoom = HubRoom(title: '새 방', panes: []);
+
+Future<HubSection?> _pickSection(
+  BuildContext context,
+  List<HubSection> sections,
+  String? rootName,
+) => showModalBottomSheet<HubSection>(
+  context: context,
+  showDragHandle: true,
+  builder: (ctx) => SafeArea(
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const ListTile(title: Text('어느 기계에 pane 을 추가할까')),
+        const Divider(height: 1),
+        for (final s in sections)
+          ListTile(
+            leading: const Icon(Icons.computer_outlined),
+            title: Text(s.machine ?? rootName ?? '이 기계'),
+            subtitle: Text('방 ${s.rooms.length}개 · ${s.paneCount}명'),
+            onTap: () => Navigator.pop(ctx, s),
+          ),
+        const SizedBox(height: 8),
+      ],
+    ),
+  ),
+);
+
+Future<HubRoom?> _pickRoom(
+  BuildContext context,
+  HubSection section,
+  String? rootName,
+) => showModalBottomSheet<HubRoom>(
+  context: context,
+  showDragHandle: true,
+  builder: (ctx) => SafeArea(
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ListTile(
+          title: Text(
+            '${section.machine ?? rootName ?? '이 기계'} — 어느 방에 추가할까',
+          ),
+        ),
+        const Divider(height: 1),
+        Flexible(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              for (final r in section.rooms)
+                ListTile(
+                  leading: const Icon(Icons.meeting_room_outlined),
+                  title: Text(r.title),
+                  subtitle: Text('pane ${r.panes.length}개'),
+                  onTap: () => Navigator.pop(ctx, r),
+                ),
+              ListTile(
+                leading: const Icon(Icons.add_home_outlined),
+                title: const Text('새 방'),
+                subtitle: const Text('방을 만들고 그 안에 pane 하나'),
+                onTap: () => Navigator.pop(ctx, _newRoom),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+      ],
+    ),
+  ),
+);
+
+/// pane 하나를 만들고, 목록을 지금 다시 받고, 만든 자리로 옮겨 간다.
+/// `splitFrom` 이 있으면 그 옆에 쪼개고(`surface.split`), 없으면 새 방(`window.new`).
+/// 새 pane 을 목록에서 못 찾으면(옛 서버·느린 기계) 목록 갱신까지만 — 다음 폴링에 뜬다.
+Future<void> addPane(
+  BuildContext context, {
+  required Server server,
+  required String? machine,
+  required Future<void> Function() onChanged,
+  void Function(Pane)? onOpen,
+  HubModel? model,
+  Pane? splitFrom,
+}) async {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final before = model?.windowsOf(machine) ?? const <int>{};
+  String? id;
+  try {
+    if (splitFrom != null) {
+      id = await server.splitPane(splitFrom.id, machine: machine);
+    } else {
+      await server.newWindow(machine: machine);
+    }
+  } on ServerException catch (e) {
+    messenger?.showSnackBar(SnackBar(content: Text(e.message)));
+    return;
+  }
+  Pane? made;
+  if (model != null) {
+    made = await model.locateNew(machine, id: id, before: before);
+  } else {
+    await onChanged();
+  }
+  if (made == null && id != null) {
+    // 목록엔 아직 없어도 자리는 안다 — 셸로 들어간다. 목록은 다음 폴링이 채운다.
+    made = Pane(
+      id: id,
+      name: '',
+      title: '',
+      status: '',
+      window: splitFrom?.window ?? 0,
+      cwd: splitFrom?.cwd ?? '',
+      machine: machine,
+    );
+  }
+  if (made == null || onOpen == null || !context.mounted) return;
+  onOpen(made);
+}
 
 Future<Pane?> _pickPane(
   BuildContext context,

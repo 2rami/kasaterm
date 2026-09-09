@@ -295,6 +295,62 @@ class HubModel extends ChangeNotifier {
     return null;
   }
 
+  /// 지금 목록에서 pane 을 찾는다 — 기계(route)와 id 로.
+  Pane? paneById(String? route, String id) {
+    for (final s in sections) {
+      if (s.route != route) continue;
+      for (final r in s.rooms) {
+        final p = r.paneOf(id);
+        if (p != null) return p;
+      }
+    }
+    return null;
+  }
+
+  /// 그 기계의 방 번호들 — 방을 새로 만들었을 때 「전에 없던 번호」로 새 방을 찾는다.
+  Set<int> windowsOf(String? route) => {
+    for (final s in sections)
+      if (s.route == route)
+        for (final r in s.rooms)
+          for (final p in r.panes) p.window,
+  };
+
+  /// 방금 만든 pane 을 목록에서 찾아 온다 — 5초 폴링을 기다리지 않고 지금 다시 받는다.
+  /// 데스크톱이 새 pane 을 목록에 싣는 데 한 박자 걸릴 수 있어 몇 번 되묻는다.
+  /// `id` 를 모르는 경우(방 새로 만들기 — 서버가 id 를 안 준다)는 `before` 에 없던
+  /// 방의 pane 을 고른다.
+  Future<Pane?> locateNew(
+    String? route, {
+    String? id,
+    Set<int> before = const {},
+    int tries = 4,
+    Duration wait = const Duration(milliseconds: 400),
+  }) async {
+    for (var i = 0; i < tries; i++) {
+      // 폴링과 겹쳐 `loading` 이면 refresh 가 건너뛴다 — 그 결과를 기다렸다 본다.
+      while (loading) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      await refresh();
+      final found = id != null ? paneById(route, id) : _inNewRoom(route, before);
+      if (found != null) return found;
+      if (i + 1 < tries) await Future<void>.delayed(wait);
+    }
+    return null;
+  }
+
+  Pane? _inNewRoom(String? route, Set<int> before) {
+    for (final s in sections) {
+      if (s.route != route) continue;
+      for (final r in s.rooms) {
+        for (final p in r.panes) {
+          if (!before.contains(p.window)) return p;
+        }
+      }
+    }
+    return null;
+  }
+
   /// 배치는 곁들이다 — 못 받아도 학생 목록은 그대로 뜬다.
   Future<List<WindowLayout>> _layoutsOf(String? machine) async {
     try {

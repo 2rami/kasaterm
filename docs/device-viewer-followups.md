@@ -27,6 +27,21 @@ frontend browsing workflow below was implemented separately on
 - Verification of delivery: machine = far host's `{"ok":true}`; phone = `opened`
   ack → toast, 4 s without ack → 「응답하지 않아요」 toast; local = `KASATERM_OPEN_URL_SINK`.
 
+## Done (2026-09-10, hifumi/mobile-pane-add)
+
+- **모바일 pane 추가**: hub app bar 「+」 (pick machine when more than one is
+  online → pick room or 「새 방」 → `surface.split` next to the room's first pane,
+  or `window.new`), and a 「pane 추가」 action in the session screen's top bar
+  (「옆에 쪼개기」 = `surface.split from:<viewed>`, 「탭으로」 = `surface.new_tab
+  outer:<viewed>`; `surface.new_tab` added to the HTTP `POST /cmd` allowlist).
+  Same command as the desktop pane header, so only a shell spawns. The new pane
+  id comes back from `result.surface.id`; the hub re-reads the list at once
+  (`HubModel.locateNew`, a few retries) and opens the new pane. Mirror panes
+  send the command to the machine the mirror lives on, which applies the
+  local-shell rule from `docs/mirror-viewer-lifecycle.md`. Not verified on a
+  real phone (install needs approval); `hub_minimap` golden is 1.18% off here
+  (1.06% before this change — the extra is the new app-bar icon).
+
 ## Not verified yet
 
 - Real phone/simulator run of the mobile app (install requires approval).

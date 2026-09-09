@@ -103,7 +103,12 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
   void _open(Pane pane) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => TerminalScreen(server: widget.server, pane: pane),
+        builder: (_) => TerminalScreen(
+          server: widget.server,
+          pane: pane,
+          // 세션 화면에서 pane 을 추가하면 허브 목록도 폴링 전에 갱신되게.
+          onPaneCreated: _model.refresh,
+        ),
       ),
     );
   }
@@ -124,6 +129,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     room: room,
     machine: s.route,
     onChanged: _model.refresh,
+    onOpen: _open,
   );
 
   Future<void> _newRoom(HubSection s) => newRoom(
@@ -131,6 +137,16 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     server: widget.server,
     machine: s.route,
     onChanged: _model.refresh,
+    onOpen: _open,
+    model: _model,
+  );
+
+  /// 앱바의 「+」 — 기계·방을 골라 pane 하나. 만든 자리로 바로 들어간다.
+  Future<void> _addPane() => showAddPaneSheet(
+    context,
+    server: widget.server,
+    model: _model,
+    onOpen: _open,
   );
 
   void _openSettings() {
@@ -163,6 +179,11 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
             ],
           ),
           actions: [
+            IconButton(
+              tooltip: 'pane 추가',
+              onPressed: _addPane,
+              icon: const Icon(Icons.add_box_outlined),
+            ),
             // 종 = 나쵸가 남긴 학생 쪽지. 배지는 안 읽은 쪽지 수(2026-09-08 지시 —
             // 전엔 기다리는 학생 수만 세고 눌러도 아무것도 없었다).
             IconButton(

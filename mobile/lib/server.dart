@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 /// 사용자에게 보여도 되는 오류 — 주소(slug)가 들어 있지 않다.
@@ -758,12 +759,40 @@ class Server {
     }
   }
 
-  /// `from` 옆에 셸 pane 하나 — 방향은 서버가 pane 모양을 보고 고른다.
-  Future<void> splitPane(String from, {String? machine}) => cmd(
-    'surface.split',
-    {'from': from, 'direction': 'auto'},
-    machine: machine,
-  );
+  /// `from` 옆에 셸 pane 하나 — 방향은 서버가 pane 모양을 보고 고른다. 데스크톱
+  /// pane 머리의 쪼개기 단추와 같은 명령이라 셸만 뜬다(claude 는 사람이 켠다).
+  /// 돌아오는 것은 새 pane 의 id — 만든 자리로 바로 옮겨 가는 데 쓴다.
+  Future<String?> splitPane(String from, {String? machine}) async {
+    final r = await cmd(
+      'surface.split',
+      {'from': from, 'direction': 'auto'},
+      machine: machine,
+    );
+    return newSurfaceId(r);
+  }
+
+  /// `outer` pane **안에 새 탭**(셸) — 데스크톱 pane 머리의 + 와 같다. 쪼개지 않으니
+  /// 원본 기계의 배치가 안 줄어든다. 돌아오는 것은 새 탭의 pane id.
+  Future<String?> newTab(String outer, {String? machine}) async {
+    final r = await cmd(
+      'surface.new_tab',
+      {'outer': outer, 'focus': true},
+      machine: machine,
+    );
+    return newSurfaceId(r);
+  }
+
+  /// `surface.split`·`surface.new_tab` 응답에서 새 pane id — `result.surface.id`.
+  /// 옛 서버가 모양을 달리 주면 null(그때는 목록을 다시 받아 찾는다).
+  @visibleForTesting
+  static String? newSurfaceId(Map<String, dynamic> r) {
+    final result = r['result'];
+    if (result is! Map) return null;
+    final surface = result['surface'];
+    if (surface is! Map) return null;
+    final id = surface['id'];
+    return id is String && id.isNotEmpty ? id : null;
+  }
 
   Future<void> swapPanes(String a, String b, {String? machine}) =>
       cmd('surface.swap', {'a': a, 'b': b}, machine: machine);
