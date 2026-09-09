@@ -249,6 +249,12 @@ Invoke-External -FilePath $lightExe -ArgumentList @(
 $portableStage = Reset-Directory -Path (Join-Path $workRoot "portable\kasaterm") -AllowedRoot $targetRoot
 Copy-Item -LiteralPath $appExe, $cliExe, (Join-Path $releaseRoot "WinSparkle.dll") -Destination $portableStage -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\kasaterm\wix\License.rtf") -Destination $portableStage -Force
+$portableFonts = Join-Path $portableStage "fonts"
+New-Item -ItemType Directory -Path $portableFonts -Force | Out-Null
+Copy-Item -LiteralPath @(
+    (Join-Path $repoRoot "app\kasaterm\assets\fonts\NotoSansKR-Variable.ttf"),
+    (Join-Path $repoRoot "app\kasaterm\assets\fonts\OFL-NotoSansKR.txt")
+) -Destination $portableFonts -Force
 Copy-Item -LiteralPath $uiDist -Destination (Join-Path $portableStage "arona-ui") -Recurse -Force
 Copy-Item -LiteralPath $collabStage -Destination (Join-Path $portableStage "collab-hooks") -Recurse -Force
 
@@ -266,7 +272,8 @@ Invoke-External -FilePath $darkExe -ArgumentList @(
 )
 $requiredFiles = @(
     "kasaterm.exe", "kasaterm-cli.exe", "WinSparkle.dll", "index.html",
-    "characters.json", "kasacollab.py", "statusline.py"
+    "characters.json", "kasacollab.py", "statusline.py",
+    "NotoSansKR-Variable.ttf", "OFL-NotoSansKR.txt"
 )
 Assert-MsiManifest -Manifest $verifyWxs -Names $requiredFiles
 Assert-PackageFiles -Root $portableStage -Names $requiredFiles

@@ -165,6 +165,27 @@ const DARK: Palette = Palette {
     ansi: ANSI_TOMORROW,
 };
 
+const VIEWER_NEUTRAL: Palette = Palette {
+    bg: [45, 47, 52, 255],
+    fg: [242, 243, 245, 255],
+    surface: [38, 40, 44, 255],
+    surface_hover: [53, 55, 60, 255],
+    surface_active: [62, 65, 71, 255],
+    border: [76, 79, 85, 180],
+    text: [232, 234, 237, 255],
+    text_dim: [174, 177, 183, 255],
+    text_mute: [128, 132, 139, 255],
+    success: DARK.success,
+    danger: DARK.danger,
+    syn_keyword: DARK.syn_keyword,
+    syn_string: DARK.syn_string,
+    syn_number: DARK.syn_number,
+    syn_comment: DARK.syn_comment,
+    syn_function: DARK.syn_function,
+    syn_type: DARK.syn_type,
+    ansi: ANSI_TOMORROW,
+};
+
 const LIGHT: Palette = Palette {
     bg: [247, 248, 250, 255],
     fg: [38, 42, 50, 255],
@@ -443,6 +464,7 @@ pub const THEME_PRESETS: &[(&str, &str, &Palette)] = &[
 /// 미리보기와 독립 Viewer 시작은 원자 색 슬롯만 필요하고, Claude 설정 파일은
 /// 건드리면 안 된다. 미리보기는 손을 뗄 때 진짜 커밋이 같은 값을 다시 적용한다.
 static PREVIEWING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static VIEWER_CHROME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn store_palette(p: &Palette) {
     S_BG.store(pack(p.bg), Ordering::Relaxed);
@@ -992,6 +1014,20 @@ pub fn apply_from_settings() {
 /// the viewer's own document-state file.
 pub fn apply_from_settings_read_only() {
     apply_from_settings_inner(false);
+}
+
+pub fn apply_viewer_palette_read_only() {
+    apply_from_settings_read_only();
+    let was_previewing = PREVIEWING.swap(true, Ordering::Relaxed);
+    store_palette(&VIEWER_NEUTRAL);
+    store_accent("orange");
+    set_shape("rounded");
+    VIEWER_CHROME.store(true, Ordering::Relaxed);
+    PREVIEWING.store(was_previewing, Ordering::Relaxed);
+}
+
+pub fn viewer_chrome() -> bool {
+    VIEWER_CHROME.load(Ordering::Relaxed)
 }
 
 fn apply_from_settings_inner(sync_claude_theme: bool) {

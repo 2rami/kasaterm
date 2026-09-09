@@ -4635,7 +4635,14 @@ impl App {
             match step {
                 0 => {
                     capture_all(self, "design-view");
-                    if !click_header(self, 0, "outline", event_loop) {
+                    let outline_open = self
+                        .aux_probe_summary()
+                        .as_array()
+                        .and_then(|rows| rows.first())
+                        .and_then(|row| row.get("outline_open"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    if !outline_open && !click_header(self, 0, "outline", event_loop) {
                         return;
                     }
                 }
@@ -4668,8 +4675,59 @@ impl App {
                 }
                 4 => {
                     capture_all(self, "design-narrow");
+                    if !click_header(self, 0, "outline", event_loop) {
+                        return;
+                    }
+                }
+                5 => {
+                    capture_all(self, "design-narrow-outline");
+                }
+                6 => {
+                    let Some((id, position)) = self.aux_probe_scrollbar_center(0, true) else {
+                        return;
+                    };
+                    self.aux_window_event(
+                        id,
+                        WindowEvent::CursorMoved {
+                            device_id: DeviceId::dummy(),
+                            position,
+                        },
+                        event_loop,
+                    );
+                    self.aux_window_event(
+                        id,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state: ElementState::Pressed,
+                            button: MouseButton::Left,
+                        },
+                        event_loop,
+                    );
+                    self.aux_window_event(
+                        id,
+                        WindowEvent::CursorMoved {
+                            device_id: DeviceId::dummy(),
+                            position: winit::dpi::PhysicalPosition::new(
+                                position.x,
+                                position.y + 100.0,
+                            ),
+                        },
+                        event_loop,
+                    );
+                    self.aux_window_event(
+                        id,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            state: ElementState::Released,
+                            button: MouseButton::Left,
+                        },
+                        event_loop,
+                    );
+                    capture_all(self, "design-narrow-outline-drag");
+                }
+                7 => {
                     eprintln!("[viewere2e] DESIGN {}", self.aux_probe_summary());
-                    STEP.store(5, Ordering::Relaxed);
+                    STEP.store(8, Ordering::Relaxed);
                     event_loop.exit();
                     return;
                 }

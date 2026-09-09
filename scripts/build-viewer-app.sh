@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build the standalone Markdown viewer bundle without installing it or touching
 # the main kasaterm app. The OpenHuman palette, icons and Galmuri fallback font
-# are compiled into this same binary (`include_*` in gpu.rs), so duplicating the
-# terminal CLI, web UI, updater framework or font files in Resources is needless.
+# are compiled into this same binary (`include_*` in gpu.rs). The official Noto
+# Sans KR variable font is packaged for the Windows viewer path; keeping it in
+# Resources here makes the standalone bundle's licensed assets self-describing.
 set -euo pipefail
 
 PROFILE=release
@@ -18,6 +19,10 @@ cd "$ROOT"
 
 ICON="$ROOT/assets/AppIcon.icns"
 [[ -f "$ICON" ]] || { echo "error: assets/AppIcon.icns missing" >&2; exit 1; }
+NOTO_FONT="$ROOT/app/kasaterm/assets/fonts/NotoSansKR-Variable.ttf"
+NOTO_LICENSE="$ROOT/app/kasaterm/assets/fonts/OFL-NotoSansKR.txt"
+[[ -f "$NOTO_FONT" ]] || { echo "error: Noto Sans KR font missing" >&2; exit 1; }
+[[ -f "$NOTO_LICENSE" ]] || { echo "error: Noto Sans KR OFL missing" >&2; exit 1; }
 
 VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
 if [[ "$PROFILE" == release ]]; then
@@ -37,9 +42,12 @@ cleanup() { rm -rf "$STAGE"; }
 trap cleanup EXIT HUP INT TERM
 
 rm -rf "$STAGE"
-mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
+mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources/fonts" \
+  "$STAGE/Contents/Resources/licenses"
 cp "$SOURCE_BIN" "$STAGE/Contents/MacOS/kasaterm-viewer"
 cp "$ICON" "$STAGE/Contents/Resources/AppIcon.icns"
+cp "$NOTO_FONT" "$STAGE/Contents/Resources/fonts/NotoSansKR-Variable.ttf"
+cp "$NOTO_LICENSE" "$STAGE/Contents/Resources/licenses/OFL-NotoSansKR.txt"
 
 cat > "$STAGE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -125,6 +133,10 @@ codesign --verify --strict --verbose=2 "$STAGE"
   com.kasa.kasaterm.viewer ]] || { echo "error: viewer bundle id mismatch" >&2; exit 1; }
 [[ "$(plutil -extract CFBundleExecutable raw -o - "$STAGE/Contents/Info.plist")" == \
   kasaterm-viewer ]] || { echo "error: viewer executable mismatch" >&2; exit 1; }
+[[ -s "$STAGE/Contents/Resources/fonts/NotoSansKR-Variable.ttf" ]] || \
+  { echo "error: viewer Noto Sans KR payload missing" >&2; exit 1; }
+[[ -s "$STAGE/Contents/Resources/licenses/OFL-NotoSansKR.txt" ]] || \
+  { echo "error: viewer Noto Sans KR license missing" >&2; exit 1; }
 for forbidden in \
   "$STAGE/Contents/MacOS/kasaterm-cli" \
   "$STAGE/Contents/MacOS/kasa-serve-web" \

@@ -6406,7 +6406,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         // Palette reads are required by the shared document renderer; unlike
         // onboarding/shims this path does not write or start a service.
-        theme::apply_from_settings_read_only();
+        theme::apply_viewer_palette_read_only();
     }
     // 헤드리스 검증 실행이 거노 화면을 뺏지 않게 한다. 스스로 종료하는 실행
     // (`KASATERM_AUTOQUIT_MS`)은 정의상 테스트라 자동으로 배경에 띄운다 —

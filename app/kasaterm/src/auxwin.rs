@@ -6,8 +6,10 @@
 //! intact when the user presses "별도창으로".
 use super::*;
 
-const VIEW_HEADER_H: f32 = 44.0;
-const EDIT_HEADER_H: f32 = 78.0;
+const TITLE_ROW_H: f32 = 42.0;
+const TOOLBAR_ROW_H: f32 = 40.0;
+const VIEW_HEADER_H: f32 = TITLE_ROW_H + TOOLBAR_ROW_H;
+const EDIT_HEADER_H: f32 = TITLE_ROW_H + TOOLBAR_ROW_H;
 const FIND_ROW_H: f32 = 54.0;
 const FIND_REPLACE_ROW_H: f32 = 84.0;
 const BODY_PAD: f32 = 6.0;
@@ -126,7 +128,7 @@ struct RestoreRecord {
     #[serde(default)]
     font_scale: Option<f32>,
     #[serde(default)]
-    outline_open: bool,
+    outline_open: Option<bool>,
     #[serde(default)]
     outline_scroll: f32,
     frame: Option<FrameRecord>,
@@ -208,6 +210,7 @@ pub(crate) struct AuxWindow {
     pub(crate) editor: MarkdownPane,
     dirty: bool,
     cursor_px: (f32, f32),
+    cursor_seen: bool,
     selecting: bool,
     focused: bool,
     preedit: String,
@@ -228,9 +231,13 @@ pub(crate) struct AuxWindow {
     outline_rect: Option<(f32, f32, f32, f32)>,
     outline_content_h: f32,
     outline_active: Option<usize>,
+    outline_scrollbar_drawn: bool,
+    outline_scrollbar: Option<ScrollbarGeometry>,
+    outline_scrollbar_drag_offset: Option<f32>,
     outline_layout_anchor: Option<usize>,
     view_find_targets: Vec<RenderedFindTarget>,
     view_find_revealed: Option<(u64, String, usize)>,
+    viewer_style: bool,
     welcome: bool,
     pub(crate) missing_source: bool,
     status: Option<String>,
@@ -275,23 +282,39 @@ impl AuxWindow {
 
     fn outline_width(&self) -> f32 {
         let width = self.logical_size().0;
-        (width * 0.26)
-            .clamp(200.0, OUTLINE_W)
-            .min((width - BODY_PAD * 2.0).max(1.0))
+        if self.outline_overlays() {
+            OUTLINE_W.min((width - BODY_PAD * 4.0).max(200.0))
+        } else {
+            (width * 0.23)
+                .clamp(168.0, OUTLINE_W)
+                .min((width - BODY_PAD * 2.0).max(1.0))
+        }
+    }
+
+    fn editor_origin_x(&self) -> f32 {
+        if self.outline_open && !self.outline_overlays() {
+            self.outline_width() + 1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn toolbar_background(&self) -> [u8; 4] {
+        if self.viewer_style {
+            crate::theme::bg()
+        } else {
+            crate::theme::surface()
+        }
     }
 
     fn body_box(&self) -> (f32, f32, f32, f32) {
         let (w, h) = self.logical_size();
         let chrome_h = self.chrome_height();
-        let rail = if self.outline_open && !self.outline_overlays() {
-            self.outline_width() + 8.0
-        } else {
-            0.0
-        };
+        let editor_x = self.editor_origin_x();
         (
-            BODY_PAD + rail,
+            editor_x + BODY_PAD,
             chrome_h,
-            (w - BODY_PAD * 2.0 - rail).max(1.0),
+            (w - editor_x - BODY_PAD * 2.0).max(1.0),
             (h - chrome_h - BODY_PAD).max(1.0),
         )
     }
@@ -342,7 +365,7 @@ impl AuxWindow {
             h_scroll: self.editor.h_scroll,
             wrap: self.editor.wrap,
             font_scale: Some(self.font_scale),
-            outline_open: self.outline_open,
+            outline_open: Some(self.outline_open),
             outline_scroll: self.outline_scroll,
             frame: Some(FrameRecord {
                 x: pos.x,
@@ -444,6 +467,7 @@ impl AuxWindow {
                 self.editor.scroll,
                 None,
                 find_draw,
+                false,
             );
             if let Some((query, block, _, index)) = find_request {
                 let key = (self.editor.doc.gen, query, index);
@@ -483,9 +507,10 @@ impl AuxWindow {
             }
         }
         self.draw_find_row(w, cursor_on);
-        self.draw_scroll_indicator(x, y, bw, bh);
         self.refresh_outline_cache();
-        self.draw_outline(x, y, bw, bh);
+        let outline_scrollbar = self.outline_scrollbar_visible(y, bh);
+        self.draw_scroll_indicator(x, y, bw, bh, !outline_scrollbar);
+        self.draw_outline(x, y, bw, bh, outline_scrollbar);
         if self.viewer_prompt.is_some() {
             self.draw_viewer_prompt(w, h);
         } else {
@@ -516,16 +541,18 @@ impl AuxWindow {
         };
         let y = self.base_header_height();
         let h = self.find_row_height();
+        let editor_x = self.editor_origin_x();
+        let editor_w = (width - editor_x).max(1.0);
         self.gpu
-            .rect(0.0, y, width, h, crate::theme::panel_bg());
+            .rect(editor_x, y, editor_w, h, self.toolbar_background());
         self.gpu
-            .rect(0.0, y + h - 1.0, width, 1.0, crate::theme::border());
+            .rect(editor_x, y + h - 1.0, editor_w, 1.0, crate::theme::border());
         self.find_hits = App::draw_find_bar_with_options(
             &mut self.gpu,
             find,
-            BODY_PAD,
+            editor_x + BODY_PAD,
             y,
-            (width - BODY_PAD * 2.0).max(1.0),
+            (editor_w - BODY_PAD * 2.0).max(1.0),
             &self.preedit,
             cursor_on,
             self.cursor_px,
@@ -538,26 +565,28 @@ impl AuxWindow {
             self.draw_view_header(width);
             return;
         }
-        const INFO_H: f32 = 44.0;
-        const CONTROL_H: f32 = 28.0;
+        const INFO_H: f32 = TITLE_ROW_H;
+        const CONTROL_H: f32 = 32.0;
         const GAP: f32 = 4.0;
         self.header_hits.clear();
-        self.gpu
-            .rect(0.0, 0.0, width, EDIT_HEADER_H, crate::theme::surface());
+        let editor_x = self.editor_origin_x();
+        let editor_w = (width - editor_x).max(1.0);
+        let toolbar_bg = self.toolbar_background();
+        self.gpu.rect(editor_x, 0.0, editor_w, EDIT_HEADER_H, toolbar_bg);
         self.gpu.rect(
-            0.0,
+            editor_x,
             INFO_H,
-            width,
+            editor_w,
             EDIT_HEADER_H - INFO_H,
-            crate::theme::panel_bg(),
+            toolbar_bg,
         );
         self.gpu
-            .rect(0.0, INFO_H, width, 1.0, crate::theme::border());
+            .rect(editor_x, INFO_H, editor_w, 1.0, crate::theme::border());
         self.gpu
-            .rect(0.0, EDIT_HEADER_H - 1.0, width, 1.0, crate::theme::border());
+            .rect(editor_x, EDIT_HEADER_H - 1.0, editor_w, 1.0, crate::theme::border());
 
-        let compact = width < 560.0;
-        let control_y = INFO_H + 3.0;
+        let compact = editor_w < 560.0;
+        let control_y = INFO_H + 4.0;
         let mut hovered = None;
 
         if self.welcome {
@@ -576,7 +605,7 @@ impl AuxWindow {
             }
             self.gpu.queue_icon(
                 "file-text",
-                12.0,
+                editor_x + 12.0,
                 12.0,
                 16.0,
                 if self.focused {
@@ -586,7 +615,7 @@ impl AuxWindow {
                 },
             );
             self.gpu.draw_text(
-                36.0,
+                editor_x + 36.0,
                 10.0,
                 "Kasaterm Viewer",
                 gpu::DrawOpts {
@@ -608,10 +637,10 @@ impl AuxWindow {
             } else {
                 crate::theme::text_dim()
             };
-            let available = (open_rect.0 - 22.0).max(0.0);
+            let available = (open_rect.0 - editor_x - 22.0).max(0.0);
             let clipped = crate::screenread::clip_px(&mut self.gpu, detail, 11.0, false, available);
             self.gpu.draw_text(
-                12.0,
+                editor_x + 12.0,
                 control_y + 7.0,
                 &clipped,
                 gpu::DrawOpts {
@@ -649,27 +678,43 @@ impl AuxWindow {
             hovered = Some(HeaderButton::Save);
         }
 
-        self.gpu.queue_icon(
-            "file-text",
-            12.0,
-            11.0,
-            16.0,
-            if self.focused {
-                crate::theme::text_dim()
-            } else {
-                crate::theme::text_mute()
-            },
-        );
+        let centered_title = self.viewer_style && !compact;
+        if !centered_title {
+            self.gpu.queue_icon(
+                "file-text",
+                editor_x + 12.0,
+                11.0,
+                16.0,
+                if self.focused {
+                    crate::theme::text_dim()
+                } else {
+                    crate::theme::text_mute()
+                },
+            );
+        }
         let name = std::path::Path::new(&self.editor.doc.path)
             .file_name()
             .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty())
             .unwrap_or("새 문서");
-        let title_x = if self.editor.modified { 43.0 } else { 36.0 };
+        let left_bound = editor_x + if centered_title { 12.0 } else { 36.0 };
+        let right_bound = save_rect.0 - 12.0;
+        let center_x = editor_x + editor_w * 0.5;
+        let title_w = if centered_title {
+            ((center_x - left_bound).min(right_bound - center_x) * 2.0).max(0.0)
+        } else {
+            (right_bound - left_bound).max(0.0)
+        };
+        let title = crate::screenread::clip_px(&mut self.gpu, name, 13.0, true, title_w);
+        let title_x = if centered_title {
+            center_x - self.gpu.measure_chrome_text(&title, 13.0, true) * 0.5
+        } else {
+            left_bound + if self.editor.modified { 7.0 } else { 0.0 }
+        };
         if self.editor.modified {
             crate::round_rect(
                 &mut self.gpu,
-                35.0,
+                title_x - 9.0,
                 17.0,
                 5.0,
                 5.0,
@@ -677,8 +722,6 @@ impl AuxWindow {
                 crate::theme::accent(),
             );
         }
-        let title_w = (save_rect.0 - title_x - 10.0).max(0.0);
-        let title = crate::screenread::clip_px(&mut self.gpu, name, 13.0, true, title_w);
         self.gpu.draw_text(
             title_x,
             9.0,
@@ -691,18 +734,20 @@ impl AuxWindow {
             },
         );
 
-        let mut left_x = 10.0;
+        let mut left_x = editor_x + 10.0;
         if self.editor.is_md_doc {
             let segment_w = if compact { 43.0 } else { 48.0 };
-            crate::round_rect(
-                &mut self.gpu,
-                left_x,
-                control_y,
-                segment_w * 2.0,
-                CONTROL_H,
-                crate::theme::radius_sm(),
-                crate::theme::surface(),
-            );
+            if !self.viewer_style {
+                crate::round_rect(
+                    &mut self.gpu,
+                    left_x,
+                    control_y,
+                    segment_w * 2.0,
+                    CONTROL_H,
+                    crate::theme::radius_sm(),
+                    crate::theme::surface(),
+                );
+            }
             for (kind, label, active) in [
                 (HeaderButton::View, "보기", !self.editor.raw_mode),
                 (HeaderButton::Edit, "편집", self.editor.raw_mode),
@@ -716,7 +761,7 @@ impl AuxWindow {
             left_x += 8.0;
         }
 
-        let small_label = width < 440.0;
+        let small_label = editor_w < 440.0;
         let find_label = "찾기";
         let wrap_label = if small_label { "줄" } else { "줄바꿈" };
         let find_w = self.gpu.measure_chrome_text(find_label, 12.0, false) + 18.0;
@@ -727,9 +772,9 @@ impl AuxWindow {
         let tools_w = find_w
             + GAP
             + outline_w
-            + GAP
+            + 9.0
             + wrap_w
-            + 8.0
+            + 9.0
             + zoom_w * 2.0
             + zoom_label_w
             + GAP;
@@ -757,7 +802,15 @@ impl AuxWindow {
         ) {
             hovered = Some(HeaderButton::Outline);
         }
-        tool_x += outline_w + GAP;
+        tool_x += outline_w + 4.0;
+        self.gpu.rect(
+            tool_x,
+            control_y + 6.0,
+            1.0,
+            20.0,
+            crate::theme::border(),
+        );
+        tool_x += 5.0;
         let wrap_rect = (tool_x, control_y, wrap_w, CONTROL_H);
         if self.paint_header_button(
             HeaderButton::Wrap,
@@ -769,7 +822,15 @@ impl AuxWindow {
         ) {
             hovered = Some(HeaderButton::Wrap);
         }
-        tool_x += wrap_w + 8.0;
+        tool_x += wrap_w + 3.0;
+        self.gpu.rect(
+            tool_x,
+            control_y + 6.0,
+            1.0,
+            20.0,
+            crate::theme::border(),
+        );
+        tool_x += 5.0;
         let out_rect = (tool_x, control_y, zoom_w, CONTROL_H);
         if self.paint_header_icon_button(
             HeaderButton::ZoomOut,
@@ -836,27 +897,32 @@ impl AuxWindow {
     }
 
     fn draw_view_header(&mut self, width: f32) {
-        const CONTROL_H: f32 = 28.0;
+        const CONTROL_H: f32 = 32.0;
         const GAP: f32 = 4.0;
         self.header_hits.clear();
+        let editor_x = self.editor_origin_x();
+        let editor_w = (width - editor_x).max(1.0);
+        let toolbar_bg = self.toolbar_background();
+        self.gpu.rect(editor_x, 0.0, editor_w, VIEW_HEADER_H, toolbar_bg);
         self.gpu
-            .rect(0.0, 0.0, width, VIEW_HEADER_H, crate::theme::surface());
+            .rect(editor_x, TITLE_ROW_H, editor_w, 1.0, crate::theme::border());
         self.gpu.rect(
-            0.0,
+            editor_x,
             VIEW_HEADER_H - 1.0,
-            width,
+            editor_w,
             1.0,
             crate::theme::border(),
         );
-        let control_y = 8.0;
-        let compact = width < 520.0;
+        let title_y = 5.0;
+        let control_y = TITLE_ROW_H + 4.0;
+        let compact = editor_w < 520.0;
         if self.welcome {
             let label = if compact { "열기" } else { "문서 열기" };
             let button_w = self.gpu.measure_chrome_text(label, 12.0, true) + 22.0;
             let rect = (width - button_w - 10.0, control_y, button_w, CONTROL_H);
             self.paint_header_button(HeaderButton::Open, rect, label, false, true, true);
             self.gpu
-                .queue_icon("file-text", 12.0, 14.0, 16.0, crate::theme::text_dim());
+                .queue_icon("file-text", editor_x + 12.0, 13.0, 16.0, crate::theme::text_dim());
             let text = self
                 .status
                 .as_deref()
@@ -866,11 +932,11 @@ impl AuxWindow {
                 text,
                 12.0,
                 false,
-                (rect.0 - 42.0).max(0.0),
+                (rect.0 - editor_x - 42.0).max(0.0),
             );
             self.gpu.draw_text(
-                36.0,
-                13.0,
+                editor_x + 36.0,
+                12.0,
                 &text,
                 gpu::DrawOpts {
                     font_size: 12.0,
@@ -895,8 +961,8 @@ impl AuxWindow {
             .gpu
             .measure_chrome_text(save_label, 12.0, self.editor.modified)
             + 20.0;
-        let mut right = width - 10.0;
-        let save_rect = (right - save_w, control_y, save_w, CONTROL_H);
+        let right = width - 10.0;
+        let save_rect = (right - save_w, title_y, save_w, CONTROL_H);
         self.paint_header_button(
             HeaderButton::Save,
             save_rect,
@@ -905,10 +971,10 @@ impl AuxWindow {
             self.editor.modified,
             self.editor.modified,
         );
-        right = save_rect.0 - 8.0;
+        let mut tool_right = width - 10.0;
 
         let outline_w = self.gpu.measure_chrome_text("목차", 12.0, false) + 18.0;
-        let outline_rect = (right - outline_w, control_y, outline_w, CONTROL_H);
+        let outline_rect = (tool_right - outline_w, control_y, outline_w, CONTROL_H);
         self.paint_header_button(
             HeaderButton::Outline,
             outline_rect,
@@ -917,11 +983,11 @@ impl AuxWindow {
             false,
             true,
         );
-        right = outline_rect.0 - GAP;
+        tool_right = outline_rect.0 - GAP;
 
         let find_label = "찾기";
         let find_w = self.gpu.measure_chrome_text(find_label, 12.0, false) + 18.0;
-        let find_rect = (right - find_w, control_y, find_w, CONTROL_H);
+        let find_rect = (tool_right - find_w, control_y, find_w, CONTROL_H);
         self.paint_header_button(
             HeaderButton::Find,
             find_rect,
@@ -930,19 +996,21 @@ impl AuxWindow {
             false,
             true,
         );
-        right = find_rect.0 - GAP;
+        tool_right = find_rect.0 - GAP;
 
         let segment_w = if compact { 40.0 } else { 44.0 };
-        let segment_x = (right - segment_w * 2.0).max(70.0);
-        crate::round_rect(
-            &mut self.gpu,
-            segment_x,
-            control_y,
-            segment_w * 2.0,
-            CONTROL_H,
-            crate::theme::radius_sm(),
-            crate::theme::panel_bg(),
-        );
+        let segment_x = (tool_right - segment_w * 2.0).max(editor_x + 10.0);
+        if !self.viewer_style {
+            crate::round_rect(
+                &mut self.gpu,
+                segment_x,
+                control_y,
+                segment_w * 2.0,
+                CONTROL_H,
+                crate::theme::radius_sm(),
+                crate::theme::panel_bg(),
+            );
+        }
         for (offset, kind, label, active) in [
             (0.0, HeaderButton::View, "보기", true),
             (segment_w, HeaderButton::Edit, "편집", false),
@@ -957,39 +1025,53 @@ impl AuxWindow {
             );
         }
 
-        self.gpu.queue_icon(
-            "file-text",
-            12.0,
-            14.0,
-            16.0,
-            if self.focused {
-                crate::theme::text_dim()
-            } else {
-                crate::theme::text_mute()
-            },
-        );
+        let centered_title = self.viewer_style && !compact;
+        if !centered_title {
+            self.gpu.queue_icon(
+                "file-text",
+                editor_x + 12.0,
+                13.0,
+                16.0,
+                if self.focused {
+                    crate::theme::text_dim()
+                } else {
+                    crate::theme::text_mute()
+                },
+            );
+        }
         let name = std::path::Path::new(&self.editor.doc.path)
             .file_name()
             .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty())
             .unwrap_or("새 문서");
-        let title_x = if self.editor.modified { 43.0 } else { 36.0 };
+        let center_x = editor_x + editor_w * 0.5;
+        let left_bound = editor_x + if centered_title { 12.0 } else { 36.0 };
+        let right_bound = save_rect.0 - 12.0;
+        let available = if centered_title {
+            ((center_x - left_bound).min(right_bound - center_x) * 2.0).max(0.0)
+        } else {
+            (right_bound - left_bound).max(0.0)
+        };
+        let title = crate::screenread::clip_px(&mut self.gpu, name, 12.5, true, available);
+        let title_x = if centered_title {
+            center_x - self.gpu.measure_chrome_text(&title, 12.5, true) * 0.5
+        } else {
+            left_bound + if self.editor.modified { 7.0 } else { 0.0 }
+        };
         if self.editor.modified {
             crate::round_rect(
                 &mut self.gpu,
-                35.0,
-                19.0,
+                title_x - 9.0,
+                17.0,
                 5.0,
                 5.0,
                 2.5,
                 crate::theme::accent(),
             );
         }
-        let available = (segment_x - title_x - 8.0).max(0.0);
-        let title = crate::screenread::clip_px(&mut self.gpu, name, 12.5, true, available);
         self.gpu.draw_text(
             title_x,
-            13.0,
+            12.0,
             &title,
             gpu::DrawOpts {
                 font_size: 12.5,
@@ -1019,15 +1101,17 @@ impl AuxWindow {
         } else {
             crate::theme::surface()
         };
-        crate::round_rect(
-            &mut self.gpu,
-            rect.0,
-            rect.1,
-            rect.2,
-            rect.3,
-            crate::theme::radius_sm(),
-            fill,
-        );
+        if !self.viewer_style || primary || active || hot {
+            crate::round_rect(
+                &mut self.gpu,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+                crate::theme::radius_sm(),
+                fill,
+            );
+        }
         let tw = self.gpu.measure_chrome_text(label, 12.0, primary);
         self.gpu.draw_text(
             rect.0 + (rect.2 - tw) * 0.5,
@@ -1063,21 +1147,23 @@ impl AuxWindow {
         enabled: bool,
     ) -> bool {
         let hot = enabled && hit(self.cursor_px, rect);
-        crate::round_rect(
-            &mut self.gpu,
-            rect.0,
-            rect.1,
-            rect.2,
-            rect.3,
-            crate::theme::radius_sm(),
-            if active {
-                crate::theme::surface_active()
-            } else if hot {
-                crate::theme::surface_hover()
-            } else {
-                crate::theme::surface()
-            },
-        );
+        if !self.viewer_style || active || hot {
+            crate::round_rect(
+                &mut self.gpu,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+                crate::theme::radius_sm(),
+                if active {
+                    crate::theme::surface_active()
+                } else if hot {
+                    crate::theme::surface_hover()
+                } else {
+                    crate::theme::surface()
+                },
+            );
+        }
         self.gpu.queue_icon(
             icon,
             rect.0 + (rect.2 - 14.0) * 0.5,
@@ -1113,10 +1199,17 @@ impl AuxWindow {
         }
     }
 
-    fn draw_scroll_indicator(&mut self, x: f32, y: f32, width: f32, height: f32) {
+    fn draw_scroll_indicator(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        visible: bool,
+    ) {
         let content = self.md_content_h.max(height);
         let max_scroll = (content - height).max(0.0);
-        if max_scroll <= 1.0 || height < 48.0 {
+        if !visible || max_scroll <= 1.0 || height < 48.0 {
             self.scrollbar = None;
             self.scrollbar_drag_offset = None;
             return;
@@ -1126,7 +1219,7 @@ impl AuxWindow {
         let thumb_h = (track_h * height / content).clamp(32.0, track_h);
         let thumb_y =
             track_y + (self.editor.scroll / max_scroll).clamp(0.0, 1.0) * (track_h - thumb_h);
-        let track_x = x + width - 5.0;
+        let track_x = x + width - 7.0;
         self.scrollbar = Some(ScrollbarGeometry {
             x: track_x,
             track_y,
@@ -1135,18 +1228,33 @@ impl AuxWindow {
             thumb_h,
             max_scroll,
         });
-        let hot = self.cursor_px.0 >= track_x - 5.0
-            && self.cursor_px.0 <= track_x + 5.0
+        let hot = self.cursor_px.0 >= track_x - 7.0
+            && self.cursor_px.0 <= track_x + 7.0
             && self.cursor_px.1 >= y
             && self.cursor_px.1 <= y + height;
+        let dragging = self.scrollbar_drag_offset.is_some();
+        let visual_w = if dragging {
+            8.0
+        } else if hot {
+            7.0
+        } else {
+            5.0
+        };
+        let alpha = if dragging {
+            0xd0
+        } else if hot {
+            0x98
+        } else {
+            0x58
+        };
         crate::round_rect(
             &mut self.gpu,
-            track_x,
+            track_x - visual_w * 0.5,
             thumb_y,
-            5.0,
+            visual_w,
             thumb_h,
-            2.5,
-            crate::theme::with_alpha(crate::theme::text_dim(), if hot { 0xb8 } else { 0x72 }),
+            visual_w * 0.5,
+            crate::theme::with_alpha(crate::theme::text_dim(), alpha),
         );
     }
 
@@ -1157,6 +1265,33 @@ impl AuxWindow {
         self.outline_entries = document_outline(&self.editor.doc);
         self.outline_gen = self.editor.doc.gen;
         self.outline_scroll = self.outline_scroll.max(0.0);
+        self.outline_content_h = self.outline_entries.len() as f32 * OUTLINE_ROW_H;
+    }
+
+    fn outline_scrollbar_visible(&self, y: f32, height: f32) -> bool {
+        if self.outline_scrollbar_drag_offset.is_some() {
+            return true;
+        }
+        if !self.outline_open || self.scrollbar_drag_offset.is_some() || self.outline_entries.is_empty() {
+            return false;
+        }
+        if !self.cursor_seen {
+            return false;
+        }
+        let overlay = self.outline_overlays();
+        let panel = if overlay {
+            (
+                BODY_PAD,
+                y + 6.0,
+                self.outline_width(),
+                (height - 12.0).max(1.0),
+            )
+        } else {
+            (0.0, 0.0, self.outline_width(), self.logical_size().1)
+        };
+        let list_y = panel.1 + if overlay { 36.0 } else { TITLE_ROW_H + 8.0 };
+        let list_h = (panel.1 + panel.3 - list_y - 8.0).max(1.0);
+        self.outline_content_h > list_h && hit(self.cursor_px, panel)
     }
 
     fn current_source_line(&mut self, body_width: f32) -> usize {
@@ -1186,37 +1321,69 @@ impl AuxWindow {
         crate::markdown::row_at(&rows, row).0
     }
 
-    fn draw_outline(&mut self, _x: f32, y: f32, width: f32, height: f32) {
+    fn draw_outline(
+        &mut self,
+        _x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        show_scrollbar: bool,
+    ) {
         self.outline_hits.clear();
         self.outline_rect = None;
         self.outline_content_h = 0.0;
         self.outline_active = None;
+        self.outline_scrollbar_drawn = false;
+        self.outline_scrollbar = None;
         if !self.outline_open || self.welcome || height < 80.0 {
+            self.outline_scrollbar_drag_offset = None;
             return;
         }
-        let window_w = self.logical_size().0;
+        let (window_w, window_h) = self.logical_size();
+        let overlay = self.outline_overlays();
         let panel_w = self.outline_width();
-        let panel_h = (height - 12.0).max(1.0);
-        let panel = (BODY_PAD, y + 6.0, panel_w, panel_h);
+        let panel = if overlay {
+            (BODY_PAD, y + 6.0, panel_w, (height - 12.0).max(1.0))
+        } else {
+            (0.0, 0.0, panel_w, window_h)
+        };
         self.outline_rect = Some(panel);
-        crate::round_rect(
-            &mut self.gpu,
-            panel.0 - 1.0,
-            panel.1 - 1.0,
-            panel.2 + 2.0,
-            panel.3 + 2.0,
-            crate::theme::radius_md() + 1.0,
-            crate::theme::border(),
-        );
-        crate::round_rect(
-            &mut self.gpu,
-            panel.0,
-            panel.1,
-            panel.2,
-            panel.3,
-            crate::theme::radius_md(),
-            crate::theme::surface(),
-        );
+        if overlay {
+            crate::round_rect(
+                &mut self.gpu,
+                panel.0 - 1.0,
+                panel.1 - 1.0,
+                panel.2 + 2.0,
+                panel.3 + 2.0,
+                crate::theme::radius_md() + 1.0,
+                crate::theme::border(),
+            );
+            crate::round_rect(
+                &mut self.gpu,
+                panel.0,
+                panel.1,
+                panel.2,
+                panel.3,
+                crate::theme::radius_md(),
+                crate::theme::surface(),
+            );
+        } else {
+            self.gpu.rect(panel.0, panel.1, panel.2, panel.3, crate::theme::surface());
+            self.gpu.rect(
+                panel.0 + panel.2,
+                panel.1,
+                1.0,
+                panel.3,
+                crate::theme::border(),
+            );
+            self.gpu.rect(
+                panel.0,
+                TITLE_ROW_H,
+                panel.2,
+                1.0,
+                crate::theme::border(),
+            );
+        }
         self.gpu.draw_text(
             panel.0 + 12.0,
             panel.1 + 10.0,
@@ -1254,8 +1421,8 @@ impl AuxWindow {
         );
         self.header_hits.push((HeaderButton::Outline, close));
 
-        let list_y = panel.1 + 36.0;
-        let list_h = (panel.3 - 44.0).max(1.0);
+        let list_y = panel.1 + if overlay { 36.0 } else { TITLE_ROW_H + 8.0 };
+        let list_h = (panel.1 + panel.3 - list_y - 8.0).max(1.0);
         self.outline_content_h = self.outline_entries.len() as f32 * OUTLINE_ROW_H;
         let max_scroll = (self.outline_content_h - list_h).max(0.0);
         self.outline_scroll = self.outline_scroll.clamp(0.0, max_scroll);
@@ -1347,15 +1514,41 @@ impl AuxWindow {
             let track_h = list_h;
             let thumb_h = (track_h * list_h / self.outline_content_h).clamp(24.0, track_h);
             let thumb_y = list_y + self.outline_scroll / max_scroll * (track_h - thumb_h);
-            crate::round_rect(
-                &mut self.gpu,
-                panel.0 + panel.2 - 5.0,
+            let track_x = panel.0 + panel.2 - 7.0;
+            self.outline_scrollbar = Some(ScrollbarGeometry {
+                x: track_x,
+                track_y: list_y,
+                track_h,
                 thumb_y,
-                3.0,
                 thumb_h,
-                1.5,
-                crate::theme::with_alpha(crate::theme::text_dim(), 0x82),
-            );
+                max_scroll,
+            });
+            if show_scrollbar {
+                self.outline_scrollbar_drawn = true;
+                let visual_w = if self.outline_scrollbar_drag_offset.is_some() {
+                    8.0
+                } else {
+                    7.0
+                };
+                crate::round_rect(
+                    &mut self.gpu,
+                    track_x - visual_w * 0.5,
+                    thumb_y,
+                    visual_w,
+                    thumb_h,
+                    visual_w * 0.5,
+                    crate::theme::with_alpha(
+                        crate::theme::text_dim(),
+                        if self.outline_scrollbar_drag_offset.is_some() {
+                            0xd0
+                        } else {
+                            0x98
+                        },
+                    ),
+                );
+            }
+        } else {
+            self.outline_scrollbar_drag_offset = None;
         }
 
         if let Some((title, row_y)) = tooltip {
@@ -1765,6 +1958,10 @@ fn rendered_find_targets(doc: &MarkdownDoc, query: &str) -> Vec<RenderedFindTarg
         .collect()
 }
 
+fn default_outline_open(viewer_only: bool, is_markdown: bool, raw_mode: bool, width: f32) -> bool {
+    viewer_only && is_markdown && !raw_mode && width >= OUTLINE_RAIL_MIN_W
+}
+
 fn make_editor(
     path: &std::path::Path,
     text: &str,
@@ -2000,7 +2197,9 @@ impl App {
                             let aux = &mut self.aux.windows[index];
                             aux.font_scale = font_scale;
                             aux.gpu.set_font_size(FONT_SIZE * font_scale);
-                            aux.outline_open = outline_open;
+                            if let Some(outline_open) = outline_open {
+                                aux.outline_open = outline_open;
+                            }
                             aux.outline_scroll = outline_scroll;
                             if missing_source {
                                 aux.status = Some("원본이 없어 복원본만 보관 중이에요".to_string());
@@ -2133,11 +2332,18 @@ impl App {
                 return Err(editor);
             }
         };
+        let initial_outline_open = default_outline_open(
+            self.viewer_only,
+            editor.is_md_doc,
+            editor.raw_mode,
+            window.inner_size().width as f32 / gpu.scale().max(0.5),
+        );
         self.aux.windows.push(AuxWindow {
             gpu,
             editor,
             dirty: true,
             cursor_px: (0.0, 0.0),
+            cursor_seen: false,
             selecting: false,
             focused: wants_focus,
             preedit: String::new(),
@@ -2150,7 +2356,7 @@ impl App {
             viewer_prompt_hits: Vec::new(),
             scrollbar: None,
             scrollbar_drag_offset: None,
-            outline_open: false,
+            outline_open: initial_outline_open,
             outline_scroll: 0.0,
             outline_gen: 0,
             outline_entries: Vec::new(),
@@ -2158,9 +2364,13 @@ impl App {
             outline_rect: None,
             outline_content_h: 0.0,
             outline_active: None,
+            outline_scrollbar_drawn: false,
+            outline_scrollbar: None,
+            outline_scrollbar_drag_offset: None,
             outline_layout_anchor: None,
             view_find_targets: Vec::new(),
             view_find_revealed: None,
+            viewer_style: self.viewer_only,
             welcome: false,
             missing_source,
             status: None,
@@ -2282,6 +2492,7 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.aux.windows[index].gpu.scale().max(0.5);
+                self.aux.windows[index].cursor_seen = true;
                 self.aux.windows[index].cursor_px =
                     (position.x as f32 / scale, position.y as f32 / scale);
                 let chrome_h = self.aux.windows[index].chrome_height();
@@ -2313,9 +2524,21 @@ impl App {
                         && point.1 >= bar.track_y
                         && point.1 <= bar.track_y + bar.track_h
                 });
-                let cursor = if self.aux.windows[index].scrollbar_drag_offset.is_some() {
+                let over_outline_scrollbar = self.aux.windows[index]
+                    .outline_scrollbar
+                    .is_some_and(|bar| {
+                        point.0 >= bar.x - 7.0
+                            && point.0 <= bar.x + 7.0
+                            && point.1 >= bar.track_y
+                            && point.1 <= bar.track_y + bar.track_h
+                    });
+                let cursor = if self.aux.windows[index].scrollbar_drag_offset.is_some()
+                    || self.aux.windows[index]
+                        .outline_scrollbar_drag_offset
+                        .is_some()
+                {
                     winit::window::CursorIcon::Grabbing
-                } else if over_scrollbar {
+                } else if over_scrollbar || over_outline_scrollbar {
                     winit::window::CursorIcon::Grab
                 } else if over_action {
                     winit::window::CursorIcon::Pointer
@@ -2325,7 +2548,7 @@ impl App {
                     winit::window::CursorIcon::Default
                 };
                 self.aux.windows[index].window.set_cursor(cursor);
-                if !self.aux_scrollbar_drag(index) {
+                if !self.aux_outline_scrollbar_drag(index) && !self.aux_scrollbar_drag(index) {
                     self.aux_drag_selection(index);
                 }
                 if hover_chrome {
@@ -2342,6 +2565,7 @@ impl App {
                 ElementState::Released => {
                     let aux = &mut self.aux.windows[index];
                     aux.scrollbar_drag_offset = None;
+                    aux.outline_scrollbar_drag_offset = None;
                     aux.selecting = false;
                     if aux.editor.sel_anchor == Some((aux.editor.cur_line, aux.editor.cur_col)) {
                         aux.editor.sel_anchor = None;
@@ -2406,6 +2630,8 @@ impl App {
                         "wrap": aux.editor.wrap,
                         "font_scale": aux.font_scale,
                         "chrome_height": aux.chrome_height(),
+                        "editor_origin_x": aux.editor_origin_x(),
+                        "viewer_style": aux.viewer_style,
                         "outline_open": aux.outline_open,
                         "outline_scroll": aux.outline_scroll,
                         "outline_entries": aux.outline_entries.len(),
@@ -2414,6 +2640,8 @@ impl App {
                         "outline_rect": aux.outline_rect,
                         "body_rect": aux.body_box(),
                         "scrollbar": aux.scrollbar.is_some(),
+                        "visible_scrollbars": usize::from(aux.scrollbar.is_some())
+                            + usize::from(aux.outline_scrollbar_drawn),
                         "buffer_lines": aux.editor.edit_lines.len(),
                         "buffer_hash": hash.finish(),
                         "focused": aux.focused,
@@ -2522,6 +2750,30 @@ impl App {
         ))
     }
 
+    pub(crate) fn aux_probe_scrollbar_center(
+        &self,
+        index: usize,
+        outline: bool,
+    ) -> Option<(WindowId, winit::dpi::PhysicalPosition<f64>)> {
+        if !crate::verification_run() {
+            return None;
+        }
+        let aux = self.aux.windows.get(index)?;
+        let bar = if outline {
+            aux.outline_scrollbar?
+        } else {
+            aux.scrollbar?
+        };
+        let scale = aux.gpu.scale() as f64;
+        Some((
+            aux.window.id(),
+            winit::dpi::PhysicalPosition::new(
+                bar.x as f64 * scale,
+                (bar.thumb_y + bar.thumb_h * 0.5) as f64 * scale,
+            ),
+        ))
+    }
+
     pub(crate) fn aux_probe_resize(&self, index: usize, width: u32, height: u32) -> bool {
         if !crate::verification_run() {
             return false;
@@ -2623,7 +2875,7 @@ impl App {
                         h_scroll: editor.h_scroll,
                         wrap: editor.wrap,
                         font_scale: None,
-                        outline_open: false,
+                        outline_open: Some(false),
                         outline_scroll: 0.0,
                         frame: None,
                     })
@@ -3335,7 +3587,7 @@ impl App {
             }
             return;
         }
-        if self.aux_scrollbar_press(index) {
+        if self.aux_outline_scrollbar_press(index) || self.aux_scrollbar_press(index) {
             return;
         }
         if let Some(button) = self.aux.windows[index]
@@ -3567,6 +3819,48 @@ impl App {
         aux.dirty = true;
         aux.window.request_redraw();
         self.save_aux_windows_state();
+    }
+
+    fn aux_outline_scrollbar_press(&mut self, index: usize) -> bool {
+        let aux = &mut self.aux.windows[index];
+        let Some(bar) = aux.outline_scrollbar else {
+            return false;
+        };
+        let point = aux.cursor_px;
+        if point.0 < bar.x - 7.0
+            || point.0 > bar.x + 7.0
+            || point.1 < bar.track_y
+            || point.1 > bar.track_y + bar.track_h
+        {
+            return false;
+        }
+        aux.outline_scrollbar_drag_offset = Some(
+            if point.1 >= bar.thumb_y && point.1 <= bar.thumb_y + bar.thumb_h {
+                point.1 - bar.thumb_y
+            } else {
+                bar.thumb_h * 0.5
+            },
+        );
+        self.aux_outline_scrollbar_drag(index);
+        true
+    }
+
+    fn aux_outline_scrollbar_drag(&mut self, index: usize) -> bool {
+        let aux = &mut self.aux.windows[index];
+        let (Some(bar), Some(offset)) = (
+            aux.outline_scrollbar,
+            aux.outline_scrollbar_drag_offset,
+        ) else {
+            return false;
+        };
+        let travel = (bar.track_h - bar.thumb_h).max(1.0);
+        let thumb_y =
+            (aux.cursor_px.1 - offset).clamp(bar.track_y, bar.track_y + bar.track_h - bar.thumb_h);
+        aux.outline_scroll = ((thumb_y - bar.track_y) / travel) * bar.max_scroll;
+        aux.dirty = true;
+        aux.window.request_redraw();
+        self.save_aux_windows_state();
+        true
     }
 
     fn aux_scrollbar_press(&mut self, index: usize) -> bool {
@@ -3980,7 +4274,7 @@ mod tests {
             h_scroll: 7.0,
             wrap: true,
             font_scale: Some(1.2),
-            outline_open: true,
+            outline_open: Some(true),
             outline_scroll: 91.0,
             frame: Some(FrameRecord {
                 x: -20,
@@ -3993,7 +4287,7 @@ mod tests {
         let got: RestoreRecord = serde_json::from_slice(&bytes).unwrap();
         assert!(got.raw_mode && got.wrap && got.modified);
         assert_eq!(got.font_scale, Some(1.2));
-        assert!(got.outline_open);
+        assert_eq!(got.outline_open, Some(true));
         assert_eq!(got.outline_scroll, 91.0);
         assert_eq!(got.sel_anchor, Some((1, 1)));
         assert_eq!(got.extra[0].anchor, Some((4, 1)));
@@ -4040,5 +4334,13 @@ mod tests {
         let labels = rendered_find_targets(&doc, "보이는");
         assert_eq!(labels.len(), 2);
         assert_ne!(labels[0].block, labels[1].block);
+    }
+
+    #[test]
+    fn fresh_viewer_opens_wide_outline_but_not_narrow_or_existing_editors() {
+        assert!(default_outline_open(true, true, false, 760.0));
+        assert!(!default_outline_open(true, true, false, 320.0));
+        assert!(!default_outline_open(true, true, true, 760.0));
+        assert!(!default_outline_open(false, true, false, 760.0));
     }
 }

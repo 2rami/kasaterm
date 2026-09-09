@@ -631,6 +631,10 @@ impl GpuRenderer {
         let mut md_shaper = Shaper::from_path(&md_font, md_idx)
             .or_else(|_| Shaper::from_path(&font_path, 0))
             .with_context(|| format!("load markdown font {md_font}"))?;
+        #[cfg(target_os = "windows")]
+        if crate::theme::viewer_chrome() {
+            md_shaper.set_variation_weight(400.0);
+        }
         eprintln!("[font] markdown={md_font}");
         // Same bundled symbol/icon fallbacks so glyphs the gothic lacks still
         // resolve (and CJK falls through to the gothic's own coverage first).
@@ -640,6 +644,13 @@ impl GpuRenderer {
         let mut md_bold_shaper = Shaper::from_path(&md_bold_font, md_bold_idx)
             .or_else(|_| Shaper::from_path(&md_font, md_idx))
             .with_context(|| format!("load markdown bold font {md_bold_font}"))?;
+        #[cfg(target_os = "windows")]
+        if crate::theme::viewer_chrome() {
+            md_bold_shaper.set_variation_weight(600.0);
+        }
+        if crate::theme::viewer_chrome() {
+            md_bold_shaper.set_bold_face_path(0, &md_bold_font, md_bold_idx);
+        }
         attach_fallback_chain(&mut md_bold_shaper);
         let cell_w = cell_w_for(&mut shaper, font_size_px as f32);
         // Use the font's natural line metric (ascent+descent+leading)
@@ -974,15 +985,18 @@ impl GpuRenderer {
     /// wants multiples of 12 device px. Off-grid sizes resample the dots and the
     /// result reads as a blurry mono font rather than a pixel one. Measuring and
     /// drawing both come through here so the snapped size can never diverge.
-    fn chrome_face(&mut self, font_size: f32) -> (u8, u32) {
-        self.chrome_face_opt(font_size, false)
+    fn chrome_face(&mut self, font_size: f32, bold: bool) -> (u8, u32) {
+        self.chrome_face_opt(font_size, false, bold)
     }
 
     /// `force_mono` pins the terminal face regardless of shape — for chrome that
     /// is *depicting* the terminal (the theme cards' `ls -la` line). Drawing that
     /// in the UI face would make the preview lie about what the terminal shows.
-    fn chrome_face_opt(&mut self, font_size: f32, force_mono: bool) -> (u8, u32) {
+    fn chrome_face_opt(&mut self, font_size: f32, force_mono: bool, bold: bool) -> (u8, u32) {
         let raw = (font_size * self.scale).round().max(1.0) as u32;
+        if !force_mono && crate::theme::viewer_chrome() {
+            return (if bold { 2 } else { 1 }, raw);
+        }
         if force_mono || !crate::theme::pixel_chrome() {
             return (0, raw);
         }
@@ -1019,8 +1033,20 @@ impl GpuRenderer {
                 return self.atlas.get_or_bake(&self.device, &self.queue, sh, key);
             }
         }
-        self.atlas
-            .get_or_bake(&self.device, &self.queue, &mut self.shaper, key)
+        match key.font {
+            2 => self.atlas.get_or_bake(
+                &self.device,
+                &self.queue,
+                &mut self.md_bold_shaper,
+                key,
+            ),
+            1 => self
+                .atlas
+                .get_or_bake(&self.device, &self.queue, &mut self.md_shaper, key),
+            _ => self
+                .atlas
+                .get_or_bake(&self.device, &self.queue, &mut self.shaper, key),
+        }
     }
 
     /// Space width for chrome runs. The mono primary's cell advance is the right
@@ -1032,12 +1058,16 @@ impl GpuRenderer {
                 return sh.advance(' ', size_px);
             }
         }
-        self.shaper.cell_advance(size_px)
+        match font {
+            2 => self.md_bold_shaper.advance(' ', size_px),
+            1 => self.md_shaper.advance(' ', size_px),
+            _ => self.shaper.cell_advance(size_px),
+        }
     }
 
     pub fn measure_chrome_text(&mut self, text: &str, font_size: f32, bold: bool) -> f32 {
         let s = self.scale;
-        let (font, size_px) = self.chrome_face(font_size);
+        let (font, size_px) = self.chrome_face(font_size, bold);
         let mut pen = 0.0_f32;
         for ch in text.chars() {
             if ch == ' ' {
@@ -1109,7 +1139,7 @@ impl GpuRenderer {
         if let Some(log) = self.text_log.as_mut() {
             log.push(text.to_string());
         }
-        let (font, size_px) = self.chrome_face_opt(opts.font_size, force_mono);
+        let (font, size_px) = self.chrome_face_opt(opts.font_size, force_mono, opts.bold);
         // The pixel face sets ascent == em, so its glyphs sit far higher above
         // the baseline than the mono primary's 0.78 assumption — without the
         // taller ratio the whole label rides up out of its row.
@@ -2063,7 +2093,7 @@ impl GpuRenderer {
         // 좌표로 바꿔 둔다.
         sel_doc: Option<(f32, f32, f32, f32)>,
     ) -> f32 {
-        self.draw_markdown_with_find(blocks, doc_gen, x, y, w, h, scroll, sel_doc, None)
+        self.draw_markdown_with_find(blocks, doc_gen, x, y, w, h, scroll, sel_doc, None, true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2078,6 +2108,7 @@ impl GpuRenderer {
         scroll: f32,
         sel_doc: Option<(f32, f32, f32, f32)>,
         find: Option<(&str, usize, usize)>,
+        draw_scrollbar: bool,
     ) -> f32 {
         use crate::MdBlock;
         // Link / copy-button rects are rebuilt from scratch each frame so
@@ -2835,7 +2866,7 @@ impl GpuRenderer {
         // 없다. macOS 오버레이 스타일로 트랙 없이 엄지만, 읽기 칼럼 밖(pane 오른쪽
         // 여백)에 둔다. 여기서 그리는 이유는 총 높이가 방금 잰 값이라서다 — 앞에서
         // 그리면 한 프레임 전 높이를 써야 한다.
-        if content_h > h + 1.0 {
+        if draw_scrollbar && content_h > h + 1.0 {
             let track_h = (h - 8.0).max(1.0);
             let th = (h / content_h * track_h).max(24.0);
             let t = (scroll / (content_h - h)).clamp(0.0, 1.0);
@@ -5924,6 +5955,16 @@ fn fallback_font_paths() -> Vec<(String, u32)> {
 /// Markdown body font: a proportional gothic. Prefer Noto Sans KR if the user
 /// installed it, else fall back to Apple SD Gothic Neo (always present on
 /// macOS). Returns (path, face_index).
+#[cfg(target_os = "windows")]
+fn viewer_bundled_noto_path() -> Option<String> {
+    if !crate::theme::viewer_chrome() {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let path = exe.parent()?.join("fonts").join("NotoSansKR-Variable.ttf");
+    path.is_file().then(|| path.to_string_lossy().into_owned())
+}
+
 fn md_font_path() -> (String, u32) {
     #[cfg(target_os = "macos")]
     {
@@ -5942,6 +5983,20 @@ fn md_font_path() -> (String, u32) {
     }
     #[cfg(target_os = "windows")]
     {
+        if let Some(path) = viewer_bundled_noto_path() {
+            return (path, 0);
+        }
+        if crate::theme::viewer_chrome() {
+            for path in windows_font_candidates(&[
+                "NotoSansKR-Regular.ttf",
+                "NotoSansCJKkr-Regular.otf",
+                "NotoSansCJK-Regular.ttc",
+            ]) {
+                if std::path::Path::new(&path).exists() {
+                    return (path, 0);
+                }
+            }
+        }
         return (r"C:\Windows\Fonts\malgun.ttf".to_string(), 0);
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -5953,8 +6008,9 @@ fn md_font_path() -> (String, u32) {
     }
 }
 
-/// Bold weight of the markdown gothic. Apple SD Gothic Neo packs its Bold face
-/// at TTC index 6; Noto Sans KR Bold ships as a separate file.
+/// Emphasis weight of the markdown gothic. Viewer uses Apple SD Gothic Neo
+/// SemiBold (TTC 4); the terminal app keeps its existing Bold face (TTC 6).
+/// Noto Sans KR Bold ships as a separate file.
 fn md_bold_font_path() -> (String, u32) {
     #[cfg(target_os = "macos")]
     {
@@ -5969,10 +6025,28 @@ fn md_bold_font_path() -> (String, u32) {
                 return (c, 0);
             }
         }
-        return ("/System/Library/Fonts/AppleSDGothicNeo.ttc".to_string(), 6);
+        return (
+            "/System/Library/Fonts/AppleSDGothicNeo.ttc".to_string(),
+            if crate::theme::viewer_chrome() { 4 } else { 6 },
+        );
     }
     #[cfg(target_os = "windows")]
     {
+        if let Some(path) = viewer_bundled_noto_path() {
+            return (path, 0);
+        }
+        if crate::theme::viewer_chrome() {
+            for path in windows_font_candidates(&[
+                "NotoSansKR-SemiBold.ttf",
+                "NotoSansKR-Bold.ttf",
+                "NotoSansCJKkr-Bold.otf",
+                "NotoSansCJK-Bold.ttc",
+            ]) {
+                if std::path::Path::new(&path).exists() {
+                    return (path, 0);
+                }
+            }
+        }
         return (r"C:\Windows\Fonts\malgunbd.ttf".to_string(), 0);
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -6938,6 +7012,7 @@ pub fn remember_unzoomed_frame(_window: &Window, _saved: &mut Option<(f64, f64, 
 #[cfg(test)]
 mod account_icon_tests {
     use super::GpuRenderer;
+    use kasa_cells::Shaper;
 
     #[test]
     fn official_email_assets_parse_and_paint_pixels() {
@@ -6952,5 +7027,18 @@ mod account_icon_tests {
             );
         }
         assert!(GpuRenderer::icon_svg("mail").is_some());
+    }
+
+    #[test]
+    fn bundled_noto_variable_rasterizes_distinct_regular_and_semibold_weights() {
+        let bytes = include_bytes!("../assets/fonts/NotoSansKR-Variable.ttf").to_vec();
+        let mut regular = Shaper::from_bytes(bytes.clone(), 0).expect("bundled Noto regular");
+        regular.set_variation_weight(400.0);
+        let mut semibold = Shaper::from_bytes(bytes, 0).expect("bundled Noto semibold");
+        semibold.set_variation_weight(600.0);
+        let regular = regular.rasterize('한', 28.0).expect("regular Hangul glyph");
+        let semibold = semibold.rasterize('한', 28.0).expect("semibold Hangul glyph");
+        assert_eq!(regular.advance, semibold.advance);
+        assert_ne!(regular.data, semibold.data);
     }
 }

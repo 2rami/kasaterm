@@ -77,6 +77,7 @@ pub struct Shaper {
     /// (Info 패널 40행 = 9.0ms)이 먼저 무너졌다. 폭은 크기당 상수라 한 번만
     /// 재면 된다.
     cell_adv: std::collections::HashMap<u32, f32>,
+    variation_weight: Option<f32>,
 }
 
 /// One baked glyph's raster + metric. Coordinates follow the swash /
@@ -177,7 +178,13 @@ impl Shaper {
             italic_faces: Vec::new(),
             scale_ctx: ScaleContext::new(),
             cell_adv: std::collections::HashMap::new(),
+            variation_weight: None,
         })
+    }
+
+    pub fn set_variation_weight(&mut self, weight: f32) {
+        self.variation_weight = Some(weight);
+        self.cell_adv.clear();
     }
 
     /// Register an OS-installed bold face that mirrors the regular face at
@@ -213,6 +220,7 @@ impl Shaper {
             italic_faces: Vec::new(),
             scale_ctx: ScaleContext::new(),
             cell_adv: std::collections::HashMap::new(),
+            variation_weight: None,
         })
     }
 
@@ -467,6 +475,7 @@ impl Shaper {
             }
             return None;
         }
+        let variation_weight = self.variation_weight;
         // Per-face size boost. Fallback faces (anything past index 0)
         // routinely design glyphs at a smaller fraction of the em
         // than monospace primaries — STIX Math's chevron lives at
@@ -548,7 +557,12 @@ impl Shaper {
             };
             let render_at = |scale_ctx: &mut ScaleContext, face_size: f32| {
                 let font = FontRef::from_index(font_data, font_index).unwrap();
-                let mut scaler = scale_ctx.builder(font).size(face_size).hint(true).build();
+                let builder = scale_ctx.builder(font).size(face_size).hint(true);
+                let mut scaler = if let Some(weight) = variation_weight {
+                    builder.variations([("wght", weight)]).build()
+                } else {
+                    builder.build()
+                };
                 // Color sources first so Apple Color Emoji (sbix), CBDT, and
                 // COLR/CPAL faces render as full-color RGBA; swash falls
                 // through to the outline / alpha bitmap for monochrome faces.

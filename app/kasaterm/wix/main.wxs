@@ -144,6 +144,22 @@
                                 Source='$(var.CargoTargetBinDir)\kasaterm-cli.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <Directory Id='ViewerFonts' Name='fonts'>
+                            <Component Id='ViewerNotoSansKr' Guid='*'>
+                                <File Id='ViewerNotoSansKrVariable'
+                                    Name='NotoSansKR-Variable.ttf'
+                                    DiskId='1'
+                                    Source='app\kasaterm\assets\fonts\NotoSansKR-Variable.ttf'
+                                    KeyPath='yes'/>
+                            </Component>
+                            <Component Id='ViewerNotoSansKrLicense' Guid='*'>
+                                <File Id='ViewerNotoSansKrOfl'
+                                    Name='OFL-NotoSansKR.txt'
+                                    DiskId='1'
+                                    Source='app\kasaterm\assets\fonts\OFL-NotoSansKR.txt'
+                                    KeyPath='yes'/>
+                            </Component>
+                        </Directory>
                         <!-- 아로나 웹뷰 정적 번들(bin\arona-ui\) — arona_ui_root() 가
                              exe 옆에서 찾는다. 내용물 Component 들은 CI 가 heat.exe 로
                              하베스트한 aronaui.wxs (cargo wix -I) 에서 온다. 수동 빌드 시에도
@@ -200,6 +216,8 @@
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
             <ComponentRef Id='binary2'/>
+            <ComponentRef Id='ViewerNotoSansKr'/>
+            <ComponentRef Id='ViewerNotoSansKrLicense'/>
             <ComponentGroupRef Id='AronaUiGroup'/>
             <ComponentGroupRef Id='CollabHooksGroup'/>
             <ComponentRef Id='StartMenuShortcut'/>
