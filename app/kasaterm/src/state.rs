@@ -398,7 +398,7 @@ pub(crate) struct MachinesColMachine {
 pub(crate) struct MachinesColRow {
     /// 로컬 surface id. 원격 전용 행은 빈 문자열(이사 대상이 못 된다).
     pub(crate) pane: String,
-    /// 원격 전용 행의 그 기계 pane id(`%N`) — 「거울」이 붙는 열쇠. 로컬·미러 행은 빈값.
+    /// Source device pane id (`%N`), also retained by existing mirrors.
     pub(crate) remote_id: String,
     /// 원격 pane 의 작업 폴더 — 거울의 링크 정체에 실어야 재접속 따라잡기가 레포를 안다.
     pub(crate) remote_cwd: String,
@@ -629,8 +629,6 @@ impl Default for SessionsColState {
 pub(crate) enum InfoSection {
     Dir,
     Procs,
-    /// 다른 기계(명부) — 기계별 학생·거울·방 펼치기·화면 보기(machinescol.rs). 명부가 비면 없다.
-    Machines,
 }
 
 /// 프로젝트 디렉터리 섹션의 액션 버튼.
@@ -725,7 +723,6 @@ pub(crate) struct InfoState {
     pub(crate) root_is_repo: bool,
     pub(crate) dir_collapsed: bool,
     pub(crate) procs_collapsed: bool,
-    pub(crate) machines_collapsed: bool,
     /// 우클릭 메뉴 — `(화면 좌표, 대상)`.
     /// 열렸으면 (좌상단 x, y, 겨눈 프로세스 pid). pid 를 들고 다니는 건 메뉴가
     /// 열린 뒤 목록이 갱신돼도 겨눈 대상이 흔들리지 않게 하려는 것이다.
@@ -769,8 +766,9 @@ pub(crate) struct InfoState {
     /// 학생 줄 우클릭 메뉴 — `(x, y, pane id, 단)`.
     pub(crate) pane_menu: Option<(f32, f32, String, PaneMenuPage)>,
     pub(crate) pane_menu_rects: Vec<(PaneMenuItem, (f32, f32, f32, f32))>,
-    /// 「다른 기계」 줄 hit rect `(라벨, rect)` — 누르면 그 기계의 메뉴. 매 paint 재생성.
+    /// Device heading hit rect: click collapses, right-click opens its menu.
     pub(crate) machine_rects: Vec<(String, (f32, f32, f32, f32))>,
+    pub(crate) machine_collapsed: std::collections::HashSet<String>,
     /// 「다른 기계」 밑에 펼친 그 기계 pane 줄 hit rect — `(라벨, 누르면 할 일, 이쪽에
     /// 이미 있는 거울 pane, rect)`. 거울이 있으면 그리로 가고, 없으면 거울을 연다.
     pub(crate) machine_pane_rects:
@@ -804,7 +802,6 @@ impl Default for InfoState {
             root_is_repo: false,
             dir_collapsed: false,
             procs_collapsed: false,
-            machines_collapsed: false,
             ctx_menu: None,
             group_collapsed: std::collections::HashSet::new(),
             pane_expanded: std::collections::HashSet::new(),
@@ -819,6 +816,7 @@ impl Default for InfoState {
             pane_menu: None,
             pane_menu_rects: Vec::new(),
             machine_rects: Vec::new(),
+            machine_collapsed: std::collections::HashSet::new(),
             machine_pane_rects: Vec::new(),
             machine_click: None,
             machine_menu: None,

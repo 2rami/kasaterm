@@ -8,6 +8,7 @@ import UserNotifications
 final class NotificationService: UNNotificationServiceExtension {
   private var handler: ((UNNotificationContent) -> Void)?
   private var content: UNMutableNotificationContent?
+  private let completionLock = NSLock()
 
   override func didReceive(
     _ request: UNNotificationRequest,
@@ -17,25 +18,34 @@ final class NotificationService: UNNotificationServiceExtension {
     let mutable = (request.content.mutableCopy() as? UNMutableNotificationContent)
     content = mutable
     guard let mutable else {
-      contentHandler(request.content)
+      finish(request.content)
       return
     }
     let info = request.content.userInfo
     let sender = (info["sender"] as? String).flatMap { $0.isEmpty ? nil : $0 }
     let avatar = (info["avatar"] as? String).flatMap(URL.init(string:))
     guard let sender else {
-      contentHandler(mutable)
+      finish(mutable)
       return
     }
     fetch(avatar) { data in
-      contentHandler(Self.asMessage(mutable, from: sender, image: data, thread: info["pane"] as? String))
+      self.finish(Self.asMessage(mutable, from: sender, image: data, thread: mutable.threadIdentifier))
     }
   }
 
   override func serviceExtensionTimeWillExpire() {
-    if let content, let handler {
-      handler(content)
+    if let content {
+      finish(content)
     }
+  }
+
+  // 다운로드 완료와 만료 콜백이 겹쳐도 같은 알림을 두 번 완료하지 않는다.
+  private func finish(_ content: UNNotificationContent) {
+    completionLock.lock()
+    let callback = handler
+    handler = nil
+    completionLock.unlock()
+    callback?(content)
   }
 
   private func fetch(_ url: URL?, _ done: @escaping (Data?) -> Void) {
@@ -70,7 +80,7 @@ final class NotificationService: UNNotificationServiceExtension {
       outgoingMessageType: .outgoingMessageText,
       content: content.body,
       speakableGroupName: nil,
-      conversationIdentifier: thread ?? sender,
+      conversationIdentifier: thread.flatMap { $0.isEmpty ? nil : $0 } ?? sender,
       serviceName: nil,
       sender: person,
       attachments: nil

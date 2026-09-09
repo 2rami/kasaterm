@@ -70,7 +70,6 @@ pub struct RemoteSession {
 enum Out {
     Input(Vec<u8>),
     Control(String),
-    Viewport,
     Detach,
 }
 
@@ -89,22 +88,20 @@ impl Drop for DetachOnDrop {
 #[derive(Default)]
 struct ViewportState {
     target: Mutex<Option<(u16, u16)>>,
-    capable: AtomicBool,
-    granted: AtomicBool,
     detached: AtomicBool,
 }
 
 /// 원격 링크 하나의 명부 항목.
 struct Link {
+    /// Authentication of the existing connection, reused for appearance GETs.
+    auth_token: Option<String>,
     kill: tokio::sync::mpsc::UnboundedSender<()>,
     base: String,
     remote_id: String,
     identity: RemoteIdentity,
-    /// 거울은 호스트가 광고한 viewport 계약으로만 논리 격자를 빌린다.
-    /// 실제 원격 창의 자리·크기는 호스트 GUI가 계속 소유한다.
+    /// Mirrors preserve the host grid; only the viewer's renderer scales it.
     view: bool,
     viewport: Arc<ViewportState>,
-    outgoing: std::sync::Weak<tokio::sync::mpsc::UnboundedSender<Out>>,
     /// 같은 local pane id 가 재사용될 때 낡은 매니저의 정리 가드가 **새 링크를**
     /// 걷어가지 않게 하는 세대 표식.
     token: u64,
@@ -165,33 +162,14 @@ pub fn is_view_pane(local_id: &str) -> bool {
         .is_some_and(|l| l.view)
 }
 
-pub fn view_supports_viewport(local_id: &str) -> bool {
-    links().lock().unwrap().get(local_id)
-        .is_some_and(|link| link.view && link.viewport.capable.load(Ordering::Acquire))
-}
-
-/// 로컬 파서 크기는 서버 size만 따른다. 목표만 보내야 구 호스트나 제어권을
-/// 거절한 호스트에서도 원본 바이트를 잘못된 너비로 해석하지 않는다.
+/// Record local display bounds without negotiating ownership of the source PTY.
+/// Both parsers keep the host's grid. The GUI fits that grid inside these bounds,
+/// so attaching, resizing or reconnecting a mirror never resizes the source.
 pub fn set_viewport(local_id: &str, cols: u16, rows: u16) -> bool {
     let map = links().lock().unwrap();
     let Some(link) = map.get(local_id).filter(|link| link.view) else { return false };
-    let mut target = link.viewport.target.lock().unwrap();
-    let next = (cols.clamp(2, 1000), rows.clamp(1, 1000));
-    if *target == Some(next) {
-        return true;
-    }
-    *target = Some(next);
-    link.outgoing.upgrade().is_some_and(|tx| tx.send(Out::Viewport).is_ok())
-}
-
-fn viewport_request(state: &ViewportState, acquired_this_connection: &mut bool) -> Option<String> {
-    if !state.capable.load(Ordering::Acquire) {
-        return None;
-    }
-    let (cols, rows) = (*state.target.lock().unwrap())?;
-    let op = if *acquired_this_connection { "resize" } else { "acquire" };
-    *acquired_this_connection = true;
-    Some(serde_json::json!({"t": "viewport", "op": op, "cols": cols, "rows": rows}).to_string())
+    *link.viewport.target.lock().unwrap() = Some((cols.clamp(2, 1000), rows.clamp(1, 1000)));
+    true
 }
 
 /// 원격 pane 의 전송 명세 + 정체 한 벌. remote_meta 와 달리 표시·역이사가 쓴다.
@@ -303,13 +281,21 @@ pub fn connect(
     cols: u16,
     rows: u16,
 ) -> Result<RemoteSession> {
-    connect_inner(spec, local_pane_id, cols, rows, false)
+    connect_inner(spec, local_pane_id, cols, rows, false, false)
 }
 
-/// 거울은 서버의 size를 먼저 받은 뒤 `set_viewport`로 실제 로컬 칸 크기를
-/// 제안한다. 지원 호스트만 논리 격자를 빌려주며 구 호스트는 읽기 미러로 남는다.
+/// Mirrors follow the server's grid and fit it locally, without acquiring size control.
 pub fn connect_view(spec: RemoteSpec, local_pane_id: &str) -> Result<RemoteSession> {
-    connect_inner(spec, local_pane_id, 0, 0, true)
+    connect_inner(spec, local_pane_id, 0, 0, true, false)
+}
+
+/// Restore a known remote identity immediately, even while its host is starting.
+/// A late tunnel must never turn a saved mirror into a new local shell.
+pub fn restore_connection(
+    spec: RemoteSpec, local_pane_id: &str, cols: u16, rows: u16, view: bool,
+) -> Result<RemoteSession> {
+    anyhow::ensure!(spec.pane.as_deref().is_some_and(|id| !id.is_empty()), "missing restored remote pane");
+    connect_inner(spec, local_pane_id, cols.max(1), rows.max(1), view, true)
 }
 
 fn connect_inner(
@@ -318,6 +304,7 @@ fn connect_inner(
     cols: u16,
     rows: u16,
     view: bool,
+    deferred: bool,
 ) -> Result<RemoteSession> {
     let (etx, erx) = crossbeam_channel::unbounded::<ExtEvent>();
     let (otx, orx) = tokio::sync::mpsc::unbounded_channel::<Out>();
@@ -331,6 +318,7 @@ fn connect_inner(
     let token = TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let spec2 = spec.clone();
     let local2 = local_pane_id.to_string();
+    let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<()>(1);
     std::thread::Builder::new()
         .name(format!("remote-ws-{local_pane_id}"))
         .spawn(move || {
@@ -344,13 +332,19 @@ fn connect_inner(
                     return;
                 }
             };
-            rt.block_on(manager(spec2, local2, token, etx, orx, krx, htx, view, manager_viewport));
+            // Deferred links must be registered before the manager may finish
+            // and unlink them (a fast "gone" reply otherwise leaves a stale link).
+            if deferred && start_rx.recv().is_err() { return; }
+            rt.block_on(manager(spec2, local2, token, etx, orx, krx, htx, view, manager_viewport, deferred));
         })
         .context("remote-ws 스레드")?;
-    let (remote_id, rc, rr) = hrx
-        .recv_timeout(Duration::from_secs(15))
-        .context("원격 호스트가 15초 안에 응답하지 않았어요")?
-        .map_err(|e| anyhow!(e))?;
+    let (remote_id, rc, rr) = if deferred {
+        (spec.pane.clone().unwrap(), cols, rows)
+    } else {
+        hrx.recv_timeout(Duration::from_secs(15))
+            .context("원격 호스트가 15초 안에 응답하지 않았어요")?
+            .map_err(|e| anyhow!(e))?
+    };
     let otx_resize = otx.clone();
     // 외부 파서가 writer를 공유해 sender 종료만 기다리면 순환이 생긴다.
     // 세션이 직접 소유한 resize 콜백의 수명으로 WS 종료를 명시한다.
@@ -367,8 +361,7 @@ fn connect_inner(
             writer: Box::new(WsWriter(otx.as_ref().clone())),
             on_resize: Arc::new(move |c, r| {
                 let _lifetime = &lifetime;
-                // view의 목표는 set_viewport로 보낸다. 외부 resize 경로가 있더라도
-                // own=1 resize로 구 호스트의 원본 크기를 빼앗지 않는다.
+                // A viewer must never send owner resize controls to the source.
                 if view {
                     return;
                 }
@@ -381,17 +374,18 @@ fn connect_inner(
     links().lock().unwrap().insert(
         local_pane_id.to_string(),
         Link {
+            auth_token: spec.token.clone(),
             kill: ktx,
             base: spec.base.clone(),
             remote_id: remote_id.clone(),
             identity: spec.identity.clone(),
             view,
             viewport,
-            outgoing: Arc::downgrade(&otx),
             token,
         },
     );
     let session = Arc::new(session);
+    let _ = start_tx.send(());
     // 거울은 서버 격자를 그대로 받아 산다 — 맞춤 resize 조차 원본을 흔든다.
     if !view && (cols, rows) != (rc, rr) {
         let _ = session.resize(cols, rows);
@@ -410,6 +404,7 @@ async fn manager(
     htx: std::sync::mpsc::SyncSender<std::result::Result<(String, u16, u16), String>>,
     view: bool,
     viewport: Arc<ViewportState>,
+    retry_initial: bool,
 ) {
     // 어떤 길로 나가든 명부를 걷는다 — 안 걷으면 pane 번호가 재사용될 때 새 로컬
     // pane 이 「원격」으로 오판된다. 세대 표식이 맞을 때만 걷는 이유는 Link 주석에.
@@ -433,16 +428,17 @@ async fn manager(
         if viewport.detached.load(Ordering::Acquire) {
             break;
         }
-        viewport.capable.store(false, Ordering::Release);
-        viewport.granted.store(false, Ordering::Release);
         let url = build_url(&spec, remote_id.as_deref(), view);
-        match tokio_tungstenite::connect_async(&url).await {
+        let connection = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(&url))
+            .await.unwrap_or_else(|_| Err(tokio_tungstenite::tungstenite::Error::Io(
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "remote handshake timed out"),
+            )));
+        match connection {
             Ok((ws, _resp)) => {
                 let (mut tx, mut rx) = ws.split();
                 // 이 연결에서 size 핸드셰이크를 받았는가 — 재접속 RIS 는 연결마다
                 // 첫 size 에서 딱 한 번.
                 let mut sized_this_conn = false;
-                let mut acquired_this_conn = false;
                 loop {
                     tokio::select! {
                         m = rx.next() => match m {
@@ -451,12 +447,6 @@ async fn manager(
                                 else { continue };
                                 match v.get("t").and_then(|x| x.as_str()) {
                                     Some("size") => {
-                                        if !sized_this_conn {
-                                            let supported = view && v.get("capabilities")
-                                                .and_then(|caps| caps.get("mirror_viewport"))
-                                                .and_then(|version| version.as_u64()) == Some(1);
-                                            viewport.capable.store(supported, Ordering::Release);
-                                        }
                                         let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
                                         let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
                                         if remote_id.is_none() {
@@ -473,28 +463,12 @@ async fn manager(
                                             // 스크롤백을 비운다(모듈 머리말 참고).
                                             let _ = etx.send(ExtEvent::Bytes(b"\x1bc".to_vec()));
                                         }
-                                        let first_size = !sized_this_conn;
                                         sized_this_conn = true;
                                         if !had_attach {
                                             had_attach = true;
                                             let id = remote_id.clone().unwrap_or_default();
                                             let _ = htx.try_send(Ok((id, c, r)));
                                         }
-                                        // 재접속은 새 소유 토큰을 받는다. 옛 capability나
-                                        // 큐의 낡은 크기 대신 최신 목표로 한 번만 재협상한다.
-                                        if first_size {
-                                            if let Some(request) = viewport_request(&viewport, &mut acquired_this_conn) {
-                                                if tx.send(Message::Text(request.into())).await.is_err() {
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Some("viewport") => {
-                                        viewport.granted.store(
-                                            v.get("granted").and_then(|value| value.as_bool()).unwrap_or(false),
-                                            Ordering::Release,
-                                        );
                                     }
                                     // 호스트가 「이 페이지를 네 쪽에서 열어라」 —
                                     // 본진 학생이 연 브라우저를 보는 사람의 기계로
@@ -505,6 +479,9 @@ async fn manager(
                                         }
                                     }
                                     Some("gone") => {
+                                        if retry_initial && !had_attach {
+                                            break; // The host may not have restored this pane yet.
+                                        }
                                         // 세션이 정말 끝났다 — 재접속하지 않는다.
                                         let _ = htx.try_send(Err(
                                             "원격 세션이 이미 끝났어요".to_string(),
@@ -534,13 +511,6 @@ async fn manager(
                             Some(Out::Control(s)) => {
                                 if tx.send(Message::Text(s.into())).await.is_err() {
                                     break;
-                                }
-                            }
-                            Some(Out::Viewport) => {
-                                if let Some(request) = viewport_request(&viewport, &mut acquired_this_conn) {
-                                    if tx.send(Message::Text(request.into())).await.is_err() {
-                                        break;
-                                    }
                                 }
                             }
                             // 세션이 drop 됐다(모든 송신자 소멸) = detach. 원격 셸은
@@ -583,7 +553,7 @@ async fn manager(
             Err(e) => {
                 if !had_attach {
                     attempts_before_first += 1;
-                    if attempts_before_first >= 6 {
+                    if attempts_before_first >= 6 && !retry_initial {
                         let _ = htx.try_send(Err(format!("원격 호스트에 못 붙었어요: {e}")));
                         return;
                     }
@@ -1066,6 +1036,58 @@ pub fn remote_pane_character(base: &str, pane: &str, token: Option<&str>) -> Opt
     })
 }
 
+/// Read-only appearance fetch used by desktop mirrors. The bounded response
+/// keeps a corrupt or incompatible host from filling the viewer's memory.
+pub fn fetch_mirror_appearance(base: &str, path: &str) -> Result<Vec<u8>> {
+    let route = path.split('?').next().unwrap_or_default();
+    anyhow::ensure!(matches!(route, "/design-tokens" | "/character-sprite" | "/character-sprite-status"), "unsupported appearance route");
+    let auth = connection_auth_token(base);
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none()).build()?;
+        let mut request = client.get(format!("{}{path}", base.trim_end_matches('/')));
+        if let Some(token) = auth { request = request.header("x-kasa-token", token); }
+        let mut response = request.send().await?.error_for_status()?;
+        const MAX: usize = 8 << 20;
+        anyhow::ensure!(response.content_length().unwrap_or(0) <= MAX as u64, "appearance response too large");
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            anyhow::ensure!(body.len() + chunk.len() <= MAX, "appearance response too large");
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    })
+}
+
+/// Transfer the image to the machine that owns the harness before asking that
+/// machine to paste. The viewer's clipboard is never visible to the host TUI.
+pub fn paste_remote_image(base: &str, surface: &str, bytes: Vec<u8>) -> Result<()> {
+    anyhow::ensure!(!surface.is_empty(), "missing image target");
+    anyhow::ensure!(!bytes.is_empty() && bytes.len() <= 32 << 20, "image must be at most 32 MiB");
+    let auth = connection_auth_token(base);
+    let url = format!("{}/paste-image?surface={}", base.trim_end_matches('/'), urlencode(surface));
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none()).build()?;
+        let mut request = client.post(url).header("content-type", "application/octet-stream").body(bytes);
+        if let Some(token) = auth { request = request.header("x-kasa-token", token); }
+        let response = request.send().await?.error_for_status()?;
+        let value: serde_json::Value = response.json().await?;
+        anyhow::ensure!(value.get("ok").and_then(|v| v.as_bool()) == Some(true),
+            "{}", value.get("error").and_then(|v| v.as_str()).unwrap_or("원본 기기에 이미지를 붙이지 못했어"));
+        Ok(())
+    })
+}
+
+fn connection_auth_token(base: &str) -> Option<String> {
+    let normalized = reqwest::Url::parse(base).ok()?;
+    links().lock().ok()?.values()
+        .filter(|link| reqwest::Url::parse(&link.base).ok().as_ref() == Some(&normalized))
+        .find_map(|link| link.auth_token.clone())
+}
+
 /// 원격 pane 이 지금 쥔 claude(또는 codex) 세션 id — 그 기계의 `GET /pane-session`
 /// (bound transcript stem). **원격에서 태어난 학생**의 거울은 이 창이 sid 를 모르므로
 /// 데려오기(`migrate … local`)가 여기서 묻는다(2026-09-02 코유키 감사: 「sid 없음으로
@@ -1108,6 +1130,8 @@ pub fn remote_pane_session(base: &str, pane: &str, token: Option<&str>) -> Optio
 /// 사람이 pane 을 닫은 것과 같아 셸이 되살리기 대열에 남는다(Info 의 pane 닫기).
 /// 낡은 원격은 그 인자를 몰라 어느 쪽이든 닫기만 한다.
 pub fn close_remote_pane(base: &str, pane: &str, token: Option<&str>, kill: bool) -> Result<()> {
+    let connection_token = token.is_none().then(|| connection_auth_token(base)).flatten();
+    let token = token.or(connection_token.as_deref());
     let u = format!(
         "{}/close-pane?surface={}{}",
         base.trim_end_matches('/'),
@@ -1121,6 +1145,7 @@ pub fn close_remote_pane(base: &str, pane: &str, token: Option<&str>, kill: bool
     let v: serde_json::Value = rt.block_on(async {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("http client")?;
         let mut req = client.post(&u);
@@ -1831,24 +1856,155 @@ pub fn settings_action(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_image_upload_preserves_source_target_and_large_binary_body() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let bytes = vec![0xa7; 3 << 20];
+        let expected = bytes.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let header_end = loop {
+                let n = stream.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") { break pos + 4; }
+            };
+            let header = String::from_utf8_lossy(&request[..header_end]);
+            assert!(header.starts_with("POST /paste-image?surface=%2516 HTTP/1.1\r\n"));
+            assert!(header.to_ascii_lowercase().contains("content-length: 3145728"));
+            while request.len() - header_end < expected.len() {
+                let n = stream.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+            }
+            assert_eq!(&request[header_end..], expected.as_slice());
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}").unwrap();
+        });
+        super::paste_remote_image(&base, "%16", bytes).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn remote_image_upload_reports_host_failure_instead_of_sending_paste_key() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"ok":false,"error":"clipboard unavailable"}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let error = super::paste_remote_image(&base, "%9", vec![1, 2, 3]).unwrap_err();
+        assert!(error.to_string().contains("clipboard unavailable"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn restored_mirror_retries_missing_source_and_accepts_input_after_attach() {
+        use super::*;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (report, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                async fn accept_mirror(listener: &tokio::net::TcpListener) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            let (stream, _) = listener.accept().await.unwrap();
+                            // Other HTTP-server tests leave discovery probes running.
+                            // They are not mirror clients and may visit a reused port.
+                            if let Ok(socket) = tokio_tungstenite::accept_async(stream).await { return socket; }
+                        }
+                    }).await.unwrap()
+                }
+                let mut socket = accept_mirror(&listener).await;
+                socket.send(Message::Text(r#"{"t":"gone"}"#.into())).await.unwrap();
+                socket.close(None).await.unwrap();
+                report.send("waiting").unwrap();
+                let mut socket = accept_mirror(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":93,"rows":27,"id":"restored-source"}"#.into())).await.unwrap();
+                report.send("attached").unwrap();
+                loop {
+                    match tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap() {
+                        Message::Binary(bytes) => {
+                            assert_eq!(&bytes[..], b"restored input");
+                            report.send("input").unwrap();
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                socket.send(Message::Text(r#"{"t":"gone"}"#.into())).await.unwrap();
+            });
+        });
+        let started = std::time::Instant::now();
+        let mirror = restore_connection(RemoteSpec {
+            base: format!("http://{address}"), pane: Some("restored-source".into()),
+            cwd: None, token: None, identity: Default::default(),
+        }, "%restored-mirror-test", 80, 24, true).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "waiting");
+        assert!(is_view_pane("%restored-mirror-test"));
+        assert_eq!(remote_info("%restored-mirror-test").unwrap().remote_id, "restored-source");
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "attached");
+        mirror.session.send_bytes(b"restored input").unwrap();
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "input");
+        server.join().unwrap();
+    }
     use super::*;
+
+    #[test]
+    fn appearance_reads_reuse_the_authenticated_remote_connection() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = [0u8; 4096];
+            let n = stream.read(&mut bytes).unwrap();
+            let request = String::from_utf8_lossy(&bytes[..n]).to_lowercase();
+            assert!(request.contains("x-kasa-token: test-appearance-token\r\n"));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        });
+        let (kill, _killed) = tokio::sync::mpsc::unbounded_channel();
+        let id = "%appearance-auth-test";
+        links().lock().unwrap().insert(id.into(), Link {
+            auth_token: Some("test-appearance-token".into()),
+            kill, base: base.clone(), remote_id: "%17".into(),
+            identity: RemoteIdentity::default(), view: true,
+            viewport: Arc::new(ViewportState::default()),
+            token: u64::MAX,
+        });
+        let result = fetch_mirror_appearance(&base, "/design-tokens");
+        links().lock().unwrap().remove(id);
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), b"{}");
+        assert!(fetch_mirror_appearance(&base, "/settings/action").is_err());
+    }
 
     #[test]
     fn kill_removes_remote_state_before_manager_cleanup() {
         let local = "%remote-state-boundary";
         let (kill, mut killed) = tokio::sync::mpsc::unbounded_channel();
-        let (outgoing, _out) = tokio::sync::mpsc::unbounded_channel::<Out>();
-        let outgoing = Arc::new(outgoing);
         links().lock().unwrap().insert(
             local.to_string(),
             Link {
+                auth_token: None,
                 kill,
                 base: "http://127.0.0.1:1".into(),
                 remote_id: "%remote".into(),
                 identity: RemoteIdentity::default(),
                 view: true,
                 viewport: Arc::new(ViewportState::default()),
-                outgoing: Arc::downgrade(&outgoing),
                 token: u64::MAX,
             },
         );
@@ -2126,7 +2282,7 @@ mod tests {
     }
 
     #[test]
-    fn viewport_mirror_expands_source_and_receives_last_row_and_column() {
+    fn viewport_mirror_preserves_source_and_last_cell_input() {
         fn wait_for(mut condition: impl FnMut() -> bool, message: &str) {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while !condition() {
@@ -2134,13 +2290,22 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+        struct InputLog(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for InputLog {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let input = Arc::new(Mutex::new(Vec::new()));
         let id = format!("viewport-source-{}", uuid::Uuid::new_v4());
         let (events, receiver) = crossbeam_channel::unbounded();
         let source = Arc::new(PtySession::start_external(
-            PtyOptions { pane_id: id.clone(), cols: 21, rows: 6, ..Default::default() },
+            PtyOptions { pane_id: id.clone(), cols: 120, rows: 40, ..Default::default() },
             ExternalIo {
                 events: receiver,
-                writer: Box::new(std::io::sink()),
+                writer: Box::new(InputLog(input.clone())),
                 on_resize: Arc::new(|_, _| {}),
             },
         ).unwrap());
@@ -2153,39 +2318,38 @@ mod tests {
             base: format!("http://127.0.0.1:{port}"), pane: Some(id),
             cwd: None, token: None, identity: Default::default(),
         };
-        let mirror = connect_view(spec.clone(), "%viewport-first").unwrap();
-        assert_eq!(source.size(), (21, 6), "a passive attach must not acquire a size");
-        assert!(view_supports_viewport("%viewport-first"));
-        assert!(set_viewport("%viewport-first", 120, 40));
-        wait_for(|| source.size() == (120, 40) && mirror.session.size() == (120, 40),
-            "the negotiated size did not reach both parsers");
+        let mirror = connect_view(spec.clone(), "%viewport-passive-first").unwrap();
+        assert!(set_viewport("%viewport-passive-first", 21, 6));
+        let second = connect_view(spec, "%viewport-passive-second").unwrap();
+        assert!(set_viewport("%viewport-passive-second", 200, 60));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(source.size(), (120, 40), "viewer bounds changed the source grid");
+        assert!(!source.has_viewer_size_control(), "a mirror acquired source ownership");
+        assert_eq!(mirror.session.size(), (120, 40));
+        assert_eq!(second.session.size(), (120, 40));
         events.send(ExtEvent::Bytes(b"\x1b[2J\x1b[40;116HEDGE!".to_vec())).unwrap();
         assert!(wait_visible(&mirror.session, "EDGE!", 5), "last row/column output was clipped");
         let snapshot = mirror.session.full_snapshot();
         let last_row = snapshot.dirty.iter().find(|(row, _)| *row == 39).unwrap();
-        assert_eq!(last_row.1[119].ch.to_string(), "!", "last column did not survive transport");
+        assert_eq!(last_row.1[119].ch.to_string(), "!");
+        let click = b"\x1b[<0;120;40M";
+        mirror.session.send_bytes(click).unwrap();
+        wait_for(|| input.lock().unwrap().as_slice() == click, "last-cell input coordinates changed");
 
-        source.resize(30, 8).unwrap();
-        assert_eq!(source.size(), (120, 40), "the host GUI stole the logical size");
-        let second = connect_view(spec, "%viewport-second").unwrap();
-        assert!(set_viewport("%viewport-second", 60, 20));
-        wait_for(|| source.size() == (60, 20), "second viewer did not acquire control");
-        assert!(set_viewport("%viewport-first", 100, 30));
-        wait_for(|| links().lock().unwrap().get("%viewport-first")
-            .is_some_and(|link| !link.viewport.granted.load(Ordering::Acquire)),
-            "superseded viewer did not receive a rejection");
-        assert_eq!(source.size(), (60, 20), "resize stole control from the newer viewer");
+        source.resize(100, 30).unwrap();
+        wait_for(|| mirror.session.size() == (100, 30) && second.session.size() == (100, 30),
+            "viewers did not follow the source's own resize");
+        assert!(set_viewport("%viewport-passive-first", 15, 4));
         drop(mirror);
-        wait_for(|| !is_view_pane("%viewport-first"), "old viewer did not detach");
-        assert_eq!(source.size(), (60, 20), "old disconnect restored over the active viewer");
         drop(second);
-        wait_for(|| !source.has_viewer_size_control(), "last disconnect did not release control");
-        assert_eq!(source.size(), (30, 8), "host GUI size was not restored");
+        wait_for(|| !is_view_pane("%viewport-passive-first") && !is_view_pane("%viewport-passive-second"),
+            "viewers did not detach");
+        assert_eq!(source.size(), (100, 30), "viewer detach changed source dimensions");
         let _ = events.send(ExtEvent::Eof);
     }
 
     #[test]
-    fn viewport_reconnect_uses_latest_target_and_old_host_stays_passive() {
+    fn viewport_reconnect_stays_passive_with_new_and_old_hosts() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -2198,23 +2362,15 @@ mod tests {
                 for connection in 0..3 {
                     let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await.unwrap().unwrap();
                     let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-                    let mut size = serde_json::json!({"t":"size", "cols":21, "rows":6, "id":"mock-origin"});
+                    let mut size = serde_json::json!({"t":"size", "cols":120, "rows":40, "id":"mock-origin"});
                     if connection < 2 {
                         size["capabilities"] = serde_json::json!({"mirror_viewport":1});
                     }
                     socket.send(Message::Text(size.to_string().into())).await.unwrap();
-                    if connection < 2 {
-                        let request = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-                        let Message::Text(request) = request else { panic!("expected viewport control") };
-                        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
-                        reports.send(request).unwrap();
-                        steps.recv_timeout(Duration::from_secs(5)).unwrap();
-                    } else {
-                        assert!(tokio::time::timeout(Duration::from_millis(300), socket.next()).await.is_err(),
-                            "old host received a viewport command after reconnect");
-                        reports.send(serde_json::json!({"passive":true})).unwrap();
-                        steps.recv_timeout(Duration::from_secs(5)).unwrap();
-                    }
+                    assert!(tokio::time::timeout(Duration::from_millis(300), socket.next()).await.is_err(),
+                        "mirror sent a source-size control on attach/reconnect");
+                    reports.send(connection).unwrap();
+                    steps.recv_timeout(Duration::from_secs(5)).unwrap();
                     socket.close(None).await.unwrap();
                 }
             });
@@ -2222,45 +2378,16 @@ mod tests {
         let mirror = connect_view(RemoteSpec {
             base: format!("http://{address}"), pane: Some("mock-origin".into()),
             cwd: None, token: None, identity: Default::default(),
-        }, "%viewport-reconnect").unwrap();
-        assert!(set_viewport("%viewport-reconnect", 120, 40));
-        let first = received.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(first["op"], "acquire");
-        assert_eq!(first["cols"], 120);
-        assert!(set_viewport("%viewport-reconnect", 100, 30));
-        advance.send(()).unwrap();
-        let second = received.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(second["op"], "acquire");
-        assert_eq!(second["cols"], 100, "reconnect replayed an old viewport");
-        advance.send(()).unwrap();
-        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap()["passive"], true);
-        assert!(!view_supports_viewport("%viewport-reconnect"));
-        assert_eq!(mirror.session.size(), (21, 6));
+        }, "%viewport-passive-reconnect").unwrap();
+        for connection in 0..3 {
+            assert!(set_viewport("%viewport-passive-reconnect", 21 + connection, 6));
+            assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), connection);
+            assert_eq!(mirror.session.size(), (120, 40));
+            if connection < 2 { advance.send(()).unwrap(); }
+        }
         drop(mirror);
         advance.send(()).unwrap();
         server.join().unwrap();
-    }
-
-    #[test]
-    fn viewport_requests_wait_for_capability_and_do_not_reacquire_on_resize() {
-        let state = ViewportState::default();
-        *state.target.lock().unwrap() = Some((120, 40));
-        let mut acquired = false;
-        assert!(viewport_request(&state, &mut acquired).is_none());
-        assert!(!acquired);
-        state.capable.store(true, Ordering::Release);
-        let first: serde_json::Value = serde_json::from_str(&viewport_request(&state, &mut acquired).unwrap()).unwrap();
-        assert_eq!(first["op"], "acquire");
-        *state.target.lock().unwrap() = Some((100, 30));
-        let resized: serde_json::Value = serde_json::from_str(&viewport_request(&state, &mut acquired).unwrap()).unwrap();
-        assert_eq!(resized["op"], "resize");
-        state.capable.store(false, Ordering::Release);
-        acquired = false;
-        assert!(viewport_request(&state, &mut acquired).is_none(), "old host after reconnect received viewport control");
-        state.capable.store(true, Ordering::Release);
-        let reconnected: serde_json::Value = serde_json::from_str(&viewport_request(&state, &mut acquired).unwrap()).unwrap();
-        assert_eq!(reconnected["op"], "acquire");
-        assert_eq!(reconnected["cols"], 100);
     }
 
     #[test]

@@ -4196,6 +4196,7 @@ impl GpuRenderer {
             "server" => include_str!("../assets/icons/server.svg"),
             "laptop" => include_str!("../assets/icons/laptop.svg"),
             "monitor" => include_str!("../assets/icons/monitor.svg"),
+            "monitor-smartphone" => include_str!("../assets/icons/monitor-smartphone.svg"),
             "database" => include_str!("../assets/icons/database.svg"),
             "sparkles" => include_str!("../assets/icons/sparkles.svg"),
             "rotate-cw" => include_str!("../assets/icons/rotate-cw.svg"),

@@ -646,6 +646,7 @@ impl App {
                 CloseWhy::Dirty(d) =>
                     format!("dirty:{}", d.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(",")),
                 CloseWhy::LastPane => "lastpane".to_string(),
+                CloseWhy::Mirror { .. } => "mirror".to_string(),
             }),
         );
     }
@@ -772,6 +773,7 @@ impl App {
                 CloseWhy::Busy(p) => format!("busy:{p}"),
                 CloseWhy::Dirty(_) => "dirty".to_string(),
                 CloseWhy::LastPane => "lastpane".to_string(),
+                CloseWhy::Mirror { .. } => "mirror".to_string(),
             }),
             self.confirm_close.as_ref().map(|c| match &c.action {
                 crate::PendingClose::Session(i) => format!("session:{i}"),
@@ -3971,6 +3973,7 @@ impl App {
                         d.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(",")
                     ),
                     CloseWhy::LastPane => "lastpane".to_string(),
+                    CloseWhy::Mirror { .. } => "mirror".to_string(),
                 });
                 eprintln!("[mdscript] close why={why:?}");
             }

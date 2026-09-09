@@ -171,6 +171,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
     <key>CFBundleName</key>
     <string>kasaterm</string>
+    <key>NSUserActivityTypes</key>
+    <array>
+      <string>INSendMessageIntent</string>
+    </array>
     <key>CFBundleDisplayName</key>
     <string>kasaterm</string>
     <key>CFBundleIdentifier</key>
@@ -429,9 +433,15 @@ PLIST
 # 명시하면 그대로 이긴다. 인증서를 바꾸면 화면 녹화 같은 권한을 한 번 다시 묻는다.
 SIGN_ID="${KASATERM_SIGN_ID:-}"
 APPLE_SIGN=""
+SIGN_KEYCHAIN="${KASATERM_SIGN_KEYCHAIN:-$HOME/.config/kasaterm/signing/development.keychain-db}"
+IDENTITY_ARGS=(-p codesigning)
+if [[ -f "$SIGN_KEYCHAIN" ]]; then
+  python3 "$ROOT/scripts/signing-keychain.py" "$SIGN_KEYCHAIN"
+  IDENTITY_ARGS+=("$SIGN_KEYCHAIN")
+fi
 if [[ -z "$SIGN_ID" ]]; then
   for kind in "Developer ID Application" "Apple Development"; do
-    line=$(security find-identity -v -p codesigning 2>/dev/null | grep "\"$kind: " | head -1)
+    line=$(security find-identity -v "${IDENTITY_ARGS[@]}" 2>/dev/null | grep "\"$kind: " | head -1 || true)
     if [[ -n "$line" ]]; then
       SIGN_ID=$(echo "$line" | awk '{print $2}')
       APPLE_SIGN=$(echo "$line" | sed -E 's/^[^"]*"([^"]*)".*$/\1/')
@@ -443,8 +453,16 @@ fi
 # No -v: a self-signed cert is valid-but-untrusted (CSSMERR_TP_NOT_TRUSTED),
 # which -v filters out. codesign still signs with it, and TCC keys
 # permissions off the signing identity, so untrusted is fine for local use.
-if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
+if security find-identity "${IDENTITY_ARGS[@]}" 2>/dev/null | grep -q "$SIGN_ID"; then
   SIGN="$SIGN_ID"
+  # 명시한 Apple 인증서도 자동 선택과 같은 공식 알림 경로를 쓴다.
+  if [[ -z "$APPLE_SIGN" ]]; then
+    line=$(security find-identity -v "${IDENTITY_ARGS[@]}" 2>/dev/null | grep -F -- "$SIGN_ID" | head -1 || true)
+    case "$line" in
+      *'"Developer ID Application: '*|*'"Apple Development: '*|*'"Apple Distribution: '*)
+        APPLE_SIGN=$(echo "$line" | sed -E 's/^[^"]*"([^"]*)".*$/\1/') ;;
+    esac
+  fi
   if [[ -n "$APPLE_SIGN" ]]; then
     SIGN_MSG="signed with '$APPLE_SIGN' — 알림센터를 쓴다"
   else
@@ -453,6 +471,10 @@ if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
 else
   SIGN="-"  # ad-hoc
   SIGN_MSG="signed ad-hoc — create a '$SIGN_ID' code-signing cert to stop the permission re-prompts"
+fi
+SIGN_ARGS=(--force --sign "$SIGN")
+if [[ -f "$SIGN_KEYCHAIN" ]]; then
+  SIGN_ARGS+=(--keychain "$SIGN_KEYCHAIN")
 fi
 # Sparkle.framework 는 nested(XPC·Updater·Autoupdate·dylib)부터 → framework → 마지막
 # app 순으로 서명한다. `--deep` 한 방은 nested XPC 의 서명 일관성을 보장 못 해 실행 시
@@ -464,22 +486,33 @@ if [[ -d "$FW" ]]; then
     "$FW/Versions/B/XPCServices/Installer.xpc" \
     "$FW/Versions/B/Updater.app" \
     "$FW/Versions/B/Autoupdate"; do
-    [[ -e "$nested" ]] && codesign --force --sign "$SIGN" "$nested" 2>/dev/null || true
+    [[ -e "$nested" ]] && codesign "${SIGN_ARGS[@]}" "$nested" 2>/dev/null || true
   done
-  codesign --force --sign "$SIGN" "$FW" 2>/dev/null || true
+  codesign "${SIGN_ARGS[@]}" "$FW" 2>/dev/null || true
 fi
 # kasaterm-cli 는 별도 실행 바이너리 — app 서명(--deep 제거)이 안 덮으므로 개별 서명.
-codesign --force --sign "$SIGN" "$APP/Contents/MacOS/kasaterm-cli" 2>/dev/null || true
-codesign --force --sign "$SIGN" "$APP/Contents/MacOS/kasa-serve-web" 2>/dev/null || true
+codesign "${SIGN_ARGS[@]}" "$APP/Contents/MacOS/kasaterm-cli" 2>/dev/null || true
+codesign "${SIGN_ARGS[@]}" "$APP/Contents/MacOS/kasa-serve-web" 2>/dev/null || true
 # 애플 인증서 표식 — 서명 봉인 안에 들어가야 하므로 app 서명 직전에 쓴다.
 if [[ -n "$APPLE_SIGN" ]]; then
   printf '%s\n' "$APPLE_SIGN" > "$APP/Contents/Resources/apple-signed"
 else
   rm -f "$APP/Contents/Resources/apple-signed"
 fi
-codesign --force --sign "$SIGN" "$APP" 2>/dev/null \
-  && echo "$SIGN_MSG" \
-  || echo "warning: signing '$APP' failed; app left unsigned"
+APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
+# Communication Notifications is restricted: Apple Development signatures with
+# this entitlement are killed at launch without a matching macOS profile.
+# Native notification center + avatar provider work without it; keep the bundle
+# runnable until a macOS profile has been explicitly prepared and validated.
+if ! codesign "${APP_SIGN_ARGS[@]}" "$APP"; then
+  echo "error: signing '$APP' failed — no installable bundle produced" >&2
+  exit 1
+fi
+if ! codesign --verify --strict "$APP"; then
+  echo "error: signature verification failed — no installable bundle produced" >&2
+  exit 1
+fi
+echo "$SIGN_MSG"
 
 # Bust the icon cache so the new .icns shows immediately in Finder /
 # Dock instead of waiting for macOS to notice on its own.

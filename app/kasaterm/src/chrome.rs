@@ -128,17 +128,26 @@ impl App {
     /// 지시: 탭 겹친 pane 에서 「어떤 학생인지 모른다」). 관문은 같다 — claude 가
     /// 실제로 도는 탭만 학생을 갖는다.
     pub(crate) fn display_tab_char(&self, ws: &Workspace, tab: &str) -> Option<String> {
-        // 로컬 pane 은 claude 가 실제로 도는 탭만 학생을 갖는다. 원격(미러) pane 은
-        // claude 가 저쪽 기계에서 돌아 로컬 프로세스 테이블에 없어(active_agent=None)
-        // 이 관문에 걸려 이름·색·프사가 통째로 사라졌다 — 리본만 남고 테마가 안 붙던
-        // 자리다(2026-09-02: render 게이트의 원격 우회와 짝을 못 맞춘 반쪽 수정이었다).
-        // 원격으로 확정된 pane 은 관문을 건너뛰고 배정(pane_character)을 정본으로 쓴다 —
-        // 실제 프사·색은 render 가 화면의 U+FFFC 표식으로 최종 판정하므로(runs_claude)
-        // 원격 셸 미러는 이름만 갖고 프사는 안 뜬다.
-        if !kasa_mcp::remote::is_remote_pane(tab) {
-            if let Some(p) = self.pty.get(tab) {
-                p.active_agent()?;
+        if let Some(info) = kasa_mcp::remote::remote_info(tab) {
+            let label = if info.label.is_empty() {
+                kasa_mcp::machines::label_for_base(&info.base)
+            } else {
+                Some(info.label)
+            };
+            if let Some(row) = label.and_then(|label| kasa_mcp::machines::cached_pane(&label, &info.remote_id)) {
+                if row.get("harness").is_some_and(serde_json::Value::is_null) {
+                    return None;
+                }
+                return row.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
             }
+            // Before the host's first metadata arrives, a restored local
+            // assignment/session binding is not evidence of remote identity.
+            return None;
+        }
+        // Local tabs use their live process, then their own saved assignment.
+        // Remote tabs have already returned their host's identity above.
+        if let Some(p) = self.pty.get(tab) {
+            p.active_agent()?;
         }
         // claude agents 목록 뷰는 학생을 안 그린다(옛 or_else 폴백의 view 가드).
         if self
@@ -3127,6 +3136,12 @@ impl App {
                 None => (1, Some(pane.to_string())),
             }
         };
+        let mirror_action = if tabs_len > 1 {
+            PendingClose::Tab { pane: pane.to_string(), idx }
+        } else {
+            PendingClose::Pane { pane: pane.to_string() }
+        };
+        if self.guard_mirror_close(&mirror_action) { return; }
         let action = if tabs_len > 1 {
             PendingClose::Tab {
                 pane: pane.to_string(),
@@ -3191,6 +3206,7 @@ impl App {
         if self.guard_dirty(&action) {
             return;
         }
+        if self.guard_mirror_close(&action) { return; }
         match self.pane_busy(pane) {
             Some(proc) => self.open_confirm_close(proc, action),
             None => self.do_close(action),
@@ -3821,8 +3837,8 @@ pub(crate) fn notify_desktop(
     let auth = NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed);
     #[cfg(not(target_os = "macos"))]
     let auth = 2u8;
-    let native = os_notify_enabled() && auth != 2;
-    if !(native && auth == 1) {
+    let native = os_notify_enabled() && auth == 1;
+    if !native {
         banner_inbox().lock().unwrap().push((
             title.to_string(),
             body.to_string(),
@@ -3850,18 +3866,16 @@ pub(crate) fn notify_desktop(
 /// 알림에 붙일 그 학생의 프사 파일.
 ///
 /// 이미지는 `include_bytes!` 로 바이너리에 박혀 있어 경로가 없는데, 첨부가 받는
-/// 것은 **파일 URL 뿐**이다. 그래서 슬러그마다 한 번씩 임시 파일로 떨궈 두고 그
-/// 경로를 재사용한다. 로스터에 없는 커스텀 캐릭터는 슬러그가 없어 None 이다.
+/// 것은 **파일 URL 뿐**이다. 시스템이 첨부를 자체 저장소로 옮기므로 요청마다
+/// 다른 파일을 쓴다. 같은 학생이 연이어 끝내도 앞 알림의 첨부와 충돌하지 않는다.
 #[cfg(target_os = "macos")]
-fn student_profile_file(character: &str) -> Option<std::path::PathBuf> {
-    let slug = crate::theme::character_slug(character)?;
+fn student_profile_file(character: &str, seq: u64) -> Option<std::path::PathBuf> {
+    let slug = crate::theme::character_slug_any(character)?;
     let path = std::env::temp_dir()
         .join("kasaterm-notify-icons")
-        .join(format!("{slug}.png"));
-    if path.exists() {
-        return Some(path);
-    }
-    let png = crate::render::student_profile_png(slug)?;
+        .join(format!("{slug}-{}-{seq}.png", std::process::id()));
+    let remote = crate::mirror_theme::asset(slug, "profile", 0);
+    let png = remote.as_deref().or_else(|| crate::render::student_profile_png(slug))?;
     std::fs::create_dir_all(path.parent()?).ok()?;
     std::fs::write(&path, png).ok()?;
     Some(path)
@@ -3871,7 +3885,7 @@ fn student_profile_file(character: &str) -> Option<std::path::PathBuf> {
 ///
 /// 전에는 `requestAuthorization` 의 콜백이 **빈 블록**이라 거부돼도 아무도 몰랐다:
 /// 요청은 그대로 native 로 나가고 시스템이 조용히 버려, 화면에는 "알림이 안 온다"
-/// 만 남았다. 답을 여기 남겨 두면 다음 알림부터 osascript 로 돌릴 수 있다.
+/// 만 남았다. 답을 여기 남겨 두면 다음 알림부터 학생 얼굴 배너를 쓴다.
 #[cfg(target_os = "macos")]
 static NOTIFY_AUTH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -3902,7 +3916,7 @@ pub(crate) fn ensure_notification_authorization() {
                     let why = unsafe { err.as_ref() }
                         .map(|e| e.localizedDescription().to_string())
                         .unwrap_or_else(|| "사유 없음".to_string());
-                    eprintln!("[notify] 데스크톱 알림 권한 없음 — osascript 로 돌린다: {why}");
+                    eprintln!("[notify] 데스크톱 알림 권한 없음 — 자체 배너 사용: {why}");
                 }
             },
         );
@@ -3969,7 +3983,10 @@ fn notify_native(
     // (알림센터 누적·클릭 라우팅·아이콘을 통째로 되찾는다), 자체 배너 창을 그린다
     // (아이콘은 자유지만 알림센터에 안 쌓이고 방해금지 같은 OS 통합을 잃는다).
     if NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed) == 2 {
-        notify_osascript(title, body);
+        banner_inbox().lock().unwrap().push((
+            title.to_string(), body.to_string(), character.map(str::to_string),
+            route.map(|(p, s)| (p.to_string(), s.map(str::to_string))),
+        ));
         return;
     }
     let content = UNMutableNotificationContent::new();
@@ -3979,9 +3996,8 @@ fn notify_native(
     // 받아 두고 정작 콘텐츠에 안 달아, 창을 뒤로 물린 동안 학생이 끝나도 알 길이
     // dock 배지뿐이었다 — 그건 "봐야 보이는" 신호다(2026-08-11 조사).
     content.setSound(Some(&UNNotificationSound::defaultSound()));
-    // 학생 프사를 오른쪽 썸네일로 — 알림이 여럿 겹쳐도 누구 것인지 그림으로 갈린다.
-    // **왼쪽 작은 아이콘은 번들 아이콘 고정**이라 여기서 못 바꾼다(그건 앱 아이콘).
-    if let Some(p) = character.and_then(student_profile_file) {
+    // 대화 알림 변환이 불가능한 경우에도 오른쪽 썸네일로 학생 얼굴을 남긴다.
+    if let Some(p) = character.and_then(|c| student_profile_file(c, seq)) {
         let url = NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()));
         let aid = NSString::from_str(&format!("kasaterm-icon-{seq}"));
         if let Ok(att) = unsafe {
@@ -3990,20 +4006,27 @@ fn notify_native(
             content.setAttachments(&NSArray::from_retained_slice(&[att]));
         }
     }
+    let thread = route.map(|(pane, sid)| sid.unwrap_or(pane)).unwrap_or(title);
+    content.setThreadIdentifier(&NSString::from_str(thread));
+    let message = character.and_then(|c| crate::macos_notify::with_character_avatar(&content, c, thread));
+    let delivered_content = message.as_deref().unwrap_or(&content);
     let ident = NSString::from_str(&route_ident);
     let request =
-        UNNotificationRequest::requestWithIdentifier_content_trigger(&ident, &content, None);
+        UNNotificationRequest::requestWithIdentifier_content_trigger(&ident, delivered_content, None);
     let center = UNUserNotificationCenter::currentNotificationCenter();
-    // 배달이 실패하면(권한 회수·첨부 거부 등) 그 자리에서 osascript 로 돌린다.
+    // 배달이 실패하면(권한 회수·첨부 거부 등) 학생 얼굴 배너로 돌린다.
     // 실패를 삼키면 "알림이 안 온다" 만 남고 이유는 어디에도 안 남는다.
-    let (t, b) = (title.to_string(), body.to_string());
+    let fallback = (
+        title.to_string(), body.to_string(), character.map(str::to_string),
+        route.map(|(p, s)| (p.to_string(), s.map(str::to_string))),
+    );
     let done = block2::RcBlock::new(move |err: *mut objc2_foundation::NSError| {
         if let Some(e) = unsafe { err.as_ref() } {
             eprintln!(
-                "[notify] native 배달 실패 — osascript 로 돌린다: {}",
+                "[notify] native 배달 실패 — 학생 프사 배너 사용: {}",
                 e.localizedDescription()
             );
-            notify_osascript(&t, &b);
+            banner_inbox().lock().unwrap().push(fallback.clone());
         }
     });
     center.addNotificationRequest_withCompletionHandler(&request, Some(&done));

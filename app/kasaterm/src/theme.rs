@@ -1067,9 +1067,7 @@ fn apply_from_settings_inner(sync_claude_theme: bool) {
             .to_string()
     });
     set_shape(&shape);
-    if let Some(v) = s.get("min_contrast").and_then(|x| x.as_f64()) {
-        set_min_contrast(v as f32);
-    }
+    set_min_contrast(s.get("min_contrast").and_then(|x| x.as_f64()).unwrap_or(2.5) as f32);
 }
 
 // ── Shape axis ───────────────────────────────────────────────────────────
@@ -1449,6 +1447,9 @@ pub fn raised_on(base: [u8; 4], hover: bool) -> [u8; 4] {
 /// (2026-08-12 지시: "애들 색도 다입혀야돼"). 수동 값은 로스터와 동일했다.
 /// 미배정(순수 셸)은 None → 호출부가 테두리를 안 그린다.
 pub fn character_accent(name: &str) -> Option<[u8; 4]> {
+    if let Some(color) = crate::mirror_theme::character_color(name) {
+        return Some(color);
+    }
     // 학생 아님 — claude agents(에이전트 목록 뷰)의 SCHALE 조직 정체성 색.
     // render 가 argv(is_claude_agents)+프사 슬롯 부재로 목록 뷰를 판정해
     // 타이틀바 이름·테두리에만 쓴다(pane_character 엔 저장 안 함, 세션 진입
@@ -1496,6 +1497,9 @@ fn accent_beyond_active(name: &str, extra: &[Roster]) -> Option<[u8; 4]> {
 /// 경로(`students_dir()`)에 없다 — 프사 자리를 세우기 전에 그림 실재를 따로
 /// 확인해야 한다(`screenread::tell_face_slug`).
 pub fn character_slug_any(name: &str) -> Option<&'static str> {
+    if let Some(slug) = crate::mirror_theme::character_slug(name) {
+        return Some(slug);
+    }
     character_slug(name).or_else(|| slug_beyond_active(name, other_rosters()))
 }
 
@@ -1771,7 +1775,8 @@ pub fn character_slug(name: &str) -> Option<&'static str> {
 /// 「그런 이름 없다」가 된다. persona 가 이미 같은 이유로 합집합(`persona_for_any`)을
 /// 쓰고 있었다.
 pub fn agent_slug(name: &str) -> String {
-    character_slug_any(name)
+    // Mirrored image keys are viewer-local GPU identities, never inbox names.
+    character_slug(name).or_else(|| slug_beyond_active(name, other_rosters()))
         .map(String::from)
         .unwrap_or_else(|| kasa_mcp::team::ascii_ident(name))
 }
@@ -1933,9 +1938,78 @@ pub fn tokens_json() -> serde_json::Value {
     })
 }
 
+/// Viewing another machine changes only runtime colors, never local settings
+/// or the theme files of agents running on this computer.
+pub(crate) fn apply_mirror_tokens(tokens: &serde_json::Value) -> bool {
+    let Some(entry) = mirror_palette_entry(tokens) else { return false };
+    let was_previewing = PREVIEWING.swap(true, Ordering::Relaxed);
+    let mut palette = custom_palette(&entry);
+    for (key, slot) in [("bg", &mut palette.bg), ("fg", &mut palette.fg), ("surface", &mut palette.surface), ("surface_hover", &mut palette.surface_hover), ("surface_active", &mut palette.surface_active), ("border", &mut palette.border), ("text", &mut palette.text), ("text_dim", &mut palette.text_dim), ("text_mute", &mut palette.text_mute), ("success", &mut palette.success), ("danger", &mut palette.danger), ("syn_keyword", &mut palette.syn_keyword), ("syn_string", &mut palette.syn_string), ("syn_number", &mut palette.syn_number), ("syn_comment", &mut palette.syn_comment), ("syn_function", &mut palette.syn_function), ("syn_type", &mut palette.syn_type)] {
+        if let Some(color) = entry.get(key).and_then(|v| v.as_str()).and_then(parse_mirror_color) {
+            *slot = color;
+        }
+    }
+    store_palette(&palette);
+    if let Some(color) = tokens.pointer("/palette/accent").and_then(|v| v.as_str()).and_then(parse_mirror_color) {
+        S_ACCENT.store(pack(color), Ordering::Relaxed);
+        S_CURSOR.store(pack(color), Ordering::Relaxed);
+    }
+    if let Some(v) = tokens.get("min_contrast").and_then(|v| v.as_f64()) {
+        set_min_contrast(v as f32);
+    }
+    for (key, slot) in [("radius_sm", &S_RADIUS_SM), ("radius_md", &S_RADIUS_MD), ("border_w", &S_BORDER_W), ("shadow_offset", &S_SHADOW_OFFSET), ("roundness", &S_ROUNDNESS)] {
+        if let Some(value) = tokens.get("shape").and_then(|s| s.get(key)).and_then(|v| v.as_f64()).filter(|v| v.is_finite() && *v >= 0.0 && *v <= 64.0) {
+            slot.store((value as f32).to_bits(), Ordering::Relaxed);
+        }
+    }
+    if let Some(value) = tokens.pointer("/shape/pixel_chrome").and_then(|v| v.as_bool()) {
+        S_PIXEL_CHROME.store(u32::from(value), Ordering::Relaxed);
+    }
+    set_current("mirror");
+    PREVIEWING.store(was_previewing, Ordering::Relaxed);
+    true
+}
+
+fn mirror_palette_entry(tokens: &serde_json::Value) -> Option<serde_json::Value> {
+    let mut entry = tokens.get("palette")?.as_object()?.clone();
+    for key in ["bg", "fg", "surface", "surface_hover", "surface_active", "border", "text", "text_dim", "text_mute", "success", "danger"] {
+        parse_mirror_color(entry.get(key)?.as_str()?)?;
+    }
+    let ansi = tokens.get("ansi")?.as_array()?;
+    if ansi.len() != 16 || ansi.iter().any(|v| v.as_str().and_then(parse_hex_rgb).is_none()) {
+        return None;
+    }
+    entry.insert("ansi".into(), serde_json::Value::Array(ansi.clone()));
+    Some(serde_json::Value::Object(entry))
+}
+
+fn parse_mirror_color(s: &str) -> Option<[u8; 4]> {
+    let hex = s.strip_prefix('#')?;
+    let value = u32::from_str_radix(hex, 16).ok()?;
+    match hex.len() {
+        6 => Some(unpack((value << 8) | 255)),
+        8 => Some(unpack(value)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod roster_tests {
     use super::*;
+
+    #[test]
+    fn mirror_palette_requires_complete_valid_colors_and_carries_custom_ansi() {
+        let mut tokens = tokens_json();
+        tokens["palette"]["bg"] = serde_json::json!("#123456");
+        tokens["ansi"][3] = serde_json::json!("#abcdef");
+        let entry = mirror_palette_entry(&tokens).unwrap();
+        let p = custom_palette(&entry);
+        assert_eq!(p.bg, [0x12, 0x34, 0x56, 255]);
+        assert_eq!(p.ansi[3], [0xab, 0xcd, 0xef]);
+        tokens["ansi"] = serde_json::json!([]);
+        assert!(mirror_palette_entry(&tokens).is_none());
+        assert!(mirror_palette_entry(&serde_json::json!({"palette": {"bg": "#123456"}})).is_none());
+    }
 
     #[test]
     fn 보조_본문은_최소_대비를_넘긴다() {

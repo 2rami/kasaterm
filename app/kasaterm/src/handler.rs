@@ -551,6 +551,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.migrate_finish(pane, res.clone());
                 return;
             }
+            UserEvent::MirrorCloseDone { action, targets, result } => {
+                self.finish_mirror_close(action.clone(), targets.clone(), result.clone());
+                return;
+            }
             UserEvent::SocketMigrateBack(pane, cwd, force, reply) => {
                 #[cfg(unix)]
                 let outcome = self
@@ -1359,27 +1363,40 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::SocketPasteImage(surface, bytes) => {
-                // 아로나 프롬프트 입력창 이미지 드롭(webview) → 그 pane claude 에 첨부.
-                // 시스템 클립보드에 비트맵으로 싣고 그 pane 에 이미지-paste 키를 보내면
-                // claude 가 클립보드 그림을 읽어 [Image] 칩으로 단다(터미널 DroppedFile
-                // 과 같은 경로, 포커스 무관: 클립보드는 시스템 전역).
-                if let Ok(img) = image::load_from_memory(&bytes) {
+            UserEvent::SocketPasteImage(surface, bytes, reply) => {
+                // Forward bytes across another mirror, or fill the clipboard on
+                // the actual harness host. Acknowledge only after target input.
+                if let Some(remote) = kasa_mcp::remote::remote_info(surface) {
+                    let (proxy, bytes, reply) = (self.proxy.clone(), bytes.clone(), reply.clone());
+                    std::thread::spawn(move || {
+                        let result = kasa_mcp::remote::paste_remote_image(&remote.base, &remote.remote_id, bytes)
+                            .map_err(|e| format!("이미지 전송 실패: {e:#}"));
+                        if let Some(reply) = reply { let _ = reply.send(result); }
+                        else { let _ = proxy.send_event(UserEvent::ImagePasteDone(result)); }
+                    });
+                    return;
+                }
+                let result = (|| -> Result<(), String> {
+                    let pty = self.pty.get(surface).ok_or_else(|| "붙여넣을 창이 없어".to_string())?;
+                    let img = image::load_from_memory(bytes).map_err(|e| format!("이미지를 읽지 못했어: {e}"))?;
                     let rgba = img.to_rgba8();
                     let (w, h) = rgba.dimensions();
-                    let data = arboard::ImageData {
-                        width: w as usize,
-                        height: h as usize,
+                    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+                    cb.set_image(arboard::ImageData {
+                        width: w as usize, height: h as usize,
                         bytes: std::borrow::Cow::Owned(rgba.into_raw()),
-                    };
-                    if let Ok(mut cb) = arboard::Clipboard::new() {
-                        if cb.set_image(data).is_ok() {
-                            if let Some(p) = self.pty_for_pane(&surface) {
-                                let _ = p.send_bytes(CLAUDE_IMG_PASTE);
-                            }
-                        }
-                    }
-                }
+                    }).map_err(|e| e.to_string())?;
+                    let key = if pty.active_agent() == Some(kasa_pty::AgentKind::Codex) {
+                        &[0x16][..]
+                    } else { CLAUDE_IMG_PASTE };
+                    pty.send_bytes(key).map_err(|e| e.to_string())
+                })();
+                if let Some(reply) = reply { let _ = reply.send(result); }
+                else if let Err(error) = result { self.set_toast(error); }
+                return;
+            }
+            UserEvent::ImagePasteDone(result) => {
+                if let Err(error) = result { self.set_toast(error.clone()); }
                 return;
             }
             UserEvent::SocketOpenPreview(path, target) => {
@@ -5137,7 +5154,7 @@ impl ApplicationHandler<UserEvent> for App {
                                         self.machines_col_act(btn);
                                     }
                                     (Some(p), None) => {
-                                        self.focus_pane(&p);
+                                        self.reveal_pane_tab(&p);
                                     }
                                     (None, None) => {}
                                 }
@@ -5145,7 +5162,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 window.request_redraw();
                                 return;
                             }
-                            // 「다른 기계」 줄 — 그 기계의 메뉴(학생·거울·펼치기·화면 보기).
+                            // Device headings collapse; right-click opens the device menu.
                             if let Some(label) = self
                                 .info
                                 .machine_rects
@@ -5153,8 +5170,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 .find(|(_, r)| inside(r))
                                 .map(|(l, _)| l.clone())
                             {
-                                self.info.machine_menu = Some((cx, cy, label));
-                                self.info.machines_col.last_refresh = None;
+                                if !self.info.machine_collapsed.remove(&label) {
+                                    self.info.machine_collapsed.insert(label);
+                                }
                                 self.chrome_dirty = true;
                                 window.request_redraw();
                                 return;
@@ -5169,9 +5187,6 @@ impl ApplicationHandler<UserEvent> for App {
                                 let flag = match sec {
                                     state::InfoSection::Dir => &mut self.info.dir_collapsed,
                                     state::InfoSection::Procs => &mut self.info.procs_collapsed,
-                                    state::InfoSection::Machines => {
-                                        &mut self.info.machines_collapsed
-                                    }
                                 };
                                 *flag = !*flag;
                                 window.request_redraw();
@@ -6913,20 +6928,12 @@ impl ApplicationHandler<UserEvent> for App {
                     })
                     .unwrap_or(false);
                 if is_img {
-                    if let Ok(img) = image::open(&path) {
-                        let rgba = img.to_rgba8();
-                        let (w, h) = rgba.dimensions();
-                        let data = arboard::ImageData {
-                            width: w as usize,
-                            height: h as usize,
-                            bytes: std::borrow::Cow::Owned(rgba.into_raw()),
-                        };
-                        if let Ok(mut cb) = arboard::Clipboard::new() {
-                            if cb.set_image(data).is_ok() {
-                                self.send_bytes(CLAUDE_IMG_PASTE);
-                                return;
-                            }
+                    if let Some(surface) = self.target_surface() {
+                        match std::fs::read(&path) {
+                            Ok(bytes) => self.paste_image_to_surface(surface, bytes),
+                            Err(error) => self.set_toast(format!("이미지 파일을 읽지 못했어: {error}")),
                         }
+                        return;
                     }
                 }
                 // 비이미지(코드 파일 등) 또는 디코드/클립보드 실패 → 경로 입력.
@@ -6999,6 +7006,7 @@ impl ApplicationHandler<UserEvent> for App {
             });
         }
         self.refresh_machines_col();
+        self.refresh_mirror_theme();
         // 참조 그림으로 굽는 잡의 진행을 걷는다 — 다 구운 것을 설치하고 프로바이더
         // 감지 캐시를 갱신한다. 설치가 GUI 스레드 몫인 이유는 로스터 갱신과 캐시
         // 무효화를 함께 해야 해서다(themegen.rs 참조).
@@ -7714,6 +7722,14 @@ impl App {
             return;
         };
         self.chrome_dirty = true;
+        if matches!(dlg.why, CloseWhy::Mirror { closing: true, .. }) {
+            self.confirm_close = Some(dlg);
+            return;
+        }
+        if let CloseWhy::Mirror { targets, .. } = dlg.why {
+            self.choose_mirror_close(dlg.action, targets, btn);
+            return;
+        }
         if btn == ConfirmBtn::Cancel {
             if let PendingClose::AuxEditor(id) = dlg.action {
                 self.focus_aux_window(id);

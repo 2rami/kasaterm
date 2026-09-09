@@ -18,7 +18,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{define_class, AllocAnyThread, DefinedClass};
 use objc2_user_notifications::{
-    UNNotificationResponse, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+    UNNotification, UNNotificationPresentationOptions, UNNotificationResponse,
+    UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -40,6 +41,20 @@ define_class!(
     unsafe impl NSObjectProtocol for NotifyDelegate {}
 
     unsafe impl UNUserNotificationCenterDelegate for NotifyDelegate {
+        // 다른 학생을 보는 중에도 완료를 알린다. delegate가 없으면 포그라운드
+        // 알림은 시스템이 숨기는데, native 모드에서는 자체 배너도 쉬므로 유실된다.
+        #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+        unsafe fn will_present(
+            &self,
+            _center: &UNUserNotificationCenter,
+            _notification: &UNNotification,
+            completion: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+        ) {
+            completion.call((UNNotificationPresentationOptions::Banner
+                | UNNotificationPresentationOptions::List
+                | UNNotificationPresentationOptions::Sound,));
+        }
+
         /// 배너를 눌렀다(기본 동작·커스텀 액션 모두 여기로 온다).
         ///
         /// completion 을 **반드시** 불러야 시스템이 이 응답을 닫는다 — 안 부르면
@@ -62,6 +77,46 @@ define_class!(
         }
     }
 );
+
+/// iPhone과 같은 대화 알림으로 바꿔 완료한 학생 얼굴을 큰 아이콘으로 표시한다.
+/// objc2-intents에는 UNNotificationContentProviding 채택 정보가 누락되어 있어
+/// 마지막 content 갱신만 Objective-C selector를 직접 부른다.
+pub(crate) fn with_character_avatar(
+    content: &objc2_user_notifications::UNNotificationContent,
+    character: &str,
+    thread: &str,
+) -> Option<Retained<objc2_user_notifications::UNNotificationContent>> {
+    use objc2_foundation::{NSData, NSError, NSString};
+    use objc2_intents::{INImage, INInteraction, INInteractionDirection, INOutgoingMessageType,
+        INPerson, INPersonHandle, INPersonHandleType, INSendMessageIntent};
+    // 앱은 macOS 11도 지원하지만 대화 알림은 macOS 12부터다.
+    if !content.respondsToSelector(objc2::sel!(contentByUpdatingWithProvider:error:)) {
+        return None;
+    }
+    let slug = crate::theme::character_slug_any(character)?;
+    let remote = crate::mirror_theme::asset(slug, "profile", 0);
+    let png = remote.as_deref().or_else(|| crate::render::student_profile_png(slug))?;
+    let name = NSString::from_str(character);
+    let identity = NSString::from_str(&format!("kasaterm:{slug}"));
+    let thread = NSString::from_str(thread);
+    // SAFETY: all arguments are live Foundation/Intents objects of the declared
+    // types; INSendMessageIntent adopts UNNotificationContentProviding on macOS 12+.
+    unsafe {
+        let avatar = INImage::imageWithImageData(&NSData::with_bytes(png));
+        let handle = INPersonHandle::initWithValue_type(
+            INPersonHandle::alloc(), Some(&identity), INPersonHandleType::Unknown);
+        let sender = INPerson::initWithPersonHandle_nameComponents_displayName_image_contactIdentifier_customIdentifier(
+            INPerson::alloc(), &handle, None, Some(&name), Some(&avatar), None, Some(&identity));
+        let intent = INSendMessageIntent::initWithRecipients_outgoingMessageType_content_speakableGroupName_conversationIdentifier_serviceName_sender_attachments(
+            INSendMessageIntent::alloc(), None, INOutgoingMessageType::OutgoingMessageText,
+            Some(&content.body()), None, Some(&thread), None, Some(&sender), None);
+        let interaction = INInteraction::initWithIntent_response(INInteraction::alloc(), &intent, None);
+        interaction.setDirection(INInteractionDirection::Incoming);
+        interaction.donateInteractionWithCompletion(None);
+        objc2::msg_send![content, contentByUpdatingWithProvider: &*intent,
+            error: std::ptr::null_mut::<*mut NSError>()]
+    }
+}
 
 /// 알림 identifier 에서 갈 자리를 꺼낸다 — `kasaterm-notify-{seq}|{pane}|{sid}`.
 ///

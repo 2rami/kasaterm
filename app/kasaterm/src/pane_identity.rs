@@ -17,6 +17,15 @@ pub(super) fn terminal_identity_pid(pane_id: &str, active_is_terminal: bool) -> 
     active_is_terminal.then_some(pane_id)
 }
 
+/// Display the source device's number without changing the local routing key.
+pub(super) fn shown_pane_id(pane_id: &str, active_is_terminal: bool) -> String {
+    terminal_identity_pid(pane_id, active_is_terminal)
+        .and_then(kasa_mcp::remote::remote_info)
+        .map(|info| info.remote_id)
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| pane_id.to_string())
+}
+
 impl MachineIdentity {
     pub fn for_pane(pane_id: Option<&str>, local_name: Option<&str>) -> Self {
         let remote = pane_id.and_then(kasa_mcp::remote::remote_info);
@@ -62,10 +71,6 @@ impl MachineIdentity {
 
     pub fn background(&self, base: [u8; 4]) -> [u8; 4] {
         theme::lerp(base, self.tint, 0.12)
-    }
-
-    pub fn marker(&self) -> [u8; 4] {
-        self.tint
     }
 
     pub fn foreground(&self, background: [u8; 4]) -> [u8; 4] {

@@ -235,6 +235,10 @@ pub struct Alert {
     pub avatar_slug: Option<String>,
 }
 
+fn notification_thread(alert: &Alert) -> String {
+    format!("{}/{}", alert.machine.as_deref().unwrap_or("local"), alert.pane)
+}
+
 /// 등록된 폰 전부에 쏜다. 열쇠나 토큰이 없으면 조용히 0.
 pub async fn send(alert: &Alert) -> usize {
     let Some(key) = load_key() else { return 0 };
@@ -260,7 +264,7 @@ pub async fn send(alert: &Alert) -> usize {
             "aps": {
                 "alert": { "title": alert.title, "body": alert.body },
                 "sound": "default",
-                "thread-id": alert.pane,
+                "thread-id": notification_thread(alert),
                 "mutable-content": 1,
             },
             "machine": alert.machine,
@@ -358,6 +362,9 @@ async fn all_rows() -> Vec<(Option<String>, Value)> {
         {
             if let Ok(v) = resp.json::<Value>().await {
                 for row in v.as_array().cloned().unwrap_or_default() {
+                    if row.get("mirror_of").and_then(Value::as_str).is_some() {
+                        continue;
+                    }
                     out.push((None, row));
                 }
             }
@@ -470,6 +477,18 @@ pub async fn push_loop() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn same_pane_on_different_machines_has_separate_notifications() {
+        let mut alert = super::Alert {
+            title: String::new(), body: String::new(), machine: None,
+            pane: "%3".into(), kind: "done".into(), collapse: None,
+            sender: None, avatar_slug: None,
+        };
+        let local = super::notification_thread(&alert);
+        alert.machine = Some("macbook".into());
+        assert_ne!(local, super::notification_thread(&alert));
+    }
+
     /// 진짜 열쇠가 있는 기계에서만 — ring 이 애플 .p8 을 읽고 서명하는지.
     #[test]
     fn apple_p8_signs_when_present() {

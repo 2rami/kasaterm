@@ -17,6 +17,21 @@
 
 use super::*;
 
+/// Room identity comes from the source device, including for an existing mirror.
+fn remote_room(p: &serde_json::Value) -> String {
+    let window = p.get("window").and_then(|v| v.as_u64());
+    let label = p.get("window_name").and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| p.get("cwd").and_then(|v| v.as_str())
+            .and_then(|s| s.rsplit('/').find(|s| !s.is_empty())));
+    match (window, label) {
+        (Some(w), Some(label)) => format!("방 {} · {label}", w + 1),
+        (Some(w), None) => format!("방 {}", w + 1),
+        (None, Some(label)) => label.to_string(),
+        _ => String::new(),
+    }
+}
+
 /// ago 초를 사람 말로 — 아로나 판(MachinesTab)의 agoLabel 과 같은 문구.
 pub(crate) fn ago_label(secs: Option<u64>) -> String {
     match secs {
@@ -99,7 +114,9 @@ fn hung_screen_share_pids() -> Vec<String> {
 /// 그 pane 이 없으면 None.
 pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)> {
     let info = kasa_mcp::remote::remote_info(id)?;
-    let label = if info.label.is_empty() { info.base.clone() } else { info.label.clone() };
+    let label = if info.label.is_empty() {
+        kasa_mcp::machines::label_for_base(&info.base).unwrap_or_else(|| info.base.clone())
+    } else { info.label.clone() };
     let snap = kasa_mcp::machines::snapshot();
     let m = snap
         .iter()
@@ -168,7 +185,8 @@ impl App {
             // 캐시의 저쪽 행에서(2026-09-07 지적 「맥미니에서 여기로 옮기는 것도 없어」
             // — 이 관문 탓에 거울이 데려오기 목록에 안 섰다).
             let facts = remote_pane_facts(id);
-            if facts.is_none() && !self.pane_claude_ready(id) {
+            let remote = kasa_mcp::remote::remote_info(id);
+            if remote.is_none() && !self.pane_claude_ready(id) {
                 continue;
             }
             let remote_str = |k: &str| {
@@ -178,31 +196,31 @@ impl App {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
             };
-            let Some(name) = self.pane_character_if_known(id).or_else(|| remote_str("name")) else {
+            let Some(name) = remote_str("name").or_else(|| self.pane_character_if_known(id))
+                .or_else(|| remote.as_ref().map(|_| String::new())) else {
                 continue;
             };
             let win = pane_window.get(id).copied().unwrap_or(self.active_window);
             let row = state::MachinesColRow {
                 pane: id.clone(),
-                remote_id: String::new(),
-                remote_cwd: String::new(),
+                remote_id: remote.as_ref().map(|i| i.remote_id.clone()).unwrap_or_default(),
+                remote_cwd: remote_str("cwd").unwrap_or_default(),
                 name,
                 // 거울이면 저쪽이 하던 일 제목 — 로컬 라벨은 이쪽 폴더라 「무엇을 하나」를
                 // 못 말한다(Info 「다른 기계」 pane 목록이 이 값을 그대로 쓴다).
                 title: remote_str("title").unwrap_or_else(|| self.pane_row_label(id)),
-                status: self
+                status: remote_str("status").or_else(|| self
                     .pane_activity
                     .get(id)
-                    .map(|v| v.status.clone())
-                    .or_else(|| remote_str("status"))
+                    .map(|v| v.status.clone()))
                     .unwrap_or_default(),
-                room: room_of(win),
+                room: facts.as_ref().map(|(_, p)| remote_room(p)).unwrap_or_else(|| room_of(win)),
                 closed: facts
                     .as_ref()
                     .and_then(|(_, r)| r.get("closed").and_then(|v| v.as_bool()))
                     .unwrap_or(false),
             };
-            match kasa_mcp::remote::remote_info(id) {
+            match remote {
                 Some(info) => {
                     let label = if info.label.is_empty() {
                         info.base.clone()
@@ -245,6 +263,9 @@ impl App {
                         let mut rows: Vec<(u64, state::MachinesColRow)> = arr
                             .iter()
                             .filter_map(|p| {
+                                if p.get("mirror_of").and_then(|v| v.as_str()).is_some() {
+                                    return None; // A viewer is listed under its source device.
+                                }
                                 let rid = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
                                 if mirror_ids.contains(rid) {
                                     return None; // 이사 간 학생의 원격 반쪽 — 미러 행이 대표한다.
@@ -266,13 +287,7 @@ impl App {
                                     .to_string();
                                 // 방 이름은 폴더 꼬리(사이드바 규칙과 같은 원천) — cwd 를
                                 // 안 주는 옛 창구에서는 방 번호로 물러선다.
-                                let room = cwd
-                                    .rsplit('/')
-                                    .next()
-                                    .filter(|t| !t.is_empty())
-                                    .map(str::to_string)
-                                    .or_else(|| win.map(|w| format!("방 {}", w + 1)))
-                                    .unwrap_or_default();
+                                let room = remote_room(p);
                                 Some((
                                     win.unwrap_or(u64::MAX),
                                     state::MachinesColRow {
@@ -281,11 +296,7 @@ impl App {
                                         // 그 기계 화면의 방이 아니다.
                                         remote_id: rid.starts_with('%').then(|| rid.to_string()).unwrap_or_default(),
                                         remote_cwd: cwd,
-                                        name: if name.is_empty() {
-                                            "이름 없는 캐릭터".to_string()
-                                        } else {
-                                            name.to_string()
-                                        },
+                                        name: name.to_string(),
                                         title: p
                                             .get("title")
                                             .and_then(|v| v.as_str())
@@ -377,6 +388,10 @@ impl App {
             return true;
         }
         if let state::MachinesColBtn::Close { label, remote_id, name, pane } = &btn {
+            if !pane.is_empty() && kasa_mcp::remote::is_view_pane(pane) {
+                self.confirm_or_close_pane(pane);
+                return true;
+            }
             // 그 기계 pane 닫기 — 거기서 사람이 × 를 누른 것과 같다(되살리기 대열에
             // 남는다, kill 아님). 거울 행은 remote_id 를 안 실으니 링크에서 꺼낸다.
             let rid = if remote_id.is_empty() {

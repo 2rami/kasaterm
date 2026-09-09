@@ -487,13 +487,10 @@ impl App {
         // from leaf_cells — no dependency on ws.panes being populated. A
         // freshly split pane has no PaneState until its first output, so the
         // old ws.panes walk left it at 80×24 spawn size (화면 겹침/하단 잘림).
-        // 거울은 목표만 전송한다. 서버의 size 확정 전에 로컬 파서를 바꾸면
-        // 구 호스트나 소유권을 거절한 호스트의 바이트가 엉뚱한 폭에 접힌다.
-        let mut views: Vec<(String, (u16, u16))> = Vec::new();
+        // Mirrors record local bounds only; their parser and source keep the host grid.
         for (id, (pc, pr)) in &leaf_cells {
             if kasa_mcp::remote::is_view_pane(id) {
                 kasa_mcp::remote::set_viewport(id, *pc, *pr);
-                views.push((id.clone(), (*pc, *pr)));
                 continue;
             }
             if let Some(sess) = self.pty.get(id) {
@@ -524,20 +521,10 @@ impl App {
             for pid in pids {
                 if kasa_mcp::remote::is_view_pane(&pid) {
                     kasa_mcp::remote::set_viewport(&pid, pc, pr);
-                    views.push((pid, (pc, pr)));
                     continue;
                 }
                 if let Some(sess) = self.pty.get(&pid) {
                     let _ = sess.resize(pc, pr);
-                }
-            }
-        }
-        if !views.is_empty() {
-            let mut ws = self.ws.lock().unwrap();
-            for (pid, cells) in views {
-                let changed = ws.view_cells.insert(pid.clone(), cells) != Some(cells);
-                if changed {
-                    Self::reflow_view_pane(&mut ws, &pid);
                 }
             }
         }
@@ -2785,17 +2772,22 @@ mod contain_scale_tests {
     #[test]
     fn last_cell_hit_matches_contained_grid_with_manual_zoom() {
         let cell = (8.0, 16.0);
-        let grid = (120.0, 40.0);
-        for usable in [(24.0, 16.0), (168.0, 96.0), (640.0, 384.0), (1200.0, 800.0)] {
-            for manual in [0.5, 1.0, 2.0] {
-                let scale = contained_cell_scale(manual, usable, grid, cell);
-                assert!(grid.0 * cell.0 * scale <= usable.0);
-                assert!(grid.1 * cell.1 * scale <= usable.1);
-                let px = (grid.0 - 0.5) * cell.0 * scale;
-                let py = (grid.1 - 0.5) * cell.1 * scale;
-                assert_eq!(pixel_cell(px, cell.0, scale), 119);
-                assert_eq!(pixel_cell(py, cell.1, scale), 39);
-                assert!(scale <= manual);
+        for grid in [(21.0, 6.0), (120.0, 40.0), (180.0, 60.0)] {
+            for usable in [(24.0, 16.0), (168.0, 96.0), (640.0, 384.0), (1200.0, 800.0)] {
+                for manual in [0.5, 1.0, 2.0] {
+                    let scale = contained_cell_scale(manual, usable, grid, cell);
+                    assert!(grid.0 * cell.0 * scale <= usable.0);
+                    assert!(grid.1 * cell.1 * scale <= usable.1);
+                    let px = (grid.0 - 0.5) * cell.0 * scale;
+                    let py = (grid.1 - 0.5) * cell.1 * scale;
+                    assert_eq!(pixel_cell(px, cell.0, scale), grid.0 as u16 - 1);
+                    assert_eq!(pixel_cell(py, cell.1, scale), grid.1 as u16 - 1);
+                    // Same clip formula as render: fitting cannot trim the last
+                    // source row/column even when the viewer is much smaller.
+                    assert!((usable.0 / (cell.0 * scale)).floor() >= grid.0);
+                    assert!((usable.1 / (cell.1 * scale)).floor() >= grid.1);
+                    assert!(scale <= manual);
+                }
             }
         }
     }

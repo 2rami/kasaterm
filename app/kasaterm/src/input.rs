@@ -1709,7 +1709,21 @@ impl App {
             Err(e) => eprintln!("[kasaterm] clipboard open failed: {e}"),
         }
     }
+    pub(crate) fn paste_image_to_surface(&self, surface: String, bytes: Vec<u8>) {
+        if let Some(remote) = kasa_mcp::remote::remote_info(&surface) {
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                let result = kasa_mcp::remote::paste_remote_image(&remote.base, &remote.remote_id, bytes)
+                    .map_err(|e| format!("이미지 전송 실패: {e:#}"));
+                let _ = proxy.send_event(UserEvent::ImagePasteDone(result));
+            });
+        } else {
+            let _ = self.proxy.send_event(UserEvent::SocketPasteImage(surface, bytes, None));
+        }
+    }
+
     pub(crate) fn paste_clipboard(&self) {
+        let surface = self.target_surface();
         let mut cb = match arboard::Clipboard::new() {
             Ok(cb) => cb,
             Err(e) => {
@@ -1717,12 +1731,32 @@ impl App {
                 return;
             }
         };
+        let text = cb.get_text().ok();
+        // Browsers can put the image URL beside its bitmap. Ordinary copied
+        // text may also carry a TIFF representation, so only URLs yield here.
+        let bitmap_first = text.as_deref().is_none_or(|text| {
+            let text = text.trim();
+            text.is_empty() || ((!text.contains(char::is_whitespace))
+                && (text.starts_with("https://") || text.starts_with("http://")))
+        });
+        if bitmap_first {
+            if let Ok(data) = cb.get_image() {
+                let Some(surface) = surface else { return; };
+                let Some(rgba) = image::RgbaImage::from_raw(data.width as u32, data.height as u32, data.bytes.into_owned()) else { return; };
+                let mut png = std::io::Cursor::new(Vec::new());
+                match image::DynamicImage::ImageRgba8(rgba).write_to(&mut png, image::ImageFormat::Png) {
+                    Ok(()) => self.paste_image_to_surface(surface, png.into_inner()),
+                    Err(error) => { let _ = self.proxy.send_event(UserEvent::ImagePasteDone(Err(format!("이미지를 준비하지 못했어: {error}")))); }
+                }
+                return;
+            }
+        }
         // 텍스트가 있으면 무조건 텍스트 우선(bracketed paste). 일부 앱은 텍스트를
         // 복사해도 TIFF 표현을 같이 올려 get_image()가 Ok를 뱉는데, 이미지를 먼저
         // 검사하면 멀쩡한 텍스트 paste가 0x16으로 새버린다(거노: 붙여넣기 먹통).
         // 텍스트가 *없고* 이미지만 있을 때만 0x16을 흘려 claude code가 osascript로
         // 클립보드 PNG를 [Image] 칩으로 읽게 한다.
-        if let Ok(text) = cb.get_text() {
+        if let Some(text) = text {
             if !text.is_empty() {
                 // 감싸개(`ESC[200~ … ESC[201~`)는 앱이 DECSET 2004 로 **켰을 때만**
                 // 보낸다. 안 켠 앱은 저 바이트를 입력의 일부로 받는다 — `claude auth
@@ -1751,10 +1785,6 @@ impl App {
                 }
                 return;
             }
-        }
-        if cb.get_image().is_ok() {
-            self.send_bytes(&[0x16]);
-            return;
         }
         eprintln!("[kasaterm] paste: clipboard has neither text nor image");
     }

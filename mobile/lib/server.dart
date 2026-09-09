@@ -632,7 +632,7 @@ class Server {
   }
 
   /// 애플에서 받은 푸시 토큰을 맡긴다 — 서버가 학생 대기·끝냄·쪽지 때 이 폰으로 쏜다.
-  Future<void> registerPushToken(String token, String env) async {
+  Future<bool> registerPushToken(String token, String env) async {
     final http.Response res;
     try {
       res = await _client.post(
@@ -646,6 +646,27 @@ class Server {
     }
     if (res.statusCode != 200) {
       throw ServerException('알림 등록이 안 됐다 (${res.statusCode})');
+    }
+    try {
+      final reply = jsonDecode(res.body) as Map<String, dynamic>;
+      if (reply['ok'] != true) throw ServerException('알림 등록이 안 됐다');
+      return reply['ready'] == true;
+    } catch (_) {
+      throw ServerException('알림 등록 응답을 확인하지 못했다');
+    }
+  }
+
+  /// 연결 서버를 바꾸거나 연결을 지울 때 옛 발신자의 등록을 걷는다.
+  Future<void> unregisterPushToken(String token) async {
+    try {
+      final res = await _client.post(
+        uri('term/push-token'),
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode({'token': token, 'remove': true}),
+      );
+      if (res.statusCode != 200) throw ServerException('이전 알림 등록 해제가 안 됐다');
+    } catch (_) {
+      throw ServerException('이전 알림 등록 해제가 안 됐다');
     }
   }
 

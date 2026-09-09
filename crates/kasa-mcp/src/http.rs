@@ -823,8 +823,10 @@ async fn paste_image_handler(
     }
     // 클립보드+Ctrl+V 로 claude 입력에 [Image] 첨부만. 아로나 대화창엔 send 후 프록시가
     // 캡처한 user 메시지(텍스트+이미지)로 말풍선에 뜬다 — sent-images 큰 박스 write 안 함(거노).
-    let ok = backend.paste_image(&surface, body.to_vec()).is_ok();
-    (cors, Json(serde_json::json!({ "ok": ok })))
+    match backend.paste_image(&surface, body.to_vec()) {
+        Ok(()) => (cors, Json(serde_json::json!({ "ok": true }))),
+        Err(error) => (cors, Json(serde_json::json!({ "ok": false, "error": error.to_string() }))),
+    }
 }
 
 /// `POST /git-panel` — 아로나 타이틀바 버튼 → 터미널 GUI git 소스컨트롤 패널 토글(거노).
@@ -6595,31 +6597,69 @@ async fn term_ws_run(
 
     let sess_in = sess.clone();
     let sess_sz = sess.clone();
+    let output_session_id = self_id.clone();
+    let input_session_id = self_id.clone();
+    let replaced = Arc::new(tokio::sync::Notify::new());
+    let replaced_input = replaced.clone();
     let mut last_size = (c, r);
     // 화면이 위로 밀려 스크롤백으로 들어간 줄을 거울에게도 흘린다(`scrolled`). 이게
     // 없으면 폰은 살아 있는 화면만 받아 위로 넘길 지난 줄이 없다.
     let mut last_hist = sess.view_state().1;
     let mut to_browser = tokio::spawn(async move {
+        // Migration/replacement preserves the pane id but installs another
+        // PtySession. A quiet terminal must reconnect too; this timer is local
+        // only and must not turn the 30-second keepalive into a ping flood.
+        let mut session_watch = tokio::time::interval(std::time::Duration::from_millis(250));
+        session_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut keepalive_at = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
+            if !websocket_session_is_current(&output_session_id, &sess_sz) {
+                // No `gone`: the pane still exists under the same id. Closing
+                // makes viewers reconnect, resubscribe and receive its new snapshot.
+                let _ = ws_tx.send(Message::Close(None)).await;
+                break;
+            }
             // 조용할 때 ping 을 끼운다. 터널·리버스 프록시는 유휴 WebSocket 을
             // 끊는데(Cloudflare 무료 플랜 ~100초), 터미널은 아무 출력 없는 시간이
             // 길어서 반드시 걸린다. 30초면 그 절반이라 여유가 있다.
             let visual_deadline = visual_delivery.deadline();
-            let incoming = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-                if let Some(subscription) = visual_subscription.as_mut() {
-                    tokio::select! {
-                        frame = brx.recv() => frame,
-                        changed = subscription.changed.changed() => changed.ok().map(|_| Frame::Visual),
-                        _ = async {
-                            if let Some(deadline) = visual_deadline {
-                                tokio::time::sleep_until(deadline).await;
-                            } else { std::future::pending::<()>().await; }
-                        } => Some(Frame::VisualDeadline),
+            let incoming = tokio::select! {
+                _ = session_watch.tick() => {
+                    // Raw-byte subscribers do not receive publish_full_snapshot
+                    // on a quiet GUI resize. Reattach atomically to the resized
+                    // parser rather than mixing a new snapshot with queued old
+                    // byte deltas. Grid subscribers already receive that frame.
+                    if !want_grid && sess_sz.size() != last_size {
+                        let _ = ws_tx.send(Message::Close(None)).await;
+                        break;
                     }
-                } else {
-                    brx.recv().await
-                }
-            }).await;
+                    continue;
+                },
+                _ = replaced.notified() => continue,
+                _ = tokio::time::sleep_until(keepalive_at) => Err(()),
+                frame = async {
+                    if let Some(subscription) = visual_subscription.as_mut() {
+                        tokio::select! {
+                            frame = brx.recv() => frame,
+                            changed = subscription.changed.changed() => changed.ok().map(|_| Frame::Visual),
+                            _ = async {
+                                if let Some(deadline) = visual_deadline {
+                                    tokio::time::sleep_until(deadline).await;
+                                } else { std::future::pending::<()>().await; }
+                            } => Some(Frame::VisualDeadline),
+                        }
+                    } else {
+                        brx.recv().await
+                    }
+                } => Ok(frame),
+            };
+            keepalive_at = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            // A queued EOF or frame may belong to the previous session. Check
+            // again after awaiting it so it cannot terminate the replacement.
+            if !websocket_session_is_current(&output_session_id, &sess_sz) {
+                let _ = ws_tx.send(Message::Close(None)).await;
+                break;
+            }
             match incoming {
                 Ok(Some(chunk)) => {
                     // PTY 격자가 바뀌었으면(divider·⤢·다른 미러) 바이트보다 먼저
@@ -6759,6 +6799,12 @@ async fn term_ws_run(
     let mut to_shell = tokio::spawn(async move {
         let mut logical_viewport = false;
         while let Some(Ok(msg)) = ws_rx.next().await {
+            if !websocket_session_is_current(&input_session_id, &sess_in) {
+                // Drop obsolete input/resize/kill instead of touching the old
+                // session. Keep this task alive until the sender flushes Close.
+                replaced_input.notify_one();
+                continue;
+            }
             match msg {
                 // 키 입력은 binary — 텍스트 채널과 섞이지 않아 파싱이 필요 없다.
                 Message::Binary(b) => {
@@ -6876,6 +6922,10 @@ async fn term_ws_run(
     }
     unregister_viewer_ctl(&ctl_pane, ctl_token);
     drop(viewport);
+}
+
+fn websocket_session_is_current(id: &str, session: &Arc<kasa_pty::PtySession>) -> bool {
+    kasa_pty::lookup_session(id).is_some_and(|current| Arc::ptr_eq(&current, session))
 }
 
 pub fn spawn_http_server(
@@ -7623,7 +7673,7 @@ pub fn spawn_http_server_opts(
                         "/paste-image",
                         post(move |q: Query<std::collections::HashMap<String, String>>, b: Bytes| {
                             paste_image_handler(paste_image_backend.clone(), q, b)
-                        }),
+                        }).layer(axum::extract::DefaultBodyLimit::max(32 << 20)),
                     )
                     .route(
                         "/git-panel",
@@ -7711,6 +7761,160 @@ pub fn spawn_http_server_opts(
 
 #[cfg(test)]
 mod tests {
+    #[derive(Clone)]
+    struct MirrorInput(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for MirrorInput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
+    fn replacement_source(
+        id: &str,
+        cols: u16,
+    ) -> (std::sync::Arc<kasa_pty::PtySession>, crossbeam_channel::Sender<kasa_pty::ExtEvent>, MirrorInput) {
+        let (events, receiver) = crossbeam_channel::unbounded();
+        let input = MirrorInput(Default::default());
+        let session = std::sync::Arc::new(kasa_pty::PtySession::start_external(
+            kasa_pty::PtyOptions { pane_id: id.to_string(), cols, rows: 6, ..Default::default() },
+            kasa_pty::ExternalIo {
+                events: receiver, writer: Box::new(input.clone()), on_resize: std::sync::Arc::new(|_, _| {}),
+            },
+        ).unwrap());
+        (session, events, input)
+    }
+
+    async fn wait_replacement_text(session: &kasa_pty::PtySession, text: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            while !session.visible_text(6).contains(text) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.expect("replacement screen did not arrive");
+    }
+
+    #[tokio::test]
+    async fn websocket_session_replacement_closes_quiet_views_without_gone_or_stale_input() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
+        type Client = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+        async fn snapshot(client: &mut Client, expected: &str) {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(Ok(message)) = client.next().await {
+                    match message {
+                        Message::Binary(bytes) if String::from_utf8_lossy(&bytes).contains(expected) => return,
+                        Message::Text(text) if text.contains(expected) => return,
+                        Message::Close(_) => panic!("closed before initial snapshot"),
+                        _ => {}
+                    }
+                }
+                panic!("missing initial snapshot");
+            }).await.unwrap();
+        }
+
+        async fn replaced_close(client: &mut Client) {
+            tokio::time::timeout(std::time::Duration::from_millis(750), async {
+                while let Some(Ok(message)) = client.next().await {
+                    match message {
+                        Message::Close(_) => return,
+                        Message::Text(text) => assert_ne!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["t"], "gone"),
+                        Message::Ping(_) => panic!("replacement watcher must not send keepalive pings"),
+                        _ => {}
+                    }
+                }
+                panic!("replacement did not flush a close frame");
+            }).await.expect("quiet replacement was not detected promptly");
+        }
+
+        for grid in [false, true] {
+            let id = format!("swap-http-test-{}", uuid::Uuid::new_v4());
+            let (old, old_events, old_input) = replacement_source(&id, 21);
+            let (new, new_events, new_input) = replacement_source(&id, 37);
+            old_events.send(kasa_pty::ExtEvent::Bytes(b"OLD-SOURCE".to_vec())).unwrap();
+            new_events.send(kasa_pty::ExtEvent::Bytes(b"NEW-SOURCE".to_vec())).unwrap();
+            wait_replacement_text(&old, "OLD-SOURCE").await;
+            wait_replacement_text(&new, "NEW-SOURCE").await;
+            kasa_pty::register_session(&id, &old);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let router = axum::Router::new().route("/term/ws", axum::routing::get(super::term_ws_handler));
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let url = format!("ws://{addr}/term/ws?pane={id}&grid={}", u8::from(grid));
+            let (mut quiet, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            let (mut typing, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            snapshot(&mut quiet, "OLD-SOURCE").await;
+            snapshot(&mut typing, "OLD-SOURCE").await;
+
+            kasa_pty::register_session(&id, &new);
+            // The old Arc remains alive and silent. Neither EOF nor fresh PTY
+            // output can accidentally provide the wakeup this test requires.
+            typing.send(Message::Binary(b"STALE-KEYS".to_vec().into())).await.unwrap();
+            replaced_close(&mut quiet).await;
+            replaced_close(&mut typing).await;
+            assert!(old_input.0.lock().unwrap().is_empty());
+            assert!(new_input.0.lock().unwrap().is_empty());
+
+            let (mut reconnected, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            snapshot(&mut reconnected, "NEW-SOURCE").await;
+            reconnected.send(Message::Binary(b"NEW-KEYS".to_vec().into())).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while new_input.0.lock().unwrap().is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }).await.unwrap();
+            assert_eq!(&*new_input.0.lock().unwrap(), b"NEW-KEYS");
+            assert!(old_input.0.lock().unwrap().is_empty());
+            let _ = quiet.close(None).await;
+            let _ = typing.close(None).await;
+            reconnected.close(None).await.unwrap();
+            old_events.send(kasa_pty::ExtEvent::Eof).unwrap();
+            new_events.send(kasa_pty::ExtEvent::Eof).unwrap();
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_session_replacement_desktop_mirror_reconnects_to_new_screen_and_input() {
+        let id = format!("swap-desktop-test-{}", uuid::Uuid::new_v4());
+        let (old, old_events, old_input) = replacement_source(&id, 21);
+        let (new, new_events, new_input) = replacement_source(&id, 37);
+        old_events.send(kasa_pty::ExtEvent::Bytes(b"OLD-DESKTOP".to_vec())).unwrap();
+        new_events.send(kasa_pty::ExtEvent::Bytes(b"NEW-DESKTOP".to_vec())).unwrap();
+        wait_replacement_text(&old, "OLD-DESKTOP").await;
+        wait_replacement_text(&new, "NEW-DESKTOP").await;
+        kasa_pty::register_session(&id, &old);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = axum::Router::new().route("/term/ws", axum::routing::get(super::term_ws_handler));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let local = format!("mirror-swap-client-{}", uuid::Uuid::new_v4());
+        let mirror = tokio::task::spawn_blocking(move || crate::remote::connect_view(
+            crate::remote::RemoteSpec {
+                base: format!("http://{addr}"), pane: Some(id), cwd: None, token: None,
+                identity: crate::remote::RemoteIdentity::default(),
+            }, &local,
+        )).await.unwrap().unwrap();
+        wait_replacement_text(&mirror.session, "OLD-DESKTOP").await;
+        kasa_pty::register_session(&mirror.remote_id, &new);
+        wait_replacement_text(&mirror.session, "NEW-DESKTOP").await;
+        assert!(!mirror.session.visible_text(6).contains("OLD-DESKTOP"));
+        mirror.session.send_bytes(b"AFTER-MOVE").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while new_input.0.lock().unwrap().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(&*new_input.0.lock().unwrap(), b"AFTER-MOVE");
+        assert!(old_input.0.lock().unwrap().is_empty());
+        drop(mirror);
+        old_events.send(kasa_pty::ExtEvent::Eof).unwrap();
+        new_events.send(kasa_pty::ExtEvent::Eof).unwrap();
+        server.abort();
+    }
+
     #[tokio::test]
     async fn websocket_glyph_segments_are_opt_in_for_full_and_delta_grids() {
         use futures_util::StreamExt;

@@ -1394,6 +1394,29 @@ fn dedup_ports(mut ports: Vec<(u16, u32)>) -> Vec<(u16, u32)> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn device_list_keeps_source_numbers_and_offline_mirrors() {
+        let row = |local: &str, source: &str| state::MachinesColRow {
+            pane: local.into(), remote_id: source.into(), remote_cwd: "/work/project".into(),
+            name: "모모이".into(), title: "작업".into(), status: "working".into(),
+            room: "방 1".into(), closed: false,
+        };
+        let mut machine = state::MachinesColMachine {
+            label: "원본 기기".into(), online: true, ago_secs: Some(0), outdated: false,
+            host: String::new(), kvm: None, closed: 0,
+            remote: vec![row("", "%12"), row("", "%2")],
+            mirrored: vec![row("%99", "%7")],
+        };
+        let rows = machine_rows(&machine);
+        assert_eq!(rows.iter().map(|r| r.remote_id.as_str()).collect::<Vec<_>>(),
+            vec!["%2", "%7", "%12"]);
+        assert_eq!(rows[1].pane, "%99"); // Navigation retains the viewer's ID.
+        machine.online = false;
+        let rows = machine_rows(&machine);
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].pane.as_str(), rows[0].remote_id.as_str()), ("%99", "%7"));
+    }
+
     fn raw(pid: u32, ppid: u32, zombie: bool, args: &str) -> Raw {
         Raw { pid, ppid, zombie, cpu: 0.0, rss_kb: 0, args: args.to_string() }
     }
@@ -2155,18 +2178,20 @@ pub(crate) fn draw_info_col(
     };
     // 탭 안의 프로세스도 센다. 접힌 pane 의 것까지 세는 건 이 숫자가 「지금 보이는
     // 줄 수」가 아니라 「이 기계에서 도는 것」이기 때문이다.
-    let proc_total: usize = snap.panes.iter().map(|g| all_rows(g).count()).sum();
+    let local_panes: Vec<_> = snap.panes.iter().filter(|g| g.machine.is_none()).collect();
+    let proc_total: usize = local_panes.iter().map(|g| all_rows(g).count()).sum();
     // 방이 하나뿐이면 머리를 안 그린다 — 늘 같은 이름 한 줄이 목록 맨 위를
     // 차지하면서 알려주는 게 없다.
-    let show_windows = snap.panes.iter().any(|g| g.window != snap.panes[0].window);
+    let show_windows = local_panes.first().is_some_and(|first|
+        local_panes.iter().any(|g| g.window != first.window));
     let procs_h = if info.procs_collapsed {
         0.0
-    } else if snap.panes.is_empty() {
+    } else if local_panes.is_empty() {
         EMPTY_H
     } else {
         let mut h = 0.0;
         let mut prev: Option<usize> = None;
-        for gp in &snap.panes {
+        for gp in &local_panes {
             if show_windows && prev != Some(gp.window) {
                 h += WIN_H;
                 prev = Some(gp.window);
@@ -2197,44 +2222,41 @@ pub(crate) fn draw_info_col(
         .as_ref()
         .map(|p| p.stages.len() as f32 * STAGE_H + 6.0)
         .unwrap_or(0.0);
-    // 기계 줄 밑에 서는 것(방 머리줄·pane 줄·닫힌 수·이쪽 거울)까지 그리는 순서
-    // 그대로 센다 — 기계 한 줄씩만 세면 상한이 모자라 맨 아래가 스크롤로 안 닿는다
-    // (2026-09-08 지적 「인포창 스크롤이 밑에까지 안보여」).
-    let machines_h = if info.machines_col.machines.is_empty() {
-        0.0
-    } else if info.machines_collapsed {
-        SEC_H + SEC_GAP
-    } else {
+    // Include every device section and its rows in the scroll extent.
+    let machines_h = {
         let prog = info.machines_col.progress.as_ref();
         let rows: f32 = info
             .machines_col
             .machines
             .iter()
             .map(|m| {
-                let mut h = ROW_H;
+                let mut h = SEC_H + SEC_GAP;
+                if info.machine_collapsed.contains(&m.label) {
+                    return h;
+                }
                 if prog.is_some_and(|p| p.machine == m.label) {
                     h += stages_h;
                 }
-                if m.online {
+                if m.online || !m.mirrored.is_empty() {
                     let mut last_room = "";
-                    for r in &m.remote {
+                    for r in machine_rows(m) {
                         if !r.room.is_empty() && r.room != last_room {
                             h += MACHINE_HEAD_H;
                             last_room = &r.room;
                         }
-                        h += ROW_H;
+                        h += GROUP_H;
                     }
                     if m.closed > 0 {
                         h += MACHINE_HEAD_H;
                     }
-                    if !m.mirrored.is_empty() {
-                        h += MACHINE_HEAD_H + m.mirrored.len() as f32 * ROW_H;
-                    }
+                    if m.remote.is_empty() && m.mirrored.is_empty() { h += EMPTY_H; }
+                } else {
+                    h += EMPTY_H;
                 }
                 h
             })
             .sum();
-        SEC_H + rows + SEC_GAP
+        rows
     };
     let content = HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + machines_h + 14.0;
     info.content_h = content;
@@ -2327,7 +2349,7 @@ pub(crate) fn draw_info_col(
     // 반쯤 사라진다.
     let t_a = prof.map(|_| Instant::now());
     let badge = if info.root_is_repo { "git 레포" } else { "현재 경로" };
-    let r = draw_section(g, cursor, "프로젝트 디렉터리", None, Some(badge), info.dir_collapsed, x, w, y, bottom, top);
+    let r = draw_section(g, cursor, "프로젝트 디렉터리", None, Some(badge), false, info.dir_collapsed, x, w, y, bottom, top);
     info.sec_rects.push((state::InfoSection::Dir, r));
     y += SEC_H;
     if !info.dir_collapsed {
@@ -2397,24 +2419,24 @@ pub(crate) fn draw_info_col(
 
     // ── 프로세스 ──
     let t_procs = prof.map(|_| Instant::now());
-    let r = draw_section(
-        g, cursor, "프로세스", Some(proc_total), None, info.procs_collapsed, x, w, y, bottom, top,
+    let r = draw_device_section(
+        g, cursor, local_machine_name(), Some(local_panes.len()), info.procs_collapsed, x, w, y, bottom, top,
     );
     info.sec_rects.push((state::InfoSection::Procs, r));
     y += SEC_H;
     if !info.procs_collapsed {
-        if snap.panes.is_empty() {
+        if local_panes.is_empty() {
             draw_empty(g, x0, y, top, bottom, "실행 중인 프로세스 없음");
             y += EMPTY_H;
         }
         let mut prev_win: Option<usize> = None;
-        for gp in &snap.panes {
+        for gp in &local_panes {
             if show_windows && prev_win != Some(gp.window) {
                 prev_win = Some(gp.window);
                 let key = win_key(gp.window);
                 let shut = info.group_collapsed.contains(&key);
                 if y + WIN_H > top && y < bottom {
-                    let n = snap.panes.iter().filter(|o| o.window == gp.window).count();
+                    let n = local_panes.iter().filter(|o| o.window == gp.window).count();
                     draw_window_head(g, cursor, gp, shut, n, x, w, x0, right, y);
                 }
                 info.group_rects.push((key, (x, y, w, WIN_H)));
@@ -2473,123 +2495,68 @@ pub(crate) fn draw_info_col(
     let d_procs = t_procs.map(|t| t.elapsed().as_secs_f32() * 1000.0).unwrap_or(0.0);
     y += SEC_GAP;
 
-    // ── 다른 기계 ── 명부 기계마다 한 줄: 학생 수·거울 수·기다림. 화면공유를 열지
-    // 않고도 「미니에 누가 뭘 기다리나」가 여기서 보인다(2026-09-02 지시). 줄을 누르면
-    // 그 기계의 메뉴 — 학생 목록·거울·방 펼치기·화면 보기가 거기 있다(옛 「원격」 탭의
-    // 자리, 2026-09-07 지시). 이 맥북 학생을 보내는 건 학생 줄 우클릭 메뉴다.
-    if !info.machines_col.machines.is_empty() {
-        let mc = &info.machines_col;
-        let n: usize = mc.machines.iter().map(|m| m.remote.len() + m.mirrored.len()).sum();
-        let waiting = mc
-            .machines
-            .iter()
-            .flat_map(|m| m.remote.iter().chain(m.mirrored.iter()))
-            .filter(|r| r.status.contains("wait") || r.status.contains("attention"))
-            .count();
-        let badge = (waiting > 0).then(|| format!("기다림 {waiting}"));
-        let r = draw_section(
-            g,
-            cursor,
-            "다른 기계",
-            Some(n),
-            badge.as_deref(),
-            info.machines_collapsed,
-            x,
-            w,
-            y,
-            bottom,
-            top,
+    // Each source device has the same section and pane layout as this device.
+    for m in &info.machines_col.machines {
+        let shut = info.machine_collapsed.contains(&m.label);
+        let r = draw_device_section(
+            g, cursor, &m.label, Some(m.remote.len() + m.mirrored.len()),
+            shut, x, w, y, bottom, top,
         );
-        info.sec_rects.push((state::InfoSection::Machines, r));
+        info.machine_rects.push((m.label.clone(), r));
         y += SEC_H;
-        if !info.machines_collapsed {
-            let prog = info.machines_col.progress.as_ref();
-            for m in &info.machines_col.machines {
-                if y + ROW_H > top && y < bottom {
-                    draw_machine_row(g, cursor, m, x, w, x0, right, y);
-                }
-                info.machine_rects.push((m.label.clone(), (x, y, w, ROW_H)));
-                y += ROW_H;
-                // 이사 체크리스트 — 그 기계 줄 바로 밑(2026-09-07 지시: 「Info 기계 줄
-                // 아래」). 레포 받기·대화 옮기기·켜기가 따로 보이는 자리다.
-                if let Some(p) = prog.filter(|p| p.machine == m.label) {
-                    y = draw_migrate_stages(g, p, x0, right, y, top, bottom);
-                }
-                // 그 기계의 pane 목록 — 메뉴 뒤에 접어 두지 않고 줄로 편다(2026-09-07
-                // 지시 「인포에 다른 기계 pane 목록 나오게」). 방이 바뀌는 자리에 흐린
-                // 머리줄, 줄마다 얼굴·이름·하던 일·기다림. 누르면 거울을 열고, 이쪽에
-                // 이미 거울(`mirrored`)이 있는 pane 은 그 줄을 눌러 거울로 간다.
-                if m.online {
-                    let mut last_room = String::new();
-                    for r in &m.remote {
-                        if !r.room.is_empty() && r.room != last_room {
-                            if y + MACHINE_HEAD_H > top && y < bottom {
-                                draw_machine_room_head(g, &r.room, x0, y);
-                            }
-                            last_room = r.room.clone();
-                            y += MACHINE_HEAD_H;
+        if !shut {
+            if let Some(p) = info.machines_col.progress.as_ref().filter(|p| p.machine == m.label) {
+                y = draw_migrate_stages(g, p, x0, right, y, top, bottom);
+            }
+            if m.online || !m.mirrored.is_empty() {
+                let mut last_room = "";
+                for r in machine_rows(m) {
+                    if !r.room.is_empty() && r.room != last_room {
+                        if y + MACHINE_HEAD_H > top && y < bottom {
+                            draw_machine_room_head(g, &r.room, x0, y);
                         }
-                        let mut close_rect = None;
-                        if y + ROW_H > top && y < bottom {
-                            close_rect = draw_machine_pane_row(g, cursor, r, false, x, w, x0, right, y);
-                        }
-                        // × 는 줄보다 먼저 싣는다 — 클릭은 먼저 맞은 rect 가 잡는다.
-                        if let Some(cr) = close_rect.filter(|_| !r.remote_id.is_empty()) {
-                            let close = state::MachinesColBtn::Close {
-                                label: m.label.clone(),
-                                remote_id: r.remote_id.clone(),
-                                name: r.name.clone(),
-                                pane: String::new(),
-                            };
-                            info.machine_pane_rects.push((m.label.clone(), Some(close), None, cr));
-                        }
-                        let act = (!r.remote_id.is_empty()).then(|| state::MachinesColBtn::Mirror {
+                        last_room = &r.room;
+                        y += MACHINE_HEAD_H;
+                    }
+                    let mirrored = !r.pane.is_empty();
+                    let mut close_rect = None;
+                    if y + GROUP_H > top && y < bottom {
+                        close_rect = draw_machine_pane_row(g, cursor, r, mirrored, x, w, x0, right, y);
+                    }
+                    if let Some(cr) = close_rect {
+                        let close = state::MachinesColBtn::Close {
                             label: m.label.clone(),
-                            remote_id: r.remote_id.clone(),
+                            remote_id: if mirrored { String::new() } else { r.remote_id.clone() },
                             name: r.name.clone(),
-                            cwd: r.remote_cwd.clone(),
-                        });
-                        info.machine_pane_rects.push((m.label.clone(), act, None, (x, y, w, ROW_H)));
-                        y += ROW_H;
+                            pane: r.pane.clone(),
+                        };
+                        info.machine_pane_rects.push((m.label.clone(), Some(close), None, cr));
                     }
-                    // 닫힌 pane 은 세우지 않는다 — 개수만, 왜 목록이 짧은지 알 수 있게.
-                    if m.closed > 0 {
-                        if y + MACHINE_HEAD_H > top && y < bottom {
-                            draw_machine_room_head(g, &format!("닫힌 pane {} — 목록엔 안 세움", m.closed), x0, y);
-                        }
-                        y += MACHINE_HEAD_H;
-                    }
-                    if !m.mirrored.is_empty() {
-                        if y + MACHINE_HEAD_H > top && y < bottom {
-                            draw_machine_room_head(g, "이쪽 거울", x0, y);
-                        }
-                        y += MACHINE_HEAD_H;
-                        for r in &m.mirrored {
-                            let mut close_rect = None;
-                            if y + ROW_H > top && y < bottom {
-                                close_rect = draw_machine_pane_row(g, cursor, r, true, x, w, x0, right, y);
-                            }
-                            if let Some(cr) = close_rect {
-                                let close = state::MachinesColBtn::Close {
-                                    label: m.label.clone(),
-                                    remote_id: String::new(),
-                                    name: r.name.clone(),
-                                    pane: r.pane.clone(),
-                                };
-                                info.machine_pane_rects.push((m.label.clone(), Some(close), None, cr));
-                            }
-                            info.machine_pane_rects.push((
-                                m.label.clone(),
-                                None,
-                                Some(r.pane.clone()),
-                                (x, y, w, ROW_H),
-                            ));
-                            y += ROW_H;
-                        }
-                    }
+                    let act = (!mirrored && !r.remote_id.is_empty()).then(|| state::MachinesColBtn::Mirror {
+                        label: m.label.clone(), remote_id: r.remote_id.clone(),
+                        name: r.name.clone(), cwd: r.remote_cwd.clone(),
+                    });
+                    info.machine_pane_rects.push((
+                        m.label.clone(), act, mirrored.then(|| r.pane.clone()), (x, y, w, GROUP_H),
+                    ));
+                    y += GROUP_H;
                 }
+                if m.closed > 0 {
+                    if y + MACHINE_HEAD_H > top && y < bottom {
+                        draw_machine_room_head(g, &format!("닫힌 pane {}", m.closed), x0, y);
+                    }
+                    y += MACHINE_HEAD_H;
+                }
+                if m.remote.is_empty() && m.mirrored.is_empty() {
+                    draw_empty(g, x0, y, top, bottom, "열린 pane 없음");
+                    y += EMPTY_H;
+                }
+            } else {
+                draw_empty(g, x0, y, top, bottom, "기기에 연결할 수 없음");
+                y += EMPTY_H;
             }
         }
+        y += SEC_GAP;
     }
 
     // ── 히트렉트를 본문과 교집합 ──
@@ -2650,6 +2617,7 @@ fn draw_section(
     label: &str,
     count: Option<usize>,
     badge: Option<&str>,
+    device: bool,
     collapsed: bool,
     x: f32,
     w: f32,
@@ -2682,10 +2650,14 @@ fn draw_section(
         (None, Some(b)) => g.measure_chrome_text(b, 10.0, false),
         (None, None) => 0.0,
     };
-    let label_max = (right - tail_w - 8.0 - (x0 + 13.0)).max(0.0);
+    let label_x = x0 + if device { 33.0 } else { 13.0 };
+    if device {
+        g.queue_icon("monitor-smartphone", x0 + 13.0, y + 6.0, 15.0, theme::text_dim());
+    }
+    let label_max = (right - tail_w - 8.0 - label_x).max(0.0);
     let label_fit = fit_text(g, label, label_max, 11.0, true);
     g.draw_text(
-        x0 + 13.0,
+        label_x,
         y + 7.0,
         &label_fit,
         gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: true, italic: false },
@@ -2710,6 +2682,26 @@ fn draw_section(
         );
     }
     r
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_device_section(
+    g: &mut gpu::GpuRenderer, cursor: (f32, f32), label: &str, count: Option<usize>,
+    collapsed: bool, x: f32, w: f32, y: f32, bottom: f32, top: f32,
+) -> (f32, f32, f32, f32) {
+    draw_section(g, cursor, if label.is_empty() { "이 기기" } else { label }, count,
+        None, true, collapsed, x, w, y, bottom, top)
+}
+
+/// Existing mirrors stay in their source room instead of a second mirror list.
+fn machine_rows(m: &state::MachinesColMachine) -> Vec<&state::MachinesColRow> {
+    let mut rows: Vec<_> = m.remote.iter().filter(|_| m.online).chain(&m.mirrored).collect();
+    rows.sort_by(|a, b| a.room.cmp(&b.room).then_with(|| {
+        let number = |r: &state::MachinesColRow|
+            r.remote_id.trim_start_matches('%').parse::<u64>().unwrap_or(u64::MAX);
+        number(a).cmp(&number(b))
+    }));
+    rows
 }
 
 fn draw_empty(g: &mut gpu::GpuRenderer, x0: f32, y: f32, top: f32, bottom: f32, text: &str) {
@@ -2907,7 +2899,9 @@ fn draw_group_head(
         g.rect(x, y + 2.0, 2.0, GROUP_H - 4.0, theme::accent());
     }
     g.queue_icon(
-        if collapsed { "chevron-right" } else { "chevron-down" },
+        if gp.machine.is_some() && gp.rows.is_empty() && gp.tabs.is_empty() {
+            "external-link"
+        } else if collapsed { "chevron-right" } else { "chevron-down" },
         x0 - 3.0,
         y + 6.0,
         12.0,
@@ -2929,7 +2923,11 @@ fn draw_group_head(
     // 이름에 밀려 사라지면 안 된다.
     // 탭이 있는 그룹은 프로세스가 탭 쪽으로 넘어가 `rows` 가 비어 있다(`fold_tabs`).
     // 그대로 세면 학생 셋이 도는 pane 이 `0` 으로 뜬다.
-    let n = all_rows(gp).count().to_string();
+    let n = if gp.machine.is_some() && gp.rows.is_empty() && gp.tabs.is_empty() {
+        String::new() // The remote board does not report an OS process count.
+    } else {
+        all_rows(gp).count().to_string()
+    };
     let nw = g.measure_chrome_text(&n, 10.0, true);
     g.draw_text(
         right - nw,
@@ -2981,20 +2979,12 @@ fn draw_group_head(
     // 원격 pane 은 셸·pid 대신 어느 기계 것인지 — 이 줄의 존재 이유가 「그
     // pane 에서 무엇이 도나」인데, 원격은 그 답이 기계 이름이다.
     let shell = match gp.machine.as_deref() {
+        Some("") => String::new(),
         Some(m) => format!("⇄ {m}"),
         None => format!("{} {}", gp.shell, gp.shell_pid),
     };
-    // 로컬 pane 이면 그 앞에 이 기계 이름을 얹는다 — 원격에만 표가 있으면 「표시가
-    // 없다」와 「이 기계다」가 같은 모양이라, 아는 사람만 읽는 화면이 된다.
-    // 다만 셸·pid 를 **밀어내면서까지** 적지는 않는다: 프로세스를 짚는 열쇠는 pid
-    // 쪽이고, 기계 이름은 로컬 줄마다 같은 값이라 한 줄에서 빠져도 옆 줄이 말해 준다.
-    let shell_wide = match gp.machine.as_deref() {
-        Some(_) => shell.clone(),
-        None => match local_machine_name() {
-            "" => shell.clone(),
-            m => format!("{m} · {shell}"),
-        },
-    };
+    // The section heading already names the device.
+    let shell_wide = shell.clone();
     // 다만 **통째로** 밀어내진 않는다 — 긴 제목 하나가 폭을 다 먹어 pid 가 사라지면
     // 프로세스를 짚을 열쇠가 없어진다(실측: 30자 제목이 `zsh 35776` 을 지웠다).
     // 셸 몫을 떼고 남는 만큼만 제목에 준다. 둘 다 못 담을 좁은 칼럼에서만 제목이
@@ -3403,89 +3393,6 @@ fn draw_proc_row(
 
 /// 프로세스 우클릭 메뉴. 칼럼 안에 가두는 건 이 칼럼이 마지막으로 그려지는
 /// 레이어가 아니어서다 — 밖으로 삐져나가면 뒤에 그려질 pane 헤더가 덮는다.
-/// 「다른 기계」 한 줄 — 왼쪽에 기계 아이콘과 이름(끊겼으면 흐리게), 오른쪽 요약.
-/// 기다림이 있으면 그 수만 경고색 — 「누가 내 답을 기다리나」가 이 줄의 존재 이유다.
-/// 누르면 그 기계의 메뉴(`draw_machine_menu`).
-#[allow(clippy::too_many_arguments)]
-fn draw_machine_row(
-    g: &mut gpu::GpuRenderer,
-    cursor: (f32, f32),
-    m: &state::MachinesColMachine,
-    x: f32,
-    w: f32,
-    x0: f32,
-    right: f32,
-    y: f32,
-) {
-    let hov = hit(cursor, &(x, y, w, ROW_H));
-    if hov {
-        g.hover_pointer = true;
-        g.rect(x, y, w, ROW_H, theme::surface_hover());
-    }
-    let fg = if m.online { theme::text() } else { theme::text_mute() };
-    let icon = 13.0_f32;
-    g.queue_icon("server", x0, y + (ROW_H - icon) / 2.0, icon, fg);
-    g.draw_text(
-        x0 + icon + 6.0,
-        y + 3.0,
-        &m.label,
-        gpu::DrawOpts {
-            font_size: 11.0,
-            color: fg,
-            bold: true,
-            italic: false,
-        },
-    );
-    let students = m.remote.len() + m.mirrored.len();
-    let waiting = m
-        .remote
-        .iter()
-        .filter(|r| r.status.contains("wait") || r.status.contains("attention"))
-        .count();
-    let summary = if !m.online {
-        "안 닿음".to_string()
-    } else if students == 0 {
-        "캐릭터 없음".to_string()
-    } else {
-        let mut s = format!("캐릭터 {students}");
-        if !m.mirrored.is_empty() {
-            s.push_str(&format!(" · 거울 {}", m.mirrored.len()));
-        }
-        s
-    };
-    let tail = if hov { format!("{summary}   ›") } else { summary };
-    let tw = g.measure_chrome_text(&tail, 10.5, false);
-    let mut tx = (right - tw).max(x0 + 80.0);
-    if m.online && waiting > 0 {
-        let warn = format!("기다림 {waiting}  ");
-        let ww = g.measure_chrome_text(&warn, 10.5, true);
-        tx = (tx - ww).max(x0 + 80.0);
-        g.draw_text(
-            tx,
-            y + 4.0,
-            &warn,
-            gpu::DrawOpts {
-                font_size: 10.5,
-                color: theme::attention(),
-                bold: true,
-                italic: false,
-            },
-        );
-        tx += ww;
-    }
-    g.draw_text(
-        tx,
-        y + 4.0,
-        &tail,
-        gpu::DrawOpts {
-            font_size: 10.5,
-            color: theme::text_dim(),
-            bold: false,
-            italic: false,
-        },
-    );
-}
-
 const STAGE_H: f32 = 18.0;
 
 /// 이사 체크리스트 — 단계마다 표(끝남 ✓ · 도는 중 ↻ · 건너뜀 – · 실패 ✗)와 이름,
@@ -3873,96 +3780,35 @@ fn draw_machine_pane_row(
     cursor: (f32, f32),
     r: &state::MachinesColRow,
     mirrored: bool,
-    x: f32,
-    w: f32,
-    x0: f32,
-    right: f32,
-    y: f32,
+    x: f32, w: f32, x0: f32, right: f32, y: f32,
 ) -> Option<(f32, f32, f32, f32)> {
-    let hov = hit(cursor, &(x, y, w, ROW_H));
-    let mut right = right;
-    let mut close_rect = None;
-    if hov {
-        g.hover_pointer = true;
-        g.rect(x, y, w, ROW_H, theme::surface_hover());
-        let cw = 18.0_f32;
-        let cr = (right - cw, y, cw + 4.0, ROW_H);
-        let on_x = hit(cursor, &cr);
-        if on_x {
-            g.rect(cr.0, y + 3.0, cw, ROW_H - 6.0, theme::raised_on(theme::surface_hover(), true));
-        }
-        g.queue_icon(
-            "x",
-            right - cw + 3.0,
-            y + (ROW_H - 12.0) / 2.0,
-            12.0,
-            if on_x { theme::attention() } else { theme::text_mute() },
-        );
-        right -= cw + 8.0;
-        close_rect = Some(cr);
-    }
-    let face = 16.0_f32;
-    let fx = x0 + IND;
-    if !crate::sprites::draw_student_face(g, &r.name, fx, y + (ROW_H - face) / 2.0, face) {
-        g.queue_icon("terminal", fx + 2.0, y + (ROW_H - 12.0) / 2.0, 12.0, theme::text_dim());
-    }
-    let name = if r.name.is_empty() { "셸" } else { r.name.as_str() };
-    let nx = fx + face + 6.0;
-    g.draw_text(
-        nx,
-        y + 3.0,
-        name,
-        gpu::DrawOpts {
-            font_size: 11.0,
-            color: theme::text(),
-            bold: true,
-            italic: false,
-        },
-    );
-    let nw = g.measure_chrome_text(name, 11.0, true);
+    let hovered = hit(cursor, &(x, y, w, GROUP_H));
+    let close_rect = hovered.then_some((right - 18.0, y, 22.0, GROUP_H));
+    let content_right = if hovered { right - 26.0 } else { right };
     let waiting = r.status.contains("wait") || r.status.contains("attention");
-    let tail: Option<(&str, [u8; 4], bool)> = if mirrored && r.closed {
-        Some(("저쪽에서 닫힘", theme::text_dim(), false))
-    } else if waiting {
-        Some(("기다림", theme::attention(), true))
-    } else if mirrored {
-        Some(("거울", theme::accent(), false))
-    } else if hov {
-        Some(("거울 열기  ›", theme::text_mute(), false))
-    } else {
-        None
+    let group = PaneGroup {
+        pane: r.remote_id.clone(),
+        label: r.name.clone(),
+        session: r.title.clone(),
+        cwd: r.remote_cwd.clone(),
+        // An empty machine marks remote data without repeating the section name.
+        machine: Some(String::new()),
+        ..Default::default()
     };
-    let mut rx = right;
-    if let Some((t, c, b)) = tail {
-        let tw = g.measure_chrome_text(t, 10.0, b);
-        rx -= tw;
-        g.draw_text(
-            rx,
-            y + 4.0,
-            t,
-            gpu::DrawOpts {
-                font_size: 10.0,
-                color: c,
-                bold: b,
-                italic: false,
-            },
-        );
-        rx -= 8.0;
+    let task = waiting.then(|| TaskLine {
+        label: if r.title.is_empty() { "기다림".into() } else { format!("기다림 · {}", r.title) },
+        attention: true,
+    });
+    draw_group_head(g, cursor, &group, true, task.as_ref(), x, w, x0, content_right, y);
+    if let Some(cr) = close_rect {
+        g.hover_pointer = true;
+        let on_x = hit(cursor, &cr);
+        g.queue_icon("x", cr.0 + 3.0, y + (GROUP_H - 12.0) / 2.0, 12.0,
+            if on_x { theme::attention() } else { theme::text_mute() });
     }
-    let tx = nx + nw + 8.0;
-    if !r.title.is_empty() && rx - tx > 24.0 {
-        let t = fit_text(g, &r.title, rx - tx, 10.5, false);
-        g.draw_text(
-            tx,
-            y + 4.0,
-            &t,
-            gpu::DrawOpts {
-                font_size: 10.5,
-                color: theme::text_mute(),
-                bold: false,
-                italic: false,
-            },
-        );
+    // Keep the source number above; the local mirror ID is only a navigation target.
+    if mirrored && r.closed {
+        g.queue_icon("archive", x0 - 3.0, y + 6.0, 12.0, theme::text_mute());
     }
     close_rect
 }

@@ -140,6 +140,7 @@ fn in_other_themes<T>(f: impl Fn(&std::path::Path) -> Option<T>) -> Option<T> {
 /// 다른 테마에 이 슬러그의 프사가 있나 — **파일 존재만** 본다(디코딩 없음).
 /// 자리를 비우기 전에 묻는 게이트(`face_ready`)가 이걸 쓴다.
 pub(crate) fn other_theme_has_profile(slug: &str) -> bool {
+    if crate::mirror_theme::asset(slug, "profile", 0).is_some() { return true; }
     other_theme_sprite_dirs()
         .iter()
         .any(|d| [true, false].into_iter().any(|f| d.join(profile_rel(slug, f)).is_file()))
@@ -451,6 +452,9 @@ pub(crate) const SPRITE_README: &str = r#"# 학생 그림 폴더
 /// 존재만 본다. 디코딩까지 되는지는 안 본다 — 그건 번들 테스트가 잡는 문제고,
 /// 여기서 매 프레임 디코딩할 수는 없다.
 pub(crate) fn student_has_sprite(slug: &str, motion: &str) -> bool {
+    if slug.starts_with("mirror-") {
+        return crate::mirror_theme::asset(slug, motion, 0).is_some();
+    }
     if student_sprite_png(slug, motion).is_some() {
         return true;
     }
@@ -471,7 +475,11 @@ pub(crate) fn student_has_sprite(slug: &str, motion: &str) -> bool {
 /// GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로 (캐릭터,모션)당 1회.
 pub(crate) fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec<u8>, u32, u32)>> {
     // 고른 테마 → 활성 override(students_dir) → 번들 내장 → 다른 설치 테마.
-    let picked = picked_theme_sprite_dir(slug).and_then(|d| user_sprite_images_in(d, slug, motion));
+    let remote = (0..motion_frame_count(motion)).map(|i| {
+        let bytes = crate::mirror_theme::asset(slug, motion, i)?;
+        Some(downscale_student(image::load_from_memory(&bytes).ok()?).to_rgba8())
+    }).collect::<Option<Vec<_>>>();
+    let picked = remote.or_else(|| picked_theme_sprite_dir(slug).and_then(|d| user_sprite_images_in(d, slug, motion)));
     let decoded: Vec<image::RgbaImage> = match picked.or_else(|| user_sprite_images(slug, motion)) {
         Some(imgs) => imgs,
         None => match bundled_sprite_images(slug, motion) {
@@ -585,6 +593,11 @@ pub(crate) fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
 
 /// 자르기 전 프사 원본 — 고른 테마 → 활성 → 번들 → 다른 설치 테마.
 fn student_profile_rgba_full(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
+    if let Some(bytes) = crate::mirror_theme::asset(slug, "profile", 0) {
+        let image = downscale_student(image::load_from_memory(&bytes).ok()?).to_rgba8();
+        let (w, h) = image.dimensions();
+        return Some((image.into_raw(), w, h));
+    }
     if let Some(r) = picked_theme_sprite_dir(slug).and_then(|d| profile_rgba_in(d, slug)) {
         return Some(r);
     }
@@ -742,6 +755,7 @@ pub(crate) fn gif_rel(slug: &str) -> String {
 
 /// 지금 쓰는 대기 gif 의 바이트 — 고른 테마가 활성을, 활성이 번들을 덮는다.
 pub(crate) fn student_idle_gif_bytes(slug: &str) -> Option<Vec<u8>> {
+    if let Some(bytes) = crate::mirror_theme::asset(slug, "gif", 0) { return Some(bytes.to_vec()); }
     if let Some(b) = picked_theme_sprite_dir(slug).and_then(|d| std::fs::read(d.join(gif_rel(slug))).ok())
     {
         return Some(b);

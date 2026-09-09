@@ -59,6 +59,8 @@ mod internal_room;
 mod links;
 mod lsp;
 mod machinescol;
+mod mirror_theme;
+mod mirror_close;
 mod mcpcol;
 mod proc;
 mod sesscol;
@@ -1333,7 +1335,7 @@ enum ImageBtn {
 }
 
 /// What a confirmed close-dialog should actually close.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum PendingClose {
     /// Drop one tab of a multi-tab pane.
     Tab { pane: String, idx: usize },
@@ -1362,6 +1364,11 @@ enum DirtyDoc {
 /// Why a close is being held up.
 #[derive(Clone)]
 enum CloseWhy {
+    Mirror {
+        targets: Vec<mirror_close::MirrorTarget>,
+        closing: bool,
+        error: Option<String>,
+    },
     /// A real foreground job is running — the process name, for the message.
     Busy(String),
     /// Editors with unsaved changes: where each one is, and its file name.
@@ -1393,6 +1400,7 @@ enum ConfirmBtn {
     Cancel,
     Close,
     Save,
+    CloseSource,
 }
 
 /// The two buttons in the Chrome-style session-restore prompt shown at launch
@@ -1704,19 +1712,6 @@ struct TerminalPane {
     /// 이번 프레임에 뷰포트와 겹치는 인라인 이미지(OSC 1337)들 — PTY 쪽이 절대
     /// 줄 앵커를 화면 좌표로 환산해 보낸 그대로. 렌더는 이 좌표에 그리기만 한다.
     inline_images: Vec<kasa_bridge::screen::InlineImageView>,
-    /// 거울(view) pane 의 원본 격자 — 저쪽 기계 pane 의 폭 그대로. `cells` 는 이걸
-    /// 이쪽 pane 폭으로 다시 접은 것이라, 원본은 따로 들고 있어야 다음 dirty 행을
-    /// 제자리에 얹고 창 크기가 바뀔 때 다시 접을 수 있다.
-    mirror_src: Option<MirrorSrc>,
-}
-
-/// 거울 pane 이 받은 원본 격자(저쪽 폭).
-struct MirrorSrc {
-    cols: u16,
-    rows: u16,
-    cells: Vec<Vec<GridCell>>,
-    cursor_row: u16,
-    cursor_col: u16,
 }
 
 /// A markdown pane's state: the parsed doc plus the Raw editor buffer/cursor.
@@ -3426,9 +3421,6 @@ struct Workspace {
     window_layouts: HashMap<usize, Layout>,
     /// pane 영역 가로÷세로(픽셀). 모든 방이 같은 창을 쓰므로 하나면 된다.
     grid_aspect: Option<f32>,
-    /// 거울(view) pane 이 이쪽 창에서 차지하는 칸 수. 거울은 원본에 resize 를 안
-    /// 보내므로 이 값으로 원본 격자를 다시 접는다(`apply_screen_update`).
-    view_cells: HashMap<String, (u16, u16)>,
 }
 
 impl Default for Workspace {
@@ -3445,7 +3437,6 @@ impl Default for Workspace {
             undocked: std::collections::HashSet::new(),
             window_layouts: HashMap::new(),
             grid_aspect: None,
-            view_cells: HashMap::new(),
         }
     }
 }
@@ -3539,6 +3530,11 @@ impl Workspace {
 #[derive(Debug, Clone)]
 enum UserEvent {
     Redraw,
+    MirrorCloseDone {
+        action: PendingClose,
+        targets: Vec<mirror_close::MirrorTarget>,
+        result: Result<(), String>,
+    },
     /// bg-agents 폴러가 `sessionId→parentSessionId` 맵을 갱신했다 — 포크/백그라운드
     /// 세션의 부모 학생 상속을 재적용하라는 신호. 폴러는 3초 주기라 세션 바인딩
     /// (SocketSessionBound) 시점엔 맵이 비어 상속을 놓친다 → 맵이 채워지면 이
@@ -3869,7 +3865,8 @@ enum UserEvent {
     /// `POST /paste-image?surface=%N` — 아로나 프롬프트 입력창에 이미지 드롭(webview).
     /// 이미지 바이트를 시스템 클립보드에 비트맵으로 싣고 그 pane 에 Ctrl+V(0x16)를 보내
     /// claude 가 [Image] 칩으로 첨부하게 한다(터미널 DroppedFile 과 같은 경로). `(surface, bytes)`.
-    SocketPasteImage(String, Vec<u8>),
+    SocketPasteImage(String, Vec<u8>, Option<std::sync::mpsc::Sender<Result<(), String>>>),
+    ImagePasteDone(Result<(), String>),
     /// `POST /git-panel` — 아로나 타이틀바 버튼 → 터미널 GUI 의 git 소스컨트롤 패널 열기.
     /// 메인 터미널 창을 띄우고(숨겨져 있으면) git 컬럼을 토글한다(거노: 그 버튼=소스컨트롤).
     SocketToggleGit,

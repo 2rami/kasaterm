@@ -880,23 +880,15 @@ impl App {
             .pty
             .get(tab_pid.as_str())
             .and_then(|p| p.active_agent())
-            // 이사 간 거울 pane — claude 는 저쪽 기계에서 돌아 로컬 프로세스
-            // 테이블에 없다(active_agent=None). 그대로 두면 학생 그림 전부
-            // (배너·학생색·standing·프사)가 이 게이트에서 잘려 「이사하면
-            // 테마가 안 보인다」(2026-09-01). 위 주석의 「화면 모양 판정 금지」
-            // 는 **아무 pane 이나** 모양으로 판정하지 말라는 것이고, 여기는
-            // ①원격 링크로 확정된 pane 에서만 ②우리 statusline 훅이 심는
-            // U+FFFC 표식(브라유 스피너류와 달리 남의 TUI 가 안 찍는 값)을
-            // 본다 — 거울 화면에 그 표식이 실려 오면 저쪽에서 claude 가
-            // 도는 것이 정본이고, 저쪽 claude 가 꺼지면 표식도 사라져
-            // 그림이 함께 걷힌다.
+            // Remote processes do not appear in the viewer's process table.
+            // Trust the host's harness metadata for every supported agent;
+            // old hosts without that field can still use Claude's face marker.
             .or_else(|| {
-                (kasa_mcp::remote::is_remote_pane(tab_pid.as_str())
-                    && find_statusline_face(&composed).is_some())
-                .then(|| {
+                mirror_agent_kind(tab_pid.as_str(), find_statusline_face(&composed).is_some())
+                .map(|kind| {
                     mirror_claude_panes.insert(tab_pid.clone());
                     mirror_claude_panes.insert(id.clone());
-                    kasa_pty::AgentKind::Claude
+                    kind
                 })
             });
         let runs_claude = agent_kind.is_some();

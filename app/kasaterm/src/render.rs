@@ -951,8 +951,6 @@ impl App {
         let mut schale_logo_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
         // agents 목록·resume 피커 화면의 교실 배경(셀 뒤 cover-fit). pane 본문 rect.
         let mut classroom_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
-        // 원격(거울) pane 의 몸통 박스 — 바탕 물들임(셀 아래)과 왼쪽 리본(셀 위)의 자리.
-        let mut remote_slots: Vec<(String, f32, f32, f32, f32)> = Vec::new();
         // /rename 세션명 아웃라인 (x,y,w,h,color) — 입력박스 위 구분선 이름을 사각 테두리로.
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Vec::new();
         // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
@@ -1483,20 +1481,6 @@ impl App {
                     }
                 };
                 footer_slots.push((id.clone(), box_x, box_y, box_w, box_h));
-                // 원격(거울) pane 몸통 표식 — 헤더 칩·물들임만으로는 헤더 없는 일반
-                // pane 이 로컬과 똑같이 보인다(2026-09-02 「pane 헤더 말고 바로
-                // 시각적으로 맥북인지 맥미니인지」). 몸통 바탕을 헤더와 같은 강조색으로
-                // 옅게 물들이고 왼쪽 가장자리에 색 리본을 세운다 — 활성이든 아니든.
-                {
-                    // `tab_pid` 는 active_tab_pid 의 outer fallback 을 이미 지난 값이다.
-                    // 첫 ScreenUpdate 전 `PaneTab.pid=None` 인 원격 pane 도 링크 정본을
-                    // 놓치지 않아야, 헤더 없는 첫 프레임부터 몸통 표식이 보인다.
-                    if pane_identity::terminal_identity_pid(&tab_pid, pane.term().is_some())
-                        .is_some_and(kasa_mcp::remote::is_remote_pane)
-                    {
-                        remote_slots.push((id.clone(), box_x, box_y, box_w, box_h));
-                    }
-                }
                 // claude agents 목록·resume 피커 화면에만 샬레 교실 배경을 셀 뒤에
                 // 깐다(거노: 세션 선택 화면만). default-bg 셀은 fill 을 안 뿜어
                 // (gpu.draw_cells) 이미지가 그 자리로 비치고, 메뉴 글리프는 위 패스에
@@ -1510,6 +1494,7 @@ impl App {
                 // image/md pane만 헤더 띠 데이터 생성(전용 컨트롤 자리). 일반
                 // 터미널은 hover ⋮ 핸들로 — has_header()가 그 경계를 가른다.
                 if pane.has_header() {
+                    let shown_id = pane_identity::shown_pane_id(&tab_pid, pane.term().is_some());
                     // 캐릭터 배정 pane(학생)은 헤더에도 이름을 — "미도리 · 작업명"(작업명
                     // =OSC title). BA GUI board 라벨과 통일(거노: 터미널 탭도 학생 이름).
                     // 비배정 pane 만 기존 "%N · 프로세스" 폴백.
@@ -1542,14 +1527,14 @@ impl App {
                             // 입력박스 보더 우측은 `/rename` 이름 자리로 비워 뒀으니
                             // (`inlay_prompt_box_right`) **이 pane 이 누구인가**는 헤더가
                             // 든다. 학생 pane 은 여태 캐릭터만 실어 아이디가 어디에도
-                            // 없었다 — `tell %N` 을 쓰려면 그걸 알아야 한다.
+                            // 없었다. 거울은 몸통이 있는 기기의 pane 번호를 표시한다.
                             //
                             // agent 이름(`midori-p1`)을 그대로 싣지 않는 이유: 그건 캐릭터
                             // 슬러그 + pane 번호라 `미도리 %1` 과 같은 정보인데, 로마자
                             // 슬러그는 스프라이트·board 의 한글 이름과 안 맞아 두 이름을
                             // 오가게 만든다. 정체 표시는 한 벌로 둔다.
-                            Some(t) => format!("{c} {id} · {t}"),
-                            None => format!("{c} {id}"),
+                            Some(t) => format!("{c} {shown_id} · {t}"),
+                            None => format!("{c} {shown_id}"),
                         }
                     } else {
                         // Custom title (rename / OSC) wins; otherwise the live
@@ -1561,13 +1546,12 @@ impl App {
                             .clone()
                             .filter(|t| !t.is_empty())
                             .or(smart)
-                            .unwrap_or_else(|| id.clone());
-                        // Prefix the pane id (for `tell %N`, etc.); skip when the
-                        // label already fell back to the id — no "%18 · %18".
-                        if base == id {
-                            base
+                            .unwrap_or_else(|| shown_id.clone());
+                        // Prefix the displayed source number; skip a duplicate fallback.
+                        if base == id || base == shown_id {
+                            shown_id
                         } else {
-                            format!("{id} · {base}")
+                            format!("{shown_id} · {base}")
                         }
                     };
                     // Append the pane's real OS tty (ghostty-style) — daemon
@@ -2159,15 +2143,8 @@ impl App {
                 // 원격 명부에서 옮겨 적은 이름)을 그대로 얼굴로 쓴다.
                 let who = {
                     let ws = self.ws.lock().unwrap();
-                    crate::screenread::mirror_runs_claude(&ws, id)
-                        .then(|| ws.pane_character.get(&ws.active_tab_pid(id)).cloned())
-                        .flatten()
+                    self.display_pane_char(&ws, id)
                 }
-                .or_else(|| {
-                    self.pane_claude_ready(id)
-                        .then(|| self.pane_character_if_known(id))
-                        .flatten()
-                })
                 .unwrap_or_default();
                 let machine = kasa_mcp::remote::remote_info(id).map(|i| {
                     if i.label.is_empty() {
@@ -2451,28 +2428,68 @@ impl App {
                 .filter_map(|(id, ..)| ws.panes.get(id).map(|pane| (id, pane)))
                 .map(|(id, pane)| {
                     let tab = pane.tabs.get(pane.active_tab);
-                    let shown = ws.active_tab_pid(id);
+                    let tab_pid = ws.active_tab_pid(id);
+                    let active_is_terminal = tab.is_some_and(|tab| tab.term().is_some());
+                    let shown = pane_identity::shown_pane_id(&tab_pid, active_is_terminal);
                     let title = if self.show_pane_numbers {
                         tab.and_then(|t| t.title.clone())
                             .filter(|s| !s.trim().is_empty())
-                            .or_else(|| (shown == *id && pane.title_pinned)
+                            .or_else(|| (tab_pid == *id && pane.title_pinned)
                                 .then(|| pane.title.clone()).flatten()
                                 .filter(|s| !s.trim().is_empty()))
-                            .or_else(|| self.display_tab_char(&ws, &shown))
+                            .or_else(|| self.display_tab_char(&ws, &tab_pid))
                             .unwrap_or_default()
                     } else {
                         String::new()
                     };
                     let machine = MachineIdentity::for_pane(
                         pane_identity::terminal_identity_pid(
-                            &shown,
-                            tab.is_some_and(|tab| tab.term().is_some()),
+                            &tab_pid,
+                            active_is_terminal,
                         ),
                         local_name,
                     );
                     (id.clone(), PaneIdentity { shown, title, machine })
                 })
                 .collect()
+        };
+        // Resolve before borrowing the GPU; the titlebar uses the same active-tab
+        // identity as terminal art, never a stale local session binding.
+        let titlebar_character = {
+            let ws = self.ws.lock().unwrap();
+            ws.active_pane.as_ref().and_then(|id| {
+                let pane = ws.panes.get(id)?;
+                pane.term()?;
+                let tab_pid = ws.active_tab_pid(id);
+                if kasa_mcp::remote::is_remote_pane(&tab_pid) {
+                    let (_, row) = crate::machinescol::remote_pane_facts(&tab_pid)?;
+                    if row.get("harness").is_some_and(serde_json::Value::is_null)
+                        || row.get("name").and_then(|name| name.as_str())
+                            .is_none_or(|name| name.is_empty())
+                    {
+                        return None;
+                    }
+                }
+                self.display_tab_char(&ws, &tab_pid)
+            })
+        };
+        // Focus decoration uses the same current character as terminal art.
+        // Resolve before borrowing the GPU, so mirrors never fall back to an
+        // old local session binding or fail the local process-table gate.
+        let (active_pane, pane_chars, claude_panes) = {
+            let ws = self.ws.lock().unwrap();
+            let chars: HashMap<String, String> = footer_slots.iter()
+                .filter_map(|(id, ..)| self.display_pane_char(&ws, id).map(|name| (id.clone(), name)))
+                .collect();
+            let agents: std::collections::HashSet<String> = footer_slots.iter()
+                .filter(|(id, ..)| {
+                    let pid = ws.active_tab_pid(id);
+                    self.pty.get(&pid).and_then(|p| p.active_agent()).is_some()
+                        || mirror_claude_panes.contains(id)
+                })
+                .map(|(id, ..)| id.clone())
+                .collect();
+            (ws.active_pane.clone(), chars, agents)
         };
         let settings_room_active = self.settings_room_active();
         // 본진 계정 조작은 백그라운드 스레드에서 끝나므로 그 자리에서 말풍선을
@@ -2526,20 +2543,6 @@ impl App {
                 if !g.has_image(&key) {
                     let (rgba, w, h) = rotate_rgba_cw(image.cur_rgba(), image.w, image.h, *rot);
                     g.upload_image(&key, &rgba, w, h);
-                }
-            }
-            // 원격 pane 바탕 물들임 — 셀·이미지보다 먼저 깔아 기본 배경 자리에서만
-            // 보인다. 글자·ANSI 배경·인라인 이미지는 뒤 패스가 그대로 덮으므로 색을
-            // 바꾸지 않고, 헤더와 같은 기기색 12% 혼합만 빈 바탕에 남는다.
-            for (id, bx, by, bw, bh) in &remote_slots {
-                if let Some(identity) = pane_identities.get(id) {
-                    g.rect(
-                        *bx,
-                        *by,
-                        *bw,
-                        *bh,
-                        identity.machine.background(crate::cells::default_bg()),
-                    );
                 }
             }
             g.draw_cells(&slot_views);
@@ -3018,17 +3021,9 @@ impl App {
                     .lock()
                     .ok()
                     .and_then(|w| w.active_pane.clone())
-                    .and_then(|id| kasa_mcp::remote::remote_info(&id))
-                    .map(|i| {
-                        if i.label.is_empty() {
-                            i.base
-                                .trim_start_matches("http://")
-                                .trim_start_matches("https://")
-                                .to_string()
-                        } else {
-                            i.label
-                        }
-                    });
+                    .and_then(|id| pane_identities.get(&id))
+                    .filter(|identity| identity.machine.remote)
+                    .map(|identity| identity.machine.label.clone());
                 let title_text: String = {
                     let ws = self.ws.lock().unwrap();
                     let active = ws.active_pane.clone();
@@ -3037,40 +3032,7 @@ impl App {
                     // 일반 셸은 기존 process · tty 폴백. session-id 매칭은 /resume 시
                     // 실제 sessionId 가 주입값과 어긋나 깨졌다(거노) → foreground 프로세스명
                     // ("claude")으로 판정해 resume·--session-id 무관하게 견고하다.
-                    let claude_char = active
-                        .as_deref()
-                        .filter(|id| {
-                            self.pty
-                                .get(*id)
-                                .and_then(|p| p.active_agent())
-                                .is_some()
-                                // 이사 간 거울 pane — claude 는 저쪽 기계라 로컬
-                                // 프로세스로는 안 보인다. pane 루프의 판정(원격 링크
-                                // + statusline 표식)을 재사용해 타이틀바에도 학생
-                                // 이름이 남게 한다(2026-09-01 「이사하면 테마 안 보여」).
-                                || mirror_claude_panes.contains(*id)
-                        })
-                        .and_then(|id| {
-                            // 프사와 동일 규칙(display_pane_char 인라인 — gpu 가변 차용
-                            // 중이라 메서드 호출 불가, 필드 접근은 분리 캡처로 허용):
-                            // 뷰 pane 은 파싱 전 스폰 랜덤을 타이틀바에도 안 올린다.
-                            self.pane_claude_sid
-                                .get(id)
-                                .and_then(|sid| kasa_mcp::character::session_character(sid))
-                                .or_else(|| {
-                                    let view = self
-                                        .pty
-                                        .get(id)
-                                        .map(|p| p.is_claude_agents())
-                                        .unwrap_or(false);
-                                    if view {
-                                        None
-                                    } else {
-                                        ws.pane_character.get(id).cloned()
-                                    }
-                                })
-                        })
-                        .filter(|c| !c.is_empty());
+                    let claude_char = titlebar_character.clone();
                     // active pane 이 claude agents 목록 뷰면 타이틀바도 SCHALE(작업명 유지).
                     let agents_active = active
                         .as_deref()
@@ -3101,7 +3063,11 @@ impl App {
                         // 오늘 두 번 물었다. 띠를 되살리면 거노가 회수한 세로 공간이
                         // pane 마다 다시 나가므로 그건 그의 결정이다.
                         let with_id = match active.as_deref() {
-                            Some(id) => format!("{c} {id}"),
+                            Some(id) => {
+                                let shown = pane_identities.get(id)
+                                    .map(|identity| identity.shown.as_str()).unwrap_or(id);
+                                format!("{c} {shown}")
+                            }
                             None => c,
                         };
                         match work {
@@ -7746,70 +7712,6 @@ impl App {
             // 계산하면 반드시 어긋난다 — 줌 pane 은 테두리가 있는데 하단바는 그걸
             // 모르고 덮어 아래쪽만 끊겨 보였다(거노). 그린 쪽이 기록하고 덮는 쪽이 읽는다.
             let mut border_inset: HashMap<String, f32> = HashMap::new();
-            // active_pane + pane 별 캐릭터명을 한 lock 으로 스냅샷 — 아래 pane 테두리
-            // 루프가 g(=&mut self.gpu) 안이라 self 재borrow 불가. character_accent 폴백용.
-            let (active_pane, pane_chars, tab_pids) = self
-                .ws
-                .lock()
-                .ok()
-                .map(|w| {
-                    // 테두리 accent 도 표시 규칙(display_pane_char 인라인 — gpu 가변
-                    // 차용 중) 공유 — 뷰 pane 은 파싱 전 스폰 랜덤 색을 두르지 않는다
-                    // (거노: 진입 직후 다른 학생색).
-                    let chars: HashMap<String, String> = w
-                        .panes
-                        .keys()
-                        .filter_map(|id| {
-                            // **키는 outer, 값은 활성 탭**. 테두리는 바깥 박스에 그리니
-                            // 키는 leaf 여야 하고, 학생은 탭 pid 로 기록되니 값은 접어서
-                            // 가져온다. 안 접으면 탭으로 띄운 학생이 무색으로 남는다.
-                            let key = w.active_tab_pid(id);
-                            self.pane_claude_sid
-                                .get(&key)
-                                .and_then(|sid| kasa_mcp::character::session_character(sid))
-                                .or_else(|| {
-                                    let view = self
-                                        .pty
-                                        .get(&key)
-                                        .map(|p| p.is_claude_agents())
-                                        .unwrap_or(false);
-                                    if view {
-                                        None
-                                    } else {
-                                        w.pane_character.get(&key).cloned()
-                                    }
-                                })
-                                .map(|c| (id.clone(), c))
-                        })
-                        .collect();
-                    // outer → 활성 탭 pid. 아래 루프는 `g(=&mut self.gpu)` 를 잡고 있어
-                    // `pty_for_pane` 같은 `&self` 메서드를 못 부른다 — 이 lock 한 번에
-                    // 같이 떠 두고 거기서 필드 접근만 한다.
-                    let tab_pids: HashMap<String, String> = w
-                        .panes
-                        .keys()
-                        .map(|id| (id.clone(), w.active_tab_pid(id)))
-                        .collect();
-                    (w.active_pane.clone(), chars, tab_pids)
-                })
-                .unwrap_or_default();
-            // claude 가 foreground 인 pane 집합 — 테두리 게이트. 캐릭터는 pane spawn 시
-            // 배정되지만(assign_character_env) 순수 셸엔 색을 안 씌우려면 타이틀바 학생
-            // 이름과 동일 조건(active_process_name=="claude")을 써야 한다(거노: 클로드
-            // 아니면 무테두리). active_process_name 은 500ms 캐시라 매 프레임 다중 pane
-            // 호출도 가볍다. self.pty 접근이라 g(=&mut self.gpu) 잡은 루프 밖에서 스냅샷.
-            let claude_panes: std::collections::HashSet<String> = footer_slots
-                .iter()
-                .filter(|(id, ..)| {
-                    // outer 키가 아니라 활성 탭 pid — 탭에서 도는 클로드는 outer 로
-                    // 안 잡혀 테두리 게이트를 통째로 못 지났다.
-                    let key = tab_pids
-                        .get(id.as_str())
-                        .map_or(id.as_str(), String::as_str);
-                    self.pty.get(key).and_then(|p| p.active_agent()).is_some()
-                })
-                .map(|(id, ..)| id.clone())
-                .collect();
             // 줌 pane 은 claude 여부·split 여부와 무관하게 테두리를 두른다 — 줌의
             // 유일한 시각 단서라서(하단 dock 칩 하나로는 안 읽힌다). g(=&mut
             // self.gpu) 를 잡기 전에 스냅샷.
@@ -7830,23 +7732,6 @@ impl App {
                 const HANDLE: f32 = 22.0;
                 const HMARGIN: f32 = 5.0;
                 for (fid, fx, fy, fw, fbox_h) in &footer_slots {
-                    // 원격 pane 왼쪽 리본 — 활성이든 아니든 상시. 여러 pane 을 훑을 때
-                    // 「저 pane 은 다른 기계」가 헤더를 읽기 전에 걸리게. 포커스 링이
-                    // 이기도록 그보다 먼저 그린다.
-                    if remote_slots.iter().any(|(rid, ..)| rid == fid) {
-                        if let Some(identity) = pane_identities.get(fid) {
-                            // 셀 시작선 바로 왼쪽의 padding 안에 둔다. 바깥 focus
-                            // ring과 겹치지 않고 첫 글자/ANSI 배경도 가리지 않는다.
-                            let ribbon_x = fx + PANE_INNER_X - 3.0;
-                            g.rect(
-                                ribbon_x,
-                                *fy,
-                                3.0,
-                                *fbox_h,
-                                identity.machine.marker(),
-                            );
-                        }
-                    }
                     // pane 테두리 — 포커스된(active) claude pane 만 자기 학생 고정색
                     // 테두리(지금 어느 pane 을 보고 있는지 한눈에). 비활성·순수 셸은
                     // 무테두리 — 여러 pane 이 동시에 테두리를 둘러 지저분하던 걸 정리(거노).
@@ -12118,6 +12003,8 @@ impl App {
                     theme::with_alpha([0, 0, 0, 255], 0xB0),
                 );
                 let dirty = matches!(dlg.why, crate::CloseWhy::Dirty(_));
+                let mirror = matches!(dlg.why, crate::CloseWhy::Mirror { .. });
+                let mirror_closing = matches!(dlg.why, crate::CloseWhy::Mirror { closing: true, .. });
                 // pane 통째 닫기(⋮ ×)를 「탭」이라 부르면 무엇이 사라지는지가
                 // 어긋난다 — 그건 그 pane 의 탭을 전부 걷는다. 와일드카드를 안 쓰는
                 // 이유는 `ActionKind` 디스패치와 같다: variant 가 늘었을 때 문구가
@@ -12130,6 +12017,18 @@ impl App {
                     crate::PendingClose::AuxEditor(_) => "이 문서 창을",
                 };
                 let (title, subtitle) = match &dlg.why {
+                    crate::CloseWhy::Mirror { targets, closing, error } => {
+                        let source = targets.iter().take(3)
+                            .map(|t| format!("{} {}", if t.label.is_empty() { "원본 기기" } else { &t.label }, t.source))
+                            .collect::<Vec<_>>().join(", ");
+                        if *closing {
+                            ("원본 기기의 창을 닫는 중".to_string(), source)
+                        } else if error.is_some() {
+                            ("원본을 닫지 못했어".to_string(), "거울은 그대로 있어. 다시 시도하거나 거울만 닫을 수 있어".to_string())
+                        } else {
+                            ("원본 기기의 창도 닫을까?".to_string(), source)
+                        }
+                    }
                     crate::CloseWhy::Busy(proc) => {
                         (format!("{proc} 실행 중이에요"), format!("{what} 닫을까요?"))
                     }
@@ -12164,7 +12063,7 @@ impl App {
                 let title_w = g.measure_chrome_text(title, 15.0, true);
                 let sub_w = g.measure_chrome_text(subtitle, 13.0, false);
                 let card_w = (title_w.max(sub_w) + pad * 2.0)
-                    .clamp(if dirty { 420.0 } else { 360.0 }, (win_w - 48.0).max(420.0));
+                    .clamp(if dirty || mirror { 420.0 } else { 360.0 }, (win_w - 48.0).max(420.0));
                 let card_h = 168.0_f32;
                 let cx0 = ((win_w - card_w) / 2.0).round();
                 let cy0 = ((win_h - card_h) / 2.0).round();
@@ -12250,7 +12149,10 @@ impl App {
                     );
                     hits.push((btn, (x, btn_y, w, btn_h)));
                 };
-                if dirty {
+                if mirror && !mirror_closing {
+                    button(g, &mut confirm_btn_hits, "원본도 닫기", crate::ConfirmBtn::CloseSource, Some(theme::danger()));
+                    button(g, &mut confirm_btn_hits, "거울만 닫기", crate::ConfirmBtn::Close, Some(theme::accent()));
+                } else if dirty {
                     // 저장이 기본이라 오른쪽 끝 — 실수로 끝을 눌러도 안전한 쪽이
                     // 걸리게. 편집분을 버리는 "저장 안 함" 은 그 왼쪽에 빨강으로.
                     let acc = theme::accent();
@@ -12269,7 +12171,7 @@ impl App {
                         crate::ConfirmBtn::Close,
                         Some(dg),
                     );
-                } else {
+                } else if !mirror_closing {
                     let dg = theme::danger();
                     button(
                         g,
@@ -12279,13 +12181,13 @@ impl App {
                         Some(dg),
                     );
                 }
-                button(
+                if !mirror_closing { button(
                     g,
                     &mut confirm_btn_hits,
                     "취소",
                     crate::ConfirmBtn::Cancel,
                     None,
-                );
+                ); }
             }
             // Chrome-style restore prompt: dim scrim + centered card offering to
             // reopen the last session's panes. Queued after the confirm modal so

@@ -61,85 +61,6 @@ impl App {
     /// Shared by the in-process channel pump (`pump_pty_screens`) and the
     /// daemon stream pump (`pump_daemon_stream`). The caller holds the ws lock
     /// and fires the redraw; this only mutates ws.
-    /// 거울 pane 의 원본 격자에 이번 갱신을 얹는다. 거울이면 원본은 **늘** 쌓아 둔다 —
-    /// 첫 스냅샷은 배치가 잡혀 이쪽 칸 수를 알기 전에 오므로, 그때 안 쌓으면 나중에
-    /// 다시 접을 재료가 없다. 다시 접을 일이 없으면(칸 수를 아직 모르거나 폭이 같으면)
-    /// None — 보통 경로로 간다. 원본 크기가 바뀌면 격자를 새로 만든다(그 갱신은 모든
-    /// 행을 싣는다).
-    fn mirror_source<'a>(
-        tp: &'a mut crate::TerminalPane,
-        update: &kasa_bridge::screen::ScreenUpdate,
-        is_view: bool,
-        view_target: Option<(u16, u16)>,
-    ) -> Option<&'a crate::MirrorSrc> {
-        if !is_view {
-            tp.mirror_src = None;
-            return None;
-        }
-        let nc = update.cols as usize;
-        let nr = update.rows as usize;
-        let src = tp.mirror_src.get_or_insert_with(|| crate::MirrorSrc {
-            cols: update.cols,
-            rows: update.rows,
-            cells: vec![vec![GridCell::blank(); nc]; nr],
-            cursor_row: 0,
-            cursor_col: 0,
-        });
-        if src.cols != update.cols || src.rows != update.rows || src.cells.len() != nr {
-            src.cols = update.cols;
-            src.rows = update.rows;
-            src.cells = vec![vec![GridCell::blank(); nc]; nr];
-        }
-        for (r, row) in &update.dirty {
-            if let Some(dst) = src.cells.get_mut(*r as usize) {
-                *dst = row.clone();
-            }
-        }
-        src.cursor_row = update.cursor_row;
-        src.cursor_col = update.cursor_col;
-        let (tc, _) = view_target?;
-        if update.cols == tc {
-            return None;
-        }
-        Some(src)
-    }
-
-    /// 창 크기가 바뀌어 거울 pane 의 칸 수가 달라졌을 때 — 원본 격자를 새 폭으로 다시
-    /// 접는다. 원본이 아직 없으면(첫 갱신 전) 다음 갱신이 접는다.
-    pub(crate) fn reflow_view_pane(ws: &mut Workspace, pid: &str) {
-        if kasa_mcp::remote::view_supports_viewport(pid) {
-            return;
-        }
-        let Some((tc, tr)) = ws.view_cells.get(pid).copied() else { return };
-        let Some((pane, tab_idx)) = ws.find_tab_by_pty(pid) else { return };
-        let Some(tp) = pane.tabs[tab_idx].term_mut() else { return };
-        let Some(src) = tp.mirror_src.as_ref() else { return };
-        if src.cols == tc {
-            // 폭이 같아졌다 — 접은 것을 걷고 원본 그대로.
-            if tp.cols != src.cols || tp.rows != src.rows {
-                tp.prev_cells.clear();
-            }
-            tp.cols = src.cols;
-            tp.rows = src.rows;
-            tp.cells = src.cells.clone();
-            tp.cursor_row = src.cursor_row;
-            tp.cursor_col = src.cursor_col;
-            return;
-        }
-        let out = kasa_bridge::reflow::reflow_grid(
-            &src.cells,
-            src.cols,
-            (src.cursor_row, src.cursor_col),
-            tc,
-            tr,
-        );
-        tp.cols = tc;
-        tp.rows = tr;
-        tp.prev_cells.clear();
-        tp.cells = out.rows;
-        tp.cursor_row = out.cursor_row;
-        tp.cursor_col = out.cursor_col;
-    }
 
     pub(crate) fn apply_screen_update(
         ws: &mut Workspace,
@@ -156,14 +77,8 @@ impl App {
         // tabs spawned via the in-pane + button route through
         // `pid_to_pane`. Falls back to creating an outer pane entry
         // when the first update from a freshly-spawned shell arrives.
-        // 거울 pane 이면 이쪽 칸 수 — 원본 폭과 다를 때만 다시 접는다.
-        let is_view = kasa_mcp::remote::is_view_pane(&update.pane_id)
-            && !kasa_mcp::remote::view_supports_viewport(&update.pane_id);
-        let view_target = if is_view {
-            ws.view_cells.get(&update.pane_id).copied()
-        } else {
-            None
-        };
+        // Mirrors retain source rows/columns, including TUI mouse coordinates.
+        // Display-only scaling is shared by rendering, hit testing and IME.
         let (pane, tab_idx) = match ws.find_tab_by_pty(&update.pane_id) {
             Some(p) => p,
             None => {
@@ -184,34 +99,6 @@ impl App {
         // expect 로 죽으면 호출자가 ws 락을 쥔 채 unwind 해 poison 이 GUI 전체로
         // 번진다. 프레임 하나를 버리는 쪽이 맞다.
         let Some(tp) = tab.term_mut() else { return };
-        if let Some(src) = Self::mirror_source(tp, &update, is_view, view_target) {
-            // 거울 pane — 원본 격자를 이쪽 폭으로 다시 접어 담는다. dirty 행은
-            // 원본(`mirror_src`)에 얹었고, 화면 전체를 다시 만든다.
-            let (tc, tr) = view_target.expect("mirror_source 가 목표 없이는 None");
-            let out = kasa_bridge::reflow::reflow_grid(
-                &src.cells,
-                src.cols,
-                (src.cursor_row, src.cursor_col),
-                tc,
-                tr,
-            );
-            if tp.cols != tc || tp.rows != tr {
-                tp.cols = tc;
-                tp.rows = tr;
-                tp.prev_cells.clear();
-            }
-            tp.cells = out.rows;
-            tp.cursor_row = out.cursor_row;
-            tp.cursor_col = out.cursor_col;
-            tp.cursor_visible = update.cursor_visible;
-            tp.alt_screen = update.alt_screen;
-            tp.inline_images = update.inline_images;
-            tp.mouse_enabled = update.mouse_enabled;
-            tp.mouse_sgr = update.mouse_sgr;
-            tp.app_cursor = update.app_cursor;
-            tp.bracketed_paste = update.bracketed_paste;
-            return;
-        }
         let resized = tp.cols != update.cols
             || tp.rows != update.rows
             || tp.cells.len() != update.rows as usize;
@@ -818,12 +705,12 @@ impl App {
                 }
             });
         }
+        self.insert_pty(pid.to_string(), session.clone());
         self.pump_pty_screens(
             session.screens.clone(),
             pid.to_string(),
             std::sync::Arc::downgrade(&session),
         );
-        self.insert_pty(pid.to_string(), session.clone());
         self.dead_panes.lock().unwrap().retain(|x| x != pid);
         let (wc, wr) = self.window_cells();
         self.resize_backend(wc, wr);
@@ -914,13 +801,14 @@ impl App {
                 )?
             }
         };
+        // Register the replacement before its first queued snapshot can be pumped.
+        // Otherwise pane_replaced sees the old local Arc and stops the new pump.
+        self.insert_pty(pid.to_string(), remote.session.clone());
         self.pump_pty_screens(
             remote.session.screens.clone(),
             pid.to_string(),
             std::sync::Arc::downgrade(&remote.session),
         );
-        // insert 가 옛 로컬 세션을 떨군다 — Drop 이 로컬 셸을 걷는다.
-        self.insert_pty(pid.to_string(), remote.session.clone());
         // 옛 세션의 늦은 죽음표시 정리(스왑 패턴) — 정체 가드가 있지만 이중으로.
         self.dead_panes.lock().unwrap().retain(|x| x != pid);
         let (wc, wr) = self.window_cells();
@@ -1265,12 +1153,12 @@ impl App {
                                 old.stop_reader();
                             }
                         }
+                        self.insert_pty(local_id.clone(), remote.session.clone());
                         self.pump_pty_screens(
                             remote.session.screens.clone(),
                             local_id.clone(),
                             std::sync::Arc::downgrade(&remote.session),
                         );
-                        self.insert_pty(local_id.clone(), remote.session.clone());
                         self.dead_panes.lock().unwrap().retain(|x| x != &local_id);
                         // 첫 자리 말고는 아직 화면 상태(PaneState)가 없다 — 첫 화면이
                         // 와야 생기는데(apply_screen_update 의 or_insert) 그건 이 함수가
@@ -1443,12 +1331,12 @@ impl App {
             c,
             r,
         )?;
+        self.insert_pty(pid.to_string(), remote.session.clone());
         self.pump_pty_screens(
             remote.session.screens.clone(),
             pid.to_string(),
             std::sync::Arc::downgrade(&remote.session),
         );
-        self.insert_pty(pid.to_string(), remote.session.clone());
         // 옛 세션의 늦은 죽음표시 정리(스왑 패턴) — 정체 가드가 있지만 이중으로.
         self.dead_panes.lock().unwrap().retain(|x| x != pid);
         let (wc, wr) = self.window_cells();
@@ -1809,9 +1697,7 @@ impl App {
         let Some(sess) = self.pty.get(pid).cloned() else {
             anyhow::bail!("이사 도중 pane {pid} 이 사라졌다");
         };
-        // 옛 reader 를 먼저 세운다(promote 와 같은 순서) — 스왑 뒤 옛 셸이 죽으며
-        // 내는 EOF 프레임이 아예 안 생겨, 죽음표시 경주의 남은 틈도 닫힌다.
-        sess.stop_reader();
+        // Keep the current shell responsive until the remote handshake succeeds.
         // 맨 셸 폴백은 캐릭터가 통째로 새 배정으로 굴러간다 — 조용히 지나가면
         // 「이사했더니 딴 학생이 됐다」로만 보이므로 크게 말한다.
         if r.character.is_some() && r.remote_pane.is_none() {
@@ -1843,13 +1729,15 @@ impl App {
             c,
             rows,
         )?;
+        sess.stop_reader();
+        // Register before starting the pump: its generation guard rejects
+        // queued snapshots while the registry still points at the old shell.
+        self.insert_pty(pid.to_string(), remote.session.clone());
         self.pump_pty_screens(
             remote.session.screens.clone(),
             pid.to_string(),
             std::sync::Arc::downgrade(&remote.session),
         );
-        // insert 가 옛 로컬 세션을 떨군다 — Drop 이 로컬 셸을 걷는다.
-        self.insert_pty(pid.to_string(), remote.session.clone());
         self.dead_panes.lock().unwrap().retain(|x| x != pid);
         // 태생 스폰 + 실행 명령 지정(`mini codex`)이면 그 명령을 **그대로** 돌린다 —
         // 하네스 불문이 요점이라 플래그를 덧붙이지 않는다. 그 외엔 claude resume.
@@ -2192,13 +2080,13 @@ impl App {
         })
         .map_err(|e| anyhow::anyhow!("로컬 셸 스폰 실패: {e:#}"))?;
         let session = Arc::new(session);
+        // insert 가 원격 링크 세션을 떨군다 — 링크 매니저는 Drop 으로 걷힌다.
+        self.insert_pty(pid.to_string(), session.clone());
         self.pump_pty_screens(
             session.screens.clone(),
             pid.to_string(),
             std::sync::Arc::downgrade(&session),
         );
-        // insert 가 원격 링크 세션을 떨군다 — 링크 매니저는 Drop 으로 걷힌다.
-        self.insert_pty(pid.to_string(), session.clone());
         self.dead_panes.lock().unwrap().retain(|x| x != pid);
         self.pane_cwd_cache
             .insert(pid.to_string(), std::path::PathBuf::from(&dest));
@@ -2333,7 +2221,7 @@ impl App {
     /// pane 캐릭터 이름표 교정 — pane_character + board /tmp 마커 + redraw. 부모
     /// 상속·세션 매핑 두 경로가 공유한다. 실존 pane 만(훅 오호출·죽은 pane 가드).
     fn relabel_pane(&mut self, pane: &str, character: &str) {
-        if !self.ws.lock().unwrap().panes.contains_key(pane) {
+        if self.ws.lock().unwrap().outer_for_pty(pane).is_none() {
             return;
         }
         self.ws
@@ -5921,6 +5809,20 @@ impl App {
         if let Some(name) = ws.pane_character.get(surface) {
             obj.insert("character".to_string(), serde_json::json!(name));
         }
+        // Every surface, including inactive tabs, must retain its remote endpoint.
+        if let Some(info) = kasa_mcp::remote::remote_info(surface) {
+            obj.insert("remote_base".into(), serde_json::json!(info.base));
+            obj.insert("remote_pane".into(), serde_json::json!(info.remote_id));
+            obj.insert("remote_view".into(), serde_json::json!(info.view));
+            obj.insert("remote_owned".into(), serde_json::json!(info.owned));
+            obj.insert("remote_label".into(), serde_json::json!(info.label));
+            if let Some(cwd) = info.remote_cwd {
+                obj.insert("remote_cwd".into(), serde_json::json!(cwd));
+            }
+            if let Some(cwd) = info.origin_cwd {
+                obj.insert("remote_origin_cwd".into(), serde_json::json!(cwd));
+            }
+        }
         // 붙인 이름(`/rename`·`surface.rename`·`kasaspace_rename`). 이게
         // 없으면 재시작마다 이름이 증발해 OSC 제목으로 되돌아갔다 — 이 앱은
         // 종료 시 자기 설치를 하므로 껐다 켜는 일이 잦고, 그래서 이름을
@@ -6055,32 +5957,8 @@ impl App {
                 // 붙는다(restore_leaf 의 remote 가지). cwd·agent 감지(ps 기반)는
                 // 원격이라 비지만, 스크롤백과 sid 마커 오버레이(pane_claude_sid)는
                 // 로컬 파서 덕에 그대로 동작한다.
-                if let Some(info) = kasa_mcp::remote::remote_info(pane_id) {
-                    if rec.as_object_mut().is_none() {
-                        rec = serde_json::json!({});
-                    }
-                    let obj = rec.as_object_mut().unwrap();
-                    obj.insert("remote_base".to_string(), serde_json::json!(info.base));
-                    obj.insert("remote_pane".to_string(), serde_json::json!(info.remote_id));
-                    // 거울(view) 여부 — 안 실으면 재시작 뒤 소유자로 되살아나
-                    // 원본 크기를 도로 뺏는다.
-                    if kasa_mcp::remote::is_view_pane(pane_id) {
-                        obj.insert("remote_view".to_string(), serde_json::json!(true));
-                    }
-                    // 정체 세 벌도 함께 — 저장은 라이브 링크에서 매번 재조립되므로,
-                    // 여기 안 실으면 재시작 한 번에 라벨·되돌아갈 자리가 증발한다.
-                    if !info.label.is_empty() {
-                        obj.insert("remote_label".to_string(), serde_json::json!(info.label));
-                    }
-                    if let Some(c) = &info.remote_cwd {
-                        obj.insert("remote_cwd".to_string(), serde_json::json!(c));
-                    }
-                    if let Some(c) = &info.origin_cwd {
-                        obj.insert("remote_origin_cwd".to_string(), serde_json::json!(c));
-                    }
-                    if info.owned {
-                        obj.insert("remote_owned".to_string(), serde_json::json!(true));
-                    }
+                if kasa_mcp::remote::is_remote_pane(pane_id) && !rec.is_object() {
+                    rec = serde_json::json!({});
                 }
                 // Attach the pane's scrollback (text lines) so restore can
                 // repaint what was on screen. Only when we have a real record.
@@ -6722,9 +6600,7 @@ impl App {
 
     /// leaf 하나, 또는 그 pane 안의 탭 하나를 되살린다.
     ///
-    /// `tab_of` 가 있으면 바깥 pane 의 탭으로 앉는다. 웹·원격 갈래는 그때 건너뛴다
-    /// — 둘 다 자기 이름의 pane 을 새로 세우는 길이라, 탭으로 태우면 바깥 pane 옆에
-    /// 남의 자리가 하나 더 생긴다(탭 저장도 PTY 가 있는 탭만 싣는다).
+    /// `tab_of` 가 있으면 원격도 바깥 pane 의 탭으로 앉힌 뒤 출력을 연결한다.
     fn restore_surface(
         &mut self,
         rec: &serde_json::Value,
@@ -6769,13 +6645,10 @@ impl App {
             self.pending_web_hosts.push((host_id, url.to_string()));
             return Some(id);
         }
-        // 원격 pane — 저장된 전송 명세로 같은 원격 세션에 다시 붙는다. 호스트가
-        // 내려갔거나 세션이 끝났으면(gone) 아래 일반 셸 복원으로 떨어진다 —
-        // 저장해 둔 스크롤백이 자리를 지키고, toast 로 잃음을 알린다.
+        // Remote restore is asynchronous: an unavailable host must never turn
+        // a saved mirror into an unrelated local shell.
         if let (Some(base), Some(rpane)) = (
-            rec.get("remote_base")
-                .and_then(|v| v.as_str())
-                .filter(|_| tab_of.is_none()),
+            rec.get("remote_base").and_then(|v| v.as_str()),
             rec.get("remote_pane").and_then(|v| v.as_str()),
         ) {
             let rec_str = |k: &str| rec.get(k).and_then(|v| v.as_str()).map(str::to_string);
@@ -6798,32 +6671,53 @@ impl App {
             };
             // 거울(view)로 살던 pane 은 거울로 되살린다 — 소유자로 붙으면
             // 재시작 한 번에 원본 크기를 도로 뺏는다.
-            let attempt = if rec
+            let view = rec
                 .get("remote_view")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                kasa_mcp::remote::connect_view(spec, &id)
-            } else {
-                kasa_mcp::remote::connect(spec, &id, cols, rows)
-            };
+                .unwrap_or(false);
+            let attempt = kasa_mcp::remote::restore_connection(spec, &id, cols, rows, view);
             match attempt {
                 Ok(remote) => {
+                    {
+                        let mut ws = self.ws.lock().unwrap();
+                        if let Some(outer) = tab_of {
+                            ws.panes.get(outer)?;
+                            ws.pid_to_pane.insert(id.clone(), outer.to_string());
+                            if let Some(room) = ws.pane_room.get(outer).cloned() {
+                                ws.pane_room.insert(id.clone(), room);
+                            }
+                            let mut tab = crate::PaneTab::default();
+                            tab.pid = Some(id.clone());
+                            ws.panes.get_mut(outer).unwrap().tabs.push(tab);
+                        } else {
+                            let pane = ws.panes.entry(id.clone()).or_default();
+                            if let Some(tab) = pane.tabs.first_mut() {
+                                tab.pid = Some(id.clone());
+                            }
+                            ws.pid_to_pane.insert(id.clone(), id.clone());
+                        }
+                    }
+                    self.insert_pty(id.clone(), remote.session.clone());
                     self.pump_pty_screens(
                         remote.session.screens.clone(),
                         id.clone(),
                         std::sync::Arc::downgrade(&remote.session),
                     );
-                    self.insert_pty(id.clone(), remote.session.clone());
                     if let Some(t) = rec
                         .get("title")
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.trim().is_empty())
                     {
                         let mut ws = self.ws.lock().unwrap();
-                        let pane = ws.pane_mut(&id);
-                        pane.title = Some(t.to_string());
-                        pane.title_pinned = true;
+                        let outer = ws.outer_for_pty(&id).unwrap_or_else(|| id.clone());
+                        let pane = ws.panes.get_mut(&outer).unwrap();
+                        let tab = if tab_of.is_some() {
+                            pane.tabs.iter_mut().find(|tab| tab.pid.as_deref() == Some(&id))
+                        } else { pane.tabs.first_mut() };
+                        if let Some(tab) = tab {
+                            tab.title = Some(t.to_string());
+                            tab.title_pinned = true;
+                        }
                     }
                     // 학생 이름을 되살린다. 이 갈래는 여기서 돌아가므로 **아래의
                     // 저장된-캐릭터 복원에 닿지 않는다** — 그래서 이사 간 학생은
@@ -6832,19 +6726,12 @@ impl App {
                     // (2026-08-30 지적: 「맥미니로 가면 왜 맥북에서 테마가 안보여」.
                     // 실측으로 미러 두 자리에 `character` 키가 아예 없었다).
                     //
-                    // 저장본이 먼저다(공짜). 없을 때만 원격에 묻는다 — 그 자리에
-                    // 이미 굳어 버린 무명 pane 을 되살리는 길이고, 몸통이 남의
-                    // 기계라 이름의 정본도 거기다. 명단 밖이라고 새로 뽑지는
-                    // 않는다: 이 학생은 저쪽에서 도는 사람이라 여기서 이름을
-                    // 갈면 두 화면이 다른 사람을 가리킨다.
+                    // Seed the saved identity without blocking restoration on
+                    // network I/O. The live source poll replaces it when ready.
                     if let Some(name) = rec_str("character")
                         .filter(|s| !s.is_empty())
-                        .or_else(|| kasa_mcp::remote::remote_pane_character(base, rpane, None))
                         .filter(|s| !s.is_empty())
                     {
-                        // relabel_pane 은 실존 pane 만 손댄다 — 원격 갈래는 아직
-                        // PaneState 를 안 만들었을 수 있어 자리를 먼저 세운다.
-                        self.ws.lock().unwrap().pane_mut(&id);
                         self.relabel_pane(&id, &name);
                     }
                     // 이사로 나간 학생의 대화 id 를 지도(pane_claude_sid)에도 되살린다 —
@@ -6866,6 +6753,7 @@ impl App {
                         format!("원격 pane 을 못 이었어요: {e}"),
                         std::time::Instant::now(),
                     ));
+                    return None;
                 }
             }
         }
@@ -8852,6 +8740,34 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn inactive_remote_tab_record_keeps_endpoint_and_view_identity() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let pid = "%saved-remote-tab-regression";
+        let remote = kasa_mcp::remote::restore_connection(kasa_mcp::remote::RemoteSpec {
+            base: base.clone(), pane: Some("%73".into()), cwd: None, token: None,
+            identity: kasa_mcp::remote::RemoteIdentity {
+                label: "맥미니".into(), remote_cwd: Some("/source/project".into()),
+                origin_cwd: Some("/viewer/project".into()), owned: false,
+            },
+        }, pid, 80, 24, true).unwrap();
+        let mut record = serde_json::Map::new();
+        let mut ws = crate::Workspace::default();
+        ws.pane_character.insert(pid.into(), "모모이".into());
+        super::App::fill_surface_record(&mut record, pid, Some("거울 탭"), None,
+            &Default::default(), &ws, &Default::default(), &Default::default());
+        assert_eq!(record["remote_base"], base);
+        assert_eq!(record["remote_pane"], "%73");
+        assert_eq!(record["remote_view"], true);
+        assert_eq!(record["remote_label"], "맥미니");
+        assert_eq!(record["remote_cwd"], "/source/project");
+        assert_eq!(record["remote_origin_cwd"], "/viewer/project");
+        assert_eq!(record["character"], "모모이");
+        assert_eq!(record["title"], "거울 탭");
+        drop(remote);
+    }
+
+    #[test]
     fn resume_keeps_the_sessions_student_unless_the_pane_was_reassigned() {
         use super::pane_pick_wins;
         assert!(!pane_pick_wins(false, true), "자동 배정 pane 이 남의 대화를 이으면 대화의 학생이 이긴다");
@@ -10018,6 +9934,41 @@ fn pane_replaced(id: &str, mine: &std::sync::Weak<kasa_pty::PtySession>) -> bool
         Some(cur) => !std::ptr::eq(std::sync::Arc::as_ptr(&cur), mine.as_ptr()),
         None => false,
     }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn replacement_snapshot_requires_registration_before_pump() {
+    use kasa_pty::{PtyOptions, PtySession};
+    use std::sync::Arc;
+
+    let id = format!("test-replacement-pump-{}", std::process::id());
+    let make_session = || {
+        // cat is a standalone test PTY, never a user's shell/profile/session.
+        Arc::new(PtySession::start(PtyOptions {
+            shell: Some("/bin/cat".into()),
+            pane_id: id.clone(),
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        }).unwrap())
+    };
+    let old = make_session();
+    let new = make_session();
+    kasa_pty::register_session(&id, &old);
+    // A successful remote handshake can queue its snapshot before the GUI
+    // swaps sessions. Starting the new pump now would reject that snapshot.
+    new.send_bytes(b"NEW HOST\r").unwrap();
+    let snapshot = new.screens.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    assert_eq!(snapshot.pane_id, id);
+    assert!(pane_replaced(&id, &Arc::downgrade(&new)));
+    assert!(!pane_replaced(&id, &Arc::downgrade(&old)));
+
+    kasa_pty::register_session(&id, &new);
+    assert!(!pane_replaced(&snapshot.pane_id, &Arc::downgrade(&new)));
+    // The old Arc stays alive through the swap; its late frames/EOF must
+    // still be rejected while the new snapshot is accepted.
+    assert!(pane_replaced(&id, &Arc::downgrade(&old)));
 }
 
 /// 승격된 학생들이 사는 로컬 상주 데몬(kasa-serve-web)의 HTTP 포트.

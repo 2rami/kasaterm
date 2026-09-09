@@ -1133,10 +1133,13 @@ impl Backend for PtyBackend {
     }
 
     fn paste_image(&self, surface: &str, bytes: Vec<u8>) -> Result<()> {
+        let (reply, result) = std::sync::mpsc::channel();
         self.proxy
-            .send_event(UserEvent::SocketPasteImage(surface.to_string(), bytes))
+            .send_event(UserEvent::SocketPasteImage(surface.to_string(), bytes, Some(reply)))
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
-        Ok(())
+        result.recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| anyhow::anyhow!("이미지 붙여넣기 응답 시간이 지났어"))?
+            .map_err(anyhow::Error::msg)
     }
 
     fn toggle_git_panel(&self) -> Result<()> {
