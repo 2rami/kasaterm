@@ -5287,11 +5287,12 @@ async fn term_push_token_post(req: axum::extract::Request) -> axum::response::Re
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     let token = v.get("token").and_then(serde_json::Value::as_str).unwrap_or("");
     let env = v.get("env").and_then(serde_json::Value::as_str).unwrap_or("prod");
+    let root = v.get("root").and_then(serde_json::Value::as_str).unwrap_or("");
     if v.get("remove").and_then(serde_json::Value::as_bool).unwrap_or(false) {
         crate::push::unregister(token);
         return Json(serde_json::json!({ "ok": true })).into_response();
     }
-    let n = crate::push::register(token, env, &user);
+    let n = crate::push::register(token, env, &user, root);
     Json(serde_json::json!({ "ok": true, "devices": n, "ready": crate::push::configured() })).into_response()
 }
 

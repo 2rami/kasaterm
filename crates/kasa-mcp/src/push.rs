@@ -32,6 +32,10 @@ pub struct DeviceToken {
     pub env: String,
     #[serde(default)]
     pub user: String,
+    /// 폰이 쓰는 서버 주소(`https://…/u/<slug>/`) — 알림 확장이 학생 얼굴을 받아 올
+    /// 절대 주소를 여기서 만든다(확장은 앱의 열쇠고리를 못 본다).
+    #[serde(default)]
+    pub root: String,
     #[serde(default)]
     pub added: u64,
 }
@@ -82,7 +86,7 @@ fn save_tokens(list: &[DeviceToken]) {
 }
 
 /// 폰이 맡긴 토큰을 적는다 — 같은 토큰이면 env·user 만 갱신.
-pub fn register(token: &str, env: &str, user: &str) -> usize {
+pub fn register(token: &str, env: &str, user: &str, root: &str) -> usize {
     let token = token.trim();
     if token.is_empty() || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
         return tokens().len();
@@ -96,11 +100,15 @@ pub fn register(token: &str, env: &str, user: &str) -> usize {
             if !user.is_empty() {
                 t.user = user.into();
             }
+            if !root.is_empty() {
+                t.root = root.into();
+            }
         }
         None => list.push(DeviceToken {
             token: token.into(),
             env: env.into(),
             user: user.into(),
+            root: root.into(),
             added: now,
         }),
     }
@@ -221,6 +229,10 @@ pub struct Alert {
     pub pane: String,
     pub kind: String,
     pub collapse: Option<String>,
+    /// 보낸 학생 이름·얼굴 슬러그 — 폰의 알림 확장이 「학생이 보낸 메시지」 모양
+    /// (아이콘 자리에 얼굴)으로 바꾼다. 없으면 보통 알림.
+    pub sender: Option<String>,
+    pub avatar_slug: Option<String>,
 }
 
 /// 등록된 폰 전부에 쏜다. 열쇠나 토큰이 없으면 조용히 0.
@@ -237,18 +249,26 @@ pub async fn send(alert: &Alert) -> usize {
             return 0;
         }
     };
-    let payload = serde_json::json!({
-        "aps": {
-            "alert": { "title": alert.title, "body": alert.body },
-            "sound": "default",
-            "thread-id": alert.pane,
-        },
-        "machine": alert.machine,
-        "pane": alert.pane,
-        "kind": alert.kind,
-    });
     let mut sent = 0;
     for t in list {
+        // 얼굴 주소는 폰마다 다르다(자기 서버 주소 밑의 `term/avatar/<slug>.png`).
+        let avatar = match (&alert.avatar_slug, t.root.trim_end_matches('/')) {
+            (Some(slug), root) if !root.is_empty() => Some(format!("{root}/term/avatar/{slug}.png")),
+            _ => None,
+        };
+        let payload = serde_json::json!({
+            "aps": {
+                "alert": { "title": alert.title, "body": alert.body },
+                "sound": "default",
+                "thread-id": alert.pane,
+                "mutable-content": 1,
+            },
+            "machine": alert.machine,
+            "pane": alert.pane,
+            "kind": alert.kind,
+            "sender": alert.sender,
+            "avatar": avatar,
+        });
         let host = if t.env == "dev" {
             "https://api.sandbox.push.apple.com"
         } else {
@@ -300,6 +320,8 @@ pub fn note_arrived(character: &str, kind: &str, summary: &str, pane: &str) {
         pane: pane.to_string(),
         kind: format!("note:{kind}"),
         collapse: Some(format!("note-{pane}")),
+        sender: (!character.is_empty()).then(|| character.to_string()),
+        avatar_slug: crate::character::slug_for_any(character),
     };
     tokio::spawn(async move {
         send(&alert).await;
@@ -394,6 +416,11 @@ pub async fn push_loop() {
                     .unwrap_or_default()
             };
             let where_ = route.as_deref().map(|r| format!(" ({r})")).unwrap_or_default();
+            let slug = row
+                .get("slug")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| crate::character::slug_for_any(name));
             let alert = if cur.waiting && !prev.as_ref().is_some_and(|p| p.waiting && p.kind == cur.kind) {
                 let head = match cur.kind.as_str() {
                     "permission" => "승인 기다림",
@@ -408,6 +435,8 @@ pub async fn push_loop() {
                     pane: id.to_string(),
                     kind: format!("waiting:{}", cur.kind),
                     collapse: Some(format!("wait-{key}")),
+                    sender: Some(name.to_string()),
+                    avatar_slug: slug.clone(),
                 })
             } else if !cur.busy && !cur.waiting && prev.as_ref().is_some_and(|p| p.busy) {
                 Some(Alert {
@@ -417,6 +446,8 @@ pub async fn push_loop() {
                     pane: id.to_string(),
                     kind: "done".into(),
                     collapse: Some(format!("done-{key}")),
+                    sender: Some(name.to_string()),
+                    avatar_slug: slug.clone(),
                 })
             } else {
                 None

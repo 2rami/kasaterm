@@ -638,7 +638,8 @@ class Server {
       res = await _client.post(
         uri('term/push-token'),
         headers: {'content-type': 'application/json'},
-        body: jsonEncode({'token': token, 'env': env}),
+        // 알림 확장이 학생 얼굴을 받아 올 주소 — 확장은 이 앱의 열쇠고리를 못 본다.
+        body: jsonEncode({'token': token, 'env': env, 'root': root.toString()}),
       );
     } catch (_) {
       throw ServerException('${describe()} 에 닿지 못했다');
