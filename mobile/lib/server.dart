@@ -814,6 +814,56 @@ class Server {
   Uri noteImage(int id, {String? machine}) =>
       uri('term/notes/$id.png', machine: machine);
 
+  /// 이 폰의 모양을 서버에 맡긴다(`POST mobile/device`) — 학생이 「폰에서 보라」고
+  /// 열 때 KasaChrome 이 흉내 낼 크기·배율이다. 논리 픽셀(CSS px)로 준다.
+  /// 돌아오는 것은 브라우징 기기 목록의 이 폰 id(`phone:<이름>`).
+  Future<String> registerDevice(DeviceInfo info) async {
+    final http.Response res;
+    try {
+      res = await _client.post(
+        uri('mobile/device'),
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode(info.toJson()),
+      );
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    if (res.statusCode != 200) {
+      throw ServerException('기기 등록이 안 됐다 (${res.statusCode})');
+    }
+    Object? body;
+    try {
+      body = jsonDecode(utf8.decode(res.bodyBytes));
+    } catch (_) {
+      body = null;
+    }
+    if (body is! Map || body['ok'] != true) {
+      throw ServerException('기기 등록 응답을 확인하지 못했다');
+    }
+    return body['id'] as String? ?? '';
+  }
+
+  /// 브라우징 대상 — 기기 목록과 지금 고른 것(`GET browse/devices`).
+  Future<BrowseDevices> browseDevices() async {
+    final j = await _getJson('browse/devices');
+    final parsed = BrowseDevices.fromJson(j);
+    if (parsed == null) {
+      throw ServerException('${describe()} 응답을 읽지 못했다 (browse/devices)');
+    }
+    return parsed;
+  }
+
+  /// 「사람이 볼 페이지」를 어느 기기로 — `"auto"` 면 자동(키를 지운다).
+  Future<void> setBrowseDevice(String id) =>
+      settingsAction('browse-device', id: id);
+
+  /// 그 기기의 무엇으로 — `web`(내장 웹) 또는 `chrome`(브라우저).
+  Future<void> setBrowseOpen(String open) =>
+      settingsAction('browse-open', id: open);
+
+  /// 폰 제어 채널(`GET mobile/ws`) 주소 — 앱이 앞에 있는 동안 붙어 있는다.
+  Uri controlUri() => wsUri('mobile/ws', query: const {});
+
   void close() => _client.close();
 }
 
@@ -880,4 +930,126 @@ class Note {
     image: j['image'] == true,
     machine: machine,
   );
+}
+
+/// `POST mobile/device` 에 싣는 이 폰의 모양. 크기는 논리 픽셀이다.
+class DeviceInfo {
+  const DeviceInfo({
+    required this.width,
+    required this.height,
+    required this.dpr,
+    required this.platform,
+    this.model,
+  });
+
+  final int width;
+  final int height;
+  final double dpr;
+
+  /// ios · android · web — `defaultTargetPlatform` 으로 가른다(`dart:io` 금지).
+  final String platform;
+  final String? model;
+
+  Map<String, Object?> toJson() => {
+    'width': width,
+    'height': height,
+    'dpr': dpr,
+    'platform': platform,
+    'model': ?model,
+  };
+}
+
+/// 브라우징 기기 목록의 한 줄 — 「이 기기」·다른 기계·폰.
+class BrowseDevice {
+  const BrowseDevice({
+    required this.id,
+    required this.label,
+    required this.kind,
+    required this.online,
+    this.model,
+    this.viewport,
+  });
+
+  /// `""` = 이 기기(데스크톱), `~<machine_id>` = 다른 기계, `phone:<이름>` = 폰.
+  final String id;
+  final String label;
+
+  /// desktop · phone.
+  final String kind;
+  final bool online;
+  final String? model;
+  final DeviceViewport? viewport;
+
+  bool get isPhone => kind == 'phone' || id.startsWith('phone:');
+
+  static BrowseDevice? fromJson(Map<String, Object?> j) {
+    final id = j['id'];
+    if (id is! String) return null;
+    final vp = j['viewport'];
+    return BrowseDevice(
+      id: id,
+      label: j['label'] as String? ?? id,
+      kind: j['kind'] as String? ?? (id.startsWith('phone:') ? 'phone' : 'desktop'),
+      online: j['online'] == true,
+      model: j['model'] as String?,
+      viewport: vp is Map ? DeviceViewport.fromJson(vp.cast<String, Object?>()) : null,
+    );
+  }
+}
+
+class DeviceViewport {
+  const DeviceViewport({required this.width, required this.height, required this.dpr});
+  final int width;
+  final int height;
+  final double dpr;
+
+  static DeviceViewport? fromJson(Map<String, Object?> j) {
+    final w = (j['width'] as num?)?.toInt();
+    final h = (j['height'] as num?)?.toInt();
+    if (w == null || h == null) return null;
+    return DeviceViewport(
+      width: w,
+      height: h,
+      dpr: (j['dpr'] as num?)?.toDouble() ?? 1,
+    );
+  }
+}
+
+/// `GET browse/devices` 응답 — 목록과 지금 고른 기기·목적지.
+class BrowseDevices {
+  const BrowseDevices({
+    required this.open,
+    required this.selected,
+    required this.auto,
+    required this.devices,
+  });
+
+  /// 설정 화면의 「자동」 항목 id — 서버 키가 없는 상태를 뜻한다.
+  static const autoId = 'auto';
+
+  /// chrome · web.
+  final String open;
+
+  /// 지금 고른 기기 id. `auto` 면 서버가 자동으로 고른 결과다.
+  final String selected;
+  final bool auto;
+  final List<BrowseDevice> devices;
+
+  /// 설정 화면이 켜 둘 항목 — 자동이면 `auto`, 아니면 고른 id.
+  String get selectedItem => auto ? autoId : selected;
+
+  static BrowseDevices? fromJson(Object? j) {
+    if (j is! Map) return null;
+    final raw = j['devices'];
+    return BrowseDevices(
+      open: j['open'] as String? ?? 'chrome',
+      selected: j['selected'] as String? ?? '',
+      auto: j['auto'] == true,
+      devices: [
+        if (raw is List)
+          for (final d in raw)
+            if (d is Map) ?BrowseDevice.fromJson(d.cast<String, Object?>()),
+      ],
+    );
+  }
 }

@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../control_session.dart';
+import '../device_info.dart';
 import '../hub_model.dart';
 import '../hub_prefs.dart';
 import '../server.dart';
@@ -11,6 +13,7 @@ import 'notes_sheet.dart';
 import 'pane_actions.dart';
 import 'settings.dart';
 import 'terminal.dart';
+import 'web.dart';
 
 /// 첫 화면 — 기계·방별 학생 목록. 기다리는 학생이 맨 위에 선다.
 class HubScreen extends StatefulWidget {
@@ -34,16 +37,49 @@ class HubScreen extends StatefulWidget {
 class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
   late final HubModel _model = HubModel(widget.server, prefs: widget.prefs);
 
+  /// 폰 제어 채널 — 학생의 「폰에서 보라」(`open-url`)를 받는다. 허브가 살아 있는
+  /// 동안(학생 화면을 위에 올려도 허브는 남는다) 붙어 있고, 앱이 뒤로 가면 닫는다.
+  late final ControlSession _control = ControlSession(
+    widget.server,
+    onOpenUrl: (f) => openControlUrl(Navigator.of(context), f),
+  );
+  bool _registered = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _model.start();
+    _control.connect();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_registered) return;
+    _registered = true;
+    _registerDevice();
+  }
+
+  /// 이 폰의 모양(논리 크기·배율·플랫폼)을 서버에 맡긴다 — 학생 쪽 KasaChrome 이
+  /// 그 크기를 흉내 내고, 브라우징 기기 목록에 「이 폰」이 선다. 실패는 조용히 —
+  /// 옛 서버엔 이 창구가 없다.
+  Future<void> _registerDevice() async {
+    final info = describeDevice(
+      logical: MediaQuery.sizeOf(context),
+      devicePixelRatio: MediaQuery.devicePixelRatioOf(context),
+    );
+    try {
+      await widget.server.registerDevice(info);
+    } on ServerException {
+      // 옛 데스크톱이거나 연결이 끊겼다 — 다음 허브 진입에 다시.
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _control.dispose();
     _model.dispose();
     super.dispose();
   }
@@ -53,10 +89,12 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         _model.start();
+        _control.resume();
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
       case AppLifecycleState.hidden:
         _model.stop();
+        _control.pause();
       case AppLifecycleState.inactive:
         break;
     }

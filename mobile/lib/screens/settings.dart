@@ -24,6 +24,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /// 데스크톱 「외형」 값 — 못 받으면 null 이고 그 칸은 안 그린다.
   Map<String, Object?>? _appearance;
+
+  /// 브라우징 대상 목록 — 옛 서버는 못 준다(null). 「이 폰」은 `phone:<내 이름>`.
+  BrowseDevices? _browse;
+  String _myName = '';
   bool _loading = true;
   String? _pending;
 
@@ -35,16 +39,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _reload() async {
     Map<String, Object?>? a;
+    BrowseDevices? b;
+    var name = _myName;
     try {
       a = await server.appearance();
     } on ServerException {
       a = null;
     }
+    try {
+      b = await server.browseDevices();
+      if (name.isEmpty) name = (await server.me()).name;
+    } on ServerException {
+      b = null;
+    }
     if (!mounted) return;
     setState(() {
       _appearance = a;
+      _browse = b;
+      _myName = name;
       _loading = false;
     });
+  }
+
+  /// 브라우징 기기·목적지 — 데스크톱 설정과 같은 액션. 바뀐 목록을 되받는다.
+  Future<void> _applyBrowse(String action, String id) async {
+    setState(() => _pending = '$action:$id');
+    try {
+      await server.settingsAction(action, id: id);
+    } on ServerException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    } finally {
+      if (mounted) setState(() => _pending = null);
+      await _reload();
+    }
   }
 
   /// 데스크톱에 액션을 보내고, 바뀐 색을 되받아 폰도 같은 얼굴로.
@@ -168,6 +198,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           ),
+          const SizedBox(height: 16),
+          _SectionTitle('브라우징'),
+          if (_loading)
+            const SizedBox.shrink()
+          else if (_browse == null)
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.cloud_off),
+                title: const Text('브라우징 설정을 못 받았다'),
+                subtitle: const Text('옛 데스크톱이거나 연결이 끊겼다. 눌러서 다시.'),
+                onTap: _reload,
+              ),
+            )
+          else
+            BrowseCard(
+              data: _browse!,
+              myName: _myName,
+              pending: _pending,
+              onPick: _applyBrowse,
+            ),
           const SizedBox(height: 16),
           _SectionTitle('데스크톱 외형'),
           if (_loading)
@@ -318,6 +368,124 @@ class _AppearanceCard extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// 「사람이 볼 페이지」가 어느 기기의 무엇으로 열리는지(docs/browse-target.md).
+/// 목록도 고른 것도 데스크톱이 준 것이고, 누르면 데스크톱 설정이 바뀐다.
+/// 액션 이름은 데스크톱과 같다 — `browse-device`(id·`auto`) · `browse-open`(web·chrome).
+class BrowseCard extends StatelessWidget {
+  const BrowseCard({
+    super.key,
+    required this.data,
+    required this.myName,
+    required this.pending,
+    required this.onPick,
+  });
+
+  final BrowseDevices data;
+
+  /// 이 폰의 이름(`mobile/me`) — 목록의 `phone:<이름>` 을 「이 폰」으로 보인다.
+  final String myName;
+  final String? pending;
+  final Future<void> Function(String action, String id) onPick;
+
+  String get myId => 'phone:$myName';
+
+  /// 목록에 보일 이름 — 이 폰은 「이 폰」, 나머지는 서버가 준 라벨.
+  String labelOf(BrowseDevice d) => d.id == myId && myName.isNotEmpty
+      ? '이 폰'
+      : d.label;
+
+  static String kindOf(BrowseDevice d) {
+    final parts = <String>[
+      if (d.isPhone) '폰' else '데스크톱',
+      if ((d.model ?? '').isNotEmpty) d.model!,
+      if (d.viewport != null) '${d.viewport!.width}×${d.viewport!.height}',
+      if (!d.online) '오프라인',
+    ];
+    return parts.join(' · ');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final busy = pending != null;
+    final selected = data.selectedItem;
+    Widget check(bool on) => Icon(
+      on ? Icons.radio_button_checked : Icons.radio_button_off,
+      color: on ? scheme.primary : scheme.outline,
+    );
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('어느 기기로', style: theme.textTheme.titleSmall),
+            const SizedBox(height: 4),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: check(selected == BrowseDevices.autoId),
+              title: const Text('자동'),
+              subtitle: Text(
+                data.auto && data.selected.isNotEmpty
+                    ? '거울로 보는 쪽이 있으면 그 기기 — 지금은 ${_labelById(data.selected)}'
+                    : '거울로 보는 쪽이 있으면 그 기기, 없으면 데스크톱',
+              ),
+              onTap: busy ? null : () => onPick('browse-device', BrowseDevices.autoId),
+            ),
+            for (final d in data.devices)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: check(selected == d.id),
+                title: Text(labelOf(d)),
+                subtitle: Text(kindOf(d)),
+                enabled: !busy,
+                onTap: busy ? null : () => onPick('browse-device', d.id),
+              ),
+            const SizedBox(height: 12),
+            Text('무엇으로', style: theme.textTheme.titleSmall),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 'web', label: Text('내장 웹')),
+                  ButtonSegment(value: 'chrome', label: Text('브라우저')),
+                ],
+                selected: {data.open == 'web' ? 'web' : 'chrome'},
+                onSelectionChanged: busy
+                    ? null
+                    : (s) => onPick('browse-open', s.first),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              data.open == 'web'
+                  ? '폰이면 앱 안 웹 화면, 데스크톱이면 그 pane 의 탭으로 연다.'
+                  : '그 기기의 브라우저로 연다 — 폰은 사파리, 맥은 기본 브라우저.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+            if (busy) ...[
+              const SizedBox(height: 12),
+              const LinearProgressIndicator(minHeight: 2),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _labelById(String id) {
+    for (final d in data.devices) {
+      if (d.id == id) return labelOf(d);
+    }
+    return id.isEmpty ? '데스크톱' : id;
   }
 }
 
