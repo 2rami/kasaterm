@@ -18,6 +18,12 @@ application accepted a user command. A live local terminal is deliberately
 usable even if agent-process detection is still pending, so login/error prompts
 can be handled. Other unfinished surfaces reject text and image input.
 
+The first terminal frame binds its PTY id even when layout/resize created the
+pane first. Without that binding, visible agent output could remain absent from
+the readiness lookup, leaving a running restored conversation unable to accept
+keyboard input. Resuming it again in another Codex process would then report an
+active writer because the original conversation was still running.
+
 Only initial layout construction blocks the main window globally. Afterwards,
 ready surfaces and app controls remain usable while the card is visible.
 Retry reconnects unfinished links without reconstructing existing panes.

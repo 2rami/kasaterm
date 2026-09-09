@@ -196,6 +196,13 @@ impl App {
         };
         pane.character = pane_char;
         let tab = &mut pane.tabs[tab_idx];
+        // Layout/resize can create the outer pane before its first frame.
+        // find_tab_by_pty then finds that unbound primary tab, bypassing the
+        // new-pane branch above. Bind it here too: restore readiness and tab
+        // routing must see the PTY whose live output is already on screen.
+        if tab.pid.is_none() && tab.term().is_some() {
+            tab.pid = Some(update.pane_id.clone());
+        }
         // pid 라우팅이 터미널 아닌 탭(이미지/md 미리보기)에 떨어질 수 있다 — 여기서
         // expect 로 죽으면 호출자가 ws 락을 쥔 채 unwind 해 poison 이 GUI 전체로
         // 번진다. 프레임 하나를 버리는 쪽이 맞다.

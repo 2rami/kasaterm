@@ -975,6 +975,30 @@ mod tests {
     }
 
     #[test]
+    fn first_live_frame_binds_a_precreated_restore_pane_and_unlocks_input() {
+        let mut ws = Workspace::default();
+        let id = "%restore-precreated";
+        // Layout/resize may create the pane before its first PTY frame. That
+        // route must acquire the same tab identity as a frame-created pane.
+        ws.pane_mut(id);
+        assert!(ws.panes[id].tabs[0].pid.is_none());
+        App::apply_screen_update(&mut ws, kasa_bridge::screen::ScreenUpdate {
+            pane_id: id.into(), cols: 4, rows: 1, live_output: true,
+            ..Default::default()
+        });
+        let term = ws.panes.values().flat_map(|pane| &pane.tabs)
+            .find(|tab| tab.pid.as_deref() == Some(id))
+            .and_then(|tab| tab.term());
+        let has_grid = term.is_some_and(|term| term.live_output && !term.cells.is_empty());
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track(id, &serde_json::json!({"was_agent": "codex"}));
+        progress.built = true;
+        progress.entries.get_mut(id).unwrap().update_local(has_grid, false, true);
+        assert!(!progress.blocks_surface(id), "a displayed restored Codex must accept input");
+        assert!(progress.entries[id].ready);
+    }
+
+    #[test]
     fn applied_live_readiness_survives_resize_but_not_a_different_generation() {
         let mut ws = Workspace::default();
         let update = |live_output, output_generation| kasa_bridge::screen::ScreenUpdate {
