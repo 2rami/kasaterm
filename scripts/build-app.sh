@@ -421,13 +421,35 @@ PLIST
 #   Keychain Access → Certificate Assistant → Create a Certificate
 #   Name: kasaterm-dev, Type: Self-Signed Root, Certificate Type: Code Signing
 # CI(release.yml)는 Secrets 의 kasaterm-ci 인증서를 임포트하고 이 env 로 지정한다.
-SIGN_ID="${KASATERM_SIGN_ID:-kasaterm-dev}"
+# 애플 발급 인증서가 키체인에 있으면 그것부터 쓴다 — 자체 서명 번들은 알림센터 등록이
+# 「Notifications are not allowed」로 거절된다(2026-08-21 조사: 남은 변수는 TeamIdentifier
+# 하나). 개발자 계정을 결제하면 Xcode 가 「Apple Development」를 넣어 두고, 배포용
+# 「Developer ID Application」이 있으면 그게 먼저다. 어느 쪽이든 번들에 표식을 남겨
+# 앱이 부팅 때 알림센터를 켠다(chrome.rs `os_notify_enabled`). KASATERM_SIGN_ID 로
+# 명시하면 그대로 이긴다. 인증서를 바꾸면 화면 녹화 같은 권한을 한 번 다시 묻는다.
+SIGN_ID="${KASATERM_SIGN_ID:-}"
+APPLE_SIGN=""
+if [[ -z "$SIGN_ID" ]]; then
+  for kind in "Developer ID Application" "Apple Development"; do
+    line=$(security find-identity -v -p codesigning 2>/dev/null | grep "\"$kind: " | head -1)
+    if [[ -n "$line" ]]; then
+      SIGN_ID=$(echo "$line" | awk '{print $2}')
+      APPLE_SIGN=$(echo "$line" | sed -E 's/^[^"]*"([^"]*)".*$/\1/')
+      break
+    fi
+  done
+  SIGN_ID="${SIGN_ID:-kasaterm-dev}"
+fi
 # No -v: a self-signed cert is valid-but-untrusted (CSSMERR_TP_NOT_TRUSTED),
 # which -v filters out. codesign still signs with it, and TCC keys
 # permissions off the signing identity, so untrusted is fine for local use.
 if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
   SIGN="$SIGN_ID"
-  SIGN_MSG="signed with '$SIGN_ID' — TCC permissions persist across rebuilds"
+  if [[ -n "$APPLE_SIGN" ]]; then
+    SIGN_MSG="signed with '$APPLE_SIGN' — 알림센터를 쓴다"
+  else
+    SIGN_MSG="signed with '$SIGN_ID' — TCC permissions persist across rebuilds"
+  fi
 else
   SIGN="-"  # ad-hoc
   SIGN_MSG="signed ad-hoc — create a '$SIGN_ID' code-signing cert to stop the permission re-prompts"
@@ -449,6 +471,12 @@ fi
 # kasaterm-cli 는 별도 실행 바이너리 — app 서명(--deep 제거)이 안 덮으므로 개별 서명.
 codesign --force --sign "$SIGN" "$APP/Contents/MacOS/kasaterm-cli" 2>/dev/null || true
 codesign --force --sign "$SIGN" "$APP/Contents/MacOS/kasa-serve-web" 2>/dev/null || true
+# 애플 인증서 표식 — 서명 봉인 안에 들어가야 하므로 app 서명 직전에 쓴다.
+if [[ -n "$APPLE_SIGN" ]]; then
+  printf '%s\n' "$APPLE_SIGN" > "$APP/Contents/Resources/apple-signed"
+else
+  rm -f "$APP/Contents/Resources/apple-signed"
+fi
 codesign --force --sign "$SIGN" "$APP" 2>/dev/null \
   && echo "$SIGN_MSG" \
   || echo "warning: signing '$APP' failed; app left unsigned"

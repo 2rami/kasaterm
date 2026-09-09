@@ -3789,7 +3789,18 @@ pub(crate) fn banner_inbox() -> &'static std::sync::Mutex<Vec<crate::notify_bann
 /// 이미 다른 것들이 메운다 — `unread_panes`(못 본 완료)·Dock 배지·사이드바
 /// 숨쉬기, 그리고 자체 배너. 넷 다 `handle_notify` 한 자리에서 함께 선다.
 fn os_notify_enabled() -> bool {
-    std::env::var("KASATERM_OS_NOTIFY").is_ok_and(|v| v == "1" || v == "true")
+    if std::env::var("KASATERM_OS_NOTIFY").is_ok_and(|v| v == "1" || v == "true") {
+        return true;
+    }
+    // 굽기가 애플 발급 인증서로 서명했으면 번들에 표식을 남긴다(build-app.sh). 알림센터
+    // 등록이 통과하는 조건이 그것뿐이라(2026-08-21 조사), 표식이 곧 「켜도 된다」다.
+    static MARK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MARK.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent()?.parent().map(|c| c.join("Resources/apple-signed")))
+            .is_some_and(|p| p.is_file())
+    })
 }
 
 pub(crate) fn notify_desktop(
@@ -3802,15 +3813,24 @@ pub(crate) fn notify_desktop(
     if dedup.is_some_and(|k| !notify_dedup_passes(k)) {
         return;
     }
-    // 자체 배너가 정본이다. 여기가 모든 알림이 지나는 한 자리라, 이 줄 하나로
-    // 완료·승인 대기·계정 한도가 전부 같은 모양으로 뜬다.
-    banner_inbox().lock().unwrap().push((
-        title.to_string(),
-        body.to_string(),
-        character.map(str::to_string),
-        route.map(|(p, s)| (p.to_string(), s.map(str::to_string))),
-    ));
-    if !os_notify_enabled() {
+    // 알림센터가 켜져 있고 허락까지 받았으면 그쪽이 정본이다 — 같은 알림이 자체
+    // 배너와 시스템 배너로 두 번 뜨지 않게 자체 배너는 쉰다. 아직 안 물었거나(첫
+    // 알림) 거절됐으면 자체 배너가 든다. 여기가 모든 알림이 지나는 한 자리라, 이
+    // 판정 하나로 완료·승인 대기·계정 한도가 전부 같은 모양으로 뜬다.
+    #[cfg(target_os = "macos")]
+    let auth = NOTIFY_AUTH.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(target_os = "macos"))]
+    let auth = 2u8;
+    let native = os_notify_enabled() && auth != 2;
+    if !(native && auth == 1) {
+        banner_inbox().lock().unwrap().push((
+            title.to_string(),
+            body.to_string(),
+            character.map(str::to_string),
+            route.map(|(p, s)| (p.to_string(), s.map(str::to_string))),
+        ));
+    }
+    if !native {
         return;
     }
     #[cfg(target_os = "macos")]
