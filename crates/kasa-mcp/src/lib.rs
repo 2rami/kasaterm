@@ -15,6 +15,8 @@ use rmcp::{
 use serde::Deserialize;
 
 pub mod character;
+pub mod browser_route;
+pub mod browser_target;
 pub mod codexhome;
 pub mod dispatch;
 pub mod git;

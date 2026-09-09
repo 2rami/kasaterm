@@ -444,6 +444,8 @@ fn spawn_flusher(
             };
 
             let update = ScreenUpdate {
+                live_output: true,
+                output_generation: 0,
                 pane_id: pid,
                 rows: snap.rows,
                 cols: snap.cols,

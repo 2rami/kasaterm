@@ -287,15 +287,18 @@ pub fn kasachrome_candidates() -> Vec<String> {
     out
 }
 
-/// 카사크롬 MCP 가 앞에서부터 시도할 다리 주소 — 고른 기계가 먼저, 이 기계가 폴백.
-/// 앱이 이 목록을 설정 `kasachrome_bridge_urls` 로 적어 두고 MCP 가 붙을 때마다 읽는다
-/// (kasachrome/mcp/server.mjs). 고른 기계가 없거나 갈 길이 없으면 이 기계 하나.
+/// Explicit selection never falls back to a different computer.
 pub fn kasachrome_bridge_urls() -> Vec<String> {
-    let local = format!("ws://127.0.0.1:{KASACHROME_PORT}");
-    let chosen = kasachrome_machine();
-    match kasachrome_target_port(&chosen) {
-        Some(port) if !chosen.is_empty() => vec![format!("ws://127.0.0.1:{port}"), local],
-        _ => vec![local],
+    kasachrome_bridge_urls_for(&kasachrome_machine())
+}
+
+pub fn kasachrome_bridge_urls_for(chosen: &str) -> Vec<String> {
+    if chosen.is_empty() {
+        vec![format!("ws://127.0.0.1:{KASACHROME_PORT}")]
+    } else {
+        kasachrome_target_port(chosen)
+            .map(|port| vec![format!("ws://127.0.0.1:{port}")])
+            .unwrap_or_default()
     }
 }
 

@@ -286,6 +286,8 @@ enum SessionIo {
 /// 파싱」하는 찢어진 프레임이 생긴다. 한 채널에 순서대로 실으면 reader 루프의
 /// 기존 「read 직후 크기 재확인」이 그대로 순서를 보장한다.
 pub enum ExtEvent {
+    /// New connection epoch, applied only after a whole following Bytes frame.
+    Generation(u64),
     /// 원격 PTY 가 뱉은 raw 바이트. 파서로 직행한다.
     Bytes(Vec<u8>),
     /// 원격 격자 크기 변경 — 다음 Bytes 를 파싱하기 전에 적용된다.
@@ -309,6 +311,8 @@ pub struct ExternalIo {
 /// `Box<dyn Read + Send>` 라서, 이 어댑터 하나로 파서·tap·스냅샷 배관 전부를
 /// 로컬 PTY 와 공유한다.
 struct ExtReader {
+    generation: u64,
+    parsed_generation: Arc<std::sync::atomic::AtomicU64>,
     events: Receiver<ExtEvent>,
     /// 세션의 공유 크기 — SetSize 이벤트를 여기 반영하면 reader 루프의
     /// 「read 직후 크기 재확인」이 다음 파싱 전에 Term 을 맞춘다.
@@ -324,9 +328,13 @@ impl Read for ExtReader {
                 let n = self.pending.len().min(buf.len());
                 buf[..n].copy_from_slice(&self.pending[..n]);
                 self.pending.drain(..n);
+                if self.pending.is_empty() {
+                    self.parsed_generation.store(self.generation, std::sync::atomic::Ordering::Release);
+                }
                 return Ok(n);
             }
             match self.events.recv() {
+                Ok(ExtEvent::Generation(generation)) => self.generation = generation,
                 Ok(ExtEvent::Bytes(b)) => {
                     if b.is_empty() {
                         continue;
@@ -756,6 +764,7 @@ impl PtySession {
             Arc::clone(&inline_imgs),
             Arc::clone(&scheme_reports),
             Arc::clone(&output_beats),
+            None,
         );
 
         Ok(Self {
@@ -822,7 +831,10 @@ impl PtySession {
             Arc::new(Mutex::new(Vec::new()));
         let inline_imgs: Arc<Mutex<InlineImgs>> = Arc::new(Mutex::new(InlineImgs::default()));
         let scheme_reports = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let parsed_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let reader = Box::new(ExtReader {
+            generation: 0,
+            parsed_generation: parsed_generation.clone(),
             events: io.events,
             size: Arc::clone(&size),
             pending: Vec::new(),
@@ -848,6 +860,7 @@ impl PtySession {
             Arc::clone(&inline_imgs),
             Arc::clone(&scheme_reports),
             Arc::clone(&output_beats),
+            Some(parsed_generation),
         );
         Ok(Self {
             screens: rx,
@@ -954,6 +967,7 @@ impl PtySession {
             Arc::clone(&inline_imgs),
             Arc::clone(&scheme_reports),
             Arc::clone(&output_beats),
+            None,
         );
         Ok(Self {
             screens: rx,
@@ -1190,6 +1204,7 @@ impl PtySession {
     pub fn last_submit(&self) -> Option<Instant> {
         *self.last_submit.lock().unwrap()
     }
+
 
     /// 백엔드에 출력이 **박자 있게** 흐르는 중인가 — 글리프와 무관한 working 신호.
     /// 에이전트는 생성 중이면 스피너 경과시간을 1초마다 다시 그려 박동이 1Hz 로
@@ -2102,6 +2117,7 @@ fn spawn_reader_thread(
     inline_imgs: Arc<Mutex<InlineImgs>>,
     scheme_reports: Arc<std::sync::atomic::AtomicBool>,
     output_beats: Arc<Mutex<VecDeque<Instant>>>,
+    parsed_generation: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         use unicode_normalization::UnicodeNormalization;
@@ -2457,6 +2473,9 @@ fn spawn_reader_thread(
                     // Hand off any OSC 777 notify captured this read (or a
                     // prior sync-suppressed one) to the host pump.
                     snap.notify = pending_notify.take();
+                    snap.live_output = true;
+                    snap.output_generation = parsed_generation.as_ref().map_or(0, |generation|
+                        generation.load(std::sync::atomic::Ordering::Acquire));
                     if std::env::var_os("KASATERM_PROFILE").is_some() {
                         eprintln!(
                             "[snapshot] {}us {}x{} ({}b in)",
@@ -2709,6 +2728,8 @@ fn build_update(
     // losing it.
     let title: Option<String> = last_title.lock().ok().and_then(|t| t.clone());
     ScreenUpdate {
+        live_output: false,
+        output_generation: 0,
         pane_id: pane_id.to_string(),
         rows,
         cols,
@@ -5982,6 +6003,44 @@ mod prompt_anchor_tests {
 #[cfg(test)]
 mod external_session_tests {
     use super::*;
+
+    #[test]
+    fn restoration_generation_waits_for_the_last_fragment() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let parsed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut reader = ExtReader { events: rx, size: Arc::new(Mutex::new((80, 24))),
+            pending: Vec::new(), generation: 0, parsed_generation: parsed.clone() };
+        tx.send(ExtEvent::Generation(1)).unwrap();
+        tx.send(ExtEvent::Bytes(b"firstframe".to_vec())).unwrap();
+        let mut small = [0u8; 5];
+        assert_eq!(reader.read(&mut small).unwrap(), 5);
+        assert_eq!(parsed.load(std::sync::atomic::Ordering::Acquire), 0);
+        reader.read(&mut small).unwrap();
+        assert_eq!(parsed.load(std::sync::atomic::Ordering::Acquire), 1);
+        tx.send(ExtEvent::Generation(2)).unwrap();
+        tx.send(ExtEvent::Bytes(b"secondframe".to_vec())).unwrap();
+        reader.read(&mut small).unwrap();
+        assert_eq!(parsed.load(std::sync::atomic::Ordering::Acquire), 1, "stale frame must not claim new connection readiness");
+        reader.read(&mut small).unwrap();
+        reader.read(&mut small).unwrap();
+        assert_eq!(parsed.load(std::sync::atomic::Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn restoration_live_frame_is_parsed_but_history_and_resize_are_not() {
+        let (session, events, _, _) = ext_session(20, 5);
+        assert!(!session.full_snapshot().live_output);
+        events.send(ExtEvent::Generation(7)).unwrap();
+        events.send(ExtEvent::Bytes(b"LIVE".to_vec())).unwrap();
+        let update = session.screens.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        assert!(update.live_output);
+        assert_eq!(update.output_generation, 7);
+        assert!(session.visible_text(5).contains("LIVE"));
+        session.resize(30, 8).unwrap();
+        let update = session.screens.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        assert!(!update.live_output);
+        assert_eq!(update.output_generation, 0);
+    }
 
     struct ChanWriter(std::sync::mpsc::Sender<Vec<u8>>);
     impl Write for ChanWriter {

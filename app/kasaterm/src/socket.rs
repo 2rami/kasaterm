@@ -2191,6 +2191,25 @@ impl Backend for PtyBackend {
         if action == "onboarding-state" {
             return Ok(crate::settings::onboarding_state_json());
         }
+        if action == "set-browser-target" {
+            let wanted = label.unwrap_or("");
+            let own_id = kasa_mcp::mobile::machine_identity();
+            let local = browser_target_is_local(wanted, id,
+                &kasa_mcp::machines::self_label(), own_id.as_deref());
+            let chosen = if local {
+                String::new()
+            } else {
+                match id {
+                    Some(id) => kasa_mcp::machines::find_route(&format!("~{id}"))
+                        .map(|machine| machine.label)
+                        .ok_or_else(|| anyhow::anyhow!("선택한 기기 ID를 이 기기의 명부에서 찾지 못했어요"))?,
+                    None => wanted.to_string(),
+                }
+            };
+            anyhow::ensure!(local || !chosen.is_empty(), "브라우저 기기가 지정되지 않았어요");
+            save_browser_target(&chosen)?;
+            return Ok(serde_json::json!({"ok": true, "machine": chosen}));
+        }
         // 언어는 파일 한 줄이고 GUI 상태가 아니다 — 비울 캐시도, 다시 그릴 네이티브
         // 화면도 없다(설정 화면 문구는 웹이 쥔다). 그래서 GUI 왕복을 타지 않는다.
         if action == "set-language" {
@@ -4110,6 +4129,38 @@ pub(crate) fn write_settings_patch_atomic(
         obj.insert((*key).to_string(), item.clone());
     }
     write_settings_value_atomic(&value)
+}
+
+/// Keep the target and its bridge address in one snapshot for live MCP readers.
+fn browser_target_is_local(label: &str, id: Option<&str>, own_label: &str, own_id: Option<&str>) -> bool {
+    match id {
+        Some(id) => !id.is_empty() && own_id == Some(id),
+        None => !label.is_empty() && label == own_label,
+    }
+}
+
+#[cfg(test)]
+mod browser_target_identity_tests {
+    use super::browser_target_is_local;
+    #[test]
+    fn stable_identity_wins_over_duplicate_or_changed_names() {
+        assert!(!browser_target_is_local("Mac", Some("other"), "Mac", Some("this")));
+        assert!(browser_target_is_local("Old name", Some("this"), "Mac", Some("this")));
+        assert!(!browser_target_is_local("Mac", Some(""), "Mac", Some("this")));
+        assert!(browser_target_is_local("Mac", None, "Mac", Some("this")));
+        assert!(!browser_target_is_local("", None, "", None));
+    }
+}
+
+pub(crate) fn save_browser_target(machine: &str) -> std::io::Result<()> {
+    let urls = kasa_mcp::machines::kasachrome_bridge_urls_for(machine);
+    if !machine.is_empty() && urls.is_empty() {
+        return Err(std::io::Error::other(format!("{machine} 브라우저로 연결할 경로가 없어요")));
+    }
+    write_settings_patch_atomic(&[
+        ("kasachrome_machine", serde_json::json!(machine)),
+        ("kasachrome_bridge_urls", serde_json::json!(urls.join(","))),
+    ])
 }
 
 /// kasaterm 테마가 바뀌면 Claude Code 도 따라간다 — `~/.claude/settings.json`

@@ -52,6 +52,9 @@ pub(crate) struct StatusbarState {
     /// 그 크롬 다리가 지금 닿나(같은 5초 폴). 고른 기계가 안 닿으면 MCP 는 이 기계
     /// 크롬으로 물러나므로 사람이 볼 창이 필요하다.
     pub(crate) chrome_reach: Option<bool>,
+    pub(crate) chrome_rect: Option<(f32, f32, f32, f32)>,
+    /// Browser targets are loaded once when the menu opens, never during paint.
+    pub(crate) chrome_candidates: Vec<String>,
     pub(crate) tunnel_checked: Option<std::time::Instant>,
     /// 원격 주소(cloudflared config 의 hostname). 같은 5초 폴에 얹는다 — 읽는 일이
     /// **파일 IO** 라, 팝오버가 그릴 때마다 부르면 열어 둔 동안 매 프레임
@@ -152,6 +155,7 @@ pub(crate) enum StatusbarPopover {
     /// 예약(반복·타이머) 목록 — 멈추거나 다시 켜고, 지운다.
     Schedules,
     Tunnel,
+    Chrome,
     Usage,
     /// 최근 복사한 것들. 클립보드는 한 칸짜리 그릇이라 다음 복사가 앞의 것을 지우는데,
     /// 그 사고는 붙여넣어 봐야 안다 — 지나간 것을 여기서 골라 되찾는다.
@@ -180,6 +184,7 @@ pub(crate) enum StatusbarHit {
     OpenWebTerm,
     /// 원격 접속 문을 여닫는다.
     ToggleTunnel,
+    ChooseChrome(String),
     /// 열려 있을 때의 주소를 클립보드로.
     CopyTunnelHost,
     /// 최근 복사 목록의 한 줄 — 그 글을 다시 클립보드에 올린다.

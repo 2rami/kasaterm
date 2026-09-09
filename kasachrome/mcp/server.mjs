@@ -15,6 +15,7 @@ import { homedir } from 'node:os'
 import { PORT } from '../extension/port.js'
 import { HOST, HOST_ID } from '../bridge/host.mjs'
 import { bridgeRoute, needsFreshBrowserHandles } from './bridge-route.mjs'
+import { resolveBrowserArgs } from './localhost-route.mjs'
 
 // 서버 이름은 한 곳에만. 배포판은 이 한 줄만 치환하면 로그·MCP 핸드셰이크가 함께 따라온다.
 const NAME = 'kasachrome'
@@ -215,10 +216,14 @@ async function ensureBrowser() {
 
 async function call(tool, args = {}, timeoutMs = 30000) {
   const sock = await connect()
+  const requestedRoute = currentRoute()
+  if (requestedRoute.key !== routeKey) throw new Error('BROWSER_TARGET_CHANGED: 다시 시도하세요.')
   if (!handlesFresh && needsFreshBrowserHandles(args, tool)) {
     throw new Error('BROWSER_TARGET_CHANGED: 기기가 바뀌어 이전 탭·창 번호를 사용할 수 없습니다. browser_list_tabs로 새 기기의 탭을 읽고 다시 선택하세요.')
   }
   await ensureBrowser()
+  args = await resolveBrowserArgs(tool, args, requestedRoute)
+  if (currentRoute().key !== requestedRoute.key) throw new Error('BROWSER_TARGET_CHANGED: 다시 시도하세요.')
   if (sock !== ws) throw new Error('BROWSER_TARGET_CHANGED: 다시 시도하세요.')
   const id = nextId++
   return new Promise((resolve, reject) => {
@@ -236,8 +241,10 @@ async function call(tool, args = {}, timeoutMs = 30000) {
 // call 과 달리 확장을 거치지 않고 브리지가 직접 답한다 — 확장이 하나도 없어도 목록은 나온다.
 async function ask(type, extra = {}, timeoutMs = 5000) {
   const sock = await connect()
+  const requestedRoute = currentRoute()
+  if (requestedRoute.key !== routeKey) throw new Error('BROWSER_TARGET_CHANGED: 다시 시도하세요.')
   await ensureBrowser()
-  if (sock !== ws) throw new Error('BROWSER_TARGET_CHANGED: 다시 시도하세요.')
+  if (sock !== ws || currentRoute().key !== requestedRoute.key) throw new Error('BROWSER_TARGET_CHANGED: 다시 시도하세요.')
   const id = nextId++
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject })

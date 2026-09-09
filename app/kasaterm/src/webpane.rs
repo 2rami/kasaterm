@@ -476,6 +476,28 @@ impl App {
         let Some(url) = normalize_web_url(raw_url) else {
             return;
         };
+        // The receiving machine must not route an already-routed open again.
+        if target == Some("__local_browser__") {
+            self.open_url_here(&url, None);
+            return;
+        }
+        let selected = kasa_mcp::machines::kasachrome_machine();
+        if !selected.is_empty() {
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                let result = kasa_mcp::browser_target::open_selected_blocking(&url, &selected);
+                let message = match result {
+                    Ok(()) => format!("{selected} 브라우저로 열었어요"),
+                    Err(error) => format!("{selected} 브라우저로 열지 못했어요: {error}"),
+                };
+                let _ = proxy.send_event(UserEvent::SocketToast(message));
+            });
+            return;
+        }
+        if socket::read_settings().get("kasachrome_machine").is_some() {
+            self.open_url_here(&url, None);
+            return;
+        }
         let outer = target.map(|t| {
             self.ws
                 .lock()

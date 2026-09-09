@@ -78,6 +78,12 @@ pub struct InlineImageView {
 /// Screen diff sent from the flusher thread to consumers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScreenUpdate {
+    /// True only for a frame parsed from live input, never saved history/resize.
+    #[serde(default)]
+    pub live_output: bool,
+    /// External connection epoch, stamped after parsing a complete frame.
+    #[serde(default)]
+    pub output_generation: u64,
     pub pane_id: String,
     pub rows: u16,
     pub cols: u16,

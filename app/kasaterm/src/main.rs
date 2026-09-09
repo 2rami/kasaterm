@@ -62,6 +62,7 @@ mod links;
 mod lsp;
 mod machinescol;
 mod mirror_theme;
+mod restore_progress;
 mod mirror_close;
 mod mirror_sync;
 mod mcpcol;
@@ -1686,6 +1687,8 @@ struct FileTreeDrag {
 /// `PaneContent::Terminal`.
 #[derive(Default)]
 struct TerminalPane {
+    live_output: bool,
+    output_generation: u64,
     rows: u16,
     cols: u16,
     cells: Vec<Vec<GridCell>>,
@@ -5158,6 +5161,8 @@ struct App {
     /// (2026-09-01 지적). 그래서 막 대신 「되살리는 중」을 한 프레임 그려 두고,
     /// 그 화면이 멈춰 있게 한 뒤에 재구성을 시작한다.
     restore_applying: Option<(serde_json::Value, std::time::Instant)>,
+    restore_progress: Option<restore_progress::RestoreProgress>,
+    restore_retry_rect: Option<(f32, f32, f32, f32)>,
     /// Restore-prompt button hit rects, refreshed each frame: `(btn, rect)`.
     restore_btn_rects: Vec<(RestoreBtn, (f32, f32, f32, f32))>,
     /// 자동 스냅샷(강제 종료 대비) 상태 — 마지막 저장 시각, 그 뒤로 깨어난 적이
@@ -5888,6 +5893,8 @@ impl App {
             confirm_btn_rects: Vec::new(),
             restore_prompt: None,
             restore_applying: None,
+            restore_progress: None,
+            restore_retry_rect: None,
             restore_btn_rects: Vec::new(),
             session_saved_at: std::time::Instant::now(),
             session_touched: false,

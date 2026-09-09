@@ -53,6 +53,7 @@ pub(crate) fn paint_popover(
             paint_schedules_popover(g, sb, view, cursor, anchor, win_w, win_h)
         }
         state::StatusbarPopover::Tunnel => paint_tunnel_popover(g, sb, cursor, anchor, win_w),
+        state::StatusbarPopover::Chrome => paint_chrome_popover(g, sb, cursor, anchor, win_w, win_h),
         state::StatusbarPopover::Build => paint_build_popover(g, sb, cursor, anchor, win_w),
         state::StatusbarPopover::Usage => {
             paint_usage_popover(g, sb, view, cursor, anchor, win_w, win_h)
@@ -756,6 +757,74 @@ fn paint_tunnel_popover(
     }
 }
 
+fn paint_chrome_popover(
+    g: &mut gpu::GpuRenderer,
+    sb: &mut state::StatusbarState,
+    cursor: (f32, f32),
+    anchor: (f32, f32, f32, f32),
+    win_w: f32,
+    win_h: f32,
+) {
+    const HEAD: f32 = 57.0;
+    const ROW: f32 = 38.0;
+    const FOOT: f32 = 36.0;
+    let w = 292.0_f32.min((win_w - 16.0).max(180.0));
+    let total = (1 + sb.chrome_candidates.len()) as f32 * ROW;
+    let h = (HEAD + total + FOOT).min((win_h - 60.0).max(HEAD + ROW + FOOT));
+    let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
+    let y = (anchor.1 - h - 6.0).max(8.0);
+    let top = y + HEAD;
+    let inner = h - HEAD - FOOT;
+    sb.popover_rect = Some((x, y, w, h));
+    sb.popover_scroll = sb.popover_scroll.clamp(0.0, (total - inner).max(0.0));
+    panel_rect_outlined(g, x, y, w, h, theme::radius_md(), theme::surface());
+    g.queue_icon("globe", x + 15.0, y + 14.0, 16.0, theme::accent());
+    g.draw_text(x + 40.0, y + 14.0, "브라우저 기기", gpu::DrawOpts {
+        font_size: 12.0, color: theme::text(), bold: true, italic: false,
+    });
+    g.draw_text(x + 15.0, y + 36.0, "학생이 사용할 브라우저를 골라줘.", gpu::DrawOpts {
+        font_size: 10.0, color: theme::text_dim(), bold: false, italic: false,
+    });
+    g.push_clip(x, top, w, inner);
+    for (index, label) in std::iter::once("").chain(sb.chrome_candidates.iter().map(String::as_str)).enumerate() {
+        let ry = top + index as f32 * ROW - sb.popover_scroll;
+        if ry + ROW <= top || ry >= top + inner { continue; }
+        let row = (x + 7.0, ry + 2.0, w - 14.0, ROW - 4.0);
+        let selected = sb.chrome_machine == label;
+        let hovered = hit(cursor, &row) && cursor.1 >= top && cursor.1 < top + inner;
+        if selected || hovered {
+            round_rect(g, row.0, row.1, row.2, row.3, theme::radius_sm(),
+                if hovered { theme::surface_hover() } else { theme::panel_bg() });
+        }
+        g.queue_icon("monitor-smartphone", x + 16.0, ry + 11.0, 15.0,
+            if selected { theme::accent() } else { theme::text_dim() });
+        let display = if label.is_empty() {
+            crate::info::cached_local_machine_name().map(|name| format!("{name} · 이 기기")).unwrap_or_else(|| "이 기기".into())
+        } else { label.to_string() };
+        let display = crate::info::fit_text(g, &display, w - 87.0, 11.0, selected);
+        g.draw_text(x + 41.0, ry + 12.0, &display, gpu::DrawOpts {
+            font_size: 11.0, color: theme::text(), bold: selected, italic: false,
+        });
+        if selected { g.queue_icon("square-check", x + w - 30.0, ry + 12.0, 13.0, theme::accent()); }
+        let hit_top = row.1.max(top);
+        let hit_bottom = (row.1 + row.3).min(top + inner);
+        if hit_bottom > hit_top {
+            sb.popover_hits.push((state::StatusbarHit::ChooseChrome(label.to_string()),
+                (row.0, hit_top, row.2, hit_bottom - hit_top)));
+        }
+        g.hover_pointer |= hovered;
+    }
+    g.pop_clip();
+    let fy = y + h - FOOT;
+    g.rect(x + 14.0, fy, w - 28.0, 1.0, theme::border());
+    let note = if sb.chrome_reach == Some(false) { "선택한 기기의 브라우저 연결을 확인해줘." }
+        else { "선택한 기기에서 열고 조작해." };
+    let note = crate::info::fit_text(g, note, w - 28.0, 10.0, false);
+    g.draw_text(x + 14.0, fy + 13.0, &note, gpu::DrawOpts {
+        font_size: 10.0, color: theme::text_mute(), bold: false, italic: false,
+    });
+}
+
 /// Four full quiet-zone modules surround the square code. Only a small central
 /// area is covered by the umbrella; finder patterns remain untouched.
 fn paint_mobile_qr(g: &mut gpu::GpuRenderer, address: &str, rect: (f32, f32, f32, f32)) {
@@ -1440,6 +1509,12 @@ impl crate::App {
                 }
                 return true;
             }
+            Some(state::StatusbarHit::ChooseChrome(machine)) => {
+                self.statusbar.popover = None;
+                self.settings_apply(crate::SettingsAction::ChromeMachine(machine));
+                self.chrome_dirty = true;
+                return true;
+            }
             Some(state::StatusbarHit::ToggleTunnel) => {
                 // 결과는 낙관 반영하고 5초 뒤 폴이 확정한다 — 끄기(TERM)는 소멸이
                 // 한 박자 늦어 즉시 되물으면 아직 살아 보인다.
@@ -1561,6 +1636,14 @@ impl crate::App {
         let same = matches!(self.statusbar.popover, Some((k, _)) if k == kind);
         self.statusbar.popover = (!same).then_some((kind, anchor));
         self.statusbar.popover_scroll = 0.0;
+        if !same && kind == state::StatusbarPopover::Chrome {
+            self.statusbar.chrome_candidates = kasa_mcp::machines::kasachrome_candidates();
+            let chosen = kasa_mcp::machines::kasachrome_machine();
+            if !chosen.is_empty() && !self.statusbar.chrome_candidates.contains(&chosen) {
+                self.statusbar.chrome_candidates.push(chosen.clone());
+            }
+            self.statusbar.chrome_machine = chosen;
+        }
         // 사용량은 **경고를 보고 누르는** 자리다. 하단바가 「재시작 권장」이라
         // 말했는데 CPU 탭이 펴지면, 방금 읽은 그 말의 근거를 보려고 탭을 한 번
         // 더 눌러야 한다. 지금 급한 잣대로 열어 준다 — 경고가 없을 때만 마지막에

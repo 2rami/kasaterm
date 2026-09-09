@@ -114,6 +114,8 @@ impl App {
         // expect 로 죽으면 호출자가 ws 락을 쥔 채 unwind 해 poison 이 GUI 전체로
         // 번진다. 프레임 하나를 버리는 쪽이 맞다.
         let Some(tp) = tab.term_mut() else { return };
+        tp.live_output |= update.live_output;
+        if update.live_output { tp.output_generation = update.output_generation; }
         let resized = tp.cols != update.cols
             || tp.rows != update.rows
             || tp.cells.len() != update.rows as usize;
@@ -182,6 +184,12 @@ impl App {
         pane_id: String,
         sess_weak: std::sync::Weak<kasa_pty::PtySession>,
     ) {
+        if let Some((pane, tab_idx)) = self.ws.lock().unwrap().find_tab_by_pty(&pane_id) {
+            if let Some(term) = pane.tabs[tab_idx].term_mut() {
+                term.live_output = false;
+                term.output_generation = 0;
+            }
+        }
         let ws_screens = self.ws.clone();
         let win_screens = self.window.clone();
         let dead = self.dead_panes.clone();
@@ -250,6 +258,8 @@ impl App {
                 loop {
                     match screens.try_recv() {
                         Ok(mut next) if !next.eof => {
+                            if !next.live_output { next.output_generation = update.output_generation; }
+                            next.live_output |= update.live_output;
                             // OSC 777 from a coalesced frame — fire before the
                             // merge below drops `next.notify`.
                             if let Some((title, body)) = next.notify.take() {
@@ -5691,6 +5701,7 @@ impl App {
             "active_session": self.active_session,
             "sessions": sessions_json,
             "stashed_panes": closed_json,
+            "last_used_unix": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
         }))
     }
     /// Write the restore snapshot on exit.
@@ -5701,7 +5712,7 @@ impl App {
     /// 과 같은 이유.
     pub(crate) fn save_session_state(&self) {
         self.save_aux_windows_state();
-        if self.restore_prompt.is_some() {
+        if self.restore_prompt.is_some() || self.restoration_blocks_input() {
             return;
         }
         if let Some(state) = self.session_state_json() {
@@ -5722,7 +5733,7 @@ impl App {
         // 복원 창이 떠 있는 동안은 절대 저장하지 않는다 — 사용자가 "복원"을 고르기
         // 전의 화면은 빈 새 세션이라, 자동 저장이 복원 대상 자체를 덮어써 버린다
         // (되돌릴 수 없는 자해). 선택이 끝나면 그 클릭이 다시 touched 를 세운다.
-        if self.restore_prompt.is_some() {
+        if self.restore_prompt.is_some() || self.restoration_blocks_input() {
             return;
         }
         let Some(state) = self.session_state_json() else {
@@ -6321,9 +6332,10 @@ impl App {
     }
 
     pub(crate) fn restore_session_state(&mut self, state: &serde_json::Value) {
+        self.restore_progress = Some(crate::restore_progress::RestoreProgress::new(state.clone()));
         // codex 는 재시작마다 옛 pid 의 pane 홈 경로를 물고 있어 `resume` 이 죽는다 —
         // 되살리기 전에 그 색인을 실체 자리로 고친다(2026-09-08, 아래 함수 주석).
-        let fixed = crate::socket::codex_repair_thread_paths();
+        let fixed = if crate::verification_run() { 0 } else { crate::socket::codex_repair_thread_paths() };
         if fixed > 0 {
             eprintln!("[restore] codex rollout 경로 {fixed}줄을 실체 자리로 고침");
         }
@@ -6366,11 +6378,15 @@ impl App {
         // 안 됐는데 그 이름들만 영영 taken 으로 남는다.
         let Some((windows, active_window)) = Self::saved_windows(state) else {
             self.release_reserved_characters();
+            if let Some(progress) = self.restore_progress.as_mut() {
+                progress.failure = Some("저장된 창 목록을 읽지 못했어요".into());
+            }
             return;
         };
         // Tear down the blank session start_pty just spawned: drop its PTY and
         // clear its pane state so the rebuilt layout starts from an empty slate.
         // The socket server (start_socket_pty) stays up — only panes are rebuilt.
+        self.pending_restores.clear();
         self.pty.clear();
         {
             let mut ws = self.ws.lock().unwrap();
@@ -6574,6 +6590,7 @@ impl App {
                 });
             }
         }
+        if let Some(progress) = self.restore_progress.as_mut() { progress.built = true; }
         self.chrome_dirty = true;
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -6692,6 +6709,7 @@ impl App {
         let used = self.used_pane_ids();
         let id = pick_restore_id(saved, |s| used.contains(s))
             .unwrap_or_else(|| next_free_pane_id(&used));
+        if let Some(progress) = self.restore_progress.as_mut() { progress.track(&id, rec); }
         // 웹 pane — PTY 를 안 띄운다. 그리드 자리(WebPane)만 앉히고 자식 창은
         // pending_web_hosts 로 미룬다: 복원 경로엔 ActiveEventLoop 가 없어
         // 창을 만들 수 없다(about_to_wait 의 drain 이 다음 턴에 만든다).
@@ -7001,6 +7019,7 @@ impl App {
                 return None;
             }
         };
+        self.insert_pty(id.clone(), session.clone());
         self.pump_pty_screens(
             session.screens.clone(),
             id.clone(),
@@ -7010,7 +7029,6 @@ impl App {
             self.pane_cwd_cache
                 .insert(id.clone(), std::path::PathBuf::from(c));
         }
-        self.insert_pty(id.clone(), session.clone());
         // 복원은 부팅 pane 을 통째로 놓고(`pty.clear`) 시작하는데, 그 셸의 EOF 는 복원이
         // 도는 **도중**에 도착한다. 그때 명부에 그 번호가 없으면 `pane_replaced` 가
         // 「바뀐 적 없다」로 답해 죽음표시가 그대로 실리고, 저장본이 같은 번호(%0)로

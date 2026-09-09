@@ -692,13 +692,45 @@ impl App {
                 socket::write_setting("language", serde_json::json!(language));
             }
             SettingsAction::ChromeMachine(machine) => {
-                socket::write_setting("kasachrome_machine", serde_json::json!(machine));
-                // MCP 가 읽는 다리 목록은 즉시 다시 적는다 — 5초 폴을 기다리면 그 사이
-                // 붙는 학생이 옛 목록을 읽는다. 상태 칩도 다음 폴에 새로 잰다.
-                socket::write_setting(
-                    "kasachrome_bridge_urls",
-                    serde_json::json!(kasa_mcp::machines::kasachrome_bridge_urls().join(",")),
-                );
+                if let Err(error) = socket::save_browser_target(&machine) {
+                    self.collab.toast = Some((error.to_string(), Instant::now()));
+                    return;
+                }
+                // A viewer's "this computer" must mean the viewer, not the
+                // source where the agent's MCP process happens to run.
+                let target_label = if machine.is_empty() {
+                    kasa_mcp::machines::self_label()
+                } else { machine.clone() };
+                let target_id = if machine.is_empty() {
+                    kasa_mcp::mobile::machine_identity()
+                } else {
+                    kasa_mcp::machines::snapshot().into_iter().find_map(|m| {
+                        (m.get("label")?.as_str()? == machine).then(|| {
+                            m.get("route")?.as_str()?.strip_prefix('~').map(str::to_string)
+                        }).flatten()
+                    })
+                };
+                let mut sources: Vec<String> = self.pty.keys()
+                    .filter_map(|p| kasa_mcp::remote::remote_info(p).map(|i| i.base))
+                    .chain(kasa_mcp::machines::machines().into_iter().filter(|m| m.home).map(|m| m.base))
+                    .collect();
+                sources.sort(); sources.dedup();
+                let proxy = self.proxy.clone();
+                self.statusbar.chrome_machine = machine.clone();
+                std::thread::spawn(move || {
+                    static SYNC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+                    let Ok(_guard) = SYNC.lock() else { return };
+                    for base in sources {
+                        if kasa_mcp::machines::kasachrome_machine() != machine { return; }
+                        if let Err(error) = kasa_mcp::remote::settings_action(
+                            &base, "set-browser-target", target_id.as_deref(), Some(&target_label), None,
+                        ) {
+                            let _ = proxy.send_event(UserEvent::SocketToast(format!(
+                                "이 기기에는 저장했지만 본진에 브라우저 선택을 전달하지 못했어요: {error}"
+                            )));
+                        }
+                    }
+                });
                 self.statusbar.tunnel_checked = None;
             }
             SettingsAction::CwdMode(m) => {

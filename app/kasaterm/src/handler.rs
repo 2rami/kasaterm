@@ -2759,6 +2759,7 @@ impl ApplicationHandler<UserEvent> for App {
         let saved = (!want_tmux && !crate::verification_run())
             .then(crate::socket::read_session_state)
             .flatten()
+            .map(crate::restore_progress::with_file_time)
             .filter(|s| App::count_panes(s) > 0);
         if let Some(s) = &saved {
             self.reserve_saved_characters(s);
@@ -2808,6 +2809,27 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.restoration_blocks_input() {
+            match &event {
+                WindowEvent::KeyboardInput { event, .. } => {
+                    if event.state == ElementState::Pressed
+                        && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter)
+                        && self.restore_progress.as_ref().is_some_and(|p| p.failure.is_some())
+                    { self.retry_restore(); }
+                    return;
+                }
+                WindowEvent::MouseInput { state: ElementState::Pressed, .. } => {
+                    let (x, y) = self.cursor_px;
+                    if self.window.as_ref().is_some_and(|window| window.id() == id)
+                        && self.restore_retry_rect.is_some_and(|(rx, ry, w, h)| x >= rx && x <= rx + w && y >= ry && y <= ry + h)
+                    { self.retry_restore(); }
+                    return;
+                }
+                WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
+                | WindowEvent::Ime(_) | WindowEvent::DroppedFile(_) | WindowEvent::Touch(_) => return,
+                _ => {}
+            }
+        }
         if self.aux_owns_window(id) {
             self.aux_window_event(id, event, event_loop);
             return;
@@ -4035,6 +4057,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let on_chip = [
                         self.statusbar.port_rect,
                         self.statusbar.tunnel_rect,
+                        self.statusbar.chrome_rect,
                         self.statusbar.res_rect,
                     ]
                     .into_iter()
@@ -5775,6 +5798,13 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    if let Some(r) = self.statusbar.chrome_rect {
+                        if sb_hit(&r) {
+                            self.toggle_statusbar_popover(state::StatusbarPopover::Chrome, r);
+                            window.request_redraw();
+                            return;
+                        }
+                    }
                     if let Some(r) = self.statusbar.res_rect {
                         if sb_hit(&r) {
                             self.toggle_statusbar_popover(state::StatusbarPopover::Usage, r);
@@ -7365,6 +7395,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
+        self.tick_restore_progress();
+        self.run_restore_probe();
         // 지글 원복 — NudgePaneResize 가 1행 줄인 pane 을 원 크기로 되돌린다.
         if !self.pending_unjiggle.is_empty() {
             let now = std::time::Instant::now();
@@ -7748,6 +7780,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 빼면 다음 키 입력이나 무관한 출력이 올 때까지 실행이 밀린다.
                 .chain(self.pending_restores.iter().map(|(_, _, at)| *at))
                 .chain(self.restore_applying.as_ref().map(|(_, at)| *at))
+                .chain(self.restore_progress.as_ref().map(|_| std::time::Instant::now() + std::time::Duration::from_millis(100)))
                 .min();
             event_loop.set_control_flow(match deadline {
                 Some(at) => ControlFlow::WaitUntil(at),
@@ -8121,6 +8154,8 @@ mod ime_focus_tests {
 
     fn screen_update(id: &str) -> kasa_bridge::screen::ScreenUpdate {
         kasa_bridge::screen::ScreenUpdate {
+            live_output: false,
+            output_generation: 0,
             pane_id: id.to_string(),
             rows: 1,
             cols: 1,

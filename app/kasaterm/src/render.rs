@@ -9619,6 +9619,7 @@ impl App {
                 let mut rx = right_edge;
                 self.status_version_rect = None;
                 self.statusbar.tunnel_rect = None;
+                self.statusbar.chrome_rect = None;
                 self.statusbar.res_rect = None;
                 macro_rules! draw_version_widget {
                     () => {{
@@ -9704,11 +9705,7 @@ impl App {
                     let dot = 6.0_f32;
                     let gap = 5.0_f32;
                     let on = self.statusbar.tunnel_on == Some(true);
-                    // 점 하나에 두 상태 — 열림이면 초록, 열렸는데 카사크롬 다리(고른
-                    // 기계 크롬이 안 닿음 / 본진→이 맥 다리 끊김)면 주황. 닫힘은 흐림.
-                    let bridge_down = on
-                        && (self.statusbar.chrome_bridge == Some(false)
-                            || self.statusbar.chrome_reach == Some(false));
+                    // Browser connectivity now has its own chip and status dot.
                     let tw = g.measure_chrome_text(label, fs, false);
                     let seg_w = icon + gap + tw + gap + dot;
                     // 판 번호가 이미 오른쪽 끝을 먹었다 — 그 왼쪽에 선다
@@ -9747,9 +9744,7 @@ impl App {
                             dot,
                             dot,
                             dot / 2.0,
-                            if bridge_down {
-                                theme::attention()
-                            } else if on {
+                            if on {
                                 theme::success()
                             } else {
                                 theme::with_alpha(theme::text_dim(), 140)
@@ -9771,9 +9766,34 @@ impl App {
                         rx = tx - 8.0;
                     }
 
-                    // 바깥 스위치 왼쪽으로 리소스 → 포트 순서(Orca 하단바처럼 —
-                    // 2026-08-15 지시 「포트 하단바로」·「리소스사용량도」).
-                    // 크롬 다리 칩은 이 칩 안으로 들어갔다 — 점 색과 팝오버 한 줄.
+                    // Browser choice is independent of mobile access. Keep the
+                    // actual selected computer visible and open its own menu.
+                    if tunnel_visible {
+                        let machine = if self.statusbar.chrome_machine.is_empty() {
+                            crate::info::cached_local_machine_name().unwrap_or("이 기기")
+                        } else { &self.statusbar.chrome_machine };
+                        let name = crate::info::fit_text(g, machine, 94.0, fs, false);
+                        let name_w = g.measure_chrome_text(&name, fs, false);
+                        let browser_w = icon + gap + name_w + gap + dot;
+                        let bx = rx - browser_w - chip;
+                        let col = theme::text_dim();
+                        g.queue_icon("globe", bx, sy + (status_h - icon) / 2.0, icon, col);
+                        g.draw_text(bx + icon + gap, ty, &name, gpu::DrawOpts {
+                            font_size: fs, color: col, bold: false, italic: false,
+                        });
+                        round_rect(g, bx + icon + gap + name_w + gap,
+                            sy + (status_h - dot) / 2.0, dot, dot, dot / 2.0,
+                            match self.statusbar.chrome_reach {
+                                Some(true) => theme::success(),
+                                Some(false) => theme::attention(),
+                                None => theme::text_mute(),
+                            });
+                        let r = (bx - 8.0, sy, browser_w + 16.0, status_h);
+                        let (hx, hy) = self.cursor_px;
+                        g.hover_pointer |= hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3;
+                        self.statusbar.chrome_rect = Some(r);
+                        rx = bx - 8.0;
+                    }
                     }};
                 }
                     // 리소스 — 앱 + 학생 트리 합. 폭이 좁으면 먼저 버린다:
@@ -12238,9 +12258,9 @@ impl App {
                 };
                 const RESTORE_TITLE: &str = "이전 세션을 이어서 켤까요?";
                 let subtitle = if n > 0 {
-                    format!("마지막 배치 그대로 · pane {total}개 · 캐릭터 {n}명")
+                    format!("{} · 창 {total}개 · 캐릭터 {n}명", crate::restore_progress::last_used_label(&state))
                 } else {
-                    format!("마지막 배치 그대로 · pane {total}개")
+                    format!("{} · 창 {total}개", crate::restore_progress::last_used_label(&state))
                 };
                 let pad = 24.0_f32;
                 let bf = 13.0_f32;
@@ -12508,61 +12528,46 @@ impl App {
                 );
                 restore_btn_hits.push((crate::RestoreBtn::Fresh, (fresh_x, btn_y, btn_w, btn_h)));
             }
-            // 복원을 누르고 재구성을 기다리는 동안. 카드와 버튼을 걷고 한 줄만
-            // 남긴다 — 이 프레임이 재구성 내내 화면에 멈춰 있게 된다.
-            if let Some((state, _)) = self.restore_applying.clone() {
+            // Keep the modal until every pane/tab has a live first frame.
+            let mut restore_retry = None;
+            if self.restore_applying.is_some() || self.restore_progress.is_some() {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
-                g.rect(
-                    0.0,
-                    0.0,
-                    win_w,
-                    win_h,
-                    theme::with_alpha([0, 0, 0, 255], 0xB0),
-                );
-                let total = crate::App::count_panes(&state);
-                let msg = format!("창 {total}개를 되살리는 중…");
-                let sub = "다 되면 이 화면이 사라져요";
-                let pad = 22.0_f32;
-                let tw = g
-                    .measure_chrome_text(&msg, 16.0, true)
-                    .max(g.measure_chrome_text(sub, 13.0, false));
-                let card_w = (tw + pad * 2.0).clamp(320.0, (win_w - 48.0).max(320.0));
-                let card_h = 92.0_f32;
-                let cx0 = ((win_w - card_w) / 2.0).round();
-                let cy0 = ((win_h - card_h) / 2.0).round();
-                panel_rect_outlined(
-                    g,
-                    cx0,
-                    cy0,
-                    card_w,
-                    card_h,
-                    theme::radius_md() * 1.5,
-                    theme::surface_active(),
-                );
-                g.draw_text(
-                    cx0 + pad,
-                    cy0 + 34.0,
-                    &msg,
-                    gpu::DrawOpts {
-                        font_size: 16.0,
-                        color: theme::text(),
-                        bold: true,
-                        italic: false,
-                    },
-                );
-                g.draw_text(
-                    cx0 + pad,
-                    cy0 + 60.0,
-                    sub,
-                    gpu::DrawOpts {
-                        font_size: 13.0,
-                        color: theme::with_alpha(theme::text(), 0xA0),
-                        bold: false,
-                        italic: false,
-                    },
-                );
+                let progress = self.restore_progress.as_ref();
+                let total = progress.map(|p| p.expected).unwrap_or_else(|| {
+                    self.restore_applying.as_ref().map_or(0, |(state, _)| crate::App::count_panes(state))
+                });
+                let ready = progress.map_or(0, |p| p.ready);
+                let failed = progress.and_then(|p| p.failure.as_deref());
+                let msg = format!("창·탭 복원 중 · {ready}/{total} 준비");
+                let sub = failed.unwrap_or("모든 창이 준비되면 입력할 수 있어요");
+                let card_w = (g.measure_chrome_text(sub, 13.0, false) + 44.0)
+                    .max(360.0).min((win_w - 48.0).max(360.0));
+                let card_h = if failed.is_some() { 166.0 } else { 124.0 };
+                let x = ((win_w - card_w) / 2.0).round();
+                let y = ((win_h - card_h) / 2.0).round();
+                g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
+                panel_rect_outlined(g, x, y, card_w, card_h, theme::radius_md() * 1.5, theme::surface_active());
+                g.draw_text(x + 22.0, y + 34.0, &msg, gpu::DrawOpts {
+                    font_size: 16.0, color: theme::text(), bold: true, italic: false,
+                });
+                g.draw_text(x + 22.0, y + 60.0, sub, gpu::DrawOpts {
+                    font_size: 13.0, color: theme::with_alpha(theme::text(), 0xB0), bold: false, italic: false,
+                });
+                let width = card_w - 44.0;
+                g.rect(x + 22.0, y + 82.0, width, 6.0, theme::surface());
+                let fraction = if total == 0 { 0.0 } else { ready as f32 / total as f32 };
+                g.rect(x + 22.0, y + 82.0, width * fraction, 6.0, theme::text());
+                if failed.is_some() {
+                    let rect = (x + card_w - 126.0, y + 110.0, 104.0, 34.0);
+                    panel_rect_outlined(g, rect.0, rect.1, rect.2, rect.3, theme::radius_md(), theme::surface());
+                    g.draw_text(rect.0 + 17.0, rect.1 + 22.0, "다시 시도", gpu::DrawOpts {
+                        font_size: 13.0, color: theme::text(), bold: true, italic: false,
+                    });
+                    restore_retry = Some(rect);
+                }
             }
+            self.restore_retry_rect = restore_retry;
             // 계정 전환 확인 — 인라인 웹에서 누른 것은 웹이 그리므로 메인 몫만 본다.
             if let Some(p) = self.account_switch_confirm.as_ref() {
                 if p.surface == crate::session::ConfirmSurface::Main {

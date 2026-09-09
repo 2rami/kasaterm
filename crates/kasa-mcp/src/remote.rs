@@ -89,6 +89,17 @@ impl Drop for DetachOnDrop {
 struct ViewportState {
     target: Mutex<Option<(u16, u16)>>,
     detached: AtomicBool,
+    received_frame: AtomicBool,
+    generation: std::sync::atomic::AtomicU64,
+    connection_error: Mutex<Option<String>>,
+}
+
+/// A handshake alone is not ready: restoration waits for the live snapshot.
+pub fn connection_readiness(local_id: &str) -> Option<(bool, u64, Option<String>)> {
+    let links = links().lock().unwrap();
+    let link = links.get(local_id)?;
+    let error = link.viewport.connection_error.lock().unwrap().clone();
+    Some((link.viewport.received_frame.load(Ordering::Acquire), link.viewport.generation.load(Ordering::Acquire), error))
 }
 
 /// 원격 링크 하나의 명부 항목.
@@ -462,6 +473,7 @@ async fn manager(
         if viewport.detached.load(Ordering::Acquire) {
             break;
         }
+        viewport.received_frame.store(false, Ordering::Release);
         let url = build_url(&spec, remote_id.as_deref(), view);
         let connection = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(&url))
             .await.unwrap_or_else(|_| Err(tokio_tungstenite::tungstenite::Error::Io(
@@ -469,7 +481,10 @@ async fn manager(
             )));
         match connection {
             Ok((ws, _resp)) => {
+                let generation = viewport.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                let _ = etx.send(ExtEvent::Generation(generation));
                 let (mut tx, mut rx) = ws.split();
+                let mut reset_before_frame = had_attach;
                 // 이 연결에서 size 핸드셰이크를 받았는가 — 재접속 RIS 는 연결마다
                 // 첫 size 에서 딱 한 번.
                 let mut sized_this_conn = false;
@@ -495,7 +510,7 @@ async fn manager(
                                         if had_attach && !sized_this_conn {
                                             // 재접속 — 곧 올 스냅샷 앞에 RIS 로 그리드·
                                             // 스크롤백을 비운다(모듈 머리말 참고).
-                                            let _ = etx.send(ExtEvent::Bytes(b"\x1bc".to_vec()));
+                                            reset_before_frame = true;
                                         }
                                         sized_this_conn = true;
                                         if !had_attach {
@@ -514,6 +529,7 @@ async fn manager(
                                     }
                                     Some("gone") => {
                                         if retry_initial && !had_attach {
+                                            *viewport.connection_error.lock().unwrap() = Some("본진에서 이 창을 기다리는 중이에요".into());
                                             break; // The host may not have restored this pane yet.
                                         }
                                         // 세션이 정말 끝났다 — 재접속하지 않는다.
@@ -527,9 +543,15 @@ async fn manager(
                                 }
                             }
                             Some(Ok(Message::Binary(b))) => {
-                                if etx.send(ExtEvent::Bytes(b.to_vec())).is_err() {
+                                let bytes = if reset_before_frame {
+                                    reset_before_frame = false;
+                                    [b"\x1bc".as_slice(), b.as_ref()].concat()
+                                } else { b.to_vec() };
+                                if etx.send(ExtEvent::Bytes(bytes)).is_err() {
                                     return;
                                 }
+                                *viewport.connection_error.lock().unwrap() = None;
+                                viewport.received_frame.store(true, Ordering::Release);
                             }
                             Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                             // Ping/Pong — tungstenite 가 pong 을 알아서 큐잉한다.
@@ -585,6 +607,7 @@ async fn manager(
                 backoff_ms = 500;
             }
             Err(e) => {
+                *viewport.connection_error.lock().unwrap() = Some("기기에 연결하지 못했어요. 자동으로 다시 시도하고 있어요".into());
                 if !had_attach {
                     attempts_before_first += 1;
                     if attempts_before_first >= 6 && !retry_initial {
@@ -594,6 +617,7 @@ async fn manager(
                 }
             }
         }
+        viewport.received_frame.store(false, Ordering::Release);
         // 세션이 이미 사라졌으면 재접속할 이유가 없다.
         if orx.is_closed() {
             break 'outer;
@@ -1157,7 +1181,7 @@ pub fn paste_remote_image(base: &str, surface: &str, bytes: Vec<u8>) -> Result<(
     })
 }
 
-fn connection_auth_token(base: &str) -> Option<String> {
+pub(crate) fn connection_auth_token(base: &str) -> Option<String> {
     let normalized = reqwest::Url::parse(base).ok()?;
     links().lock().ok()?.values()
         .filter(|link| reqwest::Url::parse(&link.base).ok().as_ref() == Some(&normalized))
@@ -1895,6 +1919,8 @@ pub fn settings_action(
     label: Option<&str>,
     token: Option<&str>,
 ) -> Result<serde_json::Value> {
+    let inherited_token = connection_auth_token(base);
+    let token = token.or(inherited_token.as_deref());
     let u = format!("{}/settings/action", base.trim_end_matches('/'));
     let mut body = serde_json::json!({ "action": action });
     if let Some(id) = id {

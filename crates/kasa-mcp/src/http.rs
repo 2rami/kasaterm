@@ -967,12 +967,25 @@ async fn open_url_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let url = params.get("url").cloned().unwrap_or_default();
-    let pane = params.get("pane").map(|s| s.as_str()).filter(|s| !s.is_empty());
+    let pane = if params.get("local").is_some_and(|v| v == "1") {
+        Some("__local_browser__")
+    } else { params.get("pane").map(|s| s.as_str()).filter(|s| !s.is_empty()) };
     let body = match backend.open_url(&url, pane) {
         Ok(()) => serde_json::json!({ "ok": true }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+async fn browser_resolve_url_handler(Query(params): Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+    let selected = crate::machines::kasachrome_machine();
+    if params.get("machine").is_some_and(|expected| expected != &selected) {
+        return Json(serde_json::json!({"ok": false, "error": "브라우저 기기가 바뀌었어요. 다시 시도해 주세요"}));
+    }
+    let url = params.get("url").map(String::as_str).unwrap_or("");
+    match crate::browser_target::resolve_url(url, &selected).await {
+        Ok(url) => Json(serde_json::json!({"ok": true, "url": url, "machine": selected})),
+        Err(error) => Json(serde_json::json!({"ok": false, "error": error.to_string()})),
+    }
 }
 async fn open_markdown_handler(
     backend: Arc<dyn Backend>,
@@ -4515,6 +4528,16 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
         .into_iter()
         .map(|id| {
             let raw = board.iter().find(|p| p.surface_id == id);
+            let remote = crate::remote::remote_info(&id);
+            // A disconnected/cold-cache mirror is still a mirror. Without this
+            // marker another viewer can discover it as a fresh source pane.
+            let mirror_label = remote.as_ref().map(|i| {
+                if i.label.is_empty() {
+                    crate::machines::label_for_base(&i.base).unwrap_or_else(|| i.base.clone())
+                } else {
+                    i.label.clone()
+                }
+            });
             // 학생이 지금 돌고 있는 자리만 학생이다. 이름표(`pane_character`)는 claude 가
             // 끝나도 자리에 남아, 셸만 남은 pane 이 「우사기」로 떴다(2026-09-07 지적
             // 「아무것도 없는 pane 셸인데 우사기라고 뜨지」). `harness` 는 셸 밑에 살아
@@ -4542,9 +4565,10 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                     return row;
                 }
             }
-            let b = raw.filter(|p| p.harness.is_some() || crate::remote::is_remote_pane(&id));
+            let b = raw.filter(|p| p.harness.is_some() && remote.is_none());
             serde_json::json!({
                 "id": id,
+                "mirror_of": mirror_label,
                 "name": b.and_then(|p| p.character.clone()),
                 "title": b.map(|p| p.title.clone()).filter(|s| !s.is_empty()),
                 "status": b.map(|p| p.status.clone()).filter(|s| !s.is_empty()),
@@ -7577,6 +7601,11 @@ pub fn spawn_http_server_opts(
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             open_url_handler(open_url_backend.clone(), q)
                         }),
+                    )
+                    .route("/browser/resolve-localhost", post(crate::browser_route::resolve_handler))
+                    .route(
+                        "/browser/resolve-url",
+                        get(browser_resolve_url_handler),
                     )
                     .route(
                         "/save-markdown",

@@ -7733,6 +7733,9 @@ impl App {
                 w if w.starts_with("tunnel") => {
                     (crate::state::StatusbarPopover::Tunnel, self.statusbar.tunnel_rect)
                 }
+                w if w.starts_with("chrome") => {
+                    (crate::state::StatusbarPopover::Chrome, self.statusbar.chrome_rect)
+                }
                 w if w.starts_with("clip") => {
                     (crate::state::StatusbarPopover::Clipboard, self.statusbar.clip_rect)
                 }
@@ -7807,6 +7810,24 @@ impl App {
         }
         if want.starts_with("usage") {
             // 누를 것이 없는 팝오버라 여기서 끝난다(스크롤은 열 때 함께 했다).
+            return;
+        }
+        if want.starts_with("chrome") {
+            // Exercise the same hit-test/action path in scratch settings only.
+            if matches!(want.as_str(), "chrome-select-local" | "chrome-select-remote")
+                && std::env::var_os("KASATERM_SETTINGS_FILE").is_some()
+            {
+                let remote = want.ends_with("remote");
+                let choice = self.statusbar.popover_hits.iter().find_map(|(h, r)| {
+                    let crate::state::StatusbarHit::ChooseChrome(label) = h else { return None };
+                    (label.is_empty() != remote).then(|| (label.clone(), *r))
+                }).expect("browser fixture must provide a matching target row");
+                assert!(self.statusbar_popover_click(choice.1.0 + choice.1.2 / 2.0,
+                    choice.1.1 + choice.1.3 / 2.0));
+                assert!(self.statusbar.popover.is_none(), "selection closes its menu");
+                assert_eq!(kasa_mcp::machines::kasachrome_machine(), choice.0,
+                    "browser selection must persist through the settings action");
+            }
             return;
         }
         if tunnel {

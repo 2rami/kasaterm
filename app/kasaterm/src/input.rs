@@ -67,7 +67,7 @@ impl App {
     /// pane, and routing that commit through `send_bytes` would put the final
     /// syllable in the newly-focused terminal.
     pub(crate) fn send_bytes_to_surface(&self, surface: Option<&str>, bytes: &[u8]) {
-        if bytes.is_empty() {
+        if bytes.is_empty() || self.restoration_blocks_input() {
             return;
         }
         // Route to whichever backend owns the *active tab*. In-pane tabs
@@ -455,22 +455,11 @@ impl App {
         self.statusbar.tunnel_checked = Some(now);
         self.statusbar.tunnel_on = Some(kasa_mcp::tunnel::is_on());
         self.statusbar.tunnel_host = kasa_mcp::tunnel::host();
-        // 「카사크롬이 쓰는 크롬」 — 고른 기계의 다리가 지금 닿는지. 안 닿으면 MCP 가
-        // 이 기계 크롬으로 물러나므로(폴백은 실패 기반) 사람이 볼 창이 필요하다.
-        // 다리 후보 목록은 여기서 설정 파일에 적어 둔다 — MCP 가 붙을 때마다 읽는다.
-        // 바뀔 때만 쓴다(5초마다 파일을 갈아엎지 않게).
+        // Explicit browser selection remains selected even when disconnected.
+        // This poll is read-only: a remote settings request may arrive while
+        // reachability is being sampled. Never write the sampled old selection.
         {
             let chosen = kasa_mcp::machines::kasachrome_machine();
-            let urls = kasa_mcp::machines::kasachrome_bridge_urls();
-            let joined = urls.join(",");
-            let stored = socket::read_settings()
-                .get("kasachrome_bridge_urls")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if stored != joined {
-                socket::write_setting("kasachrome_bridge_urls", serde_json::json!(joined));
-            }
             let port = if chosen.is_empty() {
                 Some(kasa_mcp::machines::KASACHROME_PORT)
             } else {
