@@ -64,6 +64,7 @@ mod machinescol;
 mod mirror_theme;
 mod mirror_view;
 mod mirror_focus_probe;
+mod character_assignment;
 mod restore_progress;
 mod mirror_close;
 mod close_grace;
@@ -6460,12 +6461,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     // "다른 인스턴스가 하나도 없을 때만" 이라는 게이트를 뒀는데, 개발용 `cargo run`
     // 하나만 떠 있어도 청소가 통째로 건너뛰어져 마커가 재시작마다 쌓였다(그 끝이
     // 배정 풀 고갈 = 같은 학생 중복). 이제 주인 pid 로 가리므로 게이트가 필요 없다.
-        {
+        if !verification_run() {
             let live = live_kasaterm_pids();
-            kasa_mcp::character::sweep_stale_markers(|pid| live.contains(&pid));
+            // An isolated/custom socket directory is not a complete process
+            // inventory. Keep any owner still alive outside that directory;
+            // if process enumeration fails, do not sweep other owners at all.
+            let processes = kasa_pty::fresh_process_table();
+            kasa_mcp::character::sweep_stale_markers(|pid| live.contains(&pid)
+                || processes.is_empty() || processes.iter().any(|(p, _, _)| *p == pid));
+            prune_finished_tasks();
+            prune_empty_inboxes();
         }
-        prune_finished_tasks();
-        prune_empty_inboxes();
     } else {
         // Palette reads are required by the shared document renderer; unlike
         // onboarding/shims this path does not write or start a service.

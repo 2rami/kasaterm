@@ -1113,20 +1113,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let members = kasa_mcp::character::roster_in_use()
                         .map(|c| kasa_mcp::character::assignable_names(&c))
                         .unwrap_or_default();
-                    let taken: std::collections::HashSet<String> = {
-                        let ws = self.ws.lock().unwrap();
-                        let mut t: std::collections::HashSet<String> =
-                            ws.pane_character.values().cloned().collect();
-                        t.extend(kasa_mcp::character::assigned_global());
-                        t
-                    };
-                    let free: Vec<String> = members
-                        .iter()
-                        .filter(|n| !taken.contains(n.as_str()))
-                        .cloned()
-                        .collect();
-                    kasa_mcp::character::pick_random(&free, id)
-                        .or_else(|| kasa_mcp::character::pick_random(&members, id))
+                    self.next_auto_character(&members, "")
                 });
                 if let Some(ch) = resolved {
                     // 부모 체인/신선 배정으로 온 학생은 세션 id 에 영속 — 재진입·board
@@ -7503,6 +7490,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.tick_restore_progress();
         self.run_restore_probe();
         self.run_mirror_focus_probe(event_loop);
+        self.run_character_assignment_probe();
         // 지글 원복 — NudgePaneResize 가 1행 줄인 pane 을 원 크기로 되돌린다.
         if !self.pending_unjiggle.is_empty() {
             let now = std::time::Instant::now();

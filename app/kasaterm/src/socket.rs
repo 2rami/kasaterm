@@ -2932,14 +2932,15 @@ impl Backend for PtyBackend {
                     .or(env_char)
                     .or_else(|| pane_character.get(sid.as_str()).cloned())
                     .or_else(|| {
-                        std::fs::read_to_string(
-                            kasa_socket::collab_root()
-                                .join(format!("{rslug}/character-{}", sid.trim_start_matches('%'))),
-                        )
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
+                        kasa_mcp::character::read_marker(&rslug, sid)
                     });
+                // Repair a missing derived marker from the live identity;
+                // never reassign a running student just because a file vanished.
+                if let Some(name) = row.character.as_deref() {
+                    if kasa_mcp::character::read_marker(&rslug, sid).as_deref() != Some(name) {
+                        let _ = kasa_mcp::character::write_marker(&rslug, sid, name);
+                    }
+                }
                 // retained 진실이 ws·marker 와 어긋나면 교정 — render(statusline·테두리·타이틀)는
                 // ws.pane_character 를 보므로 복원된 오염 랜덤을 원본으로 되돌린다.
                 if let Some(rc) = retained {
@@ -2990,15 +2991,13 @@ impl Backend for PtyBackend {
                             let members = kasa_mcp::character::assignable_names(&chars);
                             // 살아있는 다른 pane 이 쓰는 캐릭터(이번 폴링 누적 스냅샷)는 피한다 —
                             // 죽은 pane 마커는 무시. 빈 슬롯 없으면 첫째로 순환(거노: 모모이 둘).
-                            let taken: std::collections::HashSet<&String> = pane_character
-                                .values()
-                                .chain(lazy_assigned.iter())
-                                .collect();
-                            members
-                                .iter()
-                                .find(|m| !taken.contains(m))
-                                .cloned()
-                                .or_else(|| members.first().cloned())
+                            let mut taken: Vec<_> = pane_character.values().cloned().collect();
+                            taken.extend(kasa_mcp::character::assigned_global());
+                            if !crate::verification_run() {
+                                taken.extend(kasa_mcp::machines::cached_character_assignments());
+                            }
+                            taken.extend(lazy_assigned.iter().cloned());
+                            kasa_mcp::character::pick_in_order(&members, &taken)
                         })
                     });
                     {

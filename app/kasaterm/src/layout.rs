@@ -921,7 +921,7 @@ impl App {
         // first bytes the shell prints before SIGWINCH lands.
         let (win_cols, win_rows) = self.window_cells();
         let cwd = self.spawn_cwd_from(Some(active));
-        // split = room 만 상속, 학생은 새로 랜덤 배정(전역 유일). 07-13 의 "소스 학생 상속"
+        // split = room 만 상속, 학생은 전역 빈 자리 순서로 배정. 07-13 의 "소스 학생 상속"
         // 설계는 모든 pane 이 루트 학생 하나로 수렴하는 부작용(거노 07-17: pane 열면 다
         // 프라나)으로 폐기 — 상속이 막으려던 "둔갑"(랜덤으로 떴다 뒤늦게 교정)은 배정이
         // spawn 시점 즉시(assign_character_env)가 된 지금은 재발하지 않는다. resume 은
@@ -2061,7 +2061,7 @@ impl App {
                 let _ = std::fs::remove_file(p.join(format!("god-nudged-{target}")));
             }
         }
-        Self::archive_roster_pane(target);
+        if !crate::verification_run() { Self::archive_roster_pane(target); }
     }
     /// Mark a closed pane's roster entries `archived=true` (munder 차용, ②a) so
     /// `roster_recovery` stops offering a deliberately-closed worker for resume.

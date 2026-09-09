@@ -442,7 +442,7 @@ impl App {
     /// falls back to single-pane when no layout has arrived).
     /// pane 생성 시 캐릭터 자동 배정 — /tmp 마커·session-id 기록 후 셸 env 를 반환.
     /// pending_character(new_room_with_character 가 세팅) 우선, 없으면 통합 풀에서
-    /// 안 겹친 캐릭터 랜덤. characters.json 없으면 빈 vec(무테마 = skip).
+    /// 아로나부터 명단 순서로 빈 학생 배정. characters.json 없으면 빈 vec(무테마 = skip).
     /// board(socket.rs)는 같은 /tmp 마커를 읽어 row.character 를 채운다.
     pub(crate) fn assign_character_env(
         &mut self,
@@ -456,7 +456,7 @@ impl App {
         };
         let rslug = kasa_mcp::character::rslug(std::path::Path::new(cwd), room);
         // 통합 풀(member_names = leader/leaders/members 병합) — god 개념 폐기(거노
-        // 2026-07-13): 아로나·프라나도 특별 클래스 없이 동등하게 랜덤 배정.
+        // 2026-07-13): 아로나·프라나도 별도 클래스가 아닌 같은 배정 풀에 포함한다.
         // 배정 풀 — 골라 둔 명단이 있으면 그것만, 없으면 전원(지금까지의 동작).
         let members = kasa_mcp::character::assignable_names(&chars);
         // `KASATERM_ASSIGN_DEBUG=1` — 풀이 왜 그 크기인지 찍는다. 「골랐는데 안 고른
@@ -470,109 +470,11 @@ impl App {
                 members
             );
         }
-        // 프로젝트(방)를 넘어 같은 학생이 겹치지 않게, 이 방 live pane + 전 방 마커를 모두
-        // taken 으로 본다(거노: 미도리 둘 — 방-로컬 배정이라 다른 방 미도리를 못 봤다).
-        // ws.pane_character/read_marker(이 방 live) + assigned_global(전 방). 닫힌 pane
-        // 마커는 cleanup_collab_markers 가 지우므로 대체로 live 만 남는다.
-        // 이 방 live 만 따로 들고 있는다 — 전 방 마커까지 합친 taken 이 학생 총원을
-        // 넘기면 고를 것이 하나도 안 남는데, 그때 members 전체로 되돌아가면 **같은 방
-        // 안에서도** 겹친다. 실측 2026-08-09: 마커 17개 > 총원 12명이라 배정 풀이
-        // 통째로 말라 아루가 셋이 됐다. 마커는 pane 을 정상적으로 닫을 때만 지워지므로
-        // 앱을 재시작하면 옛 마커가 그대로 남아 이 고갈이 시간이 갈수록 잦아진다.
-        // `all_taken` 은 중복을 살린 사본이다 — 풀이 마른 뒤 「가장 적게 쓰인 학생」을
-        // 고르려면 있고 없고가 아니라 **몇 번 쓰였나**를 알아야 한다.
-        let mut all_taken: Vec<String> = Vec::new();
-        let (taken, taken_local): (
-            std::collections::HashSet<String>,
-            std::collections::HashSet<String>,
-        ) = {
-            let ws = self.ws.lock().unwrap();
-            // **`ws.panes` 로만 돌면 안 된다** — split 로 생긴 leaf 는 보조탭이 생기기
-            // 전까지 `PaneState` 가 없다(희소, main.rs `pane_font_scales` 주석). 그래서
-            // 예전엔 방금 쪼갠 pane 들이 taken 에 안 잡혀 **연달아 쪼개면 같은 학생이
-            // 둘 나왔다**(실측 2026-08-06 `split --count`: 모모이 둘·프라나 둘. 거노가
-            // 전에 신고한 "미도리 둘"과 같은 증상, 원인만 다른 갈래).
-            // 마커(`assigned_global`)도 못 메운다 — 그건 claude 가 뜰 때 쓰이므로 갓
-            // 만든 pane 엔 아직 없다. 배정의 정본은 `pane_character` 다.
-            let here: Vec<String> = ws
-                .panes
-                .keys()
-                .chain(ws.pane_character.keys())
-                .filter(|p| p.as_str() != id)
-                // 「이 방」= rslug(프로젝트 cwd + 명시 room)다. `pane_character` 는
-                // 앱 전역 맵이라 거르지 않으면 다른 방 학생까지 here 에 들어와,
-                // ①첫 pane 이어도 here 가 안 비어 prefer_fresh_school 이 영영 안
-                // 불리고 ②prefer_same_school 이 남의 방 학원으로 끌어당겨 **앱
-                // 전체가 최초 학원 하나로 수렴**했다(2026-08-19 실측: 서로 다른 방
-                // 다섯의 학생 5명 전원 밀레니엄 — 우연 확률 ≈0.9%. 방마다 학원을
-                // 가르는 c999e10 의 절반이 이 스코프 누락으로 죽어 있었다).
-                // cwd 를 아직 모르는 pane 은 같은 방으로 친다 — 같은 방을 놓쳐
-                // 같은 얼굴이 나란히 서는 쪽이, 다른 방과 학원이 뭉치는 쪽보다 나쁘다.
-                .filter(|p| {
-                    self.pane_cwd_cache.get(p.as_str()).is_none_or(|c| {
-                        let room = ws.pane_room.get(p.as_str()).cloned();
-                        kasa_mcp::character::rslug(c, room.as_deref()) == rslug
-                    })
-                })
-                .filter_map(|p| {
-                    ws.pane_character
-                        .get(p)
-                        .cloned()
-                        .or_else(|| kasa_mcp::character::read_marker(&rslug, p))
-                })
-                .collect();
-            let local: std::collections::HashSet<String> = here.iter().cloned().collect();
-            all_taken.extend(here);
-            all_taken.extend(kasa_mcp::character::assigned_global());
-            (all_taken.iter().cloned().collect(), local)
-        };
-        // pending(사용자 지정 캐릭터)은 중복이어도 존중 — 같은 학생 허용, 색은
-        // character_ordinal 변주로 구분(거노). 랜덤 배정만 taken 을 피한다.
-        let name = match self.pending_character.take() {
-            Some(n) => n,
-            None => {
-                let free: Vec<String> = members
-                    .iter()
-                    .filter(|n| !taken.contains(n.as_str()))
-                    .cloned()
-                    .collect();
-                // 고갈되면 곧장 전체로 되돌아가지 않고 **이 방 live 만** 피해 한 번 더
-                // 고른다. 다른 방과 겹치는 것은 이름에 pane 번호가 붙어 구분되지만,
-                // 같은 방에서 겹치면 화면에 같은 얼굴이 나란히 서서 누가 누군지 사라진다.
-                let free_local: Vec<String> = members
-                    .iter()
-                    .filter(|n| !taken_local.contains(n.as_str()))
-                    .cloned()
-                    .collect();
-                // 그마저 마르면 **가장 적게 쓰인 학생들** 중에서 고른다 — 전체 랜덤은
-                // 이미 셋인 학생을 넷으로 만든다(`least_used` 주석에 실측).
-                let least = kasa_mcp::character::least_used(&members, &all_taken);
-                // 이 방에 이미 학생이 있으면 **같은 학원**에서 먼저 고른다. 첫 배정이
-                // 그 방의 학원을 정하고, 이후 pane 들이 거기 붙어 한 덩어리로 읽힌다.
-                // 학원이 마르면 아래 폴백으로 내려간다 — 학원을 맞추는 것보다 같은
-                // 방에서 안 겹치는 게 먼저다.
-                let here: Vec<String> = taken_local.iter().cloned().collect();
-                let same_school = kasa_mcp::character::prefer_same_school(&chars, &free, &here);
-                // 이 방의 첫 학생이면 반대로 **다른 방이 안 쓰는 학원**을 고른다 —
-                // 그 한 명이 이 방의 학원을 정하므로, 여기서 갈라 두면 방마다 다른
-                // 학원이 선다. 학원보다 방이 많아지면 빈 목록이 와 아래로 흐른다.
-                let fresh_school = if here.is_empty() {
-                    kasa_mcp::character::prefer_fresh_school(&chars, &free, &all_taken)
-                } else {
-                    Vec::new()
-                };
-                let pick = kasa_mcp::character::pick_random(&same_school, id)
-                    .or_else(|| kasa_mcp::character::pick_random(&fresh_school, id))
-                    .or_else(|| kasa_mcp::character::pick_random(&free, id))
-                    .or_else(|| kasa_mcp::character::pick_random(&free_local, id))
-                    .or_else(|| kasa_mcp::character::pick_random(&least, id))
-                    .or_else(|| kasa_mcp::character::pick_random(&members, id));
-                match pick {
-                    Some(n) => n,
-                    None => return Vec::new(),
-                }
-            }
-        };
+        // Manual selections/restored identities stay unchanged. Automatic
+        // seats use the same ordered inventory across every local workspace
+        // and the connected machines, not a cwd/school-specific subset.
+        let Some(name) = self.pending_character.take()
+            .or_else(|| self.next_auto_character(&members, id)) else { return Vec::new() };
         // 학생 명령(`시로코`)이 남긴 persona override 는 이 spawn 의 fresh env 보다
         // 오래된 정체성 — 지워서 이 pane 의 다음 claude 가 env 기준으로 돌아가게.
         if let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
@@ -711,7 +613,7 @@ impl App {
                 .pane_room
                 .insert(id.clone(), room.clone());
         }
-        // 캐릭터 자동 배정(거노): pending(사용자 지정) 우선, 없으면 통합 풀 랜덤. 마커·
+        // 캐릭터 자동 배정: pending(사용자 지정) 우선, 없으면 통합 풀 순서. 마커·
         // session-id 기록 후 KASATERM_CHARACTER/SESSION_ID/PERSONA env 를 더한다(claude shim 적용).
         env.extend(self.assign_character_env(&id, cwd.as_deref(), room.as_deref()));
         let session = Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
@@ -2352,22 +2254,7 @@ impl App {
                             // Windows에서는 `ps eww`로 스폰 시점의 환경변수를 복구할 수
                             // 없으므로, 캐릭터 없이 복원된 pane은 SessionStart에서 보충한다.
                             let members = kasa_mcp::character::assignable_names(&chars);
-                            let taken: std::collections::HashSet<String> = self
-                                .ws
-                                .lock()
-                                .unwrap()
-                                .pane_character
-                                .values()
-                                .cloned()
-                                .collect();
-                            let free: Vec<String> = members
-                                .iter()
-                                .filter(|name| !taken.contains(name.as_str()))
-                                .cloned()
-                                .collect();
-                            if let Some(name) = kasa_mcp::character::pick_random(&free, sid)
-                                .or_else(|| kasa_mcp::character::pick_random(&members, sid))
-                            {
+                            if let Some(name) = self.next_auto_character(&members, pane) {
                                 self.relabel_pane(pane, &name);
                                 let _ = kasa_mcp::character::bind_session_character(sid, &name);
                             }

@@ -1466,10 +1466,27 @@ pub fn assigned(rslug: &str) -> Vec<String> {
 /// (layout.rs)가 지우므로 대체로 live 만 남는다 → 프로젝트(방)를 넘어 같은 학생이
 /// 중복 배정되는 걸 막는다(거노: 미도리 둘).
 pub fn assigned_global() -> Vec<String> {
+    assigned_global_except(None)
+}
+
+/// The current GUI owns an authoritative in-memory map; count its markers
+/// only once. Markers from other app instances remain useful reservations.
+pub fn assigned_other_instances() -> Vec<String> {
+    assigned_global_except(Some(std::process::id()))
+}
+
+fn assigned_global_except(excluded_owner: Option<u32>) -> Vec<String> {
     let mut out = Vec::new();
-    if let Ok(rooms) = std::fs::read_dir("/tmp/kasaterm-collab") {
+    if let Ok(rooms) = std::fs::read_dir(kasa_socket::collab_root()) {
         for room in rooms.flatten() {
-            out.extend(assigned_in(&room.path()));
+            let Ok(entries) = std::fs::read_dir(room.path()) else { continue };
+            for entry in entries.flatten() {
+                if !entry.file_name().to_str().is_some_and(is_marker_file) { continue; }
+                let Ok(body) = std::fs::read_to_string(entry.path()) else { continue };
+                let owner = body.lines().nth(1).and_then(|v| v.parse::<u32>().ok());
+                if excluded_owner.is_some() && excluded_owner == owner { continue; }
+                if let Some(name) = marker_name(&body) { out.push(name); }
+            }
         }
     }
     out
@@ -1574,6 +1591,45 @@ pub fn pick_random(candidates: &[String], salt: &str) -> Option<String> {
     Some(candidates[(seed % candidates.len() as u128) as usize].clone())
 }
 
+/// Stable automatic assignment: Arona first (only if selected), then the
+/// configured roster order. Reuse a student only after every candidate is in
+/// use, choosing the least-used student with the same deterministic tie-break.
+pub fn pick_in_order(candidates: &[String], taken: &[String]) -> Option<String> {
+    let mut ordered = Vec::new();
+    for name in candidates.iter().filter(|n| n.as_str() == "아로나").chain(candidates) {
+        if !name.is_empty() && !ordered.contains(name) { ordered.push(name.clone()); }
+    }
+    least_used(&ordered, taken).into_iter().next()
+}
+
+#[cfg(test)]
+mod ordered_assignment_tests {
+    use super::*;
+
+    #[test]
+    fn arona_first_then_selected_order_skipping_every_reserved_student() {
+        let candidates = ["미도리", "모모이", "아로나", "히후미"].map(String::from);
+        let mut assigned = Vec::new();
+        for expected in ["아로나", "미도리", "모모이", "히후미"] {
+            let next = pick_in_order(&candidates, &assigned).unwrap();
+            assert_eq!(next, expected);
+            assigned.push(next);
+        }
+        assert_eq!(pick_in_order(&candidates, &assigned).as_deref(), Some("아로나"));
+        assigned.push("아로나".into());
+        assert_eq!(pick_in_order(&candidates, &assigned).as_deref(), Some("미도리"));
+    }
+
+    #[test]
+    fn selection_and_current_workers_win_over_arona_preference() {
+        let candidates = ["히후미", "미도리", "히후미"].map(String::from);
+        assert_eq!(pick_in_order(&candidates, &[]).as_deref(), Some("히후미"));
+        assert_eq!(pick_in_order(&candidates, &["히후미".into()]).as_deref(), Some("미도리"));
+        assert!(pick_in_order(&[], &[]).is_none());
+        assert_eq!(pick_in_order(&["미도리".into(), "아로나".into()], &["아로나".into()]).as_deref(), Some("미도리"));
+    }
+}
+
 /// character-<N> 마커를 원자적으로 쓴다(tmp → rename). board 가 즉시 읽는다.
 ///
 /// 둘째 줄에 이 프로세스 pid 를 남긴다 — 마커가 죽은 뒤에도 남는 문제를
@@ -1593,6 +1649,7 @@ pub fn write_marker(rslug: &str, surface_id: &str, name: &str) -> std::io::Resul
 /// (window.json 등 기존 상태 저장과 같은 config 디렉토리). 같은 세션을 --resume 등으로
 /// 이어가면 같은 캐릭터를 재사용하기 위한 저장소(거노: 재시작하면 프라나가 미도리로 둔갑).
 fn session_char_path() -> PathBuf {
+    if let Some(root) = kasa_socket::isolated_collab_root() { return root.join("session_characters.json"); }
     kasa_socket::home_dir()
         .unwrap_or_default()
         .join(".config/kasaterm/session_characters.json")

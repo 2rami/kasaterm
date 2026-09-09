@@ -1191,6 +1191,35 @@ pub fn cached_pane(label: &str, pane: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Last known native seats on other devices, including temporarily offline
+/// devices. Mirrors and duplicate SSH/discovery aliases are not extra workers.
+/// This only reads the background poller's cache; it never blocks GUI spawn.
+pub fn cached_character_assignments() -> Vec<String> {
+    let Ok(cache) = cache().lock() else { return Vec::new() };
+    let mut seen: Vec<_> = cache.iter().collect();
+    seen.sort_by_key(|(_, seen)| std::cmp::Reverse(seen.at));
+    let mut machines = HashSet::new();
+    let rows = seen.into_iter().filter(|(label, seen)| machines.insert(seen.machine_id.as_deref().unwrap_or(label).to_string()))
+        .flat_map(|(label, seen)| seen.panes.iter().map(move |pane| (seen.machine_id.as_deref().unwrap_or(label), pane)));
+    native_character_names(rows)
+}
+
+fn native_character_names<'a>(rows: impl Iterator<Item = (&'a str, &'a Value)>) -> Vec<String> {
+    let mut seats = HashSet::new();
+    let mut names = Vec::new();
+    for (machine, row) in rows {
+        if row.get("closed").and_then(Value::as_bool) == Some(true)
+            || row.get("mirror_of").is_some_and(|value| !value.is_null()) { continue; }
+        let Some(id) = row.get("surface_key").and_then(Value::as_str)
+            .or_else(|| row.get("id").and_then(Value::as_str)) else { continue };
+        if !seats.insert((machine, id)) { continue; }
+        if let Some(name) = row.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()) {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
 /// GET /machines 응답 본체. 캐시만 읽으므로 기계가 죽어 있어도 즉시다.
 pub fn snapshot() -> Vec<Value> {
     snapshot_with_uplinks(&[])
@@ -1305,6 +1334,16 @@ pub(crate) fn snapshot_with_uplinks(uplinks: &[crate::uplink::GatewayMachine]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn student_inventory_ignores_mirrors_closed_seats_and_duplicate_routes() {
+        let first = serde_json::json!({"id":"%1", "surface_key":"one", "name":"아로나"});
+        let second = serde_json::json!({"id":"%2", "surface_key":"two", "name":"미도리"});
+        let mirror = serde_json::json!({"id":"%6", "surface_key":"one", "name":"아로나", "mirror_of":"mini"});
+        let closed = serde_json::json!({"id":"%3", "name":"모모이", "closed":true});
+        assert_eq!(native_character_names([("mini", &first), ("mini", &first), ("book", &second),
+            ("book", &mirror), ("mini", &closed)].into_iter()), ["아로나", "미도리"]);
+    }
 
     #[test]
     fn confirmed_device_id_merges_guest_routes_preserving_user_metadata_and_fallback() {
