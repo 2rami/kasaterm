@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { PORT } from '../extension/port.js'
 import { HOST, HOST_ID } from '../bridge/host.mjs'
+import { bridgeRoute, needsFreshBrowserHandles } from './bridge-route.mjs'
 
 // 서버 이름은 한 곳에만. 배포판은 이 한 줄만 치환하면 로그·MCP 핸드셰이크가 함께 따라온다.
 const NAME = 'kasachrome'
@@ -31,20 +32,27 @@ const LOCAL_BRIDGE_URL = `ws://127.0.0.1:${PORT}`
 // 카사텀 설정(`~/.config/kasaterm/settings.json` 의 `kasachrome_bridge_urls`)이
 // 있으면 그것이 env 보다 앞선다 — 설정 화면의 「카사크롬이 쓰는 크롬」이 쓰는 값이라
 // 사람이 고른 것이 env 에 박힌 옛 값에 눌리면 안 된다(2026-09-09 지시). 붙을 때마다
-// 다시 읽으므로 고친 값은 다음 재연결부터 먹는다(MCP 재시작 불필요).
+// 매 도구 요청에서 다시 읽어 연결된 기기도 즉시 바꾼다(MCP 재시작 불필요).
+// 명시적으로 고른 기기는 실패해도 다른 기기로 폴백하지 않는다.
 const ENV_BRIDGE_URLS = (process.env.KASACHROME_BRIDGE_URLS || LOCAL_BRIDGE_URL)
   .split(',').map((s) => s.trim()).filter(Boolean)
 const KASATERM_SETTINGS = process.env.KASATERM_SETTINGS_FILE || join(homedir(), '.config', 'kasaterm', 'settings.json')
-function bridgeUrls() {
+let lastRoute = null
+function currentRoute() {
+  let settings = {}
   try {
-    const raw = JSON.parse(readFileSync(KASATERM_SETTINGS, 'utf8'))?.kasachrome_bridge_urls
-    const list = (Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : [])
-      .map((s) => String(s).trim()).filter(Boolean)
-    if (list.length) return list
-  } catch { /* 설정이 없거나 깨짐 — env 로 */ }
-  return ENV_BRIDGE_URLS
+    settings = JSON.parse(readFileSync(KASATERM_SETTINGS, 'utf8'))
+  } catch {
+    // Never jump to a different browser during a transient/partial settings write.
+    if (lastRoute) return lastRoute
+  }
+  lastRoute = bridgeRoute(settings, ENV_BRIDGE_URLS, LOCAL_BRIDGE_URL)
+  return lastRoute
 }
 let activeUrl = null
+let routeKey = null
+let connectionGeneration = 0
+let handlesFresh = true
 
 let ws = null
 let ready = null
@@ -66,7 +74,7 @@ try {
 
 function log(...a) { process.stderr.write(`[${NAME}] ${a.join(' ')}\n`) }
 
-function open(url = LOCAL_BRIDGE_URL) {
+function open(url = LOCAL_BRIDGE_URL, generation = connectionGeneration) {
   return new Promise((resolve, reject) => {
     const sock = new WebSocket(url)
     // 터널 청취구는 맥북이 잠든 직후에도 잠시 살아 있어(원격 sshd 소유) 접속만
@@ -77,11 +85,18 @@ function open(url = LOCAL_BRIDGE_URL) {
     sock.once('open', () => {
       clearTimeout(timer)
       sock.off('error', fail)
+      if (generation !== connectionGeneration) {
+        sock.on('error', () => {})
+        sock.close()
+        reject(new Error('BROWSER_TARGET_CHANGED: 브라우저 기기 선택이 바뀌었습니다. 다시 시도하세요.'))
+        return
+      }
       if (activeUrl !== url) { log(`bridge: ${url}${url === LOCAL_BRIDGE_URL ? ' (이 기계 크롬)' : ' (원격 크롬)'}`) }
       activeUrl = url
       sock.send(JSON.stringify({ type: 'hello', role: 'client', identity: IDENTITY }))
       ws = sock
       sock.on('message', (raw) => {
+        if (sock !== ws) return
         let msg
         try { msg = JSON.parse(raw.toString()) } catch { return }
         if (msg.type === 'status') {
@@ -108,10 +123,12 @@ function open(url = LOCAL_BRIDGE_URL) {
         else p.reject(new Error(msg.error || 'unknown error'))
       })
       sock.on('close', () => {
+        if (sock !== ws) return
         ws = null
         ready = null
         // 다음 연결은 후보 목록 맨 앞부터 다시 시도하므로 다른 기계에 붙을 수 있다.
         bridgeMachine = null
+        extensionUp = false
         for (const [, p] of pending) p.reject(new Error('BRIDGE_CLOSED: 브리지 연결이 끊겼습니다. 다시 시도하면 자동 재연결됩니다.'))
         pending.clear()
       })
@@ -125,21 +142,42 @@ function open(url = LOCAL_BRIDGE_URL) {
 // 후보가 여럿이면 앞에서부터 시도하고, 전부 실패했을 때만 **이 기계의** 다리를 띄운다
 // — 원격 다리는 남의 기계라 여기서 살릴 수 없다.
 async function connect() {
+  const route = currentRoute()
+  if (route.key !== routeKey) {
+    if (routeKey !== null) handlesFresh = false
+    routeKey = route.key
+    connectionGeneration++
+    const previous = ws
+    ws = null
+    ready = null
+    activeUrl = null
+    bridgeMachine = null
+    extensionUp = false
+    for (const [, request] of pending) request.reject(new Error('BROWSER_TARGET_CHANGED: 브라우저 기기 선택이 바뀌었습니다. 탭 목록을 새로 읽으세요.'))
+    pending.clear()
+    try { previous?.close() } catch {}
+  }
   if (ws && ws.readyState === 1) return ws
   if (ready) return ready
-  ready = (async () => {
-    for (const url of bridgeUrls()) {
-      try { return await open(url) } catch { /* 다음 후보로 */ }
+  const generation = connectionGeneration
+  const attempt = (async () => {
+    for (const url of route.urls) {
+      if (generation !== connectionGeneration) throw new Error('BROWSER_TARGET_CHANGED: 다시 시도하세요.')
+      try { return await open(url, generation) } catch { /* 다음 후보로 */ }
     }
+    if (generation !== connectionGeneration) throw new Error('BROWSER_TARGET_CHANGED: 다시 시도하세요.')
+    if (!route.allowLocalStart) throw new Error(`BROWSER_TARGET_UNREACHABLE: 선택한 기기(${route.selected})의 크롬 다리에 닿지 않습니다. 그 기기의 연결을 확인하세요. 다른 기기에서는 실행하지 않았습니다.`)
     log('bridge not running — starting it')
     spawn(process.execPath, [BRIDGE], { detached: true, stdio: 'ignore' }).unref()
     for (let i = 0; i < 30; i++) {
       await new Promise((r) => setTimeout(r, 200))
-      try { return await open(LOCAL_BRIDGE_URL) } catch { /* 아직 리스닝 전 */ }
+      if (generation !== connectionGeneration) throw new Error('BROWSER_TARGET_CHANGED: 다시 시도하세요.')
+      try { return await open(LOCAL_BRIDGE_URL, generation) } catch { /* 아직 리스닝 전 */ }
     }
     throw new Error('BRIDGE_UNREACHABLE: 브리지를 띄우지 못했습니다. `node bridge/server.mjs` 를 직접 실행해 로그를 확인하세요.')
   })()
-  try { return await ready } finally { if (!ws) ready = null }
+  ready = attempt
+  try { return await attempt } finally { if (ready === attempt && !ws) ready = null }
 }
 
 async function waitForExtension(ms) {
@@ -177,10 +215,17 @@ async function ensureBrowser() {
 
 async function call(tool, args = {}, timeoutMs = 30000) {
   const sock = await connect()
+  if (!handlesFresh && needsFreshBrowserHandles(args, tool)) {
+    throw new Error('BROWSER_TARGET_CHANGED: 기기가 바뀌어 이전 탭·창 번호를 사용할 수 없습니다. browser_list_tabs로 새 기기의 탭을 읽고 다시 선택하세요.')
+  }
   await ensureBrowser()
+  if (sock !== ws) throw new Error('BROWSER_TARGET_CHANGED: 다시 시도하세요.')
   const id = nextId++
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject })
+    pending.set(id, { resolve: (value) => {
+      if (tool === 'list_tabs') handlesFresh = true
+      resolve(value)
+    }, reject })
     sock.send(JSON.stringify({ type: 'call', id, tool, args, timeoutMs }))
     setTimeout(() => {
       if (pending.has(id)) { pending.delete(id); reject(new Error(`TIMEOUT: ${tool}`)) }
@@ -192,6 +237,7 @@ async function call(tool, args = {}, timeoutMs = 30000) {
 async function ask(type, extra = {}, timeoutMs = 5000) {
   const sock = await connect()
   await ensureBrowser()
+  if (sock !== ws) throw new Error('BROWSER_TARGET_CHANGED: 다시 시도하세요.')
   const id = nextId++
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject })
@@ -222,7 +268,11 @@ function where() {
           note: '저쪽 브리지가 옛 코드라 기계 이름을 안 보냅니다 — 그 기계의 카사크롬을 갱신하세요.' }
       // 이 기계의 브리지라면 답을 이미 아는 셈이다.
       : { host: HOST, hostId: HOST_ID, bridgeUrl: activeUrl, remote: false }
-  return { chrome, session: { host: HOST, hostId: HOST_ID } }
+  return {
+    chrome: { ...chrome, selectedMachine: lastRoute?.selected ?? null, connected: !!ws && ws.readyState === 1,
+      ...(!activeUrl ? { host: null, hostId: null } : {}) },
+    session: { host: HOST, hostId: HOST_ID },
+  }
 }
 
 const server = new McpServer({ name: NAME, version: '0.1.0' })
@@ -471,5 +521,6 @@ const bye = () => { try { ws?.close() } catch {} process.exit(0) }
 process.stdin.on('end', bye)
 process.stdin.on('close', bye)
 
-await connect()
+// An offline selected device must not kill the MCP server; the next tool can retry.
+try { await connect() } catch (error) { log(error.message) }
 log(`ready (bridge ${activeUrl})`)
