@@ -190,9 +190,10 @@ pub fn remote_meta(local_id: &str) -> Option<(String, String)> {
 }
 
 /// 이 pane 이 원격 링크인가.
-/// 호스트가 거울로 밀어 준 `open-url` 을 받을 GUI 쪽 손잡이 — (로컬 pane id, URL).
+/// 호스트가 거울로 밀어 준 `open-url` 을 받을 GUI 쪽 손잡이 — (로컬 pane id, URL,
+/// mode). mode 는 `web`(내장 웹 탭) / `chrome`(브라우저) — docs/browse-target.md.
 /// kasa-mcp 는 창을 모르니 앱이 시작할 때 EventLoopProxy 를 물려 등록한다.
-type OpenUrlSink = Box<dyn Fn(&str, &str) + Send + Sync>;
+type OpenUrlSink = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
 
 fn open_url_sink() -> &'static std::sync::OnceLock<OpenUrlSink> {
     static S: std::sync::OnceLock<OpenUrlSink> = std::sync::OnceLock::new();
@@ -203,9 +204,9 @@ pub fn set_open_url_sink(f: OpenUrlSink) {
     let _ = open_url_sink().set(f);
 }
 
-fn fire_open_url(local: &str, url: &str) {
+fn fire_open_url(local: &str, url: &str, mode: &str) {
     match open_url_sink().get() {
-        Some(f) => f(local, url),
+        Some(f) => f(local, url, mode),
         None => eprintln!("[remote] open-url 받았지만 받을 창이 없어요: {url}"),
     }
 }
@@ -678,7 +679,8 @@ async fn manager(
                                     // 되돌리는 길(http.rs push_viewer_control).
                                     Some("open-url") => {
                                         if let Some(u) = v.get("url").and_then(|x| x.as_str()) {
-                                            fire_open_url(&local, u);
+                                            let mode = v.get("mode").and_then(|m| m.as_str()).unwrap_or("chrome");
+                                            fire_open_url(&local, u, mode);
                                         }
                                     }
                                     Some("source-closed") => {

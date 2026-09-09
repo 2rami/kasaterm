@@ -1065,7 +1065,7 @@ fn print_help() {
     );
     eprintln!("  kasaterm-cli window-new                    # 새 창
   kasaterm-cli open  <url> [%surface]        # URL 을 사람이 보는 브라우저로 — 이 pane 을 거울로 보는 기계가 있으면 그쪽 크롬, 없으면 이 기계 기본 브라우저
-  kasaterm-cli web   <url> [%surface]        # URL 을 그 pane 옆 웹(브라우저) pane 으로 (기본: 이 pane 옆)
+  kasaterm-cli web   <url> [%surface] [--tab]  # URL 을 그 pane 옆 웹(브라우저) pane 으로 (기본: 이 pane 옆). --tab 은 그 pane 의 탭으로. 하단바 「모바일」에서 폰을 골랐으면 그 폰 크기로 그린다
   kasaterm-cli web-text  [%surface]          # 웹 pane 본문 읽기 (innerText). %surface 생략 = 웹 pane 이 하나일 때
   kasaterm-cli web-eval  '<js>' [%surface]   # 웹 pane 에서 JS 실행, 결과를 JSON 으로 (클릭·입력·검사 전부 이것으로)
   kasaterm-cli web-shot  </abs/x.png> [%surface]  # 웹 pane 스크린샷을 파일로 (창에 이미지 안 실림)
@@ -1470,7 +1470,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         "web" => {
             let url = args
                 .iter()
-                .find(|a| !a.starts_with('%'))
+                .find(|a| !a.starts_with('%') && !a.starts_with("--"))
                 .ok_or_else(|| anyhow!("web needs a URL (e.g. web localhost:5173)"))?;
             let target = args
                 .iter()
@@ -1481,9 +1481,12 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                         .ok()
                         .filter(|s| !s.is_empty())
                 });
+            // `--tab` — 옆에 쪼개지 않고 그 pane 의 탭으로. 거울로 보는 사람이
+            // split 하나를 더 볼 필요가 없다(docs/device-viewer-followups.md).
+            let kind = if args.iter().any(|a| a == "--tab") { "web-tab" } else { "web" };
             (
                 "surface.open_preview",
-                json!({ "kind": "web", "path": url, "target": target }),
+                json!({ "kind": kind, "path": url, "target": target }),
             )
         }
         // 웹 pane 조종 — 열어 둔 내장 브라우저를 확인 도구로 쓴다. %surface 를

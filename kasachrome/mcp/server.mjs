@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { PORT } from '../extension/port.js'
 import { HOST, HOST_ID } from '../bridge/host.mjs'
+import { browseEmulation } from './browse-emulation.mjs'
 import { bridgeRoute, needsFreshBrowserHandles } from './bridge-route.mjs'
 import { resolveBrowserArgs } from './localhost-route.mjs'
 
@@ -39,10 +40,12 @@ const ENV_BRIDGE_URLS = (process.env.KASACHROME_BRIDGE_URLS || LOCAL_BRIDGE_URL)
   .split(',').map((s) => s.trim()).filter(Boolean)
 const KASATERM_SETTINGS = process.env.KASATERM_SETTINGS_FILE || join(homedir(), '.config', 'kasaterm', 'settings.json')
 let lastRoute = null
+let lastSettings = {}
 function currentRoute() {
   let settings = {}
   try {
     settings = JSON.parse(readFileSync(KASATERM_SETTINGS, 'utf8'))
+    lastSettings = settings
   } catch {
     // Never jump to a different browser during a transient/partial settings write.
     if (lastRoute) return lastRoute
@@ -319,15 +322,29 @@ tool('browser_select_profile', 'Point this session\'s browser tools at a specifi
 tool('browser_list_tabs', 'List all open tabs in the real Chrome profile (with tabId, url, title, active flag).', { windowId: z.number().int().optional() },
   async (a) => text(await call('list_tabs', a)))
 
+// 하단바 「모바일」에서 폰을 골랐으면 새 탭을 그 폰 크기로 — browse-emulation.mjs.
+// 실패해도 탭은 이미 열렸으니 결과에 사유만 얹는다.
+async function emulateForBrowseDevice(result) {
+  currentRoute()
+  const emu = browseEmulation(lastSettings)
+  if (!emu || !result?.tabId) return result
+  try {
+    result.emulation = { device: lastSettings.browse_device, ...(await call('emulate_device', { tabId: result.tabId, ...emu }, 20000)) }
+  } catch (e) {
+    result.emulationError = String(e?.message || e)
+  }
+  return result
+}
+
 tool('browser_new_tab', 'Open a new tab and wait for it to finish loading. This is the DEFAULT way to open a page — prefer it over browser_new_window every time, unless you need a specific window width and height. Opens in the BACKGROUND by default so the human keeps whatever they were looking at — the tab is fully operable while hidden. Pass active:true only when the page must actually be visible (animation, video, anything driven by rAF).\n\nThe tab is placed in YOUR OWN tab group (named and colored after you) so it never gets mixed in among the human\'s tabs — the returned groupId is that group. Tabs you open are yours to clean up: close each one with browser_close_tab the moment it has served its purpose — a page you already read is clutter sitting in the human\'s tab strip, and tabs pile up fast when you keep them "just in case". The one exception is the END of the task: leave exactly ONE tab open, the page that shows what you did — the layout you fixed, the flow that now works, the page the human asked about — so they can look at the result without making you run it again. Close every other tab you opened. If the task produced nothing worth looking at (you only read text, measured something, checked a value), close them all. Never close a tab you did not open.', { url: z.string().optional(), active: z.boolean().optional(), windowId: z.number().int().optional() },
-  async (a) => text(await call('new_tab', a, 40000)))
+  async (a) => text(await emulateForBrowseDevice(await call('new_tab', a, 40000))))
 
 tool('browser_new_window', 'Open a SEPARATE Chrome window. This is a LAST RESORT, not your default — use browser_new_tab for essentially every page you open. A background tab is invisible to the human; a window is not. Even opened unfocused it appears on their screen, and one per pane means four panes put four windows in front of someone trying to work. Reach for a window in exactly two cases: you need a specific width+height that a tab cannot give you, or the human asked for a window. For a phone-sized layout do NOT use this at all — use browser_emulate_device, which Chrome cannot clamp the way it clamps window width.\n\nIf an agent window already exists — no matter which pane opened it — this opens a tab there instead and answers with reused:true (resizing that window if you asked for a size). Agent windows are shared on purpose: the alternative is a window per pane. Pass reuse:false only when you genuinely need two windows side by side. Opens UNFOCUSED by default; pass focused:true only when the page must be visible to run (animation, media, rAF) — and if what you actually need is the human to type something, use browser_ask_human instead. Pass tabId to tear an existing tab out into its own window (that window is not registered as an agent window, and the torn-out tab keeps whatever group it had since it may be the human\'s). Windows you open are yours to clean up — close them with browser_close_window as soon as you are done, and before you finish the task. The end-of-task rule from browser_new_tab applies inside the window too: close the tabs you are finished with, and leave open the one page worth looking at. Close the window itself only when nothing in it is worth keeping.', {
   url: z.string().optional(), tabId: z.number().int().optional(),
   focused: z.boolean().optional(), incognito: z.boolean().optional(),
   width: z.number().int().optional(), height: z.number().int().optional(),
   reuse: z.boolean().optional(),
-}, async (a) => text(await call('new_window', a, 40000)))
+}, async (a) => text(await emulateForBrowseDevice(await call('new_window', a, 40000))))
 
 tool('browser_close_window', 'Close a window and every tab in it. Use it only on windows you opened yourself. Agent windows are shared between panes, so this refuses with WINDOW_SHARED when the window still holds tabs another agent is using — close your own tabs with browser_close_tab instead, or pass force:true if you really do mean to close theirs too.', { windowId: z.number().int(), force: z.boolean().optional() },
   async (a) => text(await call('close_window', a)))

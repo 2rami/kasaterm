@@ -1983,10 +1983,11 @@ impl Backend for PtyBackend {
     fn open_preview(&self, kind: &str, path: &str, target: Option<&str>) -> Result<()> {
         // kind=web 은 파일이 아니라 URL — open_file 확장자 분기로 못 가고,
         // winit 창 생성이 필요해 별도 이벤트로 GUI 에 위임한다.
-        if kind == "web" {
+        if kind == "web" || kind == "web-tab" {
             let _ = self.proxy.send_event(UserEvent::SocketOpenWeb(
                 path.to_string(),
                 target.map(|s| s.to_string()),
+                kind == "web-tab",
             ));
             return Ok(());
         }
@@ -2219,6 +2220,19 @@ impl Backend for PtyBackend {
             anyhow::ensure!(local || !chosen.is_empty(), "브라우저 기기가 지정되지 않았어요");
             save_browser_target(&chosen)?;
             return Ok(serde_json::json!({"ok": true, "machine": chosen}));
+        }
+        // 브라우징 대상(docs/browse-target.md) — 파일 두 키. 폰 설정 화면과 하단바가
+        // 같은 길로 온다. 기계를 고르면 KasaChrome 도 그 기계로 맞춘다.
+        if action == "browse-device" {
+            let wanted = id.unwrap_or("auto");
+            let chosen = save_browse_device(wanted)?;
+            return Ok(serde_json::json!({"ok": true, "device": chosen}));
+        }
+        if action == "browse-open" {
+            let mode = kasa_mcp::browse::Open::parse(id.unwrap_or(""))
+                .ok_or_else(|| anyhow::anyhow!("web 또는 chrome 이어야 해요"))?;
+            write_settings_patch_atomic(&[("browse_open", serde_json::json!(mode.as_str()))])?;
+            return Ok(serde_json::json!({"ok": true, "open": mode.as_str()}));
         }
         // 언어는 파일 한 줄이고 GUI 상태가 아니다 — 비울 캐시도, 다시 그릴 네이티브
         // 화면도 없다(설정 화면 문구는 웹이 쥔다). 그래서 GUI 왕복을 타지 않는다.
@@ -4160,6 +4174,40 @@ mod browser_target_identity_tests {
         assert!(browser_target_is_local("Mac", None, "Mac", Some("this")));
         assert!(!browser_target_is_local("", None, "", None));
     }
+}
+
+/// 브라우징 기기 저장(docs/browse-target.md). `auto` 는 키를 지운다. 기계면
+/// `kasachrome_machine` 도 같이 맞추고(학생 크롬과 사람 페이지가 같은 기계),
+/// 폰이면 그 폰 화면을 `browse_viewport` 에 실어 KasaChrome MCP 가 흉내 내게 한다.
+/// 돌려주는 값은 저장된 id.
+pub(crate) fn save_browse_device(wanted: &str) -> anyhow::Result<String> {
+    use kasa_mcp::browse::Device;
+    let device = Device::from_id(wanted)
+        .ok_or_else(|| anyhow::anyhow!("모르는 기기예요: {wanted}"))?;
+    let id = device.id();
+    let viewport = match &device {
+        Device::Phone(name) => {
+            let s = kasa_mcp::browse::phone_screen(name)
+                .unwrap_or_else(kasa_mcp::browse::default_phone_screen);
+            serde_json::json!({ "width": s.width, "height": s.height, "dpr": s.dpr, "mobile": true })
+        }
+        _ => serde_json::Value::Null,
+    };
+    let device_value = if device == Device::Auto {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!(id)
+    };
+    write_settings_patch_atomic(&[
+        ("browse_device", device_value),
+        ("browse_viewport", viewport),
+    ])?;
+    if let Device::Machine(label) = &device {
+        save_browser_target(label)?;
+    } else if device == Device::ThisMachine {
+        save_browser_target("")?;
+    }
+    Ok(id)
 }
 
 pub(crate) fn save_browser_target(machine: &str) -> std::io::Result<()> {

@@ -967,8 +967,14 @@ async fn open_url_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let url = params.get("url").cloned().unwrap_or_default();
+    // `local=1` — 다른 기계가 되돌려 보낸 것: 다시 돌리지 말고 여기서 연다.
+    // `web=1` 이 붙으면 브라우저 대신 내장 웹 탭으로(docs/browse-target.md).
     let pane = if params.get("local").is_some_and(|v| v == "1") {
-        Some("__local_browser__")
+        if params.get("web").is_some_and(|v| v == "1") {
+            Some("__local_web__")
+        } else {
+            Some("__local_browser__")
+        }
     } else { params.get("pane").map(|s| s.as_str()).filter(|s| !s.is_empty()) };
     let body = match backend.open_url(&url, pane) {
         Ok(()) => serde_json::json!({ "ok": true }),
@@ -5966,6 +5972,116 @@ async fn mobile_me(req: axum::extract::Request) -> axum::response::Response {
     .into_response()
 }
 
+/// 이 요청이 어느 폰 사용자 것인가 — 유저 주소(`MobileAuth`)로 왔으면 그 사람,
+/// 로컬(개발 프록시·시뮬레이터)이면 주인. `mobile_me` 와 같은 규칙.
+fn mobile_user_of(req: &axum::extract::Request) -> Option<crate::mobile::MobileUser> {
+    req.extensions()
+        .get::<MobileAuth>()
+        .map(|a| a.0.clone())
+        .or_else(|| (!is_remote_peer(req)).then(crate::mobile::owner).flatten())
+}
+
+/// `POST /mobile/device` — 폰이 제 화면 크기(논리 px)·배율·기종을 알린다.
+/// 내장 웹 pane 과 KasaChrome 이 그 폰을 흉내 낼 때 쓴다(docs/browse-target.md).
+async fn mobile_device_post(req: axum::extract::Request) -> axum::response::Response {
+    let Some(user) = mobile_user_of(&req) else {
+        return (axum::http::StatusCode::FORBIDDEN, "phone address required").into_response();
+    };
+    let body = match axum::body::to_bytes(req.into_body(), 64 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return (axum::http::StatusCode::BAD_REQUEST, "body").into_response(),
+    };
+    let screen: crate::browse::PhoneScreen = match serde_json::from_slice(&body) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": format!("화면 정보를 못 읽었어요: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    if screen.width == 0 || screen.height == 0 || screen.width > 10_000 || screen.height > 10_000 {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "width/height 가 이상해요" })),
+        )
+            .into_response();
+    }
+    match crate::browse::register_phone(&user.name, screen) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "id": format!("phone:{}", user.name) })).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /browse/devices` — 브라우징 대상 후보와 현재 선택(docs/browse-target.md).
+async fn browse_devices_get() -> axum::response::Response {
+    Json(crate::browse::devices_json()).into_response()
+}
+
+/// `GET /mobile/ws` — 폰 제어 채널. 앱이 앞에 있는 동안 붙어 있고, 호스트는
+/// 「이 폰으로 페이지 열어라」를 여기로 민다. 폰의 `opened` 응답은 앱 토스트로.
+async fn mobile_ws_handler(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    if !ws_origin_ok(&headers) {
+        return (axum::http::StatusCode::FORBIDDEN, "cross-origin websocket refused").into_response();
+    }
+    let Some(user) = mobile_user_of(&req) else {
+        return (axum::http::StatusCode::FORBIDDEN, "phone address required").into_response();
+    };
+    ws.on_upgrade(move |socket| mobile_ws_run(socket, user.name)).into_response()
+}
+
+async fn mobile_ws_run(socket: WebSocket, name: String) {
+    use futures_util::{SinkExt, StreamExt};
+    let (mut tx, mut rx) = socket.split();
+    let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let token = crate::browse::register_phone_ctl(&name, ctl_tx);
+    let hello = serde_json::json!({ "t": "hello", "name": name, "id": format!("phone:{name}") });
+    if tx.send(Message::Text(hello.to_string().into())).await.is_err() {
+        crate::browse::unregister_phone_ctl(&name, token);
+        return;
+    }
+    loop {
+        tokio::select! {
+            out = ctl_rx.recv() => {
+                let Some(text) = out else { break };
+                if tx.send(Message::Text(text.into())).await.is_err() { break; }
+            }
+            inbound = rx.next() => {
+                match inbound {
+                    Some(Ok(Message::Text(t))) => handle_phone_control(&t),
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+        }
+    }
+    crate::browse::unregister_phone_ctl(&name, token);
+}
+
+/// 폰→호스트 제어 한 줄. `opened` 만 뜻이 있고 나머지(`ping`)는 버린다.
+fn handle_phone_control(text: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { return };
+    if v.get("t").and_then(|t| t.as_str()) != Some("opened") {
+        return;
+    }
+    let req = v
+        .get("req")
+        .and_then(|r| r.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| r.as_u64()))
+        .unwrap_or(0);
+    let ok = v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
+    let error = v.get("error").and_then(|e| e.as_str()).map(str::to_string);
+    crate::browse::fire_open_ack(req, ok, error);
+}
+
 fn mobile_query_name(req: &axum::extract::Request) -> Option<String> {
     axum::extract::Query::<std::collections::HashMap<String, String>>::try_from_uri(req.uri())
         .ok()
@@ -7351,6 +7467,9 @@ pub fn spawn_http_server_opts(
                     .route("/hub", get(hub_page))
                     .route("/app", get(app_page))
                     .route("/mobile/me", get(mobile_me))
+                    .route("/mobile/device", post(mobile_device_post))
+                    .route("/mobile/ws", get(mobile_ws_handler))
+                    .route("/browse/devices", get(browse_devices_get))
                     .route(
                         "/mobile/users",
                         get(mobile_users_get)

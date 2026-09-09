@@ -54,6 +54,32 @@ pub async fn open_selected(url: &str, selected: &str) -> Result<()> {
     Ok(())
 }
 
+/// 브라우징 대상으로 고른 기계에 연다(docs/browse-target.md). `open_selected` 와
+/// 달리 KasaChrome 선택(`kasachrome_machine`)과 같아야 한다는 검사가 없다 —
+/// 사람이 볼 페이지의 기기와 학생 확인용 크롬은 따로 갈 수 있다. `web` 이면
+/// 받는 쪽이 브라우저 대신 내장 웹 탭으로 연다.
+pub async fn open_on_machine(url: &str, label: &str, web: bool) -> Result<()> {
+    anyhow::ensure!(!label.is_empty(), "remote browser target required");
+    let resolved = resolve_url(url, label).await?;
+    let base = target_base(label)?;
+    let mut query = vec![("url", resolved.as_str()), ("local", "1")];
+    if web {
+        query.push(("web", "1"));
+    }
+    let mut request = client()?.get(format!("{}/open-url", base.trim_end_matches('/')))
+        .query(&query);
+    if let Some(token) = crate::remote::connection_auth_token(&base) {
+        request = request.header("x-kasa-token", token);
+    }
+    response_json(request.send().await?).await?;
+    Ok(())
+}
+
+pub fn open_on_machine_blocking(url: &str, label: &str, web: bool) -> Result<()> {
+    tokio::runtime::Builder::new_current_thread().enable_all().build()?
+        .block_on(open_on_machine(url, label, web))
+}
+
 pub fn open_selected_blocking(url: &str, selected: &str) -> Result<()> {
     tokio::runtime::Builder::new_current_thread().enable_all().build()?
         .block_on(open_selected(url, selected))

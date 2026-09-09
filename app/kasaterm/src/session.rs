@@ -6132,6 +6132,14 @@ impl App {
                                 .iter()
                                 .skip(1)
                                 .filter_map(|t| {
+                                    // 터미널 pane 안의 웹 탭(`kasaterm-cli web --tab`·
+                                    // 브라우징 「내장 웹」) — PTY 가 없으니 주소만 남긴다.
+                                    if let Some(w) = t.web() {
+                                        return Some(serde_json::json!({
+                                            "web_url": w.url,
+                                            "title": t.title.as_deref().filter(|_| t.title_pinned),
+                                        }));
+                                    }
                                     let tab_pid = t.pid.as_deref()?;
                                     let mut trec =
                                         pty.get(tab_pid).map(|s| socket::pane_record(s))?;
@@ -6750,6 +6758,29 @@ impl App {
         rows: u16,
         tab_of: Option<&str>,
     ) -> Option<String> {
+        // 터미널 pane 안의 웹 탭 — pane 번호를 안 쓴다. 바깥 pane 에 탭만 붙이고
+        // 자식 창은 pending_web_hosts 로(아래 leaf 웹 갈래와 같은 이유).
+        if let (Some(outer), Some(url)) = (tab_of, rec.get("web_url").and_then(|v| v.as_str())) {
+            let host_id = self.alloc_web_host_id();
+            let mut tab = crate::PaneTab::default();
+            tab.content = crate::PaneContent::Web(crate::WebPane { url: url.to_string(), host_id });
+            tab.title = Some(
+                rec.get("title")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::webpane::short_label(url)),
+            );
+            tab.title_pinned = true;
+            {
+                let mut ws = self.ws.lock().unwrap();
+                let pane = ws.panes.get_mut(outer)?;
+                pane.tabs.push(tab);
+                pane.dirty = true;
+            }
+            self.pending_web_hosts.push((host_id, url.to_string()));
+            return Some(outer.to_string());
+        }
         let saved = rec.get("pane_id").and_then(|v| v.as_str());
         // 저장된 번호를 되살릴 수 있는지는 alloc 과 **같은 기준**으로 본다 — `self.pty`
         // 만 보면 이미 복원된 미리보기 pane 의 번호를 빼앗는다.

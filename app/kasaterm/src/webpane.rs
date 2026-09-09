@@ -42,7 +42,15 @@ pub(crate) struct WebHost {
     /// 초기화 스크립트가 증명한 실제 포인터/키 입력. popup은 이 짧은 창 안에서만
     /// 받아 배경 페이지의 programmatic window.open을 막는다.
     trusted_at: Option<std::time::Instant>,
+    /// 흉내 내는 기기의 CSS 뷰포트(폭, 높이). 하단바 「모바일」에서 폰을 골랐을
+    /// 때 — pane 안에 그 크기의 창을 두고 pageZoom 으로 맞춘다(docs/browse-target.md).
+    device: Option<(f64, f64)>,
+    /// 기기 창을 pane 에 담느라 곱한 배율(≤1). 사용자 줌(`zoom_level`)과 곱해 적용.
+    device_fit: f64,
 }
+
+/// 폰 흉내 UA — 서버가 UA 로 모바일 화면을 가르는 사이트가 폰 판을 내주게.
+const MOBILE_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
 impl WebHost {
     /// 웹뷰가 지금 보고 있는 주소. **없을 수 있다** — 첫 네비게이션이 commit
@@ -335,6 +343,7 @@ impl App {
         event_loop: &ActiveEventLoop,
         url: &str,
         host_id: u64,
+        screen: Option<&kasa_mcp::browse::PhoneScreen>,
     ) -> bool {
         let Some(main) = self.window.clone() else {
             eprintln!("[webpane] main window missing");
@@ -360,9 +369,13 @@ impl App {
         let capability = web_capability();
         let ipc_prefix = format!("chord:{capability}:");
         let init_script = WEB_CHORD_JS.replace("__KASATERM_WEB_CAPABILITY__", &capability);
-        let builder = wry::WebViewBuilder::new()
+        let mut builder = wry::WebViewBuilder::new()
             .with_url(url.to_string())
-            .with_devtools(true)
+            .with_devtools(true);
+        if screen.is_some() {
+            builder = builder.with_user_agent(MOBILE_UA);
+        }
+        let builder = builder
             .with_visible(false)
             .with_initialization_script(init_script)
             .with_ipc_handler(move |req: wry::http::Request<String>| {
@@ -459,6 +472,8 @@ impl App {
                 page_title: None,
                 zoom_level: 1.0,
                 trusted_at: None,
+                device: screen.map(|s| (s.width.max(1) as f64, s.height.max(1) as f64)),
+                device_fit: 1.0,
             },
         );
         true
@@ -472,7 +487,13 @@ impl App {
     /// 기계의 기본 브라우저. 본진(맥미니) 학생이 연 페이지를 화면공유로 보러 가지
     /// 않게 하는 길이다(2026-09-02 지시). 요청자가 탭 pid 면 outer pane 으로
     /// 접는다 — 거울 등록부는 pane id 로 산다.
-    pub(crate) fn open_url_for_pane(&mut self, raw_url: &str, target: Option<&str>) {
+    pub(crate) fn open_url_for_pane(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        raw_url: &str,
+        target: Option<&str>,
+    ) {
+        use kasa_mcp::browse::{Device, Open};
         let Some(url) = normalize_web_url(raw_url) else {
             return;
         };
@@ -481,21 +502,36 @@ impl App {
             self.open_url_here(&url, None);
             return;
         }
+        if target == Some("__local_web__") {
+            self.open_web_pane(event_loop, &url, None, true);
+            return;
+        }
+        // 하단바 「모바일」의 선택(docs/browse-target.md): 어느 기기의 무엇으로.
+        let open = kasa_mcp::browse::open_mode();
+        match kasa_mcp::browse::device() {
+            Device::Phone(name) => {
+                self.open_on_phone(&name, &url, open);
+                return;
+            }
+            Device::ThisMachine => {
+                self.open_here_by_mode(event_loop, &url, open, target);
+                return;
+            }
+            Device::Machine(label) => {
+                self.open_on_machine(&label, &url, open);
+                return;
+            }
+            Device::Auto => {}
+        }
+        // 자동 — 옛 규칙 그대로: KasaChrome 기계가 있으면 그쪽, 거울로 보는
+        // 사람이 있으면 그 기계, 없으면 여기.
         let selected = kasa_mcp::machines::kasachrome_machine();
         if !selected.is_empty() {
-            let proxy = self.proxy.clone();
-            std::thread::spawn(move || {
-                let result = kasa_mcp::browser_target::open_selected_blocking(&url, &selected);
-                let message = match result {
-                    Ok(()) => format!("{selected} 브라우저로 열었어요"),
-                    Err(error) => format!("{selected} 브라우저로 열지 못했어요: {error}"),
-                };
-                let _ = proxy.send_event(UserEvent::SocketToast(message));
-            });
+            self.open_on_machine(&selected, &url, open);
             return;
         }
         if socket::read_settings().get("kasachrome_machine").is_some() {
-            self.open_url_here(&url, None);
+            self.open_here_by_mode(event_loop, &url, open, target);
             return;
         }
         let outer = target.map(|t| {
@@ -505,21 +541,105 @@ impl App {
                 .outer_for_pty(t)
                 .unwrap_or_else(|| t.to_string())
         });
-        let msg = serde_json::json!({ "t": "open-url", "url": url }).to_string();
+        let msg = serde_json::json!({ "t": "open-url", "url": url, "mode": open.as_str() })
+            .to_string();
         let sent = outer
             .as_deref()
             .map_or(0, |p| kasa_mcp::push_viewer_control(p, &msg));
         if sent > 0 {
-            self.collab.toast = Some((
-                "보고 있는 기계의 브라우저로 열었어요".to_string(),
-                std::time::Instant::now(),
-            ));
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
+            let what = match open {
+                Open::Web => "보고 있는 기계의 웹 탭으로 열었어요",
+                Open::Chrome => "보고 있는 기계의 브라우저로 열었어요",
+            };
+            self.set_toast(what.to_string());
             return;
         }
-        self.open_url_here(&url, None);
+        self.open_here_by_mode(event_loop, &url, open, target);
+    }
+
+    /// 이 기계에서 — `web` 이면 요청 pane 의 웹 탭, 아니면 기본 브라우저.
+    pub(crate) fn open_here_by_mode(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        url: &str,
+        open: kasa_mcp::browse::Open,
+        target: Option<&str>,
+    ) {
+        match open {
+            kasa_mcp::browse::Open::Web => self.open_web_pane(event_loop, url, target, true),
+            kasa_mcp::browse::Open::Chrome => self.open_url_here(url, None),
+        }
+    }
+
+    /// 명부의 기계로 — 그쪽 `/open-url?local=1[&web=1]`. 응답 `ok` 가 곧 그
+    /// 기계에서 열렸다는 확인이다.
+    fn open_on_machine(&mut self, label: &str, url: &str, open: kasa_mcp::browse::Open) {
+        let proxy = self.proxy.clone();
+        let label = label.to_string();
+        let url = url.to_string();
+        let web = open == kasa_mcp::browse::Open::Web;
+        std::thread::spawn(move || {
+            let result = kasa_mcp::browser_target::open_on_machine_blocking(&url, &label, web);
+            let what = if web { "웹 탭" } else { "브라우저" };
+            let message = match result {
+                Ok(()) => format!("{label} {what}으로 열었어요"),
+                Err(error) => format!("{label} {what}으로 열지 못했어요: {error}"),
+            };
+            let _ = proxy.send_event(UserEvent::SocketToast(message));
+        });
+    }
+
+    /// 폰으로 — 제어 소켓이 붙어 있으면 바로(응답을 기다린다), 아니면 푸시 알림.
+    fn open_on_phone(&mut self, name: &str, url: &str, open: kasa_mcp::browse::Open) {
+        use kasa_mcp::browse::PhoneRoute;
+        let (req, route) = kasa_mcp::browse::open_on_phone(name, url, open);
+        let message = match route {
+            PhoneRoute::Socket => {
+                self.statusbar.phone_opens.push((req, std::time::Instant::now(), name.to_string()));
+                format!("{name} 폰으로 보냈어요…")
+            }
+            PhoneRoute::Push => format!("{name} 폰에 알림으로 보냈어요 — 누르면 열려요"),
+            PhoneRoute::Unreachable => {
+                format!("{name} 폰이 연결돼 있지 않아요 — 폰에서 앱을 열어 두세요")
+            }
+        };
+        self.set_toast(message);
+    }
+
+    /// 폰의 `opened` 응답 — 토스트로 결과를 알리고 대기 목록에서 뺀다.
+    pub(crate) fn phone_open_acked(&mut self, req: u64, ok: bool, error: Option<String>) {
+        let Some(pos) = self.statusbar.phone_opens.iter().position(|(r, _, _)| *r == req) else {
+            return;
+        };
+        let (_, _, name) = self.statusbar.phone_opens.remove(pos);
+        let message = if ok {
+            format!("{name} 폰에서 열렸어요")
+        } else {
+            format!("{name} 폰에서 못 열었어요: {}", error.unwrap_or_else(|| "이유 없음".into()))
+        };
+        self.set_toast(message);
+    }
+
+    /// 응답이 안 온 폰 열기 — 몇 초 지나면 「응답 없음」으로 알린다(about_to_wait).
+    pub(crate) fn expire_phone_opens(&mut self) {
+        if self.statusbar.phone_opens.is_empty() {
+            return;
+        }
+        let limit = std::time::Duration::from_secs(4);
+        let expired: Vec<String> = self
+            .statusbar
+            .phone_opens
+            .iter()
+            .filter(|(_, at, _)| at.elapsed() > limit)
+            .map(|(_, _, n)| n.clone())
+            .collect();
+        if expired.is_empty() {
+            return;
+        }
+        self.statusbar.phone_opens.retain(|(_, at, _)| at.elapsed() <= limit);
+        for name in expired {
+            self.set_toast(format!("{name} 폰이 응답하지 않아요 — 앱이 앞에 있는지 봐 주세요"));
+        }
     }
 
     /// 이 기계의 기본 브라우저로 연다. `from` 은 원격 호스트가 되돌려 보낸 경우 그
@@ -559,6 +679,7 @@ impl App {
         event_loop: &ActiveEventLoop,
         raw_url: &str,
         target: Option<&str>,
+        as_tab: bool,
     ) {
         if self.tmux.is_some() {
             return;
@@ -616,17 +737,52 @@ impl App {
         // pid 일 수도(CLI 의 $KASATERM_PANE_ID), outer pane id 일 수도(팝업 —
         // 웹 pane 은 PTY 가 없어 outer_for_pty 로는 못 찾는다) 있다.
         let host_id = self.alloc_web_host_id();
-        if !self.spawn_web_host(event_loop, &url, host_id) {
+        // 하단바 「모바일」에서 폰을 골랐으면 그 폰 크기로 그린다 — 학생이 확인하는
+        // 화면이 사람이 볼 기기와 같아진다(docs/browse-target.md).
+        let screen = kasa_mcp::browse::selected_phone_screen();
+        if !self.spawn_web_host(event_loop, &url, host_id, screen.as_ref()) {
             return;
         }
 
-        // 그리드 쪽 자리: PTY 없는 pane(이미지 split 과 같은 선례 — pid None,
-        // resize_backend/키 입력은 PTY miss 로 자동 skip).
-        let new_id = self.alloc_pane_id();
         let mut tab = PaneTab::default();
         tab.content = PaneContent::Web(WebPane { url: url.clone(), host_id });
         tab.title = Some(short_label(&url));
         tab.title_pinned = true;
+
+        // 탭 모드 — 요청 pane 의 탭 스택에 앉히고 그 탭을 앞으로. 트리를 안
+        // 바꾸니 resize_backend/publish 가 필요 없다(이미지 탭과 같은 규칙).
+        // 거울로 보는 사람이 split 하나를 더 볼 필요가 없게 하는 길이다.
+        let mut tab_slot = Some(tab);
+        if as_tab {
+            let pushed = {
+                let mut ws = self.ws.lock().unwrap();
+                match ws.panes.get_mut(&anchor) {
+                    Some(pane) => {
+                        pane.tabs.push(tab_slot.take().expect("tab not yet moved"));
+                        pane.active_tab = pane.tabs.len() - 1;
+                        pane.dirty = true;
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if pushed {
+                self.ws.lock().unwrap().active_pane = Some(anchor.clone());
+                self.handoff_ime_to_active_surface();
+                self.chrome_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                eprintln!("[webpane] open {url} (host {host_id}) as tab of {anchor}");
+                return;
+            }
+            // anchor 가 panes 에 없으면(막 닫힘) split 로 폴백.
+        }
+
+        // 그리드 쪽 자리: PTY 없는 pane(이미지 split 과 같은 선례 — pid None,
+        // resize_backend/키 입력은 PTY miss 로 자동 skip).
+        let tab = tab_slot.expect("tab kept for split");
+        let new_id = self.alloc_pane_id();
         let ps = PaneState { tabs: vec![tab], dirty: true, ..Default::default() };
         self.ws.lock().unwrap().panes.insert(new_id.clone(), ps);
         let Some(layout) = self.pty_layout.as_mut() else {
@@ -763,6 +919,20 @@ impl App {
                 * zoom;
             let Some(host) = self.web_hosts.get_mut(&host_id) else { continue };
             let backed = host.backing.is_some();
+            // 기기 흉내: pane 안에 기기 크기(×fit)의 창을 가운데 두고 pageZoom 을
+            // fit 으로 낮춰 CSS 뷰포트가 정확히 기기 크기가 되게 한다.
+            let (pane_x, pane_y, lw, lh) = if let Some((dw, dh)) = host.device {
+                let fit = (lw / (dw * zoom)).min(lh / (dh * zoom)).min(1.0).max(0.1);
+                if (host.device_fit - fit).abs() > 1e-3 {
+                    host.device_fit = fit;
+                    let _ = host.webview.zoom(host.zoom_level * fit);
+                }
+                let bw = (dw * zoom * fit).min(lw);
+                let bh = (dh * zoom * fit).min(lh);
+                (pane_x + ((lw - bw) / 2.0).max(0.0), pane_y, bw, bh)
+            } else {
+                (pane_x, pane_y, lw, lh)
+            };
             let (frame_origin, webview_origin) =
                 web_host_origins(main_origin, (pane_x, pane_y), backed);
             // 비교용 정수 스냅(논리 포인트) — 매 턴 같은 값이면 OS 호출을 안 한다.
@@ -1340,7 +1510,7 @@ impl App {
             return;
         }
         let anchor = self.pane_of_web_host(host_id);
-        self.open_web_pane(event_loop, url, anchor.as_deref());
+        self.open_web_pane(event_loop, url, anchor.as_deref(), false);
     }
 
     /// 페이지 줌(Cmd+= / - / 0). 배율은 host 에 남아 다음 조작의 기준이 된다.
@@ -1352,7 +1522,7 @@ impl App {
             _ => 1.0,
         };
         host.zoom_level = z;
-        if let Err(e) = host.webview.zoom(z) {
+        if let Err(e) = host.webview.zoom(z * host.device_fit) {
             eprintln!("[webpane] zoom: {e}");
             return;
         }
@@ -1684,7 +1854,7 @@ impl App {
         }
         let pending = std::mem::take(&mut self.pending_web_hosts);
         for (host_id, url) in pending {
-            if !self.spawn_web_host(event_loop, &url, host_id) {
+            if !self.spawn_web_host(event_loop, &url, host_id, None) {
                 eprintln!("[webpane] 복원 host {host_id} 생성 실패 — {url}");
             }
         }

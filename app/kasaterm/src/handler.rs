@@ -1564,18 +1564,28 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketOpenUrl(url, target) => {
-                self.open_url_for_pane(url, target.as_deref());
+                self.open_url_for_pane(event_loop, url, target.as_deref());
                 return;
             }
-            UserEvent::RemoteOpenUrl(pane, url) => {
-                self.open_url_here(url, Some(pane));
+            UserEvent::RemoteOpenUrl(pane, url, mode) => {
+                // 호스트가 「네 쪽에서 열어라」 — mode 가 web 이면 그 거울 pane 의
+                // 웹 탭으로, 아니면 이 기계 브라우저로(docs/browse-target.md).
+                if mode == "web" {
+                    self.open_web_pane(event_loop, url, Some(pane), true);
+                } else {
+                    self.open_url_here(url, Some(pane));
+                }
                 return;
             }
-            UserEvent::SocketOpenWeb(url, target) => {
-                // `kasaterm-cli web <url>` → 요청 pane 옆에 웹 pane split.
-                // 파일 미리보기와 달리 여기서 처리하는 이유: 자식 창 생성에
-                // ActiveEventLoop 가 필요하다.
-                self.open_web_pane(event_loop, url, target.as_deref());
+            UserEvent::BrowseOpenAck(req, ok, error) => {
+                self.phone_open_acked(*req, *ok, error.clone());
+                return;
+            }
+            UserEvent::SocketOpenWeb(url, target, as_tab) => {
+                // `kasaterm-cli web <url>` → 요청 pane 옆에 웹 pane split
+                // (`--tab` 이면 그 pane 의 탭). 파일 미리보기와 달리 여기서
+                // 처리하는 이유: 자식 창 생성에 ActiveEventLoop 가 필요하다.
+                self.open_web_pane(event_loop, url, target.as_deref(), *as_tab);
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;
@@ -7251,6 +7261,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 없어서 여기(첫 루프 턴)로 넘어온다. sync 보다 먼저 만들어야 같은
         // 턴에 배치까지 끝난다.
         self.drain_pending_web_hosts(event_loop);
+        self.expire_phone_opens();
         self.sync_web_hosts();
         self.sync_inline_web();
         // Windows 업데이트 체커 결과 → sticky 토스트([설치][나중에] 칩).

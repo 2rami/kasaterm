@@ -664,9 +664,10 @@ fn paint_tunnel_popover(
     let w = 344.0_f32.min((win_w - 16.0).max(200.0));
     let narrow = w < 320.0;
     let qr_box = 152.0;
+    let browse_h = browse_section_height(sb);
     let h = if host.is_some() {
-        if sb.chrome_reach.is_some() { 404.0 } else { 378.0 }
-    } else { 148.0 };
+        376.0 + browse_h + if sb.chrome_reach.is_some() { 26.0 } else { 0.0 }
+    } else { 140.0 + browse_h };
     let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
     let y = (anchor.1 - h - 6.0).max(8.0);
     sb.popover_rect = Some((x, y, w, h));
@@ -697,6 +698,7 @@ fn paint_tunnel_popover(
         let message = if on { "접속 주소를 준비하고 있어." } else { "연결을 켜면 QR과 접속 주소가 보여." };
         let message = crate::info::fit_text(g, message, w - 32.0, 11.0, false);
         text(g, x + 16.0, y + 119.0, &message, 11.0, theme::text_dim(), false);
+        paint_browse_section(g, sb, cursor, x, y + 140.0, w);
         return;
     };
     let qx = if narrow { x + (w - qr_box) / 2.0 } else { x + 16.0 };
@@ -745,8 +747,9 @@ fn paint_tunnel_popover(
         g.hover_pointer |= hovered || address_hovered;
         sb.popover_hits.push((open_hit, address_rect));
     }
+    let after_browse = paint_browse_section(g, sb, cursor, x, y + 376.0, w);
     if let Some(reachable) = sb.chrome_reach {
-        let fy = y + 376.0;
+        let fy = after_browse;
         g.rect(x + 16.0, fy - 4.0, w - 32.0, 1.0, theme::border());
         g.queue_icon("globe", x + 16.0, fy + 6.0, 12.0, theme::text_mute());
         let device = if sb.chrome_machine.is_empty() { "이 기기" } else { &sb.chrome_machine };
@@ -755,6 +758,77 @@ fn paint_tunnel_popover(
         text(g, x + 35.0, fy + 6.0, &label, 10.0,
             if reachable { theme::text_mute() } else { theme::attention() }, false);
     }
+}
+
+/// 「브라우징」 절의 높이 — 머리(24) + 기기 줄(24×n) + 목적지 줄(34).
+fn browse_section_height(sb: &state::StatusbarState) -> f32 {
+    24.0 + 24.0 * (sb.browse_devices.len() as f32).max(1.0) + 34.0
+}
+
+/// 「모바일」 팝오버의 브라우징 절 — 사람이 볼 페이지가 **어느 기기의 무엇**으로
+/// 열리는지(docs/browse-target.md). 기기 줄을 누르면 고르고, 아래 두 단추가 목적지.
+/// 돌려주는 값은 절 아래 y.
+fn paint_browse_section(
+    g: &mut gpu::GpuRenderer,
+    sb: &mut state::StatusbarState,
+    cursor: (f32, f32),
+    x: f32,
+    top: f32,
+    w: f32,
+) -> f32 {
+    let text = |g: &mut gpu::GpuRenderer, xx, yy, value: &str, size, color, bold| {
+        g.draw_text(xx, yy, value, gpu::DrawOpts { font_size: size, color, bold, italic: false });
+    };
+    g.rect(x + 16.0, top - 4.0, w - 32.0, 1.0, theme::border());
+    text(g, x + 16.0, top + 4.0, "페이지 여는 곳", 10.0, theme::text_mute(), false);
+    let mut row_y = top + 24.0;
+    let rows: Vec<(String, String, String, bool)> = sb.browse_devices.clone();
+    for (id, label, kind, online) in rows {
+        let rect = (x + 12.0, row_y, w - 24.0, 22.0);
+        let selected = sb.browse_selected == id;
+        let hovered = hit(cursor, &rect);
+        if selected {
+            round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_sm(),
+                theme::lerp(theme::surface(), theme::accent(), 0.18));
+        } else if hovered {
+            hover_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_sm());
+        }
+        let icon = match kind.as_str() {
+            "phone" => "smartphone",
+            "auto" => "sparkles",
+            _ => "monitor",
+        };
+        let color = if selected { theme::accent() } else { theme::text_dim() };
+        g.queue_icon(icon, x + 22.0, row_y + 4.0, 13.0, color);
+        let label = crate::info::fit_text(g, &label, w - 90.0, 11.0, selected);
+        text(g, x + 42.0, row_y + 5.0, &label, 11.0,
+            if selected { theme::text() } else { theme::text_dim() }, selected);
+        if kind != "auto" {
+            let dot = if online { theme::success() } else { theme::text_mute() };
+            round_rect(g, x + w - 26.0, row_y + 9.0, 5.0, 5.0, 2.5, dot);
+        }
+        g.hover_pointer |= hovered;
+        sb.popover_hits.push((state::StatusbarHit::ChooseBrowseDevice(id), rect));
+        row_y += 24.0;
+    }
+    // 목적지 — 두 칸 세그먼트.
+    let seg_y = row_y + 6.0;
+    text(g, x + 16.0, seg_y + 6.0, "여는 방식", 10.0, theme::text_mute(), false);
+    let seg_w = 84.0;
+    let seg_x = x + w - 12.0 - seg_w * 2.0;
+    for (index, (mode, label)) in [("web", "내장 웹"), ("chrome", "브라우저")].into_iter().enumerate() {
+        let rect = (seg_x + index as f32 * seg_w, seg_y, seg_w - 4.0, 24.0);
+        let on = sb.browse_open == mode;
+        let hovered = hit(cursor, &rect);
+        round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_sm(),
+            if on { theme::accent() } else if hovered { theme::surface_hover() } else { theme::panel_bg() });
+        let tw = g.measure_chrome_text(label, 10.0, on);
+        text(g, rect.0 + (rect.2 - tw) / 2.0, rect.1 + 6.0, label, 10.0,
+            if on { theme::foreground_on(theme::accent()) } else { theme::text() }, on);
+        g.hover_pointer |= hovered;
+        sb.popover_hits.push((state::StatusbarHit::SetBrowseOpen(mode.to_string()), rect));
+    }
+    seg_y + 34.0
 }
 
 fn paint_chrome_popover(
@@ -1515,6 +1589,51 @@ impl crate::App {
                 self.chrome_dirty = true;
                 return true;
             }
+            Some(state::StatusbarHit::ChooseBrowseDevice(id)) => {
+                match crate::socket::save_browse_device(&id) {
+                    Ok(saved) => {
+                        // 기계·이 기기는 KasaChrome 선택과 같이 가고, 그 선택은 본진에도
+                        // 전해야 한다 — 있는 길(ChromeMachine)을 그대로 탄다.
+                        match kasa_mcp::browse::Device::from_id(&saved) {
+                            Some(kasa_mcp::browse::Device::Machine(label)) => {
+                                self.settings_apply(crate::SettingsAction::ChromeMachine(label));
+                            }
+                            Some(kasa_mcp::browse::Device::ThisMachine) => {
+                                self.settings_apply(crate::SettingsAction::ChromeMachine(String::new()));
+                            }
+                            _ => {}
+                        }
+                        let label = self
+                            .statusbar
+                            .browse_devices
+                            .iter()
+                            .find(|(i, _, _, _)| *i == saved)
+                            .map(|(_, l, _, _)| l.clone())
+                            .unwrap_or_else(|| "자동".to_string());
+                        self.set_toast(format!("페이지를 {label}(으)로 열어요"));
+                    }
+                    Err(e) => self.set_toast(format!("기기를 저장하지 못했어요: {e}")),
+                }
+                self.reload_browse_devices();
+                self.chrome_dirty = true;
+                return true;
+            }
+            Some(state::StatusbarHit::SetBrowseOpen(mode)) => {
+                let entry = ("browse_open", serde_json::json!(mode));
+                match crate::socket::write_settings_patch_atomic(&[entry]) {
+                    Ok(()) => {
+                        self.statusbar.browse_open = mode.clone();
+                        self.set_toast(if mode == "web" {
+                            "페이지를 내장 웹으로 열어요".to_string()
+                        } else {
+                            "페이지를 브라우저로 열어요".to_string()
+                        });
+                    }
+                    Err(e) => self.set_toast(format!("저장하지 못했어요: {e}")),
+                }
+                self.chrome_dirty = true;
+                return true;
+            }
             Some(state::StatusbarHit::ToggleTunnel) => {
                 // 결과는 낙관 반영하고 5초 뒤 폴이 확정한다 — 끄기(TERM)는 소멸이
                 // 한 박자 늦어 즉시 되물으면 아직 살아 보인다.
@@ -1628,6 +1747,32 @@ impl crate::App {
         self.chrome_dirty = true;
     }
 
+    /// 「모바일」 팝오버의 브라우징 목록을 다시 읽는다 — 열 때와 고른 뒤.
+    /// 파일·명부 IO 라 그릴 때마다 부르지 않는다.
+    pub(crate) fn reload_browse_devices(&mut self) {
+        let v = kasa_mcp::browse::devices_json();
+        let mut list: Vec<(String, String, String, bool)> = vec![(
+            "auto".to_string(), "자동 — 보는 기계 따라감".to_string(), "auto".to_string(), true,
+        )];
+        for d in v.get("devices").and_then(|d| d.as_array()).into_iter().flatten() {
+            let id = d.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+            let mut label = d.get("label").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+            if d.get("this").and_then(|x| x.as_bool()).unwrap_or(false) {
+                label = format!("이 기기 · {label}");
+            }
+            let kind = d.get("kind").and_then(|x| x.as_str()).unwrap_or("desktop").to_string();
+            let online = d.get("online").and_then(|x| x.as_bool()).unwrap_or(false);
+            list.push((id, label, kind, online));
+        }
+        self.statusbar.browse_devices = list;
+        self.statusbar.browse_selected = if v.get("auto").and_then(|a| a.as_bool()).unwrap_or(true) {
+            "auto".to_string()
+        } else {
+            v.get("selected").and_then(|s| s.as_str()).unwrap_or_default().to_string()
+        };
+        self.statusbar.browse_open = v.get("open").and_then(|o| o.as_str()).unwrap_or("chrome").to_string();
+    }
+
     pub(crate) fn toggle_statusbar_popover(
         &mut self,
         kind: state::StatusbarPopover,
@@ -1636,6 +1781,9 @@ impl crate::App {
         let same = matches!(self.statusbar.popover, Some((k, _)) if k == kind);
         self.statusbar.popover = (!same).then_some((kind, anchor));
         self.statusbar.popover_scroll = 0.0;
+        if !same && kind == state::StatusbarPopover::Tunnel {
+            self.reload_browse_devices();
+        }
         if !same && kind == state::StatusbarPopover::Chrome {
             self.statusbar.chrome_candidates = kasa_mcp::machines::kasachrome_candidates();
             let chosen = kasa_mcp::machines::kasachrome_machine();

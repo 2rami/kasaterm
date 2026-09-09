@@ -3799,13 +3799,16 @@ enum UserEvent {
     /// `surface.open_preview kind=web` — URL 을 요청 pane 옆 웹 pane 으로.
     /// (url, 요청자 pid). 파일 미리보기와 달리 winit 창 생성이 필요해
     /// `ActiveEventLoop` 가 있는 user_event 에서 처리한다.
-    SocketOpenWeb(String, Option<String>),
+    /// (url, 요청자, 탭으로?) — `kasaterm-cli web [--tab]`.
+    SocketOpenWeb(String, Option<String>, bool),
+    /// 폰의 `opened` 응답 — (요청 번호, 성공, 오류). `browse::set_open_ack_sink`.
+    BrowseOpenAck(u64, bool, Option<String>),
     /// `surface.open_url` / `/open-url` — URL 을 사람이 보는 브라우저로.
     /// (url, 요청자 pid). 요청 pane 을 거울로 보는 기계가 있으면 그쪽으로 되돌린다.
     SocketOpenUrl(String, Option<String>),
     /// 원격 호스트가 거울로 되돌려 보낸 `open-url` — (로컬 pane id, url). 이 기계의
     /// 기본 브라우저로 연다(맥북에서 미니 학생의 페이지를 보는 길).
-    RemoteOpenUrl(String, String),
+    RemoteOpenUrl(String, String, String),
     /// 웹뷰 안에서 친 앱 단축키(Cmd+D 분할 등). 자식 창이 key 인 동안 winit
     /// 키 이벤트는 앱에 안 오므로(WKWebView 가 first responder), 웹뷰에 심은
     /// 초기화 스크립트가 keydown 을 잡아 wry IPC → 이 이벤트로 넘긴다.
@@ -6488,9 +6491,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 원격 호스트의 `open-url` 되돌림을 GUI 이벤트로 — kasa-mcp 는 창을 모른다.
     if !launch.viewer_only {
         let p = std::sync::Mutex::new(proxy.clone());
-        kasa_mcp::remote::set_open_url_sink(Box::new(move |pane, url| {
+        kasa_mcp::remote::set_open_url_sink(Box::new(move |pane, url, mode| {
             if let Ok(p) = p.lock() {
-                let _ = p.send_event(UserEvent::RemoteOpenUrl(pane.to_string(), url.to_string()));
+                let _ = p.send_event(UserEvent::RemoteOpenUrl(
+                    pane.to_string(), url.to_string(), mode.to_string(),
+                ));
+            }
+        }));
+        let p = std::sync::Mutex::new(proxy.clone());
+        kasa_mcp::browse::set_open_ack_sink(Box::new(move |req, ok, error| {
+            if let Ok(p) = p.lock() {
+                let _ = p.send_event(UserEvent::BrowseOpenAck(req, ok, error));
             }
         }));
     }

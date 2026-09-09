@@ -55,6 +55,14 @@ pub(crate) struct StatusbarState {
     pub(crate) chrome_rect: Option<(f32, f32, f32, f32)>,
     /// Browser targets are loaded once when the menu opens, never during paint.
     pub(crate) chrome_candidates: Vec<String>,
+    /// 브라우징 대상 후보(id, 라벨, 종류 desktop|phone, 온라인) — 「모바일」 팝오버가
+    /// 열릴 때 한 번 읽는다(docs/browse-target.md).
+    pub(crate) browse_devices: Vec<(String, String, String, bool)>,
+    /// 지금 고른 기기 id(`auto` 포함)와 목적지(`web`|`chrome`).
+    pub(crate) browse_selected: String,
+    pub(crate) browse_open: String,
+    /// 폰에 보낸 열기 요청 — (요청 번호, 보낸 때, 폰 이름). 응답이 오면 빠진다.
+    pub(crate) phone_opens: Vec<(u64, std::time::Instant, String)>,
     pub(crate) tunnel_checked: Option<std::time::Instant>,
     /// 원격 주소(cloudflared config 의 hostname). 같은 5초 폴에 얹는다 — 읽는 일이
     /// **파일 IO** 라, 팝오버가 그릴 때마다 부르면 열어 둔 동안 매 프레임
@@ -185,6 +193,10 @@ pub(crate) enum StatusbarHit {
     /// 원격 접속 문을 여닫는다.
     ToggleTunnel,
     ChooseChrome(String),
+    /// 「모바일」 팝오버의 브라우징 기기 한 줄 — id(`auto`·``·`~id`·`phone:이름`).
+    ChooseBrowseDevice(String),
+    /// 「내장 웹 / 브라우저」 토글 — `web`|`chrome`.
+    SetBrowseOpen(String),
     /// 열려 있을 때의 주소를 클립보드로.
     CopyTunnelHost,
     /// 최근 복사 목록의 한 줄 — 그 글을 다시 클립보드에 올린다.
