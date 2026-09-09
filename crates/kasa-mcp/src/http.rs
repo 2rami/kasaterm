@@ -3790,6 +3790,9 @@ async fn claude_usage_handler(
         .get("dir")
         .cloned()
         .unwrap_or_else(|| std::env::var("KASATERM_CLAUDE_ACCOUNT_DIR").unwrap_or_default());
+    // The shared workbench keeps the same empty runtime directory across
+    // account switches. Cache by its stamped account, never by that directory.
+    let cache_slot = usage_cache_slot(&dir, active_vault_dir().as_deref());
 
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
     // `account_dir` 을 함께 돌려준다 — 어느 계정의 숫자인지 소비자가 알 수 있어야
@@ -3810,7 +3813,7 @@ async fn claude_usage_handler(
     let fresh = params.get("fresh").is_some_and(|v| v == "1" || v == "true");
     // 1) 신선한 캐시(60초 이내 성공)면 upstream 없이 그대로.
     if let Ok(g) = cache.lock() {
-        if let Some((Some(at), v)) = g.get(&dir) {
+        if let Some((Some(at), v)) = g.get(&cache_slot) {
             if !fresh && at.elapsed() < TTL {
                 return (cors, Json(ok(v, false)));
             }
@@ -3823,13 +3826,13 @@ async fn claude_usage_handler(
     {
         let mut seed = None;
         if let Ok(g) = cache.lock() {
-            if !g.contains_key(&dir) {
-                seed = load_usage_disk(&dir);
+            if !g.contains_key(&cache_slot) {
+                seed = load_usage_disk(&cache_slot);
             }
         }
         if let Some(v) = seed {
             if let Ok(mut g) = cache.lock() {
-                g.entry(dir.clone()).or_insert((None, v));
+                g.entry(cache_slot.clone()).or_insert((None, v));
             }
         }
     }
@@ -3907,11 +3910,17 @@ async fn claude_usage_handler(
             }
         }
     }
+    // Do not publish or persist an answer fetched across an account switch.
+    if usage_cache_slot(&dir, active_vault_dir().as_deref()) != cache_slot {
+        return (cors, Json(serde_json::json!({
+            "ok": false, "reason": "account_changed", "account_dir": dir,
+        })));
+    }
     if let Some(v) = fresh {
         if let Ok(mut g) = cache.lock() {
-            g.insert(dir.clone(), (Some(Instant::now()), v.clone()));
+            g.insert(cache_slot.clone(), (Some(Instant::now()), v.clone()));
         }
-        save_usage_disk(&dir, &v);
+        save_usage_disk(&cache_slot, &v);
         return (cors, Json(ok(&v, false)));
     }
 
@@ -3919,7 +3928,7 @@ async fn claude_usage_handler(
     //    폴백(pill 유지). **다른 슬롯 값으로는 절대 폴백하지 않는다** — 그게 전에
     //    한 계정의 숫자를 세 계정에 전부 붙여 보이던 경로다.
     if let Ok(g) = cache.lock() {
-        if let Some((_, v)) = g.get(&dir) {
+        if let Some((_, v)) = g.get(&cache_slot) {
             return (cors, Json(ok(v, true)));
         }
     }
@@ -3940,6 +3949,18 @@ async fn claude_usage_handler(
             "ok": false, "error": msg, "reason": why, "account_dir": dir,
         })),
     )
+}
+
+fn usage_cache_slot(dir: &str, active_vault: Option<&str>) -> String {
+    if !dir.is_empty() {
+        return dir.to_string();
+    }
+    // Old empty-dir snapshots have no account provenance and may belong to a
+    // previously selected slot. Even the default login gets a new explicit key.
+    active_vault
+        .filter(|slot| !slot.is_empty())
+        .unwrap_or("@default-login")
+        .to_string()
 }
 
 /// 갱신이 **400/401 로 거부된** 슬롯. 그건 refresh token 이 죽었다는 뜻이라
@@ -8551,6 +8572,30 @@ mod tests {
         assert_eq!(usage_from_snapshot(&doc, "/slots/acct-1", now), Some(b));
         // 기록이 없는 슬롯은 **다른 슬롯 값으로 폴백하지 않는다** — 빈 값이 틀린 값보다 낫다.
         assert_eq!(usage_from_snapshot(&doc, "/slots/acct-2", now), None);
+    }
+
+    #[test]
+    fn shared_workbench_usage_follows_account_identity_and_rejects_unowned_history() {
+        let now = 1_785_000_000u64;
+        let account_a = usage_cache_slot("", Some("/slots/acct-a"));
+        let account_b = usage_cache_slot("", Some("/slots/acct-b"));
+        let default = usage_cache_slot("", None);
+        let old = serde_json::json!({"limits":[{"percent":3}]});
+        let a = serde_json::json!({"limits":[{"percent":52}]});
+        let b = serde_json::json!({"limits":[{"percent":71}]});
+        let doc = merge_usage_snapshot(None, "", &old, now);
+        assert_eq!(usage_from_snapshot(&doc, &account_a, now), None);
+        assert_eq!(usage_from_snapshot(&doc, &default, now), None);
+        let doc = merge_usage_snapshot(Some(&doc), &account_a, &a, now);
+        assert_eq!(usage_from_snapshot(&doc, &account_b, now), None);
+        let doc = merge_usage_snapshot(Some(&doc), &account_b, &b, now);
+        assert_eq!(usage_from_snapshot(&doc, &account_a, now), Some(a));
+        assert_eq!(usage_from_snapshot(&doc, &account_b, now), Some(b));
+        assert_eq!(
+            usage_cache_slot("/slots/acct-a", Some("/slots/acct-b")),
+            account_a
+        );
+        assert_eq!(usage_cache_slot("", Some("")), default);
     }
 
     /// 낡은 값이라도 하루까지는 살린다 — upstream 이 오래 막혔을 때 빈칸보다

@@ -2211,6 +2211,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 방금 전환했으면 잠시 **자동 전환 판정만** 쉰다(표시는 계속 갱신).
                 let mut last_switch: Option<std::time::Instant> = None;
                 let mut seen_account = socket::read_claude_account();
+                let mut badge_account = seen_account.clone();
                 // 비활성 계정을 마지막으로 친 시각. `None` 이면 아직 안 쳤다는
                 // 뜻이라 창을 열자마자 표가 찬다.
                 //
@@ -2291,6 +2292,14 @@ impl ApplicationHandler<UserEvent> for App {
                         let _ = usage_proxy.send_event(UserEvent::Redraw);
                     }
                     let active_id = socket::read_claude_account();
+                    if active_id != badge_account {
+                        if let (Ok(mut active), Ok(mut all)) = (usage_cache.lock(), usage_all.lock()) {
+                            clear_switched_usage_badges(&mut active, &mut all);
+                        }
+                        badge_account = active_id.clone();
+                        others_at = None;
+                        let _ = usage_proxy.send_event(UserEvent::Redraw);
+                    }
                     // 도는 세션이 갱신해 둔 토큰을 금고로 되받는다. 안 하면 금고의
                     // refresh token 이 이미 쓴 값으로 굳어, 다음에 그 계정을 꺼낼 때
                     // 로그아웃된 채로 꺼내진다(1회용이라 되돌릴 수도 없다).
@@ -2313,6 +2322,9 @@ impl ApplicationHandler<UserEvent> for App {
                         .map_or(String::new(), |p| p.to_string_lossy().into_owned());
                     let fetched =
                         fetch_claude_usage(&crate::mcp_panel_port(), &active_dir, menu_open);
+                    if socket::read_claude_account() != active_id {
+                        continue;
+                    }
                     record_claude_usage_attempt(&active_dir, fetched.is_some());
                     let usage = fetched.as_ref().map(|(u, _, _)| u);
                     let next = fetched.as_ref().and_then(|(u, stale, dir)| {
@@ -8124,6 +8136,16 @@ fn merge_usage_badges(
     previous
 }
 
+fn clear_switched_usage_badges(
+    active: &mut Option<crate::UsageBadge>,
+    all: &mut HashMap<String, crate::UsageBadge>,
+) {
+    *active = None;
+    // Named vault paths retain their own account identity; only the shared
+    // workbench key changes owners when the active account changes.
+    all.remove("");
+}
+
 #[cfg(test)]
 mod usage_badge_merge_tests {
     use super::*;
@@ -8137,6 +8159,25 @@ mod usage_badge_merge_tests {
             resets_at: None,
             windows: Vec::new(),
         }
+    }
+
+    #[test]
+    fn account_switch_clears_shared_workbench_badges_without_erasing_named_accounts() {
+        let mut active = Some(badge("", 3.0));
+        let mut all = HashMap::from([
+            (String::new(), badge("", 3.0)),
+            ("/slots/acct-a".into(), badge("/slots/acct-a", 52.0)),
+        ]);
+        clear_switched_usage_badges(&mut active, &mut all);
+        assert!(active.is_none());
+        assert!(!all.contains_key(""));
+        assert_eq!(all["/slots/acct-a"].pct, 52.0);
+        let asked = std::collections::HashSet::from([String::new(), "/slots/acct-a".into()]);
+        let merged = merge_usage_badges(all, &asked, HashMap::new());
+        assert!(
+            !merged.contains_key(""),
+            "a failed new-account query cannot revive the old owner's number"
+        );
     }
 
     #[test]
