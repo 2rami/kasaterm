@@ -41,11 +41,15 @@ frontend browsing workflow below was implemented separately on
 - **알림 통일**: notifications from 나쵸네코 / mobile / PC / mini should be one
   consistent system. Known bugs: 나쵸네코 sends the same alert three times, and
   odd/irrelevant alerts appear. Owner: 나쵸 (collaboration with the desktop side).
-- **모바일 pane 추가**: create a new pane from the mobile app, and from the
-  top bar inside a session (the pane bottom-bar affordance). Owner: 히후미
-  (may be split).
-- **나쵸네코 pane 생성 시 방 분리**: when 나쵸네코 spawns a pane, put it in its
-  own room so the current room does not get cluttered. Owner: 히후미 (may be split).
+- **모바일 pane 추가** (user answer 2026-09-10: both places): a 「+」 on the
+  phone hub (pick machine/room → new pane) and a 「pane 추가」 action in the
+  session screen's top bar (split/tab next to the pane being viewed — the same
+  thing the desktop pane bottom bar offers). Owner: 히후미 (may be split).
+- **나쵸네코 pane 생성 시 방 정리** (user answer: "방목록, 보드 보고 이쁘게
+  정렬하게 못하나"): 나쵸네코 should read the room list / board before spawning
+  and place its pane so rooms stay tidy (own room, sorted), rather than dropping
+  it into whatever room is active. Owner: 나쵸 side (collaboration), 히후미 to
+  provide the room list/board affordance if the CLI lacks one.
 
 Safety/verification: do not restart either desktop app automatically, do not
 replace current working panes with older saved sessions, and do not install or
