@@ -1290,7 +1290,8 @@ pub(crate) fn band_bg(row: &[GridCell]) -> Option<kasa_bridge::screen::Color> {
 
 /// 프롬프트 띠 한 행을 kasaterm 디자인으로 재도색 — 띠는 **본문 폭까지만**
 /// (전폭 띠의 꼬리는 기본 배경으로 되돌린다), 바탕은 `fill`, 앞머리 `❯` 는
-/// accent 원색. 글자색은 claude 가 정한 그대로 둔다.
+/// accent 원색. 글자색은 보는 기기의 기본 잉크로 맞춘다 — 원본 라이트
+/// 모드의 검은 글자를 다크 배경으로 옮기거나 그 반대로 옮겨도 읽혀야 한다.
 pub(crate) fn restyle_user_prompt_row(
     row: &mut [GridCell],
     fill: &kasa_bridge::screen::Color,
@@ -1302,6 +1303,7 @@ pub(crate) fn restyle_user_prompt_row(
         .unwrap_or(0);
     let pad_end = (last + 2).min(row.len());
     for (i, c) in row.iter_mut().enumerate() {
+        c.fg = kasa_bridge::screen::Color::Default;
         if i < pad_end {
             c.bg = fill.clone();
             if i <= 1 && c.ch == '❯' {
@@ -6303,6 +6305,25 @@ mod teammate_msg_tests {
         assert_eq!(row[0].fg, Color::Rgb(255, 128, 0), "❯ 는 accent");
         assert_eq!(row[3].bg, fill, "본문 구간은 fill");
         assert_eq!(row[30].bg, Color::Default, "꼬리는 기본 배경으로");
+    }
+
+    #[test]
+    fn mirrored_user_prompt_ink_uses_viewer_default_in_both_modes() {
+        use kasa_bridge::screen::Color;
+        for source_ink in [Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255)] {
+            let mut row = row_from("❯ previous request", 60);
+            for cell in &mut row {
+                cell.fg = source_ink.clone();
+                cell.bg = Color::Rgb(240, 240, 240);
+            }
+            let fill = Color::Rgb(35, 65, 54);
+            let accent = [51, 221, 153, 255];
+            restyle_user_prompt_row(&mut row, &fill, accent);
+            assert_eq!(row[0].fg, Color::Rgb(51, 221, 153));
+            assert_eq!(row[3].fg, Color::Default);
+            assert_eq!(row[3].bg, fill);
+            assert_eq!(row[59].bg, Color::Default);
+        }
     }
 
     // 여러 문단 SendMessage: 문단 사이 빈 행은 메시지 끝이 아니다 — 빈 행 뒤
