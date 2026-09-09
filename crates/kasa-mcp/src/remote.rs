@@ -2256,8 +2256,13 @@ mod tests {
             runtime.block_on(async {
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                 for connection in 0..3 {
-                    let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await.unwrap().unwrap();
-                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    // 실행 중인 앱의 포트 탐색(HTTP/1.0 GET /)은 WS 재접속이 아니다.
+                    let mut socket = loop {
+                        let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await.unwrap().unwrap();
+                        if let Ok(socket) = tokio_tungstenite::accept_async(stream).await {
+                            break socket;
+                        }
+                    };
                     let mut size = serde_json::json!({"t":"size", "cols":21, "rows":6, "id":"mock-origin"});
                     if connection < 2 {
                         size["capabilities"] = serde_json::json!({"mirror_viewport":1});
