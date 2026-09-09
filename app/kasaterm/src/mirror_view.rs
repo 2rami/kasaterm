@@ -114,6 +114,31 @@ fn tool_title_continuation(previous: &[GridCell], next: &[GridCell]) -> Option<(
         .then_some((lead, false))
 }
 
+fn codex_tool_title(row: &[GridCell]) -> bool {
+    let text: String = row.iter().map(|cell| cell.ch).collect();
+    text.starts_with("• Ran ") || text.starts_with("• Running ")
+}
+
+/// Codex wraps command titles two cells before the terminal edge and prefixes
+/// each continuation with `  │ `. This is a command widget, not a table. Keep
+/// short explicit command newlines and the collapsed-output marker separate.
+fn codex_tool_continuation(previous: &[GridCell], next: &[GridCell]) -> Option<(usize, bool)> {
+    if !next.iter().take(4).map(|cell| cell.ch).eq("  │ ".chars()) { return None; }
+    let previous_text: String = previous.iter().filter(|cell| cell.ch != '\0').map(|cell| cell.ch).collect();
+    let next_text: String = next.iter().skip(4).filter(|cell| cell.ch != '\0').map(|cell| cell.ch).collect();
+    if next_text.trim_start().starts_with('…') { return None; }
+    let first_word = next_text.split_whitespace().next()?;
+    let usable = previous.len().saturating_sub(2);
+    let occupied = previous.iter().rposition(|cell| !matches!(cell.ch, ' ' | '\0'))? + 1;
+    let first_width: usize = first_word.chars().map(|ch| ch.width().unwrap_or(1)).sum();
+    if occupied > usable || occupied + 12 < usable || occupied + 1 + first_width <= usable { return None; }
+    let previous_word = previous_text.split_whitespace().next_back()?;
+    let token_char = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '/' | ':' | '-' | '@' | '~');
+    let token_split = occupied == usable && previous_word.chars().all(token_char) && first_word.chars().all(token_char)
+        && previous_word.chars().chain(first_word.chars()).any(|ch| matches!(ch, '_' | '.' | '/' | ':' | '-'));
+    Some((4, !token_split))
+}
+
 fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: SourcePos, cols: usize, input_borders: &[usize], prose: bool) -> Vec<ProjectedLine> {
     let mut output = Vec::new();
     let mut row_index = start;
@@ -146,6 +171,7 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
 
         let first_row = row_index;
         let tool_title = claude_tool_title(&source[first_row]);
+        let codex_title = codex_tool_title(&source[first_row]);
         let indented_code = source[first_row].iter().take_while(|cell| cell.ch == ' ').count() >= 4;
         let mut logical: Vec<(GridCell, Option<SourcePos>)> = Vec::new();
         let mut omit_leading = 0;
@@ -160,9 +186,10 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
             // retain their hard breaks; ordinary shell grids stay strict VT.
             let paragraph = (!soft_wrap && prose && !fenced && !indented_code && row.len() != cols
                 && row_index + 1 < end
-                && !code_or_table(row) && !code_or_table(&source[row_index + 1]))
+                && (codex_title || (!code_or_table(row) && !code_or_table(&source[row_index + 1]))))
                 .then(|| {
                     let next = &source[row_index + 1];
+                    if codex_title { return codex_tool_continuation(row, next); }
                     (tool_title.then(|| tool_title_continuation(row, next)).flatten())
                         .or_else(|| kasa_bridge::reflow::paragraph_continuation(row, next, row.len()))
                 })
@@ -368,6 +395,72 @@ mod tests {
             source.push(row);
         }
         source
+    }
+
+    #[test]
+    fn observed_codex_command_wrappers_reflow_without_joining_collapsed_output() {
+        let source = codex_screen(&[
+            "• Ran curl --max-time 3 -fsS http://127.0.0.1:18986/version;",
+            "  │ curl -fsS http://127.0.0.1:8765/machines | jq '.machines",
+            "  │ | map({label,base,online,ssh})'; git status --short;",
+            "  │ … +1 lines",
+        ], 62);
+        let original = source.clone();
+        let view = project(&source, (5, 3), 200, 10, Some(4), None);
+        assert_eq!(view.body_lines.len(), 2);
+        let output = text(&view.rows).join("\n");
+        assert!(output.contains("/version; curl -fsS"));
+        assert!(output.contains("'.machines | map("));
+        assert!(output.contains("  │ … +1 lines"));
+        assert_eq!(view.body_lines[0].source_map[61], Some((1, 4)));
+        assert_eq!(source, original);
+
+        let source = codex_screen(&["• Ran cat <<'EOF'", "  │ explicit command newline", "  │ EOF"], 62);
+        let view = project(&source, (4, 3), 200, 10, Some(3), None);
+        assert_eq!(view.body_lines.len(), 3, "short explicit command lines stay separate");
+    }
+
+    #[test]
+    fn tall_wide_mirror_uses_history_before_padding_and_scrolls_continuously() {
+        let body: Vec<String> = (0..36).map(|i| format!("live event {i:02}")).collect();
+        let live = codex_screen(&body.iter().map(String::as_str).collect::<Vec<_>>(), 62);
+        let mut history: Vec<_> = (0..120).map(|i| {
+            let mut row = line(&format!("earlier event {i:03}")); row.resize(62, GridCell::blank()); row
+        }).collect();
+        history.extend_from_slice(&live);
+        let original = history.clone();
+        let view = project_history(&history, &live, (37, 3), 120, 200, 90, None);
+        assert!(view.rows[..87].iter().all(|row| row.iter().any(|cell| cell.ch != ' ')), "available history must fill the tall viewer");
+        assert!(text(&view.rows)[0].starts_with("earlier event"));
+        assert_eq!(view.cursor, Some((88, 3)));
+        assert!(view.source_map[0].iter().all(Option::is_none), "history is not a source mouse target");
+        assert_eq!(view.source_map[86][0], Some((35, 0)));
+        let older = project_history(&history, &live, (37, 3), 120, 200, 90, Some(1));
+        assert_eq!(text(&older.rows)[1], text(&view.rows)[0]);
+        assert_eq!(older.cursor, view.cursor);
+        assert_eq!(text(&older.rows)[87..], text(&view.rows)[87..]);
+        assert_eq!(history, original, "history projection never changes the source");
+    }
+
+    #[test]
+    fn wrapped_input_preserves_explicit_newlines_and_source_cursor_mapping() {
+        let mut source = codex_screen(&[], 20);
+        source[1] = line("› a wrapped input te");
+        source[1].resize(20, GridCell::blank());
+        source[1][19].wrapped = true;
+        let fill = source[0][0].bg.clone();
+        let mut continuation = line("xt"); continuation.resize(20, GridCell::blank());
+        let mut explicit = line("next explicit line"); explicit.resize(20, GridCell::blank());
+        source.insert(2, continuation);
+        source.insert(3, explicit);
+        for row in &mut source { for cell in row { cell.bg = fill.clone(); } }
+        let view = project(&source, (3, 7), 60, 10, Some(0), None);
+        let output = text(&view.rows);
+        assert!(output.iter().any(|row| row == "› a wrapped input text"));
+        assert!(output.iter().any(|row| row == "next explicit line"));
+        let (row, col) = view.cursor.unwrap();
+        assert_eq!(view.source_map[row][col], Some((3, 7)));
+        assert_eq!(view.rows[row][col].ch, source[3][7].ch);
     }
 
     #[test]

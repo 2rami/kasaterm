@@ -888,12 +888,25 @@ impl App {
         let projection = term.filter(|_| desktop_view && kasa_mcp::remote::is_view_pane(&tab_pid))
             .map(|source| {
                 let scroll = self.mirror_view_scroll.get(&tab_pid).copied();
-                if source.scroll_offset > 0 {
-                    if let Some(session) = self.pty.get(&tab_pid) {
-                        let live = session.live_tail_rows(source.rows as usize);
+                if let Some(session) = self.pty.get(&tab_pid) {
+                    let live = if source.scroll_offset > 0 {
+                        session.live_tail_rows(source.rows as usize)
+                    } else { source.cells.clone() };
+                    if source.scroll_offset > 0 || crate::screenread::pinned_input_top(&live)
+                        .is_some_and(|top| top <= source.cursor_row as usize) {
+                        // The canonical screen may be much shorter/narrower
+                        // than this viewer. Include its local parser history
+                        // before reflow, otherwise a tall mirror pads most of
+                        // its body while earlier content is already available.
+                        let budget = rows_now.saturating_mul(cols_now.div_ceil(usize::from(source.cols).max(2)))
+                            .min(4096);
+                        let mut history = session.rows_above(budget);
+                        history.reverse();
+                        let offset = source.scroll_offset.saturating_add(history.len());
+                        history.extend_from_slice(&source.cells);
                         return Arc::new(crate::mirror_view::project_history(
-                            &source.cells, &live, (source.cursor_row as usize, source.cursor_col as usize),
-                            source.scroll_offset, cols_now.max(2), rows_now.max(1), scroll,
+                            &history, &live, (source.cursor_row as usize, source.cursor_col as usize),
+                            offset, cols_now.max(2), rows_now.max(1), scroll,
                         ));
                     }
                 }
