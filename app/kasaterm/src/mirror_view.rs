@@ -340,6 +340,28 @@ pub(crate) fn project(
 
 /// History is viewer-local too. Keep the real live input below it, and never
 /// translate a click on historical text into a click on the source's live grid.
+pub(crate) fn project_session_history(
+    session: &kasa_pty::PtySession, source: &[Vec<GridCell>], cursor: SourcePos,
+    cols: usize, rows: usize, scroll: Option<usize>,
+) -> Option<Projection> {
+    // Native PTY scrolling lives in the parser. TerminalPane.scroll_offset is
+    // legacy fallback state and is not updated by socket/wheel parser scrolls.
+    let history_offset = session.view_state().0;
+    let (source_cols, source_rows) = session.size();
+    let live = if history_offset > 0 { session.live_tail_rows(source_rows as usize) }
+        else { source.to_vec() };
+    if history_offset == 0 && !crate::screenread::pinned_input_top(&live)
+        .is_some_and(|top| top <= cursor.0) { return None; }
+    // Include enough local history for this viewer before reflow. Canonical
+    // source height/width do not limit how much earlier text we can display.
+    let budget = rows.saturating_mul(cols.div_ceil(usize::from(source_cols).max(2))).min(4096);
+    let mut history = session.rows_above(budget);
+    history.reverse();
+    let offset = history_offset.saturating_add(history.len());
+    history.extend_from_slice(source);
+    Some(project_history(&history, &live, cursor, offset, cols, rows, scroll))
+}
+
 pub(crate) fn project_history(
     history: &[Vec<GridCell>], live: &[Vec<GridCell>], cursor: SourcePos,
     history_offset: usize, cols: usize, rows: usize, scroll: Option<usize>,
@@ -395,6 +417,59 @@ mod tests {
             source.push(row);
         }
         source
+    }
+
+    #[test]
+    fn parser_scroll_preserves_live_input_and_prose_when_legacy_offset_stays_zero() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let (events, incoming) = crossbeam_channel::unbounded();
+        let session = kasa_pty::PtySession::start_external(kasa_pty::PtyOptions {
+            cols: 60, rows: 20, pane_id: format!("mirror-parser-scroll-{}", uuid::Uuid::new_v4()),
+            ..Default::default()
+        }, kasa_pty::ExternalIo {
+            events: incoming, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}),
+        }).unwrap();
+        let mut bytes = String::new();
+        for i in 0..40 {
+            bytes.push_str(&format!("  - word word word word word word word word word word\r\n    continued event {i:02}\r\n"));
+        }
+        bytes.push_str("\x1b[48;2;63;69;77m\x1b[2K\r\n\x1b[2K› ready\r\n\x1b[2K\x1b[0m\r\nfooter\x1b[2A\r\x1b[3C");
+        events.send(kasa_pty::ExtEvent::Bytes(bytes.into_bytes())).unwrap();
+        session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut ws = crate::Workspace::default();
+        let id = session.full_snapshot().pane_id;
+        crate::App::apply_screen_update(&mut ws, session.full_snapshot());
+        let source = ws.panes[&id].tabs[0].term().unwrap();
+        let live = project_session_history(&session, &source.cells,
+            (source.cursor_row as usize, source.cursor_col as usize), 180, 30, None).unwrap();
+        assert!(text(&live.rows).iter().any(|row| row == "› ready"));
+        assert!(text(&live.rows).iter().any(|row| row == "footer"));
+
+        assert_eq!(session.scroll(7), 7);
+        // This is the actual screen-pump contract: scrolling updates the cells
+        // and cursor, but not TerminalPane's legacy fallback offset.
+        crate::App::apply_screen_update(&mut ws, session.screens.recv_timeout(Duration::from_secs(2)).unwrap());
+        let source = ws.panes[&id].tabs[0].term().unwrap();
+        assert_eq!(source.scroll_offset, 0);
+        assert!(crate::screenread::pinned_input_top(&source.cells).is_none());
+        let scrolled = project_session_history(&session, &source.cells,
+            (source.cursor_row as usize, source.cursor_col as usize), 180, 30, None).unwrap();
+        assert_eq!(text(&scrolled.rows)[26..], text(&live.rows)[26..]);
+        assert_eq!(scrolled.cursor, live.cursor);
+        assert!(text(&scrolled.rows).iter().any(|row| row.contains("word continued event")),
+            "scrolled paragraphs still reflow at viewer width");
+        let (r, c) = scrolled.cursor.unwrap();
+        assert_eq!(scrolled.source_map[r][c], Some((source.cursor_row as usize, source.cursor_col as usize)));
+        assert_eq!(session.size(), (60, 20));
+        assert_eq!(session.view_state().0, 7, "projection must not move the parser viewport");
+        assert_eq!(session.scroll(-7), 0);
+        crate::App::apply_screen_update(&mut ws, session.screens.recv_timeout(Duration::from_secs(2)).unwrap());
+        let source = ws.panes[&id].tabs[0].term().unwrap();
+        let returned = project_session_history(&session, &source.cells,
+            (source.cursor_row as usize, source.cursor_col as usize), 180, 30, None).unwrap();
+        assert_eq!(text(&returned.rows), text(&live.rows), "returning to live must restore the same viewport");
+        events.send(kasa_pty::ExtEvent::Eof).unwrap();
     }
 
     #[test]
