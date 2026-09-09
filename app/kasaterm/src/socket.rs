@@ -916,6 +916,46 @@ impl Backend for PtyBackend {
             .unwrap_or_default())
     }
 
+    fn transfer_snapshot(&self) -> Result<kasa_socket::transfer::MachineSnapshot> {
+        let machine = crate::transfer_endpoints::machine_context()?.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::TransferSnapshot(machine, tx))
+            .map_err(|_| anyhow::anyhow!("앱의 응답을 받을 수 없어요"))?;
+        let mut snapshot = rx.recv_timeout(std::time::Duration::from_secs(5))?.map_err(anyhow::Error::msg)?;
+        crate::transfer_endpoints::enrich_snapshot(&mut snapshot);
+        Ok(snapshot)
+    }
+
+    fn transfer_spawn(&self, request: &kasa_socket::transfer::SpawnRequest) -> Result<kasa_socket::transfer::SessionRow> {
+        let mut request = request.clone();
+        let path = std::path::Path::new(&request.cwd);
+        if !path.is_absolute() || !path.is_dir() { anyhow::bail!("도착 기계에 작업 폴더가 없어요"); }
+        request.cwd = path.canonicalize()?.to_string_lossy().into_owned();
+        if request.character.as_ref().is_some_and(|name| name.is_empty() || name.chars().count() > 120 || name.chars().any(char::is_control)) {
+            anyhow::bail!("학생 이름을 확인해 주세요");
+        }
+        let machine = crate::transfer_endpoints::machine_context()?.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::TransferPrepareSpawn(request, tx))
+            .map_err(|_| anyhow::anyhow!("앱의 응답을 받을 수 없어요"))?;
+        let plan = rx.recv_timeout(std::time::Duration::from_secs(5))?.map_err(anyhow::Error::msg)?;
+        let spawned = Arc::new(crate::transfer_endpoints::spawn(plan));
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::TransferFinishSpawn(spawned, machine, tx))
+            .map_err(|_| anyhow::anyhow!("앱의 응답을 받을 수 없어요"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(10))?.map_err(anyhow::Error::msg)
+    }
+
+    fn transfer_close(&self, identity: &kasa_socket::transfer::SessionIdentity) -> Result<()> {
+        if identity.machine_id != crate::transfer_endpoints::machine_context()?.0 {
+            anyhow::bail!("이 기계의 세션이 아니에요");
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::TransferClose(identity.clone(), tx))
+            .map_err(|_| anyhow::anyhow!("앱의 응답을 받을 수 없어요"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(5))?.map_err(anyhow::Error::msg)
+    }
+
     /// `POST /swap-character?surface=<id>&character=<name>` — pane 캐릭터 교체(respawn).
     fn swap_character(&self, surface_id: &str, character: &str) -> Result<()> {
         self.proxy
@@ -1492,6 +1532,15 @@ impl Backend for PtyBackend {
             Ok(Err(why)) => anyhow::bail!("migrate back 실패: {why}"),
             Err(_) => anyhow::bail!("migrate back 응답 없음(240초) — GUI 스레드를 확인해라"),
         }
+    }
+
+    fn transfer_migrate(&self, request: &kasa_socket::transfer::MigrateRequest) -> Result<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::SocketMigrateToRoom(request.clone(), tx))
+            .map_err(|_| anyhow::anyhow!("이사 창에 연결할 수 없어요"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(240))
+            .map_err(|_| anyhow::anyhow!("이사 응답 시간이 지났어요. 완료 여부를 확인해야 해요"))?
+            .map_err(anyhow::Error::msg)
     }
 
     fn unfold_machine(&self, label: &str) -> Result<String> {

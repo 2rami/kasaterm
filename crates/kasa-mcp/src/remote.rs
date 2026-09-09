@@ -716,6 +716,48 @@ pub fn spawn_shell_pane(base: &str, cwd: Option<&str>, token: Option<&str>) -> R
     Ok(id)
 }
 
+fn transfer_request(base: &str, action: &str, body: Option<serde_json::Value>, seconds: u64) -> Result<serde_json::Value> {
+    let url = format!("{}/transfer/{action}", base.trim_end_matches('/'));
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(seconds)).build()?;
+        let request = match body {
+            Some(body) => client.post(&url).json(&body),
+            None => client.get(&url),
+        };
+        let response = request.send().await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            anyhow::bail!("이 기계는 도착 방을 고르는 이사를 지원하지 않아요. 새 판이 필요해요");
+        }
+        let value: serde_json::Value = response.error_for_status()?.json().await?;
+        if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            anyhow::bail!("{}", value.get("error").and_then(serde_json::Value::as_str).unwrap_or("이사 요청을 처리하지 못했어요"));
+        }
+        Ok(value)
+    })
+}
+
+pub fn transfer_snapshot(base: &str) -> Result<kasa_socket::transfer::MachineSnapshot> {
+    let value = transfer_request(base, "snapshot", None, 5)?;
+    Ok(serde_json::from_value(value.get("snapshot").cloned().unwrap_or_default())?)
+}
+
+pub fn transfer_spawn(base: &str, request: &kasa_socket::transfer::SpawnRequest) -> Result<kasa_socket::transfer::SessionRow> {
+    let value = transfer_request(base, "spawn", Some(serde_json::to_value(request)?), 30)?;
+    Ok(serde_json::from_value(value.get("session").cloned().unwrap_or_default())?)
+}
+
+pub fn transfer_close(base: &str, identity: &kasa_socket::transfer::SessionIdentity) -> Result<()> {
+    transfer_request(base, "close", Some(serde_json::to_value(identity)?), 15)?;
+    Ok(())
+}
+
+pub fn transfer_migrate(base: &str, request: &kasa_socket::transfer::MigrateRequest) -> Result<String> {
+    let value = transfer_request(base, "migrate", Some(serde_json::to_value(request)?), 250)?;
+    value.get("remote_id").and_then(serde_json::Value::as_str).map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("이사 결과를 확인하지 못했어요"))
+}
+
 /// 원격 pane 의 캐릭터를 그 이름으로 못 박는다(`GET /repersona`).
 ///
 /// 소환만으로는 못 미덥다 — 2026-08-27 실측에서 `spawn-student?character=유즈` 로

@@ -1980,6 +1980,42 @@ async fn spawn_shell_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+async fn transfer_snapshot_handler(backend: Arc<dyn Backend>) -> Json<serde_json::Value> {
+    let result = tokio::task::spawn_blocking(move || backend.transfer_snapshot()).await;
+    Json(match result {
+        Ok(Ok(snapshot)) => serde_json::json!({"ok":true,"snapshot":snapshot}),
+        Ok(Err(error)) => serde_json::json!({"ok":false,"error":error.to_string()}),
+        Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
+    })
+}
+
+async fn transfer_spawn_handler(backend: Arc<dyn Backend>, Json(request): Json<kasa_socket::transfer::SpawnRequest>) -> Json<serde_json::Value> {
+    let result = tokio::task::spawn_blocking(move || backend.transfer_spawn(&request)).await;
+    Json(match result {
+        Ok(Ok(session)) => serde_json::json!({"ok":true,"session":session}),
+        Ok(Err(error)) => serde_json::json!({"ok":false,"error":error.to_string()}),
+        Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
+    })
+}
+
+async fn transfer_close_handler(backend: Arc<dyn Backend>, Json(identity): Json<kasa_socket::transfer::SessionIdentity>) -> Json<serde_json::Value> {
+    let result = tokio::task::spawn_blocking(move || backend.transfer_close(&identity)).await;
+    Json(match result {
+        Ok(Ok(())) => serde_json::json!({"ok":true}),
+        Ok(Err(error)) => serde_json::json!({"ok":false,"error":error.to_string()}),
+        Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
+    })
+}
+
+async fn transfer_migrate_handler(backend: Arc<dyn Backend>, Json(request): Json<kasa_socket::transfer::MigrateRequest>) -> Json<serde_json::Value> {
+    let result = tokio::task::spawn_blocking(move || backend.transfer_migrate(&request)).await;
+    Json(match result {
+        Ok(Ok(remote_id)) => serde_json::json!({"ok":true,"remote_id":remote_id}),
+        Ok(Err(error)) => serde_json::json!({"ok":false,"error":error.to_string()}),
+        Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
+    })
+}
+
 /// `POST /cmd` body `{"method": "surface.split", "params": {…}}` — 소켓 명령 몇 개를
 /// HTTP 로 연다. 폰이 pane 을 닫고·쪼개고·자리 바꾸고·방을 만들 창구다(2026-09-07
 /// 지시 「모바일에서도 pane 닫고 추가하고 정렬하고 방 만들고」). 소켓(`kasaterm-cli`)과
@@ -7006,6 +7042,10 @@ pub fn spawn_http_server_opts(
                 let mode_get_backend = backend.clone();
                 let focus_backend = backend.clone();
                 let close_backend = backend.clone();
+                let transfer_snapshot_backend = backend.clone();
+                let transfer_spawn_backend = backend.clone();
+                let transfer_close_backend = backend.clone();
+                let transfer_migrate_backend = backend.clone();
                 let events_backend = backend.clone();
                 let messages_backend = backend.clone();
                 let list_dir_backend = backend.clone();
@@ -7225,6 +7265,10 @@ pub fn spawn_http_server_opts(
                             close_pane_handler(close_backend.clone(), q)
                         }),
                     )
+                    .route("/transfer/snapshot", get(move || transfer_snapshot_handler(transfer_snapshot_backend.clone())))
+                    .route("/transfer/spawn", post(move |body: Json<kasa_socket::transfer::SpawnRequest>| transfer_spawn_handler(transfer_spawn_backend.clone(), body)))
+                    .route("/transfer/close", post(move |body: Json<kasa_socket::transfer::SessionIdentity>| transfer_close_handler(transfer_close_backend.clone(), body)))
+                    .route("/transfer/migrate", post(move |body: Json<kasa_socket::transfer::MigrateRequest>| transfer_migrate_handler(transfer_migrate_backend.clone(), body)))
                     // /arona-ui(슬래시 없음)는 /arona-ui/ 로 리다이렉트 —
                     // index.html 의 상대경로 assets(./assets/*) 가 디렉토리
                     // 기준으로 풀리려면 trailing slash 가 필요하다.

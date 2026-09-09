@@ -555,6 +555,29 @@ impl ApplicationHandler<UserEvent> for App {
                 self.finish_remote_shell(ready);
                 return;
             }
+            UserEvent::SocketMigrateToRoom(request, reply) => {
+                #[cfg(unix)]
+                let result = self.start_transfer_migration(request, Some(reply.clone()))
+                    .map_err(|error| format!("{error:#}"));
+                #[cfg(not(unix))]
+                let result: std::result::Result<String, String> = Err("이사는 unix 전용이에요".into());
+                #[cfg(unix)]
+                if result.is_ok() && self.migrate_running(&request.session.pane_id) {
+                    return;
+                }
+                let _ = reply.send(result);
+                return;
+            }
+            UserEvent::ValidateTransfer(identity, reply) => {
+                let result = self.validate_transfer_identity(identity).and_then(|_| {
+                    if Self::pane_agent_working(&self.ws.lock().unwrap(), &identity.pane_id) {
+                        anyhow::bail!("세션이 다시 작업을 시작했어요. 이번 이사는 중단했어요");
+                    }
+                    Ok(())
+                }).map_err(|error| format!("{error:#}"));
+                let _ = reply.send(result);
+                return;
+            }
             UserEvent::SocketMigrateBack(pane, cwd, force, reply) => {
                 #[cfg(unix)]
                 let outcome = self
@@ -805,6 +828,25 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::SocketSpawnShell(cwd, reply) => {
                 let id = self.spawn_shell_pane(cwd.as_deref());
                 let _ = reply.send(id);
+                return;
+            }
+            UserEvent::TransferSnapshot(machine, sender) => {
+                transfer_endpoints::reply(sender, Ok(self.transfer_snapshot_gui(machine)));
+                return;
+            }
+            UserEvent::TransferPrepareSpawn(request, sender) => {
+                let result = self.prepare_transfer_spawn(request).map_err(|e| e.to_string());
+                if let Err(std::sync::mpsc::SendError(Ok(plan))) = sender.send(result) {
+                    self.cancel_transfer_spawn(&plan);
+                }
+                return;
+            }
+            UserEvent::TransferFinishSpawn(spawned, machine, sender) => {
+                transfer_endpoints::reply(sender, self.finish_transfer_spawn(spawned, machine));
+                return;
+            }
+            UserEvent::TransferClose(identity, sender) => {
+                transfer_endpoints::reply(sender, self.close_transfer_shell(identity));
                 return;
             }
             UserEvent::SocketToast(msg) => {

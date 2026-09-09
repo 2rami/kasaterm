@@ -4300,6 +4300,11 @@ pub fn process_table() -> Vec<(u32, u32, String)> {
     (*process_table_shared()).clone()
 }
 
+/// 파괴적 동작의 직전 검증용. 렌더·주기 폴링은 캐시된 process_table을 쓴다.
+pub fn fresh_process_table() -> Vec<(u32, u32, String)> {
+    process_table_raw()
+}
+
 pub type ProcessTable = std::sync::Arc<Vec<(u32, u32, String)>>;
 
 /// 같은 캐시를 **복사 없이** 빌려준다. 렌더처럼 pane 마다 매 프레임 부르는 쪽은

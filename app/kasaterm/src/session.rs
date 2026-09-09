@@ -48,6 +48,7 @@ pub(crate) struct PendingMigration {
     pub(crate) force: bool,
     pub(crate) run: Option<String>,
     pub(crate) idle_since: Option<std::time::Instant>,
+    pub(crate) transfer: Option<kasa_socket::transfer::MigrateRequest>,
 }
 
 impl App {
@@ -1498,6 +1499,49 @@ impl App {
         run: Option<&str>,
         reply: Option<std::sync::mpsc::Sender<std::result::Result<String, String>>>,
     ) -> Result<String> {
+        self.migrate_pane_with_destination(pid, base, remote_cwd, force, run, reply, None)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn start_transfer_migration(
+        &mut self,
+        request: &kasa_socket::transfer::MigrateRequest,
+        reply: Option<std::sync::mpsc::Sender<std::result::Result<String, String>>>,
+    ) -> Result<String> {
+        self.validate_transfer_identity(&request.session)?;
+        let source = self.pty.get(&request.session.pane_id)
+            .ok_or_else(|| anyhow::anyhow!("출발 세션이 사라졌어요"))?;
+        if source.active_agent().is_none() {
+            let shell = source.shell_pid().ok_or_else(|| anyhow::anyhow!("셸 상태를 확인하지 못했어요"))?;
+            let command = socket::foreground_proc_name(shell)
+                .ok_or_else(|| anyhow::anyhow!("실행 중인 프로그램을 확인하지 못했어요"))?;
+            if !matches!(command.trim_start_matches('-'), "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" | "tcsh") {
+                anyhow::bail!("다른 프로그램이 실행 중이라 이사할 수 없어요");
+            }
+        }
+        let target = kasa_mcp::machines::find_route(&format!("~{}", request.destination_machine))
+            .ok_or_else(|| anyhow::anyhow!("도착 기계를 이쪽 명부에서 찾지 못했어요"))?;
+        let cwd = self.pane_current_cwd(&request.session.pane_id)
+            .ok_or_else(|| anyhow::anyhow!("현재 작업 폴더를 확인하지 못했어요"))?;
+        let remote_cwd = kasa_mcp::machines::map_local_to_remote(&target, &cwd.to_string_lossy())
+            .ok_or_else(|| anyhow::anyhow!("도착 기기의 작업 폴더 대응 규칙이 없어요"))?;
+        self.migrate_pane_with_destination(
+            &request.session.pane_id, &target.base, Some(&remote_cwd), false, None,
+            reply, Some(request.clone()),
+        )
+    }
+
+    #[cfg(unix)]
+    fn migrate_pane_with_destination(
+        &mut self,
+        pid: &str,
+        base: &str,
+        remote_cwd: Option<&str>,
+        force: bool,
+        run: Option<&str>,
+        reply: Option<std::sync::mpsc::Sender<std::result::Result<String, String>>>,
+        transfer: Option<kasa_socket::transfer::MigrateRequest>,
+    ) -> Result<String> {
         self.ensure_user_mutation_target(
             pid,
             crate::settings_room::SettingsMutation::Migrate,
@@ -1550,6 +1594,7 @@ impl App {
                     force,
                     run: run.map(str::to_string),
                     idle_since: None,
+                    transfer: transfer.clone(),
                 });
                 self.set_toast(format!("{pid} 는 지금 일하는 중 — 턴이 끝나면 이사간다"));
                 return Ok(format!("예약됨 — {pid} 가 하던 턴을 마치면 이사간다"));
@@ -1684,7 +1729,8 @@ impl App {
             model,
             effort,
             bypass,
-            run: run.map(str::to_string),
+            run: if fresh && transfer.is_some() { Some(":".to_string()) } else { run.map(str::to_string) },
+            transfer,
         };
         let mc = &mut self.info.machines_col;
         mc.busy = Some((pid.to_string(), format!("{label} 로 이사 중")));
@@ -1749,10 +1795,24 @@ impl App {
         pid: &str,
         outcome: std::result::Result<Box<MigrateReady>, String>,
     ) {
-        let result = match outcome {
+        let reserved = outcome.as_ref().ok().and_then(|ready| ready.transfer_reserved.clone())
+            .zip(outcome.as_ref().ok().map(|ready| ready.base.clone()));
+        let mut result = match outcome {
             Err(why) => Err(why),
             Ok(r) => self.migrate_seat(pid, *r).map_err(|e| format!("{e:#}")),
         };
+        if result.is_err() {
+            if let Some((identity, base)) = reserved {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    if let Err(error) = kasa_mcp::remote::transfer_close(&base, &identity) {
+                        eprintln!("[transfer] attach cleanup failed {base} {}: {error:#}", identity.pane_id);
+                        let _ = proxy.send_event(UserEvent::RepoCatchup("도착 기기에 준비한 빈 셸을 정리하지 못했어요".into()));
+                    }
+                });
+                result = result.map_err(|why| format!("{why}\n대화는 출발 기기에 남아 있어요. 그 기기에서 세션을 다시 켜야 해요"));
+            }
+        }
         let mc = &mut self.info.machines_col;
         let ok = result.is_ok();
         if let Some(p) = mc.progress.as_mut().filter(|p| p.pane == pid) {
@@ -1955,6 +2015,7 @@ impl App {
                     force,
                     run: None,
                     idle_since: None,
+                    transfer: None,
                 });
                 self.set_toast(format!("{pid} 는 지금 일하는 중 — 턴이 끝나면 데려온다"));
                 return Ok(format!("예약됨 — {pid} 가 하던 턴을 마치면 데려온다"));
@@ -5869,7 +5930,9 @@ impl App {
                     return;
                 }
             }
-            let res = if q.base == "local" {
+            let res = if let Some(request) = &q.transfer {
+                self.start_transfer_migration(request, None)
+            } else if q.base == "local" {
                 self.migrate_pane_back(&q.pane, q.cwd.as_deref(), q.force)
             } else {
                 self.migrate_pane(
@@ -10158,6 +10221,7 @@ struct MigratePlan {
     effort: String,
     bypass: bool,
     run: Option<String>,
+    transfer: Option<kasa_socket::transfer::MigrateRequest>,
 }
 
 /// 워커가 끝내고 GUI 에 돌려주는 것 — ⑦(자리 갈아끼우기·켜기)에 필요한 만큼만.
@@ -10173,6 +10237,7 @@ pub(crate) struct MigrateReady {
     pub(crate) effort: String,
     pub(crate) bypass: bool,
     pub(crate) run: Option<String>,
+    pub(crate) transfer_reserved: Option<kasa_socket::transfer::SessionIdentity>,
     /// 저쪽에 소환된 학생 pane. None 이면 맨 셸로 물러선다.
     pub(crate) remote_pane: Option<String>,
     pub(crate) character: Option<String>,
@@ -10187,7 +10252,20 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
     let stage = |i: usize, st: S, note: String| {
         let _ = proxy.send_event(UserEvent::MigrateStage(p.pid.clone(), i, st, note));
     };
-    let outcome = (|| -> Result<MigrateReady> {
+    let mut reserved: Option<kasa_socket::transfer::SessionRow> = None;
+    let mut source_stopped = false;
+    let validate = || -> Result<()> {
+        if let Some(request) = &p.transfer {
+            let (tx, rx) = std::sync::mpsc::channel();
+            proxy.send_event(UserEvent::ValidateTransfer(request.session.clone(), tx))
+                .map_err(|_| anyhow::anyhow!("출발 창이 닫혔어요"))?;
+            rx.recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|_| anyhow::anyhow!("출발 세션 상태를 확인하지 못했어요"))?
+                .map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
+    };
+    let mut outcome = (|| -> Result<MigrateReady> {
         // ① 저쪽 레포 준비 — 코드부터 맞춘다, **claude 를 끄기 전에**. 여기서
         // 실패하면 아무것도 안 건드린 채로 돌아설 수 있다(끄고 나서 실패하면
         // 학생만 잃는다).
@@ -10249,6 +10327,16 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
             Err(e) if p.force => stage(1, S::Done, format!("스냅샷 실패 — 강행: {e:#}")),
             Err(e) => anyhow::bail!("파일 스냅샷 실패: {e:#} — 알고 강행하려면 --force"),
         }
+        if let Some(request) = &p.transfer {
+            validate()?;
+            reserved = Some(kasa_mcp::remote::transfer_spawn(&p.base, &kasa_socket::transfer::SpawnRequest {
+                room: request.room.clone(),
+                cwd: p.remote_cwd.clone(),
+                character: p.character.clone(),
+            })?);
+            // 긴 복사·도착 방 생성 사이 출발 세션이 바뀌거나 일을 재개할 수 있다.
+            validate()?;
+        }
         // ③ 곱게 끈다 — SIGKILL 은 jsonl 마지막 조각을 유실할 수 있다. 안 죽으면
         // 강행하지 않고 세운다: 반쯤 산 claude 와 원격 resume 이 같은 대화를
         // 다투는 것이 최악이다(옛 9-pane 사고의 원형). 태생 스폰은 끌 것도
@@ -10264,6 +10352,7 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
                     }
                     std::thread::sleep(std::time::Duration::from_millis(120));
                 }
+                source_stopped = true;
                 stage(2, S::Done, String::new());
                 // ④ 대화 옮기기
                 if let Some(jsonl) = &p.jsonl {
@@ -10366,7 +10455,13 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
         // ⑥ 목적지에 **진짜 학생 pane** 을 먼저 만든다 — 그래야 옮겨간 자리에
         // 캐릭터·보드·훅이 다 붙는다. 창 없는 축소판 서버는 이 창구가 없으므로
         // 실패하고, 그때는 옛 경로(맨 셸 스폰)로 물러선다 — 반쪽이라도 대화는 잇는다.
-        let remote_pane = match &p.character {
+        let remote_pane = if let Some(row) = &reserved {
+            stage(5, S::Done, "선택한 방에 새 자리 준비됨".to_string());
+            if let Some(character) = &p.character {
+                kasa_mcp::remote::repersona(&p.base, &row.identity.pane_id, character, p.sid.as_deref(), None)?;
+            }
+            Some(row.identity.pane_id.clone())
+        } else { match &p.character {
             None => {
                 stage(5, S::Skipped, "캐릭터 없음 — 맨 셸".to_string());
                 None
@@ -10394,7 +10489,7 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
                     }
                 }
             }
-        };
+        }};
         Ok(MigrateReady {
             base: p.base.clone(),
             remote_cwd: p.remote_cwd.clone(),
@@ -10405,12 +10500,32 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
             effort: p.effort.clone(),
             bypass: p.bypass,
             run: p.run.clone(),
+            transfer_reserved: reserved.as_ref().map(|row| row.identity.clone()),
             remote_pane,
             character: p.character.clone(),
         })
     })();
-    let _ = proxy.send_event(UserEvent::MigrateDone(
+    if p.transfer.is_some() && source_stopped {
+        outcome = outcome.map_err(|error| anyhow::anyhow!(
+            "{error:#}\n대화는 출발 기기에 남아 있어요. 그 기기에서 세션을 다시 켜야 해요"
+        ));
+    }
+    if outcome.is_err() {
+        if let Some(row) = reserved.take() {
+            if let Err(error) = kasa_mcp::remote::transfer_close(&p.base, &row.identity) {
+                eprintln!("[transfer] reserved shell cleanup failed {} {}: {error:#}", p.base, row.identity.pane_id);
+                let _ = proxy.send_event(UserEvent::RepoCatchup("이사는 실패했고 도착 방의 빈 셸을 정리하지 못했어요".into()));
+                outcome = outcome.map_err(|error| anyhow::anyhow!("{error:#}\n도착 기기에 준비한 빈 셸이 남아 있을 수 있어요"));
+            }
+        }
+    }
+    let sent = proxy.send_event(UserEvent::MigrateDone(
         p.pid.clone(),
         outcome.map(Box::new).map_err(|e| format!("{e:#}")),
     ));
+    if sent.is_err() {
+        if let Some(row) = reserved {
+            let _ = kasa_mcp::remote::transfer_close(&p.base, &row.identity);
+        }
+    }
 }
