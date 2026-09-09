@@ -29,6 +29,8 @@ mod register;
 pub mod peermirror;
 pub mod relay;
 pub mod remote;
+pub mod remote_restore;
+pub mod surface_keys;
 #[cfg(unix)]
 pub mod adopt;
 pub mod machines;

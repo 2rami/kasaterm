@@ -4568,6 +4568,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
             let b = raw.filter(|p| p.harness.is_some() && remote.is_none());
             serde_json::json!({
                 "id": id,
+                "surface_key": crate::surface_keys::get(&id),
                 "mirror_of": mirror_label,
                 "name": b.and_then(|p| p.character.clone()),
                 "title": b.map(|p| p.title.clone()).filter(|s| !s.is_empty()),
@@ -6477,7 +6478,8 @@ async fn term_ws_handler(
     // 뒤집힌다: resize 를 force 없이 받고, 끊겨도 격자를 되돌리지 않으며(소유자가
     // 정한 크기가 곧 원본), kill 제어 메시지를 받는다.
     let own = q.get("own").map_or(false, |v| v == "1" || v == "true");
-    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own, glyphs))
+    let expected_surface_key = q.get("surface_key").cloned();
+    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own, glyphs, expected_surface_key))
         .into_response()
 }
 
@@ -6489,6 +6491,7 @@ async fn term_ws_run(
     want_grid: bool,
     own: bool,
     glyphs: bool,
+    expected_surface_key: Option<String>,
 ) {
     use futures_util::{SinkExt, StreamExt};
     // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
@@ -6542,6 +6545,14 @@ async fn term_ws_run(
             }
         }
     };
+    // A pane number can be reused between discovery and this handshake. Bind
+    // only the exact persisted surface requested by an identity-aware viewer.
+    if expected_surface_key.as_ref().is_some_and(|expected| crate::surface_keys::get(&self_id).as_ref() != Some(expected)) {
+        let _ = socket.send(Message::Text(serde_json::json!({
+            "t": "gone", "reason": "surface_identity_changed"
+        }).to_string().into())).await;
+        return;
+    }
     let viewport = ViewerViewport::new(sess.clone());
     let viewport_token = viewport.token;
     let mut visual_subscription = (want_grid && crate::visual::producer_available())
@@ -6575,6 +6586,7 @@ async fn term_ws_run(
         .send(Message::Text(
             serde_json::json!({
                 "t": "size", "cols": c, "rows": r, "mirror": mirrored, "id": self_id,
+                "surface_key": crate::surface_keys::get(&self_id),
                 "capabilities": if native_scene {
                     serde_json::json!({ "mirror_viewport": 1, "native_scene": 1 })
                 } else { serde_json::json!({ "mirror_viewport": 1 }) },
@@ -7928,6 +7940,32 @@ mod tests {
             new_events.send(kasa_pty::ExtEvent::Eof).unwrap();
             server.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_reused_number_before_any_source_frame() {
+        use futures_util::StreamExt;
+        let id = format!("identity-guard-{}", uuid::Uuid::new_v4());
+        let (source, events, _) = replacement_source(&id, 21);
+        events.send(kasa_pty::ExtEvent::Bytes(b"WRONG-SURFACE".to_vec())).unwrap();
+        wait_replacement_text(&source, "WRONG-SURFACE").await;
+        kasa_pty::register_session(&id, &source);
+        crate::surface_keys::set(&id, "replacement-key");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = axum::Router::new().route("/term/ws", axum::routing::get(super::term_ws_handler));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let (mut viewer, _) = tokio_tungstenite::connect_async(
+            format!("ws://{addr}/term/ws?pane={id}&surface_key=legacy%3A%254")
+        ).await.unwrap();
+        let message = tokio::time::timeout(std::time::Duration::from_secs(2), viewer.next())
+            .await.unwrap().unwrap().unwrap();
+        let payload: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+        assert_eq!(payload["t"], "gone");
+        assert_eq!(payload["reason"], "surface_identity_changed");
+        crate::surface_keys::remove(&id);
+        events.send(kasa_pty::ExtEvent::Eof).unwrap();
+        server.abort();
     }
 
     #[tokio::test]

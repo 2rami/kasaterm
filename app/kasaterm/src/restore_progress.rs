@@ -16,6 +16,7 @@ struct RestoreEntry {
     remote: bool,
     agent: bool,
     web: bool,
+    ready: bool,
 }
 
 fn surface_count(node: &serde_json::Value) -> usize {
@@ -45,7 +46,22 @@ impl RestoreProgress {
             remote: record.get("remote_base").and_then(|v| v.as_str()).is_some(),
             agent: record.get("was_agent").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()),
             web: record.get("web_url").is_some(),
+            ready: false,
         });
+    }
+
+    /// Retry only the wait for unfinished entries. The original layout,
+    /// assigned IDs and completed sessions are never reconstructed here.
+    fn retry_pending(&mut self, now: Instant) -> Vec<String> {
+        if !self.built {
+            // An invalid/unbuilt snapshot needs an explicit recovery choice,
+            // not another destructive whole-workspace restore.
+            return Vec::new();
+        }
+        self.started = now;
+        self.failure = None;
+        self.entries.iter().filter(|(_, entry)| entry.remote && !entry.ready)
+            .map(|(id, _)| id.clone()).collect()
     }
 }
 
@@ -55,20 +71,31 @@ impl App {
         if !crate::verification_run() { return; }
         let Ok(path) = std::env::var("KASATERM_AUTORESTORE_PROBE") else { return; };
         static PHASE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+        static ORIGINAL: std::sync::OnceLock<Mutex<HashMap<String, std::sync::Weak<kasa_pty::PtySession>>>> = std::sync::OnceLock::new();
         use std::sync::atomic::Ordering;
+        let preserved = |app: &Self| {
+            let original = ORIGINAL.get_or_init(Default::default).lock().unwrap();
+            original.len() == app.pty.len() && original.iter().all(|(id, old)| {
+                old.upgrade().zip(app.pty.get(id)).is_some_and(|(old, current)| Arc::ptr_eq(&old, current))
+            })
+        };
         match PHASE.load(Ordering::Relaxed) {
             0 => {
                 PHASE.store(1, Ordering::Relaxed);
                 let state = std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).expect("isolated restore fixture");
                 self.restore_session_state(&state);
+                *ORIGINAL.get_or_init(Default::default).lock().unwrap() = self.pty.iter()
+                    .map(|(id, session)| (id.clone(), Arc::downgrade(session))).collect();
                 for id in self.pty.keys() { self.send_bytes_to_surface(Some(id), b"RESTORE_BLOCKED_PROBE"); }
                 eprintln!("[restore-probe] blocked={} expected={}", self.restoration_blocks_input(), self.restore_progress.as_ref().map_or(0, |p| p.expected));
             }
             1 if self.restore_progress.as_ref().is_some_and(|p| p.failure.is_some()) => {
-                eprintln!("[restore-probe] failure=visible input-blocked={}", self.restoration_blocks_input());
+                eprintln!("[restore-probe] failure=visible input-blocked={} ready={}", self.restoration_blocks_input(), self.restore_progress.as_ref().map_or(0, |p| p.ready));
                 PHASE.store(2, Ordering::Relaxed);
                 self.retry_restore();
-                eprintln!("[restore-probe] retry=queued");
+                eprintln!("[restore-probe] retry=queued preserved={} ready={} expected={}", preserved(self),
+                    self.restore_progress.as_ref().map_or(0, |p| p.ready),
+                    self.restore_progress.as_ref().map_or(0, |p| p.expected));
             }
             1 | 2 if !self.restoration_blocks_input() => {
                 PHASE.store(3, Ordering::Relaxed);
@@ -76,7 +103,7 @@ impl App {
                 let ws = self.ws.lock().unwrap();
                 let tabs: usize = ws.panes.values().map(|p| p.tabs.len()).sum();
                 let active: Vec<_> = ws.panes.values().map(|p| p.active_tab).collect();
-                eprintln!("[restore-probe] complete=true surfaces={} tabs={tabs} active={active:?} input-blocked=false", self.pty.len());
+                eprintln!("[restore-probe] complete=true surfaces={} tabs={tabs} active={active:?} input-blocked=false preserved={}", self.pty.len(), preserved(self));
             }
             _ => {}
         }
@@ -87,13 +114,16 @@ impl App {
     }
 
     pub(crate) fn retry_restore(&mut self) {
-        let Some(progress) = self.restore_progress.as_ref() else { return };
-        let state = progress.state.clone();
-        // No user input has been released, so retrying the saved layout cannot
-        // discard edits in a partially restored pane. Remote sources are detached,
-        // never killed, by the normal restore path.
-        self.restore_progress = Some(RestoreProgress::new(state.clone()));
-        self.restore_applying = Some((state, Instant::now() + Duration::from_millis(90)));
+        let Some(progress) = self.restore_progress.as_mut() else { return };
+        let pending_remote = progress.retry_pending(Instant::now());
+        for id in pending_remote {
+            // Wake only existing unfinished links, never replace their parser
+            // or attach a new source pane when an old source has disappeared.
+            kasa_mcp::remote::retry_connection(&id);
+        }
+        // Keep each PTY/parser and queued local resume commands alive.
+        // Never schedule restore_session_state: it clears every current pane.
+        self.tick_restore_progress();
         self.chrome_dirty = true;
         if let Some(window) = &self.window { window.request_redraw(); }
     }
@@ -103,9 +133,13 @@ impl App {
         let mut ready = 0;
         let mut failure = None;
         let ws = self.ws.lock().unwrap();
-        for (id, entry) in &progress.entries {
+        for (id, entry) in &mut progress.entries {
+            entry.ready = false;
             if entry.web {
-                if ws.panes.contains_key(id) && self.pending_web_hosts.is_empty() { ready += 1; }
+                if ws.panes.contains_key(id) && self.pending_web_hosts.is_empty() {
+                    entry.ready = true;
+                    ready += 1;
+                }
                 continue;
             }
             let Some(session) = self.pty.get(id) else {
@@ -118,7 +152,10 @@ impl App {
             let has_grid = term.is_some_and(|term| term.live_output && !term.cells.is_empty());
             if entry.remote {
                 match kasa_mcp::remote::connection_readiness(id) {
-                    Some((true, generation, _)) if has_grid && term.is_some_and(|term| term.output_generation == generation) => ready += 1,
+                    Some((true, generation, _)) if has_grid && term.is_some_and(|term| term.output_generation == generation) => {
+                        entry.ready = true;
+                        ready += 1;
+                    }
                     Some((_, _, Some(error))) => { failure.get_or_insert_with(|| format!("{id} · {error}")); }
                     None => { failure.get_or_insert_with(|| format!("{id} 원격 연결이 끝났어요")); }
                     _ => {}
@@ -126,6 +163,7 @@ impl App {
             } else {
                 let commands_pending = self.pending_restores.iter().any(|(pending, _, _)| Arc::ptr_eq(pending, session));
                 if has_grid && !commands_pending && (!entry.agent || session.active_agent().is_some()) {
+                    entry.ready = true;
                     ready += 1;
                 }
             }
@@ -139,6 +177,12 @@ impl App {
         }
         let complete = ready == progress.expected && failure.is_none();
         let changed = progress.ready != ready || progress.failure != failure;
+        if progress.ready != ready {
+            eprintln!("[restore] progress={ready}/{}", progress.expected);
+        }
+        if complete {
+            eprintln!("[restore] complete={ready}/{}", progress.expected);
+        }
         progress.ready = ready;
         progress.failure = failure;
         if complete { self.restore_progress = None; }
@@ -198,6 +242,88 @@ mod tests {
     #[test]
     fn old_snapshots_do_not_invent_a_last_used_time() {
         assert_eq!(last_used_label(&serde_json::json!({})), "마지막 사용 시각 기록 없음");
+    }
+
+    #[test]
+    fn retry_preserves_five_ready_surfaces_and_only_targets_two_pending_links() {
+        let state = serde_json::json!({"sessions": [{"windows": [{"leaf": {
+            "pane_id": "%0", "tabs": [{}, {}, {}, {}, {}, {}]
+        }}]}]});
+        let mut progress = RestoreProgress::new(state.clone());
+        for number in 0..7 {
+            let id = format!("%{number}");
+            progress.track(&id, &serde_json::json!({"remote_base": "http://restore.invalid"}));
+            progress.entries.get_mut(&id).unwrap().ready = number < 5;
+        }
+        progress.built = true;
+        progress.ready = 5;
+        progress.failure = Some("timeout".into());
+        let now = Instant::now();
+        let mut pending = progress.retry_pending(now);
+        pending.sort();
+        assert_eq!(pending, ["%5", "%6"]);
+        assert_eq!((progress.ready, progress.expected, progress.entries.len()), (5, 7, 7));
+        assert_eq!(progress.state, state);
+        assert!(progress.built);
+        assert_eq!(progress.started, now);
+        assert!(progress.failure.is_none());
+        // Repeated clicks do not allocate IDs, reset completion or repeat work
+        // for already restored panes (whose live PTYs belong to the App).
+        assert_eq!(progress.retry_pending(now).len(), 2);
+        assert_eq!(progress.ready, 5);
+        assert!(progress.entries["%0"].ready);
+    }
+
+    #[test]
+    fn retry_does_not_requeue_local_agent_commands_or_web_hosts() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.built = true;
+        progress.track("%agent", &serde_json::json!({"was_agent": "claude"}));
+        progress.track("%web", &serde_json::json!({"web_url": "https://example.invalid"}));
+        progress.track("%remote", &serde_json::json!({"remote_base": "http://restore.invalid"}));
+        assert_eq!(progress.retry_pending(Instant::now()), ["%remote"]);
+        assert_eq!(progress.entries.len(), 3);
+    }
+
+    #[test]
+    fn retry_does_not_rebuild_an_invalid_snapshot_or_clear_its_error() {
+        let mut progress = RestoreProgress::new(serde_json::json!({"invalid": true}));
+        progress.failure = Some("invalid snapshot".into());
+        let started = progress.started;
+        assert!(progress.retry_pending(Instant::now()).is_empty());
+        assert!(!progress.built);
+        assert_eq!(progress.started, started);
+        assert_eq!(progress.failure.as_deref(), Some("invalid snapshot"));
+    }
+
+    #[test]
+    fn retry_saved_rooms_tabs_and_undocked_mirrors_keeps_their_exact_identities() {
+        let record = |id: &str, source: &str| serde_json::json!({
+            "pane_id": id, "remote_base": "http://restore.invalid",
+            "remote_pane": source, "remote_view": true, "was_agent": "claude"
+        });
+        let records: Vec<_> = (1..=7).map(|n| record(&format!("%{n}"), &format!("%{}", n + 20))).collect();
+        let mut first = records[0].clone();
+        first["tabs"] = serde_json::json!([records[1], records[2]]);
+        let mut second = records[3].clone();
+        second["tabs"] = serde_json::json!([records[4]]);
+        let state = serde_json::json!({"active_session": 0, "sessions": [{
+            "windows": [{"leaf": first}, {"split": {"a": {"leaf": second}, "b": {"leaf": records[5]}}}],
+            "undocked": [{"leaf": records[6]}], "active_window": 1
+        }]});
+        let mut progress = RestoreProgress::new(state.clone());
+        for (index, record) in records.iter().enumerate() {
+            let id = record["pane_id"].as_str().unwrap();
+            progress.track(id, record);
+            progress.entries.get_mut(id).unwrap().ready = index < 5;
+        }
+        progress.built = true;
+        progress.ready = 5;
+        let mut retry = progress.retry_pending(Instant::now());
+        retry.sort();
+        assert_eq!(retry, ["%6", "%7"], "retry targets existing local links, not source IDs");
+        assert_eq!((progress.ready, progress.expected), (5, 7));
+        assert_eq!(progress.state, state, "retry must not rewrite rooms, active tabs or source identities");
     }
 
     #[test]

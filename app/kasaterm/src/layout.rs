@@ -1433,6 +1433,7 @@ impl App {
                 // the pid_to_pane entry gone the reap pass routes through
                 // remove_pane(pid) which is a no-op (pty already gone). Fine.
                 self.pty.remove(pid);
+                kasa_mcp::surface_keys::remove(pid);
                 // 탭도 학생을 담는다(서브에이전트 스폰) — pane 과 같은 마커 정리를
                 // 안 하면 닫힌 탭의 캐릭터 바인딩이 남아 board 가 유령을 센다.
                 let closed_cwd = self.pane_cwd_cache.get(pid).cloned();
@@ -2173,9 +2174,18 @@ for p in glob.glob(os.path.join(d, '*.json')):
             let _ = self.close_window(i);
         }
         for sess in self.sessions.iter_mut().flatten() {
-            sess.pty.remove(target);
+            if sess.pty.remove(target).is_some() {
+                kasa_mcp::surface_keys::remove(target);
+            }
             if let Ok(mut ws) = sess.ws.lock() {
-                ws.panes.remove(target);
+                if let Some(pane) = ws.panes.remove(target) {
+                    kasa_mcp::surface_keys::remove(target);
+                    for pid in pane.tabs.iter().filter_map(|tab| tab.pid.as_deref()) {
+                        if !sess.pty.contains_key(pid) {
+                            kasa_mcp::surface_keys::remove(pid);
+                        }
+                    }
+                }
                 ws.rebuild_pid_map();
             }
             Self::remove_stashed_leaf(&mut sess.pty_layout, target);
@@ -2209,6 +2219,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         let closed_cwd = self.pane_cwd_cache.get(target).cloned();
         // `Arc<PtySession>` 의 마지막 주인을 놓는 지점 — 이 한 줄이 프로세스의 생사다.
         self.pty.remove(target);
+        kasa_mcp::surface_keys::remove(target);
         Self::cleanup_collab_markers(target, closed_cwd.as_deref());
         // Free the GPU texture if this was an image pane (no-op otherwise).
         if let Some(g) = self.gpu.as_mut() {
@@ -2229,6 +2240,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         };
         for pid in &secondary_pids {
             self.pty.remove(pid);
+            kasa_mcp::surface_keys::remove(pid);
         }
         {
             let mut ws = self.ws.lock().unwrap();

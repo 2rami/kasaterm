@@ -1,6 +1,81 @@
 //! 세션·윈도우·cwd/label·daemon·pty·tmux/socket·스크린 펌프·상태 저장.
 use super::*;
 
+fn latest_restored_state(dir: &std::path::Path) -> Option<serde_json::Value> {
+    let latest = std::fs::read_dir(dir).ok()?.flatten().filter_map(|entry| {
+        let name = entry.file_name();
+        let name = name.to_str()?;
+        let stamp = name.strip_prefix("session-restored-")?.strip_suffix(".json")?
+            .parse::<u64>().ok()?;
+        let metadata = entry.metadata().ok()?;
+        if !metadata.is_file() { return None; }
+        Some((metadata.modified().unwrap_or(std::time::UNIX_EPOCH), stamp, entry.path()))
+    }).max_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)))?;
+    // Do not silently choose a different older identity table if the newest
+    // backup is corrupt: ambiguous legacy mapping must remain unresolved.
+    serde_json::from_slice(&std::fs::read(latest.2).ok()?).ok()
+}
+
+fn append_surface_record_metadata(obj: &mut serde_json::Map<String, serde_json::Value>, surface: &str) {
+    obj.insert("surface_key".into(), serde_json::json!(kasa_mcp::surface_keys::ensure(surface)));
+    if let Some(key) = kasa_mcp::remote::remote_surface_key(surface) {
+        obj.insert("remote_surface_key".into(), serde_json::json!(key));
+    }
+}
+
+struct RestoredSurfaceKey {
+    id: String,
+    committed: bool,
+}
+
+impl RestoredSurfaceKey {
+    fn register(id: &str, record: &serde_json::Value) -> Self {
+        if let Some(key) = record.get("surface_key").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            kasa_mcp::surface_keys::set(id, key);
+        } else {
+            kasa_mcp::surface_keys::ensure(id);
+        }
+        Self { id: id.into(), committed: false }
+    }
+}
+
+impl Drop for RestoredSurfaceKey {
+    fn drop(&mut self) {
+        if !self.committed {
+            // Failed restore must not leave a key for a later unrelated shell
+            // that happens to reuse the still-free pane number.
+            kasa_mcp::surface_keys::remove(&self.id);
+        }
+    }
+}
+
+/// Coalesce screen data without turning a resize into lost live readiness or
+/// letting an older connection certify a new one. ExtReader emits generations
+/// only on parsed live bytes; resize/history snapshots have false + generation 0.
+fn coalesce_screen_updates(
+    previous: kasa_bridge::screen::ScreenUpdate,
+    mut next: kasa_bridge::screen::ScreenUpdate,
+) -> kasa_bridge::screen::ScreenUpdate {
+    let untagged_snapshot = !next.live_output && next.output_generation == 0;
+    let same_generation = next.output_generation == previous.output_generation;
+    if untagged_snapshot {
+        next.output_generation = previous.output_generation;
+        next.live_output = previous.live_output;
+    } else if same_generation {
+        next.live_output |= previous.live_output;
+    }
+    // Only dimensions invalidate dirty-row coordinates. Generation marks the
+    // last parsed fragment, not the start of a full grid: earlier fragments of
+    // a large snapshot can legitimately carry the preceding generation.
+    if (next.cols, next.rows) != (previous.cols, previous.rows) {
+        return next;
+    }
+    let mut rows: std::collections::HashMap<u16, Row> = previous.dirty.into_iter().collect();
+    rows.extend(next.dirty);
+    next.dirty = rows.into_iter().collect();
+    next
+}
+
 fn forward_backend_focus<T>(pane_id: String, send: impl FnOnce(String) -> T) -> T {
     send(pane_id)
 }
@@ -258,8 +333,6 @@ impl App {
                 loop {
                     match screens.try_recv() {
                         Ok(mut next) if !next.eof => {
-                            if !next.live_output { next.output_generation = update.output_generation; }
-                            next.live_output |= update.live_output;
                             // OSC 777 from a coalesced frame — fire before the
                             // merge below drops `next.notify`.
                             if let Some((title, body)) = next.notify.take() {
@@ -275,24 +348,7 @@ impl App {
                                     });
                                 }
                             }
-                            // A resize makes row numbers and widths belong to
-                            // a different grid. Combining both generations
-                            // leaves narrow panes with rows from the transient
-                            // size until a later full redraw happens.
-                            if (next.cols, next.rows) != (update.cols, update.rows) {
-                                update = next;
-                                continue;
-                            }
-                            let mut row_map: std::collections::HashMap<u16, Row> =
-                                update.dirty.into_iter().collect();
-                            for (r, row) in next.dirty {
-                                row_map.insert(r, row);
-                            }
-                            let merged_dirty: Vec<(u16, Row)> = row_map.into_iter().collect();
-                            update = kasa_bridge::screen::ScreenUpdate {
-                                dirty: merged_dirty,
-                                ..next
-                            };
+                            update = coalesce_screen_updates(update, next);
                         }
                         Ok(next) => {
                             // EOF mid-burst: 같은 자리에 새 세션이 앉았으면(스왑)
@@ -3431,6 +3487,7 @@ impl App {
     /// 종류의 구멍이 난다 — 그래서 통로를 하나로 묶었다. 레지스트리는 Weak 이라
     /// 해제는 App 이 Arc 를 떨어뜨리는 것으로 저절로 된다.
     pub(crate) fn insert_pty(&mut self, id: String, sess: std::sync::Arc<kasa_pty::PtySession>) {
+        kasa_mcp::surface_keys::ensure(&id);
         kasa_pty::register_session(&id, &sess);
         self.pty.insert(id, sess);
     }
@@ -5892,6 +5949,7 @@ impl App {
         pane_claude_sid: &HashMap<String, String>,
         agent_cfg: &HashMap<String, (String, String)>,
     ) {
+        append_surface_record_metadata(obj, surface);
         // 캐릭터 영속(거노: 재시작하면 미도리로 둔갑): pane_character 는
         // claude 프로세스 감지(was_claude)와 무관하게 살아있으므로, 감지가
         // 실패해도 캐릭터는 여기서 확실히 저장한다.
@@ -6332,6 +6390,12 @@ impl App {
     }
 
     pub(crate) fn restore_session_state(&mut self, state: &serde_json::Value) {
+        // Read the previous identity table before this restore writes its own
+        // backup. The configured session directory also isolates test fixtures.
+        let previous = crate::socket::session_file_path()
+            .and_then(|path| path.parent().and_then(latest_restored_state));
+        let prepared = kasa_mcp::surface_keys::prepare_restore_state(state, previous.as_ref());
+        let state = &prepared;
         self.restore_progress = Some(crate::restore_progress::RestoreProgress::new(state.clone()));
         // codex 는 재시작마다 옛 pid 의 pane 홈 경로를 물고 있어 `resume` 이 죽는다 —
         // 되살리기 전에 그 색인을 실체 자리로 고친다(2026-09-08, 아래 함수 주석).
@@ -6709,6 +6773,9 @@ impl App {
         let used = self.used_pane_ids();
         let id = pick_restore_id(saved, |s| used.contains(s))
             .unwrap_or_else(|| next_free_pane_id(&used));
+        // ID allocation already excluded every living PTY/tab. Register the
+        // identity on that resolved free ID, never overwrite a live source ID.
+        let mut key_registration = RestoredSurfaceKey::register(&id, rec);
         if let Some(progress) = self.restore_progress.as_mut() { progress.track(&id, rec); }
         // 웹 pane — PTY 를 안 띄운다. 그리드 자리(WebPane)만 앉히고 자식 창은
         // pending_web_hosts 로 미룬다: 복원 경로엔 ActiveEventLoop 가 없어
@@ -6739,6 +6806,7 @@ impl App {
             };
             self.ws.lock().unwrap().panes.insert(id.clone(), ps);
             self.pending_web_hosts.push((host_id, url.to_string()));
+            key_registration.committed = true;
             return Some(id);
         }
         // Remote restore is asynchronous: an unavailable host must never turn
@@ -6771,7 +6839,21 @@ impl App {
                 .get("remote_view")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let attempt = kasa_mcp::remote::restore_connection(spec, &id, cols, rows, view);
+            // Restore the same surface, not the agent conversation that happened
+            // to occupy it when the viewer last saved its layout.
+            let surface_key = rec_str("remote_surface_key")
+                .or_else(|| rpane.starts_with('%').then(|| format!("legacy:{rpane}")));
+            let attempt = if surface_key.is_some() {
+                kasa_mcp::remote::restore_connection_identified(
+                    spec, &id, cols, rows, view,
+                    kasa_mcp::remote_restore::RestoreIdentity {
+                        surface_key,
+                        ..Default::default()
+                    },
+                )
+            } else {
+                kasa_mcp::remote::restore_connection(spec, &id, cols, rows, view)
+            };
             match attempt {
                 Ok(remote) => {
                     {
@@ -6799,6 +6881,10 @@ impl App {
                         id.clone(),
                         std::sync::Arc::downgrade(&remote.session),
                     );
+                    // The startup shell may have queued EOF for this reused
+                    // ID before the replacement remote PTY was registered.
+                    // Match local restore's stale-death cleanup.
+                    self.dead_panes.lock().unwrap().retain(|old| old != &id);
                     if let Some(t) = rec
                         .get("title")
                         .and_then(|v| v.as_str())
@@ -6842,6 +6928,7 @@ impl App {
                     {
                         self.pane_claude_sid.insert(id.clone(), sid.to_string());
                     }
+                    key_registration.committed = true;
                     return Some(id);
                 }
                 Err(e) => {
@@ -7149,6 +7236,7 @@ impl App {
             let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
             self.pending_restores.push((session, cmd, at));
         }
+        key_registration.committed = true;
         Some(id)
     }
     pub(crate) fn start_tmux(&mut self) -> Result<()> {
@@ -8835,6 +8923,174 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn surface_key_save_close_reopen_preserves_identity_without_reusing_live_ids() {
+        let alive = format!("%{}", uuid::Uuid::new_v4().as_u128() as u32);
+        let restored = format!("surface-key-restored-{}", uuid::Uuid::new_v4());
+        let old_key = kasa_mcp::surface_keys::ensure(&alive);
+        let mut record = serde_json::Map::new();
+        super::append_surface_record_metadata(&mut record, &alive);
+        assert_eq!(record["surface_key"], old_key);
+        // Close the original, then let an unrelated live shell reuse its number.
+        kasa_mcp::surface_keys::remove(&alive);
+        let newcomer_key = kasa_mcp::surface_keys::ensure(&alive);
+        assert_ne!(newcomer_key, old_key);
+        assert!(super::pick_restore_id(Some(&alive), |id| id == alive).is_none());
+        let mut registered = super::RestoredSurfaceKey::register(&restored, &serde_json::Value::Object(record.clone()));
+        registered.committed = true;
+        drop(registered);
+        assert_eq!(kasa_mcp::surface_keys::get(&alive), Some(newcomer_key));
+        assert_eq!(kasa_mcp::surface_keys::get(&restored), Some(old_key.clone()));
+        // A saved closed record keeps its key after real resource removal.
+        assert_eq!(record["surface_key"], old_key);
+        kasa_mcp::surface_keys::remove(&alive);
+        kasa_mcp::surface_keys::remove(&restored);
+    }
+
+    #[test]
+    fn surface_key_failed_restore_does_not_poison_a_reused_number() {
+        let id = format!("surface-key-failed-{}", uuid::Uuid::new_v4());
+        {
+            let _pending = super::RestoredSurfaceKey::register(&id, &serde_json::json!({"surface_key": "saved-key"}));
+            assert_eq!(kasa_mcp::surface_keys::get(&id).as_deref(), Some("saved-key"));
+        }
+        assert_eq!(kasa_mcp::surface_keys::get(&id), None);
+        assert_ne!(kasa_mcp::surface_keys::ensure(&id), "saved-key");
+        kasa_mcp::surface_keys::remove(&id);
+    }
+
+    #[test]
+    fn surface_key_restore_reads_latest_backup_before_preparing_renumbered_state() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-surface-key-fixture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let previous = serde_json::json!({"leaf": {"pane_id": "%4", "session_id": "same-session"}});
+        let current = serde_json::json!({"leaf": {"pane_id": "%3", "session_id": "same-session"}});
+        let backup = dir.join("session-restored-200.json");
+        std::fs::write(dir.join("session-restored-100.json"), b"{}").unwrap();
+        std::fs::write(&backup, previous.to_string()).unwrap();
+        std::fs::write(dir.join("session.json"), current.to_string()).unwrap();
+        let saved = super::latest_restored_state(&dir).unwrap();
+        assert_eq!(saved, previous);
+        let prepared = kasa_mcp::surface_keys::prepare_restore_state(&current, Some(&saved));
+        assert_eq!(prepared["leaf"]["pane_id"], "%3");
+        assert_eq!(prepared["leaf"]["surface_key"], "legacy:%4");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&backup).unwrap()).unwrap(), previous);
+        std::fs::write(dir.join("session-restored-300.json"), b"invalid").unwrap();
+        assert!(super::latest_restored_state(&dir).is_none(), "do not guess from an older table after corruption");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn readiness_frame(live_output: bool, output_generation: u64, cols: u16, row: u16)
+        -> kasa_bridge::screen::ScreenUpdate
+    {
+        kasa_bridge::screen::ScreenUpdate {
+            live_output, output_generation, cols, rows: 3,
+            dirty: vec![(row, vec![crate::GridCell::blank(); cols as usize])],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn coalesce_readiness_survives_resize_without_retaining_old_size_rows() {
+        let merged = super::coalesce_screen_updates(
+            readiness_frame(true, 7, 20, 0), readiness_frame(false, 0, 30, 1));
+        assert!(merged.live_output);
+        assert_eq!(merged.output_generation, 7);
+        assert_eq!(merged.cols, 30);
+        assert_eq!(merged.dirty.len(), 1);
+        assert_eq!(merged.dirty[0].0, 1);
+    }
+
+    #[test]
+    fn coalesce_readiness_does_not_cross_an_explicit_generation_boundary() {
+        for (live, generation) in [(false, 8), (true, 8), (true, 0)] {
+            let merged = super::coalesce_screen_updates(
+                readiness_frame(true, 7, 20, 0), readiness_frame(live, generation, 20, 1));
+            assert_eq!((merged.live_output, merged.output_generation), (live, generation));
+            assert_eq!(merged.dirty.len(), 2, "parsed earlier fragments remain part of the canonical grid");
+            let resized = super::coalesce_screen_updates(merged, readiness_frame(false, 0, 30, 2));
+            assert_eq!((resized.live_output, resized.output_generation), (live, generation));
+        }
+    }
+
+    #[test]
+    fn coalesce_readiness_merges_same_generation_and_local_zero_generation() {
+        for generation in [0, 7] {
+            let merged = super::coalesce_screen_updates(
+                readiness_frame(true, generation, 20, 0), readiness_frame(false, generation, 20, 1));
+            assert!(merged.live_output);
+            assert_eq!(merged.output_generation, generation);
+            assert_eq!(merged.dirty.len(), 2);
+        }
+    }
+
+    #[test]
+    fn coalesce_readiness_with_actual_external_parser_waits_for_new_bytes() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let (events, incoming) = crossbeam_channel::unbounded();
+        let session = kasa_pty::PtySession::start_external(kasa_pty::PtyOptions {
+            cols: 20, rows: 3, pane_id: format!("coalesce-readiness-{}", uuid::Uuid::new_v4()),
+            ..Default::default()
+        }, kasa_pty::ExternalIo {
+            events: incoming, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}),
+        }).unwrap();
+        events.send(kasa_pty::ExtEvent::Generation(7)).unwrap();
+        events.send(kasa_pty::ExtEvent::Bytes(b"live".to_vec())).unwrap();
+        let live = session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!((live.live_output, live.output_generation), (true, 7));
+        session.resize(30, 3).unwrap();
+        let resize = session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!((resize.live_output, resize.output_generation), (false, 0));
+        let merged = super::coalesce_screen_updates(live, resize);
+        assert_eq!((merged.live_output, merged.output_generation), (true, 7));
+        events.send(kasa_pty::ExtEvent::Generation(8)).unwrap();
+        // A Generation notification alone does not certify a parsed snapshot.
+        let snapshot = super::coalesce_screen_updates(merged, session.full_snapshot());
+        assert_eq!(snapshot.output_generation, 7);
+        assert_ne!(snapshot.output_generation, 8);
+        events.send(kasa_pty::ExtEvent::Bytes(b"new".to_vec())).unwrap();
+        let fresh = session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+        let merged = super::coalesce_screen_updates(snapshot, fresh);
+        assert_eq!((merged.live_output, merged.output_generation), (true, 8));
+        events.send(kasa_pty::ExtEvent::Eof).unwrap();
+    }
+
+    #[test]
+    fn coalesce_readiness_keeps_earlier_rows_of_a_fragmented_external_frame() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let (events, incoming) = crossbeam_channel::unbounded();
+        let id = format!("coalesce-fragments-{}", uuid::Uuid::new_v4());
+        let session = kasa_pty::PtySession::start_external(kasa_pty::PtyOptions {
+            cols: 20, rows: 3, pane_id: id.clone(), ..Default::default()
+        }, kasa_pty::ExternalIo {
+            events: incoming, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}),
+        }).unwrap();
+        let mut bytes = b"FIRST\r\n".to_vec();
+        // Cross the external reader's 64 KiB fragment boundary without dirtying
+        // FIRST again. Only the final fragment writes SECOND and certifies gen 9.
+        for _ in 0..20_000 { bytes.extend_from_slice(b"\x1b[0m"); }
+        bytes.extend_from_slice(b"SECOND");
+        events.send(kasa_pty::ExtEvent::Generation(9)).unwrap();
+        events.send(kasa_pty::ExtEvent::Bytes(bytes)).unwrap();
+        let mut merged = session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_ne!(merged.output_generation, 9);
+        while merged.output_generation != 9 {
+            let next = session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+            merged = super::coalesce_screen_updates(merged, next);
+        }
+        let mut ws = crate::Workspace::default();
+        super::App::apply_screen_update(&mut ws, merged);
+        let actual = ws.panes[&id].tabs[0].term().unwrap();
+        assert!(actual.live_output);
+        assert_eq!(actual.output_generation, 9);
+        for (row, cells) in session.full_snapshot().dirty {
+            assert_eq!(actual.cells[row as usize], cells, "coalescing lost an earlier fragment's row");
+        }
+        events.send(kasa_pty::ExtEvent::Eof).unwrap();
+    }
+
     #[test]
     fn inactive_remote_tab_record_keeps_endpoint_and_view_identity() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
