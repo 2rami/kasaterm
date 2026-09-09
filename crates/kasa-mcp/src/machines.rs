@@ -875,11 +875,47 @@ pub fn stop_tunnels() {
     }
 }
 
-pub fn machines() -> Vec<Machine> {
+fn raw_machines() -> Vec<Machine> {
     let mut list = listed_machines();
     let taken: Vec<String> = list.iter().map(|m| m.label.clone()).collect();
     list.extend(guest_machines(&taken));
     list
+}
+
+/// Keep both transport routes alive, but expose one device per confirmed ID.
+/// Names, localhost ports and host aliases are not proof of machine identity.
+pub fn machines() -> Vec<Machine> {
+    let list = raw_machines();
+    let Ok(c) = cache().lock() else { return list };
+    canonical_roster(list, &c)
+}
+
+fn canonical_roster(list: Vec<Machine>, c: &Cache) -> Vec<Machine> {
+    let mut out: Vec<Machine> = Vec::new();
+    for mut machine in list {
+        machine.machine_id = machine.machine_id.or_else(|| c.get(&machine.label)?.machine_id.clone());
+        let duplicate = machine.machine_id.as_ref().and_then(|id|
+            out.iter().position(|other| other.machine_id.as_ref() == Some(id)));
+        let Some(index) = duplicate else { out.push(machine); continue };
+        let existing = &out[index];
+        let online = |m: &Machine| c.get(&m.label).is_some_and(|s| s.at.elapsed() < STALE_AFTER);
+        // Preserve the user's label, home flag, path rules and SSH settings.
+        // If that route is down, the confirmed live reverse route can carry it.
+        let (mut preferred, alternate) = if existing.guest && !machine.guest {
+            (machine, existing.clone())
+        } else { (existing.clone(), machine) };
+        if !online(&preferred) && online(&alternate) { preferred.base = alternate.base; }
+        out[index] = preferred;
+    }
+    out
+}
+
+fn seen_for_machine<'a>(machine: &Machine, c: &'a Cache) -> Option<&'a Seen> {
+    let own = c.get(&machine.label);
+    if own.is_some_and(|seen| seen.at.elapsed() < STALE_AFTER) { return own; }
+    let id = machine.machine_id.as_deref().or_else(|| own?.machine_id.as_deref());
+    id.and_then(|id| c.values().filter(|seen| seen.machine_id.as_deref() == Some(id))
+        .max_by_key(|seen| seen.at)).or(own)
 }
 
 /// 명부 파일(또는 env)의 항목만 — 알려 온 기계는 뺀다. 터널 스폰이 이걸 본다:
@@ -905,6 +941,8 @@ pub fn listed_machines() -> Vec<Machine> {
 
 pub fn find(label: &str) -> Option<Machine> {
     machines().into_iter().find(|m| m.label == label)
+        // Saved mirror links may still use the auto-discovered alias.
+        .or_else(|| raw_machines().into_iter().find(|m| m.label == label))
 }
 
 /// 폰의 새 경로는 `~<stable id>`, 옛 링크는 표시 label. stable id는 설정값이나
@@ -937,10 +975,22 @@ pub fn home_machine() -> Option<Machine> {
 /// 붙여 준다. 명부 밖 주소면 None.
 pub fn label_for_base(base: &str) -> Option<String> {
     let b = base.trim_end_matches('/');
-    machines()
-        .into_iter()
-        .find(|m| m.base == b)
-        .map(|m| m.label)
+    let raw = raw_machines();
+    let target = raw.iter().find(|m| m.base == b)?;
+    let c = cache().lock().ok()?;
+    let id = target.machine_id.as_deref().or_else(|| c.get(&target.label)?.machine_id.as_deref());
+    let canonical = canonical_roster(raw.clone(), &c);
+    canonical.iter().find(|m| m.base == b || id.is_some_and(|id| m.machine_id.as_deref() == Some(id)))
+        .map(|m| m.label.clone()).or_else(|| Some(target.label.clone()))
+}
+
+pub fn same_machine_bases(a: &str, b: &str) -> bool {
+    if a.trim_end_matches('/') == b.trim_end_matches('/') { return true; }
+    let list = raw_machines();
+    let Ok(c) = cache().lock() else { return false };
+    let id = |base: &str| list.iter().find(|m| m.base == base.trim_end_matches('/'))
+        .and_then(|m| m.machine_id.as_deref().or_else(|| c.get(&m.label)?.machine_id.as_deref()));
+    matches!((id(a), id(b)), (Some(a), Some(b)) if a == b)
 }
 
 /// 경로 접두 매핑. 경계가 path 성분이어야 한다 — `/a/bc` 가 `/a/b` 규칙에
@@ -1092,7 +1142,7 @@ pub async fn poll_loop() {
     let client = reqwest::Client::new();
     let mut announced: Vec<String> = Vec::new();
     loop {
-        let list = machines();
+        let list = raw_machines();
         let labels: Vec<String> = list.iter().map(|m| m.label.clone()).collect();
         if labels != announced {
             eprintln!("[machines] {} 곳 폴링: {}", list.len(), labels.join(", "));
@@ -1129,7 +1179,12 @@ pub async fn poll_loop() {
 /// 떠, 미니 미러링된 건데」). 폴링 캐시라 기계가 방금 죽었어도 마지막 모습이 남는다.
 pub fn cached_pane(label: &str, pane: &str) -> Option<Value> {
     let c = cache().lock().ok()?;
-    c.get(label)?
+    let own = c.get(label)?;
+    let seen = if own.at.elapsed() < STALE_AFTER { own } else {
+        own.machine_id.as_ref().and_then(|id| c.values()
+            .filter(|s| s.machine_id.as_ref() == Some(id)).max_by_key(|s| s.at)).unwrap_or(own)
+    };
+    seen
         .panes
         .iter()
         .find(|row| row.get("id").and_then(Value::as_str) == Some(pane))
@@ -1234,12 +1289,13 @@ fn snapshot_machine(
 /// 공용 주소 관문이 같은 slug/key 범위에서 확인한 살아 있는 업링크까지 합친 스냅샷.
 /// 이름 목록은 `uplink::verified_machines`를 통과한 요청에서만 들어온다.
 pub(crate) fn snapshot_with_uplinks(uplinks: &[crate::uplink::GatewayMachine]) -> Vec<Value> {
+    let list = machines();
     let c = cache().lock().ok();
     let local_build = build_id();
-    machines()
+    list
         .into_iter()
         .map(|m| {
-            let hit = c.as_ref().and_then(|c| c.get(&m.label));
+            let hit = c.as_ref().and_then(|c| seen_for_machine(&m, c));
             let uplink = matching_uplink(&m, hit, uplinks);
             snapshot_machine(m, hit, uplink, &local_build)
         })
@@ -1249,6 +1305,38 @@ pub(crate) fn snapshot_with_uplinks(uplinks: &[crate::uplink::GatewayMachine]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confirmed_device_id_merges_guest_routes_preserving_user_metadata_and_fallback() {
+        let configured = parse(&serde_json::json!([{
+            "label":"Saved Mini", "ssh":"mini", "base":"http://127.0.0.1:18795", "home":true,
+            "roots":{"/local":"/remote"}
+        }])).remove(0);
+        let mut guest = configured.clone();
+        guest.label = "mini.local".into(); guest.guest = true; guest.ssh = None;
+        guest.base = "http://127.0.0.1:19011".into(); guest.home = false; guest.roots.clear();
+        let seen = |age| Seen { at: Instant::now() - age, panes: vec![], sync:true,
+            build:Some("build".into()), machine_id:Some("same-stable-machine-id".into()) };
+        let mut c = Cache::from([(configured.label.clone(), seen(Duration::ZERO)),
+            (guest.label.clone(), seen(Duration::ZERO))]);
+        for rows in [vec![configured.clone(), guest.clone()], vec![guest.clone(), configured.clone()]] {
+            let merged = canonical_roster(rows, &c);
+            assert_eq!(merged.len(), 1);
+            assert_eq!(merged[0].label, configured.label);
+            assert_eq!(merged[0].base, configured.base);
+            assert_eq!(merged[0].roots, configured.roots);
+            assert!(merged[0].home);
+        }
+        c.get_mut(&configured.label).unwrap().at = Instant::now() - STALE_AFTER;
+        let merged = canonical_roster(vec![configured.clone(), guest.clone()], &c);
+        assert_eq!(merged[0].label, configured.label);
+        assert_eq!(merged[0].base, guest.base);
+        assert!(seen_for_machine(&merged[0], &c).unwrap().at.elapsed() < STALE_AFTER);
+        c.get_mut(&guest.label).unwrap().machine_id = Some("another-device".into());
+        assert_eq!(canonical_roster(vec![configured.clone(), guest.clone()], &c).len(), 2);
+        c.clear();
+        assert_eq!(canonical_roster(vec![configured, guest], &c).len(), 2, "never merge by localhost or similar names");
+    }
 
     #[test]
     fn announced_guest_joins_the_roster_without_a_file_entry() {

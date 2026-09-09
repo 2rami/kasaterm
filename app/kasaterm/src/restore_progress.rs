@@ -337,6 +337,7 @@ impl App {
     pub(crate) fn run_restore_probe(&mut self) {
         if !crate::verification_run() { return; }
         let Ok(path) = std::env::var("KASATERM_AUTORESTORE_PROBE") else { return; };
+        let send_probe = std::env::var_os("KASATERM_AUTORESTORE_OBSERVE_ONLY").is_none();
         static PHASE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
         static ORIGINAL: std::sync::OnceLock<Mutex<HashMap<String, std::sync::Weak<kasa_pty::PtySession>>>> = std::sync::OnceLock::new();
         use std::sync::atomic::Ordering;
@@ -353,7 +354,7 @@ impl App {
                 self.restore_session_state(&state);
                 *ORIGINAL.get_or_init(Default::default).lock().unwrap() = self.pty.iter()
                     .map(|(id, session)| (id.clone(), Arc::downgrade(session))).collect();
-                for id in self.pty.keys() { self.send_bytes_to_surface(Some(id), b"RESTORE_BLOCKED_PROBE"); }
+                if send_probe { for id in self.pty.keys() { self.send_bytes_to_surface(Some(id), b"RESTORE_BLOCKED_PROBE"); } }
                 eprintln!("[restore-probe] blocked={} expected={}", self.restoration_blocks_input(), self.restore_progress.as_ref().map_or(0, |p| p.expected));
             }
             1 if self.restore_progress.as_ref().is_some_and(|p| p.failure.is_some()) => {
@@ -362,7 +363,7 @@ impl App {
                 PHASE.store(2, Ordering::Relaxed);
                 if std::env::var_os("KASATERM_AUTORESTORE_BACKGROUND_PROBE").is_some() {
                     self.continue_restore_in_background();
-                    for id in self.pty.keys() { self.send_bytes_to_surface(Some(id), b"BACKGROUND_READY_PROBE"); }
+                    if send_probe { for id in self.pty.keys() { self.send_bytes_to_surface(Some(id), b"BACKGROUND_READY_PROBE"); } }
                     eprintln!("[restore-probe] background=true blocked={} preserved={}", self.restoration_blocks_input(), preserved(self));
                 }
                 self.retry_restore();
@@ -372,7 +373,7 @@ impl App {
             }
             1 | 2 if self.restore_applying.is_none() && self.restore_progress.is_none() => {
                 PHASE.store(3, Ordering::Relaxed);
-                for id in self.pty.keys() { self.send_bytes_to_surface(Some(id), b"RESTORE_ALLOWED_PROBE"); }
+                if send_probe { for id in self.pty.keys() { self.send_bytes_to_surface(Some(id), b"RESTORE_ALLOWED_PROBE"); } }
                 let ws = self.ws.lock().unwrap();
                 let tabs: usize = ws.panes.values().map(|p| p.tabs.len()).sum();
                 let active: Vec<_> = ws.panes.values().map(|p| p.active_tab).collect();

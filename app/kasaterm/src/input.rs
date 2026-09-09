@@ -413,6 +413,7 @@ impl App {
         lines: i32,
     ) -> bool {
         let stored = self.mirror_view_scroll.get(tab_pid).copied();
+        self.turn.clear_mirror_target(tab_pid);
         let current = stored.unwrap_or(projection.scroll_from_bottom).min(projection.max_scroll);
         let history_offset = self.pty.get(tab_pid).map_or(0, |pty| pty.view_state().0);
         if mirror_uses_parser_history(current, projection.max_scroll, lines, history_offset) {
@@ -2941,6 +2942,7 @@ impl App {
     fn follow_live_tail_now(&mut self) {
         let Some(id) = self.target_surface() else { return };
         self.mirror_view_scroll.remove(&id);
+        self.turn.clear_mirror_target(&id);
         let Some(sess) = self.pty_for_pane(&id) else { return };
         if sess.view_state().0 > 0 {
             sess.scroll_to_bottom();
@@ -3256,6 +3258,7 @@ impl App {
         // scroll offsets are left alone — switching focus by clicking
         // doesn't disturb where the user was reading.
         if let Some(pid) = self.target_surface() {
+            self.turn.clear_mirror_target(&pid);
             if self.mirror_view_scroll.remove(&pid).is_some() { self.chrome_dirty = true; }
         }
         if let Ok(mut ws) = self.ws.lock() {

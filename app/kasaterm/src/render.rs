@@ -999,14 +999,18 @@ impl App {
                 .ok()
                 .map(|ws| ws.panes.keys().cloned().collect())
                 .unwrap_or_default();
-            self.turn.retain_panes(|id| ids.iter().any(|k| k == id));
+            self.turn.retain_panes(|id| ids.iter().any(|k| k == id) || self.pty.contains_key(id));
             let mut out = std::collections::HashMap::new();
             for id in ids {
                 // Arc 를 복제해 self 빌림을 끊는다 — 참조를 든 채로는 캐시를 못 고친다.
                 let Some(sess) = self.pty_for_pane(&id).cloned() else {
                     continue;
                 };
-                if let Some(h) = self.turn.header(&id, &sess) {
+                let viewer_top = self.pane_view_shift.get(&id).and_then(|s| s.projection.as_ref())
+                    .filter(|p| p.scroll_from_bottom > 0 || sess.view_state().0 > 0)
+                    .and_then(|p| p.top_abs);
+                let pid = self.ws.lock().unwrap().active_tab_pid(&id);
+                if let Some(h) = self.turn.header_at(&pid, &sess, viewer_top) {
                     out.insert(id, h);
                 }
             }
@@ -3950,18 +3954,10 @@ impl App {
                             theme::with_alpha(theme::border(), 0x66)
                         },
                     );
-                    // 원격(맥미니 등) pane 칸은 몸통 물들임과 같은 강조색으로 옅게
-                    // 덮어 곁눈으로도 「다른 기계」가 잡히게 — 명단 줄의 기계 칩과 짝
-                    // (거노 2026-09-02 「미니맵에서도 맥미니색배경」). 활성 칸은 안쪽
-                    // 판이 이 물들임을 덮고 accent 테두리가 대신 말하므로, 비활성
-                    // 칸에서 특히 읽힌다. machine 은 원격 pane 에만 Some 이다.
-                    if info.machine.is_some() && mw > 4.0 && mh > 4.0 {
-                        round_rect(g, mx, my, mw, mh, 2.0, theme::with_alpha(theme::accent(), 0x2e));
-                    }
                     // 활성 칸은 **테두리로만** 표시한다. 통으로 칠하면 pane 이 하나인
                     // 방에서 카드 머리 아래가 통짜 accent 덩어리가 되어, 배치도가
                     // 아니라 잘못 칠해진 자리로 읽힌다(실측).
-                    if (cur || signal.is_some()) && mw > 5.0 && mh > 5.0 {
+                    if (cur || signal.is_some() || info.machine.is_some()) && mw > 5.0 && mh > 5.0 {
                         round_rect(
                             g,
                             mx + 1.5,
@@ -3969,11 +3965,11 @@ impl App {
                             mw - 3.0,
                             mh - 3.0,
                             1.5,
-                            if cur {
+                            pane_identity::minimap_background(if cur {
                                 theme::surface_active()
                             } else {
                                 theme::panel_bg()
-                            },
+                            }, info.machine.as_deref()),
                         );
                     }
                     // 숨쉬는 건 안쪽 판이다. 테두리까지 같이 흐려지면 칸의 윤곽이
@@ -4164,11 +4160,11 @@ impl App {
                         mw,
                         mh,
                         2.0,
-                        if hov {
+                        pane_identity::minimap_background(if hov {
                             theme::surface_hover()
                         } else {
                             theme::with_alpha(theme::surface(), 0x80)
-                        },
+                        }, info.machine.as_deref()),
                     );
                     if let Some((col, period)) = signal {
                         if mw > 5.0 && mh > 5.0 {

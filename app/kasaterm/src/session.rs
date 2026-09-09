@@ -4428,7 +4428,20 @@ impl App {
         if let Some(c) = self.pending_spawn_cwd.clone() {
             return Some(c);
         }
-        let prev = prev_pane.and_then(|id| self.pane_current_cwd(id));
+        let pid = prev_pane.map(|id| self.ws.lock().unwrap().active_tab_pid(id));
+        let prev = pid.as_deref().and_then(|id| {
+            let cwd = self.pane_current_cwd(id);
+            let Some(info) = kasa_mcp::remote::remote_info(id).filter(|info| info.view) else { return cwd };
+            // New siblings of a mirror are local shells. Never start one in an
+            // absent /Users/<remote-account>/... directory on the other Mac.
+            let remote = cwd.as_ref().map(|p| p.to_string_lossy().into_owned()).or(info.remote_cwd);
+            let mapped = remote.as_deref().and_then(|path| {
+                let machine = kasa_mcp::machines::find(&info.label)?;
+                kasa_mcp::machines::map_remote_to_local(&machine, path)
+            });
+            info.origin_cwd.into_iter().chain(mapped).chain(remote)
+                .map(std::path::PathBuf::from).find(|path| path.is_dir())
+        });
         resolve_spawn_cwd(prev)
     }
     /// Recompute the sidebar file tree when its root (the active pane's cwd)

@@ -46,6 +46,19 @@ fn request_source_close(targets: &[MirrorTarget]) -> Result<(), String> {
 }
 
 impl App {
+    /// Closing a source is a layout event even while its PTY is kept for undo.
+    /// Do not use EOF or the socket disconnect as a proxy for this decision.
+    pub(crate) fn notify_source_closed(&self, target: &str) {
+        let ws = self.ws.lock().unwrap();
+        let mut ids = vec![target.to_string()];
+        if let Some(pane) = ws.panes.get(target) {
+            ids.extend(pane.tabs.iter().filter_map(|tab| tab.pid.clone()));
+        }
+        ids.sort();
+        ids.dedup();
+        for id in ids { kasa_mcp::push_viewer_control(&id, r#"{"t":"source-closed"}"#); }
+    }
+
     fn mirror_close_targets(&self, action: &PendingClose) -> Vec<MirrorTarget> {
         let ws = self.ws.lock().unwrap();
         let mut ids = match action {

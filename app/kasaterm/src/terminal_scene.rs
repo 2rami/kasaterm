@@ -889,9 +889,9 @@ impl App {
             .map(|source| {
                 let scroll = self.mirror_view_scroll.get(&tab_pid).copied();
                 if let Some(session) = self.pty.get(&tab_pid) {
-                    if let Some(view) = crate::mirror_view::project_session_history(
+                    if let Some(view) = crate::mirror_view::project_session_history_target(
                         session, &source.cells, (source.cursor_row as usize, source.cursor_col as usize),
-                        cols_now.max(2), rows_now.max(1), scroll,
+                        cols_now.max(2), rows_now.max(1), scroll, self.turn.mirror_target(&tab_pid),
                     ) {
                         return Arc::new(view);
                     }
@@ -1102,6 +1102,7 @@ impl App {
             };
             if codex_live {
                 localize_codex_prompt_background(&mut composed, theme::surface());
+                crate::mirror_diff::localize(&mut composed, theme::bg(), theme::success(), theme::danger());
             }
         }
         {
@@ -1405,6 +1406,9 @@ impl App {
             let (hcw, hch) = (self.cell.w * fs, self.cell.h * fs);
             if let Some(row) = composed.get_mut(0) {
                 let cols = crate::turnjump::paint_header_row(row, h);
+                if kasa_mcp::remote::is_remote_pane(tab_pid.as_str()) {
+                    crate::turnjump::localize_mirror_header(row, theme::surface());
+                }
                 let rect_at = |c: usize| {
                     // 화살표 한 칸은 손가락으로 누르기엔 좁다 — 좌우로 반 칸씩
                     // 넓혀 잡는다. 그래도 서로 두 칸 떨어져 있어 안 겹친다.

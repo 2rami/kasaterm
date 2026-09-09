@@ -247,7 +247,9 @@ impl App {
             };
             match remote {
                 Some(info) => {
-                    let label = if info.label.is_empty() {
+                    let label = if let Some(label) = kasa_mcp::machines::label_for_base(&info.base) {
+                        label
+                    } else if info.label.is_empty() {
                         info.base.clone()
                     } else {
                         info.label.clone()

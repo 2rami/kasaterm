@@ -4409,6 +4409,10 @@ impl ApplicationHandler<UserEvent> for App {
                             .find(|(_, r, _)| hit(*r))
                             .map(|(id, _, text)| (id.clone(), text.clone()))
                     }) {
+                        if self.jump_mirror_prompt(&pane_id, &target, None) {
+                            window.request_redraw();
+                            return;
+                        }
                         // wheel 을 쏠 pane-local 셀 = 클릭 지점(그 pane 안이므로 안전).
                         let cell = self
                             .px_to_pane_cell(cx, cy)
@@ -7197,6 +7201,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.refresh_machines_col();
         self.refresh_mirror_theme();
+        self.poll_mirror_sync();
         // 참조 그림으로 굽는 잡의 진행을 걷는다 — 다 구운 것을 설치하고 프로바이더
         // 감지 캐시를 갱신한다. 설치가 GUI 스레드 몫인 이유는 로스터 갱신과 캐시
         // 무효화를 함께 해야 해서다(themegen.rs 참조).

@@ -973,6 +973,9 @@ impl App {
             }
             return Ok(None);
         };
+        // A view is not a remote execution context. Splitting/tabbing its local
+        // container must never POST /spawn-shell into the host's active room.
+        if info.view { return Ok(None); }
         let cwd = self
             .pty
             .get(&source_pid)
@@ -1425,6 +1428,7 @@ impl App {
             )
         };
         if let Some(pid) = pid_opt.as_deref() {
+            kasa_mcp::push_viewer_control(pid, r#"{"t":"source-closed"}"#);
             self.cancel_restore_surface(pid);
             if pid != outer {
                 self.close_owned_remote_surface(pid);
@@ -2218,6 +2222,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 탭 셸·협업 마커·GPU 텍스처·마크다운 캐시·화면 상태. 트리는 건드리지 않으므로
     /// 트리에서 이미 빠진 pane(숨긴 것)에도 그대로 쓴다.
     pub(crate) fn drop_pane_resources(&mut self, target: &str) {
+        self.notify_source_closed(target);
         let closed_cwd = self.pane_cwd_cache.get(target).cloned();
         // `Arc<PtySession>` 의 마지막 주인을 놓는 지점 — 이 한 줄이 프로세스의 생사다.
         self.pty.remove(target);
@@ -2325,6 +2330,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             return;
         }
         self.record_closed_pane(target, true, stashed);
+        self.notify_source_closed(target);
         self.cancel_restore_pane(target);
         let was_active = self
             .ws

@@ -19,6 +19,8 @@ pub(crate) struct Projection {
     pub body_lines: Vec<ProjectedLine>,
     pub max_scroll: usize,
     pub scroll_from_bottom: usize,
+    pub top_source_row: Option<usize>,
+    pub top_abs: Option<i64>,
 }
 
 fn blank_line(cols: usize) -> ProjectedLine {
@@ -172,6 +174,7 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
         let first_row = row_index;
         let tool_title = claude_tool_title(&source[first_row]);
         let codex_title = codex_tool_title(&source[first_row]);
+        let diff_indent = crate::mirror_diff::gutter(&source[first_row]);
         let indented_code = source[first_row].iter().take_while(|cell| cell.ch == ' ').count() >= 4;
         let mut logical: Vec<(GridCell, Option<SourcePos>)> = Vec::new();
         let mut omit_leading = 0;
@@ -184,11 +187,12 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
             // Reuse the mobile continuation rule only inside a recognised agent
             // body. Explicit input newlines, code fences/indentation and tables
             // retain their hard breaks; ordinary shell grids stay strict VT.
-            let paragraph = (!soft_wrap && prose && !fenced && !indented_code && row.len() != cols
+            let paragraph = (!soft_wrap && prose && !fenced && (!indented_code || diff_indent.is_some()) && row.len() != cols
                 && row_index + 1 < end
                 && (codex_title || (!code_or_table(row) && !code_or_table(&source[row_index + 1]))))
                 .then(|| {
                     let next = &source[row_index + 1];
+                    if let Some(indent) = diff_indent { return crate::mirror_diff::continuation(row, next, indent); }
                     if codex_title { return codex_tool_continuation(row, next); }
                     (tool_title.then(|| tool_title_continuation(row, next)).flatten())
                         .or_else(|| kasa_bridge::reflow::paragraph_continuation(row, next, row.len()))
@@ -233,7 +237,17 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
             let wide = cell.ch.width().unwrap_or(1) == 2;
             let width = if wide { 2.min(cols) } else { 1 };
             if line.cells.len() + width > cols {
+                // Prefer a nearby word boundary for agent prose and patch text.
+                // Preserve every original cell/map entry; long tokens still wrap.
+                let split = (prose && !fenced && (!indented_code || diff_indent.is_some()))
+                    .then(|| line.cells.iter().enumerate().rev()
+                        .find(|(i, c)| c.ch == ' ' && *i > 0 && line.cells.len() - *i <= 16
+                            && line.cells.get(i.saturating_sub(1)).is_none_or(|c| c.ch.width() != Some(2)))
+                        .map(|(i, _)| i + 1)).flatten()
+                    .filter(|&i| i < line.cells.len());
+                let tail = split.map(|i| (line.cells.split_off(i), line.source_map.split_off(i)));
                 output.push(finish_line(&mut line, cols, &fill, true));
+                if let Some((cells, source_map)) = tail { line = ProjectedLine { cells, source_map }; }
             }
             line.cells.push(cell.clone());
             line.source_map.push(*pos);
@@ -276,7 +290,8 @@ pub(crate) fn project(
 ) -> Projection {
     if cols == 0 || rows == 0 {
         return Projection { rows: vec![vec![]; rows], source_map: vec![vec![]; rows], cursor: None,
-            body_lines: Vec::new(), max_scroll: 0, scroll_from_bottom: 0 };
+            body_lines: Vec::new(), max_scroll: 0, scroll_from_bottom: 0,
+            top_source_row: None, top_abs: None };
     }
     // Canonical terminal height is not content height. Keeping dozens of empty
     // source rows below a shell prompt would put only blank padding in a short
@@ -318,6 +333,8 @@ pub(crate) fn project(
     // viewport offset so the next wheel step starts here, not at the old tail.
     let scroll_from_bottom = body_lines.len().saturating_sub(body_stop);
     let visible_body = &body_lines[body_start..body_stop];
+    let top_source_row = visible_body.iter().flat_map(|line| &line.source_map)
+        .flatten().next().map(|pos| pos.0);
     let mut visible = Vec::with_capacity(rows);
     if input_top.is_some() {
         visible.extend((visible_body.len()..body_height).map(|_| blank_line(cols)));
@@ -334,15 +351,23 @@ pub(crate) fn project(
     Projection {
         rows: visible.iter().map(|line| line.cells.clone()).collect(),
         source_map: visible.into_iter().map(|line| line.source_map).collect(),
-        cursor, body_lines, max_scroll, scroll_from_bottom,
+        cursor, body_lines, max_scroll, scroll_from_bottom, top_source_row, top_abs: None,
     }
 }
 
 /// History is viewer-local too. Keep the real live input below it, and never
 /// translate a click on historical text into a click on the source's live grid.
+#[cfg(test)]
 pub(crate) fn project_session_history(
     session: &kasa_pty::PtySession, source: &[Vec<GridCell>], cursor: SourcePos,
     cols: usize, rows: usize, scroll: Option<usize>,
+) -> Option<Projection> {
+    project_session_history_target(session, source, cursor, cols, rows, scroll, None)
+}
+
+pub(crate) fn project_session_history_target(
+    session: &kasa_pty::PtySession, source: &[Vec<GridCell>], cursor: SourcePos,
+    cols: usize, rows: usize, scroll: Option<usize>, target_abs: Option<i64>,
 ) -> Option<Projection> {
     // Native PTY scrolling lives in the parser. TerminalPane.scroll_offset is
     // legacy fallback state and is not updated by socket/wheel parser scrolls.
@@ -358,13 +383,24 @@ pub(crate) fn project_session_history(
     let mut history = session.rows_above(budget);
     history.reverse();
     let offset = history_offset.saturating_add(history.len());
+    let first_abs = session.view_state().1 as i64 - offset as i64;
     history.extend_from_slice(source);
-    Some(project_history(&history, &live, cursor, offset, cols, rows, scroll))
+    let target_row = target_abs.and_then(|abs| usize::try_from(abs - first_abs).ok());
+    let mut view = project_history_target(&history, &live, cursor, offset, cols, rows, scroll, target_row);
+    view.top_abs = view.top_source_row.map(|row| first_abs + row as i64);
+    Some(view)
 }
 
 pub(crate) fn project_history(
     history: &[Vec<GridCell>], live: &[Vec<GridCell>], cursor: SourcePos,
     history_offset: usize, cols: usize, rows: usize, scroll: Option<usize>,
+) -> Projection {
+    project_history_target(history, live, cursor, history_offset, cols, rows, scroll, None)
+}
+
+fn project_history_target(
+    history: &[Vec<GridCell>], live: &[Vec<GridCell>], cursor: SourcePos,
+    history_offset: usize, cols: usize, rows: usize, scroll: Option<usize>, target_row: Option<usize>,
 ) -> Projection {
     let top = crate::screenread::pinned_input_top(live).filter(|top| *top <= cursor.0);
     let body_len = top.map_or(history.len(), |top| top.saturating_add(history_offset).min(history.len()));
@@ -372,6 +408,11 @@ pub(crate) fn project_history(
     if let Some(top) = top { combined.extend_from_slice(&live[top..]); }
     let projected_cursor = top.map_or((usize::MAX, usize::MAX), |top| (body_len + cursor.0 - top, cursor.1));
     let mut view = project(&combined, projected_cursor, cols, rows, top.map(|_| body_len), Some(scroll.unwrap_or(0)));
+    if let Some(index) = target_row.and_then(|target| view.body_lines.iter()
+        .position(|line| line.source_map.iter().flatten().any(|pos| pos.0 == target))) {
+        let offset = view.max_scroll.saturating_sub(index);
+        view = project(&combined, projected_cursor, cols, rows, top.map(|_| body_len), Some(offset));
+    }
     let remap = |pos: &mut Option<SourcePos>| {
         *pos = pos.and_then(|(row, col)| {
             if row < body_len { row.checked_sub(history_offset).map(|row| (row, col)) }
@@ -386,6 +427,61 @@ pub(crate) fn project_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbered_diff_continuations_rejoin_at_viewer_width_without_losing_cells() {
+        use kasa_bridge::screen::Color;
+        let mut source = codex_screen(&[
+            " 13 + aaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcde",
+            "     fghij done",
+            " 14 + next code line",
+        ], 40);
+        for row in &mut source[..3] { for cell in row { cell.bg = Color::Rgb(221, 250, 224); } }
+        let view = project(&source, (4, 3), 80, 12, Some(3), None);
+        assert_eq!(view.body_lines.len(), 2, "hard-drawn continuation is one code line");
+        let body: Vec<_> = view.body_lines.iter().map(|row| row.cells.clone()).collect();
+        assert!(text(&body)[0].contains("abcdefghij done"), "{:?}", text(&body));
+        assert!(text(&body)[1].contains("14 + next code line"));
+        for width in [12, 24, 100] {
+            let projected = project(&source, (4, 3), width, 30, Some(3), None);
+            for (r, row) in source[..3].iter().enumerate() {
+                for (c, cell) in row.iter().enumerate().filter(|(_, cell)| !matches!(cell.ch, ' ' | '\0')) {
+                    let count = projected.body_lines.iter().flat_map(|row| row.source_map.iter()).filter(|pos| **pos == Some((r,c))).count();
+                    assert_eq!(count, 1, "lost/duplicated {:?} at {r}:{c} with viewer width {width}", cell.ch);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codex_indented_patch_wrap_uses_marker_end_not_code_indent() {
+        use kasa_bridge::screen::Color;
+        let mut source = codex_screen(&[
+            "    557 +    fn mirrored_header_uses_viewer_palette_after_copying_sour",
+            "         ce_cells() {",
+            "    558 +        let next = true;",
+        ], 70);
+        for row in &mut source[..3] { for cell in row { cell.bg = Color::Rgb(221, 250, 224); } }
+        let view = project(&source, (4, 3), 110, 12, Some(3), None);
+        assert_eq!(view.body_lines.len(), 2);
+        assert!(text(&view.rows).iter().any(|row| row.contains("after_copying_source_cells()")));
+    }
+
+    #[test]
+    fn prompt_target_lands_at_top_at_different_viewer_widths() {
+        let live = codex_screen(&["recent answer"], 60);
+        let mut history: Vec<_> = (0..50).map(|i| {
+            let mut row = line(&format!("answer {i}: long content that wraps on a narrow viewer"));
+            row.resize(60, GridCell::blank()); row
+        }).collect();
+        history[12] = line("› target question");
+        for width in [24, 45, 90] {
+            let view = project_history_target(&history, &live, (2, 3), 60, width, 10, None, Some(12));
+            assert_eq!(view.top_source_row, Some(12));
+            assert!(text(&view.rows)[0].starts_with("› target question"));
+            assert!(text(&view.rows).iter().any(|row| row.contains("› ready")));
+        }
+    }
     fn line(text: &str) -> Vec<GridCell> {
         text.chars().map(|ch| GridCell { ch, ..GridCell::blank() }).collect()
     }

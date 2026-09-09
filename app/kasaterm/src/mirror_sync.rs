@@ -72,6 +72,23 @@ impl App {
         }
         self.mirror_sync.last_poll = Some(Instant::now());
         let machines = kasa_mcp::machines::snapshot();
+        // Compatibility fallback for older hosts and a dropped control frame.
+        // Missing/stale rows are NOT proof of closure during host restart.
+        let closed: Vec<String> = self.pty.keys().filter_map(|local| {
+            let info = kasa_mcp::remote::remote_info(local)?;
+            if !info.view || self.window_of_pane(local).is_none() { return None; }
+            machines.iter().filter(|m| m["online_via"].as_str() == Some("direct"))
+                .filter(|m| m["base"].as_str().is_some_and(|base|
+                    kasa_mcp::machines::same_machine_bases(&info.base, base)))
+                .flat_map(|m| m["panes"].as_array().into_iter().flatten())
+                .any(|row| row["id"].as_str() == Some(info.remote_id.as_str())
+                    && row["closed"].as_bool() == Some(true))
+                .then(|| local.clone())
+        }).collect();
+        for local in closed {
+            self.remote_keep.insert(local.clone());
+            self.remove_pane(&local);
+        }
         for machine in &machines {
             let Some(base) = machine.get("base").and_then(|v| v.as_str()) else { continue };
             let mirrors = self.mirror_sync_views(base);
@@ -146,7 +163,7 @@ impl App {
     fn mirror_sync_views(&self, base: &str) -> Vec<(String, String)> {
         self.pty.keys().filter_map(|local| {
             let info = kasa_mcp::remote::remote_info(local)?;
-            (info.view && info.base.trim_end_matches('/') == base.trim_end_matches('/')
+            (info.view && kasa_mcp::machines::same_machine_bases(&info.base, base)
                 && self.window_of_pane(local).is_some())
                 .then(|| (local.clone(), info.remote_id))
         }).collect()

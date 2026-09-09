@@ -681,6 +681,17 @@ async fn manager(
                                             fire_open_url(&local, u);
                                         }
                                     }
+                                    Some("source-closed") => {
+                                        // Explicit user close, unlike `gone` during host restore.
+                                        // End only the viewer, even if an older build had marked
+                                        // this inherited mirror as owning its source shell.
+                                        if let Some(link) = links().lock().unwrap().get_mut(&local) {
+                                            link.identity.owned = false;
+                                        }
+                                        let _ = htx.try_send(Err("원본 창이 닫혔어요".to_string()));
+                                        let _ = etx.send(ExtEvent::Eof);
+                                        return;
+                                    }
                                     Some("gone") => {
                                         if retry_initial {
                                             *viewport.connection_error.lock().unwrap() = Some("본진에서 이 창을 기다리는 중이에요".into());
@@ -2532,6 +2543,35 @@ mod tests {
         wait_remote_test(|| mirror.session.visible_text(4).contains("AFTER RESTART"));
         assert!(mirror.session.screens.try_iter().all(|update| !update.eof));
         mirror.session.send_bytes(b"done").unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn explicit_source_close_ends_restored_view_without_killing_or_retrying_source() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"closed-source"}"#.into())).await.unwrap();
+                socket.send(Message::Binary(b"SOURCE STILL RUNNING".to_vec().into())).await.unwrap();
+                let _ = socket.next().await;
+                socket.send(Message::Text(r#"{"t":"source-closed"}"#.into())).await.unwrap();
+                while let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_secs(2), socket.next()).await {
+                    if let Message::Text(text) = message { assert!(!text.contains("kill")); }
+                    else if matches!(message, Message::Close(_)) { break; }
+                }
+                assert!(tokio::time::timeout(Duration::from_millis(250), listener.accept()).await.is_err(), "explicit close must not start restore retries");
+            });
+        });
+        let local = format!("explicit-close-{}", uuid::Uuid::new_v4());
+        let mirror = restore_connection(RemoteSpec { base: format!("http://{address}"), pane: Some("closed-source".into()),
+            cwd: None, token: None, identity: RemoteIdentity { owned: true, ..Default::default() } }, &local, 80, 24, true).unwrap();
+        wait_remote_test(|| mirror.session.visible_text(4).contains("SOURCE STILL RUNNING"));
+        mirror.session.send_bytes(b"ack").unwrap();
+        wait_remote_test(|| remote_info(&local).is_none());
         server.join().unwrap();
     }
 

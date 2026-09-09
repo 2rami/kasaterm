@@ -78,6 +78,7 @@ pub(crate) fn turn_hit_at(x: f32, y: f32) -> Option<(String, TurnHit)> {
 
 #[derive(Default)]
 pub(crate) struct TurnJump {
+    mirror_targets: HashMap<String, i64>,
     /// pane id → (스캔했을 때의 히스토리 길이, 그때의 앵커들).
     ///
     /// 히스토리 길이를 키로 쓰는 이유: 줄이 늘면 앵커의 절대 번호가 그대로여도
@@ -90,14 +91,16 @@ pub(crate) struct TurnJump {
 }
 
 impl TurnJump {
+    pub(crate) fn mirror_target(&self, pid: &str) -> Option<i64> { self.mirror_targets.get(pid).copied() }
+    pub(crate) fn clear_mirror_target(&mut self, pid: &str) { self.mirror_targets.remove(pid); }
     /// pane 하나의 이번 프레임 헤더. 라이브 바닥(offset 0)이면 `None` — 평소 화면을
     /// 가리지 않는다는 규칙이 여기 한 줄로 걸린다.
-    pub(crate) fn header(&mut self, pane_id: &str, sess: &kasa_pty::PtySession) -> Option<TurnHeader> {
+    pub(crate) fn header_at(&mut self, pane_id: &str, sess: &kasa_pty::PtySession, viewer_top: Option<i64>) -> Option<TurnHeader> {
         let (offset, hist) = sess.view_state();
         if std::env::var_os("KASATERM_TURN_DEBUG").is_some() && offset != 0 {
             eprintln!("[turn] pane={pane_id} offset={offset} hist={hist}");
         }
-        if offset == 0 {
+        if offset == 0 && viewer_top.is_none() {
             return None;
         }
         let entry = self.cache.entry(pane_id.to_string());
@@ -114,7 +117,7 @@ impl TurnJump {
         }
         // 화면 맨 윗줄의 절대 번호. 인라인 이미지가 뷰포트 배치를 낼 때 쓰는 것과
         // 같은 셈이다(`top_abs = hist - display_offset`).
-        let top_abs = hist as i64 - offset as i64;
+        let top_abs = viewer_top.unwrap_or(hist as i64 - offset as i64);
         // 그 줄이 속한 턴 = 그보다 위에 있는 마지막 질문. 화면 첫 줄이 질문 그
         // 자체일 때도 자기 자신이 잡히는 게 맞다(그 턴을 보고 있는 것이므로).
         let idx = anchors.partition_point(|a| a.abs_line <= top_abs);
@@ -133,6 +136,7 @@ impl TurnJump {
     /// 같은 id 가 재사용되면 남의 스크롤백을 가리키게 된다.
     pub(crate) fn retain_panes(&mut self, alive: impl Fn(&str) -> bool) {
         self.cache.retain(|id, _| alive(id));
+        self.mirror_targets.retain(|id, _| alive(id));
     }
 }
 
@@ -152,6 +156,18 @@ pub(crate) fn sticky_arrow_cols(len: usize) -> (Option<usize>, Option<usize>) {
 pub(crate) struct HeaderCols {
     pub up: Option<usize>,
     pub down: Option<usize>,
+}
+
+/// The pinned header is copied after the terminal's palette pass. Apply the
+/// viewer's neutral prompt fill here too, without changing text or accent ink.
+pub(crate) fn localize_mirror_header(row: &mut [GridCell], background: [u8; 4]) {
+    for cell in row {
+        if let Color::Rgb(r, g, b) = cell.bg {
+            if r.max(g).max(b) - r.min(g).min(b) <= 24 {
+                cell.bg = Color::Rgb(background[0], background[1], background[2]);
+            }
+        }
+    }
 }
 
 /// 헤더 한 줄을 pane 첫 행 셀에 **직접** 써넣는다.
@@ -254,6 +270,42 @@ pub(crate) fn paint_header_row(row: &mut [GridCell], h: &TurnHeader) -> HeaderCo
 }
 
 impl crate::App {
+    pub(crate) fn jump_mirror_abs(&mut self, pane: &str, abs: i64) -> bool {
+        let pid = self.ws.lock().unwrap().active_tab_pid(pane);
+        if !kasa_mcp::remote::is_view_pane(&pid) { return false; }
+        if let Some(pty) = self.pty.get(&pid) {
+            pty.scroll_to_abs(abs);
+            self.mirror_view_scroll.remove(&pid);
+            self.turn.mirror_targets.insert(pid, abs);
+            self.chrome_dirty = true;
+        }
+        true
+    }
+
+    /// A mirror's prompt navigation uses its own history, never source SGR wheel.
+    pub(crate) fn jump_mirror_prompt(&mut self, pane: &str, text: &str, direction: Option<bool>) -> bool {
+        let pid = self.ws.lock().unwrap().active_tab_pid(pane);
+        if !kasa_mcp::remote::is_view_pane(&pid) { return false; }
+        let Some(pty) = self.pty.get(&pid) else { return true };
+        let anchors = pty.prompt_anchors();
+        let norm = |s: &str| s.trim_start_matches(['❯', '›', '>']).split_whitespace().collect::<String>();
+        let target = norm(text);
+        let matches: Vec<_> = anchors.iter().enumerate().filter(|(_, a)| {
+            let value = norm(&a.text);
+            value == target || (!target.is_empty() && value.starts_with(&target))
+        }).collect();
+        let top = self.pane_view_shift.get(pane).and_then(|s| s.projection.as_ref()).and_then(|p| p.top_abs)
+            .unwrap_or_else(|| { let (off, hist) = pty.view_state(); hist as i64 - off as i64 });
+        let current = matches.into_iter().min_by_key(|(_, a)| a.abs_line.abs_diff(top));
+        let abs = current.and_then(|(index, anchor)| match direction {
+            None => Some(anchor.abs_line),
+            Some(true) => anchors.get(index + 1).map(|a| a.abs_line),
+            Some(false) => index.checked_sub(1).map(|i| anchors[i].abs_line),
+        });
+        if let Some(abs) = abs { self.jump_mirror_abs(pane, abs); }
+        else { self.set_toast("이 질문은 거울에 받은 대화 기록에서 찾지 못했어요".into()); }
+        true
+    }
     /// 헤더를 눌렀으면 그 자리로 옮기고 `true`. 헤더 밖이면 `false` 라 클릭이 그대로
     /// 아래(터미널 SGR 전달 등)로 흐른다.
     ///
@@ -266,6 +318,7 @@ impl crate::App {
         match hit {
             // 터미널 스크롤백 세계 — 좌표가 확정이라 한 번에 닿는다.
             TurnHit::Jump(abs) | TurnHit::Prev(abs) | TurnHit::Next(abs) => {
+                if self.jump_mirror_abs(&pane_id, abs) { return true; }
                 if let Some(pty) = self.pty_for_pane(&pane_id) {
                     let off = pty.scroll_to_abs(abs);
                     if dbg {
@@ -284,6 +337,7 @@ impl crate::App {
                     }
                     return true;
                 };
+                if self.jump_mirror_prompt(&pane_id, &target, Some(down)) { return true; }
                 // wheel 을 쏠 자리는 그 pane 안이어야 한다(클릭 지점이면 늘 그렇다).
                 let cell = self.px_to_pane_cell(x, y).map(|(_, c, r)| (c, r)).unwrap_or((1, 1));
                 // 가려는 질문을 미리 짚어 함께 넘긴다 — 그래야 seek 이 「띠 글이 바뀔
@@ -321,6 +375,35 @@ impl crate::App {
             return;
         }
         self.turn.autoclick = None;
+        // A restore replaces the initial shell. Resolve the mirror at firing
+        // time, not at bootstrap (the old scroll harness captured the old Arc).
+        if let Some(lines) = spot.strip_prefix("mirror-scroll:").and_then(|s| s.parse::<i32>().ok()) {
+            let pane = self.ws.lock().unwrap().active_pane.clone();
+            let pid = pane.map(|pane| self.ws.lock().unwrap().active_tab_pid(&pane));
+            if let Some(pid) = pid.filter(|pid| kasa_mcp::remote::is_view_pane(pid)) {
+                if let Some(pty) = self.pty.get(&pid) {
+                    let offset = pty.scroll(lines);
+                    eprintln!("[turnclick] mirror-scroll offset={offset} anchors={}", pty.prompt_anchors().len());
+                }
+                self.turn.autoclick = Some((Instant::now() + std::time::Duration::from_secs(2), "bar".into()));
+                self.chrome_dirty = true;
+            }
+            return;
+        }
+        if spot == "mirror-verify" {
+            for (id, shift) in &self.pane_view_shift {
+                let Some(view) = &shift.projection else { continue };
+                let pid = self.ws.lock().unwrap().active_tab_pid(id);
+                if let Some(target) = self.turn.mirror_target(&pid) {
+                    eprintln!("[turnclick] mirror target={target} top={:?} aligned={}", view.top_abs, view.top_abs == Some(target));
+                }
+            }
+            if let (Ok(dir), Some(gpu)) = (std::env::var("KASATERM_AUTOTURNCLICK_CAP_DIR"), self.gpu.as_mut()) {
+                gpu.capture_next = Some(format!("{dir}/after-jump.png"));
+                self.chrome_dirty = true;
+            }
+            return;
+        }
         let target = TURN_HITS.with(|s| {
             s.borrow()
                 .iter()
@@ -341,7 +424,14 @@ impl crate::App {
             return;
         };
         let (cx, cy) = (rx + rw / 2.0, ry + rh / 2.0);
+        if let (Ok(dir), Some(gpu)) = (std::env::var("KASATERM_AUTOTURNCLICK_CAP_DIR"), self.gpu.as_mut()) {
+            gpu.capture_next = Some(format!("{dir}/before-jump.png"));
+            self.render_frame();
+        }
         let handled = self.turn_header_click(cx, cy);
+        if std::env::var_os("KASATERM_AUTOTURNCLICK_CAP_DIR").is_some() {
+            self.turn.autoclick = Some((Instant::now() + std::time::Duration::from_secs(1), "mirror-verify".into()));
+        }
         eprintln!("[turnclick] {spot} ({cx:.0},{cy:.0}) {hit:?} handled={handled}");
     }
 }
@@ -457,6 +547,21 @@ mod tests {
         let up = cols.up.expect("↑ 자리");
         assert_eq!(row[up].ch, '↑');
         assert_eq!(row[up].bg, Color::Rgb(7, 8, 9), "배경은 원본 그대로");
+    }
+
+    #[test]
+    fn mirrored_header_uses_viewer_palette_after_copying_source_cells() {
+        let mut src = cells_of("\u{203a} 질문");
+        for cell in &mut src { cell.bg = Color::Rgb(245, 245, 245); }
+        let original = src.clone();
+        let mut row = vec![GridCell::blank(); 30];
+        paint_header_row(&mut row, &header(Some(src), true, true));
+        localize_mirror_header(&mut row, [26, 29, 35, 255]);
+        for (cell, source) in row.iter().zip(&original) {
+            assert_eq!(cell.bg, Color::Rgb(26, 29, 35));
+            assert_eq!((cell.ch, &cell.fg, cell.bold), (source.ch, &source.fg, source.bold));
+        }
+        assert_eq!(original[0].bg, Color::Rgb(245, 245, 245));
     }
 
     /// 원본을 못 읽으면(스크롤백 밖으로 밀려남) 종전대로 글자를 그린다 — 표시를 통째로

@@ -66,6 +66,7 @@ mod mirror_view;
 mod restore_progress;
 mod mirror_close;
 mod mirror_sync;
+mod mirror_diff;
 mod mcpcol;
 mod proc;
 mod sesscol;

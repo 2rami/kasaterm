@@ -31,7 +31,9 @@ impl MachineIdentity {
         let remote = pane_id.and_then(kasa_mcp::remote::remote_info);
         let (label, detail, is_remote) = match remote {
             Some(info) => {
-                let label = if info.label.trim().is_empty() {
+                let label = if let Some(label) = kasa_mcp::machines::label_for_base(&info.base) {
+                    label
+                } else if info.label.trim().is_empty() {
                     info.base
                         .trim_start_matches("https://")
                         .trim_start_matches("http://")
@@ -102,6 +104,12 @@ pub(crate) fn machine_tint(label: &str) -> [u8; 4] {
             (hash ^ byte as u32).wrapping_mul(16777619)
         });
     COLORS[hash as usize % COLORS.len()]
+}
+
+/// The interior is opaque so active/hover fills cannot erase device identity.
+/// Attention still owns the outer border and its pulse is painted above this.
+pub(crate) fn minimap_background(base: [u8; 4], machine: Option<&str>) -> [u8; 4] {
+    machine.map_or(base, |label| theme::lerp(base, machine_tint(label), 0.26))
 }
 
 pub(super) fn draw_card(
@@ -228,6 +236,18 @@ pub(super) fn draw_card(
 #[cfg(test)]
 mod tests {
     use super::{terminal_identity_pid, machine_tint, MachineIdentity};
+
+    #[test]
+    fn minimap_keeps_machine_fill_when_active_or_inactive_in_both_modes() {
+        for base in [[25, 27, 34, 255], [45, 47, 54, 255], [240, 240, 246, 255]] {
+            assert_eq!(super::minimap_background(base, None), base);
+            let mini = super::minimap_background(base, Some("맥미니"));
+            let book = super::minimap_background(base, Some("맥북"));
+            assert_ne!(mini, base);
+            assert_ne!(book, base);
+            assert_ne!(mini, book);
+        }
+    }
 
     #[test]
     fn remote_pane_background_keeps_viewer_brightness_and_stable_device_tint() {

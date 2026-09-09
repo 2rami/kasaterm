@@ -2592,10 +2592,14 @@ impl Utf8Buffer {
 /// xterm 은 히스토리를 자기 스크롤백으로 쌓는다. 이게 없으면 미러는 뷰포트만
 /// 받아서 폰에서 스와이프해도 올라갈 데가 없다(2026-08-20 확정).
 ///
-/// xterm 기본 스크롤백 상한(1000줄)만큼만 싣는다 — 더 보내도 버려진다.
+/// Native mirrors retain more than xterm's old 1000-line default. A long tool
+/// turn must not lose its question on attach; bound both rows and cell volume.
+fn exported_history_rows(history: usize, cols: u16) -> usize {
+    history.min(10_000).min(1_000_000 / usize::from(cols.max(1)))
+}
+
 fn history_ansi(term: &Term<PtyEventForwarder>, cols: u16, rows: u16) -> Vec<u8> {
-    const CAP: usize = 1000;
-    let hist = term.grid().history_size().min(CAP);
+    let hist = exported_history_rows(term.grid().history_size(), cols);
     if hist == 0 {
         return Vec::new();
     }
@@ -5373,7 +5377,7 @@ mod raw_snapshot_wrap_tests {
             }
         }
         if history && !frame.alt_screen {
-            let count = source.grid().history_size().min(1000);
+            let count = exported_history_rows(source.grid().history_size(), cols);
             assert_eq!(replay.grid().history_size(), count, "history gained/lost a row");
             for line in -(count as i32)..0 {
                 for col in 0..cols as usize {
@@ -5391,6 +5395,18 @@ mod raw_snapshot_wrap_tests {
         assert!(source.grid()[Line(0)][Column(7)].flags.contains(Flags::WRAPLINE));
         assert!(!source.grid()[Line(2)][Column(7)].flags.contains(Flags::WRAPLINE));
         assert_snapshot(&mut source, 8, 6, false);
+    }
+
+    #[test]
+    fn mirror_attach_keeps_question_before_a_long_tool_turn() {
+        let mut source = parser(70, 12);
+        feed(&mut source, "› recent question\r\n".as_bytes());
+        for _ in 0..1500 { feed(&mut source, b"tool output\r\n"); }
+        let bytes = history_ansi(&source, 70, 12);
+        assert!(String::from_utf8_lossy(&bytes).contains("recent question"));
+        assert_snapshot(&mut source, 70, 12, true);
+        assert_eq!(exported_history_rows(100_000, 80), 10_000);
+        assert_eq!(exported_history_rows(100_000, 400), 2_500);
     }
 
     #[test]
