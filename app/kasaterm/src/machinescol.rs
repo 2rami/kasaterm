@@ -54,7 +54,8 @@ pub(crate) fn ago_label(secs: Option<u64>) -> String {
 /// 새로 붙이므로 손댈 필요가 없다(실측). 그래서 프로세스 상태만 본다.
 ///
 /// fork 를 여러 번 하므로 호출자는 GUI 스레드 밖에서 부른다.
-fn open_screen_share(host: &str) {
+fn open_screen_share(host: &str, anchor: Option<(f64, f64, f64, f64)>) {
+    clear_ghost_vnc(host);
     let hung = hung_screen_share_pids();
     for pid in &hung {
         let _ = crate::proc::command("kill").arg(pid).status();
@@ -72,6 +73,129 @@ fn open_screen_share(host: &str) {
     let _ = crate::proc::command("open")
         .arg(format!("vnc://{host}"))
         .spawn();
+    pull_screen_share_into(anchor);
+}
+
+/// 저쪽이 아직 살아 있다고 믿는 **나와의** 5900 연결 중 이쪽에 짝이 없는 것 — 유령.
+/// 하나라도 있으면 저쪽 화면공유 서비스를 되살린다.
+///
+/// 노트북이 잠들거나 자리를 옮기면 「이 연결 끊는다」가 저쪽에 닿지 못한다. 그러면
+/// 저쪽 screensharingd 는 죽은 연결을 살아 있다고 믿고 화면을 계속 밀어넣다 송신 큐가
+/// 막히고(2026-09-09 실측 2.4MB), **그 뒤로 새 연결이 「연결 중…」에서 영영 선다**.
+/// 저쪽 keepalive 는 꺼져 있어(`always_keepalive=0`) 스스로 못 알아채고, 재전송이
+/// 포기하기까지 10분 남짓 걸린다 — 그 사이 화면 보기는 눌러도 헛돈다.
+///
+/// 끊는 것은 root 소켓이라 서비스를 되살리는 수밖에 없다. 그래서 저쪽 sudoers 에
+/// **그 명령 하나만** 암호 없이 받는 줄을 둔다(`/etc/sudoers.d/kasaterm-screenshare`).
+/// 줄이 없거나 ssh 가 안 되면 조용히 접는다 — 열기 자체는 그대로 시도한다.
+fn clear_ghost_vnc(host: &str) {
+    let Some(target) = ssh_target_for_host(host) else { return };
+    // `SSH_CLIENT` 의 첫 칸이 **저쪽이 보는 내 주소**다. 터널을 거치면 루프백이 와서
+    // 내 연결을 못 가려내므로 그때는 판정을 접는다 — 남의 세션을 끊지 않기 위해서다.
+    let probe = "ip=${SSH_CLIENT%% *}; case \"$ip\" in 127.*|::1|\"\") exit 0;; esac; \
+                 netstat -an | awk -v me=\"$ip.\" '$4 ~ /\\.5900$/ && $6 == \"ESTABLISHED\" && index($5, me) == 1 { print $5 }'";
+    let Some(out) = ssh_capture(&target, probe) else { return };
+    let remote: Vec<&str> = out
+        .lines()
+        .filter_map(|l| l.trim().rsplit('.').next())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if remote.is_empty() {
+        return;
+    }
+    let local = local_vnc_ports();
+    if !remote.iter().any(|p| !local.iter().any(|l| l == p)) {
+        return;
+    }
+    let _ = ssh_capture(
+        &target,
+        "sudo -n /bin/launchctl kickstart -k system/com.apple.screensharing",
+    );
+    // 되살아난 서비스가 포트를 다시 물 때까지 잠깐 — 바로 열면 그 틈에 걸린다.
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+}
+
+/// 이 기계가 지금 들고 있는 5900 연결의 **내 쪽 포트**들.
+fn local_vnc_ports() -> Vec<String> {
+    let Ok(out) = crate::proc::command("lsof")
+        .args(["-nP", "-iTCP:5900", "-sTCP:ESTABLISHED"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().find(|f| f.contains("->")))
+        .filter_map(|f| f.split("->").next())
+        .filter_map(|near| near.rsplit(':').next().map(str::to_string))
+        .collect()
+}
+
+/// 명부에서 이 host 의 ssh 대상. 명부에 ssh 가 없으면 host 자체를 쓴다 —
+/// `user@ip` 꼴이면 그대로 붙는다.
+fn ssh_target_for_host(host: &str) -> Option<String> {
+    let listed = kasa_mcp::machines::snapshot().into_iter().find_map(|m| {
+        (m.get("host").and_then(|v| v.as_str()) == Some(host))
+            .then(|| m.get("ssh").and_then(|v| v.as_str()).map(str::to_string))
+            .flatten()
+    });
+    listed.or_else(|| host.contains('@').then(|| host.to_string()))
+}
+
+fn ssh_capture(target: &str, script: &str) -> Option<String> {
+    let out = crate::proc::command("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            target,
+            script,
+        ])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// 화면공유 창을 **카사텀이 떠 있는 화면**으로 끌어온다.
+///
+/// macOS 화면공유는 창 자리를 자기가 저장해 복원한다 — 바깥 모니터에서 한 번 쓰면
+/// 그 뒤로 늘 거기서 열린다. 그 모니터를 안 보고 있으면 창은 멀쩡히 열렸는데도
+/// 「눌러도 아무 일이 없다」로 보인다(2026-09-09: 저장된 자리가 바깥 5K 였고, 그것이
+/// 「화면공유가 안 된다」의 절반이었다). anchor 밖에 뜬 창만 옮긴다 — 이미 보이는
+/// 자리에 있으면 건드리지 않는다.
+///
+/// 창은 「연결 중」 작은 창으로 떴다가 화면이 들어오면 커지는데, 그때 자리가 다시
+/// 저장값으로 튄다. 그래서 한 번 보고 마는 대신 잠시 되묻는다.
+fn pull_screen_share_into(anchor: Option<(f64, f64, f64, f64)>) {
+    let Some((ax, ay, aw, ah)) = anchor else { return };
+    let script = format!(
+        r#"set ax to {ax:.0}
+set ay to {ay:.0}
+set aw to {aw:.0}
+set ah to {ah:.0}
+repeat 30 times
+  try
+    tell application "System Events" to tell process "Screen Sharing"
+      repeat with w in windows
+        set nm to name of w
+        if nm is not "모든 연결" and nm is not "All Connections" then
+          set {{wx, wy}} to position of w
+          if wx < ax or wy < ay or wx > (ax + aw) or wy > (ay + ah) then
+            set position of w to {{ax + 60, ay + 60}}
+          end if
+        end if
+      end repeat
+    end tell
+  end try
+  delay 0.5
+end repeat"#
+    );
+    let _ = crate::proc::command("osascript")
+        .args(["-e", &script])
+        .output();
 }
 
 fn pid_alive(pid: &str) -> bool {
@@ -363,6 +487,19 @@ impl App {
         self.machines_col_act(btn)
     }
 
+    /// 카사텀 창이 지금 떠 있는 화면의 논리 사각형 `(x, y, w, h)`. 다른 앱 창을
+    /// 「보이는 자리」로 옮길 때 쓴다 — 사람이 보고 있는 화면은 이 창이 있는 화면이다.
+    ///
+    /// 논리 좌표로 돌려준다(Accessibility 가 그 단위로 말한다). 화면마다 배율이 다르면
+    /// 원점이 조금 어긋날 수 있지만, 「어느 화면인가」를 가리는 데는 넉넉하다.
+    pub(crate) fn visible_monitor_rect(&self) -> Option<(f64, f64, f64, f64)> {
+        let mon = self.window.as_ref()?.current_monitor()?;
+        let sf = mon.scale_factor();
+        let pos = mon.position().to_logical::<f64>(sf);
+        let size = mon.size().to_logical::<f64>(sf);
+        Some((pos.x, pos.y, size.width, size.height))
+    }
+
     /// 메뉴 항목 하나를 실행한다. 학생 줄 우클릭 메뉴(보내기·데려오기)도 여기로
     /// 온다 — 이사의 busy·note·토스트 규칙이 한 곳에 있어야 두 메뉴가 같이 논다.
     pub(crate) fn machines_col_act(&mut self, btn: state::MachinesColBtn) -> bool {
@@ -385,7 +522,8 @@ impl App {
             // 프레임이 통째로 멈춘다.
             self.set_toast(format!("화면공유 여는 중 — {host}"));
             let host = host.clone();
-            std::thread::spawn(move || open_screen_share(&host));
+            let anchor = self.visible_monitor_rect();
+            std::thread::spawn(move || open_screen_share(&host, anchor));
             return true;
         }
         if let state::MachinesColBtn::Close { label, remote_id, name, pane } = &btn {
