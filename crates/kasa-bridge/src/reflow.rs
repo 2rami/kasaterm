@@ -488,6 +488,21 @@ fn join_rows(rows: &[Vec<Glyph>], infos: &[Info], src_cols: usize) -> (Vec<Glyph
     (out, offsets)
 }
 
+/// The same paragraph-continuation decision used by the mobile/web reflow.
+/// Consumers retaining a source-cell map can join the rows themselves without
+/// approximating positions from the already reflowed output. The tuple is the
+/// next row's leading padding to omit and whether to insert a word separator.
+pub fn paragraph_continuation(previous: &Row, next: &Row, src_cols: usize) -> Option<(usize, bool)> {
+    let previous = trimmed(previous);
+    let next = trimmed(next);
+    let a = info_of(&previous);
+    let b = info_of(&next);
+    if !continues(&a, &b, src_cols) { return None; }
+    let from = b.lead.min(next.len());
+    let separator = !(a.width == src_cols && token_break(&previous, &next[from..]));
+    Some((b.lead, separator))
+}
+
 /// 다시 접은 격자.
 pub struct Reflowed {
     pub rows: Vec<Row>,

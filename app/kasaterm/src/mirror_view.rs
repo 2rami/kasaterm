@@ -51,10 +51,70 @@ fn rule_cell(row: &[GridCell]) -> Option<&GridCell> {
     (count >= 3).then_some(first)
 }
 
-fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: SourcePos, cols: usize) -> Vec<ProjectedLine> {
+/// A known input border may contain a session name or teammate label. Resize
+/// only its dash padding, never the label or arbitrary code/table punctuation.
+/// Synthetic cells have no source position: clicking their new area must not
+/// pretend that a corresponding source column exists.
+fn input_border(row: &[GridCell], row_index: usize, cols: usize) -> Option<ProjectedLine> {
+    let mut cells: Vec<_> = row.iter().cloned().enumerate()
+        .map(|(col, cell)| (cell, Some((row_index, col)))).collect();
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < cells.len() {
+        if cells[start].0.ch != '─' { start += 1; continue; }
+        let mut end = start + 1;
+        while end < cells.len() && cells[end].0.ch == '─' { end += 1; }
+        if end - start >= 3 { runs.push((start, end)); }
+        start = end;
+    }
+    let &(start, _) = runs.iter().max_by_key(|(start, end)| end - start)?;
+    if cols >= cells.len() {
+        let mut fill = cells[start].0.clone();
+        fill.wrapped = false;
+        fill.leading_wide_spacer = false;
+        cells.splice(start..start, std::iter::repeat_n((fill, None), cols - cells.len()));
+    } else {
+        let mut remove = cells.len() - cols;
+        // Keep at least one dash per run, so labels remain delimited. If even
+        // that cannot fit, preserve all text via ordinary wrapping instead.
+        if runs.iter().map(|(s, e)| e - s - 1).sum::<usize>() < remove { return None; }
+        for (start, end) in runs.into_iter().rev() {
+            let count = remove.min(end - start - 1);
+            cells.drain(start..start + count);
+            remove -= count;
+            if remove == 0 { break; }
+        }
+    }
+    let (mut cells, source_map): (Vec<_>, Vec<_>) = cells.into_iter().unzip();
+    for cell in &mut cells { cell.wrapped = false; }
+    Some(ProjectedLine { cells, source_map })
+}
+
+fn code_or_table(row: &[GridCell]) -> bool {
+    let text: String = row.iter().map(|cell| cell.ch).collect();
+    let trimmed = text.trim_start();
+    trimmed.starts_with(['|', '│', '┃', '║']) || trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
+fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: SourcePos, cols: usize, input_borders: &[usize], prose: bool) -> Vec<ProjectedLine> {
     let mut output = Vec::new();
     let mut row_index = start;
+    let mut fence: Option<char> = None;
     while row_index < end {
+        let row_text: String = source[row_index].iter().map(|cell| cell.ch).collect();
+        let fence_marker = if row_text.trim_start().starts_with("```") { Some('`') }
+            else if row_text.trim_start().starts_with("~~~") { Some('~') } else { None };
+        let fenced = fence.is_some() || fence_marker.is_some();
+        if let Some(marker) = fence_marker {
+            if fence == Some(marker) { fence = None; } else if fence.is_none() { fence = Some(marker); }
+        }
+        if input_borders.contains(&row_index) {
+            if let Some(border) = input_border(&source[row_index], row_index, cols) {
+                output.push(border);
+                row_index += 1;
+                continue;
+            }
+        }
         if let Some(rule) = rule_cell(&source[row_index]) {
             let mut cells = vec![rule.clone(); cols];
             for cell in &mut cells { cell.wrapped = false; }
@@ -67,12 +127,24 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
         }
 
         let first_row = row_index;
-        let mut logical: Vec<(GridCell, SourcePos)> = Vec::new();
+        let indented_code = source[first_row].iter().take_while(|cell| cell.ch == ' ').count() >= 4;
+        let mut logical: Vec<(GridCell, Option<SourcePos>)> = Vec::new();
+        let mut omit_leading = 0;
         let fill;
         loop {
             let row = &source[row_index];
-            let joins_next = row.last().is_some_and(|c| c.wrapped)
+            let soft_wrap = row.last().is_some_and(|c| c.wrapped)
                 && row_index + 1 < end && rule_cell(&source[row_index + 1]).is_none();
+            // Claude/Codex draw word-wrapped paragraphs using hard cursor moves.
+            // Reuse the mobile continuation rule only inside a recognised agent
+            // body. Explicit input newlines, code fences/indentation and tables
+            // retain their hard breaks; ordinary shell grids stay strict VT.
+            let paragraph = (!soft_wrap && prose && !fenced && !indented_code && row.len() != cols
+                && row_index + 1 < end && !code_or_table(row)
+                && !code_or_table(&source[row_index + 1]))
+                .then(|| kasa_bridge::reflow::paragraph_continuation(row, &source[row_index + 1], row.len()))
+                .flatten();
+            let joins_next = soft_wrap || paragraph.is_some();
             // Trailing terminal padding is not another paragraph. Keep interior
             // spaces, all soft-wrapped cells, and the actual cursor's blank cell.
             let tail = row.last();
@@ -80,13 +152,17 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
                 || tail.is_some_and(|fill| c.bg != fill.bg || c.inverse != fill.inverse
                     || c.underline != fill.underline)).map_or(0, |i| i + 1);
             let cursor_end = if cursor.0 == row_index { cursor.1.saturating_add(1).min(row.len()) } else { 0 };
-            let mut length = if joins_next { row.len() } else { significant.max(cursor_end) };
+            let mut length = if soft_wrap { row.len() } else { significant.max(cursor_end) };
             // A wide glyph's spacer may itself be trailing whitespace.
             if length > 0 && row[length - 1].ch.width().unwrap_or(1) == 2 && length < row.len() { length += 1; }
-            logical.extend(row[..length].iter().cloned().enumerate().filter(|(_, cell)| !cell.leading_wide_spacer).map(|(col, mut cell)| {
+            logical.extend(row[..length].iter().cloned().enumerate().skip(omit_leading).filter(|(_, cell)| !cell.leading_wide_spacer).map(|(col, mut cell)| {
                 cell.wrapped = false;
-                (cell, (row_index, col))
+                (cell, Some((row_index, col)))
             }));
+            omit_leading = paragraph.map_or(0, |(skip, _)| skip);
+            if paragraph.is_some_and(|(_, separator)| separator) {
+                logical.push((GridCell::blank(), None));
+            }
             row_index += 1;
             if !joins_next {
                 fill = row.last().cloned().unwrap_or_else(GridCell::blank);
@@ -104,15 +180,15 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
                 output.push(finish_line(&mut line, cols, &fill, true));
             }
             line.cells.push(cell.clone());
-            line.source_map.push(Some(*pos));
+            line.source_map.push(*pos);
             index += 1;
             if wide {
                 // The wire grid uses either a space or NUL for the wide spacer.
                 // Consume it only when adjacent in the original source row.
                 let spacer = logical.get(index).filter(|(next, next_pos)|
-                    *next_pos == (pos.0, pos.1 + 1) && matches!(next.ch, ' ' | '\0'));
+                    pos.is_some_and(|pos| *next_pos == Some((pos.0, pos.1 + 1))) && matches!(next.ch, ' ' | '\0'));
                 if width == 2 {
-                    let (mut spacer_cell, spacer_pos) = spacer.map(|(c, p)| (c.clone(), Some(*p)))
+                    let (mut spacer_cell, spacer_pos) = spacer.map(|(c, p)| (c.clone(), *p))
                         .unwrap_or_else(|| (GridCell::blank(), None));
                     spacer_cell.ch = '\0';
                     line.cells.push(spacer_cell);
@@ -155,9 +231,15 @@ pub(crate) fn project(
             || cell.bg != kasa_bridge::screen::Color::Default)).map_or(0, |row| row + 1);
     let source_end = content_end.max(source_cursor.0.saturating_add(1)).min(source.len());
     let input_top = input_top.filter(|&top| top < source_end);
+    let recognised_prompt = crate::screenread::prompt_box(source);
+    let agent_body = recognised_prompt.is_some() && input_top.is_some();
+    let input_borders = match recognised_prompt {
+        Some(crate::screenread::PromptBox::Bordered { top, bottom, .. }) if input_top == Some(top) => vec![top, bottom],
+        _ => Vec::new(),
+    };
     let body_end = input_top.unwrap_or(source_end);
-    let body_lines = project_region(source, 0, body_end, source_cursor, cols);
-    let pinned = project_region(source, body_end, source_end, source_cursor, cols);
+    let body_lines = project_region(source, 0, body_end, source_cursor, cols, &input_borders, agent_body);
+    let pinned = project_region(source, body_end, source_end, source_cursor, cols, &input_borders, false);
     let pinned_height = pinned.len().min(rows);
     let body_height = rows - pinned_height;
     let max_scroll = body_lines.len().saturating_sub(body_height);
@@ -231,6 +313,113 @@ mod tests {
     }
     fn text(rows: &[Vec<GridCell>]) -> Vec<String> {
         rows.iter().map(|r| r.iter().map(|c| if c.ch == '\0' { ' ' } else { c.ch }).collect::<String>().trim_end().to_string()).collect()
+    }
+
+    fn agent_screen(body: &[&str], cols: usize, label: bool) -> Vec<Vec<GridCell>> {
+        let mut source: Vec<_> = body.iter().map(|text| {
+            let mut row = Vec::new();
+            for ch in text.chars() {
+                row.push(GridCell { ch, ..GridCell::blank() });
+                if ch.width() == Some(2) { row.push(GridCell { ch: '\0', ..GridCell::blank() }); }
+            }
+            row.resize(cols, GridCell::blank()); row
+        }).collect();
+        source.push(line(&if label { format!("{} Session {}", "─".repeat(12), "─".repeat(cols - 21)) } else { "─".repeat(cols) }));
+        let mut prompt = line("❯ ready"); prompt.resize(cols, GridCell::blank()); source.push(prompt);
+        source.push(line(&"─".repeat(cols)));
+        source
+    }
+
+    #[test]
+    fn source_width_changes_keep_agent_paragraph_at_viewer_width() {
+        let narrow_body = ["  - word word word word word word word word word word", "    continued end"];
+        let wide_body = ["  - word word word word word word word word word word continued end"];
+        let narrow = agent_screen(&narrow_body, 60, true);
+        let wide = agent_screen(&wide_body, 100, true);
+        let before = project(&wide, (2, 3), 80, 8, Some(1), None);
+        let after = project(&narrow, (3, 3), 80, 8, Some(2), None);
+        assert_eq!(text(&before.rows), text(&after.rows), "source resize changed the viewer's paragraph or input width");
+        assert_eq!(after.cursor, before.cursor);
+        assert_eq!(after.source_map[4][54], Some((1, 4)), "continued text must still map to the source row");
+        assert!(after.rows.iter().all(|row| row.len() == 80));
+    }
+
+    #[test]
+    fn labelled_input_border_resizes_without_wrapping_or_losing_label() {
+        let source = agent_screen(&["body"], 60, true);
+        for cols in [30, 90] {
+            let view = project(&source, (2, 3), cols, 8, Some(1), None);
+            assert_eq!(view.rows.len(), 8);
+            assert!(text(&view.rows)[5].contains(" Session "));
+            assert!(view.rows[5].iter().all(|cell| !cell.wrapped));
+            assert_eq!(view.rows[5].len(), cols);
+            assert_eq!(view.cursor, Some((6, 3)));
+            for (col, pos) in view.source_map[5].iter().enumerate() {
+                if let Some((row, source_col)) = pos { assert_eq!(view.rows[5][col].ch, source[*row][*source_col].ch); }
+            }
+        }
+    }
+
+    #[test]
+    fn mobile_paragraph_rule_preserves_code_tables_and_separate_bullets() {
+        for body in [
+            vec!["    word word word word word word word word word word", "    continued end"],
+            vec!["```", "word word word word word word word word word word word", "continued end", "```"],
+            vec!["| word word word word word word word word word word |", "| continued end |"],
+            vec!["  - word word word word word word word word word word", "  - continued end"],
+        ] {
+            let source = agent_screen(&body, 60, false);
+            let view = project(&source, (body.len() + 1, 3), 100, 20, Some(body.len()), None);
+            assert_eq!(view.body_lines.len(), body.len(), "code/table/list hard break was merged: {body:?}");
+        }
+    }
+
+    #[test]
+    fn arbitrary_shell_and_explicit_multiline_input_keep_hard_breaks() {
+        let body = ["  - word word word word word word word word word word", "    continued end"];
+        let source = agent_screen(&body, 60, false);
+        let strict = project(&source[..2], (0, 0), 100, 6, None, None);
+        assert_eq!(strict.body_lines.len(), 2);
+        let mut input = agent_screen(&[], 60, false);
+        input.insert(2, line("    an explicit next input line"));
+        let view = project(&input, (1, 3), 100, 8, Some(0), None);
+        assert!(text(&view.rows).iter().any(|row| row == "    an explicit next input line"));
+    }
+
+    #[test]
+    fn mobile_join_keeps_cjk_cells_and_split_paths_mapped_to_the_source() {
+        let source = agent_screen(&[
+            "- 경로는 /Users/kasa/Desktop/momewomo/kasaterm/crates/kasa-b",
+            "ridge/src/reflow.rs 이다.",
+        ], 60, false);
+        let view = project(&source, (3, 3), 100, 8, Some(2), None);
+        let body = &view.body_lines[0];
+        assert_eq!(view.body_lines.len(), 1);
+        let output: String = body.cells.iter().filter(|cell| cell.ch != '\0').map(|cell| cell.ch).collect();
+        assert!(output.contains("경로는 /Users/kasa/Desktop/momewomo/kasaterm/crates/kasa-bridge/src/reflow.rs 이다."));
+        for (col, pos) in body.source_map.iter().enumerate() {
+            if let Some((row, source_col)) = pos { assert_eq!(body.cells[col].ch, source[*row][*source_col].ch); }
+        }
+    }
+
+    #[test]
+    fn codex_body_uses_mobile_reflow_and_filled_input_uses_viewer_width() {
+        let mut source = agent_screen(&[
+            "  - word word word word word word word word word word",
+            "    continued end",
+        ], 60, false);
+        source.truncate(2);
+        let fill = kasa_bridge::screen::Color::Rgb(63, 69, 77);
+        for content in ["", "› ready", ""] {
+            let mut row = line(content); row.resize(60, GridCell::blank());
+            for cell in &mut row { cell.bg = fill.clone(); }
+            source.push(row);
+        }
+        let view = project(&source, (3, 3), 100, 8, Some(2), None);
+        assert_eq!(view.body_lines.len(), 1);
+        assert!(text(&view.rows)[4].ends_with("word continued end"));
+        assert!(view.rows[5..].iter().all(|row| row.len() == 100 && row.iter().all(|cell| cell.bg == fill)));
+        assert_eq!(view.cursor, Some((6, 3)));
     }
 
     #[test]
