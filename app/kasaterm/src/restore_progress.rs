@@ -1,4 +1,4 @@
-//! Launch restoration stays modal until every saved surface has live output.
+//! Nonblocking launch progress; only unfinished surfaces keep an input guard.
 use super::*;
 use std::time::{Duration, Instant};
 
@@ -6,6 +6,30 @@ pub(crate) struct ProgressLayout {
     pub card: (f32, f32, f32, f32),
     pub retry: (f32, f32, f32, f32),
     pub continue_button: (f32, f32, f32, f32),
+}
+
+pub(crate) struct ToastLayout {
+    pub card: (f32, f32, f32, f32),
+    pub retry: (f32, f32, f32, f32),
+}
+
+/// Coordinates use the same units as the window. Reserve the actual bottom
+/// chrome height, so the toast never covers the device selector/status bar.
+pub(crate) fn toast_layout(width: f32, height: f32, bottom_reserved: f32) -> ToastLayout {
+    let finite = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
+    let width = finite(width);
+    let height = finite(height);
+    let available = (height - finite(bottom_reserved)).max(0.0);
+    let margin_x = 12.0_f32.min(width / 4.0);
+    let margin_y = 12.0_f32.min(available / 4.0);
+    let w = 360.0_f32.min((width - 2.0 * margin_x).max(0.0));
+    let h = 132.0_f32.min((available - 2.0 * margin_y).max(0.0));
+    let x = width - margin_x - w;
+    let y = available - margin_y - h;
+    let pad = 12.0_f32.min(w / 4.0).min(h / 4.0);
+    let bw = 88.0_f32.min((w - 2.0 * pad).max(0.0));
+    let bh = 28.0_f32.min((h - 2.0 * pad).max(0.0));
+    ToastLayout { card: (x, y, w, h), retry: (x + w - pad - bw, y + h - pad - bh, bw, bh) }
 }
 
 pub(crate) fn progress_layout(width: f32, height: f32) -> ProgressLayout {
@@ -40,7 +64,11 @@ pub(crate) struct RestoreProgress {
     pub built: bool,
     pub background: bool,
     entries: HashMap<String, RestoreEntry>,
+    entry_order: Vec<String>,
 }
+
+#[derive(Clone, Copy)]
+enum RestoreStage { Pane, Agent, RemoteConnection, RemoteScreen, Web }
 
 struct RestoreEntry {
     remote: bool,
@@ -49,15 +77,61 @@ struct RestoreEntry {
     ready: bool,
     // Agent startup and terminal input readiness are not the same thing. A
     // resumed CLI may be at login/error/permission UI or process detection may
-    // lag; its live local PTY must remain usable after dismissing the modal.
+    // lag; its live local PTY must remain usable while the toast is visible.
     local_input_ready: bool,
+    character: Option<String>,
+    remote_label: Option<String>,
+    stage: RestoreStage,
 }
 
 impl RestoreEntry {
     fn update_local(&mut self, has_live_grid: bool, commands_pending: bool, agent_seen: bool) {
         self.local_input_ready = has_live_grid && !commands_pending;
         self.ready = self.local_input_ready && (!self.agent || agent_seen);
+        self.stage = if has_live_grid && self.agent { RestoreStage::Agent } else { RestoreStage::Pane };
     }
+
+    fn update_remote(&mut self, live_label: Option<&str>, connected: bool) {
+        if let Some(label) = live_label.and_then(display_label) {
+            self.remote_label = Some(label);
+        }
+        self.stage = if connected { RestoreStage::RemoteScreen } else { RestoreStage::RemoteConnection };
+    }
+
+    fn status_line(&self) -> String {
+        match self.stage {
+            RestoreStage::Pane => "pane을 복원하는 중…".into(),
+            RestoreStage::Web => "웹 화면을 불러오는 중…".into(),
+            RestoreStage::Agent => format!("{} 불러오는 중…", object_name(self.character.as_deref().unwrap_or("학생"))),
+            RestoreStage::RemoteConnection => format!("{} 연결하는 중…", object_name(self.remote_label.as_deref().unwrap_or("원격 기기"))),
+            RestoreStage::RemoteScreen => format!("{}의 화면을 불러오는 중…", self.remote_label.as_deref().unwrap_or("원격 기기")),
+        }
+    }
+}
+
+/// Labels can come from old connection records whose fallback was the base
+/// URL. Never render an endpoint, credential, pane ID or opaque routing slug.
+fn display_label(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > 48
+        || value.chars().any(|c| c.is_control() || ":/@\\?#%~=_".contains(c))
+        || value.contains('.') || !value.chars().any(char::is_alphabetic)
+    { return None; }
+    Some(value.into())
+}
+
+fn character_label(value: &str) -> Option<String> {
+    // Saved `character` is the display name, not agent_name/slug. Reject old
+    // all-lowercase ASCII identifiers instead of presenting them as students.
+    let label = display_label(value)?;
+    if label.is_ascii() && !label.chars().any(char::is_uppercase) { return None; }
+    Some(label)
+}
+
+fn object_name(name: &str) -> String {
+    let final_consonant = name.chars().rev().find(|c| *c != ')' && *c != ' ')
+        .is_some_and(|c| ('가'..='힣').contains(&c) && (c as u32 - '가' as u32) % 28 != 0);
+    format!("{name}{}", if final_consonant { "을" } else { "를" })
 }
 
 fn surface_count(node: &serde_json::Value) -> usize {
@@ -69,6 +143,14 @@ fn surface_count(node: &serde_json::Value) -> usize {
 }
 
 impl RestoreProgress {
+    fn blocks_all_input(&self) -> bool { !self.built }
+
+    pub fn status_line(&self) -> String {
+        if !self.built { return "pane을 복원하는 중…".into(); }
+        self.entry_order.iter().filter_map(|id| self.entries.get(id))
+            .find(|entry| !entry.ready).map_or_else(|| "pane을 복원하는 중…".into(), RestoreEntry::status_line)
+    }
+
     fn dismiss_modal(&mut self) {
         self.background = true;
     }
@@ -89,16 +171,22 @@ impl RestoreProgress {
                     .map_or(0, |nodes| nodes.iter().map(surface_count).sum::<usize>())
             }).sum()
         });
-        Self { state, expected, ready: 0, failure: None, started: Instant::now(), built: false, background: false, entries: HashMap::new() }
+        Self { state, expected, ready: 0, failure: None, started: Instant::now(), built: false, background: false, entries: HashMap::new(), entry_order: Vec::new() }
     }
 
     pub fn track(&mut self, id: &str, record: &serde_json::Value) {
+        if !self.entries.contains_key(id) { self.entry_order.push(id.to_string()); }
+        let remote = record.get("remote_base").and_then(|v| v.as_str()).is_some();
+        let web = record.get("web_url").is_some();
         self.entries.insert(id.to_string(), RestoreEntry {
-            remote: record.get("remote_base").and_then(|v| v.as_str()).is_some(),
+            remote,
             agent: record.get("was_agent").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()),
-            web: record.get("web_url").is_some(),
+            web,
             ready: false,
             local_input_ready: false,
+            character: record.get("character").and_then(|v| v.as_str()).and_then(character_label),
+            remote_label: record.get("remote_label").and_then(|v| v.as_str()).and_then(display_label),
+            stage: if web { RestoreStage::Web } else if remote { RestoreStage::RemoteConnection } else { RestoreStage::Pane },
         });
     }
 
@@ -112,8 +200,8 @@ impl RestoreProgress {
         }
         self.started = now;
         self.failure = None;
-        self.entries.iter().filter(|(_, entry)| entry.remote && !entry.ready)
-            .map(|(id, _)| id.clone()).collect()
+        self.entry_order.iter().filter(|id| self.entries.get(*id).is_some_and(|entry| entry.remote && !entry.ready))
+            .cloned().collect()
     }
 }
 
@@ -167,7 +255,7 @@ impl App {
     }
 
     pub(crate) fn restoration_blocks_input(&self) -> bool {
-        self.restore_applying.is_some() || self.restore_progress.as_ref().is_some_and(|p| !p.background)
+        self.restore_applying.is_some() || self.restore_progress.as_ref().is_some_and(RestoreProgress::blocks_all_input)
     }
 
     pub(crate) fn restoration_blocks_surface(&self, id: &str) -> bool {
@@ -202,10 +290,12 @@ impl App {
 
     pub(crate) fn tick_restore_progress(&mut self) {
         let Some(progress) = self.restore_progress.as_mut().filter(|p| p.built) else { return };
+        let old_status = progress.status_line();
         let mut ready = 0;
         let mut failure = None;
         let ws = self.ws.lock().unwrap();
-        for (id, entry) in &mut progress.entries {
+        for id in &progress.entry_order {
+            let Some(entry) = progress.entries.get_mut(id) else { continue; };
             entry.ready = false;
             entry.local_input_ready = false;
             if entry.web {
@@ -224,7 +314,10 @@ impl App {
                 .and_then(|tab| tab.term());
             let has_grid = term.is_some_and(|term| term.live_output && !term.cells.is_empty());
             if entry.remote {
-                match kasa_mcp::remote::connection_readiness(id) {
+                let readiness = kasa_mcp::remote::connection_readiness(id);
+                let info = kasa_mcp::remote::remote_info(id);
+                entry.update_remote(info.as_ref().map(|info| info.label.as_str()), readiness.as_ref().is_some_and(|(connected, _, _)| *connected));
+                match readiness {
                     Some((true, generation, _)) if has_grid && term.is_some_and(|term| term.output_generation == generation) => {
                         entry.ready = true;
                         ready += 1;
@@ -249,7 +342,7 @@ impl App {
             failure.get_or_insert_with(|| "아직 준비되지 않은 창이 있어요. 연결을 확인하고 다시 시도해 주세요".to_string());
         }
         let complete = ready == progress.expected && failure.is_none();
-        let changed = progress.ready != ready || progress.failure != failure;
+        let changed = progress.ready != ready || progress.failure != failure || progress.status_line() != old_status;
         if progress.ready != ready {
             eprintln!("[restore] progress={ready}/{}", progress.expected);
         }
@@ -304,6 +397,107 @@ pub(crate) fn with_file_time(mut state: serde_json::Value) -> serde_json::Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toast_reserves_bottom_chrome_and_clamps_every_rectangle() {
+        for (width, height, bottom) in [
+            (1280.0, 720.0, 40.0), (240.0, 320.0, 48.0),
+            (320.0, 160.0, 44.0), (30.0, 30.0, 20.0),
+            (1.0, 1.0, 0.0), (0.0, 0.0, 0.0), (100.0, 20.0, 100.0),
+        ] {
+            let layout = toast_layout(width, height, bottom);
+            let (x, y, w, h) = layout.card;
+            assert!(x >= 0.0 && y >= 0.0 && w >= 0.0 && h >= 0.0);
+            assert!(x + w <= width && y + h <= (height - bottom).max(0.0));
+            assert!(w <= 360.0 && h <= 132.0);
+            let (bx, by, bw, bh) = layout.retry;
+            assert!(bw >= 0.0 && bh >= 0.0);
+            assert!(bx >= x && by >= y && bx + bw <= x + w && by + bh <= y + h);
+        }
+        let layout = toast_layout(1280.0, 720.0, 40.0);
+        assert_eq!(layout.card, (908.0, 536.0, 360.0, 132.0));
+        assert_eq!(layout.retry, (1168.0, 628.0, 88.0, 28.0));
+        for rect in [toast_layout(f32::NAN, f32::INFINITY, -10.0).card,
+            toast_layout(-1.0, -1.0, f32::NAN).retry] {
+            assert!([rect.0, rect.1, rect.2, rect.3].iter().all(|n| n.is_finite() && *n >= 0.0));
+        }
+    }
+
+    #[test]
+    fn built_restore_never_globally_blocks_even_with_pending_mirrors() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track("%local", &serde_json::json!({"was_agent": "claude", "character": "아즈사"}));
+        progress.track("%remote", &serde_json::json!({"remote_base": "http://restore.invalid"}));
+        assert!(progress.blocks_all_input(), "batch allocation still protects workspace state");
+        progress.dismiss_modal();
+        assert!(progress.blocks_all_input(), "legacy hide flag cannot bypass batch allocation");
+        progress.background = false;
+        progress.built = true;
+        progress.entries.get_mut("%local").unwrap().update_local(true, false, false);
+        assert!(!progress.blocks_all_input(), "a visible toast is never a modal input gate");
+        assert!(!progress.blocks_surface("%local"));
+        assert!(!progress.entries["%local"].ready, "process readiness criterion is unchanged");
+        assert!(progress.blocks_surface("%remote"));
+        assert!(!progress.blocks_surface("%new"), "new work is not trapped in the restore queue");
+    }
+
+    #[test]
+    fn status_tracks_real_stages_and_stable_saved_order() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        let agent = serde_json::json!({"was_agent": "claude", "character": "아즈사"});
+        progress.track("%20", &agent);
+        progress.track("%3", &serde_json::json!({"remote_base": "http://restore.invalid", "remote_label": "나쵸네코(맥미니)"}));
+        progress.track("%20", &agent);
+        progress.track("%web", &serde_json::json!({"web_url": "https://private.invalid"}));
+        assert_eq!(progress.entry_order, ["%20", "%3", "%web"]);
+        assert_eq!(progress.status_line(), "pane을 복원하는 중…");
+        progress.built = true;
+        assert_eq!(progress.status_line(), "pane을 복원하는 중…");
+        progress.entries.get_mut("%20").unwrap().update_local(true, true, false);
+        assert_eq!(progress.status_line(), "아즈사를 불러오는 중…");
+        progress.entries.get_mut("%20").unwrap().update_local(true, false, true);
+        assert_eq!(progress.status_line(), "나쵸네코(맥미니)를 연결하는 중…");
+        progress.entries.get_mut("%3").unwrap().update_remote(Some("나쵸네코"), true);
+        assert_eq!(progress.status_line(), "나쵸네코의 화면을 불러오는 중…");
+        assert!(!progress.entries["%3"].ready, "connection alone cannot fake an applied live grid");
+        progress.entries.get_mut("%3").unwrap().update_remote(Some("나쵸네코"), false);
+        assert_eq!(progress.status_line(), "나쵸네코를 연결하는 중…");
+        progress.entries.get_mut("%3").unwrap().ready = true;
+        assert_eq!(progress.status_line(), "웹 화면을 불러오는 중…");
+        assert_eq!(object_name("아리스"), "아리스를");
+    }
+
+    #[test]
+    fn status_never_uses_endpoints_credentials_slugs_or_raw_errors() {
+        for label in ["http://user:secret@127.0.0.1:8765", "127.0.0.1:8765", "host.local", "~machine-id", "%9", "x\nsecret", "bearer_token=secret"] {
+            let mut progress = RestoreProgress::new(serde_json::json!({}));
+            progress.track("%private-id", &serde_json::json!({"remote_base": "http://secret.invalid", "remote_label": label}));
+            progress.built = true;
+            progress.failure = Some("private error http://user:secret@host:8765".into());
+            assert_eq!(progress.status_line(), "원격 기기를 연결하는 중…");
+        }
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track("%1", &serde_json::json!({"remote_base": "http://secret.invalid", "remote_label": "작업 기기"}));
+        progress.built = true;
+        progress.entries.get_mut("%1").unwrap().update_remote(Some("http://secret.invalid"), false);
+        assert_eq!(progress.status_line(), "작업 기기를 연결하는 중…", "unsafe live fallback must not overwrite a saved display label");
+        progress.track("%agent", &serde_json::json!({"was_agent": "claude", "character": "azusa-p1-xyz"}));
+        progress.entries.get_mut("%1").unwrap().ready = true;
+        progress.entries.get_mut("%agent").unwrap().update_local(true, false, false);
+        assert_eq!(progress.status_line(), "학생을 불러오는 중…");
+    }
+
+    #[test]
+    fn retry_order_is_stable_and_skips_completed_targets() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        for id in ["%20", "%3", "%11"] {
+            progress.track(id, &serde_json::json!({"remote_base": "http://restore.invalid"}));
+        }
+        progress.built = true;
+        progress.entries.get_mut("%3").unwrap().ready = true;
+        for _ in 0..4 { assert_eq!(progress.retry_pending(Instant::now()), ["%20", "%11"]); }
+        assert_eq!(progress.entry_order, ["%20", "%3", "%11"]);
+    }
 
     #[test]
     fn background_restore_accepts_local_input_without_claiming_agent_ready() {
