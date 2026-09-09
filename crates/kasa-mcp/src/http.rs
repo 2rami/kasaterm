@@ -4673,6 +4673,7 @@ async fn term_repo_post(
     };
     let exists = std::path::Path::new(path).join(".git").exists();
     let action;
+    let mut dirty_lines = 0usize;
     if !exists {
         let Some(url) = q.get("url").filter(|u| !u.is_empty()) else {
             return err(format!("{path} 에 레포가 없고 `url` 도 없어요"));
@@ -4702,47 +4703,49 @@ async fn term_repo_post(
         }
         action = "cloned";
     } else {
-        // 이 기계에 안 올린 변경이 있으면 당겨오지 않는다 — 남의 작업을 덮는다.
+        // 도착지에 커밋 안 한 변경이 있어도 **세우지 않는다.** 이 자리가 해야 하는 일은
+        // 다음 단계(bundle 재현)의 전제인 origin 오브젝트를 이 기계에 들여놓는 것뿐이고,
+        // fetch 는 오브젝트만 받아 워킹트리를 안 건드린다. 남의 작업을 덮는 것은 그 뒤의
+        // checkout·ff-merge 라서 **그 걸음만** 건너뛴다 — 옮겨온 짐은 bundle 이
+        // refs/kasaterm/incoming 으로 보관하므로 잃는 것도 없다(2026-09-09: 도착지 학생의
+        // 미커밋 9개 때문에 6-pane 이사가 통째로 막혔다. 예전엔 여기서 「그쪽 학생이
+        // 커밋하고 오라」고 거부했다).
         let (_, dirty) = git(vec!["-C".into(), path.clone(), "status".into(), "--porcelain".into()]);
-        if !dirty.is_empty() {
-            // 이 문장은 **도착지 기계**가 저를 두고 하는 말이라, 출발지 화면에서 읽히게
-            // 「이쪽/저쪽」 대신 자리를 말한다(2026-09-07 실측: 맥북에 「이 기계에 안 올린
-            // 변경」이 떠 어느 기계인지 헷갈렸다).
-            return err(format!(
-                "도착지 폴더에 커밋 안 한 변경이 있어 당겨오지 않았어요({} 줄) — 그쪽 학생이 커밋하거나 정리해야 해요",
-                dirty.lines().count()
-            ));
-        }
+        dirty_lines = dirty.lines().count();
         let (ok, out) = git(vec!["-C".into(), path.clone(), "fetch".into(), "--prune".into()]);
         if !ok {
             return err(format!("fetch 실패: {out}"));
         }
-        if !branch.is_empty() {
-            let (ok, out) = git(vec!["-C".into(), path.clone(), "checkout".into(), branch.clone()]);
-            if !ok {
-                return err(format!("{branch} 로 못 옮겼어요: {out}"));
-            }
-        }
-        let (mut ok, mut out) = git(vec!["-C".into(), path.clone(), "merge".into(), "--ff-only".into(), "@{u}".into()]);
-        // 업스트림이 안 잡힌 브랜치(`checkout -B` 로 앉힌 거울)는 `@{u}` 가 없어 여기서
-        // 매번 서고, 거울이 origin 보다 한참 뒤처진 채 「준비됐다」로 넘어갔다
-        // (2026-09-02 실측: 미니 swarm 이 origin 뒤 12 커밋에서 fetched-only). 같은
-        // 이름의 origin 브랜치로 한 번 더 — 빨리감기만 하므로 이쪽 커밋을 잃을 길은 없다.
-        if !ok && !branch.is_empty() && out.contains("no upstream") {
-            (ok, out) = git(vec![
-                "-C".into(),
-                path.clone(),
-                "merge".into(),
-                "--ff-only".into(),
-                format!("origin/{branch}"),
-            ]);
-        }
-        // 이미 최신이면 실패 문구가 나오지만 그건 사고가 아니다.
-        action = if ok { "pulled" } else if out.contains("up to date") || out.contains("최신") {
-            "already-current"
+        if dirty_lines > 0 {
+            action = "kept-dirty";
         } else {
-            "fetched-only"
-        };
+            if !branch.is_empty() {
+                let (ok, out) = git(vec!["-C".into(), path.clone(), "checkout".into(), branch.clone()]);
+                if !ok {
+                    return err(format!("{branch} 로 못 옮겼어요: {out}"));
+                }
+            }
+            let (mut ok, mut out) = git(vec!["-C".into(), path.clone(), "merge".into(), "--ff-only".into(), "@{u}".into()]);
+            // 업스트림이 안 잡힌 브랜치(`checkout -B` 로 앉힌 거울)는 `@{u}` 가 없어 여기서
+            // 매번 서고, 거울이 origin 보다 한참 뒤처진 채 「준비됐다」로 넘어갔다
+            // (2026-09-02 실측: 미니 swarm 이 origin 뒤 12 커밋에서 fetched-only). 같은
+            // 이름의 origin 브랜치로 한 번 더 — 빨리감기만 하므로 이쪽 커밋을 잃을 길은 없다.
+            if !ok && !branch.is_empty() && out.contains("no upstream") {
+                (ok, out) = git(vec![
+                    "-C".into(),
+                    path.clone(),
+                    "merge".into(),
+                    "--ff-only".into(),
+                    format!("origin/{branch}"),
+                ]);
+            }
+            // 이미 최신이면 실패 문구가 나오지만 그건 사고가 아니다.
+            action = if ok { "pulled" } else if out.contains("up to date") || out.contains("최신") {
+                "already-current"
+            } else {
+                "fetched-only"
+            };
+        }
     }
     let (_, head) = git(vec!["-C".into(), path.clone(), "rev-parse".into(), "--short".into(), "HEAD".into()]);
     let (_, br) = git(vec!["-C".into(), path.clone(), "rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()]);
@@ -4751,7 +4754,7 @@ async fn term_repo_post(
     // 그 화면에 먹혀 밤새 서 있는다(2026-08-27 이사 실측 메모). 레포를 준비하는
     // 이 자리가 곧 「여기서 claude 를 돌리겠다」는 뜻이므로 여기서 심는다.
     preseed_claude_trust(path);
-    Json(serde_json::json!({ "ok": true, "action": action, "head": head, "branch": br, "path": path }))
+    Json(serde_json::json!({ "ok": true, "action": action, "head": head, "branch": br, "path": path, "dirty": dirty_lines }))
 }
 
 /// `~/.claude.json` 의 projects[path] 에 신뢰 표시를 심는다. 실패해도 조용히

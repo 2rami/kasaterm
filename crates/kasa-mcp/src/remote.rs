@@ -1285,12 +1285,18 @@ pub fn ensure_repo(
                 .unwrap_or("알 수 없는 이유")
         );
     }
-    Ok(format!(
-        "{} ({} @{})",
-        v.get("action").and_then(|x| x.as_str()).unwrap_or("?"),
-        v.get("branch").and_then(|x| x.as_str()).unwrap_or("?"),
-        v.get("head").and_then(|x| x.as_str()).unwrap_or("?")
-    ))
+    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("?");
+    let branch = v.get("branch").and_then(|x| x.as_str()).unwrap_or("?");
+    let head = v.get("head").and_then(|x| x.as_str()).unwrap_or("?");
+    // 저쪽이 작업 중이라 파일 갈아끼우기를 건너뛴 것은 사고가 아니라 「그쪽 작업을
+    // 지켰다」는 뜻이다 — 이 문장이 이사 화면에 그대로 뜨므로 사람 말로 적는다.
+    if action == "kept-dirty" {
+        let n = v.get("dirty").and_then(|x| x.as_u64()).unwrap_or(0);
+        return Ok(format!(
+            "코드는 받아만 뒀다 — 저쪽이 작업 중({n}개)이라 파일은 그대로 ({branch} @{head})"
+        ));
+    }
+    Ok(format!("{action} ({branch} @{head})"))
 }
 
 /// 이사(migrate)의 대화 운반 — claude jsonl 하나를 원격 호스트의
