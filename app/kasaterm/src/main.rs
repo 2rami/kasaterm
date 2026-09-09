@@ -4405,6 +4405,9 @@ pub(crate) enum SettingsInput {
     /// 그 뒤(11..27)는 ANSI 0..16 — 이 enum 이 Copy 라 키 문자열 대신 번호로
     /// 싣는다. 버퍼는 `App.set_palette_edit` 하나를 같이 쓴다(한 번에 한 칸).
     PaletteHex(usize),
+    /// 기기색 hex 편집 필드. 인덱스는 `pane_identity::device_color_rows()` 순서
+    /// (이 기기가 0, 그 뒤 명부 순). 버퍼는 팔레트와 같은 `App.set_palette_edit`.
+    DeviceHex(usize),
 }
 
 /// Clickable targets painted into the settings screen, collected each frame for
@@ -4456,6 +4459,16 @@ pub(crate) enum SettingsAction {
     PickerHue,
     /// 화면의 한 점에서 색을 집어 현재 팔레트 칸에 넣는다.
     PaletteEyedropper(usize),
+    /// 기기 한 줄의 색 칸에 포커스(인덱스 규약은 `SettingsInput::DeviceHex`).
+    FocusDeviceHex(usize),
+    /// 기기 색을 프리셋(#rrggbb)으로 한 번에 — 피커를 열지 않고 고르는 길.
+    DevicePreset(usize, String),
+    /// 기기 하나의 저장색을 지워 배정색으로 되돌린다.
+    ResetDeviceColor(usize),
+    /// 모든 기기의 저장색을 지운다.
+    ResetAllDeviceColors,
+    /// 화면의 한 점에서 색을 집어 기기 칸에 넣는다.
+    DeviceEyedropper(usize),
     Accent(String),
     /// Silhouette preset: "rounded" · "sharp" · "pixel". Its own axis, so any
     /// palette can be worn with any corner treatment.
@@ -6451,6 +6464,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Apply the persisted theme + accent into the global color slots before any
     // window or pane paints, so the first frame is already in the right palette.
         theme::apply_from_settings();
+        render::pane_identity::reload_device_colors();
     // Install pane shims before anything spawns a shell — every PtySession
     // reads KASATERM_TMUX_SHIM_DIR we set here (kasaterm-cli/preview/OSC133).
     // best-effort: failures just log and skip, the rest still works.
