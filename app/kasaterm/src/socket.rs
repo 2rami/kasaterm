@@ -3100,6 +3100,18 @@ impl Backend for PtyBackend {
                 })
                 .clone();
         }
+        // 이사 전 transcript는 대화 보관용이다. 지금 실행 상태는 원격 호스트가
+        // 알려 준 행을 써야 종료한 학생과 살아 있는 거울을 모두 정확히 가른다.
+        board.retain_mut(|row| {
+            if kasa_mcp::remote::is_remote_pane(&row.surface_id) {
+                if let Some(facts) = kasa_mcp::remote::cached_pane(&row.surface_id) {
+                    apply_remote_board_facts(row, &facts);
+                }
+                true
+            } else {
+                row.harness.is_some()
+            }
+        });
         board.sort_by(|a, b| a.surface_id.cmp(&b.surface_id));
         Ok(board)
     }
@@ -3247,6 +3259,81 @@ impl Backend for PtyBackend {
             map.remove(surface_id);
         }
         Ok(())
+    }
+}
+
+fn apply_remote_board_facts(row: &mut PaneActivity, facts: &serde_json::Value) {
+    // 필드가 없는 옛 호스트·연결 유실은 종료로 단정하지 않는다.
+    if facts.get("harness").is_none() {
+        return;
+    }
+    let text = |key: &str| facts.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+    let strings = |key: &str| facts.get(key).and_then(|v| v.as_array()).map(|a| {
+        a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>()
+    }).unwrap_or_default();
+    let shell = text("harness").is_none();
+    let mut current = PaneActivity {
+        surface_id: row.surface_id.clone(),
+        window_idx: row.window_idx,
+        detached: row.detached,
+        machine: row.machine.clone(),
+        cwd: text("cwd").unwrap_or_else(|| row.cwd.clone()),
+        reach: if shell { "stale" } else { "tell" }.into(),
+        status: if shell { "idle".into() } else { text("status").unwrap_or_else(|| "idle".into()) },
+        ..Default::default()
+    };
+    if !shell {
+        current.character = text("name");
+        current.harness = text("harness");
+        current.title = text("title").unwrap_or_default();
+        current.model = text("model").or_else(|| text("model_label")).unwrap_or_default();
+        current.effort_default = text("effort").unwrap_or_default();
+        current.intent = text("doing").unwrap_or_default();
+        current.background = strings("background");
+        current.subagents = strings("subagents");
+        current.waiting_for = text("waiting_for");
+        current.attention_kind = text("kind");
+        current.idle_secs = facts.get("idle_secs").and_then(|v| v.as_u64());
+        current.context_pct = facts.get("context_pct").and_then(|v| v.as_u64()).unwrap_or(0).min(100) as u8;
+        current.branch = text("branch");
+    }
+    *row = current;
+}
+
+#[cfg(test)]
+mod remote_board_tests {
+    use super::*;
+
+    #[test]
+    fn stopped_remote_agent_clears_transcript_identity_but_keeps_its_seat() {
+        let mut row = PaneActivity {
+            surface_id: "%8".into(), character: Some("previous student".into()),
+            model: "old-model".into(), status: "working".into(),
+            background: vec!["old job".into()], window_idx: 3,
+            machine: Some("mini".into()), ..Default::default()
+        };
+        apply_remote_board_facts(&mut row, &serde_json::json!({"harness":null,"cwd":"/work"}));
+        assert!(row.character.is_none());
+        assert!(row.model.is_empty() && row.background.is_empty());
+        assert_eq!(row.surface_id, "%8");
+        assert_eq!(row.window_idx, 3);
+        assert_eq!(row.machine.as_deref(), Some("mini"));
+        assert_eq!(row.reach, "stale");
+    }
+
+    #[test]
+    fn remote_agent_is_live_even_without_a_local_process() {
+        let mut row = PaneActivity::default();
+        apply_remote_board_facts(&mut row, &serde_json::json!({
+            "harness":"claude", "name":"current student", "status":"working", "model":"current-model"
+        }));
+        assert_eq!(row.harness.as_deref(), Some("claude"));
+        assert_eq!(row.character.as_deref(), Some("current student"));
+        assert_eq!(row.status, "working");
+        assert_eq!(row.model, "current-model");
+        let before = row.character.clone();
+        apply_remote_board_facts(&mut row, &serde_json::json!({}));
+        assert_eq!(row.character, before);
     }
 }
 

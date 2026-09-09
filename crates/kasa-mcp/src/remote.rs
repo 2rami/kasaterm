@@ -156,6 +156,22 @@ pub fn is_remote_pane(local_id: &str) -> bool {
     links().lock().unwrap().contains_key(local_id)
 }
 
+pub fn cached_pane(local_id: &str) -> Option<serde_json::Value> {
+    let info = remote_info(local_id)?;
+    let label = if info.label.is_empty() {
+        crate::machines::label_for_base(&info.base)?
+    } else {
+        info.label
+    };
+    crate::machines::cached_pane(&label, &info.remote_id)
+}
+
+/// 캐시가 없거나 구 호스트가 실행 상태를 안 주는 것은 종료 증거가 아니다.
+pub fn cached_agent_running(local_id: &str) -> Option<bool> {
+    let row = cached_pane(local_id)?;
+    row.get("harness").map(|value| value.as_str().is_some_and(|s| !s.is_empty()))
+}
+
 /// 이 pane 이 거울 연결인가. 구 호스트에서는 기존 읽기 미러로 남는다.
 pub fn is_view_pane(local_id: &str) -> bool {
     links()

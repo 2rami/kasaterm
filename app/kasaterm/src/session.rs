@@ -97,8 +97,8 @@ impl App {
         }
         src.cursor_row = update.cursor_row;
         src.cursor_col = update.cursor_col;
-        let (tc, _) = view_target?;
-        if update.cols == tc {
+        let (tc, tr) = view_target?;
+        if (update.cols, update.rows) == (tc, tr) {
             return None;
         }
         Some(src)
@@ -107,14 +107,11 @@ impl App {
     /// 창 크기가 바뀌어 거울 pane 의 칸 수가 달라졌을 때 — 원본 격자를 새 폭으로 다시
     /// 접는다. 원본이 아직 없으면(첫 갱신 전) 다음 갱신이 접는다.
     pub(crate) fn reflow_view_pane(ws: &mut Workspace, pid: &str) {
-        if kasa_mcp::remote::view_supports_viewport(pid) {
-            return;
-        }
         let Some((tc, tr)) = ws.view_cells.get(pid).copied() else { return };
         let Some((pane, tab_idx)) = ws.find_tab_by_pty(pid) else { return };
         let Some(tp) = pane.tabs[tab_idx].term_mut() else { return };
         let Some(src) = tp.mirror_src.as_ref() else { return };
-        if src.cols == tc {
+        if (src.cols, src.rows) == (tc, tr) {
             // 폭이 같아졌다 — 접은 것을 걷고 원본 그대로.
             if tp.cols != src.cols || tp.rows != src.rows {
                 tp.prev_cells.clear();
@@ -157,8 +154,9 @@ impl App {
         // `pid_to_pane`. Falls back to creating an outer pane entry
         // when the first update from a freshly-spawned shell arrives.
         // 거울 pane 이면 이쪽 칸 수 — 원본 폭과 다를 때만 다시 접는다.
-        let is_view = kasa_mcp::remote::is_view_pane(&update.pane_id)
-            && !kasa_mcp::remote::view_supports_viewport(&update.pane_id);
+        // 협상 지원은 크기 일치를 보장하지 않는다. 재접속 첫 프레임과 다른 뷰어가
+        // 제어권을 가져간 동안에도 원본을 쌓아 로컬 폭으로 접어야 한다.
+        let is_view = kasa_mcp::remote::is_view_pane(&update.pane_id);
         let view_target = if is_view {
             ws.view_cells.get(&update.pane_id).copied()
         } else {
@@ -8851,6 +8849,49 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(unix)]
+    fn mirror_viewport_capability_does_not_expose_the_host_grid() {
+        use std::sync::Arc;
+        let id = format!("mirror-origin-{}", uuid::Uuid::new_v4());
+        let local = format!("mirror-local-{}", uuid::Uuid::new_v4());
+        let source = Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
+            pane_id: id.clone(), shell: Some("/bin/sh".into()),
+            cols: 60, rows: 12, ..Default::default()
+        }).unwrap());
+        kasa_pty::register_session(&id, &source);
+        let backend: Arc<dyn kasa_socket::backend::Backend> = Arc::new(
+            kasa_mcp::standalone::StandaloneBackend::new(std::env::temp_dir()),
+        );
+        let port = kasa_mcp::spawn_http_server_opts(backend, 0, false).unwrap();
+        let _mirror = kasa_mcp::remote::connect_view(kasa_mcp::remote::RemoteSpec {
+            base: format!("http://127.0.0.1:{port}"), pane: Some(id),
+            cwd: None, token: None, identity: Default::default(),
+        }, &local).unwrap();
+        assert!(kasa_mcp::remote::view_supports_viewport(&local));
+
+        let mut ws = crate::Workspace::default();
+        ws.view_cells.insert(local.clone(), (30, 8));
+        let mut snapshot = source.full_snapshot();
+        snapshot.pane_id = local.clone();
+        super::App::apply_screen_update(&mut ws, snapshot.clone());
+        let displayed = ws.panes[&local].tabs[0].term().unwrap();
+        assert_eq!((displayed.cols, displayed.rows), (30, 8));
+        assert!(displayed.mirror_src.is_some());
+
+        // 협상 대기 중 레이아웃만 바뀌어도 새 원격 출력 없이 다시 맞춰야 한다.
+        ws.view_cells.insert(local.clone(), (60, 6));
+        super::App::reflow_view_pane(&mut ws, &local);
+        let displayed = ws.panes[&local].tabs[0].term().unwrap();
+        assert_eq!((displayed.cols, displayed.rows), (60, 6));
+
+        // 다른 뷰어가 크기를 가져가거나 재접속해 원본 크기가 다시 와도 유지한다.
+        super::App::apply_screen_update(&mut ws, snapshot);
+        let displayed = ws.panes[&local].tabs[0].term().unwrap();
+        assert_eq!((displayed.cols, displayed.rows), (60, 6));
+        assert_eq!(source.size(), (60, 12));
+    }
+
     #[test]
     fn resume_keeps_the_sessions_student_unless_the_pane_was_reassigned() {
         use super::pane_pick_wins;

@@ -4485,7 +4485,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
             // 거울 pane 은 이쪽 board 에 줄이 없다(몸통이 저쪽). 저 기계의 목록 캐시에서
             // 같은 pane 의 줄을 그대로 가져와 이쪽 자리·창 번호만 덮는다 — 이름·얼굴·
             // 상태·상태줄이 저쪽과 똑같이 나온다. `mirror_of` 로 어느 기계의 거울인지.
-            if raw.is_none() {
+            if crate::remote::is_remote_pane(&id) {
                 if let Some((label, mut row)) =
                     crate::remote::remote_info(&id).and_then(|i| {
                         let label = if i.label.is_empty() {
@@ -4505,28 +4505,6 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 }
             }
             let b = raw.filter(|p| p.harness.is_some() || crate::remote::is_remote_pane(&id));
-            // 거울 pane 은 이쪽 board 에 줄이 없다(몸통이 저쪽). 저 기계의 목록 캐시에서
-            // 같은 pane 의 줄을 그대로 가져와 이쪽 자리·창 번호만 덮는다 — 이름·얼굴·
-            // 상태·상태줄이 저쪽과 똑같이 나온다. `mirror_of` 로 어느 기계의 거울인지.
-            if raw.is_none() {
-                if let Some((label, mut row)) =
-                    crate::remote::remote_info(&id).and_then(|i| {
-                        let label = if i.label.is_empty() {
-                            crate::machines::label_for_base(&i.base)?
-                        } else {
-                            i.label
-                        };
-                        crate::machines::cached_pane(&label, &i.remote_id).map(|r| (label, r))
-                    })
-                {
-                    row["id"] = serde_json::Value::String(id.clone());
-                    row["window"] = serde_json::json!(pane_windows.get(&id).copied());
-                    row["closed"] = serde_json::json!(!pane_windows.contains_key(&id));
-                    row["undocked"] = serde_json::json!(undocked.contains(&id));
-                    row["mirror_of"] = serde_json::Value::String(label);
-                    return row;
-                }
-            }
             serde_json::json!({
                 "id": id,
                 "name": b.and_then(|p| p.character.clone()),
