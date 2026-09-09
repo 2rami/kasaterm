@@ -84,7 +84,7 @@ impl MachineIdentity {
     }
 }
 
-fn machine_tint(label: &str) -> [u8; 4] {
+pub(crate) fn machine_tint(label: &str) -> [u8; 4] {
     // 작업 상태의 빨강·주황·초록을 빌리지 않는다. 같은 이름은 앱을 다시
     // 열거나 로컬/원격 위치가 바뀌어도 같은 차분한 기기색을 갖는다.
     const COLORS: [[u8; 4]; 5] = [

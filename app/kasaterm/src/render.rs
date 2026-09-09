@@ -6,6 +6,7 @@ pub(crate) use crate::sprites::*;
 
 #[path = "pane_identity.rs"]
 mod pane_identity;
+pub(crate) use pane_identity::machine_tint;
 use pane_identity::{MachineIdentity, PaneIdentity};
 #[path = "terminal_scene.rs"]
 pub(crate) mod terminal_scene;

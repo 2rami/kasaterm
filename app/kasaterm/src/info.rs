@@ -2229,9 +2229,9 @@ pub(crate) fn draw_info_col(
         .map(|p| p.stages.len() as f32 * STAGE_H + 6.0)
         .unwrap_or(0.0);
     // Include every device section and its rows in the scroll extent.
-    let machines_h = {
+    let machine_heights: Vec<f32> = {
         let prog = info.machines_col.progress.as_ref();
-        let rows: f32 = info
+        info
             .machines_col
             .machines
             .iter()
@@ -2261,9 +2261,9 @@ pub(crate) fn draw_info_col(
                 }
                 h
             })
-            .sum();
-        rows
+            .collect()
     };
+    let machines_h: f32 = machine_heights.iter().sum();
     let content = HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + machines_h + 14.0;
     info.content_h = content;
     info.scroll = info.scroll.clamp(0.0, (content - (bottom - top)).max(0.0));
@@ -2425,6 +2425,7 @@ pub(crate) fn draw_info_col(
 
     // ── 프로세스 ──
     let t_procs = prof.map(|_| Instant::now());
+    draw_device_background(g, local_machine_name(), x, w, y, SEC_H + procs_h);
     let r = draw_device_section(
         g, cursor, local_machine_name(), Some(local_panes.len()), info.procs_collapsed, x, w, y, bottom, top,
     );
@@ -2502,8 +2503,9 @@ pub(crate) fn draw_info_col(
     y += SEC_GAP;
 
     // Each source device has the same section and pane layout as this device.
-    for m in &info.machines_col.machines {
+    for (m, section_h) in info.machines_col.machines.iter().zip(machine_heights) {
         let shut = info.machine_collapsed.contains(&m.label);
+        draw_device_background(g, &m.label, x, w, y, section_h - SEC_GAP);
         let r = draw_device_section(
             g, cursor, &m.label, Some(machine_open_count(m)),
             shut, x, w, y, bottom, top,
@@ -2688,6 +2690,15 @@ fn draw_section(
         );
     }
     r
+}
+
+/// Reuse pane identity colors so a device reads as one quiet, continuous card.
+fn draw_device_background(
+    g: &mut gpu::GpuRenderer, label: &str, x: f32, w: f32, y: f32, h: f32,
+) {
+    let tint = crate::render::machine_tint(label);
+    let bg = theme::lerp(theme::panel_bg(), tint, 0.12);
+    g.round_rect_fill(x + 6.0, y, (w - 12.0).max(0.0), h, 6.0, bg);
 }
 
 #[allow(clippy::too_many_arguments)]
