@@ -3226,8 +3226,14 @@ impl App {
             }
             "cursor-legacy" => {
                 self.cursor_shape = crate::cursor::CursorShape::Frame;
+                if let Some(outer) = self.settings_scene.return_pane().map(str::to_string) {
+                    if let Ok(mut ws) = self.ws.lock() {
+                        let tab_pid = ws.active_tab_pid(&outer);
+                        ws.pane_character.insert(tab_pid, "아리스".to_string());
+                    }
+                }
                 self.chrome_dirty = true;
-                eprintln!("[autosettings] 기존 고급 커서 시드");
+                eprintln!("[autosettings] 기존 고급 커서+아리스색 시드");
             }
             "account-usage-claude" => {
                 let now = std::time::SystemTime::now()
