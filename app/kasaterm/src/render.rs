@@ -2561,6 +2561,19 @@ impl App {
                     g.upload_image(&key, &rgba, w, h);
                 }
             }
+            // Device identity belongs to the whole terminal, not only a header
+            // that disappears for a single pane. Default terminal cells are
+            // transparent, so paint below them; explicit syntax/diff/prompt
+            // fills and character accents remain above this local-mode tint.
+            for (id, x, y, w, h) in &footer_slots {
+                // Keep the existing classroom illustration in system pickers.
+                if classroom_slots.contains(&(*x, *y, *w, *h)) { continue; }
+                if let Some(background) = pane_identities.get(id)
+                    .and_then(|identity| identity.machine.pane_background(theme::bg()))
+                {
+                    g.rect(*x, *y, *w, *h, background);
+                }
+            }
             g.draw_cells(&slot_views);
             paint_status_model_icons(g, &status_model_icons);
             for (id, image, (bx, by, bw, bh), zoom, rot, (pan_x, pan_y)) in &image_slots {

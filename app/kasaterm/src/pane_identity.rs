@@ -73,6 +73,12 @@ impl MachineIdentity {
         theme::lerp(base, self.tint, 0.12)
     }
 
+    /// Local panes keep the viewer's base; remote panes carry the same subtle
+    /// device tint as their header, without importing the source's light/dark mode.
+    pub fn pane_background(&self, base: [u8; 4]) -> Option<[u8; 4]> {
+        self.remote.then(|| self.background(base))
+    }
+
     pub fn foreground(&self, background: [u8; 4]) -> [u8; 4] {
         theme::enforce_contrast_at(self.tint, background, 4.5)
     }
@@ -221,7 +227,25 @@ pub(super) fn draw_card(
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_identity_pid;
+    use super::{terminal_identity_pid, machine_tint, MachineIdentity};
+
+    #[test]
+    fn remote_pane_background_keeps_viewer_brightness_and_stable_device_tint() {
+        for base in [[26, 29, 35, 255], [240, 241, 243, 255]] {
+            let mut machine = MachineIdentity {
+                label: "맥미니".into(), detail: "미러".into(), remote: false,
+                tint: machine_tint("맥미니"),
+            };
+            assert_eq!(machine.pane_background(base), None);
+            machine.remote = true;
+            let tinted = machine.pane_background(base).unwrap();
+            assert_ne!(tinted, base);
+            assert_eq!(tinted, machine.background(base));
+            let light = |c: [u8; 4]| c[..3].iter().map(|v| u16::from(*v)).sum::<u16>() > 380;
+            assert_eq!(light(tinted), light(base));
+            assert_eq!(machine_tint(" MACBOOK "), machine_tint("macbook"));
+        }
+    }
 
     #[test]
     fn non_terminal_tab_does_not_inherit_outer_terminal_identity() {
