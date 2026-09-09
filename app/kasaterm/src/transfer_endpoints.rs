@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 use kasa_socket::transfer::{MachineSnapshot, RoomInfo, RoomTarget, SessionIdentity, SessionRow, SpawnRequest};
 use std::sync::{OnceLock, Weak};
 
