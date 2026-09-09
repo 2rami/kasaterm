@@ -319,7 +319,13 @@ pub fn connect(
     cols: u16,
     rows: u16,
 ) -> Result<RemoteSession> {
-    connect_inner(spec, local_pane_id, cols, rows, false)
+    // GUI pane은 호스트 창도 크기를 갱신한다. 옛 저장본의 own=1 연결을 그대로
+    // 되살리면 두 창이 크기를 번갈아 덮으므로 기존 GUI 자리만 거울로 승계한다.
+    // 새 셸과 web-* 소유 연결의 생성·종료 책임은 그대로 둔다.
+    let view = spec.pane.as_deref().is_some_and(|pane| {
+        pane.strip_prefix('%').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    });
+    connect_inner(spec, local_pane_id, cols, rows, view)
 }
 
 /// 거울은 서버의 size를 먼저 받은 뒤 `set_viewport`로 실제 로컬 칸 크기를
@@ -2139,6 +2145,44 @@ mod tests {
             "소유자 resize 가 막혀 버렸다"
         );
         assert!(kill_remote("%vw0"));
+    }
+
+    #[test]
+    fn legacy_gui_attach_uses_a_viewport_lease_and_preserves_the_origin_on_drop() {
+        let id = format!("%{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
+        let local = format!("legacy-mirror-{id}");
+        let (_events, receiver) = crossbeam_channel::unbounded();
+        let source = Arc::new(PtySession::start_external(
+            PtyOptions { pane_id: id.clone(), cols: 60, rows: 12, ..Default::default() },
+            ExternalIo { events: receiver, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}) },
+        ).unwrap());
+        kasa_pty::register_session(&id, &source);
+        let backend: Arc<dyn kasa_socket::backend::Backend> = Arc::new(
+            crate::standalone::StandaloneBackend::new(std::env::temp_dir()),
+        );
+        let port = crate::spawn_http_server_opts(backend, 0, false).unwrap();
+        let mirror = connect(RemoteSpec {
+            base: format!("http://127.0.0.1:{port}"), pane: Some(id.clone()),
+            cwd: None, token: None, identity: Default::default(),
+        }, &local, 100, 30).unwrap();
+        assert!(is_view_pane(&local));
+        assert_eq!(source.size(), (60, 12));
+        assert!(set_viewport(&local, 100, 30));
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while !source.has_viewer_size_control() {
+            assert!(std::time::Instant::now() < until, "legacy attach did not acquire a lease");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        source.resize(40, 10).unwrap();
+        assert_eq!(source.size(), (100, 30), "host layout overwrote the mirror dimensions");
+        drop(mirror);
+        while source.has_viewer_size_control() {
+            assert!(std::time::Instant::now() < until, "closing the mirror did not release its lease");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(source.size(), (40, 10));
+        assert!(kasa_pty::lookup_session(&id).is_some(), "closing the mirror killed its origin");
     }
 
     #[test]
