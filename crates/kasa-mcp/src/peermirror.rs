@@ -442,17 +442,24 @@ fn sweep_orphan_ghosts() {
 }
 
 /// 릴레이 명단에서 유령으로 세울 대상 고르기 — 순수 함수라 테스트한다.
-/// 거르는 것 둘: ①내 기계(machine == 나) — 내 세션을 유령으로 세우면 자기 메아리
+/// 거르는 것 셋: ①내 기계(machine == 나) — 내 세션을 유령으로 세우면 자기 메아리
 /// ②직결 기계(machines.json 라벨과 같은 machine) — 직결 유령이 이미 서므로 릴레이
 /// 유령까지 서면 같은 세션이 두 이름으로 뜬다. 직결이 우선이다(왕복이 한 홉 짧다).
+/// ③직결로 이미 잡힌 **세션 id** — 라벨은 기계마다 제멋대로다(내 명부는 「나쵸네코」,
+/// 그 기계가 중계소에 올린 자기 이름은 「맥미니」). 라벨만 대조하면 같은 세션이
+/// `(나쵸네코)`·`(맥미니)` 두 벌로 서고 어느 주소가 진짜인지 못 가른다(2026-09-09
+/// 지적: 셋인데 여섯으로 보였다). 세션 id 는 어느 길로 오든 같으니 그걸로 거른다.
 fn relay_targets(
     rows: &[(String, String, String)], // (machine, sid, name)
     my_machine: &str,
     direct_labels: &[String],
+    direct_sids: &std::collections::HashSet<String>,
 ) -> Vec<(String, String, String)> {
     rows.iter()
-        .filter(|(machine, _, _)| {
-            machine != my_machine && !direct_labels.iter().any(|l| l == machine)
+        .filter(|(machine, sid, _)| {
+            machine != my_machine
+                && !direct_labels.iter().any(|l| l == machine)
+                && !direct_sids.contains(sid)
         })
         .cloned()
         .collect()
@@ -495,8 +502,10 @@ fn sync_once(ghosts: &Arc<Mutex<Ghosts>>) {
             Ok(rows) => {
                 let direct_labels: Vec<String> =
                     machines.iter().map(|m| m.label.clone()).collect();
+                let direct_sids: std::collections::HashSet<String> =
+                    want.keys().map(|(_, sid)| sid.clone()).collect();
                 for (machine, sid, name) in
-                    relay_targets(&rows, &conf.machine_id, &direct_labels)
+                    relay_targets(&rows, &conf.machine_id, &direct_labels, &direct_sids)
                 {
                     want.insert(
                         (format!("relay:{machine}"), sid),
@@ -604,12 +613,27 @@ mod tests {
             ("맥미니".to_string(), "s2".to_string(), "미니학생".to_string()),
             ("데스크탑".to_string(), "s3".to_string(), "데탑학생".to_string()),
         ];
+        let none = std::collections::HashSet::new();
         // 내 기계(맥북)와 직결(맥미니)은 걸러지고 릴레이 전용(데스크탑)만 남는다.
-        let t = relay_targets(&rows, "맥북", &["맥미니".to_string()]);
+        let t = relay_targets(&rows, "맥북", &["맥미니".to_string()], &none);
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].0, "데스크탑");
         // 직결이 없으면 내 것만 빠진다.
-        let t2 = relay_targets(&rows, "맥북", &[]);
+        let t2 = relay_targets(&rows, "맥북", &[], &none);
         assert_eq!(t2.len(), 2);
+    }
+
+    /// 같은 기계가 내 명부엔 「나쵸네코」, 중계소엔 「맥미니」로 서 있어도 세션 id 가
+    /// 직결로 이미 잡혔으면 릴레이 유령은 안 선다.
+    #[test]
+    fn relay_targets_skip_sessions_already_direct() {
+        let rows = vec![
+            ("맥미니".to_string(), "s2".to_string(), "미니학생".to_string()),
+            ("맥미니".to_string(), "s9".to_string(), "새학생".to_string()),
+        ];
+        let direct: std::collections::HashSet<String> = ["s2".to_string()].into_iter().collect();
+        let t = relay_targets(&rows, "맥북", &["나쵸네코".to_string()], &direct);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].1, "s9");
     }
 }
