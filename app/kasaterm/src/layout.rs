@@ -646,7 +646,13 @@ impl App {
             return String::new();
         }
         self.pending_character = None;
-        self.pending_spawn_cwd = cwd.map(str::to_string);
+        // /spawn-shell은 이 기계에 만드는 요청이다. 활성 pane이 다른 기계의
+        // 거울이어도 다시 넘기지 않도록 로컬 cwd를 명시한다.
+        self.pending_spawn_cwd = Some(
+            cwd.map(str::to_string)
+                .or_else(|| kasa_socket::home_dir().map(|p| p.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "/".to_string()),
+        );
         let out = self.split_pane_auto(None);
         self.pending_spawn_cwd = None;
         let id = match out {
@@ -751,6 +757,8 @@ impl App {
                     // 반쯤 만든 셸을 남기지 않는다 — 트리에 안 꽂힌 pane 은 화면에
                     // 없는데 셸은 계속 돈다.
                     for id in &made {
+                        self.close_owned_remote_surface(id);
+                        kasa_mcp::remote::kill_remote(id);
                         self.pty.remove(id);
                     }
                     return Err(e);
@@ -766,6 +774,8 @@ impl App {
         };
         if !layout.is_some_and(|l| l.replace_leaf(&host, tree)) {
             for id in &made {
+                self.close_owned_remote_surface(id);
+                kasa_mcp::remote::kill_remote(id);
                 self.pty.remove(id);
             }
             anyhow::bail!("pane {host} 자리를 못 찾았다 — 종료·재시작으로 사라졌는지 확인해라");
@@ -798,6 +808,15 @@ impl App {
             crate::settings_room::SettingsMutation::Split,
         )?;
         let new_id = self.alloc_pane_id();
+        if let Some(session) = self.spawn_inherited_remote_session(active, &new_id)? {
+            self.pump_pty_screens(
+                session.screens.clone(),
+                new_id.clone(),
+                Arc::downgrade(&session),
+            );
+            self.insert_pty(new_id.clone(), session);
+            return Ok(new_id);
+        }
 
         // Spawn the new session at a placeholder size — the resize
         // pass right after `split_leaf` puts every leaf at its real
@@ -839,6 +858,58 @@ impl App {
         );
         self.insert_pty(new_id.clone(), session);
         Ok(new_id)
+    }
+
+    fn spawn_inherited_remote_session(
+        &mut self,
+        source: &str,
+        new_id: &str,
+    ) -> Result<Option<Arc<kasa_pty::PtySession>>> {
+        // 기계를 지정해 들어온 스폰 요청은 현지에서 처리해야 왕복 소환이 없다.
+        if self.pending_spawn_cwd.is_some() || self.pending_character.is_some() {
+            return Ok(None);
+        }
+        let source_pid = self.ws.lock().unwrap().active_tab_pid(source);
+        let Some(info) = kasa_mcp::remote::remote_info(&source_pid) else {
+            return Ok(None);
+        };
+        let cwd = self
+            .pty
+            .get(&source_pid)
+            .and_then(|session| session.reported_cwd())
+            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| {
+                kasa_mcp::machines::cached_pane(&info.label, &info.remote_id)
+                    .and_then(|pane| pane.get("cwd").and_then(|v| v.as_str()).map(str::to_string))
+            })
+            .or(info.remote_cwd);
+        let remote_id = kasa_mcp::remote::spawn_shell_pane(&info.base, cwd.as_deref(), None)?;
+        let remote = match kasa_mcp::remote::connect_view(
+            kasa_mcp::remote::RemoteSpec {
+                base: info.base.clone(),
+                pane: Some(remote_id.clone()),
+                cwd: None,
+                token: None,
+                identity: kasa_mcp::remote::RemoteIdentity {
+                    label: info.label,
+                    remote_cwd: cwd,
+                    origin_cwd: info.origin_cwd,
+                    owned: true,
+                },
+            },
+            new_id,
+        ) {
+            Ok(remote) => remote,
+            Err(error) => {
+                let _ = kasa_mcp::remote::close_remote_pane(&info.base, &remote_id, None, true);
+                return Err(error);
+            }
+        };
+        let mut ws = self.ws.lock().unwrap();
+        if let Some(room) = ws.pane_room.get(source).cloned() {
+            ws.pane_room.insert(new_id.to_string(), room);
+        }
+        Ok(Some(remote.session))
     }
 
     /// 포커스된 pane 을 쪼갠다. 실패는 **전부 `Err` + 사유**다.
@@ -927,6 +998,8 @@ impl App {
         };
         if !layout.is_some_and(|l| l.split_leaf(&active, dir, new_id.clone())) {
             // 샌 세션을 되감고 사유를 올린다.
+            self.close_owned_remote_surface(&new_id);
+            kasa_mcp::remote::kill_remote(&new_id);
             self.pty.remove(&new_id);
             anyhow::bail!(
                 "pane {active} 을 어느 window 트리에서도 못 찾았다 — 종료·재시작으로 사라졌는지 확인해라"
@@ -986,6 +1059,7 @@ impl App {
             .unwrap_or_else(|| self.window_cells());
         let cwd = self.spawn_cwd_from(Some(outer));
         let new_pid = self.alloc_pane_id();
+        let inherited = self.spawn_inherited_remote_session(outer, &new_pid)?;
         // 탭도 split 과 **같은 대접**이다: 방은 상속하고 학생은 새로 배정한다.
         // 이게 없던 동안 탭으로 띄운 학생은 캐릭터가 아예 없어서 보더색·프사·입력박스
         // 도색은 물론 페르소나 env 와 board 등재까지 통째로 빠졌다(거노 2026-08-07:
@@ -1001,17 +1075,20 @@ impl App {
                 .pane_room
                 .insert(new_pid.clone(), r.clone());
         }
-        env.extend(self.assign_character_env(&new_pid, cwd.as_deref(), room.as_deref()));
-        let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
-            shell: resolve_default_shell(),
-            cwd,
-            cols,
-            rows,
-            env,
-            pane_id: new_pid.clone(),
-            initial_scrollback: Vec::new(),
-        })?;
-        let session = Arc::new(session);
+        let session = if let Some(session) = inherited {
+            session
+        } else {
+            env.extend(self.assign_character_env(&new_pid, cwd.as_deref(), room.as_deref()));
+            Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
+                shell: resolve_default_shell(),
+                cwd,
+                cols,
+                rows,
+                env,
+                pane_id: new_pid.clone(),
+                initial_scrollback: Vec::new(),
+            })?)
+        };
         self.pump_pty_screens(
             session.screens.clone(),
             new_pid.clone(),
@@ -1153,6 +1230,8 @@ impl App {
         };
         if let Some(pid) = pid_opt.as_deref() {
             if pid != outer {
+                self.close_owned_remote_surface(pid);
+                kasa_mcp::remote::kill_remote(pid);
                 // Secondary tab — drop its session entry; reader thread sees
                 // the channel close and pushes EOF to `dead_panes`, but with
                 // the pid_to_pane entry gone the reap pass routes through
@@ -2102,7 +2181,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         self.chrome_dirty = true;
     }
 
-    pub(crate) fn remove_pane(&mut self, target: &str) {
+    fn close_owned_remote_surface(&mut self, target: &str) {
         // `to` 로 저쪽 창에 세운 자리는 그 pane 까지 함께 걷는다 — ssh 를 끊으면
         // 저쪽 셸도 끝나듯이. 남기고 싶을 때만 메뉴(`remote_keep`)로 예외를 둔다.
         // kill_remote 는 우리 링크만 끊고 GUI pane 은 저쪽 앱이 Arc 를 쥐어 안 죽는다.
@@ -2121,6 +2200,10 @@ for p in glob.glob(os.path.join(d, '*.json')):
                 });
             }
         }
+    }
+
+    pub(crate) fn remove_pane(&mut self, target: &str) {
+        self.close_owned_remote_surface(target);
         // 원격 pane 이면 원격 셸까지 죽인다 — 여기는 「진짜 끄기」 경로다.
         // detach(앱 종료·재시작)는 이 함수를 안 타고 Arc drop 만으로 끝난다.
         kasa_mcp::remote::kill_remote(target);
