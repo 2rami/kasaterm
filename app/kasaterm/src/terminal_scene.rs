@@ -892,6 +892,7 @@ impl App {
             // 그림이 함께 걷힌다.
             .or_else(|| {
                 (kasa_mcp::remote::is_remote_pane(tab_pid.as_str())
+                    && kasa_mcp::remote::cached_agent_running(tab_pid.as_str()) != Some(false)
                     && find_statusline_face(&composed).is_some())
                 .then(|| {
                     mirror_claude_panes.insert(tab_pid.clone());
@@ -1004,7 +1005,12 @@ impl App {
                 .ok()
                 .and_then(|badges| badges.get(path).map(|badge| badge.branch.clone()))
         });
-        restyle_codex_status_line(&mut composed, project.as_deref(), branch.as_deref());
+        let codex_status = restyle_codex_status_line(&mut composed, project.as_deref(), branch.as_deref());
+        if kasa_mcp::remote::is_remote_pane(tab_pid.as_str())
+            && (agent_kind == Some(kasa_pty::AgentKind::Codex) || codex_status)
+        {
+            localize_codex_prompt_background(&mut composed, theme::surface());
+        }
         {
             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
             if let Some(slot) = take_status_model_icon_slot(
