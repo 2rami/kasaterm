@@ -593,6 +593,8 @@ impl App {
     fn open_on_phone(&mut self, name: &str, url: &str, open: kasa_mcp::browse::Open) {
         use kasa_mcp::browse::PhoneRoute;
         let (req, route) = kasa_mcp::browse::open_on_phone(name, url, open);
+        // 리그가 읽는 유일한 창구 — 토스트는 로그에 안 남는다.
+        eprintln!("[browse] phone={name} req={req} route={route:?} mode={} {url}", open.as_str());
         let message = match route {
             PhoneRoute::Socket => {
                 self.statusbar.phone_opens.push((req, std::time::Instant::now(), name.to_string()));
@@ -612,6 +614,7 @@ impl App {
             return;
         };
         let (_, _, name) = self.statusbar.phone_opens.remove(pos);
+        eprintln!("[browse] phone={name} req={req} opened ok={ok} error={error:?}");
         let message = if ok {
             format!("{name} 폰에서 열렸어요")
         } else {
