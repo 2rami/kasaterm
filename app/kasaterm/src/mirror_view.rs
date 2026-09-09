@@ -96,6 +96,24 @@ fn code_or_table(row: &[GridCell]) -> bool {
     trimmed.starts_with(['|', '│', '┃', '║']) || trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
+/// Claude's tool-title widget indents wrapped arguments by six cells, unlike
+/// ordinary answer paragraphs (two cells). Recognise the title, not arbitrary
+/// indented shell/code output. The first row's short explicit newline is not a
+/// wrap and stays untouched below.
+fn claude_tool_title(row: &[GridCell]) -> bool {
+    let text: String = row.iter().map(|cell| cell.ch).collect();
+    let Some(body) = text.strip_prefix("⏺ ").or_else(|| text.strip_prefix("● ")) else { return false };
+    let Some((name, _)) = body.split_once('(') else { return false };
+    !name.is_empty() && name.len() <= 40 && name.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
+}
+
+fn tool_title_continuation(previous: &[GridCell], next: &[GridCell]) -> Option<(usize, bool)> {
+    let lead = next.iter().take_while(|cell| matches!(cell.ch, ' ' | '\u{a0}')).count();
+    (lead == 6 && previous.last().is_some_and(|cell| !matches!(cell.ch, ' ' | '\0'))
+        && next.get(lead).is_some_and(|cell| !matches!(cell.ch, '⎿' | '─' | '│')))
+        .then_some((lead, false))
+}
+
 fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: SourcePos, cols: usize, input_borders: &[usize], prose: bool) -> Vec<ProjectedLine> {
     let mut output = Vec::new();
     let mut row_index = start;
@@ -127,6 +145,7 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
         }
 
         let first_row = row_index;
+        let tool_title = claude_tool_title(&source[first_row]);
         let indented_code = source[first_row].iter().take_while(|cell| cell.ch == ' ').count() >= 4;
         let mut logical: Vec<(GridCell, Option<SourcePos>)> = Vec::new();
         let mut omit_leading = 0;
@@ -140,9 +159,13 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
             // body. Explicit input newlines, code fences/indentation and tables
             // retain their hard breaks; ordinary shell grids stay strict VT.
             let paragraph = (!soft_wrap && prose && !fenced && !indented_code && row.len() != cols
-                && row_index + 1 < end && !code_or_table(row)
-                && !code_or_table(&source[row_index + 1]))
-                .then(|| kasa_bridge::reflow::paragraph_continuation(row, &source[row_index + 1], row.len()))
+                && row_index + 1 < end
+                && !code_or_table(row) && !code_or_table(&source[row_index + 1]))
+                .then(|| {
+                    let next = &source[row_index + 1];
+                    (tool_title.then(|| tool_title_continuation(row, next)).flatten())
+                        .or_else(|| kasa_bridge::reflow::paragraph_continuation(row, next, row.len()))
+                })
                 .flatten();
             let joins_next = soft_wrap || paragraph.is_some();
             // Trailing terminal padding is not another paragraph. Keep interior
@@ -161,7 +184,13 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
             }));
             omit_leading = paragraph.map_or(0, |(skip, _)| skip);
             if paragraph.is_some_and(|(_, separator)| separator) {
-                logical.push((GridCell::blank(), None));
+                // The separator belongs to the same rendered paragraph. Losing
+                // its fill breaks uniform user-prompt bands after a mirror join.
+                let mut separator = logical.last().map(|(cell, _)| cell.clone()).unwrap_or_else(GridCell::blank);
+                separator.ch = ' ';
+                separator.wrapped = false;
+                separator.leading_wide_spacer = false;
+                logical.push((separator, None));
             }
             row_index += 1;
             if !joins_next {
@@ -330,6 +359,48 @@ mod tests {
         source
     }
 
+    fn codex_screen(body: &[&str], cols: usize) -> Vec<Vec<GridCell>> {
+        let mut source = agent_screen(body, cols, false);
+        source.truncate(body.len());
+        for content in ["", "› ready", ""] {
+            let mut row = line(content); row.resize(cols, GridCell::blank());
+            for cell in &mut row { cell.bg = kasa_bridge::screen::Color::Rgb(63, 69, 77); }
+            source.push(row);
+        }
+        source
+    }
+
+    #[test]
+    fn codex_branch_paragraph_uses_mobile_hanging_indent() {
+        let source = codex_screen(&["  └ word word word word word word word word word word", "    continued end"], 60);
+        let view = project(&source, (3, 3), 100, 8, Some(2), None);
+        assert_eq!(view.body_lines.len(), 1);
+        assert!(text(&view.rows)[4].ends_with("continued end"));
+        for (col, pos) in view.body_lines[0].source_map.iter().enumerate() {
+            if let Some((row, source_col)) = pos { assert_eq!(view.body_lines[0].cells[col].ch, source[*row][*source_col].ch); }
+        }
+    }
+
+    #[test]
+    fn short_old_rows_need_canonical_history_resync_not_guessed_joins() {
+        // These may be stale 26-column wraps after the source widens to 93,
+        // or deliberate newlines. Projection cannot distinguish them: the
+        // transport must replace history with the source's canonical rows.
+        let source = codex_screen(&["  └ /tmp/mirror-fixture-", "  source/example/", "  native.png"], 93);
+        let view = project(&source, (4, 3), 200, 9, Some(3), None);
+        assert_eq!(view.body_lines.len(), 3);
+
+        let mut records = codex_screen(&["  └ Search some text", "    Read another file"], 93);
+        for cell in &mut records[0][4..10] { cell.fg = kasa_bridge::screen::Color::Idx(6); }
+        for cell in &mut records[1][4..8] { cell.fg = kasa_bridge::screen::Color::Idx(6); }
+        let view = project(&records, (3, 3), 200, 8, Some(2), None);
+        assert_eq!(view.body_lines.len(), 2, "the next coloured action keyword starts its own record");
+
+        let code = codex_screen(&["  └ let value = 1;", "  return value;"], 93);
+        let view = project(&code, (3, 3), 200, 8, Some(2), None);
+        assert_eq!(view.body_lines.len(), 2, "explicit code rows must retain newlines");
+    }
+
     #[test]
     fn source_width_changes_keep_agent_paragraph_at_viewer_width() {
         let narrow_body = ["  - word word word word word word word word word word", "    continued end"];
@@ -420,6 +491,56 @@ mod tests {
         assert!(text(&view.rows)[4].ends_with("word continued end"));
         assert!(view.rows[5..].iter().all(|row| row.len() == 100 && row.iter().all(|cell| cell.bg == fill)));
         assert_eq!(view.cursor, Some((6, 3)));
+    }
+
+    #[test]
+    fn observed_claude_full_width_tool_title_joins_its_six_cell_continuation() {
+        // Anonymised shape of the read-only 96-column production capture:
+        // a Bash title reaches the last source column in the middle of CSS;
+        // Claude paints the remainder six columns in on a new hard row.
+        let prefix = "⏺ Bash(sed -i 's|";
+        let suffix = "position:relative";
+        let first = format!("{prefix}{}{suffix}", "x".repeat(96 - prefix.chars().count() - suffix.len()));
+        let source = agent_screen(&[&first, "      ;height:480px;|' page.html)"], 96, false);
+        let view = project(&source, (3, 3), 180, 8, Some(2), None);
+        assert_eq!(view.body_lines.len(), 1);
+        assert!(text(&view.rows)[4].contains("position:relative;height:480px;|' page.html)"));
+        assert_eq!(view.body_lines[0].source_map[96], Some((1, 6)));
+    }
+
+    #[test]
+    fn short_tool_title_newline_is_not_guessed_to_be_a_wrap() {
+        let source = agent_screen(&["⏺ Bash(python3 - <<'EOF'", "      print('explicit command newline'))"], 96, false);
+        let view = project(&source, (3, 3), 180, 8, Some(2), None);
+        assert_eq!(view.body_lines.len(), 2);
+    }
+
+    #[test]
+    fn observed_result_bullet_nbsp_padding_uses_mobile_paragraph_reflow() {
+        let first = format!("  ⎿ \u{a0}{}", ["word"; 10].join(" "));
+        let source = agent_screen(&[&first, "     continued result"], 60, false);
+        let view = project(&source, (3, 3), 100, 8, Some(2), None);
+        assert_eq!(view.body_lines.len(), 1);
+        assert!(text(&view.rows)[4].ends_with("word continued result"));
+        assert_eq!(view.body_lines[0].source_map[55], Some((1, 5)));
+    }
+
+    #[test]
+    fn joined_past_user_prompt_keeps_a_uniform_coloured_band() {
+        let first = format!("❯ {}", ["word"; 10].join(" "));
+        let mut source = agent_screen(&[&first, "  continued prompt"], 60, false);
+        let fill = kasa_bridge::screen::Color::Rgb(240, 225, 235);
+        for row in &mut source[..2] {
+            for cell in row { cell.bg = fill.clone(); cell.fg = kasa_bridge::screen::Color::Rgb(50, 40, 45); }
+        }
+        let view = project(&source, (3, 3), 100, 8, Some(2), None);
+        assert_eq!(view.body_lines.len(), 1);
+        let body = &view.body_lines[0];
+        assert!(body.cells.iter().all(|cell| cell.bg == fill), "a default-colour separator split the prompt band");
+        let separator = first.chars().count();
+        assert_eq!(body.source_map[separator], None);
+        assert_eq!(body.cells[separator].ch, ' ');
+        assert_eq!(body.cells[separator].fg, source[0][0].fg);
     }
 
     #[test]
