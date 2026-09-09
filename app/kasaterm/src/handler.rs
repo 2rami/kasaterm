@@ -3977,7 +3977,33 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
-                // Confirm-close modal swallows every click while it's up. A hit
+                // 인포·사이드바의 우클릭 메뉴가 떠 있으면 **어디를 눌러도** 항목이 아닌
+                // 한 닫힌다. 전엔 그 칼럼 안의 클릭만 닫아서, pane 을 눌러도 메뉴가
+                // 남아 오른쪽 빈 곳을 눌러야 했다(2026-09-09 지적). 닫는 클릭은 삼킨다.
+                if matches!(state, ElementState::Pressed)
+                    && (self.info.pane_menu.is_some()
+                        || self.info.ctx_menu.is_some()
+                        || self.info.machine_menu.is_some()
+                        || self.sidebar_menu.is_some())
+                {
+                    let (cx, cy) = self.cursor_px;
+                    let inside = |r: &(f32, f32, f32, f32)| {
+                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                    };
+                    let on_item = self.info.pane_menu_rects.iter().any(|(_, r)| inside(r))
+                        || self.info.ctx_menu_rects.iter().any(|(_, r)| inside(r))
+                        || self.info.machines_col.btn_rects.iter().any(|(_, r)| inside(r))
+                        || self.sidebar_menu_rects.iter().any(|(_, r)| inside(r));
+                    if !on_item {
+                        self.info.pane_menu = None;
+                        self.info.ctx_menu = None;
+                        self.info.machine_menu = None;
+                        self.sidebar_menu = None;
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                        return;
+                    }
+                }
                 // on a button acts; a click on the scrim is ignored (Esc/취소
                 // dismiss). Checked before any other hit-test so nothing behind
                 // the dim leaks a click.
@@ -5075,6 +5101,38 @@ impl ApplicationHandler<UserEvent> for App {
                                 // 동작(거울 열기·닫기)이 실려 있으면 그것이 먼저 — 거울 행의
                                 // × 도 여기로 온다. 동작 없는 거울 행만 그 pane 으로 간다.
                                 match (local, act) {
+                                    // 거울 열기는 **두 번** 눌러야 한다 — 목록을 훑다 스친
+                                    // 한 번에 탭이 생기면 닫는 일이 는다(2026-09-09 지시).
+                                    // 한 번은 이미 있는 거울로만 간다.
+                                    (_, Some(state::MachinesColBtn::Mirror { label, remote_id, name, cwd })) => {
+                                        let now = Instant::now();
+                                        let key = format!("{label}/{remote_id}");
+                                        let is_double = matches!(
+                                            self.info.machine_click.as_ref(),
+                                            Some((t, k)) if *k == key && now.duration_since(*t).as_millis() < 400
+                                        );
+                                        if is_double {
+                                            self.info.machine_click = None;
+                                            self.machines_col_act(state::MachinesColBtn::Mirror {
+                                                label,
+                                                remote_id,
+                                                name,
+                                                cwd,
+                                            });
+                                        } else {
+                                            self.info.machine_click = Some((now, key));
+                                            let existing = kasa_mcp::machines::find(&label).and_then(|m| {
+                                                kasa_pty::live_sessions().into_iter().find(|id| {
+                                                    kasa_mcp::remote::remote_info(id).is_some_and(|i| {
+                                                        i.base == m.base && i.remote_id == remote_id
+                                                    })
+                                                })
+                                            });
+                                            if let Some(p) = existing {
+                                                self.reveal_pane_tab(&p);
+                                            }
+                                        }
+                                    }
                                     (_, Some(btn)) => {
                                         self.machines_col_act(btn);
                                     }

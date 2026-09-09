@@ -775,6 +775,9 @@ pub(crate) struct InfoState {
     /// 이미 있는 거울 pane, rect)`. 거울이 있으면 그리로 가고, 없으면 거울을 연다.
     pub(crate) machine_pane_rects:
         Vec<(String, Option<MachinesColBtn>, Option<String>, (f32, f32, f32, f32))>,
+    /// 「다른 기계」 pane 줄의 마지막 클릭 `(시각, 라벨/원격 id)` — 거울은 **두 번**
+    /// 눌러야 연다(2026-09-09 지시). 한 번은 이미 있는 거울로 가는 것까지만.
+    pub(crate) machine_click: Option<(std::time::Instant, String)>,
     /// 기계 메뉴 — `(x, y, 명부 라벨)`. 항목 rect 는 `machines_col.btn_rects`.
     pub(crate) machine_menu: Option<(f32, f32, String)>,
     pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
@@ -817,6 +820,7 @@ impl Default for InfoState {
             pane_menu_rects: Vec::new(),
             machine_rects: Vec::new(),
             machine_pane_rects: Vec::new(),
+            machine_click: None,
             machine_menu: None,
             refresh_rect: None,
         }
