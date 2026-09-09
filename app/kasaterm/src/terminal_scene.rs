@@ -1006,10 +1006,17 @@ impl App {
                 .and_then(|badges| badges.get(path).map(|badge| badge.branch.clone()))
         });
         let codex_status = restyle_codex_status_line(&mut composed, project.as_deref(), branch.as_deref());
-        if kasa_mcp::remote::is_remote_pane(tab_pid.as_str())
-            && (agent_kind == Some(kasa_pty::AgentKind::Codex) || codex_status)
-        {
-            localize_codex_prompt_background(&mut composed, theme::surface());
+        if kasa_mcp::remote::is_remote_pane(tab_pid.as_str()) {
+            let facts = kasa_mcp::remote::cached_pane(tab_pid.as_str());
+            // 기본 Codex는 상태줄이 없을 수 있다. 호스트가 셸이라고 보고했다면
+            // 남은 스크롤백 모양으로 다시 Codex 취급하지 않는다.
+            let codex_live = match facts.as_ref().and_then(|row| row.get("harness")) {
+                Some(harness) => harness.as_str() == Some("codex"),
+                None => agent_kind == Some(kasa_pty::AgentKind::Codex) || codex_status,
+            };
+            if codex_live {
+                localize_codex_prompt_background(&mut composed, theme::surface());
+            }
         }
         {
             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
