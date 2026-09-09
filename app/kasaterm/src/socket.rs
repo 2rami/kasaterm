@@ -916,6 +916,46 @@ impl Backend for PtyBackend {
             .unwrap_or_default())
     }
 
+    fn transfer_snapshot(&self) -> Result<kasa_socket::transfer::MachineSnapshot> {
+        let machine = crate::transfer_endpoints::machine_context()?.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::TransferSnapshot(machine, tx))
+            .map_err(|_| anyhow::anyhow!("앱의 응답을 받을 수 없어요"))?;
+        let mut snapshot = rx.recv_timeout(std::time::Duration::from_secs(5))?.map_err(anyhow::Error::msg)?;
+        crate::transfer_endpoints::enrich_snapshot(&mut snapshot);
+        Ok(snapshot)
+    }
+
+    fn transfer_spawn(&self, request: &kasa_socket::transfer::SpawnRequest) -> Result<kasa_socket::transfer::SessionRow> {
+        let mut request = request.clone();
+        let path = std::path::Path::new(&request.cwd);
+        if !path.is_absolute() || !path.is_dir() { anyhow::bail!("도착 기계에 작업 폴더가 없어요"); }
+        request.cwd = path.canonicalize()?.to_string_lossy().into_owned();
+        if request.character.as_ref().is_some_and(|name| name.is_empty() || name.chars().count() > 120 || name.chars().any(char::is_control)) {
+            anyhow::bail!("학생 이름을 확인해 주세요");
+        }
+        let machine = crate::transfer_endpoints::machine_context()?.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::TransferPrepareSpawn(request, tx))
+            .map_err(|_| anyhow::anyhow!("앱의 응답을 받을 수 없어요"))?;
+        let plan = rx.recv_timeout(std::time::Duration::from_secs(5))?.map_err(anyhow::Error::msg)?;
+        let spawned = Arc::new(crate::transfer_endpoints::spawn(plan));
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::TransferFinishSpawn(spawned, machine, tx, false))
+            .map_err(|_| anyhow::anyhow!("앱의 응답을 받을 수 없어요"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(10))?.map_err(anyhow::Error::msg)
+    }
+
+    fn transfer_close(&self, identity: &kasa_socket::transfer::SessionIdentity) -> Result<()> {
+        if identity.machine_id != crate::transfer_endpoints::machine_context()?.0 {
+            anyhow::bail!("이 기계의 세션이 아니에요");
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::TransferClose(identity.clone(), tx))
+            .map_err(|_| anyhow::anyhow!("앱의 응답을 받을 수 없어요"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(5))?.map_err(anyhow::Error::msg)
+    }
+
     /// `POST /swap-character?surface=<id>&character=<name>` — pane 캐릭터 교체(respawn).
     fn swap_character(&self, surface_id: &str, character: &str) -> Result<()> {
         self.proxy
@@ -1495,6 +1535,15 @@ impl Backend for PtyBackend {
             Ok(Err(why)) => anyhow::bail!("migrate back 실패: {why}"),
             Err(_) => anyhow::bail!("migrate back 응답 없음(240초) — GUI 스레드를 확인해라"),
         }
+    }
+
+    fn transfer_migrate(&self, request: &kasa_socket::transfer::MigrateRequest) -> Result<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::SocketMigrateToRoom(request.clone(), tx))
+            .map_err(|_| anyhow::anyhow!("이사 창에 연결할 수 없어요"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(240))
+            .map_err(|_| anyhow::anyhow!("이사 응답 시간이 지났어요. 완료 여부를 확인해야 해요"))?
+            .map_err(anyhow::Error::msg)
     }
 
     fn unfold_machine(&self, label: &str) -> Result<String> {
@@ -3103,6 +3152,18 @@ impl Backend for PtyBackend {
                 })
                 .clone();
         }
+        // 이사 전 transcript는 대화 보관용이다. 지금 실행 상태는 원격 호스트가
+        // 알려 준 행을 써야 종료한 학생과 살아 있는 거울을 모두 정확히 가른다.
+        board.retain_mut(|row| {
+            if kasa_mcp::remote::is_remote_pane(&row.surface_id) {
+                if let Some(facts) = kasa_mcp::remote::cached_pane(&row.surface_id) {
+                    apply_remote_board_facts(row, &facts);
+                }
+                true
+            } else {
+                row.harness.is_some()
+            }
+        });
         board.sort_by(|a, b| a.surface_id.cmp(&b.surface_id));
         Ok(board)
     }
@@ -3250,6 +3311,81 @@ impl Backend for PtyBackend {
             map.remove(surface_id);
         }
         Ok(())
+    }
+}
+
+fn apply_remote_board_facts(row: &mut PaneActivity, facts: &serde_json::Value) {
+    // 필드가 없는 옛 호스트·연결 유실은 종료로 단정하지 않는다.
+    if facts.get("harness").is_none() {
+        return;
+    }
+    let text = |key: &str| facts.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+    let strings = |key: &str| facts.get(key).and_then(|v| v.as_array()).map(|a| {
+        a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>()
+    }).unwrap_or_default();
+    let shell = text("harness").is_none();
+    let mut current = PaneActivity {
+        surface_id: row.surface_id.clone(),
+        window_idx: row.window_idx,
+        detached: row.detached,
+        machine: row.machine.clone(),
+        cwd: text("cwd").unwrap_or_else(|| row.cwd.clone()),
+        reach: if shell { "stale" } else { "tell" }.into(),
+        status: if shell { "idle".into() } else { text("status").unwrap_or_else(|| "idle".into()) },
+        ..Default::default()
+    };
+    if !shell {
+        current.character = text("name");
+        current.harness = text("harness");
+        current.title = text("title").unwrap_or_default();
+        current.model = text("model").or_else(|| text("model_label")).unwrap_or_default();
+        current.effort_default = text("effort").unwrap_or_default();
+        current.intent = text("doing").unwrap_or_default();
+        current.background = strings("background");
+        current.subagents = strings("subagents");
+        current.waiting_for = text("waiting_for");
+        current.attention_kind = text("kind");
+        current.idle_secs = facts.get("idle_secs").and_then(|v| v.as_u64());
+        current.context_pct = facts.get("context_pct").and_then(|v| v.as_u64()).unwrap_or(0).min(100) as u8;
+        current.branch = text("branch");
+    }
+    *row = current;
+}
+
+#[cfg(test)]
+mod remote_board_tests {
+    use super::*;
+
+    #[test]
+    fn stopped_remote_agent_clears_transcript_identity_but_keeps_its_seat() {
+        let mut row = PaneActivity {
+            surface_id: "%8".into(), character: Some("previous student".into()),
+            model: "old-model".into(), status: "working".into(),
+            background: vec!["old job".into()], window_idx: 3,
+            machine: Some("mini".into()), ..Default::default()
+        };
+        apply_remote_board_facts(&mut row, &serde_json::json!({"harness":null,"cwd":"/work"}));
+        assert!(row.character.is_none());
+        assert!(row.model.is_empty() && row.background.is_empty());
+        assert_eq!(row.surface_id, "%8");
+        assert_eq!(row.window_idx, 3);
+        assert_eq!(row.machine.as_deref(), Some("mini"));
+        assert_eq!(row.reach, "stale");
+    }
+
+    #[test]
+    fn remote_agent_is_live_even_without_a_local_process() {
+        let mut row = PaneActivity::default();
+        apply_remote_board_facts(&mut row, &serde_json::json!({
+            "harness":"claude", "name":"current student", "status":"working", "model":"current-model"
+        }));
+        assert_eq!(row.harness.as_deref(), Some("claude"));
+        assert_eq!(row.character.as_deref(), Some("current student"));
+        assert_eq!(row.status, "working");
+        assert_eq!(row.model, "current-model");
+        let before = row.character.clone();
+        apply_remote_board_facts(&mut row, &serde_json::json!({}));
+        assert_eq!(row.character, before);
     }
 }
 

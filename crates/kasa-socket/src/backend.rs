@@ -582,6 +582,9 @@ pub trait Backend: Send + Sync {
     fn migrate_pane_back(&self, _pane: &str, _cwd: Option<&str>, _force: bool) -> Result<String> {
         anyhow::bail!("migrate back: 이 백엔드는 지원하지 않는다")
     }
+    fn transfer_migrate(&self, _request: &crate::transfer::MigrateRequest) -> Result<String> {
+        anyhow::bail!("도착 방을 고르는 이사는 이 기계의 새 판이 필요해요")
+    }
     /// 기계 하나의 학생 pane 전부를 이 창의 거울로 **펼친다** — 원격 방(창)마다
     /// 이쪽에도 새 창을 만들어 같은 묶음으로 미러링한다. GUI 백엔드 전용.
     fn unfold_machine(&self, _label: &str) -> Result<String> {
@@ -707,6 +710,15 @@ pub trait Backend: Send + Sync {
     /// 자기 pane 으로 비출 자리다. 새 pane id 를 돌려주고, 빈 문자열은 못 세운 것.
     fn spawn_shell(&self, _cwd: Option<&str>) -> Result<String> {
         anyhow::bail!("spawn_shell unsupported by this backend")
+    }
+    fn transfer_snapshot(&self) -> Result<crate::transfer::MachineSnapshot> {
+        anyhow::bail!("room transfer unsupported by this backend")
+    }
+    fn transfer_spawn(&self, _request: &crate::transfer::SpawnRequest) -> Result<crate::transfer::SessionRow> {
+        anyhow::bail!("room transfer unsupported by this backend")
+    }
+    fn transfer_close(&self, _identity: &crate::transfer::SessionIdentity) -> Result<()> {
+        anyhow::bail!("room transfer unsupported by this backend")
     }
     /// Swap a pane's character: respawn its PTY with the new persona (the live
     /// claude conversation resets — persona is fixed at shell spawn). Default:

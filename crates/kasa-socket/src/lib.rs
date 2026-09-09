@@ -28,6 +28,7 @@ pub mod protocol;
 pub mod server;
 pub mod sessions;
 pub mod transport;
+pub mod transfer;
 
 pub use backend::{Backend, SplitDirection};
 pub use protocol::{ErrorObj, Request, Response};

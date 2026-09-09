@@ -555,6 +555,33 @@ impl ApplicationHandler<UserEvent> for App {
                 self.finish_mirror_close(action.clone(), targets.clone(), result.clone());
                 return;
             }
+            UserEvent::RemoteShellReady(ready) => {
+                self.finish_remote_shell(ready);
+                return;
+            }
+            UserEvent::SocketMigrateToRoom(request, reply) => {
+                #[cfg(unix)]
+                let result = self.start_transfer_migration(request, Some(reply.clone()))
+                    .map_err(|error| format!("{error:#}"));
+                #[cfg(not(unix))]
+                let result: std::result::Result<String, String> = Err("이사는 unix 전용이에요".into());
+                #[cfg(unix)]
+                if result.is_ok() && self.migrate_running(&request.session.pane_id) {
+                    return;
+                }
+                let _ = reply.send(result);
+                return;
+            }
+            UserEvent::ValidateTransfer(identity, reply) => {
+                let result = self.validate_transfer_identity(identity).and_then(|_| {
+                    if Self::pane_agent_working(&self.ws.lock().unwrap(), &identity.pane_id) {
+                        anyhow::bail!("세션이 다시 작업을 시작했어요. 이번 이사는 중단했어요");
+                    }
+                    Ok(())
+                }).map_err(|error| format!("{error:#}"));
+                let _ = reply.send(result);
+                return;
+            }
             UserEvent::SocketMigrateBack(pane, cwd, force, reply) => {
                 #[cfg(unix)]
                 let outcome = self
@@ -805,6 +832,46 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::SocketSpawnShell(cwd, reply) => {
                 let id = self.spawn_shell_pane(cwd.as_deref());
                 let _ = reply.send(id);
+                return;
+            }
+            UserEvent::TransferSnapshot(machine, sender) => {
+                transfer_endpoints::reply(sender, Ok(self.transfer_snapshot_gui(machine)));
+                return;
+            }
+            UserEvent::TransferPrepareSpawn(request, sender) => {
+                let result = self.prepare_transfer_spawn(request).map_err(|e| e.to_string());
+                if let Err(std::sync::mpsc::SendError(Ok(plan))) = sender.send(result) {
+                    self.cancel_transfer_spawn(&plan);
+                }
+                return;
+            }
+            UserEvent::TransferFinishSpawn(spawned, machine, sender, delayed) => {
+                #[cfg(debug_assertions)]
+                if !*delayed {
+                    if let Some(ms) = std::env::var("KASATERM_TEST_TRANSFER_FINISH_DELAY_MS").ok()
+                        .and_then(|v| v.parse::<u64>().ok()).filter(|ms| *ms > 0 && *ms <= 20000) {
+                        let (spawned, machine, sender, proxy) = (spawned.clone(), machine.clone(), sender.clone(), self.proxy.clone());
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(ms));
+                            let _ = proxy.send_event(UserEvent::TransferFinishSpawn(spawned, machine, sender, true));
+                        });
+                        return;
+                    }
+                }
+                let _ = delayed;
+                if let Some(identity) = transfer_endpoints::deliver_spawn(sender, self.finish_transfer_spawn(spawned, machine)) {
+                    self.reclaim_unreceived_spawn(identity);
+                }
+                return;
+            }
+            UserEvent::TransferReclaimSpawn(identity) => {
+                if let Err(error) = self.close_transfer_shell(identity) {
+                    self.set_toast(format!("응답이 끊겨 만든 셸 {}을 남겼어요 — {error}", identity.pane_id));
+                }
+                return;
+            }
+            UserEvent::TransferClose(identity, sender) => {
+                transfer_endpoints::reply(sender, self.close_transfer_shell(identity));
                 return;
             }
             UserEvent::SocketToast(msg) => {
@@ -7677,6 +7744,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // 깨어나야 한다. hover 중에는 deadline이 None이라 타이머가 멈춘다.
                 .chain(self.next_banner_deadline())
                 .chain(web_visual_deadline)
+                // 조용한 셸에서도 이사·복원 명령이 제때 발사되어야 한다. 이 만기를
+                // 빼면 다음 키 입력이나 무관한 출력이 올 때까지 실행이 밀린다.
+                .chain(self.pending_restores.iter().map(|(_, _, at)| *at))
+                .chain(self.restore_applying.as_ref().map(|(_, at)| *at))
                 .min();
             event_loop.set_control_flow(match deadline {
                 Some(at) => ControlFlow::WaitUntil(at),

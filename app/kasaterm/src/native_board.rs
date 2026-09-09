@@ -12,6 +12,7 @@
 
 use super::*;
 use kasa_socket::backend::{Backend, PaneActivity};
+use crate::session_transfer::{SessionIdentity, SessionRow, TransferSnapshot, TransferRequest, RoomTarget, TransferResult, TransferStatus};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -63,6 +64,47 @@ pub(crate) enum BoardInput {
     ScheduleMinutes,
     ScheduleAt,
     GitMessage,
+    TransferRoomName,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TransferStep {
+    #[default]
+    Select,
+    Destination,
+    Confirm,
+}
+
+#[derive(Clone, Debug)]
+enum TransferConfirmation {
+    Move(TransferRequest),
+    Close(Vec<SessionIdentity>),
+}
+
+#[derive(Clone, Debug, Default)]
+struct TransferUi {
+    step: TransferStep,
+    room_filter: Option<(String, Option<String>)>,
+    selected: HashSet<SessionIdentity>,
+    shell_selected: HashSet<SessionIdentity>,
+    destination: String,
+    room: Option<String>,
+    new_room: bool,
+    room_name: String,
+    show_shells: bool,
+    detail: Option<String>,
+    pending: Option<TransferConfirmation>,
+    busy: bool,
+    results: Vec<TransferResult>,
+    result_names: std::collections::HashMap<String, String>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct TransferEnvelope {
+    generation: u64,
+    result: Option<TransferResult>,
+    finished: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -85,28 +127,6 @@ pub(crate) struct BackgroundRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LocalBackgroundProcess {
     pub(crate) pid: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BringHomeTarget {
-    pub(crate) local_pane: String,
-    pub(crate) machine: String,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct MachinePane {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) title: String,
-    pub(crate) status: String,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct MachineRow {
-    pub(crate) label: String,
-    pub(crate) online: bool,
-    pub(crate) ago_secs: Option<u64>,
-    pub(crate) panes: Vec<MachinePane>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -142,11 +162,9 @@ pub(crate) struct BoardData {
     pub(crate) tasks: Arc<Vec<kasa_mcp::PaneTaskView>>,
     pub(crate) background: Arc<Vec<BackgroundRow>>,
     pub(crate) schedules: Arc<Vec<kasa_mcp::ScheduleItem>>,
-    pub(crate) machines: Arc<Vec<MachineRow>>,
+    pub(crate) transfer: Arc<TransferSnapshot>,
     pub(crate) git: Arc<GitSnapshot>,
     pub(crate) faces: Arc<Vec<FaceAsset>>,
-    /// 로컬 앱 안의 mirror pane이며 remote origin mapping까지 확인된 id만.
-    pub(crate) bring_home: Arc<HashSet<String>>,
     pub(crate) error: Option<String>,
 }
 
@@ -167,6 +185,7 @@ struct ActionEnvelope {
 struct Mailbox {
     data: Option<DataEnvelope>,
     actions: Vec<ActionEnvelope>,
+    transfers: Vec<TransferEnvelope>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -192,8 +211,21 @@ pub(crate) enum Target {
     GitClear,
     GitCommit,
     GitPush,
-    Migrate(String, String),
-    BringHome(BringHomeTarget),
+    TransferFilter(Option<(String, Option<String>)>),
+    TransferSelect(SessionIdentity, bool),
+    TransferSelectRoom,
+    TransferClear,
+    TransferDestination,
+    TransferMachine(String),
+    TransferRoom(String),
+    TransferNewRoom,
+    TransferReview,
+    TransferCloseReview,
+    TransferConfirm,
+    TransferBack,
+    TransferShells,
+    TransferDetail(String),
+    TransferView(SessionIdentity),
 }
 
 #[derive(Clone, Debug)]
@@ -227,6 +259,8 @@ pub(crate) struct Snapshot {
     pub(crate) toast: Option<(bool, String)>,
     pub(crate) expanded_agent: Option<String>,
     pub(crate) pending_stop: Option<LocalBackgroundProcess>,
+    transfer: TransferUi,
+    fixture: bool,
 }
 
 pub(crate) struct PaintOutput {
@@ -267,6 +301,8 @@ pub(crate) struct Scene {
     toast: Option<(bool, String, Instant)>,
     expanded_agent: Option<String>,
     pending_stop: Option<LocalBackgroundProcess>,
+    transfer: TransferUi,
+    transfer_generation: u64,
 }
 
 impl Default for Scene {
@@ -302,6 +338,8 @@ impl Default for Scene {
             toast: None,
             expanded_agent: None,
             pending_stop: None,
+            transfer: TransferUi::default(),
+            transfer_generation: 0,
         }
     }
 }
@@ -422,6 +460,8 @@ impl Scene {
             toast: self.toast.as_ref().map(|(ok, text, _)| (*ok, text.clone())),
             expanded_agent: self.expanded_agent.clone(),
             pending_stop: self.pending_stop.clone(),
+            transfer: self.transfer.clone(),
+            fixture: transfer_fixture_active(),
         }
     }
 
@@ -465,6 +505,7 @@ impl Scene {
             BoardInput::ScheduleMinutes => &self.schedule_minutes,
             BoardInput::ScheduleAt => &self.schedule_at,
             BoardInput::GitMessage => &self.git_message,
+            BoardInput::TransferRoomName => &self.transfer.room_name,
         }
     }
 
@@ -474,6 +515,7 @@ impl Scene {
             BoardInput::ScheduleMinutes => (&mut self.schedule_minutes, &mut self.caret),
             BoardInput::ScheduleAt => (&mut self.schedule_at, &mut self.caret),
             BoardInput::GitMessage => (&mut self.git_message, &mut self.caret),
+            BoardInput::TransferRoomName => (&mut self.transfer.room_name, &mut self.caret),
         };
         edit(value, caret);
     }
@@ -510,6 +552,42 @@ impl Scene {
         backend: Arc<dyn Backend>,
         proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     ) {
+        #[cfg(debug_assertions)]
+        if let Some(data) = transfer_fixture() {
+            self.data = Arc::new(BoardData { transfer: Arc::new(data), ..Default::default() });
+            self.last_refresh = Some(Instant::now());
+            self.refreshing = false;
+            if self.applied_generation == 0 {
+                self.applied_generation = 1;
+                self.tab = BoardTab::Machines;
+                self.transfer.show_shells = true;
+                for row in self.data.transfer.sessions.iter().filter(|row| row.harness.is_some()).take(2) {
+                    self.transfer.selected.insert(row.identity.clone());
+                }
+                if let Some(machine) = self.data.transfer.machines.iter().find(|machine| !machine.local) {
+                    self.transfer.destination = machine.id.clone();
+                    self.transfer.room = machine.rooms.first().map(|room| room.id.clone());
+                }
+                if let Ok(name) = std::env::var("KASATERM_TEST_TRANSFER_ROOM_NAME") {
+                    self.transfer.new_room = true;
+                    self.transfer.room = None;
+                    self.transfer.room_name = name;
+                }
+                match std::env::var("KASATERM_TEST_TRANSFER_STEP").as_deref() {
+                    Ok("destination") => self.transfer.step = TransferStep::Destination,
+                    Ok("confirm") => self.review_transfer(false),
+                    Ok("results") => {
+                        self.transfer.step = TransferStep::Confirm;
+                        self.transfer.results = self.transfer.selected.iter().enumerate().map(|(index, source)| TransferResult {
+                            source: source.clone(), status: if index == 0 { TransferStatus::Succeeded } else { TransferStatus::Failed },
+                            message: if index == 0 { "선택한 기기의 작업 방에 도착했어요" } else { "도착 기기의 연결이 끊겼어요. 연결 후 목록을 확인해 주세요." }.into(), destination: None,
+                        }).collect();
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.requested_generation = generation;
         self.refreshing = true;
@@ -533,9 +611,9 @@ impl Scene {
     }
 
     pub(crate) fn pump(&mut self) -> bool {
-        let (data, actions) = {
+        let (data, actions, transfers) = {
             let mut mailbox = self.mailbox.lock().unwrap();
-            (mailbox.data.take(), std::mem::take(&mut mailbox.actions))
+            (mailbox.data.take(), std::mem::take(&mut mailbox.actions), std::mem::take(&mut mailbox.transfers))
         };
         let mut changed = false;
         if let Some(envelope) = data {
@@ -555,6 +633,7 @@ impl Scene {
                 }
                 self.git_selected
                     .retain(|path| self.data.git.rows.iter().any(|row| &row.path == path));
+                self.revalidate_transfer_selection();
                 changed = true;
             }
         }
@@ -565,6 +644,24 @@ impl Scene {
                 self.last_refresh = None;
                 changed = true;
             }
+        }
+        for event in transfers {
+            if event.generation != self.transfer_generation { continue; }
+            if let Some(result) = event.result {
+                if let Some(previous) = self.transfer.results.iter_mut().find(|row| row.source == result.source) {
+                    *previous = result;
+                } else {
+                    self.transfer.results.push(result);
+                }
+            }
+            if event.finished {
+                self.transfer.busy = false;
+                self.transfer.pending = None;
+                self.transfer.selected.clear();
+                self.transfer.shell_selected.clear();
+                self.last_refresh = None;
+            }
+            changed = true;
         }
         if self
             .toast
@@ -583,6 +680,7 @@ impl Scene {
         action: WorkerAction,
         proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     ) {
+        if transfer_fixture_active() { self.report_error("검증 화면에서는 실제 작업을 실행하지 않아요"); return; }
         self.action_generation += 1;
         let generation = self.action_generation;
         let mailbox = self.mailbox.clone();
@@ -631,6 +729,120 @@ impl Scene {
     pub(crate) fn report_error(&mut self, message: impl Into<String>) {
         self.toast = Some((false, message.into(), Instant::now()));
     }
+
+    fn revalidate_transfer_selection(&mut self) {
+        if self.transfer.busy { return; }
+        let before = self.transfer.selected.len() + self.transfer.shell_selected.len();
+        let rows = &self.data.transfer.sessions;
+        self.transfer.selected.retain(|id| rows.iter().any(|row| &row.identity == id && row.harness.is_some() && row.unavailable_reason.is_none()));
+        self.transfer.shell_selected.retain(|id| rows.iter().any(|row| &row.identity == id && row.harness.is_none() && row.shell_closeable));
+        if before != self.transfer.selected.len() + self.transfer.shell_selected.len() {
+            self.transfer.pending = None;
+            self.transfer.step = TransferStep::Select;
+            self.transfer.error = Some("상태가 바뀐 세션을 선택에서 뺐어요. 목록을 확인하고 다시 골라 주세요.".into());
+        }
+    }
+
+    fn review_transfer(&mut self, close: bool) {
+        self.revalidate_transfer_selection();
+        let pending = if close {
+            if self.transfer.shell_selected.is_empty() {
+                self.transfer.error = Some("닫을 셸을 먼저 골라 주세요.".into());
+                return;
+            }
+            TransferConfirmation::Close(self.transfer.shell_selected.iter().cloned().collect())
+        } else {
+            match transfer_request(&self.transfer, &self.data.transfer) {
+                Ok(request) => TransferConfirmation::Move(request),
+                Err(error) => { self.transfer.error = Some(error); return; }
+            }
+        };
+        self.transfer.pending = Some(pending);
+        self.transfer.results.clear();
+        self.transfer.error = None;
+        self.transfer.step = TransferStep::Confirm;
+        self.scroll = 0.0;
+        self.input = None;
+    }
+
+    fn run_transfer(&mut self, backend: Arc<dyn Backend>, proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
+        if transfer_fixture_active() { self.transfer.error = Some("검증 화면에서는 실제 이사·닫기를 실행하지 않아요".into()); return; }
+        if self.transfer.busy { return; }
+        self.revalidate_transfer_selection();
+        let Some(mut pending) = self.transfer.pending.take() else { return };
+        if let TransferConfirmation::Move(ref request) = pending {
+            match transfer_request(&self.transfer, &self.data.transfer) {
+                Ok(current) if current.sessions == request.sessions
+                    && current.destination_machine == request.destination_machine
+                    && current.destination_room == request.destination_room => {}
+                _ => {
+                    self.transfer.error = Some("선택이나 도착 방이 바뀌었어요. 다시 확인해 주세요.".into());
+                    self.transfer.step = TransferStep::Destination;
+                    return;
+                }
+            }
+        }
+        let ids = match &mut pending {
+            TransferConfirmation::Move(request) => {
+                request.confirmed = true;
+                request.sessions.clone()
+            }
+            TransferConfirmation::Close(ids) => ids.clone(),
+        };
+        self.transfer.result_names = ids.iter().filter_map(|id| {
+            self.data.transfer.sessions.iter().find(|row| &row.identity == id).map(|row| (id.canonical_key(), transfer_session_name(row)))
+        }).collect();
+        self.transfer.results = ids.into_iter().map(|source| TransferResult {
+            source, status: TransferStatus::Waiting, message: "대기 중".into(), destination: None,
+        }).collect();
+        self.transfer.busy = true;
+        self.transfer.error = None;
+        self.transfer_generation += 1;
+        let generation = self.transfer_generation;
+        let mailbox = self.mailbox.clone();
+        std::thread::spawn(move || {
+            let mut report = |result| {
+                mailbox.lock().unwrap().transfers.push(TransferEnvelope { generation, result: Some(result), finished: false });
+                let _ = proxy.send_event(UserEvent::Redraw);
+            };
+            let results = match pending {
+                TransferConfirmation::Move(request) => crate::session_transfer::execute_with_progress(&backend, request, &mut report),
+                TransferConfirmation::Close(ids) => crate::session_transfer::close_shells_with_progress(&backend, ids, true, &mut report),
+            };
+            for result in results { report(result); }
+            mailbox.lock().unwrap().transfers.push(TransferEnvelope { generation, result: None, finished: true });
+            let _ = proxy.send_event(UserEvent::Redraw);
+        });
+    }
+}
+
+fn transfer_request(ui: &TransferUi, data: &TransferSnapshot) -> std::result::Result<TransferRequest, String> {
+    if ui.selected.is_empty() { return Err("이사할 세션을 먼저 골라 주세요.".into()); }
+    for id in &ui.selected {
+        if !data.sessions.iter().any(|row| &row.identity == id && row.harness.is_some() && row.unavailable_reason.is_none()) {
+            return Err("상태가 바뀐 세션이 있어요. 목록을 새로고침해 주세요.".into());
+        }
+    }
+    let machine = data.machines.iter().find(|machine| machine.id == ui.destination)
+        .ok_or_else(|| "도착할 기기를 골라 주세요.".to_string())?;
+    if ui.selected.iter().any(|id| id.machine_id == machine.id) {
+        return Err("현재 실행 중인 기기와 다른 기기를 골라 주세요.".into());
+    }
+    if !machine.online || !machine.room_transfer_supported {
+        return Err(machine.unavailable_reason.clone().unwrap_or_else(|| "이 기기는 아직 방을 선택해 이사할 수 없어요.".into()));
+    }
+    let destination_room = if ui.new_room {
+        let name = ui.room_name.trim();
+        if name.is_empty() { return Err("새 방 이름을 적어 주세요.".into()); }
+        RoomTarget::New(name.to_string())
+    } else {
+        let room = ui.room.as_ref().filter(|id| machine.rooms.iter().any(|room| &room.id == *id))
+            .ok_or_else(|| "도착할 방을 골라 주세요.".to_string())?;
+        RoomTarget::Existing(room.clone())
+    };
+    let mut sessions: Vec<_> = ui.selected.iter().cloned().collect();
+    sessions.sort_by_key(SessionIdentity::canonical_key);
+    Ok(TransferRequest { sessions, destination_machine: machine.id.clone(), destination_room, confirmed: false })
 }
 
 pub(crate) fn confirmed_resume_pane(
@@ -657,11 +869,11 @@ pub(crate) enum WorkerAction {
         message: String,
     },
     GitPush { cwd: String },
-    Migrate { pane: String, target: String },
-    BringHome(BringHomeTarget),
+    ViewSession(SessionIdentity),
 }
 
 fn execute_action(backend: &Arc<dyn Backend>, action: WorkerAction) -> anyhow::Result<String> {
+    if transfer_fixture_active() { anyhow::bail!("검증 화면에서는 실제 작업을 실행하지 않아요"); }
     match action {
         WorkerAction::StopBackground(target) => {
             if target.pid == 0 {
@@ -729,40 +941,28 @@ fn execute_action(backend: &Arc<dyn Backend>, action: WorkerAction) -> anyhow::R
             }
             Ok("푸시했어요".to_string())
         }
-        WorkerAction::Migrate { pane, target } => {
-            let machine = kasa_mcp::machines::find(&target)
-                .ok_or_else(|| anyhow::anyhow!("기계 {target}를 찾지 못했어요"))?;
-            let local = backend
-                .collab_board()
-                .unwrap_or_default()
-                .into_iter()
-                .find(|row| row.surface_id == pane)
-                .map(|row| row.cwd)
-                .filter(|cwd| !cwd.is_empty());
-            let remote = local
-                .as_deref()
-                .and_then(|cwd| kasa_mcp::machines::map_local_to_remote(&machine, cwd));
-            let id = backend.migrate_pane(&pane, &machine.base, remote.as_deref(), false, None)?;
-            Ok(format!("이사를 마쳤어요 · {id}"))
-        }
-        WorkerAction::BringHome(target) => {
-            let info = kasa_mcp::remote::remote_info(&target.local_pane)
-                .ok_or_else(|| anyhow::anyhow!("원격 origin mapping이 사라졌어요"))?;
-            let actual_machine = if info.label.is_empty() {
-                info.base
-                    .trim_start_matches("http://")
-                    .trim_start_matches("https://")
-                    .to_string()
-            } else {
-                info.label
-            };
-            if actual_machine != target.machine {
-                anyhow::bail!("원격 기계 정체가 바뀌었어요 — 목록을 새로고침해 주세요");
-            }
-            let id = backend.migrate_pane_back(&target.local_pane, None, false)?;
-            Ok(format!("데려오기를 마쳤어요 · {id}"))
+        WorkerAction::ViewSession(identity) => {
+            crate::session_transfer::focus_session(backend, &identity)?;
+            Ok("선택한 세션을 열었어요".into())
         }
     }
+}
+
+fn transfer_fixture_active() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var_os("KASATERM_TEST_TRANSFER_FIXTURE").is_some()
+        && std::env::var_os("KASATERM_SETTINGS_FILE").is_some()
+        && std::env::var_os("KASATERM_SESSION_FILE").is_some()
+        && std::env::var_os("KASATERM_SOCKET_PATH").is_some()
+        && std::env::var("KASATERM_AUTORESTORE").is_ok_and(|value| value == "fresh")
+}
+
+#[cfg(debug_assertions)]
+fn transfer_fixture() -> Option<TransferSnapshot> {
+    if !transfer_fixture_active() { return None; }
+    let path = std::env::var("KASATERM_TEST_TRANSFER_FIXTURE").ok()?;
+    Some(std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| TransferSnapshot { errors: vec!["검증 데이터를 읽지 못했어요".into()], ..Default::default() }))
 }
 
 fn collect_data(
@@ -778,23 +978,17 @@ fn collect_data(
             Vec::new()
         }
     };
-    let bring_home: HashSet<String> = agents
-        .iter()
-        .filter(|row| {
-            row.machine.is_some()
-                && kasa_mcp::remote::remote_info(&row.surface_id).is_some()
-        })
-        .map(|row| row.surface_id.clone())
-        .collect();
     agents.extend(
         kasa_mcp::remoteboard::board_rows()
             .into_iter()
             .filter_map(|value| serde_json::from_value(value).ok()),
     );
     agents.retain(|row| row.machine.is_some() || row.window_idx == target_window);
+    let transfer = crate::session_transfer::collect(backend);
     let faces = agents
         .iter()
         .filter_map(|row| row.character.as_deref())
+        .chain(transfer.sessions.iter().map(|row| row.name.as_str()).filter(|name| !name.is_empty()))
         .collect::<HashSet<_>>()
         .into_iter()
         .filter_map(|name| {
@@ -819,17 +1013,15 @@ fn collect_data(
         Vec::new()
     });
     let schedules = kasa_mcp::schedule_snapshot();
-    let machines = collect_machines();
     let git = collect_git(target_cwd);
     BoardData {
         agents: Arc::new(agents),
         tasks: Arc::new(tasks),
         background: Arc::new(background),
         schedules: Arc::new(schedules),
-        machines: Arc::new(machines),
+        transfer: Arc::new(transfer),
         git: Arc::new(git),
         faces: Arc::new(faces),
-        bring_home: Arc::new(bring_home),
         error: (!errors.is_empty()).then(|| errors.join(" · ")),
     }
 }
@@ -889,34 +1081,6 @@ fn collect_background(backend: &Arc<dyn Backend>) -> anyhow::Result<Vec<Backgrou
             }
         })
         .collect())
-}
-
-fn collect_machines() -> Vec<MachineRow> {
-    kasa_mcp::machines::snapshot()
-        .into_iter()
-        .map(|value| MachineRow {
-            label: text_value(&value, "label"),
-            online: value
-                .get("online")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false),
-            ago_secs: value.get("ago_secs").and_then(|value| value.as_u64()),
-            panes: value
-                .get("panes")
-                .and_then(|value| value.as_array())
-                .map(|rows| {
-                    rows.iter()
-                        .map(|pane| MachinePane {
-                            id: text_value(pane, "id"),
-                            name: text_value(pane, "name"),
-                            title: text_value(pane, "title"),
-                            status: text_value(pane, "status"),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        })
-        .collect()
 }
 
 fn collect_git(cwd: &str) -> GitSnapshot {
@@ -1129,7 +1293,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             &mut y,
             content_w,
         ),
-        BoardTab::Machines => paint_machines(g, snapshot, &mut hits, content_x, &mut y, content_w),
+        BoardTab::Machines => paint_machines(g, snapshot, &mut hits, &mut caret_rect, content_x, &mut y, content_w),
     }
     g.pop_clip();
     let content_h = (y + snapshot.scroll - body_top + 18.0).max(view_h);
@@ -1573,90 +1737,233 @@ fn paint_git(
     *y += 52.0;
 }
 
-fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
-    section(g, x, y, "이 기기", "현재 대상 방의 학생을 다른 기기로 보냅니다");
-    let local: Vec<_> = s.data.agents.iter().filter(|row| row.machine.is_none()).collect();
-    for row in local {
-        let rect = (x, *y, w, 54.0);
-        outlined(g, rect, theme::surface_hover());
-        draw_face(g, s, row, rect.0 + 10.0, rect.1 + 10.0, 30.0);
-        text(g, rect.0 + 50.0, rect.1 + 8.0, &agent_name(row), 12.0, theme::text(), true);
-        let title = fit(g, &row.title, w - 220.0, 10.5, false);
-        text(g, rect.0 + 50.0, rect.1 + 29.0, &title, 10.5, theme::text_dim(), false);
-        let mut bx = rect.0 + rect.2 - 12.0;
-        for machine in s.data.machines.iter().rev().filter(|machine| machine.online).take(2) {
-            let bw = 88.0;
-            bx -= bw;
-            button(g, s, hits, (bx, rect.1 + 12.0, bw - 6.0, 30.0), &format!("→ {}", machine.label), Target::Migrate(row.surface_id.clone(), machine.label.clone()), false);
+fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, caret: &mut Option<Rect>, x: f32, y: &mut f32, w: f32) {
+    let ui = &s.transfer;
+    let data = &s.data.transfer;
+    if s.fixture { notice(g, x, y, w, "검증용 가상 세션 · 실제 이사·닫기는 실행되지 않아요", true); }
+    if let Some(error) = &ui.error { notice(g, x, y, w, error, false); }
+    for error in &data.errors { notice(g, x, y, w, error, false); }
+    match ui.step {
+        TransferStep::Select => {
+            section(g, x, y, "1  세션 고르기", "선택하지 않은 세션은 현재 자리에 남아요");
+            let mut rooms = vec![("모든 방".to_string(), Target::TransferFilter(None), ui.room_filter.is_none(), true)];
+            for machine in &data.machines {
+                for room in &machine.rooms {
+                    let key = (machine.id.clone(), Some(room.id.clone()));
+                    rooms.push((format!("{} · {}", machine.label, room.title), Target::TransferFilter(Some(key.clone())), ui.room_filter.as_ref() == Some(&key), true));
+                }
+                if data.sessions.iter().any(|row| row.identity.machine_id == machine.id && row.room_id.is_none()) {
+                    let key = (machine.id.clone(), None);
+                    rooms.push((format!("{} · 방 밖", machine.label), Target::TransferFilter(Some(key.clone())), ui.room_filter.as_ref() == Some(&key), true));
+                }
+            }
+            transfer_choices(g, s, hits, x, y, w, rooms);
+            let selected = ui.selected.len();
+            transfer_button(g, s, hits, (x, *y, w, 36.0), &format!("선택한 {selected}개 이사할 곳 고르기"), Target::TransferDestination, selected > 0, true);
+            *y += 46.0;
+            button(g, s, hits, (x, *y, (w / 2.0 - 4.0).min(136.0), 30.0), "보이는 세션 선택", Target::TransferSelectRoom, false);
+            button(g, s, hits, (x + (w / 2.0).min(144.0), *y, (w / 2.0 - 4.0).min(110.0), 30.0), "선택 해제", Target::TransferClear, false);
+            *y += 42.0;
+            let mut sessions: Vec<_> = data.sessions.iter().filter(|row| row.harness.is_some() && transfer_row_visible(ui, row)).collect();
+            sessions.sort_by(|a, b| (&a.identity.machine_id, &a.room_id, &a.name).cmp(&(&b.identity.machine_id, &b.room_id, &b.name)));
+            if sessions.is_empty() { empty(g, x, y, w, "이 방에서 실행 중인 세션이 없어요"); }
+            let mut previous = None;
+            for row in sessions {
+                let group = transfer_room_label(data, row);
+                if previous.as_deref() != Some(group.as_str()) {
+                    let label = fit(g, &group, w, 11.0, true);
+                    text(g, x, *y, &label, 11.0, theme::text_dim(), true);
+                    *y += 24.0;
+                    previous = Some(group);
+                }
+                paint_transfer_session(g, s, hits, x, y, w, row, false);
+            }
+            *y += 12.0;
+            let shells: Vec<_> = data.sessions.iter().filter(|row| row.harness.is_none() && transfer_row_visible(ui, row)).collect();
+            button(g, s, hits, (x, *y, w, 34.0), &format!("{} 셸 따로 보기 · {}개", if ui.show_shells { "접기" } else { "펼치기" }, shells.len()), Target::TransferShells, false);
+            *y += 44.0;
+            if ui.show_shells {
+                text(g, x, *y, "셸만 닫으며, 실행 중인 학생은 닫지 않아요.", 10.5, theme::text_dim(), false);
+                *y += 28.0;
+                for row in shells { paint_transfer_session(g, s, hits, x, y, w, row, true); }
+                transfer_button(g, s, hits, (x, *y, w, 36.0), &format!("선택한 셸 {}개 닫기 확인", ui.shell_selected.len()), Target::TransferCloseReview, !ui.shell_selected.is_empty(), false);
+                *y += 48.0;
+            }
         }
-        *y += 62.0;
-    }
-    if s.data.machines.is_empty() {
-        empty(g, x, y, w, "등록된 다른 기기가 없어요");
-        return;
-    }
-    for machine in s.data.machines.iter() {
-        *y += 12.0;
-        let state = if machine.online {
-            "연결됨".to_string()
-        } else {
-            machine
-                .ago_secs
-                .map(|secs| format!("{secs}초 전까지 연결"))
-                .unwrap_or_else(|| "연결이 닿지 않아요".to_string())
-        };
-        section(g, x, y, &machine.label, &state);
-        for row in s.data.agents.iter().filter(|row| {
-            row.machine.as_deref() == Some(machine.label.as_str())
-                && s.data.bring_home.contains(&row.surface_id)
-        }) {
-            let rect = (x, *y, w, 48.0);
-            outlined(g, rect, theme::surface_hover());
-            status_dot(g, rect.0 + 14.0, rect.1 + 19.0, row);
-            text(
-                g,
-                rect.0 + 32.0,
-                rect.1 + 7.0,
-                &agent_name(row),
-                12.0,
-                theme::text(),
-                true,
-            );
-            let title = fit(g, &row.title, w - 170.0, 10.5, false);
-            text(g, rect.0 + 32.0, rect.1 + 26.0, &title, 10.5, theme::text_dim(), false);
-            button(
-                g,
-                s,
-                hits,
-                (rect.0 + rect.2 - 104.0, rect.1 + 9.0, 92.0, 30.0),
-                "← 데려오기",
-                Target::BringHome(BringHomeTarget {
-                    local_pane: row.surface_id.clone(),
-                    machine: machine.label.clone(),
-                }),
-                false,
-            );
-            *y += 56.0;
+        TransferStep::Destination => {
+            button(g, s, hits, (x, *y, 100.0, 30.0), "세션 다시 고르기", Target::TransferBack, false);
+            *y += 44.0;
+            section(g, x, y, "2  도착할 기기와 방", &format!("{}개 세션을 함께 보냅니다", ui.selected.len()));
+            let machines = data.machines.iter().map(|machine| {
+                let same = ui.selected.iter().any(|id| id.machine_id == machine.id);
+                let suffix = if same { " · 현재 기기" } else if !machine.online { " · 연결 안 됨" } else if !machine.room_transfer_supported { " · 업데이트 필요" } else { "" };
+                (format!("{}{suffix}", machine.label), Target::TransferMachine(machine.id.clone()), ui.destination == machine.id, machine.online && machine.room_transfer_supported && !same)
+            }).collect();
+            transfer_choices(g, s, hits, x, y, w, machines);
+            if let Some(machine) = data.machines.iter().find(|machine| machine.id == ui.destination) {
+                *y += 12.0;
+                section(g, x, y, "도착할 방", "기존 방을 고르거나 새 방 이름을 적어 주세요");
+                let mut rooms: Vec<_> = machine.rooms.iter().map(|room| (room.title.clone(), Target::TransferRoom(room.id.clone()), !ui.new_room && ui.room.as_deref() == Some(&room.id), true)).collect();
+                rooms.push(("새 방 만들기".into(), Target::TransferNewRoom, ui.new_room, true));
+                transfer_choices(g, s, hits, x, y, w, rooms);
+                if ui.new_room {
+                    field(g, s, hits, caret, (x, *y, w, 40.0), "새 방 이름", &ui.room_name, BoardInput::TransferRoomName);
+                    *y += 50.0;
+                }
+            }
+            *y += 12.0;
+            let valid = transfer_request(ui, data).is_ok();
+            transfer_button(g, s, hits, (x, *y, w, 38.0), "선택 내용 확인", Target::TransferReview, valid, true);
+            *y += 50.0;
+            text(g, x, *y, "다음 화면에서 확인해야 이사가 시작돼요.", 10.5, theme::text_dim(), false);
+            *y += 30.0;
         }
-        for pane in &machine.panes {
-            let rect = (x, *y, w, 48.0);
-            outlined(g, rect, theme::surface_hover());
-            status_dot_raw(g, rect.0 + 14.0, rect.1 + 19.0, &pane.status);
-            text(g, rect.0 + 32.0, rect.1 + 7.0, if pane.name.is_empty() { &pane.id } else { &pane.name }, 12.0, theme::text(), true);
-            let title = fit(g, &pane.title, w - 170.0, 10.5, false);
-            text(g, rect.0 + 32.0, rect.1 + 26.0, &title, 10.5, theme::text_dim(), false);
-            text(
-                g,
-                rect.0 + rect.2 - 126.0,
-                rect.1 + 17.0,
-                "원격 목록",
-                10.0,
-                theme::text_mute(),
-                false,
-            );
-            *y += 56.0;
+        TransferStep::Confirm => {
+            if ui.results.is_empty() {
+                let Some(pending) = &ui.pending else { return };
+                let (title, summary, ids, confirm) = match pending {
+                    TransferConfirmation::Move(request) => {
+                        let machine = data.machines.iter().find(|machine| machine.id == request.destination_machine);
+                        let machine_name = machine.map(|m| m.label.as_str()).unwrap_or("연결 확인 필요");
+                        let room = match &request.destination_room {
+                            RoomTarget::New(name) => format!("새 방 · {name}"),
+                            RoomTarget::Existing(id) => machine.and_then(|m| m.rooms.iter().find(|room| &room.id == id)).map(|room| room.title.clone()).unwrap_or_else(|| "방 확인 필요".into()),
+                        };
+                        ("3  이사할 내용 확인", format!("도착 · {machine_name} / {room}"), &request.sessions, "확인하고 이사")
+                    }
+                    TransferConfirmation::Close(ids) => ("셸 닫기 확인", "선택한 셸만 닫습니다. 실행 중인 학생은 유지돼요.".into(), ids, "확인하고 셸 닫기"),
+                };
+                section(g, x, y, title, "선택한 항목만 처리하며, 나머지는 그대로 남아요");
+                transfer_message(g, x, y, w, &summary);
+                *y += 16.0;
+                for id in ids {
+                    if let Some(row) = data.sessions.iter().find(|row| &row.identity == id) {
+                        let label = fit(g, &format!("{} · {}", transfer_session_name(row), transfer_room_label(data, row)), w - 24.0, 11.5, false);
+                        text(g, x + 12.0, *y + 8.0, &label, 11.5, theme::text(), false);
+                        *y += 32.0;
+                    }
+                }
+                *y += 16.0;
+                button(g, s, hits, (x, *y, w, 38.0), confirm, Target::TransferConfirm, true);
+                *y += 48.0;
+                button(g, s, hits, (x, *y, w, 32.0), "취소하고 다시 고르기", Target::TransferBack, false);
+                *y += 44.0;
+            } else {
+                let done = ui.results.iter().filter(|row| row.status == TransferStatus::Succeeded).count();
+                let failed = ui.results.iter().filter(|row| matches!(row.status, TransferStatus::Failed | TransferStatus::Unknown)).count();
+                section(g, x, y, if ui.busy { "이사·정리 진행 중" } else { "처리 결과" }, &format!("전체 {}개 · 완료 {done} · 확인 필요 {failed}", ui.results.len()));
+                for result in &ui.results {
+                    let name = ui.result_names.get(&result.source.canonical_key()).cloned().or_else(|| data.sessions.iter().find(|row| row.identity.canonical_key() == result.source.canonical_key()).map(transfer_session_name)).unwrap_or_else(|| "선택한 세션".into());
+                    let state = match result.status { TransferStatus::Waiting => "대기", TransferStatus::Running => "진행", TransferStatus::Succeeded => "완료", TransferStatus::Failed => "실패", TransferStatus::Unknown => "결과 확인 필요" };
+                    let title = fit(g, &format!("{name} · {state}"), w - 20.0, 12.0, true);
+                    text(g, x + 10.0, *y + 8.0, &title, 12.0, if matches!(result.status, TransferStatus::Failed | TransferStatus::Unknown) { theme::danger() } else { theme::text() }, true);
+                    *y += 32.0;
+                    transfer_message(g, x + 10.0, y, w - 20.0, &result.message);
+                    *y += 16.0;
+                }
+                if !ui.busy {
+                    button(g, s, hits, (x, *y, w, 36.0), "목록으로 돌아가기", Target::TransferBack, false);
+                    *y += 48.0;
+                }
+            }
         }
     }
+}
+
+fn transfer_row_visible(ui: &TransferUi, row: &SessionRow) -> bool {
+    ui.room_filter.as_ref().is_none_or(|(machine, room)| &row.identity.machine_id == machine && &row.room_id == room)
+}
+
+fn transfer_message(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, message: &str) {
+    let mut line = String::new();
+    for ch in message.chars() {
+        if ch == '\n' || (!line.is_empty() && g.measure_chrome_text(&format!("{line}{ch}"), 10.5, false) > w) {
+            text(g, x, *y, &line, 10.5, theme::text_dim(), false);
+            *y += 19.0;
+            line.clear();
+        }
+        if ch != '\n' { line.push(ch); }
+    }
+    if !line.is_empty() { text(g, x, *y, &line, 10.5, theme::text_dim(), false); *y += 19.0; }
+}
+
+fn transfer_session_name(row: &SessionRow) -> String {
+    if !row.name.is_empty() { row.name.clone() } else if row.harness.is_none() { "셸".into() } else { row.harness.clone().unwrap_or_else(|| "세션".into()) }
+}
+
+fn transfer_room_label(data: &TransferSnapshot, row: &SessionRow) -> String {
+    let machine = data.machines.iter().find(|machine| machine.id == row.identity.machine_id);
+    let name = machine.map(|machine| machine.label.as_str()).unwrap_or("기기 확인 필요");
+    let room = machine.and_then(|m| row.room_id.as_ref().and_then(|id| m.rooms.iter().find(|room| &room.id == id))).map(|room| room.title.as_str()).unwrap_or("방 밖");
+    format!("{name} · {room}")
+}
+
+fn transfer_button(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, rect: Rect, label: &str, target: Target, enabled: bool, primary: bool) {
+    if enabled { button(g, s, hits, rect, label, target, primary); }
+    else {
+        outlined(g, rect, theme::surface());
+        let label = fit(g, label, rect.2 - 20.0, 10.5, false);
+        text(g, rect.0 + 10.0, rect.1 + (rect.3 - 12.0) / 2.0, &label, 10.5, theme::text_dim(), false);
+    }
+}
+
+fn transfer_choices(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32, choices: Vec<(String, Target, bool, bool)>) {
+    let mut left = x;
+    for (label, target, selected, enabled) in choices {
+        let width = (g.measure_chrome_text(&label, 10.5, selected) + 28.0).clamp(90.0, w.min(260.0));
+        if left > x && left + width > x + w { left = x; *y += 38.0; }
+        transfer_button(g, s, hits, (left, *y, width, 30.0), &label, target, enabled, selected);
+        left += width + 8.0;
+    }
+    *y += 42.0;
+}
+
+fn paint_transfer_session(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32, row: &SessionRow, shell: bool) {
+    let selected = if shell { s.transfer.shell_selected.contains(&row.identity) } else { s.transfer.selected.contains(&row.identity) };
+    let enabled = row.unavailable_reason.is_none() && (!shell || row.shell_closeable);
+    let key = row.identity.canonical_key();
+    let expanded = s.transfer.detail.as_deref() == Some(&key);
+    let compact = w < 440.0;
+    let rect = (x, *y, w, if compact { 120.0 } else { 88.0 });
+    if selected || contains(rect, s.cursor) { round_rect(g, x, *y, w, rect.3, theme::radius_sm(), theme::surface_hover()); }
+    checkbox(g, x + 8.0, *y + 12.0, selected);
+    let activity = s.data.agents.iter().find(|agent| row.local_panes.contains(&agent.surface_id));
+    if let Some(agent) = activity { draw_face(g, s, agent, x + 34.0, *y + 10.0, 28.0); }
+    else if let Some(face) = s.data.faces.iter().find(|face| face.name == row.name) {
+        if !g.has_image(&face.key) { g.upload_image(&face.key, &face.rgba, face.width, face.height); }
+        g.queue_image_above(&face.key, x + 34.0, *y + 10.0, 28.0, 28.0);
+    } else { g.queue_icon(if shell { "terminal" } else { "users" }, x + 39.0, *y + 14.0, 16.0, theme::text_dim()); }
+    let text_w = (w - if compact { 88.0 } else { 152.0 }).max(38.0);
+    let status = match row.status.as_str() { "working" | "thinking" | "compacting" => "작업 중", "waiting" | "blocked" => "확인 필요", _ => if shell { "셸" } else { "대기" } };
+    let name = fit(g, &format!("{} · {status}", transfer_session_name(row)), text_w, 12.0, true);
+    text(g, x + 72.0, *y + 10.0, &name, 12.0, theme::text(), true);
+    let local = s.data.transfer.machines.iter().find(|machine| machine.id == row.identity.machine_id).is_some_and(|machine| machine.local);
+    let viewing = if local { "여기서 실행" } else if row.local_panes.is_empty() { "원격만" } else { "여기서 보는 중" };
+    let machine = s.data.transfer.machines.iter().find(|machine| machine.id == row.identity.machine_id).map(|machine| machine.label.as_str()).unwrap_or("기기 확인 필요");
+    let status = fit(g, &format!("{machine} · {viewing}"), text_w, 10.0, false);
+    text(g, x + 72.0, *y + 30.0, &status, 10.0, theme::text_dim(), false);
+    let summary = row.unavailable_reason.as_deref().unwrap_or(if row.title.is_empty() { "최근 작업 제목 없음" } else { &row.title });
+    let summary = fit(g, summary, text_w, 10.5, false);
+    text(g, x + 72.0, *y + 51.0, &summary, 10.5, if enabled { theme::text_dim() } else { theme::attention() }, false);
+    if enabled { hit(g, hits, Target::TransferSelect(row.identity.clone(), shell), (x, *y, if compact { w } else { w - 72.0 }, 76.0), false); }
+    let view = if compact { (x + 16.0, *y + 82.0, 58.0, 28.0) } else { (x + w - 66.0, *y + 8.0, 58.0, 28.0) };
+    let detail = if compact { (x + 82.0, *y + 82.0, 58.0, 28.0) } else { (x + w - 66.0, *y + 42.0, 58.0, 28.0) };
+    button(g, s, hits, view, "보기", Target::TransferView(row.identity.clone()), false);
+    button(g, s, hits, detail, if expanded { "접기" } else { "상세" }, Target::TransferDetail(key), false);
+    *y += rect.3;
+    if expanded {
+        let rows = activity.map(|agent| vec![agent.last_prompt.as_str(), agent.last_reply.as_str(), agent.intent.as_str()]).unwrap_or_default();
+        for line in rows.into_iter().filter(|line| !line.is_empty()).take(3) {
+            let shown = fit(g, line, w - 32.0, 10.5, false);
+            text(g, x + 16.0, *y + 6.0, &shown, 10.5, theme::text_dim(), false);
+            *y += 24.0;
+        }
+        let last = activity.and_then(|agent| agent.idle_secs).map(|secs| format!("마지막 활동 · {}분 전", secs / 60)).unwrap_or_else(|| "마지막 활동 시각 정보 없음".into());
+        text(g, x + 16.0, *y + 6.0, &last, 10.0, theme::text_dim(), false);
+        *y += 32.0;
+    }
+    g.rect(x, *y - 1.0, w, 1.0, theme::border());
+    *y += 8.0;
 }
 
 fn draw_face(g: &mut gpu::GpuRenderer, s: &Snapshot, row: &PaneActivity, x: f32, y: f32, size: f32) {
@@ -2137,11 +2444,94 @@ impl App {
                     .unwrap_or_default();
                 self.run_native_board_action(WorkerAction::GitPush { cwd });
             }
-            Target::Migrate(pane, target) => {
-                self.run_native_board_action(WorkerAction::Migrate { pane, target });
+            Target::TransferFilter(filter) => {
+                self.board_scene.transfer.room_filter = filter;
+                self.board_scene.scroll = 0.0;
             }
-            Target::BringHome(target) => {
-                self.run_native_board_action(WorkerAction::BringHome(target));
+            Target::TransferSelect(identity, shell) => {
+                let ui = &mut self.board_scene.transfer;
+                let selected = if shell { &mut ui.shell_selected } else { &mut ui.selected };
+                if !selected.remove(&identity) { selected.insert(identity); }
+                ui.pending = None;
+                ui.error = None;
+            }
+            Target::TransferSelectRoom => {
+                let ui = &mut self.board_scene.transfer;
+                for row in &self.board_scene.data.transfer.sessions {
+                    if row.harness.is_some() && row.unavailable_reason.is_none() && transfer_row_visible(ui, row) {
+                        ui.selected.insert(row.identity.clone());
+                    }
+                }
+                ui.error = None;
+            }
+            Target::TransferClear => {
+                self.board_scene.transfer.selected.clear();
+                self.board_scene.transfer.shell_selected.clear();
+                self.board_scene.transfer.pending = None;
+            }
+            Target::TransferDestination => {
+                self.native_board_blur();
+                self.board_scene.revalidate_transfer_selection();
+                if !self.board_scene.transfer.selected.is_empty() {
+                    self.board_scene.transfer.step = TransferStep::Destination;
+                    self.board_scene.transfer.error = None;
+                    self.board_scene.scroll = 0.0;
+                }
+            }
+            Target::TransferMachine(machine) => {
+                self.native_board_blur();
+                self.board_scene.transfer.destination = machine;
+                self.board_scene.transfer.room = None;
+                self.board_scene.transfer.new_room = false;
+                self.board_scene.transfer.pending = None;
+                self.board_scene.transfer.error = None;
+            }
+            Target::TransferRoom(room) => {
+                self.native_board_blur();
+                self.board_scene.transfer.room = Some(room);
+                self.board_scene.transfer.new_room = false;
+                self.board_scene.transfer.pending = None;
+                self.board_scene.transfer.error = None;
+            }
+            Target::TransferNewRoom => {
+                self.board_scene.transfer.new_room = true;
+                self.board_scene.transfer.room = None;
+                let len = self.board_scene.transfer.room_name.chars().count();
+                self.board_scene.set_input(Some(BoardInput::TransferRoomName), len);
+                self.ime_retarget(crate::ImeFocus::Board(BoardInput::TransferRoomName));
+            }
+            Target::TransferReview => {
+                self.native_board_blur();
+                self.board_scene.review_transfer(false);
+            }
+            Target::TransferCloseReview => {
+                self.native_board_blur();
+                self.board_scene.review_transfer(true);
+            }
+            Target::TransferConfirm => {
+                self.native_board_blur();
+                if let Some(backend) = self.native_board_backend() {
+                    self.board_scene.run_transfer(backend, self.proxy.clone());
+                }
+            }
+            Target::TransferBack => {
+                self.native_board_blur();
+                if !self.board_scene.transfer.busy {
+                    self.board_scene.transfer.step = TransferStep::Select;
+                    self.board_scene.transfer.pending = None;
+                    self.board_scene.transfer.results.clear();
+                    self.board_scene.transfer.error = None;
+                    self.board_scene.scroll = 0.0;
+                }
+            }
+            Target::TransferShells => self.board_scene.transfer.show_shells = !self.board_scene.transfer.show_shells,
+            Target::TransferDetail(key) => {
+                let ui = &mut self.board_scene.transfer;
+                ui.detail = if ui.detail.as_ref() == Some(&key) { None } else { Some(key) };
+            }
+            Target::TransferView(identity) => {
+                self.native_board_blur();
+                self.run_native_board_action(WorkerAction::ViewSession(identity));
             }
         }
         self.chrome_dirty = true;
@@ -2353,6 +2743,93 @@ mod tests {
         assert_eq!(scene.target_cwd, "/repo");
     }
 
+    fn transfer_data() -> TransferSnapshot {
+        use crate::session_transfer::{TransferMachine, RoomInfo};
+        TransferSnapshot {
+            machines: vec![
+                TransferMachine { id: "source".into(), label: "맥북".into(), local: true, online: true, room_transfer_supported: true, ..Default::default() },
+                TransferMachine { id: "destination".into(), label: "미니".into(), online: true, room_transfer_supported: true, rooms: vec![RoomInfo { id: "work".into(), title: "작업 방".into() }], ..Default::default() },
+            ],
+            sessions: vec![SessionRow {
+                identity: SessionIdentity { machine_id: "source".into(), pane_id: "%8".into(), session_id: Some("conversation".into()), instance: "instance".into(), token: "generation".into() },
+                harness: Some("codex".into()), name: "학생".into(), status: "idle".into(), ..Default::default()
+            }],
+            errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn transfer_review_is_non_mutating_and_requires_a_current_room() {
+        let data = transfer_data();
+        let mut scene = Scene::default();
+        scene.data = Arc::new(BoardData { transfer: Arc::new(data.clone()), ..Default::default() });
+        scene.transfer.selected.insert(data.sessions[0].identity.clone());
+        scene.transfer.destination = "destination".into();
+        scene.review_transfer(false);
+        assert!(scene.transfer.pending.is_none());
+        scene.transfer.room = Some("work".into());
+        scene.review_transfer(false);
+        assert!(matches!(&scene.transfer.pending, Some(TransferConfirmation::Move(request)) if !request.confirmed));
+        assert!(!scene.transfer.busy);
+        assert!(scene.mailbox.lock().unwrap().transfers.is_empty());
+        assert!(scene.mailbox.lock().unwrap().actions.is_empty());
+    }
+
+    #[test]
+    fn changed_session_identity_cancels_review_even_when_the_pane_number_matches() {
+        let data = transfer_data();
+        let mut scene = Scene::default();
+        scene.transfer.selected.insert(data.sessions[0].identity.clone());
+        scene.transfer.destination = "destination".into();
+        scene.transfer.room = Some("work".into());
+        scene.data = Arc::new(BoardData { transfer: Arc::new(data.clone()), ..Default::default() });
+        scene.review_transfer(false);
+        let mut changed = data;
+        changed.sessions[0].identity.token = "replacement".into();
+        scene.data = Arc::new(BoardData { transfer: Arc::new(changed), ..Default::default() });
+        scene.revalidate_transfer_selection();
+        assert!(scene.transfer.pending.is_none());
+        assert!(scene.transfer.selected.is_empty());
+        assert!(scene.transfer.error.is_some());
+    }
+
+    #[test]
+    fn destination_validation_rejects_same_machine_and_empty_new_room() {
+        let data = transfer_data();
+        let mut ui = TransferUi::default();
+        ui.selected.insert(data.sessions[0].identity.clone());
+        ui.destination = "source".into();
+        ui.new_room = true;
+        ui.room_name = "새 작업".into();
+        assert!(transfer_request(&ui, &data).is_err());
+        ui.destination = "destination".into();
+        ui.room_name = "   ".into();
+        assert!(transfer_request(&ui, &data).is_err());
+        ui.room_name = "  새 작업  ".into();
+        let request = transfer_request(&ui, &data).unwrap();
+        assert_eq!(request.destination_room, RoomTarget::New("새 작업".into()));
+        assert!(!request.confirmed);
+    }
+
+    #[test]
+    fn partial_transfer_results_survive_refresh_and_ignore_old_generations() {
+        let data = transfer_data();
+        let mut scene = Scene::default();
+        scene.transfer_generation = 2;
+        scene.transfer.busy = true;
+        let result = TransferResult { source: data.sessions[0].identity.clone(), status: TransferStatus::Failed, message: "연결을 확인해 주세요".into(), destination: None };
+        scene.mailbox.lock().unwrap().transfers.push(TransferEnvelope { generation: 1, result: Some(result.clone()), finished: true });
+        scene.pump();
+        assert!(scene.transfer.busy);
+        assert!(scene.transfer.results.is_empty());
+        scene.mailbox.lock().unwrap().transfers.push(TransferEnvelope { generation: 2, result: Some(result), finished: true });
+        scene.pump();
+        assert!(!scene.transfer.busy);
+        assert_eq!(scene.transfer.results[0].status, TransferStatus::Failed);
+        scene.pump();
+        assert_eq!(scene.transfer.results.len(), 1);
+    }
+
     #[test]
     fn paint_has_no_process_file_or_network_work() {
         let source = include_str!("native_board.rs");
@@ -2437,8 +2914,7 @@ mod tests {
             "WorkerAction::ScheduleDelete",
             "WorkerAction::GitCommit",
             "WorkerAction::GitPush",
-            "WorkerAction::Migrate",
-            "WorkerAction::BringHome",
+            "WorkerAction::ViewSession",
         ] {
             assert!(click.contains(action), "worker action routing 누락: {action}");
         }

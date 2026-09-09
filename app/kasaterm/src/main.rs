@@ -29,6 +29,7 @@ mod layout;
 mod lineedit;
 mod markdown;
 mod native_board;
+mod transfer_endpoints;
 mod native_onboarding;
 mod native_settings;
 mod native_strings;
@@ -37,6 +38,7 @@ mod onboarding;
 mod render;
 mod screenread;
 mod session;
+mod session_transfer;
 mod settings;
 mod settings_media;
 mod settings_room;
@@ -3616,6 +3618,15 @@ enum UserEvent {
         String,
         std::result::Result<Box<session::MigrateReady>, String>,
     ),
+    RemoteShellReady(Arc<layout::RemoteShellReady>),
+    SocketMigrateToRoom(
+        kasa_socket::transfer::MigrateRequest,
+        std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ),
+    ValidateTransfer(
+        kasa_socket::transfer::SessionIdentity,
+        std::sync::mpsc::Sender<std::result::Result<(), String>>,
+    ),
     /// `machine.unfold` — 기계 라벨 하나로 그 기계 학생 pane 전부를 거울로
     /// **펼친다**(방마다 새 창). (라벨, 회신=요약 문장).
     SocketUnfold(
@@ -3725,6 +3736,11 @@ enum UserEvent {
     SocketSpawnStudent(String, std::sync::mpsc::Sender<String>),
     /// 다른 기계의 `to` 가 비출 맨 셸 pane — (cwd, 회신=새 pane id).
     SocketSpawnShell(Option<String>, std::sync::mpsc::Sender<String>),
+    TransferSnapshot((String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::MachineSnapshot, String>>),
+    TransferPrepareSpawn(kasa_socket::transfer::SpawnRequest, std::sync::mpsc::Sender<std::result::Result<transfer_endpoints::SpawnPlan, String>>),
+    TransferFinishSpawn(Arc<transfer_endpoints::Spawned>, (String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::SessionRow, String>>, bool),
+    TransferReclaimSpawn(kasa_socket::transfer::SessionIdentity),
+    TransferClose(kasa_socket::transfer::SessionIdentity, std::sync::mpsc::Sender<std::result::Result<(), String>>),
     /// `POST /swap-character?surface=<id>&character=<name>` 위임 — (pane, 캐릭터).
     /// 그 pane PTY 를 새 persona 로 respawn(대화 리셋, persona 는 셸 spawn 시 고정).
     SocketSwapCharacter(String, String),

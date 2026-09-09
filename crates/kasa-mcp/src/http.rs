@@ -1982,6 +1982,42 @@ async fn spawn_shell_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+async fn transfer_snapshot_handler(backend: Arc<dyn Backend>) -> Json<serde_json::Value> {
+    let result = tokio::task::spawn_blocking(move || backend.transfer_snapshot()).await;
+    Json(match result {
+        Ok(Ok(snapshot)) => serde_json::json!({"ok":true,"snapshot":snapshot}),
+        Ok(Err(error)) => serde_json::json!({"ok":false,"error":error.to_string()}),
+        Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
+    })
+}
+
+async fn transfer_spawn_handler(backend: Arc<dyn Backend>, Json(request): Json<kasa_socket::transfer::SpawnRequest>) -> Json<serde_json::Value> {
+    let result = tokio::task::spawn_blocking(move || backend.transfer_spawn(&request)).await;
+    Json(match result {
+        Ok(Ok(session)) => serde_json::json!({"ok":true,"session":session}),
+        Ok(Err(error)) => serde_json::json!({"ok":false,"error":error.to_string()}),
+        Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
+    })
+}
+
+async fn transfer_close_handler(backend: Arc<dyn Backend>, Json(identity): Json<kasa_socket::transfer::SessionIdentity>) -> Json<serde_json::Value> {
+    let result = tokio::task::spawn_blocking(move || backend.transfer_close(&identity)).await;
+    Json(match result {
+        Ok(Ok(())) => serde_json::json!({"ok":true}),
+        Ok(Err(error)) => serde_json::json!({"ok":false,"error":error.to_string()}),
+        Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
+    })
+}
+
+async fn transfer_migrate_handler(backend: Arc<dyn Backend>, Json(request): Json<kasa_socket::transfer::MigrateRequest>) -> Json<serde_json::Value> {
+    let result = tokio::task::spawn_blocking(move || backend.transfer_migrate(&request)).await;
+    Json(match result {
+        Ok(Ok(remote_id)) => serde_json::json!({"ok":true,"remote_id":remote_id}),
+        Ok(Err(error)) => serde_json::json!({"ok":false,"error":error.to_string()}),
+        Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
+    })
+}
+
 /// `POST /cmd` body `{"method": "surface.split", "params": {…}}` — 소켓 명령 몇 개를
 /// HTTP 로 연다. 폰이 pane 을 닫고·쪼개고·자리 바꾸고·방을 만들 창구다(2026-09-07
 /// 지시 「모바일에서도 pane 닫고 추가하고 정렬하고 방 만들고」). 소켓(`kasaterm-cli`)과
@@ -4487,7 +4523,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
             // 거울 pane 은 이쪽 board 에 줄이 없다(몸통이 저쪽). 저 기계의 목록 캐시에서
             // 같은 pane 의 줄을 그대로 가져와 이쪽 자리·창 번호만 덮는다 — 이름·얼굴·
             // 상태·상태줄이 저쪽과 똑같이 나온다. `mirror_of` 로 어느 기계의 거울인지.
-            if raw.is_none() {
+            if crate::remote::is_remote_pane(&id) {
                 if let Some((label, mut row)) =
                     crate::remote::remote_info(&id).and_then(|i| {
                         let label = if i.label.is_empty() {
@@ -4507,28 +4543,6 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 }
             }
             let b = raw.filter(|p| p.harness.is_some() || crate::remote::is_remote_pane(&id));
-            // 거울 pane 은 이쪽 board 에 줄이 없다(몸통이 저쪽). 저 기계의 목록 캐시에서
-            // 같은 pane 의 줄을 그대로 가져와 이쪽 자리·창 번호만 덮는다 — 이름·얼굴·
-            // 상태·상태줄이 저쪽과 똑같이 나온다. `mirror_of` 로 어느 기계의 거울인지.
-            if raw.is_none() {
-                if let Some((label, mut row)) =
-                    crate::remote::remote_info(&id).and_then(|i| {
-                        let label = if i.label.is_empty() {
-                            crate::machines::label_for_base(&i.base)?
-                        } else {
-                            i.label
-                        };
-                        crate::machines::cached_pane(&label, &i.remote_id).map(|r| (label, r))
-                    })
-                {
-                    row["id"] = serde_json::Value::String(id.clone());
-                    row["window"] = serde_json::json!(pane_windows.get(&id).copied());
-                    row["closed"] = serde_json::json!(!pane_windows.contains_key(&id));
-                    row["undocked"] = serde_json::json!(undocked.contains(&id));
-                    row["mirror_of"] = serde_json::Value::String(label);
-                    return row;
-                }
-            }
             serde_json::json!({
                 "id": id,
                 "name": b.and_then(|p| p.character.clone()),
@@ -4661,6 +4675,7 @@ async fn term_repo_post(
     };
     let exists = std::path::Path::new(path).join(".git").exists();
     let action;
+    let mut dirty_lines = 0usize;
     if !exists {
         let Some(url) = q.get("url").filter(|u| !u.is_empty()) else {
             return err(format!("{path} 에 레포가 없고 `url` 도 없어요"));
@@ -4690,47 +4705,49 @@ async fn term_repo_post(
         }
         action = "cloned";
     } else {
-        // 이 기계에 안 올린 변경이 있으면 당겨오지 않는다 — 남의 작업을 덮는다.
+        // 도착지에 커밋 안 한 변경이 있어도 **세우지 않는다.** 이 자리가 해야 하는 일은
+        // 다음 단계(bundle 재현)의 전제인 origin 오브젝트를 이 기계에 들여놓는 것뿐이고,
+        // fetch 는 오브젝트만 받아 워킹트리를 안 건드린다. 남의 작업을 덮는 것은 그 뒤의
+        // checkout·ff-merge 라서 **그 걸음만** 건너뛴다 — 옮겨온 짐은 bundle 이
+        // refs/kasaterm/incoming 으로 보관하므로 잃는 것도 없다(2026-09-09: 도착지 학생의
+        // 미커밋 9개 때문에 6-pane 이사가 통째로 막혔다. 예전엔 여기서 「그쪽 학생이
+        // 커밋하고 오라」고 거부했다).
         let (_, dirty) = git(vec!["-C".into(), path.clone(), "status".into(), "--porcelain".into()]);
-        if !dirty.is_empty() {
-            // 이 문장은 **도착지 기계**가 저를 두고 하는 말이라, 출발지 화면에서 읽히게
-            // 「이쪽/저쪽」 대신 자리를 말한다(2026-09-07 실측: 맥북에 「이 기계에 안 올린
-            // 변경」이 떠 어느 기계인지 헷갈렸다).
-            return err(format!(
-                "도착지 폴더에 커밋 안 한 변경이 있어 당겨오지 않았어요({} 줄) — 그쪽 학생이 커밋하거나 정리해야 해요",
-                dirty.lines().count()
-            ));
-        }
+        dirty_lines = dirty.lines().count();
         let (ok, out) = git(vec!["-C".into(), path.clone(), "fetch".into(), "--prune".into()]);
         if !ok {
             return err(format!("fetch 실패: {out}"));
         }
-        if !branch.is_empty() {
-            let (ok, out) = git(vec!["-C".into(), path.clone(), "checkout".into(), branch.clone()]);
-            if !ok {
-                return err(format!("{branch} 로 못 옮겼어요: {out}"));
-            }
-        }
-        let (mut ok, mut out) = git(vec!["-C".into(), path.clone(), "merge".into(), "--ff-only".into(), "@{u}".into()]);
-        // 업스트림이 안 잡힌 브랜치(`checkout -B` 로 앉힌 거울)는 `@{u}` 가 없어 여기서
-        // 매번 서고, 거울이 origin 보다 한참 뒤처진 채 「준비됐다」로 넘어갔다
-        // (2026-09-02 실측: 미니 swarm 이 origin 뒤 12 커밋에서 fetched-only). 같은
-        // 이름의 origin 브랜치로 한 번 더 — 빨리감기만 하므로 이쪽 커밋을 잃을 길은 없다.
-        if !ok && !branch.is_empty() && out.contains("no upstream") {
-            (ok, out) = git(vec![
-                "-C".into(),
-                path.clone(),
-                "merge".into(),
-                "--ff-only".into(),
-                format!("origin/{branch}"),
-            ]);
-        }
-        // 이미 최신이면 실패 문구가 나오지만 그건 사고가 아니다.
-        action = if ok { "pulled" } else if out.contains("up to date") || out.contains("최신") {
-            "already-current"
+        if dirty_lines > 0 {
+            action = "kept-dirty";
         } else {
-            "fetched-only"
-        };
+            if !branch.is_empty() {
+                let (ok, out) = git(vec!["-C".into(), path.clone(), "checkout".into(), branch.clone()]);
+                if !ok {
+                    return err(format!("{branch} 로 못 옮겼어요: {out}"));
+                }
+            }
+            let (mut ok, mut out) = git(vec!["-C".into(), path.clone(), "merge".into(), "--ff-only".into(), "@{u}".into()]);
+            // 업스트림이 안 잡힌 브랜치(`checkout -B` 로 앉힌 거울)는 `@{u}` 가 없어 여기서
+            // 매번 서고, 거울이 origin 보다 한참 뒤처진 채 「준비됐다」로 넘어갔다
+            // (2026-09-02 실측: 미니 swarm 이 origin 뒤 12 커밋에서 fetched-only). 같은
+            // 이름의 origin 브랜치로 한 번 더 — 빨리감기만 하므로 이쪽 커밋을 잃을 길은 없다.
+            if !ok && !branch.is_empty() && out.contains("no upstream") {
+                (ok, out) = git(vec![
+                    "-C".into(),
+                    path.clone(),
+                    "merge".into(),
+                    "--ff-only".into(),
+                    format!("origin/{branch}"),
+                ]);
+            }
+            // 이미 최신이면 실패 문구가 나오지만 그건 사고가 아니다.
+            action = if ok { "pulled" } else if out.contains("up to date") || out.contains("최신") {
+                "already-current"
+            } else {
+                "fetched-only"
+            };
+        }
     }
     let (_, head) = git(vec!["-C".into(), path.clone(), "rev-parse".into(), "--short".into(), "HEAD".into()]);
     let (_, br) = git(vec!["-C".into(), path.clone(), "rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()]);
@@ -4739,7 +4756,7 @@ async fn term_repo_post(
     // 그 화면에 먹혀 밤새 서 있는다(2026-08-27 이사 실측 메모). 레포를 준비하는
     // 이 자리가 곧 「여기서 claude 를 돌리겠다」는 뜻이므로 여기서 심는다.
     preseed_claude_trust(path);
-    Json(serde_json::json!({ "ok": true, "action": action, "head": head, "branch": br, "path": path }))
+    Json(serde_json::json!({ "ok": true, "action": action, "head": head, "branch": br, "path": path, "dirty": dirty_lines }))
 }
 
 /// `~/.claude.json` 의 projects[path] 에 신뢰 표시를 심는다. 실패해도 조용히
@@ -7078,6 +7095,10 @@ pub fn spawn_http_server_opts(
                 let mode_get_backend = backend.clone();
                 let focus_backend = backend.clone();
                 let close_backend = backend.clone();
+                let transfer_snapshot_backend = backend.clone();
+                let transfer_spawn_backend = backend.clone();
+                let transfer_close_backend = backend.clone();
+                let transfer_migrate_backend = backend.clone();
                 let events_backend = backend.clone();
                 let messages_backend = backend.clone();
                 let list_dir_backend = backend.clone();
@@ -7297,6 +7318,10 @@ pub fn spawn_http_server_opts(
                             close_pane_handler(close_backend.clone(), q)
                         }),
                     )
+                    .route("/transfer/snapshot", get(move || transfer_snapshot_handler(transfer_snapshot_backend.clone())))
+                    .route("/transfer/spawn", post(move |body: Json<kasa_socket::transfer::SpawnRequest>| transfer_spawn_handler(transfer_spawn_backend.clone(), body)))
+                    .route("/transfer/close", post(move |body: Json<kasa_socket::transfer::SessionIdentity>| transfer_close_handler(transfer_close_backend.clone(), body)))
+                    .route("/transfer/migrate", post(move |body: Json<kasa_socket::transfer::MigrateRequest>| transfer_migrate_handler(transfer_migrate_backend.clone(), body)))
                     // /arona-ui(슬래시 없음)는 /arona-ui/ 로 리다이렉트 —
                     // index.html 의 상대경로 assets(./assets/*) 가 디렉토리
                     // 기준으로 풀리려면 trailing slash 가 필요하다.

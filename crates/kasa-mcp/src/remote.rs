@@ -153,6 +153,22 @@ pub fn is_remote_pane(local_id: &str) -> bool {
     links().lock().unwrap().contains_key(local_id)
 }
 
+pub fn cached_pane(local_id: &str) -> Option<serde_json::Value> {
+    let info = remote_info(local_id)?;
+    let label = if info.label.is_empty() {
+        crate::machines::label_for_base(&info.base)?
+    } else {
+        info.label
+    };
+    crate::machines::cached_pane(&label, &info.remote_id)
+}
+
+/// 캐시가 없거나 구 호스트가 실행 상태를 안 주는 것은 종료 증거가 아니다.
+pub fn cached_agent_running(local_id: &str) -> Option<bool> {
+    let row = cached_pane(local_id)?;
+    row.get("harness").map(|value| value.as_str().is_some_and(|s| !s.is_empty()))
+}
+
 /// 이 pane 이 거울 연결인가. 구 호스트에서는 기존 읽기 미러로 남는다.
 pub fn is_view_pane(local_id: &str) -> bool {
     links()
@@ -275,13 +291,23 @@ fn build_url(spec: &RemoteSpec, pane: Option<&str>, view: bool) -> String {
 /// `cols`/`rows` 는 GUI 가 원하는 격자 — 서버 격자와 다르면 접속 직후 resize
 /// 제어로 맞춘다(own=1 이라 force 없이 통과). **이 앱이 그 세션의 주인일 때만**
 /// 쓴다(스폰·이사·승격). 남의 화면을 들여다보는 거울은 `connect_view` 로.
+fn is_gui_pane(pane: Option<&str>) -> bool {
+    pane.is_some_and(|pane| {
+        pane.strip_prefix('%').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
 pub fn connect(
     spec: RemoteSpec,
     local_pane_id: &str,
     cols: u16,
     rows: u16,
 ) -> Result<RemoteSession> {
-    connect_inner(spec, local_pane_id, cols, rows, false, false)
+    // GUI pane은 호스트 창도 크기를 갱신한다. 옛 저장본의 own=1 연결을 그대로
+    // 되살리면 두 창이 크기를 번갈아 덮으므로 기존 GUI 자리만 거울로 승계한다.
+    // 새 셸과 web-* 소유 연결의 생성·종료 책임은 그대로 둔다.
+    let view = is_gui_pane(spec.pane.as_deref());
+    connect_inner(spec, local_pane_id, cols, rows, view, false)
 }
 
 /// Mirrors follow the server's grid and fit it locally, without acquiring size control.
@@ -295,6 +321,9 @@ pub fn restore_connection(
     spec: RemoteSpec, local_pane_id: &str, cols: u16, rows: u16, view: bool,
 ) -> Result<RemoteSession> {
     anyhow::ensure!(spec.pane.as_deref().is_some_and(|id| !id.is_empty()), "missing restored remote pane");
+    // Old snapshots may have saved GUI panes as own=1. Deferred restore must
+    // preserve the same host-owned dimensions as a normal legacy attach.
+    let view = view || is_gui_pane(spec.pane.as_deref());
     connect_inner(spec, local_pane_id, cols.max(1), rows.max(1), view, true)
 }
 
@@ -662,6 +691,48 @@ pub fn spawn_shell_pane(base: &str, cwd: Option<&str>, token: Option<&str>) -> R
         anyhow::bail!("원격이 pane id 를 안 돌려줬어요");
     }
     Ok(id)
+}
+
+fn transfer_request(base: &str, action: &str, body: Option<serde_json::Value>, seconds: u64) -> Result<serde_json::Value> {
+    let url = format!("{}/transfer/{action}", base.trim_end_matches('/'));
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(seconds)).build()?;
+        let request = match body {
+            Some(body) => client.post(&url).json(&body),
+            None => client.get(&url),
+        };
+        let response = request.send().await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            anyhow::bail!("이 기계는 도착 방을 고르는 이사를 지원하지 않아요. 새 판이 필요해요");
+        }
+        let value: serde_json::Value = response.error_for_status()?.json().await?;
+        if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            anyhow::bail!("{}", value.get("error").and_then(serde_json::Value::as_str).unwrap_or("이사 요청을 처리하지 못했어요"));
+        }
+        Ok(value)
+    })
+}
+
+pub fn transfer_snapshot(base: &str) -> Result<kasa_socket::transfer::MachineSnapshot> {
+    let value = transfer_request(base, "snapshot", None, 5)?;
+    Ok(serde_json::from_value(value.get("snapshot").cloned().unwrap_or_default())?)
+}
+
+pub fn transfer_spawn(base: &str, request: &kasa_socket::transfer::SpawnRequest) -> Result<kasa_socket::transfer::SessionRow> {
+    let value = transfer_request(base, "spawn", Some(serde_json::to_value(request)?), 30)?;
+    Ok(serde_json::from_value(value.get("session").cloned().unwrap_or_default())?)
+}
+
+pub fn transfer_close(base: &str, identity: &kasa_socket::transfer::SessionIdentity) -> Result<()> {
+    transfer_request(base, "close", Some(serde_json::to_value(identity)?), 15)?;
+    Ok(())
+}
+
+pub fn transfer_migrate(base: &str, request: &kasa_socket::transfer::MigrateRequest) -> Result<String> {
+    let value = transfer_request(base, "migrate", Some(serde_json::to_value(request)?), 250)?;
+    value.get("remote_id").and_then(serde_json::Value::as_str).map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("이사 결과를 확인하지 못했어요"))
 }
 
 /// 원격 pane 의 캐릭터를 그 이름으로 못 박는다(`GET /repersona`).
@@ -1246,12 +1317,18 @@ pub fn ensure_repo(
                 .unwrap_or("알 수 없는 이유")
         );
     }
-    Ok(format!(
-        "{} ({} @{})",
-        v.get("action").and_then(|x| x.as_str()).unwrap_or("?"),
-        v.get("branch").and_then(|x| x.as_str()).unwrap_or("?"),
-        v.get("head").and_then(|x| x.as_str()).unwrap_or("?")
-    ))
+    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("?");
+    let branch = v.get("branch").and_then(|x| x.as_str()).unwrap_or("?");
+    let head = v.get("head").and_then(|x| x.as_str()).unwrap_or("?");
+    // 저쪽이 작업 중이라 파일 갈아끼우기를 건너뛴 것은 사고가 아니라 「그쪽 작업을
+    // 지켰다」는 뜻이다 — 이 문장이 이사 화면에 그대로 뜨므로 사람 말로 적는다.
+    if action == "kept-dirty" {
+        let n = v.get("dirty").and_then(|x| x.as_u64()).unwrap_or(0);
+        return Ok(format!(
+            "코드는 받아만 뒀다 — 저쪽이 작업 중({n}개)이라 파일은 그대로 ({branch} @{head})"
+        ));
+    }
+    Ok(format!("{action} ({branch} @{head})"))
 }
 
 /// 이사(migrate)의 대화 운반 — claude jsonl 하나를 원격 호스트의
@@ -2282,6 +2359,49 @@ mod tests {
     }
 
     #[test]
+    fn legacy_gui_attach_preserves_source_size_and_survives_viewer_drop() {
+        let id = format!("%{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
+        let local = format!("legacy-mirror-{id}");
+        let (_events, receiver) = crossbeam_channel::unbounded();
+        let source = Arc::new(PtySession::start_external(
+            PtyOptions { pane_id: id.clone(), cols: 60, rows: 12, ..Default::default() },
+            ExternalIo { events: receiver, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}) },
+        ).unwrap());
+        kasa_pty::register_session(&id, &source);
+        let backend: Arc<dyn kasa_socket::backend::Backend> = Arc::new(
+            crate::standalone::StandaloneBackend::new(std::env::temp_dir()),
+        );
+        let port = crate::spawn_http_server_opts(backend, 0, false).unwrap();
+        let spec = RemoteSpec {
+            base: format!("http://127.0.0.1:{port}"), pane: Some(id.clone()),
+            cwd: None, token: None, identity: Default::default(),
+        };
+        let mirror = connect(spec.clone(), &local, 100, 30).unwrap();
+        assert!(is_view_pane(&local));
+        assert_eq!(source.size(), (60, 12));
+        assert!(set_viewport(&local, 100, 30));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!source.has_viewer_size_control(), "legacy attach acquired source control");
+        assert_eq!(source.size(), (60, 12));
+        source.resize(40, 10).unwrap();
+        assert_eq!(source.size(), (40, 10), "source lost ownership of its own dimensions");
+        drop(mirror);
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while is_view_pane(&local) {
+            assert!(std::time::Instant::now() < until, "closing the mirror did not detach");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(source.size(), (40, 10));
+        assert!(kasa_pty::lookup_session(&id).is_some(), "closing the mirror killed its origin");
+        let restored = restore_connection(spec, &local, 100, 30, false).unwrap();
+        assert!(is_view_pane(&local), "legacy saved own=1 GUI attach must also restore passively");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(source.size(), (40, 10), "deferred restore changed the host dimensions");
+        drop(restored);
+    }
+
+    #[test]
     fn viewport_mirror_preserves_source_and_last_cell_input() {
         fn wait_for(mut condition: impl FnMut() -> bool, message: &str) {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -2360,8 +2480,13 @@ mod tests {
             runtime.block_on(async {
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                 for connection in 0..3 {
-                    let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await.unwrap().unwrap();
-                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    // 실행 중인 앱의 포트 탐색(HTTP/1.0 GET /)은 WS 재접속이 아니다.
+                    let mut socket = loop {
+                        let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await.unwrap().unwrap();
+                        if let Ok(socket) = tokio_tungstenite::accept_async(stream).await {
+                            break socket;
+                        }
+                    };
                     let mut size = serde_json::json!({"t":"size", "cols":120, "rows":40, "id":"mock-origin"});
                     if connection < 2 {
                         size["capabilities"] = serde_json::json!({"mirror_viewport":1});

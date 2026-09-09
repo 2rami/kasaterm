@@ -842,6 +842,26 @@ mod codex_status_line_tests {
     }
 }
 
+/// 원격 Codex가 호스트 밝기로 고른 입력창 채움색은 보는 쪽 테마와 무관하다.
+/// 입력창과 같은 중립 배경만 바꿔 코드·diff의 의미색과 원격 원본은 보존한다.
+pub(crate) fn localize_codex_prompt_background(rows: &mut [Vec<GridCell>], background: [u8; 4]) {
+    use kasa_bridge::screen::Color;
+    let Some(PromptBox::Filled { rows: prompt }) = prompt_box(rows) else { return };
+    let Some(source) = rows[prompt.start].first().map(|cell| cell.bg.clone()) else { return };
+    let Color::Rgb(r, g, b) = source else { return };
+    if r.max(g).max(b) - r.min(g).min(b) > 24 {
+        return;
+    }
+    let target = Color::Rgb(background[0], background[1], background[2]);
+    for row in rows {
+        for cell in row {
+            if cell.bg == source {
+                cell.bg = target.clone();
+            }
+        }
+    }
+}
+
 /// 학생 pane 입력박스의 양끝 보더 행(─ 줄 + @배지)을 claude 가 /color·
 /// --agent-color 로 그린 명시색을 **무시하고** 학생 accent 로 강제 도색한다 —
 /// pane 정체성 색과 항상 일치. (본문 틴트가 있던 시절엔 사이 행의 입력 글자를
@@ -6915,6 +6935,51 @@ mod prompt_box_tests {
         // 같은 줄이라도 배경이 없으면 입력창이 아니다 — 인용문 오인 방지.
         let plain = vec![row_from("› quoted line, not an input box at all")];
         assert!(prompt_box(&plain).is_none());
+    }
+
+    #[test]
+    fn remote_codex_prompt_tracks_viewer_theme_without_recoloring_diff_or_text() {
+        use kasa_bridge::screen::Color;
+        let filled = |text: &str, bg: Color| {
+            let mut row = row_from(text);
+            for cell in &mut row { cell.bg = bg.clone(); }
+            row
+        };
+        for (source, target) in [
+            (Color::Rgb(240, 240, 240), [26, 29, 35, 255]),
+            (Color::Rgb(63, 69, 77), [240, 241, 243, 255]),
+        ] {
+            let mut rows = vec![
+                filled("  previous user text", source.clone()),
+                filled("+ preserve green diff", Color::Rgb(24, 64, 32)),
+                row_from("  ordinary response"),
+                filled("                     ", source.clone()),
+                filled("› enter next request ", source.clone()),
+                filled("                     ", source),
+            ];
+            rows[4][2].fg = Color::Rgb(160, 120, 80);
+            let original = rows.clone();
+            localize_codex_prompt_background(&mut rows, target);
+            for i in [0, 3, 4, 5] {
+                assert!(rows[i].iter().all(|c| c.bg == Color::Rgb(target[0], target[1], target[2])));
+                assert!(rows[i].iter().zip(&original[i]).all(|(a, b)| a.ch == b.ch && a.fg == b.fg));
+            }
+            assert_eq!(rows[1], original[1]);
+            assert_eq!(rows[2], original[2]);
+            assert!(matches!(prompt_box(&rows), Some(PromptBox::Filled { .. })));
+        }
+    }
+
+    #[test]
+    fn remote_codex_theme_does_not_guess_a_prompt_from_plain_text_or_colored_panels() {
+        let mut plain = vec![row_from("› quoted text without a filled input")];
+        let original = plain.clone();
+        localize_codex_prompt_background(&mut plain, [26, 29, 35, 255]);
+        assert_eq!(plain, original);
+        for cell in &mut plain[0] { cell.bg = kasa_bridge::screen::Color::Rgb(30, 80, 40); }
+        let original = plain.clone();
+        localize_codex_prompt_background(&mut plain, [26, 29, 35, 255]);
+        assert_eq!(plain, original);
     }
 
     /// codex 학생은 입력행 **바로 위**에 선다. claude 처럼 statusline 자리표시자

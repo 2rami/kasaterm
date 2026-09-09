@@ -307,6 +307,18 @@ impl AuxWindow {
         }
     }
 
+    fn mode_selector_geometry(&self) -> (f32, f32, f32, f32) {
+        let editor_x = self.editor_origin_x();
+        let editor_w = (self.logical_size().0 - editor_x).max(1.0);
+        let segment_w = if editor_w < 560.0 { 43.0 } else { 48.0 };
+        (
+            editor_x + 10.0,
+            TITLE_ROW_H + 4.0,
+            segment_w,
+            32.0,
+        )
+    }
+
     fn body_box(&self) -> (f32, f32, f32, f32) {
         let (w, h) = self.logical_size();
         let chrome_h = self.chrome_height();
@@ -557,6 +569,7 @@ impl AuxWindow {
             cursor_on,
             self.cursor_px,
             self.editor.raw_mode,
+            self.viewer_style,
         );
     }
 
@@ -665,7 +678,7 @@ impl AuxWindow {
         let save_w = self
             .gpu
             .measure_chrome_text(save_label, 12.0, self.editor.modified)
-            + 22.0;
+            + if self.editor.modified { 22.0 } else { 14.0 };
         let save_rect = (width - save_w - 10.0, 8.0, save_w, CONTROL_H);
         if self.paint_header_button(
             HeaderButton::Save,
@@ -734,25 +747,23 @@ impl AuxWindow {
             },
         );
 
-        let mut left_x = editor_x + 10.0;
+        let (mode_x, mode_y, segment_w, mode_h) = self.mode_selector_geometry();
+        let mut left_x = mode_x;
         if self.editor.is_md_doc {
-            let segment_w = if compact { 43.0 } else { 48.0 };
-            if !self.viewer_style {
-                crate::round_rect(
-                    &mut self.gpu,
-                    left_x,
-                    control_y,
-                    segment_w * 2.0,
-                    CONTROL_H,
-                    crate::theme::radius_sm(),
-                    crate::theme::surface(),
-                );
-            }
+            crate::round_rect(
+                &mut self.gpu,
+                left_x,
+                mode_y,
+                segment_w * 2.0,
+                mode_h,
+                crate::theme::radius_sm(),
+                crate::theme::surface(),
+            );
             for (kind, label, active) in [
                 (HeaderButton::View, "보기", !self.editor.raw_mode),
                 (HeaderButton::Edit, "편집", self.editor.raw_mode),
             ] {
-                let rect = (left_x, control_y, segment_w, CONTROL_H);
+                let rect = (left_x, mode_y, segment_w, mode_h);
                 if self.paint_header_button(kind, rect, label, active, false, true) {
                     hovered = Some(kind);
                 }
@@ -960,7 +971,7 @@ impl AuxWindow {
         let save_w = self
             .gpu
             .measure_chrome_text(save_label, 12.0, self.editor.modified)
-            + 20.0;
+            + if self.editor.modified { 20.0 } else { 14.0 };
         let right = width - 10.0;
         let save_rect = (right - save_w, title_y, save_w, CONTROL_H);
         self.paint_header_button(
@@ -996,28 +1007,24 @@ impl AuxWindow {
             false,
             true,
         );
-        tool_right = find_rect.0 - GAP;
 
-        let segment_w = if compact { 40.0 } else { 44.0 };
-        let segment_x = (tool_right - segment_w * 2.0).max(editor_x + 10.0);
-        if !self.viewer_style {
-            crate::round_rect(
-                &mut self.gpu,
-                segment_x,
-                control_y,
-                segment_w * 2.0,
-                CONTROL_H,
-                crate::theme::radius_sm(),
-                crate::theme::panel_bg(),
-            );
-        }
+        let (segment_x, mode_y, segment_w, mode_h) = self.mode_selector_geometry();
+        crate::round_rect(
+            &mut self.gpu,
+            segment_x,
+            mode_y,
+            segment_w * 2.0,
+            mode_h,
+            crate::theme::radius_sm(),
+            crate::theme::surface(),
+        );
         for (offset, kind, label, active) in [
             (0.0, HeaderButton::View, "보기", true),
             (segment_w, HeaderButton::Edit, "편집", false),
         ] {
             self.paint_header_button(
                 kind,
-                (segment_x + offset, control_y, segment_w, CONTROL_H),
+                (segment_x + offset, mode_y, segment_w, mode_h),
                 label,
                 active,
                 false,
@@ -1121,6 +1128,8 @@ impl AuxWindow {
                 font_size: 12.0,
                 color: if primary {
                     crate::theme::foreground_on(crate::theme::accent())
+                } else if !enabled && kind == HeaderButton::Save {
+                    crate::theme::text_dim()
                 } else if !enabled || !self.focused {
                     crate::theme::text_mute()
                 } else if active || hot {
@@ -1469,6 +1478,15 @@ impl AuxWindow {
                     } else {
                         crate::theme::surface_hover()
                     },
+                );
+            }
+            if active == Some(index) {
+                self.gpu.rect(
+                    rect.0 + 2.0,
+                    rect.1 + 5.0,
+                    2.0,
+                    rect.3 - 10.0,
+                    crate::theme::accent(),
                 );
             }
             let indent = entry.level.saturating_sub(1).min(4) as f32 * 11.0;
@@ -2631,6 +2649,7 @@ impl App {
                         "font_scale": aux.font_scale,
                         "chrome_height": aux.chrome_height(),
                         "editor_origin_x": aux.editor_origin_x(),
+                        "mode_selector": aux.mode_selector_geometry(),
                         "viewer_style": aux.viewer_style,
                         "outline_open": aux.outline_open,
                         "outline_scroll": aux.outline_scroll,
