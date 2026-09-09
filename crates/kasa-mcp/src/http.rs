@@ -5263,9 +5263,36 @@ async fn term_notes_post(body: Bytes) -> impl IntoResponse {
         Err(e) => return err(format!("쪽지 본문을 못 읽었어요: {e}")),
     };
     match crate::notes::add(input) {
-        Some(n) => Json(serde_json::json!({ "ok": true, "id": n.id })),
+        Some(n) => {
+            // 쪽지는 사람이 자리에 없을 때 오는 것이라 폰에도 같이 알린다.
+            crate::push::note_arrived(&n.character, &n.kind, &n.summary, &n.pane);
+            Json(serde_json::json!({ "ok": true, "id": n.id }))
+        }
         None => err("pane 과 summary 는 비면 안 돼요".into()),
     }
+}
+
+/// 폰이 애플에서 받은 기기 토큰을 맡긴다 — `{token, env: prod|dev}`. 주소의 slug 로
+/// 누구 폰인지 안다(없으면 로컬 = 주인).
+async fn term_push_token_post(req: axum::extract::Request) -> axum::response::Response {
+    let user = req
+        .extensions()
+        .get::<MobileAuth>()
+        .map(|a| a.0.name.clone())
+        .unwrap_or_default();
+    let body = match axum::body::to_bytes(req.into_body(), 16 * 1024).await {
+        Ok(b) => b,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e.to_string() })).into_response(),
+    };
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    let token = v.get("token").and_then(serde_json::Value::as_str).unwrap_or("");
+    let env = v.get("env").and_then(serde_json::Value::as_str).unwrap_or("prod");
+    if v.get("remove").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+        crate::push::unregister(token);
+        return Json(serde_json::json!({ "ok": true })).into_response();
+    }
+    let n = crate::push::register(token, env, &user);
+    Json(serde_json::json!({ "ok": true, "devices": n, "ready": crate::push::configured() })).into_response()
 }
 
 /// 읽음 표시 — `{"ids":[1,2]}` 또는 `{"all":true}`.
@@ -6937,6 +6964,9 @@ pub fn spawn_http_server_opts(
                     tokio::spawn(crate::machines::poll_loop());
                     // ssh 만 적힌 기계의 8765 터널을 앱이 든다(설정 화면이 적는 항목).
                     tokio::spawn(crate::machines::tunnel_loop());
+                    // 폰 푸시 — 학생 상태 변화(대기·끝냄)를 보고 쏜다. 기계 캐시를 합쳐
+                    // 보므로 순환 이유로 본체 한정.
+                    tokio::spawn(crate::push::push_loop());
                 }
                 // 업링크 — 관문에 붙어 폰 주소를 살린다(uplink.rs). 본체는 늘, standalone 은
                 // 리그가 `KASATERM_GATEWAY` 로 로컬 관문을 가리켰을 때만(사용자 관문에 가짜
@@ -7171,6 +7201,7 @@ pub fn spawn_http_server_opts(
                     .route("/term/message", post(term_message_post))
                     // 학생 쪽지 — 나쵸가 넣고 폰 종 목록이 읽는다(notes.rs 머리말).
                     .route("/term/notes", get(term_notes_get).post(term_notes_post))
+        .route("/term/push-token", post(term_push_token_post))
                     .route("/term/notes/read", post(term_notes_read_post))
                     .route("/term/notes/{name}", get(term_notes_image))
                     // 폰 허브·유저별 주소 관리·다른 기계로 넘기는 문(mobile.rs 머리말).

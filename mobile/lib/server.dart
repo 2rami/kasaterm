@@ -631,6 +631,23 @@ class Server {
     }
   }
 
+  /// 애플에서 받은 푸시 토큰을 맡긴다 — 서버가 학생 대기·끝냄·쪽지 때 이 폰으로 쏜다.
+  Future<void> registerPushToken(String token, String env) async {
+    final http.Response res;
+    try {
+      res = await _client.post(
+        uri('term/push-token'),
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode({'token': token, 'env': env}),
+      );
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    if (res.statusCode != 200) {
+      throw ServerException('알림 등록이 안 됐다 (${res.statusCode})');
+    }
+  }
+
   /// 화면 배치를 만지는 소켓 명령 — `POST cmd` 는 `kasaterm-cli` 와 이름·인자가 같다
   /// (surface.split·swap·close, window.new·rename·close). 서버가 허용 목록으로 거른다.
   Future<Map<String, dynamic>> cmd(

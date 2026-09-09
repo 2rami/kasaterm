@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'address_store.dart';
 import 'app_link.dart';
 import 'hub_prefs.dart';
+import 'push.dart';
 import 'screens/connect.dart';
 import 'screens/hub.dart';
 import 'screens/terminal.dart';
@@ -255,6 +256,8 @@ class _RootScreenState extends State<RootScreen> {
   }
 
   void _loadTokens(Server server) {
+    // 서버가 정해지는 자리가 여기 하나라 푸시 등록도 같이 건다.
+    PushBridge.instance.bind(server, _openLink);
     server.designTokens().then((t) {
       if (t == null || !mounted || (_server != null && _server != server)) {
         return;
@@ -282,6 +285,7 @@ class _RootScreenState extends State<RootScreen> {
       _initial = Future.value(null);
     });
     designTokens.value = null;
+    PushBridge.instance.unbind();
   }
 
   @override

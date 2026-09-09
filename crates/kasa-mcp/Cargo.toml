@@ -41,7 +41,9 @@ tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "macros", "s
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 # ccglass-style capture proxy: forward claude의 Anthropic API 호출을 가로채 messages[]
 # 를 깨끗하게 캡처(peek/jsonl 없이 라이브 대화). rustls 로 시스템 openssl 의존 회피.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "json"] }
+# APNs 푸시의 ES256 서명(push.rs) — rustls 가 이미 쓰는 것이라 새 빌드 비용은 없다.
+ring = "0.17"
 futures-util = "0.3"
 bytes = "1"
 # tell(standalone): forkpty 로 `claude attach` 를 띄워 background 세션 stdin 에 주입.
