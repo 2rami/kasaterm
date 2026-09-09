@@ -834,6 +834,54 @@ impl App {
         desktop_view: bool,
         turn_headers: &std::collections::HashMap<String, crate::turnjump::TurnHeader>,
     ) -> TerminalComposition {
+        // The parser always follows the source's canonical screen. Only this
+        // viewer's presentation is reflowed, at its own unchanged font size.
+        // Remote visual exports (desktop_view=false) remain canonical.
+        let projection = term.filter(|_| desktop_view && kasa_mcp::remote::is_view_pane(&tab_pid))
+            .map(|source| {
+                let scroll = self.mirror_view_scroll.get(&tab_pid).copied();
+                if source.scroll_offset > 0 {
+                    if let Some(session) = self.pty.get(&tab_pid) {
+                        let live = session.live_tail_rows(source.rows as usize);
+                        return Arc::new(crate::mirror_view::project_history(
+                            &source.cells, &live, (source.cursor_row as usize, source.cursor_col as usize),
+                            source.scroll_offset, cols_now.max(2), rows_now.max(1), scroll,
+                        ));
+                    }
+                }
+                let input_top = crate::screenread::pinned_input_top(&source.cells)
+                    .filter(|top| *top <= source.cursor_row as usize);
+                Arc::new(crate::mirror_view::project(
+                    &source.cells, (source.cursor_row as usize, source.cursor_col as usize),
+                    cols_now.max(2), rows_now.max(1), input_top,
+                    scroll,
+                ))
+            });
+        let projected_term = term.zip(projection.as_ref()).map(|(source, view)| {
+            let map_position = |row: usize, col: usize| {
+                view.source_map.iter().enumerate().find_map(|(r, cells)| {
+                    cells.iter().position(|cell| *cell == Some((row, col))).map(|c| (r as u16, c as u16))
+                })
+            };
+            let cursor = view.cursor.unwrap_or((0, 0));
+            TerminalPane {
+                rows: rows_now.max(1) as u16, cols: cols_now.max(2) as u16,
+                cells: view.rows.clone(), cursor_row: cursor.0 as u16, cursor_col: cursor.1 as u16,
+                cursor_visible: source.cursor_visible && view.cursor.is_some(),
+                alt_screen: source.alt_screen, mouse_enabled: source.mouse_enabled,
+                mouse_sgr: source.mouse_sgr, app_cursor: source.app_cursor,
+                bracketed_paste: source.bracketed_paste, scroll_offset: source.scroll_offset,
+                prompt_end: source.prompt_end.and_then(|(r,c)| map_position(r as usize,c as usize)),
+                inline_images: source.inline_images.iter().filter_map(|image| {
+                    let (r,c) = map_position(usize::try_from(image.row).ok()?, image.col as usize)?;
+                    let mut image = image.clone(); image.row = i32::from(r); image.col = c;
+                    image.cols = image.cols.min((cols_now.max(2) as u16).saturating_sub(c));
+                    Some(image)
+                }).collect(),
+                ..Default::default()
+            }
+        });
+        let term = projected_term.as_ref().or(term);
         let pane_scales = std::collections::HashMap::from([(id.clone(), font_scale)]);
         let normalise = |row: &Vec<GridCell>| -> Vec<GridCell> {
             let mut row = row.clone();
@@ -907,8 +955,8 @@ impl App {
         // classic claude 가 화면 밑에 남긴 빈 줄만큼 화면을 아래로 당겨,
         // 상태줄이 pane 바닥에 붙게 한다 — 근거는 `bottom_pull_rows`.
         // 이 pane 을 어떻게 옮겨 그렸는지 — 복사가 되짚을 유일한 기록.
-        let mut view_shift = crate::PaneViewShift::default();
-        let pulled = match term.filter(|_| desktop_view) {
+        let mut view_shift = crate::PaneViewShift { projection: projection.clone(), ..Default::default() };
+        let pulled = match term.filter(|_| desktop_view && projection.is_none()) {
             Some(t) => {
                 let above = self.bottom_pull_rows(tab_pid.as_str(), t, rows_now);
                 let n = above.len();
@@ -930,7 +978,7 @@ impl App {
             }
             None => 0,
         };
-        if desktop_view && runs_claude && !composed.is_empty() {
+        if desktop_view && projection.is_none() && runs_claude && !composed.is_empty() {
             if let Some(sess) = self.pty.get(tab_pid.as_str()) {
                 if sess.view_state().0 > 0 {
                     let live_all: Vec<Vec<GridCell>> = sess

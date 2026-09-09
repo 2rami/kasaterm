@@ -62,6 +62,7 @@ mod links;
 mod lsp;
 mod machinescol;
 mod mirror_theme;
+mod mirror_view;
 mod restore_progress;
 mod mirror_close;
 mod mirror_sync;
@@ -1079,6 +1080,10 @@ fn normalise(sel: Selection) -> ((u16, u16), (u16, u16)) {
 fn append_cells_text<'a>(cells: impl IntoIterator<Item = &'a GridCell>, out: &mut String) {
     let mut skip_spacer = false;
     for cell in cells {
+        if cell.leading_wide_spacer {
+            skip_spacer = false;
+            continue;
+        }
         if skip_spacer {
             skip_spacer = false;
             // The spacer is blank by construction; only swallow it when it
@@ -1140,6 +1145,8 @@ fn term_scrollback_lines(t: &TerminalPane) -> Vec<String> {
 /// 프레임마다 복사하면 값이 크고, 어긋나는 자리는 위아래 끝 몇 줄뿐이다.
 #[derive(Default, Clone)]
 struct PaneViewShift {
+    /// Independent viewer layout with exact display-to-source cell mapping.
+    projection: Option<Arc<crate::mirror_view::Projection>>,
     /// classic claude 가 화면 끝에 남긴 여백만큼 위(스크롤백)에서 당겨 온 줄.
     /// 화면 맨 위 `above.len()` 행이 이것이고, 그 아래부터 원본이 같은 수만큼 밀린다.
     above: Vec<Vec<GridCell>>,
@@ -1155,12 +1162,13 @@ impl PaneViewShift {
     /// 옮김이 아예 없나 — 평범한 pane, 그리고 **대체화면 claude**(노플리커)가 그렇다.
     /// 그쪽은 claude 가 화면 끝까지 직접 그려 메울 여백이 없다.
     fn is_identity(&self) -> bool {
-        self.rows == 0 || (self.above.is_empty() && self.pinned.is_empty())
+        self.projection.is_none() && (self.rows == 0 || (self.above.is_empty() && self.pinned.is_empty()))
     }
 
     /// 화면 행 `r` 에 **실제로 그려진** 줄. 화면 좌표를 쓰는 모든 판독(복사·링크
     /// 집기)이 이걸 거쳐야 고른 자리와 집히는 글자가 같다.
     fn row<'a>(&'a self, r: usize, base: &'a [Vec<GridCell>]) -> Option<&'a Vec<GridCell>> {
+        if let Some(projection) = &self.projection { return projection.rows.get(r); }
         if self.is_identity() {
             return base.get(r);
         }
@@ -1178,6 +1186,9 @@ impl PaneViewShift {
     /// 쓴다. 우리가 화면을 옮겨 그렸으므로 그대로 보내면 그 앱은 다른 줄을 눌린
     /// 것으로 안다. 당겨 온 구간(스크롤백)은 앱 화면에 없으니 `None`.
     fn term_row(&self, r: usize) -> Option<usize> {
+        if let Some(projection) = &self.projection {
+            return projection.source_map.get(r)?.iter().flatten().next().map(|&(row, _)| row);
+        }
         if self.is_identity() {
             return Some(r);
         }
@@ -1185,6 +1196,22 @@ impl PaneViewShift {
             return None;
         }
         Some(r - self.above.len())
+    }
+
+    fn term_pos(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        match &self.projection {
+            Some(projection) => projection.source_map.get(row)?.get(col).copied().flatten(),
+            None => self.term_row(row).map(|row| (row, col)),
+        }
+    }
+
+    fn display_pos(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        if let Some(projection) = &self.projection {
+            return projection.source_map.iter().enumerate().find_map(|(r, cells)| {
+                cells.iter().position(|cell| *cell == Some((row, col))).map(|c| (r, c))
+            });
+        }
+        Some((row + self.above.len(), col))
     }
 
     /// 화면에 실제로 그려진 그대로의 행들. 복사는 원본이 아니라 이걸 봐야 한다.
@@ -1208,7 +1235,7 @@ fn extract_selection(rows: &[Vec<GridCell>], sel: Selection) -> String {
         if r < start.1 || r > end.1 {
             continue;
         }
-        let (cs, ce) = if start.1 == end.1 {
+        let (mut cs, ce) = if start.1 == end.1 {
             (start.0 as usize, end.0 as usize)
         } else if r == start.1 {
             (start.0 as usize, row.len().saturating_sub(1))
@@ -1217,11 +1244,23 @@ fn extract_selection(rows: &[Vec<GridCell>], sel: Selection) -> String {
         } else {
             (0, row.len().saturating_sub(1))
         };
-        append_cells_text(row.iter().take(ce + 1).skip(cs), &mut out);
-        while out.ends_with(' ') {
-            out.pop();
+        // A selection can start on the second cell of a wide glyph. That cell
+        // is not a selected space, and its glyph lies outside the column range.
+        if cs > 0 && row.get(cs).is_some_and(|cell| matches!(cell.ch, ' ' | '\0'))
+            && row.get(cs - 1).is_some_and(|cell| gpu::is_wide_char(cell.ch))
+        {
+            cs += 1;
         }
-        out.push('\n');
+        append_cells_text(row.iter().take(ce + 1).skip(cs), &mut out);
+        let continues = r < end.1 && (r as usize + 1) < rows.len()
+            && row.last().is_some_and(|cell| cell.wrapped);
+        if !continues {
+            // Viewer reflow is not a user-authored newline. Preserve real
+            // spaces at a soft boundary; trim only a complete logical line or
+            // the end of the selected range, as before.
+            while out.ends_with(' ') { out.pop(); }
+            out.push('\n');
+        }
     }
     if out.ends_with('\n') {
         out.pop();
@@ -5636,6 +5675,7 @@ struct App {
     /// 같은 글자를 보게 하는 유일한 창구다 — 렌더 파이프라인 한복판에서 만들어지는
     /// 화면 행을 복사 시점에 되짚을 다른 길이 없다.
     pane_view_shift: std::collections::HashMap<String, PaneViewShift>,
+    mirror_view_scroll: HashMap<String, usize>,
     /// Wakes the event loop from background threads (PTY snapshots,
     /// socket commands) so a parked WaitUntil repaints immediately.
     proxy: EventLoopProxy<UserEvent>,
@@ -6101,6 +6141,7 @@ impl App {
             ui_zoom_unset: socket::read_ui_zoom().is_none(),
             pane_font_scales: std::collections::HashMap::new(),
             pane_view_shift: std::collections::HashMap::new(),
+            mirror_view_scroll: HashMap::new(),
             proxy,
             inline_web: None,
             account_switch_confirm: None,
@@ -8704,6 +8745,7 @@ mod tests {
             above: vec![grid_row("a0", W)],
             pinned: Vec::new(),
             rows: 5,
+            projection: None,
         };
         let view = shift.compose(&base);
         // 화면 = [a0, b0, b1, b2, b3] — 원본 마지막 줄(b4)은 잘려 나갔다.
@@ -8724,6 +8766,7 @@ mod tests {
             above: Vec::new(),
             pinned: vec![grid_row("p0", W), grid_row("p1", W)],
             rows: 5,
+            projection: None,
         };
         let view = shift.compose(&base);
         // 화면 = [b0, b1, b2, p0, p1]
@@ -10126,6 +10169,44 @@ mod tests {
             end: (5, 0),
         };
         assert_eq!(extract_selection(&[row], sel), "a한 b");
+    }
+
+    #[test]
+    fn selection_soft_wrap_joins_but_hard_lines_stay_separate() {
+        let mut rows = vec![wide_row("abcd", 4), wide_row("efgh", 4), wide_row("NEXT", 4)];
+        rows[0][3].wrapped = true;
+        let selection = Selection { anchor: (0, 0), end: (3, 2) };
+        assert_eq!(extract_selection(&rows, selection), "abcdefgh\nNEXT");
+        assert_eq!(extract_selection(&rows, Selection { anchor: selection.end, end: selection.anchor }),
+            "abcdefgh\nNEXT");
+        assert_eq!(extract_selection(&rows, Selection { anchor: (2, 0), end: (1, 1) }), "cdef");
+        assert_eq!(extract_selection(&rows, Selection { anchor: (1, 0), end: (2, 0) }), "bc");
+    }
+
+    #[test]
+    fn selection_soft_wrap_preserves_real_boundary_spaces_and_blank_hard_lines() {
+        let mut rows = vec![wide_row("ab  ", 4), wide_row(" cd ", 4), wide_row("", 4), wide_row("end", 4)];
+        rows[0][3].wrapped = true;
+        assert_eq!(extract_selection(&rows, Selection { anchor: (0, 0), end: (3, 3) }), "ab   cd\n\nend");
+        assert_eq!(extract_selection(&rows, Selection { anchor: (0, 0), end: (3, 0) }), "ab");
+    }
+
+    #[test]
+    fn selection_soft_wrap_wide_glyphs_keep_column_boundaries() {
+        let mut rows = vec![wide_row("한글", 4), wide_row("가 나", 5)];
+        rows[0][3].wrapped = true;
+        assert_eq!(extract_selection(&rows, Selection { anchor: (0, 0), end: (4, 1) }), "한글가 나");
+        assert_eq!(extract_selection(&rows, Selection { anchor: (1, 0), end: (0, 1) }), "글가");
+        assert_eq!(extract_selection(&rows, Selection { anchor: (1, 0), end: (1, 0) }), "");
+    }
+
+    #[test]
+    fn selection_soft_wrap_omits_leading_wide_padding_but_keeps_real_spaces() {
+        let mut rows = vec![wide_row("ab  ", 4), wide_row("한글", 4)];
+        rows[0][3].wrapped = true;
+        rows[0][3].leading_wide_spacer = true;
+        assert_eq!(extract_selection(&rows, Selection { anchor: (0, 0), end: (3, 1) }), "ab 한글");
+        assert_eq!(extract_selection(&rows, Selection { anchor: (3, 0), end: (1, 1) }), "한");
     }
 
     #[test]

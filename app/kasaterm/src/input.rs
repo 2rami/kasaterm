@@ -1,6 +1,98 @@
 //! 키/마우스/휠 입력 + 클립보드 + claude 상태 글리프/타이틀.
 use super::*;
 
+/// None means the viewer already exhausted its local rows toward older history.
+fn mirror_scroll_offset(current: usize, maximum: usize, lines: i32) -> Option<usize> {
+    let current = current.min(maximum);
+    if lines > 0 && current == maximum { return None; }
+    let step = lines.unsigned_abs().min(8) as usize;
+    Some(if lines > 0 { current.saturating_add(step).min(maximum) }
+        else { current.saturating_sub(step) })
+}
+
+fn mirror_scroll_from_projection(
+    stored: Option<usize>, projected: usize, maximum: usize, lines: i32,
+) -> Option<usize> {
+    // An absent offset follows the live cursor. Some(0) is an explicitly
+    // requested tail and must remain zero across multiple events before paint.
+    let current = stored.unwrap_or(projected);
+    mirror_scroll_offset(current, maximum, lines)
+}
+
+fn mirror_uses_parser_history(current: usize, maximum: usize, lines: i32, history_offset: usize) -> bool {
+    (lines > 0 && current >= maximum) || (lines < 0 && current == 0 && history_offset > 0)
+}
+
+#[cfg(test)]
+mod mirror_input_tests {
+    use super::{mirror_scroll_offset, mirror_scroll_from_projection, mirror_uses_parser_history};
+    #[test]
+    fn local_wheel_stays_inside_projected_rows() {
+        assert_eq!(mirror_scroll_offset(0, 30, 3), Some(3));
+        assert_eq!(mirror_scroll_offset(3, 30, 3), Some(6));
+        assert_eq!(mirror_scroll_offset(28, 30, 8), Some(30));
+        assert_eq!(mirror_scroll_offset(30, 30, 1), None);
+        assert_eq!(mirror_scroll_offset(0, 30, -4), Some(0));
+        assert_eq!(mirror_scroll_offset(7, 30, -4), Some(3));
+        assert_eq!(mirror_scroll_offset(50, 5, -2), Some(3));
+    }
+
+    #[test]
+    fn first_wheel_in_both_directions_starts_from_cursor_follow_view() {
+        assert_eq!(mirror_scroll_from_projection(None, 6, 20, 1), Some(7));
+        assert_eq!(mirror_scroll_from_projection(None, 6, 20, -1), Some(5));
+        assert_eq!(mirror_scroll_from_projection(Some(7), 6, 20, 1), Some(8));
+        assert_eq!(mirror_scroll_from_projection(Some(5), 6, 20, -1), Some(4));
+        assert_eq!(mirror_scroll_from_projection(Some(0), 0, 20, -1), Some(0));
+        assert_eq!(mirror_scroll_from_projection(Some(0), 6, 20, -1), Some(0));
+        assert_eq!(mirror_scroll_from_projection(Some(0), 6, 20, 1), Some(1));
+        assert!(mirror_uses_parser_history(0, 8, -1, 5));
+        assert!(!mirror_uses_parser_history(0, 8, -1, 0));
+        assert!(!mirror_uses_parser_history(1, 8, -1, 5));
+        assert!(mirror_uses_parser_history(8, 8, 1, 0));
+    }
+
+    #[test]
+    fn first_wheel_moves_actual_projected_content_one_row() {
+        let source = vec!["abcdefghijklmnop".chars().map(|ch| crate::GridCell {
+            ch, ..crate::GridCell::blank()
+        }).collect()];
+        let live = crate::mirror_view::project(&source, (0, 5), 2, 2, None, None);
+        assert_eq!(live.source_map[0][0], Some((0, 2)));
+        for (lines, source_col) in [(1, 0), (-1, 4)] {
+            let next = mirror_scroll_from_projection(None, live.scroll_from_bottom,
+                live.max_scroll, lines).unwrap();
+            let moved = crate::mirror_view::project(&source, (0, 5), 2, 2, None, Some(next));
+            assert_eq!(moved.source_map[0][0], Some((0, source_col)));
+        }
+        let tail = mirror_scroll_from_projection(None, live.scroll_from_bottom, live.max_scroll, -8).unwrap();
+        let repeated = mirror_scroll_from_projection(Some(tail), live.scroll_from_bottom, live.max_scroll, -1).unwrap();
+        assert_eq!((tail, repeated), (0, 0), "second event before paint must not jump back toward the cursor");
+        let tail_view = crate::mirror_view::project(&source, (0, 5), 2, 2, None, Some(repeated));
+        assert_eq!(tail_view.source_map[0][0], Some((0, 12)));
+    }
+
+    #[test]
+    fn wrapped_click_and_cursor_are_inverse_and_padding_is_not_clickable() {
+        let source = vec!["abcdefgh".chars().map(|ch| crate::GridCell {
+            ch, ..crate::GridCell::blank()
+        }).collect()];
+        let projection = crate::mirror_view::project(&source, (0, 7), 4, 3, None, None);
+        let shift = crate::PaneViewShift {
+            projection: Some(std::sync::Arc::new(projection)), rows: 3,
+            ..Default::default()
+        };
+        assert_eq!(shift.term_pos(1, 3), Some((0, 7)));
+        assert_eq!(shift.display_pos(0, 7), Some((1, 3)));
+        assert_eq!(shift.term_pos(2, 0), None, "viewer-only padding is not a source cell");
+        let clipped = crate::PaneViewShift {
+            projection: Some(std::sync::Arc::new(crate::mirror_view::project(&source, (0, 7), 4, 1, None, Some(1)))),
+            rows: 1, ..Default::default()
+        };
+        assert_eq!(clipped.display_pos(0, 7), None, "offscreen cursor/IME must stay hidden");
+    }
+}
+
 fn claude_launch_screen(text: &str) -> bool {
     (text.contains("Claude Code")
         && text.contains("Welcome back")
@@ -282,10 +374,35 @@ impl App {
             .unwrap_or((0.0, 0.0));
         self.image_pan_drag = Some((pane_id.to_string(), self.cursor_px, base));
     }
-    /// Encode an SGR mouse event and ship it to the pane. `button` is
-    /// the SGR button code (0 = left press/motion/release, +32 for
-    /// motion-with-button-held). `press` toggles the final byte
-    /// between `M` (press / motion) and `m` (release).
+    /// Keep mirror wheel input inside the viewer, including parser history.
+    pub(crate) fn scroll_mirror_view(
+        &mut self,
+        tab_pid: &str,
+        projection: &crate::mirror_view::Projection,
+        lines: i32,
+    ) -> bool {
+        let stored = self.mirror_view_scroll.get(tab_pid).copied();
+        let current = stored.unwrap_or(projection.scroll_from_bottom).min(projection.max_scroll);
+        let history_offset = self.pty.get(tab_pid).map_or(0, |pty| pty.view_state().0);
+        if mirror_uses_parser_history(current, projection.max_scroll, lines, history_offset) {
+            // PtySession::scroll changes only this viewer's alacritty offset.
+            // Do not fall through to SGR/PageUp: that would scroll the source TUI.
+            if let Some(pty) = self.pty.get(tab_pid) {
+                let step = lines.unsigned_abs().min(8) as i32;
+                let remaining = pty.scroll(if lines > 0 { step } else { -step });
+                if lines < 0 && remaining == 0 { self.mirror_view_scroll.remove(tab_pid); }
+            }
+        } else if let Some(next) = mirror_scroll_from_projection(
+            stored, projection.scroll_from_bottom, projection.max_scroll, lines,
+        ) {
+            self.mirror_view_scroll.insert(tab_pid.to_string(), next);
+        }
+        self.chrome_dirty = true;
+        if let Some(window) = &self.window { window.request_redraw(); }
+        true
+    }
+
+    /// Encode a source-coordinate SGR mouse event; press/release use M/m.
     pub(crate) fn send_mouse_sgr(
         &self,
         pane_id: &str,
@@ -298,12 +415,12 @@ impl App {
         // 그대로 넘기면 그 TUI 는 다른 줄이 눌린 것으로 안다(2026-09-05). 당겨 온
         // 구간은 스크롤백이라 앱 화면에 자리가 없어 그 클릭은 흘린다 — 없는 줄을
         // 눌렀다고 알리느니 아무 일도 안 하는 편이 낫다.
-        let row = match self.pane_view_shift.get(pane_id) {
-            Some(shift) => match shift.term_row(row as usize) {
-                Some(r) => r as u16,
+        let (row, col) = match self.pane_view_shift.get(pane_id) {
+            Some(shift) => match shift.term_pos(row as usize, col as usize) {
+                Some((r, c)) => (r as u16, c as u16),
                 None => return,
             },
-            None => row,
+            None => (row, col),
         };
         let final_byte = if press { 'M' } else { 'm' };
         let payload = format!("\x1b[<{button};{};{}{final_byte}", col + 1, row + 1);
@@ -2283,6 +2400,16 @@ impl App {
                 self.ws.lock().unwrap().active_pane
             );
         }
+        // A mirror scrolls its own projected viewport first. Only an upward
+        // request beyond all locally available rows may ask for older history.
+        let mirror = target_pane_id.as_ref().and_then(|outer| {
+            let projection = self.pane_view_shift.get(outer)?.projection.clone()?;
+            let pid = self.ws.lock().ok()?.active_tab_pid(outer);
+            Some((pid, projection))
+        });
+        if let Some((pid, projection)) = mirror {
+            if self.scroll_mirror_view(&pid, &projection, lines) { return; }
+        }
         let (alt, hist_len, mouse_on, mouse_sgr, launch_screen) = {
             let ws = self.ws.lock().unwrap();
             let pane = target_pane_id.as_deref().and_then(|id| ws.panes.get(id));
@@ -2338,17 +2465,20 @@ impl App {
         }
         if mouse_on && mouse_sgr && alt {
             let (col, row) = self
-                .px_to_cell_active(self.cursor_px.0, self.cursor_px.1)
+                .px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
+                .filter(|(id, _, _)| Some(id) == target_pane_id.as_ref())
+                .map(|(_, col, row)| (col, row))
                 .unwrap_or((1, 1));
             // 화면 좌표를 앱이 아는 좌표로 되돌린다. 여기서 SGR 을 직접 조립하므로
             // `send_mouse_sgr` 의 같은 보정이 안 걸린다 — 화면을 당긴 pane 에서는 그
             // 앱이 다른 줄에서 굴린 것으로 안다. 당겨 온 구간(스크롤백)은 앱 화면에
             // 자리가 없으니 첫 줄로 친다: 휠은 어느 줄인지보다 **그 pane 안**인지가
             // 중요해서, 클릭과 달리 흘리지 않고 보낸다.
-            let row = self
-                .target_pane()
-                .and_then(|id| self.pane_view_shift.get(&id).map(|s| s.term_row(row as usize)))
-                .map_or(row, |r| r.unwrap_or(0) as u16);
+            let (row, col) = target_pane_id.as_ref()
+                .and_then(|id| self.pane_view_shift.get(id))
+                .map(|shift| shift.term_pos(row as usize, col as usize)
+                    .map(|(r, c)| (r as u16, c as u16)).unwrap_or((0, 0)))
+                .unwrap_or((row, col));
             let button = if lines > 0 { 64 } else { 65 };
             let count = lines.unsigned_abs().min(8) as usize;
             let single = format!("\x1b[<{button};{};{}M", col + 1, row + 1);
@@ -2770,6 +2900,7 @@ impl App {
     /// 이미 끝에 있으면 아무 일도 안 한다(공짜 질의라 매번 물어도 된다).
     fn follow_live_tail_now(&mut self) {
         let Some(id) = self.target_surface() else { return };
+        self.mirror_view_scroll.remove(&id);
         let Some(sess) = self.pty_for_pane(&id) else { return };
         if sess.view_state().0 > 0 {
             sess.scroll_to_bottom();
@@ -3084,6 +3215,9 @@ impl App {
         // Typing snaps the active pane back to live tail. Other panes'
         // scroll offsets are left alone — switching focus by clicking
         // doesn't disturb where the user was reading.
+        if let Some(pid) = self.target_surface() {
+            if self.mirror_view_scroll.remove(&pid).is_some() { self.chrome_dirty = true; }
+        }
         if let Ok(mut ws) = self.ws.lock() {
             if let Some(t) = ws.active_mut().and_then(|p| p.term_mut()) {
                 if t.scroll_offset != 0 {

@@ -103,6 +103,29 @@ fn pixel_cell(offset: f32, cell: f32, scale: f32) -> u16 {
     (offset.max(0.0) / (cell * scale).max(f32::EPSILON)).floor() as u16
 }
 
+fn projection_grid_size(projection: &crate::mirror_view::Projection) -> (u16, u16) {
+    (
+        projection.rows.iter().map(Vec::len).max().unwrap_or(0).min(u16::MAX as usize) as u16,
+        projection.rows.len().min(u16::MAX as usize) as u16,
+    )
+}
+
+#[cfg(test)]
+mod mirror_hit_bounds_tests {
+    #[test]
+    fn taller_and_wider_viewer_cells_are_not_clamped_to_source_size() {
+        let source = vec![vec![crate::GridCell::blank(); 8]];
+        for (cols, rows) in [(4, 3), (12, 5)] {
+            let view = crate::mirror_view::project(&source, (0, 0), cols, rows, None, None);
+            let (width, height) = super::projection_grid_size(&view);
+            assert_eq!((width, height), (cols as u16, rows as u16));
+            let col = super::pixel_cell((cols as f32 - 0.5) * 10.0, 10.0, 1.0);
+            let row = super::pixel_cell((rows as f32 - 0.5) * 20.0, 20.0, 1.0);
+            assert_eq!((col.min(width - 1), row.min(height - 1)), (cols as u16 - 1, rows as u16 - 1));
+        }
+    }
+}
+
 /// pane 중심 기준 정규화 offset → 드롭 존. 순수 함수(단위테스트 대상).
 ///
 /// 4방향 판정은 raw 픽셀 거리가 아니라 정규화 offset 으로 한다 — 픽셀 거리를
@@ -208,8 +231,10 @@ impl App {
         let Some(pane) = ws.panes.get(id) else { return manual };
         let active_pid = pane.tabs.get(pane.active_tab)
             .and_then(|tab| tab.pid.as_deref()).unwrap_or(id);
-        let needs_fit = kasa_mcp::remote::is_view_pane(active_pid)
-            || self.pty.get(active_pid).is_some_and(|session| session.has_viewer_size_control());
+        // A mirror now lays out text at its own columns/rows. Never make its
+        // font smaller merely because the source window is larger.
+        if kasa_mcp::remote::is_view_pane(active_pid) { return manual; }
+        let needs_fit = self.pty.get(active_pid).is_some_and(|session| session.has_viewer_size_control());
         if !needs_fit {
             return manual;
         }
@@ -241,6 +266,11 @@ impl App {
     /// then translates the pixel into that pane's cell-local coords.
     /// Returns None when the workspace has no panes or the click missed
     /// every pane (gutter between split borders, padding, etc).
+    fn displayed_grid_size(&self, id: &str, source_cols: u16, source_rows: u16) -> (u16, u16) {
+        self.pane_view_shift.get(id).and_then(|shift| shift.projection.as_ref())
+            .map(|projection| projection_grid_size(projection)).unwrap_or((source_cols, source_rows))
+    }
+
     pub(crate) fn px_to_pane_cell(&self, px: f32, py: f32) -> Option<(String, u16, u16)> {
         let sb = self.effective_sidebar_w();
         let ws = self.ws.lock().unwrap();
@@ -259,7 +289,8 @@ impl App {
             if live {
                 let pane = ws.panes.get(z)?;
                 let t = pane.term()?;
-                if t.cols == 0 || t.rows == 0 {
+                let (cols, rows) = self.displayed_grid_size(z, t.cols, t.rows);
+                if cols == 0 || rows == 0 {
                     return None;
                 }
                 let fs = self.pane_display_scale(&ws, z);
@@ -274,7 +305,7 @@ impl App {
                 let box_top = TITLE_HEIGHT + iy as f32 * self.cell.h;
                 let lc = pixel_cell(px - box_left - PANE_INNER_X, self.cell.w, fs);
                 let lr = pixel_cell(py - box_top - pane.header_px() - PANE_INNER_Y, self.cell.h, fs);
-                return Some((z.to_string(), lc.min(t.cols - 1), lr.min(t.rows - 1)));
+                return Some((z.to_string(), lc.min(cols - 1), lr.min(rows - 1)));
             }
         }
         if let Some(layout) = ws.layout.as_ref() {
@@ -315,9 +346,10 @@ impl App {
                                 .get(&pid)
                                 .and_then(|p| p.term())
                                 .map_or((lc, lr), |t| {
+                                    let (cols, rows) = self.displayed_grid_size(&pid, t.cols, t.rows);
                                     (
-                                        lc.min(t.cols.saturating_sub(1)),
-                                        lr.min(t.rows.saturating_sub(1)),
+                                        lc.min(cols.saturating_sub(1)),
+                                        lr.min(rows.saturating_sub(1)),
                                     )
                                 });
                         return Some((pid, mc, mr));
@@ -339,7 +371,8 @@ impl App {
         let Some(t) = pane.term() else {
             return Some((id, 0, 0));
         };
-        if t.cols == 0 || t.rows == 0 {
+        let (cols, rows) = self.displayed_grid_size(&id, t.cols, t.rows);
+        if cols == 0 || rows == 0 {
             return None;
         }
         let fs = self.pane_display_scale(&ws, &id);
@@ -348,7 +381,7 @@ impl App {
         let hdr = pane.header_px();
         let lc = pixel_cell(px - sb - WINDOW_PADDING - PANE_INNER_X, self.cell.w, fs);
         let lr = pixel_cell(py - TITLE_HEIGHT - hdr - PANE_INNER_Y, self.cell.h, fs);
-        Some((id, lc.min(t.cols - 1), lr.min(t.rows - 1)))
+        Some((id, lc.min(cols - 1), lr.min(rows - 1)))
     }
     /// Convenience wrapper that returns only the active pane's local
     /// cell coords. Most callers (wheel, selection drag) only care

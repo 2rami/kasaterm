@@ -35,6 +35,10 @@ pub struct Cell {
     /// 칸에만 선다. 옛 스냅샷·레거시 브리지는 이 표식이 없어 default(false).
     #[serde(default)]
     pub wrapped: bool,
+    /// Padding before a wide glyph which wrapped to the next row. This cell
+    /// occupies screen space but is not a space from the terminal's text.
+    #[serde(default)]
+    pub leading_wide_spacer: bool,
 }
 
 impl Cell {
@@ -50,6 +54,7 @@ impl Cell {
             dim: false,
             hidden: false,
             wrapped: false,
+            leading_wide_spacer: false,
         }
     }
 }
@@ -192,7 +197,12 @@ impl Cell {
     /// 보이므로 남긴다.
     fn is_trailing_blank(&self) -> bool {
         (self.ch == ' ' || self.ch == '\0')
+            && self.fg == Color::Default
             && self.bg == Color::Default
+            && !self.bold
+            && !self.dim
+            && !self.italic
+            && !self.hidden
             && !self.underline
             && !self.inverse
     }
@@ -209,6 +219,12 @@ impl ScreenUpdate {
     /// `dirty` 에 담긴 행만 그리므로, 화면 전체를 원하면 `force_full` 로 뜬
     /// 스냅샷을 넘겨야 한다.
     pub fn to_ansi(&self) -> Vec<u8> {
+        self.to_ansi_with_wide_spacers(&[])
+    }
+
+    /// Raw-terminal callers can retain leading wide spacers without adding a
+    /// field to the screen wire format, which does not represent that flag.
+    pub fn to_ansi_with_wide_spacers(&self, leading_wide_rows: &[u16]) -> Vec<u8> {
         let mut out = String::new();
         // 앱이 대체 화면에 있으면 미러도 거기서 시작해야 한다. 안 그러면 앱이
         // 빠져나갈 때 보내는 `?1049l` 이 미러에선 짝이 없는 복귀가 된다.
@@ -217,12 +233,28 @@ impl ScreenUpdate {
         }
         out.push_str("\x1b[H\x1b[2J");
 
+        let mut continued_at = None;
         for (row, cells) in &self.dirty {
             let Some(body) = row_ansi(cells) else {
                 continue;
             };
-            out.push_str(&format!("\x1b[{};1H", row + 1));
+            if continued_at != Some(*row) {
+                out.push_str(&format!("\x1b[{};1H", row + 1));
+            }
             out.push_str(&body);
+            continued_at = None;
+            if cells.last().is_some_and(|cell| cell.wrapped)
+                && cells.len() == self.cols as usize
+                && row.saturating_add(1) < self.rows
+            {
+                // Alacritty's HT at a pending right-margin wrap commits WRAPLINE
+                // and moves to the next row without writing a synthetic glyph.
+                // This also preserves a wrap into an entirely blank next row.
+                // Never do this on the last screen row: scrolling would lose
+                // content. Its offscreen continuation cannot affect this view.
+                out.push_str(&row_wrap_ansi(cells, leading_wide_rows.contains(row)));
+                continued_at = Some(row + 1);
+            }
         }
 
         out.push_str(&format!(
@@ -239,14 +271,30 @@ impl ScreenUpdate {
     }
 }
 
+/// Commit a full-width row's soft wrap without leaving any synthetic glyph.
+/// A wide glyph at the rightmost column also recreates the leading-wide-spacer
+/// flag. Clear its temporary next-row glyph before painting the real next row;
+/// overwriting a wide glyph directly would clear that previous-row flag again.
+/// Call only when advancing a row is safe (never the bottom visible row).
+pub fn row_wrap_ansi(cells: &[Cell], leading_wide: bool) -> String {
+    if leading_wide && cells.len() >= 2 {
+        let style = cells.last().unwrap().sgr();
+        format!("\r\x1b[{}C{style}界\r\x1b[0m\x1b[2K", cells.len() - 1)
+    } else {
+        "\t".into()
+    }
+}
+
 /// 한 행을 SGR 포함 ANSI 로 굽는다(끝은 `\x1b[0m`). 커서 이동은 호출자 몫이라
 /// 화면 행(`to_ansi`)과 스크롤백 행(연속 출력으로 흘리는 쪽) 이 같이 쓴다.
-/// 잘라내도 화면이 같은 꼬리 공백을 걷어낸 뒤 전부 빈 행이면 None.
+/// 기본 스타일의 꼬리 공백은 걷지만, 소프트랩 행은 마지막 칸까지 출력한다.
+/// 호출자가 뒤에 HT를 보내면 오른끝의 pending wrap을 글자 추가 없이 확정한다.
 pub fn row_ansi(cells: &[Cell]) -> Option<String> {
-    let end = cells
-        .iter()
-        .rposition(|c| !c.is_trailing_blank())
-        .map_or(0, |i| i + 1);
+    let end = if cells.last().is_some_and(|cell| cell.wrapped) {
+        cells.len()
+    } else {
+        cells.iter().rposition(|c| !c.is_trailing_blank()).map_or(0, |i| i + 1)
+    };
     if end == 0 {
         return None;
     }
@@ -266,15 +314,14 @@ pub fn row_ansi(cells: &[Cell]) -> Option<String> {
             spacer = false;
             continue;
         }
-        if cell.ch == '\0' {
-            continue;
-        }
         let sgr = cell.sgr();
         if style.as_deref() != Some(sgr.as_str()) {
             out.push_str(&sgr);
             style = Some(sgr);
         }
-        out.push(cell.ch);
+        // A spacer following a wide glyph was already skipped above. A lone
+        // blank sentinel still occupies a column, especially on full-width rows.
+        out.push(if cell.ch == '\0' { ' ' } else { cell.ch });
         spacer = UnicodeWidthChar::width(cell.ch).unwrap_or(1) > 1;
     }
     out.push_str("\x1b[0m");
@@ -411,5 +458,35 @@ pub(crate) fn vt_cell(c: &vt100::Cell) -> Cell {
         hidden: false,
         // vt100 crate 는 줄넘김 표식도 안 준다 — 링크 감지는 채움 휴리스틱으로 잇는다.
         wrapped: false,
+        // Legacy vt100 cells do not expose leading-wide padding metadata.
+        leading_wide_spacer: false,
+    }
+}
+
+#[cfg(test)]
+mod leading_wide_spacer_json_tests {
+    use super::*;
+
+    #[test]
+    fn older_cell_json_defaults_to_real_space() {
+        let mut old = serde_json::to_value(Cell::blank()).unwrap();
+        old.as_object_mut().unwrap().remove("leading_wide_spacer");
+        let decoded: Cell = serde_json::from_value(old).unwrap();
+        assert!(!decoded.leading_wide_spacer);
+        assert_eq!(decoded.ch, ' ');
+    }
+
+    #[test]
+    fn snapshot_json_preserves_leading_wide_padding() {
+        let mut padding = Cell::blank();
+        padding.leading_wide_spacer = true;
+        let update = ScreenUpdate {
+            dirty: vec![(0, vec![padding.clone(), Cell::blank()])],
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&update).unwrap();
+        let decoded: ScreenUpdate = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.dirty[0].1[0], padding);
+        assert!(!decoded.dirty[0].1[1].leading_wide_spacer);
     }
 }

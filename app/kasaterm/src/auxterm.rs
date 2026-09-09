@@ -49,6 +49,7 @@ pub(crate) struct AuxTerminal {
     cursor_px: (f32, f32),
     focused: bool,
     preedit: String,
+    view_shift: Option<crate::PaneViewShift>,
     last_title: String,
     /// 이 창의 글꼴 크기(논리 px). Cmd+=/- 로 창마다 따로 움직인다.
     font_size: f32,
@@ -396,6 +397,7 @@ impl App {
             cursor_px: (0.0, 0.0),
             focused: wants_focus,
             preedit: String::new(),
+            view_shift: None,
             last_title: title,
             font_size: FONT_SIZE,
             pinned: false,
@@ -570,7 +572,16 @@ impl App {
             Some(name) => format!("{name} · {pane_id} · {}번 방", home + 1),
             None => format!("{pane_id} · {}번 방", home + 1),
         };
+        let view_shift = composition.as_ref().and_then(|scene| {
+            scene.view_shifts.iter().find(|(id, _)| id == &pane_id).map(|(_, shift)| shift.clone())
+        });
+        let cursor = cursor.and_then(|(row, col, visible, width)| {
+            let position = view_shift.as_ref().map(|shift| shift.display_pos(row as usize, col as usize))
+                .unwrap_or(Some((row as usize + pulled as usize, col as usize)));
+            position.map(|(row, col)| (row, col, visible, width))
+        });
         let Some(t) = self.aux.terminals.get_mut(idx) else { return };
+        t.view_shift = view_shift;
         if t.last_title != label {
             t.window.set_title(&label);
             t.last_title = label.clone();
@@ -675,8 +686,7 @@ impl App {
                 crate::screenread::paint_student_overlays(&mut t.gpu, &overlays, anim_ms);
                 animated = c.animated_cells;
                 // 커서 자리(논리 px). 조합 중 한글이 있으면 프리에딧을, 없으면 blink 커서.
-                if let Some((raw_row, col, vis, cur_w)) = cursor {
-                    let row = raw_row + pulled;
+                if let Some((row, col, vis, cur_w)) = cursor {
                     let px = cell_left + col as f32 * cw;
                     let py = cell_top + row as f32 * ch;
                     if t.preedit.is_empty() {
@@ -902,6 +912,15 @@ impl App {
         }
         let Some(pid) = self.aux_active_term_pid(&pane_id) else { return };
         let step = lines.abs().ceil() as i32;
+        let projection = self.aux.terminals.get(idx)
+            .and_then(|term| term.view_shift.as_ref())
+            .and_then(|shift| shift.projection.clone());
+        if let Some(projection) = projection {
+            if self.scroll_mirror_view(&pid, &projection, if lines > 0.0 { step } else { -step }) {
+                if let Some(term) = self.aux.terminals.get_mut(idx) { term.redraw(); }
+                return;
+            }
+        }
         if let Some(pty) = self.pty.get(&pid) {
             pty.scroll(if lines > 0.0 { step } else { -step });
         }
@@ -965,6 +984,7 @@ impl App {
         }
         // 셸이 아닌 탭은 키를 받지 않는다 — 화면에 없는 첫 탭 셸로 새지 않게.
         let Some(tab_pid) = self.aux_active_term_pid(&pane_id) else { return };
+        self.mirror_view_scroll.remove(&tab_pid);
         // **탭 pid** 로 겨눈다. outer 를 넣으면 조합 중 글자가 첫 탭으로 샌다.
         self.ime_retarget(crate::ImeFocus::Pane(tab_pid.clone()));
         // macOS in-process 한글 조합: 자모(U+3130..318F)면 composer 로, 완성 음절만 PTY.
@@ -1070,6 +1090,7 @@ impl App {
                     t.preedit.clear();
                 }
                 if let Some(pid) = pane_id.and_then(|p| self.aux_active_term_pid(&p)) {
+                    self.mirror_view_scroll.remove(&pid);
                     self.send_bytes_to_surface(Some(&pid), text.as_bytes());
                 }
             }

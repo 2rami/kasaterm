@@ -1529,15 +1529,17 @@ impl PtySession {
     /// 안에서 뿌리므로(`spawn_reader_thread`) 이 순서면 어느 쪽도 일어나지 않는다.
     pub fn tap_bytes_with_snapshot(&self) -> (Receiver<Vec<u8>>, Vec<u8>) {
         let (cols, rows) = *self.size.lock().unwrap();
-        let mut t = self.term.lock().unwrap();
+        let t = self.term.lock().unwrap();
         let hist = history_ansi(&t, cols, rows);
-        let snap = snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
+        // A subscriber starts at the live screen, independently of where the
+        // source GUI is reading. Its damage belongs to that GUI, not this tap.
+        let snap = live_snapshot(&t, cols, rows, &self.pane_id, &self.title_handle);
         let (tx, rx) = crossbeam_channel::bounded(64);
         self.byte_taps.lock().unwrap().push(tx);
         // 스크롤백은 primary 화면의 것이다 — alt 화면(vim 등)에 붙는 미러에
         // 실으면 ?1049h 앞에 찍혀 primary 를 더럽힌다.
         let mut bytes = if snap.alt_screen { Vec::new() } else { hist };
-        bytes.extend_from_slice(&snap.to_ansi());
+        bytes.extend_from_slice(&raw_screen_ansi(&snap));
         (rx, bytes)
     }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
@@ -2602,13 +2604,34 @@ fn history_ansi(term: &Term<PtyEventForwarder>, cols: u16, rows: u16) -> Vec<u8>
         if let Some(body) = kasa_bridge::screen::row_ansi(&row) {
             out.push_str(&body);
         }
-        out.push_str("\r\n");
+        if row.last().is_some_and(|cell| cell.wrapped) {
+            // Full-width row_ansi + HT commits the source's actual soft wrap.
+            // Hard CRLF rows remain hard breaks, never guessed from text width.
+            let leading_wide = grid[Point::new(
+                alacritty_terminal::index::Line(line),
+                alacritty_terminal::index::Column(grid_cols - 1),
+            )].flags.contains(alacritty_terminal::term::cell::Flags::LEADING_WIDE_CHAR_SPACER);
+            out.push_str(&kasa_bridge::screen::row_wrap_ansi(&row, leading_wide));
+        } else {
+            out.push_str("\r\n");
+        }
     }
     out.push_str(&format!("\x1b[{};1H", rows.max(1)));
-    for _ in 0..hist.min(rows as usize) {
+    // Every serialized history row already advanced once. At most rows-1
+    // historical rows remain visible; scrolling rows would add a phantom blank.
+    for _ in 0..hist.min(rows.saturating_sub(1) as usize) {
         out.push('\n');
     }
     out.into_bytes()
+}
+
+/// The frame carries its own wide-wrap metadata, independent of the source
+/// GUI's display offset. Reconstruct those flags from ordinary ANSI on replay.
+fn raw_screen_ansi(frame: &ScreenUpdate) -> Vec<u8> {
+    let leading_wide_rows: Vec<u16> = frame.dirty.iter().filter_map(|(row, cells)| {
+        cells.last()?.leading_wide_spacer.then_some(*row)
+    }).collect();
+    frame.to_ansi_with_wide_spacers(&leading_wide_rows)
 }
 
 fn snapshot(
@@ -3708,6 +3731,27 @@ fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
         wrapped: cell
             .flags
             .contains(alacritty_terminal::term::cell::Flags::WRAPLINE),
+        leading_wide_spacer: cell
+            .flags
+            .contains(alacritty_terminal::term::cell::Flags::LEADING_WIDE_CHAR_SPACER),
+    }
+}
+
+#[cfg(test)]
+mod leading_wide_spacer_conversion_tests {
+    use super::convert_cell;
+    use alacritty_terminal::term::cell::{Cell, Flags};
+
+    #[test]
+    fn source_padding_flag_is_not_confused_with_real_spaces_or_trailing_spacers() {
+        let mut source = Cell::default();
+        assert!(!convert_cell(&source).leading_wide_spacer);
+        source.flags.insert(Flags::WIDE_CHAR_SPACER);
+        assert!(!convert_cell(&source).leading_wide_spacer);
+        source.flags = Flags::LEADING_WIDE_CHAR_SPACER | Flags::WRAPLINE;
+        let converted = convert_cell(&source);
+        assert!(converted.leading_wide_spacer);
+        assert!(converted.wrapped);
     }
 }
 
@@ -5271,6 +5315,154 @@ fn test_posix_shell() -> String {
     panic!("POSIX 셸을 못 찾았다 — 이 테스트는 Git for Windows 의 sh.exe 가 필요하다: {cands:?}");
 }
 
+#[cfg(test)]
+mod raw_snapshot_wrap_tests {
+    use super::*;
+    use alacritty_terminal::index::{Column, Line};
+    use alacritty_terminal::term::cell::Flags;
+
+    fn parser(cols: u16, rows: u16) -> Term<PtyEventForwarder> {
+        make_term(cols, rows, PtyEventForwarder {
+            respond: false,
+            writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+            size: Arc::new(Mutex::new((cols, rows))),
+            last_title: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    fn feed(term: &mut Term<PtyEventForwarder>, raw: &[u8]) {
+        let mut processor: Processor<StdSyncHandler> = Processor::new();
+        processor.advance(term, raw);
+    }
+
+    fn assert_snapshot(source: &mut Term<PtyEventForwarder>, cols: u16, rows: u16, history: bool) {
+        let title = Arc::new(Mutex::new(None));
+        let frame = snapshot(source, cols, rows, "%wrap-test", &title, true);
+        let mut bytes = if history && !frame.alt_screen { history_ansi(source, cols, rows) } else { Vec::new() };
+        bytes.extend(raw_screen_ansi(&frame));
+        let mut replay = parser(cols, rows);
+        feed(&mut replay, &bytes);
+        let actual = snapshot(&mut replay, cols, rows, "%wrap-test", &title, true);
+        assert_eq!((actual.cursor_row, actual.cursor_col, actual.cursor_visible, actual.alt_screen),
+            (frame.cursor_row, frame.cursor_col, frame.cursor_visible, frame.alt_screen));
+        let mut expected = frame.dirty.clone();
+        // A wrap into a row outside this viewport is intentionally not committed:
+        // doing so would scroll away content, including on 1- and 2-row viewers.
+        if let Some((_, row)) = expected.last_mut() {
+            if let Some(last) = row.last_mut() { last.wrapped = false; }
+        }
+        assert_eq!(actual.dirty, expected, "raw ANSI roundtrip changed screen cells");
+        for line in 0..rows as i32 {
+            for col in 0..cols as usize {
+                let point = Point::new(Line(line), Column(col));
+                let mut expected = source.grid()[point].clone();
+                if line == rows as i32 - 1 {
+                    expected.flags.remove(Flags::WRAPLINE | Flags::LEADING_WIDE_CHAR_SPACER);
+                }
+                assert_eq!(replay.grid()[point], expected, "raw grid cell {line}:{col} changed");
+            }
+        }
+        if history && !frame.alt_screen {
+            let count = source.grid().history_size().min(1000);
+            assert_eq!(replay.grid().history_size(), count, "history gained/lost a row");
+            for line in -(count as i32)..0 {
+                for col in 0..cols as usize {
+                    let point = Point::new(Line(line), Column(col));
+                    assert_eq!(replay.grid()[point], source.grid()[point], "history cell {line}:{col} changed");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_soft_wraps_but_not_hard_crlf() {
+        let mut source = parser(8, 6);
+        feed(&mut source, b"abcdefghIJ\r\n12345678\r\nHARD\x1b[2;3H");
+        assert!(source.grid()[Line(0)][Column(7)].flags.contains(Flags::WRAPLINE));
+        assert!(!source.grid()[Line(2)][Column(7)].flags.contains(Flags::WRAPLINE));
+        assert_snapshot(&mut source, 8, 6, false);
+    }
+
+    #[test]
+    fn preserves_wrap_into_blank_row_without_inserting_a_glyph() {
+        let mut source = parser(8, 4);
+        feed(&mut source, b"abcdefghi\x1b[2;1H\x1b[2K\x1b[1;2H");
+        assert_snapshot(&mut source, 8, 4, false);
+    }
+
+    #[test]
+    fn preserves_wrapped_blank_rows_and_styled_trailing_spaces() {
+        let mut source = parser(8, 5);
+        feed(&mut source, b"        X\r\n\x1b[1;3;31mA   \x1b[0m\x1b[1;1H");
+        assert_snapshot(&mut source, 8, 5, false);
+    }
+
+    #[test]
+    fn preserves_cjk_margin_spacers_and_style_runs() {
+        let mut source = parser(5, 6);
+        feed(&mut source, "abcd한글\x1b[1;4;38;2;40;50;60m가나\x1b[0mZ\x1b[2;2H".as_bytes());
+        assert_snapshot(&mut source, 5, 6, false);
+    }
+
+    #[test]
+    fn preserves_leading_wide_spacers_in_history_and_tiny_views() {
+        for cols in [2, 3, 5] {
+            for rows in [1, 2, 6] {
+                let mut source = parser(cols, rows);
+                feed(&mut source, "\x1b[1;3;4;7;38;2;10;20;30;48;2;40;50;60mabcd한글가나다라마바사아자차\x1b[0m".as_bytes());
+                assert_snapshot(&mut source, cols, rows, true);
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_leading_wide_spacer_when_next_row_was_erased() {
+        let mut source = parser(5, 3);
+        feed(&mut source, "abcd한\r\x1b[2K\x1b[1;2H".as_bytes());
+        assert!(source.grid()[Line(0)][Column(4)].flags.contains(Flags::LEADING_WIDE_CHAR_SPACER));
+        assert_snapshot(&mut source, 5, 3, false);
+    }
+
+    #[test]
+    fn preserves_historical_wraps_and_boundary_into_visible_screen() {
+        let mut source = parser(8, 3);
+        feed(&mut source, b"abcdefghABCDEFGHijklmnopIJKLMNOPqrstuvwxQRSTUVWXyz");
+        assert_snapshot(&mut source, 8, 3, true);
+    }
+
+    #[test]
+    fn keeps_hard_history_lines_separate() {
+        let mut source = parser(8, 3);
+        feed(&mut source, b"aaaaaaaa\r\nbbbbbbbb\r\ncccccccc\r\ndddddddd\r\neeeeeeee\r\n");
+        assert_snapshot(&mut source, 8, 3, true);
+    }
+
+    #[test]
+    fn tiny_viewports_never_scroll_away_last_row() {
+        for rows in [1, 2] {
+            let mut source = parser(8, rows);
+            feed(&mut source, b"abcdefghABCDEFGHijklmnopIJKLMNOP");
+            assert_snapshot(&mut source, 8, rows, true);
+            source.grid_mut()[Line(rows as i32 - 1)][Column(7)].flags.insert(Flags::WRAPLINE);
+            assert_snapshot(&mut source, 8, rows, false);
+        }
+    }
+
+    #[test]
+    fn alternate_screen_wraps_do_not_populate_primary_history() {
+        let mut source = parser(8, 4);
+        feed(&mut source, b"old primary\x1b[?1049habcdefghi\x1b[?25l\x1b[2;2H");
+        assert_snapshot(&mut source, 8, 4, true);
+    }
+
+    #[test]
+    fn capped_history_roundtrip_has_no_extra_blank_line() {
+        let mut source = parser(8, 4);
+        for n in 0..1010 { feed(&mut source, format!("H{n:04}\r\n").as_bytes()); }
+        assert_snapshot(&mut source, 8, 4, true);
+    }
+}
+
 /// 살아 있는 PTY 로 스냅샷 재생을 검증한다. 순수 변환(`to_ansi`) 쪽 테스트는
 /// kasa-bridge 에 있고, 여기서는 실제 셀 그리드에서 제대로 떠지는지와
 /// **구독-스냅샷 원자성**을 본다.
@@ -6262,6 +6454,41 @@ mod external_session_tests {
         assert!(live.cursor_visible);
         assert_eq!(live.dirty.len(), 5, "전체 행을 담는다");
         assert_eq!(sess.view_state().0, 3, "거울 스냅샷이 스크롤 위치를 건드리지 않는다");
+    }
+
+    #[test]
+    fn byte_snapshot_uses_live_grid_without_consuming_source_scroll_or_damage() {
+        use alacritty_terminal::index::{Column, Line};
+        let (source, _source_events, _source_writer, _source_resize) = ext_session(5, 3);
+        {
+            let mut term = source.term.lock().unwrap();
+            let mut parser: Processor<StdSyncHandler> = Processor::new();
+            for i in 0..10 { parser.advance(&mut *term, format!("H{i}\r\n").as_bytes()); }
+            parser.advance(&mut *term, "\x1b[2J\x1b[Habcd한\r\nLIVE".as_bytes());
+            term.scroll_display(alacritty_terminal::grid::Scroll::Delta(3));
+            assert_eq!(term.grid().display_offset(), 3);
+            assert!(matches!(term.damage(), TermDamage::Full));
+            assert!(term.grid()[Line(0)][Column(4)].flags.contains(
+                alacritty_terminal::term::cell::Flags::LEADING_WIDE_CHAR_SPACER));
+        }
+        let (_tap, bytes) = source.tap_bytes_with_snapshot();
+        let (replay, _replay_events, _replay_writer, _replay_resize) = ext_session(5, 3);
+        let mut source_term = source.term.lock().unwrap();
+        assert_eq!(source_term.grid().display_offset(), 3, "tap moved the source viewport");
+        assert!(matches!(source_term.damage(), TermDamage::Full), "tap consumed source GUI damage");
+        let mut replay_term = replay.term.lock().unwrap();
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        parser.advance(&mut *replay_term, &bytes);
+        assert_eq!(replay_term.grid().display_offset(), 0);
+        assert_eq!(replay_term.grid().history_size(), source_term.grid().history_size());
+        assert_eq!(replay_term.grid().cursor, source_term.grid().cursor);
+        for row in -(source_term.grid().history_size() as i32)..3 {
+            for col in 0..5 {
+                let point = Point::new(Line(row), Column(col));
+                assert_eq!(replay_term.grid()[point], source_term.grid()[point],
+                    "replayed live/history cell changed at {row}:{col}");
+            }
+        }
     }
 
     #[test]

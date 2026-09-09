@@ -360,7 +360,7 @@ impl App {
                                 .len() as u16
                         })
                         .unwrap_or(0);
-                    let (raw_row, cur_col, cur_vis, cols, cur_w) = match pane.term() {
+                    let (raw_row, raw_col, source_vis, source_cols, cur_w) = match pane.term() {
                         Some(t) => (
                             t.cursor_row,
                             t.cursor_col,
@@ -370,7 +370,16 @@ impl App {
                         ),
                         None => (0, 0, false, 80, 1),
                     };
-                    let cur_row = raw_row + pulled;
+                    let shift = self.pane_view_shift.get(&id);
+                    let position = shift.map(|view| view.display_pos(raw_row as usize, raw_col as usize))
+                        .unwrap_or(Some((raw_row as usize + pulled as usize, raw_col as usize)));
+                    let (cur_row, cur_col) = position.map(|(row, col)| (row as u16, col as u16))
+                        .unwrap_or((0, 0));
+                    let cur_vis = source_vis && position.is_some();
+                    let cols = shift.and_then(|view| view.projection.as_ref())
+                        .and_then(|projection| projection.rows.first())
+                        .map(|row| row.len().min(u16::MAX as usize) as u16)
+                        .unwrap_or(source_cols);
                     let (base_row, base_col) = (cur_row, cur_col);
                     // Until the committed syllable's echo lands (cursor
                     // still where it was at commit time), draw the
@@ -382,12 +391,12 @@ impl App {
                     // 따로 그리므로 같은 글자가 두 군데 보인다(거노: "입력이
                     // 동시에 되고"). 터미널 오버레이는 터미널일 때만 그린다.
                     let (display, prow, pcol) = match &commit_overlay {
-                        _ if pane.term().is_none() => (String::new(), base_row, base_col),
+                        _ if pane.term().is_none() || position.is_none() => (String::new(), base_row, base_col),
                         Some((ctext, before, owner))
                             if active_surface.as_deref() == Some(owner.as_str())
-                                && *before == (raw_row, cur_col) =>
+                                && *before == (raw_row, raw_col) =>
                         {
-                            (format!("{ctext}{preedit_text}"), before.0 + pulled, before.1)
+                            (format!("{ctext}{preedit_text}"), base_row, base_col)
                         }
                         _ => (preedit_text.clone(), base_row, base_col),
                     };
@@ -1168,12 +1177,12 @@ impl App {
                 // shell catch up and the clip is a no-op.
                 //
                 // Single-pane fallback path (no layout tree yet) passes
-                // (0,0,0,0) as a placeholder — that would clip everything
-                // to nothing, so skip the layout clip entirely when w_cells
-                // or h_cells is 0 and just trust the PTY dims.
+                // (0,0,0,0) as a placeholder. A mirror must use the full local
+                // window in that case, never the source terminal dimensions.
                 let pty_cols = pane.term().map_or(1, |t| t.cols).max(1) as usize;
                 let pty_rows = pane.term().map_or(0, |t| t.cells.len());
-                let (cols_now, rows_now) = if w_cells == 0 || h_cells == 0 {
+                let independent_view = kasa_mcp::remote::is_view_pane(&ws.active_tab_pid(&id));
+                let (cols_now, rows_now) = if !independent_view && (w_cells == 0 || h_cells == 0) {
                     (pty_cols, pty_rows)
                 } else {
                     // Mirror resize_backend EXACTLY: pane box in base-grid px,
@@ -1192,13 +1201,19 @@ impl App {
                     let scaled_ch = ch * fs;
                     let header_px_now = pane.header_px();
                     let footer_px_now = self.statusbar_px(id.as_str());
-                    let usable_w = (w_cells as f32 * cw - 2.0 * PANE_INNER_X).max(scaled_cw);
+                    let local_w = if w_cells == 0 { grid_cols } else { w_cells };
+                    let local_h = if h_cells == 0 { grid_rows } else { h_cells };
+                    let usable_w = (local_w as f32 * cw - 2.0 * PANE_INNER_X).max(scaled_cw);
                     let usable_h =
-                        (h_cells as f32 * ch - header_px_now - footer_px_now - 2.0 * PANE_INNER_Y)
+                        (local_h as f32 * ch - header_px_now - footer_px_now - 2.0 * PANE_INNER_Y)
                             .max(scaled_ch);
                     let layout_cols = (usable_w / scaled_cw).floor() as usize;
                     let layout_rows = (usable_h / scaled_ch).floor() as usize;
-                    (layout_cols.min(pty_cols).max(1), layout_rows.min(pty_rows))
+                    if independent_view {
+                        (layout_cols.max(2), layout_rows.max(1))
+                    } else {
+                        (layout_cols.min(pty_cols).max(1), layout_rows.min(pty_rows))
+                    }
                 };
                 // Image/markdown panes carry no PTY grid; an empty rows vec
                 // makes draw_cells a no-op and the content (texture or laid-out
