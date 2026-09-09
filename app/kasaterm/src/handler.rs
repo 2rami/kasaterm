@@ -2816,13 +2816,19 @@ impl ApplicationHandler<UserEvent> for App {
                         && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter)
                         && self.restore_progress.as_ref().is_some_and(|p| p.failure.is_some())
                     { self.retry_restore(); }
+                    if event.state == ElementState::Pressed
+                        && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+                    { self.continue_restore_in_background(); }
                     return;
                 }
-                WindowEvent::MouseInput { state: ElementState::Pressed, .. } => {
+                WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                     let (x, y) = self.cursor_px;
                     if self.window.as_ref().is_some_and(|window| window.id() == id)
                         && self.restore_retry_rect.is_some_and(|(rx, ry, w, h)| x >= rx && x <= rx + w && y >= ry && y <= ry + h)
                     { self.retry_restore(); }
+                    if self.window.as_ref().is_some_and(|window| window.id() == id)
+                        && self.restore_continue_rect.is_some_and(|(rx, ry, w, h)| x >= rx && x <= rx + w && y >= ry && y <= ry + h)
+                    { self.continue_restore_in_background(); }
                     return;
                 }
                 WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }

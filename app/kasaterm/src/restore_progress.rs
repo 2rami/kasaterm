@@ -2,6 +2,35 @@
 use super::*;
 use std::time::{Duration, Instant};
 
+pub(crate) struct ProgressLayout {
+    pub card: (f32, f32, f32, f32),
+    pub retry: (f32, f32, f32, f32),
+    pub continue_button: (f32, f32, f32, f32),
+}
+
+pub(crate) fn progress_layout(width: f32, height: f32) -> ProgressLayout {
+    let w = (width - 24.0).max(1.0).min(440.0);
+    let stacked = w < 340.0 && height >= 244.0;
+    let h = (if stacked { 220.0_f32 } else { 180.0 }).min((height - 24.0).max(1.0));
+    let x = (width - w) / 2.0;
+    let y = (height - h) / 2.0;
+    let pad = 16.0_f32.min(w / 8.0);
+    let bh = 34.0_f32.min((h - 32.0).max(1.0) / 2.0);
+    let action_width = (w - 2.0 * pad - 8.0).max(1.0);
+    let continue_width = 170.0_f32.min(action_width * 0.62);
+    let continue_button = if stacked {
+        (x + pad, y + h - pad - bh, w - 2.0 * pad, bh)
+    } else {
+        (x + w - pad - continue_width, y + h - pad - bh, continue_width, bh)
+    };
+    let retry = if stacked {
+        (x + pad, continue_button.1 - bh - 8.0, w - 2.0 * pad, bh)
+    } else {
+        (x + pad, continue_button.1, 104.0_f32.min(action_width - continue_width), bh)
+    };
+    ProgressLayout { card: (x, y, w, h), retry, continue_button }
+}
+
 pub(crate) struct RestoreProgress {
     pub state: serde_json::Value,
     pub expected: usize,
@@ -9,6 +38,7 @@ pub(crate) struct RestoreProgress {
     pub failure: Option<String>,
     pub started: Instant,
     pub built: bool,
+    pub background: bool,
     entries: HashMap<String, RestoreEntry>,
 }
 
@@ -28,6 +58,14 @@ fn surface_count(node: &serde_json::Value) -> usize {
 }
 
 impl RestoreProgress {
+    fn dismiss_modal(&mut self) {
+        self.background = true;
+    }
+
+    fn blocks_surface(&self, id: &str) -> bool {
+        self.entries.get(id).is_some_and(|entry| !entry.ready)
+    }
+
     pub fn new(state: serde_json::Value) -> Self {
         let session = state.get("sessions").and_then(|sessions| sessions.as_array()).and_then(|sessions| {
             sessions.get(state["active_session"].as_u64().unwrap_or(0) as usize).or_else(|| sessions.first())
@@ -38,7 +76,7 @@ impl RestoreProgress {
                     .map_or(0, |nodes| nodes.iter().map(surface_count).sum::<usize>())
             }).sum()
         });
-        Self { state, expected, ready: 0, failure: None, started: Instant::now(), built: false, entries: HashMap::new() }
+        Self { state, expected, ready: 0, failure: None, started: Instant::now(), built: false, background: false, entries: HashMap::new() }
     }
 
     pub fn track(&mut self, id: &str, record: &serde_json::Value) {
@@ -92,12 +130,17 @@ impl App {
             1 if self.restore_progress.as_ref().is_some_and(|p| p.failure.is_some()) => {
                 eprintln!("[restore-probe] failure=visible input-blocked={} ready={}", self.restoration_blocks_input(), self.restore_progress.as_ref().map_or(0, |p| p.ready));
                 PHASE.store(2, Ordering::Relaxed);
+                if std::env::var_os("KASATERM_AUTORESTORE_BACKGROUND_PROBE").is_some() {
+                    self.continue_restore_in_background();
+                    for id in self.pty.keys() { self.send_bytes_to_surface(Some(id), b"BACKGROUND_READY_PROBE"); }
+                    eprintln!("[restore-probe] background=true blocked={} preserved={}", self.restoration_blocks_input(), preserved(self));
+                }
                 self.retry_restore();
                 eprintln!("[restore-probe] retry=queued preserved={} ready={} expected={}", preserved(self),
                     self.restore_progress.as_ref().map_or(0, |p| p.ready),
                     self.restore_progress.as_ref().map_or(0, |p| p.expected));
             }
-            1 | 2 if !self.restoration_blocks_input() => {
+            1 | 2 if self.restore_applying.is_none() && self.restore_progress.is_none() => {
                 PHASE.store(3, Ordering::Relaxed);
                 for id in self.pty.keys() { self.send_bytes_to_surface(Some(id), b"RESTORE_ALLOWED_PROBE"); }
                 let ws = self.ws.lock().unwrap();
@@ -110,7 +153,22 @@ impl App {
     }
 
     pub(crate) fn restoration_blocks_input(&self) -> bool {
-        self.restore_applying.is_some() || self.restore_progress.is_some()
+        self.restore_applying.is_some() || self.restore_progress.as_ref().is_some_and(|p| !p.background)
+    }
+
+    pub(crate) fn restoration_blocks_surface(&self, id: &str) -> bool {
+        self.restore_progress.as_ref().is_some_and(|p| p.blocks_surface(id))
+    }
+
+    pub(crate) fn continue_restore_in_background(&mut self) {
+        let Some(progress) = self.restore_progress.as_mut() else { return; };
+        // Keep every PTY, pending resume and original saved layout. This only
+        // dismisses the modal; unfinished surfaces remain protected from input.
+        progress.dismiss_modal();
+        self.restore_retry_rect = None;
+        self.restore_continue_rect = None;
+        self.chrome_dirty = true;
+        if let Some(window) = &self.window { window.request_redraw(); }
     }
 
     pub(crate) fn retry_restore(&mut self) {
@@ -231,6 +289,45 @@ pub(crate) fn with_file_time(mut state: serde_json::Value) -> serde_json::Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn progress_actions_stay_inside_small_and_large_windows_without_overlap() {
+        for (width, height) in [(240.0, 320.0), (320.0, 200.0), (480.0, 260.0), (1280.0, 720.0)] {
+            let layout = progress_layout(width, height);
+            let (x, y, w, h) = layout.card;
+            assert!(x >= 0.0 && y >= 0.0 && x + w <= width && y + h <= height);
+            for (bx, by, bw, bh) in [layout.retry, layout.continue_button] {
+                assert!(bx >= x && by >= y && bx + bw <= x + w && by + bh <= y + h);
+                assert!(by >= y + 104.0, "actions must not overlap the progress bar");
+            }
+            let a = layout.retry;
+            let b = layout.continue_button;
+            assert!(a.0 + a.2 <= b.0 || a.1 + a.3 <= b.1);
+        }
+    }
+
+    #[test]
+    fn dismissing_progress_keeps_restore_state_and_only_unlocks_ready_surfaces() {
+        let mut progress = RestoreProgress::new(serde_json::json!({"sessions": [{"windows": [{"leaf": {
+            "pane_id": "%0", "tabs": [{}, {}, {}, {}, {}, {}]
+        }}]}]}));
+        for number in 0..7 {
+            let id = format!("%{number}");
+            progress.track(&id, &serde_json::json!({"remote_base": "http://restore.invalid"}));
+            progress.entries.get_mut(&id).unwrap().ready = number < 5;
+        }
+        progress.ready = 5;
+        progress.built = true;
+        let original = progress.state.clone();
+        progress.dismiss_modal();
+        assert!(progress.background);
+        assert_eq!((progress.ready, progress.expected, progress.entries.len()), (5, 7, 7));
+        assert_eq!(progress.state, original);
+        assert!(!progress.blocks_surface("%0"));
+        assert!(progress.blocks_surface("%5"));
+        assert!(!progress.blocks_surface("%new"));
+        progress.entries.get_mut("%5").unwrap().ready = true;
+        assert!(!progress.blocks_surface("%5"));
+    }
     #[test]
     fn counts_inactive_tabs_and_undocked_surfaces_in_the_active_session() {
         let state = serde_json::json!({"active_session": 0, "sessions": [{

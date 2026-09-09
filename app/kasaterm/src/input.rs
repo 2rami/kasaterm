@@ -162,6 +162,10 @@ impl App {
         if bytes.is_empty() || self.restoration_blocks_input() {
             return;
         }
+        let fallback_surface = surface.is_none().then(|| self.target_surface()).flatten();
+        if surface.or(fallback_surface.as_deref()).is_some_and(|id| self.restoration_blocks_surface(id)) {
+            return;
+        }
         // Route to whichever backend owns the *active tab*. In-pane tabs
         // (`spawn_new_tab`) are always GUI-local PtySessions in `self.pty`,
         // even when the GUI is daemon-attached: the daemon owns only the

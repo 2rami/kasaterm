@@ -2376,6 +2376,7 @@ impl App {
         let mut swap_confirm_hits: Vec<(crate::session::CharacterSwapBtn, (f32, f32, f32, f32))> =
             Vec::new();
         let mut restore_btn_hits: Vec<(RestoreBtn, (f32, f32, f32, f32))> = Vec::new();
+        let restore_modal_visible = self.restoration_blocks_input();
         let win_h_logical = win_px.1 / scale;
         let settings_btn = self.settings_btn_rect(win_h_logical);
         self.settings_btn_rect = settings_btn;
@@ -12293,7 +12294,10 @@ impl App {
                 let face = chip - chip_inset * 2.0;
                 let face_gap = 8.0_f32;
                 // 카드 폭이 감당하는 얼굴 수를 먼저 정하고(최대 9), 나머지는 +N 로 접는다.
-                let face_max = 9usize.min(faces.len());
+                let face_slots = (((win_w - 72.0).max(0.0) + face_gap) / (chip + face_gap)) as usize;
+                let face_max = if win_h < 260.0 { 0 } else {
+                    9usize.min(faces.len()).min(face_slots.saturating_sub(usize::from(faces.len() > face_slots)))
+                };
                 let overflow = faces.len().saturating_sub(face_max);
                 let btn_w = g
                     .measure_chrome_text("새로 시작", bf, false)
@@ -12319,7 +12323,11 @@ impl App {
                     .max(sub_w)
                     .max(faces_w)
                     .max(hint_w + 16.0 + btn_w * 2.0 + btn_gap);
-                let card_w = (body_w + pad * 2.0).clamp(440.0, (win_w - 48.0).max(440.0));
+                let card_w = (body_w + pad * 2.0).max(440.0).min((win_w - 24.0).max(1.0));
+                let title_display = crate::info::fit_text(g, RESTORE_TITLE, (card_w - pad * 2.0 - close - 12.0).max(1.0), 16.0, true);
+                let subtitle = crate::info::fit_text(g, &subtitle, (card_w - pad * 2.0).max(1.0), 12.5, false);
+                let hint = if hint_w + 16.0 + btn_w * 2.0 + btn_gap <= card_w - pad * 2.0 { hint } else { "" };
+                let btn_w = btn_w.min(((card_w - pad * 2.0 - btn_gap) / 2.0).max(1.0));
                 let title_y = 26.0_f32;
                 let sub_y = title_y + 26.0;
                 let faces_y = sub_y + 24.0;
@@ -12340,7 +12348,7 @@ impl App {
                 g.draw_text(
                     cx0 + pad,
                     cy0 + title_y,
-                    RESTORE_TITLE,
+                    &title_display,
                     gpu::DrawOpts {
                         font_size: 16.0,
                         color: theme::text(),
@@ -12545,7 +12553,8 @@ impl App {
             }
             // Keep the modal until every pane/tab has a live first frame.
             let mut restore_retry = None;
-            if self.restore_applying.is_some() || self.restore_progress.is_some() {
+            let mut restore_continue = None;
+            if restore_modal_visible {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
                 let progress = self.restore_progress.as_ref();
@@ -12555,34 +12564,45 @@ impl App {
                 let ready = progress.map_or(0, |p| p.ready);
                 let failed = progress.and_then(|p| p.failure.as_deref());
                 let msg = format!("창·탭 복원 중 · {ready}/{total} 준비");
-                let sub = failed.unwrap_or("모든 창이 준비되면 입력할 수 있어요");
-                let card_w = (g.measure_chrome_text(sub, 13.0, false) + 44.0)
-                    .max(360.0).min((win_w - 48.0).max(360.0));
-                let card_h = if failed.is_some() { 166.0 } else { 124.0 };
-                let x = ((win_w - card_w) / 2.0).round();
-                let y = ((win_h - card_h) / 2.0).round();
+                let sub = failed.unwrap_or("기다리거나 준비된 창부터 사용할 수 있어요");
+                let layout = crate::restore_progress::progress_layout(win_w, win_h);
+                let (x, y, card_w, card_h) = layout.card;
+                let width = (card_w - 32.0).max(1.0);
+                let msg = crate::info::fit_text(g, &msg, width, 16.0, true);
+                let lines = crate::info::fit_text_lines(g, sub, width, 13.0, false, 2, false);
                 g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
                 panel_rect_outlined(g, x, y, card_w, card_h, theme::radius_md() * 1.5, theme::surface_active());
-                g.draw_text(x + 22.0, y + 34.0, &msg, gpu::DrawOpts {
+                g.draw_text(x + 16.0, y + 20.0, &msg, gpu::DrawOpts {
                     font_size: 16.0, color: theme::text(), bold: true, italic: false,
                 });
-                g.draw_text(x + 22.0, y + 60.0, sub, gpu::DrawOpts {
-                    font_size: 13.0, color: theme::with_alpha(theme::text(), 0xB0), bold: false, italic: false,
-                });
-                let width = card_w - 44.0;
-                g.rect(x + 22.0, y + 82.0, width, 6.0, theme::surface());
+                for (i, line) in lines.iter().enumerate() {
+                    g.draw_text(x + 16.0, y + 48.0 + i as f32 * 18.0, line, gpu::DrawOpts {
+                        font_size: 13.0, color: theme::with_alpha(theme::text(), 0xB0), bold: false, italic: false,
+                    });
+                }
+                g.rect(x + 16.0, y + 92.0, width, 6.0, theme::surface());
                 let fraction = if total == 0 { 0.0 } else { ready as f32 / total as f32 };
-                g.rect(x + 22.0, y + 82.0, width * fraction, 6.0, theme::text());
-                if failed.is_some() {
-                    let rect = (x + card_w - 126.0, y + 110.0, 104.0, 34.0);
-                    panel_rect_outlined(g, rect.0, rect.1, rect.2, rect.3, theme::radius_md(), theme::surface());
-                    g.draw_text(rect.0 + 17.0, rect.1 + 22.0, "다시 시도", gpu::DrawOpts {
+                g.rect(x + 16.0, y + 92.0, width * fraction.clamp(0.0, 1.0), 6.0, theme::text());
+                for (label, rect, enabled) in [
+                    ("다시 시도", layout.retry, failed.is_some()),
+                    ("준비된 창부터 사용", layout.continue_button, progress.is_some()),
+                ] {
+                    if !enabled { continue; }
+                    let (mx, my) = self.cursor_px;
+                    let hover = mx >= rect.0 && mx <= rect.0 + rect.2 && my >= rect.1 && my <= rect.1 + rect.3;
+                    g.hover_pointer |= hover;
+                    panel_rect_outlined(g, rect.0, rect.1, rect.2, rect.3, theme::radius_md(), theme::raised_on(theme::surface(), hover));
+                    let label = crate::info::fit_text(g, label, (rect.2 - 16.0).max(1.0), 13.0, true);
+                    let tw = g.measure_chrome_text(&label, 13.0, true);
+                    g.draw_text(rect.0 + (rect.2 - tw) / 2.0, rect.1 + (rect.3 - 13.0) / 2.0, &label, gpu::DrawOpts {
                         font_size: 13.0, color: theme::text(), bold: true, italic: false,
                     });
-                    restore_retry = Some(rect);
                 }
+                restore_retry = failed.is_some().then_some(layout.retry);
+                restore_continue = progress.is_some().then_some(layout.continue_button);
             }
             self.restore_retry_rect = restore_retry;
+            self.restore_continue_rect = restore_continue;
             // 계정 전환 확인 — 인라인 웹에서 누른 것은 웹이 그리므로 메인 몫만 본다.
             if let Some(p) = self.account_switch_confirm.as_ref() {
                 if p.surface == crate::session::ConfirmSurface::Main {

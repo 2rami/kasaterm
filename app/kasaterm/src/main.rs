@@ -5202,6 +5202,7 @@ struct App {
     restore_applying: Option<(serde_json::Value, std::time::Instant)>,
     restore_progress: Option<restore_progress::RestoreProgress>,
     restore_retry_rect: Option<(f32, f32, f32, f32)>,
+    restore_continue_rect: Option<(f32, f32, f32, f32)>,
     /// Restore-prompt button hit rects, refreshed each frame: `(btn, rect)`.
     restore_btn_rects: Vec<(RestoreBtn, (f32, f32, f32, f32))>,
     /// 자동 스냅샷(강제 종료 대비) 상태 — 마지막 저장 시각, 그 뒤로 깨어난 적이
@@ -5935,6 +5936,7 @@ impl App {
             restore_applying: None,
             restore_progress: None,
             restore_retry_rect: None,
+            restore_continue_rect: None,
             restore_btn_rects: Vec::new(),
             session_saved_at: std::time::Instant::now(),
             session_touched: false,

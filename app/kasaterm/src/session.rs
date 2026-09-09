@@ -5780,7 +5780,7 @@ impl App {
     /// 과 같은 이유.
     pub(crate) fn save_session_state(&self) {
         self.save_aux_windows_state();
-        if self.restore_prompt.is_some() || self.restoration_blocks_input() {
+        if self.restore_prompt.is_some() || self.restore_applying.is_some() || self.restore_progress.is_some() {
             return;
         }
         if let Some(state) = self.session_state_json() {
@@ -5801,7 +5801,7 @@ impl App {
         // 복원 창이 떠 있는 동안은 절대 저장하지 않는다 — 사용자가 "복원"을 고르기
         // 전의 화면은 빈 새 세션이라, 자동 저장이 복원 대상 자체를 덮어써 버린다
         // (되돌릴 수 없는 자해). 선택이 끝나면 그 클릭이 다시 touched 를 세운다.
-        if self.restore_prompt.is_some() || self.restoration_blocks_input() {
+        if self.restore_prompt.is_some() || self.restore_applying.is_some() || self.restore_progress.is_some() {
             return;
         }
         let Some(state) = self.session_state_json() else {
