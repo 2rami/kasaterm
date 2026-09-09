@@ -21,6 +21,8 @@ class TerminalPalette {
     required this.cursor,
     required this.ansi,
     this.minContrast = DesignTokens.defaultMinContrast,
+    this.sourceFg,
+    this.sourceBg,
   });
 
   /// 데스크톱이 지금 쓰는 색 그대로 — 같은 학생 화면이 폰에서도 같은 얼굴로 보인다.
@@ -30,7 +32,9 @@ class TerminalPalette {
       bg = Color(t.bg),
       cursor = Color(t.accent),
       ansi = t.ansi,
-      minContrast = t.minContrast;
+      minContrast = t.minContrast,
+      sourceFg = null,
+      sourceBg = null;
 
   final bool dark;
   final Color fg;
@@ -38,6 +42,32 @@ class TerminalPalette {
   final Color cursor;
   final List<int> ansi;
   final double minContrast;
+  final Color? sourceFg;
+  final Color? sourceBg;
+
+  /// Explicit phone brightness applies to the terminal too, not just its chrome.
+  /// Keep source tokens for student accents and exact default-RGB translation;
+  /// arbitrary syntax/diff RGB colors must not be recolored as theme colors.
+  static TerminalPalette forViewer(
+    BuildContext context, {
+    required ThemeMode mode,
+    DesignTokens? source,
+  }) {
+    if (mode == ThemeMode.system && source != null) {
+      return TerminalPalette.fromTokens(source);
+    }
+    final local = of(context);
+    return TerminalPalette(
+      dark: local.dark,
+      fg: local.fg,
+      bg: local.bg,
+      cursor: local.cursor,
+      ansi: local.ansi,
+      minContrast: source?.minContrast ?? local.minContrast,
+      sourceFg: source == null ? null : Color(source.fg),
+      sourceBg: source == null ? null : Color(source.bg),
+    );
+  }
 
   /// 서버 색을 아직 못 받았을 때의 앱 기본색.
   static TerminalPalette of(BuildContext context) {
@@ -55,8 +85,17 @@ class TerminalPalette {
   Color resolve(CellColor c, {required bool foreground}) => switch (c) {
     DefaultColor() => foreground ? fg : bg,
     IndexColor(:final index) => Color(palette256(index, base16: ansi)),
-    RgbColor(:final r, :final g, :final b) => Color.fromARGB(255, r, g, b),
+    RgbColor(:final r, :final g, :final b) => _resolveRgb(
+      Color.fromARGB(255, r, g, b),
+      foreground: foreground,
+    ),
   };
+
+  Color _resolveRgb(Color color, {required bool foreground}) {
+    if (foreground && color == sourceFg) return fg;
+    if (!foreground && color == sourceBg) return bg;
+    return color;
+  }
 
   @override
   bool operator ==(Object other) =>
@@ -66,11 +105,21 @@ class TerminalPalette {
       other.bg == bg &&
       other.cursor == cursor &&
       other.minContrast == minContrast &&
+      other.sourceFg == sourceFg &&
+      other.sourceBg == sourceBg &&
       listEquals(other.ansi, ansi);
 
   @override
-  int get hashCode =>
-      Object.hash(dark, fg, bg, cursor, minContrast, Object.hashAll(ansi));
+  int get hashCode => Object.hash(
+    dark,
+    fg,
+    bg,
+    cursor,
+    minContrast,
+    sourceFg,
+    sourceBg,
+    Object.hashAll(ansi),
+  );
 }
 
 const _fontFamily = 'TermMono';

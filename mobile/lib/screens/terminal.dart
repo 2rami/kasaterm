@@ -8,6 +8,7 @@ import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
 import '../term_session.dart';
+import '../theme_prefs.dart';
 
 /// 학생 하나의 화면. 위는 격자(또는 그림), 아래는 키 줄과 답장 입력창.
 class TerminalScreen extends StatefulWidget {
@@ -360,9 +361,11 @@ class _TerminalScreenState extends State<TerminalScreen>
 
   Widget _view(TermSession s) {
     final tokens = s.tokens;
-    final palette = tokens == null
-        ? TerminalPalette.of(context)
-        : TerminalPalette.fromTokens(tokens);
+    final palette = TerminalPalette.forViewer(
+      context,
+      mode: phoneThemeMode.value,
+      source: tokens,
+    );
     if (_wrap) {
       final pane = widget.pane;
       return WrappedCanvas(
