@@ -436,3 +436,17 @@ pub async fn push_loop() {
         primed = true;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// 진짜 열쇠가 있는 기계에서만 — ring 이 애플 .p8 을 읽고 서명하는지.
+    #[test]
+    fn apple_p8_signs_when_present() {
+        let Some(key) = super::load_key() else { return };
+        if std::fs::metadata(super::expand(&key.p8)).is_err() {
+            return;
+        }
+        let tok = super::jwt(&key).expect("애플 .p8 로 ES256 서명");
+        assert_eq!(tok.split('.').count(), 3);
+    }
+}
