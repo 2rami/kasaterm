@@ -66,6 +66,8 @@ pub(crate) const FAKE_CLAUDE_SCRIPT: &str = concat!(
         "\"$d/claude\"\n",
 );
 
+static AUTOSETTINGS_SCROLL: std::sync::Mutex<Option<f32>> = std::sync::Mutex::new(None);
+
 impl App {
     /// Headless verification: arm a clean exit after KASATERM_AUTOQUIT_MS so a
     /// background run exercises the save-on-exit path (and thus the next
@@ -3141,6 +3143,22 @@ impl App {
         }
     }
     /// Headless inline-settings repro: open settings after
+    /// `KASATERM_AUTOSETTINGS_SCROLL` 이 예약한 스크롤을 한계가 잡힌 뒤 한 번 적용한다.
+    /// 설정 틱이 부른다.
+    pub(crate) fn pump_autosettings_scroll(&mut self) {
+        let Some(px) = AUTOSETTINGS_SCROLL.lock().ok().and_then(|g| *g) else {
+            return;
+        };
+        if self.settings_scene.scroll_by(px) {
+            *AUTOSETTINGS_SCROLL.lock().unwrap() = None;
+            eprintln!("[autosettings] 스크롤 {px}px 적용");
+            self.chrome_dirty = true;
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+        }
+    }
+
     /// `KASATERM_AUTOSETTINGS_MS`, on the category named in `KASATERM_AUTOSETTINGS`
     /// ("appearance" / "shell" / "claude" / "students" / "feedback", default General), then arm
     /// the requested delay and apply an optional settings action.
@@ -3403,6 +3421,24 @@ impl App {
                     self.settings_apply(SettingsAction::FocusPaletteHex(i));
                 }
             }
+            // `focus-device:<i>` — 기기 색 i 번째 줄이 골라져 프리셋·선택기가 펼쳐진 상태.
+            a if a.starts_with("focus-device:") => {
+                if let Ok(i) = a.trim_start_matches("focus-device:").parse::<usize>() {
+                    eprintln!("[autosettings] 기기 색 {i} 포커스");
+                    self.settings_apply(SettingsAction::FocusDeviceHex(i));
+                }
+            }
+            // `device-preset:<i>:<hex>` — 기기 i 의 색을 프리셋처럼 한 번에 굳힌다.
+            // 설정 파일의 `device_colors` 와 캡처의 색이 함께 바뀌는지 본다.
+            a if a.starts_with("device-preset:") => {
+                let mut parts = a.trim_start_matches("device-preset:").splitn(2, ':');
+                if let (Some(Ok(i)), Some(hex)) =
+                    (parts.next().map(str::parse::<usize>), parts.next())
+                {
+                    eprintln!("[autosettings] 기기 {i} 색 → {hex}");
+                    self.settings_apply(SettingsAction::DevicePreset(i, hex.to_string()));
+                }
+            }
             // `picker-probe:<i>` — 클릭 없이 픽 로직만 검증: Hue 1/3(=120°),
             // SV (0.75, 위에서 1/4) 를 찍고 결과 hex 를 로그로 남긴다.
             // 기대값 #30bf30 — hsv(120, .75, .75). 캡처는 렌더를, 이건 수학을 본다.
@@ -3420,6 +3456,16 @@ impl App {
                 }
             }
             other => eprintln!("[autosettings] 모르는 액션 '{other}'"),
+        }
+        // 화면 아래쪽 섹션(기기 색·배율 등)은 첫 화면에 안 잡힌다 — 캡처 전에
+        // 그만큼 내려 둔다. 픽셀 단위. 스크롤 한계는 첫 페인트가 재므로 여기서
+        // 바로 내리면 0 에 잘린다 — 틱이 한계가 잡힌 뒤 적용한다.
+        if let Some(px) = std::env::var("KASATERM_AUTOSETTINGS_SCROLL")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+        {
+            eprintln!("[autosettings] 스크롤 {px}px 예약");
+            *AUTOSETTINGS_SCROLL.lock().unwrap() = Some(px);
         }
         // 피드백 본문은 키 이벤트로만 채워지는데 헤드리스엔 그 경로가 없다 —
         // 버퍼를 직접 심어 wrap·캐럿·활성 버튼을 캡처로 본다.

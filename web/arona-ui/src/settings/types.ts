@@ -113,6 +113,11 @@ export type AppearanceValues = {
   custom_active: string;
   /// 이 운영체제에서 화면 집기(스포이드)가 되는가 — 안 되면 단추를 아예 안 낸다.
   eyedropper: boolean;
+  /// 기기별 색 — 이 기기가 맨 앞, 그 뒤 명부 순. pane 헤더 칩·배치도 칸·정보 탭이
+  /// 같은 색을 쓴다.
+  device_colors: DeviceColorRow[];
+  /// 서로 갈라 보이는 기본 다섯 색 — 휠 없이 한 번에 고르는 길.
+  device_presets: { name: string; hex: string }[];
   palette_keys: string[];
   /// UI 색(palette_keys 순서) 뒤에 ANSI 16색이 이어 붙는다.
   palette_hex: string[];
@@ -127,6 +132,15 @@ export type AppearanceValues = {
   font_size: number;
   font_size_default: number;
   ui_zoom: number;
+};
+
+export type DeviceColorRow = {
+  label: string;
+  local: boolean;
+  hex: string;
+  default_hex: string;
+  /// 사용자가 직접 고른 색이 저장돼 있다 — 「기본값」 단추가 뜨는 조건.
+  custom: boolean;
 };
 
 /// 형태 프리셋 한 벌. 카드가 **자기 실루엣으로** 그려져야 고르기 전에 형태가

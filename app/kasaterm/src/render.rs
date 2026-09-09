@@ -5,7 +5,7 @@ pub(crate) use crate::screenread::*;
 pub(crate) use crate::sprites::*;
 
 #[path = "pane_identity.rs"]
-mod pane_identity;
+pub(crate) mod pane_identity;
 pub(crate) use pane_identity::machine_tint;
 use pane_identity::{MachineIdentity, PaneIdentity};
 #[path = "terminal_scene.rs"]
@@ -90,6 +90,10 @@ struct SidebarRowInfo {
     /// 원격 pane 이면 그 기계 이름. 페인트 루프는 self 를 못 읽으므로(2887 주석)
     /// 여기서 프레임당 1회 떠 둔다.
     machine: Option<String>,
+    /// 배치도 칸을 물들일 기기 이름 — 로컬 pane 도 든다. 헤더 칩과 **같은 이름
+    /// 풀이**(`MachineIdentity::for_pane`)를 쓴다: 링크에 적힌 이름과 명부 이름이
+    /// 다르면 같은 기계가 헤더와 배치도에서 다른 색이 된다(2026-09-10 지적).
+    device: Option<String>,
 }
 
 /// 도는 시간을 칸에 얹을 짧은 말로. **1분 미만은 None** — 잠깐 도는 일에까지 숫자가
@@ -2166,16 +2170,13 @@ impl App {
                     self.display_pane_char(&ws, id)
                 }
                 .unwrap_or_default();
-                let machine = kasa_mcp::remote::remote_info(id).map(|i| {
-                    if i.label.is_empty() {
-                        i.base
-                            .trim_start_matches("http://")
-                            .trim_start_matches("https://")
-                            .to_string()
-                    } else {
-                        i.label
-                    }
-                });
+                let identity = MachineIdentity::for_pane(
+                    Some(id.as_str()),
+                    crate::info::cached_local_machine_name(),
+                );
+                let machine = identity.remote.then(|| identity.label.clone());
+                let device = (identity.remote || pane_identity::multiple_devices_known())
+                    .then_some(identity.label);
                 let (is_cur, icon, tab_peeks) = {
                     let ws = self.ws.lock().unwrap();
                     let is_cur = ws.active_pane.as_deref() == Some(id.as_str());
@@ -2276,6 +2277,7 @@ impl App {
                     compact_pct: act.and_then(|a| a.compact_pct),
                     busy_secs,
                     machine,
+                    device,
                 }
             }
         };
@@ -3957,7 +3959,7 @@ impl App {
                     // 활성 칸은 **테두리로만** 표시한다. 통으로 칠하면 pane 이 하나인
                     // 방에서 카드 머리 아래가 통짜 accent 덩어리가 되어, 배치도가
                     // 아니라 잘못 칠해진 자리로 읽힌다(실측).
-                    if (cur || signal.is_some() || info.machine.is_some()) && mw > 5.0 && mh > 5.0 {
+                    if (cur || signal.is_some() || info.device.is_some()) && mw > 5.0 && mh > 5.0 {
                         round_rect(
                             g,
                             mx + 1.5,
@@ -3969,7 +3971,7 @@ impl App {
                                 theme::surface_active()
                             } else {
                                 theme::panel_bg()
-                            }, info.machine.as_deref()),
+                            }, info.device.as_deref()),
                         );
                     }
                     // 숨쉬는 건 안쪽 판이다. 테두리까지 같이 흐려지면 칸의 윤곽이
@@ -4164,7 +4166,7 @@ impl App {
                             theme::surface_hover()
                         } else {
                             theme::with_alpha(theme::surface(), 0x80)
-                        }, info.machine.as_deref()),
+                        }, info.device.as_deref()),
                     );
                     if let Some((col, period)) = signal {
                         if mw > 5.0 && mh > 5.0 {
