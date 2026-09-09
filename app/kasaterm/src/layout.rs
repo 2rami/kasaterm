@@ -1,11 +1,41 @@
 //! pane 레이아웃 조작 — split/move/close/focus/swap/drop/divider/zoom/tab + 좌표·resize. daemon-authoritative.
 use super::*;
 
-struct PendingRemoteInput(Arc<Mutex<Vec<u8>>>);
+const REMOTE_PENDING_INPUT_LIMIT: usize = 64 * 1024;
+const REMOTE_PENDING_INPUT_ERROR: &str = "연결 대기 중 입력이 너무 커서 새 셸 생성을 취소했어요";
+
+#[derive(Default)]
+struct PendingRemoteBuffer {
+    bytes: Vec<u8>,
+    overflowed: bool,
+}
+
+impl PendingRemoteBuffer {
+    fn push(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if self.overflowed || bytes.len() > REMOTE_PENDING_INPUT_LIMIT - self.bytes.len() {
+            self.bytes.clear();
+            self.overflowed = true;
+            return Err(std::io::Error::other(REMOTE_PENDING_INPUT_ERROR));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+}
+
+struct PendingRemoteInput {
+    input: Arc<Mutex<PendingRemoteBuffer>>,
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+}
 
 impl std::io::Write for PendingRemoteInput {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
+        let mut input = self.input.lock().unwrap();
+        let already_failed = input.overflowed;
+        let result = input.push(bytes);
+        if result.is_err() && !already_failed {
+            let _ = self.proxy.send_event(UserEvent::RepoCatchup(REMOTE_PENDING_INPUT_ERROR.to_string()));
+        }
+        result?;
         Ok(bytes.len())
     }
 
@@ -15,7 +45,8 @@ impl std::io::Write for PendingRemoteInput {
 pub(crate) struct RemoteShellReady {
     pane: String,
     expected: std::sync::Weak<kasa_pty::PtySession>,
-    input: Arc<Mutex<Vec<u8>>>,
+    input: Arc<Mutex<PendingRemoteBuffer>>,
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     base: String,
     remote_id: Option<String>,
     outcome: Mutex<Option<std::result::Result<Arc<kasa_pty::PtySession>, String>>>,
@@ -33,11 +64,21 @@ impl Drop for RemoteShellReady {
         if self.outcome.get_mut().unwrap().is_some() {
             if let Some(remote_id) = self.remote_id.take() {
                 let base = self.base.clone();
+                let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let _ = kasa_mcp::remote::close_remote_pane(&base, &remote_id, None, true);
+                    cleanup_new_remote_shell(&base, &remote_id, &proxy);
                 });
             }
         }
+    }
+}
+
+fn cleanup_new_remote_shell(base: &str, pane: &str, proxy: &winit::event_loop::EventLoopProxy<UserEvent>) {
+    if let Err(error) = kasa_mcp::remote::close_remote_pane(base, pane, None, true) {
+        eprintln!("[remote-spawn] cleanup failed: base={base} pane={pane}: {error:#}");
+        let _ = proxy.send_event(UserEvent::RepoCatchup(
+            "새 원격 셸을 정리하지 못했어요. 미니 창에 남아 있을 수 있어요".to_string(),
+        ));
     }
 }
 
@@ -926,14 +967,14 @@ impl App {
                     .and_then(|pane| pane.get("cwd").and_then(|v| v.as_str()).map(str::to_string))
             })
             .or(info.remote_cwd);
-        let input = Arc::new(Mutex::new(Vec::new()));
+        let input = Arc::new(Mutex::new(PendingRemoteBuffer::default()));
         let (events, receiver) = crossbeam_channel::unbounded();
         let _ = events.send(kasa_pty::ExtEvent::Bytes("원격 셸 연결 중…\r\n".as_bytes().to_vec()));
         let pending = Arc::new(kasa_pty::PtySession::start_external(
             kasa_pty::PtyOptions { pane_id: new_id.to_string(), ..Default::default() },
             kasa_pty::ExternalIo {
                 events: receiver,
-                writer: Box::new(PendingRemoteInput(input.clone())),
+                writer: Box::new(PendingRemoteInput { input: input.clone(), proxy: self.proxy.clone() }),
                 on_resize: Arc::new(move |_, _| {
                     let _keep_open = &events;
                 }),
@@ -946,10 +987,16 @@ impl App {
             if expected.strong_count() == 0 { return; }
             let mut remote_id = None;
             let outcome = (|| -> Result<Arc<kasa_pty::PtySession>> {
+                if input.lock().unwrap().overflowed {
+                    anyhow::bail!(REMOTE_PENDING_INPUT_ERROR);
+                }
                 let id = kasa_mcp::remote::spawn_shell_pane(&info.base, cwd.as_deref(), None)?;
                 remote_id = Some(id.clone());
                 if expected.strong_count() == 0 {
                     anyhow::bail!("생성 중인 pane이 닫혔어요");
+                }
+                if input.lock().unwrap().overflowed {
+                    anyhow::bail!(REMOTE_PENDING_INPUT_ERROR);
                 }
                 let remote = kasa_mcp::remote::connect_view(
                     kasa_mcp::remote::RemoteSpec {
@@ -970,11 +1017,11 @@ impl App {
             })().map_err(|error| format!("{error:#}"));
             if outcome.is_err() {
                 if let Some(id) = remote_id.take() {
-                    let _ = kasa_mcp::remote::close_remote_pane(&info.base, &id, None, true);
+                    cleanup_new_remote_shell(&info.base, &id, &proxy);
                 }
             }
             let ready = Arc::new(RemoteShellReady {
-                pane, expected, input, base: info.base, remote_id,
+                pane, expected, input, proxy: proxy.clone(), base: info.base, remote_id,
                 outcome: Mutex::new(Some(outcome)),
             });
             let _ = proxy.send_event(UserEvent::RemoteShellReady(ready));
@@ -993,12 +1040,25 @@ impl App {
             return;
         }
         let Some(outcome) = ready.outcome.lock().unwrap().take() else { return };
+        let (input, overflowed) = {
+            let mut pending = ready.input.lock().unwrap();
+            (std::mem::take(&mut pending.bytes), pending.overflowed)
+        };
+        let outcome = if overflowed {
+            // 일부만 실행하면 긴 명령이 다른 뜻이 되므로 입력 전체를 폐기한다.
+            if outcome.is_ok() {
+                self.close_owned_remote_surface(&ready.pane);
+                kasa_mcp::remote::kill_remote(&ready.pane);
+            }
+            Err(REMOTE_PENDING_INPUT_ERROR.to_string())
+        } else {
+            outcome
+        };
         match outcome {
             Ok(session) => {
                 self.insert_pty(ready.pane.clone(), session.clone());
                 self.pump_pty_screens(session.screens.clone(), ready.pane.clone(), Arc::downgrade(&session));
                 self.dead_panes.lock().unwrap().retain(|pane| pane != &ready.pane);
-                let input = std::mem::take(&mut *ready.input.lock().unwrap());
                 if !input.is_empty() {
                     let _ = session.send_bytes(&input);
                 }
@@ -2304,15 +2364,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
         // HTTP 라 GUI 스레드 밖에서 — 저쪽이 안 닿으면 10초를 여기서 멈추게 된다.
         if let Some(info) = kasa_mcp::remote::remote_info(target) {
             if info.owned && info.remote_id.starts_with('%') && !self.remote_keep.remove(target) {
+                let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = kasa_mcp::remote::close_remote_pane(
-                        &info.base,
-                        &info.remote_id,
-                        None,
-                        true,
-                    ) {
-                        eprintln!("[to] 원격 pane {} 닫기 실패(무시): {e:#}", info.remote_id);
-                    }
+                    cleanup_new_remote_shell(&info.base, &info.remote_id, &proxy);
                 });
             }
         }
@@ -2975,6 +3029,33 @@ fn leaf_is_orphan(has_pty: bool, has_grid: bool, grid_needs_pty: bool) -> bool {
     // 에 그 자리가 30분 넘게 `Puzzling… (16m 29s)` 를 그대로 띄운 채 앉아 있었고,
     // board 에도 안 잡혀 사용자가 치울 방법이 없었다.
     !has_grid || grid_needs_pty
+}
+
+#[cfg(test)]
+mod remote_pending_input_tests {
+    use super::*;
+
+    #[test]
+    fn pending_input_preserves_exact_bytes_through_the_limit() {
+        let mut buffer = PendingRemoteBuffer::default();
+        buffer.push(b"printf ").unwrap();
+        let suffix = vec![b'x'; REMOTE_PENDING_INPUT_LIMIT - 7];
+        buffer.push(&suffix).unwrap();
+        assert_eq!(buffer.bytes.len(), REMOTE_PENDING_INPUT_LIMIT);
+        assert!(buffer.bytes.starts_with(b"printf "));
+        assert!(!buffer.overflowed);
+    }
+
+    #[test]
+    fn overflow_discards_everything_and_rejects_later_input() {
+        let mut buffer = PendingRemoteBuffer::default();
+        buffer.push(b"dangerous prefix ").unwrap();
+        assert!(buffer.push(&vec![b'x'; REMOTE_PENDING_INPUT_LIMIT]).is_err());
+        assert!(buffer.bytes.is_empty());
+        assert!(buffer.overflowed);
+        assert!(buffer.push(b"\n").is_err());
+        assert!(buffer.bytes.is_empty());
+    }
 }
 
 #[cfg(test)]
