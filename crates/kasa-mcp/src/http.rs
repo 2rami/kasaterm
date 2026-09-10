@@ -5373,6 +5373,56 @@ async fn term_notes_delete_post(body: Bytes) -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true, "removed": n }))
 }
 
+/// `GET /term/clipboard` — 최근 복사 목록(미리보기·id·비밀 여부). 본문은 안 싣는다.
+async fn term_clipboard_list(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    Json(serde_json::json!({ "ok": true, "items": backend.clipboard_history() }))
+}
+
+/// `POST /term/clipboard {text, secret?}` — 폰에서 복사한 것을 이 기계 클립보드로.
+async fn term_clipboard_post(backend: Arc<dyn Backend>, body: Bytes) -> impl IntoResponse {
+    #[derive(serde::Deserialize)]
+    struct Req {
+        text: String,
+        #[serde(default)]
+        secret: bool,
+    }
+    let req: Req = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": format!("본문을 못 읽었어요: {e}") })),
+    };
+    if req.text.trim().is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "빈 글이에요" }));
+    }
+    match backend.clipboard_set_opts(&req.text, req.secret) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "chars": req.text.chars().count() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+/// `GET /term/clipboard/{id}` — 한 칸의 본문. 폰이 제 클립보드로 가져갈 때.
+async fn term_clipboard_item(backend: Arc<dyn Backend>, AxPath(id): AxPath<u64>) -> impl IntoResponse {
+    match backend.clipboard_item(id) {
+        Ok(text) => Json(serde_json::json!({ "ok": true, "text": text })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+/// `POST /term/clipboard/pick {id}` — 한 칸을 이 기계 클립보드로 되올린다.
+async fn term_clipboard_pick(backend: Arc<dyn Backend>, body: Bytes) -> impl IntoResponse {
+    #[derive(serde::Deserialize)]
+    struct Req {
+        id: u64,
+    }
+    let req: Req = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": format!("본문을 못 읽었어요: {e}") })),
+    };
+    match backend.clipboard_pick(req.id) {
+        Ok(text) => Json(serde_json::json!({ "ok": true, "chars": text.chars().count() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
 /// 쪽지에 딸린 pane 사진.
 async fn term_notes_image(AxPath(name): AxPath<String>) -> impl IntoResponse {
     let id = name
@@ -7097,6 +7147,7 @@ pub fn spawn_http_server_opts(
                 let migrate_backend = backend.clone();
                 let persona_backend = backend.clone();
                 let panes_backend = backend.clone();
+                let clip_backend = backend.clone();
                 let shot_backend = backend.clone();
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
@@ -7317,6 +7368,32 @@ pub fn spawn_http_server_opts(
         .route("/term/push-token", post(term_push_token_post))
                     .route("/term/notes/read", post(term_notes_read_post))
                     .route("/term/notes/delete", post(term_notes_delete_post))
+                    // 클립보드 — 하단바 「최근 복사」 목록을 폰과 나눈다.
+                    .route(
+                        "/term/clipboard",
+                        get({
+                            let b = clip_backend.clone();
+                            move || term_clipboard_list(b.clone())
+                        })
+                        .post({
+                            let b = clip_backend.clone();
+                            move |body| term_clipboard_post(b.clone(), body)
+                        }),
+                    )
+                    .route(
+                        "/term/clipboard/pick",
+                        post({
+                            let b = clip_backend.clone();
+                            move |body| term_clipboard_pick(b.clone(), body)
+                        }),
+                    )
+                    .route(
+                        "/term/clipboard/{id}",
+                        get({
+                            let b = clip_backend.clone();
+                            move |p| term_clipboard_item(b.clone(), p)
+                        }),
+                    )
                     .route("/term/notes/{name}", get(term_notes_image))
                     // 폰 허브·유저별 주소 관리·다른 기계로 넘기는 문(mobile.rs 머리말).
                     .route("/hub", get(hub_page))

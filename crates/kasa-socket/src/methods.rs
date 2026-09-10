@@ -165,6 +165,8 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.agent_status" => surface_agent_status(backend, id, &req.params),
         "clipboard.set" => clipboard_set(backend, id, &req.params),
         "clipboard.get" => clipboard_get(backend, id),
+        "clipboard.list" => clipboard_list(backend, id),
+        "clipboard.pick" => clipboard_pick(backend, id, &req.params),
         unknown => Response {
             id,
             ok: false,
@@ -415,7 +417,8 @@ fn clipboard_set(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     if body.is_empty() {
         return param_err(id, "복사할 것이 없다 — 빈 글은 클립보드를 지우기만 한다");
     }
-    match backend.clipboard_set(&body) {
+    let secret = params.get("secret").and_then(Value::as_bool).unwrap_or(false);
+    match backend.clipboard_set_opts(&body, secret) {
         // 담은 글자 수를 돌려준다 — 부른 쪽이 「무엇이 얼마나」 복사됐는지 사람에게
         // 그대로 옮길 수 있어야 한다.
         Ok(()) => Response::success(
@@ -426,13 +429,33 @@ fn clipboard_set(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     }
 }
 
-/// 지금 클립보드에 담긴 글.
+/// 지금 클립보드에 담긴 글. `secret` 이 참이면 부른 쪽(CLI)이 값을 찍지 않는다.
 fn clipboard_get(backend: &dyn Backend, id: Value) -> Response {
     match backend.clipboard_get() {
         Ok(text) => Response::success(
             id,
-            json!({"text": text.clone(), "chars": text.chars().count()}),
+            json!({
+                "text": text.clone(),
+                "chars": text.chars().count(),
+                "secret": backend.clipboard_secret(&text),
+            }),
         ),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// 최근 복사 목록 — 미리보기만.
+fn clipboard_list(backend: &dyn Backend, id: Value) -> Response {
+    Response::success(id, json!({ "items": backend.clipboard_history() }))
+}
+
+/// 목록의 한 칸을 다시 클립보드로 — `id` 로.
+fn clipboard_pick(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let Some(item) = params.get("id").and_then(Value::as_u64) else {
+        return param_err(id, "clipboard.pick requires `id` (number)");
+    };
+    match backend.clipboard_pick(item) {
+        Ok(text) => Response::success(id, json!({"ok": true, "chars": text.chars().count()})),
         Err(e) => backend_err(id, e),
     }
 }

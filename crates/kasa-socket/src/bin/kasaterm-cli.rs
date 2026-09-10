@@ -137,6 +137,114 @@ fn run() -> Result<Option<Response>> {
         print_rooms(&socket_path)?;
         return Ok(None);
     }
+    // 클립보드 — 값이 대화·인자·기록에 찍히지 않게 하는 문 셋(2026-09-10 지시 「env 키
+    // 같은 것도 클립보드에 있어 하면 안전하게」). usemap CLI 의 `--clipboard` 와 같은 생각.
+    if cmd == "copy" && args.first().is_some_and(|a| a == "--secret") {
+        let socket_path = resolve_socket_path()?;
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).context("표준입력 읽기")?;
+        let text = text.trim_end_matches(['\n', '\r']).to_string();
+        if text.trim().is_empty() {
+            return Err(anyhow!("copy --secret 은 값을 표준입력으로 받는다 — `printf '%s' \"$KEY\" | kasaterm-cli copy --secret`"));
+        }
+        let req = Request {
+            id: json!("copy-secret"),
+            method: "clipboard.set".into(),
+            params: json!({ "text": text, "secret": true }),
+        };
+        let resp = roundtrip(&socket_path, &req)?;
+        if !resp.ok {
+            return Err(anyhow!("{}", resp.error.as_ref().map(|e| e.message.as_str()).unwrap_or("복사 실패")));
+        }
+        println!("비밀값 복사됨 · {}자 — 목록·폰엔 가려 보인다", text.chars().count());
+        return Ok(None);
+    }
+    if cmd == "clips" {
+        let socket_path = resolve_socket_path()?;
+        let req = Request { id: json!("clips"), method: "clipboard.list".into(), params: json!({}) };
+        let resp = roundtrip(&socket_path, &req)?;
+        let items = resp.result.as_ref().and_then(|v| v.get("items")).and_then(Value::as_array).cloned().unwrap_or_default();
+        if items.is_empty() {
+            println!("아직 복사한 것이 없다");
+        }
+        for (i, it) in items.iter().enumerate() {
+            let id = it.get("id").and_then(Value::as_u64).unwrap_or(0);
+            let secret = it.get("secret").and_then(Value::as_bool).unwrap_or(false);
+            let preview = it.get("preview").and_then(Value::as_str).unwrap_or("");
+            let chars = it.get("chars").and_then(Value::as_u64).unwrap_or(0);
+            println!("{:>2}. #{id:<4} {}{preview}  ({chars}자)", i + 1, if secret { "[비밀] " } else { "" });
+        }
+        return Ok(None);
+    }
+    if cmd == "paste" && !args.is_empty() {
+        let socket_path = resolve_socket_path()?;
+        let get = Request { id: json!("paste"), method: "clipboard.get".into(), params: json!({}) };
+        let resp = roundtrip(&socket_path, &get)?;
+        if !resp.ok {
+            return Err(anyhow!("{}", resp.error.as_ref().map(|e| e.message.as_str()).unwrap_or("클립보드 읽기 실패")));
+        }
+        let result = resp.result.clone().unwrap_or(Value::Null);
+        let text = result.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+        let secret = result.get("secret").and_then(Value::as_bool).unwrap_or(false);
+        if text.is_empty() {
+            return Err(anyhow!("클립보드가 비었다"));
+        }
+        match args[0].as_str() {
+            "--show" => {
+                println!("{text}");
+                return Ok(None);
+            }
+            "--into" => {
+                // 값은 이 프로세스에서 pane 으로 곧장 간다 — 부른 쪽(캐릭터) 화면에는 글자
+                // 수만 남는다. 괄호붙임(bracketed paste)으로 감싸 한 덩어리로 들어가고,
+                // Enter 는 안 친다 — 붙인 뒤 사람이 확인하고 넘기는 자리다.
+                let surface = args
+                    .get(1)
+                    .cloned()
+                    .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()))
+                    .ok_or_else(|| anyhow!("paste --into 뒤에 pane 을 주거나 $KASATERM_PANE_ID 가 있어야 한다"))?;
+                let send = Request {
+                    id: json!("paste-into"),
+                    method: "surface.send_text".into(),
+                    params: json!({ "surface_id": surface, "text": format!("\x1b[200~{text}\x1b[201~") }),
+                };
+                let r = roundtrip(&socket_path, &send)?;
+                if !r.ok {
+                    return Err(anyhow!("{}", r.error.as_ref().map(|e| e.message.as_str()).unwrap_or("붙여넣기 실패")));
+                }
+                println!("{surface} 에 붙여넣음 · {}자{}", text.chars().count(), if secret { " (비밀값)" } else { "" });
+                return Ok(None);
+            }
+            "--env" => {
+                let var = args.get(1).filter(|v| !v.is_empty() && *v != "--").cloned()
+                    .ok_or_else(|| anyhow!("paste --env <VAR> -- <명령…>"))?;
+                let dash = args.iter().position(|a| a == "--").ok_or_else(|| anyhow!("paste --env <VAR> -- <명령…> — `--` 뒤에 돌릴 명령"))?;
+                let command = &args[dash + 1..];
+                let Some((prog, rest)) = command.split_first() else {
+                    return Err(anyhow!("`--` 뒤에 돌릴 명령이 없다"));
+                };
+                let status = std::process::Command::new(prog)
+                    .args(rest)
+                    .env(&var, &text)
+                    .status()
+                    .with_context(|| format!("{prog} 실행"))?;
+                std::process::exit(status.code().unwrap_or(1));
+            }
+            other => return Err(anyhow!("paste 의 모르는 옵션 {other} — --into · --env · --show")),
+        }
+    }
+    if cmd == "paste" {
+        // 값을 찍기 전에 비밀인지 본다 — 찍힌 값은 대화에서 못 지운다.
+        let socket_path = resolve_socket_path()?;
+        let get = Request { id: json!("paste"), method: "clipboard.get".into(), params: json!({}) };
+        let resp = roundtrip(&socket_path, &get)?;
+        if resp.ok && resp.result.as_ref().and_then(|r| r.get("secret")).and_then(Value::as_bool).unwrap_or(false) {
+            let chars = resp.result.as_ref().and_then(|r| r.get("chars")).and_then(Value::as_u64).unwrap_or(0);
+            println!("클립보드에 비밀값이 있다({chars}자) — 값을 안 찍는다. pane 에 붙이려면 `paste --into`, 명령에 주려면 `paste --env VAR -- <명령>`, 정말 봐야 하면 `paste --show`.");
+            return Ok(None);
+        }
+        return Ok(Some(resp));
+    }
     // `split --count N` 은 **한 번의 호출로** pane N 개를 배치한다.
     //
     // 예전엔 여기서 split 을 N 번 부르면서 2회차부터 직전에 만든 pane 을 대상으로
@@ -1096,7 +1204,11 @@ fn print_help() {
     );
     eprintln!("  kasaterm-cli copy  <텍스트>                # 클립보드에 넣는다 — 사람이 Cmd+V 로 쓴다
   kasaterm-cli copy  --surface <id> [줄수]   # 그 pane 의 보이는 화면을 클립보드로(기본 200줄)
-  kasaterm-cli paste                         # 지금 클립보드에 담긴 글 읽기
+  kasaterm-cli copy  --secret                # 표준입력의 값을 비밀로 — 목록·토스트·폰에 가려 보인다(ps·기록에 안 남는다)
+  kasaterm-cli paste                         # 지금 클립보드에 담긴 글 읽기 — 비밀값이면 거부한다(--show 로 강제)
+  kasaterm-cli paste --into [%surface]       # 클립보드를 그 pane 에 붙여넣는다 — 값을 안 보고 넘기는 길(기본 이 pane)
+  kasaterm-cli paste --env <VAR> -- <명령…>   # 클립보드를 환경변수로 준 채 명령을 돈다 — 키를 대화에 안 찍는 길
+  kasaterm-cli clips                         # 최근 복사 목록(하단바 「최근 복사」와 같다, 비밀은 가림)
   kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen
   kasaterm-cli capture [surface_id] [path] [--max-width N]
                                             # screenshot ONE pane to PNG (peek's picture twin)

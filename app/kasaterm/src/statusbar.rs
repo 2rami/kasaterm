@@ -111,17 +111,17 @@ fn paint_clipboard_popover(
     );
 
     let mut oy = y + HEAD_H;
-    for (i, text) in items.iter().take(shown).enumerate() {
+    for (i, item) in items.iter().take(shown).enumerate() {
         let r = (x + 6.0, oy, w - 12.0, ROW);
         let hov = hit(cursor, &r);
         if hov {
             round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
         }
-        // 지금 것은 굵게 — 목록에서 눈이 먼저 닿아야 하는 줄이다.
+        // 지금 것은 굵게 — 목록에서 눈이 먼저 닿아야 하는 줄이다. 비밀은 가린 채.
         g.draw_text(
             r.0 + 8.0,
             oy + 7.0,
-            &crate::clipboard::preview(text, 46),
+            &crate::clipboard::preview_item(item, 46),
             gpu::DrawOpts {
                 font_size: 11.0,
                 color: if i == 0 { theme::text() } else { theme::text_dim() },

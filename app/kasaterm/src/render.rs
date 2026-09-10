@@ -10011,7 +10011,7 @@ impl App {
                     if status_prefs.visible("clipboard") {
                         let head = crate::clipboard::history()
                             .first()
-                            .map(|t| crate::clipboard::preview(t, 8))
+                            .map(|i| if i.secret { "비밀".to_string() } else { crate::clipboard::preview(&i.text, 8) })
                             .unwrap_or_default();
                         if !head.is_empty() {
                             let icon = 12.0_f32;

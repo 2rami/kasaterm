@@ -804,6 +804,64 @@ class Server {
     }
   }
 
+  /// 하단바 「최근 복사」 목록 — 미리보기·id·비밀 여부. 본문은 `clipboardItem` 으로.
+  Future<List<ClipItem>> clipboard({String? machine}) async {
+    final j = await _getJson('term/clipboard', machine: machine);
+    if (j is! Map) return const [];
+    return [
+      for (final e in (j['items'] as List?) ?? const [])
+        if (e is Map) ClipItem.fromJson(e.cast<String, Object?>()),
+    ];
+  }
+
+  Future<String> clipboardItem(int id, {String? machine}) async {
+    final j = await _getJson('term/clipboard/$id', machine: machine);
+    if (j is! Map || j['ok'] != true) {
+      throw ServerException(
+        (j is Map ? j['error'] as String? : null) ?? '그 칸을 못 받았다',
+      );
+    }
+    return j['text'] as String? ?? '';
+  }
+
+  /// 폰에서 복사한 것을 데스크톱 클립보드로 — 목록 맨 위에 선다.
+  Future<void> clipboardPush(
+    String text, {
+    bool secret = false,
+    String? machine,
+  }) => _postOk(
+    'term/clipboard',
+    {'text': text, 'secret': secret},
+    machine: machine,
+  );
+
+  /// 목록 한 칸을 데스크톱 클립보드로 되올린다.
+  Future<void> clipboardPick(int id, {String? machine}) =>
+      _postOk('term/clipboard/pick', {'id': id}, machine: machine);
+
+  Future<void> _postOk(
+    String path,
+    Map<String, Object?> body, {
+    String? machine,
+  }) async {
+    final http.Response res;
+    try {
+      res = await _client.post(
+        uri(path, machine: machine),
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode(body),
+      );
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    final j = res.statusCode == 200 ? jsonDecode(res.body) : null;
+    if (j is! Map || j['ok'] != true) {
+      throw ServerException(
+        (j is Map ? j['error'] as String? : null) ?? '안 됐다 (${res.statusCode})',
+      );
+    }
+  }
+
   Uri noteImage(int id, {String? machine}) =>
       uri('term/notes/$id.png', machine: machine);
 
@@ -827,6 +885,33 @@ class BrowserTarget {
   /// 그 기계가 명부에서 불리는 이름 — 다른 기계에 같은 선택을 전할 때 쓴다.
   final String local;
   final bool phone;
+}
+
+/// 데스크톱 「최근 복사」 한 칸. 비밀은 미리보기가 가려져 온다.
+class ClipItem {
+  const ClipItem({
+    required this.id,
+    required this.preview,
+    required this.secret,
+    required this.chars,
+    required this.when,
+  });
+
+  final int id;
+  final String preview;
+  final bool secret;
+  final int chars;
+  final DateTime when;
+
+  static ClipItem fromJson(Map<String, Object?> j) => ClipItem(
+    id: (j['id'] as num?)?.toInt() ?? 0,
+    preview: j['preview'] as String? ?? '',
+    secret: j['secret'] == true,
+    chars: (j['chars'] as num?)?.toInt() ?? 0,
+    when: DateTime.fromMillisecondsSinceEpoch(
+      ((j['when'] as num?)?.toInt() ?? 0) * 1000,
+    ),
+  );
 }
 
 class Note {

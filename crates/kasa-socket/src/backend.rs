@@ -889,6 +889,27 @@ pub trait Backend: Send + Sync {
     fn clipboard_get(&self) -> Result<String> {
         anyhow::bail!("clipboard unsupported by this backend")
     }
+    /// `secret` 이면 목록·토스트에서 값을 가린다(`copy --secret`). 기본은 보통 복사.
+    fn clipboard_set_opts(&self, text: &str, secret: bool) -> Result<()> {
+        let _ = secret;
+        self.clipboard_set(text)
+    }
+    /// 최근 복사 목록 — 본문 없이 미리보기·id·비밀 여부. 폰·CLI 가 고르는 자리.
+    fn clipboard_history(&self) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
+    /// 목록 한 칸의 본문(id).
+    fn clipboard_item(&self, _id: u64) -> Result<String> {
+        anyhow::bail!("clipboard history unsupported by this backend")
+    }
+    /// 목록 한 칸을 다시 시스템 클립보드로.
+    fn clipboard_pick(&self, _id: u64) -> Result<String> {
+        anyhow::bail!("clipboard history unsupported by this backend")
+    }
+    /// 이 글이 비밀값인가 — `paste` 가 값을 찍기 전에 묻는다.
+    fn clipboard_secret(&self, _text: &str) -> bool {
+        false
+    }
     /// A pane's agent is blocked waiting for the user — a permission prompt or
     /// an idle input prompt — surfaced by claude's `Notification` hook running
     /// `kasaterm-cli attention`. Unlike `notify` (a one-shot push), this marks

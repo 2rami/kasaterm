@@ -7,6 +7,7 @@ import '../hub_prefs.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
+import 'clipboard_sheet.dart';
 import 'notes_sheet.dart';
 import 'pane_actions.dart';
 import 'settings.dart';
@@ -125,6 +126,14 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
             ],
           ),
           actions: [
+            // 클립보드 = 데스크톱 「최근 복사」. 폰으로 가져오거나 폰 것을 올린다
+            // (2026-09-10 지시 「카사텀 pc 에도 붙고 폰에도 붙게」).
+            IconButton(
+              tooltip: '클립보드',
+              onPressed: () =>
+                  showClipboardSheet(context, server: widget.server),
+              icon: const Icon(Icons.content_paste_outlined),
+            ),
             // 종 = 나쵸가 남긴 학생 쪽지. 배지는 안 읽은 쪽지 수(2026-09-08 지시 —
             // 전엔 기다리는 학생 수만 세고 눌러도 아무것도 없었다).
             IconButton(

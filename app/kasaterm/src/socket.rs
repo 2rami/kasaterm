@@ -3221,6 +3221,10 @@ impl Backend for PtyBackend {
     }
 
     fn clipboard_set(&self, text: &str) -> Result<()> {
+        self.clipboard_set_opts(text, false)
+    }
+
+    fn clipboard_set_opts(&self, text: &str, secret: bool) -> Result<()> {
         // 클립보드 쓰기 자체는 GUI 상태를 안 쓴다(NSPasteboard 는 스레드 무관) —
         // 소켓 스레드에서 바로 넣고, **보여 주는 일만** GUI 로 넘긴다.
         let mut cb = arboard::Clipboard::new().map_err(|e| anyhow::anyhow!("클립보드 열기 실패: {e}"))?;
@@ -3229,16 +3233,43 @@ impl Backend for PtyBackend {
         // 무엇이 담겼는지 앞머리를 함께 띄운다 — 「복사됨」만 뜨면 맞는 것을 담았는지
         // 붙여넣기 전까지 알 수가 없다. 줄바꿈은 한 줄 토스트에서 자리를 먹으니 눕힌다.
         // 하단바 목록에도 담는다 — 폴링이 어차피 주워 가지만, 그건 다음 틱이라
-        // 그 사이에 목록을 펼치면 방금 넣은 것이 빠져 보인다.
-        crate::clipboard::remember(text);
-        let head: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let head: String = head.chars().take(36).collect();
-        let more = text.chars().count() > head.chars().count();
-        let _ = self.proxy.send_event(UserEvent::SocketToast(format!(
-            "복사됨 · {head}{}",
-            if more { "…" } else { "" }
-        )));
+        // 그 사이에 목록을 펼치면 방금 넣은 것이 빠져 보인다. 비밀은 토스트에도 안 찍는다.
+        let item = crate::clipboard::remember_as(text, secret.then_some(true));
+        let head = match &item {
+            Some(i) if i.secret => format!("비밀값 {}", crate::clipboard::masked(text)),
+            _ => {
+                let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let head: String = flat.chars().take(36).collect();
+                let more = text.chars().count() > head.chars().count();
+                format!("{head}{}", if more { "…" } else { "" })
+            }
+        };
+        let _ = self.proxy.send_event(UserEvent::SocketToast(format!("복사됨 · {head}")));
         Ok(())
+    }
+
+    fn clipboard_history(&self) -> Vec<serde_json::Value> {
+        crate::clipboard::json_list()
+    }
+
+    fn clipboard_item(&self, id: u64) -> Result<String> {
+        crate::clipboard::get(id)
+            .map(|i| i.text)
+            .ok_or_else(|| anyhow::anyhow!("그 칸은 이제 목록에 없어요"))
+    }
+
+    fn clipboard_pick(&self, id: u64) -> Result<String> {
+        let item = crate::clipboard::pick_id(id)
+            .ok_or_else(|| anyhow::anyhow!("그 칸은 이제 목록에 없어요"))?;
+        let _ = self.proxy.send_event(UserEvent::SocketToast(format!(
+            "복사됨 · {}",
+            crate::clipboard::preview_item(&item, 36)
+        )));
+        Ok(item.text)
+    }
+
+    fn clipboard_secret(&self, text: &str) -> bool {
+        crate::clipboard::current_is_secret(text)
     }
 
     fn clipboard_get(&self) -> Result<String> {
