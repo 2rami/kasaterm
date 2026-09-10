@@ -1361,6 +1361,12 @@ pub fn member_def(chars: &Value, name: &str) -> Option<Value> {
 /// pane 을 보므로 `idle` 을 넣으면 남의 턴 종료마다 깨운다(거노 2026-08-10:
 /// "어차피 끝나면 보고하는데 필요없지 않나"). 그래서 Monitor 는 **보고가 올 수
 /// 없는 상태**(승인 막힘·죽음·경로 끊김)에만 남겼다.
+///
+/// ⚠️ 그 좁힘은 **동료 완료 감시에만** 걸린다. 2026-09-10 지적: 캐릭터들이 그
+/// 금지를 빌드·CI 추적에까지 확대해 「몇 초마다 확인하겠습니다」로 자기 턴 안에서
+/// sleep 을 돌리고 있었다(세션 로그에 `sleep N; done` 수백 건). 기계에는 대신
+/// 보고해 줄 입이 없으므로 규약에 [추적 — 기계를 지켜볼 때] 절을 따로 뒀다 —
+/// 좁힘을 더 이상 넓혀 읽지 못하게.
 const DEFAULT_COLLAB_PROTOCOL: &str = concat!(
     "\n\n",
     include_str!("../../../app/kasaterm/collab-hooks/collab-protocol.md")
