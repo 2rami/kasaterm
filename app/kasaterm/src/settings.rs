@@ -1030,6 +1030,14 @@ impl App {
                 socket::write_setting("shape", serde_json::Value::String(s.to_string()));
                 self.repaint_all();
             }
+            SettingsAction::UiFont(name) => {
+                theme::set_ui_font(&name);
+                socket::write_setting("ui_font", serde_json::Value::String(name));
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.force_atlas_reset();
+                }
+                self.repaint_all();
+            }
             SettingsAction::MinContrast(label) => {
                 let v = theme::CONTRAST_PRESETS
                     .iter()
@@ -1924,6 +1932,16 @@ impl App {
                     .ok_or_else(|| unknown(id))?;
                 self.settings_apply(SettingsAction::Shape(key));
                 Ok(theme::shape_name() == key)
+            }
+            "ui-font" => {
+                let value = if id.is_empty() { arg.as_str() } else { id };
+                let ok = matches!(value, "terminal" | "system")
+                    || crate::onboarding::resolve_ui_font(value).is_some();
+                if !ok {
+                    return Err(unknown(value));
+                }
+                self.settings_apply(SettingsAction::UiFont(value.to_string()));
+                Ok(theme::ui_font() == value)
             }
             "min-contrast" => {
                 let (l, v) = theme::CONTRAST_PRESETS

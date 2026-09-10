@@ -4472,6 +4472,8 @@ pub(crate) enum SettingsAction {
     /// Silhouette preset: "rounded" · "sharp" · "pixel". Its own axis, so any
     /// palette can be worn with any corner treatment.
     Shape(&'static str),
+    /// 크롬 글꼴: "terminal" · "system" · 설치 글꼴 이름. 재시작 없이 바로 먹는다.
+    UiFont(String),
     /// Font-size stepper: −1 / +1 logical px on the base cell font.
     FontSizeDelta(i8),
     /// UI 배율 스테퍼(±10%). Cmd+/− 와 같은 축이지만, 키로만 있으면 얼마나

@@ -52,6 +52,17 @@ const GALMURI_11: &[u8] = include_bytes!("../assets/fonts/Galmuri11.ttf");
 /// Device px per Galmuri dot — every cut draws one dot per `upem/100` units, so
 /// Galmuri11 (upem 1200) is crisp only at whole multiples of 12.
 const GALMURI_DOT_PX: u32 = 12;
+
+/// 크롬 글자를 어느 얼굴로 그리는지(`theme::ui_font` 를 푼 것).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum UiFace {
+    /// 터미널 격자와 같은 고정폭(font=0).
+    Terminal,
+    /// 마크다운 고딕(font=1/2) — 따로 싣지 않는다.
+    System,
+    /// 사용자가 고른 설치 글꼴(font=4, `ui_shaper`).
+    Custom,
+}
 /// Side of the pixel icons' design grid. Their paths sit on whole units, so any
 /// raster size off this multiple lands dot edges on fractions and softens them.
 const ICON_GRID_PX: u32 = 24;
@@ -131,6 +142,13 @@ pub struct GpuRenderer {
     chrome_shaper: Option<Shaper>,
     /// Set once loading fails so a broken face doesn't retry every frame.
     chrome_shaper_failed: bool,
+    /// 사용자가 고른 크롬 글꼴(font=4). `ui_font` 설정이 설치 글꼴 이름일 때만
+    /// 실린다 — 터미널 글꼴·시스템 고딕은 이미 있는 shaper 를 그대로 쓴다.
+    ui_shaper: Option<Shaper>,
+    /// 마지막으로 해석한 `theme::ui_font_gen()`. 세대가 같으면 아무것도 안 한다.
+    ui_font_gen: Option<u32>,
+    /// 해석 결과. 라벨 하나 그릴 때마다 카탈로그를 뒤지지 않도록 캐시한다.
+    ui_face: UiFace,
     /// Secondary shaper for markdown body/heading text — a proportional gothic
     /// (Noto Sans KR if installed, else Apple SD Gothic Neo) so documents read
     /// like prose, not code. Glyphs go into the SAME atlas keyed by font=1.
@@ -731,6 +749,9 @@ impl GpuRenderer {
             shaper,
             chrome_shaper: None,
             chrome_shaper_failed: false,
+            ui_shaper: None,
+            ui_font_gen: None,
+            ui_face: UiFace::Terminal,
             md_shaper,
             md_bold_shaper,
             bind_group,
@@ -1080,8 +1101,18 @@ impl GpuRenderer {
         if !force_mono && crate::theme::viewer_chrome() {
             return (if bold { 2 } else { 1 }, raw);
         }
-        if force_mono || !crate::theme::pixel_chrome() {
+        if force_mono {
             return (0, raw);
+        }
+        if !crate::theme::pixel_chrome() {
+            // 픽셀 형태가 아닐 때만 사용자 글꼴이 든다 — 픽셀 형태의 정체성이
+            // 곧 그 글꼴이라, 거기에 다른 얼굴을 얹으면 형태를 고른 뜻이 없어진다.
+            self.ensure_ui_shaper();
+            return match self.ui_face {
+                UiFace::Terminal => (0, raw),
+                UiFace::System => (if bold { 2 } else { 1 }, raw),
+                UiFace::Custom => (4, raw),
+            };
         }
         self.ensure_chrome_shaper();
         if self.chrome_shaper.is_none() {
@@ -1090,6 +1121,52 @@ impl GpuRenderer {
         let dot = GALMURI_DOT_PX as f32;
         let steps = (raw as f32 / dot).round().max(1.0);
         (3, (dot * steps) as u32)
+    }
+
+    /// `ui_font` 설정을 얼굴로 푼다. 세대가 바뀐 프레임에만 돌고, 그때 글꼴이
+    /// 갈렸으면 아틀라스를 비운다 — font=4 자리에 옛 얼굴의 글리프가 남아 있다.
+    fn ensure_ui_shaper(&mut self) {
+        let gen = crate::theme::ui_font_gen();
+        if self.ui_font_gen == Some(gen) {
+            return;
+        }
+        self.ui_font_gen = Some(gen);
+        let before = self.ui_face;
+        let value = crate::theme::ui_font();
+        self.ui_face = match value.as_str() {
+            "" | "terminal" => UiFace::Terminal,
+            "system" => UiFace::System,
+            other => match crate::onboarding::resolve_ui_font(other) {
+                Some(choice) => match Shaper::from_path(&choice.path.to_string_lossy(), choice.index) {
+                    Ok(mut sh) => {
+                        if let Some((bold_path, bold_idx)) = &choice.bold {
+                            sh.set_bold_face_path(0, &bold_path.to_string_lossy(), *bold_idx);
+                        }
+                        attach_fallback_chain(&mut sh);
+                        eprintln!("[font] ui={} ({})", choice.family, choice.path.display());
+                        self.ui_shaper = Some(sh);
+                        UiFace::Custom
+                    }
+                    Err(e) => {
+                        eprintln!("[font] ui font {} failed to load: {e}", choice.path.display());
+                        UiFace::System
+                    }
+                },
+                None => {
+                    eprintln!("[font] ui font {other:?} not installed; using system gothic");
+                    UiFace::System
+                }
+            },
+        };
+        if self.ui_face != UiFace::Custom {
+            self.ui_shaper = None;
+        }
+        // 얼굴이 같은 종류라도(Custom→Custom) 파일이 갈렸을 수 있다. 세대가
+        // 올랐다는 것 자체가 「값이 바뀌었다」이므로 무조건 비운다 — 처음 한 번은
+        // 아직 아무것도 안 그린 상태라 비용이 없다.
+        if before != self.ui_face || self.ui_face == UiFace::Custom {
+            self.atlas.request_reset();
+        }
     }
 
     fn ensure_chrome_shaper(&mut self) {
@@ -1116,6 +1193,11 @@ impl GpuRenderer {
                 return self.atlas.get_or_bake(&self.device, &self.queue, sh, key);
             }
         }
+        if key.font == 4 {
+            if let Some(sh) = self.ui_shaper.as_mut() {
+                return self.atlas.get_or_bake(&self.device, &self.queue, sh, key);
+            }
+        }
         match key.font {
             2 => self.atlas.get_or_bake(
                 &self.device,
@@ -1138,6 +1220,11 @@ impl GpuRenderer {
     fn chrome_space_advance(&mut self, size_px: f32, font: u8) -> f32 {
         if font == 3 {
             if let Some(sh) = self.chrome_shaper.as_ref() {
+                return sh.advance(' ', size_px);
+            }
+        }
+        if font == 4 {
+            if let Some(sh) = self.ui_shaper.as_ref() {
                 return sh.advance(' ', size_px);
             }
         }

@@ -669,6 +669,10 @@ pub(crate) struct Snapshot {
     pub(crate) accent: String,
     pub(crate) shape: String,
     pub(crate) min_contrast: f32,
+    /// 크롬 글꼴 설정값("" 은 터미널 글꼴).
+    pub(crate) ui_font: String,
+    /// 설치돼 있어 고를 수 있는 UI 글꼴 이름들.
+    pub(crate) ui_fonts: Vec<String>,
     pub(crate) font_size: f32,
     pub(crate) ui_zoom: f32,
     pub(crate) wheel_gain: f32,
@@ -886,6 +890,8 @@ impl App {
             accent: theme::accent_name().to_string(),
             shape: theme::shape_name().to_string(),
             min_contrast: theme::min_contrast(),
+            ui_font: theme::ui_font(),
+            ui_fonts: crate::onboarding::ui_font_families(),
             font_size: self.font_size,
             ui_zoom: self.ui_zoom,
             wheel_gain: self.set_wheel_pixel_gain,
@@ -3002,6 +3008,45 @@ fn paint_appearance(
         SettingsAction::UiZoomDelta(-1),
         SettingsAction::UiZoomDelta(1),
     );
+    // 크롬 글꼴. 터미널 격자와 별개다 — 격자는 고정폭이어야 하지만 탭·설정·상태줄은
+    // 산세리프가 더 잘 읽힌다. 바로 먹고 재시작이 필요 없다.
+    row_label(g, x, y, "UI 글꼴");
+    let custom = !matches!(s.ui_font.as_str(), "" | "terminal" | "system");
+    segmented(
+        g,
+        s,
+        hits,
+        x,
+        *y,
+        w,
+        &[
+            (
+                "터미널 글꼴 그대로",
+                !custom && s.ui_font != "system",
+                SettingsAction::UiFont("terminal".to_string()),
+            ),
+            (
+                "시스템 고딕",
+                s.ui_font == "system",
+                SettingsAction::UiFont("system".to_string()),
+            ),
+        ],
+    );
+    *y += 44.0;
+    if !s.ui_fonts.is_empty() {
+        let cells: Vec<(String, bool, SettingsAction)> = s
+            .ui_fonts
+            .iter()
+            .map(|f| {
+                (
+                    f.clone(),
+                    custom && crate::onboarding::ui_font_matches(&s.ui_font, f),
+                    SettingsAction::UiFont(f.clone()),
+                )
+            })
+            .collect();
+        chips_owned(g, s, hits, x, y, w, cells);
+    }
     segmented(
         g,
         s,
