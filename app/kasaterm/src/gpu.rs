@@ -969,6 +969,89 @@ impl GpuRenderer {
         }
     }
 
+    /// 둥근 사각형의 **테두리만** — `round_rect_fill` 과 같은 원호를 따라 `t` 두께로
+    /// 두른다. 채움은 둥글게 그려 놓고 테두리를 네모난 `rect` 넉 줄로 두르면
+    /// 모서리 밖으로 직각 선이 삐져나온다(2026-09-10 지적 「z-index 안 맞아서
+    /// 선 튀어나옴」 — 설정 화면의 카드·세그먼트·입력칸 전부가 그랬다).
+    ///
+    /// 캡 구간은 `round_rect_fill` 과 같은 행 단위로 돌되, 바깥 원(반지름 `r`)과
+    /// 안쪽 원(반지름 `r - t`) 사이만 칠한다. 바깥 경계 픽셀은 같은 부분 알파를
+    /// 받아 채움 위에 얹었을 때 계단이 안 보인다.
+    pub fn round_rect_stroke(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        r: f32,
+        t: f32,
+        col: [u8; 4],
+    ) {
+        let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+        let t = t.max(0.0).min(w / 2.0).min(h / 2.0);
+        if t <= 0.0 {
+            return;
+        }
+        if r <= t {
+            self.rect(x, y, w, t, col);
+            self.rect(x, y + h - t, w, t, col);
+            self.rect(x, y + t, t, (h - 2.0 * t).max(0.0), col);
+            self.rect(x + w - t, y + t, t, (h - 2.0 * t).max(0.0), col);
+            return;
+        }
+        // 좌우 직선 변 — 캡 사이.
+        let band = (h - 2.0 * r).max(0.0);
+        self.rect(x, y + r, t, band, col);
+        self.rect(x + w - t, y + r, t, band, col);
+        let s = self.scale;
+        let inv = 1.0 / s;
+        let steps = (r * s).ceil() as i32;
+        let ri = r - t;
+        for k in 0..steps {
+            let yy = k as f32 * inv;
+            let yc = yy + 0.5 * inv;
+            let d_out = (r * r - (r - yc) * (r - yc)).max(0.0).sqrt();
+            let dx_out_dev = ((r - d_out) * s).max(0.0);
+            let dx_floor = dx_out_dev.floor();
+            let frac = dx_out_dev - dx_floor;
+            let edge_col = [col[0], col[1], col[2], (col[3] as f32 * (1.0 - frac)).round() as u8];
+            // 안쪽 원의 같은 행 — 아직 원이 시작되지 않은 위쪽 행(`yc < t`)은 통째로
+            // 윗변이다.
+            let inner_dx = if yc < t {
+                None
+            } else {
+                let dy = r - yc;
+                if dy.abs() >= ri {
+                    None
+                } else {
+                    Some(r - (ri * ri - dy * dy).sqrt())
+                }
+            };
+            let lx = x + dx_floor * inv;
+            let rx = x + w - (dx_floor + 1.0) * inv;
+            let solid_from = (dx_floor + 1.0) * inv;
+            for ry in [y + yy, y + h - yy - inv] {
+                self.rect(lx, ry, inv, inv, edge_col);
+                self.rect(rx, ry, inv, inv, edge_col);
+                match inner_dx {
+                    None => {
+                        let cw = (w - 2.0 * solid_from).max(0.0);
+                        if cw > 0.0 {
+                            self.rect(x + solid_from, ry, cw, inv, col);
+                        }
+                    }
+                    Some(dx_in) => {
+                        let span = (dx_in - solid_from).max(0.0);
+                        if span > 0.0 {
+                            self.rect(x + solid_from, ry, span, inv, col);
+                            self.rect(x + w - solid_from - span, ry, span, inv, col);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Draw a text label using glyphs baked into the atlas at the
     /// requested size. Returns the pen-x after the last glyph
     /// (mirrors sugarloaf's `text.draw` return behaviour for callers

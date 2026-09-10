@@ -2686,7 +2686,7 @@ fn paint_appearance(
         theme::radius_md(),
         theme::surface(),
     );
-    stroke_rect(g, preview, theme::border());
+    stroke_round(g, preview, theme::radius_md(), theme::border());
     draw_text(
         g,
         preview.0 + 12.0,
@@ -3207,7 +3207,7 @@ fn statusbar_preview(g: &mut gpu::GpuRenderer, s: &Snapshot, x: f32, y: f32, w: 
         theme::radius_md(),
         theme::surface(),
     );
-    stroke_rect(g, rect, theme::border());
+    stroke_round(g, rect, theme::radius_md(), theme::border());
     draw_text(
         g,
         rect.0 + 12.0,
@@ -3297,7 +3297,7 @@ fn statusbar_widget_row(
         theme::radius_md(),
         theme::surface(),
     );
-    stroke_rect(g, rect, theme::border());
+    stroke_round(g, rect, theme::radius_md(), theme::border());
     let visible = !s.statusbar_hidden.contains(id);
     let check = (rect.0 + 10.0, rect.1 + 9.0, 28.0, 28.0);
     g.queue_icon(
@@ -3379,7 +3379,7 @@ fn statusbar_widget_row(
         let on = selected.eq_ignore_ascii_case(&value);
         round_rect(g, sr.0, sr.1, sr.2, sr.3, 5.0, color);
         if on {
-            stroke_rect(g, (sr.0 - 2.0, sr.1 - 2.0, sr.2 + 4.0, sr.3 + 4.0), theme::text());
+            stroke_round(g, (sr.0 - 2.0, sr.1 - 2.0, sr.2 + 4.0, sr.3 + 4.0), 7.0, theme::text());
         }
         register_clipped(
             g,
@@ -3509,9 +3509,10 @@ fn paint_palette_editor(
                 .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
                 .unwrap_or([0, 0, 0, 255]),
         );
-        stroke_rect(
+        stroke_round(
             g,
             rect,
+            theme::radius_sm(),
             if index == selected { theme::accent() } else { theme::border() },
         );
         register_clipped(
@@ -3685,11 +3686,11 @@ fn paint_device_colors(
             theme::radius_md(),
             if is_sel { theme::surface_active() } else { theme::surface() },
         );
-        stroke_rect(g, rect, if is_sel { theme::accent() } else { theme::border() });
+        stroke_round(g, rect, theme::radius_md(), if is_sel { theme::accent() } else { theme::border() });
         let color = to_rgba(&row.hex);
         let swatch = (x + 8.0, *y + 8.0, 24.0, 24.0);
         round_rect(g, swatch.0, swatch.1, swatch.2, swatch.3, theme::radius_sm(), color);
-        stroke_rect(g, swatch, theme::edge_on(color));
+        stroke_round(g, swatch, theme::radius_sm(), theme::edge_on(color));
         let name = if row.local {
             format!("{} · 이 기기", row.label)
         } else {
@@ -3733,13 +3734,14 @@ fn paint_device_colors(
             let is_cur = row.hex.eq_ignore_ascii_case(&hex);
             let rect = (cx, *y, 34.0, 30.0);
             round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), *color);
-            stroke_rect(
+            stroke_round(
                 g,
                 rect,
+                theme::radius_sm(),
                 if is_cur { theme::text() } else { theme::edge_on(*color) },
             );
             if is_cur {
-                stroke_rect(g, (rect.0 + 2.0, rect.1 + 2.0, rect.2 - 4.0, rect.3 - 4.0), theme::bg());
+                stroke_round(g, (rect.0 + 2.0, rect.1 + 2.0, rect.2 - 4.0, rect.3 - 4.0), (theme::radius_sm() - 2.0).max(0.0), theme::bg());
             }
             register_clipped(
                 g,
@@ -4546,7 +4548,7 @@ fn machine_row(
             theme::surface()
         },
     );
-    stroke_rect(g, rect, theme::border());
+    stroke_round(g, rect, theme::radius_md(), theme::border());
     g.queue_icon(
         "server",
         rect.0 + 12.0,
@@ -6720,7 +6722,7 @@ fn text_field(
         },
     );
     if focused {
-        stroke_rect(g, rect, theme::accent());
+        stroke_round(g, rect, theme::radius_md(), theme::accent());
         if s.select_all {
             g.rect(
                 rect.0 + 3.0,
@@ -6731,7 +6733,7 @@ fn text_field(
             );
         }
     } else {
-        stroke_rect(g, rect, theme::border());
+        stroke_round(g, rect, theme::radius_md(), theme::border());
     }
     register_clipped(g, hits, Target::Focus(field), rect, HitCursor::Text);
     g.push_clip(rect.0 + 10.0, rect.1 + 5.0, rect.2 - 20.0, rect.3 - 10.0);
@@ -6935,9 +6937,10 @@ fn choice_card(
             theme::surface()
         },
     );
-    stroke_rect(
+    stroke_round(
         g,
         rect,
+        theme::radius_md(),
         if selected {
             theme::accent()
         } else {
@@ -6958,25 +6961,25 @@ fn button(
     primary: bool,
 ) {
     let hover = contains(rect, s.cursor);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        if primary {
-            if hover {
-                theme::surface_active()
-            } else {
-                theme::accent()
-            }
-        } else if hover {
-            theme::surface_active()
+    // 주 버튼은 강조색 그대로이고 호버에 한 톤만 밝아진다 — 예전엔 호버 순간
+    // 회색 `surface_active` 로 바뀌어 눌리는 게 아니라 꺼지는 것처럼 보였다.
+    // 보조 버튼은 입력칸·카드와 같은 채움+테두리 한 벌이라 한 화면 안에서
+    // 마감이 하나로 읽힌다(2026-09-10 지적 「버튼 마감이 이상하다」).
+    let fill = if primary {
+        if hover {
+            theme::lerp(theme::accent(), theme::fg(), 0.14)
         } else {
-            theme::surface_hover()
-        },
-    );
+            theme::accent()
+        }
+    } else if hover {
+        theme::surface_hover()
+    } else {
+        theme::surface()
+    };
+    round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_md(), fill);
+    if !primary {
+        stroke_round(g, rect, theme::radius_md(), theme::border());
+    }
     let shown = fit(g, label, rect.2 - 18.0, 11.5, primary);
     let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, primary)) / 2.0;
     draw_text(
@@ -7157,6 +7160,12 @@ fn mini_text_button(
     register_clipped(g, hits, target, rect, HitCursor::Pointer);
     g.hover_pointer |= hover;
     w
+}
+
+/// 둥근 채움 위에 두르는 1px 테두리 — 반지름을 채움과 같게 주면 모서리가 채움
+/// 안에 머문다. 직각 `stroke_rect` 는 사각 격자(SV 판·색상띠)에만 남긴다.
+fn stroke_round(g: &mut gpu::GpuRenderer, rect: Rect, r: f32, color: [u8; 4]) {
+    g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, r, theme::border_w().max(1.0), color);
 }
 
 fn stroke_rect(g: &mut gpu::GpuRenderer, rect: Rect, color: [u8; 4]) {
