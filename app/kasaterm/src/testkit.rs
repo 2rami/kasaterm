@@ -5520,8 +5520,29 @@ impl App {
     /// a tab, switched away and back, then replaced through `bring_pane_home`.
     /// The live machine list and user panes are never consulted.
     pub(crate) fn run_pending_autoremotecolor(&mut self) {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex, OnceLock};
+
+        // Exercise the GUI's read-only mirror path, not `remote --attach` (an
+        // owning terminal connection). A verification source is supplied by a
+        // separately isolated app; this helper never spawns a remote shell.
+        static VIEW_DUE: OnceLock<Option<(Instant, String, String)>> = OnceLock::new();
+        static VIEW_OPENED: AtomicBool = AtomicBool::new(false);
+        if let Some((due, label, pane)) = VIEW_DUE.get_or_init(|| {
+            if !crate::verification_run() { return None; }
+            let label = std::env::var("KASATERM_TEST_MIRROR_LABEL").ok()?;
+            let pane = std::env::var("KASATERM_TEST_MIRROR_PANE").ok()?;
+            Some((Instant::now() + std::time::Duration::from_secs(2), label, pane))
+        }) {
+            if Instant::now() >= *due && !VIEW_OPENED.swap(true, Ordering::Relaxed) {
+                match self.mirror_remote_pane(label, pane, "", "") {
+                    Ok(id) => eprintln!("[mirror-view-test] source={pane} viewer={id} read_only={}",
+                        kasa_mcp::remote::is_view_pane(&id)),
+                    Err(error) => eprintln!("[mirror-view-test] FAIL {error:#}"),
+                }
+            }
+            return;
+        }
 
         static DUE: OnceLock<Option<Instant>> = OnceLock::new();
         static STEP: AtomicUsize = AtomicUsize::new(0);

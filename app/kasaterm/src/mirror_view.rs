@@ -53,8 +53,8 @@ fn rule_cell(row: &[GridCell]) -> Option<&GridCell> {
     (count >= 3).then_some(first)
 }
 
-/// A known input border may contain a session name or teammate label. Resize
-/// only its dash padding, never the label or arbitrary code/table punctuation.
+/// A known input border or completion divider contains a label. Resize only
+/// its dash padding, never the label or arbitrary code/table punctuation.
 /// Synthetic cells have no source position: clicking their new area must not
 /// pretend that a corresponding source column exists.
 fn input_border(row: &[GridCell], row_index: usize, cols: usize) -> Option<ProjectedLine> {
@@ -90,6 +90,23 @@ fn input_border(row: &[GridCell], row_index: usize, cols: usize) -> Option<Proje
     let (mut cells, source_map): (Vec<_>, Vec<_>) = cells.into_iter().unzip();
     for cell in &mut cells { cell.wrapped = false; }
     Some(ProjectedLine { cells, source_map })
+}
+
+fn completion_border(row: &[GridCell], row_index: usize, cols: usize) -> Option<Vec<ProjectedLine>> {
+    if let Some(line) = input_border(row, row_index, cols) { return Some(vec![line]); }
+    // At very small widths even the duration cannot fit on one line. Remove
+    // decorative padding first, then wrap the ASCII label, not hundreds of
+    // source-width dashes. Source positions still refer to the original cells.
+    let removable: usize = row.split(|c| c.ch != '─').filter(|run| run.len() >= 3)
+        .map(|run| run.len() - 1).sum();
+    let compact = input_border(row, row_index, row.len() - removable)?;
+    let count = compact.cells.len().div_ceil(cols);
+    let fill = row.last()?;
+    Some(compact.cells.chunks(cols).zip(compact.source_map.chunks(cols)).enumerate()
+        .map(|(index, (cells, source_map))| {
+            let mut line = ProjectedLine { cells: cells.to_vec(), source_map: source_map.to_vec() };
+            finish_line(&mut line, cols, fill, index + 1 < count)
+        }).collect())
 }
 
 fn code_or_table(row: &[GridCell]) -> bool {
@@ -191,6 +208,13 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
         let fenced = fence.is_some() || fence_marker.is_some();
         if let Some(marker) = fence_marker {
             if fence == Some(marker) { fence = None; } else if fence.is_none() { fence = Some(marker); }
+        }
+        if !fenced && crate::screenread::codex_worked_rule(&source[row_index]) {
+            if let Some(lines) = completion_border(&source[row_index], row_index, cols) {
+                output.extend(lines);
+                row_index += 1;
+                continue;
+            }
         }
         if input_borders.contains(&row_index) {
             if let Some(border) = input_border(&source[row_index], row_index, cols) {
@@ -771,6 +795,45 @@ mod tests {
                 if let Some((row, source_col)) = pos { assert_eq!(view.rows[5][col].ch, source[*row][*source_col].ch); }
             }
         }
+    }
+
+    #[test]
+    fn codex_worked_rule_fits_narrow_viewer_without_wrapped_dash_rows() {
+        let label = "─ Worked for 3m 53s ";
+        for source_cols in [100, 220] {
+            let border = format!("{label}{}", "─".repeat(source_cols - label.chars().count() - 2));
+            let source = codex_screen(&[&border, "next response"], source_cols);
+            let original = source.clone();
+            for cols in [26, 40, 140, 260] {
+                let view = project(&source, (3, 3), cols, 12, Some(2), None);
+                assert_eq!(view.body_lines.len(), 2, "{source_cols} -> {cols}: divider wrapped into the transcript");
+                let line = &view.body_lines[0];
+                assert_eq!(line.cells.len(), cols);
+                assert!(text(&[line.cells.clone()])[0].starts_with(label));
+                assert!(line.cells.iter().all(|cell| !cell.wrapped));
+                for (col, pos) in line.source_map.iter().enumerate() {
+                    if let Some((r, c)) = pos { assert_eq!(line.cells[col].ch, source[*r][*c].ch); }
+                }
+                assert!(crate::screenread::find_titled_rule(&[line.cells.clone()]).is_none());
+            }
+            assert_eq!(source, original, "projection must never resize the source terminal");
+        }
+    }
+
+    #[test]
+    fn tiny_completion_divider_wraps_only_its_label_and_never_changes_fenced_code() {
+        let border = format!("─ Worked for 3m 53s {}", "─".repeat(200));
+        let source = codex_screen(&[&border], 220);
+        for cols in [8, 12, 20] {
+            let view = project(&source, (2, 3), cols, 15, Some(1), None);
+            assert!(view.body_lines.len() <= 4, "decorative source padding filled the viewer");
+            assert!(view.body_lines.iter().all(|line| line.cells.len() == cols));
+            let joined: String = view.body_lines.iter().flat_map(|line| &line.cells).map(|c| c.ch).collect();
+            assert!(joined.contains("Worked for 3m 53s"));
+        }
+        let source = codex_screen(&["```text", &border, "```"], 220);
+        let view = project(&source, (4, 3), 40, 15, Some(3), None);
+        assert_eq!(view.body_lines.iter().flat_map(|line| &line.cells).filter(|c| c.ch == '─').count(), 201);
     }
 
     #[test]

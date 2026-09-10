@@ -2513,6 +2513,24 @@ pub(crate) fn erase_ultracode_badge(rows: &mut [Vec<GridCell>]) {
     }
 }
 
+/// Codex's completed-turn divider is decoration, not a session-name header.
+/// Require both rule ends and a real duration so similarly named sessions and
+/// ordinary prose/code are not reclassified by the mirror's width projection.
+pub(crate) fn codex_worked_rule(row: &[GridCell]) -> bool {
+    let mut visible = row.iter().filter(|c| !matches!(c.ch, ' ' | '\0'));
+    if visible.next().map(|c| c.ch) != Some('─')
+        || visible.next_back().map(|c| c.ch) != Some('─') { return false; }
+    let text: String = row.iter().filter(|c| c.ch != '\0').map(|c| c.ch).collect();
+    let text = text.trim_matches(['─', ' ']);
+    let Some(duration) = text.strip_prefix("Worked for ") else { return false };
+    !duration.is_empty() && duration.split_whitespace().all(|part| {
+        let number = part.strip_suffix("ms").or_else(|| part.strip_suffix('h'))
+            .or_else(|| part.strip_suffix('m')).or_else(|| part.strip_suffix('s'));
+        number.is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && n.parse::<f64>().is_ok_and(|n| n.is_finite() && n >= 0.0))
+    })
+}
+
 /// claude 입력박스 위 "── 세션명 ──" 구분선의 이름 구간 위치(거노: rename 아웃라인).
 /// 하단 10행에서 대시가 지배적이고 비-대시 텍스트 섬이 있는 rule 행을 찾아, **좌우 대시
 /// 런 사이**(양옆 공백 포함)의 (row, c0, c1)을 돌려준다. 이름 글자 셀이 아니라 대시 경계로
@@ -2522,6 +2540,7 @@ pub(crate) fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, 
     let n = rows.len();
     for r in (n.saturating_sub(10)..n).rev() {
         let row = &rows[r];
+        if codex_worked_rule(row) { continue; }
         let dashes = row.iter().filter(|c| c.ch == '─').count();
         if dashes < row.len() / 2 {
             continue;
@@ -6081,6 +6100,16 @@ mod teammate_msg_tests {
         assert!(find_titled_rule(&[top]).is_none(), "둥근 상단 테두리 무시");
         assert!(find_titled_rule(&[bottom]).is_none(), "둥근 하단 테두리 무시");
         assert!(find_titled_rule(&[plain]).is_none(), "순수 rule 무시");
+    }
+
+    #[test]
+    fn titled_rule_ignores_codex_worked_duration() {
+        for duration in ["0s", "53s", "3m 53s", "1h 2m 3s"] {
+            let rule = row_from(&format!("─ Worked for {duration} {}", "─".repeat(80)), 120);
+            assert!(find_titled_rule(&[rule]).is_none(), "completion duration is not a session name");
+        }
+        let title = row_from(&format!("── Worked for a better editor {}", "─".repeat(80)), 120);
+        assert!(find_titled_rule(&[title]).is_some(), "ordinary titles retain their outline");
     }
 
     // teammate 칩 행(`──── @이름 ──`)은 세션명이 아니다 — claude 네이티브가 그리는

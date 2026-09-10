@@ -3139,12 +3139,9 @@ impl App {
                         }
                     }
                 };
-                // 제목은 은은한 배경 칩에 담는다 — 아이콘·경로·토글이 늘어선 한 줄에서
-                // "이게 지금 열린 탭"이라고 자리를 묶어 주되, 눌리는 것은 아니다.
-                //
-                // 배경은 flat(round_rect)이어야 한다. panel_rect 로 그렸더니 픽셀
-                // 실루엣의 검은 테두리·하드 섀도가 붙어 떠오른 버튼처럼 보였는데,
-                // 이건 클릭 대상이 아니라 표시라 눌리는 신호를 주면 안 된다.
+                // The title is a label on the header, not a separate button.
+                // Leave the strip's panel_bg visible so dark/light and custom
+                // palette changes do not leave a differently coloured pill.
                 //
                 // 가운데에 세우는 것은 **이름 칩 하나**다. 경로는 파일트리 버튼
                 // 오른쪽 제자리에 남는다(거노) — 둘을 한 덩어리로 묶어 가운데를
@@ -3244,7 +3241,6 @@ impl App {
                 };
                 let start = ((win_w - pw) / 2.0).clamp(left_lim, (right_lim - pw).max(left_lim));
                 if !title_text.is_empty() {
-                    round_rect(g, start, py, pw, ph, theme::radius_md(), theme::surface());
                     let icon_name = sb_icons
                         .get(sb_active)
                         .copied()
@@ -3293,7 +3289,7 @@ impl App {
                             gpu::DrawOpts {
                                 font_size: chrome_font,
                                 color: theme::enforce_contrast_at(
-                                    machine_tint(machine), theme::surface(), 4.5,
+                                    machine_tint(machine), theme::panel_bg(), 4.5,
                                 ),
                                 bold: true,
                                 italic: false,
