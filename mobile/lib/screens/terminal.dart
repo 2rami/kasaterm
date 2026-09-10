@@ -1,5 +1,6 @@
 import '../device_shape.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../claude_style.dart';
 import '../grid_canvas.dart';
@@ -212,8 +213,6 @@ class _TerminalScreenState extends State<TerminalScreen>
         child: Scaffold(
           appBar: AppBar(
             titleSpacing: 0,
-            // 세 줄(이름·세션 / 상태·연결 / 상태줄)이 기본 56 에 안 들어간다.
-            toolbarHeight: pane.statusParts.isEmpty ? kToolbarHeight : 84,
             title: Row(
               children: [
                 Hero(
@@ -293,15 +292,19 @@ class _TerminalScreenState extends State<TerminalScreen>
                           ),
                         ],
                       ),
-                      // 데스크톱 pane 머리와 같은 셋째 줄 — 하네스·모델·브랜치·컨텍스트·effort.
-                      if (pane.statusParts.isNotEmpty)
-                        PaneStatusLine(pane: pane),
                     ],
                   ),
                 ),
               ],
             ),
             actions: [
+              // 글자 선택 — 격자는 손가락으로 못 긁으니 화면 글자를 그대로 선택 상자에
+              // 띄운다(2026-09-10 지시 「꾹 누르는 건 선택이 안 되는데 클립보드 기능」).
+              IconButton(
+                tooltip: '글자 선택·복사',
+                onPressed: () => _selectText(s),
+                icon: const Icon(Icons.content_copy_outlined),
+              ),
               IconButton(
                 tooltip: _wrap ? '데스크톱 격자 그대로 보기' : '폰 폭에 맞춰 보기',
                 isSelected: _wrap,
@@ -357,6 +360,63 @@ class _TerminalScreenState extends State<TerminalScreen>
       );
     },
   );
+
+  /// 지난 줄과 살아 있는 화면을 글자로 이어 붙여 iOS 선택 손잡이가 붙는 상자에 띄운다.
+  /// 끝 공백은 걷고 빈 줄 뭉치는 하나로 — 격자 그대로 붙이면 절반이 공백이다.
+  Future<void> _selectText(TermSession s) {
+    final lines = <String>[
+      for (final r in s.history) r.map((x) => x.text).join().trimRight(),
+      for (final r in s.grid.lines) r.map((x) => x.text).join().trimRight(),
+    ];
+    final buf = <String>[];
+    for (final l in lines) {
+      if (l.isEmpty && (buf.isEmpty || buf.last.isEmpty)) continue;
+      buf.add(l);
+    }
+    final text = buf.join('\n').trim();
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheet) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.7,
+        minChildSize: 0.3,
+        maxChildSize: 0.95,
+        builder: (context, controller) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 8, 4),
+              child: Row(
+                children: [
+                  Text('글자 선택', style: Theme.of(context).textTheme.titleMedium),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(text: text));
+                      if (sheet.mounted) Navigator.of(sheet).pop();
+                    },
+                    icon: const Icon(Icons.copy, size: 18),
+                    label: const Text('전부 복사'),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: SingleChildScrollView(
+                controller: controller,
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                child: SelectableText(
+                  text.isEmpty ? '(빈 화면)' : text,
+                  style: const TextStyle(fontFamily: 'TermMono', fontSize: 12),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _view(TermSession s) {
     final tokens = s.tokens;
