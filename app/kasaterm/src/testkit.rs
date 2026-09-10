@@ -2497,6 +2497,29 @@ impl App {
             eprintln!("[autoinfo] Info 탭 열림 (col_visible={})", self.git.col_visible);
             return;
         }
+        // Display-only fixture: never connect to or change a real source pane.
+        // Reapply while active so process polling cannot replace the capture.
+        if std::env::var("KASATERM_AUTOINFO").as_deref() == Ok("mirrors") {
+            self.info.view = crate::info::InfoSnap {
+                panes: vec![
+                    crate::info::PaneGroup { pane: "%0".into(), label: "코하루".into(),
+                        shell: "zsh".into(), shell_pid: 123, ..Default::default() },
+                    crate::info::PaneGroup { pane: "%1".into(), label: "미도리".into(),
+                        machine: Some("맥미니".into()), active: true,
+                        session: "아주 긴 세션 제목이 있어도 실행하는 기기 이름은 남아야 해요".into(),
+                        cwd: "/workspace/remote-project".into(), ..Default::default() },
+                    crate::info::PaneGroup { pane: "%2".into(), label: "유우카".into(),
+                        machine: Some("맥북".into()), ..Default::default() },
+                ], ..Default::default()
+            };
+            self.info.procs_collapsed = false;
+            self.info.machines_col.machines.clear();
+            self.info.machines_col.last_refresh = Some(Instant::now());
+            if !ACTED.swap(true, Ordering::Relaxed) {
+                eprintln!("[autoinfo] mirror fixture: native and two mirrors in the viewer list");
+            }
+            return;
+        }
         let act = match std::env::var("KASATERM_AUTOINFO").ok() {
             Some(v)
                 if v == "hover"

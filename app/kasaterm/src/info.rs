@@ -546,8 +546,8 @@ fn fold_tabs(panes: &mut Vec<PaneGroup>, targets: &[PaneTarget]) {
     // Viewer tabs describe this window's layout, not the source device's pane
     // ownership. Folding a mirror into a native group erases its machine; doing
     // the reverse hides native processes when the remote group is filtered out.
-    // Source panes are listed separately by machines_col, regardless of how their
-    // viewers are arranged here. Only native children of a native host fold.
+    // Mirrors remain normal top-level rows in this device's pane list, with their
+    // execution device beside the name. Only native children of a native host fold.
     let host_of = |t: &PaneTarget| {
         t.outer.as_ref()
             .filter(|outer| t.machine.is_none()
@@ -1308,7 +1308,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn device_list_keeps_source_numbers_and_offline_mirrors() {
+    fn mirrors_keep_viewer_room_and_id_in_the_normal_pane_list() {
+        let snap = InfoSnap { panes: vec![
+            PaneGroup { pane: "%0".into(), ..Default::default() },
+            PaneGroup { pane: "%99".into(), machine: Some("source".into()),
+                window: 2, window_label: "viewer room".into(), ..Default::default() },
+            PaneGroup { pane: "%100".into(), machine: Some("source".into()),
+                closed: true, ..Default::default() },
+        ], ..Default::default() };
+        let rows = viewer_panes(&snap);
+        assert_eq!(rows.iter().map(|p| p.pane.as_str()).collect::<Vec<_>>(), ["%0", "%99"]);
+        assert_eq!((rows[1].window, rows[1].window_label.as_str()), (2, "viewer room"));
+        assert_eq!(rows[1].machine.as_deref(), Some("source"));
+    }
+
+    #[test]
+    fn device_browser_does_not_repeat_mirrors_already_in_this_device_list() {
         let row = |local: &str, source: &str| state::MachinesColRow {
             pane: local.into(), remote_id: source.into(), remote_cwd: "/work/project".into(),
             name: "모모이".into(), title: "작업".into(), status: "working".into(),
@@ -1322,17 +1337,14 @@ mod tests {
         };
         let rows = machine_rows(&machine);
         assert_eq!(rows.iter().map(|r| r.remote_id.as_str()).collect::<Vec<_>>(),
-            vec!["%2", "%7", "%12"]);
-        assert_eq!(rows[1].pane, "%99"); // Navigation retains the viewer's ID.
-        assert_eq!(machine_open_count(&machine), 3);
+            vec!["%2", "%12"]);
+        assert_eq!(machine_open_count(&machine), 2);
         machine.mirrored[0].closed = true;
-        let rows = machine_rows(&machine);
-        assert_eq!(rows.last().unwrap().pane, "%99");
         assert_eq!(machine_open_count(&machine), 2);
         machine.online = false;
-        let rows = machine_rows(&machine);
-        assert_eq!(rows.len(), 1);
-        assert_eq!((rows[0].pane.as_str(), rows[0].remote_id.as_str()), ("%99", "%7"));
+        assert!(machine_rows(&machine).is_empty());
+        // Retain navigation/migration metadata even when the source is offline.
+        assert_eq!(machine.mirrored[0].pane, "%99");
         assert_eq!(machine_open_count(&machine), 0);
     }
 
@@ -1730,6 +1742,7 @@ impl App {
                     .unwrap_or_else(|| (String::new(), outer.is_none(), 0));
                 // 원격 거울은 프로세스가 저쪽이라 이름·제목이 로컬에 없다 — 폴링 캐시의
                 // 저쪽 행이 대신 말한다(2026-09-07 지적 「%0 나쵸네코 이렇게만 뜬다」).
+                let remote = kasa_mcp::remote::remote_info(id);
                 let facts = crate::machinescol::remote_pane_facts(id);
                 let remote_str = |k: &str| {
                     facts
@@ -1757,12 +1770,14 @@ impl App {
                     remote_title: remote_str("title").unwrap_or_default(),
                     // "pane 이 보는 경로"가 셸 cwd 보다 우선 — bg-attach 뷰 pane 은
                     // 셸이 spawn 디렉터리에 머물러 실제 프로젝트와 어긋난다.
-                    cwd: self
-                        .pane_view_cwd
-                        .get(id)
-                        .or_else(|| self.pane_cwd_cache.get(id))
-                        .cloned(),
-                    active: active.as_deref() == Some(leaf.as_str()),
+                    cwd: if let Some(remote) = &remote {
+                        remote_str("cwd").or_else(|| remote.remote_cwd.clone())
+                            .map(std::path::PathBuf::from)
+                    } else {
+                        self.pane_view_cwd.get(id).or_else(|| self.pane_cwd_cache.get(id)).cloned()
+                    },
+                    active: active.as_deref() == Some(leaf.as_str())
+                        || (remote.is_some() && tab_active && active.as_deref() == Some(host)),
                     window,
                     // `window_labels.0` 은 안 쓴다 — 그 자리는 대표 pane 의 OSC
                     // 타이틀이라 셸만 떠 있으면 방마다 똑같이 `zsh` 가 된다(실측).
@@ -1781,10 +1796,10 @@ impl App {
                         .unwrap_or_default(),
                     // 경로 해석까지만 GUI 가 한다 — 제목을 읽으려면 jsonl 꼬리를
                     // 훑어야 해서 그건 워커 몫이다(session_title).
-                    session_path: self
+                    session_path: remote.is_none().then(|| self
                         .pane_claude_sid
                         .get(id)
-                        .and_then(|sid| crate::socket::transcript_path_for_session(sid)),
+                        .and_then(|sid| crate::socket::transcript_path_for_session(sid))).flatten(),
                     closed: self.stashed_record(id).is_some(),
                     id: leaf,
                     // 원격 pane 은 로컬 셸이 없다 — 0 으로 남기고 machine 이 그
@@ -1795,8 +1810,10 @@ impl App {
                         None if kasa_mcp::remote::is_remote_pane(id) => 0,
                         None => return None,
                     },
-                    machine: kasa_mcp::remote::remote_info(id).map(|i| {
-                        if i.label.is_empty() {
+                    machine: remote.map(|i| {
+                        if let Some(label) = kasa_mcp::machines::label_for_base(&i.base) {
+                            label
+                        } else if i.label.is_empty() {
                             i.base
                                 .trim_start_matches("http://")
                                 .trim_start_matches("https://")
@@ -2097,8 +2114,11 @@ pub(crate) fn draw_info_col(
     };
     // 탭 안의 프로세스도 센다. 접힌 pane 의 것까지 세는 건 이 숫자가 「지금 보이는
     // 줄 수」가 아니라 「이 기계에서 도는 것」이기 때문이다.
-    let local_panes: Vec<_> = snap.panes.iter().filter(|g| g.machine.is_none()).collect();
-    let proc_total: usize = local_panes.iter().map(|g| all_rows(g).count()).sum();
+    // These are panes open on this device, including mirrors. Process totals,
+    // unlike pane membership, still refer only to locally running processes.
+    let local_panes = viewer_panes(&snap);
+    let proc_total: usize = local_panes.iter().filter(|g| g.machine.is_none())
+        .map(|g| all_rows(g).count()).sum();
     // 방이 하나뿐이면 머리를 안 그린다 — 늘 같은 이름 한 줄이 목록 맨 위를
     // 차지하면서 알려주는 게 없다.
     let show_windows = local_panes.first().is_some_and(|first|
@@ -2156,7 +2176,7 @@ pub(crate) fn draw_info_col(
                 if prog.is_some_and(|p| p.machine == m.label) {
                     h += stages_h;
                 }
-                if m.online || !m.mirrored.is_empty() {
+                if m.online {
                     let mut last_room = "";
                     for r in machine_rows(m) {
                         if !r.room.is_empty() && r.room != last_room {
@@ -2168,7 +2188,7 @@ pub(crate) fn draw_info_col(
                     if m.closed > 0 {
                         h += MACHINE_HEAD_H;
                     }
-                    if m.remote.is_empty() && m.mirrored.is_empty() { h += EMPTY_H; }
+                    if m.remote.is_empty() { h += EMPTY_H; }
                 } else {
                     h += EMPTY_H;
                 }
@@ -2429,7 +2449,7 @@ pub(crate) fn draw_info_col(
             if let Some(p) = info.machines_col.progress.as_ref().filter(|p| p.machine == m.label) {
                 y = draw_migrate_stages(g, p, x0, right, y, top, bottom);
             }
-            if m.online || !m.mirrored.is_empty() {
+            if m.online {
                 let mut last_room = "";
                 for r in machine_rows(m) {
                     if !r.room.is_empty() && r.room != last_room {
@@ -2468,8 +2488,10 @@ pub(crate) fn draw_info_col(
                     }
                     y += MACHINE_HEAD_H;
                 }
-                if m.remote.is_empty() && m.mirrored.is_empty() {
-                    draw_empty(g, x0, y, top, bottom, "열린 pane 없음");
+                if m.remote.is_empty() {
+                    let text = if m.mirrored.is_empty() { "열린 pane 없음" }
+                        else { "열린 거울은 이 기기 목록에 표시돼요" };
+                    draw_empty(g, x0, y, top, bottom, text);
                     y += EMPTY_H;
                 }
             } else {
@@ -2623,9 +2645,10 @@ fn draw_device_section(
         None, true, collapsed, x, w, y, bottom, top)
 }
 
-/// Existing mirrors stay in their source room instead of a second mirror list.
+/// Already-open mirrors belong to the viewer's normal pane list. Keep this
+/// browser for source panes that are not open here; do not list a viewer twice.
 fn machine_rows(m: &state::MachinesColMachine) -> Vec<&state::MachinesColRow> {
-    let mut rows: Vec<_> = m.remote.iter().filter(|_| m.online).chain(&m.mirrored).collect();
+    let mut rows: Vec<_> = m.remote.iter().filter(|_| m.online).collect();
     rows.sort_by(|a, b| a.closed.cmp(&b.closed).then_with(|| a.room.cmp(&b.room)).then_with(|| {
         let number = |r: &state::MachinesColRow|
             r.remote_id.trim_start_matches('%').parse::<u64>().unwrap_or(u64::MAX);
@@ -2636,6 +2659,10 @@ fn machine_rows(m: &state::MachinesColMachine) -> Vec<&state::MachinesColRow> {
 
 fn machine_open_count(m: &state::MachinesColMachine) -> usize {
     machine_rows(m).into_iter().filter(|row| !row.closed).count()
+}
+
+fn viewer_panes(snap: &InfoSnap) -> Vec<&PaneGroup> {
+    snap.panes.iter().filter(|pane| !pane.closed).collect()
 }
 
 fn draw_empty(g: &mut gpu::GpuRenderer, x0: f32, y: f32, top: f32, bottom: f32, text: &str) {
@@ -2870,7 +2897,24 @@ fn draw_group_head(
         gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: true, italic: false },
     );
     let tx = x0 + if has_face { 15.0 + FACE } else { 24.0 };
-    let mut budget = (right - nw - 8.0 - tx).max(0.0);
+    let mut text_right = right - nw;
+    // Execution location is identity, not optional shell detail: reserve it
+    // before fitting long student/task names so a narrow Info column keeps it.
+    if let Some(machine) = gp.machine.as_deref().filter(|m| !m.is_empty()) {
+        let available = (text_right - tx - 8.0).max(0.0);
+        let badge = fit_text(g, &format!("⇄ {machine}"), available * 0.45, 10.0, true);
+        let bw = g.measure_chrome_text(&badge, 10.0, true);
+        if bw > 0.0 {
+            let bx = text_right - bw - 8.0;
+            let tint = crate::render::machine_tint(machine);
+            pill_rect(g, bx, y + 3.0, bw + 8.0, 18.0, theme::lerp(theme::panel_bg(), tint, 0.18));
+            g.draw_text(bx + 4.0, y + 6.0, &badge,
+                gpu::DrawOpts { font_size: 10.0, color: theme::lerp(theme::text(), tint, 0.35),
+                    bold: true, italic: false });
+            text_right = bx - 4.0;
+        }
+    }
+    let mut budget = (text_right - 8.0 - tx).max(0.0);
     let title = if gp.label.is_empty() {
         gp.pane.clone()
     } else {
@@ -2889,11 +2933,10 @@ fn draw_group_head(
     // 먼저 가져간다(폭이 모자라면 밀려나는 건 셸·pid 쪽).
     budget -= tw + 8.0;
     let mut cx = tx + tw + 8.0;
-    // 원격 pane 은 셸·pid 대신 어느 기계 것인지 — 이 줄의 존재 이유가 「그
-    // pane 에서 무엇이 도나」인데, 원격은 그 답이 기계 이름이다.
+    // The remote execution device has a reserved badge above; no local shell PID
+    // exists for that pane, and the machine name must not be repeated here.
     let shell = match gp.machine.as_deref() {
-        Some("") => String::new(),
-        Some(m) => format!("⇄ {m}"),
+        Some(_) => String::new(),
         None => format!("{} {}", gp.shell, gp.shell_pid),
     };
     // The section heading already names the device.

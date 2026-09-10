@@ -133,9 +133,9 @@ fn hung_screen_share_pids() -> Vec<String> {
 /// 그 pane 이 없으면 None.
 pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)> {
     let info = kasa_mcp::remote::remote_info(id)?;
-    let label = if info.label.is_empty() {
-        kasa_mcp::machines::label_for_base(&info.base).unwrap_or_else(|| info.base.clone())
-    } else { info.label.clone() };
+    let label = kasa_mcp::machines::label_for_base(&info.base).unwrap_or_else(|| {
+        if info.label.is_empty() { info.base.clone() } else { info.label.clone() }
+    });
     let snap = kasa_mcp::machines::snapshot();
     let m = snap
         .iter()
