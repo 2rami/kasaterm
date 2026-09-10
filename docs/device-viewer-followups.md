@@ -55,8 +55,11 @@ frontend browsing workflow below was implemented separately on
 
 - **알림 통일** — done 2026-09-10 on the desktop/phone side (`docs/notifications.md`,
   commit a0c3d5a4) and on the 나쵸네코 side (branch `hifumi/notify-dedup` in
-  ~/Desktop/momewomo/nacho-neko, commit 7779ed1, not pushed). Neither is live yet:
-  the app needs a rebuild and the bot a restart, both awaiting the user.
+  ~/Desktop/momewomo/nacho-neko, commit c69d8c1 — student alerts now default off,
+  not pushed) and the sentry side (`hifumi/sentry-dedup` in
+  ~/Desktop/momewomo/sionic/storm-assistant, single-instance lock + no 429 fallback).
+  None is live yet: app rebuild, bot restart, sentry deploy + killing the duplicate
+  watchd all await the user.
 - **모바일 pane 추가** (user answer 2026-09-10: both places): a 「+」 on the
   phone hub (pick machine/room → new pane) and a 「pane 추가」 action in the
   session screen's top bar (split/tab next to the pane being viewed — the same
