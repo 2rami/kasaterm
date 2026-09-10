@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../hub_model.dart';
 import '../server.dart';
@@ -137,8 +138,15 @@ class _NoteRow extends StatelessWidget {
       if (note.asked.isNotEmpty) note.asked,
       if (note.did.isNotEmpty) note.did,
     ].join('  →  ');
+    final link = Uri.tryParse(note.url);
+    final hasLink =
+        link != null && (link.scheme == 'http' || link.scheme == 'https');
     return ListTile(
-      onTap: p == null
+      // 페이지 쪽지는 학생 화면이 아니라 그 주소로 — 「폰」을 골라 둔 동안 학생이
+      // 보여 주려 연 것이라 사파리가 맞다.
+      onTap: hasLink
+          ? () => launchUrl(link, mode: LaunchMode.externalApplication)
+          : p == null
           ? () => ScaffoldMessenger.of(
               context,
             ).showSnackBar(const SnackBar(content: Text('그 pane 은 이제 없다')))
@@ -146,6 +154,7 @@ class _NoteRow extends StatelessWidget {
               Navigator.of(context).pop();
               onOpen(p);
             },
+      trailing: hasLink ? const Icon(Icons.open_in_new, size: 18) : null,
       leading: StudentFace(
         slug: p?.slug,
         url: p?.slug == null

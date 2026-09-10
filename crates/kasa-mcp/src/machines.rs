@@ -236,6 +236,22 @@ pub fn chrome_tunnel_port(label: &str) -> u16 {
 /// 이 기계의 카사크롬 다리 포트(확장 ↔ 브리지, kasachrome/extension/port.js 와 같다).
 pub const KASACHROME_PORT: u16 = 8777;
 
+/// 사람에게 보여 줄 페이지가 갈 곳 — `""` 이면 「카사크롬이 쓰는 크롬」과 같은 기계,
+/// `"phone"` 이면 폰(쪽지+알림). 폰에는 학생이 조작할 크롬이 없어 이 둘은 갈라 둔다:
+/// 학생 도구가 쓰는 크롬은 그대로 두고 `open` 의 도착지만 폰으로 간다(2026-09-10 지시
+/// 「폰일 때는 폰에서도 볼 수 있게」).
+pub const OPEN_TARGET_PHONE: &str = "phone";
+
+pub fn open_url_target() -> String {
+    crate::character::read_setting_str("open_url_target")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+pub fn opens_on_phone() -> bool {
+    open_url_target() == OPEN_TARGET_PHONE
+}
+
 /// 설정 「카사크롬이 쓰는 크롬」 — 명부의 기계 라벨, 빈 문자열이면 이 기계.
 pub fn kasachrome_machine() -> String {
     crate::character::read_setting_str("kasachrome_machine")

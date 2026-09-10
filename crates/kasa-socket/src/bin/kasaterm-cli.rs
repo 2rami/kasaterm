@@ -1064,7 +1064,7 @@ fn print_help() {
         "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N] [--host-ratio 0.6]  # 기본 no-focus·이 pane 을 쪼갬. --count N 은 부른 쪽을 크게 두고 N 명을 균등하게 배치(몫이 반감하지 않는다). 창이 좁으면 앉힌 인원이 요청보다 적고 note 에 적힌다"
     );
     eprintln!("  kasaterm-cli window-new                    # 새 창
-  kasaterm-cli open  <url> [%surface]        # URL 을 사람이 보는 브라우저로 — 이 pane 을 거울로 보는 기계가 있으면 그쪽 크롬, 없으면 이 기계 기본 브라우저
+  kasaterm-cli open  <url> [%surface]        # URL 을 사람이 보는 브라우저로 — 어느 기기로 갈지는 사람이 하단바·폰 허브 「브라우저 기기」에서 고른다(폰이면 쪽지+알림). 네가 기기를 바꾸지 마라
   kasaterm-cli web   <url> [%surface]        # URL 을 그 pane 옆 웹(브라우저) pane 으로 (기본: 이 pane 옆)
   kasaterm-cli web-text  [%surface]          # 웹 pane 본문 읽기 (innerText). %surface 생략 = 웹 pane 이 하나일 때
   kasaterm-cli web-eval  '<js>' [%surface]   # 웹 pane 에서 JS 실행, 결과를 JSON 으로 (클릭·입력·검사 전부 이것으로)

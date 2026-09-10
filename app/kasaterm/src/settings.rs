@@ -717,6 +717,7 @@ impl App {
                 sources.sort(); sources.dedup();
                 let proxy = self.proxy.clone();
                 self.statusbar.chrome_machine = machine.clone();
+                self.statusbar.chrome_phone = false;
                 std::thread::spawn(move || {
                     static SYNC: std::sync::Mutex<()> = std::sync::Mutex::new(());
                     let Ok(_guard) = SYNC.lock() else { return };
@@ -732,6 +733,31 @@ impl App {
                     }
                 });
                 self.statusbar.tunnel_checked = None;
+            }
+            SettingsAction::OpenOnPhone(on) => {
+                let value = if on { kasa_mcp::machines::OPEN_TARGET_PHONE } else { "" };
+                socket::write_setting("open_url_target", serde_json::json!(value));
+                self.statusbar.chrome_phone = on;
+                // `open` 은 학생이 도는 기계가 처리한다 — 본진에도 같은 값을 둬야
+                // 거기 학생이 연 페이지가 폰으로 온다(크롬 선택 전파와 같은 길).
+                let mut sources: Vec<String> = self.pty.keys()
+                    .filter_map(|p| kasa_mcp::remote::remote_info(p).map(|i| i.base))
+                    .chain(kasa_mcp::machines::machines().into_iter().filter(|m| m.home).map(|m| m.base))
+                    .collect();
+                sources.sort(); sources.dedup();
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    for base in sources {
+                        if kasa_mcp::machines::opens_on_phone() != on { return; }
+                        if let Err(error) = kasa_mcp::remote::settings_action(
+                            &base, "set-open-target", Some(value), None, None,
+                        ) {
+                            let _ = proxy.send_event(UserEvent::SocketToast(format!(
+                                "이 기기에는 저장했지만 본진에 폰 선택을 전달하지 못했어요: {error}"
+                            )));
+                        }
+                    }
+                });
             }
             SettingsAction::CwdMode(m) => {
                 // "last"/"home" are literal; "custom" keeps any existing path or

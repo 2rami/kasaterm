@@ -233,6 +233,8 @@ pub struct Alert {
     /// (아이콘 자리에 얼굴)으로 바꾼다. 없으면 보통 알림.
     pub sender: Option<String>,
     pub avatar_slug: Option<String>,
+    /// 학생이 보여 주려 연 페이지 — 폰이 알림을 누르면 pane 대신 이 주소를 연다.
+    pub url: Option<String>,
 }
 
 fn notification_thread(alert: &Alert) -> String {
@@ -272,6 +274,7 @@ pub async fn send(alert: &Alert) -> usize {
             "kind": alert.kind,
             "sender": alert.sender,
             "avatar": avatar,
+            "url": alert.url,
         });
         let host = if t.env == "dev" {
             "https://api.sandbox.push.apple.com"
@@ -306,7 +309,22 @@ pub async fn send(alert: &Alert) -> usize {
 }
 
 /// 쪽지가 들어왔을 때 — `notes::add` 뒤에서 부른다.
-pub fn note_arrived(character: &str, kind: &str, summary: &str, pane: &str) {
+pub fn note_arrived(character: &str, kind: &str, summary: &str, pane: &str, url: Option<&str>) {
+    let alert = note_alert(character, kind, summary, pane, url);
+    tokio::spawn(async move {
+        send(&alert).await;
+    });
+}
+
+/// 런타임 밖(GUI 스레드)에서 — `open` 이 폰으로 갈 때. 자기 런타임을 하나 세워 보낸다.
+pub fn note_arrived_blocking(character: &str, kind: &str, summary: &str, pane: &str, url: Option<&str>) {
+    let alert = note_alert(character, kind, summary, pane, url);
+    if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        rt.block_on(send(&alert));
+    }
+}
+
+fn note_alert(character: &str, kind: &str, summary: &str, pane: &str, url: Option<&str>) -> Alert {
     let who = if character.is_empty() { "학생" } else { character };
     let head = match kind {
         "permission" => "승인 기다림",
@@ -315,21 +333,22 @@ pub fn note_arrived(character: &str, kind: &str, summary: &str, pane: &str) {
         "done_ok" => "끝냄",
         "done_fail" => "실패",
         "dead" => "멈춤",
+        "link" => "페이지",
         _ => "쪽지",
     };
-    let alert = Alert {
+    Alert {
         title: format!("{who} · {head}"),
         body: summary.chars().take(180).collect(),
         machine: None,
         pane: pane.to_string(),
         kind: format!("note:{kind}"),
-        collapse: Some(format!("note-{pane}")),
+        // 페이지는 한 장씩 다 보여야 한다 — 같은 pane 의 두 번째 링크가 첫 번째를 덮으면
+        // 사람은 하나만 받은 줄 안다.
+        collapse: (kind != "link").then(|| format!("note-{pane}")),
         sender: (!character.is_empty()).then(|| character.to_string()),
         avatar_slug: crate::character::slug_for_any(character),
-    };
-    tokio::spawn(async move {
-        send(&alert).await;
-    });
+        url: url.filter(|u| !u.is_empty()).map(str::to_string),
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -444,6 +463,7 @@ pub async fn push_loop() {
                     collapse: Some(format!("wait-{key}")),
                     sender: Some(name.to_string()),
                     avatar_slug: slug.clone(),
+                    url: None,
                 })
             } else if !cur.busy && !cur.waiting && prev.as_ref().is_some_and(|p| p.busy) {
                 Some(Alert {
@@ -455,6 +475,7 @@ pub async fn push_loop() {
                     collapse: Some(format!("done-{key}")),
                     sender: Some(name.to_string()),
                     avatar_slug: slug.clone(),
+                    url: None,
                 })
             } else {
                 None
@@ -482,7 +503,7 @@ mod tests {
         let mut alert = super::Alert {
             title: String::new(), body: String::new(), machine: None,
             pane: "%3".into(), kind: "done".into(), collapse: None,
-            sender: None, avatar_slug: None,
+            sender: None, avatar_slug: None, url: None,
         };
         let local = super::notification_thread(&alert);
         alert.machine = Some("macbook".into());

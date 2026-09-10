@@ -749,13 +749,16 @@ fn paint_tunnel_popover(
         let fy = y + 376.0;
         g.rect(x + 16.0, fy - 4.0, w - 32.0, 1.0, theme::border());
         g.queue_icon("globe", x + 16.0, fy + 6.0, 12.0, theme::text_mute());
-        let device = if sb.chrome_machine.is_empty() { "이 기기" } else { &sb.chrome_machine };
-        let label = if reachable { format!("브라우저 · {device}") } else { format!("브라우저 · {device} 연결 확인 필요") };
+        let device = if sb.chrome_phone { "폰" } else if sb.chrome_machine.is_empty() { "이 기기" } else { &sb.chrome_machine };
+        let label = if reachable || sb.chrome_phone { format!("브라우저 · {device}") } else { format!("브라우저 · {device} 연결 확인 필요") };
         let label = crate::info::fit_text(g, &label, w - 64.0, 10.0, false);
         text(g, x + 35.0, fy + 6.0, &label, 10.0,
             if reachable { theme::text_mute() } else { theme::attention() }, false);
     }
 }
+
+/// 팝오버의 「폰」 줄 — 명부 라벨과 안 겹치는 표식. 기계가 아니라 `open` 의 도착지다.
+const PHONE_ROW: &str = "\u{1}phone";
 
 fn paint_chrome_popover(
     g: &mut gpu::GpuRenderer,
@@ -769,7 +772,8 @@ fn paint_chrome_popover(
     const ROW: f32 = 38.0;
     const FOOT: f32 = 36.0;
     let w = 292.0_f32.min((win_w - 16.0).max(180.0));
-    let total = (1 + sb.chrome_candidates.len()) as f32 * ROW;
+    // 「이 기기」 · 명부 기계들 · 「폰」 — 폰은 크롬이 아니라 `open` 의 도착지다.
+    let total = (2 + sb.chrome_candidates.len()) as f32 * ROW;
     let h = (HEAD + total + FOOT).min((win_h - 60.0).max(HEAD + ROW + FOOT));
     let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
     let y = (anchor.1 - h - 6.0).max(8.0);
@@ -786,19 +790,25 @@ fn paint_chrome_popover(
         font_size: 10.0, color: theme::text_dim(), bold: false, italic: false,
     });
     g.push_clip(x, top, w, inner);
-    for (index, label) in std::iter::once("").chain(sb.chrome_candidates.iter().map(String::as_str)).enumerate() {
+    let rows = std::iter::once("")
+        .chain(sb.chrome_candidates.iter().map(String::as_str))
+        .chain(std::iter::once(PHONE_ROW));
+    for (index, label) in rows.enumerate() {
         let ry = top + index as f32 * ROW - sb.popover_scroll;
         if ry + ROW <= top || ry >= top + inner { continue; }
         let row = (x + 7.0, ry + 2.0, w - 14.0, ROW - 4.0);
-        let selected = sb.chrome_machine == label;
+        let phone = label == PHONE_ROW;
+        let selected = if phone { sb.chrome_phone } else { !sb.chrome_phone && sb.chrome_machine == label };
         let hovered = hit(cursor, &row) && cursor.1 >= top && cursor.1 < top + inner;
         if selected || hovered {
             round_rect(g, row.0, row.1, row.2, row.3, theme::radius_sm(),
                 if hovered { theme::surface_hover() } else { theme::panel_bg() });
         }
-        g.queue_icon("monitor-smartphone", x + 16.0, ry + 11.0, 15.0,
+        g.queue_icon(if phone { "smartphone" } else { "monitor-smartphone" }, x + 16.0, ry + 11.0, 15.0,
             if selected { theme::accent() } else { theme::text_dim() });
-        let display = if label.is_empty() {
+        let display = if phone {
+            "폰 · 쪽지로 받기".to_string()
+        } else if label.is_empty() {
             crate::info::cached_local_machine_name().map(|name| format!("{name} · 이 기기")).unwrap_or_else(|| "이 기기".into())
         } else { label.to_string() };
         let display = crate::info::fit_text(g, &display, w - 87.0, 11.0, selected);
@@ -817,7 +827,8 @@ fn paint_chrome_popover(
     g.pop_clip();
     let fy = y + h - FOOT;
     g.rect(x + 14.0, fy, w - 28.0, 1.0, theme::border());
-    let note = if sb.chrome_reach == Some(false) { "선택한 기기의 브라우저 연결을 확인해줘." }
+    let note = if sb.chrome_phone { "보여 줄 페이지는 폰 쪽지로. 조작은 이 기기 크롬." }
+        else if sb.chrome_reach == Some(false) { "선택한 기기의 브라우저 연결을 확인해줘." }
         else { "선택한 기기에서 열고 조작해." };
     let note = crate::info::fit_text(g, note, w - 28.0, 10.0, false);
     g.draw_text(x + 14.0, fy + 13.0, &note, gpu::DrawOpts {
@@ -1511,7 +1522,11 @@ impl crate::App {
             }
             Some(state::StatusbarHit::ChooseChrome(machine)) => {
                 self.statusbar.popover = None;
-                self.settings_apply(crate::SettingsAction::ChromeMachine(machine));
+                if machine == PHONE_ROW {
+                    self.settings_apply(crate::SettingsAction::OpenOnPhone(true));
+                } else {
+                    self.settings_apply(crate::SettingsAction::ChromeMachine(machine));
+                }
                 self.chrome_dirty = true;
                 return true;
             }
@@ -1643,6 +1658,7 @@ impl crate::App {
                 self.statusbar.chrome_candidates.push(chosen.clone());
             }
             self.statusbar.chrome_machine = chosen;
+            self.statusbar.chrome_phone = kasa_mcp::machines::opens_on_phone();
         }
         // 사용량은 **경고를 보고 누르는** 자리다. 하단바가 「재시작 권장」이라
         // 말했는데 CPU 탭이 펴지면, 방금 읽은 그 말의 근거를 보려고 탭을 한 번

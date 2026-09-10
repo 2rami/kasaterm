@@ -55,6 +55,8 @@ pub(crate) struct StatusbarState {
     pub(crate) chrome_rect: Option<(f32, f32, f32, f32)>,
     /// Browser targets are loaded once when the menu opens, never during paint.
     pub(crate) chrome_candidates: Vec<String>,
+    /// 「폰」이 골라져 있다 — `open` 이 쪽지로 간다. 크롬 선택과 별개의 파일 값.
+    pub(crate) chrome_phone: bool,
     pub(crate) tunnel_checked: Option<std::time::Instant>,
     /// 원격 주소(cloudflared config 의 hostname). 같은 5초 폴에 얹는다 — 읽는 일이
     /// **파일 IO** 라, 팝오버가 그릴 때마다 부르면 열어 둔 동안 매 프레임

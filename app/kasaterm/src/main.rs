@@ -4417,6 +4417,8 @@ pub(crate) enum SettingsAction {
     UiLanguage(&'static str),
     /// 「카사크롬이 쓰는 크롬」 — 명부의 기계 라벨, 빈 문자열=이 기계.
     ChromeMachine(String),
+    /// 사람에게 보여 줄 페이지를 폰(쪽지+알림)으로. 크롬 선택은 건드리지 않는다.
+    OpenOnPhone(bool),
     CwdMode(&'static str),
     /// 파일트리에서 파일을 열 때 쓸 방식 — `"builtin"` · `"app"` · `"terminal"`.
     FileOpenMode(&'static str),

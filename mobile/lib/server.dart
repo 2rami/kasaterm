@@ -529,11 +529,26 @@ class Server {
     return a is Map ? a.cast<String, Object?>() : null;
   }
 
+  /// 하단바 「브라우저 기기」와 같은 목록 — 고른 기계·후보·이 기계 이름·폰 여부.
+  Future<BrowserTarget?> browserTarget({String? machine}) async {
+    final v = await _getJson('settings/values', machine: machine);
+    if (v is! Map) return null;
+    final b = v['browser'];
+    if (b is! Map) return null;
+    return BrowserTarget(
+      machine: b['machine'] as String? ?? '',
+      candidates: [for (final c in (b['candidates'] as List?) ?? const []) '$c'],
+      local: b['local'] as String? ?? '',
+      phone: b['phone'] == true,
+    );
+  }
+
   /// 데스크톱 설정 액션 — 이름·인자가 설정 화면의 웹 쪽과 같다(`theme-mode`·`accent`·
   /// `shape`…). 데스크톱이 그 자리에서 바뀌고 색이 폰으로 되돌아온다.
   Future<void> settingsAction(
     String action, {
     String? id,
+    String? label,
     String? machine,
   }) async {
     final http.Response res;
@@ -541,7 +556,7 @@ class Server {
       res = await _client.post(
         uri('settings/action', machine: machine),
         headers: {'content-type': 'application/json'},
-        body: jsonEncode({'action': action, 'id': ?id}),
+        body: jsonEncode({'action': action, 'id': ?id, 'label': ?label}),
       );
     } catch (_) {
       throw ServerException('${describe()} 에 닿지 못했다');
@@ -779,6 +794,24 @@ class Server {
 }
 
 /// 나쵸가 남긴 학생 쪽지 한 장(서버 notes.rs).
+/// 학생이 사람에게 보여 줄 페이지가 갈 곳. `phone` 이면 쪽지로 온다.
+class BrowserTarget {
+  const BrowserTarget({
+    required this.machine,
+    required this.candidates,
+    required this.local,
+    required this.phone,
+  });
+
+  /// 고른 기계 라벨 — 빈 문자열이면 주소가 가리키는 그 기계.
+  final String machine;
+  final List<String> candidates;
+
+  /// 그 기계가 명부에서 불리는 이름 — 다른 기계에 같은 선택을 전할 때 쓴다.
+  final String local;
+  final bool phone;
+}
+
 class Note {
   const Note({
     required this.id,
@@ -792,11 +825,15 @@ class Note {
     required this.read,
     required this.image,
     this.machine,
+    this.url = '',
   });
 
   final int id;
   final String pane;
   final String character;
+
+  /// kind=`link` — 누르면 사파리로 여는 주소.
+  final String url;
 
   /// permission · question · waiting · idle · done_ok · done_fail · dead
   final String kind;
@@ -824,6 +861,7 @@ class Note {
     read: read ?? this.read,
     image: image,
     machine: machine,
+    url: url,
   );
 
   static Note fromJson(Map<String, Object?> j, {String? machine}) => Note(
@@ -840,5 +878,6 @@ class Note {
     read: j['read'] == true,
     image: j['image'] == true,
     machine: machine,
+    url: j['url'] as String? ?? '',
   );
 }

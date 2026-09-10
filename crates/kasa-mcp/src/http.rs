@@ -5308,7 +5308,7 @@ async fn term_notes_post(body: Bytes) -> impl IntoResponse {
     match crate::notes::add(input) {
         Some(n) => {
             // 쪽지는 사람이 자리에 없을 때 오는 것이라 폰에도 같이 알린다.
-            crate::push::note_arrived(&n.character, &n.kind, &n.summary, &n.pane);
+            crate::push::note_arrived(&n.character, &n.kind, &n.summary, &n.pane, Some(&n.url));
             Json(serde_json::json!({ "ok": true, "id": n.id }))
         }
         None => err("pane 과 summary 는 비면 안 돼요".into()),

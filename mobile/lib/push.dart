@@ -124,6 +124,11 @@ class PushBridge {
   }
 
   void _tap(Map<String, Object?> m) {
+    final url = m['url'] as String?;
+    if (url != null && url.isNotEmpty) {
+      _onTap?.call(AppLink(url: url));
+      return;
+    }
     final pane = m['pane'] as String?;
     if (pane == null || pane.isEmpty) return;
     final machine = m['machine'] as String?;

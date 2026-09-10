@@ -2210,6 +2210,14 @@ impl Backend for PtyBackend {
             save_browser_target(&chosen)?;
             return Ok(serde_json::json!({"ok": true, "machine": chosen}));
         }
+        // 폰이 「이 폰」을 고르면 — 학생 도구의 크롬은 그대로, `open` 의 도착지만 폰.
+        if action == "set-open-target" {
+            let phone = id == Some(kasa_mcp::machines::OPEN_TARGET_PHONE);
+            anyhow::ensure!(phone || id.unwrap_or("").is_empty(), "모르는 도착지예요");
+            write_setting("open_url_target",
+                serde_json::json!(if phone { kasa_mcp::machines::OPEN_TARGET_PHONE } else { "" }));
+            return Ok(serde_json::json!({"ok": true, "phone": phone}));
+        }
         // 언어는 파일 한 줄이고 GUI 상태가 아니다 — 비울 캐시도, 다시 그릴 네이티브
         // 화면도 없다(설정 화면 문구는 웹이 쥔다). 그래서 GUI 왕복을 타지 않는다.
         if action == "set-language" {
@@ -2280,6 +2288,16 @@ impl Backend for PtyBackend {
             o.insert(
                 "language".to_string(),
                 serde_json::json!(read_ui_language()),
+            );
+            // 브라우저 기기도 파일 값이다 — 폰 허브가 하단바 팝오버와 같은 목록을 받는다.
+            o.insert(
+                "browser".to_string(),
+                serde_json::json!({
+                    "machine": kasa_mcp::machines::kasachrome_machine(),
+                    "candidates": kasa_mcp::machines::kasachrome_candidates(),
+                    "local": kasa_mcp::machines::self_label(),
+                    "phone": kasa_mcp::machines::opens_on_phone(),
+                }),
             );
         }
         v
@@ -4157,9 +4175,11 @@ pub(crate) fn save_browser_target(machine: &str) -> std::io::Result<()> {
     if !machine.is_empty() && urls.is_empty() {
         return Err(std::io::Error::other(format!("{machine} 브라우저로 연결할 경로가 없어요")));
     }
+    // 크롬을 골랐다는 것은 그 기계 앞에 있다는 뜻 — 폰 도착지는 함께 풀린다.
     write_settings_patch_atomic(&[
         ("kasachrome_machine", serde_json::json!(machine)),
         ("kasachrome_bridge_urls", serde_json::json!(urls.join(","))),
+        ("open_url_target", serde_json::json!("")),
     ])
 }
 

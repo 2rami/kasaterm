@@ -28,6 +28,10 @@ pub struct Note {
     /// 사진이 딸렸는가 — `/term/notes/<id>.png`.
     #[serde(default)]
     pub image: bool,
+    /// 학생이 사람에게 보여 주려 연 페이지 — 폰이 「이 폰」으로 고른 동안 `open` 이
+    /// 브라우저 대신 여기로 온다(kind=`link`). 폰은 누르면 사파리로 연다.
+    #[serde(default)]
+    pub url: String,
 }
 
 /// 나쵸가 보내는 본문 — id·읽음은 서버가 붙인다.
@@ -48,6 +52,8 @@ pub struct NoteInput {
     /// pane 사진 PNG 를 base64 로. 나쵸가 DM 에 붙이는 그 사진.
     #[serde(default)]
     pub image: Option<String>,
+    #[serde(default)]
+    pub url: String,
 }
 
 /// 사진 상한 — 폰 목록의 썸네일이지 원본 보관이 아니다.
@@ -132,6 +138,7 @@ fn add_to(path: &Path, input: NoteInput) -> Option<Note> {
         when: input.when.unwrap_or_else(now_secs),
         read: false,
         image: image.is_some(),
+        url: input.url.trim().to_string(),
     };
     body.next_id += 1;
     body.notes.push(note.clone());
@@ -212,6 +219,7 @@ mod tests {
             did: String::new(),
             when: Some(when),
             image: None,
+            url: String::new(),
         }
     }
 

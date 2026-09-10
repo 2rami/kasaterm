@@ -476,6 +476,12 @@ impl App {
         let Some(url) = normalize_web_url(raw_url) else {
             return;
         };
+        // 사람이 폰을 들고 있다(하단바·폰 허브의 「폰」) — 어느 기계 브라우저도 그 눈앞에
+        // 없다. 쪽지+알림으로 보내고, 되돌아온 open(`__local_browser__`)도 같다.
+        if kasa_mcp::machines::opens_on_phone() {
+            self.open_url_to_phone(&url, target);
+            return;
+        }
         // The receiving machine must not route an already-routed open again.
         if target == Some("__local_browser__") {
             self.open_url_here(&url, None);
@@ -520,6 +526,44 @@ impl App {
             return;
         }
         self.open_url_here(&url, None);
+    }
+
+    /// 폰 쪽지로 — 누르면 사파리로 열린다. 이 기계의 쪽지 파일에 남고 푸시는 여기
+    /// 등록된 폰으로만 간다(본진에서 열렸으면 폰 목록엔 그 기계 칸으로 뜬다).
+    fn open_url_to_phone(&mut self, url: &str, target: Option<&str>) {
+        let pane = target
+            .filter(|t| *t != "__local_browser__")
+            .map(|t| self.ws.lock().unwrap().outer_for_pty(t).unwrap_or_else(|| t.to_string()))
+            .unwrap_or_default();
+        let character = self
+            .ws
+            .lock()
+            .unwrap()
+            .pane_character
+            .get(&pane)
+            .cloned()
+            .unwrap_or_default();
+        let summary = url.to_string();
+        let input = kasa_mcp::notes::NoteInput {
+            pane: if pane.is_empty() { "-".to_string() } else { pane.clone() },
+            character: character.clone(),
+            kind: "link".to_string(),
+            summary: summary.clone(),
+            asked: String::new(),
+            did: String::new(),
+            when: None,
+            image: None,
+            url: url.to_string(),
+        };
+        let added = kasa_mcp::notes::add(input);
+        let proxy = self.proxy.clone();
+        let url_owned = url.to_string();
+        std::thread::spawn(move || {
+            if let Some(n) = added {
+                kasa_mcp::push::note_arrived_blocking(&n.character, &n.kind, &n.summary, &n.pane, Some(&url_owned));
+            }
+            let _ = proxy.send_event(UserEvent::SocketToast("폰 쪽지로 보냈어요".to_string()));
+        });
     }
 
     /// 이 기계의 기본 브라우저로 연다. `from` 은 원격 호스트가 되돌려 보낸 경우 그
