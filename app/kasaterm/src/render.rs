@@ -14088,7 +14088,6 @@ pub(crate) fn paint_character_swap_confirm(
         &lines,
         &[
             ("다시 띄우기", CharacterSwapBtn::Relaunch, Some(tone)),
-            ("껍데기만", CharacterSwapBtn::ShellOnly, None),
             ("취소", CharacterSwapBtn::Cancel, None),
         ],
     )

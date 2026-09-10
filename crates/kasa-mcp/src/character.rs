@@ -1718,6 +1718,12 @@ fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Res
     if sid.is_empty() || name.is_empty() {
         return Ok(());
     }
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    // Atomic rename alone does not protect the read/modify/write transaction:
+    // concurrent launches could each erase the other's session assignment.
+    let guard = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(path.with_extension("json.lock"))?;
+    guard.lock()?;
     let mut map = load_session_chars(path);
     if map.get(sid).and_then(|v| v.as_str()) == Some(name) {
         return Ok(());
@@ -1726,7 +1732,7 @@ fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Res
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     let body = serde_json::to_string_pretty(&Value::Object(map)).map_err(std::io::Error::other)?;
     std::fs::write(&tmp, body)?;
     let r = std::fs::rename(&tmp, path);
@@ -1736,6 +1742,28 @@ fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Res
         *g = None;
     }
     r
+}
+
+#[cfg(test)]
+mod binding_race_tests {
+    #[test]
+    fn simultaneous_launches_preserve_every_session_identity() {
+        let root = std::env::temp_dir().join(format!("kasaterm-identity-race-{}", uuid::Uuid::new_v4()));
+        let path = root.join("characters.json");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let workers: Vec<_> = (0..12).map(|i| {
+            let (path, barrier) = (path.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                super::bind_session_character_in(&path, &format!("session-{i}"), &format!("student-{i}")).unwrap();
+            })
+        }).collect();
+        for worker in workers { worker.join().unwrap(); }
+        let saved = super::load_session_chars(&path);
+        assert_eq!(saved.len(), 12);
+        for i in 0..12 { assert_eq!(saved[&format!("session-{i}")], format!("student-{i}")); }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// 새 `claude --session-id` 용 uuid. claude 가 엄격한 UUID 형식을 요구하므로

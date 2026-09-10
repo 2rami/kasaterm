@@ -979,6 +979,10 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn prepare_agent_identity(&self, surface: &str, sid: &str, requested: &str) -> Result<serde_json::Value> {
+        crate::agent_identity::prepare(&self.ws, surface, sid, requested)
+    }
+
     /// 이사가 출발지의 캐릭터 테마 선택을 이 기계에 재현한다 — 설정 화면과 같은
     /// 경로(write_setting + 캐시 무효화)를 앱 프로세스 안에서 태운다. 파일만 밖에서
     /// 고치면 도는 앱의 활성 테마·로스터 캐시가 낡은 채 남는다(character.rs 캐시 주석).
@@ -2890,7 +2894,8 @@ impl Backend for PtyBackend {
                 // detach 포크로 세션 id 가 갈려도 --resume 부모 끝의 바인딩이 retained 진실
                 // (per-세션이라 "다 같은 학생" 아님, 거노). stem = transcript 파일명 = 세션 id.
                 let stem = path.file_stem().and_then(|s| s.to_str());
-                let retained = stem
+                let launched = self.ws.lock().unwrap().pane_launch_character.get(sid.as_str()).cloned();
+                let retained = launched.or_else(|| stem
                     .and_then(|s| {
                         let mut cur = s.to_string();
                         for _ in 0..8 {
@@ -2904,7 +2909,7 @@ impl Backend for PtyBackend {
                         }
                         None
                     })
-                    .filter(|c| valid_members.contains(c));
+                    .filter(|c| valid_members.contains(c)));
                 // 셸 env 폴백(foreground 순정 경로) — bg 셸엔 대개 없다. 단 spawn 시
                 // 동결된 KASATERM_CHARACTER 는 --resume/재배정 후 stale 하다(거노: 복원
                 // 후 board 가 전부 미도리 — env CHARACTER 는 미도리로 굳었지만 pane env 의

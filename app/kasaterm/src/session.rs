@@ -488,6 +488,7 @@ impl App {
             }
         }
         let sid = kasa_mcp::character::new_session_id();
+        self.ws.lock().unwrap().pane_launch_character.remove(id);
         let _ = kasa_mcp::character::write_marker(&rslug, id, &name);
         self.pane_session_id.insert(id.to_string(), sid.clone());
         // 세션→캐릭터 영속 바인딩(거노 ④): 같은 세션이 --resume 등으로 다시 붙으면 같은
@@ -2194,6 +2195,16 @@ impl App {
     /// 이름표를 교정(respawn 없음 — persona 는 스폰 시 고정, label·마커만 갱신,
     /// --resume 둔갑 방지), 그것도 없으면 현재 배정을 저장해 다음 resume 이 재사용한다.
     pub(crate) fn apply_session_character(&mut self, pane: &str, sid: &str) {
+        // The model has already read these instructions. A late transcript or
+        // parent lookup must not silently change only its face and name.
+        let launched = self.ws.lock().unwrap().pane_launch_character.get(pane).cloned();
+        if let Some(name) = launched {
+            self.relabel_pane(pane, &name);
+            if kasa_mcp::character::session_character(sid).is_none() {
+                let _ = kasa_mcp::character::bind_session_character(sid, &name);
+            }
+            return;
+        }
         let cur = self.ws.lock().unwrap().pane_character.get(pane).cloned();
         // 우선순위: 세션 자신의 바인딩 > 부모 상속 > env anchor. 예전엔 부모가 바인딩을
         // 덮었지만("첫 호출에 박힌 랜덤 바인딩 교정"용) — 지금 바인딩은 전부 의도적
@@ -2311,6 +2322,13 @@ impl App {
             eprintln!("[repersona] unknown character '{character}' — ignored");
             return;
         }
+        // A shell has no loaded voice, and persona-off deliberately allows
+        // visual-only changes. Do not retain a previous run's identity latch.
+        if !socket::read_claude_persona()
+            || self.pty.get(pane).and_then(|session| session.active_agent()).is_none()
+        {
+            self.ws.lock().unwrap().pane_launch_character.remove(pane);
+        }
         self.ws
             .lock()
             .unwrap()
@@ -2396,6 +2414,7 @@ impl App {
         let Some(p) = self.character_swap_confirm.take() else {
             return;
         };
+        let previous = self.ws.lock().unwrap().pane_character.get(&p.pane).cloned();
         if btn != CharacterSwapBtn::Cancel {
             // 어느 쪽이든 마커·바인딩·말투 파일이 먼저 새 학생으로 서야 한다 —
             // 되띄우기가 `assign_character_env` 로 env 를 다시 세울 때 그것을 읽는다.
@@ -2403,9 +2422,6 @@ impl App {
         }
         let msg = match btn {
             CharacterSwapBtn::Cancel => None,
-            CharacterSwapBtn::ShellOnly => {
-                Some(format!("{} → {} · 말투는 다음에 띄울 때부터", p.pane, p.to))
-            }
             CharacterSwapBtn::Relaunch => Some({
                 // **되띄우기가 캐릭터를 다시 고르지 못하게 못 박는다.** 그 경로는
                 // `assign_character_env` 로 env 를 새로 세우는데, 그 함수는 고른
@@ -2421,8 +2437,10 @@ impl App {
                 if ok {
                     format!("{} → {} · 대화를 이어서 다시 띄웠어요", p.pane, p.to)
                 } else {
-                    // 되띄우기가 조용히 실패하면 사용자는 말투까지 바뀐 줄 안다.
-                    format!("{} → {} · 다시 띄우지 못해 말투는 다음부터", p.pane, p.to)
+                    if let Some(previous) = previous {
+                        self.repersona_pane(&p.pane, &previous);
+                    }
+                    format!("{} · 다시 띄우지 못해 학생을 바꾸지 않았어요", p.pane)
                 }
             }),
         };
@@ -7790,8 +7808,6 @@ pub(crate) struct PendingCharacterSwap {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum CharacterSwapBtn {
     Cancel,
-    /// 이름·얼굴·색만 지금 바꾼다. 말투는 다음에 그 pane 에서 띄울 때부터.
-    ShellOnly,
     /// 대화를 이어서 다시 띄운다 — 말투까지 지금 바뀐다.
     Relaunch,
 }
@@ -7849,13 +7865,12 @@ pub(crate) fn character_swap_confirm_text(to: &str, resumable: bool) -> (String,
     let lines = if resumable {
         vec![
             "다시 띄우면 말투까지 바뀝니다 — 나눈 대화는 이어서 띄우니 그대로예요.".to_string(),
-            "껍데기만 바꾸면 이름·얼굴·색만 지금 바뀌고, 말투는 다음에 띄울 때부터입니다."
-                .to_string(),
+            "이름·얼굴·말투를 함께 바꿉니다. 취소하면 지금 학생을 그대로 유지해요.".to_string(),
         ]
     } else {
         vec![
             "이어붙일 대화가 없어, 다시 띄우면 지금 내용이 사라집니다.".to_string(),
-            "껍데기만 바꾸면 이름·얼굴·색만 바뀌고 이 자리는 그대로예요.".to_string(),
+            "취소하면 지금 학생과 대화를 그대로 유지해요.".to_string(),
         ]
     };
     (title, lines)

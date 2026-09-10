@@ -2126,6 +2126,17 @@ async fn repersona_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+async fn agent_identity_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let field = |key| params.get(key).map(String::as_str).unwrap_or("");
+    match backend.prepare_agent_identity(field("surface"), field("sid"), field("character")) {
+        Ok(identity) => (axum::http::StatusCode::OK, Json(identity)),
+        Err(error) => (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": error.to_string()}))),
+    }
+}
+
 /// `POST /term/character-theme?theme=<id>` (body = `character_picks` JSON) —
 /// 이사(migrate)가 출발지의 캐릭터 테마 선택을 이 기계에 재현하는 창구.
 /// 값만 설정 파일에 밖에서 적으면 도는 앱의 캐시(활성 테마·로스터)가 낡은 채
@@ -7139,6 +7150,7 @@ pub fn spawn_http_server_opts(
                 let broadcast_backend = backend.clone();
                 let swap_character_backend = backend.clone();
                 let repersona_backend = backend.clone();
+                let agent_identity_backend = backend.clone();
                 let session_close_backend = backend.clone();
                 let slash_backend = backend.clone();
                 let session_restore_backend = backend.clone();
@@ -7574,6 +7586,7 @@ pub fn spawn_http_server_opts(
                         }),
                     )
                     .route("/teamname", get(teamname_handler))
+                    .route("/agent-identity", post(move |q| agent_identity_handler(agent_identity_backend.clone(), q)))
                     .route("/persona", get(persona_handler))
                     .route("/persona-portrait", get(persona_portrait_handler))
                     .route(
