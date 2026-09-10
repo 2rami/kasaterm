@@ -333,6 +333,9 @@ impl App {
                     if title == crate::BRING_HOME_MARKER {
                         let _ = proxy
                             .send_event(UserEvent::SocketBringHome(update.pane_id.clone()));
+                    } else if kasa_mcp::remote::is_remote_pane(&update.pane_id) {
+                        // 거울은 원본 화면 바이트를 그대로 받으므로 OSC 777 도 함께
+                        // 온다 — 원본 기계가 이미 알렸으니 여기서 또 띄우지 않는다.
                     } else {
                         let _ = proxy.send_event(UserEvent::Notify {
                             surface_id: update.pane_id.clone(),
@@ -358,6 +361,8 @@ impl App {
                                     let _ = proxy.send_event(
                                         UserEvent::SocketBringHome(next.pane_id.clone()),
                                     );
+                                } else if kasa_mcp::remote::is_remote_pane(&next.pane_id) {
+                                    // 위와 같은 이유 — 거울은 원본이 알린다.
                                 } else {
                                     let _ = proxy.send_event(UserEvent::Notify {
                                         surface_id: next.pane_id.clone(),

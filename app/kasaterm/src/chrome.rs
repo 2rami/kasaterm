@@ -308,14 +308,15 @@ impl App {
             Some(c) => format!("{c} · {title}"),
             None => title.to_string(),
         };
-        // 완료는 열쇠를 안 준다 — 턴마다 정당하게 떠야 하고, 학생이 여럿이면 서로
-        // 다른 pane 의 완료가 같은 창 안에 겹치는 게 정상이다.
+        // 열쇠는 pane 별 — 같은 턴 완료가 Stop 훅(`kasaterm-cli notify`)과 OSC 777
+        // 두 길로 몇 초 사이에 들어오면 하나로 접는다. 다른 pane 끼리는 열쇠가 달라
+        // 겹쳐 뜨는 게 그대로 정상이고, 한 pane 이 8초 안에 두 턴을 끝내는 일은 없다.
         let sid = self.pane_claude_sid.get(surface_id).cloned();
         notify_desktop(
             &titled,
             body,
             who.as_deref(),
-            None,
+            Some(&format!("done:{surface_id}")),
             Some((surface_id, sid.as_deref())),
         );
         // 배너는 `notify_desktop` 이 줄 세운다 — 한때 여기서 따로 push 했는데,

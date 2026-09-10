@@ -306,7 +306,42 @@ pub async fn send(alert: &Alert) -> usize {
 }
 
 /// 쪽지가 들어왔을 때 — `notes::add` 뒤에서 부른다.
+/// 최근에 폰으로 쏜 pane — 쪽지(`note_arrived`)와 상태 감시(`push_loop`)가 같은
+/// 사건을 서로 모른 채 둘 다 쏘던 것을 여기서 막는다(2026-09-10 「알림 3개씩」).
+/// 열쇠는 `{route}/{pane}` — push_loop 의 key 와 같다(로컬은 route 가 빈 문자열).
+fn recent_sent() -> &'static Mutex<HashMap<String, Instant>> {
+    static R: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// 같은 pane 에 MIN_GAP 안에 이미 쐈으면 true(=쏘지 마라). 아니면 지금을 적는다.
+fn recently_sent(key: &str) -> bool {
+    let Ok(mut g) = recent_sent().lock() else { return false };
+    let now = Instant::now();
+    g.retain(|_, t| now.duration_since(*t) < MIN_GAP * 4);
+    if g.get(key).is_some_and(|t| now.duration_since(*t) < MIN_GAP) {
+        return true;
+    }
+    g.insert(key.to_string(), now);
+    false
+}
+
+/// 쪽지 종류 → push_loop 와 같은 collapse 열쇠. 같은 사건은 잠금화면에서 한 줄로
+/// 갈아치워지고(애플이 collapse-id 로 합친다), 서로 다른 사건만 따로 남는다.
+fn collapse_for(kind: &str, key: &str) -> String {
+    match kind {
+        "permission" | "question" | "waiting" | "idle" => format!("wait-{key}"),
+        "done_ok" | "done_fail" => format!("done-{key}"),
+        _ => format!("note-{key}"),
+    }
+}
+
 pub fn note_arrived(character: &str, kind: &str, summary: &str, pane: &str) {
+    let key = format!("/{pane}");
+    if recently_sent(&key) {
+        eprintln!("[push] 쪽지 {kind} {pane} — 방금 같은 pane 알림을 보냈으니 건너뜀");
+        return;
+    }
     let who = if character.is_empty() { "학생" } else { character };
     let head = match kind {
         "permission" => "승인 기다림",
@@ -323,7 +358,7 @@ pub fn note_arrived(character: &str, kind: &str, summary: &str, pane: &str) {
         machine: None,
         pane: pane.to_string(),
         kind: format!("note:{kind}"),
-        collapse: Some(format!("note-{pane}")),
+        collapse: Some(collapse_for(kind, &key)),
         sender: (!character.is_empty()).then(|| character.to_string()),
         avatar_slug: crate::character::slug_for_any(character),
     };
@@ -391,8 +426,10 @@ fn client_local() -> &'static reqwest::Client {
 /// 상태 변화 감시 — 본체(PTY 를 가진 앱) 한 곳만 돈다. 첫 바퀴는 기준만 잡고 안 쏜다
 /// (켜자마자 대기 중인 학생 전부가 한꺼번에 울리지 않게).
 pub async fn push_loop() {
-    let mut last: HashMap<String, Seen> = HashMap::new();
-    let mut sent_at: HashMap<String, Instant> = HashMap::new();
+    // (마지막 상태, 마지막으로 목록에 보인 때). 한 바퀴 안 보였다고 바로 잊으면
+    // 하네스 감지가 잠깐 빠지거나 원격 캐시가 20초 늙었을 때 `prev` 가 None 이 돼
+    // 아직 기다리는 학생이 「새로 기다리기 시작」으로 또 울린다(엉뚱한 알림의 한 원인).
+    let mut last: HashMap<String, (Seen, Instant)> = HashMap::new();
     let mut primed = false;
     loop {
         tokio::time::sleep(TICK).await;
@@ -400,7 +437,7 @@ pub async fn push_loop() {
             continue;
         }
         let rows = all_rows().await;
-        let mut now_seen: HashMap<String, Seen> = HashMap::new();
+        let sweep = Instant::now();
         for (route, row) in rows {
             let Some(id) = row.get("id").and_then(Value::as_str) else { continue };
             let name = row.get("name").and_then(Value::as_str).unwrap_or("");
@@ -409,8 +446,8 @@ pub async fn push_loop() {
             }
             let key = format!("{}/{id}", route.as_deref().unwrap_or(""));
             let cur = seen_of(&row);
-            let prev = last.get(&key).cloned();
-            now_seen.insert(key.clone(), cur.clone());
+            let prev = last.get(&key).map(|(s, _)| s.clone());
+            last.insert(key.clone(), (cur.clone(), sweep));
             if !primed {
                 continue;
             }
@@ -460,17 +497,19 @@ pub async fn push_loop() {
                 None
             };
             if let Some(alert) = alert {
-                if sent_at.get(&key).is_some_and(|t| t.elapsed() < MIN_GAP) {
+                // 쪽지(note_arrived)와 공유하는 문 — 같은 pane 의 같은 사건이 두 길로
+                // 들어와도 폰에는 한 번만 간다.
+                if recently_sent(&key) {
                     continue;
                 }
-                sent_at.insert(key.clone(), Instant::now());
                 let n = send(&alert).await;
                 if n > 0 {
                     eprintln!("[push] {} → 폰 {n}대", alert.title);
                 }
             }
         }
-        last = now_seen;
+        // 60초 넘게 안 보인 것만 잊는다 — 닫힌 pane 은 그때 빠진다.
+        last.retain(|_, (_, seen_at)| sweep.duration_since(*seen_at) < Duration::from_secs(60));
         primed = true;
     }
 }
@@ -487,6 +526,20 @@ mod tests {
         let local = super::notification_thread(&alert);
         alert.machine = Some("macbook".into());
         assert_ne!(local, super::notification_thread(&alert));
+    }
+
+    #[test]
+    fn note_collapse_matches_push_loop_keys() {
+        assert_eq!(super::collapse_for("permission", "/%3"), "wait-/%3");
+        assert_eq!(super::collapse_for("done_ok", "/%3"), "done-/%3");
+        assert_eq!(super::collapse_for("chat", "/%3"), "note-/%3");
+    }
+
+    #[test]
+    fn recent_gate_blocks_second_send_within_gap() {
+        assert!(!super::recently_sent("t-gate/%9"));
+        assert!(super::recently_sent("t-gate/%9"));
+        assert!(!super::recently_sent("t-gate/%10"));
     }
 
     /// 진짜 열쇠가 있는 기계에서만 — ring 이 애플 .p8 을 읽고 서명하는지.

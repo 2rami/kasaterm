@@ -1455,17 +1455,18 @@ impl App {
                     // 막혀 선 학생이 「끝난 학생」으로 보였다 — 없는 신호보다 나쁜
                     // 틀린 신호다(2026-08-11). 대기는 attention 색이 말한다.
                     // board 에 waiting 으로 노출 — 오케스트레이터가 board 로 본다.
+                    // ⚠️ 훅이 먼저 적어 둔 표식은 덮지 않는다 — 훅은 종류(question/
+                    // permission)를 정확히 알고 화면은 모른다. 덮으면 종류가 번갈아
+                    // 바뀌어 폰이 「질문 기다림」「승인 기다림」을 둘 다 울린다.
                     self.collab
                         .attention
                         .lock()
                         .unwrap()
-                        .insert(
-                            id.clone(),
-                            crate::stream::AttentionFlag {
-                                reason: "승인 대기 (화면 감지)".to_string(),
-                                kind: "permission".to_string(),
-                            },
-                        );
+                        .entry(id.clone())
+                        .or_insert_with(|| crate::stream::AttentionFlag {
+                            reason: "승인 대기 (화면 감지)".to_string(),
+                            kind: "permission".to_string(),
+                        });
                     // 화면 승인 토스트/칩은 화면 감지 오탐이 있어 제거(거노 요청).
                     // 승인 신호는 board attention(위) + (pane 안 볼 때) 데스크탑 알림
                     // 으로만 남긴다 — toast_action 은 Sparkle 업데이트 토스트가 공유해
