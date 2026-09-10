@@ -70,6 +70,13 @@ frontend browsing workflow below was implemented separately on
   it into whatever room is active. Owner: 나쵸 side (collaboration), 히후미 to
   provide the room list/board affordance if the CLI lacks one.
 
+- **화면공유 바탕화면이 까맣고 독이 안 보임** (user 2026-09-10): when mirroring the
+  Mac mini's screen, the desktop is black and the Dock is missing. Not investigated.
+- **맥미니가 꺼지면 카사텀 모바일이 안 됨** (user 2026-09-10): the MacBook keeps
+  running but the phone app cannot connect. Suspected cause: the gateway/tunnel
+  (debimarlene side) lives on the mini, so the MacBook has no public route of its
+  own. Not investigated.
+
 Safety/verification: do not restart either desktop app automatically, do not
 replace current working panes with older saved sessions, and do not install or
 publish a mobile build without the user's approval. Desktop updates are staged;
