@@ -543,7 +543,18 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
 /// 두면 `rows`(탭 구분이 필요 없는 pane)와 `tabs`(탭별)가 배타적이라 세기 쉽다.
 fn fold_tabs(panes: &mut Vec<PaneGroup>, targets: &[PaneTarget]) {
     let by_id: HashMap<&str, &PaneTarget> = targets.iter().map(|t| (t.id.as_str(), t)).collect();
-    let host_of = |t: &PaneTarget| t.outer.clone().unwrap_or_else(|| t.id.clone());
+    // Viewer tabs describe this window's layout, not the source device's pane
+    // ownership. Folding a mirror into a native group erases its machine; doing
+    // the reverse hides native processes when the remote group is filtered out.
+    // Source panes are listed separately by machines_col, regardless of how their
+    // viewers are arranged here. Only native children of a native host fold.
+    let host_of = |t: &PaneTarget| {
+        t.outer.as_ref()
+            .filter(|outer| t.machine.is_none()
+                && by_id.get(outer.as_str()).is_some_and(|host| host.machine.is_none()))
+            .cloned()
+            .unwrap_or_else(|| t.id.clone())
+    };
     // 바깥 pane 별로 **인포에 설 줄**이 몇 개인가. 이미지·마크다운 탭은 셸이 없어
     // 애초에 수집 대상이 아니므로 여기서도 안 세어진다 — 그게 맞다. 판정 기준은
     // "탭이 몇 개인가"가 아니라 "이 목록이 몇 줄로 갈리는가"다.
@@ -568,7 +579,7 @@ fn fold_tabs(panes: &mut Vec<PaneGroup>, targets: &[PaneTarget]) {
         if t.closed || n.get(&host).copied().unwrap_or(0) < 2 || !hosts.contains(&host) {
             continue;
         }
-        if t.outer.is_some() {
+        if g.pane != host {
             moved.insert(g.pane.clone());
         }
         tabs.entry(host).or_default().push((
@@ -4200,6 +4211,51 @@ mod fold_tabs_tests {
         let before = panes.clone();
         fold_tabs(&mut panes, &[tgt("%0", None, 0), tgt("%3", None, 0)]);
         assert_eq!(panes, before);
+    }
+
+    #[test]
+    fn a_mirror_tab_does_not_become_a_local_child() {
+        let mirror = PaneGroup { machine: Some("source".into()), ..grp("%1") };
+        let mut panes = vec![grp("%0"), mirror.clone()];
+        let remote = PaneTarget { machine: Some("source".into()), ..tgt("%1", Some("%0"), 1) };
+        fold_tabs(&mut panes, &[tgt("%0", None, 0), remote]);
+        assert_eq!(panes, vec![grp("%0"), mirror]);
+    }
+
+    #[test]
+    fn local_tabs_under_a_mirror_stay_on_this_device() {
+        let mirror = PaneGroup { machine: Some("source".into()), ..grp("%0") };
+        let native = PaneGroup {
+            rows: vec![ProcRow { pid: 42, ..Default::default() }], ..grp("%1")
+        };
+        let mut panes = vec![mirror.clone(), native.clone(), grp("%2")];
+        let remote = PaneTarget { machine: Some("source".into()), ..tgt("%0", None, 0) };
+        fold_tabs(&mut panes, &[
+            remote, tgt("%1", Some("%0"), 1), tgt("%2", Some("%0"), 2),
+        ]);
+        assert_eq!(panes, vec![mirror, native, grp("%2")]);
+    }
+
+    #[test]
+    fn viewer_tabs_do_not_define_source_pane_nesting() {
+        let mut panes: Vec<_> = ["%0", "%1"].into_iter().map(|id|
+            PaneGroup { machine: Some("source".into()), ..grp(id) }).collect();
+        let before = panes.clone();
+        let targets: Vec<_> = [tgt("%0", None, 0), tgt("%1", Some("%0"), 1)]
+            .into_iter().map(|t| PaneTarget { machine: Some("source".into()), ..t }).collect();
+        fold_tabs(&mut panes, &targets);
+        assert_eq!(panes, before);
+    }
+
+    #[test]
+    fn native_siblings_still_fold_when_a_mirror_shares_the_tab_bar() {
+        let mirror = PaneGroup { machine: Some("source".into()), ..grp("%2") };
+        let mut panes = vec![grp("%0"), grp("%1"), mirror.clone()];
+        let remote = PaneTarget { machine: Some("source".into()), ..tgt("%2", Some("%0"), 2) };
+        fold_tabs(&mut panes, &[tgt("%0", None, 0), tgt("%1", Some("%0"), 1), remote]);
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[0].tabs.iter().map(|t| t.pane.as_str()).collect::<Vec<_>>(), ["%0", "%1"]);
+        assert_eq!(panes[1], mirror);
     }
 
     /// 탭은 바깥 pane 안으로 들어가고 최상위에서는 사라진다 — pane 하나가 여럿으로
