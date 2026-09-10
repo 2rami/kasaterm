@@ -1595,9 +1595,19 @@ pub fn pick_random(candidates: &[String], salt: &str) -> Option<String> {
 /// configured roster order. Reuse a student only after every candidate is in
 /// use, choosing the least-used student with the same deterministic tie-break.
 pub fn pick_in_order(candidates: &[String], taken: &[String]) -> Option<String> {
+    pick_in_order_after(candidates, taken, None)
+}
+
+/// Advance only when a fresh harness starts; freeing a seat does not reset the
+/// order to Arona. Restoring a conversation does not consume the cursor.
+pub fn pick_in_order_after(candidates: &[String], taken: &[String], previous: Option<&str>) -> Option<String> {
     let mut ordered = Vec::new();
     for name in candidates.iter().filter(|n| n.as_str() == "아로나").chain(candidates) {
         if !name.is_empty() && !ordered.contains(name) { ordered.push(name.clone()); }
+    }
+    if let Some(index) = previous.and_then(|name| ordered.iter().position(|n| n == name)) {
+        let shift = (index + 1) % ordered.len();
+        ordered.rotate_left(shift);
     }
     least_used(&ordered, taken).into_iter().next()
 }
@@ -1605,6 +1615,15 @@ pub fn pick_in_order(candidates: &[String], taken: &[String]) -> Option<String> 
 #[cfg(test)]
 mod ordered_assignment_tests {
     use super::*;
+
+    #[test]
+    fn exiting_a_harness_does_not_reset_the_fresh_launch_order() {
+        let candidates = ["미도리", "모모이", "아로나"].map(String::from);
+        assert_eq!(pick_in_order_after(&candidates, &[], None).as_deref(), Some("아로나"));
+        assert_eq!(pick_in_order_after(&candidates, &[], Some("아로나")).as_deref(), Some("미도리"));
+        assert_eq!(pick_in_order_after(&candidates, &["미도리".into()], Some("아로나")).as_deref(), Some("모모이"));
+        assert_eq!(pick_in_order_after(&candidates, &[], Some("모모이")).as_deref(), Some("아로나"));
+    }
 
     #[test]
     fn arona_first_then_selected_order_skipping_every_reserved_student() {

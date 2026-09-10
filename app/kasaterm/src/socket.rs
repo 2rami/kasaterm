@@ -979,8 +979,13 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
-    fn prepare_agent_identity(&self, surface: &str, sid: &str, requested: &str) -> Result<serde_json::Value> {
-        crate::agent_identity::prepare(&self.ws, surface, sid, requested)
+    fn prepare_agent_identity(&self, surface: &str, sid: &str, requested: &str, pid: u32) -> Result<serde_json::Value> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::SocketAgentIdentity(surface.into(), sid.into(), requested.into(), pid, tx))
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(4))
+            .map_err(|_| anyhow::anyhow!("identity launch timed out"))?
+            .map_err(anyhow::Error::msg)
     }
 
     /// 이사가 출발지의 캐릭터 테마 선택을 이 기계에 재현한다 — 설정 화면과 같은

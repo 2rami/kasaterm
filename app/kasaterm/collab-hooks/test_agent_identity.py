@@ -55,6 +55,15 @@ class IdentityTests(unittest.TestCase):
                     self.assertEqual((target / "persona").read_text(), "너는 코하루.")
                     self.assertEqual(queries[-1]["sid"], [SID])
                 self.assertEqual(len(queries), 2, "one request per launch, not separate name/persona reads")
+                fresh_sids = []
+                for _ in range(2):
+                    result = subprocess.run(["python3", str(SCRIPT), "claude", str(root), "stale-pane-anchor"],
+                                            env=env, capture_output=True, text=True, check=True)
+                    target = Path(result.stdout.strip())
+                    fresh_sids.append((target / "session_id").read_text())
+                    self.assertEqual(queries[-1]["sid"], [fresh_sids[-1]])
+                    self.assertNotEqual(fresh_sids[-1], "stale-pane-anchor")
+                self.assertNotEqual(*fresh_sids, "two fresh runs in one pane need distinct conversation IDs")
         finally:
             server.shutdown()
             worker.join()

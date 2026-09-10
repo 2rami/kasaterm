@@ -1447,6 +1447,7 @@ impl App {
                 ws.pid_to_pane.remove(pid);
                 ws.pane_character.remove(pid);
                 ws.pane_launch_character.remove(pid);
+                ws.pane_next_character.remove(pid);
             }
         }
         // Preview tab removal is immediate via the ws.panes mutation below;

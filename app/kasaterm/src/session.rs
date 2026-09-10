@@ -440,16 +440,30 @@ impl App {
     /// renderer expects. Single-pane MVP — the workspace holds one
     /// PaneState keyed "%0" and the layout is `None` (the render path
     /// falls back to single-pane when no layout has arrived).
-    /// pane 생성 시 캐릭터 자동 배정 — /tmp 마커·session-id 기록 후 셸 env 를 반환.
-    /// pending_character(new_room_with_character 가 세팅) 우선, 없으면 통합 풀에서
-    /// 아로나부터 명단 순서로 빈 학생 배정. characters.json 없으면 빈 vec(무테마 = skip).
-    /// board(socket.rs)는 같은 /tmp 마커를 읽어 row.character 를 채운다.
+    /// Prepare a shell without automatically assigning a student or conversation.
+    /// Only explicit selections/restored students reserve an identity here;
+    /// normal allocation happens when the harness requests its launch identity.
     pub(crate) fn assign_character_env(
         &mut self,
         id: &str,
         cwd: Option<&str>,
         room: Option<&str>,
     ) -> Vec<(String, String)> {
+        // A new terminal is only a shell. Do not consume a student or freeze a
+        // conversation UUID before the user actually starts a harness.
+        let blank = || vec![
+            ("KASATERM_CHARACTER".into(), String::new()),
+            ("KASATERM_PERSONA".into(), String::new()),
+            ("KASATERM_SESSION_ID".into(), String::new()),
+            ("KASATERM_AGENT_SLUG".into(), String::new()),
+            ("KASATERM_MODEL".into(), String::new()),
+            ("KASATERM_BACKEND".into(), String::new()),
+            ("KASATERM_AGENT_SUFFIX".into(), crate::agent_name_suffix()),
+        ];
+        if self.pending_character.is_none() {
+            self.ws.lock().unwrap().pane_launch_character.insert(id.into(), String::new());
+            return blank();
+        }
         let Some(cwd) = cwd else { return Vec::new() };
         let Some(chars) = kasa_mcp::character::roster_in_use() else {
             return Vec::new();
@@ -470,11 +484,9 @@ impl App {
                 members
             );
         }
-        // Manual selections/restored identities stay unchanged. Automatic
-        // seats use the same ordered inventory across every local workspace
-        // and the connected machines, not a cwd/school-specific subset.
-        let Some(name) = self.pending_character.take()
-            .or_else(|| self.next_auto_character(&members, id)) else { return Vec::new() };
+        // Explicit selections/restored identities stay reserved until launch.
+        let Some(name) = self.pending_character.take() else { return blank() };
+        self.ws.lock().unwrap().pane_next_character.insert(id.into(), name.clone());
         // 학생 명령(`시로코`)이 남긴 persona override 는 이 spawn 의 fresh env 보다
         // 오래된 정체성 — 지워서 이 pane 의 다음 claude 가 env 기준으로 돌아가게.
         if let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
@@ -2199,6 +2211,7 @@ impl App {
         // parent lookup must not silently change only its face and name.
         let launched = self.ws.lock().unwrap().pane_launch_character.get(pane).cloned();
         if let Some(name) = launched {
+            if name.is_empty() { return; } // this run ended; do not relabel its shell
             self.relabel_pane(pane, &name);
             if kasa_mcp::character::session_character(sid).is_none() {
                 let _ = kasa_mcp::character::bind_session_character(sid, &name);

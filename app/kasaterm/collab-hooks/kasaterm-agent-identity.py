@@ -12,9 +12,21 @@ import sys
 import tempfile
 import urllib.parse
 import urllib.request
+import uuid
+
+
+def fresh_conversation(harness, args):
+    flags = {"claude": ("--resume", "-r", "--continue", "-c"),
+             "codex": ("resume", "fork"), "agy": ("--conversation",)}[harness]
+    return not any(arg in flags for arg in args)
 
 
 def session_id(harness, args, anchor):
+    if harness == "agy":
+        for i, arg in enumerate(args[:-1]):
+            if arg == "--conversation":
+                return args[i + 1]
+        return ""
     if harness == "claude":
         for i, arg in enumerate(args[:-1]):
             if arg in ("--resume", "-r", "--session-id"):
@@ -46,15 +58,25 @@ def main():
     port = portfile.read_text().strip() if socket and portfile.is_file() else os.environ.get("KASASPACE_MCP_PORT", "")
     if not port.isdigit():
         raise ValueError("pane app port unavailable")
-    query = urllib.parse.urlencode({"surface": pane, "sid": session_id(harness, args, anchor), "character": requested})
+    fresh = fresh_conversation(harness, args)
+    sid = session_id(harness, args, str(uuid.uuid4()) if fresh else anchor)
+    query = urllib.parse.urlencode({"surface": pane, "sid": sid, "character": requested,
+                                   "pid": os.environ.get("KASATERM_LAUNCH_PID", str(os.getppid()))})
     request = urllib.request.Request(f"http://127.0.0.1:{int(port)}/agent-identity?{query}", data=b"", method="POST")
     with urllib.request.urlopen(request, timeout=5) as response:
         identity = json.load(response)
     if not all(isinstance(identity.get(key), str) for key in ("character", "persona", "slug")) or not identity["character"]:
         raise ValueError("incomplete launch identity")
     destination = Path(tempfile.mkdtemp(prefix="agent-identity-", dir=shim))
-    for key in ("character", "persona", "slug"):
-        (destination / key).write_text(identity[key], encoding="utf-8")
+    for key in ("character", "persona", "slug", "model", "backend"):
+        (destination / key).write_text(identity.get(key, ""), encoding="utf-8")
+    # Only fresh Claude runs get an injected UUID. A picker/continue must keep
+    # its own session selection and must never inherit a pane-creation UUID.
+    injected_sid = sid if harness == "claude" and fresh and "--session-id" not in args else ""
+    (destination / "session_id").write_text(injected_sid, encoding="utf-8")
+    if requested:
+        for ext in ("character", "persona", "model", "backend", "slug"):
+            (shim / f"repersona-{pane}.{ext}").unlink(missing_ok=True)
     print(destination)
 
 

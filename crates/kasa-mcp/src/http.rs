@@ -2131,7 +2131,7 @@ async fn agent_identity_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let field = |key| params.get(key).map(String::as_str).unwrap_or("");
-    match backend.prepare_agent_identity(field("surface"), field("sid"), field("character")) {
+    match backend.prepare_agent_identity(field("surface"), field("sid"), field("character"), field("pid").parse().unwrap_or(0)) {
         Ok(identity) => (axum::http::StatusCode::OK, Json(identity)),
         Err(error) => (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": error.to_string()}))),
     }

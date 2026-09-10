@@ -25,7 +25,7 @@ impl App {
     }
 
     pub(crate) fn next_auto_character(&self, members: &[String], excluded: &str) -> Option<String> {
-        kasa_mcp::character::pick_in_order(members, &self.assigned_characters(excluded))
+        kasa_mcp::character::pick_in_order_after(members, &self.assigned_characters(excluded), self.last_auto_character.as_deref())
     }
 
     pub(crate) fn run_character_assignment_probe(&mut self) {
@@ -34,14 +34,20 @@ impl App {
         static RAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if RAN.swap(true, std::sync::atomic::Ordering::Relaxed) { return; }
         let original = self.target_surface().expect("initial verification pane");
+        assert!(!self.ws.lock().unwrap().pane_character.contains_key(&original));
+        self.prepare_agent_identity(&original, "", "", std::process::id()).unwrap();
         assert_eq!(self.ws.lock().unwrap().pane_character[&original], "아로나");
         let one = self.spawn_new_tab(&original, false).expect("first ordered tab");
+        assert!(!self.ws.lock().unwrap().pane_character.contains_key(&one));
+        self.prepare_agent_identity(&one, "", "", std::process::id()).unwrap();
         assert_eq!(self.ws.lock().unwrap().pane_character[&one], "미도리");
         self.pane_cwd_cache.insert(one.clone(), std::path::PathBuf::from("/tmp/different-worktree"));
         let two = self.spawn_new_tab(&original, false).expect("second ordered tab");
+        self.prepare_agent_identity(&two, "", "", std::process::id()).unwrap();
         assert_eq!(self.ws.lock().unwrap().pane_character[&two], "모모이");
         self.new_window();
         let next = self.target_surface().expect("new ordered room");
+        self.prepare_agent_identity(&next, "", "", std::process::id()).unwrap();
         let ws = self.ws.lock().unwrap();
         assert_eq!(ws.pane_character[&next], "히후미");
         assert_eq!(ws.pane_character[&original], "아로나", "running identity must remain unchanged");

@@ -782,6 +782,7 @@ impl App {
             }
         }
         self.pane_busy_check = Some(now);
+        self.release_finished_agent_identities();
         // 지난 프레임에 위로 스크롤돼 있던 pane 의 프롬프트 목록을 깊게 채운다.
         // **표시를 비우면서** 가져간다 — 아래로 내린 pane 이 목록에 남아 있으면
         // 틱마다 파일을 되짚게 된다. 계속 올려다보는 중이면 렌더가 다음 프레임에

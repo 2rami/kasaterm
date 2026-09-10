@@ -3446,10 +3446,12 @@ struct Workspace {
     pane_room: HashMap<String, String>,
     /// pane → 배정 캐릭터명(미도리 등). pane_room 과 같은 이유로 ws 에 둔다 —
     /// pump 스레드(apply_screen_update)가 PaneState.character 를 동기하고, 헤더
-    /// 렌더(render.rs)가 같은 매핑을 본다. assign_character_env 가 spawn 시 채운다.
+    /// 렌더(render.rs)가 같은 매핑을 본다. 새 대화 실행 시 채우고 종료하면 비운다.
     pane_character: HashMap<String, String>,
-    /// Identity actually delivered at harness launch; metadata polling cannot rename it.
+    /// Delivered launch identity; empty means shell/retired and rejects late metadata.
     pane_launch_character: HashMap<String, String>,
+    /// Explicit selection waiting for its first harness launch, not a shell identity.
+    pane_next_character: HashMap<String, String>,
     /// 활성 윈도우(보이는 방)의 leaf pane id 집합. `publish_pty_layout` 이 갱신한다.
     /// collab_board 가 이걸로 bound pane 을 필터해 *활성 방 학생만* board 에 올린다
     /// (거노: 아로나 방 + 프라나 방이 한 교실에 같이 뜨던 문제 — 방별 격리).
@@ -3478,6 +3480,7 @@ impl Default for Workspace {
             pane_room: HashMap::new(),
             pane_character: HashMap::new(),
             pane_launch_character: HashMap::new(),
+            pane_next_character: HashMap::new(),
             active_window_panes: std::collections::HashSet::new(),
             pane_window: HashMap::new(),
             undocked: std::collections::HashSet::new(),
@@ -3793,6 +3796,7 @@ enum UserEvent {
     /// respawn 없는 재배정: 학생 명령(`시로코`)이 claude 실행 직전에 호출, persona
     /// 는 래퍼의 override 파일이 싣고 GUI 는 헤더·마커·세션바인딩만 갱신.
     SocketRepersona(String, String),
+    SocketAgentIdentity(String, String, String, u32, std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>),
     /// `POST /session-close?idx=N` 위임 — 방(윈도우) 닫기(거노). `close_window` 가
     /// 마지막 윈도우 가드·pane 정리. 닫기 실패(마지막)는 무시(프론트가 가드).
     SocketCloseRoom(usize),
@@ -5412,14 +5416,15 @@ struct App {
     /// 다음 spawn 할 pane 에 강제할 캐릭터(new_room_with_character 가 세팅). None 이면
     /// 빈 슬롯 순환 배정(미도리→모모이→…). 배정 결과는 KASATERM_CHARACTER env + /tmp 마커.
     pending_character: Option<String>,
+    last_auto_character: Option<String>,
+    pane_agent_launches: HashMap<String, u32>,
     /// 다음 split 이 셸을 띄울 폴더를 강제한다(`spawn_shell_pane` 이 세웠다 걷는다) —
     /// 다른 기계의 `to` 가 「이 폴더에서」를 실어 오는 유일한 길이다.
     pending_spawn_cwd: Option<String>,
     /// 닫을 때 **저쪽 pane 은 남길** 원격 pane(메뉴 「닫기 — 저쪽 pane 은 남김」).
     /// `to` 로 세운 자리는 기본이 함께 끄기라, 예외만 여기 적는다.
     remote_keep: std::collections::HashSet<String>,
-    /// pane id → claude --session-id(백엔드가 spawn 시 생성). shim 이 env 로 받아 고정,
-    /// transcript jsonl 파일명 안정화 → resume 시 같은 대화 복원.
+    /// pane id → current launch's conversation ID, never a permanent shell ID.
     pane_session_id: HashMap<String, String>,
     /// pane id → claude 실제 sessionId(transcript stem, `SocketSessionBound` 로 도착).
     /// pane_session_id(백엔드 발급)와 달리 fork/detach 시 갈라진 진짜 세션이라, 이걸로
@@ -5995,6 +6000,8 @@ impl App {
             pending_room: None,
             next_room_seq: 1,
             pending_character: None,
+            last_auto_character: None,
+            pane_agent_launches: HashMap::new(),
             pending_spawn_cwd: None,
             remote_keep: std::collections::HashSet::new(),
             pane_session_id: HashMap::new(),
@@ -7870,10 +7877,20 @@ fn install_agent_identity_helper(shim_dir: &std::path::Path) {
 
 fn identity_bootstrap_sh(harness: &str, anchor: &str) -> String {
     r#"export PATH="$SELF_DIR:$CLEAN_PATH"
-IDENTITY=$(python3 "$SELF_DIR/agent-identity.py" HARNESS "$SELF_DIR" "ANCHOR" "$@") || exit 1
+if [ -n "$KASATERM_VIA_BACKEND" ] && [ "$KASATERM_LAUNCH_OWNER" = "$SELF_DIR:$KASATERM_PANE_ID" ] && [ -d "$KASATERM_IDENTITY_DIR" ]; then
+  IDENTITY="$KASATERM_IDENTITY_DIR"
+else
+  IDENTITY=$(KASATERM_LAUNCH_PID=$$ python3 "$SELF_DIR/agent-identity.py" HARNESS "$SELF_DIR" "ANCHOR" "$@") || exit 1
+fi
+export KASATERM_IDENTITY_DIR="$IDENTITY"
 export KASATERM_CHARACTER="$(cat "$IDENTITY/character")"
-KASATERM_PERSONA=$(cat "$IDENTITY/persona")
+export KASATERM_PERSONA="$(cat "$IDENTITY/persona")"
 export KASATERM_AGENT_SLUG="$(cat "$IDENTITY/slug")"
+export KASATERM_MODEL="$(cat "$IDENTITY/model")"
+export KASATERM_BACKEND="$(cat "$IDENTITY/backend")"
+SID=$(cat "$IDENTITY/session_id")
+[ -n "$SID" ] && export KASATERM_SESSION_ID="$SID"
+export KASATERM_LAUNCH_OWNER="$SELF_DIR:$KASATERM_PANE_ID"
 "#.replace("HARNESS", harness).replace("ANCHOR", anchor)
 }
 
@@ -7919,6 +7936,11 @@ case "$SUB" in
   login|logout|mcp|plugin|app|app-server|remote-control|completion|update|doctor|sandbox|debug|apply|cloud|exec-server|features|help|archive|delete|unarchive)
     exec "$REAL" "$@" ;;
 esac
+# Nested utility calls do not allocate another student or rewrite the parent's
+# pane home. A new shell/harness run does not inherit this child-only marker.
+if [ "$KASATERM_LAUNCH_OWNER" = "$SELF_DIR:$KASATERM_PANE_ID" ]; then
+  exec "$REAL" "$@"
+fi
 SRC="$HOME/.codex"
 CH="$SELF_DIR/codex-home-${KASATERM_PANE_ID:-solo}"
 mkdir -p "$CH" 2>/dev/null || exec "$REAL" "$@"
@@ -8049,6 +8071,7 @@ fn sh_case_pat(name: &str) -> String {
 ///
 /// 훅은 아직 안 붙인다 — agy 훅 스키마를 재지 않았다. 이 함수는 페르소나까지다.
 fn install_agy_hook_shim(shim_dir: &std::path::Path) {
+    install_agent_identity_helper(shim_dir);
     let Some(chars) = kasa_mcp::character::characters_json() else {
         return;
     };
@@ -8125,6 +8148,7 @@ case "$SUB" in
   agent|agents|changelog|help|install|models|plugin|plugins|update)
     exec "$REAL" "$@" ;;
 esac
+# KASATERM_LAUNCH_IDENTITY
 # 이 pane 의 학생 — `시로코` 런처로 갈아탔으면 그 파일이 env 를 이긴다(env 는 셸
 # spawn 시 고정이라 늦게 못 바꾼다). codex 래퍼와 같은 규약.
 C="$KASATERM_CHARACTER"
@@ -8153,6 +8177,7 @@ exec "$REAL" "$@"
 "#
     );
     let wrapper_path = shim_dir.join("agy");
+    let wrapper = wrapper.replace("# KASATERM_LAUNCH_IDENTITY", &identity_bootstrap_sh("agy", ""));
     if let Err(e) = write_shim(&wrapper_path, wrapper) {
         eprintln!("[shim] write agy wrapper failed: {e}");
     }

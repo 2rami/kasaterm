@@ -734,7 +734,7 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("repersona unsupported by this backend")
     }
     /// Resolve one launch identity before the harness reads its instructions.
-    fn prepare_agent_identity(&self, _surface: &str, _sid: &str, _requested: &str) -> Result<serde_json::Value> {
+    fn prepare_agent_identity(&self, _surface: &str, _sid: &str, _requested: &str, _pid: u32) -> Result<serde_json::Value> {
         anyhow::bail!("agent identity unsupported by this backend")
     }
     /// 이사(migrate)가 출발지의 캐릭터 테마 선택을 이 기계에 재현한다 —

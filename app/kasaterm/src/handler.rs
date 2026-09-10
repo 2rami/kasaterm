@@ -962,7 +962,16 @@ impl ApplicationHandler<UserEvent> for App {
                 self.repersona_pane(&pane, &character);
                 return;
             }
+            UserEvent::SocketAgentIdentity(pane, sid, character, pid, reply) => {
+                let result = self.prepare_agent_identity(&pane, &sid, &character, *pid)
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(result);
+                return;
+            }
             UserEvent::SocketSessionBound(pane, sid) => {
+                if self.ws.lock().unwrap().pane_launch_character.get(pane.as_str()).is_some_and(String::is_empty) {
+                    return; // delayed metadata from an exited harness cannot reclaim the shell
+                }
                 // 배지 판정용: pane → claude 실제 sessionId(fork 시 갈라진 진짜 세션).
                 // report-cwd 가 매 렌더 이 이벤트를 재발화해 bg 세션 pane_claude_sid 를
                 // 보강하므로(F/H), 이미 같은 sid 면 no-op — 무한 relabel·render 를 막는다.
