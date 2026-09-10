@@ -992,6 +992,7 @@ pub(crate) fn paint(
 
     PaintOutput {
         hits,
+        dropdown_scroll_max: 0.0,
         content_h,
         view_h,
         caret_rect,

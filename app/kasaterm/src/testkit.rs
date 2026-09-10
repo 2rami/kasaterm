@@ -3207,6 +3207,12 @@ impl App {
         // 부른다 — 검증 때마다 Finder 창이 튀어나오면 그게 더 방해다.
         match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
             "" => {}
+            "dropdown-ui-font" => {
+                self.settings_scene
+                    .toggle_dropdown(crate::native_settings::DropdownId::UiFont);
+                self.chrome_dirty = true;
+                eprintln!("[autosettings] UI 글꼴 선택 상자 펼침");
+            }
             "statusbar-all-off" => {
                 self.set_statusbar.hidden = crate::statusbar_config::WIDGETS
                     .iter()

@@ -549,11 +549,23 @@ fn account_sub(email: &str, org: &str) -> String {
 pub(crate) enum HitCursor {
     Pointer,
     Text,
+    /// 보통 화살표 — 「바깥을 눌러 닫기」처럼 누를 수는 있지만 손가락은 아닌 자리.
+    Arrow,
+}
+
+/// 펼쳐지는 선택 상자. 한 번에 하나만 열린다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DropdownId {
+    UiFont,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Target {
     Category(SettingsCat),
+    /// 선택 상자 머리 — 누르면 펼치고, 다시 누르면 닫는다.
+    Dropdown(DropdownId),
+    /// 펼친 선택 상자 바깥 — 누르면 닫기만 한다.
+    DropdownDismiss,
     Setting(SettingsAction),
     Focus(SettingsInput),
     AccountUsage(String),
@@ -586,6 +598,8 @@ impl std::fmt::Debug for Hit {
 
 pub(crate) struct PaintOutput {
     pub(crate) hits: Vec<Hit>,
+    /// 펼친 선택 상자 목록의 최대 스크롤.
+    pub(crate) dropdown_scroll_max: f32,
     pub(crate) content_h: f32,
     pub(crate) view_h: f32,
     pub(crate) caret_rect: Option<Rect>,
@@ -614,6 +628,9 @@ pub(crate) struct MultilineLayout {
 struct PaintFeedback {
     multiline_layouts: Vec<MultilineLayout>,
     motion_preview_visible: bool,
+    /// 이번 프레임에 그린 「펼쳐진」 선택 상자의 머리 자리. 팝업은 본문을 다 그린 뒤
+    /// 이 자리에 붙여 맨 위에 올린다.
+    dropdown_anchor: Option<(DropdownId, Rect)>,
 }
 
 thread_local! {
@@ -626,6 +643,10 @@ fn begin_paint_feedback() {
 
 fn push_multiline_layout(layout: MultilineLayout) {
     PAINT_FEEDBACK.with(|feedback| feedback.borrow_mut().multiline_layouts.push(layout));
+}
+
+fn mark_dropdown_anchor(id: DropdownId, rect: Rect) {
+    PAINT_FEEDBACK.with(|feedback| feedback.borrow_mut().dropdown_anchor = Some((id, rect)));
 }
 
 fn mark_motion_preview_visible() {
@@ -673,6 +694,9 @@ pub(crate) struct Snapshot {
     pub(crate) ui_font: String,
     /// 설치돼 있어 고를 수 있는 UI 글꼴 이름들.
     pub(crate) ui_fonts: Vec<String>,
+    /// 지금 펼쳐진 선택 상자.
+    pub(crate) dropdown: Option<DropdownId>,
+    pub(crate) dropdown_scroll: f32,
     pub(crate) font_size: f32,
     pub(crate) ui_zoom: f32,
     pub(crate) wheel_gain: f32,
@@ -916,6 +940,8 @@ impl App {
             account_autoswitch_pct: self.set_account_autoswitch_pct,
             accounts: cache.accounts.clone(),
             account_usage_expanded: scene.account_usage_expanded().clone(),
+            dropdown: scene.dropdown(),
+            dropdown_scroll: scene.dropdown_scroll(),
             account_label_edit: self.account_label_edit.clone(),
             machine_edit: self.machine_edit.clone(),
             login_job: crate::settings::hidden_login_job(),
@@ -973,6 +999,7 @@ impl App {
     pub(crate) fn finish_native_settings_paint(&mut self, output: PaintOutput) {
         self.settings_scene.finish_paint(
             output.hits,
+            output.dropdown_scroll_max,
             output.content_h,
             output.view_h,
             output.caret_rect,
@@ -1015,7 +1042,16 @@ impl App {
         }
         let hit = self.settings_scene.hit_at(x, y).cloned();
         let target = hit.as_ref().map(|hit| hit.target.clone());
+        // 어디를 눌러도 펼친 선택 상자는 닫힌다 — 머리를 다시 누른 것만 토글이다.
+        if !matches!(target, Some(Target::Dropdown(_))) {
+            self.settings_scene.close_dropdown();
+        }
         match target {
+            Some(Target::Dropdown(id)) => {
+                self.native_settings_blur();
+                self.settings_scene.toggle_dropdown(id);
+            }
+            Some(Target::DropdownDismiss) => {}
             Some(Target::Category(cat)) => {
                 self.native_settings_blur();
                 self.settings_scene.set_category(cat);
@@ -1510,6 +1546,13 @@ impl App {
         if event.state != ElementState::Pressed {
             return true;
         }
+        if self.settings_scene.dropdown().is_some()
+            && matches!(event.logical_key, Key::Named(NamedKey::Escape))
+        {
+            self.settings_scene.close_dropdown();
+            self.chrome_dirty = true;
+            return true;
+        }
         let Some(field) = self.settings_input else {
             if self.settings_scene.first_run() {
                 return self.native_onboarding_key(event);
@@ -1754,7 +1797,12 @@ impl App {
             winit::event::MouseScrollDelta::LineDelta(_, y) => y * 42.0,
             winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
         };
-        if self.settings_scene.scroll_by(-dy) {
+        let scrolled = if self.settings_scene.dropdown().is_some() {
+            self.settings_scene.dropdown_scroll_by(-dy)
+        } else {
+            self.settings_scene.scroll_by(-dy)
+        };
+        if scrolled {
             self.chrome_dirty = true;
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
@@ -2331,8 +2379,15 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     );
 
     let feedback = take_paint_feedback();
+    let mut dropdown_scroll_max = 0.0;
+    if let (Some(open), Some((id, anchor))) = (snapshot.dropdown, feedback.dropdown_anchor) {
+        if open == id {
+            dropdown_scroll_max = paint_dropdown_popup(g, snapshot, &mut hits, id, anchor);
+        }
+    }
     PaintOutput {
         hits,
+        dropdown_scroll_max,
         content_h,
         view_h,
         caret_rect,
@@ -3010,43 +3065,17 @@ fn paint_appearance(
     );
     // 크롬 글꼴. 터미널 격자와 별개다 — 격자는 고정폭이어야 하지만 탭·설정·상태줄은
     // 산세리프가 더 잘 읽힌다. 바로 먹고 재시작이 필요 없다.
-    row_label(g, x, y, "UI 글꼴");
-    let custom = !matches!(s.ui_font.as_str(), "" | "terminal" | "system");
-    segmented(
+    dropdown_row(
         g,
         s,
         hits,
         x,
-        *y,
+        y,
         w,
-        &[
-            (
-                "터미널 글꼴 그대로",
-                !custom && s.ui_font != "system",
-                SettingsAction::UiFont("terminal".to_string()),
-            ),
-            (
-                "시스템 고딕",
-                s.ui_font == "system",
-                SettingsAction::UiFont("system".to_string()),
-            ),
-        ],
+        "UI 글꼴",
+        &ui_font_label(&s.ui_font),
+        DropdownId::UiFont,
     );
-    *y += 44.0;
-    if !s.ui_fonts.is_empty() {
-        let cells: Vec<(String, bool, SettingsAction)> = s
-            .ui_fonts
-            .iter()
-            .map(|f| {
-                (
-                    f.clone(),
-                    custom && crate::onboarding::ui_font_matches(&s.ui_font, f),
-                    SettingsAction::UiFont(f.clone()),
-                )
-            })
-            .collect();
-        chips_owned(g, s, hits, x, y, w, cells);
-    }
     segmented(
         g,
         s,
@@ -6697,6 +6726,216 @@ fn chips_owned(
         cx += cw + 7.0;
     }
     *y = cy + 42.0;
+}
+
+/// 선택 상자에 뜨는 값 이름. 「terminal」·「system」·빈 값은 사람 말로 바꾼다.
+fn ui_font_label(value: &str) -> String {
+    match value {
+        "" | "terminal" => "터미널 글꼴 그대로".to_string(),
+        "system" => "시스템 고딕".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// 선택 상자에 들어갈 항목들: (보이는 이름, 지금 골라진 것인지, 고르면 할 일).
+fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAction)> {
+    match id {
+        DropdownId::UiFont => {
+            let custom = !matches!(s.ui_font.as_str(), "" | "terminal" | "system");
+            let mut items = vec![
+                (
+                    ui_font_label("terminal"),
+                    !custom && s.ui_font != "system",
+                    SettingsAction::UiFont("terminal".to_string()),
+                ),
+                (
+                    ui_font_label("system"),
+                    s.ui_font == "system",
+                    SettingsAction::UiFont("system".to_string()),
+                ),
+            ];
+            items.extend(s.ui_fonts.iter().map(|f| {
+                (
+                    f.clone(),
+                    custom && crate::onboarding::ui_font_matches(&s.ui_font, f),
+                    SettingsAction::UiFont(f.clone()),
+                )
+            }));
+            items
+        }
+    }
+}
+
+const DROPDOWN_FIELD_W: f32 = 260.0;
+const DROPDOWN_FIELD_H: f32 = 34.0;
+const DROPDOWN_ITEM_H: f32 = 30.0;
+const DROPDOWN_VISIBLE_ITEMS: f32 = 8.0;
+
+/// 라벨 왼쪽, 오른쪽에 닫힌 선택 상자 한 줄. 펼쳐져 있으면 자리를 기록해 두고
+/// 팝업은 `paint()` 끝에서 맨 위에 그린다.
+#[allow(clippy::too_many_arguments)]
+fn dropdown_row(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    label: &str,
+    value: &str,
+    id: DropdownId,
+) {
+    draw_text(g, x + 2.0, *y + 13.0, label, 12.5, theme::text(), false);
+    let fw = DROPDOWN_FIELD_W.min(w * 0.55);
+    let rect = (x + w - fw, *y + 4.0, fw, DROPDOWN_FIELD_H);
+    let open = s.dropdown == Some(id);
+    let hover = contains(rect, s.cursor);
+    round_rect(
+        g,
+        rect.0,
+        rect.1,
+        rect.2,
+        rect.3,
+        theme::radius_md(),
+        if open || hover {
+            theme::surface_hover()
+        } else {
+            theme::surface()
+        },
+    );
+    stroke_round(
+        g,
+        rect,
+        theme::radius_md(),
+        if open { theme::accent() } else { theme::border() },
+    );
+    let shown = fit(g, value, rect.2 - 44.0, 12.0, false);
+    draw_text(g, rect.0 + 12.0, rect.1 + 10.0, &shown, 12.0, theme::text(), false);
+    g.queue_icon(
+        if open { "chevron-up" } else { "chevron-down" },
+        rect.0 + rect.2 - 24.0,
+        rect.1 + 10.5,
+        13.0,
+        theme::text_dim(),
+    );
+    register_clipped(g, hits, Target::Dropdown(id), rect, HitCursor::Pointer);
+    g.hover_pointer |= hover;
+    if open {
+        if let Some(visible) = g.clip_hit(rect) {
+            let _ = visible;
+            mark_dropdown_anchor(id, rect);
+        }
+    }
+    *y += 46.0;
+}
+
+/// 펼친 목록. 본문 클립 바깥에서, 모든 것 위에 그린다. 바깥 전체에 「닫기」 판정을
+/// 먼저 깔고 항목 판정을 그 위에 얹어, 어디를 눌러도 닫히되 항목은 항목으로 먹는다.
+/// 돌려주는 값은 목록의 최대 스크롤.
+fn paint_dropdown_popup(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    id: DropdownId,
+    anchor: Rect,
+) -> f32 {
+    let items = dropdown_items(s, id);
+    if items.is_empty() {
+        return 0.0;
+    }
+    register(hits, Target::DropdownDismiss, s.area, HitCursor::Arrow);
+    let pad = 4.0;
+    let full_h = items.len() as f32 * DROPDOWN_ITEM_H + pad * 2.0;
+    let max_h = DROPDOWN_VISIBLE_ITEMS * DROPDOWN_ITEM_H + pad * 2.0;
+    let area_bottom = s.area.1 + s.area.3 - 8.0;
+    let below = area_bottom - (anchor.1 + anchor.3 + 4.0);
+    let above = anchor.1 - 4.0 - (s.area.1 + 8.0);
+    let (h, top) = if below >= full_h.min(max_h) || below >= above {
+        let h = full_h.min(max_h).min(below.max(DROPDOWN_ITEM_H + pad * 2.0));
+        (h, anchor.1 + anchor.3 + 4.0)
+    } else {
+        let h = full_h.min(max_h).min(above.max(DROPDOWN_ITEM_H + pad * 2.0));
+        (h, anchor.1 - 4.0 - h)
+    };
+    let panel = (anchor.0, top, anchor.2, h);
+    let scroll_max = (full_h - h).max(0.0);
+    let scroll = s.dropdown_scroll.clamp(0.0, scroll_max);
+
+    // 그림자 — 살짝 큰 반투명 판을 아래로 밀어 띄운다.
+    round_rect(
+        g,
+        panel.0 - 1.0,
+        panel.1 + 2.0,
+        panel.2 + 2.0,
+        panel.3 + 2.0,
+        theme::radius_md() + 1.0,
+        theme::with_alpha([0, 0, 0, 255], 46),
+    );
+    round_rect(g, panel.0, panel.1, panel.2, panel.3, theme::radius_md(), theme::surface());
+    stroke_round(g, panel, theme::radius_md(), theme::border());
+
+    g.push_clip(panel.0 + 1.0, panel.1 + 1.0, panel.2 - 2.0, panel.3 - 2.0);
+    let mut iy = panel.1 + pad - scroll;
+    for (label, selected, action) in items {
+        let rect = (panel.0 + pad, iy, panel.2 - pad * 2.0, DROPDOWN_ITEM_H);
+        iy += DROPDOWN_ITEM_H;
+        if rect.1 + rect.3 < panel.1 || rect.1 > panel.1 + panel.3 {
+            continue;
+        }
+        let hover = contains(rect, s.cursor) && contains(panel, s.cursor);
+        if hover || selected {
+            round_rect(
+                g,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+                theme::radius_sm(),
+                if selected {
+                    theme::surface_active()
+                } else {
+                    theme::surface_hover()
+                },
+            );
+        }
+        let shown = fit(g, &label, rect.2 - 40.0, 12.0, selected);
+        draw_text(
+            g,
+            rect.0 + 10.0,
+            rect.1 + 8.0,
+            &shown,
+            12.0,
+            if selected { theme::text() } else { theme::text_dim() },
+            selected,
+        );
+        if selected {
+            g.queue_icon(
+                "check",
+                rect.0 + rect.2 - 22.0,
+                rect.1 + 8.5,
+                13.0,
+                theme::accent(),
+            );
+        }
+        register_clipped(g, hits, Target::Setting(action), rect, HitCursor::Pointer);
+        g.hover_pointer |= hover;
+    }
+    g.pop_clip();
+    if scroll_max > 0.0 {
+        let track_h = panel.3 - pad * 2.0;
+        let thumb_h = (track_h * h / full_h).clamp(18.0, track_h);
+        let thumb_y = panel.1 + pad + (track_h - thumb_h) * (scroll / scroll_max);
+        round_rect(
+            g,
+            panel.0 + panel.2 - 6.0,
+            thumb_y,
+            3.0,
+            thumb_h,
+            1.5,
+            theme::with_alpha(theme::text_dim(), 120),
+        );
+    }
+    scroll_max
 }
 
 fn stepper_row(
