@@ -6609,7 +6609,7 @@ fn toggle_row(
             rect.1,
             rect.2,
             rect.3,
-            theme::radius_md(),
+            ctrl_radius(),
             theme::surface_hover(),
         );
     }
@@ -6665,17 +6665,47 @@ fn segmented(
     if cells.is_empty() {
         return;
     }
-    let gap = 4.0;
-    let cw = (w - gap * (cells.len() - 1) as f32) / cells.len() as f32;
+    // 워프식 분절 상자: 바깥 틀 하나에 칸이 붙어 있고, 고른 칸만 안에서 채워진다.
+    let h = 32.0;
+    let inset = 3.0;
+    let outer = (x, y, w, h);
+    round_rect(g, outer.0, outer.1, outer.2, outer.3, seg_outer_radius(), theme::surface());
+    stroke_round(g, outer, seg_outer_radius(), theme::border());
+    let cw = (w - inset * 2.0) / cells.len() as f32;
     for (i, (label, selected, action)) in cells.iter().enumerate() {
-        let rect = (x + i as f32 * (cw + gap), y, cw, 34.0);
-        choice_card(g, s, hits, rect, *selected, Target::Setting(action.clone()));
-        let shown = fit(g, label, cw - 18.0, 11.5, *selected);
+        let rect = (x + inset + i as f32 * cw, y + inset, cw, h - inset * 2.0);
+        let hover = contains(rect, s.cursor);
+        if *selected {
+            round_rect(
+                g,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+                seg_inner_radius(),
+                theme::surface_active(),
+            );
+            stroke_round(g, rect, seg_inner_radius(), theme::with_alpha(theme::accent(), 150));
+        } else if hover {
+            round_rect(
+                g,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+                seg_inner_radius(),
+                theme::surface_hover(),
+            );
+        }
+        if i > 0 && !*selected && !cells[i - 1].1 {
+            g.rect(rect.0, rect.1 + 6.0, 1.0, rect.3 - 12.0, theme::border());
+        }
+        let shown = fit(g, label, cw - 16.0, 11.5, *selected);
         let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, *selected)) / 2.0;
         draw_text(
             g,
             tx,
-            rect.1 + 10.0,
+            rect.1 + 7.0,
             &shown,
             11.5,
             if *selected {
@@ -6685,6 +6715,8 @@ fn segmented(
             },
             *selected,
         );
+        register_clipped(g, hits, Target::Setting(action.clone()), rect, HitCursor::Pointer);
+        g.hover_pointer |= hover;
     }
 }
 
@@ -6705,8 +6737,8 @@ fn chips_owned(
             cx = x;
             cy += 40.0;
         }
-        let rect = (cx, cy, cw, 32.0);
-        choice_card(g, s, hits, rect, selected, Target::Setting(action));
+        let rect = (cx, cy, cw, 30.0);
+        choice_card_with_radius(g, s, hits, rect, selected, Target::Setting(action), chip_radius());
         // 반 픽셀을 더 준다. 칸 너비를 같은 함수로 재 놓고 그 값으로 다시 자르는데,
         // 두 번의 재기가 소수점에서 갈리면 딱 맞는 이름이 「Ma…」로 잘린다(실측).
         let shown = fit(g, &label, rect.2 - 23.5, 11.5, selected);
@@ -6768,7 +6800,7 @@ fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAc
 
 const DROPDOWN_FIELD_W: f32 = 260.0;
 const DROPDOWN_FIELD_H: f32 = 34.0;
-const DROPDOWN_ITEM_H: f32 = 30.0;
+const DROPDOWN_ITEM_H: f32 = 28.0;
 const DROPDOWN_VISIBLE_ITEMS: f32 = 8.0;
 
 /// 라벨 왼쪽, 오른쪽에 닫힌 선택 상자 한 줄. 펼쳐져 있으면 자리를 기록해 두고
@@ -6796,7 +6828,7 @@ fn dropdown_row(
         rect.1,
         rect.2,
         rect.3,
-        theme::radius_md(),
+        ctrl_radius(),
         if open || hover {
             theme::surface_hover()
         } else {
@@ -6806,7 +6838,7 @@ fn dropdown_row(
     stroke_round(
         g,
         rect,
-        theme::radius_md(),
+        ctrl_radius(),
         if open { theme::accent() } else { theme::border() },
     );
     let shown = fit(g, value, rect.2 - 44.0, 12.0, false);
@@ -6844,7 +6876,7 @@ fn paint_dropdown_popup(
         return 0.0;
     }
     register(hits, Target::DropdownDismiss, s.area, HitCursor::Arrow);
-    let pad = 4.0;
+    let pad = 6.0;
     let full_h = items.len() as f32 * DROPDOWN_ITEM_H + pad * 2.0;
     let max_h = DROPDOWN_VISIBLE_ITEMS * DROPDOWN_ITEM_H + pad * 2.0;
     let area_bottom = s.area.1 + s.area.3 - 8.0;
@@ -6868,11 +6900,11 @@ fn paint_dropdown_popup(
         panel.1 + 2.0,
         panel.2 + 2.0,
         panel.3 + 2.0,
-        theme::radius_md() + 1.0,
+        ctrl_radius() + 1.0,
         theme::with_alpha([0, 0, 0, 255], 46),
     );
-    round_rect(g, panel.0, panel.1, panel.2, panel.3, theme::radius_md(), theme::surface());
-    stroke_round(g, panel, theme::radius_md(), theme::border());
+    round_rect(g, panel.0, panel.1, panel.2, panel.3, ctrl_radius(), theme::surface());
+    stroke_round(g, panel, ctrl_radius(), theme::border());
 
     g.push_clip(panel.0 + 1.0, panel.1 + 1.0, panel.2 - 2.0, panel.3 - 2.0);
     let mut iy = panel.1 + pad - scroll;
@@ -6901,8 +6933,8 @@ fn paint_dropdown_popup(
         let shown = fit(g, &label, rect.2 - 40.0, 12.0, selected);
         draw_text(
             g,
-            rect.0 + 10.0,
-            rect.1 + 8.0,
+            rect.0 + 12.0,
+            rect.1 + 7.0,
             &shown,
             12.0,
             if selected { theme::text() } else { theme::text_dim() },
@@ -6912,7 +6944,7 @@ fn paint_dropdown_popup(
             g.queue_icon(
                 "check",
                 rect.0 + rect.2 - 22.0,
-                rect.1 + 8.5,
+                rect.1 + 7.5,
                 13.0,
                 theme::accent(),
             );
@@ -6998,7 +7030,7 @@ fn text_field(
         rect.1,
         rect.2,
         rect.3,
-        theme::radius_md(),
+        ctrl_radius(),
         if focused {
             theme::surface_hover()
         } else {
@@ -7006,7 +7038,7 @@ fn text_field(
         },
     );
     if focused {
-        stroke_round(g, rect, theme::radius_md(), theme::accent());
+        stroke_round(g, rect, ctrl_radius(), theme::accent());
         if s.select_all {
             g.rect(
                 rect.0 + 3.0,
@@ -7017,7 +7049,7 @@ fn text_field(
             );
         }
     } else {
-        stroke_round(g, rect, theme::radius_md(), theme::border());
+        stroke_round(g, rect, ctrl_radius(), theme::border());
     }
     register_clipped(g, hits, Target::Focus(field), rect, HitCursor::Text);
     g.push_clip(rect.0 + 10.0, rect.1 + 5.0, rect.2 - 20.0, rect.3 - 10.0);
@@ -7197,6 +7229,25 @@ fn wrap_text(g: &mut gpu::GpuRenderer, text: &str, max_w: f32, font: f32) -> Vec
     out
 }
 
+/// 설정 부품의 모서리. 워프 기준(버튼·입력창·팝업 5px, 칩 3px, 분절 상자 바깥 4px/안 3px)
+/// 을 상한으로 두고, 테마 모양(Rounded/Sharp/Pixel)이 그보다 작으면 그걸 따른다 —
+/// Pixel 은 0 그대로다.
+fn ctrl_radius() -> f32 {
+    theme::radius_md().min(5.0)
+}
+
+fn chip_radius() -> f32 {
+    theme::radius_sm().min(3.0)
+}
+
+fn seg_outer_radius() -> f32 {
+    theme::radius_sm().min(4.0)
+}
+
+fn seg_inner_radius() -> f32 {
+    theme::radius_sm().min(3.0)
+}
+
 fn choice_card(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -7205,6 +7256,19 @@ fn choice_card(
     selected: bool,
     target: Target,
 ) {
+    choice_card_with_radius(g, s, hits, rect, selected, target, ctrl_radius());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn choice_card_with_radius(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    rect: Rect,
+    selected: bool,
+    target: Target,
+    r: f32,
+) {
     let hover = contains(rect, s.cursor);
     round_rect(
         g,
@@ -7212,7 +7276,7 @@ fn choice_card(
         rect.1,
         rect.2,
         rect.3,
-        theme::radius_md(),
+        r,
         if selected {
             theme::surface_active()
         } else if hover {
@@ -7224,7 +7288,7 @@ fn choice_card(
     stroke_round(
         g,
         rect,
-        theme::radius_md(),
+        r,
         if selected {
             theme::accent()
         } else {
@@ -7260,9 +7324,9 @@ fn button(
     } else {
         theme::surface()
     };
-    round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_md(), fill);
+    round_rect(g, rect.0, rect.1, rect.2, rect.3, ctrl_radius(), fill);
     if !primary {
-        stroke_round(g, rect, theme::radius_md(), theme::border());
+        stroke_round(g, rect, ctrl_radius(), theme::border());
     }
     let shown = fit(g, label, rect.2 - 18.0, 11.5, primary);
     let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, primary)) / 2.0;
