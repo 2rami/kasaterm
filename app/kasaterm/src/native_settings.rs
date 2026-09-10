@@ -8,7 +8,7 @@ use super::*;
 pub(crate) type Rect = (f32, f32, f32, f32);
 
 const HEADER_H: f32 = 92.0;
-const CONTENT_MAX_W: f32 = 820.0;
+const CONTENT_MAX_W: f32 = 800.0;
 const SPRITE_DROP_MAX_BYTES: u64 = 4 << 20;
 const THEMEGEN_DROP_MAX_BYTES: u64 = 32 << 20;
 
@@ -2126,36 +2126,21 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     }
     begin_paint_feedback();
     let (ax, ay, aw, ah) = snapshot.area;
-    let nav_w = if aw < 760.0 { 154.0 } else { 190.0 };
+    let nav_w = if aw < 760.0 { 154.0 } else { 200.0 };
     let mut hits = Vec::new();
     let mut caret_rect = None;
 
     g.rect(ax, ay, aw, ah, theme::bg());
     g.rect(ax, ay, nav_w, ah, theme::panel_bg());
     g.rect(ax + nav_w - 1.0, ay, 1.0, ah, theme::border());
-    draw_text(
-        g,
-        ax + 20.0,
-        ay + 20.0,
-        "설정 방",
-        18.0,
-        theme::text(),
-        true,
-    );
-    draw_text(
-        g,
-        ax + 20.0,
-        ay + 47.0,
-        "앱의 작업 환경",
-        11.0,
-        theme::text_dim(),
-        false,
-    );
+    draw_text(g, ax + 20.0, ay + 22.0, "설정 방", 16.0, theme::text(), true);
+    draw_text(g, ax + 20.0, ay + 46.0, "앱의 작업 환경", 12.0, theme::text_dim(), false);
 
+    // 워프식 목록: 왼쪽 강조 막대 없이 고른 줄만 채워지고, 줄 높이 32 에 간격 4.
     let mut ny = ay + 82.0;
     for cat in SettingsCat::ALL {
         let (label, icon, _) = category_meta(cat);
-        let rect = (ax + 10.0, ny, nav_w - 20.0, 36.0);
+        let rect = (ax + 12.0, ny, nav_w - 24.0, 32.0);
         let selected = cat == snapshot.cat;
         let hover = contains(rect, snapshot.cursor);
         if selected || hover {
@@ -2165,7 +2150,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                 rect.1,
                 rect.2,
                 rect.3,
-                theme::radius_md(),
+                ctrl_radius(),
                 if selected {
                     theme::surface_active()
                 } else {
@@ -2173,14 +2158,11 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                 },
             );
         }
-        if selected {
-            g.rect(rect.0, rect.1 + 8.0, 2.0, rect.3 - 16.0, theme::accent());
-        }
         g.queue_icon(
             icon,
-            rect.0 + 12.0,
-            rect.1 + 10.0,
-            15.0,
+            rect.0 + 10.0,
+            rect.1 + 9.0,
+            14.0,
             if selected {
                 theme::text()
             } else {
@@ -2189,10 +2171,10 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         );
         draw_text(
             g,
-            rect.0 + 36.0,
-            rect.1 + 10.0,
+            rect.0 + 32.0,
+            rect.1 + 9.0,
             label,
-            13.0,
+            12.0,
             if selected {
                 theme::text()
             } else {
@@ -2202,10 +2184,10 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         );
         register(&mut hits, Target::Category(cat), rect, HitCursor::Pointer);
         g.hover_pointer |= hover;
-        ny += 39.0;
+        ny += 36.0;
     }
 
-    let close = (ax + 12.0, ay + ah - 48.0, nav_w - 24.0, 34.0);
+    let close = (ax + 12.0, ay + ah - 46.0, nav_w - 24.0, 32.0);
     let close_hover = contains(close, snapshot.cursor);
     if close_hover {
         round_rect(
@@ -2214,7 +2196,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             close.1,
             close.2,
             close.3,
-            theme::radius_md(),
+            ctrl_radius(),
             theme::surface_hover(),
         );
     }
@@ -2236,21 +2218,13 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     );
     register(&mut hits, Target::Close, close, HitCursor::Pointer);
 
-    let content_x = ax + nav_w + if aw < 760.0 { 22.0 } else { 38.0 };
-    let content_w = (aw - nav_w - if aw < 760.0 { 44.0 } else { 76.0 })
+    let content_x = ax + nav_w + if aw < 760.0 { 20.0 } else { 28.0 };
+    let content_w = (aw - nav_w - if aw < 760.0 { 40.0 } else { 56.0 })
         .max(180.0)
         .min(CONTENT_MAX_W);
     let (title, _, blurb) = category_meta(snapshot.cat);
-    draw_text(g, content_x, ay + 22.0, title, 24.0, theme::text(), true);
-    draw_text(
-        g,
-        content_x,
-        ay + 55.0,
-        blurb,
-        12.5,
-        theme::text_dim(),
-        false,
-    );
+    draw_text(g, content_x, ay + 24.0, title, 23.0, theme::text(), true);
+    draw_text(g, content_x, ay + 57.0, blurb, 12.0, theme::text_dim(), false);
     g.rect(
         content_x,
         ay + HEADER_H - 1.0,
@@ -2456,7 +2430,7 @@ fn paint_general(
     w: f32,
 ) {
     section_title(g, x, *y, "언어", "설정과 안내 화면에서 쓸 말을 고릅니다");
-    *y += 48.0;
+    *y += 54.0;
     segmented(
         g,
         s,
@@ -2477,7 +2451,7 @@ fn paint_general(
         "시작과 파일",
         "새 작업 방과 파일을 여는 기본 동작입니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     row_label(g, x, y, "새 방의 시작 폴더");
     segmented(
         g,
@@ -2612,7 +2586,7 @@ fn paint_general(
         "편집과 스크롤",
         "자주 바꾸지 않는 입력 감각만 모았습니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let autosave = [("끔", 0), ("1초", 1000), ("3초", 3000), ("10초", 10000)];
     let autosave_cells: Vec<(&str, bool, SettingsAction)> = autosave
         .iter()
@@ -2690,7 +2664,7 @@ fn paint_appearance(
         "터미널 커서",
         "모양만 고르면 색은 현재 캐릭터를 따라가요",
     );
-    *y += 48.0;
+    *y += 54.0;
     draw_text(g, x + 2.0, *y, "기본", 11.5, theme::text_dim(), true);
     *y += 24.0;
     cursor_shape_grid(
@@ -2820,7 +2794,7 @@ fn paint_appearance(
         "마우스 포인터",
         "텍스트 입력 캐럿과 터미널 위 포인터는 서로 다른 설정입니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     segmented(
         g,
         s,
@@ -2850,7 +2824,7 @@ fn paint_appearance(
         "색과 형태",
         "현재 테마 토큰을 모든 네이티브 화면이 함께 씁니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let gap = 10.0;
     let grid_cols = if w >= 600.0 { 3 } else { 2 };
     let pw = (w - gap * (grid_cols - 1) as f32) / grid_cols as f32;
@@ -2918,7 +2892,7 @@ fn paint_appearance(
             "시스템 밝기별 테마",
             "운영체제가 밝음/어두움을 바꿀 때 입을 팔레트입니다",
         );
-        *y += 46.0;
+        *y += 52.0;
         for (light, label, current) in [
             (true, "밝은 화면", s.system_light.as_str()),
             (false, "어두운 화면", s.system_dark.as_str()),
@@ -3124,7 +3098,7 @@ fn paint_statusbar(
         "실시간 미리보기 예시",
         "고른 순서와 색, 구분선을 창 맨 아래와 같은 흐름으로 보여 줍니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     statusbar_preview(g, s, x, *y, w);
     *y += 80.0;
 
@@ -3135,7 +3109,7 @@ fn paint_statusbar(
         "표시 항목",
         "체크는 보이기, 화살표는 순서, 색 칸은 항목의 강조색입니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     for (index, id) in s.statusbar_order.iter().enumerate() {
         statusbar_widget_row(g, s, hits, x, y, w, id, index);
     }
@@ -3148,7 +3122,7 @@ fn paint_statusbar(
         "사용량에 넣을 정보",
         "서비스 이름은 유지하고 필요한 수치만 각각 고릅니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     for (provider, title) in [("claude", "Claude"), ("codex", "Codex")] {
         row_label(g, x, y, title);
         let selected = s.statusbar_usage_fields.get(provider);
@@ -3533,7 +3507,7 @@ fn paint_palette_editor(
         "팔레트 색",
         "색 칸을 고른 뒤 휠이나 #rrggbb 값으로 바꿉니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let selected = match s.input {
         Some(SettingsInput::PaletteHex(index)) => index.min(s.palette_hex.len().saturating_sub(1)),
         _ => 0,
@@ -3725,7 +3699,7 @@ fn paint_device_colors(
         "기기 색",
         "pane 헤더·배치도·정보 탭이 기기를 이 색으로 가릅니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     if s.device_colors.is_empty() {
         draw_text(
             g,
@@ -3904,7 +3878,7 @@ fn paint_shell(
         "새 pane의 셸",
         "이미 열린 pane은 그대로 두고 다음 pane부터 적용합니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let known = matches!(s.shell.as_str(), "" | "/bin/zsh" | "/bin/bash");
     segmented(
         g,
@@ -3972,7 +3946,7 @@ fn paint_claude(
         "Agent 기본값",
         "새로 띄우는 Claude와 Codex 작업대에 적용됩니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     toggle_row(
         g,
         s,
@@ -4778,7 +4752,7 @@ fn paint_themes(
         "캐릭터 테마",
         "명단과 그림, 성격을 한 벌로 갈아낍니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let gap = 12.0;
     let cols = if w >= 620.0 { 2 } else { 1 };
     let cw = (w - gap * (cols - 1) as f32) / cols as f32;
@@ -4909,7 +4883,7 @@ fn paint_themes(
             &format!("{label} 명단"),
             "아무도 따로 고르지 않으면 이 테마의 전원이 기본 후보입니다",
         );
-        *y += 48.0;
+        *y += 54.0;
         button(
             g,
             s,
@@ -5140,7 +5114,7 @@ fn paint_students(
             "모델",
             "이 캐릭터만 다른 실행 통로를 쓸 수 있습니다",
         );
-        *y += 46.0;
+        *y += 52.0;
         let choices: Vec<(String, bool, SettingsAction)> = s
             .models
             .iter()
@@ -5162,7 +5136,7 @@ fn paint_students(
             "성격",
             "다른 칸으로 나가거나 목록으로 돌아갈 때 저장합니다",
         );
-        *y += 44.0;
+        *y += 50.0;
         text_field(
             g,
             s,
@@ -5185,7 +5159,7 @@ fn paint_students(
             "그림 생성",
             "참조 그림을 이 화면에 놓고 모든 기본 동작을 한 번에 굽습니다",
         );
-        *y += 48.0;
+        *y += 54.0;
         let status = match s.themegen_phase {
             Some(crate::themegen::GenPhase::Describing) => "그림 살펴보는 중",
             Some(crate::themegen::GenPhase::Generating) => "굽는 중",
@@ -5279,7 +5253,7 @@ fn paint_students(
         "캐릭터",
         "한 명을 골라 이름과 성격, 모델을 고칩니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let gap = 10.0;
     let cols = if w >= 680.0 {
         4
@@ -5377,7 +5351,7 @@ fn paint_motion_sprites(
         "모션 그림",
         "프레임 칸을 고르고 그림 파일을 놓으면 그 한 장만 바뀝니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     for (motion, title) in [
         ("idle", "대기"),
         ("walk", "걷기"),
@@ -5476,7 +5450,7 @@ fn paint_themegen_engine(
         "그림 생성 엔진",
         "준비되지 않은 엔진은 이유를 함께 표시합니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let providers = s
         .themegen_providers
         .iter()
@@ -5541,7 +5515,7 @@ fn paint_feedback(
         "무엇이 불편했나요",
         "보내지 않고 이 기기의 피드백 폴더에 한 장씩 저장합니다",
     );
-    *y += 50.0;
+    *y += 56.0;
     text_field(
         g,
         s,
@@ -6552,15 +6526,15 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
 }
 
 fn section_title(g: &mut gpu::GpuRenderer, x: f32, y: f32, title: &str, desc: &str) {
-    draw_text(g, x, y, title, 15.0, theme::text(), true);
-    draw_text(g, x, y + 24.0, desc, 11.5, theme::text_dim(), false);
+    draw_text(g, x, y, title, 16.0, theme::text(), true);
+    draw_text(g, x, y + 25.0, desc, 12.0, theme::text_dim(), false);
 }
 
 /// 선택 줄(`segmented`) 위에 서는 한 줄 이름표. 줄이 둘 이상 잇달아 서면 어느 줄이
 /// 무엇을 고르는지 칸 글자만으로는 안 읽혔다(「끔 · 1초 · 3초」가 무엇의 간격인지) —
 /// 2026-09-07 「자잘한 것들 다 수정」.
 fn row_label(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, label: &str) {
-    draw_text(g, x + 2.0, *y, label, 11.5, theme::text_dim(), false);
+    draw_text(g, x + 2.0, *y, label, 12.0, theme::text_dim(), false);
     *y += 20.0;
 }
 
@@ -6572,17 +6546,17 @@ fn info_slab(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, text: &str) 
         rect.1,
         rect.2,
         rect.3,
-        theme::radius_md(),
+        ctrl_radius(),
         theme::surface(),
     );
-    g.rect(rect.0, rect.1, 2.0, rect.3, theme::border());
-    let shown = fit(g, text, rect.2 - 28.0, 11.5, false);
+    stroke_round(g, rect, ctrl_radius(), theme::border());
+    let shown = fit(g, text, rect.2 - 28.0, 12.0, false);
     draw_text(
         g,
         rect.0 + 14.0,
         rect.1 + 16.0,
         &shown,
-        11.5,
+        12.0,
         theme::text_dim(),
         false,
     );
@@ -6600,49 +6574,32 @@ fn toggle_row(
     on: bool,
     action: SettingsAction,
 ) {
-    let rect = (x, *y, w, 44.0);
+    let rect = (x, *y, w, 40.0);
     let hover = contains(rect, s.cursor);
-    if hover {
-        round_rect(
-            g,
-            rect.0,
-            rect.1,
-            rect.2,
-            rect.3,
-            ctrl_radius(),
-            theme::surface_hover(),
-        );
-    }
-    draw_text(
-        g,
-        rect.0 + 12.0,
-        rect.1 + 14.0,
-        label,
-        12.5,
-        theme::text(),
-        false,
-    );
-    let toggle = (rect.0 + rect.2 - 46.0, rect.1 + 10.0, 36.0, 22.0);
-    round_rect(
-        g,
-        toggle.0,
-        toggle.1,
-        toggle.2,
-        toggle.3,
-        11.0,
-        if on {
-            theme::accent()
+    draw_text(g, rect.0 + 2.0, rect.1 + 13.0, label, 12.0, theme::text(), false);
+    let toggle = (rect.0 + rect.2 - 36.0, rect.1 + 10.0, 36.0, 20.0);
+    let track = if on {
+        if hover {
+            theme::lerp(theme::accent(), theme::fg(), 0.10)
         } else {
-            theme::surface_active()
-        },
-    );
+            theme::accent()
+        }
+    } else if hover {
+        theme::lerp(theme::surface_active(), theme::fg(), 0.10)
+    } else {
+        theme::surface_active()
+    };
+    round_rect(g, toggle.0, toggle.1, toggle.2, toggle.3, 10.0, track);
+    if !on {
+        stroke_round(g, toggle, 10.0, theme::border());
+    }
     round_rect(
         g,
-        toggle.0 + if on { 17.0 } else { 3.0 },
+        toggle.0 + if on { 19.0 } else { 3.0 },
         toggle.1 + 3.0,
-        16.0,
-        16.0,
-        8.0,
+        14.0,
+        14.0,
+        7.0,
         if on {
             [255, 255, 255, 255]
         } else {
@@ -6650,7 +6607,8 @@ fn toggle_row(
         },
     );
     register_clipped(g, hits, Target::Setting(action), rect, HitCursor::Pointer);
-    *y += 48.0;
+    g.hover_pointer |= hover;
+    *y += 44.0;
 }
 
 fn segmented(
@@ -6700,14 +6658,14 @@ fn segmented(
         if i > 0 && !*selected && !cells[i - 1].1 {
             g.rect(rect.0, rect.1 + 6.0, 1.0, rect.3 - 12.0, theme::border());
         }
-        let shown = fit(g, label, cw - 16.0, 11.5, *selected);
-        let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, *selected)) / 2.0;
+        let shown = fit(g, label, cw - 16.0, 12.0, *selected);
+        let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 12.0, *selected)) / 2.0;
         draw_text(
             g,
             tx,
-            rect.1 + 7.0,
+            rect.1 + 6.5,
             &shown,
-            11.5,
+            12.0,
             if *selected {
                 theme::text()
             } else {
@@ -6732,7 +6690,7 @@ fn chips_owned(
     let mut cx = x;
     let mut cy = *y;
     for (label, selected, action) in cells {
-        let cw = (g.measure_chrome_text(&label, 11.5, selected) + 24.0).min(w);
+        let cw = (g.measure_chrome_text(&label, 12.0, selected) + 24.0).min(w);
         if cx + cw > x + w && cx > x {
             cx = x;
             cy += 40.0;
@@ -6741,13 +6699,13 @@ fn chips_owned(
         choice_card_with_radius(g, s, hits, rect, selected, Target::Setting(action), chip_radius());
         // 반 픽셀을 더 준다. 칸 너비를 같은 함수로 재 놓고 그 값으로 다시 자르는데,
         // 두 번의 재기가 소수점에서 갈리면 딱 맞는 이름이 「Ma…」로 잘린다(실측).
-        let shown = fit(g, &label, rect.2 - 23.5, 11.5, selected);
+        let shown = fit(g, &label, rect.2 - 23.5, 12.0, selected);
         draw_text(
             g,
             rect.0 + 12.0,
-            rect.1 + 9.0,
+            rect.1 + 8.5,
             &shown,
-            11.5,
+            12.0,
             if selected {
                 theme::text()
             } else {
@@ -6799,7 +6757,7 @@ fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAc
 }
 
 const DROPDOWN_FIELD_W: f32 = 260.0;
-const DROPDOWN_FIELD_H: f32 = 34.0;
+const DROPDOWN_FIELD_H: f32 = 30.0;
 const DROPDOWN_ITEM_H: f32 = 28.0;
 const DROPDOWN_VISIBLE_ITEMS: f32 = 8.0;
 
@@ -6817,9 +6775,9 @@ fn dropdown_row(
     value: &str,
     id: DropdownId,
 ) {
-    draw_text(g, x + 2.0, *y + 13.0, label, 12.5, theme::text(), false);
+    draw_text(g, x + 2.0, *y + 13.0, label, 12.0, theme::text(), false);
     let fw = DROPDOWN_FIELD_W.min(w * 0.55);
-    let rect = (x + w - fw, *y + 4.0, fw, DROPDOWN_FIELD_H);
+    let rect = (x + w - fw, *y + 5.0, fw, DROPDOWN_FIELD_H);
     let open = s.dropdown == Some(id);
     let hover = contains(rect, s.cursor);
     round_rect(
@@ -6842,11 +6800,11 @@ fn dropdown_row(
         if open { theme::accent() } else { theme::border() },
     );
     let shown = fit(g, value, rect.2 - 44.0, 12.0, false);
-    draw_text(g, rect.0 + 12.0, rect.1 + 10.0, &shown, 12.0, theme::text(), false);
+    draw_text(g, rect.0 + 12.0, rect.1 + 8.5, &shown, 12.0, theme::text(), false);
     g.queue_icon(
         if open { "chevron-up" } else { "chevron-down" },
         rect.0 + rect.2 - 24.0,
-        rect.1 + 10.5,
+        rect.1 + 8.5,
         13.0,
         theme::text_dim(),
     );
@@ -6982,23 +6940,39 @@ fn stepper_row(
     minus: SettingsAction,
     plus: SettingsAction,
 ) {
-    let rect = (x, *y, w, 42.0);
-    draw_text(g, x + 2.0, *y + 13.0, label, 12.5, theme::text(), false);
+    // 워프식: −·값·+ 가 한 테두리 안에 붙어 하나의 부품으로 읽힌다.
+    draw_text(g, x + 2.0, *y + 13.0, label, 12.0, theme::text(), false);
     let right = x + w;
-    let mr = (right - 104.0, *y + 4.0, 30.0, 30.0);
-    let pr = (right - 30.0, *y + 4.0, 30.0, 30.0);
-    button(g, s, hits, mr, "−", Target::Setting(minus), false);
-    button(g, s, hits, pr, "+", Target::Setting(plus), false);
-    draw_text(
-        g,
-        right - 66.0,
-        *y + 12.0,
-        value,
-        12.0,
-        theme::text_dim(),
-        false,
-    );
-    let _ = rect;
+    let bw = 30.0;
+    let vw = 56.0;
+    let boxr = (right - (bw * 2.0 + vw), *y + 5.0, bw * 2.0 + vw, 30.0);
+    round_rect(g, boxr.0, boxr.1, boxr.2, boxr.3, ctrl_radius(), theme::surface());
+    let mr = (boxr.0, boxr.1, bw, boxr.3);
+    let pr = (boxr.0 + bw + vw, boxr.1, bw, boxr.3);
+    for (cell, sign, action) in [(mr, "−", minus), (pr, "+", plus)] {
+        let hover = contains(cell, s.cursor);
+        if hover {
+            let inner = (cell.0 + 1.0, cell.1 + 1.0, cell.2 - 2.0, cell.3 - 2.0);
+            round_rect(g, inner.0, inner.1, inner.2, inner.3, seg_inner_radius(), theme::surface_hover());
+        }
+        let tx = cell.0 + (cell.2 - g.measure_chrome_text(sign, 13.0, false)) / 2.0;
+        draw_text(
+            g,
+            tx,
+            cell.1 + 7.5,
+            sign,
+            13.0,
+            if hover { theme::text() } else { theme::text_dim() },
+            false,
+        );
+        register_clipped(g, hits, Target::Setting(action), cell, HitCursor::Pointer);
+        g.hover_pointer |= hover;
+    }
+    g.rect(mr.0 + bw, boxr.1 + 1.0, 1.0, boxr.3 - 2.0, theme::border());
+    g.rect(pr.0, boxr.1 + 1.0, 1.0, boxr.3 - 2.0, theme::border());
+    stroke_round(g, boxr, ctrl_radius(), theme::border());
+    let vx = boxr.0 + bw + (vw - g.measure_chrome_text(value, 12.0, false)) / 2.0;
+    draw_text(g, vx, boxr.1 + 8.5, value, 12.0, theme::text(), false);
     *y += 46.0;
 }
 
@@ -7018,9 +6992,9 @@ fn text_field(
     multiline: bool,
 ) {
     if !label.is_empty() {
-        draw_text(g, x + 2.0, y, label, 11.0, theme::text_dim(), false);
+        draw_text(g, x + 2.0, y, label, 12.0, theme::text_dim(), false);
     }
-    let top = y + if label.is_empty() { 0.0 } else { 18.0 };
+    let top = y + if label.is_empty() { 0.0 } else { 20.0 };
     let h = if multiline { 132.0 } else { 36.0 };
     let rect = (x, top, w, h);
     let focused = s.input == Some(field);
@@ -7313,9 +7287,16 @@ fn button(
     // 회색 `surface_active` 로 바뀌어 눌리는 게 아니라 꺼지는 것처럼 보였다.
     // 보조 버튼은 입력칸·카드와 같은 채움+테두리 한 벌이라 한 화면 안에서
     // 마감이 하나로 읽힌다(2026-09-10 지적 「버튼 마감이 이상하다」).
+    // 호출처가 준 높이가 30~36 으로 제각각이라, 보이는 몸통만 30 으로 맞추고
+    // 세로로 가운데 놓는다(누르는 자리는 준 사각형 그대로). 워프 버튼 높이.
+    let vis = if rect.3 > 30.0 {
+        (rect.0, rect.1 + ((rect.3 - 30.0) / 2.0).floor(), rect.2, 30.0)
+    } else {
+        rect
+    };
     let fill = if primary {
         if hover {
-            theme::lerp(theme::accent(), theme::fg(), 0.14)
+            theme::lerp(theme::accent(), theme::fg(), 0.10)
         } else {
             theme::accent()
         }
@@ -7324,18 +7305,18 @@ fn button(
     } else {
         theme::surface()
     };
-    round_rect(g, rect.0, rect.1, rect.2, rect.3, ctrl_radius(), fill);
+    round_rect(g, vis.0, vis.1, vis.2, vis.3, ctrl_radius(), fill);
     if !primary {
-        stroke_round(g, rect, ctrl_radius(), theme::border());
+        stroke_round(g, vis, ctrl_radius(), theme::border());
     }
-    let shown = fit(g, label, rect.2 - 18.0, 11.5, primary);
-    let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, primary)) / 2.0;
+    let shown = fit(g, label, vis.2 - 20.0, 12.0, primary);
+    let tx = vis.0 + (vis.2 - g.measure_chrome_text(&shown, 12.0, primary)) / 2.0;
     draw_text(
         g,
         tx,
-        rect.1 + (rect.3 - 12.0) / 2.0 - 1.0,
+        vis.1 + (vis.3 - 12.0) / 2.0 - 0.5,
         &shown,
-        11.5,
+        12.0,
         if primary {
             [255, 255, 255, 255]
         } else {
@@ -7363,7 +7344,7 @@ fn mini_icon_button(
             rect.1,
             rect.2,
             rect.3,
-            theme::radius_sm(),
+            chip_radius(),
             theme::surface_active(),
         );
     }
@@ -7490,7 +7471,7 @@ fn mini_text_button(
             rect.1,
             rect.2,
             rect.3,
-            theme::radius_sm(),
+            chip_radius(),
             theme::surface_active(),
         );
     }
