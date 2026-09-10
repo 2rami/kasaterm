@@ -76,7 +76,13 @@ frontend browsing workflow below was implemented separately on
   on every display is `~/Pictures/nacho-midnight.png` (mean brightness 29/255,
   set 2026-09-05 07:42 KST) so the desktop *is* almost black, and the Dock has
   `autohide = 1`, so over Screen Sharing it only appears when the pointer reaches
-  the bottom edge. Both are user settings; changing them is the user's call.
+  the bottom edge. Both came from the `nacho-rice` install script (2026-09-02:
+  `apply-visuals.sh` sets that image, `install.sh` sets Dock auto-hide). The user
+  wanted the video wallpaper: it *is* running (`kasawall`, launchd `com.kasa.kasawall`),
+  but the older player LiveDesk was still launching at login alongside it; on the
+  user's say-so LiveDesk was quit and its login launch removed (2026-09-10). Whether
+  Screen Sharing shows the video layer at all is still unverified (the mini's own
+  screenshot is permission-blocked).
 - **맥미니가 꺼지면 카사텀 모바일이 안 됨** (user 2026-09-10): the MacBook keeps
   running but the phone app cannot connect. Suspected cause: the gateway/tunnel
   (debimarlene side) lives on the mini, so the MacBook has no public route of its
