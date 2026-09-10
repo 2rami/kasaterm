@@ -2499,7 +2499,8 @@ impl App {
         }
         // Display-only fixture: never connect to or change a real source pane.
         // Reapply while active so process polling cannot replace the capture.
-        if std::env::var("KASATERM_AUTOINFO").as_deref() == Ok("mirrors") {
+        let preview = std::env::var("KASATERM_AUTOINFO").unwrap_or_default();
+        if crate::verification_run() && matches!(preview.as_str(), "mirrors" | "rooms") {
             self.info.view = crate::info::InfoSnap {
                 panes: vec![
                     crate::info::PaneGroup { pane: "%0".into(), label: "코하루".into(),
@@ -2514,9 +2515,44 @@ impl App {
             };
             self.info.procs_collapsed = false;
             self.info.machines_col.machines.clear();
+            if preview == "rooms" {
+                use crate::info::{PaneGroup, ProcKind, ProcRow};
+                self.info.view.panes = vec![
+                    PaneGroup { pane: "%0".into(), label: "코하루".into(),
+                        window: 0, window_label: "앱 개발".into(),
+                        session: "복원 입력 수정".into(), shell: "zsh".into(), shell_pid: 120,
+                        rows: vec![ProcRow { pid: 121, name: "codex".into(),
+                            kind: ProcKind::Codex, ..Default::default() }], ..Default::default() },
+                    PaneGroup { pane: "%2".into(), label: "하치와레".into(),
+                        window: 0, window_label: "앱 개발".into(),
+                        machine: Some("맥북".into()), active: true,
+                        session: "브라우저 연동".into(), ..Default::default() },
+                    PaneGroup { pane: "%1".into(), label: "아즈사".into(),
+                        window: 1, window_label: "브랜딩".into(),
+                        session: "브랜딩 화면".into(), shell: "zsh".into(), shell_pid: 130,
+                        rows: vec![ProcRow { pid: 131, name: "claude".into(),
+                            kind: ProcKind::Claude, ..Default::default() }], ..Default::default() },
+                ];
+                self.info.group_collapsed.clear();
+                self.info.machine_collapsed.clear();
+                self.info.machines_col.machines = vec![crate::state::MachinesColMachine {
+                    label: "맥북".into(), online: true, ago_secs: Some(0), outdated: false,
+                    host: String::new(), kvm: None, closed: 0,
+                    mirrored: vec![crate::state::MachinesColRow {
+                        pane: "%2".into(), remote_id: "%13".into(), name: "하치와레".into(),
+                        title: "브라우저 연동".into(), status: "working".into(),
+                        room: "방 1 · 브라우저".into(), remote_cwd: String::new(), closed: false,
+                    }],
+                    remote: vec![crate::state::MachinesColRow {
+                        pane: String::new(), remote_id: "%4".into(), name: "히후미".into(),
+                        title: "모바일 연결".into(), status: "idle".into(),
+                        room: "방 2 · 모바일".into(), remote_cwd: String::new(), closed: false,
+                    }],
+                }];
+            }
             self.info.machines_col.last_refresh = Some(Instant::now());
             if !ACTED.swap(true, Ordering::Relaxed) {
-                eprintln!("[autoinfo] mirror fixture: native and two mirrors in the viewer list");
+                eprintln!("[autoinfo] display-only fixture: {preview}");
             }
             return;
         }
