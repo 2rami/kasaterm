@@ -53,9 +53,10 @@ frontend browsing workflow below was implemented separately on
 
 ## Next items (from the user, 2026-09-10 — not started)
 
-- **알림 통일**: notifications from 나쵸네코 / mobile / PC / mini should be one
-  consistent system. Known bugs: 나쵸네코 sends the same alert three times, and
-  odd/irrelevant alerts appear. Owner: 나쵸 (collaboration with the desktop side).
+- **알림 통일** — done 2026-09-10 on the desktop/phone side (`docs/notifications.md`,
+  commit a0c3d5a4) and on the 나쵸네코 side (branch `hifumi/notify-dedup` in
+  ~/Desktop/momewomo/nacho-neko, commit 7779ed1, not pushed). Neither is live yet:
+  the app needs a rebuild and the bot a restart, both awaiting the user.
 - **모바일 pane 추가** (user answer 2026-09-10: both places): a 「+」 on the
   phone hub (pick machine/room → new pane) and a 「pane 추가」 action in the
   session screen's top bar (split/tab next to the pane being viewed — the same
