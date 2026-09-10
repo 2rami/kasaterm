@@ -2,6 +2,7 @@
 //! 여기서는 저장된 값의 검증과 앱 런타임 반영만 맡는다.
 
 use super::*;
+use crate::render::pane_identity;
 
 type Rect = (f32, f32, f32, f32);
 
@@ -994,6 +995,57 @@ impl App {
                     self.set_toast("이 운영체제에선 화면 집기를 아직 못 써요".to_string());
                 }
             }
+            SettingsAction::FocusDeviceHex(i) => {
+                let Some(row) = self.device_color_row(i) else {
+                    return;
+                };
+                self.set_palette_edit = row.hex;
+                self.settings_caret = self.set_palette_edit.chars().count();
+                if let Some(c) = theme::parse_hex(&self.set_palette_edit) {
+                    self.set_picker_hsv = rgb_to_hsv(c);
+                }
+                self.settings_input = Some(SettingsInput::DeviceHex(i));
+            }
+            SettingsAction::DevicePreset(i, hex) => {
+                let Some(row) = self.device_color_row(i) else {
+                    return;
+                };
+                if let Some(c) = pane_identity::parse_color_input(&hex) {
+                    pane_identity::set_device_color(&row.label, c);
+                    self.set_palette_edit = theme::hex_str(c);
+                    self.settings_caret = self.set_palette_edit.chars().count();
+                    self.set_picker_hsv = rgb_to_hsv(c);
+                    self.settings_input = Some(SettingsInput::DeviceHex(i));
+                    self.settings_scene.refresh_palette_cache();
+                    self.repaint_all();
+                }
+            }
+            SettingsAction::ResetDeviceColor(i) => {
+                let Some(row) = self.device_color_row(i) else {
+                    return;
+                };
+                pane_identity::reset_device_color(&row.label);
+                if matches!(self.settings_input, Some(SettingsInput::DeviceHex(_))) {
+                    self.settings_input = None;
+                }
+                self.settings_scene.refresh_palette_cache();
+                self.repaint_all();
+            }
+            SettingsAction::ResetAllDeviceColors => {
+                pane_identity::reset_all_device_colors();
+                if matches!(self.settings_input, Some(SettingsInput::DeviceHex(_))) {
+                    self.settings_input = None;
+                }
+                self.settings_scene.refresh_palette_cache();
+                self.repaint_all();
+            }
+            SettingsAction::DeviceEyedropper(i) => {
+                if crate::eyedropper::supported() {
+                    crate::eyedropper::pick_screen_color(pane_identity::DEVICE_SLOT_BASE + i);
+                } else {
+                    self.set_toast("이 운영체제에선 화면 집기를 아직 못 써요".to_string());
+                }
+            }
             SettingsAction::Accent(name) => {
                 theme::set_accent(&name);
                 socket::write_setting("accent", serde_json::Value::String(name));
@@ -1776,6 +1828,50 @@ impl App {
                 self.settings_apply(SettingsAction::ResetCustomTheme);
                 Ok(true)
             }
+            // 기기색 — `id` 는 기기 이름(설정 화면이 보여 준 그대로), `label` 은 색.
+            // 네이티브와 같은 함수로 굳혀 두 화면이 같은 파일 키를 쓴다.
+            "device-color" | "device-preview" => {
+                let rows = pane_identity::device_color_rows();
+                let Some(row) = rows.iter().find(|r| r.label == id) else {
+                    return Err(reject_with(
+                        "device_missing",
+                        serde_json::json!({ "device": id }),
+                        "모르는 기기예요".to_string(),
+                    ));
+                };
+                let Some(c) = pane_identity::parse_color_input(&arg) else {
+                    return Err(reject(
+                        "hex_invalid",
+                        "#rrggbb 또는 rgb(r, g, b) 꼴로 적어 주세요".to_string(),
+                    ));
+                };
+                if action == "device-preview" {
+                    pane_identity::preview_device_color(&row.label, c);
+                } else {
+                    pane_identity::set_device_color(&row.label, c);
+                    self.settings_scene.refresh_palette_cache();
+                }
+                self.repaint_all();
+                Ok(true)
+            }
+            "reset-device-color" => {
+                let rows = pane_identity::device_color_rows();
+                if !rows.iter().any(|r| r.label == id) {
+                    return Err(reject_with(
+                        "device_missing",
+                        serde_json::json!({ "device": id }),
+                        "모르는 기기예요".to_string(),
+                    ));
+                }
+                pane_identity::reset_device_color(id);
+                self.settings_scene.refresh_palette_cache();
+                self.repaint_all();
+                Ok(true)
+            }
+            "reset-device-colors" => {
+                self.settings_apply(SettingsAction::ResetAllDeviceColors);
+                Ok(true)
+            }
             "palette-hex" => {
                 let i: usize = id.parse().map_err(|_| unknown(id))?;
                 if i >= theme::PALETTE_KEYS.len() + 16 {
@@ -2528,6 +2624,20 @@ impl App {
                     .collect::<Vec<_>>(),
                 "custom_active": theme::active_custom_slug().unwrap_or_default(),
                 "eyedropper": crate::eyedropper::supported(),
+                "device_colors": pane_identity::device_color_rows()
+                    .iter()
+                    .map(|r| serde_json::json!({
+                        "label": r.label,
+                        "local": r.local,
+                        "hex": r.hex,
+                        "default_hex": r.default_hex,
+                        "custom": r.custom,
+                    }))
+                    .collect::<Vec<_>>(),
+                "device_presets": pane_identity::DEVICE_COLOR_PRESETS
+                    .iter()
+                    .map(|(n, c)| serde_json::json!({ "name": n, "hex": hex(*c) }))
+                    .collect::<Vec<_>>(),
                 "palette_keys": theme::PALETTE_KEYS.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
                 "palette_hex": palette_hex_list(&s, theme::active_custom_slug().as_deref()),
                 "accent": theme::accent_name(),
@@ -2737,8 +2847,10 @@ impl App {
         r: (f32, f32, f32, f32),
         p: (f32, f32),
     ) {
-        let Some(SettingsInput::PaletteHex(i)) = self.settings_input else {
-            return;
+        let slot = match self.settings_input {
+            Some(SettingsInput::PaletteHex(i)) => PickerSlot::Palette(i),
+            Some(SettingsInput::DeviceHex(i)) => PickerSlot::Device(i),
+            _ => return,
         };
         let rx = ((p.0 - r.0) / r.2.max(1.0)).clamp(0.0, 1.0);
         let ry = ((p.1 - r.1) / r.3.max(1.0)).clamp(0.0, 1.0);
@@ -2751,7 +2863,10 @@ impl App {
         let (h, s, v) = self.set_picker_hsv;
         self.set_palette_edit = theme::hex_str(hsv_to_rgb(h, s, v));
         self.settings_caret = self.set_palette_edit.chars().count();
-        self.apply_palette_edit(i);
+        match slot {
+            PickerSlot::Palette(i) => self.apply_palette_edit(i),
+            PickerSlot::Device(i) => self.apply_device_edit(i),
+        }
         self.chrome_dirty = true;
     }
 
@@ -2763,8 +2878,10 @@ impl App {
         r: (f32, f32, f32, f32),
         p: (f32, f32),
     ) {
-        let Some(SettingsInput::PaletteHex(i)) = self.settings_input else {
-            return;
+        let slot = match self.settings_input {
+            Some(SettingsInput::PaletteHex(i)) => PickerSlot::Palette(i),
+            Some(SettingsInput::DeviceHex(i)) => PickerSlot::Device(i),
+            _ => return,
         };
         let rx = ((p.0 - r.0) / r.2.max(1.0)).clamp(0.0, 1.0);
         let ry = ((p.1 - r.1) / r.3.max(1.0)).clamp(0.0, 1.0);
@@ -2777,8 +2894,44 @@ impl App {
         let rgb = hsv_to_rgb(h, s, v);
         self.set_palette_edit = theme::hex_str(rgb);
         self.settings_caret = self.set_palette_edit.chars().count();
-        self.preview_palette_edit(i, rgb);
+        match slot {
+            PickerSlot::Palette(i) => self.preview_palette_edit(i, rgb),
+            PickerSlot::Device(i) => self.preview_device_edit(i, rgb),
+        }
         self.chrome_dirty = true;
+    }
+
+    /// 설정 화면 기기 목록의 `i` 번째 줄 — 캐시가 먼저고, 캐시가 아직 비었으면
+    /// (헤드리스·첫 프레임) 직접 읽는다. 화면이 보여 준 줄과 같은 순서여야 한다.
+    fn device_color_row(&self, i: usize) -> Option<pane_identity::DeviceColorRow> {
+        let cached = self.settings_scene.cache().device_colors.get(i).cloned();
+        cached.or_else(|| pane_identity::device_color_rows().into_iter().nth(i))
+    }
+
+    /// 기기색 입력 버퍼를 검증해 설정에 굳히고 즉시 다시 칠한다. hex 뿐 아니라
+    /// `rgb(r,g,b)`·`r,g,b` 도 받는다(`parse_color_input`). 완성되지 않은 값이면
+    /// 아무것도 안 한다 — 팔레트 칸과 같은 규칙.
+    pub(crate) fn apply_device_edit(&mut self, i: usize) {
+        let Some(c) = pane_identity::parse_color_input(&self.set_palette_edit) else {
+            return;
+        };
+        let Some(row) = self.device_color_row(i) else {
+            return;
+        };
+        self.sync_picker_hsv(c);
+        pane_identity::set_device_color(&row.label, c);
+        self.settings_scene.refresh_palette_cache();
+        self.repaint_all();
+    }
+
+    /// 파일에 굳히지 않고 화면 색만 — 피커를 끄는 동안 매 움직임이 온다.
+    pub(crate) fn preview_device_edit(&mut self, i: usize, c: [u8; 3]) {
+        let Some(row) = self.device_color_row(i) else {
+            return;
+        };
+        self.sync_picker_hsv(c);
+        pane_identity::preview_device_color(&row.label, c);
+        self.repaint_all();
     }
 
     /// 팔레트 칸 `i` 를 `c` 로 바꾼 커스텀 목록과 그중 편집 대상 인덱스, 그리고
@@ -2881,7 +3034,11 @@ impl App {
             return;
         };
         self.set_palette_edit = theme::hex_str(rgb);
-        self.apply_palette_edit(slot);
+        if let Some(i) = slot.checked_sub(pane_identity::DEVICE_SLOT_BASE) {
+            self.apply_device_edit(i);
+        } else {
+            self.apply_palette_edit(slot);
+        }
     }
 
     /// persona 편집 버퍼를 characters.json 에 저장(선택 캐릭터가 있고 실제로
@@ -3530,6 +3687,14 @@ pub(crate) fn rename_custom_theme(slug: &str, label: &str) -> Result<(), String>
     );
     write_custom_themes(list);
     Ok(())
+}
+
+/// 피커가 지금 고치는 칸 — 팔레트 색이냐 기기색이냐. 둘은 같은 피커·같은 입력
+/// 버퍼를 쓰고 굳히는 곳만 다르다.
+#[derive(Clone, Copy)]
+enum PickerSlot {
+    Palette(usize),
+    Device(usize),
 }
 
 pub(crate) fn palette_hex_list(s: &serde_json::Value, slug: Option<&str>) -> Vec<String> {

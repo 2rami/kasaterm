@@ -81,6 +81,7 @@ struct DetachOnDrop {
 impl Drop for DetachOnDrop {
     fn drop(&mut self) {
         self.viewport.detached.store(true, Ordering::Release);
+        self.viewport.retry.notify_one();
         let _ = self.outgoing.send(Out::Detach);
     }
 }
@@ -91,7 +92,18 @@ struct ViewportState {
     detached: AtomicBool,
     received_frame: AtomicBool,
     generation: std::sync::atomic::AtomicU64,
+    // A restore retry can need a new snapshot even after transport bytes
+    // arrived: the GUI may still lack an applied frame for this generation.
+    refresh_generation: std::sync::atomic::AtomicU64,
     connection_error: Mutex<Option<String>>,
+    retry: tokio::sync::Notify,
+    surface_key: Mutex<Option<String>>,
+}
+
+impl ViewportState {
+    fn take_snapshot_refresh(&self, generation: u64) -> bool {
+        self.refresh_generation.swap(0, Ordering::AcqRel) == generation
+    }
 }
 
 /// A handshake alone is not ready: restoration waits for the live snapshot.
@@ -100,6 +112,44 @@ pub fn connection_readiness(local_id: &str) -> Option<(bool, u64, Option<String>
     let link = links.get(local_id)?;
     let error = link.viewport.connection_error.lock().unwrap().clone();
     Some((link.viewport.received_frame.load(Ordering::Acquire), link.viewport.generation.load(Ordering::Acquire), error))
+}
+
+/// Wake only an unfinished connection, preserving its parser, identity and PTY.
+/// Returns false for an absent link or an already live stream. A retry racing
+/// with the first frame is also ignored by the manager after that frame arrives.
+pub fn retry_connection(local_id: &str) -> bool {
+    retry_connection_inner(local_id, false)
+}
+
+/// Refresh an existing link whose current frame has not become ready in the
+/// GUI. Call only for pending restore entries, after refreshing GUI readiness.
+/// The request is tied to this connection generation so it cannot interrupt a
+/// later connection that recovered while the notification was queued.
+pub fn retry_pending_restore(local_id: &str) -> bool {
+    retry_connection_inner(local_id, true)
+}
+
+fn retry_connection_inner(local_id: &str, pending_restore: bool) -> bool {
+    let viewport = links().lock().unwrap().get(local_id).map(|link| link.viewport.clone());
+    let Some(viewport) = viewport else { return false };
+    if viewport.detached.load(Ordering::Acquire)
+        || (!pending_restore && viewport.received_frame.load(Ordering::Acquire)) {
+        return false;
+    }
+    if pending_restore {
+        viewport.refresh_generation.store(viewport.generation.load(Ordering::Acquire), Ordering::Release);
+    }
+    *viewport.connection_error.lock().unwrap() = None;
+    viewport.retry.notify_one();
+    true
+}
+
+/// The persisted expected identity, or the source-issued key learned from a
+/// verified size handshake. Keep it available while offline; readiness is separate.
+pub fn remote_surface_key(local_id: &str) -> Option<String> {
+    let viewport = links().lock().ok()?.get(local_id)?.viewport.clone();
+    let key = viewport.surface_key.lock().ok()?.clone();
+    key
 }
 
 /// 원격 링크 하나의 명부 항목.
@@ -318,12 +368,12 @@ pub fn connect(
     // 되살리면 두 창이 크기를 번갈아 덮으므로 기존 GUI 자리만 거울로 승계한다.
     // 새 셸과 web-* 소유 연결의 생성·종료 책임은 그대로 둔다.
     let view = is_gui_pane(spec.pane.as_deref());
-    connect_inner(spec, local_pane_id, cols, rows, view, false)
+    connect_inner(spec, local_pane_id, cols, rows, view, false, None)
 }
 
 /// Mirrors follow the server's grid and fit it locally, without acquiring size control.
 pub fn connect_view(spec: RemoteSpec, local_pane_id: &str) -> Result<RemoteSession> {
-    connect_inner(spec, local_pane_id, 0, 0, true, false)
+    connect_inner(spec, local_pane_id, 0, 0, true, false, None)
 }
 
 /// Restore a known remote identity immediately, even while its host is starting.
@@ -335,7 +385,18 @@ pub fn restore_connection(
     // Old snapshots may have saved GUI panes as own=1. Deferred restore must
     // preserve the same host-owned dimensions as a normal legacy attach.
     let view = view || is_gui_pane(spec.pane.as_deref());
-    connect_inner(spec, local_pane_id, cols.max(1), rows.max(1), view, true)
+    connect_inner(spec, local_pane_id, cols.max(1), rows.max(1), view, true, None)
+}
+
+/// Deferred restoration with a source-issued identity. Resolution is read-only
+/// and repeats before every connection; an unmatched source stays pending.
+pub fn restore_connection_identified(
+    spec: RemoteSpec, local_pane_id: &str, cols: u16, rows: u16, view: bool,
+    hint: crate::remote_restore::RestoreIdentity,
+) -> Result<RemoteSession> {
+    anyhow::ensure!(spec.pane.as_deref().is_some_and(|id| !id.is_empty()), "missing restored remote pane");
+    let view = view || is_gui_pane(spec.pane.as_deref());
+    connect_inner(spec, local_pane_id, cols.max(1), rows.max(1), view, true, Some(hint))
 }
 
 fn connect_inner(
@@ -345,6 +406,7 @@ fn connect_inner(
     rows: u16,
     view: bool,
     deferred: bool,
+    hint: Option<crate::remote_restore::RestoreIdentity>,
 ) -> Result<RemoteSession> {
     // Additional mirrors use the same authenticated host connection without
     // putting its credential into pane/session snapshots.
@@ -354,7 +416,10 @@ fn connect_inner(
     let (etx, erx) = crossbeam_channel::unbounded::<ExtEvent>();
     let (otx, orx) = tokio::sync::mpsc::unbounded_channel::<Out>();
     let otx = Arc::new(otx);
-    let viewport = Arc::new(ViewportState::default());
+    let viewport = Arc::new(ViewportState {
+        surface_key: Mutex::new(hint.as_ref().and_then(|hint| hint.surface_key.clone())),
+        ..Default::default()
+    });
     let manager_viewport = viewport.clone();
     let (ktx, krx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let (htx, hrx) =
@@ -380,7 +445,7 @@ fn connect_inner(
             // Deferred links must be registered before the manager may finish
             // and unlink them (a fast "gone" reply otherwise leaves a stale link).
             if deferred && start_rx.recv().is_err() { return; }
-            rt.block_on(manager(spec2, local2, token, etx, orx, krx, htx, view, manager_viewport, deferred));
+            rt.block_on(manager(spec2, local2, token, etx, orx, krx, htx, view, manager_viewport, deferred, hint));
         })
         .context("remote-ws 스레드")?;
     let (remote_id, rc, rr) = if deferred {
@@ -450,6 +515,7 @@ async fn manager(
     view: bool,
     viewport: Arc<ViewportState>,
     retry_initial: bool,
+    mut hint: Option<crate::remote_restore::RestoreIdentity>,
 ) {
     // 어떤 길로 나가든 명부를 걷는다 — 안 걷으면 pane 번호가 재사용될 때 새 로컬
     // pane 이 「원격」으로 오판된다. 세대 표식이 맞을 때만 걷는 이유는 Link 주석에.
@@ -469,14 +535,58 @@ async fn manager(
     let mut had_attach = false;
     let mut attempts_before_first = 0u32;
     let mut backoff_ms = 500u64;
+    // Never forward authentication across a source-controlled HTTP redirect.
+    let identity_client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none()).build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            *viewport.connection_error.lock().unwrap() = Some("원본 창을 확인할 연결을 준비하지 못했어요".into());
+            return;
+        }
+    };
     'outer: loop {
         if viewport.detached.load(Ordering::Acquire) {
             break;
         }
         viewport.received_frame.store(false, Ordering::Release);
-        let url = build_url(&spec, remote_id.as_deref(), view);
-        let connection = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(&url))
-            .await.unwrap_or_else(|_| Err(tokio_tungstenite::tungstenite::Error::Io(
+        if let Some(identity) = hint.as_ref() {
+            let resolved = tokio::select! {
+                result = crate::remote_restore::resolve(&identity_client, &spec.base, spec.token.as_deref(),
+                    remote_id.as_deref().unwrap_or_default(), identity) => result,
+                _ = viewport.retry.notified() => {
+                    *viewport.connection_error.lock().unwrap() = None;
+                    backoff_ms = 500;
+                    continue 'outer;
+                }
+            };
+            match resolved {
+                Ok(id) => {
+                    remote_id = Some(id.clone());
+                    if let Some(link) = links().lock().unwrap().get_mut(&local).filter(|link| link.token == token) {
+                        link.remote_id = id;
+                    }
+                }
+                Err(error) => {
+                    *viewport.connection_error.lock().unwrap() = Some(error);
+                    reconnect_pause(&viewport, &mut backoff_ms).await;
+                    continue 'outer;
+                }
+            }
+        }
+        let mut url = build_url(&spec, remote_id.as_deref(), view);
+        if let Some(key) = hint.as_ref().and_then(|hint| hint.surface_key.as_deref()) {
+            url.push_str("&surface_key=");
+            url.push_str(&urlencode(key));
+        }
+        let connection = tokio::select! {
+            result = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(&url)) => result,
+            _ = viewport.retry.notified() => {
+                *viewport.connection_error.lock().unwrap() = None;
+                backoff_ms = 500;
+                continue 'outer;
+            }
+        }.unwrap_or_else(|_| Err(tokio_tungstenite::tungstenite::Error::Io(
                 std::io::Error::new(std::io::ErrorKind::TimedOut, "remote handshake timed out"),
             )));
         match connection {
@@ -485,19 +595,63 @@ async fn manager(
                 let _ = etx.send(ExtEvent::Generation(generation));
                 let (mut tx, mut rx) = ws.split();
                 let mut reset_before_frame = had_attach;
+                let first_frame_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
                 // 이 연결에서 size 핸드셰이크를 받았는가 — 재접속 RIS 는 연결마다
                 // 첫 size 에서 딱 한 번.
                 let mut sized_this_conn = false;
+                let mut connection_size = None;
                 loop {
                     tokio::select! {
+                        _ = viewport.retry.notified() => {
+                            let refresh = viewport.take_snapshot_refresh(generation);
+                            if refresh || !viewport.received_frame.load(Ordering::Acquire) {
+                                // Manual retry should not wait through the backoff.
+                                *viewport.connection_error.lock().unwrap() = None;
+                                backoff_ms = 500;
+                                continue 'outer;
+                            }
+                        }
+                        _ = tokio::time::sleep_until(first_frame_deadline), if !viewport.received_frame.load(Ordering::Acquire) => {
+                            *viewport.connection_error.lock().unwrap() = Some("기기에는 연결됐지만 화면을 받지 못했어요. 다시 연결하고 있어요".into());
+                            break;
+                        }
                         m = rx.next() => match m {
                             Some(Ok(Message::Text(t))) => {
                                 let Ok(v) = serde_json::from_str::<serde_json::Value>(t.as_str())
                                 else { continue };
                                 match v.get("t").and_then(|x| x.as_str()) {
                                     Some("size") => {
+                                        let source_key = v.get("surface_key").and_then(|v| v.as_str())
+                                            .filter(|key| !key.trim().is_empty());
+                                        if let Some(expected) = hint.as_ref().and_then(|hint| hint.surface_key.as_deref()) {
+                                            if source_key != Some(expected) {
+                                                *viewport.connection_error.lock().unwrap() = Some("원본 창의 식별자가 달라 복원을 기다리고 있어요".into());
+                                                break;
+                                            }
+                                        } else if hint.is_some() && source_key.is_none() {
+                                            *viewport.connection_error.lock().unwrap() = Some("원본 창의 식별 정보를 기다리고 있어요".into());
+                                            break;
+                                        }
+                                        if let Some(key) = source_key {
+                                            *viewport.surface_key.lock().unwrap() = Some(key.to_owned());
+                                            if view || retry_initial {
+                                                hint = Some(crate::remote_restore::RestoreIdentity {
+                                                    surface_key: Some(key.to_owned()), ..Default::default()
+                                                });
+                                            }
+                                        }
                                         let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
                                         let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
+                                        if connection_size.is_some_and(|previous| previous != (c, r)) {
+                                            // Old hosts send size+raw deltas on
+                                            // resize, without replacing their
+                                            // reflowed scrollback. Reconnect to
+                                            // obtain its authoritative history.
+                                            // Leave queued input in orx: no
+                                            // replay of previously sent bytes.
+                                            break;
+                                        }
+                                        connection_size = Some((c, r));
                                         if remote_id.is_none() {
                                             remote_id = v
                                                 .get("id")
@@ -527,8 +681,19 @@ async fn manager(
                                             fire_open_url(&local, u);
                                         }
                                     }
+                                    Some("source-closed") => {
+                                        // Explicit user close, unlike `gone` during host restore.
+                                        // End only the viewer, even if an older build had marked
+                                        // this inherited mirror as owning its source shell.
+                                        if let Some(link) = links().lock().unwrap().get_mut(&local) {
+                                            link.identity.owned = false;
+                                        }
+                                        let _ = htx.try_send(Err("원본 창이 닫혔어요".to_string()));
+                                        let _ = etx.send(ExtEvent::Eof);
+                                        return;
+                                    }
                                     Some("gone") => {
-                                        if retry_initial && !had_attach {
+                                        if retry_initial {
                                             *viewport.connection_error.lock().unwrap() = Some("본진에서 이 창을 기다리는 중이에요".into());
                                             break; // The host may not have restored this pane yet.
                                         }
@@ -543,6 +708,11 @@ async fn manager(
                                 }
                             }
                             Some(Ok(Message::Binary(b))) => {
+                                if b.is_empty() { continue; }
+                                if hint.is_some() && !sized_this_conn {
+                                    *viewport.connection_error.lock().unwrap() = Some("원본 창의 식별 확인 전에 화면이 도착해 복원을 기다리고 있어요".into());
+                                    break;
+                                }
                                 let bytes = if reset_before_frame {
                                     reset_before_frame = false;
                                     [b"\x1bc".as_slice(), b.as_ref()].concat()
@@ -558,7 +728,10 @@ async fn manager(
                             // 실제 송신은 아래 주기 flush 가 밀어낸다.
                             Some(Ok(_)) => {}
                         },
-                        o = orx.recv() => match o {
+                        // Keep queued input in its existing channel until the
+                        // source identity is verified; never type into a reused
+                        // pane number while its size handshake is still pending.
+                        o = orx.recv(), if hint.is_none() || sized_this_conn => match o {
                             Some(Out::Input(b)) => {
                                 if tx.send(Message::Binary(b.into())).await.is_err() {
                                     break;
@@ -622,8 +795,19 @@ async fn manager(
         if orx.is_closed() {
             break 'outer;
         }
-        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-        backoff_ms = (backoff_ms * 2).min(5000);
+        reconnect_pause(&viewport, &mut backoff_ms).await;
+    }
+}
+
+async fn reconnect_pause(viewport: &ViewportState, backoff_ms: &mut u64) {
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(*backoff_ms)) => {
+            *backoff_ms = (*backoff_ms * 2).min(5000);
+        }
+        _ = viewport.retry.notified() => {
+            *viewport.connection_error.lock().unwrap() = None;
+            *backoff_ms = 500;
+        }
     }
 }
 
@@ -1964,6 +2148,433 @@ pub fn settings_action(
 
 #[cfg(test)]
 mod tests {
+    fn identity_connection_test(mode: &'static str) {
+        use axum::{extract::{Query, WebSocketUpgrade, ws::Message as WsMessage}, routing::get, Router};
+        let stage = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let inputs = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (address_tx, address_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let server_stage = stage.clone();
+        let server_requests = requests.clone();
+        let server_inputs = inputs.clone();
+        let server = std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                let listing_stage = server_stage.clone();
+                let app = Router::new()
+                    .route("/term/panes", get(move || {
+                        let stage = listing_stage.clone();
+                        async move {
+                            let rows = if stage.load(Ordering::Acquire) > 0 {
+                                serde_json::json!([
+                                    {"id":"%1","surface_key":"reused-by-someone-else"},
+                                    {"id":"%9","surface_key":"legacy:%1"}
+                                ])
+                            } else if mode == "reused" {
+                                serde_json::json!([{ "id":"%1","surface_key":"reused-by-someone-else" }])
+                            } else {
+                                serde_json::json!([{ "id":"%1","surface_key":"legacy:%1" }])
+                            };
+                            axum::Json(rows)
+                        }
+                    }))
+                    .route("/term/ws", get(move |Query(query): Query<std::collections::HashMap<String,String>>, upgrade: WebSocketUpgrade| {
+                        let stage = server_stage.clone();
+                        let requests = server_requests.clone();
+                        let inputs = server_inputs.clone();
+                        async move {
+                            upgrade.on_upgrade(move |mut socket| async move {
+                                let pane = query.get("pane").cloned().unwrap_or_default();
+                                requests.lock().unwrap().push((pane.clone(), query.get("surface_key").cloned()));
+                                let bad_handshake = mode == "mismatch" && stage.load(Ordering::Acquire) == 0;
+                                let key = if bad_handshake { "reused-by-someone-else" } else { "legacy:%1" };
+                                socket.send(WsMessage::Text(serde_json::json!({
+                                    "t":"size","cols":50,"rows":4,"id":pane,"surface_key":key
+                                }).to_string().into())).await.unwrap();
+                                let body = if bad_handshake { "FORBIDDEN SCREEN" } else if pane == "%9" { "VERIFIED MOVED SOURCE" } else { "VERIFIED ORIGINAL SOURCE" };
+                                let _ = socket.send(WsMessage::Binary(body.as_bytes().to_vec().into())).await;
+                                while let Some(Ok(message)) = socket.recv().await {
+                                    if let WsMessage::Binary(bytes) = message {
+                                        assert!(!bad_handshake, "input leaked before source key verification");
+                                        inputs.lock().unwrap().push(pane.clone());
+                                        if bytes.as_ref() == b"restart" { break; }
+                                    }
+                                }
+                            })
+                        }
+                    }));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                address_tx.send(listener.local_addr().unwrap()).unwrap();
+                axum::serve(listener, app).with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap();
+            });
+        });
+        let address = address_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let local = format!("identified-{mode}-{}", uuid::Uuid::new_v4());
+        let spec = RemoteSpec { base: format!("http://{address}"), pane: Some("%1".into()),
+            cwd: None, token: None, identity: Default::default() };
+        let mirror = if mode == "reconnect" {
+            connect_view(spec, &local).unwrap()
+        } else {
+            restore_connection_identified(spec, &local, 80, 24, true,
+                crate::remote_restore::RestoreIdentity { surface_key: Some("legacy:%1".into()), ..Default::default() }).unwrap()
+        };
+        if mode == "reconnect" {
+            wait_remote_test(|| mirror.session.visible_text(4).contains("VERIFIED ORIGINAL SOURCE"));
+            assert_eq!(remote_surface_key(&local).as_deref(), Some("legacy:%1"));
+            stage.store(1, Ordering::Release);
+            mirror.session.send_bytes(b"restart").unwrap();
+        } else {
+            if mode == "mismatch" { mirror.session.send_bytes(b"queued until verified").unwrap(); }
+            wait_remote_test(|| connection_readiness(&local).is_some_and(|(_,_,error)| error.is_some()));
+            assert!(!connection_readiness(&local).unwrap().0);
+            assert_eq!(remote_surface_key(&local).as_deref(), Some("legacy:%1"),
+                "saving an offline/unverified restore must retain its expected source identity");
+            assert!(!mirror.session.visible_text(4).contains("FORBIDDEN"));
+            if mode == "reused" { assert!(requests.lock().unwrap().is_empty(), "opened a reused pane before resolving its key"); }
+            stage.store(1, Ordering::Release);
+            assert!(retry_connection(&local));
+        }
+        wait_remote_test(|| mirror.session.visible_text(4).contains("VERIFIED MOVED SOURCE"));
+        assert_eq!(remote_info(&local).unwrap().remote_id, "%9");
+        assert_eq!(remote_surface_key(&local).as_deref(), Some("legacy:%1"));
+        let opened = requests.lock().unwrap().clone();
+        assert_eq!(opened.last(), Some(&("%9".into(), Some("legacy:%1".into()))));
+        if mode == "mismatch" {
+            wait_remote_test(|| !inputs.lock().unwrap().is_empty());
+            assert!(inputs.lock().unwrap().iter().all(|id| id == "%9"));
+        }
+        drop(mirror);
+        let _ = stop_tx.send(());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn identified_restore_never_opens_a_reused_pane_number_and_tracks_the_source_key() {
+        identity_connection_test("reused");
+    }
+
+    #[test]
+    fn ordinary_mirror_reconnect_follows_the_first_source_key_to_its_new_number() {
+        identity_connection_test("reconnect");
+    }
+
+    #[test]
+    fn identified_restore_rejects_a_changed_handshake_key_and_holds_queued_input() {
+        identity_connection_test("mismatch");
+    }
+
+    fn wait_remote_test(mut predicate: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !predicate() {
+            assert!(std::time::Instant::now() < deadline, "remote test condition timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn resize_reconnect_replaces_history_for_legacy_and_keyed_hosts_without_replaying_input() {
+        use axum::{extract::{WebSocketUpgrade, ws::Message as WsMessage}, routing::get, Router};
+        for mode in ["legacy", "keyed", "missing-key"] {
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let inputs = Arc::new(Mutex::new(Vec::<String>::new()));
+            let (address_tx, address_rx) = std::sync::mpsc::channel();
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+            let server_count = count.clone();
+            let server_inputs = inputs.clone();
+            let server = std::thread::spawn(move || {
+                tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                    let app = Router::new()
+                        .route("/term/panes", get(|| async {
+                            axum::Json(serde_json::json!([{"id":"resize-source", "surface_key":"same-source"}]))
+                        }))
+                        .route("/term/ws", get(move |upgrade: WebSocketUpgrade| {
+                            let count = server_count.clone();
+                            let inputs = server_inputs.clone();
+                            async move { upgrade.on_upgrade(move |mut socket| async move {
+                                let index = count.fetch_add(1, Ordering::AcqRel);
+                                assert!(index < 2, "same-size control caused a reconnect loop");
+                                let mut size = serde_json::json!({"t":"size", "cols":if index==0 {26} else {93}, "rows":4, "id":"resize-source"});
+                                if mode != "legacy" { size["surface_key"] = serde_json::json!("same-source"); }
+                                socket.send(WsMessage::Text(size.to_string().into())).await.unwrap();
+                                let text = if index == 0 { b"OLD_NARROW_HISTORY\r\n\n\n\nOLD_SCREEN".as_slice() }
+                                    else { b"CANONICAL_WIDE_HISTORY\r\n\n\n\nNEW_SCREEN".as_slice() };
+                                socket.send(WsMessage::Binary(text.to_vec().into())).await.unwrap();
+                                // Duplicate handshakes at unchanged size are harmless.
+                                socket.send(WsMessage::Text(size.to_string().into())).await.unwrap();
+                                while let Some(Ok(message)) = socket.recv().await {
+                                    if let WsMessage::Binary(bytes) = message {
+                                        let text = String::from_utf8(bytes.to_vec()).unwrap();
+                                        inputs.lock().unwrap().push(text.clone());
+                                        if text == "resize" {
+                                            size["cols"] = serde_json::json!(93);
+                                            if mode == "missing-key" { size.as_object_mut().unwrap().remove("surface_key"); }
+                                            socket.send(WsMessage::Text(size.to_string().into())).await.unwrap();
+                                            let _ = socket.send(WsMessage::Binary(b"STALE_DELTA".to_vec().into())).await;
+                                        }
+                                    }
+                                }
+                            }) }
+                        }));
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    address_tx.send(listener.local_addr().unwrap()).unwrap();
+                    axum::serve(listener, app).with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap();
+                });
+            });
+            let address = address_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let local = format!("resize-{mode}-{}", uuid::Uuid::new_v4());
+            let mirror = connect_view(RemoteSpec { base: format!("http://{address}"), pane: Some("resize-source".into()),
+                cwd: None, token: None, identity: Default::default() }, &local).unwrap();
+            wait_remote_test(|| mirror.session.visible_text(10).contains("OLD_SCREEN"));
+            mirror.session.send_bytes(b"before").unwrap();
+            wait_remote_test(|| inputs.lock().unwrap().len() == 1);
+            assert_eq!(count.load(Ordering::Acquire), 1);
+            mirror.session.send_bytes(b"resize").unwrap();
+            wait_remote_test(|| mirror.session.visible_text(10).contains("NEW_SCREEN"));
+            mirror.session.send_bytes(b"after").unwrap();
+            wait_remote_test(|| inputs.lock().unwrap().len() == 3);
+            assert_eq!(*inputs.lock().unwrap(), ["before", "resize", "after"]);
+            assert_eq!(count.load(Ordering::Acquire), 2);
+            assert_eq!(mirror.session.size(), (93, 4));
+            let history: String = mirror.session.rows_above_live(100).iter()
+                .map(|row| row.iter().map(|cell| cell.ch).collect::<String>())
+                .collect::<Vec<_>>().join("\n");
+            let all = format!("{history}\n{}", mirror.session.visible_text(100));
+            assert!(all.contains("CANONICAL_WIDE_HISTORY"));
+            assert!(!all.contains("OLD_NARROW_HISTORY"), "RIS did not clear stale history");
+            assert!(!all.contains("STALE_DELTA"), "old-width queued bytes leaked into new snapshot");
+            drop(mirror);
+            let _ = stop_tx.send(());
+            server.join().unwrap();
+        }
+    }
+
+    async fn accept_retry_test(listener: &tokio::net::TcpListener) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                if let Ok(socket) = tokio_tungstenite::accept_async(stream).await { return socket; }
+            }
+        }).await.unwrap()
+    }
+
+    #[test]
+    fn retry_connection_wakes_handshake_and_empty_stream_without_replacing_or_interrupting_ready_pty() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (report, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                // TCP connects, but this peer never answers the upgrade request.
+                let (stalled, _) = listener.accept().await.unwrap();
+                report.send("tcp").unwrap();
+                let mut no_frame = accept_retry_test(&listener).await;
+                drop(stalled);
+                no_frame.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"retry-target"}"#.into())).await.unwrap();
+                no_frame.send(Message::Binary(Vec::new().into())).await.unwrap();
+                report.send("empty").unwrap();
+                let mut ready = accept_retry_test(&listener).await;
+                drop(no_frame);
+                ready.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"retry-target"}"#.into())).await.unwrap();
+                ready.send(Message::Binary(b"READY RETAINED PTY".to_vec().into())).await.unwrap();
+                report.send("ready").unwrap();
+                match tokio::time::timeout(Duration::from_secs(5), ready.next()).await.unwrap().unwrap().unwrap() {
+                    Message::Binary(bytes) => assert_eq!(&bytes[..], b"same ready stream"),
+                    other => panic!("retry interrupted ready stream: {other:?}"),
+                }
+            });
+        });
+        let local = format!("retry-preserved-{}", uuid::Uuid::new_v4());
+        let mirror = restore_connection(RemoteSpec { base: format!("http://{address}"), pane: Some("retry-target".into()),
+            cwd: None, token: None, identity: Default::default() }, &local, 80, 24, true).unwrap();
+        let token = links().lock().unwrap()[&local].token;
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "tcp");
+        assert!(retry_connection(&local));
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "empty");
+        wait_remote_test(|| connection_readiness(&local).is_some_and(|(_, generation, _)| generation >= 1));
+        assert!(!connection_readiness(&local).unwrap().0, "empty binary cannot mark a pane ready");
+        assert!(retry_connection(&local));
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "ready");
+        wait_remote_test(|| connection_readiness(&local).is_some_and(|(ready, _, _)| ready)
+            && mirror.session.visible_text(4).contains("READY RETAINED PTY"));
+        assert_eq!(links().lock().unwrap()[&local].token, token, "manual retry replaced the link");
+        assert!(!retry_connection(&local));
+        mirror.session.send_bytes(b"same ready stream").unwrap();
+        server.join().unwrap();
+        assert!(!retry_connection("nonexistent-retry-target"));
+    }
+
+    #[test]
+    fn pending_restore_refresh_only_consumes_its_requested_generation() {
+        let viewport = ViewportState::default();
+        viewport.refresh_generation.store(3, Ordering::Release);
+        assert!(!viewport.take_snapshot_refresh(4), "a stale retry must preserve a recovered stream");
+        viewport.refresh_generation.store(4, Ordering::Release);
+        assert!(viewport.take_snapshot_refresh(4));
+        assert!(!viewport.take_snapshot_refresh(4), "one request causes at most one reconnect");
+    }
+
+    #[test]
+    fn pending_restore_retry_refreshes_received_but_unapplied_frame_on_same_link() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (report, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut first = accept_retry_test(&listener).await;
+                first.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"pending-render-target"}"#.into())).await.unwrap();
+                first.send(Message::Binary(b"UNAPPLIED FRAME".to_vec().into())).await.unwrap();
+                report.send(()).unwrap();
+                match tokio::time::timeout(Duration::from_secs(5), first.next()).await.unwrap().unwrap().unwrap() {
+                    Message::Binary(bytes) => assert_eq!(&bytes[..], b"input before refresh"),
+                    other => panic!("unexpected first-stream input: {other:?}"),
+                }
+                report.send(()).unwrap();
+                let mut second = accept_retry_test(&listener).await;
+                drop(first);
+                second.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"pending-render-target"}"#.into())).await.unwrap();
+                second.send(Message::Binary(b"REFRESHED FRAME".to_vec().into())).await.unwrap();
+                match tokio::time::timeout(Duration::from_secs(5), second.next()).await.unwrap().unwrap().unwrap() {
+                    Message::Binary(bytes) => assert_eq!(&bytes[..], b"input after refreshed frame"),
+                    other => panic!("unexpected control or lost refreshed stream: {other:?}"),
+                }
+            });
+        });
+        let local = format!("retry-unapplied-{}", uuid::Uuid::new_v4());
+        let mirror = restore_connection(RemoteSpec { base: format!("http://{address}"), pane: Some("pending-render-target".into()),
+            cwd: None, token: None, identity: Default::default() }, &local, 80, 24, true).unwrap();
+        let token = links().lock().unwrap()[&local].token;
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        wait_remote_test(|| connection_readiness(&local).is_some_and(|(ready, _, _)| ready));
+        mirror.session.send_bytes(b"input before refresh").unwrap();
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Deliberately leave the screen receiver undrained: transport readiness
+        // alone cannot prove the GUI applied this frame. The old retry was a
+        // no-op in precisely this state.
+        let generation = connection_readiness(&local).unwrap().1;
+        assert!(!retry_connection(&local));
+        assert!(retry_pending_restore(&local));
+        wait_remote_test(|| connection_readiness(&local).is_some_and(|(ready, next, _)| ready && next > generation)
+            && mirror.session.visible_text(4).contains("REFRESHED FRAME"));
+        assert_eq!(links().lock().unwrap()[&local].token, token, "restore retry replaced the PTY link");
+        assert_eq!(remote_meta(&local).unwrap().1, "pending-render-target");
+        // The server must see this exactly once and must not see a replay of
+        // "input before refresh" from the previous connection.
+        mirror.session.send_bytes(b"input after refreshed frame").unwrap();
+        server.join().unwrap();
+        assert!(!retry_pending_restore("nonexistent-restore-target"));
+    }
+
+    #[test]
+    fn restore_stream_without_first_bytes_times_out_then_reconnects() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (report, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut silent = accept_retry_test(&listener).await;
+                silent.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"timeout-target"}"#.into())).await.unwrap();
+                report.send("size").unwrap();
+                let started = std::time::Instant::now();
+                // The server remains connected and quiet; only the first-frame
+                // deadline can cause this disconnect (no manual retry or gone).
+                let _ = tokio::time::timeout(Duration::from_secs(12), silent.next()).await.unwrap();
+                assert!(started.elapsed() >= Duration::from_secs(9));
+                report.send("expired").unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"timeout-target"}"#.into())).await.unwrap();
+                socket.send(Message::Binary(b"AFTER FIRST FRAME TIMEOUT".to_vec().into())).await.unwrap();
+                let _ = tokio::time::timeout(Duration::from_secs(5), socket.next()).await;
+            });
+        });
+        let local = format!("retry-deadline-{}", uuid::Uuid::new_v4());
+        let mirror = restore_connection(RemoteSpec { base: format!("http://{address}"), pane: Some("timeout-target".into()),
+            cwd: None, token: None, identity: Default::default() }, &local, 80, 24, true).unwrap();
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "size");
+        assert_eq!(received.recv_timeout(Duration::from_secs(12)).unwrap(), "expired");
+        assert!(connection_readiness(&local).unwrap().2.unwrap().contains("화면을 받지 못했어요"));
+        wait_remote_test(|| mirror.session.visible_text(4).contains("AFTER FIRST FRAME TIMEOUT"));
+        assert!(connection_readiness(&local).unwrap().0);
+        mirror.session.send_bytes(b"done").unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn restored_connection_waits_through_gone_even_after_a_live_frame() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (report, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"stable-target"}"#.into())).await.unwrap();
+                socket.send(Message::Binary(b"BEFORE RESTART".to_vec().into())).await.unwrap();
+                let _ = socket.next().await;
+                socket.send(Message::Text(r#"{"t":"gone"}"#.into())).await.unwrap();
+                socket.close(None).await.unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"gone"}"#.into())).await.unwrap();
+                socket.close(None).await.unwrap();
+                report.send("waiting").unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"stable-target"}"#.into())).await.unwrap();
+                socket.send(Message::Binary(b"AFTER RESTART".to_vec().into())).await.unwrap();
+                let _ = tokio::time::timeout(Duration::from_secs(5), socket.next()).await;
+            });
+        });
+        let local = format!("retry-gone-{}", uuid::Uuid::new_v4());
+        let mirror = restore_connection(RemoteSpec { base: format!("http://{address}"), pane: Some("stable-target".into()),
+            cwd: None, token: None, identity: Default::default() }, &local, 80, 24, true).unwrap();
+        wait_remote_test(|| mirror.session.visible_text(4).contains("BEFORE RESTART"));
+        mirror.session.send_bytes(b"restart").unwrap();
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), "waiting");
+        assert_eq!(remote_info(&local).unwrap().remote_id, "stable-target");
+        wait_remote_test(|| mirror.session.visible_text(4).contains("AFTER RESTART"));
+        assert!(mirror.session.screens.try_iter().all(|update| !update.eof));
+        mirror.session.send_bytes(b"done").unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn explicit_source_close_ends_restored_view_without_killing_or_retrying_source() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut socket = accept_retry_test(&listener).await;
+                socket.send(Message::Text(r#"{"t":"size","cols":40,"rows":4,"id":"closed-source"}"#.into())).await.unwrap();
+                socket.send(Message::Binary(b"SOURCE STILL RUNNING".to_vec().into())).await.unwrap();
+                let _ = socket.next().await;
+                socket.send(Message::Text(r#"{"t":"source-closed"}"#.into())).await.unwrap();
+                while let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_secs(2), socket.next()).await {
+                    if let Message::Text(text) = message { assert!(!text.contains("kill")); }
+                    else if matches!(message, Message::Close(_)) { break; }
+                }
+                assert!(tokio::time::timeout(Duration::from_millis(250), listener.accept()).await.is_err(), "explicit close must not start restore retries");
+            });
+        });
+        let local = format!("explicit-close-{}", uuid::Uuid::new_v4());
+        let mirror = restore_connection(RemoteSpec { base: format!("http://{address}"), pane: Some("closed-source".into()),
+            cwd: None, token: None, identity: RemoteIdentity { owned: true, ..Default::default() } }, &local, 80, 24, true).unwrap();
+        wait_remote_test(|| mirror.session.visible_text(4).contains("SOURCE STILL RUNNING"));
+        mirror.session.send_bytes(b"ack").unwrap();
+        wait_remote_test(|| remote_info(&local).is_none());
+        server.join().unwrap();
+    }
+
     #[test]
     fn remote_image_upload_preserves_source_target_and_large_binary_body() {
         use std::io::{Read, Write};

@@ -3,6 +3,24 @@ use super::*;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
+/// Use the resolved local OR remote harness identity. A mirror has no local
+/// foreground agent process, so checking its PTY again drops student styling.
+fn active_prompt_accent(
+    agent: Option<kasa_pty::AgentKind>,
+    blocked: bool,
+    accent: Option<[u8; 4]>,
+) -> Option<[u8; 4]> {
+    accent.filter(|_| agent.is_some() && !blocked)
+}
+
+fn codex_session_label(local_pinned: Option<&str>, remote: Option<&serde_json::Value>) -> Option<String> {
+    local_pinned.filter(|s| !s.trim().is_empty()).map(str::to_owned).or_else(|| {
+        let remote = remote.filter(|row| row["harness"] == "codex")?;
+        ["title", "session"].into_iter().find_map(|key| remote.get(key)?.as_str()
+            .filter(|s| !s.trim().is_empty()).map(str::to_owned))
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compose_student_banners(
     composed: &mut Vec<Vec<GridCell>>,
@@ -610,6 +628,67 @@ mod visual_scene_tests {
     use super::*;
 
     #[test]
+    fn mirrored_codex_title_uses_host_metadata_without_local_transcript() {
+        let remote = serde_json::json!({"harness":"codex", "title":"세션 복원 오류 해결", "session":"older"});
+        assert_eq!(codex_session_label(None, Some(&remote)).as_deref(), Some("세션 복원 오류 해결"));
+        assert_eq!(codex_session_label(Some("local rename"), Some(&remote)).as_deref(), Some("local rename"));
+        assert_eq!(codex_session_label(None, None), None);
+        assert_eq!(codex_session_label(None, Some(&serde_json::json!({"harness":null,"title":"folder"}))), None);
+    }
+
+    #[test]
+    fn source_and_mirror_prompt_use_same_theme_before_student_tint() {
+        use kasa_bridge::screen::Color;
+        let mut outputs = Vec::new();
+        for source in [Color::Rgb(240,240,240), Color::Rgb(63,69,77)] {
+            let mut rows: Vec<Vec<GridCell>> = ["                    ", "› ready             ", "                    "].iter()
+                .map(|text| text.chars().map(|ch| GridCell {ch,bg:source.clone(),..GridCell::blank()}).collect()).collect();
+            localize_codex_prompt_background(&mut rows, [34,37,44,255]);
+            style_prompt_box(&mut rows, [242,123,155,255]);
+            outputs.push(rows);
+        }
+        assert_eq!(outputs[0], outputs[1]);
+    }
+
+    #[test]
+    fn mirrored_prompt_uses_resolved_harness_and_student_accent() {
+        use kasa_bridge::screen::Color;
+        let accent = [51, 221, 153, 255];
+        let row = |text: &str| {
+            let mut cells: Vec<_> = text.chars().map(|ch| GridCell { ch, ..GridCell::blank() }).collect();
+            cells.resize(60, GridCell::blank());
+            cells
+        };
+        let mut claude = vec![row("response"), row(&"─".repeat(60)), row("❯ request"), row(&"─".repeat(60))];
+        // A mirror has host metadata, not a local Claude process. The same
+        // resolved identity used for sprites must reach the prompt painter.
+        let resolved = Some(kasa_pty::AgentKind::Claude);
+        style_prompt_box(&mut claude, active_prompt_accent(resolved, false, Some(accent)).unwrap());
+        for i in [1, 3] {
+            assert!(claude[i].iter().all(|c| c.fg == Color::Rgb(51, 221, 153)));
+        }
+        assert_eq!(claude[2][0].fg, Color::Rgb(51, 221, 153));
+        for background in [[26, 29, 35, 255], [240, 241, 243, 255]] {
+            let mut codex = vec![row("response"), row("› request")];
+            for c in &mut codex[1] { c.bg = Color::Rgb(240, 240, 240); }
+            localize_codex_prompt_background(&mut codex, background);
+            let resolved = Some(kasa_pty::AgentKind::Codex);
+            style_prompt_box(&mut codex, active_prompt_accent(resolved, false, Some(accent)).unwrap());
+            let expected = tint_toward([background[0], background[1], background[2]], accent, PROMPT_TINT);
+            assert!(codex[1].iter().all(|c| c.bg == expected));
+            assert_eq!(codex[0][0].bg, Color::Default);
+        }
+    }
+
+    #[test]
+    fn prompt_accent_still_excludes_shells_and_system_pickers() {
+        let accent = Some([51, 221, 153, 255]);
+        assert_eq!(active_prompt_accent(None, false, accent), None);
+        assert_eq!(active_prompt_accent(Some(kasa_pty::AgentKind::Claude), true, accent), None);
+        assert_eq!(active_prompt_accent(Some(kasa_pty::AgentKind::Codex), false, None), None);
+    }
+
+    #[test]
     fn visual_scene_reconnect_rebuilds_even_when_source_fingerprint_is_unchanged() {
         let now = Instant::now();
         let stamp = SourceStamp {
@@ -840,13 +919,12 @@ impl App {
         let projection = term.filter(|_| desktop_view && kasa_mcp::remote::is_view_pane(&tab_pid))
             .map(|source| {
                 let scroll = self.mirror_view_scroll.get(&tab_pid).copied();
-                if source.scroll_offset > 0 {
-                    if let Some(session) = self.pty.get(&tab_pid) {
-                        let live = session.live_tail_rows(source.rows as usize);
-                        return Arc::new(crate::mirror_view::project_history(
-                            &source.cells, &live, (source.cursor_row as usize, source.cursor_col as usize),
-                            source.scroll_offset, cols_now.max(2), rows_now.max(1), scroll,
-                        ));
+                if let Some(session) = self.pty.get(&tab_pid) {
+                    if let Some(view) = crate::mirror_view::project_session_history_target(
+                        session, &source.cells, (source.cursor_row as usize, source.cursor_col as usize),
+                        cols_now.max(2), rows_now.max(1), scroll, self.turn.mirror_target(&tab_pid),
+                    ) {
+                        return Arc::new(view);
                     }
                 }
                 let input_top = crate::screenread::pinned_input_top(&source.cells)
@@ -1045,6 +1123,10 @@ impl App {
                 .and_then(|badges| badges.get(path).map(|badge| badge.branch.clone()))
         });
         let codex_status = restyle_codex_status_line(&mut composed, project.as_deref(), branch.as_deref());
+        // Normalize the neutral filled prompt before applying student tint on
+        // BOTH source and viewer. Harness polling must not flash a light CLI
+        // background into a dark viewer, and raw CLI defaults are not a theme.
+        localize_codex_prompt_background(&mut composed, theme::surface());
         if kasa_mcp::remote::is_remote_pane(tab_pid.as_str()) {
             let facts = kasa_mcp::remote::cached_pane(tab_pid.as_str());
             // 기본 Codex는 상태줄이 없을 수 있다. 호스트가 셸이라고 보고했다면
@@ -1054,7 +1136,7 @@ impl App {
                 None => agent_kind == Some(kasa_pty::AgentKind::Codex) || codex_status,
             };
             if codex_live {
-                localize_codex_prompt_background(&mut composed, theme::surface());
+                crate::mirror_diff::localize(&mut composed, theme::bg(), theme::success(), theme::danger());
             }
         }
         {
@@ -1358,6 +1440,9 @@ impl App {
             let (hcw, hch) = (self.cell.w * fs, self.cell.h * fs);
             if let Some(row) = composed.get_mut(0) {
                 let cols = crate::turnjump::paint_header_row(row, h);
+                if kasa_mcp::remote::is_remote_pane(tab_pid.as_str()) {
+                    crate::turnjump::localize_mirror_header(row, theme::surface());
+                }
                 let rect_at = |c: usize| {
                     // 화살표 한 칸은 손가락으로 누르기엔 좁다 — 좌우로 반 칸씩
                     // 넓혀 잡는다. 그래도 서로 두 칸 떨어져 있어 안 겹친다.
@@ -2245,11 +2330,10 @@ impl App {
         // 제목이 상단보더에 와서 @칩 게이트론 못 가른다 → 화면 시그니처
         // ("Chat about this" 등)로 감지해 resume 와 동일하게 accent 를 끈다.
         let ask_picker = screen_is_ask_picker(&composed);
-        let prompt_accent = if agents_view || resume_picker || ask_picker {
-            None
-        } else {
-            // 관문은 아래 `filter`(active_agent)가 이미 지고 있다. 폴백만
-            // 걷어낸 이유는 정확도다 — `pane.character` 는 pane 단위라 탭이
+        let prompt_accent = active_prompt_accent(
+            agent_kind,
+            agents_view || resume_picker || ask_picker,
+            // 로컬·원격 공통 harness 판정으로 관문을 지킨다. `pane.character` 는 pane 단위라 탭이
             // 둘이면 마지막 출력 탭이 이겨, 접힌 `true_char` 와 색이 갈렸다.
             true_char
                 .as_deref()
@@ -2258,25 +2342,15 @@ impl App {
                         n,
                         theme::character_ordinal(&ws.pane_character, &tab_pid),
                     )
-                })
-                .filter(|_| {
-                    self.pty
-                        .get(tab_pid.as_str())
-                        .and_then(|p| p.active_agent())
-                        .is_some()
-                })
-        };
+                }),
+        );
         // ultracode 는 학생 배정과 무관한 pane 상태다 — 학생 accent 게이트
         // (Some 일 때만 칠함) 안쪽에 두면 미배정 pane 은 마커가 있어도 영영
         // 안 칠해진다(2026-08-12 조사). 피커 게이트는 prompt_accent 와 같은
         // 조건을 그대로 쓴다 — resume/ask 피커 오탐 방지 유지.
         let ultra = self.pane_ultracode.contains(&tab_pid)
             && !(agents_view || resume_picker || ask_picker)
-            && self
-                .pty
-                .get(tab_pid.as_str())
-                .and_then(|p| p.active_agent())
-                .is_some();
+            && agent_kind.is_some();
         if ultra {
             animated_cells = true;
             let t = self.version_anim_start.elapsed().as_secs_f32();
@@ -2301,21 +2375,15 @@ impl App {
         // 창마다 「kasaterm」 이 반복될 뿐이다. 핀은 사람의 개명이나 스캔이
         // 찾은 이름(`sync_codex_titles`)에만 선다.
         if !(agents_view || resume_picker || ask_picker)
-            && self
-                .pty
-                .get(tab_pid.as_str())
-                .and_then(|p| p.active_agent())
-                .is_some_and(|k| matches!(k, kasa_pty::AgentKind::Codex))
+            && agent_kind == Some(kasa_pty::AgentKind::Codex)
         {
-            if let Some(name) = ws
-                .panes
-                .get(tab_pid.as_str())
-                .filter(|p| p.title_pinned)
-                .and_then(|p| p.title.as_deref())
-            {
+            let remote = kasa_mcp::remote::cached_pane(&tab_pid);
+            if let Some(name) = codex_session_label(
+                pane.title_pinned.then(|| pane.title.as_deref()).flatten(), remote.as_ref(),
+            ) {
                 overlay_codex_session_label(
                     &mut composed,
-                    name,
+                    &name,
                     prompt_accent.unwrap_or_else(|| theme::accent_color(theme::accent_name())),
                 );
             }

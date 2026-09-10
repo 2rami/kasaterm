@@ -842,7 +842,7 @@ mod codex_status_line_tests {
     }
 }
 
-/// 원격 Codex가 호스트 밝기로 고른 입력창 채움색은 보는 쪽 테마와 무관하다.
+/// Codex가 시작할 때 고른 입력창 채움색보다 현재 보는 쪽 테마를 우선한다.
 /// 입력창과 같은 중립 배경만 바꿔 코드·diff의 의미색과 원격 원본은 보존한다.
 pub(crate) fn localize_codex_prompt_background(rows: &mut [Vec<GridCell>], background: [u8; 4]) {
     use kasa_bridge::screen::Color;
@@ -1290,7 +1290,8 @@ pub(crate) fn band_bg(row: &[GridCell]) -> Option<kasa_bridge::screen::Color> {
 
 /// 프롬프트 띠 한 행을 kasaterm 디자인으로 재도색 — 띠는 **본문 폭까지만**
 /// (전폭 띠의 꼬리는 기본 배경으로 되돌린다), 바탕은 `fill`, 앞머리 `❯` 는
-/// accent 원색. 글자색은 claude 가 정한 그대로 둔다.
+/// accent 원색. 글자색은 보는 기기의 기본 잉크로 맞춘다 — 원본 라이트
+/// 모드의 검은 글자를 다크 배경으로 옮기거나 그 반대로 옮겨도 읽혀야 한다.
 pub(crate) fn restyle_user_prompt_row(
     row: &mut [GridCell],
     fill: &kasa_bridge::screen::Color,
@@ -1302,6 +1303,7 @@ pub(crate) fn restyle_user_prompt_row(
         .unwrap_or(0);
     let pad_end = (last + 2).min(row.len());
     for (i, c) in row.iter_mut().enumerate() {
+        c.fg = kasa_bridge::screen::Color::Default;
         if i < pad_end {
             c.bg = fill.clone();
             if i <= 1 && c.ch == '❯' {
@@ -2511,6 +2513,24 @@ pub(crate) fn erase_ultracode_badge(rows: &mut [Vec<GridCell>]) {
     }
 }
 
+/// Codex's completed-turn divider is decoration, not a session-name header.
+/// Require both rule ends and a real duration so similarly named sessions and
+/// ordinary prose/code are not reclassified by the mirror's width projection.
+pub(crate) fn codex_worked_rule(row: &[GridCell]) -> bool {
+    let mut visible = row.iter().filter(|c| !matches!(c.ch, ' ' | '\0'));
+    if visible.next().map(|c| c.ch) != Some('─')
+        || visible.next_back().map(|c| c.ch) != Some('─') { return false; }
+    let text: String = row.iter().filter(|c| c.ch != '\0').map(|c| c.ch).collect();
+    let text = text.trim_matches(['─', ' ']);
+    let Some(duration) = text.strip_prefix("Worked for ") else { return false };
+    !duration.is_empty() && duration.split_whitespace().all(|part| {
+        let number = part.strip_suffix("ms").or_else(|| part.strip_suffix('h'))
+            .or_else(|| part.strip_suffix('m')).or_else(|| part.strip_suffix('s'));
+        number.is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && n.parse::<f64>().is_ok_and(|n| n.is_finite() && n >= 0.0))
+    })
+}
+
 /// claude 입력박스 위 "── 세션명 ──" 구분선의 이름 구간 위치(거노: rename 아웃라인).
 /// 하단 10행에서 대시가 지배적이고 비-대시 텍스트 섬이 있는 rule 행을 찾아, **좌우 대시
 /// 런 사이**(양옆 공백 포함)의 (row, c0, c1)을 돌려준다. 이름 글자 셀이 아니라 대시 경계로
@@ -2520,6 +2540,7 @@ pub(crate) fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, 
     let n = rows.len();
     for r in (n.saturating_sub(10)..n).rev() {
         let row = &rows[r];
+        if codex_worked_rule(row) { continue; }
         let dashes = row.iter().filter(|c| c.ch == '─').count();
         if dashes < row.len() / 2 {
             continue;
@@ -6081,6 +6102,16 @@ mod teammate_msg_tests {
         assert!(find_titled_rule(&[plain]).is_none(), "순수 rule 무시");
     }
 
+    #[test]
+    fn titled_rule_ignores_codex_worked_duration() {
+        for duration in ["0s", "53s", "3m 53s", "1h 2m 3s"] {
+            let rule = row_from(&format!("─ Worked for {duration} {}", "─".repeat(80)), 120);
+            assert!(find_titled_rule(&[rule]).is_none(), "completion duration is not a session name");
+        }
+        let title = row_from(&format!("── Worked for a better editor {}", "─".repeat(80)), 120);
+        assert!(find_titled_rule(&[title]).is_some(), "ordinary titles retain their outline");
+    }
+
     // teammate 칩 행(`──── @이름 ──`)은 세션명이 아니다 — claude 네이티브가 그리는
     // agent 이름 배지라 아웃라인(사각 테두리)을 두르면 안 된다(거노 2026-07-27:
     // "칩 네모칸"). 세션명 rule 은 계속 인정.
@@ -6303,6 +6334,25 @@ mod teammate_msg_tests {
         assert_eq!(row[0].fg, Color::Rgb(255, 128, 0), "❯ 는 accent");
         assert_eq!(row[3].bg, fill, "본문 구간은 fill");
         assert_eq!(row[30].bg, Color::Default, "꼬리는 기본 배경으로");
+    }
+
+    #[test]
+    fn mirrored_user_prompt_ink_uses_viewer_default_in_both_modes() {
+        use kasa_bridge::screen::Color;
+        for source_ink in [Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255)] {
+            let mut row = row_from("❯ previous request", 60);
+            for cell in &mut row {
+                cell.fg = source_ink.clone();
+                cell.bg = Color::Rgb(240, 240, 240);
+            }
+            let fill = Color::Rgb(35, 65, 54);
+            let accent = [51, 221, 153, 255];
+            restyle_user_prompt_row(&mut row, &fill, accent);
+            assert_eq!(row[0].fg, Color::Rgb(51, 221, 153));
+            assert_eq!(row[3].fg, Color::Default);
+            assert_eq!(row[3].bg, fill);
+            assert_eq!(row[59].bg, Color::Default);
+        }
     }
 
     // 여러 문단 SendMessage: 문단 사이 빈 행은 메시지 끝이 아니다 — 빈 행 뒤

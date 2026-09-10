@@ -181,10 +181,6 @@ pub(crate) struct PaneGroup {
     pub(crate) pane: String,
     /// 학생 이름. 없으면 빈 문자열이고 렌더가 셸 이름으로 대신한다.
     pub(crate) label: String,
-    /// 이 pane 의 claude·codex 에 **실제로 실린 말투**의 주인. `None` 은 학생
-    /// 프로세스가 없는 것, 빈 문자열은 프로세스는 도는데 말투가 안 실린 것이다.
-    /// 얼굴(`label`)과 다르면 재시작·재배정에서 어긋난 자리다(2026-09-09 지시).
-    pub(crate) persona: Option<String>,
     /// 이 pane 의 claude 세션 제목 — `/rename` 이름이 있으면 그것, 없으면
     /// aiTitle(요약). 학생 이름은 "누가"고 이건 "무엇을" 이라 둘 다 필요하다.
     pub(crate) session: String,
@@ -360,7 +356,6 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
         .map(|t| PaneGroup {
             pane: t.id.clone(),
             label: t.label.clone(),
-            persona: None,
             session: t
                 .session_path
                 .as_deref()
@@ -403,28 +398,6 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     // 때도 있어"). 자리는 고정해 두고 활성은 색으로만 알린다 — 목록은 위치가
     // 기억되는 지도여야지 매번 다시 읽어야 하는 피드가 아니다.
     panes.sort_by_key(|g| (g.window, pane_ord(&g.pane), g.pane.clone()));
-
-    // 학생 프로세스에 실린 말투의 주인을 되짚는다 — 얼굴과 다른 자리를 드러내려는 것.
-    let agent_of = |g: &PaneGroup| {
-        g.rows.iter().find(|r| matches!(r.kind, ProcKind::Claude | ProcKind::Codex)).map(|r| (r.pid, r.kind))
-    };
-    let (claude_pids, codex_pids): (Vec<u32>, Vec<u32>) = panes.iter().filter_map(agent_of).fold(
-        (Vec::new(), Vec::new()),
-        |(mut c, mut x), (pid, kind)| {
-            if kind == ProcKind::Claude { c.push(pid) } else { x.push(pid) }
-            (c, x)
-        },
-    );
-    let personas = personas_of(&claude_pids, &codex_pids);
-    for g in panes.iter_mut() {
-        let Some((pid, _)) = agent_of(g) else { continue };
-        let Some(who) = personas.get(&pid) else { continue };
-        g.persona = Some(who.clone());
-        let tag = if who.is_empty() { "말투 없음".to_string() } else { format!("말투 {who}") };
-        if let Some(r) = g.rows.iter_mut().find(|r| r.pid == pid) {
-            r.rest = if r.rest.is_empty() { tag } else { format!("{tag} · {}", r.rest) };
-        }
-    }
 
     // pid → 소유 pane. 포트를 쥔 프로세스를 pane 으로 되짚는 역인덱스다.
     let mut owner: HashMap<u32, String> = HashMap::new();
@@ -570,7 +543,18 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
 /// 두면 `rows`(탭 구분이 필요 없는 pane)와 `tabs`(탭별)가 배타적이라 세기 쉽다.
 fn fold_tabs(panes: &mut Vec<PaneGroup>, targets: &[PaneTarget]) {
     let by_id: HashMap<&str, &PaneTarget> = targets.iter().map(|t| (t.id.as_str(), t)).collect();
-    let host_of = |t: &PaneTarget| t.outer.clone().unwrap_or_else(|| t.id.clone());
+    // Viewer tabs describe this window's layout, not the source device's pane
+    // ownership. Folding a mirror into a native group erases its machine; doing
+    // the reverse hides native processes when the remote group is filtered out.
+    // Mirrors remain normal top-level rows in this device's pane list, with their
+    // execution device beside the name. Only native children of a native host fold.
+    let host_of = |t: &PaneTarget| {
+        t.outer.as_ref()
+            .filter(|outer| t.machine.is_none()
+                && by_id.get(outer.as_str()).is_some_and(|host| host.machine.is_none()))
+            .cloned()
+            .unwrap_or_else(|| t.id.clone())
+    };
     // 바깥 pane 별로 **인포에 설 줄**이 몇 개인가. 이미지·마크다운 탭은 셸이 없어
     // 애초에 수집 대상이 아니므로 여기서도 안 세어진다 — 그게 맞다. 판정 기준은
     // "탭이 몇 개인가"가 아니라 "이 목록이 몇 줄로 갈리는가"다.
@@ -595,7 +579,7 @@ fn fold_tabs(panes: &mut Vec<PaneGroup>, targets: &[PaneTarget]) {
         if t.closed || n.get(&host).copied().unwrap_or(0) < 2 || !hosts.contains(&host) {
             continue;
         }
-        if t.outer.is_some() {
+        if g.pane != host {
             moved.insert(g.pane.clone());
         }
         tabs.entry(host).or_default().push((
@@ -1271,77 +1255,6 @@ fn panes_of(_pids: &[u32]) -> HashMap<u32, String> {
     HashMap::new()
 }
 
-/// 학생 프로세스 pid → 실린 말투의 주인 이름(없으면 빈 문자열).
-///
-/// claude 는 `--append-system-prompt` 로 argv 에 말투가 통째로 실리므로 argv 를 읽고,
-/// codex 는 등가물이 없어 shim 이 pane 별 `CODEX_HOME/AGENTS.md` 끝에 붙이므로 env 의
-/// 홈을 따라가 그 파일을 읽는다. 어느 학생 것인지는 말투 첫 줄 앞머리로 대조한다
-/// (`persona_prefixes`) — 이름이 argv 에 따로 실리지 않아서다.
-#[cfg(unix)]
-fn personas_of(claude: &[u32], codex: &[u32]) -> HashMap<u32, String> {
-    let mut out = HashMap::new();
-    if claude.is_empty() && codex.is_empty() {
-        return out;
-    }
-    let table = kasa_mcp::character::persona_prefixes();
-    let who = |text: &str| -> String {
-        table
-            .iter()
-            .find(|(_, head)| text.contains(head.as_str()))
-            .map(|(name, _)| name.clone())
-            .unwrap_or_default()
-    };
-    for (pid, cmd) in ps_records(&["-ww", "-o", "pid=,command="], claude) {
-        let injected = cmd.contains("--append-system-prompt");
-        out.insert(pid, if injected { who(&cmd) } else { String::new() });
-    }
-    const KEY: &str = "CODEX_HOME=";
-    for (pid, cmd) in ps_records(&["eww", "-o", "pid=,command="], codex) {
-        let text = cmd
-            .find(KEY)
-            .and_then(|i| cmd[i + KEY.len()..].split_whitespace().next())
-            .and_then(|home| std::fs::read_to_string(std::path::Path::new(home).join("AGENTS.md")).ok())
-            .unwrap_or_default();
-        out.insert(pid, who(&text));
-    }
-    out
-}
-
-#[cfg(not(unix))]
-fn personas_of(_claude: &[u32], _codex: &[u32]) -> HashMap<u32, String> {
-    HashMap::new()
-}
-
-/// `ps <flags> -p <pids>` 를 pid 별 레코드로. argv 안의 개행(말투 본문)은 다음 줄로
-/// 이어지므로, 아는 pid 로 시작하지 않는 줄은 앞 레코드에 붙인다.
-#[cfg(unix)]
-fn ps_records(flags: &[&str], pids: &[u32]) -> Vec<(u32, String)> {
-    if pids.is_empty() {
-        return Vec::new();
-    }
-    let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-    let Ok(o) = proc::command("ps").args(flags).args(["-p", &list]).output() else {
-        return Vec::new();
-    };
-    let mut recs: Vec<(u32, String)> = Vec::new();
-    for line in String::from_utf8_lossy(&o.stdout).lines() {
-        let head = line
-            .trim_start()
-            .split_once(' ')
-            .and_then(|(p, rest)| p.parse::<u32>().ok().filter(|p| pids.contains(p)).map(|p| (p, rest)));
-        match head {
-            Some((pid, rest)) => recs.push((pid, rest.to_string())),
-            None => {
-                if let Some(last) = recs.last_mut() {
-                    last.1.push('\n');
-                    last.1.push_str(line);
-                }
-            }
-        }
-    }
-    recs
-}
-
 #[cfg(unix)]
 fn cwds_of(pids: &[u32]) -> HashMap<u32, std::path::PathBuf> {
     let mut out = HashMap::new();
@@ -1395,7 +1308,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn device_list_keeps_source_numbers_and_offline_mirrors() {
+    fn mirrors_keep_viewer_room_and_id_in_the_normal_pane_list() {
+        let snap = InfoSnap { panes: vec![
+            PaneGroup { pane: "%0".into(), ..Default::default() },
+            PaneGroup { pane: "%99".into(), machine: Some("source".into()),
+                window: 2, window_label: "viewer room".into(), ..Default::default() },
+            PaneGroup { pane: "%100".into(), machine: Some("source".into()),
+                closed: true, ..Default::default() },
+        ], ..Default::default() };
+        let rows = viewer_panes(&snap);
+        assert_eq!(rows.iter().map(|p| p.pane.as_str()).collect::<Vec<_>>(), ["%0", "%99"]);
+        assert_eq!((rows[1].window, rows[1].window_label.as_str()), (2, "viewer room"));
+        assert_eq!(rows[1].machine.as_deref(), Some("source"));
+    }
+
+    #[test]
+    fn device_browser_does_not_repeat_mirrors_already_in_this_device_list() {
         let row = |local: &str, source: &str| state::MachinesColRow {
             pane: local.into(), remote_id: source.into(), remote_cwd: "/work/project".into(),
             name: "모모이".into(), title: "작업".into(), status: "working".into(),
@@ -1409,12 +1337,15 @@ mod tests {
         };
         let rows = machine_rows(&machine);
         assert_eq!(rows.iter().map(|r| r.remote_id.as_str()).collect::<Vec<_>>(),
-            vec!["%2", "%7", "%12"]);
-        assert_eq!(rows[1].pane, "%99"); // Navigation retains the viewer's ID.
+            vec!["%2", "%12"]);
+        assert_eq!(machine_open_count(&machine), 2);
+        machine.mirrored[0].closed = true;
+        assert_eq!(machine_open_count(&machine), 2);
         machine.online = false;
-        let rows = machine_rows(&machine);
-        assert_eq!(rows.len(), 1);
-        assert_eq!((rows[0].pane.as_str(), rows[0].remote_id.as_str()), ("%99", "%7"));
+        assert!(machine_rows(&machine).is_empty());
+        // Retain navigation/migration metadata even when the source is offline.
+        assert_eq!(machine.mirrored[0].pane, "%99");
+        assert_eq!(machine_open_count(&machine), 0);
     }
 
     fn raw(pid: u32, ppid: u32, zombie: bool, args: &str) -> Raw {
@@ -1811,6 +1742,7 @@ impl App {
                     .unwrap_or_else(|| (String::new(), outer.is_none(), 0));
                 // 원격 거울은 프로세스가 저쪽이라 이름·제목이 로컬에 없다 — 폴링 캐시의
                 // 저쪽 행이 대신 말한다(2026-09-07 지적 「%0 나쵸네코 이렇게만 뜬다」).
+                let remote = kasa_mcp::remote::remote_info(id);
                 let facts = crate::machinescol::remote_pane_facts(id);
                 let remote_str = |k: &str| {
                     facts
@@ -1838,12 +1770,14 @@ impl App {
                     remote_title: remote_str("title").unwrap_or_default(),
                     // "pane 이 보는 경로"가 셸 cwd 보다 우선 — bg-attach 뷰 pane 은
                     // 셸이 spawn 디렉터리에 머물러 실제 프로젝트와 어긋난다.
-                    cwd: self
-                        .pane_view_cwd
-                        .get(id)
-                        .or_else(|| self.pane_cwd_cache.get(id))
-                        .cloned(),
-                    active: active.as_deref() == Some(leaf.as_str()),
+                    cwd: if let Some(remote) = &remote {
+                        remote_str("cwd").or_else(|| remote.remote_cwd.clone())
+                            .map(std::path::PathBuf::from)
+                    } else {
+                        self.pane_view_cwd.get(id).or_else(|| self.pane_cwd_cache.get(id)).cloned()
+                    },
+                    active: active.as_deref() == Some(leaf.as_str())
+                        || (remote.is_some() && tab_active && active.as_deref() == Some(host)),
                     window,
                     // `window_labels.0` 은 안 쓴다 — 그 자리는 대표 pane 의 OSC
                     // 타이틀이라 셸만 떠 있으면 방마다 똑같이 `zsh` 가 된다(실측).
@@ -1862,10 +1796,10 @@ impl App {
                         .unwrap_or_default(),
                     // 경로 해석까지만 GUI 가 한다 — 제목을 읽으려면 jsonl 꼬리를
                     // 훑어야 해서 그건 워커 몫이다(session_title).
-                    session_path: self
+                    session_path: remote.is_none().then(|| self
                         .pane_claude_sid
                         .get(id)
-                        .and_then(|sid| crate::socket::transcript_path_for_session(sid)),
+                        .and_then(|sid| crate::socket::transcript_path_for_session(sid))).flatten(),
                     closed: self.stashed_record(id).is_some(),
                     id: leaf,
                     // 원격 pane 은 로컬 셸이 없다 — 0 으로 남기고 machine 이 그
@@ -1876,8 +1810,10 @@ impl App {
                         None if kasa_mcp::remote::is_remote_pane(id) => 0,
                         None => return None,
                     },
-                    machine: kasa_mcp::remote::remote_info(id).map(|i| {
-                        if i.label.is_empty() {
+                    machine: remote.map(|i| {
+                        if let Some(label) = kasa_mcp::machines::label_for_base(&i.base) {
+                            label
+                        } else if i.label.is_empty() {
                             i.base
                                 .trim_start_matches("http://")
                                 .trim_start_matches("https://")
@@ -2178,8 +2114,11 @@ pub(crate) fn draw_info_col(
     };
     // 탭 안의 프로세스도 센다. 접힌 pane 의 것까지 세는 건 이 숫자가 「지금 보이는
     // 줄 수」가 아니라 「이 기계에서 도는 것」이기 때문이다.
-    let local_panes: Vec<_> = snap.panes.iter().filter(|g| g.machine.is_none()).collect();
-    let proc_total: usize = local_panes.iter().map(|g| all_rows(g).count()).sum();
+    // These are panes open on this device, including mirrors. Process totals,
+    // unlike pane membership, still refer only to locally running processes.
+    let local_panes = viewer_panes(&snap);
+    let proc_total: usize = local_panes.iter().filter(|g| g.machine.is_none())
+        .map(|g| all_rows(g).count()).sum();
     // 방이 하나뿐이면 머리를 안 그린다 — 늘 같은 이름 한 줄이 목록 맨 위를
     // 차지하면서 알려주는 게 없다.
     let show_windows = local_panes.first().is_some_and(|first|
@@ -2223,9 +2162,9 @@ pub(crate) fn draw_info_col(
         .map(|p| p.stages.len() as f32 * STAGE_H + 6.0)
         .unwrap_or(0.0);
     // Include every device section and its rows in the scroll extent.
-    let machines_h = {
+    let machine_heights: Vec<f32> = {
         let prog = info.machines_col.progress.as_ref();
-        let rows: f32 = info
+        info
             .machines_col
             .machines
             .iter()
@@ -2237,7 +2176,7 @@ pub(crate) fn draw_info_col(
                 if prog.is_some_and(|p| p.machine == m.label) {
                     h += stages_h;
                 }
-                if m.online || !m.mirrored.is_empty() {
+                if m.online {
                     let mut last_room = "";
                     for r in machine_rows(m) {
                         if !r.room.is_empty() && r.room != last_room {
@@ -2249,15 +2188,15 @@ pub(crate) fn draw_info_col(
                     if m.closed > 0 {
                         h += MACHINE_HEAD_H;
                     }
-                    if m.remote.is_empty() && m.mirrored.is_empty() { h += EMPTY_H; }
+                    if m.remote.is_empty() { h += EMPTY_H; }
                 } else {
                     h += EMPTY_H;
                 }
                 h
             })
-            .sum();
-        rows
+            .collect()
     };
+    let machines_h: f32 = machine_heights.iter().sum();
     let content = HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + machines_h + 14.0;
     info.content_h = content;
     info.scroll = info.scroll.clamp(0.0, (content - (bottom - top)).max(0.0));
@@ -2419,6 +2358,7 @@ pub(crate) fn draw_info_col(
 
     // ── 프로세스 ──
     let t_procs = prof.map(|_| Instant::now());
+    draw_device_background(g, local_machine_name(), x, w, y, SEC_H + procs_h);
     let r = draw_device_section(
         g, cursor, local_machine_name(), Some(local_panes.len()), info.procs_collapsed, x, w, y, bottom, top,
     );
@@ -2496,10 +2436,11 @@ pub(crate) fn draw_info_col(
     y += SEC_GAP;
 
     // Each source device has the same section and pane layout as this device.
-    for m in &info.machines_col.machines {
+    for (m, section_h) in info.machines_col.machines.iter().zip(machine_heights) {
         let shut = info.machine_collapsed.contains(&m.label);
+        draw_device_background(g, &m.label, x, w, y, section_h - SEC_GAP);
         let r = draw_device_section(
-            g, cursor, &m.label, Some(m.remote.len() + m.mirrored.len()),
+            g, cursor, &m.label, Some(machine_open_count(m)),
             shut, x, w, y, bottom, top,
         );
         info.machine_rects.push((m.label.clone(), r));
@@ -2508,7 +2449,7 @@ pub(crate) fn draw_info_col(
             if let Some(p) = info.machines_col.progress.as_ref().filter(|p| p.machine == m.label) {
                 y = draw_migrate_stages(g, p, x0, right, y, top, bottom);
             }
-            if m.online || !m.mirrored.is_empty() {
+            if m.online {
                 let mut last_room = "";
                 for r in machine_rows(m) {
                     if !r.room.is_empty() && r.room != last_room {
@@ -2543,12 +2484,14 @@ pub(crate) fn draw_info_col(
                 }
                 if m.closed > 0 {
                     if y + MACHINE_HEAD_H > top && y < bottom {
-                        draw_machine_room_head(g, &format!("닫힌 pane {}", m.closed), x0, y);
+                        draw_machine_room_head(g, &format!("닫힌 pane {} · 원본 기기에서 되살리기", m.closed), x0, y);
                     }
                     y += MACHINE_HEAD_H;
                 }
-                if m.remote.is_empty() && m.mirrored.is_empty() {
-                    draw_empty(g, x0, y, top, bottom, "열린 pane 없음");
+                if m.remote.is_empty() {
+                    let text = if m.mirrored.is_empty() { "열린 pane 없음" }
+                        else { "열린 거울은 이 기기 목록에 표시돼요" };
+                    draw_empty(g, x0, y, top, bottom, text);
                     y += EMPTY_H;
                 }
             } else {
@@ -2684,6 +2627,15 @@ fn draw_section(
     r
 }
 
+/// Reuse pane identity colors so a device reads as one quiet, continuous card.
+fn draw_device_background(
+    g: &mut gpu::GpuRenderer, label: &str, x: f32, w: f32, y: f32, h: f32,
+) {
+    let tint = crate::render::machine_tint(label);
+    let bg = theme::lerp(theme::panel_bg(), tint, 0.12);
+    g.round_rect_fill(x + 6.0, y, (w - 12.0).max(0.0), h, 6.0, bg);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_device_section(
     g: &mut gpu::GpuRenderer, cursor: (f32, f32), label: &str, count: Option<usize>,
@@ -2693,15 +2645,24 @@ fn draw_device_section(
         None, true, collapsed, x, w, y, bottom, top)
 }
 
-/// Existing mirrors stay in their source room instead of a second mirror list.
+/// Already-open mirrors belong to the viewer's normal pane list. Keep this
+/// browser for source panes that are not open here; do not list a viewer twice.
 fn machine_rows(m: &state::MachinesColMachine) -> Vec<&state::MachinesColRow> {
-    let mut rows: Vec<_> = m.remote.iter().filter(|_| m.online).chain(&m.mirrored).collect();
-    rows.sort_by(|a, b| a.room.cmp(&b.room).then_with(|| {
+    let mut rows: Vec<_> = m.remote.iter().filter(|_| m.online).collect();
+    rows.sort_by(|a, b| a.closed.cmp(&b.closed).then_with(|| a.room.cmp(&b.room)).then_with(|| {
         let number = |r: &state::MachinesColRow|
             r.remote_id.trim_start_matches('%').parse::<u64>().unwrap_or(u64::MAX);
         number(a).cmp(&number(b))
     }));
     rows
+}
+
+fn machine_open_count(m: &state::MachinesColMachine) -> usize {
+    machine_rows(m).into_iter().filter(|row| !row.closed).count()
+}
+
+fn viewer_panes(snap: &InfoSnap) -> Vec<&PaneGroup> {
+    snap.panes.iter().filter(|pane| !pane.closed).collect()
 }
 
 fn draw_empty(g: &mut gpu::GpuRenderer, x0: f32, y: f32, top: f32, bottom: f32, text: &str) {
@@ -2936,7 +2897,24 @@ fn draw_group_head(
         gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: true, italic: false },
     );
     let tx = x0 + if has_face { 15.0 + FACE } else { 24.0 };
-    let mut budget = (right - nw - 8.0 - tx).max(0.0);
+    let mut text_right = right - nw;
+    // Execution location is identity, not optional shell detail: reserve it
+    // before fitting long student/task names so a narrow Info column keeps it.
+    if let Some(machine) = gp.machine.as_deref().filter(|m| !m.is_empty()) {
+        let available = (text_right - tx - 8.0).max(0.0);
+        let badge = fit_text(g, &format!("⇄ {machine}"), available * 0.45, 10.0, true);
+        let bw = g.measure_chrome_text(&badge, 10.0, true);
+        if bw > 0.0 {
+            let bx = text_right - bw - 8.0;
+            let tint = crate::render::machine_tint(machine);
+            pill_rect(g, bx, y + 3.0, bw + 8.0, 18.0, theme::lerp(theme::panel_bg(), tint, 0.18));
+            g.draw_text(bx + 4.0, y + 6.0, &badge,
+                gpu::DrawOpts { font_size: 10.0, color: theme::lerp(theme::text(), tint, 0.35),
+                    bold: true, italic: false });
+            text_right = bx - 4.0;
+        }
+    }
+    let mut budget = (text_right - 8.0 - tx).max(0.0);
     let title = if gp.label.is_empty() {
         gp.pane.clone()
     } else {
@@ -2955,32 +2933,10 @@ fn draw_group_head(
     // 먼저 가져간다(폭이 모자라면 밀려나는 건 셸·pid 쪽).
     budget -= tw + 8.0;
     let mut cx = tx + tw + 8.0;
-    // 실린 말투가 얼굴과 다르면 그 사실을 이름 바로 옆에 — 재시작·재배정 뒤 「얼굴은
-    // 새 학생, 말투는 옛 학생」인 자리가 여기 말고는 드러날 데가 없다(2026-09-09 지시).
-    // 맞는 자리엔 안 그린다(펼치면 프로세스 줄에 있다).
-    if let Some(who) = gp.persona.as_deref().filter(|w| *w != gp.label) {
-        let (badge, col) = if who.is_empty() {
-            ("말투 없음".to_string(), theme::text_mute())
-        } else {
-            (format!("말투 {who}"), theme::attention())
-        };
-        let bw = g.measure_chrome_text(&badge, 10.0, true);
-        if budget > bw + 48.0 {
-            g.draw_text(
-                cx,
-                y + 6.0,
-                &badge,
-                gpu::DrawOpts { font_size: 10.0, color: col, bold: true, italic: false },
-            );
-            cx += bw + 8.0;
-            budget -= bw + 8.0;
-        }
-    }
-    // 원격 pane 은 셸·pid 대신 어느 기계 것인지 — 이 줄의 존재 이유가 「그
-    // pane 에서 무엇이 도나」인데, 원격은 그 답이 기계 이름이다.
+    // The remote execution device has a reserved badge above; no local shell PID
+    // exists for that pane, and the machine name must not be repeated here.
     let shell = match gp.machine.as_deref() {
-        Some("") => String::new(),
-        Some(m) => format!("⇄ {m}"),
+        Some(_) => String::new(),
         None => format!("{} {}", gp.shell, gp.shell_pid),
     };
     // The section heading already names the device.
@@ -3795,10 +3751,12 @@ fn draw_machine_pane_row(
         machine: Some(String::new()),
         ..Default::default()
     };
-    let task = waiting.then(|| TaskLine {
+    let task = if r.closed { Some(TaskLine {
+        label: "닫힘 · 원본 기기에서 되살리기".into(), attention: false,
+    }) } else { waiting.then(|| TaskLine {
         label: if r.title.is_empty() { "기다림".into() } else { format!("기다림 · {}", r.title) },
         attention: true,
-    });
+    }) };
     draw_group_head(g, cursor, &group, true, task.as_ref(), x, w, x0, content_right, y);
     if let Some(cr) = close_rect {
         g.hover_pointer = true;
@@ -3889,7 +3847,7 @@ fn draw_machine_menu(
             items.push((act, if i == 0 && last_room.is_empty() { row.sep() } else { row }));
         }
     }
-    for (i, r) in m.mirrored.iter().enumerate() {
+    for (i, r) in m.mirrored.iter().filter(|r| !r.closed).enumerate() {
         let row = MenuRow::new(format!("{} 데려오기", r.name)).face(&r.name);
         items.push((Some(B::Bring { pane: r.pane.clone() }), if i == 0 { row.sep() } else { row }));
     }
@@ -4296,6 +4254,51 @@ mod fold_tabs_tests {
         let before = panes.clone();
         fold_tabs(&mut panes, &[tgt("%0", None, 0), tgt("%3", None, 0)]);
         assert_eq!(panes, before);
+    }
+
+    #[test]
+    fn a_mirror_tab_does_not_become_a_local_child() {
+        let mirror = PaneGroup { machine: Some("source".into()), ..grp("%1") };
+        let mut panes = vec![grp("%0"), mirror.clone()];
+        let remote = PaneTarget { machine: Some("source".into()), ..tgt("%1", Some("%0"), 1) };
+        fold_tabs(&mut panes, &[tgt("%0", None, 0), remote]);
+        assert_eq!(panes, vec![grp("%0"), mirror]);
+    }
+
+    #[test]
+    fn local_tabs_under_a_mirror_stay_on_this_device() {
+        let mirror = PaneGroup { machine: Some("source".into()), ..grp("%0") };
+        let native = PaneGroup {
+            rows: vec![ProcRow { pid: 42, ..Default::default() }], ..grp("%1")
+        };
+        let mut panes = vec![mirror.clone(), native.clone(), grp("%2")];
+        let remote = PaneTarget { machine: Some("source".into()), ..tgt("%0", None, 0) };
+        fold_tabs(&mut panes, &[
+            remote, tgt("%1", Some("%0"), 1), tgt("%2", Some("%0"), 2),
+        ]);
+        assert_eq!(panes, vec![mirror, native, grp("%2")]);
+    }
+
+    #[test]
+    fn viewer_tabs_do_not_define_source_pane_nesting() {
+        let mut panes: Vec<_> = ["%0", "%1"].into_iter().map(|id|
+            PaneGroup { machine: Some("source".into()), ..grp(id) }).collect();
+        let before = panes.clone();
+        let targets: Vec<_> = [tgt("%0", None, 0), tgt("%1", Some("%0"), 1)]
+            .into_iter().map(|t| PaneTarget { machine: Some("source".into()), ..t }).collect();
+        fold_tabs(&mut panes, &targets);
+        assert_eq!(panes, before);
+    }
+
+    #[test]
+    fn native_siblings_still_fold_when_a_mirror_shares_the_tab_bar() {
+        let mirror = PaneGroup { machine: Some("source".into()), ..grp("%2") };
+        let mut panes = vec![grp("%0"), grp("%1"), mirror.clone()];
+        let remote = PaneTarget { machine: Some("source".into()), ..tgt("%2", Some("%0"), 2) };
+        fold_tabs(&mut panes, &[tgt("%0", None, 0), tgt("%1", Some("%0"), 1), remote]);
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[0].tabs.iter().map(|t| t.pane.as_str()).collect::<Vec<_>>(), ["%0", "%1"]);
+        assert_eq!(panes[1], mirror);
     }
 
     /// 탭은 바깥 pane 안으로 들어가고 최상위에서는 사라진다 — pane 하나가 여럿으로

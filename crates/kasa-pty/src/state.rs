@@ -254,6 +254,16 @@ pub struct PromptAnchor {
     pub text: String,
 }
 
+/// One parser generation for a viewer's screen, history and pinned live input.
+/// Reading these independently can join old GUI rows to a new scroll offset.
+pub struct ViewerSnapshot {
+    pub screen: ScreenUpdate,
+    pub live: Vec<Row>,
+    pub above: Vec<Row>,
+    pub display_offset: usize,
+    pub history_size: usize,
+}
+
 /// PTY 의 실체가 어디 있는가 — 이 프로세스(Local)인가 원격 호스트(External)인가.
 ///
 /// External 은 소유권이 원격에 있는 세션의 **로컬 파서 사본**이다: 바이트가 그대로
@@ -486,6 +496,8 @@ pub struct PtySession {
     reader_stop: Arc<std::sync::atomic::AtomicBool>,
     /// true 면 Drop 이 child 를 죽이지 않는다 — 핸드오프로 소유권이 나간 세션.
     kill_disarmed: std::sync::atomic::AtomicBool,
+    /// Closed panes reject all user/control input while awaiting disposal.
+    input_closed: std::sync::atomic::AtomicBool,
     /// 마지막으로 CR/LF 가 이 PTY 로 들어간 시각 — 「방금 제출됐다」 신호.
     /// GUI 의 스피너 즉시-신뢰(턴 시작 첫 프레임부터 학생 테마)가 읽는다.
     /// 키보드·paste·소켓 send·하네스 autosend 모든 쓰기 경로가 `send_bytes`
@@ -796,6 +808,7 @@ impl PtySession {
             scheme_reports,
             reader_stop,
             kill_disarmed: std::sync::atomic::AtomicBool::new(false),
+            input_closed: std::sync::atomic::AtomicBool::new(false),
             last_submit: Mutex::new(None),
             output_beats,
             last_input: Mutex::new(None),
@@ -890,6 +903,7 @@ impl PtySession {
             scheme_reports,
             reader_stop,
             kill_disarmed: std::sync::atomic::AtomicBool::new(false),
+            input_closed: std::sync::atomic::AtomicBool::new(false),
             last_submit: Mutex::new(None),
             output_beats,
             last_input: Mutex::new(None),
@@ -995,6 +1009,7 @@ impl PtySession {
             scheme_reports,
             reader_stop,
             kill_disarmed: std::sync::atomic::AtomicBool::new(false),
+            input_closed: std::sync::atomic::AtomicBool::new(false),
             last_submit: Mutex::new(None),
             output_beats,
             last_input: Mutex::new(None),
@@ -1171,6 +1186,56 @@ impl PtySession {
         false
     }
 
+    pub fn input_closed(&self) -> bool {
+        self.input_closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Serialize with writes so no delayed submit can cross the close boundary.
+    /// Interrupt is deliberately opt-in: a mirror must never cancel its source.
+    pub fn set_input_closed(&self, closed: bool, interrupt: bool) -> Result<()> {
+        let mut writer = self.writer.lock().unwrap();
+        let was_closed = self.input_closed.swap(closed, std::sync::atomic::Ordering::AcqRel);
+        if closed && !was_closed && interrupt {
+            writer.write_all(b"\x03").context("interrupt closing pane")?;
+            writer.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Explicit close cannot rely on the last Arc disappearing: HTTP viewers
+    /// and pending writes may still hold it. Only terminate our local child tree.
+    pub fn terminate_local(&self) {
+        if self.kill_disarmed.load(std::sync::atomic::Ordering::Acquire) { return; }
+        let SessionIo::Local { child, .. } = &self.io else { return };
+        let Ok(mut child) = child.lock() else { return };
+        if !matches!(child.try_wait(), Ok(None)) { return; }
+        if let Some(root) = child.process_id().filter(|pid| *pid > 1) {
+            #[cfg(unix)]
+            {
+                // Fresh parent links, rooted in the still-owned child handle.
+                // Never select processes by an executable name or shared tty.
+                let table = process_table_raw();
+                let mut owned = vec![root];
+                let mut i = 0;
+                while i < owned.len() {
+                    let parent = owned[i];
+                    for (pid, ppid, _) in &table {
+                        if *ppid == parent && *pid > 1 && !owned.contains(pid) { owned.push(*pid); }
+                    }
+                    i += 1;
+                }
+                for pid in owned.into_iter().rev() { unsafe { libc::kill(pid as i32, libc::SIGKILL); } }
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("taskkill").args(["/PID", &root.to_string(), "/T", "/F"])
+                    .creation_flags(0x08000000).output();
+            }
+        }
+        let _ = child.kill();
+    }
+
     pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> {
         // 포커스 리포트(CSI I/O)는 pane 전환마다 앱이 자동으로 쏘는 것이라 사람
         // 입력이 아니다 — 이걸 세면 working pane 으로 포커스를 옮길 때마다 박동
@@ -1180,6 +1245,7 @@ impl PtySession {
         }
         {
             let mut w = self.writer.lock().unwrap();
+            anyhow::ensure!(!self.input_closed(), "pane is closed — reopen it before sending input");
             w.write_all(bytes).context("pty write")?;
             // Flush immediately. Without this, a one-shot write that isn't
             // followed by another (a committed Hangul syllable — the next
@@ -1478,6 +1544,21 @@ impl PtySession {
         self.publish_screen(self.full_snapshot());
     }
 
+    pub fn viewer_snapshot(&self, viewer_cols: usize, viewer_rows: usize) -> ViewerSnapshot {
+        let t = self.term.lock().unwrap();
+        let (cols, rows) = (t.grid().columns() as u16, t.grid().screen_lines() as u16);
+        let display_offset = t.grid().display_offset();
+        let budget = viewer_rows.saturating_mul(viewer_cols.div_ceil(usize::from(cols).max(2))).min(4096);
+        ViewerSnapshot {
+            screen: build_update(&t, cols, rows, &self.pane_id, &self.title_handle,
+                &(0..rows).collect::<Vec<_>>(), display_offset as i32),
+            live: read_live_tail(&t, rows as usize),
+            above: read_rows_above(&t, budget),
+            display_offset,
+            history_size: t.grid().history_size(),
+        }
+    }
+
     /// GUI 채널과 모든 그리드 tap 에 한 프레임을 내보낸다.
     fn publish_screen(&self, update: ScreenUpdate) {
         let _ = publish_screen_update(&self.screens_tx, &self.screen_taps, update);
@@ -1528,8 +1609,18 @@ impl PtySession {
     /// 두 번 그려진다(중복 — `abc` 뒤에 `c` 가 또 찍히는 식). reader 도 같은 락
     /// 안에서 뿌리므로(`spawn_reader_thread`) 이 순서면 어느 쪽도 일어나지 않는다.
     pub fn tap_bytes_with_snapshot(&self) -> (Receiver<Vec<u8>>, Vec<u8>) {
-        let (cols, rows) = *self.size.lock().unwrap();
+        let (rx, bytes, _) = self.tap_bytes_with_sized_snapshot();
+        (rx, bytes)
+    }
+
+    /// The dimensions belong to these exact snapshot bytes, not a later
+    /// `size()` read. A resize between capture and WS handshake otherwise
+    /// replays narrow rows at a wide margin, destroying their soft-wrap flags.
+    pub fn tap_bytes_with_sized_snapshot(&self) -> (Receiver<Vec<u8>>, Vec<u8>, (u16, u16)) {
         let t = self.term.lock().unwrap();
+        // resize_effective reshapes the parser before publishing self.size.
+        // The parser is canonical while holding its lock.
+        let (cols, rows) = (t.grid().columns() as u16, t.grid().screen_lines() as u16);
         let hist = history_ansi(&t, cols, rows);
         // A subscriber starts at the live screen, independently of where the
         // source GUI is reading. Its damage belongs to that GUI, not this tap.
@@ -1540,7 +1631,7 @@ impl PtySession {
         // 실으면 ?1049h 앞에 찍혀 primary 를 더럽힌다.
         let mut bytes = if snap.alt_screen { Vec::new() } else { hist };
         bytes.extend_from_slice(&raw_screen_ansi(&snap));
-        (rx, bytes)
+        (rx, bytes, (cols, rows))
     }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let mut sizes = self.viewport_sizes.lock().unwrap();
@@ -2582,10 +2673,14 @@ impl Utf8Buffer {
 /// xterm 은 히스토리를 자기 스크롤백으로 쌓는다. 이게 없으면 미러는 뷰포트만
 /// 받아서 폰에서 스와이프해도 올라갈 데가 없다(2026-08-20 확정).
 ///
-/// xterm 기본 스크롤백 상한(1000줄)만큼만 싣는다 — 더 보내도 버려진다.
+/// Native mirrors retain more than xterm's old 1000-line default. A long tool
+/// turn must not lose its question on attach; bound both rows and cell volume.
+fn exported_history_rows(history: usize, cols: u16) -> usize {
+    history.min(10_000).min(1_000_000 / usize::from(cols.max(1)))
+}
+
 fn history_ansi(term: &Term<PtyEventForwarder>, cols: u16, rows: u16) -> Vec<u8> {
-    const CAP: usize = 1000;
-    let hist = term.grid().history_size().min(CAP);
+    let hist = exported_history_rows(term.grid().history_size(), cols);
     if hist == 0 {
         return Vec::new();
     }
@@ -5363,7 +5458,7 @@ mod raw_snapshot_wrap_tests {
             }
         }
         if history && !frame.alt_screen {
-            let count = source.grid().history_size().min(1000);
+            let count = exported_history_rows(source.grid().history_size(), cols);
             assert_eq!(replay.grid().history_size(), count, "history gained/lost a row");
             for line in -(count as i32)..0 {
                 for col in 0..cols as usize {
@@ -5381,6 +5476,18 @@ mod raw_snapshot_wrap_tests {
         assert!(source.grid()[Line(0)][Column(7)].flags.contains(Flags::WRAPLINE));
         assert!(!source.grid()[Line(2)][Column(7)].flags.contains(Flags::WRAPLINE));
         assert_snapshot(&mut source, 8, 6, false);
+    }
+
+    #[test]
+    fn mirror_attach_keeps_question_before_a_long_tool_turn() {
+        let mut source = parser(70, 12);
+        feed(&mut source, "› recent question\r\n".as_bytes());
+        for _ in 0..1500 { feed(&mut source, b"tool output\r\n"); }
+        let bytes = history_ansi(&source, 70, 12);
+        assert!(String::from_utf8_lossy(&bytes).contains("recent question"));
+        assert_snapshot(&mut source, 70, 12, true);
+        assert_eq!(exported_history_rows(100_000, 80), 10_000);
+        assert_eq!(exported_history_rows(100_000, 400), 2_500);
     }
 
     #[test]
@@ -6291,6 +6398,30 @@ mod external_session_tests {
     }
 
     #[test]
+    fn closed_input_gate_rejects_delayed_messages_and_reopens_without_replay() {
+        let (sess, _events, writer, _) = ext_session(20, 5);
+        sess.set_input_closed(true, true).unwrap();
+        assert_eq!(writer.recv().unwrap(), b"\x03");
+        assert!(sess.send_bytes(b"new work\r").is_err());
+        sess.set_input_closed(false, false).unwrap();
+        assert!(writer.try_recv().is_err());
+        sess.send_bytes(b"fresh input").unwrap();
+        assert_eq!(writer.recv().unwrap(), b"fresh input");
+    }
+
+    #[test]
+    fn closed_mirror_gate_never_interrupts_or_terminates_its_source() {
+        let (sess, _events, writer, _) = ext_session(20, 5);
+        sess.set_input_closed(true, false).unwrap();
+        sess.terminate_local();
+        assert!(writer.try_recv().is_err());
+        assert!(sess.send_bytes(b"forbidden").is_err());
+        sess.set_input_closed(false, false).unwrap();
+        sess.send_bytes(b"still attached").unwrap();
+        assert_eq!(writer.recv().unwrap(), b"still attached");
+    }
+
+    #[test]
     fn external_bytes_land_in_local_grid_and_input_goes_to_writer() {
         let (sess, etx, wrx, resized) = ext_session(20, 5);
         etx.send(ExtEvent::Bytes(b"hello".to_vec())).unwrap();
@@ -6492,6 +6623,49 @@ mod external_session_tests {
     }
 
     #[test]
+    fn byte_snapshot_dimensions_stay_bound_to_captured_history_across_resize() {
+        let (source, _events, _writer, _resize) = ext_session(8, 4);
+        {
+            let mut term = source.term.lock().unwrap();
+            let mut parser: Processor<StdSyncHandler> = Processor::new();
+            parser.advance(&mut *term, b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefgh\r\nLIVE");
+        }
+        let history = source.rows_above_live(100);
+        assert!(history.iter().any(|row| row.last().is_some_and(|cell| cell.wrapped)));
+        let (_tap, bytes, captured_size) = source.tap_bytes_with_sized_snapshot();
+        source.resize(93, 4).unwrap();
+        assert_eq!(captured_size, (8, 4));
+        assert_ne!(captured_size, source.size(), "later dimensions do not describe the captured ANSI");
+        let (replay, _events, _writer, _resize) = ext_session(captured_size.0, captured_size.1);
+        {
+            let mut term = replay.term.lock().unwrap();
+            let mut parser: Processor<StdSyncHandler> = Processor::new();
+            parser.advance(&mut *term, &bytes);
+        }
+        assert_eq!(replay.rows_above_live(100), history, "soft-wrap flags or source history were lost");
+
+        // The old HTTP handshake used this later width: replaying the exact
+        // same bytes at it loses their right-margin soft-wrap semantics.
+        let (wrong, _events, _writer, _resize) = ext_session(93, 4);
+        {
+            let mut term = wrong.term.lock().unwrap();
+            let mut parser: Processor<StdSyncHandler> = Processor::new();
+            parser.advance(&mut *term, &bytes);
+        }
+        assert_ne!(wrong.rows_above_live(100), history);
+    }
+
+    #[test]
+    fn byte_snapshot_reads_locked_parser_size_during_resize_publication_gap() {
+        let (source, _events, _writer, _resize) = ext_session(8, 4);
+        // resize_effective updates the parser and public size in two steps.
+        // Simulate a stale size slot without involving a real user's PTY.
+        *source.size.lock().unwrap() = (26, 9);
+        let (_tap, _bytes, size) = source.tap_bytes_with_sized_snapshot();
+        assert_eq!(size, (8, 4));
+    }
+
+    #[test]
     fn external_reconnect_ris_clears_history() {
         // 재접속 시나리오: RIS(ESC c) 한 방이 화면과 스크롤백을 모두 비워, 이어지는
         // 스냅샷 재생이 중복 없이 상태를 다시 세운다(alacritty Grid::reset 이
@@ -6544,6 +6718,24 @@ mod handoff_tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         false
+    }
+
+    #[test]
+    fn close_terminates_owned_process_even_with_a_retained_viewer_arc() {
+        let source = Arc::new(PtySession::start(PtyOptions {
+            shell: Some("/bin/sh".into()), pane_id: "close-grace-owned".into(),
+            ..Default::default()
+        }).unwrap());
+        let retained_viewer = source.clone();
+        source.set_input_closed(true, true).unwrap();
+        source.terminate_local();
+        let SessionIo::Local { child, .. } = &source.io else { panic!("expected owned child") };
+        let end = Instant::now() + std::time::Duration::from_secs(2);
+        while child.lock().unwrap().try_wait().unwrap().is_none() && Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(child.lock().unwrap().try_wait().unwrap().is_some());
+        assert!(retained_viewer.send_bytes(b"late work").is_err());
     }
 
     /// 핸드오프 전 구간: 산 셸의 fd 를 다른 세션이 입양해도 셸이 재시작되지 않고

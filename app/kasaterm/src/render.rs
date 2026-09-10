@@ -5,7 +5,8 @@ pub(crate) use crate::screenread::*;
 pub(crate) use crate::sprites::*;
 
 #[path = "pane_identity.rs"]
-mod pane_identity;
+pub(crate) mod pane_identity;
+pub(crate) use pane_identity::machine_tint;
 use pane_identity::{MachineIdentity, PaneIdentity};
 #[path = "terminal_scene.rs"]
 pub(crate) mod terminal_scene;
@@ -89,6 +90,10 @@ struct SidebarRowInfo {
     /// 원격 pane 이면 그 기계 이름. 페인트 루프는 self 를 못 읽으므로(2887 주석)
     /// 여기서 프레임당 1회 떠 둔다.
     machine: Option<String>,
+    /// 배치도 칸을 물들일 기기 이름 — 로컬 pane 도 든다. 헤더 칩과 **같은 이름
+    /// 풀이**(`MachineIdentity::for_pane`)를 쓴다: 링크에 적힌 이름과 명부 이름이
+    /// 다르면 같은 기계가 헤더와 배치도에서 다른 색이 된다(2026-09-10 지적).
+    device: Option<String>,
 }
 
 /// 도는 시간을 칸에 얹을 짧은 말로. **1분 미만은 None** — 잠깐 도는 일에까지 숫자가
@@ -998,14 +1003,18 @@ impl App {
                 .ok()
                 .map(|ws| ws.panes.keys().cloned().collect())
                 .unwrap_or_default();
-            self.turn.retain_panes(|id| ids.iter().any(|k| k == id));
+            self.turn.retain_panes(|id| ids.iter().any(|k| k == id) || self.pty.contains_key(id));
             let mut out = std::collections::HashMap::new();
             for id in ids {
                 // Arc 를 복제해 self 빌림을 끊는다 — 참조를 든 채로는 캐시를 못 고친다.
                 let Some(sess) = self.pty_for_pane(&id).cloned() else {
                     continue;
                 };
-                if let Some(h) = self.turn.header(&id, &sess) {
+                let viewer_top = self.pane_view_shift.get(&id).and_then(|s| s.projection.as_ref())
+                    .filter(|p| p.scroll_from_bottom > 0 || sess.view_state().0 > 0)
+                    .and_then(|p| p.top_abs);
+                let pid = self.ws.lock().unwrap().active_tab_pid(&id);
+                if let Some(h) = self.turn.header_at(&pid, &sess, viewer_top) {
                     out.insert(id, h);
                 }
             }
@@ -2161,16 +2170,13 @@ impl App {
                     self.display_pane_char(&ws, id)
                 }
                 .unwrap_or_default();
-                let machine = kasa_mcp::remote::remote_info(id).map(|i| {
-                    if i.label.is_empty() {
-                        i.base
-                            .trim_start_matches("http://")
-                            .trim_start_matches("https://")
-                            .to_string()
-                    } else {
-                        i.label
-                    }
-                });
+                let identity = MachineIdentity::for_pane(
+                    Some(id.as_str()),
+                    crate::info::cached_local_machine_name(),
+                );
+                let machine = identity.remote.then(|| identity.label.clone());
+                let device = (identity.remote || pane_identity::multiple_devices_known())
+                    .then_some(identity.label);
                 let (is_cur, icon, tab_peeks) = {
                     let ws = self.ws.lock().unwrap();
                     let is_cur = ws.active_pane.as_deref() == Some(id.as_str());
@@ -2271,6 +2277,7 @@ impl App {
                     compact_pct: act.and_then(|a| a.compact_pct),
                     busy_secs,
                     machine,
+                    device,
                 }
             }
         };
@@ -2376,6 +2383,8 @@ impl App {
         let mut swap_confirm_hits: Vec<(crate::session::CharacterSwapBtn, (f32, f32, f32, f32))> =
             Vec::new();
         let mut restore_btn_hits: Vec<(RestoreBtn, (f32, f32, f32, f32))> = Vec::new();
+        let restore_toast_visible = self.restore_applying.is_some() || self.restore_progress.is_some();
+        let restore_bottom_reserved = self.bottom_reserve_h();
         let win_h_logical = win_px.1 / scale;
         let settings_btn = self.settings_btn_rect(win_h_logical);
         self.settings_btn_rect = settings_btn;
@@ -2558,6 +2567,19 @@ impl App {
                 if !g.has_image(&key) {
                     let (rgba, w, h) = rotate_rgba_cw(image.cur_rgba(), image.w, image.h, *rot);
                     g.upload_image(&key, &rgba, w, h);
+                }
+            }
+            // Device identity belongs to the whole terminal, not only a header
+            // that disappears for a single pane. Default terminal cells are
+            // transparent, so paint below them; explicit syntax/diff/prompt
+            // fills and character accents remain above this local-mode tint.
+            for (id, x, y, w, h) in &footer_slots {
+                // Keep the existing classroom illustration in system pickers.
+                if classroom_slots.contains(&(*x, *y, *w, *h)) { continue; }
+                if let Some(background) = pane_identities.get(id)
+                    .and_then(|identity| identity.machine.pane_background(theme::bg()))
+                {
+                    g.rect(*x, *y, *w, *h, background);
                 }
             }
             g.draw_cells(&slot_views);
@@ -3117,12 +3139,9 @@ impl App {
                         }
                     }
                 };
-                // 제목은 은은한 배경 칩에 담는다 — 아이콘·경로·토글이 늘어선 한 줄에서
-                // "이게 지금 열린 탭"이라고 자리를 묶어 주되, 눌리는 것은 아니다.
-                //
-                // 배경은 flat(round_rect)이어야 한다. panel_rect 로 그렸더니 픽셀
-                // 실루엣의 검은 테두리·하드 섀도가 붙어 떠오른 버튼처럼 보였는데,
-                // 이건 클릭 대상이 아니라 표시라 눌리는 신호를 주면 안 된다.
+                // The title is a label on the header, not a separate button.
+                // Leave the strip's panel_bg visible so dark/light and custom
+                // palette changes do not leave a differently coloured pill.
                 //
                 // 가운데에 세우는 것은 **이름 칩 하나**다. 경로는 파일트리 버튼
                 // 오른쪽 제자리에 남는다(거노) — 둘을 한 덩어리로 묶어 가운데를
@@ -3222,7 +3241,6 @@ impl App {
                 };
                 let start = ((win_w - pw) / 2.0).clamp(left_lim, (right_lim - pw).max(left_lim));
                 if !title_text.is_empty() {
-                    round_rect(g, start, py, pw, ph, theme::radius_md(), theme::surface());
                     let icon_name = sb_icons
                         .get(sb_active)
                         .copied()
@@ -3259,16 +3277,20 @@ impl App {
                             },
                         );
                     }
-                    if let Some(b) = machine_badge.as_deref() {
-                        // 기계 배지는 dim 이 아니라 강조색 — bg 배지(부가 정보)와 달리
-                        // 이건 「입력이 어디로 가는가」라 흐리면 안 보이는 게 낫지 않다.
+                    if let (Some(b), Some(machine)) =
+                        (machine_badge.as_deref(), title_machine.as_deref())
+                    {
+                        // The title strip must use the same device identity as
+                        // the pane header and minimap, not the theme accent.
                         g.draw_text(
                             tx + tw + bw,
                             ty,
                             b,
                             gpu::DrawOpts {
                                 font_size: chrome_font,
-                                color: theme::accent(),
+                                color: theme::enforce_contrast_at(
+                                    machine_tint(machine), theme::panel_bg(), 4.5,
+                                ),
                                 bold: true,
                                 italic: false,
                             },
@@ -3934,18 +3956,10 @@ impl App {
                             theme::with_alpha(theme::border(), 0x66)
                         },
                     );
-                    // 원격(맥미니 등) pane 칸은 몸통 물들임과 같은 강조색으로 옅게
-                    // 덮어 곁눈으로도 「다른 기계」가 잡히게 — 명단 줄의 기계 칩과 짝
-                    // (거노 2026-09-02 「미니맵에서도 맥미니색배경」). 활성 칸은 안쪽
-                    // 판이 이 물들임을 덮고 accent 테두리가 대신 말하므로, 비활성
-                    // 칸에서 특히 읽힌다. machine 은 원격 pane 에만 Some 이다.
-                    if info.machine.is_some() && mw > 4.0 && mh > 4.0 {
-                        round_rect(g, mx, my, mw, mh, 2.0, theme::with_alpha(theme::accent(), 0x2e));
-                    }
                     // 활성 칸은 **테두리로만** 표시한다. 통으로 칠하면 pane 이 하나인
                     // 방에서 카드 머리 아래가 통짜 accent 덩어리가 되어, 배치도가
                     // 아니라 잘못 칠해진 자리로 읽힌다(실측).
-                    if (cur || signal.is_some()) && mw > 5.0 && mh > 5.0 {
+                    if (cur || signal.is_some() || info.device.is_some()) && mw > 5.0 && mh > 5.0 {
                         round_rect(
                             g,
                             mx + 1.5,
@@ -3953,11 +3967,11 @@ impl App {
                             mw - 3.0,
                             mh - 3.0,
                             1.5,
-                            if cur {
+                            pane_identity::minimap_background(if cur {
                                 theme::surface_active()
                             } else {
                                 theme::panel_bg()
-                            },
+                            }, info.device.as_deref()),
                         );
                     }
                     // 숨쉬는 건 안쪽 판이다. 테두리까지 같이 흐려지면 칸의 윤곽이
@@ -4148,11 +4162,11 @@ impl App {
                         mw,
                         mh,
                         2.0,
-                        if hov {
+                        pane_identity::minimap_background(if hov {
                             theme::surface_hover()
                         } else {
                             theme::with_alpha(theme::surface(), 0x80)
-                        },
+                        }, info.device.as_deref()),
                     );
                     if let Some((col, period)) = signal {
                         if mw > 5.0 && mh > 5.0 {
@@ -12293,7 +12307,10 @@ impl App {
                 let face = chip - chip_inset * 2.0;
                 let face_gap = 8.0_f32;
                 // 카드 폭이 감당하는 얼굴 수를 먼저 정하고(최대 9), 나머지는 +N 로 접는다.
-                let face_max = 9usize.min(faces.len());
+                let face_slots = (((win_w - 72.0).max(0.0) + face_gap) / (chip + face_gap)) as usize;
+                let face_max = if win_h < 260.0 { 0 } else {
+                    9usize.min(faces.len()).min(face_slots.saturating_sub(usize::from(faces.len() > face_slots)))
+                };
                 let overflow = faces.len().saturating_sub(face_max);
                 let btn_w = g
                     .measure_chrome_text("새로 시작", bf, false)
@@ -12319,7 +12336,11 @@ impl App {
                     .max(sub_w)
                     .max(faces_w)
                     .max(hint_w + 16.0 + btn_w * 2.0 + btn_gap);
-                let card_w = (body_w + pad * 2.0).clamp(440.0, (win_w - 48.0).max(440.0));
+                let card_w = (body_w + pad * 2.0).max(440.0).min((win_w - 24.0).max(1.0));
+                let title_display = crate::info::fit_text(g, RESTORE_TITLE, (card_w - pad * 2.0 - close - 12.0).max(1.0), 16.0, true);
+                let subtitle = crate::info::fit_text(g, &subtitle, (card_w - pad * 2.0).max(1.0), 12.5, false);
+                let hint = if hint_w + 16.0 + btn_w * 2.0 + btn_gap <= card_w - pad * 2.0 { hint } else { "" };
+                let btn_w = btn_w.min(((card_w - pad * 2.0 - btn_gap) / 2.0).max(1.0));
                 let title_y = 26.0_f32;
                 let sub_y = title_y + 26.0;
                 let faces_y = sub_y + 24.0;
@@ -12340,7 +12361,7 @@ impl App {
                 g.draw_text(
                     cx0 + pad,
                     cy0 + title_y,
-                    RESTORE_TITLE,
+                    &title_display,
                     gpu::DrawOpts {
                         font_size: 16.0,
                         color: theme::text(),
@@ -12543,9 +12564,10 @@ impl App {
                 );
                 restore_btn_hits.push((crate::RestoreBtn::Fresh, (fresh_x, btn_y, btn_w, btn_h)));
             }
-            // Keep the modal until every pane/tab has a live first frame.
+            // Restoration stays visible without a scrim or keyboard trap.
             let mut restore_retry = None;
-            if self.restore_applying.is_some() || self.restore_progress.is_some() {
+            let mut restore_toast = None;
+            if restore_toast_visible {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
                 let progress = self.restore_progress.as_ref();
@@ -12553,36 +12575,58 @@ impl App {
                     self.restore_applying.as_ref().map_or(0, |(state, _)| crate::App::count_panes(state))
                 });
                 let ready = progress.map_or(0, |p| p.ready);
-                let failed = progress.and_then(|p| p.failure.as_deref());
-                let msg = format!("창·탭 복원 중 · {ready}/{total} 준비");
-                let sub = failed.unwrap_or("모든 창이 준비되면 입력할 수 있어요");
-                let card_w = (g.measure_chrome_text(sub, 13.0, false) + 44.0)
-                    .max(360.0).min((win_w - 48.0).max(360.0));
-                let card_h = if failed.is_some() { 166.0 } else { 124.0 };
-                let x = ((win_w - card_w) / 2.0).round();
-                let y = ((win_h - card_h) / 2.0).round();
-                g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
+                let failed = progress.is_some_and(|p| p.failure.is_some());
+                let msg = "pane을 복원하는 중…";
+                let sub = progress.map(|p| p.status_line()).unwrap_or_else(|| "저장된 pane과 탭을 불러오는 중…".to_string());
+                let layout = crate::restore_progress::toast_layout(win_w, win_h, restore_bottom_reserved);
+                let (x, y, card_w, card_h) = layout.card;
+                let pad = 16.0_f32.min(card_w / 8.0);
+                let width = (card_w - 2.0 * pad).max(1.0);
+                let count = format!("{ready}/{total}");
+                let count_w = g.measure_chrome_text(&count, 12.0, false);
+                let title_width = (width - count_w - 12.0).max(1.0);
+                let msg = crate::info::fit_text(g, msg, title_width, 14.0, true);
+                let lines = crate::info::fit_text_lines(g, &sub, width, 12.0, false, 2, false);
                 panel_rect_outlined(g, x, y, card_w, card_h, theme::radius_md() * 1.5, theme::surface_active());
-                g.draw_text(x + 22.0, y + 34.0, &msg, gpu::DrawOpts {
-                    font_size: 16.0, color: theme::text(), bold: true, italic: false,
-                });
-                g.draw_text(x + 22.0, y + 60.0, sub, gpu::DrawOpts {
-                    font_size: 13.0, color: theme::with_alpha(theme::text(), 0xB0), bold: false, italic: false,
-                });
-                let width = card_w - 44.0;
-                g.rect(x + 22.0, y + 82.0, width, 6.0, theme::surface());
+                if card_h >= 52.0 && width >= count_w + 24.0 {
+                    g.draw_text(x + pad, y + 14.0, &msg, gpu::DrawOpts {
+                        font_size: 14.0, color: theme::text(), bold: true, italic: false,
+                    });
+                    g.draw_text(x + card_w - pad - count_w, y + 15.0, &count, gpu::DrawOpts {
+                        font_size: 12.0, color: theme::with_alpha(theme::text(), 0xB0), bold: false, italic: false,
+                    });
+                }
+                let show_retry = failed && card_h >= 120.0;
+                let bar_y = if show_retry { layout.retry.1 - 10.0 } else { y + card_h - 18.0 };
+                for (i, line) in lines.iter().enumerate() {
+                    let line_y = y + 40.0 + i as f32 * 17.0;
+                    if line_y + 14.0 > bar_y - 6.0 { break; }
+                    g.draw_text(x + pad, line_y, line, gpu::DrawOpts {
+                        font_size: 12.0, color: theme::with_alpha(theme::text(), 0xB0), bold: false, italic: false,
+                    });
+                }
                 let fraction = if total == 0 { 0.0 } else { ready as f32 / total as f32 };
-                g.rect(x + 22.0, y + 82.0, width * fraction, 6.0, theme::text());
-                if failed.is_some() {
-                    let rect = (x + card_w - 126.0, y + 110.0, 104.0, 34.0);
-                    panel_rect_outlined(g, rect.0, rect.1, rect.2, rect.3, theme::radius_md(), theme::surface());
-                    g.draw_text(rect.0 + 17.0, rect.1 + 22.0, "다시 시도", gpu::DrawOpts {
+                if card_h >= 24.0 {
+                    g.rect(x + pad, bar_y, width, 5.0, theme::surface());
+                    g.rect(x + pad, bar_y, width * fraction.clamp(0.0, 1.0), 5.0, theme::text());
+                }
+                if show_retry {
+                    let rect = layout.retry;
+                    let (mx, my) = self.cursor_px;
+                    let hover = mx >= rect.0 && mx <= rect.0 + rect.2 && my >= rect.1 && my <= rect.1 + rect.3;
+                    g.hover_pointer |= hover;
+                    panel_rect_outlined(g, rect.0, rect.1, rect.2, rect.3, theme::radius_md(), theme::raised_on(theme::surface(), hover));
+                    let label = crate::info::fit_text(g, "다시 시도", (rect.2 - 16.0).max(1.0), 13.0, true);
+                    let tw = g.measure_chrome_text(&label, 13.0, true);
+                    g.draw_text(rect.0 + (rect.2 - tw) / 2.0, rect.1 + (rect.3 - 13.0) / 2.0, &label, gpu::DrawOpts {
                         font_size: 13.0, color: theme::text(), bold: true, italic: false,
                     });
-                    restore_retry = Some(rect);
                 }
+                restore_retry = show_retry.then_some(layout.retry);
+                restore_toast = Some(layout.card);
             }
             self.restore_retry_rect = restore_retry;
+            self.restore_toast_rect = restore_toast;
             // 계정 전환 확인 — 인라인 웹에서 누른 것은 웹이 그리므로 메인 몫만 본다.
             if let Some(p) = self.account_switch_confirm.as_ref() {
                 if p.surface == crate::session::ConfirmSurface::Main {
@@ -14040,7 +14084,6 @@ pub(crate) fn paint_character_swap_confirm(
         &lines,
         &[
             ("다시 띄우기", CharacterSwapBtn::Relaunch, Some(tone)),
-            ("껍데기만", CharacterSwapBtn::ShellOnly, None),
             ("취소", CharacterSwapBtn::Cancel, None),
         ],
     )

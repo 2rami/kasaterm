@@ -1470,10 +1470,27 @@ pub fn assigned(rslug: &str) -> Vec<String> {
 /// (layout.rs)가 지우므로 대체로 live 만 남는다 → 프로젝트(방)를 넘어 같은 학생이
 /// 중복 배정되는 걸 막는다(거노: 미도리 둘).
 pub fn assigned_global() -> Vec<String> {
+    assigned_global_except(None)
+}
+
+/// The current GUI owns an authoritative in-memory map; count its markers
+/// only once. Markers from other app instances remain useful reservations.
+pub fn assigned_other_instances() -> Vec<String> {
+    assigned_global_except(Some(std::process::id()))
+}
+
+fn assigned_global_except(excluded_owner: Option<u32>) -> Vec<String> {
     let mut out = Vec::new();
-    if let Ok(rooms) = std::fs::read_dir("/tmp/kasaterm-collab") {
+    if let Ok(rooms) = std::fs::read_dir(kasa_socket::collab_root()) {
         for room in rooms.flatten() {
-            out.extend(assigned_in(&room.path()));
+            let Ok(entries) = std::fs::read_dir(room.path()) else { continue };
+            for entry in entries.flatten() {
+                if !entry.file_name().to_str().is_some_and(is_marker_file) { continue; }
+                let Ok(body) = std::fs::read_to_string(entry.path()) else { continue };
+                let owner = body.lines().nth(1).and_then(|v| v.parse::<u32>().ok());
+                if excluded_owner.is_some() && excluded_owner == owner { continue; }
+                if let Some(name) = marker_name(&body) { out.push(name); }
+            }
         }
     }
     out
@@ -1578,6 +1595,64 @@ pub fn pick_random(candidates: &[String], salt: &str) -> Option<String> {
     Some(candidates[(seed % candidates.len() as u128) as usize].clone())
 }
 
+/// Stable automatic assignment: Arona first (only if selected), then the
+/// configured roster order. Reuse a student only after every candidate is in
+/// use, choosing the least-used student with the same deterministic tie-break.
+pub fn pick_in_order(candidates: &[String], taken: &[String]) -> Option<String> {
+    pick_in_order_after(candidates, taken, None)
+}
+
+/// Advance only when a fresh harness starts; freeing a seat does not reset the
+/// order to Arona. Restoring a conversation does not consume the cursor.
+pub fn pick_in_order_after(candidates: &[String], taken: &[String], previous: Option<&str>) -> Option<String> {
+    let mut ordered = Vec::new();
+    for name in candidates.iter().filter(|n| n.as_str() == "아로나").chain(candidates) {
+        if !name.is_empty() && !ordered.contains(name) { ordered.push(name.clone()); }
+    }
+    if let Some(index) = previous.and_then(|name| ordered.iter().position(|n| n == name)) {
+        let shift = (index + 1) % ordered.len();
+        ordered.rotate_left(shift);
+    }
+    least_used(&ordered, taken).into_iter().next()
+}
+
+#[cfg(test)]
+mod ordered_assignment_tests {
+    use super::*;
+
+    #[test]
+    fn exiting_a_harness_does_not_reset_the_fresh_launch_order() {
+        let candidates = ["미도리", "모모이", "아로나"].map(String::from);
+        assert_eq!(pick_in_order_after(&candidates, &[], None).as_deref(), Some("아로나"));
+        assert_eq!(pick_in_order_after(&candidates, &[], Some("아로나")).as_deref(), Some("미도리"));
+        assert_eq!(pick_in_order_after(&candidates, &["미도리".into()], Some("아로나")).as_deref(), Some("모모이"));
+        assert_eq!(pick_in_order_after(&candidates, &[], Some("모모이")).as_deref(), Some("아로나"));
+    }
+
+    #[test]
+    fn arona_first_then_selected_order_skipping_every_reserved_student() {
+        let candidates = ["미도리", "모모이", "아로나", "히후미"].map(String::from);
+        let mut assigned = Vec::new();
+        for expected in ["아로나", "미도리", "모모이", "히후미"] {
+            let next = pick_in_order(&candidates, &assigned).unwrap();
+            assert_eq!(next, expected);
+            assigned.push(next);
+        }
+        assert_eq!(pick_in_order(&candidates, &assigned).as_deref(), Some("아로나"));
+        assigned.push("아로나".into());
+        assert_eq!(pick_in_order(&candidates, &assigned).as_deref(), Some("미도리"));
+    }
+
+    #[test]
+    fn selection_and_current_workers_win_over_arona_preference() {
+        let candidates = ["히후미", "미도리", "히후미"].map(String::from);
+        assert_eq!(pick_in_order(&candidates, &[]).as_deref(), Some("히후미"));
+        assert_eq!(pick_in_order(&candidates, &["히후미".into()]).as_deref(), Some("미도리"));
+        assert!(pick_in_order(&[], &[]).is_none());
+        assert_eq!(pick_in_order(&["미도리".into(), "아로나".into()], &["아로나".into()]).as_deref(), Some("미도리"));
+    }
+}
+
 /// character-<N> 마커를 원자적으로 쓴다(tmp → rename). board 가 즉시 읽는다.
 ///
 /// 둘째 줄에 이 프로세스 pid 를 남긴다 — 마커가 죽은 뒤에도 남는 문제를
@@ -1597,6 +1672,7 @@ pub fn write_marker(rslug: &str, surface_id: &str, name: &str) -> std::io::Resul
 /// (window.json 등 기존 상태 저장과 같은 config 디렉토리). 같은 세션을 --resume 등으로
 /// 이어가면 같은 캐릭터를 재사용하기 위한 저장소(거노: 재시작하면 프라나가 미도리로 둔갑).
 fn session_char_path() -> PathBuf {
+    if let Some(root) = kasa_socket::isolated_collab_root() { return root.join("session_characters.json"); }
     kasa_socket::home_dir()
         .unwrap_or_default()
         .join(".config/kasaterm/session_characters.json")
@@ -1665,6 +1741,12 @@ fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Res
     if sid.is_empty() || name.is_empty() {
         return Ok(());
     }
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    // Atomic rename alone does not protect the read/modify/write transaction:
+    // concurrent launches could each erase the other's session assignment.
+    let guard = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(path.with_extension("json.lock"))?;
+    guard.lock()?;
     let mut map = load_session_chars(path);
     if map.get(sid).and_then(|v| v.as_str()) == Some(name) {
         return Ok(());
@@ -1673,7 +1755,7 @@ fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Res
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     let body = serde_json::to_string_pretty(&Value::Object(map)).map_err(std::io::Error::other)?;
     std::fs::write(&tmp, body)?;
     let r = std::fs::rename(&tmp, path);
@@ -1683,6 +1765,28 @@ fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Res
         *g = None;
     }
     r
+}
+
+#[cfg(test)]
+mod binding_race_tests {
+    #[test]
+    fn simultaneous_launches_preserve_every_session_identity() {
+        let root = std::env::temp_dir().join(format!("kasaterm-identity-race-{}", uuid::Uuid::new_v4()));
+        let path = root.join("characters.json");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let workers: Vec<_> = (0..12).map(|i| {
+            let (path, barrier) = (path.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                super::bind_session_character_in(&path, &format!("session-{i}"), &format!("student-{i}")).unwrap();
+            })
+        }).collect();
+        for worker in workers { worker.join().unwrap(); }
+        let saved = super::load_session_chars(&path);
+        assert_eq!(saved.len(), 12);
+        for i in 0..12 { assert_eq!(saved[&format!("session-{i}")], format!("student-{i}")); }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// 새 `claude --session-id` 용 uuid. claude 가 엄격한 UUID 형식을 요구하므로

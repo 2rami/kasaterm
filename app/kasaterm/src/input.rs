@@ -1,6 +1,33 @@
 //! 키/마우스/휠 입력 + 클립보드 + claude 상태 글리프/타이틀.
 use super::*;
 
+fn image_paste_restore_error(layout_blocked: bool, surface_blocked: bool) -> Option<&'static str> {
+    (layout_blocked || surface_blocked)
+        .then_some("아직 복원 중인 pane이에요. 준비되면 사진을 다시 붙여 주세요")
+}
+
+#[cfg(test)]
+mod restore_image_input_tests {
+    use super::image_paste_restore_error;
+
+    #[test]
+    fn image_paste_respects_both_layout_and_target_readiness() {
+        for (layout_blocked, target_blocked) in [(true, false), (true, true), (false, true)] {
+            assert!(image_paste_restore_error(layout_blocked, target_blocked).is_some(),
+                "clipboard images and dropped photos must not bypass terminal input protection");
+        }
+    }
+
+    #[test]
+    fn ready_target_accepts_images_while_other_panes_restore() {
+        assert!(image_paste_restore_error(false, false).is_none(),
+            "visible restore progress is not itself a reason to block a ready target");
+        assert!(image_paste_restore_error(false, true).is_some());
+        assert!(image_paste_restore_error(false, false).is_none(),
+            "retrying after this target becomes ready must not retain a global lock");
+    }
+}
+
 /// None means the viewer already exhausted its local rows toward older history.
 fn mirror_scroll_offset(current: usize, maximum: usize, lines: i32) -> Option<usize> {
     let current = current.min(maximum);
@@ -160,6 +187,10 @@ impl App {
     /// syllable in the newly-focused terminal.
     pub(crate) fn send_bytes_to_surface(&self, surface: Option<&str>, bytes: &[u8]) {
         if bytes.is_empty() || self.restoration_blocks_input() {
+            return;
+        }
+        let fallback_surface = surface.is_none().then(|| self.target_surface()).flatten();
+        if surface.or(fallback_surface.as_deref()).is_some_and(|id| self.restoration_blocks_surface(id)) {
             return;
         }
         // Route to whichever backend owns the *active tab*. In-pane tabs
@@ -382,6 +413,7 @@ impl App {
         lines: i32,
     ) -> bool {
         let stored = self.mirror_view_scroll.get(tab_pid).copied();
+        self.turn.clear_mirror_target(tab_pid);
         let current = stored.unwrap_or(projection.scroll_from_bottom).min(projection.max_scroll);
         let history_offset = self.pty.get(tab_pid).map_or(0, |pty| pty.view_state().0);
         if mirror_uses_parser_history(current, projection.max_scroll, lines, history_offset) {
@@ -750,6 +782,7 @@ impl App {
             }
         }
         self.pane_busy_check = Some(now);
+        self.release_finished_agent_identities();
         // 지난 프레임에 위로 스크롤돼 있던 pane 의 프롬프트 목록을 깊게 채운다.
         // **표시를 비우면서** 가져간다 — 아래로 내린 pane 이 목록에 남아 있으면
         // 틱마다 파일을 되짚게 된다. 계속 올려다보는 중이면 렌더가 다음 프레임에
@@ -1816,6 +1849,15 @@ impl App {
         }
     }
     pub(crate) fn paste_image_to_surface(&self, surface: String, bytes: Vec<u8>) {
+        // Images bypass send_bytes_to_surface: remote images use HTTP and local
+        // images dispatch a clipboard event. Guard before either path can
+        // transfer bytes, modify a clipboard or send the harness paste key.
+        if let Some(error) = image_paste_restore_error(
+            self.restoration_blocks_input(), self.restoration_blocks_surface(&surface),
+        ) {
+            let _ = self.proxy.send_event(UserEvent::ImagePasteDone(Err(error.into())));
+            return;
+        }
         if let Some(remote) = kasa_mcp::remote::remote_info(&surface) {
             let proxy = self.proxy.clone();
             std::thread::spawn(move || {
@@ -2901,6 +2943,7 @@ impl App {
     fn follow_live_tail_now(&mut self) {
         let Some(id) = self.target_surface() else { return };
         self.mirror_view_scroll.remove(&id);
+        self.turn.clear_mirror_target(&id);
         let Some(sess) = self.pty_for_pane(&id) else { return };
         if sess.view_state().0 > 0 {
             sess.scroll_to_bottom();
@@ -3216,6 +3259,7 @@ impl App {
         // scroll offsets are left alone — switching focus by clicking
         // doesn't disturb where the user was reading.
         if let Some(pid) = self.target_surface() {
+            self.turn.clear_mirror_target(&pid);
             if self.mirror_view_scroll.remove(&pid).is_some() { self.chrome_dirty = true; }
         }
         if let Ok(mut ws) = self.ws.lock() {

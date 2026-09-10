@@ -394,9 +394,14 @@ RgbColor tintToward(Color base, Color accent, double amount) {
 
 /// 입력상자 — 테두리 줄은 배경을 터미널색으로 되돌리고 글리프만 학생색, ❯ 도 학생색.
 /// codex 의 칠해진 입력행은 배경을 학생색 쪽으로 22% 끌어당긴다.
-void _stylePromptBox(List<List<_Cell>> rows, Set<int> touched, Color accent) {
+void _stylePromptBox(
+  List<List<_Cell>> rows,
+  Set<int> touched,
+  StudentStyle st,
+) {
   final bx = _promptBox(rows);
   if (bx == null) return;
+  final accent = st.accent;
   final fg = _rgb(accent);
   switch (bx) {
     case _Bordered(:final top, :final bottom):
@@ -411,13 +416,10 @@ void _stylePromptBox(List<List<_Cell>> rows, Set<int> touched, Color accent) {
       for (var i = start; i < end; i++) {
         touched.add(i);
         for (final c in rows[i]) {
-          if (c.bg case RgbColor(:final r, :final g, :final b)) {
-            c.bg = tintToward(
-              Color.fromARGB(255, r, g, b),
-              accent,
-              _promptTint,
-            );
-          }
+          // Only the structurally identified live input band is a theme
+          // surface. Source gray/truecolor fills must not carry source mode
+          // into the viewer; unrelated syntax/diff backgrounds stay untouched.
+          c.bg = tintToward(st.bg, accent, _promptTint);
         }
       }
   }
@@ -1488,7 +1490,7 @@ StyledGrid restyleClaude(
     }
   }
 
-  _stylePromptBox(rows, touched, accent);
+  _stylePromptBox(rows, touched, st);
   if (st.codex && (st.session ?? '').isNotEmpty) {
     _overlayCodexSessionLabel(rows, touched, st.session!, accent, width);
   }

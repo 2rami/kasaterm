@@ -2126,6 +2126,17 @@ async fn repersona_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+async fn agent_identity_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let field = |key| params.get(key).map(String::as_str).unwrap_or("");
+    match backend.prepare_agent_identity(field("surface"), field("sid"), field("character"), field("pid").parse().unwrap_or(0)) {
+        Ok(identity) => (axum::http::StatusCode::OK, Json(identity)),
+        Err(error) => (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": error.to_string()}))),
+    }
+}
+
 /// `POST /term/character-theme?theme=<id>` (body = `character_picks` JSON) —
 /// 이사(migrate)가 출발지의 캐릭터 테마 선택을 이 기계에 재현하는 창구.
 /// 값만 설정 파일에 밖에서 적으면 도는 앱의 캐시(활성 테마·로스터)가 낡은 채
@@ -3790,6 +3801,9 @@ async fn claude_usage_handler(
         .get("dir")
         .cloned()
         .unwrap_or_else(|| std::env::var("KASATERM_CLAUDE_ACCOUNT_DIR").unwrap_or_default());
+    // The shared workbench keeps the same empty runtime directory across
+    // account switches. Cache by its stamped account, never by that directory.
+    let cache_slot = usage_cache_slot(&dir, active_vault_dir().as_deref());
 
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
     // `account_dir` 을 함께 돌려준다 — 어느 계정의 숫자인지 소비자가 알 수 있어야
@@ -3810,7 +3824,7 @@ async fn claude_usage_handler(
     let fresh = params.get("fresh").is_some_and(|v| v == "1" || v == "true");
     // 1) 신선한 캐시(60초 이내 성공)면 upstream 없이 그대로.
     if let Ok(g) = cache.lock() {
-        if let Some((Some(at), v)) = g.get(&dir) {
+        if let Some((Some(at), v)) = g.get(&cache_slot) {
             if !fresh && at.elapsed() < TTL {
                 return (cors, Json(ok(v, false)));
             }
@@ -3823,13 +3837,13 @@ async fn claude_usage_handler(
     {
         let mut seed = None;
         if let Ok(g) = cache.lock() {
-            if !g.contains_key(&dir) {
-                seed = load_usage_disk(&dir);
+            if !g.contains_key(&cache_slot) {
+                seed = load_usage_disk(&cache_slot);
             }
         }
         if let Some(v) = seed {
             if let Ok(mut g) = cache.lock() {
-                g.entry(dir.clone()).or_insert((None, v));
+                g.entry(cache_slot.clone()).or_insert((None, v));
             }
         }
     }
@@ -3907,11 +3921,17 @@ async fn claude_usage_handler(
             }
         }
     }
+    // Do not publish or persist an answer fetched across an account switch.
+    if usage_cache_slot(&dir, active_vault_dir().as_deref()) != cache_slot {
+        return (cors, Json(serde_json::json!({
+            "ok": false, "reason": "account_changed", "account_dir": dir,
+        })));
+    }
     if let Some(v) = fresh {
         if let Ok(mut g) = cache.lock() {
-            g.insert(dir.clone(), (Some(Instant::now()), v.clone()));
+            g.insert(cache_slot.clone(), (Some(Instant::now()), v.clone()));
         }
-        save_usage_disk(&dir, &v);
+        save_usage_disk(&cache_slot, &v);
         return (cors, Json(ok(&v, false)));
     }
 
@@ -3919,7 +3939,7 @@ async fn claude_usage_handler(
     //    폴백(pill 유지). **다른 슬롯 값으로는 절대 폴백하지 않는다** — 그게 전에
     //    한 계정의 숫자를 세 계정에 전부 붙여 보이던 경로다.
     if let Ok(g) = cache.lock() {
-        if let Some((_, v)) = g.get(&dir) {
+        if let Some((_, v)) = g.get(&cache_slot) {
             return (cors, Json(ok(v, true)));
         }
     }
@@ -3940,6 +3960,18 @@ async fn claude_usage_handler(
             "ok": false, "error": msg, "reason": why, "account_dir": dir,
         })),
     )
+}
+
+fn usage_cache_slot(dir: &str, active_vault: Option<&str>) -> String {
+    if !dir.is_empty() {
+        return dir.to_string();
+    }
+    // Old empty-dir snapshots have no account provenance and may belong to a
+    // previously selected slot. Even the default login gets a new explicit key.
+    active_vault
+        .filter(|slot| !slot.is_empty())
+        .unwrap_or("@default-login")
+        .to_string()
 }
 
 /// 갱신이 **400/401 로 거부된** 슬롯. 그건 refresh token 이 죽었다는 뜻이라
@@ -4568,6 +4600,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
             let b = raw.filter(|p| p.harness.is_some() && remote.is_none());
             serde_json::json!({
                 "id": id,
+                "surface_key": crate::surface_keys::get(&id),
                 "mirror_of": mirror_label,
                 "name": b.and_then(|p| p.character.clone()),
                 "title": b.map(|p| p.title.clone()).filter(|s| !s.is_empty()),
@@ -6481,7 +6514,7 @@ pub fn push_viewer_control(pane: &str, text: &str) -> usize {
 /// 구독 시작 시점의 "지금 화면"과 이후 스트림. 둘을 한 락에서 받아야 그 사이
 /// 프레임이 유실되지 않는다(`tap_bytes_with_snapshot` 주석).
 enum Tap {
-    Bytes(kasa_pty::ScreenReceiver<Vec<u8>>, Vec<u8>),
+    Bytes(kasa_pty::ScreenReceiver<Vec<u8>>, Vec<u8>, (u16, u16)),
     Grid(
         kasa_pty::ScreenReceiver<kasa_bridge::screen::ScreenUpdate>,
         Box<kasa_bridge::screen::ScreenUpdate>,
@@ -6544,7 +6577,8 @@ async fn term_ws_handler(
     // 뒤집힌다: resize 를 force 없이 받고, 끊겨도 격자를 되돌리지 않으며(소유자가
     // 정한 크기가 곧 원본), kill 제어 메시지를 받는다.
     let own = q.get("own").map_or(false, |v| v == "1" || v == "true");
-    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own, glyphs))
+    let expected_surface_key = q.get("surface_key").cloned();
+    ws.on_upgrade(move |socket| term_ws_run(socket, pane, pane_raw, cwd, grid, own, glyphs, expected_surface_key))
         .into_response()
 }
 
@@ -6556,6 +6590,7 @@ async fn term_ws_run(
     want_grid: bool,
     own: bool,
     glyphs: bool,
+    expected_surface_key: Option<String>,
 ) {
     use futures_util::{SinkExt, StreamExt};
     // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
@@ -6609,6 +6644,14 @@ async fn term_ws_run(
             }
         }
     };
+    // A pane number can be reused between discovery and this handshake. Bind
+    // only the exact persisted surface requested by an identity-aware viewer.
+    if expected_surface_key.as_ref().is_some_and(|expected| crate::surface_keys::get(&self_id).as_ref() != Some(expected)) {
+        let _ = socket.send(Message::Text(serde_json::json!({
+            "t": "gone", "reason": "surface_identity_changed"
+        }).to_string().into())).await;
+        return;
+    }
     let viewport = ViewerViewport::new(sess.clone());
     let viewport_token = viewport.token;
     let mut visual_subscription = (want_grid && crate::visual::producer_available())
@@ -6626,8 +6669,8 @@ async fn term_ws_run(
         let snap = if sess.view_state().0 > 0 { sess.live_screen() } else { snap };
         Tap::Grid(rx, Box::new(snap))
     } else {
-        let (rx, bytes) = sess.tap_bytes_with_snapshot();
-        Tap::Bytes(rx, bytes)
+        let (rx, bytes, size) = sess.tap_bytes_with_sized_snapshot();
+        Tap::Bytes(rx, bytes, size)
     };
     // kill 제어가 놓아 줄 대상 — self_id 는 아래 size 메시지에 실려 move 된다.
     let kill_id = self_id.clone();
@@ -6635,13 +6678,19 @@ async fn term_ws_run(
     let (mut ws_tx, mut ws_rx) = socket.split();
     // 붙자마자 현재 격자 크기를 알려 준다 — 미러는 이 크기에 자기를 맞춰야
     // 줄바꿈이 어긋나지 않는다(웹이 PTY 를 바꾸면 kasaterm 쪽이 깨지므로).
-    let (c, r) = sess.size();
+    // Captured bytes must be parsed at their capture dimensions. Reading
+    // sess.size() here races a resize after subscription/snapshot capture.
+    let (c, r) = match &tap {
+        Tap::Bytes(_, _, size) => *size,
+        Tap::Grid(_, snap) => (snap.cols, snap.rows),
+    };
     // `id` 는 이 연결이 실제로 붙은 세션 — 새 셸은 서버가 지은 web-uuid 라 클라가
     // 이걸 받아야 목록에서 자기 행(「보는 중」)을 안다.
     let _ = ws_tx
         .send(Message::Text(
             serde_json::json!({
                 "t": "size", "cols": c, "rows": r, "mirror": mirrored, "id": self_id,
+                "surface_key": crate::surface_keys::get(&self_id),
                 "capabilities": if native_scene {
                     serde_json::json!({ "mirror_viewport": 1, "native_scene": 1 })
                 } else { serde_json::json!({ "mirror_viewport": 1 }) },
@@ -6671,7 +6720,7 @@ async fn term_ws_run(
     // 후자는 만든 쪽이 곧 보는 사람이라(맥북의 `mini` 창) 거기가 브라우저의 자리다.
     let ctl_token = register_viewer_ctl(&ctl_pane, btx.clone());
     match tap {
-        Tap::Bytes(rx, screen) => {
+        Tap::Bytes(rx, screen, _) => {
             let _ = ws_tx.send(Message::Binary(screen.into())).await;
             std::thread::spawn(move || {
                 while let Ok(chunk) = rx.recv() {
@@ -6776,6 +6825,15 @@ async fn term_ws_run(
                     // full snapshot 출력을 동반하므로(chunk) 여기서 보면 놓치지 않는다.
                     let now = sess_sz.size();
                     if now != last_size {
+                        if !want_grid {
+                            // A byte delta can beat the quiet-resize timer.
+                            // It cannot repair already-reflowed source history,
+                            // and can itself have been queued at the old width.
+                            // Reattach for an atomic history+screen snapshot;
+                            // do not advance last_size and bypass the timer.
+                            let _ = ws_tx.send(Message::Close(None)).await;
+                            break;
+                        }
                         last_size = now;
                         let msg = serde_json::json!({
                             "t": "size", "cols": now.0, "rows": now.1, "mirror": mirrored,
@@ -7160,6 +7218,7 @@ pub fn spawn_http_server_opts(
                 let broadcast_backend = backend.clone();
                 let swap_character_backend = backend.clone();
                 let repersona_backend = backend.clone();
+                let agent_identity_backend = backend.clone();
                 let session_close_backend = backend.clone();
                 let slash_backend = backend.clone();
                 let session_restore_backend = backend.clone();
@@ -7622,6 +7681,7 @@ pub fn spawn_http_server_opts(
                         }),
                     )
                     .route("/teamname", get(teamname_handler))
+                    .route("/agent-identity", post(move |q| agent_identity_handler(agent_identity_backend.clone(), q)))
                     .route("/persona", get(persona_handler))
                     .route("/persona-portrait", get(persona_portrait_handler))
                     .route(
@@ -7945,6 +8005,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_resize_reconnects_before_new_size_or_delta_for_quiet_and_busy_sources() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        for emit_delta in [false, true] {
+            let id = format!("raw-resize-http-{}", uuid::Uuid::new_v4());
+            let (source, events, _) = replacement_source(&id, 26);
+            events.send(kasa_pty::ExtEvent::Bytes(b"ORIGINAL".to_vec())).unwrap();
+            wait_replacement_text(&source, "ORIGINAL").await;
+            kasa_pty::register_session(&id, &source);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let router = axum::Router::new().route("/term/ws", axum::routing::get(super::term_ws_handler));
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let url = format!("ws://{addr}/term/ws?pane={id}&own=0");
+            let (mut client, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(Ok(message)) = client.next().await {
+                    if matches!(message, Message::Binary(ref bytes) if String::from_utf8_lossy(bytes).contains("ORIGINAL")) { return; }
+                }
+                panic!("initial raw snapshot missing");
+            }).await.unwrap();
+            // Let the watcher's initial tick run. The busy case then wakes
+            // the byte branch before its next interval rather than relying
+            // exclusively on quiet-resize polling.
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            source.resize(93, 6).unwrap();
+            if emit_delta { events.send(kasa_pty::ExtEvent::Bytes(b"RESIZED_OUTPUT".to_vec())).unwrap(); }
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(Ok(message)) = client.next().await {
+                    match message {
+                        Message::Close(_) => return,
+                        Message::Text(text) => assert_ne!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["t"], "size",
+                            "raw size+delta bypassed authoritative history resubscription"),
+                        Message::Binary(_) => panic!("queued raw delta crossed resize before snapshot"),
+                        _ => {},
+                    }
+                }
+                panic!("source did not close raw stream for resnapshot");
+            }).await.unwrap();
+            drop(client);
+            let (mut fresh, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            let first = tokio::time::timeout(std::time::Duration::from_secs(3), fresh.next()).await.unwrap().unwrap().unwrap();
+            let Message::Text(size) = first else { panic!("snapshot missing its size handshake") };
+            let size: serde_json::Value = serde_json::from_str(&size).unwrap();
+            assert_eq!(size["cols"], 93);
+            drop(fresh);
+            server.abort();
+            let _ = events.send(kasa_pty::ExtEvent::Eof);
+        }
+    }
+
+    #[tokio::test]
     async fn websocket_session_replacement_closes_quiet_views_without_gone_or_stale_input() {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -8023,6 +8135,32 @@ mod tests {
             new_events.send(kasa_pty::ExtEvent::Eof).unwrap();
             server.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_reused_number_before_any_source_frame() {
+        use futures_util::StreamExt;
+        let id = format!("identity-guard-{}", uuid::Uuid::new_v4());
+        let (source, events, _) = replacement_source(&id, 21);
+        events.send(kasa_pty::ExtEvent::Bytes(b"WRONG-SURFACE".to_vec())).unwrap();
+        wait_replacement_text(&source, "WRONG-SURFACE").await;
+        kasa_pty::register_session(&id, &source);
+        crate::surface_keys::set(&id, "replacement-key");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = axum::Router::new().route("/term/ws", axum::routing::get(super::term_ws_handler));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let (mut viewer, _) = tokio_tungstenite::connect_async(
+            format!("ws://{addr}/term/ws?pane={id}&surface_key=legacy%3A%254")
+        ).await.unwrap();
+        let message = tokio::time::timeout(std::time::Duration::from_secs(2), viewer.next())
+            .await.unwrap().unwrap().unwrap();
+        let payload: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+        assert_eq!(payload["t"], "gone");
+        assert_eq!(payload["reason"], "surface_identity_changed");
+        crate::surface_keys::remove(&id);
+        events.send(kasa_pty::ExtEvent::Eof).unwrap();
+        server.abort();
     }
 
     #[tokio::test]
@@ -8542,6 +8680,30 @@ mod tests {
         assert_eq!(usage_from_snapshot(&doc, "/slots/acct-1", now), Some(b));
         // 기록이 없는 슬롯은 **다른 슬롯 값으로 폴백하지 않는다** — 빈 값이 틀린 값보다 낫다.
         assert_eq!(usage_from_snapshot(&doc, "/slots/acct-2", now), None);
+    }
+
+    #[test]
+    fn shared_workbench_usage_follows_account_identity_and_rejects_unowned_history() {
+        let now = 1_785_000_000u64;
+        let account_a = usage_cache_slot("", Some("/slots/acct-a"));
+        let account_b = usage_cache_slot("", Some("/slots/acct-b"));
+        let default = usage_cache_slot("", None);
+        let old = serde_json::json!({"limits":[{"percent":3}]});
+        let a = serde_json::json!({"limits":[{"percent":52}]});
+        let b = serde_json::json!({"limits":[{"percent":71}]});
+        let doc = merge_usage_snapshot(None, "", &old, now);
+        assert_eq!(usage_from_snapshot(&doc, &account_a, now), None);
+        assert_eq!(usage_from_snapshot(&doc, &default, now), None);
+        let doc = merge_usage_snapshot(Some(&doc), &account_a, &a, now);
+        assert_eq!(usage_from_snapshot(&doc, &account_b, now), None);
+        let doc = merge_usage_snapshot(Some(&doc), &account_b, &b, now);
+        assert_eq!(usage_from_snapshot(&doc, &account_a, now), Some(a));
+        assert_eq!(usage_from_snapshot(&doc, &account_b, now), Some(b));
+        assert_eq!(
+            usage_cache_slot("/slots/acct-a", Some("/slots/acct-b")),
+            account_a
+        );
+        assert_eq!(usage_cache_slot("", Some("")), default);
     }
 
     /// 낡은 값이라도 하루까지는 살린다 — upstream 이 오래 막혔을 때 빈칸보다

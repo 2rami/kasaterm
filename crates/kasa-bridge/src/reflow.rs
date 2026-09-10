@@ -113,13 +113,17 @@ struct RowReflow {
     indent: usize,
 }
 
-const MARKS: &[char] = &['-', '*', '>', '•', '●', '⏺', '⎿', '❯', '▸', '▪'];
+// Keep parity with mobile/lib/reflow.dart: Codex tool-result branches are
+// hanging text prefixes, not table borders.
+const MARKS: &[char] = &['-', '*', '>', '•', '●', '⏺', '⎿', '❯', '▸', '▪', '└', '├'];
+
+fn layout_space(ch: char) -> bool { matches!(ch, ' ' | '\u{a0}') }
 
 /// 글머리(- * > • ⎿ 1. 2)) 뒤 글이 시작하는 칸 — 이어지는 조각을 여기 맞춘다. 글머리가
 /// 없으면 앞 빈칸 수.
 fn hanging_indent(g: &[Glyph]) -> usize {
     let mut i = 0;
-    while i < g.len() && g[i].ch() == ' ' {
+    while i < g.len() && layout_space(g[i].ch()) {
         i += 1;
     }
     if i >= g.len() {
@@ -141,9 +145,9 @@ fn hanging_indent(g: &[Glyph]) -> usize {
     if j == i {
         return i;
     }
-    if j < g.len() && g[j].ch() == ' ' {
+    if j < g.len() && layout_space(g[j].ch()) {
         let mut k = j;
-        while k < g.len() && g[k].ch() == ' ' {
+        while k < g.len() && layout_space(g[k].ch()) {
             k += 1;
         }
         return width_of(&g[..k]);
@@ -389,15 +393,17 @@ impl Info {
 fn info_of(t: &[Glyph]) -> Info {
     let width = width_of(t);
     let mut i = 0;
-    while i < t.len() && t[i].ch() == ' ' {
+    while i < t.len() && layout_space(t[i].ch()) {
         i += 1;
     }
-    let prose = i < t.len() && !('\u{2500}'..='\u{259f}').contains(&t[i].ch());
+    // Match mobile: branch glyphs used as Claude result bullets are prose,
+    // even though their code points live among box-drawing characters.
+    let prose = i < t.len() && (!('\u{2500}'..='\u{259f}').contains(&t[i].ch()) || MARKS.contains(&t[i].ch()));
     let mut words = 0;
     let mut in_word = false;
     let mut first_word = 0;
     for g in &t[i..] {
-        let space = g.ch() == ' ';
+        let space = layout_space(g.ch());
         if !space && !in_word {
             words += 1;
         }
@@ -486,6 +492,21 @@ fn join_rows(rows: &[Vec<Glyph>], infos: &[Info], src_cols: usize) -> (Vec<Glyph
         out.extend_from_slice(&row[from..]);
     }
     (out, offsets)
+}
+
+/// The same paragraph-continuation decision used by the mobile/web reflow.
+/// Consumers retaining a source-cell map can join the rows themselves without
+/// approximating positions from the already reflowed output. The tuple is the
+/// next row's leading padding to omit and whether to insert a word separator.
+pub fn paragraph_continuation(previous: &Row, next: &Row, src_cols: usize) -> Option<(usize, bool)> {
+    let previous = trimmed(previous);
+    let next = trimmed(next);
+    let a = info_of(&previous);
+    let b = info_of(&next);
+    if !continues(&a, &b, src_cols) { return None; }
+    let from = b.lead.min(next.len());
+    let separator = !(a.width == src_cols && token_break(&previous, &next[from..]));
+    Some((b.lead, separator))
 }
 
 /// 다시 접은 격자.

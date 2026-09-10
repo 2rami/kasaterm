@@ -2,6 +2,77 @@
 //! main.rs 에서 분리. impl App 메서드·타입은 crate root 그대로 참조.
 use super::*;
 
+fn restore_rect_contains((x, y, w, h): (f32, f32, f32, f32), point: (f32, f32)) -> bool {
+    w > 0.0 && h > 0.0 && point.0 >= x && point.0 <= x + w && point.1 >= y && point.1 <= y + h
+}
+
+/// Consume only pointer actions on the toast, never keyboard input or events
+/// outside it. In particular, a toast button must not also click the terminal.
+fn restore_toast_captures_pointer(
+    event: &WindowEvent,
+    cursor: (f32, f32),
+    scale: f32,
+    card: Option<(f32, f32, f32, f32)>,
+) -> bool {
+    let point = match event {
+        WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. }
+        | WindowEvent::DroppedFile(_) => cursor,
+        WindowEvent::Touch(touch) => (
+            touch.location.x as f32 / scale.max(f32::EPSILON),
+            touch.location.y as f32 / scale.max(f32::EPSILON),
+        ),
+        _ => return false,
+    };
+    card.is_some_and(|rect| restore_rect_contains(rect, point))
+}
+
+#[cfg(test)]
+mod restore_toast_input_tests {
+    use super::*;
+
+    const CARD: Option<(f32, f32, f32, f32)> = Some((100.0, 80.0, 360.0, 132.0));
+
+    #[test]
+    fn toast_consumes_both_click_edges_and_wheel_only_inside_card() {
+        for state in [ElementState::Pressed, ElementState::Released] {
+            let event = WindowEvent::MouseInput {
+                device_id: winit::event::DeviceId::dummy(), state, button: MouseButton::Left,
+            };
+            assert!(restore_toast_captures_pointer(&event, (110.0, 90.0), 2.0, CARD));
+            assert!(!restore_toast_captures_pointer(&event, (90.0, 90.0), 2.0, CARD));
+            assert!(!restore_toast_captures_pointer(&event, (110.0, 90.0), 2.0, None));
+        }
+        let wheel = WindowEvent::MouseWheel {
+            device_id: winit::event::DeviceId::dummy(),
+            delta: winit::event::MouseScrollDelta::LineDelta(0.0, 1.0),
+            phase: winit::event::TouchPhase::Moved,
+        };
+        assert!(restore_toast_captures_pointer(&wheel, (110.0, 90.0), 2.0, CARD));
+        assert!(!restore_toast_captures_pointer(&wheel, (500.0, 90.0), 2.0, CARD));
+    }
+
+    #[test]
+    fn text_input_is_not_trapped_and_drop_does_not_reach_terminal() {
+        let ime = WindowEvent::Ime(winit::event::Ime::Commit("입력".into()));
+        assert!(!restore_toast_captures_pointer(&ime, (110.0, 90.0), 2.0, CARD));
+        let drop = WindowEvent::DroppedFile(std::path::PathBuf::from("photo.png"));
+        assert!(restore_toast_captures_pointer(&drop, (110.0, 90.0), 2.0, CARD));
+        assert!(!restore_toast_captures_pointer(&drop, (90.0, 90.0), 2.0, CARD));
+    }
+
+    #[test]
+    fn touch_coordinates_are_converted_from_physical_pixels() {
+        let touch = WindowEvent::Touch(winit::event::Touch {
+            device_id: winit::event::DeviceId::dummy(),
+            phase: winit::event::TouchPhase::Started,
+            location: winit::dpi::PhysicalPosition::new(220.0, 180.0),
+            force: None, id: 1,
+        });
+        assert!(restore_toast_captures_pointer(&touch, (0.0, 0.0), 2.0, CARD));
+        assert!(!restore_toast_captures_pointer(&touch, (110.0, 90.0), 4.0, CARD));
+    }
+}
+
 fn create_main_window(
     event_loop: &ActiveEventLoop,
     attrs: WindowAttributes,
@@ -125,6 +196,11 @@ impl ApplicationHandler<UserEvent> for App {
         // Local cmux socket backend delegated a pane write / split / focus to
         // this GUI thread (the socket server can't touch self.pty directly).
         match &event {
+            UserEvent::CloseGraceExpired => {
+                self.finish_close_grace();
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketBytes(sid, bytes) => {
                 {
                     let target = match sid.as_deref() {
@@ -886,7 +962,16 @@ impl ApplicationHandler<UserEvent> for App {
                 self.repersona_pane(&pane, &character);
                 return;
             }
+            UserEvent::SocketAgentIdentity(pane, sid, character, pid, reply) => {
+                let result = self.prepare_agent_identity(&pane, &sid, &character, *pid)
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(result);
+                return;
+            }
             UserEvent::SocketSessionBound(pane, sid) => {
+                if self.ws.lock().unwrap().pane_launch_character.get(pane.as_str()).is_some_and(String::is_empty) {
+                    return; // delayed metadata from an exited harness cannot reclaim the shell
+                }
                 // 배지 판정용: pane → claude 실제 sessionId(fork 시 갈라진 진짜 세션).
                 // report-cwd 가 매 렌더 이 이벤트를 재발화해 bg 세션 pane_claude_sid 를
                 // 보강하므로(F/H), 이미 같은 sid 면 no-op — 무한 relabel·render 를 막는다.
@@ -1037,20 +1122,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let members = kasa_mcp::character::roster_in_use()
                         .map(|c| kasa_mcp::character::assignable_names(&c))
                         .unwrap_or_default();
-                    let taken: std::collections::HashSet<String> = {
-                        let ws = self.ws.lock().unwrap();
-                        let mut t: std::collections::HashSet<String> =
-                            ws.pane_character.values().cloned().collect();
-                        t.extend(kasa_mcp::character::assigned_global());
-                        t
-                    };
-                    let free: Vec<String> = members
-                        .iter()
-                        .filter(|n| !taken.contains(n.as_str()))
-                        .cloned()
-                        .collect();
-                    kasa_mcp::character::pick_random(&free, id)
-                        .or_else(|| kasa_mcp::character::pick_random(&members, id))
+                    self.next_auto_character(&members, "")
                 });
                 if let Some(ch) = resolved {
                     // 부모 체인/신선 배정으로 온 학생은 세션 id 에 영속 — 재진입·board
@@ -1431,6 +1503,12 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketPasteImage(surface, bytes, reply) => {
+                if self.restoration_blocks_input() || self.restoration_blocks_surface(surface) {
+                    let error = "아직 pane을 복원하는 중이에요. 연결이 준비되면 다시 첨부해 주세요.".to_string();
+                    if let Some(reply) = reply { let _ = reply.send(Err(error)); }
+                    else { self.set_toast(error); }
+                    return;
+                }
                 // Forward bytes across another mirror, or fill the clipboard on
                 // the actual harness host. Acknowledge only after target input.
                 if let Some(remote) = kasa_mcp::remote::remote_info(surface) {
@@ -2134,6 +2212,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 방금 전환했으면 잠시 **자동 전환 판정만** 쉰다(표시는 계속 갱신).
                 let mut last_switch: Option<std::time::Instant> = None;
                 let mut seen_account = socket::read_claude_account();
+                let mut badge_account = seen_account.clone();
                 // 비활성 계정을 마지막으로 친 시각. `None` 이면 아직 안 쳤다는
                 // 뜻이라 창을 열자마자 표가 찬다.
                 //
@@ -2214,6 +2293,14 @@ impl ApplicationHandler<UserEvent> for App {
                         let _ = usage_proxy.send_event(UserEvent::Redraw);
                     }
                     let active_id = socket::read_claude_account();
+                    if active_id != badge_account {
+                        if let (Ok(mut active), Ok(mut all)) = (usage_cache.lock(), usage_all.lock()) {
+                            clear_switched_usage_badges(&mut active, &mut all);
+                        }
+                        badge_account = active_id.clone();
+                        others_at = None;
+                        let _ = usage_proxy.send_event(UserEvent::Redraw);
+                    }
                     // 도는 세션이 갱신해 둔 토큰을 금고로 되받는다. 안 하면 금고의
                     // refresh token 이 이미 쓴 값으로 굳어, 다음에 그 계정을 꺼낼 때
                     // 로그아웃된 채로 꺼내진다(1회용이라 되돌릴 수도 없다).
@@ -2236,6 +2323,9 @@ impl ApplicationHandler<UserEvent> for App {
                         .map_or(String::new(), |p| p.to_string_lossy().into_owned());
                     let fetched =
                         fetch_claude_usage(&crate::mcp_panel_port(), &active_dir, menu_open);
+                    if socket::read_claude_account() != active_id {
+                        continue;
+                    }
                     record_claude_usage_attempt(&active_dir, fetched.is_some());
                     let usage = fetched.as_ref().map(|(u, _, _)| u);
                     let next = fetched.as_ref().and_then(|(u, stale, dir)| {
@@ -2809,23 +2899,27 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        if self.restoration_blocks_input() {
+        let main_window = self.window.as_ref().is_some_and(|window| window.id() == id);
+        if main_window && (self.restore_applying.is_some() || self.restore_progress.is_some()) {
+            let scale = self.effective_scale();
+            if restore_toast_captures_pointer(&event, self.cursor_px, scale, self.restore_toast_rect) {
+                if matches!(&event, WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. }) {
+                    self.cancel_drag_over_restore_toast();
+                }
+                if matches!(&event, WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. })
+                    && self.restore_retry_rect.is_some_and(|rect| restore_rect_contains(rect, self.cursor_px))
+                {
+                    self.retry_restore();
+                }
+                return;
+            }
+        }
+        // Only layout construction is global. Once surfaces exist, each pending
+        // surface protects its own input; a progress toast never traps the user.
+        if main_window && self.restoration_blocks_input() {
             match &event {
-                WindowEvent::KeyboardInput { event, .. } => {
-                    if event.state == ElementState::Pressed
-                        && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter)
-                        && self.restore_progress.as_ref().is_some_and(|p| p.failure.is_some())
-                    { self.retry_restore(); }
-                    return;
-                }
-                WindowEvent::MouseInput { state: ElementState::Pressed, .. } => {
-                    let (x, y) = self.cursor_px;
-                    if self.window.as_ref().is_some_and(|window| window.id() == id)
-                        && self.restore_retry_rect.is_some_and(|(rx, ry, w, h)| x >= rx && x <= rx + w && y >= ry && y <= ry + h)
-                    { self.retry_restore(); }
-                    return;
-                }
-                WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
+                WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
                 | WindowEvent::Ime(_) | WindowEvent::DroppedFile(_) | WindowEvent::Touch(_) => return,
                 _ => {}
             }
@@ -3011,8 +3105,10 @@ impl ApplicationHandler<UserEvent> for App {
                     // point, and same-size PTY resizes are no-ops.
                     let (cols, rows) = self.window_cells();
                     self.resize_backend(cols, rows);
-                    for pane in self.pty.values() {
-                        pane.publish_full_snapshot();
+                    for (id, pane) in &self.pty {
+                        // A passive mirror's grid never resized. Repaint its
+                        // local projection without injecting a replacement frame.
+                        if !kasa_mcp::remote::is_view_pane(id) { pane.publish_full_snapshot(); }
                     }
                 }
                 self.repaint_all();
@@ -4316,6 +4412,10 @@ impl ApplicationHandler<UserEvent> for App {
                             .find(|(_, r, _)| hit(*r))
                             .map(|(id, _, text)| (id.clone(), text.clone()))
                     }) {
+                        if self.jump_mirror_prompt(&pane_id, &target, None) {
+                            window.request_redraw();
+                            return;
+                        }
                         // wheel 을 쏠 pane-local 셀 = 클릭 지점(그 pane 안이므로 안전).
                         let cell = self
                             .px_to_pane_cell(cx, cy)
@@ -7104,6 +7204,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.refresh_machines_col();
         self.refresh_mirror_theme();
+        self.poll_mirror_sync();
         // 참조 그림으로 굽는 잡의 진행을 걷는다 — 다 구운 것을 설치하고 프로바이더
         // 감지 캐시를 갱신한다. 설치가 GUI 스레드 몫인 이유는 로스터 갱신과 캐시
         // 무효화를 함께 해야 해서다(themegen.rs 참조).
@@ -7397,6 +7498,9 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.tick_restore_progress();
         self.run_restore_probe();
+        self.run_mirror_focus_probe(event_loop);
+        self.run_character_assignment_probe();
+        self.run_agent_identity_probe();
         // 지글 원복 — NudgePaneResize 가 1행 줄인 pane 을 원 크기로 되돌린다.
         if !self.pending_unjiggle.is_empty() {
             let now = std::time::Instant::now();
@@ -7490,6 +7594,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoclosereopen();
         self.run_pending_autopreviewreopen();
         self.run_pending_autostash();
+        self.run_pending_close_grace_probe();
         self.run_pending_autolonestash();
         self.run_pending_autohitaudit();
         self.run_pending_autoghost();
@@ -7812,6 +7917,46 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
+    /// A drop onto progress UI is not a drop onto the terminal behind it.
+    /// Disarm existing gestures so their next release cannot move files, type
+    /// a path, open a link, or complete an old pane relocation unexpectedly.
+    fn cancel_drag_over_restore_toast(&mut self) {
+        self.native_settings_end_drag();
+        self.file_tree.drag = None;
+        self.titlebar_drag_pending = None;
+        self.link_armed = None;
+        self.md_select_drag = None;
+        if let Some(selection) = self.md_render_sel.as_mut() { selection.dragging = false; }
+        self.sidebar_row_drag = None;
+        self.win_tab_drag = None;
+        self.image_pan_drag = None;
+        self.tab_drag = None;
+        self.header_drag = None;
+        let resized = self.resize_drag.take().is_some();
+        self.last_divider_pos = None;
+        self.last_divider_pty_resize = None;
+        let original = self.drag_orig_layout.take();
+        let restore_layout = original.is_some();
+        if let Some(original) = original { self.pty_layout = Some(original); }
+        self.drag_live_applied = None;
+        if restore_layout || resized {
+            let (cols, rows) = self.window_cells();
+            self.resize_backend(cols, rows);
+        }
+        // If the TUI saw the original press, it still needs a matching release.
+        if let Some(pane_id) = self.mouse_forward_pane.take() {
+            if let Some((col, row)) = self.px_to_cell_active(self.cursor_px.0, self.cursor_px.1) {
+                self.send_mouse_sgr(&pane_id, 0, col, row, false);
+            }
+        }
+        self.drag_anchor = None;
+        self.chrome_dirty = true;
+        if let Some(window) = &self.window {
+            window.set_cursor(CursorIcon::Default);
+            window.request_redraw();
+        }
+    }
+
     /// Resolve a confirm-close modal: 취소 just dismisses; 닫기 runs the pending
     /// action (a `Window` close needs the event loop to exit, the rest go
     /// through `do_close`).
@@ -8003,6 +8148,16 @@ fn merge_usage_badges(
     previous
 }
 
+fn clear_switched_usage_badges(
+    active: &mut Option<crate::UsageBadge>,
+    all: &mut HashMap<String, crate::UsageBadge>,
+) {
+    *active = None;
+    // Named vault paths retain their own account identity; only the shared
+    // workbench key changes owners when the active account changes.
+    all.remove("");
+}
+
 #[cfg(test)]
 mod usage_badge_merge_tests {
     use super::*;
@@ -8016,6 +8171,25 @@ mod usage_badge_merge_tests {
             resets_at: None,
             windows: Vec::new(),
         }
+    }
+
+    #[test]
+    fn account_switch_clears_shared_workbench_badges_without_erasing_named_accounts() {
+        let mut active = Some(badge("", 3.0));
+        let mut all = HashMap::from([
+            (String::new(), badge("", 3.0)),
+            ("/slots/acct-a".into(), badge("/slots/acct-a", 52.0)),
+        ]);
+        clear_switched_usage_badges(&mut active, &mut all);
+        assert!(active.is_none());
+        assert!(!all.contains_key(""));
+        assert_eq!(all["/slots/acct-a"].pct, 52.0);
+        let asked = std::collections::HashSet::from([String::new(), "/slots/acct-a".into()]);
+        let merged = merge_usage_badges(all, &asked, HashMap::new());
+        assert!(
+            !merged.contains_key(""),
+            "a failed new-account query cannot revive the old owner's number"
+        );
     }
 
     #[test]

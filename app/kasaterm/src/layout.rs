@@ -1,6 +1,43 @@
 //! pane 레이아웃 조작 — split/move/close/focus/swap/drop/divider/zoom/tab + 좌표·resize. daemon-authoritative.
 use super::*;
 
+/// Rebuild visibility even when the active room has lost its last pane. Live
+/// PTYs may remain in the revive list, but must no longer be published as open.
+fn publish_workspace_layout<'a>(
+    ws: &mut Workspace,
+    active: Option<&kasa_pty::PtyLayout>,
+    layouts: impl Iterator<Item = (usize, &'a kasa_pty::PtyLayout)>,
+    undocked: Vec<(String, usize)>,
+    (cols, rows): (u16, u16),
+) {
+    ws.layout = active.filter(|tree| tree.leaves().len() > 1)
+        .map(|tree| tree.to_tmux_layout(cols, rows));
+    ws.active_window_panes = active.into_iter().flat_map(|tree| tree.leaves())
+        .map(str::to_string).collect();
+    let mut pane_windows = HashMap::new();
+    let mut window_layouts = HashMap::new();
+    for (index, layout) in layouts {
+        for leaf in layout.leaves() {
+            pane_windows.insert(leaf.to_string(), index);
+        }
+        window_layouts.insert(index, layout.to_tmux_layout(cols, rows));
+    }
+    // Detached OS windows are still visible; hidden panes are not.
+    ws.undocked.clear();
+    for (pane, home) in undocked {
+        pane_windows.insert(pane.clone(), home);
+        ws.undocked.insert(pane);
+    }
+    // Tabs inherit visibility only from a currently visible outer pane.
+    for (pid, outer) in &ws.pid_to_pane {
+        if let Some(index) = pane_windows.get(outer).copied() {
+            pane_windows.entry(pid.clone()).or_insert(index);
+        }
+    }
+    ws.window_layouts = window_layouts;
+    ws.pane_window = pane_windows;
+}
+
 const REMOTE_PENDING_INPUT_LIMIT: usize = 64 * 1024;
 const REMOTE_PENDING_INPUT_ERROR: &str = "연결 대기 중 입력이 너무 커서 새 셸 생성을 취소했어요";
 
@@ -489,58 +526,17 @@ impl App {
     /// A single-leaf tree leaves `ws.layout` empty — the render path's
     /// single-pane fallback handles that case.
     pub(crate) fn publish_pty_layout(&self) {
-        if let Some(tree) = self.pty_layout.as_ref() {
-            let (cols, rows) = self.window_cells();
-            let mut ws = self.ws.lock().unwrap();
-            if tree.leaves().len() <= 1 {
-                ws.layout = None;
-            } else {
-                ws.layout = Some(tree.to_tmux_layout(cols, rows));
-            }
-            // 활성 방(윈도우)의 leaf pane 집합 — 일부 경로가 아직 참조.
-            ws.active_window_panes = tree.leaves().iter().map(|l| l.to_string()).collect();
-            // 전 윈도우(방) pane → window_idx — collab_board 가 전 방 학생을 방별로 그룹핑.
-            // window_of_pane 과 같은 패턴(활성=pty_layout, 그 외=windows[i]). PtyBackend 가
-            // App 의 windows 를 못 봐서 ws 로 미러한다(거노: 좌측 통합·전 방 영속).
-            let mut pw: HashMap<String, usize> = HashMap::new();
-            let mut wl: HashMap<usize, Layout> = HashMap::new();
-            for i in 0..self.windows.len() {
-                let layout = if i == self.active_window {
-                    self.pty_layout.as_ref()
-                } else {
-                    self.windows[i].as_ref()
-                };
-                if let Some(l) = layout {
-                    for leaf in l.leaves() {
-                        pw.insert(leaf.to_string(), i);
-                    }
-                    // 안 보는 방도 창 크기로 펴 둔다 — 비율만 쓰는 미니맵엔 그걸로 충분하다.
-                    wl.insert(i, l.to_tmux_layout(cols, rows));
-                }
-            }
-            // 별도창으로 뗀 pane 은 트리 밖이지만 사용자 눈앞에 있다 — 떠나온 방으로
-            // 실어 폰 목록·board 화면밖 판정·SendMessage 가드가 닫힌 pane 으로 안 본다.
-            let mut undocked = std::collections::HashSet::new();
-            for (pane, home) in self.undocked_panes() {
-                pw.insert(pane.clone(), home);
-                undocked.insert(pane);
-            }
-            ws.undocked = undocked;
-            ws.window_layouts = wl;
-            let (gw, gh) = (cols as f32 * self.cell.w, rows as f32 * self.cell.h);
-            ws.grid_aspect = (gw > 0.0 && gh > 0.0).then(|| gw / gh);
-            // 보조 탭 pid 도 화면 안이다 — 탭은 바깥 pane 자리에 살고 사용자가 탭바로
-            // 언제든 본다. leaf 만 실으면 collab_board 가 탭 학생을 전부 detached
-            // (화면밖)로 찍고, SendMessage 의 닫힌-pane 가드가 「사용자가 닫았거나
-            // 숨긴 자리」라며 차단했다(거노 2026-08-18: 탭에 넣으면 인식을 못 한다).
-            // 바깥 pane 이 pw 에 없으면(숨김·stash) 탭도 안 싣는다 — 그건 진짜 화면밖.
-            for (pid, outer) in &ws.pid_to_pane {
-                if let Some(i) = pw.get(outer).copied() {
-                    pw.entry(pid.clone()).or_insert(i);
-                }
-            }
-            ws.pane_window = pw;
-        }
+        let (cols, rows) = self.window_cells();
+        let mut ws = self.ws.lock().unwrap();
+        publish_workspace_layout(
+            &mut ws, self.pty_layout.as_ref(),
+            self.windows.iter().enumerate().filter_map(|(i, layout)| {
+                (if i == self.active_window { self.pty_layout.as_ref() } else { layout.as_ref() })
+                    .map(|layout| (i, layout))
+            }), self.undocked_panes(), (cols, rows),
+        );
+        let (gw, gh) = (cols as f32 * self.cell.w, rows as f32 * self.cell.h);
+        ws.grid_aspect = (gw > 0.0 && gh > 0.0).then(|| gw / gh);
         // Keep the socket snapshot in lockstep with the renderer view —
         // every code path that adds/removes panes or moves focus goes
         // through publish_pty_layout, so this is the one spot we have
@@ -925,7 +921,7 @@ impl App {
         // first bytes the shell prints before SIGWINCH lands.
         let (win_cols, win_rows) = self.window_cells();
         let cwd = self.spawn_cwd_from(Some(active));
-        // split = room 만 상속, 학생은 새로 랜덤 배정(전역 유일). 07-13 의 "소스 학생 상속"
+        // split = room 만 상속, 학생은 전역 빈 자리 순서로 배정. 07-13 의 "소스 학생 상속"
         // 설계는 모든 pane 이 루트 학생 하나로 수렴하는 부작용(거노 07-17: pane 열면 다
         // 프라나)으로 폐기 — 상속이 막으려던 "둔갑"(랜덤으로 떴다 뒤늦게 교정)은 배정이
         // spawn 시점 즉시(assign_character_env)가 된 지금은 재발하지 않는다. resume 은
@@ -977,6 +973,9 @@ impl App {
             }
             return Ok(None);
         };
+        // A view is not a remote execution context. Splitting/tabbing its local
+        // container must never POST /spawn-shell into the host's active room.
+        if info.view { return Ok(None); }
         let cwd = self
             .pty
             .get(&source_pid)
@@ -1408,7 +1407,11 @@ impl App {
             })
         };
         if last_primary {
+            let restore_ids: Vec<String> = self.ws.lock().unwrap().panes.get(outer)
+                .map(|pane| pane.tabs.iter().filter_map(|tab| tab.pid.clone()).collect())
+                .unwrap_or_default();
             self.remove_pane(outer);
+            for id in restore_ids { self.cancel_restore_surface(&id); }
             return;
         }
         let (pid_opt, preview_opt, preview_path): (
@@ -1425,6 +1428,8 @@ impl App {
             )
         };
         if let Some(pid) = pid_opt.as_deref() {
+            kasa_mcp::push_viewer_control(pid, r#"{"t":"source-closed"}"#);
+            self.cancel_restore_surface(pid);
             if pid != outer {
                 self.close_owned_remote_surface(pid);
                 kasa_mcp::remote::kill_remote(pid);
@@ -1433,6 +1438,7 @@ impl App {
                 // the pid_to_pane entry gone the reap pass routes through
                 // remove_pane(pid) which is a no-op (pty already gone). Fine.
                 self.pty.remove(pid);
+                kasa_mcp::surface_keys::remove(pid);
                 // 탭도 학생을 담는다(서브에이전트 스폰) — pane 과 같은 마커 정리를
                 // 안 하면 닫힌 탭의 캐릭터 바인딩이 남아 board 가 유령을 센다.
                 let closed_cwd = self.pane_cwd_cache.get(pid).cloned();
@@ -1440,6 +1446,8 @@ impl App {
                 let mut ws = self.ws.lock().unwrap();
                 ws.pid_to_pane.remove(pid);
                 ws.pane_character.remove(pid);
+                ws.pane_launch_character.remove(pid);
+                ws.pane_next_character.remove(pid);
             }
         }
         // Preview tab removal is immediate via the ws.panes mutation below;
@@ -1504,6 +1512,7 @@ impl App {
             ws.panes.get(outer).is_some_and(|p| p.tabs.is_empty())
         };
         if emptied {
+            self.cancel_restore_surface(outer);
             self.collapse_layout_only(outer);
         }
         // pane_window 미러에서 닫힌 탭 pid 를 걷는다(스폰 쪽과 대칭).
@@ -2054,7 +2063,7 @@ impl App {
                 let _ = std::fs::remove_file(p.join(format!("god-nudged-{target}")));
             }
         }
-        Self::archive_roster_pane(target);
+        if !crate::verification_run() { Self::archive_roster_pane(target); }
     }
     /// Mark a closed pane's roster entries `archived=true` (munder 차용, ②a) so
     /// `roster_recovery` stops offering a deliberately-closed worker for resume.
@@ -2138,7 +2147,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 그 자리는 그릴 것이 없는 유령 pane 이다. 활성 창만 봐서는 안 된다: 다른
     /// 윈도우로 전환해 둔 pane 은 stash 슬롯에 있고, 백그라운드 세션은 자기 트리를
     /// 따로 쥔다. 실제로 빈 칸이 남은 자리가 활성 창이 아니라 **다른 윈도우**였다.
-    fn leaf_lingers_anywhere(&self, target: &str) -> bool {
+    pub(crate) fn leaf_lingers_anywhere(&self, target: &str) -> bool {
         if Self::stashed_leaf_exists(&self.pty_layout, target) {
             return true;
         }
@@ -2173,9 +2182,18 @@ for p in glob.glob(os.path.join(d, '*.json')):
             let _ = self.close_window(i);
         }
         for sess in self.sessions.iter_mut().flatten() {
-            sess.pty.remove(target);
+            if sess.pty.remove(target).is_some() {
+                kasa_mcp::surface_keys::remove(target);
+            }
             if let Ok(mut ws) = sess.ws.lock() {
-                ws.panes.remove(target);
+                if let Some(pane) = ws.panes.remove(target) {
+                    kasa_mcp::surface_keys::remove(target);
+                    for pid in pane.tabs.iter().filter_map(|tab| tab.pid.as_deref()) {
+                        if !sess.pty.contains_key(pid) {
+                            kasa_mcp::surface_keys::remove(pid);
+                        }
+                    }
+                }
                 ws.rebuild_pid_map();
             }
             Self::remove_stashed_leaf(&mut sess.pty_layout, target);
@@ -2206,9 +2224,11 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 탭 셸·협업 마커·GPU 텍스처·마크다운 캐시·화면 상태. 트리는 건드리지 않으므로
     /// 트리에서 이미 빠진 pane(숨긴 것)에도 그대로 쓴다.
     pub(crate) fn drop_pane_resources(&mut self, target: &str) {
+        self.notify_source_closed(target);
         let closed_cwd = self.pane_cwd_cache.get(target).cloned();
         // `Arc<PtySession>` 의 마지막 주인을 놓는 지점 — 이 한 줄이 프로세스의 생사다.
         self.pty.remove(target);
+        kasa_mcp::surface_keys::remove(target);
         Self::cleanup_collab_markers(target, closed_cwd.as_deref());
         // Free the GPU texture if this was an image pane (no-op otherwise).
         if let Some(g) = self.gpu.as_mut() {
@@ -2229,6 +2249,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         };
         for pid in &secondary_pids {
             self.pty.remove(pid);
+            kasa_mcp::surface_keys::remove(pid);
         }
         {
             let mut ws = self.ws.lock().unwrap();
@@ -2272,22 +2293,18 @@ for p in glob.glob(os.path.join(d, '*.json')):
         self.set_toast(format!("{target} 이 끝나 자리를 접었다 — ⌘⇧T 로 되살린다"));
     }
 
-    /// 사용자가 닫은 pane — **죽이지 않고 화면에서만 뗀다.** BSP 트리에서 leaf 를
-    /// 빼는 것이 전부라 PTY 도 화면 상태도 남고, 그래서 그 안의 claude 는 하던 일을
-    /// 계속한다(거노: resume 로 잇는 게 아니라 데몬처럼 돌기를 원함). 출력이 유실될
-    /// 걱정은 없다 — 화면 갱신은 pane 마다 붙은 전용 스레드(`pump_pty_screens`)라
-    /// 트리와 무관하게 계속 돈다. 리사이즈는 `leaf_cells` 기반이라 트리 밖 pane 을
-    /// 건드리지 않아 마지막 크기가 그대로 유지된다.
-    ///
-    /// 되살리기는 `reopen_pane_record` 의 재부착 경로, 정말 끄는 것은 인포의 ×
-    /// (`discard_closed_pane_at`)다.
+    /// Ordinary close blocks input, requests cancellation and retains the PTY
+    /// for ten seconds of undo. Afterwards only the recovery record remains.
     pub(crate) fn hide_pane(&mut self, target: &str) {
         self.tuck_pane(target, false);
+        if self.stashed_record(target).is_some_and(|c| !c.stashed) {
+            self.set_toast("창을 닫았어요 · 10초 뒤 실행 종료 · ⌘⇧T로 되살리기".into());
+        }
     }
 
     /// 사이드바 「pane 숨기기」 — 닫기와 같은 자리에 넣되 **절대 정리하지 않는다.**
     ///
-    /// 닫기(`hide_pane`)는 개수 상한과 15분 idle 로 언젠가 프로세스를 놓는다. 그런데
+    /// 닫기(`hide_pane`)는 10초 유예 뒤 프로세스를 놓는다. 그런데
     /// 숨기기는 *작업이 도는 중에* 화면에서만 치우는 것이라(2026-08-11 지시), 돌아왔을
     /// 때 대화가 끊겨 있으면 쓸모가 없다. 그래서 같은 스택에 `stashed` 로 넣고 두 정리
     /// 루프가 건너뛰게 한다.
@@ -2311,6 +2328,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
             return;
         }
         self.record_closed_pane(target, true, stashed);
+        if !stashed { self.close_grace_input(target, true); }
+        self.notify_source_closed(target);
+        self.cancel_restore_pane(target);
         let was_active = self
             .ws
             .lock()
@@ -2516,6 +2536,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             .as_ref()
             .is_some_and(|t| t.leaves().iter().any(|l| *l == pid));
         if !in_active {
+            self.cancel_restore_pane(pid);
             self.remove_pane(pid);
             return;
         }
@@ -3167,6 +3188,38 @@ mod auto_split_tests {
 #[cfg(test)]
 mod drop_zone_tests {
     use super::*;
+
+    #[test]
+    fn hiding_last_active_pane_clears_visibility_but_keeps_other_rooms_and_undocked_tabs() {
+        let active = kasa_pty::PtyLayout::single("%0");
+        let other = kasa_pty::PtyLayout::single("%2");
+        let mut ws = Workspace::default();
+        ws.pid_to_pane.extend([
+            ("%1".into(), "%0".into()),
+            ("%3".into(), "%2".into()),
+            ("%5".into(), "%4".into()),
+        ]);
+        let detached = || vec![("%4".into(), 2)];
+        publish_workspace_layout(&mut ws, Some(&active), [(0, &active), (1, &other)].into_iter(), detached(), (80, 24));
+        assert_eq!(ws.pane_window.len(), 6);
+        publish_workspace_layout(&mut ws, None, [(1, &other)].into_iter(), detached(), (80, 24));
+        assert!(!ws.pane_window.contains_key("%0"));
+        assert!(!ws.pane_window.contains_key("%1"));
+        assert_eq!(ws.pane_window.len(), 4);
+        assert_eq!(ws.pane_window["%3"], 1);
+        assert_eq!(ws.pane_window["%5"], 2);
+        assert!(ws.undocked.contains("%4"));
+        assert!(ws.active_window_panes.is_empty());
+        assert!(ws.layout.is_none());
+        assert!(!ws.window_layouts.contains_key(&0));
+        // Publishing the same retained pane again is revival, not a new process.
+        publish_workspace_layout(&mut ws, Some(&active), [(0, &active), (1, &other)].into_iter(), detached(), (80, 24));
+        assert_eq!(ws.pane_window["%1"], 0);
+        publish_workspace_layout(&mut ws, None, std::iter::empty(), Vec::new(), (80, 24));
+        assert!(ws.pane_window.is_empty());
+        assert!(ws.window_layouts.is_empty());
+        assert!(ws.undocked.is_empty());
+    }
 
     #[test]
     fn center_is_a_zone_of_its_own_not_a_split() {

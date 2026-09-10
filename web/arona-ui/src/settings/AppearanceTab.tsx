@@ -234,6 +234,14 @@ export function AppearanceTab({
   const previewHex = (index: number) => (next: string) =>
     postAction('palette-preview', { id: String(index), label: next });
 
+  // 기기 색 — 휠 하나를 두고 고른 기기를 갈아 끼운다(팔레트 칸과 같은 이유).
+  const [device, setDevice] = useState<string | null>(null);
+  const deviceRow = data.device_colors.find((d) => d.label === device) ?? null;
+  const commitDevice = (label: string) => (next: string) =>
+    run('device-color', { id: label, label: next });
+  const previewDevice = (label: string) => (next: string) =>
+    postAction('device-preview', { id: label, label: next });
+
   return (
     <TabCard>
       <Notice notice={notice} />
@@ -419,6 +427,102 @@ export function AppearanceTab({
                 onClick={() => void run('reset-custom-theme')}
               />
             </div>
+          </>
+        )}
+      </Section>
+
+      {/* 기기 색은 테마와 별개 축이다 — 어느 팔레트를 입든 「이 pane 이 어느
+          기계인가」는 같은 색으로 읽혀야 하므로 커스텀 여부와 무관하게 늘 열린다. */}
+      <Section
+        title={t.appearance.deviceColors}
+        hint={t.appearance.deviceColorsHint}
+        right={
+          <Button
+            label={t.appearance.deviceResetAll}
+            disabled={busy || !data.device_colors.some((d) => d.custom)}
+            onClick={() => void run('reset-device-colors')}
+          />
+        }
+      >
+        {data.device_colors.length === 0 ? (
+          <p className="text-[13px] text-[var(--kt-text-mute)]">{t.appearance.deviceNone}</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(294px,1fr))] gap-x-2 gap-y-1">
+              {data.device_colors.map((row) => (
+                <div key={row.label} className="flex items-center gap-2 py-1">
+                  <ColorSwatch
+                    hex={row.hex}
+                    title={row.label}
+                    active={device === row.label}
+                    disabled={busy}
+                    onPick={() => setDevice(row.label)}
+                  />
+                  <span className="flex-1 truncate text-[13px] text-[var(--kt-text)]">
+                    {row.label}
+                    {row.local && (
+                      <span className="ml-1 text-[12px] text-[var(--kt-text-mute)]">
+                        · {t.appearance.deviceLocal}
+                      </span>
+                    )}
+                  </span>
+                  <TextField
+                    label={row.label}
+                    value={row.hex}
+                    disabled={busy}
+                    mono
+                    className="w-[104px]"
+                    onCommit={commitDevice(row.label)}
+                  />
+                  {row.custom ? (
+                    <Button
+                      label={t.appearance.deviceReset}
+                      disabled={busy}
+                      onClick={() => void run('reset-device-color', { id: row.label })}
+                    />
+                  ) : (
+                    <span className="text-[12px] text-[var(--kt-text-mute)]">
+                      {t.appearance.deviceDefault}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+            {deviceRow && (
+              <div className="mt-4 flex items-start gap-4">
+                <ColorWheel
+                  key={deviceRow.label}
+                  hex={deviceRow.hex}
+                  disabled={busy}
+                  onPreview={previewDevice(deviceRow.label)}
+                  onCommit={commitDevice(deviceRow.label)}
+                />
+                <div className="pt-1">
+                  <p className="text-[13px] text-[var(--kt-text)]">{deviceRow.label}</p>
+                  <p className="mt-1 font-[var(--kt-font-mono)] text-[13px] text-[var(--kt-text-dim)]">
+                    {deviceRow.hex}
+                  </p>
+                  <p className="mt-3 text-[12px] text-[var(--kt-text-mute)]">
+                    {t.appearance.devicePresets}
+                  </p>
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    {data.device_presets.map((preset) => (
+                      <ColorSwatch
+                        key={preset.name}
+                        hex={preset.hex}
+                        title={preset.name}
+                        active={deviceRow.hex.toLowerCase() === preset.hex.toLowerCase()}
+                        disabled={busy}
+                        onPick={() => void commitDevice(deviceRow.label)(preset.hex)}
+                      />
+                    ))}
+                  </div>
+                  <p className="mt-2 text-[12px] text-[var(--kt-text-mute)]">
+                    {t.appearance.deviceHexHint}
+                  </p>
+                </div>
+              </div>
+            )}
           </>
         )}
       </Section>

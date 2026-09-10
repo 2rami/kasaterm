@@ -46,6 +46,65 @@ void main() {
   pinnedTests();
   historyTests();
 
+  test(
+    'opposite-mode Codex input fill uses viewer base, preserves diff colors',
+    () {
+      final g = Grid()
+        ..apply({
+          'cols': 40,
+          'rows': 4,
+          'dirty': [
+            [
+              0,
+              [
+                [
+                  '+ added line'.padRight(40),
+                  [30, 180, 50],
+                  [220, 255, 220],
+                  0,
+                ],
+              ],
+            ],
+            [
+              1,
+              [
+                [
+                  '› Ask Codex'.padRight(40),
+                  null,
+                  [245, 245, 245],
+                  0,
+                ],
+              ],
+            ],
+            [
+              2,
+              [
+                [
+                  ' ' * 40,
+                  null,
+                  [245, 245, 245],
+                  0,
+                ],
+              ],
+            ],
+            [3, []],
+          ],
+          'cursor': [1, 2],
+        });
+      const dark = StudentStyle(
+        slug: 'seia',
+        accent: accent,
+        bg: bg,
+        codex: true,
+      );
+      final view = restyleClaude(g, dark, 0);
+      final fill = view.lines[1].first.bg as RgbColor;
+      expect(fill.r + fill.g + fill.b, lessThan(380));
+      expect(view.lines[0].first.bg, rgb(const RgbColor(220, 255, 220)));
+      expect(view.lines[0].first.fg, rgb(const RgbColor(30, 180, 50)));
+    },
+  );
+
   test('스피너 자리: 글리프를 지우고 걷는 도트 2칸×2줄, 문구는 학생색', () {
     final g = gridOf([
       '⏺ Bash(ls)',

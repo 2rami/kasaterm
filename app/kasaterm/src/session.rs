@@ -1,6 +1,92 @@
 //! 세션·윈도우·cwd/label·daemon·pty·tmux/socket·스크린 펌프·상태 저장.
 use super::*;
 
+fn latest_restored_state(dir: &std::path::Path) -> Option<serde_json::Value> {
+    let mut backups: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().filter_map(|entry| {
+        let name = entry.file_name();
+        let name = name.to_str()?;
+        let stamp = name.strip_prefix("session-restored-")?.strip_suffix(".json")?
+            .parse::<u64>().ok()?;
+        let metadata = entry.metadata().ok()?;
+        if !metadata.is_file() { return None; }
+        Some((stamp, entry.path()))
+    }).collect();
+    // Filename timestamps reflect restore order even if backups were copied
+    // later and acquired different mtimes. Propagate identities through every
+    // intermediate legacy snapshot, not just the already-renumbered last one.
+    backups.sort_by_key(|(stamp, _)| *stamp);
+    let mut previous = None;
+    for (_, path) in backups {
+        let state = std::fs::read(path).ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .filter(serde_json::Value::is_object);
+        // A corrupt checkpoint breaks the lineage. Later valid checkpoints
+        // start independently; a corrupt final checkpoint returns None.
+        previous = state.map(|state| kasa_mcp::surface_keys::prepare_restore_state(&state, previous.as_ref()));
+    }
+    previous
+}
+
+fn append_surface_record_metadata(obj: &mut serde_json::Map<String, serde_json::Value>, surface: &str) {
+    obj.insert("surface_key".into(), serde_json::json!(kasa_mcp::surface_keys::ensure(surface)));
+    if let Some(key) = kasa_mcp::remote::remote_surface_key(surface) {
+        obj.insert("remote_surface_key".into(), serde_json::json!(key));
+    }
+}
+
+struct RestoredSurfaceKey {
+    id: String,
+    committed: bool,
+}
+
+impl RestoredSurfaceKey {
+    fn register(id: &str, record: &serde_json::Value) -> Self {
+        if let Some(key) = record.get("surface_key").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            kasa_mcp::surface_keys::set(id, key);
+        } else {
+            kasa_mcp::surface_keys::ensure(id);
+        }
+        Self { id: id.into(), committed: false }
+    }
+}
+
+impl Drop for RestoredSurfaceKey {
+    fn drop(&mut self) {
+        if !self.committed {
+            // Failed restore must not leave a key for a later unrelated shell
+            // that happens to reuse the still-free pane number.
+            kasa_mcp::surface_keys::remove(&self.id);
+        }
+    }
+}
+
+/// Coalesce screen data without turning a resize into lost live readiness or
+/// letting an older connection certify a new one. ExtReader emits generations
+/// only on parsed live bytes; resize/history snapshots have false + generation 0.
+fn coalesce_screen_updates(
+    previous: kasa_bridge::screen::ScreenUpdate,
+    mut next: kasa_bridge::screen::ScreenUpdate,
+) -> kasa_bridge::screen::ScreenUpdate {
+    let untagged_snapshot = !next.live_output && next.output_generation == 0;
+    let same_generation = next.output_generation == previous.output_generation;
+    if untagged_snapshot {
+        next.output_generation = previous.output_generation;
+        next.live_output = previous.live_output;
+    } else if same_generation {
+        next.live_output |= previous.live_output;
+    }
+    // Only dimensions invalidate dirty-row coordinates. Generation marks the
+    // last parsed fragment, not the start of a full grid: earlier fragments of
+    // a large snapshot can legitimately carry the preceding generation.
+    if (next.cols, next.rows) != (previous.cols, previous.rows) {
+        return next;
+    }
+    let mut rows: std::collections::HashMap<u16, Row> = previous.dirty.into_iter().collect();
+    rows.extend(next.dirty);
+    next.dirty = rows.into_iter().collect();
+    next
+}
+
 fn forward_backend_focus<T>(pane_id: String, send: impl FnOnce(String) -> T) -> T {
     send(pane_id)
 }
@@ -110,6 +196,13 @@ impl App {
         };
         pane.character = pane_char;
         let tab = &mut pane.tabs[tab_idx];
+        // Layout/resize can create the outer pane before its first frame.
+        // find_tab_by_pty then finds that unbound primary tab, bypassing the
+        // new-pane branch above. Bind it here too: restore readiness and tab
+        // routing must see the PTY whose live output is already on screen.
+        if tab.pid.is_none() && tab.term().is_some() {
+            tab.pid = Some(update.pane_id.clone());
+        }
         // pid 라우팅이 터미널 아닌 탭(이미지/md 미리보기)에 떨어질 수 있다 — 여기서
         // expect 로 죽으면 호출자가 ws 락을 쥔 채 unwind 해 poison 이 GUI 전체로
         // 번진다. 프레임 하나를 버리는 쪽이 맞다.
@@ -258,8 +351,6 @@ impl App {
                 loop {
                     match screens.try_recv() {
                         Ok(mut next) if !next.eof => {
-                            if !next.live_output { next.output_generation = update.output_generation; }
-                            next.live_output |= update.live_output;
                             // OSC 777 from a coalesced frame — fire before the
                             // merge below drops `next.notify`.
                             if let Some((title, body)) = next.notify.take() {
@@ -275,24 +366,7 @@ impl App {
                                     });
                                 }
                             }
-                            // A resize makes row numbers and widths belong to
-                            // a different grid. Combining both generations
-                            // leaves narrow panes with rows from the transient
-                            // size until a later full redraw happens.
-                            if (next.cols, next.rows) != (update.cols, update.rows) {
-                                update = next;
-                                continue;
-                            }
-                            let mut row_map: std::collections::HashMap<u16, Row> =
-                                update.dirty.into_iter().collect();
-                            for (r, row) in next.dirty {
-                                row_map.insert(r, row);
-                            }
-                            let merged_dirty: Vec<(u16, Row)> = row_map.into_iter().collect();
-                            update = kasa_bridge::screen::ScreenUpdate {
-                                dirty: merged_dirty,
-                                ..next
-                            };
+                            update = coalesce_screen_updates(update, next);
                         }
                         Ok(next) => {
                             // EOF mid-burst: 같은 자리에 새 세션이 앉았으면(스왑)
@@ -366,23 +440,37 @@ impl App {
     /// renderer expects. Single-pane MVP — the workspace holds one
     /// PaneState keyed "%0" and the layout is `None` (the render path
     /// falls back to single-pane when no layout has arrived).
-    /// pane 생성 시 캐릭터 자동 배정 — /tmp 마커·session-id 기록 후 셸 env 를 반환.
-    /// pending_character(new_room_with_character 가 세팅) 우선, 없으면 통합 풀에서
-    /// 안 겹친 캐릭터 랜덤. characters.json 없으면 빈 vec(무테마 = skip).
-    /// board(socket.rs)는 같은 /tmp 마커를 읽어 row.character 를 채운다.
+    /// Prepare a shell without automatically assigning a student or conversation.
+    /// Only explicit selections/restored students reserve an identity here;
+    /// normal allocation happens when the harness requests its launch identity.
     pub(crate) fn assign_character_env(
         &mut self,
         id: &str,
         cwd: Option<&str>,
         room: Option<&str>,
     ) -> Vec<(String, String)> {
+        // A new terminal is only a shell. Do not consume a student or freeze a
+        // conversation UUID before the user actually starts a harness.
+        let blank = || vec![
+            ("KASATERM_CHARACTER".into(), String::new()),
+            ("KASATERM_PERSONA".into(), String::new()),
+            ("KASATERM_SESSION_ID".into(), String::new()),
+            ("KASATERM_AGENT_SLUG".into(), String::new()),
+            ("KASATERM_MODEL".into(), String::new()),
+            ("KASATERM_BACKEND".into(), String::new()),
+            ("KASATERM_AGENT_SUFFIX".into(), crate::agent_name_suffix()),
+        ];
+        if self.pending_character.is_none() {
+            self.ws.lock().unwrap().pane_launch_character.insert(id.into(), String::new());
+            return blank();
+        }
         let Some(cwd) = cwd else { return Vec::new() };
         let Some(chars) = kasa_mcp::character::roster_in_use() else {
             return Vec::new();
         };
         let rslug = kasa_mcp::character::rslug(std::path::Path::new(cwd), room);
         // 통합 풀(member_names = leader/leaders/members 병합) — god 개념 폐기(거노
-        // 2026-07-13): 아로나·프라나도 특별 클래스 없이 동등하게 랜덤 배정.
+        // 2026-07-13): 아로나·프라나도 별도 클래스가 아닌 같은 배정 풀에 포함한다.
         // 배정 풀 — 골라 둔 명단이 있으면 그것만, 없으면 전원(지금까지의 동작).
         let members = kasa_mcp::character::assignable_names(&chars);
         // `KASATERM_ASSIGN_DEBUG=1` — 풀이 왜 그 크기인지 찍는다. 「골랐는데 안 고른
@@ -396,109 +484,9 @@ impl App {
                 members
             );
         }
-        // 프로젝트(방)를 넘어 같은 학생이 겹치지 않게, 이 방 live pane + 전 방 마커를 모두
-        // taken 으로 본다(거노: 미도리 둘 — 방-로컬 배정이라 다른 방 미도리를 못 봤다).
-        // ws.pane_character/read_marker(이 방 live) + assigned_global(전 방). 닫힌 pane
-        // 마커는 cleanup_collab_markers 가 지우므로 대체로 live 만 남는다.
-        // 이 방 live 만 따로 들고 있는다 — 전 방 마커까지 합친 taken 이 학생 총원을
-        // 넘기면 고를 것이 하나도 안 남는데, 그때 members 전체로 되돌아가면 **같은 방
-        // 안에서도** 겹친다. 실측 2026-08-09: 마커 17개 > 총원 12명이라 배정 풀이
-        // 통째로 말라 아루가 셋이 됐다. 마커는 pane 을 정상적으로 닫을 때만 지워지므로
-        // 앱을 재시작하면 옛 마커가 그대로 남아 이 고갈이 시간이 갈수록 잦아진다.
-        // `all_taken` 은 중복을 살린 사본이다 — 풀이 마른 뒤 「가장 적게 쓰인 학생」을
-        // 고르려면 있고 없고가 아니라 **몇 번 쓰였나**를 알아야 한다.
-        let mut all_taken: Vec<String> = Vec::new();
-        let (taken, taken_local): (
-            std::collections::HashSet<String>,
-            std::collections::HashSet<String>,
-        ) = {
-            let ws = self.ws.lock().unwrap();
-            // **`ws.panes` 로만 돌면 안 된다** — split 로 생긴 leaf 는 보조탭이 생기기
-            // 전까지 `PaneState` 가 없다(희소, main.rs `pane_font_scales` 주석). 그래서
-            // 예전엔 방금 쪼갠 pane 들이 taken 에 안 잡혀 **연달아 쪼개면 같은 학생이
-            // 둘 나왔다**(실측 2026-08-06 `split --count`: 모모이 둘·프라나 둘. 거노가
-            // 전에 신고한 "미도리 둘"과 같은 증상, 원인만 다른 갈래).
-            // 마커(`assigned_global`)도 못 메운다 — 그건 claude 가 뜰 때 쓰이므로 갓
-            // 만든 pane 엔 아직 없다. 배정의 정본은 `pane_character` 다.
-            let here: Vec<String> = ws
-                .panes
-                .keys()
-                .chain(ws.pane_character.keys())
-                .filter(|p| p.as_str() != id)
-                // 「이 방」= rslug(프로젝트 cwd + 명시 room)다. `pane_character` 는
-                // 앱 전역 맵이라 거르지 않으면 다른 방 학생까지 here 에 들어와,
-                // ①첫 pane 이어도 here 가 안 비어 prefer_fresh_school 이 영영 안
-                // 불리고 ②prefer_same_school 이 남의 방 학원으로 끌어당겨 **앱
-                // 전체가 최초 학원 하나로 수렴**했다(2026-08-19 실측: 서로 다른 방
-                // 다섯의 학생 5명 전원 밀레니엄 — 우연 확률 ≈0.9%. 방마다 학원을
-                // 가르는 c999e10 의 절반이 이 스코프 누락으로 죽어 있었다).
-                // cwd 를 아직 모르는 pane 은 같은 방으로 친다 — 같은 방을 놓쳐
-                // 같은 얼굴이 나란히 서는 쪽이, 다른 방과 학원이 뭉치는 쪽보다 나쁘다.
-                .filter(|p| {
-                    self.pane_cwd_cache.get(p.as_str()).is_none_or(|c| {
-                        let room = ws.pane_room.get(p.as_str()).cloned();
-                        kasa_mcp::character::rslug(c, room.as_deref()) == rslug
-                    })
-                })
-                .filter_map(|p| {
-                    ws.pane_character
-                        .get(p)
-                        .cloned()
-                        .or_else(|| kasa_mcp::character::read_marker(&rslug, p))
-                })
-                .collect();
-            let local: std::collections::HashSet<String> = here.iter().cloned().collect();
-            all_taken.extend(here);
-            all_taken.extend(kasa_mcp::character::assigned_global());
-            (all_taken.iter().cloned().collect(), local)
-        };
-        // pending(사용자 지정 캐릭터)은 중복이어도 존중 — 같은 학생 허용, 색은
-        // character_ordinal 변주로 구분(거노). 랜덤 배정만 taken 을 피한다.
-        let name = match self.pending_character.take() {
-            Some(n) => n,
-            None => {
-                let free: Vec<String> = members
-                    .iter()
-                    .filter(|n| !taken.contains(n.as_str()))
-                    .cloned()
-                    .collect();
-                // 고갈되면 곧장 전체로 되돌아가지 않고 **이 방 live 만** 피해 한 번 더
-                // 고른다. 다른 방과 겹치는 것은 이름에 pane 번호가 붙어 구분되지만,
-                // 같은 방에서 겹치면 화면에 같은 얼굴이 나란히 서서 누가 누군지 사라진다.
-                let free_local: Vec<String> = members
-                    .iter()
-                    .filter(|n| !taken_local.contains(n.as_str()))
-                    .cloned()
-                    .collect();
-                // 그마저 마르면 **가장 적게 쓰인 학생들** 중에서 고른다 — 전체 랜덤은
-                // 이미 셋인 학생을 넷으로 만든다(`least_used` 주석에 실측).
-                let least = kasa_mcp::character::least_used(&members, &all_taken);
-                // 이 방에 이미 학생이 있으면 **같은 학원**에서 먼저 고른다. 첫 배정이
-                // 그 방의 학원을 정하고, 이후 pane 들이 거기 붙어 한 덩어리로 읽힌다.
-                // 학원이 마르면 아래 폴백으로 내려간다 — 학원을 맞추는 것보다 같은
-                // 방에서 안 겹치는 게 먼저다.
-                let here: Vec<String> = taken_local.iter().cloned().collect();
-                let same_school = kasa_mcp::character::prefer_same_school(&chars, &free, &here);
-                // 이 방의 첫 학생이면 반대로 **다른 방이 안 쓰는 학원**을 고른다 —
-                // 그 한 명이 이 방의 학원을 정하므로, 여기서 갈라 두면 방마다 다른
-                // 학원이 선다. 학원보다 방이 많아지면 빈 목록이 와 아래로 흐른다.
-                let fresh_school = if here.is_empty() {
-                    kasa_mcp::character::prefer_fresh_school(&chars, &free, &all_taken)
-                } else {
-                    Vec::new()
-                };
-                let pick = kasa_mcp::character::pick_random(&same_school, id)
-                    .or_else(|| kasa_mcp::character::pick_random(&fresh_school, id))
-                    .or_else(|| kasa_mcp::character::pick_random(&free, id))
-                    .or_else(|| kasa_mcp::character::pick_random(&free_local, id))
-                    .or_else(|| kasa_mcp::character::pick_random(&least, id))
-                    .or_else(|| kasa_mcp::character::pick_random(&members, id));
-                match pick {
-                    Some(n) => n,
-                    None => return Vec::new(),
-                }
-            }
-        };
+        // Explicit selections/restored identities stay reserved until launch.
+        let Some(name) = self.pending_character.take() else { return blank() };
+        self.ws.lock().unwrap().pane_next_character.insert(id.into(), name.clone());
         // 학생 명령(`시로코`)이 남긴 persona override 는 이 spawn 의 fresh env 보다
         // 오래된 정체성 — 지워서 이 pane 의 다음 claude 가 env 기준으로 돌아가게.
         if let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
@@ -512,6 +500,7 @@ impl App {
             }
         }
         let sid = kasa_mcp::character::new_session_id();
+        self.ws.lock().unwrap().pane_launch_character.remove(id);
         let _ = kasa_mcp::character::write_marker(&rslug, id, &name);
         self.pane_session_id.insert(id.to_string(), sid.clone());
         // 세션→캐릭터 영속 바인딩(거노 ④): 같은 세션이 --resume 등으로 다시 붙으면 같은
@@ -637,7 +626,7 @@ impl App {
                 .pane_room
                 .insert(id.clone(), room.clone());
         }
-        // 캐릭터 자동 배정(거노): pending(사용자 지정) 우선, 없으면 통합 풀 랜덤. 마커·
+        // 캐릭터 자동 배정: pending(사용자 지정) 우선, 없으면 통합 풀 순서. 마커·
         // session-id 기록 후 KASATERM_CHARACTER/SESSION_ID/PERSONA env 를 더한다(claude shim 적용).
         env.extend(self.assign_character_env(&id, cwd.as_deref(), room.as_deref()));
         let session = Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
@@ -2218,6 +2207,17 @@ impl App {
     /// 이름표를 교정(respawn 없음 — persona 는 스폰 시 고정, label·마커만 갱신,
     /// --resume 둔갑 방지), 그것도 없으면 현재 배정을 저장해 다음 resume 이 재사용한다.
     pub(crate) fn apply_session_character(&mut self, pane: &str, sid: &str) {
+        // The model has already read these instructions. A late transcript or
+        // parent lookup must not silently change only its face and name.
+        let launched = self.ws.lock().unwrap().pane_launch_character.get(pane).cloned();
+        if let Some(name) = launched {
+            if name.is_empty() { return; } // this run ended; do not relabel its shell
+            self.relabel_pane(pane, &name);
+            if kasa_mcp::character::session_character(sid).is_none() {
+                let _ = kasa_mcp::character::bind_session_character(sid, &name);
+            }
+            return;
+        }
         let cur = self.ws.lock().unwrap().pane_character.get(pane).cloned();
         // 우선순위: 세션 자신의 바인딩 > 부모 상속 > env anchor. 예전엔 부모가 바인딩을
         // 덮었지만("첫 호출에 박힌 랜덤 바인딩 교정"용) — 지금 바인딩은 전부 의도적
@@ -2278,22 +2278,7 @@ impl App {
                             // Windows에서는 `ps eww`로 스폰 시점의 환경변수를 복구할 수
                             // 없으므로, 캐릭터 없이 복원된 pane은 SessionStart에서 보충한다.
                             let members = kasa_mcp::character::assignable_names(&chars);
-                            let taken: std::collections::HashSet<String> = self
-                                .ws
-                                .lock()
-                                .unwrap()
-                                .pane_character
-                                .values()
-                                .cloned()
-                                .collect();
-                            let free: Vec<String> = members
-                                .iter()
-                                .filter(|name| !taken.contains(name.as_str()))
-                                .cloned()
-                                .collect();
-                            if let Some(name) = kasa_mcp::character::pick_random(&free, sid)
-                                .or_else(|| kasa_mcp::character::pick_random(&members, sid))
-                            {
+                            if let Some(name) = self.next_auto_character(&members, pane) {
                                 self.relabel_pane(pane, &name);
                                 let _ = kasa_mcp::character::bind_session_character(sid, &name);
                             }
@@ -2349,6 +2334,13 @@ impl App {
         if crate::theme::character_slug_any(character).is_none() {
             eprintln!("[repersona] unknown character '{character}' — ignored");
             return;
+        }
+        // A shell has no loaded voice, and persona-off deliberately allows
+        // visual-only changes. Do not retain a previous run's identity latch.
+        if !socket::read_claude_persona()
+            || self.pty.get(pane).and_then(|session| session.active_agent()).is_none()
+        {
+            self.ws.lock().unwrap().pane_launch_character.remove(pane);
         }
         self.ws
             .lock()
@@ -2435,6 +2427,7 @@ impl App {
         let Some(p) = self.character_swap_confirm.take() else {
             return;
         };
+        let previous = self.ws.lock().unwrap().pane_character.get(&p.pane).cloned();
         if btn != CharacterSwapBtn::Cancel {
             // 어느 쪽이든 마커·바인딩·말투 파일이 먼저 새 학생으로 서야 한다 —
             // 되띄우기가 `assign_character_env` 로 env 를 다시 세울 때 그것을 읽는다.
@@ -2442,9 +2435,6 @@ impl App {
         }
         let msg = match btn {
             CharacterSwapBtn::Cancel => None,
-            CharacterSwapBtn::ShellOnly => {
-                Some(format!("{} → {} · 말투는 다음에 띄울 때부터", p.pane, p.to))
-            }
             CharacterSwapBtn::Relaunch => Some({
                 // **되띄우기가 캐릭터를 다시 고르지 못하게 못 박는다.** 그 경로는
                 // `assign_character_env` 로 env 를 새로 세우는데, 그 함수는 고른
@@ -2460,8 +2450,10 @@ impl App {
                 if ok {
                     format!("{} → {} · 대화를 이어서 다시 띄웠어요", p.pane, p.to)
                 } else {
-                    // 되띄우기가 조용히 실패하면 사용자는 말투까지 바뀐 줄 안다.
-                    format!("{} → {} · 다시 띄우지 못해 말투는 다음부터", p.pane, p.to)
+                    if let Some(previous) = previous {
+                        self.repersona_pane(&p.pane, &previous);
+                    }
+                    format!("{} · 다시 띄우지 못해 학생을 바꾸지 않았어요", p.pane)
                 }
             }),
         };
@@ -3431,6 +3423,8 @@ impl App {
     /// 종류의 구멍이 난다 — 그래서 통로를 하나로 묶었다. 레지스트리는 Weak 이라
     /// 해제는 App 이 Arc 를 떨어뜨리는 것으로 저절로 된다.
     pub(crate) fn insert_pty(&mut self, id: String, sess: std::sync::Arc<kasa_pty::PtySession>) {
+        crate::close_grace::clear_marker(&id);
+        kasa_mcp::surface_keys::ensure(&id);
         kasa_pty::register_session(&id, &sess);
         self.pty.insert(id, sess);
     }
@@ -3644,9 +3638,10 @@ impl App {
                 .unwrap_or_default();
             (rec, ch)
         };
-        let Some(rec) = rec.get("leaf").cloned().filter(|r| !r.is_null()) else {
+        let Some(mut rec) = rec.get("leaf").cloned().filter(|r| !r.is_null()) else {
             return;
         };
+        if let Some(progress) = &self.restore_progress { progress.preserve_record(&mut rec); }
         // cwd 캐시는 `lsof` 로 채워져 갓 만든 pane 에선 아직 비어 있다 — 그때는
         // 레코드에 실린 cwd 로 되짚는다(복원도 그 값을 쓰므로 어긋날 일이 없다).
         let folder = self
@@ -3671,9 +3666,7 @@ impl App {
             window,
             alive,
             stashed,
-            // 놀고 있는지는 다음 활동 스캔이 판정한다 — 닫는 순간의 상태로 못 박으면
-            // 마침 응답 중이던 pane 이 곧바로 유휴로 몰린다.
-            idle_since: None,
+            idle_since: (alive && !stashed).then(Instant::now),
             preview: None,
         });
         self.chrome_dirty = true;
@@ -3733,63 +3726,9 @@ impl App {
         }
     }
 
-    /// 닫아 둔 pane 중 **잊힌 것**을 놓는다 — 내리 노는 상태가 `CLOSED_PANE_IDLE_REAP`
-    /// 를 넘으면 프로세스를 끈다.
-    ///
-    /// 닫아도 안 죽이는 건 의도다(`hide_pane`): 그 안의 claude 가 하던 일을 계속하고,
-    /// 되살리기가 재부착이 된다. 문제는 놓는 계기가 개수 상한뿐이었다는 것 — 그건
-    /// **다음 닫기가 있어야** 도니, 몇 개 닫고 손 떼면 그 셸들이 무기한 남았다.
-    ///
-    /// 그래서 일하는 것과 잊힌 것을 가른다. 일하는 중이면 타이머가 매번 풀리므로
-    /// 닫아 두고 계속 돌리는 용법은 그대로 산다.
+    /// Absolute close deadline. Keep recovery metadata after stopping execution.
     pub(crate) fn reap_idle_closed_panes(&mut self) {
-        if self.closed_panes.is_empty() {
-            return;
-        }
-        let now = Instant::now();
-        // ws 락과 `closed_panes` 를 동시에 빌릴 수 없어 판정을 먼저 걷어 온다.
-        let working: Vec<bool> = {
-            let ws = self.ws.lock().unwrap();
-            self.closed_panes
-                .iter()
-                .map(|c| {
-                    ws.panes
-                        .get(&c.pane_id)
-                        .and_then(|p| p.term())
-                        .is_some_and(crate::input::term_is_working)
-                })
-                .collect()
-        };
-        let limit = crate::closed_pane_idle_reap();
-        let mut doomed: Vec<usize> = Vec::new();
-        for (i, c) in self.closed_panes.iter_mut().enumerate() {
-            // 이미 죽은 pane 은 레코드로만 되살아나므로 셀 것이 없다.
-            // 숨긴 것도 시간을 안 센다 — **놀고 있는 게 정상이고 그래서 치운 것**이다.
-            // 여기서 세면 15분 뒤 조용히 죽어, 돌아온 사용자가 빈 셸을 보게 된다.
-            if !c.alive || c.stashed {
-                continue;
-            }
-            if working[i] {
-                c.idle_since = None;
-                continue;
-            }
-            let since = *c.idle_since.get_or_insert(now);
-            if now.duration_since(since) >= limit {
-                doomed.push(i);
-            }
-        }
-        if doomed.is_empty() {
-            return;
-        }
-        // 뒤에서부터 — 앞을 지우면 뒤 인덱스가 밀린다.
-        for i in doomed.into_iter().rev() {
-            let c = self.closed_panes.remove(i);
-            self.kill_hidden_pane(&c.pane_id);
-        }
-        self.chrome_dirty = true;
-        if let Some(w) = &self.window {
-            w.request_redraw();
-        }
+        self.finish_close_grace();
     }
 
     /// 인포의 × — 되살리기 목록에서 지우고, 아직 돌고 있으면 프로세스까지 끈다.
@@ -3879,6 +3818,7 @@ impl App {
         // 셸이 스스로 끝났을 수 있어서다(그때는 아래 레코드 경로로 흘러간다).
         let attached = c.alive && self.pty.contains_key(&c.pane_id);
         let new_id = if attached {
+            self.close_grace_input(&c.pane_id, false);
             c.pane_id.clone()
         } else {
             let (cols, rows) = self.window_cells();
@@ -4018,6 +3958,7 @@ impl App {
             self.windows[idx].take()
         };
         if let Some(layout) = layout {
+            for pane_id in layout.leaves() { self.cancel_restore_pane(pane_id); }
             let mut ws = self.ws.lock().unwrap();
             for pane_id in layout.leaves() {
                 self.pty.remove(pane_id);
@@ -4351,7 +4292,20 @@ impl App {
         if let Some(c) = self.pending_spawn_cwd.clone() {
             return Some(c);
         }
-        let prev = prev_pane.and_then(|id| self.pane_current_cwd(id));
+        let pid = prev_pane.map(|id| self.ws.lock().unwrap().active_tab_pid(id));
+        let prev = pid.as_deref().and_then(|id| {
+            let cwd = self.pane_current_cwd(id);
+            let Some(info) = kasa_mcp::remote::remote_info(id).filter(|info| info.view) else { return cwd };
+            // New siblings of a mirror are local shells. Never start one in an
+            // absent /Users/<remote-account>/... directory on the other Mac.
+            let remote = cwd.as_ref().map(|p| p.to_string_lossy().into_owned()).or(info.remote_cwd);
+            let mapped = remote.as_deref().and_then(|path| {
+                let machine = kasa_mcp::machines::find(&info.label)?;
+                kasa_mcp::machines::map_remote_to_local(&machine, path)
+            });
+            info.origin_cwd.into_iter().chain(mapped).chain(remote)
+                .map(std::path::PathBuf::from).find(|path| path.is_dir())
+        });
         resolve_spawn_cwd(prev)
     }
     /// Recompute the sidebar file tree when its root (the active pane's cwd)
@@ -5673,16 +5627,15 @@ impl App {
         // 있어 `restore_leaf` 가 `--resume` 까지 붙여 준다. 살아 있다고 적어 두면
         // 되살리기가 「있지도 않은 PTY 에 재부착」을 시도한다.
         //
-        // 숨긴 것(`stashed`)만 싣는다. ⌘W 로 닫은 것은 두 정리 루프가 언젠가 놓는
-        // 임시 기록이라 앱 수명을 넘겨 되살릴 값이 아니고, 그것까지 실으면 껐다 켤
-        // 때마다 되살리기 목록이 옛 묘비로 불어난다.
+        // Both stashes and the bounded closed-pane history survive app restart.
+        // Expiring execution must not also erase the user's recovery record.
         let internal_windows: Vec<usize> = (0..self.windows.len())
             .filter(|idx| self.internal_room_kind_at(*idx).is_some())
             .collect();
         let closed_json: Vec<serde_json::Value> = self
             .closed_panes
             .iter()
-            .filter(|c| c.stashed && !c.rec.is_null())
+            .filter(|c| !c.rec.is_null())
             .map(|c| {
                 let window = c.window.saturating_sub(
                     internal_windows.iter().filter(|idx| **idx < c.window).count(),
@@ -5694,15 +5647,18 @@ impl App {
                     "folder": c.folder,
                     "neighbor": c.neighbor,
                     "window": window,
+                    "stashed": c.stashed,
                 })
             })
             .collect();
-        Some(serde_json::json!({
+        let mut state = serde_json::json!({
             "active_session": self.active_session,
             "sessions": sessions_json,
             "stashed_panes": closed_json,
             "last_used_unix": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
-        }))
+        });
+        if let Some(progress) = &self.restore_progress { progress.preserve_snapshot(&mut state); }
+        Some(state)
     }
     /// Write the restore snapshot on exit.
     ///
@@ -5712,6 +5668,8 @@ impl App {
     /// 과 같은 이유.
     pub(crate) fn save_session_state(&self) {
         self.save_aux_windows_state();
+        // Once the layout exists, keep new work while preserving the original
+        // execution records of unfinished surfaces in session_state_json.
         if self.restore_prompt.is_some() || self.restoration_blocks_input() {
             return;
         }
@@ -5892,6 +5850,7 @@ impl App {
         pane_claude_sid: &HashMap<String, String>,
         agent_cfg: &HashMap<String, (String, String)>,
     ) {
+        append_surface_record_metadata(obj, surface);
         // 캐릭터 영속(거노: 재시작하면 미도리로 둔갑): pane_character 는
         // claude 프로세스 감지(was_claude)와 무관하게 살아있으므로, 감지가
         // 실패해도 캐릭터는 여기서 확실히 저장한다.
@@ -6332,6 +6291,12 @@ impl App {
     }
 
     pub(crate) fn restore_session_state(&mut self, state: &serde_json::Value) {
+        // Read the previous identity table before this restore writes its own
+        // backup. The configured session directory also isolates test fixtures.
+        let previous = crate::socket::session_file_path()
+            .and_then(|path| path.parent().and_then(latest_restored_state));
+        let prepared = kasa_mcp::surface_keys::prepare_restore_state(state, previous.as_ref());
+        let state = &prepared;
         self.restore_progress = Some(crate::restore_progress::RestoreProgress::new(state.clone()));
         // codex 는 재시작마다 옛 pid 의 pane 홈 경로를 물고 있어 `resume` 이 죽는다 —
         // 되살리기 전에 그 색인을 실체 자리로 고친다(2026-09-08, 아래 함수 주석).
@@ -6515,7 +6480,7 @@ impl App {
                 // 활성 방으로 떨어뜨린다(`window` 를 쓰는 쪽의 기존 규칙).
                 window: c.get("window").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
                 alive: false,
-                stashed: true,
+                stashed: c.get("stashed").and_then(|v| v.as_bool()).unwrap_or(true),
                 idle_since: None,
                 preview: None,
             });
@@ -6709,6 +6674,9 @@ impl App {
         let used = self.used_pane_ids();
         let id = pick_restore_id(saved, |s| used.contains(s))
             .unwrap_or_else(|| next_free_pane_id(&used));
+        // ID allocation already excluded every living PTY/tab. Register the
+        // identity on that resolved free ID, never overwrite a live source ID.
+        let mut key_registration = RestoredSurfaceKey::register(&id, rec);
         if let Some(progress) = self.restore_progress.as_mut() { progress.track(&id, rec); }
         // 웹 pane — PTY 를 안 띄운다. 그리드 자리(WebPane)만 앉히고 자식 창은
         // pending_web_hosts 로 미룬다: 복원 경로엔 ActiveEventLoop 가 없어
@@ -6739,6 +6707,7 @@ impl App {
             };
             self.ws.lock().unwrap().panes.insert(id.clone(), ps);
             self.pending_web_hosts.push((host_id, url.to_string()));
+            key_registration.committed = true;
             return Some(id);
         }
         // Remote restore is asynchronous: an unavailable host must never turn
@@ -6771,7 +6740,21 @@ impl App {
                 .get("remote_view")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let attempt = kasa_mcp::remote::restore_connection(spec, &id, cols, rows, view);
+            // Restore the same surface, not the agent conversation that happened
+            // to occupy it when the viewer last saved its layout.
+            let surface_key = rec_str("remote_surface_key")
+                .or_else(|| rpane.starts_with('%').then(|| format!("legacy:{rpane}")));
+            let attempt = if surface_key.is_some() {
+                kasa_mcp::remote::restore_connection_identified(
+                    spec, &id, cols, rows, view,
+                    kasa_mcp::remote_restore::RestoreIdentity {
+                        surface_key,
+                        ..Default::default()
+                    },
+                )
+            } else {
+                kasa_mcp::remote::restore_connection(spec, &id, cols, rows, view)
+            };
             match attempt {
                 Ok(remote) => {
                     {
@@ -6799,6 +6782,10 @@ impl App {
                         id.clone(),
                         std::sync::Arc::downgrade(&remote.session),
                     );
+                    // The startup shell may have queued EOF for this reused
+                    // ID before the replacement remote PTY was registered.
+                    // Match local restore's stale-death cleanup.
+                    self.dead_panes.lock().unwrap().retain(|old| old != &id);
                     if let Some(t) = rec
                         .get("title")
                         .and_then(|v| v.as_str())
@@ -6842,6 +6829,7 @@ impl App {
                     {
                         self.pane_claude_sid.insert(id.clone(), sid.to_string());
                     }
+                    key_registration.committed = true;
                     return Some(id);
                 }
                 Err(e) => {
@@ -7149,6 +7137,7 @@ impl App {
             let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
             self.pending_restores.push((session, cmd, at));
         }
+        key_registration.committed = true;
         Some(id)
     }
     pub(crate) fn start_tmux(&mut self) -> Result<()> {
@@ -7832,8 +7821,6 @@ pub(crate) struct PendingCharacterSwap {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum CharacterSwapBtn {
     Cancel,
-    /// 이름·얼굴·색만 지금 바꾼다. 말투는 다음에 그 pane 에서 띄울 때부터.
-    ShellOnly,
     /// 대화를 이어서 다시 띄운다 — 말투까지 지금 바뀐다.
     Relaunch,
 }
@@ -7891,13 +7878,12 @@ pub(crate) fn character_swap_confirm_text(to: &str, resumable: bool) -> (String,
     let lines = if resumable {
         vec![
             "다시 띄우면 말투까지 바뀝니다 — 나눈 대화는 이어서 띄우니 그대로예요.".to_string(),
-            "껍데기만 바꾸면 이름·얼굴·색만 지금 바뀌고, 말투는 다음에 띄울 때부터입니다."
-                .to_string(),
+            "이름·얼굴·말투를 함께 바꿉니다. 취소하면 지금 학생을 그대로 유지해요.".to_string(),
         ]
     } else {
         vec![
             "이어붙일 대화가 없어, 다시 띄우면 지금 내용이 사라집니다.".to_string(),
-            "껍데기만 바꾸면 이름·얼굴·색만 바뀌고 이 자리는 그대로예요.".to_string(),
+            "취소하면 지금 학생과 대화를 그대로 유지해요.".to_string(),
         ]
     };
     (title, lines)
@@ -8835,6 +8821,214 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn surface_key_save_close_reopen_preserves_identity_without_reusing_live_ids() {
+        let alive = format!("%{}", uuid::Uuid::new_v4().as_u128() as u32);
+        let restored = format!("surface-key-restored-{}", uuid::Uuid::new_v4());
+        let old_key = kasa_mcp::surface_keys::ensure(&alive);
+        let mut record = serde_json::Map::new();
+        super::append_surface_record_metadata(&mut record, &alive);
+        assert_eq!(record["surface_key"], old_key);
+        // Close the original, then let an unrelated live shell reuse its number.
+        kasa_mcp::surface_keys::remove(&alive);
+        let newcomer_key = kasa_mcp::surface_keys::ensure(&alive);
+        assert_ne!(newcomer_key, old_key);
+        assert!(super::pick_restore_id(Some(&alive), |id| id == alive).is_none());
+        let mut registered = super::RestoredSurfaceKey::register(&restored, &serde_json::Value::Object(record.clone()));
+        registered.committed = true;
+        drop(registered);
+        assert_eq!(kasa_mcp::surface_keys::get(&alive), Some(newcomer_key));
+        assert_eq!(kasa_mcp::surface_keys::get(&restored), Some(old_key.clone()));
+        // A saved closed record keeps its key after real resource removal.
+        assert_eq!(record["surface_key"], old_key);
+        kasa_mcp::surface_keys::remove(&alive);
+        kasa_mcp::surface_keys::remove(&restored);
+    }
+
+    #[test]
+    fn surface_key_failed_restore_does_not_poison_a_reused_number() {
+        let id = format!("surface-key-failed-{}", uuid::Uuid::new_v4());
+        {
+            let _pending = super::RestoredSurfaceKey::register(&id, &serde_json::json!({"surface_key": "saved-key"}));
+            assert_eq!(kasa_mcp::surface_keys::get(&id).as_deref(), Some("saved-key"));
+        }
+        assert_eq!(kasa_mcp::surface_keys::get(&id), None);
+        assert_ne!(kasa_mcp::surface_keys::ensure(&id), "saved-key");
+        kasa_mcp::surface_keys::remove(&id);
+    }
+
+    #[test]
+    fn surface_key_restore_reads_latest_backup_before_preparing_renumbered_state() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-surface-key-fixture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let previous = serde_json::json!({"leaf": {"pane_id": "%4", "session_id": "same-session"}});
+        let current = serde_json::json!({"leaf": {"pane_id": "%3", "session_id": "same-session"}});
+        let backup = dir.join("session-restored-200.json");
+        std::fs::write(dir.join("session-restored-100.json"), b"{}").unwrap();
+        std::fs::write(&backup, previous.to_string()).unwrap();
+        std::fs::write(dir.join("session.json"), current.to_string()).unwrap();
+        let saved = super::latest_restored_state(&dir).unwrap();
+        assert_eq!(saved["leaf"]["pane_id"], "%4");
+        assert_eq!(saved["leaf"]["surface_key"], "legacy:%4");
+        let prepared = kasa_mcp::surface_keys::prepare_restore_state(&current, Some(&saved));
+        assert_eq!(prepared["leaf"]["pane_id"], "%3");
+        assert_eq!(prepared["leaf"]["surface_key"], "legacy:%4");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&backup).unwrap()).unwrap(), previous);
+        std::fs::write(dir.join("session-restored-300.json"), b"invalid").unwrap();
+        assert!(super::latest_restored_state(&dir).is_none(), "do not guess from an older table after corruption");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn surface_key_backup_lineage_survives_multiple_legacy_restarts_and_new_pane() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-surface-lineage-fixture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let records = |pairs: &[(&str, &str)]| serde_json::json!({"windows": pairs.iter()
+            .map(|(id, sid)| serde_json::json!({"leaf":{"pane_id":id,"session_id":sid}})).collect::<Vec<_>>()});
+        let old = records(&[("%4", "a"), ("%2", "b"), ("%7", "c"), ("%8", "d")]);
+        let renamed = records(&[("%3", "a"), ("%0", "b"), ("%1", "c"), ("%2", "d")]);
+        // Write the oldest last, deliberately reversing mtimes: ordering must
+        // follow the restore timestamp, not when a backup happened to be copied.
+        std::fs::write(dir.join("session-restored-1788966036.json"), renamed.to_string()).unwrap();
+        std::fs::write(dir.join("session-restored-1788966035.json"), renamed.to_string()).unwrap();
+        std::fs::write(dir.join("session-restored-1788964315.json"), old.to_string()).unwrap();
+        let previous = super::latest_restored_state(&dir).unwrap();
+        let current = records(&[("%4", "new-session"), ("%3", "a"), ("%0", "b"), ("%1", "c"), ("%2", "d")]);
+        let prepared = kasa_mcp::surface_keys::prepare_restore_state(&current, Some(&previous));
+        for (index, old_id) in ["%4", "%2", "%7", "%8"].iter().enumerate() {
+            assert_eq!(prepared["windows"][index + 1]["leaf"]["surface_key"], format!("legacy:{old_id}"));
+        }
+        assert!(uuid::Uuid::parse_str(prepared["windows"][0]["leaf"]["surface_key"].as_str().unwrap()).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn surface_key_corrupt_checkpoint_breaks_lineage_and_corrupt_latest_returns_none() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-surface-corrupt-fixture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("session-restored-100.json"),
+            serde_json::json!({"leaf":{"pane_id":"%4","session_id":"same"}}).to_string()).unwrap();
+        std::fs::write(dir.join("session-restored-200.json"), b"corrupt").unwrap();
+        std::fs::write(dir.join("session-restored-300.json"),
+            serde_json::json!({"leaf":{"pane_id":"%3","session_id":"same"}}).to_string()).unwrap();
+        let restarted = super::latest_restored_state(&dir).unwrap();
+        assert_eq!(restarted["leaf"]["surface_key"], "legacy:%3", "never bridge across a corrupt identity checkpoint");
+        std::fs::write(dir.join("session-restored-400.json"), b"corrupt").unwrap();
+        assert!(super::latest_restored_state(&dir).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn readiness_frame(live_output: bool, output_generation: u64, cols: u16, row: u16)
+        -> kasa_bridge::screen::ScreenUpdate
+    {
+        kasa_bridge::screen::ScreenUpdate {
+            live_output, output_generation, cols, rows: 3,
+            dirty: vec![(row, vec![crate::GridCell::blank(); cols as usize])],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn coalesce_readiness_survives_resize_without_retaining_old_size_rows() {
+        let merged = super::coalesce_screen_updates(
+            readiness_frame(true, 7, 20, 0), readiness_frame(false, 0, 30, 1));
+        assert!(merged.live_output);
+        assert_eq!(merged.output_generation, 7);
+        assert_eq!(merged.cols, 30);
+        assert_eq!(merged.dirty.len(), 1);
+        assert_eq!(merged.dirty[0].0, 1);
+    }
+
+    #[test]
+    fn coalesce_readiness_does_not_cross_an_explicit_generation_boundary() {
+        for (live, generation) in [(false, 8), (true, 8), (true, 0)] {
+            let merged = super::coalesce_screen_updates(
+                readiness_frame(true, 7, 20, 0), readiness_frame(live, generation, 20, 1));
+            assert_eq!((merged.live_output, merged.output_generation), (live, generation));
+            assert_eq!(merged.dirty.len(), 2, "parsed earlier fragments remain part of the canonical grid");
+            let resized = super::coalesce_screen_updates(merged, readiness_frame(false, 0, 30, 2));
+            assert_eq!((resized.live_output, resized.output_generation), (live, generation));
+        }
+    }
+
+    #[test]
+    fn coalesce_readiness_merges_same_generation_and_local_zero_generation() {
+        for generation in [0, 7] {
+            let merged = super::coalesce_screen_updates(
+                readiness_frame(true, generation, 20, 0), readiness_frame(false, generation, 20, 1));
+            assert!(merged.live_output);
+            assert_eq!(merged.output_generation, generation);
+            assert_eq!(merged.dirty.len(), 2);
+        }
+    }
+
+    #[test]
+    fn coalesce_readiness_with_actual_external_parser_waits_for_new_bytes() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let (events, incoming) = crossbeam_channel::unbounded();
+        let session = kasa_pty::PtySession::start_external(kasa_pty::PtyOptions {
+            cols: 20, rows: 3, pane_id: format!("coalesce-readiness-{}", uuid::Uuid::new_v4()),
+            ..Default::default()
+        }, kasa_pty::ExternalIo {
+            events: incoming, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}),
+        }).unwrap();
+        events.send(kasa_pty::ExtEvent::Generation(7)).unwrap();
+        events.send(kasa_pty::ExtEvent::Bytes(b"live".to_vec())).unwrap();
+        let live = session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!((live.live_output, live.output_generation), (true, 7));
+        session.resize(30, 3).unwrap();
+        let resize = session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!((resize.live_output, resize.output_generation), (false, 0));
+        let merged = super::coalesce_screen_updates(live, resize);
+        assert_eq!((merged.live_output, merged.output_generation), (true, 7));
+        events.send(kasa_pty::ExtEvent::Generation(8)).unwrap();
+        // A Generation notification alone does not certify a parsed snapshot.
+        let snapshot = super::coalesce_screen_updates(merged, session.full_snapshot());
+        assert_eq!(snapshot.output_generation, 7);
+        assert_ne!(snapshot.output_generation, 8);
+        events.send(kasa_pty::ExtEvent::Bytes(b"new".to_vec())).unwrap();
+        let fresh = session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+        let merged = super::coalesce_screen_updates(snapshot, fresh);
+        assert_eq!((merged.live_output, merged.output_generation), (true, 8));
+        events.send(kasa_pty::ExtEvent::Eof).unwrap();
+    }
+
+    #[test]
+    fn coalesce_readiness_keeps_earlier_rows_of_a_fragmented_external_frame() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let (events, incoming) = crossbeam_channel::unbounded();
+        let id = format!("coalesce-fragments-{}", uuid::Uuid::new_v4());
+        let session = kasa_pty::PtySession::start_external(kasa_pty::PtyOptions {
+            cols: 20, rows: 3, pane_id: id.clone(), ..Default::default()
+        }, kasa_pty::ExternalIo {
+            events: incoming, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}),
+        }).unwrap();
+        let mut bytes = b"FIRST\r\n".to_vec();
+        // Cross the external reader's 64 KiB fragment boundary without dirtying
+        // FIRST again. Only the final fragment writes SECOND and certifies gen 9.
+        for _ in 0..20_000 { bytes.extend_from_slice(b"\x1b[0m"); }
+        bytes.extend_from_slice(b"SECOND");
+        events.send(kasa_pty::ExtEvent::Generation(9)).unwrap();
+        events.send(kasa_pty::ExtEvent::Bytes(bytes)).unwrap();
+        let mut merged = session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_ne!(merged.output_generation, 9);
+        while merged.output_generation != 9 {
+            let next = session.screens.recv_timeout(Duration::from_secs(2)).unwrap();
+            merged = super::coalesce_screen_updates(merged, next);
+        }
+        let mut ws = crate::Workspace::default();
+        super::App::apply_screen_update(&mut ws, merged);
+        let actual = ws.panes[&id].tabs[0].term().unwrap();
+        assert!(actual.live_output);
+        assert_eq!(actual.output_generation, 9);
+        for (row, cells) in session.full_snapshot().dirty {
+            assert_eq!(actual.cells[row as usize], cells, "coalescing lost an earlier fragment's row");
+        }
+        events.send(kasa_pty::ExtEvent::Eof).unwrap();
+    }
+
     #[test]
     fn inactive_remote_tab_record_keeps_endpoint_and_view_identity() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

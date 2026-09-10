@@ -63,9 +63,14 @@ mod lsp;
 mod machinescol;
 mod mirror_theme;
 mod mirror_view;
+mod mirror_focus_probe;
+mod character_assignment;
+mod agent_identity;
 mod restore_progress;
 mod mirror_close;
+mod close_grace;
 mod mirror_sync;
+mod mirror_diff;
 mod mcpcol;
 mod proc;
 mod sesscol;
@@ -1637,8 +1642,7 @@ pub(crate) struct ClosedPane {
     /// 돌아왔을 때 대화가 끊겨 있으면 쓸모가 없다(2026-08-11 지시). 대신 숨긴 만큼
     /// 메모리를 계속 문다 — 그건 사용자가 고른 값이다.
     pub(crate) stashed: bool,
-    /// 놀기 시작한 시각 — 여기서부터 `CLOSED_PANE_IDLE_REAP` 을 세다 넘으면 놓는다.
-    /// 다시 일하기 시작하면 `None` 으로 풀려 처음부터 다시 센다.
+    /// Ordinary close began here. Activity never extends the undo grace.
     pub(crate) idle_since: Option<Instant>,
     /// 이미지·마크다운 미리보기 **탭**이었나 — `(붙어 있던 pane, 파일 경로)`.
     /// 참이면 되살리기는 `restore_leaf` 가 아니라 `open_file` 재호출이고 `rec` 는
@@ -1656,19 +1660,13 @@ const CLOSED_PANE_KEEP: usize = 10;
 /// 화면 펌프(`pump_pty_screens`)가 같은 문자열을 써야 하므로 한 곳에 둔다.
 pub(crate) const BRING_HOME_MARKER: &str = "kasaterm-home";
 
-/// 닫아 둔 pane 이 이만큼 내리 놀면 스스로 놓는다.
-///
-/// 닫아도 안 죽이는 건 의도지만(`hide_pane`), 개수 상한은 **다음 닫기가 있어야만**
-/// 걷어내서 몇 개 닫고 손 떼면 그 셸들이 계속 남는다(실측: 닫힌 pane 4개가 살아
-/// 있었고 그중 셋은 놀고 있었다). 실수로 닫은 걸 알아채는 데는 몇 분이면 충분하고,
-/// 그 뒤로도 노는 pane 은 잊힌 것이다.
-const CLOSED_PANE_IDLE_REAP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// Ordinary close gets ten seconds to undo, regardless of ongoing activity.
+/// Explicit stash remains a separate background-execution action.
+const CLOSED_PANE_IDLE_REAP: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// 위 시간을 초 단위로 덮는다(`KASATERM_CLOSED_IDLE_SECS`). 15분을 기다리지 않고
-/// 회수를 확인할 수 있는 유일한 길이라 테스트가 이걸 쓰고, 15분이 길거나 짧게
-/// 느껴질 때 손대는 곳도 여기다. 0 이나 파싱 실패는 무시하고 기본값으로 돌아간다.
+/// Isolated tests may shorten the grace. Invalid/zero values use ten seconds.
 fn closed_pane_idle_reap() -> std::time::Duration {
-    std::env::var("KASATERM_CLOSED_IDLE_SECS")
+    std::env::var("KASATERM_CLOSED_GRACE_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|s| *s > 0)
@@ -3448,8 +3446,12 @@ struct Workspace {
     pane_room: HashMap<String, String>,
     /// pane → 배정 캐릭터명(미도리 등). pane_room 과 같은 이유로 ws 에 둔다 —
     /// pump 스레드(apply_screen_update)가 PaneState.character 를 동기하고, 헤더
-    /// 렌더(render.rs)가 같은 매핑을 본다. assign_character_env 가 spawn 시 채운다.
+    /// 렌더(render.rs)가 같은 매핑을 본다. 새 대화 실행 시 채우고 종료하면 비운다.
     pane_character: HashMap<String, String>,
+    /// Delivered launch identity; empty means shell/retired and rejects late metadata.
+    pane_launch_character: HashMap<String, String>,
+    /// Explicit selection waiting for its first harness launch, not a shell identity.
+    pane_next_character: HashMap<String, String>,
     /// 활성 윈도우(보이는 방)의 leaf pane id 집합. `publish_pty_layout` 이 갱신한다.
     /// collab_board 가 이걸로 bound pane 을 필터해 *활성 방 학생만* board 에 올린다
     /// (거노: 아로나 방 + 프라나 방이 한 교실에 같이 뜨던 문제 — 방별 격리).
@@ -3477,6 +3479,8 @@ impl Default for Workspace {
             pid_to_pane: HashMap::new(),
             pane_room: HashMap::new(),
             pane_character: HashMap::new(),
+            pane_launch_character: HashMap::new(),
+            pane_next_character: HashMap::new(),
             active_window_panes: std::collections::HashSet::new(),
             pane_window: HashMap::new(),
             undocked: std::collections::HashSet::new(),
@@ -3575,6 +3579,7 @@ impl Workspace {
 #[derive(Debug, Clone)]
 enum UserEvent {
     Redraw,
+    CloseGraceExpired,
     MirrorCloseDone {
         action: PendingClose,
         targets: Vec<mirror_close::MirrorTarget>,
@@ -3791,6 +3796,7 @@ enum UserEvent {
     /// respawn 없는 재배정: 학생 명령(`시로코`)이 claude 실행 직전에 호출, persona
     /// 는 래퍼의 override 파일이 싣고 GUI 는 헤더·마커·세션바인딩만 갱신.
     SocketRepersona(String, String),
+    SocketAgentIdentity(String, String, String, u32, std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>),
     /// `POST /session-close?idx=N` 위임 — 방(윈도우) 닫기(거노). `close_window` 가
     /// 마지막 윈도우 가드·pane 정리. 닫기 실패(마지막)는 무시(프론트가 가드).
     SocketCloseRoom(usize),
@@ -4407,6 +4413,9 @@ pub(crate) enum SettingsInput {
     /// 그 뒤(11..27)는 ANSI 0..16 — 이 enum 이 Copy 라 키 문자열 대신 번호로
     /// 싣는다. 버퍼는 `App.set_palette_edit` 하나를 같이 쓴다(한 번에 한 칸).
     PaletteHex(usize),
+    /// 기기색 hex 편집 필드. 인덱스는 `pane_identity::device_color_rows()` 순서
+    /// (이 기기가 0, 그 뒤 명부 순). 버퍼는 팔레트와 같은 `App.set_palette_edit`.
+    DeviceHex(usize),
 }
 
 /// Clickable targets painted into the settings screen, collected each frame for
@@ -4460,6 +4469,16 @@ pub(crate) enum SettingsAction {
     PickerHue,
     /// 화면의 한 점에서 색을 집어 현재 팔레트 칸에 넣는다.
     PaletteEyedropper(usize),
+    /// 기기 한 줄의 색 칸에 포커스(인덱스 규약은 `SettingsInput::DeviceHex`).
+    FocusDeviceHex(usize),
+    /// 기기 색을 프리셋(#rrggbb)으로 한 번에 — 피커를 열지 않고 고르는 길.
+    DevicePreset(usize, String),
+    /// 기기 하나의 저장색을 지워 배정색으로 되돌린다.
+    ResetDeviceColor(usize),
+    /// 모든 기기의 저장색을 지운다.
+    ResetAllDeviceColors,
+    /// 화면의 한 점에서 색을 집어 기기 칸에 넣는다.
+    DeviceEyedropper(usize),
     Accent(String),
     /// Silhouette preset: "rounded" · "sharp" · "pixel". Its own axis, so any
     /// palette can be worn with any corner treatment.
@@ -5204,6 +5223,7 @@ struct App {
     restore_applying: Option<(serde_json::Value, std::time::Instant)>,
     restore_progress: Option<restore_progress::RestoreProgress>,
     restore_retry_rect: Option<(f32, f32, f32, f32)>,
+    restore_toast_rect: Option<(f32, f32, f32, f32)>,
     /// Restore-prompt button hit rects, refreshed each frame: `(btn, rect)`.
     restore_btn_rects: Vec<(RestoreBtn, (f32, f32, f32, f32))>,
     /// 자동 스냅샷(강제 종료 대비) 상태 — 마지막 저장 시각, 그 뒤로 깨어난 적이
@@ -5398,14 +5418,15 @@ struct App {
     /// 다음 spawn 할 pane 에 강제할 캐릭터(new_room_with_character 가 세팅). None 이면
     /// 빈 슬롯 순환 배정(미도리→모모이→…). 배정 결과는 KASATERM_CHARACTER env + /tmp 마커.
     pending_character: Option<String>,
+    last_auto_character: Option<String>,
+    pane_agent_launches: HashMap<String, u32>,
     /// 다음 split 이 셸을 띄울 폴더를 강제한다(`spawn_shell_pane` 이 세웠다 걷는다) —
     /// 다른 기계의 `to` 가 「이 폴더에서」를 실어 오는 유일한 길이다.
     pending_spawn_cwd: Option<String>,
     /// 닫을 때 **저쪽 pane 은 남길** 원격 pane(메뉴 「닫기 — 저쪽 pane 은 남김」).
     /// `to` 로 세운 자리는 기본이 함께 끄기라, 예외만 여기 적는다.
     remote_keep: std::collections::HashSet<String>,
-    /// pane id → claude --session-id(백엔드가 spawn 시 생성). shim 이 env 로 받아 고정,
-    /// transcript jsonl 파일명 안정화 → resume 시 같은 대화 복원.
+    /// pane id → current launch's conversation ID, never a permanent shell ID.
     pane_session_id: HashMap<String, String>,
     /// pane id → claude 실제 sessionId(transcript stem, `SocketSessionBound` 로 도착).
     /// pane_session_id(백엔드 발급)와 달리 fork/detach 시 갈라진 진짜 세션이라, 이걸로
@@ -5937,6 +5958,7 @@ impl App {
             restore_applying: None,
             restore_progress: None,
             restore_retry_rect: None,
+            restore_toast_rect: None,
             restore_btn_rects: Vec::new(),
             session_saved_at: std::time::Instant::now(),
             session_touched: false,
@@ -5980,6 +6002,8 @@ impl App {
             pending_room: None,
             next_room_seq: 1,
             pending_character: None,
+            last_auto_character: None,
+            pane_agent_launches: HashMap::new(),
             pending_spawn_cwd: None,
             remote_keep: std::collections::HashSet::new(),
             pane_session_id: HashMap::new(),
@@ -6453,6 +6477,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Apply the persisted theme + accent into the global color slots before any
     // window or pane paints, so the first frame is already in the right palette.
         theme::apply_from_settings();
+        render::pane_identity::reload_device_colors();
     // Install pane shims before anything spawns a shell — every PtySession
     // reads KASATERM_TMUX_SHIM_DIR we set here (kasaterm-cli/preview/OSC133).
     // best-effort: failures just log and skip, the rest still works.
@@ -6463,12 +6488,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     // "다른 인스턴스가 하나도 없을 때만" 이라는 게이트를 뒀는데, 개발용 `cargo run`
     // 하나만 떠 있어도 청소가 통째로 건너뛰어져 마커가 재시작마다 쌓였다(그 끝이
     // 배정 풀 고갈 = 같은 학생 중복). 이제 주인 pid 로 가리므로 게이트가 필요 없다.
-        {
+        if !verification_run() {
             let live = live_kasaterm_pids();
-            kasa_mcp::character::sweep_stale_markers(|pid| live.contains(&pid));
+            // An isolated/custom socket directory is not a complete process
+            // inventory. Keep any owner still alive outside that directory;
+            // if process enumeration fails, do not sweep other owners at all.
+            let processes = kasa_pty::fresh_process_table();
+            kasa_mcp::character::sweep_stale_markers(|pid| live.contains(&pid)
+                || processes.is_empty() || processes.iter().any(|(p, _, _)| *p == pid));
+            prune_finished_tasks();
+            prune_empty_inboxes();
         }
-        prune_finished_tasks();
-        prune_empty_inboxes();
     } else {
         // Palette reads are required by the shared document renderer; unlike
         // onboarding/shims this path does not write or start a service.
@@ -6836,7 +6866,7 @@ fn install_rust_analyzer_shim(shim_dir: &std::path::Path) {
 # ⚠️ --server-path 에 **진짜 경로**를 넘겨야 한다. 안 주면 ra-multiplex 가 PATH 에서
 #    rust-analyzer 를 찾는데 그게 이 shim 이라 자기를 무한히 다시 부른다.
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | paste -sd: -)
+CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | grep -vE '(^|/)kasaterm-shim-[0-9]+/?$' | paste -sd: -)
 REAL=$(PATH="$CLEAN_PATH" command -v rust-analyzer 2>/dev/null)
 # 같은 디렉터리가 다른 표기로 PATH 에 남으면 위 grep 이 못 지운다 — Git Bash 는
 # /tmp 를 AppData/Local/Temp 의 별칭으로 두어, PATH 엔 `/tmp/kasaterm-shim-N` 이
@@ -7359,7 +7389,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // 가야 보이고, 안 보고 보내는 것이 사고의 형태다.
             "PreToolUse": [
                 { "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] },
-                { "matcher": "SendMessage", "hooks": [cmd("kasaterm-closed-pane-guard.py", 5000)] },
+                { "hooks": [cmd("kasaterm-closed-pane-guard.py", 5000)] },
                 { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
             ],
             "PostToolUse": [
@@ -7384,6 +7414,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // stdout 에 JSON 을 내므로 ultracode-mark 와 **다른 그룹**에 둔다(Stop 의
             // stop-drain 과 같은 이유 — 한 그룹에 섞이면 결정이 깨질 수 있다).
             "UserPromptSubmit": [
+                { "hooks": [cmd("kasaterm-closed-pane-guard.py", 5000)] },
                 { "hooks": [cmd("ultracode-mark.py", 3000)] },
                 { "hooks": [cmd("kasaterm-peer-name.py", 5000)] }
             ],
@@ -7610,9 +7641,11 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     // - KASATERM_RESUMED_SID/RESUME_PICKER 마커(statusline ⑂bg 오발화 방지)
     // - resume 부팅 캐릭터 정합 교정(거노: 모모이 세션이 프라나 배지·persona 로 부팅)
     let team_arms = teammate_case_arms();
+    install_agent_identity_helper(shim_dir);
+    let identity_block = identity_bootstrap_sh("claude", "$TSID");
     let team_block = format!(
         "AGENT=\"\"; ACOLOR=\"\"; TSID=\"$SID\"; prev=\"\"\n\
-for a in \"$@\"; do case \"$prev\" in --session-id|--resume) case \"$a\" in -*) ;; *) TSID=\"$a\" ;; esac ;; esac; prev=\"$a\"; done\n\
+for a in \"$@\"; do case \"$prev\" in --session-id|--resume|-r) case \"$a\" in -*) ;; *) TSID=\"$a\" ;; esac ;; esac; prev=\"$a\"; done\n\
 # id 없는 --continue 는 claude 와 같은 기준(cwd 프로젝트 최신 transcript)으로 sid 를\n\
 # 추론해 캐릭터 정합·RESUMED_SID 마커의 연속성을 유지한다(추론 실패는 마커 없이 부팅).\n\
 case \" $* \" in\n\
@@ -7628,15 +7661,11 @@ esac\n\
 # export 해 statusline 이 포크/attach 뷰(마커 없음)와 구분하게 한다. anchor\n\
 # (KASATERM_SESSION_ID) 자체는 state.rs 캐릭터 복원이 원본을 요구해 안 덮는다.\n\
 [ -n \"$TSID\" ] && export KASATERM_RESUMED_SID=\"$TSID\"\n\
-case \" $* \" in *\" --resume \"*|*\" --continue \"*|*\" -c \"*) [ -z \"$TSID\" ] && export KASATERM_RESUME_PICKER=1 ;; esac\n\
+case \" $* \" in *\" --resume \"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*) [ -z \"$TSID\" ] && export KASATERM_RESUME_PICKER=1 ;; esac\n\
 # resume/명시 sid 부팅 — pane 상속 캐릭터 대신 그 세션의 정본(바인딩) 캐릭터로 정체성 교정\n\
-# (거노: 모모이 세션이 프라나 배지·persona 로 부팅). 서버 죽으면 빈 응답 → pane env 폴백.\n\
-if [ -n \"$PERSONA_OK\" ] && [ -z \"$SID\" ] && [ -n \"$TSID\" ]; then\n\
-  RC=$(curl -s --max-time 2 --get --data-urlencode \"sid=$TSID\" \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/character\" 2>/dev/null)\n\
-  if [ -n \"$RC\" ]; then\n\
-    export KASATERM_CHARACTER=\"$RC\"\n\
-    KASATERM_PERSONA=$(curl -s --max-time 2 --get --data-urlencode \"sid=$TSID\" \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/persona\" 2>/dev/null)\n\
-  fi\n\
+# 이름과 지침을 한 응답으로 받는다. 실패하면 낡은 pane env 로 실행하지 않는다.\n\
+if [ -n \"$PERSONA_OK\" ] && [ -n \"$KASATERM_PANE_ID\" ]; then\n\
+{identity_block}\
 fi\n\
 if [ -n \"$PERSONA_OK\" ] && [ -n \"$KASATERM_PANE_ID\" ] && [ -n \"$KASATERM_CHARACTER\" ]; then\n\
   case \" $* \" in *\" --agent-id \"*|*\" --agent-name \"*|*\" --team-name \"*) : ;; *)\n\
@@ -7671,7 +7700,7 @@ fi\n"
 # wrapper isn't on PATH and claude runs exactly as the user configured it.\n\
 HOOKS_DIR=\"{hd}\"\n\
 SELF_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
-CLEAN_PATH=$(printf '%s' \"$PATH\" | tr ':' '\\n' | grep -vxF \"$SELF_DIR\" | paste -sd: -)\n\
+CLEAN_PATH=$(printf '%s' \"$PATH\" | tr ':' '\\n' | grep -vxF \"$SELF_DIR\" | grep -vE '(^|/)kasaterm-shim-[0-9]+/?$' | paste -sd: -)\n\
 REAL=$(PATH=\"$CLEAN_PATH\" command -v claude 2>/dev/null)\n\
 # 같은 디렉터리가 다른 표기로 PATH 에 남으면 위 grep 이 못 지운다 — Git Bash 는\n\
 # /tmp 를 AppData/Local/Temp 의 별칭으로 두어, PATH 엔 `/tmp/kasaterm-shim-N` 이\n\
@@ -7714,7 +7743,7 @@ BGSUF=\"\"\n\
 # 안 붙던 원인 · Bash 도구의 claude -p 가 pane session-id 강탈→board 가 그 pane 을 학생으로 둔갑·⑂bg 오발화).\n\
 # --bg 는 session-id 를 자기가 관리(명시 지정은 무시+경고 실측)하지만 persona 는 새 세션이라 붙이고,\n\
 # --agent-* 트리플은 데몬 스폰까지 전달된다(07-16 실측) — 이름 접미사만 랜덤 BGSUF(비-hex, bridge 매칭 회피).\n\
-case \" $* \" in *\" attach \"*|*\" agents \"*|*\" -p \"*|*\" --print \"*) SID=\"\"; PERSONA_OK=\"\" ;; *\" --bg \"*|*\" --background \"*) SID=\"\"; BGSUF=$(od -An -N2 -tx1 /dev/urandom | tr -d ' \\n' | tr '0123456789abcdef' 'ghjkmnpqrstvwxyz') ;; *\" --session-id \"*|*\" --resume \"*|*\" --continue \"*|*\" -c \"*) SID=\"\" ;; *) SID=\"$KASATERM_SESSION_ID\" ;; esac\n\
+case \" $* \" in *\" attach \"*|*\" agents \"*|*\" -p \"*|*\" --print \"*) SID=\"\"; PERSONA_OK=\"\" ;; *\" --bg \"*|*\" --background \"*) SID=\"\"; BGSUF=$(od -An -N2 -tx1 /dev/urandom | tr -d ' \\n' | tr '0123456789abcdef' 'ghjkmnpqrstvwxyz') ;; *\" --session-id \"*|*\" --resume \"*|*\" -r \"*|*\" --continue \"*|*\" -c \"*) SID=\"\" ;; *) SID=\"$KASATERM_SESSION_ID\" ;; esac\n\
 # stop/logs 도 세션 지정 서브커맨드 — session-id/persona/트리플을 얹으면 claude 가 서브커맨드를\n\
 # 프롬프트 positional 로 소비해 유령 세션 부팅/\"already in use\"(실측 07-16). $1 정확 일치는\n\
 # zshrc claude() 알리아스(--dangerously-skip-permissions prepend)에 깨진다(실측) — 첫 non-flag\n\
@@ -7838,6 +7867,35 @@ exec kasaterm-cli remote \"$M\" --here ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\
     }
 }
 
+/// Install the shared, fail-closed pre-exec identity resolver.
+fn install_agent_identity_helper(shim_dir: &std::path::Path) {
+    if let Err(error) = write_shim_data(
+        &shim_dir.join("agent-identity.py"),
+        include_str!("../collab-hooks/kasaterm-agent-identity.py"),
+    ) {
+        eprintln!("[shim] identity helper failed: {error}");
+    }
+}
+
+fn identity_bootstrap_sh(harness: &str, anchor: &str) -> String {
+    r#"export PATH="$SELF_DIR:$CLEAN_PATH"
+if [ -n "$KASATERM_VIA_BACKEND" ] && [ "$KASATERM_LAUNCH_OWNER" = "$SELF_DIR:$KASATERM_PANE_ID" ] && [ -d "$KASATERM_IDENTITY_DIR" ]; then
+  IDENTITY="$KASATERM_IDENTITY_DIR"
+else
+  IDENTITY=$(KASATERM_LAUNCH_PID=$$ python3 "$SELF_DIR/agent-identity.py" HARNESS "$SELF_DIR" "ANCHOR" "$@") || exit 1
+fi
+export KASATERM_IDENTITY_DIR="$IDENTITY"
+export KASATERM_CHARACTER="$(cat "$IDENTITY/character")"
+export KASATERM_PERSONA="$(cat "$IDENTITY/persona")"
+export KASATERM_AGENT_SLUG="$(cat "$IDENTITY/slug")"
+export KASATERM_MODEL="$(cat "$IDENTITY/model")"
+export KASATERM_BACKEND="$(cat "$IDENTITY/backend")"
+SID=$(cat "$IDENTITY/session_id")
+[ -n "$SID" ] && export KASATERM_SESSION_ID="$SID"
+export KASATERM_LAUNCH_OWNER="$SELF_DIR:$KASATERM_PANE_ID"
+"#.replace("HARNESS", harness).replace("ANCHOR", anchor)
+}
+
 /// codex 판 pane shim. pane 안에서만 계정·페르소나를 얹고 거노 개인 설정은 안
 /// 건드린다 — 수단이 셋 다르다. 전부 2026-08-05 실측 확정:
 ///
@@ -7850,13 +7908,14 @@ exec kasaterm-cli remote \"$M\" --here ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\
 ///    `--dangerously-bypass-approvals-and-sandbox`(codex 판 "욜로")가 맡는다.
 ///    claude pane 의 `--dangerously-skip-permissions` 와 대응하는 자리다.
 pub(crate) fn install_codex_shim(shim_dir: &std::path::Path) {
+    install_agent_identity_helper(shim_dir);
     // 래퍼는 Rust 쪽 값이 하나도 안 박혀 정적 문자열이다 — hooks 경로는 위 json 안에
     // 있고 나머지는 전부 실행 시점에 셸이 푼다. 덕분에 format! 이스케이프가 없다.
     let wrapper = r#"#!/bin/sh
 # kasaterm pane-only codex wrapper — pane 전용 CODEX_HOME 을 세워 훅·페르소나를 얹는다.
 # ~/.codex 는 읽기만 한다. pane 밖에선 이 래퍼가 PATH 에 없어 순정 codex 가 돈다.
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | paste -sd: -)
+CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | grep -vE '(^|/)kasaterm-shim-[0-9]+/?$' | paste -sd: -)
 REAL=$(PATH="$CLEAN_PATH" command -v codex 2>/dev/null)
 # 같은 디렉터리가 다른 표기로 PATH 에 남으면 위 grep 이 못 지운다 — Git Bash 는
 # /tmp 를 AppData/Local/Temp 의 별칭으로 두어, PATH 엔 `/tmp/kasaterm-shim-N` 이
@@ -7879,6 +7938,11 @@ case "$SUB" in
   login|logout|mcp|plugin|app|app-server|remote-control|completion|update|doctor|sandbox|debug|apply|cloud|exec-server|features|help|archive|delete|unarchive)
     exec "$REAL" "$@" ;;
 esac
+# Nested utility calls do not allocate another student or rewrite the parent's
+# pane home. A new shell/harness run does not inherit this child-only marker.
+if [ "$KASATERM_LAUNCH_OWNER" = "$SELF_DIR:$KASATERM_PANE_ID" ]; then
+  exec "$REAL" "$@"
+fi
 SRC="$HOME/.codex"
 CH="$SELF_DIR/codex-home-${KASATERM_PANE_ID:-solo}"
 mkdir -p "$CH" 2>/dev/null || exec "$REAL" "$@"
@@ -7920,8 +7984,11 @@ if [ -n "$KASATERM_PANE_ID" ] && [ -f "$OVP" ]; then
   KASATERM_PERSONA=$(cat "$OVP")
   [ -f "${OVP%.persona}.character" ] && export KASATERM_CHARACTER="$(cat "${OVP%.persona}.character")"
 fi
-cp "$SRC/AGENTS.md" "$CH/AGENTS.md" 2>/dev/null || : > "$CH/AGENTS.md"
-[ -n "$KASATERM_PERSONA" ] && printf '\n%s\n' "$KASATERM_PERSONA" >> "$CH/AGENTS.md"
+# KASATERM_LAUNCH_IDENTITY
+INSTRUCTIONS=$(mktemp "$CH/AGENTS.md.XXXXXX") || exit 1
+cp "$SRC/AGENTS.md" "$INSTRUCTIONS" 2>/dev/null || : > "$INSTRUCTIONS"
+[ -n "$KASATERM_PERSONA" ] && printf '\n%s\n' "$KASATERM_PERSONA" >> "$INSTRUCTIONS"
+mv "$INSTRUCTIONS" "$CH/AGENTS.md" || exit 1
 export CODEX_HOME="$CH"
 # 승인·샌드박스도 함께 우회한다 — claude pane 이 `--dangerously-skip-permissions` 로
 # 뜨는 것과 같은 자리다. 이게 없으면 학생이 첫 명령에서 승인 프롬프트에 멈춰 서고,
@@ -7940,6 +8007,7 @@ if [ -n "$ACCT" ]; then
 fi
 exec "$REAL" "$@"
 "#;
+    let wrapper = wrapper.replace("# KASATERM_LAUNCH_IDENTITY", &identity_bootstrap_sh("codex", ""));
     let wrapper_path = shim_dir.join("codex");
     if let Err(e) = write_shim(&wrapper_path, wrapper) {
         eprintln!("[shim] write codex wrapper failed: {e}");
@@ -8005,6 +8073,7 @@ fn sh_case_pat(name: &str) -> String {
 ///
 /// 훅은 아직 안 붙인다 — agy 훅 스키마를 재지 않았다. 이 함수는 페르소나까지다.
 fn install_agy_hook_shim(shim_dir: &std::path::Path) {
+    install_agent_identity_helper(shim_dir);
     let Some(chars) = kasa_mcp::character::characters_json() else {
         return;
     };
@@ -8059,7 +8128,7 @@ fn install_agy_hook_shim(shim_dir: &std::path::Path) {
 # ~/.gemini 는 agents/kasaterm-*.md 만 쓴다(그 파일들은 GUI 가 부팅 때 굽는다).
 # pane 밖에선 이 래퍼가 PATH 에 없어 순정 agy 가 돈다.
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | paste -sd: -)
+CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | grep -vE '(^|/)kasaterm-shim-[0-9]+/?$' | paste -sd: -)
 REAL=$(PATH="$CLEAN_PATH" command -v agy 2>/dev/null)
 # 같은 디렉터리가 다른 표기로 PATH 에 남으면 위 grep 이 못 지운다 — Git Bash 는
 # /tmp 를 AppData/Local/Temp 의 별칭으로 두어, PATH 엔 `/tmp/kasaterm-shim-N` 이
@@ -8081,6 +8150,7 @@ case "$SUB" in
   agent|agents|changelog|help|install|models|plugin|plugins|update)
     exec "$REAL" "$@" ;;
 esac
+# KASATERM_LAUNCH_IDENTITY
 # 이 pane 의 학생 — `시로코` 런처로 갈아탔으면 그 파일이 env 를 이긴다(env 는 셸
 # spawn 시 고정이라 늦게 못 바꾼다). codex 래퍼와 같은 규약.
 C="$KASATERM_CHARACTER"
@@ -8109,6 +8179,7 @@ exec "$REAL" "$@"
 "#
     );
     let wrapper_path = shim_dir.join("agy");
+    let wrapper = wrapper.replace("# KASATERM_LAUNCH_IDENTITY", &identity_bootstrap_sh("agy", ""));
     if let Err(e) = write_shim(&wrapper_path, wrapper) {
         eprintln!("[shim] write agy wrapper failed: {e}");
     }
@@ -9889,6 +9960,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         install_codex_shim(&dir);
         let body = std::fs::read_to_string(dir.join("codex")).unwrap();
+        assert!(body.contains("kasaterm-shim-[0-9]+"), "exclude every older wrapper, not just this directory");
+        assert!(body.contains("agent-identity.py\" codex"), "resolve resume identity before loading AGENTS.md");
+        assert!(body.find("agent-identity.py\" codex").unwrap() < body.find("cp \"$SRC/AGENTS.md\"").unwrap());
         assert!(
             !body.contains("--dangerously-bypass-hook-trust"),
             "명령 승인과 무관한 훅 trust 우회는 시작 경고만 만들므로 강제하지 않는다"
@@ -9922,6 +9996,24 @@ mod tests {
             "계정 슬롯이 keyring을 쓰면 CODEX_HOME을 갈라도 같은 로그인을 공유한다"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_path_filter_excludes_all_inherited_app_generations() {
+        let dir = std::env::temp_dir().join(format!("kt-shim-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        install_codex_shim(&dir);
+        let body = std::fs::read_to_string(dir.join("codex")).unwrap();
+        let filter = body.lines().find(|line| line.starts_with("CLEAN_PATH=")).unwrap();
+        let result = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("{filter}\nprintf '%s' \"$CLEAN_PATH\"")])
+            .env("SELF_DIR", &dir)
+            .env("PATH", format!("{}:/tmp/kasaterm-shim-11:/private/tmp/kasaterm-shim-22/:/usr/bin:/bin", dir.display()))
+            .output().unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8(result.stdout).unwrap(), "/usr/bin:/bin");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

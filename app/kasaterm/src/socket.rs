@@ -979,6 +979,15 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn prepare_agent_identity(&self, surface: &str, sid: &str, requested: &str, pid: u32) -> Result<serde_json::Value> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::SocketAgentIdentity(surface.into(), sid.into(), requested.into(), pid, tx))
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(4))
+            .map_err(|_| anyhow::anyhow!("identity launch timed out"))?
+            .map_err(anyhow::Error::msg)
+    }
+
     /// 이사가 출발지의 캐릭터 테마 선택을 이 기계에 재현한다 — 설정 화면과 같은
     /// 경로(write_setting + 캐시 무효화)를 앱 프로세스 안에서 태운다. 파일만 밖에서
     /// 고치면 도는 앱의 활성 테마·로스터 캐시가 낡은 채 남는다(character.rs 캐시 주석).
@@ -1946,6 +1955,10 @@ impl Backend for PtyBackend {
             if !known {
                 anyhow::bail!("surface {sid} 없음 — 재시작·종료로 사라진 pane (오발송 방지)");
             }
+            let pid = self.ws.lock().unwrap().active_tab_pid(sid);
+            if kasa_pty::lookup_session(&pid).is_some_and(|p| p.input_closed()) {
+                anyhow::bail!("surface {sid} is closed — reopen it before assigning work");
+            }
         }
         let _ = self.proxy.send_event(UserEvent::SocketBytes(
             surface_id.map(|s| s.to_string()),
@@ -1955,6 +1968,12 @@ impl Backend for PtyBackend {
     }
 
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()> {
+        if let Some(sid) = surface_id {
+            let pid = self.ws.lock().unwrap().active_tab_pid(sid);
+            if kasa_pty::lookup_session(&pid).is_some_and(|p| p.input_closed()) {
+                anyhow::bail!("surface {sid} is closed — reopen it before sending keys");
+            }
+        }
         let _ = self.proxy.send_event(UserEvent::SocketBytes(
             surface_id.map(|s| s.to_string()),
             key_to_bytes(key),
@@ -2898,7 +2917,8 @@ impl Backend for PtyBackend {
                 // detach 포크로 세션 id 가 갈려도 --resume 부모 끝의 바인딩이 retained 진실
                 // (per-세션이라 "다 같은 학생" 아님, 거노). stem = transcript 파일명 = 세션 id.
                 let stem = path.file_stem().and_then(|s| s.to_str());
-                let retained = stem
+                let launched = self.ws.lock().unwrap().pane_launch_character.get(sid.as_str()).cloned();
+                let retained = launched.or_else(|| stem
                     .and_then(|s| {
                         let mut cur = s.to_string();
                         for _ in 0..8 {
@@ -2912,7 +2932,7 @@ impl Backend for PtyBackend {
                         }
                         None
                     })
-                    .filter(|c| valid_members.contains(c));
+                    .filter(|c| valid_members.contains(c)));
                 // 셸 env 폴백(foreground 순정 경로) — bg 셸엔 대개 없다. 단 spawn 시
                 // 동결된 KASATERM_CHARACTER 는 --resume/재배정 후 stale 하다(거노: 복원
                 // 후 board 가 전부 미도리 — env CHARACTER 는 미도리로 굳었지만 pane env 의
@@ -2940,14 +2960,15 @@ impl Backend for PtyBackend {
                     .or(env_char)
                     .or_else(|| pane_character.get(sid.as_str()).cloned())
                     .or_else(|| {
-                        std::fs::read_to_string(
-                            kasa_socket::collab_root()
-                                .join(format!("{rslug}/character-{}", sid.trim_start_matches('%'))),
-                        )
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
+                        kasa_mcp::character::read_marker(&rslug, sid)
                     });
+                // Repair a missing derived marker from the live identity;
+                // never reassign a running student just because a file vanished.
+                if let Some(name) = row.character.as_deref() {
+                    if kasa_mcp::character::read_marker(&rslug, sid).as_deref() != Some(name) {
+                        let _ = kasa_mcp::character::write_marker(&rslug, sid, name);
+                    }
+                }
                 // retained 진실이 ws·marker 와 어긋나면 교정 — render(statusline·테두리·타이틀)는
                 // ws.pane_character 를 보므로 복원된 오염 랜덤을 원본으로 되돌린다.
                 if let Some(rc) = retained {
@@ -2998,15 +3019,13 @@ impl Backend for PtyBackend {
                             let members = kasa_mcp::character::assignable_names(&chars);
                             // 살아있는 다른 pane 이 쓰는 캐릭터(이번 폴링 누적 스냅샷)는 피한다 —
                             // 죽은 pane 마커는 무시. 빈 슬롯 없으면 첫째로 순환(거노: 모모이 둘).
-                            let taken: std::collections::HashSet<&String> = pane_character
-                                .values()
-                                .chain(lazy_assigned.iter())
-                                .collect();
-                            members
-                                .iter()
-                                .find(|m| !taken.contains(m))
-                                .cloned()
-                                .or_else(|| members.first().cloned())
+                            let mut taken: Vec<_> = pane_character.values().cloned().collect();
+                            taken.extend(kasa_mcp::character::assigned_global());
+                            if !crate::verification_run() {
+                                taken.extend(kasa_mcp::machines::cached_character_assignments());
+                            }
+                            taken.extend(lazy_assigned.iter().cloned());
+                            kasa_mcp::character::pick_in_order(&members, &taken)
                         })
                     });
                     {

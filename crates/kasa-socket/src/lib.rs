@@ -48,11 +48,28 @@ pub fn home_dir() -> Option<std::path::PathBuf> {
 /// statusline 등 스크립트가 같은 리터럴을 참조한다. Windows 는 `%TEMP%` 기준 —
 /// Git bash 가 `/tmp` 를 `%TEMP%` 로 마운트하므로 스크립트와 같은 디렉토리로 만난다.
 pub fn collab_root() -> std::path::PathBuf {
+    if let Some(root) = isolated_collab_root() { return root; }
     if cfg!(windows) {
         std::env::temp_dir().join("kasaterm-collab")
     } else {
         std::path::PathBuf::from("/tmp/kasaterm-collab")
     }
+}
+
+/// Native verification apps must not write, sweep or unlink the production
+/// character registry, even when their TMPDIR/socket is different.
+pub fn isolated_collab_root() -> Option<std::path::PathBuf> {
+    if let Some(root) = std::env::var_os("KASATERM_COLLAB_ROOT").filter(|v| !v.is_empty()) {
+        return Some(root.into());
+    }
+    let verification = std::env::var_os("KASATERM_WINDOW_SIZE").is_some()
+        || std::env::var_os("KASATERM_WINDOW_POS").is_some();
+    verification_collab_root(verification, std::env::var_os("KASATERM_SESSION_FILE").as_deref(), std::process::id())
+}
+
+fn verification_collab_root(verification: bool, session: Option<&std::ffi::OsStr>, pid: u32) -> Option<std::path::PathBuf> {
+    let session = session.filter(|v| verification && !v.is_empty())?;
+    Some(std::path::Path::new(session).parent()?.join(format!("kasaterm-collab-verify-{pid}")))
 }
 
 /// pane↔sid bind 마커(`kasaterm-bound-<safe id>`). `collab_root` 과 같은 이유로
@@ -61,9 +78,25 @@ pub fn collab_root() -> std::path::PathBuf {
 /// 리터럴을 그대로 따라 하면 Windows 에서 영영 못 지운다.
 pub fn bound_marker_path(safe_id: &str) -> std::path::PathBuf {
     let name = format!("kasaterm-bound-{safe_id}");
+    if let Some(root) = isolated_collab_root() { return root.join(name); }
     if cfg!(windows) {
         std::env::temp_dir().join(name)
     } else {
         std::path::PathBuf::from("/tmp").join(name)
+    }
+}
+
+#[cfg(test)]
+mod collab_isolation_tests {
+    use super::*;
+
+    #[test]
+    fn verification_registry_never_shares_production_or_another_probe() {
+        let session = Some(std::ffi::OsStr::new("/probe/session.json"));
+        let one = verification_collab_root(true, session, 101).unwrap();
+        assert_eq!(one, std::path::PathBuf::from("/probe/kasaterm-collab-verify-101"));
+        assert_ne!(one, verification_collab_root(true, session, 102).unwrap());
+        assert!(verification_collab_root(false, session, 101).is_none());
+        assert!(verification_collab_root(true, None, 101).is_none());
     }
 }
