@@ -3,11 +3,13 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'claude_style.dart';
 import 'contrast.dart';
 import 'fill_viewer.dart';
 import 'grid.dart';
+import 'links.dart';
 import 'reflow.dart';
 import 'server.dart';
 import 'sprite_cache.dart';
@@ -320,6 +322,7 @@ class _GridPainter extends CustomPainter {
           .layout(runs, palette, metrics)
           .paint(canvas, row * metrics.height, metrics);
     }
+    _paintLinks(canvas, first, last);
     if (grid.cursorVisible && grid.rows > 0) {
       final ime = composing ?? '';
       var cursorCol = grid.cursorCol;
@@ -337,6 +340,25 @@ class _GridPainter extends CustomPainter {
       );
     }
     _paintSprites(canvas);
+  }
+
+  /// 보이는 줄의 주소에 밑줄 — 데스크톱과 같이 누를 수 있다는 표시. 보이는 줄만 훑는다.
+  void _paintLinks(Canvas canvas, int first, int last) {
+    if (last <= first) return;
+    final paint = Paint()..color = palette.fg.withValues(alpha: 0.45);
+    for (final hit in detectLinks(grid.lines, grid.cols, from: first, to: last)) {
+      for (final (row, start, end) in hit.segments) {
+        canvas.drawRect(
+          Rect.fromLTWH(
+            start * metrics.width,
+            (row + 1) * metrics.height - 1.5,
+            (end - start) * metrics.width,
+            1,
+          ),
+          paint,
+        );
+      }
+    }
   }
 
   /// 조합 중인 글을 커서 자리에 밑줄 친 채 얹는다 — 데스크톱의 IME 조합 표시와 같은
@@ -477,14 +499,19 @@ class _GridCanvasState extends State<GridCanvas> {
     return FillViewer(
       content: Size(cols * _metrics.width, rows * _metrics.height),
       background: widget.palette.bg,
-      child: CustomPaint(
-        painter: _GridPainter(
-          grid: grid,
-          version: widget.version,
-          palette: widget.palette,
-          metrics: _metrics,
-          cache: _cache,
-          composing: widget.composing,
+      child: _LinkTaps(
+        lines: grid.lines,
+        cols: grid.cols,
+        metrics: _metrics,
+        child: CustomPaint(
+          painter: _GridPainter(
+            grid: grid,
+            version: widget.version,
+            palette: widget.palette,
+            metrics: _metrics,
+            cache: _cache,
+            composing: widget.composing,
+          ),
         ),
       ),
     );
@@ -780,7 +807,12 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                   child: SizedBox(
                     width: constraints.maxWidth,
                     height: math.max(view.rows, 1) * metrics.height,
-                    child: CustomPaint(painter: painter(view)),
+                    child: _LinkTaps(
+                      lines: view.lines,
+                      cols: cols,
+                      metrics: metrics,
+                      child: CustomPaint(painter: painter(view)),
+                    ),
                   ),
                 ),
               ),
@@ -790,13 +822,55 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
                   right: 0,
                   bottom: 0,
                   height: math.max(tail.rows, 1) * metrics.height,
-                  child: CustomPaint(painter: painter(tail)),
+                  child: _LinkTaps(
+                    lines: tail.lines,
+                    cols: cols,
+                    metrics: metrics,
+                    child: CustomPaint(painter: painter(tail)),
+                  ),
                 ),
             ],
           ),
         ),
       );
     },
+  );
+}
+
+/// 격자 위 손가락 — 주소를 누르면 열기·복사 시트, 아무 줄이나 길게 누르면 그 줄 복사
+/// (2026-09-10 지시 「pane 에서 링크 누르면 브라우저 열리거나 복사」). 스크롤·핀치는
+/// 바깥이 맡고 여기는 탭·길게 누름만 받는다.
+class _LinkTaps extends StatelessWidget {
+  const _LinkTaps({
+    required this.lines,
+    required this.cols,
+    required this.metrics,
+    required this.child,
+  });
+
+  final List<List<Run>> lines;
+  final int cols;
+  final _CellMetrics metrics;
+  final Widget child;
+
+  (int, int) _cell(Offset p) =>
+      ((p.dy / metrics.height).floor(), (p.dx / metrics.width).floor());
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    behavior: HitTestBehavior.opaque,
+    onTapUp: (d) {
+      final (row, col) = _cell(d.localPosition);
+      final hit = linkAt(lines, cols, row, col);
+      if (hit != null) showLinkSheet(context, hit.url);
+    },
+    onLongPressStart: (d) {
+      final (row, _) = _cell(d.localPosition);
+      if (row < 0 || row >= lines.length) return;
+      HapticFeedback.selectionClick();
+      copyLine(context, lines[row]);
+    },
+    child: child,
   );
 }
 
