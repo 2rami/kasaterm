@@ -104,6 +104,10 @@ U=$(id -u); L=com.geono.kasaterm
 RUN=~/Applications/kasaterm.app/Contents/MacOS/kasaterm
 test -x ~/kasaterm-dist/kasaterm.app/Contents/MacOS/kasaterm || { echo "부쳐진 판이 없어요"; exit 1; }
 launchctl bootout "gui/$U/$L" 2>/dev/null || true
+# launchd 밖에서(open 으로) 뜬 앱은 bootout 이 아무것도 안 한다 — 그때는 TERM 으로
+# 곱게 끈다(앱의 exiting 이 세션을 저장한다). 2026-09-10 실측: 이 줄이 없어 20초를
+# 기다리다 교체를 세웠다.
+for p in $(pgrep -f "$RUN"); do kill -TERM "$p" 2>/dev/null || true; done
 for _ in $(seq 1 40); do pgrep -f "$RUN" >/dev/null || break; sleep 0.5; done
 if pgrep -f "$RUN" >/dev/null; then
   launchctl bootstrap "gui/$U" ~/Library/LaunchAgents/$L.plist 2>/dev/null || true
