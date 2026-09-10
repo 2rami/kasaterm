@@ -282,6 +282,28 @@ class HubModel extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 하나만 읽음 — 눌러서 그 학생 화면으로 갔거나 페이지를 열었을 때.
+  Future<void> markRead(Note n) async {
+    notes = [for (final x in notes) x.key == n.key ? x.copyWith(read: true) : x];
+    notifyListeners();
+    try {
+      await server.markNotesRead(ids: [n.id], machine: n.machine);
+    } catch (_) {}
+  }
+
+  /// 옆으로 밀어 지움. 목록에서 먼저 빼야 Dismissible 이 빈 자리를 안 찾는다 —
+  /// 서버가 늦거나 실패하면 다음 폴링에 되돌아온다.
+  Future<void> deleteNote(Note n) async {
+    notes = [
+      for (final x in notes)
+        if (x.key != n.key) x,
+    ];
+    notifyListeners();
+    try {
+      await server.deleteNotes(ids: [n.id], machine: n.machine);
+    } catch (_) {}
+  }
+
   /// 쪽지의 pane 을 지금 목록에서 찾는다 — 닫혔으면 null.
   Pane? paneOfNote(Note n) {
     for (final s in sections) {

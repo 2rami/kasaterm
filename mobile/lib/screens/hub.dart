@@ -7,7 +7,6 @@ import '../hub_prefs.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
-import 'browser_device.dart';
 import 'notes_sheet.dart';
 import 'pane_actions.dart';
 import 'settings.dart';
@@ -126,17 +125,6 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
             ],
           ),
           actions: [
-            // 지구본 = 하단바 「브라우저 기기」. 학생이 보여 주려 연 페이지가 폰으로
-            // 올지 어느 기계 크롬으로 갈지 — 폰을 들고 있으면 여기서 「이 폰」.
-            IconButton(
-              tooltip: '브라우저 기기',
-              onPressed: () => showBrowserDeviceSheet(
-                context,
-                server: widget.server,
-                model: _model,
-              ),
-              icon: const Icon(Icons.public_outlined),
-            ),
             // 종 = 나쵸가 남긴 학생 쪽지. 배지는 안 읽은 쪽지 수(2026-09-08 지시 —
             // 전엔 기다리는 학생 수만 세고 눌러도 아무것도 없었다).
             IconButton(

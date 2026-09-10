@@ -181,6 +181,26 @@ fn mark_read_in(path: &Path, ids: &[u64], all: bool) -> usize {
     n
 }
 
+/// 지우기 — `all` 이면 전부. 딸린 사진도 함께. 돌려주는 값은 지운 개수.
+fn remove_in(path: &Path, ids: &[u64], all: bool) -> usize {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut body = load(path);
+    let before = body.notes.len();
+    let (gone, keep): (Vec<Note>, Vec<Note>) =
+        body.notes.drain(..).partition(|n| all || ids.contains(&n.id));
+    body.notes = keep;
+    let n = before - body.notes.len();
+    if n > 0 && save(path, &body).is_err() {
+        return 0;
+    }
+    for old in gone {
+        if old.image {
+            let _ = std::fs::remove_file(image_path(path, old.id));
+        }
+    }
+    n
+}
+
 /// 최근 것부터.
 pub fn list() -> Vec<Note> {
     path().map(|p| list_from(&p)).unwrap_or_default()
@@ -197,6 +217,11 @@ pub fn mark_read(ids: &[u64], all: bool) -> usize {
 
 pub fn image_bytes(id: u64) -> Option<Vec<u8>> {
     image_from(&path()?, id)
+}
+
+/// 폰이 옆으로 밀어 지우거나 「모두 읽음」으로 비운 것 — 돌려주는 값은 지운 개수.
+pub fn remove(ids: &[u64], all: bool) -> usize {
+    path().map(|p| remove_in(&p, ids, all)).unwrap_or(0)
 }
 
 #[cfg(test)]

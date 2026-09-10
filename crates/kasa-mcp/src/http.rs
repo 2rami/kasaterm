@@ -5356,6 +5356,23 @@ async fn term_notes_read_post(body: Bytes) -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true, "marked": n }))
 }
 
+/// 지우기 — `{"ids":[1,2]}` 또는 `{"all":true}`. 폰이 옆으로 밀어 지운다.
+async fn term_notes_delete_post(body: Bytes) -> impl IntoResponse {
+    #[derive(serde::Deserialize)]
+    struct Req {
+        #[serde(default)]
+        ids: Vec<u64>,
+        #[serde(default)]
+        all: bool,
+    }
+    let req: Req = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": format!("본문을 못 읽었어요: {e}") })),
+    };
+    let n = crate::notes::remove(&req.ids, req.all);
+    Json(serde_json::json!({ "ok": true, "removed": n }))
+}
+
 /// 쪽지에 딸린 pane 사진.
 async fn term_notes_image(AxPath(name): AxPath<String>) -> impl IntoResponse {
     let id = name
@@ -7299,6 +7316,7 @@ pub fn spawn_http_server_opts(
                     .route("/term/notes", get(term_notes_get).post(term_notes_post))
         .route("/term/push-token", post(term_push_token_post))
                     .route("/term/notes/read", post(term_notes_read_post))
+                    .route("/term/notes/delete", post(term_notes_delete_post))
                     .route("/term/notes/{name}", get(term_notes_image))
                     // 폰 허브·유저별 주소 관리·다른 기계로 넘기는 문(mobile.rs 머리말).
                     .route("/hub", get(hub_page))

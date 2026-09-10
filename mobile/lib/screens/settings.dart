@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../main.dart' show designTokens;
 import '../server.dart';
+import 'browser_device.dart';
 import '../theme_prefs.dart';
 import 'hub.dart' show parseHexColor;
 
@@ -124,6 +125,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           const SizedBox(height: 16),
+          _SectionTitle('학생'),
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.public_outlined),
+              title: const Text('브라우저 기기'),
+              subtitle: const Text('학생이 보여 주려 여는 페이지가 갈 곳 — 이 폰이면 쪽지로'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => showBrowserDeviceSheet(context, server: server),
+            ),
+          ),
+          const SizedBox(height: 16),
           _SectionTitle('이 폰'),
           Card(
             child: Padding(
@@ -216,8 +228,9 @@ class _SectionTitle extends StatelessWidget {
   }
 }
 
-/// 데스크톱 설정 화면의 외형 칸 — 테마·강조색·모서리. 목록도 고른 것도 데스크톱이
-/// 준 것이고, 누르면 데스크톱이 바뀐다.
+/// 데스크톱 설정 화면의 외형 칸 — 강조색·모서리. 목록도 고른 것도 데스크톱이 준
+/// 것이고, 누르면 데스크톱이 바뀐다. 테마(밝기)는 여기 없다 — 폰에서 밝은 테마를
+/// 고르면 맥북까지 밝아졌다(2026-09-10 지적). 폰의 밝기는 위 「이 폰」 칸이 폰만 바꾼다.
 class _AppearanceCard extends StatelessWidget {
   const _AppearanceCard({
     required this.appearance,
@@ -242,7 +255,6 @@ class _AppearanceCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final themeKey = appearance['theme'] as String?;
     final accent = appearance['accent'] as String?;
     final shape = appearance['shape'] as String?;
     final busy = pending != null;
@@ -252,30 +264,6 @@ class _AppearanceCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('테마', style: theme.textTheme.titleSmall),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final t in _list('themes'))
-                  _ThemeChip(
-                    label: t['label'] as String? ?? t['key'] as String? ?? '',
-                    bg: parseHexColor(t['bg'] as String?),
-                    text: parseHexColor(t['text'] as String?),
-                    ansi: [
-                      if (t['ansi'] is List)
-                        for (final c in t['ansi'] as List)
-                          if (c is String) parseHexColor(c),
-                    ],
-                    selected: t['key'] == themeKey,
-                    onTap: busy || t['key'] is! String
-                        ? null
-                        : () => onPick('theme-mode', t['key'] as String),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 16),
             Text('강조색', style: theme.textTheme.titleSmall),
             const SizedBox(height: 8),
             Wrap(
@@ -322,81 +310,6 @@ class _AppearanceCard extends StatelessWidget {
 }
 
 /// 테마 카드 — 그 테마의 바탕·글자·ansi 색으로 그려야 고르기 전에 색이 보인다.
-class _ThemeChip extends StatelessWidget {
-  const _ThemeChip({
-    required this.label,
-    required this.bg,
-    required this.text,
-    required this.ansi,
-    required this.selected,
-    this.onTap,
-  });
-
-  final String label;
-  final Color? bg;
-  final Color? text;
-  final List<Color?> ansi;
-  final bool selected;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final fill = bg ?? scheme.surfaceContainerHighest;
-    final ink = text ?? scheme.onSurface;
-    return Material(
-      color: fill,
-      borderRadius: BorderRadius.circular(10),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(10),
-        onTap: onTap,
-        child: Container(
-          width: 104,
-          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: selected ? scheme.primary : scheme.outlineVariant,
-              width: selected ? 2 : 1,
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: TextStyle(
-                  color: ink,
-                  fontSize: 12,
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              const SizedBox(height: 6),
-              Row(
-                children: [
-                  for (final c in ansi)
-                    if (c != null)
-                      Container(
-                        width: 10,
-                        height: 10,
-                        margin: const EdgeInsets.only(right: 3),
-                        decoration: BoxDecoration(
-                          color: c,
-                          borderRadius: BorderRadius.circular(3),
-                        ),
-                      ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _AccentDot extends StatelessWidget {
   const _AccentDot({
     required this.name,

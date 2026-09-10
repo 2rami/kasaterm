@@ -787,6 +787,23 @@ class Server {
     }
   }
 
+  /// 옆으로 밀어 지운 쪽지 — 서버 파일에서도 사라진다(사진 포함).
+  Future<void> deleteNotes({
+    List<int> ids = const [],
+    bool all = false,
+    String? machine,
+  }) async {
+    try {
+      await _client.post(
+        uri('term/notes/delete', machine: machine),
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode({'ids': ids, 'all': all}),
+      );
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+  }
+
   Uri noteImage(int id, {String? machine}) =>
       uri('term/notes/$id.png', machine: machine);
 

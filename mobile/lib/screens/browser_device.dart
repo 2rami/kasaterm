@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../hub_model.dart';
 import '../server.dart';
 
 /// 하단바 「브라우저 기기」의 폰 판 — 학생이 사람에게 보여 주려 여는 페이지가 어디로
@@ -12,18 +11,16 @@ import '../server.dart';
 Future<void> showBrowserDeviceSheet(
   BuildContext context, {
   required Server server,
-  required HubModel model,
 }) => showModalBottomSheet<void>(
   context: context,
   showDragHandle: true,
-  builder: (_) => _BrowserDeviceSheet(server: server, model: model),
+  builder: (_) => _BrowserDeviceSheet(server: server),
 );
 
 class _BrowserDeviceSheet extends StatefulWidget {
-  const _BrowserDeviceSheet({required this.server, required this.model});
+  const _BrowserDeviceSheet({required this.server});
 
   final Server server;
-  final HubModel model;
 
   @override
   State<_BrowserDeviceSheet> createState() => _BrowserDeviceSheetState();
@@ -31,6 +28,8 @@ class _BrowserDeviceSheet extends StatefulWidget {
 
 class _BrowserDeviceSheetState extends State<_BrowserDeviceSheet> {
   BrowserTarget? _target;
+  List<Machine> _machines = const [];
+  String? _rootName;
   bool _loading = true;
   bool _busy = false;
   String? _error;
@@ -43,10 +42,17 @@ class _BrowserDeviceSheetState extends State<_BrowserDeviceSheet> {
 
   Future<void> _load() async {
     try {
-      final t = await widget.server.browserTarget();
+      final results = await Future.wait<Object?>([
+        widget.server.browserTarget(),
+        widget.server.machines(),
+        widget.server.me(),
+      ]);
       if (!mounted) return;
+      final t = results[0] as BrowserTarget?;
       setState(() {
         _target = t;
+        _machines = results[1] as List<Machine>;
+        _rootName = (results[2] as Me).machine;
         _loading = false;
         _error = t == null ? '옛 데스크톱이라 브라우저 기기를 못 받았다' : null;
       });
@@ -65,12 +71,12 @@ class _BrowserDeviceSheetState extends State<_BrowserDeviceSheet> {
   ) async {
     final failed = <String>[];
     await send(null, true);
-    for (final s in widget.model.sections) {
-      if (s.machine == null || !s.online) continue;
+    for (final m in _machines) {
+      if (!m.online) continue;
       try {
-        await send(s.route ?? s.machine, false);
+        await send(m.route, false);
       } on ServerException {
-        failed.add(s.machine!);
+        failed.add(m.label);
       }
     }
     if (failed.isNotEmpty && mounted) {
@@ -120,7 +126,7 @@ class _BrowserDeviceSheetState extends State<_BrowserDeviceSheet> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final t = _target;
-    final rootName = widget.model.rootName ?? '이 기계';
+    final rootName = _rootName ?? '이 기계';
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
