@@ -110,7 +110,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 
 **협업 스트림 (blocking — 반드시 background로)**
 
-`board-watch [interval_s]`(변경된 pane 상태를 1줄/변경으로 스트림 → Claude Code Monitor에 먹임) · `wake-watch <id> [interval_s] [--timeout s]`(동료가 한 턴 끝낼 때까지 block 후 스스로 종료 → background task로 띄우면 완료 즉시 자동 wake). 둘 다 §5.
+`board-watch [interval_s]`(변경된 pane 상태를 1줄/변경으로 스트림 → Claude Code Monitor에 먹임). §5. ⚠️ `wake-watch <id>` 는 **쓰지 마라** — 동료가 끝났는데 완료를 못 잡고 40분 타임아웃으로 죽은 실측이 있다(2026-08-10). board-watch로 갈음한다.
 
 **결과물 띄우기 헬퍼** (CLI 서브명령 아님 — 별도 실행파일. 상세 패턴 D):
 `imgopen <절대경로.png>`(이미지 → 새 pane, 맞춤↔원본) · `mdopen <절대경로.md>`(마크다운 → 노션풍 렌더 pane).
@@ -356,7 +356,7 @@ kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude\n'
 - 실제 팀모드 자식 세션의 판별 마커: env `CLAUDE_CODE_TEAMMATE_MODE=tmux`·`CLAUDE_CODE_CHILD_SESSION=1`·`CLAUDE_CODE_FORK_SUBAGENT=1`, transcript에 `bridge-session` 레코드. 우리 수동 스폰엔 이 env가 없어도 inbox 송수신은 동작(F-2) — kasaterm이 "진짜 팀모드 자식" 여부를 구분해야 할 때 이 마커를 쓴다.
 - teammate 플래그는 숨은 인터페이스 — Claude Code 업데이트 후 안 먹으면 플래그 없이 부팅하고 `/rename`·`/color`(v2.1.205+)로 대체.
 - 배분 전 `board`로 형제 pane의 `changed_files`를 확인해 **파일 경계를 사전 분리**(같은 파일을 두 학생이 만지면 같은 작업트리라 git 이전에 물리 충돌). 검수·커밋은 오케스트레이터 단독.
-- wake-watch가 울려도 board idle은 오판일 수 있다 — `peek`로 실화면(스피너/보고문) 확인 후 판단(§5 함정 표).
+- board-watch가 idle을 흘려도 오판일 수 있다 — `peek`로 실화면(스피너/보고문) 확인 후 판단(§5 함정 표). 완료의 정본은 `[done:`.
 
 **학생 답장 프로토콜(2026-08-04 개정 — shim 자동 트리플 복원 후)** — 학생이 pane에 남기는 일반 답장(턴 최종 텍스트)은 **pane 사용자(거노)에게만 보이고 오케스트레이터에게 자동 전달되지 않는다.** 받는 경로를 브리프에 못박아라:
 1. **push(기본) = SendMessage** — 브리핑에 포함: "보고는 SendMessage to `$KASATERM_AGENT`(= 내 이름)". 양쪽 다 shim 트리플로 떠 있어 양방향이 열려 있다. 인박스 주입이라 상대 턴을 안 깨뜨린다.
@@ -405,7 +405,7 @@ PY
 
 컬러: 발신 하네스가 부팅 `--agent-color`를 발신 메시지의 `color` 필드에 **자동 스탬프**하고, 수신 렌더는 그 필드 기준(실측: pink 부팅 학생의 요청이 color:pink, red 부팅 학생의 SendMessage가 color:red로 도착). 수동 파일 append 때만 `color`를 직접 넣으면 된다.
 
-리더가 학생 상태를 아는 법: 학생이 턴을 끝내면 하네스가 team-lead 인박스에 idle 알림을 자동 발신한다(실측 2026-07-13) — 오케스트레이터가 team-lead 플래그로 부팅돼 있으면 네이티브로 받고, 아니면 파일에서 읽는다. wake-watch 없이도 이걸로 완료 감지가 가능. **포장 스키마 주의(같은 날 raw 실측)**: 겉 엔트리는 일반 메시지와 같은 `type:"message"`이고, `text` 필드에 `{"type":"idle_notification","from":…,"idleReason":"available","summary":"<그 턴 요약>"}` JSON **문자열**이 담겨 온다 — 파일을 직접 읽는 소비자는 `text`를 파싱해서 idle/실메시지를 구분해야 한다(겉 type만 보면 전부 message). 진짜 보고 메시지는 `text`가 평문이고 `summary`가 겉 레벨에 있다.
+리더가 학생 상태를 아는 법: 학생이 턴을 끝내면 하네스가 team-lead 인박스에 idle 알림을 자동 발신한다(실측 2026-07-13) — 오케스트레이터가 team-lead 플래그로 부팅돼 있으면 네이티브로 받고, 아니면 파일에서 읽는다. 이것만으로도 완료 감지가 된다. **포장 스키마 주의(같은 날 raw 실측)**: 겉 엔트리는 일반 메시지와 같은 `type:"message"`이고, `text` 필드에 `{"type":"idle_notification","from":…,"idleReason":"available","summary":"<그 턴 요약>"}` JSON **문자열**이 담겨 온다 — 파일을 직접 읽는 소비자는 `text`를 파싱해서 idle/실메시지를 구분해야 한다(겉 type만 보면 전부 message). 진짜 보고 메시지는 `text`가 평문이고 `summary`가 겉 레벨에 있다.
 
 #### 패턴 F-3 — 학생 권한 라우팅 (AskUserQuestion은 pane에 안 뜬다)
 
@@ -798,7 +798,7 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 
 ---
 
-## 5) pane 협업 — board(현황) + SendMessage(소통) + wake-watch(대기)
+## 5) pane 협업 — board(현황) + SendMessage(소통) + board-watch(대기)
 
 §4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 떠 있는 pane들끼리 — claude든 codex·antigravity든 — 소통하고 충돌을 피한다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용. 네 축이다:
 
@@ -808,7 +808,7 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
   - 보내기 전에 `kasaterm-cli board` 로 상대의 **`team` 이 내 `$KASATERM_TEAM` 과 같은지** 확인해라 — board 가 `agent`·`team` 을 pane 프로세스에서 실측해 싣는다(2026-08-04 추가). 이름을 `<슬러그>-p<번호>` 규칙으로 짐작하지 마라: 어긋나도 오류가 안 난다.
   - **팀이 다르면 tell 로 지시하고, 브리프에 「보고는 하지 마라」고 적어라.** 반대 방향도 안 닿으므로 그 학생의 보고는 영영 오지 않는다 — 결과는 커밋과 `peek`·`transcript` 로 오케스트레이터가 직접 확인한다.
 - **tell** — **그 외 전부의 기본 채널**: 스폰 관계 없는 같은 방 pane·다른 방·bg 세션·비-claude(codex·antigravity·셸)·학생→오케스트레이터 보고·`/model` 같은 슬래시 명령 주입·idle claude 즉시 깨우기. 2026-07-24부터 받는 pane에 발신 학생 프사+학생색으로 렌더되어 거노 입력과 구분된다. 서버가 발신자를 기록해 웹뷰 대화에도 발신 학생 이름으로 뜬다.
-- **wait** — 동료 작업이 끝나길 기다릴 때. `tell`로 깨우거나 `board`를 반복 조회하지 말고 `wake-watch`를 background로 띄운다(아래).
+- **wait** — 동료 작업이 끝나길 기다릴 때. `tell`로 깨우거나 `board`를 반복 조회하지 말고, 상대의 보고를 그냥 받는다. 보고가 올 수 없는 상태만 `board-watch`로 지켜본다(아래).
 
 ### board — 각 pane이 뭘 하는지 (직접 조회)
 
@@ -817,19 +817,24 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 - **사용자(거노)**: 상단 **보기 메뉴 → "board 패널"** 로 전 pane 현황을 본다(읽기 전용).
 - **claude(너)**: `kasaterm-cli board`로 현황을 조회한다. 내가 만질 파일을 다른 pane이 잡고 있으면 충돌 회피(같은 문제면 합류, 빌드 중이면 `peek %N`로 보고 대기).
 
-### wait — 동료 완료 기다리기 (wake-watch, background)
+### wait — 동료 완료 기다리기
 
-동료 pane의 한 턴이 끝나길 기다려야 할 때(예: 내 작업이 그 결과에 의존), **`tell`로 반복해 깨우거나 `board`를 폴링하지 마라** — 입력창을 더럽히고 컨텍스트만 태운다. `wake-watch`를 background task로 띄운다:
+동료 pane의 한 턴이 끝나길 기다려야 할 때(예: 내 작업이 그 결과에 의존), **`tell`로 반복해 깨우거나 `board`를 폴링하지 마라** — 입력창을 더럽히고 컨텍스트만 태운다.
+
+**기본은 보고를 그냥 받는 것이다.** 브리프에 「끝나면 알려라」를 적었으면 SendMessage가 알아서 도착한다 — 상대가 유휴로 프롬프트만 떠 있어도 읽는다.
+
+**보고보다 먼저 알아야 할 것이면 지켜본다.** 승인 프롬프트에 막혔거나·죽었거나·보고 경로가 끊긴 것은 상대가 스스로 알릴 수가 없다. 그때 `board-watch`를 Monitor에 먹인다(persistent: true):
 
 ```bash
-kasaterm-cli wake-watch %3          # %3이 한 턴 끝내면 스스로 종료
+kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|attention)|\[done:'
 ```
 
-- Bash 도구의 `run_in_background: true`로 실행(또는 명령 끝에 `&`). 동료가 한 턴을 마치면 이 명령이 종료되고 시스템이 너를 자동으로 wake(task-notification)한다.
-- 깨어나면 `board`/`peek %3`/`transcript %3`로 결과를 확인하고 이어간다.
-- 상대 surface_id는 `kasaterm-cli board`로 확인. `[interval_s]`(폴링 주기)·`--timeout <s>`(최대 대기) 선택.
+- **필터는 필수** — 안 걸면 매 도구 호출까지 흘러나와 12초에 8줄이 되고 알림 폭주로 Monitor가 자동 중지된다(실측).
+- **`idle`은 넣지 마라** — 「쉬는 중」일 뿐 완료가 아니고, board-watch는 **모든 pane**을 보므로 내가 안 기다리는 남의 턴 종료마다 깨운다. 완료의 정본은 `[done:`.
+- ⚠️ **`wake-watch`는 쓰지 마라** — 동료가 끝났는데 완료를 못 잡고 40분 타임아웃으로 죽은 실측이 있다(2026-08-10).
+- 깨어나면 `board`/`peek %3`/`activity %3`로 결과를 확인하고 이어간다.
 
-여러 pane 상태 변화를 실시간으로 흘려보고 싶으면(특정 완료 대기가 아니라) `board-watch [interval_s]`를 Monitor에 먹인다 — 변경된 pane 상태를 1줄/변경으로 스트림.
+빌드·CI·서버 로그처럼 **기계**를 지켜보는 것은 규칙이 다르다 — 한 번만 알면 되는 것(빌드 끝남)은 Bash `run_in_background`로 스스로 끝나는 명령을 던지고 턴을 놓고, 생길 때마다 알아야 하는 것(오류 발생)만 Monitor다. 자기 턴 안에서 `sleep`을 도는 것이 셋 중 가장 비싸다.
 
 ### tell — 폴백·TUI 조작 채널 (send+제출)
 
@@ -839,7 +844,7 @@ kasaterm-cli tell %3 "socket.rs 동결 해제 — 이어서 진행해"
 
 `tell`은 대상 PTY에 텍스트 주입 후 `\r`로 제출 — idle claude를 새 user turn으로 깨운다. focus는 안 바뀐다. **SendMessage는 본인이 스폰한 학생에게만, 그 외 전부 tell이 기본**(2026-07-24 거노 확정). 발신 pane의 `$KASATERM_CHARACTER` 마커가 자동 프리픽스되어 받는 pane에 발신 학생 프사+학생색으로 렌더된다(2026-07-24). ⚠️ **그러니 본문에 발신자 이름을 직접 쓰지 말 것** — 「아로나: 확인했어요」가 아니라 「확인했어요」. 자동 마커 위에 한 번 더 찍혀 중복으로 보인다(2026-08-02 거노 지적). kasaterm-cli가 발신 메타(from_pane+plain)를 동봉하고 서버가 방 기준 `messages.jsonl`에 기록해, 웹뷰 대화에도 발신 학생 이름 버블로 뜬다(2026-07-12).
 
-- **상대가 working/선택지 대기면 입력창에 큐잉**되고 즉시 처리 안 된다. 급한 게 아니면 `wake-watch`로 idle을 기다렸다 tell — 브리프 여러 건을 working 상대에게 연달아 쏘지 말 것.
+- **상대가 working/선택지 대기면 입력창에 큐잉**되고 즉시 처리 안 된다. 급한 게 아니면 `board-watch`로 idle을 기다렸다 tell — 브리프 여러 건을 working 상대에게 연달아 쏘지 말 것.
 - tell 텍스트는 **개행 없는 한 줄**로(개행=조기 제출).
 - `send`(=`surface.send_text`)는 `\r` 없이 글자만 남는다 — 입력창에 텍스트만 걸린 채 **제출 안 됨**(실측 2026-07-01). `send`는 오직 셸 명령 주입(개행 직접 포함)용, 동료에게 보내는 텍스트는 무조건 `tell`.
 - (구)`kasacollab msg`는 내부에서 tell을 타는 별칭이 됐다(2026-07-12) — 새 자동화엔 tell을 직접 써라. `kasacollab task add/list`(작업 분담 선언)는 별개 기능으로 유지.
@@ -854,7 +859,7 @@ kasaterm-cli tell %3 "socket.rs 동결 해제 — 이어서 진행해"
 | `send`로 깨우려 함 | `\r` 없음 → 글자만. idle 깨우기는 `tell` |
 | `tell`에 surface_id 생략 | 항상 `<surface_id> <text>`. 자기 자신엔 안 씀 |
 | board가 비어 보임 | 미bind이거나, **소켓 탈취**(claude pane에서 `cargo run`이 메인 .app 소켓 가로챔 — 2026-06-08 수정). 인스턴스 난립 의심 |
-| board status 단독 신뢰 | `agents --json` 2s 캐시 지연으로 생성 중이 idle로 뜰 수 있음 — wake-watch 헛울림 포함, 판단 전 `peek`로 실화면 확인 |
+| board status 단독 신뢰 | `agents --json` 2s 캐시 지연으로 생성 중이 idle로 뜰 수 있음 — board-watch 헛울림 포함, 판단 전 `peek`로 실화면 확인 |
 
 ---
 
