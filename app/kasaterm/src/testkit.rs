@@ -1424,7 +1424,7 @@ impl App {
         let cats = [
             ("일반", SettingsCat::General),
             ("모양", SettingsCat::Appearance),
-            ("셸", SettingsCat::Shell),
+            ("터미널", SettingsCat::Shell),
             ("에이전트", SettingsCat::Claude),
             ("계정", SettingsCat::Accounts),
             ("기계", SettingsCat::Machines),

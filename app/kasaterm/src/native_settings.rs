@@ -561,6 +561,8 @@ pub(crate) enum HitCursor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum DropdownId {
     UiFont,
+    /// 캐릭터 페이지 맨 위의 「캐릭터 테마」 — 목업대로 격자 대신 선택 상자 하나.
+    CharacterTheme,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1561,16 +1563,16 @@ impl App {
             if self.settings_scene.first_run() {
                 return self.native_onboarding_key(event);
             }
-            let at = SettingsCat::ALL
+            let at = SettingsCat::NAV
                 .iter()
                 .position(|cat| *cat == self.settings_scene.category())
                 .unwrap_or(0);
             let next = match event.logical_key {
                 Key::Named(NamedKey::ArrowUp) => at.saturating_sub(1),
-                Key::Named(NamedKey::ArrowDown) => (at + 1).min(SettingsCat::ALL.len() - 1),
+                Key::Named(NamedKey::ArrowDown) => (at + 1).min(SettingsCat::NAV.len() - 1),
                 _ => return false,
             };
-            self.settings_scene.set_category(SettingsCat::ALL[next]);
+            self.settings_scene.set_category(SettingsCat::NAV[next]);
             self.chrome_dirty = true;
             return true;
         };
@@ -2140,10 +2142,12 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     draw_text(g, ax + 20.0, ay + 24.0, "설정", 13.0, theme::text_dim(), false);
 
     let mut ny = ay + 56.0;
-    for cat in SettingsCat::ALL {
+    for cat in SettingsCat::NAV {
         let (label, icon, _) = category_meta(cat);
         let rect = (ax + 12.0, ny, nav_w - 24.0, 32.0);
-        let selected = cat == snapshot.cat;
+        // 테마 페이지는 「캐릭터」 밑으로 들어갔다 — 거기 있는 동안도 캐릭터 칸이 켜진다.
+        let selected = cat == snapshot.cat
+            || (cat == SettingsCat::Students && snapshot.cat == SettingsCat::Theme);
         let hover = contains(rect, snapshot.cursor);
         if selected || hover {
             round_rect(
@@ -2646,148 +2650,6 @@ fn paint_appearance(
     y: &mut f32,
     w: f32,
 ) {
-    section_title(
-        g,
-        x,
-        *y,
-        "터미널 커서",
-        "모양만 고르면 색은 현재 캐릭터를 따라가요",
-    );
-    *y += 54.0;
-    draw_text(g, x + 2.0, *y, "기본", 11.5, theme::text_dim(), true);
-    *y += 24.0;
-    cursor_shape_grid(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        &[
-            (cursor::CursorShape::Block, "블록"),
-            (cursor::CursorShape::Bar, "빔"),
-            (cursor::CursorShape::Underline, "밑줄"),
-        ],
-    );
-    let everyday = [
-        cursor::CursorShape::Block,
-        cursor::CursorShape::Bar,
-        cursor::CursorShape::Underline,
-    ];
-    if !everyday.contains(&s.cursor_shape) {
-        *y += 8.0;
-        draw_text(
-            g,
-            x + 2.0,
-            *y,
-            "고급 · 기존 설정",
-            11.5,
-            theme::text_dim(),
-            true,
-        );
-        *y += 24.0;
-        cursor_shape_grid(
-            g,
-            s,
-            hits,
-            x,
-            y,
-            w,
-            &[(s.cursor_shape, cursor_shape_label(s.cursor_shape))],
-        );
-    }
-    *y += 8.0;
-    // 고른 열 밑에만 미리보기를 두면 선택을 바꿀 때 카드가 좌우로 뛰고, 좁은
-    // 화면에서는 다음 섹션과 한 묶음처럼 붙는다. 한 줄 전체를 고정해 결과와
-    // 선택지를 시각적으로 갈라 둔다.
-    let preview = (x, *y, w, 68.0);
-    stroke_round(g, preview, theme::radius_md(), theme::border());
-    draw_text(
-        g,
-        preview.0 + 12.0,
-        preview.1 + 10.0,
-        "실제 깜빡임",
-        10.5,
-        theme::text_dim(),
-        false,
-    );
-    let selected = cursor_shape_label(s.cursor_shape);
-    draw_text(
-        g,
-        preview.0 + 12.0,
-        preview.1 + 35.0,
-        selected,
-        12.0,
-        theme::text(),
-        true,
-    );
-    if s.caret_on {
-        cursor_sample(
-            g,
-            s.cursor_shape,
-            preview.0 + preview.2 - 55.0,
-            preview.1 + 18.0,
-            s.cursor_thickness,
-            false,
-            s.cursor_color,
-        );
-    }
-    *y += 84.0;
-    let thickness: Vec<(&str, bool, SettingsAction)> = [1u8, 2, 3, 4, 6]
-        .iter()
-        .map(|px| {
-            let label = match px {
-                1 => "1px",
-                2 => "2px",
-                3 => "3px",
-                4 => "4px",
-                _ => "6px",
-            };
-            (
-                label,
-                (s.cursor_thickness - *px as f32).abs() < 0.1,
-                SettingsAction::CursorThickness(*px),
-            )
-        })
-        .collect();
-    if s.cursor_shape == cursor::CursorShape::Block {
-        draw_text(
-            g,
-            x + 2.0,
-            *y + 10.0,
-            "블록은 셀 전체를 채워 굵기를 쓰지 않아요",
-            11.5,
-            theme::text_mute(),
-            false,
-        );
-        *y += 42.0;
-    } else {
-        seg_row(g, s, hits, x, y, w, "선 굵기", &thickness);
-    }
-    *y += 12.0;
-    seg_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "마우스 포인터",
-        &[
-            (
-                "화살표",
-                s.mouse_cursor != "ibeam",
-                SettingsAction::MouseCursor("arrow"),
-            ),
-            (
-                "I-빔",
-                s.mouse_cursor == "ibeam",
-                SettingsAction::MouseCursor("ibeam"),
-            ),
-        ],
-    );
-    *y += 8.0;
-
     section_title(
         g,
         x,
@@ -3795,6 +3657,159 @@ fn hsv_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
     ]
 }
 
+/// 「터미널」 페이지의 커서 절. 목업 IA(셸+커서→터미널)대로 「모양」에서 여기로
+/// 옮겼다 — 커서는 색·글꼴이 아니라 pane 안 동작이라 셸 옆이 맞다.
+fn paint_cursor(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    section_title(
+        g,
+        x,
+        *y,
+        "커서",
+        "모양만 고르면 색은 현재 캐릭터를 따라가요",
+    );
+    *y += 54.0;
+    draw_text(g, x + 2.0, *y, "기본", 11.5, theme::text_dim(), true);
+    *y += 24.0;
+    cursor_shape_grid(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        &[
+            (cursor::CursorShape::Block, "블록"),
+            (cursor::CursorShape::Bar, "빔"),
+            (cursor::CursorShape::Underline, "밑줄"),
+        ],
+    );
+    let everyday = [
+        cursor::CursorShape::Block,
+        cursor::CursorShape::Bar,
+        cursor::CursorShape::Underline,
+    ];
+    if !everyday.contains(&s.cursor_shape) {
+        *y += 8.0;
+        draw_text(
+            g,
+            x + 2.0,
+            *y,
+            "고급 · 기존 설정",
+            11.5,
+            theme::text_dim(),
+            true,
+        );
+        *y += 24.0;
+        cursor_shape_grid(
+            g,
+            s,
+            hits,
+            x,
+            y,
+            w,
+            &[(s.cursor_shape, cursor_shape_label(s.cursor_shape))],
+        );
+    }
+    *y += 8.0;
+    // 고른 열 밑에만 미리보기를 두면 선택을 바꿀 때 카드가 좌우로 뛰고, 좁은
+    // 화면에서는 다음 섹션과 한 묶음처럼 붙는다. 한 줄 전체를 고정해 결과와
+    // 선택지를 시각적으로 갈라 둔다.
+    let preview = (x, *y, w, 68.0);
+    stroke_round(g, preview, theme::radius_md(), theme::border());
+    draw_text(
+        g,
+        preview.0 + 12.0,
+        preview.1 + 10.0,
+        "실제 깜빡임",
+        10.5,
+        theme::text_dim(),
+        false,
+    );
+    let selected = cursor_shape_label(s.cursor_shape);
+    draw_text(
+        g,
+        preview.0 + 12.0,
+        preview.1 + 35.0,
+        selected,
+        12.0,
+        theme::text(),
+        true,
+    );
+    if s.caret_on {
+        cursor_sample(
+            g,
+            s.cursor_shape,
+            preview.0 + preview.2 - 55.0,
+            preview.1 + 18.0,
+            s.cursor_thickness,
+            false,
+            s.cursor_color,
+        );
+    }
+    *y += 84.0;
+    let thickness: Vec<(&str, bool, SettingsAction)> = [1u8, 2, 3, 4, 6]
+        .iter()
+        .map(|px| {
+            let label = match px {
+                1 => "1px",
+                2 => "2px",
+                3 => "3px",
+                4 => "4px",
+                _ => "6px",
+            };
+            (
+                label,
+                (s.cursor_thickness - *px as f32).abs() < 0.1,
+                SettingsAction::CursorThickness(*px),
+            )
+        })
+        .collect();
+    if s.cursor_shape == cursor::CursorShape::Block {
+        draw_text(
+            g,
+            x + 2.0,
+            *y + 10.0,
+            "블록은 셀 전체를 채워 굵기를 쓰지 않아요",
+            11.5,
+            theme::text_mute(),
+            false,
+        );
+        *y += 42.0;
+    } else {
+        seg_row(g, s, hits, x, y, w, "선 굵기", &thickness);
+    }
+    *y += 12.0;
+    seg_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "마우스 포인터",
+        &[
+            (
+                "화살표",
+                s.mouse_cursor != "ibeam",
+                SettingsAction::MouseCursor("arrow"),
+            ),
+            (
+                "I-빔",
+                s.mouse_cursor == "ibeam",
+                SettingsAction::MouseCursor("ibeam"),
+            ),
+        ],
+    );
+    *y += 8.0;
+}
+
 fn paint_shell(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -3855,6 +3870,8 @@ fn paint_shell(
         w,
         "셸 경로는 실행 파일 하나만 적습니다. 명령 옵션은 각 pane에서 직접 붙여 주세요.",
     );
+    *y += 16.0;
+    paint_cursor(g, s, hits, x, y, w);
 }
 
 fn paint_claude(
@@ -4888,6 +4905,64 @@ fn paint_themes(
     );
 }
 
+/// 캐릭터 페이지 맨 위 「테마」 절 — 목업 IA(테마+캐릭터→캐릭터). 세트 고르기는
+/// 선택 상자 하나로 끝나고, 명단·그림·내보내기처럼 세트를 손보는 일은 「테마 관리」로
+/// 예전 테마 페이지에 들어가서 한다(그 페이지는 옆 목록에서 빠졌다).
+fn paint_character_theme_row(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    section_title(g, x, *y, "테마", "");
+    *y += 54.0;
+    let current = s
+        .themes
+        .iter()
+        .find(|t| t.id == s.character_theme)
+        .map(|t| t.label.clone())
+        .unwrap_or_else(|| {
+            if s.character_theme.is_empty() {
+                "블루 아카이브 (기본)".to_string()
+            } else {
+                s.character_theme.clone()
+            }
+        });
+    dropdown_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "캐릭터 테마",
+        &current,
+        DropdownId::CharacterTheme,
+    );
+    *y += 8.0;
+    button(
+        g,
+        s,
+        hits,
+        (x, *y, 92.0, CTL_H),
+        "테마 관리",
+        Target::Category(SettingsCat::Theme),
+        false,
+    );
+    draw_text(
+        g,
+        x + 104.0,
+        *y + 6.5,
+        "명단과 그림, 내보내기·삭제",
+        11.5,
+        theme::text_dim(),
+        false,
+    );
+    *y += CTL_H + 28.0;
+}
+
 fn paint_students(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -4897,6 +4972,9 @@ fn paint_students(
     y: &mut f32,
     w: f32,
 ) {
+    if s.student_selected.is_none() {
+        paint_character_theme_row(g, s, hits, x, y, w);
+    }
     paint_themegen_engine(g, s, hits, caret, x, y, w);
     if let Some(selected) = s.student_selected.as_deref() {
         button(
@@ -6396,14 +6474,18 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
         SettingsCat::Appearance => (
             "모양",
             "sparkles",
-            "커서와 색, 글자 크기를 한 화면에서 맞춥니다",
+            "색과 글자 크기, 화면 배율을 한 화면에서 맞춥니다",
         ),
         SettingsCat::Statusbar => (
             "하단바",
             "panel-bottom",
             "보이는 정보와 순서, 색을 내 작업에 맞춥니다",
         ),
-        SettingsCat::Shell => ("셸", "terminal", "새 pane이 어떤 셸로 시작할지 정합니다"),
+        SettingsCat::Shell => (
+            "터미널",
+            "terminal",
+            "새 pane의 셸과 커서를 정합니다",
+        ),
         SettingsCat::Pet => (
             "펫",
             "sparkles",
@@ -6680,6 +6762,21 @@ fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAc
             }));
             items
         }
+        DropdownId::CharacterTheme => s
+            .themes
+            .iter()
+            .map(|t| {
+                (
+                    if t.count > 0 {
+                        format!("{} · {}명", t.label, t.count)
+                    } else {
+                        t.label.clone()
+                    },
+                    s.character_theme == t.id,
+                    SettingsAction::SelectTheme(t.id.clone()),
+                )
+            })
+            .collect(),
     }
 }
 
