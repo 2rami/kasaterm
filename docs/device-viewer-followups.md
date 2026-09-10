@@ -71,7 +71,12 @@ frontend browsing workflow below was implemented separately on
   provide the room list/board affordance if the CLI lacks one.
 
 - **화면공유 바탕화면이 까맣고 독이 안 보임** (user 2026-09-10): when mirroring the
-  Mac mini's screen, the desktop is black and the Dock is missing. Not investigated.
+  Mac mini's screen, the desktop is black and the Dock is missing. Investigated
+  2026-09-10 (세이아): not a kasaterm or Screen Sharing defect. The mini's wallpaper
+  on every display is `~/Pictures/nacho-midnight.png` (mean brightness 29/255,
+  set 2026-09-05 07:42 KST) so the desktop *is* almost black, and the Dock has
+  `autohide = 1`, so over Screen Sharing it only appears when the pointer reaches
+  the bottom edge. Both are user settings; changing them is the user's call.
 - **맥미니가 꺼지면 카사텀 모바일이 안 됨** (user 2026-09-10): the MacBook keeps
   running but the phone app cannot connect. Suspected cause: the gateway/tunnel
   (debimarlene side) lives on the mini, so the MacBook has no public route of its
