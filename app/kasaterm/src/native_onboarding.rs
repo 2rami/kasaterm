@@ -782,42 +782,27 @@ pub(crate) fn paint(
     let mut hits = Vec::new();
     let mut caret_rect = None;
     g.rect(ax, ay, aw, ah, theme::bg());
+    // 왼쪽 목록 — 설정창·보드 방과 같은 판. 채움 없이 이름표 두 줄.
     g.rect(ax, ay, rail_w, ah, theme::panel_bg());
-    g.rect(ax + rail_w - 1.0, ay, 1.0, ah, theme::border());
-    text(
-        g,
-        ax + 20.0,
-        ay + 20.0,
-        "kasaterm",
-        18.0,
-        theme::text(),
-        true,
-    );
-    text(
-        g,
-        ax + 20.0,
-        ay + 48.0,
-        "처음 설정",
-        11.0,
-        theme::text_dim(),
-        false,
-    );
+    text(g, ax + 20.0, ay + 24.0, "kasaterm", 13.0, theme::text(), true);
+    text(g, ax + 20.0, ay + 44.0, "처음 설정", 11.0, theme::text_dim(), false);
 
     let steps = ["외형", "Agent", "터미널", "완료"];
-    let mut py = ay + 92.0;
+    let mut py = ay + 72.0;
     for (index, label) in steps.iter().enumerate() {
         let step = index as u8;
         let enabled = step <= snapshot.state.furthest;
         let current = step == snapshot.state.step;
-        let rect = (ax + 10.0, py, rail_w - 20.0, 42.0);
-        if current || (enabled && inside(rect, snapshot.cursor)) {
+        let rect = (ax + 12.0, py, rail_w - 24.0, 32.0);
+        let hover = enabled && inside(rect, snapshot.cursor);
+        if current || hover {
             round_rect(
                 g,
                 rect.0,
                 rect.1,
                 rect.2,
                 rect.3,
-                theme::radius_md(),
+                theme::radius_md().min(5.0),
                 if current {
                     theme::surface_active()
                 } else {
@@ -825,41 +810,35 @@ pub(crate) fn paint(
                 },
             );
         }
-        let dot = (rect.0 + 12.0, rect.1 + 10.0, 22.0, 22.0);
-        round_rect(
-            g,
+        // 번호는 채움 없는 동그라미 — 현재 단계만 강조색.
+        let dot = (rect.0 + 10.0, rect.1 + 7.0, 18.0, 18.0);
+        g.round_rect_stroke(
             dot.0,
             dot.1,
             dot.2,
             dot.3,
-            11.0,
-            if current {
-                theme::accent()
-            } else {
-                theme::surface_hover()
-            },
+            9.0,
+            1.0,
+            if current { theme::accent() } else { theme::border() },
         );
         let number = ["1", "2", "3", "4"][index];
+        let nw = g.measure_chrome_text(number, 10.0, false);
         text(
             g,
-            dot.0 + 7.0,
-            dot.1 + 5.0,
+            dot.0 + (18.0 - nw) / 2.0,
+            dot.1 + 3.0,
             number,
-            10.5,
-            if current { [255, 255, 255, 255] } else { theme::text() },
-            true,
+            10.0,
+            if current { theme::accent() } else { theme::text_dim() },
+            false,
         );
         text(
             g,
-            rect.0 + 44.0,
-            rect.1 + 13.0,
+            rect.0 + 38.0,
+            rect.1 + 9.0,
             label,
-            12.5,
-            if enabled {
-                theme::text()
-            } else {
-                theme::text_dim()
-            },
+            12.0,
+            if enabled { theme::text() } else { theme::text_dim() },
             current,
         );
         if enabled {
@@ -870,17 +849,18 @@ pub(crate) fn paint(
                 HitCursor::Pointer,
             );
         }
-        py += 48.0;
+        py += 36.0;
     }
     let skip = (ax + 12.0, ay + ah - 46.0, rail_w - 24.0, 32.0);
-    if inside(skip, snapshot.cursor) {
+    let skip_hover = inside(skip, snapshot.cursor);
+    if skip_hover {
         round_rect(
             g,
             skip.0,
             skip.1,
             skip.2,
             skip.3,
-            theme::radius_md(),
+            theme::radius_md().min(5.0),
             theme::surface_hover(),
         );
     }
@@ -889,9 +869,9 @@ pub(crate) fn paint(
         skip.0 + 12.0,
         skip.1 + 9.0,
         "건너뛰고 터미널 열기",
-        11.0,
-        theme::text(),
-        true,
+        11.5,
+        if skip_hover { theme::text() } else { theme::text_dim() },
+        false,
     );
     hit(
         &mut hits,
@@ -900,16 +880,16 @@ pub(crate) fn paint(
         HitCursor::Pointer,
     );
 
-    let mx = ax + rail_w + if aw < 760.0 { 22.0 } else { 38.0 };
-    let mw = (aw - rail_w - if aw < 760.0 { 44.0 } else { 76.0 })
-        .max(220.0)
-        .min(820.0);
+    let mx = ax + rail_w + if aw < 760.0 { 20.0 } else { 28.0 };
+    let mw = (aw - rail_w - if aw < 760.0 { 40.0 } else { 56.0 })
+        .max(180.0)
+        .min(800.0);
     let (title, subtitle) = step_copy(snapshot.state.step);
-    text(g, mx, ay + 22.0, title, 24.0, theme::text(), true);
-    text(g, mx, ay + 55.0, subtitle, 12.5, theme::text_dim(), false);
-    g.rect(mx, ay + 86.0, mw, 1.0, theme::border());
+    text(g, mx, ay + 22.0, title, 20.0, theme::text(), true);
+    text(g, mx, ay + 52.0, subtitle, 11.5, theme::text_dim(), false);
+    divider(g, mx, ay + 82.0, mw);
 
-    let body_top = ay + 102.0;
+    let body_top = ay + 97.0;
     let body_bottom = ay + ah - footer_h - 8.0;
     let view_h = (body_bottom - body_top).max(1.0);
     g.push_clip(mx, body_top, mw, view_h);
@@ -930,13 +910,13 @@ pub(crate) fn paint(
     clip_hits(g, &mut hits);
     g.pop_clip();
 
-    g.rect(mx, ay + ah - footer_h, mw, 1.0, theme::border());
+    divider(g, mx, ay + ah - footer_h, mw);
     if snapshot.state.step > 0 {
         button(
             g,
             snapshot,
             &mut hits,
-            (mx, ay + ah - 48.0, 92.0, 34.0),
+            (mx, ay + ah - 47.0, 72.0, 32.0),
             "이전",
             Target::Onboarding(Action::Back),
             false,
@@ -947,7 +927,7 @@ pub(crate) fn paint(
     } else {
         ("다음", Action::Next)
     };
-    let forward = (mx + mw - 128.0, ay + ah - 48.0, 128.0, 34.0);
+    let forward = (mx + mw - 120.0, ay + ah - 47.0, 120.0, 32.0);
     if snapshot.state.loaded {
         button(
             g,
@@ -959,22 +939,24 @@ pub(crate) fn paint(
             true,
         );
     } else {
-        round_rect(
-            g,
+        // 아직 못 누르는 단추 — 흐린 테두리와 흐린 글자만.
+        g.round_rect_stroke(
             forward.0,
             forward.1,
             forward.2,
             forward.3,
-            theme::radius_md(),
-            theme::surface(),
+            theme::radius_md().min(5.0),
+            1.0,
+            theme::with_alpha(theme::border(), 120),
         );
+        let lw = g.measure_chrome_text(label, 11.5, false);
         text(
             g,
-            forward.0 + 45.0,
-            forward.1 + 10.0,
+            forward.0 + (forward.2 - lw) / 2.0,
+            forward.1 + 9.0,
             label,
             11.5,
-            theme::text_dim(),
+            theme::text_mute(),
             false,
         );
     }
@@ -1037,11 +1019,10 @@ fn paint_appearance(
         section(
             g,
             x,
-            *y,
+            y,
             "Mac 터미널에서 가져오기",
             "색상과 글꼴만 읽고 원본 프로필은 바꾸지 않습니다",
         );
-        *y += 50.0;
         if s.state.data.imports.is_empty() {
             empty_slab(
                 g,
@@ -1052,29 +1033,21 @@ fn paint_appearance(
             );
         }
         for source in s.state.data.imports.iter() {
-            let rect = (x, *y, w, 82.0);
-            round_rect(
-                g,
-                rect.0,
-                rect.1,
-                rect.2,
-                rect.3,
-                theme::radius_md(),
-                theme::surface(),
-            );
+            // 목업: 구분선 행. 왼쪽 작은 미리보기, 이름·프로필, 오른쪽 아웃라인 단추.
+            let rect = (x, *y, w, 60.0);
             let bg = source
                 .background
                 .as_deref()
                 .and_then(theme::parse_hex)
                 .map(rgba)
-                .unwrap_or_else(theme::surface_hover);
+                .unwrap_or_else(theme::surface);
             let fg = source
                 .foreground
                 .as_deref()
                 .and_then(theme::parse_hex)
                 .map(rgba)
-                .unwrap_or_else(theme::text);
-            let preview = (rect.0 + 12.0, rect.1 + 12.0, 118.0, 58.0);
+                .unwrap_or_else(theme::text_dim);
+            let preview = (rect.0, rect.1 + 8.0, 84.0, 44.0);
             round_rect(
                 g,
                 preview.0,
@@ -1084,32 +1057,43 @@ fn paint_appearance(
                 theme::radius_sm(),
                 bg,
             );
+            g.round_rect_stroke(
+                preview.0,
+                preview.1,
+                preview.2,
+                preview.3,
+                theme::radius_sm(),
+                1.0,
+                theme::border(),
+            );
             text(
                 g,
-                preview.0 + 10.0,
-                preview.1 + 10.0,
+                preview.0 + 8.0,
+                preview.1 + 6.0,
                 "❯ kasaterm",
-                11.0,
+                10.0,
                 fg,
-                true,
+                false,
             );
-            for (index, color) in source.ansi16.iter().take(6).enumerate() {
+            for (index, color) in source.ansi16.iter().skip(1).take(5).enumerate() {
                 if let Some(color) = theme::parse_hex(color).map(rgba) {
-                    g.rect(
-                        preview.0 + 10.0 + index as f32 * 15.0,
-                        preview.1 + 36.0,
-                        10.0,
-                        8.0,
+                    round_rect(
+                        g,
+                        preview.0 + 8.0 + index as f32 * 9.0,
+                        preview.1 + 30.0,
+                        6.0,
+                        6.0,
+                        3.0,
                         color,
                     );
                 }
             }
             text(
                 g,
-                rect.0 + 144.0,
-                rect.1 + 17.0,
+                rect.0 + 104.0,
+                rect.1 + 13.0,
                 &source.label,
-                13.0,
+                12.5,
                 theme::text(),
                 true,
             );
@@ -1120,8 +1104,8 @@ fn paint_appearance(
                 .unwrap_or("가져올 수 없음");
             text(
                 g,
-                rect.0 + 144.0,
-                rect.1 + 43.0,
+                rect.0 + 104.0,
+                rect.1 + 33.0,
                 detail,
                 11.0,
                 theme::text_dim(),
@@ -1134,19 +1118,19 @@ fn paint_appearance(
                     g,
                     s,
                     hits,
-                    (rect.0 + rect.2 - 100.0, rect.1 + 24.0, 86.0, 32.0),
+                    (rect.0 + rect.2 - 76.0, rect.1 + 17.0, 76.0, 26.0),
                     if applied { "적용됨" } else { "가져오기" },
                     Target::Onboarding(Action::Import(source.id.clone())),
-                    applied,
+                    !applied,
                 );
             }
-            *y += 92.0;
+            divider(g, x, rect.1 + 59.0, w);
+            *y += 60.0;
         }
         return;
     }
 
-    section(g, x, *y, "색상 테마", "앱과 터미널 ANSI 색이 함께 바뀝니다");
-    *y += 50.0;
+    section(g, x, y, "색상 테마", "앱과 터미널 ANSI 색이 함께 바뀝니다");
     let gap = 10.0;
     let cols = if w >= 620.0 { 3 } else { 2 };
     let card_w = (w - gap * (cols - 1) as f32) / cols as f32;
@@ -1191,19 +1175,18 @@ fn paint_appearance(
             rect.1 + 54.0,
             &shown,
             10.5,
-            theme::text_dim(),
-            selected,
+            if selected { theme::accent() } else { theme::text_dim() },
+            false,
         );
     }
     *y += ((s.palettes.len() + cols - 1) / cols) as f32 * 88.0 + 12.0;
     section(
         g,
         x,
-        *y,
+        y,
         "터미널 글꼴",
         "설치된 고정폭 글꼴과 글자 크기를 고릅니다",
     );
-    *y += 48.0;
     if s.state.data.fonts.is_empty() {
         empty_slab(
             g,
@@ -1240,8 +1223,8 @@ fn paint_appearance(
         Action::FontDelta(-1),
         Action::FontDelta(1),
     );
-    section(g, x, *y, "강조색", "선택 영역과 커서, 링크에 함께 씁니다");
-    *y += 46.0;
+    *y += 12.0;
+    section(g, x, y, "강조색", "선택 영역과 커서, 링크에 함께 씁니다");
     let accents = theme::ACCENT_PRESETS
         .iter()
         .map(|(name, _)| {
@@ -1266,42 +1249,27 @@ fn paint_auth(
     section(
         g,
         x,
-        *y,
+        y,
         "첫 터미널에서 먼저 쓸 Agent",
         "로그인된 항목을 기본으로 고를 수 있습니다",
     );
-    *y += 52.0;
     for provider in [AccountProvider::Claude, AccountProvider::Codex] {
         auth_row(g, s, hits, x, y, w, provider);
     }
-    *y += 8.0;
-    let rect = (x, *y, w, 54.0);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        theme::surface(),
-    );
-    g.queue_icon(
-        "info",
-        rect.0 + 14.0,
-        rect.1 + 18.0,
-        16.0,
-        theme::text_dim(),
-    );
+    *y += 12.0;
+    // 목업: 채움 없이 회색 왼쪽 선 하나에 작은 안내문.
+    let rect = (x, *y, w, 36.0);
+    g.rect(rect.0, rect.1, 2.0, rect.3, theme::border());
     text(
         g,
-        rect.0 + 42.0,
-        rect.1 + 17.0,
+        rect.0 + 14.0,
+        rect.1 + 11.0,
         "인증정보는 각 도구가 보관하고, kasaterm은 토큰이나 비밀번호를 저장하지 않아요.",
         11.0,
         theme::text_dim(),
         false,
     );
-    *y += 68.0;
+    *y += 48.0;
 }
 
 fn auth_row(
@@ -1316,66 +1284,60 @@ fn auth_row(
     use crate::native_settings::Target;
     let auth = s.state.data.auth(provider);
     let selected = s.state.preferred == Some(provider);
-    let rect = (x, *y, w, 74.0);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        if selected {
-            theme::surface_active()
-        } else {
-            theme::surface()
-        },
-    );
-    stroke(
-        g,
-        rect,
-        if selected {
-            theme::accent()
-        } else {
-            theme::border()
-        },
-    );
+    let rect = (x, *y, w, 56.0);
+    if selected {
+        // 목업 .sel — 행을 살짝 감싸는 강조색 테두리만.
+        g.round_rect_stroke(
+            rect.0 - 8.0,
+            rect.1 + 3.0,
+            rect.2 + 16.0,
+            rect.3 - 6.0,
+            theme::radius_md().min(5.0),
+            1.0,
+            theme::accent(),
+        );
+    }
     g.queue_icon(
         provider.icon(),
-        rect.0 + 16.0,
-        rect.1 + 18.0,
+        rect.0 + 2.0,
+        rect.1 + 17.0,
         22.0,
         theme::text(),
     );
+    let label = provider.label();
+    text(g, rect.0 + 40.0, rect.1 + 10.0, label, 12.5, theme::text(), true);
+    if selected {
+        let lw = g.measure_chrome_text(label, 12.5, true);
+        text(
+            g,
+            rect.0 + 46.0 + lw,
+            rect.1 + 11.0,
+            "기본",
+            11.0,
+            theme::accent(),
+            false,
+        );
+    }
     text(
         g,
-        rect.0 + 52.0,
-        rect.1 + 14.0,
-        provider.label(),
-        14.0,
-        theme::text(),
-        true,
-    );
-    text(
-        g,
-        rect.0 + 52.0,
-        rect.1 + 41.0,
+        rect.0 + 40.0,
+        rect.1 + 31.0,
         auth.account
             .as_deref()
             .unwrap_or_else(|| auth_label(auth.status)),
-        11.5,
+        11.0,
         theme::text_dim(),
         false,
     );
     if auth.logged_in() {
-        if selected {
-            text(
+        if !selected {
+            text_button(
                 g,
-                rect.0 + rect.2 - 72.0,
-                rect.1 + 28.0,
-                "기본",
-                11.0,
-                theme::accent(),
-                true,
+                s,
+                hits,
+                (rect.0 + rect.2 - 72.0, rect.1 + 15.0, 72.0, 26.0),
+                "기본으로",
+                Target::Onboarding(Action::Preferred(provider)),
             );
         }
         hit(
@@ -1389,7 +1351,7 @@ fn auth_row(
             g,
             s,
             hits,
-            (rect.0 + rect.2 - 94.0, rect.1 + 20.0, 78.0, 34.0),
+            (rect.0 + rect.2 - 64.0, rect.1 + 15.0, 64.0, 26.0),
             "취소",
             Target::Onboarding(Action::CancelLogin),
             false,
@@ -1399,7 +1361,7 @@ fn auth_row(
             g,
             s,
             hits,
-            (rect.0 + rect.2 - 94.0, rect.1 + 20.0, 78.0, 34.0),
+            (rect.0 + rect.2 - 64.0, rect.1 + 15.0, 64.0, 26.0),
             "로그인",
             Target::Onboarding(Action::Login(provider)),
             true,
@@ -1407,13 +1369,14 @@ fn auth_row(
     } else if auth.status == AuthStatus::Checking {
         g.queue_icon(
             "rotate-cw",
-            rect.0 + rect.2 - 34.0,
-            rect.1 + 27.0,
-            15.0,
+            rect.0 + rect.2 - 22.0,
+            rect.1 + 21.0,
+            14.0,
             theme::text_mute(),
         );
     }
-    *y += 84.0;
+    divider(g, x, rect.1 + 55.0, w);
+    *y += 56.0;
 }
 
 fn paint_platform(
@@ -1430,49 +1393,54 @@ fn paint_platform(
         section(
             g,
             x,
-            *y,
+            y,
             "Windows 기본 셸",
             "새 pane을 열 때 시작할 셸입니다",
         );
-        *y += 50.0;
         for shell in s.state.data.shells.iter() {
-            let rect = (x, *y, w, 54.0);
-            choice(
-                g,
-                s,
-                hits,
-                rect,
-                s.state.data.selected_shell == shell.id,
-                Target::Onboarding(Action::Shell(shell.id.clone())),
-            );
+            let rect = (x, *y, w, 48.0);
+            let selected = s.state.data.selected_shell == shell.id;
+            if selected {
+                g.round_rect_stroke(
+                    rect.0 - 8.0,
+                    rect.1 + 3.0,
+                    rect.2 + 16.0,
+                    rect.3 - 6.0,
+                    theme::radius_md().min(5.0),
+                    1.0,
+                    theme::accent(),
+                );
+            }
+            let hover = inside(rect, s.cursor);
+            text(g, rect.0, rect.1 + 8.0, &shell.label, 12.5, theme::text(), true);
             text(
                 g,
-                rect.0 + 14.0,
-                rect.1 + 10.0,
-                &shell.label,
-                12.5,
-                theme::text(),
-                true,
-            );
-            text(
-                g,
-                rect.0 + 14.0,
-                rect.1 + 32.0,
+                rect.0,
+                rect.1 + 28.0,
                 &shell.path,
                 10.5,
                 theme::text_dim(),
                 false,
             );
-            *y += 62.0;
+            hit(
+                hits,
+                Target::Onboarding(Action::Shell(shell.id.clone())),
+                rect,
+                crate::native_settings::HitCursor::Pointer,
+            );
+            g.hover_pointer |= hover;
+            divider(g, x, rect.1 + 47.0, w);
+            *y += 48.0;
         }
+        *y += 14.0;
         onboarding_shell_field(g, s, hits, caret, x, *y, w);
-        *y += 64.0;
+        *y += 60.0;
         return;
     }
     section(
         g,
         x,
-        *y,
+        y,
         if s.state.data.platform == "macos" {
             "Mac 터미널 설정"
         } else {
@@ -1480,7 +1448,6 @@ fn paint_platform(
         },
         "지금까지 고른 값을 첫 pane에 그대로 사용합니다",
     );
-    *y += 52.0;
     let imported = s
         .state
         .last_imported
@@ -1520,16 +1487,11 @@ fn paint_platform(
 }
 
 fn paint_ready(g: &mut gpu::GpuRenderer, s: &Snapshot, x: f32, y: &mut f32, w: f32) {
-    let mark = (x + w / 2.0 - 28.0, *y + 4.0, 56.0, 56.0);
-    round_rect(g, mark.0, mark.1, mark.2, mark.3, 28.0, theme::success());
-    g.queue_icon(
-        "square-check",
-        mark.0 + 16.0,
-        mark.1 + 16.0,
-        24.0,
-        [255, 255, 255, 255],
-    );
-    *y += 82.0;
+    // 목업: 채움 없는 강조색 동그라미 안에 체크 하나.
+    let mark = (x + w / 2.0 - 20.0, *y + 8.0, 40.0, 40.0);
+    g.round_rect_stroke(mark.0, mark.1, mark.2, mark.3, 20.0, 1.0, theme::accent());
+    g.queue_icon("check", mark.0 + 10.0, mark.1 + 10.0, 20.0, theme::accent());
+    *y += 72.0;
     let theme_label = s
         .palettes
         .iter()
@@ -1567,33 +1529,18 @@ fn paint_ready(g: &mut gpu::GpuRenderer, s: &Snapshot, x: f32, y: &mut f32, w: f
         },
     );
     if s.state.data.restart_required {
-        let rect = (x, *y + 10.0, w, 50.0);
-        round_rect(
-            g,
-            rect.0,
-            rect.1,
-            rect.2,
-            rect.3,
-            theme::radius_md(),
-            theme::surface(),
-        );
-        g.queue_icon(
-            "triangle-alert",
-            rect.0 + 14.0,
-            rect.1 + 17.0,
-            16.0,
-            theme::attention(),
-        );
+        let rect = (x, *y + 12.0, w, 36.0);
+        g.rect(rect.0, rect.1, 2.0, rect.3, theme::attention());
         text(
             g,
-            rect.0 + 42.0,
-            rect.1 + 16.0,
+            rect.0 + 14.0,
+            rect.1 + 11.0,
             "새 글꼴은 kasaterm을 다시 열면 적용돼요.",
             11.5,
-            theme::text_dim(),
+            theme::text(),
             false,
         );
-        *y += 70.0;
+        *y += 60.0;
     }
 }
 
@@ -1609,31 +1556,22 @@ fn onboarding_shell_field(
     use crate::native_settings::{HitCursor, Target};
     text(
         g,
-        x + 2.0,
+        x,
         y,
         "셸 경로 직접 입력",
         11.0,
         theme::text_dim(),
         false,
     );
-    let rect = (x, y + 18.0, w, 36.0);
+    let rect = (x, y + 18.0, w, 32.0);
     let focused = s.input == Some(SettingsInput::Shell);
-    round_rect(
-        g,
+    g.round_rect_stroke(
         rect.0,
         rect.1,
         rect.2,
         rect.3,
-        theme::radius_md(),
-        if focused {
-            theme::surface_hover()
-        } else {
-            theme::surface()
-        },
-    );
-    stroke(
-        g,
-        rect,
+        theme::radius_md().min(5.0),
+        1.0,
         if focused {
             theme::accent()
         } else {
@@ -1648,8 +1586,8 @@ fn onboarding_shell_field(
     );
     text(
         g,
-        rect.0 + 11.0,
-        rect.1 + 10.0,
+        rect.0 + 10.0,
+        rect.1 + 8.0,
         if s.shell.is_empty() {
             "경로를 입력하세요"
         } else {
@@ -1657,7 +1595,7 @@ fn onboarding_shell_field(
         },
         12.0,
         if s.shell.is_empty() {
-            theme::text_dim()
+            theme::text_mute()
         } else {
             theme::text()
         },
@@ -1669,13 +1607,13 @@ fn onboarding_shell_field(
             .chars()
             .take(s.settings_caret.min(s.shell.chars().count()))
             .collect();
-        let cx = rect.0 + 11.0 + g.measure_chrome_text(&prefix, 12.0, false);
+        let cx = rect.0 + 10.0 + g.measure_chrome_text(&prefix, 12.0, false);
         if !s.preedit.is_empty() {
-            text(g, cx, rect.1 + 9.0, &s.preedit, 12.0, theme::text(), false);
+            text(g, cx, rect.1 + 7.0, &s.preedit, 12.0, theme::text(), false);
         } else if s.caret_on {
-            g.rect(cx, rect.1 + 8.0, 1.5, 19.0, theme::cursor());
+            g.rect(cx, rect.1 + 7.0, 1.5, 18.0, theme::cursor());
         }
-        *caret_out = Some((cx, rect.1 + 8.0, 2.0, 19.0));
+        *caret_out = Some((cx, rect.1 + 7.0, 2.0, 18.0));
     }
 }
 
@@ -1710,89 +1648,44 @@ fn step_copy(step: u8) -> (&'static str, &'static str) {
 }
 
 fn loading_slab(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32) {
-    let rect = (x, *y, w, 84.0);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        theme::surface(),
-    );
-    g.queue_icon(
-        "rotate-cw",
-        rect.0 + 18.0,
-        rect.1 + 27.0,
-        20.0,
-        theme::accent(),
-    );
+    // 목업(플랫): 채움 없이 아이콘 하나와 두 줄.
+    g.queue_icon("rotate-cw", x, *y + 10.0, 16.0, theme::accent());
     text(
         g,
-        rect.0 + 52.0,
-        rect.1 + 20.0,
+        x + 26.0,
+        *y + 8.0,
         "설치 환경을 확인하고 있어요",
-        14.0,
+        12.5,
         theme::text(),
         true,
     );
     text(
         g,
-        rect.0 + 52.0,
-        rect.1 + 47.0,
+        x + 26.0,
+        *y + 28.0,
         "테마, 터미널 설정, Agent 로그인을 한 번만 살펴봅니다.",
         11.0,
         theme::text_dim(),
         false,
     );
-    *y += 98.0;
+    divider(g, x, *y + 55.0, w);
+    *y += 64.0;
 }
 
 fn empty_slab(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, message: &str) {
-    let rect = (x, *y, w, 58.0);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        theme::surface(),
-    );
-    g.queue_icon(
-        "info",
-        rect.0 + 14.0,
-        rect.1 + 20.0,
-        16.0,
-        theme::text_dim(),
-    );
-    text(
-        g,
-        rect.0 + 42.0,
-        rect.1 + 19.0,
-        message,
-        11.0,
-        theme::text_dim(),
-        false,
-    );
-    *y += 68.0;
+    text(g, x, *y + 14.0, message, 11.0, theme::text_mute(), false);
+    divider(g, x, *y + 43.0, w);
+    *y += 52.0;
 }
 
 fn notice_slab(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, ok: bool, message: &str) {
-    let rect = (x, *y + 8.0, w, 48.0);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        theme::surface(),
-    );
+    // 목업(플랫): 채움·아이콘 없이 왼쪽 2px 색선만.
+    let _ = w;
+    let rect = (x, *y + 8.0, w, 36.0);
     g.rect(
         rect.0,
         rect.1,
-        3.0,
+        2.0,
         rect.3,
         if ok {
             theme::success()
@@ -1802,47 +1695,43 @@ fn notice_slab(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, ok: bool, 
     );
     text(
         g,
-        rect.0 + 16.0,
-        rect.1 + 16.0,
+        rect.0 + 14.0,
+        rect.1 + 11.0,
         message,
         11.5,
-        theme::text_dim(),
-        false,
-    );
-    *y += 64.0;
-}
-
-fn section(g: &mut gpu::GpuRenderer, x: f32, y: f32, title: &str, subtitle: &str) {
-    text(g, x, y, title, 15.0, theme::text(), true);
-    text(g, x, y + 24.0, subtitle, 11.5, theme::text_dim(), false);
-}
-
-fn summary_row(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, label: &str, value: &str) {
-    let rect = (x, *y, w, 48.0);
-    g.rect(rect.0, rect.1 + rect.3 - 1.0, rect.2, 1.0, theme::border());
-    text(
-        g,
-        rect.0 + 4.0,
-        rect.1 + 16.0,
-        label,
-        11.5,
-        theme::text_dim(),
-        false,
-    );
-    let shown = fit(g, value, rect.2 - 180.0, 12.0, false);
-    let tx = rect.0 + rect.2 - g.measure_chrome_text(&shown, 12.0, false) - 4.0;
-    text(
-        g,
-        tx.max(rect.0 + 120.0),
-        rect.1 + 15.0,
-        &shown,
-        12.0,
         theme::text(),
         false,
     );
-    *y += 48.0;
+    *y += 56.0;
 }
 
+/// 묶음 머리 한 줄 — 「제목 — 설명」 흐린 글자(목업 .group h2). 줄을 나아가게 한다.
+fn section(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, title: &str, subtitle: &str) {
+    let line = if subtitle.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title} — {subtitle}")
+    };
+    text(g, x, *y + 6.0, &line, 11.5, theme::text_dim(), false);
+    *y += 32.0;
+}
+
+/// 행 아래 얇은 구분선. 카드 채움 대신 이것으로 행을 가른다.
+fn divider(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32) {
+    g.rect(x, y, w, 1.0, theme::with_alpha(theme::border(), 140));
+}
+
+/// 이름표 왼쪽 · 값 오른쪽의 정보 행(목업 .kv).
+fn summary_row(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, label: &str, value: &str) {
+    text(g, x, *y + 10.0, label, 11.5, theme::text_dim(), false);
+    let shown = fit(g, value, w - 120.0, 11.5, false);
+    let vw = g.measure_chrome_text(&shown, 11.5, false);
+    text(g, x + w - vw, *y + 10.0, &shown, 11.5, theme::text(), false);
+    divider(g, x, *y + 33.0, w);
+    *y += 34.0;
+}
+
+/// 목업의 구분 선택 — 테두리 하나, 고른 칸만 강조색 테두리+글자. 왼쪽에 붙는다.
 fn segmented(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -1852,36 +1741,50 @@ fn segmented(
     w: f32,
     cells: &[(&str, bool, Action)],
 ) {
-    let gap = 4.0;
-    let cw = (w - gap * cells.len().saturating_sub(1) as f32) / cells.len().max(1) as f32;
+    let h = 26.0;
+    let inset = 2.0;
+    let pad = 10.0;
+    let widths: Vec<f32> = cells
+        .iter()
+        .map(|(label, _, _)| g.measure_chrome_text(label, 11.5, false) + pad * 2.0)
+        .collect();
+    let total = (widths.iter().sum::<f32>() + inset * 2.0).min(w);
+    g.round_rect_stroke(x, y, total, h, 4.0, 1.0, theme::border());
+    let mut cx = x + inset;
     for (index, (label, selected, action)) in cells.iter().enumerate() {
-        let rect = (x + index as f32 * (cw + gap), y, cw, 34.0);
-        choice(
-            g,
-            s,
-            hits,
-            rect,
-            *selected,
-            crate::native_settings::Target::Onboarding(action.clone()),
-        );
-        let shown = fit(g, label, rect.2 - 16.0, 11.5, *selected);
-        let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, *selected)) / 2.0;
+        let rect = (cx, y + inset, widths[index], h - inset * 2.0);
+        cx += widths[index];
+        let hover = inside(rect, s.cursor);
+        if *selected {
+            g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, 3.0, 1.0, theme::accent());
+        }
+        let tx = rect.0 + (rect.2 - g.measure_chrome_text(label, 11.5, false)) / 2.0;
         text(
             g,
             tx,
-            rect.1 + 10.0,
-            &shown,
+            rect.1 + 4.0,
+            label,
             11.5,
             if *selected {
+                theme::accent()
+            } else if hover {
                 theme::text()
             } else {
                 theme::text_dim()
             },
-            *selected,
+            false,
         );
+        hit(
+            hits,
+            crate::native_settings::Target::Onboarding(action.clone()),
+            rect,
+            crate::native_settings::HitCursor::Pointer,
+        );
+        g.hover_pointer |= hover;
     }
 }
 
+/// 아웃라인 칩 여러 개를 줄바꿈해 깐다 — 고른 것만 강조색.
 fn chips(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -1894,12 +1797,12 @@ fn chips(
     let mut cx = x;
     let mut cy = *y;
     for (label, selected, action) in cells {
-        let cw = (g.measure_chrome_text(&label, 11.0, selected) + 22.0).min(w);
+        let cw = (g.measure_chrome_text(&label, 11.0, false) + 22.0).min(w);
         if cx + cw > x + w && cx > x {
             cx = x;
-            cy += 38.0;
+            cy += 32.0;
         }
-        let rect = (cx, cy, cw, 30.0);
+        let rect = (cx, cy, cw, 26.0);
         choice(
             g,
             s,
@@ -1908,25 +1811,29 @@ fn chips(
             selected,
             crate::native_settings::Target::Onboarding(action),
         );
-        let shown = fit(g, &label, rect.2 - 20.0, 11.0, selected);
+        let hover = inside(rect, s.cursor);
+        let shown = fit(g, &label, rect.2 - 20.0, 11.0, false);
         text(
             g,
-            rect.0 + 10.0,
-            rect.1 + 8.0,
+            rect.0 + 11.0,
+            rect.1 + 6.0,
             &shown,
             11.0,
             if selected {
+                theme::accent()
+            } else if hover {
                 theme::text()
             } else {
                 theme::text_dim()
             },
-            selected,
+            false,
         );
         cx += cw + 6.0;
     }
-    *y = cy + 40.0;
+    *y = cy + 26.0 + 16.0;
 }
 
+/// 이름표 왼쪽 · 오른쪽에 − 값 + 의 조절 행. 구분선으로 마감.
 #[allow(clippy::too_many_arguments)]
 fn stepper(
     g: &mut gpu::GpuRenderer,
@@ -1940,13 +1847,13 @@ fn stepper(
     minus: Action,
     plus: Action,
 ) {
-    text(g, x + 2.0, *y + 13.0, label, 12.0, theme::text(), false);
+    text(g, x, *y + 12.0, label, 12.0, theme::text(), false);
     let right = x + w;
     button(
         g,
         s,
         hits,
-        (right - 104.0, *y + 4.0, 30.0, 30.0),
+        (right - 96.0, *y + 7.0, 26.0, 26.0),
         "−",
         crate::native_settings::Target::Onboarding(minus),
         false,
@@ -1955,23 +1862,26 @@ fn stepper(
         g,
         s,
         hits,
-        (right - 30.0, *y + 4.0, 30.0, 30.0),
+        (right - 26.0, *y + 7.0, 26.0, 26.0),
         "+",
         crate::native_settings::Target::Onboarding(plus),
         false,
     );
+    let vw = g.measure_chrome_text(value, 11.5, false);
     text(
         g,
-        right - 66.0,
-        *y + 12.0,
+        right - 48.0 - vw / 2.0,
+        *y + 13.0,
         value,
         11.5,
-        theme::text_dim(),
+        theme::text(),
         false,
     );
-    *y += 46.0;
+    divider(g, x, *y + 39.0, w);
+    *y += 40.0;
 }
 
+/// 고를 수 있는 아웃라인 칸(목업 .btn / .sel) — 채움 없이 테두리 색만 바뀐다.
 fn choice(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -1981,26 +1891,24 @@ fn choice(
     target: crate::native_settings::Target,
 ) {
     let hover = inside(rect, s.cursor);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        if selected {
-            theme::surface_active()
-        } else if hover {
-            theme::surface_hover()
-        } else {
-            theme::surface()
-        },
-    );
+    if hover && !selected {
+        round_rect(
+            g,
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            theme::radius_md().min(5.0),
+            theme::surface_hover(),
+        );
+    }
     stroke(
         g,
         rect,
         if selected {
             theme::accent()
+        } else if hover {
+            theme::text_dim()
         } else {
             theme::border()
         },
@@ -2014,6 +1922,7 @@ fn choice(
     g.hover_pointer |= hover;
 }
 
+/// 목업(플랫): 채움 없는 아웃라인 단추. 주 단추는 강조색 테두리+글자.
 fn button(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -2024,39 +1933,73 @@ fn button(
     primary: bool,
 ) {
     let hover = inside(rect, s.cursor);
-    round_rect(
-        g,
+    if hover {
+        round_rect(
+            g,
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            theme::radius_md().min(5.0),
+            theme::surface_hover(),
+        );
+    }
+    let line = if primary {
+        theme::accent()
+    } else if hover {
+        theme::text_dim()
+    } else {
+        theme::border()
+    };
+    g.round_rect_stroke(
         rect.0,
         rect.1,
         rect.2,
         rect.3,
-        theme::radius_md(),
-        if primary {
-            if hover {
-                theme::surface_active()
-            } else {
-                theme::accent()
-            }
-        } else if hover {
-            theme::surface_active()
-        } else {
-            theme::surface_hover()
-        },
+        theme::radius_md().min(5.0),
+        1.0,
+        line,
     );
-    let shown = fit(g, label, rect.2 - 16.0, 11.5, primary);
-    let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, primary)) / 2.0;
+    let shown = fit(g, label, rect.2 - 14.0, 11.5, false);
+    let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, false)) / 2.0;
     text(
         g,
         tx,
         rect.1 + (rect.3 - 12.0) / 2.0 - 1.0,
         &shown,
         11.5,
-        if primary {
-            [255, 255, 255, 255]
-        } else {
-            theme::text()
-        },
-        primary,
+        if primary { theme::accent() } else { theme::text() },
+        false,
+    );
+    hit(
+        hits,
+        target,
+        rect,
+        crate::native_settings::HitCursor::Pointer,
+    );
+    g.hover_pointer |= hover;
+}
+
+/// 테두리도 없는 글자 단추(목업 .btn.txt) — 보조 동작.
+fn text_button(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<crate::native_settings::Hit>,
+    rect: Rect,
+    label: &str,
+    target: crate::native_settings::Target,
+) {
+    let hover = inside(rect, s.cursor);
+    let shown = fit(g, label, rect.2 - 4.0, 11.5, false);
+    let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, false)) / 2.0;
+    text(
+        g,
+        tx,
+        rect.1 + (rect.3 - 12.0) / 2.0 - 1.0,
+        &shown,
+        11.5,
+        if hover { theme::text() } else { theme::text_dim() },
+        false,
     );
     hit(
         hits,
@@ -2091,10 +2034,15 @@ fn clip_hits(g: &gpu::GpuRenderer, hits: &mut Vec<crate::native_settings::Hit>) 
 }
 
 fn stroke(g: &mut gpu::GpuRenderer, rect: Rect, color: [u8; 4]) {
-    g.rect(rect.0, rect.1, rect.2, 1.0, color);
-    g.rect(rect.0, rect.1 + rect.3 - 1.0, rect.2, 1.0, color);
-    g.rect(rect.0, rect.1, 1.0, rect.3, color);
-    g.rect(rect.0 + rect.2 - 1.0, rect.1, 1.0, rect.3, color);
+    g.round_rect_stroke(
+        rect.0,
+        rect.1,
+        rect.2,
+        rect.3,
+        theme::radius_md().min(5.0),
+        1.0,
+        color,
+    );
 }
 
 fn text(
