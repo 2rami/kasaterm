@@ -47,13 +47,14 @@ impl BoardTab {
         }
     }
 
-    pub(crate) const fn icon(self) -> &'static str {
+    /// 머리글 밑 한 줄 설명(목업 .sub).
+    pub(crate) const fn desc(self) -> &'static str {
         match self {
-            Self::Overview => "rows-2",
-            Self::Agents => "users",
-            Self::Schedule => "rotate-cw",
-            Self::Git => "git-branch",
-            Self::Machines => "server",
+            Self::Overview => "현재 대상 방의 학생과 진행 흐름",
+            Self::Agents => "pane 밖에서도 계속 도는 대화",
+            Self::Schedule => "지정한 때에 학생에게 지시를 보냅니다",
+            Self::Git => "대상 pane의 저장소",
+            Self::Machines => "세션을 다른 기기·방으로 옮깁니다",
         }
     }
 }
@@ -1158,34 +1159,14 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let mut hits = Vec::new();
     let mut caret_rect = None;
     g.rect(ax, ay, aw, ah, theme::bg());
+    // 목업(플랫): 옆 목록은 구분선 없이 배경만 다르고, 머리글은 작은 흐림 글자 —
+    // 설정창과 같은 틀. 아이콘·강조 막대는 걷었다.
     g.rect(ax, ay, nav_w, ah, theme::panel_bg());
-    g.rect(ax + nav_w - 1.0, ay, 1.0, ah, theme::border());
-    text(g, ax + 20.0, ay + 20.0, "운영 보드", 18.0, theme::text(), true);
-    let busy = snapshot
-        .data
-        .agents
-        .iter()
-        .filter(|row| agent_is_working(row))
-        .count();
-    let waiting = snapshot
-        .data
-        .agents
-        .iter()
-        .filter(|row| agent_needs_attention(row))
-        .count();
-    text(
-        g,
-        ax + 20.0,
-        ay + 47.0,
-        &format!("작업 중 {busy} · 확인 필요 {waiting}"),
-        11.0,
-        if waiting > 0 { theme::danger() } else { theme::text_dim() },
-        false,
-    );
+    text(g, ax + 20.0, ay + 24.0, "운영 보드", 13.0, theme::text_dim(), false);
 
-    let mut ny = ay + 82.0;
+    let mut ny = ay + 56.0;
     for tab in BoardTab::ALL {
-        let rect = (ax + 10.0, ny, nav_w - 20.0, 36.0);
+        let rect = (ax + 12.0, ny, nav_w - 24.0, 32.0);
         let selected = snapshot.tab == tab;
         let hover = contains(rect, snapshot.cursor);
         if selected || hover {
@@ -1195,71 +1176,58 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                 rect.1,
                 rect.2,
                 rect.3,
-                theme::radius_md(),
+                theme::radius_md().min(5.0),
                 if selected { theme::surface_active() } else { theme::surface_hover() },
             );
         }
-        if selected {
-            g.rect(rect.0, rect.1 + 8.0, 2.0, rect.3 - 16.0, theme::accent());
-        }
-        g.queue_icon(
-            tab.icon(),
-            rect.0 + 12.0,
-            rect.1 + 10.0,
-            15.0,
-            if selected { theme::text() } else { theme::text_mute() },
-        );
         text(
             g,
-            rect.0 + 36.0,
-            rect.1 + 10.0,
+            rect.0 + 12.0,
+            rect.1 + 9.0,
             tab.label(),
-            13.0,
+            12.0,
             if selected { theme::text() } else { theme::text_dim() },
             selected,
         );
         hit(g, &mut hits, Target::Tab(tab), rect, false);
         g.hover_pointer |= hover;
-        ny += 39.0;
+        ny += 36.0;
     }
-    let back = (ax + 12.0, ay + ah - 48.0, nav_w - 24.0, 34.0);
+    let back = (ax + 12.0, ay + ah - 46.0, nav_w - 24.0, 32.0);
     if contains(back, snapshot.cursor) {
-        round_rect(g, back.0, back.1, back.2, back.3, theme::radius_md(), theme::surface_hover());
+        round_rect(g, back.0, back.1, back.2, back.3, theme::radius_md().min(5.0), theme::surface_hover());
         g.hover_pointer = true;
     }
     g.queue_icon("chevron-left", back.0 + 10.0, back.1 + 9.0, 15.0, theme::text_dim());
     text(g, back.0 + 33.0, back.1 + 9.0, "작업 방으로", 12.0, theme::text_dim(), false);
     hit(g, &mut hits, Target::Return, back, false);
 
-    let content_x = ax + nav_w + if aw < 760.0 { 22.0 } else { 38.0 };
-    let content_w = (aw - nav_w - if aw < 760.0 { 44.0 } else { 76.0 })
+    let content_x = ax + nav_w + if aw < 760.0 { 20.0 } else { 28.0 };
+    let content_w = (aw - nav_w - if aw < 760.0 { 40.0 } else { 56.0 })
         .max(180.0)
-        .min(1120.0);
-    text(g, content_x, ay + 20.0, snapshot.tab.label(), 24.0, theme::text(), true);
-    let target = if snapshot.target_cwd.is_empty() {
+        .min(800.0);
+    text(g, content_x, ay + 22.0, snapshot.tab.label(), 20.0, theme::text(), true);
+    // 기준 pane 알약: 채움 없는 테두리, pane 이름만 강조색(목업 .head .pill).
+    let refresh = (content_x + content_w - 30.0, ay + 18.0, 30.0, 30.0);
+    let pane = if snapshot.target_cwd.is_empty() {
         snapshot.target_pane.clone()
     } else {
-        format!("{} · {}", snapshot.target_pane, short_path(&snapshot.target_cwd))
+        format!("{} {}", snapshot.target_pane, short_path(&snapshot.target_cwd))
     };
-    let target = format!("기준 pane · {target}");
-    let target = fit(g, &target, content_w - 92.0, 11.5, true);
-    let target_w = (g.measure_chrome_text(&target, 11.5, true) + 20.0).min(content_w - 72.0);
-    round_rect(
-        g,
-        content_x,
-        ay + 48.0,
-        target_w,
-        25.0,
-        theme::radius_sm(),
-        theme::with_alpha(theme::accent(), 36),
-    );
-    text(g, content_x + 10.0, ay + 54.0, &target, 11.5, theme::text(), true);
-    let refresh = (content_x + content_w - 34.0, ay + 18.0, 32.0, 32.0);
+    let prefix = "기준 pane · ";
+    let prefix_w = g.measure_chrome_text(prefix, 11.0, false);
+    let pane = fit(g, &pane, content_w * 0.5 - prefix_w - 40.0, 11.0, false);
+    let pane_w = g.measure_chrome_text(&pane, 11.0, false);
+    let pill = (refresh.0 - 10.0 - (prefix_w + pane_w + 20.0), ay + 21.0, prefix_w + pane_w + 20.0, 24.0);
+    g.round_rect_stroke(pill.0, pill.1, pill.2, pill.3, theme::radius_md().min(5.0), 1.0, theme::border());
+    text(g, pill.0 + 10.0, pill.1 + 6.0, prefix, 11.0, theme::text_dim(), false);
+    text(g, pill.0 + 10.0 + prefix_w, pill.1 + 6.0, &pane, 11.0, theme::accent(), false);
     icon_button(g, snapshot, &mut hits, refresh, "rotate-cw", Target::Refresh);
     if snapshot.refreshing {
-        text(g, refresh.0 - 62.0, refresh.1 + 9.0, "갱신 중", 10.5, theme::text_mute(), false);
+        text(g, pill.0 - 52.0, pill.1 + 6.0, "갱신 중", 10.5, theme::text_mute(), false);
     }
-    g.rect(content_x, ay + 82.0, content_w, 1.0, theme::border());
+    text(g, content_x, ay + 52.0, snapshot.tab.desc(), 11.5, theme::text_dim(), false);
+    divider(g, content_x, ay + 82.0, content_w);
 
     let body_top = ay + 97.0;
     let body_bottom = ay + ah - 14.0;
@@ -1329,16 +1297,15 @@ fn paint_overview(
         .filter(|row| agent_needs_attention(row))
         .collect();
     if !awaiting.is_empty() {
-        section(g, x, y, "확인 필요", &format!("선생님을 기다리는 학생 {}명", awaiting.len()));
+        notice(g, x, y, w, &format!("선생님을 기다리는 학생 {}명", awaiting.len()), false);
         for row in awaiting {
-            let rect = (x, *y, w, 42.0);
-            outlined(g, rect, theme::with_alpha(theme::danger(), 24));
-            status_dot(g, rect.0 + 14.0, rect.1 + 17.0, row);
-            text(g, rect.0 + 32.0, rect.1 + 7.0, &agent_name(row), 12.5, theme::text(), true);
+            let rect = (x, *y, w, 46.0);
+            status_dot(g, rect.0 + 2.0, rect.1 + 12.0, row);
+            text(g, rect.0 + 20.0, rect.1 + 7.0, &agent_name(row), 12.5, theme::text(), true);
             text(
                 g,
-                rect.0 + 32.0,
-                rect.1 + 23.0,
+                rect.0 + 20.0,
+                rect.1 + 25.0,
                 row.waiting_for.as_deref().unwrap_or("응답이 필요해요"),
                 10.5,
                 theme::danger(),
@@ -1347,11 +1314,14 @@ fn paint_overview(
             if row.machine.is_none() {
                 hit(g, hits, Target::FocusPane(row.surface_id.clone()), rect, false);
             }
-            *y += 48.0;
+            divider(g, x, rect.1 + 45.0, w);
+            *y += 46.0;
         }
-        *y += 8.0;
+        *y += 16.0;
     }
-    section(g, x, y, "현황", "현재 대상 방의 학생과 진행 흐름");
+    let doing = s.data.tasks.iter().filter(|task| task.mine && task.status == "in_progress").count();
+    let done = s.data.tasks.iter().filter(|task| task.mine && task.status == "completed").count();
+    section(g, x, y, "현황", &format!("진행 {doing} · 완료 {done}"));
     if s.data.agents.is_empty() {
         empty(g, x, y, w, "이 방에서 일하는 학생이 아직 없어요");
         return;
@@ -1384,26 +1354,25 @@ fn paint_overview(
         } else {
             summary_lines
         };
-        let h = 72.0 + detail_lines as f32 * 22.0;
+        // 목업(플랫): 카드 대신 구분선 행. 얼굴·이름·작업 왼쪽, 상태·단추 오른쪽.
+        let h = 62.0 + detail_lines as f32 * 22.0 + if detail_lines > 0 { 6.0 } else { 0.0 };
         let rect = (x, *y, w, h);
-        outlined(g, rect, theme::surface_hover());
-        draw_face(g, s, row, rect.0 + 12.0, rect.1 + 12.0, 34.0);
-        status_dot(g, rect.0 + 51.0, rect.1 + 18.0, row);
-        text(g, rect.0 + 66.0, rect.1 + 10.0, &agent_name(row), 13.0, theme::text(), true);
+        draw_face(g, s, row, rect.0, rect.1 + 12.0, 36.0);
+        let tx = rect.0 + 50.0;
+        let save = (rect.0 + rect.2 - 60.0, rect.1 + 17.0, 60.0, 28.0);
+        let detail = (save.0 - 60.0, save.1, 52.0, 28.0);
+        let status = status_label(row);
+        let status_w = g.measure_chrome_text(&status, 11.0, false);
+        let status_x = detail.0 - 12.0 - status_w;
+        status_dot(g, status_x - 14.0, rect.1 + 27.0, row);
+        text(g, status_x, rect.1 + 24.0, &status, 11.0, theme::text_dim(), false);
+        let name_w = (status_x - 28.0 - tx).max(40.0);
+        let name = fit(g, &agent_name(row), name_w, 13.0, true);
+        text(g, tx, rect.1 + 12.0, &name, 13.0, theme::text(), true);
         let project = if row.title.is_empty() { &row.intent } else { &row.title };
-        let project = fit(g, project, w - 190.0, 11.0, false);
-        text(g, rect.0 + 66.0, rect.1 + 29.0, &project, 11.0, theme::text_dim(), false);
-        text(
-            g,
-            rect.0 + 66.0,
-            rect.1 + 47.0,
-            &status_label(row),
-            10.5,
-            theme::enforce_contrast_at(status_color(row), theme::surface_hover(), 4.5),
-            true,
-        );
-        let detail = (rect.0 + rect.2 - 140.0, rect.1 + 12.0, 60.0, 28.0);
-        button(
+        let project = fit(g, project, name_w, 10.5, false);
+        text(g, tx, rect.1 + 32.0, &project, 10.5, theme::text_dim(), false);
+        text_button(
             g,
             s,
             hits,
@@ -1413,82 +1382,61 @@ fn paint_overview(
             false,
         );
         if row.machine.is_none() {
-            let save = (rect.0 + rect.2 - 72.0, rect.1 + 12.0, 60.0, 28.0);
-            button(g, s, hits, save, "저장", Target::SavePane(row.surface_id.clone()), false);
+            button(g, s, hits, save, "저장", Target::SavePane(row.surface_id.clone()), true);
         } else {
-            text(
-                g,
-                rect.0 + rect.2 - 72.0,
-                rect.1 + 20.0,
-                "원격",
-                10.0,
-                theme::text_mute(),
-                true,
-            );
+            let rw = g.measure_chrome_text("원격", 11.0, false);
+            text(g, save.0 + save.2 - rw, save.1 + 8.0, "원격", 11.0, theme::text_mute(), false);
         }
-        let mut ey = rect.1 + 70.0;
+        let mut ey = rect.1 + 60.0;
+        let ix = tx;
+        let lx = tx + 20.0;
+        let line_w = w - 70.0;
         if !tasks.is_empty() {
             if expanded {
                 for task in tasks.iter().take(5) {
-                    g.queue_icon("square-check", rect.0 + 16.0, ey, 13.0, theme::text_mute());
+                    g.queue_icon("square-check", ix, ey, 13.0, theme::text_mute());
                     let task_text = format!("{} · {}", task.status, task.subject);
-                    let task_text = fit(g, &task_text, w - 52.0, 10.5, false);
-                    text(g, rect.0 + 36.0, ey + 1.0, &task_text, 10.5, theme::text_dim(), false);
+                    let task_text = fit(g, &task_text, line_w, 10.5, false);
+                    text(g, lx, ey + 1.0, &task_text, 10.5, theme::text_dim(), false);
                     ey += 22.0;
                 }
             } else {
                 let doing = tasks.iter().filter(|task| task.status == "in_progress").count();
                 let done = tasks.iter().filter(|task| task.status == "completed").count();
-                g.queue_icon("square-check", rect.0 + 16.0, ey, 13.0, theme::text_mute());
-                text(g, rect.0 + 36.0, ey + 1.0, &format!("태스크 · 진행 {doing} · 완료 {done}"), 10.5, theme::text_dim(), false);
+                g.queue_icon("square-check", ix, ey, 13.0, theme::text_mute());
+                text(g, lx, ey + 1.0, &format!("태스크 · 진행 {doing} · 완료 {done}"), 10.5, theme::text_dim(), false);
                 ey += 22.0;
             }
         }
         if unassigned > 0 {
-            g.queue_icon("square", rect.0 + 16.0, ey, 13.0, theme::text_mute());
-            text(
-                g,
-                rect.0 + 36.0,
-                ey + 1.0,
-                &format!("미배정 태스크 {unassigned}개"),
-                10.5,
-                theme::text_mute(),
-                false,
-            );
+            g.queue_icon("square", ix, ey, 13.0, theme::text_mute());
+            text(g, lx, ey + 1.0, &format!("미배정 태스크 {unassigned}개"), 10.5, theme::text_mute(), false);
             ey += 22.0;
         }
         if others > 0 {
-            g.queue_icon("users", rect.0 + 16.0, ey, 13.0, theme::text_mute());
-            text(
-                g,
-                rect.0 + 36.0,
-                ey + 1.0,
-                &format!("같은 방 다른 캐릭터 태스크 {others}개"),
-                10.5,
-                theme::text_mute(),
-                false,
-            );
+            g.queue_icon("users", ix, ey, 13.0, theme::text_mute());
+            text(g, lx, ey + 1.0, &format!("같은 방 다른 캐릭터 태스크 {others}개"), 10.5, theme::text_mute(), false);
             ey += 22.0;
         }
         if !row.subagents.is_empty() || !row.background.is_empty() {
             if expanded {
                 for label in row.subagents.iter().take(3) {
-                    g.queue_icon("users", rect.0 + 16.0, ey, 13.0, theme::accent());
-                    let label = fit(g, &format!("서브에이전트 · {label}"), w - 52.0, 10.5, false);
-                    text(g, rect.0 + 36.0, ey + 1.0, &label, 10.5, theme::text_dim(), false);
+                    g.queue_icon("users", ix, ey, 13.0, theme::accent());
+                    let label = fit(g, &format!("서브에이전트 · {label}"), line_w, 10.5, false);
+                    text(g, lx, ey + 1.0, &label, 10.5, theme::text_dim(), false);
                     ey += 22.0;
                 }
                 for label in row.background.iter().take(3) {
-                    g.queue_icon("terminal", rect.0 + 16.0, ey, 13.0, theme::accent());
-                    let label = fit(g, &format!("백그라운드 · {label}"), w - 52.0, 10.5, false);
-                    text(g, rect.0 + 36.0, ey + 1.0, &label, 10.5, theme::text_dim(), false);
+                    g.queue_icon("terminal", ix, ey, 13.0, theme::accent());
+                    let label = fit(g, &format!("백그라운드 · {label}"), line_w, 10.5, false);
+                    text(g, lx, ey + 1.0, &label, 10.5, theme::text_dim(), false);
                     ey += 22.0;
                 }
             } else {
-                g.queue_icon("users", rect.0 + 16.0, ey, 13.0, theme::accent());
+                g.queue_icon("users", ix, ey, 13.0, theme::accent());
                 text(
                     g,
-                    rect.0 + 36.0,
+                    lx,
                     ey + 1.0,
                     &format!("서브 {} · 백그라운드 {}", row.subagents.len(), row.background.len()),
                     10.5,
@@ -1501,100 +1449,103 @@ fn paint_overview(
         if !row.recent_tools.is_empty() {
             if expanded {
                 for (index, tool) in row.recent_tools.iter().rev().take(8).enumerate() {
-                    g.queue_icon("braces", rect.0 + 16.0, ey, 13.0, theme::text_mute());
-                    let tool = fit(g, &format!("{}  {tool}", index + 1), w - 52.0, 10.0, false);
-                    text(g, rect.0 + 36.0, ey + 1.0, &tool, 10.0, theme::text_dim(), false);
+                    g.queue_icon("braces", ix, ey, 13.0, theme::text_mute());
+                    let tool = fit(g, &format!("{}  {tool}", index + 1), line_w, 10.0, false);
+                    text(g, lx, ey + 1.0, &tool, 10.0, theme::text_dim(), false);
                     ey += 22.0;
                 }
             } else {
-                g.queue_icon("braces", rect.0 + 16.0, ey, 13.0, theme::text_mute());
+                g.queue_icon("braces", ix, ey, 13.0, theme::text_mute());
                 let tools = row.recent_tools.iter().rev().take(3).cloned().collect::<Vec<_>>().join("  →  ");
-                let tools = fit(g, &tools, w - 52.0, 10.0, false);
-                text(g, rect.0 + 36.0, ey + 1.0, &tools, 10.0, theme::text_dim(), false);
+                let tools = fit(g, &tools, line_w, 10.0, false);
+                text(g, lx, ey + 1.0, &tools, 10.0, theme::text_dim(), false);
             }
         }
-        *y += h + 8.0;
+        divider(g, x, rect.1 + h - 1.0, w);
+        *y += h;
     }
 }
 
 fn paint_agents(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
-    section(g, x, y, "백그라운드 에이전트", "pane 밖에서도 계속 도는 대화");
     if s.data.background.is_empty() {
         empty(g, x, y, w, "백그라운드 세션이 없어요");
         return;
     }
-    for row in s.data.background.iter() {
-        let rect = (x, *y, w, 58.0);
-        outlined(g, rect, theme::surface_hover());
-        let label = if row.name.is_empty() { &row.id } else { &row.name };
-        let label = fit(g, label, w - 210.0, 12.5, true);
-        text(g, rect.0 + 14.0, rect.1 + 10.0, &label, 12.5, theme::text(), true);
-        let origin = row
-            .parent_surface
-            .as_deref()
-            .map(|pane| format!("연결 {pane}"))
-            .unwrap_or_else(|| format_age(row.started_at));
-        let location = row.machine.as_deref().unwrap_or("이 기기");
-        let sub = format!(
-            "{} · {} · {} · {}",
-            background_state(row),
-            short_path(&row.cwd),
-            origin,
-            location,
-        );
-        let sub = fit(g, &sub, w - 210.0, 10.5, false);
-        text(g, rect.0 + 14.0, rect.1 + 32.0, &sub, 10.5, theme::text_dim(), false);
-        if row.kind == "background" && row.machine.is_none() {
-            // 멈춤은 되돌릴 수 없다. 확인을 기다리는 행은 「이어받기」를 접고 그
-            // 자리를 확인 버튼에 내준다 — 둘을 함께 두면 폭이 겹치고, 이 순간
-            // 고를 것은 멈출지 말지뿐이다.
-            let pending = background_stop_target(row)
-                .filter(|target| s.pending_stop.as_ref() == Some(target));
-            if let Some(target) = pending {
-                let confirm = (rect.0 + rect.2 - 164.0, rect.1 + 14.0, 96.0, 30.0);
-                button(
-                    g,
-                    s,
-                    hits,
-                    confirm,
-                    "정말 멈추기",
-                    Target::ConfirmStopBackground(target),
-                    true,
-                );
-                let cancel = (rect.0 + rect.2 - 56.0, rect.1 + 14.0, 44.0, 30.0);
-                icon_button(g, s, hits, cancel, "x", Target::CancelStopBackground);
-            } else {
-                let resume = (rect.0 + rect.2 - 164.0, rect.1 + 14.0, 96.0, 30.0);
-                button(
-                    g,
-                    s,
-                    hits,
-                    resume,
-                    "이어받기",
-                    Target::ResumeBackground(
-                        if row.id.is_empty() { row.session_id.clone() } else { row.id.clone() },
-                        row.cwd.clone(),
-                    ),
-                    true,
-                );
-                let stop = (rect.0 + rect.2 - 56.0, rect.1 + 14.0, 44.0, 30.0);
-                if let Some(target) = background_stop_target(row) {
-                    icon_button(g, s, hits, stop, "x", Target::StopBackground(target));
+    // 목업(플랫): 「이 기기」·「원격 기기」 묶음, 카드 대신 구분선 행.
+    for (title, remote) in [("이 기기", false), ("원격 기기", true)] {
+        let rows: Vec<_> = s.data.background.iter().filter(|row| row.machine.is_some() == remote).collect();
+        if rows.is_empty() { continue; }
+        section(g, x, y, title, "");
+        for row in rows {
+            let rect = (x, *y, w, 58.0);
+            let state = background_state(row);
+            let state_color = match row.state.as_str() {
+                "blocked" => theme::danger(),
+                "running" | "working" => theme::success(),
+                "done" => theme::text_mute(),
+                _ => theme::attention(),
+            };
+            let mut right = rect.0 + rect.2;
+            if row.kind == "background" && row.machine.is_none() {
+                // 멈춤은 되돌릴 수 없다. 확인을 기다리는 행은 「이어받기」를 접고 그
+                // 자리를 확인 버튼에 내준다 — 이 순간 고를 것은 멈출지 말지뿐이다.
+                let pending = background_stop_target(row)
+                    .filter(|target| s.pending_stop.as_ref() == Some(target));
+                if let Some(target) = pending {
+                    let cancel = (right - 44.0, rect.1 + 15.0, 44.0, 28.0);
+                    text_button(g, s, hits, cancel, "취소", Target::CancelStopBackground, false);
+                    let confirm = (cancel.0 - 8.0 - 96.0, rect.1 + 15.0, 96.0, 28.0);
+                    button(g, s, hits, confirm, "정말 멈추기", Target::ConfirmStopBackground(target), true);
+                    right = confirm.0;
+                } else {
+                    let stop_rect = (right - 52.0, rect.1 + 15.0, 52.0, 28.0);
+                    if let Some(target) = background_stop_target(row) {
+                        text_button(g, s, hits, stop_rect, "멈추기", Target::StopBackground(target), true);
+                    }
+                    let resume = (stop_rect.0 - 8.0 - 84.0, rect.1 + 15.0, 84.0, 28.0);
+                    button(
+                        g,
+                        s,
+                        hits,
+                        resume,
+                        "이어받기",
+                        Target::ResumeBackground(
+                            if row.id.is_empty() { row.session_id.clone() } else { row.id.clone() },
+                            row.cwd.clone(),
+                        ),
+                        true,
+                    );
+                    right = resume.0;
                 }
+            } else if row.kind == "background" {
+                let note = "원격 기기에서만 제어 가능";
+                let nw = g.measure_chrome_text(note, 11.0, false);
+                text(g, right - nw, rect.1 + 23.0, note, 11.0, theme::text_mute(), false);
+                right -= nw;
             }
-        } else if row.kind == "background" {
-            text(
-                g,
-                rect.0 + rect.2 - 176.0,
-                rect.1 + 21.0,
-                "원격 기기에서만 제어 가능",
-                10.0,
-                theme::text_mute(),
-                false,
-            );
+            let sw = g.measure_chrome_text(state, 11.0, false);
+            let sx = right - 16.0 - sw;
+            circle_rect(g, sx - 14.0, rect.1 + 26.0, 8.0, state_color);
+            text(g, sx, rect.1 + 23.0, state, 11.0, theme::text_dim(), false);
+            let text_w = (sx - 14.0 - 16.0 - rect.0).max(60.0);
+            let label = if row.name.is_empty() { &row.id } else { &row.name };
+            let label = fit(g, label, text_w, 12.5, true);
+            text(g, rect.0, rect.1 + 11.0, &label, 12.5, theme::text(), true);
+            let origin = row
+                .parent_surface
+                .as_deref()
+                .map(|pane| format!("연결 {pane}"))
+                .unwrap_or_else(|| format_age(row.started_at));
+            let location = row.machine.as_deref().unwrap_or("이 기기");
+            let sub = format!("{} · {} · {}", short_path(&row.cwd), origin, location);
+            let sub = fit(g, &sub, text_w, 10.5, false);
+            text(g, rect.0, rect.1 + 32.0, &sub, 10.5, theme::text_dim(), false);
+            divider(g, x, rect.1 + 57.0, w);
+            *y += 58.0;
         }
-        *y += 66.0;
+        *y += 16.0;
     }
+    notice(g, x, y, w, "「멈추기」를 두 번 누르면 정말 멈춰요 — 첫 번째는 확인, 두 번째가 실행", true);
 }
 
 fn paint_schedule(
@@ -1606,80 +1557,96 @@ fn paint_schedule(
     y: &mut f32,
     w: f32,
 ) {
-    section(g, x, y, "새 스케줄", "반복 지시, 예약, 타이머를 학생에게 보냅니다");
-    let gap = 6.0;
-    let kw = ((w - gap * 2.0) / 3.0).max(70.0);
-    for (i, (kind, label)) in [("loop", "반복 루프"), ("cron", "예약"), ("timer", "타이머")]
-        .into_iter()
-        .enumerate()
-    {
-        button(
-            g,
-            s,
-            hits,
-            (x + i as f32 * (kw + gap), *y, kw, 32.0),
-            label,
-            Target::ScheduleKind(kind.to_string()),
-            s.schedule_kind == kind,
-        );
-    }
-    *y += 42.0;
-    text(g, x, *y, "대상", 11.0, theme::text_dim(), true);
-    *y += 20.0;
-    let mut sx = x;
-    for row in s.data.agents.iter() {
-        let label = agent_name(row);
-        let bw = (g.measure_chrome_text(&label, 10.5, false) + 22.0).clamp(70.0, 150.0);
-        if sx + bw > x + w {
-            sx = x;
-            *y += 36.0;
-        }
-        button(
-            g,
-            s,
-            hits,
-            (sx, *y, bw, 30.0),
-            &label,
-            Target::ScheduleSurface(row.surface_id.clone()),
-            s.schedule_surface == row.surface_id,
-        );
-        sx += bw + 6.0;
-    }
-    *y += 42.0;
-    field(g, s, hits, caret, (x, *y, w, 40.0), "보낼 지시", &s.schedule_text, BoardInput::ScheduleText);
-    *y += 50.0;
+    // 목업(플랫): 이름표 왼쪽 · 조작 오른쪽의 40px 행, 구분선으로 가른다.
+    section(g, x, y, "새 스케줄", "");
+    text(g, x, *y + 13.0, "방식", 12.0, theme::text(), false);
+    segmented(
+        g,
+        s,
+        hits,
+        x,
+        *y + 7.0,
+        w,
+        &[
+            ("반복 루프", s.schedule_kind == "loop", Target::ScheduleKind("loop".into())),
+            ("예약", s.schedule_kind == "cron", Target::ScheduleKind("cron".into())),
+            ("타이머", s.schedule_kind == "timer", Target::ScheduleKind("timer".into())),
+        ],
+    );
+    divider(g, x, *y + 39.0, w);
+    *y += 40.0;
     let detail = if s.schedule_kind == "cron" {
         (&s.schedule_at, BoardInput::ScheduleAt, "Unix 시각(초)")
     } else {
         (&s.schedule_minutes, BoardInput::ScheduleMinutes, if s.schedule_kind == "loop" { "간격(분)" } else { "몇 분 뒤" })
     };
-    field(g, s, hits, caret, (x, *y, 190.0, 38.0), detail.2, detail.0, detail.1);
-    button(g, s, hits, (x + 202.0, *y, 88.0, 38.0), "등록", Target::ScheduleAdd, true);
-    *y += 58.0;
-    section(g, x, y, "등록됨", "멈추거나 다시 켜고, 필요 없는 항목은 지울 수 있어요");
+    text(g, x, *y + 13.0, detail.2, 12.0, theme::text(), false);
+    field(g, s, hits, caret, (x + w - 120.0, *y + 5.0, 120.0, 30.0), "", detail.0, detail.1);
+    divider(g, x, *y + 39.0, w);
+    *y += 40.0;
+    text(g, x, *y + 13.0, "대상", 12.0, theme::text(), false);
+    *y += 40.0;
+    let mut sx = x;
+    let mut used = false;
+    for row in s.data.agents.iter() {
+        let label = agent_name(row);
+        let bw = (g.measure_chrome_text(&label, 11.5, false) + 22.0).clamp(64.0, 150.0);
+        if sx + bw > x + w {
+            sx = x;
+            *y += 34.0;
+        }
+        button(
+            g,
+            s,
+            hits,
+            (sx, *y - 6.0, bw, 26.0),
+            &label,
+            Target::ScheduleSurface(row.surface_id.clone()),
+            s.schedule_surface == row.surface_id,
+        );
+        sx += bw + 6.0;
+        used = true;
+    }
+    if !used {
+        text(g, x, *y - 2.0, "이 방에 학생이 없어요", 11.0, theme::text_mute(), false);
+    }
+    *y += 28.0;
+    divider(g, x, *y, w);
+    *y += 12.0;
+    text(g, x, *y + 6.0, "보낼 지시", 12.0, theme::text(), false);
+    *y += 30.0;
+    field(g, s, hits, caret, (x, *y, w, 36.0), "예: 테스트 돌리고 실패만 보고", &s.schedule_text, BoardInput::ScheduleText);
+    *y += 48.0;
+    divider(g, x, *y, w);
+    button(g, s, hits, (x + w - 72.0, *y + 12.0, 72.0, 30.0), "등록", Target::ScheduleAdd, true);
+    *y += 54.0;
+    divider(g, x, *y, w);
+    *y += 24.0;
+    section(g, x, y, "등록된 스케줄", "");
     if s.data.schedules.is_empty() {
         empty(g, x, y, w, "예약된 작업이 없어요");
         return;
     }
     for item in s.data.schedules.iter() {
         let rect = (x, *y, w, 58.0);
-        outlined(
-            g,
-            rect,
-            if item.enabled {
-                theme::surface_hover()
-            } else {
-                theme::surface()
-            },
-        );
         let kind = match item.kind.as_str() { "loop" => "반복", "cron" => "예약", _ => "타이머" };
-        text(g, rect.0 + 14.0, rect.1 + 9.0, kind, 10.0, theme::accent(), true);
-        let item_text = fit(g, &item.text, w - 180.0, 12.0, false);
-        text(g, rect.0 + 62.0, rect.1 + 8.0, &item_text, 12.0, theme::text(), false);
-        text(g, rect.0 + 14.0, rect.1 + 34.0, &format!("{} · {}", item.surface, schedule_when(item)), 10.5, theme::text_dim(), false);
-        icon_button(g, s, hits, (rect.0 + rect.2 - 72.0, rect.1 + 14.0, 28.0, 28.0), if item.enabled { "minus" } else { "arrow-up" }, Target::ScheduleToggle(item.id.clone()));
-        icon_button(g, s, hits, (rect.0 + rect.2 - 36.0, rect.1 + 14.0, 28.0, 28.0), "x", Target::ScheduleDelete(item.id.clone()));
-        *y += 66.0;
+        let title = format!("{kind} · {}", schedule_when(item));
+        let title = fit(g, &title, w - 200.0, 12.5, true);
+        text(g, rect.0, rect.1 + 11.0, &title, 12.5, if item.enabled { theme::text() } else { theme::text_dim() }, true);
+        let sub = fit(g, &format!("{} · 「{}」", item.surface, item.text), w - 200.0, 10.5, false);
+        text(g, rect.0, rect.1 + 32.0, &sub, 10.5, theme::text_dim(), false);
+        text_button(g, s, hits, (rect.0 + rect.2 - 52.0, rect.1 + 15.0, 52.0, 28.0), "지우기", Target::ScheduleDelete(item.id.clone()), true);
+        text_button(
+            g,
+            s,
+            hits,
+            (rect.0 + rect.2 - 52.0 - 8.0 - 52.0, rect.1 + 15.0, 52.0, 28.0),
+            if item.enabled { "멈춤" } else { "켜기" },
+            Target::ScheduleToggle(item.id.clone()),
+            false,
+        );
+        divider(g, x, rect.1 + 57.0, w);
+        *y += 58.0;
     }
 }
 
@@ -1693,7 +1660,6 @@ fn paint_git(
     w: f32,
 ) {
     let git = &s.data.git;
-    section(g, x, y, "대상 pane의 저장소", &short_path(&s.target_cwd));
     if git.no_repo {
         empty(g, x, y, w, "이 pane은 Git 저장소에 있지 않아요");
         return;
@@ -1702,39 +1668,46 @@ fn paint_git(
         notice(g, x, y, w, &git.error, false);
         return;
     }
-    let summary = (x, *y, w, 54.0);
-    outlined(g, summary, theme::surface_hover());
-    g.queue_icon("git-branch", summary.0 + 14.0, summary.1 + 18.0, 15.0, theme::accent());
-    text(g, summary.0 + 38.0, summary.1 + 9.0, if git.branch.is_empty() { "—" } else { &git.branch }, 13.0, theme::text(), true);
-    text(g, summary.0 + 38.0, summary.1 + 31.0, &format!("앞섬 {} · 뒤처짐 {} · +{} −{}", git.ahead, git.behind, git.insertions, git.deletions), 10.5, theme::text_dim(), false);
-    *y += 66.0;
+    // 목업(플랫): 브랜치·원격·상태를 이름표/값 행으로.
+    kv_row(g, x, y, w, "브랜치", if git.branch.is_empty() { "—" } else { &git.branch });
+    kv_row(g, x, y, w, "원격", &format!("앞섬 {} · 뒤처짐 {}", git.ahead, git.behind));
+    kv_row(g, x, y, w, "상태", &format!("변경 {}개 · +{} −{}", git.rows.len(), git.insertions, git.deletions));
+    *y += 20.0;
+    let head_y = *y;
+    section(g, x, y, "변경", &format!("{}개 선택", s.git_selected.len()));
     if git.rows.is_empty() {
         empty(g, x, y, w, "변경된 파일이 없어요");
     } else {
+        text_button(g, s, hits, (x + w - 44.0, head_y, 44.0, 26.0), "해제", Target::GitClear, false);
+        text_button(g, s, hits, (x + w - 44.0 - 44.0, head_y, 44.0, 26.0), "전체", Target::GitAll, false);
         for row in git.rows.iter() {
-            let rect = (x, *y, w, 34.0);
+            let rect = (x, *y, w, 40.0);
             let selected = s.git_selected.contains(&row.path);
-            if selected || contains(rect, s.cursor) {
-                round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), theme::surface_hover());
+            if contains(rect, s.cursor) {
+                round_rect(g, rect.0 - 8.0, rect.1, rect.2 + 16.0, rect.3 - 1.0, theme::radius_sm(), theme::surface_hover());
             }
-            checkbox(g, rect.0 + 8.0, rect.1 + 8.0, selected);
-            text(g, rect.0 + 36.0, rect.1 + 9.0, &row.marker.to_string(), 10.5, status_marker_color(row.marker), true);
-            let path = fit(g, &row.path, w - 70.0, 11.0, false);
-            text(g, rect.0 + 58.0, rect.1 + 8.0, &path, 11.0, theme::text(), false);
+            let path = fit(g, &row.path, w - 60.0, 11.5, false);
+            text(g, rect.0, rect.1 + 7.0, &path, 11.5, theme::text(), false);
+            let marker = match row.marker { 'M' => "수정", 'A' | '?' => "추가", 'D' => "삭제", 'R' => "이름 바꿈", 'U' => "충돌", _ => "변경" };
+            text(g, rect.0, rect.1 + 24.0, marker, 10.0, status_marker_color(row.marker), false);
+            checkbox(g, rect.0 + rect.2 - 16.0, rect.1 + 12.0, selected);
             hit(g, hits, Target::GitFile(row.path.clone()), rect, false);
-            *y += 36.0;
+            divider(g, x, rect.1 + 39.0, w);
+            *y += 40.0;
         }
-        *y += 8.0;
-        button(g, s, hits, (x, *y, 72.0, 30.0), "전체", Target::GitAll, false);
-        button(g, s, hits, (x + 80.0, *y, 72.0, 30.0), "해제", Target::GitClear, false);
-        text(g, x + 166.0, *y + 8.0, &format!("{}개 선택", s.git_selected.len()), 10.5, theme::text_dim(), false);
-        *y += 42.0;
     }
-    field(g, s, hits, caret, (x, *y, w, 40.0), "커밋 메시지", &s.git_message, BoardInput::GitMessage);
-    *y += 50.0;
-    button(g, s, hits, (x, *y, 112.0, 38.0), "커밋", Target::GitCommit, true);
-    button(g, s, hits, (x + 122.0, *y, 100.0, 38.0), &format!("푸시 ↑{}", git.ahead), Target::GitPush, false);
-    *y += 52.0;
+    *y += 24.0;
+    section(g, x, y, "커밋", "");
+    field(g, s, hits, caret, (x, *y, w, 36.0), "커밋 메시지", &s.git_message, BoardInput::GitMessage);
+    *y += 48.0;
+    divider(g, x, *y, w);
+    let push_label = format!("푸시 ↑{}", git.ahead);
+    let push_w = g.measure_chrome_text(&push_label, 11.5, false) + 24.0;
+    button(g, s, hits, (x + w - push_w, *y + 12.0, push_w, 30.0), &push_label, Target::GitPush, false);
+    button(g, s, hits, (x + w - push_w - 8.0 - 64.0, *y + 12.0, 64.0, 30.0), "커밋", Target::GitCommit, true);
+    *y += 54.0;
+    divider(g, x, *y, w);
+    *y += 12.0;
 }
 
 fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, caret: &mut Option<Rect>, x: f32, y: &mut f32, w: f32) {
@@ -1745,7 +1718,7 @@ fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, c
     for error in &data.errors { notice(g, x, y, w, error, false); }
     match ui.step {
         TransferStep::Select => {
-            section(g, x, y, "1  세션 고르기", "선택하지 않은 세션은 현재 자리에 남아요");
+            step_title(g, x, y, "1", "세션 고르기", true);
             let mut rooms = vec![("모든 방".to_string(), Target::TransferFilter(None), ui.room_filter.is_none(), true)];
             for machine in &data.machines {
                 for room in &machine.rooms {
@@ -1759,11 +1732,14 @@ fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, c
             }
             transfer_choices(g, s, hits, x, y, w, rooms);
             let selected = ui.selected.len();
-            transfer_button(g, s, hits, (x, *y, w, 36.0), &format!("선택한 {selected}개 이사할 곳 고르기"), Target::TransferDestination, selected > 0, true);
-            *y += 46.0;
-            button(g, s, hits, (x, *y, (w / 2.0 - 4.0).min(136.0), 30.0), "보이는 세션 선택", Target::TransferSelectRoom, false);
-            button(g, s, hits, (x + (w / 2.0).min(144.0), *y, (w / 2.0 - 4.0).min(110.0), 30.0), "선택 해제", Target::TransferClear, false);
-            *y += 42.0;
+            text_button(g, s, hits, (x - 4.0, *y, 120.0, 28.0), "보이는 세션 선택", Target::TransferSelectRoom, false);
+            text_button(g, s, hits, (x + 124.0, *y, 72.0, 28.0), "선택 해제", Target::TransferClear, false);
+            let cta = format!("선택한 {selected}개 이사할 곳 고르기");
+            let cw = (g.measure_chrome_text(&cta, 11.5, false) + 28.0).min(w - 210.0).max(80.0);
+            transfer_button(g, s, hits, (x + w - cw, *y - 1.0, cw, 30.0), &cta, Target::TransferDestination, selected > 0, true);
+            *y += 40.0;
+            divider(g, x, *y, w);
+            *y += 8.0;
             let mut sessions: Vec<_> = data.sessions.iter().filter(|row| row.harness.is_some() && transfer_row_visible(ui, row)).collect();
             sessions.sort_by(|a, b| (&a.identity.machine_id, &a.room_id, &a.name).cmp(&(&b.identity.machine_id, &b.room_id, &b.name)));
             if sessions.is_empty() { empty(g, x, y, w, "이 방에서 실행 중인 세션이 없어요"); }
@@ -1780,20 +1756,22 @@ fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, c
             }
             *y += 12.0;
             let shells: Vec<_> = data.sessions.iter().filter(|row| row.harness.is_none() && transfer_row_visible(ui, row)).collect();
-            button(g, s, hits, (x, *y, w, 34.0), &format!("{} 셸 따로 보기 · {}개", if ui.show_shells { "접기" } else { "펼치기" }, shells.len()), Target::TransferShells, false);
-            *y += 44.0;
+            text_button(g, s, hits, (x - 4.0, *y, 180.0, 28.0), &format!("셸 따로 보기 · {}개 {}", shells.len(), if ui.show_shells { "접기" } else { "펼치기" }), Target::TransferShells, false);
+            *y += 40.0;
             if ui.show_shells {
                 text(g, x, *y, "셸만 닫으며, 실행 중인 학생은 닫지 않아요.", 10.5, theme::text_dim(), false);
                 *y += 28.0;
                 for row in shells { paint_transfer_session(g, s, hits, x, y, w, row, true); }
-                transfer_button(g, s, hits, (x, *y, w, 36.0), &format!("선택한 셸 {}개 닫기 확인", ui.shell_selected.len()), Target::TransferCloseReview, !ui.shell_selected.is_empty(), false);
-                *y += 48.0;
+                let label = format!("선택한 셸 {}개 닫기 확인", ui.shell_selected.len());
+                let cw = g.measure_chrome_text(&label, 11.5, false) + 28.0;
+                transfer_button(g, s, hits, (x + w - cw, *y, cw, 30.0), &label, Target::TransferCloseReview, !ui.shell_selected.is_empty(), false);
+                *y += 44.0;
             }
         }
         TransferStep::Destination => {
-            button(g, s, hits, (x, *y, 100.0, 30.0), "세션 다시 고르기", Target::TransferBack, false);
+            text_button(g, s, hits, (x - 4.0, *y, 120.0, 28.0), "‹ 세션 다시 고르기", Target::TransferBack, false);
             *y += 44.0;
-            section(g, x, y, "2  도착할 기기와 방", &format!("{}개 세션을 함께 보냅니다", ui.selected.len()));
+            step_title(g, x, y, "2", &format!("도착할 기기와 방 · {}개 세션을 함께 보냅니다", ui.selected.len()), true);
             let machines = data.machines.iter().map(|machine| {
                 let same = ui.selected.iter().any(|id| id.machine_id == machine.id);
                 let suffix = if same { " · 현재 기기" } else if !machine.online { " · 연결 안 됨" } else if !machine.room_transfer_supported { " · 업데이트 필요" } else { "" };
@@ -1813,8 +1791,9 @@ fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, c
             }
             *y += 12.0;
             let valid = transfer_request(ui, data).is_ok();
-            transfer_button(g, s, hits, (x, *y, w, 38.0), "선택 내용 확인", Target::TransferReview, valid, true);
-            *y += 50.0;
+            divider(g, x, *y, w);
+            transfer_button(g, s, hits, (x + w - 120.0, *y + 12.0, 120.0, 30.0), "선택 내용 확인", Target::TransferReview, valid, true);
+            *y += 54.0;
             text(g, x, *y, "다음 화면에서 확인해야 이사가 시작돼요.", 10.5, theme::text_dim(), false);
             *y += 30.0;
         }
@@ -1829,11 +1808,11 @@ fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, c
                             RoomTarget::New(name) => format!("새 방 · {name}"),
                             RoomTarget::Existing(id) => machine.and_then(|m| m.rooms.iter().find(|room| &room.id == id)).map(|room| room.title.clone()).unwrap_or_else(|| "방 확인 필요".into()),
                         };
-                        ("3  이사할 내용 확인", format!("도착 · {machine_name} / {room}"), &request.sessions, "확인하고 이사")
+                        ("이사할 내용 확인", format!("도착 · {machine_name} / {room}"), &request.sessions, "확인하고 이사")
                     }
                     TransferConfirmation::Close(ids) => ("셸 닫기 확인", "선택한 셸만 닫습니다. 실행 중인 학생은 유지돼요.".into(), ids, "확인하고 셸 닫기"),
                 };
-                section(g, x, y, title, "선택한 항목만 처리하며, 나머지는 그대로 남아요");
+                step_title(g, x, y, "3", title, true);
                 transfer_message(g, x, y, w, &summary);
                 *y += 16.0;
                 for id in ids {
@@ -1844,10 +1823,11 @@ fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, c
                     }
                 }
                 *y += 16.0;
-                button(g, s, hits, (x, *y, w, 38.0), confirm, Target::TransferConfirm, true);
-                *y += 48.0;
-                button(g, s, hits, (x, *y, w, 32.0), "취소하고 다시 고르기", Target::TransferBack, false);
-                *y += 44.0;
+                divider(g, x, *y, w);
+                let cw = g.measure_chrome_text(confirm, 11.5, false) + 28.0;
+                button(g, s, hits, (x + w - cw, *y + 12.0, cw, 30.0), confirm, Target::TransferConfirm, true);
+                text_button(g, s, hits, (x + w - cw - 8.0 - 120.0, *y + 12.0, 120.0, 30.0), "취소하고 다시 고르기", Target::TransferBack, false);
+                *y += 54.0;
             } else {
                 let done = ui.results.iter().filter(|row| row.status == TransferStatus::Succeeded).count();
                 let failed = ui.results.iter().filter(|row| matches!(row.status, TransferStatus::Failed | TransferStatus::Unknown)).count();
@@ -1862,8 +1842,9 @@ fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, c
                     *y += 16.0;
                 }
                 if !ui.busy {
-                    button(g, s, hits, (x, *y, w, 36.0), "목록으로 돌아가기", Target::TransferBack, false);
-                    *y += 48.0;
+                    divider(g, x, *y, w);
+                    button(g, s, hits, (x + w - 120.0, *y + 12.0, 120.0, 30.0), "목록으로 돌아가기", Target::TransferBack, false);
+                    *y += 54.0;
                 }
             }
         }
@@ -1901,9 +1882,10 @@ fn transfer_room_label(data: &TransferSnapshot, row: &SessionRow) -> String {
 fn transfer_button(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, rect: Rect, label: &str, target: Target, enabled: bool, primary: bool) {
     if enabled { button(g, s, hits, rect, label, target, primary); }
     else {
-        outlined(g, rect, theme::surface());
-        let label = fit(g, label, rect.2 - 20.0, 10.5, false);
-        text(g, rect.0 + 10.0, rect.1 + (rect.3 - 12.0) / 2.0, &label, 10.5, theme::text_dim(), false);
+        g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, theme::radius_md().min(5.0), 1.0, theme::with_alpha(theme::border(), 140));
+        let label = fit(g, label, rect.2 - 20.0, 11.5, false);
+        let tx = rect.0 + (rect.2 - g.measure_chrome_text(&label, 11.5, false)) / 2.0;
+        text(g, tx, rect.1 + (rect.3 - 12.0) / 2.0 - 1.0, &label, 11.5, theme::text_mute(), false);
     }
 }
 
@@ -1925,7 +1907,7 @@ fn paint_transfer_session(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec
     let expanded = s.transfer.detail.as_deref() == Some(&key);
     let compact = w < 440.0;
     let rect = (x, *y, w, if compact { 120.0 } else { 88.0 });
-    if selected || contains(rect, s.cursor) { round_rect(g, x, *y, w, rect.3, theme::radius_sm(), theme::surface_hover()); }
+    // 목업(플랫): 채움 없이 구분선만. 고른 행은 체크박스가 말한다.
     checkbox(g, x + 8.0, *y + 12.0, selected);
     let activity = s.data.agents.iter().find(|agent| row.local_panes.contains(&agent.surface_id));
     if let Some(agent) = activity { draw_face(g, s, agent, x + 34.0, *y + 10.0, 28.0); }
@@ -1948,8 +1930,8 @@ fn paint_transfer_session(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec
     if enabled { hit(g, hits, Target::TransferSelect(row.identity.clone(), shell), (x, *y, if compact { w } else { w - 72.0 }, 76.0), false); }
     let view = if compact { (x + 16.0, *y + 82.0, 58.0, 28.0) } else { (x + w - 66.0, *y + 8.0, 58.0, 28.0) };
     let detail = if compact { (x + 82.0, *y + 82.0, 58.0, 28.0) } else { (x + w - 66.0, *y + 42.0, 58.0, 28.0) };
-    button(g, s, hits, view, "보기", Target::TransferView(row.identity.clone()), false);
-    button(g, s, hits, detail, if expanded { "접기" } else { "상세" }, Target::TransferDetail(key), false);
+    text_button(g, s, hits, view, "보기", Target::TransferView(row.identity.clone()), false);
+    text_button(g, s, hits, detail, if expanded { "접기" } else { "상세" }, Target::TransferDetail(key), false);
     *y += rect.3;
     if expanded {
         let rows = activity.map(|agent| vec![agent.last_prompt.as_str(), agent.last_reply.as_str(), agent.intent.as_str()]).unwrap_or_default();
@@ -1962,7 +1944,7 @@ fn paint_transfer_session(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec
         text(g, x + 16.0, *y + 6.0, &last, 10.0, theme::text_dim(), false);
         *y += 32.0;
     }
-    g.rect(x, *y - 1.0, w, 1.0, theme::border());
+    divider(g, x, *y - 1.0, w);
     *y += 8.0;
 }
 
@@ -2017,29 +1999,50 @@ fn field(
 }
 
 fn section(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, title: &str, desc: &str) {
-    text(g, x, *y, title, 13.0, theme::text(), true);
-    text(g, x, *y + 20.0, desc, 10.5, theme::text_dim(), false);
-    *y += 44.0;
+    // 목업(플랫): 묶음 이름은 작은 흐림 글자 한 줄. 설명이 있으면 「·」로 이어 붙인다.
+    let line = if desc.is_empty() { title.to_string() } else { format!("{title} · {desc}") };
+    text(g, x, *y + 6.0, &line, 11.0, theme::text_dim(), false);
+    *y += 32.0;
+}
+
+/// 목업의 stepn — 번호 원(테두리) + 제목. 현재 단계만 강조색.
+fn step_title(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, n: &str, title: &str, on: bool) {
+    let color = if on { theme::accent() } else { theme::text_dim() };
+    g.round_rect_stroke(x, *y + 2.0, 18.0, 18.0, 9.0, 1.0, if on { theme::accent() } else { theme::border() });
+    let nw = g.measure_chrome_text(n, 10.0, false);
+    text(g, x + (18.0 - nw) / 2.0, *y + 5.0, n, 10.0, color, false);
+    text(g, x + 26.0, *y + 4.0, title, 12.0, color, on);
+    *y += 32.0;
+}
+
+/// 행 아래 얇은 구분선. 카드 채움 대신 이것으로 행을 가른다.
+fn divider(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32) {
+    g.rect(x, y, w, 1.0, theme::with_alpha(theme::border(), 140));
+}
+
+/// 이름표 왼쪽 · 값 오른쪽의 정보 행(목업 .kv).
+fn kv_row(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, label: &str, value: &str) {
+    text(g, x, *y + 10.0, label, 11.5, theme::text_dim(), false);
+    let shown = fit(g, value, w - 120.0, 11.5, false);
+    let vw = g.measure_chrome_text(&shown, 11.5, false);
+    text(g, x + w - vw, *y + 10.0, &shown, 11.5, theme::text(), false);
+    divider(g, x, *y + 33.0, w);
+    *y += 34.0;
 }
 
 fn notice(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, message: &str, ok: bool) {
-    let rect = (x, *y, w, 38.0);
-    outlined(
-        g,
-        rect,
-        theme::with_alpha(if ok { theme::success() } else { theme::danger() }, 24),
-    );
-    g.queue_icon(if ok { "square-check" } else { "triangle-alert" }, x + 12.0, *y + 11.0, 14.0, if ok { theme::success() } else { theme::danger() });
-    let message = fit(g, message, w - 46.0, 10.5, false);
-    text(g, x + 34.0, *y + 11.0, &message, 10.5, theme::text(), false);
+    // 목업(플랫): 채움·아이콘 없이 왼쪽 2px 색선만.
+    let color = if ok { theme::success() } else { theme::danger() };
+    g.rect(x, *y, 2.0, 36.0, color);
+    let message = fit(g, message, w - 24.0, 11.5, false);
+    text(g, x + 14.0, *y + 11.0, &message, 11.5, theme::text(), false);
     *y += 48.0;
 }
 
 fn empty(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, message: &str) {
-    let rect = (x, *y, w, 72.0);
-    outlined(g, rect, theme::surface());
-    text(g, x + 16.0, *y + 26.0, message, 11.5, theme::text_dim(), false);
-    *y += 82.0;
+    text(g, x, *y + 14.0, message, 11.5, theme::text_mute(), false);
+    divider(g, x, *y + 43.0, w);
+    *y += 52.0;
 }
 
 fn outlined(g: &mut gpu::GpuRenderer, rect: Rect, fill: [u8; 4]) {
@@ -2055,21 +2058,53 @@ fn stroke(g: &mut gpu::GpuRenderer, rect: Rect, color: [u8; 4]) {
 }
 
 fn button(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, rect: Rect, label: &str, target: Target, primary: bool) {
+    // 목업(플랫): 채움 없는 아웃라인. 주 단추는 강조색 테두리+글자, 나머지는 회색 테두리.
     let hover = contains(rect, s.cursor);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        if primary { if hover { theme::surface_active() } else { theme::accent() } } else if hover { theme::surface_active() } else { theme::surface_hover() },
-    );
-    let shown = fit(g, label, rect.2 - 14.0, 10.5, primary);
-    let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 10.5, primary)) / 2.0;
-    text(g, tx, rect.1 + (rect.3 - 11.0) / 2.0 - 1.0, &shown, 10.5, if primary { [255, 255, 255, 255] } else { theme::text() }, primary);
+    if hover {
+        round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_md().min(5.0), theme::surface_hover());
+    }
+    let line = if primary { theme::accent() } else if hover { theme::text_dim() } else { theme::border() };
+    g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, theme::radius_md().min(5.0), 1.0, line);
+    let shown = fit(g, label, rect.2 - 14.0, 11.5, false);
+    let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, false)) / 2.0;
+    text(g, tx, rect.1 + (rect.3 - 12.0) / 2.0 - 1.0, &shown, 11.5, if primary { theme::accent() } else { theme::text() }, false);
     hit(g, hits, target, rect, false);
     g.hover_pointer |= hover;
+}
+
+/// 테두리도 없는 글자 단추(목업 .btn.txt). 보조 동작 — 상세·해제·멈추기.
+fn text_button(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, rect: Rect, label: &str, target: Target, danger: bool) {
+    let hover = contains(rect, s.cursor);
+    let shown = fit(g, label, rect.2 - 4.0, 11.5, false);
+    let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, false)) / 2.0;
+    let color = if danger && hover { theme::danger() } else if hover { theme::text() } else { theme::text_dim() };
+    text(g, tx, rect.1 + (rect.3 - 12.0) / 2.0 - 1.0, &shown, 11.5, color, false);
+    hit(g, hits, target, rect, false);
+    g.hover_pointer |= hover;
+}
+
+/// 목업의 구분 선택 — 테두리 하나, 고른 칸만 강조색 테두리+글자. 오른쪽 끝에 붙는다.
+fn segmented(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: f32, w: f32, cells: &[(&str, bool, Target)]) {
+    let h = 26.0;
+    let inset = 2.0;
+    let pad = 10.0;
+    let widths: Vec<f32> = cells.iter().map(|(label, _, _)| g.measure_chrome_text(label, 11.5, false) + pad * 2.0).collect();
+    let total = widths.iter().sum::<f32>() + inset * 2.0;
+    let outer = (x + w - total.min(w), y, total.min(w), h);
+    g.round_rect_stroke(outer.0, outer.1, outer.2, outer.3, 4.0, 1.0, theme::border());
+    let mut cx = outer.0 + inset;
+    for (i, (label, selected, target)) in cells.iter().enumerate() {
+        let rect = (cx, y + inset, widths[i], h - inset * 2.0);
+        cx += widths[i];
+        let hover = contains(rect, s.cursor);
+        if *selected {
+            g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, 3.0, 1.0, theme::accent());
+        }
+        let tx = rect.0 + (rect.2 - g.measure_chrome_text(label, 11.5, false)) / 2.0;
+        text(g, tx, rect.1 + 4.0, label, 11.5, if *selected { theme::accent() } else if hover { theme::text() } else { theme::text_dim() }, false);
+        hit(g, hits, target.clone(), rect, false);
+        g.hover_pointer |= hover;
+    }
 }
 
 fn icon_button(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, rect: Rect, icon: &str, target: Target) {
@@ -2105,20 +2140,6 @@ fn fit(g: &mut gpu::GpuRenderer, value: &str, width: f32, size: f32, bold: bool)
 
 fn status_dot(g: &mut gpu::GpuRenderer, x: f32, y: f32, row: &PaneActivity) {
     circle_rect(g, x, y, 8.0, status_color(row));
-}
-
-fn status_dot_raw(g: &mut gpu::GpuRenderer, x: f32, y: f32, status: &str) {
-    let color = if status == "blocked" {
-        theme::danger()
-    } else if matches!(
-        status,
-        "working" | "building" | "waiting" | "thinking" | "compacting"
-    ) {
-        theme::accent()
-    } else {
-        theme::success()
-    };
-    circle_rect(g, x, y, 8.0, color);
 }
 
 fn status_color(row: &PaneActivity) -> [u8; 4] {
@@ -2211,9 +2232,10 @@ fn status_marker_color(marker: char) -> [u8; 4] {
 }
 
 fn checkbox(g: &mut gpu::GpuRenderer, x: f32, y: f32, checked: bool) {
+    // 목업(플랫): 채움 없이 테두리. 켜짐은 강조색 테두리+강조색 체크.
     let color = if checked { theme::accent() } else { theme::border() };
-    round_rect(g, x, y, 16.0, 16.0, theme::radius_sm(), color);
-    if checked { g.queue_icon("square-check", x + 1.0, y + 1.0, 14.0, [255, 255, 255, 255]); }
+    g.round_rect_stroke(x, y, 16.0, 16.0, 3.0, 1.0, color);
+    if checked { g.queue_icon("check", x + 2.0, y + 2.0, 12.0, theme::accent()); }
 }
 
 fn char_to_byte(value: &str, at: usize) -> usize {

@@ -6695,6 +6695,21 @@ impl App {
         }
         self.autoboard_at = None;
         self.toggle_board_room();
+        // KASATERM_AUTOBOARD_TAB=overview|agents|schedule|git|machines — 캡처용 탭 선택.
+        if let Ok(tab) = std::env::var("KASATERM_AUTOBOARD_TAB") {
+            use crate::native_board::BoardTab;
+            let tab = match tab.as_str() {
+                "agents" => Some(BoardTab::Agents),
+                "schedule" => Some(BoardTab::Schedule),
+                "git" => Some(BoardTab::Git),
+                "machines" => Some(BoardTab::Machines),
+                "overview" => Some(BoardTab::Overview),
+                _ => None,
+            };
+            if let Some(tab) = tab {
+                self.board_scene.set_tab(tab);
+            }
+        }
         eprintln!("[autoboard] toggled → open={}", self.board_room_active());
     }
     pub(crate) fn run_pending_autoarona(
