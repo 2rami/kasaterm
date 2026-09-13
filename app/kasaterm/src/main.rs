@@ -1690,8 +1690,9 @@ struct SidebarRowDrag {
     start: (f32, f32),
     /// 문턱을 넘었나.
     active: bool,
-    /// 떨어질 자리 — `(기준 pane, 그 위인가)`. 아무 줄 위도 아니면 None.
-    target: Option<(String, bool)>,
+    /// 떨어질 자리 — `(기준 pane, 어느 모서리에)`. 목록 줄은 Up/Down 만, 배치도
+    /// 칸은 네 모서리가 다 나온다(Center 는 안 쓴다). 아무 줄 위도 아니면 None.
+    target: Option<(String, DropZone)>,
 }
 
 struct WinTabDrag {
@@ -5099,6 +5100,9 @@ struct App {
     /// 펼친 방 아래 pane 한 줄씩의 히트 영역 — (방, pane id, rect). 탭 rect 안에
     /// 들어 있으므로 클릭 판정은 **탭보다 먼저** 해야 한다.
     sidebar_row_rects: Vec<(usize, String, (f32, f32, f32, f32))>,
+    /// 배치도 칸만 따로 — `sidebar_row_rects` 에도 섞여 있지만(클릭·우클릭은 한
+    /// 벡터로 판정한다) 드래그 착지는 칸과 줄의 규칙이 달라 갈라 봐야 한다.
+    sidebar_mini_rects: Vec<(usize, String, (f32, f32, f32, f32))>,
     /// 사이드바 pane 행 우클릭 메뉴 — `(x, y, 방, pane id)`.
     ///
     /// 방을 함께 쥐는 이유: 숨기기는 **그 방을 활성으로 만든 뒤** 돌아야 한다. 사이드바는
@@ -5923,6 +5927,7 @@ impl App {
             window_tab_rects: Vec::new(),
             close_freeze: CloseFreeze::default(),
             sidebar_row_rects: Vec::new(),
+            sidebar_mini_rects: Vec::new(),
             sidebar_menu: None,
             sidebar_menu_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),

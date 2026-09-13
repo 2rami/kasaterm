@@ -269,11 +269,11 @@ impl App {
         let before_leaves = all(self);
         self.window_strip_click(sr.0 + sr.2 / 2.0, sr.1 + sr.3 / 2.0);
         let armed = self.sidebar_row_drag.is_some();
+        let zone = if before { crate::DropZone::Up } else { crate::DropZone::Down };
         if let Some(d) = self.sidebar_row_drag.as_mut() {
             d.active = true;
-            d.target = Some((did.clone(), before));
+            d.target = Some((did.clone(), zone));
         }
-        let zone = if before { crate::DropZone::Up } else { crate::DropZone::Down };
         let (sid, did) = (sid.clone(), did.clone());
         self.move_pane(&sid, &did, zone);
         self.sidebar_row_drag = None;

@@ -2000,6 +2000,14 @@ impl App {
         } else {
             Vec::new()
         };
+        self.sidebar_mini_rects = if sidebar_shown {
+            sb_mini
+                .iter()
+                .filter_map(|(i, id, r)| clip_y(*r).map(|c| (*i, id.clone(), c)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         // 별도창 띠 칸은 따로 — 클릭은 그 OS 창을 앞으로, 우클릭은 되돌리기뿐.
         self.aux.undock_hits = if sidebar_shown {
             sb_undock
@@ -2127,14 +2135,14 @@ impl App {
         let sb_expand_t: Vec<f32> = (0..sb_labels.len())
             .map(|i| self.expand_progress(i))
             .collect();
-        let sb_row_drop: Option<(String, bool, String)> = self
+        let sb_row_drop: Option<(String, crate::DropZone, String)> = self
             .sidebar_row_drag
             .as_ref()
             .filter(|d| d.active)
             .and_then(|d| {
                 d.target
                     .as_ref()
-                    .map(|(t, b)| (t.clone(), *b, d.pane.clone()))
+                    .map(|(t, z)| (t.clone(), *z, d.pane.clone()))
             });
         // 펼치기 버튼의 사각은 클릭 판정과 같은 것을 쓴다 — 페인트 루프는 `&self`
         // 를 다시 못 빌리므로(GPU 를 이미 빌렸다) 방 인덱스로 늘어놓고 들어간다.
@@ -4132,6 +4140,25 @@ impl App {
                             dx += w + gap;
                         }
                     }
+                    // 끌고 있는 칸이 떨어질 자리 — 대상 칸의 그 모서리에 accent 띠.
+                    // 목록 줄의 위/아래 선과 같은 말을 네 방향으로 한다.
+                    if let Some((tid, zone, src)) = sb_row_drop.as_ref() {
+                        if id == src {
+                            g.rect(mx, my, mw, mh, theme::with_alpha(theme::bg(), 0x88));
+                        }
+                        if id == tid {
+                            let bar = 3.0_f32.min(mw / 3.0).min(mh / 3.0).max(1.0);
+                            let (x, y, w, h) = match zone {
+                                crate::DropZone::Left => (mx, my, bar, mh),
+                                crate::DropZone::Right => (mx + mw - bar, my, bar, mh),
+                                crate::DropZone::Up => (mx, my, mw, bar),
+                                crate::DropZone::Down | crate::DropZone::Center => {
+                                    (mx, my + mh - bar, mw, bar)
+                                }
+                            };
+                            g.rect(x, y, w, h, theme::accent());
+                        }
+                    }
                 }
                 // 「별도창」 띠 — 별도 OS 창으로 뗀 pane 이 떠나온 방 아래에 점선 칸으로
                 // 앉는다. 얼굴·진행 바는 배치도 칸과 같은 말을 하고, 점선과 모서리의
@@ -4428,13 +4455,17 @@ impl App {
                 }
                 // 끌고 있는 줄이 떨어질 자리 — 대상 줄의 위/아래 모서리에 긋는다.
                 // 끌리는 줄 자신은 옅게 낮춰 "지금 손에 들려 있다"를 남긴다.
-                if let Some((tid, before, src)) = sb_row_drop.as_ref() {
+                if let Some((tid, zone, src)) = sb_row_drop.as_ref() {
                     for (_, id, r) in sb_rows.iter() {
                         if id == src {
                             g.rect(r.0, r.1, r.2, r.3, theme::with_alpha(theme::bg(), 0x88));
                         }
                         if id == tid {
-                            let ly = if *before { r.1 } else { r.1 + r.3 - 2.0 };
+                            let ly = if *zone == crate::DropZone::Up {
+                                r.1
+                            } else {
+                                r.1 + r.3 - 2.0
+                            };
                             g.rect(r.0 + 4.0, ly, r.2 - 8.0, 2.0, theme::accent());
                         }
                     }

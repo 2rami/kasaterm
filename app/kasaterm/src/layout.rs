@@ -212,6 +212,12 @@ pub(crate) fn drop_zone_for_offsets(nx: f32, ny: f32) -> DropZone {
     if nx.abs() < DROP_CENTER_R && ny.abs() < DROP_CENTER_R {
         return DropZone::Center;
     }
+    drop_edge_for_offsets(nx, ny)
+}
+
+/// 가운데 없이 가장 가까운 모서리만 — 사이드바 배치도 칸처럼 작아서 Center 가
+/// 사고(탭으로 합쳐짐)가 되기 쉬운 과녁용.
+pub(crate) fn drop_edge_for_offsets(nx: f32, ny: f32) -> DropZone {
     if nx.abs() > ny.abs() {
         if nx < 0.0 {
             DropZone::Left

@@ -3562,17 +3562,37 @@ impl ApplicationHandler<UserEvent> for App {
                     let start = self.sidebar_row_drag.as_ref().unwrap().start;
                     let (dx, dy) = (px - start.0, py - start.1);
                     let src = self.sidebar_row_drag.as_ref().unwrap().pane.clone();
+                    let inside = |r: &(f32, f32, f32, f32)| {
+                        px >= r.0 && px <= r.0 + r.2 && py >= r.1 && py <= r.1 + r.3
+                    };
+                    // 배치도 칸이 먼저다 — 칸은 화면 자리 그대로라 왼/오른/위/아래 네
+                    // 모서리로 받는다(2026-09-14 지시 「미니맵 내에서도 정렬」). 전엔
+                    // 칸도 줄과 같이 위/아래 절반뿐이라 옆에 세우려면 본 화면으로
+                    // 가야 했다. 가운데(Center)는 일부러 안 쓴다 — 칸이 작아 탭으로
+                    // 합쳐지는 사고가 되기 쉽고, 탭에 든 학생은 배치도에서 안 보인다.
                     let target = self
-                        .sidebar_row_rects
+                        .sidebar_mini_rects
                         .iter()
-                        .find(|(_, id, r)| {
-                            *id != src
-                                && px >= r.0
-                                && px <= r.0 + r.2
-                                && py >= r.1
-                                && py <= r.1 + r.3
+                        .find(|(_, id, r)| *id != src && inside(r))
+                        .map(|(_, id, r)| {
+                            let nx = (px - (r.0 + r.2 / 2.0)) / (r.2 / 2.0).max(1.0);
+                            let ny = (py - (r.1 + r.3 / 2.0)) / (r.3 / 2.0).max(1.0);
+                            (id.clone(), crate::layout::drop_edge_for_offsets(nx, ny))
                         })
-                        .map(|(_, id, r)| (id.clone(), py < r.1 + r.3 / 2.0))
+                        // 목록 줄은 위/아래 절반.
+                        .or_else(|| {
+                            self.sidebar_row_rects
+                                .iter()
+                                .find(|(_, id, r)| *id != src && inside(r))
+                                .map(|(_, id, r)| {
+                                    let zone = if py < r.1 + r.3 / 2.0 {
+                                        crate::DropZone::Up
+                                    } else {
+                                        crate::DropZone::Down
+                                    };
+                                    (id.clone(), zone)
+                                })
+                        })
                         // 줄이 아니라 **방 카드**에 떨어뜨려도 받는다. pane 이 하나뿐인
                         // 방은 목록을 펴지 않으므로 줄만 받으면 그런 방으로는 영영 못
                         // 옮긴다 — 정작 옮길 이유가 가장 큰 쪽이 막히는 셈이다.
@@ -3580,12 +3600,10 @@ impl ApplicationHandler<UserEvent> for App {
                             let wi = self
                                 .window_tab_rects
                                 .iter()
-                                .find(|(_, r)| {
-                                    px >= r.0 && px <= r.0 + r.2 && py >= r.1 && py <= r.1 + r.3
-                                })
+                                .find(|(_, r)| inside(r))
                                 .map(|(i, _)| *i)?;
                             let last = self.window_leaves(wi).into_iter().last()?;
-                            (last != src).then_some((last, false))
+                            (last != src).then_some((last, crate::DropZone::Down))
                         });
                     if let Some(d) = self.sidebar_row_drag.as_mut() {
                         if !d.active && dx * dx + dy * dy > 9.0 {
@@ -6444,12 +6462,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // 있을 때만 옮긴다 — 포커스는 press 가 이미 했다.
                         if let Some(d) = self.sidebar_row_drag.take() {
                             window.set_cursor(CursorIcon::Default);
-                            if let (true, Some((target, before))) = (d.active, d.target) {
-                                let zone = if before {
-                                    crate::DropZone::Up
-                                } else {
-                                    crate::DropZone::Down
-                                };
+                            if let (true, Some((target, zone))) = (d.active, d.target) {
                                 self.move_pane(&d.pane, &target, zone);
                                 self.chrome_dirty = true;
                             }
