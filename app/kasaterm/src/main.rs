@@ -6241,7 +6241,7 @@ impl App {
 /// 반환은 (설치본 번들, 새로 구운 번들). `None` 이면 움직일 이유가 없다.
 fn install_pending_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     let installed =
-        std::path::PathBuf::from(std::env::var("HOME").ok()?).join("Applications/kasaterm.app");
+        std::path::PathBuf::from(kasa_socket::home_var().ok()?).join("Applications/kasaterm.app");
     let running = installed.join("Contents/MacOS/kasaterm");
     // 그 설치본으로 도는 앱에서만 뜻이 있다 — `cargo run` 개발 실행에서는 새로 구운
     // 쪽이 늘 더 새것이라 표시가 영구히 켜져 있게 된다.

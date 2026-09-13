@@ -73,7 +73,7 @@ fn scan_open_with_apps() -> Vec<(String, String)> {
         "PyCharm",
         "Xcode",
     ];
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = kasa_socket::home_var().unwrap_or_default();
     let roots = [
         "/Applications".to_string(),
         format!("{home}/Applications"),

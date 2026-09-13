@@ -14,7 +14,7 @@ use std::path::PathBuf;
 pub const MAX_PORTRAIT_FILE_BYTES: u64 = 32 << 20;
 
 fn home() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
+    kasa_socket::home_var().ok().map(PathBuf::from)
 }
 
 /// 이름(「아로나」) → slug(`arona`). 그림 파일이 slug 로 놓여 있어서 필요하다.

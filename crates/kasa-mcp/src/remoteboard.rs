@@ -57,7 +57,7 @@ pub fn remotes() -> Vec<Remote> {
             return v;
         }
     }
-    let Ok(home) = std::env::var("HOME") else { return Vec::new() };
+    let Ok(home) = kasa_socket::home_var() else { return Vec::new() };
     let path = std::path::Path::new(&home).join(".config/kasaterm/remote-boards.json");
     if let Ok(text) = std::fs::read_to_string(&path) {
         let v = parse_json(&text);

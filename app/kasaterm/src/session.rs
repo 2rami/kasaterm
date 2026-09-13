@@ -1276,7 +1276,7 @@ impl App {
         cmd.arg("--port")
             .arg(LOCAL_PTYD_PORT.to_string())
             .arg("--cwd")
-            .arg(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
+            .arg(kasa_socket::home_var().unwrap_or_else(|_| "/".into()))
             .stdin(std::process::Stdio::null())
             .stdout(
                 logf()

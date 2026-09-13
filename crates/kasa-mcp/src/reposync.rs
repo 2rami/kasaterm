@@ -42,7 +42,7 @@ pub fn tool_path() -> &'static str {
     P.get_or_init(|| {
         let mut path = std::env::var("PATH").unwrap_or_default();
         if cfg!(unix) {
-            let home = std::env::var("HOME").unwrap_or_default();
+            let home = kasa_socket::home_var().unwrap_or_default();
             for d in
                 ["/opt/homebrew/bin".to_string(), "/usr/local/bin".to_string(), format!("{home}/.local/bin")]
             {

@@ -5869,7 +5869,7 @@ fn fallback_font_paths() -> Vec<(String, u32)> {
     let mut out: Vec<(String, u32)> = Vec::new();
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = kasa_socket::home_var().unwrap_or_default();
         let push_if = |out: &mut Vec<(String, u32)>, p: String, i: u32| {
             if std::path::Path::new(&p).exists() {
                 out.push((p, i));
@@ -5970,7 +5970,7 @@ fn viewer_bundled_noto_path() -> Option<String> {
 fn md_font_path() -> (String, u32) {
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = kasa_socket::home_var().unwrap_or_default();
         let candidates = [
             format!("{home}/Library/Fonts/NotoSansKR-Regular.otf"),
             format!("{home}/Library/Fonts/NotoSansKR-Regular.ttf"),
@@ -6016,7 +6016,7 @@ fn md_font_path() -> (String, u32) {
 fn md_bold_font_path() -> (String, u32) {
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = kasa_socket::home_var().unwrap_or_default();
         let candidates = [
             format!("{home}/Library/Fonts/NotoSansKR-Bold.otf"),
             format!("{home}/Library/Fonts/NotoSansKR-Bold.ttf"),
@@ -6071,7 +6071,7 @@ fn primary_italic_font_path() -> Option<(String, u32)> {
     }
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = kasa_socket::home_var().unwrap_or_default();
         let p = format!("{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Italic.ttf");
         if std::path::Path::new(&p).exists() {
             return Some((p, 0));
@@ -6105,7 +6105,7 @@ fn primary_bold_font_path(primary: &str) -> Option<(String, u32)> {
     }
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = kasa_socket::home_var().unwrap_or_default();
         let jb = format!("{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Bold.ttf");
         if std::path::Path::new(&jb).exists() {
             return Some((jb, 0));
@@ -6157,7 +6157,7 @@ fn default_font_path() -> String {
         // 한 번 폰트에 맡겨 봤지만(2026-08-15 오전) 글리프가 advance 폭까지만
         // 그려서 칸이 그보다 넓으면 이웃과 틈이 남아 표 가로줄이 점선이 됐다 —
         // 폰트 선택은 이제 표·테두리 이음새에 영향이 없다.
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = kasa_socket::home_var().unwrap_or_default();
         let jb = format!("{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Regular.ttf");
         if std::path::Path::new(&jb).exists() {
             return jb;

@@ -259,7 +259,7 @@ fn parse_porcelain_v2(text: &str) -> Value {
 /// `~` so the panel shows `~` or `~/Desktop` instead of a long absolute path.
 fn display_path(p: &Path) -> String {
     let full = p.display().to_string();
-    if let Ok(home) = std::env::var("HOME") {
+    if let Ok(home) = kasa_socket::home_var() {
         if full == home {
             return "~".to_string();
         }

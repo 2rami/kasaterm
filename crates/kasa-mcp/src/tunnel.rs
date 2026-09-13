@@ -67,7 +67,7 @@ pub fn host() -> Option<String> {
     if gateway_mode() {
         return crate::mobile::gateway_host();
     }
-    let home = std::env::var("HOME").ok()?;
+    let home = kasa_socket::home_var().ok()?;
     let s = std::fs::read_to_string(
         std::path::PathBuf::from(home).join(".cloudflared/config.yml"),
     )

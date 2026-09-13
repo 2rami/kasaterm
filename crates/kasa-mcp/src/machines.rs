@@ -182,7 +182,7 @@ pub fn announce_guest(label: &str, port: u16, host: &str, home: &str, build: &st
 fn guest_machines(taken: &[String]) -> Vec<Machine> {
     let Ok(mut g) = guests().lock() else { return Vec::new() };
     g.retain(|_, v| v.at.elapsed() < GUEST_STALE);
-    let my_home = std::env::var("HOME").unwrap_or_default();
+    let my_home = kasa_socket::home_var().unwrap_or_default();
     g.iter()
         .filter(|(label, _)| !taken.contains(label))
         .map(|(label, v)| Machine {
@@ -393,7 +393,7 @@ fn parse(v: &Value) -> Vec<Machine> {
             // 한 번 물어 두며, 아직 못 물었으면 규칙 없이 간다(이사가 그때 「roots 에
             // 규칙을」로 서고, 몇 초 뒤 다시 누르면 된다).
             if roots.is_empty() && ssh.is_some() && !meta.home.is_empty() {
-                if let Ok(home) = std::env::var("HOME") {
+                if let Ok(home) = kasa_socket::home_var() {
                     roots.push((home, meta.home.clone()));
                 }
             }
@@ -452,7 +452,7 @@ pub fn machines_path() -> Option<std::path::PathBuf> {
     if std::env::var("KASATERM_MACHINES").is_ok() {
         return None;
     }
-    let home = std::env::var("HOME").ok()?;
+    let home = kasa_socket::home_var().ok()?;
     Some(std::path::Path::new(&home).join(".config/kasaterm/machines.json"))
 }
 
@@ -541,7 +541,7 @@ fn key_args(key: Option<&str>) -> Vec<String> {
 
 /// `~/.ssh` 의 개인 열쇠 후보 — `.pub` 짝이 있는 파일만(config·known_hosts 는 빠진다).
 fn candidate_keys() -> Vec<String> {
-    let Ok(home) = std::env::var("HOME") else { return Vec::new() };
+    let Ok(home) = kasa_socket::home_var() else { return Vec::new() };
     let dir = std::path::Path::new(&home).join(".ssh");
     let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
     let mut keys: Vec<String> = rd
@@ -1120,7 +1120,7 @@ async fn announce_to(client: &reqwest::Client, base: &str) {
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default(),
-        "home": std::env::var("HOME").unwrap_or_default(),
+        "home": kasa_socket::home_var().unwrap_or_default(),
         "build": build_id(),
     });
     let _ = client

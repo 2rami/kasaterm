@@ -71,7 +71,7 @@ pub async fn sweep_loop() {
 
 /// `~/.claude/projects/*/<uuid>.jsonl` 전수 스윕. 반환 = 변경 파일 수.
 pub fn sweep_all_projects() -> usize {
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = kasa_socket::home_var().unwrap_or_default();
     if home.is_empty() {
         return 0;
     }

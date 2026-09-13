@@ -36,6 +36,16 @@ pub use server::Server;
 
 /// 홈 디렉토리 — HOME(unix·Git bash) → USERPROFILE(Windows GUI 프로세스는 HOME
 /// 미설정) 순. 둘 다 없으면 None — 호출부가 빈 PathBuf 로 폴백하면 종전 동작과 동일.
+/// `std::env::var("HOME")` 의 자리 — Windows 는 HOME 이 없고 USERPROFILE 만 있다.
+/// 명부(machines.json)·터널·페르소나가 이걸 안 거치고 HOME 만 보다가 Windows 에서
+/// 「명부를 저장하지 못했어요」로 기계 추가가 막혔다(2026-09-13).
+pub fn home_var() -> Result<String, std::env::VarError> {
+    match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => Ok(h),
+        _ => std::env::var("USERPROFILE"),
+    }
+}
+
 pub fn home_dir() -> Option<std::path::PathBuf> {
     std::env::var("HOME")
         .ok()

@@ -190,7 +190,7 @@ fn cfg_dir() -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(d));
         }
     }
-    let home = std::env::var("HOME").ok()?;
+    let home = kasa_socket::home_var().ok()?;
     Some(std::path::PathBuf::from(home).join(".config/kasaterm"))
 }
 

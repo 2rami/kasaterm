@@ -164,7 +164,7 @@ fn now_ms() -> u64 {
 /// 팀 config 기본 루트(`~/.claude/teams`). 조작 함수는 전부 root 를 인자로 받고
 /// (테스트 = tempdir), 앱 호출부가 이 어댑터를 한 번 얹는다.
 pub fn teams_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = kasa_socket::home_var().unwrap_or_default();
     Path::new(&home).join(".claude").join("teams")
 }
 
