@@ -9169,18 +9169,35 @@ impl App {
                 // 뒤에야 확정되는데 배경은 글자보다 먼저 깔려야 해서(나중에 그린
                 // 것이 위로 온다) 이번 프레임 폭을 기다릴 수가 없다. 한 프레임 늦지만
                 // 호버는 이어지는 동작이라 눈에 안 띈다.
-                if let Some(r) = self.status_account_rect {
+                //
+                // 눌리는 칩 전부가 같은 판을 받는다 — 설정 목록·사이드바와 같은
+                // 옅은 판 하나가 「여기가 눌린다」의 유일한 표시다(플랫 정리 2026-09-14).
+                {
                     let (hx, hy) = self.cursor_px;
-                    if hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3 {
-                        round_rect(
-                            g,
-                            r.0,
-                            r.1 + 2.0,
-                            r.2,
-                            (r.3 - 4.0).max(1.0),
-                            theme::radius_sm(),
-                            theme::surface_hover(),
-                        );
+                    for r in [
+                        self.status_account_rect,
+                        self.status_version_rect,
+                        self.statusbar.tunnel_rect,
+                        self.statusbar.chrome_rect,
+                        self.statusbar.res_rect,
+                        self.statusbar.clip_rect,
+                        self.statusbar.schedule_rect,
+                        self.statusbar.pet_rect,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        if hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3 {
+                            round_rect(
+                                g,
+                                r.0,
+                                r.1 + 3.0,
+                                r.2,
+                                (r.3 - 6.0).max(1.0),
+                                theme::radius_sm(),
+                                theme::surface_hover(),
+                            );
+                        }
                     }
                 }
                 let seg_x0 = x;
@@ -9664,7 +9681,7 @@ impl App {
                             sy + 6.0,
                             1.0,
                             (status_h - 12.0).max(6.0),
-                            theme::with_alpha(theme::border(), 150),
+                            theme::with_alpha(theme::border(), 140),
                         );
                     }
                 }
@@ -10036,7 +10053,7 @@ impl App {
                             sy + 6.0,
                             1.0,
                             (status_h - 12.0).max(6.0),
-                            theme::with_alpha(theme::border(), 150),
+                            theme::with_alpha(theme::border(), 140),
                         );
                         rx -= 13.0;
                     } else if has_device && has_work {
@@ -13875,19 +13892,20 @@ pub(crate) fn usage_pct_color(pct: f32) -> [u8; 4] {
     } else if pct >= 60.0 {
         theme::syn_number()
     } else {
-        theme::text()
+        theme::text_dim()
     }
 }
 
-/// 막대는 여유 구간에서 더 흐리다 — 숫자와 달리 늘 보이는 것이라, 안 급할 때까지
-/// 또렷하면 목록 전체가 얼룩덜룩해져 급한 줄이 안 튄다.
+/// 여유 구간의 막대는 강조색이다 — 설정의 토글·탭 색선과 같은 파랑이라 「지금
+/// 어디까지 찼나」가 한 색으로 읽히고, 한도가 다가오면 노랑·빨강으로 갈아탄다
+/// (플랫 정리 2026-09-14, 안 B).
 pub(crate) fn usage_bar_color(pct: f32) -> [u8; 4] {
     if pct >= 80.0 {
         theme::danger()
     } else if pct >= 60.0 {
         theme::syn_number()
     } else {
-        theme::with_alpha(theme::text_dim(), 0x66)
+        theme::accent()
     }
 }
 
@@ -14252,8 +14270,8 @@ pub(crate) fn draw_window_gauges(
     wins: &[(String, f32)],
     stale: bool,
 ) -> f32 {
-    const GW: f32 = 28.0;
-    const GH: f32 = 5.0;
+    const GW: f32 = 40.0;
+    const GH: f32 = 4.0;
     let gy = y + (font - GH) / 2.0;
     let mut bx = x;
     for (label, pct) in wins {
@@ -14262,7 +14280,7 @@ pub(crate) fn draw_window_gauges(
             + 6.0
             + GW
             + 6.0
-            + g.measure_chrome_text("100%", font, true);
+            + g.measure_chrome_text("100%", font, false);
         if bx + need > right {
             break;
         }
@@ -14278,7 +14296,7 @@ pub(crate) fn draw_window_gauges(
             },
         );
         let gx = bx + g.measure_chrome_text(label, font, false) + 6.0;
-        round_rect(g, gx, gy, GW, GH, GH / 2.0, theme::with_alpha(theme::text_dim(), 0x33));
+        round_rect(g, gx, gy, GW, GH, GH / 2.0, theme::with_alpha(theme::text_dim(), 0x59));
         let w = (GW * (pct / 100.0).clamp(0.0, 1.0)).max(GH);
         round_rect(g, gx, gy, w, GH, GH / 2.0, usage_bar_color(pct));
         // stale 은 `~` 로만 말한다 — 색까지 흐리면 「급하지 않다」로 읽힌다.
@@ -14294,11 +14312,11 @@ pub(crate) fn draw_window_gauges(
             gpu::DrawOpts {
                 font_size: font,
                 color: usage_pct_color(pct),
-                bold: true,
+                bold: false,
                 italic: false,
             },
         );
-        bx = gx + GW + 6.0 + g.measure_chrome_text(&pt, font, true) + 12.0;
+        bx = gx + GW + 6.0 + g.measure_chrome_text(&pt, font, false) + 12.0;
     }
     bx
 }
