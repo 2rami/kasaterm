@@ -436,7 +436,14 @@ APPLE_SIGN=""
 SIGN_KEYCHAIN="${KASATERM_SIGN_KEYCHAIN:-$HOME/.config/kasaterm/signing/development.keychain-db}"
 IDENTITY_ARGS=(-p codesigning)
 if [[ -f "$SIGN_KEYCHAIN" ]]; then
-  python3 "$ROOT/scripts/signing-keychain.py" "$SIGN_KEYCHAIN"
+  # 비밀번호 파일이 곁에 있을 때만 푼다 — 로그인 키체인처럼 이미 열려 있는 것을
+  # 가리키면 풀 게 없다. 그리고 codesign 에 `--keychain` 을 **꼭** 넘겨야 한다:
+  # 같은 인증서가 여러 키체인에 있으면 검색 목록 첫 것(개발 키체인)의 키를 잡는데,
+  # 그게 잠겨 있으면 알 수 없는 키체인 암호를 묻는 창에서 굽기가 영원히 멈춘다
+  # (2026-09-14 실측 — 개발 키체인 비밀번호 파일이 키체인과 안 맞아 6분 멈춤).
+  if [[ -f "$(dirname "$SIGN_KEYCHAIN")/keychain-password" ]]; then
+    python3 "$ROOT/scripts/signing-keychain.py" "$SIGN_KEYCHAIN"
+  fi
   IDENTITY_ARGS+=("$SIGN_KEYCHAIN")
 fi
 if [[ -z "$SIGN_ID" ]]; then
