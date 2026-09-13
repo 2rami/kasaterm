@@ -10352,21 +10352,6 @@ impl App {
                 let claude_badge = usage_of(&self.set_claude_account)
                     .or_else(|| self.claude_usage.lock().ok().and_then(|v| v.clone()));
                 let codex_limits = crate::codexlimits::snapshot();
-                let codex_wins = codex_windows_for(&self.set_codex_account).unwrap_or_default();
-                let claude_wins: Vec<(String, f32)> = claude_badge
-                    .as_ref()
-                    .map(|badge| {
-                        if badge.windows.is_empty() {
-                            vec![(badge.label.clone(), badge.pct)]
-                        } else {
-                            badge
-                                .windows
-                                .iter()
-                                .map(|window| (window.label.clone(), window.pct))
-                                .collect()
-                        }
-                    })
-                    .unwrap_or_default();
 
                 // `62% 씀 · 5h` — 퍼센트가 먼저다. 창 이름이 앞에 오면 눈이 «어느 창인가»
                 // 를 먼저 읽는데, 정작 판단을 가르는 건 숫자다.
@@ -10377,24 +10362,6 @@ impl App {
                         format!("{:.0}% 씀", b.pct)
                     };
                     format!("{head} {}", b.label)
-                };
-                // `3시간 54분 뒤 초기화`. 90% 라도 12분 뒤면 기다리면 되고 3시간 뒤면 지금
-                // 옮겨야 한다 — 퍼센트만으로는 그 둘이 구별되지 않는다.
-                let resets_text = |b: &crate::UsageBadge| -> Option<String> {
-                    let at = b.resets_at?;
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.as_secs());
-                    let left = at.saturating_sub(now);
-                    if left == 0 {
-                        return Some("곧 초기화".to_string());
-                    }
-                    let (h, m) = (left / 3600, (left % 3600) / 60);
-                    Some(match (h, m) {
-                        (0, m) => format!("{m}분 뒤 초기화"),
-                        (h, 0) => format!("{h}시간 뒤 초기화"),
-                        (h, m) => format!("{h}시간 {m}분 뒤 초기화"),
-                    })
                 };
                 // 임계는 60/80. 그 아래는 초록이 아니라 **중립**이다 — 초록은 "좋다"는
                 // 신호라 늘 켜져 있으면 아무 말도 안 하는 색이 된다.
@@ -10434,30 +10401,107 @@ impl App {
                 provs.sort_by(|a, b| b.1.total_cmp(&a.1));
 
                 // ── 치수 ────────────────────────────────────────────────────
+                // 플랫 정리(2026-09-14 승인 목업): 계정마다 블록 하나, 그 안에 창(5h·7d)
+                // 마다 한 줄 — `[창][막대][퍼센트][풀리는 때]` 가 같은 자리에 선다.
+                // 모델별 창은 들여 쓴 작은 줄. 토글은 채운 알약이 아니라 테두리다.
                 let mw = 340.0_f32;
                 let head_h = 26.0_f32;
                 let seg_h = 28.0_f32;
                 let row_h = 28.0_f32;
-                // 한 줄에 게이지 둘까지. Claude의 세 번째 모델 창(Fable 등)은 다음
-                // 줄로 내려야 300px 안에서 잘리지 않는다.
-                let graph_lines = |p: AccountProvider| -> usize {
-                    let wins = match p {
-                        AccountProvider::Claude => &claude_wins,
-                        AccountProvider::Codex => &codex_wins,
-                    };
-                    let missing_standard = p == AccountProvider::Codex
-                        && codex_current_limits.is_some()
-                        && ["5h", "7d"]
+                let ph_h = 22.0_f32;
+                let win_h_row = 22.0_f32;
+                let blk_top = 6.0_f32;
+                let blk_bot = 4.0_f32;
+                struct WinRow {
+                    lab: String,
+                    pct: f32,
+                    rs: String,
+                    sub: bool,
+                }
+                let reset_word = |t: Option<String>| -> String {
+                    t.map(|t| if t == "곧" { "곧 풀림".to_string() } else { format!("{t} 뒤 풀림") })
+                        .unwrap_or_default()
+                };
+                // 창 줄 목록. 값이 없으면 빈 목록이고, 그 자리엔 한 줄짜리 안내가 선다.
+                let rows_of = |p: AccountProvider| -> Vec<WinRow> {
+                    match p {
+                        AccountProvider::Claude => match claude_badge.as_ref() {
+                            Some(b) if b.windows.is_empty() => vec![WinRow {
+                                lab: b.label.clone(),
+                                pct: b.pct,
+                                rs: reset_word(crate::resets_in_label(b.resets_at)),
+                                sub: false,
+                            }],
+                            Some(b) => b
+                                .windows
+                                .iter()
+                                .map(|w| {
+                                    // `7d <모델>` — 모델 스코프 창은 들여 쓴 줄로, 모델명은
+                                    // 풀리는 때 자리에 적는다(그 창의 시각은 따로 없다).
+                                    match w.label.split_once(' ') {
+                                        Some((lab, model)) => WinRow {
+                                            lab: lab.to_string(),
+                                            pct: w.pct,
+                                            rs: model.to_string(),
+                                            sub: true,
+                                        },
+                                        None => WinRow {
+                                            lab: w.label.clone(),
+                                            pct: w.pct,
+                                            rs: reset_word(crate::resets_in_label(w.resets_at)),
+                                            sub: false,
+                                        },
+                                    }
+                                })
+                                .collect(),
+                            None => Vec::new(),
+                        },
+                        AccountProvider::Codex => match codex_current_limits {
+                            Some(limits) => limits
+                                .windows
+                                .iter()
+                                .map(|(minutes, pct, at)| WinRow {
+                                    lab: codex_rate_window_label(Some(*minutes)),
+                                    pct: *pct,
+                                    rs: reset_word(
+                                        at.filter(|at| *at > 0)
+                                            .and_then(|at| crate::resets_in_label(Some(at as u64))),
+                                    ),
+                                    sub: false,
+                                })
+                                .chain(limits.named_windows.iter().map(|w| WinRow {
+                                    lab: codex_rate_window_label(Some(w.minutes)),
+                                    pct: w.pct,
+                                    rs: w.name.clone(),
+                                    sub: true,
+                                }))
+                                .collect(),
+                            None => Vec::new(),
+                        },
+                    }
+                };
+                // 코덱스가 5h·7d 를 안 준 경우의 안내 줄. 빈칸은 「여유」로 읽히므로 적는다.
+                let codex_missing = || -> Option<String> {
+                    let limits = codex_current_limits?;
+                    let has = |wanted: &str| {
+                        limits
+                            .windows
                             .iter()
-                            .any(|wanted| !wins.iter().any(|(label, _)| label == wanted));
-                    wins.len().div_ceil(2) + usize::from(missing_standard)
+                            .any(|(m, _, _)| codex_rate_window_label(Some(*m)) == wanted)
+                    };
+                    let missing: Vec<&str> =
+                        ["5h", "7d"].into_iter().filter(|w| !has(w)).collect();
+                    (!missing.is_empty()).then(|| format!("{} 미제공", missing.join("·")))
                 };
                 let provider_h = |p: AccountProvider| -> f32 {
                     if compact {
-                        30.0
-                    } else {
-                        30.0 + 16.0 * graph_lines(p).max(1) as f32
+                        return blk_top + ph_h + blk_bot;
                     }
+                    let mut lines = rows_of(p).len();
+                    if p == AccountProvider::Codex && codex_missing().is_some() {
+                        lines += 1;
+                    }
+                    blk_top + ph_h + win_h_row * lines.max(1) as f32 + blk_bot
                 };
                 let rule = 5.0_f32;
                 // 판 줄. 액션 행보다 낮다 — 누르는 자리가 아니라 읽는 자리다.
@@ -10512,10 +10556,10 @@ impl App {
                     // 「이 앱에서 도는 학생 전부의 합」이라는 뜻 — 계정 하나를 여러
                     // pane 이 나눠 쓰므로, 이 숫자가 내 pane 것이 아님을 밝혀야 한다.
                     let sub = "캐릭터 전체";
-                    let sf = f - 2.0;
-                    let sw = g.measure_chrome_text(sub, sf, false);
+                    let sf = f - 2.5;
+                    let hw = g.measure_chrome_text("사용량", f, true);
                     g.draw_text(
-                        mx + mw - pad_x - icon - 8.0 - sw,
+                        mx + pad_x + hw + 8.0,
                         ry + (head_h - sf) / 2.0 - 1.0,
                         sub,
                         gpu::DrawOpts {
@@ -10530,303 +10574,246 @@ impl App {
                         mx + mw - pad_x - icon,
                         ry + (head_h - icon) / 2.0,
                         icon,
-                        theme::text_dim(),
+                        theme::text_mute(),
                     );
                 }
                 ry += head_h;
 
                 // ── 밀도 선택 ───────────────────────────────────────────────
+                // 테두리 한 줄에 칸 둘. 켜진 칸만 바탕이 살짝 올라오고 글자가 진해진다 —
+                // 채운 알약은 버튼처럼 읽혀 「눌러서 뭔가 한다」로 오해됐다.
                 {
-                    let cw = (mw - pad_x * 2.0) / 2.0;
-                    for (i, (label, want)) in [("자세히", false), ("간단히", true)]
-                        .into_iter()
-                        .enumerate()
-                    {
-                        let cx = mx + pad_x + cw * i as f32;
-                        let r = (cx, ry + 2.0, cw, seg_h - 6.0);
+                    let lf = f - 2.0;
+                    let sh = seg_h - 6.0;
+                    let sy = ry + 2.0;
+                    let segs = [("자세히", false), ("간단히", true)];
+                    let widths: Vec<f32> = segs
+                        .iter()
+                        .map(|(label, _)| g.measure_chrome_text(label, lf, false) + 20.0)
+                        .collect();
+                    let total: f32 = widths.iter().sum();
+                    let sx = mx + pad_x;
+                    let mut cx = sx;
+                    for (i, (label, want)) in segs.into_iter().enumerate() {
+                        let r = (cx, sy, widths[i], sh);
                         let on = compact == want;
                         let hover =
                             hmx >= r.0 && hmx <= r.0 + r.2 && hmy >= r.1 && hmy <= r.1 + r.3;
                         g.hover_pointer |= hover;
-                        if on || hover {
-                            round_rect(
-                                g,
-                                r.0,
-                                r.1,
-                                r.2,
-                                r.3,
-                                theme::radius_sm(),
-                                if on {
-                                    theme::surface_active()
-                                } else {
-                                    theme::with_alpha(theme::surface_active(), 0x66)
-                                },
-                            );
+                        if on {
+                            round_rect(g, r.0, r.1, r.2, r.3, 0.0, theme::surface_active());
                         }
-                        let lf = f - 2.0;
-                        let lw = g.measure_chrome_text(label, lf, on);
+                        if i > 0 {
+                            g.rect(cx, sy, 1.0, sh, theme::border());
+                        }
+                        let lw = g.measure_chrome_text(label, lf, false);
                         g.draw_text(
                             r.0 + (r.2 - lw) / 2.0,
                             r.1 + (r.3 - lf) / 2.0 - 1.0,
                             label,
                             gpu::DrawOpts {
                                 font_size: lf,
-                                color: if on {
+                                color: if on || hover {
                                     theme::text()
                                 } else {
-                                    theme::text_mute()
+                                    theme::text_dim()
                                 },
-                                bold: on,
+                                bold: false,
                                 italic: false,
                             },
                         );
                         self.account_menu_hits
                             .push((AccountMenuItem::Density(want), r));
+                        cx += widths[i];
                     }
+                    g.round_rect_stroke(sx, sy, total, sh, theme::radius_sm(), 1.0, theme::border());
                 }
                 ry += seg_h;
                 g.rect(mx + pad, ry + 2.0, mw - pad * 2.0, 1.0, theme::border());
                 ry += rule;
 
-                // ── 제공자 행 ───────────────────────────────────────────────
+                // ── 제공자 블록 ─────────────────────────────────────────────
                 let mut sub_anchor: Option<(AccountProvider, f32)> = None;
+                let right = mx + mw - pad_x;
+                let ix = mx + pad_x + 21.0;
                 for (p, _) in provs.iter().copied() {
                     let prow_h = provider_h(p);
                     let open = self.account_menu_provider == Some(p);
                     let on = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + prow_h;
                     g.hover_pointer |= on;
+                    let hy = ry + blk_top;
                     if on || open {
                         round_rect(
                             g,
                             mx + pad,
-                            ry,
+                            hy - 2.0,
                             mw - pad * 2.0,
-                            prow_h,
+                            ph_h + 4.0,
                             theme::radius_sm(),
                             theme::surface_active(),
                         );
                     }
-                    let line1 = ry
-                        + if compact {
-                            (prow_h - f) / 2.0 - 1.0
-                        } else {
-                            7.0
-                        };
+                    // 머리: 아이콘·이름·계정 별명 왼쪽, 플랜(또는 간단히 모드의 숫자) 오른쪽.
+                    let pi = 14.0_f32;
                     g.queue_icon(
                         p.icon(),
                         mx + pad_x,
-                        line1 + (f - icon) / 2.0,
-                        icon,
-                        theme::text(),
+                        hy + (ph_h - pi) / 2.0,
+                        pi,
+                        theme::text_dim(),
                     );
-                    let name_x = mx + pad_x + icon + 8.0;
+                    let nf = f - 1.0;
+                    let name_x = mx + pad_x + pi + 7.0;
                     g.draw_text(
                         name_x,
-                        line1,
+                        hy + (ph_h - nf) / 2.0 - 1.0,
                         p.label(),
                         gpu::DrawOpts {
-                            font_size: f,
+                            font_size: nf,
                             color: theme::text(),
+                            bold: true,
+                            italic: false,
+                        },
+                    );
+                    let acct = match p {
+                        AccountProvider::Claude => claude_account_label(
+                            &self.set_claude_account,
+                            &self.set_claude_accounts,
+                        ),
+                        AccountProvider::Codex => codex_account_label(
+                            &self.set_codex_account,
+                            &self.set_codex_accounts,
+                        ),
+                    };
+                    let af = f - 2.5;
+                    let nw = g.measure_chrome_text(p.label(), nf, true);
+                    g.draw_text(
+                        name_x + nw + 7.0,
+                        hy + (ph_h - af) / 2.0 - 1.0,
+                        &acct,
+                        gpu::DrawOpts {
+                            font_size: af,
+                            color: theme::text_mute(),
                             bold: false,
                             italic: false,
                         },
                     );
-                    // 오른쪽 끝은 언제나 › — 이 행이 열리는 행이라는 유일한 표시다.
-                    g.queue_icon(
-                        "chevron-right",
-                        mx + mw - pad_x - icon,
-                        ry + (prow_h - icon) / 2.0,
-                        icon,
-                        theme::text_dim(),
-                    );
-                    let right = mx + mw - pad_x - icon - 6.0;
-                    match p {
-                        AccountProvider::Claude => match claude_badge.as_ref() {
-                            // 값이 있으면: 첫 줄 오른쪽에 리셋, 둘째 줄에 창별 막대.
-                            Some(b) => {
-                                if compact {
-                                    let t = usage_text(b);
-                                    let tf = f - 1.0;
-                                    let tw = g.measure_chrome_text(t.as_str(), tf, true);
-                                    g.draw_text(
-                                        right - tw,
-                                        line1,
-                                        &t,
-                                        gpu::DrawOpts {
-                                            font_size: tf,
-                                            color: pct_col(b.pct),
-                                            bold: true,
-                                            italic: false,
-                                        },
-                                    );
-                                } else {
-                                    if let Some(t) = resets_text(b) {
-                                        let tf = f - 2.0;
-                                        let tw = g.measure_chrome_text(t.as_str(), tf, false);
-                                        g.draw_text(
-                                            right - tw,
-                                            line1 + 1.0,
-                                            &t,
-                                            gpu::DrawOpts {
-                                                font_size: tf,
-                                                color: theme::text_mute(),
-                                                bold: false,
-                                                italic: false,
-                                            },
-                                        );
-                                    }
-                                    // 둘째 줄: [창 이름][막대][퍼센트] — **창마다 하나씩**.
-                                    // 하단바는 좁아서 급할 땐 한 창으로 접히므로, 펼친
-                                    // 여기서는 5시간과 주간이 **둘 다** 보여야 한다
-                                    // (2026-08-15 지시 「7일 한도는 눌렀을 때만」의 그 자리).
-                                    // 막대는 트랙을 함께 그린다 — 채움만 있으면 15% 짜리가
-                                    // 어디까지 갈 수 있는 것인지 알 수가 없어 그냥 얼룩이 된다.
-                                    let l2 = ry + 30.0;
-                                    for (line, chunk) in claude_wins.chunks(2).enumerate() {
-                                        draw_window_gauges(
-                                            g,
-                                            name_x,
-                                            l2 + line as f32 * 16.0,
-                                            right,
-                                            f - 3.0,
-                                            chunk,
-                                            b.stale,
-                                        );
-                                    }
-                                }
-                            }
-                            None => {
-                                let t = "기록 없음";
-                                let tf = f - 2.0;
-                                let tw = g.measure_chrome_text(t, tf, false);
-                                g.draw_text(
-                                    right - tw,
-                                    ry + (prow_h - tf) / 2.0 - 1.0,
-                                    t,
-                                    gpu::DrawOpts {
-                                        font_size: tf,
-                                        color: theme::text_mute(),
-                                        bold: false,
-                                        italic: false,
-                                    },
-                                );
-                            }
-                        },
-                        AccountProvider::Codex => match codex_current_limits {
-                            Some(limits) => {
-                                let pressure = limits
-                                    .windows
-                                    .iter()
-                                    .max_by(|a, b| a.1.total_cmp(&b.1));
-                                let missing: Vec<&str> = ["5h", "7d"]
-                                    .into_iter()
-                                    .filter(|wanted| {
-                                        !codex_wins.iter().any(|(label, _)| label == wanted)
-                                    })
-                                    .collect();
-                                if compact {
+                    // 오른쪽 글자: 간단히 모드면 압박 숫자, 아니면 플랜.
+                    let rows = rows_of(p);
+                    let (rt, rcol, rbold) = if compact {
+                        match p {
+                            AccountProvider::Claude => match claude_badge.as_ref() {
+                                Some(b) => (usage_text(b), pct_col(b.pct), true),
+                                None => ("기록 없음".to_string(), theme::text_mute(), false),
+                            },
+                            AccountProvider::Codex => match codex_current_limits {
+                                Some(limits) => {
+                                    let pressure = limits
+                                        .windows
+                                        .iter()
+                                        .max_by(|a, b| a.1.total_cmp(&b.1));
                                     let usage = pressure.map(|(minutes, pct, _)| {
                                         format!(
-                                            "{}{pct:.0}% 씀 · {}",
+                                            "{}{pct:.0}% 씀 {}",
                                             if limits.stale { "~" } else { "" },
                                             codex_rate_window_label(Some(*minutes))
                                         )
                                     });
-                                    let t = match (missing.is_empty(), usage) {
-                                        (true, Some(usage)) => usage,
-                                        (false, Some(usage)) => {
-                                            format!("{} 미제공 · {usage}", missing.join("·"))
-                                        }
-                                        (_, None) => "한도 미제공".to_string(),
-                                    };
-                                    let tf = f - 1.0;
-                                    let t = crate::info::fit_text(g, &t, right - name_x, tf, true);
-                                    let tw = g.measure_chrome_text(&t, tf, true);
-                                    g.draw_text(
-                                        right - tw,
-                                        line1,
-                                        &t,
-                                        gpu::DrawOpts {
-                                            font_size: tf,
-                                            color: pressure
-                                                .map_or(theme::text_mute(), |(_, pct, _)| pct_col(*pct)),
-                                            bold: true,
-                                            italic: false,
-                                        },
-                                    );
-                                } else {
-                                    let resets = pressure
-                                        .and_then(|(_, _, at)| *at)
-                                        .filter(|at| *at > 0)
-                                        .and_then(|at| crate::resets_in_label(Some(at as u64)));
-                                    if let Some(t) = resets {
-                                        let tf = f - 2.0;
-                                        let tw = g.measure_chrome_text(&t, tf, false);
-                                        g.draw_text(
-                                            right - tw,
-                                            line1 + 1.0,
-                                            &t,
-                                            gpu::DrawOpts {
-                                                font_size: tf,
-                                                color: theme::text_mute(),
-                                                bold: false,
-                                                italic: false,
-                                            },
-                                        );
-                                    }
-                                    let mut line = 0usize;
-                                    let l2 = ry + 30.0;
-                                    if !missing.is_empty() {
-                                        let t = format!("{} 미제공", missing.join("·"));
-                                        let tf = f - 2.0;
-                                        g.draw_text(
-                                            name_x,
-                                            l2,
-                                            &t,
-                                            gpu::DrawOpts {
-                                                font_size: tf,
-                                                color: theme::text_mute(),
-                                                bold: false,
-                                                italic: false,
-                                            },
-                                        );
-                                        line += 1;
-                                    }
-                                    for chunk in codex_wins.chunks(2) {
-                                        draw_window_gauges(
-                                            g,
-                                            name_x,
-                                            l2 + line as f32 * 16.0,
-                                            right,
-                                            f - 3.0,
-                                            chunk,
-                                            limits.stale,
-                                        );
-                                        line += 1;
+                                    match (codex_missing(), usage) {
+                                        (None, Some(u)) => (
+                                            u,
+                                            pressure.map_or(theme::text_mute(), |(_, pct, _)| pct_col(*pct)),
+                                            true,
+                                        ),
+                                        (Some(m), Some(u)) => (
+                                            format!("{m} · {u}"),
+                                            pressure.map_or(theme::text_mute(), |(_, pct, _)| pct_col(*pct)),
+                                            true,
+                                        ),
+                                        (_, None) => ("한도 미제공".to_string(), theme::text_mute(), false),
                                     }
                                 }
-                            }
-                            None => {
-                                let (t, col) = if codex_signed_in {
+                                None if codex_signed_in => {
+                                    ("한도 확인 중…".to_string(), theme::text_mute(), false)
+                                }
+                                None => ("로그인 안 됨".to_string(), theme::danger(), false),
+                            },
+                        }
+                    } else {
+                        let plan = match p {
+                            AccountProvider::Codex => codex_current_limits
+                                .and_then(|l| l.plan.clone())
+                                .map(|plan| {
+                                    let mut c = plan.chars();
+                                    match c.next() {
+                                        Some(h) => h.to_uppercase().collect::<String>() + c.as_str(),
+                                        None => String::new(),
+                                    }
+                                })
+                                .unwrap_or_default(),
+                            AccountProvider::Claude => String::new(),
+                        };
+                        (plan, theme::text_mute(), false)
+                    };
+                    if !rt.is_empty() {
+                        let tf = if rbold { f - 1.0 } else { f - 2.5 };
+                        let avail = right - (name_x + nw + 7.0 + g.measure_chrome_text(&acct, af, false) + 8.0);
+                        let rt = crate::info::fit_text(g, &rt, avail.max(40.0), tf, rbold);
+                        let tw = g.measure_chrome_text(&rt, tf, rbold);
+                        g.draw_text(
+                            right - tw,
+                            hy + (ph_h - tf) / 2.0 - 1.0,
+                            &rt,
+                            gpu::DrawOpts {
+                                font_size: tf,
+                                color: rcol,
+                                bold: rbold,
+                                italic: false,
+                            },
+                        );
+                    }
+                    // 창 줄. 간단히 모드는 머리 한 줄로 끝난다.
+                    if !compact {
+                        let mut wy = hy + ph_h;
+                        let stale = match p {
+                            AccountProvider::Claude => claude_badge.as_ref().is_some_and(|b| b.stale),
+                            AccountProvider::Codex => codex_current_limits.is_some_and(|l| l.stale),
+                        };
+                        if let (AccountProvider::Codex, Some(t)) = (p, codex_missing()) {
+                            draw_usage_note(g, ix, wy, win_h_row, f - 2.0, &t, theme::text_mute());
+                            wy += win_h_row;
+                        }
+                        if rows.is_empty() {
+                            let (t, col) = match p {
+                                AccountProvider::Claude => ("기록 없음", theme::text_mute()),
+                                AccountProvider::Codex if codex_current_limits.is_some() => {
+                                    ("한도 미제공", theme::text_mute())
+                                }
+                                AccountProvider::Codex if codex_signed_in => {
                                     ("한도 확인 중…", theme::text_mute())
-                                } else {
-                                    ("로그인 안 됨", theme::danger())
-                                };
-                                let tf = f - 2.0;
-                                let tw = g.measure_chrome_text(t, tf, false);
-                                g.draw_text(
-                                    right - tw,
-                                    ry + (prow_h - tf) / 2.0 - 1.0,
-                                    t,
-                                    gpu::DrawOpts {
-                                        font_size: tf,
-                                        color: col,
-                                        bold: false,
-                                        italic: false,
-                                    },
-                                );
+                                }
+                                AccountProvider::Codex => ("로그인 안 됨", theme::danger()),
+                            };
+                            if !(p == AccountProvider::Codex && codex_missing().is_some()) {
+                                draw_usage_note(g, ix, wy, win_h_row, f - 2.0, t, col);
                             }
-                        },
+                        }
+                        for row in &rows {
+                            draw_usage_win_row(
+                                g,
+                                ix,
+                                wy,
+                                right,
+                                win_h_row,
+                                f,
+                                &row.lab,
+                                row.pct,
+                                &row.rs,
+                                row.sub,
+                                stale,
+                            );
+                            wy += win_h_row;
+                        }
                     }
                     self.account_menu_hits
                         .push((AccountMenuItem::Provider(p), (mx, ry, mw, prow_h)));
@@ -14319,6 +14306,88 @@ pub(crate) fn draw_window_gauges(
         bx = gx + GW + 6.0 + g.measure_chrome_text(&pt, font, false) + 12.0;
     }
     bx
+}
+
+/// 사용량 팝오버의 창 한 줄: `[창][막대][퍼센트][풀리는 때]`. 칸 너비가 고정이라
+/// 5h 줄과 7d 줄의 막대가 같은 자리에 서고, 두 줄을 위아래로 견줄 수 있다.
+/// 모델별 창(`sub`)은 글자를 낮추고 흐리게 — 계정 전체의 창이 아니라 그 안의 한 칸이다.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_usage_win_row(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    right: f32,
+    h: f32,
+    f: f32,
+    lab: &str,
+    pct: f32,
+    rs: &str,
+    sub: bool,
+    stale: bool,
+) {
+    const LAB_W: f32 = 22.0;
+    const GG_W: f32 = 64.0;
+    const GG_H: f32 = 4.0;
+    const PCT_W: f32 = 34.0;
+    const GAP: f32 = 8.0;
+    let rf = if sub { f - 2.5 } else { f - 2.0 };
+    let ty = y + (h - rf) / 2.0 - 1.0;
+    g.draw_text(
+        x,
+        ty,
+        lab,
+        gpu::DrawOpts { font_size: rf, color: theme::text_mute(), bold: false, italic: false },
+    );
+    let gx = x + LAB_W + GAP;
+    let gy = y + (h - GG_H) / 2.0;
+    round_rect(g, gx, gy, GG_W, GG_H, GG_H / 2.0, theme::with_alpha(theme::text_dim(), 0x59));
+    let w = (GG_W * (pct / 100.0).clamp(0.0, 1.0)).max(GG_H);
+    round_rect(g, gx, gy, w, GG_H, GG_H / 2.0, usage_bar_color(pct));
+    // stale 은 `~` 로만 말한다 — 색까지 흐리면 「급하지 않다」로 읽힌다.
+    let pt = if stale { format!("~{pct:.0}%") } else { format!("{pct:.0}%") };
+    let px = gx + GG_W + GAP;
+    let pw = g.measure_chrome_text(&pt, rf, false);
+    g.draw_text(
+        px + PCT_W - pw,
+        ty,
+        &pt,
+        gpu::DrawOpts {
+            font_size: rf,
+            color: if sub { theme::text_mute() } else { usage_pct_color(pct) },
+            bold: false,
+            italic: false,
+        },
+    );
+    if !rs.is_empty() {
+        let rx = px + PCT_W + GAP;
+        let sf = f - 2.5;
+        let t = crate::info::fit_text(g, rs, (right - rx).max(20.0), sf, false);
+        g.draw_text(
+            rx,
+            y + (h - sf) / 2.0 - 1.0,
+            &t,
+            gpu::DrawOpts { font_size: sf, color: theme::text_mute(), bold: false, italic: false },
+        );
+    }
+}
+
+/// 창 줄 자리에 놓는 한 줄 안내(「기록 없음」·「5h 미제공」). 줄 높이를 창 줄과 같게
+/// 맞춰 블록 높이 계산이 한 가지로 남는다.
+pub(crate) fn draw_usage_note(
+    g: &mut gpu::GpuRenderer,
+    x: f32,
+    y: f32,
+    h: f32,
+    f: f32,
+    t: &str,
+    col: [u8; 4],
+) {
+    g.draw_text(
+        x,
+        y + (h - f) / 2.0 - 1.0,
+        t,
+        gpu::DrawOpts { font_size: f, color: col, bold: false, italic: false },
+    );
 }
 
 #[cfg(test)]
