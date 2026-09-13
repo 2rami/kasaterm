@@ -284,6 +284,7 @@ fn panel_rect_outlined(
 /// 안쪽을 `bg` 로 되메우는 방식이라 **바탕색을 호출자가 알아야 한다** — 링만
 /// 그리는 스트로크가 렌더러에 없어서고, 사각 넷으로 두르면 모서리 라운드가
 /// 죽는다.
+#[allow(dead_code)]
 fn outline_rect(
     g: &mut gpu::GpuRenderer,
     x: f32,

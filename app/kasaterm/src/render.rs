@@ -3611,16 +3611,17 @@ impl App {
                         // 되메우는 색이 `panel_bg` 인 건 이 스트립의 바탕이 그것이기
                         // 때문이다(이 함수 위쪽에서 칼럼째 칠한다). 링만 그리는
                         // 스트로크가 렌더러에 없어 안쪽을 바탕색으로 덮는 방식이다.
-                        outline_rect(
+                        // 2026-09-14 플랫 개편: 설정·보드의 목록과 같은 문법으로
+                        // 고른 방은 **은은한 판**(surface_active)이다. 링은 목록에서
+                        // 유일하게 튀는 선이라 카드 셋 중 하나만 액자처럼 보였다.
+                        panel_rect(
                             g,
                             *tx,
                             *ty,
                             *tw,
                             *th,
                             theme::radius_md(),
-                            theme::accent(),
-                            SIDEBAR_ACTIVE_RING,
-                            theme::panel_bg(),
+                            theme::surface_active(),
                         );
                     } else if is_hover {
                         panel_rect(
@@ -3827,15 +3828,11 @@ impl App {
                         g.hover_pointer |= hov;
                         // 밝기는 **이 카드 위에서** 정해진다. 고정 톤을 쓰면 활성
                         // 카드(더 밝은 판) 위에서 들리기는커녕 되레 어두워졌다.
-                        let base = if is_active {
-                            theme::surface_active()
-                        } else if is_hover {
-                            theme::surface_hover()
-                        } else {
-                            theme::panel_bg()
-                        };
-                        let fill = theme::raised_on(base, hov);
-                        panel_rect_outlined(g, er.0, er.1, er.2, er.3, theme::radius_sm(), fill);
+                        // 플랫 문법(2026-09-14): 배지는 판 없이 글자·화살표만.
+                        // 눌릴 자리라는 건 hover 판이 말한다.
+                        if hov {
+                            hover_rect(g, er.0, er.1, er.2, er.3, theme::radius_sm());
+                        }
                         // 화살표는 목록을 여는 유일한 표지라 배지 안에서 가장 밝아야
                         // 한다. `text_dim` 은 부제 색이어서, 10px 로 그린 화살표가
                         // 배지 채움에 묻혀 숫자만 떠 있는 칩으로 보였다(2026-08-27 지적).
@@ -3961,7 +3958,13 @@ impl App {
                         } else if hov {
                             theme::surface_hover()
                         } else {
-                            theme::with_alpha(theme::border(), 0x66)
+                            // 기기 칸은 테두리가 기기색을 문다 — 채움(22%)만으로는
+                            // 옆 칸과 안 갈리고, 진하게 채우면 얼굴이 묻힌다.
+                            pane_identity::minimap_border(
+                                theme::panel_bg(),
+                                info.device.as_deref(),
+                                theme::with_alpha(theme::border(), 0x66),
+                            )
                         },
                     );
                     // 활성 칸은 **테두리로만** 표시한다. 통으로 칠하면 pane 이 하나인
@@ -3975,11 +3978,12 @@ impl App {
                             mw - 3.0,
                             mh - 3.0,
                             1.5,
-                            pane_identity::minimap_background(if cur {
-                                theme::surface_active()
-                            } else {
-                                theme::panel_bg()
-                            }, info.device.as_deref()),
+                            // 고른 칸도 채움은 기기색 그대로다 — 테두리(accent)가
+                            // 「여기」를 말하고, 색은 「어느 기기」를 말한다.
+                            pane_identity::minimap_background(
+                                theme::panel_bg(),
+                                info.device.as_deref(),
+                            ),
                         );
                     }
                     // 숨쉬는 건 안쪽 판이다. 테두리까지 같이 흐려지면 칸의 윤곽이
@@ -4605,17 +4609,7 @@ impl App {
                                 && sb_cursor.1 >= by
                                 && sb_cursor.1 <= by + bh;
                             g.hover_pointer |= hover;
-                            if on {
-                                round_rect(
-                                    g,
-                                    bx,
-                                    by,
-                                    bw,
-                                    bh,
-                                    theme::radius_sm(),
-                                    theme::surface_active(),
-                                );
-                            } else if hover {
+                            if hover {
                                 hover_rect(g, bx, by, bw, bh, theme::radius_sm());
                             }
                             g.queue_icon(
@@ -4623,7 +4617,10 @@ impl App {
                                 bx + (bw - theme::ICON_SIZE) / 2.0,
                                 by + (bh - theme::ICON_SIZE) / 2.0,
                                 theme::ICON_SIZE,
-                                if hover || on {
+                                // 켜진 설정은 판 대신 **색**으로 말한다(플랫 문법).
+                                if on {
+                                    theme::accent()
+                                } else if hover {
                                     theme::text()
                                 } else {
                                     theme::text_mute()
@@ -7175,9 +7172,11 @@ impl App {
                         let ch = PANE_HEADER_HEIGHT - 8.0;
                         let cx = chip_right - cw;
                         let cy = h.y + 4.0;
-                        let bg = machine.background(theme::bg());
+                        // 플랫 문법: 칩은 채우지 않고 기기색 **테두리+글자**로 말한다
+                        // (2026-09-14 승인 목업). 바탕은 헤더 바탕 그대로다.
+                        let bg = theme::bg();
                         let fg = machine.foreground(bg);
-                        g.round_rect_fill(cx, cy, cw, ch, 4.0, bg);
+                        g.round_rect_stroke(cx, cy, cw, ch, 4.0, 1.0, fg);
                         g.queue_icon(machine.icon(), cx + pad, cy + (ch - icon) / 2.0, icon, fg);
                         g.draw_text(
                             cx + pad + icon + 5.0,
