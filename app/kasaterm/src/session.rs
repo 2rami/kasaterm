@@ -6067,8 +6067,21 @@ impl App {
                                 .skip(1)
                                 .filter_map(|t| {
                                     let tab_pid = t.pid.as_deref()?;
-                                    let mut trec =
-                                        pty.get(tab_pid).map(|s| socket::pane_record(s))?;
+                                    // 탭의 PTY 가 그 순간 없어도 자리를 지우지 않는다 —
+                                    // 바깥 leaf 와 같은 이유(e380ac71). 탭은 레코드가
+                                    // 빠지면 그 학생이 저장 파일에 **존재한 적이 없게**
+                                    // 되고, 되살릴 단서(세션 id·캐릭터)까지 함께 사라진다.
+                                    // 아래 fill_surface_record 가 pane_claude_sid 로 세션을
+                                    // 채우므로 빈 기록이라도 `--resume` 은 선다.
+                                    let mut trec = pty
+                                        .get(tab_pid)
+                                        .map(|s| socket::pane_record(s))
+                                        .unwrap_or_else(|| {
+                                            eprintln!(
+                                                "[save] 탭 {tab_pid} 에 PTY 가 없다 — 빈 기록으로 남긴다(세션은 유지)"
+                                            );
+                                            serde_json::json!({})
+                                        });
                                     let o = trec.as_object_mut()?;
                                     o.insert(
                                         "pane_id".to_string(),
@@ -6660,7 +6673,15 @@ impl App {
             self.ws.lock().unwrap().pane_mut(&id);
         }
         for t in tabs.into_iter().flatten() {
-            self.restore_surface(t, cols, rows, Some(&id));
+            if self.restore_surface(t, cols, rows, Some(&id)).is_none() {
+                // 조용히 빠지면 「탭이 왜 안 돌아왔나」를 사후에 짚을 수가 없다 —
+                // 2026-09-14 에 학생 넷을 잃고도 로그가 한 줄도 없어 저장·복원 중
+                // 어느 쪽인지 가리는 데만 한참 걸렸다.
+                eprintln!(
+                    "[restore] pane {id} 의 탭 {} 를 못 살렸다",
+                    t.get("pane_id").and_then(|v| v.as_str()).unwrap_or("?")
+                );
+            }
         }
         // 보던 탭으로 되돌린다. 하나가 못 살아났을 수 있으므로 실제 개수로 자른다.
         if let Some(n) = rec.get("active_tab").and_then(|v| v.as_u64()) {
