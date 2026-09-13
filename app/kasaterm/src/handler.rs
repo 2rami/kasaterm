@@ -6658,14 +6658,19 @@ impl ApplicationHandler<UserEvent> for App {
                                     if let (Some(tab), Some(pid)) =
                                         (moved.take(), moved_pid.clone())
                                     {
+                                        // 목적지 PaneState 는 첫 화면 프레임이 와야 생긴다
+                                        // (split 직후엔 아직 없다). 없다고 탭을 버리면 그
+                                        // 학생은 PTY 만 돌고 어느 탭에도 없는 고아가 된다 —
+                                        // 누를 수도, 저장할 수도 없다(2026-09-14 실측:
+                                        // 되살린 학생 넷이 방을 옮기다 전부 이렇게 됐다).
+                                        // 자리를 먼저 세우고 넣는다.
+                                        let dst = ws.pane_mut(&td.drop_pane);
+                                        let to = td.target.min(dst.tabs.len());
+                                        dst.tabs.insert(to, tab);
+                                        dst.active_tab = to;
+                                        dst.dirty = true;
                                         // Re-bind the pid to the new outer.
                                         ws.pid_to_pane.insert(pid, td.drop_pane.clone());
-                                        if let Some(dst) = ws.panes.get_mut(&td.drop_pane) {
-                                            let to = td.target.min(dst.tabs.len());
-                                            dst.tabs.insert(to, tab);
-                                            dst.active_tab = to;
-                                            dst.dirty = true;
-                                        }
                                     }
                                     if src_empty {
                                         // Source has no tabs left — drop the
