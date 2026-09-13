@@ -271,6 +271,201 @@ fn resolve_font_family(family: &str) -> Option<FontChoice> {
     })
 }
 
+// ── UI font catalog ──────────────────────────────────────────────────────
+// 크롬 글꼴 후보. 터미널 카탈로그와 같은 폴더를 훑되 기준이 반대다 — 고정폭이
+// 아니라 본문용 산세리프를 고른다. 이름표 목록으로 거른다: 설치 폴더에는
+// 기호·장식·세리프가 수백 개 있어 전부 보여 주면 고를 수가 없다.
+#[derive(Clone, Debug)]
+pub(crate) struct UiFontChoice {
+    pub family: String,
+    pub path: PathBuf,
+    pub index: u32,
+    /// 같은 가족의 굵은 얼굴(파일, TTC 번호). 없으면 gpu 가 합성한다.
+    pub bold: Option<(PathBuf, u32)>,
+}
+
+const UI_FONT_NEEDLES: &[&str] = &[
+    "pretendard", "notosans", "applesdgothic", "applegothic", "nanumgothic", "nanumsquare",
+    "nanumbarun", "spoqa", "ibmplexsans", "helvetica", "sfns", "sfpro", "avenir",
+    "gmarket", "wanted", "freesentation", "galmuri", "malgun", "segoeui", "roboto",
+    "opensans", "sourcesans", "sourcehansans", "lato", "dejavusans", "ubuntu", "cantarell",
+];
+
+/// 이름 앞에서만 맞춰야 하는 짧은 키. "inter" 를 어디서나 찾으면 SignPainter 가,
+/// "suit" 는 다른 이름 속 글자에 걸린다.
+const UI_FONT_PREFIXES: &[&str] = &["inter", "suit"];
+
+/// 굵기·기울임을 파일 이름에 단 변형들. 카탈로그에는 정체(Regular)만 올린다.
+const UI_FONT_VARIANT_TAGS: &[&str] = &[
+    "bold", "italic", "oblique", "light", "thin", "medium", "black", "heavy", "extra",
+    "semi", "demi", "ultra", "condensed", "narrow", "display", "text", "mono", "variable",
+];
+
+fn ui_font_stem(path: &Path) -> String {
+    path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string()
+}
+
+fn likely_ui_font(path: &Path) -> bool {
+    let k = font_key(&ui_font_stem(path));
+    if !UI_FONT_NEEDLES.iter().any(|needle| k.contains(needle))
+        && !UI_FONT_PREFIXES.iter().any(|p| k.starts_with(p))
+    {
+        return false;
+    }
+    // "SFNSMono"·"NotoSansMono" 같은 고정폭과 "Inter-Bold" 같은 변형은 뺀다.
+    // 단 TTC 는 한 파일에 전 굵기가 들어 있어 이름에 태그가 없다.
+    if UI_FONT_VARIANT_TAGS.iter().any(|tag| k.contains(tag)) {
+        return false;
+    }
+    // Noto Sans 는 문자 체계마다 파일이 따로다(Adlam·Armenian·… 수십 개). 본문에
+    // 쓸 만한 것은 무표기(라틴)와 CJK 갈래뿐이다.
+    if let Some(rest) = k.strip_prefix("notosans") {
+        return matches!(rest, "" | "kr" | "cjk" | "cjkkr" | "cjkjp" | "cjksc" | "cjktc" | "jp" | "sc" | "tc");
+    }
+    true
+}
+
+/// 설치 파일 이름을 사람이 아는 이름으로. 시스템 파일은 이름이 뭉개져 있다.
+fn ui_font_label(path: &Path) -> String {
+    let stem = ui_font_stem(path);
+    match stem.as_str() {
+        "AppleSDGothicNeo" => "Apple SD Gothic Neo".to_string(),
+        "AppleGothic" => "Apple Gothic".to_string(),
+        "SFNS" => "SF Pro".to_string(),
+        "SFNSRounded" => "SF Pro Rounded".to_string(),
+        "HelveticaNeue" => "Helvetica Neue".to_string(),
+        "malgun" => "맑은 고딕".to_string(),
+        "segoeui" => "Segoe UI".to_string(),
+        _ => font_label(path),
+    }
+}
+
+/// 같은 폴더에서 굵은 얼굴을 찾는다. 파일 관례(`-Regular`→`-Bold`, `<이름>Bold`,
+/// `<이름>bd`)를 먼저, TTC 는 알려진 번호표로.
+fn ui_font_bold(path: &Path) -> Option<(PathBuf, u32)> {
+    let stem = ui_font_stem(path);
+    if stem == "AppleSDGothicNeo" {
+        return Some((path.to_path_buf(), 6));
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("ttf");
+    let dir = path.parent()?;
+    let mut names: Vec<String> = Vec::new();
+    for suffix in ["-Regular", " Regular", "_Regular", "-Roman"] {
+        if let Some(head) = stem.strip_suffix(suffix) {
+            let sep = &suffix[..1];
+            names.push(format!("{head}{sep}Bold"));
+        }
+    }
+    names.push(format!("{stem}-Bold"));
+    names.push(format!("{stem} Bold"));
+    names.push(format!("{stem}Bold"));
+    names.push(format!("{stem}bd"));
+    names.push(format!("{stem}b"));
+    names
+        .into_iter()
+        .map(|n| dir.join(format!("{n}.{ext}")))
+        .find(|p| p.is_file())
+        .map(|p| (p, 0))
+}
+
+fn collect_ui_fonts(dir: &Path, depth: usize, out: &mut Vec<UiFontChoice>) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            collect_ui_fonts(&path, depth - 1, out);
+        } else if kind.is_file() && font_extension(&path) && likely_ui_font(&path) {
+            out.push(UiFontChoice { family: ui_font_label(&path), bold: ui_font_bold(&path), path, index: 0 });
+        }
+    }
+}
+
+fn build_ui_font_catalog() -> Vec<UiFontChoice> {
+    let mut out = Vec::new();
+    for dir in font_dirs() {
+        collect_ui_fonts(&dir, 3, &mut out);
+    }
+    out.retain(|f| safe_font_path(&f.path).is_some());
+    out.sort_by(|a, b| a.family.to_lowercase().cmp(&b.family.to_lowercase()));
+    out.dedup_by(|a, b| font_key(&a.family) == font_key(&b.family));
+    out
+}
+
+/// 터미널·UI 두 카탈로그가 훑는 폴더. 한 곳에 두어 둘이 어긋나지 않게.
+fn font_dirs() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = kasa_socket::home_dir() {
+            out.push(home.join("Library/Fonts"));
+        }
+        for root in ["/Library/Fonts", "/System/Library/Fonts", "/System/Library/Fonts/Supplemental"] {
+            out.push(PathBuf::from(root));
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            out.push(PathBuf::from(local).join("Microsoft/Windows/Fonts"));
+        }
+        out.push(PathBuf::from(r"C:\Windows\Fonts"));
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        if let Some(home) = crate::kasa_socket::home_dir() {
+            out.push(home.join(".local/share/fonts"));
+        }
+        out.push(PathBuf::from("/usr/share/fonts"));
+    }
+    out
+}
+
+fn ui_font_catalog() -> &'static [UiFontChoice] {
+    static CATALOG: std::sync::OnceLock<Vec<UiFontChoice>> = std::sync::OnceLock::new();
+    CATALOG.get_or_init(build_ui_font_catalog)
+}
+
+pub(crate) fn ui_font_families() -> Vec<String> {
+    ui_font_catalog().iter().map(|f| f.family.clone()).collect()
+}
+
+/// 설정값(이름 또는 파일 경로)을 실을 파일로. 이름은 키가 같은 것을 먼저,
+/// 그다음 앞부분이 맞는 것("Pretendard" ↔ "PretendardVariable").
+pub(crate) fn resolve_ui_font(value: &str) -> Option<UiFontChoice> {
+    let as_path = Path::new(value);
+    if as_path.is_absolute() {
+        let path = safe_font_path(as_path)?;
+        return Some(UiFontChoice { family: ui_font_label(&path), bold: ui_font_bold(&path), path, index: 0 });
+    }
+    let wanted = font_key(value);
+    if wanted.is_empty() {
+        return None;
+    }
+    let fonts = ui_font_catalog();
+    fonts.iter().find(|f| font_key(&f.family) == wanted).cloned().or_else(|| {
+        fonts
+            .iter()
+            .find(|f| {
+                let have = font_key(&f.family);
+                have.starts_with(&wanted) || wanted.starts_with(&have)
+            })
+            .cloned()
+    })
+}
+
+/// 두 설정값이 같은 글꼴을 가리키는지(설정 화면의 선택 표시용).
+pub(crate) fn ui_font_matches(a: &str, b: &str) -> bool {
+    font_key(a) == font_key(b)
+}
+
 pub(crate) fn font_families() -> Vec<String> {
     font_catalog().iter().map(|f| f.family.clone()).collect()
 }

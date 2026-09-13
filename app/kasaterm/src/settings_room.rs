@@ -46,6 +46,10 @@ pub(crate) struct SettingsScene {
     motion_preview_visible: bool,
     /// 제공자+계정 id별 사용량 상세 펼침. 같은 id가 Claude/Codex에 있어도 갈라진다.
     account_usage_expanded: std::collections::HashSet<String>,
+    /// 펼쳐진 선택 상자와 그 목록의 스크롤.
+    dropdown: Option<crate::native_settings::DropdownId>,
+    dropdown_scroll: f32,
+    dropdown_scroll_max: f32,
 }
 
 impl Default for SettingsScene {
@@ -72,6 +76,9 @@ impl Default for SettingsScene {
             multiline_layouts: Vec::new(),
             motion_preview_visible: false,
             account_usage_expanded: std::collections::HashSet::new(),
+            dropdown: None,
+            dropdown_scroll: 0.0,
+            dropdown_scroll_max: 0.0,
         }
     }
 }
@@ -163,7 +170,37 @@ impl SettingsScene {
             self.scroll = 0.0;
             self.hits.clear();
             self.caret_rect = None;
+            self.close_dropdown();
         }
+    }
+
+    pub(crate) fn dropdown(&self) -> Option<crate::native_settings::DropdownId> {
+        self.dropdown
+    }
+
+    pub(crate) fn dropdown_scroll(&self) -> f32 {
+        self.dropdown_scroll
+    }
+
+    pub(crate) fn toggle_dropdown(&mut self, id: crate::native_settings::DropdownId) {
+        self.dropdown = if self.dropdown == Some(id) { None } else { Some(id) };
+        self.dropdown_scroll = 0.0;
+        self.dropdown_scroll_max = 0.0;
+    }
+
+    /// 열려 있던 것을 닫았으면 `true`.
+    pub(crate) fn close_dropdown(&mut self) -> bool {
+        let was_open = self.dropdown.take().is_some();
+        self.dropdown_scroll = 0.0;
+        self.dropdown_scroll_max = 0.0;
+        was_open
+    }
+
+    pub(crate) fn dropdown_scroll_by(&mut self, delta: f32) -> bool {
+        let next = (self.dropdown_scroll + delta).clamp(0.0, self.dropdown_scroll_max);
+        let changed = (next - self.dropdown_scroll).abs() > f32::EPSILON;
+        self.dropdown_scroll = next;
+        changed
     }
 
     pub(crate) fn scroll(&self) -> f32 {
@@ -206,12 +243,15 @@ impl SettingsScene {
     pub(crate) fn finish_paint(
         &mut self,
         hits: Vec<crate::native_settings::Hit>,
+        dropdown_scroll_max: f32,
         content_h: f32,
         view_h: f32,
         caret_rect: Option<crate::native_settings::Rect>,
         multiline_layouts: Vec<crate::native_settings::MultilineLayout>,
         motion_preview_visible: bool,
     ) {
+        self.dropdown_scroll_max = dropdown_scroll_max.max(0.0);
+        self.dropdown_scroll = self.dropdown_scroll.clamp(0.0, self.dropdown_scroll_max);
         self.scroll_max = (content_h - view_h).max(0.0);
         self.scroll = self.scroll.clamp(0.0, self.scroll_max);
         self.hits = hits;
@@ -809,6 +849,7 @@ mod tests {
         };
         scene.finish_paint(
             vec![bottom, top],
+            0.0,
             300.0,
             100.0,
             Some((4.0, 5.0, 2.0, 12.0)),

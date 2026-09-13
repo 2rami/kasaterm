@@ -1068,6 +1068,38 @@ fn apply_from_settings_inner(sync_claude_theme: bool) {
     });
     set_shape(&shape);
     set_min_contrast(s.get("min_contrast").and_then(|x| x.as_f64()).unwrap_or(2.5) as f32);
+    set_ui_font(s.get("ui_font").and_then(|x| x.as_str()).unwrap_or(""));
+}
+
+// ── UI font ──────────────────────────────────────────────────────────────
+// 크롬(탭·설정·상태줄) 글자를 어느 얼굴로 그리느냐. 터미널 격자와는 다른 축이다:
+// 격자는 `font_path` 로 고정폭 하나를 고르지만, 크롬은 산세리프가 더 잘 읽힌다.
+//   ""·"terminal" — 터미널 글꼴을 그대로(기본, 예전 동작).
+//   "system"      — 마크다운이 이미 쓰는 시스템 고딕(맥은 Apple SD Gothic Neo).
+//   그 밖의 값    — 설치된 글꼴 이름. gpu 가 카탈로그에서 찾아 따로 싣는다.
+// gpu 는 세대 번호로 바뀜을 알아채므로 문자열을 매 라벨마다 비교하지 않는다.
+static UI_FONT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static UI_FONT_GEN: AtomicU32 = AtomicU32::new(0);
+
+pub fn ui_font() -> String {
+    UI_FONT.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+/// 바뀔 때만 세대를 올린다 — 설정 파일을 다시 읽을 때마다 같은 값으로 들어오는데,
+/// 그때마다 세대가 오르면 gpu 가 글꼴을 다시 싣고 아틀라스를 비운다.
+pub fn set_ui_font(value: &str) {
+    let value = value.trim();
+    if let Ok(mut g) = UI_FONT.lock() {
+        if *g == value {
+            return;
+        }
+        *g = value.to_string();
+    }
+    UI_FONT_GEN.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn ui_font_gen() -> u32 {
+    UI_FONT_GEN.load(Ordering::Relaxed)
 }
 
 // ── Shape axis ───────────────────────────────────────────────────────────

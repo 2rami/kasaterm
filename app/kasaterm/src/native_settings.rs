@@ -7,8 +7,12 @@ use super::*;
 
 pub(crate) type Rect = (f32, f32, f32, f32);
 
-const HEADER_H: f32 = 92.0;
-const CONTENT_MAX_W: f32 = 820.0;
+const HEADER_H: f32 = 64.0;
+/// 플랫 행 한 줄 높이(목업 `.row` min-height 40).
+const ROW_H: f32 = 40.0;
+/// 조작 부품 높이(목업 `.ctl` 26).
+const CTL_H: f32 = 26.0;
+const CONTENT_MAX_W: f32 = 800.0;
 const SPRITE_DROP_MAX_BYTES: u64 = 4 << 20;
 const THEMEGEN_DROP_MAX_BYTES: u64 = 32 << 20;
 
@@ -549,11 +553,25 @@ fn account_sub(email: &str, org: &str) -> String {
 pub(crate) enum HitCursor {
     Pointer,
     Text,
+    /// 보통 화살표 — 「바깥을 눌러 닫기」처럼 누를 수는 있지만 손가락은 아닌 자리.
+    Arrow,
+}
+
+/// 펼쳐지는 선택 상자. 한 번에 하나만 열린다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DropdownId {
+    UiFont,
+    /// 캐릭터 페이지 맨 위의 「캐릭터 테마」 — 목업대로 격자 대신 선택 상자 하나.
+    CharacterTheme,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Target {
     Category(SettingsCat),
+    /// 선택 상자 머리 — 누르면 펼치고, 다시 누르면 닫는다.
+    Dropdown(DropdownId),
+    /// 펼친 선택 상자 바깥 — 누르면 닫기만 한다.
+    DropdownDismiss,
     Setting(SettingsAction),
     Focus(SettingsInput),
     AccountUsage(String),
@@ -586,6 +604,8 @@ impl std::fmt::Debug for Hit {
 
 pub(crate) struct PaintOutput {
     pub(crate) hits: Vec<Hit>,
+    /// 펼친 선택 상자 목록의 최대 스크롤.
+    pub(crate) dropdown_scroll_max: f32,
     pub(crate) content_h: f32,
     pub(crate) view_h: f32,
     pub(crate) caret_rect: Option<Rect>,
@@ -614,6 +634,9 @@ pub(crate) struct MultilineLayout {
 struct PaintFeedback {
     multiline_layouts: Vec<MultilineLayout>,
     motion_preview_visible: bool,
+    /// 이번 프레임에 그린 「펼쳐진」 선택 상자의 머리 자리. 팝업은 본문을 다 그린 뒤
+    /// 이 자리에 붙여 맨 위에 올린다.
+    dropdown_anchor: Option<(DropdownId, Rect)>,
 }
 
 thread_local! {
@@ -626,6 +649,10 @@ fn begin_paint_feedback() {
 
 fn push_multiline_layout(layout: MultilineLayout) {
     PAINT_FEEDBACK.with(|feedback| feedback.borrow_mut().multiline_layouts.push(layout));
+}
+
+fn mark_dropdown_anchor(id: DropdownId, rect: Rect) {
+    PAINT_FEEDBACK.with(|feedback| feedback.borrow_mut().dropdown_anchor = Some((id, rect)));
 }
 
 fn mark_motion_preview_visible() {
@@ -669,6 +696,13 @@ pub(crate) struct Snapshot {
     pub(crate) accent: String,
     pub(crate) shape: String,
     pub(crate) min_contrast: f32,
+    /// 크롬 글꼴 설정값("" 은 터미널 글꼴).
+    pub(crate) ui_font: String,
+    /// 설치돼 있어 고를 수 있는 UI 글꼴 이름들.
+    pub(crate) ui_fonts: Vec<String>,
+    /// 지금 펼쳐진 선택 상자.
+    pub(crate) dropdown: Option<DropdownId>,
+    pub(crate) dropdown_scroll: f32,
     pub(crate) font_size: f32,
     pub(crate) ui_zoom: f32,
     pub(crate) wheel_gain: f32,
@@ -886,6 +920,8 @@ impl App {
             accent: theme::accent_name().to_string(),
             shape: theme::shape_name().to_string(),
             min_contrast: theme::min_contrast(),
+            ui_font: theme::ui_font(),
+            ui_fonts: crate::onboarding::ui_font_families(),
             font_size: self.font_size,
             ui_zoom: self.ui_zoom,
             wheel_gain: self.set_wheel_pixel_gain,
@@ -910,6 +946,8 @@ impl App {
             account_autoswitch_pct: self.set_account_autoswitch_pct,
             accounts: cache.accounts.clone(),
             account_usage_expanded: scene.account_usage_expanded().clone(),
+            dropdown: scene.dropdown(),
+            dropdown_scroll: scene.dropdown_scroll(),
             account_label_edit: self.account_label_edit.clone(),
             machine_edit: self.machine_edit.clone(),
             login_job: crate::settings::hidden_login_job(),
@@ -967,6 +1005,7 @@ impl App {
     pub(crate) fn finish_native_settings_paint(&mut self, output: PaintOutput) {
         self.settings_scene.finish_paint(
             output.hits,
+            output.dropdown_scroll_max,
             output.content_h,
             output.view_h,
             output.caret_rect,
@@ -1009,7 +1048,16 @@ impl App {
         }
         let hit = self.settings_scene.hit_at(x, y).cloned();
         let target = hit.as_ref().map(|hit| hit.target.clone());
+        // 어디를 눌러도 펼친 선택 상자는 닫힌다 — 머리를 다시 누른 것만 토글이다.
+        if !matches!(target, Some(Target::Dropdown(_))) {
+            self.settings_scene.close_dropdown();
+        }
         match target {
+            Some(Target::Dropdown(id)) => {
+                self.native_settings_blur();
+                self.settings_scene.toggle_dropdown(id);
+            }
+            Some(Target::DropdownDismiss) => {}
             Some(Target::Category(cat)) => {
                 self.native_settings_blur();
                 self.settings_scene.set_category(cat);
@@ -1504,20 +1552,27 @@ impl App {
         if event.state != ElementState::Pressed {
             return true;
         }
+        if self.settings_scene.dropdown().is_some()
+            && matches!(event.logical_key, Key::Named(NamedKey::Escape))
+        {
+            self.settings_scene.close_dropdown();
+            self.chrome_dirty = true;
+            return true;
+        }
         let Some(field) = self.settings_input else {
             if self.settings_scene.first_run() {
                 return self.native_onboarding_key(event);
             }
-            let at = SettingsCat::ALL
+            let at = SettingsCat::NAV
                 .iter()
                 .position(|cat| *cat == self.settings_scene.category())
                 .unwrap_or(0);
             let next = match event.logical_key {
                 Key::Named(NamedKey::ArrowUp) => at.saturating_sub(1),
-                Key::Named(NamedKey::ArrowDown) => (at + 1).min(SettingsCat::ALL.len() - 1),
+                Key::Named(NamedKey::ArrowDown) => (at + 1).min(SettingsCat::NAV.len() - 1),
                 _ => return false,
             };
-            self.settings_scene.set_category(SettingsCat::ALL[next]);
+            self.settings_scene.set_category(SettingsCat::NAV[next]);
             self.chrome_dirty = true;
             return true;
         };
@@ -1748,7 +1803,12 @@ impl App {
             winit::event::MouseScrollDelta::LineDelta(_, y) => y * 42.0,
             winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
         };
-        if self.settings_scene.scroll_by(-dy) {
+        let scrolled = if self.settings_scene.dropdown().is_some() {
+            self.settings_scene.dropdown_scroll_by(-dy)
+        } else {
+            self.settings_scene.scroll_by(-dy)
+        };
+        if scrolled {
             self.chrome_dirty = true;
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
@@ -2072,37 +2132,22 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     }
     begin_paint_feedback();
     let (ax, ay, aw, ah) = snapshot.area;
-    let nav_w = if aw < 760.0 { 154.0 } else { 190.0 };
+    let nav_w = if aw < 760.0 { 154.0 } else { 200.0 };
     let mut hits = Vec::new();
     let mut caret_rect = None;
 
     g.rect(ax, ay, aw, ah, theme::bg());
+    // 목업(플랫): 옆 목록은 구분선 없이 배경만 다르고, 머리글은 작은 흐림 글자.
     g.rect(ax, ay, nav_w, ah, theme::panel_bg());
-    g.rect(ax + nav_w - 1.0, ay, 1.0, ah, theme::border());
-    draw_text(
-        g,
-        ax + 20.0,
-        ay + 20.0,
-        "설정 방",
-        18.0,
-        theme::text(),
-        true,
-    );
-    draw_text(
-        g,
-        ax + 20.0,
-        ay + 47.0,
-        "앱의 작업 환경",
-        11.0,
-        theme::text_dim(),
-        false,
-    );
+    draw_text(g, ax + 20.0, ay + 24.0, "설정", 13.0, theme::text_dim(), false);
 
-    let mut ny = ay + 82.0;
-    for cat in SettingsCat::ALL {
+    let mut ny = ay + 56.0;
+    for cat in SettingsCat::NAV {
         let (label, icon, _) = category_meta(cat);
-        let rect = (ax + 10.0, ny, nav_w - 20.0, 36.0);
-        let selected = cat == snapshot.cat;
+        let rect = (ax + 12.0, ny, nav_w - 24.0, 32.0);
+        // 테마 페이지는 「캐릭터」 밑으로 들어갔다 — 거기 있는 동안도 캐릭터 칸이 켜진다.
+        let selected = cat == snapshot.cat
+            || (cat == SettingsCat::Students && snapshot.cat == SettingsCat::Theme);
         let hover = contains(rect, snapshot.cursor);
         if selected || hover {
             round_rect(
@@ -2111,7 +2156,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                 rect.1,
                 rect.2,
                 rect.3,
-                theme::radius_md(),
+                ctrl_radius(),
                 if selected {
                     theme::surface_active()
                 } else {
@@ -2119,14 +2164,11 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                 },
             );
         }
-        if selected {
-            g.rect(rect.0, rect.1 + 8.0, 2.0, rect.3 - 16.0, theme::accent());
-        }
         g.queue_icon(
             icon,
-            rect.0 + 12.0,
-            rect.1 + 10.0,
-            15.0,
+            rect.0 + 10.0,
+            rect.1 + 9.0,
+            14.0,
             if selected {
                 theme::text()
             } else {
@@ -2135,10 +2177,10 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         );
         draw_text(
             g,
-            rect.0 + 36.0,
-            rect.1 + 10.0,
+            rect.0 + 32.0,
+            rect.1 + 9.0,
             label,
-            13.0,
+            12.0,
             if selected {
                 theme::text()
             } else {
@@ -2148,10 +2190,10 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         );
         register(&mut hits, Target::Category(cat), rect, HitCursor::Pointer);
         g.hover_pointer |= hover;
-        ny += 39.0;
+        ny += 36.0;
     }
 
-    let close = (ax + 12.0, ay + ah - 48.0, nav_w - 24.0, 34.0);
+    let close = (ax + 12.0, ay + ah - 46.0, nav_w - 24.0, 32.0);
     let close_hover = contains(close, snapshot.cursor);
     if close_hover {
         round_rect(
@@ -2160,7 +2202,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             close.1,
             close.2,
             close.3,
-            theme::radius_md(),
+            ctrl_radius(),
             theme::surface_hover(),
         );
     }
@@ -2182,28 +2224,12 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     );
     register(&mut hits, Target::Close, close, HitCursor::Pointer);
 
-    let content_x = ax + nav_w + if aw < 760.0 { 22.0 } else { 38.0 };
-    let content_w = (aw - nav_w - if aw < 760.0 { 44.0 } else { 76.0 })
+    let content_x = ax + nav_w + if aw < 760.0 { 20.0 } else { 28.0 };
+    let content_w = (aw - nav_w - if aw < 760.0 { 40.0 } else { 56.0 })
         .max(180.0)
         .min(CONTENT_MAX_W);
-    let (title, _, blurb) = category_meta(snapshot.cat);
-    draw_text(g, content_x, ay + 22.0, title, 24.0, theme::text(), true);
-    draw_text(
-        g,
-        content_x,
-        ay + 55.0,
-        blurb,
-        12.5,
-        theme::text_dim(),
-        false,
-    );
-    g.rect(
-        content_x,
-        ay + HEADER_H - 1.0,
-        content_w,
-        1.0,
-        theme::border(),
-    );
+    let (title, _, _blurb) = category_meta(snapshot.cat);
+    draw_text(g, content_x, ay + 26.0, title, 20.0, theme::text(), true);
 
     let body_top = ay + HEADER_H + 14.0;
     let body_bottom = ay + ah - 12.0;
@@ -2325,8 +2351,15 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     );
 
     let feedback = take_paint_feedback();
+    let mut dropdown_scroll_max = 0.0;
+    if let (Some(open), Some((id, anchor))) = (snapshot.dropdown, feedback.dropdown_anchor) {
+        if open == id {
+            dropdown_scroll_max = paint_dropdown_popup(g, snapshot, &mut hits, id, anchor);
+        }
+    }
     PaintOutput {
         hits,
+        dropdown_scroll_max,
         content_h,
         view_h,
         caret_rect,
@@ -2394,21 +2427,21 @@ fn paint_general(
     y: &mut f32,
     w: f32,
 ) {
-    section_title(g, x, *y, "언어", "설정과 안내 화면에서 쓸 말을 고릅니다");
-    *y += 48.0;
-    segmented(
+    *y += 6.0;
+    seg_row(
         g,
         s,
         hits,
         x,
-        *y,
+        y,
         w,
+        "언어",
         &[
             ("한국어", s.language == "ko", SettingsAction::UiLanguage("ko")),
             ("English", s.language == "en", SettingsAction::UiLanguage("en")),
         ],
     );
-    *y += 54.0;
+    *y += 8.0;
     section_title(
         g,
         x,
@@ -2416,15 +2449,15 @@ fn paint_general(
         "시작과 파일",
         "새 작업 방과 파일을 여는 기본 동작입니다",
     );
-    *y += 48.0;
-    row_label(g, x, y, "새 방의 시작 폴더");
-    segmented(
+    *y += 54.0;
+    seg_row(
         g,
         s,
         hits,
         x,
-        *y,
+        y,
         w,
+        "새 방의 시작 폴더",
         &[
             (
                 "마지막 위치",
@@ -2439,7 +2472,6 @@ fn paint_general(
             ),
         ],
     );
-    *y += 42.0;
     if s.cwd_mode != "last" && s.cwd_mode != "home" {
         text_field(
             g,
@@ -2455,16 +2487,16 @@ fn paint_general(
             s.settings_caret,
             false,
         );
-        *y += 58.0;
+        *y += ROW_H;
     }
-    row_label(g, x, y, "파일을 여는 곳");
-    segmented(
+    seg_row(
         g,
         s,
         hits,
         x,
-        *y,
+        y,
         w,
+        "파일을 여는 곳",
         &[
             (
                 "카사텀",
@@ -2483,7 +2515,6 @@ fn paint_general(
             ),
         ],
     );
-    *y += 42.0;
     if matches!(s.file_open_mode.as_str(), "app" | "system") {
         let mut choices: Vec<(String, bool, SettingsAction)> = s
             .open_apps
@@ -2518,7 +2549,7 @@ fn paint_general(
             s.settings_caret,
             false,
         );
-        *y += 58.0;
+        *y += ROW_H;
     }
     toggle_row(
         g,
@@ -2551,7 +2582,7 @@ fn paint_general(
         "편집과 스크롤",
         "자주 바꾸지 않는 입력 감각만 모았습니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let autosave = [("끔", 0), ("1초", 1000), ("3초", 3000), ("10초", 10000)];
     let autosave_cells: Vec<(&str, bool, SettingsAction)> = autosave
         .iter()
@@ -2563,18 +2594,16 @@ fn paint_general(
             )
         })
         .collect();
-    row_label(g, x, y, "편집기 자동 저장");
-    segmented(g, s, hits, x, *y, w, &autosave_cells);
-    *y += 42.0;
+    seg_row(g, s, hits, x, y, w, "편집기 자동 저장", &autosave_cells);
     let gain = (s.wheel_gain * 100.0).round() as u32;
-    row_label(g, x, y, "휠 스크롤 속도");
-    segmented(
+    seg_row(
         g,
         s,
         hits,
         x,
-        *y,
+        y,
         w,
+        "휠 스크롤 속도",
         &[
             ("차분하게", gain == 30, SettingsAction::WheelPixelGain(30)),
             ("보통", gain == 60, SettingsAction::WheelPixelGain(60)),
@@ -2586,7 +2615,6 @@ fn paint_general(
             ),
         ],
     );
-    *y += 52.0;
     stepper_row(
         g,
         s,
@@ -2626,170 +2654,10 @@ fn paint_appearance(
         g,
         x,
         *y,
-        "터미널 커서",
-        "모양만 고르면 색은 현재 캐릭터를 따라가요",
-    );
-    *y += 48.0;
-    draw_text(g, x + 2.0, *y, "기본", 11.5, theme::text_dim(), true);
-    *y += 24.0;
-    cursor_shape_grid(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        &[
-            (cursor::CursorShape::Block, "블록"),
-            (cursor::CursorShape::Bar, "빔"),
-            (cursor::CursorShape::Underline, "밑줄"),
-        ],
-    );
-    let everyday = [
-        cursor::CursorShape::Block,
-        cursor::CursorShape::Bar,
-        cursor::CursorShape::Underline,
-    ];
-    if !everyday.contains(&s.cursor_shape) {
-        *y += 8.0;
-        draw_text(
-            g,
-            x + 2.0,
-            *y,
-            "고급 · 기존 설정",
-            11.5,
-            theme::text_dim(),
-            true,
-        );
-        *y += 24.0;
-        cursor_shape_grid(
-            g,
-            s,
-            hits,
-            x,
-            y,
-            w,
-            &[(s.cursor_shape, cursor_shape_label(s.cursor_shape))],
-        );
-    }
-    *y += 8.0;
-    // 고른 열 밑에만 미리보기를 두면 선택을 바꿀 때 카드가 좌우로 뛰고, 좁은
-    // 화면에서는 다음 섹션과 한 묶음처럼 붙는다. 한 줄 전체를 고정해 결과와
-    // 선택지를 시각적으로 갈라 둔다.
-    let preview = (x, *y, w, 68.0);
-    round_rect(
-        g,
-        preview.0,
-        preview.1,
-        preview.2,
-        preview.3,
-        theme::radius_md(),
-        theme::surface(),
-    );
-    stroke_rect(g, preview, theme::border());
-    draw_text(
-        g,
-        preview.0 + 12.0,
-        preview.1 + 10.0,
-        "실제 깜빡임",
-        10.5,
-        theme::text_dim(),
-        false,
-    );
-    let selected = cursor_shape_label(s.cursor_shape);
-    draw_text(
-        g,
-        preview.0 + 12.0,
-        preview.1 + 35.0,
-        selected,
-        12.0,
-        theme::text(),
-        true,
-    );
-    if s.caret_on {
-        cursor_sample(
-            g,
-            s.cursor_shape,
-            preview.0 + preview.2 - 55.0,
-            preview.1 + 18.0,
-            s.cursor_thickness,
-            false,
-            s.cursor_color,
-        );
-    }
-    *y += 84.0;
-    let thickness: Vec<(&str, bool, SettingsAction)> = [1u8, 2, 3, 4, 6]
-        .iter()
-        .map(|px| {
-            let label = match px {
-                1 => "1px",
-                2 => "2px",
-                3 => "3px",
-                4 => "4px",
-                _ => "6px",
-            };
-            (
-                label,
-                (s.cursor_thickness - *px as f32).abs() < 0.1,
-                SettingsAction::CursorThickness(*px),
-            )
-        })
-        .collect();
-    if s.cursor_shape == cursor::CursorShape::Block {
-        draw_text(
-            g,
-            x + 2.0,
-            *y + 10.0,
-            "블록은 셀 전체를 채워 굵기를 쓰지 않아요",
-            11.5,
-            theme::text_mute(),
-            false,
-        );
-        *y += 42.0;
-    } else {
-        row_label(g, x, y, "선 굵기");
-        segmented(g, s, hits, x, *y, w, &thickness);
-        *y += 42.0;
-    }
-    *y += 12.0;
-    section_title(
-        g,
-        x,
-        *y,
-        "마우스 포인터",
-        "텍스트 입력 캐럿과 터미널 위 포인터는 서로 다른 설정입니다",
-    );
-    *y += 48.0;
-    segmented(
-        g,
-        s,
-        hits,
-        x,
-        *y,
-        w,
-        &[
-            (
-                "화살표",
-                s.mouse_cursor != "ibeam",
-                SettingsAction::MouseCursor("arrow"),
-            ),
-            (
-                "I-빔",
-                s.mouse_cursor == "ibeam",
-                SettingsAction::MouseCursor("ibeam"),
-            ),
-        ],
-    );
-    *y += 54.0;
-
-    section_title(
-        g,
-        x,
-        *y,
         "색과 형태",
         "현재 테마 토큰을 모든 네이티브 화면이 함께 씁니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let gap = 10.0;
     let grid_cols = if w >= 600.0 { 3 } else { 2 };
     let pw = (w - gap * (grid_cols - 1) as f32) / grid_cols as f32;
@@ -2857,7 +2725,7 @@ fn paint_appearance(
             "시스템 밝기별 테마",
             "운영체제가 밝음/어두움을 바꿀 때 입을 팔레트입니다",
         );
-        *y += 46.0;
+        *y += 52.0;
         for (light, label, current) in [
             (true, "밝은 화면", s.system_light.as_str()),
             (false, "어두운 화면", s.system_dark.as_str()),
@@ -2958,14 +2826,11 @@ fn paint_appearance(
         })
         .collect();
     chips_owned(g, s, hits, x, y, w, accents);
-    row_label(g, x, y, "모서리 형태");
     let shapes: Vec<(&str, bool, SettingsAction)> = theme::SHAPE_PRESETS
         .iter()
         .map(|(key, label, _)| (*label, s.shape == *key, SettingsAction::Shape(key)))
         .collect();
-    segmented(g, s, hits, x, *y, w, &shapes);
-    *y += 46.0;
-    row_label(g, x, y, "최소 대비");
+    seg_row(g, s, hits, x, y, w, "모서리 형태", &shapes);
     let contrast: Vec<(&str, bool, SettingsAction)> = theme::CONTRAST_PRESETS
         .iter()
         .map(|(label, value)| {
@@ -2976,8 +2841,7 @@ fn paint_appearance(
             )
         })
         .collect();
-    segmented(g, s, hits, x, *y, w, &contrast);
-    *y += 54.0;
+    seg_row(g, s, hits, x, y, w, "최소 대비", &contrast);
     stepper_row(
         g,
         s,
@@ -3002,37 +2866,43 @@ fn paint_appearance(
         SettingsAction::UiZoomDelta(-1),
         SettingsAction::UiZoomDelta(1),
     );
-    segmented(
+    // 크롬 글꼴. 터미널 격자와 별개다 — 격자는 고정폭이어야 하지만 탭·설정·상태줄은
+    // 산세리프가 더 잘 읽힌다. 바로 먹고 재시작이 필요 없다.
+    dropdown_row(
         g,
         s,
         hits,
         x,
-        *y,
+        y,
         w,
+        "UI 글꼴",
+        &ui_font_label(&s.ui_font),
+        DropdownId::UiFont,
+    );
+    seg_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "탭 위치",
         &[
-            (
-                "탭을 위에",
-                s.tabs_on_top,
-                SettingsAction::TabPosition("top"),
-            ),
-            (
-                "탭을 옆에",
-                !s.tabs_on_top,
-                SettingsAction::TabPosition("side"),
-            ),
+            ("위", s.tabs_on_top, SettingsAction::TabPosition("top")),
+            ("옆", !s.tabs_on_top, SettingsAction::TabPosition("side")),
         ],
     );
-    *y += 44.0;
+    *y += 10.0;
     button(
         g,
         s,
         hits,
-        (x, *y, 148.0, 34.0),
+        (x, *y, 130.0, CTL_H),
         "배율 1:1로 되돌리기",
         Target::Setting(SettingsAction::ResetScale),
         false,
     );
-    *y += 46.0;
+    *y += CTL_H + 10.0;
 }
 
 fn paint_statusbar(
@@ -3050,7 +2920,7 @@ fn paint_statusbar(
         "실시간 미리보기 예시",
         "고른 순서와 색, 구분선을 창 맨 아래와 같은 흐름으로 보여 줍니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     statusbar_preview(g, s, x, *y, w);
     *y += 80.0;
 
@@ -3061,7 +2931,7 @@ fn paint_statusbar(
         "표시 항목",
         "체크는 보이기, 화살표는 순서, 색 칸은 항목의 강조색입니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     for (index, id) in s.statusbar_order.iter().enumerate() {
         statusbar_widget_row(g, s, hits, x, y, w, id, index);
     }
@@ -3074,7 +2944,7 @@ fn paint_statusbar(
         "사용량에 넣을 정보",
         "서비스 이름은 유지하고 필요한 수치만 각각 고릅니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     for (provider, title) in [("claude", "Claude"), ("codex", "Codex")] {
         row_label(g, x, y, title);
         let selected = s.statusbar_usage_fields.get(provider);
@@ -3198,16 +3068,7 @@ fn statusbar_item_color(s: &Snapshot, id: &str) -> [u8; 4] {
 
 fn statusbar_preview(g: &mut gpu::GpuRenderer, s: &Snapshot, x: f32, y: f32, w: f32) {
     let rect = (x, y, w, 64.0);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        theme::surface(),
-    );
-    stroke_rect(g, rect, theme::border());
+    stroke_round(g, rect, theme::radius_md(), theme::border());
     draw_text(
         g,
         rect.0 + 12.0,
@@ -3288,16 +3149,7 @@ fn statusbar_widget_row(
     index: usize,
 ) {
     let rect = (x, *y, w, 70.0);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        theme::surface(),
-    );
-    stroke_rect(g, rect, theme::border());
+    stroke_round(g, rect, theme::radius_md(), theme::border());
     let visible = !s.statusbar_hidden.contains(id);
     let check = (rect.0 + 10.0, rect.1 + 9.0, 28.0, 28.0);
     g.queue_icon(
@@ -3379,7 +3231,7 @@ fn statusbar_widget_row(
         let on = selected.eq_ignore_ascii_case(&value);
         round_rect(g, sr.0, sr.1, sr.2, sr.3, 5.0, color);
         if on {
-            stroke_rect(g, (sr.0 - 2.0, sr.1 - 2.0, sr.2 + 4.0, sr.3 + 4.0), theme::text());
+            stroke_round(g, (sr.0 - 2.0, sr.1 - 2.0, sr.2 + 4.0, sr.3 + 4.0), 7.0, theme::text());
         }
         register_clipped(
             g,
@@ -3459,7 +3311,7 @@ fn paint_palette_editor(
         "팔레트 색",
         "색 칸을 고른 뒤 휠이나 #rrggbb 값으로 바꿉니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let selected = match s.input {
         Some(SettingsInput::PaletteHex(index)) => index.min(s.palette_hex.len().saturating_sub(1)),
         _ => 0,
@@ -3509,9 +3361,10 @@ fn paint_palette_editor(
                 .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
                 .unwrap_or([0, 0, 0, 255]),
         );
-        stroke_rect(
+        stroke_round(
             g,
             rect,
+            theme::radius_sm(),
             if index == selected { theme::accent() } else { theme::border() },
         );
         register_clipped(
@@ -3524,6 +3377,264 @@ fn paint_palette_editor(
     }
     let rows = (s.palette_hex.len() + cols - 1) / cols;
     *y += rows as f32 * 36.0 + 18.0;
+}
+
+/// 색 선택기 한 벌 — 채도×명도 면·색상 띠·HEX 칸·스포이드. 팔레트 칸과 기기색이
+/// **같은 것**을 쓴다: 고르는 손놀림이 자리마다 다르면 한쪽에서 익힌 것이 다른
+/// 쪽에서 안 통한다. 쓴 높이를 돌려준다.
+#[allow(clippy::too_many_arguments)]
+fn paint_color_picker(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: f32,
+    w: f32,
+    field: SettingsInput,
+    slot_label: &str,
+    value: &str,
+    eyedropper: Option<SettingsAction>,
+) -> f32 {
+    let (hue, sat, val) = s.picker_hsv;
+    let wheel_w = w.min(310.0).max(180.0);
+    let sv = (x, y, wheel_w, 132.0);
+    let cells_x = 24;
+    let cells_y = 12;
+    for row in 0..cells_y {
+        for col in 0..cells_x {
+            let saturation = (col + 1) as f32 / cells_x as f32;
+            let value = 1.0 - row as f32 / cells_y as f32;
+            let rgb = hsv_rgb(hue, saturation, value);
+            g.rect(
+                sv.0 + col as f32 * sv.2 / cells_x as f32,
+                sv.1 + row as f32 * sv.3 / cells_y as f32,
+                sv.2 / cells_x as f32 + 0.5,
+                sv.3 / cells_y as f32 + 0.5,
+                [rgb[0], rgb[1], rgb[2], 255],
+            );
+        }
+    }
+    stroke_rect(g, sv, theme::border());
+    let marker_x = sv.0 + sat * sv.2;
+    let marker_y = sv.1 + (1.0 - val) * sv.3;
+    stroke_rect(g, (marker_x - 4.0, marker_y - 4.0, 8.0, 8.0), [255, 255, 255, 255]);
+    register_clipped(
+        g,
+        hits,
+        Target::Setting(SettingsAction::PickerSV),
+        sv,
+        HitCursor::Pointer,
+    );
+
+    let hue_rect = (x, y + 141.0, wheel_w, 18.0);
+    for col in 0..60 {
+        let rgb = hsv_rgb(col as f32 * 6.0, 1.0, 1.0);
+        g.rect(
+            hue_rect.0 + col as f32 * hue_rect.2 / 60.0,
+            hue_rect.1,
+            hue_rect.2 / 60.0 + 0.5,
+            hue_rect.3,
+            [rgb[0], rgb[1], rgb[2], 255],
+        );
+    }
+    stroke_rect(g, hue_rect, theme::border());
+    g.rect(
+        hue_rect.0 + (hue / 360.0) * hue_rect.2 - 1.0,
+        hue_rect.1 - 2.0,
+        2.0,
+        hue_rect.3 + 4.0,
+        [255, 255, 255, 255],
+    );
+    register_clipped(
+        g,
+        hits,
+        Target::Setting(SettingsAction::PickerHue),
+        hue_rect,
+        HitCursor::Pointer,
+    );
+    let field_x = x + wheel_w + 16.0;
+    let field_w = (w - wheel_w - 16.0).max(110.0);
+    draw_text(g, field_x, y + 4.0, slot_label, 12.0, theme::text(), true);
+    text_field(
+        g,
+        s,
+        hits,
+        caret,
+        field_x,
+        y + 28.0,
+        field_w,
+        "HEX",
+        value,
+        field,
+        s.settings_caret,
+        false,
+    );
+    if let Some(action) = eyedropper {
+        button(
+            g,
+            s,
+            hits,
+            (field_x, y + 91.0, field_w.min(126.0), 34.0),
+            "화면에서 색 집기",
+            Target::Setting(action),
+            false,
+        );
+    }
+    178.0
+}
+
+/// 기기별 색 — 이 기기와 명부의 기계 한 줄씩. 줄을 고르면 프리셋과 선택기가
+/// 그 밑에 펼쳐진다. 색은 pane 헤더 칩·배치도 칸·정보 탭·거울 pane 바탕이 함께
+/// 쓰므로, 여기서 바꾸면 그 넷이 한꺼번에 따라온다.
+fn paint_device_colors(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    section_title(
+        g,
+        x,
+        *y,
+        "기기 색",
+        "pane 헤더·배치도·정보 탭이 기기를 이 색으로 가릅니다",
+    );
+    *y += 54.0;
+    if s.device_colors.is_empty() {
+        draw_text(
+            g,
+            x + 2.0,
+            *y,
+            "아직 이름을 알아낸 기기가 없어요",
+            11.5,
+            theme::text_dim(),
+            false,
+        );
+        *y += 30.0;
+        return;
+    }
+    let selected = match s.input {
+        Some(SettingsInput::DeviceHex(index)) if index < s.device_colors.len() => Some(index),
+        _ => None,
+    };
+    let to_rgba = |hex: &str| {
+        theme::parse_hex(hex)
+            .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+            .unwrap_or([0, 0, 0, 255])
+    };
+    for (index, row) in s.device_colors.iter().enumerate() {
+        let rect = (x, *y, w, 40.0);
+        let is_sel = selected == Some(index);
+        stroke_round(g, rect, theme::radius_md(), if is_sel { theme::accent() } else { theme::border() });
+        let color = to_rgba(&row.hex);
+        let swatch = (x + 8.0, *y + 8.0, 24.0, 24.0);
+        round_rect(g, swatch.0, swatch.1, swatch.2, swatch.3, theme::radius_sm(), color);
+        stroke_round(g, swatch, theme::radius_sm(), theme::edge_on(color));
+        let name = if row.local {
+            format!("{} · 이 기기", row.label)
+        } else {
+            row.label.clone()
+        };
+        let right_w = 176.0;
+        let name_w = (w - 42.0 - right_w).max(60.0);
+        let shown = fit(g, &name, name_w, 12.5, is_sel);
+        draw_text(g, x + 42.0, *y + 12.0, &shown, 12.5, theme::text(), is_sel);
+        let hex_x = x + w - right_w + 8.0;
+        draw_text(g, hex_x, *y + 13.0, &row.hex, 11.0, theme::text_dim(), false);
+        register_clipped(
+            g,
+            hits,
+            Target::Setting(SettingsAction::FocusDeviceHex(index)),
+            rect,
+            HitCursor::Pointer,
+        );
+        if row.custom {
+            button(
+                g,
+                s,
+                hits,
+                (x + w - 78.0, *y + 5.0, 70.0, 30.0),
+                "기본값",
+                Target::Setting(SettingsAction::ResetDeviceColor(index)),
+                false,
+            );
+        } else {
+            draw_text(g, x + w - 62.0, *y + 13.0, "기본값", 11.0, theme::text_mute(), false);
+        }
+        *y += 46.0;
+    }
+    if let Some(index) = selected {
+        let row = &s.device_colors[index];
+        *y += 4.0;
+        row_label(g, x, y, "프리셋 — 서로 갈라 보이는 다섯 색");
+        let mut cx = x;
+        for (_, color) in crate::render::pane_identity::DEVICE_COLOR_PRESETS {
+            let hex = theme::hex_str([color[0], color[1], color[2]]);
+            let is_cur = row.hex.eq_ignore_ascii_case(&hex);
+            let rect = (cx, *y, 34.0, 30.0);
+            round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), *color);
+            stroke_round(
+                g,
+                rect,
+                theme::radius_sm(),
+                if is_cur { theme::text() } else { theme::edge_on(*color) },
+            );
+            if is_cur {
+                stroke_round(g, (rect.0 + 2.0, rect.1 + 2.0, rect.2 - 4.0, rect.3 - 4.0), (theme::radius_sm() - 2.0).max(0.0), theme::bg());
+            }
+            register_clipped(
+                g,
+                hits,
+                Target::Setting(SettingsAction::DevicePreset(index, hex)),
+                rect,
+                HitCursor::Pointer,
+            );
+            cx += 41.0;
+        }
+        *y += 42.0;
+        let value = if s.input == Some(SettingsInput::DeviceHex(index)) {
+            s.palette_edit.clone()
+        } else {
+            row.hex.clone()
+        };
+        *y += paint_color_picker(
+            g,
+            s,
+            hits,
+            caret,
+            x,
+            *y,
+            w,
+            SettingsInput::DeviceHex(index),
+            &row.label,
+            &value,
+            s.eyedropper.then(|| SettingsAction::DeviceEyedropper(index)),
+        );
+        draw_text(
+            g,
+            x + 2.0,
+            *y - 12.0,
+            "HEX 칸은 #rrggbb 말고 rgb(r, g, b) · r, g, b 도 받아요",
+            10.5,
+            theme::text_dim(),
+            false,
+        );
+        *y += 10.0;
+    }
+    button(
+        g,
+        s,
+        hits,
+        (x, *y, 172.0, 34.0),
+        "모든 기기 색 기본값으로",
+        Target::Setting(SettingsAction::ResetAllDeviceColors),
+        false,
+    );
+    *y += 50.0;
 }
 
 /// 색 선택기 한 벌 — 채도×명도 면·색상 띠·HEX 칸·스포이드. 팔레트 칸과 기기색이
@@ -3812,6 +3923,159 @@ fn hsv_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
     ]
 }
 
+/// 「터미널」 페이지의 커서 절. 목업 IA(셸+커서→터미널)대로 「모양」에서 여기로
+/// 옮겼다 — 커서는 색·글꼴이 아니라 pane 안 동작이라 셸 옆이 맞다.
+fn paint_cursor(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    section_title(
+        g,
+        x,
+        *y,
+        "커서",
+        "모양만 고르면 색은 현재 캐릭터를 따라가요",
+    );
+    *y += 54.0;
+    draw_text(g, x + 2.0, *y, "기본", 11.5, theme::text_dim(), true);
+    *y += 24.0;
+    cursor_shape_grid(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        &[
+            (cursor::CursorShape::Block, "블록"),
+            (cursor::CursorShape::Bar, "빔"),
+            (cursor::CursorShape::Underline, "밑줄"),
+        ],
+    );
+    let everyday = [
+        cursor::CursorShape::Block,
+        cursor::CursorShape::Bar,
+        cursor::CursorShape::Underline,
+    ];
+    if !everyday.contains(&s.cursor_shape) {
+        *y += 8.0;
+        draw_text(
+            g,
+            x + 2.0,
+            *y,
+            "고급 · 기존 설정",
+            11.5,
+            theme::text_dim(),
+            true,
+        );
+        *y += 24.0;
+        cursor_shape_grid(
+            g,
+            s,
+            hits,
+            x,
+            y,
+            w,
+            &[(s.cursor_shape, cursor_shape_label(s.cursor_shape))],
+        );
+    }
+    *y += 8.0;
+    // 고른 열 밑에만 미리보기를 두면 선택을 바꿀 때 카드가 좌우로 뛰고, 좁은
+    // 화면에서는 다음 섹션과 한 묶음처럼 붙는다. 한 줄 전체를 고정해 결과와
+    // 선택지를 시각적으로 갈라 둔다.
+    let preview = (x, *y, w, 68.0);
+    stroke_round(g, preview, theme::radius_md(), theme::border());
+    draw_text(
+        g,
+        preview.0 + 12.0,
+        preview.1 + 10.0,
+        "실제 깜빡임",
+        10.5,
+        theme::text_dim(),
+        false,
+    );
+    let selected = cursor_shape_label(s.cursor_shape);
+    draw_text(
+        g,
+        preview.0 + 12.0,
+        preview.1 + 35.0,
+        selected,
+        12.0,
+        theme::text(),
+        true,
+    );
+    if s.caret_on {
+        cursor_sample(
+            g,
+            s.cursor_shape,
+            preview.0 + preview.2 - 55.0,
+            preview.1 + 18.0,
+            s.cursor_thickness,
+            false,
+            s.cursor_color,
+        );
+    }
+    *y += 84.0;
+    let thickness: Vec<(&str, bool, SettingsAction)> = [1u8, 2, 3, 4, 6]
+        .iter()
+        .map(|px| {
+            let label = match px {
+                1 => "1px",
+                2 => "2px",
+                3 => "3px",
+                4 => "4px",
+                _ => "6px",
+            };
+            (
+                label,
+                (s.cursor_thickness - *px as f32).abs() < 0.1,
+                SettingsAction::CursorThickness(*px),
+            )
+        })
+        .collect();
+    if s.cursor_shape == cursor::CursorShape::Block {
+        draw_text(
+            g,
+            x + 2.0,
+            *y + 10.0,
+            "블록은 셀 전체를 채워 굵기를 쓰지 않아요",
+            11.5,
+            theme::text_mute(),
+            false,
+        );
+        *y += 42.0;
+    } else {
+        seg_row(g, s, hits, x, y, w, "선 굵기", &thickness);
+    }
+    *y += 12.0;
+    seg_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "마우스 포인터",
+        &[
+            (
+                "화살표",
+                s.mouse_cursor != "ibeam",
+                SettingsAction::MouseCursor("arrow"),
+            ),
+            (
+                "I-빔",
+                s.mouse_cursor == "ibeam",
+                SettingsAction::MouseCursor("ibeam"),
+            ),
+        ],
+    );
+    *y += 8.0;
+}
+
 fn paint_shell(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -3821,22 +4085,17 @@ fn paint_shell(
     y: &mut f32,
     w: f32,
 ) {
-    section_title(
-        g,
-        x,
-        *y,
-        "새 pane의 셸",
-        "이미 열린 pane은 그대로 두고 다음 pane부터 적용합니다",
-    );
-    *y += 48.0;
+    section_title(g, x, *y, "셸", "");
+    *y += 54.0;
     let known = matches!(s.shell.as_str(), "" | "/bin/zsh" | "/bin/bash");
-    segmented(
+    seg_row(
         g,
         s,
         hits,
         x,
-        *y,
+        y,
         w,
+        "새 pane의 셸",
         &[
             (
                 "시스템 기본",
@@ -3855,7 +4114,6 @@ fn paint_shell(
             ),
         ],
     );
-    *y += 44.0;
     text_field(
         g,
         s,
@@ -3878,6 +4136,8 @@ fn paint_shell(
         w,
         "셸 경로는 실행 파일 하나만 적습니다. 명령 옵션은 각 pane에서 직접 붙여 주세요.",
     );
+    *y += 16.0;
+    paint_cursor(g, s, hits, x, y, w);
 }
 
 fn paint_claude(
@@ -3896,7 +4156,7 @@ fn paint_claude(
         "Agent 기본값",
         "새로 띄우는 Claude와 Codex 작업대에 적용됩니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     toggle_row(
         g,
         s,
@@ -3935,9 +4195,7 @@ fn paint_claude(
             )
         })
         .collect();
-    row_label(g, x, y, "모델");
-    segmented(g, s, hits, x, *y, w, &model_cells);
-    *y += 42.0;
+    seg_row(g, s, hits, x, y, w, "모델", &model_cells);
     let efforts = [
         ("기본", ""),
         ("낮게", "low"),
@@ -3955,9 +4213,7 @@ fn paint_claude(
             )
         })
         .collect();
-    row_label(g, x, y, "생각 깊이");
-    segmented(g, s, hits, x, *y, w, &effort_cells);
-    *y += 44.0;
+    seg_row(g, s, hits, x, y, w, "생각 깊이", &effort_cells);
     text_field(
         g,
         s,
@@ -4009,13 +4265,14 @@ fn paint_accounts(
         .map_or(s.account_autoswitch_pct, |h| h.autoswitch_pct)
         .round() as u32;
     if switch_on {
-        segmented(
+        seg_row(
             g,
             s,
             hits,
             x,
-            *y,
+            y,
             w,
+            "전환 기준",
             &[
                 (
                     "80%",
@@ -4039,7 +4296,6 @@ fn paint_accounts(
                 ),
             ],
         );
-        *y += 48.0;
     }
 }
 
@@ -4223,7 +4479,8 @@ fn paint_pet(
     let prefs = crate::chrome::pet_preferences();
     let scale = crate::chrome::pet_scale_percent(&prefs);
 
-    toggle_row(
+    // 설명은 줄 안의 힌트로 — 줄 밑에 따로 그리면 구분선을 뚫고 지나갔다.
+    toggle_row_hint(
         g,
         s,
         hits,
@@ -4231,19 +4488,11 @@ fn paint_pet(
         y,
         w,
         "바탕화면에 띄우기",
+        "kasaterm을 내려도 바탕화면에 남습니다",
         on,
         SettingsAction::TogglePet,
     );
-    draw_text(
-        g,
-        x + 12.0,
-        *y - 4.0,
-        "kasaterm을 내려도 바탕화면에 남습니다",
-        11.0,
-        theme::text_dim(),
-        false,
-    );
-    *y += 24.0;
+    *y += 16.0;
 
     draw_text(g, x, *y, "캐릭터", 12.5, theme::text(), true);
     *y += 24.0;
@@ -4442,8 +4691,8 @@ fn paint_machines(
                 SettingsAction::ChromeMachine(label.clone()),
             ));
         }
-        segmented(g, s, hits, x, *y, w, &cells);
-        *y += 40.0;
+        seg_row(g, s, hits, x, y, w, "크롬 기계", &cells);
+        *y += 6.0;
         let note = if chosen.is_empty() {
             "학생의 브라우저 도구가 이 맥의 크롬을 씁니다".to_string()
         } else {
@@ -4533,20 +4782,16 @@ fn machine_row(
             54.0
         },
     );
-    round_rect(
+    stroke_round(
         g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
+        rect,
         theme::radius_md(),
         if contains(rect, s.cursor) {
-            theme::surface_hover()
+            theme::text_dim()
         } else {
-            theme::surface()
+            theme::border()
         },
     );
-    stroke_rect(g, rect, theme::border());
     g.queue_icon(
         "server",
         rect.0 + 12.0,
@@ -4702,7 +4947,7 @@ fn paint_themes(
         "캐릭터 테마",
         "명단과 그림, 성격을 한 벌로 갈아낍니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let gap = 12.0;
     let cols = if w >= 620.0 { 2 } else { 1 };
     let cw = (w - gap * (cols - 1) as f32) / cols as f32;
@@ -4833,7 +5078,7 @@ fn paint_themes(
             &format!("{label} 명단"),
             "아무도 따로 고르지 않으면 이 테마의 전원이 기본 후보입니다",
         );
-        *y += 48.0;
+        *y += 54.0;
         button(
             g,
             s,
@@ -4926,6 +5171,64 @@ fn paint_themes(
     );
 }
 
+/// 캐릭터 페이지 맨 위 「테마」 절 — 목업 IA(테마+캐릭터→캐릭터). 세트 고르기는
+/// 선택 상자 하나로 끝나고, 명단·그림·내보내기처럼 세트를 손보는 일은 「테마 관리」로
+/// 예전 테마 페이지에 들어가서 한다(그 페이지는 옆 목록에서 빠졌다).
+fn paint_character_theme_row(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    section_title(g, x, *y, "테마", "");
+    *y += 54.0;
+    let current = s
+        .themes
+        .iter()
+        .find(|t| t.id == s.character_theme)
+        .map(|t| t.label.clone())
+        .unwrap_or_else(|| {
+            if s.character_theme.is_empty() {
+                "블루 아카이브 (기본)".to_string()
+            } else {
+                s.character_theme.clone()
+            }
+        });
+    dropdown_row(
+        g,
+        s,
+        hits,
+        x,
+        y,
+        w,
+        "캐릭터 테마",
+        &current,
+        DropdownId::CharacterTheme,
+    );
+    *y += 8.0;
+    button(
+        g,
+        s,
+        hits,
+        (x, *y, 92.0, CTL_H),
+        "테마 관리",
+        Target::Category(SettingsCat::Theme),
+        false,
+    );
+    draw_text(
+        g,
+        x + 104.0,
+        *y + 6.5,
+        "명단과 그림, 내보내기·삭제",
+        11.5,
+        theme::text_dim(),
+        false,
+    );
+    *y += CTL_H + 28.0;
+}
+
 fn paint_students(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -4935,6 +5238,9 @@ fn paint_students(
     y: &mut f32,
     w: f32,
 ) {
+    if s.student_selected.is_none() {
+        paint_character_theme_row(g, s, hits, x, y, w);
+    }
     paint_themegen_engine(g, s, hits, caret, x, y, w);
     if let Some(selected) = s.student_selected.as_deref() {
         button(
@@ -5064,7 +5370,7 @@ fn paint_students(
             "모델",
             "이 캐릭터만 다른 실행 통로를 쓸 수 있습니다",
         );
-        *y += 46.0;
+        *y += 52.0;
         let choices: Vec<(String, bool, SettingsAction)> = s
             .models
             .iter()
@@ -5086,7 +5392,7 @@ fn paint_students(
             "성격",
             "다른 칸으로 나가거나 목록으로 돌아갈 때 저장합니다",
         );
-        *y += 44.0;
+        *y += 50.0;
         text_field(
             g,
             s,
@@ -5109,7 +5415,7 @@ fn paint_students(
             "그림 생성",
             "참조 그림을 이 화면에 놓고 모든 기본 동작을 한 번에 굽습니다",
         );
-        *y += 48.0;
+        *y += 54.0;
         let status = match s.themegen_phase {
             Some(crate::themegen::GenPhase::Describing) => "그림 살펴보는 중",
             Some(crate::themegen::GenPhase::Generating) => "굽는 중",
@@ -5203,7 +5509,7 @@ fn paint_students(
         "캐릭터",
         "한 명을 골라 이름과 성격, 모델을 고칩니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let gap = 10.0;
     let cols = if w >= 680.0 {
         4
@@ -5301,7 +5607,7 @@ fn paint_motion_sprites(
         "모션 그림",
         "프레임 칸을 고르고 그림 파일을 놓으면 그 한 장만 바뀝니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     for (motion, title) in [
         ("idle", "대기"),
         ("walk", "걷기"),
@@ -5400,7 +5706,7 @@ fn paint_themegen_engine(
         "그림 생성 엔진",
         "준비되지 않은 엔진은 이유를 함께 표시합니다",
     );
-    *y += 48.0;
+    *y += 54.0;
     let providers = s
         .themegen_providers
         .iter()
@@ -5465,7 +5771,7 @@ fn paint_feedback(
         "무엇이 불편했나요",
         "보내지 않고 이 기기의 피드백 폴더에 한 장씩 저장합니다",
     );
-    *y += 50.0;
+    *y += 56.0;
     text_field(
         g,
         s,
@@ -6402,14 +6708,11 @@ fn cursor_sample(
     let cw = if compact { 9.0 } else { 11.0 };
     let ch = if compact { 23.0 } else { 29.0 };
     let width = cw * 2.0;
-    round_rect(
+    stroke_round(
         g,
-        x - 5.0,
-        y - 4.0,
-        width + 10.0,
-        ch + 8.0,
+        (x - 5.0, y - 4.0, width + 10.0, ch + 8.0),
         theme::radius_sm(),
-        theme::surface_hover(),
+        theme::border(),
     );
     draw_text(
         g,
@@ -6437,14 +6740,18 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
         SettingsCat::Appearance => (
             "모양",
             "sparkles",
-            "커서와 색, 글자 크기를 한 화면에서 맞춥니다",
+            "색과 글자 크기, 화면 배율을 한 화면에서 맞춥니다",
         ),
         SettingsCat::Statusbar => (
             "하단바",
             "panel-bottom",
             "보이는 정보와 순서, 색을 내 작업에 맞춥니다",
         ),
-        SettingsCat::Shell => ("셸", "terminal", "새 pane이 어떤 셸로 시작할지 정합니다"),
+        SettingsCat::Shell => (
+            "터미널",
+            "terminal",
+            "새 pane의 셸과 커서를 정합니다",
+        ),
         SettingsCat::Pet => (
             "펫",
             "sparkles",
@@ -6475,38 +6782,62 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
     }
 }
 
-fn section_title(g: &mut gpu::GpuRenderer, x: f32, y: f32, title: &str, desc: &str) {
-    draw_text(g, x, y, title, 15.0, theme::text(), true);
-    draw_text(g, x, y + 24.0, desc, 11.5, theme::text_dim(), false);
+/// 묶음 제목. 목업의 `.group h2` — 작은 흐림 글자 하나. 부르는 쪽이 이어서
+/// 54 를 더하므로 제목은 그 아래쪽(첫 행 바로 위)에 앉힌다. 설명은 행마다
+/// 붙는 보조글로 옮겨 가고 여기선 그리지 않는다(2026-09-10 「카드 다 제거하고 플랫하게」).
+fn section_title(g: &mut gpu::GpuRenderer, x: f32, y: f32, title: &str, _desc: &str) {
+    draw_text(g, x, y + 30.0, title, 11.0, theme::text_dim(), false);
+}
+
+/// 플랫 행 하나: 왼쪽 이름(+보조글), 아래 얇은 선. 조작은 부르는 쪽이 오른쪽에 얹는다.
+/// 돌려주는 값은 행 사각형.
+fn flat_row(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, label: &str, hint: &str) -> Rect {
+    let rect = (x, y, w, ROW_H);
+    if hint.is_empty() {
+        draw_text(g, x, y + 13.0, label, 12.0, theme::text(), false);
+    } else {
+        draw_text(g, x, y + 7.0, label, 12.0, theme::text(), false);
+        draw_text(g, x, y + 24.0, hint, 10.5, theme::text_dim(), false);
+    }
+    g.rect(x, y + ROW_H - 1.0, w, 1.0, theme::with_alpha(theme::border(), 140));
+    rect
+}
+
+/// 이름표 + 구분 선택을 한 행에. 목업의 「새 방의 시작 폴더 · [마지막 위치|홈|직접 지정]」.
+fn seg_row(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    label: &str,
+    cells: &[(&str, bool, SettingsAction)],
+) {
+    flat_row(g, x, *y, w, label, "");
+    segmented(g, s, hits, x, *y + (ROW_H - CTL_H) / 2.0, w, cells);
+    *y += ROW_H;
 }
 
 /// 선택 줄(`segmented`) 위에 서는 한 줄 이름표. 줄이 둘 이상 잇달아 서면 어느 줄이
 /// 무엇을 고르는지 칸 글자만으로는 안 읽혔다(「끔 · 1초 · 3초」가 무엇의 간격인지) —
 /// 2026-09-07 「자잘한 것들 다 수정」.
 fn row_label(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, label: &str) {
-    draw_text(g, x + 2.0, *y, label, 11.5, theme::text_dim(), false);
+    draw_text(g, x + 2.0, *y, label, 12.0, theme::text_dim(), false);
     *y += 20.0;
 }
 
 fn info_slab(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, text: &str) {
     let rect = (x, *y, w, 48.0);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        theme::surface(),
-    );
-    g.rect(rect.0, rect.1, 2.0, rect.3, theme::border());
-    let shown = fit(g, text, rect.2 - 28.0, 11.5, false);
+    // 목업(플랫): 채움 없이 테두리만.
+    stroke_round(g, rect, ctrl_radius(), theme::border());
+    let shown = fit(g, text, rect.2 - 28.0, 12.0, false);
     draw_text(
         g,
         rect.0 + 14.0,
         rect.1 + 16.0,
         &shown,
-        11.5,
+        12.0,
         theme::text_dim(),
         false,
     );
@@ -6524,57 +6855,46 @@ fn toggle_row(
     on: bool,
     action: SettingsAction,
 ) {
-    let rect = (x, *y, w, 44.0);
+    toggle_row_hint(g, s, hits, x, y, w, label, "", on, action);
+}
+
+/// 이름표 밑에 작은 설명이 붙는 토글 줄.
+fn toggle_row_hint(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    label: &str,
+    hint: &str,
+    on: bool,
+    action: SettingsAction,
+) {
+    // 목업: 채움 없는 토글. 꺼짐은 회색 테두리+회색 점, 켜짐은 강조색 테두리+강조색 점.
+    let rect = flat_row(g, x, *y, w, label, hint);
     let hover = contains(rect, s.cursor);
-    if hover {
-        round_rect(
-            g,
-            rect.0,
-            rect.1,
-            rect.2,
-            rect.3,
-            theme::radius_md(),
-            theme::surface_hover(),
-        );
-    }
-    draw_text(
-        g,
-        rect.0 + 12.0,
-        rect.1 + 14.0,
-        label,
-        12.5,
-        theme::text(),
-        false,
-    );
-    let toggle = (rect.0 + rect.2 - 46.0, rect.1 + 10.0, 36.0, 22.0);
-    round_rect(
-        g,
-        toggle.0,
-        toggle.1,
-        toggle.2,
-        toggle.3,
-        11.0,
-        if on {
-            theme::accent()
-        } else {
-            theme::surface_active()
-        },
-    );
+    let toggle = (rect.0 + rect.2 - 32.0, rect.1 + 11.0, 32.0, 18.0);
+    let line = if on {
+        theme::accent()
+    } else if hover {
+        theme::text_dim()
+    } else {
+        theme::border()
+    };
+    stroke_round(g, toggle, 9.0, line);
     round_rect(
         g,
         toggle.0 + if on { 17.0 } else { 3.0 },
         toggle.1 + 3.0,
-        16.0,
-        16.0,
-        8.0,
-        if on {
-            [255, 255, 255, 255]
-        } else {
-            theme::text_mute()
-        },
+        12.0,
+        12.0,
+        6.0,
+        if on { theme::accent() } else { theme::text_mute() },
     );
     register_clipped(g, hits, Target::Setting(action), rect, HitCursor::Pointer);
-    *y += 48.0;
+    g.hover_pointer |= hover;
+    *y += ROW_H;
 }
 
 fn segmented(
@@ -6589,26 +6909,47 @@ fn segmented(
     if cells.is_empty() {
         return;
     }
-    let gap = 4.0;
-    let cw = (w - gap * (cells.len() - 1) as f32) / cells.len() as f32;
+    // 목업(플랫): 칸 너비는 글자에 맞추고 상자는 오른쪽 끝에 붙는다. 채움 없이
+    // 테두리 하나, 고른 칸만 강조색 테두리+글자. 두 개짜리(언어)가 화면을
+    // 가로지르던 것을 없앴다(2026-09-10 지적).
+    let h = CTL_H;
+    let inset = 2.0;
+    let pad = 10.0;
+    let widths: Vec<f32> = cells
+        .iter()
+        .map(|(label, selected, _)| g.measure_chrome_text(label, 12.0, *selected) + pad * 2.0)
+        .collect();
+    let total = widths.iter().sum::<f32>() + inset * 2.0;
+    let outer = (x + w - total.min(w), y, total.min(w), h);
+    stroke_round(g, outer, seg_outer_radius(), theme::border());
+    let mut cx = outer.0 + inset;
     for (i, (label, selected, action)) in cells.iter().enumerate() {
-        let rect = (x + i as f32 * (cw + gap), y, cw, 34.0);
-        choice_card(g, s, hits, rect, *selected, Target::Setting(action.clone()));
-        let shown = fit(g, label, cw - 18.0, 11.5, *selected);
-        let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, *selected)) / 2.0;
+        let cw = widths[i];
+        let rect = (cx, y + inset, cw, h - inset * 2.0);
+        cx += cw;
+        let hover = contains(rect, s.cursor);
+        if *selected {
+            stroke_round(g, rect, seg_inner_radius(), theme::accent());
+        }
+        let shown = fit(g, label, cw - 8.0, 12.0, *selected);
+        let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 12.0, *selected)) / 2.0;
         draw_text(
             g,
             tx,
-            rect.1 + 10.0,
+            rect.1 + 3.5,
             &shown,
-            11.5,
+            12.0,
             if *selected {
+                theme::accent()
+            } else if hover {
                 theme::text()
             } else {
                 theme::text_dim()
             },
             *selected,
         );
+        register_clipped(g, hits, Target::Setting(action.clone()), rect, HitCursor::Pointer);
+        g.hover_pointer |= hover;
     }
 }
 
@@ -6624,32 +6965,257 @@ fn chips_owned(
     let mut cx = x;
     let mut cy = *y;
     for (label, selected, action) in cells {
-        let cw = (g.measure_chrome_text(&label, 11.5, selected) + 24.0).min(w);
+        let cw = (g.measure_chrome_text(&label, 12.0, selected) + 22.0).min(w);
         if cx + cw > x + w && cx > x {
             cx = x;
-            cy += 40.0;
+            cy += 30.0;
         }
-        let rect = (cx, cy, cw, 32.0);
-        choice_card(g, s, hits, rect, selected, Target::Setting(action));
+        let rect = (cx, cy, cw, 24.0);
+        choice_card_with_radius(g, s, hits, rect, selected, Target::Setting(action), chip_radius());
         // 반 픽셀을 더 준다. 칸 너비를 같은 함수로 재 놓고 그 값으로 다시 자르는데,
         // 두 번의 재기가 소수점에서 갈리면 딱 맞는 이름이 「Ma…」로 잘린다(실측).
-        let shown = fit(g, &label, rect.2 - 23.5, 11.5, selected);
+        let shown = fit(g, &label, rect.2 - 21.5, 12.0, selected);
         draw_text(
             g,
-            rect.0 + 12.0,
-            rect.1 + 9.0,
+            rect.0 + 11.0,
+            rect.1 + 5.5,
             &shown,
-            11.5,
+            12.0,
             if selected {
-                theme::text()
+                theme::accent()
             } else {
                 theme::text_dim()
             },
             selected,
         );
-        cx += cw + 7.0;
+        cx += cw + 6.0;
     }
-    *y = cy + 42.0;
+    *y = cy + 36.0;
+}
+
+/// 선택 상자에 뜨는 값 이름. 「terminal」·「system」·빈 값은 사람 말로 바꾼다.
+fn ui_font_label(value: &str) -> String {
+    match value {
+        "" | "terminal" => "터미널 글꼴 그대로".to_string(),
+        "system" => "시스템 고딕".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// 선택 상자에 들어갈 항목들: (보이는 이름, 지금 골라진 것인지, 고르면 할 일).
+fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAction)> {
+    match id {
+        DropdownId::UiFont => {
+            let custom = !matches!(s.ui_font.as_str(), "" | "terminal" | "system");
+            let mut items = vec![
+                (
+                    ui_font_label("terminal"),
+                    !custom && s.ui_font != "system",
+                    SettingsAction::UiFont("terminal".to_string()),
+                ),
+                (
+                    ui_font_label("system"),
+                    s.ui_font == "system",
+                    SettingsAction::UiFont("system".to_string()),
+                ),
+            ];
+            items.extend(s.ui_fonts.iter().map(|f| {
+                (
+                    f.clone(),
+                    custom && crate::onboarding::ui_font_matches(&s.ui_font, f),
+                    SettingsAction::UiFont(f.clone()),
+                )
+            }));
+            items
+        }
+        DropdownId::CharacterTheme => s
+            .themes
+            .iter()
+            .map(|t| {
+                (
+                    if t.count > 0 {
+                        format!("{} · {}명", t.label, t.count)
+                    } else {
+                        t.label.clone()
+                    },
+                    s.character_theme == t.id,
+                    SettingsAction::SelectTheme(t.id.clone()),
+                )
+            })
+            .collect(),
+    }
+}
+
+const DROPDOWN_FIELD_W: f32 = 260.0;
+const DROPDOWN_FIELD_H: f32 = CTL_H;
+const DROPDOWN_ITEM_H: f32 = 28.0;
+const DROPDOWN_VISIBLE_ITEMS: f32 = 8.0;
+
+/// 라벨 왼쪽, 오른쪽에 닫힌 선택 상자 한 줄. 펼쳐져 있으면 자리를 기록해 두고
+/// 팝업은 `paint()` 끝에서 맨 위에 그린다.
+#[allow(clippy::too_many_arguments)]
+fn dropdown_row(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    label: &str,
+    value: &str,
+    id: DropdownId,
+) {
+    flat_row(g, x, *y, w, label, "");
+    let fw = DROPDOWN_FIELD_W.min(w * 0.55);
+    let rect = (x + w - fw, *y + (ROW_H - DROPDOWN_FIELD_H) / 2.0, fw, DROPDOWN_FIELD_H);
+    let open = s.dropdown == Some(id);
+    let hover = contains(rect, s.cursor);
+    round_rect(
+        g,
+        rect.0,
+        rect.1,
+        rect.2,
+        rect.3,
+        ctrl_radius(),
+        if open || hover {
+            theme::surface_hover()
+        } else {
+            theme::surface()
+        },
+    );
+    stroke_round(
+        g,
+        rect,
+        ctrl_radius(),
+        if open { theme::accent() } else { theme::border() },
+    );
+    let shown = fit(g, value, rect.2 - 40.0, 12.0, false);
+    draw_text(g, rect.0 + 10.0, rect.1 + 6.5, &shown, 12.0, theme::text(), false);
+    g.queue_icon(
+        if open { "chevron-up" } else { "chevron-down" },
+        rect.0 + rect.2 - 22.0,
+        rect.1 + 6.5,
+        13.0,
+        theme::text_dim(),
+    );
+    register_clipped(g, hits, Target::Dropdown(id), rect, HitCursor::Pointer);
+    g.hover_pointer |= hover;
+    if open {
+        if let Some(visible) = g.clip_hit(rect) {
+            let _ = visible;
+            mark_dropdown_anchor(id, rect);
+        }
+    }
+    *y += ROW_H;
+}
+
+/// 펼친 목록. 본문 클립 바깥에서, 모든 것 위에 그린다. 바깥 전체에 「닫기」 판정을
+/// 먼저 깔고 항목 판정을 그 위에 얹어, 어디를 눌러도 닫히되 항목은 항목으로 먹는다.
+/// 돌려주는 값은 목록의 최대 스크롤.
+fn paint_dropdown_popup(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    id: DropdownId,
+    anchor: Rect,
+) -> f32 {
+    let items = dropdown_items(s, id);
+    if items.is_empty() {
+        return 0.0;
+    }
+    register(hits, Target::DropdownDismiss, s.area, HitCursor::Arrow);
+    let pad = 6.0;
+    let full_h = items.len() as f32 * DROPDOWN_ITEM_H + pad * 2.0;
+    let max_h = DROPDOWN_VISIBLE_ITEMS * DROPDOWN_ITEM_H + pad * 2.0;
+    let area_bottom = s.area.1 + s.area.3 - 8.0;
+    let below = area_bottom - (anchor.1 + anchor.3 + 4.0);
+    let above = anchor.1 - 4.0 - (s.area.1 + 8.0);
+    let (h, top) = if below >= full_h.min(max_h) || below >= above {
+        let h = full_h.min(max_h).min(below.max(DROPDOWN_ITEM_H + pad * 2.0));
+        (h, anchor.1 + anchor.3 + 4.0)
+    } else {
+        let h = full_h.min(max_h).min(above.max(DROPDOWN_ITEM_H + pad * 2.0));
+        (h, anchor.1 - 4.0 - h)
+    };
+    let panel = (anchor.0, top, anchor.2, h);
+    let scroll_max = (full_h - h).max(0.0);
+    let scroll = s.dropdown_scroll.clamp(0.0, scroll_max);
+
+    // 그림자 — 살짝 큰 반투명 판을 아래로 밀어 띄운다.
+    round_rect(
+        g,
+        panel.0 - 1.0,
+        panel.1 + 2.0,
+        panel.2 + 2.0,
+        panel.3 + 2.0,
+        ctrl_radius() + 1.0,
+        theme::with_alpha([0, 0, 0, 255], 46),
+    );
+    round_rect(g, panel.0, panel.1, panel.2, panel.3, ctrl_radius(), theme::surface());
+    stroke_round(g, panel, ctrl_radius(), theme::border());
+
+    g.push_clip(panel.0 + 1.0, panel.1 + 1.0, panel.2 - 2.0, panel.3 - 2.0);
+    let mut iy = panel.1 + pad - scroll;
+    for (label, selected, action) in items {
+        let rect = (panel.0 + pad, iy, panel.2 - pad * 2.0, DROPDOWN_ITEM_H);
+        iy += DROPDOWN_ITEM_H;
+        if rect.1 + rect.3 < panel.1 || rect.1 > panel.1 + panel.3 {
+            continue;
+        }
+        let hover = contains(rect, s.cursor) && contains(panel, s.cursor);
+        if hover || selected {
+            round_rect(
+                g,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+                theme::radius_sm(),
+                if selected {
+                    theme::surface_active()
+                } else {
+                    theme::surface_hover()
+                },
+            );
+        }
+        let shown = fit(g, &label, rect.2 - 40.0, 12.0, selected);
+        draw_text(
+            g,
+            rect.0 + 12.0,
+            rect.1 + 7.0,
+            &shown,
+            12.0,
+            if selected { theme::text() } else { theme::text_dim() },
+            selected,
+        );
+        if selected {
+            g.queue_icon(
+                "check",
+                rect.0 + rect.2 - 22.0,
+                rect.1 + 7.5,
+                13.0,
+                theme::accent(),
+            );
+        }
+        register_clipped(g, hits, Target::Setting(action), rect, HitCursor::Pointer);
+        g.hover_pointer |= hover;
+    }
+    g.pop_clip();
+    if scroll_max > 0.0 {
+        let track_h = panel.3 - pad * 2.0;
+        let thumb_h = (track_h * h / full_h).clamp(18.0, track_h);
+        let thumb_y = panel.1 + pad + (track_h - thumb_h) * (scroll / scroll_max);
+        round_rect(
+            g,
+            panel.0 + panel.2 - 6.0,
+            thumb_y,
+            3.0,
+            thumb_h,
+            1.5,
+            theme::with_alpha(theme::text_dim(), 120),
+        );
+    }
+    scroll_max
 }
 
 fn stepper_row(
@@ -6664,24 +7230,35 @@ fn stepper_row(
     minus: SettingsAction,
     plus: SettingsAction,
 ) {
-    let rect = (x, *y, w, 42.0);
-    draw_text(g, x + 2.0, *y + 13.0, label, 12.5, theme::text(), false);
+    // 목업(플랫): −·값·+ 가 채움 없는 테두리 하나 안에, 높이 26.
+    flat_row(g, x, *y, w, label, "");
     let right = x + w;
-    let mr = (right - 104.0, *y + 4.0, 30.0, 30.0);
-    let pr = (right - 30.0, *y + 4.0, 30.0, 30.0);
-    button(g, s, hits, mr, "−", Target::Setting(minus), false);
-    button(g, s, hits, pr, "+", Target::Setting(plus), false);
-    draw_text(
-        g,
-        right - 66.0,
-        *y + 12.0,
-        value,
-        12.0,
-        theme::text_dim(),
-        false,
-    );
-    let _ = rect;
-    *y += 46.0;
+    let bw = 26.0;
+    let vw = 52.0;
+    let boxr = (right - (bw * 2.0 + vw), *y + (ROW_H - CTL_H) / 2.0, bw * 2.0 + vw, CTL_H);
+    let mr = (boxr.0, boxr.1, bw, boxr.3);
+    let pr = (boxr.0 + bw + vw, boxr.1, bw, boxr.3);
+    for (cell, sign, action) in [(mr, "−", minus), (pr, "+", plus)] {
+        let hover = contains(cell, s.cursor);
+        let tx = cell.0 + (cell.2 - g.measure_chrome_text(sign, 13.0, false)) / 2.0;
+        draw_text(
+            g,
+            tx,
+            cell.1 + 5.5,
+            sign,
+            13.0,
+            if hover { theme::text() } else { theme::text_dim() },
+            false,
+        );
+        register_clipped(g, hits, Target::Setting(action), cell, HitCursor::Pointer);
+        g.hover_pointer |= hover;
+    }
+    g.rect(mr.0 + bw, boxr.1 + 1.0, 1.0, boxr.3 - 2.0, theme::border());
+    g.rect(pr.0, boxr.1 + 1.0, 1.0, boxr.3 - 2.0, theme::border());
+    stroke_round(g, boxr, ctrl_radius(), theme::border());
+    let vx = boxr.0 + bw + (vw - g.measure_chrome_text(value, 12.0, false)) / 2.0;
+    draw_text(g, vx, boxr.1 + 6.5, value, 12.0, theme::text(), false);
+    *y += ROW_H;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6699,12 +7276,20 @@ fn text_field(
     caret: usize,
     multiline: bool,
 ) {
-    if !label.is_empty() {
-        draw_text(g, x + 2.0, y, label, 11.0, theme::text_dim(), false);
-    }
-    let top = y + if label.is_empty() { 0.0 } else { 18.0 };
-    let h = if multiline { 132.0 } else { 36.0 };
-    let rect = (x, top, w, h);
+    // 목업(플랫): 한 줄 입력은 이름 왼쪽·칸 오른쪽의 한 행. 여러 줄은 이름 위, 칸 아래.
+    let rect = if multiline {
+        if !label.is_empty() {
+            draw_text(g, x, y, label, 12.0, theme::text_dim(), false);
+        }
+        let top = y + if label.is_empty() { 0.0 } else { 20.0 };
+        (x, top, w, 132.0)
+    } else if label.is_empty() {
+        (x, y, w, CTL_H)
+    } else {
+        flat_row(g, x, y, w, label, "");
+        let fw = (w * 0.45).max(160.0).min(w);
+        (x + w - fw, y + (ROW_H - CTL_H) / 2.0, fw, CTL_H)
+    };
     let focused = s.input == Some(field);
     round_rect(
         g,
@@ -6712,7 +7297,7 @@ fn text_field(
         rect.1,
         rect.2,
         rect.3,
-        theme::radius_md(),
+        ctrl_radius(),
         if focused {
             theme::surface_hover()
         } else {
@@ -6720,7 +7305,7 @@ fn text_field(
         },
     );
     if focused {
-        stroke_rect(g, rect, theme::accent());
+        stroke_round(g, rect, ctrl_radius(), theme::accent());
         if s.select_all {
             g.rect(
                 rect.0 + 3.0,
@@ -6731,7 +7316,7 @@ fn text_field(
             );
         }
     } else {
-        stroke_rect(g, rect, theme::border());
+        stroke_round(g, rect, ctrl_radius(), theme::border());
     }
     register_clipped(g, hits, Target::Focus(field), rect, HitCursor::Text);
     g.push_clip(rect.0 + 10.0, rect.1 + 5.0, rect.2 - 20.0, rect.3 - 10.0);
@@ -6799,7 +7384,7 @@ fn text_field(
         draw_text(
             g,
             rect.0 + 11.0,
-            rect.1 + 10.0,
+            rect.1 + 6.5,
             &shown,
             12.0,
             if value.is_empty() {
@@ -6816,7 +7401,7 @@ fn text_field(
                 .take(caret.saturating_sub(visible_start).min(value.chars().count()))
                 .collect();
             let cx = rect.0 + 11.0 + g.measure_chrome_text(&prefix, 12.0, false);
-            draw_preedit_and_caret(g, s, (cx, rect.1 + 9.0), 18.0, caret_out);
+            draw_preedit_and_caret(g, s, (cx, rect.1 + 5.0), 16.0, caret_out);
         }
     }
     g.pop_clip();
@@ -6911,6 +7496,25 @@ fn wrap_text(g: &mut gpu::GpuRenderer, text: &str, max_w: f32, font: f32) -> Vec
     out
 }
 
+/// 설정 부품의 모서리. 워프 기준(버튼·입력창·팝업 5px, 칩 3px, 분절 상자 바깥 4px/안 3px)
+/// 을 상한으로 두고, 테마 모양(Rounded/Sharp/Pixel)이 그보다 작으면 그걸 따른다 —
+/// Pixel 은 0 그대로다.
+fn ctrl_radius() -> f32 {
+    theme::radius_md().min(5.0)
+}
+
+fn chip_radius() -> f32 {
+    theme::radius_sm().min(3.0)
+}
+
+fn seg_outer_radius() -> f32 {
+    theme::radius_sm().min(4.0)
+}
+
+fn seg_inner_radius() -> f32 {
+    theme::radius_sm().min(3.0)
+}
+
 fn choice_card(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -6919,27 +7523,29 @@ fn choice_card(
     selected: bool,
     target: Target,
 ) {
+    choice_card_with_radius(g, s, hits, rect, selected, target, ctrl_radius());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn choice_card_with_radius(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    rect: Rect,
+    selected: bool,
+    target: Target,
+    r: f32,
+) {
+    // 목업(플랫): 채움 없이 테두리만. 고른 것은 강조색, 올리면 한 톤 진한 회색.
     let hover = contains(rect, s.cursor);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        if selected {
-            theme::surface_active()
-        } else if hover {
-            theme::surface_hover()
-        } else {
-            theme::surface()
-        },
-    );
-    stroke_rect(
+    stroke_round(
         g,
         rect,
+        r,
         if selected {
             theme::accent()
+        } else if hover {
+            theme::text_dim()
         } else {
             theme::border()
         },
@@ -6958,38 +7564,36 @@ fn button(
     primary: bool,
 ) {
     let hover = contains(rect, s.cursor);
-    round_rect(
-        g,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        theme::radius_md(),
-        if primary {
-            if hover {
-                theme::surface_active()
-            } else {
-                theme::accent()
-            }
-        } else if hover {
-            theme::surface_active()
-        } else {
-            theme::surface_hover()
-        },
-    );
-    let shown = fit(g, label, rect.2 - 18.0, 11.5, primary);
-    let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, primary)) / 2.0;
+    // 주 버튼은 강조색 그대로이고 호버에 한 톤만 밝아진다 — 예전엔 호버 순간
+    // 회색 `surface_active` 로 바뀌어 눌리는 게 아니라 꺼지는 것처럼 보였다.
+    // 보조 버튼은 입력칸·카드와 같은 채움+테두리 한 벌이라 한 화면 안에서
+    // 마감이 하나로 읽힌다(2026-09-10 지적 「버튼 마감이 이상하다」).
+    // 호출처가 준 높이가 30~36 으로 제각각이라, 보이는 몸통만 30 으로 맞추고
+    // 세로로 가운데 놓는다(누르는 자리는 준 사각형 그대로). 워프 버튼 높이.
+    // 목업(플랫, 2026-09-10 「버튼 아웃라인, 텍스트만 색 바꿔서. fill 은 x」):
+    // 채움 없이 테두리와 글자만. 보조는 회색→올리면 진해지고, 주 버튼은 강조색.
+    let vis = if rect.3 > CTL_H {
+        (rect.0, rect.1 + ((rect.3 - CTL_H) / 2.0).floor(), rect.2, CTL_H)
+    } else {
+        rect
+    };
+    let (line, ink) = if primary {
+        (theme::accent(), theme::accent())
+    } else if hover {
+        (theme::text_dim(), theme::text())
+    } else {
+        (theme::border(), theme::text_dim())
+    };
+    stroke_round(g, vis, ctrl_radius(), line);
+    let shown = fit(g, label, vis.2 - 20.0, 12.0, primary);
+    let tx = vis.0 + (vis.2 - g.measure_chrome_text(&shown, 12.0, primary)) / 2.0;
     draw_text(
         g,
         tx,
-        rect.1 + (rect.3 - 12.0) / 2.0 - 1.0,
+        vis.1 + (vis.3 - 12.0) / 2.0 - 0.5,
         &shown,
-        11.5,
-        if primary {
-            [255, 255, 255, 255]
-        } else {
-            theme::text()
-        },
+        12.0,
+        ink,
         primary,
     );
     register_clipped(g, hits, target, rect, HitCursor::Pointer);
@@ -7012,7 +7616,7 @@ fn mini_icon_button(
             rect.1,
             rect.2,
             rect.3,
-            theme::radius_sm(),
+            chip_radius(),
             theme::surface_active(),
         );
     }
@@ -7084,18 +7688,12 @@ fn email_provider_mark(
 fn pill(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str, accent: bool) -> f32 {
     let f = 9.5;
     let w = g.measure_chrome_text(text, f, false) + 14.0;
-    round_rect(
+    // 목업(플랫): 알약도 채움 없이 테두리와 글자만.
+    stroke_round(
         g,
-        x,
-        y,
-        w,
-        17.0,
+        (x, y, w, 17.0),
         8.5,
-        if accent {
-            theme::surface_active()
-        } else {
-            theme::surface_hover()
-        },
+        if accent { theme::accent() } else { theme::border() },
     );
     draw_text(
         g,
@@ -7139,7 +7737,7 @@ fn mini_text_button(
             rect.1,
             rect.2,
             rect.3,
-            theme::radius_sm(),
+            chip_radius(),
             theme::surface_active(),
         );
     }
@@ -7157,6 +7755,12 @@ fn mini_text_button(
     register_clipped(g, hits, target, rect, HitCursor::Pointer);
     g.hover_pointer |= hover;
     w
+}
+
+/// 둥근 채움 위에 두르는 1px 테두리 — 반지름을 채움과 같게 주면 모서리가 채움
+/// 안에 머문다. 직각 `stroke_rect` 는 사각 격자(SV 판·색상띠)에만 남긴다.
+fn stroke_round(g: &mut gpu::GpuRenderer, rect: Rect, r: f32, color: [u8; 4]) {
+    g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, r, theme::border_w().max(1.0), color);
 }
 
 fn stroke_rect(g: &mut gpu::GpuRenderer, rect: Rect, color: [u8; 4]) {

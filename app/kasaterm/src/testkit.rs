@@ -1424,7 +1424,7 @@ impl App {
         let cats = [
             ("일반", SettingsCat::General),
             ("모양", SettingsCat::Appearance),
-            ("셸", SettingsCat::Shell),
+            ("터미널", SettingsCat::Shell),
             ("에이전트", SettingsCat::Claude),
             ("계정", SettingsCat::Accounts),
             ("기계", SettingsCat::Machines),
@@ -3266,6 +3266,12 @@ impl App {
         // 부른다 — 검증 때마다 Finder 창이 튀어나오면 그게 더 방해다.
         match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
             "" => {}
+            "dropdown-ui-font" => {
+                self.settings_scene
+                    .toggle_dropdown(crate::native_settings::DropdownId::UiFont);
+                self.chrome_dirty = true;
+                eprintln!("[autosettings] UI 글꼴 선택 상자 펼침");
+            }
             "statusbar-all-off" => {
                 self.set_statusbar.hidden = crate::statusbar_config::WIDGETS
                     .iter()
@@ -6769,6 +6775,21 @@ impl App {
         }
         self.autoboard_at = None;
         self.toggle_board_room();
+        // KASATERM_AUTOBOARD_TAB=overview|agents|schedule|git|machines — 캡처용 탭 선택.
+        if let Ok(tab) = std::env::var("KASATERM_AUTOBOARD_TAB") {
+            use crate::native_board::BoardTab;
+            let tab = match tab.as_str() {
+                "agents" => Some(BoardTab::Agents),
+                "schedule" => Some(BoardTab::Schedule),
+                "git" => Some(BoardTab::Git),
+                "machines" => Some(BoardTab::Machines),
+                "overview" => Some(BoardTab::Overview),
+                _ => None,
+            };
+            if let Some(tab) = tab {
+                self.board_scene.set_tab(tab);
+            }
+        }
         eprintln!("[autoboard] toggled → open={}", self.board_room_active());
     }
     pub(crate) fn run_pending_autoarona(

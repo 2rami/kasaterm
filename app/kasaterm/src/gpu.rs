@@ -52,6 +52,17 @@ const GALMURI_11: &[u8] = include_bytes!("../assets/fonts/Galmuri11.ttf");
 /// Device px per Galmuri dot — every cut draws one dot per `upem/100` units, so
 /// Galmuri11 (upem 1200) is crisp only at whole multiples of 12.
 const GALMURI_DOT_PX: u32 = 12;
+
+/// 크롬 글자를 어느 얼굴로 그리는지(`theme::ui_font` 를 푼 것).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum UiFace {
+    /// 터미널 격자와 같은 고정폭(font=0).
+    Terminal,
+    /// 마크다운 고딕(font=1/2) — 따로 싣지 않는다.
+    System,
+    /// 사용자가 고른 설치 글꼴(font=4, `ui_shaper`).
+    Custom,
+}
 /// Side of the pixel icons' design grid. Their paths sit on whole units, so any
 /// raster size off this multiple lands dot edges on fractions and softens them.
 const ICON_GRID_PX: u32 = 24;
@@ -131,6 +142,13 @@ pub struct GpuRenderer {
     chrome_shaper: Option<Shaper>,
     /// Set once loading fails so a broken face doesn't retry every frame.
     chrome_shaper_failed: bool,
+    /// 사용자가 고른 크롬 글꼴(font=4). `ui_font` 설정이 설치 글꼴 이름일 때만
+    /// 실린다 — 터미널 글꼴·시스템 고딕은 이미 있는 shaper 를 그대로 쓴다.
+    ui_shaper: Option<Shaper>,
+    /// 마지막으로 해석한 `theme::ui_font_gen()`. 세대가 같으면 아무것도 안 한다.
+    ui_font_gen: Option<u32>,
+    /// 해석 결과. 라벨 하나 그릴 때마다 카탈로그를 뒤지지 않도록 캐시한다.
+    ui_face: UiFace,
     /// Secondary shaper for markdown body/heading text — a proportional gothic
     /// (Noto Sans KR if installed, else Apple SD Gothic Neo) so documents read
     /// like prose, not code. Glyphs go into the SAME atlas keyed by font=1.
@@ -731,6 +749,9 @@ impl GpuRenderer {
             shaper,
             chrome_shaper: None,
             chrome_shaper_failed: false,
+            ui_shaper: None,
+            ui_font_gen: None,
+            ui_face: UiFace::Terminal,
             md_shaper,
             md_bold_shaper,
             bind_group,
@@ -969,6 +990,89 @@ impl GpuRenderer {
         }
     }
 
+    /// 둥근 사각형의 **테두리만** — `round_rect_fill` 과 같은 원호를 따라 `t` 두께로
+    /// 두른다. 채움은 둥글게 그려 놓고 테두리를 네모난 `rect` 넉 줄로 두르면
+    /// 모서리 밖으로 직각 선이 삐져나온다(2026-09-10 지적 「z-index 안 맞아서
+    /// 선 튀어나옴」 — 설정 화면의 카드·세그먼트·입력칸 전부가 그랬다).
+    ///
+    /// 캡 구간은 `round_rect_fill` 과 같은 행 단위로 돌되, 바깥 원(반지름 `r`)과
+    /// 안쪽 원(반지름 `r - t`) 사이만 칠한다. 바깥 경계 픽셀은 같은 부분 알파를
+    /// 받아 채움 위에 얹었을 때 계단이 안 보인다.
+    pub fn round_rect_stroke(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        r: f32,
+        t: f32,
+        col: [u8; 4],
+    ) {
+        let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+        let t = t.max(0.0).min(w / 2.0).min(h / 2.0);
+        if t <= 0.0 {
+            return;
+        }
+        if r <= t {
+            self.rect(x, y, w, t, col);
+            self.rect(x, y + h - t, w, t, col);
+            self.rect(x, y + t, t, (h - 2.0 * t).max(0.0), col);
+            self.rect(x + w - t, y + t, t, (h - 2.0 * t).max(0.0), col);
+            return;
+        }
+        // 좌우 직선 변 — 캡 사이.
+        let band = (h - 2.0 * r).max(0.0);
+        self.rect(x, y + r, t, band, col);
+        self.rect(x + w - t, y + r, t, band, col);
+        let s = self.scale;
+        let inv = 1.0 / s;
+        let steps = (r * s).ceil() as i32;
+        let ri = r - t;
+        for k in 0..steps {
+            let yy = k as f32 * inv;
+            let yc = yy + 0.5 * inv;
+            let d_out = (r * r - (r - yc) * (r - yc)).max(0.0).sqrt();
+            let dx_out_dev = ((r - d_out) * s).max(0.0);
+            let dx_floor = dx_out_dev.floor();
+            let frac = dx_out_dev - dx_floor;
+            let edge_col = [col[0], col[1], col[2], (col[3] as f32 * (1.0 - frac)).round() as u8];
+            // 안쪽 원의 같은 행 — 아직 원이 시작되지 않은 위쪽 행(`yc < t`)은 통째로
+            // 윗변이다.
+            let inner_dx = if yc < t {
+                None
+            } else {
+                let dy = r - yc;
+                if dy.abs() >= ri {
+                    None
+                } else {
+                    Some(r - (ri * ri - dy * dy).sqrt())
+                }
+            };
+            let lx = x + dx_floor * inv;
+            let rx = x + w - (dx_floor + 1.0) * inv;
+            let solid_from = (dx_floor + 1.0) * inv;
+            for ry in [y + yy, y + h - yy - inv] {
+                self.rect(lx, ry, inv, inv, edge_col);
+                self.rect(rx, ry, inv, inv, edge_col);
+                match inner_dx {
+                    None => {
+                        let cw = (w - 2.0 * solid_from).max(0.0);
+                        if cw > 0.0 {
+                            self.rect(x + solid_from, ry, cw, inv, col);
+                        }
+                    }
+                    Some(dx_in) => {
+                        let span = (dx_in - solid_from).max(0.0);
+                        if span > 0.0 {
+                            self.rect(x + solid_from, ry, span, inv, col);
+                            self.rect(x + w - solid_from - span, ry, span, inv, col);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Draw a text label using glyphs baked into the atlas at the
     /// requested size. Returns the pen-x after the last glyph
     /// (mirrors sugarloaf's `text.draw` return behaviour for callers
@@ -997,8 +1101,18 @@ impl GpuRenderer {
         if !force_mono && crate::theme::viewer_chrome() {
             return (if bold { 2 } else { 1 }, raw);
         }
-        if force_mono || !crate::theme::pixel_chrome() {
+        if force_mono {
             return (0, raw);
+        }
+        if !crate::theme::pixel_chrome() {
+            // 픽셀 형태가 아닐 때만 사용자 글꼴이 든다 — 픽셀 형태의 정체성이
+            // 곧 그 글꼴이라, 거기에 다른 얼굴을 얹으면 형태를 고른 뜻이 없어진다.
+            self.ensure_ui_shaper();
+            return match self.ui_face {
+                UiFace::Terminal => (0, raw),
+                UiFace::System => (if bold { 2 } else { 1 }, raw),
+                UiFace::Custom => (4, raw),
+            };
         }
         self.ensure_chrome_shaper();
         if self.chrome_shaper.is_none() {
@@ -1007,6 +1121,52 @@ impl GpuRenderer {
         let dot = GALMURI_DOT_PX as f32;
         let steps = (raw as f32 / dot).round().max(1.0);
         (3, (dot * steps) as u32)
+    }
+
+    /// `ui_font` 설정을 얼굴로 푼다. 세대가 바뀐 프레임에만 돌고, 그때 글꼴이
+    /// 갈렸으면 아틀라스를 비운다 — font=4 자리에 옛 얼굴의 글리프가 남아 있다.
+    fn ensure_ui_shaper(&mut self) {
+        let gen = crate::theme::ui_font_gen();
+        if self.ui_font_gen == Some(gen) {
+            return;
+        }
+        self.ui_font_gen = Some(gen);
+        let before = self.ui_face;
+        let value = crate::theme::ui_font();
+        self.ui_face = match value.as_str() {
+            "" | "terminal" => UiFace::Terminal,
+            "system" => UiFace::System,
+            other => match crate::onboarding::resolve_ui_font(other) {
+                Some(choice) => match Shaper::from_path(&choice.path.to_string_lossy(), choice.index) {
+                    Ok(mut sh) => {
+                        if let Some((bold_path, bold_idx)) = &choice.bold {
+                            sh.set_bold_face_path(0, &bold_path.to_string_lossy(), *bold_idx);
+                        }
+                        attach_fallback_chain(&mut sh);
+                        eprintln!("[font] ui={} ({})", choice.family, choice.path.display());
+                        self.ui_shaper = Some(sh);
+                        UiFace::Custom
+                    }
+                    Err(e) => {
+                        eprintln!("[font] ui font {} failed to load: {e}", choice.path.display());
+                        UiFace::System
+                    }
+                },
+                None => {
+                    eprintln!("[font] ui font {other:?} not installed; using system gothic");
+                    UiFace::System
+                }
+            },
+        };
+        if self.ui_face != UiFace::Custom {
+            self.ui_shaper = None;
+        }
+        // 얼굴이 같은 종류라도(Custom→Custom) 파일이 갈렸을 수 있다. 세대가
+        // 올랐다는 것 자체가 「값이 바뀌었다」이므로 무조건 비운다 — 처음 한 번은
+        // 아직 아무것도 안 그린 상태라 비용이 없다.
+        if before != self.ui_face || self.ui_face == UiFace::Custom {
+            self.atlas.request_reset();
+        }
     }
 
     fn ensure_chrome_shaper(&mut self) {
@@ -1033,6 +1193,11 @@ impl GpuRenderer {
                 return self.atlas.get_or_bake(&self.device, &self.queue, sh, key);
             }
         }
+        if key.font == 4 {
+            if let Some(sh) = self.ui_shaper.as_mut() {
+                return self.atlas.get_or_bake(&self.device, &self.queue, sh, key);
+            }
+        }
         match key.font {
             2 => self.atlas.get_or_bake(
                 &self.device,
@@ -1055,6 +1220,11 @@ impl GpuRenderer {
     fn chrome_space_advance(&mut self, size_px: f32, font: u8) -> f32 {
         if font == 3 {
             if let Some(sh) = self.chrome_shaper.as_ref() {
+                return sh.advance(' ', size_px);
+            }
+        }
+        if font == 4 {
+            if let Some(sh) = self.ui_shaper.as_ref() {
                 return sh.advance(' ', size_px);
             }
         }
@@ -4179,6 +4349,7 @@ impl GpuRenderer {
             "chevron-down" => include_str!("../assets/icons/chevron-down.svg"),
             "chevron-left" => include_str!("../assets/icons/chevron-left.svg"),
             "chevron-up" => include_str!("../assets/icons/chevron-up.svg"),
+            "check" => include_str!("../assets/icons/check.svg"),
             "file" => include_str!("../assets/icons/file.svg"),
             "file-code" => include_str!("../assets/icons/file-code.svg"),
             "image" => include_str!("../assets/icons/image.svg"),
@@ -4314,6 +4485,7 @@ impl GpuRenderer {
             "chevron-left" => include_str!("../assets/icons/pixel/chevron-left.svg"),
             "chevron-right" => include_str!("../assets/icons/pixel/chevron-right.svg"),
             "chevron-up" => include_str!("../assets/icons/pixel/chevron-up.svg"),
+            "check" => include_str!("../assets/icons/pixel/check.svg"),
             "chevrons-down-up" => include_str!("../assets/icons/pixel/chevrons-down-up.svg"),
             "columns-2" => include_str!("../assets/icons/pixel/columns-2.svg"),
             "copy" => include_str!("../assets/icons/pixel/copy.svg"),

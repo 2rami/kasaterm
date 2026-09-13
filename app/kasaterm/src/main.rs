@@ -4334,6 +4334,22 @@ impl SettingsCat {
         Self::Feedback,
     ];
 
+    /// 옆 목록에 실제로 서는 칸 — `Theme` 은 「캐릭터」 밑으로 들어가 목록에서 빠졌다
+    /// (2026-09-10 목업 IA: 셸+커서→터미널, 테마+캐릭터→캐릭터). 페이지 자체는
+    /// 캐릭터 페이지의 「테마 관리」로 연다. 웹 대조는 그대로 `ALL` 이다.
+    pub(crate) const NAV: [SettingsCat; 10] = [
+        Self::General,
+        Self::Appearance,
+        Self::Statusbar,
+        Self::Shell,
+        Self::Claude,
+        Self::Accounts,
+        Self::Machines,
+        Self::Students,
+        Self::Pet,
+        Self::Feedback,
+    ];
+
     /// 웹 설정(arona-ui)이 쓰는 카테고리 키. 딥링크를 URL 과 스크립트 양쪽으로
     /// 보내야 해서 이름이 한 곳에 있어야 한다 — 문자열을 부르는 자리마다 적으면
     /// 오타가 나도 **아무 일도 안 일어나** 원인을 못 찾는다(모르는 값은 무시된다).
@@ -4484,6 +4500,8 @@ pub(crate) enum SettingsAction {
     /// Silhouette preset: "rounded" · "sharp" · "pixel". Its own axis, so any
     /// palette can be worn with any corner treatment.
     Shape(&'static str),
+    /// 크롬 글꼴: "terminal" · "system" · 설치 글꼴 이름. 재시작 없이 바로 먹는다.
+    UiFont(String),
     /// Font-size stepper: −1 / +1 logical px on the base cell font.
     FontSizeDelta(i8),
     /// UI 배율 스테퍼(±10%). Cmd+/− 와 같은 축이지만, 키로만 있으면 얼마나
