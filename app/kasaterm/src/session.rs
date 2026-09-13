@@ -5879,7 +5879,16 @@ impl App {
         // ⚠️ **핀이 섰을 때만 저장한다.** 핀 없는 `title` 은 안에서 도는
         // 프로그램이 쏜 OSC 라, 그걸 굳혀 두면 다음에 켤 때 「사람이 정한
         // 이름」인 척하면서 그 뒤의 OSC 를 영영 막는다.
-        if let Some(t) = title.filter(|s| !s.trim().is_empty()) {
+        //
+        // 자동으로 붙는 세션 주소(`yuzu-p0-4iz` 꼴)는 핀이 서 있어도 싣지 않는다.
+        // 그 주소가 이름표에 오르는 길은 2026-09-14 에 닫았지만, 닫기 전에 이미
+        // 굳어 파일에 들어간 값은 재시작마다 되살아나 핀까지 물고 온다. 거르는
+        // 자리는 여기 한 곳이어야 한다 — 호출부(leaf·탭)에 나눠 두면 한쪽만
+        // 고쳐지는, 이 레포가 되풀이해 온 사고가 된다.
+        if let Some(t) = title
+            .filter(|s| !s.trim().is_empty())
+            .filter(|s| !crate::screenread::label_is_roster_agent(s))
+        {
             obj.insert("title".to_string(), serde_json::json!(t));
         }
         // per-pane 실제 세션은 SocketSessionBound 로 채워진 pane_claude_sid
@@ -6011,11 +6020,18 @@ impl App {
                 // Attach the pane's scrollback (text lines) so restore can
                 // repaint what was on screen. Only when we have a real record.
                 if rec.is_null() {
-                    // Null leaf 는 복원이 소리 없이 버린다 — 저장 시점에 흔적이라도
-                    // 남겨야 「재시작하니 창이 없어졌다」를 되짚을 수 있다.
-                    eprintln!(
-                        "[save] pane {pane_id} 기록이 비어 leaf 로 못 실린다(복원에서 빠질 것)"
-                    );
+                    // PTY 가 없다고 **자리까지** 지우면 안 된다. null leaf 는 복원이
+                    // 소리 없이 버리는데, 버려지는 것이 그 pane 하나가 아니다:
+                    // 탭 목록은 아래 `obj` 블록 안에서만 실리므로 **그 안에서 돌던
+                    // 학생이 통째로** 같이 사라지고, 좌우 leaf 가 다 null 이면
+                    // `restore_window_layout_at` 이 None 을 반환해 **window 가 방째로**
+                    // 없어진다(2026-09-14 실측: leaf 8 개 중 4 개가 null, 방 하나 증발).
+                    //
+                    // 그래서 빈 레코드로 승격시켜 pane 번호와 탭만은 남긴다. 번호가
+                    // 남아야 `--resume` 으로 되살아난 학생의 `tell %N` 이 엉뚱한 pane
+                    // 으로 가지 않는다(아래 pane_id 주석과 같은 이유).
+                    eprintln!("[save] pane {pane_id} 에 PTY 가 없다 — 빈 자리로 남긴다(번호·탭은 유지)");
+                    rec = serde_json::json!({});
                 }
                 if let Some(obj) = rec.as_object_mut() {
                     // pane id 자체를 저장한다. 이게 없으면 복원이 `%1` 부터 새로
