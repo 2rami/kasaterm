@@ -268,9 +268,13 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
             // Trailing terminal padding is not another paragraph. Keep interior
             // spaces, all soft-wrapped cells, and the actual cursor's blank cell.
             let tail = row.last();
+            // A patch box narrower than the source terminal ends in plain
+            // background, so its fill padding would count as content and wrap
+            // into fill-only rows. The fill is re-applied at the viewer width.
+            let patch_fill = diff_indent.and_then(|_| crate::mirror_diff::fill(row));
             let significant = row.iter().rposition(|c| !matches!(c.ch, ' ' | '\0') || c.hidden
-                || tail.is_some_and(|fill| c.bg != fill.bg || c.inverse != fill.inverse
-                    || c.underline != fill.underline)).map_or(0, |i| i + 1);
+                || (patch_fill.is_none() && tail.is_some_and(|fill| c.bg != fill.bg || c.inverse != fill.inverse
+                    || c.underline != fill.underline))).map_or(0, |i| i + 1);
             let cursor_end = if cursor.0 == row_index { cursor.1.saturating_add(1).min(row.len()) } else { 0 };
             let mut length = if soft_wrap { row.len() } else { significant.max(cursor_end) };
             // A wide glyph's spacer may itself be trailing whitespace.
@@ -291,7 +295,7 @@ fn project_region(source: &[Vec<GridCell>], start: usize, end: usize, cursor: So
             }
             row_index += 1;
             if !joins_next {
-                fill = row.last().cloned().unwrap_or_else(GridCell::blank);
+                fill = patch_fill.or_else(|| row.last().cloned()).unwrap_or_else(GridCell::blank);
                 break;
             }
         }
@@ -554,6 +558,24 @@ mod tests {
         assert_eq!(view.body_lines.len(), 2);
         assert!(text(&view.rows).iter().any(|r| r.contains("1562 +    above: read_rows_above(&t, budget),")), "{:?}",text(&view.rows));
         assert!(text(&view.rows).iter().any(|r| r.contains("1563 +    next,")));
+    }
+
+    #[test]
+    fn claude_patch_box_narrower_than_source_refills_at_viewer_width() {
+        use kasa_bridge::screen::Color;
+        let green = Color::Rgb(221, 250, 224);
+        let mut source = codex_screen(&[
+            " 964 + store(true, Ordering::Relaxed)",
+            " 965 + fi",
+        ], 60);
+        for row in &mut source[..2] { for cell in &mut row[..58] { cell.bg = green.clone(); } }
+        let view = project(&source, (3, 3), 20, 12, Some(2), None);
+        let body: Vec<_> = view.body_lines.iter().map(|row| row.cells.clone()).collect();
+        assert_eq!(body.len(), 3, "{:?}", text(&body));
+        assert!(text(&body)[0].contains("964 + store(true,") && text(&body)[2].contains("965 + fi"), "{:?}", text(&body));
+        for row in &view.body_lines {
+            assert!(row.cells.iter().all(|c| c.bg == green), "fill covers the viewer width: {:?}", text(&[row.cells.clone()]));
+        }
     }
 
     #[test]

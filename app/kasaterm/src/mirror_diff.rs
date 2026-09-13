@@ -24,6 +24,13 @@ fn kind(color: &Color) -> Option<bool> {
     else { None }
 }
 
+/// The patch fill of a numbered row: the last cell painted addition/deletion.
+/// Claude paints its patch box narrower than the terminal, so the row's last
+/// cell is plain background and cannot stand in for the fill.
+pub(crate) fn fill(row: &[GridCell]) -> Option<GridCell> {
+    row.iter().rev().find(|c| kind(&c.bg).is_some()).cloned()
+}
+
 /// Source-painted line breaks inside one numbered diff line are continuations,
 /// unlike the next numbered code line. Keep the real code indentation/newlines.
 pub(crate) fn continuation(previous: &[GridCell], next: &[GridCell], indent: usize) -> Option<(usize, bool)> {
@@ -88,6 +95,14 @@ mod tests {
                 assert_eq!((a.ch, &a.fg, a.dim, a.inverse), (b.ch, &b.fg, b.dim, b.inverse));
             }
         }
+    }
+    #[test]
+    fn fill_is_the_patch_colour_even_when_the_box_ends_before_the_row() {
+        let green = Color::Rgb(221, 250, 224);
+        let mut cells = row(" 13 + added", green.clone());
+        for cell in &mut cells[30..] { cell.bg = Color::Default; }
+        assert_eq!(fill(&cells).map(|c| c.bg), Some(green));
+        assert_eq!(fill(&row("plain", Color::Default)), None);
     }
     #[test]
     fn ordinary_colored_output_is_not_a_patch() {

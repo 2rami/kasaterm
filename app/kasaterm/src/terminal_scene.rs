@@ -1131,11 +1131,13 @@ impl App {
             let facts = kasa_mcp::remote::cached_pane(tab_pid.as_str());
             // 기본 Codex는 상태줄이 없을 수 있다. 호스트가 셸이라고 보고했다면
             // 남은 스크롤백 모양으로 다시 Codex 취급하지 않는다.
-            let codex_live = match facts.as_ref().and_then(|row| row.get("harness")) {
-                Some(harness) => harness.as_str() == Some("codex"),
-                None => agent_kind == Some(kasa_pty::AgentKind::Codex) || codex_status,
+            // Claude 의 번호 패치도 같은 거터 모양이고, 그 색은 저쪽 기계의
+            // 테마를 따른다 — 밝은 원본이 어두운 거울에 연두 패치를 남겼다(2026-09-14).
+            let patch_live = match facts.as_ref().and_then(|row| row.get("harness")) {
+                Some(harness) => matches!(harness.as_str(), Some("codex" | "claude")),
+                None => matches!(agent_kind, Some(kasa_pty::AgentKind::Codex | kasa_pty::AgentKind::Claude)) || codex_status,
             };
-            if codex_live {
+            if patch_live {
                 crate::mirror_diff::localize(&mut composed, theme::bg(), theme::success(), theme::danger());
             }
         }
