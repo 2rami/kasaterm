@@ -2108,6 +2108,22 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
+        // 걷는 학생 타이머. 배치도·줄의 busy 칸이 걷는 동안만 걸음 반 장(70ms)
+        // 마다 깨운다 — 걸음(140ms)에 제 박자가 없어 다른 펌프에 얹혀 두 장씩
+        // 건너뛰던 것이 깜빡임으로 읽혔다. 걷는 칸이 없으면 sleep+load 뿐.
+        {
+            let walk_proxy = self.proxy.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::render::STUDENT_WALK_PUMP_MS,
+                ));
+                let animating = crate::render::STUDENT_WALK_ANIMATING
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if animating && walk_proxy.send_event(UserEvent::Redraw).is_err() {
+                    break;
+                }
+            });
+        }
         // ultracode 혜성 타이머. 도트 배너 스레드와 같은 패턴이지만 주기가 다르다
         // (66ms) — 혜성은 픽셀 이동이라 200ms 론 순간이동으로 보인다. ultracode
         // pane 이 없으면 sleep+load 만 도는 무비용 루프.

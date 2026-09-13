@@ -45,6 +45,19 @@ pub(crate) const INPUT_STANDING_ROWS: usize = 3;
 pub(crate) static STUDENT_SPRITE_ANIMATING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// 직전 프레임에 **걷는** 학생(사이드바 배치도·줄의 busy 칸)이 화면에 있었는지.
+/// 걸음은 140ms 한 장인데 프레임을 깨우는 사유가 따로 없어, 다른 펌프(스피너
+/// 30fps·배너 200ms·커서 530ms)에 얹혀서만 넘어갔다 — 보는 방에 도는 pane 이
+/// 없으면 두 장씩 건너뛰고 멈추기를 반복해 작은 칸에서 걷기가 아니라 깜빡임으로
+/// 읽혔다(거노 2026-09-14). 전용 타이머(handler.rs)가 이걸 보고 걷는 동안만
+/// `STUDENT_WALK_PUMP_MS` 마다 깨운다. 그리는 쪽(`draw_student_walk`)이 세우고
+/// 크롬 프레임 첫머리(render.rs)가 내린다.
+pub(crate) static STUDENT_WALK_ANIMATING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// 걸음 한 장(140ms)의 절반 — 한 장에 최소 두 번은 깨어야 타이머 위상이 걸음
+/// 경계와 어긋나도 장을 건너뛰지 않는다.
+pub(crate) const STUDENT_WALK_PUMP_MS: u64 = 70;
+
 /// ultracode 애니(혜성·숨쉬기) 프레임 주기. 도트 배너(200ms)와 달리 혜성은
 /// 픽셀 이동이라 그 주기론 프레임당 8셀씩 순간이동으로 보인다 — 66ms(~15fps)면
 /// 프레임당 ~2.8셀로 흐르는 빛으로 읽힌다.

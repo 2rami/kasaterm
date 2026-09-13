@@ -961,6 +961,7 @@ pub(crate) fn draw_student_walk(
         }
     }
     g.queue_image_above(&key, x, y, size, size);
+    STUDENT_WALK_ANIMATING.store(true, std::sync::atomic::Ordering::Relaxed);
     true
 }
 
