@@ -6476,6 +6476,35 @@ impl ApplicationHandler<UserEvent> for App {
                         // list; a plain press just switches to that tab.
                         if let Some(mut td) = self.tab_drag.take() {
                             window.set_cursor(CursorIcon::Default);
+                            // 탭 알약을 사이드바의 **다른 방 카드**에 놓았다 — 그 방으로
+                            // 옮긴다. 헤더 드래그와 같은 자리(사이드바 드롭 최우선)에 둬야
+                            // 아래 라이브 확정·body_drop 이 먼저 먹어치우지 않는다.
+                            // 탭은 leaf 가 아니라 pane 안의 항목이라 한 번에 못 옮긴다:
+                            // 먼저 이 창에서 pane 으로 꺼낸 뒤(drop_tab_into_body) 그
+                            // pane 을 창 너머로 보낸다(move_pane → move_pane_cross_window).
+                            // 그 전에는 탭을 일단 탭 밖으로 꺼내야만 방을 옮길 수 있었다
+                            // (2026-09-14 지시).
+                            if td.active {
+                                if let Some(anchor) = self
+                                    .sidebar_window_drop_target(self.cursor_px.0, self.cursor_px.1)
+                                {
+                                    if let Some(orig) = self.drag_orig_layout.take() {
+                                        self.pty_layout = Some(orig);
+                                    }
+                                    self.drag_live_applied = None;
+                                    let src_pane = td.pane.clone();
+                                    self.drop_tab_into_body(&td, &src_pane, DropZone::Right);
+                                    // 꺼낸 pane 의 id — drop_tab_into_body 가 active_pane
+                                    // 에 남긴다(반환값이 없다).
+                                    let lifted = self.ws.lock().unwrap().active_pane.clone();
+                                    if let Some(lifted) = lifted {
+                                        self.move_pane(&lifted, &anchor, DropZone::Right);
+                                    }
+                                    self.chrome_dirty = true;
+                                    window.request_redraw();
+                                    return;
+                                }
+                            }
                             // 라이브로 옮기던 단일탭 pane 을 타깃 중앙에 놓았다 —
                             // split 이 아니라 그 pane 의 탭으로 들어간다. 라이브가
                             // 걸린 드래그(drag_orig_layout 이 있는 경우)는 여기서
