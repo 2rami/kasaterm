@@ -2423,6 +2423,9 @@ impl App {
         // 학생 도트 배너 가시 상태 → 애니 타이머(handler.rs)와 damage 게이트
         // (render_frame)가 참조. 배너가 사라진 프레임에 false로 떨어져
         // 애니 redraw 펌프가 저절로 멈춘다.
+        // 걷는 학생 표시는 이 프레임에서 `draw_student_walk` 가 다시 세운다 —
+        // 여기서 내려야 걷던 pane 이 멈춘 뒤 타이머가 저절로 잠든다.
+        STUDENT_WALK_ANIMATING.store(false, std::sync::atomic::Ordering::Relaxed);
         STUDENT_SPRITE_ANIMATING.store(
             // waiting(승인 대기)·standing(입력박스 위)은 렌더 펌프가 없는 정적
             // 상태에서도 idle 애니가 돌아야 해서 이 타이머에 의존한다. 스피너
@@ -13435,6 +13438,9 @@ impl App {
         // 바꾼다 — 전용 타이머(handler.rs)가 깨운 redraw 를 여기서
         // 통과시켜야 프레임이 넘어간다.
         let banner_animating = STUDENT_SPRITE_ANIMATING.load(std::sync::atomic::Ordering::Relaxed);
+        // 사이드바의 걷는 학생 — 70ms 타이머(handler.rs)가 깨운 redraw 는
+        // `chrome_dirty` 를 세우지 않으므로 여기서 직접 통과시켜야 걸음이 넘어간다.
+        let walk_animating = STUDENT_WALK_ANIMATING.load(std::sync::atomic::Ordering::Relaxed);
         // ultracode 혜성은 셀 그리드(`composed`) 위에 얹혀 66ms 마다 위상이 바뀐다.
         // 그런데 이 게이트에 그 사유가 없어서, claude 가 idle 이면 통과하는 게 커서
         // blink(530ms) 뿐이었다 — 혜성이 프레임당 2.8셀이 아니라 **22셀씩** 튀어
@@ -13462,6 +13468,7 @@ impl App {
             || toast_animating
             || git_op_animating
             || banner_animating
+            || walk_animating
             // 혜성은 그리드에 얹히므로 `bar_animating` 처럼 bar-only 경로로 두면 안 된다
             // — 전체 프레임을 다시 그려야 위상이 반영된다.
             || comet_animating;
