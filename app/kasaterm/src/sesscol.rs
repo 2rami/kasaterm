@@ -97,8 +97,14 @@ impl App {
                 }
                 // 살아 있는 claude 세션은 `/rename` 이름을 라벨로 — 명부가 정본이다
                 // (2026-09-08 지시 「클로드세션도 /rename해놓은거 뜨게」).
+                //
+                // 단 아무도 개명하지 않은 세션의 명부 이름은 셰임이 부팅 때 심는 **세션
+                // 주소**(`yuzu-p0-4iz` 꼴)다 — 그것으로 덮으면 원래 라벨이 사라지고 목록이
+                // 주소 나열이 된다(2026-09-14 지시 「자동으로 붙는거 아예 없애도돼」).
                 if s.harness == "claude" {
-                    if let Some(n) = crate::screenread::peer_name_by_sid(&s.id) {
+                    if let Some(n) = crate::screenread::peer_name_by_sid(&s.id)
+                        .filter(|n| !crate::screenread::label_is_roster_agent(n))
+                    {
                         s.label = n;
                     }
                 }

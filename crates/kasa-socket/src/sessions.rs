@@ -287,23 +287,6 @@ pub fn custom_title_of_line(line: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.chars().take(80).collect())
 }
 
-/// jsonl 한 줄이 claude 가 스스로 지은 제목이면 그 제목, 아니면 None.
-///
-/// 세션에 붙인 이름이 하나도 없을 때의 정본이다. claude 는 세션 초반에 이것을 한 번
-/// 짓고 그 뒤로는 같은 값을 계속 다시 적는다(최근 세션 여섯 개 모두 평생 한 종류,
-/// 2026-09-07 실측) — 그래서 꼬리만 봐도 잡히고, 대화가 길어져도 사라지지 않는다.
-pub fn ai_title_of_line(line: &str) -> Option<String> {
-    if !line.contains("\"ai-title\"") {
-        return None;
-    }
-    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
-    if v.get("type").and_then(|t| t.as_str()) != Some("ai-title") {
-        return None;
-    }
-    let t = v.get("aiTitle").and_then(|t| t.as_str())?.trim();
-    (!t.is_empty()).then(|| t.chars().take(80).collect())
-}
-
 /// 라벨로 부적합한 메타성 user 텍스트(슬래시 명령·시스템 주입·bash 출력 래퍼).
 /// claude 가 첫 턴에 흔히 끼워넣어 라벨을 오염시키므로 건너뛴다.
 fn is_meta_user_text(t: &str) -> bool {
@@ -471,19 +454,6 @@ use crate::backend::RecentSession;
 mod tests {
     use super::*;
     use std::io::Write;
-
-    #[test]
-    fn ai_title_은_claude_가_지은_제목만_잡는다() {
-        // 붙인 이름이 없는 세션의 이름표가 여기서 온다. 다른 줄에 같은 글자가
-        // 섞여 있어도(툴 결과에 흔하다) 레코드 형태가 맞을 때만 잡아야 한다.
-        let good = r#"{"type":"ai-title","aiTitle":"리네임 기능 하네스 구조"}"#;
-        assert_eq!(
-            ai_title_of_line(good).as_deref(),
-            Some("리네임 기능 하네스 구조")
-        );
-        assert_eq!(ai_title_of_line(r#"{"type":"user","message":{"content":"\"ai-title\" 얘기"}}"#), None);
-        assert_eq!(ai_title_of_line(r#"{"type":"ai-title","aiTitle":"  "}"#), None);
-    }
 
     #[test]
     fn 대화턴은_메타와_도구줄을_빼고_마지막_n개만_남긴다() {

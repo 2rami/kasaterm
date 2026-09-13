@@ -7466,29 +7466,22 @@ impl App {
             // 따로 읽는 건 중복이지만, 캐시를 하나로 묶으면 `struct App` 에 필드가
             // 붙는다(병렬 작업 핫스팟, CLAUDE.md). 같은 파일이라 페이지 캐시가 받는다.
             let (tail, _) = crate::socket::read_tail(&path, WINDOW);
-            // 명부의 `/rename` 이름이 먼저다. transcript 꼬리로만 가면 학생이 CLI 로 붙인
-            // 이름이 뒤에 쌓여 사람이 친 `/rename` 을 덮는다(2026-09-08 지적).
-            let found = crate::screenread::peer_name_by_sid(&sid)
-                .or_else(|| {
-                    tail.lines()
-                        .filter_map(kasa_socket::sessions::custom_title_of_line)
-                        .last()
-                })
-                .or_else(|| {
-                    // 붙인 이름이 아직 없으면 claude 가 스스로 지은 제목을 쓴다.
-                    //
-                    // 여기서 첫 지시를 제목으로 **심던** 것을 걷어냈다(2026-09-07 지시).
-                    // 심은 값은 claude 가 매 턴 표식 없이 다시 적어 첫 문장이 그대로
-                    // 굳었고 — 화면에 "리네임기능 하네스 어떻게돼있어?" 같은 질문 원문이
-                    // 이름표로 남았다 — 표식이 지워진 복제본이라 자동 갱신 훅까지
-                    // 「내가 지은 게 아니다」로 물러나 한 번도 안 돌았다. claude 자신의
-                    // 제목은 같은 자리에서 "리네임 기능 하네스 구조"다.
-                    //
-                    // 파일에 아무것도 쓰지 않는다. 이름을 적는 것은 사람이 붙일 때뿐이다.
-                    tail.lines()
-                        .filter_map(kasa_socket::sessions::ai_title_of_line)
-                        .last()
-                });
+            // 이름표는 **사람이 붙인 것만** 얹는다(2026-09-14 지시 「자동으로 붙는거 아예
+            // 없애도돼」). 앱이 스스로 이름을 고르던 두 갈래를 여기서 걷었다:
+            //
+            // ① 명부(`~/.claude/sessions/<pid>.json`)의 세션 이름 — 사람이 친 `/rename` 을
+            //    지키려고 1순위로 올렸던 것인데(2026-09-08), 그 이름의 **기본값이 부팅 때
+            //    자동으로 붙는 세션 주소**(`yuzu-p0-4iz` 꼴)라서, 아무도 이름을 안 붙인
+            //    창은 헤더가 통째로 주소가 됐다. 세션 이름은 원래 헤더가 아니라 입력박스
+            //    보더 우측이 드는 겹이다(2026-08-27 확정: 헤더 = 캐릭터 + pane 번호 + 작업명).
+            //    `/rename` 은 전사본에도 `custom-title` 로 쓰므로 아래 한 줄이 그대로 잡는다.
+            // ② claude 가 스스로 지은 제목(`ai-title`) — 사람이 고른 말이 아니다.
+            //
+            // 파일에 아무것도 쓰지 않는다. 이름을 적는 것은 사람이 붙일 때뿐이다.
+            let found = tail
+                .lines()
+                .filter_map(kasa_socket::sessions::custom_title_of_line)
+                .last();
             let mut seen = session_titles().lock().unwrap();
             let entry = seen.entry(pane_id.clone()).or_default();
             // pane 이 다른 세션을 물면 기준선을 새로 잡는다 — 옛 대화의 마커를 이
