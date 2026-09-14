@@ -4499,8 +4499,15 @@ pub(crate) fn spinner_row_col(row: &[GridCell]) -> Option<usize> {
         return Some(first);
     }
     let g = row[first].ch;
-    if (0x2800..=0x28FF).contains(&(g as u32)) {
-        return Some(first);
+    if is_particle(g) {
+        // 점자 한 칸이 행 머리에 있다고 곧바로 스피너로 치면 codex 의 Astra 효과에
+        // 통째로 걸린다 — 그건 입력창 둘레 행에 점자를 **흩뿌리기만** 하고 말은 없다
+        // (gpt-6-astra, 2026-09-15 실측: 그 pane 이 계속 working 으로 읽혀 헤더 바가
+        // 안 멈추고, 학생이 스피너 자리라고 믿은 점 옆 — 입력 글자 위 — 에 그려졌다).
+        // claude 스피너는 늘 `⠋ Computing…` 처럼 점자 하나 뒤에 말이 온다. 그래서
+        // 점자가 그 행에 **하나뿐이고 뒤에 글자가 이어질 때**만 스피너로 본다.
+        let lone = !row[first + 1..].iter().any(|c| is_particle(c.ch));
+        return (lone && rest.chars().any(char::is_alphanumeric)).then_some(first);
     }
     // 최근 claude code(2.1.207 실측)는 힌트 없이 "· Verbing… (3m · ↓ 9k tokens)"
     // 만 찍는다 — 점(·) 프레임도 별과 같이 인정해야 감지가 프레임마다 끊기지 않는다.
@@ -7126,6 +7133,29 @@ mod prompt_box_tests {
             (left_c - (80.0 - 1.0 - STAND_CELLS)).abs() < f32::EPSILON,
             "점은 빈칸이라 오른쪽 끝에 선다 — 점 옆으로 끌려가 입력 글자 위에 올라오면 안 된다"
         );
+    }
+
+    #[test]
+    fn codex_astra_particle_row_is_not_a_spinner() {
+        // gpt-6-astra 실측(2026-09-15, %6 peek): 입력창 둘레 행에 점자만 흩뿌려진다.
+        // 행 머리에 앉은 점 하나를 스피너로 인정하던 동안 그 pane 이 통째로 working
+        // 으로 읽혔고, 학생이 스피너 자리라고 믿은 그 점 옆 — 입력 글자 위 — 에 섰다.
+        let rows = vec![
+            row_from("• Model changed to gpt-6-astra medium"),
+            row_from(""),
+            row_from("    ⠈         ⠄        ⠁          ⠂   ⠄      ⡀"),
+            row_from("› Ask Codex to do anything⡀   ⠈       ⠁      ⠈"),
+            row_from("      ⢀⠐            ⠠      ⢀ ⢀    ⡀    ⡀"),
+            row_from("  gpt-6-astra medium · main · kasaterm · Context 0% used"),
+        ];
+        assert_eq!(find_claude_spinner(&rows), None, "별밭을 스피너로 읽었다");
+
+        // 같은 판정이 claude 의 점자 스피너는 그대로 잡아야 한다.
+        let live = vec![
+            row_from("⠋ Computing… (3s · ↓ 1.2k tokens)"),
+            row_from(""),
+        ];
+        assert_eq!(find_claude_spinner(&live), Some((0, 0)));
     }
 
     #[test]
