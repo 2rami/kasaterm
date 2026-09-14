@@ -434,6 +434,16 @@ PLIST
 SIGN_ID="${KASATERM_SIGN_ID:-}"
 APPLE_SIGN=""
 SIGN_KEYCHAIN="${KASATERM_SIGN_KEYCHAIN:-$HOME/.config/kasaterm/signing/development.keychain-db}"
+# 로그인 키체인에 애플 발급 인증서가 있으면 그쪽이 먼저다 — 개발 키체인(자체 서명)은
+# 알림센터를 못 켠다. 단 그 키가 codesign 에 열려 있어야 한다(`security
+# set-key-partition-list -S apple-tool:,apple:,codesign: -s`) — 안 열려 있으면 암호창에서
+# 굽기가 멈추므로 여기서는 열린 키만 고른다(2026-09-14: 자체 서명으로 내려갔던 이유).
+LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+if [[ -z "${KASATERM_SIGN_KEYCHAIN:-}" && -f "$LOGIN_KEYCHAIN" ]] \
+   && security find-identity -v -p codesigning "$LOGIN_KEYCHAIN" 2>/dev/null | grep -qE '"(Developer ID Application|Apple Development): ' \
+   && python3 "$ROOT/scripts/signing-keychain.py" --probe "$LOGIN_KEYCHAIN" 2>/dev/null; then
+  SIGN_KEYCHAIN="$LOGIN_KEYCHAIN"
+fi
 IDENTITY_ARGS=(-p codesigning)
 if [[ -f "$SIGN_KEYCHAIN" ]]; then
   # 비밀번호 파일이 곁에 있을 때만 푼다 — 로그인 키체인처럼 이미 열려 있는 것을
