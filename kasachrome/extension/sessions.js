@@ -6,6 +6,7 @@
 // 셋 다 사람이 끌 수 있다(display.js) — 우상단 칩이 사이트의 계정 메뉴를 가리는 일이 있어서다.
 import { page } from './page.js'
 import { getDisplay } from './display.js'
+import { chooseGroupColor } from './group-colors.js'
 
 const sessions = new Map() // paneKey -> {identity, task, tabs:Set, busy:Set}
 const clientPane = new Map() // clientKey -> paneKey
@@ -492,20 +493,30 @@ export function addActivity(client, label, tabId, ok = true) {
 // 물고 그룹 넷을 차지하고 있었다). 방으로 묶으면 탭바에 방 수만큼만 뜬다.
 const ROOM_GROUPS_KEY = 'roomGroups'
 let roomGroups = null
+let roomGroupsLoading = null
+let roomGroupsSaving = Promise.resolve()
+const groupQueues = new Map()
 
 // storage.session 인 이유는 agentWindows 와 같다 — worker 가 죽어도 남고, 브라우저를 껐다 켜면
 // 저절로 비워진다(그룹 id 는 재사용되므로 남아 있으면 남의 그룹을 우리 것이라 가리킨다).
 async function roomGroupMap() {
   if (roomGroups) return roomGroups
-  try {
-    const v = await chrome.storage.session.get(ROOM_GROUPS_KEY)
-    roomGroups = new Map(Object.entries(v[ROOM_GROUPS_KEY] || {}))
-  } catch { roomGroups = new Map() }
-  return roomGroups
+  // 서로 다른 창도 첫 로드를 공유해야 늦게 온 저장소 사본이 이미 만든 방을 지우지 않는다.
+  if (!roomGroupsLoading) roomGroupsLoading = (async () => {
+    try {
+      const v = await chrome.storage.session.get(ROOM_GROUPS_KEY)
+      roomGroups = new Map(Object.entries(v[ROOM_GROUPS_KEY] || {}))
+    } catch { roomGroups = new Map() }
+    return roomGroups
+  })()
+  return roomGroupsLoading
 }
 
 function saveRoomGroups() {
-  chrome.storage.session.set({ [ROOM_GROUPS_KEY]: Object.fromEntries(roomGroups || []) }).catch(() => {})
+  const value = Object.fromEntries(roomGroups || [])
+  roomGroupsSaving = roomGroupsSaving
+    .then(() => chrome.storage.session.set({ [ROOM_GROUPS_KEY]: value }))
+    .catch((e) => note('group-save', e))
 }
 
 // 합류 후보. 방을 알면 방 그룹을, 모르면(kasaterm 밖) 예전처럼 자기 그룹을 쓴다.
@@ -553,6 +564,16 @@ async function roomTitleOf(room, groupId) {
 
 // 창을 넘나드는 그룹은 없다. 창마다 따로 묶고, 그 창에 이미 이 방 그룹이 있으면 거기 합친다.
 async function groupInWindow(s, windowId, tabIds) {
+  // 후보 조회와 색 선택까지 함께 세워야 동시 요청이 같은 방·같은 색을 두 번 만들지 않는다.
+  const previous = groupQueues.get(windowId) || Promise.resolve()
+  const run = previous.then(() => assignGroupInWindow(s, windowId, tabIds))
+  const settled = run.catch(() => {})
+  groupQueues.set(windowId, settled)
+  settled.then(() => { if (groupQueues.get(windowId) === settled) groupQueues.delete(windowId) })
+  return run
+}
+
+async function assignGroupInWindow(s, windowId, tabIds) {
   const team = s.identity?.team || null
   const room = s.identity?.room || null
   let target = null
@@ -566,11 +587,15 @@ async function groupInWindow(s, windowId, tabIds) {
   )
   s.groups.add(groupId)
   if (team) await rememberRoomGroup(team, groupId)
-  // 탭 그룹은 이미지를 못 받는다(글자 + 8색뿐). 아바타는 페이지 칩에 있으니 여기선 이름과 색만.
-  // 색은 방 이름에서 뽑은 것을 쓴다 — 학생 색을 쓰면 먼저 연 사람이 누구냐에 따라 방 색이 바뀐다.
   const title = room ? await roomTitleOf(room, groupId) : (s.identity?.name || PRODUCT)
-  const color = (room && s.identity?.roomColor) || s.identity?.groupColor || 'grey'
-  await chrome.tabGroups.update(groupId, { title, color }).catch((e) => note('group-title', e))
+  const patch = { title }
+  // 기존 그룹색은 사람이 바꿨을 수 있다. 새 그룹만 사람 그룹까지 포함해 빈 색을 고른다.
+  if (target == null) {
+    const groups = await chrome.tabGroups.query({ windowId })
+    const preferred = (room && s.identity?.roomColor) || s.identity?.groupColor || 'grey'
+    patch.color = chooseGroupColor(groups.filter((g) => g.id !== groupId), preferred)
+  }
+  await chrome.tabGroups.update(groupId, patch).catch((e) => note('group-title', e))
   return groupId
 }
 

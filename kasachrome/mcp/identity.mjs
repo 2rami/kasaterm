@@ -11,9 +11,9 @@ let host = null
 try { host = await import('./kasaterm.mjs') } catch { /* 배포판엔 이 파일이 없다 */ }
 
 // 크롬 탭 그룹은 이 8색만 받는다. 호스트가 주는 색을 여기에 맞춘다.
-const CHROME_GROUP_COLORS = new Set(['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan'])
+const CHROME_GROUP_COLORS = new Set(['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'])
 const COLOR_ALIAS = {
-  orange: 'yellow', magenta: 'pink', violet: 'purple', teal: 'cyan',
+  magenta: 'pink', violet: 'purple', teal: 'cyan',
   gray: 'grey', white: 'grey', black: 'grey',
 }
 
