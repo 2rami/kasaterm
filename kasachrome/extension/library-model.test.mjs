@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { tabSections, bookmarkResults, bookmarkMatches, canOpenBookmark } from './library-model.js'
+import { tabSections, bookmarkResults, bookmarkMatches, canOpenBookmark, sortWindowGroups } from './library-model.js'
 
 test('all current-window tabs stay unique, grouped and naturally sorted without mutating browser order', () => {
   const tabs = [
@@ -35,4 +35,24 @@ test('bookmark open rejects executable and invalid URLs', () => {
   assert.equal(canOpenBookmark('not a url'), false)
   assert.equal(canOpenBookmark('https://example.com'), true)
   assert.equal(canOpenBookmark('chrome://bookmarks'), true)
+})
+
+test('sorting stops before touching a group moved to another window', async () => {
+  const moves = []
+  const api = {
+    tabs: { query: async ({ windowId }) => {
+      assert.equal(windowId, 7)
+      return [{ id: 1, groupId: 1, index: 0 }, { id: 2, groupId: 2, index: 1 }]
+    } },
+    tabGroups: {
+      query: async ({ windowId }) => {
+        assert.equal(windowId, 7)
+        return [{ id: 1, title: 'A' }, { id: 2, title: 'B' }]
+      },
+      get: async id => ({ id, windowId: id === 2 ? 8 : 7 }),
+      move: async (id, options) => moves.push({ id, ...options }),
+    },
+  }
+  await assert.rejects(sortWindowGroups(api, 7), /changed windows/)
+  assert.deepEqual(moves, [{ id: 1, index: 0 }])
 })

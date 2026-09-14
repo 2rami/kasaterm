@@ -1,5 +1,5 @@
 import { hostOf } from './url.js'
-import { tabSections, bookmarkMatches, bookmarkCount, bookmarkResults, byName, matches, canOpenBookmark } from './library-model.js'
+import { tabSections, bookmarkMatches, bookmarkCount, bookmarkResults, byName, matches, canOpenBookmark, sortWindowGroups } from './library-model.js'
 
 const COLORS = { grey: '#aeb4bd', blue: '#8ab4f8', red: '#f28b82', yellow: '#fdd663', green: '#81c995', pink: '#ff8bcb', purple: '#c58af9', cyan: '#78d9ec', orange: '#fcad70' }
 const PREF_KEY = 'browserLibrary'
@@ -80,6 +80,7 @@ export function mountLibrary(students, connection) {
   let windowId = null, tabGeneration = 0, bookGeneration = 0
   let actionRunning = false
   let prefsTouched = false
+  let permissionPending = false, permissionSlow = false
   const navButtons = new Map()
 
   const save = () => {
@@ -252,13 +253,15 @@ export function mountLibrary(students, connection) {
     summary.textContent = '이 크롬 프로필의 북마크'
     if (booksError) return content.append(empty('북마크를 불러오지 못했어요', '잠시 후 다시 불러와 주세요.', '다시 시도', loadBookmarks))
     if (!booksLoaded) return content.append(empty('북마크를 확인하는 중', '이 프로필의 접근 권한을 확인하고 있어요.'))
-    if (!permitted) return content.append(empty('내 북마크를 여기서 보기', '한 번 연결하면 폴더와 저장한 페이지를 볼 수 있어요. 북마크는 이 크롬 안에서만 읽어요.', '북마크 연결', async () => {
-      try {
-        const granted = await chrome.permissions.request({ permissions: ['bookmarks'] })
-        if (!granted) return notify('북마크 접근을 허용하지 않았어요. 연결 버튼으로 다시 시도할 수 있어요.')
-        await loadBookmarks()
-      } catch { notify('연결하지 못했어요. 확장 프로그램을 새로고침한 뒤 다시 시도해 주세요.') }
-    }))
+    if (!permitted) {
+      const detail = permissionPending
+        ? permissionSlow ? '아직 크롬의 권한 응답을 받지 못했어요. 권한 상태를 다시 확인하거나 패널을 다시 열어 주세요. 탭 목록은 계속 사용할 수 있어요.' : '크롬의 권한 응답을 기다리고 있어요. 탭 목록은 계속 사용할 수 있어요.'
+        : '한 번 연결하면 폴더와 저장한 페이지를 볼 수 있어요. 북마크는 이 크롬 안에서만 읽어요.'
+      const buttonLabel = permissionPending ? permissionSlow ? '권한 다시 확인' : '연결 확인 중' : '북마크 연결'
+      const prompt = empty('내 북마크를 여기서 보기', detail, buttonLabel, requestBookmarks)
+      prompt.querySelector('button').disabled = permissionPending && !permissionSlow
+      return content.append(prompt)
+    }
     if (!bookmarks.length) return content.append(empty('저장한 북마크가 없어요', '크롬에서 페이지를 북마크에 저장하면 여기에 나타나요.'))
     if (!bookmarks.some(bookmark => bookmarkMatches(bookmark, query()))) return content.append(empty('찾는 북마크가 없어요', '다른 제목, 폴더 이름이나 주소로 검색해 보세요.'))
     const results = query() ? bookmarkResults(bookmarks, query()) : []
@@ -266,6 +269,32 @@ export function mountLibrary(students, connection) {
       summary.textContent = `${results.length}개 북마크 찾음`
       content.append(bookmarkBranch(results, true))
     } else content.append(bookmarkBranch(bookmarks))
+  }
+
+  async function requestBookmarks() {
+    if (permissionPending) {
+      await loadBookmarks()
+      if (!permitted && prefs.view === 'bookmarks') notify('아직 북마크 접근 권한이 없어요. 응답이 계속 없으면 패널을 닫았다 다시 열어 주세요.')
+      return
+    }
+    permissionPending = true; permissionSlow = false
+    notify('')
+    render()
+    const timer = setTimeout(() => {
+      permissionSlow = true
+      if (prefs.view === 'bookmarks') render()
+    }, 10000)
+    try {
+      // Keep the permission request inside the original click's user gesture.
+      const granted = await chrome.permissions.request({ permissions: ['bookmarks'] })
+      if (!granted && prefs.view === 'bookmarks') notify('북마크 접근을 허용하지 않았어요. 연결 버튼으로 다시 시도할 수 있어요.')
+    } catch {
+      if (prefs.view === 'bookmarks') notify('연결하지 못했어요. 확장 프로그램을 새로고침한 뒤 다시 시도해 주세요.')
+    } finally {
+      clearTimeout(timer)
+      permissionPending = false; permissionSlow = false
+      await loadBookmarks()
+    }
   }
 
   function render() {
@@ -311,15 +340,8 @@ export function mountLibrary(students, connection) {
   }
 
   align.addEventListener('click', () => runAction(align, async () => {
-    const currentTabs = await chrome.tabs.query({ windowId })
-    const currentGroups = await chrome.tabGroups.query({ windowId })
-    const ordered = tabSections(currentTabs, currentGroups, 'name').filter(section => section.id != null)
-    // Group moves keep membership and internal order intact, including collapsed groups.
-    let index = Math.min(...ordered.map(section => section.index))
-    for (const section of ordered) {
-      await chrome.tabGroups.move(section.id, { index })
-      index += section.tabs.length
-    }
+    const targetWindowId = windowId
+    await sortWindowGroups(chrome, targetWindowId)
     notify('그룹을 이름순으로 정렬했어요. 그룹 안의 탭 순서는 그대로예요.')
   }))
   recolor.addEventListener('click', () => runAction(recolor, async () => {

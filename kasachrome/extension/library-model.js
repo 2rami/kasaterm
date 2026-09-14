@@ -43,3 +43,15 @@ export function canOpenBookmark(url) {
   try { return ['http:', 'https:', 'file:', 'ftp:', 'chrome:', 'about:'].includes(new URL(url).protocol) }
   catch { return false }
 }
+
+export async function sortWindowGroups(api, windowId) {
+  const [tabs, groups] = await Promise.all([api.tabs.query({ windowId }), api.tabGroups.query({ windowId })])
+  const ordered = tabSections(tabs, groups, 'name').filter(section => section.id != null)
+  let index = Math.min(...ordered.map(section => section.index))
+  for (const section of ordered) {
+    // A user can move a group to another window while earlier group moves are pending.
+    if ((await api.tabGroups.get(section.id)).windowId !== windowId) throw new Error('Group changed windows')
+    await api.tabGroups.move(section.id, { index })
+    index += section.tabs.length
+  }
+}

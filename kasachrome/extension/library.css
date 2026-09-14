@@ -19,7 +19,7 @@ body.panel { min-width: 260px; }
 .library-actions { display: flex; gap: 6px; padding-bottom: 10px; }
 .library-action, .library-primary { font: inherit; font-size: 11px; border: 1px solid #454c57; border-radius: 6px; background: #242930; color: var(--fg); padding: 6px 10px; cursor: pointer; min-height: 30px; }
 .library-action:hover:not(:disabled), .library-primary:hover { background: #303741; }
-.library-action:disabled { opacity: .45; cursor: default; }
+.library-action:disabled, .library-primary:disabled { opacity: .45; cursor: default; }
 .library-status { padding: 10px 12px; color: #fdd663; font-size: 12px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .library-content { padding: 0 6px 16px; }
 .library-section + .library-section { margin-top: 3px; }
