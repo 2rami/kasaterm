@@ -254,13 +254,24 @@ class Handler(BaseHTTPRequestHandler):
         parts = route.strip("/").split("/")
         pet_request = route == "/api/pet-summary"
         chat_request = route == "/api/chat"
-        if not pet_request and not chat_request and (len(parts) != 4 or parts[:2] != ["api", "requests"] or parts[3] != "ack"):
+        ask_request = route == "/api/ask"
+        if not pet_request and not chat_request and not ask_request and (len(parts) != 4 or parts[:2] != ["api", "requests"] or parts[3] != "ack"):
             return self.reply(404, {"error": "not_found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= 65536 or self.headers.get("Transfer-Encoding"):
                 return self.reply(413, {"error": "invalid_body_size"})
             body = json.loads(self.rfile.read(length))
+            if ask_request:
+                # 펫 머리 위 유리 바 — 지금 보는 창 하나를 두고 짧게 답하고, 시키면 움직인다.
+                # 동기(최대 25초). 장부 채팅(`/api/chat`)과 달리 모델이 고른 도구를 실행한다.
+                if self.server.chat is None:
+                    return self.reply(503, {"error": "chat_unavailable"})
+                if not isinstance(body, dict) or set(body) - {"text", "pane"}:
+                    return self.reply(400, {"error": "invalid_ask_request"})
+                from .ask import answer
+                status, payload = answer(self.server.chat.provider_factory, body)
+                return self.reply(status, payload)
             if chat_request:
                 if self.server.chat is None:
                     return self.reply(503, {"error": "chat_unavailable"})
