@@ -1323,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn device_browser_does_not_repeat_mirrors_already_in_this_device_list() {
+    fn device_browser_keeps_a_hole_for_mirrors_open_here() {
         let row = |local: &str, source: &str| state::MachinesColRow {
             pane: local.into(), remote_id: source.into(), remote_cwd: "/work/project".into(),
             name: "모모이".into(), title: "작업".into(), status: "working".into(),
@@ -1337,8 +1337,10 @@ mod tests {
         };
         let rows = machine_rows(&machine);
         assert_eq!(rows.iter().map(|r| r.remote_id.as_str()).collect::<Vec<_>>(),
-            vec!["%2", "%12"]);
-        assert_eq!(machine_open_count(&machine), 2);
+            vec!["%2", "%7", "%12"]);
+        // The mirror keeps its source number and carries the local pane to jump to.
+        assert_eq!(rows.iter().find(|r| r.remote_id == "%7").map(|r| r.pane.as_str()), Some("%99"));
+        assert_eq!(machine_open_count(&machine), 3);
         machine.mirrored[0].closed = true;
         assert_eq!(machine_open_count(&machine), 2);
         machine.online = false;
@@ -2188,7 +2190,7 @@ pub(crate) fn draw_info_col(
                     if m.closed > 0 {
                         h += MACHINE_HEAD_H;
                     }
-                    if m.remote.is_empty() { h += EMPTY_H; }
+                    if machine_rows(m).is_empty() { h += EMPTY_H; }
                 } else {
                     h += EMPTY_H;
                 }
@@ -2462,7 +2464,18 @@ pub(crate) fn draw_info_col(
                     let mirrored = !r.pane.is_empty();
                     let mut close_rect = None;
                     if y + GROUP_H > top && y < bottom {
-                        close_rect = draw_machine_pane_row(g, cursor, r, mirrored, x, w, x0, right, y);
+                        if mirrored {
+                            // 거울이 앉은 이쪽 방 — 방이 하나뿐이면 라벨이 비어 「이 창」이 된다.
+                            let room = snap
+                                .panes
+                                .iter()
+                                .find(|p| p.pane == r.pane)
+                                .map(|p| p.window_label.as_str())
+                                .unwrap_or("");
+                            draw_machine_hole_row(g, cursor, r, room, x, w, x0, right, y);
+                        } else {
+                            close_rect = draw_machine_pane_row(g, cursor, r, x, w, x0, right, y);
+                        }
                     }
                     if let Some(cr) = close_rect {
                         let close = state::MachinesColBtn::Close {
@@ -2488,10 +2501,8 @@ pub(crate) fn draw_info_col(
                     }
                     y += MACHINE_HEAD_H;
                 }
-                if m.remote.is_empty() {
-                    let text = if m.mirrored.is_empty() { "열린 pane 없음" }
-                        else { "열린 거울은 이 기기 목록에 표시돼요" };
-                    draw_empty(g, x0, y, top, bottom, text);
+                if machine_rows(m).is_empty() {
+                    draw_empty(g, x0, y, top, bottom, "열린 pane 없음");
                     y += EMPTY_H;
                 }
             } else {
@@ -2645,10 +2656,12 @@ fn draw_device_section(
         None, true, collapsed, x, w, y, bottom, top)
 }
 
-/// Already-open mirrors belong to the viewer's normal pane list. Keep this
-/// browser for source panes that are not open here; do not list a viewer twice.
+/// 그 기계의 pane 전부 — 이쪽에 거울로 와 있는 것도 **제자리에** 선다. 거울 행은
+/// 그리는 쪽이 구멍(점선 빈 칸)으로 그려 「이쪽 방에서 보는 중」만 적는다: 몸통은
+/// 여전히 저 기계 것이라 목록에서 빼면 그 기계가 실제보다 비어 보인다(2026-09-14
+/// 지시). 얼굴·작업 줄은 거울이 앉은 방의 pane 줄이 말한다.
 fn machine_rows(m: &state::MachinesColMachine) -> Vec<&state::MachinesColRow> {
-    let mut rows: Vec<_> = m.remote.iter().filter(|_| m.online).collect();
+    let mut rows: Vec<_> = m.remote.iter().chain(m.mirrored.iter()).filter(|_| m.online).collect();
     rows.sort_by(|a, b| a.closed.cmp(&b.closed).then_with(|| a.room.cmp(&b.room)).then_with(|| {
         let number = |r: &state::MachinesColRow|
             r.remote_id.trim_start_matches('%').parse::<u64>().unwrap_or(u64::MAX);
@@ -2915,10 +2928,14 @@ fn draw_group_head(
         }
     }
     let mut budget = (text_right - 8.0 - tx).max(0.0);
-    let title = if gp.label.is_empty() {
+    // 글자는 **세션 이름**이다 — 「누가」는 얼굴이 이미 말하고, 여러 pane 에서 찾는
+    // 단서는 「무엇을」 쪽이다(2026-09-14 지시 「캐릭터 이름은 빼고 세션 이름」).
+    // 이름 없는 새 세션만 학생 이름으로 채운다 — 빈 줄보다는 낫다.
+    let name = if gp.session.is_empty() { gp.label.as_str() } else { gp.session.as_str() };
+    let title = if name.is_empty() {
         gp.pane.clone()
     } else {
-        format!("{} {}", gp.pane, gp.label)
+        format!("{} {}", gp.pane, name)
     };
     let title = fit_text(g, &title, budget, 12.0, true);
     let tw = g.measure_chrome_text(&title, 12.0, true);
@@ -2965,14 +2982,15 @@ fn draw_group_head(
     } else {
         budget
     };
-    // 작업 한 줄이 있으면 세션 제목보다 먼저다 — 제목은 「무엇으로 시작했나」고
-    // 작업 줄은 「지금 뭘 하나」라, 훑는 눈이 찾는 건 뒤쪽이다(2026-09-08 지시).
+    // 작업 한 줄 — 「지금 뭘 하나」. 세션 이름은 위 제목 자리로 올라갔으니 여기서
+    // 되풀이하지 않는다(2026-09-08 지시로 작업 줄이 제목보다 앞섰고, 09-14 에 제목이
+    // 세션 이름이 되면서 둘이 한 줄로 합쳐졌다).
     let (line, line_col) = match task {
         Some(t) => (
             t.label.clone(),
             if t.attention { theme::attention() } else { theme::text_dim() },
         ),
-        None => (gp.session.clone(), theme::text_dim()),
+        None => (String::new(), theme::text_dim()),
     };
     if !line.is_empty() && title_budget > 40.0 {
         let s = fit_text(g, &line, title_budget, 10.5, false);
@@ -3735,7 +3753,6 @@ fn draw_machine_pane_row(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     r: &state::MachinesColRow,
-    mirrored: bool,
     x: f32, w: f32, x0: f32, right: f32, y: f32,
 ) -> Option<(f32, f32, f32, f32)> {
     let hovered = hit(cursor, &(x, y, w, GROUP_H));
@@ -3764,11 +3781,49 @@ fn draw_machine_pane_row(
         g.queue_icon("x", cr.0 + 3.0, y + (GROUP_H - 12.0) / 2.0, 12.0,
             if on_x { theme::attention() } else { theme::text_mute() });
     }
-    // Keep the source number above; the local mirror ID is only a navigation target.
-    if mirrored && r.closed {
-        g.queue_icon("archive", x0 - 3.0, y + 6.0, 12.0, theme::text_mute());
-    }
     close_rect
+}
+
+/// 거울로 이쪽에 와 있는 pane 의 자리 — 그 기계 목록에 **구멍**으로 남긴다. 몸통은
+/// 저쪽이고 화면은 이쪽 방에 있으니, 점선 빈 칸에 「어느 방에서 보는 중」만 적는다.
+/// 얼굴·작업 줄은 그 방의 pane 줄이 이미 말한다(2026-09-14 지시 「구멍 나서 가져와서
+/// 보는 느낌」). 누르면 그 거울 pane 으로 간다 — 히트렉트는 부르는 쪽이 건다.
+fn draw_machine_hole_row(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    r: &state::MachinesColRow,
+    viewer_room: &str,
+    x: f32, w: f32, x0: f32, right: f32, y: f32,
+) {
+    if hit(cursor, &(x, y, w, GROUP_H)) {
+        g.rect(x, y, w, GROUP_H, theme::surface_hover());
+        g.hover_pointer = true;
+    }
+    let mute = theme::text_mute();
+    crate::render::dashed_rect(
+        g, x0 - 3.0, y + 2.0, (right - x0 + 3.0).max(0.0), GROUP_H - 4.0,
+        theme::with_alpha(mute, 0x80),
+    );
+    let name = if r.title.is_empty() { r.name.as_str() } else { r.title.as_str() };
+    let place = if r.closed {
+        "닫힘 · 원본 기기에서 되살리기".to_string()
+    } else if viewer_room.is_empty() {
+        "이 창에서 보는 중".to_string()
+    } else {
+        format!("{viewer_room}에서 보는 중")
+    };
+    let pw = g.measure_chrome_text(&place, 10.0, false);
+    let tx = x0 + 8.0;
+    let budget = (right - 8.0 - pw - 12.0 - tx).max(0.0);
+    let head = fit_text(g, &format!("{} {}", r.remote_id, name), budget, 11.0, false);
+    g.draw_text(
+        tx, y + 5.0, &head,
+        gpu::DrawOpts { font_size: 11.0, color: mute, bold: false, italic: false },
+    );
+    g.draw_text(
+        right - 8.0 - pw, y + 6.0, &place,
+        gpu::DrawOpts { font_size: 10.0, color: mute, bold: false, italic: false },
+    );
 }
 
 /// 「다른 기계」 줄을 누르면 뜨는 메뉴 — 방 펼치기·화면 보기, 그 기계 학생마다

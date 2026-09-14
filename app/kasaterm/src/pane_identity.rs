@@ -277,13 +277,6 @@ pub(crate) fn machine_tint(label: &str) -> [u8; 4] {
     .unwrap_or_else(|| hashed_device_color(&key))
 }
 
-/// 아는 기기가 둘 이상인가. 기기가 하나뿐인 창에서는 로컬 칸까지 물들일 이유가
-/// 없다 — 가를 상대가 없는데 배치도 전체가 한 색이 되면 「어느 기기」가 아니라
-/// 「잘못 칠해진 자리」로 읽힌다. 명부에 기계가 하나라도 있으면 늘 가른다.
-pub(crate) fn multiple_devices_known() -> bool {
-    with_device_colors(|c| c.roster.len() > 1).unwrap_or(false)
-}
-
 /// 설정 화면에 늘어놓을 기기 목록 — 이 기기가 맨 위, 그 뒤 명부 순서.
 pub(crate) fn device_color_rows() -> Vec<DeviceColorRow> {
     reload_device_colors();

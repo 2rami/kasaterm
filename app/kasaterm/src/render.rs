@@ -2183,8 +2183,11 @@ impl App {
                     crate::info::cached_local_machine_name(),
                 );
                 let machine = identity.remote.then(|| identity.label.clone());
-                let device = (identity.remote || pane_identity::multiple_devices_known())
-                    .then_some(identity.label);
+                // 기기색은 **남의 기계에서 온 pane 에만** 칠한다 — pane 배경(`pane_background`)과
+                // 같은 규칙이다. 전에는 명부에 기계가 둘 이상이면 로컬 칸까지 이 기기색으로
+                // 물들여, 배치도는 파란데 pane 배경은 그대로인 어긋남이 났다(2026-09-14 지적
+                // 「연결된 기기 말고는 기본색이어야 하는 거 아니야」).
+                let device = identity.remote.then_some(identity.label);
                 let (is_cur, icon, tab_peeks) = {
                     let ws = self.ws.lock().unwrap();
                     let is_cur = ws.active_pane.as_deref() == Some(id.as_str());
