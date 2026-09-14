@@ -567,7 +567,16 @@ impl App {
     /// 생기기 전까지 없다). 레이아웃 트리는 비활성 방까지 훑는다.
     pub(crate) fn used_pane_ids(&self) -> std::collections::HashSet<String> {
         let mut used: std::collections::HashSet<String> = self.pty.keys().cloned().collect();
-        used.extend(self.ws.lock().unwrap().panes.keys().cloned());
+        {
+            let ws = self.ws.lock().unwrap();
+            used.extend(ws.panes.keys().cloned());
+            // `pid_to_pane` 의 키도 쓴 번호다. 탭을 닫아도 그 표는 그 자리에서 안 걷히고
+            // `rebuild_pid_map` 이 돌 때만 정리되는데, 여기서 안 세면 탭을 꺼낼 때
+            // 발급한 새 leaf 번호가 죽은 탭의 옛 번호와 겹친다. 그러면 `outer_for_pty`
+            // 가 새 pane 클릭을 옛 바깥 pane 으로 접어 포커스가 안 옮겨졌다(2026-09-14
+            // 실측: 탭에서 꺼낸 pane 을 눌러도 활성이 안 바뀜).
+            used.extend(ws.pid_to_pane.keys().cloned());
+        }
         for l in self
             .windows
             .iter()

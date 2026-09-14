@@ -1888,6 +1888,10 @@ impl App {
             ps.active_tab = 0;
             ps.dirty = true;
             ws.panes.insert(new_outer.clone(), ps);
+            // 새 leaf 번호는 자기 PTY 가 없다 — 그 이름으로 남은 매핑은 죽은 탭의
+            // 찌꺼기라 걷는다. 남겨 두면 이 pane 을 누를 때 `outer_for_pty` 가 옛
+            // 바깥으로 접어 클릭 포커스가 통째로 죽는다.
+            ws.pid_to_pane.remove(&new_outer);
             if let Some(pid) = moved_pid {
                 // Rebind the pid map so future ScreenUpdates / find_tab_by_pty
                 // route to new_outer even when pid != new_outer.
