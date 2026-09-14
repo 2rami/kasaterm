@@ -436,17 +436,29 @@ impl ApplicationHandler for App {
             if elapsed>10.0 {eprintln!("MENU_PROBE_TIMEOUT");el.exit();}
         }
         // 진짜 펫에서 바가 열리고 머리 위에 앉는지 — 사람 손 없이 확인하는 창구.
+        // `KASAPET_AUTOASK` 에 물음을 담으면 그것을 실제로 보내고 답까지 기다린다
+        // (`1` 이면 여는 데까지만). 물을 pane 은 `KASAPET_AUTOASK_PANE` 으로 덮는다.
         #[cfg(target_os="macos")]
-        if std::env::var_os("KASAPET_AUTOASK").is_some() {
-            if self.frames==30 && !self.ask_open() { self.toggle_ask(); }
-            if self.frames==90 {
-                let pet = self.win.as_ref().map(|w| w.outer_position().ok().map(|p| p.y as f64).unwrap_or(0.0));
+        if let Ok(question) = std::env::var("KASAPET_AUTOASK") {
+            let question = question.trim().to_string();
+            if self.frames==30 && !self.ask_open() {
+                self.toggle_ask();
+                let pet = self.win.as_ref().and_then(|w| w.outer_position().ok()).map(|p| p.y as f64);
                 match self.ask_bar.as_ref() {
                     Some(bar) => eprintln!("ASK_APP_OPEN:{} FRAME:{:?} PET_TOP:{:?}", bar.visible(), bar.probe_frame(), pet),
                     None => eprintln!("ASK_APP_OPEN:false"),
                 }
-                el.exit();
+                if question != "1" && !question.is_empty() {
+                    let pane = std::env::var("KASAPET_AUTOASK_PANE").ok().filter(|p| !p.is_empty())
+                        .unwrap_or_else(|| self.ask_pane());
+                    eprintln!("ASK_APP_PANE:{pane}");
+                    if let Some(path) = self.journal_path() {
+                        eprintln!("ASK_APP_SERVICE:{} SENT:{}", path.display(), self.ask.ask(path.clone(), question.clone(), pane));
+                        if let Some(bar) = &self.ask_bar { bar.say("나쵸가 보는 중…"); }
+                    }
+                }
             }
+            if self.frames>60 && !self.ask.busy() { el.exit(); }
         }
         if let Some(w) = &self.win { w.request_redraw(); }
     }
@@ -920,6 +932,12 @@ impl App {
                 }
             }
             if let Some(result) = self.ask.poll() {
+                if std::env::var_os("KASAPET_AUTOASK").is_some() {
+                    eprintln!("ASK_APP_ANSWER:{}", match &result {
+                        Ok(answer) => answer.line().replace('\n', " | "),
+                        Err(()) => "닿지 못했어요".to_string(),
+                    });
+                }
                 if let Some(bar) = &self.ask_bar {
                     match result {
                         Ok(answer) => bar.say(&answer.line()),

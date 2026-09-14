@@ -16,12 +16,18 @@ pub struct Answer {
 }
 
 impl Answer {
-    /// 바에 찍을 한두 줄. 답 다음에 벌어진 일을 붙인다.
+    /// 바에 찍을 한두 줄. 답 다음에 벌어진 일을 붙이되, 답이 이미 그 말을 하고 있으면
+    /// 안 붙인다 — 「앞으로 가져옴 / 앞으로 가져옴」처럼 같은 줄이 두 번 뜨면 사람은
+    /// 둘째 줄에서 새 정보를 찾다가 없다는 것을 알게 된다.
     pub fn line(&self) -> String {
-        if self.actions.is_empty() {
+        let fresh: Vec<&str> = self.actions.iter()
+            .map(String::as_str)
+            .filter(|action| !self.text.contains(*action))
+            .collect();
+        if fresh.is_empty() {
             return self.text.clone();
         }
-        format!("{}\n{}", self.text, self.actions.join(" · "))
+        format!("{}\n{}", self.text, fresh.join(" · "))
     }
 }
 
@@ -120,6 +126,18 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(answer.line(), "옮겼어요.\n맥미니로 이사 · 붙을 기계가 없음 — 실패");
+    }
+
+    /// 답이 이미 한 말은 아래 줄에 또 적지 않는다(2026-09-14 실호출: 「앞으로 가져와
+    /// 줘」가 답과 벌어진 일 양쪽에 「앞으로 가져옴」으로 왔다).
+    #[test]
+    fn an_action_the_answer_already_said_is_not_repeated() {
+        let answer = parse(&json!({
+            "answer": "앞으로 가져옴",
+            "actions": [{"kind": "focus_pane", "ok": true, "detail": "앞으로 가져옴"}]
+        }))
+        .unwrap();
+        assert_eq!(answer.line(), "앞으로 가져옴");
     }
 
     /// 답이 비어 있으면 성공으로 치지 않는다. 빈 바를 띄워 두면 사람은 답을 기다리며
