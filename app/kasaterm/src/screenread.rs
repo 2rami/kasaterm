@@ -291,6 +291,20 @@ pub(crate) fn overlay_codex_session_label(
 /// **codex**: 보더가 없다. 대신 입력행이 **명시 배경색으로 통째로 칠해져** 있어서
 /// 그걸 시그니처로 쓴다 — `›` 로 시작하고 그 행의 모든 글리프가 같은 non-Default
 /// `bg` 를 공유하는 행. 배경 없이 `›` 만 보면 인용문·diff 를 입력창으로 오인한다.
+/// 점자 블록(U+2800–U+28FF) 한 칸 — codex 의 Astra 효과가 입력창 주변에 흩뿌리는
+/// 「별」이다(gpt-6-astra, 2026-09-14 실측: 입력행 위아래와 입력행 안까지 점이 앉는다).
+/// 입력창 판정·학생 자리 잡기에서는 빈칸으로 친다 — 글자로 세면 마커를 못 찾고,
+/// 학생이 점 옆에 서겠다고 입력 글자 위로 올라온다. claude 의 점자 스피너도 같은
+/// 블록이지만 그건 행 머리에만 오고 입력창 판정과는 무관하다.
+pub(crate) fn is_particle(ch: char) -> bool {
+    ('\u{2800}'..='\u{28FF}').contains(&ch)
+}
+
+/// 빈칸으로 칠 글리프 — 공백·미채움·Astra 점.
+pub(crate) fn is_blank_glyph(ch: char) -> bool {
+    matches!(ch, ' ' | '\0') || is_particle(ch)
+}
+
 pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     fn is_border(r: &[GridCell]) -> bool {
         let (mut dash, mut glyph, mut lead, mut first, mut last) = (0usize, 0usize, 0usize, None, ' ');
@@ -320,7 +334,7 @@ pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     // `>` 까지 마커로 치면 그 대시줄 쌍을 입력박스로 오인해 뜬금없는 빈 초록
     // 사각형을 덧그렸다(거노 2026-07-22).
     fn marker_row(r: &[GridCell]) -> bool {
-        r.iter().find(|c| c.ch != ' ' && c.ch != '\0').is_some_and(|c| matches!(c.ch, '❯' | '›'))
+        r.iter().find(|c| !is_blank_glyph(c.ch)).is_some_and(|c| matches!(c.ch, '❯' | '›'))
     }
     if let Some(b2) = rows.iter().rposition(|r| is_border(r)) {
         if let Some(b1) = rows[..b2].iter().rposition(|r| is_border(r)) {
@@ -335,7 +349,7 @@ pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     let uniform_fill = |r: &[GridCell]| -> Option<kasa_bridge::screen::Color> {
         let mut fill: Option<kasa_bridge::screen::Color> = None;
         let mut glyphs = 0usize;
-        for c in r.iter().filter(|c| c.ch != '\0') {
+        for c in r.iter().filter(|c| c.ch != '\0' && !is_particle(c.ch)) {
             if matches!(c.bg, kasa_bridge::screen::Color::Default) {
                 return None;
             }
@@ -4108,7 +4122,7 @@ pub(crate) fn stand_left_col(rows: &[Vec<GridCell>], anchor: usize, cols: usize)
     let anchor_row = rows.get(anchor)?;
     let first = anchor_row
         .iter()
-        .position(|c| !c.hidden && !matches!(c.ch, ' ' | '\0'));
+        .position(|c| !c.hidden && !is_blank_glyph(c.ch));
     let right_c = match first {
         Some(f) => f as f32 - 1.5,
         None => cols as f32 - 1.0,
@@ -4117,7 +4131,7 @@ pub(crate) fn stand_left_col(rows: &[Vec<GridCell>], anchor: usize, cols: usize)
     let first_row = (anchor + 1).saturating_sub(INPUT_STANDING_ROWS);
     for row in &rows[first_row..=anchor] {
         for (col, cell) in row.iter().enumerate().take(cols) {
-            if cell.hidden || matches!(cell.ch, ' ' | '\0') {
+            if cell.hidden || is_blank_glyph(cell.ch) {
                 continue;
             }
             let end = (col + cell.ch.width().unwrap_or(1).max(1)).min(cols);
@@ -7082,6 +7096,36 @@ mod prompt_box_tests {
             assert_eq!(rect.1 + rect.3, 8.0 + (anchor + 1) as f32 * 18.0);
             assert_eq!(rect.3 / 18.0, INPUT_STANDING_ROWS.min(anchor + 1) as f32);
         }
+    }
+
+    #[test]
+    fn codex_astra_particles_count_as_blank_for_the_box_and_the_stand() {
+        let filled = |s: &str| {
+            let mut r = row_from(s);
+            for c in r.iter_mut() {
+                c.bg = kasa_bridge::screen::Color::Rgb(63, 69, 77);
+            }
+            r
+        };
+        // gpt-6-astra 실측 모양: 입력창 위 행에도, 채워진 여백·입력 행 안에도 점이 앉는다.
+        let rows = vec![
+            row_from("• Model changed to gpt-6-astra high"),
+            row_from("      ⠈        ⠁         ⡀⠐⠂        ⢀ ⠄    "),
+            filled("⠁      ⡀⠁        ⡀            ⠈          "),
+            filled("›⠁l           ⡀⠁        ⡀        ⠈       "),
+            filled("       ⢀⠐        ⠄        ⠄             "),
+            row_from("gpt-6-astra high · main · kasaterm · Context 0% used"),
+        ];
+        assert!(
+            matches!(prompt_box(&rows), Some(PromptBox::Filled { ref rows }) if *rows == (2..5)),
+            "점이 섞여도 채워진 세 줄이 한 상자"
+        );
+        let (anchor, left_c) = find_filled_standing_anchor(&rows, 80).expect("앵커");
+        assert_eq!(anchor, 1);
+        assert!(
+            (left_c - (80.0 - 1.0 - STAND_CELLS)).abs() < f32::EPSILON,
+            "점은 빈칸이라 오른쪽 끝에 선다 — 점 옆으로 끌려가 입력 글자 위에 올라오면 안 된다"
+        );
     }
 
     #[test]
