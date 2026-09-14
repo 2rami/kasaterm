@@ -681,6 +681,11 @@ impl App {
             .filter(|idx| *idx != settings_idx)
             .map(remap)
             .collect();
+        self.room_list_body = std::mem::take(&mut self.room_list_body)
+            .into_iter()
+            .filter(|(idx, _)| *idx != settings_idx)
+            .map(|(i, v)| (remap(i), v))
+            .collect();
         self.expand_anim = self
             .expand_anim
             .filter(|(idx, _, _)| *idx != settings_idx)

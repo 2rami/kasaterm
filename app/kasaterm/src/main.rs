@@ -5797,9 +5797,21 @@ struct App {
     /// and `tab_strip_w()` pins the side strip to 0, so render + click routing
     /// follow automatically. Persisted as settings.json `tab_position`.
     tabs_on_top: bool,
-    /// 사이드바 방 카드 본문 — 참이면 배치도 대신 학생 줄 목록(2026-09-08 지시 「방
-    /// 우클릭하면 목록·미니맵 전환」). settings.json `sidebar_body` = "list".
+    /// 사이드바 방 카드 본문의 **기본** 보기 — 참이면 배치도 대신 학생 줄 목록
+    /// (2026-09-08 지시 「방 우클릭하면 목록·미니맵 전환」). settings.json
+    /// `sidebar_body` = "list". 방마다 따로 고른 것은 `room_list_body` 가 이긴다.
     sidebar_list_body: bool,
+    /// **그 방만** 따로 고른 본문 보기 — 참이면 목록, 거짓이면 배치도. 없는 방은
+    /// 위 기본값을 따른다.
+    ///
+    /// 전에는 전역 값 하나뿐이라 한 방을 목록으로 바꾸면 **모든 방이** 목록이
+    /// 됐다(2026-09-15 지적). 방마다 쓰임이 다르다 — 학생이 여럿인 방은 누가
+    /// 무엇을 하는지 줄로 읽고 싶고, pane 배치를 자주 바꾸는 방은 지도가 낫다.
+    ///
+    /// 방 인덱스가 키라 `expanded_windows` 와 똑같이 **remap 을 반드시 통과**해야
+    /// 한다 — 안 그러면 2번 방을 목록으로 두고 3번 자리로 끌어 옮겼을 때 엉뚱한
+    /// 방이 목록으로 뜬다.
+    room_list_body: std::collections::HashMap<usize, bool>,
     /// settings.json 의 모르는 값은 읽는 경계에서 block 으로 떨어뜨린다.
     cursor_shape: cursor::CursorShape,
     cursor_thickness: f32,
@@ -6228,6 +6240,7 @@ impl App {
                 .get("sidebar_body")
                 .and_then(|v| v.as_str())
                 == Some("list"),
+            room_list_body: std::collections::HashMap::new(),
             cursor_shape: socket::read_cursor_shape(),
             cursor_thickness: socket::read_cursor_thickness(),
             mouse_cursor: socket::read_mouse_cursor(),

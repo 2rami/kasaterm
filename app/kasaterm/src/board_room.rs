@@ -211,6 +211,11 @@ impl App {
             .filter(|idx| *idx != board_idx)
             .map(remap)
             .collect();
+        self.room_list_body = std::mem::take(&mut self.room_list_body)
+            .into_iter()
+            .filter(|(idx, _)| *idx != board_idx)
+            .map(|(i, v)| (remap(i), v))
+            .collect();
         self.expand_anim = self
             .expand_anim
             .filter(|(idx, _, _)| *idx != board_idx)

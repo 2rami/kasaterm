@@ -1782,12 +1782,11 @@ impl App {
             }
             SidebarMenuAction::ListBody | SidebarMenuAction::MapBody => {
                 let list = action == SidebarMenuAction::ListBody;
-                if self.sidebar_list_body != list {
-                    self.sidebar_list_body = list;
-                    socket::write_setting(
-                        "sidebar_body",
-                        serde_json::Value::String(if list { "list" } else { "map" }.to_string()),
-                    );
+                // **그 방만** 바꾼다. 전에는 전역 설정 하나를 뒤집어 한 방을 목록으로
+                // 바꾸면 모든 방이 목록이 됐다(2026-09-15 지적). 전역 값은 아직 고른
+                // 적 없는 방의 기본으로 남는다.
+                if self.room_body_is_list(wi) != list {
+                    self.room_list_body.insert(wi, list);
                     // 카드 높이가 바뀌므로 펼친 방이 있으면 스크롤 상한도 같이 바뀐다.
                     self.mark_room_label_dirty();
                 }
@@ -1795,6 +1794,16 @@ impl App {
             SidebarMenuAction::RenameRoom => self.begin_room_rename(wi),
             SidebarMenuAction::CloseRoom => self.confirm_or_close_session(wi),
         }
+    }
+
+    /// 그 방 카드 본문이 **목록**인가 — 방마다 고른 것이 있으면 그것, 없으면 전역
+    /// 기본(`sidebar_list_body`). 카드 높이·행 사각·메뉴 문구·그리기가 전부 이
+    /// 하나를 봐야 한 방이 자리마다 다른 모습이 되지 않는다.
+    pub(crate) fn room_body_is_list(&self, idx: usize) -> bool {
+        self.room_list_body
+            .get(&idx)
+            .copied()
+            .unwrap_or(self.sidebar_list_body)
     }
 
     /// 방을 펴거나 접는다 — 상태와 애니메이션을 같이 세우는 유일한 입구.

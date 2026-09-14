@@ -2154,6 +2154,13 @@ impl App {
                     .and_then(|(_, r)| self.window_expand_rect(i, *r))
             })
             .collect();
+        // 방 메뉴 문구도 **그 방** 기준이라 여기서 미리 읽는다 — 페인트 루프는 GPU 를
+        // 이미 빌려 `&self` 메서드를 다시 못 부른다(위 `sb_expand` 와 같은 이유).
+        let sb_menu_list = self
+            .sidebar_menu
+            .as_ref()
+            .map(|(_, _, room, _)| self.room_body_is_list(*room))
+            .unwrap_or(false);
         // 펼친 방의 pane 한 줄씩 — 이름·색을 여기서 뽑아 둔다. `pane_character_if_known`
         // 이 `ws` 를 잠그므로 GPU 를 빌린 페인트 루프 안에서 부르면 그 자리에서 멈춘다.
         // 줄에 적는 건 **그 pane 이 무엇을 하고 있나**(claude · zsh · 편집기…)다.
@@ -4647,7 +4654,9 @@ impl App {
                     // pane 이 비면 방 메뉴 — 본문 보기 전환·이름·닫기(2026-09-08 지시).
                     let items: Vec<(SidebarMenuAction, &str)> = if pane.is_empty() {
                         vec![
-                            if self.sidebar_list_body {
+                            // 문구는 **그 방** 기준이다 — 옆 방이 목록이라고 이 방
+                            // 메뉴가 「배치도로 보기」로 뜨면 누를 때마다 어긋난다.
+                            if sb_menu_list {
                                 (SidebarMenuAction::MapBody, "배치도로 보기")
                             } else {
                                 (SidebarMenuAction::ListBody, "목록으로 보기")

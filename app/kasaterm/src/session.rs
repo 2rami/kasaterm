@@ -3445,6 +3445,8 @@ impl App {
         self.window_alert = alerts.into_iter().map(remap).collect();
         let expanded = std::mem::take(&mut self.expanded_windows);
         self.expanded_windows = expanded.into_iter().map(remap).collect();
+        let bodies = std::mem::take(&mut self.room_list_body);
+        self.room_list_body = bodies.into_iter().map(|(i, v)| (remap(i), v)).collect();
         // 도는 중인 펼침 모션도 방을 인덱스로 가리킨다. 0.16초짜리라 그 안에 방을
         // 끌어 옮기는 일은 드물지만, 인덱스를 키로 쓰는 필드가 **예외 없이** 여기를
         // 지나야 다음 사람이 이 목록을 믿는다.
@@ -3890,6 +3892,11 @@ impl App {
             .into_iter()
             .filter(|i| *i != idx)
             .map(remap)
+            .collect();
+        self.room_list_body = std::mem::take(&mut self.room_list_body)
+            .into_iter()
+            .filter(|(i, _)| *i != idx)
+            .map(|(i, v)| (remap(i), v))
             .collect();
         self.expand_anim = self
             .expand_anim
@@ -5036,7 +5043,7 @@ impl App {
         // 칸이 얼굴을 담아야 하므로 높이가 pane 수를 따라간다 — 여섯 칸을 46px
         // 안에 우겨넣으면 한 칸이 7px 이라 얼굴이 안 들어간다.
         // 목록 보기면 본문은 학생 줄이 pane 수만큼 — 배치도 대신이다(2026-09-08 지시).
-        let body_h = if self.sidebar_list_body {
+        let body_h = if self.room_body_is_list(i) {
             leaves.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD
         } else {
             (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0)
@@ -5237,7 +5244,7 @@ impl App {
                     tab_w - 20.0,
                     body_h - 8.0,
                 );
-                if self.sidebar_list_body {
+                if self.room_body_is_list(i) {
                     // 목록 보기 — 배치도 자리에 학생 줄. 숨긴 줄은 그 아래 이어진다.
                     for (k, id) in self.window_leaves(i).into_iter().enumerate() {
                         let ry = y + SIDEBAR_TAB_H + SIDEBAR_ROW_PAD / 2.0 + k as f32 * SIDEBAR_ROW_H;
@@ -5491,10 +5498,31 @@ impl App {
             } else {
                 Vec::new()
             };
+            // 방마다 따로 고른 본문 보기(목록/배치도). 방 인덱스가 키인데 저장하며
+            // 빈 방이 빠져 번호가 당겨지므로, `persisted_idx` 로 **저장본 번호**로
+            // 옮겨 적는다 — 옛 번호 그대로 실으면 재시작에 엉뚱한 방이 목록이 된다.
+            let room_body_json: serde_json::Map<String, serde_json::Value> =
+                if i == self.active_session {
+                    self.room_list_body
+                        .iter()
+                        .filter_map(|(old, list)| {
+                            let ni = persisted_idx.get(*old).copied().flatten()?;
+                            Some((
+                                ni.to_string(),
+                                serde_json::Value::String(
+                                    if *list { "list" } else { "map" }.to_string(),
+                                ),
+                            ))
+                        })
+                        .collect()
+                } else {
+                    serde_json::Map::new()
+                };
             sessions_json.push(serde_json::json!({
                 "windows": windows_json,
                 "active_window": new_active,
                 "undocked": undocked_json,
+                "room_body": room_body_json,
             }));
         }
         if sessions_json.is_empty() {
@@ -6140,6 +6168,27 @@ impl App {
             .map_or(&[], |v| v.as_slice())
     }
 
+    /// 활성 세션의 방별 본문 보기(`room_body`) — `saved_windows` 와 같은 세션을 본다.
+    /// 없는 방은 담기지 않는다(전역 기본을 따른다는 뜻).
+    pub(crate) fn saved_room_bodies(state: &serde_json::Value) -> Vec<(usize, bool)> {
+        let active = state
+            .get("active_session")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as usize;
+        state
+            .get("sessions")
+            .and_then(|s| s.as_array())
+            .and_then(|sessions| sessions.get(active).or_else(|| sessions.first()))
+            .and_then(|s| s.get("room_body"))
+            .and_then(|m| m.as_object())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| Some((k.parse().ok()?, v.as_str()? == "list")))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// 저장본의 leaf 가 쥐고 있던 학생 이름 — 트리 순서대로, 빈 이름은 뺀다.
     pub(crate) fn saved_characters(state: &serde_json::Value) -> Vec<String> {
         fn walk(n: &serde_json::Value, out: &mut Vec<String>) {
@@ -6335,6 +6384,9 @@ impl App {
         {
             self.ws.lock().unwrap().active_pane = Some(first);
         }
+        // 방별 본문 보기(목록/배치도)도 방 번호가 굳은 지금 되살린다 — 고른 것이
+        // 재시작에 전역 기본으로 되돌아가면 방마다 따로 둔 뜻이 없어진다.
+        self.room_list_body = Self::saved_room_bodies(state).into_iter().collect();
         // 별도창으로 뗀 pane — 트리에 안 꽂고 pane 만 살린 뒤(셸·`--resume` 큐잉은
         // leaf 와 같은 길) 창은 다음 틱의 `flush_aux_opens` 가 연다(여기엔 event
         // loop 가 없다). 방 번호는 방 복원이 끝나 인덱스가 굳은 지금 환산한다.
@@ -9971,6 +10023,31 @@ mod character_swap_plan_tests {
             .0
             .contains("페이몬으로"));
         assert!(ok.iter().any(|l| l.contains("그대로")));
+    }
+}
+
+#[cfg(test)]
+mod room_body_tests {
+    #[test]
+    fn saved_room_bodies_reads_the_active_session_only() {
+        let state = serde_json::json!({
+            "active_session": 1,
+            "sessions": [
+                { "room_body": { "0": "list" } },
+                { "room_body": { "1": "list", "2": "map" } },
+            ],
+        });
+        let mut got = crate::App::saved_room_bodies(&state);
+        got.sort();
+        assert_eq!(got, vec![(1, true), (2, false)]);
+    }
+
+    #[test]
+    fn saved_room_bodies_is_empty_without_the_field() {
+        // 옛 저장본(이 필드가 없던 판)은 빈 목록이어야 한다 — 그래야 모든 방이
+        // 전역 기본을 따르는 예전 동작 그대로 뜬다.
+        let state = serde_json::json!({ "sessions": [{}] });
+        assert!(crate::App::saved_room_bodies(&state).is_empty());
     }
 }
 
