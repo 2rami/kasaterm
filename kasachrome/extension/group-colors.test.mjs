@@ -27,6 +27,8 @@ test('concurrent Chrome requests share room creation, preserve manual colors and
   let nextId = 101
   let loads = 0
   let failNext = false
+  let moveOnGet = null
+  let failUpdate = null
   const saved = {}
   const tick = () => new Promise((resolve) => setImmediate(resolve))
   const oldChrome = globalThis.chrome
@@ -55,13 +57,21 @@ test('concurrent Chrome requests share room creation, preserve manual colors and
       },
     },
     tabGroups: {
-      get: async (id) => groups.get(id),
+      get: async (id) => {
+        if (id === moveOnGet) { groups.get(id).windowId = 2; moveOnGet = null }
+        return groups.get(id)
+      },
       query: async ({ windowId }) => [...groups.values()].filter((g) => g.windowId === windowId).map((g) => ({ ...g })),
-      update: async (id, patch) => { await tick(); Object.assign(groups.get(id), patch); return groups.get(id) },
+      update: async (id, patch) => {
+        await tick()
+        if (id === failUpdate) { failUpdate = null; throw new Error('update failed') }
+        Object.assign(groups.get(id), patch)
+        return groups.get(id)
+      },
     },
   }
   try {
-    const { openSession, groupOwnTab } = await import(`./sessions.js?test=${Date.now()}`)
+    const { openSession, groupOwnTab, recolorGroups } = await import(`./sessions.js?test=${Date.now()}`)
     for (const [client, team] of [['a', 'room-a'], ['b', 'room-a'], ['c', 'room-c'], ['d', 'room-d']]) {
       await openSession(client, { paneId: client, team, room: team, name: client, roomColor: 'blue' })
     }
@@ -85,6 +95,26 @@ test('concurrent Chrome requests share room creation, preserve manual colors and
     // 저장 큐가 비워지기 전에는 메모리만 맞고 저장소는 아직 옛 상태일 수 있다.
     for (let i = 0; i < 6; i++) await tick()
     assert.deepEqual(Object.keys(saved.roomGroups).sort(), ['room-a', 'room-c', 'room-d'])
+    await openSession('e', { paneId: 'e', team: 'room-e', room: 'room-e', name: 'e', roomColor: 'blue' })
+    groups.set(200, { id: 200, windowId: 1, color: 'blue' })
+    const [cleanup, added] = await Promise.all([recolorGroups(1), groupOwnTab('e', 8)])
+    assert.equal(cleanup.changed, 1)
+    assert.equal(groups.get(200).color, 'red')
+    assert.equal(groups.get(added).color, 'green')
+    const colors = [...groups.values()].filter(g => g.windowId === 1).map(g => g.color)
+    assert.equal(new Set(colors).size, colors.length)
+    groups.set(201, { id: 201, windowId: 1, color: 'blue' })
+    moveOnGet = 201
+    await assert.rejects(recolorGroups(1), /GROUP_MOVED/)
+    assert.equal(groups.get(201).color, 'blue')
+    groups.set(202, { id: 202, windowId: 1, color: 'blue' })
+    groups.set(203, { id: 203, windowId: 1, color: 'blue' })
+    failUpdate = 203
+    await assert.rejects(recolorGroups(1), /update failed/)
+    assert.notEqual(groups.get(202).color, 'blue')
+    assert.equal(groups.get(203).color, 'blue')
+    assert.equal((await recolorGroups(1)).changed, 1)
+    await assert.rejects(recolorGroups(-1), /INVALID_WINDOW/)
   } finally {
     globalThis.chrome = oldChrome
     globalThis.self = oldSelf

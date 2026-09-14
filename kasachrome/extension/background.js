@@ -1,6 +1,6 @@
 import { dispatch, targetTabOf, reapplyEmulation, forgetEmulation, reapplyLayout, forgetLayout, layoutState, layoutToggle } from './tools.js'
 import { setBridgeSender, bridgeResolve } from './bridge-ask.js'
-import { openSession, closeSession, markBusy, markDone, forgetTab, refreshAction, restoreOverlay, snapshot, groupTabs, ungroupTabs, addActivity, clearPanes, repaintAll } from './sessions.js'
+import { openSession, closeSession, markBusy, markDone, forgetTab, refreshAction, restoreOverlay, snapshot, groupTabs, ungroupTabs, addActivity, clearPanes, repaintAll, recolorGroups } from './sessions.js'
 import { getDisplay, setDisplay } from './display.js'
 import { hostOf } from './url.js'
 import { PORT } from './port.js'
@@ -247,6 +247,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.op === 'group' || msg.op === 'ungroup') {
     const run = msg.op === 'group' ? groupTabs : ungroupTabs
     run(msg.key)
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
+    return true
+  }
+  if (msg.op === 'recolorGroups') {
+    recolorGroups(msg.windowId)
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
     return true

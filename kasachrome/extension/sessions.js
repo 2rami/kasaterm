@@ -6,7 +6,7 @@
 // 셋 다 사람이 끌 수 있다(display.js) — 우상단 칩이 사이트의 계정 메뉴를 가리는 일이 있어서다.
 import { page } from './page.js'
 import { getDisplay } from './display.js'
-import { chooseGroupColor } from './group-colors.js'
+import { chooseGroupColor, planGroupColors, GROUP_COLORS } from './group-colors.js'
 
 const sessions = new Map() // paneKey -> {identity, task, tabs:Set, busy:Set}
 const clientPane = new Map() // clientKey -> paneKey
@@ -564,13 +564,32 @@ async function roomTitleOf(room, groupId) {
 
 // 창을 넘나드는 그룹은 없다. 창마다 따로 묶고, 그 창에 이미 이 방 그룹이 있으면 거기 합친다.
 async function groupInWindow(s, windowId, tabIds) {
+  return queueGroupOperation(windowId, () => assignGroupInWindow(s, windowId, tabIds))
+}
+
+function queueGroupOperation(windowId, operation) {
   // 후보 조회와 색 선택까지 함께 세워야 동시 요청이 같은 방·같은 색을 두 번 만들지 않는다.
   const previous = groupQueues.get(windowId) || Promise.resolve()
-  const run = previous.then(() => assignGroupInWindow(s, windowId, tabIds))
+  const run = previous.then(operation)
   const settled = run.catch(() => {})
   groupQueues.set(windowId, settled)
   settled.then(() => { if (groupQueues.get(windowId) === settled) groupQueues.delete(windowId) })
   return run
+}
+
+export async function recolorGroups(windowId) {
+  if (!Number.isInteger(windowId) || windowId < 0) throw new Error('INVALID_WINDOW: 창을 지정해 주세요.')
+  return queueGroupOperation(windowId, async () => {
+    const groups = await chrome.tabGroups.query({ windowId })
+    const changes = planGroupColors(groups)
+    for (const change of changes) {
+      // 사람이 조회 뒤 다른 창으로 옮겼다면 그 창의 색까지 바꾸지 않는다.
+      const group = await chrome.tabGroups.get(change.groupId)
+      if (group.windowId !== windowId) throw new Error('GROUP_MOVED: 그룹이 다른 창으로 이동했어요. 다시 정리해 주세요.')
+      await chrome.tabGroups.update(change.groupId, { color: change.color })
+    }
+    return { ok: true, changed: changes.length, groups: groups.length, overflow: groups.length > GROUP_COLORS.length }
+  })
 }
 
 async function assignGroupInWindow(s, windowId, tabIds) {
