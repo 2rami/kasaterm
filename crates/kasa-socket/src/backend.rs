@@ -898,6 +898,20 @@ pub trait Backend: Send + Sync {
         let _ = secret;
         self.clipboard_set(text)
     }
+    /// 다른 기계가 밀어 준 클립보드(`POST /term/clipboard` 의 `from_machine`). 담되
+    /// **다시 퍼뜨리지 않는다** — 받은 것을 또 보내면 두 기계가 서로에게 영원히
+    /// 되돌려 준다. 기본은 보통 복사와 같다.
+    fn clipboard_set_from_peer(&self, text: &str, secret: bool, from: &str) -> Result<()> {
+        let _ = from;
+        self.clipboard_set_opts(text, secret)
+    }
+    /// 글을 pane 에 **붙여넣는다** — 감싸개(bracketed paste)는 그 pane 의 앱이 켰을 때만
+    /// 두른다. `send_text` 는 바이트를 그대로 흘리므로 부르는 쪽이 감싸개를 붙이면
+    /// 안 켠 앱(맨 셸·`claude auth login` 의 코드 칸)에서 `[200~` 같은 글자가 튀어나온다
+    /// (2026-09-14 지적). 기본은 감싸개 없이 `send_text`.
+    fn paste_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
+        self.send_text(surface_id, text)
+    }
     /// 최근 복사 목록 — 본문 없이 미리보기·id·비밀 여부. 폰·CLI 가 고르는 자리.
     fn clipboard_history(&self) -> Vec<serde_json::Value> {
         Vec::new()

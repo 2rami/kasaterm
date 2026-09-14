@@ -1928,7 +1928,8 @@ impl App {
                     // 하단바 목록에도 담는다 — 앱이 넣은 것만 빠지면 「최근 복사한
                     // 것」에 구멍이 난다(터널 주소를 복사해 두고 다른 것을 복사하면
                     // 되찾을 길이 없어진다).
-                    crate::clipboard::remember(&text);
+                    let item = crate::clipboard::remember_as(&text, None);
+                    crate::clipboard::share(&text, item.is_some_and(|i| i.secret));
                     self.set_toast(toast.to_string());
                 }
             }

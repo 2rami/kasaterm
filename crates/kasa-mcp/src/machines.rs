@@ -1108,6 +1108,52 @@ async fn fetch_version(client: &reqwest::Client, base: &str) -> Option<VersionIn
     })
 }
 
+/// 이 기계에서 복사한 것을 온라인인 기계 전부에 밀어 준다 — 기계가 달라도 클립보드가
+/// 하나가 되게(2026-09-14 지시 「기기 달라도 클립보드 같이 쓰고」). 받는 쪽은
+/// `from_machine` 을 보고 되퍼뜨리지 않는다. 비밀값도 간다 — 그쪽에서 쓰라고 옮기는
+/// 것이고, 가리는 일은 양쪽 화면이 각자 한다. 보내는 일은 딴 스레드에서 하고 결과를
+/// 기다리지 않는다 — 복사 한 번에 화면이 멈추면 안 된다.
+pub fn share_clipboard(text: String, secret: bool) {
+    let targets: Vec<(String, String)> = snapshot()
+        .into_iter()
+        .filter(|m| m.get("online").and_then(Value::as_bool) == Some(true))
+        .filter_map(|m| {
+            let label = m.get("label")?.as_str()?.to_string();
+            let base = m.get("base")?.as_str()?.trim_end_matches('/').to_string();
+            (!base.is_empty()).then_some((label, base))
+        })
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let body = serde_json::json!({
+        "text": text,
+        "secret": secret,
+        "from_machine": self_label(),
+    })
+    .to_string();
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            return;
+        };
+        rt.block_on(async {
+            let client = reqwest::Client::new();
+            for (label, base) in targets {
+                let sent = client
+                    .post(format!("{base}/term/clipboard"))
+                    .timeout(FETCH_TIMEOUT)
+                    .header("content-type", "application/json")
+                    .body(body.clone())
+                    .send()
+                    .await;
+                if let Err(e) = sent {
+                    eprintln!("[clipboard] {label} 에 못 보냈다: {e}");
+                }
+            }
+        });
+    });
+}
+
 /// 「나는 여기 있다」 — 이쪽이 터널을 든 기계에 이쪽 이름·되돌아오는 포트·빌드를
 /// 알린다. 매 폴링마다 보내는 것이 곧 살아 있다는 신호다(저쪽은 반 분 못 받으면 뺀다).
 async fn announce_to(client: &reqwest::Client, base: &str) {

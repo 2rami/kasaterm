@@ -67,6 +67,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             }
         }
         "surface.send_text" => surface_send_text(backend, id, &req.params),
+        "surface.paste" => surface_paste(backend, id, &req.params),
         "surface.send_key" => surface_send_key(backend, id, &req.params),
         "surface.send_raw" => surface_send_raw(backend, id, &req.params),
         "surface.resize" => surface_resize(backend, id, &req.params),
@@ -256,6 +257,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.split_fleet",
                 "surface.closed",
                 "surface.send_text",
+                "surface.paste",
                 "surface.send_key",
                 "surface.send_raw",
                 "surface.resize",
@@ -1065,6 +1067,17 @@ fn session_recent(backend: &dyn Backend, id: Value, params: &Value) -> Response 
         Ok(list) => Response::success(id, json!({ "sessions": list })),
         Err(e) => backend_err(id, e),
     }
+}
+
+/// `surface.paste {surface_id?, text}` — 붙여넣기. 감싸개는 서버가 그 pane 의 상태를
+/// 보고 두른다(`Backend::paste_text`). CLI `paste --into` 가 쓴다.
+fn surface_paste(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let text = match params.get("text").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return param_err(id, "surface.paste requires `text` (string)"),
+    };
+    let target = params.get("surface_id").and_then(|v| v.as_str());
+    simple(id, backend.paste_text(target, text))
 }
 
 fn surface_send_text(backend: &dyn Backend, id: Value, params: &Value) -> Response {

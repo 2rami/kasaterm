@@ -203,10 +203,12 @@ fn run() -> Result<Option<Response>> {
                     .cloned()
                     .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()))
                     .ok_or_else(|| anyhow!("paste --into 뒤에 pane 을 주거나 $KASATERM_PANE_ID 가 있어야 한다"))?;
+                // 감싸개는 여기서 안 두른다 — 그 pane 이 bracketed paste 를 켰는지는
+                // 서버만 안다. 여기서 두르면 안 켠 앱에 `[200~` 글자가 튀어나온다.
                 let send = Request {
                     id: json!("paste-into"),
-                    method: "surface.send_text".into(),
-                    params: json!({ "surface_id": surface, "text": format!("\x1b[200~{text}\x1b[201~") }),
+                    method: "surface.paste".into(),
+                    params: json!({ "surface_id": surface, "text": text }),
                 };
                 let r = roundtrip(&socket_path, &send)?;
                 if !r.ok {

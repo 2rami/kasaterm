@@ -805,6 +805,41 @@ impl PtyBackend {
     }
 }
 
+impl PtyBackend {
+    /// 클립보드에 담고 하단바 목록·토스트에 알린다. `from` 이 없으면 이 기계에서 난
+    /// 복사라 다른 기계에도 나눠 주고, 있으면 그 기계가 밀어 준 것이라 담기만 한다.
+    fn clipboard_take(&self, text: &str, secret: bool, from: Option<&str>) -> Result<()> {
+        // 클립보드 쓰기 자체는 GUI 상태를 안 쓴다(NSPasteboard 는 스레드 무관) —
+        // 소켓 스레드에서 바로 넣고, **보여 주는 일만** GUI 로 넘긴다.
+        let mut cb = arboard::Clipboard::new().map_err(|e| anyhow::anyhow!("클립보드 열기 실패: {e}"))?;
+        cb.set_text(text.to_string())
+            .map_err(|e| anyhow::anyhow!("클립보드 쓰기 실패: {e}"))?;
+        // 무엇이 담겼는지 앞머리를 함께 띄운다 — 「복사됨」만 뜨면 맞는 것을 담았는지
+        // 붙여넣기 전까지 알 수가 없다. 줄바꿈은 한 줄 토스트에서 자리를 먹으니 눕힌다.
+        // 하단바 목록에도 담는다 — 폴링이 어차피 주워 가지만, 그건 다음 틱이라
+        // 그 사이에 목록을 펼치면 방금 넣은 것이 빠져 보인다. 비밀은 토스트에도 안 찍는다.
+        let item = crate::clipboard::remember_as(text, secret.then_some(true));
+        let is_secret = item.as_ref().is_some_and(|i| i.secret);
+        let head = if is_secret {
+            format!("비밀값 {}", crate::clipboard::masked(text))
+        } else {
+            let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let head: String = flat.chars().take(36).collect();
+            let more = text.chars().count() > head.chars().count();
+            format!("{head}{}", if more { "…" } else { "" })
+        };
+        let toast = match from {
+            Some(machine) => format!("{machine}에서 복사됨 · {head}"),
+            None => format!("복사됨 · {head}"),
+        };
+        let _ = self.proxy.send_event(UserEvent::SocketToast(toast));
+        if from.is_none() {
+            crate::clipboard::share(text, is_secret);
+        }
+        Ok(())
+    }
+}
+
 impl Backend for PtyBackend {
     fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         Ok(vec![WorkspaceInfo {
@@ -3244,27 +3279,33 @@ impl Backend for PtyBackend {
     }
 
     fn clipboard_set_opts(&self, text: &str, secret: bool) -> Result<()> {
-        // 클립보드 쓰기 자체는 GUI 상태를 안 쓴다(NSPasteboard 는 스레드 무관) —
-        // 소켓 스레드에서 바로 넣고, **보여 주는 일만** GUI 로 넘긴다.
-        let mut cb = arboard::Clipboard::new().map_err(|e| anyhow::anyhow!("클립보드 열기 실패: {e}"))?;
-        cb.set_text(text.to_string())
-            .map_err(|e| anyhow::anyhow!("클립보드 쓰기 실패: {e}"))?;
-        // 무엇이 담겼는지 앞머리를 함께 띄운다 — 「복사됨」만 뜨면 맞는 것을 담았는지
-        // 붙여넣기 전까지 알 수가 없다. 줄바꿈은 한 줄 토스트에서 자리를 먹으니 눕힌다.
-        // 하단바 목록에도 담는다 — 폴링이 어차피 주워 가지만, 그건 다음 틱이라
-        // 그 사이에 목록을 펼치면 방금 넣은 것이 빠져 보인다. 비밀은 토스트에도 안 찍는다.
-        let item = crate::clipboard::remember_as(text, secret.then_some(true));
-        let head = match &item {
-            Some(i) if i.secret => format!("비밀값 {}", crate::clipboard::masked(text)),
-            _ => {
-                let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                let head: String = flat.chars().take(36).collect();
-                let more = text.chars().count() > head.chars().count();
-                format!("{head}{}", if more { "…" } else { "" })
-            }
+        self.clipboard_take(text, secret, None)
+    }
+
+    fn clipboard_set_from_peer(&self, text: &str, secret: bool, from: &str) -> Result<()> {
+        self.clipboard_take(text, secret, Some(from))
+    }
+
+    fn paste_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
+        // 감싸개는 그 pane 의 앱이 DECSET 2004 로 켰을 때만 — GUI 의 Cmd+V 와 같은 규칙
+        // (`paste_clipboard`). 안 켠 앱에 두르면 `[200~`·`[201~` 가 글자로 튀어나온다.
+        // 안 켠 앱에서는 줄바꿈이 곧 실행이라 실제 터미널처럼 CR 로 보낸다.
+        let bracketed = {
+            let ws = self.ws.lock().unwrap();
+            surface_id
+                .map(str::to_string)
+                .or_else(|| ws.active_pane.clone())
+                .and_then(|outer| ws.panes.get(&outer).map(|p| p.tabs.get(p.active_tab)))
+                .flatten()
+                .and_then(|tab| tab.term())
+                .is_some_and(|t| t.bracketed_paste)
         };
-        let _ = self.proxy.send_event(UserEvent::SocketToast(format!("복사됨 · {head}")));
-        Ok(())
+        let payload = if bracketed {
+            format!("\x1b[200~{text}\x1b[201~")
+        } else {
+            text.replace("\r\n", "\r").replace('\n', "\r")
+        };
+        self.send_text(surface_id, &payload)
     }
 
     fn clipboard_history(&self) -> Vec<serde_json::Value> {

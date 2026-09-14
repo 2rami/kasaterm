@@ -5430,13 +5430,17 @@ async fn term_clipboard_list(backend: Arc<dyn Backend>) -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true, "items": backend.clipboard_history() }))
 }
 
-/// `POST /term/clipboard {text, secret?}` — 폰에서 복사한 것을 이 기계 클립보드로.
+/// `POST /term/clipboard {text, secret?, from_machine?}` — 폰이나 다른 기계에서 복사한
+/// 것을 이 기계 클립보드로. `from_machine` 이 있으면 기계가 밀어 준 것이라 다시
+/// 퍼뜨리지 않는다(되돌이 방지).
 async fn term_clipboard_post(backend: Arc<dyn Backend>, body: Bytes) -> impl IntoResponse {
     #[derive(serde::Deserialize)]
     struct Req {
         text: String,
         #[serde(default)]
         secret: bool,
+        #[serde(default)]
+        from_machine: Option<String>,
     }
     let req: Req = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -5445,7 +5449,11 @@ async fn term_clipboard_post(backend: Arc<dyn Backend>, body: Bytes) -> impl Int
     if req.text.trim().is_empty() {
         return Json(serde_json::json!({ "ok": false, "error": "빈 글이에요" }));
     }
-    match backend.clipboard_set_opts(&req.text, req.secret) {
+    let stored = match req.from_machine.as_deref().filter(|m| !m.trim().is_empty()) {
+        Some(from) => backend.clipboard_set_from_peer(&req.text, req.secret, from),
+        None => backend.clipboard_set_opts(&req.text, req.secret),
+    };
+    match stored {
         Ok(()) => Json(serde_json::json!({ "ok": true, "chars": req.text.chars().count() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }

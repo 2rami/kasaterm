@@ -8,7 +8,7 @@
 //!
 //! **담는 것은 사람의 복사도 포함한다.** 캐릭터가 `kasaterm-cli copy` 로 넣은 것만
 //! 쌓으면 정작 사람이 Cmd+C 한 것이 목록에 없어, 「최근 복사한 것」이라는 이름이
-//! 거짓이 된다. 그래서 값을 밀어 넣는 문(`remember`)과 별개로, 틱에서 클립보드를
+//! 거짓이 된다. 그래서 값을 밀어 넣는 문(`remember_as`)과 별개로, 틱에서 클립보드를
 //! 들여다보다 바뀌었으면 그것도 같은 목록에 담는다(`poll`).
 //!
 //! **디스크에 안 남긴다.** 클립보드에는 비밀번호·토큰이 지나간다 — 앱이 그것을 파일로
@@ -105,11 +105,6 @@ pub(crate) fn looks_secret(text: &str) -> bool {
     plain && letters >= 4 && digits >= 3
 }
 
-/// 목록에 담는다 — 비밀 여부는 생김새로 정한다.
-pub(crate) fn remember(text: &str) {
-    remember_as(text, None);
-}
-
 /// 목록에 담는다. 이미 있는 값이면 **지우고 맨 앞으로** 올린다 — 같은 것을 다시
 /// 복사하면 그건 지금 쓰는 것이라, 목록 아래에 묻혀 있으면 안 된다. `secret` 이
 /// `None` 이면 생김새로 판정하고, 한 번 비밀이었던 것은 다시 담겨도 비밀로 남는다.
@@ -178,8 +173,18 @@ pub(crate) fn poll() -> bool {
     if text.trim().is_empty() || *last_seen().lock().unwrap() == text {
         return false;
     }
-    remember(&text);
+    // 사람이 이 기계에서 복사한 것 — 다른 기계에도 나눠 준다. 다른 기계가 밀어 준
+    // 것은 `remember_as` 가 last_seen 을 먼저 맞춰 두므로 여기 안 걸린다(되돌이 없음).
+    let item = remember_as(&text, None);
+    share(&text, item.is_some_and(|i| i.secret));
     true
+}
+
+/// 이 기계에서 새로 담긴 것을 다른 기계에 나눈다 — 폰과는 이미 나누고 있었고(폰이 붙은
+/// 기계 것을 본다), 기계끼리는 이것으로 잇는다(2026-09-14 지시). 다른 기계에서 온 것은
+/// 부르지 않는다 — 그건 `clipboard_set_from_peer` 가 담기만 한다.
+pub(crate) fn share(text: &str, secret: bool) {
+    kasa_mcp::machines::share_clipboard(text.to_string(), secret);
 }
 
 fn set_system(text: &str) -> Option<()> {
@@ -194,6 +199,7 @@ pub(crate) fn pick(idx: usize) -> Option<String> {
     // 고른 것이 맨 앞으로 올라온다 — 방금 쓴 것이 목록 아래에 있으면 다음에 또 찾아야
     // 한다. `remember` 가 last_seen 도 갱신하므로 폴링이 이것을 새 복사로 또 담지 않는다.
     remember_as(&item.text, Some(item.secret));
+    share(&item.text, item.secret);
     Some(item.text)
 }
 
@@ -261,9 +267,9 @@ mod tests {
     #[test]
     fn re_copying_moves_the_entry_to_the_front_without_growing() {
         let _g = lock();
-        remember("가");
-        remember("나");
-        remember("가");
+        remember_as("가", None);
+        remember_as("나", None);
+        remember_as("가", None);
         assert_eq!(texts(), vec!["가".to_string(), "나".to_string()]);
     }
 
@@ -272,8 +278,8 @@ mod tests {
     #[test]
     fn blank_copies_never_enter_the_list() {
         let _g = lock();
-        remember("");
-        remember("   \n ");
+        remember_as("", None);
+        remember_as("   \n ", None);
         assert!(history().is_empty());
     }
 
@@ -282,7 +288,7 @@ mod tests {
     fn the_list_stops_at_the_cap() {
         let _g = lock();
         for i in 0..(CAP + 5) {
-            remember(&format!("항목{i}"));
+            remember_as(&format!("항목{i}"), None);
         }
         let h = texts();
         assert_eq!(h.len(), CAP);
