@@ -3379,6 +3379,24 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                     }
                 }
+                // 사이드바 hover — 방 카드·펼치기 배지·배치도 칸의 강조가 커서를
+                // 따라가도록, 커서가 그 기둥 위에 있는 동안 다시 그린다. 렌더는
+                // `cursor_px` 를 live 로 읽으므로 redraw 만 걸면 된다.
+                //
+                // 옆 두 기둥(파일트리·git)은 이 장치를 처음부터 갖고 있었는데 사이드바
+                // 에만 없었다. 그래서 펼치기 배지처럼 **hover 판이 유일한 표지**인
+                // 것들은 커서를 올려도 화면이 그대로였다 — 판을 그리는 코드는 멀쩡한데
+                // 그 프레임이 영영 안 그려지던 것이다(2026-09-15 지적 「미니맵 펼치기
+                // 버튼도 마우스오버 효과 안 나와」). 평소 재그리기는 PTY 출력이 끌고
+                // 오므로, 조용한 화면에서만 어긋나 원인이 더 안 보였다.
+                {
+                    let (cx, cy) = self.cursor_px;
+                    let w = self.tab_strip_w();
+                    if w > 0.0 && cy > TITLE_HEIGHT && cx < w {
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
+                }
                 // File-tree column hover — repaint while the cursor is over the
                 // column so the hover-only scrollbar thumb appears (and clears
                 // on the way out). The render reads cursor_px live.
