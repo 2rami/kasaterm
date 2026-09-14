@@ -2591,10 +2591,9 @@ impl App {
             };
             use crate::state::MigrateStageState as S;
             let mut p = crate::state::MigrateProgress::new("%1", &m.label, "코하루", None);
-            p.stages[0] = (S::Done, "이미 있음 — fetch 만".to_string());
-            p.stages[1] = (S::Skipped, "옮길 변경 없음".to_string());
-            p.stages[2] = (S::Done, String::new());
-            p.stages[3] = (S::Running, "12.4MB".to_string());
+            p.stages[0] = (S::Done, "있음".to_string());
+            p.stages[1] = (S::Done, String::new());
+            p.stages[2] = (S::Running, "12.4MB".to_string());
             self.info.machines_col.progress = Some(p);
             eprintln!("[autoinfo] act=migratestages machine={}", m.label);
             return;

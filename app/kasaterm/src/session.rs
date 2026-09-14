@@ -1366,18 +1366,22 @@ impl App {
     /// pane 의 claude 를 **다른 기계로 이사**시킨다 — 로컬을 정리하고 원격에서 같은
     /// 대화로 다시 깨운다(promote 와 달리 산 채로는 못 건넌다 — 기계가 다르다).
     ///
-    /// 순서: ①원격 레포 준비 ②**파일 싱크**(미push 커밋·미커밋 변경을 bundle 로
-    /// 떠서 저쪽에 재현 — 예전엔 여기서 막아 세웠다) ③claude 를 곱게 끄고(jsonl
-    /// 마지막 flush 를 기다린다) ④대화 jsonl 을 원격 호스트로 업로드 ⑤테마 동행
-    /// ⑥저쪽에 학생 pane 소환 ⑦같은 pane 자리를 원격 셸로 갈아끼우고 `claude
-    /// --resume` 을 주입. 로컬 셸은 스왑의 Drop 이 정상 철거한다.
+    /// 순서: ①저쪽 폴더 확인(없으면 홈) ②claude 를 곱게 끄고(jsonl 마지막 flush 를
+    /// 기다린다) ③대화 jsonl 을 원격 호스트로 업로드 ④저쪽에 학생 pane 소환
+    /// ⑤같은 pane 자리를 원격 셸로 갈아끼우고 `claude --resume` 을 주입. 로컬
+    /// 셸은 스왑의 Drop 이 정상 철거한다.
     ///
-    /// ①~⑥은 **워커 스레드**가 돌고 단계마다 `UserEvent::MigrateStage` 로 보고한다
-    /// — Info 「다른 기계」 줄 밑에 체크리스트로 선다(2026-09-07 지시 「레포 받는
-    /// 거·세션 옮기는 거·켜는 거 따로 보이게」). 전에는 여기서 동기로 돌아 업로드가
-    /// 큰 대화면 앱 전체가 굳고 토스트 한 줄만 남았다. ⑦만 GUI 스레드 몫이라
-    /// `MigrateDone` 을 받은 `migrate_finish` 가 한다. 이 함수는 검사·재료 수집만
-    /// 하고 바로 돌아온다 — 반환 문구는 「시작됨」이지 「끝남」이 아니다.
+    /// **세션 파일만 옮긴다.** 레포 준비·미push 커밋 bundle·테마 동행은 2026-09-14
+    /// 에 걷었다(거노 지시 「세션 파일만 옮기고 대화 이어가게만」) — 코드 맞추기는
+    /// git 이 할 일이고, 이사가 그걸 대신하다 큰 짐·관문으로 번번이 멈췄다. 저쪽에
+    /// 같은 폴더가 없으면 홈에서 대화만 잇는다.
+    ///
+    /// ①~④는 **워커 스레드**가 돌고 단계마다 `UserEvent::MigrateStage` 로 보고한다
+    /// — Info 「다른 기계」 줄 밑에 체크리스트로 선다(2026-09-07 지시). 전에는
+    /// 여기서 동기로 돌아 업로드가 큰 대화면 앱 전체가 굳고 토스트 한 줄만 남았다.
+    /// ⑤만 GUI 스레드 몫이라 `MigrateDone` 을 받은 `migrate_finish` 가 한다. 이
+    /// 함수는 검사·재료 수집만 하고 바로 돌아온다 — 반환 문구는 「시작됨」이지
+    /// 「끝남」이 아니다.
     #[cfg(unix)]
     pub(crate) fn migrate_pane(
         &mut self,
@@ -1548,24 +1552,6 @@ impl App {
             ),
             _ => None,
         };
-        let origin = crate::proc::command("git")
-            .arg("-C")
-            .arg(&cwd)
-            .args(["remote", "get-url", "origin"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty());
-        let branch = crate::proc::command("git")
-            .arg("-C")
-            .arg(&cwd)
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty() && s != "HEAD");
         // 권한 모드를 승계한다 — 안 실으면 옮겨간 학생이 기본값(auto)으로 떠서
         // 「왜 오토모드로 바뀌었냐」가 된다(거노 2026-08-27). 화면 문구를 읽지 않고
         // **도는 프로세스의 인자**를 본다 — 그게 유일한 진실이다.
@@ -1602,16 +1588,6 @@ impl App {
             let _ = kasa_mcp::character::bind_session_character(s, ch);
             kasa_mcp::character::mark_manual_pick(s);
         }
-        let theme_id = socket::read_character_theme();
-        let picks = socket::read_settings()
-            .get("character_picks")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let picks_json = if picks.is_object() {
-            picks.to_string()
-        } else {
-            String::new()
-        };
         let label = kasa_mcp::machines::label_for_base(base).unwrap_or_else(|| base.to_string());
         let plan = MigratePlan {
             pid: pid.to_string(),
@@ -1619,8 +1595,6 @@ impl App {
             base: base.to_string(),
             remote_cwd,
             cwd: cwd.to_string_lossy().into_owned(),
-            origin,
-            branch,
             force,
             agent_pid: agent.as_ref().map(|(_, p)| *p),
             sid,
@@ -1628,8 +1602,6 @@ impl App {
             jsonl,
             rollout,
             character,
-            theme_id,
-            picks_json,
             model,
             effort,
             bypass,
@@ -1861,13 +1833,12 @@ impl App {
 
     /// 역이사 — 원격 pane 의 claude 를 **이 기계로** 데려온다(migrate 의 거울).
     ///
-    /// 순서: ①**파일 싱크**(그 기계에만 있는 미push 커밋·미커밋 변경을 bundle 로
-    /// 떠 온다 — 창구 없는 옛 기계만 옛 관문으로 막아 세운다) ②로컬 레포
-    /// 준비(없으면 clone) + 스냅샷 재현 ③원격 claude 곱게 끄기(권한 모드도
-    /// 여기서 받는다) ④대화 내려받기 ⑤원격 셸 철거 + 같은 pane id 로 로컬
-    /// PTY 스왑 ⑥`claude --resume` 주입.
+    /// 순서: ①돌아올 폴더 확인(없으면 홈) ②원격 claude 곱게 끄기(권한 모드도
+    /// 여기서 받는다) ③대화 내려받기 ④원격 셸 철거 + 같은 pane id 로 로컬
+    /// PTY 스왑 ⑤`claude --resume` 주입. 순방향과 같이 **세션 파일만** 옮긴다
+    /// (2026-09-14) — bundle 싱크·clone 은 걷었다.
     ///
-    /// ③이 ④보다 먼저인 이유: jsonl 은 살아 있는 동안에도 읽을 수 있지만, 끄기
+    /// ②가 ③보다 먼저인 이유: jsonl 은 살아 있는 동안에도 읽을 수 있지만, 끄기
     /// 전에 받으면 마지막 턴이 파일에 덜 실린 채 건너온다 — 순방향이 SIGTERM
     /// 뒤에 업로드하는 것과 같은 순서다.
     #[cfg(unix)]
@@ -1941,114 +1912,17 @@ impl App {
                     "돌아올 로컬 경로를 모른다 — --cwd 로 지정하거나 machines.json 에 roots 를 적어라"
                 )
             })?;
-        let repo_state = kasa_mcp::remote::remote_repo_state(&info.base, &remote_cwd, None);
-        // 파일 싱크 — 그 기계에만 있는 것(미push 커밋·미커밋 변경)을 bundle 로
-        // 떠 온다(순방향의 거울, 2026-08-29). 창구가 없는 옛 기계만 옛 관문
-        // (「저쪽에서 커밋·push 하고 와라」)으로 물러선다.
-        self.migrate_progress(pid, "저쪽 짐(커밋·미저장 변경) 떠 오는 중…".to_string());
-        let sync_pack = match kasa_mcp::remote::fetch_repo_sync(&info.base, &remote_cwd, None) {
-            Ok(kasa_mcp::remote::RepoSyncFetch::Bundle(meta, bytes)) => Some((meta, bytes)),
-            Ok(kasa_mcp::remote::RepoSyncFetch::Nothing) => None,
-            Ok(kasa_mcp::remote::RepoSyncFetch::Unsupported) => {
-                if !force {
-                    match &repo_state {
-                        Ok(Some((dirty, unpushed, _, _))) if *dirty > 0 || *unpushed > 0 => {
-                            anyhow::bail!(
-                                "그 기계에만 있는 변경이 남아 있는데 저쪽 프로그램이 낡아 파일 동기화 창구가 없다: 미커밋 {dirty}건 · 미push 커밋 {unpushed}건 ({remote_cwd}) — 저쪽을 갱신하거나, 저쪽에서 커밋·push 하고 오거나 --force"
-                            );
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            anyhow::bail!(
-                                "원격 git 상태를 못 물었다({e:#}) — 알고 강행하려면 --force"
-                            );
-                        }
-                    }
-                }
-                None
-            }
-            Err(e) if force => {
-                eprintln!("[migrate-back] 원격 파일 스냅샷 실패(강행): {e:#}");
-                None
-            }
-            Err(e) => {
-                anyhow::bail!("원격 파일 스냅샷 실패: {e:#} — 알고 강행하려면 --force")
-            }
+        // 돌아올 폴더가 이 기계에 없으면 홈에서 대화만 잇는다 — clone 으로 만들어
+        // 주던 옛 단계는 걷었다(2026-09-14).
+        let dest = if std::path::Path::new(&dest).is_dir() {
+            dest
+        } else {
+            let home = kasa_socket::home_dir()
+                .map(|h| h.to_string_lossy().into_owned())
+                .ok_or_else(|| anyhow::anyhow!("{dest} 가 없고 홈도 몰라 돌아올 자리를 못 정한다"))?;
+            self.set_toast(format!("{dest} 가 없어 홈에서 잇는다"));
+            home
         };
-        // 로컬 레포 준비 — 목적지 폴더가 없으면 원격이 알려준 origin 으로 clone.
-        // 순방향의 ensure_repo(원격에 레포 보장)와 대칭이다.
-        if !std::path::Path::new(&dest).exists() {
-            let origin = repo_state
-                .as_ref()
-                .ok()
-                .and_then(|s| s.as_ref())
-                .map(|(_, _, o, _)| o.clone())
-                .filter(|o| !o.is_empty())
-                // 옛 상태 창구가 없어도 스냅샷 메타가 origin 을 실어 온다.
-                .or_else(|| {
-                    sync_pack
-                        .as_ref()
-                        .map(|(m, _)| m.origin.clone())
-                        .filter(|o| !o.is_empty())
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!("{dest} 가 없고 원격 origin 도 몰라 clone 할 수 없다")
-                })?;
-            let branch = repo_state
-                .as_ref()
-                .ok()
-                .and_then(|s| s.as_ref())
-                .map(|(_, _, _, b)| b.clone())
-                .filter(|b| !b.is_empty())
-                .or_else(|| sync_pack.as_ref().map(|(m, _)| m.branch.clone()))
-                .unwrap_or_default();
-            if let Some(parent) = std::path::Path::new(&dest).parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            // PATH 보정 — LFS 레포는 checkout 필터가 git-lfs 를 부르는데 GUI
-            // 프로세스의 기본 PATH 엔 homebrew 가 없다(reposync::tool_path 참조).
-            let out = crate::proc::command("git")
-                .args(["clone", &origin, &dest])
-                .env("PATH", kasa_mcp::reposync::tool_path())
-                .output()
-                .map_err(|e| anyhow::anyhow!("git clone 실행 실패: {e}"))?;
-            if !out.status.success() {
-                anyhow::bail!(
-                    "로컬 clone 실패: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
-            }
-            if !branch.is_empty() && branch != "HEAD" {
-                let _ = crate::proc::command("git")
-                    .args(["-C", &dest, "checkout", &branch])
-                    .output();
-            }
-        }
-        // 떠 온 스냅샷을 이 기계 레포에 재현한다 — claude 를 끄기 전이라, 여기서
-        // 막혀도 안전하다. 관문(도착지 dirty·브랜치 다름·되감김)에 걸리면 이사를
-        // 세우는 대신 짐을 ref(refs/kasaterm/incoming)로만 보관하고 간다 —
-        // 워킹트리 무접촉이라 다른 pane 의 작업을 안 건드리고, 잃는 것도 없다
-        // (2026-08-30: 미쿠 역이사가 「저쪽 push → 이쪽 정리」를 손으로 밟던 자리).
-        if let Some((meta, bytes)) = &sync_pack {
-            self.migrate_progress(
-                pid,
-                format!(
-                    "짐 {:.1}MB 이 기계에 재현 중…",
-                    bytes.len() as f64 / 1048576.0
-                ),
-            );
-            let applied = kasa_mcp::reposync::apply(
-                std::path::Path::new(&dest),
-                bytes,
-                &meta.head,
-                &meta.sync,
-                &meta.branch,
-                meta.dirty,
-                force,
-                kasa_mcp::reposync::OnBlock::Deposit,
-            )?;
-            self.set_toast(format!("코드 동기화: {applied}"));
-        }
         // 모델·effort 는 원격이 죽기 전에 떠 둔다(순방향과 같은 이유). 이 창의 보고는
         // 이사로 나가기 전 값이라 원격에서 태어난 학생에겐 없다 — 그땐 그 기계의
         // 목록(`/term/panes` model·effort)이 정본이고, 낡은 원격이면 기본값이다.
@@ -10443,8 +10317,6 @@ struct MigratePlan {
     base: String,
     remote_cwd: String,
     cwd: String,
-    origin: Option<String>,
-    branch: Option<String>,
     force: bool,
     agent_pid: Option<u32>,
     sid: Option<String>,
@@ -10452,8 +10324,6 @@ struct MigratePlan {
     jsonl: Option<std::path::PathBuf>,
     rollout: Option<std::path::PathBuf>,
     character: Option<String>,
-    theme_id: String,
-    picks_json: String,
     model: String,
     effort: String,
     bypass: bool,
@@ -10480,7 +10350,7 @@ pub(crate) struct MigrateReady {
     pub(crate) character: Option<String>,
 }
 
-/// 이사 ①~⑥ — 네트워크·기다림뿐이라 GUI 밖에서 돈다. 단계마다 `MigrateStage`,
+/// 이사 ①~④ — 네트워크·기다림뿐이라 GUI 밖에서 돈다. 단계마다 `MigrateStage`,
 /// 끝에 `MigrateDone` 을 보낸다. 실패는 그 단계가 Running 인 채로 Err 가 가고,
 /// GUI 가 그 자리에 ✗ 를 찍는다.
 #[cfg(unix)]
@@ -10503,72 +10373,31 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
         Ok(())
     };
     let mut outcome = (|| -> Result<MigrateReady> {
-        // ① 저쪽 레포 준비 — 코드부터 맞춘다, **claude 를 끄기 전에**. 여기서
-        // 실패하면 아무것도 안 건드린 채로 돌아설 수 있다(끄고 나서 실패하면
-        // 학생만 잃는다).
-        match &p.origin {
-            Some(origin) => {
-                stage(0, S::Running, String::new());
-                let what = kasa_mcp::remote::ensure_repo(
-                    &p.base,
-                    &p.remote_cwd,
-                    Some(origin.as_str()),
-                    p.branch.as_deref(),
-                    None,
-                )
-                .map_err(|e| anyhow::anyhow!("{}({}) 쪽 레포 준비: {e:#}", p.label, p.remote_cwd))?;
-                stage(0, S::Done, what);
+        // ① 저쪽 폴더 확인 — 같은 경로가 저쪽에 없으면 **홈에서** 대화만 잇는다.
+        // 레포를 만들어 맞추던 옛 단계는 걷었다(2026-09-14). 창구가 없는 옛 판은
+        // 있다고 치고 그대로 간다 — 그때 폴더가 없으면 저쪽 셸의 cd 가 실패하고,
+        // resume 명령이 홈에서 뜬다(대화 파일은 그 경로 이름으로 올라가 있으니 안 잇긴다).
+        let mut remote_cwd = p.remote_cwd.clone();
+        stage(0, S::Running, String::new());
+        match kasa_mcp::remote::remote_path_probe(&p.base, &remote_cwd, None) {
+            Ok(Some((true, _))) => stage(0, S::Done, "있음".to_string()),
+            Ok(Some((false, home))) if !home.is_empty() => {
+                remote_cwd = home;
+                stage(0, S::Done, "없음 — 홈에서 잇는다".to_string());
             }
-            None => stage(0, S::Skipped, "git 레포가 아니라 건너뜀".to_string()),
-        }
-        // ② 파일 싱크 — 이 기계에만 있는 것(미push 커밋·미커밋 변경)을 떠서 저쪽에
-        // 재현한다. 예전엔 여기서 「커밋·push 하고 와라」로 막아 세웠다 — 이제는
-        // 실어 간다(2026-08-29 지시: 파일이 달라도 싱크되어 안 끊기게). 창구가
-        // 없는 옛 기계에서만 옛 관문이 남는다. 반드시 ensure_repo 뒤 — bundle 의
-        // 전제(origin 오브젝트)가 저쪽에 있어야 fetch 가 풀린다.
-        stage(1, S::Running, "짐 뜨는 중".to_string());
-        match kasa_mcp::reposync::snapshot(std::path::Path::new(&p.cwd)) {
-            Ok(None) => stage(1, S::Skipped, "옮길 변경 없음".to_string()),
-            Ok(Some(snap)) => {
-                stage(
-                    1,
-                    S::Running,
-                    format!("{:.1}MB 저쪽에 재현 중", snap.bundle.len() as f64 / 1048576.0),
-                );
-                let meta = kasa_mcp::remote::RepoSyncMeta {
-                    head: snap.head,
-                    sync: snap.sync,
-                    branch: snap.branch,
-                    origin: snap.origin,
-                    dirty: snap.dirty,
-                };
-                match kasa_mcp::remote::push_repo_sync(
-                    &p.base,
-                    &p.remote_cwd,
-                    &meta,
-                    snap.bundle,
-                    None,
-                    p.force,
-                ) {
-                    Ok(Some(msg)) => stage(1, S::Done, msg),
-                    Ok(None) if p.force => {
-                        stage(1, S::Done, "창구 없음 — 강행(저쪽 코드가 옛것일 수 있다)".to_string())
-                    }
-                    Ok(None) => anyhow::bail!(
-                        "이 기계에만 있는 변경이 있는데 저쪽 프로그램이 낡아 파일 동기화 창구가 없다 — 저쪽을 갱신하거나, 커밋·push 하고 오거나 --force"
-                    ),
-                    Err(e) if p.force => stage(1, S::Done, format!("실패 — 강행: {e:#}")),
-                    Err(e) => anyhow::bail!("파일 동기화 실패: {e:#} — 알고 강행하려면 --force"),
-                }
-            }
-            Err(e) if p.force => stage(1, S::Done, format!("스냅샷 실패 — 강행: {e:#}")),
-            Err(e) => anyhow::bail!("파일 스냅샷 실패: {e:#} — 알고 강행하려면 --force"),
+            Ok(Some((false, _))) => anyhow::bail!(
+                "{}에 {} 가 없고 저쪽 홈도 못 알아냈다",
+                p.label,
+                p.remote_cwd
+            ),
+            Ok(None) => stage(0, S::Done, "옛 판 — 있다고 치고".to_string()),
+            Err(e) => anyhow::bail!("{} 쪽 폴더 확인: {e:#}", p.label),
         }
         if let Some(request) = &p.transfer {
             validate()?;
             reserved = Some(kasa_mcp::remote::transfer_spawn(&p.base, &kasa_socket::transfer::SpawnRequest {
                 room: request.room.clone(),
-                cwd: p.remote_cwd.clone(),
+                cwd: remote_cwd.clone(),
                 character: p.character.clone(),
             })?);
             // 긴 복사·도착 방 생성 사이 출발 세션이 바뀌거나 일을 재개할 수 있다.
@@ -10589,7 +10418,7 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
         // 옮길 대화도 없어 ③④를 통째로 건너뛴다.
         match (p.agent_pid, &p.sid) {
             (Some(agent_pid), Some(sid)) => {
-                stage(2, S::Running, String::new());
+                stage(1, S::Running, String::new());
                 unsafe { libc::kill(agent_pid as i32, libc::SIGTERM) };
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
                 while unsafe { libc::kill(agent_pid as i32, 0) } == 0 {
@@ -10599,27 +10428,27 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
                     std::thread::sleep(std::time::Duration::from_millis(120));
                 }
                 source_stopped = true;
-                stage(2, S::Done, String::new());
-                // ④ 대화 옮기기
+                stage(1, S::Done, String::new());
+                // ③ 대화 옮기기
                 if let Some(jsonl) = &p.jsonl {
                     let size = std::fs::metadata(jsonl)
                         .map(|m| format!("{:.1}MB", m.len() as f64 / 1048576.0))
                         .unwrap_or_default();
-                    stage(3, S::Running, size.clone());
+                    stage(2, S::Running, size.clone());
                     kasa_mcp::remote::upload_transcript(
                         &p.base,
-                        &p.remote_cwd,
+                        &remote_cwd,
                         sid,
                         jsonl,
                         None,
                         p.force,
                     )?;
-                    stage(3, S::Done, size);
+                    stage(2, S::Done, size);
                 }
                 if let Some(rollout) = &p.rollout {
                     // 끄고 난 뒤에 묶는다 — append-only rollout 의 마지막 조각까지.
                     // 검증(헤더·경로·id 교차)은 운반 helper 가 전담한다.
-                    stage(3, S::Running, "Codex 대화 묶는 중".to_string());
+                    stage(2, S::Running, "Codex 대화 묶는 중".to_string());
                     let home = kasa_mcp::codexhome::codex_home_of_rollout(rollout)
                         .ok_or_else(|| {
                             anyhow::anyhow!(
@@ -10642,7 +10471,7 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("빈 Codex bundle"))?;
                     let size = format!("{:.1}MB", file.bytes.len() as f64 / 1048576.0);
-                    stage(3, S::Running, format!("Codex 대화 {size} 옮기는 중"));
+                    stage(2, S::Running, format!("Codex 대화 {size} 옮기는 중"));
                     let note = kasa_mcp::remote::push_codex_session(
                         &p.base,
                         sid,
@@ -10650,70 +10479,30 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
                         file.bytes,
                         None,
                     )?;
-                    stage(3, S::Done, note);
+                    stage(2, S::Done, note);
                 }
             }
             _ => {
-                stage(2, S::Skipped, "끌 캐릭터 없음".to_string());
-                stage(3, S::Skipped, "옮길 대화 없음".to_string());
+                stage(1, S::Skipped, "끌 캐릭터 없음".to_string());
+                stage(2, S::Skipped, "옮길 대화 없음".to_string());
             }
         }
-        // ⑤ 캐릭터 테마·명단도 함께 싼다 — 도착지 기계가 제 테마·명단으로 배정·복원
-        // 하면 이사 온 학생이 다른 얼굴로 뜬다(2026-08-31 지적 「이사시켜봤는데
-        // 테마 적용이 안 되네」). 실패해도 이사는 계속 — 색·명단 문제일 뿐 대화는
-        // 무사하고, 낡은 서버(창구 없음)면 404 가 이 메모로 보인다.
-        stage(4, S::Running, String::new());
-        match kasa_mcp::remote::push_character_theme(&p.base, &p.theme_id, &p.picks_json, None) {
-            Ok(()) => stage(4, S::Done, String::new()),
-            // 도착지에 그 팩이 없다는 거절 — 팩을 zip 으로 싸 보내고 한 번 더.
-            // 직접 만든 테마는 도착지에 있을 리 없으니 이 길이 정상 경로다
-            // (2026-08-31 새벽 zip 가져오기와 짝: 내보내기 쪽 절반).
-            Err(e) if !p.theme_id.is_empty() && format!("{e:#}").contains("테마 팩") => {
-                let carried = socket::export_theme_zip(&p.theme_id)
-                    .map_err(|x| anyhow::anyhow!("{x}"))
-                    .and_then(|zip| {
-                        stage(
-                            4,
-                            S::Running,
-                            format!("테마 팩 {:.1}MB 실어 나르는 중", zip.len() as f64 / 1048576.0),
-                        );
-                        kasa_mcp::remote::push_theme_pack(&p.base, zip, None)?;
-                        kasa_mcp::remote::push_character_theme(
-                            &p.base,
-                            &p.theme_id,
-                            &p.picks_json,
-                            None,
-                        )
-                    });
-                match carried {
-                    Ok(()) => stage(4, S::Done, "테마 팩 실어 나름".to_string()),
-                    Err(e2) => {
-                        eprintln!("[migrate] 테마 팩 운반 실패(계속 진행): {e2:#}");
-                        stage(4, S::Done, format!("실패(이사는 계속) — {e2:#}"));
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("[migrate] 테마 동행 실패(계속 진행): {e:#}");
-                stage(4, S::Done, format!("실패(이사는 계속) — {e:#}"));
-            }
-        }
-        // ⑥ 목적지에 **진짜 학생 pane** 을 먼저 만든다 — 그래야 옮겨간 자리에
+        // ④ 목적지에 **진짜 학생 pane** 을 먼저 만든다 — 그래야 옮겨간 자리에
         // 캐릭터·보드·훅이 다 붙는다. 창 없는 축소판 서버는 이 창구가 없으므로
         // 실패하고, 그때는 옛 경로(맨 셸 스폰)로 물러선다 — 반쪽이라도 대화는 잇는다.
         let remote_pane = if let Some(row) = &reserved {
-            stage(5, S::Done, "선택한 방에 새 자리 준비됨".to_string());
+            stage(3, S::Done, "선택한 방에 새 자리 준비됨".to_string());
             if let Some(character) = &p.character {
                 kasa_mcp::remote::repersona(&p.base, &row.identity.pane_id, character, p.sid.as_deref(), None)?;
             }
             Some(row.identity.pane_id.clone())
         } else { match &p.character {
             None => {
-                stage(5, S::Skipped, "캐릭터 없음 — 맨 셸".to_string());
+                stage(3, S::Skipped, "캐릭터 없음 — 맨 셸".to_string());
                 None
             }
             Some(c) => {
-                stage(5, S::Running, c.clone());
+                stage(3, S::Running, c.clone());
                 match kasa_mcp::remote::spawn_student_pane(&p.base, c, None) {
                     Ok(id) => {
                         // 소환만으로는 못 미덥다 — 이름표만 그 학생이고 말투는 남의
@@ -10725,12 +10514,12 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
                         {
                             eprintln!("[migrate] 캐릭터 못박기 실패(계속 진행): {e:#}");
                         }
-                        stage(5, S::Done, format!("{c} · {id}"));
+                        stage(3, S::Done, format!("{c} · {id}"));
                         Some(id)
                     }
                     Err(e) => {
                         eprintln!("[migrate] 진짜 pane 소환 실패 — 맨 셸로 물러섭니다: {e:#}");
-                        stage(5, S::Done, format!("소환 실패 — 맨 셸로: {e:#}"));
+                        stage(3, S::Done, format!("소환 실패 — 맨 셸로: {e:#}"));
                         None
                     }
                 }
@@ -10738,7 +10527,7 @@ fn migrate_worker(p: MigratePlan, proxy: winit::event_loop::EventLoopProxy<UserE
         }};
         Ok(MigrateReady {
             base: p.base.clone(),
-            remote_cwd: p.remote_cwd.clone(),
+            remote_cwd,
             cwd: p.cwd.clone(),
             sid: p.sid.clone(),
             is_codex: p.is_codex,

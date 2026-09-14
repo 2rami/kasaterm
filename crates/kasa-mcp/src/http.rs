@@ -4964,6 +4964,25 @@ async fn term_transcript_get(
     }
 }
 
+/// `GET /term/path?path=<abs>` — 그 경로가 이 기계에 있나, 그리고 이 기계의 홈.
+/// 이사가 「저쪽에 같은 폴더가 없으면 홈에서 띄운다」(2026-09-14 지시)를 고르는
+/// 데 쓴다 — 레포를 만들어 맞추는 대신 있는 자리를 묻기만 한다.
+async fn term_path_get(
+    q: Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(path) = q.get("path").filter(|p| p.starts_with('/')) else {
+        return Json(serde_json::json!({ "ok": false, "error": "`path`(절대경로) 가 필요해요" }));
+    };
+    let home = kasa_socket::home_dir()
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "ok": true,
+        "exists": std::path::Path::new(path).is_dir(),
+        "home": home,
+    }))
+}
+
 /// `GET /term/repo?path=<abs>` — 그 레포의 「이 기계에만 있는 것」 상태.
 /// 역이사의 git 관문이다: 순방향이 출발지에서 미커밋·미push 를 검사하듯,
 /// 역방향은 이걸 물어 원격에만 있는 변경을 실은 채 떠나는 사고를 막는다.
@@ -7395,6 +7414,7 @@ pub fn spawn_http_server_opts(
                     .route("/term/ws", get(term_ws_handler))
                     .route("/term/spawn", post(term_spawn_post))
                     .route("/term/repo", get(term_repo_get).post(term_repo_post))
+                    .route("/term/path", get(term_path_get))
                     .route("/term/input", post(term_input_post))
                     .route("/term/screen", get(term_screen_get))
                     .route("/term/session", axum::routing::delete(term_session_delete))

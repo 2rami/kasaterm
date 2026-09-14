@@ -326,12 +326,10 @@ pub(crate) struct MachinesColState {
 }
 
 /// 이사 단계 이름 — 워커의 보고 번호와 짝(session.rs `migrate_worker`, 마지막은 GUI).
-pub(crate) const MIGRATE_STAGES: [&str; 7] = [
-    "저쪽 레포 준비",
-    "코드 짐 옮기기",
+pub(crate) const MIGRATE_STAGES: [&str; 5] = [
+    "저쪽 폴더 확인",
     "캐릭터 끄기",
     "대화 옮기기",
-    "테마 동행",
     "저쪽에 자리 만들기",
     "켜기",
 ];

@@ -7926,20 +7926,20 @@ impl App {
                         let zone_h = fbox_h * 0.30;
                         let in_zone =
                             hmx >= *fx && hmx <= fx + fw && hmy >= *fy && hmy <= fy + zone_h;
-                        let isz = 16.0_f32;
-                        // glow/chip 없이 ⋮ 아이콘 자체만 숨김→흐릿→진함 3단계.
+                        // 글자 위에서도 보이게 **칩 위에 점 셋**을 chrome 사각형으로 그린다.
+                        // SVG 아이콘은 텍스트 글리프 밑으로 깔려(2026-09-14 실측: 학생 pane
+                        // 처럼 첫 줄에 글자가 차면 점이 글자 뒤로 숨어 「⋮ 이 안 뜬다」가
+                        // 됐다) 흐린 색으로는 아예 안 보였다. 칩은 hover 띠 안에서만.
                         if on_handle || in_zone {
-                            g.queue_icon(
-                                "ellipsis-horizontal",
-                                hx + (HANDLE - isz) / 2.0,
-                                hy + (HANDLE - isz) / 2.0,
-                                isz,
-                                if on_handle {
-                                    theme::text()
-                                } else {
-                                    theme::with_alpha(theme::text(), 0x66)
-                                },
-                            );
+                            round_rect(g, hx, hy, HANDLE, HANDLE, 6.0, theme::surface_active());
+                            g.round_rect_stroke(hx, hy, HANDLE, HANDLE, 6.0, 1.0, theme::border());
+                            let dot = 2.5_f32;
+                            let cy = hy + (HANDLE - dot) / 2.0;
+                            let col = if on_handle { theme::text() } else { theme::text_dim() };
+                            for i in 0..3 {
+                                let cx = hx + HANDLE / 2.0 - dot / 2.0 + (i as f32 - 1.0) * 5.0;
+                                round_rect(g, cx, cy, dot, dot, dot / 2.0, col);
+                            }
                         }
                         handle_rects.push((fid.clone(), (hx, hy, HANDLE, HANDLE)));
                         zones.push((fid.clone(), (*fx, *fy, *fw, zone_h)));

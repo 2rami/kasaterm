@@ -85,6 +85,8 @@ struct App {
     text_pt: f32,
     /// 지금 말풍선이 가리키는 pane — 되받아 말하거나 말풍선을 누르면 이리로 간다.
     subject: String,
+    /// 사람이 지금 보고 있는 pane 의 요약 — 펫을 한 번 누르면 말한다.
+    focus: Option<board::Focus>,
     /// 지금 말이 뜬 때. 급하지 않은 말은 잠깐 뒤 접는다.
     said_at: std::time::Instant,
     /// 사람 손이 필요한 말인가. 이런 말은 안 접고, 뜨는 순간 캐릭터가 한 번 튄다.
@@ -909,8 +911,9 @@ impl App {
             return;
         }
         self.board_seen = m;
-        let (mood, text, pane) = board::read(&f);
+        let (mood, text, pane, focus) = board::read(&f);
         self.subject = pane;
+        self.focus = focus;
         self.stirred = std::time::Instant::now();
         let urgent = matches!(mood, board::Mood::Wait | board::Mood::Error);
         if self.journal_shown && !urgent { return; }
@@ -980,6 +983,20 @@ impl App {
         self.resting = false;
         if self.mood == board::Mood::Sleep { self.apply_mood(board::Mood::Idle); }
         self.stirred = std::time::Instant::now();
+        // 누르면 **지금 보고 있는 pane** 이야기를 한다 — 세션이 여럿일 때 「이 창이
+        // 뭐고 어디까지 했나」를 화면을 뒤지지 않고 듣는다(거노 2026-09-14). 손이
+        // 필요한 말이 떠 있으면 그건 그대로 둔다 — 급한 쪽이 이긴다.
+        if !self.urgent {
+            if let Some(f) = self.focus.clone() {
+                let line = f.line();
+                if !line.is_empty() {
+                    self.journal_shown = false;
+                    self.subject = f.pane;
+                    self.say = line;
+                    self.rebuild_bubble_text();
+                }
+            }
+        }
         // 접힌 말을 다시 띄운다 — 「방금 뭐라고 했더라」를 누르면 볼 수 있어야, 말이
         // 잠깐 뒤 사라지는 것이 손해가 아니게 된다.
         self.said_at = std::time::Instant::now();
@@ -1689,7 +1706,7 @@ fn main() {
         preferences, resting: false, playback: catalog::Playback::default(),
         mood: board::Mood::Idle, say: String::new(), board_seen: None,
         board_polled: std::time::Instant::now(), stirred: std::time::Instant::now(),
-        bubble_text: None, text_pt, subject: String::new(),
+        bubble_text: None, text_pt, subject: String::new(), focus: None,
         bubble_geometry:None,typed_geometry:None,text_viewport:None,
         journal: journal::Client::default(),
         journal_shown: false,
