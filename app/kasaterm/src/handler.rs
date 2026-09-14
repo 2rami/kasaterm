@@ -5739,7 +5739,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 | ActionKind::WebForward
                                 | ActionKind::WebReload
                                 | ActionKind::WebOpenExternal
-                                | ActionKind::WebAddress => {}
+                                | ActionKind::WebAddress
+                                | ActionKind::HandleMenu => {}
                             }
                             self.handle_menu = None;
                             self.chrome_dirty = true;
@@ -5840,6 +5841,14 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             ActionKind::RefreshRenderer => {
                                 self.refresh_renderer();
+                            }
+                            // 탭 띠의 ⋮ — 헤더 우클릭과 같은 메뉴를 연다(두 번 누르면 닫힘).
+                            ActionKind::HandleMenu => {
+                                self.handle_menu = if self.handle_menu.as_deref() == Some(pid.as_str()) {
+                                    None
+                                } else {
+                                    Some(pid.clone())
+                                };
                             }
                             ActionKind::WebBack => self.web_nav(&pid, "back"),
                             ActionKind::WebForward => self.web_nav(&pid, "forward"),

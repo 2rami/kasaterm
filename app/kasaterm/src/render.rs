@@ -7132,7 +7132,13 @@ impl App {
                 //
                 // 오른쪽 버튼 무리보다 **먼저** 그린다 — 그쪽은 x 를 오른쪽 끝에서
                 // 거꾸로 잡아 나가서, 나중에 그리면 칩 위에 겹친다.
-                let btn_zone = (theme::ICON_SIZE + 2.0) * 4.0 + 8.0;
+                // 탭 띠 헤더(터미널 pane 에 탭이 둘 이상)는 오른쪽에 단추 넷 대신 ⋮ 하나만 —
+                // 같은 항목이 ⋮ 메뉴에 다 있고, 탭 이름이 자리를 쓴다. 기기 칩도 여기선
+                // 안 그린다(2026-09-14 지시 「탭 안에 있을 때 기기 표시 없애고 단추는 ⋮ 로」).
+                let tab_strip = h.tabs.len() > 1
+                    && !h.is_image && !h.is_web && !h.is_editor && !h.is_markdown;
+                let n_btn: f32 = if tab_strip { 1.0 } else { 4.0 };
+                let btn_zone = (theme::ICON_SIZE + 2.0) * n_btn + 8.0;
                 let mut chip_right = h.x + h.w - btn_zone;
                 // 칩이 실제로 먹은 폭 — 아래 탭 스트립이 오른쪽에 비워 둘 자리에
                 // 얹는다. 탭은 칩보다 **나중에** 그려져서, 예약이 없으면 긴 탭
@@ -7165,7 +7171,7 @@ impl App {
                         chip_right = cx - 6.0;
                     }
                 }
-                if let Some(identity) = pane_identities.get(&h.id) {
+                if let Some(identity) = pane_identities.get(&h.id).filter(|_| !tab_strip) {
                     let machine = &identity.machine;
                     let font = chrome_font - 1.0;
                     let icon = 12.0;
@@ -7246,7 +7252,6 @@ impl App {
                 let abw = icon_size + 2.0;
                 let agap = 2.0;
                 // 터미널 묶음은 별도창(external-link)까지 넷.
-                let n_btn: f32 = if h.is_image || h.is_web { 4.0 } else { 4.0 };
                 // Markdown panes show explicit view/edit, save and separate-window
                 // controls instead of the terminal icon cluster.
                 let seg_font = 11.0_f32;
@@ -7402,6 +7407,8 @@ impl App {
                 } else if h.is_editor {
                     // Document panes use the controls drawn below.
                     vec![]
+                } else if tab_strip {
+                    vec![("ellipsis-vertical", None, Some(ActionKind::HandleMenu))]
                 } else {
                     // The status-bar toggle reads "filled" (panel-bottom) when the
                     // bar is shown and "dashed" when it's collapsed, so the icon
