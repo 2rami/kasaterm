@@ -1764,13 +1764,18 @@ impl App {
                     // 다른 얼굴을 갖지 않는다. 안 걸었더니 `%1 유우카 zsh` 처럼 셸에
                     // 학생이 붙었다(거노 2026-08-07: "일반pane은 실행전에 학생배정
                     // 안되게하지않았나").
+                    //
+                    // `display_pane_char` 가 아니라 `display_tab_char` 다 — 전자는 pane 의
+                    // **지금 보는 탭**으로 접어 부르는데, 첫 탭의 PTY id 가 바깥 pane id 와
+                    // 같아서 탭이 여럿인 pane 의 첫 탭이 활성 탭의 학생을 뒤집어썼다
+                    // (2026-09-14 실측: 프라나 탭이 「아로나」로 섰다).
                     label: if facts.is_some() {
-                        self.display_pane_char(&ws, id)
+                        self.display_tab_char(&ws, id)
                             .or_else(|| remote_str("name"))
                             .unwrap_or_default()
                     } else {
                         s.active_agent()
-                            .and_then(|_| self.display_pane_char(&ws, id))
+                            .and_then(|_| self.display_tab_char(&ws, id))
                             .unwrap_or_default()
                     },
                     remote_title: remote_str("title").unwrap_or_default(),
@@ -2235,7 +2240,22 @@ pub(crate) fn draw_info_col(
                 y += ROOM_H;
             }
             if y + GROUP_H > top && y < bottom {
-                let task = snap.tasks.get(&gp.pane);
+                // 탭 묶음의 머리는 자리를 말하지 한 탭을 말하지 않는다 — 점은 탭 전부를
+                // 모아(하나라도 승인 대기면 주황, 하나라도 도는 중이면 초록) 찍고, 작업
+                // 한 줄은 각 탭 줄이 제 것을 든다. 첫 탭 것을 그대로 쓰면 뒤 탭이 승인을
+                // 기다려도 머리는 잠잠하다.
+                let folded;
+                let task = if gp.tabs.len() > 1 {
+                    let (mut attention, mut working) = (false, false);
+                    for tk in gp.tabs.iter().filter_map(|t| snap.tasks.get(&t.pane)) {
+                        attention |= tk.attention;
+                        working |= tk.working;
+                    }
+                    folded = TaskLine { label: String::new(), attention, working };
+                    Some(&folded)
+                } else {
+                    snap.tasks.get(&gp.pane)
+                };
                 let dot = row_dot(task.is_some_and(|t| t.attention), task.is_some_and(|t| t.working));
                 draw_group_head(g, cursor, gp, task, dot, x, w, x0, right, y);
             }
@@ -2246,7 +2266,8 @@ pub(crate) fn draw_info_col(
             let n = gp.tabs.len();
             for (i, t) in gp.tabs.iter().enumerate() {
                 if y + ROW_H > top && y < bottom {
-                    draw_tab_row(g, t, &gp.cwd, i + 1 == n, x, w, x0, right, y);
+                    let task = snap.tasks.get(&t.pane);
+                    draw_tab_row(g, t, task, &gp.cwd, i + 1 == n, x, w, x0, right, y);
                 }
                 y += ROW_H;
             }
@@ -2663,7 +2684,11 @@ fn draw_group_head(
     // 외워야 알고, 픽셀 실루엣에서는 점이 네모로 굳어 상태 표시처럼 보였다.
     const FACE: f32 = GROUP_H - 6.0;
     let fx = x0 + 2.0;
-    let shell_pane = gp.label.is_empty();
+    // 탭 묶음은 머리에 얼굴을 안 놓는다 — 얼굴은 탭 줄마다 서고, 머리에 첫 탭 얼굴을
+    // 두면 같은 학생이 두 줄로 서서 「왜 둘이지」가 된다(2026-09-14 실측). 자리
+    // 번호 알약과 탭 수만 남겨 「한 자리를 N 개가 번갈아 쓴다」로 읽히게 한다.
+    let tabbed = gp.tabs.len() > 1;
+    let shell_pane = gp.label.is_empty() || tabbed;
     let tx = if shell_pane {
         let id = fit_text(g, &gp.pane, 44.0, 9.0, false);
         let iw = g.measure_chrome_text(&id, 9.0, false);
@@ -2703,7 +2728,11 @@ fn draw_group_head(
     // 글자는 **세션 이름**이다 — 「누가」는 얼굴이 이미 말하고, 여러 pane 에서 찾는
     // 단서는 「무엇을」 쪽이다(2026-09-14 지시 「캐릭터 이름은 빼고 세션 이름」).
     // 이름 없는 새 세션만 학생 이름으로 채운다 — 빈 줄보다는 낫다.
-    let name = if shell_pane {
+    // 「탭 2개」다 — 「탭 2」로 두면 바로 밑 둘째 탭 줄의 이름(탭 2)과 같은 글자가 되어
+    // 머리인지 탭인지가 안 갈린다(리그 캡처에서 실제로 그렇게 보였다).
+    let name = if tabbed {
+        format!("탭 {}개", gp.tabs.len())
+    } else if shell_pane {
         "셸".to_string()
     } else if !gp.session.is_empty() {
         gp.session.clone()
@@ -2737,7 +2766,7 @@ fn draw_group_head(
             t.label.clone(),
             if t.attention { theme::attention() } else { theme::text_dim() },
         ),
-        None if shell_pane => (gp.shell.clone(), theme::text_dim()),
+        None if shell_pane && !tabbed => (gp.shell.clone(), theme::text_dim()),
         None => (String::new(), theme::text_dim()),
     };
     if !line.is_empty() && title_budget > 40.0 {
@@ -2775,7 +2804,8 @@ fn draw_group_head(
     }
 }
 
-/// 탭 한 줄 — `├─ ● 미도리  세션 제목`.
+/// 탭 한 줄 — `├─ [얼굴] 세션 제목  작업 한 줄 … ●`. 글자 순서는 그룹 머리와 같다
+/// (얼굴이 「누구」, 굵은 글자가 「무엇」, 옅은 글자가 「지금 뭘 하나」, 끝 점이 상태).
 ///
 /// pane 하나가 탭을 여럿 품으면 그 셸들은 **한 자리를 번갈아 쓴다**. 평면으로
 /// 늘어놓으면 pane 이 여럿인 것처럼 보이므로(실측: 탭 셋짜리 pane 이 `pane 3`
@@ -2788,6 +2818,7 @@ fn draw_group_head(
 fn draw_tab_row(
     g: &mut gpu::GpuRenderer,
     t: &TabRow,
+    task: Option<&TaskLine>,
     host_cwd: &str,
     last: bool,
     x: f32,
@@ -2811,6 +2842,11 @@ fn draw_tab_row(
             theme::with_alpha(theme::surface(), 0x80),
         );
     }
+    // 승인·질문 대기는 탭 줄에도 주황 띠 — 머리와 같은 값. 탭은 한 자리를 번갈아
+    // 쓰므로 뒤에 숨은 탭이 기다리는 것을 머리 점만으로는 어느 탭인지 못 가른다.
+    if task.is_some_and(|tk| tk.attention) {
+        g.rect(x, y, w, ROW_H, theme::with_alpha(theme::attention(), 0x22));
+    }
     // ── 계보선 ── `draw_proc_row` 의 depth 0 자리와 픽셀이 같아야 두 종류의 줄이
     // 한 나무로 읽힌다.
     let line = theme::with_alpha(theme::border(), 0xDD);
@@ -2830,15 +2866,23 @@ fn draw_tab_row(
     }
     let nx = cx + if has_face { FACE + 4.0 } else { 15.0 };
 
-    // 오른쪽은 학생 줄의 상태 점 자리만큼 비운다 — 탭 줄에는 점이 없지만 글자 끝이
-    // 맞아야 한 목록으로 읽힌다.
-    let rx = right - 15.0;
+    // 오른쪽 끝 상태 점 — 머리와 같은 크기·같은 자리. 탭마다 제 상태를 갖는다.
+    const DOT: f32 = 7.0;
+    let dot = row_dot(task.is_some_and(|tk| tk.attention), task.is_some_and(|tk| tk.working));
+    circle_rect(g, right - DOT, y + (ROW_H - DOT) / 2.0, DOT, dot);
+    let rx = right - DOT - 8.0;
 
-    // 이름은 학생, 없으면 탭 번호. **pane id 를 쓰지 않는다** — 첫 탭은 id 가 바깥
-    // pane 과 같아서(leaf id == 첫 탭 pid) `%0` 이 두 줄 연속으로 떴고, 그게 중복
-    // 표시로 읽혔다(실측). 번호는 탭바와 대응되고, 식별용 pid 는 오른쪽에 있다.
-    let name =
-        if t.label.is_empty() { format!("탭 {}", t.index + 1) } else { t.label.clone() };
+    // 굵은 글자는 세션 제목 — 머리와 같은 규칙(「누가」는 얼굴이 말한다). 제목 없는 새
+    // 세션은 학생 이름, 학생 없는 셸 탭은 탭 번호. **pane id 를 쓰지 않는다** — 첫
+    // 탭은 id 가 바깥 pane 과 같아서(leaf id == 첫 탭 pid) `%0` 이 두 줄 연속으로
+    // 떴고, 그게 중복 표시로 읽혔다(실측). 번호는 탭바와 대응된다.
+    let name = if !t.session.is_empty() {
+        t.session.clone()
+    } else if !t.label.is_empty() {
+        t.label.clone()
+    } else {
+        format!("탭 {}", t.index + 1)
+    };
     let name = fit_text(g, &name, (rx - nx).max(0.0), 11.5, true);
     let nw = g.measure_chrome_text(&name, 11.5, true);
     g.draw_text(
@@ -2860,14 +2904,17 @@ fn draw_tab_row(
     // 폴백이다) 마지막으로 작업 경로를 쓴다. 바깥 pane 과 같은 경로면 안 쓴다 —
     // 그건 이미 그룹 머리에 한 번 적혀 있고, 탭 수만큼 반복되면 정작 다른 데를
     // 보는 탭이 안 튄다.
-    let sub = if !t.session.is_empty() {
-        t.session.as_str()
-    } else if !t.title.is_empty() {
-        t.title.as_str()
-    } else if t.cwd != host_cwd {
-        t.cwd.as_str()
-    } else {
-        ""
+    //
+    // 옅은 글자는 작업 한 줄이 먼저다 — 머리의 같은 자리와 같은 뜻. 없으면 탭바
+    // 이름(제목과 다를 때만), 그것도 없으면 바깥 pane 과 다른 경로.
+    let (sub, sub_col) = match task {
+        Some(tk) if !tk.label.is_empty() => (
+            tk.label.as_str(),
+            if tk.attention { theme::attention() } else { theme::text_dim() },
+        ),
+        _ if !t.title.is_empty() && t.title != t.session => (t.title.as_str(), theme::text_mute()),
+        _ if t.cwd != host_cwd => (t.cwd.as_str(), theme::text_mute()),
+        _ => ("", theme::text_mute()),
     };
     let sx = nx + nw + 6.0;
     if !sub.is_empty() && rx - sx > 40.0 {
@@ -2876,7 +2923,7 @@ fn draw_tab_row(
             sx,
             y + 6.0,
             &s,
-            gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
+            gpu::DrawOpts { font_size: 10.5, color: sub_col, bold: false, italic: false },
         );
     }
 }
