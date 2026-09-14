@@ -313,6 +313,51 @@ fn run() -> Result<Option<Response>> {
             std::process::exit(if ok { 0 } else { 1 });
         }
     }
+    // `human <명령…>` — **사람이 쳐야 하는 명령**(sudo·로그인·비밀번호)을 옆 pane 에
+    // 넣어 둔다. 캐릭터가 「터미널 열고 이걸 치라」고 말로 시키면 사람이 옮겨 치다
+    // 틀리고, 캐릭터가 터미널 앱을 따로 띄우면 화면 밖으로 나간다(2026-09-14 지적).
+    // 이 명령 하나가 그 규칙이다: 아래로 쪼개고, 명령을 밀어넣고, 포커스를 넘긴다 —
+    // 사람은 비밀번호만 치면 된다. 응답은 그 pane id(peek 으로 완료를 볼 수 있게).
+    if cmd == "human" {
+        let text = args.join(" ");
+        if text.trim().is_empty() {
+            anyhow::bail!("human 뒤에 사람이 칠 명령을 줘라");
+        }
+        let from = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty());
+        let socket_path = resolve_socket_path()?;
+        let split = Request {
+            id: json!(format!("cli-{}", std::process::id())),
+            method: "surface.split".into(),
+            params: json!({ "direction": "down", "focus": true, "from": from }),
+        };
+        let r = roundtrip(&socket_path, &split)?;
+        if !r.ok {
+            anyhow::bail!(
+                "pane 을 못 쪼갰다: {}",
+                r.error.map(|e| e.message).unwrap_or_else(|| "사유 없음".into())
+            );
+        }
+        let surface = r
+            .result
+            .as_ref()
+            .and_then(|v| v.pointer("/surface/id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("쪼갠 pane 의 id 를 못 받았다"))?;
+        // 셸이 뜨는 데 한 박자 — 바로 밀어넣으면 첫 글자가 프롬프트 전에 씹힌다.
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let send = Request {
+            id: json!(format!("cli-{}-send", std::process::id())),
+            method: "surface.send_text".into(),
+            params: json!({ "surface_id": surface, "text": format!("{text}\n") }),
+        };
+        let r = roundtrip(&socket_path, &send)?;
+        println!(
+            "{}",
+            json!({ "ok": r.ok, "surface": surface, "note": "사람이 칠 차례 — 완료는 peek 으로 본다" })
+        );
+        std::process::exit(if r.ok { 0 } else { 1 });
+    }
     // `wake-watch <surface>` blocks until ONE teammate finishes a turn, then
     // exits — the inverse of board-watch (which streams forever). Meant to run
     // as a Claude Code background task: its exit auto-re-invokes the idle pane
@@ -1168,6 +1213,9 @@ fn print_help() {
     eprintln!("  kasaterm-cli rename <surface_id> <title>");
     eprintln!("  kasaterm-cli rename-window <title>          # 이 pane 의 세션 이름");
     eprintln!("  kasaterm-cli color <surface_id> <#rrggbb>");
+    eprintln!(
+        "  kasaterm-cli human <명령…>                 # 사람이 쳐야 하는 명령(sudo·로그인)을 아래 pane 에 넣고 포커스를 넘긴다 — 사람은 비밀번호만"
+    );
     eprintln!(
         "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N] [--host-ratio 0.6]  # 기본 no-focus·이 pane 을 쪼갬. --count N 은 부른 쪽을 크게 두고 N 명을 균등하게 배치(몫이 반감하지 않는다). 창이 좁으면 앉힌 인원이 요청보다 적고 note 에 적힌다"
     );

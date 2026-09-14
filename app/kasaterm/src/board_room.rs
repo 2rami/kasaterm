@@ -46,9 +46,13 @@ impl App {
             .as_deref()
             .and_then(|pane| self.window_of_pane(pane))
             .unwrap_or(self.active_window);
+        // 폴더는 **활성 탭**의 것이다 — 바깥 pane id 로 물으면 첫 탭(또는 없는
+        // PTY)을 보게 되어, 탭을 바꿔 둔 pane 에서 「저장소가 아니다」가 떴다
+        // (2026-09-14 지적).
         let target_cwd = return_pane
             .as_deref()
-            .and_then(|pane| self.pane_current_cwd(pane))
+            .map(|pane| self.ws.lock().unwrap().active_tab_pid(pane))
+            .and_then(|tab| self.pane_current_cwd(&tab))
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
         self.board_scene

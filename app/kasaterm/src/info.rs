@@ -119,6 +119,7 @@ pub(crate) struct ProcRow {
 impl ProcRow {
     /// `458 MB` · `1.2 GB` · `640 KB`. KB 를 그대로 보여주는 건 1MB 미만일
     /// 때뿐이다 — 대부분의 개발 프로세스는 MB 대라 자릿수만 늘어난다.
+    #[allow(dead_code)]
     pub(crate) fn mem_label(&self) -> String {
         match self.mem_kb {
             0..=1023 => format!("{} KB", self.mem_kb),
@@ -272,6 +273,8 @@ pub(crate) struct InfoSnap {
 pub(crate) struct TaskLine {
     pub(crate) label: String,
     pub(crate) attention: bool,
+    /// 지금 도는 중인가 — 학생 줄 오른쪽 점이 초록이 되는 조건.
+    pub(crate) working: bool,
 }
 
 /// 수집 결과에 보드 쪽 정보를 덧댄다 — 작업 한 줄(collab board)·예약.
@@ -284,6 +287,7 @@ fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>
                     TaskLine {
                         label: crate::native_board::status_label(&r),
                         attention: crate::native_board::agent_needs_attention(&r),
+                        working: crate::native_board::agent_is_working(&r),
                     },
                 );
             }
@@ -1959,6 +1963,20 @@ pub(crate) fn draw_side_tabs(
             && cursor.1 >= y - 3.0
             && cursor.1 <= y + bi + 3.0
     };
+    // 다시 읽기는 Info 본문의 머리줄이 들고 있었는데, 그 줄(요약 숫자)이 걷히면서
+    // 탭 줄의 단추 자리로 올라왔다 — 확대·닫기와 한 벌이다.
+    let refresh_x = expand_x - bi - 8.0;
+    info.refresh_rect = None;
+    if info.tab == state::SideTab::Info {
+        g.queue_icon(
+            "rotate-cw",
+            refresh_x,
+            y,
+            bi,
+            if bhov(refresh_x) { theme::text() } else { theme::text_mute() },
+        );
+        info.refresh_rect = Some((refresh_x - 3.0, y - 3.0, bi + 6.0, bi + 6.0));
+    }
     g.queue_icon(
         "maximize",
         expand_x,
@@ -2003,7 +2021,11 @@ pub(crate) fn draw_side_tabs(
         let tw = g.measure_chrome_text(label, 12.0, active);
         // 첫 줄만 우상단 버튼(확대·닫기) 앞에서 끊는다. 둘째 줄부터는 그 위가
         // 비어 있으니 칼럼 오른쪽 끝까지 쓴다.
-        let limit = if row == 0 { expand_x - 8.0 } else { x + w - 10.0 };
+        let limit = if row == 0 {
+            if info.tab == state::SideTab::Info { refresh_x - 8.0 } else { expand_x - 8.0 }
+        } else {
+            x + w - 10.0
+        };
         if tx > left && tx + tw > limit {
             row += 1;
             ty += line_h;
@@ -2038,37 +2060,20 @@ pub(crate) fn draw_side_tabs(
 }
 
 const ROW_H: f32 = 22.0;
-const SEC_H: f32 = 26.0;
 /// 섹션 본문과 다음 섹션 머리 사이 숨. 없으면 목록 마지막 행과 다음 머리가
 /// 붙어 두 섹션이 한 덩어리로 읽힌다.
 const SEC_GAP: f32 = 8.0;
-const HEAD_H: f32 = 30.0;
-/// pane 그룹 머리.
+/// 기기 머리 — 색 점 · 이름 · 상태 · pane 수.
+const DEV_H: f32 = 30.0;
+/// 방 머리와 「닫힌 pane」 줄. 위 4px 는 앞 줄과의 숨이다.
+const ROOM_H: f32 = 22.0;
+/// 학생(pane) 한 줄.
 const GROUP_H: f32 = 24.0;
-/// 방(윈도우) 머리. **위쪽 `WIN_PAD` 는 앞 방과의 여백이고 나머지가 실제 머리다.**
-///
-/// 여백을 상수 밖에 따로 두지 않는 이유: 이 값을 높이 계산(스크롤 clamp)과 페인트가
-/// **각각** 읽는데, 여백을 별도 항으로 더하면 한쪽만 고쳐져 목록이 어긋난다. 높이
-/// 안에 품으면 상수 하나로 둘이 같이 움직인다.
-///
-/// 종전엔 20 으로 pane 머리(24)보다 낮았다 — "구획선에 이름이 붙은 것"을 노린 것인데,
-/// 배경도 여백도 없어서 방 경계가 pane 경계보다 약하게 읽혔다(2026-08-11 지적).
-/// 들여쓰기로 가르는 길은 여전히 안 쓴다: 좁은 칼럼에서 한 단 더 들이면 프로세스
-/// 트리의 계보선이 설 자리가 없다.
-const WIN_H: f32 = 32.0;
-/// 방 머리 위 여백 — 앞 방의 마지막 프로세스 줄과 붙지 않게.
-const WIN_PAD: f32 = 10.0;
-/// 포트 행은 두 줄이다 — 번호·소유 pane 이 윗줄, "무엇인지"가 아랫줄.
-/// 계보 한 단의 가로 폭. 좁은 칼럼에서 깊이 3~4 단은 흔하므로(claude → MCP
-/// 래퍼 → 실체) 한 단을 넓게 잡으면 정작 이름 자리가 사라진다.
-const IND: f32 = 11.0;
-const BTN_H: f32 = 24.0;
-const PATH_LINE_H: f32 = 15.0;
 const EMPTY_H: f32 = 22.0;
 
-/// Info 탭 본문 — 셸 머리 / 프로젝트 디렉터리 / 프로세스 / 포트. 프로세스는
-/// 셸 아래 트리를 들여쓰기로 그리고 CPU·메모리를 오른쪽에 붙이며, 포트는 좁은
-/// 칼럼에서 이름을 밀어내지 않도록 별도 섹션으로 뺐다.
+/// Info 탭 본문 — 기기마다 「방 › 학생 줄」, 그 밑에 닫힌 pane 과 예약. 프로세스·
+/// 포트·pid·요약 숫자는 걷었다(2026-09-14 지시) — 하단바가 이미 말하는 것이라
+/// 여기서는 「누가 어디서 무엇을」만 남긴다.
 pub(crate) fn draw_info_col(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
@@ -2083,7 +2088,6 @@ pub(crate) fn draw_info_col(
     info.panel_rect = Some((x, top, w, (bottom - top).max(0.0)));
     let x0 = x + 14.0;
     let right = x + w - 12.0;
-    let avail = (right - x0).max(0.0);
     // 스냅샷을 잠그거나 복사하지 않고 잠시 꺼내 쓴다 — 이 함수는 매 프레임 도는데
     // `pump_info` 가 이미 갱신될 때만 사본을 만들어 뒀다. `take` 는 빈 값과
     // 맞바꾸는 것뿐이라 할당이 없고, 끝에서 그대로 돌려놓는다.
@@ -2095,37 +2099,13 @@ pub(crate) fn draw_info_col(
     info.machine_pane_rects.clear();
     info.sec_rects.clear();
     info.dir_btn_rects.clear();
-    info.refresh_rect = None;
 
-    // 경로 줄바꿈을 먼저 재는 건 내용 높이에 들어가기 때문이다 — 높이를 알아야
-    // 스크롤을 그리기 *전에* clamp 할 수 있고, 그래야 한 프레임 밀리지 않는다.
-    let path_s = info
-        .root
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let path_lines = if info.dir_collapsed || path_s.is_empty() {
-        Vec::new()
-    } else {
-        wrap_path(g, &path_s, avail, 2)
-    };
-    let dir_h = if info.dir_collapsed {
-        0.0
-    } else {
-        path_lines.len() as f32 * PATH_LINE_H + 8.0 + BTN_H + 10.0
-    };
-    // 탭 안의 프로세스도 센다. 접힌 pane 의 것까지 세는 건 이 숫자가 「지금 보이는
-    // 줄 수」가 아니라 「이 기계에서 도는 것」이기 때문이다.
-    // These are panes open on this device, including mirrors. Process totals,
-    // unlike pane membership, still refer only to locally running processes.
+    // 이 기기에 열린 pane(거울 포함). 방이 하나뿐이면 방 머리를 안 그린다 — 늘 같은
+    // 이름 한 줄이 목록 맨 위를 차지하면서 알려주는 게 없다.
     let local_panes = viewer_panes(&snap);
-    let proc_total: usize = local_panes.iter().filter(|g| g.machine.is_none())
-        .map(|g| all_rows(g).count()).sum();
-    // 방이 하나뿐이면 머리를 안 그린다 — 늘 같은 이름 한 줄이 목록 맨 위를
-    // 차지하면서 알려주는 게 없다.
     let show_windows = local_panes.first().is_some_and(|first|
         local_panes.iter().any(|g| g.window != first.window));
-    let procs_h = if info.procs_collapsed {
+    let local_h = if info.procs_collapsed {
         0.0
     } else if local_panes.is_empty() {
         EMPTY_H
@@ -2134,14 +2114,10 @@ pub(crate) fn draw_info_col(
         let mut prev: Option<usize> = None;
         for gp in &local_panes {
             if show_windows && prev != Some(gp.window) {
-                h += WIN_H;
+                h += ROOM_H;
                 prev = Some(gp.window);
             }
-            if show_windows && info.group_collapsed.contains(&win_key(gp.window)) {
-                continue;
-            }
-            h += GROUP_H;
-            h += visible_row_count(info, gp) as f32 * ROW_H;
+            h += GROUP_H + gp.tabs.len() as f32 * ROW_H;
         }
         h
     };
@@ -2163,7 +2139,6 @@ pub(crate) fn draw_info_col(
         .as_ref()
         .map(|p| p.stages.len() as f32 * STAGE_H + 6.0)
         .unwrap_or(0.0);
-    // Include every device section and its rows in the scroll extent.
     let machine_heights: Vec<f32> = {
         let prog = info.machines_col.progress.as_ref();
         info
@@ -2171,7 +2146,7 @@ pub(crate) fn draw_info_col(
             .machines
             .iter()
             .map(|m| {
-                let mut h = SEC_H + SEC_GAP;
+                let mut h = DEV_H + SEC_GAP;
                 if info.machine_collapsed.contains(&m.label) {
                     return h;
                 }
@@ -2182,13 +2157,13 @@ pub(crate) fn draw_info_col(
                     let mut last_room = "";
                     for r in machine_rows(m) {
                         if !r.room.is_empty() && r.room != last_room {
-                            h += MACHINE_HEAD_H;
+                            h += ROOM_H;
                             last_room = &r.room;
                         }
                         h += GROUP_H;
                     }
                     if m.closed > 0 {
-                        h += MACHINE_HEAD_H;
+                        h += ROOM_H;
                     }
                     if machine_rows(m).is_empty() { h += EMPTY_H; }
                 } else {
@@ -2199,24 +2174,28 @@ pub(crate) fn draw_info_col(
             .collect()
     };
     let machines_h: f32 = machine_heights.iter().sum();
-    let content = HEAD_H + SEC_H * 2.0 + SEC_GAP * 2.0 + dir_h + procs_h + machines_h + 14.0;
+    // 예약은 있을 때만 선다 — 빈 머리 한 줄은 「예약이라는 기능이 있다」 말고는
+    // 알려주는 게 없다.
+    let sched_h = if snap.schedules.is_empty() {
+        0.0
+    } else {
+        DEV_H + snap.schedules.len() as f32 * GROUP_H + SEC_GAP
+    };
+    let content = DEV_H + local_h + SEC_GAP + machines_h + sched_h + 14.0;
     info.content_h = content;
     info.scroll = info.scroll.clamp(0.0, (content - (bottom - top)).max(0.0));
-    // 본문 전체를 시저로 가둔다. 지금까지는 섹션·행마다 `y + H > top && y < bottom`
-    // 으로 걸렀는데, 그건 **완전히** 밖인 것만 막는다 — 위로 반쯤 걸친 행은 통째로
-    // 그려져 탭 줄 위로 올라탔다. 그 검사들은 컬링으로 그대로 남기고(안 남기면
-    // 목록이 길 때 인스턴스가 수천 개 늘어난다), 삐져나온 픽셀만 여기서 자른다.
+    // 본문 전체를 시저로 가둔다. 섹션·행마다 `y + H > top && y < bottom` 으로 거르는
+    // 건 **완전히** 밖인 것만 막는다 — 위로 반쯤 걸친 행은 통째로 그려져 탭 줄 위로
+    // 올라탔다. 그 검사들은 컬링으로 그대로 남기고(안 남기면 목록이 길 때 인스턴스가
+    // 수천 개 늘어난다), 삐져나온 픽셀만 여기서 자른다.
     g.push_clip(x, top, w, (bottom - top).max(0.0));
     // 시저는 픽셀만 자르지 클릭은 안 자른다. 막을 것이 둘인데 **시점이 다르다**:
     //
     // ① **이 프레임의 호버** — 커서가 잘려 안 보이는 부분에 있는데 행의 보이는
-    //    쪽에 하이라이트가 그려지는 것. 시저는 이걸 못 막는다(하이라이트의 보이는
-    //    부분은 클립 안이니까). 커서를 여기서 한 번 걸러 막는다.
+    //    쪽에 하이라이트가 그려지는 것. 커서를 여기서 한 번 걸러 막는다.
     // ② **나중의 클릭** — 아래에서 쌓는 히트렉트는 `handler.rs` 가 **다음 클릭
-    //    좌표로 다시** 검사한다. 그래서 커서를 거른 것만으로는 안 되고, 저장되는
-    //    rect 자체가 잘려 있어야 한다. 그건 이 함수 끝의 `clip_rects!` 가 한다.
-    //
-    // ①만 하고 ②를 빠뜨리면 화면은 완벽한데 헤더 뒤에 숨은 행이 눌린다.
+    //    좌표로 다시** 검사한다. 저장되는 rect 자체가 잘려 있어야 한다. 그건 이
+    //    함수 끝의 `clip_rects!` 가 한다.
     let raw_cursor = cursor;
     let cursor = match g.clip_hit((cursor.0, cursor.1, 1.0, 1.0)) {
         Some(_) => cursor,
@@ -2224,229 +2203,67 @@ pub(crate) fn draw_info_col(
     };
     let mut y = top - info.scroll;
 
-    // ── 요약 머리 ──
-    // 목록이 전 pane 공유라 "지금 무엇을 보고 있는지"가 셸 하나의 이름일 수
-    // 없다. 몇 개의 pane 을 합쳐 몇 개를 세고 있는지가 그 자리를 대신한다.
-    if y + HEAD_H > top && y < bottom {
-        let summary = if snap.panes.is_empty() {
-            "읽는 중…".to_string()
-        } else {
-            format!(
-                "pane {} · 프로세스 {} · 포트 {}",
-                snap.panes.len(),
-                proc_total,
-                snap.ports.len()
-            )
-        };
-        // 세 숫자가 한 덩어리라 하나만 잘리면 줄 전체가 못 쓰게 된다(216px 실측:
-        // 「포트 15」가 통째로 사라졌다). 자리가 모자라면 터미널 아이콘부터 접고,
-        // 그래도 모자라면 글자를 한 단 줄여 셋을 다 보인다 — 이 줄에서 그림은
-        // 장식이고 숫자가 내용이다.
-        let room = |ind: f32| (right - x0 - ind - 22.0).max(0.0);
-        let tight = summary.replace(" · ", "·");
-        let mut fs = 11.5_f32;
-        let mut ind = 21.0_f32;
-        let mut text = summary.clone();
-        for (nind, nfs, ntext) in [
-            (21.0, 11.5, &summary),
-            (0.0, 11.5, &summary),
-            (0.0, 10.5, &summary),
-            (0.0, 10.5, &tight),
-        ] {
-            ind = nind;
-            fs = nfs;
-            text = ntext.clone();
-            if g.measure_chrome_text(ntext, nfs, false) <= room(nind) {
-                break;
-            }
-        }
-        if ind > 0.0 {
-            g.queue_icon("terminal", x0, y + 5.0, 14.0, theme::text_mute());
-        }
-        let s = fit_text(g, &text, room(ind), fs, false);
-        g.draw_text(
-            x0 + ind,
-            y + 5.0,
-            &s,
-            gpu::DrawOpts { font_size: fs, color: theme::text_dim(), bold: false, italic: false },
-        );
-        let rr = (right - 15.0, y + 4.0, 15.0, 15.0);
-        let rhov = hit(cursor, &(rr.0 - 4.0, rr.1 - 4.0, rr.2 + 8.0, rr.3 + 8.0));
-        g.hover_pointer |= rhov;
-        g.queue_icon(
-            "rotate-cw",
-            rr.0,
-            rr.1,
-            rr.2,
-            if rhov { theme::text() } else { theme::text_mute() },
-        );
-        info.refresh_rect = Some((rr.0 - 4.0, rr.1 - 4.0, rr.2 + 8.0, rr.3 + 8.0));
-    }
-    y += HEAD_H;
-
-    // ── 프로젝트 디렉터리 ──
-    // git 레포라서 골라진 것인지 cwd 그대로인지를 배지로 밝힌다. 트리 루트가
-    // 왜 여기인지 묻게 만들지 않는 게 목적이라, 배지 없이 경로만 두면 의미가
-    // 반쯤 사라진다.
-    let t_a = prof.map(|_| Instant::now());
-    let badge = if info.root_is_repo { "git 레포" } else { "현재 경로" };
-    let r = draw_section(g, cursor, "프로젝트 디렉터리", None, Some(badge), false, info.dir_collapsed, x, w, y, bottom, top);
-    info.sec_rects.push((state::InfoSection::Dir, r));
-    y += SEC_H;
-    if !info.dir_collapsed {
-        for line in &path_lines {
-            if y + PATH_LINE_H > top && y < bottom {
-                g.draw_text(
-                    x0,
-                    y,
-                    line,
-                    gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
-                );
-            }
-            y += PATH_LINE_H;
-        }
-        y += 8.0;
-        if y + BTN_H > top && y < bottom {
-            #[cfg(target_os = "macos")]
-            let reveal = "Finder";
-            #[cfg(not(target_os = "macos"))]
-            let reveal = "탐색기";
-            let editor = crate::proc::open_with_apps_ready()
-                .and_then(<[_]>::first)
-                .map(|(n, _)| short_app_name(n));
-            let mut btns: Vec<(state::InfoDirBtn, &str, &str)> =
-                vec![(state::InfoDirBtn::Reveal, "external-link", reveal)];
-            if let Some(name) = editor {
-                btns.push((state::InfoDirBtn::Editor, "file-code", name));
-            }
-            btns.push((state::InfoDirBtn::CopyPath, "copy", "복사"));
-            let gap = 6.0;
-            let bw = ((avail - gap * (btns.len() - 1) as f32) / btns.len() as f32).max(0.0);
-            for (i, (kind, icon, label)) in btns.into_iter().enumerate() {
-                let bx = x0 + i as f32 * (bw + gap);
-                let hov = hit(cursor, &(bx, y, bw, BTN_H));
-                g.hover_pointer |= hov;
-                panel_rect_outlined(
-                    g,
-                    bx,
-                    y,
-                    bw,
-                    BTN_H,
-                    theme::radius_sm(),
-                    theme::raised_on(theme::panel_bg(), hov),
-                );
-                let col = if hov { theme::text() } else { theme::text_dim() };
-                let lw = g.measure_chrome_text(label, 10.5, false);
-                // 아이콘+글자가 안 들어가면 아이콘만 가운데 — 잘린 글자보다 낫다.
-                if lw + 12.0 + 4.0 + 10.0 <= bw {
-                    let inner = 12.0 + 4.0 + lw;
-                    let ix = bx + (bw - inner) / 2.0;
-                    g.queue_icon(icon, ix, y + 6.0, 12.0, col);
-                    g.draw_text(
-                        ix + 16.0,
-                        y + 6.0,
-                        label,
-                        gpu::DrawOpts { font_size: 10.5, color: col, bold: false, italic: false },
-                    );
-                } else {
-                    g.queue_icon(icon, bx + (bw - 12.0) / 2.0, y + 6.0, 12.0, col);
-                }
-                info.dir_btn_rects.push((kind, (bx, y, bw, BTN_H)));
-            }
-        }
-        y += BTN_H + 10.0;
-    }
-    y += SEC_GAP;
-
-    // ── 프로세스 ──
-    let t_procs = prof.map(|_| Instant::now());
-    draw_device_background(g, local_machine_name(), x, w, y, SEC_H + procs_h);
-    let r = draw_device_section(
-        g, cursor, local_machine_name(), Some(local_panes.len()), info.procs_collapsed, x, w, y, bottom, top,
+    // ── 이 기기 ──
+    let t_local = prof.map(|_| Instant::now());
+    let local = local_machine_name();
+    let r = draw_device_head(
+        g, cursor, if local.is_empty() { "이 기기" } else { local }, local, "이 기기", true,
+        local_panes.len(), x, w, x0, right, y, top, bottom,
     );
     info.sec_rects.push((state::InfoSection::Procs, r));
-    y += SEC_H;
+    y += DEV_H;
     if !info.procs_collapsed {
         if local_panes.is_empty() {
-            draw_empty(g, x0, y, top, bottom, "실행 중인 프로세스 없음");
+            draw_empty(g, x0, y, top, bottom, "열린 pane 없음");
             y += EMPTY_H;
         }
         let mut prev_win: Option<usize> = None;
         for gp in &local_panes {
             if show_windows && prev_win != Some(gp.window) {
                 prev_win = Some(gp.window);
-                let key = win_key(gp.window);
-                let shut = info.group_collapsed.contains(&key);
-                if y + WIN_H > top && y < bottom {
-                    let n = local_panes.iter().filter(|o| o.window == gp.window).count();
-                    draw_window_head(g, cursor, gp, shut, n, x, w, x0, right, y);
+                if y + ROOM_H > top && y < bottom {
+                    // 번호를 앞에 세운다 — 방 이름은 작업 폴더에서 오는데 두 방이 같은
+                    // 폴더면 이름만으론 구분이 안 된다(실측: 방 셋이 전부 `Desktop`).
+                    let name = if gp.window_label.is_empty() {
+                        format!("방 {}", gp.window + 1)
+                    } else {
+                        format!("방 {} · {}", gp.window + 1, gp.window_label)
+                    };
+                    draw_room_head(g, &name, x0, right, y);
                 }
-                info.group_rects.push((key, (x, y, w, WIN_H)));
-                y += WIN_H;
+                y += ROOM_H;
             }
-            if show_windows && info.group_collapsed.contains(&win_key(gp.window)) {
-                continue;
-            }
-            // 학생은 접힌 게 기본 — 펴 둔 것만 `pane_expanded` 에 있다.
-            let collapsed = !info.pane_expanded.contains(&gp.pane);
             if y + GROUP_H > top && y < bottom {
-                draw_group_head(g, cursor, gp, collapsed, snap.tasks.get(&gp.pane), x, w, x0, right, y);
+                let task = snap.tasks.get(&gp.pane);
+                let dot = row_dot(task.is_some_and(|t| t.attention), task.is_some_and(|t| t.working));
+                draw_group_head(g, cursor, gp, task, dot, x, w, x0, right, y);
             }
             info.group_rects.push((gp.pane.clone(), (x, y, w, GROUP_H)));
             y += GROUP_H;
-            // 접혀 있어도 포트를 쥔 줄은 남는다(`visible_rows`). 소유값이라 아래
-            // `info` 재차용과 안 부딪힌다.
-            let rows = visible_rows(info, gp);
-            for p in &rows {
-                if y + ROW_H > top && y < bottom {
-                    draw_proc_row(g, cursor, info, p, x, w, x0, right, y);
-                }
-                info.proc_rects.push((p.pid, (x, y, w, ROW_H)));
-                y += ROW_H;
-            }
-            // 탭이 여럿인 pane 만 이 경로로 온다(`fold_tabs`). 탭 줄을 세우고 그
-            // 탭의 프로세스를 한 단계 더 들여쓴다 — 프로세스 트리가 이미 쓰는
-            // 계보선을 그대로 빌리므로 목록이 한 벌로 읽힌다.
-            //
-            // **접혀 있어도 탭 줄은 그린다.** 접기는 「프로세스 목록을 줄이자」는
-            // 뜻이지 pane 의 생김새까지 감추자는 게 아니다 — 접었다고 탭을 숨기면
-            // 그룹 머리 한 줄이 학생 셋을 대표하게 되고, 그건 목록이 하는 거짓말
-            // 중에 제일 나쁜 종류다(애초에 이 작업이 그걸 고치러 왔다). 접힌 그룹이
-            // 포트를 쥔 줄만은 남기는 것과 같은 규칙이다.
+            // 탭이 여럿인 pane 만 이 경로로 온다(`fold_tabs`). 탭은 바깥 pane 자리에
+            // 겹쳐 사는 또 하나의 셸이라 한 단 들여 세운다.
             let n = gp.tabs.len();
             for (i, t) in gp.tabs.iter().enumerate() {
-                let last = i + 1 == n;
                 if y + ROW_H > top && y < bottom {
-                    draw_tab_row(g, t, &gp.cwd, last, x, w, x0, right, y);
+                    draw_tab_row(g, t, &gp.cwd, i + 1 == n, x, w, x0, right, y);
                 }
                 y += ROW_H;
-                for p in &tab_proc_rows(!collapsed, t, last) {
-                    if y + ROW_H > top && y < bottom {
-                        draw_proc_row(g, cursor, info, p, x, w, x0, right, y);
-                    }
-                    info.proc_rects.push((p.pid, (x, y, w, ROW_H)));
-                    y += ROW_H;
-                }
             }
         }
     }
-    let d_dir = match (t_a, t_procs) {
-        (Some(a), Some(b)) => (b - a).as_secs_f32() * 1000.0,
-        _ => 0.0,
-    };
-    let d_procs = t_procs.map(|t| t.elapsed().as_secs_f32() * 1000.0).unwrap_or(0.0);
+    let d_local = t_local.map(|t| t.elapsed().as_secs_f32() * 1000.0).unwrap_or(0.0);
     y += SEC_GAP;
 
-    // Each source device has the same section and pane layout as this device.
+    // ── 다른 기기 ── 이 기기와 같은 「방 › 학생 줄」 모양이다.
     for (m, section_h) in info.machines_col.machines.iter().zip(machine_heights) {
         let shut = info.machine_collapsed.contains(&m.label);
-        draw_device_background(g, &m.label, x, w, y, section_h - SEC_GAP);
-        let r = draw_device_section(
-            g, cursor, &m.label, Some(machine_open_count(m)),
-            shut, x, w, y, bottom, top,
+        let status = machine_status(m);
+        let r = draw_device_head(
+            g, cursor, &m.label, &m.label, &status, m.online, machine_open_count(m),
+            x, w, x0, right, y, top, bottom,
         );
         info.machine_rects.push((m.label.clone(), r));
-        y += SEC_H;
+        y += DEV_H;
         if !shut {
             if let Some(p) = info.machines_col.progress.as_ref().filter(|p| p.machine == m.label) {
                 y = draw_migrate_stages(g, p, x0, right, y, top, bottom);
@@ -2455,11 +2272,11 @@ pub(crate) fn draw_info_col(
                 let mut last_room = "";
                 for r in machine_rows(m) {
                     if !r.room.is_empty() && r.room != last_room {
-                        if y + MACHINE_HEAD_H > top && y < bottom {
-                            draw_machine_room_head(g, &r.room, x0, y);
+                        if y + ROOM_H > top && y < bottom {
+                            draw_room_head(g, &r.room, x0, right, y);
                         }
                         last_room = &r.room;
-                        y += MACHINE_HEAD_H;
+                        y += ROOM_H;
                     }
                     let mirrored = !r.pane.is_empty();
                     let mut close_rect = None;
@@ -2496,29 +2313,45 @@ pub(crate) fn draw_info_col(
                     y += GROUP_H;
                 }
                 if m.closed > 0 {
-                    if y + MACHINE_HEAD_H > top && y < bottom {
-                        draw_machine_room_head(g, &format!("닫힌 pane {} · 원본 기기에서 되살리기", m.closed), x0, y);
+                    if y + ROOM_H > top && y < bottom {
+                        draw_room_head(
+                            g, &format!("닫힌 pane {} · 원본 기기에서 되살리기", m.closed), x0, right, y,
+                        );
                     }
-                    y += MACHINE_HEAD_H;
+                    y += ROOM_H;
                 }
                 if machine_rows(m).is_empty() {
                     draw_empty(g, x0, y, top, bottom, "열린 pane 없음");
                     y += EMPTY_H;
                 }
             } else {
-                draw_empty(g, x0, y, top, bottom, "기기에 연결할 수 없음");
+                draw_empty(g, x0, y, top, bottom, "연결할 수 없음");
                 y += EMPTY_H;
             }
         }
+        let _ = section_h;
         y += SEC_GAP;
     }
 
+    // ── 예약 ── 하단바 「예약」 칩과 같은 목록. 누를 수 없다 — 여닫는 손잡이는 칩 쪽.
+    if !snap.schedules.is_empty() {
+        if y + DEV_H > top && y < bottom {
+            draw_plain_head(g, "clock", "예약", &snap.schedules.len().to_string(), x0, right, y);
+        }
+        y += DEV_H;
+        for it in &snap.schedules {
+            if y + GROUP_H > top && y < bottom {
+                draw_schedule_row(g, it, x0, right, y);
+            }
+            y += GROUP_H;
+        }
+    }
+
     // ── 히트렉트를 본문과 교집합 ──
-    // 여기 한 곳에서 몰아서 하는 이유: 이 함수는 rect 를 아홉 갈래로 쌓고 그중
-    // 넷은 헬퍼 함수 안에서 쌓는다. 쌓는 자리마다 교집합을 내면 **새 줄을 추가하는
-    // 사람이 반드시 빠뜨린다** — 빠뜨려도 화면은 멀쩡하고 컴파일도 초록이라, 안
-    // 보이는 줄이 눌리기 전까지 아무도 모른다. 클립이 아직 서 있는 지금 걸러 두면
-    // 그 자리가 한 곳으로 모인다.
+    // 여기 한 곳에서 몰아서 하는 이유: rect 를 여러 갈래로 쌓고 그중 몇은 헬퍼 안에서
+    // 쌓는다. 쌓는 자리마다 교집합을 내면 **새 줄을 추가하는 사람이 반드시 빠뜨린다**
+    // — 빠뜨려도 화면은 멀쩡하고 컴파일도 초록이라, 안 보이는 줄이 눌리기 전까지
+    // 아무도 모른다. 클립이 아직 서 있는 지금 걸러 두면 그 자리가 한 곳으로 모인다.
     macro_rules! clip_rects {
         ($v:expr, $i:tt) => {
             $v.retain_mut(|e| match g.clip_hit(e.$i) {
@@ -2531,30 +2364,221 @@ pub(crate) fn draw_info_col(
         };
     }
     clip_rects!(info.sec_rects, 1);
-    clip_rects!(info.dir_btn_rects, 1);
     clip_rects!(info.group_rects, 1);
-    clip_rects!(info.proc_rects, 1);
-    clip_rects!(info.kill_rects, 1);
     clip_rects!(info.machine_rects, 1);
     clip_rects!(info.machine_pane_rects, 3);
-    info.refresh_rect = info.refresh_rect.and_then(|r| g.clip_hit(r));
-    // `action_rects`·`tab_rects` 는 스크롤 밖(고정)이라 건드리지 않는다 — 여기서
-    // 자르면 멀쩡한 버튼이 사라진다.
+    // `refresh_rect`·`tab_rects` 는 스크롤 밖(탭 줄)이라 건드리지 않는다 — 여기서
+    // 자르면 멀쩡한 단추가 사라진다.
 
     // 메뉴는 클립 **밖**이다 — 목록 위에 얹히는 오버레이라 본문 사각형에 가두면
     // 아래쪽 행에서 연 메뉴가 잘린다. 커서도 거르지 않은 것을 쓴다.
     g.pop_clip();
-    draw_row_menu(g, raw_cursor, info, x, w, top, bottom);
     draw_pane_menu(g, raw_cursor, info, x, w, top, bottom);
     draw_machine_menu(g, raw_cursor, info, x, w, top, bottom);
     info.view = snap;
     if let Some(t) = prof {
         eprintln!(
-            "[profile] info_col {:.2}ms (head {:.2} dir {d_dir:.2} procs {d_procs:.2}) procs={proc_total} ports={}",
+            "[profile] info_col {:.2}ms (local {d_local:.2}) panes={}",
             t.elapsed().as_secs_f32() * 1000.0,
-            (t_a.map_or(t, |p| p) - t).as_secs_f32() * 1000.0,
-            info.view.ports.len()
+            info.view.panes.len()
         );
+    }
+}
+
+/// 학생 줄 오른쪽 끝 점 — 확인 필요면 주황, 도는 중이면 초록, 나머지는 흐림.
+fn row_dot(attention: bool, working: bool) -> [u8; 4] {
+    if attention {
+        theme::attention()
+    } else if working {
+        theme::success()
+    } else {
+        theme::with_alpha(theme::text_mute(), 0x90)
+    }
+}
+
+/// 다른 기기 머리의 상태 글자 — 붙어 있으면 「연결됨」, 아니면 마지막으로 본 때.
+fn machine_status(m: &state::MachinesColMachine) -> String {
+    if m.online {
+        if m.outdated { "연결됨 · 옛 판".to_string() } else { "연결됨".to_string() }
+    } else {
+        match m.ago_secs {
+            Some(s) if s < 60 => "방금 전".to_string(),
+            Some(s) if s < 3600 => format!("{}분 전", s / 60),
+            Some(s) if s < 86400 => format!("{}시간 전", s / 3600),
+            Some(s) => format!("{}일 전", s / 86400),
+            None => "연결 안 됨".to_string(),
+        }
+    }
+}
+
+/// 기기 머리 — 기기색 점 · 이름 · 상태 · 오른쪽에 pane 수. 색은 pane 헤더 칩이 쓰는
+/// 그 기기색이라(같은 기기는 어디서든 같은 색) 배경을 통째로 물들이지 않아도 된다 —
+/// 종전의 색 카드는 목록을 무겁게만 했다(2026-09-14 정리). 누르면 접힌다.
+#[allow(clippy::too_many_arguments)]
+fn draw_device_head(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    label: &str,
+    tint_key: &str,
+    status: &str,
+    online: bool,
+    panes: usize,
+    x: f32,
+    w: f32,
+    x0: f32,
+    right: f32,
+    y: f32,
+    top: f32,
+    bottom: f32,
+) -> (f32, f32, f32, f32) {
+    let r = (x, y, w, DEV_H);
+    if y + DEV_H <= top || y >= bottom {
+        return r;
+    }
+    let hov = hit(cursor, &r);
+    g.hover_pointer |= hov;
+    if hov {
+        g.rect(x, y, w, DEV_H, theme::surface_hover());
+    }
+    let tint = crate::render::machine_tint(tint_key);
+    let dot = if online { tint } else { theme::with_alpha(tint, 0x80) };
+    circle_rect(g, x0 + 2.0, y + (DEV_H - 8.0) / 2.0, 8.0, dot);
+    let n = format!("{panes} pane");
+    let nw = g.measure_chrome_text(&n, 10.0, false);
+    g.draw_text(
+        right - nw,
+        y + 9.0,
+        &n,
+        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+    );
+    let lx = x0 + 18.0;
+    let sw = if status.is_empty() { 0.0 } else { g.measure_chrome_text(status, 10.0, false) + 8.0 };
+    let name = fit_text(g, label, (right - nw - 8.0 - sw - lx).max(0.0), 12.0, true);
+    g.draw_text(
+        lx,
+        y + 7.0,
+        &name,
+        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
+    );
+    if !status.is_empty() {
+        let tw = g.measure_chrome_text(&name, 12.0, true);
+        g.draw_text(
+            lx + tw + 8.0,
+            y + 9.0,
+            status,
+            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+        );
+    }
+    r
+}
+
+/// 방 머리 — 흐린 이름과 오른쪽으로 이어지는 실선. 들여쓰기 대신 이 줄로만 방을
+/// 가른다: 좁은 칼럼에서 한 단 더 들이면 학생 줄의 제목 자리가 없다.
+fn draw_room_head(g: &mut gpu::GpuRenderer, text: &str, x0: f32, right: f32, y: f32) {
+    let tx = x0 + 12.0;
+    let t = fit_text(g, text, (right - tx - 24.0).max(0.0), 10.0, false);
+    g.draw_text(
+        tx,
+        y + 6.0,
+        &t,
+        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+    );
+    let lx = tx + g.measure_chrome_text(&t, 10.0, false) + 8.0;
+    if right > lx + 8.0 {
+        g.rect(lx, y + 12.0, right - lx, 1.0, theme::with_alpha(theme::border(), 0x99));
+    }
+}
+
+/// 누를 수 없는 섹션 머리(예약) — 아이콘 · 이름 · 오른쪽 개수.
+fn draw_plain_head(g: &mut gpu::GpuRenderer, icon: &str, label: &str, count: &str, x0: f32, right: f32, y: f32) {
+    g.queue_icon(icon, x0, y + (DEV_H - 13.0) / 2.0, 13.0, theme::text_mute());
+    g.draw_text(
+        x0 + 18.0,
+        y + 7.0,
+        label,
+        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
+    );
+    let cw = g.measure_chrome_text(count, 10.0, false);
+    g.draw_text(
+        right - cw,
+        y + 9.0,
+        count,
+        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+    );
+}
+
+/// 예약 한 줄 — `매 30m  보드 정리 브리프          12m 뒤`. 종류가 머리, 라벨(없으면
+/// 본문 첫 줄)이 몸, 오른쪽이 다음 발사까지.
+fn draw_schedule_row(g: &mut gpu::GpuRenderer, it: &kasa_mcp::ScheduleItem, x0: f32, right: f32, y: f32) {
+    let head = match it.kind.as_str() {
+        "loop" => format!("매 {}", dur_label(it.interval_sec)),
+        "timer" => "타이머".to_string(),
+        _ => "한 번".to_string(),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    let at = if it.next_ts > 0.0 { it.next_ts } else { it.at_ts };
+    let when = if !it.enabled {
+        "꺼짐".to_string()
+    } else if at <= 0.0 {
+        String::new()
+    } else {
+        let left = (at - now).max(0.0) as u64;
+        if left == 0 { "곧".to_string() } else { format!("{} 뒤", dur_label(left)) }
+    };
+    let ww = g.measure_chrome_text(&when, 10.0, false);
+    g.draw_text(
+        right - ww,
+        y + 6.0,
+        &when,
+        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
+    );
+    let tx = x0 + 12.0;
+    let text_right = right - ww - 8.0;
+    let head = fit_text(g, &head, (text_right - tx).max(0.0), 11.5, true);
+    g.draw_text(
+        tx,
+        y + 5.0,
+        &head,
+        gpu::DrawOpts { font_size: 11.5, color: theme::text(), bold: true, italic: false },
+    );
+    let hw = g.measure_chrome_text(&head, 11.5, true);
+    let body_src = if it.label.trim().is_empty() { it.text.as_str() } else { it.label.as_str() };
+    let body: String = body_src.split_whitespace().collect::<Vec<_>>().join(" ");
+    let bx = tx + hw + 8.0;
+    if !body.is_empty() && text_right - bx > 40.0 {
+        let s = fit_text(g, &body, text_right - bx, 10.5, false);
+        g.draw_text(
+            bx,
+            y + 6.0,
+            &s,
+            gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false },
+        );
+    }
+}
+
+/// 앱 이름을 짧게 — 설정의 「열기 앱」 목록이 쓴다.
+pub(crate) fn short_app_name(name: &str) -> &str {
+    match name {
+        "Visual Studio Code" => "VS Code",
+        "IntelliJ IDEA" => "IntelliJ",
+        "Sublime Text" => "Sublime",
+        other => other,
+    }
+}
+
+/// 초를 `30s`·`5m`·`1h 12m`·`2일` 로.
+fn dur_label(s: u64) -> String {
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m", s / 60)
+    } else if s < 86400 {
+        let (h, m) = (s / 3600, (s % 3600) / 60);
+        if m == 0 { format!("{h}h") } else { format!("{h}h {m}m") }
+    } else {
+        format!("{}일", s / 86400)
     }
 }
 
@@ -2562,100 +2586,8 @@ fn hit(cursor: (f32, f32), r: &(f32, f32, f32, f32)) -> bool {
     cursor.0 >= r.0 && cursor.0 <= r.0 + r.2 && cursor.1 >= r.1 && cursor.1 <= r.1 + r.3
 }
 
-/// 접히는 섹션 머리 — 셰브런 + 이름 + (개수 배지 | 상태 배지). 반환값은 클릭
-/// 판정 rect.
-#[allow(clippy::too_many_arguments)]
-fn draw_section(
-    g: &mut gpu::GpuRenderer,
-    cursor: (f32, f32),
-    label: &str,
-    count: Option<usize>,
-    badge: Option<&str>,
-    device: bool,
-    collapsed: bool,
-    x: f32,
-    w: f32,
-    y: f32,
-    bottom: f32,
-    top: f32,
-) -> (f32, f32, f32, f32) {
-    let r = (x, y, w, SEC_H);
-    if y + SEC_H <= top || y >= bottom {
-        return r;
-    }
-    let hov = hit(cursor, &r);
-    g.hover_pointer |= hov;
-    if hov {
-        g.rect(x, y, w, SEC_H, theme::surface_hover());
-    }
-    let x0 = x + 14.0;
-    g.queue_icon(
-        if collapsed { "chevron-right" } else { "chevron-down" },
-        x0 - 3.0,
-        y + 7.0,
-        12.0,
-        theme::text_mute(),
-    );
-    let right = x + w - 12.0;
-    // 오른쪽 표시(개수 알약·배지)의 자리를 먼저 빼고 라벨을 그 안에 맞춘다.
-    // 안 빼면 좁은 칼럼에서 「프로젝트 디렉터리」가 「현재 경로」 위로 올라탄다.
-    let tail_w = match (count, badge) {
-        (Some(n), _) => g.measure_chrome_text(&n.to_string(), 10.0, true) + 10.0,
-        (None, Some(b)) => g.measure_chrome_text(b, 10.0, false),
-        (None, None) => 0.0,
-    };
-    let label_x = x0 + if device { 33.0 } else { 13.0 };
-    if device {
-        g.queue_icon("monitor-smartphone", x0 + 13.0, y + 6.0, 15.0, theme::text_dim());
-    }
-    let label_max = (right - tail_w - 8.0 - label_x).max(0.0);
-    let label_fit = fit_text(g, label, label_max, 11.0, true);
-    g.draw_text(
-        label_x,
-        y + 7.0,
-        &label_fit,
-        gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: true, italic: false },
-    );
-    if let Some(n) = count {
-        let s = n.to_string();
-        let tw = g.measure_chrome_text(&s, 10.0, true);
-        pill_rect(g, right - tw - 10.0, y + 5.0, tw + 10.0, 16.0, theme::surface());
-        g.draw_text(
-            right - tw - 5.0,
-            y + 7.0,
-            &s,
-            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: true, italic: false },
-        );
-    } else if let Some(b) = badge {
-        let tw = g.measure_chrome_text(b, 10.0, false);
-        g.draw_text(
-            right - tw,
-            y + 7.0,
-            b,
-            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
-        );
-    }
-    r
-}
-
-/// Reuse pane identity colors so a device reads as one quiet, continuous card.
-fn draw_device_background(
-    g: &mut gpu::GpuRenderer, label: &str, x: f32, w: f32, y: f32, h: f32,
-) {
-    let tint = crate::render::machine_tint(label);
-    let bg = theme::lerp(theme::panel_bg(), tint, 0.12);
-    g.round_rect_fill(x + 6.0, y, (w - 12.0).max(0.0), h, 6.0, bg);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_device_section(
-    g: &mut gpu::GpuRenderer, cursor: (f32, f32), label: &str, count: Option<usize>,
-    collapsed: bool, x: f32, w: f32, y: f32, bottom: f32, top: f32,
-) -> (f32, f32, f32, f32) {
-    draw_section(g, cursor, if label.is_empty() { "이 기기" } else { label }, count,
-        None, true, collapsed, x, w, y, bottom, top)
-}
-
+/// Already-open mirrors belong to the viewer's normal pane list. Keep this
+/// browser for source panes that are not open here; do not list a viewer twice.
 /// 그 기계의 pane 전부 — 이쪽에 거울로 와 있는 것도 **제자리에** 선다. 거울 행은
 /// 그리는 쪽이 구멍(점선 빈 칸)으로 그려 「이쪽 방에서 보는 중」만 적는다: 몸통은
 /// 여전히 저 기계 것이라 목록에서 빼면 그 기계가 실제보다 비어 보인다(2026-09-14
@@ -2690,171 +2622,20 @@ fn draw_empty(g: &mut gpu::GpuRenderer, x0: f32, y: f32, top: f32, bottom: f32, 
     );
 }
 
-/// 이 학생 그룹에서 지금 보일 프로세스 행 수. 높이 계산과 그리기가 같은 판정을
-/// 봐야 목록이 제 높이만큼만 스크롤된다.
-fn visible_row_count(info: &state::InfoState, gp: &PaneGroup) -> usize {
-    let expanded = info.pane_expanded.contains(&gp.pane);
-    if !gp.tabs.is_empty() {
-        // 탭 줄 자신도 한 줄씩 차지한다.
-        return gp.tabs.len()
-            + gp
-                .tabs
-                .iter()
-                .map(|t| if expanded { t.rows.len() } else { t.rows.iter().filter(|r| !r.ports.is_empty()).count() })
-                .sum::<usize>();
-    }
-    if expanded {
-        gp.rows.len()
-    } else {
-        gp.rows.iter().filter(|r| !r.ports.is_empty()).count()
-    }
-}
-
-/// 이 pane 에 딸린 **모든** 프로세스 행 — 탭에 든 것까지. `rows` 와 `tabs` 는
-/// 배타적이라(`fold_tabs`) 이어 붙여도 두 번 세지 않는다.
-fn all_rows(gp: &PaneGroup) -> impl Iterator<Item = &ProcRow> {
-    gp.rows.iter().chain(gp.tabs.iter().flat_map(|t| t.rows.iter()))
-}
-
-/// 탭 아래에 붙일 프로세스 행. 접혀 있으면 포트를 쥔 줄만 남는다 — 그룹 접기와
-/// 똑같은 규칙이라, 탭이 있고 없고에 따라 접기가 다르게 동작하지 않는다.
+/// 학생(pane) 한 줄 — `[얼굴] 프라나  info 최적화        …/kasaterm ●`.
+/// 얼굴 옆이 이름, 그 다음이 「지금 뭘 하나」(보드의 작업 줄 > 세션 제목), 오른쪽 끝에
+/// 작업 경로와 상태 점. 학생 없는 셸 pane 은 얼굴 자리에 pane 번호 알약, 이름 자리에
+/// 「셸」, 제목 자리에 셸 이름. 활성 pane 은 왼쪽 띠로 한 번 더 표시한다 — 목록이 전
+/// pane 공유라 "내가 지금 있는 곳"이 안 보이면 매번 번호를 대조하게 된다.
 ///
-/// 남은 줄은 계보를 한 단계 밀어 탭 줄의 자식으로 만든다. 새로 생긴 조상 열
-/// (비트 0)은 **탭 줄** 자리라, 뒤에 형제 탭이 남았을 때만 세로선이 이어진다 —
-/// 무조건 세우면 마지막 탭 아래로 선이 흘러 「아직 더 있다」는 거짓말이 된다.
-fn tab_proc_rows(expanded: bool, t: &TabRow, last_tab: bool) -> Vec<ProcRow> {
-    let mut rows: Vec<ProcRow> = if expanded {
-        t.rows.clone()
-    } else {
-        let mut shown: Vec<ProcRow> =
-            t.rows.iter().filter(|r| !r.ports.is_empty()).cloned().collect();
-        // 중간 가지만 뽑아 두면 부모 없는 선이 허공에서 시작한다 — 다시 매긴다.
-        let n = shown.len();
-        for (i, r) in shown.iter_mut().enumerate() {
-            r.depth = 0;
-            r.spine = 0;
-            r.last = i + 1 == n;
-        }
-        shown
-    };
-    for r in &mut rows {
-        r.spine = (r.spine << 1) | u32::from(!last_tab);
-        r.depth = r.depth.saturating_add(1);
-    }
-    rows
-}
-
-/// 그 행들의 실제 목록. 접었으면 **포트를 쥔 줄만** 남는다 — 접는 건 목록을 줄이려는
-/// 것이지 서버가 떠 있다는 사실까지 감추려는 게 아니다.
-///
-/// 남은 줄은 계보선을 다시 매긴다. 원래 `depth`/`spine` 은 프로세스 나무에서의
-/// 자리라, 중간 가지만 뽑아 두면 부모 없는 선이 허공에서 시작한다.
-fn visible_rows(info: &state::InfoState, gp: &PaneGroup) -> Vec<ProcRow> {
-    // 탭이 있으면 프로세스는 **탭 줄 아래**에 붙는다 — 접힘 여부와 무관하게 그리는
-    // 쪽이 그 경로를 따로 돈다(`tab_proc_rows`). 여기서 또 내보내면 같은 프로세스가
-    // 두 번 그려진다.
-    if !gp.tabs.is_empty() {
-        return Vec::new();
-    }
-    if info.pane_expanded.contains(&gp.pane) {
-        return gp.rows.clone();
-    }
-    let mut shown: Vec<ProcRow> =
-        gp.rows.iter().filter(|r| !r.ports.is_empty()).cloned().collect();
-    let n = shown.len();
-    for (i, r) in shown.iter_mut().enumerate() {
-        r.depth = 0;
-        r.spine = 0;
-        r.last = i + 1 == n;
-    }
-    shown
-}
-
-/// 방의 접힘 열쇠. pane id(`%17`)와 절대 겹치지 않는 접두사를 쓴다 — 클릭 히트
-/// 목록(`group_rects`)이 방 머리와 학생 머리를 한 벌로 담아, 열쇠만 보고 어느
-/// 쪽인지 갈라야 하기 때문이다(기본값이 서로 반대라 집합도 갈라져 있다).
-fn win_key(idx: usize) -> String {
-    format!("win:{idx}")
-}
-
-/// 방(윈도우) 머리 — 이름 붙은 구획선. pane 머리를 들여쓰지 않고 이 줄로만
-/// 나누는 건, 좁은 칼럼에서 한 단계를 더 들여쓰면 정작 프로세스 트리의
-/// 계보선이 설 자리가 없어지기 때문이다.
-#[allow(clippy::too_many_arguments)]
-fn draw_window_head(
-    g: &mut gpu::GpuRenderer,
-    cursor: (f32, f32),
-    gp: &PaneGroup,
-    collapsed: bool,
-    panes: usize,
-    x: f32,
-    w: f32,
-    x0: f32,
-    right: f32,
-    y: f32,
-) {
-    // 위 `WIN_PAD` 는 앞 방과의 여백이다 — 지나서 그린다. 아래 오프셋들이 종전 그대로
-    // 동작하도록 y 를 여기서 한 번만 옮긴다.
-    let y = y + WIN_PAD;
-    let hh = WIN_H - WIN_PAD;
-    // 옅은 밴드. 방 경계는 pane 경계보다 **세게** 읽혀야 하는데, 종전엔 배경도 여백도
-    // 없이 낮은 글자 한 줄뿐이라 그 반대였다.
-    round_rect(g, x, y, w, hh, theme::radius_sm(), theme::with_alpha(theme::surface(), 0x80));
-    if hit(cursor, &(x, y, w, hh)) {
-        g.rect(x, y, w, hh, theme::surface_hover());
-    }
-    g.queue_icon(
-        if collapsed { "chevron-right" } else { "chevron-down" },
-        x0 - 3.0,
-        y + 5.0,
-        11.0,
-        theme::text_mute(),
-    );
-    let n = format!("pane {panes}");
-    let nw = g.measure_chrome_text(&n, 9.5, false);
-    g.draw_text(
-        right - nw,
-        y + 5.0,
-        &n,
-        gpu::DrawOpts {
-            font_size: 9.5,
-            color: theme::with_alpha(theme::text_mute(), 0xA0),
-            bold: false,
-            italic: false,
-        },
-    );
-    let tx = x0 + 12.0;
-    // 번호를 앞에 세운다 — 방 이름은 작업 폴더에서 오는데 두 방이 같은 폴더면
-    // 이름만으론 구분이 안 된다(실측: 방 셋이 전부 `Desktop`). 폭이 모자라 뒤가
-    // 잘려도 번호는 남는다.
-    let name = if gp.window_label.is_empty() {
-        format!("방 {}", gp.window + 1)
-    } else {
-        format!("방 {} · {}", gp.window + 1, gp.window_label)
-    };
-    // 별도 창으로 나간 방은 그 사실을 머리에 적는다 — 이 pane 들은 메인 화면에
-    // 없으니, 표시가 없으면 목록에만 있고 어디에도 안 보이는 유령으로 읽힌다.
-    let name = fit_text(g, &name, (right - nw - 8.0 - tx).max(0.0), 10.5, true);
-    g.draw_text(
-        tx,
-        y + 4.0,
-        &name,
-        gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: true, italic: false },
-    );
-}
-
-/// pane 그룹 머리 — `▾ ● %17 프라나  info 최적화  ~/Desktop/tmuxify  zsh 75941  [5]`.
-/// 점 색은 그
-/// pane 의 학생 색으로, 터미널 헤더·테두리가 이미 쓰는 색과 같다(같은 pane 은
-/// 어디서든 같은 색). 활성 pane 은 왼쪽 띠로 한 번 더 표시한다 — 목록이 전 pane
-/// 공유라 "내가 지금 있는 곳"이 안 보이면 매번 번호를 대조하게 된다.
+/// 셸 pid·프로세스 수는 걷었다(2026-09-14) — 여기서 짚을 프로세스 목록이 없어졌다.
 #[allow(clippy::too_many_arguments)]
 fn draw_group_head(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     gp: &PaneGroup,
-    collapsed: bool,
     task: Option<&TaskLine>,
+    dot: [u8; 4],
     x: f32,
     w: f32,
     x0: f32,
@@ -2872,45 +2653,35 @@ fn draw_group_head(
     if gp.active {
         g.rect(x, y + 2.0, 2.0, GROUP_H - 4.0, theme::accent());
     }
-    g.queue_icon(
-        if gp.machine.is_some() && gp.rows.is_empty() && gp.tabs.is_empty() {
-            "external-link"
-        } else if collapsed { "chevron-right" } else { "chevron-down" },
-        x0 - 3.0,
-        y + 6.0,
-        12.0,
-        theme::text_mute(),
-    );
+    // 오른쪽 끝 상태 점이 자리를 먼저 잡는다 — 이 줄에서 제일 작은 것이 제일 먼저
+    // 밀려나면 안 된다.
+    const DOT: f32 = 7.0;
+    circle_rect(g, right - DOT, y + (GROUP_H - DOT) / 2.0, DOT, dot);
+    let mut text_right = right - DOT - 8.0;
     // 배정된 학생이면 색 점이 아니라 그 얼굴을 놓는다 — 색만으로는 어느 학생인지
     // 외워야 알고, 픽셀 실루엣에서는 점이 네모로 굳어 상태 표시처럼 보였다.
-    // 얼굴이 없는 pane(학생 미배정)만 원래대로 색 점.
-    //
-    // 얼굴은 점보다 넓어서 이름 시작점도 같이 민다 — 고정 오프셋을 쓰면 chevron
-    // 과 이름 양쪽에 얼굴이 겹쳐 붙는다.
-    let tint = theme::character_accent_any(&gp.label).unwrap_or_else(theme::text_mute);
     const FACE: f32 = GROUP_H - 6.0;
-    let has_face = crate::render::draw_student_face(g, &gp.label, x0 + 11.0, y + 3.0, FACE);
-    if !has_face {
-        circle_rect(g, x0 + 12.0, y + 9.0, 6.0, tint);
-    }
-    // 개수 배지가 오른쪽 끝을 먼저 잡는다 — 접힌 그룹에서 유일한 내용물이라
-    // 이름에 밀려 사라지면 안 된다.
-    // 탭이 있는 그룹은 프로세스가 탭 쪽으로 넘어가 `rows` 가 비어 있다(`fold_tabs`).
-    // 그대로 세면 학생 셋이 도는 pane 이 `0` 으로 뜬다.
-    let n = if gp.machine.is_some() && gp.rows.is_empty() && gp.tabs.is_empty() {
-        String::new() // The remote board does not report an OS process count.
+    let fx = x0 + 2.0;
+    let shell_pane = gp.label.is_empty();
+    let tx = if shell_pane {
+        let id = fit_text(g, &gp.pane, 44.0, 9.0, false);
+        let iw = g.measure_chrome_text(&id, 9.0, false);
+        pill_rect(g, fx, y + 4.0, iw + 8.0, GROUP_H - 8.0, theme::surface());
+        g.draw_text(
+            fx + 4.0,
+            y + 6.5,
+            &id,
+            gpu::DrawOpts { font_size: 9.0, color: theme::text_mute(), bold: false, italic: false },
+        );
+        fx + iw + 8.0 + 8.0
     } else {
-        all_rows(gp).count().to_string()
+        let has_face = crate::render::draw_student_face(g, &gp.label, fx, y + 3.0, FACE);
+        if !has_face {
+            let tint = theme::character_accent_any(&gp.label).unwrap_or_else(theme::text_mute);
+            circle_rect(g, fx + 6.0, y + 9.0, 6.0, tint);
+        }
+        fx + FACE + 6.0
     };
-    let nw = g.measure_chrome_text(&n, 10.0, true);
-    g.draw_text(
-        right - nw,
-        y + 6.0,
-        &n,
-        gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: true, italic: false },
-    );
-    let tx = x0 + if has_face { 15.0 + FACE } else { 24.0 };
-    let mut text_right = right - nw;
     // Execution location is identity, not optional shell detail: reserve it
     // before fitting long student/task names so a narrow Info column keeps it.
     if let Some(machine) = gp.machine.as_deref().filter(|m| !m.is_empty()) {
@@ -2927,61 +2698,36 @@ fn draw_group_head(
             text_right = bx - 4.0;
         }
     }
-    let mut budget = (text_right - 8.0 - tx).max(0.0);
+    let mut budget = (text_right - tx).max(0.0);
     // 글자는 **세션 이름**이다 — 「누가」는 얼굴이 이미 말하고, 여러 pane 에서 찾는
     // 단서는 「무엇을」 쪽이다(2026-09-14 지시 「캐릭터 이름은 빼고 세션 이름」).
     // 이름 없는 새 세션만 학생 이름으로 채운다 — 빈 줄보다는 낫다.
-    let name = if gp.session.is_empty() { gp.label.as_str() } else { gp.session.as_str() };
-    let title = if name.is_empty() {
-        gp.pane.clone()
+    let name = if shell_pane {
+        "셸".to_string()
+    } else if !gp.session.is_empty() {
+        gp.session.clone()
     } else {
-        format!("{} {}", gp.pane, name)
+        gp.label.clone()
     };
-    let title = fit_text(g, &title, budget, 12.0, true);
-    let tw = g.measure_chrome_text(&title, 12.0, true);
+    let name = fit_text(g, &name, budget, 12.0, true);
+    let nw = g.measure_chrome_text(&name, 12.0, true);
     g.draw_text(
         tx,
         y + 4.0,
-        &title,
+        &name,
         gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
     );
-    // 학생 이름 다음은 **세션 제목**이다. 학생은 "누가"고 제목은 "무엇을" 이라,
-    // pane 이 여럿일 때 정작 찾는 단서는 이쪽이다 — 그래서 셸·pid 보다 폭을
-    // 먼저 가져간다(폭이 모자라면 밀려나는 건 셸·pid 쪽).
-    budget -= tw + 8.0;
-    let mut cx = tx + tw + 8.0;
-    // The remote execution device has a reserved badge above; no local shell PID
-    // exists for that pane, and the machine name must not be repeated here.
-    let shell = match gp.machine.as_deref() {
-        Some(_) => String::new(),
-        None => format!("{} {}", gp.shell, gp.shell_pid),
-    };
-    // The section heading already names the device.
-    let shell_wide = shell.clone();
-    // 다만 **통째로** 밀어내진 않는다 — 긴 제목 하나가 폭을 다 먹어 pid 가 사라지면
-    // 프로세스를 짚을 열쇠가 없어진다(실측: 30자 제목이 `zsh 35776` 을 지웠다).
-    // 셸 몫을 떼고 남는 만큼만 제목에 준다. 둘 다 못 담을 좁은 칼럼에서만 제목이
-    // 전부 가져간다 — 그때는 pid 보다 "무엇을" 이 먼저다.
-    let shell_w = g.measure_chrome_text(&shell, 10.0, false) + 8.0;
-    // 작업 경로도 몫을 떼지만 **끝 조각만큼만** 뗀다. 전체 경로 폭으로 예약하면
-    // 깊은 경로 하나가 제목을 통째로 밀어내는데, 정작 pane 을 고르는 단서는
-    // 제목 쪽이다.
+    budget -= nw + 8.0;
+    let cx = tx + nw + 8.0;
+    // 작업 경로는 오른쪽 끝에 붙는다(거노 2026-08-20 「인포에 어느 경로에서 켰는지
+    // 나오게 해줘」). 제목이 폭을 다 먹지 않도록 **끝 조각만큼** 몫을 먼저 뗀다 —
+    // 전체 경로 폭으로 예약하면 깊은 경로 하나가 제목을 통째로 밀어내는데, 정작
+    // pane 을 고르는 단서는 제목 쪽이다.
     let sep = std::path::MAIN_SEPARATOR;
     let tail = gp.cwd.rsplit(sep).next().unwrap_or_default();
     let tail_w =
         if gp.cwd.is_empty() { 0.0 } else { g.measure_chrome_text(tail, 10.0, false) + 8.0 };
-    // 좁아질 때 물러나는 순서는 **경로 → 셸·pid → 세션 제목 → pane 이름** 이다.
-    // 경로가 맨 먼저인 건 전체 → 끝 조각으로 줄어들 여지가 있어 사라지기 전에
-    // 한 번 작아지고, 방이 둘 이상이면 방 머리가 작업 폴더 이름을 대신 말해 주기
-    // 때문이다. 셸 pid 가 그다음인 건 여기 말고는 나오는 데가 없어서다 — 셸
-    // 자신은 프로세스 목록에서 빠진다(`build_rows`).
-    let title_budget = if budget > shell_w + tail_w + 60.0 {
-        budget - shell_w - tail_w
-    } else if budget > shell_w + 60.0 {
-        budget - shell_w
-    } else {
-        budget
-    };
+    let title_budget = if budget > tail_w + 60.0 { budget - tail_w } else { budget };
     // 작업 한 줄 — 「지금 뭘 하나」. 세션 이름은 위 제목 자리로 올라갔으니 여기서
     // 되풀이하지 않는다(2026-09-08 지시로 작업 줄이 제목보다 앞섰고, 09-14 에 제목이
     // 세션 이름이 되면서 둘이 한 줄로 합쳐졌다).
@@ -2990,6 +2736,7 @@ fn draw_group_head(
             t.label.clone(),
             if t.attention { theme::attention() } else { theme::text_dim() },
         ),
+        None if shell_pane => (gp.shell.clone(), theme::text_dim()),
         None => (String::new(), theme::text_dim()),
     };
     if !line.is_empty() && title_budget > 40.0 {
@@ -3001,20 +2748,14 @@ fn draw_group_head(
             &s,
             gpu::DrawOpts { font_size: 10.5, color: line_col, bold: false, italic: false },
         );
-        cx += sw + 8.0;
         budget -= sw + 8.0;
     }
-    // 그 다음이 **작업 경로**다(거노 2026-08-20 「인포에 어느 경로에서 켰는지
-    // 나오게 해줘」). 폭이 모자라면 말줄임으로 꼬리를 자르지 않고 `…/tmuxify` 로
-    // **앞을** 줄인다 — 경로는 구분되는 자리가 뒤쪽이라, 앞에서 채우고 꼬리를
-    // 자르면 남는 게 `~/Desk…` 처럼 어느 pane 이든 같은 글자가 된다.
-    // 재는 폭은 남은 폭 전부가 아니라 **셸 몫을 뗀 나머지**다. 그러지 않으면 깊은
-    // 경로 하나가 `zsh 35776` 을 지우는데, 그건 긴 제목이 pid 를 지웠던 위의 실측과
-    // 같은 사고다 — 셸 pid 는 여기 말고 나오는 데가 없다.
-    let room = if budget > shell_w + 40.0 { budget - shell_w } else { budget };
-    if !gp.cwd.is_empty() && room > 40.0 {
+    // 경로. 폭이 모자라면 말줄임으로 꼬리를 자르지 않고 `…/tmuxify` 로 **앞을**
+    // 줄인다 — 경로는 구분되는 자리가 뒤쪽이라, 꼬리를 자르면 남는 게 `~/Desk…`
+    // 처럼 어느 pane 이든 같은 글자가 된다.
+    if !gp.cwd.is_empty() && budget > 40.0 {
         let full = g.measure_chrome_text(&gp.cwd, 10.0, false);
-        let text = if full + 8.0 <= room || tail == gp.cwd {
+        let text = if full + 8.0 <= budget || tail == gp.cwd {
             gp.cwd.clone()
         } else {
             format!("…{sep}{tail}")
@@ -3022,49 +2763,18 @@ fn draw_group_head(
         let pw = g.measure_chrome_text(&text, 10.0, false);
         // 끝 조각조차 안 들어가면 아무것도 안 그린다 — 잘린 경로 한 조각은
         // 폭만 먹고 알려주는 게 없다.
-        if pw + 8.0 <= room {
+        if pw + 8.0 <= budget {
             g.draw_text(
-                cx,
+                text_right - pw,
                 y + 6.0,
                 &text,
-                gpu::DrawOpts {
-                    font_size: 10.0,
-                    color: theme::text_mute(),
-                    bold: false,
-                    italic: false,
-                },
+                gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
             );
-            cx += pw + 8.0;
-            budget -= pw + 8.0;
         }
-    }
-    // 셸과 pid 는 남는 폭에만 — 그룹을 가리키는 이름이 잘리는 것보다 낫다.
-    if budget > 40.0 {
-        // 기계 이름까지 온전히 들어갈 때만 넓은 쪽을 쓴다. 예산을 넘겨 놓고 자르면
-        // 잘려 나가는 것이 뒤에 있는 pid 라, 위 주석의 순서가 뒤집힌다.
-        let wide_w = g.measure_chrome_text(&shell_wide, 10.0, false);
-        let shell = if wide_w <= budget { shell_wide.as_str() } else { shell.as_str() };
-        let s = fit_text(g, shell, budget, 10.0, false);
-        g.draw_text(
-            cx,
-            y + 6.0,
-            &s,
-            gpu::DrawOpts {
-                font_size: 10.0,
-                // 기계 표시는 흐리면 안 보이는 게 낫지 않다 — pane 헤더 칩과 같은 언어.
-                color: if gp.machine.is_some() {
-                    theme::accent()
-                } else {
-                    theme::with_alpha(theme::text_mute(), 0xA0)
-                },
-                bold: gp.machine.is_some(),
-                italic: false,
-            },
-        );
     }
 }
 
-/// 탭 한 줄 — `├─ ● 미도리  세션 제목            zsh 76016`.
+/// 탭 한 줄 — `├─ ● 미도리  세션 제목`.
 ///
 /// pane 하나가 탭을 여럿 품으면 그 셸들은 **한 자리를 번갈아 쓴다**. 평면으로
 /// 늘어놓으면 pane 이 여럿인 것처럼 보이므로(실측: 탭 셋짜리 pane 이 `pane 3`
@@ -3119,32 +2829,9 @@ fn draw_tab_row(
     }
     let nx = cx + if has_face { FACE + 4.0 } else { 15.0 };
 
-    // 셸·pid 가 오른쪽 끝을 먼저 잡는다. 탭은 바깥 pane 과 pid 가 달라서, 여기
-    // 말고는 그 번호가 나오는 데가 없다.
-    let mut rx = right;
-    let shell = if t.shell.is_empty() {
-        String::new()
-    } else {
-        format!("{} {}", t.shell, t.shell_pid)
-    };
-    if !shell.is_empty() {
-        let sw = g.measure_chrome_text(&shell, 10.0, false);
-        if rx - sw - 8.0 - nx > 48.0 {
-            rx -= sw;
-            g.draw_text(
-                rx,
-                y + 6.0,
-                &shell,
-                gpu::DrawOpts {
-                    font_size: 10.0,
-                    color: theme::with_alpha(theme::text_mute(), 0xA0),
-                    bold: false,
-                    italic: false,
-                },
-            );
-            rx -= 8.0;
-        }
-    }
+    // 오른쪽은 학생 줄의 상태 점 자리만큼 비운다 — 탭 줄에는 점이 없지만 글자 끝이
+    // 맞아야 한 목록으로 읽힌다.
+    let rx = right - 15.0;
 
     // 이름은 학생, 없으면 탭 번호. **pane id 를 쓰지 않는다** — 첫 탭은 id 가 바깥
     // pane 과 같아서(leaf id == 첫 탭 pid) `%0` 이 두 줄 연속으로 떴고, 그게 중복
@@ -3189,178 +2876,6 @@ fn draw_tab_row(
             y + 6.0,
             &s,
             gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
-        );
-    }
-}
-
-/// 프로세스 한 줄 — `├─ mcp playwright  --cdp-endpoint …    :9222  2% · 90 MB  pid`.
-/// 행에 커서가 있으면 오른쪽 끝에 종료(×) 버튼이 들어선다. 버튼을 상시 노출하면
-/// 스크롤하다 잘못 누르기 쉽다.
-///
-/// 폭이 모자랄 때 **이름이 마지막까지 살아남는다**. 예전엔 pid·수치가 오른쪽부터
-/// 자리를 먼저 잡고 남은 폭에 이름을 우겨넣어, 좁은 칼럼에서 이름이 통째로 잘려
-/// 점만 남았다(거노: "클로드 밑으로 초록점밖에 안 보인다"). 지금은 이름 몫을 먼저
-/// 떼고, 곁다리는 남는 폭이 있을 때만 그린다.
-#[allow(clippy::too_many_arguments)]
-fn draw_proc_row(
-    g: &mut gpu::GpuRenderer,
-    cursor: (f32, f32),
-    info: &mut state::InfoState,
-    p: &ProcRow,
-    x: f32,
-    w: f32,
-    x0: f32,
-    right: f32,
-    y: f32,
-) {
-    let row = (x, y, w, ROW_H);
-    let hov = hit(cursor, &row);
-    g.hover_pointer |= hov;
-    if hov {
-        g.rect(x, y, w, ROW_H, theme::surface_hover());
-    }
-    // ── 계보선 ── 조상 열의 세로줄 + 자기 tick(├ / └). 선이 있으면 어느 것이
-    // 누구의 자식인지가 들여쓰기 폭을 세지 않아도 읽힌다.
-    let line = theme::with_alpha(theme::border(), 0xDD);
-    let depth = p.depth as f32;
-    for d in 0..u32::from(p.depth) {
-        if p.spine & (1u32 << d) != 0 {
-            g.rect(x0 + d as f32 * IND + 2.0, y, 1.0, ROW_H, line);
-        }
-    }
-    let tick = x0 + depth * IND + 2.0;
-    let mid = (y + ROW_H * 0.5).round();
-    g.rect(tick, y, 1.0, if p.last { mid - y } else { ROW_H }, line);
-    g.rect(tick, mid, 6.0, 1.0, line);
-
-    let cx = x0 + depth * IND + 12.0;
-    // 이름 몫부터 확보한다. 이 값 아래로는 곁다리를 그리지 않는다.
-    const NAME_MIN: f32 = 64.0;
-    let mut rx = right;
-    if hov {
-        let br = (rx - 16.0, y + 3.0, 16.0, 16.0);
-        let bhov = hit(cursor, &br);
-        g.hover_pointer |= bhov;
-        if bhov {
-            round_rect(g, br.0, br.1, br.2, br.3, theme::radius_sm(), theme::with_alpha(theme::danger(), 0x33));
-        }
-        g.queue_icon(
-            "x",
-            br.0 + 3.0,
-            br.1 + 3.0,
-            10.0,
-            if bhov { theme::danger() } else { theme::text_mute() },
-        );
-        info.kill_rects.push((p.pid, br));
-        rx = br.0 - 6.0;
-    }
-    let room = |want: f32, rx: &mut f32| -> Option<f32> {
-        (*rx - want - 8.0 - cx >= NAME_MIN).then(|| {
-            *rx -= want + 8.0;
-            *rx
-        })
-    };
-    // 오른쪽부터 pid → 자원 수치 → 포트 칩 순으로 자리를 잡는다. pid 를 끝에
-    // 고정해야 행마다 같은 열에 서서 눈이 흔들리지 않는다. 폭이 모자라면 자리를
-    // 못 얻은 것부터 조용히 빠지고, 이름은 `NAME_MIN` 덕에 끝까지 남는다.
-    //
-    // pid 는 수치가 아니라 손잡이라 한 단계 더 물러나 있어야 한다 — 같은 밝기면
-    // 바로 왼쪽 메모리 값에 붙어 `2 MB 25655` 가 한 덩어리로 읽힌다.
-    let pid_s = if p.folded > 0 {
-        format!("{} +{}", p.pid, p.folded)
-    } else {
-        p.pid.to_string()
-    };
-    let pid_w = g.measure_chrome_text(&pid_s, 10.0, false);
-    if let Some(px) = room(pid_w, &mut rx) {
-        g.draw_text(
-            px,
-            y + 6.0,
-            &pid_s,
-            gpu::DrawOpts {
-                font_size: 10.0,
-                color: theme::with_alpha(theme::text_mute(), 0xA0),
-                bold: false,
-                italic: false,
-            },
-        );
-    }
-    if p.mem_kb > 0 {
-        let m = format!("{:.0}% · {}", p.cpu, p.mem_label());
-        let mw = g.measure_chrome_text(&m, 10.0, false);
-        if let Some(px) = room(mw, &mut rx) {
-            g.draw_text(
-                px,
-                y + 6.0,
-                &m,
-                gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
-            );
-        }
-    }
-    // 포트를 쥔 프로세스는 여기서 바로 읽혀야 한다 — 아래 포트 섹션과 pid 를
-    // 대조하게 만들지 않는다.
-    if !p.ports.is_empty() {
-        let chip = p.ports.iter().map(|c| format!(":{c}")).collect::<Vec<_>>().join(" ");
-        let cw = g.measure_chrome_text(&chip, 10.0, true);
-        if let Some(px) = room(cw, &mut rx) {
-            g.draw_text(
-                px,
-                y + 6.0,
-                &chip,
-                gpu::DrawOpts { font_size: 10.0, color: theme::accent(), bold: true, italic: false },
-            );
-        }
-    }
-
-    let avail = (rx - cx).max(0.0);
-    // `mcp exa` 는 앞머리가 종류, 뒤가 정체다 — 앞을 흐리게 두면 서버 이름이
-    // 먼저 눈에 들어온다.
-    let (head, tail) = match p.kind {
-        ProcKind::Mcp => p.name.split_once(' ').unwrap_or(("", p.name.as_str())),
-        _ => ("", p.name.as_str()),
-    };
-    let mut nx = cx;
-    // claude 본체는 로고를 앞에 단다. 이름만으로도 읽히지만 목록에서 계보의
-    // 기점이라 — 그 아래 npm·node·Bash 가 전부 이 프로세스의 자손이다 — 눈이
-    // 한 번에 찾아야 할 자리다. 색(accent)만으로는 흑백에 가까운 테마에서 약하다.
-    if matches!(p.kind, ProcKind::Claude | ProcKind::Codex) && avail > 40.0 {
-        g.queue_icon("claude", nx, y + 5.0, 12.0, theme::accent());
-        nx += 16.0;
-    }
-    if !head.is_empty() {
-        let hw = g.measure_chrome_text(head, 10.5, false);
-        if avail > hw + 40.0 {
-            g.draw_text(
-                nx,
-                y + 6.0,
-                head,
-                gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
-            );
-            nx += hw + 5.0;
-        }
-    }
-    let name_col = match p.kind {
-        ProcKind::Claude | ProcKind::Codex => theme::accent(),
-        ProcKind::Tool => theme::text_dim(),
-        _ => theme::text(),
-    };
-    let name = fit_text(g, tail, (rx - nx).max(0.0), 12.0, true);
-    let name_w = g.measure_chrome_text(&name, 12.0, true);
-    g.draw_text(
-        nx,
-        y + 4.0,
-        &name,
-        gpu::DrawOpts { font_size: 12.0, color: name_col, bold: true, italic: false },
-    );
-    // 부제는 오른쪽 수치와 한 칸 띄운다 — 말줄임으로 끝난 부제가 수치에 바로
-    // 붙으면 `http:…0%` 처럼 한 낱말로 읽힌다.
-    if !p.rest.is_empty() && rx - nx - name_w > 48.0 {
-        let rest = fit_text(g, &p.rest, rx - nx - name_w - 14.0, 11.0, false);
-        g.draw_text(
-            nx + name_w + 6.0,
-            y + 5.0,
-            &rest,
-            gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
         );
     }
 }
@@ -3727,27 +3242,23 @@ fn draw_pane_menu(
 }
 
 /// 「다른 기계」 밑 방 머리줄 높이 — 학생 줄(ROW_H)보다 낮은 흐린 한 줄.
-const MACHINE_HEAD_H: f32 = 16.0;
-
-/// 「다른 기계」 밑의 방 머리줄 — 그 기계 사이드바 규칙의 방 이름을 흐리게.
-fn draw_machine_room_head(g: &mut gpu::GpuRenderer, room: &str, x0: f32, y: f32) {
-    g.draw_text(
-        x0 + IND,
-        y + 2.0,
-        room,
-        gpu::DrawOpts {
-            font_size: 10.0,
-            color: theme::text_dim(),
-            bold: false,
-            italic: false,
-        },
-    );
-}
-
 /// 「다른 기계」 밑 pane 한 줄 — 얼굴·이름, 하던 일 제목(남는 폭에 맞춰 자름), 오른쪽에
 /// 기다림(경고색) 또는 「거울」(이쪽에 이미 있는 것) 표시. 누르면 거울을 연다/간다.
 /// 마우스가 올라가면 맨 오른쪽에 × — 그 기계의 pane 을 닫는 자리(2026-09-07 지시
 /// 「맥북에서도 맥미니 pane 닫을 수 있게」). 반환은 그 × 의 rect(호버 때만).
+/// 다른 기계의 경로는 이쪽 홈으로 못 줄이니 `/Users/<이름>/`·`/home/<이름>/` 꼴만 `~` 로 접는다.
+fn remote_tilde(p: &str) -> String {
+    for root in ["/Users/", "/home/"] {
+        if let Some(rest) = p.strip_prefix(root) {
+            return match rest.split_once('/') {
+                Some((_, tail)) if !tail.is_empty() => format!("~/{tail}"),
+                _ => "~".to_string(),
+            };
+        }
+    }
+    p.to_string()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_machine_pane_row(
     g: &mut gpu::GpuRenderer,
@@ -3763,18 +3274,24 @@ fn draw_machine_pane_row(
         pane: r.remote_id.clone(),
         label: r.name.clone(),
         session: r.title.clone(),
-        cwd: r.remote_cwd.clone(),
+        cwd: remote_tilde(&r.remote_cwd),
         // An empty machine marks remote data without repeating the section name.
         machine: Some(String::new()),
         ..Default::default()
     };
     let task = if r.closed { Some(TaskLine {
-        label: "닫힘 · 원본 기기에서 되살리기".into(), attention: false,
+        label: "닫힘 · 원본 기기에서 되살리기".into(), attention: false, working: false,
     }) } else { waiting.then(|| TaskLine {
         label: if r.title.is_empty() { "기다림".into() } else { format!("기다림 · {}", r.title) },
         attention: true,
+        working: false,
     }) };
-    draw_group_head(g, cursor, &group, true, task.as_ref(), x, w, x0, content_right, y);
+    let dot = if r.closed {
+        theme::with_alpha(theme::text_mute(), 0x60)
+    } else {
+        row_dot(waiting, matches!(r.status.as_str(), "working" | "building" | "compacting" | "thinking"))
+    };
+    draw_group_head(g, cursor, &group, task.as_ref(), dot, x, w, x0, content_right, y);
     if let Some(cr) = close_rect {
         g.hover_pointer = true;
         let on_x = hit(cursor, &cr);
@@ -3939,115 +3456,6 @@ fn draw_machine_menu(
             info.machines_col.btn_rects.push((act, r));
         }
     }
-}
-
-fn draw_row_menu(
-    g: &mut gpu::GpuRenderer,
-    cursor: (f32, f32),
-    info: &mut state::InfoState,
-    x: f32,
-    w: f32,
-    top: f32,
-    bottom: f32,
-) {
-    info.ctx_menu_rects.clear();
-    let Some((rawx, rawy, _)) = info.ctx_menu else { return };
-    use state::InfoMenuAction as A;
-    // (액션, 라벨, 위험, 앞에 구분선)
-    let items: Vec<(A, &str, bool, bool)> = vec![
-        (A::Terminate, "종료 (SIGTERM)", false, false),
-        (A::ForceKill, "강제 종료 (SIGKILL)", true, false),
-        (A::CopyPid, "PID 복사", false, true),
-        (A::CopyCmd, "명령 복사", false, false),
-    ];
-    let mih = 28.0_f32;
-    let sep = 7.0_f32;
-    let pad = 6.0_f32;
-    let widest = items
-        .iter()
-        .map(|(_, l, _, _)| g.measure_chrome_text(l, 13.0, false))
-        .fold(0.0_f32, f32::max);
-    let menu_w = (widest + 32.0).min(w - 8.0);
-    let nsep = items.iter().filter(|(_, _, _, s)| *s).count() as f32;
-    let menu_h = pad * 2.0 + items.len() as f32 * mih + nsep * sep;
-    let mx = rawx.min(x + w - menu_w - 4.0).max(x + 4.0);
-    let my = rawy.min(bottom - menu_h - 4.0).max(top);
-    panel_rect_outlined(g, mx, my, menu_w, menu_h, theme::radius_md(), theme::surface());
-    let bc = theme::with_alpha(theme::border(), 0xCC);
-    g.rect(mx, my, menu_w, 1.0, bc);
-    g.rect(mx, my + menu_h - 1.0, menu_w, 1.0, bc);
-    g.rect(mx, my, 1.0, menu_h, bc);
-    g.rect(mx + menu_w - 1.0, my, 1.0, menu_h, bc);
-    let mut iy = my + pad;
-    for (action, label, danger, sep_before) in items {
-        if sep_before {
-            g.rect(mx + pad, iy + sep * 0.5, menu_w - pad * 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
-            iy += sep;
-        }
-        let r = (mx + 4.0, iy, menu_w - 8.0, mih);
-        if hit(cursor, &r) {
-            crate::hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
-        }
-        g.draw_text(
-            r.0 + 12.0,
-            r.1 + (mih - 13.0) / 2.0,
-            label,
-            gpu::DrawOpts {
-                font_size: 13.0,
-                color: if danger { theme::danger() } else { theme::text() },
-                bold: false,
-                italic: false,
-            },
-        );
-        info.ctx_menu_rects.push((action, r));
-        iy += mih;
-    }
-}
-
-/// `Visual Studio Code` 처럼 긴 앱 이름을 버튼에 들어갈 길이로. 목록에 없는
-/// 이름은 그대로 두고, 안 들어가면 호출부가 아이콘만 그린다.
-pub(crate) fn short_app_name(name: &str) -> &str {
-    match name {
-        "Visual Studio Code" => "VS Code",
-        "IntelliJ IDEA" => "IntelliJ",
-        "Sublime Text" => "Sublime",
-        other => other,
-    }
-}
-
-/// 경로를 최대 `max_lines` 줄로 접는다. 넘치면 **앞을** 버리고 "…" 를 붙인다 —
-/// 경로에서 알아야 하는 건 프로젝트 이름이 있는 꼬리 쪽이다.
-fn wrap_path(g: &mut gpu::GpuRenderer, s: &str, avail: f32, max_lines: usize) -> Vec<String> {
-    if avail <= 0.0 {
-        return Vec::new();
-    }
-    let mut lines: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    // 글자 폭을 누적해 끊는다. 한 글자 늘릴 때마다 줄 전체를 다시 재면 길이의
-    // 제곱만큼 글리프를 뒤지게 된다 — `fit_text` 와 같은 이유로 O(n) 로 둔다.
-    let mut w = 0.0;
-    let mut buf = [0u8; 4];
-    for ch in s.chars() {
-        let cw = g.measure_chrome_text(ch.encode_utf8(&mut buf), 11.0, false);
-        if w + cw > avail {
-            if cur.is_empty() {
-                break; // 한 글자도 안 들어가는 폭 — 그릴 게 없다.
-            }
-            lines.push(std::mem::take(&mut cur));
-            w = 0.0;
-        }
-        cur.push(ch);
-        w += cw;
-    }
-    if !cur.is_empty() {
-        lines.push(cur);
-    }
-    if lines.len() > max_lines {
-        let tail = lines.split_off(lines.len() - max_lines);
-        lines = tail;
-        lines[0] = format!("…{}", lines[0]);
-    }
-    lines
 }
 
 /// 주어진 폭에 들어가도록 꼬리를 자르고 말줄임을 붙인다. 폭이 아예 부족하면 빈

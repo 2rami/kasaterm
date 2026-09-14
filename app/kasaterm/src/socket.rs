@@ -5167,6 +5167,9 @@ pub fn import_theme(zip_path: &std::path::Path) -> std::io::Result<String> {
     import_theme_into(&root, zip_path)
 }
 
+// 이사가 테마를 실어 나르던 자리에서 쓰였다 — 세션 파일만 옮기기로 하며(2026-09-14)
+// 부르는 곳이 없어졌다. 테마 내보내기 자체는 성립하는 기능이라 남긴다.
+#[allow(dead_code)]
 /// 테마 팩 하나를 zip 바이트로 싼다 — 이사(migrate)가 도착지에 팩을 실어 나를 때
 /// 쓴다(받는 쪽은 import_theme, 같은 검사·같은 형식). 껍질 없이(항목이 `<id>/…`
 /// 로 시작하지 않게) 싼다 — import 의 껍질 판정은 어느 형태든 받지만 붙일 이유가

@@ -3620,6 +3620,43 @@ impl App {
         stalled.dedup_by(|a, b| a.0 == b.0);
         busy.sort();
 
+        // 지금 보고 있는 pane — 「내가 포커스한 창이 뭐고 어디까지 했나」(거노 2026-09-14).
+        // 돌아가며 말하는 한 줄과 별개로 **늘** 싣는다. 펫이 이걸로 보고 있는 학생의
+        // 이름·일감·상태를 그 자리에서 말할 수 있다.
+        static LAST_FOCUS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+        let focus = self.active_user_pane().map(|id| {
+            let who = self.pane_character_if_known(&id).unwrap_or_default();
+            let task = titles.get(&id).map(|t| task_name(t, &who)).unwrap_or_default();
+            let (state, what, mins) = self
+                .pane_activity
+                .get(&id)
+                .map(|a| {
+                    let st = if a.stalled.is_some() || a.has_error {
+                        "error"
+                    } else if status_needs_you(&a.status) {
+                        "wait"
+                    } else if a.status == "working" || a.status == "building" || a.bg_active {
+                        "busy"
+                    } else {
+                        "idle"
+                    };
+                    let what = match a.compact_pct {
+                        Some(p) => format!("대화 줄이는 중 {p}%"),
+                        None if st == "wait" => doing_now(a.waiting_for.as_deref().unwrap_or("")),
+                        None if st == "error" => a.stalled.clone().unwrap_or_else(|| "막혔어요".into()),
+                        None => doing_now(&a.intent),
+                    };
+                    let mins = a.busy_since.map(|t| t.elapsed().as_secs() / 60).unwrap_or(0);
+                    (st, what, mins)
+                })
+                .unwrap_or(("idle", String::new(), 0));
+            serde_json::json!({
+                "pane": id, "who": who, "task": task, "state": state, "what": what, "mins": mins,
+            })
+        });
+        let focus_key = focus.as_ref().map(|f| f.to_string()).unwrap_or_default();
+        let focus_changed = *LAST_FOCUS.lock().unwrap() != focus_key;
+
         // 급한 것부터. 막힌 사람이 있는데 「무엇을 하는 중」이라고 말하면 그 한 줄이
         // 정작 손이 필요한 곳을 덮는다.
         let urgent = !stalled.is_empty() || !waiting.is_empty();
@@ -3627,7 +3664,7 @@ impl App {
         let due = last
             .as_ref()
             .is_none_or(|(t, _, _)| now.duration_since(*t) >= std::time::Duration::from_secs(7));
-        if !due && !urgent {
+        if !due && !urgent && !focus_changed {
             return;
         }
 
@@ -3695,16 +3732,21 @@ impl App {
 
         // 같은 말을 다시 적지 않는다 — 펫이 mtime 으로 바뀜을 보므로, 매번 쓰면 말풍선이
         // 그때마다 다시 뜬다.
-        if last
-            .as_ref()
-            .is_some_and(|(_, st, tx)| st == state && tx == &text)
+        if !focus_changed
+            && last
+                .as_ref()
+                .is_some_and(|(_, st, tx)| st == state && tx == &text)
         {
             return;
         }
         *last = Some((now, state.to_string(), text.clone()));
+        *LAST_FOCUS.lock().unwrap() = focus_key;
 
         let Some(dir) = pet_model_dir() else { return };
-        let _ = std::fs::write(dir.join("board.json"), pet_board_json(state, &text, &subject));
+        let _ = std::fs::write(
+            dir.join("board.json"),
+            pet_board_json(state, &text, &subject, focus),
+        );
     }
 }
 
@@ -3713,8 +3755,16 @@ impl App {
 /// 이어 붙이지 않고 직렬화기에 맡기는 이유는 두 줄짜리 말 때문이다 — 따옴표와 역슬래시만
 /// 손으로 막고 개행을 그대로 넣었더니 JSON 규격을 벗어나, 펫이 파일 **전체**를 못 읽고
 /// 통째로 입을 다물었다(2026-09-08 실측: 「무엇을 하는 중」이 두 줄이 된 날부터 조용해졌다).
-fn pet_board_json(state: &str, text: &str, subject: &str) -> String {
-    serde_json::json!({ "state": state, "text": text, "pane": subject }).to_string()
+///
+/// `focus` 는 지금 보고 있는 pane 의 요약(`pane`·`who`·`task`·`state`·`what`·`mins`) —
+/// 없으면(내부 방·설정 화면) null.
+fn pet_board_json(
+    state: &str,
+    text: &str,
+    subject: &str,
+    focus: Option<serde_json::Value>,
+) -> String {
+    serde_json::json!({ "state": state, "text": text, "pane": subject, "focus": focus }).to_string()
 }
 
 /// File name for the dialog — the full path would blow the card's width.
@@ -3851,6 +3901,16 @@ pub(crate) fn notify_desktop(
             character.map(str::to_string),
             route.map(|(p, s)| (p.to_string(), s.map(str::to_string))),
         ));
+    }
+    // 애플 서명이 없는 굽기(자체 인증서 `kasaterm-dev`, 2026-09-14 부터 기본)는
+    // 알림센터 등록이 거절되어 자체 배너만 남았다 — 앱을 보고 있으면 배너가 뜨지만
+    // 다른 앱에 가 있으면 아무것도 안 온다(거노 「사용 중이어도 알림센터로 오게」).
+    // osascript 는 스크립트 편집기 명의라 서명과 무관하게 알림센터에 남는다 —
+    // 아이콘은 그쪽 것이지만 「안 오는 것」보다 낫다. 자체 배너는 그대로 둔다:
+    // 눌러서 그 pane 으로 가는 길은 배너에만 있다.
+    #[cfg(target_os = "macos")]
+    if !native && is_bundled() && !os_notify_enabled() {
+        notify_osascript(title, body);
     }
     if !native {
         return;
@@ -4816,7 +4876,7 @@ mod pet_board_tests {
         // 「무엇을 하는 중」은 두 줄이다(누구·무엇 / 몇 분째). 손으로 이어 붙이던 시절
         // 그 개행이 규격을 깨서 펫이 판을 통째로 못 읽었다.
         let text = "유즈 · 설정 화면\n7분째 \"굽는 중\" — C:\\경로";
-        let j = super::pet_board_json("busy", text, "%5");
+        let j = super::pet_board_json("busy", text, "%5", None);
         let v: serde_json::Value = serde_json::from_str(&j).expect("다시 읽힌다");
         assert_eq!(v["text"], text);
         assert_eq!(v["state"], "busy");

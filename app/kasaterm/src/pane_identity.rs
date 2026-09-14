@@ -101,8 +101,10 @@ pub(crate) const DEVICE_COLOR_PRESETS: &[(&str, [u8; 4])] = &[
 ];
 
 /// 배치도 칸이 기기색을 섞는 비율. 헤더 칩(12%)보다 진한 이유는 칸이 작아서다 —
-/// 20px 남짓한 사각이 12% 로 물들면 옆 칸과 갈라 보이지 않는다.
-const MINIMAP_TINT: f32 = 0.34;
+/// 20px 남짓한 사각이 12% 로 물들면 옆 칸과 갈라 보이지 않는다. 채움은 은은하게
+/// 두고 **테두리**가 기기색을 더 진하게 문다(2026-09-14 승인: 「은은한 채움+테두리」).
+const MINIMAP_TINT: f32 = 0.22;
+const MINIMAP_BORDER_TINT: f32 = 0.55;
 
 /// 스포이드 슬롯 번호에서 기기 칸을 가르는 기준. 팔레트 칸(0..27)과 한 통을
 /// 쓰므로 그보다 훨씬 위에 둔다.
@@ -391,6 +393,11 @@ pub(crate) fn minimap_background(base: [u8; 4], machine: Option<&str>) -> [u8; 4
     machine.map_or(base, |label| theme::lerp(base, machine_tint(label), MINIMAP_TINT))
 }
 
+/// 배치도 칸 테두리 — 채움보다 진하게 기기색을 문다. 기기가 없으면 `fallback`.
+pub(crate) fn minimap_border(base: [u8; 4], machine: Option<&str>, fallback: [u8; 4]) -> [u8; 4] {
+    machine.map_or(fallback, |label| theme::lerp(base, machine_tint(label), MINIMAP_BORDER_TINT))
+}
+
 pub(super) fn draw_card(
     g: &mut gpu::GpuRenderer,
     identity: &PaneIdentity,
@@ -516,7 +523,8 @@ pub(super) fn draw_card(
 mod tests {
     use super::{
         assign_defaults, hashed_device_color, machine_tint, parse_color_input, read_overrides,
-        terminal_identity_pid, MachineIdentity, DEVICE_COLOR_PRESETS, MINIMAP_TINT,
+        terminal_identity_pid, MachineIdentity, DEVICE_COLOR_PRESETS, MINIMAP_BORDER_TINT,
+        MINIMAP_TINT,
     };
 
     fn distance(a: [u8; 4], b: [u8; 4]) -> f32 {
@@ -544,15 +552,19 @@ mod tests {
         for base in [[25, 27, 34, 255], [240, 240, 246, 255]] {
             for (i, (_, a)) in DEVICE_COLOR_PRESETS.iter().enumerate() {
                 for (_, b) in &DEVICE_COLOR_PRESETS[i + 1..] {
-                    let mini_a = crate::theme::lerp(base, *a, MINIMAP_TINT);
-                    let mini_b = crate::theme::lerp(base, *b, MINIMAP_TINT);
+                    let mini_a = crate::theme::lerp(base, *a, MINIMAP_BORDER_TINT);
+                    let mini_b = crate::theme::lerp(base, *b, MINIMAP_BORDER_TINT);
                     assert!(distance(mini_a, mini_b) >= 24.0, "{a:?} vs {b:?} on {base:?}");
+                    let fill_a = crate::theme::lerp(base, *a, MINIMAP_TINT);
+                    let fill_b = crate::theme::lerp(base, *b, MINIMAP_TINT);
+                    assert!(distance(fill_a, fill_b) >= 12.0, "{a:?} vs {b:?} on {base:?}");
                     let chip_a = crate::theme::lerp(base, *a, 0.12);
                     let chip_b = crate::theme::lerp(base, *b, 0.12);
                     assert!(distance(chip_a, chip_b) >= 8.0, "{a:?} vs {b:?} on {base:?}");
                 }
                 // 섞인 뒤에도 바탕에서 떠야 한다.
-                assert!(distance(crate::theme::lerp(base, *a, MINIMAP_TINT), base) >= 24.0);
+                assert!(distance(crate::theme::lerp(base, *a, MINIMAP_BORDER_TINT), base) >= 24.0);
+                assert!(distance(crate::theme::lerp(base, *a, MINIMAP_TINT), base) >= 12.0);
             }
         }
     }

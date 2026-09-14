@@ -2174,7 +2174,7 @@ pub(crate) fn agent_needs_attention(row: &PaneActivity) -> bool {
     row.waiting_for.is_some() || row.status == "blocked"
 }
 
-fn agent_is_working(row: &PaneActivity) -> bool {
+pub(crate) fn agent_is_working(row: &PaneActivity) -> bool {
     matches!(
         row.status.as_str(),
         "working" | "building" | "waiting" | "compacting" | "thinking"

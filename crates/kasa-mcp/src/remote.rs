@@ -1777,6 +1777,35 @@ pub fn push_codex_session(
 /// (dirty 줄 수, 미push 커밋 수, origin, branch). 창구가 없는 옛 바이너리는
 /// None — 관문을 못 세우는 것이지 이사가 불가능한 게 아니라서, 호출부가
 /// force 요구로 갈음한다.
+/// 저쪽에 그 폴더가 있나 + 저쪽 홈. 창구가 없는 옛 판이면 `None` — 부르는 쪽이
+/// 「있다고 치고」 옛 동작으로 간다.
+pub fn remote_path_probe(
+    base: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Result<Option<(bool, String)>> {
+    let url = format!(
+        "{}/term/path?path={}",
+        base.trim_end_matches('/'),
+        urlencode(path)
+    );
+    let (status, body) = blocking_get(&url, token, Duration::from_secs(20))?;
+    if status == 404 || status == 405 {
+        return Ok(None);
+    }
+    let v: serde_json::Value = serde_json::from_slice(&body).context("path 상태 파싱")?;
+    if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "원격 폴더 확인 실패: {}",
+            v.get("error").and_then(|e| e.as_str()).unwrap_or("알 수 없는 이유")
+        );
+    }
+    Ok(Some((
+        v.get("exists").and_then(|b| b.as_bool()).unwrap_or(true),
+        v.get("home").and_then(|h| h.as_str()).unwrap_or("").to_string(),
+    )))
+}
+
 pub fn remote_repo_state(
     base: &str,
     path: &str,
