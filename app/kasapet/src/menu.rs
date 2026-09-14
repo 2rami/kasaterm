@@ -2,6 +2,7 @@ use kasa_pet_config::{PetPreferences, PreferenceChange};
 
 #[derive(Clone, Copy)]
 pub enum Action {
+    Ask,
     Chat,
     ChatAsk(&'static str),
     Talk,
@@ -79,6 +80,7 @@ pub fn content(
     expressions: &[usize],
 ) -> Content {
     let home = vec![
+        action("바로 묻기", true, Action::Ask),
         action(
             if chatting {
                 "나쵸 대화 닫기"
@@ -280,10 +282,14 @@ mod tests {
         );
         assert!(matches!(
             data.pages[0].1[0].item,
-            Item::Action(Action::Chat, false)
+            Item::Action(Action::Ask, false)
         ));
         assert!(matches!(
             data.pages[0].1[1].item,
+            Item::Action(Action::Chat, false)
+        ));
+        assert!(matches!(
+            data.pages[0].1[2].item,
             Item::Action(Action::ChatAsk(_), false)
         ));
         assert!(!data.pages[2].1[0].enabled);

@@ -24,8 +24,11 @@ mod menu;
 mod catalog;
 mod journal;
 mod chat;
+mod ask;
 #[cfg(target_os = "macos")]
 mod chat_panel;
+#[cfg(target_os = "macos")]
+mod ask_bar;
 #[cfg(target_os = "macos")]
 mod native_cursor;
 
@@ -98,8 +101,12 @@ struct App {
     journal: journal::Client,
     journal_shown: bool,
     chat: chat::Chat,
+    /// 머리 위 유리 바가 서버에 묻고 있는 것. 한 번에 하나다.
+    ask: ask::Client,
     #[cfg(target_os = "macos")]
     chat_panel: Option<chat_panel::Panel>,
+    #[cfg(target_os = "macos")]
+    ask_bar: Option<ask_bar::Bar>,
     #[cfg(target_os = "macos")]
     popup: Option<menu::Popup>,
     menu_probe_started: Option<std::time::Instant>,
@@ -311,8 +318,11 @@ impl ApplicationHandler for App {
                     .last_click
                     .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400));
                 self.last_click = Some(std::time::Instant::now());
+                // 두 번 누르면 머리 위 유리 바가 열린다. 한 번 누름은 창 끌기라 여기
+                // 걸 수가 없고, 여기 있던 「다음 캐릭터」는 메뉴에 그대로 있다 —
+                // 캐릭터는 하루에 한 번 바꾸지만 묻는 것은 하루에도 여러 번이다.
                 if double {
-                    self.next_character();
+                    self.toggle_ask();
                     return;
                 }
                 // 말풍선을 누르면 그 이야기의 pane 으로 간다 — 「누가 무엇을 하고 있다」를
@@ -425,6 +435,19 @@ impl ApplicationHandler for App {
             else if self.menu_probe_phase==4&&!popup.visible(){eprintln!("MENU_PROBE_ESCAPE_CLOSED:true");self.menu_probe_phase=5;el.exit();}
             if elapsed>10.0 {eprintln!("MENU_PROBE_TIMEOUT");el.exit();}
         }
+        // 진짜 펫에서 바가 열리고 머리 위에 앉는지 — 사람 손 없이 확인하는 창구.
+        #[cfg(target_os="macos")]
+        if std::env::var_os("KASAPET_AUTOASK").is_some() {
+            if self.frames==30 && !self.ask_open() { self.toggle_ask(); }
+            if self.frames==90 {
+                let pet = self.win.as_ref().map(|w| w.outer_position().ok().map(|p| p.y as f64).unwrap_or(0.0));
+                match self.ask_bar.as_ref() {
+                    Some(bar) => eprintln!("ASK_APP_OPEN:{} FRAME:{:?} PET_TOP:{:?}", bar.visible(), bar.probe_frame(), pet),
+                    None => eprintln!("ASK_APP_OPEN:false"),
+                }
+                el.exit();
+            }
+        }
         if let Some(w) = &self.win { w.request_redraw(); }
     }
 }
@@ -472,6 +495,7 @@ impl App {
         if self.menu_probe_started.is_some()&&matches!(action,Some(menu::Action::Motion(_))){eprintln!("MENU_PROBE_CLICK_APPLIED:true");}
         match action {
             Some(menu::Action::Talk) => self.toggle_typing(),
+            Some(menu::Action::Ask) => self.toggle_ask(),
             Some(menu::Action::Chat) => self.toggle_chat(),
             Some(menu::Action::ChatAsk(question)) => {
                 if !self.chat_open() { self.toggle_chat(); }
@@ -835,6 +859,83 @@ impl App {
         }
     }
 
+    fn ask_open(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        { self.ask_bar.as_ref().is_some_and(|bar| bar.visible()) }
+        #[cfg(not(target_os = "macos"))]
+        { false }
+    }
+
+    /// 머리 위 유리 바를 열고 닫는다. 대화창과 달리 창을 차지하지 않으므로 펫 크기를
+    /// 줄이지 않는다 — 하던 일을 멈추지 않은 채 한 마디 던지는 자리다.
+    fn toggle_ask(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            if self.ask_open() { self.close_ask(); return; }
+            if self.typing.is_some() { self.toggle_typing(); }
+            if self.chat_open() { self.close_chat(); }
+            if self.ask_bar.is_none() {
+                self.ask_bar = self.win.as_ref().and_then(|win| ask_bar::Bar::new(win));
+            }
+            let Some(bar) = &self.ask_bar else { self.action_error("유리 바를 열지 못했어요."); return };
+            set_hand_cursor(false);
+            bar.clear_input();
+            bar.say("");
+            bar.show();
+            bar.sync(HEADROOM * self.scale as f64);
+        }
+    }
+
+    fn close_ask(&mut self) {
+        self.ask.cancel();
+        #[cfg(target_os = "macos")]
+        if let Some(bar) = &self.ask_bar { bar.hide(); }
+    }
+
+    /// 지금 이야기의 주인공 pane. 사람이 보고 있는 창이 먼저고, 그것이 없으면 말풍선이
+    /// 가리키던 pane 이다 — 서버는 이 이름으로 「이 창」을 찾는다.
+    fn ask_pane(&self) -> String {
+        self.focus.as_ref().map(|focus| focus.pane.clone()).filter(|pane| !pane.is_empty())
+            .unwrap_or_else(|| self.subject.clone())
+    }
+
+    fn poll_ask(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            let events = self.ask_bar.as_ref().map(|bar| bar.events()).unwrap_or_default();
+            for event in events {
+                match event {
+                    ask_bar::Event::Close => self.close_ask(),
+                    ask_bar::Event::Send(text) => {
+                        let pane = self.ask_pane();
+                        if let Some(path) = self.journal_path() {
+                            if self.ask.ask(path, text, pane) {
+                                if let Some(bar) = &self.ask_bar {
+                                    bar.clear_input();
+                                    bar.say("나쵸가 보는 중…");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(result) = self.ask.poll() {
+                if let Some(bar) = &self.ask_bar {
+                    match result {
+                        Ok(answer) => bar.say(&answer.line()),
+                        Err(()) => bar.say("나쵸에게 닿지 못했어요."),
+                    }
+                }
+            }
+            // 다른 창으로 넘어가면 접는다. 늘 떠 있는 입력줄은 바탕화면에 얹어 둔
+            // 판이 되고, 사람은 그 판을 곧 안 보게 된다.
+            if self.ask_bar.as_ref().is_some_and(|bar| bar.lost_focus()) { self.close_ask(); }
+            if let Some(bar) = self.ask_bar.as_ref().filter(|bar| bar.visible()) {
+                bar.sync(HEADROOM * self.scale as f64);
+            }
+        }
+    }
+
     fn poll_journal(&mut self) {
         if self.journal_shown && self.said_at.elapsed().as_secs_f32() > self.preferences.say_seconds as f32 {
             self.journal_shown = false;
@@ -1127,6 +1228,7 @@ impl App {
         self.poll_board();
         self.poll_journal();
         self.poll_chat();
+        self.poll_ask();
         self.tick_bounce();
         let finished = self.motion.as_ref().is_some_and(|m| m.is_finished());
         if self.playback.finish_once(finished) { self.resume_automatic(); }
@@ -1652,6 +1754,8 @@ mod argument_tests {
 fn main() {
     #[cfg(all(target_os = "macos", debug_assertions))]
     if std::env::args().any(|arg| arg == "--chat-panel-probe") { chat_panel::probe(); return; }
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if std::env::args().any(|arg| arg == "--ask-bar-probe") { ask_bar::probe(); return; }
     let (model_arg, motion_arg) = positional_arguments(std::env::args());
     let path = model_arg.unwrap();
     let model = mocari::assets::load_model_runtime(&path).expect("모델");
@@ -1712,8 +1816,11 @@ fn main() {
         journal_shown: false,
         chat: chat::Chat::default(), chat_restore_scale: None,
         chat_prefill: None,
+        ask: ask::Client::default(),
         #[cfg(target_os = "macos")]
         chat_panel: None,
+        #[cfg(target_os = "macos")]
+        ask_bar: None,
         #[cfg(target_os = "macos")]
         popup: None,
         menu_probe_started:None,menu_probe_phase:0,menu_probe_frames:0,

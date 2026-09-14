@@ -64,9 +64,15 @@ pub(crate) fn get(port: u16, route: &str) -> Result<Value, ()> {
 }
 
 pub(crate) fn request(port: u16, method: &str, route: &str, body: Option<&Value>) -> Result<Value, ()> {
+    request_within(port, method, route, body, Duration::from_secs(3))
+}
+
+/// 답을 이만큼까지 기다린다. 장부 조회는 바로 오지만 서버가 창을 옮기는 것까지 하고
+/// 답하는 길(`/api/ask`)은 한참 걸려, 같은 3초를 물리면 성공한 일을 실패로 읽는다.
+pub(crate) fn request_within(port: u16, method: &str, route: &str, body: Option<&Value>, read: Duration) -> Result<Value, ()> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|_| ())?;
-    stream.set_read_timeout(Some(Duration::from_secs(3))).map_err(|_| ())?;
+    stream.set_read_timeout(Some(read)).map_err(|_| ())?;
     stream.set_write_timeout(Some(Duration::from_secs(2))).map_err(|_| ())?;
     let body = body.map(Value::to_string).unwrap_or_default();
     write!(stream, "{method} {route} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nX-Journal-Request: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).map_err(|_| ())?;

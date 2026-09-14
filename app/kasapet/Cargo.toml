@@ -25,5 +25,5 @@ sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSCursor", "NSWindow", "NSView", "NSResponder", "NSColor", "NSGraphics", "NSEvent", "NSScreen", "NSRunningApplication", "NSPanel", "NSTextField", "NSTextView", "NSText", "NSTextContainer", "NSScrollView", "NSButton", "NSControl", "NSFont", "NSBezierPath", "NSStringDrawing", "NSAttributedString"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSCursor", "NSWindow", "NSView", "NSResponder", "NSColor", "NSGraphics", "NSEvent", "NSScreen", "NSRunningApplication", "NSPanel", "NSTextField", "NSTextView", "NSText", "NSTextContainer", "NSScrollView", "NSButton", "NSControl", "NSFont", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSGlassEffectView", "NSVisualEffectView", "NSBitmapImageRep", "NSImageRep", "objc2-core-foundation"] }
 objc2-foundation = "0.3"
