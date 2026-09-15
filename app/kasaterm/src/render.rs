@@ -9234,6 +9234,10 @@ impl App {
                     }
                 }
                 let seg_x0 = x;
+                let account_right = if status_prefs.visible("claude") || status_prefs.visible("codex") {
+                    (win_w * 0.32).max(seg_x0).min(win_w - 12.0)
+                } else { seg_x0 };
+                g.push_clip(seg_x0 - 6.0, sy, (account_right - seg_x0 + 6.0).max(0.0), status_h);
                 let mut account_drawn = false;
                 macro_rules! draw_claude_status {
                     () => {{
@@ -9682,7 +9686,8 @@ impl App {
 
                 // 세그먼트 전체가 손잡이다 — 게이지든 숫자든 이름이든 판 번호든
                 // 누르면 열린다. 자세한 것은 전부 그 안에 있다.
-                let acct_r = (seg_x0 - 6.0, sy, (x - seg_x0 + 12.0).max(24.0), status_h);
+                x = x.min(account_right - 6.0);
+                let acct_r = (seg_x0 - 6.0, sy, (x - seg_x0 + 12.0).max(0.0), status_h);
                 // 세그먼트가 곧 계정 스위처 손잡이다 — 손모양이 없으면 눌러 볼
                 // 생각조차 안 든다(거노 2026-08-12). 채움은 주지 않는다: 세그먼트
                 // 폭은 텍스트를 다 그린 뒤에야 확정되고, 이 렌더는 나중에 그린 것이
@@ -9719,17 +9724,28 @@ impl App {
                     }
                 }
 
+                g.pop_clip();
+                // 양끝 그룹이 같은 폭을 서로 예약하지 않도록 각 도구의 공간을 먼저 나눈다.
+                let widget_count = ["ports", "schedules", "pet", "clipboard", "resources", "version", "tunnel"]
+                    .iter().filter(|id| status_prefs.visible(id))
+                    .map(|id| if *id == "tunnel" { 2 } else { 1 }).sum::<usize>().max(1);
+                let tool_left = account_right + 12.0;
+                let slot_w = ((win_w - 12.0 - tool_left) / widget_count as f32).max(1.0);
                 // 오른쪽 끝에서 왼쪽으로 자라는 자들의 공통 기준선. 판 번호가
                 // 이 끝을 먼저 먹고, 터널 스위치와 나머지 칩이 그 왼쪽으로 선다.
                 let right_edge = win_w - 12.0;
                 // 칩 사이 간격. 12 로는 아이콘·글자가 서로 붙어 어디까지가 한 칩인지
                 // 눈으로 안 갈렸다(2026-09-07 지적 「간격이 너무 없어서」).
-                let chip = 26.0_f32;
+                let chip = 12.0_f32.min(slot_w * 0.2);
                 let mut rx = right_edge;
                 self.status_version_rect = None;
                 self.statusbar.tunnel_rect = None;
                 self.statusbar.chrome_rect = None;
                 self.statusbar.res_rect = None;
+                self.statusbar.port_rect = None;
+                self.statusbar.schedule_rect = None;
+                self.statusbar.pet_rect = None;
+                self.statusbar.clip_rect = None;
                 macro_rules! draw_version_widget {
                     () => {{
                     // 판 번호 — 이 줄의 **맨 오른쪽**(2026-09-06 지시: 「하단바
@@ -9762,6 +9778,7 @@ impl App {
                                 s_ver.push_str(&format!(" · 기기 {}대 빌드 다름", mismatched.len()));
                             }
                         }
+                        let s_ver = crate::info::fit_text(g, &s_ver, (slot_w - 21.0).max(0.0), fs, false);
                         let w = g.measure_chrome_text(&s_ver, fs, true);
                         rx -= w + 14.0;
                         g.draw_text(
@@ -9809,13 +9826,13 @@ impl App {
                     // 칩으로 합치며(2026-09-08 지시 「크롬다리랑 원격을 통합」) 이 칩이
                     // 말하는 것은 「이 맥 밖의 기기」가 됐다. 폰 아이콘이 뜻을 지고,
                     // 나머지 설명(QR·주소·다리)은 팝오버가 한다.
-                    let label = "모바일";
+                    let label = crate::info::fit_text(g, "모바일", (slot_w - chip - 36.0).max(0.0), fs, false);
                     let icon = 12.0_f32;
-                    let dot = 6.0_f32;
-                    let gap = 5.0_f32;
+                    let dot = 4.0_f32;
+                    let gap = 3.0_f32;
                     let on = self.statusbar.tunnel_on == Some(true);
                     // Browser connectivity now has its own chip and status dot.
-                    let tw = g.measure_chrome_text(label, fs, false);
+                    let tw = g.measure_chrome_text(&label, fs, false);
                     let seg_w = icon + gap + tw + gap + dot;
                     // 판 번호가 이미 오른쪽 끝을 먹었다 — 그 왼쪽에 선다
                     // (2026-09-06 지시: 버전 표시를 맨 오른쪽으로).
@@ -9834,7 +9851,7 @@ impl App {
                         g.draw_text(
                             tx + icon + gap,
                             ty,
-                            label,
+                            &label,
                             gpu::DrawOpts {
                                 font_size: fs,
                                 color: col,
@@ -9872,7 +9889,7 @@ impl App {
                         self.statusbar.tunnel_rect = None;
                     }
                     if tunnel_visible {
-                        rx = tx - 8.0;
+                        rx = tx;
                     }
 
                     // Browser choice is independent of mobile access. Keep the
@@ -9881,7 +9898,7 @@ impl App {
                         let machine = if self.statusbar.chrome_machine.is_empty() {
                             crate::info::cached_local_machine_name().unwrap_or("이 기기")
                         } else { &self.statusbar.chrome_machine };
-                        let name = crate::info::fit_text(g, machine, 94.0, fs, false);
+                        let name = crate::info::fit_text(g, machine, (slot_w - chip - 36.0).max(0.0), fs, false);
                         let name_w = g.measure_chrome_text(&name, fs, false);
                         let browser_w = icon + gap + name_w + gap + dot;
                         let bx = rx - browser_w - chip;
@@ -9901,7 +9918,7 @@ impl App {
                         let (hx, hy) = self.cursor_px;
                         g.hover_pointer |= hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3;
                         self.statusbar.chrome_rect = Some(r);
-                        rx = bx - 8.0;
+                        rx = bx;
                     }
                     }};
                 }
@@ -9921,6 +9938,7 @@ impl App {
                         } else {
                             format!("{cpu:.0}% · {:.0}M", gb * 1024.0)
                         };
+                        let label = crate::info::fit_text(g, &label, (slot_w - chip - 34.0).max(0.0), fs, false);
                         let lw = g.measure_chrome_text(&label, fs, false);
                         rx -= lw + chip;
                         let open = matches!(
@@ -10020,7 +10038,8 @@ impl App {
                             let icon = 12.0_f32;
                             // 좁으면 글자를 버리고 아이콘만 — 누르면 팝오버가
                             // 무슨 일인지 다 적어 준다.
-                            let words = (win_w >= 900.0).then_some(words);
+                            let words = crate::info::fit_text(g, &words, (slot_w - chip - lw - 34.0).max(0.0), fs, false);
+                            let words = (!words.is_empty()).then_some(words);
                             let ww = words
                                 .as_ref()
                                 .map_or(0.0, |t| 4.0 + g.measure_chrome_text(t, fs, false));
@@ -10065,13 +10084,24 @@ impl App {
                         .iter()
                         .rev()
                         .filter(|id| matches!(id.as_str(), "resources" | "tunnel" | "version"))
+                        .filter(|id| status_prefs.visible(id))
+                        .filter(|_| slot_w >= 28.0)
                     {
+                        let slot_right = rx;
+                        let allocated = slot_w * if id == "tunnel" { 2.0 } else { 1.0 };
+                        g.push_clip(slot_right - allocated, sy, allocated, status_h);
                         match id.as_str() {
                             "resources" => draw_resources_widget!(),
                             "tunnel" => draw_tunnel_widget!(),
                             "version" => draw_version_widget!(),
                             _ => {}
                         }
+                        self.status_version_rect = self.status_version_rect.and_then(|r| if id == "version" { g.clip_hit(r) } else { Some(r) });
+                        self.statusbar.tunnel_rect = self.statusbar.tunnel_rect.and_then(|r| if id == "tunnel" { g.clip_hit(r) } else { Some(r) });
+                        self.statusbar.chrome_rect = self.statusbar.chrome_rect.and_then(|r| if id == "tunnel" { g.clip_hit(r) } else { Some(r) });
+                        self.statusbar.res_rect = self.statusbar.res_rect.and_then(|r| if id == "resources" { g.clip_hit(r) } else { Some(r) });
+                        g.pop_clip();
+                        rx = slot_right - allocated;
                     }
                     let has_device = ["resources", "tunnel", "version"]
                         .iter()
@@ -10080,7 +10110,6 @@ impl App {
                         .iter()
                         .any(|id| status_prefs.visible(id));
                     if status_prefs.separators && has_device && has_work {
-                        rx -= 13.0;
                         g.rect(
                             rx,
                             sy + 6.0,
@@ -10088,9 +10117,6 @@ impl App {
                             (status_h - 12.0).max(6.0),
                             theme::with_alpha(theme::border(), 140),
                         );
-                        rx -= 13.0;
-                    } else if has_device && has_work {
-                        rx -= 14.0;
                     }
                     // 클립보드 — 지금 담긴 것의 앞머리. 클립보드는 보이지 않는
                     // 그릇이라, 붙여넣기 전까지 무엇이 들었는지 알 수가 없다. 칩이
@@ -10110,6 +10136,7 @@ impl App {
                         if !head.is_empty() {
                             let icon = 12.0_f32;
                             let gap = 4.0_f32;
+                            let head = crate::info::fit_text(g, &head, (slot_w - chip - 24.0).max(0.0), fs, false);
                             let lw = g.measure_chrome_text(&head, fs, false);
                             let seg = icon + gap + lw;
                             rx -= seg + chip;
@@ -10157,6 +10184,7 @@ impl App {
                     if status_prefs.visible("schedules") {
                         let n = self.info.view.schedules.iter().filter(|s| s.enabled).count();
                         let label = n.to_string();
+                        let label = crate::info::fit_text(g, &label, (slot_w - chip - 24.0).max(0.0), fs, false);
                         let icon = 12.0_f32;
                         let gap = 4.0_f32;
                         let lw = g.measure_chrome_text(&label, fs, false);
@@ -10203,6 +10231,7 @@ impl App {
                             .then(crate::chrome::pet_current_character)
                             .flatten()
                             .unwrap_or_default();
+                        let name = crate::info::fit_text(g, &name, (slot_w - chip - 24.0).max(0.0), fs, false);
                         let icon = 12.0_f32;
                         let gap = 4.0_f32;
                         let lw = if name.is_empty() {
@@ -10250,6 +10279,7 @@ impl App {
                     if status_prefs.visible("ports") {
                         let n = self.info.view.ports.len();
                         let label = n.to_string();
+                        let label = crate::info::fit_text(g, &label, (slot_w - chip - 24.0).max(0.0), fs, false);
                         let icon = 12.0_f32;
                         let gap = 4.0_f32;
                         let lw = g.measure_chrome_text(&label, fs, false);
@@ -10295,7 +10325,11 @@ impl App {
                         .filter(|id| {
                             matches!(id.as_str(), "ports" | "schedules" | "pet" | "clipboard")
                         })
+                        .filter(|id| status_prefs.visible(id))
+                        .filter(|_| slot_w >= 28.0)
                     {
+                        let slot_right = rx;
+                        g.push_clip(slot_right - slot_w, sy, slot_w, status_h);
                         match id.as_str() {
                             "ports" => draw_ports_widget!(),
                             "schedules" => draw_schedules_widget!(),
@@ -10303,6 +10337,12 @@ impl App {
                             "clipboard" => draw_clipboard_widget!(),
                             _ => {}
                         }
+                        self.statusbar.port_rect = self.statusbar.port_rect.and_then(|r| if id == "ports" { g.clip_hit(r) } else { Some(r) });
+                        self.statusbar.schedule_rect = self.statusbar.schedule_rect.and_then(|r| if id == "schedules" { g.clip_hit(r) } else { Some(r) });
+                        self.statusbar.pet_rect = self.statusbar.pet_rect.and_then(|r| if id == "pet" { g.clip_hit(r) } else { Some(r) });
+                        self.statusbar.clip_rect = self.statusbar.clip_rect.and_then(|r| if id == "clipboard" { g.clip_hit(r) } else { Some(r) });
+                        g.pop_clip();
+                        rx = slot_right - slot_w;
                     }
 
                 // 팝오버는 상태줄 **뒤**다 — 같은 자리 위로 떠야 하고, 칩을 그린

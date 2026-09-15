@@ -3066,7 +3066,15 @@ impl App {
         let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return; };
         let mut button = MouseButton::Left;
         let rect = match step {
-            0 => self.statusbar.clip_rect,
+            0 => {
+                if let Some(r) = self.statusbar.clip_rect {
+                    let (cx, cy) = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                    let overlaps = [self.status_account_rect, self.statusbar.res_rect].into_iter().flatten()
+                        .any(|r| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3);
+                    eprintln!("[clipboard-probe] clipboard_hit_exclusive={}", !overlaps);
+                }
+                self.statusbar.clip_rect
+            }
             1 => self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::PickClip(_)).then_some(*r)),
             2 => {
                 let Some(r) = self.statusbar.popover_rect else { return; };
