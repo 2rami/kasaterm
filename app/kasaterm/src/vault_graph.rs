@@ -20,6 +20,7 @@ fn scan_bounded(root: &Path, generation: u64, current: &AtomicU64, limits: Limit
     let mut graph = Graph::default();
     let mut pending = vec![(String::new(), 0)];
     let mut visited = 0;
+    let mut attachments = HashSet::new();
     while let Some((directory, depth)) = pending.pop() {
         if current.load(Ordering::Relaxed) != generation { return Graph { error: Some("그래프 요청이 바뀌었어요".into()), ..Graph::default() }; }
         let listing = crate::vault::list(root, &directory, 20_000);
@@ -32,6 +33,8 @@ fn scan_bounded(root: &Path, generation: u64, current: &AtomicU64, limits: Limit
             } else if Path::new(&entry.id).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md")) {
                 if graph.nodes.len() >= limits.nodes { graph.truncated = true; break; }
                 graph.nodes.push(Node { name: Path::new(&entry.name).file_stem().unwrap_or_default().to_string_lossy().into_owned(), id: entry.id });
+            } else {
+                attachments.insert(entry.id);
             }
         }
         if visited > limits.entries || graph.nodes.len() >= limits.nodes { graph.truncated = true; break; }
@@ -57,7 +60,7 @@ fn scan_bounded(root: &Path, generation: u64, current: &AtomicU64, limits: Limit
         bytes += text.len();
         if bytes > limits.bytes { graph.truncated = true; break; }
         for (target, wiki) in links(&text) {
-            if let Some(target) = resolve_link(&node.id, &target, wiki, &ids, &names) {
+            if let Some(target) = resolve_link(&node.id, &target, wiki, &ids, &names, &attachments) {
                 if target == node.id { continue; }
                 if edges.len() >= limits.edges { graph.truncated = true; break; }
                 edges.insert((node.id.clone(), target));
@@ -95,23 +98,24 @@ fn normalize(base: &str, target: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-fn resolve_link(source: &str, value: &str, wiki: bool, ids: &HashSet<&str>, names: &HashMap<String, Vec<&str>>) -> Option<String> {
+fn resolve_link(source: &str, value: &str, wiki: bool, ids: &HashSet<&str>, names: &HashMap<String, Vec<&str>>, attachments: &HashSet<String>) -> Option<String> {
     let value = value.split(['#', '?']).next()?.trim();
     let value = decode(value)?;
     if value.is_empty() || value.starts_with('/') || value.contains([':', '\\', '\0']) { return None; }
+    let base = source.rsplit_once('/').map_or("", |(base, _)| base);
+    if wiki && (attachments.contains(&normalize(base, &value)?) || normalize("", &value).is_some_and(|id| attachments.contains(&id))) { return None; }
     let target = match Path::new(&value).extension() {
         Some(ext) if ext.eq_ignore_ascii_case("md") => value.clone(),
-        None if wiki => format!("{value}.md"),
+        _ if wiki => format!("{value}.md"),
         _ => return None,
     };
-    let base = source.rsplit_once('/').map_or("", |(base, _)| base);
     let relative = normalize(base, &target)?;
     if ids.contains(relative.as_str()) { return Some(relative); }
     if wiki {
         let rooted = normalize("", &target)?;
         if ids.contains(rooted.as_str()) { return Some(rooted); }
         if !value.contains('/') {
-            let name = Path::new(&value).file_stem()?.to_str()?;
+            let name = Path::new(&target).file_stem()?.to_str()?;
             if let Some(matches) = names.get(name) { if matches.len() == 1 { return Some(matches[0].into()); } }
         }
     }
@@ -146,6 +150,15 @@ mod tests {
     fn parser_ignores_code_comments_and_escaped_wiki_syntax() {
         let text = "`[[inline]]`\n\n```md\n[[fence]]\n[x](fence.md)\n```\n\n<!-- [[comment]] -->\n\\[\\[escaped]]\n[[real]]";
         assert_eq!(links(text), vec![("real".into(), true)]);
+    }
+    #[test]
+    fn dotted_wiki_titles_work_without_hijacking_attachments() {
+        let fixture = Fixture::new();
+        fixture.put("start.md", "[[v1.2]] [[nested/version.3]] [[image.png]] [image](image.png) [missing](missing.png) [[guide.pdf]]");
+        for name in ["versions/v1.2.md", "nested/version.3.md", "image.png", "image.png.md", "missing.png.md", "guide.pdf", "guide.pdf.md"] { fixture.put(name, ""); }
+        let graph = fixture.scan(LIMITS);
+        let targets: BTreeSet<_> = graph.edges.iter().map(|edge| edge.target.as_str()).collect();
+        assert_eq!(targets, BTreeSet::from(["versions/v1.2.md", "nested/version.3.md"]));
     }
     #[test]
     fn boundaries_limits_and_stale_requests_are_explicit() {
