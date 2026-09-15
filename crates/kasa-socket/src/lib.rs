@@ -27,6 +27,7 @@ pub mod peers;
 pub mod protocol;
 pub mod server;
 pub mod sessions;
+pub mod session_storage;
 pub mod transport;
 pub mod transfer;
 

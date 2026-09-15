@@ -1357,7 +1357,11 @@ fn state_path(viewer_only: bool) -> Option<std::path::PathBuf> {
         if let Some(path) = std::env::var_os("KASATERM_VIEWER_STATE_FILE") {
             return Some(std::path::PathBuf::from(path));
         }
-        return Some(kasa_socket::home_dir()?.join(".config/kasaterm/viewer-documents.json"));
+        if let Some(path) = std::env::var_os("KASATERM_SESSION_FILE").filter(|p| !p.is_empty()) {
+            return Some(std::path::PathBuf::from(path).with_extension("viewer-documents.json"));
+        }
+        if crate::verification_run() { return None; }
+        return Some(crate::socket::default_session_root()?.join("sessions/viewer-documents.json"));
     }
     if crate::verification_run() && std::env::var_os("KASATERM_SESSION_FILE").is_none() {
         return None;

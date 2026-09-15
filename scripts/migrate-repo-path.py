@@ -226,6 +226,9 @@ class Migration:
             self.home / ".claude/settings.json",
             self.home / ".claude/plugins/known_marketplaces.json",
             self.home / ".config/kasaterm/session.json",
+            self.home / ".config/kasaterm/sessions/session.json",
+            self.home / ".config/kasaterm/sessions/session.documents.json",
+            self.home / ".config/kasaterm/sessions/viewer-documents.json",
             self.home / ".config/kasaterm/window.json",
             self.home / ".config/kasaterm/settings.json",
             self.home / ".config/kasaterm/claude-mcp.json",
@@ -233,6 +236,8 @@ class Migration:
         fixed = [target for path in fixed_slots if (target := self.config_target(path)) is not None]
         patterns = [
             (self.home / ".config/kasaterm", "session-restored-*.json"),
+            (self.home / ".config/kasaterm/sessions", "session-restored-*.json"),
+            (self.home / ".config/kasaterm/sessions/server-restore-pending", "*.json"),
             (self.home / ".config/kasaterm", "daemon*.sock.state"),
             (self.home / ".config/kasaterm/agent-roster", "*.json"),
             (self.home / ".claude/sessions", "*.json"),

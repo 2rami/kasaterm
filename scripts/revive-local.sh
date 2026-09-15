@@ -13,7 +13,10 @@
 # 있다. 여기서 이어가는 대화와 갈라지는 것은 감수하는 것이다 — 되돌릴 길이 아직
 # 없어서, 지금 일을 이어가는 쪽을 택한다.
 set -u
-CFG=$HOME/.config/kasaterm/session.json
+CFG=${KASATERM_SESSION_FILE:-$HOME/.config/kasaterm/sessions/session.json}
+if [[ -z "${KASATERM_SESSION_FILE:-}" && ! -e "$CFG" ]]; then
+  CFG=$HOME/.config/kasaterm/session.json
+fi
 APP=$HOME/Applications/kasaterm.app
 
 pid=$(pgrep -f "$APP/Contents/MacOS/kasaterm" | head -1)

@@ -4028,7 +4028,10 @@ pub fn write_session_state(state: &serde_json::Value) {
 /// file is absent or unparseable — the caller then boots a fresh session with
 /// no restore prompt.
 pub fn read_session_state() -> Option<serde_json::Value> {
-    let path = session_file_path()?;
+    let mut path = session_file_path()?;
+    if std::env::var_os("KASATERM_SESSION_FILE").is_none_or(|v| v.is_empty()) {
+        path = kasa_socket::session_storage::read_path(&default_session_root()?, "session.json");
+    }
     let bytes = std::fs::read(&path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
@@ -4037,6 +4040,25 @@ pub fn read_session_state() -> Option<serde_json::Value> {
 /// missing file is already the desired end state.
 pub fn clear_session_state() {
     if let Some(path) = session_file_path() {
+        // Keep conflicting legacy bytes as evidence without making "fresh"
+        // resurrect them through the legacy read fallback on the next launch.
+        if std::env::var_os("KASATERM_SESSION_FILE").is_none_or(|v| v.is_empty()) {
+            if let Some(root) = default_session_root() {
+                let old = root.join("session.json");
+                if old.exists() {
+                    let archive = root.join("sessions/legacy");
+                    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos()).unwrap_or(0);
+                    let preserved = archive.join(format!("session-cleared-{stamp}.json"));
+                    if std::fs::create_dir_all(&archive).is_err()
+                        || std::fs::hard_link(&old, &preserved).is_err()
+                        || std::fs::remove_file(&old).is_err() {
+                        eprintln!("[session migration] cannot preserve legacy state before clearing");
+                        return;
+                    }
+                }
+            }
+        }
         let _ = std::fs::remove_file(path);
     }
 }
@@ -4049,8 +4071,18 @@ pub fn session_file_path() -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(p));
         }
     }
-    // HOME 직참조 금지 — Windows GUI(Explorer 실행)는 HOME 부재라 영속이 통째로 죽는다.
-    Some(kasa_socket::home_dir()?.join(".config/kasaterm/session.json"))
+    Some(kasa_socket::session_storage::session_path(&default_session_root()?, None))
+}
+
+pub(crate) fn default_session_root() -> Option<std::path::PathBuf> {
+    let root = kasa_socket::home_dir()?.join(".config/kasaterm");
+    static MIGRATED: std::sync::Once = std::sync::Once::new();
+    MIGRATED.call_once(|| {
+        for error in kasa_socket::session_storage::migrate_legacy(&root) {
+            eprintln!("[session migration] {error}");
+        }
+    });
+    Some(root)
 }
 
 fn window_size_path() -> Option<std::path::PathBuf> {

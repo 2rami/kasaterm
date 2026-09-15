@@ -6318,21 +6318,7 @@ impl App {
                 dir.join(format!("session-restored-{ts}.json")),
                 state.to_string(),
             );
-            if let Ok(list) = std::fs::read_dir(&dir) {
-                let mut olds: Vec<_> = list
-                    .flatten()
-                    .filter(|e| {
-                        e.file_name()
-                            .to_string_lossy()
-                            .starts_with("session-restored-")
-                    })
-                    .map(|e| e.path())
-                    .collect();
-                olds.sort();
-                for p in olds.iter().rev().skip(5) {
-                    let _ = std::fs::remove_file(p);
-                }
-            }
+            let _ = kasa_socket::session_storage::prune_restored(&dir, 5);
         }
         // 저장본이 형식 밖이면 부팅 때 걸어 둔 예약도 여기서 푼다 — 안 풀면 복원은
         // 안 됐는데 그 이름들만 영영 taken 으로 남는다.
