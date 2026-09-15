@@ -3047,22 +3047,26 @@ impl App {
     }
 
     pub(crate) fn run_clipboard_probe(&mut self, event_loop: &ActiveEventLoop) {
-        use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
+        use std::sync::{OnceLock, atomic::{AtomicBool, AtomicUsize, Ordering}};
         use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
         if !crate::clipboard::isolated_probe() { return; }
         static START: OnceLock<Instant> = OnceLock::new();
+        static SEEDED: AtomicBool = AtomicBool::new(false);
         static STEP: AtomicUsize = AtomicUsize::new(0);
+        if !SEEDED.swap(true, Ordering::Relaxed) {
+            crate::clipboard::remember_as("sk-synthetic-secret-0123456789", Some(true));
+            crate::clipboard::remember_as("짧은 항목", Some(false));
+            crate::clipboard::remember_as(&format!("{}\nhttps://example.com/{}\n\n마지막 줄", "긴 한글 본문 줄바꿈 확인 ".repeat(20), "long-path".repeat(30)), Some(false));
+            self.chrome_dirty = true;
+            if let Some(window) = &self.window { window.request_redraw(); }
+            return;
+        }
         let step = STEP.load(Ordering::Relaxed);
         if step > 6 || START.get_or_init(Instant::now).elapsed().as_millis() < 2000 + step as u128 * 1200 { return; }
         let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return; };
         let mut button = MouseButton::Left;
         let rect = match step {
-            0 => {
-                crate::clipboard::remember_as("sk-synthetic-secret-0123456789", Some(true));
-                crate::clipboard::remember_as("짧은 항목", Some(false));
-                crate::clipboard::remember_as(&format!("{}\nhttps://example.com/{}\n\n마지막 줄", "긴 한글 본문 줄바꿈 확인 ".repeat(20), "long-path".repeat(30)), Some(false));
-                self.statusbar.clip_rect
-            }
+            0 => self.statusbar.clip_rect,
             1 => self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::PickClip(_)).then_some(*r)),
             2 => {
                 let expanded = self.statusbar.clip_expanded.is_some();
@@ -3089,7 +3093,12 @@ impl App {
             }
         };
         let Some(r) = rect else {
-            eprintln!("[clipboard-probe] FAILED missing_target step={step}");
+            if step == 0 && START.get().is_some_and(|start| start.elapsed().as_secs() < 8) {
+                self.chrome_dirty = true;
+                if let Some(window) = &self.window { window.request_redraw(); }
+                return;
+            }
+            eprintln!("[clipboard-probe] FAILED missing_rendered_target step={step} seeded=true timeout_ms=8000");
             STEP.store(7, Ordering::Relaxed);
             return;
         };
