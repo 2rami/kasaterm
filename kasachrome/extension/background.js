@@ -1,4 +1,4 @@
-import { dispatch, targetTabOf, reapplyEmulation, forgetEmulation, reapplyLayout, forgetLayout, layoutState, layoutToggle } from './tools.js'
+import { dispatch, targetTabOf, reapplyEmulation, forgetEmulation, emulationOf, reapplyLayout, forgetLayout, layoutState, layoutToggle } from './tools.js'
 import { setBridgeSender, bridgeResolve } from './bridge-ask.js'
 import { openSession, closeSession, markBusy, markDone, forgetTab, refreshAction, restoreOverlay, snapshot, groupTabs, ungroupTabs, addActivity, clearPanes, repaintAll } from './sessions.js'
 import { getDisplay, setDisplay } from './display.js'
@@ -242,6 +242,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.op === 'layoutToggle') {
     layoutToggle(msg.tabId)
       .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
+    return true
+  }
+  // 사람이 팝업에서 기기 뷰를 직접 고르는 길. 터미널의 학생에게 「폰으로 봐 줘」 하고 기다리는
+  // 것 말고 다른 길이 하나는 있어야 한다 — 레이아웃을 눈으로 보는 것은 사람이 하는 일이다.
+  if (msg.op === 'emulateState') {
+    emulationOf(msg.tabId)
+      .then(sendResponse)
+      .catch(() => sendResponse({ on: false }))
+    return true
+  }
+  if (msg.op === 'emulate') {
+    // 팝업에는 세션이 없다. dispatch 의 ctx.client 를 비워 두면 그대로 통과한다 —
+    // emulate_device 는 탭만 보고 일하지 누가 불렀는지 묻지 않는다.
+    dispatch('emulate_device', msg.args || {}, {})
+      .then((result) => sendResponse({ ok: true, result }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
     return true
   }

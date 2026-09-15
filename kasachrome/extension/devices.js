@@ -71,6 +71,16 @@ const LIST = [
   { name: 'Surface Pro 7', width: 912, height: 1368, dsf: 2, os: 'windows', model: '', mobile: false, touch: true, aliases: ['surface-pro-7', 'surface-pro', 'surface'] },
   { name: 'Nest Hub', width: 1024, height: 600, dsf: 2, os: 'chromeos', model: '', mobile: false, touch: true, aliases: ['nest-hub'] },
   { name: 'Nest Hub Max', width: 1280, height: 800, dsf: 2, os: 'chromeos', model: '', mobile: false, touch: true, aliases: ['nest-hub-max'] },
+
+  // ── 데스크톱 해상도 ───────────────────────────────────────────────────────
+  // ★`os` 가 없다 — 그래서 `uaOverrideFor` 가 null 을 돌려주고 UA 는 이 기계의 것 그대로 남는다.
+  // 일부러 그렇다: 이 프리셋은 「다른 기기인 척」이 아니라 **넓은 화면에서 어떻게 보이나**를 재는
+  // 자리다. 1920 을 보려는 사람에게 Windows UA 를 씌우면 어떤 기기도 아닌 조합이 된다.
+  // ⚠️창보다 큰 값이라 `fit` 이 render 를 줄여 넣는다. CSS 픽셀은 그대로라 미디어 쿼리는 전부
+  // 제 값으로 걸리지만, 글자가 작게 보이는 것은 축소 때문이지 페이지 탓이 아니다.
+  { name: 'Laptop', width: 1440, height: 900, dsf: 1, mobile: false, touch: false, aliases: ['laptop', 'notebook', 'macbook'] },
+  { name: 'Desktop 1080p', width: 1920, height: 1080, dsf: 1, mobile: false, touch: false, aliases: ['desktop', 'fhd', '1080p', 'full-hd'] },
+  { name: 'Desktop 4K', width: 3840, height: 2160, dsf: 1, mobile: false, touch: false, aliases: ['4k', 'uhd', '2160p', 'desktop-4k'] },
 ]
 
 // `iPad Pro 12.9` · `iphone_14_pro_max` · `Galaxy S8+` 가 전부 같은 키로 떨어지게 한다. 사람이

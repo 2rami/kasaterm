@@ -183,6 +183,16 @@ export async function reapplyEmulation(tabId) {
   return fixed.length ? { tabId, fixed } : null
 }
 
+// 이 탭에 지금 무엇이 걸려 있나. 팝업의 기기 버튼이 어느 것을 눌린 상태로 그릴지 정하는 값이라,
+// 기록에 남긴 폭·높이를 그대로 준다 — 페이지에서 잰 값이 아니라 **우리가 건 값**이어야 한다.
+// 페이지가 뷰포트 메타로 더 넓은 레이아웃 폭을 요구하면 실측값은 요청값과 다르고, 그걸로 버튼을
+// 고르면 눌러둔 기기가 화면에서 슬쩍 다른 것으로 바뀐다.
+export async function emulationOf(tabId) {
+  const at = (await loadEmulated()).get(Number(tabId))
+  if (!at) return { on: false }
+  return { on: true, width: at.width, height: at.height, mobile: !!at.mobile, touch: !!at.touch, scale: at.scale ?? 1 }
+}
+
 export async function forgetEmulation(tabId) {
   const map = await loadEmulated()
   if (map.delete(tabId)) await saveEmulated()
@@ -245,10 +255,21 @@ function waitForLoad(tabId, timeoutMs = 20000) {
 // 띄우고 그것이 슬라이드해 내려오는 동안 높이가 계속 줄어든다(실측: 직후 632 → 71ms 600 →
 // 123ms 583 에서 안정). 그 과도기 값을 쓰면 창을 53px 크게 잡아 그만큼 화면 밖으로 밀려난다.
 async function measureRoom(tabId) {
+  // ⚠️창 크기를 함께 받아 두는 이유는 아래 stale 판정 때문이다. 창은 OS 가 주는 값이라 어떤
+  // override 로도 오염되지 않는 유일한 잣대다.
+  const tab = await chrome.tabs.get(tabId).catch(() => null)
+  const win = tab ? await chrome.windows.get(tab.windowId).catch(() => null) : null
   let prev = null
   for (let i = 0; i < 8; i++) {
     const now = await cdp.evaluate(tabId, '({ w: innerWidth, h: innerHeight })', { timeoutMs: PROBE_TIMEOUT_MS }).catch(() => null)
     if (!now) return prev
+    // ★숨은 탭은 override 를 바꿔도 레이아웃을 다시 하지 않아 innerWidth 가 **직전 기기 크기**로
+    // 남는다(2026-09-16 실측: 4K 를 걸었다 푼 배경 탭이 clear 를 두 번 불러도 3840x2160 을 계속
+    // 보고했고, 탭을 앞으로 꺼내자 그 자리에서 1272x812 가 됐다). 그 값을 창 공간으로 믿으면
+    // scale 과 fullyVisible 이 통째로 거짓이 된다 — 하단 잘림을 잡으라고 만든 값이 정확히 그
+    // 경우를 놓치고 「다 보인다」고 답한다. 창보다 큰 뷰포트는 잰 것이 아니라 남은 것이므로,
+    // 모르는 채로 두고(null) 부르는 쪽이 그 사실을 알게 한다.
+    if (win?.width && win?.height && (now.w > win.width || now.h > win.height)) return null
     if (prev && prev.w === now.w && prev.h === now.h) return now
     prev = now
     await new Promise((r) => setTimeout(r, 60))
@@ -1333,6 +1354,9 @@ const handlers = {
     }
     if (scale < 1 && room) notes.push(`창이 ${room.w}x${room.h} 라 ${Math.round(scale * 100)}% 로 축소해 넣었습니다. CSS 픽셀은 ${w}x${h} 그대로여서 미디어쿼리는 안 바뀝니다.`)
     else if (overflows && room) notes.push(`⚠️창(${room.w}x${room.h})보다 커서 화면 밖으로 잘립니다. bottom 에 붙은 요소는 안 보입니다 — fit 을 켜면 축소해 맞춥니다.`)
+    // 못 쟀으면 못 쟀다고 한다. windowRoom·fullyVisible 이 null 인 채로 조용히 넘어가면 부르는 쪽은
+    // 「잘림 경고가 없으니 다 보인다」로 읽는다 — 그게 이 값을 만든 이유와 정확히 반대다.
+    else if (!room) notes.push('⚠️창 공간을 재지 못해 축소·잘림을 판정하지 않았습니다(windowRoom·fullyVisible 이 null). 숨은 탭은 override 를 바꿔도 레이아웃을 다시 하지 않아 직전 크기가 그대로 남습니다 — activate_tab 으로 앞에 꺼낸 뒤 다시 걸면 잽니다.')
     // UA 로 가르는 것은 서버다. 이미 받아둔 문서는 안 바뀌므로 다시 요청해야 그 분기가 보인다.
     if (uaSet) notes.push('UA 는 다음 요청부터 서버에 전달됩니다 — 이미 열린 페이지의 서버 분기를 보려면 navigate 로 다시 여세요.')
     else if (uaMode === 'off' && sizedByHand && device === undefined) notes.push('기기 이름 없이 크기만 줘서 UA 는 그대로 둡니다. 기기 UA 까지 필요하면 device 를 함께 주세요.')

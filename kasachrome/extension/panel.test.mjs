@@ -49,6 +49,8 @@ function mockDom() {
   globalThis.document = {
     getElementById: (id) => byId.get(id) || null,
     createElement: (tag) => new El(tag),
+    // SVG 아이콘은 createElementNS 로 만든다 — namespaceURI 까지 흉내내야 path 도 같은 길로 간다.
+    createElementNS: (ns, tag) => Object.assign(new El(tag), { namespaceURI: ns }),
     createTextNode: (t) => String(t),
     querySelector: () => new El('div'),
     body,
@@ -57,14 +59,17 @@ function mockDom() {
   return byId
 }
 
-function mockChrome(state) {
+function mockChrome(state, emulation = { on: false }) {
   const store = {}
+  const calls = []
   globalThis.chrome = {
     runtime: {
       getManifest: () => ({ name: 'Test' }),
       sendMessage: (msg, cb) => {
         if (msg.op === 'state') return cb(state)
         if (msg.op === 'layoutState') return cb({ ok: true, on: false, src: null, tabId: 7 })
+        if (msg.op === 'emulateState') return cb(emulation)
+        if (msg.op === 'emulate') { calls.push(msg.args); return cb({ ok: true }) }
         cb({ ok: true })
       },
       lastError: null,
@@ -74,7 +79,7 @@ function mockChrome(state) {
     windows: { getCurrent: async () => ({ id: 1 }) },
     sidePanel: { open() {} },
   }
-  return store
+  return { store, calls }
 }
 
 const SESSION = {
@@ -90,24 +95,24 @@ const SESSION = {
 
 const settle = async (n = 8) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)) }
 
-test('the popup renders without throwing and splits work from the layout tool', async () => {
+test('the popup renders without throwing and keeps each tool on its own tab', async () => {
   const byId = mockDom()
-  const store = mockChrome(SESSION)
+  const { store } = mockChrome(SESSION)
   await import(`./panel.js?test=${Date.now()}`)
   await settle()
 
   const nav = byId.get('nav')
   const root = byId.get('root')
-  assert.deepEqual(nav.children.map((b) => b.textContent), ['작업', '레이아웃툴'])
+  assert.deepEqual(nav.children.map((b) => b.textContent), ['작업', '기기', '레이아웃툴'])
   assert.equal(nav.children[0].getAttribute('aria-selected'), 'true')
-  // 작업 화면에는 누가 무슨 작업 중인지가 있고, 레이아웃툴 단추는 섞여 있지 않다.
+  // 작업 화면에는 누가 무슨 작업 중인지가 있고, 도구 단추는 섞여 있지 않다.
   assert.match(root.text, /사키리/)
   assert.match(root.text, /결제 플로/)
   assert.doesNotMatch(root.text, /레이아웃툴/)
 
-  nav.children[1].handlers.get('click')()
+  nav.children[2].handlers.get('click')()
   await settle()
-  assert.equal(nav.children[1].getAttribute('aria-selected'), 'true')
+  assert.equal(nav.children[2].getAttribute('aria-selected'), 'true')
   assert.match(root.text, /레이아웃툴/)
   // 갈라놓은 값어치가 여기다 — 매초 바뀌는 현황이 도구 화면에 딸려 오지 않는다.
   assert.doesNotMatch(root.text, /사키리/)
@@ -115,7 +120,50 @@ test('the popup renders without throwing and splits work from the layout tool', 
   assert.equal(store.panelView, 'layout')
 })
 
-test('a disconnected bridge is reported on either tab', async () => {
+test('device buttons apply to the tab the human is looking at, and go back', async () => {
+  const byId = mockDom()
+  const { calls } = mockChrome(SESSION)
+  await import(`./panel.js?test=${Date.now()}${Math.random()}`)
+  await settle()
+
+  byId.get('nav').children[1].handlers.get('click')()
+  await settle()
+  const root = byId.get('root')
+  assert.match(root.text, /폰/)
+  assert.match(root.text, /4K/)
+  // 크기를 함께 낸다 — 이름만으로는 「노트북」과 「FHD」가 무엇이 다른지 안 보인다.
+  assert.match(root.text, /3840×2160/)
+
+  const grid = root.children[0].children.find((c) => c.className === 'dev-grid')
+  const labelOf = (b) => b.children.find((c) => c.className === 'dev-l')?.textContent
+  grid.children.find((b) => labelOf(b) === '폰').handlers.get('click')()
+  await settle()
+  // 활성 탭에만 건다. 창을 건드리면 이 브라우저를 함께 쓰는 사람들의 설정이 통째로 날아간다.
+  assert.deepEqual(calls.at(-1), { tabId: 7, device: 'iphone-15-pro' })
+
+  grid.children.find((b) => labelOf(b) === '원래대로').handlers.get('click')()
+  await settle()
+  assert.deepEqual(calls.at(-1), { tabId: 7, off: true })
+})
+
+test('a device already applied shows which button is pressed, and says it was scaled down', async () => {
+  const byId = mockDom()
+  mockChrome(SESSION, { on: true, width: 3840, height: 2160, scale: 0.39 })
+  await import(`./panel.js?test=${Date.now()}${Math.random()}`)
+  await settle()
+
+  byId.get('nav').children[1].handlers.get('click')()
+  await settle()
+  const root = byId.get('root')
+  const grid = root.children[0].children.find((c) => c.className === 'dev-grid')
+  const pressed = grid.children.filter((b) => b.getAttribute('aria-pressed') === 'true')
+  assert.equal(pressed.length, 1)
+  assert.equal(pressed[0].children.find((c) => c.className === 'dev-l').textContent, '4K')
+  // 줄여서 보여준다는 사실을 안 밝히면 「왜 글자가 작지」가 페이지 탓으로 읽힌다.
+  assert.match(root.text, /39% 로 줄여/)
+})
+
+test('a disconnected bridge is reported on every tab', async () => {
   const byId = mockDom()
   mockChrome({ connected: false, sessions: [] })
   await import(`./panel.js?test=${Date.now()}${Math.random()}`)

@@ -12,7 +12,7 @@ let lastSig = null
 // 화면 둘. 「작업」은 1초마다 갱신되는 현황(누가 어느 탭을 잡고 무슨 작업 중인지)이고,
 // 레이아웃툴은 사람이 가끔 켜고 끄는 도구라 성격이 다르다 — 한 화면에 세로로 쌓아두면
 // 매초 바뀌는 목록 위에 안 바뀌는 단추가 얹혀 어느 쪽도 눈에 안 들어온다.
-const VIEWS = [['work', '작업'], ['layout', '레이아웃툴']]
+const VIEWS = [['work', '작업'], ['device', '기기'], ['layout', '레이아웃툴']]
 const VIEW_KEY = 'panelView'
 const navEl = document.getElementById('nav')
 const navButtons = new Map()
@@ -121,6 +121,104 @@ function displayBar(d) {
   return wrap
 }
 
+// --- 기기 뷰 ----------------------------------------------------------------
+
+// 사람이 지금 보는 탭의 화면 크기를 한 번에 바꾸는 줄. 터미널의 학생에게 「폰으로 봐 줘」 하고
+// 기다리는 것 말고 다른 길이 하나는 있어야 한다 — 레이아웃을 눈으로 보는 것은 사람이 하는 일이다.
+// ⚠️창 크기를 바꾸는 게 아니라 이 탭에만 거는 override 다. 창은 이 브라우저를 함께 쓰는 모두의
+// 것이라 건드리면 남의 설정이 통째로 날아가고, 크롬은 500px 아래로 좁히지도 못한다.
+const DEVICES = [
+  { key: null, label: '원래대로', icon: 'reset', hint: '이 탭의 기기 뷰를 끕니다' },
+  { key: 'iphone-15-pro', label: '폰', icon: 'phone', w: 393, h: 852 },
+  { key: 'ipad-air', label: '태블릿', icon: 'tablet', w: 820, h: 1180 },
+  { key: 'laptop', label: '노트북', icon: 'laptop', w: 1440, h: 900 },
+  { key: 'desktop-1080p', label: 'FHD', icon: 'monitor', w: 1920, h: 1080 },
+  { key: 'desktop-4k', label: '4K', icon: 'monitor', w: 3840, h: 2160 },
+]
+
+// 이모지 대신 직접 그린다. 기기 실루엣은 글자보다 빨리 읽히고, 이모지는 OS 마다 다른 그림이 나온다.
+const ICONS = {
+  // 세로로 긴 몸체 + 위쪽 스피커.
+  phone: 'M7.5 2.5h9a1 1 0 0 1 1 1v17a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1ZM10 5h4',
+  // 폰보다 넓고 아래에 홈 버튼.
+  tablet: 'M5 2.5h14a1 1 0 0 1 1 1v17a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1ZM12 18.8v.01',
+  // 화면 + 바닥으로 벌어지는 받침.
+  laptop: 'M5 5.5h14a1 1 0 0 1 1 1v9H4v-9a1 1 0 0 1 1-1ZM2 18.5h20',
+  // 화면 + 목 + 스탠드.
+  monitor: 'M3 4.5h18a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1ZM12 16.5v3M8.5 19.5h7',
+  // 되돌리는 화살표.
+  reset: 'M4 11a8 8 0 1 1 2.3 5.7M4 5.5V11h5.5',
+}
+
+function deviceIcon(kind) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 24 24')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('stroke', 'currentColor')
+  svg.setAttribute('stroke-width', '1.5')
+  svg.setAttribute('stroke-linecap', 'round')
+  svg.setAttribute('stroke-linejoin', 'round')
+  const path = document.createElementNS(svg.namespaceURI, 'path')
+  path.setAttribute('d', ICONS[kind] || ICONS.monitor)
+  svg.append(path)
+  return svg
+}
+
+// 지금 걸린 것이 어느 버튼인지. 기기 이름이 아니라 **크기**로 맞춘다 — 학생이 도구로 건 기기는
+// 이 목록에 없을 수 있고(Pixel 7·Surface 등), 그때 아무 버튼도 안 눌린 것으로 두는 편이 정직하다.
+function currentDevice(emul) {
+  if (!emul?.on) return null
+  return DEVICES.find((d) => d.w === emul.width && d.h === emul.height) || null
+}
+
+function devicePane(emul, tabId) {
+  const wrap = el('div', 'dev')
+  const head = el('div', 'disp-h')
+  head.append(el('span', 'disp-t', '기기 뷰'))
+  wrap.append(head)
+
+  if (tabId == null) {
+    wrap.append(el('div', 'lay-n', '지금 보고 있는 탭을 찾지 못했습니다. 페이지를 열고 다시 시도해 주세요.'))
+    return wrap
+  }
+
+  const note = el('div', 'lay-n')
+  const here = currentDevice(emul)
+  const grid = el('div', 'dev-grid')
+  for (const d of DEVICES) {
+    const on = d.key ? here?.key === d.key : !emul?.on
+    const b = el('button', on ? 'dev-b on' : 'dev-b')
+    b.title = d.hint || `${d.w}×${d.h}`
+    b.setAttribute('aria-pressed', String(on))
+    b.append(deviceIcon(d.icon), el('span', 'dev-l', d.label))
+    if (d.w) b.append(el('span', 'dev-s', `${d.w}×${d.h}`))
+    b.addEventListener('click', async () => {
+      for (const other of grid.children) other.disabled = true
+      const r = await ask('emulate', { args: d.key ? { tabId, device: d.key } : { tabId, off: true } })
+      if (r && r.ok === false) {
+        note.textContent = r.error || '기기 뷰를 바꾸지 못했습니다'
+        wrap.classList.add('bad')
+        for (const other of grid.children) other.disabled = false
+        return
+      }
+      lastSig = null
+      await tick()
+    })
+    grid.append(b)
+  }
+  wrap.append(grid)
+
+  // 창보다 큰 화면은 줄여서 넣는다. 그 사실을 안 밝히면 「왜 글자가 작지」가 페이지 탓으로 읽힌다.
+  note.textContent = emul?.on
+    ? (emul.scale < 0.999
+      ? `${emul.width}×${emul.height} · 창에 맞춰 ${Math.round(emul.scale * 100)}% 로 줄여 보여줍니다. CSS 크기는 그대로라 반응형 규칙은 제 값으로 걸립니다.`
+      : `${emul.width}×${emul.height} 로 보고 있습니다.`)
+    : '누르면 이 탭에만 걸립니다. 창 크기는 그대로예요 — 창은 이 브라우저를 함께 쓰는 모두의 것이라 건드리지 않습니다.'
+  wrap.append(note)
+  return wrap
+}
+
 // --- 레이아웃툴 -------------------------------------------------------------
 
 // 편집기를 사람이 직접 붙이는 화면. 여기 없으면 터미널의 에이전트에게 「켜 줘」 하는 길밖에 없는데,
@@ -219,7 +317,7 @@ function activityList(log) {
   return wrap
 }
 
-function render(state, layout) {
+function render(state, layout, emul, tabId) {
   const connected = !!state?.connected
   connEl.className = connected ? 'conn on' : 'conn off'
   connText.textContent = connected ? '브리지 연결됨' : '브리지 없음'
@@ -227,6 +325,10 @@ function render(state, layout) {
   rootEl.replaceChildren()
   if (!connected) {
     rootEl.appendChild(el('div', 'warn', `브리지(127.0.0.1:${PORT})에 붙어 있지 않습니다. 터미널에서 브라우저 툴을 한 번 쓰면 브리지가 자동으로 뜹니다.`))
+  }
+  if (view === 'device') {
+    rootEl.appendChild(devicePane(emul, tabId))
+    return
   }
   if (view === 'layout') {
     rootEl.appendChild(layoutPane(layout))
@@ -247,11 +349,12 @@ function render(state, layout) {
 }
 
 // 프사 dataURL 은 25KB 라 비교에서 뺀다 — 어차피 신원이 바뀌면 이름이 같이 바뀐다.
-function sig(state, layout) {
+function sig(state, layout, emul) {
   return JSON.stringify({
     c: state?.connected,
     d: state?.display,
     l: layout && [layout.ok, layout.on, layout.src],
+    e: emul && [emul.on, emul.width, emul.height, emul.scale],
     s: (state?.sessions || []).map((s) => [
       s.key, s.name, s.paneId, s.task, s.busy, s.grouped,
       s.log?.length, s.log?.[0]?.at,
@@ -272,14 +375,15 @@ async function activeTabId() {
 
 async function tick() {
   const my = await activeTabId()
-  const [state, layout] = await Promise.all([
+  const [state, layout, emul] = await Promise.all([
     ask('state'),
     my == null ? null : ask('layoutState', { tabId: my }),
+    my == null ? null : ask('emulateState', { tabId: my }),
   ])
-  const g = sig(state, layout)
+  const g = sig(state, layout, emul)
   if (g === lastSig) return
   lastSig = g
-  render(state, layout)
+  render(state, layout, emul, my)
 }
 
 // 사이드 패널은 한 번 열면 탭을 옮겨다녀도 계속 떠 있다 — 아이콘을 누르지 않아도 보이는 유일한 방법이다.

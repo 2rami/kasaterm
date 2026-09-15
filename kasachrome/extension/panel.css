@@ -143,6 +143,24 @@ body.panel .openpanel { display: none; }
 
 /* 레이아웃툴 줄. 화면 표시 줄과 같은 카드로 보이되, 켜져 있을 때만 색이 산다 —
    무엇이 지금 페이지에 얹혀 있는지가 한눈에 갈려야 한다. */
+/* 기기 뷰 버튼. 아이콘·이름·크기를 세로로 쌓아 한 칸에 담는다 — 이름만으로는 「노트북」과 「FHD」가
+   무엇이 다른지 안 보이고, 크기만으로는 무엇을 고르는지 한눈에 안 들어온다. */
+.dev { margin: 8px 8px 0; padding: 8px 10px 9px; background: var(--card); border: 1px solid var(--line); border-radius: 9px; }
+.dev-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin: 2px 0 8px; }
+.dev-b {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 9px 4px 7px; border: 1px solid var(--line); border-radius: 7px;
+  background: rgba(255,255,255,.02); color: var(--dim); font: inherit; cursor: pointer;
+}
+.dev-b svg { width: 19px; height: 19px; }
+.dev-b:hover:not(:disabled) { color: var(--fg); border-color: #3b424c; background: rgba(255,255,255,.06); }
+.dev-b:disabled { opacity: .5; cursor: default; }
+.dev-b.on { color: #8ba8ff; border-color: rgba(79,124,255,.5); background: rgba(79,124,255,.1); }
+.dev-l { font-size: 11.5px; font-weight: 500; }
+.dev-s { font-size: 9.5px; opacity: .65; font-variant-numeric: tabular-nums; }
+.dev.bad { border-color: rgba(240,140,0,.45); }
+.dev.bad .lay-n { color: var(--busy); }
+
 .lay {
   margin: 8px 8px 0; padding: 8px 10px 9px;
   background: var(--card); border: 1px solid var(--line); border-radius: 10px;
