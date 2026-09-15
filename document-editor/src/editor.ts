@@ -77,12 +77,14 @@ function contentBounds(): Rectangle {
 }
 function selectionAnchor(): Rectangle | undefined {
   if (!editor) return;
-  const selection = getSelection();
-  if (selection?.rangeCount && editor.view.dom.contains(selection.anchorNode)) {
-    const rects = [...selection.getRangeAt(0).getClientRects()].filter(rect => rect.height > 0 && rect.bottom > 8 && rect.top < innerHeight - 8);
-    if (rects.length) return { left: Math.min(...rects.map(rect => rect.left)), right: Math.max(...rects.map(rect => rect.right)), top: rects[0].top, bottom: rects.at(-1)!.bottom };
-  }
   const { from, to } = editor.state.selection;
+  try {
+    // ProseMirror emits selection updates before WebKit commits window.getSelection().
+    const start = editor.view.domAtPos(from), end = editor.view.domAtPos(to);
+    const range = document.createRange(); range.setStart(start.node, start.offset); range.setEnd(end.node, end.offset);
+    const rects = [...range.getClientRects()].filter(rect => rect.height > 0 && rect.bottom > 8 && rect.top < innerHeight - 8);
+    if (rects.length) return { left: Math.min(...rects.map(rect => rect.left)), right: Math.max(...rects.map(rect => rect.right)), top: rects[0].top, bottom: rects.at(-1)!.bottom };
+  } catch { /* Non-text node selections use the editor's own position geometry. */ }
   const start = editor.view.coordsAtPos(from), end = editor.view.coordsAtPos(to);
   if (end.bottom < 8 || start.top > innerHeight - 8) return;
   return { left: Math.min(start.left, end.left), right: Math.max(start.right, end.right), top: start.top, bottom: end.bottom };
