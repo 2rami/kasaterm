@@ -3,6 +3,7 @@ import Placeholder from '@tiptap/extension-placeholder';
 import { DocumentSource, extensions } from './document';
 import { applyTheme } from './theme';
 import { mountVault, type VaultState, type VaultChildren, type VaultSearch } from './vault';
+import { floatingPlacement, type Rectangle } from './floating';
 import './editor.css';
 import './vault.css';
 
@@ -18,6 +19,7 @@ let source = new DocumentSource(), composing = false, pending: { kind: string; e
 let lastMarkdown = '', zoom = 1, slashRange: { from: number; to: number } | undefined;
 let slashIndex = 0, slashItems: Action[] = [];
 let generation = 0, compositionTimer: ReturnType<typeof setTimeout> | undefined;
+let dismissedSelection = '', dismissedSlash = '', blockMenu = false;
 type Action = { label: string; hint: string; run(): void };
 document.body.append(document.createComment('THESIS: Edit the document itself. OWN-WORLD: existing neutral paper, sky focus, system sans. STORY: write, select, format, save. FIRST VIEWPORT: one centered reading measure; contextual tools beside text. FORM: user-pinned Notion/Linear canon. FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md'));
 const root = document.createElement('main'); root.id = 'document';
@@ -27,6 +29,9 @@ const live = document.createElement('div'); live.className = 'save-notice'; live
 const slash = document.createElement('div'); slash.className = 'context-menu slash-menu'; slash.hidden = true; slash.setAttribute('role', 'listbox'); slash.setAttribute('aria-label', '블록 추가');
 const bubble = document.createElement('div'); bubble.className = 'context-menu bubble'; bubble.hidden = true; bubble.setAttribute('role', 'toolbar'); bubble.setAttribute('aria-label', '선택한 글자 서식');
 const panel = document.createElement('div'); panel.className = 'context-menu utility-panel'; panel.hidden = true;
+const addBlock = button('', () => { blockMenu = true; dismissedSlash = ''; showBlockMenu(); }, '블록 추가 · /');
+addBlock.className = 'block-add'; addBlock.hidden = true; addBlock.setAttribute('aria-haspopup', 'listbox');
+addBlock.innerHTML = '<svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>';
 let copyTarget: HTMLElement | null = null;
 const copy = button('복사', async () => {
   if (!copyTarget) return;
@@ -42,7 +47,7 @@ const copy = button('복사', async () => {
   } catch { copy.textContent = '복사 실패'; }
 }, '코드 블록 복사');
 copy.className = 'code-copy'; copy.hidden = true;
-document.body.append(root, live, slash, bubble, panel, copy);
+document.body.append(root, live, slash, bubble, panel, copy, addBlock);
 const vault = mountVault(root, (kind, payload) => send(kind, false, payload));
 function send(kind: string, includeContent = false, extra = {}) {
   if (!token) return;
@@ -66,6 +71,32 @@ function position(element: HTMLElement, left: number, top: number) {
   element.style.left = Math.max(8, Math.min(left, innerWidth - element.offsetWidth - 8)) + 'px';
   element.style.top = Math.max(8, Math.min(top, innerHeight - element.offsetHeight - 8)) + 'px';
 }
+function contentBounds(): Rectangle {
+  const canvas = root.parentElement!.getBoundingClientRect();
+  return { left: Math.max(8, canvas.left + 8), right: Math.min(innerWidth - 8, canvas.right - 8), top: 8, bottom: innerHeight - 8 };
+}
+function selectionAnchor(): Rectangle | undefined {
+  if (!editor) return;
+  const selection = getSelection();
+  if (selection?.rangeCount && editor.view.dom.contains(selection.anchorNode)) {
+    const rects = [...selection.getRangeAt(0).getClientRects()].filter(rect => rect.height > 0 && rect.bottom > 8 && rect.top < innerHeight - 8);
+    if (rects.length) return { left: Math.min(...rects.map(rect => rect.left)), right: Math.max(...rects.map(rect => rect.right)), top: rects[0].top, bottom: rects.at(-1)!.bottom };
+  }
+  const { from, to } = editor.state.selection;
+  const start = editor.view.coordsAtPos(from), end = editor.view.coordsAtPos(to);
+  if (end.bottom < 8 || start.top > innerHeight - 8) return;
+  return { left: Math.min(start.left, end.left), right: Math.max(start.right, end.right), top: start.top, bottom: end.bottom };
+}
+function floatNear(element: HTMLElement, anchor: Rectangle, preferred: 'above' | 'below') {
+  const bounds = contentBounds();
+  element.hidden = false; element.style.maxWidth = `${bounds.right - bounds.left}px`; element.style.maxHeight = '';
+  const placement = floatingPlacement(anchor, element.offsetWidth, element.offsetHeight, bounds, preferred);
+  element.style.left = `${placement.left}px`; element.style.top = `${placement.top}px`; element.style.maxHeight = `${placement.maxHeight}px`; element.dataset.side = placement.side;
+}
+function dismissTools() {
+  if (editor) { const selection = editor.state.selection; dismissedSelection = `${selection.from}:${selection.to}`; dismissedSlash = `${selection.from}:${selection.$from.parent.textContent}`; }
+  blockMenu = false; bubble.hidden = slash.hidden = panel.hidden = addBlock.hidden = true;
+}
 function actions(): Action[] {
   const chain = () => editor!.chain().focus();
   return [
@@ -81,31 +112,52 @@ function actions(): Action[] {
   ];
 }
 function runSlash(index: number) {
-  if (!slashRange || !slashItems[index]) return;
-  editor!.chain().focus().deleteRange(slashRange).run(); slashItems[index].run(); slash.hidden = true; slashRange = undefined;
+  if (!editor || !slashItems[index]) return;
+  const convert = blockMenu; blockMenu = false;
+  if (!convert && slashRange) editor.chain().focus().deleteRange(slashRange).run();
+  slashItems[index].run(); slash.hidden = true; slashRange = undefined;
 }
-function updateMenus() {
-  if (!editor || composing) return;
-  const { from, to, $from, empty } = editor.state.selection;
-  bubble.hidden = empty || !editor.isEditable || editor.isActive('codeBlock') || editor.isActive('preservedMarkdown');
-  if (!bubble.hidden) {
-    const a = editor.view.coordsAtPos(from), b = editor.view.coordsAtPos(to);
-    position(bubble, (a.left + b.left) / 2 - bubble.offsetWidth / 2, a.top - bubble.offsetHeight - 8);
-    for (const child of bubble.querySelectorAll<HTMLButtonElement>('button[data-mark]')) child.setAttribute('aria-pressed', String(editor.isActive(child.dataset.mark!)));
-  }
-  const before = $from.parent.textBetween(0, $from.parentOffset, '\n', '\0');
-  const match = empty && !editor.isActive('codeBlock') && !editor.isActive('preservedMarkdown') && /^\/([^\s/]*)$/.exec(before);
-  if (!match) { slash.hidden = true; slashRange = undefined; return; }
-  slashRange = { from: from - before.length, to: from };
-  slashItems = actions().filter(a => (a.label + a.hint).includes(match[1]));
+function showBlockMenu(query = '') {
+  if (!editor) return;
+  slashItems = actions().filter(a => (a.label + a.hint).includes(query));
   slashIndex = Math.min(slashIndex, Math.max(0, slashItems.length - 1));
   slash.replaceChildren();
   for (const [index, action] of slashItems.entries()) {
-    const b = button(action.label, () => runSlash(index)); b.setAttribute('role', 'option'); b.setAttribute('aria-selected', String(index === slashIndex));
+    const b = button(action.label, () => runSlash(index)); b.id = `block-option-${index}`; b.setAttribute('role', 'option'); b.setAttribute('aria-selected', String(index === slashIndex));
     const detail = document.createElement('span'); detail.textContent = action.hint; b.append(detail); slash.append(b);
   }
   if (!slashItems.length) { const empty = document.createElement('p'); empty.textContent = '일치하는 블록이 없어요'; slash.append(empty); }
-  slash.hidden = false; const rect = editor.view.coordsAtPos(from); position(slash, rect.left, rect.bottom + 8);
+  slash.setAttribute('aria-activedescendant', `block-option-${slashIndex}`);
+  const rect = editor.view.coordsAtPos(editor.state.selection.from);
+  floatNear(slash, { ...rect, right: rect.left + Math.min(272, contentBounds().right - rect.left) }, 'below');
+  bubble.hidden = true;
+}
+function updateMenus() {
+  if (!editor || composing || !editor.isEditable || root.hidden) { bubble.hidden = slash.hidden = addBlock.hidden = true; return; }
+  const { from, to, $from, empty } = editor.state.selection;
+  const inside = editor.isFocused || bubble.contains(document.activeElement) || slash.contains(document.activeElement);
+  const anchor = selectionAnchor();
+  bubble.hidden = empty || !inside || !anchor || dismissedSelection === `${from}:${to}` || !panel.hidden || editor.isActive('codeBlock') || editor.isActive('preservedMarkdown');
+  if (!bubble.hidden && anchor) {
+    floatNear(bubble, anchor, 'above');
+    for (const child of bubble.querySelectorAll<HTMLButtonElement>('button[data-mark]')) child.setAttribute('aria-pressed', String(editor.isActive(child.dataset.mark!)));
+    const kind = bubble.querySelector<HTMLButtonElement>('[data-block-type]');
+    if (kind) kind.textContent = editor.isActive('heading') ? `제목 ${editor.getAttributes('heading').level}` : editor.isActive('taskList') ? '할 일' : editor.isActive('bulletList') ? '목록' : editor.isActive('orderedList') ? '번호' : '본문';
+  }
+  const raw = editor.isActive('codeBlock') || editor.isActive('preservedMarkdown');
+  const rect = editor.view.coordsAtPos(from);
+  const emptyBlock = empty && $from.parent.type.name === 'paragraph' && $from.parent.content.size === 0;
+  addBlock.hidden = !emptyBlock || !inside || !panel.hidden || raw || rect.bottom < 8 || rect.top > innerHeight - 8;
+  if (!addBlock.hidden) {
+    addBlock.style.left = `${Math.max(contentBounds().left - 4, rect.left - 28)}px`;
+    addBlock.style.top = `${rect.top + (rect.bottom - rect.top - 22) / 2}px`;
+  }
+  if (blockMenu) { showBlockMenu(); return; }
+  const before = $from.parent.textBetween(0, $from.parentOffset, '\n', '\0');
+  const match = empty && inside && !raw && /^\/([^\s/]*)$/.exec(before);
+  if (!match || dismissedSlash === `${from}:${$from.parent.textContent}`) { slash.hidden = true; slashRange = undefined; return; }
+  slashRange = { from: from - before.length, to: from };
+  showBlockMenu(match[1]);
 }
 function linkPanel() {
   if (!editor) return;
@@ -120,8 +172,9 @@ function linkPanel() {
   };
   field.addEventListener('keydown', e => { if (e.key === 'Enter') apply(); if (e.key === 'Escape') { panel.hidden = true; editor!.commands.focus(); } });
   panel.append(field, button('적용', apply), button('닫기', () => { panel.hidden = true; editor!.commands.focus(); }));
-  position(panel, Math.max(8, innerWidth / 2 - 160), 20); field.focus();
+  const anchor = selectionAnchor(); if (anchor) floatNear(panel, anchor, 'above'); else position(panel, Math.max(8, innerWidth / 2 - 160), 20); bubble.hidden = true; field.focus();
 }
+const blockType = button('본문', () => { blockMenu = true; dismissedSlash = ''; showBlockMenu(); }, '문단 종류 변경'); blockType.dataset.blockType = ''; blockType.setAttribute('aria-haspopup', 'listbox'); bubble.append(blockType);
 for (const [label, mark, title, command] of [
   ['B', 'bold', '굵게 · ⌘B', 'toggleBold'], ['I', 'italic', '기울임 · ⌘I', 'toggleItalic'], ['S', 'strike', '취소선', 'toggleStrike'], ['코드', 'code', '인라인 코드', 'toggleCode'],
 ] as const) {
@@ -173,8 +226,8 @@ function setContent(data: Content) {
 window.kasatermEditor = {
   init(data) {
     const ownGeneration = ++generation;
-    clearTimeout(compositionTimer); pending = []; composing = false; slashRange = undefined;
-    slash.hidden = bubble.hidden = panel.hidden = copy.hidden = true; live.textContent = ''; live.classList.remove('visible');
+    clearTimeout(compositionTimer); pending = []; composing = false; slashRange = undefined; blockMenu = false; dismissedSelection = dismissedSlash = '';
+    slash.hidden = bubble.hidden = panel.hidden = copy.hidden = addBlock.hidden = true; live.textContent = ''; live.classList.remove('visible');
     token = data.token; window.__KASATERM_DOC_TOKEN__ = token; revision = data.revision; lastMarkdown = data.markdown; applyTheme(data.theme); editor?.destroy(); source = new DocumentSource();
     editor = new Editor({ element: mount, extensions: [...extensions(), Placeholder.configure({ placeholder: '내용을 입력하거나 / 로 블록을 추가하세요' })], content: source.load(data.markdown), editable: data.editable !== false,
       editorProps: { attributes: { class: 'document-content', role: 'textbox', 'aria-label': '마크다운 문서 본문', 'aria-multiline': 'true', spellcheck: 'false' },
@@ -182,19 +235,19 @@ window.kasatermEditor = {
           if (ownGeneration !== generation) return false;
           if ((event.metaKey || event.ctrlKey) && ['s', 'w', 'f', 'k'].includes(event.key.toLowerCase())) { event.preventDefault(); const key = event.key.toLowerCase(); if (key === 's') commit('save'); else if (key === 'w') commit('close'); else if (key === 'f') find(); else linkPanel(); return true; }
           if (event.isComposing || composing) return false;
-          if (!slash.hidden) { if (event.key === 'Escape') { slash.hidden = true; return true; } if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); slashIndex = (slashIndex + (event.key === 'ArrowDown' ? 1 : -1) + slashItems.length) % Math.max(1, slashItems.length); updateMenus(); return true; } if (event.key === 'Enter') { event.preventDefault(); runSlash(slashIndex); return true; } }
+          if (!slash.hidden) { if (event.key === 'Escape') { dismissTools(); return true; } if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); slashIndex = (slashIndex + (event.key === 'ArrowDown' ? 1 : -1) + slashItems.length) % Math.max(1, slashItems.length); updateMenus(); slash.querySelector('[aria-selected=true]')?.scrollIntoView({ block: 'nearest' }); return true; } if (event.key === 'Enter') { event.preventDefault(); runSlash(slashIndex); return true; } }
           return false;
         },
         handleClick(_view, _pos, event) { if (ownGeneration !== generation) return false; const anchor = (event.target as HTMLElement).closest('a'); if (anchor && (event.metaKey || event.ctrlKey)) { const href = anchor.getAttribute('href') ?? ''; if (/^(https?:|mailto:)/i.test(href)) send('open-link', false, { href }); event.preventDefault(); return true; } return false; },
-      }, onUpdate: () => { if (ownGeneration !== generation) return; report(); updateMenus(); }, onSelectionUpdate: () => { if (ownGeneration === generation) updateMenus(); },
+      }, onUpdate: () => { if (ownGeneration !== generation) return; report(); updateMenus(); }, onSelectionUpdate: () => { if (ownGeneration === generation) updateMenus(); }, onFocus: () => { if (ownGeneration === generation) updateMenus(); },
     });
-    editor.view.dom.addEventListener('compositionstart', () => { if (ownGeneration !== generation) return; composing = true; slash.hidden = bubble.hidden = true; send('change'); });
+    editor.view.dom.addEventListener('compositionstart', () => { if (ownGeneration !== generation) return; composing = true; blockMenu = false; slash.hidden = bubble.hidden = addBlock.hidden = true; send('change'); });
     editor.view.dom.addEventListener('compositionend', () => { if (ownGeneration !== generation) return; composing = false; compositionTimer = setTimeout(() => { if (ownGeneration !== generation) return; report(); const queue = pending; pending = []; queue.forEach(item => commit(item.kind, item.extra)); updateMenus(); }, 0); });
   }, setContent, command, setTheme: applyTheme, ...vault,
   setSaveState(data) { live.textContent = data.state === 'error' ? (data.message || '저장하지 못했어요. 다시 저장해주세요.') : ''; live.classList.toggle('visible', data.state === 'error'); },
 };
-document.addEventListener('keydown', e => { if (e.key === 'Escape') { panel.hidden = true; bubble.hidden = true; slash.hidden = true; } });
-document.addEventListener('mousedown', e => { if (!panel.contains(e.target as globalThis.Node) && !bubble.contains(e.target as globalThis.Node) && !slash.contains(e.target as globalThis.Node)) panel.hidden = true; });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !e.isComposing) dismissTools(); });
+document.addEventListener('mousedown', e => { if (!panel.contains(e.target as globalThis.Node) && !bubble.contains(e.target as globalThis.Node) && !slash.contains(e.target as globalThis.Node) && !addBlock.contains(e.target as globalThis.Node)) { panel.hidden = true; blockMenu = false; if (!root.contains(e.target as globalThis.Node)) dismissTools(); } });
 document.addEventListener('mouseover', e => {
   const target = e.target as HTMLElement;
   const link = target.closest('a'); if (link) link.title = '⌘ 또는 Ctrl 키를 누른 채 클릭하면 링크를 열어요';

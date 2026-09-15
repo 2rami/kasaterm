@@ -34,7 +34,9 @@ table { border-collapse:collapse; table-layout:fixed; width:100%; margin:1em 0; 
 .document-button--danger { color:var(--danger); }
 button:focus-visible,input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 .slash-menu { width:272px; }.slash-menu button { width:100%; display:flex; align-items:center; justify-content:space-between; gap:12px; }.slash-menu button span { color:var(--muted); font-size:11px; }
-.bubble { display:flex; gap:2px; }.bubble button[data-mark=bold] { font-weight:750; }.bubble button[data-mark=italic] { font-style:italic; }.bubble button[data-mark=strike] { text-decoration:line-through; }
+.bubble { display:flex; flex-wrap:wrap; gap:2px; width:max-content; }.bubble button[data-mark=bold] { font-weight:750; }.bubble button[data-mark=italic] { font-style:italic; }.bubble button[data-mark=strike] { text-decoration:line-through; }
+.bubble button[data-block-type] { margin-inline-end:3px; border-inline-end:1px solid var(--line); border-radius:4px 0 0 4px; }
+.block-add { position:fixed; z-index:18; display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; margin:0; padding:0; border:0; border-radius:4px; background:var(--paper); color:var(--muted); cursor:pointer; }.block-add:hover,.block-add:focus-visible { background:var(--hover); color:var(--ink); }
 .code-copy { position:fixed; z-index:10; min-height:28px; padding:4px 9px; border:1px solid var(--line); background:var(--paper); color:var(--muted); font-size:12px; }.code-copy:hover { color:var(--ink); }
 .utility-panel { width:340px; }.utility-panel[aria-label=목차] > button { display:flex; justify-content:flex-start; width:100%; white-space:normal; text-align:start; }
 .context-menu input { width:100%; font:inherit; padding:9px 10px; color:var(--ink); border:1px solid var(--line); border-radius:4px; background:var(--paper); }.result-count { display:block; padding:8px 10px; color:var(--muted); }
