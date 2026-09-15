@@ -37,6 +37,7 @@ mod notify_banner;
 mod onboarding;
 mod render;
 mod rich_document;
+mod vault;
 mod screenread;
 mod session;
 mod server_restore;
@@ -3587,6 +3588,10 @@ impl Workspace {
 /// without the ~0.5s blink-cadence lag.
 #[derive(Debug, Clone)]
 enum UserEvent {
+    VaultPicked { owner: WindowId, root: String },
+    VaultListings { owner: WindowId, generation: u64, listings: Vec<vault::Listing> },
+    VaultSearch { owner: WindowId, generation: u64, query: String, request_id: String, entries: Vec<vault::Entry>, error: Option<String> },
+    VaultDocument { owner: WindowId, generation: u64, relative: String, path: String, text: std::result::Result<String, String> },
     RichDocument { owner: WindowId, message: String },
     Redraw,
     CloseGraceExpired,
@@ -6604,6 +6609,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let mut app = App::new(proxy, launch.viewer_only);
     if launch.viewer_only {
+        app.configure_viewer_vault_startup(!launch.paths.is_empty());
         for path in launch.paths {
             app.queue_aux_file(path, true);
         }

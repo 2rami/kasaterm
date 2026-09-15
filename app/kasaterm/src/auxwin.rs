@@ -36,6 +36,7 @@ enum HeaderButton {
 enum ViewerPromptAction {
     Close,
     Quit,
+    Navigate,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -137,6 +138,13 @@ struct RestoreRecord {
 struct StoredWindows {
     #[serde(default)]
     windows: Vec<RestoreRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vault: Option<crate::vault::Record>,
+}
+
+enum VaultTransition {
+    Root(std::path::PathBuf),
+    Document { path: std::path::PathBuf, text: String, relative: Option<String> },
 }
 
 enum PendingAuxOpen {
@@ -176,21 +184,24 @@ pub(crate) struct AuxWindows {
     last_theme_poll: Instant,
     viewer_message: Option<String>,
     focus_on_open: std::collections::HashSet<String>,
+    vault: Option<crate::vault::Record>,
+    vault_generation: u64,
+    vault_owner: Option<WindowId>,
+    vault_directories: HashMap<String, usize>,
+    vault_cache: HashMap<String, crate::vault::Listing>,
+    vault_scanning: bool,
+    vault_poll: Instant,
+    vault_open_generation: u64,
+    vault_search_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl AuxWindows {
     pub(crate) fn load(viewer_only: bool) -> Self {
-        let pending = state_path(viewer_only)
+        let stored = state_path(viewer_only)
             .and_then(|path| std::fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice::<StoredWindows>(&bytes).ok())
-            .map(|saved| {
-                saved
-                    .windows
-                    .into_iter()
-                    .map(PendingAuxOpen::Restore)
-                    .collect()
-            })
             .unwrap_or_default();
+        let pending = stored.windows.into_iter().map(PendingAuxOpen::Restore).collect();
         Self {
             windows: Vec::new(),
             terminals: Vec::new(),
@@ -206,6 +217,15 @@ impl AuxWindows {
             last_theme_poll: Instant::now() - std::time::Duration::from_secs(1),
             viewer_message: None,
             focus_on_open: std::collections::HashSet::new(),
+            vault: stored.vault,
+            vault_generation: 0,
+            vault_owner: None,
+            vault_directories: HashMap::new(),
+            vault_cache: HashMap::new(),
+            vault_scanning: false,
+            vault_poll: Instant::now() - std::time::Duration::from_secs(3),
+            vault_open_generation: 0,
+            vault_search_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 }
@@ -213,6 +233,7 @@ impl AuxWindows {
 /// `gpu` is declared before `window`: the surface must be dropped while the
 /// native window it references is still alive.
 pub(crate) struct AuxWindow {
+    vault_transition: Option<VaultTransition>,
     rich: Option<crate::rich_document::RichDocHost>,
     gpu: gpu::GpuRenderer,
     pub(crate) editor: MarkdownPane,
@@ -1384,6 +1405,7 @@ struct SavedState {
     stamp: StateStamp,
 }
 
+#[cfg(test)]
 fn write_state(
     path: &std::path::Path,
     records: &[RestoreRecord],
@@ -1392,9 +1414,20 @@ fn write_state(
     write_state_after_rename(path, records, saved, || {})
 }
 
+#[cfg(test)]
 fn write_state_after_rename(
     path: &std::path::Path,
     records: &[RestoreRecord],
+    saved: &mut Option<SavedState>,
+    after_rename: impl FnOnce(),
+) -> std::io::Result<bool> {
+    write_state_full(path, records, None, saved, after_rename)
+}
+
+fn write_state_full(
+    path: &std::path::Path,
+    records: &[RestoreRecord],
+    vault: Option<&crate::vault::Record>,
     saved: &mut Option<SavedState>,
     after_rename: impl FnOnce(),
 ) -> std::io::Result<bool> {
@@ -1403,8 +1436,10 @@ fn write_state_after_rename(
     #[derive(serde::Serialize)]
     struct BorrowedWindows<'a> {
         windows: &'a [RestoreRecord],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        vault: Option<&'a crate::vault::Record>,
     }
-    let bytes = serde_json::to_vec(&BorrowedWindows { windows: records })?;
+    let bytes = serde_json::to_vec(&BorrowedWindows { windows: records, vault })?;
     if saved.as_ref().is_some_and(|saved| {
         saved.path == path
             && saved.bytes == bytes
@@ -1652,6 +1687,246 @@ fn disallow_tabbing(window: &Window) {
 }
 
 impl App {
+    pub(crate) fn configure_viewer_vault_startup(&mut self, explicit_file: bool) {
+        if !self.viewer_only { return; }
+        for pending in std::mem::take(&mut self.aux.pending) {
+            match pending { PendingAuxOpen::Restore(record) => self.aux.unopened.push(record), other => self.aux.pending.push(other) }
+        }
+        if !explicit_file {
+            if let Some(vault) = &self.aux.vault {
+                if let Some(path) = vault.active.as_deref().and_then(|relative| crate::vault::resolve(std::path::Path::new(&vault.root), relative).ok()) {
+                    self.queue_aux_file(path, true);
+                }
+            }
+        }
+    }
+
+    fn publish_vault(&self, index: usize) {
+        if !self.viewer_only || self.aux.vault_owner != Some(self.aux.windows[index].window.id()) { return; }
+        let aux = &self.aux.windows[index];
+        let Some(rich) = &aux.rich else { return };
+        let root = self.aux.vault.as_ref().map(|record| std::path::Path::new(&record.root));
+        let available = root.is_some_and(|root| root.is_dir());
+        let listing = self.aux.vault_cache.get("");
+        let recent: Vec<_> = self.aux.unopened.iter().enumerate().take(20).map(|(index, record)| serde_json::json!({"id":format!("recent:{index}"),"name":std::path::Path::new(&record.path).file_name().map(|name|name.to_string_lossy().to_string()).unwrap_or_default()})).collect();
+        rich.call("setVault", serde_json::json!({
+            "id":format!("vault:{}",self.aux.vault_generation),
+            "name":root.and_then(|root|root.file_name()).map(|name|name.to_string_lossy().to_string()),
+            "available":available,"hasDocument":!aux.welcome,"loading":available && listing.is_none(),
+            "activeId":self.aux.vault.as_ref().and_then(|vault|vault.active.clone()),
+            "entries":listing.map(|listing|listing.entries.clone()).unwrap_or_default(),
+            "nextCursor":listing.and_then(|listing|listing.next_cursor),
+            "error":if root.is_some() && !available {Some("마지막 볼트를 찾지 못했어요. 다른 폴더를 선택해 주세요".to_string())} else {listing.and_then(|listing|listing.error.clone())},
+            "recent":recent,
+        }));
+        for (parent, listing) in &self.aux.vault_cache { if !parent.is_empty() { rich.call("setVaultChildren", serde_json::to_value(listing).unwrap()); } }
+    }
+
+    fn vault_ipc(&mut self, index: usize, value: &serde_json::Value) -> bool {
+        if !self.viewer_only { return false; }
+        let kind = value["kind"].as_str().unwrap_or("");
+        if !kind.starts_with("vault-") { return false; }
+        let owner = self.aux.windows[index].window.id();
+        self.aux.vault_owner = Some(owner);
+        let node = value["nodeId"].as_str().unwrap_or("");
+        match kind {
+            "vault-choose" => {
+                if let Some(record) = node.strip_prefix("recent:").and_then(|value|value.parse::<usize>().ok()).and_then(|number|self.aux.unopened.get(number)) {
+                    if let Some(root) = std::path::Path::new(&record.path).parent().map(std::path::Path::to_path_buf) {
+                        self.aux.windows[index].vault_transition=Some(VaultTransition::Root(root)); self.guard_vault_transition(index);
+                    }
+                } else { self.choose_vault_folder(index); }
+            }
+            "vault-list" => {
+                if self.aux.vault_directories.len() < 64 || self.aux.vault_directories.contains_key(node) {
+                    let limit = value["cursor"].as_u64().unwrap_or(0).min(19_500) as usize + 500;
+                    self.aux.vault_directories.insert(node.to_string(),limit);
+                    self.begin_vault_scan();
+                }
+            }
+            "vault-open" => self.request_vault_document(index,node),
+            "vault-search" => {
+                let query = value["query"].as_str().unwrap_or("").chars().take(256).collect::<String>();
+                let request_id = value["requestId"].as_str().map(String::from).unwrap_or_else(||value["requestId"].to_string());
+                let generation = self.aux.vault_search_generation.fetch_add(1,std::sync::atomic::Ordering::Relaxed)+1;
+                let current = self.aux.vault_search_generation.clone();
+                let root = self.aux.vault.as_ref().map(|vault|std::path::PathBuf::from(&vault.root));
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let (entries,error) = if query.trim().is_empty() { (Vec::new(),None) } else if let Some(root)=root {crate::vault::search(&root,&query,generation,current)} else {(Vec::new(),None)};
+                    let _ = proxy.send_event(UserEvent::VaultSearch {owner,generation,query,request_id,entries,error});
+                });
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn begin_vault_scan(&mut self) {
+        if self.aux.vault_scanning { return; }
+        let Some(owner) = self.aux.vault_owner else { return };
+        let Some(root) = self.aux.vault.as_ref().map(|vault|std::path::PathBuf::from(&vault.root)) else { return };
+        self.aux.vault_directories.entry(String::new()).or_insert(500);
+        let directories: Vec<_> = self.aux.vault_directories.iter().map(|(path, limit)|(path.clone(),*limit)).collect();
+        let generation = self.aux.vault_generation;
+        let proxy = self.proxy.clone();
+        self.aux.vault_scanning = true;
+        self.aux.vault_poll = Instant::now();
+        std::thread::spawn(move || {
+            let listings = directories.into_iter().map(|(path,limit)|crate::vault::list(&root,&path,limit)).collect();
+            let _ = proxy.send_event(UserEvent::VaultListings { owner, generation, listings });
+        });
+    }
+
+    pub(crate) fn poll_viewer_vault(&mut self) {
+        if self.viewer_only && self.aux.vault_poll.elapsed() >= std::time::Duration::from_secs(2) { self.begin_vault_scan(); }
+    }
+
+    fn choose_vault_folder(&mut self, index: usize) {
+        let owner = self.aux.windows[index].window.id();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            #[cfg(target_os = "macos")]
+            {
+                let root = std::process::Command::new("/usr/bin/osascript").args(["-e", "POSIX path of (choose folder with prompt \"마크다운 볼트 폴더 선택\")"]).output().ok()
+                    .filter(|output| output.status.success()).map(|output|String::from_utf8_lossy(&output.stdout).trim().to_string()).unwrap_or_default();
+                let _ = proxy.send_event(UserEvent::VaultPicked { owner,root });
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = proxy.send_event(UserEvent::VaultPicked { owner,root:String::new() });
+        });
+    }
+
+    fn request_vault_document(&mut self, index: usize, node: &str) {
+        let path = if let Some(number) = node.strip_prefix("recent:").and_then(|value|value.parse::<usize>().ok()) {
+            self.aux.unopened.get(number).map(|record|std::path::PathBuf::from(&record.path))
+        } else {
+            self.aux.vault.as_ref().and_then(|vault|crate::vault::resolve(std::path::Path::new(&vault.root),node).ok())
+        };
+        let Some(path) = path else { self.set_aux_status(self.aux.windows[index].window.id(), "파일을 찾지 못했어요".into()); return };
+        if path.is_dir() { return; }
+        if !is_markdown_path(&path) {
+            if matches!(crate::vault::kind(&path,false),"image"|"pdf") {
+                #[cfg(target_os = "macos")]
+                let _ = crate::proc::command("/usr/bin/open").arg(&path).spawn();
+                #[cfg(not(target_os = "macos"))]
+                self.open_md_dest(&path.to_string_lossy());
+            } else { self.open_md_dest(&path.to_string_lossy()); }
+            return;
+        }
+        if path.to_string_lossy() == self.aux.windows[index].editor.doc.path { return; }
+        self.aux.vault_open_generation += 1;
+        self.aux.windows[index].vault_transition = None;
+        if let Some(rich) = &mut self.aux.windows[index].rich {
+            if rich.pending.as_ref().is_some_and(|(action,_,_)|matches!(action,crate::rich_document::PendingAction::Navigate)) { rich.pending=None; }
+        }
+        let generation = self.aux.vault_open_generation;
+        let relative = if node.starts_with("recent:") { String::new() } else { node.to_string() };
+        let owner = self.aux.windows[index].window.id();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let text = std::fs::metadata(&path).map_err(|error|error.to_string()).and_then(|metadata| {
+                if metadata.len() > 8 * 1024 * 1024 { Err("문서가 너무 커요. 외부 편집기로 열어 주세요".into()) }
+                else { std::fs::read_to_string(&path).map_err(|error|error.to_string()) }
+            });
+            let _ = proxy.send_event(UserEvent::VaultDocument { owner,generation,relative,path:path.to_string_lossy().into_owned(),text });
+        });
+    }
+
+    fn guard_vault_transition(&mut self, index: usize) {
+        if self.aux_request_rich_flush(index, crate::rich_document::PendingAction::Navigate) { return; }
+        self.vault_transition_flushed(index);
+    }
+
+    fn vault_transition_flushed(&mut self, index: usize) {
+        if self.aux.windows[index].vault_transition.is_none() { return; }
+        if self.aux.windows[index].editor.modified {
+            self.aux.windows[index].viewer_prompt = Some(ViewerPromptAction::Navigate);
+            self.aux.windows[index].window.focus_window();
+            self.aux_redraw(index);
+        } else { self.apply_vault_transition(index); }
+    }
+
+    fn apply_vault_transition(&mut self, index: usize) {
+        let Some(transition) = self.aux.windows[index].vault_transition.take() else { return };
+        let old = &self.aux.windows[index];
+        if !old.welcome && !old.editor.doc.path.is_empty() {
+            let mut record = old.record();
+            record.modified = false; record.buffer = None;
+            self.aux.unopened.retain(|item|item.path != record.path);
+            self.aux.unopened.push(record);
+        }
+        let mut restored_dirty = false;
+        let mut saved_text = None;
+        let (path,text,welcome) = match transition {
+            VaultTransition::Root(root) => {
+                self.aux.vault = Some(crate::vault::Record {root:root.to_string_lossy().into_owned(),active:None});
+                self.aux.vault_generation += 1;
+                self.aux.vault_search_generation.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+                self.aux.vault_open_generation += 1;
+                self.aux.vault_directories.clear(); self.aux.vault_cache.clear(); self.aux.vault_scanning = false;
+                (std::path::PathBuf::new(),String::new(),true)
+            }
+            VaultTransition::Document {path,mut text,relative} => {
+                saved_text = Some(text.clone());
+                if let Some(record) = self.aux.unopened.iter().find(|record| record.path == path.to_string_lossy() && record.modified) {
+                    if let Some(buffer) = &record.buffer { text = buffer.join("\n"); restored_dirty = true; }
+                }
+                if let Some(vault) = &mut self.aux.vault {
+                    vault.active = relative.or_else(||path.strip_prefix(&vault.root).ok().map(|relative|relative.to_string_lossy().to_string()));
+                }
+                self.aux.unopened.retain(|record|record.path != path.to_string_lossy());
+                (path,text,false)
+            }
+        };
+        let aux = &mut self.aux.windows[index];
+        aux.editor = make_editor(&path,&text,Arc::new(text.split('\n').map(String::from).collect()),true,false,restored_dirty);
+        if let Some(saved_text) = saved_text { aux.editor.saved_text = saved_text; }
+        aux.welcome = welcome; aux.status = None; aux.preedit.clear(); aux.selecting = false; aux.outline_open = false;
+        if let Some(rich) = &mut aux.rich { rich.change_document(text,!welcome); }
+        self.publish_vault(index);
+        self.begin_vault_scan();
+        self.aux_redraw(index);
+        self.save_aux_windows_state();
+    }
+
+    pub(crate) fn handle_vault_event(&mut self, event: &UserEvent, _event_loop: &ActiveEventLoop) -> bool {
+        match event {
+            UserEvent::VaultPicked { owner,root } => {
+                if let Some(index) = self.aux_index(*owner) {
+                    if let Some(root) = std::fs::canonicalize(root).ok().filter(|root|root.is_dir()) {
+                        self.aux.vault_open_generation += 1;
+                        self.aux.vault_owner = Some(*owner);
+                        self.aux.windows[index].vault_transition = Some(VaultTransition::Root(root));
+                        self.guard_vault_transition(index);
+                    } else { self.publish_vault(index); }
+                }
+            }
+            UserEvent::VaultListings { owner,generation,listings } => {
+                if *generation != self.aux.vault_generation || Some(*owner) != self.aux.vault_owner { return true; }
+                self.aux.vault_scanning = false;
+                let mut changed = false;
+                for listing in listings { if self.aux.vault_cache.get(&listing.parent_id) != Some(listing) { self.aux.vault_cache.insert(listing.parent_id.clone(),listing.clone()); changed=true; } }
+                if changed { if let Some(index) = self.aux_index(*owner) { self.publish_vault(index); } }
+            }
+            UserEvent::VaultDocument { owner,generation,relative,path,text } => {
+                if *generation != self.aux.vault_open_generation { return true; }
+                if let Some(index) = self.aux_index(*owner) {
+                    match text {
+                        Ok(text) => { self.aux.windows[index].vault_transition = Some(VaultTransition::Document {path:path.into(),text:text.clone(),relative:(!relative.is_empty()).then(||relative.clone())}); self.guard_vault_transition(index); }
+                        Err(error) => self.set_aux_status(*owner,format!("문서 열기 실패: {error}")),
+                    }
+                }
+            }
+            UserEvent::VaultSearch {owner,generation,query,request_id,entries,error} => {
+                if *generation != self.aux.vault_search_generation.load(std::sync::atomic::Ordering::Relaxed) { return true; }
+                if let Some(index) = self.aux_index(*owner) { if let Some(rich) = &self.aux.windows[index].rich {rich.call("setVaultSearch",serde_json::json!({"query":query,"requestId":request_id,"entries":entries,"error":error}));} }
+            }
+            _ => return false,
+        }
+        true
+    }
+
     pub(crate) fn poll_document_theme(&mut self) {
         if self.aux.windows.is_empty() { return; }
         if self.viewer_only && self.aux.last_theme_poll.elapsed() >= std::time::Duration::from_millis(650) {
@@ -1724,7 +1999,10 @@ impl App {
         let kind = value["kind"].as_str().unwrap_or("");
         if kind == "ready" {
             let text = self.aux.windows[index].editor.text_for_save();
-            self.aux.windows[index].rich.as_mut().unwrap().init(text);
+            let editable = !self.aux.windows[index].welcome;
+            self.aux.windows[index].rich.as_mut().unwrap().init_document(text,editable);
+            self.publish_vault(index);
+            self.begin_vault_scan();
             if crate::verification_run() {
                 if let Some(script) = std::env::var_os("KASATERM_RICH_PROBE_JS").and_then(|path| std::fs::read_to_string(path).ok()) {
                     self.aux.windows[index].rich.as_ref().unwrap().probe(&script);
@@ -1733,6 +2011,7 @@ impl App {
             self.aux_redraw(index);
             return;
         }
+        if kind.starts_with("vault-") { self.vault_ipc(index,&value); return; }
         if kind == "timeout" {
             if host.pending.as_ref().is_some_and(|(_, at, request)| at.elapsed() >= std::time::Duration::from_secs(5) && value["requestId"].as_str() == Some(request.as_str())) {
                 self.aux.windows[index].rich.as_mut().unwrap().pending = None;
@@ -1744,6 +2023,16 @@ impl App {
             return;
         }
         if self.aux.windows[index].editor.raw_mode { return; }
+        if kind == "probe-action" && crate::verification_run() {
+            if let Some(action) = value["action"].as_str().filter(|action|matches!(*action,"save"|"discard"|"cancel")) {
+                if let Some((id,position)) = self.aux_probe_viewer_prompt_center(index,action) {
+                    self.aux_window_event(id,WindowEvent::CursorMoved {device_id:winit::event::DeviceId::dummy(),position},event_loop);
+                    self.aux_window_event(id,WindowEvent::MouseInput {device_id:winit::event::DeviceId::dummy(),state:ElementState::Pressed,button:MouseButton::Left},event_loop);
+                    self.aux_window_event(id,WindowEvent::MouseInput {device_id:winit::event::DeviceId::dummy(),state:ElementState::Released,button:MouseButton::Left},event_loop);
+                }
+            }
+            return;
+        }
         if kind == "probe" && crate::verification_run() { eprintln!("[rich-probe] {}", value["result"]); return; }
         #[cfg(target_os = "macos")]
         if kind == "snapshot" && crate::verification_run() {
@@ -1775,6 +2064,8 @@ impl App {
             self.aux.windows[index].rich.as_ref().unwrap().call("setSaveState", serde_json::json!({"state":if saved {"saved"} else {"error"},"message":message}));
         } else if matches!(pending, Some(crate::rich_document::PendingAction::Raw)) {
             self.aux_set_mode_flushed(index, true);
+        } else if matches!(pending, Some(crate::rich_document::PendingAction::Navigate)) {
+            self.vault_transition_flushed(index);
         } else if matches!(pending, Some(crate::rich_document::PendingAction::Close)) {
             self.close_aux_editor_flushed(index, event_loop);
             return;
@@ -1793,6 +2084,24 @@ impl App {
 
     pub(crate) fn queue_aux_file(&mut self, path: std::path::PathBuf, active: bool) {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
+        if self.viewer_only && path.is_dir() {
+            if let Some(index) = self.aux.windows.iter().position(|aux| Some(aux.window.id()) == self.aux.vault_owner) {
+                self.aux.windows[index].vault_transition = Some(VaultTransition::Root(path));
+                self.guard_vault_transition(index);
+            } else {
+                self.aux.vault = Some(crate::vault::Record {root:path.to_string_lossy().into_owned(),active:None});
+                self.save_aux_windows_state();
+            }
+            return;
+        }
+        if self.viewer_only && !self.aux.windows.iter().any(|aux|std::path::Path::new(&aux.editor.doc.path) == path) {
+            if let Some(index) = self.aux.unopened.iter().position(|record|std::path::Path::new(&record.path) == path) {
+                let record = self.aux.unopened.remove(index);
+                if active { self.aux.focus_on_open.insert(record.path.clone()); }
+                self.aux.pending.push(PendingAuxOpen::Restore(record));
+                return;
+            }
+        }
         if let Some(index) = self
             .aux
             .windows
@@ -1987,9 +2296,10 @@ impl App {
     pub(crate) fn prepare_viewer_windows(&mut self, event_loop: &ActiveEventLoop) {
         self.flush_aux_opens(event_loop);
         if !self.aux.windows.is_empty() || !self.aux.pending.is_empty() {
+            if self.aux.vault_owner.is_none() { self.aux.vault_owner = self.aux.windows.first().map(|aux|aux.window.id()); }
             return;
         }
-        let text = "# kasaterm 문서 뷰어\n\nCmd+O로 문서를 열거나 이 창에 파일을 끌어놓으세요.\n\n열어 둔 문서는 다음 실행에 같은 위치와 읽던 자리로 돌아옵니다.";
+        let text = "";
         let editor = make_editor(
             std::path::Path::new(""),
             text,
@@ -1999,6 +2309,7 @@ impl App {
             false,
         );
         if let Ok(index) = self.spawn_aux_editor(editor, event_loop, true, None, false) {
+            self.aux.vault_owner = Some(self.aux.windows[index].window.id());
             let message = self.aux.viewer_message.take();
             let aux = &mut self.aux.windows[index];
             aux.welcome = true;
@@ -2012,7 +2323,6 @@ impl App {
     pub(crate) fn viewer_has_work(&self) -> bool {
         !self.aux.windows.is_empty()
             || !self.aux.pending.is_empty()
-            || !self.aux.unopened.is_empty()
     }
 
     pub(crate) fn viewer_needs_blink(&self) -> bool {
@@ -2110,6 +2420,7 @@ impl App {
             window.inner_size().width as f32 / gpu.scale().max(0.5),
         );
         self.aux.windows.push(AuxWindow {
+            vault_transition: None,
             rich: None,
             gpu,
             editor,
@@ -2452,6 +2763,7 @@ impl App {
                         "viewer_prompt": aux.viewer_prompt.map(|prompt| match prompt {
                             ViewerPromptAction::Close => "close",
                             ViewerPromptAction::Quit => "quit",
+                            ViewerPromptAction::Navigate => "navigate",
                         }),
                         "find": aux.editor.find.as_ref().map(|find| serde_json::json!({
                             "hits": find.hits.len(),
@@ -2706,7 +3018,8 @@ impl App {
         let mut seen = std::collections::HashSet::new();
         records.retain(|record| record.path.is_empty() || seen.insert(record.path.clone()));
         if let Some(path) = state_path(self.aux.viewer_only) {
-            let _ = write_state(&path, &records, &mut self.aux.saved.borrow_mut());
+            let vault = if self.viewer_only { self.aux.vault.as_ref() } else { None };
+            let _ = write_state_full(&path, &records, vault, &mut self.aux.saved.borrow_mut(), || {});
         }
     }
 
@@ -2722,7 +3035,7 @@ impl App {
         }
         aux.render(aux.focused && cursor_on);
         let body = aux.body_box();
-        let show = !aux.editor.raw_mode && !aux.welcome && aux.viewer_prompt.is_none() && !aux.toolbar_menu_open && !aux.window.is_minimized().unwrap_or(false);
+        let show = !aux.editor.raw_mode && (!aux.welcome || self.viewer_only) && aux.viewer_prompt.is_none() && !aux.toolbar_menu_open && !aux.window.is_minimized().unwrap_or(false);
         if let Some(rich) = &mut aux.rich { rich.sync(body, show); }
     }
 
@@ -2816,17 +3129,23 @@ impl App {
         };
         if button == ViewerPromptButton::Cancel {
             self.aux.viewer_quit_requested = false;
+            self.aux.windows[index].vault_transition = None;
+            self.publish_vault(index);
             self.aux_redraw(index);
             return;
         }
         let id = self.aux.windows[index].window.id();
-        if button == ViewerPromptButton::Save && !self.aux_save(index) {
+        if button == ViewerPromptButton::Save && !self.aux_save_flushed(index) {
             self.aux.windows[index].viewer_prompt = Some(action);
             self.aux.windows[index].window.focus_window();
             self.aux_redraw(index);
             return;
         }
         match action {
+            ViewerPromptAction::Navigate => {
+                if button == ViewerPromptButton::Discard { self.aux.windows[index].editor.mark_saved(); }
+                self.apply_vault_transition(index);
+            }
             ViewerPromptAction::Close => {
                 self.close_aux_by_id(id);
                 if !self.viewer_has_work() {
@@ -4061,6 +4380,19 @@ mod tests {
     }
 
     #[test]
+    fn vault_metadata_keeps_dirty_legacy_documents() {
+        let dir = StateDir::new();
+        let records = vec![RestoreRecord { path: "legacy.md".into(), modified: true, buffer: Some(vec!["unsaved".into()]), ..Default::default() }];
+        let vault = crate::vault::Record { root: "/selected/vault".into(), active: Some("notes/current.md".into()) };
+        let mut saved = None;
+        write_state_full(&dir.path(), &records, Some(&vault), &mut saved, || {}).unwrap();
+        let stored: StoredWindows = serde_json::from_slice(&std::fs::read(dir.path()).unwrap()).unwrap();
+        assert_eq!(stored.windows[0].buffer.as_ref().unwrap()[0], "unsaved");
+        assert!(stored.windows[0].modified);
+        assert_eq!(stored.vault.unwrap().active.as_deref(), Some("notes/current.md"));
+    }
+
+    #[test]
     fn unchanged_state_skips_even_opening_the_temporary_file() {
         let dir = StateDir::new();
         let path = dir.path();
@@ -4111,7 +4443,7 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(
             bytes,
-            serde_json::to_vec(&StoredWindows { windows: records }).unwrap()
+            serde_json::to_vec(&StoredWindows { windows: records, vault: None }).unwrap()
         );
         let restored: StoredWindows = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(restored.windows[0].path, "b");

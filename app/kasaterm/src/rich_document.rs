@@ -7,6 +7,7 @@ pub(crate) enum PendingAction {
     Close,
     Quit,
     AppClose,
+    Navigate,
 }
 
 pub(crate) struct RichDocHost {
@@ -14,6 +15,7 @@ pub(crate) struct RichDocHost {
     backing: Option<Arc<Window>>,
     parent: Arc<Window>,
     pub token: String,
+    auth_token: Arc<std::sync::Mutex<String>>,
     pub revision: u64,
     pub ready: bool,
     pub pending: Option<(PendingAction, Instant, String)>,
@@ -38,7 +40,8 @@ impl RichDocHost {
     ) -> Result<Self, String> {
         let token = uuid::Uuid::new_v4().simple().to_string();
         let owner = parent.id();
-        let expected = token.clone();
+        let auth_token = Arc::new(std::sync::Mutex::new(token.clone()));
+        let expected = auth_token.clone();
         let script = include_str!("../../../document-editor/dist/editor.js")
             .replace("</script", "<\\/script");
         let css = include_str!("../../../document-editor/dist/editor.css");
@@ -58,7 +61,7 @@ impl RichDocHost {
                 let Ok(message) = serde_json::from_str::<serde_json::Value>(&body) else {
                     return;
                 };
-                if message.get("token").and_then(|v| v.as_str()) != Some(expected.as_str()) {
+                if !expected.lock().is_ok_and(|token| message.get("token").and_then(|v| v.as_str()) == Some(token.as_str())) {
                     return;
                 }
                 let _ = proxy.send_event(UserEvent::RichDocument {
@@ -97,6 +100,7 @@ impl RichDocHost {
             backing,
             parent,
             token,
+            auth_token,
             revision: 0,
             ready: false,
             pending: None,
@@ -149,10 +153,19 @@ impl RichDocHost {
         unsafe { self.view.webview().takeSnapshotWithConfiguration_completionHandler(None, &done) };
     }
 
-    pub fn init(&mut self, text: String) {
+    pub fn init_document(&mut self, text: String, editable: bool) {
         self.ready = true;
         let theme = crate::theme::document_tokens_json();
-        self.call("init", serde_json::json!({"token":self.token,"markdown":text,"revision":self.revision,"theme":theme,"editable":true}));
+        self.call("init", serde_json::json!({"token":self.token,"markdown":text,"revision":self.revision,"theme":theme,"editable":editable}));
+    }
+
+    pub fn change_document(&mut self, text: String, editable: bool) {
+        self.token = uuid::Uuid::new_v4().simple().to_string();
+        if let Ok(mut token) = self.auth_token.lock() { *token = self.token.clone(); }
+        self.revision += 1;
+        self.pending = None;
+        let _ = self.view.evaluate_script(&format!("window.__KASATERM_DOC_TOKEN__={};", serde_json::to_string(&self.token).unwrap()));
+        self.init_document(text, editable);
     }
 
     pub fn replace(&mut self, text: String) {

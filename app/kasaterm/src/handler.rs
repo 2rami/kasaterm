@@ -146,6 +146,7 @@ impl ApplicationHandler<UserEvent> for App {
     /// committed-Hangul echo / backspace / space show up without lag.
     // event_loop 는 SocketOpenWeb(자식 창 생성) 한 곳만 쓴다.
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        if self.handle_vault_event(&event,event_loop) { return; }
         if let UserEvent::RichDocument { owner, message } = &event {
             self.aux_rich_message(*owner, message, event_loop);
             return;
@@ -200,6 +201,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Local cmux socket backend delegated a pane write / split / focus to
         // this GUI thread (the socket server can't touch self.pty directly).
         match &event {
+            UserEvent::VaultPicked { .. } | UserEvent::VaultListings { .. } | UserEvent::VaultSearch { .. } | UserEvent::VaultDocument { .. } => return,
             UserEvent::RichDocument { .. } => return,
             UserEvent::CloseGraceExpired => {
                 self.finish_close_grace();
@@ -7251,6 +7253,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.poll_viewer_vault();
         self.poll_document_theme();
         if self.viewer_only {
             self.flush_aux_opens(event_loop);
