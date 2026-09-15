@@ -76,7 +76,9 @@ pub fn sweep_all_projects() -> usize {
         return 0;
     }
     let root = Path::new(&home).join(".claude/projects");
-    let bindings = load_bindings(&Path::new(&home).join(".config/kasaterm/session_characters.json"));
+    let config = kasa_socket::isolated_collab_root()
+        .unwrap_or_else(|| Path::new(&home).join(".config/kasaterm"));
+    let bindings = load_bindings(&kasa_socket::session_storage::read_path(&config, "session_characters.json"));
     let students = student_names();
     sweep_projects_root(&root, &bindings, &students)
 }

@@ -2288,7 +2288,8 @@ fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
         return Ok(());
     }
     let home = kasa_socket::home_dir().unwrap_or_default();
-    let bindings = read_string_map(&home.join(".config/kasaterm/session_characters.json"));
+    let config = kasa_socket::isolated_collab_root().unwrap_or_else(|| home.join(".config/kasaterm"));
+    let bindings = read_string_map(&kasa_socket::session_storage::read_path(&config, "session_characters.json"));
     let colors = student_colors(&home.join(".config/kasaterm/characters.json"));
     let live = live_session_ids();
     const RESET: &str = "\x1b[0m";
@@ -2807,7 +2808,8 @@ fn run_statusline() {
     let forked_view = !session_id.is_empty()
         && std::env::var("KASATERM_SESSION_ID").ok().as_deref() != Some(session_id);
     if forked_view {
-        if let Some(map) = sl_read_json(&sl_home().join(".config/kasaterm/session_characters.json"))
+        let config = kasa_socket::isolated_collab_root().unwrap_or_else(|| sl_home().join(".config/kasaterm"));
+        if let Some(map) = sl_read_json(&kasa_socket::session_storage::read_path(&config, "session_characters.json"))
         {
             if let Some(bound) = map.get(session_id).and_then(|v| v.as_str()) {
                 if !bound.is_empty() {

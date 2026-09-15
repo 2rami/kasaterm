@@ -204,7 +204,11 @@ def main():
     forked_view = bool(session_id) and session_id != os.environ.get("KASATERM_SESSION_ID")
     if forked_view:
         try:
-            with open(os.path.expanduser("~/.config/kasaterm/session_characters.json"), encoding="utf-8") as f:
+            config = os.environ.get("KASATERM_COLLAB_ROOT") or os.path.expanduser("~/.config/kasaterm")
+            path = os.path.join(config, "session_characters.json")
+            if not os.path.exists(path):
+                path = os.path.join(config, "sessions", "session_characters.json")
+            with open(path, encoding="utf-8") as f:
                 name = json.load(f).get(session_id) or name
         except Exception:
             pass

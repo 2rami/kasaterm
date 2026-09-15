@@ -1675,14 +1675,31 @@ pub fn write_marker(rslug: &str, surface_id: &str, name: &str) -> std::io::Resul
     std::fs::rename(&tmp, &path)
 }
 
-/// 세션id→캐릭터 영속 매핑 파일 — `~/.config/kasaterm/session_characters.json`
-/// (window.json 등 기존 상태 저장과 같은 config 디렉토리). 같은 세션을 --resume 등으로
-/// 이어가면 같은 캐릭터를 재사용하기 위한 저장소(거노: 재시작하면 프라나가 미도리로 둔갑).
-fn session_char_path() -> PathBuf {
-    if let Some(root) = kasa_socket::isolated_collab_root() { return root.join("session_characters.json"); }
+/// Resumed sessions keep their character across application restarts.
+fn session_char_root() -> PathBuf {
+    if let Some(root) = kasa_socket::isolated_collab_root() { return root; }
     kasa_socket::home_dir()
         .unwrap_or_default()
-        .join(".config/kasaterm/session_characters.json")
+        .join(".config/kasaterm")
+}
+
+fn session_char_path() -> PathBuf {
+    kasa_socket::session_storage::read_path(&session_char_root(), "session_characters.json")
+}
+
+#[path = "character_gc.rs"]
+mod character_gc;
+
+pub fn maintain_session_characters() -> std::io::Result<()> {
+    if kasa_socket::isolated_collab_root().is_some() { return Ok(()); }
+    let Some(home) = kasa_socket::home_dir() else { return Ok(()); };
+    let root = session_char_root();
+    let path = migrate_session_characters(&root)?;
+    // A custom harness home may contain sessions outside the supported stores.
+    if std::env::var_os("CLAUDE_CONFIG_DIR").is_some() || std::env::var_os("CODEX_HOME").is_some() {
+        return Ok(());
+    }
+    character_gc::sweep(&home, &root, &path).map(|_| ())
 }
 
 fn load_session_chars(path: &Path) -> serde_json::Map<String, Value> {
@@ -1727,7 +1744,11 @@ fn with_session_chars<R>(path: &Path, f: impl FnOnce(&serde_json::Map<String, Va
 
 /// 세션 id 의 영속 배정 캐릭터 — 있으면 재사용, 없으면(None) 신규 세션이라 랜덤 배정.
 pub fn session_character(sid: &str) -> Option<String> {
-    session_character_in(&session_char_path(), sid)
+    let path = session_char_path();
+    session_character_in(&path, sid).or_else(|| {
+        let current = session_char_path();
+        (current != path).then(|| session_character_in(&current, sid)).flatten()
+    })
 }
 
 fn session_character_in(path: &Path, sid: &str) -> Option<String> {
@@ -1741,7 +1762,66 @@ fn session_character_in(path: &Path, sid: &str) -> Option<String> {
 
 /// 세션id→캐릭터 매핑 저장(같은 값이면 무쓰기). 원자 쓰기(tmp→rename, write_marker 관례).
 pub fn bind_session_character(sid: &str, name: &str) -> std::io::Result<()> {
+    let root = session_char_root();
+    let _migration = session_character_migration_lock(&root)?;
     bind_session_character_in(&session_char_path(), sid, name)
+}
+
+fn session_character_migration_lock(root: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(root)?;
+    let guard = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(root.join("session_characters.migration.lock"))?;
+    guard.lock()?;
+    Ok(guard)
+}
+
+fn read_session_chars_strict(path: &Path) -> std::io::Result<serde_json::Map<String, Value>> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes)
+            .map_err(std::io::Error::other),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(e) => Err(e),
+    }
+}
+
+fn write_session_chars_atomic(path: &Path, map: &serde_json::Map<String, Value>) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?)?;
+    let result = std::fs::rename(&tmp, path);
+    if result.is_err() { let _ = std::fs::remove_file(tmp); }
+    if let Ok(mut cache) = CHARS.lock() { *cache = None; }
+    result
+}
+
+fn migrate_session_characters(root: &Path) -> std::io::Result<PathBuf> {
+    let _migration = session_character_migration_lock(root)?;
+    let old = root.join("session_characters.json");
+    let path = root.join("sessions/session_characters.json");
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    // The caller has verified sole ownership; existing bind transactions still
+    // share these locks while the registry is published in its new directory.
+    let old_guard = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(old.with_extension("json.lock"))?;
+    old_guard.lock()?;
+    let guard = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(path.with_extension("json.lock"))?;
+    guard.lock()?;
+    if std::fs::symlink_metadata(&old).is_ok_and(|m| m.file_type().is_symlink()) {
+        if std::fs::canonicalize(&old)? == std::fs::canonicalize(&path)? {
+            std::fs::remove_file(&old)?;
+            return Ok(path);
+        }
+        return Err(std::io::Error::other("unexpected character registry symlink"));
+    }
+    let mut merged = read_session_chars_strict(&old)?;
+    let current = read_session_chars_strict(&path)?;
+    if current.iter().any(|(id, name)| merged.get(id).is_some_and(|old_name| old_name != name)) {
+        return Err(std::io::Error::other("conflicting character registries; both preserved"));
+    }
+    merged.extend(current);
+    if !path.exists() || old.exists() { write_session_chars_atomic(&path, &merged)?; }
+    if old.exists() { std::fs::remove_file(&old)?; }
+    Ok(path)
 }
 
 fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Result<()> {
@@ -1754,7 +1834,7 @@ fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Res
     let guard = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
         .open(path.with_extension("json.lock"))?;
     guard.lock()?;
-    let mut map = load_session_chars(path);
+    let mut map = read_session_chars_strict(path)?;
     if map.get(sid).and_then(|v| v.as_str()) == Some(name) {
         return Ok(());
     }
@@ -1776,6 +1856,73 @@ fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Res
 
 #[cfg(test)]
 mod binding_race_tests {
+    #[test]
+    fn migration_merges_identities_and_resolves_legacy_readers() {
+        let root = std::env::temp_dir().join(format!("kasaterm-identity-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let legacy = root.join("session_characters.json");
+        let current = root.join("sessions/session_characters.json");
+        std::fs::write(&legacy, r#"{"old":"one","shared":"new"}"#).unwrap();
+        std::fs::write(&current, r#"{"new":"two","shared":"new"}"#).unwrap();
+        assert_eq!(super::migrate_session_characters(&root).unwrap(), current);
+        let map = super::load_session_chars(&current);
+        assert_eq!(map.len(), 3);
+        assert_eq!(map["shared"], "new");
+        assert!(!legacy.exists());
+        assert_eq!(kasa_socket::session_storage::read_path(&root, "session_characters.json"), current);
+        super::bind_session_character_in(&current, "later", "three").unwrap();
+        super::migrate_session_characters(&root).unwrap();
+        assert_eq!(super::load_session_chars(&current).len(), 4);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn broken_registry_is_preserved_instead_of_replaced() {
+        let root = std::env::temp_dir().join(format!("kasaterm-identity-broken-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy = root.join("session_characters.json");
+        std::fs::write(&legacy, "{unfinished").unwrap();
+        assert!(super::migrate_session_characters(&root).is_err());
+        assert!(super::bind_session_character_in(&legacy, "sid", "name").is_err());
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "{unfinished");
+        assert!(!root.join("sessions/session_characters.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conflicting_character_identity_preserves_both_registries() {
+        let root = std::env::temp_dir().join(format!("kasaterm-identity-conflict-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let old = root.join("session_characters.json");
+        let new = root.join("sessions/session_characters.json");
+        std::fs::write(&old, r#"{"same":"old"}"#).unwrap();
+        std::fs::write(&new, r#"{"same":"new"}"#).unwrap();
+        assert!(super::migrate_session_characters(&root).is_err());
+        assert_eq!(std::fs::read_to_string(old).unwrap(), r#"{"same":"old"}"#);
+        assert_eq!(std::fs::read_to_string(new).unwrap(), r#"{"same":"new"}"#);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_migration_and_bind_do_not_recreate_legacy_registry() {
+        let root = std::env::temp_dir().join(format!("kasaterm-migrate-bind-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("session_characters.json"), "{}").unwrap();
+        let writer_root = root.clone();
+        let writer = std::thread::spawn(move || {
+            for i in 0..30 {
+                let _migration = super::session_character_migration_lock(&writer_root).unwrap();
+                let path = kasa_socket::session_storage::read_path(&writer_root, "session_characters.json");
+                super::bind_session_character_in(&path, &format!("sid-{i}"), "name").unwrap();
+            }
+        });
+        let path = super::migrate_session_characters(&root).unwrap();
+        writer.join().unwrap();
+        assert_eq!(super::load_session_chars(&path).len(), 30);
+        assert!(!root.join("session_characters.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn simultaneous_launches_preserve_every_session_identity() {
         let root = std::env::temp_dir().join(format!("kasaterm-identity-race-{}", uuid::Uuid::new_v4()));
