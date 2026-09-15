@@ -3048,7 +3048,7 @@ impl App {
 
     pub(crate) fn run_clipboard_probe(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::{OnceLock, atomic::{AtomicBool, AtomicUsize, Ordering}};
-        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        use winit::event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
         if !crate::clipboard::isolated_probe() { return; }
         static START: OnceLock<Instant> = OnceLock::new();
         static SEEDED: AtomicBool = AtomicBool::new(false);
@@ -3062,33 +3062,52 @@ impl App {
             return;
         }
         let step = STEP.load(Ordering::Relaxed);
-        if step > 6 || START.get_or_init(Instant::now).elapsed().as_millis() < 2000 + step as u128 * 1200 { return; }
+        if step > 8 || START.get_or_init(Instant::now).elapsed().as_millis() < 2000 + step as u128 * 1200 { return; }
         let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return; };
         let mut button = MouseButton::Left;
         let rect = match step {
             0 => self.statusbar.clip_rect,
             1 => self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::PickClip(_)).then_some(*r)),
             2 => {
-                let expanded = self.statusbar.clip_expanded.is_some();
-                let untouched = crate::clipboard::probe_copied_text().lock().unwrap().is_empty();
-                eprintln!("[clipboard-probe] expand={} clipboard_untouched={}", expanded, untouched);
-                self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::CopyClip(_)).then_some(*r))
+                let Some(r) = self.statusbar.popover_rect else { return; };
+                self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                STEP.store(3, Ordering::Relaxed);
+                self.window_event(event_loop, wid, WindowEvent::MouseWheel { device_id: DeviceId::dummy(), delta: MouseScrollDelta::LineDelta(0.0, -10000.0), phase: TouchPhase::Moved });
+                return;
             }
             3 => {
+                let last_id = crate::clipboard::history().last().map(|item| item.id);
+                let bottom = self.statusbar.popover_rect.map(|r| r.1 + r.3 - 8.0);
+                let bottom_reached = self.statusbar.popover_hits.iter().any(|(a, r)| {
+                    matches!(a, state::StatusbarHit::PickClip(id) if Some(*id) == last_id)
+                        && bottom.is_some_and(|bottom| (r.1 + r.3 - bottom).abs() < 1.0)
+                });
+                eprintln!("[clipboard-probe] wheel_scrolled={} bottom_reached={}", self.statusbar.popover_scroll > 0.0, bottom_reached);
+                STEP.store(4, Ordering::Relaxed);
+                self.window_event(event_loop, wid, WindowEvent::MouseWheel { device_id: DeviceId::dummy(), delta: MouseScrollDelta::LineDelta(0.0, 10000.0), phase: TouchPhase::Moved });
+                return;
+            }
+            4 => {
+                let expanded = self.statusbar.clip_expanded.is_some();
+                let untouched = crate::clipboard::probe_copied_text().lock().unwrap().is_empty();
+                eprintln!("[clipboard-probe] expand={} clipboard_untouched={} scroll_returned_top={}", expanded, untouched, self.statusbar.popover_scroll == 0.0);
+                self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::CopyClip(_)).then_some(*r))
+            }
+            5 => {
                 let copied = crate::clipboard::history().first().is_some_and(|item| *crate::clipboard::probe_copied_text().lock().unwrap() == item.text);
                 eprintln!("[clipboard-probe] exact_copy={} popover_open={}", copied, self.statusbar.popover.is_some());
                 button = MouseButton::Right;
                 self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::PickClip(_)).then_some(*r))
             }
-            4 => self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::RemoveClip(_)).then_some(*r)),
-            5 => {
+            6 => self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::RemoveClip(_)).then_some(*r)),
+            7 => {
                 let removed = crate::clipboard::history().len() == 2;
                 eprintln!("[clipboard-probe] remove={} menu_closed={}", removed, self.statusbar.clip_menu.is_none());
                 self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::PickClip(_)).then_some(*r))
             }
             _ => {
                 eprintln!("[clipboard-probe] completed=true");
-                STEP.store(7, Ordering::Relaxed);
+                STEP.store(9, Ordering::Relaxed);
                 return;
             }
         };
@@ -3099,7 +3118,7 @@ impl App {
                 return;
             }
             eprintln!("[clipboard-probe] FAILED missing_rendered_target step={step} seeded=true timeout_ms=8000");
-            STEP.store(7, Ordering::Relaxed);
+            STEP.store(9, Ordering::Relaxed);
             return;
         };
         STEP.store(step + 1, Ordering::Relaxed);
