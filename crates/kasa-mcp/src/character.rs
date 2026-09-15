@@ -56,16 +56,15 @@ pub fn profile_png_on_disk(slug: &str) -> Option<Vec<u8>> {
     if slug.is_empty() || slug.contains('/') || slug.contains("..") {
         return None;
     }
+    let picked = picked_theme_of_slug().into_iter().find(|(s, _)| s == slug);
+    if let Some((_, theme)) = picked {
+        let dir = picked_sprite_dir(&theme)?;
+        return [format!("profile/{slug}.png"), format!("{slug}-profile.png")]
+            .into_iter()
+            .find_map(|rel| std::fs::read(dir.join(rel)).ok());
+    }
     let mut dirs: Vec<PathBuf> = Vec::new();
     let root = themes_root();
-    // 1. 그 슬러그를 고른 테마 — 이름이 겹칠 때 얼굴이 갈리지 않게 맨 앞이다.
-    if let Some(r) = root.as_ref() {
-        for (s, theme) in picked_theme_of_slug() {
-            if s == slug {
-                dirs.push(r.join(theme).join("sprites"));
-            }
-        }
-    }
     // 2. 활성 override 폴더(`students/`) — 앱과 같은 env 이름을 본다.
     if let Ok(p) = std::env::var("KASATERM_STUDENTS_DIR") {
         if !p.is_empty() {
@@ -346,9 +345,7 @@ fn name_of(m: &Value) -> Option<&str> {
 /// `rio` 라, 이름·색·말투는 eternalreturn 인데 얼굴만 블루아카가 붙었다. 이 표를
 /// 에셋 찾기의 0단으로 세워 그 자리를 닫는다.
 ///
-/// 번들(`__base`)에서 고른 것은 넣지 않는다 — 찾기 순서가 이미 활성 폴더 다음에
-/// 번들을 보므로 얹을 것이 없다. 활성 테마가 번들 슬러그를 가로채는 대칭 사례는
-/// 아직 실물이 없어 두었다(활성 테마 + 번들 고르기가 동시에 있어야 한다).
+/// 번들 선택도 남겨야 활성 테마의 같은 슬러그가 선택한 얼굴을 가로채지 않는다.
 pub fn picked_theme_of_slug() -> Vec<(String, String)> {
     picked_theme_of_slug_from(&read_character_picks(), |theme| {
         if theme == BASE_THEME_KEY {
@@ -365,11 +362,18 @@ fn picked_theme_of_slug_from(
 ) -> Vec<(String, String)> {
     picked_entries_from(picks, &load)
         .into_iter()
-        .filter(|(t, _)| t != BASE_THEME_KEY)
         .filter_map(|(t, m)| {
             Some((m.get("slug")?.as_str()?.to_string(), t))
         })
         .collect()
+}
+
+pub fn picked_sprite_dir(theme: &str) -> Option<PathBuf> {
+    if theme == BASE_THEME_KEY {
+        Some(home()?.join(".config/kasaterm/students"))
+    } else {
+        Some(themes_root()?.join(theme).join("sprites"))
+    }
 }
 
 /// 설치된 **모든** 로스터 — 활성 테마 + 기본 + `themes/` 아래 테마 전부.
@@ -2244,15 +2248,23 @@ mod tests {
         );
     }
 
-    /// 번들에서 고른 것은 표에 없다 — 찾기 순서가 이미 번들을 보므로, 얹으면 같은
-    /// 폴더를 두 번 뒤지는 것뿐이다.
     #[test]
-    fn 번들에서_고른_학생은_그림_표에_안_들어간다() {
+    fn 번들에서_고른_학생도_그림_출처를_보존한다() {
         let base = roster_slugged(&[("미도리", "midori")]);
         let got = picked_theme_of_slug_from(&picks(&[(BASE_THEME_KEY, &["미도리"])]), |t| {
             (t == BASE_THEME_KEY).then(|| base.clone())
         });
-        assert!(got.is_empty(), "번들 고르기가 표에 들어갔다: {got:?}");
+        assert_eq!(got, vec![("midori".into(), BASE_THEME_KEY.into())]);
+    }
+
+    #[test]
+    fn same_slug_follows_the_explicit_base_or_other_theme_pick() {
+        for theme in [BASE_THEME_KEY, "eternalreturn"] {
+            let got = picked_theme_of_slug_from(&picks(&[(theme, &["리오"])]), |_| {
+                Some(roster_slugged(&[("리오", "rio")]))
+            });
+            assert_eq!(got, vec![("rio".into(), theme.into())]);
+        }
     }
 
     /// 고른 것이 없으면 지금까지의 동작 그대로 — 전원이 후보다.

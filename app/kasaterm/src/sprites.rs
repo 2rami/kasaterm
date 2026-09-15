@@ -88,13 +88,25 @@ fn build_picked_sprite_dirs() -> &'static [(String, std::path::PathBuf)] {
     if cfg!(test) {
         return &[];
     }
-    let Some(root) = kasa_mcp::character::themes_root() else { return &[] };
     let v: Vec<(String, std::path::PathBuf)> = kasa_mcp::character::picked_theme_of_slug()
         .into_iter()
-        .map(|(slug, theme)| (slug, root.join(theme).join("sprites")))
-        .filter(|(_, d)| d.is_dir())
+        .filter_map(|(slug, theme)| Some((slug, kasa_mcp::character::picked_sprite_dir(&theme)?)))
         .collect();
     Box::leak(v.into_boxed_slice())
+}
+
+// 선택 폴더가 없거나 일부 모션만 있어도 활성 테마의 동명 캐릭터로 바뀌면 안 된다.
+fn selected_asset<T>(
+    picked: Option<&std::path::Path>,
+    load: impl Fn(&std::path::Path) -> Option<T>,
+    bundled: impl Fn() -> Option<T>,
+    active: Option<&std::path::Path>,
+    others: &[std::path::PathBuf],
+) -> Option<T> {
+    if let Some(dir) = picked {
+        return load(dir).or_else(bundled);
+    }
+    active.and_then(&load).or_else(bundled).or_else(|| others.iter().find_map(|d| load(d)))
 }
 
 fn build_other_sprite_dirs() -> &'static [std::path::PathBuf] {
@@ -130,11 +142,6 @@ pub(crate) fn other_sprite_dirs_in(
     }
     out.sort();
     out
-}
-
-/// 그 폴더들을 차례로 뒤져 처음 걸리는 것. 3단의 마지막 칸을 부르는 공통 문.
-fn in_other_themes<T>(f: impl Fn(&std::path::Path) -> Option<T>) -> Option<T> {
-    other_theme_sprite_dirs().iter().find_map(|d| f(d))
 }
 
 /// 다른 테마에 이 슬러그의 프사가 있나 — **파일 존재만** 본다(디코딩 없음).
@@ -202,10 +209,6 @@ pub(crate) fn motion_frame_count(motion: &str) -> usize {
 /// 새 폴더 구조와 옛 평면 이름을 **벌 단위로** 가른다. 프레임마다 따로 고르면
 /// 새 폴더에 절반만 옮긴 사용자의 애니가 옛 그림과 섞여 튀는데, 그건 위 규칙이
 /// 막으려던 바로 그 증상이다.
-pub(crate) fn user_sprite_images(slug: &str, motion: &str) -> Option<Vec<image::RgbaImage>> {
-    user_sprite_images_in(&crate::socket::students_dir()?, slug, motion)
-}
-
 /// dir 주입 버전(테스트용) — students_dir 해석과 분리해 env 없이 검증한다.
 pub(crate) fn user_sprite_images_in(
     dir: &std::path::Path,
@@ -479,14 +482,13 @@ pub(crate) fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec
         let bytes = crate::mirror_theme::asset(slug, motion, i)?;
         Some(downscale_student(image::load_from_memory(&bytes).ok()?).to_rgba8())
     }).collect::<Option<Vec<_>>>();
-    let picked = remote.or_else(|| picked_theme_sprite_dir(slug).and_then(|d| user_sprite_images_in(d, slug, motion)));
-    let decoded: Vec<image::RgbaImage> = match picked.or_else(|| user_sprite_images(slug, motion)) {
-        Some(imgs) => imgs,
-        None => match bundled_sprite_images(slug, motion) {
-            Some(imgs) => imgs,
-            None => in_other_themes(|d| user_sprite_images_in(d, slug, motion))?,
-        },
-    };
+    let decoded = remote.or_else(|| selected_asset(
+        picked_theme_sprite_dir(slug),
+        |d| user_sprite_images_in(d, slug, motion),
+        || bundled_sprite_images(slug, motion),
+        crate::socket::students_dir().as_deref(),
+        other_theme_sprite_dirs(),
+    ))?;
     let (w, h) = decoded[0].dimensions();
     let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
     for img in &decoded {
@@ -598,23 +600,19 @@ fn student_profile_rgba_full(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
         let (w, h) = image.dimensions();
         return Some((image.into_raw(), w, h));
     }
-    if let Some(r) = picked_theme_sprite_dir(slug).and_then(|d| profile_rgba_in(d, slug)) {
-        return Some(r);
-    }
-    if let Some(r) = crate::socket::students_dir().and_then(|d| profile_rgba_in(&d, slug)) {
-        return Some(r);
-    }
-    if let Some(r) = student_profile_png(slug)
+    selected_asset(
+        picked_theme_sprite_dir(slug),
+        |d| profile_rgba_in(d, slug),
+        || student_profile_png(slug)
         .and_then(|b| image::load_from_memory(b).ok())
         .map(|i| {
             let img = i.to_rgba8();
             let (w, h) = img.dimensions();
             (img.into_raw(), w, h)
-        })
-    {
-        return Some(r);
-    }
-    in_other_themes(|d| profile_rgba_in(d, slug))
+        }),
+        crate::socket::students_dir().as_deref(),
+        other_theme_sprite_dirs(),
+    )
 }
 
 fn profile_rgba_in(dir: &std::path::Path, slug: &str) -> Option<(Vec<u8>, u32, u32)> {
@@ -756,18 +754,13 @@ pub(crate) fn gif_rel(slug: &str) -> String {
 /// 지금 쓰는 대기 gif 의 바이트 — 고른 테마가 활성을, 활성이 번들을 덮는다.
 pub(crate) fn student_idle_gif_bytes(slug: &str) -> Option<Vec<u8>> {
     if let Some(bytes) = crate::mirror_theme::asset(slug, "gif", 0) { return Some(bytes.to_vec()); }
-    if let Some(b) = picked_theme_sprite_dir(slug).and_then(|d| std::fs::read(d.join(gif_rel(slug))).ok())
-    {
-        return Some(b);
-    }
-    if let Some(b) = crate::socket::students_dir().and_then(|d| std::fs::read(d.join(gif_rel(slug))).ok())
-    {
-        return Some(b);
-    }
-    if let Some(b) = student_idle_gif(slug) {
-        return Some(b.to_vec());
-    }
-    in_other_themes(|d| std::fs::read(d.join(gif_rel(slug))).ok())
+    selected_asset(
+        picked_theme_sprite_dir(slug),
+        |d| std::fs::read(d.join(gif_rel(slug))).ok(),
+        || student_idle_gif(slug).map(Vec::from),
+        crate::socket::students_dir().as_deref(),
+        other_theme_sprite_dirs(),
+    )
 }
 
 pub(crate) fn student_idle_gif(slug: &str) -> Option<&'static [u8]> {
@@ -1059,6 +1052,36 @@ mod idle_anim_tests {
 #[cfg(test)]
 mod theme_sprite_dir_tests {
     use super::*;
+
+    #[test]
+    fn explicit_pick_keeps_its_source_for_profiles_gifs_and_motions() {
+        let root = std::env::temp_dir().join(format!(
+            "kt-picked-source-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let base = root.join("students");
+        let active = root.join("active");
+        let picked = root.join("picked");
+        let other = root.join("other");
+        for rel in [profile_rel("rio", true), gif_rel("rio"), sprite_rel("rio", "walk", 0, true)] {
+            for (dir, value) in [(&base, b"base".as_slice()), (&active, b"active"), (&picked, b"picked"), (&other, b"other")] {
+                let path = dir.join(&rel);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, value).unwrap();
+            }
+            let load = |dir: &std::path::Path| std::fs::read(dir.join(&rel)).ok();
+            let bundled = || Some(b"bundled".to_vec());
+            let others = [other.clone()];
+            assert_eq!(selected_asset(Some(&base), load, bundled, Some(&active), &others), Some(b"base".to_vec()));
+            assert_eq!(selected_asset(Some(&picked), load, bundled, Some(&active), &others), Some(b"picked".to_vec()));
+            let missing = root.join("missing");
+            assert_eq!(selected_asset(Some(&missing), load, bundled, Some(&active), &others), Some(b"bundled".to_vec()));
+            assert_eq!(selected_asset(Some(&missing), load, || None, Some(&active), &others), None);
+            assert_eq!(selected_asset(None, load, bundled, Some(&active), &others), Some(b"active".to_vec()));
+            assert_eq!(selected_asset(None, load, || None, None, &others), Some(b"other".to_vec()));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn theme_at(root: &std::path::Path, id: &str, sprites: bool) {
         let dir = root.join(id);
