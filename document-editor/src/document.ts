@@ -21,7 +21,7 @@ const SourceIdentity = Extension.create({
 });
 export function extensions() {
   return [StarterKit.configure({ trailingNode: false, link: { openOnClick: false, autolink: false } }),
-    Markdown, TaskList, TaskItem.configure({ nested: true }), TableKit.configure({ table: { resizable: false } }), RawBlock, SourceIdentity];
+    Markdown, TaskList, TaskItem.configure({ nested: true, HTMLAttributes: { 'data-type': 'taskItem' } }), TableKit.configure({ table: { resizable: false } }), RawBlock, SourceIdentity];
 }
 const manager = new MarkdownManager({ extensions: extensions() });
 const schema = getSchema(extensions());
