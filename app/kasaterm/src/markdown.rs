@@ -34,6 +34,37 @@ pub(crate) fn wiki_target_in(
     subs.into_iter().map(|d| d.join(&file)).find(|p| p.exists())
 }
 
+pub(crate) fn resolve_wiki_link(
+    current: &std::path::Path,
+    vault: Option<&std::path::Path>,
+    href: &str,
+) -> Option<(std::path::PathBuf, Option<String>)> {
+    let encoded = href.strip_prefix("wiki:")?;
+    if encoded.len() > 4096 { return None; }
+    let mut decoded = Vec::new();
+    let mut bytes = encoded.as_bytes().iter().copied();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let high = (bytes.next()? as char).to_digit(16)? as u8;
+            let low = (bytes.next()? as char).to_digit(16)? as u8;
+            decoded.push(high * 16 + low);
+        } else { decoded.push(byte); }
+    }
+    let target = String::from_utf8(decoded).ok()?;
+    let (name, anchor) = target.split_once('#').map_or((target.as_str(),None), |(name,anchor)|(name,Some(anchor.to_string())));
+    let dir = current.parent()?.canonicalize().ok()?;
+    let scope = vault.and_then(|path|path.canonicalize().ok()).filter(|root|dir.starts_with(root)).unwrap_or_else(||dir.clone());
+    if std::path::Path::new(name).components().any(|part| !matches!(part,std::path::Component::Normal(_))) { return None; }
+    let path = if name.is_empty() { current.to_path_buf() } else {
+        let direct = dir.join(name);
+        let stem = name.strip_suffix(".md").unwrap_or(name);
+        (direct.is_file() && crate::vault::kind(&direct,false) == "markdown").then_some(direct)
+            .or_else(||wiki_target_in(&dir,stem))
+            .or_else(||wiki_target_in(&scope,stem))?
+    }.canonicalize().ok()?;
+    (path.is_file() && path.starts_with(&scope)).then_some((path,anchor))
+}
+
 /// Write a text file **atomically** — sibling temp file, fsync, rename.
 ///
 /// `fs::write` truncates the destination first, so anything that interrupts the
@@ -4018,6 +4049,28 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wiki_links_decode_unicode_and_keep_vault_boundary() {
+        let base = std::env::temp_dir().join(format!("kasaterm-wiki-{}",uuid::Uuid::new_v4()));
+        let root = base.join("vault");
+        std::fs::create_dir_all(root.join("topics")).unwrap();
+        let current = root.join("index.md");
+        let target = root.join("topics/문서.md");
+        std::fs::write(&current,"index").unwrap();
+        std::fs::write(&target,"## 제목").unwrap();
+        let (path,anchor) = resolve_wiki_link(&current,Some(&root),"wiki:%EB%AC%B8%EC%84%9C%23%EC%A0%9C%EB%AA%A9").unwrap();
+        assert_eq!(path,target.canonicalize().unwrap());
+        assert_eq!(anchor.as_deref(),Some("제목"));
+        assert!(resolve_wiki_link(&current,Some(&root),"wiki:%2E%2E/outside").is_none());
+        assert!(resolve_wiki_link(&current,Some(&root),"wiki:%XY").is_none());
+        assert_eq!(resolve_wiki_link(&current,Some(&root),"wiki:%23heading").unwrap().0,current.canonicalize().unwrap());
+        #[cfg(unix)] {
+            std::fs::write(base.join("outside.md"),"outside").unwrap();
+            std::os::unix::fs::symlink(base.join("outside.md"),root.join("leak.md")).unwrap();
+            assert!(resolve_wiki_link(&current,Some(&root),"wiki:leak").is_none());
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
     fn task_pane(text: &str) -> MarkdownPane {
         let mut m = pane(&[]);
         m.is_md_doc = true;

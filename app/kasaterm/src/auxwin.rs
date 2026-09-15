@@ -234,6 +234,7 @@ impl AuxWindows {
 /// native window it references is still alive.
 pub(crate) struct AuxWindow {
     vault_transition: Option<VaultTransition>,
+    wiki_anchor: Option<(u64, String)>,
     rich: Option<crate::rich_document::RichDocHost>,
     gpu: gpu::GpuRenderer,
     pub(crate) editor: MarkdownPane,
@@ -1804,6 +1805,10 @@ impl App {
             self.aux.vault.as_ref().and_then(|vault|crate::vault::resolve(std::path::Path::new(&vault.root),node).ok())
         };
         let Some(path) = path else { self.set_aux_status(self.aux.windows[index].window.id(), "파일을 찾지 못했어요".into()); return };
+        self.request_document_path(index,path,(!node.starts_with("recent:")).then(||node.to_string()));
+    }
+
+    fn request_document_path(&mut self, index: usize, path: std::path::PathBuf, relative: Option<String>) {
         if path.is_dir() { return; }
         if !is_markdown_path(&path) {
             if matches!(crate::vault::kind(&path,false),"image"|"pdf") {
@@ -1816,12 +1821,13 @@ impl App {
         }
         if path.to_string_lossy() == self.aux.windows[index].editor.doc.path { return; }
         self.aux.vault_open_generation += 1;
+        self.aux.windows[index].wiki_anchor = None;
         self.aux.windows[index].vault_transition = None;
         if let Some(rich) = &mut self.aux.windows[index].rich {
             if rich.pending.as_ref().is_some_and(|(action,_,_)|matches!(action,crate::rich_document::PendingAction::Navigate)) { rich.pending=None; }
         }
         let generation = self.aux.vault_open_generation;
-        let relative = if node.starts_with("recent:") { String::new() } else { node.to_string() };
+        let relative = relative.unwrap_or_default();
         let owner = self.aux.windows[index].window.id();
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
@@ -1884,6 +1890,11 @@ impl App {
         if let Some(saved_text) = saved_text { aux.editor.saved_text = saved_text; }
         aux.welcome = welcome; aux.status = None; aux.preedit.clear(); aux.selecting = false; aux.outline_open = false;
         if let Some(rich) = &mut aux.rich { rich.change_document(text,!welcome); }
+        if let Some((generation,anchor)) = aux.wiki_anchor.take() {
+            if generation == self.aux.vault_open_generation {
+                if let Some(rich) = &aux.rich { rich.command("scrollToHeading",serde_json::json!({"anchor":anchor})); }
+            }
+        }
         self.publish_vault(index);
         self.begin_vault_scan();
         self.aux_redraw(index);
@@ -2041,6 +2052,20 @@ impl App {
         }
         if kind == "close" { self.close_aux_editor(index, event_loop); return; }
         if kind == "open-link" {
+            if let Some(href) = value["href"].as_str().filter(|href|href.starts_with("wiki:")) {
+                let current = std::path::PathBuf::from(&self.aux.windows[index].editor.doc.path);
+                let vault = self.aux.vault.as_ref().map(|vault|std::path::Path::new(&vault.root));
+                if let Some((path,anchor)) = crate::markdown::resolve_wiki_link(&current,vault,href) {
+                    if path == current {
+                        if let Some(anchor) = anchor { host.command("scrollToHeading",serde_json::json!({"anchor":anchor})); }
+                    } else {
+                        let relative = vault.and_then(|root|path.strip_prefix(root).ok()).map(|path|path.to_string_lossy().to_string());
+                        self.request_document_path(index,path,relative);
+                        self.aux.windows[index].wiki_anchor = anchor.map(|anchor|(self.aux.vault_open_generation,anchor));
+                    }
+                } else { self.set_aux_status(owner,"연결된 문서를 찾지 못했어요".into()); }
+                return;
+            }
             if let Some(href) = value["href"].as_str().filter(|href| href.starts_with("https://") || href.starts_with("http://") || href.starts_with("mailto:")) { self.open_md_dest(href); }
             return;
         }
@@ -2421,6 +2446,7 @@ impl App {
         );
         self.aux.windows.push(AuxWindow {
             vault_transition: None,
+            wiki_anchor: None,
             rich: None,
             gpu,
             editor,
