@@ -2500,6 +2500,59 @@ impl App {
         // Display-only fixture: never connect to or change a real source pane.
         // Reapply while active so process polling cannot replace the capture.
         let preview = std::env::var("KASATERM_AUTOINFO").unwrap_or_default();
+        if crate::verification_run() && matches!(preview.as_str(), "execution" | "execution-details" | "execution-scroll" | "execution-stale" | "execution-unknown") {
+            use crate::context_info::ContextEvidence;
+            use crate::info::{ContextLines, InfoScope, InfoSnap, PaneGroup};
+            let evidence = if preview == "execution-unknown" { ContextEvidence::default() } else {
+                ContextEvidence {
+                    available: true, partial: true, observed_records: 18,
+                    last_input_tokens: Some(12000), observed_input_tokens: 24000,
+                    observed_output_tokens: 600,
+                    skills_available: Some(vec!["화면 구성과 버튼 배치를 점검하는 긴 이름의 스킬".into(), "문서 작성".into(), "코드 검토".into()]),
+                    skills_read: vec!["문서 작성".into()],
+                    mcp_configured: Some(vec!["문서 검색".into(), "브라우저".into()]),
+                    mcp_called: vec!["문서 검색".into()],
+                    image_read_calls: 3, attachment_records: 2,
+                    image_payload_blocks: 1, image_reference_blocks: 1,
+                    stored_image_payload_bytes: 8192, max_image_payload_bytes: 8192,
+                    request_size_error: true,
+                    ..Default::default()
+                }
+            };
+            self.git.col_w_logical = 280.0;
+            self.info.scope = InfoScope::AllRooms;
+            self.info.active_room = 0;
+            self.info.selected_pane = Some("%info-fixture".into());
+            self.info.selected_pid = if preview == "execution-stale" { "%new-fixture" } else { "%info-fixture" }.into();
+            self.info.selected_session_id = "fixture-session".into();
+            self.info.selected_harness = "claude".into();
+            self.info.pane_expanded.clear();
+            if matches!(preview.as_str(), "execution-details" | "execution-scroll") {
+                self.info.pane_expanded.insert("runtime:local:%info-fixture".into());
+            }
+            self.info.scroll = if preview == "execution-scroll" { 960.0 } else { 0.0 };
+            self.info.view = InfoSnap {
+                panes: vec![
+                    PaneGroup { pane: "%info-fixture".into(), label: "문서 담당".into(),
+                        session: "문서 편집 동작 확인".into(), harness: "claude".into(),
+                        status: "대기".into(), window: 0, window_label: "앱 개발".into(),
+                        ..Default::default() },
+                    PaneGroup { pane: "%second-fixture".into(), label: "검토 담당".into(),
+                        session: "다른 방의 실행 정보".into(), harness: "codex".into(),
+                        status: "연결끊김".into(), machine: Some("검증용 기기".into()),
+                        window: 1, window_label: "화면 검토".into(), ..Default::default() },
+                ],
+                contexts: std::collections::HashMap::from([("%info-fixture".into(), ContextLines {
+                    pane_id: "%info-fixture".into(), session_id: "fixture-session".into(),
+                    harness: "claude".into(), summary: evidence.summary_lines(), details: evidence.detail_sections(),
+                })]),
+                ..Default::default()
+            };
+            if !ACTED.swap(true, Ordering::Relaxed) {
+                eprintln!("[autoinfo] display-only fixture: {preview}");
+            }
+            return;
+        }
         if crate::verification_run() && matches!(preview.as_str(), "mirrors" | "rooms") {
             self.info.view = crate::info::InfoSnap {
                 panes: vec![
