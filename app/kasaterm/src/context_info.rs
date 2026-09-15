@@ -54,26 +54,26 @@ impl ContextEvidence {
     pub(crate) fn summary_lines(&self) -> Vec<String> {
         if !self.available {
             return vec![
-                "대화 부담 · 이 세션의 기록을 확인하지 못했어요".into(),
-                "스킬·MCP · 사용 가능 목록과 사용 기록 미확인".into(),
-                "이미지·전송 용량 · 미확인".into(),
+                "기록 미확인 · 이 세션의 대화 부담".into(),
+                "미확인 · 스킬·MCP 목록과 사용 기록".into(),
+                "미확인 · 이미지·전송 용량".into(),
             ];
         }
         let usage = self.last_input_tokens.map_or_else(
-            || "최근 입력 토큰 미확인".into(),
+            || "미확인 · 최근 입력 토큰".into(),
             |n| format!("최근 입력 {n} 토큰"),
         );
         let tools = format!(
-            "스킬 읽기 {} · MCP 호출 {}종 · {}",
+            "{} · 스킬 읽기 {} · MCP 호출 {}종",
+            self.scope(),
             self.skills_read.len(),
-            self.mcp_called.len(),
-            self.scope()
+            self.mcp_called.len()
         );
         let images = if self.request_size_error {
-            "요청 크기 오류 기록 · 원인 미확인".into()
+            "원인 미확인 · 요청 크기 오류 기록".into()
         } else {
             format!(
-                "이미지 읽기 {}회 · 첨부 기록 {}건 · 전송 용량 미계측",
+                "전송 미계측 · 이미지 읽기 {}회 · 첨부 기록 {}건",
                 self.image_read_calls, self.attachment_records
             )
         };
@@ -94,7 +94,7 @@ impl ContextEvidence {
         }
         let mut tokens = vec![
             self.last_input_tokens.map_or_else(
-                || "최근 요청 입력: 미확인".into(),
+                || "미확인 · 최근 요청 입력".into(),
                 |n| format!("최근 요청 입력: {n} 토큰 (캐시 포함)"),
             ),
             "토큰은 전송 바이트와 다른 단위예요.".into(),
@@ -110,22 +110,20 @@ impl ContextEvidence {
                 "하네스가 보고한 세션 누적: 입력 {i} · 출력 {o} 토큰"
             ));
         }
-        let skills = vec![
-            list(
-                "세션에 제시된 사용 가능 스킬",
-                self.skills_available.as_deref(),
-            ),
-            list("읽기 응답이 확인된 스킬", Some(&self.skills_read)),
-            list("스킬 호출 기록", Some(&self.skills_invoked)),
+        let mut skills = list(
+            "세션에 제시된 사용 가능 스킬",
+            self.skills_available.as_deref(),
+        );
+        skills.extend(list("읽기 응답이 확인된 스킬", Some(&self.skills_read)));
+        skills.extend(list("스킬 호출 기록", Some(&self.skills_invoked)));
+        skills.push(
             "목록에 있다고 본문을 읽은 것은 아니에요. 셸로 읽은 스킬은 식별하지 못할 수 있어요."
                 .into(),
-        ];
-        let mcp = vec![
-            list("세션에 보고된 MCP 설정", self.mcp_configured.as_deref()),
-            list("MCP 호출 기록", Some(&self.mcp_called)),
-            list("연결 성공 기록", self.mcp_connected.as_deref()),
-            "연결 기록은 기록 당시 상태예요. 현재 연결 여부는 확인하지 못했어요.".into(),
-        ];
+        );
+        let mut mcp = list("세션에 보고된 MCP 설정", self.mcp_configured.as_deref());
+        mcp.extend(list("MCP 호출 기록", Some(&self.mcp_called)));
+        mcp.extend(list("연결 성공 기록", self.mcp_connected.as_deref()));
+        mcp.push("현재 연결 미확인 · 연결 기록은 기록 당시 상태예요.".into());
         let mut images = vec![
             format!("이미지 읽기 도구 호출: {}회", self.image_read_calls),
             format!("이미지 첨부가 표시된 기록: {}건", self.attachment_records),
@@ -141,7 +139,7 @@ impl ContextEvidence {
             ),
             "위 값은 확인한 기록 안의 값이에요. 참조만 남은 이미지의 본문 크기는 미확인이에요."
                 .into(),
-            "실제 요청 전송 바이트: 미계측. 파일 크기를 요청 크기로 보지 않아요.".into(),
+            "미계측 · 실제 요청 전송 바이트. 파일 크기를 요청 크기로 보지 않아요.".into(),
         ];
         if self.partial {
             images
@@ -149,7 +147,7 @@ impl ContextEvidence {
         }
         if self.request_size_error {
             images.push(
-                "요청 크기 오류 기록이 있어요. 원인 미확인이며 이미지 때문이라고 단정하지 않아요."
+                "원인 미확인 · 요청 크기 오류 기록이 있어요. 이미지 때문이라고 단정하지 않아요."
                     .into(),
             );
         }
@@ -171,11 +169,13 @@ impl ContextEvidence {
     }
 }
 
-fn list(label: &str, names: Option<&[String]>) -> String {
+fn list(label: &str, names: Option<&[String]>) -> Vec<String> {
     match names {
-        None => format!("{label}: 미확인"),
-        Some([]) => format!("{label}: 확인한 기록 0건"),
-        Some(names) => format!("{label}: {}", names.join(", ")),
+        None => vec![format!("미확인 · {label}")],
+        Some([]) => vec![format!("기록 없음 · {label} (확인한 구간)")],
+        Some(names) => std::iter::once(format!("{label}: {}개", names.len()))
+            .chain(names.iter().map(|name| format!("  {name}")))
+            .collect(),
     }
 }
 
@@ -737,13 +737,15 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
-                "kasaterm-context-{}-{}",
+                "kasaterm-context-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::create_dir(&path).unwrap();
             Self(path)
@@ -859,5 +861,23 @@ mod tests {
         };
         assert_eq!(partial.summary_lines().len(), 3);
         assert!(partial.summary_lines()[1].contains("전체 미확인"));
+    }
+
+    #[test]
+    fn uncertainty_precedes_values_and_lists_keep_each_item_visible() {
+        let mut evidence = ContextEvidence {
+            available: true,
+            partial: true,
+            ..Default::default()
+        };
+        assert!(evidence.summary_lines()[1].starts_with("확인한 일부 기록"));
+        assert!(evidence.summary_lines()[2].starts_with("전송 미계측"));
+        evidence.request_size_error = true;
+        assert!(evidence.summary_lines()[2].starts_with("원인 미확인"));
+        assert_eq!(
+            list("목록", Some(&["first".into(), "last".into()])),
+            ["목록: 2개", "  first", "  last"]
+        );
+        assert!(list("연결", None)[0].starts_with("미확인"));
     }
 }
