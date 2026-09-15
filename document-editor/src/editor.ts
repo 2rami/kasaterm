@@ -247,7 +247,7 @@ window.kasatermEditor = {
   setSaveState(data) { live.textContent = data.state === 'error' ? (data.message || '저장하지 못했어요. 다시 저장해주세요.') : ''; live.classList.toggle('visible', data.state === 'error'); },
 };
 document.addEventListener('keydown', e => {
-  if (e.isComposing || composing) return;
+  if (e.defaultPrevented || e.isComposing || composing) return;
   const toolFocus = bubble.contains(document.activeElement) || slash.contains(document.activeElement) || document.activeElement === addBlock;
   if (e.key === 'Escape') { dismissTools(); if (toolFocus) editor?.view.focus(); return; }
   if (!slash.hidden && toolFocus && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
