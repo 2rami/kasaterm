@@ -286,6 +286,16 @@ fn next_word_col(chars: &[char], col: usize) -> usize {
 }
 
 impl MarkdownPane {
+    pub(crate) fn accept_rich_text(&mut self, text: &str) {
+        if self.text_for_save() == text { return; }
+        if self.edit_lines.is_empty() {
+            self.edit_lines = Arc::new(self.doc.raw.split('\n').map(String::from).collect());
+        }
+        self.push_undo(EditKind::Other);
+        *self.lines_mut() = text.split('\n').map(String::from).collect();
+        self.touch();
+        self.refresh_preview();
+    }
     pub(crate) fn refresh_preview(&mut self) {
         if self.is_md_doc && !self.raw_mode {
             let text = self.text_for_save();

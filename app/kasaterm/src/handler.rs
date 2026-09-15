@@ -146,6 +146,10 @@ impl ApplicationHandler<UserEvent> for App {
     /// committed-Hangul echo / backspace / space show up without lag.
     // event_loop 는 SocketOpenWeb(자식 창 생성) 한 곳만 쓴다.
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        if let UserEvent::RichDocument { owner, message } = &event {
+            self.aux_rich_message(*owner, message, event_loop);
+            return;
+        }
         if self.viewer_only {
             match event {
                 UserEvent::Redraw => self.aux_request_redraws(),
@@ -196,6 +200,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Local cmux socket backend delegated a pane write / split / focus to
         // this GUI thread (the socket server can't touch self.pty directly).
         match &event {
+            UserEvent::RichDocument { .. } => return,
             UserEvent::CloseGraceExpired => {
                 self.finish_close_grace();
                 self.render_frame();
@@ -2991,6 +2996,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match event {
             WindowEvent::CloseRequested => {
+                if self.aux_flush_for_app_close() { return; }
                 // A running job (claude / build / editor) gets a confirm modal
                 // first; an idle window quits straight away.
                 if !self.confirm_or_close_window() {
@@ -7098,6 +7104,7 @@ impl ApplicationHandler<UserEvent> for App {
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyQ)
                     )
                 {
+                    if self.aux_flush_for_app_close() { return; }
                     if !self.confirm_or_close_window() {
                         event_loop.exit();
                     }
@@ -7247,6 +7254,9 @@ impl ApplicationHandler<UserEvent> for App {
         if self.viewer_only {
             self.flush_aux_opens(event_loop);
             while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
+                if self.aux_document_menu_action(event.id.as_ref(), event_loop) {
+                    continue;
+                }
                 if self.quit_menu_item.as_ref().map(|item| item.id()) == Some(&event.id) {
                     self.viewer_begin_quit(event_loop);
                     return;
@@ -7436,6 +7446,9 @@ impl ApplicationHandler<UserEvent> for App {
         // Drain menu clicks from muda's global channel. The "Git 패널" item
         // toggles the in-window git column (open/close).
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
+            if self.aux_document_menu_action(ev.id.as_ref(), event_loop) {
+                continue;
+            }
             if self.git_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.toggle_git_col();
             } else if self.session_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {

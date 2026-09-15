@@ -36,6 +36,7 @@ mod native_strings;
 mod notify_banner;
 mod onboarding;
 mod render;
+mod rich_document;
 mod screenread;
 mod session;
 mod server_restore;
@@ -3586,6 +3587,7 @@ impl Workspace {
 /// without the ~0.5s blink-cadence lag.
 #[derive(Debug, Clone)]
 enum UserEvent {
+    RichDocument { owner: WindowId, message: String },
     Redraw,
     CloseGraceExpired,
     MirrorCloseDone {
