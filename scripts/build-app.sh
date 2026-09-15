@@ -94,6 +94,8 @@ fi
 
 # Build the binaries. Besides kasaterm we bundle kasaterm-cli so a pane can
 # drive siblings via the socket (install_pane_shims stages it on the pane PATH).
+npm --prefix document-editor ci --no-audit --no-fund
+npm --prefix document-editor run build
 BUILD_PROVENANCE_STATE="$(mktemp /tmp/kasaterm-build-proof.XXXXXX)"
 if ! python3 "$ROOT/tools/request_journal/build_manifest.py" begin --project "$ROOT" --profile "$PROFILE" --output "$BUILD_PROVENANCE_STATE"; then
   echo "[build-app] source provenance unavailable; this build will not claim a source commit" >&2

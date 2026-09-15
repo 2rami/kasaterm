@@ -25,6 +25,8 @@ NOTO_LICENSE="$ROOT/app/kasaterm/assets/fonts/OFL-NotoSansKR.txt"
 [[ -f "$NOTO_LICENSE" ]] || { echo "error: Noto Sans KR OFL missing" >&2; exit 1; }
 
 VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+npm --prefix document-editor ci --no-audit --no-fund
+npm --prefix document-editor run build
 if [[ "$PROFILE" == release ]]; then
   cargo build --release -p kasaterm --bin kasaterm
   BINDIR="$ROOT/target/release"
