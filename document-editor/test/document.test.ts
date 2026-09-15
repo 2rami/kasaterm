@@ -102,3 +102,30 @@ test('mixed checkbox and plain bullet items stay rich and preserve unchanged sou
   assert.match(saved, /- \[x\] 작업/); assert.ok(saved.includes('설명 [[참고]]')); assert.ok(saved.includes('바뀐 끝'));
   assert.ok(!new DocumentSource().load(saved).content!.some(node => node.type === 'preservedMarkdown'));
 });
+test('duplicating a mixed-list block without source identity does not resurrect its original group', () => {
+  const source = new DocumentSource();
+  const doc = source.load('- [ ] 첫 작업 [[첫째]]\n- 설명 [[참고|별칭]]\n- [x] 마지막 작업\n\n남겨둘 문단\n');
+  const copy = JSON.parse(JSON.stringify(doc.content![1], (key, value) => key === 'sourceId' ? undefined : value));
+  doc.content!.splice(2, 0, copy);
+  const saved = source.serialize(doc);
+  assert.equal(saved.split('첫 작업').length - 1, 1);
+  assert.equal(saved.split('설명 [[참고|별칭]]').length - 1, 2);
+  assert.equal(saved.split('마지막 작업').length - 1, 1);
+  assert.equal(saved.split('남겨둘 문단').length - 1, 1);
+  const reopened = new DocumentSource().load(saved);
+  let references = 0; getSchema(extensions()).nodeFromJSON(reopened).descendants(node => { if (node.type.name === 'wikiReference' && node.attrs.raw === '[[참고|별칭]]') references++; });
+  assert.equal(references, 2);
+});
+test('reordering and deleting members of an original mixed group preserves only remaining blocks', () => {
+  const source = new DocumentSource();
+  const doc = source.load('- [ ] 첫 작업 [[첫째]]\n- 삭제할 설명 [[지울참고]]\n- [x] 끝 작업 [[마지막]]\n\n그대로 둘 문단\n');
+  const [first, , last, paragraph] = doc.content!;
+  doc.content = [last, first, paragraph];
+  const saved = source.serialize(doc);
+  assert.ok(saved.indexOf('끝 작업') < saved.indexOf('첫 작업'));
+  assert.ok(!saved.includes('삭제할 설명')); assert.ok(!saved.includes('[[지울참고]]'));
+  for (const expected of ['[[마지막]]', '[[첫째]]', '그대로 둘 문단']) assert.equal(saved.split(expected).length - 1, 1);
+  const reopened = getSchema(extensions()).nodeFromJSON(new DocumentSource().load(saved));
+  let tasks = 0; reopened.descendants(node => { if (node.type.name === 'taskItem') tasks++; });
+  assert.equal(tasks, 2);
+});
