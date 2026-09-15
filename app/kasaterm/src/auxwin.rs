@@ -2063,7 +2063,7 @@ impl App {
                         self.request_document_path(index,path,relative);
                         self.aux.windows[index].wiki_anchor = anchor.map(|anchor|(self.aux.vault_open_generation,anchor));
                     }
-                } else { self.set_aux_status(owner,"연결된 문서를 찾지 못했어요".into()); }
+                } else { self.set_aux_status(owner,"위키 열기 실패: 연결된 문서를 찾지 못했어요".into()); }
                 return;
             }
             if let Some(href) = value["href"].as_str().filter(|href| href.starts_with("https://") || href.starts_with("http://") || href.starts_with("mailto:")) { self.open_md_dest(href); }
