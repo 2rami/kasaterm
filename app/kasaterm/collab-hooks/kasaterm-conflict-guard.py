@@ -6,9 +6,8 @@
 transcript를 직접 비교하므로 kasaterm 빌드 상태와 무관하게 동작한다.
 kasaterm pane 밖($KASATERM_PANE_ID 없음)이면 no-op.
 
-왜 transcript 비교인가: tell(프롬프트 주입)은 상대가 작업 중이면 턴이 끝나야
-읽혀 실시간 조율에 못 쓴다. PreToolUse는 Edit 직전 동기 실행되고, 상대의
-transcript는 상대가 바쁘든 말든 실시간으로 쌓이므로, 말 걸지 않고 즉시 판정한다.
+충돌 판정은 상대의 답변을 기다리면 늦는다. Edit 직전에 transcript를 직접
+비교해 판정하고, 차단 안내에서 최신 board 주소로 조율하게 한다.
 
 "지금 작업 중" 판정 — 절대 시간 윈도우가 아니라 진행 상태로:
   - 상대가 그 파일 이후 다른 작업(어떤 tool이든)으로 넘어갔으면 → 손 뗌 → 통과
@@ -71,25 +70,6 @@ def scan(jf, fp):
                 if last_file is None or ts > last_file:
                     last_file = ts
     return last_file, last_any
-
-
-def teammate_name(sid):
-    """충돌 상대 세션 id → 같은 방 팀의 SendMessage 주소(agent 이름).
-
-    shim 이름 규칙 = <로마자>-<sid 앞4자> 라서 인박스 파일명 꼬리로 역추적한다
-    (bridge.rs 와 같은 매칭). 꼬리 충돌(스테일 인박스 누적)로 후보가 2개 이상이면
-    오배달 대신 None — 호출부가 tell 안내로 폴백한다."""
-    team = os.environ.get("KASATERM_TEAM")
-    if not team or not sid:
-        return None
-    tail = "-" + sid[:4]
-    d = os.path.expanduser("~/.claude/teams/" + team + "/inboxes")
-    try:
-        names = [f[:-5] for f in os.listdir(d) if f.endswith(".json")]
-    except OSError:
-        return None
-    hits = [n for n in names if n.endswith(tail)]
-    return hits[0] if len(hits) == 1 else None
 
 
 def roster_pane(cwd, sid):
@@ -216,24 +196,17 @@ def main():
         sid = os.path.basename(jf).split(".")[0]
         who = pane or f"다른 pane({sid[:8]}…)"
         doing = f" (지금: {intent[:70]})" if intent else ""
-        # 조율 채널은 SendMessage 우선(사용자 07-17) — tell 은 상대가 작업 중이면 턴이
-        # 끝나야 읽지만 teammate-message 는 작업 중에도 도착해 실시간 조율이 된다.
-        # 주소 역추적이 안 되는 상대(비팀원 pane·detach 포크·꼬리 충돌)만 tell 폴백.
-        addr = teammate_name(sid)
-        if addr:
-            coord = (
-                f"① 같은 문제면 합류/분담 — SendMessage 도구로 to:\"{addr}\" 에게 "
-                f"\"나도 {name} 작업 필요, 조율하자\" 처럼 의도를 보내세요(상대가 작업 중이어도 도착). "
-            )
-        else:
-            tellref = pane or "<pane>"
-            coord = f"① 같은 문제면 합류 → kasaterm-cli tell {tellref} \"나도 {name} 보는 중, 합칠까?\" "
+        coord = (
+            "kasaterm-cli board --all에서 기기·방·신원을 확인하고, 최신 address 전체로 "
+            "kasaterm-cli tell --address '<주소 JSON>' --stdin을 사용하세요. "
+            "대상이 불명확하면 보내지 마세요. 사용자 범위 안에서 담당만 조율하고, "
+            "위험·취향·범위 질문은 사용자에게 직접 하세요. "
+        )
         reason = (
             f"{who}이 {secs}초 전부터 '{name}'을(를) 작업 중이에요{doing}. "
-            f"같은 파일 겹침을 막았어요. 조율하세요: "
+            "같은 파일 겹침을 막았어요. "
             + coord
-            + f"② 독립 작업이면 다른 파일부터. "
-            f"③ 그 pane이 손 뗄 때까지(~{IDLE}초 조용 또는 다른 작업) 기다렸다 재시도."
+            + "독립 작업은 다른 파일부터 하세요. 이 파일은 상대가 손을 뗀 뒤 다시 시도하세요."
         )
         print(
             json.dumps(

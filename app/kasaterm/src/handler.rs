@@ -208,6 +208,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SafeTellWake => { self.safe_tell_tick(); }
+            UserEvent::SafeTellReady(delivery) => { self.safe_tell_ready(delivery); }
+            UserEvent::SafeTellCommit(commit) => { self.safe_tell_commit(commit); }
             UserEvent::SocketBytes(sid, bytes) => {
                 {
                     let target = match sid.as_deref() {
@@ -7358,6 +7361,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 무효화를 함께 해야 해서다(themegen.rs 참조).
         self.themegen_poll();
         self.native_settings_tick();
+        self.safe_tell_tick();
         self.native_board_tick();
         self.pump_native_onboarding();
         // 창 이동/리사이즈 1초 뒤 프레임 저장(디바운스) — exit 훅에만 맡기면

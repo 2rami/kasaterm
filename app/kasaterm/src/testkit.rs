@@ -6984,11 +6984,21 @@ impl App {
     /// creates a webview; it switches to the PTY-less WGPU room.
     pub(crate) fn arm_autoboard(&mut self) {
         let Ok(ms_str) = std::env::var("KASATERM_AUTOBOARD_MS") else { return };
+        if std::env::var_os("KASATERM_TEST_BOARD_FIXTURE").is_some()
+            && !crate::native_board::board_fixture_active()
+        {
+            eprintln!("[autoboard] refused: isolate temporary files, socket, window and viewer state first");
+            return;
+        }
         let Ok(ms) = ms_str.parse::<u64>() else { return };
         self.autoboard_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
     }
 
     pub(crate) fn run_pending_autoboard(&mut self) {
+        #[cfg(debug_assertions)]
+        if self.board_room_active() {
+            self.board_scene.apply_board_probe_view();
+        }
         let Some(due) = self.autoboard_at else { return };
         if Instant::now() < due {
             return;

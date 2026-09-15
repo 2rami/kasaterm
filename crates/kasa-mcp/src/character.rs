@@ -2527,13 +2527,22 @@ mod collab_protocol_tests {
     /// 규약은 화면에 안 보이므로 비어도 알아챌 방법이 없다. 파일이 지워지거나
     /// 경로가 어긋나면 여기서 먼저 걸린다.
     #[test]
-    fn default_protocol_is_not_empty_and_starts_with_a_blank_line() {
+    fn default_protocol_is_concise_and_keeps_the_collaboration_flow() {
+        let protocol = DEFAULT_COLLAB_PROTOCOL.trim();
         assert!(
-            DEFAULT_COLLAB_PROTOCOL.len() > 1000,
-            "규약 정본 파일이 비었거나 경로가 어긋났다"
+            protocol.lines().count() <= 65 && protocol.len() <= 6 * 1024,
+            "규약은 짧게 유지하고 API 상세는 연결된 문서에 둬야 한다"
         );
         // 캐릭터 정체성 문장에 규약이 이어붙으면 한 문단이 된다.
-        assert!(DEFAULT_COLLAB_PROTOCOL.starts_with("\n\n["));
+        assert!(DEFAULT_COLLAB_PROTOCOL.starts_with("\n\n"));
+        assert!(protocol.starts_with("# "), "규약은 Markdown 제목으로 시작한다");
+        for command in [
+            "kasaterm-cli board --all",
+            "kasaterm-cli tell --address",
+            "kasaterm-cli done",
+        ] {
+            assert!(protocol.contains(command), "핵심 협업 흐름 누락: {command}");
+        }
     }
 
     /// 파일에서 읽은 규약도 코드 기본값과 **같은 모양**이어야 한다 — 앞의 빈 줄
@@ -2543,7 +2552,7 @@ mod collab_protocol_tests {
     fn file_backed_protocol_keeps_the_same_leading_gap() {
         let dir = std::env::temp_dir().join(format!("kasa-proto-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("collab-protocol.md"), "[협업 — 시험]\n본문\n").unwrap();
+        std::fs::write(dir.join("collab-protocol.md"), "# 협업 테스트\n\n본문\n").unwrap();
         // SAFETY: 이 테스트만 이 변수를 읽는다(같은 프로세스의 다른 테스트는 규약
         // 파일 경로를 안 본다).
         unsafe { std::env::set_var("KASATERM_COLLAB_HOOKS_DIR", &dir) };
@@ -2552,8 +2561,8 @@ mod collab_protocol_tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         // 테마·홈 override 가 실재하면 그쪽이 먼저 이긴다 — 그때는 이 단언을 건너뛴다.
-        if got.contains("[협업 — 시험]") {
-            assert!(got.starts_with("\n\n["), "앞 빈 줄 두 칸이 유지돼야 한다");
+        if got.contains("# 협업 테스트") {
+            assert!(got.starts_with("\n\n# "), "앞 빈 줄 두 칸이 유지돼야 한다");
         }
     }
 

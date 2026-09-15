@@ -61,6 +61,41 @@ impl StandaloneBackend {
 }
 
 impl Backend for StandaloneBackend {
+    fn collab_snapshot(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        crate::board_service::snapshot(params)
+    }
+
+    fn collab_changes(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        crate::board_service::changes(params)
+    }
+
+    fn collab_inspect(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        crate::board_service::inspect(self,params)
+    }
+
+    fn collab_pane_identity(&self, surface: &str) -> Result<serde_json::Value> {
+        if kasa_pty::lookup_session(surface).is_none() { anyhow::bail!("managed place no longer exists"); }
+        crate::board_service::address(surface,None)
+    }
+
+    fn collab_board_source(&self) -> Result<serde_json::Value> {
+        let table = kasa_pty::process_table_shared();
+        let mut panes = Vec::new();
+        for id in kasa_pty::live_sessions() {
+            let Some(pty) = kasa_pty::lookup_session(&id) else { continue };
+            let harness = pty.shell_pid().and_then(|pid|kasa_pty::agent_for_shell(&table,pid))
+                .map(|kind|kind.as_str().to_owned());
+            panes.push(serde_json::json!({"address":self.collab_pane_identity(&id)?,"room_label":"Managed terminals",
+                "harness":harness,"title":pty.osc_title().unwrap_or_default(),"status":"unknown",
+                "status_reason":"standalone activity binding unsupported","request":"","progress":"",
+                "place_state":"managed","detached":false}));
+        }
+        let mut source = crate::board_service::local_source(panes,true)?;
+        source["source_kind"] = serde_json::json!("standalone");
+        source["capabilities"] = serde_json::json!(["live_places","activity_unsupported","rooms_unsupported"]);
+        Ok(source)
+    }
+
     // --- required (no trait default) ---------------------------------------
     // Standalone has no live panes: list queries return empty, pane ops bail.
     fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
@@ -83,82 +118,18 @@ impl Backend for StandaloneBackend {
     ) -> Result<SurfaceInfo> {
         anyhow::bail!("standalone webview server has no live panes")
     }
-    fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
-        // tell — background claude 세션에 텍스트 주입. bg-pty-host pty 소켓에 raw write 는
-        // 안 먹는다: 실제 진입은 control.sock 의 nudge→attach(op) 핸드셰이크 + 세션 고정 auth
-        // 토큰이 필요하다(인터포저로 프로토콜 해독). auth 출처가 불투명하므로 그 핸드셰이크를
-        // 직접 재현하는 대신, `claude attach <sid>` 를 forkpty 로 띄운다 — claude 가 nudge/
-        // attach/auth 를 다 처리하니 우리는 pty stdin 에 텍스트+CR 을 쓰고 잠시 뒤 SIGTERM 으로
-        // detach 하면 된다.
-        //
-        // 실환경 검증됨(2026-08-26, 맥미니): `done` 세션에 「방금 답한 숫자에 10을 곱하면?」을
-        // 넣으니 앞 턴(1+1→2)을 이어받아 **20** 이라 답했다 — 주입만 되는 게 아니라 맥락이
-        // 이어진다. blocked/working 세션엔 즉시 안 먹는 것은 그대로다.
-        //
-        // ⚠️**부르는 쪽은 이 함수의 반환을 기다려 성패를 판정하면 안 된다.** drain 2.5s +
-        // 처리 2.5s 에 `claude attach` 가 SIGTERM 을 받고 정리하는 시간이 더 붙어, HTTP 로
-        // 감싸면 25초를 넘겨 클라이언트가 먼저 끊는다(실측). 실제로는 성공했는데 화면엔
-        // 실패로 보인다 — 「보냈다」로 끊고 transcript 갱신으로 확인하는 편이 맞다.
-        let sid = surface_id
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("standalone tell requires a session id (surface)"))?;
-        // forkpty 기반 `claude attach` 주입은 Unix 전용 — Windows 엔 forkpty 가 없다.
-        // Windows standalone 서버는 아직 tell 을 지원하지 않으므로 명시적으로 bail.
-        #[cfg(not(unix))]
-        {
-            let _ = (sid, text);
-            return Err(anyhow::anyhow!(
-                "standalone tell (forkpty attach) is not supported on Windows yet"
-            ));
-        }
-        #[cfg(unix)]
-        {
-            let short: String = sid.chars().take(8).collect();
-            let claude = crate::http::claude_bin();
-            let claude_c = std::ffi::CString::new(claude.to_string_lossy().as_bytes())
-                .map_err(|_| anyhow::anyhow!("bad claude path"))?;
-            let attach_c = std::ffi::CString::new("attach").unwrap();
-            let short_c =
-                std::ffi::CString::new(short).map_err(|_| anyhow::anyhow!("bad session id"))?;
-            unsafe {
-                let mut master: libc::c_int = 0;
-                let pid = libc::forkpty(
-                    &mut master,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-                if pid < 0 {
-                    anyhow::bail!("forkpty failed");
-                }
-                if pid == 0 {
-                    // child: exec `claude attach <short>` on the pty.
-                    let argv =
-                        [claude_c.as_ptr(), attach_c.as_ptr(), short_c.as_ptr(), std::ptr::null()];
-                    libc::execv(claude_c.as_ptr(), argv.as_ptr());
-                    libc::_exit(127);
-                }
-                // parent: attach 화면이 뜰 시간을 준 뒤(pty output drain) 텍스트 주입, claude 가
-                // user 메시지로 처리할 시간을 두고 SIGTERM 으로 detach(세션은 daemon 에 유지).
-                libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
-                let mut buf = [0u8; 4096];
-                let drain_until =
-                    std::time::Instant::now() + std::time::Duration::from_millis(2500);
-                while std::time::Instant::now() < drain_until {
-                    libc::read(master, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                let payload = format!("{text}\r");
-                let _ =
-                    libc::write(master, payload.as_ptr() as *const libc::c_void, payload.len());
-                std::thread::sleep(std::time::Duration::from_millis(2500));
-                libc::kill(pid, libc::SIGTERM);
-                let mut status = 0;
-                libc::waitpid(pid, &mut status, 0);
-                libc::close(master);
-            }
-            return Ok(());
-        }
+    fn send_text(&self, _surface_id: Option<&str>, _text: &str) -> Result<()> {
+        anyhow::bail!("unmanaged background sessions do not support safe tell; no attach fallback")
+    }
+
+    fn collab_tell(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        crate::tell_service::submit(self,params,|| {
+            anyhow::bail!("standalone local injection is unsupported: managed input/IME evidence is unavailable")
+        })
+    }
+
+    fn collab_tell_status(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        crate::tell_service::status(params)
     }
     fn send_key(&self, _surface_id: Option<&str>, _key: &str) -> Result<()> {
         anyhow::bail!("standalone webview server has no live panes")

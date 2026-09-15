@@ -7136,6 +7136,45 @@ fn websocket_session_is_current(id: &str, session: &Arc<kasa_pty::PtySession>) -
     kasa_pty::lookup_session(id).is_some_and(|current| Arc::ptr_eq(&current, session))
 }
 
+async fn collab_read_handler(
+    backend: Arc<dyn Backend>, operation: &'static str,
+    Query(query): Query<std::collections::HashMap<String,String>>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    let params = if let Some(raw) = query.get("params") {
+        match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(value) if value.is_object() => value,
+            _ => return (StatusCode::BAD_REQUEST,Json(serde_json::json!({"error":"invalid collaboration parameters"}))).into_response(),
+        }
+    } else {
+        let mut value = serde_json::json!({});
+        for key in ["scope","since"] { if let Some(text) = query.get(key) { value[key] = serde_json::json!(text); } }
+        if let Some(limit) = query.get("limit") {
+            match limit.parse::<u64>() {
+                Ok(limit) => value["limit"] = serde_json::json!(limit),
+                Err(_) => return (StatusCode::BAD_REQUEST,Json(serde_json::json!({"error":"invalid limit"}))).into_response(),
+            }
+        }
+        if operation == "inspect" {
+            let mut address = serde_json::json!({});
+            for key in ["machine_id","surface_key","surface_id","session_id","instance_id"] {
+                if let Some(text) = query.get(key) { address[key] = serde_json::json!(text); }
+            }
+            value["address"] = address;
+        }
+        value
+    };
+    match tokio::task::spawn_blocking(move || match operation {
+        "snapshot" => backend.collab_snapshot(&params),
+        "changes" => backend.collab_changes(&params),
+        _ => backend.collab_inspect(&params),
+    }).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => (StatusCode::CONFLICT,Json(serde_json::json!({"error":error.to_string()}))).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,Json(serde_json::json!({"error":"collaboration worker failed"}))).into_response(),
+    }
+}
+
 pub fn spawn_http_server(
     backend: Arc<dyn Backend>,
     preferred_port: u16,
@@ -7162,6 +7201,10 @@ pub fn spawn_http_server_opts(
         .or_else(|_| std::net::TcpListener::bind((addr.as_str(), 0)))?;
     let port = listener.local_addr()?.port();
     listener.set_nonblocking(true)?;
+    let collab_collector = match crate::board_service::register(backend.clone(),port) {
+        Ok(collector) => Some(collector),
+        Err(_) => { eprintln!("[collaboration] observer unavailable"); None },
+    };
     // 무중단 핸드오프 입양 창구 — HTTP 포트와 짝지은 unix 소켓. 실패해도 서버는
     // 계속 뜬다(핸드오프만 못 받을 뿐).
     #[cfg(unix)]
@@ -7182,6 +7225,7 @@ pub fn spawn_http_server_opts(
     std::thread::Builder::new()
         .name("kasaspace-mcp-http".into())
         .spawn(move || {
+            let _collab_collector = collab_collector;
             let rt = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -7244,6 +7288,9 @@ pub fn spawn_http_server_opts(
                 let ai_backend = backend.clone();
                 let sessions_backend = backend.clone();
                 let board_backend = backend.clone();
+                let collab_snapshot_backend = backend.clone();
+                let collab_changes_backend = backend.clone();
+                let collab_inspect_backend = backend.clone();
                 let migrate_backend = backend.clone();
                 let persona_backend = backend.clone();
                 let panes_backend = backend.clone();
@@ -7292,6 +7339,8 @@ pub fn spawn_http_server_opts(
                 let transfer_spawn_backend = backend.clone();
                 let transfer_close_backend = backend.clone();
                 let transfer_migrate_backend = backend.clone();
+                let tell_backend = backend.clone();
+                let tell_status_backend = backend.clone();
                 let events_backend = backend.clone();
                 let messages_backend = backend.clone();
                 let list_dir_backend = backend.clone();
@@ -7355,6 +7404,12 @@ pub fn spawn_http_server_opts(
                         get(move || board_handler(board_backend.clone())),
                     )
                     .route("/machines", get(machines_handler))
+                    .route("/collab/board", get(move |q: Query<std::collections::HashMap<String,String>>|
+                        collab_read_handler(collab_snapshot_backend.clone(),"snapshot",q)))
+                    .route("/collab/changes", get(move |q: Query<std::collections::HashMap<String,String>>|
+                        collab_read_handler(collab_changes_backend.clone(),"changes",q)))
+                    .route("/collab/inspect", get(move |q: Query<std::collections::HashMap<String,String>>|
+                        collab_read_handler(collab_inspect_backend.clone(),"inspect",q)))
                     .route("/machines/announce", post(machines_announce_handler))
                     .route("/version", get(version_handler))
                     .route(
@@ -7465,6 +7520,20 @@ pub fn spawn_http_server_opts(
                     )
                     .route("/term/agent-stop", post(term_agent_stop_post))
                     .route("/term/message", post(term_message_post))
+                    .route("/collab/tell", post(move |Json(params): Json<serde_json::Value>| {
+                        let backend = tell_backend.clone();
+                        collab_tell_post(backend,Json(params))
+                    }).layer(axum::extract::DefaultBodyLimit::max(24 * 1024)))
+                    .route("/collab/tell/status", post(move |Json(params): Json<serde_json::Value>| {
+                        let backend = tell_status_backend.clone();
+                        async move {
+                            match tokio::task::spawn_blocking(move || backend.collab_tell_status(&params)).await {
+                                Ok(Ok(value)) => Json(value),
+                                Ok(Err(error)) => Json(serde_json::json!({"ok":false,"error":error.to_string()})),
+                                Err(_) => Json(serde_json::json!({"ok":false,"error":"receipt worker stopped"})),
+                            }
+                        }
+                    }).layer(axum::extract::DefaultBodyLimit::max(4096)))
                     // 학생 쪽지 — 나쵸가 넣고 폰 종 목록이 읽는다(notes.rs 머리말).
                     .route("/term/notes", get(term_notes_get).post(term_notes_post))
         .route("/term/push-token", post(term_push_token_post))
@@ -8011,8 +8080,44 @@ pub fn spawn_http_server_opts(
     Ok(port)
 }
 
+pub(crate) async fn collab_tell_post(backend: Arc<dyn Backend>, Json(params): Json<serde_json::Value>) -> Json<serde_json::Value> {
+    match tokio::task::spawn_blocking(move || backend.collab_tell(&params)).await {
+        Ok(Ok(value)) => Json(value),
+        Ok(Err(error)) => Json(serde_json::json!({"ok":false,"error":error.to_string()})),
+        Err(_) => Json(serde_json::json!({"ok":false,"error":"tell worker stopped; inspect receipt before retrying"})),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn collaboration_read_routes_share_backend_and_origin_guard() {
+        use super::*;
+        use axum::http::StatusCode;
+        let backend: Arc<dyn Backend> = Arc::new(crate::board_service::tests::SyntheticBackend::default());
+        let mut router = axum::Router::new();
+        for (path,operation) in [("/collab/board","snapshot"),("/collab/changes","changes"),("/collab/inspect","inspect")] {
+            let backend = backend.clone();
+            router = router.route(path,get(move |q: Query<std::collections::HashMap<String,String>>|
+                collab_read_handler(backend.clone(),operation,q)));
+        }
+        let router = router.layer(axum::middleware::from_fn(origin_guard_mw));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}",listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener,router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        for path in ["/collab/board","/collab/changes","/collab/inspect"] {
+            let response = client.get(format!("{base}{path}?scope=local")).send().await.unwrap();
+            assert_eq!(response.status(),StatusCode::OK);
+            assert_eq!(response.json::<serde_json::Value>().await.unwrap()["synthetic"],true);
+            let blocked = client.get(format!("{base}{path}")).header("sec-fetch-site","cross-site").send().await.unwrap();
+            assert_eq!(blocked.status(),StatusCode::FORBIDDEN);
+        }
+        server.abort();
+    }
+
     #[derive(Clone)]
     struct MirrorInput(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 

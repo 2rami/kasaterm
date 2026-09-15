@@ -31,6 +31,30 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
+struct ApiTarget { base: String, token_file: Option<std::path::PathBuf> }
+static API_TARGET: std::sync::OnceLock<ApiTarget> = std::sync::OnceLock::new();
+
+fn parse_api_target(args: &mut Vec<String>) -> Result<Option<ApiTarget>> {
+    let mut base = None;
+    let mut token_file = None;
+    while args.first().is_some_and(|arg|matches!(arg.as_str(),"--api"|"--api-token-file")) {
+        let option = args.remove(0);
+        if args.is_empty() { return Err(anyhow!("{option} requires a value")); }
+        let value = args.remove(0);
+        if option == "--api" {
+            if base.replace(value).is_some() { return Err(anyhow!("duplicate --api")); }
+        } else { token_file = Some(std::path::PathBuf::from(value)); }
+    }
+    let Some(base) = base else {
+        if token_file.is_some() { return Err(anyhow!("--api-token-file requires --api")); }
+        return Ok(None);
+    };
+    if !(base.starts_with("http://") || base.starts_with("https://")) || base.chars().any(char::is_control) {
+        return Err(anyhow!("--api requires an explicit HTTP or HTTPS base URL"));
+    }
+    Ok(Some(ApiTarget {base:base.trim_end_matches('/').to_owned(),token_file}))
+}
+
 fn main() {
     match run() {
         Ok(Some(resp)) => {
@@ -69,16 +93,30 @@ fn main() {
 
 fn run() -> Result<Option<Response>> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(target) = parse_api_target(&mut args)? { let _ = API_TARGET.set(target); }
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
         print_help();
         return Ok(None);
     }
     let cmd = args.remove(0);
+    if API_TARGET.get().is_some() {
+        if !matches!(cmd.as_str(),"board"|"board-watch"|"rooms"|"activity"|"tell"|"tell-status") {
+            return Err(anyhow!("--api supports board, board-watch, rooms, activity, tell and tell-status"));
+        }
+        if matches!(cmd.as_str(),"board"|"board-watch") && !args.iter().any(|s|matches!(s.as_str(),"--all"|"--local")) {
+            args.push("--all".into());
+        }
+    }
     // `board-watch` is a polling loop, not a single round-trip: it streams one
     // line per *changed* pane so a Claude Code Monitor can watch the board and
     // wake on transitions (a worker going `waiting` for a permission prompt,
     // finishing → `idle`, etc.) without dumping the whole board every tick.
     if cmd == "board-watch" {
+        if args.iter().any(|s|matches!(s.as_str(),"--all"|"--local"|"--since"|"--json")) {
+            let socket_path = resolve_socket_path()?;
+            run_collab_watch(&socket_path,&args)?;
+            return Ok(None);
+        }
         let interval = args
             .first()
             .and_then(|s| s.parse::<u64>().ok())
@@ -586,78 +624,77 @@ fn run() -> Result<Option<Response>> {
     Ok(Some(response))
 }
 
-/// `rooms` — 방(창)별로 누가 뭘 하는지 한 화면에. 위임 상대를 고르는 자리다.
-///
-/// board 는 방 전부가 JSON 한 덩어리로 오고 ListAgents 엔 방이 아예 없다 — 그래서
-/// 2026-09-03 에 방2 캐릭터가 「mobile」이라는 세션 이름만 보고 다른 방 캐릭터에게
-/// 폰 화면 점검을 보냈다. 여기서는 내 방·내 자리를 표시하고, `to:` 에 넣을 주소
-/// (세션 이름)를 캐릭터 이름 옆에 같이 낸다.
+/// Machine and room identity must precede reusable pane numbers.
 fn print_rooms(socket_path: &str) -> Result<()> {
     let req = Request {
         id: "rooms".into(),
-        method: "collab.board".into(),
-        params: json!({}),
+        method: "collab.snapshot".into(),
+        params: json!({"scope":"all"}),
     };
     let resp = roundtrip(socket_path, &req)?;
-    let board: Vec<Value> = resp
-        .result
-        .as_ref()
-        .and_then(|v| v.get("board"))
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    if !resp.ok { return Err(anyhow!(resp.error.map(|error|error.message).unwrap_or_else(||"room snapshot failed".into()))); }
+    let snapshot = resp.result.context("room snapshot missing")?;
     let me = std::env::var("KASATERM_PANE_ID").unwrap_or_default();
-    let s = |e: &Value, k: &str| e.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let win_of = |e: &Value| e.get("window_idx").and_then(|v| v.as_u64());
-    let my_room = board
-        .iter()
-        .find(|e| s(e, "surface_id") == me)
-        .and_then(win_of);
-    let mut rooms: std::collections::BTreeMap<Option<u64>, Vec<&Value>> =
-        std::collections::BTreeMap::new();
-    for e in &board {
-        rooms.entry(win_of(e)).or_default().push(e);
+    let machine = if API_TARGET.get().is_none() { rooms_caller_machine() } else { None };
+    print!("{}",render_rooms(&snapshot,&me,machine.as_deref())?);
+    Ok(())
+}
+
+fn rooms_caller_machine() -> Option<String> {
+    use std::io::Read;
+    if kasa_socket::isolated_collab_root().is_some() || std::env::var_os("KASATERM_TEST_BOARD_FIXTURE").is_some() { return None; }
+    if let Ok(id) = std::env::var("KASATERM_MACHINE_ID") { if !id.is_empty() { return Some(id); } }
+    let path = std::env::var_os("KASATERM_MACHINE_ID_FILE").map(std::path::PathBuf::from)
+        .or_else(||Some(kasa_socket::home_dir()?.join(".config/kasaterm/machine-id")))?;
+    let mut id = String::new();
+    std::fs::File::open(path).ok()?.take(129).read_to_string(&mut id).ok()?;
+    let id = id.trim();
+    ((8..=128).contains(&id.len()) && id.bytes().all(|b|b.is_ascii_alphanumeric() || b"-_.".contains(&b))).then(||id.to_owned())
+}
+
+fn render_rooms(snapshot: &Value, me: &str, caller_machine: Option<&str>) -> Result<String> {
+    use kasa_socket::board::{field,short};
+    if snapshot["schema_version"] != 1 { return Err(anyhow!("unsupported room snapshot")); }
+    let sources = snapshot["sources"].as_array().context("room sources missing")?;
+    let panes = snapshot["panes"].as_array().context("room panes missing")?;
+    let locals: Vec<_> = sources.iter().filter(|source|source["is_local"] == true)
+        .filter_map(|source|field(source,"machine_id")).collect();
+    let local_machine = (locals.len() == 1).then(||locals[0]);
+    let mine: Vec<_> = panes.iter().filter(|pane| !me.is_empty()
+        && local_machine.is_some() && caller_machine == local_machine
+        && sources.iter().any(|source|field(source,"machine_id") == local_machine && source["state"] == "online")
+        && field(&pane["address"],"machine_id") == local_machine
+        && field(&pane["address"],"surface_id") == Some(me) && pane["freshness"] == "fresh").collect();
+    let my_room = (mine.len() == 1).then(||field(mine[0],"room_id")).flatten();
+    let mut groups: std::collections::BTreeMap<(String,Option<String>),Vec<&Value>> = std::collections::BTreeMap::new();
+    for pane in panes {
+        groups.entry((field(&pane["address"],"machine_id").unwrap_or("unknown").to_owned(),field(pane,"room_id").map(str::to_owned))).or_default().push(pane);
     }
-    if rooms.is_empty() {
-        println!("(pane 없음)");
-        return Ok(());
+    let mut out = String::new();
+    for source in sources.iter().filter(|source|source["state"] != "online") {
+        out.push_str(&format!("{} [{}]: {}\n",short(field(source,"label").unwrap_or("기기 미확인"),120),short(field(source,"machine_id").unwrap_or("unknown"),128),field(source,"state").unwrap_or("unknown")));
     }
-    for (win, rows) in &rooms {
-        let head = match win {
-            Some(w) => format!("방{}", w + 1),
-            None => "방 없음(화면밖·원격 거울)".to_string(),
-        };
-        let mine = win.is_some() && win == &my_room;
-        println!("{head}{}", if mine { "  ← 내 방" } else { "" });
-        for e in rows {
-            let id = s(e, "surface_id");
-            let ch = s(e, "character");
-            let ch = if ch.is_empty() { "(캐릭터 없음)".to_string() } else { ch };
-            let status = s(e, "status");
-            let peer = s(e, "peer_name");
-            let title = s(e, "title");
-            let mut tags: Vec<String> = Vec::new();
-            if id == me {
-                tags.push("나".into());
-            }
-            let harness = s(e, "harness");
-            if !harness.is_empty() && harness != "claude" {
-                tags.push(harness);
-            }
-            let machine = s(e, "machine");
-            if !machine.is_empty() {
-                tags.push(format!("원격 {machine}"));
-            }
-            if e.get("detached").and_then(|v| v.as_bool()).unwrap_or(false) {
-                tags.push("화면밖".into());
-            }
-            let addr = if peer.is_empty() { String::new() } else { format!("  to={peer}") };
-            let tag = if tags.is_empty() { String::new() } else { format!("  [{}]", tags.join("·")) };
-            println!("  {id:<5} {ch:<8} {status:<8}{addr}{tag}  {title}");
+    if groups.is_empty() { out.push_str("(pane 없음)\n"); }
+    for ((machine,room),rows) in groups {
+        let first = rows[0];
+        let local = local_machine == Some(machine.as_str());
+        let room_label = field(first,"room_label").unwrap_or("방 미확인");
+        let mine = local && my_room.is_some() && my_room == room.as_deref();
+        out.push_str(&format!("{} [{}] · {}{}\n",short(field(first,"machine_label").unwrap_or(&machine),120),short(&machine,128),short(room_label,120),if mine {"  ← 내 방"} else {""}));
+        for pane in rows {
+            let id = field(&pane["address"],"surface_id").unwrap_or("?");
+            let mut tags = Vec::new();
+            if mine && id == me { tags.push("나".to_owned()); }
+            if !local { tags.push("원격 또는 출처 미확인".into()); }
+            if let Some(harness) = field(pane,"harness").filter(|h|*h != "claude") { tags.push(short(harness,40)); }
+            if pane["detached"] == true { tags.push("화면밖".into()); }
+            if pane["freshness"] != "fresh" { tags.push("최근 상태 미확인".into()); }
+            let tags = if tags.is_empty() {String::new()} else {format!("  [{}]",tags.join("·"))};
+            out.push_str(&format!("  {:<5} {:<8} {:<8}{tags}  {}\n",short(id,64),short(field(pane,"character").unwrap_or("(캐릭터 없음)"),80),short(field(pane,"status").unwrap_or("unknown"),32),short(field(pane,"title").unwrap_or(""),200)));
         }
     }
-    println!("같은 방 캐릭터에게만 일을 보낸다. 주소는 to= 의 세션 이름, 부를 때는 캐릭터 이름.");
-    Ok(())
+    out.push_str("연락 주소는 board --all에서 선택한 pane의 address 전체를 사용하세요.\n");
+    Ok(out)
 }
 
 /// Poll `collab.board` AND this pane's inbox every `interval_secs`, printing
@@ -666,6 +703,44 @@ fn print_rooms(socket_path: &str) -> Result<()> {
 /// tick baselines both (board state + existing messages) silently so a fresh
 /// watch doesn't replay history. Transient failures are swallowed. Never
 /// returns (Ctrl-C / Monitor timeout ends it).
+fn run_collab_watch(socket_path: &str, args: &[String]) -> Result<()> {
+    let mut scope = "all";
+    let mut since: Option<String> = None;
+    let mut interval = 3;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--all" => scope = "all",
+            "--local" => scope = "local",
+            "--json" => (),
+            "--since" => since = Some(args.next().ok_or_else(||anyhow!("--since requires a cursor"))?.clone()),
+            text => interval = text.parse::<u64>().map_err(|_|anyhow!("unknown board-watch argument"))?.clamp(1,60),
+        }
+    }
+    let request = |method: &str,params: Value| -> Result<Value> {
+        let response = roundtrip(socket_path,&Request{id:"collab-watch".into(),method:method.into(),params})?;
+        if !response.ok { return Err(anyhow!(response.error.map(|e|e.message).unwrap_or_else(||"collaboration request failed".into()))); }
+        response.result.ok_or_else(||anyhow!("collaboration response missing result"))
+    };
+    if since.is_none() {
+        let snapshot = request("collab.snapshot",json!({"scope":scope}))?;
+        since = snapshot["cursor"].as_str().map(str::to_owned);
+        println!("{}",json!({"kind":"snapshot","snapshot":snapshot,"cursor":since}));
+    }
+    loop {
+        let batch = request("collab.changes",json!({"scope":scope,"since":since,"limit":100}))?;
+        if batch["reset_required"] == true {
+            println!("{batch}");
+            return Err(anyhow!("collaboration cursor needs a fresh snapshot"));
+        }
+        let next = batch["cursor"].as_str().ok_or_else(||anyhow!("collaboration cursor missing"))?.to_owned();
+        if since.as_deref() != Some(&next) { println!("{batch}"); }
+        since = Some(next);
+        std::io::stdout().flush()?;
+        if batch["has_more"] != true { std::thread::sleep(std::time::Duration::from_secs(interval)); }
+    }
+}
+
 fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
     use std::collections::{BTreeMap, HashSet};
     let req = Request {
@@ -1264,17 +1339,22 @@ fn print_help() {
   kasaterm-cli machines [--names]             # 명부 기계 목록 — `to` 셰임의 ls. 이 pane 이 거울이면 그 기계 줄에 *. --names 는 라벨만(탭 완성용)
   kasaterm-cli home                           # 명부의 본진(home:true) 기계 — 살아 있으면 라벨만 출력(종료 0)·미설정은 조용히 1·설정됐는데 안 닿으면 3. 셰임의 순정 claude 디스패치용
   kasaterm-cli remote <http://호스트:포트> [--cwd /원격/경로] [--attach web-id] [%surface]  # 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 앱을 꺼도 원격 셸은 산다
-  kasaterm-cli tab   [%surface] [--focus]    # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다). 서브에이전트는 여기에 — 응답의 agent 로 바로 SendMessage. --focus 만 탭을 앞으로
+  kasaterm-cli tab   [%surface] [--focus]    # 새 탭 생성. 부팅 후 board --all에서 실행·신원 확인 → 최신 address 전체로 tell --address. --focus만 앞으로
   kasaterm-cli move  <surface> <target> [left|right|up|down]  # 대상이 다른 창이면 창을 건너뛴다(PTY 유지)
   kasaterm-cli swap  <surface_a> <surface_b>");
     eprintln!("  kasaterm-cli resize <surface_id> <ratio>   # 직계 split 에서 차지 비중 0..1 (오케스트레이터 크게)");
     eprintln!("  kasaterm-cli send  <text>");
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
     eprintln!("  kasaterm-cli key   [--surface <id>] <enter|tab|escape|up|down|left|right|...>  # 특정 pane에 키/선택");
-    eprintln!("  kasaterm-cli tell  [--force] <surface_id> <text>  # send + submit (codex 등 SendMessage 밖 전용 — claude pane 은 거부, 비상시 --force)");
+    eprintln!("  kasaterm-cli tell [--id ID] <%surface | --address JSON> <text>  # safe queued message; returns a receipt");
+    eprintln!("  kasaterm-cli tell-status ID --address JSON                    # inspect the original receiver receipt");
     eprintln!("  kasaterm-cli board [screen_lines]         # what every pane is doing (+ screen tail if N given)");
-    eprintln!("  kasaterm-cli rooms                        # 방별로 누가 뭘 하는지(내 방·내 자리·to= 주소) — 위임 상대는 여기서 고른다");
+    eprintln!("  kasaterm-cli [--api BASE] rooms           # 기기·방별 상태. 연락 주소는 board --all의 address 전체 사용");
     eprintln!("  kasaterm-cli board-watch [interval_s]     # stream changed pane status (1 line/change) — feed a Claude Code Monitor");
+    eprintln!("  kasaterm-cli [--api BASE] board --all|--local");
+    eprintln!("  kasaterm-cli [--api BASE] board-watch --all --json [--since CURSOR]");
+    eprintln!("  kasaterm-cli [--api BASE] activity --address '<JSON>' [limit]");
+    eprintln!("  --api-token-file FILE may precede the command to reuse an existing API token");
     eprintln!("  kasaterm-cli wake-watch <surface_id> [interval_s] [--timeout s]  # block until a teammate finishes one turn, then exit (run as a background task → auto-wakes you)");
     eprintln!(
         "  kasaterm-cli layout                       # where each pane sits (active window, %)"
@@ -1856,65 +1936,53 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             ("surface.send_key", params)
         }
         "tell" => {
-            // send + submit in one shot, so an idle claude in the target pane
-            // wakes and acts on the message:  tell <surface_id> <text>
-            // SendMessage 로 닿는 claude pane 은 서버가 거부한다(SM·tell 이중 발송
-            // 차단) — 인박스가 정말 죽었을 때만 --force 로 강행.
-            let force = args.first().is_some_and(|a| a == "--force");
-            let args = if force { &args[1..] } else { &args[..] };
-            let surface = args
-                .first()
-                .filter(|a| a.starts_with('%'))
-                .cloned()
-                .ok_or_else(|| anyhow!("tell needs <surface_id> <text> (e.g. tell %3 \"hi\")"))?;
-            let text = args
-                .get(1..)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("tell needs a text payload"))?
-                .join(" ");
-            // Flatten internal newlines so a stray \n can't fire a half-typed
-            // turn, then append \r — claude submits on CR (0x0d); a bare \n
-            // (0x0a) is only a newline insert, not a submit.
-            let flat: String = text
-                .chars()
-                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-                .collect();
-            // Prepend Ctrl+U (0x15): clear any half-typed line resident in the
-            // target prompt. Then wrap in bracketed paste (\x1b[200~…\x1b[201~):
-            // claude's Ink input treats this as a safe paste event even in
-            // menu/special states where a bare CR was eaten (munder pattern,
-            // hiddenClaude.ts). The handler ships body first, then \r 140ms
-            // later so Ink has finished processing the paste before the submit.
-            // 발신 학생 마커 — 받는 pane 이 tell 을 발신자 테마색으로 렌더하려면 화면에
-            // 앵커가 필요하다(터미널은 그리드라 transcript 대조로 user 턴을 못 집는다).
-            // 발신 pane 자기 캐릭터($KASATERM_CHARACTER)를 `⟦이름⟧` 로 앞에 심는다 —
-            // 사람이 직접 친 cli 는 env 가 없어 마커 없이(사용자 발신=무색) 나간다.
-            let marked = match std::env::var("KASATERM_CHARACTER")
-                .ok()
-                .filter(|s| !s.is_empty())
-            {
-                Some(c) => format!("⟦{c}⟧ {}", flat.trim()),
-                None => flat.trim().to_string(),
-            };
-            let mut params = json!({ "surface_id": surface,
-                "text": format!("\x15\x1b[200~{}\x1b[201~\r", marked) });
-            // 발신 메타 동봉 — 서버가 방 기준 slug 의 messages.jsonl 에 기록해 채팅뷰가
-            // 학생→학생 tell 을 발신자 좌측 버블로 그린다(사용자 #5/#7). CLI 자체 기록은
-            // 발신 셸의 cwd 기준 slug 라 cd 상태에 따라 파일이 갈라져 매칭이 새던 것을
-            // 서버 기록으로 일원화. PANE_ID 없으면(사람이 직접 친 cli) 사용자 발신 = 미기록.
-            if let Some(fp) = std::env::var("KASATERM_PANE_ID")
-                .ok()
-                .filter(|s| !s.is_empty())
-            {
-                params["from_pane"] = json!(fp);
-                // plain 도 마커 포함 — 웹뷰 senderOf 가 transcript 정확대조라 마커가
-                // 한쪽에만 있으면 발신자 버블 매칭이 깨진다.
-                params["plain"] = json!(marked);
-                if force {
-                    params["force"] = json!(true);
+            let mut index = 0;
+            let mut stdin = false;
+            let mut params = json!({"message_id":kasa_socket::tell::new_message_id()});
+            while let Some(arg) = args.get(index) {
+                match arg.as_str() {
+                    "--id" => {
+                        params["message_id"] = json!(args.get(index+1).ok_or_else(||anyhow!("--id needs a message ID"))?);
+                        index += 2;
+                    }
+                    "--address" => {
+                        params["address"] = serde_json::from_str(args.get(index+1).ok_or_else(||anyhow!("--address needs complete board address JSON"))?)?;
+                        index += 2;
+                    }
+                    "--stdin" => { stdin = true; index += 1; }
+                    "--force" => return Err(anyhow!("--force cannot bypass safe tell protection")),
+                    "--" => { index += 1; break; }
+                    _ if arg.starts_with('%') && params.get("address").is_none() && params.get("surface_id").is_none() => {
+                        params["surface_id"] = json!(arg); index += 1;
+                    }
+                    _ => break,
                 }
             }
-            ("surface.send_text", params)
+            if params.get("address").is_none() && params.get("surface_id").is_none() {
+                return Err(anyhow!("tell requires %surface or --address JSON"));
+            }
+            if params.get("address").is_some() && params.get("surface_id").is_some() {
+                return Err(anyhow!("use one target: %surface or --address JSON"));
+            }
+            let body = if stdin {
+                if index != args.len() { return Err(anyhow!("--stdin cannot be combined with a message argument")); }
+                use std::io::Read;
+                let mut body = String::new();
+                std::io::stdin().take(kasa_socket::tell::MAX_BODY as u64 + 1).read_to_string(&mut body)?;
+                body
+            } else {
+                args.get(index..).filter(|a|!a.is_empty()).ok_or_else(||anyhow!("tell needs a message or --stdin"))?.join(" ")
+            };
+            params["body"] = json!(kasa_socket::tell::normalize(&body)?);
+            kasa_socket::tell::valid_id(params["message_id"].as_str().unwrap())?;
+            eprintln!("tell receipt ID: {}",params["message_id"].as_str().unwrap());
+            ("collab.tell",params)
+        }
+        "tell-status" => {
+            let id = args.first().ok_or_else(||anyhow!("tell-status needs message_id --address JSON"))?;
+            if args.get(1).is_none_or(|a|a != "--address") { return Err(anyhow!("tell-status requires the original --address JSON")); }
+            let address: Value = serde_json::from_str(args.get(2).ok_or_else(||anyhow!("missing receipt address"))?)?;
+            ("collab.tell_status",json!({"message_id":id,"address":address}))
         }
         "resume" => {
             // resume <session_id> [cwd] — 사라진(재시작·종료) 학생 세션을 새 pane 에 claude
@@ -1937,6 +2005,13 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             ("session.recent", json!({ "cwd": cwd }))
         }
         "board" => {
+            if args.iter().any(|s|matches!(s.as_str(),"--all"|"--local")) {
+                if args.iter().any(|s|!matches!(s.as_str(),"--all"|"--local"|"--json")) {
+                    return Err(anyhow!("board scope accepts only --all, --local and --json"));
+                }
+                let scope = if args.iter().any(|s|s == "--local") {"local"} else {"all"};
+                return Ok(Request{id,method:"collab.snapshot".into(),params:json!({"scope":scope})});
+            }
             // Bare `board` = metadata only. `board <N>` folds each pane's
             // visible last N rows in — what an orchestrator pane reads to see
             // who's stuck on a prompt without a peek-per-pane.
@@ -2209,6 +2284,13 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             ("collab.transcript", params)
         }
         "activity" => {
+            if args.first().is_some_and(|arg|arg == "--address") {
+                let address: Value = serde_json::from_str(args.get(1).ok_or_else(||anyhow!("--address requires JSON"))?)
+                    .context("invalid activity address JSON")?;
+                if !address.is_object() || args.len() > 3 { return Err(anyhow!("activity --address JSON [limit]")); }
+                let limit = args.get(2).map(|n|n.parse::<u64>()).transpose().context("invalid activity limit")?.unwrap_or(20).clamp(1,50);
+                return Ok(Request{id,method:"collab.inspect".into(),params:json!({"address":address,"limit":limit})});
+            }
             // 형제 pane 이 **실제로 무엇을 했나** — 부른 도구, 그 인자, 돌아온 결과를
             // 시간순으로. `transcript` 는 대화만(도구를 버린다), `board` 는 도구 라벨을
             // 짧게 잘라 여덟 개만 준다. 「쟤 뭐 하나」는 board, 「쟤 왜 저러나」는 이쪽.
@@ -2247,6 +2329,7 @@ fn resolve_socket_path() -> Result<String> {
 }
 
 fn roundtrip(socket_path: &str, request: &Request) -> Result<Response> {
+    if let Some(target) = API_TARGET.get() { return api_roundtrip(target,request); }
     let stream = LocalStream::connect(Path::new(socket_path))
         .with_context(|| format!("connect to {socket_path:?}"))?;
     let mut writer = stream.try_clone().context("clone stream")?;
@@ -2263,6 +2346,52 @@ fn roundtrip(socket_path: &str, request: &Request) -> Result<Response> {
     }
     let resp: Response = serde_json::from_str(line.trim()).context("parse response JSON")?;
     Ok(resp)
+}
+
+fn api_roundtrip(target: &ApiTarget, request: &Request) -> Result<Response> {
+    use std::io::Read;
+    use std::process::{Command,Stdio};
+    let (path,post) = match request.method.as_str() {
+        "collab.snapshot" => ("/collab/board",false),
+        "collab.changes" => ("/collab/changes",false),
+        "collab.inspect" => ("/collab/inspect",false),
+        "collab.tell" => ("/collab/tell",true),
+        "collab.tell_status" => ("/collab/tell/status",true),
+        _ => return Err(anyhow!("this command has no safe HTTP mapping; use board --all or activity --address")),
+    };
+    let quote = |text: &str| format!("\"{}\"",text.replace('\\',"\\\\").replace('"',"\\\"").replace('\n',"\\n").replace('\r',"\\r"));
+    // Credentials and message bodies travel through stdin, never process arguments.
+    let mut config = format!("silent\nshow-error\nfail-with-body\nmax-time = 5\nconnect-timeout = 3\nmax-filesize = 4194304\nproto = \"=http,https\"\nmax-redirs = 0\nurl = {}\n",quote(&format!("{}{path}",target.base)));
+    if let Some(path) = &target.token_file {
+        let mut token = String::new();
+        std::fs::File::open(path).context("open API token file")?.take(4097).read_to_string(&mut token)?;
+        let token = token.trim();
+        if token.is_empty() || token.len() > 4096 || token.chars().any(char::is_control) { return Err(anyhow!("invalid API token file")); }
+        config.push_str(&format!("header = {}\n",quote(&format!("x-kasa-token: {token}"))));
+    }
+    if post {
+        config.push_str(&format!("request = POST\nheader = \"Content-Type: application/json\"\ndata = {}\n",quote(&request.params.to_string())));
+    } else {
+        config.push_str(&format!("get\ndata-urlencode = {}\n",quote(&format!("params={}",request.params))));
+    }
+    let mut child = Command::new("curl").args(["--disable","--config","-"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("start HTTP transport (curl)")?;
+    child.stdin.take().context("HTTP transport stdin missing")?.write_all(config.as_bytes())?;
+    let mut bytes = Vec::new();
+    child.stdout.take().context("HTTP transport stdout missing")?.take(4*1024*1024+1).read_to_end(&mut bytes)?;
+    if bytes.len() > 4*1024*1024 { let _ = child.kill(); let _ = child.wait(); return Err(anyhow!("HTTP response exceeds limit")); }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        let reason = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v|v["error"].as_str().map(str::to_owned))
+            .unwrap_or_else(||"HTTP request failed; check the explicit API address and authentication".into());
+        return Ok(Response::error(request.id.clone(),kasa_socket::protocol::codes::BACKEND_ERROR,reason));
+    }
+    let value: Value = serde_json::from_slice(&bytes).context("invalid HTTP response JSON")?;
+    if value["ok"] == false {
+        return Ok(Response::error(request.id.clone(),kasa_socket::protocol::codes::BACKEND_ERROR,
+            value["error"].as_str().unwrap_or("HTTP collaboration request failed")));
+    }
+    Ok(Response::success(request.id.clone(),value))
 }
 
 // ---------------------------------------------------------------- sessions --
@@ -2929,6 +3058,74 @@ fn run_statusline() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rooms_use_machine_and_room_identity_without_peer_addresses() {
+        let pane = |machine: &str,room: &str,character: &str| serde_json::json!({
+            "address":{"machine_id":machine,"surface_id":"%1","surface_key":format!("key-{machine}")},
+            "machine_label":machine,"room_id":room,"room_label":format!("방 {room}"),"character":character,
+            "status":"idle","freshness":"fresh","title":"task","peer_name":"never-use-this-address"});
+        let snapshot = serde_json::json!({"schema_version":1,
+            "sources":[{"machine_id":"local-machine","is_local":true,"state":"online"},
+                {"machine_id":"remote-machine","is_local":false,"state":"online"}],
+            "panes":[pane("local-machine","one","Local"),pane("remote-machine","one","Remote")]});
+        let rendered = super::render_rooms(&snapshot,"%1",Some("local-machine")).unwrap();
+        assert_eq!(rendered.matches("← 내 방").count(),1);
+        assert_eq!(rendered.matches("[나]").count(),1);
+        assert!(rendered.contains("local-machine") && rendered.contains("remote-machine"));
+        assert!(rendered.contains("%1") && rendered.contains("address 전체"));
+        assert!(!rendered.contains("never-use-this-address") && !rendered.contains("to="));
+        assert!(!super::render_rooms(&snapshot,"%1",None).unwrap().contains("내 방"));
+        assert!(!super::render_rooms(&snapshot,"%1",Some("other-machine")).unwrap().contains("내 방"));
+        let mut unknown = snapshot.clone(); unknown["sources"][0]["is_local"] = serde_json::Value::Null;
+        assert!(!super::render_rooms(&unknown,"%1",Some("local-machine")).unwrap().contains("내 방"));
+        let mut missing = snapshot.clone(); missing["panes"][0]["room_id"] = serde_json::Value::Null;
+        assert!(!super::render_rooms(&missing,"%1",Some("local-machine")).unwrap().contains("내 방"));
+        assert!(super::render_rooms(&serde_json::json!({}),"%1",None).is_err());
+    }
+
+    #[test]
+    fn explicit_http_transport_preserves_tell_body_without_a_socket() {
+        use super::*;
+        use std::io::{Read,Write};
+        let mut args = vec!["--api".into(),"http://127.0.0.1:1234".into(),"board".into(),"--all".into()];
+        assert!(parse_api_target(&mut args).unwrap().is_some()); assert_eq!(args[0],"board");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = ApiTarget {base:format!("http://{}",listener.local_addr().unwrap()),token_file:None};
+        let params = json!({"body":"한글 첫 줄\n\"둘째 줄\"\t끝","message_id":"synthetic","address":{"machine_id":"fake"}});
+        let expected = params.clone();
+        let server = std::thread::spawn(move || {
+            let (mut socket,_) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+            let mut bytes = Vec::new(); let mut one = [0u8;1];
+            while !bytes.ends_with(b"\r\n\r\n") { socket.read_exact(&mut one).unwrap(); bytes.push(one[0]); }
+            let headers = String::from_utf8(bytes).unwrap();
+            assert!(headers.starts_with("POST /collab/tell "));
+            let length = headers.lines().find_map(|line|line.to_ascii_lowercase().strip_prefix("content-length:").and_then(|n|n.trim().parse::<usize>().ok())).unwrap();
+            let mut body = vec![0;length]; socket.read_exact(&mut body).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(),expected);
+            let body = json!({"accepted":true}).to_string();
+            write!(socket,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+        });
+        let response = api_roundtrip(&target,&Request{id:json!("test"),method:"collab.tell".into(),params}).unwrap();
+        assert!(response.ok); assert_eq!(response.result.unwrap()["accepted"],true);
+        server.join().unwrap();
+        assert!(api_roundtrip(&target,&Request{id:json!("test"),method:"surface.send".into(),params:json!({})}).is_err());
+    }
+
+    #[test]
+    fn board_scope_uses_shared_collector_and_legacy_stays_compatible() {
+        let all = super::build_request("board", &["--all".into()]).unwrap();
+        assert_eq!(all.method,"collab.snapshot"); assert_eq!(all.params["scope"],"all");
+        let local = super::build_request("board", &["--local".into()]).unwrap();
+        assert_eq!(local.params["scope"],"local");
+        assert_eq!(super::build_request("board", &[]).unwrap().method,"collab.board");
+        assert_eq!(super::build_request("board", &["12".into()]).unwrap().params["screen_lines"],12);
+        assert!(super::build_request("board", &["--all".into(),"12".into()]).is_err());
+        let address = r#"{"machine_id":"machine","surface_key":"key","surface_id":"%1"}"#;
+        let inspect = super::build_request("activity", &["--address".into(),address.into(),"999".into()]).unwrap();
+        assert_eq!(inspect.method,"collab.inspect"); assert_eq!(inspect.params["limit"],50);
+        assert_eq!(super::build_request("activity", &["%1".into()]).unwrap().method,"collab.activity");
+    }
     use super::*;
 
     #[test]

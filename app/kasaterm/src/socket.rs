@@ -210,6 +210,7 @@ pub struct PtyBackend {
     /// pane's transcript tail *on demand* (pull) — there is no background
     /// watcher thread filling a cache.
     bound: Arc<Mutex<HashMap<String, PathBuf>>>,
+    tell_binding_epochs: Mutex<HashMap<String,u64>>,
     /// 새 pane → 그것을 쪼갠 pane. **완료 보고가 갈 주소**다.
     ///
     /// `surface.split` 은 부른 쪽의 id 를 이미 함께 받는데(그래야 사람이 보던 pane 이
@@ -412,6 +413,9 @@ pub(crate) fn agents_error_sids_cached() -> HashSet<String> {
 }
 
 impl PtyBackend {
+    pub(crate) fn tell_binding_epoch(&self, surface: &str) -> u64 {
+        self.tell_binding_epochs.lock().unwrap().get(surface).copied().unwrap_or(0)
+    }
     /// 살아 있는 surface 전부 — BSP leaf(`ws.panes`) **와 탭 pid**(`ws.pid_to_pane`).
     ///
     /// `panes` 만 모으면 탭으로 띄운 학생이 transcript 바인딩 후보에서부터 빠지고,
@@ -494,6 +498,7 @@ impl PtyBackend {
             proxy,
             ws,
             bound: Arc::new(Mutex::new(HashMap::new())),
+            tell_binding_epochs: Mutex::new(HashMap::new()),
             spawned_by: Arc::new(Mutex::new(HashMap::new())),
             attention,
             idle_since: Mutex::new(HashMap::new()),
@@ -1217,6 +1222,7 @@ impl Backend for PtyBackend {
     }
 
     fn paste_image(&self, surface: &str, bytes: Vec<u8>) -> Result<()> {
+        if let Some(pty) = kasa_pty::lookup_session(surface) { pty.reserve_input_draft(); }
         let (reply, result) = std::sync::mpsc::channel();
         self.proxy
             .send_event(UserEvent::SocketPasteImage(surface.to_string(), bytes, Some(reply)))
@@ -2408,10 +2414,14 @@ impl Backend for PtyBackend {
         // Record the pane's transcript path; `collab_board`/`transcript_tail`
         // read it on demand. Re-binding (claude --resume swaps the jsonl)
         // replaces the entry rather than stacking.
-        self.bound
-            .lock()
-            .unwrap()
-            .insert(surface_id.to_string(), PathBuf::from(path));
+        {
+            let mut bound = self.bound.lock().unwrap();
+            if bound.get(surface_id).is_none_or(|old|old != std::path::Path::new(path)) {
+                let mut epochs = self.tell_binding_epochs.lock().unwrap();
+                *epochs.entry(surface_id.into()).or_default() += 1;
+            }
+            bound.insert(surface_id.to_string(),PathBuf::from(path));
+        }
         // 같은 pane id가 다른 rollout을 가리키기 시작하면, 앞 세션의 model/한도는
         // 공개하면 안 된다. 새 로그에서 첫 유효 turn을 읽을 때 다시 채운다.
         self.codex_rollouts.lock().unwrap().remove(surface_id);
@@ -2548,6 +2558,9 @@ impl Backend for PtyBackend {
         // 없고, 전체 읽기는 수 MB 짜리 세션에서 물어볼 때마다 값을 치른다. 꼬리
         // 첫 줄은 중간에서 잘려 있는데 파서가 무시한다.
         let (tail, _) = read_tail(&path, 512 * 1024);
+        if codex_sid_from_rollout(&path).is_some() {
+            return Ok(kasa_socket::board::rollout_activity(&tail,limit));
+        }
         Ok(crate::transcript::activity_from_tail(&tail, limit))
     }
 
@@ -2664,6 +2677,155 @@ impl Backend for PtyBackend {
             .join(format!("agent-{agent_id}.jsonl"));
         std::fs::read_to_string(&file)
             .map_err(|e| anyhow::anyhow!("read subagent transcript {file:?}: {e}"))
+    }
+
+    fn collab_snapshot(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_mcp::board_service::snapshot(params)
+    }
+
+    fn collab_changes(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_mcp::board_service::changes(params)
+    }
+
+    fn collab_inspect(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_mcp::board_service::inspect(self,params)
+    }
+
+    fn collab_tell(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_mcp::tell_service::submit(self,params,||self.proxy.send_event(UserEvent::SafeTellWake)
+            .map_err(|_|anyhow::anyhow!("GUI delivery event loop stopped")))
+    }
+
+    fn collab_tell_status(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_mcp::tell_service::status(params)
+    }
+
+    fn collab_tell_identity(&self, surface: &str) -> Result<serde_json::Value> {
+        let live = kasa_pty::lookup_session(surface).ok_or_else(||anyhow::anyhow!("live PTY unavailable"))?;
+        let shell = live.shell_pid().ok_or_else(||anyhow::anyhow!("live process identity unavailable"))?;
+        let table = kasa_pty::fresh_process_table();
+        let (kind,pid) = kasa_pty::agent_pid_for_shell(&table,shell).ok_or_else(||anyhow::anyhow!("target is a shell or unknown process"))?;
+        let current = match kind {
+            kasa_pty::AgentKind::Claude => {
+                let command = kasa_pty::process_cmdline(pid).ok_or_else(||anyhow::anyhow!("current Claude command unavailable"))?;
+                let words: Vec<_> = command.split_whitespace().collect();
+                let value = ["--session-id","--resume","-r"].iter().find_map(|flag|words.iter().enumerate().find_map(|(i,word)| {
+                    if word == flag { words.get(i+1).filter(|sid|is_uuid(sid)).map(|sid|sid.to_string()) }
+                    else { word.strip_prefix(&format!("{flag}=")).filter(|sid|is_uuid(sid)).map(str::to_owned) }
+                }));
+                value.ok_or_else(||anyhow::anyhow!("full current Claude session unavailable; tell withheld"))?
+            }
+            kasa_pty::AgentKind::Codex => {
+                let roots: HashSet<_> = codex_open_rollouts(pid).iter().filter_map(|path| {
+                    let sid = codex_sid_from_rollout(path)?;
+                    codex_rollout_is_root_for_sid(path,&sid).then_some(sid)
+                }).collect();
+                anyhow::ensure!(roots.len() == 1,"current Codex conversation is ambiguous or unavailable; tell withheld");
+                roots.into_iter().next().unwrap()
+            }
+            _ => anyhow::bail!("unsupported harness; tell withheld"),
+        };
+        let mut address = self.collab_pane_identity(surface)?;
+        anyhow::ensure!(address["session_id"].as_str() == Some(current.as_str()),"bound conversation differs from the live process; refresh before tell");
+        address["agent_pid"] = serde_json::json!(pid);
+        address["harness"] = serde_json::json!(kind.as_str());
+        Ok(address)
+    }
+
+    fn collab_pane_identity(&self, surface: &str) -> Result<serde_json::Value> {
+        let bound = self.bound.lock().unwrap();
+        let session = bound.get(surface).and_then(|path| codex_sid_from_rollout(path)
+            .or_else(||path.file_stem().and_then(|s|s.to_str()).map(str::to_owned)));
+        kasa_mcp::board_service::address(surface,session.as_deref())
+    }
+
+    fn collab_board_source(&self) -> Result<serde_json::Value> {
+        use serde_json::json;
+        let mut live = self.live_surfaces();
+        live.extend(kasa_pty::live_sessions());
+        // Discovery binds transcripts from owned process trees; it does not
+        // query Claude's agent inventory or the cross-session peer registry.
+        self.discover_unbound(&live);
+        let table = kasa_pty::process_table_shared();
+        let (rooms,characters,windows,screens) = {
+            let ws = self.ws.lock().unwrap();
+            let screens: HashMap<String,(Option<String>,bool)> = live.iter().filter_map(|id| {
+                let outer = ws.outer_for_pty(id).unwrap_or_else(||id.clone());
+                let pane = ws.panes.get(&outer)?.tab_for_pid(id);
+                Some((id.clone(),(pane.title.clone(),screen_shows_working(&pane.visible_text(14)))))
+            }).collect();
+            (ws.pane_room.clone(),ws.pane_character.clone(),ws.pane_window.clone(),screens)
+        };
+        let labels = self.sessions().labels;
+        let attention: HashSet<String> = self.attention.lock().unwrap().keys().cloned().collect();
+        let mut panes = Vec::new();
+        let mut observed_bindings = Vec::new();
+        for id in live {
+            let managed = kasa_pty::lookup_session(&id);
+            let binding = self.bound.lock().unwrap().get(&id).cloned();
+            let session = binding.as_deref().and_then(|path|codex_sid_from_rollout(path)
+                .or_else(||path.file_stem().and_then(|s|s.to_str()).map(str::to_owned)));
+            let observed_address = kasa_mcp::board_service::address(&id,session.as_deref())?;
+            let harness = managed.as_ref().and_then(|pty|pty.shell_pid())
+                .and_then(|pid|kasa_pty::agent_for_shell(&table,pid)).map(|kind|kind.as_str().to_owned());
+            let supported = harness.as_deref().is_some_and(|h|matches!(h,"claude"|"codex"|"agy"));
+            let evidence = binding.as_ref().filter(|_|supported).map(|path| {
+                let (tail,idle) = read_tail(path,128*1024);
+                let metadata = snapshot_from_tail(&id,&tail,idle);
+                (metadata,!tail.trim().is_empty())
+            });
+            let generating = screens.get(&id).is_some_and(|(_,working)|*working);
+            let (status,reason) = if kasa_mcp::remote::is_remote_pane(&id) {
+                ("unknown","remote mirror; observe agent on its source machine")
+            } else if !supported {
+                ("unknown","live place; supported agent activity unavailable")
+            } else if generating {
+                ("working","terminal activity observed")
+            } else if attention.contains(&id) {
+                ("waiting","pane attention signal observed")
+            } else if evidence.as_ref().is_some_and(|(_,present)|*present) {
+                ("idle","no current terminal generation signal; transcript available")
+            } else { ("unknown","supported agent observed; transcript activity unavailable") };
+            let meta = evidence.map(|(row,_)|row).unwrap_or_default();
+            let title = screens.get(&id).and_then(|(title,_)|title.as_deref())
+                .map(crate::strip_activity_prefix).filter(|s|!s.is_empty()).unwrap_or(&meta.title);
+            let window = windows.get(&id).copied();
+            let detached = window.is_none();
+            let mut row = json!({"address":observed_address,
+                "room_id":rooms.get(&id).cloned().or_else(||window.map(|n|n.to_string())),
+                "room_label":window.and_then(|n|labels.get(n)).cloned().unwrap_or_else(||"Unplaced".into()),
+                "character":characters.get(&id),"harness":harness,"title":title,
+                "request":meta.last_prompt,"progress":if meta.last_reply.is_empty() {meta.intent} else {meta.last_reply},
+                "status":status,"status_reason":reason,"detached":detached,
+                "place_state":if detached {"detached"} else {"visible"}});
+            let mut done = self.done_reports.lock().unwrap();
+            if done.get(&id).is_some_and(|report|report.idle_seen && status == "working") { done.remove(&id); }
+            if let Some(report) = done.get_mut(&id) {
+                if status == "idle" { report.idle_seen = true; }
+                row["done_outcome"] = json!(report.outcome);
+                row["done_summary"] = json!(report.summary);
+            }
+            panes.push(row);
+            observed_bindings.push((id,binding,managed));
+        }
+        let mut complete = true;
+        // Publishing a new address with an old transcript would attribute a
+        // previous agent's work to its replacement. Recheck after all file I/O.
+        for (row,(id,binding,managed)) in panes.iter_mut().zip(observed_bindings) {
+            let current_binding = self.bound.lock().unwrap().get(&id).cloned();
+            let current_managed = kasa_pty::lookup_session(&id);
+            let same_pty = match (&managed,&current_managed) {
+                (Some(before),Some(after)) => Arc::ptr_eq(before,after), (None,None) => true, _ => false,
+            };
+            let session = current_binding.as_deref().and_then(|path|codex_sid_from_rollout(path)
+                .or_else(||path.file_stem().and_then(|s|s.to_str()).map(str::to_owned)));
+            let current_address = kasa_mcp::board_service::address(&id,session.as_deref())?;
+            complete &= kasa_socket::board::guard_observation(row,&current_address,binding == current_binding,same_pty);
+        }
+        let mut source = kasa_mcp::board_service::local_source(panes,complete)?;
+        source["source_kind"] = json!("desktop");
+        source["capabilities"] = json!(["live_places","rooms","transcript_summary","bounded_activity","done_reports"]);
+        Ok(source)
     }
 
     fn collab_board(&self) -> Result<Vec<PaneActivity>> {
@@ -3613,7 +3775,7 @@ pub(crate) fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool
         let _ = f.seek(SeekFrom::Start(len - max_bytes));
     }
     let mut buf = Vec::new();
-    let _ = f.read_to_end(&mut buf);
+    let _ = f.take(max_bytes).read_to_end(&mut buf);
     (String::from_utf8_lossy(&buf).into_owned(), idle)
 }
 

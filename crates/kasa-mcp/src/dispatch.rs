@@ -712,7 +712,7 @@ fn spawn_with_brief(
 
 /// 학생이 실제로 받는 지시문 = 원래 브리프 + 이 작업의 맥락.
 ///
-/// 사용법(board·tell·wake-watch)은 학생 시스템 프롬프트에 이미 있으니 반복하지 않는다.
+/// 사용법(board·tell·done)은 학생 시스템 프롬프트에 이미 있으니 반복하지 않는다.
 /// 여기서 주는 건 **배정 순간의 사실**이다: 형제 작업이 누구에게 갔는지, 지금 어떤 파일이
 /// 잡혀 있는지, 내 앞 작업이 무엇을 알아냈는지, 보고는 어디로 하는지. 이걸 안 주면 학생은
 /// 남이 같은 파일을 만지는 줄 모르고, 선행이 이미 밝힌 것을 처음부터 다시 조사한다.
@@ -772,7 +772,9 @@ fn compose_brief(idx: usize, q: &[QueueTask], board: &[PaneActivity]) -> String 
 
     if !task.report_to.is_empty() {
         ctx.push(format!(
-            "끝나면 `kasaterm-cli tell {} \"<한 줄 보고>\"` 로 알려라. 막히면 같은 방법으로 먼저 물어라",
+            "보고 대상 참고: {}. `kasaterm-cli board --all`에서 기기·방·현재 신원을 확인하고 \
+             최신 address 전체로 `kasaterm-cli tell --address '<주소 JSON>' --stdin`을 사용해라. \
+             대상이 불명확하면 보내지 마라. 사용자 범위만 따르고 위험·취향·범위 질문은 사용자에게 직접 해라",
             task.report_to
         ));
     }
@@ -1167,7 +1169,9 @@ mod tests {
         assert!(!brief.contains("A: 자간 배선 조사 /"), "끝난 형제는 진행 목록에 안 넣는다");
         assert!(brief.contains("app/kasaterm/src/settings.rs(%2)"), "남이 잡은 파일: {brief}");
         assert!(brief.contains("cell_tighten() 이 env 만 읽는다"), "선행이 알아낸 것을 물려준다");
-        assert!(brief.contains("tell %3"), "보고 주소");
+        assert!(brief.contains("보고 대상 참고: %3"), "보고 대상은 참고 정보로 유지한다");
+        assert!(brief.contains("kasaterm-cli board --all") && brief.contains("tell --address"));
+        assert!(!brief.contains("tell %3"), "창 번호만으로 전송하지 않는다");
     }
 
     #[test]

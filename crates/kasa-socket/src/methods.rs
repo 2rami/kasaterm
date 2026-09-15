@@ -131,6 +131,21 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.open_preview" => surface_open_preview(backend, id, &req.params),
         "surface.open_url" => surface_open_url(backend, id, &req.params),
         "web.drive" => web_drive(backend, id, &req.params),
+        "collab.snapshot" => match backend.collab_snapshot(&req.params) {
+            Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+        },
+        "collab.changes" => match backend.collab_changes(&req.params) {
+            Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+        },
+        "collab.inspect" => match backend.collab_inspect(&req.params) {
+            Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+        },
+        "collab.tell" => match backend.collab_tell(&req.params) {
+            Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+        },
+        "collab.tell_status" => match backend.collab_tell_status(&req.params) {
+            Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+        },
         "collab.board" => {
             // Opt-in screen capture: a plain board stays metadata-only (cheap,
             // what board-watch polling wants), but an orchestrator pane can
@@ -282,6 +297,9 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.resize_divider",
                 "surface.set_ratio",
                 "collab.board",
+                "collab.snapshot",
+                "collab.changes",
+                "collab.inspect",
                 "window.layout",
                 "window.list",
                 "collab.bind_transcript",
@@ -1091,30 +1109,12 @@ fn surface_send_text(backend: &dyn Backend, id: Value, params: &Value) -> Respon
         None => return param_err(id, "surface.send_text requires `text` (string)"),
     };
     let target = params.get("surface_id").and_then(|v| v.as_str());
-    // 학생→학생 tell 발신 기록 — CLI(tell)가 `from_pane`(발신 pane)+`plain`(제어시퀀스
-    // 없는 본문)을 동봉하면 서버가 방 기준 slug 의 messages.jsonl 에 남긴다. 채팅뷰가
-    // 이걸 ts+텍스트로 대조해 수신 transcript 의 user 턴을 발신 학생 버블로 그린다.
-    // 발신 프로세스의 cwd 가 아닌 서버(방) 기준이라 cd 상태에 따라 기록 파일이 갈라지지
-    // 않는다. 메타 없는 send_text(웹뷰 send 등)는 기존 그대로.
-    if let (Some(from), Some(plain)) = (
-        params.get("from_pane").and_then(|v| v.as_str()),
-        params.get("plain").and_then(|v| v.as_str()),
-    ) {
-        if let Some(to) = target {
-            // pane 발 tell(메타 동봉) 이 claude pane 을 겨누면 거부 — 지침(「SM 과
-            // tell 을 같이 보내지 마라」, 2026-08-18)만으로는 학생들이 계속 겹쳐
-            // 보냈다(2026-08-20 재발). 기계적으로 막아야 한 통만 남는다.
-            let force = params
-                .get("force")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !force {
-                if let Some(msg) = tell_into_claude_pane(backend, to) {
-                    return param_err(id, &msg);
-                }
-            }
-            log_agent_tell(backend, from, to, plain);
-        }
+    if params.get("plain").is_some() || params.get("from_pane").is_some() {
+        let mut safe = params.clone();
+        safe["body"] = params.get("plain").cloned().unwrap_or_else(||json!(text));
+        return match backend.collab_tell(&safe) {
+            Ok(receipt) => Response::success(id,receipt), Err(error) => backend_err(id,error),
+        };
     }
     if let Some(to) = target {
         if let Some(msg) = claude_boot_into_running_pane(backend, to, text) {
@@ -1169,27 +1169,6 @@ fn claude_boot_into_running_pane(
     ))
 }
 
-/// pane 발 tell 이 **SendMessage 로 닿는 claude pane** 을 겨누면 거부 사유를 돌려준다.
-///
-/// tell 은 입력창 주입이라, SendMessage 와 겹쳐 보내면 받는 화면에 같은 말이 두 번
-/// 뜨고 상대가 두 번 깨어난다. codex(인박스 없음)와 명부에 안 오른 claude(agent_name
-/// 없음)는 tell 이 유일한 경로라 통과. 인박스가 실제로 죽은 비상시엔 `--force`.
-fn tell_into_claude_pane(backend: &dyn Backend, target: &str) -> Option<String> {
-    let row = backend
-        .collab_board()
-        .ok()?
-        .into_iter()
-        .find(|r| r.surface_id == target)?;
-    if row.harness.as_deref() != Some("claude") {
-        return None;
-    }
-    let agent = row.agent_name?;
-    Some(format!(
-        "{target} 의 claude 에는 SendMessage(to: \"{agent}\") 로 보내라 — tell 은 입력창 \
-         주입이라 SM 과 겹치면 같은 말이 두 번 뜬다(둘 중 하나만, 기본은 SendMessage). \
-         인박스가 죽어 SendMessage 가 정말 안 닿을 때만 tell --force."
-    ))
-}
 
 /// 에이전트를 **띄우는** 명령처럼 보이는지. 좁게 잡는다 — "claude 가 왜 이래" 같은
 /// 평범한 지시문이 걸리면 tell 이 막혀 더 나쁘다. 그래서 실행 형태(`cd … && claude`)
@@ -1234,47 +1213,6 @@ fn looks_like_claude_boot(text: &str) -> bool {
     })
 }
 
-/// tell 발신 이벤트를 messages.jsonl 에 append — http `persist_sensei_msg` 와 같은
-/// 파일·형식(방이면 slug 에 `__room_<id>`)이되 from 은 발신 pane. 파일 IO 실패는
-/// 조용히 삼킨다(기록은 표시용 부가 기능, tell 전달을 막으면 안 된다).
-fn log_agent_tell(backend: &dyn Backend, from_pane: &str, to_pane: &str, text: &str) {
-    let cwd = backend
-        .active_cwd()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-    let base: String = cwd
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c == '/' || c == '.' { '-' } else { c })
-        .collect();
-    let slug = match backend.active_room() {
-        Some(r) => format!("{base}__room_{r}"),
-        None => base,
-    };
-    let dir = crate::collab_root().join(slug);
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
-    let id = format!("{:08x}", (now * 1000.0) as u64 & 0xffff_ffff);
-    let line = json!({
-        "id": id,
-        "from": from_pane, "from_pane": from_pane,
-        "to": to_pane, "to_pane": to_pane,
-        "text": text, "ts": now, "read": true,
-    })
-    .to_string();
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("messages.jsonl"))
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{line}");
-    }
-}
 
 fn surface_send_key(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let key = match params.get("key").and_then(|v| v.as_str()) {
@@ -1578,41 +1516,14 @@ mod tests {
     }
 
     #[test]
-    fn send_text_with_tell_meta_logs_to_room_messages() {
-        // slug 는 cwd 문자열 변환이라 유니크 cwd 로 실제 방 파일과 격리.
-        let fake_cwd = std::env::temp_dir().join(format!("kasa-tell-test-{}", std::process::id()));
-        let backend = FakeBackend {
-            cwd: Some(fake_cwd.clone()),
-            ..Default::default()
-        };
-        let r = dispatch(
-            &backend,
-            req(
-                "surface.send_text",
-                json!({"surface_id": "surf-1", "from_pane": "%9",
-                       "plain": "안녕 유즈", "text": "\u{15}\u{1b}[200~안녕 유즈\u{1b}[201~\r"}),
-            ),
-        );
-        assert!(r.ok);
-        // PTY 로는 wrapper 포함 원문이 그대로 간다 — 기록이 전달을 바꾸면 안 된다.
-        assert_eq!(backend.sent_text.lock().unwrap().len(), 1);
-        let slug: String = fake_cwd
-            .to_string_lossy()
-            .chars()
-            .map(|c| if c == '/' || c == '.' { '-' } else { c })
-            .collect();
-        let path = crate::collab_root().join(&slug).join("messages.jsonl");
-        let content = std::fs::read_to_string(&path).expect("tell meta must be logged");
-        let entry: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
-        assert_eq!(entry["from_pane"], "%9");
-        assert_eq!(entry["to_pane"], "surf-1");
-        assert_eq!(
-            entry["text"], "안녕 유즈",
-            "제어시퀀스 없는 plain 본문만 기록"
-        );
-        assert!(entry["ts"].as_f64().unwrap() > 0.0);
-        let _ = std::fs::remove_dir_all(crate::collab_root().join(&slug));
+    fn legacy_tell_metadata_never_uses_unchecked_input() {
+        let backend = FakeBackend::default();
+        let result = dispatch(&backend,req("surface.send_text",json!({
+            "surface_id":"%1","from_pane":"%2","plain":"hello","text":"\u{15}hello\r"})));
+        assert!(!result.ok);
+        assert!(backend.sent_text.lock().unwrap().is_empty());
     }
+
 
     #[test]
     fn send_text_without_tell_meta_logs_nothing() {
@@ -1706,117 +1617,24 @@ mod tests {
         );
     }
 
-    /// 학생이 SM 과 tell 을 겹쳐 보내는 이중 발송 — 지침은 두 번 어겨졌으니(08-18,
-    /// 08-20) 서버가 막는다. SendMessage 로 닿는 claude pane 이 과녁이면 거부하고
-    /// 정답(agent 이름)을 알려준다.
     #[test]
-    fn tell_into_claude_pane_is_refused_with_sendmessage_answer() {
-        let backend = FakeBackend {
-            board: vec![crate::backend::PaneActivity {
-                surface_id: "surf-3".into(),
-                harness: Some("claude".into()),
-                agent_name: Some("midori-p4-v32".into()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let r = dispatch(
-            &backend,
-            req(
-                "surface.send_text",
-                json!({"surface_id": "surf-3", "from_pane": "%9",
-                       "plain": "판독 끝", "text": "\u{15}\u{1b}[200~판독 끝\u{1b}[201~\r"}),
-            ),
-        );
-        assert!(!r.ok);
-        let msg = r.error.unwrap().message;
-        assert!(
-            msg.contains("SendMessage"),
-            "정답 경로를 알려줘야 한다: {msg}"
-        );
-        assert!(
-            msg.contains("midori-p4-v32"),
-            "to 에 넣을 이름까지 줘야 한다: {msg}"
-        );
-        assert!(
-            backend.sent_text.lock().unwrap().is_empty(),
-            "거부했으면 보내지 않는다"
-        );
+    fn legacy_force_cannot_bypass_safe_tell_backend() {
+        let backend = FakeBackend::default();
+        let result = dispatch(&backend,req("surface.send_text",json!({
+            "surface_id":"%1","from_pane":"%2","plain":"hello","text":"hello\r","force":true})));
+        assert!(!result.ok);
+        assert!(backend.sent_text.lock().unwrap().is_empty());
     }
 
-    /// 인박스가 죽은 비상시의 탈출구 — force 가 오면 같은 과녁이라도 통과한다.
     #[test]
-    fn tell_force_overrides_claude_pane_guard() {
-        let fake_cwd = std::env::temp_dir().join(format!("kasa-tell-force-{}", std::process::id()));
-        let backend = FakeBackend {
-            cwd: Some(fake_cwd.clone()),
-            board: vec![crate::backend::PaneActivity {
-                surface_id: "surf-3".into(),
-                harness: Some("claude".into()),
-                agent_name: Some("midori-p4-v32".into()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let r = dispatch(
-            &backend,
-            req(
-                "surface.send_text",
-                json!({"surface_id": "surf-3", "from_pane": "%9", "force": true,
-                       "plain": "비상", "text": "비상\r"}),
-            ),
-        );
-        assert!(r.ok);
-        assert_eq!(backend.sent_text.lock().unwrap().len(), 1);
-        let slug: String = fake_cwd
-            .to_string_lossy()
-            .chars()
-            .map(|c| if c == '/' || c == '.' { '-' } else { c })
-            .collect();
-        let _ = std::fs::remove_dir_all(crate::collab_root().join(&slug));
-    }
-
-    /// tell 이 유일한 경로인 곳은 그대로 열려 있어야 한다 — codex pane 과,
-    /// 명부에 안 오른 claude(agent_name 없음).
-    #[test]
-    fn tell_still_reaches_codex_and_unlisted_claude() {
-        let fake_cwd = std::env::temp_dir().join(format!("kasa-tell-open-{}", std::process::id()));
-        let backend = FakeBackend {
-            cwd: Some(fake_cwd.clone()),
-            board: vec![
-                crate::backend::PaneActivity {
-                    surface_id: "surf-9".into(),
-                    harness: Some("codex".into()),
-                    ..Default::default()
-                },
-                crate::backend::PaneActivity {
-                    surface_id: "surf-10".into(),
-                    harness: Some("claude".into()),
-                    agent_name: None,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        for surf in ["surf-9", "surf-10"] {
-            let r = dispatch(
-                &backend,
-                req(
-                    "surface.send_text",
-                    json!({"surface_id": surf, "from_pane": "%9",
-                           "plain": "이어서", "text": "이어서\r"}),
-                ),
-            );
-            assert!(r.ok, "{surf} 는 tell 이 유일한 경로다");
+    fn safe_tell_requires_supported_receiver() {
+        let backend = FakeBackend::default();
+        for method in ["collab.tell","collab.tell_status"] {
+            assert!(!dispatch(&backend,req(method,json!({}))).ok);
         }
-        assert_eq!(backend.sent_text.lock().unwrap().len(), 2);
-        let slug: String = fake_cwd
-            .to_string_lossy()
-            .chars()
-            .map(|c| if c == '/' || c == '.' { '-' } else { c })
-            .collect();
-        let _ = std::fs::remove_dir_all(crate::collab_root().join(&slug));
+        assert!(backend.sent_text.lock().unwrap().is_empty());
     }
+
 
     /// done 의 outcome 은 두 값뿐 — status 칸에서 겪은 "free text 라더니 소비부는
     /// 정확 일치" 함정을 서버 입구에서 막는다. 통과한 보고만 backend 에 닿는다.

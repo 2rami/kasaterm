@@ -2,8 +2,8 @@
 //!
 //! THESIS: 터미널을 가리는 대시보드가 아니라, 작업 방 하나로 오가는 운영실이다.
 //! OWN-WORLD: 현재 터미널 팔레트, 얇은 경계, 상태색과 학생 스프라이트를 공유한다.
-//! STORY: 확인할 것부터 보고 학생·예약·Git·기계를 한 자리에서 조작한다.
-//! FIRST VIEWPORT: 왼쪽 운영 탭, 오른쪽에는 대상 pane과 현재 현황이 바로 보인다.
+//! STORY: 기기와 방을 따라 요청·진행·완료를 읽고, 선택한 창의 근거를 펼친다.
+//! FIRST VIEWPORT: 왼쪽 운영 탭, 오른쪽 전체 기기 필터와 방별 작업 행, 최근 변경.
 //! FORM: desktop workspace; seed native-board-room.
 //! FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
 //!
@@ -50,7 +50,7 @@ impl BoardTab {
     /// 머리글 밑 한 줄 설명(목업 .sub).
     pub(crate) const fn desc(self) -> &'static str {
         match self {
-            Self::Overview => "현재 대상 방의 학생과 진행 흐름",
+            Self::Overview => "연결된 기기의 모든 방과 최근 변경",
             Self::Agents => "pane 밖에서도 계속 도는 대화",
             Self::Schedule => "지정한 때에 학생에게 지시를 보냅니다",
             Self::Git => "대상 pane의 저장소",
@@ -157,16 +157,145 @@ pub(crate) struct FaceAsset {
     pub(crate) height: u32,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct BoardAddress {
+    machine_id: String,
+    surface_key: String,
+    surface_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instance_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct OverviewPane {
+    id: String,
+    address: BoardAddress,
+    machine_label: String,
+    room_id: Option<String>,
+    room_label: String,
+    character: Option<String>,
+    harness: Option<String>,
+    title: String,
+    request: String,
+    progress: String,
+    status: String,
+    status_reason: Option<String>,
+    done_outcome: Option<String>,
+    done_summary: Option<String>,
+    observed_at_ms: u64,
+    freshness: String,
+    detached: bool,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct OverviewSource {
+    machine_id: String,
+    label: String,
+    state: String,
+    observed_at_ms: u64,
+    error: Option<String>,
+    complete: bool,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct OverviewChange {
+    cursor: String,
+    at_ms: u64,
+    kind: String,
+    pane_id: Option<String>,
+    machine_id: String,
+    room_id: Option<String>,
+    room_label: Option<String>,
+    summary: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct OverviewData {
+    schema_version: u32,
+    cursor: String,
+    observed_at_ms: u64,
+    sources: Vec<OverviewSource>,
+    panes: Vec<OverviewPane>,
+    recent_changes: Vec<OverviewChange>,
+    journal_error: Option<String>,
+    #[serde(skip)]
+    local_machine_id: Option<String>,
+    #[serde(skip)]
+    error: Option<String>,
+    #[serde(skip)]
+    gap: Option<String>,
+    #[serde(skip)]
+    detail: Option<OverviewDetail>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OverviewSelection {
+    id: String,
+    address: BoardAddress,
+    generation: u64,
+}
+
+#[derive(Clone, Debug)]
+struct OverviewDetail {
+    selection: OverviewSelection,
+    observed_at_ms: u64,
+    lines: Vec<String>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum OverviewSort {
+    #[default]
+    Name,
+    Status,
+    Recent,
+}
+
+#[derive(Clone, Debug, Default)]
+struct OverviewUi {
+    machine: Option<String>,
+    room: Option<(String, Option<String>)>,
+    sort: OverviewSort,
+    order: Vec<String>,
+    selection: Option<OverviewSelection>,
+    selection_generation: u64,
+    show_changes: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoardProbeMode {
+    Live,
+    Fixture,
+    Rejected,
+}
+
+fn board_probe_mode(debug_build: bool, requested: bool, isolated: bool) -> BoardProbeMode {
+    if !requested { BoardProbeMode::Live }
+    else if debug_build && isolated { BoardProbeMode::Fixture }
+    else { BoardProbeMode::Rejected }
+}
+
+fn board_fixture_requested() -> bool {
+    std::env::var_os("KASATERM_TEST_BOARD_FIXTURE").is_some()
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BoardData {
     pub(crate) agents: Arc<Vec<PaneActivity>>,
-    pub(crate) tasks: Arc<Vec<kasa_mcp::PaneTaskView>>,
     pub(crate) background: Arc<Vec<BackgroundRow>>,
     pub(crate) schedules: Arc<Vec<kasa_mcp::ScheduleItem>>,
     pub(crate) transfer: Arc<TransferSnapshot>,
     pub(crate) git: Arc<GitSnapshot>,
     pub(crate) faces: Arc<Vec<FaceAsset>>,
     pub(crate) error: Option<String>,
+    overview: Arc<OverviewData>,
 }
 
 #[derive(Clone, Debug)]
@@ -195,8 +324,14 @@ pub(crate) enum Target {
     Return,
     Refresh,
     FocusPane(String),
-    ToggleAgentDetail(String),
-    SavePane(String),
+    OverviewMachine(Option<String>),
+    OverviewRoom(Option<(String, Option<String>)>),
+    OverviewSort(OverviewSort),
+    OverviewDetail(String),
+    OverviewChanges,
+    OverviewCopy(BoardAddress),
+    OverviewFocus(BoardAddress),
+    OverviewSave(BoardAddress),
     ResumeBackground(String, String),
     StopBackground(LocalBackgroundProcess),
     ConfirmStopBackground(LocalBackgroundProcess),
@@ -258,7 +393,7 @@ pub(crate) struct Snapshot {
     pub(crate) preedit: String,
     pub(crate) caret_on: bool,
     pub(crate) toast: Option<(bool, String)>,
-    pub(crate) expanded_agent: Option<String>,
+    overview: OverviewUi,
     pub(crate) pending_stop: Option<LocalBackgroundProcess>,
     transfer: TransferUi,
     fixture: bool,
@@ -300,7 +435,7 @@ pub(crate) struct Scene {
     git_message: String,
     git_selected: HashSet<String>,
     toast: Option<(bool, String, Instant)>,
-    expanded_agent: Option<String>,
+    overview: OverviewUi,
     pending_stop: Option<LocalBackgroundProcess>,
     transfer: TransferUi,
     transfer_generation: u64,
@@ -337,7 +472,7 @@ impl Default for Scene {
             git_message: String::new(),
             git_selected: HashSet::new(),
             toast: None,
-            expanded_agent: None,
+            overview: OverviewUi::default(),
             pending_stop: None,
             transfer: TransferUi::default(),
             transfer_generation: 0,
@@ -372,6 +507,8 @@ impl Scene {
         self.scroll = 0.0;
         self.scroll_max = 0.0;
         self.pending_stop = None;
+        self.overview.selection = None;
+        self.overview.selection_generation += 1;
     }
 
     pub(crate) fn return_pane(&self) -> Option<&str> {
@@ -393,6 +530,7 @@ impl Scene {
             self.scroll = 0.0;
             self.input = None;
             self.caret_rect = None;
+            self.last_refresh = None;
         }
     }
 
@@ -459,10 +597,10 @@ impl Scene {
             preedit,
             caret_on,
             toast: self.toast.as_ref().map(|(ok, text, _)| (*ok, text.clone())),
-            expanded_agent: self.expanded_agent.clone(),
+            overview: self.overview.clone(),
             pending_stop: self.pending_stop.clone(),
             transfer: self.transfer.clone(),
-            fixture: transfer_fixture_active(),
+            fixture: transfer_fixture_active() || board_fixture_active(),
         }
     }
 
@@ -470,11 +608,47 @@ impl Scene {
         &self.git_selected
     }
 
-    pub(crate) fn toggle_agent_detail(&mut self, pane: String) {
-        if self.expanded_agent.as_deref() == Some(pane.as_str()) {
-            self.expanded_agent = None;
+    fn toggle_overview_detail(&mut self, id: String) {
+        self.overview.selection_generation += 1;
+        self.overview.selection = if self.overview.selection.as_ref().is_some_and(|row| row.id == id) {
+            None
         } else {
-            self.expanded_agent = Some(pane);
+            self.data.overview.panes.iter().find(|row| row.id == id).map(|row| OverviewSelection {
+                id, address: row.address.clone(), generation: self.overview.selection_generation,
+            })
+        };
+        self.last_refresh = None;
+    }
+
+    fn revalidate_overview(&mut self) {
+        if self.overview.selection.as_ref().is_some_and(|selected| {
+            !self.data.overview.panes.iter().any(|row| row.id == selected.id && row.address == selected.address)
+        }) {
+            self.overview.selection = None;
+            self.overview.selection_generation += 1;
+        }
+        let panes = &self.data.overview.panes;
+        self.overview.order.retain(|id| panes.iter().any(|row| &row.id == id));
+        let mut newcomers: Vec<_> = panes.iter().filter(|row| !self.overview.order.contains(&row.id)).collect();
+        sort_overview_panes(&mut newcomers, self.overview.sort);
+        self.overview.order.extend(newcomers.into_iter().map(|row| row.id.clone()));
+    }
+
+    fn sort_overview(&mut self, sort: OverviewSort) {
+        self.overview.sort = sort;
+        let mut panes: Vec<_> = self.data.overview.panes.iter().collect();
+        sort_overview_panes(&mut panes, sort);
+        self.overview.order = panes.into_iter().map(|row| row.id.clone()).collect();
+        self.scroll = 0.0;
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn apply_board_probe_view(&mut self) {
+        if !board_fixture_active() { return; }
+        if let Ok(scroll) = std::env::var("KASATERM_TEST_BOARD_SCROLL") {
+            if let Ok(scroll) = scroll.parse::<f32>() {
+                self.scroll = scroll.clamp(0.0, self.scroll_max);
+            }
         }
     }
 
@@ -553,6 +727,46 @@ impl Scene {
         backend: Arc<dyn Backend>,
         proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     ) {
+        let probe = board_probe_mode(cfg!(debug_assertions), board_fixture_requested(), board_fixture_active());
+        if probe == BoardProbeMode::Rejected {
+            self.data = Arc::new(BoardData {
+                overview: Arc::new(OverviewData { error: Some("보드 검증 설정 오류예요. 디버그 빌드와 분리된 임시 상태 경로가 필요합니다.".into()), ..Default::default() }),
+                ..Default::default()
+            });
+            self.last_refresh = Some(Instant::now());
+            self.refreshing = false;
+            return;
+        }
+        #[cfg(debug_assertions)]
+        if probe == BoardProbeMode::Fixture {
+            let first = self.applied_generation == 0;
+            let mut overview = board_fixture();
+            if first {
+                self.tab = BoardTab::Overview;
+                self.overview.show_changes = std::env::var("KASATERM_TEST_BOARD_CHANGES").as_deref() == Ok("1");
+            }
+            if let Some(selected) = self.overview.selection.clone() {
+                overview.detail = overview.panes.iter().find(|row| row.id == selected.id && row.address == selected.address).map(|row| OverviewDetail {
+                    selection: selected,
+                    observed_at_ms: overview.observed_at_ms,
+                    lines: vec![format!("요청 · {}", row.request), format!("응답 · {}", row.progress)],
+                    error: (row.freshness != "fresh").then(|| "상세 연결을 확인하지 못했어요. 마지막 확인 내용입니다.".into()),
+                });
+            }
+            let names = overview.panes.iter().filter_map(|row| row.character.as_deref()).collect::<HashSet<_>>();
+            let faces = collect_overview_faces(names);
+            self.data = Arc::new(BoardData { overview: Arc::new(overview), faces: Arc::new(faces), ..Default::default() });
+            self.revalidate_overview();
+            if first {
+                self.applied_generation = 1;
+                if let Ok(id) = std::env::var("KASATERM_TEST_BOARD_SELECT") {
+                    self.toggle_overview_detail(id);
+                }
+            }
+            self.last_refresh = if first && self.overview.selection.is_some() { None } else { Some(Instant::now()) };
+            self.refreshing = false;
+            return;
+        }
         #[cfg(debug_assertions)]
         if let Some(data) = transfer_fixture() {
             self.data = Arc::new(BoardData { transfer: Arc::new(data), ..Default::default() });
@@ -596,8 +810,11 @@ impl Scene {
         let mailbox = self.mailbox.clone();
         let target_window = self.target_window;
         let target_cwd = self.target_cwd.clone();
+        let previous = self.data.clone();
+        let tab = self.tab;
+        let selection = (self.tab == BoardTab::Overview).then(|| self.overview.selection.clone()).flatten();
         std::thread::spawn(move || {
-            let data = collect_data(&backend, target_window, &target_cwd);
+            let data = collect_data(&backend, target_window, &target_cwd, tab, &previous, selection);
             let mut mailbox = mailbox.lock().unwrap();
             if mailbox
                 .data
@@ -635,6 +852,7 @@ impl Scene {
                 self.git_selected
                     .retain(|path| self.data.git.rows.iter().any(|row| &row.path == path));
                 self.revalidate_transfer_selection();
+                self.revalidate_overview();
                 changed = true;
             }
         }
@@ -958,6 +1176,77 @@ fn transfer_fixture_active() -> bool {
         && std::env::var("KASATERM_AUTORESTORE").is_ok_and(|value| value == "fresh")
 }
 
+pub(crate) fn board_fixture_active() -> bool {
+    cfg!(debug_assertions)
+        && crate::verification_run()
+        && std::env::var_os("KASATERM_TEST_BOARD_FIXTURE").is_some()
+        && std::env::var("KASATERM_AUTORESTORE").as_deref() == Ok("fresh")
+        && std::env::var_os("TMPDIR").is_some_and(|root| {
+            let root = std::path::PathBuf::from(root);
+            let temporary = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"].iter().any(|base| root.starts_with(base))
+                && root.file_name().is_some_and(|name| name.to_string_lossy().starts_with("kasaterm-board-"));
+            temporary && ["KASATERM_SETTINGS_FILE", "KASATERM_SESSION_FILE", "KASATERM_SOCKET_PATH", "KASATERM_WINDOW_FILE", "KASATERM_VIEWER_STATE_FILE"].iter().all(|name| {
+                std::env::var_os(name).is_some_and(|path| board_fixture_path(&root, std::path::Path::new(&path)))
+            })
+        })
+}
+
+fn board_fixture_path(root: &std::path::Path, path: &std::path::Path) -> bool {
+    path.is_absolute() && path != root && path.starts_with(root)
+        && !path.components().any(|part| matches!(part, std::path::Component::ParentDir))
+}
+
+#[cfg(debug_assertions)]
+fn board_fixture() -> OverviewData {
+    let failed = |message: &str| OverviewData { error: Some(message.into()), ..Default::default() };
+    if !board_fixture_active() { return failed("검증 환경이 분리되지 않아 가상 보드를 열지 않았어요"); }
+    let name = std::env::var("KASATERM_TEST_BOARD_FIXTURE").unwrap_or_default();
+    let value = if name == "synthetic" {
+        board_probe_value()
+    } else {
+        let root = std::path::PathBuf::from(std::env::var_os("TMPDIR").unwrap());
+        if !board_fixture_path(&root, std::path::Path::new(&name)) { return failed("검증 파일이 임시 폴더 밖에 있어 열지 않았어요"); }
+        let Ok(body) = std::fs::read_to_string(&name) else { return failed("검증 파일을 읽지 못했어요"); };
+        let Ok(value) = serde_json::from_str(&body) else { return failed("검증 파일의 형식을 읽지 못했어요"); };
+        value
+    };
+    let local = value.get("local_machine_id").and_then(|v| v.as_str()).map(str::to_string);
+    let gap = value.get("reset_required").and_then(|v| v.as_bool()) == Some(true);
+    let mut data = overview_from_value(value).unwrap_or_else(|error| failed(&error));
+    data.local_machine_id = local;
+    data.gap = gap.then(|| "변경 기록 일부를 이어받지 못했어요. 현재 전체 목록을 다시 확인했습니다.".into());
+    data
+}
+
+#[cfg(any(test, debug_assertions))]
+fn board_probe_value() -> serde_json::Value {
+    let at = 1_000_000_u64;
+    let mut panes = Vec::new();
+    for (index, (machine, machine_label, room, character, status, freshness)) in [
+        ("device-a", "작업 컴퓨터", "제품", "아로나", "working", "fresh"),
+        ("device-a", "작업 컴퓨터", "제품", "모모이", "waiting", "fresh"),
+        ("device-a", "작업 컴퓨터", "문서", "미도리", "idle", "fresh"),
+        ("device-b", "연결 컴퓨터", "제품", "아로나", "idle", "fresh"),
+        ("device-b", "연결 컴퓨터", "자료", "", "unknown", "fresh"),
+        ("device-c", "응답 없는 컴퓨터", "제품", "유즈", "working", "stale"),
+    ].into_iter().enumerate() {
+        panes.push(serde_json::json!({"id":format!("{machine}/surface-{index}"),
+            "address":{"machine_id":machine,"surface_key":format!("surface-{index}"),"surface_id":format!("%{}", index % 3 + 1),"session_id":format!("session-{index}"),"instance_id":"fixture-instance"},
+            "machine_label":machine_label,"room_id":room,"room_label":room,"character":character,"harness":if character.is_empty() {"shell"} else {"codex"},
+            "title":"주문 내역 화면 점검","request":"좁은 화면에서도 주문 상태와 다음 행동을 읽을 수 있게 정리해 주세요. 긴 한글 문장과 https://example.test/a/very-long-unbroken-path-for-layout-checking 도 잘리지 않아야 합니다.",
+            "progress":if status == "waiting" {"연결할 자료를 선택해 주세요"} else {"요청과 진행을 나누고, 이전 기록이 다른 창에 표시되지 않는지 확인하고 있어요"},
+            "status":status,"status_reason":if status == "unknown" {"아직 지원되는 활동 신호가 없어요"} else {""},
+            "done_outcome":if index == 3 {Some("succeeded")} else {None},"done_summary":if index == 3 {Some("확인을 마쳤고 변경을 남겼어요")} else {None},
+            "observed_at_ms":if freshness == "fresh" {at-4_000} else {at-180_000},"freshness":freshness}));
+    }
+    serde_json::json!({"schema_version":1,"scope":"all","cursor":"fixture:9","observed_at_ms":at,"local_machine_id":"device-a","reset_required":true,
+        "sources":[{"machine_id":"device-a","label":"작업 컴퓨터","state":"online","observed_at_ms":at-4_000,"complete":true},
+            {"machine_id":"device-b","label":"연결 컴퓨터","state":"online","observed_at_ms":at-4_000,"complete":true},
+            {"machine_id":"device-c","label":"응답 없는 컴퓨터","state":"offline","observed_at_ms":at-180_000,"complete":false,"error":"기기에서 응답하지 않아요"}],
+        "panes":panes,"recent_changes":[{"cursor":"fixture:9","at_ms":at-3_000,"kind":"pane_changed","pane_id":"device-a/surface-1","machine_id":"device-a","summary":"자료 선택을 기다리고 있어요"},
+            {"cursor":"fixture:8","at_ms":at-6_000,"kind":"pane_changed","pane_id":"device-b/surface-3","machine_id":"device-b","summary":"화면 확인을 마쳤다는 보고가 도착했어요"}]})
+}
+
 #[cfg(debug_assertions)]
 fn transfer_fixture() -> Option<TransferSnapshot> {
     if !transfer_fixture_active() { return None; }
@@ -970,7 +1259,16 @@ fn collect_data(
     backend: &Arc<dyn Backend>,
     target_window: usize,
     target_cwd: &str,
+    tab: BoardTab,
+    previous: &BoardData,
+    selection: Option<OverviewSelection>,
 ) -> BoardData {
+    if tab == BoardTab::Overview {
+        let overview = collect_overview(backend, &previous.overview, selection);
+        let names = overview.panes.iter().filter_map(|row| row.character.as_deref()).collect::<HashSet<_>>();
+        let faces = collect_overview_faces(names);
+        return BoardData { overview: Arc::new(overview), faces: Arc::new(faces), error: None, ..previous.clone() };
+    }
     let mut errors = Vec::new();
     let mut agents = match backend.collab_board() {
         Ok(rows) => rows,
@@ -1004,11 +1302,6 @@ fn collect_data(
             })
         })
         .collect();
-    let visible_agents: HashSet<_> = agents.iter().map(|row| row.surface_id.as_str()).collect();
-    let tasks = kasa_mcp::pane_tasks_snapshot(backend, None)
-        .into_iter()
-        .filter(|task| visible_agents.contains(task.pane.as_str()))
-        .collect();
     let background = collect_background(backend).unwrap_or_else(|error| {
         errors.push(error.to_string());
         Vec::new()
@@ -1017,14 +1310,178 @@ fn collect_data(
     let git = collect_git(target_cwd);
     BoardData {
         agents: Arc::new(agents),
-        tasks: Arc::new(tasks),
         background: Arc::new(background),
         schedules: Arc::new(schedules),
         transfer: Arc::new(transfer),
         git: Arc::new(git),
         faces: Arc::new(faces),
         error: (!errors.is_empty()).then(|| errors.join(" · ")),
+        overview: previous.overview.clone(),
     }
+}
+
+fn collect_overview(
+    backend: &Arc<dyn Backend>,
+    previous: &OverviewData,
+    selection: Option<OverviewSelection>,
+) -> OverviewData {
+    let result = backend.collab_snapshot(&serde_json::json!({"scope": "all"}))
+        .and_then(|value| overview_from_value(value).map_err(anyhow::Error::msg));
+    let mut data = match result {
+        Ok(data) => data,
+        Err(error) => {
+            return overview_failed(previous, format!("보드를 갱신하지 못했어요. 마지막 확인 내용을 보여줍니다. {error}"));
+        }
+    };
+    data.gap = previous.gap.clone();
+    data.local_machine_id = previous.local_machine_id.clone().or_else(|| {
+        backend.collab_snapshot(&serde_json::json!({"scope": "local"})).ok()
+            .and_then(|local| local.get("sources")?.as_array()?.first()?.get("machine_id")?.as_str().map(str::to_string))
+    });
+    if !previous.cursor.is_empty() {
+        match backend.collab_changes(&serde_json::json!({"scope": "all", "since": previous.cursor, "limit": 100})) {
+            Ok(value) => {
+                if value.get("reset_required").and_then(|v| v.as_bool()) == Some(true) {
+                    data.gap = Some("변경 기록 일부를 이어받지 못했어요. 현재 전체 목록을 다시 확인했습니다.".into());
+                }
+                let changes = value.get("changes").and_then(|v| serde_json::from_value::<Vec<OverviewChange>>(v.clone()).ok()).unwrap_or_default();
+                merge_overview_changes(&mut data.recent_changes, &previous.recent_changes, changes);
+                if value.get("has_more").and_then(|v| v.as_bool()) == Some(true) {
+                    data.gap = Some("그사이 변경이 많아 최근 기록만 보여줍니다. 현재 전체 목록은 갱신했어요.".into());
+                }
+            }
+            Err(_) => {
+                data.gap = Some("변경 기록을 이어받지 못했어요. 현재 목록을 기준으로 확인해 주세요.".into());
+                merge_overview_changes(&mut data.recent_changes, &previous.recent_changes, Vec::new());
+            }
+        }
+    }
+    if let Some(selection) = selection {
+        if data.panes.iter().any(|row| row.id == selection.id && row.address == selection.address) {
+            let mut detail = OverviewDetail { selection: selection.clone(), observed_at_ms: data.observed_at_ms, lines: Vec::new(), error: None };
+            match backend.collab_inspect(&serde_json::json!({"address": selection.address, "limit": 20})) {
+                Ok(value) => {
+                    if value.get("address").and_then(|address| serde_json::from_value::<BoardAddress>(address.clone()).ok()).as_ref() != Some(&selection.address) {
+                        detail.error = Some("창이 바뀌어 상세 내용을 표시하지 않았어요. 목록에서 다시 선택해 주세요.".into());
+                    } else {
+                        detail.observed_at_ms = value.get("observed_at_ms").and_then(|v| v.as_u64()).unwrap_or(data.observed_at_ms);
+                        detail.lines = overview_detail_lines(&value);
+                    }
+                }
+                Err(_) => {
+                    detail.error = Some("상세 내용을 확인하지 못했어요. 연결을 확인한 뒤 새로고침해 주세요.".into());
+                    if let Some(old) = previous.detail.as_ref().filter(|old| old.selection == selection) {
+                        detail.lines = old.lines.clone();
+                        detail.observed_at_ms = old.observed_at_ms;
+                    }
+                }
+            }
+            data.detail = Some(detail);
+        }
+    }
+    data
+}
+
+fn overview_failed(previous: &OverviewData, error: String) -> OverviewData {
+    let mut cached = previous.clone();
+    cached.error = Some(error);
+    cached.observed_at_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|time| time.as_millis() as u64).unwrap_or(previous.observed_at_ms);
+    for row in &mut cached.panes { row.freshness = "stale".into(); }
+    for source in &mut cached.sources { source.complete = false; }
+    if let Some(detail) = &mut cached.detail {
+        detail.error = Some("상세 내용을 다시 확인하지 못했어요. 마지막 확인 내용을 보여줍니다.".into());
+    }
+    cached
+}
+
+fn collect_overview_faces(names: HashSet<&str>) -> Vec<FaceAsset> {
+    names.into_iter().filter_map(|name| {
+        let slug = theme::character_slug_any(name)?;
+        let (rgba, width, height) = sprites::student_profile_rgba(slug)?;
+        Some(FaceAsset { name: name.into(), key: format!("board:{slug}:profile"), rgba: Arc::new(rgba), width, height })
+    }).collect()
+}
+
+fn overview_from_value(value: serde_json::Value) -> Result<OverviewData, String> {
+    let mut data: OverviewData = serde_json::from_value(value).map_err(|_| "보드 응답을 읽지 못했어요".to_string())?;
+    if data.schema_version != 1 { return Err("보드 형식이 달라 갱신하지 못했어요".into()); }
+    data.panes.retain(|row| !row.id.is_empty() && !row.address.machine_id.is_empty() && !row.address.surface_key.is_empty() && !row.address.surface_id.is_empty());
+    data.panes.truncate(2000);
+    data.sources.truncate(100);
+    data.recent_changes.truncate(30);
+    Ok(data)
+}
+
+fn merge_overview_changes(current: &mut Vec<OverviewChange>, previous: &[OverviewChange], changes: Vec<OverviewChange>) {
+    current.extend(previous.iter().cloned());
+    current.extend(changes);
+    current.sort_by(|a, b| b.at_ms.cmp(&a.at_ms).then_with(|| b.cursor.cmp(&a.cursor)));
+    let mut seen = HashSet::new();
+    current.retain(|row| seen.insert(row.cursor.clone()));
+    current.truncate(30);
+}
+
+fn overview_detail_lines(value: &serde_json::Value) -> Vec<String> {
+    let rows = ["activity", "events", "items"].iter().find_map(|key| value.get(key).and_then(|v| v.as_array()));
+    let Some(rows) = rows else { return Vec::new(); };
+    rows.iter().take(20).filter_map(|row| {
+        if let Some(text) = row.as_str() { return Some(board_plain(text, 1600)); }
+        let kind = ["role", "kind", "type"].iter().find_map(|key| row.get(key).and_then(|v| v.as_str())).unwrap_or("");
+        let body = ["summary", "text", "content", "message", "label"].iter()
+            .find_map(|key| row.get(key).and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()))?;
+        let label = if row.get("is_error").and_then(|v| v.as_bool()) == Some(true) { "오류" } else {
+            match kind { "user" | "request" | "prompt" => "요청", "assistant" | "response" | "say" => "응답", "tool" | "tool_call" => "도구", "result" => "결과", "error" => "오류", _ => "활동" }
+        };
+        let name = row.get("name").and_then(|v| v.as_str()).filter(|name| !name.is_empty()).map(|name| format!(" · {name}")).unwrap_or_default();
+        Some(board_plain(&format!("{label}{name} · {body}"), 1600))
+    }).collect()
+}
+
+fn board_plain(value: &str, max_chars: usize) -> String {
+    value.chars().filter(|ch| !ch.is_control() || ch.is_whitespace()).take(max_chars)
+        .collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn overview_name(row: &OverviewPane) -> &str {
+    row.character.as_deref().filter(|name| !name.is_empty())
+        .unwrap_or_else(|| if row.title.is_empty() { &row.address.surface_id } else { &row.title })
+}
+
+fn overview_status(row: &OverviewPane) -> (&'static str, u8) {
+    if row.freshness == "offline" { return ("연결 끊김", 1); }
+    if row.freshness != "fresh" { return ("오래된 정보", 2); }
+    if matches!(row.status.as_str(), "waiting" | "attention" | "blocked") { return ("확인 필요", 0); }
+    match row.done_outcome.as_deref() {
+        Some("succeeded") => return ("완료 보고", 5),
+        Some("failed") => return ("실패 보고", 0),
+        _ => {}
+    }
+    match row.status.as_str() {
+        "working" | "running" | "building" | "thinking" | "compacting" => ("작업 중", 3),
+        "idle" => ("대기 중", 4),
+        _ => ("미확인", 2),
+    }
+}
+
+fn sort_overview_panes(rows: &mut Vec<&OverviewPane>, sort: OverviewSort) {
+    rows.sort_by(|a, b| {
+        let selected = match sort {
+            OverviewSort::Name => std::cmp::Ordering::Equal,
+            OverviewSort::Status => overview_status(a).1.cmp(&overview_status(b).1),
+            OverviewSort::Recent => b.observed_at_ms.cmp(&a.observed_at_ms),
+        };
+        selected.then_with(|| overview_name(a).cmp(overview_name(b))).then_with(|| a.id.cmp(&b.id))
+    });
+}
+
+fn overview_is_local(data: &OverviewData, address: &BoardAddress) -> bool {
+    data.local_machine_id.as_deref() == Some(&address.machine_id)
+        && data.panes.iter().any(|row| row.address == *address && row.freshness == "fresh" && !row.detached)
+}
+
+fn overview_current_detail<'a>(data: &'a OverviewData, ui: &OverviewUi) -> Option<&'a OverviewDetail> {
+    data.detail.as_ref().filter(|detail| ui.selection.as_ref() == Some(&detail.selection)
+        && data.panes.iter().any(|row| row.id == detail.selection.id && row.address == detail.selection.address))
 }
 
 fn collect_background(backend: &Arc<dyn Backend>) -> anyhow::Result<Vec<BackgroundRow>> {
@@ -1155,7 +1612,7 @@ fn contains(rect: Rect, point: (f32, f32)) -> bool {
 
 pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutput {
     let (ax, ay, aw, ah) = snapshot.area;
-    let nav_w = if aw < 760.0 { 154.0 } else { 190.0 };
+    let nav_w = if aw < 460.0 { 112.0 } else if aw < 760.0 { 154.0 } else { 190.0 };
     let mut hits = Vec::new();
     let mut caret_rect = None;
     g.rect(ax, ay, aw, ah, theme::bg());
@@ -1180,11 +1637,12 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
                 if selected { theme::surface_active() } else { theme::surface_hover() },
             );
         }
+        let label = fit(g, tab.label(), rect.2 - 24.0, 12.0, selected);
         text(
             g,
             rect.0 + 12.0,
             rect.1 + 9.0,
-            tab.label(),
+            &label,
             12.0,
             if selected { theme::text() } else { theme::text_dim() },
             selected,
@@ -1199,34 +1657,40 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         g.hover_pointer = true;
     }
     g.queue_icon("chevron-left", back.0 + 10.0, back.1 + 9.0, 15.0, theme::text_dim());
-    text(g, back.0 + 33.0, back.1 + 9.0, "작업 방으로", 12.0, theme::text_dim(), false);
+    let back_label = fit(g, "작업 방으로", back.2 - 39.0, 12.0, false);
+    text(g, back.0 + 33.0, back.1 + 9.0, &back_label, 12.0, theme::text_dim(), false);
     hit(g, &mut hits, Target::Return, back, false);
 
     let content_x = ax + nav_w + if aw < 760.0 { 20.0 } else { 28.0 };
     let content_w = (aw - nav_w - if aw < 760.0 { 40.0 } else { 56.0 })
-        .max(180.0)
+        .max(1.0)
         .min(800.0);
     text(g, content_x, ay + 22.0, snapshot.tab.label(), 20.0, theme::text(), true);
     // 기준 pane 알약: 채움 없는 테두리, pane 이름만 강조색(목업 .head .pill).
     let refresh = (content_x + content_w - 30.0, ay + 18.0, 30.0, 30.0);
-    let pane = if snapshot.target_cwd.is_empty() {
+    let pane = if snapshot.tab == BoardTab::Overview {
+        "모든 방".into()
+    } else if snapshot.target_cwd.is_empty() {
         snapshot.target_pane.clone()
     } else {
         format!("{} {}", snapshot.target_pane, short_path(&snapshot.target_cwd))
     };
-    let prefix = "기준 pane · ";
+    let prefix = if snapshot.tab == BoardTab::Overview { "" } else { "기준 pane · " };
     let prefix_w = g.measure_chrome_text(prefix, 11.0, false);
     let pane = fit(g, &pane, content_w * 0.5 - prefix_w - 40.0, 11.0, false);
     let pane_w = g.measure_chrome_text(&pane, 11.0, false);
     let pill = (refresh.0 - 10.0 - (prefix_w + pane_w + 20.0), ay + 21.0, prefix_w + pane_w + 20.0, 24.0);
-    g.round_rect_stroke(pill.0, pill.1, pill.2, pill.3, theme::radius_md().min(5.0), 1.0, theme::border());
-    text(g, pill.0 + 10.0, pill.1 + 6.0, prefix, 11.0, theme::text_dim(), false);
-    text(g, pill.0 + 10.0 + prefix_w, pill.1 + 6.0, &pane, 11.0, theme::accent(), false);
+    if content_w >= 300.0 {
+        g.round_rect_stroke(pill.0, pill.1, pill.2, pill.3, theme::radius_md().min(5.0), 1.0, theme::border());
+        text(g, pill.0 + 10.0, pill.1 + 6.0, prefix, 11.0, theme::text_dim(), false);
+        text(g, pill.0 + 10.0 + prefix_w, pill.1 + 6.0, &pane, 11.0, theme::accent(), false);
+    }
     icon_button(g, snapshot, &mut hits, refresh, "rotate-cw", Target::Refresh);
-    if snapshot.refreshing {
+    if snapshot.refreshing && content_w >= 430.0 {
         text(g, pill.0 - 52.0, pill.1 + 6.0, "갱신 중", 10.5, theme::text_mute(), false);
     }
-    text(g, content_x, ay + 52.0, snapshot.tab.desc(), 11.5, theme::text_dim(), false);
+    let description = fit(g, snapshot.tab.desc(), content_w, 11.5, false);
+    text(g, content_x, ay + 52.0, &description, 11.5, theme::text_dim(), false);
     divider(g, content_x, ay + 82.0, content_w);
 
     let body_top = ay + 97.0;
@@ -1290,179 +1754,353 @@ fn paint_overview(
     y: &mut f32,
     w: f32,
 ) {
-    let awaiting: Vec<_> = s
-        .data
-        .agents
-        .iter()
-        .filter(|row| agent_needs_attention(row))
-        .collect();
-    if !awaiting.is_empty() {
-        notice(g, x, y, w, &format!("선생님을 기다리는 학생 {}명", awaiting.len()), false);
-        for row in awaiting {
-            let rect = (x, *y, w, 46.0);
-            status_dot(g, rect.0 + 2.0, rect.1 + 12.0, row);
-            text(g, rect.0 + 20.0, rect.1 + 7.0, &agent_name(row), 12.5, theme::text(), true);
-            text(
-                g,
-                rect.0 + 20.0,
-                rect.1 + 25.0,
-                row.waiting_for.as_deref().unwrap_or("응답이 필요해요"),
-                10.5,
-                theme::danger(),
-                false,
-            );
-            if row.machine.is_none() {
-                hit(g, hits, Target::FocusPane(row.surface_id.clone()), rect, false);
-            }
-            divider(g, x, rect.1 + 45.0, w);
-            *y += 46.0;
-        }
-        *y += 16.0;
+    let data = &s.data.overview;
+    if s.fixture {
+        overview_note(g, x, y, w, "검증용 가상 보드", theme::text_dim());
     }
-    let doing = s.data.tasks.iter().filter(|task| task.mine && task.status == "in_progress").count();
-    let done = s.data.tasks.iter().filter(|task| task.mine && task.status == "completed").count();
-    section(g, x, y, "현황", &format!("진행 {doing} · 완료 {done}"));
-    if s.data.agents.is_empty() {
-        empty(g, x, y, w, "이 방에서 일하는 학생이 아직 없어요");
+    if let Some(error) = &data.error {
+        overview_note(g, x, y, w, error, theme::danger());
+    }
+    if data.schema_version == 0 && data.error.is_none() {
+        overview_note(g, x, y, w, "연결된 기기와 방을 확인하고 있어요", theme::text_dim());
         return;
     }
-    for row in s.data.agents.iter() {
-        let room_tasks: Vec<_> = s
-            .data
-            .tasks
-            .iter()
-            .filter(|task| task.pane == row.surface_id)
-            .collect();
-        let tasks: Vec<_> = room_tasks.iter().copied().filter(|task| task.mine).collect();
-        let unassigned = room_tasks.iter().filter(|task| task.owner.is_empty()).count();
-        let others = room_tasks
-            .iter()
-            .filter(|task| !task.mine && !task.owner.is_empty())
-            .count();
-        let expanded = s.expanded_agent.as_deref() == Some(row.surface_id.as_str());
-        let task_fold_lines = usize::from(unassigned > 0) + usize::from(others > 0);
-        let summary_lines = usize::from(!tasks.is_empty())
-            + task_fold_lines
-            + usize::from(!row.subagents.is_empty() || !row.background.is_empty())
-            + usize::from(!row.recent_tools.is_empty());
-        let detail_lines = if expanded {
-            tasks.len().min(5)
-                + task_fold_lines
-                + row.subagents.len().min(3)
-                + row.background.len().min(3)
-                + row.recent_tools.len().min(8)
-        } else {
-            summary_lines
+    let mut machine_choices = vec![("전체 기기".into(), Target::OverviewMachine(None), s.overview.machine.is_none(), true)];
+    let mut sources: Vec<_> = data.sources.iter().collect();
+    sources.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.machine_id.cmp(&b.machine_id)));
+    for source in &sources {
+        machine_choices.push((source.label.clone(), Target::OverviewMachine(Some(source.machine_id.clone())),
+            s.overview.machine.as_ref() == Some(&source.machine_id), true));
+    }
+    overview_choices(g, s, hits, x, y, w, machine_choices);
+    let room_choices = overview_room_choices(data, &s.overview);
+    if !room_choices.is_empty() {
+        overview_choices(g, s, hits, x, y, w, room_choices);
+    }
+    let choices = [
+        ("이름순", OverviewSort::Name), ("상태순", OverviewSort::Status), ("최근 확인순", OverviewSort::Recent),
+    ].into_iter().map(|(label, sort)| (label.into(), Target::OverviewSort(sort), s.overview.sort == sort, true)).collect();
+    overview_choices(g, s, hits, x, y, w, choices);
+    let rows = overview_visible_rows(data, &s.overview);
+    let attention = rows.iter().filter(|row| overview_status(row).1 == 0).count();
+    let working = rows.iter().filter(|row| overview_status(row).1 == 3).count();
+    let uncertain = rows.iter().filter(|row| matches!(overview_status(row).1, 1 | 2)).count();
+    let summary = format!("작업 중 {working} · 확인 필요 {attention} · 상태 미확인 {uncertain}");
+    overview_note(g, x, y, w, &summary, theme::text_dim());
+    if let Some(gap) = &data.gap {
+        overview_note(g, x, y, w, gap, theme::danger());
+    }
+    if data.journal_error.is_some() {
+        overview_note(g, x, y, w, "변경 기록을 보관하지 못하고 있어요. 현재 목록은 계속 확인할 수 있습니다.", theme::danger());
+    }
+    let change_label = if s.overview.show_changes { "최근 변경 접기" } else { "최근 변경 보기" };
+    text_button(g, s, hits, (x, *y, 116.0_f32.min(w), 28.0), change_label, Target::OverviewChanges, false);
+    *y += 31.0;
+    if s.overview.show_changes {
+        paint_overview_changes(g, s, hits, x, y, w);
+    } else if let Some(change) = data.recent_changes.iter().find(|row| overview_change_visible(row, data, &s.overview)) {
+        let line = fit(g, &format!("{} · {}", board_relative_time(data.observed_at_ms, change.at_ms), board_plain(&change.summary, 240)), w, 11.0, false);
+        text(g, x, *y, &line, 11.0, theme::text_dim(), false);
+        *y += 24.0;
+    }
+    *y += 8.0;
+    let mut group_count = 0;
+    for source in sources {
+        if s.overview.machine.as_ref().is_some_and(|machine| machine != &source.machine_id) { continue; }
+        let source_rows: Vec<_> = rows.iter().copied().filter(|row| row.address.machine_id == source.machine_id).collect();
+        let source_state = match source.state.as_str() {
+            "online" if source.complete => "연결됨",
+            "offline" | "disconnected" => "연결 끊김",
+            "stale" | "error" => "오래된 정보",
+            _ => "미확인",
         };
-        // 목업(플랫): 카드 대신 구분선 행. 얼굴·이름·작업 왼쪽, 상태·단추 오른쪽.
-        let h = 62.0 + detail_lines as f32 * 22.0 + if detail_lines > 0 { 6.0 } else { 0.0 };
-        let rect = (x, *y, w, h);
-        draw_face(g, s, row, rect.0, rect.1 + 12.0, 36.0);
-        let tx = rect.0 + 50.0;
-        let save = (rect.0 + rect.2 - 60.0, rect.1 + 17.0, 60.0, 28.0);
-        let detail = (save.0 - 60.0, save.1, 52.0, 28.0);
-        let status = status_label(row);
-        let status_w = g.measure_chrome_text(&status, 11.0, false);
-        let status_x = detail.0 - 12.0 - status_w;
-        status_dot(g, status_x - 14.0, rect.1 + 27.0, row);
-        text(g, status_x, rect.1 + 24.0, &status, 11.0, theme::text_dim(), false);
-        let name_w = (status_x - 28.0 - tx).max(40.0);
-        let name = fit(g, &agent_name(row), name_w, 13.0, true);
-        text(g, tx, rect.1 + 12.0, &name, 13.0, theme::text(), true);
-        let project = if row.title.is_empty() { &row.intent } else { &row.title };
-        let project = fit(g, project, name_w, 10.5, false);
-        text(g, tx, rect.1 + 32.0, &project, 10.5, theme::text_dim(), false);
-        text_button(
-            g,
-            s,
-            hits,
-            detail,
-            if expanded { "접기" } else { "상세" },
-            Target::ToggleAgentDetail(row.surface_id.clone()),
-            false,
-        );
-        if row.machine.is_none() {
-            button(g, s, hits, save, "저장", Target::SavePane(row.surface_id.clone()), true);
-        } else {
-            let rw = g.measure_chrome_text("원격", 11.0, false);
-            text(g, save.0 + save.2 - rw, save.1 + 8.0, "원격", 11.0, theme::text_mute(), false);
+        let machine_line = format!("{} · {} · {}", source.label, source_state, board_relative_time(data.observed_at_ms, source.observed_at_ms));
+        let machine_line = fit(g, &board_plain(&machine_line, 240), w, 12.5, true);
+        text(g, x, *y, &machine_line, 12.5, theme::text(), true);
+        *y += 25.0;
+        if let Some(error) = &source.error {
+            overview_note(g, x, y, w, &format!("{} · 마지막으로 확인한 내용을 유지합니다", board_reason(error)), theme::danger());
         }
-        let mut ey = rect.1 + 60.0;
-        let ix = tx;
-        let lx = tx + 20.0;
-        let line_w = w - 70.0;
-        if !tasks.is_empty() {
-            if expanded {
-                for task in tasks.iter().take(5) {
-                    g.queue_icon("square-check", ix, ey, 13.0, theme::text_mute());
-                    let task_text = format!("{} · {}", task.status, task.subject);
-                    let task_text = fit(g, &task_text, line_w, 10.5, false);
-                    text(g, lx, ey + 1.0, &task_text, 10.5, theme::text_dim(), false);
-                    ey += 22.0;
-                }
-            } else {
-                let doing = tasks.iter().filter(|task| task.status == "in_progress").count();
-                let done = tasks.iter().filter(|task| task.status == "completed").count();
-                g.queue_icon("square-check", ix, ey, 13.0, theme::text_mute());
-                text(g, lx, ey + 1.0, &format!("태스크 · 진행 {doing} · 완료 {done}"), 10.5, theme::text_dim(), false);
-                ey += 22.0;
+        if source_rows.is_empty() {
+            let message = if source.state == "online" && source.complete { "표시할 창이 없어요" } else { "연결을 확인하면 이 기기의 창을 불러올 수 있어요" };
+            overview_note(g, x, y, w, message, theme::text_dim());
+            *y += 14.0;
+            continue;
+        }
+        let mut rooms: Vec<_> = source_rows.iter().map(|row| (row.room_id.clone(), row.room_label.clone())).collect();
+        rooms.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        rooms.dedup_by(|a, b| a.0 == b.0);
+        rooms.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        for (room_id, room_label) in rooms {
+            let room_rows: Vec<_> = source_rows.iter().copied().filter(|row| row.room_id == room_id).collect();
+            let name = if room_label.is_empty() { "방 미확인" } else { &room_label };
+            let label = fit(g, &format!("{name} · {}개 창", room_rows.len()), w, 11.5, true);
+            text(g, x, *y, &label, 11.5, theme::text_dim(), true);
+            *y += 24.0;
+            divider(g, x, *y, w);
+            for row in room_rows { paint_overview_pane(g, s, hits, x, y, w, row); }
+            *y += 20.0;
+            group_count += 1;
+        }
+    }
+    if group_count == 0 && data.sources.is_empty() {
+        overview_note(g, x, y, w, "아직 확인한 기기가 없어요. 새로고침하면 연결된 기기를 다시 확인합니다.", theme::text_dim());
+    }
+}
+
+fn overview_visible_rows<'a>(data: &'a OverviewData, ui: &OverviewUi) -> Vec<&'a OverviewPane> {
+    let mut rows: Vec<_> = data.panes.iter().filter(|row| {
+        ui.machine.as_ref().is_none_or(|machine| &row.address.machine_id == machine)
+            && ui.room.as_ref().is_none_or(|(machine, id)| &row.address.machine_id == machine && &row.room_id == id)
+    }).collect();
+    let order: std::collections::HashMap<_, _> = ui.order.iter().enumerate().map(|(index, id)| (id.as_str(), index)).collect();
+    rows.sort_by_key(|row| order.get(row.id.as_str()).copied().unwrap_or(usize::MAX));
+    rows
+}
+
+fn overview_room_choices(data: &OverviewData, ui: &OverviewUi) -> Vec<(String, Target, bool, bool)> {
+    let Some(machine) = ui.machine.as_ref().or_else(|| ui.room.as_ref().map(|room| &room.0)) else { return Vec::new(); };
+    let mut rooms: Vec<_> = data.panes.iter().filter(|row| &row.address.machine_id == machine)
+        .map(|row| (row.room_id.clone(), row.room_label.clone())).collect();
+    rooms.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    rooms.dedup_by(|a, b| a.0 == b.0);
+    rooms.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let active_missing = ui.room.as_ref().is_some_and(|(selected_machine, id)| selected_machine != machine || !rooms.iter().any(|room| &room.0 == id));
+    let mut choices = vec![("모든 방".into(), Target::OverviewRoom(None), ui.room.is_none(), true)];
+    choices.extend(rooms.into_iter().map(|(id, label)| {
+        let room = (machine.clone(), id);
+        let label = if label.is_empty() { "방 미확인".into() } else { label };
+        let selected = ui.room.as_ref() == Some(&room);
+        (label, Target::OverviewRoom(Some(room)), selected, true)
+    }));
+    if active_missing {
+        choices.push(("선택한 방 · 현재 목록에 없음".into(), Target::OverviewRoom(ui.room.clone()), true, false));
+    }
+    choices
+}
+
+fn overview_change_visible(change: &OverviewChange, data: &OverviewData, ui: &OverviewUi) -> bool {
+    ui.machine.as_ref().is_none_or(|machine| machine == &change.machine_id)
+        && ui.room.as_ref().is_none_or(|(machine, room)| {
+            if machine != &change.machine_id { return false; }
+            if change.pane_id.is_none() { return true; }
+            if let Some(event_room) = &change.room_id { return room.as_ref() == Some(event_room); }
+            data.panes.iter().find(|row| change.pane_id.as_ref() == Some(&row.id))
+                .is_none_or(|row| &row.address.machine_id == machine && &row.room_id == room)
+        })
+}
+
+fn paint_overview_changes(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
+    let data = &s.data.overview;
+    let changes: Vec<_> = data.recent_changes.iter().filter(|row| overview_change_visible(row, data, &s.overview)).take(12).collect();
+    if changes.is_empty() {
+        overview_note(g, x, y, w, "아직 확인한 변경이 없어요", theme::text_dim());
+    }
+    for change in changes {
+        let start = *y;
+        let pane = data.panes.iter().find(|row| change.pane_id.as_ref() == Some(&row.id));
+        let source = data.sources.iter().find(|row| row.machine_id == change.machine_id).map(|row| row.label.as_str()).unwrap_or("기기 미확인");
+        let room = change.room_label.as_deref().filter(|label| !label.is_empty())
+            .or_else(|| pane.map(|row| row.room_label.as_str()))
+            .unwrap_or(if change.pane_id.is_none() { "기기 상태" } else { "방 정보 없음" });
+        let heading = format!("{} · {} · {}{}", board_relative_time(data.observed_at_ms, change.at_ms), source, room, pane.map(|row| format!(" · {}", overview_name(row))).unwrap_or_default());
+        let heading = fit(g, &heading, w, 10.5, false);
+        text(g, x, *y, &heading, 10.5, theme::text_dim(), false);
+        *y += 18.0;
+        let summary = if change.summary.is_empty() {
+            match change.kind.as_str() { "removed" | "pane_removed" => "창이 목록에서 사라졌어요", "added" | "pane_added" => "새 창을 확인했어요", _ => "상태가 바뀌었어요" }
+        } else { &change.summary };
+        overview_note(g, x, y, w, summary, theme::text());
+        if let Some(row) = pane {
+            hit(g, hits, Target::OverviewDetail(row.id.clone()), (x, start, w, *y - start), false);
+        }
+        divider(g, x, *y, w);
+        *y += 10.0;
+    }
+}
+
+fn paint_overview_pane(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32, row: &OverviewPane) {
+    let expanded = s.overview.selection.as_ref().is_some_and(|selected| selected.id == row.id && selected.address == row.address);
+    let top = *y;
+    let status = overview_status(row);
+    let color = overview_status_color(status.1);
+    let tx = if w >= 260.0 { x + 44.0 } else { x };
+    let tw = w - (tx - x);
+    if w >= 260.0 { draw_overview_face(g, s, row, x, top + 12.0, 32.0); }
+    let status_w = g.measure_chrome_text(status.0, 11.0, false);
+    let name_w = if tw >= 280.0 { tw - status_w - 26.0 } else { tw };
+    let name = fit(g, &board_plain(overview_name(row), 160), name_w, 13.0, true);
+    text(g, tx, top + 12.0, &name, 13.0, theme::text(), true);
+    let status_y = if tw >= 280.0 { top + 14.0 } else { top + 34.0 };
+    let status_x = if tw >= 280.0 { x + w - status_w } else { tx + 13.0 };
+    circle_rect(g, status_x - 12.0, status_y + 2.0, 6.0, color);
+    text(g, status_x, status_y, status.0, 11.0, color, false);
+    *y = if tw >= 280.0 { top + 35.0 } else { top + 56.0 };
+    let meta = format!("{} · {}", row.harness.as_deref().filter(|value| !value.is_empty()).unwrap_or("하네스 미확인"), board_relative_time(s.data.overview.observed_at_ms, row.observed_at_ms));
+    let meta = fit(g, &meta, tw, 10.5, false);
+    text(g, tx, *y, &meta, 10.5, theme::text_dim(), false);
+    *y += 21.0;
+    let request = if row.request.is_empty() { &row.title } else { &row.request };
+    if !request.is_empty() { paint_overview_summary(g, tx, y, tw, "요청", request, 2); }
+    if !row.progress.is_empty() { paint_overview_summary(g, tx, y, tw, "진행", &row.progress, 2); }
+    if let Some(summary) = row.done_summary.as_deref().filter(|summary| !summary.is_empty()) {
+        if row.done_outcome.is_some() { paint_overview_summary(g, tx, y, tw, "보고", summary, 2); }
+    }
+    if row.detached {
+        overview_note(g, tx, y, tw, "닫아 둔 창 · 완료 여부는 보고를 확인해 주세요", theme::text_dim());
+    }
+    if request.is_empty() && row.progress.is_empty() && row.done_summary.is_none() {
+        overview_note(g, tx, y, tw, "아직 확인한 요청이나 진행 내용이 없어요", theme::text_dim());
+    }
+    if status.1 <= 2 {
+        if let Some(reason) = row.status_reason.as_deref().filter(|reason| !reason.is_empty()) {
+            let reason = fit(g, &board_reason(reason), tw, 10.5, false);
+            text(g, tx, *y, &reason, 10.5, theme::text_dim(), false);
+            *y += 20.0;
+        }
+    }
+    hit(g, hits, Target::OverviewDetail(row.id.clone()), (x, top, w, *y - top), false);
+    let details_label = if expanded { "상세 접기" } else { "상세 보기" };
+    text_button(g, s, hits, (tx, *y, 76.0_f32.min(tw), 28.0), details_label, Target::OverviewDetail(row.id.clone()), false);
+    *y += 34.0;
+    if expanded { paint_overview_detail(g, s, hits, tx, y, tw, row); }
+    divider(g, x, *y, w);
+    *y += 10.0;
+}
+
+fn paint_overview_detail(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32, row: &OverviewPane) {
+    let data = &s.data.overview;
+    let address_label = format!("{}/{}", row.address.machine_id, row.address.surface_key);
+    paint_overview_summary(g, x, y, w, "주소", &address_label, 3);
+    let local = overview_is_local(data, &row.address);
+    let mut choices = vec![("주소 복사".into(), Target::OverviewCopy(row.address.clone()), false, true)];
+    if local {
+        choices.push(("창으로 이동".into(), Target::OverviewFocus(row.address.clone()), false, true));
+        choices.push(overview_save_choice(&row.address));
+    }
+    overview_choices(g, s, hits, x, y, w, choices);
+    if local {
+        overview_note(g, x, y, w, "저장은 해당 창에서 실행해 주세요", theme::text_dim());
+    }
+    let detail = overview_current_detail(data, &s.overview);
+    let Some(detail) = detail else {
+        overview_note(g, x, y, w, "선택한 창의 최근 내용을 확인하고 있어요", theme::text_dim());
+        return;
+    };
+    if let Some(error) = &detail.error { overview_note(g, x, y, w, error, theme::danger()); }
+    let checked = format!("최근 내용 · {} 확인", board_relative_time(data.observed_at_ms, detail.observed_at_ms));
+    overview_note(g, x, y, w, &checked, theme::text_dim());
+    if detail.lines.is_empty() && detail.error.is_none() {
+        overview_note(g, x, y, w, "이 창에서 확인할 수 있는 최근 활동이 없어요", theme::text_dim());
+    }
+    for line in &detail.lines {
+        let lines = board_wrap(&board_plain(line, 1600), w, 5, |line| g.measure_chrome_text(line, 11.0, false));
+        for line in lines {
+            text(g, x, *y, &line, 11.0, theme::text(), false);
+            *y += 18.0;
+        }
+        *y += 8.0;
+    }
+}
+
+fn overview_save_choice(address: &BoardAddress) -> (String, Target, bool, bool) {
+    // SaveSession queues pane-number-only input; it cannot retain the displayed
+    // conversation's identity through the later terminal writes.
+    ("저장".into(), Target::OverviewSave(address.clone()), false, false)
+}
+
+fn paint_overview_summary(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, label: &str, value: &str, max_lines: usize) {
+    let label_w = 32.0;
+    let lines = board_wrap(&board_plain(value, 1600), (w - label_w).max(0.0), max_lines, |line| g.measure_chrome_text(line, 11.5, false));
+    text(g, x, *y, label, 10.5, theme::text_dim(), false);
+    for line in lines {
+        text(g, x + label_w, *y, &line, 11.5, theme::text(), false);
+        *y += 19.0;
+    }
+    *y += 6.0;
+}
+
+fn overview_note(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, value: &str, color: [u8; 4]) {
+    let lines = board_wrap(&board_plain(value, 1600), w, 3, |line| g.measure_chrome_text(line, 11.0, false));
+    for line in lines {
+        text(g, x, *y, &line, 11.0, color, false);
+        *y += 18.0;
+    }
+    *y += 8.0;
+}
+
+fn overview_choices(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32, choices: Vec<(String, Target, bool, bool)>) {
+    let mut cx = x;
+    for (label, target, selected, enabled) in choices {
+        let label = fit(g, &board_plain(&label, 160), (w - 20.0).max(0.0), 11.0, selected);
+        let width = (g.measure_chrome_text(&label, 11.0, selected) + 20.0).min(w);
+        if cx > x && cx + width > x + w { cx = x; *y += 34.0; }
+        let rect = (cx, *y, width, 28.0);
+        let hover = enabled && contains(rect, s.cursor);
+        if selected || hover {
+            round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_md().min(5.0), if selected { theme::surface_active() } else { theme::surface_hover() });
+        }
+        text(g, cx + 10.0, *y + 8.0, &label, 11.0, if enabled { theme::text() } else { theme::text_mute() }, selected);
+        if enabled { hit(g, hits, target, rect, false); }
+        g.hover_pointer |= hover;
+        cx += width + 6.0;
+    }
+    *y += 36.0;
+}
+
+fn overview_status_color(rank: u8) -> [u8; 4] {
+    match rank { 0 => theme::danger(), 3 => theme::accent(), 5 => theme::success(), _ => theme::text_dim() }
+}
+
+fn board_reason(reason: &str) -> String {
+    let message = match reason {
+        "initial observation pending" => "첫 상태를 확인하고 있어요",
+        "remote observation unavailable" | "source absent from current discovery" => "기기에서 최근 상태를 받지 못했어요",
+        "local observation unavailable" => "이 기기의 최근 상태를 확인하지 못했어요",
+        "live place; supported agent activity unavailable" => "지원되는 에이전트의 활동을 아직 확인하지 못했어요",
+        "supported agent observed; transcript activity unavailable" => "실행 중인 에이전트의 최근 내용을 아직 확인하지 못했어요",
+        "remote mirror; observe agent on its source machine" => "원격 화면을 보여주는 창이에요. 원래 기기에서 작업 상태를 확인해 주세요",
+        "pane attention signal observed" => "응답이나 선택을 기다리고 있어요",
+        _ => reason,
+    };
+    board_plain(message, 240)
+}
+
+fn board_relative_time(observed: u64, at: u64) -> String {
+    if at == 0 { return "확인 시각 없음".into(); }
+    let elapsed = observed.saturating_sub(at) / 1000;
+    match elapsed { 0..=4 => "방금".into(), 5..=59 => format!("{elapsed}초 전"), 60..=3599 => format!("{}분 전", elapsed / 60), 3600..=86399 => format!("{}시간 전", elapsed / 3600), _ => format!("{}일 전", elapsed / 86400) }
+}
+
+fn board_wrap(value: &str, width: f32, max_lines: usize, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
+    if width <= 0.0 || max_lines == 0 { return Vec::new(); }
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let candidate = format!("{line}{ch}");
+        if !line.is_empty() && measure(&candidate) > width {
+            lines.push(std::mem::take(&mut line));
+            if lines.len() == max_lines {
+                let last = lines.last_mut().unwrap();
+                while !last.is_empty() && measure(&format!("{last}…")) > width { last.pop(); }
+                if measure("…") <= width { last.push('…'); }
+                return lines;
             }
         }
-        if unassigned > 0 {
-            g.queue_icon("square", ix, ey, 13.0, theme::text_mute());
-            text(g, lx, ey + 1.0, &format!("미배정 태스크 {unassigned}개"), 10.5, theme::text_mute(), false);
-            ey += 22.0;
-        }
-        if others > 0 {
-            g.queue_icon("users", ix, ey, 13.0, theme::text_mute());
-            text(g, lx, ey + 1.0, &format!("같은 방 다른 캐릭터 태스크 {others}개"), 10.5, theme::text_mute(), false);
-            ey += 22.0;
-        }
-        if !row.subagents.is_empty() || !row.background.is_empty() {
-            if expanded {
-                for label in row.subagents.iter().take(3) {
-                    g.queue_icon("users", ix, ey, 13.0, theme::accent());
-                    let label = fit(g, &format!("서브에이전트 · {label}"), line_w, 10.5, false);
-                    text(g, lx, ey + 1.0, &label, 10.5, theme::text_dim(), false);
-                    ey += 22.0;
-                }
-                for label in row.background.iter().take(3) {
-                    g.queue_icon("terminal", ix, ey, 13.0, theme::accent());
-                    let label = fit(g, &format!("백그라운드 · {label}"), line_w, 10.5, false);
-                    text(g, lx, ey + 1.0, &label, 10.5, theme::text_dim(), false);
-                    ey += 22.0;
-                }
-            } else {
-                g.queue_icon("users", ix, ey, 13.0, theme::accent());
-                text(
-                    g,
-                    lx,
-                    ey + 1.0,
-                    &format!("서브 {} · 백그라운드 {}", row.subagents.len(), row.background.len()),
-                    10.5,
-                    theme::text_dim(),
-                    false,
-                );
-                ey += 22.0;
-            }
-        }
-        if !row.recent_tools.is_empty() {
-            if expanded {
-                for (index, tool) in row.recent_tools.iter().rev().take(8).enumerate() {
-                    g.queue_icon("braces", ix, ey, 13.0, theme::text_mute());
-                    let tool = fit(g, &format!("{}  {tool}", index + 1), line_w, 10.0, false);
-                    text(g, lx, ey + 1.0, &tool, 10.0, theme::text_dim(), false);
-                    ey += 22.0;
-                }
-            } else {
-                g.queue_icon("braces", ix, ey, 13.0, theme::text_mute());
-                let tools = row.recent_tools.iter().rev().take(3).cloned().collect::<Vec<_>>().join("  →  ");
-                let tools = fit(g, &tools, line_w, 10.0, false);
-                text(g, lx, ey + 1.0, &tools, 10.0, theme::text_dim(), false);
-            }
-        }
-        divider(g, x, rect.1 + h - 1.0, w);
-        *y += h;
+        if measure(&ch.to_string()) <= width { line.push(ch); }
+    }
+    if !line.is_empty() { lines.push(line); }
+    lines
+}
+
+fn draw_overview_face(g: &mut gpu::GpuRenderer, s: &Snapshot, row: &OverviewPane, x: f32, y: f32, size: f32) {
+    if let Some(face) = row.character.as_deref().and_then(|name| s.data.faces.iter().find(|face| face.name == name)) {
+        if !g.has_image(&face.key) { g.upload_image(&face.key, &face.rgba, face.width, face.height); }
+        g.queue_image_above(&face.key, x, y, size, size);
+    } else {
+        round_rect(g, x, y, size, size, theme::radius_md(), theme::surface_hover());
+        g.queue_icon("terminal", x + 7.0, y + 7.0, size - 14.0, theme::text_dim());
     }
 }
 
@@ -2142,22 +2780,6 @@ fn fit(g: &mut gpu::GpuRenderer, value: &str, width: f32, size: f32, bold: bool)
     out
 }
 
-fn status_dot(g: &mut gpu::GpuRenderer, x: f32, y: f32, row: &PaneActivity) {
-    circle_rect(g, x, y, 8.0, status_color(row));
-}
-
-fn status_color(row: &PaneActivity) -> [u8; 4] {
-    if agent_needs_attention(row) {
-        theme::danger()
-    } else if row.done_outcome.as_deref() == Some("failed") {
-        theme::danger()
-    } else if agent_is_working(row) {
-        theme::accent()
-    } else {
-        theme::success()
-    }
-}
-
 pub(crate) fn status_label(row: &PaneActivity) -> String {
     if agent_needs_attention(row) {
         "확인 필요".to_string()
@@ -2257,6 +2879,10 @@ impl App {
         let Some(backend) = self.native_board_backend() else {
             return;
         };
+        if board_fixture_requested() {
+            self.board_scene.request_refresh(backend, self.proxy.clone());
+            return;
+        }
         let target = self
             .board_scene
             .target_pane()
@@ -2364,6 +2990,15 @@ impl App {
             self.board_scene.clear_stop();
             return false;
         };
+        if board_fixture_requested()
+            && !matches!(target, Target::Tab(_) | Target::Return | Target::Refresh
+                | Target::OverviewMachine(_) | Target::OverviewRoom(_) | Target::OverviewSort(_)
+                | Target::OverviewDetail(_) | Target::OverviewChanges | Target::OverviewCopy(_))
+        {
+            self.board_scene.report_error("검증용 보드에서는 실제 창을 조작하지 않아요");
+            self.chrome_dirty = true;
+            return true;
+        }
         // 멈춤 확인은 그 행에서 답할 때만 살아 있다. 다른 곳을 누르면 접어, 화면에
         // 남은 확인이 나중 클릭에 엉뚱하게 걸리지 않게 한다.
         if !matches!(
@@ -2387,9 +3022,47 @@ impl App {
                 self.return_from_board_room();
                 self.focus_surface(&pane);
             }
-            Target::ToggleAgentDetail(pane) => self.board_scene.toggle_agent_detail(pane),
-            Target::SavePane(pane) => {
-                self.save_pane_confirmed(pane);
+            Target::OverviewMachine(machine) => {
+                self.board_scene.overview.machine = machine;
+                self.board_scene.overview.room = None;
+                self.board_scene.scroll = 0.0;
+            }
+            Target::OverviewRoom(room) => {
+                self.board_scene.overview.room = room;
+                self.board_scene.scroll = 0.0;
+            }
+            Target::OverviewSort(sort) => self.board_scene.sort_overview(sort),
+            Target::OverviewDetail(id) => self.board_scene.toggle_overview_detail(id),
+            Target::OverviewChanges => {
+                self.board_scene.overview.show_changes = !self.board_scene.overview.show_changes;
+            }
+            Target::OverviewCopy(address) => {
+                if self.board_scene.data.overview.panes.iter().any(|row| row.address == address) {
+                    let value = serde_json::to_string(&address).unwrap_or_default();
+                    let copied = if board_fixture_active() {
+                        *crate::clipboard::probe_copied_text().lock().unwrap() = value;
+                        true
+                    } else {
+                        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(value)).is_ok()
+                    };
+                    self.board_scene.toast = Some((copied, if copied { "보드 주소를 복사했어요" } else { "주소를 복사하지 못했어요" }.into(), Instant::now()));
+                }
+            }
+            Target::OverviewFocus(address) => {
+                if overview_is_local(&self.board_scene.data.overview, &address)
+                    && !board_fixture_active()
+                    && self.window_of_pane(&address.surface_id).is_some()
+                    && kasa_mcp::surface_keys::get(&address.surface_id).as_deref() == Some(&address.surface_key)
+                {
+                    self.native_board_blur();
+                    self.return_from_board_room();
+                    self.focus_surface(&address.surface_id);
+                } else {
+                    self.board_scene.report_error("이 창으로 이동할 수 없어요. 목록을 새로고침해 주세요");
+                }
+            }
+            Target::OverviewSave(_) => {
+                self.board_scene.report_error("저장은 해당 창에서 실행해 주세요. 보드에서는 저장 순간의 대화를 확인할 수 없어요");
             }
             Target::ResumeBackground(id, cwd) => {
                 self.resume_background_in_target_room(id, cwd);
@@ -2602,20 +3275,6 @@ impl App {
             .wait_for_gui_result(receiver, "세션을 이어받았어요", self.proxy.clone());
     }
 
-    fn save_pane_confirmed(&mut self, pane: String) {
-        let (reply, receiver) = std::sync::mpsc::channel();
-        let event = UserEvent::SaveSession {
-            surface: Some(pane),
-            reply: Some(reply),
-        };
-        if self.proxy.send_event(event).is_err() {
-            self.board_scene.report_error("저장 요청을 보내지 못했어요");
-            return;
-        }
-        self.board_scene
-            .wait_for_gui_result(receiver, "백그라운드 저장을 시작했어요", self.proxy.clone());
-    }
-
     pub(crate) fn native_board_insert_into(&mut self, field: BoardInput, text: &str) {
         self.board_scene.edit_field(field, |value, caret| {
             let byte = char_to_byte(value, (*caret).min(value.chars().count()));
@@ -2769,6 +3428,234 @@ mod tests {
         assert_eq!(scene.target_cwd, "/repo");
     }
 
+    fn overview_data() -> OverviewData {
+        let mut data = overview_from_value(board_probe_value()).unwrap();
+        data.local_machine_id = Some("device-a".into());
+        data
+    }
+
+    #[test]
+    fn overview_groups_same_pane_numbers_and_room_names_by_machine_identity() {
+        let data = overview_data();
+        let local = &data.panes[0];
+        let remote = &data.panes[3];
+        assert_eq!(local.address.surface_id, remote.address.surface_id);
+        assert_eq!(local.room_label, remote.room_label);
+        assert_ne!(local.id, remote.id);
+        assert_eq!(overview_visible_rows(&data, &OverviewUi::default()).len(), 6);
+        let filter = OverviewUi { machine: Some("device-b".into()), room: Some(("device-b".into(), Some("제품".into()))), ..Default::default() };
+        let visible = overview_visible_rows(&data, &filter);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, remote.id);
+        assert!(overview_is_local(&data, &local.address));
+        assert!(!overview_is_local(&data, &remote.address));
+        let mut changed = local.address.clone();
+        changed.instance_id = Some("another-instance".into());
+        assert!(!overview_is_local(&data, &changed));
+        assert_eq!(remote.character.as_deref(), Some("아로나"));
+        assert_ne!(remote.character.as_deref(), Some(remote.machine_label.as_str()));
+    }
+
+    #[test]
+    fn overview_room_filter_survives_rename_and_always_offers_clear() {
+        let mut data = overview_data();
+        let ui = OverviewUi { machine: Some("device-b".into()), room: Some(("device-b".into(), Some("제품".into()))), ..Default::default() };
+        let before: Vec<_> = overview_visible_rows(&data, &ui).iter().map(|row| row.id.clone()).collect();
+        data.panes[3].room_label = "새로운 방 이름".into();
+        let after: Vec<_> = overview_visible_rows(&data, &ui).iter().map(|row| row.id.clone()).collect();
+        assert_eq!(after, before);
+        let choices = overview_room_choices(&data, &ui);
+        assert!(choices.iter().any(|choice| choice.0 == "새로운 방 이름" && choice.2 && choice.3));
+        data.panes.retain(|row| row.id == before[0]);
+        let one_room = overview_room_choices(&data, &ui);
+        assert!(one_room.iter().any(|choice| matches!(choice.1, Target::OverviewRoom(None)) && choice.3));
+        assert!(one_room.iter().any(|choice| choice.2 && choice.3));
+        data.panes.clear();
+        let missing_room = overview_room_choices(&data, &ui);
+        assert!(missing_room.iter().any(|choice| matches!(choice.1, Target::OverviewRoom(None)) && choice.3));
+        assert!(missing_room.iter().any(|choice| choice.2 && !choice.3));
+        let cleared = OverviewUi { room: None, ..ui };
+        assert!(overview_room_choices(&data, &cleared).iter().any(|choice| matches!(choice.1, Target::OverviewRoom(None)) && choice.2 && choice.3));
+    }
+
+    #[test]
+    fn overview_room_changes_keep_deleted_panes_and_source_failures() {
+        let mut data = overview_data();
+        let ui = OverviewUi { machine: Some("device-b".into()), room: Some(("device-b".into(), Some("제품".into()))), ..Default::default() };
+        let removed = OverviewChange { machine_id: "device-b".into(), pane_id: Some(data.panes[3].id.clone()),
+            room_id: Some("제품".into()), room_label: Some("옛 방 이름".into()), kind: "pane_removed".into(), ..Default::default() };
+        data.panes[3].room_id = Some("다른 방".into());
+        data.panes[3].room_label = "다른 이름".into();
+        assert!(overview_change_visible(&removed, &data, &ui));
+        data.panes.retain(|row| Some(&row.id) != removed.pane_id.as_ref());
+        assert!(overview_change_visible(&removed, &data, &ui));
+        let other_room = OverviewUi { room: Some(("device-b".into(), Some("다른 방".into()))), ..ui.clone() };
+        assert!(!overview_change_visible(&removed, &data, &other_room));
+        let source_error = OverviewChange { machine_id: "device-b".into(), kind: "source_error".into(), ..Default::default() };
+        assert!(overview_change_visible(&source_error, &data, &ui));
+        assert!(overview_change_visible(&source_error, &data, &other_room));
+        let other_machine = OverviewUi { machine: Some("device-a".into()), room: Some(("device-a".into(), Some("제품".into()))), ..Default::default() };
+        assert!(!overview_change_visible(&source_error, &data, &other_machine));
+        let legacy_removed = OverviewChange { room_id: None, room_label: None, ..removed };
+        assert!(overview_change_visible(&legacy_removed, &data, &ui));
+    }
+
+    #[test]
+    fn overview_save_keeps_the_address_but_cannot_queue_unvalidated_input() {
+        let data = overview_data();
+        let original = data.panes[0].address.clone();
+        let mut replacement = original.clone();
+        replacement.session_id = Some("replacement-conversation".into());
+        replacement.instance_id = Some("replacement-process".into());
+        for address in [&original, &replacement] {
+            let choice = overview_save_choice(address);
+            assert_eq!(choice.1, Target::OverviewSave(address.clone()));
+            assert!(!choice.3);
+        }
+        let source = include_str!("native_board.rs").split_once("#[cfg(test)]\nmod tests {").unwrap().0;
+        assert!(!source.contains("UserEvent::SaveSession"));
+        let click = source.split_once("Target::OverviewSave(_) => {").unwrap().1.split_once("Target::ResumeBackground").unwrap().0;
+        assert!(click.contains("report_error"));
+        assert!(!click.contains("send_event"));
+    }
+
+    #[test]
+    fn overview_fixture_requests_are_rejected_outside_an_isolated_debug_build() {
+        assert_eq!(board_probe_mode(true, false, false), BoardProbeMode::Live);
+        assert_eq!(board_probe_mode(true, true, true), BoardProbeMode::Fixture);
+        for (debug, isolated) in [(true, false), (false, false), (false, true)] {
+            assert_eq!(board_probe_mode(debug, true, isolated), BoardProbeMode::Rejected);
+        }
+        let source = include_str!("native_board.rs");
+        let request = source.split_once("pub(crate) fn request_refresh(").unwrap().1.split_once("pub(crate) fn pump(").unwrap().0;
+        let rejected = request.split_once("if probe == BoardProbeMode::Rejected {").unwrap().1.split_once("#[cfg(debug_assertions)]").unwrap().0;
+        assert!(rejected.contains("return;"));
+        assert!(!rejected.contains("collect_data"));
+        assert!(!rejected.contains("std::thread::spawn"));
+        assert!(request.contains("#[cfg(debug_assertions)]\n        if probe == BoardProbeMode::Fixture"));
+        let app_request = source.split_once("pub(crate) fn request_native_board_refresh(").unwrap().1.split_once("let target =").unwrap().0;
+        assert!(app_request.contains("if board_fixture_requested()"));
+        assert!(app_request.contains("return;"));
+    }
+
+    #[test]
+    fn idle_is_not_completion_and_unavailable_evidence_stays_uncertain() {
+        let data = overview_data();
+        assert_eq!(overview_status(&data.panes[2]).0, "대기 중");
+        assert_eq!(overview_status(&data.panes[3]).0, "완료 보고");
+        assert_eq!(overview_status(&data.panes[4]).0, "미확인");
+        assert_eq!(overview_status(&data.panes[5]).0, "오래된 정보");
+        assert_eq!(overview_status(&data.panes[1]).0, "확인 필요");
+        let mut disconnected = data.panes[5].clone();
+        disconnected.freshness = "offline".into();
+        assert_eq!(overview_status(&disconnected).0, "연결 끊김");
+    }
+
+    #[test]
+    fn overview_order_stays_anchored_until_the_user_sorts_again() {
+        let mut scene = Scene::default();
+        scene.data = Arc::new(BoardData { overview: Arc::new(overview_data()), ..Default::default() });
+        scene.sort_overview(OverviewSort::Status);
+        let before = scene.overview.order.clone();
+        let mut changed = (*scene.data.overview).clone();
+        changed.panes[0].status = "waiting".into();
+        changed.panes[1].status = "idle".into();
+        scene.data = Arc::new(BoardData { overview: Arc::new(changed), ..Default::default() });
+        scene.revalidate_overview();
+        assert_eq!(scene.overview.order, before);
+        scene.sort_overview(OverviewSort::Status);
+        assert_ne!(scene.overview.order, before);
+    }
+
+    #[test]
+    fn overview_inspection_rejects_a_previous_selection_and_replaced_session() {
+        let mut scene = Scene::default();
+        let mut data = overview_data();
+        scene.data = Arc::new(BoardData { overview: Arc::new(data.clone()), ..Default::default() });
+        scene.toggle_overview_detail(data.panes[0].id.clone());
+        data.detail = Some(OverviewDetail { selection: scene.overview.selection.clone().unwrap(), observed_at_ms: data.observed_at_ms, lines: vec!["첫 번째 창의 내용".into()], error: None });
+        assert!(overview_current_detail(&data, &scene.overview).is_some());
+        scene.toggle_overview_detail(data.panes[3].id.clone());
+        assert!(overview_current_detail(&data, &scene.overview).is_none());
+        scene.toggle_overview_detail(data.panes[0].id.clone());
+        assert!(overview_current_detail(&data, &scene.overview).is_none());
+        data.detail.as_mut().unwrap().selection = scene.overview.selection.clone().unwrap();
+        assert!(overview_current_detail(&data, &scene.overview).is_some());
+        data.panes[0].address.session_id = Some("new-conversation".into());
+        assert!(overview_current_detail(&data, &scene.overview).is_none());
+        scene.data = Arc::new(BoardData { overview: Arc::new(data), ..Default::default() });
+        scene.revalidate_overview();
+        assert!(scene.overview.selection.is_none());
+    }
+
+    #[test]
+    fn failed_overview_refresh_preserves_last_information_but_disables_focus() {
+        let previous = overview_data();
+        let data = overview_failed(&previous, "offline".into());
+        assert_eq!(data.panes.len(), previous.panes.len());
+        assert_eq!(data.panes[0].request, previous.panes[0].request);
+        assert_eq!(data.panes[0].progress, previous.panes[0].progress);
+        assert_eq!(data.panes[0].observed_at_ms, previous.panes[0].observed_at_ms);
+        assert!(data.panes.iter().all(|row| row.freshness == "stale"));
+        assert!(!overview_is_local(&data, &data.panes[0].address));
+        assert!(data.detail.is_none());
+        assert!(data.error.is_some());
+    }
+
+    #[test]
+    fn overview_long_korean_and_urls_wrap_inside_the_measured_width() {
+        let measure = |line: &str| line.chars().map(|ch| if ch.is_ascii() { 6.0 } else { 12.0 }).sum::<f32>();
+        for width in [36.0, 112.0, 248.0, 560.0] {
+            let value = "공백없는아주긴한글내용으로확인합니다https://example.test/averylongunbrokentoken?with=parameters";
+            let full = board_wrap(value, width, 100, measure);
+            assert_eq!(full.concat(), value);
+            assert!(full.iter().all(|line| measure(line) <= width));
+            let short = board_wrap(value, width, 2, measure);
+            assert!(short.len() <= 2);
+            assert!(short.iter().all(|line| measure(line) <= width));
+            if full.len() > 2 { assert!(short.last().unwrap().ends_with('…')); }
+        }
+    }
+
+    #[test]
+    fn overview_detail_and_recent_changes_are_bounded_and_keep_error_signals() {
+        let events = serde_json::json!({"events":[{"kind":"prompt","text":"요청 내용"}, {"kind":"result","name":"Check","text":"실패 이유","is_error":true}]});
+        let lines = overview_detail_lines(&events);
+        assert_eq!(lines[0], "요청 · 요청 내용");
+        assert_eq!(lines[1], "오류 · Check · 실패 이유");
+        let many = serde_json::json!({"events":vec![serde_json::json!({"kind":"say","text":"가".repeat(2000)}); 100]});
+        let lines = overview_detail_lines(&many);
+        assert_eq!(lines.len(), 20);
+        assert!(lines.iter().all(|line| line.chars().count() <= 1600));
+        let data = overview_data();
+        let mut changes = data.recent_changes.clone();
+        merge_overview_changes(&mut changes, &data.recent_changes, data.recent_changes.clone());
+        assert_eq!(changes.len(), 2);
+        assert!(changes[0].at_ms >= changes[1].at_ms);
+    }
+
+    #[test]
+    fn overview_probe_rejects_user_paths_and_parent_traversal() {
+        let root = std::path::Path::new("/tmp/kasaterm-board-probe");
+        assert!(board_fixture_path(root, &root.join("session.json")));
+        assert!(!board_fixture_path(root, std::path::Path::new("/Users/example/session.json")));
+        assert!(!board_fixture_path(root, &root.join("../session.json")));
+        assert!(!board_fixture_path(root, root));
+    }
+
+    #[test]
+    fn overview_collection_exits_before_legacy_agent_and_remote_loaders() {
+        let source = include_str!("native_board.rs");
+        let collection = source.split_once("fn collect_data(").unwrap().1;
+        let overview = collection.split_once("if tab == BoardTab::Overview {").unwrap().1
+            .split_once("let mut errors = Vec::new();").unwrap().0;
+        assert!(overview.contains("collect_overview"));
+        assert!(overview.contains("return BoardData"));
+        for forbidden in ["collab_board()", "collect_background", "session_transfer::collect", "pane_tasks_snapshot", "remoteboard::board_rows"] {
+            assert!(!overview.contains(forbidden), "전체 보드에서 구형 수집 호출: {forbidden}");
+        }
+    }
+
     fn transfer_data() -> TransferSnapshot {
         use crate::session_transfer::{TransferMachine, RoomInfo};
         TransferSnapshot {
@@ -2874,6 +3761,9 @@ mod tests {
             "TcpStream",
             "reqwest",
             "curl",
+            "collab_snapshot(",
+            "collab_changes(",
+            "collab_inspect(",
         ] {
             assert!(!paint.contains(forbidden), "paint에서 I/O 발견: {forbidden}");
         }
@@ -2944,10 +3834,10 @@ mod tests {
         ] {
             assert!(click.contains(action), "worker action routing 누락: {action}");
         }
-        // 저장·이어받기는 pane 을 실제로 만드는 일이라 워커 스레드가 아니라 GUI
+        // 이어받기는 pane 을 실제로 만드는 일이라 워커 스레드가 아니라 GUI
         // 스레드로 간다(`UserEvent` 의 reply 채널로 결과를 되받는다). 워커에 남으면
         // 만들어진 pane 을 확인할 길이 없어 성공 토스트가 거짓이 된다.
-        for gui in ["save_pane_confirmed", "resume_background_in_target_room"] {
+        for gui in ["resume_background_in_target_room"] {
             assert!(click.contains(gui), "GUI 스레드 경로 누락: {gui}");
         }
         for forbidden in ["git_status(", "std::process::Command", "read_to_string"] {

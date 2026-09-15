@@ -30,6 +30,7 @@ mod lineedit;
 mod markdown;
 mod native_board;
 mod transfer_endpoints;
+mod tell_delivery;
 mod native_onboarding;
 mod native_settings;
 mod native_strings;
@@ -38,8 +39,8 @@ mod onboarding;
 mod render;
 mod rich_document;
 mod vault;
-mod screenread;
 mod vault_graph;
+mod screenread;
 mod session;
 mod server_restore;
 mod session_transfer;
@@ -3592,8 +3593,8 @@ impl Workspace {
 #[derive(Debug, Clone)]
 enum UserEvent {
     VaultPicked { owner: WindowId, root: String },
-    VaultListings { owner: WindowId, generation: u64, listings: Vec<vault::Listing> },
     VaultGraph { owner: WindowId, generation: u64, request_generation: u64, request_id: String, graph: vault_graph::Graph },
+    VaultListings { owner: WindowId, generation: u64, listings: Vec<vault::Listing> },
     VaultSearch { owner: WindowId, generation: u64, query: String, request_id: String, entries: Vec<vault::Entry>, error: Option<String> },
     VaultDocument { owner: WindowId, generation: u64, relative: String, path: String, text: std::result::Result<String, String> },
     RichDocument { owner: WindowId, message: String },
@@ -3617,6 +3618,9 @@ enum UserEvent {
     /// pane writes / split / focus to the GUI thread via the proxy. `surface_id`
     /// None = active pane.
     SocketBytes(Option<String>, Vec<u8>),
+    SafeTellWake,
+    SafeTellReady(tell_delivery::Commit),
+    SafeTellCommit(tell_delivery::Commit),
     /// Split delegated from the socket thread. The `Sender` carries the new
     /// pane's real id back so `split_surface` can return it instead of the old
     /// `"pane-new"` placeholder — without it the teammate launcher targets a

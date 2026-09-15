@@ -1265,6 +1265,38 @@ pub trait Backend: Send + Sync {
         Ok(Vec::new())
     }
 
+    fn collab_board_source(&self) -> Result<serde_json::Value> {
+        anyhow::bail!("local collaboration source unsupported by this backend")
+    }
+
+    fn collab_snapshot(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("collaboration collector unsupported by this backend")
+    }
+
+    fn collab_changes(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("collaboration collector unsupported by this backend")
+    }
+
+    fn collab_inspect(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("collaboration inspection unsupported by this backend")
+    }
+
+    fn collab_pane_identity(&self, _surface_id: &str) -> Result<serde_json::Value> {
+        anyhow::bail!("collaboration pane identity unsupported by this backend")
+    }
+
+    fn collab_tell(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("safe tell unsupported by this backend")
+    }
+
+    fn collab_tell_status(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("safe tell receipts unsupported by this backend")
+    }
+
+    fn collab_tell_identity(&self, _surface_id: &str) -> Result<serde_json::Value> {
+        anyhow::bail!("current tell session identity cannot be verified by this backend")
+    }
+
     /// Geometry of the panes in the visible window, as window-relative
     /// percentages — so a caller can see who sits where (right half, top
     /// third) and pick a spot to split. Default: empty (backends that don't

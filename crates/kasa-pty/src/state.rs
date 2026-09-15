@@ -498,6 +498,8 @@ pub struct PtySession {
     kill_disarmed: std::sync::atomic::AtomicBool,
     /// Closed panes reject all user/control input while awaiting disposal.
     input_closed: std::sync::atomic::AtomicBool,
+    input_revision: std::sync::atomic::AtomicU64,
+    input_draft: std::sync::atomic::AtomicBool,
     /// 마지막으로 CR/LF 가 이 PTY 로 들어간 시각 — 「방금 제출됐다」 신호.
     /// GUI 의 스피너 즉시-신뢰(턴 시작 첫 프레임부터 학생 테마)가 읽는다.
     /// 키보드·paste·소켓 send·하네스 autosend 모든 쓰기 경로가 `send_bytes`
@@ -809,6 +811,8 @@ impl PtySession {
             reader_stop,
             kill_disarmed: std::sync::atomic::AtomicBool::new(false),
             input_closed: std::sync::atomic::AtomicBool::new(false),
+            input_revision: std::sync::atomic::AtomicU64::new(0),
+            input_draft: std::sync::atomic::AtomicBool::new(true),
             last_submit: Mutex::new(None),
             output_beats,
             last_input: Mutex::new(None),
@@ -904,6 +908,8 @@ impl PtySession {
             reader_stop,
             kill_disarmed: std::sync::atomic::AtomicBool::new(false),
             input_closed: std::sync::atomic::AtomicBool::new(false),
+            input_revision: std::sync::atomic::AtomicU64::new(0),
+            input_draft: std::sync::atomic::AtomicBool::new(true),
             last_submit: Mutex::new(None),
             output_beats,
             last_input: Mutex::new(None),
@@ -1010,6 +1016,8 @@ impl PtySession {
             reader_stop,
             kill_disarmed: std::sync::atomic::AtomicBool::new(false),
             input_closed: std::sync::atomic::AtomicBool::new(false),
+            input_revision: std::sync::atomic::AtomicU64::new(0),
+            input_draft: std::sync::atomic::AtomicBool::new(true),
             last_submit: Mutex::new(None),
             output_beats,
             last_input: Mutex::new(None),
@@ -1195,6 +1203,9 @@ impl PtySession {
     pub fn set_input_closed(&self, closed: bool, interrupt: bool) -> Result<()> {
         let mut writer = self.writer.lock().unwrap();
         let was_closed = self.input_closed.swap(closed, std::sync::atomic::Ordering::AcqRel);
+        if was_closed != closed {
+            self.input_revision.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
+        }
         if closed && !was_closed && interrupt {
             writer.write_all(b"\x03").context("interrupt closing pane")?;
             writer.flush()?;
@@ -1237,15 +1248,46 @@ impl PtySession {
     }
 
     pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> {
+        self.send_bytes_guarded(bytes,None).map(|_|())
+    }
+
+    pub fn input_revision(&self) -> u64 {
+        self.input_revision.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn input_quiet_for(&self, duration: std::time::Duration) -> bool {
+        self.last_input.lock().unwrap().is_none_or(|at|at.elapsed() >= duration)
+    }
+
+    pub fn input_draft_present(&self) -> bool {
+        self.input_draft.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn reserve_input_draft(&self) {
+        let _writer = self.writer.lock().unwrap();
+        self.input_draft.store(true,std::sync::atomic::Ordering::Release);
+        self.input_revision.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Compare and write under the same lock used by keyboard, web and socket input.
+    pub fn send_bytes_guarded(&self, bytes: &[u8], expected: Option<u64>) -> Result<u64> {
         // 포커스 리포트(CSI I/O)는 pane 전환마다 앱이 자동으로 쏘는 것이라 사람
         // 입력이 아니다 — 이걸 세면 working pane 으로 포커스를 옮길 때마다 박동
         // 억제가 걸려 바가 1.5초 꺼졌다 켜진다.
         if bytes != b"\x1b[I" && bytes != b"\x1b[O" {
             *self.last_input.lock().unwrap() = Some(Instant::now());
         }
-        {
+        let revision = {
             let mut w = self.writer.lock().unwrap();
             anyhow::ensure!(!self.input_closed(), "pane is closed — reopen it before sending input");
+            anyhow::ensure!(expected.is_none_or(|revision|revision == self.input_revision()), "input changed during tell delivery");
+            if expected.is_none() && bytes != b"\x1b[I" && bytes != b"\x1b[O" {
+                // A separately submitted Enter proves a user draft is gone;
+                // editing, wrapped lines and attachment sequences do not.
+                let submitted = bytes == b"\r" || (bytes.ends_with(b"\r") && !bytes.contains(&0x1b));
+                self.input_draft.store(!submitted,std::sync::atomic::Ordering::Release);
+            }
+            let revision = self.input_revision.fetch_add(1,std::sync::atomic::Ordering::AcqRel) + 1;
             w.write_all(bytes).context("pty write")?;
             // Flush immediately. Without this, a one-shot write that isn't
             // followed by another (a committed Hangul syllable — the next
@@ -1255,7 +1297,8 @@ impl PtySession {
             // "ㄴ" until then. ASCII typing hid this because each keystroke's
             // write flushed the previous one.
             w.flush().context("pty flush")?;
-        }
+            revision
+        };
         if bytes.iter().any(|b| matches!(b, b'\r' | b'\n')) {
             *self.last_submit.lock().unwrap() = Some(Instant::now());
             // Enter 는 「새 전경 프로세스가 곧 뜬다」의 가장 이른 신호이기도 하다 —
@@ -1263,7 +1306,7 @@ impl PtySession {
             // 에이전트로 판정된다(process_table_poke 머리말).
             process_table_poke();
         }
-        Ok(())
+        Ok(revision)
     }
 
     /// 마지막 CR/LF 가 이 PTY 로 들어간 시각 — 없으면 아직 아무 제출도 없었다.
@@ -6407,6 +6450,45 @@ mod external_session_tests {
         assert!(writer.try_recv().is_err());
         sess.send_bytes(b"fresh input").unwrap();
         assert_eq!(writer.recv().unwrap(), b"fresh input");
+    }
+
+    #[test]
+    fn guarded_tell_preserves_intervening_draft_and_withholds_enter() {
+        let (session,_events,writer,_) = ext_session(20,5);
+        let revision = session.input_revision();
+        let revision = session.send_bytes_guarded(b"\x1b[200~hello\x1b[201~",Some(revision)).unwrap();
+        session.send_bytes(b"user draft").unwrap();
+        assert!(session.send_bytes_guarded(b"\r",Some(revision)).is_err());
+        assert_eq!(writer.recv().unwrap(),b"\x1b[200~hello\x1b[201~");
+        assert_eq!(writer.recv().unwrap(),b"user draft");
+        assert!(writer.try_recv().is_err());
+    }
+
+    #[test]
+    fn guarded_tell_closing_between_paste_and_enter_cannot_submit() {
+        let (session,_events,writer,_) = ext_session(20,5);
+        let revision = session.send_bytes_guarded(b"hello",Some(session.input_revision())).unwrap();
+        session.set_input_closed(true,false).unwrap();
+        assert!(session.send_bytes_guarded(b"\r",Some(revision)).is_err());
+        assert_eq!(writer.recv().unwrap(),b"hello");
+        assert!(writer.try_recv().is_err());
+    }
+
+    #[test]
+    fn guarded_tell_reports_disconnect_after_body_instead_of_success() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self,_bytes: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe,"fake PTY disconnected"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let (session,_events,writer,_) = ext_session(20,5);
+        let revision = session.send_bytes_guarded(b"hello",Some(session.input_revision())).unwrap();
+        assert_eq!(writer.recv().unwrap(),b"hello");
+        *session.writer.lock().unwrap() = Box::new(Broken);
+        assert!(session.send_bytes_guarded(b"\r",Some(revision)).is_err());
+        assert_ne!(session.input_revision(),revision);
     }
 
     #[test]

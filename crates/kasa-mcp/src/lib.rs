@@ -15,6 +15,7 @@ use rmcp::{
 use serde::Deserialize;
 
 pub mod character;
+pub mod board_service;
 pub mod browser_route;
 pub mod browser_target;
 pub mod codexhome;
@@ -31,6 +32,7 @@ pub mod relay;
 pub mod remote;
 pub mod remote_restore;
 pub mod surface_keys;
+pub mod tell_service;
 #[cfg(unix)]
 pub mod adopt;
 pub mod machines;

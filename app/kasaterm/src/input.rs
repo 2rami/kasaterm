@@ -1858,6 +1858,7 @@ impl App {
             let _ = self.proxy.send_event(UserEvent::ImagePasteDone(Err(error.into())));
             return;
         }
+        if let Some(pty) = self.pty_for_pane(&surface) { pty.reserve_input_draft(); }
         if let Some(remote) = kasa_mcp::remote::remote_info(&surface) {
             let proxy = self.proxy.clone();
             std::thread::spawn(move || {
@@ -4698,8 +4699,8 @@ pub(crate) fn rows_show_approval_prompt(cells: &[Vec<GridCell>]) -> Option<Appro
             .iter()
             .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
             .collect();
-        if let Some(pos) = line.find('❯') {
-            let rest = line[pos + '❯'.len_utf8()..].trim();
+        if let Some(pos) = line.find(['❯', '›']) {
+            let rest = line[pos + line[pos..].chars().next().unwrap().len_utf8()..].trim();
             if rest.is_empty() {
                 // bare "❯ " = claude idle 입력행. 이미 찾은 메뉴 후보 아래에
                 // 있으면 그 메뉴는 인용된 가짜 → 뒤에서 reject.

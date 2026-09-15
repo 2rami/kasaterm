@@ -22,6 +22,7 @@
 //! shapes.
 
 pub mod backend;
+pub mod board;
 pub mod methods;
 pub mod peers;
 pub mod protocol;
@@ -30,6 +31,7 @@ pub mod sessions;
 pub mod session_storage;
 pub mod transport;
 pub mod transfer;
+pub mod tell;
 
 pub use backend::{Backend, SplitDirection};
 pub use protocol::{ErrorObj, Request, Response};
