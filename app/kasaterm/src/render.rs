@@ -9234,14 +9234,18 @@ impl App {
                     }
                 }
                 let seg_x0 = x;
+                let widget_count = ["ports", "schedules", "pet", "clipboard", "resources", "version", "tunnel"]
+                    .iter().filter(|id| status_prefs.visible(id))
+                    .map(|id| if *id == "tunnel" { 2 } else { 1 }).sum::<usize>().max(1);
+                let compact_tools = (win_w * 0.68 - 24.0) / (widget_count as f32) < 28.0;
                 let account_right = if status_prefs.visible("claude") || status_prefs.visible("codex") {
-                    (win_w * 0.32).max(seg_x0).min(win_w - 12.0)
+                    if compact_tools { seg_x0 + 16.0 } else { (win_w * 0.32).max(seg_x0).min(win_w - 12.0) }
                 } else { seg_x0 };
                 g.push_clip(seg_x0 - 6.0, sy, (account_right - seg_x0 + 6.0).max(0.0), status_h);
                 let mut account_drawn = false;
                 macro_rules! draw_claude_status {
                     () => {{
-                if status_prefs.visible("claude") {
+                if status_prefs.visible("claude") && !compact_tools {
                     account_drawn = true;
                 // 클로드 로고 — 이 숫자가 「클로드 한도」라는 것을 그림이 먼저
                 // 말한다(2026-08-16 「클로드사용량 로고도 넣어주고」). 계정 이름은
@@ -9525,7 +9529,7 @@ impl App {
                 // 등록했거나 로그인한 사람에게는 현재 계정과 상태를 늘 남긴다.
                 macro_rules! draw_codex_status {
                     () => {{
-                if status_prefs.visible("codex") {
+                if status_prefs.visible("codex") && !compact_tools {
                     let codex_id = self.set_codex_account.as_str();
                     let codex_logged_in = crate::settings::codex_logged_in(codex_id);
                     let codex_configured =
@@ -9684,6 +9688,11 @@ impl App {
                     }
                 }
 
+                if compact_tools && (status_prefs.visible("claude") || status_prefs.visible("codex")) {
+                    g.queue_icon("users", seg_x0, sy + (status_h - 12.0) / 2.0, 12.0, theme::text_dim());
+                    account_drawn = true;
+                    x = seg_x0 + 12.0;
+                }
                 // 세그먼트 전체가 손잡이다 — 게이지든 숫자든 이름이든 판 번호든
                 // 누르면 열린다. 자세한 것은 전부 그 안에 있다.
                 x = x.min(account_right - 6.0);
@@ -9726,9 +9735,6 @@ impl App {
 
                 g.pop_clip();
                 // 양끝 그룹이 같은 폭을 서로 예약하지 않도록 각 도구의 공간을 먼저 나눈다.
-                let widget_count = ["ports", "schedules", "pet", "clipboard", "resources", "version", "tunnel"]
-                    .iter().filter(|id| status_prefs.visible(id))
-                    .map(|id| if *id == "tunnel" { 2 } else { 1 }).sum::<usize>().max(1);
                 let tool_left = account_right + 12.0;
                 let slot_w = ((win_w - 12.0 - tool_left) / widget_count as f32).max(1.0);
                 // 오른쪽 끝에서 왼쪽으로 자라는 자들의 공통 기준선. 판 번호가
@@ -9737,6 +9743,7 @@ impl App {
                 // 칩 사이 간격. 12 로는 아이콘·글자가 서로 붙어 어디까지가 한 칩인지
                 // 눈으로 안 갈렸다(2026-09-07 지적 「간격이 너무 없어서」).
                 let chip = 12.0_f32.min(slot_w * 0.2);
+                let tool_icon = 12.0_f32.min((slot_w - chip - 2.0).max(1.0));
                 let mut rx = right_edge;
                 self.status_version_rect = None;
                 self.statusbar.tunnel_rect = None;
@@ -9759,7 +9766,11 @@ impl App {
                     // 반영됩니다」를 사람이 말로 전하던 자리다. 판정은 종료 때 실제로
                     // 설치를 움직이는 것과 **같은 함수**를 쓴다(갈리면 표시는 떴는데
                     // 안 바뀌거나 그 반대가 된다).
-                    if status_prefs.visible("version") && win_w >= 720.0 {
+                    if status_prefs.visible("version") && compact_tools {
+                        rx -= tool_icon + chip;
+                        g.queue_icon("info", rx, sy + (status_h - tool_icon) / 2.0, tool_icon, theme::text_dim());
+                        self.status_version_rect = Some((rx - chip / 2.0, sy, tool_icon + chip, status_h));
+                    } else if status_prefs.visible("version") && win_w >= 720.0 {
                         let mismatched = crate::statusbar_config::mismatched_machines();
                         let waiting = crate::install_pending()
                             || matches!(crate::version::state(), crate::version::Check::Newer(_));
@@ -9826,10 +9837,10 @@ impl App {
                     // 칩으로 합치며(2026-09-08 지시 「크롬다리랑 원격을 통합」) 이 칩이
                     // 말하는 것은 「이 맥 밖의 기기」가 됐다. 폰 아이콘이 뜻을 지고,
                     // 나머지 설명(QR·주소·다리)은 팝오버가 한다.
-                    let label = crate::info::fit_text(g, "모바일", (slot_w - chip - 36.0).max(0.0), fs, false);
-                    let icon = 12.0_f32;
-                    let dot = 4.0_f32;
-                    let gap = 3.0_f32;
+                    let label = if compact_tools { String::new() } else { crate::info::fit_text(g, "모바일", (slot_w - chip - 36.0).max(0.0), fs, false) };
+                    let icon = tool_icon;
+                    let dot = if compact_tools { 0.0 } else { 4.0_f32 };
+                    let gap = if compact_tools { 0.0 } else { 3.0_f32 };
                     let on = self.statusbar.tunnel_on == Some(true);
                     // Browser connectivity now has its own chip and status dot.
                     let tw = g.measure_chrome_text(&label, fs, false);
@@ -9876,7 +9887,7 @@ impl App {
                                 theme::with_alpha(theme::text_dim(), 140)
                             },
                         );
-                        let r = (tx - 8.0, sy, seg_w + 20.0, status_h);
+                        let r = (tx - chip / 2.0, sy, seg_w + chip, status_h);
                         {
                             let (hx, hy) = self.cursor_px;
                             g.hover_pointer |= hx >= r.0
@@ -9898,7 +9909,7 @@ impl App {
                         let machine = if self.statusbar.chrome_machine.is_empty() {
                             crate::info::cached_local_machine_name().unwrap_or("이 기기")
                         } else { &self.statusbar.chrome_machine };
-                        let name = crate::info::fit_text(g, machine, (slot_w - chip - 36.0).max(0.0), fs, false);
+                        let name = if compact_tools { String::new() } else { crate::info::fit_text(g, machine, (slot_w - chip - 36.0).max(0.0), fs, false) };
                         let name_w = g.measure_chrome_text(&name, fs, false);
                         let browser_w = icon + gap + name_w + gap + dot;
                         let bx = rx - browser_w - chip;
@@ -9914,7 +9925,7 @@ impl App {
                                 Some(false) => theme::attention(),
                                 None => theme::text_mute(),
                             });
-                        let r = (bx - 8.0, sy, browser_w + 16.0, status_h);
+                        let r = (bx - chip / 2.0, sy, browser_w + chip, status_h);
                         let (hx, hy) = self.cursor_px;
                         g.hover_pointer |= hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3;
                         self.statusbar.chrome_rect = Some(r);
@@ -9929,7 +9940,7 @@ impl App {
                     self.statusbar.res_rect = None;
                     if let (Some((cpu, rss)), true, true) = (
                         self.statusbar.res,
-                        win_w >= 640.0,
+                        win_w >= 640.0 || compact_tools,
                         status_prefs.visible("resources"),
                     ) {
                         let gb = rss as f32 / (1024.0 * 1024.0 * 1024.0);
@@ -9938,9 +9949,12 @@ impl App {
                         } else {
                             format!("{cpu:.0}% · {:.0}M", gb * 1024.0)
                         };
-                        let label = crate::info::fit_text(g, &label, (slot_w - chip - 34.0).max(0.0), fs, false);
-                        let lw = g.measure_chrome_text(&label, fs, false);
+                        let label = if compact_tools { String::new() } else { crate::info::fit_text(g, &label, (slot_w - chip - 34.0).max(0.0), fs, false) };
+                        let lw = if label.is_empty() { tool_icon } else { g.measure_chrome_text(&label, fs, false) };
                         rx -= lw + chip;
+                        if label.is_empty() {
+                            g.queue_icon("monitor", rx, sy + (status_h - tool_icon) / 2.0, tool_icon, theme::text_dim());
+                        }
                         let open = matches!(
                             self.statusbar.popover,
                             Some((state::StatusbarPopover::Usage, _))
@@ -10029,7 +10043,7 @@ impl App {
                         } else {
                             None
                         };
-                        if let Some((danger, words)) = warn {
+                        if let Some((danger, words)) = warn.filter(|_| !compact_tools) {
                             let col = if danger {
                                 theme::danger()
                             } else {
@@ -10085,7 +10099,6 @@ impl App {
                         .rev()
                         .filter(|id| matches!(id.as_str(), "resources" | "tunnel" | "version"))
                         .filter(|id| status_prefs.visible(id))
-                        .filter(|_| slot_w >= 28.0)
                     {
                         let slot_right = rx;
                         let allocated = slot_w * if id == "tunnel" { 2.0 } else { 1.0 };
@@ -10134,9 +10147,9 @@ impl App {
                             .map(|i| if i.secret { "비밀".to_string() } else { crate::clipboard::preview(&i.text, 8) })
                             .unwrap_or_default();
                         if !head.is_empty() {
-                            let icon = 12.0_f32;
-                            let gap = 4.0_f32;
-                            let head = crate::info::fit_text(g, &head, (slot_w - chip - 24.0).max(0.0), fs, false);
+                            let icon = tool_icon;
+                            let gap = if compact_tools { 0.0 } else { 4.0_f32 };
+                            let head = if compact_tools { String::new() } else { crate::info::fit_text(g, &head, (slot_w - chip - 24.0).max(0.0), fs, false) };
                             let lw = g.measure_chrome_text(&head, fs, false);
                             let seg = icon + gap + lw;
                             rx -= seg + chip;
@@ -10184,9 +10197,9 @@ impl App {
                     if status_prefs.visible("schedules") {
                         let n = self.info.view.schedules.iter().filter(|s| s.enabled).count();
                         let label = n.to_string();
-                        let label = crate::info::fit_text(g, &label, (slot_w - chip - 24.0).max(0.0), fs, false);
-                        let icon = 12.0_f32;
-                        let gap = 4.0_f32;
+                        let label = if compact_tools { String::new() } else { crate::info::fit_text(g, &label, (slot_w - chip - 24.0).max(0.0), fs, false) };
+                        let icon = tool_icon;
+                        let gap = if compact_tools { 0.0 } else { 4.0_f32 };
                         let lw = g.measure_chrome_text(&label, fs, false);
                         let seg = icon + gap + lw;
                         rx -= seg + chip;
@@ -10231,9 +10244,9 @@ impl App {
                             .then(crate::chrome::pet_current_character)
                             .flatten()
                             .unwrap_or_default();
-                        let name = crate::info::fit_text(g, &name, (slot_w - chip - 24.0).max(0.0), fs, false);
-                        let icon = 12.0_f32;
-                        let gap = 4.0_f32;
+                        let name = if compact_tools { String::new() } else { crate::info::fit_text(g, &name, (slot_w - chip - 24.0).max(0.0), fs, false) };
+                        let icon = tool_icon;
+                        let gap = if compact_tools { 0.0 } else { 4.0_f32 };
                         let lw = if name.is_empty() {
                             0.0
                         } else {
@@ -10279,9 +10292,9 @@ impl App {
                     if status_prefs.visible("ports") {
                         let n = self.info.view.ports.len();
                         let label = n.to_string();
-                        let label = crate::info::fit_text(g, &label, (slot_w - chip - 24.0).max(0.0), fs, false);
-                        let icon = 12.0_f32;
-                        let gap = 4.0_f32;
+                        let label = if compact_tools { String::new() } else { crate::info::fit_text(g, &label, (slot_w - chip - 24.0).max(0.0), fs, false) };
+                        let icon = tool_icon;
+                        let gap = if compact_tools { 0.0 } else { 4.0_f32 };
                         let lw = g.measure_chrome_text(&label, fs, false);
                         let seg = icon + gap + lw;
                         rx -= seg + chip;
@@ -10326,7 +10339,6 @@ impl App {
                             matches!(id.as_str(), "ports" | "schedules" | "pet" | "clipboard")
                         })
                         .filter(|id| status_prefs.visible(id))
-                        .filter(|_| slot_w >= 28.0)
                     {
                         let slot_right = rx;
                         g.push_clip(slot_right - slot_w, sy, slot_w, status_h);

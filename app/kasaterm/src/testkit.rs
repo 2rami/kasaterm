@@ -3072,6 +3072,9 @@ impl App {
                     let overlaps = [self.status_account_rect, self.statusbar.res_rect].into_iter().flatten()
                         .any(|r| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3);
                     eprintln!("[clipboard-probe] clipboard_hit_exclusive={}", !overlaps);
+                    let tools_visible = [self.statusbar.clip_rect, self.statusbar.port_rect, self.statusbar.chrome_rect, self.statusbar.tunnel_rect]
+                        .into_iter().all(|r| r.is_some_and(|r| r.2 > 0.0 && r.3 > 0.0));
+                    eprintln!("[clipboard-probe] toolbar_targets_visible={tools_visible}");
                 }
                 self.statusbar.clip_rect
             }
