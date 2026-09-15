@@ -165,27 +165,6 @@ const DARK: Palette = Palette {
     ansi: ANSI_TOMORROW,
 };
 
-const VIEWER_NEUTRAL: Palette = Palette {
-    bg: [45, 47, 52, 255],
-    fg: [242, 243, 245, 255],
-    surface: [38, 40, 44, 255],
-    surface_hover: [53, 55, 60, 255],
-    surface_active: [62, 65, 71, 255],
-    border: [76, 79, 85, 180],
-    text: [232, 234, 237, 255],
-    text_dim: [174, 177, 183, 255],
-    text_mute: [128, 132, 139, 255],
-    success: DARK.success,
-    danger: DARK.danger,
-    syn_keyword: DARK.syn_keyword,
-    syn_string: DARK.syn_string,
-    syn_number: DARK.syn_number,
-    syn_comment: DARK.syn_comment,
-    syn_function: DARK.syn_function,
-    syn_type: DARK.syn_type,
-    ansi: ANSI_TOMORROW,
-};
-
 const LIGHT: Palette = Palette {
     bg: [247, 248, 250, 255],
     fg: [38, 42, 50, 255],
@@ -1018,12 +997,14 @@ pub fn apply_from_settings_read_only() {
 
 pub fn apply_viewer_palette_read_only() {
     apply_from_settings_read_only();
-    let was_previewing = PREVIEWING.swap(true, Ordering::Relaxed);
-    store_palette(&VIEWER_NEUTRAL);
-    store_accent("orange");
-    set_shape("rounded");
     VIEWER_CHROME.store(true, Ordering::Relaxed);
+}
+
+pub(crate) fn poll_system_theme_read_only() -> bool {
+    let was_previewing = PREVIEWING.swap(true, Ordering::Relaxed);
+    let changed = poll_system_theme();
     PREVIEWING.store(was_previewing, Ordering::Relaxed);
+    changed
 }
 
 pub fn viewer_chrome() -> bool {
@@ -1876,6 +1857,24 @@ fn css_hex(c: [u8; 4]) -> String {
     }
 }
 
+pub(crate) fn document_tokens_json() -> serde_json::Value {
+    serde_json::json!({
+        "mode": if current_is_light() { "light" } else { "dark" },
+        "background": css_hex(bg()),
+        "foreground": css_hex(fg()),
+        "muted": css_hex(text_dim()),
+        "border": css_hex(border()),
+        "surface": css_hex(surface()),
+        "surfaceHover": css_hex(surface_hover()),
+        "surfaceActive": css_hex(surface_active()),
+        "accent": css_hex(accent()),
+        "selection": css_hex(crate::cells::ITERM_SELECTION),
+        "checkboxForeground": css_hex(foreground_on(accent())),
+        "danger": css_hex(danger()),
+        "success": css_hex(success()),
+    })
+}
+
 /// 지금 화면에 쓰이는 디자인 토큰 전부 — 웹뷰 UI 가 `--kt-*` CSS 변수로 심어
 /// 네이티브와 같은 색·같은 실루엣으로 그린다(`GET /design-tokens`).
 ///
@@ -1973,6 +1972,21 @@ pub fn tokens_json() -> serde_json::Value {
 #[cfg(test)]
 mod roster_tests {
     use super::*;
+
+    #[test]
+    fn document_colors_use_live_terminal_tokens() {
+        let tokens = document_tokens_json();
+        for (key, color) in [
+            ("background", bg()), ("foreground", fg()), ("accent", accent()),
+            ("muted", text_dim()), ("border", border()), ("surface", surface()),
+            ("surfaceHover", surface_hover()), ("surfaceActive", surface_active()),
+            ("selection", crate::cells::ITERM_SELECTION),
+            ("checkboxForeground", foreground_on(accent())),
+        ] {
+            assert_eq!(tokens[key].as_str(), Some(css_hex(color).as_str()), "{key}");
+        }
+        assert_eq!(tokens["mode"], if current_is_light() { "light" } else { "dark" });
+    }
 
     #[test]
     fn 보조_본문은_최소_대비를_넘긴다() {

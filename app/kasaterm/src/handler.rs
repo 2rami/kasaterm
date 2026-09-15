@@ -7251,6 +7251,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.poll_document_theme();
         if self.viewer_only {
             self.flush_aux_opens(event_loop);
             while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
@@ -7272,7 +7273,7 @@ impl ApplicationHandler<UserEvent> for App {
                     Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS),
                 ));
             } else {
-                event_loop.set_control_flow(ControlFlow::Wait);
+                event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + std::time::Duration::from_millis(700)));
             }
             return;
         }

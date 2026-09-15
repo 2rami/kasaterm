@@ -171,6 +171,9 @@ pub(crate) struct AuxWindows {
     viewer_only: bool,
     viewer_quit_requested: bool,
     app_close_requested: bool,
+    document_theme: Option<serde_json::Value>,
+    settings_stamp: Option<(std::time::SystemTime, u64)>,
+    last_theme_poll: Instant,
     viewer_message: Option<String>,
     focus_on_open: std::collections::HashSet<String>,
 }
@@ -198,6 +201,9 @@ impl AuxWindows {
             viewer_only,
             viewer_quit_requested: false,
             app_close_requested: false,
+            document_theme: None,
+            settings_stamp: None,
+            last_theme_poll: Instant::now() - std::time::Duration::from_secs(1),
             viewer_message: None,
             focus_on_open: std::collections::HashSet::new(),
         }
@@ -1641,6 +1647,31 @@ fn disallow_tabbing(window: &Window) {
 }
 
 impl App {
+    pub(crate) fn poll_document_theme(&mut self) {
+        if self.aux.windows.is_empty() { return; }
+        if self.viewer_only && self.aux.last_theme_poll.elapsed() >= std::time::Duration::from_millis(650) {
+            self.aux.last_theme_poll = Instant::now();
+            let stamp = crate::socket::settings_file_path().and_then(|path| std::fs::metadata(path).ok())
+                .and_then(|metadata| metadata.modified().ok().map(|modified| (modified, metadata.len())));
+            if stamp.is_some() && self.aux.settings_stamp != stamp {
+                crate::theme::apply_viewer_palette_read_only();
+                self.aux.settings_stamp = stamp;
+            }
+            crate::theme::poll_system_theme_read_only();
+        }
+        let palette = crate::theme::document_tokens_json();
+        if self.aux.document_theme.as_ref() == Some(&palette) { return; }
+        self.aux.document_theme = Some(palette.clone());
+        for aux in &mut self.aux.windows {
+            if let Some(rich) = &aux.rich {
+                if rich.ready { rich.call("setTheme", palette.clone()); }
+            }
+            aux.window.set_theme(Some(crate::theme::window_theme()));
+            aux.dirty = true;
+            aux.window.request_redraw();
+        }
+    }
+
     fn aux_rich_command(&self, index: usize, name: &str, payload: serde_json::Value) -> bool {
         let Some(aux) = self.aux.windows.get(index) else { return false };
         if aux.editor.raw_mode || aux.welcome { return false; }

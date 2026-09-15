@@ -151,11 +151,7 @@ impl RichDocHost {
 
     pub fn init(&mut self, text: String) {
         self.ready = true;
-        let theme = if crate::theme::bg()[0] > 128 {
-            "light"
-        } else {
-            "dark"
-        };
+        let theme = crate::theme::document_tokens_json();
         self.call("init", serde_json::json!({"token":self.token,"markdown":text,"revision":self.revision,"theme":theme,"editable":true}));
     }
 
