@@ -185,7 +185,7 @@ window.kasatermEditor = {
         handleClick(_view, _pos, event) { const anchor = (event.target as HTMLElement).closest('a'); if (anchor && (event.metaKey || event.ctrlKey)) { const href = anchor.getAttribute('href') ?? ''; if (/^(https?:|mailto:)/i.test(href)) send('open-link', false, { href }); event.preventDefault(); return true; } return false; },
       }, onUpdate: () => { report(); updateMenus(); }, onSelectionUpdate: updateMenus,
     });
-    editor.view.dom.addEventListener('compositionstart', () => { composing = true; slash.hidden = bubble.hidden = true; });
+    editor.view.dom.addEventListener('compositionstart', () => { composing = true; slash.hidden = bubble.hidden = true; send('change'); });
     editor.view.dom.addEventListener('compositionend', () => { composing = false; setTimeout(() => { report(); const queue = pending; pending = []; queue.forEach(item => commit(item.kind, item.extra)); updateMenus(); }, 0); });
   }, setContent, command,
   setSaveState(data) { live.textContent = data.state === 'error' ? (data.message || '저장하지 못했어요. 다시 저장해주세요.') : ''; live.classList.toggle('visible', data.state === 'error'); },
@@ -201,5 +201,5 @@ document.addEventListener('mouseover', e => {
   if (copyTarget) { const rect = copyTarget.getBoundingClientRect(); copy.textContent = '복사'; position(copy, rect.right - 62, rect.top + 8); }
 });
 window.addEventListener('resize', () => { panel.hidden = true; updateMenus(); });
-window.addEventListener('scroll', () => { bubble.hidden = true; slash.hidden = true; copy.hidden = true; }, { passive: true });
+window.addEventListener('scroll', () => { copy.hidden = true; updateMenus(); }, { passive: true });
 send('ready');
