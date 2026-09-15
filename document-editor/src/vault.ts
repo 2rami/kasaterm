@@ -1,5 +1,5 @@
 export type VaultEntry = { id: string; name: string; kind: 'folder' | 'markdown' | 'image' | 'pdf' | 'file' };
-export type VaultState = { id?: string; name?: string; available: boolean; error?: string; activeId?: string; hasDocument: boolean; entries?: VaultEntry[]; nextCursor?: number; recent?: { id: string; name: string }[] };
+export type VaultState = { id?: string; name?: string; available: boolean; loading?: boolean; error?: string; activeId?: string; hasDocument: boolean; entries?: VaultEntry[]; nextCursor?: number; recent?: { id: string; name: string }[] };
 export type VaultChildren = { parentId: string; entries: VaultEntry[]; nextCursor?: number; error?: string };
 export type VaultSearch = { query: string; requestId: string; entries: VaultEntry[]; nextCursor?: number; error?: string };
 type Row = { entry?: VaultEntry; depth: number; parentId?: string; more?: number; loading?: boolean; error?: string };
@@ -99,7 +99,7 @@ export function mountVault(documentRoot: HTMLElement, send: Sender) {
     const query = search.value.trim();
     rows = query ? (searchResult?.entries ?? []).map(entry => ({ entry, depth: 0 })) : visibleRows(state.entries ?? [], children, expanded, loading, state.nextCursor);
     if (query && searchResult?.nextCursor != null) rows.push({ depth: 0, more: searchResult.nextCursor });
-    status.textContent = query ? (!searchResult ? '파일을 찾고 있어요…' : searchResult.error || (!rows.length ? '일치하는 파일이 없어요' : '')) : state.error || (!rows.length ? '이 볼트는 비어 있어요' : '');
+    status.textContent = query ? (!searchResult ? '파일을 찾고 있어요…' : searchResult.error || (!rows.length ? '일치하는 파일이 없어요' : '')) : state.error || (state.loading ? '폴더를 읽고 있어요…' : !rows.length ? '이 볼트는 비어 있어요' : '');
     renderRows();
   }
   function renderRows() {
