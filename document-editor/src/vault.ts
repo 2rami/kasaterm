@@ -16,12 +16,12 @@ export function visibleRows(roots: VaultEntry[], children: Map<string, Listing>,
       if (child) {
         visit(child.entries, depth + 1);
         if (child.error) rows.push({ depth: depth + 1, parentId: entry.id, error: child.error });
-        if (child.nextCursor !== undefined) rows.push({ depth: depth + 1, parentId: entry.id, more: child.nextCursor });
+        if (child.nextCursor != null) rows.push({ depth: depth + 1, parentId: entry.id, more: child.nextCursor });
       } else if (loading.has(entry.id)) rows.push({ depth: depth + 1, loading: true });
     }
   };
   visit(roots, 0);
-  if (nextCursor !== undefined) rows.push({ depth: 0, parentId: '', more: nextCursor });
+  if (nextCursor != null) rows.push({ depth: 0, parentId: '', more: nextCursor });
   return rows;
 }
 
@@ -98,7 +98,7 @@ export function mountVault(documentRoot: HTMLElement, send: Sender) {
     if (!state) return;
     const query = search.value.trim();
     rows = query ? (searchResult?.entries ?? []).map(entry => ({ entry, depth: 0 })) : visibleRows(state.entries ?? [], children, expanded, loading, state.nextCursor);
-    if (query && searchResult?.nextCursor !== undefined) rows.push({ depth: 0, more: searchResult.nextCursor });
+    if (query && searchResult?.nextCursor != null) rows.push({ depth: 0, more: searchResult.nextCursor });
     status.textContent = query ? (!searchResult ? '파일을 찾고 있어요…' : searchResult.error || (!rows.length ? '일치하는 파일이 없어요' : '')) : state.error || (!rows.length ? '이 볼트는 비어 있어요' : '');
     renderRows();
   }
@@ -138,13 +138,13 @@ export function mountVault(documentRoot: HTMLElement, send: Sender) {
     setVaultChildren(data: VaultChildren) {
       loading.delete(data.parentId);
       if (!state) return;
-      if (data.parentId === '') state = { ...state, entries: [...(state.entries ?? []), ...data.entries], nextCursor: data.nextCursor, error: data.error };
-      else { const previous = children.get(data.parentId); children.set(data.parentId, { entries: [...(previous?.entries ?? []), ...data.entries], nextCursor: data.nextCursor, error: data.error }); }
+      if (data.parentId === '') state = { ...state, entries: data.entries, nextCursor: data.nextCursor, error: data.error };
+      else children.set(data.parentId, { entries: data.entries, nextCursor: data.nextCursor, error: data.error });
       updateRows();
     },
     setVaultSearch(data: VaultSearch) {
       if (data.requestId !== String(queryId) || data.query !== search.value.trim()) return;
-      searchResult = { ...data, entries: [...(searchResult?.entries ?? []), ...data.entries] }; updateRows();
+      searchResult = data; updateRows();
     },
   };
 }

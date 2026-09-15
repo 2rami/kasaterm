@@ -19,3 +19,7 @@ test('lazy folders expose loading and paginated children without losing relative
   assert.deepEqual(rows[2],{depth:1,parentId:'한글',more:256});
   assert.deepEqual(rows[3],{depth:0,parentId:'',more:512});
 });
+test('Rust null cursors terminate a listing instead of rendering an endless more row', () => {
+  const rows = visibleRows([],new Map(),new Set(),new Set(),null as unknown as undefined);
+  assert.equal(rows.length,0);
+});
