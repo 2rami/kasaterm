@@ -7785,6 +7785,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autopillclick(event_loop);
         self.run_pending_autoinfodbl(event_loop);
         self.run_pending_autosettings(event_loop);
+        self.run_character_pick_probe(event_loop);
         self.run_pending_autoshellmenu();
         self.run_pending_automdtask(event_loop);
         self.run_pending_autoftmenu();

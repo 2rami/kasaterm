@@ -67,7 +67,10 @@ fn last_seen() -> &'static Mutex<String> {
 }
 
 pub(crate) fn isolated_probe() -> bool {
-    cfg!(debug_assertions) && std::env::var("KASATERM_CLIPBOARD_PROBE").as_deref() == Ok("1")
+    cfg!(debug_assertions)
+        && (std::env::var("KASATERM_CLIPBOARD_PROBE").as_deref() == Ok("1")
+            || (crate::verification_run()
+                && std::env::var("KASATERM_CHARACTER_PICK_PROBE").as_deref() == Ok("1")))
 }
 
 pub(crate) fn probe_copied_text() -> &'static Mutex<String> {

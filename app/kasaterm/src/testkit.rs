@@ -3049,7 +3049,8 @@ impl App {
     pub(crate) fn run_clipboard_probe(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::{OnceLock, atomic::{AtomicBool, AtomicUsize, Ordering}};
         use winit::event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
-        if !crate::clipboard::isolated_probe() { return; }
+        if !crate::clipboard::isolated_probe()
+            || std::env::var("KASATERM_CLIPBOARD_PROBE").as_deref() != Ok("1") { return; }
         static START: OnceLock<Instant> = OnceLock::new();
         static SEEDED: AtomicBool = AtomicBool::new(false);
         static STEP: AtomicUsize = AtomicUsize::new(0);
@@ -3348,6 +3349,75 @@ impl App {
         }
     }
     /// Headless inline-settings repro: open settings after
+    // 실제 카드 클릭과 저장을 격리 환경에서만 확인해 사용자 명단 변경을 막는다.
+    pub(crate) fn run_character_pick_probe(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::{OnceLock, Mutex};
+        use winit::event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
+        if !cfg!(debug_assertions) || !crate::verification_run()
+            || std::env::var("KASATERM_CHARACTER_PICK_PROBE").as_deref() != Ok("1") { return; }
+        static STATE: OnceLock<Mutex<(Instant, Instant, usize)>> = OnceLock::new();
+        let mut state = STATE.get_or_init(|| Mutex::new((Instant::now(), Instant::now(), 0))).lock().unwrap();
+        if state.2 == 3 { return; }
+        let temporary = |key| {
+            std::env::var_os(key).and_then(|p| std::fs::canonicalize(p).ok()).is_some_and(|p| {
+                [std::path::PathBuf::from("/private/tmp"), std::path::PathBuf::from("/tmp"), std::env::temp_dir()]
+                    .iter().filter_map(|root| std::fs::canonicalize(root).ok()).any(|root| p.starts_with(root))
+            })
+        };
+        if !temporary("KASATERM_SETTINGS_FILE") || !temporary("KASATERM_THEMES_DIR")
+            || std::env::var_os("KASATERM_CLIPBOARD_PROBE").is_some() {
+            eprintln!("[character-pick-probe] FAILED: temporary settings/themes and exclusive probe required");
+            state.2 = 3;
+            return;
+        }
+        if state.0.elapsed().as_secs() >= 35 {
+            eprintln!("[character-pick-probe] FAILED: timeout step={} scroll={} hits={}", state.2, self.settings_scene.scroll(), self.settings_scene.hits().len());
+            state.2 = 3;
+            return;
+        }
+        if state.1.elapsed().as_millis() < 700 { return; }
+        state.1 = Instant::now();
+        if !self.settings_room_active() || self.settings_scene.category() != SettingsCat::Students { return; }
+        if state.2 == 2 {
+            let stored = std::env::var_os("KASATERM_SETTINGS_FILE")
+                .and_then(|p| std::fs::read(p).ok())
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+            let valid = stored.as_ref().is_some_and(|v| ["probe-a", "probe-b"].iter().all(|key|
+                v["character_picks"][*key].as_array().is_some_and(|names| names.iter().any(|n| n.as_str() == Some(*key)))));
+            eprintln!("[character-pick-probe] {}: two theme cards clicked; disk picks checked", if valid { "PASS" } else { "FAILED" });
+            state.2 = 3;
+            return;
+        }
+        let Some(window) = self.window.as_ref() else { return; };
+        let wid = window.id();
+        let height = window.inner_size().height as f32 / window.scale_factor() as f32;
+        let key = ["probe-a", "probe-b"][state.2];
+        let hit = self.settings_scene.hits().iter().find(|hit| matches!(&hit.target,
+            crate::native_settings::Target::Setting(SettingsAction::CharacterPick(theme, name, true))
+                if theme == key && name == key)).map(|hit| hit.rect);
+        let visible = hit.filter(|r| r.1 >= TITLE_HEIGHT + 78.0 && r.1 + r.3 < height - 100.0);
+        if let Some(r) = visible {
+            self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+            for pressed in [ElementState::Pressed, ElementState::Released] {
+                self.window_event(event_loop, wid, WindowEvent::MouseInput {
+                    device_id: DeviceId::dummy(), state: pressed, button: MouseButton::Left,
+                });
+            }
+            eprintln!("[character-pick-probe] clicked {key} scroll={}", self.settings_scene.scroll());
+            state.2 += 1;
+        } else {
+            self.cursor_px = (self.effective_sidebar_w() + 300.0, height / 2.0);
+            let delta = if hit.is_some_and(|r| r.1 < TITLE_HEIGHT + 78.0) { 240.0 } else { -240.0 };
+            self.window_event(event_loop, wid, WindowEvent::MouseWheel {
+                device_id: DeviceId::dummy(), delta: MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, delta)), phase: TouchPhase::Moved,
+            });
+            eprintln!("[character-pick-probe] seeking {key} scroll={}", self.settings_scene.scroll());
+        }
+        self.chrome_dirty = true;
+        self.render_frame();
+        if let Some(window) = self.window.as_ref() { window.request_redraw(); }
+    }
+
     /// `KASATERM_AUTOSETTINGS_SCROLL` 이 예약한 스크롤을 한계가 잡힌 뒤 한 번 적용한다.
     /// 설정 틱이 부른다.
     pub(crate) fn pump_autosettings_scroll(&mut self) {
