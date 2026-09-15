@@ -4,6 +4,7 @@ import { DocumentSource, extensions } from './document';
 import { applyTheme } from './theme';
 import { mountVault, type VaultState, type VaultChildren, type VaultSearch } from './vault';
 import { floatingPlacement, type Rectangle } from './floating';
+import { createSizedCaret } from './caret';
 import './editor.css';
 import './vault.css';
 
@@ -49,6 +50,7 @@ const copy = button('복사', async () => {
 copy.className = 'code-copy'; copy.hidden = true;
 document.body.append(root, live, slash, bubble, panel, copy, addBlock);
 const vault = mountVault(root, (kind, payload) => send(kind, false, payload));
+const sizedCaret = createSizedCaret();
 function send(kind: string, includeContent = false, extra = {}) {
   if (!token) return;
   window.ipc?.postMessage(JSON.stringify({ kind, token, revision, ...(includeContent ? { markdown: current() } : {}), ...extra }));
@@ -121,6 +123,7 @@ function runSlash(index: number) {
 }
 function showBlockMenu(query = '') {
   if (!editor) return;
+  const focusMenu = blockMenu && (bubble.contains(document.activeElement) || slash.contains(document.activeElement) || document.activeElement === addBlock);
   slashItems = actions().filter(a => (a.label + a.hint).includes(query));
   slashIndex = Math.min(slashIndex, Math.max(0, slashItems.length - 1));
   slash.replaceChildren();
@@ -131,10 +134,12 @@ function showBlockMenu(query = '') {
   if (!slashItems.length) { const empty = document.createElement('p'); empty.textContent = '일치하는 블록이 없어요'; slash.append(empty); }
   slash.setAttribute('aria-activedescendant', `block-option-${slashIndex}`);
   const rect = editor.view.coordsAtPos(editor.state.selection.from);
-  floatNear(slash, { ...rect, right: rect.left + Math.min(272, contentBounds().right - rect.left) }, 'below');
+  floatNear(slash, { left: rect.left, top: rect.top, bottom: rect.bottom, right: rect.left + Math.min(272, contentBounds().right - rect.left) }, 'below');
   bubble.hidden = true;
+  if (focusMenu) slash.querySelector<HTMLButtonElement>('[aria-selected=true]')?.focus({ preventScroll: true });
 }
 function updateMenus() {
+  sizedCaret.sync(editor, composing);
   if (!editor || composing || !editor.isEditable || root.hidden) { bubble.hidden = slash.hidden = addBlock.hidden = true; return; }
   const { from, to, $from, empty } = editor.state.selection;
   const inside = editor.isFocused || bubble.contains(document.activeElement) || slash.contains(document.activeElement);
@@ -228,6 +233,7 @@ function setContent(data: Content) {
 window.kasatermEditor = {
   init(data) {
     const ownGeneration = ++generation;
+    sizedCaret.hide();
     clearTimeout(compositionTimer); pending = []; composing = false; slashRange = undefined; blockMenu = false; dismissedSelection = dismissedSlash = '';
     slash.hidden = bubble.hidden = panel.hidden = copy.hidden = addBlock.hidden = true; live.textContent = ''; live.classList.remove('visible');
     token = data.token; window.__KASATERM_DOC_TOKEN__ = token; revision = data.revision; lastMarkdown = data.markdown; applyTheme(data.theme); editor?.destroy(); source = new DocumentSource();
@@ -237,13 +243,15 @@ window.kasatermEditor = {
           if (ownGeneration !== generation) return false;
           if ((event.metaKey || event.ctrlKey) && ['s', 'w', 'f', 'k'].includes(event.key.toLowerCase())) { event.preventDefault(); const key = event.key.toLowerCase(); if (key === 's') commit('save'); else if (key === 'w') commit('close'); else if (key === 'f') find(); else linkPanel(); return true; }
           if (event.isComposing || composing) return false;
+          if (event.key === 'Tab' && !event.shiftKey && !bubble.hidden) { event.preventDefault(); bubble.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true }); return true; }
           if (!slash.hidden) { if (event.key === 'Escape') { dismissTools(); return true; } if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); slashIndex = (slashIndex + (event.key === 'ArrowDown' ? 1 : -1) + slashItems.length) % Math.max(1, slashItems.length); updateMenus(); slash.querySelector('[aria-selected=true]')?.scrollIntoView({ block: 'nearest' }); return true; } if (event.key === 'Enter') { event.preventDefault(); runSlash(slashIndex); return true; } }
           return false;
         },
         handleClick(_view, _pos, event) { if (ownGeneration !== generation) return false; const anchor = (event.target as HTMLElement).closest('a'); if (anchor && (event.metaKey || event.ctrlKey)) { const href = anchor.getAttribute('href') ?? ''; if (/^(https?:|mailto:)/i.test(href)) send('open-link', false, { href }); event.preventDefault(); return true; } return false; },
       }, onUpdate: () => { if (ownGeneration !== generation) return; report(); updateMenus(); }, onSelectionUpdate: () => { if (ownGeneration === generation) updateMenus(); }, onFocus: () => { if (ownGeneration === generation) updateMenus(); },
     });
-    editor.view.dom.addEventListener('compositionstart', () => { if (ownGeneration !== generation) return; composing = true; blockMenu = false; slash.hidden = bubble.hidden = addBlock.hidden = true; send('change'); });
+    editor.view.dom.addEventListener('blur', () => { if (ownGeneration === generation) sizedCaret.hide(); });
+    editor.view.dom.addEventListener('compositionstart', () => { if (ownGeneration !== generation) return; composing = true; sizedCaret.hide(); blockMenu = false; slash.hidden = bubble.hidden = addBlock.hidden = true; send('change'); });
     editor.view.dom.addEventListener('compositionend', () => { if (ownGeneration !== generation) return; composing = false; compositionTimer = setTimeout(() => { if (ownGeneration !== generation) return; report(); const queue = pending; pending = []; queue.forEach(item => commit(item.kind, item.extra)); updateMenus(); }, 0); });
   }, setContent, command, setTheme: applyTheme, ...vault,
   setSaveState(data) { live.textContent = data.state === 'error' ? (data.message || '저장하지 못했어요. 다시 저장해주세요.') : ''; live.classList.toggle('visible', data.state === 'error'); },
