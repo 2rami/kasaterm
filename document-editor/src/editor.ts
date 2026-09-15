@@ -1,12 +1,13 @@
 import { Editor } from '@tiptap/core';
 import Placeholder from '@tiptap/extension-placeholder';
 import { DocumentSource, extensions } from './document';
+import { applyTheme } from './theme';
 import './editor.css';
 
 declare global { interface Window {
   __KASATERM_DOC_TOKEN__?: string;
   ipc?: { postMessage(message: string): void };
-  kasatermEditor: { init(data: Init): void; setContent(data: Content): void; command(name: string, payload?: any): void; setSaveState(data: { state: string; message?: string }): void };
+  kasatermEditor: { init(data: Init): void; setContent(data: Content): void; setTheme(theme: unknown): void; command(name: string, payload?: any): void; setSaveState(data: { state: string; message?: string }): void };
 } }
 type Content = { markdown: string; revision: number };
 type Init = Content & { token: string; theme?: any; editable?: boolean };
@@ -160,12 +161,6 @@ function command(name: string, payload?: any) {
   }
   document.documentElement.style.setProperty('--document-scale', String(zoom));
 }
-function theme(value: any) {
-  const dark = value === 'dark' || value?.dark === true || value?.mode === 'dark'; document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-  if (value && typeof value === 'object') for (const [key, css] of Object.entries({ background: '--paper', foreground: '--ink', accent: '--accent' })) {
-    const color = value[key]; if (typeof color === 'string' && CSS.supports('color', color)) document.documentElement.style.setProperty(css, color);
-  }
-}
 function setContent(data: Content) {
   if (composing) return;
   muted = true; source = new DocumentSource(); lastMarkdown = data.markdown; revision = data.revision;
@@ -173,7 +168,7 @@ function setContent(data: Content) {
 }
 window.kasatermEditor = {
   init(data) {
-    token = data.token; revision = data.revision; lastMarkdown = data.markdown; theme(data.theme); editor?.destroy(); source = new DocumentSource();
+    token = data.token; revision = data.revision; lastMarkdown = data.markdown; applyTheme(data.theme); editor?.destroy(); source = new DocumentSource();
     editor = new Editor({ element: mount, extensions: [...extensions(), Placeholder.configure({ placeholder: '내용을 입력하거나 / 로 블록을 추가하세요' })], content: source.load(data.markdown), editable: data.editable !== false,
       editorProps: { attributes: { class: 'document-content', role: 'textbox', 'aria-label': '마크다운 문서 본문', 'aria-multiline': 'true', spellcheck: 'false' },
         handleKeyDown(_view, event) {
@@ -187,7 +182,7 @@ window.kasatermEditor = {
     });
     editor.view.dom.addEventListener('compositionstart', () => { composing = true; slash.hidden = bubble.hidden = true; send('change'); });
     editor.view.dom.addEventListener('compositionend', () => { composing = false; setTimeout(() => { report(); const queue = pending; pending = []; queue.forEach(item => commit(item.kind, item.extra)); updateMenus(); }, 0); });
-  }, setContent, command,
+  }, setContent, command, setTheme: applyTheme,
   setSaveState(data) { live.textContent = data.state === 'error' ? (data.message || '저장하지 못했어요. 다시 저장해주세요.') : ''; live.classList.toggle('visible', data.state === 'error'); },
 };
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { panel.hidden = true; bubble.hidden = true; slash.hidden = true; } });
