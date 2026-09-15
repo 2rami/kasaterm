@@ -224,6 +224,7 @@ function command(name: string, payload?: any) {
     case 'zoom-reset': zoom = 1; break;
   }
   document.documentElement.style.setProperty('--document-scale', String(zoom));
+  if (name.startsWith('zoom')) updateMenus();
 }
 function setContent(data: Content) {
   if (composing) return;
