@@ -7729,7 +7729,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoinfodbl(event_loop);
         self.run_pending_autosettings(event_loop);
         self.run_pending_autoshellmenu();
-        self.run_pending_automdtask();
+        self.run_pending_automdtask(event_loop);
         self.run_pending_autoftmenu();
         self.run_pending_automdselect();
         self.run_pending_automdscript(event_loop);

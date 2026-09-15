@@ -4469,14 +4469,15 @@ impl App {
             w.request_redraw();
         }
     }
-    /// Headless 마크다운 할 일 체크박스 repro: `KASATERM_AUTOMDTASK=<md 경로>` 를
-    /// `KASATERM_AUTOMDTASK_MS` 뒤에 뷰어로 열고, 1.5초 뒤 첫 체크박스 한가운데를
-    /// 손으로 누른 것과 같은 순서(자리→pane→포커스→토글)로 밟으며 관문마다 값을
-    /// 찍는다. 「눌러도 안 된다」(2026-09-08)는 어느 관문이 삼켰는지가 화면에 안
-    /// 보여서, 관문별 값을 남겨야 원인이 갈린다. autoshellmenu 처럼 함수-로컬 static.
-    pub(crate) fn run_pending_automdtask(&mut self) {
+    /// Detached documents have their own renderer and input route; probing the
+    /// main window's task rectangles cannot reproduce a detached checkbox click.
+    pub(crate) fn run_pending_automdtask(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::atomic::{AtomicU8, Ordering};
         use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        if !crate::verification_run() {
+            return;
+        }
         static DUE: OnceLock<Option<(Instant, std::path::PathBuf)>> = OnceLock::new();
         static STEP: AtomicU8 = AtomicU8::new(0);
         static CLICK_AT: OnceLock<Instant> = OnceLock::new();
@@ -4504,41 +4505,44 @@ impl App {
             }
             1 if CLICK_AT.get().is_some_and(|t| Instant::now() >= *t) => {
                 STEP.store(2, Ordering::Relaxed);
-                let rects: Vec<(f32, f32, f32, f32, usize)> =
-                    self.gpu.as_ref().map(|g| g.md_task_rects.clone()).unwrap_or_default();
-                let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
-                eprintln!(
-                    "[automdtask] rects={} body={:?} active={active:?}",
-                    rects.len(),
-                    self.md_body_rects.keys().collect::<Vec<_>>()
-                );
-                let Some(r) = rects.first().copied() else {
-                    eprintln!("[automdtask] FAIL 체크박스 영역 없음");
+                let Some(index) = self.aux.windows.iter().position(|aux| {
+                    std::path::Path::new(&aux.editor.doc.path) == path.as_path()
+                }) else {
+                    eprintln!("[automdtask] FAIL detached document missing");
                     return;
                 };
-                let (cx, cy) = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
-                self.cursor_px = (cx, cy);
-                let hit = self.px_to_pane_cell(cx, cy);
-                eprintln!("[automdtask] click=({cx:.1},{cy:.1}) hit={hit:?}");
-                let Some((pid, _, _)) = hit else {
-                    eprintln!("[automdtask] FAIL pane 없음");
+                let Some((id, position)) = self.aux_probe_task_center(index) else {
+                    eprintln!("[automdtask] FAIL detached checkbox hit area missing");
                     return;
                 };
-                let switched = active.as_deref() != Some(pid.as_str());
-                let focused = self.focus_pane(&pid);
-                eprintln!(
-                    "[automdtask] switched={switched} focus={focused} body_has={}",
-                    self.md_body_rects.contains_key(&pid)
+                let before = self.aux.windows[index].editor.text_for_save();
+                self.aux_window_event(id, WindowEvent::Focused(true), event_loop);
+                self.aux_window_event(
+                    id,
+                    WindowEvent::CursorMoved { device_id: DeviceId::dummy(), position },
+                    event_loop,
                 );
-                let toggled = self.md_task_click(&pid, cx, cy);
-                let first = std::fs::read_to_string(&path).ok().and_then(|t| {
-                    t.lines()
-                        .find(|l| l.trim_start().starts_with("- ["))
-                        .map(|l| l.chars().take(40).collect::<String>())
-                });
+                for state in [ElementState::Pressed, ElementState::Released] {
+                    self.aux_window_event(
+                        id,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(), state, button: MouseButton::Left,
+                        },
+                        event_loop,
+                    );
+                }
+                let after = self.aux.windows[index].editor.text_for_save();
+                let modified = self.aux.windows[index].editor.modified;
+                let changed = before != after;
+                let saved = self.aux_probe_save(index);
+                let disk_matches = std::fs::read_to_string(path).ok().as_deref() == Some(after.as_str());
+                let clean = !self.aux.windows[index].editor.modified;
+                if let Some(parent) = path.parent() {
+                    self.aux_capture(index, parent.join("checkbox-click.png").to_string_lossy().into_owned());
+                }
                 eprintln!(
-                    "[automdtask] {} toggled={toggled} first_task={first:?}",
-                    if toggled { "PASS" } else { "FAIL" }
+                    "[automdtask] {} clicked={changed} modified={modified} shortcut={saved} disk_matches={disk_matches} clean={clean}",
+                    if changed && modified && saved && disk_matches && clean { "PASS" } else { "FAIL" }
                 );
                 if let Some(w) = &self.window {
                     w.request_redraw();
