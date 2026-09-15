@@ -9,6 +9,15 @@ const connEl = document.getElementById('conn')
 const connText = document.getElementById('conn-text')
 let lastSig = null
 
+// 화면 둘. 「작업」은 1초마다 갱신되는 현황(누가 어느 탭을 잡고 무슨 작업 중인지)이고,
+// 레이아웃툴은 사람이 가끔 켜고 끄는 도구라 성격이 다르다 — 한 화면에 세로로 쌓아두면
+// 매초 바뀌는 목록 위에 안 바뀌는 단추가 얹혀 어느 쪽도 눈에 안 들어온다.
+const VIEWS = [['work', '작업'], ['layout', '레이아웃툴']]
+const VIEW_KEY = 'panelView'
+const navEl = document.getElementById('nav')
+const navButtons = new Map()
+let view = 'work'
+
 // 제품명·포트는 각각 manifest 와 port.js 한 곳에만 둔다 — 화면 문구가 그걸 따라온다.
 const PRODUCT = chrome.runtime.getManifest().name
 const brandEl = document.querySelector('.brand')
@@ -114,13 +123,22 @@ function displayBar(d) {
 
 // --- 레이아웃툴 -------------------------------------------------------------
 
-// 편집기를 사람이 직접 붙이는 줄. 여기 없으면 터미널의 에이전트에게 「켜 줘」 하는 길밖에 없는데,
+// 편집기를 사람이 직접 붙이는 화면. 여기 없으면 터미널의 에이전트에게 「켜 줘」 하는 길밖에 없는데,
 // 화면을 만지는 것은 사람이라 그때마다 부탁하게 된다.
 // 켜져 있나만 미리 보여주고, 서버가 있나 없나는 누른 자리에서 알려 준다 — 포트를 훑는 일은
 // 1초마다 도는 이 화면에 얹을 만큼 가볍지 않다.
-function layoutBar(l) {
-  const wrap = el('div', l.on ? 'lay on' : 'lay')
+function layoutPane(l) {
+  // 붙을 수 없는 화면(확장 관리·웹스토어·새 탭)에서는 누를 수 있는 단추를 아예 내지 않는다.
+  // 탭 자체는 그대로 둔다 — 페이지에 따라 탭이 나타났다 사라지면 누르던 자리가 옮겨 다닌다.
+  if (!l?.ok) {
+    const wrap = el('div', 'lay')
+    const head = el('div', 'disp-h')
+    head.append(el('span', 'disp-t', '레이아웃툴'))
+    wrap.append(head, el('div', 'lay-n', '이 페이지에는 편집기를 넣을 수 없습니다. 크롬 내부 화면(chrome://)·웹스토어·새 탭이 그렇습니다. 고치려는 화면을 연 뒤 다시 열어 주세요.'))
+    return wrap
+  }
 
+  const wrap = el('div', l.on ? 'lay on' : 'lay')
   const b = el('button', 'sw', l.on ? '끄기' : '켜기')
   b.title = '이 탭을 그대로 만지는 편집기'
   const head = el('div', 'disp-h')
@@ -148,6 +166,7 @@ function layoutBar(l) {
   })
 
   wrap.append(head, note)
+  wrap.append(el('div', 'lay-n', '켜면 이 화면의 요소를 피그마처럼 잡아 옮기고 크기·색을 바꿀 수 있습니다. 만진 내역은 터미널의 학생이 browser_layout_edits 로 가져가 소스를 고칩니다 — 편집기의 「코드에 반영」 단추는 누르지 마세요.'))
   return wrap
 }
 
@@ -201,7 +220,6 @@ function activityList(log) {
 }
 
 function render(state, layout) {
-  const sessions = state?.sessions || []
   const connected = !!state?.connected
   connEl.className = connected ? 'conn on' : 'conn off'
   connText.textContent = connected ? '브리지 연결됨' : '브리지 없음'
@@ -210,9 +228,12 @@ function render(state, layout) {
   if (!connected) {
     rootEl.appendChild(el('div', 'warn', `브리지(127.0.0.1:${PORT})에 붙어 있지 않습니다. 터미널에서 브라우저 툴을 한 번 쓰면 브리지가 자동으로 뜹니다.`))
   }
+  if (view === 'layout') {
+    rootEl.appendChild(layoutPane(layout))
+    return
+  }
   rootEl.appendChild(displayBar({ ...DISPLAY_FALLBACK, ...(state?.display || {}) }))
-  // 붙을 수 없는 화면(확장 관리·웹스토어)에서는 아예 안 낸다 — 눌러도 안 되는 단추가 남는다
-  if (layout?.ok) rootEl.appendChild(layoutBar(layout))
+  const sessions = state?.sessions || []
   if (!sessions.length) {
     const e = el('div', 'empty')
     e.appendChild(el('b', null, '아직 이 크롬을 조작한 세션이 없습니다'))
@@ -273,6 +294,46 @@ if (openBtn) {
     window.close()
   })
 }
+
+// --- 화면 전환 --------------------------------------------------------------
+
+function selectView(next, persist = true) {
+  if (!VIEWS.some(([key]) => key === next)) return
+  view = next
+  for (const [key, button] of navButtons) {
+    button.setAttribute('aria-selected', String(key === view))
+    button.tabIndex = key === view ? 0 : -1
+  }
+  if (persist) chrome.storage.local.set({ [VIEW_KEY]: view }).catch(() => {})
+  lastSig = null
+  tick()
+}
+
+for (const [key, label] of VIEWS) {
+  const button = el('button', null, label)
+  button.setAttribute('role', 'tab')
+  button.setAttribute('aria-controls', 'root')
+  button.addEventListener('click', () => selectView(key))
+  navEl.appendChild(button)
+  navButtons.set(key, button)
+}
+
+navEl.addEventListener('keydown', (e) => {
+  const keys = VIEWS.map(([key]) => key)
+  const at = keys.indexOf(view)
+  let next
+  if (e.key === 'ArrowRight') next = (at + 1) % keys.length
+  if (e.key === 'ArrowLeft') next = (at + keys.length - 1) % keys.length
+  if (next == null) return
+  e.preventDefault()
+  selectView(keys[next])
+  navButtons.get(keys[next]).focus()
+})
+
+selectView(view, false)
+// 고른 화면은 남는다 — 팝업은 누를 때마다 새로 뜨는데 매번 첫 탭으로 돌아가면 레이아웃툴을
+// 켜고 끄는 데 두 번씩 누르게 된다.
+chrome.storage.local.get(VIEW_KEY).then((saved) => selectView(saved[VIEW_KEY] || 'work', false)).catch(() => {})
 
 tick()
 // service worker 가 막 깨어난 참이면 세션 복구가 한 박자 늦는다. 화면이 떠 있는 동안만 훑는다.

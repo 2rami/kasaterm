@@ -38,6 +38,21 @@ body.panel { width: 100%; min-width: 260px; min-height: 100vh; }
 .openpanel:hover { color: var(--fg); background: rgba(255,255,255,.07); }
 body.panel .openpanel { display: none; }
 
+/* 화면 전환 줄. 헤더 바로 아래에 붙어 함께 고정된다 — 스크롤해 내려가도 지금 어느 화면인지
+   보이고, 사이드 패널처럼 세로가 긴 창에서 되돌아 올라오지 않아도 된다. */
+.nav {
+  display: flex; gap: 2px; padding: 6px 8px 0;
+  border-bottom: 1px solid var(--line);
+  position: sticky; top: 41px; background: var(--bg); z-index: 1;
+}
+.nav button {
+  flex: 1; padding: 7px 8px 8px; border: 0; border-bottom: 2px solid transparent;
+  background: none; color: var(--dim); font: inherit; font-size: 12px; cursor: pointer;
+  border-radius: 5px 5px 0 0;
+}
+.nav button:hover { color: var(--fg); background: rgba(255,255,255,.05); }
+.nav button[aria-selected="true"] { color: var(--fg); font-weight: 600; border-bottom-color: #8ba8ff; }
+
 .body { padding: 8px; display: flex; flex-direction: column; gap: 8px; }
 
 /* 페이지 위 표시를 끄고 옮기는 줄. 사이드 패널은 좁아질 수 있으므로 두 덩이가 줄바꿈된다. */
