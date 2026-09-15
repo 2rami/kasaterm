@@ -38,8 +38,8 @@ fi
 SOURCE_BIN="$BINDIR/kasaterm"
 [[ -x "$SOURCE_BIN" ]] || { echo "error: built kasaterm binary missing" >&2; exit 1; }
 
-APP="$ROOT/dist/Kasaterm Viewer.app"
-STAGE="$ROOT/dist/.Kasaterm Viewer.app.$$.new"
+APP="$ROOT/dist/KasaViewer.app"
+STAGE="$ROOT/dist/.KasaViewer.app.$$.new"
 cleanup() { rm -rf "$STAGE"; }
 trap cleanup EXIT HUP INT TERM
 
@@ -59,9 +59,9 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Kasaterm Viewer</string>
+    <string>KasaViewer</string>
     <key>CFBundleDisplayName</key>
-    <string>Kasaterm Viewer</string>
+    <string>카사뷰어</string>
     <key>CFBundleIdentifier</key>
     <string>com.kasa.kasaterm.viewer</string>
     <key>CFBundleVersion</key>
@@ -87,11 +87,11 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
     <key>NSDesktopFolderUsageDescription</key>
-    <string>Kasaterm Viewer가 데스크톱의 Markdown 문서를 엽니다.</string>
+    <string>카사뷰어가 데스크톱의 Markdown 문서를 엽니다.</string>
     <key>NSDocumentsFolderUsageDescription</key>
-    <string>Kasaterm Viewer가 문서 폴더의 Markdown 문서를 엽니다.</string>
+    <string>카사뷰어가 문서 폴더의 Markdown 문서를 엽니다.</string>
     <key>NSDownloadsFolderUsageDescription</key>
-    <string>Kasaterm Viewer가 다운로드한 Markdown 문서를 엽니다.</string>
+    <string>카사뷰어가 다운로드한 Markdown 문서를 엽니다.</string>
     <key>CFBundleDocumentTypes</key>
     <array>
       <dict>

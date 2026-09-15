@@ -1,6 +1,6 @@
-# Viewer design references
+# KasaViewer design references
 
-이 문서는 독립 Markdown Viewer의 읽기 화면을 다듬을 때 참고한 공개 UI만 기록한다. 구현 코드는 복사하지 않았고 새 의존성도 들이지 않는다.
+이 문서는 카사뷰어(KasaViewer)의 읽기 화면을 다듬을 때 참고한 공개 UI만 기록한다. 구현 코드는 복사하지 않았고 새 의존성도 들이지 않는다.
 
 ## MarkText
 

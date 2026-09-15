@@ -1856,11 +1856,11 @@ impl ApplicationHandler<UserEvent> for App {
                 use muda::accelerator::Accelerator;
                 use muda::{Menu, MenuItem, Submenu};
                 let menu = Menu::new();
-                let app_menu = Submenu::new("Kasaterm Viewer", true);
+                let app_menu = Submenu::new("카사뷰어", true);
                 // The predefined Quit item asks AppKit to terminate before
                 // winit can show the owning document's unsaved-changes prompt.
                 let quit_item = MenuItem::new(
-                    "Kasaterm Viewer 종료",
+                    "카사뷰어 종료",
                     true,
                     "CmdOrCtrl+Q".parse::<Accelerator>().ok(),
                 );
