@@ -17,8 +17,8 @@ done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-ICON="$ROOT/assets/AppIcon.icns"
-[[ -f "$ICON" ]] || { echo "error: assets/AppIcon.icns missing" >&2; exit 1; }
+ICON="$ROOT/assets/ViewerIcon.icns"
+[[ -f "$ICON" ]] || { echo "error: assets/ViewerIcon.icns missing" >&2; exit 1; }
 NOTO_FONT="$ROOT/app/kasaterm/assets/fonts/NotoSansKR-Variable.ttf"
 NOTO_LICENSE="$ROOT/app/kasaterm/assets/fonts/OFL-NotoSansKR.txt"
 [[ -f "$NOTO_FONT" ]] || { echo "error: Noto Sans KR font missing" >&2; exit 1; }
@@ -47,7 +47,7 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources/fonts" \
   "$STAGE/Contents/Resources/licenses"
 cp "$SOURCE_BIN" "$STAGE/Contents/MacOS/kasaterm-viewer"
-cp "$ICON" "$STAGE/Contents/Resources/AppIcon.icns"
+cp "$ICON" "$STAGE/Contents/Resources/ViewerIcon.icns"
 cp "$NOTO_FONT" "$STAGE/Contents/Resources/fonts/NotoSansKR-Variable.ttf"
 cp "$NOTO_LICENSE" "$STAGE/Contents/Resources/licenses/OFL-NotoSansKR.txt"
 
@@ -75,7 +75,7 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>
     <string>kasaterm-viewer</string>
     <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
+    <string>ViewerIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>NSHighResolutionCapable</key>
@@ -135,6 +135,10 @@ codesign --verify --strict --verbose=2 "$STAGE"
   com.kasa.kasaterm.viewer ]] || { echo "error: viewer bundle id mismatch" >&2; exit 1; }
 [[ "$(plutil -extract CFBundleExecutable raw -o - "$STAGE/Contents/Info.plist")" == \
   kasaterm-viewer ]] || { echo "error: viewer executable mismatch" >&2; exit 1; }
+[[ "$(plutil -extract CFBundleIconFile raw -o - "$STAGE/Contents/Info.plist")" == \
+  ViewerIcon ]] || { echo "error: viewer icon reference mismatch" >&2; exit 1; }
+[[ -s "$STAGE/Contents/Resources/ViewerIcon.icns" ]] || \
+  { echo "error: viewer icon payload missing" >&2; exit 1; }
 [[ -s "$STAGE/Contents/Resources/fonts/NotoSansKR-Variable.ttf" ]] || \
   { echo "error: viewer Noto Sans KR payload missing" >&2; exit 1; }
 [[ -s "$STAGE/Contents/Resources/licenses/OFL-NotoSansKR.txt" ]] || \
