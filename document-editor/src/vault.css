@@ -1,0 +1,24 @@
+.vault-workspace { display:flex; min-height:100vh; width:100%; }
+.vault-canvas { flex:1; min-width:0; }
+.vault-sidebar { position:sticky; top:0; width:244px; flex:none; height:100vh; display:flex; flex-direction:column; background:var(--paper); border-inline-end:1px solid var(--line); }
+.vault-heading { display:flex; align-items:center; gap:8px; min-height:58px; padding:12px; }.vault-heading strong { flex:1; min-width:0; font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.vault-heading svg,.vault-row svg,.vault-toggle svg,.vault-recents svg { width:17px; height:17px; flex:none; }
+.vault-search { margin:0 12px 10px; padding:8px 10px; background:var(--soft); border:1px solid transparent; border-radius:6px; color:var(--ink); font:13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif; width:calc(100% - 24px); }.vault-search::placeholder { color:var(--muted); }
+.vault-status { color:var(--muted); font-size:12px; line-height:1.6; margin:0 14px; }.vault-status:not(:empty) { padding:8px 0; }
+.vault-tree { flex:1; min-height:0; overflow:auto; padding-bottom:16px; }
+.vault-row { display:flex; align-items:center; gap:7px; width:100%; height:32px; padding-block:0; padding-inline-end:12px; border:0; border-radius:0; background:transparent; color:var(--ink); cursor:pointer; text-align:start; font:13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif; }
+.vault-row > span { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }.vault-row svg { color:var(--muted); }.vault-row:hover { background:var(--hover); }.vault-row[aria-selected=true] { background:var(--active); color:var(--ink); }.vault-row:disabled { cursor:default; color:var(--muted); }
+.vault-row .vault-disclosure { width:10px; height:12px; }.vault-disclosure.expanded { transform:rotate(90deg); }
+.vault-welcome { min-height:85vh; max-width:560px; margin:auto; padding:clamp(64px,16vh,140px) 32px 64px; display:flex; flex-direction:column; align-items:flex-start; }
+.vault-welcome-icon { width:42px; height:42px; color:var(--muted); margin-bottom:24px; }.vault-welcome h1 { font-size:26px; font-weight:650; margin:0 0 12px; letter-spacing:-.025em; }.vault-welcome > p { margin:0 0 24px; color:var(--muted); font-size:14px; line-height:1.7; }.vault-welcome .vault-error { color:var(--danger); margin-top:16px; }
+.vault-recents { margin-top:44px; width:100%; }.vault-recents h2 { font-size:12px; color:var(--muted); margin:0 0 10px; font-weight:550; }.vault-recents button { display:flex; width:100%; justify-content:flex-start; }
+.vault-toggle { display:none; position:fixed; top:12px; left:12px; z-index:35; }.vault-veil { display:none; }
+.vault-disabled .vault-sidebar,.vault-disabled .vault-welcome,.vault-disabled .vault-toggle { display:none; }
+@media(max-width:699px) {
+  .vault-sidebar { position:fixed; inset:0 auto 0 0; z-index:32; width:min(280px,85vw); transform:translateX(-100%); }
+  .vault-sidebar-open .vault-sidebar { transform:translateX(0); }
+  .vault-sidebar-open .vault-veil { display:block; position:fixed; inset:0; z-index:31; border:0; background:rgba(0,0,0,.24); }
+  .vault-has-vault .vault-toggle { display:inline-flex; }.vault-has-vault #document { padding-top:58px; }
+  .vault-sidebar-open .vault-toggle { left:auto; right:12px; }
+  .vault-welcome { padding-inline:24px; }.vault-welcome h1 { font-size:24px; }
+}

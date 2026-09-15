@@ -2,12 +2,14 @@ import { Editor } from '@tiptap/core';
 import Placeholder from '@tiptap/extension-placeholder';
 import { DocumentSource, extensions } from './document';
 import { applyTheme } from './theme';
+import { mountVault, type VaultState, type VaultChildren, type VaultSearch } from './vault';
 import './editor.css';
+import './vault.css';
 
 declare global { interface Window {
   __KASATERM_DOC_TOKEN__?: string;
   ipc?: { postMessage(message: string): void };
-  kasatermEditor: { init(data: Init): void; setContent(data: Content): void; setTheme(theme: unknown): void; command(name: string, payload?: any): void; setSaveState(data: { state: string; message?: string }): void };
+  kasatermEditor: { init(data: Init): void; setContent(data: Content): void; setTheme(theme: unknown): void; setVault(data: VaultState): void; setVaultChildren(data: VaultChildren): void; setVaultSearch(data: VaultSearch): void; command(name: string, payload?: any): void; setSaveState(data: { state: string; message?: string }): void };
 } }
 type Content = { markdown: string; revision: number };
 type Init = Content & { token: string; theme?: any; editable?: boolean };
@@ -15,6 +17,7 @@ let token = window.__KASATERM_DOC_TOKEN__ ?? '', revision = 0, editor: Editor | 
 let source = new DocumentSource(), composing = false, pending: { kind: string; extra: object }[] = [], muted = false;
 let lastMarkdown = '', zoom = 1, slashRange: { from: number; to: number } | undefined;
 let slashIndex = 0, slashItems: Action[] = [];
+let generation = 0, compositionTimer: ReturnType<typeof setTimeout> | undefined;
 type Action = { label: string; hint: string; run(): void };
 document.body.append(document.createComment('THESIS: Edit the document itself. OWN-WORLD: existing neutral paper, sky focus, system sans. STORY: write, select, format, save. FIRST VIEWPORT: one centered reading measure; contextual tools beside text. FORM: user-pinned Notion/Linear canon. FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md'));
 const root = document.createElement('main'); root.id = 'document';
@@ -40,6 +43,7 @@ const copy = button('복사', async () => {
 }, '코드 블록 복사');
 copy.className = 'code-copy'; copy.hidden = true;
 document.body.append(root, live, slash, bubble, panel, copy);
+const vault = mountVault(root, (kind, payload) => send(kind, false, payload));
 function send(kind: string, includeContent = false, extra = {}) {
   if (!token) return;
   window.ipc?.postMessage(JSON.stringify({ kind, token, revision, ...(includeContent ? { markdown: current() } : {}), ...extra }));
@@ -168,21 +172,25 @@ function setContent(data: Content) {
 }
 window.kasatermEditor = {
   init(data) {
-    token = data.token; revision = data.revision; lastMarkdown = data.markdown; applyTheme(data.theme); editor?.destroy(); source = new DocumentSource();
+    const ownGeneration = ++generation;
+    clearTimeout(compositionTimer); pending = []; composing = false; slashRange = undefined;
+    slash.hidden = bubble.hidden = panel.hidden = copy.hidden = true; live.textContent = ''; live.classList.remove('visible');
+    token = data.token; window.__KASATERM_DOC_TOKEN__ = token; revision = data.revision; lastMarkdown = data.markdown; applyTheme(data.theme); editor?.destroy(); source = new DocumentSource();
     editor = new Editor({ element: mount, extensions: [...extensions(), Placeholder.configure({ placeholder: '내용을 입력하거나 / 로 블록을 추가하세요' })], content: source.load(data.markdown), editable: data.editable !== false,
       editorProps: { attributes: { class: 'document-content', role: 'textbox', 'aria-label': '마크다운 문서 본문', 'aria-multiline': 'true', spellcheck: 'false' },
         handleKeyDown(_view, event) {
+          if (ownGeneration !== generation) return false;
           if ((event.metaKey || event.ctrlKey) && ['s', 'w', 'f', 'k'].includes(event.key.toLowerCase())) { event.preventDefault(); const key = event.key.toLowerCase(); if (key === 's') commit('save'); else if (key === 'w') commit('close'); else if (key === 'f') find(); else linkPanel(); return true; }
           if (event.isComposing || composing) return false;
           if (!slash.hidden) { if (event.key === 'Escape') { slash.hidden = true; return true; } if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); slashIndex = (slashIndex + (event.key === 'ArrowDown' ? 1 : -1) + slashItems.length) % Math.max(1, slashItems.length); updateMenus(); return true; } if (event.key === 'Enter') { event.preventDefault(); runSlash(slashIndex); return true; } }
           return false;
         },
-        handleClick(_view, _pos, event) { const anchor = (event.target as HTMLElement).closest('a'); if (anchor && (event.metaKey || event.ctrlKey)) { const href = anchor.getAttribute('href') ?? ''; if (/^(https?:|mailto:)/i.test(href)) send('open-link', false, { href }); event.preventDefault(); return true; } return false; },
-      }, onUpdate: () => { report(); updateMenus(); }, onSelectionUpdate: updateMenus,
+        handleClick(_view, _pos, event) { if (ownGeneration !== generation) return false; const anchor = (event.target as HTMLElement).closest('a'); if (anchor && (event.metaKey || event.ctrlKey)) { const href = anchor.getAttribute('href') ?? ''; if (/^(https?:|mailto:)/i.test(href)) send('open-link', false, { href }); event.preventDefault(); return true; } return false; },
+      }, onUpdate: () => { if (ownGeneration !== generation) return; report(); updateMenus(); }, onSelectionUpdate: () => { if (ownGeneration === generation) updateMenus(); },
     });
-    editor.view.dom.addEventListener('compositionstart', () => { composing = true; slash.hidden = bubble.hidden = true; send('change'); });
-    editor.view.dom.addEventListener('compositionend', () => { composing = false; setTimeout(() => { report(); const queue = pending; pending = []; queue.forEach(item => commit(item.kind, item.extra)); updateMenus(); }, 0); });
-  }, setContent, command, setTheme: applyTheme,
+    editor.view.dom.addEventListener('compositionstart', () => { if (ownGeneration !== generation) return; composing = true; slash.hidden = bubble.hidden = true; send('change'); });
+    editor.view.dom.addEventListener('compositionend', () => { if (ownGeneration !== generation) return; composing = false; compositionTimer = setTimeout(() => { if (ownGeneration !== generation) return; report(); const queue = pending; pending = []; queue.forEach(item => commit(item.kind, item.extra)); updateMenus(); }, 0); });
+  }, setContent, command, setTheme: applyTheme, ...vault,
   setSaveState(data) { live.textContent = data.state === 'error' ? (data.message || '저장하지 못했어요. 다시 저장해주세요.') : ''; live.classList.toggle('visible', data.state === 'error'); },
 };
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { panel.hidden = true; bubble.hidden = true; slash.hidden = true; } });
