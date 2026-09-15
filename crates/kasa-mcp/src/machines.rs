@@ -491,6 +491,8 @@ struct Tunnel {
     child: std::process::Child,
     target: String,
     port: u16,
+    /// 띄운 시각 — 금방 죽었으면(30초 안) 「안 닿는 기계」로 보고 재시도를 늦춘다.
+    spawned: Instant,
 }
 fn tunnels() -> &'static Mutex<HashMap<String, Tunnel>> {
     static T: OnceLock<Mutex<HashMap<String, Tunnel>>> = OnceLock::new();
@@ -504,6 +506,20 @@ fn last_spawn() -> &'static Mutex<HashMap<String, Instant>> {
 const TUNNEL_TICK: Duration = Duration::from_secs(3);
 const TUNNEL_RETRY: Duration = Duration::from_secs(8);
 const META_RETRY: Duration = Duration::from_secs(60);
+/// 이 안에 죽은 터널은 「안 닿는 기계」다 — 연달아 그러면 재시도를 8→16→32→60초로
+/// 늦춘다. 안 그러면 꺼진 기계에 몇 초마다 ssh 를 쏘고 로그가 그 줄로만 찬다
+/// (2026-09-16 실측: 한 시간에 「끊김 — 다시 연다」 2만 줄).
+const TUNNEL_SHORT_LIFE: Duration = Duration::from_secs(30);
+const TUNNEL_RETRY_MAX: Duration = Duration::from_secs(60);
+/// 라벨 → 연속 단명 횟수.
+fn fail_streak() -> &'static Mutex<HashMap<String, u32>> {
+    static F: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn retry_after(streak: u32) -> Duration {
+    let mult = 1u32 << streak.min(3);
+    (TUNNEL_RETRY * mult).min(TUNNEL_RETRY_MAX)
+}
 
 fn ssh_output(args: &[&str]) -> Option<String> {
     ssh_run(args).ok()
@@ -777,7 +793,7 @@ fn chrome_tunnel_tick() {
     match spawn_watched_ssh(&kargs, &forwards, &target) {
         Ok(child) => {
             eprintln!("[machines] {label} 크롬 포워드 염: 127.0.0.1:{port} → {target}:{KASACHROME_PORT}");
-            t.insert(label, Tunnel { child, target, port });
+            t.insert(label, Tunnel { child, target, port, spawned: Instant::now() });
         }
         Err(e) => eprintln!("[machines] {label} 크롬 포워드 스폰 실패: {e}"),
     }
@@ -818,13 +834,33 @@ fn tunnel_tick() {
             match tun.child.try_wait() {
                 Ok(None) => continue, // 살아 있다
                 _ => {
-                    eprintln!("[machines] {label} 터널 끊김 — 다시 연다");
+                    let short = tun.spawned.elapsed() < TUNNEL_SHORT_LIFE;
+                    let streak = fail_streak()
+                        .lock()
+                        .map(|mut f| {
+                            let e = f.entry(label.clone()).or_default();
+                            *e = if short { e.saturating_add(1) } else { 0 };
+                            *e
+                        })
+                        .unwrap_or(0);
+                    // 첫 끊김은 바로, 연속 단명은 4번째부터 8번마다 한 줄만.
+                    if streak <= 1 || streak % 8 == 0 {
+                        eprintln!(
+                            "[machines] {label} 터널 끊김 — {}초 뒤 다시 연다{}",
+                            retry_after(streak).as_secs(),
+                            if streak > 1 { format!(" (연속 {streak}번째)") } else { String::new() }
+                        );
+                    }
                     t.remove(&label);
                 }
             }
         }
+        let wait = fail_streak()
+            .lock()
+            .map(|f| retry_after(f.get(&label).copied().unwrap_or(0)))
+            .unwrap_or(TUNNEL_RETRY);
         if let Ok(mut l) = last_spawn().lock() {
-            if l.get(&label).is_some_and(|at| at.elapsed() < TUNNEL_RETRY) {
+            if l.get(&label).is_some_and(|at| at.elapsed() < wait) {
                 continue;
             }
             l.insert(label.clone(), Instant::now());
@@ -858,7 +894,13 @@ fn tunnel_tick() {
                         .map(|lp| format!(" · 되돌아옴 {}→{lp}", reverse_port(&self_label())))
                         .unwrap_or_default()
                 );
-                t.insert(label, Tunnel { child, target, port });
+                t.insert(label, Tunnel { child, target, port, spawned: Instant::now() });
+                // 터널이 서면 유령 동기를 곧 깨운다 — 5초 주기를 기다리지 않고 원격
+                // 세션이 ListAgents 에 뜨게(ssh 가 붙는 시간만큼만 늦춘다).
+                std::thread::spawn(|| {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    crate::peermirror::poke();
+                });
             }
             Err(e) => eprintln!("[machines] {label} 터널 스폰 실패: {e}"),
         }
@@ -1391,6 +1433,20 @@ pub(crate) fn snapshot_with_uplinks(uplinks: &[crate::uplink::GatewayMachine]) -
             snapshot_machine(m, hit, uplink, &local_build)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tunnel_backoff_tests {
+    use super::*;
+    /// 연속 단명은 8→16→32→60초로 늦추고 거기서 멈춘다(첫 끊김은 예전처럼 8초).
+    #[test]
+    fn retry_after_backs_off_and_caps() {
+        assert_eq!(retry_after(0), Duration::from_secs(8));
+        assert_eq!(retry_after(1), Duration::from_secs(16));
+        assert_eq!(retry_after(2), Duration::from_secs(32));
+        assert_eq!(retry_after(3), Duration::from_secs(60));
+        assert_eq!(retry_after(40), Duration::from_secs(60));
+    }
 }
 
 #[cfg(test)]

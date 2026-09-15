@@ -189,6 +189,9 @@ struct SendQuery {
     to_sid: String,
     #[serde(default)]
     from_name: Option<String>,
+    /// 발신 세션 uuid — 그대로 실어 나른다(수신측이 답장 주소를 맞추는 데 쓴다).
+    #[serde(default)]
+    from_sid: Option<String>,
     /// 발신 사람 — 차 있으면 수신측이 「부탁」 봉투를 씌운다(다른 계정 발신 표식).
     #[serde(default)]
     from_person: Option<String>,
@@ -258,9 +261,10 @@ async fn send(
     // 그 기계로 라우팅 — send_peer_message 재사용(현-스레드 런타임 블로킹이라 spawn_blocking).
     let base = m.base.clone();
     let token = m.token.clone();
-    let (to_sid, from_name, from_machine) = (
+    let (to_sid, from_name, from_sid, from_machine) = (
         q.to_sid.clone(),
         q.from_name.unwrap_or_default(),
+        q.from_sid.unwrap_or_default(),
         q.from_machine.unwrap_or_default(),
     );
     let res = tokio::task::spawn_blocking(move || {
@@ -268,6 +272,7 @@ async fn send(
             &base,
             &to_sid,
             &from_name,
+            &from_sid,
             &from_person,
             &from_machine,
             &body_text,

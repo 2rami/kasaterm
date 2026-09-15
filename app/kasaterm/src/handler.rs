@@ -1830,6 +1830,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.close_inline_web();
         // 자동 ssh 터널(명부의 ssh 항목)이 고아로 남지 않게.
         kasa_mcp::machines::stop_tunnels();
+        kasa_mcp::peermirror::shutdown();
         self.close_web_hosts();
         // Persist every session's layout + pane cwds + claude sessions so the
         // next launch restores the full workspace (A3).

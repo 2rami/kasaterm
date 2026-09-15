@@ -5160,9 +5160,24 @@ async fn term_message_post(
     if !socket_reachable(&peer.socket_path) {
         return err(format!("세션 {sid} 의 소켓이 없어요 — 등록만 남고 길이 끊긴 상태입니다"));
     }
-    let from_name = q.get("from_name").map(String::as_str).unwrap_or("peer");
     let from_person = q.get("from_person").map(String::as_str).unwrap_or("");
     let from_machine = q.get("from_machine").map(String::as_str).unwrap_or("");
+    // 답장 주소 — 발신 세션 sid 로 이 기계에 선 유령을 찾아 **그 이름**을 from-name 에
+    // 단다. 받는 claude 는 from-name 으로 답하는데, 발신 기계의 원이름은 여기 없어
+    // 「no agent」였다(2026-09-16). 유령이 아직 없으면 동기를 깨워 곧 서게 한다.
+    let from_sid = q.get("from_sid").map(String::as_str).unwrap_or("");
+    let ghost_name = if from_sid.is_empty() {
+        None
+    } else {
+        let g = crate::peermirror::ghost_name_for_sid(from_sid);
+        if g.is_none() {
+            crate::peermirror::poke();
+        }
+        g
+    };
+    let from_name = ghost_name
+        .as_deref()
+        .unwrap_or_else(|| q.get("from_name").map(String::as_str).unwrap_or("peer"));
     // 발신 소켓 경로 자리 — 원격 발신자는 이 기계에 소켓이 없으므로 응답이 돌아갈
     // 곳을 「원격」으로 표식만 남긴다(왕복은 후속 단계에서 프록시 소켓으로).
     let from_addr = format!("remote:{from_machine}");

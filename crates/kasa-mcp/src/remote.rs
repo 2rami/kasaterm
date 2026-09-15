@@ -1085,8 +1085,17 @@ pub fn push_theme_pack(base: &str, zip: Vec<u8>, token: Option<&str>) -> Result<
 /// 원격 기계의 세션 목록 `(sid, name)` — 유령 명부 미러링의 소스(`GET /peer-registry`).
 /// 소켓이 살아 있는 세션만 온다(원격이 걸러 준다).
 pub fn fetch_peer_registry(base: &str, token: Option<&str>) -> Result<Vec<(String, String)>> {
+    fetch_peer_registry_timeout(base, token, Duration::from_secs(10))
+}
+
+/// 위와 같되 타임아웃을 부르는 쪽이 정한다 — 유령 동기는 기계마다 병렬로 짧게 묻는다.
+pub fn fetch_peer_registry_timeout(
+    base: &str,
+    token: Option<&str>,
+    timeout: Duration,
+) -> Result<Vec<(String, String)>> {
     let u = format!("{}/peer-registry", base.trim_end_matches('/'));
-    let (code, body) = blocking_get(&u, token, Duration::from_secs(10))?;
+    let (code, body) = blocking_get(&u, token, timeout)?;
     if code != 200 {
         anyhow::bail!("peer-registry HTTP {code}");
     }
@@ -1119,16 +1128,22 @@ pub fn send_peer_message(
     base: &str,
     target_sid: &str,
     from_name: &str,
+    from_sid: &str,
     from_person: &str,
     from_machine: &str,
     body: &str,
     token: Option<&str>,
 ) -> Result<()> {
+    // `from_sid` — 발신 세션의 uuid. 받는 쪽이 자기 유령 명부에서 이 sid 를 찾아
+    // **답장이 닿는 이름**(그쪽 라벨이 붙은 유령 이름)으로 from-name 을 바꿔 단다.
+    // 안 실으면 받는 claude 는 발신 기계의 원이름으로 답하고, 그 이름은 그 기계에
+    // 없어 「no agent」로 떨어진다(2026-09-16).
     let u = format!(
-        "{}/term/message?sid={}&from_name={}&from_person={}&from_machine={}",
+        "{}/term/message?sid={}&from_name={}&from_sid={}&from_person={}&from_machine={}",
         base.trim_end_matches('/'),
         urlencode(target_sid),
         urlencode(from_name),
+        urlencode(from_sid),
         urlencode(from_person),
         urlencode(from_machine),
     );
@@ -1270,15 +1285,17 @@ pub fn relay_send(
     token: Option<&str>,
     to_sid: &str,
     from_name: &str,
+    from_sid: &str,
     from_account: &str,
     from_machine: &str,
     body: &str,
 ) -> Result<()> {
     let u = format!(
-        "{}/relay/send?to_sid={}&from_name={}&from_account={}&from_machine={}",
+        "{}/relay/send?to_sid={}&from_name={}&from_sid={}&from_account={}&from_machine={}",
         base.trim_end_matches('/'),
         urlencode(to_sid),
         urlencode(from_name),
+        urlencode(from_sid),
         urlencode(from_account),
         urlencode(from_machine),
     );

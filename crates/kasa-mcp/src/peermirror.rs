@@ -8,6 +8,8 @@
 //!   숫자인 유령은 안 뜬다). 그래서 유령마다 **살아 있는 껍데기 프로세스** 하나를
 //!   붙이고, 그 pid 로 파일명을 짓는다. 껍데기는 `sleep` — 메모리 거의 0.
 //! - 명부 파일명 규격: `<pid>.json` + `<pid>.<64hex>.key`. pid=숫자여야 한다.
+//! - **procStart 는 `LC_ALL=C TZ=UTC ps -o lstart=` 문자열 그대로** — claude 가 같은
+//!   명령으로 뽑아 글자 비교한다(2.1.272). 현지시각이면 유령이 통째로 안 보인다.
 //! - 소켓에 꽂히는 것: `{msgV,msg_id,type:"user",message.content=<cross-session
 //!   -message …>,from}` 한 줄. 우리는 그 소켓의 **listen 쪽**이 되어 받는다.
 //!
@@ -15,9 +17,10 @@
 //! 유령 파일·소켓을 지운다 — 안 지우면 죽은 원격이 로컬 ListAgents 에 영영 남는다.
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::BufRead;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// 유령 하나 — 로컬 껍데기·파일·소켓의 수명 묶음. 원격 (base,sid)는 Ghosts 맵의
 /// 키가 쥐고, 전달은 프록시 스레드가 캡처한 값으로 하므로 여기엔 안 둔다.
@@ -30,6 +33,8 @@ struct Ghost {
     sock_path: PathBuf,
     /// 프록시 소켓 리스너를 멈추는 신호.
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// 로컬에 뜨는 표시 이름(`이름 (라벨)`) — 답장 주소.
+    display: String,
     /// 세울 때의 원격 세션 이름(라벨 붙이기 전) — 원격이 개명하면 유령을 다시
     /// 세우는 비교 기준. 안 따라가면 상대는 옛 이름으로만 불린다(2026-09-01 실측:
     /// 앱 재시작 직후 자동 슬러그로 굳어, 나중에 붙은 진짜 세션 이름으로 보낸
@@ -52,6 +57,95 @@ impl Drop for Ghost {
 /// `direct:<base>`, 릴레이면 `relay:<machine>` — 같은 세션이 두 경로로 잡혀도
 /// 키가 갈려 둘 다 서는 일이 없게 sync 쪽에서 직결을 우선한다.
 type Ghosts = HashMap<(String, String), Ghost>;
+
+/// 유령 전부의 정본 — sync 스레드가 쓰고, 수신 창구(`term_message_post`)가 발신자
+/// sid → 유령 이름을 되짚을 때·CLI 가 상태를 물을 때 읽는다.
+fn ghosts() -> &'static Arc<Mutex<Ghosts>> {
+    static G: OnceLock<Arc<Mutex<Ghosts>>> = OnceLock::new();
+    G.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+/// 기계 하나의 명단 동기 상태 — `kasaterm-cli machines` 가 「말 걸 수 있는 세션 N ·
+/// 명단 못 받음(이유)」를 찍는 근거. 라벨이 키.
+#[derive(Clone, Debug, Default)]
+pub struct MachineSync {
+    /// 마지막으로 명단을 받은 시각. None = 한 번도 못 받음.
+    pub last_ok: Option<Instant>,
+    /// 마지막 시도가 실패했으면 그 이유.
+    pub last_err: Option<String>,
+    /// 지금 서 있는 유령 수(껍데기 살아 있는 것만).
+    pub ghosts: usize,
+}
+
+fn sync_stats() -> &'static Mutex<HashMap<String, MachineSync>> {
+    static S: OnceLock<Mutex<HashMap<String, MachineSync>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 라벨별 동기 상태를 JSON 으로 — machine.list 가 행마다 붙인다.
+pub fn machine_stats() -> HashMap<String, serde_json::Value> {
+    let Ok(st) = sync_stats().lock() else { return HashMap::new() };
+    st.iter()
+        .map(|(label, m)| {
+            (
+                label.clone(),
+                serde_json::json!({
+                    "peers": m.ghosts,
+                    "peers_age_secs": m.last_ok.map(|t| t.elapsed().as_secs()),
+                    "peers_error": m.last_err,
+                }),
+            )
+        })
+        .collect()
+}
+
+/// 원격 세션 sid 로 이 기계에 선 유령의 표시 이름 — 답장이 닿는 주소다.
+pub fn ghost_name_for_sid(sid: &str) -> Option<String> {
+    let g = ghosts().lock().ok()?;
+    g.iter()
+        .find(|((_, s), _)| s == sid)
+        .map(|(_, ghost)| ghost.display.clone())
+}
+
+/// sync 스레드를 깨우는 신호 — 터널이 막 열렸거나, 아직 유령이 없는 발신자에게서
+/// 메시지가 왔을 때. 5초 주기를 기다리지 않고 바로 한 바퀴 돈다.
+fn wake() -> &'static (Mutex<bool>, Condvar) {
+    static W: OnceLock<(Mutex<bool>, Condvar)> = OnceLock::new();
+    W.get_or_init(|| (Mutex::new(false), Condvar::new()))
+}
+pub fn poke() {
+    let (m, cv) = wake();
+    if let Ok(mut flag) = m.lock() {
+        *flag = true;
+        cv.notify_all();
+    }
+}
+/// `timeout` 만큼 자거나, 그 전에 poke 가 오면 바로 깬다.
+fn sleep_or_poke(timeout: Duration) {
+    let (m, cv) = wake();
+    let Ok(mut flag) = m.lock() else { return };
+    let deadline = Instant::now() + timeout;
+    while !*flag {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let Ok((g, _)) = cv.wait_timeout(flag, left) else { return };
+        flag = g;
+    }
+    *flag = false;
+}
+
+/// 원격 명단을 한 번 못 받았다고 유령을 걷지 않는 유예 — 터널이 다시 열리는 몇 초,
+/// 원격이 바쁜 순간에 유령이 걷혔다 새 pid 로 다시 서면 ListAgents 에서 상대가
+/// 깜빡이고, 그 사이 보낸 메시지는 없어진 소켓으로 가 사라진다(2026-09-16 실측:
+/// 5초마다 유령이 통째로 교체되고 있었다). 이 시간이 넘도록 못 받으면 그때 걷는다.
+const KEEP_ON_FAIL: Duration = Duration::from_secs(90);
+/// 원격 명단 조회 타임아웃 — 기계마다 병렬로 묻는다(순차 10초는 기계 둘만 죽어도
+/// 한 바퀴가 20초였다).
+const FETCH_TIMEOUT: Duration = Duration::from_secs(4);
+/// 평소 동기 주기.
+const SYNC_EVERY: Duration = Duration::from_secs(5);
 
 /// 유령이 원격으로 전달하는 길 — 직결(기계 명부의 base 로 직접) 또는 릴레이 경유.
 #[derive(Clone, Debug)]
@@ -86,9 +180,29 @@ fn from_name_of_socket(from: &str) -> Option<String> {
     v.get("name").and_then(|n| n.as_str()).map(str::to_string)
 }
 
-/// 유령 소켓에 꽂힌 한 줄(claude SendMessage)을 원격으로 전달한다.
+/// 발신 로컬 세션의 uuid — 같은 경로로 명부 json 의 sessionId 를 읽는다.
+fn from_sid_of_socket(from: &str) -> Option<String> {
+    let pid: u32 = from.rsplit('/').next()?.strip_suffix(".sock")?.parse().ok()?;
+    let path = sessions_dir()?.join(format!("{pid}.json"));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    v.get("sessionId").and_then(|n| n.as_str()).map(str::to_string)
+}
+
+/// 유령 소켓에 꽂힌 한 줄(claude SendMessage)을 원격으로 전달한다. 한 번 실패하면
+/// 잠깐 뒤 한 번 더 — 터널이 다시 열리는 순간의 실패는 대개 1초 안에 풀린다.
 fn forward_line(route: &Route, remote_sid: &str, line: &str) {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return };
+    let mut res = forward_once(route, remote_sid, line);
+    if res.is_err() {
+        std::thread::sleep(Duration::from_millis(800));
+        res = forward_once(route, remote_sid, line);
+    }
+    if let Err(e) = res {
+        eprintln!("[peermirror] 전달 실패 {route:?} {remote_sid}: {e:#}");
+    }
+}
+
+fn forward_once(route: &Route, remote_sid: &str, line: &str) -> anyhow::Result<()> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return Ok(()) };
     // 본문은 message.content 의 <cross-session-message> 태그 안. 태그를 벗겨
     // 순수 본문만 넘긴다 — 받는 쪽(term_message_post)이 새 태그를 다시 씌운다.
     let content = v
@@ -105,11 +219,19 @@ fn forward_line(route: &Route, remote_sid: &str, line: &str) {
             .map(|(n, _)| n.to_string())
             .unwrap_or_else(|| "peer".to_string())
     });
-    let res = match route {
+    let from_sid = from_sid_of_socket(from).unwrap_or_default();
+    match route {
         // 직결 — 발신 사람·기계는 같은 계정·내 기계 사이라 비운다.
-        Route::Direct { base } => {
-            crate::remote::send_peer_message(base, remote_sid, &from_name, "", "", &body, None)
-        }
+        Route::Direct { base } => crate::remote::send_peer_message(
+            base,
+            remote_sid,
+            &from_name,
+            &from_sid,
+            "",
+            "",
+            &body,
+            None,
+        ),
         // 릴레이 — 설정을 다시 읽어(회전 대비) 내 계정·기계를 달아 보낸다.
         // 계정이 다른 상대에게는 릴레이가 외부 표식을 강제한다.
         Route::Relay => match relay_conf() {
@@ -118,15 +240,13 @@ fn forward_line(route: &Route, remote_sid: &str, line: &str) {
                 conf.token().as_deref(),
                 remote_sid,
                 &from_name,
+                &from_sid,
                 &conf.account,
                 &conf.machine_id,
                 &body,
             ),
             None => Err(anyhow::anyhow!("릴레이 설정(relay.json)이 사라졌어요")),
         },
-    };
-    if let Err(e) = res {
-        eprintln!("[peermirror] 전달 실패 {route:?} {remote_sid}: {e:#}");
     }
 }
 
@@ -286,7 +406,13 @@ fn spawn_ghost(route: Route, remote_sid: &str, name: &str, label: &str) -> std::
     let _ = std::fs::create_dir_all(&dir);
     let json_path = dir.join(format!("{pid}.json"));
     let key_path = dir.join(format!("{pid}.{}.key", hex32()));
+    // ⚠️ claude 는 명부의 procStart 를 **`LC_ALL=C TZ=UTC ps -o lstart=`** 결과와
+    // 글자 그대로 비교해 pid 재사용을 가린다(2.1.272 바이너리에서 확인). 현지시각으로
+    // 적으면 한 글자도 안 맞아 유령이 「죽은 주인」으로 걸러져 ListAgents 에 안 뜬다
+    // (2026-09-16 실측: 원격은 멀쩡한데 거울이 하나도 안 보였다). 같은 환경으로 뽑는다.
     let procstart = std::process::Command::new("ps")
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
         .args(["-o", "lstart=", "-p", &pid.to_string()])
         .output()
         .ok()
@@ -308,6 +434,24 @@ fn spawn_ghost(route: Route, remote_sid: &str, name: &str, label: &str) -> std::
         "status": "idle", "updatedAt": now, "statusUpdatedAt": now,
     });
     std::fs::write(&json_path, serde_json::to_string(&entry).unwrap_or_default())?;
+    // 열쇠 파일은 진짜 세션과 같은 0600 — 남이 읽을 수 있는 토큰을 남기지 않는다.
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&key_path)?;
+        f.write_all(
+            serde_json::json!({ "peerToken": hex16(), "procStart": procstart, "pidDomain": "darwin" })
+                .to_string()
+                .as_bytes(),
+        )?;
+    }
+    #[cfg(not(unix))]
     std::fs::write(
         &key_path,
         serde_json::json!({ "peerToken": hex16(), "procStart": procstart, "pidDomain": "darwin" })
@@ -323,16 +467,27 @@ fn spawn_ghost(route: Route, remote_sid: &str, name: &str, label: &str) -> std::
             .spawn(move || {
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                     match listener.accept() {
-                        Ok((mut conn, _)) => {
-                            let mut buf = String::new();
-                            let _ = conn.set_read_timeout(Some(std::time::Duration::from_secs(2)));
-                            let _ = conn.read_to_string(&mut buf);
-                            for line in buf.lines().filter(|l| !l.trim().is_empty()) {
-                                forward_line(&route, &remote_sid, line);
+                        Ok((conn, _)) => {
+                            // 줄 단위로 읽는 즉시 전달 — 예전엔 EOF 까지(최대 2초)
+                            // 모아서 보내 메시지마다 2초가 떴다. claude 는 한 줄
+                            // 쓰고 닫지만, 안 닫아도 개행이 오면 바로 나간다.
+                            let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
+                            let mut rd = std::io::BufReader::new(conn);
+                            let mut line = String::new();
+                            loop {
+                                line.clear();
+                                match rd.read_line(&mut line) {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(_) => {
+                                        if !line.trim().is_empty() {
+                                            forward_line(&route, &remote_sid, line.trim_end());
+                                        }
+                                    }
+                                }
                             }
                         }
                         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(std::time::Duration::from_millis(150));
+                            std::thread::sleep(Duration::from_millis(40));
                         }
                         Err(_) => break,
                     }
@@ -341,7 +496,7 @@ fn spawn_ghost(route: Route, remote_sid: &str, name: &str, label: &str) -> std::
             .ok();
     }
 
-    Ok(Ghost { shell, json_path, key_path, sock_path, stop, name: name.to_string() })
+    Ok(Ghost { shell, json_path, key_path, sock_path, stop, display, name: name.to_string() })
 }
 
 fn hex32() -> String {
@@ -383,16 +538,38 @@ pub fn spawn() {
         .name("peermirror".into())
         .spawn(|| {
             sweep_orphan_ghosts();
-            let ghosts: Arc<Mutex<Ghosts>> = Arc::new(Mutex::new(HashMap::new()));
+            let ghosts = ghosts().clone();
             loop {
                 sync_once(&ghosts);
-                std::thread::sleep(std::time::Duration::from_secs(5));
+                sleep_or_poke(SYNC_EVERY);
             }
         })
         .ok();
 }
 #[cfg(not(unix))]
 pub fn spawn() {}
+
+/// 앱을 끌 때 — 유령 전부를 걷는다(껍데기 kill·명부 파일·소켓 삭제). 안 부르면
+/// 프로세스 종료로는 Drop 이 안 돌아 껍데기 sleep 이 고아로 남고, 그 pid 가 사는 한
+/// 죽은 원격이 ListAgents 에 그대로 뜬다(2026-09-16 실측: 앱을 TERM 으로 끝내니
+/// 유령 파일·sleep 이 남았다). 다음 부팅의 sweep 이 뒷정리는 하지만, 그 사이가 문제다.
+pub fn shutdown() {
+    if let Ok(mut g) = ghosts().lock() {
+        let n = g.len();
+        g.clear();
+        if n > 0 {
+            eprintln!("[peermirror] 유령 {n}개 걷음(종료)");
+        }
+    }
+}
+
+/// 유령의 껍데기가 아직 살아 있고 명부 파일도 남아 있나 — 둘 중 하나라도 아니면
+/// claude 눈에서 사라진 것이라 다시 세워야 한다(2026-09-16 실측: 껍데기 sleep 이
+/// 밖에서 죽었는데 파일만 남아, 원격은 멀쩡한데 ListAgents 엔 안 떴다).
+#[cfg(unix)]
+fn ghost_alive(g: &mut Ghost) -> bool {
+    matches!(g.shell.try_wait(), Ok(None)) && g.json_path.exists()
+}
 
 /// 부팅 시 고아 유령 청소 — 앞선 카사텀이 강제종료·크래시로 죽으면 `Drop` 이 못
 /// 돌아 유령 파일·껍데기 sleep 이 남고, 껍데기 pid 가 살아 있는 한 죽은 원격이
@@ -468,11 +645,34 @@ fn relay_targets(
 #[cfg(unix)]
 fn sync_once(ghosts: &Arc<Mutex<Ghosts>>) {
     let machines = crate::machines::machines();
+    // 기계마다 병렬로 명단을 묻는다 — 순차면 죽은 기계 하나가 한 바퀴를 통째로 세운다.
+    let fetched: Vec<(crate::machines::Machine, anyhow::Result<Vec<(String, String)>>)> =
+        std::thread::scope(|sc| {
+            let hs: Vec<_> = machines
+                .iter()
+                .map(|m| {
+                    sc.spawn(move || {
+                        (m.clone(), crate::remote::fetch_peer_registry_timeout(&m.base, None, FETCH_TIMEOUT))
+                    })
+                })
+                .collect();
+            hs.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
     // 이번에 살아 있어야 할 유령 집합 — 키는 (경로표식, sid), 값은 (이름, 라벨, 경로).
     let mut want: HashMap<(String, String), (String, String, Route)> = HashMap::new();
-    for m in &machines {
-        match crate::remote::fetch_peer_registry(&m.base, None) {
+    // 명단을 못 받은 기계 — 유예 안이면 그 기계 유령은 그대로 둔다.
+    let mut keep_prefix: Vec<String> = Vec::new();
+    for (m, res) in fetched {
+        let mut st = sync_stats().lock().ok();
+        let entry = st.as_mut().map(|s| s.entry(m.label.clone()).or_default());
+        match res {
             Ok(peers) => {
+                if let Some(e) = entry {
+                    if e.last_err.take().is_some() {
+                        eprintln!("[peermirror] {} 명단 다시 받음 — 세션 {}", m.label, peers.len());
+                    }
+                    e.last_ok = Some(Instant::now());
+                }
                 for (sid, name) in peers {
                     want.insert(
                         (format!("direct:{}", m.base), sid),
@@ -480,8 +680,26 @@ fn sync_once(ghosts: &Arc<Mutex<Ghosts>>) {
                     );
                 }
             }
-            // 죽은 기계는 조용히 건너뛴다 — 그 기계 유령은 아래에서 걷힌다.
-            Err(_) => {}
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let within_grace = entry
+                    .as_ref()
+                    .and_then(|s| s.last_ok)
+                    .is_some_and(|t| t.elapsed() < KEEP_ON_FAIL);
+                if let Some(st) = entry {
+                    if st.last_err.as_deref() != Some(msg.as_str()) {
+                        eprintln!(
+                            "[peermirror] {} 명단 못 받음: {msg}{}",
+                            m.label,
+                            if within_grace { " — 유령은 잠시 유지" } else { "" }
+                        );
+                    }
+                    st.last_err = Some(msg);
+                }
+                if within_grace {
+                    keep_prefix.push(format!("direct:{}", m.base));
+                }
+            }
         }
     }
     // 릴레이 — 설정이 있으면 ①내 실세션을 등록하고 ②명단의 남의 기계 세션을 유령 후보로.
@@ -496,10 +714,11 @@ fn sync_once(ghosts: &Arc<Mutex<Ghosts>>) {
             conf.advertise_token().as_deref(),
             &local_live_sessions(),
         ) {
-            eprintln!("[peermirror] 릴레이 등록 실패 {}: {e:#}", conf.base);
+            relay_log("등록", &format!("{e:#}"), &conf.base);
         }
         match crate::remote::relay_sessions(&conf.base, token.as_deref()) {
             Ok(rows) => {
+                relay_log("명단", "", &conf.base);
                 let direct_labels: Vec<String> =
                     machines.iter().map(|m| m.label.clone()).collect();
                 let direct_sids: std::collections::HashSet<String> =
@@ -513,35 +732,83 @@ fn sync_once(ghosts: &Arc<Mutex<Ghosts>>) {
                     );
                 }
             }
-            Err(e) => eprintln!("[peermirror] 릴레이 명단 실패 {}: {e:#}", conf.base),
+            Err(e) => relay_log("명단", &format!("{e:#}"), &conf.base),
         }
     }
     let mut g = ghosts.lock().unwrap();
+    // 유예 중인 기계의 유령은 want 에 그대로 옮겨 이번 바퀴에 안 걷힌다.
+    for (key, ghost) in g.iter() {
+        if keep_prefix.iter().any(|p| &key.0 == p) && !want.contains_key(key) {
+            let route = Route::Direct { base: key.0.trim_start_matches("direct:").to_string() };
+            let label = ghost.display.rsplit_once(" (").map(|(_, l)| l.trim_end_matches(')')).unwrap_or("");
+            want.insert(key.clone(), (ghost.name.clone(), label.to_string(), route));
+        }
+    }
     // 사라진 것 제거(Drop 이 껍데기·파일·소켓 정리).
     let dead: Vec<(String, String)> =
         g.keys().filter(|k| !want.contains_key(*k)).cloned().collect();
     for k in dead {
-        g.remove(&k);
+        if let Some(gh) = g.remove(&k) {
+            eprintln!("[peermirror] 유령 걷음 {}", gh.display);
+        }
     }
-    // 새로 생긴 것 추가 + 개명 따라가기.
+    // 새로 생긴 것 추가 + 개명 따라가기 + 죽은 껍데기 되살리기.
     for (key, (name, label, route)) in want {
-        match g.get(&key) {
-            // 이름이 같으면 그대로. 다르면 걷고 새 이름으로 다시 세운다 — 앱 재시작
-            // 직후엔 자동 슬러그였다가 곧 진짜 세션 이름이 붙는데, 유령이 그걸 안
-            // 따라가면 상대는 옛 이름으로만 불린다(실측: 답장이 no agent 로 실패).
-            Some(existing) if existing.name == name => continue,
-            Some(_) => {
-                g.remove(&key);
+        // 이름이 같고 껍데기도 살아 있으면 그대로. 다르면 걷고 새 이름으로 다시
+        // 세운다 — 앱 재시작 직후엔 자동 슬러그였다가 곧 진짜 세션 이름이 붙는데,
+        // 유령이 그걸 안 따라가면 상대는 옛 이름으로만 불린다(실측: 답장이 no
+        // agent 로 실패).
+        if let Some(existing) = g.get_mut(&key) {
+            let same = existing.name == name;
+            if same && ghost_alive(existing) {
+                continue;
             }
-            None => {}
+            let why = if same { "껍데기 죽음" } else { "개명" };
+            eprintln!("[peermirror] 유령 다시 세움({why}) {}", existing.display);
+            g.remove(&key);
         }
         match spawn_ghost(route, &key.1, &name, &label) {
             Ok(ghost) => {
+                eprintln!("[peermirror] 유령 세움 {}", ghost.display);
                 g.insert(key, ghost);
             }
             Err(e) => eprintln!("[peermirror] 유령 생성 실패 {}: {e}", key.1),
         }
     }
+    // 기계별 유령 수를 상태에 적는다(라벨은 표시 이름 꼬리에서).
+    if let Ok(mut st) = sync_stats().lock() {
+        for m in st.values_mut() {
+            m.ghosts = 0;
+        }
+        for ghost in g.values() {
+            if let Some((_, l)) = ghost.display.rsplit_once(" (") {
+                if let Some(m) = st.get_mut(l.trim_end_matches(')')) {
+                    m.ghosts += 1;
+                }
+            }
+        }
+    }
+}
+
+/// 릴레이 오류는 바뀔 때만 한 줄 — 중계소가 꺼져 있으면 5초마다 같은 줄이 쌓여
+/// 로그가 그것뿐이 된다(2026-09-16 실측 3천여 줄). 빈 err 는 「풀렸다」.
+fn relay_log(what: &str, err: &str, base: &str) {
+    static LAST: OnceLock<Mutex<HashMap<&'static str, String>>> = OnceLock::new();
+    let m = LAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut last) = m.lock() else { return };
+    let key: &'static str = if what == "등록" { "등록" } else { "명단" };
+    let prev = last.get(key).cloned().unwrap_or_default();
+    if prev == err {
+        return;
+    }
+    if err.is_empty() {
+        if !prev.is_empty() {
+            eprintln!("[peermirror] 릴레이 {what} 다시 됨 {base}");
+        }
+    } else {
+        eprintln!("[peermirror] 릴레이 {what} 실패 {base}: {err}");
+    }
+    last.insert(key, err.to_string());
 }
 
 #[cfg(test)]
