@@ -34,7 +34,7 @@ class IdentityTests(unittest.TestCase):
                 queries.append(parse_qs(urlparse(self.path).query))
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(json.dumps({"character": "코하루", "persona": "너는 코하루.", "slug": "koharu"}).encode())
+                self.wfile.write(json.dumps({"character": "코하루", "persona": "너는 코하루.", "slug": "koharu", "launch_token": str(len(queries))}).encode())
             def log_message(self, *args):
                 pass
         server = HTTPServer(("127.0.0.1", 0), Handler)
@@ -53,6 +53,11 @@ class IdentityTests(unittest.TestCase):
                     self.assertEqual(target.parent, root)
                     self.assertEqual((target / "character").read_text(), "코하루")
                     self.assertEqual((target / "persona").read_text(), "너는 코하루.")
+                    self.assertIn("너는 코하루.", (target / "append.md").read_text())
+                    self.assertIn("전체 시스템 지침은 아니에요", (target / "append.md").read_text())
+                    marker = json.loads((root / "instruction-_test.json").read_text())
+                    self.assertEqual(marker["path"], str(target / "append.md"))
+                    self.assertEqual(marker["launch_token"], str(len(queries)))
                     self.assertEqual(queries[-1]["sid"], [SID])
                 self.assertEqual(len(queries), 2, "one request per launch, not separate name/persona reads")
                 fresh_sids = []

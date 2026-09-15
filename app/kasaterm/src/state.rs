@@ -888,6 +888,10 @@ pub(crate) struct FileTreeState {
     /// 개인/프로젝트 CLAUDE.md·프로젝트 MEMORY.md 로의 원클릭. 스크롤과 무관하게
     /// 고정 위치라 별도 벡터로 둔다(스크롤하는 `rects` 와 분리). 매 paint 재생성.
     pub(crate) quick_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
+    // Reading a document must not replace the terminal whose instructions it describes.
+    pub(crate) instruction_pane: Option<String>,
+    pub(crate) instruction_launches: std::collections::HashMap<String, String>,
+    pub(crate) instruction_cache: Option<(std::time::Instant, String, Vec<(String, Option<std::path::PathBuf>, &'static str)>)>,
     pub(crate) visible: bool,
     pub(crate) w_logical: f32,
     pub(crate) resize: Option<(f32, f32)>,

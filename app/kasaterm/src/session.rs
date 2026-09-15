@@ -4552,6 +4552,7 @@ impl App {
                 raw.split('\n').map(|s| s.to_string()).collect()
             });
             PaneContent::Markdown(MarkdownPane {
+                saved_text: raw.clone(),
                 doc,
                 is_md_doc: is_md,
                 raw_mode: !is_md,

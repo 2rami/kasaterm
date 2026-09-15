@@ -74,6 +74,20 @@ def main():
     # its own session selection and must never inherit a pane-creation UUID.
     injected_sid = sid if harness == "claude" and fresh and "--session-id" not in args else ""
     (destination / "session_id").write_text(injected_sid, encoding="utf-8")
+    # The viewer follows this exact run, never a newly edited character preset.
+    (destination / "append.md").write_text(
+        f"# {identity['character']}의 추가 지침\n\n"
+        "실행 당시 카사텀이 전달한 추가 지침 사본이에요. 전체 시스템 지침은 아니에요.\n"
+        "수정해도 실행 중인 대화에는 반영되지 않아요.\n\n"
+        + (identity["persona"] or "이 실행은 캐릭터 추가 지침을 사용하지 않아요."),
+        encoding="utf-8",
+    )
+    safe_pane = "".join(c if c.isascii() and c.isalnum() else "_" for c in pane)
+    marker = shim / ("instruction-" + safe_pane + ".json")
+    temporary = destination / "instruction.json"
+    temporary.write_text(json.dumps({"launch_token": identity.get("launch_token", ""),
+                                     "path": str(destination / "append.md")}), encoding="utf-8")
+    temporary.replace(marker)
     if requested:
         for ext in ("character", "persona", "model", "backend", "slug"):
             (shim / f"repersona-{pane}.{ext}").unlink(missing_ok=True)

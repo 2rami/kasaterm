@@ -3147,7 +3147,9 @@ impl App {
                     self.save_active_editor();
                     return;
                 }
-                if is_raw && self.md_editor_shortcut(event) {
+                let view_undo = matches!(event.physical_key,
+                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyZ));
+                if (is_raw || view_undo) && self.md_editor_shortcut(event) {
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }

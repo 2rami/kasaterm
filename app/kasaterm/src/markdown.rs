@@ -286,6 +286,56 @@ fn next_word_col(chars: &[char], col: usize) -> usize {
 }
 
 impl MarkdownPane {
+    pub(crate) fn refresh_preview(&mut self) {
+        if self.is_md_doc && !self.raw_mode {
+            let text = self.text_for_save();
+            self.doc = Arc::new(build_markdown_doc(std::path::Path::new(&self.doc.path), &text));
+        }
+    }
+
+    pub(crate) fn toggle_task(&mut self, block: usize) -> bool {
+        if self.raw_mode || !matches!(self.doc.blocks.get(block), Some(MdBlock::ListItem { task: Some(_), .. })) {
+            return false;
+        }
+        let Some(&line) = self.doc.block_lines.get(block) else { return false };
+        let text = self.text_for_save();
+        let start = text.split_inclusive('\n').take(line).map(str::len).sum::<usize>();
+        let end = start + text.get(start..).and_then(|s| s.split('\n').next()).map_or(0, str::len);
+        let marker = pulldown_cmark::Parser::new_ext(&text, pulldown_cmark::Options::ENABLE_TASKLISTS)
+            .into_offset_iter()
+            .find_map(|(event, range)| match event {
+                pulldown_cmark::Event::TaskListMarker(checked) if range.start >= start && range.start < end => Some((range.start, checked)),
+                _ => None,
+            });
+        let Some((offset, checked)) = marker else { return false };
+        if text.get(offset..offset + 3).is_none_or(|s| !matches!(s, "[ ]" | "[x]" | "[X]")) {
+            return false;
+        }
+        if self.edit_lines.is_empty() {
+            self.edit_lines = Arc::new(text.split('\n').map(String::from).collect());
+        }
+        self.push_undo(EditKind::Other);
+        self.lines_mut()[line].replace_range(offset - start + 1..offset - start + 2, if checked { " " } else { "x" });
+        self.touch();
+        self.refresh_preview();
+        true
+    }
+
+    pub(crate) fn save_document(&mut self) -> std::io::Result<()> {
+        let text = self.text_for_save();
+        match std::fs::read_to_string(&self.doc.path) {
+            Ok(disk) if disk != self.saved_text && disk != text => {
+                return Err(std::io::Error::other("다른 곳에서 문서가 변경되어 저장하지 않았어요. 편집 내용은 남아 있어요"));
+            }
+            Ok(_) => {}
+            Err(error) => return Err(error),
+        }
+        write_atomic(&self.doc.path, &text)?;
+        self.saved_text = text;
+        self.mark_saved();
+        Ok(())
+    }
+
     /// Normalized selection as (start, end) in (line, col), start < end.
     /// None when there's no anchor or the selection is empty. Out-of-range
     /// endpoints (buffer shrank under a stale anchor) clamp to the buffer.
@@ -615,6 +665,7 @@ impl MarkdownPane {
         self.set_carets(carets);
         self.last_edit = EditKind::Break;
         self.touch();
+        self.refresh_preview();
     }
 
     /// Insert `text` (a committed Hangul syllable or a single typed segment) at
@@ -3006,9 +3057,9 @@ impl App {
         let outcome = {
             let mut ws = self.ws.lock().unwrap();
             let Some(pane) = ws.active_mut() else { return false };
-            let job = pane.markdown().map(|m| (m.text_for_save(), m.doc.path.clone()));
-            let Some((text, path)) = job else { return false };
-            match write_atomic(&path, &text) {
+            let Some(m) = pane.markdown_mut() else { return false };
+            let path = m.doc.path.clone();
+            match m.save_document() {
                 Ok(()) => {
                     if let Some(m) = pane.markdown_mut() {
                         m.mark_saved();
@@ -3692,14 +3743,11 @@ impl App {
         true
     }
 
-    /// 렌더 뷰에서 할 일 체크박스를 눌렀을 때 그 줄을 `- [ ]`↔`- [x]` 로 뒤집고
-    /// 파일에 되쓴 뒤 다시 파싱한다. `md_task_rects`(그리는 프레임마다 gpu 가 채운다)
-    /// 는 Raw 모드에선 비어 있어 거기선 안 걸린다. 되쓰기는 그 한 줄만 바꾸고
-    /// 나머지 바이트는 그대로 둔다 — 원본 서식을 건드리면 안 되기 때문이다.
+    /// 체크도 편집 버퍼를 거쳐야 저장 정책과 실행 취소가 다른 편집과 같아진다.
     pub(crate) fn md_task_click(&mut self, id: &str, px: f32, py: f32) -> bool {
         let bi = {
-            let Some(g) = self.gpu.as_ref() else { return false };
-            g.md_task_rects
+            let Some(hits) = self.md_task_hits.get(id) else { return false };
+            hits
                 .iter()
                 .find(|(x, y, w, h, _)| px >= *x && px <= *x + *w && py >= *y && py <= *y + *h)
                 .map(|t| t.4)
@@ -3708,22 +3756,9 @@ impl App {
         let Ok(mut ws) = self.ws.lock() else { return false };
         let Some(pane) = ws.panes.get_mut(id) else { return false };
         let Some(m) = pane.markdown_mut() else { return false };
-        if m.raw_mode {
-            return false;
-        }
-        let Some(&line_no) = m.doc.block_lines.get(bi) else { return false };
-        let path = m.doc.path.clone();
-        let mut lines: Vec<String> = m.doc.raw.split('\n').map(|s| s.to_string()).collect();
-        let Some(line) = lines.get_mut(line_no) else { return false };
-        if !toggle_task_marker(line) {
-            return false;
-        }
-        let text = lines.join("\n");
-        if write_atomic(&path, &text).is_err() {
-            return false;
-        }
-        m.doc = std::sync::Arc::new(crate::build_markdown_doc(std::path::Path::new(&path), &text));
+        if !m.toggle_task(bi) { return false; }
         pane.dirty = true;
+        self.chrome_dirty = true;
         true
     }
 
@@ -3897,8 +3932,8 @@ impl App {
     pub(crate) fn try_copy_md_block(&mut self) -> bool {
         let (cx, cy) = self.cursor_px;
         let code = {
-            let Some(g) = self.gpu.as_ref() else { return false };
-            g.md_copy_rects
+            let Some(hits) = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone()).and_then(|id| self.md_copy_hits.get(&id)) else { return false };
+            hits
                 .iter()
                 .find(|(x, y, w, h, _)| cx >= *x && cx <= *x + *w && cy >= *y && cy <= *y + *h)
                 .map(|(_, _, _, _, c)| c.clone())
@@ -3916,9 +3951,8 @@ impl App {
     /// Returns true if a link was opened (so the caller skips other handling).
     pub(crate) fn try_open_md_link(&mut self) -> bool {
         let (cx, cy) = self.cursor_px;
-        let Some(g) = self.gpu.as_ref() else { return false };
-        let dest = g
-            .md_link_rects
+        let Some(hits) = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone()).and_then(|id| self.md_link_hits.get(&id)) else { return false };
+        let dest = hits
             .iter()
             .find(|(x, y, w, h, _)| cx >= *x && cx <= *x + *w && cy >= *y && cy <= *y + *h)
             .map(|(_, _, _, _, d)| d.clone());
@@ -3971,56 +4005,75 @@ impl App {
     }
 }
 
-/// 한 줄에서 첫 할 일 마커(`- [ ]`/`* [ ]`/`+ [ ]`, 상태 ` `·`x`·`X`)를 뒤집는다.
-/// 들여쓰기·마커·나머지 글자는 그대로 둔다. 계산한 오프셋으로만 잘라 멀티바이트
-/// 본문이 있어도 경계에서 안 깨진다(마커부는 전부 ASCII).
-fn toggle_task_marker(line: &mut String) -> bool {
-    let indent = line.len() - line.trim_start().len();
-    let rest = &line[indent..];
-    let after = match rest
-        .strip_prefix("- ")
-        .or_else(|| rest.strip_prefix("* "))
-        .or_else(|| rest.strip_prefix("+ "))
-    {
-        Some(a) => a,
-        None => return false,
-    };
-    if after.len() < 3 {
-        return false;
-    }
-    let box_start = line.len() - after.len();
-    let new = match &after[..3] {
-        "[ ]" => "[x]",
-        "[x]" | "[X]" => "[ ]",
-        _ => return false,
-    };
-    line.replace_range(box_start..box_start + 3, new);
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn 체크박스_마커만_뒤집고_나머지는_그대로() {
-        let mut l = "- [ ] 할 일".to_string();
-        assert!(toggle_task_marker(&mut l)); assert_eq!(l, "- [x] 할 일");
-        assert!(toggle_task_marker(&mut l)); assert_eq!(l, "- [ ] 할 일");
-        let mut i = "  - [x] 들여쓴 일".to_string();
-        assert!(toggle_task_marker(&mut i)); assert_eq!(i, "  - [ ] 들여쓴 일");
-        let mut star = "* [X] 별표".to_string();
-        assert!(toggle_task_marker(&mut star)); assert_eq!(star, "* [ ] 별표");
-        // 체크박스가 아닌 줄은 안 건드린다
-        let mut plain = "- 그냥 목록".to_string();
-        assert!(!toggle_task_marker(&mut plain)); assert_eq!(plain, "- 그냥 목록");
-        let mut head = "# 제목 [ ] 아님".to_string();
-        assert!(!toggle_task_marker(&mut head));
+    fn task_pane(text: &str) -> MarkdownPane {
+        let mut m = pane(&[]);
+        m.is_md_doc = true;
+        m.raw_mode = false;
+        m.doc = Arc::new(build_markdown_doc(std::path::Path::new("/tmp/check.md"), text));
+        m.saved_text = text.to_string();
+        m
     }
 
+    #[test]
+    fn task_edit_preserves_bytes_and_roundtrips_undo() {
+        let text = "# 한글\r\n\r\n- [ ] 부모\r\n  - [X] 자식\r\n\r\n1. [ ] 번호\r\n\r\n> - [ ] 인용\r\n\r\n```md\n- [ ] 코드\n```\n";
+        let mut m = task_pane(text);
+        let blocks: Vec<_> = m.doc.blocks.iter().enumerate().filter_map(|(i, b)| matches!(b, MdBlock::ListItem { task: Some(_), .. }).then_some(i)).collect();
+        assert_eq!(blocks.len(), 4);
+        for block in blocks {
+            let before = m.text_for_save();
+            assert!(m.toggle_task(block), "block={block} source={:?}", m.doc.block_lines);
+            let after = m.text_for_save();
+            assert_eq!(before.len(), after.len());
+            assert_eq!(before.bytes().zip(after.bytes()).filter(|(a,b)| a != b).count(), 1);
+            assert!(m.modified);
+            assert!(m.do_undo());
+            assert_eq!(m.doc.raw, before);
+            assert!(m.do_redo());
+            assert_eq!(m.doc.raw, after);
+        }
+        assert!(m.doc.raw.contains("```md\n- [ ] 코드\n```"));
+    }
+
+    #[test]
+    fn task_keeps_unsaved_text_and_checks_disk_before_save() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-task-save-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fixture.md");
+        let original = "- [ ] 할 일\n";
+        std::fs::write(&path, original).unwrap();
+        let mut m = task_pane(original);
+        m.doc = Arc::new(build_markdown_doc(&path, original));
+        m.edit_lines = Arc::new(vec!["- [ ] 할 일".into(), "미저장 메모".into()]);
+        m.touch();
+        m.refresh_preview();
+        assert!(m.toggle_task(0));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(m.text_for_save(), "- [x] 할 일\n미저장 메모");
+        std::fs::write(&path, "다른 편집자의 내용").unwrap();
+        assert!(m.save_document().is_err());
+        assert!(m.modified);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "다른 편집자의 내용");
+        std::fs::write(&path, original).unwrap();
+        m.save_document().unwrap();
+        assert!(!m.modified);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), m.text_for_save());
+        assert!(m.do_undo());
+        m.save_document().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [ ] 할 일\n미저장 메모");
+        std::fs::remove_file(&path).unwrap();
+        assert!(m.save_document().is_err());
+        assert!(!path.exists());
+        std::fs::remove_dir(&dir).unwrap();
+    }
 
     fn pane(lines: &[&str]) -> MarkdownPane {
         MarkdownPane {
             doc: Arc::new(build_markdown_doc(std::path::Path::new("/tmp/t.rs"), "")),
+            saved_text: String::new(),
             is_md_doc: false,
             raw_mode: true,
             edit_lines: lines.iter().map(|s| s.to_string()).collect::<Vec<_>>().into(),

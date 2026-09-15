@@ -989,6 +989,13 @@ pub fn collab_protocol() -> String {
     DEFAULT_COLLAB_PROTOCOL.to_string()
 }
 
+/// The editable source can differ from the preferred save location before an override exists.
+pub fn collab_protocol_source_path() -> Option<PathBuf> {
+    protocol_candidate_paths().into_iter().find(|path| {
+        std::fs::read_to_string(path).is_ok_and(|text| !text.trim().is_empty())
+    })
+}
+
 /// 캐릭터의 claude_color(characters.json) — teammate 스폰 `--agent-color` 용. 팔레트 밖
 /// 값(프라나=magenta)이 실재하므로 8색 정규화는 team::normalize_agent_color 가 맡는다.
 pub fn claude_color_for(chars: &Value, name: &str) -> Option<String> {

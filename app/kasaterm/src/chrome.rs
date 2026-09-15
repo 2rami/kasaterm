@@ -94,6 +94,90 @@ fn memory_vault_dir() -> Option<std::path::PathBuf> {
         .find(|p| p.is_dir())
 }
 
+fn instruction_pair(label: &str, claude: std::path::PathBuf, codex: std::path::PathBuf) -> Vec<(String, std::path::PathBuf, &'static str)> {
+    let same = std::fs::canonicalize(&claude).ok().zip(std::fs::canonicalize(&codex).ok())
+        .is_some_and(|(a, b)| a == b);
+    if same { return vec![(label.into(), claude, "braces")]; }
+    [("Claude", claude, "claude"), ("Codex", codex, "codex")].into_iter()
+        .filter(|(_, path, _)| path.is_file())
+        .map(|(name, path, icon)| (format!("{label} · {name}"), path, icon)).collect()
+}
+
+fn instruction_snapshot(pane: &str, token: &str) -> Option<std::path::PathBuf> {
+    let shim = std::path::PathBuf::from(std::env::var_os("KASATERM_TMUX_SHIM_DIR")?);
+    instruction_snapshot_in(&shim, pane, token)
+}
+
+fn instruction_snapshot_in(shim: &std::path::Path, pane: &str, token: &str) -> Option<std::path::PathBuf> {
+    let safe: String = pane.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(shim.join(format!("instruction-{safe}.json"))).ok()?).ok()?;
+    if value.get("launch_token")?.as_str()? != token { return None; }
+    let path = std::path::PathBuf::from(value.get("path")?.as_str()?);
+    (path.starts_with(shim) && path.is_file()).then_some(path)
+}
+
+fn focused_instruction_pane(ws: &Workspace) -> Option<String> {
+    let pane = ws.panes.get(ws.active_pane.as_deref()?)?;
+    pane.tabs.get(pane.active_tab)?.pid.clone()
+}
+
+#[cfg(test)]
+mod quick_instruction_tests {
+    use super::*;
+
+    #[test]
+    fn focus_follows_terminal_tabs_but_documents_have_no_new_instruction_owner() {
+        let mut ws = Workspace::default();
+        let mut pane = PaneState::default();
+        pane.tabs = vec![
+            PaneTab { pid: Some("%1".into()), ..Default::default() },
+            PaneTab { pid: Some("%2".into()), ..Default::default() },
+            PaneTab::default(),
+        ];
+        ws.panes.insert("%1".into(), pane);
+        ws.active_pane = Some("%1".into());
+        assert_eq!(focused_instruction_pane(&ws).as_deref(), Some("%1"));
+        ws.panes.get_mut("%1").unwrap().active_tab = 1;
+        assert_eq!(focused_instruction_pane(&ws).as_deref(), Some("%2"));
+        ws.panes.get_mut("%1").unwrap().active_tab = 2;
+        assert!(focused_instruction_pane(&ws).is_none());
+    }
+
+    #[test]
+    fn instruction_pair_preserves_distinct_sources_and_omits_missing_files() {
+        let dir = std::env::temp_dir().join(kasa_mcp::character::new_session_id());
+        std::fs::create_dir(&dir).unwrap();
+        let claude = dir.join("CLAUDE.md");
+        let codex = dir.join("AGENTS.md");
+        std::fs::write(&claude, "claude rules").unwrap();
+        assert_eq!(instruction_pair("공통 지침", claude.clone(), codex.clone()).len(), 1);
+        std::fs::write(&codex, "codex rules").unwrap();
+        assert_eq!(instruction_pair("공통 지침", claude.clone(), codex.clone()).len(), 2);
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&codex).unwrap();
+            std::os::unix::fs::symlink(&claude, &codex).unwrap();
+            let rows = instruction_pair("공통 지침", claude, codex);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, "공통 지침");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn snapshot_requires_the_current_launch_and_matching_pane() {
+        let dir = std::env::temp_dir().join(kasa_mcp::character::new_session_id());
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("append.md");
+        std::fs::write(&path, "original launch instructions").unwrap();
+        std::fs::write(dir.join("instruction-_2.json"), serde_json::json!({"launch_token": "new-run", "path": path}).to_string()).unwrap();
+        assert_eq!(instruction_snapshot_in(&dir, "%2", "new-run"), Some(path));
+        assert!(instruction_snapshot_in(&dir, "%2", "old-run").is_none());
+        assert!(instruction_snapshot_in(&dir, "%3", "new-run").is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 impl App {
     /// pane 의 표시용 학생 — "터미널은 파싱만"(거노): claude sessionId 바인딩이 정본,
     /// agents/attach 뷰 pane 은 파싱 전 스폰 랜덤(ws.pane_character)을 보여주지 않는다
@@ -2799,59 +2883,69 @@ impl App {
             .unwrap_or(1.0);
         dpi * self.ui_zoom
     }
-    /// "빠른 파일" 고정 섹션 목록: (라벨, 경로, 아이콘 이름). ① 개인 CLAUDE.md
-    /// (~/.claude/CLAUDE.md) 는 항상, ② 프로젝트 CLAUDE.md(트리 root/CLAUDE.md)·
-    /// ③ 프로젝트 메모리(root/.memory/MEMORY.md, symlink 허용→exists) 는 있을 때만.
-    /// codex 짝(개인 ~/.codex/AGENTS.md · 프로젝트 root/AGENTS.md)도 있을 때만 넣는다 —
-    /// codex pane 도 claude 처럼 자기 지시 파일을 한 번에 열게.
-    /// ⚠️ 아이콘 "codex" 는 codex.svg 가 아직 없으면 gpu.rs match 에서 None 으로
-    /// 빠져 아이콘만 안 뜬다(빌드는 안 깨진다). svg 들어오면 gpu.rs 에 arm 추가 필요.
-    pub(crate) fn quick_files(&self) -> Vec<(&'static str, std::path::PathBuf, &'static str)> {
-        let mut out: Vec<(&'static str, std::path::PathBuf, &'static str)> = Vec::new();
+    pub(crate) fn track_instruction_pane(&mut self) {
+        if let Some(pane) = focused_instruction_pane(&self.ws.lock().unwrap()) {
+            self.file_tree.instruction_pane = Some(pane);
+        }
+    }
+
+    pub(crate) fn quick_files(&mut self) -> Vec<(String, Option<std::path::PathBuf>, &'static str)> {
+        let ws = self.ws.lock().unwrap();
+        let selected = self.file_tree.instruction_pane.as_deref()
+            .filter(|pane| ws.outer_for_pty(pane).is_some_and(|outer| {
+                self.pty_layout.as_ref().is_some_and(|layout| layout.leaves().into_iter().any(|leaf| leaf == &outer))
+            }));
+        let character = selected.and_then(|pane| self.display_tab_char(&ws, pane));
+        let token = selected.and_then(|pane| self.file_tree.instruction_launches.get(pane));
+        let cache_key = format!("{:?}:{:?}:{:?}:{:?}", selected, token, character, self.file_tree.root);
+        if let Some((at, key, rows)) = &self.file_tree.instruction_cache {
+            if key == &cache_key && at.elapsed() < std::time::Duration::from_secs(1) {
+                return rows.clone();
+            }
+        }
+        let snapshot = selected.and_then(|pane| {
+            instruction_snapshot(pane, token?)
+        });
+        drop(ws);
+
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut add = |label: String, path: std::path::PathBuf, icon| {
+            if path.is_file() {
+                let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+                if seen.insert(canonical.clone()) { out.push((label, Some(canonical), icon)); }
+            }
+        };
         if let Some(home) = kasa_socket::home_dir() {
-            out.push(("개인 CLAUDE.md", home.join(".claude/CLAUDE.md"), "claude"));
-            let agents = home.join(".codex/AGENTS.md");
-            if agents.exists() {
-                out.push(("개인 AGENTS.md", agents, "codex"));
+            for (label, path, icon) in instruction_pair("공통 지침", home.join(".claude/CLAUDE.md"), home.join(".codex/AGENTS.md")) {
+                add(label, path, icon);
             }
         }
         if let Some(root) = self.file_tree.root.as_ref() {
-            let proj = root.join("CLAUDE.md");
-            if proj.exists() {
-                out.push(("프로젝트 CLAUDE.md", proj, "claude"));
-            }
-            let agents = root.join("AGENTS.md");
-            if agents.exists() {
-                out.push(("프로젝트 AGENTS.md", agents, "codex"));
-            }
-            let mem = root.join(".memory/MEMORY.md");
-            if mem.exists() {
-                out.push(("프로젝트 메모리", mem, "braces"));
+            for (label, path, icon) in instruction_pair("프로젝트 지침", root.join("CLAUDE.md"), root.join("AGENTS.md")) {
+                add(label, path, icon);
             }
         }
-        // 오토메모리 볼트 — 세션마다 자동으로 실리는 **루트 인덱스**와, 지금 열어 둔
-        // 프로젝트의 **폴더 인덱스**. 루트는 상한이 있어 폴더 목록만 담고 토픽 훅은
-        // 폴더 인덱스에 있으므로, 둘을 같이 걸어야 실제로 읽을 것이 손에 닿는다.
-        // 폴더 이름은 프로젝트 폴더 이름과 같을 때만 맞춘다 — 추측해서 엉뚱한 폴더를
-        // 걸면 「내 메모리가 아닌 것」이 열려 더 나쁘다.
+        if let Some(path) = kasa_mcp::character::collab_protocol_source_path() {
+            add("카사텀 협업 지침".into(), path, "braces");
+        }
+        if let Some(root) = self.file_tree.root.as_ref() {
+            add("메모리 핸드오프 · 프로젝트".into(), root.join(".memory/MEMORY.md"), "braces");
+        }
         if let Some(vault) = memory_vault_dir() {
-            let root_idx = vault.join("MEMORY.md");
-            if root_idx.exists() {
-                out.push(("오토메모리", root_idx, "braces"));
-            }
-            if let Some(name) = self
-                .file_tree
-                .root
-                .as_ref()
-                .and_then(|r| r.file_name())
-                .and_then(|s| s.to_str())
-            {
-                let folder_idx = vault.join(name).join(format!("{name}.md"));
-                if folder_idx.exists() {
-                    out.push(("오토메모리 · 이 프로젝트", folder_idx, "braces"));
-                }
+            add("메모리 핸드오프".into(), vault.join("MEMORY.md"), "braces");
+            if let Some(name) = self.file_tree.root.as_ref().and_then(|r| r.file_name()).and_then(|s| s.to_str()) {
+                add("프로젝트 메모리".into(), vault.join(name).join(format!("{name}.md")), "braces");
             }
         }
+        if let Some(name) = character {
+            let label = if snapshot.is_some() { format!("{name} · 실행 때 추가 지침") }
+                else { format!("{name} · 추가 지침 기록 없음") };
+            // Keep the execution-specific row next to the shared instruction sources.
+            let position = out.iter().position(|(label, _, _)| label.starts_with("메모리") || label == "프로젝트 메모리").unwrap_or(out.len());
+            out.insert(position, (label, snapshot, "braces"));
+        }
+        self.file_tree.instruction_cache = Some((std::time::Instant::now(), cache_key, out.clone()));
         out
     }
     /// Adjust the whole-UI zoom by `delta` (additive on the multiplier).
@@ -3390,11 +3484,10 @@ impl App {
     pub(crate) fn save_dirty_docs(&mut self, docs: &[(DirtyDoc, String)]) -> bool {
         let mut ok = true;
         for (doc, name) in docs {
-            let Some((text, path)) = self.doc_text(doc) else {
+            let Some(result) = self.save_doc_checked(doc) else {
                 continue;
             };
-            if let Err(e) = crate::markdown::write_atomic(&path, &text) {
-                eprintln!("[editor] 저장 실패 {path}: {e}");
+            if let Err(e) = result {
                 self.set_toast(format!("⚠ {name} 저장 실패: {e}"));
                 if let DirtyDoc::Aux(id) = doc {
                     self.set_aux_status(*id, format!("저장 실패: {e}"));
@@ -3483,28 +3576,33 @@ impl App {
     /// `save_dirty_docs` without the failure toast — see `run_editor_autosave`.
     fn save_dirty_docs_quiet(&mut self, docs: &[DirtyDoc]) {
         for doc in docs {
-            let job = self.doc_text(doc);
-            let Some((text, path)) = job else { continue };
-            match crate::markdown::write_atomic(&path, &text) {
+            let Some(result) = self.save_doc_checked(doc) else { continue };
+            match result {
                 Ok(()) => self.mark_doc_clean(doc),
-                Err(e) => eprintln!("[editor] 자동 저장 실패 {path}: {e}"),
+                Err(e) => {
+                    if let DirtyDoc::Aux(id) = doc {
+                        self.set_aux_status(*id, format!("자동 저장 실패: {e}"));
+                    } else {
+                        self.set_toast(format!("자동 저장 실패: {e}"));
+                    }
+                }
             }
         }
     }
 
-    fn doc_text(&self, doc: &DirtyDoc) -> Option<(String, String)> {
+    fn save_doc_checked(&mut self, doc: &DirtyDoc) -> Option<std::io::Result<()>> {
         match doc {
             DirtyDoc::Tab { pane, tab } => {
-                let ws = self.ws.lock().unwrap();
+                let mut ws = self.ws.lock().unwrap();
                 ws.panes
-                    .get(pane)
-                    .and_then(|p| p.tabs.get(*tab))
-                    .and_then(|t| t.markdown())
-                    .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone()))
+                    .get_mut(pane)
+                    .and_then(|p| p.tabs.get_mut(*tab))
+                    .and_then(|t| t.markdown_mut())
+                    .map(|m| { let result = m.save_document(); if result.is_err() { m.edited_at = None; } result })
             }
             DirtyDoc::Aux(id) => self
-                .aux_doc(*id)
-                .map(|editor| (editor.text_for_save(), editor.doc.path.clone())),
+                .aux_doc_mut(*id)
+                .map(|m| { let result = m.save_document(); if result.is_err() { m.edited_at = None; } result }),
         }
     }
 

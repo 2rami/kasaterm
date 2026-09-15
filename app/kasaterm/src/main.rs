@@ -1766,6 +1766,7 @@ struct TerminalPane {
 /// A markdown pane's state: the parsed doc plus the Raw editor buffer/cursor.
 struct MarkdownPane {
     doc: Arc<MarkdownDoc>,
+    saved_text: String,
     /// true only for actual `.md`/`.markdown` files. Code/text files reuse this
     /// pane as a plain Raw editor but get no "Rendered | Raw" header toggle —
     /// rendering a `.toml` as markdown would just mangle it.
@@ -5030,6 +5031,9 @@ struct App {
     /// each frame. A click in this box hit-tests to a caret position so the
     /// mouse can place the edit cursor (see `md_click_caret`).
     md_body_rects: HashMap<String, (f32, f32, f32, f32)>,
+    md_task_hits: HashMap<String, Vec<(f32, f32, f32, f32, usize)>>,
+    md_link_hits: HashMap<String, Vec<(f32, f32, f32, f32, String)>>,
+    md_copy_hits: HashMap<String, Vec<(f32, f32, f32, f32, String)>>,
     /// In-pane tab hit rects: (pane id, tab index, logical rect). Click
     /// switches that pane's active_tab. Rebuilt each header paint.
     pane_tab_rects: Vec<(String, usize, (f32, f32, f32, f32))>,
@@ -5949,6 +5953,9 @@ impl App {
             md_click_streak: None,
             md_find_rects: Vec::new(),
             md_body_rects: HashMap::new(),
+            md_task_hits: HashMap::new(),
+            md_link_hits: HashMap::new(),
+            md_copy_hits: HashMap::new(),
             pane_tab_rects: Vec::new(),
             pane_tab_close_rects: Vec::new(),
             pane_restart_chip_rects: Vec::new(),

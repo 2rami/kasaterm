@@ -41,10 +41,12 @@ impl App {
             ws.pane_launch_character.insert(pane.into(), name.clone());
         }
         self.pane_agent_launches.insert(pane.into(), pid);
+        let launch_token = kasa_mcp::character::new_session_id();
+        self.file_tree.instruction_launches.insert(pane.into(), launch_token.clone());
         self.relabel_pane(pane, &name);
         if automatic { self.last_auto_character = Some(name.clone()); }
         Ok(serde_json::json!({"character": name, "persona": persona, "slug": crate::theme::agent_slug(&name),
-            "model": model, "backend": backend}))
+            "model": model, "backend": backend, "launch_token": launch_token}))
     }
 
     pub(crate) fn release_finished_agent_identities(&mut self) {
@@ -61,6 +63,7 @@ impl App {
         for pane in finished {
             if self.pane_agent_launches.get(&pane).is_some_and(|pid| fresh.iter().any(|(p, _, _)| p == pid)) { continue; }
             self.pane_agent_launches.remove(&pane);
+            self.file_tree.instruction_launches.remove(&pane);
             self.pane_session_id.remove(&pane);
             self.pane_claude_sid.remove(&pane);
             let mut ws = self.ws.lock().unwrap();

@@ -2427,7 +2427,8 @@ impl App {
             .collect();
         // "빠른 파일" 목록 — &self 메서드라 아래 &mut self.gpu 빌림 안에서는 못 부른다.
         // 빌림 전에 스냅샷(파일트리 렌더에서 로컬로 소비).
-        let quick_files_list = self.quick_files();
+        self.track_instruction_pane();
+        let quick_files_list = if self.file_tree.visible { self.quick_files() } else { Vec::new() };
         // 아래 &mut self.gpu 빌림 안에서 &self 메서드를 못 부른다 — 미리 스냅샷.
         let dock_own_reserve = self.dock_reserve_h();
         // 학생 도트 배너 가시 상태 → 애니 타이머(handler.rs)와 damage 게이트
@@ -2712,6 +2713,9 @@ impl App {
             // Rebuilt fresh each frame so a pane toggled out of raw mode (or
             // closed) drops its caret hit box.
             self.md_body_rects.clear();
+            self.md_task_hits.clear();
+            self.md_link_hits.clear();
+            self.md_copy_hits.clear();
             let mut find_btn_hits: Vec<(String, FindBtn, (f32, f32, f32, f32))> = Vec::new();
             for (
                 id,
@@ -2808,6 +2812,9 @@ impl App {
                         .filter(|s| s.pane == *id)
                         .map(|s| (s.anchor.0, s.anchor.1, s.end.0, s.end.1));
                     let h = g.draw_markdown(&doc.blocks, doc.gen, *bx, *by, *bw, *bh, *scroll, sel);
+                    self.md_task_hits.insert(id.clone(), g.md_task_rects.clone());
+                    self.md_link_hits.insert(id.clone(), g.md_link_rects.clone());
+                    self.md_copy_hits.insert(id.clone(), g.md_copy_rects.clone());
                     // 이 pane 이 그린 낱말 사각형을 옮겨 둔다 — 복사·히트테스트가
                     // 읽고, block_ys 와 같은 이유로 pane 별로 갈라야 한다.
                     let words = std::mem::take(&mut g.md_word_rects);
@@ -5008,7 +5015,7 @@ impl App {
                     g.draw_text(
                         row_x + 6.0,
                         qy + 3.0,
-                        "빠른 파일",
+                        "지침과 핸드오프",
                         gpu::DrawOpts {
                             font_size: 10.5,
                             color: theme::text_mute(),
@@ -5022,8 +5029,8 @@ impl App {
                         let y = qy;
                         let hovered =
                             qmx >= row_x && qmx <= row_x + row_w && qmy >= y && qmy <= y + item_h;
-                        let is_open = active_file.as_deref() == Some(path.as_path());
-                        if hovered {
+                        let is_open = path.as_deref().is_some_and(|path| active_file.as_deref() == Some(path));
+                        if hovered && path.is_some() {
                             hover_rect(g, row_x, y, row_w, item_h, theme::radius_sm());
                         } else if is_open {
                             round_rect(
@@ -5042,7 +5049,9 @@ impl App {
                         let isz = 16.0_f32;
                         let iy = y + (item_h - isz) / 2.0;
                         let icon_x = row_x + 18.0;
-                        let col = if hovered || is_open {
+                        let col = if path.is_none() {
+                            theme::text_mute()
+                        } else if hovered || is_open {
                             theme::text()
                         } else {
                             theme::text_dim()
@@ -5055,7 +5064,7 @@ impl App {
                         let ltx = icon_x + isz + 8.0;
                         let lbl = crate::info::fit_text(
                             g,
-                            label,
+                            label.as_str(),
                             (row_x + row_w - 4.0 - ltx).max(0.0),
                             13.0,
                             false,
@@ -5071,9 +5080,9 @@ impl App {
                                 italic: false,
                             },
                         );
-                        self.file_tree
-                            .quick_rects
-                            .push((path.clone(), (row_x, y, row_w, item_h)));
+                        if let Some(path) = path {
+                            self.file_tree.quick_rects.push((path.clone(), (row_x, y, row_w, item_h)));
+                        }
                         qy += item_h;
                     }
                     // 구분선 — 빠른 파일과 트리 본문 사이 하이라인.
