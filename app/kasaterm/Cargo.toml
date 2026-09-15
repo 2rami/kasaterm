@@ -37,7 +37,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # 여러 pane을 추측 없이 구분하려면 그 정본을 직접 읽어야 한다. bundled는 Windows에도
 # sqlite3 CLI/개발 라이브러리를 따로 요구하지 않게 한다.
 rusqlite = { version = "0.32", features = ["bundled"] }
-# codex 설정(config.toml)을 주석·형식을 보존한 채 읽고 쓴다 — MCP 탭이 거노 개인
+# codex 설정(config.toml)을 주석·형식을 보존한 채 읽고 쓴다 — MCP 탭이 사용자 개인
 # 설정을 직접 고치므로, 통째로 재직렬화하는 파서는 쓸 수 없다.
 toml_edit = "0.22"
 # bincode-framed ScreenUpdate stream between daemon and GUI (src/stream.rs).

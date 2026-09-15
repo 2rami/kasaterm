@@ -768,7 +768,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // pane 으로 다시 지정한다.
                 // board id 가 실제 leaf 인 윈도우가 있을 때만 포커스한다 — 캐릭터/작업명/async
                 // 같은 비-leaf 집계 id 로 active_pane 을 덮으면 다음 /layout 폴에서 그 타일이
-                // 빠져 "pane 이 닫힌 것처럼" 보였다(거노: 캐릭터 클릭→학생 선택하면 닫힘).
+                // 빠져 "pane 이 닫힌 것처럼" 보였다(사용자: 캐릭터 클릭→학생 선택하면 닫힘).
                 if self.focus_surface(id) {
                     self.render_frame();
                 }
@@ -843,7 +843,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::SocketToggleGit => {
                 // 아로나 타이틀바 버튼 → 터미널 GUI git 소스컨트롤 패널. 메인 창을 띄우고
-                // (숨겨져 있으면) 둘을 타일링한 뒤 git 컬럼 토글(거노).
+                // (숨겨져 있으면) 둘을 타일링한 뒤 git 컬럼 토글(사용자).
                 if let Some(w) = &self.window {
                     w.set_visible(true);
                     w.focus_window();
@@ -1004,7 +1004,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 다르면(재배정이 stem 을 안 갱신한 자국), 현재 배정을 정본으로 stem 을
                 // 맞춘다. 안 그러면 바로 아래 apply_session_character 가 그 옛 바인딩을
                 // 읽어 pane 을 옛 캐릭터로 되돌리고, persona 재주입(http.rs /persona)도
-                // 옛 말투를 되살린다(거노 실측: 배정은 히후미인데 info·말투는 고블린).
+                // 옛 말투를 되살린다(사용자 실측: 배정은 히후미인데 info·말투는 고블린).
                 // ⚠️ **기존 바인딩이 있고 다를 때만** — 바인딩이 없는(None) 포크·bg
                 // 세션은 건드리지 않는다. 그건 apply 가 부모 상속·anchor 로 복원할 몫이고,
                 // 여기서 굳히면 그 복원을 막아 옛 「미도리→유우카 둔갑」 회귀가 난다.
@@ -1035,7 +1035,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.apply_session_character(pane, sid);
                 // 즉시 redraw — 없으면 idle 세션 attach 는 화면 업데이트가 안 흘러
                 // 다음 리드로우가 영영 없고, 교정된 학생(테두리·명찰·프사)이 사용자가
-                // 스크롤 등으로 리드로우를 강제할 때까지 옛 모습으로 남았다(거노:
+                // 스크롤 등으로 리드로우를 강제할 때까지 옛 모습으로 남았다(사용자:
                 // 스크롤 살짝 올렸다 내려야 바뀜 — 바인딩은 즉시, 픽셀만 지연).
                 self.chrome_dirty = true;
                 self.render_frame();
@@ -1097,12 +1097,12 @@ impl ApplicationHandler<UserEvent> for App {
                 // 주입한다(주입 자체는 pending_restores drain 이 시간 기반으로 처리).
                 // 세션 cwd 가 있으면 cd 를 앞에 붙여 어느 방에서 열어도 올바른 프로젝트
                 // 세션을 잇는다(claude --resume 는 cwd 의 프로젝트 기준).
-                // 세션→캐릭터 매핑이 있으면 스폰 전에 pending 배정(거노 ④) — 랜덤 둔갑을
+                // 세션→캐릭터 매핑이 있으면 스폰 전에 pending 배정(사용자 ④) — 랜덤 둔갑을
                 // 시점부터 차단하고 persona 까지 그 캐릭터로 맞춘다. 없으면 기존 랜덤.
                 // background 세션은 detach 때 fork 로 id 가 갈려(id=fork sessionId) 직접
                 // 매핑이 없을 수 있어, bg_agents 의 부모 체인을 따라 원본 학생을 찾는다.
                 // 진입 시점에 확정해야 attach 로 foreground 가 되며 폴러(kind=background)에서
-                // 빠져 상속이 끊기기 전에 고정된다(거노: 백그라운드 재진입 학생 바뀜).
+                // 빠져 상속이 끊기기 전에 고정된다(사용자: 백그라운드 재진입 학생 바뀜).
                 let direct = kasa_mcp::character::session_character(id);
                 let resolved = direct.clone().or_else(|| {
                     let mut cur = id.to_string();
@@ -1127,8 +1127,8 @@ impl ApplicationHandler<UserEvent> for App {
                 });
                 // 바인딩도 부모도 없는 세션(포크 parentSessionId 미상) — pending 을 비워두면
                 // split 상속(layout.rs, 같은 맥락 이어보기용)이 소스 pane 의 학생을 물려줘
-                // 무관한 세션이 그 학생으로 둔갑했다(거노: 왼쪽 pane 둘 다 프라나). 여기서
-                // 빈 슬롯 학생을 뽑아 확정한다 — 매핑 없는 pane 없게, 이후엔 파싱만(거노).
+                // 무관한 세션이 그 학생으로 둔갑했다(사용자: 왼쪽 pane 둘 다 프라나). 여기서
+                // 빈 슬롯 학생을 뽑아 확정한다 — 매핑 없는 pane 없게, 이후엔 파싱만(사용자).
                 let resolved = resolved.or_else(|| {
                     let members = kasa_mcp::character::roster_in_use()
                         .map(|c| kasa_mcp::character::assignable_names(&c))
@@ -1154,7 +1154,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.handoff_ime_to_active_surface();
                     // pane↔세션 transcript 즉석 확정(파싱 우선): attach 뷰는 bind hook 이
                     // 안 떠서 board discovery 의 recent-jsonl 추측이 같은 cwd 의 남의 활성
-                    // 세션에 오귀속됐다(거노: 왼쪽 pane 둘 다 프라나 + board 내용 뒤섞임).
+                    // 세션에 오귀속됐다(사용자: 왼쪽 pane 둘 다 프라나 + board 내용 뒤섞임).
                     // 세션 id 를 아는 유일한 시점인 여기서 bind_transcript 한 호출로
                     // bound(board)·SocketSessionBound(render pane_claude_sid + 캐릭터)를
                     // 정렬한다. jsonl 미존재(막 포크돼 첫 기록 전)면 기존 discovery 폴백.
@@ -1763,7 +1763,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::BgAgentsChanged => {
                 // agents/attach 뷰 pane 재바인딩을 board 폴링에만 맡기지 않는다 — 웹뷰/
                 // CLI 가 board 를 안 부르는 세션에선 rebind 가 영영 안 돌아 pane 이 스폰
-                // 로컬 랜덤에 머물렀다(거노: 이번엔 유우카로 떠). 3s 폴러에 편승해 항상
+                // 로컬 랜덤에 머물렀다(사용자: 이번엔 유우카로 떠). 3s 폴러에 편승해 항상
                 // 돈다. bind_transcript 는 proxy 이벤트(SocketSessionBound)라 다음 루프에
                 // apply_session_character 로 이어진다.
                 if let Some(be) = self.socket_backend.clone() {
@@ -1931,7 +1931,7 @@ impl ApplicationHandler<UserEvent> for App {
             // 편집 메뉴 — macOS 는 이 메뉴(Cmd+V/Cmd+C 단축키)가 있어야 아로나
             // webview 입력창 붙여넣기가 먹는다. 다만 PredefinedMenuItem::paste/copy 는
             // 그 단축키 keyDown 을 NSMenu 가 가로채 winit 까지 안 내려보내 터미널
-            // paste/copy 가 먹통이었다(거노). 그래서 Copy/Paste 만 *커스텀* 항목으로
+            // paste/copy 가 먹통이었다(사용자). 그래서 Copy/Paste 만 *커스텀* 항목으로
             // 만들어 MenuEvent 로 받고, webview 우선 위임(send_*_action) 후 안 먹으면
             // 직접 클립보드를 처리한다. Cut/SelectAll(Cmd+X/A)은 터미널이 안 쓰니 predefined 유지.
             let copy_item = MenuItem::new("복사", true, "CmdOrCtrl+C".parse::<Accelerator>().ok());
@@ -2003,7 +2003,7 @@ impl ApplicationHandler<UserEvent> for App {
         });
         // 창을 **팔레트 밝기에 맞춘다.** OS 가 이 값으로 칠하는 것들 — Windows 의
         // 스크롤바·시스템 팝업·IME 후보창, 맥의 타이틀바 글자색 — 이 앱 안쪽 색과
-        // 어긋나면 거기만 딴 세상처럼 뜬다(2026-08-31 거노: 라이트인 Catppuccin
+        // 어긋나면 거기만 딴 세상처럼 뜬다(2026-08-31 사용자: 라이트인 Catppuccin
         // Latte 를 쓰는데 그 언저리만 어두웠다).
         //
         // 전에는 `Theme::Dark` 고정이었다. 맥 타이틀바 글자를 밝은 회색으로 두려던
@@ -2022,7 +2022,7 @@ impl ApplicationHandler<UserEvent> for App {
         // `KASATERM_WINDOW_POS="x,y"` — 저장된 위치를 무시하고 거기 띄운다. 헤드리스
         // 검증용이다: 그냥 두면 테스트 인스턴스가 **저장된 자리**(=쓰던 모니터의
         // 그 자리)에 떠서 작업 화면을 덮는다. `KASATERM_NO_FOCUS` 가 키 포커스는
-        // 막아 주지만 가리는 것까지는 못 막는다(거노: "포커스 안 뺏어가게 맥북에
+        // 막아 주지만 가리는 것까지는 못 막는다(사용자: "포커스 안 뺏어가게 맥북에
         // 띄워서 해봐"). 기본 디스플레이 좌표가 (0,0) 이라 `100,100` 이면 맥북 화면이다.
         let forced_pos = std::env::var("KASATERM_WINDOW_POS").ok().and_then(|s| {
             let (a, b) = s.split_once(',')?;
@@ -2230,7 +2230,7 @@ impl ApplicationHandler<UserEvent> for App {
         //
         // 주기는 60초지만 **5초 단위로 쪼개 자며** 계정이 바뀌었는지 본다. 전에는 통째로
         // 60초를 자서, 계정을 눌러도 숫자가 최대 1분(+서버 캐시 1분) 동안 옛 계정 것으로
-        // 남았다 — 거노: "누를때마다 바뀐다는 표시가 없고".
+        // 남았다 — 사용자: "누를때마다 바뀐다는 표시가 없고".
         {
             let usage_proxy = self.proxy.clone();
             let usage_cache = self.claude_usage.clone();
@@ -2414,7 +2414,7 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     // 등록된 **모든** 계정의 한도 — 드롭다운이 누르기 전에 보여줘야 하는
-                    // 값이다(거노: "누르면 전환되버리잖아"). 활성 계정은 방금 받은 값을
+                    // 값이다(사용자: "누르면 전환되버리잖아"). 활성 계정은 방금 받은 값을
                     // 그대로 재사용하고, 나머지만 슬롯을 지정해 추가로 조회한다.
                     // 프록시가 슬롯별 토큰을 직접 읽어 **전환 없이** 답한다.
                     //
@@ -2430,7 +2430,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // 지금 쓰는 계정 값은 **매 사이클** 표에도 넣는다. 표 전체를 그 주기로만
                     // 갱신하던 동안, 드롭다운·계정 행의 숫자는 활성 계정 것마저 그동안
                     // 굳어 있었다 — 계정을 눌러 전환할 때만 움직이는 것처럼 보인 이유다
-                    // (거노 2026-08-07: "전환해야만 사용량 갱신되는데").
+                    // (사용자 2026-08-07: "전환해야만 사용량 갱신되는데").
                     // 펼쳐 놓은 동안은 나머지 슬롯도 **매 사이클** 친다. 이 화면의
                     // 쓸모가 「지금 어디로 옮기나」인데, 정작 옮겨 갈 후보의 숫자가
                     // 굳어 있으면 열어 둔 의미가 없다.
@@ -2661,7 +2661,7 @@ impl ApplicationHandler<UserEvent> for App {
                                         // 갈 곳이 없다 — 남은 계정이 전부 쿨다운이거나
                                         // 등록된 게 하나뿐이다. 전에는 여기서 **조용히**
                                         // 아무 일도 안 일어나, 리밋에 걸린 줄 모르고 손으로
-                                        // 계정마다 로그인하는 일이 벌어졌다(거노 2026-08-13:
+                                        // 계정마다 로그인하는 일이 벌어졌다(사용자 2026-08-13:
                                         // "방금도 리밋걸린거 하나씩 로그인함").
                                         //
                                         // 폴러는 60초마다 도는 백그라운드 스레드라 알림을
@@ -3516,7 +3516,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.last_divider_pos = Some(pos);
                         // Ctrl+드래그 중 하단 세로선(split_htov_at 이 만든 [..,1])이 상단
                         // 세로선과 ratio 정렬되면 관통 세로선으로 재병합 — 그때부턴 상하가
-                        // 같이 움직인다(거노: 위에랑 맞춰지면 같이). resize_drag 를 관통
+                        // 같이 움직인다(사용자: 위에랑 맞춰지면 같이). resize_drag 를 관통
                         // divider 로 전환해 이후 드래그가 상하 함께 이동한다. merge_vtoh_at
                         // 이 구조(V split + 상하 H)까지 검증하므로 일반 divider 엔 무해.
                         if self.modifiers.control_key()
@@ -4005,7 +4005,7 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     // 프로세스 행이 아니면 **학생 줄**을 본다 — 거기서 그 pane 의
-                    // 학생을 바꾼다(2026-08-25 거노: 인포에서 우클릭하게 한 거
+                    // 학생을 바꾼다(2026-08-25 사용자: 인포에서 우클릭하게 한 거
                     // 아니냐). `group_rects` 는 방 머리와 학생 머리를 한 벌로 담으므로
                     // pane id(`%N`)로 시작하는 것만 고른다.
                     let pane = self
@@ -4800,7 +4800,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // 메뉴 밖 클릭은 **닫기만 하고 소비한다.** 예전엔 pane focus 를
                         // 위해 흘려보냈는데, 메뉴가 창 하단에 뜨는 데다 pane 하단바를
                         // 여는 손잡이가 바로 그 아래라 「닫으려고 눌렀는데 하단바가
-                        // 열리는」 꼴이었다(거노 2026-08-13 지적). 팝오버 밖 클릭을
+                        // 열리는」 꼴이었다(사용자 2026-08-13 지적). 팝오버 밖 클릭을
                         // 삼키는 것이 데스크톱 관례고 Orca(radix Popover)도 그렇다.
                         return;
                     } else if chip_hit {
@@ -7151,7 +7151,7 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 // Cmd+W (macOS) / Ctrl+Shift+W: 활성 pane/탭 닫기. close_active_tab 이
-                // tab-vs-pane 판정 + job 실행 중 확인 모달까지 처리(거노: 커맨드 W 로도 닫기).
+                // tab-vs-pane 판정 + job 실행 중 확인 모달까지 처리(사용자: 커맨드 W 로도 닫기).
                 if matches!(event.state, ElementState::Pressed)
                     && !event.repeat
                     && self.host_mod()
@@ -7415,7 +7415,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // gif 애니: 멀티프레임 이미지 pane 의 현재 프레임이 delay 를 넘겼으면 다음 프레임으로
         // 넘기고 redraw. gif 가 있을 때만 WaitUntil(다음 전환 시각)로 타이머를 잡아 부드럽게
-        // 돈다(거노: 이미지 pane gif 도 재생). 정지 이미지(frames==1)엔 영향 없음.
+        // 돈다(사용자: 이미지 pane gif 도 재생). 정지 이미지(frames==1)엔 영향 없음.
         {
             let now = std::time::Instant::now();
             let mut gif_advanced = false;
@@ -8211,7 +8211,7 @@ impl App {
 ///
 /// `stale`·`account_dir` 이 필요한 이유: 화면이 "지금 값인지"와 "어느 계정 값인지"를
 /// 말해야 한다. 전에는 `usage` 만 떠서, upstream 이 막힌 옛 숫자와 방금 조회한 숫자가
-/// 화면에서 똑같이 보였고 계정을 바꿔도 표시가 안 바뀌었다(거노 2026-08-05).
+/// 화면에서 똑같이 보였고 계정을 바꿔도 표시가 안 바뀌었다(사용자 2026-08-05).
 ///
 /// `dir` 은 조회할 계정 저장소 — `None` 이면 활성 계정. 프록시가 슬롯별 토큰을 직접
 /// 읽으므로 **전환하지 않고** 남의 계정 한도를 볼 수 있다(계정 드롭다운이 그걸 쓴다).
@@ -8237,7 +8237,7 @@ fn urlencode(s: &str) -> String {
 /// 나머지를 건너뛴다**.
 ///
 /// 사용량이 실제로 움직이는 계기는 턴이 끝날 때뿐이다. 그런데 폴러는 그와 무관하게
-/// 60초를 세고 있어서, 턴이 끝난 직후에 본 숫자가 최대 1분 낡은 값이었다 — 거노
+/// 60초를 세고 있어서, 턴이 끝난 직후에 본 숫자가 최대 1분 낡은 값이었다 — 사용자
 /// 2026-08-21 「다 로그인하면 세션 사용량 실시간으로 떠야 되는데 왤케 느려」의 본체가
 /// 이쪽이다(슬롯 순차 조회는 그 위에 얹힌 두 번째 몫이었다).
 ///

@@ -372,7 +372,7 @@ pub struct DrawOpts {
 /// `text_log` 는 크롬 텍스트 draw 경로만 채운다. 입력박스 보더의 제목·pane 이름
 /// 인레이는 셀에 직접 써넣어 그 경로를 안 타므로, 하네스가 "그 자리에 무엇이
 /// 그려졌나"를 물을 수단이 없었다. 그 공백의 대가를 실제로 치렀다 — 칩 제거 관문이
-/// 폭 조건에서 조용히 돌아서는 걸 아무 판정도 못 잡아 거노 화면까지 갔다(2026-08-05).
+/// 폭 조건에서 조용히 돌아서는 걸 아무 판정도 못 잡아 사용자 화면까지 갔다(2026-08-05).
 ///
 /// 메서드가 아니라 자유 함수인 이유: 슬롯 조립(`inlay_prompt_box_*`)은 `g` 를 만들기
 /// **전에** 돌아서 `&mut GpuRenderer` 가 없다. 거기서 `self.gpu` 를 다시 빌리면
@@ -452,7 +452,7 @@ fn probe_cell_row(r: usize, row: &[kasa_bridge::screen::Cell], dim: bool, font_s
 /// `draw_cells` 진입 횟수 — `probe_cell_row` 가 "몇 번째 호출의 그리드인가"를 찍는다.
 static DRAW_CELLS_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-// OpenHuman 문서 팔레트 — 마크다운 리더를 그 앱과 같은 톤으로 그린다(거노
+// OpenHuman 문서 팔레트 — 마크다운 리더를 그 앱과 같은 톤으로 그린다(사용자
 // 2026-09-05 "오픈휴먼처럼 아예 똑같이"). 값은 openhuman `styles/tokens.css` 에서
 // 그대로 가져왔고, 테마 프리셋과 무관하게 라이트/다크만 가른다 — 리더는 그
 // 자체로 한 편의 문서라 앱 크롬 색이 아니라 문서 색을 입는다.
@@ -3202,7 +3202,7 @@ impl GpuRenderer {
     /// **재파싱은 타이핑이 멈춘 뒤로 미룬다.** `tree-sitter-highlight` 에는
     /// 증분 API 가 없어 한 글자만 바뀌어도 문서를 통째로 다시 파싱하는데,
     /// 그 값이 5736줄에서 **1키당 20.3ms**(9줄은 0.84ms)로 프레임 예산
-    /// 16.7ms 를 넘었다 — 키마다 화면을 1~2프레임 떨어뜨려 거노가 "반응이
+    /// 16.7ms 를 넘었다 — 키마다 화면을 1~2프레임 떨어뜨려 사용자가 "반응이
     /// 0.3초 느리다"고 한 그것이다(실측). 연타 중에는 버퍼 해시가 매 키마다
     /// 바뀌므로 `raw_hl_pending` 이 계속 갱신되어 파싱이 한 번도 돌지 않고,
     /// 손이 멈추면 커서 blink 스레드가 깨우는 프레임에 실려 한 번만 돈다.
@@ -3676,7 +3676,7 @@ impl GpuRenderer {
                 // 조합 중인 줄은 하이라이트를 한 프레임 접고 prefix/조합/suffix 를
                 // 직접 그린다. 예전엔 줄을 다 그린 뒤 조합 글자를 캐럿 자리에
                 // **덮어** 그려서, 편집기에선 뒤 글자와 뭉개져 어디에 쓰고 있는지
-                // 안 보였다(거노: "입력중인거 이상한 위치에 있어"). 터미널은 셀
+                // 안 보였다(사용자: "입력중인거 이상한 위치에 있어"). 터미널은 셀
                 // 격자라 덮어도 되지만 편집기는 밀어야 맞다.
                 let composing = li == cursor.0 && !preedit.is_empty();
                 // 재파싱을 미루는 동안(ts_stale)엔 **편집 중인 줄만** 줄 단위
@@ -6259,7 +6259,7 @@ fn primary_italic_font_path() -> Option<(String, u32)> {
 /// `primary` 는 실제 로드된 regular 경로 — 같은 패밀리의 `-Bold` 형제를 최우선
 /// 으로 본다. 패밀리가 어긋나면(예: primary=D2Coding, bold=JetBrains) 한글처럼
 /// bold 파일이 커버하지 않는 글자가 designed bold 를 못 타고 regular 로 폴백해
-/// "볼드가 약한" 증상이 난다(거노 2026-07-26 실측: 한글 세션명 1.22x → 1.33x).
+/// "볼드가 약한" 증상이 난다(사용자 2026-07-26 실측: 한글 세션명 1.22x → 1.33x).
 fn primary_bold_font_path(primary: &str) -> Option<(String, u32)> {
     if let Ok(p) = std::env::var("KASATERM_GRID_FONT_BOLD") {
         if !p.is_empty() && std::path::Path::new(&p).exists() {
@@ -6317,7 +6317,7 @@ fn default_font_path() -> String {
     #[cfg(target_os = "macos")]
     {
         // JetBrains Mono for Latin; Hangul falls through to D2Coding 논-Mono
-        // in the fallback chain (거노 요청 2026-07-27).
+        // in the fallback chain (사용자 요청 2026-07-27).
         //
         // 예전에 JetBrains-as-primary 를 시도했다 되돌린 적이 있는데, 그때 자간이
         // 벌어진 원인은 JetBrains 자체가 아니라 **한글을 받던 폴백이 D2Coding
@@ -6364,7 +6364,7 @@ fn default_font_path() -> String {
 /// NSView 가 창의 콘텐츠 영역을 **꽉 채우는지** 확인하고, 작으면 다시 채운다.
 /// 고쳤으면 `true`.
 ///
-/// 거노가 큰 모니터에서 본 화면(창 1510x950 안에 UI 가 754x472 로 온전히
+/// 사용자가 큰 모니터에서 본 화면(창 1510x950 안에 UI 가 754x472 로 온전히
 /// 축소돼 구석에 붙고, 빈 영역엔 우리 배경색이 아닌 NSWindow 기본색)이 바로
 /// 이 상태다. 뷰가 작아지면 그 아래(레이어·`inner_size()`·스왑체인)가 전부
 /// 사이좋게 작아지므로 **앱 내부에선 아무 모순이 안 보인다** — 어긋난 건 창과
@@ -6432,7 +6432,7 @@ pub fn ensure_view_fills_window(_window: &Window) -> bool {
 /// 세 번 오가며 실측해도 cs 는 초기값 그대로였다. 그러면 레이어는 "이 넓이를 cs 배
 /// 픽셀로 채워라" 라고 기대하는데 drawable 은 새 scale 기준이라, 2→1(내장→외부)
 /// 이동에선 텍스처가 레이어 좌상단 1/4 에만 그려지고 나머지는 우리가 안 그린
-/// NSWindow 기본색으로 남는다. 거노가 본 "큰 모니터로 옮기면 화면이 구석에 절반
+/// NSWindow 기본색으로 남는다. 사용자가 본 "큰 모니터로 옮기면 화면이 구석에 절반
 /// 크기로 처박힘" 이 이것이고, 맥북으로 되돌리면 멀쩡한 건 고쳐져서가 아니라 cs 가
 /// 원래 맞던 화면으로 돌아왔을 뿐이다.
 ///
@@ -6474,7 +6474,7 @@ pub fn ensure_layer_scale_matches(_window: &Window) -> bool {
     false
 }
 
-/// 검증 전용: NSView 를 창의 절반으로 줄여 거노가 본 상태를 그대로 만든다.
+/// 검증 전용: NSView 를 창의 절반으로 줄여 사용자가 본 상태를 그대로 만든다.
 /// `ensure_view_fills_window` 가 이걸 되돌리는지 보는 것이 이 하네스의 목적.
 #[cfg(target_os = "macos")]
 pub fn shrink_view_for_test(window: &Window) {
@@ -6991,7 +6991,7 @@ pub fn toggle_maximize_no_anim(window: &Window, _saved: &mut Option<(f64, f64, f
     window.set_maximized(!window.is_maximized());
 }
 
-/// 창을 **다른 물리 모니터로 옮긴다**. 검증 전용 — 거노가 손으로 하는
+/// 창을 **다른 물리 모니터로 옮긴다**. 검증 전용 — 사용자가 손으로 하는
 /// "맥북 화면 ↔ 큰 모니터" 이동을 헤드리스에서 그대로 일으키려면 backing
 /// scale 이 진짜로 바뀌어야 하는데, winit 이벤트는 외부에서 합성할 수 없고
 /// 레이어 속성만 흉내 내는 건 (실측으로) 증상을 재현하지 못했다. 유일하게

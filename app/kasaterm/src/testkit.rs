@@ -6,12 +6,12 @@ use super::*;
 static MDSCRIPT_LEFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// `autoboxlabel` 이 심는 가짜 transcript 자리. `/tmp/...` 로 골라 프로젝트 슬러그가
-/// 거노 실제 폴더와 안 겹치게 한다 — 그 폴더를 잘못 건드린 사고를 한 번 냈다.
+/// 사용자 실제 폴더와 안 겹치게 한다 — 그 폴더를 잘못 건드린 사고를 한 번 냈다.
 const BOXLABEL_CWD: &str = "/tmp/kasaterm-boxlabel";
 const BOXLABEL_SID: &str = "boxlabel-probe";
 
 /// `autoimgtip` 이 심는 가짜 transcript 자리 — `boxlabel` 과 같은 이유로 `/tmp/`
-/// 슬러그를 써서 거노 실제 프로젝트 폴더와 안 겹치게 한다.
+/// 슬러그를 써서 사용자 실제 프로젝트 폴더와 안 겹치게 한다.
 const IMGTIP_CWD: &str = "/tmp/kasaterm-imgtip";
 const IMGTIP_SID: &str = "imgtip-probe";
 /// 화면에 찍을 참조 번호 — 심는 jsonl 의 `imagePasteIds` 와 짝이다.
@@ -735,7 +735,7 @@ impl App {
     /// **pane 이 하나인 상태에서** `close_active_tab`(Cmd+W 가 부르는 그 함수)을 친다.
     ///
     /// 이 경로는 아무 일도 안 하던 자리다 — 마지막 pane 이면 `confirm_or_close_tab`
-    /// 이 조용히 return 해서 키가 죽은 것처럼 보였다(거노). 확인 모달이 뜨는지를
+    /// 이 조용히 return 해서 키가 죽은 것처럼 보였다(사용자). 확인 모달이 뜨는지를
     /// 로그로 못박는다. 모달만 띄우고 실제로 닫지는 않으므로 캡처도 그대로 남는다.
     /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
     pub(crate) fn run_pending_autolastclose(&mut self) {
@@ -1312,7 +1312,7 @@ impl App {
     /// 스스로 끝난 상황을 만들어 **낡은 되살리기 레코드가 산 pane 을 죽이는지**와
     /// **자원 없는 leaf 가 검은 사각형으로 남는지**를 잰다.
     ///
-    /// 2026-08-24 에 거노가 두 번 목격한 사고다. pane 을 숨기면 레코드가 `alive`
+    /// 2026-08-24 에 사용자가 두 번 목격한 사고다. pane 을 숨기면 레코드가 `alive`
     /// 로 스택에 남는데, 그 셸이 그 뒤에 죽으면 플래그가 낡는다. 그때 같은 번호를
     /// 새 pane 이 물려받으면 레코드 정리(개수 상한·15분 idle·인포의 ×)가 **남의
     /// 살아 있는 셸**을 끄고, 트리는 안 걷어 클릭도 안 되는 빈 칸이 남았다.
@@ -2055,7 +2055,7 @@ impl App {
     /// surface 크기 어긋남 재현. `KASATERM_FORCE_SURFACE_HALF_MS` 뒤에 스왑체인만
     /// 창의 절반 크기로 다시 잡는다 — 모니터를 옮길 때 Resized/ScaleFactorChanged
     /// 가 코얼레스되며 실제로 벌어지는 상태를 인위적으로 만든 것이다.
-    /// 거노 스크린샷 실측(창 1510x950 안에 콘텐츠 754x472, 빈 영역은 우리
+    /// 사용자 스크린샷 실측(창 1510x950 안에 콘텐츠 754x472, 빈 영역은 우리
     /// 배경색이 아닌 NSWindow 기본색)이 바로 이 상태다.
     pub(crate) fn run_pending_forcesurfacehalf(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -2073,7 +2073,7 @@ impl App {
             return;
         }
         let Some(size) = self.window.as_ref().map(|w| w.inner_size()) else { return };
-        // `view` = 뷰 자체를 줄인다(거노가 본 상태 — UI 가 온전한 채로 축소).
+        // `view` = 뷰 자체를 줄인다(사용자가 본 상태 — UI 가 온전한 채로 축소).
         // 그 외 = 스왑체인만 줄인다(UI 가 잘림). 두 증상이 다르다는 게
         // 원인 판별의 핵심이었다.
         if std::env::var("KASATERM_FORCE_SURFACE_HALF_KIND").as_deref() == Ok("view") {
@@ -2187,7 +2187,7 @@ impl App {
     ///
     /// 지켜야 할 불변식은 하나다 — **줌 중엔 작업영역 안 모든 점이 줌된 pane 으로
     /// 가야 한다.** 예전엔 원본 split 박스로 판정해 아래 절반이 숨은 pane 으로
-    /// 샜고(거노: "최대화하고 위치 매핑이 이상해"), 화면엔 그 pane 이 안 보이니
+    /// 샜고(사용자: "최대화하고 위치 매핑이 이상해"), 화면엔 그 pane 이 안 보이니
     /// 클릭이 사라지는 것처럼 보였다. 눈으로 보는 캡처로는 절대 안 잡히는 종류라
     /// 좌표를 직접 찍는 프로브를 남긴다.
     pub(crate) fn run_pending_autozoomprobe(&mut self) {
@@ -2358,7 +2358,7 @@ impl App {
     ///
     /// 훅(`collab-hooks/ultracode-mark.py`)은 UserPromptSubmit 이라 프롬프트가 있어야
     /// 돈다. 켜자마자 앱을 끄면 표식이 한 번도 안 써지고, 그러면 저장이 xhigh 로
-    /// 굳어 다음 실행이 ultracode 를 잃는다 — 거노가 두 번 물린 자리다. 앱이
+    /// 굳어 다음 실행이 ultracode 를 잃는다 — 사용자가 두 번 물린 자리다. 앱이
     /// transcript 를 직접 훑는 경로가 그 구간을 메우는지 본다.
     ///
     /// 판정은 **둘 다** 찍는다. 글로우(`pane_ultracode`)만 보면 화면은 맞는데 저장은
@@ -3755,7 +3755,7 @@ impl App {
         // 한글 조합 검증: KASATERM_AUTOSETTINGS_TYPE 의 자모를 계정 이름 필드에
         // 한 글자씩 먹여, 조합기가 완성 음절을 만드는지 낱자로 흘리는지 찍는다.
         // 실제 IME 없이 재현할 수 있는 건 macOS 가 OS IME 를 끄고 자모를 그대로
-        // 받기 때문 — 그 경로가 곧 거노가 치는 경로다.
+        // 받기 때문 — 그 경로가 곧 사용자가 치는 경로다.
         // 배율/폰트를 흐트러뜨린 뒤 "1:1 로 되돌리기"가 둘 다 되돌리는지. 되돌린
         // 값이 맞아도 격자를 다시 안 재면 화면만 옛 크기로 남으므로 cells 도 찍는다.
         if std::env::var("KASATERM_AUTOSETTINGS_RESET").is_ok() {
@@ -6371,7 +6371,7 @@ impl App {
             //                              시작하면 left_c 가 음수가 되어 None)
             //   ────…──── 대시보드 ──    ← 윗 테두리. 텍스트 섬을 일부러 넣어
             //                              max_label 24 분기까지 태운다(세션명이
-            //                              박히면 standing 이 사라졌던 거노 실사고).
+            //                              박히면 standing 이 사라졌던 사용자 실사고).
             //                              **라벨은 오른쪽 끝**에 둔다 — 실제 claude 가
             //                              그 모양이고, 왼쪽 대시 run 이 짧으면 좌측
             //                              제목 인레이가 폭 부족으로 포기한다(4칸으로
@@ -6438,7 +6438,7 @@ impl App {
     /// 이름의 정본은 transcript jsonl 이라 헤드리스엔 없다. 그래서 **가짜 jsonl 을
     /// 심는다** — 진짜 claude 를 띄우는 대신, 판정 대상(`pane_rename_label` →
     /// `session_rename_for`)이 손대지 않은 채로 참이 되게. 프로젝트 디렉터리는
-    /// `/tmp/...` 로 슬러그가 나게 골라 거노 실제 프로젝트 폴더를 안 건드린다.
+    /// `/tmp/...` 로 슬러그가 나게 골라 사용자 실제 프로젝트 폴더를 안 건드린다.
     ///
     /// 판정 셋: ①좌측 요약 ②우측 이름 ③**겹치지 않았나**. ③이 없으면 좌우가 한
     /// 낱말로 붙어 읽히는 실제 버그를 통과시킨다 — 신고는 "썼다"만 말하기 때문이다.
@@ -6518,11 +6518,11 @@ impl App {
         }
         self.boxlabel_seed(&pid);
         // 헤더 띠는 **일부러 켜지 않는다.** 켜면 `{캐릭터} %N` 이 띠에서도 그려져
-        // 판정이 통과하는데, 거노 화면의 학생 pane 은 대부분 단일 탭이라 띠가 없다
-        // (`has_header()` = 탭>1 ‖ 이미지 ‖ md ‖ ⋮강제; 학생 띠는 거노가 폐기,
+        // 판정이 통과하는데, 사용자 화면의 학생 pane 은 대부분 단일 탭이라 띠가 없다
+        // (`has_header()` = 탭>1 ‖ 이미지 ‖ md ‖ ⋮강제; 학생 띠는 사용자가 폐기,
         // main.rs:2146). 그러면 "하네스는 보는데 화면엔 없다"가 된다 — 오늘 그 모양에
         // 두 번 물렸다. 띠를 끈 채로 통과하면 그건 **타이틀바**가 실었다는 뜻이고,
-        // 그게 거노가 실제로 보는 자리다.
+        // 그게 사용자가 실제로 보는 자리다.
         // 여기서 한 번 그려 타이프라이터 시계를 출발시킨다. 판정은 2단계.
         self.chrome_dirty = true;
         self.render_frame();
@@ -6736,8 +6736,8 @@ impl App {
         let (left, right, never) =
             (g.drew_text(SUMMARY), g.drew_text(RENAME), g.drew_text(NEVER));
         // 정체 표시(`{캐릭터} %N`) — 보더 우측을 `/rename` 자리로 비웠으니 "이 pane 이
-        // 누구인가"는 **타이틀바**가 든다(거노 2026-08-05). 하네스가 헤더 띠를 안 켜니
-        // (그쪽 주석 참고) 이 판정이 통과하면 타이틀바가 실었다는 뜻이다 — 거노가
+        // 누구인가"는 **타이틀바**가 든다(사용자 2026-08-05). 하네스가 헤더 띠를 안 켜니
+        // (그쪽 주석 참고) 이 판정이 통과하면 타이틀바가 실었다는 뜻이다 — 사용자가
         // 단일 탭에서 실제로 보는 자리. 인레이와 달리 크롬 텍스트 draw 라 `text_log` 가
         // 직접 잡는다.
         let who = {
@@ -6815,7 +6815,7 @@ impl App {
                 None => return,
             }
         };
-        // 그리드 진단을 먼저 찍는다 — 앵커가 안 잡혔을 때 거노 실화면의
+        // 그리드 진단을 먼저 찍는다 — 앵커가 안 잡혔을 때 사용자 실화면의
         // `KASATERM_STUDENT_DEBUG` 출력과 **같은 단위**로 견줄 수 있어야 한다.
         // 여기 숫자와 실화면 숫자가 다른 지점이 곧 원인이다.
         if let Some(rows) = self
@@ -7228,7 +7228,7 @@ impl App {
         let pane = if leaves.iter().any(|s| *s == want) { want } else { leaves[0].clone() };
         // carried pane 을 제거하면 형제가 창 전체를 채운다 — 라이브 hit-test 는 그
         // base 기준이므로 커서를 *창 전체*의 가로 중앙·하단(80%)에 둬야 Down 쐐기에
-        // 확실히 떨어진다(거노가 말한 1→2 밑). 형제의 옛 rect 기준으로 두면 정규화
+        // 확실히 떨어진다(사용자가 말한 1→2 밑). 형제의 옛 rect 기준으로 두면 정규화
         // 좌표상 대각선 경계라 Right 로 새기도 했다.
         let (cols, rows) = self.window_cells();
         let pad = WINDOW_PADDING + self.effective_sidebar_w();
@@ -7772,11 +7772,11 @@ impl App {
             self.set_claude_accounts = vec![
                 crate::socket::ClaudeAccount {
                     id: "acct-2".to_string(),
-                    label: "goenho0613@naver.com".to_string(),
+                    label: "sampleuser@maila.example.test".to_string(),
                 },
                 crate::socket::ClaudeAccount {
                     id: "acct-3".to_string(),
-                    label: "goenho0613@gmail.com".to_string(),
+                    label: "sampleuser@mailb.example.test".to_string(),
                 },
             ];
             self.set_claude_account = "acct-3".to_string();
@@ -7863,7 +7863,7 @@ impl App {
             self.set_claude_account = String::new();
             // 리셋 시각을 심는다 — 이 목록은 「지금 옮길까 기다릴까」를 정하는
             // 자리라, 퍼센트만 있으면 90% 가 12분 뒤 풀리는 것인지 3시간 뒤인지
-            // 구별이 안 된다(거노 2026-08-25).
+            // 구별이 안 된다(사용자 2026-08-25).
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
@@ -7911,15 +7911,15 @@ impl App {
                 "",
                 Some(crate::settings::AuthProbe {
                     logged_in: true,
-                    email: "goenho0613@gmail.com".to_string(),
-                    org: "goenho0613@gmail.com's Organization".to_string(),
+                    email: "sampleuser@mailb.example.test".to_string(),
+                    org: "sampleuser@mailb.example.test's Organization".to_string(),
                 }),
             );
             crate::settings::seed_auth_probe(
                 "acct-2",
                 Some(crate::settings::AuthProbe {
                     logged_in: true,
-                    email: "2rami@sionic.ai".to_string(),
+                    email: "workuser@work.example.test".to_string(),
                     org: "Sionic AI".to_string(),
                 }),
             );

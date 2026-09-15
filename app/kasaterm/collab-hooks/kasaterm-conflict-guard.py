@@ -216,7 +216,7 @@ def main():
         sid = os.path.basename(jf).split(".")[0]
         who = pane or f"다른 pane({sid[:8]}…)"
         doing = f" (지금: {intent[:70]})" if intent else ""
-        # 조율 채널은 SendMessage 우선(거노 07-17) — tell 은 상대가 작업 중이면 턴이
+        # 조율 채널은 SendMessage 우선(사용자 07-17) — tell 은 상대가 작업 중이면 턴이
         # 끝나야 읽지만 teammate-message 는 작업 중에도 도착해 실시간 조율이 된다.
         # 주소 역추적이 안 되는 상대(비팀원 pane·detach 포크·꼬리 충돌)만 tell 폴백.
         addr = teammate_name(sid)

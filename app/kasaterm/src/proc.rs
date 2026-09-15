@@ -60,7 +60,7 @@ pub(crate) fn warm_open_with_apps(done: impl FnOnce() + Send + 'static) {
 
 #[cfg(target_os = "macos")]
 fn scan_open_with_apps() -> Vec<(String, String)> {
-    // 순서가 곧 메뉴 순서다. 거노가 안 쓰는 에디터(Cursor·Antigravity·Obsidian)는
+    // 순서가 곧 메뉴 순서다. 사용자가 안 쓰는 에디터(Cursor·Antigravity·Obsidian)는
     // 뺐다 — 설치돼 있다고 다 올리면 정작 쓰는 항목이 목록에 파묻힌다.
     const CANDIDATES: &[&str] = &[
         "Visual Studio Code",

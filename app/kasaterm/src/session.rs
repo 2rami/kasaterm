@@ -180,7 +180,7 @@ impl App {
             ws.active_pane = Some(update.pane_id.clone());
         }
         // 배정 캐릭터를 PaneState 에 동기 — has_header 가 이걸 보고 단일 pane 도 헤더 띠를
-        // 띄운다(거노: 터미널에도 학생 이름). 매 업데이트라 교체 시 다음 프레임에 반영.
+        // 띄운다(사용자: 터미널에도 학생 이름). 매 업데이트라 교체 시 다음 프레임에 반영.
         let pane_char = ws.pane_character.get(&update.pane_id).cloned();
         // Route the update to the *tab* whose pid matches this stream.
         // Single-tab panes round-trip through the outer id; secondary
@@ -401,7 +401,7 @@ impl App {
                 if pane_replaced(&update.pane_id, &sess_weak) {
                     return;
                 }
-                // 세션 진입 즉시 감지(거노): dirty 행에 statusline 세션 id 마커가 있으면
+                // 세션 진입 즉시 감지(사용자): dirty 행에 statusline 세션 id 마커가 있으면
                 // 그 자리에서 rebind — 3s 폴러를 기다리지 않는다. 마커는 세션 화면의
                 // 일부라 agents 피커로 진입한 첫 리드로우에 반드시 실려 온다. '⟦' 스캔은
                 // 문자 비교뿐이라 스트리밍 버스트에도 공짜에 가깝다. rebind 는 apply
@@ -478,7 +478,7 @@ impl App {
             return Vec::new();
         };
         let rslug = kasa_mcp::character::rslug(std::path::Path::new(cwd), room);
-        // 통합 풀(member_names = leader/leaders/members 병합) — god 개념 폐기(거노
+        // 통합 풀(member_names = leader/leaders/members 병합) — god 개념 폐기(사용자
         // 2026-07-13): 아로나·프라나도 별도 클래스가 아닌 같은 배정 풀에 포함한다.
         // 배정 풀 — 골라 둔 명단이 있으면 그것만, 없으면 전원(지금까지의 동작).
         let members = kasa_mcp::character::assignable_names(&chars);
@@ -512,7 +512,7 @@ impl App {
         self.ws.lock().unwrap().pane_launch_character.remove(id);
         let _ = kasa_mcp::character::write_marker(&rslug, id, &name);
         self.pane_session_id.insert(id.to_string(), sid.clone());
-        // 세션→캐릭터 영속 바인딩(거노 ④): 같은 세션이 --resume 등으로 다시 붙으면 같은
+        // 세션→캐릭터 영속 바인딩(사용자 ④): 같은 세션이 --resume 등으로 다시 붙으면 같은
         // 캐릭터를 재사용하도록 스폰 시점에 기록(apply_session_character 가 조회).
         let _ = kasa_mcp::character::bind_session_character(&sid, &name);
         self.ws
@@ -597,7 +597,7 @@ impl App {
         // 되살리기 목록에서 **아직 도는 것**의 번호도 쓰는 중이다. 레코드는 pane
         // 번호로 프로세스를 가리키는데, 그 번호를 새 pane 이 물려받으면 레코드가
         // 정리될 때(개수 상한·15분 idle·인포의 ×) 남의 살아 있는 셸을 끈다 —
-        // 2026-08-24 에 거노가 두 번 목격한 「검은 빈칸」이 그것이다.
+        // 2026-08-24 에 사용자가 두 번 목격한 「검은 빈칸」이 그것이다.
         //
         // `alive` 만 세는 것이 요점이다. 이미 죽은 레코드는 정리해도 아무것도 안
         // 놓으므로(세 정리 경로가 모두 `c.alive` 로 거른다) 번호를 잡을 이유가
@@ -615,7 +615,7 @@ impl App {
     }
     /// 지금 안 쓰는 **가장 작은** pane 번호. 예전엔 단조 증가 카운터라 열고 닫기를
     /// 반복한 하루치가 `%116` 같은 번호로 쌓였다 — 학생 이름(`아루-p116`)에도 붙고
-    /// `tell`·`dismiss` 로 부를 때마다 그걸 봐야 했다(거노: "pane 번호는 계속 늘어난다").
+    /// `tell`·`dismiss` 로 부를 때마다 그걸 봐야 했다(사용자: "pane 번호는 계속 늘어난다").
     ///
     /// 번호 재사용이 위험했던 자리는 collab 마커다: 닫힌 pane 의 `kasaterm-bound-_N` 이
     /// 남은 채 같은 번호가 다시 나면 죽은 세션이 산 것처럼 붙는다. 그래서 닫을 때
@@ -632,7 +632,7 @@ impl App {
         let (cols, rows) = self.window_cells();
         let cwd = resolve_initial_cwd();
         let id = self.alloc_pane_id();
-        // 방별 분리(거노): 이 pane 이 새 방이면 KASATERM_ROOM 을 셸 env 로 주입해 collab
+        // 방별 분리(사용자): 이 pane 이 새 방이면 KASATERM_ROOM 을 셸 env 로 주입해 collab
         // 훅이 방별 slug 를 쓰게 한다. pane_room 에도 기록(Rust collab slug 계산용).
         let mut env = crate::proxy_env(&id);
         let room = self.pending_room.take();
@@ -927,7 +927,7 @@ impl App {
             anyhow::bail!("pane {anchor} 을 어느 window 트리에서도 못 찾았다");
         }
         // 몸통이 남의 기계라도 **이 창의 학생은 같은 사람**이어야 한다 — 안 그러면
-        // 이름·색·얼굴이 없는 무명 pane 이 된다(거노: 「옮기면 왜 테마가 없어져」).
+        // 이름·색·얼굴이 없는 무명 pane 이 된다(사용자: 「옮기면 왜 테마가 없어져」).
         if let Some(name) = remote_pane
             .and_then(|p| kasa_mcp::remote::remote_pane_character(base, p, None))
             .filter(|n| !n.is_empty())
@@ -1161,7 +1161,7 @@ impl App {
                     self.alloc_pane_id()
                 };
                 // connect 가 아니라 connect_view — 거울은 원본 세션 크기를 절대
-                // 바꾸지 않는다(거노: 「미러링할때 크기 줄이면 미러링되는곳도
+                // 바꾸지 않는다(사용자: 「미러링할때 크기 줄이면 미러링되는곳도
                 // 줄어들어」). 격자가 pane 보다 크면 렌더가 그 pane 만 배율을 줄인다.
                 match kasa_mcp::remote::connect_view(
                     kasa_mcp::remote::RemoteSpec {
@@ -1390,7 +1390,7 @@ impl App {
     /// 셸은 스왑의 Drop 이 정상 철거한다.
     ///
     /// **세션 파일만 옮긴다.** 레포 준비·미push 커밋 bundle·테마 동행은 2026-09-14
-    /// 에 걷었다(거노 지시 「세션 파일만 옮기고 대화 이어가게만」) — 코드 맞추기는
+    /// 에 걷었다(사용자 지시 「세션 파일만 옮기고 대화 이어가게만」) — 코드 맞추기는
     /// git 이 할 일이고, 이사가 그걸 대신하다 큰 짐·관문으로 번번이 멈췄다. 저쪽에
     /// 같은 폴더가 없으면 홈에서 대화만 잇는다.
     ///
@@ -1571,7 +1571,7 @@ impl App {
             _ => None,
         };
         // 권한 모드를 승계한다 — 안 실으면 옮겨간 학생이 기본값(auto)으로 떠서
-        // 「왜 오토모드로 바뀌었냐」가 된다(거노 2026-08-27). 화면 문구를 읽지 않고
+        // 「왜 오토모드로 바뀌었냐」가 된다(사용자 2026-08-27). 화면 문구를 읽지 않고
         // **도는 프로세스의 인자**를 본다 — 그게 유일한 진실이다.
         // 태생 스폰(fresh)은 물려받을 인자가 없다 — 학생 스폰 관례(bypass)를 따른다.
         let bypass = match &agent {
@@ -2094,7 +2094,7 @@ impl App {
         Ok("local".into())
     }
 
-    /// bind-transcript 로 pane 의 실제 세션 id 를 인지한 시점의 캐릭터 영속화(거노 ④):
+    /// bind-transcript 로 pane 의 실제 세션 id 를 인지한 시점의 캐릭터 영속화(사용자 ④):
     /// 부모(포크/백그라운드)가 있으면 그 학생을 우선 상속하고, 없으면 세션 매핑으로
     /// 이름표를 교정(respawn 없음 — persona 는 스폰 시 고정, label·마커만 갱신,
     /// --resume 둔갑 방지), 그것도 없으면 현재 배정을 저장해 다음 resume 이 재사용한다.
@@ -2116,7 +2116,7 @@ impl App {
         // 기록(ResumeSession 해석/신선 배정, lazy own, 여기 None-arm 영속화)이라 부모가
         // 이기면 오히려 진실이 뒤집힌다: 미도리로 확정된 포크 세션(2535079b)의 부모
         // (b18e41d2)가 히마리라서, BgAgentsChanged 재적용마다 미도리→히마리로 둔갑+
-        // 재바인딩되는 지뢰였다(거노 07-16). 부모는 자기 바인딩이 없을 때만.
+        // 재바인딩되는 지뢰였다(사용자 07-16). 부모는 자기 바인딩이 없을 때만.
         match kasa_mcp::character::session_character(sid) {
             Some(mapped) => {
                 if cur.as_deref() != Some(mapped.as_str()) {
@@ -2147,7 +2147,7 @@ impl App {
                 // stem 매핑도 부모도 없는 포크/재접속(claude 가 transcript id 를 새로 발급,
                 // parentSessionId 부재) — 랜덤 cur 를 정본으로 굳히기 전에 pane 프로세스 env 의
                 // KASATERM_SESSION_ID(스폰 때 학생에 바인딩된 원본 anchor, env 상속으로 보존)로
-                // 진짜 학생을 복원한다(거노: 백그라운드 재접속에서 미도리→유우카 둔갑).
+                // 진짜 학생을 복원한다(사용자: 백그라운드 재접속에서 미도리→유우카 둔갑).
                 let anchored = self
                     .pty
                     .get(pane)
@@ -2207,7 +2207,7 @@ impl App {
     /// pane 캐릭터 재배정, respawn 없음 — 학생 명령(`시로코`)이 claude 실행 직전에
     /// `/repersona` 로 호출한다. persona 는 래퍼가 override 파일로 직접 싣고 여기선
     /// GUI 상태(헤더·테두리·board 마커·세션 바인딩)만 새 캐릭터로 맞춘다. 중복 허용
-    /// — 같은 학생 pane 은 색 변주(character_ordinal)로 구분(거노).
+    /// — 같은 학생 pane 은 색 변주(character_ordinal)로 구분(사용자).
     /// 이 pane 의 다음 claude 가 쓸 정체성을 파일로 남긴다(학생 명령과 같은 규약).
     /// spawn 때 지워지므로 새 pane 에는 안 따라간다.
     ///
@@ -2249,7 +2249,7 @@ impl App {
         // (pane_claude_sid)은 다를 수 있는데(claude 가 자기 세션 id 를 새로 발급), info
         // 그림과 persona 재주입은 **stem** 을 읽는다(chrome.rs display_tab_char·http.rs
         // /persona). stem 을 빼먹으면 재배정해도 옛 테마 캐릭터의 얼굴·말투가 남는다
-        // (거노 실측: 배정은 히후미인데 info·말투는 고블린).
+        // (사용자 실측: 배정은 히후미인데 info·말투는 고블린).
         for sid in [
             self.pane_session_id.get(pane),
             self.pane_claude_sid.get(pane),
@@ -2359,7 +2359,7 @@ impl App {
     }
 
     /// pane 캐릭터 교체 — persona 는 셸 spawn 시 고정이라 PTY 를 새 persona 로 respawn
-    /// 한다(대화 리셋, 거노 확인 후). 같은 pane id·leaf 유지라 레이아웃·자리 그대로,
+    /// 한다(대화 리셋, 사용자 확인 후). 같은 pane id·leaf 유지라 레이아웃·자리 그대로,
     /// 헤더/board 캐릭터만 다음 화면에 갱신(assign_character_env 가 ws.pane_character·마커
     /// 를 덮음).
     pub(crate) fn swap_character(&mut self, pane: &str, character: &str) {
@@ -2396,11 +2396,11 @@ impl App {
                 );
                 self.insert_pty(pane.to_string(), sess.clone());
                 // old PTY 의 EOF 가 이 pane id 를 dead_panes 에 넣었을 수 있다 — 같은 id 로
-                // respawn 했으니 그 stale 죽음표시를 지워 reap 이 새 pane 을 닫지 않게(거노:
+                // respawn 했으니 그 stale 죽음표시를 지워 reap 이 새 pane 을 닫지 않게(사용자:
                 // 캐릭터 변경하면 pane 이 닫히던 버그). reap 에 contains_key 가드도 있지만 명시.
                 self.dead_panes.lock().unwrap().retain(|x| x != pane);
                 // 새 PTY 는 셸 프롬프트만 — 교체는 돌던 claude 를 죽이므로, 프롬프트가 뜰 즈음
-                // claude 를 직접 주입해 새 persona 로 다시 시작한다(거노: 캐릭터 교체 = claude 새로.
+                // claude 를 직접 주입해 새 persona 로 다시 시작한다(사용자: 캐릭터 교체 = claude 새로.
                 // 초기 부팅은 셸만 띄워도 됐지만, 교체는 claude 가 꺼진 채 셸만 남던 게 버그였다).
                 let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
                 self.pending_restores
@@ -2418,7 +2418,7 @@ impl App {
     ///
     /// 계정은 `CLAUDE_SECURESTORAGE_CONFIG_DIR` = 프로세스 env 라 pane 이 뜰 때 박히고,
     /// 도는 프로세스의 env 는 누구도 못 바꾼다. 그래서 계정을 전환해도 이미 열려 있는
-    /// pane 은 옛 계정으로 계속 돌았다(거노 2026-08-13: "전환하면 인포랑 하단은 바뀌는데
+    /// pane 은 옛 계정으로 계속 돌았다(사용자 2026-08-13: "전환하면 인포랑 하단은 바뀌는데
     /// pane안에 세션이 인식못하나봐"). Orca 도 같은 한계를 재시작으로 푼다
     /// (`CodexRestartChip` → `queueCodexPaneRestarts`) — 자동 승계는 저쪽에도 없다.
     ///
@@ -2597,7 +2597,7 @@ impl App {
     /// 도는 프로세스의 env 는 못 바꾸므로(`restart_pane_agent` doc) 반영 수단은
     /// 재시작뿐이다. 전에는 자동 전환이 「⟳ 재시작」 칩만 띄우고 수동 전환은 그마저
     /// 없어서, 전환해 놓고 pane 안 /status 가 옛 계정인 것을 보고 "바로 안 된다"가
-    /// 됐다(거노 2026-08-15: "재시작칩없이 나도 그렇게 되게해줘"). 이제 쉬는 pane 은
+    /// 됐다(사용자 2026-08-15: "재시작칩없이 나도 그렇게 되게해줘"). 이제 쉬는 pane 은
     /// 그 자리에서 대화를 이어 재시작하고, 일하는 중인 pane 은 칩을 단 채 남겼다가
     /// 턴이 끝나면 틱(`run_pending_account_restarts`)이 마저 돌린다 — 일하는 학생을
     /// 중간에 끊으면 진행 중이던 턴이 통째로 죽기 때문이다.
@@ -3281,7 +3281,7 @@ impl App {
         // 탭 pid 는 BSP leaf 가 아니다 — 화면을 든 건 그 탭이 사는 바깥 pane 이다.
         // 접지 않으면 「그 surface 가 어느 창에 있나」가 탭에 대해 항상 None 이 되고,
         // 그걸 존재 판정으로 쓰는 소켓 split 이 「없는 pane」이라며 거절했다. 그래서
-        // 학생들이 split 을 포기하고 탭으로 우회했다(거노 2026-08-07: "갑자기 애들
+        // 학생들이 split 을 포기하고 탭으로 우회했다(사용자 2026-08-07: "갑자기 애들
         // 왜 탭안에 생성하지"). 접는 규칙은 `outer_for_pty` 한 곳에만 둔다.
         let pane = self
             .ws
@@ -3360,7 +3360,7 @@ impl App {
         // 빈 방이면 셸을 하나 띄워 되살린다. 예전엔 여기 오기 전에 `windows[idx]
         // .is_none()` 으로 막았는데, 그러면 그 방은 **활성으로 만들 수 없고 활성이
         // 아니면 닫을 수도 없다** — 사이드바에는 계속 보이는데 눌러도 아무 일이
-        // 없었다(거노 2026-08-25 「방을 닫을수도 pane을 닫을수도 없어 복구도
+        // 없었다(사용자 2026-08-25 「방을 닫을수도 pane을 닫을수도 없어 복구도
         // 안되고」). 막는 대신 들여보내고 쓸 수 있는 방으로 만든다.
         if self.pty_layout.is_none() {
             if let Err(e) = self.spawn_session_pane() {
@@ -3512,7 +3512,7 @@ impl App {
             );
             // 되살리기 목록의 학생 이름도 「클로드가 돌던 pane 인가」 관문을 지난다 —
             // 배정은 spawn 때 **모든** pane 에 되므로(`assign_character_env`) 안 걸면
-            // 순수 셸을 닫아도 `%7 이로하 · tmuxify` 로 남는다(거노 2026-08-20).
+            // 순수 셸을 닫아도 `%7 이로하 · tmuxify` 로 남는다(사용자 2026-08-20).
             // 닫는 순간 claude 가 이미 내려갔을 수 있어 바인딩된 세션 id 도 함께 본다 —
             // `count_claude_panes` 가 쓰는 기준과 같다.
             let was_agent = self.pane_claude_sid.contains_key(pane)
@@ -3768,7 +3768,7 @@ impl App {
     ///
     /// 실재하는 leaf 일 때만 옮긴다 — 캐릭터·작업명 같은 집계 id 로 `active_pane`
     /// 을 덮으면 다음 `/layout` 폴에서 그 타일이 빠져 pane 이 닫힌 것처럼 보였다
-    /// (거노: 캐릭터 클릭→학생 선택하면 닫힘).
+    /// (사용자: 캐릭터 클릭→학생 선택하면 닫힘).
     pub(crate) fn focus_pane(&mut self, pane: &str) -> bool {
         self.focus_target(pane, false)
     }
@@ -4072,7 +4072,7 @@ impl App {
     ///
     /// **재계산 안이 아니라 밖에서 덮는 게 핵심이다.** 위 캐시는 1초짜리고 cwd 를
     /// `lsof` 로 캐느라 비싸서 매 키마다 깰 수가 없는데, 합성을 그 안에 두면 타이핑이
-    /// 1초씩 뭉쳐 나온다(거노: "이름 바꾸는 게 버벅여").
+    /// 1초씩 뭉쳐 나온다(사용자: "이름 바꾸는 게 버벅여").
     fn overlay_room_rename_label(&mut self) {
         let Some((idx, buf)) = self.room_rename.editing.as_ref() else {
             return;
@@ -4243,7 +4243,7 @@ impl App {
             .as_ref()
             // "pane 이 보는 경로"(statusline report / transcript bind)가 셸 cwd 보다
             // 우선 — bg-attach 뷰 pane 은 셸이 spawn 디렉토리(~/Desktop)에 머물러
-            // 파일트리가 pane 내용과 다른 프로젝트를 보여줬다(거노).
+            // 파일트리가 pane 내용과 다른 프로젝트를 보여줬다(사용자).
             .and_then(|id| self.pane_view_cwd.get(id).cloned())
             .or_else(|| {
                 active
@@ -4381,7 +4381,7 @@ impl App {
     /// GUI 편집기로 넘긴다. 지정 앱을 **설치 목록에서 되찾아** 번들 경로로 여는
     /// 게 핵심 — 이 기기의 VS Code 는 `/Applications` 밖에 있어 이름만으로는
     /// LaunchServices 가 못 찾을 수 있다. 앱이 사라졌으면 OS 기본으로 넘기지 않고
-    /// 내장 편집기로 되돌린다: 이 맥의 기본 연결 프로그램은 거노가 목록에서
+    /// 내장 편집기로 되돌린다: 이 맥의 기본 연결 프로그램은 사용자가 목록에서
     /// 일부러 뺀 앱이라, 폴백이 그쪽으로 가면 고친 게 도로 나타난다.
     fn open_file_in_app(&mut self, path: &std::path::Path) -> bool {
         let want = socket::read_file_open_app();
@@ -4624,7 +4624,7 @@ impl App {
             let mut ws = self.ws.lock().unwrap();
             if let Some(pane) = ws.panes.get_mut(&outer) {
                 pane.tabs.push(tab);
-                // **백그라운드 탭이다** — 활성 탭도 활성 pane 도 안 건드린다(거노
+                // **백그라운드 탭이다** — 활성 탭도 활성 pane 도 안 건드린다(사용자
                 // 2026-08-13). 학생이 이미지를 보내면 그 pane 의 대화가 통째로 이미지에
                 // 덮이고, 키보드 포커스까지 그 pane 으로 끌려가 다른 데서 타이핑 중이면
                 // 뺏긴다. 그림 자체는 OSC 1337 인라인으로 대화 흐름 안에 이미 뜨므로
@@ -5778,7 +5778,7 @@ impl App {
         agent_cfg: &HashMap<String, (String, String)>,
     ) {
         append_surface_record_metadata(obj, surface);
-        // 캐릭터 영속(거노: 재시작하면 미도리로 둔갑): pane_character 는
+        // 캐릭터 영속(사용자: 재시작하면 미도리로 둔갑): pane_character 는
         // claude 프로세스 감지(was_claude)와 무관하게 살아있으므로, 감지가
         // 실패해도 캐릭터는 여기서 확실히 저장한다.
         if let Some(name) = ws.pane_character.get(surface) {
@@ -5822,7 +5822,7 @@ impl App {
         // (정본)로 최우선 확정한다. 예전엔 argv(pane_record)·cwd 최신 jsonl 로
         // 폴백했는데, argv 없는 fresh `claude` 여럿이 같은 cwd 면 전부 cwd 최신
         // 세션 하나로 뭉쳐 재시작 시 여러 pane 이 다 같은 대화+캐릭터(미도리)로
-        // 복원됐다(거노: 다른 세션이 다 미도리로 뭉침). cwd 최신 폴백을 제거하고
+        // 복원됐다(사용자: 다른 세션이 다 미도리로 뭉침). cwd 최신 폴백을 제거하고
         // pane_claude_sid 로만 session_id 를 확정한다 — 없으면 pane_record 의
         // argv sid, 그것도 없으면 restore_leaf 가 fresh claude 로 복원.
         if let Some(sid) = pane_claude_sid.get(surface) {
@@ -5973,7 +5973,7 @@ impl App {
                     // 번호를 매기는데, `--resume` 으로 되살아난 학생은 재시작 **전**
                     // 의 surface_id 를 대화 기록째 기억하고 있다 → `tell %5` 가 없는
                     // pane 이거나 그 사이 다른 pane 이 물려받은 번호로 배달된다
-                    // (거노: "재시작하면 학생들이 tell 을 이상한 pane 에 쓴다").
+                    // (사용자: "재시작하면 학생들이 tell 을 이상한 pane 에 쓴다").
                     obj.insert("pane_id".to_string(), serde_json::json!(pane_id));
                     let pane = ws.panes.get(pane_id);
                     // leaf 의 몫은 **첫 탭**이다 — 바깥 pane id 가 곧 첫 탭의 pid 다.
@@ -6834,12 +6834,12 @@ impl App {
             .get("session_id")
             .and_then(|s| s.as_str())
             .map(|s| s.to_string());
-        // 저장된 캐릭터를 되살린다(거노: 재시작하면 랜덤 둔갑). pending 으로 세팅하면
+        // 저장된 캐릭터를 되살린다(사용자: 재시작하면 랜덤 둔갑). pending 으로 세팅하면
         // assign_character_env 가 랜덤 대신 이걸 재사용하고, 저장 세션 id 가 있으면 그
         // 원본 sid 에 캐릭터를 다시 bind 해 --resume 후 shim 교정·다음 재시작까지 영속화한다.
         // 고른 명단 밖이면 **되살리지 않는다** — 그러면 아래 `assign_character_env` 가
         // 명단 안에서 새로 뽑는다. 저장된 이름을 무조건 되살리던 탓에, 명단을 바꿔도
-        // 이미 배정된 학생은 재시작을 넘어 영원히 남았다(거노 2026-08-25 「설정에서
+        // 이미 배정된 학생은 재시작을 넘어 영원히 남았다(사용자 2026-08-25 「설정에서
         // 원하는거 다 골랐는데 그거 반영안되고 선택안된학생도 스폰돼」 — 새 배정은
         // 멀쩡했고 옛 배정이 안 바뀐 것이었다).
         //
@@ -7032,7 +7032,7 @@ impl App {
         if restores_agent {
             // --resume 대상 대화가 실재할 때만 resume 한다. 저장된 sid 의 jsonl 이
             // 사라졌으면 claude 가 "No conversation found" 를 뱉고 빈 셸만 남아 학생
-            // pane 이 통째 죽는다(거노: %3 시로코 복원 실패 — claude 세션이 없어 board
+            // pane 이 통째 죽는다(사용자: %3 시로코 복원 실패 — claude 세션이 없어 board
             // 순회에서 빠졌다). 그땐 fresh claude 로 폴백해 최소한 학생 pane(캐릭터는
             // env/marker 로 유지)은 살린다 — 대화는 잃지만 pane 이 통째 죽는 것보다 낫다.
             //
@@ -7379,7 +7379,7 @@ impl App {
     /// pane 제목이 읽는 것은 두 가지뿐이었다 — 터미널이 쏘는 OSC 와 그것을 따라가는
     /// GUI 사본. claude 안에서 `/rename` 을 치면 이름은 **transcript 의 `custom-title`
     /// 레코드**로만 남고 OSC 로는 안 나가므로, 탭에는 옛 이름이 그대로 남았다
-    /// (거노 2026-08-15 「소환할때 /rename 안되는거」). 실측으로 그 갈림을 확인했다:
+    /// (사용자 2026-08-15 「소환할때 /rename 안되는거」). 실측으로 그 갈림을 확인했다:
     /// `/rename` 뒤에도 OSC 는 활동 요약이었고, 새 이름은 transcript 의 마지막
     /// custom-title 에만 있었다.
     ///
@@ -8425,7 +8425,7 @@ fn restored_scrollback(rec: &serde_json::Value, restarting_agent: bool) -> Vec<S
 /// 복원되는 pane 이 쓸 id 를 고른다. **저장된 id 를 최우선**으로 되살린다 —
 /// `--resume` 으로 되살아난 학생은 재시작 전의 surface_id 를 대화 기록째 기억하고
 /// 있어서, 번호를 새로 매기면 `tell` 이 없는 pane 이거나 그 사이 다른 pane 이
-/// 물려받은 번호로 배달된다(거노: "재시작하면 학생들이 tell 을 이상한 pane 에 쓴다").
+/// 물려받은 번호로 배달된다(사용자: "재시작하면 학생들이 tell 을 이상한 pane 에 쓴다").
 ///
 /// 저장본에 id 가 없거나(옛 포맷) 이미 쓰이는 번호면 새로 발급한다. 되살린 번호가
 /// 카운터보다 크면 카운터를 그 위로 밀어, 이후 split 이 같은 번호를 다시 내주지
@@ -8433,7 +8433,7 @@ fn restored_scrollback(rec: &serde_json::Value, restarting_agent: bool) -> Vec<S
 /// 저장된 leaf 가 어떤 하네스로 돌던 pane 인지 — 없으면 순수 셸.
 ///
 /// 정본 키는 `was_agent`(`AgentKind::as_str` 이 쓴 id). 그 전 포맷은 `was_claude: true`
-/// 뿐이라 **옛 저장본은 claude 로 읽는다** — 안 그러면 이번 판올림 한 번에 거노가 쓰던
+/// 뿐이라 **옛 저장본은 claude 로 읽는다** — 안 그러면 이번 판올림 한 번에 사용자가 쓰던
 /// 학생 pane 이 전부 셸로 되살아난다. 새 코드는 `was_agent` 만 쓴다(두 키를 같이 쓰면
 /// 언젠가 갈린다).
 ///

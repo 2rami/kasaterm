@@ -61,7 +61,7 @@ color_slot!(S_SYN_TYPE, syn_type, [229, 192, 123, 255]);
 /// 「내 손을 기다린다」 색. 상태 언어의 네 번째 자리 — accent=도는 중,
 /// success=끝남, danger=잘못됨, 그리고 이것은 **막혀서 나를 부르는 중**이다.
 /// 예전엔 danger 를 빌려 썼는데 빨강은 "고장났다"로 읽혀, 승인 한 번이면 풀릴
-/// 일이 사고처럼 보였다(거노: "내가 엔터해야되는 건 핑크색으로").
+/// 일이 사고처럼 보였다(사용자: "내가 엔터해야되는 건 핑크색으로").
 ///
 /// 팔레트 슬롯이 아니라 고정값인 이유: 이건 테마 취향이 아니라 신호다. 테마마다
 /// 달라지면 같은 뜻이 창마다 다른 색으로 읽힌다. 밝기를 중간에 둬 밝은 테마의
@@ -295,7 +295,7 @@ const TOKYO_NIGHT: Palette = Palette {
 };
 
 // Blue Archive "Schale" pair — hexes extracted from fan-repo canon (vitepress
-// vars.less / momotalk mixin.scss / BA-style-homepage index.css; 거노 수집분,
+// vars.less / momotalk mixin.scss / BA-style-homepage index.css; 사용자 수집분,
 // [[reference_ba_styling_repos]]). green/red have no canon source and are
 // derived to fit — tune by eye. Light follows the game's white/sky UI; dark is
 // the same family re-rooted on the BA navy (#003153/#2a323e) since the game
@@ -1014,7 +1014,7 @@ pub fn viewer_chrome() -> bool {
 fn apply_from_settings_inner(sync_claude_theme: bool) {
     let s = crate::socket::read_settings();
     // 처음 켠 사람이 보는 팔레트. Windows 만 Catppuccin Latte 로 갈라진다 —
-    // 밝은 바탕이 그쪽 시스템 팝업·창 그림자와 훨씬 덜 부딪힌다(2026-08-31 거노:
+    // 밝은 바탕이 그쪽 시스템 팝업·창 그림자와 훨씬 덜 부딪힌다(2026-08-31 사용자:
     // "이게 윈도우에서 제일 이쁘게 보이네"). 이미 고른 사람은 안 건드린다:
     // 이 값은 settings.json 에 `theme` 이 **없을 때만** 쓰인다.
     //
@@ -1524,9 +1524,9 @@ fn slug_beyond_active(name: &str, extra: &[Roster]) -> Option<&'static str> {
 }
 
 /// 같은 학생이 여러 pane 에 떠 있을 때 n번째(0-기준) 인스턴스의 accent 변주 —
-/// 학생 지정 스폰이 중복을 허용하므로 색으로 인스턴스를 구분한다(거노).
+/// 학생 지정 스폰이 중복을 허용하므로 색으로 인스턴스를 구분한다(사용자).
 /// 0=원색, 이후 파스텔↔딥톤 교대 사다리. hue 는 유지해 학생 정체성과 타 학생
-/// 색 충돌을 피하고, 단차는 한눈에 갈리게 크게(거노: 첫 판 20%는 미묘했음).
+/// 색 충돌을 피하고, 단차는 한눈에 갈리게 크게(사용자: 첫 판 20%는 미묘했음).
 /// 프라나처럼 원색이 흰 계열이면 밝히는 쪽이 안 보여 딥톤 사다리만 탄다.
 pub fn accent_variant(base: [u8; 4], ordinal: usize) -> [u8; 4] {
     if ordinal == 0 {
@@ -1566,7 +1566,7 @@ pub fn character_ordinal(
 
 /// character_accent 에 같은-학생 순번 변주를 얹은 판 — pane 테두리·입력박스
 /// 보더(@배지)·배너가 공통으로 쓴다. (본문 틴트도 썼었으나 폐기 — 출력 글자는
-/// 테마 기본 fg, 거노 2026-07-18.)
+/// 테마 기본 fg, 사용자 2026-07-18.)
 pub fn character_accent_n(name: &str, ordinal: usize) -> Option<[u8; 4]> {
     // **활성 밖까지 본다**(`_any`). pane 을 다른 테마 학생으로 바꾸는 건 지원되는
     // 조작인데(2026-08-24 지시), 활성 로스터만 보면 그렇게 바뀐 pane 은 색을 못 찾아
@@ -1824,11 +1824,11 @@ fn name_beyond_active(slug: &str, extra: &[Roster]) -> Option<&'static str> {
 /// ⚠️ 개별 페르소나가 없는 학생도 **범용 존대 한 줄로 반드시 커버한다** —
 /// 12명만 알고 나머지를 None 으로 돌려보내던 동안, 그 학생 pane 은 인사말이
 /// 안 바뀌는 것에서 끝나지 않고 **배너 테두리 학생색까지 통째로 빠졌다**
-/// (호출부가 None 에서 조기 반환, 2026-08-20 거노 스샷·히나 pane 실측).
+/// (호출부가 None 에서 조기 반환, 2026-08-20 사용자 스샷·히나 pane 실측).
 /// 아바타 12명 목록과 같은 병이다: 로스터 부분집합 하드코딩은 조용히 샌다.
 pub fn character_welcome(name: &str, user: &str) -> Option<String> {
     // 인사말은 원 배너("Welcome back <user>!") 폭에 맞춘 한 문장 — 2컬럼 배너의
-    // 왼쪽 컬럼을 넘기면 호출부가 "…"로 자른다(거노 실사고: 긴 인사말 잘림).
+    // 왼쪽 컬럼을 넘기면 호출부가 "…"로 자른다(사용자 실사고: 긴 인사말 잘림).
     let g = match name {
         "아로나" => format!("어서 오세요 {user} 선생님!"),
         "프라나" => format!("{user} 선생님, 오셨군요."),

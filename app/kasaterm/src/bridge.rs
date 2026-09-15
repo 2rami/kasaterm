@@ -90,7 +90,7 @@ if {$guard ne ""} {
 }
 expect -timeout 3 timeout {}
 # 조용창 2s — 출력이 오면(사용자 타이핑 에코/렌더) 입력창 충돌 위험이라 물러난다.
-# 다음 tick 재시도(짧은 재시도, 90s 백오프 아님). 실사례: 주입이 거노 타이핑 중간에
+# 다음 tick 재시도(짧은 재시도, 90s 백오프 아님). 실사례: 주입이 사용자 타이핑 중간에
 # 끼어들어 "방향키" 사이에 [학생채팅 …] 이 박힌 채 한 턴으로 섞여 제출됨(07-17).
 expect -timeout 2 -re "." { puts "\nKB-USER-ACTIVE"; exit 5 } timeout {}
 set len [string length $msg]

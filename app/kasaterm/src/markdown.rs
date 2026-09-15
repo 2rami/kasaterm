@@ -1668,7 +1668,7 @@ impl MarkdownPane {
 
     /// Opt+↑↓ — 캐럿 줄(선택이 있으면 그 블록)을 한 줄 위/아래로 옮긴다.
     /// 경계에 닿으면 아무것도 하지 않고 false — 예전엔 이 키가 `alt` 를 아예
-    /// 무시해 "커서만 한 줄 이동" 으로 조용히 처리됐다(거노: 아무 일도 안 난 것
+    /// 무시해 "커서만 한 줄 이동" 으로 조용히 처리됐다(사용자: 아무 일도 안 난 것
     /// 처럼 보임).
     pub(crate) fn move_lines(&mut self, up: bool) -> bool {
         if self.edit_lines.is_empty() {
@@ -2620,7 +2620,7 @@ impl App {
     /// 키 경로에서 따로 뗀 이유는 **검증 때문**이다. winit `KeyEvent` 는 밖에서
     /// 만들 수 없어 조합을 헤드리스로 재현할 길이 없었는데, 진짜 경로가 이
     /// 함수 하나로 모이면 하네스(`mdscript` 의 `jamo` 단계)가 같은 코드를 탄다.
-    /// 조합 버그를 "거노가 직접 쳐 봐야만" 아는 상태를 벗어나는 게 목적이다.
+    /// 조합 버그를 "사용자가 직접 쳐 봐야만" 아는 상태를 벗어나는 게 목적이다.
     pub(crate) fn md_feed_jamo(&mut self, c: char) -> bool {
         if !(0x3130..=0x318F).contains(&(c as u32)) {
             return false;

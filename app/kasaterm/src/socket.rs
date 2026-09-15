@@ -255,7 +255,7 @@ pub struct PtyBackend {
     reported_ctx: Arc<Mutex<HashMap<String, (u64, u64)>>>,
     /// surface_id → 마지막 유효 (context_tokens, context_limit). transcript usage 가 tail
     /// 윈도에 없어 0 으로 떨어질 때 직전 값을 유지해 컨텍스트량·인연%가 0 으로 깜빡이지
-    /// 않게 한다(거노: statusline 잘려도 화면파싱 말고 정확 추적 — 정확 소스만 신뢰).
+    /// 않게 한다(사용자: statusline 잘려도 화면파싱 말고 정확 추적 — 정확 소스만 신뢰).
     last_ctx: Arc<Mutex<HashMap<String, (u64, u64)>>>,
     /// surface_id → Codex rollout의 마지막 유효 공개 상태. 화면은 이 값만 읽고,
     /// board 폴링이 실제 rollout에서 갱신한다. 닫힌 pane도 마지막 상태를 잠시 남겨
@@ -282,7 +282,7 @@ pub struct PtyBackend {
     /// agents/attach 뷰로 판정된 pane 집합 — rebind_agents_panes(3s 폴러)가 재구축.
     /// 뷰 pane 의 statusline report-cwd 는 뷰어 프로세스 자신의 cwd(pane 스폰 경로)지
     /// 표시 중인 세션의 프로젝트가 아니라, 파일트리 오버라이드로 흘리면 transcript
-    /// 유래 진짜 세션 cwd 를 덮는다(거노: bg 세션 파일트리가 pane cwd 고착) —
+    /// 유래 진짜 세션 cwd 를 덮는다(사용자: bg 세션 파일트리가 pane cwd 고착) —
     /// report_cwd 가 이 집합을 보고 GUI 이벤트를 생략한다.
     view_panes: Arc<Mutex<HashSet<String>>>,
     /// surface_id → 명시적 완료 보고(`kasaterm-cli done`). transcript 휴리스틱은
@@ -304,7 +304,7 @@ struct DoneReport {
 
 /// `claude agents --json` 의 sessionId→status (2s static 캐시). board(PtyBackend.
 /// agents_status)와 터미널 타이틀바(render)가 같은 데이터로 claude 실행/working 판정을
-/// 일치시킨다(거노: gui 동기화). 전역이라 PtyBackend 인스턴스 없이 App 도 호출.
+/// 일치시킨다(사용자: gui 동기화). 전역이라 PtyBackend 인스턴스 없이 App 도 호출.
 static AGENTS_CACHE: LazyLock<
     Mutex<
         Option<(
@@ -338,7 +338,7 @@ fn agents_cached() -> (
     // "claude" 이름 호출 금지 — .app 실행 시 kasaterm PATH 는 시스템 기본
     // (/usr/bin:/bin:…)뿐이라 ~/.local/bin 의 claude 가 안 잡혀, 이 캐시가 조용히
     // 늘 빈 값이었다(status 폴백 항상 mtime 휴리스틱 + agents 뷰 이름 매칭 불발 —
-    // 거노: 이번엔 유우카로 떠). GUI 폴러와 같은 claude_bin() 리졸버를 쓴다.
+    // 사용자: 이번엔 유우카로 떠). GUI 폴러와 같은 claude_bin() 리졸버를 쓴다.
     if let Ok(out) = crate::proc::command(kasa_mcp::claude_bin())
         .args(["agents", "--json"])
         .output()
@@ -416,7 +416,7 @@ impl PtyBackend {
     ///
     /// `panes` 만 모으면 탭으로 띄운 학생이 transcript 바인딩 후보에서부터 빠지고,
     /// 그러면 board 의 `bound.filter(live.contains)` 에서도 탈락해 **아예 등재되지
-    /// 않는다** — 화면에도 board 에도 없는 유령이 된다(거노 2026-08-07).
+    /// 않는다** — 화면에도 board 에도 없는 유령이 된다(사용자 2026-08-07).
     fn live_surfaces(&self) -> std::collections::HashSet<String> {
         let ws = self.ws.lock().unwrap();
         ws.panes
@@ -694,7 +694,7 @@ impl PtyBackend {
     /// 다른 세션으로 갈아타면 bound 가 낡으므로 unbound 게이트를 못 탄다). 대상 세션은
     /// attach 는 argv 위치 인자, agents 피커는 pane OSC 타이틀(=세션 name)↔`claude
     /// agents --json` name 의 유일 매칭으로 알아낸다 — kasaterm 은 피커 선택을 이벤트로
-    /// 못 받아 이 역추적이 유일한 파싱 경로다(거노: 백그라운드는 터미널이 파싱만).
+    /// 못 받아 이 역추적이 유일한 파싱 경로다(사용자: 백그라운드는 터미널이 파싱만).
     /// 바인딩은 bind_transcript 로 — bound(board)+SocketSessionBound(render 캐릭터)가
     /// 한 호출로 정렬된다. 매칭 실패(피커 화면·중복 이름)면 건드리지 않는다.
     pub(crate) fn rebind_agents_panes(&self, live: &HashSet<String>) {
@@ -740,7 +740,7 @@ impl PtyBackend {
                     // stale statusline: 우리 statusline(프사 슬롯 U+FFFC)은 떠 있는데
                     // 마커도 타이틀 매칭도 없다 — 구버전 claude(≤2.1.209 실측)는 attach
                     // 에서 statusline 을 재실행하지 않아, 사용자가 뭔가 치기 전까지
-                    // 마커가 영영 안 흐른다(거노). 1행 지글로 재실행을 강제(10s
+                    // 마커가 영영 안 흐른다(사용자). 1행 지글로 재실행을 강제(10s
                     // rate-limit). 피커/셸 화면은 FFFC 가 없어 안 탄다.
                     if resolved.is_none()
                         && screen.contains('\u{fffc}')
@@ -856,7 +856,7 @@ impl Backend for PtyBackend {
     }
 
     /// 로컬 PTY 모드의 '방' = App 윈도우. GUI 스레드에 질의해(별 스레드라 직접 못 봄)
-    /// 윈도우 수·활성 idx·라벨을 받는다. arona-ui 좌측 방 네비가 폴링한다(거노).
+    /// 윈도우 수·활성 idx·라벨을 받는다. arona-ui 좌측 방 네비가 폴링한다(사용자).
     fn sessions(&self) -> SessionsInfo {
         let (tx, rx) = std::sync::mpsc::channel();
         if self
@@ -1069,7 +1069,7 @@ impl Backend for PtyBackend {
         import_theme(zip_path).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    /// 활성 pane(보이는 방)의 방 식별자 — 모모톡 inbox 등을 방별 격리(거노). ws 공유.
+    /// 활성 pane(보이는 방)의 방 식별자 — 모모톡 inbox 등을 방별 격리(사용자). ws 공유.
     fn active_room(&self) -> Option<String> {
         let ws = self.ws.lock().unwrap();
         ws.active_pane
@@ -1078,7 +1078,7 @@ impl Backend for PtyBackend {
     }
 
     /// 활성 pane 의 포그라운드 프로세스 이름("zsh"·"node"(=claude)·"vim"…). room_cd 가
-    /// **셸일 때만** raw `cd` 를 보내고 claude 등엔 안 보내도록(거노: BA GUI 가 돌아가는
+    /// **셸일 때만** raw `cd` 를 보내고 claude 등엔 안 보내도록(사용자: BA GUI 가 돌아가는
     /// claude 입력칸에 cd 를 박지 않게) 판단 근거로 쓴다.
     fn active_process_name(&self) -> Option<String> {
         let active = self.ws.lock().unwrap().active_pane.clone()?;
@@ -1287,7 +1287,7 @@ impl Backend for PtyBackend {
 
     /// 활성 pane 의 셸 cwd — GET /mode 등 협업방 판정의 기준. trait 디폴트
     /// (None→호스트 cwd 폴백)는 .app 실행 시 cwd 가 `/` 라 항상 solo 로
-    /// 오판했다(거노 실측: 방 토글 차단). GUI 동기 RPC 로 활성 pane 의
+    /// 오판했다(사용자 실측: 방 토글 차단). GUI 동기 RPC 로 활성 pane 의
     /// shell pid 만 받고(메모리 즉답), lsof 해석은 이 backend 스레드서 한다 —
     /// 라이브 lsof 가 정확(split 시점 박제 캐시·프로세스 cwd 불신).
     fn active_cwd(&self) -> Option<std::path::PathBuf> {
@@ -1405,7 +1405,7 @@ impl Backend for PtyBackend {
         }
         // agents/attach 뷰 pane: 이 보고는 뷰어 claude 프로세스 자신의 cwd(pane
         // 스폰 경로)지 표시 중인 세션의 프로젝트가 아니다 — GUI 로 흘리면
-        // publish_transcript_cwd 가 넣은 진짜 세션 cwd 를 매 렌더 덮는다(거노:
+        // publish_transcript_cwd 가 넣은 진짜 세션 cwd 를 매 렌더 덮는다(사용자:
         // bg 세션 파일트리가 pane cwd 고착). 오버라이드는 transcript bind 에 맡긴다.
         // (session_id 바인딩도 뷰 pane 은 뷰어 세션이라 오염되므로 함께 스킵.)
         if self.view_panes.lock().unwrap().contains(surface_id) {
@@ -1414,7 +1414,7 @@ impl Backend for PtyBackend {
         // pane 활성 세션의 real sid 로 pane_claude_sid 를 보강(SocketSessionBound 재사용).
         // bg job(bind-transcript hook 을 CLAUDE_JOB_DIR 로 스킵)·포크(SessionStart 가
         // 못 온 pane)는 pane_claude_sid 가 비어 display_pane_char 가 None → statusline
-        // 프사·이름이 빈다(거노: bg 세션 얼굴 없고 그 자리 배경만 = F/H). statusline 은
+        // 프사·이름이 빈다(사용자: bg 세션 얼굴 없고 그 자리 배경만 = F/H). statusline 은
         // 이 세션에서도 매 렌더 real sid 를 report 하므로, 이 경로가 pane→세션 바인딩의
         // 최후 보루가 된다(handler arm 이 같은 sid 면 no-op → 매 report 부하 없음).
         if !session_id.is_empty() {
@@ -1458,7 +1458,7 @@ impl Backend for PtyBackend {
         ));
         // 타임아웃이 넉넉한 이유: GUI 스레드가 답하는 데 걸리는 시간은 머신 부하에
         // 좌우된다. 로드 400 에서 5초를 넘겨 자리표시자로 떨어졌고, 그게 곧 "성공했다"로
-        // 읽혀 학생 스폰이 통째로 샜다(거노 실사고 2026-08-05). 한가할 때 실측 0.06초라
+        // 읽혀 학생 스폰이 통째로 샜다(사용자 실사고 2026-08-05). 한가할 때 실측 0.06초라
         // 정상 경로에서 이 값이 체감되는 일은 없다.
         let id = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
             Ok(Ok(id)) if !id.is_empty() => id,
@@ -1683,7 +1683,7 @@ impl Backend for PtyBackend {
         host_ratio: Option<f32>,
     ) -> Result<Vec<SurfaceInfo>> {
         // 기본 0.6 — 부른 쪽(오케스트레이터)이 대화를 읽는 자리라 학생 칸보다 넓어야
-        // 한다. 거노가 그려서 고른 비율이다(2026-08-13).
+        // 한다. 사용자가 그려서 고른 비율이다(2026-08-13).
         let ratio = host_ratio.unwrap_or(0.6);
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketSplitFleet(
@@ -1694,7 +1694,7 @@ impl Backend for PtyBackend {
         ));
         // 타임아웃이 split 과 같은 20초인 이유도 같다 — 부하가 걸리면 GUI 응답이
         // 밀리고, 그때 자리표시자로 떨어지면 「성공했다」로 읽혀 스폰이 통째로 샌다
-        // (거노 실사고 2026-08-05). 셸 N 개를 낳으므로 한 번 호출이 split 보다
+        // (사용자 실사고 2026-08-05). 셸 N 개를 낳으므로 한 번 호출이 split 보다
         // 오래 걸리지만, 실측은 그래도 밀리초 단위다.
         let ids = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
             Ok(Ok(ids)) if !ids.is_empty() => ids,
@@ -1858,11 +1858,11 @@ impl Backend for PtyBackend {
     }
 
     /// 부른 pane **안에 새 탭**. 쪼개지 않으므로 화면이 안 줄어든다 — 학생을 하나 더
-    /// 띄울 때마다 split 하면 네 번째쯤에서 다 종잇장이 된다(거노 2026-08-05).
+    /// 띄울 때마다 split 하면 네 번째쯤에서 다 종잇장이 된다(사용자 2026-08-05).
     ///
     /// `focus=false`(기본)면 새 탭이 활성탭을 뺏지 않는다 — 서브에이전트를 자기
     /// pane 탭에 띄우는 것이 이 경로의 주 용도라, 부모가 보이던 화면이 그대로 남아야
-    /// 한다(거노 2026-08-18).
+    /// 한다(사용자 2026-08-18).
     fn new_tab(&self, outer: Option<&str>, focus: bool) -> Result<SurfaceInfo> {
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketNewTab(
@@ -1977,7 +1977,7 @@ impl Backend for PtyBackend {
 
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
         // 대상 surface 가 지정됐는데 현재 없는 pane 이면 거부 — 재시작·종료로 사라진 학생에게
-        // tell 이 검증 없이 ok 만 받고 조용히 사라지던 오발송을 막는다(거노). 보낸 쪽이 ok:false
+        // tell 이 검증 없이 ok 만 받고 조용히 사라지던 오발송을 막는다(사용자). 보낸 쪽이 ok:false
         // 로 즉시 알아 떠맡기/--resume 을 결정한다. None(focused)은 항상 통과.
         if let Some(sid) = surface_id {
             // pane 뿐 아니라 **탭 pid** 도 유효한 대상이다(`surface.new_tab` 이 주는 id).
@@ -2411,7 +2411,7 @@ impl Backend for PtyBackend {
         self.codex_rollouts.lock().unwrap().remove(surface_id);
         self.publish_transcript_cwd(surface_id, std::path::Path::new(path));
         // transcript 파일명(stem) = claude 세션 id — GUI 에 위임해 세션→캐릭터 영속
-        // 매핑을 조회/저장한다(거노 ④: resume 시 캐릭터 재사용). App 상태는 GUI 스레드
+        // 매핑을 조회/저장한다(사용자 ④: resume 시 캐릭터 재사용). App 상태는 GUI 스레드
         // 소유라 proxy 로 넘긴다(SocketBytes 관례).
         //
         // codex 는 `rollout-<ts>-<uuid>.jsonl` 이라 stem 이 sid 가 아니다 — 그대로 쓰면
@@ -2674,7 +2674,7 @@ impl Backend for PtyBackend {
         self.rebind_agents_panes(&live);
         let agents = self.agents_status();
         // claude 가 실제 생성 중이면 화면 푸터에 스피너+"esc to interrupt" 가 뜬다.
-        // mtime(60s) 휴리스틱이 ESC/완료 후에도 working 으로 stuck 이라(거노), 이 화면
+        // mtime(60s) 휴리스틱이 ESC/완료 후에도 working 으로 stuck 이라(사용자), 이 화면
         // 신호를 mtime-fallback(아래 None 분기)의 진짜 working 기준으로 쓴다.
         let generating: HashSet<String> = {
             let ws = self.ws.lock().unwrap();
@@ -2690,13 +2690,13 @@ impl Backend for PtyBackend {
         };
         let bound = self.bound.lock().unwrap();
         let mut attention = self.attention.lock().unwrap();
-        // 방별 분리(거노): 각 pane 의 character 는 *그 pane 의 방(room)* collab dir
+        // 방별 분리(사용자): 각 pane 의 character 는 *그 pane 의 방(room)* collab dir
         // 에서 읽는다 — 같은 cwd 라도 방마다 캐릭터가 다르다. pane_room
         // 없으면(기본 방) 기존 cwd-slug. ws(공유)에서 복제해 아래 map 클로저서 쓴다.
         // active_window_panes: 보이는 방(윈도우)의 pane — board 를 활성 방으로 한정
-        // (거노: 아로나 방+프라나 방이 한 교실에 같이 뜸). 비었으면(초기) 필터 안 함.
+        // (사용자: 아로나 방+프라나 방이 한 교실에 같이 뜸). 비었으면(초기) 필터 안 함.
         // 전 윈도우(방) pane → window_idx — board 를 활성 방으로 한정하지 않고 모든 방의 학생을
-        // 실어 arona-ui 좌측이 방별 학생 트리를 영속한다(거노: 좌측 통합·전 방 영속). 이 맵은
+        // 실어 arona-ui 좌측이 방별 학생 트리를 영속한다(사용자: 좌측 통합·전 방 영속). 이 맵은
         // GUI(App)의 publish_pty_layout 이 ws 로 미러한다 — PtyBackend 는 App.windows 를 못 본다.
         let (pane_room, pane_character, pane_window) = {
             let ws = self.ws.lock().unwrap();
@@ -2709,7 +2709,7 @@ impl Backend for PtyBackend {
         // pane 셸 프로세스 env 의 KASATERM_CHARACTER — 데몬이 영속하는 세션 정체성.
         // bg/포크 세션은 re-attach 마다 claude 가 transcript id 를 새로 발급해 세션id 키
         // persistence 가 어긋나고 board 가 랜덤 둔갑한다. 게다가 ws.pane_character 는
-        // 세션 저장파일로 복원돼 오염된 랜덤값이 marker 를 덮는다(거노: 데몬 영속 학생이
+        // 세션 저장파일로 복원돼 오염된 랜덤값이 marker 를 덮는다(사용자: 데몬 영속 학생이
         // board 와 따로 논다). env 는 스폰 때 박혀 fork/재접속/재시작 너머 안 바뀌므로
         // 최우선으로 읽어 복원된 ws·marker·랜덤보다 먼저 정체성을 고정한다. 로스터 밖
         // 값은 무시(오염 방지). ps 는 폴당 pane 수만큼(1/s)이라 부담 없음.
@@ -2746,7 +2746,7 @@ impl Backend for PtyBackend {
             .map(|c| kasa_mcp::character::member_names(&c).into_iter().collect())
             .unwrap_or_default();
         // 세션 → 포크 부모 세션 id(argv --resume). detach 포크로 세션 id 가 갈려도 이 사슬
-        // 끝의 원본 바인딩(session_characters.json)이 retained 학생이다(거노: bg 재진입 둔갑).
+        // 끝의 원본 바인딩(session_characters.json)이 retained 학생이다(사용자: bg 재진입 둔갑).
         let daemon_parents = daemon_session_parents();
         // board 빌드 한 폴링 안에서 lazy 배정된 캐릭터 — 같은 폴링에 처음 등장한 두 pane 이
         // 둘 다 같은 빈 슬롯(예: 미도리)을 고르는 걸 막는다(pane_character 클론은 빌드 중
@@ -2757,11 +2757,11 @@ impl Backend for PtyBackend {
         let hook_act = self.hook_activity.lock().unwrap().clone();
         let mut board: Vec<PaneActivity> = bound
             .iter()
-            // 전 방(윈도우) 학생 — 활성 방 한정 폐기(거노: 전 방 영속). live = 모든 윈도우 pane.
+            // 전 방(윈도우) 학생 — 활성 방 한정 폐기(사용자: 전 방 영속). live = 모든 윈도우 pane.
             .filter(|(sid, _)| live.contains(sid.as_str()))
             .map(|(sid, path)| {
                 // 512KB: 64KB 윈도는 background/subagent 런치(run_in_background·Monitor·Task)가
-                // 그 뒤 대량 출력에 밀려나 윈도 밖이면 못 잡았다(거노: 유즈 background 빔 —
+                // 그 뒤 대량 출력에 밀려나 윈도 밖이면 못 잡았다(사용자: 유즈 background 빔 —
                 // 최근 런치가 파일 끝에서 ~269KB 지점). 작은 transcript 는 전체라 부담 없음.
                 let (tail, mtime_idle) = read_tail(path, 512 * 1024);
                 let mut row = snapshot_from_tail(sid, &tail, mtime_idle);
@@ -2785,7 +2785,7 @@ impl Backend for PtyBackend {
                 // pane_window 는 모든 방의 split 트리 leaf 집합이다(publish_pty_layout).
                 // 거기 없는 pane = 사용자가 닫았거나 숨겨 화면에 없다 — PTY 는
                 // 재부착 대비로 돌지만, 학생들이 그런 pane 에 새 일을 시키면 안
-                // 보이는 곳에서 작업이 돈다(거노 2026-08-15).
+                // 보이는 곳에서 작업이 돈다(사용자 2026-08-15).
                 row.detached = !pane_window.contains_key(sid.as_str());
                 // 이사 간 학생 — 화면은 이 창(%N)이지만 실제로 도는 곳은 저 기계다.
                 // 라벨이 비면(명부 밖 주소) 주소의 host:port 로라도 가른다.
@@ -2889,7 +2889,7 @@ impl Backend for PtyBackend {
                     None => {
                         // mtime 만 보면 ESC 취소·완료 후 60s 간 working 으로 stuck →
                         // 화면에 생성중 스피너가 있을 때만 working, 없으면 idle 로 교정
-                        // (거노: ESC 눌러서 취소해도 '생각 중' 으로 남는 문제).
+                        // (사용자: ESC 눌러서 취소해도 '생각 중' 으로 남는 문제).
                         if generating.contains(sid.as_str()) {
                             row.status = "working".into();
                             false
@@ -2944,7 +2944,7 @@ impl Backend for PtyBackend {
                     }
                 }
                 // 이 pane 의 방 collab dir = cwd-slug(+ 방이면 __room_<id>). character
-                // 마커를 여기서 읽어 방별로 분리(거노: 프라나 방에 시로코 뜨던 버그).
+                // 마커를 여기서 읽어 방별로 분리(사용자: 프라나 방에 시로코 뜨던 버그).
                 let base_slug = path
                     .parent()
                     .and_then(|d| d.file_name())
@@ -2955,11 +2955,11 @@ impl Backend for PtyBackend {
                     None => base_slug.to_string(),
                 };
                 // GUI 가 spawn/swap 시 배정한 ws.pane_character 우선 — 터미널 헤더
-                // 렌더(render.rs)와 같은 소스라 board·탭 캐릭터가 항상 일치(거노:
+                // 렌더(render.rs)와 같은 소스라 board·탭 캐릭터가 항상 일치(사용자:
                 // board 미도리 둘 / 헤더 모모이 불일치). 없으면 방 dir 의 character-<N> 마커.
                 // 세션 자신의 바인딩 → 없으면 포크 부모 사슬을 따라 원본 학생을 찾는다.
                 // detach 포크로 세션 id 가 갈려도 --resume 부모 끝의 바인딩이 retained 진실
-                // (per-세션이라 "다 같은 학생" 아님, 거노). stem = transcript 파일명 = 세션 id.
+                // (per-세션이라 "다 같은 학생" 아님, 사용자). stem = transcript 파일명 = 세션 id.
                 let stem = path.file_stem().and_then(|s| s.to_str());
                 let launched = self.ws.lock().unwrap().pane_launch_character.get(sid.as_str()).cloned();
                 let retained = launched.or_else(|| stem
@@ -2978,7 +2978,7 @@ impl Backend for PtyBackend {
                     })
                     .filter(|c| valid_members.contains(c)));
                 // 셸 env 폴백(foreground 순정 경로) — bg 셸엔 대개 없다. 단 spawn 시
-                // 동결된 KASATERM_CHARACTER 는 --resume/재배정 후 stale 하다(거노: 복원
+                // 동결된 KASATERM_CHARACTER 는 --resume/재배정 후 stale 하다(사용자: 복원
                 // 후 board 가 전부 미도리 — env CHARACTER 는 미도리로 굳었지만 pane env 의
                 // SESSION_ID 가 가리키는 실제 세션 bind 는 각자 아루·히마리·아리스였다).
                 // 그래서 SESSION_ID 의 세션 bind 를 먼저(신선) 조회하고, 없을 때만 동결
@@ -3027,11 +3027,11 @@ impl Backend for PtyBackend {
                 }
                 // 마커 없는 pane(claude --resume 복원·spawn 의 assign_character_env 를 못 탄
                 // 경로)도 board 빌드 때 빈 슬롯 캐릭터를 lazy 배정한다 — 안 하면 board
-                // char=None → 프사/이름이 안 떴다(거노: %1 프사 None).
+                // char=None → 프사/이름이 안 떴다(사용자: %1 프사 None).
                 // write_marker(atomic) 후 다음 폴링부턴 위 read 로 잡혀 1회만 배정된다.
                 if row.character.is_none() {
                     // 포크(background/--resume) 세션은 부모 대화의 학생을 상속한다 —
-                    // 랜덤 둔갑 방지(거노: 백그라운드에서 학생이 또 바뀜). claude sid =
+                    // 랜덤 둔갑 방지(사용자: 백그라운드에서 학생이 또 바뀜). claude sid =
                     // transcript stem → bg_agents(claude sessionId→parentSessionId) →
                     // 부모 학생. 부모가 없으면(순수 새 세션) 기존 빈 슬롯 랜덤.
                     let stem = path.file_stem().and_then(|s| s.to_str());
@@ -3045,12 +3045,12 @@ impl Backend for PtyBackend {
                         })
                         .and_then(|parent| kasa_mcp::character::session_character(&parent));
                     // 세션 자신이 이미 배정받은 적 있으면(재시작·resume 이 같은 transcript id 로
-                    // 복귀) 그 학생을 재사용 — board 첫 폴링부터 랜덤 둔갑 차단(거노). 부모
+                    // 복귀) 그 학생을 재사용 — board 첫 폴링부터 랜덤 둔갑 차단(사용자). 부모
                     // 상속 다음, 빈 슬롯 랜덤 앞.
                     let own = stem.and_then(kasa_mcp::character::session_character);
                     // respawn/새 세션(claude 가 --resume 없이 새 sid 발급)은 pane 셸 env 의
                     // SESSION_ID(스폰·swap 이 박은 원본 anchor)가 가리키는 학생을 상속한다 —
-                    // 안 하면 lazy 빈슬롯 배정이 미도리로 오배정돼 retained 가 오염됐다(거노:
+                    // 안 하면 lazy 빈슬롯 배정이 미도리로 오배정돼 retained 가 오염됐다(사용자:
                     // swap 후 %3 이 매 턴 새 세션을 발급하며 계속 미도리로 뭉침). apply_session_
                     // character 의 anchored 경로와 동일 규칙.
                     let anchored = pane_shell_pid
@@ -3062,7 +3062,7 @@ impl Backend for PtyBackend {
                         kasa_mcp::character::roster_in_use().and_then(|chars| {
                             let members = kasa_mcp::character::assignable_names(&chars);
                             // 살아있는 다른 pane 이 쓰는 캐릭터(이번 폴링 누적 스냅샷)는 피한다 —
-                            // 죽은 pane 마커는 무시. 빈 슬롯 없으면 첫째로 순환(거노: 모모이 둘).
+                            // 죽은 pane 마커는 무시. 빈 슬롯 없으면 첫째로 순환(사용자: 모모이 둘).
                             let mut taken: Vec<_> = pane_character.values().cloned().collect();
                             taken.extend(kasa_mcp::character::assigned_global());
                             if !crate::verification_run() {
@@ -3077,7 +3077,7 @@ impl Backend for PtyBackend {
                             let _ = kasa_mcp::character::write_marker(&rslug, sid.as_str(), &name);
                             // claude sid(transcript stem)에도 영속 — 재진입·재시작이 같은
                             // transcript id 로 돌아오면 own(session_character(stem))으로 잡혀
-                            // 랜덤 재배정(둔갑) 없이 같은 학생을 유지한다(거노: 어느새 미도리로
+                            // 랜덤 재배정(둔갑) 없이 같은 학생을 유지한다(사용자: 어느새 미도리로
                             // 바뀜). write_marker/pane_character 만으론 session_characters.json 에
                             // 안 남아 다음 폴링·재진입의 stem 조회가 계속 None → 매번 재랜덤이었다.
                             if let Some(stem) = stem {
@@ -3148,7 +3148,7 @@ impl Backend for PtyBackend {
             }
             (screens, osc_titles, pinned)
         };
-        // claude saved default effort(settings.json) — resume 직후 effort 카드 폴백(거노). 작은 파일
+        // claude saved default effort(settings.json) — resume 직후 effort 카드 폴백(사용자). 작은 파일
         // 1회 읽어 모든 행에 동일 적용(글로벌 설정이라 pane 무관).
         let saved_effort = claude_saved_effort();
         for row in &mut board {
@@ -3182,7 +3182,7 @@ impl Backend for PtyBackend {
             if let Some(screen) = screens.get(&row.surface_id) {
                 // 모델명만 상태바에서 — "Opus 4.8 (1M context)" 처럼 1M 변형까지 정확.
                 // 컨텍스트 %는 상태바를 안 쓴다: 터미널이 좁아 statusline 이 잘리면 % 가 화면 밖이라
-                // 0 으로 떨어진다(거노: 화면파싱 말고 정확 추적). transcript usage 만 정확 소스.
+                // 0 으로 떨어진다(사용자: 화면파싱 말고 정확 추적). transcript usage 만 정확 소스.
                 if let Some(m) = parse_status_model(screen) {
                     row.model = m;
                 }
@@ -3209,7 +3209,7 @@ impl Backend for PtyBackend {
                 row.context_limit = 1_000_000;
             }
             // 정확 소스(transcript usage)가 tail 윈도에 없어 0 이면 직전 유효값을 유지 — 컨텍스트량·
-            // 인연%가 0 으로 깜빡이지 않게(거노: statusline 잘려도 0 안 됨). 0 이상이면 캐시 갱신.
+            // 인연%가 0 으로 깜빡이지 않게(사용자: statusline 잘려도 0 안 됨). 0 이상이면 캐시 갱신.
             {
                 let mut cache = self.last_ctx.lock().unwrap();
                 if row.context_tokens > 0 {
@@ -3399,7 +3399,7 @@ impl Backend for PtyBackend {
             if is_claude {
                 // 캐릭터는 `pane_character`(탭 pid 키)가 정본이다 — `ws.panes` 는
                 // pane 컨테이너 키라 **탭 학생이 안 걸려** 보고가 `[완료] %4(%4)` 로
-                // 떴다(2026-08-20 거노 스샷). 이름이 잡혀야 화면 색칠도 학생을 안다.
+                // 떴다(2026-08-20 사용자 스샷). 이름이 잡혀야 화면 색칠도 학생을 안다.
                 let who =
                     self.ws
                         .lock()
@@ -3573,7 +3573,7 @@ pub(crate) fn key_to_bytes(key: &str) -> Vec<u8> {
 /// claude 가 실제로 생성 중이면 라이브 푸터에 "✳ Verbing… (12s · esc to interrupt)"
 /// 가 뜬다. `rows_show_working`(input.rs)의 문자열판 — visible_text 의 마지막 비공백
 /// 행들을 본다. transcript mtime(60s) 휴리스틱은 ESC 취소·완료 후에도 working 으로
-/// stuck 이라(거노: ESC 눌러도 생각 중), 이 화면 신호를 mtime-fallback 의 진짜
+/// stuck 이라(사용자: ESC 눌러도 생각 중), 이 화면 신호를 mtime-fallback 의 진짜
 /// working 기준으로 쓴다. 완료 요약("✻ Churned for 42s")은 별은 있어도 말줄임표가
 /// 없어 제외된다.
 fn screen_shows_working(screen: &str) -> bool {
@@ -3665,7 +3665,7 @@ fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::Result<Tran
     }
     let mut raw = String::from_utf8_lossy(slice).into_owned();
     // tail 윈도 밖으로 밀린 미처리 예약(queue-operation)도 채팅에 살린다 — 작업 turn 이
-    // 512KB 넘게 쌓이면 오래된 enqueue 가 윈도 밖이라 큐 버블이 안 뜨던 것(거노). 큐 op
+    // 512KB 넘게 쌓이면 오래된 enqueue 가 윈도 밖이라 큐 버블이 안 뜨던 것(사용자). 큐 op
     // 라인은 작아(텍스트) 전부 prepend 해도 가볍고, 프론트가 enqueue/dequeue/remove 를
     // FIFO 매칭해 미처리만 큐 버블로 그린다(처리된 예약은 droppedQ 로 제거).
     if reset && start > 0 {
@@ -3717,7 +3717,7 @@ fn scan_queue_ops_before(path: &std::path::Path, start: u64) -> String {
 /// Foreground process name under a pane's shell pid — the youngest direct child
 /// (a running `claude`/`vim`/build), else the shell itself at a bare prompt. One
 /// `ps` scan (Windows has no `ps` → None, degrades to "not a shell"). Lets
-/// `room_cd` send raw `cd` only at a shell, never into a live claude (거노).
+/// `room_cd` send raw `cd` only at a shell, never into a live claude (사용자).
 /// ⚠️ 이쪽은 런처(node·npx)를 지나 내려가지 **않는다**. 여기 쓰임은 "셸이냐
 /// 아니냐" 하나뿐이라 이름이 `node` 로 나와도 목적을 이루기 때문이다. 사용자에게
 /// 보여줄 정확한 프로그램 이름이 필요하면 kasa-pty 의 `active_process_name`
@@ -3970,7 +3970,7 @@ pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
     // Only record a session id for panes actually running claude, straight off
     // the running claude's argv (exact per-pane). The cwd-mtime fallback that
     // used to fill argv-less `claude` panes is gone — it collapsed every pane
-    // sharing a cwd onto one session id (거노: 재시작 시 여러 pane 이 다 같은 대화+
+    // sharing a cwd onto one session id (사용자: 재시작 시 여러 pane 이 다 같은 대화+
     // 캐릭터로 뭉침). layout_to_json 이 pane_claude_sid(SocketSessionBound)로 정확한
     // per-pane 세션을 채우므로, pane_record 는 argv id 만 보고하고 없으면 None 을 둔다
     // (restore_leaf 가 fresh claude 로 복원).
@@ -4212,7 +4212,7 @@ pub fn read_default_cwd_mode() -> String {
 }
 
 /// 설정 화면이 쓰는 말(`ko`|`en`). 값이 없거나 모르는 값이면 **한국어** — 이 앱을
-/// 쓰는 사람이 한국어로 일한다(거노 지시 2026-08-15 「나는 한글이 기본으로」).
+/// 쓰는 사람이 한국어로 일한다(사용자 지시 2026-08-15 「나는 한글이 기본으로」).
 /// 사람이 파일을 손으로 고칠 수 있으므로 아는 값만 통과시킨다.
 pub fn read_ui_language() -> String {
     match read_settings().get("language").and_then(|x| x.as_str()) {
@@ -4228,7 +4228,7 @@ pub fn read_ui_language() -> String {
 /// 개인 설정이라 코드가 아니라 여기에 둔다.
 ///
 /// 넘기는 곳은 그 기계의 `nacho-tell` 인박스다. 슬랙을 안 거치고, 나쵸가 집어
-/// 가면서 **거노의 디스코드 DM 스레드에도 같은 대화가 남는다** — 앱이 디스코드로
+/// 가면서 **사용자의 디스코드 DM 스레드에도 같은 대화가 남는다** — 앱이 디스코드로
 /// 직접 보내려면 봇 토큰이 필요한데 그건 설정 파일에 평문으로 둘 것이 못 된다.
 pub fn read_feedback_nacho_host() -> String {
     read_settings()
@@ -4599,7 +4599,7 @@ pub fn read_cursor_thickness() -> f32 {
 ///
 /// 기본값 16 → 13 (2026-07-27). 셀 치수를 주 폰트 metric 에서 뽑는데 주 폰트가
 /// D2Coding(advance 0.500em · line 1.160em)에서 JetBrains Mono(0.600em · 1.320em)로
-/// 바뀌어, 같은 16 에서 칸이 가로 20%·세로 14% 커졌다(거노: "전체적으로 폰트가
+/// 바뀌어, 같은 16 에서 칸이 가로 20%·세로 14% 커졌다(사용자: "전체적으로 폰트가
 /// 커졌네"). 13 이면 0.600 × 13 = 7.8px 로 옛 0.500 × 16 = 8px 과 사실상 같다.
 /// 폰트 크기 = em 픽셀이라는 의미는 그대로 두고 기본값만 새 폰트에 맞춘 것 —
 /// 명시적으로 값을 저장해 둔 사용자는 자기 크기를 그대로 유지한다.
@@ -4655,7 +4655,7 @@ pub fn read_ui_zoom() -> Option<f32> {
 /// 두 배로 커진다 — 4K 를 150% 로 쓰는 노트북(논리 2560)과 4K 를 100% 로 쓰는
 /// 데스크톱 모니터(논리 3840)는 눈에 보이는 글자 크기가 이미 비슷하다.
 ///
-/// 그래서 "OS 가 안 키워 준 넓은 화면"에서만 올린다. 거노의 3840×1600 을
+/// 그래서 "OS 가 안 키워 준 넓은 화면"에서만 올린다. 사용자의 3840×1600 을
 /// 100% 로 쓰는 경우가 정확히 이 자리다(2026-09-01: "처음 키면 왤케 조그매").
 pub fn guess_ui_zoom(logical_width: f64) -> f32 {
     if logical_width >= 3400.0 {
@@ -5906,7 +5906,7 @@ pub fn clear_account_cooldowns() {
 
 /// 지금 압박을 주는 한도 — `limits[]` 중 percent 가 가장 높은 것.
 ///
-/// **화면도 이걸 봐야 한다**(거노 2026-08-05: "info에는 다 0퍼로뜨는데"). 전에는
+/// **화면도 이걸 봐야 한다**(사용자 2026-08-05: "info에는 다 0퍼로뜨는데"). 전에는
 /// pill·info 가 `five_hour.utilization` 만 봤는데, 실측 세 계정 모두 그 값이 `0.0`
 /// 이고 실제 압박은 전부 `weekly_all`(95%/25%)이었다 — 화면은 한도가 코앞인데도
 /// 0% 를 보여줬고, 자동 전환만 이 함수로 옳게 판정하고 있었다. 사용자에게 "이 세션이
@@ -5952,7 +5952,7 @@ fn usage_window_label(e: &serde_json::Value) -> String {
 /// `usage_pressure` 와 나란히 두는 이유: 그쪽은 「가장 급한 창 하나」를 골라야 하고
 /// (자동 계정 전환이 그 판정을 쓴다), 화면은 두 창을 **나란히** 보여야 한다. 하나로
 /// 합치려다 `usage_pressure` 의 「최고 창을 고른다」를 흔들면, 5시간이 0%인데 주간이
-/// 95%인 상황에서 하단바가 0% 를 띄운다 — 2026-08-05 에 실제로 그랬고 거노가
+/// 95%인 상황에서 하단바가 0% 를 띄운다 — 2026-08-05 에 실제로 그랬고 사용자가
 /// 「3계정 다 소진이야? info엔 다 0퍼로뜨는데」로 발견했다.
 pub fn usage_windows(v: &serde_json::Value) -> Vec<UsagePressure> {
     let mut out: Vec<UsagePressure> = v
@@ -6082,7 +6082,7 @@ pub fn pick_next_account(
     // 쓰는 사람에게는 대개 **슬롯 중 하나와 같은 계정**이다. 그런데도 후보에 늘
     // 들어 있어서, 한도가 찬 계정에서 「기본」으로 옮겨 봐야 같은 계정이라 여전히
     // 100% 였다 — 옮기고 5분 쉬고 또 옮기는 헛돌이가 된다(2026-09-05 실측: 기본과
-    // acct-1 이 이메일·조직까지 같았다. 거노 「기본계정은 뭐야 굳이 있는 이유를
+    // acct-1 이 이메일·조직까지 같았다. 사용자 「기본계정은 뭐야 굳이 있는 이유를
     // 모르겠다」).
     let mut all: Vec<&str> = Vec::new();
     if default_usable {
@@ -6199,7 +6199,7 @@ pub fn read_window_size() -> Option<(f64, f64)> {
 }
 
 /// claude 의 saved default effort(~/.claude/settings.json `effortLevel`). resume 직후 GUI effort
-/// 카드 폴백값(거노). 파일/키 없으면 빈 문자열. ultracode 는 session-only 라 여기 안 저장된다.
+/// 카드 폴백값(사용자). 파일/키 없으면 빈 문자열. ultracode 는 session-only 라 여기 안 저장된다.
 fn claude_saved_effort() -> String {
     let Some(home) = kasa_socket::home_dir() else {
         return String::new();
@@ -6220,9 +6220,9 @@ fn claude_saved_effort() -> String {
 
 /// 살아있는 claude 프로세스 argv 에서 session_id → 포크 부모 session_id 맵. detach 는 세션을
 /// 포크(`--fork-session --resume <부모>.jsonl --session-id <포크>`)해 새 id 를 발급하므로
-/// session_characters.json 의 원본 바인딩 키가 어긋나 재진입 시 랜덤 둔갑한다(거노: bg 재진입
+/// session_characters.json 의 원본 바인딩 키가 어긋나 재진입 시 랜덤 둔갑한다(사용자: bg 재진입
 /// 학생 바뀜, foreground 는 원래 유지). 데몬 프로세스 env(KASATERM_CHARACTER)는 세션별이
-/// 아니라 데몬 띄운 셸값을 전 세션이 공유해 못 쓴다(거노: 한 뷰 다 같은 학생). 대신 argv 의
+/// 아니라 데몬 띄운 셸값을 전 세션이 공유해 못 쓴다(사용자: 한 뷰 다 같은 학생). 대신 argv 의
 /// `--resume <부모>` 사슬을 따라 원본 세션의 바인딩까지 되짚는다. `ps`(env 불필요) 1회/프로세스,
 /// 2s 캐시. parent = --resume 값의 파일명 stem(=uuid) 또는 값 그대로.
 /// pane 셸 아래에서 도는 claude 프로세스 pid. shim 이 심는 KASATERM_* env 와 팀원
@@ -6947,7 +6947,7 @@ fn discover_transcript(pane_id: &str, shell_pid: u32) -> Option<std::path::PathB
         return jsonl_for_session(&cwd, &id);
     }
     // agents/attach 뷰 pane 은 여기서 절대 추측하지 않는다 — 어느 세션을 보는지 cwd 로
-    // 알 수 없어, recent-jsonl 폴백이 같은 cwd 의 남의 활성 세션을 훔쳤다(거노: bg 뷰
+    // 알 수 없어, recent-jsonl 폴백이 같은 cwd 의 남의 활성 세션을 훔쳤다(사용자: bg 뷰
     // pane 들이 전부 첫 세션 학생으로 쏠림). 이 pane 의 바인딩은 rebind_agents_panes
     // (attach 인자·타이틀↔세션명 매칭)가 전담한다.
     if claude_view_subcommand(shell_pid).is_some() {
@@ -6958,7 +6958,7 @@ fn discover_transcript(pane_id: &str, shell_pid: u32) -> Option<std::path::PathB
     // 재시도(곧 쓰면 잡힘). 2+ = 같은 cwd 에 여러 claude(여러 pane 공유) →
     // 어느 게 이 pane 인지 latest-mtime 으로는 모름(남의 세션 훔침) → None, hook
     // (정확 경로 보고)에 맡긴다. 이 모호성 가드가 없을 때 %2 가 남의 세션에 잘못
-    // bind 돼 대화가 안 뜨던 버그(거노 실측).
+    // bind 돼 대화가 안 뜨던 버그(사용자 실측).
     let mut recent = recent_jsonls(&cwd, std::time::Duration::from_secs(30 * 60));
     if recent.len() == 1 {
         return recent.pop();
@@ -7049,7 +7049,7 @@ fn recent_jsonls(cwd: &std::path::Path, within: std::time::Duration) -> Vec<std:
 
 /// claude TUI 상태바 첫 칸의 모델 표시명. 예 "Opus 4.8 (1M context)" / "Sonnet 4.6".
 /// transcript 의 model id("claude-opus-4-8")로는 1M context 변형을 구분 못 해(둘 다
-/// 같은 id) — 상태바가 유일하게 "(1M context)" 까지 보여준다(거노 지적). 선두 글리프/
+/// 같은 id) — 상태바가 유일하게 "(1M context)" 까지 보여준다(사용자 지적). 선두 글리프/
 /// 공백 뒤 첫 영문자부터 첫 ┃ 까지.
 fn parse_status_model(screen: &str) -> Option<String> {
     for line in screen.lines() {
@@ -7467,7 +7467,7 @@ mod account_autoswitch_tests {
         assert_eq!(p.label, "5h");
     }
 
-    /// 거노 화면에서 그대로 뜬 응답(2026-08-05, 기본 슬롯 토큰으로 직접 조회).
+    /// 사용자 화면에서 그대로 뜬 응답(2026-08-05, 기본 슬롯 토큰으로 직접 조회).
     /// `five_hour.utilization` 이 **0.0** 인데 주간이 95% 다 — 화면이 five_hour 만
     /// 보던 탓에 한도가 코앞인데 「0%」 가 떴다. 라벨까지 재는 것은 숫자만 고치면
     /// 「5h 95%」 가 되어 5시간 창 이야기로 읽히기 때문이다.

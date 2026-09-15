@@ -68,7 +68,7 @@ fn compose_student_banners(
             }
         }
         // 배너 타이틀("Claude Code"·"Antigravity CLI")도 학생 이름으로 —
-        // 도트만 바뀌면 학생이 남의 이름표를 달고 서 있는 꼴(거노).
+        // 도트만 바뀌면 학생이 남의 이름표를 달고 서 있는 꼴(사용자).
         replace_banner_title(composed, br, bc, lcols, lrows, title, name, accent);
         // 웰컴 배너("Welcome back <user>!")면 도트 위 인사말 행을
         // 배정 학생 페르소나 인사말로 — launcher 화면에선 no-op.
@@ -76,7 +76,7 @@ fn compose_student_banners(
         // 배너 박스 보더도 학생색 — 인사말 치환과 **분리**해서
         // 무조건 부른다. 인사말 함수 안에 뒀던 동안 인사말
         // 로스터에 없는 학생 pane 은 치환이 조기 반환하며
-        // 테두리까지 파랑으로 남았다(2026-08-20 거노 스샷).
+        // 테두리까지 파랑으로 남았다(2026-08-20 사용자 스샷).
         // 박스 코너가 없는 launcher 화면에선 자연 no-op.
         if let Some(acc) = accent {
             let art_bottom = (br + lrows as isize).max(0) as usize;
@@ -1001,7 +1001,7 @@ impl App {
         // 500ms 캐시가 이미 붙어 있어 매 프레임 불러도 싸다.
         // 학생 상태는 **탭 pid** 로 기록되고 이 루프가 든 `id` 는 BSP leaf 다.
         // 접지 않으면 탭에서 도는 클로드가 안 잡혀, 프사·전신·배너 도트가
-        // 통째로 안 뜬다(거노 2026-08-07). 아래 ordinal 도 같은 키를 쓴다.
+        // 통째로 안 뜬다(사용자 2026-08-07). 아래 ordinal 도 같은 키를 쓴다.
         let agent_kind = self
             .pty
             .get(tab_pid.as_str())
@@ -1253,7 +1253,7 @@ impl App {
         // 아래 chrome 패스에서 STICKY_PILLS 로 mouse handler 에 넘긴다.
         //
         // pill 은 **프롬프트 띠 재도색과 같은 테마 스타일**로 칠한다 — 흰
-        // pill 은 없애기로 했다(거노 2026-08-19: "흰색없애기로했었는데 클릭은
+        // pill 은 없애기로 했다(사용자 2026-08-19: "흰색없애기로했었는데 클릭은
         // 되게하면서"). 08-15 재도색이 흰 pill 을 덮으면서 pill 이 박아 둔
         // 검은 글자만 남아 줄이 통째로 안 보였는데, 그 답은 흰색 복원이
         // 아니라 pill 자체를 테마 띠로 그리는 것이다. 클릭 rect·↑↓·seek 는
@@ -1308,7 +1308,7 @@ impl App {
             let sch = self.cell.h * fs;
             let ncols = composed.get(sticky.row).map_or(0, |r| r.len());
             sticky_pill_row = Some(sticky.row);
-            // 흰 배경 pill 을 pane 양끝(col 0..ncols)까지 채운다(거노: "흰색
+            // 흰 배경 pill 을 pane 양끝(col 0..ncols)까지 채운다(사용자: "흰색
             // 바탕 pane 양끝으로 다 채워"). 클릭 rect 도 행 전체 폭 — 흰 바탕
             // 어디를 눌러도 seek(begin_sticky_seek)가 걸린다.
             let px = body_left;
@@ -1332,7 +1332,7 @@ impl App {
                 // 원본 셀(등폭 그리드)을 지우지 않고 그 자리에서 선명화만
                 // 한다 — draw_text(proportional)로 다시 그리던 옛 방식은
                 // 한글 wide glyph 를 ink 폭으로 tighten 해 자간이 어긋났다
-                // (거노: "딱 안 맞아 자간 이상"). 그리드 셀은 등폭이라
+                // (사용자: "딱 안 맞아 자간 이상"). 그리드 셀은 등폭이라
                 // 폭·자간이 원본과 정확히 일치한다.
                 //
                 // 색은 프롬프트 띠 재도색과 **같은 공식**(테마 배경에 학생
@@ -1472,7 +1472,7 @@ impl App {
         // (U+FFFC) 유무는 보지 않는다. 세션 **안에서** `← for agents` 로 여는
         // 목록은 맨 아래 statusline 한 칸이 남아, 예전처럼 `!has_profile_slot`
         // 을 AND 로 걸면 화면 신호가 잡혀도 판정이 꺼졌다 → 학생 그림이 목록
-        // 위에 그대로 그려져 내용을 덮었다(거노 2026-08-20 「claude agents 치면
+        // 위에 그대로 그려져 내용을 덮었다(사용자 2026-08-20 「claude agents 치면
         // 사진이 내용을 다가려」).
         //
         // argv(`is_claude_agents`)는 화면 신호가 아직 안 그려진 프레임을 메우는
@@ -1492,7 +1492,7 @@ impl App {
         if agents_view {
             agents_view_panes.insert(id.clone());
             // 관리 화면 = SCHALE 조직 정체성. claude 캐릭터(Clawd) 자리에 SCHALE
-            // 로고를 얹는다(거노: 그 자리가 비어 보임). Clawd 블록아트가 있으면 그
+            // 로고를 얹는다(사용자: 그 자리가 비어 보임). Clawd 블록아트가 있으면 그
             // 자리를 지우고 동일 위치에, 없으면(agents 목록) "Claude Code" 헤더
             // 왼쪽 여백에 앵커한다. 로고는 정사각이라 폭을 셀 비율로 맞춘다.
             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
@@ -1531,7 +1531,7 @@ impl App {
         // 감지된 셀은 스냅샷에서 blank 처리해 자리를 비우고, 그
         // 자리에 도트 이미지를 queue한다 — 이미지 패스는 셀/chrome
         // 보다 먼저 그려지므로 비워진 셀 밑으로 도트가 보인다.
-        // "터미널은 파싱만"(거노): claude sessionId 바인딩 우선, 뷰 pane 은
+        // "터미널은 파싱만"(사용자): claude sessionId 바인딩 우선, 뷰 pane 은
         // 파싱 전 스폰 랜덤 미표시 — display_pane_char(chrome.rs)가 규칙 정본.
         let true_char = self.display_tab_char(&ws, &tab_pid);
         if let Some((name, slug)) = true_char
@@ -1599,7 +1599,7 @@ impl App {
             // 프로브 확정 전이라도 이 pane 에 방금 제출(Enter)이 있었으면
             // 후보를 그 프레임부터 신뢰한다 — refresh 틱(100~300ms)을
             // 기다리는 동안 claude 원색 스피너가 그대로 보이던 마지막
-            // 깜빡임 조각(거노 2026-08-20 「치자마자 0.1초동안
+            // 깜빡임 조각(사용자 2026-08-20 「치자마자 0.1초동안
             // 적용안되는거」). runs_claude 게이트 안이라 셸 출력 오탐
             // 걱정은 없다.
             let spinner_hit = find_claude_spinner(&composed).or_else(|| {
@@ -1644,7 +1644,7 @@ impl App {
                     let row = &composed[sr];
                     // glow/색은 동사 문구("Cerebrating…")까지만 — 뒤의
                     // "(esc to interrupt · N tokens)" 는 원래 dim 색을 둔다
-                    // (거노: 문구만 glow). 줄임표(…) 다음을 경계로, 없으면
+                    // (사용자: 문구만 glow). 줄임표(…) 다음을 경계로, 없으면
                     // "(" 앞, 그것도 없으면 행 끝.
                     let end = row
                         .iter()
@@ -1679,7 +1679,7 @@ impl App {
                         cell.fg = Color::Rgb(mix(a[0]), mix(a[1]), mix(a[2]));
                     }
                     // 꼬리("(49s · thinking some more…)")도 학생 색 언어로 —
-                    // glow 는 여전히 문구까지만(거노: 문구만 glow)이고, 꼬리는
+                    // glow 는 여전히 문구까지만(사용자: 문구만 glow)이고, 꼬리는
                     // accent 를 테마 배경에 눕힌 차분한 톤. claude 가 제 주황을
                     // 남겨 두면 학생색 줄 한가운데 남의 색이 선다(2026-08-16
                     // 「almost done thinking 같은 거도 색 바꿔줘」).
@@ -1739,7 +1739,7 @@ impl App {
                 for cell in composed[sr].iter_mut().skip(sc).take(len) {
                     *cell = GridCell::blank();
                 }
-                // 프사는 여기 안 그린다(거노 2026-08-11: "클로드코드 상태줄
+                // 프사는 여기 안 그린다(사용자 2026-08-11: "클로드코드 상태줄
                 // 학생프사는 없애자"). statusline 은 이제 `● 이름` 을 직접
                 // 찍고, 남은 U+FFFC 한 칸은 **신호**다 — 위 blank 로 지우고
                 // `sr` 만 standing 앵커로 쓴다. 자리표시자를 아예 없애면
@@ -1849,7 +1849,7 @@ impl App {
         erase_ultracode_badge(&mut composed);
         // /rename 세션명 아웃라인 — claude 입력박스 위 "── 세션명 ──" 구분선의
         // 이름 텍스트 섬을 찾아 그 셀 범위를 rename/학생 색 사각 테두리로 두른다
-        // (거노). 순수 '─' rule·statusline·입력행은 걸러진다. 테두리 패스에서 소비.
+        // (사용자). 순수 '─' rule·statusline·입력행은 걸러진다. 테두리 패스에서 소비.
         if let Some((tr, c0, c1)) = find_titled_rule(&composed) {
             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
             let scw = self.cell.w * fs;
@@ -1891,7 +1891,7 @@ impl App {
         }
         // /resume 피커 학생 프사 — 스위퍼(resume_visibility)가 세션 행
         // 설명줄 끝에 스탬프한 ` · #학생이름` 태그를 지우고 그 자리에
-        // 프사(bust)를 얹는다(거노: 이름 말고 프사). 세션 행 아래는
+        // 프사(bust)를 얹는다(사용자: 이름 말고 프사). 세션 행 아래는
         // 구분 빈 줄이라 2행 키로 아래로 내려 그린다. pane 학생과
         // 무관하게 행마다 태그된 학생의 얼굴 — profile_slots(statusline
         // 프사와 같은 이미지 패스)로 소비된다.
@@ -1919,7 +1919,7 @@ impl App {
                     .max(body_left);
                 // 바닥 정렬(statusline 프사 공식) — 얼굴 발을 설명줄
                 // 바닥에 붙이고 위(제목행 끝자락)로 서게. 아래로 내리면
-                // 구분 빈 줄에 매달려 다음 세션 것처럼 보인다(거노).
+                // 구분 빈 줄에 매달려 다음 세션 것처럼 보인다(사용자).
                 let y = (body_top + (r + 1) as f32 * sch - face_h).max(body_top);
                 profile_slots.push((tag_slug, (x, y, face_w, face_h)));
                 faces += 1;
@@ -1984,7 +1984,7 @@ impl App {
             }
         }
         // 접힌 팀메시지("› Message from @이름", verbose OFF) — 보낸 학생
-        // 색으로 "@ 이름❯ 본문…" 인라인 전개(거노: verbose 안 켜고도
+        // 색으로 "@ 이름❯ 본문…" 인라인 전개(사용자: verbose 안 켜고도
         // 읽고 싶다. 클로드코드에 팀메시지만 펼치는 설정은 없음 —
         // verbosity 카테고리는 bash/agent/todo 뿐이라 그리드 재작성으로).
         // 본문은 이 pane transcript tail 의 <teammate-message> 태그에서.
@@ -1999,7 +1999,7 @@ impl App {
                 crate::socket::project_jsonl(cwd, sid)
             });
             // 긴 팀메시지를 스크롤하면 헤더가 화면 위로 나가 아래 본문이
-            // 무테마로 남는다(2026-08-24 거노 스샷: 「위에는 적용되는데
+            // 무테마로 남는다(2026-08-24 사용자 스샷: 「위에는 적용되는데
             // 밑에는 sm인지 모르니까 적용안되는데」). 화면 첫 행이 wrap
             // 연속이면 스크롤백을 올려다 헤더를 찾아 같은 색으로 잇는다.
             // runs_claude 게이트: 셸 pane 의 들여쓴 출력(로그 등)이 첫 행에
@@ -2083,7 +2083,7 @@ impl App {
                 // 그 이름으로도 학생을 못 찾으면 **세션 id 로 pane 을 되짚는다.**
                 // 명부의 이름은 세션 제목이라 자동 요약에 덮인다 — 실측으로
                 // 모모이 pane 은 `mcp, skill사이드바` 였고, 로스터가 아는 글자가
-                // 하나도 없어 색도 프사도 안 걸렸다(거노 2026-08-11: "sm테마는 왜
+                // 하나도 없어 색도 프사도 안 걸렸다(사용자 2026-08-11: "sm테마는 왜
                 // 안됐어"). 앞서 이름 파싱을 고친 것은 이름에 슬러그가 들어 있을
                 // 때만 듣는 반쪽이었다. pane 을 되짚으면 제목이 뭐로 바뀌든 맞는다.
                 //
@@ -2163,7 +2163,7 @@ impl App {
             }
             // claude v2.1.228 은 처리 끝난 팀메시지를 접힌 줄이 아니라
             // `@ <발신 라벨>❯` + 들여쓴 본문으로 **펼쳐서** 그린다 — 위
-            // 접힌 줄 탐지가 영영 안 걸리는 형태다(2026-08-12, 거노 스샷).
+            // 접힌 줄 탐지가 영영 안 걸리는 형태다(2026-08-12, 사용자 스샷).
             // 화면 라벨이 transcript 태그의 from_label 과 일치할 때만
             // 남의 메시지로 인정한다 — 사용자가 직접 친 `@ …❯` 보호.
             for r in 0..composed.len() {
@@ -2186,7 +2186,7 @@ impl App {
                 // 대조되는 것은 **최신 메시지 하나**뿐이라, 스크롤백의 옛
                 // 메시지·tail(256KB) 밖 메시지는 대조가 영영 안 된다 — 라벨이
                 // 로스터 학생의 agent 이름꼴이면 그것만으로 남의 메시지로
-                // 인정한다(2026-08-20 거노 스샷: dismiss 된 미도리의 메시지가
+                // 인정한다(2026-08-20 사용자 스샷: dismiss 된 미도리의 메시지가
                 // 무테마로 남았다).
                 // 라벨이 사람이 붙인 pane 이름이어도(`@ diff❯`) 명부에 그
                 // 이름의 세션이 하나면 남의 메시지로 인정한다 — 지침이 pane
@@ -2251,7 +2251,7 @@ impl App {
             }
         }
         // 크로스-방 tell(⟦캐릭터⟧ 본문)을 발신 학생 테마색으로 — 팀 경계를
-        // 넘는 tell 은 네이티브 teammate 가 아니라 raw user 입력이라 거노 발신
+        // 넘는 tell 은 네이티브 teammate 가 아니라 raw user 입력이라 사용자 발신
         // 처럼 보인다. 마커가 유효 캐릭터면 그 행과 wrap 연속 행을 발신자
         // accent 로 칠하고, 마커 자리에 발신 학생 프사(bust)를 얹는다 —
         // profile_slots(statusline·resume 피커와 같은 이미지 패스)로 소비.
@@ -2293,7 +2293,7 @@ impl App {
         }
         // 학생 완료 보고 줄(`[완료] 미도리(%4) — …`, socket.rs pane_done
         // 주입)도 보고한 학생색으로 — 어느 학생의 보고인지 색으로 읽힌다
-        // (거노 2026-08-20 「이왕하는거면 학생테마에 맞게 색상 다 해」).
+        // (사용자 2026-08-20 「이왕하는거면 학생테마에 맞게 색상 다 해」).
         // 캐릭터를 모르는 옛 형식(`[완료] %4(%4)`)은 원색 유지 — 엉뚱한
         // 색보다 낫다. 반면 **이름은 아는데 명부만 다른** 경우(테마를 바꾼
         // 뒤 옛 이름 pane 의 보고)는 그 이름의 색이 실재하므로 합집합으로
@@ -2316,18 +2316,18 @@ impl App {
                 }
             }
         }
-        // 학생 accent 는 입력박스 보더·@배지 도색에만(거노 2026-07-18:
+        // 학생 accent 는 입력박스 보더·@배지 도색에만(사용자 2026-07-18:
         // 응답 본문·"Reading 1 file" 상태줄까지 학생색이면 헷갈린다 —
         // 출력 글자는 테마 기본 fg. 옛 본문 틴트 폐기). 게이트는 pane
         // 테두리와 동일: 배정 캐릭터 + claude 가 foreground 일 때만
         // (active_process_name=="claude", 500ms 캐시 — 순정 셸 오염
-        // 방지, 거노 실사고). agents 목록 뷰는 중립.
+        // 방지, 사용자 실사고). agents 목록 뷰는 중립.
         // resume 피커(claude 시스템 UI)는 `╭─╮ Search ╰─╯` 박스가 pane
-        // 입력박스로 오인돼 학생 accent 후처리가 오발동한다(거노: 빈 초록
+        // 입력박스로 오인돼 학생 accent 후처리가 오발동한다(사용자: 빈 초록
         // 사각형). agents 목록 뷰처럼 학생 accent·세션 제목 인레이를 끈다.
         let resume_picker = screen_is_resume_picker(&composed);
         // AskUserQuestion picker 도 `❯ 1. …` 옵션줄 + 하단 힌트 박스가
-        // 입력박스로 오인돼 accent 사각형이 남는다(거노: "question 이나
+        // 입력박스로 오인돼 accent 사각형이 남는다(사용자: "question 이나
         // resume" 둘 다). team member/bg 세션 입력박스는 @칩 대신 세션
         // 제목이 상단보더에 와서 @칩 게이트론 못 가른다 → 화면 시그니처
         // ("Chat about this" 등)로 감지해 resume 와 동일하게 accent 를 끈다.

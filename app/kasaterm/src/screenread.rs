@@ -49,7 +49,7 @@ pub(crate) static STUDENT_SPRITE_ANIMATING: std::sync::atomic::AtomicBool =
 /// 걸음은 140ms 한 장인데 프레임을 깨우는 사유가 따로 없어, 다른 펌프(스피너
 /// 30fps·배너 200ms·커서 530ms)에 얹혀서만 넘어갔다 — 보는 방에 도는 pane 이
 /// 없으면 두 장씩 건너뛰고 멈추기를 반복해 작은 칸에서 걷기가 아니라 깜빡임으로
-/// 읽혔다(거노 2026-09-14). 전용 타이머(handler.rs)가 이걸 보고 걷는 동안만
+/// 읽혔다(사용자 2026-09-14). 전용 타이머(handler.rs)가 이걸 보고 걷는 동안만
 /// `STUDENT_WALK_PUMP_MS` 마다 깨운다. 그리는 쪽(`draw_student_walk`)이 세우고
 /// 크롬 프레임 첫머리(render.rs)가 내린다.
 pub(crate) static STUDENT_WALK_ANIMATING: std::sync::atomic::AtomicBool =
@@ -140,7 +140,7 @@ pub(crate) fn blank_tail(rows: &[Vec<GridCell>]) -> usize {
 ///
 /// 상태줄 배지(`ultra`)는 세그먼트 **맨 끝**이라 좁은 pane 에서 제일 먼저 잘리고,
 /// 안 잘려도 눈이 잘 안 간다 — 여러 에이전트를 푸는 턴인지는 타이핑하는 자리에서
-/// 보여야 한다(거노 2026-08-11: "상태줄말고 프롬프트입력창 보라색 glow").
+/// 보여야 한다(사용자 2026-08-11: "상태줄말고 프롬프트입력창 보라색 glow").
 ///
 /// **입력박스를 따로 칠하지 않고 accent 만 갈아끼우는 이유**: 그 박스를 칠하는 손은
 /// `style_prompt_box` 하나뿐이고 pane 렌더 **뒤쪽**에서 돈다. 앞에서 셀을 직접
@@ -332,7 +332,7 @@ pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     // claude 입력박스 마커는 `❯`(U+276F, 또는 옛 `›`)뿐 — ASCII `>` 는 제외한다.
     // diff·git·노트 TUI 는 대시줄 사이에 ASCII `>`(인용·프롬프트) 를 흔히 둬서,
     // `>` 까지 마커로 치면 그 대시줄 쌍을 입력박스로 오인해 뜬금없는 빈 초록
-    // 사각형을 덧그렸다(거노 2026-07-22).
+    // 사각형을 덧그렸다(사용자 2026-07-22).
     fn marker_row(r: &[GridCell]) -> bool {
         r.iter().find(|c| !is_blank_glyph(c.ch)).is_some_and(|c| matches!(c.ch, '❯' | '›'))
     }
@@ -367,7 +367,7 @@ pub(crate) fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     let fill = uniform_fill(&rows[f])?;
     // 입력창은 **여러 줄이다** — 마커 행 위아래로 같은 채움색 여백 행이 붙고,
     // 여러 줄을 입력하면 그만큼 자란다(실측 0.146.0: 여백-입력-여백 3줄). 마커
-    // 행만 칠하면 가운데 한 줄만 색이 바뀌어 상자가 아니라 밑줄로 보인다(거노).
+    // 행만 칠하면 가운데 한 줄만 색이 바뀌어 상자가 아니라 밑줄로 보인다(사용자).
     let same = |r: &[GridCell]| uniform_fill(r).is_some_and(|c| c == fill);
     let mut start = f;
     while start > 0 && same(&rows[start - 1]) {
@@ -902,7 +902,7 @@ pub(crate) fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
                 for c in rows[i].iter_mut() {
                     // 세션명/테두리 줄 배경(claude --agent-color 로 채운 accent 밴드)을
                     // 터미널색으로 되돌린다 — 아웃라인(─ 대시·세션명 글자)만 accent 로
-                    // 두고 배경은 안 칠한다(거노: 배경까지 채우면 글자가 묻힌다).
+                    // 두고 배경은 안 칠한다(사용자: 배경까지 채우면 글자가 묻힌다).
                     c.bg = kasa_bridge::screen::Color::Default;
                     if c.ch != ' ' && c.ch != '\0' {
                         c.fg = fg.clone();
@@ -911,7 +911,7 @@ pub(crate) fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
             }
         }
         // codex 는 칠할 보더가 없다. 이미 배경으로 칠해진 그 줄을 학생색 쪽으로
-        // 끌어당긴다 — 거노 선택(2026-08-05). 원래 배경을 버리지 않고 섞는 이유는
+        // 끌어당긴다 — 사용자 선택(2026-08-05). 원래 배경을 버리지 않고 섞는 이유는
         // 입력 글자가 묻히지 않게 하기 위해서다(보더 도색이 배경을 비우는 것과
         // 같은 이유). 여기서 fg 는 건드리지 않는다.
         PromptBox::Filled { rows: r } => {
@@ -925,7 +925,7 @@ pub(crate) fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
         }
     }
     // 입력행 왼쪽 ❯ 프롬프트 마커도 학생 accent 로 — claude --agent-color(8색
-    // 근사)가 남으면 보더와 화살표 색이 어긋난다(거노). 마커 글리프 한 칸만
+    // 근사)가 남으면 보더와 화살표 색이 어긋난다(사용자). 마커 글리프 한 칸만
     // 칠하고 입력 글자는 테마 기본 fg 유지.
     for r in bx.rows() {
         if let Some(c) = rows[r]
@@ -1036,7 +1036,7 @@ pub(crate) fn teammate_collapsed_line(row: &[GridCell]) -> Option<(usize, usize,
 
 /// tell 주입 마커 `⟦캐릭터⟧ 본문` 감지 — kasaterm-cli tell 이 발신 pane 캐릭터를
 /// 앞에 심는다(SendMessage 는 팀 경계 안이라 크로스-방 tell 만 화면에 발신자 앵커가
-/// 필요). `character_accent` 유효 캐릭터만 인정해 거노가 우연히 친 `⟦…⟧` 오탐을
+/// 필요). `character_accent` 유효 캐릭터만 인정해 사용자가 우연히 친 `⟦…⟧` 오탐을
 /// 막는다. 반환: (⟦ 시작 col, ⟧ 다음 col, 캐릭터명).
 pub(crate) fn tell_marker_line(row: &[GridCell]) -> Option<(usize, usize, String)> {
     let chars: Vec<char> = row
@@ -1073,7 +1073,7 @@ pub(crate) const TELL_FACE_COLS: usize = 2;
 /// 인라인과 시각을 맞춘다. 프사가 있는 캐릭터는 첫 줄 본문을 마커 시작 col 로
 /// 당겨(= claude 의 `❯ ` 폭 2 = wrap 들여쓰기) 접힌 줄과 좌측선을 맞추고, 비워진
 /// `❯` 자리 2칸에 아바타를 얹는다(호출측 이미지 패스) — 옛 배치는 첫 줄만 프사
-/// 폭만큼 밀려 계단이 졌다(거노 2026-07-27). 위 행 헤더로 올리는 안은 claude 가
+/// 폭만큼 밀려 계단이 졌다(사용자 2026-07-27). 위 행 헤더로 올리는 안은 claude 가
 /// user 턴 앞에 빈 줄을 두지 않아 윗줄 글자를 덮어 기각(실측). slug 없는
 /// 캐릭터만 `이름 ›` 인라인 폴백. 반환은 프사 rect 의 x 기준 col — 없으면 None.
 /// `@ <발신 라벨>❯` 헤더의 라벨을 학생 이름으로 — `@ 이름❯` 만 남기고 뒤는 지운다.
@@ -1201,7 +1201,7 @@ pub(crate) fn restyle_tell_line(
     let label = format!("{name} ›");
     // 라벨을 본문 쪽(end)에 붙인다. 지우는 마커 `⟦이름⟧ ` 폭은 이름 길이에 따라
     // 가변인데 라벨은 고정폭이라, 왼쪽 정렬하면 남는 칸이 그대로 `›`—본문 사이
-    // 갭으로 보였다(거노 2026-07-27: 이름이 길수록 더 벌어짐).
+    // 갭으로 보였다(사용자 2026-07-27: 이름이 길수록 더 벌어짐).
     let label_w: usize = label.chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
     let start = end.saturating_sub(label_w + 1).max(lead);
     let mut w = start;
@@ -1276,7 +1276,7 @@ pub(crate) fn done_report_line(row: &[GridCell]) -> Option<String> {
 ///
 /// ⚠️ 「정확히 2」로 가두면 안 된다 — 목록 항목("- …"·"1. …")의 wrap 은 4~5칸
 /// 들여쓰기로 떨어지고, 거기서 걸음이 끊기면 **그 아래 문단 전체가 무테마**로
-/// 남는다(2026-08-20 거노 스샷: 사오리 브리프가 셋째 줄부터 흰색). 걸음은
+/// 남는다(2026-08-20 사용자 스샷: 사오리 브리프가 셋째 줄부터 흰색). 걸음은
 /// 헤더부터 연속 행만 따라가므로, 다음 블록(⏺ col0·입력박스 보더)에서 어차피
 /// 멈춘다 — 깊은 들여쓰기를 받아도 남의 출력까지 번지지 않는다.
 pub(crate) fn tell_wrap_continuation(row: &[GridCell]) -> bool {
@@ -1370,7 +1370,7 @@ pub(crate) enum CarriedHeader {
 
 /// 뷰포트 첫 행이 팀메시지 wrap 연속일 때, 화면 위(스크롤백)로 올라가 그 메시지의
 /// 헤더를 찾는다 — 긴 SendMessage 를 스크롤해 내려가면 헤더가 화면 밖으로 나가
-/// 본문 아래쪽이 「팀메시지인지 모르는」 무테마로 남았다(2026-08-24 거노 스샷:
+/// 본문 아래쪽이 「팀메시지인지 모르는」 무테마로 남았다(2026-08-24 사용자 스샷:
 /// 「위에는 적용되는데 밑에는 sm인지 모르니까 적용안되는데」). `above` 는 뷰포트
 /// 바로 위 행부터 위로(가까운 순). 연속 행·빈 행(문단 구분)만 건너뛰고, 처음
 /// 만나는 다른 행이 헤더일 때만 발신자를 돌려준다 — 다른 무엇이면 화면 첫 행은
@@ -1395,7 +1395,7 @@ pub(crate) fn carried_message_header(above: &[Vec<GridCell>]) -> Option<CarriedH
 /// `@ 라벨❯` 헤더의 라벨 → (발신자 이름, 학생색). transcript 최신 태그와 대조된
 /// 라벨(label_hit)은 태그의 발신자·색 힌트를 쓰고, 그 이름으로 학생을 못 찾으면
 /// 세션 id 로 발신 pane 을 되짚는다 — 명부의 이름은 세션 자동 제목에 덮인다
-/// (거노 2026-08-11 "sm테마는 왜 안됐어"). 그마저 안 되면 로스터 agent 이름꼴
+/// (사용자 2026-08-11 "sm테마는 왜 안됐어"). 그마저 안 되면 로스터 agent 이름꼴
 /// 라벨 자체를 이름으로. 화면 안 헤더 색칠과 헤더가 스크롤로 밀려난 본문
 /// 이어칠하기가 **같은 규칙**을 타야 스크롤 중에 색이 변하지 않는다 — 그래서
 /// 한 함수다.
@@ -1479,7 +1479,7 @@ pub(crate) fn teammate_sender_slug(name: &str) -> Option<&'static str> {
 /// 전에는 마지막 `-` 앞을 뗐는데(`aru-9c88` → `aru`), 2026-08-04 에 이름이
 /// `<슬러그>-p<pane 번호>-<접미>` 세 토막이 되면서 `himari-p2-1uc` → `himari-p2` 가
 /// 되어 로스터에 없는 이름으로 떨어졌다 — 그래서 남이 보낸 메시지가 학생색도 프사도
-/// 없이 떴다(거노 2026-08-11: "sendmessage 학생테마 안나오는거"). 첫 토막을 보면 두
+/// 없이 떴다(사용자 2026-08-11: "sendmessage 학생테마 안나오는거"). 첫 토막을 보면 두
 /// 형식이 다 걸린다.
 pub(crate) fn sender_roman_head(name: &str) -> &str {
     name.split_once('-').map(|(a, _)| a).unwrap_or(name)
@@ -1490,7 +1490,7 @@ pub(crate) fn sender_roman_head(name: &str) -> &str {
 /// transcript 대조가 불가능한 헤더의 보조 관문 — 발신 pane 을 dismiss 하면 명부
 /// 파일(`~/.claude/sessions/<pid>.json`)이 사라져 발신자 복원이 통째로 실패하고,
 /// 옛 메시지는 tail(256KB) 밖으로 밀려나 대조 자체가 안 된다. 둘 다 화면에는
-/// 라벨이 그대로 남아 있으니 이름꼴로 판정한다(2026-08-20 거노 스샷:
+/// 라벨이 그대로 남아 있으니 이름꼴로 판정한다(2026-08-20 사용자 스샷:
 /// `@ midori-p4-v32❯` 가 무테마로 남았다). `-p<번호>` 토막까지 요구해 사용자가
 /// 우연히 친 텍스트("midori-chan" 등)는 안 걸린다.
 /// `@ 라벨❯` 의 라벨을 명부(`~/.claude/sessions/*.json`)의 세션 이름으로 되짚어
@@ -1613,7 +1613,7 @@ fn fold_peer_names<I: IntoIterator<Item = (String, String)>>(
         // 때 **공백을 하이픈으로** 바꾸므로(실측 2026-08-27: 세션 이름 `account
         // theme` 이 `› Message from @account-theme:` 으로 떴다), 명부의 원래 이름만
         // 키로 두면 공백이 든 이름은 영영 못 찾는다 — 그 세션이 보낸 메시지는
-        // 학생색도 프사도 없이 뜬다(거노 「sm에 테마가 안붙네 이미지랑 색상」).
+        // 학생색도 프사도 없이 뜬다(사용자 「sm에 테마가 안붙네 이미지랑 색상」).
         //
         // 별칭을 **따로 만들지 않고 같은 표에** 넣는 이유는 충돌 규칙을 한 번만
         // 쓰기 위해서다 — 별칭이 남의 진짜 이름과 겹치면 그것도 「못 가름(None)」이
@@ -1653,7 +1653,7 @@ pub(crate) fn label_is_roster_agent(label: &str) -> bool {
 pub(crate) fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8; 4] {
     // 발신자가 한글 캐릭터 표시명인 경우(F-2 인박스 규칙의 `from` = 발신 캐릭터명)
     // 를 먼저 본다 — 슬러그 경로만 타면 "프라나" 같은 이름이 매칭에 실패해 학생색
-    // 대신 tag_color 폴백으로 떨어졌다(거노 2026-07-27: SendMessage 도 학생 테마).
+    // 대신 tag_color 폴백으로 떨어졌다(사용자 2026-07-27: SendMessage 도 학생 테마).
     if let Some(c) = theme::character_accent_any(name) {
         return c;
     }
@@ -2010,7 +2010,7 @@ pub(crate) fn wrap_body_cells(
 
 /// 접힌 팀메시지를 학생색으로 전개(스냅샷 전용, 원본 그리드 무손상) — 본문이
 /// 있으면 그 행을 "@ 이름❯ 본문"으로 갈아끼우고, **아래 blank 행이 있는 만큼
-/// 줄바꿈으로 이어 쓴다**(거노: 한 줄 말줄임 말고 펼쳐서). 그리드는 reflow 가
+/// 줄바꿈으로 이어 쓴다**(사용자: 한 줄 말줄임 말고 펼쳐서). 그리드는 reflow 가
 /// 안 되니 빈 행 너머로 남는 본문은 '…' — 전문은 hover 말풍선이 담당. 다음
 /// 항목과의 구분 blank 1행은 남기고, 뷰포트 바닥까지 전부 빈 경우엔 끝까지
 /// 쓴다. 본문이 없으면 원문 글자에 색만. 와이드 글리프는 글자 + ' ' 스페이서
@@ -2044,7 +2044,7 @@ pub(crate) fn expand_teammate_message(
         blank_run.saturating_sub(1)
     };
     // 발신자가 배정 학생이면 이름 텍스트 대신 프사(bust) — tell 렌더와 같은 시각
-    // 언어(거노 2026-07-27: SendMessage 도 학생 테마로). 프사는 첫 줄 왼쪽 여백
+    // 언어(사용자 2026-07-27: SendMessage 도 학생 테마로). 프사는 첫 줄 왼쪽 여백
     // 2칸에 얹으므로(호출측 이미지 패스) 헤더는 그만큼 비운다 — 그 폭이 곧 이어
     // 쓰는 줄의 들여쓰기(indent = start+2)라 본문 좌측이 한 줄로 선다.
     let face_slug = teammate_sender_slug(sender);
@@ -2558,10 +2558,10 @@ pub(crate) fn codex_worked_rule(row: &[GridCell]) -> bool {
     })
 }
 
-/// claude 입력박스 위 "── 세션명 ──" 구분선의 이름 구간 위치(거노: rename 아웃라인).
+/// claude 입력박스 위 "── 세션명 ──" 구분선의 이름 구간 위치(사용자: rename 아웃라인).
 /// 하단 10행에서 대시가 지배적이고 비-대시 텍스트 섬이 있는 rule 행을 찾아, **좌우 대시
 /// 런 사이**(양옆 공백 포함)의 (row, c0, c1)을 돌려준다. 이름 글자 셀이 아니라 대시 경계로
-/// 잡아야 한글 같은 와이드(2셀) 문자의 둘째 셀까지 박스 안에 정확히 들어온다(거노: 칸 안맞음).
+/// 잡아야 한글 같은 와이드(2셀) 문자의 둘째 셀까지 박스 안에 정확히 들어온다(사용자: 칸 안맞음).
 /// 순수 '─' rule·statusline·입력행은 걸러진다.
 pub(crate) fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, usize)> {
     let n = rows.len();
@@ -2573,16 +2573,16 @@ pub(crate) fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, 
             continue;
         }
         // 이름 섬이 없는 순수 '─' rule(입력박스 바닥 테두리 등)은 건너뛴다 — `?` 로 함수를
-        // 끝내면 그 아래 순수 rule 이 세션명 줄보다 먼저 걸려 아웃라인이 통째 사라진다(거노).
+        // 끝내면 그 아래 순수 rule 이 세션명 줄보다 먼저 걸려 아웃라인이 통째 사라진다(사용자).
         // box-drawing 문자(╭╮╰╯│…, U+2500-257F) 전체를 이름에서 제외 — 둥근 입력박스
-        // 테두리 행(╭────╮)의 모서리가 이름 섬으로 오탐되어 행 전체에 사각형이 그려졌다(거노).
+        // 테두리 행(╭────╮)의 모서리가 이름 섬으로 오탐되어 행 전체에 사각형이 그려졌다(사용자).
         let is_name = |c: &GridCell| {
             !matches!(c.ch, ' ' | '\0') && !('\u{2500}'..='\u{257F}').contains(&c.ch)
         };
         let Some(first) = row.iter().position(&is_name) else { continue };
         let Some(last) = row.iter().rposition(&is_name) else { continue };
         // teammate 칩(`──── @이름 ──`)은 claude 네이티브가 그리는 agent 배지지
-        // 세션명이 아니다 — 아웃라인을 두르면 칩에 네모칸이 생긴다(거노 2026-07-27).
+        // 세션명이 아니다 — 아웃라인을 두르면 칩에 네모칸이 생긴다(사용자 2026-07-27).
         if row[first].ch == '@' {
             continue;
         }
@@ -2612,7 +2612,7 @@ pub(crate) fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, 
 /// Clawd 시작 배너 감지. 결정행(몸통 2행째)의 9글리프 시퀀스를 찾고 바로
 /// 윗행의 머리 7글리프로 확정한다 — 이 조합은 일반 텍스트에서 사실상
 /// 나올 수 없다. 스크롤로 배너가 뷰포트 가장자리에 걸치면 보이는 행만으로
-/// 감지한다(거노: 스크롤 살짝 내리면 Clawd 원본이 노출) — 위로 잘리면
+/// 감지한다(사용자: 스크롤 살짝 내리면 Clawd 원본이 노출) — 위로 잘리면
 /// top_row 가 음수, 아래로 잘리면 박스가 화면 밖까지 이어진다. 호출측은
 /// blank 범위를 스냅샷 안으로 클램프하고 스프라이트를 pane 세로로 클립할 것.
 /// 반환: 배너 박스의 (top_row, left_col) 목록.
@@ -3087,7 +3087,7 @@ pub(crate) fn find_sticky_prompt(
     // ⚠️ 마커 없는 흐릿한 행을 잡던 폴백은 **걷어냈다**(2026-08-30). 게이트가 열린
     // 화면의 맨 위에 오는 흐릿한 줄은 프롬프트만이 아니라서, claude 배너
     // (`Fable 5 with xhigh effort · Claude Max`)나 지나간 회색 안내문에 띠가 붙어
-    // **엉뚱한 질문이 뜬다**로 보였다(거노 지적). 이제 진짜 질문 목록을 들고 있으니
+    // **엉뚱한 질문이 뜬다**로 보였다(사용자 지적). 이제 진짜 질문 목록을 들고 있으니
     // 화면에서 아무 흐릿한 줄이나 주워 올 이유가 없다.
     //
     // 화면에서 못 얻으면 transcript 에서 얻은 프롬프트로 **우리가 직접** 최상단 행에
@@ -3288,7 +3288,7 @@ fn pick_scrolled_past_prompt(
     // 기록에 없는 질문이 실재한다. claude 가 답하는 동안 넣어 큐에 쌓인 프롬프트가
     // 그렇다 — 화면에는 `❯ …` 로 멀쩡히 그려지는데 대화 기록에는 user 레코드가
     // 안 남는다(2026-09-03 실측: 화면에 질문 셋, 기록에 하나). 기록만 믿으면 그 턴을
-    // 보고 있어도 **아는 것 중 하나**, 즉 맨 처음 질문으로 떨어진다(거노 지적:
+    // 보고 있어도 **아는 것 중 하나**, 즉 맨 처음 질문으로 떨어진다(사용자 지적:
     // 「클로드는 맨위에 쳤던거가 뜨는데」).
     //
     // 그 자리에서는 화면이 정본이다. 다만 아는 질문을 우선하는 순서는 그대로 둔다 —
@@ -3442,7 +3442,7 @@ pub(crate) fn fit_sprite_box(cols: usize, rows: usize, cw: f32, ch: f32) -> (f32
 pub(crate) fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
     // 세대별 (머리, 몸통, 발) — claude 는 배너 도트를 바꾼다. 2.1.23x 에서
     // 눈 요철이 생긴 새 아트로 갈렸는데 옛 글리프만 알던 동안 **새 배너가
-    // 통째로 안 잡혀** 부팅 화면에 학생 테마가 안 붙었다(2026-08-20 거노
+    // 통째로 안 잡혀** 부팅 화면에 학생 테마가 안 붙었다(2026-08-20 사용자
     // 스샷 + 격리 리그 실측: 컴팩트·박스형 웰컴 둘 다 같은 3행 아트).
     // 옛 버전으로 도는 pane 도 있을 수 있어 두 세대를 다 훑는다.
     const GENS: [(&[char], &[char], &[char]); 2] = [
@@ -3802,7 +3802,7 @@ pub(crate) fn tint_welcome_box(
 
 /// 화면 전체를 한 줄로 접는다 — 공백류·U+0000 을 한 칸으로 눌러 wrap 에 무관하게
 /// 매칭하기 위한 정규화. 좁은 창에선 한 문구가 여러 셀 행으로 갈리고 사이에 행끝
-/// 패딩이 껴 직접 매칭이 깨진다(거노: 특정 창 크기에서만 사각형 잔상 재발).
+/// 패딩이 껴 직접 매칭이 깨진다(사용자: 특정 창 크기에서만 사각형 잔상 재발).
 fn squash_screen(rows: &[Vec<GridCell>]) -> String {
     // 화면 원문과 단어 배열을 따로 쌓으면 학생 수만큼 프레임마다 할당이 늘어난다.
     let mut text = String::new();
@@ -3851,7 +3851,7 @@ fn seq_near(hay: &str, parts: &[&str], gap: usize) -> bool {
 
 /// claude agents 목록 화면(FleetView)인지 화면 텍스트로 감지. argv(`is_claude_agents`)는
 /// `claude agents` **명령**만 잡고, 세션 안에서 "← for agents"로 여는 목록 뷰는 같은
-/// 프로세스라 argv 가 안 바뀌어 못 잡는다(거노: agents view 로고 안 뜸).
+/// 프로세스라 argv 가 안 바뀌어 못 잡는다(사용자: agents view 로고 안 뜸).
 ///
 /// 신호는 목록 상단 통계줄 "N awaiting input · N working · N completed" 다. 세 조각이
 /// **구분자로 붙어 한 줄**을 이루는 것이 이 화면 고유고, 조건부 렌더가 아니라 0 이어도
@@ -3874,22 +3874,22 @@ pub(crate) fn screen_is_agents_list(rows: &[Vec<GridCell>]) -> bool {
 /// claude `--resume` 세션 피커 화면인지 감지. "Resume session (N of M)" 헤더가
 /// 뜨는 시스템 UI라, 학생 pane 후처리(prompt box accent·세션 제목 인레이)를 여기서
 /// 오발동하면 안 된다 — Search 박스(`╭─╮ ⌕ Search… ╰─╯`)가 pane 입력박스로 오인돼
-/// 빈 초록 사각형이 그려졌다(거노). 일반 대화엔 statusline(U+FFFC)이 있어 호출부에서
+/// 빈 초록 사각형이 그려졌다(사용자). 일반 대화엔 statusline(U+FFFC)이 있어 호출부에서
 /// !has_profile_slot 로 이미 걸러진다.
 pub(crate) fn screen_is_resume_picker(rows: &[Vec<GridCell>]) -> bool {
     // "Resume session (N of M)" 헤더가 피커 고유 — 단순 "Resume session" 은
     // 대화 본문에 우연히 나올 수 있어 여는 괄호까지 확인한다. 피커도 맨 아래
     // statusline(U+FFFC) 한 줄이 남아 has_profile_slot 으로는 못 거른다
-    // (거노: Search 아래 핑크 사각형 잔재 — accent 후처리 오발동).
+    // (사용자: Search 아래 핑크 사각형 잔재 — accent 후처리 오발동).
     //
     // 좁은 창에선 "Resume session" 과 "(N of M)" 이 다른 셀 행으로 wrap 되며
     // 사이에 행끝 패딩(스페이스·U+0000)이 껴 "Resume session (" 직접 매칭이
-    // 깨진다(거노: 특정 창 크기에서만 사각형 잔상 재발) — squash_screen 이 그걸 접는다.
+    // 깨진다(사용자: 특정 창 크기에서만 사각형 잔상 재발) — squash_screen 이 그걸 접는다.
     squash_screen(rows).contains("Resume session (")
 }
 
 /// AskUserQuestion picker 감지 — `❯ 1. …` 옵션 목록 + 하단 힌트 박스가 학생
-/// 입력박스로 오인돼 accent 사각형이 남던 화면(거노: "question 이나 resume").
+/// 입력박스로 오인돼 accent 사각형이 남던 화면(사용자: "question 이나 resume").
 /// 고유 시그니처: 항상 마지막 옵션인 "Chat about this" + 하단 네비 힌트
 /// ("Esc to cancel" 또는 "Enter to select"). resume 피커엔 없는 조합이라
 /// 대화 본문 우연 등장을 힌트 AND 로 한 번 더 거른다. resume 와 같은 squash
@@ -4046,7 +4046,7 @@ pub(crate) fn find_statusline_face(rows: &[Vec<GridCell>]) -> Option<(usize, usi
 ///
 /// 윗 테두리는 `/rename` 세션명이 "── 학생 ──" 로 박힐 수 있어 짧은 텍스트 섬을
 /// 인정한다(max_label 24) — 순수 rule 만 보면 이름 지은 세션에서 standing 이
-/// 통째로 사라진다(거노 실사고). 아래 테두리는 항상 순수 '─'(0).
+/// 통째로 사라진다(사용자 실사고). 아래 테두리는 항상 순수 '─'(0).
 /// agy 입력창 위 standing 앵커.
 ///
 /// agy 화면 아래는 `[윗보더][> 입력][아래보더][? for shortcuts …]` 로, claude 와
@@ -4248,7 +4248,7 @@ pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
         .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
     // todo 트리가 뜨면 스피너 행이 statusline(=last)에서 멀어진다: todo ~7행 +
     // 입력박스(테두리·❯·테두리) ~4행이 사이에 껴 10행 창 밖으로 밀려나 walk
-    // 도트가 사라졌다(거노). 앞머리 글리프(별/점/점자 col<8) + '…'/"esc to
+    // 도트가 사라졌다(사용자). 앞머리 글리프(별/점/점자 col<8) + '…'/"esc to
     // interrupt" 라는 강한 시그니처라 30행으로 넓혀도 본문 오탐은 사실상 없다.
     let start = (last + 1).saturating_sub(30);
     // 스피너 애니메이션은 별(U+2720~274F)·점자(U+2800~28FF)·가운뎃점(·) 등
@@ -4272,14 +4272,14 @@ pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
 /// 2026-08-31 실측 — 윈도우 pane 의 그 행이 그대로
 /// `* Beaming… (1m 50s · thought for 1s)` 였다. 별 범위만 보던 동안 윈도우에서는
 /// 스피너를 아예 못 찾아 학생 도트도 working 바도 완료 판정도 함께 죽어 있었다
-/// (거노: 「스피너 모양 하나가 윈도우에선 다른가봐, 테마적용이 안돼」).
+/// (사용자: 「스피너 모양 하나가 윈도우에선 다른가봐, 테마적용이 안돼」).
 ///
 /// `·` 는 최근 claude 의 점 프레임이다.
 ///
 /// `●`(U+25CF)는 **reduce motion**(/config) 스피너다 — 애니메이션 없이 이 원
 /// 하나로 고정된다. 2026-09-02 실측: `● Whatchamacalliting… (9s · ↓ 442 tokens)`.
 /// 집합에 없던 동안 reduce motion pane 은 스피너를 못 찾아 테마·학생 도트·working
-/// 판정이 전부 죽었다(거노: 「스피너 모양이 달라서 테마가 안붙네」). 응답 마커
+/// 판정이 전부 죽었다(사용자: 「스피너 모양이 달라서 테마가 안붙네」). 응답 마커
 /// `⏺`(U+23FA)와는 다른 글자라 대화 본문과 안 섞인다.
 ///
 /// ASCII `*` 는 흔한 글자다. 그래도 오탐이 안 늘어나는 것은 이 함수를 쓰는 자리가
@@ -4336,7 +4336,7 @@ pub(crate) fn spinner_tip_rescue(rows: &[Vec<GridCell>], r: usize) -> Option<usi
 /// 괄호도 esc 힌트도 Tip 도 아직 없는 「턴 시작 첫 프레임」 스피너 후보 —
 /// `✢ Transmuting…` 별+줄임표뿐인 행. 실측(2026-08-15, 0.3s 간격 채집): 매 턴
 /// **첫 ~3초**가 이 모양이고 경과시간 괄호는 3초께에야 붙는다. 그동안 본판정이
-/// 거부해 학생이 매 턴 3초 늦게 붙었다(거노 「스피너 인식 바로 안 되나봐」).
+/// 거부해 학생이 매 턴 3초 늦게 붙었다(사용자 「스피너 인식 바로 안 되나봐」).
 ///
 /// 글자만으로는 이 모양을 인용문과 못 가른다(그 오탐을 막으려고 괄호 요구를
 /// 세웠던 것). 그래서 이 함수는 **후보만** 대고, 확정은 App 쪽 프로브가
@@ -4427,7 +4427,7 @@ pub(crate) fn lenient_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
 ///
 /// 글자만으로는 못 가른다 — 답변이 스피너 형태를 **인용**하면 진짜와 한 글자도
 /// 다르지 않다. 실제로 스피너 감지를 설명하는 답변 자체가 잡혀, 턴이 끝난 뒤에도
-/// 그 인용줄 위에서 학생이 계속 걸었다(거노 2026-08-13 지적: "저기서 왜 걷고있어").
+/// 그 인용줄 위에서 학생이 계속 걸었다(사용자 2026-08-13 지적: "저기서 왜 걷고있어").
 ///
 /// 가르는 축은 글자가 아니라 **위치**다. claude 화면에서 진짜 스피너 아래에는
 /// 입력박스와 statusline 뿐이고, 대화 마커(`⏺` 응답 · `⎿` 도구 출력)는 언제나
@@ -4451,7 +4451,7 @@ pub(crate) fn spinner_is_live(rows: &[Vec<GridCell>], r: usize) -> bool {
             // 태스크 목록 위젯도 스피너 바로 아래에 `⎿  ◻ 항목` 으로 뜬다는 게
             // 실측됐다(2026-08-15 peek: `✽ Ideating…` 아래 `⎿  ◻ 설정 다국어`).
             // 이 행을 마커로 세면 태스크를 쓰는 working pane 전부에서 스피너가
-            // 죽어 학생이 걷다 말고 입력창 위에 서 버린다(거노 신고). 체크박스
+            // 죽어 학생이 걷다 말고 입력창 위에 서 버린다(사용자 신고). 체크박스
             // 글리프로 시작하는 ⎿ 행은 위젯이다 — 도구 출력 인용(`⎿ Read 50
             // lines…`)은 일반 글자로 시작해 안 걸린다.
             '⎿' => {
@@ -4483,7 +4483,7 @@ pub(crate) fn spinner_is_live(rows: &[Vec<GridCell>], r: usize) -> bool {
 /// ②를 처음엔 "글리프와 줄임표 사이가 ASCII"로 뒀는데 그게 **진짜 스피너를 통째로
 /// 죽였다** — 동사가 영어라는 전제가 틀렸다. claude 는 한국어로도 찍는다:
 /// `· claude 테마 자동 연동 구현 중… (3m 19s · ↓ 14.2k tokens)`. 그래서 working 인
-/// pane 의 학생이 안 걸었다(거노 2026-08-13 지적). 언어에 안 묶이는 표식은 동사가
+/// pane 의 학생이 안 걸었다(사용자 2026-08-13 지적). 언어에 안 묶이는 표식은 동사가
 /// 아니라 뒤에 붙는 경과시간이다.
 pub(crate) fn spinner_row_col(row: &[GridCell]) -> Option<usize> {
     let first = row.iter().position(|c| !matches!(c.ch, ' ' | '\0'))?;
@@ -4528,7 +4528,7 @@ pub(crate) fn spinner_row_col(row: &[GridCell]) -> Option<usize> {
     let head = inside.split_once(')').map_or(inside, |(h, _)| h);
     // 경과시간은 괄호 **어딘가에** 있으면 된다 — 맨 앞이어야 한다고 못 박았더니
     // 토큰이 먼저 오는 변종 `(↓ 1.2k tokens · 3s)` 을 통째로 놓쳤다. 턴이 막
-    // 시작해 경과시간이 아직 안 붙은 프레임이 이 꼴로 뜨는데, 그게 거노가 말한
+    // 시작해 경과시간이 아직 안 붙은 프레임이 이 꼴로 뜨는데, 그게 사용자가 말한
     // 「바로 안 붙을 때도 있어」(2026-08-20)의 한 갈래다. 앞머리 글리프가 그 행의
     // **첫** non-blank(col<8)여야 한다는 관문은 그대로라 본문 오탐은 안 늘어난다.
     has_elapsed(head).then_some(first)
@@ -4677,7 +4677,7 @@ mod picker_tag_tests {
 
     // 좁은 창서 헤더가 wrap 되면 "Resume session" 과 "(N of M)" 사이에 행끝
     // 패딩(스페이스·\0)이 껴 예전엔 감지가 끊겨 accent 사각형이 남았다
-    // (거노: 특정 창 크기에서만 재발). 공백류를 접어 wrap 무관하게 잡는다.
+    // (사용자: 특정 창 크기에서만 재발). 공백류를 접어 wrap 무관하게 잡는다.
     #[test]
     fn resume_picker_survives_wrapped_header() {
         // 한 행 안 다수 공백(직접 매칭이면 "Resume session   (" 로 깨짐)
@@ -4699,7 +4699,7 @@ mod picker_tag_tests {
 
     // AskUserQuestion picker 는 "Chat about this"(항상 마지막 옵션) + 하단
     // 네비 힌트로 감지한다 — 정상 입력박스(미도리 세션제목 보더든 @칩이든)는
-    // 건드리지 않고 picker 만 accent 배제(거노: question 도 사각형 잔상).
+    // 건드리지 않고 picker 만 accent 배제(사용자: question 도 사각형 잔상).
     #[test]
     fn ask_picker_detected_by_signature() {
         // 실측 시그니처: 옵션 목록 + "Chat about this" + "Enter to select"·"Esc to cancel"
@@ -4824,14 +4824,14 @@ mod clawd_banner_tests {
     // 실측 agy 로고(Antigravity CLI 1.1.12) — 아래로 갈수록 한 칸씩 넓어진다.
     const AGY: [&str; 5] = [
         "      ▄▀▀▄        Antigravity CLI 1.1.12",
-        "     ▀▀▀▀▀▀       goenho0613@example.com (Google AI Pro)",
+        "     ▀▀▀▀▀▀       test.user@example.test (Google AI Pro)",
         "    ▀▀▀▀▀▀▀▀      Gemini 3.5 Flash (High)",
         "   ▄▀▀    ▀▀▄     ~/Desktop/momewomo/tmuxify",
         "  ▄▀▀      ▀▀▄",
     ];
 
     /// 2.1.23x 의 눈 달린 새 아트 — 옛 글리프만 알던 동안 새 배너가 통째로
-    /// 안 잡혀 부팅 화면에 학생 테마가 안 붙었다(2026-08-20 거노 스샷).
+    /// 안 잡혀 부팅 화면에 학생 테마가 안 붙었다(2026-08-20 사용자 스샷).
     /// 컴팩트·박스형 웰컴 둘 다 이 3행이다(격리 리그 peek 실측).
     #[test]
     fn new_gen_clawd_banner_detected() {
@@ -4971,7 +4971,7 @@ mod clawd_banner_tests {
     }
 
     // 스크롤로 머리 행이 위로 잘림 — 몸통이 최상단 행. top_row = -1 로
-    // 잡혀야 몸통·발이 blank 되고 스프라이트가 클립돼 그려진다(거노:
+    // 잡혀야 몸통·발이 blank 되고 스프라이트가 클립돼 그려진다(사용자:
     // 스크롤 살짝 내리면 Clawd 원본 노출 회귀 방지).
     #[test]
     fn body_at_top_row_detected_as_cropped() {
@@ -5555,13 +5555,13 @@ mod clawd_banner_tests {
         s
     }
 
-    // 1컬럼(좁은 폭): 도트 위 "Welcome back 건호!" → 학생 인사말 + accent 색,
-    // 이름("건호")은 그리드에서 추출해 인사말에 삽입된다. 폭은 넉넉히(클립 없음).
+    // 1컬럼(좁은 폭): 도트 위 "Welcome back 한글!" → 학생 인사말 + accent 색,
+    // 이름("한글")은 그리드에서 추출해 인사말에 삽입된다. 폭은 넉넉히(클립 없음).
     #[test]
     fn welcome_greeting_single_column() {
         let pad = " ".repeat(50);
         let mut rows = vec![
-            wide_row(&format!("  Welcome back 건호!{pad}")),
+            wide_row(&format!("  Welcome back 한글!{pad}")),
             row_from("   ▐▛███▜▌"),
             row_from("  ▝▜█████▛▘"),
             row_from("    ▘▘ ▝▝"),
@@ -5569,7 +5569,7 @@ mod clawd_banner_tests {
         replace_welcome_greeting(&mut rows, 1, "코하루", Some([200, 50, 50, 255]));
         let line = row_text(&rows[0]);
         assert!(line.contains("어서오세요"), "인사말 치환됨: {line}");
-        assert!(line.contains("건호"), "이름 추출·삽입: {line}");
+        assert!(line.contains("한글"), "이름 추출·삽입: {line}");
         assert!(!line.contains("Welcome back"), "원문 제거: {line}");
         let first = rows[0].iter().find(|c| !matches!(c.ch, ' ' | '\0')).unwrap();
         assert_eq!(first.fg, kasa_bridge::screen::Color::Rgb(200, 50, 50));
@@ -5579,7 +5579,7 @@ mod clawd_banner_tests {
     #[test]
     fn welcome_greeting_clipped_at_border() {
         let mut rows = vec![
-            wide_row("│  Welcome back 건호!    │"),
+            wide_row("│  Welcome back 한글!    │"),
             row_from(" ▐▛███▜▌"),
             row_from("▝▜█████▛▘"),
             row_from("  ▘▘ ▝▝"),
@@ -5597,7 +5597,7 @@ mod clawd_banner_tests {
     #[test]
     fn welcome_greeting_preserves_right_column() {
         let mut rows = vec![
-            wide_row("  Welcome back 건호!      Tips for getting started"),
+            wide_row("  Welcome back 한글!      Tips for getting started"),
             row_from(" ▐▛███▜▌"),
             row_from("▝▜█████▛▘"),
         ];
@@ -5628,13 +5628,13 @@ mod clawd_banner_tests {
     fn welcome_greeting_fallback_for_unlisted_student() {
         let pad = " ".repeat(40);
         let mut rows = vec![
-            wide_row(&format!("  Welcome back 건호!{pad}")),
+            wide_row(&format!("  Welcome back 한글!{pad}")),
             row_from(" ▐▛███▛█"),
         ];
         replace_welcome_greeting(&mut rows, 1, "히나", Some([200, 50, 50, 255]));
         let line = row_text(&rows[0]);
         assert!(line.contains("어서 오세요"), "범용 인사말 치환: {line}");
-        assert!(line.contains("건호"), "이름 추출·삽입: {line}");
+        assert!(line.contains("한글"), "이름 추출·삽입: {line}");
         assert!(!line.contains("Welcome back"), "원문 제거: {line}");
     }
 
@@ -5645,7 +5645,7 @@ mod clawd_banner_tests {
         let acc = [80, 160, 240, 255];
         let mut rows = vec![
             row_from("╭─ Claude Code ─╮"),
-            wide_row("│ Welcome back 건호! │"),
+            wide_row("│ Welcome back 한글! │"),
             row_from("│   ▐▛███▜▌   │"),
             row_from("│  ▝▜█████▛▘  │"),
             row_from("│    ▘▘ ▝▝    │"),
@@ -5803,7 +5803,7 @@ mod spinner_tests {
     }
 
     /// 경과시간이 괄호 **맨 앞**이 아닌 변종. 토큰이 먼저 오는 프레임을 놓쳐
-    /// 학생 색이 늦게 붙던 것(거노 2026-08-20 「바로 안 붙을 때도 있어」).
+    /// 학생 색이 늦게 붙던 것(사용자 2026-08-20 「바로 안 붙을 때도 있어」).
     #[test]
     fn spinner_detects_elapsed_after_tokens() {
         let rows = vec![row_from("✶ Skedaddling… (↓ 1.2k tokens · 3s)")];
@@ -6120,7 +6120,7 @@ mod teammate_msg_tests {
     }
 
     // 세션명 rule 검출: 진짜 "── 이름 ──" 만. 둥근 입력박스 테두리(╭────╮·╰────╯)의
-    // 모서리는 box-drawing 이라 이름 섬이 아니다 — 행 전체 사각형 오탐 회귀 방지(거노).
+    // 모서리는 box-drawing 이라 이름 섬이 아니다 — 행 전체 사각형 오탐 회귀 방지(사용자).
     #[test]
     fn titled_rule_ignores_box_border_rows() {
         let dash = |n: usize| "─".repeat(n);
@@ -6147,7 +6147,7 @@ mod teammate_msg_tests {
     }
 
     // teammate 칩 행(`──── @이름 ──`)은 세션명이 아니다 — claude 네이티브가 그리는
-    // agent 이름 배지라 아웃라인(사각 테두리)을 두르면 안 된다(거노 2026-07-27:
+    // agent 이름 배지라 아웃라인(사각 테두리)을 두르면 안 된다(사용자 2026-07-27:
     // "칩 네모칸"). 세션명 rule 은 계속 인정.
     #[test]
     fn titled_rule_ignores_agent_chip_row() {
@@ -6199,7 +6199,7 @@ mod teammate_msg_tests {
         assert!(text.contains("세션명"), "세션명 rule 을 지우면 안 된다: {text:?}");
     }
 
-    // 크로스-방 tell 마커: 유효 캐릭터 `⟦이름⟧` 만 인정, 거노 직접 입력(마커 없음)·
+    // 크로스-방 tell 마커: 유효 캐릭터 `⟦이름⟧` 만 인정, 사용자 직접 입력(마커 없음)·
     // 오탐(`⟦…⟧` 이지만 캐릭터 아님)은 무시 = 무색.
     #[test]
     fn tell_marker_parsed_and_guarded() {
@@ -6303,7 +6303,7 @@ mod teammate_msg_tests {
     }
 
     // 실제 화면은 한글이 2셀이라 마커 `⟦이름⟧ ` 폭이 이름 길이에 따라 가변이다 —
-    // 본문 시작 col 이 그 폭에 휘둘리면 wrap 연속 행과 계단이 진다(거노 2026-07-27).
+    // 본문 시작 col 이 그 폭에 휘둘리면 wrap 연속 행과 계단이 진다(사용자 2026-07-27).
     #[test]
     fn tell_body_col_independent_of_name_width() {
         // wide 셀 재현: 한글 뒤에 스페이서 한 칸(composed 경로와 동일).
@@ -6454,7 +6454,7 @@ mod teammate_msg_tests {
         assert_eq!(row_text(&rows[1]), "다음 항목", "다음 항목 무손상");
     }
 
-    // 아래 blank 행이 있으면 줄바꿈으로 이어 쓴다(거노) — 다음 항목과의
+    // 아래 blank 행이 있으면 줄바꿈으로 이어 쓴다(사용자) — 다음 항목과의
     // 구분 blank 1행은 남긴다.
     #[test]
     fn expands_into_blank_rows_keeping_separator() {
@@ -7004,7 +7004,7 @@ mod prompt_box_tests {
         assert!(matches!(prompt_box(&rows), Some(PromptBox::Filled { ref rows }) if *rows == (1..2)));
 
         // 실제 codex 는 마커 행 위아래에 같은 채움색 여백 행을 둔다(실측 3줄).
-        // 마커 행만 잡으면 가운데 한 줄만 칠해져 상자가 아니라 밑줄이 된다(거노).
+        // 마커 행만 잡으면 가운데 한 줄만 칠해져 상자가 아니라 밑줄이 된다(사용자).
         let boxed = vec![
             row_from("⚠ MCP startup incomplete"),
             filled(&" ".repeat(50)),
@@ -7189,7 +7189,7 @@ mod prompt_box_tests {
     }
 
     // diff·git·노트 TUI 의 대시 구분선 쌍은 사이에 ASCII '>'(인용·프롬프트)가
-    // 있어도 입력박스로 오인하지 않는다 — 거노 2026-07-22: 뜬금없는 빈 초록
+    // 있어도 입력박스로 오인하지 않는다 — 사용자 2026-07-22: 뜬금없는 빈 초록
     // 사각형(style_prompt_box 오발동) 회귀 방지.
     #[test]
     fn plain_dash_rules_ignored() {
@@ -7403,7 +7403,7 @@ This came from another Claude session";
     }
 
     /// transcript 대조가 불가능한(발신 pane dismiss·tail 밖) 헤더의 보조 관문 —
-    /// 로스터 슬러그 + `-p<번호>` 이름꼴만 통과한다(2026-08-20 거노 스샷 재발 방지).
+    /// 로스터 슬러그 + `-p<번호>` 이름꼴만 통과한다(2026-08-20 사용자 스샷 재발 방지).
     #[test]
     fn roster_agent_label_shape_is_narrow() {
         assert!(label_is_roster_agent("midori-p4-v32"));
@@ -7506,7 +7506,7 @@ This came from another Claude session";
         let (name, sid) = peer_ident_from_json(ROSTER_FILE);
         assert_eq!(name.as_deref(), Some("mcp, skill사이드바"));
         // 이 이름으로는 학생을 절대 못 찾는다 — 이것이 남의 메시지가 색도 프사도
-        // 없이 뜨던 이유였다(거노 2026-08-11: "sm테마는 왜안됐어").
+        // 없이 뜨던 이유였다(사용자 2026-08-11: "sm테마는 왜안됐어").
         assert_eq!(teammate_sender_slug("mcp, skill사이드바"), None);
         // 그래서 세션 id 를 같이 들고 온다. 이걸로 pane 을 되짚어 배정 학생을 묻는다.
         assert_eq!(sid.as_deref(), Some("53b6a9c9-b6e8-4f15-87ae-fbf9ee9d5b4b"));

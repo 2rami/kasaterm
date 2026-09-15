@@ -133,7 +133,7 @@ def _reward_done():
 
 
 def _room_suffix():
-    """방별 분리(거노): KASATERM_ROOM env 가 있으면 slug 에 `__room_<id>` 를 붙여
+    """방별 분리(사용자): KASATERM_ROOM env 가 있으면 slug 에 `__room_<id>` 를 붙여
     같은 cwd 의 다른 방(윈도우)과 collab(board/inbox/roster)을 격리한다.
     env 없으면 빈 문자열 → 기존 동작 그대로(역호환). 모든 slug 계산이 이걸 더한다."""
     room = os.environ.get("KASATERM_ROOM", "")

@@ -1103,7 +1103,7 @@ impl App {
         if self.mood == board::Mood::Sleep { self.apply_mood(board::Mood::Idle); }
         self.stirred = std::time::Instant::now();
         // 누르면 **지금 보고 있는 pane** 이야기를 한다 — 세션이 여럿일 때 「이 창이
-        // 뭐고 어디까지 했나」를 화면을 뒤지지 않고 듣는다(거노 2026-09-14). 손이
+        // 뭐고 어디까지 했나」를 화면을 뒤지지 않고 듣는다(사용자 2026-09-14). 손이
         // 필요한 말이 떠 있으면 그건 그대로 둔다 — 급한 쪽이 이긴다.
         if !self.urgent {
             if let Some(f) = self.focus.clone() {

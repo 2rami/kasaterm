@@ -64,7 +64,7 @@ struct SidebarRowInfo {
     icon: &'static str,
     /// pane **안의 탭 수**. 배치도 칸은 pane 하나당 하나뿐이고 활성 탭만
     /// 대표하므로, 이게 없으면 한 pane 에 학생이 셋 들어 있어도 화면 어디에도
-    /// 흔적이 없다(거노 2026-08-20 「탭 안에 있으면 … 미니맵에 겹친다든지」).
+    /// 흔적이 없다(사용자 2026-08-20 「탭 안에 있으면 … 미니맵에 겹친다든지」).
     /// 1 이면 지금까지와 완전히 같은 그림 — 거의 모든 pane 이 그렇다.
     ///
     /// **모든 탭이 한 자리씩 차지한다.** 학생을 못 찾는 탭(이미지·md·웹, 아직
@@ -80,7 +80,7 @@ struct SidebarRowInfo {
     compact_pct: Option<u8>,
     /// 지금 도는 일이 시작된 뒤로 흐른 초(`busy_since`, input.rs 가 잡는다).
     /// 걷기·쓸림바는 **도는 중이라는 사실**만 말해서, 2분짜리와 40분짜리가
-    /// 화면에서 완전히 같아 보였다(거노 2026-08-24). 기다리는 중은 여기 안 든다
+    /// 화면에서 완전히 같아 보였다(사용자 2026-08-24). 기다리는 중은 여기 안 든다
     /// — 그건 멈춘 것이고, 멈춘 시간이 차오르면 「일하는 줄」 알고 지나친다.
     ///
     /// Instant 가 아니라 **초로 접어** 싣는다. 이 구조체는 페인트 직전 스냅샷이라
@@ -98,7 +98,7 @@ struct SidebarRowInfo {
 
 /// 도는 시간을 칸에 얹을 짧은 말로. **1분 미만은 None** — 잠깐 도는 일에까지 숫자가
 /// 붙으면 배치도가 시계판이 되고, 정작 갈라 보이고 싶던 「오래 도는 것」이 그 숫자들
-/// 사이에 묻힌다(거노 2026-08-24 「오래 걸릴수록 눈에 띄게」).
+/// 사이에 묻힌다(사용자 2026-08-24 「오래 걸릴수록 눈에 띄게」).
 ///
 /// **두 시간까지 분으로 버틴다.** 「90분」이 「1시간」보다 정보가 많고, 무엇보다
 /// 한 시간에서 단위를 갈면 99분 다음이 「1시간」이 되어 **화면의 숫자가 거꾸로
@@ -181,7 +181,7 @@ pub(crate) fn minimap_face_box(mx: f32, my: f32, mw: f32, mh: f32) -> (f32, f32,
     (mx + (mw - face) / 2.0, my + (mh - room - face) / 2.0, face)
 }
 
-/// 오래 도는 것일수록 눈에 띄게 — 색과 굵기로 세 단(거노 2026-08-24 조건).
+/// 오래 도는 것일수록 눈에 띄게 — 색과 굵기로 세 단(사용자 2026-08-24 조건).
 /// 흐린 회색으로 시작해 accent 굵은 글씨로 끝난다. 크기를 키우는 길도 있었지만
 /// 칸이 40px 대라 한 단만 키워도 얼굴을 밀어낸다.
 fn elapsed_style(secs: u64) -> ([u8; 4], bool) {
@@ -393,7 +393,7 @@ impl App {
                     // PTY 가 없는 pane(편집기·이미지)은 위에서 (0,0) 을 기본으로
                     // 받는다. 거기에 조합 문자열을 그리면 **줄번호 거터 위에
                     // 유령**이 뜨고, raw 편집기는 자기 문서 캐럿에 preedit 을
-                    // 따로 그리므로 같은 글자가 두 군데 보인다(거노: "입력이
+                    // 따로 그리므로 같은 글자가 두 군데 보인다(사용자: "입력이
                     // 동시에 되고"). 터미널 오버레이는 터미널일 때만 그린다.
                     let (display, prow, pcol) = match &commit_overlay {
                         _ if pane.term().is_none() || position.is_none() => (String::new(), base_row, base_col),
@@ -1495,7 +1495,7 @@ impl App {
                             // 상태줄·dock 예약을 빼야 한다 — body_rects 의 stretch 는
                             // 빼는데 여기만 안 빼서, 하단행 pane 의 박스가 창 끝까지
                             // 내려가 포커스 테두리 아랫변이 나중에 그려지는 전역
-                            // 상태줄 뒤에 통째로 깔렸다(거노 2026-08-15 「하단바때문에
+                            // 상태줄 뒤에 통째로 깔렸다(사용자 2026-08-15 「하단바때문에
                             // 포커스 테두리 밑에가 안보여」, 창 캡처 실측).
                             (raw_lh - self.bottom_reserve_h() - bottom_edge).max(0.0)
                         });
@@ -1506,10 +1506,10 @@ impl App {
                 };
                 footer_slots.push((id.clone(), box_x, box_y, box_w, box_h));
                 // claude agents 목록·resume 피커 화면에만 샬레 교실 배경을 셀 뒤에
-                // 깐다(거노: 세션 선택 화면만). default-bg 셀은 fill 을 안 뿜어
+                // 깐다(사용자: 세션 선택 화면만). default-bg 셀은 fill 을 안 뿜어
                 // (gpu.draw_cells) 이미지가 그 자리로 비치고, 메뉴 글리프는 위 패스에
                 // 또렷이 얹힌다. 로더가 이미지를 어둡게 낮춰 텍스트 대비를 확보한다.
-                // 거노 2026-07-26: /resume 은 일반 배경으로 — 백그라운드 세션
+                // 사용자 2026-07-26: /resume 은 일반 배경으로 — 백그라운드 세션
                 // 목록(agents)과 같은 교실 배경을 쓰니 두 화면이 겹쳐 보였다.
                 // 교실 배경은 agents 목록의 시각 정체성으로만 남긴다.
                 if agents_view {
@@ -1520,7 +1520,7 @@ impl App {
                 if pane.has_header() {
                     let shown_id = pane_identity::shown_pane_id(&tab_pid, pane.term().is_some());
                     // 캐릭터 배정 pane(학생)은 헤더에도 이름을 — "미도리 · 작업명"(작업명
-                    // =OSC title). BA GUI board 라벨과 통일(거노: 터미널 탭도 학생 이름).
+                    // =OSC title). BA GUI board 라벨과 통일(사용자: 터미널 탭도 학생 이름).
                     // 비배정 pane 만 기존 "%N · 프로세스" 폴백.
                     let label = if agents_view {
                         // 관리 화면 — 개별 학생 대신 SCHALE. 작업명(OSC title)은 유지.
@@ -1538,7 +1538,7 @@ impl App {
                         // raw pane.character 만 보면 claude agents 로 이어받은 백그라운드
                         // 세션은 ws.pane_character 가 비어(attach 스폰이 캐릭터 미배정)
                         // 이 분기를 못 타고 아래 폴백으로 흘러 "미도리 · 작업명" 대신
-                        // 세션제목이 칩자리에 박혔다(거노 Q1). session_character(bound sid)
+                        // 세션제목이 칩자리에 박혔다(사용자 Q1). session_character(bound sid)
                         // 로 해석하면 스프라이트·프사(둘 다 true_char)와 헤더가 일치한다.
                         match pane
                             .title
@@ -1546,7 +1546,7 @@ impl App {
                             .map(|t| crate::strip_activity_prefix(&t).to_string())
                             .filter(|t| !t.is_empty())
                         {
-                            // pane 아이디를 캐릭터 뒤에 붙인다(거노 2026-08-05: "칩 위치를
+                            // pane 아이디를 캐릭터 뒤에 붙인다(사용자 2026-08-05: "칩 위치를
                             // 바꿔 pane아이디 이런데에, 거기는 /rename 들어갈 자리니까").
                             // 입력박스 보더 우측은 `/rename` 이름 자리로 비워 뒀으니
                             // (`inlay_prompt_box_right`) **이 pane 이 누구인가**는 헤더가
@@ -1873,7 +1873,7 @@ impl App {
                     // ⚠️ 오른쪽 끝은 **창 끝이 아니라 우측 컬럼(Git·Info) 앞**이다.
                     // 격자는 `window_cells` 가 그 폭을 이미 접어 두는데 이 선만 창 끝을
                     // 써서, 마지막 열까지 걸친 가로선이 열려 있는 패널을 관통했다
-                    // (거노: "73·27 사이 선이 우측 패널까지 뚫어버려").
+                    // (사용자: "73·27 사이 선이 우측 패널까지 뚫어버려").
                     let (win_right, win_bottom) = self.window.as_ref().map_or(
                         (
                             pad + cols as f32 * self.cell.w,
@@ -2116,7 +2116,7 @@ impl App {
         // 깜빡이는 동그라미 하나다.
         //
         // 방마다 pane 하나당 점 하나 — 방을 열지 않고도 "누가 나를 기다리는지"가
-        // 보이게 한다(거노). 색이 곧 상태다: 대기=danger(내가 엔터를 쳐야 풀린다) ·
+        // 보이게 한다(사용자). 색이 곧 상태다: 대기=danger(내가 엔터를 쳐야 풀린다) ·
         // 작업 중=accent · 방금 끝남=success · 쉬는 중=흐린 회색. 순서는 leaves
         // 순서라 pane 이 늘거나 줄기 전까진 점의 자리가 고정된다.
         //
@@ -2165,7 +2165,7 @@ impl App {
         // 이 `ws` 를 잠그므로 GPU 를 빌린 페인트 루프 안에서 부르면 그 자리에서 멈춘다.
         // 줄에 적는 건 **그 pane 이 무엇을 하고 있나**(claude · zsh · 편집기…)다.
         // 학생 이름은 얼굴이 이미 말하고 있어, 글자로 한 번 더 쓰면 같은 말이 두 번
-        // 나오고 정작 pane 을 가르는 정보가 자리를 잃는다(거노: "학생이름은 빼고").
+        // 나오고 정작 pane 을 가르는 정보가 자리를 잃는다(사용자: "학생이름은 빼고").
         // 배치도 칸에 쓸 활성 pane — 칸마다 락을 잡지 않게 여기서 한 번만 뜬다
         // (페인트 루프는 gpu 를 빌린 상태라 `&self` 메서드도 못 부른다).
         let sb_active_pane = self.ws.lock().unwrap().active_pane.clone();
@@ -2269,7 +2269,7 @@ impl App {
                     label,
                     color: self.pane_state_color(id),
                     is_cur,
-                    // 못 본 완료 — 방이 아니라 **이 줄** 이 숨쉰다(거노: "숨쉬기효과
+                    // 못 본 완료 — 방이 아니라 **이 줄** 이 숨쉰다(사용자: "숨쉬기효과
                     // 윈도우전체가 아니라 완료된세션하나만"). window_alert 가 아니라
                     // unread_panes 를 보는 이유: 전자는 배경 방에만 서고, 지금 보고
                     // 있는 방에서 옆 pane 이 끝난 것도 알려야 한다. 내가 그 pane 을
@@ -2366,7 +2366,7 @@ impl App {
             })
             .map(|(i, _)| *i);
         // 조합 중인 글자는 **조합기 주인**에게만 그린다. 예전엔 pane 을 안 가려서,
-        // 터미널에서 치는 한글이 열려 있는 편집기에도 같이 떴다(거노: "입력이
+        // 터미널에서 치는 한글이 열려 있는 편집기에도 같이 떴다(사용자: "입력이
         // 동시에 되고"). 주인은 `ime_focus` 가 이미 알고 있다.
         let md_preedit = self.preedit.clone();
         let ime_editor: Option<String> = match &self.ime_focus {
@@ -2583,7 +2583,7 @@ impl App {
                 // the key because one pane can hold several image tabs — keying on
                 // pane id alone made the 2nd image tab collide with the 1st's
                 // texture (has_image hit → 2nd/switched image showed the 1st's
-                // pixels, 거노: 같은 pane에 이미지 띄우면 이전 게 덮어써짐).
+                // pixels, 사용자: 같은 pane에 이미지 띄우면 이전 게 덮어써짐).
                 let cur = image.cur_idx();
                 let key = format!("{id}-p{:x}-r{rot}-f{cur}", Arc::as_ptr(image) as usize);
                 if !g.has_image(&key) {
@@ -3095,9 +3095,9 @@ impl App {
                     let ws = self.ws.lock().unwrap();
                     let active = ws.active_pane.clone();
                     // claude code 가 이 pane 의 foreground 프로세스면 타이틀바에
-                    // "학생 이름 · 작업명"(거노: claude code 일 때만 학생 이름). zsh 등
+                    // "학생 이름 · 작업명"(사용자: claude code 일 때만 학생 이름). zsh 등
                     // 일반 셸은 기존 process · tty 폴백. session-id 매칭은 /resume 시
-                    // 실제 sessionId 가 주입값과 어긋나 깨졌다(거노) → foreground 프로세스명
+                    // 실제 sessionId 가 주입값과 어긋나 깨졌다(사용자) → foreground 프로세스명
                     // ("claude")으로 판정해 resume·--session-id 무관하게 견고하다.
                     let claude_char = titlebar_character.clone();
                     // active pane 이 claude agents 목록 뷰면 타이틀바도 SCHALE(작업명 유지).
@@ -3120,14 +3120,14 @@ impl App {
                             .and_then(|id| ws.panes.get(id).and_then(|p| p.title.clone()))
                             .map(|t| crate::strip_activity_prefix(&t).to_string())
                             .filter(|s| !s.is_empty());
-                        // pane 아이디를 캐릭터 뒤에 (거노 2026-08-05: "칩 위치를 바꿔
+                        // pane 아이디를 캐릭터 뒤에 (사용자 2026-08-05: "칩 위치를 바꿔
                         // pane아이디 이런데에, 거기는 /rename 들어갈 자리니까").
                         //
                         // 헤더 띠가 아니라 **타이틀바**에 붙이는 이유: 학생 헤더 띠는
-                        // 거노가 폐기했고(main.rs:2146) 학생 정체는 그때 타이틀바로
+                        // 사용자가 폐기했고(main.rs:2146) 학생 정체는 그때 타이틀바로
                         // 옮겨졌다. 단일 탭 pane 은 `has_header()` 가 false 라 띠 쪽에만
-                        // 붙이면 **거노 화면엔 안 보인다** — 하네스만 통과하는 그 모양이
-                        // 오늘 두 번 물었다. 띠를 되살리면 거노가 회수한 세로 공간이
+                        // 붙이면 **사용자 화면엔 안 보인다** — 하네스만 통과하는 그 모양이
+                        // 오늘 두 번 물었다. 띠를 되살리면 사용자가 회수한 세로 공간이
                         // pane 마다 다시 나가므로 그건 그의 결정이다.
                         let with_id = match active.as_deref() {
                             Some(id) => {
@@ -3174,7 +3174,7 @@ impl App {
                 // palette changes do not leave a differently coloured pill.
                 //
                 // 가운데에 세우는 것은 **이름 칩 하나**다. 경로는 파일트리 버튼
-                // 오른쪽 제자리에 남는다(거노) — 둘을 한 덩어리로 묶어 가운데를
+                // 오른쪽 제자리에 남는다(사용자) — 둘을 한 덩어리로 묶어 가운데를
                 // 잡으면 뒤에 붙는 경로 길이만큼 이름이 왼쪽으로 밀려, 정작
                 // 가운데 오는 것은 이름과 경로 사이 빈 자리가 된다. 칩이 경로와
                 // 오른쪽 토글 사이에 안 들어갈 만큼 길면 중앙을 포기하고 경로
@@ -3658,7 +3658,7 @@ impl App {
                     }
                     // 방과 방 사이 실선. 활성·호버 카드만 판을 깔기 때문에, 조용한
                     // 방끼리는 3px 틈만 있고 경계가 없었다 — 두 줄짜리 카드가 죽
-                    // 이어지면 어디까지가 한 방인지 안 읽힌다(거노: "구분선이 하나도
+                    // 이어지면 어디까지가 한 방인지 안 읽힌다(사용자: "구분선이 하나도
                     // 없어"). 활성 카드는 스스로 판이라 그 위아래엔 긋지 않는다.
                     if !is_active && *i + 1 < sb_tabs.len() && *i + 1 != sb_active {
                         let ly = (ty + th + SIDEBAR_TAB_GAP / 2.0).round();
@@ -3779,7 +3779,7 @@ impl App {
                     // 아랫줄 오른쪽은 이제 펼치기 배지 몫이다. 여기 있던 pane 별
                     // 상태 점은 뺐다 — 방 목록은 "어느 방으로 갈까"를 고르는 자리고,
                     // pane 하나하나의 상태는 방을 펴면 그 줄이 이미 말한다. 둘 다
-                    // 두면 같은 정보가 두 층에 겹쳐 목록이 시끄러워진다(거노:
+                    // 두면 같은 정보가 두 층에 겹쳐 목록이 시끄러워진다(사용자:
                     // "학생 목록 말고 윈도우 목록에선 없애").
                     let badge_w = sb_expand
                         .get(*i)
@@ -4018,7 +4018,7 @@ impl App {
                         }
                     }
                     // 칸이 **누구 자리인지** 말한다. 목록을 걷어낸 이상 얼굴이 여기
-                    // 없으면 사이드바 어디에도 학생이 없다(거노 2026-08-11: "미니맵은
+                    // 없으면 사이드바 어디에도 학생이 없다(사용자 2026-08-11: "미니맵은
                     // 학생뭔지 보여야해"). 도는 중이면 줄에서 그랬듯 걷는다.
                     // 상자는 바닥 띠 자리를 비우고 잡는다 — 걷기와 띠를 함께 그리기로
                     // 한 이상(아래 진행 바 참고), 안 비우면 세로로 갈린 칸에서 발밑에
@@ -4066,7 +4066,7 @@ impl App {
                         }
                     }
                     // 진행 바 — 칸 바닥의 2px 띠. 도는 칸에는 **걷기와 함께** 그린다
-                    // (거노 2026-08-24 「미니맵에서 진행중이면 걷기나 프로세스바가
+                    // (사용자 2026-08-24 「미니맵에서 진행중이면 걷기나 프로세스바가
                     // 아니라 둘다 나오게」).
                     //
                     // 처음 넣을 때는(2026-08-20) 걷는 칸에서 바를 뺐다 — 같은 뜻을 두
@@ -4092,7 +4092,7 @@ impl App {
                         let bar_h = MINI_BAR_H;
                         let (bx, by, mut bw) = (mx + 2.0, my + mh - bar_h - MINI_BAR_PAD, mw - 4.0);
                         // 경과 시간 — 바 오른쪽 끝을 내주고 바가 그만큼 짧아진다
-                        // (거노 2026-08-24: 도는 것끼리 오래된 순서가 안 보인다).
+                        // (사용자 2026-08-24: 도는 것끼리 오래된 순서가 안 보인다).
                         // 걷기·쓸림바는 「도는 중」만 말하지 「얼마나째」는 못 말하고,
                         // 그건 compact 바에 % 를 붙인 것과 같은 종류의 부족함이다.
                         //
@@ -5213,7 +5213,7 @@ impl App {
                     if node.is_dir {
                         // 레포는 폴더 대신 브랜치 아이콘 — 펼침 화살표가 이미
                         // 폴더성을 말해 주므로 정보가 줄지 않고, 목록에서 어느
-                        // 게 레포인지 한눈에 갈린다(거노).
+                        // 게 레포인지 한눈에 갈린다(사용자).
                         let ic = if node.is_repo { "git-branch" } else { "folder" };
                         g.queue_icon(ic, icon_x, iy, isz, icon_color);
                     } else if let Some(ft) = file_icon(&node.name) {
@@ -7100,7 +7100,7 @@ impl App {
                 if h.compacting {
                     // compact 중 — 쓸림 대신 왼쪽부터 채워지는 바. compact 는 끝이 있는
                     // 작업이라 이 모양이 상태를 옳게 읽히고, 화면에 뜨는 알림이 teammate
-                    // 메시지에 가려져도 헤더는 남는다(거노 2026-08-13: "가끔 sm으로
+                    // 메시지에 가려져도 헤더는 남는다(사용자 2026-08-13: "가끔 sm으로
                     // 가려질때도 있어"). busy 보다 먼저 봐야 한다 — compact 중에도 스피너가
                     // 돌아 busy 가 함께 참이고, 순서가 뒤면 늘 쓸림바가 이긴다.
                     let bar_h = 3.0;
@@ -7792,7 +7792,7 @@ impl App {
             // (비활성 dim과 함께 focus 단서) ② pane에 마우스를 올리면 우상단에
             // ⋮ 핸들이 떠서 클릭=메뉴(Phase 3)·드래그=이동(Phase 4) 진입점이 됨.
             // 설정 화면이 떠 있으면 pane 핸들·보더를 그리지 않는다 — 불투명 설정
-            // backdrop 위로 ⋮ 가 비쳐 보이던 잔상(거노). hit-rect 도 비워 설정 영역
+            // backdrop 위로 ⋮ 가 비쳐 보이던 잔상(사용자). hit-rect 도 비워 설정 영역
             // 클릭이 유령 핸들에 안 걸리게 한다.
             // active_pane + is_split + 헤더 보유 pane 집합을 한 번에 스냅샷 —
             // 루프 안에서 self를 재borrow하면 g(=&mut self.gpu)와 충돌하므로 미리
@@ -7802,7 +7802,7 @@ impl App {
             // 테두리를 실제로 그린 pane 과 그 두께. 하단바(footer)는 나중에 그려지므로
             // 이 값만큼 안쪽으로 물러나야 테두리를 안 덮는다. 두 곳이 각자 조건을
             // 계산하면 반드시 어긋난다 — 줌 pane 은 테두리가 있는데 하단바는 그걸
-            // 모르고 덮어 아래쪽만 끊겨 보였다(거노). 그린 쪽이 기록하고 덮는 쪽이 읽는다.
+            // 모르고 덮어 아래쪽만 끊겨 보였다(사용자). 그린 쪽이 기록하고 덮는 쪽이 읽는다.
             let mut border_inset: HashMap<String, f32> = HashMap::new();
             // 줌 pane 은 claude 여부·split 여부와 무관하게 테두리를 두른다 — 줌의
             // 유일한 시각 단서라서(하단 dock 칩 하나로는 안 읽힌다). g(=&mut
@@ -7811,7 +7811,7 @@ impl App {
             // 헤더를 실제로 그린 pane 집합 — 헤더 working bar 가 거기 뜨므로 footer 로딩바는
             // 이 pane 들을 건너뛴다. `ws.panes.has_header()` 가 아니라 방금 그린 `headers`
             // (pty_layout 기반)에서 뽑아야 ws.panes↔pty_layout 데싱크로 한 pane 에 헤더(위)·
-            // footer(아래) 스윕바가 동시에 뜨는 "로딩바 두개" 버그가 안 난다(거노).
+            // footer(아래) 스윕바가 동시에 뜨는 "로딩바 두개" 버그가 안 난다(사용자).
             let headered: std::collections::HashSet<String> =
                 headers.iter().map(|h| h.id.clone()).collect();
             {
@@ -7826,7 +7826,7 @@ impl App {
                 for (fid, fx, fy, fw, fbox_h) in &footer_slots {
                     // pane 테두리 — 포커스된(active) claude pane 만 자기 학생 고정색
                     // 테두리(지금 어느 pane 을 보고 있는지 한눈에). 비활성·순수 셸은
-                    // 무테두리 — 여러 pane 이 동시에 테두리를 둘러 지저분하던 걸 정리(거노).
+                    // 무테두리 — 여러 pane 이 동시에 테두리를 둘러 지저분하던 걸 정리(사용자).
                     let zoom_focus = zoomed_now.as_deref() == Some(fid.as_str());
                     if zoom_focus
                         || (is_split
@@ -7866,7 +7866,7 @@ impl App {
                         }
                     }
                     // 로딩바 — claude 작업 중(pane_activity working)일 때 box 상단
-                    // 얇은 스윕바. 헤더 띠 폐기 후 일반 pane 의 유일한 진행 표시(거노).
+                    // 얇은 스윕바. 헤더 띠 폐기 후 일반 pane 의 유일한 진행 표시(사용자).
                     // 학생이름은 타이틀바(claude 실행 시), 로딩바는 working 시 — 역할 분리.
                     // compact 중이면 쓸림 대신 왼쪽부터 채워지는 바 — 헤더 pane 과 같은
                     // 형태 언어다. working 만 보던 시절엔 status 가 "compacting" 으로
@@ -7914,7 +7914,7 @@ impl App {
                             }
                         }
                     }
-                    // 손을 기다리는 pane — 네 변이 핑크로 깜빡인다(거노: "내가
+                    // 손을 기다리는 pane — 네 변이 핑크로 깜빡인다(사용자: "내가
                     // 엔터해야되거나 그런거는 핑크색으로 깜빡이게"). 로딩바(숨쉬기)
                     // 와 **뜻이 정반대**라 형태부터 갈랐다: 스윕바는 "놔둬도 진행
                     // 된다", 이 테두리는 "내가 손대야 풀린다". 상태가 배타적이라
@@ -8108,7 +8108,7 @@ impl App {
                 let bar_y = fy + fbox_h - pane_footer_h;
                 // 테두리를 footer 배경이 덮지 않게 좌우·하단을 그 두께만큼 안쪽으로
                 // 그린다 — 안 그러면 나중에 그려지는 footer bg 가 보더의 하단·좌우 끝을
-                // 덮어 "선이 하단바를 제외하고 감싸는" 것처럼 보인다(거노). 두께는
+                // 덮어 "선이 하단바를 제외하고 감싸는" 것처럼 보인다(사용자). 두께는
                 // 실제로 그린 쪽이 남긴 값을 쓴다(줌은 2.0, 분할 active 는 1.5).
                 let bt = border_inset.get(fid.as_str()).copied().unwrap_or(0.0);
                 g.rect(
@@ -8121,7 +8121,7 @@ impl App {
                 g.rect(fx + bt, bar_y, fw - 2.0 * bt, 1.0, theme::border());
                 // Pill metrics shared by every chip. 12/13 은 앱을 통틀어 가장 작은
                 // 글자·아이콘이었다 — 같은 화면의 사이드바(13~14)와 나란히 놓이니
-                // 하단바만 축소된 것처럼 읽혔다(거노). 본문 단과 같은 단으로 올린다.
+                // 하단바만 축소된 것처럼 읽혔다(사용자). 본문 단과 같은 단으로 올린다.
                 let pill_h = 22.0_f32;
                 let pill_y = bar_y + (pane_footer_h - pill_h) / 2.0;
                 let icon_sz = 14.0_f32;
@@ -9083,7 +9083,7 @@ impl App {
                 };
             // 닫은 pane 은 여기 안 선다 — 되살리기는 Info 의 「되살리기」 섹션이
             // 맡는다. 하단바에 두면 pane 하나 닫을 때마다 띠가 생겨 그리드가 통째로
-            // 재배치되고, 그 띠가 포커스 테두리 아랫변을 덮었다(거노).
+            // 재배치되고, 그 띠가 포커스 테두리 아랫변을 덮었다(사용자).
             //
             // 칩이 하나도 없어도 **예약된** 띠는 칠한다 — 안 칠하면 그리드가 비워 둔
             // 자리에 창 배경이 그대로 비쳐 바닥에 검은 틈이 생긴다.
@@ -9174,7 +9174,7 @@ impl App {
             // ── 하단 상태줄 ─────────────────────────────────────────────────
             // 창 맨 아래 한 줄. **계정 한도가 늘 보이는 자리**다 — 패널을 열어야
             // 보이면 「지금 얼마나 남았나」를 확인하려는 순간마다 손이 한 번 더 가고,
-            // 그 손이 아까워 안 보다가 한도에 부딪힌다(거노 2026-08-11 「orca랑
+            // 그 손이 아까워 안 보다가 한도에 부딪힌다(사용자 2026-08-11 「orca랑
             // 똑같이 하단바 그 형식으로」). 형식은 Orca 하단바에서 가져왔다:
             // 게이지 + 퍼센트 + 언제 풀리는지, 폭이 좁아지면 정해진 순서로 무너진다.
             {
@@ -9271,7 +9271,7 @@ impl App {
                 // 사고가 되돌아온다: 그때 5시간이 0%, 주간이 95% 였는데 하단바가 0% 를
                 // 띄워 「3계정 다 소진이야? info엔 다 0퍼로뜨는데」가 됐다. 그래서 둘을
                 // 나란히 두고, 폭이 모자랄 때만 급한 쪽을 남긴다 — 요청도 지켜지고
-                // 그 사고도 안 돌아온다(거노 확정: 「둘 다 나란히」).
+                // 그 사고도 안 돌아온다(사용자 확정: 「둘 다 나란히」).
                 //
                 // 게이지는 Orca 처럼 **항상 중립색**이다. 하단바에서까지 빨갛게 하면
                 // 시야 끝에서 늘 깜빡이는 경고가 되어 오히려 안 보게 된다. 위험은
@@ -9314,7 +9314,7 @@ impl App {
                 // `windows` 는 5시간이 앞이고, `pct`/`label` 은 **가장 급한** 창이다.
                 // 좁을 때 후자로 떨어지는 것이 요점 — 자리가 하나뿐이면 급한 쪽을
                 // 보여야 한다. `None` 은 「읽는 중」 — 자리는 잡되 숫자는 안 말한다.
-                // **평소엔 5시간 창 하나만**(거노 2026-09-05 「평소에는 5시간 세션만
+                // **평소엔 5시간 창 하나만**(사용자 2026-09-05 「평소에는 5시간 세션만
                 // 보여주고 눌러야 보이게」). 창을 셋 다 세우면 줄 절반이 숫자가 되고,
                 // 그중 지금 판단에 쓰는 것은 대개 5시간 하나다. 나머지는 이 세그먼트를
                 // 누르면 열리는 계정 드롭다운에 이미 전부 있다.
@@ -9451,7 +9451,7 @@ impl App {
                 // 뒷부분을 몰라서가 아니다), 전체는 드롭다운에 그대로 있다.
                 //
                 // 다만 **겹치면 안 줄인다.** 슬롯 둘이 같은 아이디에 다른 도메인이면
-                // (`goenho0613@naver` · `goenho0613@gmail`) 화면에서 통째로 같은 글자가
+                // (`sampleuser@maila` · `sampleuser@mailb`) 화면에서 통째로 같은 글자가
                 // 되어, 지금 어느 계정인지 이 자리로는 알 수가 없다(토키 실측
                 // 2026-08-15). 겹칠 때만 도메인 앞머리를 붙여 가른다 — 안 겹치면
                 // 예전대로 짧게.
@@ -9698,7 +9698,7 @@ impl App {
                 x = x.min(account_right - 6.0);
                 let acct_r = (seg_x0 - 6.0, sy, (x - seg_x0 + 12.0).max(0.0), status_h);
                 // 세그먼트가 곧 계정 스위처 손잡이다 — 손모양이 없으면 눌러 볼
-                // 생각조차 안 든다(거노 2026-08-12). 채움은 주지 않는다: 세그먼트
+                // 생각조차 안 든다(사용자 2026-08-12). 채움은 주지 않는다: 세그먼트
                 // 폭은 텍스트를 다 그린 뒤에야 확정되고, 이 렌더는 나중에 그린 것이
                 // 위로 오므로 여기서 사각형을 깔면 방금 쓴 글자를 덮는다.
                 {
@@ -9710,7 +9710,7 @@ impl App {
                 }
                 self.status_account_rect = account_drawn.then_some(acct_r);
                 // 계정이 바뀐 직후 잠깐 반짝인다 — 우상단 토스트만으로는 정작 이
-                // 칩이 그대로라 「바뀐 줄 모르겠다」가 된다(거노 2026-08-25).
+                // 칩이 그대로라 「바뀐 줄 모르겠다」가 된다(사용자 2026-08-25).
                 // 칩을 그리는 이 자리에서 함께 그려야 층이 안 어긋난다.
                 if account_drawn {
                     if let Some(k) = crate::chrome::account_flash_k(self.account_flash) {
@@ -10393,7 +10393,7 @@ impl App {
             // info::draw_info_actions 가 채운다). 패널 본문 위로 떠야 해서 그 안에서
             // 같이 못 그리고, 모든 pane·오버레이가 끝난 여기서 마지막에 그린다.
             //
-            // 계정 행이 곧 계정 스위처다(거노 요청) — 거기 보이는 한도가 **활성
+            // 계정 행이 곧 계정 스위처다(사용자 요청) — 거기 보이는 한도가 **활성
             // 계정의** 것이라, 이름을 같은 행에 적고 클릭을 전환에 쓰는 게 별도
             // 칩보다 정직하다.
             // 폴러에게 「목록이 펼쳐져 있다」를 알린다. 여닫는 손잡이가 여럿이라
@@ -10624,7 +10624,7 @@ impl App {
                     (ay - mh - 4.0).max(4.0)
                 };
                 // 패널 배경과 팝업 배경은 6단계밖에 안 벌어져서, 색만으로는 이게 떠 있는
-                // 메뉴인지 패널의 한 구역인지 읽히지 않았다(거노: 뒤가 비쳐 보인다).
+                // 메뉴인지 패널의 한 구역인지 읽히지 않았다(사용자: 뒤가 비쳐 보인다).
                 // 층 선언은 색이 아니라 그림자·테두리가 하는 일이다.
                 panel_rect_outlined(
                     g,
@@ -11094,7 +11094,7 @@ impl App {
                         })
                         .flatten();
                     let lab_h = if codex_note.is_some() { 42.0 } else { 24.0 };
-                    // **고르기 전에** 각 계정의 5시간·7일이 둘 다 보여야 한다(거노
+                    // **고르기 전에** 각 계정의 5시간·7일이 둘 다 보여야 한다(사용자
                     // 2026-08-15 「계정전환전에 5시간 7일 한도 보이게」). 누르면 그 자리서
                     // 전환되므로 눌러 보고 판단할 수가 없다. 막대 두 벌은 이름과 한 줄에
                     // 못 들어가니 행을 두 줄로 키운다 — 「간단히」 밀도에서는 예전처럼
@@ -11624,7 +11624,7 @@ impl App {
                     g.rect(sx + pad, sry + 2.0, sw - pad * 2.0, 1.0, theme::border());
                     sry += rule;
                     // 계정이 떨어져 이 목록을 연 사람이 정작 채우려면 설정창까지
-                    // 나가야 했다(거노 2026-09-05). 로그인이 도는 중에는 안 그린다 —
+                    // 나가야 했다(사용자 2026-09-05). 로그인이 도는 중에는 안 그린다 —
                     // 동시에 둘을 띄우면 브라우저 창이 둘 뜨고 어느 창이 어느
                     // 슬롯인지 알 수가 없다.
                     {
@@ -11699,7 +11699,7 @@ impl App {
             }
             // 커밋 모달 — 전면 스크림을 깐 진짜 대화상자라, 창 안의 모든 것보다
             // 나중에 그려져야 한다. 사이드바 블록 안에서 그리던 동안엔 그 뒤에
-            // 오는 pane 헤더·divider·활성 보더가 카드 위를 가로질렀다(거노).
+            // 오는 pane 헤더·divider·활성 보더가 카드 위를 가로질렀다(사용자).
             // ── Commit modal (screenshot #5): dim + centered card.
             self.git.commit_modal_rects.clear();
             if self.git.commit_modal_open {
@@ -12841,7 +12841,7 @@ impl App {
                 }
             }
             // Pane header drag ghost — 잡은 pane 이 커서를 따라오는 pill(파일트리
-            // drag ghost 와 동일 방식). 거노: pane 을 잡았을 때 "잡혔다"는 피드백이
+            // drag ghost 와 동일 방식). 사용자: pane 을 잡았을 때 "잡혔다"는 피드백이
             // 없어 마우스가 안 따라오는 느낌. 라벨은 display_pane_char(캐릭터 표시명,
             // 없으면 pane id). update_live_drag(라이브 재배치)와 별개의 최상단 층이라
             // 미리보기 무손상 — 커서가 사이드바로 나가 자리 프리뷰가 원위치로 돌아가도
@@ -13692,9 +13692,9 @@ fn draw_compact_cells(
 /// 통째로 적으면 한 줄의 절반을 주소가 먹는다 — 그래서 `@` 앞만 남긴다.
 ///
 /// **겹치면 안 줄인다.** 슬롯 둘이 같은 아이디에 다른 도메인이면
-/// (`goenho0613@naver.com` · `goenho0613@gmail.com`) 화면에서 통째로 같은 글자가 되어,
+/// (`sampleuser@maila.example.test` · `sampleuser@mailb.example.test`) 화면에서 통째로 같은 글자가 되어,
 /// 지금 어느 계정인지 이 자리로는 알 수가 없다(토키 실측 2026-08-15). 그때만
-/// 도메인 앞머리를 붙여 가른다(`goenho0613·gmail`) — 짧은 채로 갈리는 것이 요점이라
+/// 도메인 앞머리를 붙여 가른다(`sampleuser·mailb`) — 짧은 채로 갈리는 것이 요점이라
 /// 도메인 전체는 안 쓴다.
 ///
 /// `others` 는 자기 자신을 포함해도 된다(같은 문자열은 겹침으로 안 센다).
@@ -13932,25 +13932,25 @@ mod tests {
     #[test]
     fn statusbar_account_name_keeps_the_domain_only_when_slots_collide() {
         let alone = vec![
-            "goenho0613@gmail.com".to_string(),
-            "2rami@sionic.ai".to_string(),
+            "sampleuser@mailb.example.test".to_string(),
+            "workuser@work.example.test".to_string(),
         ];
         assert_eq!(
-            statusbar_account_short("goenho0613@gmail.com", &alone),
-            "goenho0613"
+            statusbar_account_short("sampleuser@mailb.example.test", &alone),
+            "sampleuser"
         );
 
         let clash = vec![
-            "goenho0613@naver.com".to_string(),
-            "goenho0613@gmail.com".to_string(),
+            "sampleuser@maila.example.test".to_string(),
+            "sampleuser@mailb.example.test".to_string(),
         ];
         assert_eq!(
-            statusbar_account_short("goenho0613@gmail.com", &clash),
-            "goenho0613·gmail"
+            statusbar_account_short("sampleuser@mailb.example.test", &clash),
+            "sampleuser·mailb"
         );
         assert_eq!(
-            statusbar_account_short("goenho0613@naver.com", &clash),
-            "goenho0613·naver"
+            statusbar_account_short("sampleuser@maila.example.test", &clash),
+            "sampleuser·maila"
         );
 
         // 사람이 지은 라벨엔 `@` 가 없다 — 손대지 않는다.
@@ -14247,7 +14247,7 @@ const LOUD_PCT: f32 = 70.0;
 
 /// 상태줄에 세울 한도 창 목록.
 ///
-/// **평소엔 5시간 창 하나만**(거노 2026-09-05 「평소에는 5시간 세션만 보여주고
+/// **평소엔 5시간 창 하나만**(사용자 2026-09-05 「평소에는 5시간 세션만 보여주고
 /// 눌러야 보이게」). 창을 셋 다 세우면 줄 절반이 숫자가 되고, 그중 지금 판단에 쓰는
 /// 것은 대개 5시간 하나다. 나머지는 이 세그먼트를 누르면 열리는 계정 드롭다운에
 /// 이미 전부 있다.
@@ -14512,7 +14512,7 @@ pub(crate) fn draw_usage_note(
 mod minimap_box_tests {
     use super::*;
 
-    /// 도는 칸에는 걷기와 띠가 **함께** 선다(거노 2026-08-24). 그러면 둘이 자리를
+    /// 도는 칸에는 걷기와 띠가 **함께** 선다(사용자 2026-08-24). 그러면 둘이 자리를
     /// 다투는데, 화면으로는 잡기 어렵다 — 겹치는 건 세로로 갈린 좁은 칸뿐이고
     /// 스프라이트 하단이 발이라 「좀 지저분하다」로만 보인다. 산술로 못 박는다.
     ///

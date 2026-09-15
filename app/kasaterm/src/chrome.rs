@@ -40,7 +40,7 @@ const NOTIFY_FLASH_MS: u128 = 1800;
 
 /// 계정이 바뀐 순간 계정 칩 둘레가 반짝이는 시간. 짧게 두는 이유는 이것이 「무슨
 /// 일이 있었다」를 알리는 것이지 읽을 정보가 아니어서다 — 눈이 그리로 한 번 가면
-/// 목적은 끝난다(거노 2026-08-25 "바뀐지도 잘모르겠는데").
+/// 목적은 끝난다(사용자 2026-08-25 "바뀐지도 잘모르겠는데").
 const ACCOUNT_FLASH_MS: u128 = 900;
 
 /// `(세션 정체, 원격 거울 여부, 실제 작업 여부)`를 작업 수로 접는다.
@@ -213,9 +213,9 @@ mod quick_instruction_tests {
 }
 
 impl App {
-    /// pane 의 표시용 학생 — "터미널은 파싱만"(거노): claude sessionId 바인딩이 정본,
+    /// pane 의 표시용 학생 — "터미널은 파싱만"(사용자): claude sessionId 바인딩이 정본,
     /// agents/attach 뷰 pane 은 파싱 전 스폰 랜덤(ws.pane_character)을 보여주지 않는다
-    /// (거노: 세션 진입 직후 다른 학생으로 보임 — 뷰 pane 의 로컬 배정은 무의미한 잔재
+    /// (사용자: 세션 진입 직후 다른 학생으로 보임 — 뷰 pane 의 로컬 배정은 무의미한 잔재
     /// 라 None 으로 두면 학생 시각 요소가 중립으로 남는다). 일반 pane 은 스폰 배정
     /// 폴백 유지(첫 프레임부터 학생 표시). render 의 프사·타이틀바·테두리가 공유한다.
     ///
@@ -282,7 +282,7 @@ impl App {
         // 현재 배정(`ws.pane_character`)이 정본이다 — 미니맵·목록이 읽는 값과 같다.
         // 예전엔 `session_character(sid)` 를 우선했는데, 재배정·테마전환은 pane_character
         // 만 갱신하고 `session_characters.json` 의 옛 claude-stem 바인딩은 안 지워서,
-        // 그걸 우선하면 재배정 전 캐릭터(옛 테마)가 얼굴·이름으로 되살아났다(거노 실측:
+        // 그걸 우선하면 재배정 전 캐릭터(옛 테마)가 얼굴·이름으로 되살아났다(사용자 실측:
         // 배정은 히후미인데 info 는 고블린). pane 이 살아 있는 한 pane_character 를 믿고,
         // 그것이 빈(복원 직후 아직 미배정) 순간에만 세션 바인딩으로 되짚는다.
         ws.pane_character
@@ -305,7 +305,7 @@ impl App {
     ) -> Vec<String> {
         // 단일 탭 + 배정된 학생이면 탭 제목을 비운다 — render 의 tab_list
         // 폴백(h.tabs.is_empty → h.label)이 character label("미도리 · 작업명")
-        // 을 헤더에 그리게(거노: 탭 제목이 학생 이름을 덮어쓰던 버그). 멀티탭/
+        // 을 헤더에 그리게(사용자: 탭 제목이 학생 이름을 덮어쓰던 버그). 멀티탭/
         // 비배정 pane 은 기존대로 탭별 제목.
         if pane.tabs.len() <= 1 && pane.character.as_deref().is_some_and(|c| !c.is_empty()) {
             Vec::new()
@@ -316,7 +316,7 @@ impl App {
                 .map(|(i, t)| {
                     // 탭 이름도 헤더와 같은 규칙으로 짓는다 — 여기만
                     // OSC 제목을 **날것 그대로** 실어, claude 탭이
-                    // `✳ Claude Code` 로 떴다(거노 2026-08-21: "탭 안에
+                    // `✳ Claude Code` 로 떴다(사용자 2026-08-21: "탭 안에
                     // 있을 때 claude code 랑 무슨 유니코드 이모지 나오는데
                     // 그것도 이쁘게"). 헤더는 진작 학생 이름을 쓰고 있어서
                     // **같은 pane 인데 헤더와 탭이 서로 다른 것을 부르는**
@@ -390,7 +390,7 @@ impl App {
         // busy-grace timer. The glyph working→idle path in
         // `refresh_pane_activity` then sees the pane is already idle.
         //
-        // 완료 화면 토스트는 제거(거노 2026-07-27) — 학생이 많아 턴마다 떠서 시야를
+        // 완료 화면 토스트는 제거(사용자 2026-07-27) — 학생이 많아 턴마다 떠서 시야를
         // 가린다. 완료 신호는 탭 펄스·dock 배지·백그라운드 데스크톱 알림(아래)으로
         // 전달된다.
         self.pane_last_busy.remove(surface_id);
@@ -414,7 +414,7 @@ impl App {
         }
         self.chrome_dirty = true;
         // 읽음 처리(=dock 배지)만 지금 보고 있는 pane 을 뺀다. 데스크톱 알림 자체는
-        // 그 pane 을 보고 있어도 쏜다 — 거노 2026-08-11 "pane별로 그냥 다오게하자".
+        // 그 pane 을 보고 있어도 쏜다 — 사용자 2026-08-11 "pane별로 그냥 다오게하자".
         // 학생이 여럿이면 어느 창을 보고 있든 나머지가 끝난 걸 놓치는 쪽이 손해다.
         if !(self.window_focused && is_active_pane) {
             self.unread_panes.insert(surface_id.to_string());
@@ -546,7 +546,7 @@ impl App {
     /// **탭을 접는다.** 자격은 `note_claude_panes` 가 `self.pty` 를 훑어 넣으므로
     /// 키가 **PTY id(=pid)** 인데, 부르는 쪽(사이드바 줄·미니맵 칸)은 **BSP leaf** 를
     /// 든다. 탭으로 띄운 학생은 그 둘이 달라 조회가 영영 빗나갔고, 그래서 탭 안의
-    /// 학생은 미니맵에 얼굴이 아예 안 떴다(거노 2026-08-20 「탭 안에 소환돼서 꺼내면
+    /// 학생은 미니맵에 얼굴이 아예 안 떴다(사용자 2026-08-20 「탭 안에 소환돼서 꺼내면
     /// 미니맵에 학생 표시 없는 버그」). 같은 병을 `display_pane_char`·`pane_accent`
     /// 는 이미 접어서 피하고 있었다 — 접는 자리와 안 접는 자리가 갈려 한 pane 이
     /// 화면 자리마다 다른 얼굴을 갖던 계열의 마지막 하나다.
@@ -608,7 +608,7 @@ impl App {
     /// 그 pane 이 **도는 중**인가 — 헤더 진행 바와 사이드바 걷기가 같이 쓴다.
     ///
     /// 기다리는 중(`waiting`·`blocked`)은 도는 게 아니다. 사람 답을 기다리는데 바가
-    /// 계속 차오르면 "일하는 줄" 알고 지나치게 된다(거노 2026-08-11: "프로세스바
+    /// 계속 차오르면 "일하는 줄" 알고 지나치게 된다(사용자 2026-08-11: "프로세스바
     /// 제대로 안되는거"). 사이드바는 이미 그걸 갈라 놨는데 헤더만 안 갈려 있었다 —
     /// 같은 판정이 두 벌이면 한쪽만 고쳐진다.
     pub(crate) fn pane_is_busy(&self, id: &str) -> bool {
@@ -1740,7 +1740,7 @@ impl App {
     pub(crate) fn save_window_frame(&self) {
         // **검증 실행은 저장하지 않는다.** 위치·크기를 env 로 강제했다는 건 그 창이
         // 사람이 쓰던 창이 아니라 하네스가 띄운 창이라는 뜻인데, 설정 파일은 인스턴스
-        // 사이에 공유돼서 그 값이 그대로 거노 앱의 다음 크기가 된다(실사고 2026-08-06:
+        // 사이에 공유돼서 그 값이 그대로 사용자 앱의 다음 크기가 된다(실사고 2026-08-06:
         // 좁은 화면 재현으로 430x700 를 띄웠더니 `window.json` 이 그 값으로 덮여,
         // 재시작하면 앱이 구석에 손바닥만 하게 뜰 뻔했다).
         if crate::verification_run() {
@@ -1946,7 +1946,7 @@ impl App {
     /// 렌더와 클릭 판정이 이 하나를 같이 본다. 예전엔 클릭 쪽이 "아랫줄 오른쪽
     /// 100px" 이라는 자기 공식을 따로 갖고 있어서, 눈에는 삼각형 하나만 보이는데
     /// 그 옆 점들까지 눌러도 방 전환이 안 됐다 — 버튼이 어디까지인지 화면이
-    /// 말해 주지 않는 상태였다(거노: "접기 버튼이 따로 있어야, 누르면 전환은
+    /// 말해 주지 않는 상태였다(사용자: "접기 버튼이 따로 있어야, 누르면 전환은
     /// 되고"). pane 이 하나뿐인 방은 펼쳐도 그 하나뿐이라 버튼을 두지 않는다.
     pub(crate) fn window_expand_rect(
         &self,
@@ -1960,11 +1960,11 @@ impl App {
         // pane 이 하나뿐인 방도 편다. 예전엔 `n < 2` 로 막았는데 — 한 줄짜리 목록은
         // 펼 값어치가 없다는 판단이었다 — 그 한 줄이 **누가 거기 있고 무슨 상태인지**
         // 다. 학생 하나를 방 하나에 두고 쓰면 사이드바에서 그 학생을 볼 길이 통째로
-        // 사라졌다(거노: "방하나에 학생하나면 펼치기가 없어서 학생목록이 안보이네").
+        // 사라졌다(사용자: "방하나에 학생하나면 펼치기가 없어서 학생목록이 안보이네").
         if n == 0 {
             return None;
         }
-        // 삼각형 하나짜리 18px 칩은 눌러 보기에 너무 작았다(거노). pane 개수를
+        // 삼각형 하나짜리 18px 칩은 눌러 보기에 너무 작았다(사용자). pane 개수를
         // 같이 담아 pill 로 키우면 타깃이 두 배 넘게 커지고, 방을 펴지 않고도
         // 몇 개짜리 방인지 읽힌다 — 커진 자리에 정보가 같이 들어온 셈이다.
         let w = if n >= 10 { 44.0 } else { 37.0 };
@@ -2101,7 +2101,7 @@ impl App {
             self.info.navigation.machine = None;
             // 피커 항목은 Windows 설치 셸뿐 — macOS/Linux 는 목록이 비므로
             // 메뉴 대신 즉시 기본 셸 새 윈도우("Claude 학생" 항목은 폐기 —
-            // split+claude 수동 부팅으로 충분, 거노).
+            // split+claude 수동 부팅으로 충분, 사용자).
             if crate::available_shells().is_empty() {
                 self.new_window();
             } else {
@@ -2136,7 +2136,7 @@ impl App {
     ///
     /// 닫은 pane 은 여기 안 센다. 되살리기는 Info 의 「되살리기」 섹션이 맡는다 —
     /// dock 에 두면 pane 을 하나 닫을 때마다 그리드가 40px 줄면서 화면 전체가
-    /// 재배치되고, 그 띠가 포커스 테두리 아랫변까지 덮었다(거노).
+    /// 재배치되고, 그 띠가 포커스 테두리 아랫변까지 덮었다(사용자).
     ///
     pub(crate) fn bottom_reserve_h(&self) -> f32 {
         self.dock_reserve_h() + self.status_h()
@@ -2329,7 +2329,7 @@ impl App {
     ///
     /// **한글은 자체 조합기(`self.hangul`)를 태운다.** macOS 는 OS IME 를 꺼 두고
     /// (`set_ime_allowed(false)`) 자모를 `KeyboardInput.text` 로 직접 받으므로, 여기서
-    /// 조합하지 않으면 "안녕"이 "ㅇㅏㄴㄴㅕㅇ"으로 박힌다 — 거노: "이름 바꾸는 거
+    /// 조합하지 않으면 "안녕"이 "ㅇㅏㄴㄴㅕㅇ"으로 박힌다 — 사용자: "이름 바꾸는 거
     /// 이상한데". git 커밋 칸(`git_commit_input`)이 같은 이유로 같은 경로를 탄다.
     pub(crate) fn room_rename_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
@@ -2387,7 +2387,7 @@ impl App {
     }
 
     /// 방 라벨을 이번 프레임에 다시 짓게 한다. `refresh_window_labels` 는 1초 캐시라
-    /// 이걸 안 깨면 **타이핑이 1초씩 뭉쳐 나온다**(거노: "버벅여"). 편집 중인 방의
+    /// 이걸 안 깨면 **타이핑이 1초씩 뭉쳐 나온다**(사용자: "버벅여"). 편집 중인 방의
     /// 라벨은 캐시 밖에서 버퍼로 덮으므로 재계산 자체는 안 돌지만, 편집을 끝낸 뒤
     /// 원래 이름으로 돌아가려면 캐시를 한 번 비워야 한다.
     fn mark_room_label_dirty(&mut self) {
@@ -2893,7 +2893,7 @@ impl App {
         self.open_arona_panel(event_loop);
     }
 
-    /// 거노: 새 방(윈도우) + 첫 pane 캐릭터 지정. 방별 collab 격리로 room slug 를
+    /// 사용자: 새 방(윈도우) + 첫 pane 캐릭터 지정. 방별 collab 격리로 room slug 를
     /// 셸 env(KASATERM_ROOM)로 주입하고(spawn_session_pane 이 pending_room 을 읽음),
     /// 첫 pane 캐릭터를 지정값으로 강제한다(pending_character). 사용자가 그 pane 에서
     /// claude 를 치면 shim 이 persona·session-id 를 입히고, 추가 split pane 은 랜덤 배정.
@@ -3007,7 +3007,7 @@ impl App {
     pub(crate) fn persist_ui_zoom(&mut self) {
         self.ui_zoom_unset = false;
         // 검증 실행은 설정 파일을 공유하므로 쓰지 않는다 — `save_window_frame`
-        // 과 같은 이유다(하네스가 띄운 창 값이 거노 앱의 다음 배율이 되면 안 된다).
+        // 과 같은 이유다(하네스가 띄운 창 값이 사용자 앱의 다음 배율이 되면 안 된다).
         if crate::verification_run() {
             return;
         }
@@ -3260,7 +3260,7 @@ impl App {
                 // PaneState 가 **없는 게 정상**인 pane 이 있다 — split leaf 는 보조 탭이
                 // 생길 때까지 `ws.panes` 에 안 들어간다(main.rs `pane_font_scales` 주석이
                 // 같은 사실을 말한다). 여기서 return 하면 그런 pane 은 Cmd+W 가 통째로
-                // 죽는다(거노: "커맨드 W 해도 무반응"). 항목이 없다 = 탭 하나짜리 pane.
+                // 죽는다(사용자: "커맨드 W 해도 무반응"). 항목이 없다 = 탭 하나짜리 pane.
                 //
                 // ⚠️ pid 를 `None` 으로 두면 안 된다 — 아래 바쁨 검사가 `and_then` 이라
                 // 통째로 건너뛰어져 **claude 가 도는 pane 이 확인 없이 닫힌다**
@@ -3290,7 +3290,7 @@ impl App {
             let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
             if leaves <= 1 {
                 // 이 방의 마지막 pane. 방이 여럿이면 **방을 닫는 것**으로 잇는다 —
-                // 전에는 여기서 그냥 return 이라 Cmd+W 가 죽은 키였다(거노).
+                // 전에는 여기서 그냥 return 이라 Cmd+W 가 죽은 키였다(사용자).
                 // 방이 하나뿐이면 그건 앱 종료라 OS 닫기 버튼에 맡기고 no-op.
                 let idx = self.active_window;
                 if self.user_room_count() <= 1 {
@@ -3333,7 +3333,7 @@ impl App {
     /// 탭 단위가 아니라서 승격 로직 없이 바로 `PendingClose::Pane` 이고, 바쁨 판정도
     /// pane 전체(`pane_busy`)다.
     ///
-    /// 이 경로는 `close_pane` 직행이라 **확인이 통째로 없었다**(거노 2026-08-20
+    /// 이 경로는 `close_pane` 직행이라 **확인이 통째로 없었다**(사용자 2026-08-20
     /// 「pane 종료할 때도 바로 꺼지네, 안 물어보고. 클로드 도는데」). 헤더 우측
     /// 클러스터엔 × 가 없어서 **헤더 없는 split pane 의 유일한 닫기 버튼이 이
     /// 무방비 경로**였고, 학생 pane 은 대개 헤더 없는 split 이라 하필 가장 자주 쓰는
@@ -3757,7 +3757,7 @@ impl App {
         stalled.dedup_by(|a, b| a.0 == b.0);
         busy.sort();
 
-        // 지금 보고 있는 pane — 「내가 포커스한 창이 뭐고 어디까지 했나」(거노 2026-09-14).
+        // 지금 보고 있는 pane — 「내가 포커스한 창이 뭐고 어디까지 했나」(사용자 2026-09-14).
         // 돌아가며 말하는 한 줄과 별개로 **늘** 싣는다. 펫이 이걸로 보고 있는 학생의
         // 이름·일감·상태를 그 자리에서 말할 수 있다.
         static LAST_FOCUS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
@@ -3987,7 +3987,7 @@ pub(crate) fn banner_inbox() -> &'static std::sync::Mutex<Vec<crate::notify_bann
 /// (`Notifications are not allowed for this application`), 그래서 osascript 로
 /// 떨어지면 배너에 **스크립트 편집기 아이콘**이 붙는다. 우리 코드가 원인이
 /// 아니라는 것까지 배제 실측으로 확인했다(`98b6502`: 53KB 최소 ObjC 앱도 같은
-/// 오류). 거노 2026-08-21 「그럼 기본 알림은 꺼줘」 — 자체 배너가 같은 자리에서
+/// 오류). 사용자 2026-08-21 「그럼 기본 알림은 꺼줘」 — 자체 배너가 같은 자리에서
 /// 뜨므로 OS 알림은 중복이고, 게다가 남의 아이콘을 달고 뜬다.
 ///
 /// **지우지 않고 끈 이유**: 지금 못 고치는 것이지 영영 아닌 게 아니다. 애플
@@ -4041,7 +4041,7 @@ pub(crate) fn notify_desktop(
     }
     // 애플 서명이 없는 굽기(자체 인증서 `kasaterm-dev`, 2026-09-14 부터 기본)는
     // 알림센터 등록이 거절되어 자체 배너만 남았다 — 앱을 보고 있으면 배너가 뜨지만
-    // 다른 앱에 가 있으면 아무것도 안 온다(거노 「사용 중이어도 알림센터로 오게」).
+    // 다른 앱에 가 있으면 아무것도 안 온다(사용자 「사용 중이어도 알림센터로 오게」).
     // osascript 는 스크립트 편집기 명의라 서명과 무관하게 알림센터에 남는다 —
     // 아이콘은 그쪽 것이지만 「안 오는 것」보다 낫다. 자체 배너는 그대로 둔다:
     // 눌러서 그 pane 으로 가는 길은 배너에만 있다.

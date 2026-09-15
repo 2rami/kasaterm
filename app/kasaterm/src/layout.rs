@@ -175,7 +175,7 @@ mod mirror_hit_bounds_tests {
 /// 끌어 놓을 때 헤더 띠(28px)를 정확히 맞히지 않는 한 무조건 split 이 됐다.
 /// 방향을 안 준 split 이 고를 축 — **긴 쪽을 쪼갠다.**
 ///
-/// 거노 2026-08-05: "너무 가로로나 세로로 안 길게". 늘 같은 방향으로 쪼개면 네 번째
+/// 사용자 2026-08-05: "너무 가로로나 세로로 안 길게". 늘 같은 방향으로 쪼개면 네 번째
 /// pane 쯤에서 종잇장이 된다. 긴 축을 자르면 정사각에 가까워지고, 다음 split 은 자연히
 /// 반대 축을 골라 격자가 된다.
 ///
@@ -320,7 +320,7 @@ impl App {
         // 줌 중엔 그 pane 하나가 작업영역을 통째로 채운다(effective_leaf_rects) —
         // 원본 split 트리로 판정하면 클릭이 **숨어 있는** pane 으로 가고, 셀 좌표도
         // 그 pane 의 옛 박스 원점으로 계산돼 화면과 어긋난다. Claude 프롬프트가
-        // 아래쪽에 있으니 위 절반만 대충 맞고 아래는 통째로 빗나갔다(거노:
+        // 아래쪽에 있으니 위 절반만 대충 맞고 아래는 통째로 빗나갔다(사용자:
         // "최대화하고 위치 매핑이 이상해"). 박스가 하나뿐이라 단일 pane 경로와
         // 계산이 같다. 렌더와 같은 조건(트리에 살아 있는 leaf)일 때만 타서,
         // 닫힌 pane 의 유령 줌이 클릭을 삼키지 않는다.
@@ -340,7 +340,7 @@ impl App {
                 // 줌 pane 은 「떠 있는 카드」라 가장자리에서 zoom_inset_cells 만큼
                 // 들여 그려진다(render_frame_gpu·effective_leaf_rects 와 같은 함수).
                 // 그 원점을 안 빼면 클릭·드래그 선택이 inset 셀수(가로 ~2·세로 1)
-                // 만큼 오른쪽 아래 글자를 집는다(거노: "확대하면 드래그 위치가
+                // 만큼 오른쪽 아래 글자를 집는다(사용자: "확대하면 드래그 위치가
                 // 정확히 안 맞아").
                 let (gc, gr) = self.window_cells();
                 let (ix, iy) = self.zoom_inset_cells(gc, gr);
@@ -779,7 +779,7 @@ impl App {
     ///
     /// 옛 경로는 CLI 가 split 을 N 번 부르면서 **직전에 만든 pane 을 다음 대상으로**
     /// 삼았다. ⌘D 를 연달아 누른 것과 같은 모양이라 몫이 1/2 → 1/4 → 1/8 로
-    /// 반감하고, 넷을 부르면 마지막 학생이 화면의 1/16 이다(거노 2026-08-13:
+    /// 반감하고, 넷을 부르면 마지막 학생이 화면의 1/16 이다(사용자 2026-08-13:
     /// "너네가 부르면 내가 드래그로 정렬하고"). 방향을 명시하면 더 나빴다 — 모든
     /// 회차가 같은 축이라 얇은 기둥이 된다.
     ///
@@ -928,7 +928,7 @@ impl App {
         let (win_cols, win_rows) = self.window_cells();
         let cwd = self.spawn_cwd_from(Some(active));
         // split = room 만 상속, 학생은 전역 빈 자리 순서로 배정. 07-13 의 "소스 학생 상속"
-        // 설계는 모든 pane 이 루트 학생 하나로 수렴하는 부작용(거노 07-17: pane 열면 다
+        // 설계는 모든 pane 이 루트 학생 하나로 수렴하는 부작용(사용자 07-17: pane 열면 다
         // 프라나)으로 폐기 — 상속이 막으려던 "둔갑"(랜덤으로 떴다 뒤늦게 교정)은 배정이
         // spawn 시점 즉시(assign_character_env)가 된 지금은 재발하지 않는다. resume 은
         // shim 의 /character 교정이 세션 정본 캐릭터로 되돌리고, 사용자가 '+ 학생'·학생
@@ -1117,12 +1117,12 @@ impl App {
     ///
     /// 예전엔 실패 셋을 `Ok(String::new())` 로 돌려줬는데, 소켓 경로가 그 빈
     /// 문자열을 `pane-new` 자리표시자로 바꿔 **`ok:true` 에 실어 보냈다** —
-    /// 호출자가 성공으로 읽고 그 id 로 send 를 쏘면 조용히 사라진다. 거노가 학생
+    /// 호출자가 성공으로 읽고 그 id 로 send 를 쏘면 조용히 사라진다. 사용자가 학생
     /// 5명을 띄우려다 1명만 뜬 게 이것이다(2026-08-05). 사유 없는 실패는 호출자가
     /// `list surfaces` 를 다시 대조해야만 알 수 있어, 스크립트가 감지할 방법이 없었다.
     /// 방향을 안 준 split 이 고를 축 — **긴 쪽을 쪼갠다.**
     ///
-    /// 거노 2026-08-05: "너무 가로로나 세로로 안 길게". 늘 같은 방향으로 쪼개면 네
+    /// 사용자 2026-08-05: "너무 가로로나 세로로 안 길게". 늘 같은 방향으로 쪼개면 네
     /// 번째 pane 쯤에서 종잇장이 된다. 긴 축을 자르면 정사각에 가까워지고, 다음
     /// split 은 자연히 반대 축을 골라 격자가 된다.
     ///
@@ -1185,9 +1185,9 @@ impl App {
             .outer_for_pty(&active)
             .unwrap_or(active);
         // **그 pane 을 가진 트리**에 꽂는다 — 활성 window 트리가 아니라.
-        // 예전엔 `pty_layout` 만 봐서, 거노가 다른 방을 보고 있으면 pane 이 자기
+        // 예전엔 `pty_layout` 만 봐서, 사용자가 다른 방을 보고 있으면 pane 이 자기
         // 자리를 쪼개려다 통째로 실패했다("pane %5 이 활성 window(1) 트리에 없다").
-        // 스폰은 오케스트레이터가 배경에서 하는 일이라 **거노가 어느 방을 보고 있는지와
+        // 스폰은 오케스트레이터가 배경에서 하는 일이라 **사용자가 어느 방을 보고 있는지와
         // 무관해야** 한다.
         let owner = self.window_of_pane(&active);
         let new_id = self.spawn_split_session(&active)?;
@@ -1263,7 +1263,7 @@ impl App {
         let inherited = self.spawn_inherited_remote_session(outer, &new_pid)?;
         // 탭도 split 과 **같은 대접**이다: 방은 상속하고 학생은 새로 배정한다.
         // 이게 없던 동안 탭으로 띄운 학생은 캐릭터가 아예 없어서 보더색·프사·입력박스
-        // 도색은 물론 페르소나 env 와 board 등재까지 통째로 빠졌다(거노 2026-08-07:
+        // 도색은 물론 페르소나 env 와 board 등재까지 통째로 빠졌다(사용자 2026-08-07:
         // "탭안에서 생성하면 학생테마가안먹네"). split 이 깨져 학생들이 탭으로
         // 우회하던 참이라 더 눈에 띄었다.
         let room = self.ws.lock().unwrap().pane_room.get(outer).cloned();
@@ -1361,7 +1361,7 @@ impl App {
     /// 줌 pane 을 작업영역 가장자리에서 들이는 셀 수 `(가로, 세로)`.
     ///
     /// 통째로 채우면 줌 화면이 「pane 하나뿐인 평소 화면」과 픽셀 단위로 같아져,
-    /// 최대화 중인지 아닌지 구분이 안 된다(거노). 여백 + 테두리(render.rs)가
+    /// 최대화 중인지 아닌지 구분이 안 된다(사용자). 여백 + 테두리(render.rs)가
     /// 「이것만 보고 있다」를 만든다. 셀은 세로로 긴 직사각형이라 사방 1셀씩
     /// 들이면 여백이 2배 어긋나므로 종횡비로 가로를 보정한다. 창이 좁으면 그
     /// 축은 들이지 않는다 — 여백보다 내용 칸이 먼저다.
@@ -2047,7 +2047,7 @@ impl App {
     /// `character-<N>` 는 **이 pane 의 방(cwd slug)에서만** 지운다 — pane 번호는 방 간
     /// 유니크가 아니다(윈도우마다 %1 재사용). 모든 방을 쓸면 다른 방의 *살아있는* 같은
     /// 번호 pane 의 캐릭터 마커까지 삭제돼, board 가 char=None 으로 떠 프사가 사라지고
-    /// 그 캐릭터가 "미사용"으로 재배정됐다(거노: 캐릭터 주입 안 됨). cwd 를 모르면(캐시
+    /// 그 캐릭터가 "미사용"으로 재배정됐다(사용자: 캐릭터 주입 안 됨). cwd 를 모르면(캐시
     /// 미스) 폴백으로 전체를 쓴다 — 닫힌 pane 마커가 새는 것보단 낫다.
     pub(crate) fn cleanup_collab_markers(target: &str, cwd: Option<&std::path::Path>) {
         // %3 → _3, mirroring the shell hooks' ${ID//[^A-Za-z0-9]/_}.
@@ -2298,7 +2298,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             return;
         }
         // 소리 없이 사라지면 사용자는 학생이 어떻게 된 건지 알 방법이 없다
-        // (거노가 두 번 물었다). 되살리기 목록엔 이미 레코드가 있으므로 그리로
+        // (사용자가 두 번 물었다). 되살리기 목록엔 이미 레코드가 있으므로 그리로
         // 안내한다.
         self.set_toast(format!("{target} 이 끝나 자리를 접었다 — ⌘⇧T 로 되살린다"));
     }
@@ -2507,7 +2507,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// Close `pid`'s pane: remove it from the BSP tree and drop its PTY.
     /// Shared by Cmd+W and the header × button. When `pid` is the window's
     /// last pane we don't leave an empty window — we spawn a fresh shell in
-    /// its place (거노: BA GUI 종료 버튼으로 마지막 claude pane 을 닫으면 빈 창이
+    /// its place (사용자: BA GUI 종료 버튼으로 마지막 claude pane 을 닫으면 빈 창이
     /// 되어 안 닫히던 것 → 새 tty 셸로 교체). Otherwise just remove it.
     pub(crate) fn close_pane(&mut self, pid: &str) {
         if self.tmux.is_some() {

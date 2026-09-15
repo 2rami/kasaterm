@@ -21,7 +21,7 @@ tp=$(printf '%s' "$input" | python3 -c "import sys,json;print(json.load(sys.stdi
 # 세션으로 덮여 입력박스 인레이에 "아래 대화의 주제를…" 메타프롬프트가 샌다. 전용
 # junk cwd(kasaterm-title-gen)로 식별해 건너뛴다(title-sync env 정리의 이중 안전망).
 case "$tp$PWD" in *kasaterm-title-gen*) exit 0 ;; esac
-# detach 포크 페르소나 복원(거노: 백그라운드 가면 페르소나 풀림): 데몬이 포크 argv 를
+# detach 포크 페르소나 복원(사용자: 백그라운드 가면 페르소나 풀림): 데몬이 포크 argv 를
 # 재구성하며 --append-system-prompt 가 유실된다. env KASATERM_PERSONA 는 데몬 env(데몬을
 # 낳은 옛 pane 고정)라 계보가 틀려 못 쓴다 — 물려받은 transcript stem(포크 첫 부팅 =
 # 부모 세션 id)의 캐릭터 바인딩을 kasaterm 에 조회해 SessionStart 문맥으로 재주입한다.
@@ -92,7 +92,7 @@ try:
 except (IndexError, ValueError):
     sock_birth = 0.0
 sid = os.path.splitext(os.path.basename(tp))[0]  # transcript 파일명 = session uuid
-# 방별 분리(거노): KASATERM_ROOM 있으면 roster slug 도 방별로(없으면 기존).
+# 방별 분리(사용자): KASATERM_ROOM 있으면 roster slug 도 방별로(없으면 기존).
 _room = os.environ.get('KASATERM_ROOM', '')
 slug = cwd.replace('/', '-').replace('.', '-') + (f'__room_{_room}' if _room else '')
 d = os.path.expanduser('~/.config/kasaterm/agent-roster')

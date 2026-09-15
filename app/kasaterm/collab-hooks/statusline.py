@@ -15,7 +15,7 @@ Claude Code Statusline — kasaterm 미니멀.
   kasaterm 이 그 칸을 blank 로 지우므로 화면엔 왼쪽 공백 한 칸으로 남고, 구분자를 안
   붙여 그 뒤로 바로 첫 세그먼트가 온다. 밖(일반 터미널)에선 ●+이름 폴백.
 - 창 크기는 모델 옆에 붙인다 — 200k 인지 1M 인지가 모델의 성질이고, 뒤 퍼센트는
-  그 분모로 계산된 값이라 숫자 하나만 있으면 된다(거노 2026-08-11).
+  그 분모로 계산된 값이라 숫자 하나만 있으면 된다(사용자 2026-08-11).
 - effort: stdin `effort.level`(/effort 시 실시간 갱신), 레벨별 색.
 - permission 모드는 표시 안 함 — 하단 기본 힌트 줄(bypass permissions on)과 중복.
 """
@@ -66,7 +66,7 @@ MODEL_MARKER_CLAUDE = "\ue0c0"
 MODEL_MARKER_GPT = "\ue0c1"
 
 # kasaterm pane 표식 — 예전엔 U+FFFC 5칸이 학생 프사(bust) 자리표시자였는데,
-# 프사를 걷어내면서(거노 2026-08-11) 1칸으로 줄였다. **지우지는 마라.** 이 문자가
+# 프사를 걷어내면서(사용자 2026-08-11) 1칸으로 줄였다. **지우지는 마라.** 이 문자가
 # 화면에 있느냐가 kasaterm 쪽에서 세 가지 판정의 근거다: agents 목록 뷰인지
 # (render.rs `has_profile_slot`), statusline 이 stale 이라 재실행해야 하는지
 # (socket.rs), 입력박스 위 전신 학생을 어느 행 기준으로 세울지(render.rs standing).
@@ -92,7 +92,7 @@ def load_config():
     return {}
 
 
-# 계정 세그먼트는 걷었다(거노 2026-08-11: "계정없애고"). 슬롯 라벨을 읽던
+# 계정 세그먼트는 걷었다(사용자 2026-08-11: "계정없애고"). 슬롯 라벨을 읽던
 # `active_account_label`·`load_account` 도 함께 지웠다 — 계정을 어느 pane 이 쓰는지는
 # Info 패널이 답하고, 상태줄은 매 턴 눈에 들어오는 자리라 안 바뀌는 값을 둘 곳이 아니다.
 
@@ -174,7 +174,7 @@ def main():
 
     cfg = load_config()
     ic = ICON_SETS.get(cfg.get("icon_set", "nerd-font"), ICON_SETS["nerd-font"])
-    sep_char = cfg.get("separator", "┃")  # 기본 ┃ (거노 설정)
+    sep_char = cfg.get("separator", "┃")  # 기본 ┃ (사용자 설정)
 
     cwd = d.get("cwd") or os.getcwd()
     session_id = d.get("session_id", "")
@@ -192,13 +192,13 @@ def main():
     parts = []
     # pane 안에서 왼쪽 끝에 놓는 표식. `parts` 에 안 넣는 이유는 구분자다 — 넣으면
     # `￼ ┃ ` 로 네 칸이 비고, 프사를 걷어낸 뒤로 그 자리가 그냥 구멍이 된다
-    # (거노 2026-08-11: "학생프사 없어진 자리 비어이쓴는데 왼쪽으로 밀착해").
+    # (사용자 2026-08-11: "학생프사 없어진 자리 비어이쓴는데 왼쪽으로 밀착해").
     # kasaterm 이 이 한 칸을 blank 로 지우므로 실제로는 공백 한 칸만 남는다.
     prefix = ""
 
     name = os.environ.get("KASATERM_CHARACTER")
     # 포크/attach 로 세션 id 가 env anchor(KASATERM_SESSION_ID)와 갈라진 백그라운드
-    # 세션은 env 캐릭터가 출생 pane 의 동결값이라 오표기(거노: bg 뷰 프사가 딴 학생).
+    # 세션은 env 캐릭터가 출생 pane 의 동결값이라 오표기(사용자: bg 뷰 프사가 딴 학생).
     # 그때만 kasaterm 의 세션→캐릭터 영속 바인딩을 정본으로 읽는다 — 일반 pane 과
     # repersona(학생 명령) 경로는 env 가 최신이므로 건드리지 않는다.
     forked_view = bool(session_id) and session_id != os.environ.get("KASATERM_SESSION_ID")
@@ -214,7 +214,7 @@ def main():
             pass
     if name:
         if os.environ.get("KASATERM_PANE_ID"):
-            # pane 안에서는 학생을 여기 안 쓴다(거노 2026-08-11) — 이름도 프사도
+            # pane 안에서는 학생을 여기 안 쓴다(사용자 2026-08-11) — 이름도 프사도
             # pane 헤더가 이미 보여주므로 상태줄에 또 있으면 같은 정보가 두 번이다.
             # 표식만 남긴다(위 SPRITE 주석: 이게 없으면 kasaterm 쪽 판정 셋이 죽는다).
             prefix = SPRITE
@@ -223,13 +223,13 @@ def main():
             c = ansi(STUDENT_HEX.get(name, C_FALLBACK))
             parts.append(f"{c}●{RESET} {c}{BOLD}{name}{RESET}")
 
-    # ⑂bg 백그라운드 배지 제거(거노: 복원 세션에 자꾸 백그라운드로 떠 짜증). anchor
+    # ⑂bg 백그라운드 배지 제거(사용자: 복원 세션에 자꾸 백그라운드로 떠 짜증). anchor
     # (KASATERM_SESSION_ID) 불일치 판정은 detach 포크·앱 재시작 복원·continuation 을
     # 구분 못 해 오발화가 잦았고, pane_foreground_session HTTP 왕복 정밀 판별도
     # --resume 복원 경로에선 여전히 오판했다. pane→세션 바인딩이 복원까지 정확해진
     # 뒤에 정밀 재도입할 것. forked_view 는 위 프사 이름 교정에만 쓴다.
 
-    # 창 크기는 모델의 성질이라 모델 옆에 붙인다(거노 2026-08-11: "컨텍스트량 1m은
+    # 창 크기는 모델의 성질이라 모델 옆에 붙인다(사용자 2026-08-11: "컨텍스트량 1m은
     # 모델로 옮기고 200k인지 그건지"). 같은 Opus 라도 `[1m]` 으로 띄웠는지에 따라
     # 분모가 다섯 배 갈리는데, 그 사실이 퍼센트 옆에 있으면 "왜 갑자기 뛰었지"를
     # 모델과 못 잇는다. `display_name` 의 "(1M context)" 꼬리는 안 쓴다 — 200k 일 땐
@@ -268,7 +268,7 @@ def main():
         parts.append(f"{ansi(EFFORT_HEX.get(lvl, '7aa2f7'))}{ic['effort']} {lvl}{RESET}")
 
     # ultracode 배지는 여기 있었지만 뺐다 — 세그먼트 **맨 끝**이라 좁은 pane 에서
-    # 제일 먼저 잘리고, 안 잘려도 눈이 잘 안 갔다(거노 2026-08-11: 마커를 심어
+    # 제일 먼저 잘리고, 안 잘려도 눈이 잘 안 갔다(사용자 2026-08-11: 마커를 심어
     # 놓고 물어야 그제서야 "아 보이네"). 지금은 kasaterm 이 같은 마커를 읽어
     # **입력박스 테두리**를 보라색으로 물들인다 — 타이핑하는 자리라 놓칠 수 없다.
     # `ultracode-mark.py`(UserPromptSubmit)가 마커를 쓰는 쪽은 그대로다.

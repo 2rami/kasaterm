@@ -473,7 +473,7 @@ impl App {
     /// about_to_wait 가 매 틱 호출한다.
     pub(crate) fn run_pending_sticky_seek(&mut self) {
         if let Some((pane, col, row, down)) = crate::render::sticky_seek_step() {
-            // 노치당 여러 줄 스크롤 — 1줄씩이라 너무 느렸다(거노). 여러 번 쏴
+            // 노치당 여러 줄 스크롤 — 1줄씩이라 너무 느렸다(사용자). 여러 번 쏴
             // 체감 속도를 올린다. sticky_seek_step 의 reached 판정이 매 틱 화면을
             // 확인하므로 목표가 뷰에 들면 즉시 멈춘다(약간의 overshoot 는 허용 —
             // 한 화면 지나가도 프롬프트는 보인다).
@@ -580,7 +580,7 @@ impl App {
     /// Enter 가 들어간 지 이 시간 안이면 괄호-없는 스피너 후보를 글리프-변화
     /// 확정 없이 신뢰한다 — 제출이라는 사건 자체가 「이건 진짜 스피너다」의
     /// 확정보다 강한 근거라, 타이핑 턴은 첫 프레임부터 학생 테마가 붙는다
-    /// (거노 2026-08-20 「학생테마 치자마자 0.1초동안 적용안되는거」).
+    /// (사용자 2026-08-20 「학생테마 치자마자 0.1초동안 적용안되는거」).
     /// 경과시간 괄호는 ~3초에야 붙으므로(unconfirmed_spinner_row 주석), 그
     /// 구간의 행 이동이 확정을 되돌리는 것까지 덮게 4초.
     pub(crate) const SUBMIT_TRUST: std::time::Duration = std::time::Duration::from_secs(4);
@@ -717,7 +717,7 @@ impl App {
         // 앱이 transcript 꼬리에서 직접 읽은 판정. 훅은 **프롬프트를 보내야** 도는데,
         // `/effort` 로 켜고 프롬프트 없이 앱을 끄는 것이 자연스러운 사용이라 그 구간엔
         // 표식이 아예 없었다 — 그러면 저장이 xhigh 로 굳어 다음 실행이 ultracode 를
-        // 잃는다(거노 2026-08-15 두 번째 신고). 스캔이 답을 내면 그쪽이 최신이다:
+        // 잃는다(사용자 2026-08-15 두 번째 신고). 스캔이 답을 내면 그쪽이 최신이다:
         // 켰다면 표식이 없어도 켜고, 껐다면 표식이 남아 있어도 끈다.
         let scanned = self.scanned_ultracode();
         // 복원이 `--effort ultracode` 로 되살린 pane. 그 경로는 transcript 에 흔적을
@@ -1066,7 +1066,7 @@ impl App {
             return;
         }
         // A sibling finished: 헤더 펄스 + 학생 cheer 만 남긴다. 완료 "토스트"는
-        // glyph 스캔 기반이라 오탐(엉뚱한 pane·타이밍)이 잦아 제거(거노 요청).
+        // glyph 스캔 기반이라 오탐(엉뚱한 pane·타이밍)이 잦아 제거(사용자 요청).
         for id in completed {
             self.notify_flash.insert(id.clone(), now);
             // 턴 완료 → 학생 cheer 시작. 사용자가 이 pane 에 입력할 때까지 유지.
@@ -1081,7 +1081,7 @@ impl App {
     /// 그리고 아직 안 돌아온 **서브에이전트**.
     ///
     /// 서브에이전트를 같이 보는 이유: 세션 자체는 idle(스피너 없음)인데 Task 가 정보를
-    /// 모아 오는 동안, 화면에서 그 pane 이 **정말 노는 pane 과 구별되지 않았다**(거노
+    /// 모아 오는 동안, 화면에서 그 pane 이 **정말 노는 pane 과 구별되지 않았다**(사용자
     /// 2026-08-11 제안). 표시는 이미 갈려 있다 — 도는 중은 쓸어가는 sweep, 이쪽은
     /// 3초 숨쉬기 pulse(`render.rs` 의 `working_bar` vs `pulse_bar`).
     ///
@@ -1467,12 +1467,12 @@ impl App {
                                 kind: "permission".to_string(),
                             },
                         );
-                    // 화면 승인 토스트/칩은 화면 감지 오탐이 있어 제거(거노 요청).
+                    // 화면 승인 토스트/칩은 화면 감지 오탐이 있어 제거(사용자 요청).
                     // 승인 신호는 board attention(위) + (pane 안 볼 때) 데스크탑 알림
                     // 으로만 남긴다 — toast_action 은 Sparkle 업데이트 토스트가 공유해
                     // 건드리지 않는다.
                     if faces_user {
-                        // 보고 있는 pane 이라고 삼키지 않는다 — 거노 2026-08-11
+                        // 보고 있는 pane 이라고 삼키지 않는다 — 사용자 2026-08-11
                         // "pane별로 그냥 다오게하자". 프사가 붙어 누구 건지 갈린다.
                         let ch = self.pane_character_if_known(id);
                         let who = ch.clone().unwrap_or_else(|| "pane".to_string());
@@ -1745,7 +1745,7 @@ impl App {
     /// 보이는 범위가 곧 복사 범위다(화면 밖 블록은 애초에 레이아웃을 건너뛴다).
     ///
     /// 클립보드 쓰기와 갈라 둔 이유는 검증 때문이다 — 헤드리스 하네스가 이걸 불러
-    /// 결과를 로그로 찍으면 거노 클립보드를 건드리지 않고 정확성을 확인할 수 있다.
+    /// 결과를 로그로 찍으면 사용자 클립보드를 건드리지 않고 정확성을 확인할 수 있다.
     pub(crate) fn md_render_selection_text(&self) -> Option<String> {
         let sel = self.md_render_sel.as_ref()?;
         let words = self.md_word_rects.get(&sel.pane)?;
@@ -1901,14 +1901,14 @@ impl App {
         }
         // 텍스트가 있으면 무조건 텍스트 우선(bracketed paste). 일부 앱은 텍스트를
         // 복사해도 TIFF 표현을 같이 올려 get_image()가 Ok를 뱉는데, 이미지를 먼저
-        // 검사하면 멀쩡한 텍스트 paste가 0x16으로 새버린다(거노: 붙여넣기 먹통).
+        // 검사하면 멀쩡한 텍스트 paste가 0x16으로 새버린다(사용자: 붙여넣기 먹통).
         // 텍스트가 *없고* 이미지만 있을 때만 0x16을 흘려 claude code가 osascript로
         // 클립보드 PNG를 [Image] 칩으로 읽게 한다.
         if let Some(text) = text {
             if !text.is_empty() {
                 // 감싸개(`ESC[200~ … ESC[201~`)는 앱이 DECSET 2004 로 **켰을 때만**
                 // 보낸다. 안 켠 앱은 저 바이트를 입력의 일부로 받는다 — `claude auth
-                // login` 의 코드 프롬프트가 그래서 "Invalid code" 로 튕겼다(거노:
+                // login` 의 코드 프롬프트가 그래서 "Invalid code" 로 튕겼다(사용자:
                 // "붙여넣기가 안되는거같은데"). zsh·claude TUI 는 켜므로 평소 붙여넣기
                 // 경험은 그대로다.
                 let bracketed = self
@@ -2614,7 +2614,7 @@ impl App {
     /// 이다. 문맥이 바뀌어도 조합 상태가 그대로 남아 있어서, 터미널에서 "한" 을
     /// 치다 편집기를 클릭하면 그 "한" 이 **편집기에** 떨어지고(이상하게 쳐짐),
     /// Backspace 는 편집기 글자 대신 그 잔재를 갉아 아무것도 안 지워진다
-    /// (이상하게 지워짐). 거노 실사고 — 편집기가 "못 쓸 정도" 였던 정체다.
+    /// (이상하게 지워짐). 사용자 실사고 — 편집기가 "못 쓸 정도" 였던 정체다.
     ///
     /// 남은 음절은 **떠나는 쪽에** 확정시킨다(macOS 가 포커스 이동 때 하는 것과
     /// 같다). 떠나는 쪽이 이미 사라졌으면(pane 닫힘·드롭다운 닫힘) 조용히 버린다
@@ -3826,7 +3826,7 @@ impl App {
                 // 셸에는 readline 제어문자로 보내야 한다 — 전에 쓰던 CSI
                 // 인코딩(`\x1b[H`/`\x1b[F`·`\x1b[1;3C`)은 zsh 기본 bindkey 에
                 // 아예 없어서(실측: `^A`/`^E`·`^[b`/`^[f`·`^[OH` 만 있다)
-                // 셸 프롬프트에서 조용히 무시됐다(거노: "터미널에서 커맨드
+                // 셸 프롬프트에서 조용히 무시됐다(사용자: "터미널에서 커맨드
                 // 이동·옵션 단어 이동이 안 돼"). alt-screen TUI(vim·less)는
                 // 반대로 CSI 를 이해하고 ^A 가 딴 뜻(숫자 증가)이라, 화면
                 // 상태로 인코딩을 가른다. DECCKM 도 같은 스냅샷에서 읽는다.
@@ -3999,7 +3999,7 @@ pub(crate) fn term_is_working(t: &TerminalPane) -> bool {
 ///
 /// 조합기를 쓰는 입구들은 하나같이 "자모도 Backspace 도 아니면 조합을 확정한다"로
 /// 짜여 있는데, 그 규칙에 Shift 가 걸린다. "계"의 ㅖ 는 **Shift+ㅔ** 라, ㄱ 을 친
-/// 뒤 Shift 를 누르는 순간 ㄱ 이 확정돼 "ㄱㅖ"가 된다(거노 실측 2026-08-04).
+/// 뒤 Shift 를 누르는 순간 ㄱ 이 확정돼 "ㄱㅖ"가 된다(사용자 실측 2026-08-04).
 /// 수식키를 누르는 것은 조합을 끝내겠다는 뜻이 아니므로 조합기에 닿으면 안 된다.
 ///
 /// 수식키가 **조합된** 단축키(Cmd+W 등)는 여기 안 걸린다 — 그때 logical_key 는
@@ -4681,7 +4681,7 @@ pub(crate) enum ApprovalPrompt {
 ///     never has a bare chevron under it. When one does, the "menu" text is
 ///     just quoted history in the transcript (e.g. a `peek` dump of another
 ///     pane's prompt) — matching it made an idle orchestrator pane toast itself and,
-///     worse, a chip click injected Enter into its own input line. (거노
+///     worse, a chip click injected Enter into its own input line. (사용자
 ///     실클릭으로 확인된 false-positive.)
 /// Callers must check `rows_show_working` first — a spinner means the prompt
 /// text still on screen is history, not a question.
@@ -4860,7 +4860,7 @@ mod working_scan_tests {
     #[test]
     fn claude_launch_screens_do_not_expose_redraw_history() {
         assert!(claude_launch_screen(
-            "╭─ Claude Code ─╮\nWelcome back 양건호!\nUsing Opus 5"
+            "╭─ Claude Code ─╮\nWelcome back 사용자!\nUsing Opus 5"
         ));
         assert!(claude_launch_screen(
             "Accessing workspace:\nQuick safety check: Is this a project you trust?"
@@ -4872,7 +4872,7 @@ mod working_scan_tests {
 
     #[test]
     fn spinner_above_trailing_blank_padding_is_working() {
-        // The exact 거노 case: claude's status line, then a wall of blank
+        // The exact 사용자 case: claude's status line, then a wall of blank
         // padding rows filling out the grid. The old `cells[rows-10..]` scan
         // saw only blanks here and missed it.
         let mut cells = vec![row("✢ Gitifying… (1m 35s · ↑ 4.9k tokens)")];
@@ -5006,7 +5006,7 @@ mod working_scan_tests {
     fn quoted_menu_with_bare_chevron_below_is_rejected() {
         // 오케스트레이터 pane 이 `peek %2` 결과를 자기 대화창에 인용 → transcript 에 박제된
         // 가짜 메뉴. 그 아래에 claude idle 입력행(bare "❯ ")이 있으면 reject.
-        // (거노 실클릭으로 확인: 안 잡으면 idle pane 이 자기한테 토스트 쏘고
+        // (사용자 실클릭으로 확인: 안 잡으면 idle pane 이 자기한테 토스트 쏘고
         //  칩 클릭 시 자기 입력행에 Enter 가 주입됨.)
         let cells = vec![
             row("> peek %2 결과:"),
@@ -5072,7 +5072,7 @@ mod working_scan_tests {
     }
 
     // ★회귀: 알림과 맨 아랫줄 사이에 todo 트리와 입력박스가 끼어도 잡아야 한다.
-    // 하단 10행 창으로 뒀을 때 거노 화면에서 그 거리가 12행이라 한 번도 안 걸렸다
+    // 하단 10행 창으로 뒀을 때 사용자 화면에서 그 거리가 12행이라 한 번도 안 걸렸다
     // (2026-08-13). 판정을 스피너 행에 앵커하면 그 거리는 무의미해진다.
     // 진행률 행(45%)도 알림 바로 아래에서 함께 읽혀야 한다.
     #[test]

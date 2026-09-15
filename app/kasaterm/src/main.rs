@@ -428,7 +428,7 @@ fn git_paint_dropdowns(
 
 /// Lucide icon name for a sidebar tab's chip, chosen from the window label.
 /// 에이전트 pane 은 sparkle, markdown 은 문서, 나머지는 터미널 글리프.
-/// codex 도 학생 대접이라 같은 sparkle 을 쓴다(거노 2026-08-05) — 종류를 아이콘으로
+/// codex 도 학생 대접이라 같은 sparkle 을 쓴다(사용자 2026-08-05) — 종류를 아이콘으로
 /// 가르면 "누가 에이전트인가"가 한눈에 안 들어온다.
 /// 방 카드 앞의 글리프. **무엇이 도는지**가 아니라 **무엇을 여는 자리인지**만
 /// 말한다.
@@ -447,7 +447,7 @@ fn tab_icon_glyph(name: &str) -> &'static str {
 
 /// claude Code 가 OSC 제목에 붙이는 선행 활동 글리프(✳/✶/✻/✽ … dingbat 별표류
 /// + ∗ ＊ * + 브라유 스피너 ⠂⠐… U+2800 블록)와 공백 run 을 벗긴다. 타이틀바·
-/// 헤더·board 라벨이 "아로나 · ⠂ 요약" 대신 "아로나 · 요약" 을 보이게(거노).
+/// 헤더·board 라벨이 "아로나 · ⠂ 요약" 대신 "아로나 · 요약" 을 보이게(사용자).
 /// 활동 글리프로 시작 안 하면 원문 그대로(rename 사용자 값 보호).
 pub(crate) fn strip_activity_prefix(s: &str) -> &str {
     s.trim_start_matches(|c: char| {
@@ -709,7 +709,7 @@ fn wheel_throttle_ms() -> u64 {
 /// 기준이다 — 트랙패드와 고해상도 마우스휠은 winit 에서 **같은 PixelDelta 로 와서
 /// 구분할 수가 없으므로**, 한쪽에 맞추면 다른 쪽이 어긋난다. 마우스휠이 굼떠 1.0 +
 /// 최소 1셀 floor 로 올렸던 적이 있는데(2026-07-23 `1aa9b6c`) 그러자 트랙패드가 세
-/// 배 넘게 민감해졌다(거노: "트랙패드 스크롤 원래대로 돌려줘"). 손이 늘 닿아 있는
+/// 배 넘게 민감해졌다(사용자: "트랙패드 스크롤 원래대로 돌려줘"). 손이 늘 닿아 있는
 /// 쪽을 기본값으로 두고, 마우스를 쓸 때 설정에서 올린다.
 ///
 /// 설정(`settings.json` 의 `wheel_pixel_gain`) → env(`KASATERM_WHEEL_PIXEL_GAIN`) 순.
@@ -1429,7 +1429,7 @@ enum CloseWhy {
     Dirty(Vec<(DirtyDoc, String)>),
     /// Cmd+W 를 눌렀는데 그 pane 이 이 방의 **마지막**이라, 닫으면 방(세션)째
     /// 사라지는 경우. 전에는 여기서 아무 일도 안 일어나 키가 죽은 것처럼 보였다
-    /// (거노: "pane 하나 있고 다른 방 있으면 커맨드 W 해도 무반응"). 방이 하나뿐일
+    /// (사용자: "pane 하나 있고 다른 방 있으면 커맨드 W 해도 무반응"). 방이 하나뿐일
     /// 때는 여전히 no-op 다 — 그건 앱 종료라 OS 닫기 버튼(Cmd+Q)의 몫이다.
     ///
     /// 바쁜 것도 저장 안 된 것도 없어도 **무조건 묻는다**: Cmd+W 는 「하나 닫기」로
@@ -1539,7 +1539,7 @@ enum ActionKind {
 pub(crate) enum AccountMenuItem {
     /// 로스터 한 행 = 제공자 하나. 누르면 그 제공자의 계정 목록이 옆으로 열린다.
     ///
-    /// 계정을 첫 화면에 죽 늘어놓지 않는 건 Orca 하단바를 그대로 따른 것이다(거노
+    /// 계정을 첫 화면에 죽 늘어놓지 않는 건 Orca 하단바를 그대로 따른 것이다(사용자
     /// 2026-08-12 「똑같이 하라니까」). 첫 화면이 답하는 질문은 «어느 쪽이 얼마나
     /// 찼나» 고, «누구로 바꿀까» 는 그 다음이다 — 제공자가 늘수록 이 차이가 커진다.
     Provider(AccountProvider),
@@ -1605,7 +1605,7 @@ struct TabDrag {
 ///
 /// **닫아도 프로세스는 죽지 않는다.** 사용자가 닫은 pane 은 화면(BSP 트리)에서만
 /// 빠지고 PTY 는 계속 돌아, 되살리기가 "다시 붙이기"가 된다 — claude 가 하던 일을
-/// 이어서 하고 있으므로 `--resume` 으로 대화를 되감을 이유가 없다(거노: 데몬처럼
+/// 이어서 하고 있으므로 `--resume` 으로 대화를 되감을 이유가 없다(사용자: 데몬처럼
 /// 계속 돌기를 원함). 진짜로 끄고 싶으면 인포 줄의 × 다.
 ///
 /// 다만 죽은 채 목록에 남는 경우도 있다 — 셸이 스스로 exit 한 pane, 그리고 앱을
@@ -2284,7 +2284,7 @@ impl PaneState {
     /// 위해 헤더 띠를 유지한다. 그 외 일반 터미널은 hover ⋮ 만 쓴다. image()/
     /// markdown()은 Deref로 active 탭을 본다.
     fn has_header(&self) -> bool {
-        // 학생 헤더 띠 폐기(거노) — 학생 이름은 상단 타이틀바(claude 실행 시),
+        // 학생 헤더 띠 폐기(사용자) — 학생 이름은 상단 타이틀바(claude 실행 시),
         // 로딩바는 pane 위 별도. 헤더 띠는 멀티탭·이미지·md 전용 컨트롤만 남긴다.
         // 코드/텍스트 raw 편집기도 헤더를 가진다 — 파일명 + ● 미저장 도트의 자리.
         // ⋮ 에서 직접 정했으면 그게 우선 — 탭이 하나인 터미널에도 띠를 띄워
@@ -3452,7 +3452,7 @@ struct Workspace {
     /// The first tab's pid equals the outer pane id, so single-tab panes
     /// don't need an entry — but secondary tabs always insert/remove here.
     pid_to_pane: HashMap<String, String>,
-    /// 방별 분리(거노): pane → 방(윈도우) 식별자. 새 방 pane 만 들어가고, 기본 방은
+    /// 방별 분리(사용자): pane → 방(윈도우) 식별자. 새 방 pane 만 들어가고, 기본 방은
     /// 없음 → cwd-slug 그대로. ws 에 둬서 GUI(spawn)와 PtyBackend(collab_board) 가
     /// 같은 매핑을 본다(별 스레드라 App 필드는 socket.rs 가 못 봄).
     pane_room: HashMap<String, String>,
@@ -3466,7 +3466,7 @@ struct Workspace {
     pane_next_character: HashMap<String, String>,
     /// 활성 윈도우(보이는 방)의 leaf pane id 집합. `publish_pty_layout` 이 갱신한다.
     /// collab_board 가 이걸로 bound pane 을 필터해 *활성 방 학생만* board 에 올린다
-    /// (거노: 아로나 방 + 프라나 방이 한 교실에 같이 뜨던 문제 — 방별 격리).
+    /// (사용자: 아로나 방 + 프라나 방이 한 교실에 같이 뜨던 문제 — 방별 격리).
     active_window_panes: std::collections::HashSet<String>,
     /// pane → 속한 윈도우(방) 인덱스. 전 윈도우 leaf 를 `publish_pty_layout` 이 채운다.
     /// collab_board(PtyBackend, 별 스레드)가 App 의 windows/pty_layout 을 못 봐서 ws 로
@@ -3555,7 +3555,7 @@ impl Workspace {
     /// 학생 관련 상태(`pane_character`·`pane_claude_sid`·`pane_cwd_cache`…)는 전부
     /// **탭 pid** 로 기록된다(`assign_character_env` 가 spawn 하는 pane 마다 그 pid 로
     /// 쓴다). 그런데 그리는 쪽은 BSP leaf(=outer)를 들고 있어, 접지 않으면 탭으로 띄운
-    /// 학생의 색·프사·이름이 **아무 데도 안 나온다**(거노 2026-08-07: "탭안에서
+    /// 학생의 색·프사·이름이 **아무 데도 안 나온다**(사용자 2026-08-07: "탭안에서
     /// 생성하면 학생테마가안먹네"). PTY 조회의 `pty_for_pane` 과 짝이다.
     ///
     /// 탭이 아직 pid 를 못 받은 순간(첫 ScreenUpdate 전)엔 outer 를 그대로 돌려준다 —
@@ -3623,10 +3623,10 @@ enum UserEvent {
     /// true follows into the new one.
     /// 세 번째 필드는 **쪼갤 pane**. None 이면 포커스된 pane 을 쪼갠다(GUI 와 같은
     /// 뜻). 에이전트가 자기 pane 에서 부를 때는 자기 id 를 실어 보낸다 — 안 그러면
-    /// 사람이 보고 있는 창이 쪼개진다(거노: "자꾸 내가 포커스하는 윈도우에 띄우냐").
+    /// 사람이 보고 있는 창이 쪼개진다(사용자: "자꾸 내가 포커스하는 윈도우에 띄우냐").
     /// 네 번째 필드는 회신 채널 — `Ok(새 pane id)` 아니면 `Err(사유)`. 사유를
     /// 실어야 소켓이 `ok:false` 로 답할 수 있다. 빈 문자열을 성공으로 실어 보내면
-    /// 호출자가 실패를 감지할 방법이 없다(거노 실사고 2026-08-05).
+    /// 호출자가 실패를 감지할 방법이 없다(사용자 실사고 2026-08-05).
     /// 첫 번째 필드가 `None` 이면 **auto** — GUI 스레드가 쪼갤 pane 의 종횡비를 보고
     /// 긴 축을 고른다. 소켓 스레드는 pane 픽셀 크기를 모르므로 거기서 못 정한다.
     SocketSplit(
@@ -3730,7 +3730,7 @@ enum UserEvent {
     /// 왜 소켓에 뚫는가: 닫은 pane 은 **죽지 않는다**(`alive`). 프로세스를 그대로 물고
     /// 되살리기 목록에 앉아 있어서, 오케스트레이터가 `dismiss` 로 학생을 정리해도 그
     /// claude 들은 계속 살아 있다 — 그런데 그 목록은 App 필드라 CLI 에서 보이지도, 끄지도
-    /// 못했다(거노 2026-08-06: "너도 보여? 너도 진짜 끄게 할 수 있는지").
+    /// 못했다(사용자 2026-08-06: "너도 보여? 너도 진짜 끄게 할 수 있는지").
     ///
     /// `Some(pane_id)` 면 그 항목을 버린다(살아 있으면 프로세스까지). `None` 이면 조회만.
     /// pane id 로 지목하는 이유: 인덱스는 목록이 바뀌면 다른 항목을 가리킨다 —
@@ -3743,11 +3743,11 @@ enum UserEvent {
     /// pane. 회신은 새 탭의 pane id — 부른 쪽이 거기에 명령을 실어야 한다.
     ///
     /// split 과 나뉘는 이유: 학생을 하나 더 띄울 때마다 쪼개면 화면이 계속 줄어든다.
-    /// 탭은 자리를 안 뺏는다(거노 2026-08-05).
+    /// 탭은 자리를 안 뺏는다(사용자 2026-08-05).
     ///
     /// 둘째(bool)는 새 탭을 **활성탭으로 올릴지**다. 소켓 스폰의 기본은 false —
     /// 오케스트레이터가 자기 pane 에 서브에이전트를 띄울 때 새 탭이 앞으로 오면
-    /// 사람이 보던 화면(부모의 대화)이 통째로 덮인다(거노 2026-08-18: 서브에이전트는
+    /// 사람이 보던 화면(부모의 대화)이 통째로 덮인다(사용자 2026-08-18: 서브에이전트는
     /// 본인 탭 안에, 화면은 그대로).
     SocketNewTab(
         Option<String>,
@@ -3792,14 +3792,14 @@ enum UserEvent {
     /// 상태를 직접 못 봐(별 스레드) `SocketQueryPanePids` 패턴으로 질의: 응답은
     /// (윈도우 수, 활성 idx, [(name, cwd)] 라벨). arona-ui 좌측 방 네비가 쓴다.
     SocketQuerySessions(std::sync::mpsc::Sender<(usize, usize, Vec<(String, String)>)>),
-    /// `POST /session-switch?idx=N` 위임 — 보이는 윈도우를 idx 로 전환(거노: GUI 에서
+    /// `POST /session-switch?idx=N` 위임 — 보이는 윈도우를 idx 로 전환(사용자: GUI 에서
     /// 방=윈도우 클릭 시 그 터미널 윈도우로). `switch_window` 가 resize·redraw 자체 처리.
     SocketSwitchSession(usize),
     /// `POST /session-new?character=<name>` 위임 — 새 방(윈도우, 빈 셸) + 선택 캐릭터 라벨.
     /// 자동통솔 폐기(06-18)로 claude 자동 스폰 없음. `new_room_with_character` 가 처리.
     SocketNewRoom(String),
     /// `POST /spawn-student?character=<name>` 위임 — 현재 방에 캐릭터 지정 학생 추가
-    /// (split + pending_character). 아로나/프라나도 학생처럼 고를 수 있다(거노).
+    /// (split + pending_character). 아로나/프라나도 학생처럼 고를 수 있다(사용자).
     /// Sender 로 새 pane id 를 돌려준다(SocketSplit 패턴) — 디스패처가 스폰 직후
     /// 그 pane 에 브리프를 쏘려면 주소가 필요하다. 빈 문자열 = pane 미생성.
     SocketSpawnStudent(String, std::sync::mpsc::Sender<String>),
@@ -3818,7 +3818,7 @@ enum UserEvent {
     /// 는 래퍼의 override 파일이 싣고 GUI 는 헤더·마커·세션바인딩만 갱신.
     SocketRepersona(String, String),
     SocketAgentIdentity(String, String, String, u32, std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>),
-    /// `POST /session-close?idx=N` 위임 — 방(윈도우) 닫기(거노). `close_window` 가
+    /// `POST /session-close?idx=N` 위임 — 방(윈도우) 닫기(사용자). `close_window` 가
     /// 마지막 윈도우 가드·pane 정리. 닫기 실패(마지막)는 무시(프론트가 가드).
     SocketCloseRoom(usize),
     /// `GET /open-image`·`/open-markdown`(imgopen/mdopen 셰임·SendUserFile 훅)이
@@ -3881,7 +3881,7 @@ enum UserEvent {
     },
     /// `collab.bind_transcript`(SessionStart 훅) 위임 — (pane, 세션 id). transcript
     /// 파일명(stem) = claude 세션 id. 세션→캐릭터 영속 매핑을 조회/저장해 --resume 시
-    /// 캐릭터 둔갑을 막는다(거노: 재시작하면 프라나가 미도리로). `apply_session_character`.
+    /// 캐릭터 둔갑을 막는다(사용자: 재시작하면 프라나가 미도리로). `apply_session_character`.
     SocketSessionBound(String, String),
     /// pane 이 "보고 있는" 경로 — statusline report-cwd(claude 내부 cd 포함) 또는
     /// transcript bind 시 jsonl tail 의 cwd. 셸 pid cwd 와 달리 pane **내용**의
@@ -3889,7 +3889,7 @@ enum UserEvent {
     /// ~/Desktop 이라 파일트리가 pane 과 달랐던 것). `(pane, cwd)`.
     SocketViewCwd(String, std::path::PathBuf),
     /// stale statusline 재실행 강제 — 구버전 claude(≤2.1.209 실측)는 attach 에서
-    /// statusline 을 재실행하지 않아 세션 id 마커가 프롬프트 전까지 안 흐른다(거노:
+    /// statusline 을 재실행하지 않아 세션 id 마커가 프롬프트 전까지 안 흐른다(사용자:
     /// 들어오자마자 바뀌게). PTY 1행 지글(줄였다 원복)로 SIGWINCH 재레이아웃을 유도.
     /// 발동 게이트·rate-limit 은 backend(rebind_agents_panes)가 진다.
     NudgePaneResize(String),
@@ -3954,7 +3954,7 @@ enum UserEvent {
     SocketPasteImage(String, Vec<u8>, Option<std::sync::mpsc::Sender<Result<(), String>>>),
     ImagePasteDone(Result<(), String>),
     /// `POST /git-panel` — 아로나 타이틀바 버튼 → 터미널 GUI 의 git 소스컨트롤 패널 열기.
-    /// 메인 터미널 창을 띄우고(숨겨져 있으면) git 컬럼을 토글한다(거노: 그 버튼=소스컨트롤).
+    /// 메인 터미널 창을 띄우고(숨겨져 있으면) git 컬럼을 토글한다(사용자: 그 버튼=소스컨트롤).
     SocketToggleGit,
     /// Show/hide the main terminal window, delegated from the socket thread
     /// (`POST /terminal-reveal` — the arona classroom's red-pill button).
@@ -4001,7 +4001,7 @@ enum UserEvent {
     },
     /// "대화 저장하기" — surface pane 의 foreground claude 를 ←←(agents view = bg-detach)
     /// 주입으로 background daemon 으로 detach. surface 없으면 active pane. 터미널이 꺼져도
-    /// daemon 이 세션을 들고 살아남아 웹뷰에서 계속 보인다(거노 핵심).
+    /// daemon 이 세션을 들고 살아남아 웹뷰에서 계속 보인다(사용자 핵심).
     SaveSession {
         surface: Option<String>,
         reply: Option<std::sync::mpsc::Sender<std::result::Result<String, String>>>,
@@ -4083,7 +4083,7 @@ struct FileNode {
     /// `git check-ignore`), so `walk_dir` leaves it `false`.
     ignored: bool,
     /// 이 폴더가 git 저장소 루트인가 — 아이콘을 폴더 대신 브랜치로 바꿔 「어느
-    /// 게 레포인지」를 목록에서 바로 읽게 한다(거노). 워크트리는 `.git` 이
+    /// 게 레포인지」를 목록에서 바로 읽게 한다(사용자). 워크트리는 `.git` 이
     /// 디렉터리가 아니라 gitdir 을 가리키는 파일이라 존재 여부로만 본다.
     is_repo: bool,
 }
@@ -4099,7 +4099,7 @@ fn is_git_repo(p: &std::path::Path) -> bool {
 /// 화면에 띄울 한도 한 줄 — 가장 먼저 닫히는 창의 사용률, 그게 어느 창인지,
 /// 그리고 그 숫자가 지금 값인지. 셋을 함께 들고 다니는 이유는 전에 percent 하나만
 /// 들고 다니다 (가) 어느 창인지 몰라 0% 를 이상하게 여기지 않았고 (나) upstream 이
-/// 막혀 며칠 묵은 값을 보여줘도 화면이 똑같아 보였기 때문이다(거노 2026-08-05).
+/// 막혀 며칠 묵은 값을 보여줘도 화면이 똑같아 보였기 때문이다(사용자 2026-08-05).
 #[derive(Clone, PartialEq)]
 pub(crate) struct UsageWindowBadge {
     pub(crate) label: String,
@@ -4122,7 +4122,7 @@ pub(crate) struct UsageBadge {
     /// 옛 계정 값을 새 계정 것으로 그리지 않기 위한 표식.
     pub(crate) account_dir: String,
     /// 그 창이 풀리는 시각(epoch 초). 화면은 이걸 **남은 시간**으로 바꿔 그린다 —
-    /// 퍼센트만으로는 "지금 아껴야 하나 곧 풀리나"를 못 고른다(거노 2026-08-07).
+    /// 퍼센트만으로는 "지금 아껴야 하나 곧 풀리나"를 못 고른다(사용자 2026-08-07).
     pub(crate) resets_at: Option<u64>,
     /// 모든 한도 창. 5시간이 앞이고, 모델별 주간 창까지 각자 초기화 시각을 보존한다.
     /// 위의 `pct`/`label`은 자동 전환용 최고 압박이고, 이 목록은 상세 화면용이다.
@@ -4995,7 +4995,7 @@ struct App {
     ///
     /// 두 칸으로 가른 이유는 claude 가 실제로 **양쪽에서 돌기 때문**이다(2026-09-05
     /// 실측: 작업대 6개·본진 4개). 한쪽만 보여 주면 하단 상태줄(늘 이 기계 것)과
-    /// 어긋나 「설정창이랑 하단이랑 왜 다르냐」가 된다 — 거노가 실제로 그렇게 물었다.
+    /// 어긋나 「설정창이랑 하단이랑 왜 다르냐」가 된다 — 사용자가 실제로 그렇게 물었다.
     set_account_scope_home: bool,
     /// 드롭다운이 **어느 손잡이에서** 열렸나 — 메뉴를 그 자리에 붙여 그린다.
     /// 손잡이가 둘(Info 탭 계정 행 · 상태줄)이라, 하나로 고정하면 다른 쪽에서 열었을
@@ -5418,7 +5418,7 @@ struct App {
     /// 캐릭터 자체는 pane 을 만들 때 배정된다 — 셸 env(`KASATERM_CHARACTER`·
     /// `KASATERM_PERSONA`)에 미리 심어 둬야 나중에 거기서 켜는 claude 가 그 학생으로
     /// 부팅되기 때문이다. 그런데 그러면 셸만 도는 pane 에도 얼굴이 먼저 떠 있어
-    /// "누가 일하고 있다"로 읽힌다(거노: "zsh 인데 학생이 이미 있는 이유는 뭐야").
+    /// "누가 일하고 있다"로 읽힌다(사용자: "zsh 인데 학생이 이미 있는 이유는 뭐야").
     /// 배정은 그대로 두고 **보이는 시점만** claude 가 실제로 붙을 때로 미룬다.
     ///
     /// 한 번 본 것을 계속 기억하는 건, claude 가 cargo 같은 자식을 띄우면 그동안
@@ -5456,7 +5456,7 @@ struct App {
     /// pane 의 오버라이드를 버려 stale 고착을 막는다(claude 살아 있으면 statusline
     /// 이 곧 재보고).
     pane_view_cwd: HashMap<String, std::path::PathBuf>,
-    /// 방별 collab 분리(거노). `pending_room`: 다음 spawn 할 pane 의 방 id(셸 env
+    /// 방별 collab 분리(사용자). `pending_room`: 다음 spawn 할 pane 의 방 id(셸 env
     /// KASATERM_ROOM 주입 + ws.pane_room 기록용). pane→방 매핑은 ws.pane_room(공유).
     pending_room: Option<String>,
     next_room_seq: u32,
@@ -5481,7 +5481,7 @@ struct App {
     ///
     /// 계정은 프로세스 env 라 pane 이 뜰 때 박히고, 도는 프로세스는 못 바꾼다. 그래서
     /// 전환해도 이미 열린 pane 은 옛 계정 그대로다 — 화면(상태줄·Info)만 새 계정을
-    /// 가리켜 「전환했는데 왜 그대로지」가 된다(거노 2026-08-13). 여기 적어 두고
+    /// 가리켜 「전환했는데 왜 그대로지」가 된다(사용자 2026-08-13). 여기 적어 두고
     /// pane 헤더에 「재시작할까요?」를 띄운다. Orca 도 같은 한계를 같은 방식으로 푼다.
     ///
     /// `restart_pane_agent` 가 성공하거나 사용자가 무시하면 지운다. A→B→A 로 되돌아온
@@ -5490,7 +5490,7 @@ struct App {
     /// cmux socket backend 핸들 — ResumeSession(attach/재개)이 세션 id 를 아는 유일한
     /// 시점에 pane↔transcript 를 bind_transcript 로 즉석 확정하기 위해 보관. attach 뷰는
     /// bind hook 이 안 떠서 board discovery 의 recent-jsonl 추측이 남의 활성 세션에
-    /// 오귀속됐다(거노: 왼쪽 pane 둘 다 프라나).
+    /// 오귀속됐다(사용자: 왼쪽 pane 둘 다 프라나).
     socket_backend: Option<std::sync::Arc<socket::PtyBackend>>,
     /// claude sessionId → parentSessionId(background kind 세션만). `claude agents
     /// --json --all` 폴러(handler.rs resumed)가 3초마다 갱신. 타이틀바 배지·학생 유지
@@ -5504,7 +5504,7 @@ struct App {
     /// 활성 계정 하나만 담는 것과 달리, 이건 등록된 계정 전부를 담는다.
     ///
     /// 계정 드롭다운이 읽는다 — 누르기 **전에** 각 계정의 사용률이 보여야 하기 때문이다
-    /// (거노: "누르면 전환되버리잖아"). 전환해 봐야 아는 구조면 한도 때문에 옮기려는
+    /// (사용자: "누르면 전환되버리잖아"). 전환해 봐야 아는 구조면 한도 때문에 옮기려는
     /// 사람이 옮길 곳을 못 고른다. 활성이 아닌 계정도 조회할 수 있는 것은 usage 프록시가
     /// 슬롯별 토큰을 직접 읽기 때문이다(`/claude-usage?dir=<슬롯>`) — 전환이 필요 없다.
     claude_usage_all: std::sync::Arc<std::sync::Mutex<HashMap<String, UsageBadge>>>,
@@ -5728,7 +5728,7 @@ struct App {
     /// drive this so chrome, sidebar, and every pane scale together.
     ///
     /// 값은 `settings.json` 에 남는다 — 배율은 그 사람 눈과 그 모니터에 맞춘
-    /// 것이라 앱을 껐다고 사라지면 매번 다시 맞춰야 한다(2026-09-01 거노).
+    /// 것이라 앱을 껐다고 사라지면 매번 다시 맞춰야 한다(2026-09-01 사용자).
     ui_zoom: f32,
     /// 배율을 **아직 아무도 안 골랐다**는 표시. 저장된 `ui_zoom` 이 없을 때만
     /// 참이고, 창이 뜬 뒤 모니터 크기로 한 번 추정할 자격이 된다
@@ -6386,7 +6386,7 @@ fn arm_self_install() {
 /// kasaterm 을 claude 안에서 실행하는 건 예외가 아니라 일상이다: 재시작 스크립트를
 /// 세션에서 돌리면 새 앱이 그 claude 의 자식으로 뜬다. 그러면 `CHILD_SESSION`·
 /// `TEAMMATE_MODE`·`SESSION_ID` 가 앱에 눌어붙고, 앱이 낳는 **모든 pane** 에 흘러
-/// 거기서 뜬 claude 가 "나는 이미 남의 자식" 이라며 transcript 저장을 끈다. 거노가
+/// 거기서 뜬 claude 가 "나는 이미 남의 자식" 이라며 transcript 저장을 끈다. 사용자가
 /// 본 `Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker` 가
 /// 그것이다. pane 하나가 아니라 그 인스턴스의 pane 전부가 그렇게 된다.
 ///
@@ -6567,10 +6567,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         // onboarding/shims this path does not write or start a service.
         theme::apply_viewer_palette_read_only();
     }
-    // 헤드리스 검증 실행이 거노 화면을 뺏지 않게 한다. 스스로 종료하는 실행
+    // 헤드리스 검증 실행이 사용자 화면을 뺏지 않게 한다. 스스로 종료하는 실행
     // (`KASATERM_AUTOQUIT_MS`)은 정의상 테스트라 자동으로 배경에 띄운다 —
     // Accessory 정책이면 Dock/⌘Tab 에도 안 올라오고 활성 앱도 안 바뀌므로,
-    // 캡처를 도는 동안 거노가 하던 창에 그대로 머문다. `KASATERM_NO_FOCUS`
+    // 캡처를 도는 동안 사용자가 하던 창에 그대로 머문다. `KASATERM_NO_FOCUS`
     // 로 직접 켜고 끌 수도 있다(0/false 면 강제로 평소처럼 뜬다).
     let mut builder = EventLoop::<UserEvent>::with_user_event();
     #[cfg(target_os = "macos")]
@@ -7177,7 +7177,7 @@ fn teammate_case_arms() -> String {
 /// 이 실행이 **하네스가 띄운 검증 인스턴스**인가.
 ///
 /// 판정 근거는 창 기하를 env 로 강제했다는 것 하나다 — 사람이 쓰는 창은 저장된 자리에
-/// 뜨지 강제되지 않는다. 이게 참이면 그 인스턴스는 거노의 설정을 **읽지도 쓰지도**
+/// 뜨지 강제되지 않는다. 이게 참이면 그 인스턴스는 사용자의 설정을 **읽지도 쓰지도**
 /// 않는다: 창 크기를 저장하지 않고(`save_window_frame`), 저장 세션 복원도 묻지 않는다.
 /// 설정 파일이 인스턴스 사이에 공유되기 때문이고, 실제로 한쪽만 막았다가 나머지에
 /// 당했다(430x700 검증 실행이 `window.json` 을 덮었고, 복원 대화상자가 캡처를 가렸다).
@@ -7232,7 +7232,7 @@ const TASK_OPEN_KEEP_DAYS: u64 = 14;
 /// 저장소는 `~/.claude/tasks/<팀>/` 이고 팀 = 방(cwd) 이라, 한 방에서 2주를 일하면
 /// 그 방의 모든 pane 이 2주치 완료 목록을 달고 다닌다(실측 2026-08-06 sionic 방:
 /// 34개 중 29개 완료, 가장 오래된 것이 7월 24일). board 가 그걸 거르지 않고 다 그려서
-/// 「지금 뭘 하는지」가 안 보였다 — 거노: "아루 태스크는 왜 저렇게 돼 있어".
+/// 「지금 뭘 하는지」가 안 보였다 — 사용자: "아루 태스크는 왜 저렇게 돼 있어".
 ///
 /// 문턱은 둘이다: 끝난 것 `TASK_KEEP_DAYS`(3일), **열린 채 방치된 것**
 /// `TASK_OPEN_KEEP_DAYS`(14일). 어제 안 끝낸 일은 밀린 일이라 살려 두고, 2주를 손 안
@@ -7351,7 +7351,7 @@ fn task_file_is_stale(
 }
 
 /// 우리가 쓴 파일인지 알아보는 표식. 이게 없으면 사용자가 손수 쓴 것으로 보고
-/// 건드리지 않는다 — `~/.claude/commands` 는 거노 개인 설정이지 우리 것이 아니다.
+/// 건드리지 않는다 — `~/.claude/commands` 는 사용자 개인 설정이지 우리 것이 아니다.
 const RENAME_CMD_MARK: &str = "<!-- kasaterm-managed -->";
 
 /// 예전에 심어 둔 `~/.claude/commands/rename.md` 를 **지운다**.
@@ -7435,7 +7435,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // hook-free 라 이 bind 는 roster(복구)·즉시성 보조일 뿐.
             "SessionStart": [{ "hooks": [cmd("kasaterm-bind-transcript.sh", 5000)] }],
             // UserPromptSubmit(board-context.py) 제거 — 프롬프트마다 persona+board+inbox 를
-            // additionalContext 로 주입해 소넷 워커 컨텍스트가 누적·과대했다(거노 06-14).
+            // additionalContext 로 주입해 소넷 워커 컨텍스트가 누적·과대했다(사용자 06-14).
             // persona 는 스폰 시 `--append-system-prompt`로 1회(캐시돼 per-turn 0) 대체.
             // board/inbox 자동인지는 폐기 — 조율은 GUI(SCHALE OS) 와 명시적 kasacollab 으로.
             // 같은 방 다른 pane 이 같은 파일을 작업 중이면 Edit 직전에 막는다
@@ -7449,7 +7449,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // 닫힌 pane 으로 가는 SendMessage 를 그 자리서 막는다. 사용자가 닫아도
             // 그 안의 claude 는 계속 도는데 **명부(ListAgents)에는 닫힘이 안 보여서**,
             // 학생이 멀쩡한 줄 알고 일을 시키고 그 작업이 사용자 눈 밖에서 돌았다
-            // (거노 2026-08-15). board 의 `detached` 로 이미 알 수 있지만 그건 보러
+            // (사용자 2026-08-15). board 의 `detached` 로 이미 알 수 있지만 그건 보러
             // 가야 보이고, 안 보고 보내는 것이 사고의 형태다.
             "PreToolUse": [
                 { "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] },
@@ -7578,7 +7578,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     let model_line = {
         // 전역값만 작은따옴표로 감싼다 — `claude-opus-5[1m]` 의 `[1m]` 이 zsh 글롭이라
         // 무인용이면 "no matches found" 로 대입이 통째 실패해 --model 이 아예 안 붙고
-        // claude 가 기본 모델(구세대 Opus)로 떨어졌다(거노 2026-07-27 실사고: 학생이
+        // claude 가 기본 모델(구세대 Opus)로 떨어졌다(사용자 2026-07-27 실사고: 학생이
         // 전부 4.8). env 쪽은 큰따옴표 확장이라 글롭을 안 탄다.
         let q = model.replace('\'', "'\\''");
         format!(
@@ -7681,7 +7681,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     // 이름·같은 인박스고, 인박스 개수는 방의 pane 슬롯 수로 묶인다.
     //
     // 되살린 이유: 제거의 진짜 동기는 `@이름` 칩이 입력박스 구분선에서 /rename 세션 이름
-    // 자리를 뺏는 것이었는데(거노), 그건 이제 render.rs 의 strip_teammate_chip 이 칩만
+    // 자리를 뺏는 것이었는데(사용자), 그건 이제 render.rs 의 strip_teammate_chip 이 칩만
     // 지워서 해결한다 — 통신을 끄지 않고도 화면이 조용해진다.
     //
     // 나머지 규칙:
@@ -7703,7 +7703,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     // 함께 남아 있는 resume 연속성 처리(트리플과 무관):
     // - TSID 파싱(--session-id/--resume 값, --continue 는 cwd 프로젝트 최신 transcript 추론)
     // - KASATERM_RESUMED_SID/RESUME_PICKER 마커(statusline ⑂bg 오발화 방지)
-    // - resume 부팅 캐릭터 정합 교정(거노: 모모이 세션이 프라나 배지·persona 로 부팅)
+    // - resume 부팅 캐릭터 정합 교정(사용자: 모모이 세션이 프라나 배지·persona 로 부팅)
     let team_arms = teammate_case_arms();
     install_agent_identity_helper(shim_dir);
     let identity_block = identity_bootstrap_sh("claude", "$TSID");
@@ -7721,7 +7721,7 @@ case \" $* \" in\n\
 fi ;;\n\
 esac\n\
 # 사용자 주도 resume 마커 — statusline 의 ⑂bg 배지가 anchor 불일치 휴리스틱이라\n\
-# resume 세션 전부에 오발화한다(거노). id 있으면 그 sid 를, 피커/continue 는 플래그를\n\
+# resume 세션 전부에 오발화한다(사용자). id 있으면 그 sid 를, 피커/continue 는 플래그를\n\
 # export 해 statusline 이 포크/attach 뷰(마커 없음)와 구분하게 한다. anchor\n\
 # (KASATERM_SESSION_ID) 자체는 state.rs 캐릭터 복원이 원본을 요구해 안 덮는다.\n\
 [ -n \"$TSID\" ] && export KASATERM_RESUMED_SID=\"$TSID\"\n\
@@ -7796,14 +7796,14 @@ esac\n\
 # 트리플 때문이었다 — 명부 등록이 --agent-id 있는 세션을 거부한다.)\n\
 export CLAUDE_CODE_HARBOR_KITE=1\n\
 SETTINGS=\"$SELF_DIR/claude-hooks-settings.json\"\n\
-# 백엔드가 이 pane 에 심은 캐릭터 정체성 적용(거노): persona = 시스템프롬프트 prefix(캐시,\n\
+# 백엔드가 이 pane 에 심은 캐릭터 정체성 적용(사용자): persona = 시스템프롬프트 prefix(캐시,\n\
 # per-turn 0), session-id = transcript 파일명 고정. 사용자가 --session-id/--resume 를\n\
 # 직접 주면 그게 우선(우리 건 생략). --settings 도 사용자 지정이면 우리 걸 안 얹는다.\n\
 USER_SETTINGS=0\n\
 for a in \"$@\"; do [ \"$a\" = \"--settings\" ] && USER_SETTINGS=1 && break; done\n\
 PERSONA_OK=1\n\
 BGSUF=\"\"\n\
-# attach/agents 는 서브커맨드, -p/--print 는 헤드리스 일회성 — persona·session-id 얹으면 깨진다(거노: 이어받기\n\
+# attach/agents 는 서브커맨드, -p/--print 는 헤드리스 일회성 — persona·session-id 얹으면 깨진다(사용자: 이어받기\n\
 # 안 붙던 원인 · Bash 도구의 claude -p 가 pane session-id 강탈→board 가 그 pane 을 학생으로 둔갑·⑂bg 오발화).\n\
 # --bg 는 session-id 를 자기가 관리(명시 지정은 무시+경고 실측)하지만 persona 는 새 세션이라 붙이고,\n\
 # --agent-* 트리플은 데몬 스폰까지 전달된다(07-16 실측) — 이름 접미사만 랜덤 BGSUF(비-hex, bridge 매칭 회피).\n\
@@ -7837,7 +7837,7 @@ fi\n\
 {pblk}\
 [ -n \"$SID\" ] && set -- --session-id \"$SID\" \"$@\"\n\
 # task store(~/.claude/tasks/<id>)를 transcript session 과 같은 키로 묶는다 — 없으면 claude\n\
-# 가 매 실행 임의 session-<hex8> 로 task 를 저장해 pane↔task 매핑이 끊긴다(거노: 유즈\n\
+# 가 매 실행 임의 session-<hex8> 로 task 를 저장해 pane↔task 매핑이 끊긴다(사용자: 유즈\n\
 # 업무탭 빔). SID 비면(사용자 --resume) claude 기본.\n\
 # 이름은 CLAUDE_CODE_ 접두어다. CLAUDE_TASK_LIST_ID 로 주면 claude 가 안 읽고, 그러면\n\
 # 목록 키가 안 잡히면서 Task 도구 자체가 세션에 안 실린다(2026-09-15 실측).\n\
@@ -7962,14 +7962,14 @@ export KASATERM_LAUNCH_OWNER="$SELF_DIR:$KASATERM_PANE_ID"
 "#.replace("HARNESS", harness).replace("ANCHOR", anchor)
 }
 
-/// codex 판 pane shim. pane 안에서만 계정·페르소나를 얹고 거노 개인 설정은 안
+/// codex 판 pane shim. pane 안에서만 계정·페르소나를 얹고 사용자 개인 설정은 안
 /// 건드린다 — 수단이 셋 다르다. 전부 2026-08-05 실측 확정:
 ///
 /// 1. **`--settings` 등가물이 없다.** 세션 스코프 주입 자리가 `CODEX_HOME` 자체다.
 ///    pane 별 홈을 세우고 `~/.codex` 를 심볼릭으로 미러한다
 ///    (세션·플러그인·스킬·캐시·인증 공유).
 /// 2. **`config.toml` 만 복사한다.** codex 가 신뢰 목록을 여기 되쓰는데,
-///    심볼릭이면 그 쓰기가 거노 개인 설정으로 샌다. 매 실행 다시 복사해 안 낡는다.
+///    심볼릭이면 그 쓰기가 사용자 개인 설정으로 샌다. 매 실행 다시 복사해 안 낡는다.
 /// 3. **자동 실행 승인은 codex 전용 플래그로 푼다.** 명령 실행 승인과 샌드박스는
 ///    `--dangerously-bypass-approvals-and-sandbox`(codex 판 "욜로")가 맡는다.
 ///    claude pane 의 `--dangerously-skip-permissions` 와 대응하는 자리다.
@@ -8043,7 +8043,7 @@ fi
 # 예전 버전이 만든 pane 전용 hooks.json 은 신뢰 경고를 되살리므로 걷는다.
 rm -f "$CH/hooks.json"
 # 페르소나 — codex 엔 --append-system-prompt 등가물이 없어 CODEX_HOME/AGENTS.md 로 준다
-# (pane 별 홈이라 격리). 거노 전역 AGENTS.md 를 먼저 깔고 뒤에 얹는다 — 통째로 갈아치우면
+# (pane 별 홈이라 격리). 사용자 전역 AGENTS.md 를 먼저 깔고 뒤에 얹는다 — 통째로 갈아치우면
 # 그의 전역 지시가 pane 안에서만 조용히 사라진다. 매 실행 다시 복사라 누적되지 않는다.
 OVP="$SELF_DIR/repersona-${KASATERM_PANE_ID}.persona"
 if [ -n "$KASATERM_PANE_ID" ] && [ -f "$OVP" ]; then
@@ -8660,7 +8660,7 @@ pub(crate) fn mcp_panel_port() -> String {
 /// 것이고, 설정 화면은 파일을 쓰므로 남의 설정을 고치게 된다.
 ///
 /// 확실성을 따로 돌려주는 이유는 경고를 **필요할 때만** 띄우기 위해서다. 설정 창
-/// 제목에 주소를 늘 박아 두면 평소엔 지저분하기만 하고(거노 2026-08-25 「그거
+/// 제목에 주소를 늘 박아 두면 평소엔 지저분하기만 하고(사용자 2026-08-25 「그거
 /// 주소안나오게해봐」), 정작 위험한 순간에도 늘 있던 글자라 눈에 안 띈다.
 pub(crate) fn mcp_panel_port_certain() -> (String, bool) {
     let trimmed_nonempty = |s: String| {
@@ -9960,7 +9960,7 @@ mod tests {
     }
 
     /// 새 키 `was_agent` 는 종류를 담고, codex pane 도 복원 대상으로 센다.
-    /// 옛 `was_claude` 는 계속 claude 로 읽혀야 한다 — 판올림 한 번에 거노가 쓰던
+    /// 옛 `was_claude` 는 계속 claude 로 읽혀야 한다 — 판올림 한 번에 사용자가 쓰던
     /// 학생 pane 이 전부 셸로 되살아나는 것을 막는 단언.
     #[test]
     fn was_agent_counts_codex_and_keeps_legacy_was_claude() {
@@ -10043,7 +10043,7 @@ mod tests {
         );
         assert!(
             body.contains("cp \"$SRC/config.toml\""),
-            "config 는 반드시 복사 — 심볼릭이면 codex 의 신뢰 상태 쓰기가 거노 개인 설정으로 샌다"
+            "config 는 반드시 복사 — 심볼릭이면 codex 의 신뢰 상태 쓰기가 사용자 개인 설정으로 샌다"
         );
         assert!(
             body.contains("trust_level = \\\"trusted\\\"") || body.contains("trust_level"),
@@ -10224,7 +10224,7 @@ mod tests {
 
     #[test]
     fn cleanup_collab_markers_spares_other_rooms() {
-        // 같은 pane 번호라도 *다른 방*의 마커는 살아남아야 한다(거노: 캐릭터 유실 근본).
+        // 같은 pane 번호라도 *다른 방*의 마커는 살아남아야 한다(사용자: 캐릭터 유실 근본).
         let mine = kasa_socket::collab_root().join("-tmp-room-mine");
         let other = kasa_socket::collab_root().join("-tmp-room-other");
         std::fs::create_dir_all(&mine).unwrap();

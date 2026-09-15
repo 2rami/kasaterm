@@ -378,7 +378,7 @@ fn item_text(it: &serde_json::Map<String, serde_json::Value>) -> String {
 
 /// codex 롤아웃 로그(`~/.codex/sessions/**/rollout-*.jsonl`) → board 한 줄.
 ///
-/// 스키마는 거노 머신에서 직접 재서 매핑했다(2026-08-05, 발화는 2026-08-11 재측):
+/// 스키마는 사용자 머신에서 직접 재서 매핑했다(2026-08-05, 발화는 2026-08-11 재측):
 /// - `session_meta` → `cwd` (여기 `context_window` 는 숫자가 아니라 `{window_id}` 다)
 /// - `turn_context` → `model`(턴마다 실려 최신이 이긴다)
 /// - `event_msg/token_count` → `info.total_token_usage{input,cached_input,cache_write,output}`
@@ -599,7 +599,7 @@ fn tag_body<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
 
 /// agy 전사본(`brain/<uuid>/.system_generated/logs/transcript_full.jsonl`) → board 한 줄.
 ///
-/// 거노 머신에서 직접 재서 매핑했다(2026-08-11, 대화 105개):
+/// 사용자 머신에서 직접 재서 매핑했다(2026-08-11, 대화 105개):
 /// - `USER_INPUT.content` → `<USER_REQUEST>` 안쪽이 마지막 프롬프트
 /// - `CHECKPOINT.content` 의 `# USER Objective:` 다음 줄 → `title`. agy 가 스스로
 ///   붙인 세션 제목이라 claude 의 `ai-title` 과 같은 자리다.
@@ -809,7 +809,7 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
     let mut cache_read = 0u64;
     let mut cache_creation = 0u64;
     // context_pct 용 — 합산(throughput)이 아니라 "가장 최근(역순 첫) assistant 턴"의 컨텍스트
-    // 점유량. input+cache_read+cache_creation = 그 요청이 실제로 끌어온 컨텍스트 크기(거노:
+    // 점유량. input+cache_read+cache_creation = 그 요청이 실제로 끌어온 컨텍스트 크기(사용자:
     // peek 화면 대신 정확한 소스). None = tail 에 usage 있는 assistant 턴이 아직 없음.
     let mut latest_ctx: Option<u64> = None;
     let mut cost_usd = 0f64;
@@ -922,7 +922,7 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                                     .unwrap_or("백그라운드 작업");
                                 bg_launch.push((id.to_string(), clip(desc, 40)));
                             }
-                            // Monitor 도구도 백그라운드 작업(거노: 유즈 "2 monitors" 누락) — 단
+                            // Monitor 도구도 백그라운드 작업(사용자: 유즈 "2 monitors" 누락) — 단
                             // board-watch/wake-watch 는 협업 상시 감시(작업 아님)라 제외.
                             if name == "Monitor" {
                                 let cmd = b
@@ -1065,7 +1065,7 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         recent_tools,
         model: model.clone(),
         context_limit,
-        // 컨텍스트 % = 최신 assistant 턴 컨텍스트 / 한도(거노: 화면 peek 대신 정확한 transcript
+        // 컨텍스트 % = 최신 assistant 턴 컨텍스트 / 한도(사용자: 화면 peek 대신 정확한 transcript
         // 소스). tail 에 usage 가 아직 없으면 0 → socket.rs 가 상태바 파싱으로 폴백.
         context_pct,
         context_tokens: observed_ctx,
@@ -1713,7 +1713,7 @@ mod tests {
 mod codex_tests {
     use super::*;
 
-    /// 거노 머신 실물 로그(2026-08-05, gpt-5.5)에서 뽑은 값 그대로. 스키마 매핑이
+    /// 사용자 머신 실물 로그(2026-08-05, gpt-5.5)에서 뽑은 값 그대로. 스키마 매핑이
     /// 조용히 되돌아가면 board 가 **거짓 숫자**를 내므로 실값으로 못박는다.
     fn sample() -> String {
         [
