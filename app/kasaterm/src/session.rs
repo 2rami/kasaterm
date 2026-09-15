@@ -27,6 +27,15 @@ fn latest_restored_state(dir: &std::path::Path) -> Option<serde_json::Value> {
     previous
 }
 
+fn contains_saved_codex(node: &serde_json::Value) -> bool {
+    match node {
+        serde_json::Value::Object(object) => object.get("was_agent").and_then(|v| v.as_str()) == Some("codex")
+            || object.values().any(contains_saved_codex),
+        serde_json::Value::Array(array) => array.iter().any(contains_saved_codex),
+        _ => false,
+    }
+}
+
 fn append_surface_record_metadata(obj: &mut serde_json::Map<String, serde_json::Value>, surface: &str) {
     obj.insert("surface_key".into(), serde_json::json!(kasa_mcp::surface_keys::ensure(surface)));
     if let Some(key) = kasa_mcp::remote::remote_surface_key(surface) {
@@ -5890,6 +5899,14 @@ impl App {
                 .unwrap_or_default()
         };
         obj.insert("scrollback".to_string(), serde_json::json!(sb));
+        if let Some(server) = pty.get(surface).and_then(|session| crate::server_restore::save_server(ws, surface, session)) {
+            obj.insert("server".into(), server);
+            // A previous agent's binding can outlive its process in this tab.
+            obj.insert("was_agent".into(), serde_json::Value::Null);
+            obj.insert("session_id".into(), serde_json::Value::Null);
+            obj.remove("was_claude");
+            obj.remove("character");
+        }
     }
 
     /// Walk a live PtyLayout into the nested JSON the restore loader reads,
@@ -6256,12 +6273,13 @@ impl App {
         // backup. The configured session directory also isolates test fixtures.
         let previous = crate::socket::session_file_path()
             .and_then(|path| path.parent().and_then(latest_restored_state));
-        let prepared = kasa_mcp::surface_keys::prepare_restore_state(state, previous.as_ref());
+        let mut prepared = kasa_mcp::surface_keys::prepare_restore_state(state, previous.as_ref());
+        crate::server_restore::import_pending_servers(&mut prepared);
         let state = &prepared;
         self.restore_progress = Some(crate::restore_progress::RestoreProgress::new(state.clone()));
         // codex 는 재시작마다 옛 pid 의 pane 홈 경로를 물고 있어 `resume` 이 죽는다 —
         // 되살리기 전에 그 색인을 실체 자리로 고친다(2026-09-08, 아래 함수 주석).
-        let fixed = if crate::verification_run() { 0 } else { crate::socket::codex_repair_thread_paths() };
+        let fixed = if crate::verification_run() || !contains_saved_codex(state) { 0 } else { crate::socket::codex_repair_thread_paths() };
         if fixed > 0 {
             eprintln!("[restore] codex rollout 경로 {fixed}줄을 실체 자리로 고침");
         }
@@ -7014,7 +7032,7 @@ impl App {
         // Bring the agent back: --resume the saved conversation (the shim
         // re-attaches team/persona/character from the session id), or a fresh
         // one when the pane ran an agent but no session id was captured.
-        // Plain-shell panes restore to just their shell + scrollback. 900ms
+        // Unregistered shells restore to just their shell + scrollback. 900ms
         // mirrors swap_character's wait for the shell prompt before injection.
         // 하네스 감지가 실패했어도 캐릭터+저장 sid 가 있으면 claude 학생 pane 이었던
         // 것이라 --resume 으로 대화를 복원한다(감지 실패 시 셸만 뜨던 회귀 차단).
@@ -7108,6 +7126,8 @@ impl App {
             }
             let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
             self.pending_restores.push((session, cmd, at));
+        } else {
+            self.restore_server(&id, &session, rec);
         }
         key_registration.committed = true;
         Some(id)

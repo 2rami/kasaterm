@@ -370,6 +370,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketServer(params, reply) => {
+                let result = self.register_server(&params).map_err(|error| error.to_string());
+                let _ = reply.send(result);
+            }
             UserEvent::SocketSplit(dir, focus, from, reply) => {
                 // `split_active_pane` always sets the new pane active (correct
                 // for the GUI's keyboard split). The socket path defaults to
@@ -2862,10 +2866,11 @@ impl ApplicationHandler<UserEvent> for App {
         // 시작」·닫기는 `restore_dialog_pick` 이 푼다.
         // 기준은 claude 수가 아니라 전체 pane 수 — 셸만 쓰던 창도 레이아웃과
         // 스크롤백은 되살릴 값이 있다(claude 기준이면 아무것도 못 되살린다).
-        let saved = (!want_tmux && !crate::verification_run())
+        let saved = (!want_tmux && (!crate::verification_run() || crate::server_restore::verification_restore_fixture()))
             .then(crate::socket::read_session_state)
             .flatten()
             .map(crate::restore_progress::with_file_time)
+            .filter(|s| !crate::server_restore::verification_restore_fixture() || App::count_claude_panes(s) == 0)
             .filter(|s| App::count_panes(s) > 0);
         if let Some(s) = &saved {
             self.reserve_saved_characters(s);
@@ -7586,6 +7591,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
+        self.refresh_registered_servers();
         self.tick_restore_progress();
         self.run_restore_probe();
         self.run_mirror_focus_probe(event_loop);

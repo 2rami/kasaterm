@@ -663,6 +663,10 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("이 백엔드는 되살리기 목록을 모른다")
     }
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()>;
+
+    fn server(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("server restoration is unsupported by this backend")
+    }
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()>;
     /// Send raw bytes straight to a surface's PTY (no symbolic-key mapping).
     /// The GUI client forwards key input to a daemon-hosted pane this way so

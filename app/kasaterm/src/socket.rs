@@ -2002,6 +2002,15 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn server(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy.send_event(UserEvent::SocketServer(params.clone(), tx))
+            .map_err(|_| anyhow::anyhow!("GUI event loop is gone"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(20))
+            .map_err(|_| anyhow::anyhow!("server registration timed out"))?
+            .map_err(anyhow::Error::msg)
+    }
+
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()> {
         if let Some(sid) = surface_id {
             let pid = self.ws.lock().unwrap().active_tab_pid(sid);

@@ -67,6 +67,10 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             }
         }
         "surface.send_text" => surface_send_text(backend, id, &req.params),
+        "surface.server" => match backend.server(&req.params) {
+            Ok(result) => Response::success(id, result),
+            Err(error) => backend_err(id, error),
+        },
         "surface.paste" => surface_paste(backend, id, &req.params),
         "surface.send_key" => surface_send_key(backend, id, &req.params),
         "surface.send_raw" => surface_send_raw(backend, id, &req.params),
@@ -257,6 +261,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.split_fleet",
                 "surface.closed",
                 "surface.send_text",
+                "surface.server",
                 "surface.paste",
                 "surface.send_key",
                 "surface.send_raw",

@@ -38,6 +38,7 @@ mod onboarding;
 mod render;
 mod screenread;
 mod session;
+mod server_restore;
 mod session_transfer;
 mod settings;
 mod settings_media;
@@ -2012,6 +2013,7 @@ impl Default for PaneContent {
 #[derive(Default)]
 struct PaneTab {
     content: PaneContent,
+    server: Option<server_restore::RegisteredServer>,
     /// OSC 0/2 title — `printf '\e]0;hello\a'` from this tab's shell, or a
     /// pinned label. Falls back to the live process name in the header paint
     /// when None.
@@ -3622,6 +3624,10 @@ enum UserEvent {
         bool,
         Option<String>,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ),
+    SocketServer(
+        serde_json::Value,
+        std::sync::mpsc::Sender<std::result::Result<serde_json::Value, String>>,
     ),
     /// 원격 PTY 호스트(`kasa-serve-web`)의 세션을 pane 으로 앉힌다 — 스폰(원격
     /// id 없음) 또는 이어받기. (base 또는 기계 이름, 원격 cwd, 원격 pane id, 기준
