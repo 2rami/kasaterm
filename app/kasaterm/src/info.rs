@@ -99,6 +99,8 @@ pub(crate) struct ProcRow {
     pub(crate) name: String,
     /// 부제로 흐리게 붙일 나머지 — 표시 이름이 이미 말해주는 토큰은 빠진다.
     pub(crate) rest: String,
+    /// Keep source argv separate from abbreviated labels used by the collapsed list.
+    pub(crate) full_command: String,
     /// `ps` 가 보고한 CPU 점유율(%).
     pub(crate) cpu: f32,
     /// resident set size(KB).
@@ -117,6 +119,9 @@ pub(crate) struct ProcRow {
 }
 
 impl ProcRow {
+    fn command_text(&self) -> String {
+        if self.full_command.is_empty() { format!("{}{}{}", self.name, if self.rest.is_empty() { "" } else { " " }, self.rest) } else { self.full_command.clone() }
+    }
     /// `458 MB` · `1.2 GB` · `640 KB`. KB 를 그대로 보여주는 건 1MB 미만일
     /// 때뿐이다 — 대부분의 개발 프로세스는 MB 대라 자릿수만 늘어난다.
     #[allow(dead_code)]
@@ -297,6 +302,7 @@ pub(crate) struct InfoSnap {
     pub(crate) execution_states: HashMap<String, String>,
     pub(crate) collection_error: Option<String>,
     pub(crate) board_error: bool,
+    pub(crate) full_titles: HashMap<String, String>,
 }
 
 /// 학생 줄에 붙는 작업 한 줄. `attention` 이면 줄이 주황으로 튄다(승인·질문 대기).
@@ -334,12 +340,16 @@ fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>
             }
         } else { snap.board_error = true; }
     }
-    for target in targets.iter().filter(|target| target.active && !target.harness.is_empty()) {
+    for target in targets.iter().filter(|target| (target.active || target.details_requested) && !target.harness.is_empty()) {
         let path = if target.machine.is_some() { None } else {
             target.session_path.clone().or_else(|| if target.session_id.is_empty() { None } else if target.harness == "codex" {
                 crate::socket::codex_rollout_for_session(&target.session_id)
             } else { crate::socket::transcript_path_for_session(&target.session_id) })
         };
+        if target.details_requested {
+            if let Some(path) = path.as_deref() { preserve_full_title(&mut snap, &target.id, path); }
+        }
+        if !target.active { continue; }
         let evidence = crate::context_info::snapshot(&crate::context_info::ContextRequest {
             session_id: format!("{}:{}", target.machine_identity, target.session_id), harness: target.harness.clone(), path,
         });
@@ -353,6 +363,7 @@ fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>
 /// GUI 는 `ps`/`lsof`/`git` 을 돌리면 안 되니 경계가 여기다.
 #[derive(Clone, Default)]
 pub(crate) struct PaneTarget {
+    pub(crate) details_requested: bool,
     pub(crate) pty_id: String,
     pub(crate) machine_identity: String,
     pub(crate) id: String,
@@ -706,6 +717,59 @@ fn session_title(path: &std::path::Path) -> String {
     title
 }
 
+fn explicit_title_records(text: &str) -> (Option<String>, Option<String>) {
+    let (mut custom, mut generated) = (None, None);
+    for line in text.lines().filter(|line| line.contains("customTitle") || line.contains("aiTitle")) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let (field, slot) = match value.get("type").and_then(|value| value.as_str()) {
+            Some("custom-title") => ("customTitle", &mut custom),
+            Some("ai-title") => ("aiTitle", &mut generated),
+            _ => continue,
+        };
+        if let Some(title) = value.get(field).and_then(|value| value.as_str()).filter(|title| !title.trim().is_empty()) { *slot = Some(title.to_string()); }
+    }
+    (custom, generated)
+}
+
+fn detail_session_title(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    type TitleCache = HashMap<std::path::PathBuf, (Instant, Option<std::time::SystemTime>, u64, Option<String>)>;
+    static CACHE: std::sync::LazyLock<std::sync::Mutex<TitleCache>> = std::sync::LazyLock::new(Default::default);
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok();
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((checked, stamp, len, title)) = cache.get(path) {
+            if checked.elapsed() < std::time::Duration::from_secs(30) || (*stamp == modified && *len == metadata.len()) { return title.clone(); }
+        }
+    }
+    // Only explicit metadata in small end slices is inspected; message bodies never become titles.
+    const SLICE: u64 = 64 * 1024;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = Vec::new(); file.by_ref().take(SLICE).read_to_end(&mut head).ok()?;
+    let (head_custom, head_generated) = explicit_title_records(&String::from_utf8_lossy(&head));
+    let (tail_custom, tail_generated) = if metadata.len() > SLICE {
+        file.seek(SeekFrom::Start(metadata.len().saturating_sub(SLICE))).ok()?;
+        let mut tail = Vec::new(); file.take(SLICE).read_to_end(&mut tail).ok()?;
+        let start = tail.iter().position(|byte| *byte == b'\n').map_or(tail.len(), |index| index + 1);
+        explicit_title_records(&String::from_utf8_lossy(&tail[start..]))
+    } else { (None, None) };
+    let title = tail_custom.or(head_custom).or(tail_generated).or(head_generated);
+    if let Ok(mut cache) = CACHE.lock() {
+        if cache.len() >= 256 { cache.clear(); }
+        cache.insert(path.to_path_buf(), (Instant::now(), modified, metadata.len(), title.clone()));
+    }
+    title
+}
+
+fn preserve_full_title(snap: &mut InfoSnap, pane: &str, path: &std::path::Path) {
+    let Some(title) = detail_session_title(path) else { return };
+    let observed = snap.panes.iter().find_map(|group| {
+        if group.pane == pane { Some(group.session.as_str()) } else { group.tabs.iter().find(|tab| tab.pane == pane).map(|tab| tab.session.as_str()) }
+    }).unwrap_or("").trim().trim_end_matches('…').trim_end_matches("...");
+    // A cached full title must not replace a newer, differently named session.
+    if observed.is_empty() || title.trim().starts_with(observed) { snap.full_titles.insert(pane.into(), title); }
+}
+
 /// `(포트, pid)` → 그 서버가 응답한 제목. 키에 pid 를 넣는 건 같은 포트를 다른
 /// 프로세스가 물려받으면 옛 제목이 거짓이 되기 때문이다. 값이 빈 문자열이면
 /// "물어봤지만 답이 없었다" — 키가 있다는 사실 자체가 재시도를 막는다.
@@ -922,6 +986,7 @@ fn build_rows(table: &[Raw], shell_pid: u32) -> Vec<ProcRow> {
                     depth: depth.min(u8::MAX as i16) as u8,
                     name,
                     rest,
+                    full_command: raw.args.clone(),
                     cpu: raw.cpu,
                     mem_kb: raw.rss_kb,
                     kind,
@@ -1170,6 +1235,19 @@ fn launcher_identity(name: &str, rest: &str) -> (String, String) {
     (name.to_string(), rest.to_string())
 }
 
+fn parse_process_line(line: &str) -> Option<Raw> {
+    let mut rest = line;
+    let mut fields = [""; 5];
+    for field in &mut fields {
+        rest = rest.trim_start();
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        *field = &rest[..end]; rest = &rest[end..];
+    }
+    let args = rest.trim_start();
+    if args.is_empty() { return None; }
+    Some(Raw { pid: fields[0].parse().ok()?, ppid: fields[1].parse().ok()?, zombie: fields[2].starts_with('Z'), cpu: fields[3].parse().ok()?, rss_kb: fields[4].parse().ok()?, args: args.to_string() })
+}
+
 #[cfg(unix)]
 fn process_snapshot() -> Vec<Raw> {
     let Ok(out) = proc::command("ps")
@@ -1179,28 +1257,7 @@ fn process_snapshot() -> Vec<Raw> {
         return Vec::new();
     };
     let s = String::from_utf8_lossy(&out.stdout);
-    let mut rows = Vec::new();
-    for line in s.lines() {
-        let mut it = line.split_whitespace();
-        let (Some(pid), Some(ppid), Some(stat), Some(cpu), Some(rss_kb)) = (
-            it.next().and_then(|x| x.parse::<u32>().ok()),
-            it.next().and_then(|x| x.parse::<u32>().ok()),
-            it.next(),
-            it.next().and_then(|x| x.parse::<f32>().ok()),
-            it.next().and_then(|x| x.parse::<u64>().ok()),
-        ) else {
-            continue;
-        };
-        // 좀비(stat 앞머리 'Z')는 뺀다 — 출력을 볼 수도, kill 할 수도 없는
-        // 껍데기라 목록에 있어봐야 노이즈다(kero 가 0.1.26 에서 같은 걸 고쳤다).
-        // 자식 색인에는 남겨야 좀비를 건너뛴 손자까지 트리가 이어진다.
-        let args = it.collect::<Vec<_>>().join(" ");
-        if args.is_empty() {
-            continue;
-        }
-        rows.push(Raw { pid, ppid, zombie: stat.starts_with('Z'), cpu, rss_kb, args });
-    }
-    rows
+    s.lines().filter_map(parse_process_line).collect()
 }
 
 #[cfg(windows)]
@@ -1834,6 +1891,7 @@ impl App {
                         .map(str::to_string)
                 };
                 Some(PaneTarget {
+                    details_requested: self.info.pane_expanded.iter().any(|key| key.rsplit(':').next() == Some(host)),
                     pty_id: id.clone(),
                     machine_identity: remote.as_ref().map(|remote| format!("{}:{}", remote.base, remote.remote_id)).unwrap_or_else(|| "local".into()),
                     session_id: self.pane_claude_sid.get(id).cloned().unwrap_or_default(),
@@ -1988,13 +2046,7 @@ impl App {
                     .iter()
                     .flat_map(|g| g.rows.iter().chain(g.tabs.iter().flat_map(|tab| tab.rows.iter())))
                     .find(|r| r.pid == pid)
-                    .map(|r| {
-                        if r.rest.is_empty() {
-                            r.name.clone()
-                        } else {
-                            format!("{} {}", r.name, r.rest)
-                        }
-                    });
+                    .map(ProcRow::command_text);
                 if let Some(cmd) = cmd {
                     self.copy_to_clipboard(cmd, "명령 복사됨");
                 }
@@ -2166,6 +2218,79 @@ fn execution_key(group: &PaneGroup) -> String {
 mod execution_overview_tests {
     use super::*;
     #[test]
+    fn expanded_execution_keeps_full_titles_paths_and_commands_but_collapsed_stays_short() {
+        let title = "긴한글제목이중간에잘리지않고끝까지표시되어야하는실행작업";
+        let path = "/작업/공백없는아주긴디렉터리/하위폴더/끝까지보존";
+        let args = "--url=https://example.test/very/long/path?query=abcdefghijklmnopqrstuvwxyz";
+        let group = PaneGroup { pane: "%1".into(), session: title.into(), cwd: path.into(), rows: vec![ProcRow { name: "node".into(), rest: args.into(), ..Default::default() }], ..Default::default() };
+        let mut info = state::InfoState::default(); let key = execution_key(&group);
+        let snap = InfoSnap { panes: vec![group], ..Default::default() };
+        assert!(!execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(_))));
+        info.pane_expanded.insert(key);
+        let lines = execution_lines(&snap, &info);
+        for full in [format!("전체 제목 미확인 · 기록된 제목 {title}"), format!("작업 폴더 · {path}"), format!("node {args}")] {
+            assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == &full)));
+        }
+    }
+    #[test]
+    fn raw_process_and_explicit_title_reach_expanded_view_without_label_caps() {
+        let title = format!("{}끝제목", "아주긴한글작업제목".repeat(15));
+        let command = format!("\"/Applications/Tool With Spaces/bin/node\" --url=https://example.test/{}끝URL", "abcdefghij".repeat(30));
+        let table = vec![Raw { pid: 1, ppid: 0, zombie: false, cpu: 0.0, rss_kb: 0, args: "zsh".into() }, Raw { pid: 2, ppid: 1, zombie: false, cpu: 0.0, rss_kb: 0, args: command.clone() }];
+        let rows = build_rows(&table, 1);
+        assert_eq!(rows[0].command_text(), command);
+        assert!(rows[0].rest.len() < command.len());
+        let group = PaneGroup { pane: "%raw".into(), session: title.chars().take(60).collect(), rows, ..Default::default() };
+        let key = execution_key(&group);
+        let mut snap = InfoSnap { panes: vec![group], ..Default::default() };
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("kasaterm-info-title-{}-{nonce}.jsonl", std::process::id()));
+        let record = serde_json::json!({"type":"ai-title","aiTitle":title}).to_string();
+        std::fs::write(&path, format!("{record}\n")).unwrap();
+        preserve_full_title(&mut snap, "%raw", &path);
+        std::fs::remove_file(&path).unwrap();
+        let mut info = state::InfoState::default(); info.pane_expanded.insert(key);
+        let lines = execution_lines(&snap, &info);
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == &command)));
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == &format!("제목 · {title}"))));
+        assert_eq!(explicit_title_records(r#"{"type":"user","message":{"customTitle":"본문을제목으로쓰지않음"}}"#), (None, None));
+    }
+    #[test]
+    fn process_columns_leave_observed_argument_spacing_untouched() {
+        let command = "\"/Applications/Tool  With Spaces/bin/node\" --value=\"a  b\"  --url=https://example.test/end";
+        let row = parse_process_line(&format!("  22  11 S  2.5  4096   {command}")).unwrap();
+        assert_eq!(row.args, command);
+        let shell = parse_process_line("11 1 S 0.0 100 zsh").unwrap();
+        assert_eq!(build_rows(&[shell, row], 11)[0].command_text(), command);
+        assert!(parse_process_line("bad columns").is_none());
+    }
+    #[test]
+    fn cjk_and_unbroken_urls_wrap_losslessly_and_increase_scroll_height() {
+        let measure = |text: &str| text.chars().map(|ch| if ch.is_ascii() { 1.0 } else { 2.0 }).sum::<f32>();
+        for text in ["긴한글문장과경로/공백없이계속이어지는끝부분", "https://example.test/abcdefghijklmnopqrstuvwxyz?token=abcdefghijklmnop"] {
+            let narrow = wrap_measured_text(text, 12.0, measure);
+            let wide = wrap_measured_text(text, 36.0, measure);
+            assert_eq!(narrow.concat(), text); assert_eq!(wide.concat(), text);
+            assert!(narrow.iter().all(|line| measure(line) <= 12.0));
+            assert!(narrow.len() as f32 * ROW_H > wide.len() as f32 * ROW_H);
+        }
+        assert!(wrap_measured_text("한글", 0.0, measure).is_empty());
+    }
+    #[test]
+    fn menu_and_remote_place_budgets_never_go_negative_or_exceed_visible_height() {
+        for width in [0.0, 8.0, 24.0, 80.0, 180.0] {
+            let text = row_text_width(width, 28.0, 28.0);
+            assert!(text >= 0.0 && text <= width);
+            let place = width * 0.5;
+            let head = row_text_width(width, 12.0, place);
+            assert!(head >= 0.0 && head + place <= width);
+        }
+        for room in [0.0, 14.0, 40.0, 70.0, 130.0] {
+            let (shown, _, height) = menu_visible_rows(&[false, true, false, true], room, 28.0, 6.0, 7.0);
+            assert!(shown <= 4); assert!(height >= 0.0 && height <= room);
+        }
+    }
+    #[test]
     fn scopes_preserve_all_rooms_and_match_inner_tabs() {
         let group = PaneGroup { pane: "%1".into(), window: 2, tabs: vec![TabRow { pane: "%7".into(), ..Default::default() }], ..Default::default() };
         assert!(in_scope(&group, InfoScope::AllRooms, 0, None));
@@ -2279,12 +2404,25 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
             lines.push(ExecutionLine::Context("미확인 · 선택 에이전트 정보 갱신 중".into()));
         }
         if expanded {
-            if !group.cwd.is_empty() { lines.push(ExecutionLine::Text(format!("작업 폴더 · {}", group.cwd), false)); }
-            if let Some(server) = &group.registered { lines.push(ExecutionLine::Text(server.command.clone(), false)); }
-            for process in &group.rows { lines.push(ExecutionLine::Process(process)); }
+            if let Some(title) = snap.full_titles.get(&group.pane) { lines.push(ExecutionLine::Context(format!("제목 · {title}"))); }
+            else if !group.session.is_empty() { lines.push(ExecutionLine::Context(format!("전체 제목 미확인 · 기록된 제목 {}", group.session))); }
+            if let Some(task) = task.filter(|task| !task.label.is_empty()) { lines.push(ExecutionLine::Context(task.label.clone())); }
+            if !group.cwd.is_empty() { lines.push(ExecutionLine::Context(format!("작업 폴더 · {}", group.cwd))); }
+            if let Some(server) = &group.registered { lines.push(ExecutionLine::Context(server.command.clone())); }
+            for process in &group.rows {
+                lines.push(ExecutionLine::Process(process));
+                lines.push(ExecutionLine::Context(process.command_text()));
+            }
             for tab in &group.tabs {
-                if let Some(server) = &tab.registered { lines.push(ExecutionLine::Text(server.command.clone(), false)); }
-                for process in &tab.rows { lines.push(ExecutionLine::Process(process)); }
+                if let Some(title) = snap.full_titles.get(&tab.pane) { lines.push(ExecutionLine::Context(format!("제목 · {title}"))); }
+                else if !tab.session.is_empty() { lines.push(ExecutionLine::Context(format!("전체 제목 미확인 · 기록된 제목 {}", tab.session))); }
+                if !tab.title.is_empty() { lines.push(ExecutionLine::Context(format!("탭 이름 · {}", tab.title))); }
+                if !tab.cwd.is_empty() { lines.push(ExecutionLine::Context(format!("작업 폴더 · {}", tab.cwd))); }
+                if let Some(server) = &tab.registered { lines.push(ExecutionLine::Context(server.command.clone())); }
+                for process in &tab.rows {
+                    lines.push(ExecutionLine::Process(process));
+                    lines.push(ExecutionLine::Context(process.command_text()));
+                }
             }
             if group.rows.is_empty() && group.tabs.iter().all(|tab| tab.rows.is_empty()) {
                 lines.push(ExecutionLine::Text(if group.machine.is_some() { "원격 프로세스·포트는 로컬에서 확인하지 못함" } else if group.status == "수집실패" { "실행 상세 수집실패" } else { "추가 실행 프로세스 없음" }.into(), false));
@@ -2305,17 +2443,22 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
     lines
 }
 
-fn wrap_context_line(g: &mut gpu::GpuRenderer, text: &str, width: f32) -> Vec<String> {
+fn wrap_measured_text(text: &str, width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
+    if !width.is_finite() || width <= 0.0 { return Vec::new(); }
     let mut result = Vec::new(); let mut line = String::new();
     for character in text.chars() {
         let candidate = format!("{line}{character}");
-        if character == '\n' || (!line.is_empty() && g.measure_chrome_text(&candidate, 10.5, false) > width.max(1.0)) {
+        if character == '\n' || (!line.is_empty() && measure(&candidate) > width) {
             result.push(std::mem::take(&mut line));
         }
         if character != '\n' { line.push(character); }
     }
     if !line.is_empty() { result.push(line); }
     result
+}
+
+fn wrap_context_line(g: &mut gpu::GpuRenderer, text: &str, width: f32) -> Vec<String> {
+    wrap_measured_text(text, width, |line| g.measure_chrome_text(line, 10.5, false))
 }
 
 pub(crate) fn draw_info_col(
@@ -2332,7 +2475,7 @@ pub(crate) fn draw_info_col(
     info.group_rects.clear(); info.proc_rects.clear(); info.kill_rects.clear();
     info.machine_rects.clear(); info.machine_pane_rects.clear(); info.sec_rects.clear(); info.dir_btn_rects.clear();
     let lines: Vec<_> = execution_lines(&snap, info).into_iter().flat_map(|line| match line {
-        ExecutionLine::Context(text) => wrap_context_line(g, &text, (w - 26.0).max(1.0)).into_iter().map(ExecutionLine::Context).collect(),
+        ExecutionLine::Context(text) => wrap_context_line(g, &text, (w - 26.0).max(0.0)).into_iter().map(ExecutionLine::Context).collect(),
         line => vec![line],
     }).collect();
     let height: f32 = lines.iter().map(ExecutionLine::height).sum();
@@ -2362,7 +2505,13 @@ pub(crate) fn draw_info_col(
                     let text = fit_text(g, text, (right - x0).max(0.0), 11.0, false);
                     g.draw_text(x0, y + 5.0, &text, gpu::DrawOpts { font_size: 11.0, color: if *attention { theme::attention() } else { theme::text_dim() }, bold: false, italic: false });
                 }
-                ExecutionLine::Context(text) => { g.draw_text(x0, y + 5.0, text, gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false }); }
+                ExecutionLine::Context(text) => {
+                    let available = (right - x0).max(0.0);
+                    let fitted = if g.measure_chrome_text(text, 10.5, false) <= available { text.clone() } else { fit_text(g, text, available, 10.5, false) };
+                    g.push_clip(x0, y, available, row_h);
+                    g.draw_text(x0, y + 5.0, &fitted, gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false });
+                    g.pop_clip();
+                }
                 ExecutionLine::Process(process) => {
                     let left = x0 + 8.0 + f32::from(process.depth.min(5)) * 10.0;
                     let ports = if process.ports.is_empty() { String::new() } else { format!(" · 포트 {}", process.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")) };
@@ -3040,6 +3189,23 @@ impl MenuRow {
     }
 }
 
+fn menu_visible_rows(separators: &[bool], room: f32, row_h: f32, pad: f32, sep: f32) -> (usize, bool, f32) {
+    let room = room.max(0.0);
+    let mut used = pad * 2.0; let mut shown = 0;
+    for (index, separator) in separators.iter().enumerate() {
+        let next = row_h + if *separator { sep } else { 0.0 };
+        let hint = if index + 1 < separators.len() { row_h } else { 0.0 };
+        if used + next + hint > room { break; }
+        used += next; shown += 1;
+    }
+    let clipped = shown < separators.len();
+    (shown, clipped, (used + if clipped { row_h } else { 0.0 }).min(room))
+}
+
+fn row_text_width(width: f32, inset: f32, lead: f32) -> f32 {
+    (width - inset - lead).max(0.0)
+}
+
 /// 칼럼 안 팝업 메뉴를 그리고 줄마다 hit rect 를 돌려준다(잘려서 안 그린 줄은 None).
 /// 학생 줄 메뉴와 기계 메뉴가 같은 모양이어야 해서 한 곳에 둔다.
 ///
@@ -3071,23 +3237,21 @@ fn draw_menu_rows(
     let mih = if face > 0.0 { 30.0_f32 } else { 28.0 };
     let sep = 7.0_f32;
     let pad = 6.0_f32;
-    let room = (bottom - top - 8.0).max(mih * 3.0);
-    let max_items = (((room - pad * 2.0) / mih).floor() as usize).max(3);
-    let clipped = rows.len() > max_items;
-    let shown = if clipped { max_items - 1 } else { rows.len() };
+    let room = (bottom - top - 8.0).max(0.0);
+    if w <= 8.0 || room <= 0.0 { return out; }
+    let (shown, clipped, menu_h) = menu_visible_rows(&rows.iter().map(|row| row.sep_before).collect::<Vec<_>>(), room, mih, pad, sep);
     let rows_v = &rows[..shown];
-    let widest = rows_v
+    let mut widest = rows_v
         .iter()
         .map(|r| g.measure_chrome_text(&r.label, 13.0, r.bold))
         .fold(0.0_f32, f32::max);
+    if clipped { widest = widest.max(g.measure_chrome_text("… 창을 키우면 더 보여요", 12.0, false)); }
     let lead = face.max(icon);
     let lead = if lead > 0.0 { lead + 6.0 } else { 0.0 };
-    let menu_w = (widest + 32.0 + lead).min(w - 8.0);
-    let nsep = rows_v.iter().filter(|r| r.sep_before).count() as f32;
-    let nrows = shown as f32 + if clipped { 1.0 } else { 0.0 };
-    let menu_h = pad * 2.0 + nrows * mih + nsep * sep;
+    let menu_w = (widest + 32.0 + lead).min((w - 8.0).max(0.0));
     let mx = rawx.min(x + w - menu_w - 4.0).max(x + 4.0);
     let my = rawy.min(bottom - menu_h - 4.0).max(top);
+    g.push_clip(mx, my, menu_w, menu_h);
     panel_rect_outlined(g, mx, my, menu_w, menu_h, theme::radius_md(), theme::surface());
     let bc = theme::with_alpha(theme::border(), 0xCC);
     g.rect(mx, my, menu_w, 1.0, bc);
@@ -3101,13 +3265,13 @@ fn draw_menu_rows(
             g.rect(
                 mx + pad,
                 iy + sep * 0.5,
-                menu_w - pad * 2.0,
+                (menu_w - pad * 2.0).max(0.0),
                 1.0,
                 theme::with_alpha(theme::border(), 0x88),
             );
             iy += sep;
         }
-        let r = (mx + 4.0, iy, menu_w - 8.0, mih);
+        let r = (mx + 4.0, iy, (menu_w - 8.0).max(0.0), mih);
         if !row.muted && hit(cursor, &r) {
             crate::hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
         }
@@ -3122,10 +3286,11 @@ fn draw_menu_rows(
                 theme::text_dim(),
             );
         }
+        let label = fit_text(g, &row.label, row_text_width(menu_w, 28.0, lead), 13.0, row.bold);
         g.draw_text(
             r.0 + 12.0 + lead,
             r.1 + (mih - 13.0) / 2.0,
-            &row.label,
+            &label,
             gpu::DrawOpts {
                 font_size: 13.0,
                 color: if row.muted { theme::text_mute() } else { theme::text() },
@@ -3133,16 +3298,17 @@ fn draw_menu_rows(
                 italic: false,
             },
         );
-        if !row.muted {
-            out[i] = Some(r);
+        if !row.muted && !label.is_empty() {
+            out[i] = g.clip_hit(r);
         }
         iy += mih;
     }
     if clipped {
+        let hint = fit_text(g, "… 창을 키우면 더 보여요", row_text_width(menu_w, 32.0, 0.0), 12.0, false);
         g.draw_text(
             mx + 16.0,
             iy + (mih - 12.0) / 2.0,
-            "… 창을 키우면 더 보여요",
+            &hint,
             gpu::DrawOpts {
                 font_size: 12.0,
                 color: theme::with_alpha(theme::text(), 0x99),
@@ -3151,6 +3317,7 @@ fn draw_menu_rows(
             },
         );
     }
+    g.pop_clip();
     out
 }
 
@@ -3353,6 +3520,7 @@ fn draw_machine_hole_row(
     viewer_room: &str,
     x: f32, w: f32, x0: f32, right: f32, y: f32,
 ) {
+    g.push_clip(x, y, w.max(0.0), GROUP_H);
     if hit(cursor, &(x, y, w, GROUP_H)) {
         g.rect(x, y, w, GROUP_H, theme::surface_hover());
         g.hover_pointer = true;
@@ -3370,18 +3538,21 @@ fn draw_machine_hole_row(
     } else {
         format!("{viewer_room}에서 보는 중")
     };
-    let pw = g.measure_chrome_text(&place, 10.0, false);
     let tx = x0 + 8.0;
-    let budget = (right - 8.0 - pw - 12.0 - tx).max(0.0);
+    let available = (right - 8.0 - tx).max(0.0);
+    let place = fit_text(g, &place, available * 0.5, 10.0, false);
+    let pw = g.measure_chrome_text(&place, 10.0, false);
+    let budget = row_text_width(available, if pw > 0.0 { 12.0 } else { 0.0 }, pw);
     let head = fit_text(g, &format!("{} {}", r.remote_id, name), budget, 11.0, false);
     g.draw_text(
         tx, y + 5.0, &head,
         gpu::DrawOpts { font_size: 11.0, color: mute, bold: false, italic: false },
     );
     g.draw_text(
-        right - 8.0 - pw, y + 6.0, &place,
+        (right - 8.0 - pw).max(tx), y + 6.0, &place,
         gpu::DrawOpts { font_size: 10.0, color: mute, bold: false, italic: false },
     );
+    g.pop_clip();
 }
 
 /// 「다른 기계」 줄을 누르면 뜨는 메뉴 — 방 펼치기·화면 보기, 그 기계 학생마다
