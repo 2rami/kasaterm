@@ -3998,7 +3998,58 @@ pub(crate) fn ensure_notification_authorization() {
         let center = UNUserNotificationCenter::currentNotificationCenter();
         let opts = UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound;
         center.requestAuthorizationWithOptions_completionHandler(opts, &handler);
+        // 요청 콜백이 **안 오는 경우가 있다.** 그러면 `NOTIFY_AUTH` 가 0(아직 모름)에
+        // 머물러 모든 알림이 자체 배너로 샌다 — 애플 인증서로 서명해 알림센터를 쓰게
+        // 해 두고도 배너만 뜨던 것이 이것이다(2026-09-15 지적). 현재 권한은 요청과
+        // 별개로 직접 읽을 수 있으니, 같이 물어 답이 오는 대로 채운다. 둘 중 먼저
+        // 오는 쪽이 이기고, 값은 같은 뜻이라 순서가 어느 쪽이든 결과가 같다.
+        refresh_notification_authorization();
     });
+}
+
+/// 지금 이 앱의 알림 권한을 **직접 읽어** `NOTIFY_AUTH` 에 채운다.
+///
+/// `requestAuthorization` 의 콜백에만 기대면, 그 콜백이 안 올 때 상태가 영영
+/// 「아직 모름」으로 남는다. 이쪽은 물어보는 것이 아니라 이미 정해진 값을 읽는
+/// 것이라 팝업이 뜨지 않는다 — 부팅마다 불러도 사람에게는 아무 일도 안 일어난다.
+///
+/// 아직 아무것도 안 정해졌으면(NotDetermined) 건드리지 않는다 — 그 상태에서 2 로
+/// 적으면 곧 도착할 요청 답을 덮어 「거절됨」으로 굳힌다.
+#[cfg(target_os = "macos")]
+pub(crate) fn refresh_notification_authorization() {
+    use objc2_user_notifications::{UNAuthorizationStatus, UNUserNotificationCenter};
+    if !is_bundled() {
+        return;
+    }
+    let handler = block2::RcBlock::new(
+        |settings: std::ptr::NonNull<objc2_user_notifications::UNNotificationSettings>| {
+            let status = unsafe { settings.as_ref() }.authorizationStatus();
+            // `KASATERM_NOTIFY_DEBUG=1` — 왜 OS 알림 대신 자체 배너가 뜨는지 앱이
+            // 직접 말한다. GUI 로 띄운 앱은 stderr 가 어디에도 안 남아(2026-09-15
+            // 실측: 로그 파일이 0줄) 이 자리를 밖에서 들여다볼 창구가 없었다.
+            if std::env::var_os("KASATERM_NOTIFY_DEBUG").is_some() {
+                let p = std::env::temp_dir().join("kasaterm-notify.log");
+                let line = format!(
+                    "auth_status={} bundled={} os_notify_enabled={}\n",
+                    status.0,
+                    is_bundled(),
+                    os_notify_enabled()
+                );
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+                    let _ = f.write_all(line.as_bytes());
+                }
+            }
+            let v = match status {
+                UNAuthorizationStatus::NotDetermined => return,
+                UNAuthorizationStatus::Authorized | UNAuthorizationStatus::Provisional => 1u8,
+                _ => 2u8,
+            };
+            NOTIFY_AUTH.store(v, std::sync::atomic::Ordering::Relaxed);
+        },
+    );
+    UNUserNotificationCenter::currentNotificationCenter()
+        .getNotificationSettingsWithCompletionHandler(&handler);
 }
 
 #[cfg(target_os = "macos")]
