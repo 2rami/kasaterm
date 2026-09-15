@@ -6530,6 +6530,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // `open`-launched instance. Loaded (and deleted) before anything
     // reads KASATERM_* vars.
         load_capture_config();
+        socket::prepare_session_storage();
     // 기기 이름 수집은 첫 화면을 준비하는 동안 끝낸다. Info를 열어야
     // 이름·기기색이 생기거나 렌더 스레드에서 scutil을 띄우지 않도록 한다.
         std::thread::spawn(info::local_machine_name);

@@ -14,7 +14,7 @@
 # 없어서, 지금 일을 이어가는 쪽을 택한다.
 set -u
 CFG=${KASATERM_SESSION_FILE:-$HOME/.config/kasaterm/sessions/session.json}
-if [[ -z "${KASATERM_SESSION_FILE:-}" && ! -e "$CFG" ]]; then
+if [[ -z "${KASATERM_SESSION_FILE:-}" && -e "$HOME/.config/kasaterm/session.json" ]]; then
   CFG=$HOME/.config/kasaterm/session.json
 fi
 APP=$HOME/Applications/kasaterm.app

@@ -1,6 +1,14 @@
 //! Persistence paths shared by the app and its offline tools.
 use std::path::{Path, PathBuf};
 
+/// An empty/partial process inventory is not evidence that the old app exited.
+pub fn sole_app_process(own_pid: u32, processes: &[(u32, u32, String)]) -> bool {
+    processes.iter().any(|(pid, _, _)| *pid == own_pid)
+        && !processes
+            .iter()
+            .any(|(pid, _, name)| *pid != own_pid && name.to_ascii_lowercase().contains("kasaterm"))
+}
+
 pub fn session_path(root: &Path, override_path: Option<&std::ffi::OsStr>) -> PathBuf {
     override_path
         .filter(|p| !p.is_empty())
@@ -8,13 +16,14 @@ pub fn session_path(root: &Path, override_path: Option<&std::ffi::OsStr>) -> Pat
         .unwrap_or_else(|| root.join("sessions/session.json"))
 }
 
-/// A damaged new file must not silently resurrect an older session.
+/// A remaining legacy file can still have an old writer. Until migration
+/// removes it, readers and writers must agree on that same location.
 pub fn read_path(root: &Path, name: &str) -> PathBuf {
-    let path = root.join("sessions").join(name);
-    if path.try_exists().ok() == Some(false) {
-        root.join(name)
+    let legacy = root.join(name);
+    if legacy.try_exists().ok() != Some(false) {
+        legacy
     } else {
-        path
+        root.join("sessions").join(name)
     }
 }
 
@@ -41,7 +50,7 @@ pub fn prune_restored(dir: &Path, keep: usize) -> std::io::Result<()> {
     Ok(())
 }
 
-fn migrate_file(old: &Path, new: &Path) -> std::io::Result<()> {
+fn preflight_file(old: &Path, new: &Path) -> std::io::Result<()> {
     if !old.try_exists()? {
         return Ok(());
     }
@@ -60,6 +69,14 @@ fn migrate_file(old: &Path, new: &Path) -> std::io::Result<()> {
         return Err(std::io::Error::other(
             "both state paths exist; legacy state preserved",
         ));
+    }
+    Ok(())
+}
+
+fn migrate_file(old: &Path, new: &Path) -> std::io::Result<()> {
+    preflight_file(old, new)?;
+    if !old.try_exists()? {
+        return Ok(());
     }
     std::fs::create_dir_all(new.parent().unwrap())?;
     // Linking publishes complete bytes without ever replacing a concurrent writer.
@@ -96,6 +113,15 @@ pub fn migrate_legacy(root: &Path) -> Vec<String> {
                 .filter(|p| p.extension().is_some_and(|e| e == "json")),
         );
     }
+    for old in &files {
+        let new = dir.join(old.strip_prefix(root).unwrap());
+        if let Err(e) = preflight_file(old, &new) {
+            errors.push(format!("{}: {e}", old.display()));
+        }
+    }
+    if !errors.is_empty() {
+        return errors;
+    }
     for old in files {
         let new = dir.join(old.strip_prefix(root).unwrap());
         if let Err(e) = migrate_file(&old, &new) {
@@ -115,6 +141,21 @@ pub fn migrate_legacy(root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ownership_requires_self_and_no_other_app_including_viewer() {
+        assert!(!sole_app_process(1, &[]));
+        assert!(!sole_app_process(1, &[(2, 0, "shell".into())]));
+        let own = (1, 0, "kasaterm".into());
+        assert!(sole_app_process(1, &[own.clone()]));
+        assert!(!sole_app_process(
+            1,
+            &[own.clone(), (2, 0, "kasaterm".into())]
+        ));
+        assert!(!sole_app_process(
+            1,
+            &[own, (2, 0, "kasaterm-viewer".into())]
+        ));
+    }
     struct Root(PathBuf);
     impl Root {
         fn new() -> Self {
@@ -169,7 +210,7 @@ mod tests {
         assert!(migrate_legacy(&r.0).is_empty());
     }
     #[test]
-    fn conflicts_and_corruption_keep_originals_and_do_not_fall_back() {
+    fn conflicts_and_corruption_keep_originals_and_existing_writer_path() {
         let r = Root::new();
         r.put("session.json", b"{\"old\":true}");
         assert_eq!(read_path(&r.0, "session.json"), r.0.join("session.json"));
@@ -180,10 +221,7 @@ mod tests {
             std::fs::read(r.0.join("session.json")).unwrap(),
             b"{\"old\":true}"
         );
-        assert_eq!(
-            read_path(&r.0, "session.json"),
-            r.0.join("sessions/session.json")
-        );
+        assert_eq!(read_path(&r.0, "session.json"), r.0.join("session.json"));
         assert!(r.0.join("viewer-documents.json").exists());
     }
     #[test]

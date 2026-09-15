@@ -4028,10 +4028,7 @@ pub fn write_session_state(state: &serde_json::Value) {
 /// file is absent or unparseable — the caller then boots a fresh session with
 /// no restore prompt.
 pub fn read_session_state() -> Option<serde_json::Value> {
-    let mut path = session_file_path()?;
-    if std::env::var_os("KASATERM_SESSION_FILE").is_none_or(|v| v.is_empty()) {
-        path = kasa_socket::session_storage::read_path(&default_session_root()?, "session.json");
-    }
+    let path = session_file_path()?;
     let bytes = std::fs::read(&path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
@@ -4044,15 +4041,21 @@ pub fn clear_session_state() {
         // resurrect them through the legacy read fallback on the next launch.
         if std::env::var_os("KASATERM_SESSION_FILE").is_none_or(|v| v.is_empty()) {
             if let Some(root) = default_session_root() {
-                let old = root.join("session.json");
-                if old.exists() {
+                let inactive = if path == root.join("session.json") {
+                    root.join("sessions/session.json")
+                } else { root.join("session.json") };
+                if inactive.exists() {
+                    if SESSION_STORAGE.get().is_none_or(|storage| storage._owner.is_none()) {
+                        eprintln!("[session migration] another owner prevents clearing conflicting state");
+                        return;
+                    }
                     let archive = root.join("sessions/legacy");
                     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_nanos()).unwrap_or(0);
                     let preserved = archive.join(format!("session-cleared-{stamp}.json"));
                     if std::fs::create_dir_all(&archive).is_err()
-                        || std::fs::hard_link(&old, &preserved).is_err()
-                        || std::fs::remove_file(&old).is_err() {
+                        || std::fs::hard_link(&inactive, &preserved).is_err()
+                        || std::fs::remove_file(&inactive).is_err() {
                         eprintln!("[session migration] cannot preserve legacy state before clearing");
                         return;
                     }
@@ -4071,18 +4074,79 @@ pub fn session_file_path() -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(p));
         }
     }
-    Some(kasa_socket::session_storage::session_path(&default_session_root()?, None))
+    Some(SESSION_STORAGE.get().map(|storage| storage.dir.clone())
+        .unwrap_or(default_session_root()?).join("session.json"))
 }
 
 pub(crate) fn default_session_root() -> Option<std::path::PathBuf> {
-    let root = kasa_socket::home_dir()?.join(".config/kasaterm");
-    static MIGRATED: std::sync::Once = std::sync::Once::new();
-    MIGRATED.call_once(|| {
+    Some(kasa_socket::home_dir()?.join(".config/kasaterm"))
+}
+
+struct SessionStorage {
+    dir: std::path::PathBuf,
+    _owner: Option<std::fs::File>,
+}
+static SESSION_STORAGE: std::sync::OnceLock<SessionStorage> = std::sync::OnceLock::new();
+
+pub(crate) fn prepare_session_storage() {
+    if crate::verification_run()
+        || std::env::var_os("KASATERM_SESSION_FILE").is_some_and(|v| !v.is_empty()) { return; }
+    let Some(root) = default_session_root() else { return; };
+    SESSION_STORAGE.get_or_init(|| {
+        let owner = sole_session_owner(&root);
+        if owner.is_none() {
+            eprintln!("[session migration] another or unknown owner; keeping legacy storage");
+            let dir = if root.join("session.json").exists() || !root.join("sessions/session.json").exists() {
+                root.clone()
+            } else { root.join("sessions") };
+            return SessionStorage { dir, _owner: None };
+        }
         for error in kasa_socket::session_storage::migrate_legacy(&root) {
             eprintln!("[session migration] {error}");
         }
+        let dir = kasa_socket::session_storage::read_path(&root, "session.json")
+            .parent().unwrap().to_path_buf();
+        std::thread::spawn(kasa_mcp::character::maintain_session_characters);
+        SessionStorage { dir, _owner: owner }
     });
-    Some(root)
+}
+
+#[cfg(unix)]
+fn sole_session_owner(root: &std::path::Path) -> Option<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    std::fs::create_dir_all(root).ok()?;
+    let lock = std::fs::OpenOptions::new().write(true).create(true).truncate(false)
+        .open(root.join("session-storage.lock")).ok()?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 { return None; }
+    let processes = kasa_pty::fresh_process_table();
+    let pid = std::process::id();
+    if !kasa_socket::session_storage::sole_app_process(pid, &processes) {
+        return None;
+    }
+    // Registry absence alone cannot prove ownership: a legacy app can have a
+    // custom socket, while a newly starting app has not registered one yet.
+    let mut sockets = vec![root.join("daemon.sock"), std::path::PathBuf::from("/tmp/cmux.sock")];
+    for dir in [root.to_path_buf(), std::env::temp_dir()] {
+        for entry in std::fs::read_dir(dir).ok()? {
+            let path = entry.ok()?.path();
+            if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("kasaterm-"))
+                && path.extension().is_some_and(|s| s == "sock") { sockets.push(path); }
+        }
+    }
+    for path in sockets {
+        if !path.try_exists().ok()? { continue; }
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(_) => return None,
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound) => {},
+            Err(_) => return None,
+        }
+    }
+    Some(lock)
+}
+
+#[cfg(not(unix))]
+fn sole_session_owner(_root: &std::path::Path) -> Option<std::fs::File> {
+    None
 }
 
 fn window_size_path() -> Option<std::path::PathBuf> {

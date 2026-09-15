@@ -1361,7 +1361,8 @@ fn state_path(viewer_only: bool) -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(path).with_extension("viewer-documents.json"));
         }
         if crate::verification_run() { return None; }
-        return Some(crate::socket::default_session_root()?.join("sessions/viewer-documents.json"));
+        return Some(kasa_socket::session_storage::read_path(
+            &crate::socket::default_session_root()?, "viewer-documents.json"));
     }
     if crate::verification_run() && std::env::var_os("KASATERM_SESSION_FILE").is_none() {
         return None;
