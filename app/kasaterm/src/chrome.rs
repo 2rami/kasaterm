@@ -121,9 +121,43 @@ fn focused_instruction_pane(ws: &Workspace) -> Option<String> {
     pane.tabs.get(pane.active_tab)?.pid.clone()
 }
 
+fn memory_instruction_files(root: Option<&std::path::Path>, vault: Option<&std::path::Path>) -> Vec<(String, std::path::PathBuf, &'static str)> {
+    let mut rows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut add = |label: &str, path: std::path::PathBuf| {
+        if path.is_file() {
+            let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+            if seen.insert(canonical.clone()) { rows.push((label.into(), canonical, "braces")); }
+        }
+    };
+    // A project's .memory often points to the entire vault, not project-only notes.
+    if let Some(vault) = vault { add("메모리 핸드오프", vault.join("MEMORY.md")); }
+    if let Some(root) = root { add("메모리 핸드오프 · 프로젝트", root.join(".memory/MEMORY.md")); }
+    if let (Some(name), Some(vault)) = (root.and_then(|p| p.file_name()).and_then(|p| p.to_str()), vault) {
+        add("프로젝트 메모리", vault.join(name).join(format!("{name}.md")));
+    }
+    rows
+}
+
 #[cfg(test)]
 mod quick_instruction_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn project_memory_link_to_the_whole_vault_keeps_the_global_label() {
+        let dir = std::env::temp_dir().join(kasa_mcp::character::new_session_id());
+        let vault = dir.join("vault");
+        let project = dir.join("project");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(vault.join("MEMORY.md"), "all projects").unwrap();
+        std::os::unix::fs::symlink(&vault, project.join(".memory")).unwrap();
+        let rows = memory_instruction_files(Some(&project), Some(&vault));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "메모리 핸드오프");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn focus_follows_terminal_tabs_but_documents_have_no_new_instruction_owner() {
@@ -2929,14 +2963,8 @@ impl App {
         if let Some(path) = kasa_mcp::character::collab_protocol_source_path() {
             add("카사텀 협업 지침".into(), path, "braces");
         }
-        if let Some(root) = self.file_tree.root.as_ref() {
-            add("메모리 핸드오프 · 프로젝트".into(), root.join(".memory/MEMORY.md"), "braces");
-        }
-        if let Some(vault) = memory_vault_dir() {
-            add("메모리 핸드오프".into(), vault.join("MEMORY.md"), "braces");
-            if let Some(name) = self.file_tree.root.as_ref().and_then(|r| r.file_name()).and_then(|s| s.to_str()) {
-                add("프로젝트 메모리".into(), vault.join(name).join(format!("{name}.md")), "braces");
-            }
+        for (label, path, icon) in memory_instruction_files(self.file_tree.root.as_deref(), memory_vault_dir().as_deref()) {
+            add(label, path, icon);
         }
         if let Some(name) = character {
             let label = if snapshot.is_some() { format!("{name} · 실행 때 추가 지침") }
