@@ -536,7 +536,14 @@ fn run() -> Result<Option<Response>> {
     }
     let request = build_request(&cmd, &args)?;
     let socket_path = resolve_socket_path()?;
-    let response = roundtrip(&socket_path, &request)?;
+    let mut response = roundtrip(&socket_path, &request)?;
+    if cmd == "server" {
+        if let Some(error) = response.error.as_mut() {
+            if error.code == kasa_socket::protocol::codes::METHOD_NOT_FOUND {
+                error.message = "이 앱은 서버 복원 등록을 지원하지 않아요. 앱을 업데이트한 뒤 다시 등록해주세요. 서버는 실행하지 않았어요.".into();
+            }
+        }
+    }
     // `layout` is meant to be *read*, not piped — render the pane rects as an
     // ASCII diagram so claude (and a human) grasp the screen split at a glance.
     // On error we fall through to the raw JSON so the failure is still visible.
@@ -1229,6 +1236,9 @@ fn print_help() {
   kasaterm-cli web-shot  </abs/x.png> [%surface]  # 웹 pane 스크린샷을 파일로 (창에 이미지 안 실림)
   kasaterm-cli web-url   [%surface]          # 웹 pane 의 현재 주소
   kasaterm-cli promote <%surface>            # 도는 pane 을 로컬 상주 데몬으로 무중단 승격 — 앱을 굽고 껐다 켜도 그 캐릭터는 안 죽는다
+  kasaterm-cli server --surface <%pane> [--cwd <dir>] [--name <label>] [--register-only] '<command>'
+                                            # 로컬 서버 실행·복원 등록. 명령은 인자 하나로 인용하며 비밀값을 넣지 않는다
+  kasaterm-cli server --surface <%pane> --clear # 실행 중인 서버는 유지하고 복원 등록만 해제
   kasaterm-cli migrate [%surface] <기계이름|http://호스트:포트|local> [--cwd /레포] [--force]  # pane 의 claude 를 그 기계로 이사(대화·미커밋 변경까지 운반+같은 자리 재개). 기계이름(예: 맥미니)이면 주소·경로를 명부(machines.json)에서 알아서 정한다. %surface 를 빼면 **이 명령을 친 pane 자신**이 간다 — 학생이 자기 이사를 신청하는 길. `local` 이면 역이사: 원격 pane 을 이 기계로 데려온다
   kasaterm-cli unfold <라벨>                  # 기계의 캐릭터 pane 전부를 거울로 펼침
   kasaterm-cli machines [--names]             # 명부 기계 목록 — `to` 셰임의 ls. 이 pane 이 거울이면 그 기계 줄에 *. --names 는 라벨만(탭 완성용)
@@ -1279,6 +1289,63 @@ fn print_help() {
     eprintln!(
         "Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default (Unix /tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)"
     );
+}
+
+fn server_params(args: &[String]) -> Result<Value> {
+    let mut params = json!({});
+    let mut clear = false;
+    let mut register_only = false;
+    let mut command = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--surface" | "--cwd" | "--name" => {
+                let value = args
+                    .next()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| anyhow!("server option needs a nonempty value"))?;
+                params[arg.trim_start_matches('-')] = json!(value);
+            }
+            "--register-only" => register_only = true,
+            "--clear" => clear = true,
+            "--" => {
+                command = args.next().cloned();
+                if args.next().is_some() {
+                    return Err(anyhow!("server command must be quoted as one argument"));
+                }
+                break;
+            }
+            _ if arg.starts_with('-') => return Err(anyhow!("unknown server option")),
+            _ => {
+                if command.replace(arg.clone()).is_some() {
+                    return Err(anyhow!("server command must be quoted as one argument"));
+                }
+            }
+        }
+    }
+    if params.get("surface").is_none() {
+        return Err(anyhow!(
+            "server requires --surface to identify the server pane"
+        ));
+    }
+    if clear {
+        if command.is_some()
+            || register_only
+            || params.get("cwd").is_some()
+            || params.get("name").is_some()
+        {
+            return Err(anyhow!("server --clear accepts only --surface"));
+        }
+        params["clear"] = json!(true);
+    } else {
+        let command = command
+            .filter(|command| !command.trim().is_empty())
+            .ok_or_else(|| anyhow!("server requires one quoted command"))?;
+        // Joining argv would silently strip quoting before the restored shell runs it.
+        params["command"] = json!(command);
+        params["start"] = json!(!register_only);
+    }
+    Ok(params)
 }
 
 fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
@@ -1443,6 +1510,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         }
         // 새 창(사이드바에 하나 더). 창 간 이동(`move`)의 목적지를 만들 때 쓴다.
         "window-new" => ("window.new", json!({})),
+        "server" => ("surface.server", server_params(args)?),
         // 도는 pane 을 로컬 상주 데몬으로 **무중단 승격** — 셸·claude 는 그대로,
         // 소유권만 앱 밖으로. 이후 앱을 굽고 껐다 켜도 그 캐릭터는 안 죽는다.
         "promote" => {
@@ -2840,6 +2908,46 @@ fn run_statusline() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_preserves_shell_command_and_registration_mode() {
+        let command = "printf '%s\\n' \"$VALUE\" 'space in argument'";
+        let args = [
+            "--surface",
+            "%1",
+            "--cwd",
+            "/tmp/a b",
+            "--name",
+            "local",
+            "--register-only",
+            command,
+        ]
+        .map(String::from);
+        let params = server_params(&args).unwrap();
+        assert_eq!(params["command"], command);
+        assert_eq!(params["cwd"], "/tmp/a b");
+        assert_eq!(params["start"], false);
+        let args = ["--surface", "%1", "npm run dev"].map(String::from);
+        assert_eq!(server_params(&args).unwrap()["start"], true);
+    }
+
+    #[test]
+    fn server_clear_cannot_accidentally_execute_and_requires_explicit_target() {
+        let args = ["--surface", "%1", "--clear"].map(String::from);
+        assert_eq!(
+            server_params(&args).unwrap(),
+            json!({"surface":"%1","clear":true})
+        );
+        for args in [
+            vec!["--clear"],
+            vec!["--surface", "%1", "--clear", "npm run dev"],
+            vec!["--surface", "%1", "npm", "run", "dev"],
+        ] {
+            assert!(
+                server_params(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err()
+            );
+        }
+    }
 
     /// 오른쪽 끝에 붙은 아주 좁은 pane 이 격자 밖을 짚지 않는다.
     ///
