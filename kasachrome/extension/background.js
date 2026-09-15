@@ -1,6 +1,6 @@
 import { dispatch, targetTabOf, reapplyEmulation, forgetEmulation, reapplyLayout, forgetLayout, layoutState, layoutToggle } from './tools.js'
 import { setBridgeSender, bridgeResolve } from './bridge-ask.js'
-import { openSession, closeSession, markBusy, markDone, forgetTab, refreshAction, restoreOverlay, snapshot, groupTabs, ungroupTabs, addActivity, clearPanes, repaintAll, recolorGroups } from './sessions.js'
+import { openSession, closeSession, markBusy, markDone, forgetTab, refreshAction, restoreOverlay, snapshot, groupTabs, ungroupTabs, addActivity, clearPanes, repaintAll } from './sessions.js'
 import { getDisplay, setDisplay } from './display.js'
 import { hostOf } from './url.js'
 import { PORT } from './port.js'
@@ -10,7 +10,7 @@ const BRIDGE_URL = `ws://127.0.0.1:${PORT}`
 
 // 미리 대상 탭을 정할 수 없는 툴 — 아무 탭도 건드리지 않거나(status·list_tabs),
 // 대상이 실행 결과로만 정해진다(new_tab). 여기서 활성 탭을 잡으면 엉뚱한 탭이 조작 중으로 켜진 채 남는다.
-const NO_TAB_TOOLS = new Set(['status', 'list_tabs', 'set_task', 'dev_reload', 'new_tab'])
+const NO_TAB_TOOLS = new Set(['status', 'list_tabs', 'set_task', 'dev_reload', 'new_tab', 'bookmarks'])
 
 // 탭을 없애는 툴. 오버레이를 그리지 않고 곧장 dispatch 로 간다 — 곧 사라질 탭을 꾸미는 일이라
 // 얻는 것이 없는데, 그 왕복이 페이지 메인 스레드를 타는 탓에 **막힌 탭을 못 닫게 만든다**.
@@ -48,6 +48,7 @@ function describe(tool, args = {}, result = {}) {
     case 'wait_for': return '대기'
     case 'resize_window': return '창 크기 조절'
     case 'ungroup_tabs': return '탭 그룹 해제'
+    case 'bookmarks': return '북마크 읽기'
     case 'set_task': return `작업명 — ${args.task}`
     case 'cdp_raw': return `CDP — ${args.method}`
     default: return null
@@ -247,12 +248,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.op === 'group' || msg.op === 'ungroup') {
     const run = msg.op === 'group' ? groupTabs : ungroupTabs
     run(msg.key)
-      .then(sendResponse)
-      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
-    return true
-  }
-  if (msg.op === 'recolorGroups') {
-    recolorGroups(msg.windowId)
       .then(sendResponse)
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
     return true

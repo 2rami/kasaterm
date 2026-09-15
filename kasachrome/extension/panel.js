@@ -3,12 +3,10 @@
 // 페이지에서 온 제목·URL 은 반드시 textContent 로만 넣는다(남의 사이트가 준 문자열이다).
 import { hostOf } from './url.js'
 import { PORT } from './port.js'
-import { mountLibrary } from './library.js'
 
 const rootEl = document.getElementById('root')
 const connEl = document.getElementById('conn')
 const connText = document.getElementById('conn-text')
-mountLibrary(rootEl, connEl)
 let lastSig = null
 
 // 제품명·포트는 각각 manifest 와 port.js 한 곳에만 둔다 — 화면 문구가 그걸 따라온다.

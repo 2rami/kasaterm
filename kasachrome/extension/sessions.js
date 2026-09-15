@@ -6,7 +6,7 @@
 // 셋 다 사람이 끌 수 있다(display.js) — 우상단 칩이 사이트의 계정 메뉴를 가리는 일이 있어서다.
 import { page } from './page.js'
 import { getDisplay } from './display.js'
-import { chooseGroupColor, planGroupColors, GROUP_COLORS } from './group-colors.js'
+import { chooseGroupColor } from './group-colors.js'
 
 const sessions = new Map() // paneKey -> {identity, task, tabs:Set, busy:Set}
 const clientPane = new Map() // clientKey -> paneKey
@@ -148,10 +148,15 @@ export function closeSession(client) {
 export function setTask(client, task) {
   const s = sessionOf(client)
   if (!s) return { applied: false, reason: 'NO_SESSION: 이 클라이언트에 열린 세션이 없습니다.' }
+  const changed = (s.task || '') !== (task || '')
   s.task = task
-  persist(clientPane.get(client))
+  const key = clientPane.get(client)
+  persist(key)
   // 칩이 떠 있는 탭들의 문구를 즉시 갱신한다(대기 중인 탭도 포함)
-  paintSession(clientPane.get(client)).catch(() => {})
+  paintSession(key).catch(() => {})
+  // 그룹은 작업 단위라 작업명이 바뀌면 이미 연 탭도 따라가야 한다. 기다리지 않는다 —
+  // 작업명을 붙이는 호출이 탭 여러 개의 그룹 이동을 기다리느라 늦어질 이유가 없다.
+  if (changed) regroupOwnTabs(key).catch((e) => note('regroup', e))
   refreshAction()
   return { applied: true, identity: s.identity.name, task }
 }
@@ -214,6 +219,10 @@ async function occupantsOf(tabId) {
       color: s.identity.headerColor || '#6BCF7F',
       avatar,
       task: s.task || null,
+      // 칩 아랫줄에 뜨는 「방금 한 일」. 작업명은 학생이 직접 붙여야 채워지는데 안 붙이는 경우가
+      // 잦아, 그때 칩이 이름만 남아 아무것도 알려주지 않았다(2026-09-16 지시). 이건 도구 호출에서
+      // 저절로 쌓이므로 늘 채워진다.
+      doing: s.log.length ? s.log[s.log.length - 1].label : null,
       busy,
     })
   }
@@ -480,6 +489,9 @@ export function addActivity(client, label, tabId, ok = true) {
   s.log.push({ at: Date.now(), label, tabId: tabId || null, ...(ok ? {} : { failed: true }) })
   if (s.log.length > ACTIVITY_MAX) s.log.splice(0, s.log.length - ACTIVITY_MAX)
   persist(clientPane.get(client))
+  // 칩의 「방금 한 일」 줄이 이 기록을 그대로 읽는다. 다음 조작까지 기다리면 한 박자 늦은 동작이
+  // 떠 있게 되므로 여기서 바로 칠한다.
+  if (tabId) paintTab(tabId).catch(() => {})
 }
 
 // --- 탭 그룹 --------------------------------------------------------------
@@ -488,67 +500,85 @@ export function addActivity(client, label, tabId, ok = true) {
 // 열어둔 탭이 제멋대로 재배치되는 것이 claude-in-chrome 이 금지된 이유다. 팝업의 「묶기」 버튼은
 // 세션이 잡은 탭까지 한꺼번에 묶는 별개 경로다(groupTabs).
 
-// ★그룹은 학생마다가 아니라 **방마다** 하나다(2026-08-15 지시). 방 = 같은 폴더에서 도는 pane 들.
-// 학생마다 만들면 방 하나에 다섯이 붙어 있을 때 그룹이 다섯 개 뜬다(같은 날 관측: 넷이 탭을 하나씩
-// 물고 그룹 넷을 차지하고 있었다). 방으로 묶으면 탭바에 방 수만큼만 뜬다.
-const ROOM_GROUPS_KEY = 'roomGroups'
-let roomGroups = null
-let roomGroupsLoading = null
-let roomGroupsSaving = Promise.resolve()
+// ★그룹은 **작업마다** 하나다(2026-09-16 지시). 같은 일을 하는 탭끼리만 묶여야 탭바를 훑어서
+// 「이건 무슨 작업 중이지」가 읽힌다 — 방으로만 묶던 때는 한 그룹 안에 서로 무관한 작업의 탭이
+// 섞여서, 그룹 이름을 봐도 안에 뭐가 들었는지 알 수 없었다.
+// 작업명은 `browser_set_task` 로 정한 것이고, 안 정한 세션은 종전대로 방으로 묶인다(방도 모르면
+// 그 세션 혼자 쓰는 그룹). 그래서 그룹 키는 세 갈래다: `task:<작업명>` · `room:<방>` · 세션 자기 것.
+const TASK_GROUPS_KEY = 'taskGroups'
+let taskGroups = null
+let taskGroupsLoading = null
+let taskGroupsSaving = Promise.resolve()
 const groupQueues = new Map()
 
 // storage.session 인 이유는 agentWindows 와 같다 — worker 가 죽어도 남고, 브라우저를 껐다 켜면
 // 저절로 비워진다(그룹 id 는 재사용되므로 남아 있으면 남의 그룹을 우리 것이라 가리킨다).
-async function roomGroupMap() {
-  if (roomGroups) return roomGroups
-  // 서로 다른 창도 첫 로드를 공유해야 늦게 온 저장소 사본이 이미 만든 방을 지우지 않는다.
-  if (!roomGroupsLoading) roomGroupsLoading = (async () => {
+async function taskGroupMap() {
+  if (taskGroups) return taskGroups
+  // 서로 다른 창도 첫 로드를 공유해야 늦게 온 저장소 사본이 이미 만든 그룹을 지우지 않는다.
+  if (!taskGroupsLoading) taskGroupsLoading = (async () => {
     try {
-      const v = await chrome.storage.session.get(ROOM_GROUPS_KEY)
-      roomGroups = new Map(Object.entries(v[ROOM_GROUPS_KEY] || {}))
-    } catch { roomGroups = new Map() }
-    return roomGroups
+      const v = await chrome.storage.session.get(TASK_GROUPS_KEY)
+      taskGroups = new Map(Object.entries(v[TASK_GROUPS_KEY] || {}))
+    } catch { taskGroups = new Map() }
+    return taskGroups
   })()
-  return roomGroupsLoading
+  return taskGroupsLoading
 }
 
-function saveRoomGroups() {
-  const value = Object.fromEntries(roomGroups || [])
-  roomGroupsSaving = roomGroupsSaving
-    .then(() => chrome.storage.session.set({ [ROOM_GROUPS_KEY]: value }))
+function saveTaskGroups() {
+  const value = Object.fromEntries(taskGroups || [])
+  taskGroupsSaving = taskGroupsSaving
+    .then(() => chrome.storage.session.set({ [TASK_GROUPS_KEY]: value }))
     .catch((e) => note('group-save', e))
 }
 
-// 합류 후보. 방을 알면 방 그룹을, 모르면(kasaterm 밖) 예전처럼 자기 그룹을 쓴다.
-// ⚠️세션 것만 보면 안 된다 — 먼저 연 학생이 이미 나갔어도 그 그룹에 탭이 남아 있으면 거기 합쳐야
-// 방에 그룹이 둘 생기지 않는다. 그래서 세션이 아니라 저장소를 정본으로 둔다.
-async function candidateGroups(s) {
+// 이 세션의 탭이 들어갈 그룹의 이름표. 작업명이 먼저다 — 같은 작업이면 방도 학생도 달라도 한 그룹으로
+// 모인다. null 이면 공유할 이름표가 없다는 뜻이라 그 세션 혼자 쓰는 그룹을 쓴다.
+function groupKeyOf(s) {
+  const task = s.task?.trim()
+  if (task) return `task:${task}`
   const team = s.identity?.team
-  if (!team) return [...s.groups]
-  const map = await roomGroupMap()
-  return [...(map.get(team) || [])]
+  return team ? `room:${team}` : null
 }
 
-async function rememberRoomGroup(team, groupId) {
-  const map = await roomGroupMap()
-  const list = map.get(team) || []
-  if (!list.includes(groupId)) { map.set(team, [...list, groupId]); saveRoomGroups() }
+// 그룹 제목 앞에 붙는 라벨. 키와 같은 갈래다 — 작업 그룹이면 작업명이 곧 제목이라 탭바만 봐도
+// 무슨 일이 도는지 읽힌다.
+function groupLabelOf(s) {
+  const task = s.task?.trim()
+  return task || s.identity?.room || s.identity?.name || PRODUCT
 }
 
-async function forgetRoomGroup(team, groupId) {
-  const map = await roomGroupMap()
-  const list = map.get(team) || []
+// 합류 후보. 이름표를 알면 그 이름표의 그룹을, 모르면 자기 그룹을 쓴다.
+// ⚠️세션 것만 보면 안 된다 — 먼저 연 학생이 이미 나갔어도 그 그룹에 탭이 남아 있으면 거기 합쳐야
+// 같은 작업에 그룹이 둘 생기지 않는다. 그래서 세션이 아니라 저장소를 정본으로 둔다.
+async function candidateGroups(s) {
+  const key = groupKeyOf(s)
+  if (!key) return [...s.groups]
+  const map = await taskGroupMap()
+  return [...(map.get(key) || [])]
+}
+
+async function rememberTaskGroup(key, groupId) {
+  const map = await taskGroupMap()
+  const list = map.get(key) || []
+  if (!list.includes(groupId)) { map.set(key, [...list, groupId]); saveTaskGroups() }
+}
+
+async function forgetTaskGroup(key, groupId) {
+  const map = await taskGroupMap()
+  const list = map.get(key) || []
   if (!list.includes(groupId)) return
   const left = list.filter((g) => g !== groupId)
-  if (left.length) map.set(team, left)
-  else map.delete(team)
-  saveRoomGroups()
+  if (left.length) map.set(key, left)
+  else map.delete(key)
+  saveTaskGroups()
 }
 
-// 그룹 제목. 「폴더 · 이름,이름 +N」 — 2026-08-15 지시로 방 이름만 쓰지 않고 누가 붙어 있는지 함께
+// 그룹 제목. 「작업명 · 이름,이름 +N」 — 2026-08-15 지시로 라벨만 쓰지 않고 누가 붙어 있는지 함께
 // 보인다. 전부 나열하지 않는 이유는 폭이다: 다섯 명을 늘어놓으면 뒤가 통째로 잘려 몇 명인지조차
 // 안 남지만, +N 은 잘리기 전에 읽힌다. 판정은 `made` — 그 학생이 **직접 연** 탭이 이 그룹에 있는지다.
-async function roomTitleOf(room, groupId) {
+async function titleOf(label, groupId) {
   const tabs = await new Promise((r) => chrome.tabs.query({ groupId }, r)).catch(() => [])
   const ids = new Set(tabs.map((t) => t.id))
   const names = []
@@ -557,12 +587,12 @@ async function roomTitleOf(room, groupId) {
     if (!n || names.includes(n)) continue
     for (const id of s.made) if (ids.has(id)) { names.push(n); break }
   }
-  if (!names.length) return room
+  if (!names.length) return label
   const rest = names.length - 2
-  return rest > 0 ? `${room} · ${names.slice(0, 2).join(',')} +${rest}` : `${room} · ${names.join(',')}`
+  return rest > 0 ? `${label} · ${names.slice(0, 2).join(',')} +${rest}` : `${label} · ${names.join(',')}`
 }
 
-// 창을 넘나드는 그룹은 없다. 창마다 따로 묶고, 그 창에 이미 이 방 그룹이 있으면 거기 합친다.
+// 창을 넘나드는 그룹은 없다. 창마다 따로 묶고, 그 창에 이미 같은 작업의 그룹이 있으면 거기 합친다.
 async function groupInWindow(s, windowId, tabIds) {
   return queueGroupOperation(windowId, () => assignGroupInWindow(s, windowId, tabIds))
 }
@@ -577,61 +607,66 @@ function queueGroupOperation(windowId, operation) {
   return run
 }
 
-export async function recolorGroups(windowId) {
-  if (!Number.isInteger(windowId) || windowId < 0) throw new Error('INVALID_WINDOW: 창을 지정해 주세요.')
-  return queueGroupOperation(windowId, async () => {
-    const groups = await chrome.tabGroups.query({ windowId })
-    const changes = planGroupColors(groups)
-    for (const change of changes) {
-      // 사람이 조회 뒤 다른 창으로 옮겼다면 그 창의 색까지 바꾸지 않는다.
-      const group = await chrome.tabGroups.get(change.groupId)
-      if (group.windowId !== windowId) throw new Error('GROUP_MOVED: 그룹이 다른 창으로 이동했어요. 다시 정리해 주세요.')
-      await chrome.tabGroups.update(change.groupId, { color: change.color })
-    }
-    return { ok: true, changed: changes.length, groups: groups.length, overflow: groups.length > GROUP_COLORS.length }
-  })
-}
-
 async function assignGroupInWindow(s, windowId, tabIds) {
-  const team = s.identity?.team || null
-  const room = s.identity?.room || null
+  const key = groupKeyOf(s)
+  const label = groupLabelOf(s)
   let target = null
   for (const gid of await candidateGroups(s)) {
     const g = await chrome.tabGroups.get(gid).catch(() => null)
-    if (!g) { s.groups.delete(gid); if (team) await forgetRoomGroup(team, gid); continue }
+    if (!g) { s.groups.delete(gid); if (key) await forgetTaskGroup(key, gid); continue }
     if (g.windowId === windowId) { target = gid; break }
   }
   const groupId = await chrome.tabs.group(
     target ? { tabIds, groupId: target } : { tabIds, createProperties: { windowId } },
   )
   s.groups.add(groupId)
-  if (team) await rememberRoomGroup(team, groupId)
-  const title = room ? await roomTitleOf(room, groupId) : (s.identity?.name || PRODUCT)
-  const patch = { title }
+  if (key) await rememberTaskGroup(key, groupId)
+  const patch = { title: await titleOf(label, groupId) }
   // 기존 그룹색은 사람이 바꿨을 수 있다. 새 그룹만 사람 그룹까지 포함해 빈 색을 고른다.
   if (target == null) {
     const groups = await chrome.tabGroups.query({ windowId })
-    const preferred = (room && s.identity?.roomColor) || s.identity?.groupColor || 'grey'
+    const preferred = s.identity?.roomColor || s.identity?.groupColor || 'grey'
     patch.color = chooseGroupColor(groups.filter((g) => g.id !== groupId), preferred)
   }
   await chrome.tabGroups.update(groupId, patch).catch((e) => note('group-title', e))
   return groupId
 }
 
+// 작업명이 바뀌면 그 전에 연 탭은 옛 그룹에 남는다 — 그러면 한 그룹에 서로 다른 작업이 섞여
+// 「동일한 작업만 묶는다」가 곧바로 깨진다. 그래서 작업명을 정하는 순간 **내가 직접 연** 탭을
+// 새 작업 그룹으로 데려간다. 사람이 열어둔 탭(`tabs` 에는 있고 `made` 에는 없는 것)은 건드리지
+// 않는다 — 사람 탭이 제멋대로 그룹을 옮겨 다니는 것이 claude-in-chrome 이 금지된 이유다.
+async function regroupOwnTabs(key) {
+  const s = sessions.get(key)
+  if (!s?.made.size) return
+  const byWindow = new Map()
+  for (const tabId of [...s.made]) {
+    const t = await chrome.tabs.get(tabId).catch(() => null)
+    if (!t) { s.made.delete(tabId); forgetTab(tabId); continue }
+    byWindow.set(t.windowId, [...(byWindow.get(t.windowId) || []), tabId])
+  }
+  // 떠나온 그룹도 제목을 다시 짓는다. 안 하면 이미 옮겨간 학생 이름이 옛 그룹에 계속 남는다.
+  const left = new Set([...s.groups])
+  for (const [windowId, tabIds] of byWindow) {
+    await groupInWindow(s, windowId, tabIds).catch((e) => note('regroup', e))
+  }
+  for (const gid of left) await refreshGroupTitle(gid).catch(() => {})
+}
+
 // 그룹에서 탭이 빠지면 제목의 이름 목록도 달라진다. 닫기 경로에서 불러 준다 — 안 하면 이미 나간
 // 학생 이름이 탭바에 계속 남는다. 우리 그룹이 아니면 아무것도 하지 않는다.
 export async function refreshGroupTitle(groupId) {
   if (!groupId || groupId < 0) return
-  let room = null
+  let label = null
   for (const s of sessions.values()) {
     if (!s.groups.has(groupId)) continue
-    room = s.identity?.room || null
+    label = groupLabelOf(s)
     break
   }
-  if (!room) return
+  if (!label) return
   const g = await chrome.tabGroups.get(groupId).catch(() => null)
   if (!g) return
-  await chrome.tabGroups.update(groupId, { title: await roomTitleOf(room, groupId) }).catch((e) => note('group-retitle', e))
+  await chrome.tabGroups.update(groupId, { title: await titleOf(label, groupId) }).catch((e) => note('group-retitle', e))
 }
 
 // new_tab/new_window 로 **내가 만든** 탭만 자기 그룹에 넣는다. 여럿이 한 브라우저를 쓸 때
@@ -660,6 +695,12 @@ export async function groupOwnTab(client, tabId) {
 // 작업이 끝나도 결과를 보여줄 페이지 하나는 남아야 하는데, 몇 개 남았는지 모르면 마지막 하나까지 닫는다.
 // ⚠️그룹 멤버십으로 세면 안 된다 — 방 단위로 그룹을 공유하면서 같은 그룹에 **남의 탭**이 들어왔다.
 // 그걸 세면 내 탭을 다 닫고도 remaining 이 남아 있어 「하나는 남겼다」고 잘못 읽는다.
+// 이 세션이 **직접 연** 탭의 id. new_tab 이 같은 주소를 또 열지 않으려고 후보를 고를 때,
+// 내 탭과 사람 탭을 갈라야 해서 필요하다 — 사람 탭은 재사용해도 내 몫으로 삼지 않는다.
+export function ownTabIds(client) {
+  return new Set(sessionOf(client)?.made || [])
+}
+
 export async function ownTabCount(client) {
   const s = sessionOf(client)
   if (!s) return 0
@@ -791,9 +832,9 @@ export async function listGroups() {
 export async function ungroupBeforeClose(tabIds) {
   const ours = new Set()
   for (const s of sessions.values()) for (const g of s.groups) ours.add(g)
-  // 방 그룹은 만든 학생이 나가도 남는다. 세션 것만 보면 그 그룹의 탭을 닫을 때 빼내기를 건너뛰어
-  // 껍데기가 생긴다 — 방을 도입하면서 새로 생긴 구멍이라 저장소도 함께 본다.
-  for (const list of (await roomGroupMap()).values()) for (const g of list) ours.add(g)
+  // 작업 그룹은 만든 학생이 나가도 남는다. 세션 것만 보면 그 그룹의 탭을 닫을 때 빼내기를 건너뛰어
+  // 껍데기가 생긴다 — 그룹을 공유하면서 생긴 구멍이라 저장소도 함께 본다.
+  for (const list of (await taskGroupMap()).values()) for (const g of list) ours.add(g)
   if (!ours.size) return
   const targets = []
   for (const id of tabIds) {

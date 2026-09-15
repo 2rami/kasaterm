@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { GROUP_COLORS, chooseGroupColor, planGroupColors } from './group-colors.js'
+import { GROUP_COLORS, chooseGroupColor } from './group-colors.js'
 
 test('new colors avoid occupied preferences and balance exhausted palettes', () => {
   assert.equal(chooseGroupColor([{ color: 'blue' }], 'blue'), 'red')
@@ -10,68 +10,71 @@ test('new colors avoid occupied preferences and balance exhausted palettes', () 
   assert.equal(chooseGroupColor(groups, 'orange'), 'blue')
 })
 
-test('manual cleanup reserves later unique colors and is stable after cleanup', () => {
-  const groups = [{ id: 1, color: 'blue' }, { id: 2, color: 'blue' }, { id: 3, color: 'red' }]
-  assert.deepEqual(planGroupColors(groups), [{ groupId: 2, color: 'yellow' }])
-  const many = Array.from({ length: 20 }, (_, id) => ({ id, color: 'blue' }))
-  const changes = new Map(planGroupColors(many).map((g) => [g.groupId, g.color]))
-  const result = many.map((g) => ({ ...g, color: changes.get(g.id) || g.color }))
-  const counts = GROUP_COLORS.map((color) => result.filter((g) => g.color === color).length)
-  assert.ok(Math.max(...counts) - Math.min(...counts) <= 1)
-  assert.deepEqual(planGroupColors(result), [])
-})
-
-test('concurrent Chrome requests share room creation, preserve manual colors and recover after failure', async () => {
+// 목 크롬. 탭 그룹 배정만 검증하므로 그룹/탭 조작에 필요한 만큼만 흉내낸다.
+function mockChrome() {
   const groups = new Map([[100, { id: 100, windowId: 1, color: 'blue', title: 'Personal' }]])
   const tabs = new Map(Array.from({ length: 16 }, (_, i) => [i + 1, { id: i + 1, windowId: i === 4 ? 2 : 1 }]))
-  let nextId = 101
-  let loads = 0
-  let failNext = false
-  let moveOnGet = null
-  let failUpdate = null
   const saved = {}
+  const state = { groups, tabs, saved, nextId: 101, loads: 0, failNext: false }
   const tick = () => new Promise((resolve) => setImmediate(resolve))
-  const oldChrome = globalThis.chrome
-  const oldSelf = globalThis.self
-  globalThis.self = {}
-  globalThis.chrome = {
+  state.tick = tick
+  state.settle = async (n = 10) => { for (let i = 0; i < n; i++) await tick() }
+  state.chrome = {
     runtime: { getManifest: () => ({ name: 'Test' }) },
     storage: {
       local: { get: async () => ({}), set: async () => {} },
       session: {
-        get: async () => { loads++; await tick(); return {} },
+        get: async () => { state.loads++; await tick(); return {} },
         set: async (value) => { await tick(); Object.assign(saved, value) },
       },
     },
     action: { setTitle() {}, setBadgeText() {} },
     tabs: {
-      get: async (id) => tabs.get(id),
+      get: async (id) => {
+        const t = tabs.get(id)
+        if (!t) throw new Error(`No tab with id ${id}`)
+        return t
+      },
       query: (query, callback) => callback([...tabs.values()].filter((t) => t.groupId === query.groupId)),
       group: async ({ tabIds, groupId, createProperties }) => {
         await tick()
-        if (failNext) { failNext = false; throw new Error('temporary failure') }
-        const id = groupId ?? nextId++
+        if (state.failNext) { state.failNext = false; throw new Error('temporary failure') }
+        const id = groupId ?? state.nextId++
         if (groupId == null) groups.set(id, { id, windowId: createProperties.windowId, color: 'grey' })
         for (const tabId of tabIds) tabs.get(tabId).groupId = id
         return id
       },
     },
     tabGroups: {
-      get: async (id) => {
-        if (id === moveOnGet) { groups.get(id).windowId = 2; moveOnGet = null }
-        return groups.get(id)
-      },
+      get: async (id) => groups.get(id),
       query: async ({ windowId }) => [...groups.values()].filter((g) => g.windowId === windowId).map((g) => ({ ...g })),
       update: async (id, patch) => {
         await tick()
-        if (id === failUpdate) { failUpdate = null; throw new Error('update failed') }
         Object.assign(groups.get(id), patch)
         return groups.get(id)
       },
     },
   }
+  return state
+}
+
+async function withChrome(state, run) {
+  const oldChrome = globalThis.chrome
+  const oldSelf = globalThis.self
+  globalThis.self = {}
+  globalThis.chrome = state.chrome
   try {
-    const { openSession, groupOwnTab, recolorGroups } = await import(`./sessions.js?test=${Date.now()}`)
+    return await run(await import(`./sessions.js?test=${Date.now()}${Math.random()}`))
+  } finally {
+    globalThis.chrome = oldChrome
+    globalThis.self = oldSelf
+  }
+}
+
+test('concurrent requests share one group per room, preserve manual colors and recover after failure', async () => {
+  const state = mockChrome()
+  const { groups, tabs, saved } = state
+  await withChrome(state, async ({ openSession, groupOwnTab }) => {
     for (const [client, team] of [['a', 'room-a'], ['b', 'room-a'], ['c', 'room-c'], ['d', 'room-d']]) {
       await openSession(client, { paneId: client, team, room: team, name: client, roomColor: 'blue' })
     }
@@ -80,43 +83,65 @@ test('concurrent Chrome requests share room creation, preserve manual colors and
     ])
     assert.equal(a, b)
     assert.notEqual(a, c)
-    assert.equal(loads, 1)
+    // 첫 로드를 공유해야 늦게 온 저장소 사본이 이미 만든 그룹을 지우지 않는다.
+    assert.equal(state.loads, 1)
     assert.equal(groups.get(a).color, 'red')
     assert.equal(groups.get(c).color, 'yellow')
     assert.equal(groups.get(d).color, 'blue')
+    // 사람이 만든 그룹은 건드리지 않는다.
     assert.equal(groups.get(100).title, 'Personal')
     assert.equal(groups.get(100).color, 'blue')
+    // 합류한 그룹의 색은 사람이 바꿨을 수 있으니 덮어쓰지 않는다.
     groups.get(a).color = 'orange'
     assert.equal(await groupOwnTab('b', 4), a)
     assert.equal(groups.get(a).color, 'orange')
-    failNext = true
+    // 묶기가 실패해도 탭 생성은 실패가 아니고, 다음 호출은 원래 그룹으로 돌아온다.
+    state.failNext = true
     assert.equal(await groupOwnTab('c', 6), null)
     assert.equal(await groupOwnTab('c', 7), c)
     // 저장 큐가 비워지기 전에는 메모리만 맞고 저장소는 아직 옛 상태일 수 있다.
-    for (let i = 0; i < 6; i++) await tick()
-    assert.deepEqual(Object.keys(saved.roomGroups).sort(), ['room-a', 'room-c', 'room-d'])
-    await openSession('e', { paneId: 'e', team: 'room-e', room: 'room-e', name: 'e', roomColor: 'blue' })
-    groups.set(200, { id: 200, windowId: 1, color: 'blue' })
-    const [cleanup, added] = await Promise.all([recolorGroups(1), groupOwnTab('e', 8)])
-    assert.equal(cleanup.changed, 1)
-    assert.equal(groups.get(200).color, 'red')
-    assert.equal(groups.get(added).color, 'green')
-    const colors = [...groups.values()].filter(g => g.windowId === 1).map(g => g.color)
-    assert.equal(new Set(colors).size, colors.length)
-    groups.set(201, { id: 201, windowId: 1, color: 'blue' })
-    moveOnGet = 201
-    await assert.rejects(recolorGroups(1), /GROUP_MOVED/)
-    assert.equal(groups.get(201).color, 'blue')
-    groups.set(202, { id: 202, windowId: 1, color: 'blue' })
-    groups.set(203, { id: 203, windowId: 1, color: 'blue' })
-    failUpdate = 203
-    await assert.rejects(recolorGroups(1), /update failed/)
-    assert.notEqual(groups.get(202).color, 'blue')
-    assert.equal(groups.get(203).color, 'blue')
-    assert.equal((await recolorGroups(1)).changed, 1)
-    await assert.rejects(recolorGroups(-1), /INVALID_WINDOW/)
-  } finally {
-    globalThis.chrome = oldChrome
-    globalThis.self = oldSelf
-  }
+    await state.settle(6)
+    assert.deepEqual(Object.keys(saved.taskGroups).sort(), ['room:room-a', 'room:room-c', 'room:room-d'])
+    // 창을 넘나드는 그룹은 없다 — 다른 창에 있는 탭은 그 창에서 묶인다.
+    assert.equal(tabs.get(5).windowId, 2)
+    assert.equal(groups.get(d).windowId, 2)
+    assert.equal(groups.get(a).windowId, 1)
+  })
+})
+
+test('the same task shares a group across rooms, and different tasks split one room', async () => {
+  const state = mockChrome()
+  const { groups, tabs } = state
+  await withChrome(state, async ({ openSession, groupOwnTab, setTask }) => {
+    for (const [client, team] of [['a', 'room-a'], ['b', 'room-a'], ['c', 'room-c']]) {
+      await openSession(client, { paneId: client, team, room: team, name: client, roomColor: 'blue' })
+    }
+    // 작업명이 없으면 종전대로 방으로 묶인다.
+    const roomA = await groupOwnTab('a', 1)
+    assert.equal(await groupOwnTab('b', 2), roomA)
+    const roomC = await groupOwnTab('c', 3)
+    assert.notEqual(roomA, roomC)
+
+    // 같은 작업명이면 방이 달라도 한 그룹으로 모인다.
+    setTask('a', '결제 플로')
+    setTask('c', '결제 플로')
+    await state.settle(20)
+    const task = await groupOwnTab('a', 6)
+    assert.equal(await groupOwnTab('c', 7), task)
+    assert.notEqual(task, roomA)
+    // 작업명을 정하는 순간 이미 연 탭도 따라온다.
+    assert.equal(tabs.get(1).groupId, task)
+    assert.equal(tabs.get(3).groupId, task)
+    // 작업명을 안 정한 학생은 방 그룹에 남는다.
+    assert.equal(tabs.get(2).groupId, roomA)
+    // 제목이 곧 작업명이라 탭바만 봐도 무슨 일이 도는지 읽힌다.
+    assert.match(groups.get(task).title, /^결제 플로/)
+
+    // 작업명이 다르면 같은 방이어도 갈린다.
+    setTask('b', '로그인')
+    await state.settle(20)
+    assert.notEqual(tabs.get(2).groupId, task)
+    assert.notEqual(tabs.get(2).groupId, roomA)
+    assert.match(groups.get(tabs.get(2).groupId).title, /^로그인/)
+  })
 })

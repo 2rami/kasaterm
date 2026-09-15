@@ -5,7 +5,8 @@ import { askBridge } from './bridge-ask.js'
 import { page, restricted } from './page.js'
 import { withTimeout } from './wait.js'
 import { lookupDevice, suggestDevices, deviceTable, uaOverrideFor } from './devices.js'
-import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, ownTabCount, refreshGroupTitle, agentWindowOf, agentWindowsByGroups, rememberAgentWindow, forgetAgentWindow, otherOwners, listGroups, hideForShot, showAfterShot } from './sessions.js'
+import { sameUrlKey, pickExistingTab } from './url.js'
+import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, ownTabCount, ownTabIds, refreshGroupTitle, agentWindowOf, agentWindowsByGroups, rememberAgentWindow, forgetAgentWindow, otherOwners, listGroups, hideForShot, showAfterShot } from './sessions.js'
 
 // 워커가 언제 떴는지. 이 값이 방금 태어난 것으로 나오면 직전 명령이 실패한 이유는 대개 워커가
 // 도중에 죽은 것이다 — 끊김의 원인을 코드에서 찾기 전에 여기부터 본다.
@@ -204,6 +205,23 @@ function normalizeUrl(url) {
   if (/^(https?|file|ftp|about|chrome|chrome-extension|devtools|data|blob|view-source):/i.test(url)) return url
   if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?([/?#]|$)/i.test(url)) return `http://${url}`
   return `https://${url}`
+}
+
+// 이미 열려 있는 같은 주소의 탭. 창을 지정하면 그 창만, 아니면 열린 창 전부에서 찾는다.
+async function findOpenTab(url, windowId, client) {
+  if (!sameUrlKey(url) || sameUrlKey(url) === 'about:blank') return null
+  const tabs = await tabsQuery(windowId ? { windowId: Number(windowId) } : {})
+  return pickExistingTab(tabs, url, ownTabIds(client))
+}
+
+// 북마크 트리를 「폴더 경로 + 주소」 한 줄짜리 목록으로 편다. 폴더는 그 자체가 답인 적이 없고,
+// 에이전트가 찾는 것은 언제나 주소다.
+function flattenBookmarks(nodes, path = [], out = []) {
+  for (const node of nodes) {
+    if (node.url) out.push({ title: node.title || '', url: node.url, path: path.join('/') })
+    else if (node.children) flattenBookmarks(node.children, [...path, node.title || ''], out)
+  }
+  return out
 }
 
 function waitForLoad(tabId, timeoutMs = 20000) {
@@ -479,6 +497,21 @@ const handlers = {
   // 기본은 백그라운드다. 사람이 보던 화면을 에이전트가 뺏으면 안 된다.
   // 애니메이션·미디어처럼 보이는 탭이어야 도는 것을 확인할 때만 active:true 나 activate_tab 을 쓴다.
   async new_tab({ url, active = false, windowId } = {}, ctx = {}) {
+    // ★같은 주소를 두 번 열지 않는다(2026-09-16 지시). 확인하러 열고 안 닫은 탭이 쌓이면 사람
+    // 탭바가 같은 페이지로 도배된다. 사람이 열어둔 탭도 돌려주지만 **내 것으로 삼지는 않는다** —
+    // 내 그룹으로 끌고 가지 않고 close_tab 이 닫을 몫으로도 세지 않는다. 사람 탭이 제멋대로
+    // 재배치되는 것이 claude-in-chrome 이 금지된 이유고, 재사용이 그 문을 열어서는 안 된다.
+    const existing = url ? await findOpenTab(normalizeUrl(url), windowId, ctx.client) : null
+    if (existing) {
+      if (active && !existing.active) await chrome.tabs.update(existing.id, { active: true }).catch(() => {})
+      const seen = await chrome.tabs.get(existing.id).catch(() => null) || existing
+      const mine = ownTabIds(ctx.client).has(seen.id)
+      return {
+        tabId: seen.id, url: seen.url, title: seen.title, active: seen.active, reused: true,
+        ...(seen.groupId !== undefined && seen.groupId !== NO_GROUP ? { groupId: seen.groupId } : {}),
+        ...(mine ? {} : { note: '이 주소는 사람이 열어둔 탭에 이미 떠 있어 그 탭을 돌려줍니다. 내 탭이 아니니 close_tab 으로 닫지 마세요.' }),
+      }
+    }
     // ⚠️service worker 에서 부르면 create 의 active:false 가 무시되고 새 탭이 앞으로 나온다(실측 — 같은
     // 호출이 확장 페이지에서는 존중된다). 사람이 보던 탭을 뺏지 않도록 직전 활성 탭을 곧바로 되돌린다.
     // 되돌릴 대상은 반드시 "새 탭이 실제로 생긴 창"의 것이어야 한다 — 창이 여러 개일 때
@@ -642,6 +675,26 @@ const handlers = {
 
   async list_groups() {
     return await listGroups()
+  },
+
+  // 이 크롬 프로필에 저장된 북마크를 **읽기만** 한다(2026-09-16 지시). 만들기·옮기기·지우기는
+  // 두지 않는다 — 사람이 몇 년에 걸쳐 쌓은 자료라 에이전트가 건드려 잃으면 되돌릴 길이 없다.
+  // 폴더 구조는 `path` 한 줄로 접어 준다. 트리째 실으면 대부분이 중첩 껍데기라 읽는 쪽이 비싸다.
+  async bookmarks({ query = '', limit = 200 } = {}) {
+    if (!chrome.bookmarks) {
+      throw new Error('NO_BOOKMARKS: 북마크 권한이 없습니다. chrome://extensions 에서 이 확장을 다시 로드하세요.')
+    }
+    const tree = await chrome.bookmarks.getTree()
+    const all = flattenBookmarks(tree[0]?.children || [])
+    const q = String(query).trim().toLowerCase()
+    const hits = q ? all.filter((b) => `${b.title} ${b.url} ${b.path}`.toLowerCase().includes(q)) : all
+    const cap = Math.max(1, Number(limit) || 200)
+    return {
+      total: all.length,
+      matched: hits.length,
+      bookmarks: hits.slice(0, cap),
+      ...(hits.length > cap ? { note: `${hits.length}개 중 ${cap}개만 실었습니다. query 로 좁히세요.` } : {}),
+    }
   },
 
   // 탭을 그룹에서 빼낸다. 마지막 탭이 빠지면 그룹은 크롬이 알아서 없앤다(그룹 삭제 API 는 없다).

@@ -347,6 +347,12 @@ if (!window.__ccInjected) {
            통째로 깨진다(background.js 의 call 처리 순서를 함께 볼 것). */
         :host([data-mode="active"]) .chip { pointer-events: none; }
         .chip.drag { cursor: grabbing; }
+        /* 이름/작업명 위에, 방금 한 일을 아래에. 작업명은 학생이 직접 붙여야 채워지지만 아랫줄은
+           도구 호출에서 저절로 쌓이므로, 이름만 떠 있어 아무것도 알 수 없던 자리를 이게 메운다.
+           길면 자른다 — 검색어가 그대로 들어오는 줄이라 안 자르면 칩이 화면 폭을 가로지른다. */
+        .lines { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+        .doing { font-size: 10px; font-weight: 400; opacity: .6; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+        .doing:empty { display: none; }
         /* 칩 자리. 기본은 우상단이지만 계정 메뉴·닫기 버튼이 거기 있는 사이트에서는 그걸 가린다.
            모서리는 넷 중 하나를 고르고, 그 모서리로부터 얼마나 떨어질지는 --dx/--dy 가 정한다 —
            끌어서 옮긴 자리를 절대 좌표로 두면 창 크기가 바뀔 때 칩이 화면 밖으로 밀려난다.
@@ -428,7 +434,7 @@ if (!window.__ccInjected) {
         :host([data-mode="idle"]) .cursor { opacity: 0 !important; }
       </style>
       <div class="frame"></div>
-      <div class="chip"><span class="avas"></span><span class="label"></span></div>
+      <div class="chip"><span class="avas"></span><span class="lines"><span class="label"></span><span class="doing"></span></span></div>
       <div class="cursor"><img alt=""></div>`
     /* brand-skip — 러너 다섯 칸. 마크업이 아니라 여기서 만드는 이유는 배포판에서 이 블록만
        들어내면 쓰이지 않는 빈 요소도 함께 사라지기 때문이다. */
@@ -678,6 +684,10 @@ if (!window.__ccInjected) {
         ? (occ[0].task ? `${occ[0].name} · ${occ[0].task}` : occ[0].name)
         : occ.map((o) => o.name).join(' · ')
       if (label.textContent !== text) label.textContent = text
+      // 방금 한 일. 같은 이유로 여럿일 때는 접는다.
+      const doing = chip.querySelector('.doing')
+      const what = occ.length === 1 ? (occ[0].doing || '') : ''
+      if (doing.textContent !== what) doing.textContent = what
       return { applied: true, state: mode, occupants: occ.length }
     },
 

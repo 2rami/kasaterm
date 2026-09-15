@@ -509,6 +509,11 @@ tool('browser_ungroup_tabs', 'Pull tabs out of their tab groups. Omit tabIds to 
   tabIds: z.array(z.number().int()).optional().describe('Specific tabs to ungroup. Omit for all.'),
 }, async (a) => text(await call('ungroup_tabs', a, 15000)))
 
+tool('browser_bookmarks', 'Read the bookmarks saved in this Chrome profile — what the human has kept, with the folder path each one sits in. Use it when the human refers to a page they saved ("that dashboard I bookmarked", "open my staging link") instead of guessing the URL, and to learn which tools and sites they actually work with. Pass `query` to filter by title, URL or folder name; omit it to list everything (capped by `limit`, default 200). Read-only by design: this cannot create, move or delete a bookmark, so nothing you do here can lose the human\'s collection. Folder structure comes back flattened as a `path` string per entry rather than a nested tree.', {
+  query: z.string().optional().describe('Filter by title, URL or folder name. Omit for everything.'),
+  limit: z.number().int().optional().describe('Maximum entries to return (default 200).'),
+}, async (a) => text(await call('bookmarks', a, 15000)))
+
 tool('browser_dev_reload', 'Reload this extension itself after its source changed. Only needed while developing the extension.', {},
   async () => text(await call('dev_reload', {}, 5000)))
 
