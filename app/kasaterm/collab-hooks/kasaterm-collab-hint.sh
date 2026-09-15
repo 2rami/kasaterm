@@ -14,11 +14,9 @@ read -r -d '' CTX <<'EOF'
 - 전체를 계속 감시하려면(팀장/오케스트레이터): Monitor 도구로 `kasaterm-cli board-watch 3` 를 persistent로 걸면 pane 상태가 바뀔 때마다(working↔idle↔building, 합류/종료) 알림이 온다.
 
 네가 능동적으로 할 것:
-- 작업을 맡을 때 선언: kasacollab task add "무슨 일" (다른 pane과 안 겹치게). 끝나면 kasacollab task done <id>.
-- 다른 pane이 시킨 작업(브리프)을 마쳤으면 마지막에: kasaterm-cli done succeeded "끝난 것: … / 남은 것: 미확인·막힘 포함 / 사용자가 할 것: 없으면 없음" — 쉬운 한국어 한 줄로 쓰고 기술 상세는 기록에 남긴다. board에 완료가 정본으로 뜬다(추정 아님). 실패로 끝나도 숨기지 말고 failed로 같은 보고를 해라. (kasacollab task done은 태스크 목록 정리, kasaterm-cli done은 pane 완료 보고 — 다른 것)
-- 다른 pane에 말 걸기 — **통로가 상대에 따라 갈린다.** claude pane이면 SendMessage: cross-session 명부에 올라 있어 유휴로 프롬프트만 떠 있어도 읽고, 상대 화면을 안 어지럽힌다. claude가 아닌 pane(codex·agy·opencode·gemini·cursor…)은 그 명부에 안 올라 SendMessage가 아예 안 닿으니 kasaterm-cli tell %N "메시지" — 상대 입력창에 글자를 밀어넣는 것이라 타이핑 중이면 섞인다. 무엇으로 도는지는 kasaterm-cli board의 harness로 본다(하네스는 claude·codex·agy 말고도 서른 종이 넘는다). ⚠️둘을 겹쳐 보내지 마라 — 같은 말이 상대 화면에 두 번 뜨고 상대가 두 번 깨어난다. kasacollab msg %N "메시지"는 상대가 kasacollab inbox로 확인하는 비동기 쪽지라 급하지 않을 때 쓴다.
-- kasacollab = python3 ~/.claude/hooks/kasacollab.py — task add|list|done, msg, inbox.
-
+- 작업을 맡을 때 선언: 같은 파일을 만질 만한 pane에 SendMessage로 "이 파일 내가 만진다" 한 줄. 겹침은 conflict-guard가 막아 주지만, 미리 알리면 상대가 헛일을 안 한다.
+- 다른 pane이 시킨 작업(브리프)을 마쳤으면 마지막에 시킨 쪽으로 보고 — 브리프가 온 통로 그대로(claude면 SendMessage, 아니면 tell). 끝난 것 / 남은 것 / 사용자가 할 것 세 칸을 쉬운 한국어로 쓰고 기술 상세는 기록에 남긴다. 실패로 끝나도 숨기지 말고 무엇이 막혔는지 원인 한 줄을 남은 것에 적어라.
+- 다른 pane에 말 걸기 — **통로가 상대에 따라 갈린다.** claude pane이면 SendMessage: cross-session 명부에 올라 있어 유휴로 프롬프트만 떠 있어도 읽고, 상대 화면을 안 어지럽힌다. claude가 아닌 pane(codex·agy·opencode·gemini·cursor…)은 그 명부에 안 올라 SendMessage가 아예 안 닿으니 kasaterm-cli tell %N "메시지" — 상대 입력창에 글자를 밀어넣는 것이라 타이핑 중이면 섞인다. 무엇으로 도는지는 kasaterm-cli board의 harness로 본다(하네스는 claude·codex·agy 말고도 서른 종이 넘는다). ⚠️둘을 겹쳐 보내지 마라 — 같은 말이 상대 화면에 두 번 뜨고 상대가 두 번 깨어난다.
 혼자 작업이면(다른 pane 없음) 신경 쓸 것 없다.
 EOF
 

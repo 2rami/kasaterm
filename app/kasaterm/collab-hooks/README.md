@@ -15,9 +15,8 @@ hook 경로 해석(`locate_collab_hooks_dir`): env `KASATERM_COLLAB_HOOKS_DIR` �
 | `auto-imgopen.sh` | PostToolUse(SendUserFile) | 보낸 이미지를 image pane 으로 자동 표시 |
 
 ## 협업 = 솔로 베이스 (god 폐기 2026-06-18)
-거노가 직접 오케스트레이터 — claude 끼리 자율 협업/통솔 안 함. board 는 호출 시점 pull(다른 pane 활동 보기), 충돌은 `conflict-guard` 가 transcript 직접 비교로 자동 차단, 메시지는 `kasacollab msg`(inbox). 가시성은 GUI(SCHALE OS) 관찰 레이어가 담당.
+거노가 직접 오케스트레이터 — claude 끼리 자율 협업/통솔 안 함. board 는 호출 시점 pull(다른 pane 활동 보기), 충돌은 `conflict-guard` 가 transcript 직접 비교로 자동 차단, 메시지는 SendMessage(claude pane)·`kasaterm-cli tell`(그 외). 가시성은 GUI(SCHALE OS) 관찰 레이어가 담당.
 
-- `kasacollab.py` — (CLI) task 분담·msg(보내기 전 살아있는 pane 검증)·board·mode·drain-stop.
 - 재시작 복구(후속 미구현): bind-transcript 가 `~/.config/kasaterm/agent-roster/<slug>.json` 에 pane↔session 을 영속 기록 → `claude --resume <uuid>` 로 세션 복원에 쓸 예정.
 
 ## 보관 hook (미주입 — 필요 시 hookSettings 에 추가)
