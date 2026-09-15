@@ -625,7 +625,7 @@ fn read_claude_tasks(session_id: &str) -> Vec<(String, String, String, String)> 
     };
     let base = home.join(".claude/tasks");
     let prefix: String = session_id.chars().take(8).collect();
-    // shim 이 CLAUDE_TASK_LIST_ID=<full session> 를 주입하면 store dir 이 full-uuid 또는
+    // shim 이 CLAUDE_CODE_TASK_LIST_ID=<full session> 를 주입하면 store dir 이 full-uuid 또는
     // session-<full> 형태일 수 있다. 신형 session-<8hex> → full-uuid → session-<full> 순.
     let candidates = [
         base.join(format!("session-{prefix}")),

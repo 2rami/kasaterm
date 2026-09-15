@@ -7836,7 +7836,9 @@ fi\n\
 # task store(~/.claude/tasks/<id>)를 transcript session 과 같은 키로 묶는다 — 없으면 claude\n\
 # 가 매 실행 임의 session-<hex8> 로 task 를 저장해 pane↔task 매핑이 끊긴다(거노: 유즈\n\
 # 업무탭 빔). SID 비면(사용자 --resume) claude 기본.\n\
-[ -n \"$SID\" ] && export CLAUDE_TASK_LIST_ID=\"$SID\"\n\
+# 이름은 CLAUDE_CODE_ 접두어다. CLAUDE_TASK_LIST_ID 로 주면 claude 가 안 읽고, 그러면\n\
+# 목록 키가 안 잡히면서 Task 도구 자체가 세션에 안 실린다(2026-09-15 실측).\n\
+[ -n \"$SID\" ] && export CLAUDE_CODE_TASK_LIST_ID=\"$SID\"\n\
 {mblk}\
 if [ \"$USER_SETTINGS\" = 1 ] || [ ! -f \"$SETTINGS\" ]; then\n\
   exec \"$REAL\" \"$@\"\n\
