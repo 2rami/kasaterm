@@ -39,6 +39,7 @@ mod render;
 mod rich_document;
 mod vault;
 mod screenread;
+mod vault_graph;
 mod session;
 mod server_restore;
 mod session_transfer;
@@ -3592,6 +3593,7 @@ impl Workspace {
 enum UserEvent {
     VaultPicked { owner: WindowId, root: String },
     VaultListings { owner: WindowId, generation: u64, listings: Vec<vault::Listing> },
+    VaultGraph { owner: WindowId, generation: u64, request_generation: u64, request_id: String, graph: vault_graph::Graph },
     VaultSearch { owner: WindowId, generation: u64, query: String, request_id: String, entries: Vec<vault::Entry>, error: Option<String> },
     VaultDocument { owner: WindowId, generation: u64, relative: String, path: String, text: std::result::Result<String, String> },
     RichDocument { owner: WindowId, message: String },

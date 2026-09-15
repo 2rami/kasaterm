@@ -201,7 +201,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Local cmux socket backend delegated a pane write / split / focus to
         // this GUI thread (the socket server can't touch self.pty directly).
         match &event {
-            UserEvent::VaultPicked { .. } | UserEvent::VaultListings { .. } | UserEvent::VaultSearch { .. } | UserEvent::VaultDocument { .. } => return,
+            UserEvent::VaultPicked { .. } | UserEvent::VaultListings { .. } | UserEvent::VaultSearch { .. } | UserEvent::VaultDocument { .. } | UserEvent::VaultGraph { .. } => return,
             UserEvent::RichDocument { .. } => return,
             UserEvent::CloseGraceExpired => {
                 self.finish_close_grace();

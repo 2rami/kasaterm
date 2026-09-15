@@ -193,6 +193,8 @@ pub(crate) struct AuxWindows {
     vault_poll: Instant,
     vault_open_generation: u64,
     vault_search_generation: Arc<std::sync::atomic::AtomicU64>,
+    vault_graph_generation: Arc<std::sync::atomic::AtomicU64>,
+    vault_graph_request: Option<String>,
 }
 
 impl AuxWindows {
@@ -226,6 +228,8 @@ impl AuxWindows {
             vault_poll: Instant::now() - std::time::Duration::from_secs(3),
             vault_open_generation: 0,
             vault_search_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_graph_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_graph_request: None,
         }
     }
 }
@@ -1751,6 +1755,19 @@ impl App {
                 }
             }
             "vault-open" => self.request_vault_document(index,node),
+            "vault-graph" => {
+                let Some(request_id) = value["requestId"].as_str().filter(|id| id.len() <= 256).map(String::from) else { return true; };
+                let request_generation = self.aux.vault_graph_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                self.aux.vault_graph_request = Some(request_id.clone());
+                let current = self.aux.vault_graph_generation.clone();
+                let generation = self.aux.vault_generation;
+                let root = self.aux.vault.as_ref().map(|vault| std::path::PathBuf::from(&vault.root));
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let graph = root.map(|root| crate::vault_graph::scan(&root, request_generation, current)).unwrap_or_else(|| crate::vault_graph::Graph { error: Some("먼저 볼트 폴더를 선택해 주세요".into()), ..Default::default() });
+                    let _ = proxy.send_event(UserEvent::VaultGraph { owner, generation, request_generation, request_id, graph });
+                });
+            }
             "vault-search" => {
                 let query = value["query"].as_str().unwrap_or("").chars().take(256).collect::<String>();
                 let request_id = value["requestId"].as_str().map(String::from).unwrap_or_else(||value["requestId"].to_string());
@@ -1824,7 +1841,10 @@ impl App {
             } else { self.open_md_dest(&path.to_string_lossy()); }
             return;
         }
-        if path.to_string_lossy() == self.aux.windows[index].editor.doc.path { return; }
+        if path.to_string_lossy() == self.aux.windows[index].editor.doc.path {
+            self.publish_vault(index);
+            return;
+        }
         self.aux.vault_open_generation += 1;
         self.aux.windows[index].wiki_anchor = None;
         self.aux.windows[index].vault_transition = None;
@@ -1873,6 +1893,8 @@ impl App {
             VaultTransition::Root(root) => {
                 self.aux.vault = Some(crate::vault::Record {root:root.to_string_lossy().into_owned(),active:None});
                 self.aux.vault_generation += 1;
+                self.aux.vault_graph_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.aux.vault_graph_request = None;
                 self.aux.vault_search_generation.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
                 self.aux.vault_open_generation += 1;
                 self.aux.vault_directories.clear(); self.aux.vault_cache.clear(); self.aux.vault_scanning = false;
@@ -1937,6 +1959,14 @@ impl App {
             UserEvent::VaultSearch {owner,generation,query,request_id,entries,error} => {
                 if *generation != self.aux.vault_search_generation.load(std::sync::atomic::Ordering::Relaxed) { return true; }
                 if let Some(index) = self.aux_index(*owner) { if let Some(rich) = &self.aux.windows[index].rich {rich.call("setVaultSearch",serde_json::json!({"query":query,"requestId":request_id,"entries":entries,"error":error}));} }
+            }
+            UserEvent::VaultGraph { owner, generation, request_generation, request_id, graph } => {
+                if *generation != self.aux.vault_generation || Some(*owner) != self.aux.vault_owner
+                    || *request_generation != self.aux.vault_graph_generation.load(std::sync::atomic::Ordering::Relaxed)
+                    || self.aux.vault_graph_request.as_deref() != Some(request_id.as_str()) { return true; }
+                if let Some(index) = self.aux_index(*owner) { if let Some(rich) = &self.aux.windows[index].rich {
+                    rich.call("setVaultGraph", serde_json::json!({"vaultId":format!("vault:{generation}"), "requestId":request_id, "nodes":graph.nodes, "edges":graph.edges, "truncated":graph.truncated, "error":graph.error}));
+                } }
             }
             _ => return false,
         }
