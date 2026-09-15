@@ -1,0 +1,16 @@
+.vault-view-switch { display:flex; gap:4px; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--paper); }
+.vault-view-switch [aria-pressed=true] { background:var(--active); color:var(--ink); }
+.vault-graph { height:calc(100vh - 54px); min-height:320px; display:flex; flex-direction:column; color:var(--ink); background:var(--paper); overflow:hidden; }
+.vault-graph[hidden],.vault-view-switch[hidden] { display:none; }
+.graph-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:12px 16px 4px; }
+.graph-toolbar input { flex:1 1 130px; min-width:0; max-width:280px; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--soft); color:var(--ink); font:13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif; }
+.graph-status,.graph-hint { margin:8px 16px; font-size:12px; line-height:1.5; color:var(--muted); overflow-wrap:anywhere; }
+.graph-stage { position:relative; flex:1; min-height:140px; overflow:hidden; }
+.graph-stage canvas { display:block; width:100%; height:100%; touch-action:none; cursor:grab; }
+.graph-tooltip { position:absolute; left:12px; bottom:8px; max-width:calc(100% - 24px); padding:6px 9px; border:1px solid var(--line); border-radius:6px; background:var(--paper); color:var(--ink); font-size:12px; overflow-wrap:anywhere; pointer-events:none; }
+.graph-documents { border-top:1px solid var(--line); padding:8px 16px; font-size:12px; max-height:35%; overflow:auto; flex-shrink:0; }
+.graph-documents summary { cursor:pointer; padding:4px 0; }
+.graph-list { display:flex; flex-direction:column; align-items:stretch; gap:2px; padding-top:8px; }
+.graph-list button { display:block; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-height:32px; }
+.vault-graph :focus-visible,.vault-view-switch :focus-visible { outline:2px solid var(--ink); outline-offset:2px; }
+@media(max-width:699px) { .vault-view-switch { padding-left:56px; } .graph-toolbar { padding-inline:12px; } .graph-toolbar input { max-width:none; flex-basis:100%; } }

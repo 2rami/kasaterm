@@ -10,11 +10,13 @@ import { createSizedCaret } from './caret';
 import { blockAt, insertAfterBlock, duplicateBlock, removeBlock, moveBlockBy, moveBlockTo, unwrapListItem, type BlockTarget } from './block-controls';
 import './editor.css';
 import './vault.css';
+import './graph.css';
+import type { VaultGraph } from './graph';
 
 declare global { interface Window {
   __KASATERM_DOC_TOKEN__?: string;
   ipc?: { postMessage(message: string): void };
-  kasatermEditor: { init(data: Init): void; setContent(data: Content): void; setTheme(theme: unknown): void; setVault(data: VaultState): void; setVaultChildren(data: VaultChildren): void; setVaultSearch(data: VaultSearch): void; command(name: string, payload?: any): void; setSaveState(data: { state: string; message?: string }): void };
+  kasatermEditor: { init(data: Init): void; setContent(data: Content): void; setTheme(theme: unknown): void; setVault(data: VaultState): void; setVaultChildren(data: VaultChildren): void; setVaultSearch(data: VaultSearch): void; setVaultGraph(data: VaultGraph): void; command(name: string, payload?: any): void; setSaveState(data: { state: string; message?: string }): void };
 } }
 type Content = { markdown: string; revision: number };
 type Init = Content & { token: string; theme?: any; editable?: boolean };

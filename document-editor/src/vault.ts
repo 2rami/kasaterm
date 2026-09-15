@@ -1,3 +1,4 @@
+import { mountGraph, type VaultGraph } from './graph';
 export type VaultEntry = { id: string; name: string; kind: 'folder' | 'markdown' | 'image' | 'pdf' | 'file' };
 export type VaultState = { id?: string; name?: string; available: boolean; loading?: boolean; error?: string; activeId?: string; hasDocument: boolean; entries?: VaultEntry[]; nextCursor?: number; recent?: { id: string; name: string }[] };
 export type VaultChildren = { parentId: string; entries: VaultEntry[]; nextCursor?: number; error?: string };
@@ -59,6 +60,26 @@ export function mountVault(documentRoot: HTMLElement, send: Sender) {
   documentRoot.before(shell); canvas.append(welcome, documentRoot); shell.append(aside, veil, canvas, toggle);
   let state: VaultState | undefined, expanded = new Set<string>(), children = new Map<string, Listing>(), loading = new Set<string>();
   let rows: Row[] = [], searchResult: VaultSearch | undefined, searchTimer: ReturnType<typeof setTimeout> | undefined, queryId = 0, picking = false;
+  let graphMode = false, graphRequest = 0, graphVaultId = '', pendingOpen: string | undefined;
+  let graphTimeout: ReturnType<typeof setTimeout> | undefined;
+  const graph = mountGraph(id => { pendingOpen = id; send('vault-open', { nodeId: id }); }, requestGraph);
+  const viewSwitch = document.createElement('div'); viewSwitch.className = 'vault-view-switch'; viewSwitch.hidden = true;
+  const documentButton = action('본문', () => setGraphMode(false));
+  const graphButton = action('그래프', () => { setGraphMode(true); requestGraph(); });
+  viewSwitch.append(documentButton, graphButton); canvas.prepend(viewSwitch); canvas.append(graph.root);
+  function setGraphMode(value: boolean) {
+    graphMode = value; graph.show(value); documentRoot.hidden = value || !state?.hasDocument; welcome.hidden = value || Boolean(state?.hasDocument);
+    documentButton.setAttribute('aria-pressed', String(!value)); graphButton.setAttribute('aria-pressed', String(value));
+  }
+  function requestGraph() {
+    if (!state?.available) return;
+    clearTimeout(graphTimeout); graphVaultId = state.id ?? ''; graphRequest++; graph.loading();
+    const requestId = String(graphRequest), vaultId = graphVaultId;
+    send('vault-graph', { requestId });
+    graphTimeout = setTimeout(() => {
+      if (requestId === String(graphRequest)) graph.set({ vaultId, requestId, nodes: [], edges: [], truncated: false, error: '응답이 늦어지고 있어요.' });
+    }, 30000);
+  }
   const rowHeight = 32;
   function choose(id?: string) { if (picking) return; picking = true; renderWelcome(); send('vault-choose', id ? { nodeId: id } : {}); }
   function renderWelcome() {
@@ -90,6 +111,7 @@ export function mountVault(documentRoot: HTMLElement, send: Sender) {
       else { expanded.add(entry.id); if (!children.has(entry.id)) requestFolder(entry.id); }
       updateRows();
     } else {
+      if (graphMode) pendingOpen = entry.id;
       send('vault-open', { nodeId: entry.id });
       if (innerWidth < 700) shell.classList.remove('vault-sidebar-open');
     }
@@ -130,9 +152,13 @@ export function mountVault(documentRoot: HTMLElement, send: Sender) {
   return {
     setVault(next: VaultState) {
       const changed = !state || (next.id ?? next.name) !== (state.id ?? state.name);
+      const opened = pendingOpen !== undefined && next.activeId === pendingOpen && next.hasDocument;
       if (changed) { expanded.clear(); children.clear(); loading.clear(); search.value = ''; searchResult = undefined; tree.scrollTop = 0; }
       state = next; picking = false; shell.classList.remove('vault-disabled'); shell.classList.toggle('vault-has-vault', next.available); shell.classList.toggle('vault-has-document', next.hasDocument);
       title.textContent = next.name ?? '볼트'; documentRoot.hidden = !next.hasDocument; welcome.hidden = next.hasDocument; aside.hidden = !next.available; toggle.hidden = !next.available;
+      viewSwitch.hidden = !next.available;
+      if (changed || opened || !next.available) { pendingOpen = undefined; graphRequest++; clearTimeout(graphTimeout); setGraphMode(false); }
+      else setGraphMode(graphMode);
       renderWelcome(); updateRows();
     },
     setVaultChildren(data: VaultChildren) {
@@ -146,5 +172,11 @@ export function mountVault(documentRoot: HTMLElement, send: Sender) {
       if (data.requestId !== String(queryId) || data.query !== search.value.trim()) return;
       searchResult = data; updateRows();
     },
+    setVaultGraph(data: VaultGraph) {
+      if (!state?.available || data.requestId !== String(graphRequest) || data.vaultId !== graphVaultId || state.id !== graphVaultId) return;
+      clearTimeout(graphTimeout);
+      graph.set(data);
+    },
+    destroy() { clearTimeout(searchTimer); clearTimeout(graphTimeout); window.removeEventListener('resize', renderRows); graph.destroy(); },
   };
 }
