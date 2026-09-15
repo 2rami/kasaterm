@@ -99,7 +99,7 @@ pub(crate) struct SettingsCache {
     palette_hex: Arc<Vec<String>>,
     pub(crate) device_colors: Arc<Vec<crate::render::pane_identity::DeviceColorRow>>,
     theme_rosters: Arc<std::collections::HashMap<String, Vec<CharacterChoice>>>,
-    theme_picks: Arc<std::collections::HashMap<String, Vec<String>>>,
+    ordered_picks: Arc<Vec<(String, Vec<String>)>>,
     accounts: Arc<Vec<AccountChoice>>,
     themegen_providers: Arc<Vec<crate::themegen::ProviderStatus>>,
     themegen_provider: String,
@@ -156,7 +156,7 @@ impl SettingsCache {
         self.language = socket::read_ui_language();
 
         let mut theme_rosters = std::collections::HashMap::new();
-        let mut theme_picks = std::collections::HashMap::new();
+        self.ordered_picks = Arc::new(kasa_mcp::character::all_picks());
         for row in self.themes.iter() {
             let key = if row.id.is_empty() {
                 kasa_mcp::character::BASE_THEME_KEY.to_string()
@@ -182,11 +182,9 @@ impl SettingsCache {
                         .collect()
                 })
                 .unwrap_or_default();
-            theme_picks.insert(key.clone(), kasa_mcp::character::picks_of_theme(&key));
             theme_rosters.insert(key, members);
         }
         self.theme_rosters = Arc::new(theme_rosters);
-        self.theme_picks = Arc::new(theme_picks);
 
         let settings = socket::read_settings();
         self.themegen_provider = settings
@@ -561,8 +559,6 @@ pub(crate) enum HitCursor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum DropdownId {
     UiFont,
-    /// 캐릭터 페이지 맨 위의 「캐릭터 테마」 — 목업대로 격자 대신 선택 상자 하나.
-    CharacterTheme,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -737,10 +733,9 @@ pub(crate) struct Snapshot {
     /// 계정 칸이 지금 다루는 기계 — `true` = 본진.
     pub(crate) account_scope_home: bool,
     pub(crate) palettes: Arc<Vec<PaletteChoice>>,
-    pub(crate) characters: Arc<Vec<CharacterChoice>>,
     pub(crate) themes: Arc<Vec<socket::ThemeRow>>,
     pub(crate) theme_rosters: Arc<std::collections::HashMap<String, Vec<CharacterChoice>>>,
-    pub(crate) theme_picks: Arc<std::collections::HashMap<String, Vec<String>>>,
+    pub(crate) ordered_picks: Arc<Vec<(String, Vec<String>)>>,
     pub(crate) inspected_theme: Option<String>,
     pub(crate) theme_label_edit: Option<(String, String)>,
     pub(crate) character_theme: String,
@@ -799,10 +794,12 @@ impl App {
                     }
                 }
                 SettingsCat::Students if self.students_selected.is_none() => {
-                    plan.include_student_faces(
-                        &cache.character_theme,
-                        cache.characters.iter().map(|character| character.slug.as_str()),
-                    );
+                    for row in cache.themes.iter() {
+                        let key = if row.id.is_empty() { kasa_mcp::character::BASE_THEME_KEY } else { &row.id };
+                        if let Some(roster) = cache.theme_rosters.get(key) {
+                            plan.include_student_faces(&row.id, roster.iter().map(|c| c.slug.as_str()));
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -955,10 +952,9 @@ impl App {
             home_accounts: home_accounts_view(),
             account_scope_home: self.set_account_scope_home,
             palettes: cache.palettes.clone(),
-            characters: cache.characters.clone(),
             themes: cache.themes.clone(),
             theme_rosters: cache.theme_rosters.clone(),
-            theme_picks: cache.theme_picks.clone(),
+            ordered_picks: cache.ordered_picks.clone(),
             inspected_theme: scene.inspected_theme().map(str::to_string),
             theme_label_edit: self.theme_label_edit.clone(),
             character_theme: cache.character_theme.clone(),
@@ -4800,8 +4796,6 @@ fn paint_themes(
             id
         };
         let roster = s.theme_rosters.get(key).cloned().unwrap_or_default();
-        let picked = s.theme_picks.get(key).cloned().unwrap_or_default();
-        let fallback = picked.is_empty();
         let label = s
             .themes
             .iter()
@@ -4813,7 +4807,7 @@ fn paint_themes(
             x,
             *y,
             &format!("{label} 명단"),
-            "아무도 따로 고르지 않으면 이 테마의 전원이 기본 후보입니다",
+            "다른 명단과 함께 사용할 캐릭터를 고릅니다",
         );
         *y += 54.0;
         button(
@@ -4830,7 +4824,7 @@ fn paint_themes(
             s,
             hits,
             (x + 120.0, *y, 124.0, 34.0),
-            "기본값으로",
+            "선택 해제",
             Target::Setting(SettingsAction::ThemePickAll(key.to_string(), false)),
             false,
         );
@@ -4840,7 +4834,7 @@ fn paint_themes(
         let card_w = (w - gap * (cols - 1) as f32) / cols as f32;
         let card_h = 82.0;
         for (index, character) in roster.iter().enumerate() {
-            let on = fallback || picked.iter().any(|name| name == &character.name);
+            let on = character_choice_selected(s, key, &character.name);
             let rect = (
                 x + (index % cols) as f32 * (card_w + gap),
                 *y + (index / cols) as f32 * (card_h + gap),
@@ -4908,9 +4902,7 @@ fn paint_themes(
     );
 }
 
-/// 캐릭터 페이지 맨 위 「테마」 절 — 목업 IA(테마+캐릭터→캐릭터). 세트 고르기는
-/// 선택 상자 하나로 끝나고, 명단·그림·내보내기처럼 세트를 손보는 일은 「테마 관리」로
-/// 예전 테마 페이지에 들어가서 한다(그 페이지는 옆 목록에서 빠졌다).
+// 선택과 편집은 서로 다른 동작이므로 카드와 편집 버튼의 대상을 나눈다.
 fn paint_character_theme_row(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -4919,32 +4911,36 @@ fn paint_character_theme_row(
     y: &mut f32,
     w: f32,
 ) {
-    section_title(g, x, *y, "테마", "");
+    section_title(g, x, *y, "사용할 캐릭터", "앱 테마와 관계없이 여러 명단에서 함께 고릅니다");
     *y += 54.0;
-    let current = s
-        .themes
-        .iter()
-        .find(|t| t.id == s.character_theme)
-        .map(|t| t.label.clone())
-        .unwrap_or_else(|| {
-            if s.character_theme.is_empty() {
-                "블루 아카이브 (기본)".to_string()
-            } else {
-                s.character_theme.clone()
-            }
-        });
-    dropdown_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "캐릭터 테마",
-        &current,
-        DropdownId::CharacterTheme,
-    );
-    *y += 8.0;
+    info_slab(g, x, y, w, "새 대화에 사용할 명단이에요. 앱 테마와 따로 고르고, 같은 이름·그림은 새 선택으로 교체해요.");
+    let fallback = !s.ordered_picks.iter().any(|(key, names)| s.theme_rosters.get(key)
+        .is_some_and(|roster| roster.iter().any(|character| names.contains(&character.name))));
+    if fallback {
+        info_slab(g, x, y, w, "선택한 캐릭터가 없으면 기본 명단을 사용해요.");
+    }
+    for row in s.themes.iter() {
+        let key = if row.id.is_empty() { kasa_mcp::character::BASE_THEME_KEY } else { &row.id };
+        let Some(roster) = s.theme_rosters.get(key) else { continue };
+        if roster.is_empty() { continue; }
+        let label = fit(g, &row.label, w.max(0.0), 14.0, true);
+        draw_text(g, x, *y, &label, 14.0, theme::text(), true);
+        *y += 30.0;
+        let gap = 8.0;
+        let cols = ((w + gap) / 170.0).floor().max(1.0) as usize;
+        let cw = (w - gap * (cols - 1) as f32) / cols as f32;
+        for (i, character) in roster.iter().enumerate() {
+            let on = character_choice_selected(s, key, &character.name);
+            let rect = (x + (i % cols) as f32 * (cw + gap), *y + (i / cols) as f32 * 82.0, cw, 74.0);
+            choice_card(g, s, hits, rect, on, Target::Setting(SettingsAction::CharacterPick(key.to_string(), character.name.clone(), !on)));
+            s.media.draw_face(g, &row.id, &character.slug, (rect.0 + 6.0, rect.1 + 8.0, 40.0, 54.0));
+            let name = fit(g, &character.name, (cw - 88.0).max(0.0), 12.0, on);
+            draw_text(g, rect.0 + 50.0, rect.1 + 17.0, &name, 12.0, theme::text(), on);
+            draw_text(g, rect.0 + 50.0, rect.1 + 40.0, if on { "사용 중" } else { "선택" }, 10.5, theme::text_dim(), false);
+            mini_icon_button(g, s, hits, (rect.0 + cw - 32.0, rect.1 + 24.0, 26.0, 26.0), "edit-3", Target::Setting(SettingsAction::SelectStudentInTheme(row.id.clone(), character.name.clone())));
+        }
+        *y += ((roster.len() + cols - 1) / cols) as f32 * 82.0 + 24.0;
+    }
     button(
         g,
         s,
@@ -4954,16 +4950,38 @@ fn paint_character_theme_row(
         Target::Category(SettingsCat::Theme),
         false,
     );
+    let description = fit(g, "명단과 그림, 내보내기·삭제", (w - 104.0).max(0.0), 11.5, false);
     draw_text(
         g,
         x + 104.0,
         *y + 6.5,
-        "명단과 그림, 내보내기·삭제",
+        &description,
         11.5,
         theme::text_dim(),
         false,
     );
     *y += CTL_H + 28.0;
+}
+
+fn character_choice_selected(s: &Snapshot, key: &str, name: &str) -> bool {
+    character_choice_selected_from(&s.ordered_picks, &s.theme_rosters, &s.character_theme, key, name)
+}
+
+fn character_choice_selected_from(
+    selected: &[(String, Vec<String>)],
+    rosters: &std::collections::HashMap<String, Vec<CharacterChoice>>,
+    active: &str,
+    key: &str,
+    name: &str,
+) -> bool {
+    let picks: Vec<_> = selected.iter().filter(|(key, names)| rosters.get(key).is_some_and(|roster| roster.iter().any(|c| names.contains(&c.name)))).collect();
+    if picks.is_empty() {
+        return key == if active.is_empty() { kasa_mcp::character::BASE_THEME_KEY } else { active };
+    }
+    // 저장 순서가 실제 배정 우선순위이므로 과거 중복 선택도 그대로 표시한다.
+    picks.iter().find(|(theme, names)| names.iter().any(|n| n == name)
+        && rosters.get(theme).is_some_and(|roster| roster.iter().any(|c| c.name == name)))
+        .is_some_and(|(theme, _)| theme.as_str() == key)
 }
 
 fn paint_students(
@@ -4977,6 +4995,7 @@ fn paint_students(
 ) {
     if s.student_selected.is_none() {
         paint_character_theme_row(g, s, hits, x, y, w);
+        return;
     }
     paint_themegen_engine(g, s, hits, caret, x, y, w);
     if let Some(selected) = s.student_selected.as_deref() {
@@ -4989,16 +5008,14 @@ fn paint_students(
             Target::Setting(SettingsAction::CloseStudent),
             false,
         );
-        draw_text(g, x + 112.0, *y + 6.0, selected, 17.0, theme::text(), true);
+        let selected_label = fit(g, selected, (w - 194.0).max(0.0), 17.0, true);
+        draw_text(g, x + 112.0, *y + 6.0, &selected_label, 17.0, theme::text(), true);
+        let selected_theme = fit(g, if s.student_theme.is_empty() { "Bundled" } else { &s.student_theme }, (w - 194.0).max(0.0), 10.5, false);
         draw_text(
             g,
             x + 112.0,
             *y + 28.0,
-            if s.student_theme.is_empty() {
-                "Bundled"
-            } else {
-                &s.student_theme
-            },
+            &selected_theme,
             10.5,
             theme::text_dim(),
             false,
@@ -5238,95 +5255,6 @@ fn paint_students(
         info_slab(g, x, y, w, "그림 파일을 이 화면에 놓으면 이 캐릭터의 참조로 저장합니다.");
         return;
     }
-
-    section_title(
-        g,
-        x,
-        *y,
-        "캐릭터",
-        "한 명을 골라 이름과 성격, 모델을 고칩니다",
-    );
-    *y += 54.0;
-    let gap = 10.0;
-    let cols = if w >= 680.0 {
-        4
-    } else if w >= 470.0 {
-        3
-    } else {
-        2
-    };
-    let cw = (w - gap * (cols - 1) as f32) / cols as f32;
-    let ch = 74.0;
-    for (i, character) in s.characters.iter().enumerate() {
-        let rect = (
-            x + (i % cols) as f32 * (cw + gap),
-            *y + (i / cols) as f32 * (ch + gap),
-            cw,
-            ch,
-        );
-        choice_card(
-            g,
-            s,
-            hits,
-            rect,
-            false,
-            Target::Setting(SettingsAction::SelectStudent(character.name.clone())),
-        );
-        let face = (rect.0 + 8.0, rect.1 + 7.0, 42.0, 54.0);
-        let status = s
-            .media
-            .draw_face(g, &s.character_theme, &character.slug, face);
-        if !status.is_ready() {
-            let color = color_for_word(if character.slug.is_empty() {
-                &character.name
-            } else {
-                &character.slug
-            });
-            round_rect(g, rect.0 + 12.0, rect.1 + 14.0, 34.0, 34.0, 17.0, color);
-        }
-        let name = fit(g, &character.name, rect.2 - 66.0, 12.0, false);
-        draw_text(
-            g,
-            rect.0 + 56.0,
-            rect.1 + 25.0,
-            &name,
-            12.0,
-            theme::text(),
-            false,
-        );
-    }
-    let rows = (s.characters.len() + cols - 1) / cols;
-    *y += rows as f32 * (ch + gap) + 8.0;
-    button(
-        g,
-        s,
-        hits,
-        (x, *y, 132.0, 34.0),
-        "캐릭터 폴더 열기",
-        Target::Setting(SettingsAction::OpenStudentsDir),
-        false,
-    );
-    button(
-        g,
-        s,
-        hits,
-        (x + 142.0, *y, 132.0, 34.0),
-        "정의 파일 열기",
-        Target::Setting(SettingsAction::OpenCharactersJson),
-        false,
-    );
-    *y += 48.0;
-    info_slab(
-        g,
-        x,
-        y,
-        w,
-        if s.character_theme.is_empty() {
-            "새 캐릭터는 먼저 테마를 복제한 뒤 그림 파일을 이 화면에 놓아 만듭니다."
-        } else {
-            "새 캐릭터 그림을 이 화면에 놓으면 파일 이름으로 명단에 추가합니다."
-        },
-    );
 }
 
 fn paint_motion_sprites(
@@ -6516,7 +6444,7 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
             "ssh 로 붙는 다른 컴퓨터를 등록합니다",
         ),
         SettingsCat::Theme => ("테마", "image", "캐릭터 명단과 그림을 한 벌로 갈아낍니다"),
-        SettingsCat::Students => ("캐릭터", "users", "한 명씩 이름과 성격, 모델을 고칩니다"),
+        SettingsCat::Students => ("캐릭터", "users", "테마를 섞어 사용할 캐릭터를 고릅니다"),
         SettingsCat::Feedback => (
             "피드백",
             "message-square-warning",
@@ -6776,21 +6704,6 @@ fn dropdown_items(s: &Snapshot, id: DropdownId) -> Vec<(String, bool, SettingsAc
             }));
             items
         }
-        DropdownId::CharacterTheme => s
-            .themes
-            .iter()
-            .map(|t| {
-                (
-                    if t.count > 0 {
-                        format!("{} · {}명", t.label, t.count)
-                    } else {
-                        t.label.clone()
-                    },
-                    s.character_theme == t.id,
-                    SettingsAction::SelectTheme(t.id.clone()),
-                )
-            })
-            .collect(),
     }
 }
 
@@ -7758,6 +7671,23 @@ mod tests {
         assert!(!action_refreshes_cache(&SettingsAction::CursorShape(
             cursor::CursorShape::Frame,
         )));
+    }
+
+    #[test]
+    fn mixed_character_choices_keep_their_selection_across_active_themes() {
+        use std::collections::HashMap;
+        let rosters: HashMap<_, _> = [("a", vec!["Alice", "Shared"]), ("b", vec!["Bob", "Shared"])]
+            .into_iter().map(|(theme, names)| (theme.to_string(), names.into_iter()
+                .map(|name| CharacterChoice { name: name.into(), slug: name.into() }).collect())).collect();
+        let selected = vec![("b".into(), vec!["Bob".into(), "Shared".into()]), ("a".into(), vec!["Alice".into(), "Shared".into()])];
+        for active in ["a", "b", ""] {
+            assert!(character_choice_selected_from(&selected, &rosters, active, "a", "Alice"));
+            assert!(character_choice_selected_from(&selected, &rosters, active, "b", "Bob"));
+            assert!(!character_choice_selected_from(&selected, &rosters, active, "a", "Shared"));
+            assert!(character_choice_selected_from(&selected, &rosters, active, "b", "Shared"));
+        }
+        assert!(character_choice_selected_from(&[], &rosters, "b", "b", "Bob"));
+        assert!(!character_choice_selected_from(&[], &rosters, "b", "a", "Alice"));
     }
 
     #[test]

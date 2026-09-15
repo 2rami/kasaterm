@@ -2647,25 +2647,7 @@ impl App {
                 ));
             }
         }
-        let mut picks = kasa_mcp::character::all_picks();
-        let slot = match picks.iter_mut().find(|(k, _)| k == theme) {
-            Some(s) => s,
-            None => {
-                picks.push((theme.to_string(), Vec::new()));
-                picks.last_mut().expect("just pushed")
-            }
-        };
-        // 아무도 안 고른 테마를 처음 건드릴 때 「끄기」로 들어오면, 지금 전원이
-        // 후보인 상태에서 한 명만 빼는 뜻이 된다 — 그러려면 나머지를 전부 켜 둬야
-        // 한다. 안 그러면 명단이 빈 채로 남아 다시 전원 후보가 되어 아무 일도
-        // 안 일어난 것처럼 보인다.
-        if !on && slot.1.is_empty() {
-            slot.1 = theme_roster_names(theme);
-        }
-        slot.1.retain(|n| n != name);
-        if on && !slot.1.iter().any(|n| n == name) {
-            slot.1.push(name.to_string());
-        }
+        let picks = updated_character_picks(kasa_mcp::character::all_picks(), theme, name, on, theme_roster_value)?;
         socket::write_character_picks(&picks);
         self.invalidate_character_view();
         Ok(kasa_mcp::character::picks_of_theme(theme)
@@ -2692,7 +2674,11 @@ impl App {
         let mut picks = kasa_mcp::character::all_picks();
         picks.retain(|(k, _)| k != theme);
         if on {
+            replace_conflicting_character_picks(&mut picks, theme, &names, theme_roster_value);
             picks.push((theme.to_string(), names));
+        }
+        if !picks.iter().any(|(_, selected)| !selected.is_empty()) {
+            return Err("최소 한 명은 선택해 주세요".to_string());
         }
         // 끄기는 키를 빼는 것으로 끝난다 — 빈 배열은 저장 때 어차피 걷힌다.
         socket::write_character_picks(&picks);
@@ -2704,6 +2690,11 @@ impl App {
     /// 이미 비웠다 — 여기는 그림·색·테마 카드 몫이라 **짝으로** 불러야 한다.
     fn invalidate_character_view(&mut self) {
         crate::theme::invalidate_roster();
+        self.web_visual.invalidate_assets();
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.drop_images_with_prefix("student:");
+        }
+        crate::render::invalidate_idle_anim();
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -8258,14 +8249,64 @@ pub(crate) fn predicted_target_dir(
     String::new()
 }
 
-/// 그 테마의 전원 이름. `__base` 는 번들(활성 테마를 뺀 기본) 로스터다.
-fn theme_roster_names(theme: &str) -> Vec<String> {
-    let chars = if theme == kasa_mcp::character::BASE_THEME_KEY {
+fn theme_roster_value(theme: &str) -> Option<serde_json::Value> {
+    if theme == kasa_mcp::character::BASE_THEME_KEY {
         kasa_mcp::character::base_characters_json()
     } else {
         kasa_mcp::character::theme_characters_json(theme)
+    }
+}
+
+fn updated_character_picks(
+    mut picks: Vec<(String, Vec<String>)>,
+    theme: &str,
+    name: &str,
+    on: bool,
+    load: impl Fn(&str) -> Option<serde_json::Value>,
+) -> Result<Vec<(String, Vec<String>)>, String> {
+    let unrestricted = picks.iter().all(|(_, names)| names.is_empty());
+    if on {
+        replace_conflicting_character_picks(&mut picks, theme, &[name.to_string()], &load);
+    }
+    let index = picks.iter().position(|(key, _)| key == theme).unwrap_or_else(|| {
+        picks.push((theme.to_string(), Vec::new()));
+        picks.len() - 1
+    });
+    let names = &mut picks[index].1;
+    // 처음의 전체 후보에서 한 명을 뺄 때만 나머지를 명시적으로 저장한다.
+    if !on && unrestricted {
+        *names = load(theme).as_ref().map(kasa_mcp::character::member_names).unwrap_or_default();
+    }
+    names.retain(|other| other != name);
+    if on { names.push(name.to_string()); }
+    picks.retain(|(_, names)| !names.is_empty());
+    if picks.is_empty() { return Err("최소 한 명은 선택해 주세요".to_string()); }
+    Ok(picks)
+}
+
+fn replace_conflicting_character_picks(
+    picks: &mut [(String, Vec<String>)],
+    theme: &str,
+    names: &[String],
+    load: impl Fn(&str) -> Option<serde_json::Value>,
+) {
+    let slug_of = |roster: &serde_json::Value, name: &str| {
+        kasa_mcp::character::member_def(roster, name)
+            .and_then(|m| m.get("slug").and_then(|s| s.as_str()).map(String::from))
+            .filter(|s| !s.is_empty())
     };
-    chars
+    let slugs: Vec<String> = load(theme).map(|roster| names.iter().filter_map(|name| slug_of(&roster, name)).collect()).unwrap_or_default();
+    for (other_theme, selected) in picks {
+        if other_theme == theme { continue; }
+        let roster = load(other_theme);
+        // 얼굴도 슬러그로 찾으므로 동명뿐 아니라 같은 그림 키도 한 테마만 남긴다.
+        selected.retain(|name| !names.contains(name) && !roster.as_ref()
+            .and_then(|r| slug_of(r, name)).is_some_and(|slug| slugs.contains(&slug)));
+    }
+}
+
+fn theme_roster_names(theme: &str) -> Vec<String> {
+    theme_roster_value(theme)
         .as_ref()
         .map(kasa_mcp::character::member_names)
         .unwrap_or_default()
@@ -8808,6 +8849,32 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mixed_character_picks_replace_conflicts_without_changing_other_choices() {
+        use super::updated_character_picks;
+        fn roster(theme: &str) -> Option<serde_json::Value> {
+            Some(if theme == "a" {
+                serde_json::json!({"members":[{"name":"Alice","slug":"alice"},{"name":"Shared","slug":"shared"},{"name":"Old art","slug":"same-art"}]})
+            } else {
+                serde_json::json!({"members":[{"name":"Bob","slug":"bob"},{"name":"Shared","slug":"shared"},{"name":"New art","slug":"same-art"}]})
+            })
+        }
+        let old = vec![("a".into(), vec!["Alice".into(), "Shared".into(), "Old art".into()])];
+        let picks = updated_character_picks(old.clone(), "b", "Bob", true, roster).unwrap();
+        assert_eq!(picks[0], old[0]);
+        let picks = updated_character_picks(picks, "b", "Shared", true, roster).unwrap();
+        assert!(!picks[0].1.contains(&"Shared".into()));
+        let picks = updated_character_picks(picks, "b", "New art", true, roster).unwrap();
+        assert_eq!(picks[0].1, vec!["Alice"]);
+        let picks = updated_character_picks(picks, "a", "Alice", false, roster).unwrap();
+        assert_eq!(picks.len(), 1);
+        assert_eq!(picks[0].0, "b");
+        let picks = updated_character_picks(picks, "a", "Alice", false, roster).unwrap();
+        assert_eq!(picks.len(), 1, "an unselected collection must not become selected on deselection");
+        assert!(updated_character_picks(vec![("b".into(), vec!["Bob".into()])], "b", "Bob", false, roster).is_err());
+        let fallback = updated_character_picks(vec![], "a", "Alice", false, roster).unwrap();
+        assert_eq!(fallback[0].1, vec!["Shared", "Old art"]);
+    }
     #[test]
     fn surface_key_save_close_reopen_preserves_identity_without_reusing_live_ids() {
         let alive = format!("%{}", uuid::Uuid::new_v4().as_u128() as u32);
