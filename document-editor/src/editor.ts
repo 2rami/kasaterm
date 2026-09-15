@@ -23,7 +23,22 @@ const live = document.createElement('div'); live.className = 'save-notice'; live
 const slash = document.createElement('div'); slash.className = 'context-menu slash-menu'; slash.hidden = true; slash.setAttribute('role', 'listbox'); slash.setAttribute('aria-label', '블록 추가');
 const bubble = document.createElement('div'); bubble.className = 'context-menu bubble'; bubble.hidden = true; bubble.setAttribute('role', 'toolbar'); bubble.setAttribute('aria-label', '선택한 글자 서식');
 const panel = document.createElement('div'); panel.className = 'context-menu utility-panel'; panel.hidden = true;
-document.body.append(root, live, slash, bubble, panel);
+let copyTarget: HTMLElement | null = null;
+const copy = button('복사', async () => {
+  if (!copyTarget) return;
+  const text = copyTarget.textContent ?? '';
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+    else {
+      const input = document.createElement('textarea'); input.value = text; input.style.position = 'fixed'; input.style.opacity = '0';
+      document.body.append(input); input.select(); const copied = document.execCommand('copy'); input.remove();
+      if (!copied) throw new Error('clipboard');
+    }
+    copy.textContent = '복사됨';
+  } catch { copy.textContent = '복사 실패'; }
+}, '코드 블록 복사');
+copy.className = 'code-copy'; copy.hidden = true;
+document.body.append(root, live, slash, bubble, panel, copy);
 function send(kind: string, includeContent = false, extra = {}) {
   if (!token) return;
   window.ipc?.postMessage(JSON.stringify({ kind, token, revision, ...(includeContent ? { markdown: current() } : {}), ...extra }));
@@ -177,6 +192,14 @@ window.kasatermEditor = {
 };
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { panel.hidden = true; bubble.hidden = true; slash.hidden = true; } });
 document.addEventListener('mousedown', e => { if (!panel.contains(e.target as globalThis.Node) && !bubble.contains(e.target as globalThis.Node) && !slash.contains(e.target as globalThis.Node)) panel.hidden = true; });
+document.addEventListener('mouseover', e => {
+  const target = e.target as HTMLElement;
+  const link = target.closest('a'); if (link) link.title = '⌘ 또는 Ctrl 키를 누른 채 클릭하면 링크를 열어요';
+  if (target === copy) return;
+  copyTarget = target.closest<HTMLElement>('.document-content pre');
+  copy.hidden = !copyTarget;
+  if (copyTarget) { const rect = copyTarget.getBoundingClientRect(); copy.textContent = '복사'; position(copy, rect.right - 62, rect.top + 8); }
+});
 window.addEventListener('resize', () => { panel.hidden = true; updateMenus(); });
-window.addEventListener('scroll', () => { bubble.hidden = true; slash.hidden = true; }, { passive: true });
+window.addEventListener('scroll', () => { bubble.hidden = true; slash.hidden = true; copy.hidden = true; }, { passive: true });
 send('ready');
