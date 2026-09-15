@@ -60,8 +60,8 @@ impl ContextEvidence {
             ];
         }
         let usage = self.last_input_tokens.map_or_else(
-            || "미확인 · 최근 입력 토큰".into(),
-            |n| format!("최근 입력 {n} 토큰"),
+            || "미확인 · 마지막 입력 사용량".into(),
+            |n| format!("마지막 기록 · 입력 {n} 토큰"),
         );
         let tools = format!(
             "{} · 스킬 읽기 {} · MCP 호출 {}종",
@@ -94,9 +94,10 @@ impl ContextEvidence {
         }
         let mut tokens = vec![
             self.last_input_tokens.map_or_else(
-                || "미확인 · 최근 요청 입력".into(),
-                |n| format!("최근 요청 입력: {n} 토큰 (캐시 포함)"),
+                || "미확인 · 마지막으로 기록된 입력 사용량".into(),
+                |n| format!("마지막 사용량 기록: 입력 {n} 토큰 (캐시 포함)"),
             ),
+            "오류가 난 요청의 사용량이 없으면 앞선 응답 기록이 남을 수 있어요.".into(),
             "토큰은 전송 바이트와 다른 단위예요.".into(),
         ];
         if self.last_input_tokens.is_some() && self.cumulative_input_tokens.is_none() {
@@ -879,5 +880,23 @@ mod tests {
             ["목록: 2개", "  first", "  last"]
         );
         assert!(list("연결", None)[0].starts_with("미확인"));
+    }
+
+    #[test]
+    fn error_without_usage_keeps_previous_report_and_labels_it_as_recorded() {
+        let mut evidence = parse(&[
+            serde_json::json!({"type":"assistant","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":900}}}),
+            serde_json::json!({"type":"assistant","isApiErrorMessage":true,"message":{"content":[{"type":"text","text":"Request too large (32MB)"}]}}),
+        ]);
+        evidence.available = true;
+        assert_eq!(evidence.last_input_tokens, Some(1000));
+        assert!(evidence.request_size_error);
+        assert_eq!(evidence.request_bytes, None);
+        assert!(evidence.summary_lines()[0].starts_with("마지막 기록"));
+        assert!(evidence
+            .detail_sections()
+            .iter()
+            .flat_map(|(_, lines)| lines)
+            .any(|line| line.contains("앞선 응답 기록")));
     }
 }
