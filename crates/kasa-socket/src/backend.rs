@@ -296,11 +296,11 @@ pub struct PaneActivity {
     pub cwd: String,
     /// statusLine 이 보고한 "현재 보는 경로" — claude 는 셸 위에서 돌아 lsof(cwd)로는
     /// 내부 cd 가 안 보여, statusline.py 가 매 렌더 `report-cwd` 로 직접 보고한다.
-    /// cwd(=claude 프로세스 실행 경로, 고정)와 함께 푸터 "실행/현재 보는" 두 경로(거노).
+    /// cwd(=claude 프로세스 실행 경로, 고정)와 함께 푸터 "실행/현재 보는" 두 경로(사용자).
     #[serde(default)]
     pub view_cwd: String,
     /// claude saved default effort(~/.claude/settings.json `effortLevel`) — resume 직후엔 현재
-    /// 세션의 /effort stdout 이 jsonl 에 없어 GUI effort 카드가 빈값이 됐다(거노: resume 후 effort
+    /// 세션의 /effort stdout 이 jsonl 에 없어 GUI effort 카드가 빈값이 됐다(사용자: resume 후 effort
     /// 만 뜸). 그 폴백값. ultracode 는 "this session only"라 여기 안 들어와 잔존하지 않는다.
     #[serde(default)]
     pub effort_default: String,
@@ -320,13 +320,13 @@ pub struct PaneActivity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// 이 pane 이 속한 kasaterm 윈도우(=방) 인덱스. board 가 활성 윈도우뿐 아니라 전
-    /// 윈도우 pane 을 실으면서 arona-ui 가 방별로 학생을 그룹핑하게 한다(거노: 좌측 통합).
+    /// 윈도우 pane 을 실으면서 arona-ui 가 방별로 학생을 그룹핑하게 한다(사용자: 좌측 통합).
     /// 0 기본 — board 빌더(socket.rs)가 윈도우별로 채운다.
     #[serde(default)]
     pub window_idx: usize,
     /// 구독 한도 사용률(%) — **codex 전용**, claude pane 은 None.
     ///
-    /// 거노 2026-08-05: codex 는 정액제라 비용($)이 무의미하고(그래서 board 비용 칸은
+    /// 사용자 2026-08-05: codex 는 정액제라 비용($)이 무의미하고(그래서 board 비용 칸은
     /// `—`), 실제로 알고 싶은 건 "얼마나 썼나 / 언제 리셋되나"다. 화면 모양:
     /// ```text
     /// claude   $126.02  ctx 50%
@@ -340,7 +340,7 @@ pub struct PaneActivity {
     /// 창 종류가 늘어도 코드를 안 고치게 이름 대신 숫자를 싣는다.
     #[serde(default)]
     pub rate_window_minutes: Option<u32>,
-    /// 그 창이 리셋되는 절대 시각(unix 초). **표시는 상대 시간으로** 바꿔라(거노) —
+    /// 그 창이 리셋되는 절대 시각(unix 초). **표시는 상대 시간으로** 바꿔라(사용자) —
     /// 절대 시각은 읽는 사람이 매번 뺄셈을 해야 한다.
     #[serde(default)]
     pub rate_resets_at: Option<i64>,
@@ -361,7 +361,7 @@ pub struct PaneActivity {
     pub done_ago_secs: Option<u64>,
     /// **화면에 없는 pane**(사용자가 닫았거나 숨김 — PTY 는 재부착 대비로 돈다).
     /// 사용자가 닫은 pane 은 화면에서 사라졌는데 board 에는 멀쩡히 떠서, 학생들이
-    /// 거기가 닫힌 줄 모르고 새 일을 시켰다(거노 2026-08-15 「내가 pane 닫아도
+    /// 거기가 닫힌 줄 모르고 새 일을 시켰다(사용자 2026-08-15 「내가 pane 닫아도
     /// 너네한텐 안 보이고 살아있어서 거기다가 시킨다」). 참이면 **새 일을 시키지
     /// 말 것** — 이어받으려면 사람이 되살리기로 화면에 꺼낸 뒤에.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -658,7 +658,7 @@ pub trait Backend: Send + Sync {
     ///
     /// 닫은 pane 은 죽지 않는다 — 프로세스를 물고 이 목록에 앉아 있다가 밀려날 때
     /// 비로소 죽는다. 오케스트레이터가 `dismiss` 로 정리한 학생들이 그래서 계속 살아
-    /// 있는데, GUI 밖에서는 그 사실을 볼 수도 끌 수도 없었다(거노 2026-08-06).
+    /// 있는데, GUI 밖에서는 그 사실을 볼 수도 끌 수도 없었다(사용자 2026-08-06).
     fn closed_panes(&self, _discard: Option<&str>) -> Result<serde_json::Value> {
         anyhow::bail!("이 백엔드는 되살리기 목록을 모른다")
     }
@@ -1024,7 +1024,7 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("new_room not supported")
     }
     /// 활성 pane(보이는 방)의 방 식별자 — 방별 collab(모모톡 inbox 등)을 그 방으로
-    /// 격리한다(거노: 방끼리 inbox 공유 금지). 기본 방(없음)이면 None.
+    /// 격리한다(사용자: 방끼리 inbox 공유 금지). 기본 방(없음)이면 None.
     fn active_room(&self) -> Option<String> {
         None
     }

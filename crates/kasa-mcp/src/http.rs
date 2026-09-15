@@ -218,7 +218,7 @@ async fn schedule_loop(backend: Arc<dyn Backend>) {
             // 발사 — 학생 TUI 제출(submit_payload).
             let _ = backend.send_text(Some(&it.surface), &submit_payload(&it.text));
             // 모모톡에도 노란 버블로 — send_text 는 PTY 주입만 하고 messages.jsonl 에 안 남겨
-            // 예약/타이머 발신이 대화창에 안 떴다(거노). read=false 로 inbox(미확인) 기록.
+            // 예약/타이머 발신이 대화창에 안 떴다(사용자). read=false 로 inbox(미확인) 기록.
             persist_sensei_msg(
                 &resolve_cwd(&backend),
                 &it.surface,
@@ -557,7 +557,7 @@ async fn sent_images_handler(
         _ => kasa_socket::collab_root().join(mode_slug(&cwd)),
     };
     // 세션 경계: since(현재 세션 첫 이벤트 ts, unix sec) 이전 이미지는 이전 대화 잔류물 —
-    // 제외(거노: 이전 pane 이미지가 새 대화에 남던 것). sent-images.jsonl 은 방단위 append-only
+    // 제외(사용자: 이전 pane 이미지가 새 대화에 남던 것). sent-images.jsonl 은 방단위 append-only
     // 라 /clear·세션전환 후에도 옛 경로가 누적된다. since 없으면(transcript 빈 경우) 전체.
     let since = params.get("since").and_then(|s| s.parse::<f64>().ok());
     let mut imgs: Vec<String> = Vec::new();
@@ -588,7 +588,7 @@ async fn sent_images_handler(
 /// task 디렉토리에서 `[(id, subject, status, owner)]` 파싱. id(숫자) 오름차순. 비-json 제외.
 ///
 /// `owner` 를 같이 싣는 이유: 같은 방 pane 들이 **한 목록을 공유하는 건 설계**라, 주인이
-/// 없으면 화면에서 「내 것」과 「방 전체」를 가를 근거가 아무것도 없다(거노 2026-08-06).
+/// 없으면 화면에서 「내 것」과 「방 전체」를 가를 근거가 아무것도 없다(사용자 2026-08-06).
 /// 비어 있는 owner 는 주인 없는 방 공용 태스크다 — 그것도 정보다.
 fn read_tasks_in_dir(dir: &std::path::Path) -> Vec<(String, String, String, String)> {
     let mut tasks: Vec<(u64, String, String, String, String)> = Vec::new();
@@ -644,7 +644,7 @@ fn read_claude_tasks(session_id: &str) -> Vec<(String, String, String, String)> 
 /// 정확하고, cwd·mtime 추측이 필요 없다. 같은 방 pane 들이 **같은 목록을 공유하는 건 설계**다
 /// (그래서 여러 pane 을 한 번에 물을 때만 호출부가 dedup 한다).
 ///
-/// 이게 없던 동안 태스크가 **모든 pane 에서 0개**로 떴다(거노: 아루 태스크가 이상하다).
+/// 이게 없던 동안 태스크가 **모든 pane 에서 0개**로 떴다(사용자: 아루 태스크가 이상하다).
 /// 옛 경로 둘이 다 빗나가서다 — store 는 `tasks/<team>/` 인데 세션 경로는 `tasks/session-<8hex>/`
 /// 를 찾았고, cwd 폴백은 `teams/<team>/config.json` 의 `members[].cwd` 를 읽는데 그 파일이
 /// 이제 안 생긴다(팀 디렉토리엔 `inboxes/` 뿐, 실측 2026-08-05).
@@ -822,14 +822,14 @@ async fn paste_image_handler(
         return (cors, Json(serde_json::json!({ "ok": false })));
     }
     // 클립보드+Ctrl+V 로 claude 입력에 [Image] 첨부만. 아로나 대화창엔 send 후 프록시가
-    // 캡처한 user 메시지(텍스트+이미지)로 말풍선에 뜬다 — sent-images 큰 박스 write 안 함(거노).
+    // 캡처한 user 메시지(텍스트+이미지)로 말풍선에 뜬다 — sent-images 큰 박스 write 안 함(사용자).
     match backend.paste_image(&surface, body.to_vec()) {
         Ok(()) => (cors, Json(serde_json::json!({ "ok": true }))),
         Err(error) => (cors, Json(serde_json::json!({ "ok": false, "error": error.to_string() }))),
     }
 }
 
-/// `POST /git-panel` — 아로나 타이틀바 버튼 → 터미널 GUI git 소스컨트롤 패널 토글(거노).
+/// `POST /git-panel` — 아로나 타이틀바 버튼 → 터미널 GUI git 소스컨트롤 패널 토글(사용자).
 async fn git_panel_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
     let ok = backend.toggle_git_panel().is_ok();
@@ -873,7 +873,7 @@ async fn list_dir_handler(
 
 /// `POST /room-cd?path=<path>` — 방(active pane)을 그 경로로 이동.
 /// **셸 pane 일 때만** `cd '<path>'` + CR 을 주입한다. claude 등 다른 포그라운드가
-/// 떠 있으면 raw `cd` 가 그 프로그램 입력칸에 박히므로(거노: "프롬프트에 cd~~가 입력돼")
+/// 떠 있으면 raw `cd` 가 그 프로그램 입력칸에 박히므로(사용자: "프롬프트에 cd~~가 입력돼")
 /// 아무것도 보내지 않고 현재 cwd 를 유지한다 — BA GUI 는 돌아가는 세션을 건드리지 않는다.
 async fn room_cd_handler(
     backend: Arc<dyn Backend>,
@@ -1271,7 +1271,7 @@ fn add_cmd(
 }
 
 /// `GET /slash-commands` — claude 가 `/` 자동완성에 보여주는 동적 명령(스킬·커스텀·플러그인)을
-/// 디스크 스캔(거노: 스킬 이런 거 다). ~/.claude/skills·commands·plugins + 프로젝트 .claude/skills.
+/// 디스크 스캔(사용자: 스킬 이런 거 다). ~/.claude/skills·commands·plugins + 프로젝트 .claude/skills.
 /// MCP 프롬프트는 서버 런타임이라 파일 스캔 불가 — 프런트 정적 목록이 내장 명령을 커버한다.
 async fn slash_commands_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
@@ -1430,7 +1430,7 @@ async fn arona_ui_serve(rel: String) -> axum::response::Response {
     }
     match std::fs::read(&canon) {
         // no-store: webview(WKWebView)가 옛 index.html+JS 를 통째 캐시해 relaunch 후에도
-        // stale UI 를 띄우던 문제 차단(거노: 모달 z-fix 가 안 보이던 근본). 로컬·소번들
+        // stale UI 를 띄우던 문제 차단(사용자: 모달 z-fix 가 안 보이던 근본). 로컬·소번들
         // 이라 매 로드 재요청 비용 무시 가능 — 항상 최신.
         Ok(bytes) => (
             axum::http::StatusCode::OK,
@@ -1934,7 +1934,7 @@ async fn session_switch_handler(
 }
 
 /// `POST /session-new?character=<name>` — 새 방(윈도우) + 첫 pane 캐릭터 지정 스폰
-/// (거노: 방 추가 시 캐릭터 선택). 미지정이면 아로나 기본. 구 클라이언트의
+/// (사용자: 방 추가 시 캐릭터 선택). 미지정이면 아로나 기본. 구 클라이언트의
 /// `?god=` 파라미터도 당분간 수용(god 개념 폐기 후 하위호환).
 async fn session_new_handler(
     backend: Arc<dyn Backend>,
@@ -2215,7 +2215,7 @@ async fn teamname_handler(
 /// id(bound transcript stem, 플레인 텍스트). statusline 이 `⑂ bg` 배지를 정밀
 /// 판별하는 데 쓴다: 자기 session_id 와 이 응답이 같으면 foreground(복원·재부팅
 /// 포함), 다르면 진짜 백그라운드 포크. anchor(KASATERM_SESSION_ID) 휴리스틱은
-/// 앱 재시작 복원에서 세션↔anchor 가 갈라져 오발화했다(거노) — 런타임 bound 조회가
+/// 앱 재시작 복원에서 세션↔anchor 가 갈라져 오발화했다(사용자) — 런타임 bound 조회가
 /// 정본. 미바인딩·미지정은 빈 응답(statusline 은 빈 응답이면 배지 생략).
 async fn pane_session_handler(
     backend: Arc<dyn Backend>,
@@ -2247,7 +2247,7 @@ async fn persona_handler(
     let sid = params.get("sid").map(|s| s.as_str()).unwrap_or("");
     // ⚠️ 「말투」 토글을 여기서도 본다. shim 의 `--append-system-prompt` 만 막으면
     // **이 재주입 경로로 그대로 새어 들어간다** — 토글을 꺼도 말투가 계속 붙던 것이
-    // 그 때문이다(거노 2026-08-25 "토글꺼도 적용안되던데").
+    // 그 때문이다(사용자 2026-08-25 "토글꺼도 적용안되던데").
     let body = if sid.is_empty() || !crate::character::persona_enabled() {
         String::new()
     } else {
@@ -2350,7 +2350,7 @@ async fn persona_chat_handler(
 
 /// `GET /character?sid=<sid>` — 세션→캐릭터 바인딩의 정본 캐릭터명(없으면 빈 응답).
 /// claude shim 이 --resume/--session-id 부팅 때 pane 상속 캐릭터 대신 이걸로
-/// teammate 트리플·persona 를 짓는다(거노: 모모이 세션이 프라나 배지로 부팅).
+/// teammate 트리플·persona 를 짓는다(사용자: 모모이 세션이 프라나 배지로 부팅).
 async fn character_binding_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -2452,7 +2452,7 @@ fn with_bound_characters(sessions: &[kasa_socket::backend::RecentSession]) -> se
 ///
 /// `character` 는 세션→학생 영속 바인딩(session_characters.json) — teamName 기록
 /// 세션이 claude 자체 /resume 에서 숨겨지는 탓에 이 피커가 사실상 유일한 복원
-/// 입구라, 어느 학생의 세션인지 프사·학생색으로 즉시 구분하게 얹는다(거노).
+/// 입구라, 어느 학생의 세션인지 프사·학생색으로 즉시 구분하게 얹는다(사용자).
 /// 미바인딩 세션은 필드 생략(웹뷰가 실루엣 폴백).
 async fn recent_sessions_handler(
     backend: Arc<dyn Backend>,
@@ -2519,7 +2519,7 @@ async fn session_resume_handler(
 
 /// `POST /session-save?surface=%N` — foreground claude 를 background daemon 으로
 /// detach(←← agents-view 주입). surface 없으면 active pane. "대화 저장하기" — 터미널이
-/// 꺼져도 daemon 이 세션을 들고 살아남아 웹뷰에서 계속 보인다(거노 핵심).
+/// 꺼져도 daemon 이 세션을 들고 살아남아 웹뷰에서 계속 보인다(사용자 핵심).
 async fn session_save_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -2632,7 +2632,7 @@ async fn background_agents_handler(
                             // detach 포크는 --agent-name 유실로 이름 없이(name=sid 프리픽스)
                             // 등록된다 — claude 자체 목록은 upstream 한계라, 표시층(웹뷰·
                             // classroom)이 쓰도록 세션→캐릭터 바인딩(자기 sid → 없으면 부모
-                            // sid)으로 학생 이름을 복원해 얹는다(거노: ←← 하면 이름 사라짐).
+                            // sid)으로 학생 이름을 복원해 얹는다(사용자: ←← 하면 이름 사라짐).
                             let own_sid = a
                                 .get("sessionId")
                                 .and_then(|s| s.as_str())
@@ -2681,7 +2681,7 @@ async fn background_agents_handler(
 
 /// `POST /background-kill?pid=<pid>` — claude agents background 세션을 종료(SIGTERM).
 /// claude agents 에 공식 kill 명령이 없어 pid 로 직접 보낸다. pid 는 `/background-agents`
-/// 가 준 것(claude 워커 프로세스). 거노: 백그라운드 패널에서 세션을 쉽게 정리.
+/// 가 준 것(claude 워커 프로세스). 사용자: 백그라운드 패널에서 세션을 쉽게 정리.
 async fn background_kill_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -2968,7 +2968,7 @@ async fn layout_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
 /// `read=true`: `/send` 로 이미 PTY 전달됐으니 학생 inbox drain 은 막고
 /// 기록·표시만 남긴다.
 /// claude TUI(Ink)에 텍스트를 *제출까지* 보내는 페이로드. 단순 `\n`(LF)은 Ink 가
-/// 입력 내 개행으로 먹어 Enter 제출이 씹힌다(거노 실측: 텍스트만 입력칸에 남음).
+/// 입력 내 개행으로 먹어 Enter 제출이 씹힌다(사용자 실측: 텍스트만 입력칸에 남음).
 /// cli `tell` 과 동일하게 Ctrl-U(줄 비움) + bracketed paste + `\r`(CR=Enter):
 /// handler 의 `split_trailing_submit` 가 끝 `\r` 을 떼어 140ms 후 보내(Ink 가
 /// paste 처리를 끝낸 뒤) 제출이 확실히 먹는다.
@@ -2982,7 +2982,7 @@ fn submit_payload(text: &str) -> String {
 /// to/to_pane 은 surface(%N) — drain_unread 가 pane id 도 내 주소로 매칭한다.
 fn persist_sensei_msg(room_cwd: &std::path::Path, surface: &str, text: &str, read: bool, room: Option<&str>) {
     // 활성 방 디렉터리에 직접 기록(없으면 생성) — 읽기와 달리 존재 여부로 안 거른다.
-    // 방별 분리(거노): room 있으면 slug 에 `__room_<id>` — 모모톡 inbox 도 방별 격리.
+    // 방별 분리(사용자): room 있으면 slug 에 `__room_<id>` — 모모톡 inbox 도 방별 격리.
     let slug = match room {
         Some(r) => format!("{}__room_{}", mode_slug(room_cwd), r),
         None => mode_slug(room_cwd),
@@ -3059,7 +3059,7 @@ async fn send_handler(
             .into_response();
     }
     // 모모톡 inbox 발신(`inbox=1`): PTY 에 *주입하지 않고* messages.jsonl 에 read=false
-    // 로만 적는다(거노: 모모톡은 프롬프트가 아니라 에이전트 inbox). 받는 에이전트는
+    // 로만 적는다(사용자: 모모톡은 프롬프트가 아니라 에이전트 inbox). 받는 에이전트는
     // drain_unread 로 컨텍스트에 받고, idle 이면 nudge 가 4s 내 깨운다.
     let inbox = params.get("inbox").map(|v| v == "1" || v == "true").unwrap_or(false);
     if inbox {
@@ -3079,10 +3079,10 @@ async fn send_handler(
             // 선생님 발신을 messages.jsonl 에 영속(모모톡 가시) — 단, 실제 제출(submit)
             // 일 때만. 실시간 미러는 키 한 자마다 `\x15+부분입력`(submit=false)을 쏘는데,
             // 그걸 다 기록하면 모모톡에 "안녕 너"→"안녕 너 누"→… 한 자씩 쌓이고 `\x15`가
-            // ⊠ 글리프로 보였다(거노 리포트). 메뉴 선택·Ctrl 키도 submit=false → 제외.
+            // ⊠ 글리프로 보였다(사용자 리포트). 메뉴 선택·Ctrl 키도 submit=false → 제외.
             // 제어문자는 한 번 더 걸러 영속 텍스트를 깨끗이 유지한다.
             // `nopersist=1`: 학생별 대화 패널의 개인 지시는 그 학생 대화(캡처 프록시)에만
-            // 떠야 하는데 persist 하면 모모톡 단톡방에까지 노란버블로 샜다(거노). 모모톡
+            // 떠야 하는데 persist 하면 모모톡 단톡방에까지 노란버블로 샜다(사용자). 모모톡
             // 발신(모모톡 학생지목)만 persist, 학생별 대화는 nopersist 로 끈다.
             let nopersist = params.get("nopersist").map(|v| v == "1" || v == "true").unwrap_or(false);
             if submit && !nopersist {
@@ -3213,7 +3213,7 @@ fn collab_events(room_cwd: &std::path::Path, n: usize) -> Vec<Event> {
 }
 
 /// messages.jsonl 을 캐릭터명 해석 포함해 최근 N 개 반환(ts 내림차순).
-/// `room_cwd` = 활성 pane cwd(방 해석). `room` 있으면 방별 slug(거노: 방끼리 inbox 격리).
+/// `room_cwd` = 활성 pane cwd(방 해석). `room` 있으면 방별 slug(사용자: 방끼리 inbox 격리).
 fn collab_messages(room_cwd: &std::path::Path, n: usize, room: Option<&str>) -> Vec<MessageEntry> {
     let dir = match room {
         Some(r) => kasa_socket::collab_root()
@@ -3315,7 +3315,7 @@ enum CredSource {
 /// 끝냈는데, macOS 에서 claude CLI 가 갱신하는 정본은 키체인이라 한 번 남은
 /// `~/.claude/.credentials.json` 은 아무도 안 고쳐 주고 몇 시간이면 썩는다. 그러면
 /// 살아 있는 키체인 토큰을 눈앞에 두고 죽은 파일 토큰으로 401 을 받아, 화면은
-/// 기본 계정을 영영 "확인 중…" 으로 붙잡는다(거노 2026-08-13. 실측: 파일 토큰은
+/// 기본 계정을 영영 "확인 중…" 으로 붙잡는다(사용자 2026-08-13. 실측: 파일 토큰은
 /// 11:09 만료·401, 같은 시각 키체인 토큰은 200 이었다).
 fn read_claude_credentials(account_dir: Option<&str>) -> Option<(serde_json::Value, CredSource)> {
     let account_dir = account_dir.filter(|s| !s.is_empty());
@@ -3522,9 +3522,9 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
 
 /// `GET /claude-usage` — claude oauth usage API(5시간/주간 한도·사용률·리셋)를 그대로
 /// 프록시한다. rate limit 은 claude CLI 가 안 내보내지만 `/api/oauth/usage` 가 직접 준다
-/// (거노: ba모드 사용량 패널). 토큰 만료/실패는 그 상태를 ok:false 로 전달.
+/// (사용자: ba모드 사용량 패널). 토큰 만료/실패는 그 상태를 ok:false 로 전달.
 ///
-/// **프로세스 전역 TTL 캐시(거노: "사용량 또 안 뜸")**: oauth/usage 는 레이트리밋이
+/// **프로세스 전역 TTL 캐시(사용자: "사용량 또 안 뜸")**: oauth/usage 는 레이트리밋이
 /// 빡빡해, 터미널 폴러(60초)+웹뷰 TitleBar+여러 pane 이 매 요청 upstream 을 치면 금방
 /// 429 로 막힌다. 성공 응답을 캐시해 60초 이내 재요청은 upstream 없이 캐시로 답하고
 /// (호출을 60초당 1회로 수렴), upstream 실패(429 등) 시엔 마지막 성공값을 stale 로 돌려
@@ -3535,7 +3535,7 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
 /// 왜 이게 필요한가: `claude auth status` 의 `email`·`orgId`·`orgName` 은 슬롯별
 /// 저장소가 아니라 **공유 캐시 `~/.claude.json`** 에서 온다(실측: 공유 캐시를 치우면
 /// `loggedIn: true` 인데 email 이 `null`). 그래서 어느 슬롯에 로그인하든 모든 슬롯의
-/// 표시 이메일이 방금 로그인한 계정으로 바뀌었다 — 거노: "계정추가하면 1도 그거로
+/// 표시 이메일이 방금 로그인한 계정으로 바뀌었다 — 사용자: "계정추가하면 1도 그거로
 /// 바뀌어". 저장소는 실제로 갈려 있었고 표시만 거짓말을 하고 있었다.
 ///
 /// 토큰은 이 프로세스 안에서 키체인에서 읽어 헤더로만 나간다 — argv 에 안 실린다
@@ -3708,7 +3708,7 @@ async fn claude_identity_handler(
     let Some(body) = body else {
         // 십중팔구 access token 이 만료된 것이다. 안 쓰는 슬롯은 Claude Code 가
         // 갱신할 일이 없어 며칠이면 죽고, 그러면 이 자리가 영영 빈칸으로 남아
-        // "계정이 하나밖에 안 보인다"가 된다(거노, 2026-08-02. 실측: 기본 슬롯만
+        // "계정이 하나밖에 안 보인다"가 된다(사용자, 2026-08-02. 실측: 기본 슬롯만
         // 유효하고 나머지 둘은 이틀 전 만료였다).
         //
         // **토큰은 우리가 만지지 않는다.** refresh 를 직접 구현하려면 Anthropic 의
@@ -3771,7 +3771,7 @@ async fn claude_usage_handler(
     // 계정 저장소별 (freshness, usage). freshness=Some(at) 면 그 시점 성공값, None 이면
     // 디스크에서 로드한 재시작 이전 값(항상 만료 취급 → upstream 재시도, 실패 시 stale).
     //
-    // **캐시를 계정별로 가르는 이유**(거노 2026-08-05: "누를때마다 바뀐다는 표시가
+    // **캐시를 계정별로 가르는 이유**(사용자 2026-08-05: "누를때마다 바뀐다는 표시가
     // 없고 사용량도 제대로 표기안돼"): 전에는 프로세스 전역 한 벌이라, 계정을 바꿔도
     // 60초 동안은 **떠나온 계정의 숫자**가 그대로 나왔고 upstream 이 막히면 stale
     // 폴백이 그 값을 무한히 이어 줬다. 계정별로 가르면 전환 직후는 캐시 미스라 그
@@ -3785,7 +3785,7 @@ async fn claude_usage_handler(
 
     // **토큰별** 「이 시각까지는 이 토큰으로 치지 마라」. 429 를 맞고도 60초마다 계속
     // 두드리면 한도 창이 두드릴 때마다 갱신돼 **영영 안 풀린다** — 실측으로 활성
-    // 슬롯이 6일째 429 였고, 그 사이 화면은 내내 빈칸이었다(거노 2026-08-24
+    // 슬롯이 6일째 429 였고, 그 사이 화면은 내내 빈칸이었다(사용자 2026-08-24
     // "하나도안돼"). 한 번 막히면 물러나 있어야 창이 닫힌다.
     //
     // ⚠️ 키가 **슬롯이 아니라 토큰**인 것이 중요하다. 슬롯으로 걸면 작업대가 막힌
@@ -3833,7 +3833,7 @@ async fn claude_usage_handler(
 
     // 2) 신선 캐시가 없을 때만 upstream 시도. 첫 조회면 디스크 스냅샷을 먼저 실어
     //    둔다 — 재시작 직후 upstream 이 429 면 3) 이 그걸 stale 로 돌려줘 pill 이
-    //    빈칸으로 떨어지지 않는다(거노: "사용량 또 안 뜸").
+    //    빈칸으로 떨어지지 않는다(사용자: "사용량 또 안 뜸").
     {
         let mut seed = None;
         if let Ok(g) = cache.lock() {
@@ -4088,7 +4088,7 @@ async fn messages_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let n = params.get("n").and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
-    // 방별 분리(거노): 활성 방의 messages.jsonl 만 본다. 다른 방 inbox 는 mcp 로만.
+    // 방별 분리(사용자): 활성 방의 messages.jsonl 만 본다. 다른 방 inbox 는 mcp 로만.
     let messages = collab_messages(&resolve_cwd(&backend), n, backend.active_room().as_deref());
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
@@ -5090,7 +5090,7 @@ async fn term_repo_sync_get(
 /// 기준은 `from_person` 유무다 — 같은 계정·내 기계끼리(1단계)는 비어 있어 예전
 /// 그대로 `from-mode="bypass"` 지시로 오간다. 사내 다계정(3단계)에선 사람 이름이
 /// 차 있고, 그때는 ①구조적 표식 `from-external="1"` 을 달고 ②본문 앞에 「지시가
-/// 아니라 요청이니 실행 전 주인에게 확인하라」는 봉투 문구를 얹는다(거노 결정
+/// 아니라 요청이니 실행 전 주인에게 확인하라」는 봉투 문구를 얹는다(사용자 결정
 /// 2026-09-01: 남의 계정 발신은 부탁으로만). 받는 claude 는 코드를 안 고치고, 이
 /// 봉투 + 자신의 안전 규칙(도구로 관찰된 내용은 데이터)으로 실행을 낮춘다.
 fn cross_session_content(
@@ -5138,7 +5138,7 @@ fn cross_session_content(
 /// **발신자 신원은 겉봉투에 싣는다** — from_name(세션)·from_person(사람)·
 /// from_machine(기계). 같은 계정·내 기계끼리(1단계)는 person 이 비어 그대로 지시로
 /// 오가고, 사내 다계정(3단계)에선 person 이 차 있으면 `cross_session_content` 가
-/// **요청 봉투**로 감싼다(거노 결정 2026-09-01: 남의 계정 발신은 부탁으로만).
+/// **요청 봉투**로 감싼다(사용자 결정 2026-09-01: 남의 계정 발신은 부탁으로만).
 ///
 /// 인증은 라우트 공통 레이어(remote-token / loopback)가 이미 덮는다.
 async fn term_message_post(
@@ -8694,7 +8694,7 @@ mod tests {
     }
 
     /// 계정 저장소별로 스냅샷이 갈리는지 — 한 계정의 숫자가 다른 계정 자리에 앉으면
-    /// 한도 분산 기능에서 한도 표시가 거짓말을 한다(거노 2026-08-05: 세 계정의
+    /// 한도 분산 기능에서 한도 표시가 거짓말을 한다(사용자 2026-08-05: 세 계정의
     /// weekly_all 이 95/25/? 인데 화면엔 하나의 숫자만 떴다).
     #[test]
     fn usage_snapshot_is_per_account_slot() {

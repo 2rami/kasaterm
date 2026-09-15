@@ -1,6 +1,6 @@
 //! 캐릭터 배정 — characters.json persona + /tmp 마커 + 빈 슬롯 순환.
 //!
-//! 자율통솔·MCP `/spawn` 폐기(거노) 후, 학생 정체성을 백엔드(kasaterm)가
+//! 자율통솔·MCP `/spawn` 폐기(사용자) 후, 학생 정체성을 백엔드(kasaterm)가
 //! pane 생성 시점에 직접 박는다. 사용자가 그 pane 에서 `claude` 를 치면 shim 이
 //! 여기서 심은 env(KASATERM_CHARACTER/SESSION_ID/PERSONA)를 --session-id·
 //! --append-system-prompt 로 적용한다. board(socket.rs)는 같은 /tmp 마커를 읽어
@@ -547,7 +547,7 @@ fn names_of(arr: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 캐릭터 풀 — leader/leaders/members 통합, 이름 중복 제거. god 개념 폐기(거노
+/// 캐릭터 풀 — leader/leaders/members 통합, 이름 중복 제거. god 개념 폐기(사용자
 /// 2026-07-13): 아로나·프라나도 특별 클래스가 아니라 동등한 배정 대상이라
 /// 풀 구분 없이 전원 한 목록이다(config 의 leader/leaders 필드는 하위호환 파싱만).
 pub fn member_names(chars: &Value) -> Vec<String> {
@@ -718,7 +718,7 @@ pub fn assignable_names(chars: &Value) -> Vec<String> {
 /// 그 이름이 **지금 배정 대상인가**.
 ///
 /// 재시작 복원이 쓴다. 저장된 캐릭터를 그대로 되살리면 고른 명단을 바꿔도 이미
-/// 배정된 학생은 영원히 남는다 — 거노가 30명을 골랐는데 화면엔 안 고른 9명이
+/// 배정된 학생은 영원히 남는다 — 사용자가 30명을 골랐는데 화면엔 안 고른 9명이
 /// 계속 떠 있었고, 그건 새 배정이 명단을 어긴 게 아니라 **옛 배정이 안 바뀐** 것이었다
 /// (2026-08-25 실측: 새 pane 은 `pool=30/roster=79` 로 정확했다).
 pub fn is_assignable(name: &str) -> bool {
@@ -765,7 +765,7 @@ pub fn school_of(chars: &Value, name: &str) -> Option<String> {
 /// 후보를 **그 방에 이미 있는 학생들과 같은 학원**으로 좁힌다.
 ///
 /// 한 방(프로젝트)에 같은 학원 학생들이 모이면 화면이 한 덩어리로 읽힌다 —
-/// 거노 2026-08-11: "방마다 같은학원소속이나 연관되게 생성되면 재밌을듯".
+/// 사용자 2026-08-11: "방마다 같은학원소속이나 연관되게 생성되면 재밌을듯".
 ///
 /// 좁힌 결과가 비면 **빈 Vec 을 돌려준다**. 호출부가 원래 후보로 폴백해야 한다 —
 /// 학원을 맞추는 것보다 학생이 겹치지 않는 게 먼저다(같은 방에 같은 얼굴이 둘이면
@@ -1368,7 +1368,7 @@ pub fn member_def(chars: &Value, name: &str) -> Option<Value> {
 /// 고쳐지는 사고가 반드시 난다).
 ///
 /// 내용 자체의 배경: 동료에게는 보고 경로(SendMessage)가 있으니 그것만으로 되는
-/// 일이면 그냥 기다리면 된다(거노 2026-08-10: "어차피 끝나면 보고하는데 필요없지
+/// 일이면 그냥 기다리면 된다(사용자 2026-08-10: "어차피 끝나면 보고하는데 필요없지
 /// 않나"). 문제는 그 말을 **감시 금지**로 적어 둔 것이었다 — 캐릭터들이 금지를
 /// 빌드·CI 추적에까지 넓혀 읽고, 남은 길인 「몇 초마다 확인하겠습니다」로 자기 턴
 /// 안에서 sleep 을 돌렸다(세션 로그에 `sleep N; done` 수백 건).
@@ -1479,7 +1479,7 @@ pub fn assigned(rslug: &str) -> Vec<String> {
 /// 모든 방(rslug)의 배정 캐릭터 — 전역 유일 배정용. /tmp/kasaterm-collab/ 아래 각
 /// 방 디렉토리의 character-* 마커를 합친다. 닫힌 pane 마커는 cleanup_collab_markers
 /// (layout.rs)가 지우므로 대체로 live 만 남는다 → 프로젝트(방)를 넘어 같은 학생이
-/// 중복 배정되는 걸 막는다(거노: 미도리 둘).
+/// 중복 배정되는 걸 막는다(사용자: 미도리 둘).
 pub fn assigned_global() -> Vec<String> {
     assigned_global_except(None)
 }
@@ -1589,7 +1589,7 @@ pub fn least_used(candidates: &[String], taken: &[String]) -> Vec<String> {
 }
 
 /// 후보 중 하나를 유사난수로 고른다 — 순서 고정(늘 미도리부터) 대신 랜덤 배정용
-/// (거노: 완전 랜덤). 시드 = SystemTime nanos ^ pid ^ salt(pane id) 해시라, 같은
+/// (사용자: 완전 랜덤). 시드 = SystemTime nanos ^ pid ^ salt(pane id) 해시라, 같은
 /// 순간 spawn 된 여러 pane 도 서로 갈린다. rand 크레이트 없이 std 만.
 pub fn pick_random(candidates: &[String], salt: &str) -> Option<String> {
     if candidates.is_empty() {

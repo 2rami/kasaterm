@@ -1,14 +1,14 @@
 //! /resume 가시성 스위퍼 — claude 자체 /resume 피커는 transcript head 64KB 를
 //! 텍스트 스캔해 `"teamName":"…"` 이 보이면 그 세션을 무조건 숨긴다(v2.1.212
 //! 바이너리 실측, 설정·env 우회 없음). kasaterm 은 모든 pane claude 를 팀
-//! 트리플로 띄우므로 pane 세션 전부가 /resume 에서 사라진다(거노 실사고).
+//! 트리플로 띄우므로 pane 세션 전부가 /resume 에서 사라진다(사용자 실사고).
 //!
 //! 해법 2축:
 //! 1. **숨김 해제** — transcript 의 `"teamName":` 키를 **같은 바이트 길이**의
 //!    `"ktTeamNm":` 으로 바꿔치기(라인은 유효 JSON 유지, 파일 크기·구조 불변).
 //!    teamName 은 세션당 team_context attachment 라인 1곳뿐임을 실측했고,
 //!    스캐너가 읽는 창(head/tail 64KB)만 패치하면 충분. 팀 종류 불문 전부
-//!    되살린다(거노: "팀원이든 뭐든 다 뜨게") — 라이브 세션도 패치한다.
+//!    되살린다(사용자: "팀원이든 뭐든 다 뜨게") — 라이브 세션도 패치한다.
 //!    라이브 재개 중복은 upstream 의 bg 가드 + kasaterm-cli [실행중] 마커가 막고,
 //!    append 전용 파일이라 라이브 중 창 되쓰기도 안전.
 //! 2. **학생 표시** — 세션→학생 바인딩(session_characters.json)이 있으면
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn any_team_prefix_patched() {
-        // 거노: "팀원이든 뭐든 다 뜨게" — kt- 외 팀(TeamCreate·수동)도 해제.
+        // 사용자: "팀원이든 뭐든 다 뜨게" — kt- 외 팀(TeamCreate·수동)도 해제.
         let d = tmpdir("anyteam");
         let p = d.join(format!("{SID}.jsonl"));
         std::fs::write(&p, team_line("session-12345678")).unwrap();

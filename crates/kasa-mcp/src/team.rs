@@ -8,14 +8,14 @@
 //! `claude agents` 표시·명부용이지 폴러 전제가 아니다.
 //! 슬러그 규칙·config 스키마는 비공개 내부 실측이라 Claude Code 버전 업 시 재검증 대상.
 //!
-//! 네이밍 규칙(거노 확정, 2026-07-13):
+//! 네이밍 규칙(사용자 확정, 2026-07-13):
 //! - **agent-name = 목표 작업명**(예: "native-wiring-backend") — 캐릭터명이 아니다. 캐릭터는
 //!   kasaterm 이 pane 에 자동 배정하므로 이름 중복이 불필요하고, ASCII 작업명이면 inbox 슬러그
 //!   유일성도 자연 해결된다(한글 작업명은 unique_agent_name 이 꼬리표로 방어).
 //! - **메시지 from = 발신 세션의 배정 학생 캐릭터명**(team-lead 고정 금지). 단 config 의 리더
 //!   멤버 엔트리 명칭은 team-lead 유지 — 하네스에 team-lead 하드코딩 경로가 있다.
 //! - **--agent-type 은 학생 스폰에서 생략** — 역할 표시로 뜨지만 그 agent 정의(도구 제한)를
-//!   실제 로드하는 부작용이 있다(거노 실측).
+//!   실제 로드하는 부작용이 있다(사용자 실측).
 //! - 참고: 진짜 팀모드 자식 프로세스엔 env `CLAUDE_CODE_TEAMMATE_MODE=tmux`·
 //!   `CLAUDE_CODE_CHILD_SESSION=1` 마커가 있다 — 판별 필요 시 활용(우리는 세팅하지 않는다:
 //!   tmux 위장이 아니라 kasaterm pane 직접 스폰).
@@ -42,7 +42,7 @@ pub fn normalize_agent_color(c: &str) -> &'static str {
 }
 
 /// pane accent(RGB) → Claude 8색 최근접(색상환 hue 거리). `--agent-color` 는 배지가
-/// 아니라 **teammate TUI 전체를 그 색으로 테마**하므로(거노 팀모드 스크린샷 실측),
+/// 아니라 **teammate TUI 전체를 그 색으로 테마**하므로(사용자 팀모드 스크린샷 실측),
 /// kasaterm 이 pane 테두리에 칠한 학생 accent 와 일치시켜야 한 화면에서 안 어긋난다.
 /// 채도가 거의 없는 회색 계열은 hue 가 무의미 — blue 폴백.
 pub fn nearest_agent_color(rgb: [u8; 3]) -> &'static str {
@@ -263,7 +263,7 @@ pub fn set_lead_session(root: &Path, team: &str, sid: &str) -> io::Result<()> {
 
 /// 학생 멤버 스펙 — add_member 입력.
 pub struct StudentSpec<'a> {
-    /// --agent-name 에 들어갈 **목표 작업명**(거노: 캐릭터명 아님, 예: "native-wiring-backend").
+    /// --agent-name 에 들어갈 **목표 작업명**(사용자: 캐릭터명 아님, 예: "native-wiring-backend").
     /// ASCII 권장 — 한글이면 unique_agent_name 으로 꼬리표를 붙여 넘길 것.
     pub agent_name: &'a str,
     /// 8색 팔레트 문자열(밖의 값은 normalize_agent_color 로 정규화돼 저장).
@@ -348,7 +348,7 @@ fn iso8601_now() -> String {
     format!("{y:04}-{m:02}-{day:02}T{h:02}:{mi:02}:{s:02}.{ms:03}Z")
 }
 
-/// inbox 로 보낼 메시지 — `from` 은 **발신 세션의 배정 학생 캐릭터명**(거노: team-lead 고정
+/// inbox 로 보낼 메시지 — `from` 은 **발신 세션의 배정 학생 캐릭터명**(사용자: team-lead 고정
 /// 금지, 예: "프라나"). 리더 명부 엔트리(team-lead)와 별개 — 메시지 표기만 캐릭터.
 pub struct InboxMessage<'a> {
     pub from: &'a str,
@@ -396,7 +396,7 @@ pub fn append_message(
     std::fs::rename(&tmp, &p)
 }
 
-/// teammate 스폰 argv(claude 실행파일 제외). agent_name 은 **목표 작업명**(거노 네이밍
+/// teammate 스폰 argv(claude 실행파일 제외). agent_name 은 **목표 작업명**(사용자 네이밍
 /// 규칙). 트리플(agent-id/agent-name/team-name)은 필수 세트("must all be provided
 /// together" 실측). `--parent-session-id` 는 금지 — 그 세션에 idle 알림이 새는 부작용
 /// (패턴 F-2 함정 ④).
@@ -622,7 +622,7 @@ mod tests {
             pane_id: None,
         };
         add_member(&root, team, &spec).unwrap();
-        // from = 발신 세션의 배정 캐릭터명(거노) — team-lead 고정이 아니다.
+        // from = 발신 세션의 배정 캐릭터명(사용자) — team-lead 고정이 아니다.
         let msg = InboxMessage {
             from: "프라나",
             text: "브리핑이다",

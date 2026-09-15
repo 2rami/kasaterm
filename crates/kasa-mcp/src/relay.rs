@@ -7,7 +7,7 @@
 //! 유무로 씌우므로, 중계소는 그 신원을 **그대로 실어 나르기만** 하면 된다 — 정책을
 //! 두 곳에 두지 않는다.
 //!
-//! 거노 결정(2026-09-01) 반영:
+//! 사용자 결정(2026-09-01) 반영:
 //! - 공유 보드(`GET /relay/sessions`)는 **방·제목·상태만** — sid·name·machine·
 //!   account·status 만 내고 대화·비용은 애초에 안 받고 안 낸다.
 //! - 다른 계정 발신은 **부탁으로만** — 중계소는 from_person(발신 사람)을 그대로
@@ -41,7 +41,7 @@ struct MachineReg {
     last_seen: Instant,
 }
 
-/// 세션 하나 — 보드에 실리는 최소 정보. **대화·비용은 없다**(거노 결정: 방·제목·상태만).
+/// 세션 하나 — 보드에 실리는 최소 정보. **대화·비용은 없다**(사용자 결정: 방·제목·상태만).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SessionEntry {
     pub sid: String,
@@ -144,7 +144,7 @@ struct SessionsQuery {
 }
 
 /// `GET /relay/sessions?account=` — 등록된 기계들의 세션을 모아 준다. **필터**: 각 행은
-/// sid·name·machine·account·status 뿐이다(거노 결정: 대화·비용 제외). account 를 주면
+/// sid·name·machine·account·status 뿐이다(사용자 결정: 대화·비용 제외). account 를 주면
 /// 그 계정만.
 async fn sessions(
     State(relay): State<Relay>,
@@ -195,7 +195,7 @@ struct SendQuery {
     #[serde(default)]
     from_machine: Option<String>,
     /// 발신 계정 — 대상 세션의 계정과 다르면 릴레이가 **강제로** 외부 표식(from_person)을
-    /// 채운다. 그래야 다른 계정이 from_person 을 빼고 지시로 보내는 걸 막는다(거노 결정
+    /// 채운다. 그래야 다른 계정이 from_person 을 빼고 지시로 보내는 걸 막는다(사용자 결정
     /// ①의 강제). 같으면 그대로(같은 계정끼리는 지시).
     #[serde(default)]
     from_account: Option<String>,
@@ -249,7 +249,7 @@ async fn send(
             Json(json!({ "ok": false, "error": format!("세션 {} 을 가진 기계가 없어요", q.to_sid) })),
         );
     };
-    // 발신 계정 ≠ 대상 계정이면 외부 표식(from_person)을 강제한다 — 거노 결정 ①의 봉인.
+    // 발신 계정 ≠ 대상 계정이면 외부 표식(from_person)을 강제한다 — 사용자 결정 ①의 봉인.
     let from_person = enforce_external(
         q.from_account.as_deref(),
         &m.account,

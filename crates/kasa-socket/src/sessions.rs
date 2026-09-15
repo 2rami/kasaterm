@@ -135,7 +135,7 @@ pub fn recent_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
 /// transcript jsonl 에서 사람이 읽을 라벨을 뽑는다 — `/rename` 이 남기는
 /// `custom-title`(사용자 지정, 마지막 것 우선) 최우선, 다음 claude 가 붙인
 /// `aiTitle`, 없으면 첫 user 텍스트 메시지(앞 80자), 전부 없으면 None(호출부가
-/// short id 폴백). summary 라인은 최근 세션엔 거의 없어 안 쓴다(거노 실측).
+/// short id 폴백). summary 라인은 최근 세션엔 거의 없어 안 쓴다(사용자 실측).
 /// 큰 파일 방어로 앞 600줄만 스캔한다. custom-title 은 rename 시점에 파일
 /// 말미로 append 되므로 앞 스캔으론 못 보고 꼬리 64KB 역스캔으로 잡는다 —
 /// teammate 세션은 claude `/rename` 이 막혀 있어 외부 append 가 유일한
@@ -146,7 +146,7 @@ fn parse_session_label(path: &Path, allow_custom: bool) -> Option<String> {
     // 의 cwd=kasaterm-title-gen)은 사용자 세션이 아니다 — 첫 user 가 "다음 대화
     // 발췌를 보고…" 메타프롬프트고 assistant 는 빈 발췌 거부문("대화 발췌가 제공되지
     // 않았어요…")이라 라벨·custom-title 이 전부 오염된다. 경로로 통째 제외해
-    // 인레이/피커에 절대 안 뜨게 한다(거노 실측).
+    // 인레이/피커에 절대 안 뜨게 한다(사용자 실측).
     if path
         .to_str()
         .is_some_and(|s| s.contains("kasaterm-title-gen"))
@@ -190,7 +190,7 @@ fn parse_session_label(path: &Path, allow_custom: bool) -> Option<String> {
                     // slash command(<command-name>)·시스템 주입(Caveat/<system-reminder>)
                     // 같은 메타성 첫 메시지는 라벨로 부적합 — 건너뛰고 다음 진짜 발화를
                     // 찾는다(first_user 가 None 이라 계속 스캔). 안 그러면 "<command-name>
-                    // /effort…" 가 라벨로 샌다(거노 실측).
+                    // /effort…" 가 라벨로 샌다(사용자 실측).
                     if !txt.is_empty() && !is_meta_user_text(txt) {
                         first_user = Some(txt.chars().take(80).collect());
                     }
@@ -212,7 +212,7 @@ pub fn session_label_for(path: &Path) -> Option<String> {
 /// user) — 입력박스 **좌측** 제목 인레이 전용이다. claude 가 그 rename 이름을
 /// 입력박스 **우측**에 이미 그리고 있어서, 좌측까지 custom-title 을 쓰면 한 줄에
 /// 똑같은 이름이 두 번 서고 "이 pane 이 무슨 작업 중인지"가 사라진다
-/// (거노 2026-07-30: "리네임하면 좌측은 세션이름요약, 우측칩은 리네임한 이름").
+/// (사용자 2026-07-30: "리네임하면 좌측은 세션이름요약, 우측칩은 리네임한 이름").
 pub fn session_summary_for(path: &Path) -> Option<String> {
     parse_session_label(path, false)
 }
@@ -222,7 +222,7 @@ pub fn session_summary_for(path: &Path) -> Option<String> {
 /// `session_label_for` 의 폴백 사슬(custom-title > aiTitle > 첫 user)을 안 쓰는 게
 /// 핵심이다. 폴백을 쓰면 rename 하지 않은 pane 의 우측에 aiTitle 이 뜨는데, 좌측
 /// 요약이 이미 그걸 보여 주고 있어 같은 이름이 한 줄에 두 번 선다 — 좌우를 나눈
-/// 이유가 사라진다(거노 2026-07-30: "리네임하면 좌측은 세션이름요약, 우측칩은
+/// 이유가 사라진다(사용자 2026-07-30: "리네임하면 좌측은 세션이름요약, 우측칩은
 /// 리네임한 이름"). 리네임 안 했으면 우측은 비는 게 맞다.
 pub fn session_rename_for(path: &Path) -> Option<String> {
     last_custom_title(path)
@@ -300,7 +300,7 @@ fn is_meta_user_text(t: &str) -> bool {
         // 굴리는 학생은 첫 발화가 대개 이것이므로 걸러야 제목이 태그로 새지 않는다.
         || t.starts_with("<cross-session-message")
         // claude 내부 title-gen 서브세션의 첫 user 프롬프트 — custom-title 스탬프
-        // 전 찰나에 이게 첫 user 폴백으로 새어 인레이에 유출됐다(거노 실측).
+        // 전 찰나에 이게 첫 user 폴백으로 새어 인레이에 유출됐다(사용자 실측).
         || t.starts_with("아래 대화의 주제를 나타내는")
         || t.starts_with("다음 대화 발췌를 보고")
 }

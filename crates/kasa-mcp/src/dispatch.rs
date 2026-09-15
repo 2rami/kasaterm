@@ -113,7 +113,7 @@ pub struct DispatchConfig {
     #[serde(default)]
     pub light_model: String,
     /// 학생을 띄울 때 `claude` 앞에 끼울 래퍼 — 가볍고 급한 일은 싸고 빠른 백엔드로
-    /// 돌리려는 것(거노). `"glm"` 이면 `glm claude '<브리프>'` 가 되고, 그 셸 함수가
+    /// 돌리려는 것(사용자). `"glm"` 이면 `glm claude '<브리프>'` 가 되고, 그 셸 함수가
     /// 게이트웨이 env 와 모델을 스스로 세팅한다. 래퍼가 모델을 강제하므로 이때
     /// `*_model` 은 붙이지 않는다(두 지정이 싸운다).
     #[serde(default)]
@@ -796,7 +796,7 @@ fn compose_brief(idx: usize, q: &[QueueTask], board: &[PaneActivity]) -> String 
 /// 스폰된 pane 에 넣을 한 줄. cd 를 앞에 붙이는 이유는 `QueueTask::cwd` 주석에 있다.
 ///
 /// 래퍼(`*_launcher`)가 있으면 `<래퍼> claude '<브리프>'` 가 된다 — 가벼운 일을 싸고
-/// 빠른 백엔드로 돌리려는 것(거노). `glm` 이 그런 래퍼이고, 게이트웨이 env 와 모델을
+/// 빠른 백엔드로 돌리려는 것(사용자). `glm` 이 그런 래퍼이고, 게이트웨이 env 와 모델을
 /// 스스로 세팅한 뒤 `command claude --model <게이트웨이 모델> "$@"` 로 넘긴다. 그래서
 /// 래퍼가 있을 때 `--model` 을 또 주면 두 지정이 싸운다 — 이때는 붙이지 않는다.
 /// 래퍼는 셸 함수일 수 있어(실제로 `glm` 이 그렇다) pane 의 인터랙티브 zsh 에서만
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn light_work_can_run_on_a_cheaper_backend() {
-        // 거노 지시: 급하거나 덜 중요한 일은 GLM 게이트웨이로 — 모델명이 아니라 셸 래퍼다.
+        // 사용자 지시: 급하거나 덜 중요한 일은 GLM 게이트웨이로 — 모델명이 아니라 셸 래퍼다.
         let mut cfg = cfg_for(2);
         cfg.light_launcher = "glm".into();
         cfg.light_model = "무시돼야-한다".into();

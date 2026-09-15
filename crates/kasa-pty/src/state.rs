@@ -2049,7 +2049,7 @@ const SCROLLBACK_MAX_LINES: usize = 100_000;
 /// 크게 잡아도 되는 이유는 **캡이 예약이 아니라 상한이라서**다(실측 2026-08-06,
 /// 363칸 pane): 캡 10만 줄에 1,964줄만 실으면 RSS 39MB, 61,624줄을 실제로 채우면
 /// 742MB. 즉 안 쓰면 안 먹는다. 옛 기본값 16MB 는 **폭에 반비례**해서, 넓게 쓰는
-/// pane 이 1,925줄밖에 못 남겼다 — 거노: "히스토리가 왜 다 안 남지, 보려고 위로
+/// pane 이 1,925줄밖에 못 남겼다 — 사용자: "히스토리가 왜 다 안 남지, 보려고 위로
 /// 올리면 없어져 있어". claude 한 세션이 몇 분이면 미는 양이다.
 ///
 /// 대가는 **진짜로 10만 줄을 채운 pane** 이 1GB 를 쥔다는 것. RAM 이 아쉬우면
@@ -4065,7 +4065,7 @@ pub struct AgentSpec {
 ///
 /// 셋은 일부러 뺐다: `claude`·`codex`·`antigravity` 는 아래 enum 변종이고,
 /// `claude-agent-teams` 는 Orca 전용 런치 모드라 우리 쪽에 대응물이 없으며,
-/// `kimi` 는 이 컴퓨터에서 **거노의 자작 런처 이름**이다(claude 를 다른 모델로
+/// `kimi` 는 이 컴퓨터에서 **사용자의 자작 런처 이름**이다(claude 를 다른 모델로
 /// 띄우는 zsh 스크립트) — 문샷의 Kimi CLI 와 이름이 같아 넣으면 오판한다.
 pub static AGENT_TABLE: &[AgentSpec] = &[
     AgentSpec { id: "aider", label: "Aider", procs: &["aider"], argv_hints: &[] },
@@ -4104,7 +4104,7 @@ pub static AGENT_TABLE: &[AgentSpec] = &[
 ];
 
 /// pane 에서 도는 에이전트 종류. 학생 대접(보더 학생색·타이틀바·얼굴·탭칩)은
-/// claude 전용이 아니라 **이 값이 Some 이면** 붙는다(거노 2026-08-05: codex 도 학생).
+/// claude 전용이 아니라 **이 값이 Some 이면** 붙는다(사용자 2026-08-05: codex 도 학생).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentKind {
     Claude,
@@ -4452,7 +4452,7 @@ fn process_table_raw() -> Vec<(u32, u32, String)> {
 
 /// `process_table_raw` 를 짧은 TTL 로 감싼 전역 캐시. 세션이 많을 때 렌더 스레드가
 /// pane 마다 active_process_name/is_claude_agents 로 이걸 부르면, per-pane 500ms
-/// 캐시가 같은 프레임에 동시 만료될 때 K 번 ps fork 가 겹쳐 프레임드랍(거노: 세션
+/// 캐시가 같은 프레임에 동시 만료될 때 K 번 ps fork 가 겹쳐 프레임드랍(사용자: 세션
 /// 많을 때). 300ms 전역 캐시로 한 프레임의 중복 fork 를 1 회로 접는다(per-pane 캐시
 /// 보다 촘촘해 신선도는 유지). fork 대신 Vec clone 이라 비용이 pane 수에 선형이지만
 /// ps fork+파싱보다 훨씬 싸다. 빈 결과(ps 실패)는 캐싱하지 않아 다음 호출이 재시도한다.
@@ -4489,7 +4489,7 @@ fn table_cache() -> &'static std::sync::Mutex<CachedTable> {
 
 /// Enter 직후 프로세스 테이블을 앞당겨 읽는다 — 300ms TTL + 백그라운드 갱신
 /// 구조에서는 방금 exec 된 claude 가 테이블에 실리기까지 최악 ~600ms 가 비고,
-/// 그동안 배너·헤더가 학생 테마 없이 그려졌다(거노 2026-08-20 「처음 클로드코드
+/// 그동안 배너·헤더가 학생 테마 없이 그려졌다(사용자 2026-08-20 「처음 클로드코드
 /// 켜면 캐릭터 학생테마 적용안돼」). Enter 는 「새 전경 프로세스가 곧 뜬다」의
 /// 가장 이른 신호지만 exec 사슬이 끝나기 전에 읽으면 헛스캔이 `at` 시계만
 /// 되돌려 오히려 다음 정기 갱신을 늦춘다 — 그래서 사슬이 끝났을 100ms 뒤와,
@@ -4838,7 +4838,7 @@ pub fn process_cmdline(pid: u32) -> Option<String> {
 
 /// pane 프로세스 env 의 한 변수 값 — 세션 캐릭터 anchor(`KASATERM_SESSION_ID`) 복원용.
 /// 포크·`--resume`·`agents`·`--bg` 는 claude 가 transcript id 를 새로 발급해 stem ≠ 원본
-/// anchor 라, stem 매핑도 부모 상속(parentSessionId)도 실패한다(거노: 백그라운드 재접속에서
+/// anchor 라, stem 매핑도 부모 상속(parentSessionId)도 실패한다(사용자: 백그라운드 재접속에서
 /// 학생이 유우카로 둔갑). env 의 KASATERM_SESSION_ID 는 스폰 때 캐릭터에 바인딩된 원본이라
 /// (env 상속으로 포크/재접속 너머 보존) 유일하게 진짜 학생을 가리킨다. 값은 uuid(공백 없음)라
 /// 공백 split 파싱이 안전하다. `ps eww` = env 를 command 열 뒤에 붙여 출력(macOS/BSD).
@@ -5089,7 +5089,7 @@ mod process_table_tests {
 mod agent_kind_tests {
     use super::*;
 
-    /// 실측 트리(2026-08-05, 거노 머신). codex 는 npm shim 이라 진짜 바이너리가
+    /// 실측 트리(2026-08-05, 사용자 머신). codex 는 npm shim 이라 진짜 바이너리가
     /// **손자**다 — 이름만 보는 판정은 여기서 반드시 실패한다.
     fn codex_tree() -> Vec<(u32, u32, String)> {
         vec![
@@ -5152,7 +5152,7 @@ mod agent_kind_tests {
 mod scrollback_probe {
     use super::*;
 
-    /// 실 PTY 로 스크롤백 **보존 줄수와 그 대가(RSS)** 를 잰다 — 거노: "히스토리가 왜
+    /// 실 PTY 로 스크롤백 **보존 줄수와 그 대가(RSS)** 를 잰다 — 사용자: "히스토리가 왜
     /// 다 안 남지, 보려고 위로 올리면 없어져 있어". 캡은 폭에서 나오므로(예산 ÷ 폭)
     /// 넓은 pane 일수록 짧아진다. `KASATERM_SCROLLBACK_MB` 와 `PROBE_COLS` 로 조합을
     /// 바꿔 가며 돌린다. 무시(ignore)인 이유는 셸을 띄우고 몇십 초 기다려서다.

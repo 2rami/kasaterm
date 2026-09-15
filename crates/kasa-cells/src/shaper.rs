@@ -527,7 +527,7 @@ impl Shaper {
             };
             // Dilate only when this slot has no designed bold. A real bold
             // outline is already shaped at the right weight, so smearing it
-            // wider gives the "fat blocky" look — the symptom 거노 flagged.
+            // wider gives the "fat blocky" look — the symptom the user flagged.
             //
             // 2026-07-26 에 이걸 `bold` 전체로 넓혔던 이유는 D2Coding 의 designed
             // bold 가 약해서(한글 1.12x) 팽창한 regular 보다도 얇았기 때문이다.
@@ -538,7 +538,7 @@ impl Shaper {
             // 예전엔 "두 칸 폭 ÷ 글리프 advance" 로 맞췄는데, 그리드는 떨어져도
             // 글자가 통째로 부푼다 — JetBrains 칸 0.6em×2 ÷ D2Coding 한글 1.0em
             // = 1.2배가 걸려 한글 ink 가 0.895em → 1.07em, 라틴 대문자(0.73em)의
-            // 1.5배로 보였다(거노 지적, 실측 35px vs 23px). cap height 로 맞추면
+            // 1.5배로 보였다(사용자 지적, 실측 35px vs 23px). cap height 로 맞추면
             // 1.05배라 크기가 자연스럽다.
             // primary 가 직접 한글을 그리는 구성에서는 배율을 걸지 않는다.
             let cjk_fit = if is_cjk_wide(ch) && face_idx != 0 {

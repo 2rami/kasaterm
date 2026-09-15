@@ -877,7 +877,7 @@ fn surface_split(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     match backend.split_surface(dir, focus, from) {
         Ok(s) => {
             // 새 pane 이 claude 로 뜨면 쓸 이름을 **여기서** 알려 준다 — 부른 쪽이
-            // 부팅을 기다렸다 board 를 되짚는 왕복이 통째로 사라진다(거노: "바로
+            // 부팅을 기다렸다 board 를 되짚는 왕복이 통째로 사라진다(사용자: "바로
             // SendMessage 하면 되는데"). 모르면 키를 아예 안 싣는다.
             let agent = backend.pane_agent(&s.id);
             let mut body = json!({"surface": s});

@@ -1294,7 +1294,7 @@ pub fn relay_send(
 
 /// 원격이 그 pane 에 붙여 둔 캐릭터 이름. 미러로 붙일 때 **이 창에도 같은 학생**을
 /// 앉히려고 읽는다 — 안 읽으면 몸통은 유즈인데 이 창만 이름·색·얼굴이 없다
-/// (2026-08-27 거노 지적: 「옮기면 왜 테마가 없어져」).
+/// (2026-08-27 사용자 지적: 「옮기면 왜 테마가 없어져」).
 pub fn remote_pane_character(base: &str, pane: &str, token: Option<&str>) -> Option<String> {
     let u = format!("{}/term/panes", base.trim_end_matches('/'));
     let rt = tokio::runtime::Builder::new_current_thread()

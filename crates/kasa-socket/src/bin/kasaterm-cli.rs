@@ -251,7 +251,7 @@ fn run() -> Result<Option<Response>> {
     //
     // 예전엔 여기서 split 을 N 번 부르면서 2회차부터 직전에 만든 pane 을 대상으로
     // 삼았다. ⌘D 를 연달아 누른 것과 같은 모양이라 몫이 1/2 → 1/4 → 1/8 로
-    // 반감하고, 넷을 부르면 마지막 학생이 화면의 1/16 이었다 — 거노가 매번 드래그로
+    // 반감하고, 넷을 부르면 마지막 학생이 화면의 1/16 이었다 — 사용자가 매번 드래그로
     // 고쳤다(2026-08-13). 방향을 명시하면 더 나빴다: 모든 회차가 같은 축이라 얇은
     // 세로 기둥 넷이 된다.
     //
@@ -500,7 +500,7 @@ fn run() -> Result<Option<Response>> {
     //
     // 닫은 pane 은 죽지 않는다 — 프로세스를 물고 이 목록에 앉아 있다가 10개를 넘겨
     // 밀려날 때 죽는다. 그래서 `dismiss` 로 정리한 학생 claude 들이 계속 살아 있는데,
-    // 그 사실이 GUI 밖에서는 보이지도 않았다(거노 2026-08-06).
+    // 그 사실이 GUI 밖에서는 보이지도 않았다(사용자 2026-08-06).
     if cmd == "closed" {
         let want = args.iter().find(|a| a.starts_with('%')).cloned();
         let socket_path = resolve_socket_path()?;
@@ -1484,7 +1484,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             // 기본 no-focus(자동화: tell 처럼 포커스 안 뺏음). --focus 로 옵트인.
             let focus = args.iter().any(|a| a == "--focus");
             // 방향은 **선택**이다 — 생략하면 `auto`, 즉 앱이 pane 의 종횡비를 보고 긴
-            // 축을 쪼갠다(거노 2026-08-05: "너무 가로로나 세로로 안 길게"). 사람이
+            // 축을 쪼갠다(사용자 2026-08-05: "너무 가로로나 세로로 안 길게"). 사람이
             // 방향을 정해 부를 때만 명시하면 된다.
             let dir = args
                 .iter()
@@ -1868,7 +1868,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             // 발신 학생 마커 — 받는 pane 이 tell 을 발신자 테마색으로 렌더하려면 화면에
             // 앵커가 필요하다(터미널은 그리드라 transcript 대조로 user 턴을 못 집는다).
             // 발신 pane 자기 캐릭터($KASATERM_CHARACTER)를 `⟦이름⟧` 로 앞에 심는다 —
-            // 사람이 직접 친 cli 는 env 가 없어 마커 없이(거노 발신=무색) 나간다.
+            // 사람이 직접 친 cli 는 env 가 없어 마커 없이(사용자 발신=무색) 나간다.
             let marked = match std::env::var("KASATERM_CHARACTER")
                 .ok()
                 .filter(|s| !s.is_empty())
@@ -1879,9 +1879,9 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             let mut params = json!({ "surface_id": surface,
                 "text": format!("\x15\x1b[200~{}\x1b[201~\r", marked) });
             // 발신 메타 동봉 — 서버가 방 기준 slug 의 messages.jsonl 에 기록해 채팅뷰가
-            // 학생→학생 tell 을 발신자 좌측 버블로 그린다(거노 #5/#7). CLI 자체 기록은
+            // 학생→학생 tell 을 발신자 좌측 버블로 그린다(사용자 #5/#7). CLI 자체 기록은
             // 발신 셸의 cwd 기준 slug 라 cd 상태에 따라 파일이 갈라져 매칭이 새던 것을
-            // 서버 기록으로 일원화. PANE_ID 없으면(사람이 직접 친 cli) 거노 발신 = 미기록.
+            // 서버 기록으로 일원화. PANE_ID 없으면(사람이 직접 친 cli) 사용자 발신 = 미기록.
             if let Some(fp) = std::env::var("KASATERM_PANE_ID")
                 .ok()
                 .filter(|s| !s.is_empty())
@@ -1898,7 +1898,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         }
         "resume" => {
             // resume <session_id> [cwd] — 사라진(재시작·종료) 학생 세션을 새 pane 에 claude
-            // --resume 으로 이어 띄운다(거노: tell 오발송 대신 이어가기). cwd 생략 시 활성 방 cwd.
+            // --resume 으로 이어 띄운다(사용자: tell 오발송 대신 이어가기). cwd 생략 시 활성 방 cwd.
             let sid = args
                 .first()
                 .filter(|s| !s.is_empty())
@@ -1912,7 +1912,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         }
         "recent-sessions" => {
             // recent-sessions [cwd] — 이어갈 후보 세션 목록(최신순, id/label/mtime/cwd). tell
-            // 오발송(없는 학생) 시 사라진 학생 세션을 찾아 resume 하는 데 쓴다(거노: 내가 자동).
+            // 오발송(없는 학생) 시 사라진 학생 세션을 찾아 resume 하는 데 쓴다(사용자: 내가 자동).
             let cwd = args.first().filter(|s| !s.is_empty()).cloned();
             ("session.recent", json!({ "cwd": cwd }))
         }
