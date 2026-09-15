@@ -589,7 +589,7 @@ impl AuxWindow {
                 self.paint_header_icon_button(kind, (right, 6.0, 32.0, 32.0), icon, active, true);
                 right -= 4.0;
             }
-            let find_w = self.gpu.measure_chrome_text("찾기", 12.0, false) + 16.0;
+            let find_w = self.gpu.measure_chrome_text("찾기", 12.0, self.editor.find.is_some()) + 16.0;
             right -= find_w;
             self.paint_header_button(HeaderButton::Find, (right, 6.0, find_w, 32.0),
                 "찾기", self.editor.find.is_some(), false, true);
@@ -607,7 +607,7 @@ impl AuxWindow {
                 .and_then(|name| name.to_str()).filter(|name| !name.is_empty()).unwrap_or("새 문서")
         };
         let title = crate::screenread::clip_px(&mut self.gpu, name, 13.0, true, (right - left).max(0.0));
-        self.gpu.draw_text(left, 14.0, &title, gpu::DrawOpts {
+        self.gpu.draw_text(left, (DOCUMENT_BAR_H - 13.0) * 0.5, &title, gpu::DrawOpts {
             font_size: 13.0, color: crate::theme::text(), bold: true, italic: false,
         });
     }
@@ -636,7 +636,7 @@ impl AuxWindow {
                 let x = (rect.0 + rect.2 - tw).clamp(8.0, (width - tw - 8.0).max(8.0));
                 let y = DOCUMENT_BAR_H + 4.0;
                 crate::round_rect(&mut self.gpu, x, y, tw, 28.0, crate::theme::radius_sm(), crate::theme::surface_active());
-                self.gpu.draw_text(x + 8.0, y + 7.0, label, gpu::DrawOpts {
+                self.gpu.draw_text(x + 8.0, y + (28.0 - 11.0) * 0.5, label, gpu::DrawOpts {
                     font_size: 11.0, color: crate::theme::text(), bold: false, italic: false,
                 });
             }
@@ -672,7 +672,7 @@ impl AuxWindow {
                 crate::round_rect(&mut self.gpu, rect.0, rect.1, rect.2, rect.3,
                     crate::theme::radius_sm(), crate::theme::surface_hover());
             }
-            self.gpu.draw_text(rect.0 + 10.0, rect.1 + 8.0, label, gpu::DrawOpts {
+            self.gpu.draw_text(rect.0 + 10.0, rect.1 + (rect.3 - 12.0) * 0.5, label, gpu::DrawOpts {
                 font_size: 12.0,
                 color: if enabled { crate::theme::text() } else { crate::theme::text_mute() },
                 bold: active, italic: false,
@@ -713,15 +713,20 @@ impl AuxWindow {
                 fill,
             );
         }
-        let tw = self.gpu.measure_chrome_text(label, 12.0, primary);
+        let bold = primary || active || (kind == HeaderButton::Save && self.editor.modified);
+        let failed = kind == HeaderButton::Save
+            && self.status.as_deref().is_some_and(|status| status.contains("실패"));
+        let tw = self.gpu.measure_chrome_text(label, 12.0, bold);
         self.gpu.draw_text(
             rect.0 + (rect.2 - tw) * 0.5,
-            rect.1 + 7.0,
+            rect.1 + (rect.3 - 12.0) * 0.5,
             label,
             gpu::DrawOpts {
                 font_size: 12.0,
                 color: if primary {
                     crate::theme::foreground_on(crate::theme::accent())
+                } else if failed {
+                    crate::theme::danger()
                 } else if !enabled && kind == HeaderButton::Save {
                     crate::theme::text_dim()
                 } else if !enabled || !self.focused {
@@ -731,7 +736,7 @@ impl AuxWindow {
                 } else {
                     crate::theme::text_dim()
                 },
-                bold: primary || active,
+                bold,
                 italic: false,
             },
         );
