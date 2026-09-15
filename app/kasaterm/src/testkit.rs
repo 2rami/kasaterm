@@ -4482,14 +4482,14 @@ impl App {
         static STEP: AtomicU8 = AtomicU8::new(0);
         static CLICK_AT: OnceLock<Instant> = OnceLock::new();
         let due = DUE.get_or_init(|| {
-            let p = std::env::var("KASATERM_AUTOMDTASK").ok()?;
+            let p = std::fs::canonicalize(std::env::var("KASATERM_AUTOMDTASK").ok()?).ok()?;
             let ms: u64 = std::env::var("KASATERM_AUTOMDTASK_MS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(4000);
             Some((
                 Instant::now() + std::time::Duration::from_millis(ms),
-                std::path::PathBuf::from(p),
+                p,
             ))
         });
         let Some((due, path)) = due else { return };
