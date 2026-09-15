@@ -939,6 +939,7 @@ fn paint_build_popover(
     } else {
         format!("{} 판이 다르다 · 보내면 그쪽 앱이 잠깐 껐다 켜진다", mismatched.join("·"))
     };
+    let sub = crate::info::fit_text(g, &sub, (w - 24.0).max(0.0), 10.0, false);
     g.draw_text(
         x + 12.0,
         y + 28.0,
@@ -948,6 +949,7 @@ fn paint_build_popover(
     let mut oy = y + HEAD_H;
     for (label, hit_kind) in rows {
         let r = (x + 6.0, oy, w - 12.0, ROW);
+        let label = crate::info::fit_text(g, &label, (r.2 - 16.0).max(0.0), 11.0, false);
         let hov = hit(cursor, &r);
         g.hover_pointer |= hov;
         if hov {

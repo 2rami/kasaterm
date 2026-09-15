@@ -13012,23 +13012,38 @@ impl App {
         win_h: f32,
     ) {
         const MAX_LINES: usize = 10;
-        const MAX_COLS: usize = 78;
         const PAD: f32 = 7.0;
         let (_, lh0) = g.raw_editor_metrics();
         let size = lh0 / 1.25 * 0.92;
         let lh = size * 1.35;
-        let lines: Vec<String> = text
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(MAX_LINES)
-            .map(|l| {
-                if l.chars().count() > MAX_COLS {
-                    format!("{}…", l.chars().take(MAX_COLS).collect::<String>())
-                } else {
-                    l.to_string()
+        let max_w = (win_w - PAD * 2.0 - 8.0).min(600.0);
+        let max_lines = (((win_h - PAD * 2.0 - 8.0) / lh).floor().max(0.0) as usize).min(MAX_LINES);
+        if max_lines == 0 || max_w < g.measure_pen_run("…", size, false, false) {
+            return;
+        }
+        let mut lines = Vec::new();
+        let mut line = String::new();
+        let mut truncated = false;
+        for ch in text.trim().chars() {
+            let next = format!("{line}{ch}");
+            if ch == '\n' || (!line.is_empty() && g.measure_pen_run(&next, size, false, false) > max_w) {
+                lines.push(std::mem::take(&mut line));
+                if lines.len() == max_lines {
+                    truncated = true;
+                    break;
                 }
-            })
-            .collect();
+            }
+            if ch != '\n' { line.push(ch); }
+        }
+        if !line.is_empty() { lines.push(line); }
+        if truncated {
+            if let Some(last) = lines.last_mut() {
+                while !last.is_empty() && g.measure_pen_run(&format!("{last}…"), size, false, false) > max_w {
+                    last.pop();
+                }
+                last.push('…');
+            }
+        }
         if lines.is_empty() {
             return;
         }
@@ -13036,7 +13051,7 @@ impl App {
             .iter()
             .map(|l| g.measure_pen_run(l, size, false, false))
             .fold(0.0f32, f32::max);
-        let w = tw + PAD * 2.0;
+        let w = tw.min(max_w) + PAD * 2.0;
         let h = lines.len() as f32 * lh + PAD * 2.0;
         // 마우스 아래가 기본. 아래가 모자라면 위로 뒤집고, 오른쪽으로 넘치면
         // 왼쪽으로 민다 — 창 밖으로 나간 툴팁은 그리나 마나다.
@@ -13052,6 +13067,7 @@ impl App {
         g.rect(x, y + h - 1.0, w, 1.0, edge);
         g.rect(x, y, 1.0, h, edge);
         g.rect(x + w - 1.0, y, 1.0, h, edge);
+        g.push_clip(x + PAD, y + PAD, w - PAD * 2.0, h - PAD * 2.0);
         for (i, l) in lines.iter().enumerate() {
             g.draw_text(
                 x + PAD,
@@ -13065,6 +13081,7 @@ impl App {
                 },
             );
         }
+        g.pop_clip();
     }
 
     /// It overlays rather than pushing the text down, so opening it never

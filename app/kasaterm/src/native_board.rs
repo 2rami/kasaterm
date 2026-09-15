@@ -2085,23 +2085,26 @@ fn text_button(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, rect
 
 /// 목업의 구분 선택 — 테두리 하나, 고른 칸만 강조색 테두리+글자. 오른쪽 끝에 붙는다.
 fn segmented(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: f32, w: f32, cells: &[(&str, bool, Target)]) {
+    if cells.is_empty() || w <= 4.0 { return; }
     let h = 26.0;
     let inset = 2.0;
     let pad = 10.0;
     let widths: Vec<f32> = cells.iter().map(|(label, _, _)| g.measure_chrome_text(label, 11.5, false) + pad * 2.0).collect();
     let total = widths.iter().sum::<f32>() + inset * 2.0;
     let outer = (x + w - total.min(w), y, total.min(w), h);
+    let scale = ((outer.2 - inset * 2.0) / (total - inset * 2.0)).min(1.0);
     g.round_rect_stroke(outer.0, outer.1, outer.2, outer.3, 4.0, 1.0, theme::border());
     let mut cx = outer.0 + inset;
     for (i, (label, selected, target)) in cells.iter().enumerate() {
-        let rect = (cx, y + inset, widths[i], h - inset * 2.0);
-        cx += widths[i];
+        let rect = (cx, y + inset, widths[i] * scale, h - inset * 2.0);
+        cx += rect.2;
         let hover = contains(rect, s.cursor);
         if *selected {
             g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, 3.0, 1.0, theme::accent());
         }
-        let tx = rect.0 + (rect.2 - g.measure_chrome_text(label, 11.5, false)) / 2.0;
-        text(g, tx, rect.1 + 4.0, label, 11.5, if *selected { theme::accent() } else if hover { theme::text() } else { theme::text_dim() }, false);
+        let shown = fit(g, label, rect.2 - 8.0, 11.5, false);
+        let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, false)) / 2.0;
+        text(g, tx, rect.1 + 4.0, &shown, 11.5, if *selected { theme::accent() } else if hover { theme::text() } else { theme::text_dim() }, false);
         hit(g, hits, target.clone(), rect, false);
         g.hover_pointer |= hover;
     }
@@ -2128,6 +2131,7 @@ fn text(g: &mut gpu::GpuRenderer, x: f32, y: f32, value: &str, size: f32, color:
 
 fn fit(g: &mut gpu::GpuRenderer, value: &str, width: f32, size: f32, bold: bool) -> String {
     if g.measure_chrome_text(value, size, bold) <= width { return value.to_string(); }
+    if width <= 0.0 || g.measure_chrome_text("…", size, bold) > width { return String::new(); }
     let mut out = String::new();
     for ch in value.chars() {
         let next = format!("{out}{ch}…");

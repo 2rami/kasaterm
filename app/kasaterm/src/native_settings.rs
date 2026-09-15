@@ -4432,8 +4432,11 @@ fn paint_machines(
         } else {
             format!("학생의 브라우저 도구가 {chosen} 의 크롬(로그인 그대로)을 쓰고, 안 닿으면 이 맥 크롬으로 물러납니다")
         };
-        draw_text(g, x, *y, &note, 10.5, theme::text_mute(), false);
-        *y += 26.0;
+        for line in wrap_words(g, &note, w, 10.5) {
+            draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
+            *y += 15.0;
+        }
+        *y += 11.0;
     }
     draw_text(g, x, *y + 5.0, "명부", 12.5, theme::text(), true);
     button(
@@ -5739,8 +5742,11 @@ fn account_group(
             } else {
                 "이 맥북에서 도는 claude 의 계정이에요 — 하단 막대에 뜨는 숫자가 이것".to_string()
             };
-            draw_text(g, x, *y, &note, 10.5, theme::text_mute(), false);
-            *y += 24.0;
+            for line in wrap_words(g, &note, w, 10.5) {
+                draw_text(g, x, *y, &line, 10.5, theme::text_mute(), false);
+                *y += 15.0;
+            }
+            *y += 9.0;
         }
     }
 
@@ -5776,8 +5782,11 @@ fn account_group(
 
     if let Some(h) = home {
         if let Some(why) = h.error.as_deref() {
-            draw_text(g, x + 2.0, *y, why, 10.5, theme::danger(), false);
-            *y += 18.0;
+            for line in wrap_words(g, why, w - 4.0, 10.5) {
+                draw_text(g, x + 2.0, *y, &line, 10.5, theme::danger(), false);
+                *y += 15.0;
+            }
+            *y += 3.0;
         }
         if h.accounts.is_empty() && h.error.is_none() {
             draw_text(
@@ -6525,13 +6534,15 @@ fn section_title(g: &mut gpu::GpuRenderer, x: f32, y: f32, title: &str, _desc: &
 
 /// 플랫 행 하나: 왼쪽 이름(+보조글), 아래 얇은 선. 조작은 부르는 쪽이 오른쪽에 얹는다.
 /// 돌려주는 값은 행 사각형.
-fn flat_row(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, label: &str, hint: &str) -> Rect {
+fn flat_row(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, label: &str, hint: &str, text_w: f32) -> Rect {
     let rect = (x, y, w, ROW_H);
+    let label = fit(g, label, text_w.max(0.0), 12.0, false);
+    let hint = fit(g, hint, text_w.max(0.0), 10.5, false);
     if hint.is_empty() {
-        draw_text(g, x, y + 13.0, label, 12.0, theme::text(), false);
+        draw_text(g, x, y + 13.0, &label, 12.0, theme::text(), false);
     } else {
-        draw_text(g, x, y + 7.0, label, 12.0, theme::text(), false);
-        draw_text(g, x, y + 24.0, hint, 10.5, theme::text_dim(), false);
+        draw_text(g, x, y + 7.0, &label, 12.0, theme::text(), false);
+        draw_text(g, x, y + 24.0, &hint, 10.5, theme::text_dim(), false);
     }
     g.rect(x, y + ROW_H - 1.0, w, 1.0, theme::with_alpha(theme::border(), 140));
     rect
@@ -6548,8 +6559,10 @@ fn seg_row(
     label: &str,
     cells: &[(&str, bool, SettingsAction)],
 ) {
-    flat_row(g, x, *y, w, label, "");
-    segmented(g, s, hits, x, *y + (ROW_H - CTL_H) / 2.0, w, cells);
+    let label_w = g.measure_chrome_text(&crate::native_strings::text(label), 12.0, false).min(w * 0.4);
+    flat_row(g, x, *y, w, label, "", label_w);
+    let control_x = x + label_w + 12.0;
+    segmented(g, s, hits, control_x, *y + (ROW_H - CTL_H) / 2.0, (x + w - control_x).max(0.0), cells);
     *y += ROW_H;
 }
 
@@ -6606,7 +6619,7 @@ fn toggle_row_hint(
     action: SettingsAction,
 ) {
     // 목업: 채움 없는 토글. 꺼짐은 회색 테두리+회색 점, 켜짐은 강조색 테두리+강조색 점.
-    let rect = flat_row(g, x, *y, w, label, hint);
+    let rect = flat_row(g, x, *y, w, label, hint, w - 44.0);
     let hover = contains(rect, s.cursor);
     let toggle = (rect.0 + rect.2 - 32.0, rect.1 + 11.0, 32.0, 18.0);
     let line = if on {
@@ -6640,7 +6653,7 @@ fn segmented(
     w: f32,
     cells: &[(&str, bool, SettingsAction)],
 ) {
-    if cells.is_empty() {
+    if cells.is_empty() || w <= 4.0 {
         return;
     }
     // 목업(플랫): 칸 너비는 글자에 맞추고 상자는 오른쪽 끝에 붙는다. 채움 없이
@@ -6655,10 +6668,11 @@ fn segmented(
         .collect();
     let total = widths.iter().sum::<f32>() + inset * 2.0;
     let outer = (x + w - total.min(w), y, total.min(w), h);
+    let scale = ((outer.2 - inset * 2.0) / (total - inset * 2.0)).min(1.0);
     stroke_round(g, outer, seg_outer_radius(), theme::border());
     let mut cx = outer.0 + inset;
     for (i, (label, selected, action)) in cells.iter().enumerate() {
-        let cw = widths[i];
+        let cw = widths[i] * scale;
         let rect = (cx, y + inset, cw, h - inset * 2.0);
         cx += cw;
         let hover = contains(rect, s.cursor);
@@ -6799,8 +6813,8 @@ fn dropdown_row(
     value: &str,
     id: DropdownId,
 ) {
-    flat_row(g, x, *y, w, label, "");
     let fw = DROPDOWN_FIELD_W.min(w * 0.55);
+    flat_row(g, x, *y, w, label, "", w - fw - 12.0);
     let rect = (x + w - fw, *y + (ROW_H - DROPDOWN_FIELD_H) / 2.0, fw, DROPDOWN_FIELD_H);
     let open = s.dropdown == Some(id);
     let hover = contains(rect, s.cursor);
@@ -6965,7 +6979,7 @@ fn stepper_row(
     plus: SettingsAction,
 ) {
     // 목업(플랫): −·값·+ 가 채움 없는 테두리 하나 안에, 높이 26.
-    flat_row(g, x, *y, w, label, "");
+    flat_row(g, x, *y, w, label, "", w - 116.0);
     let right = x + w;
     let bw = 26.0;
     let vw = 52.0;
@@ -7020,8 +7034,8 @@ fn text_field(
     } else if label.is_empty() {
         (x, y, w, CTL_H)
     } else {
-        flat_row(g, x, y, w, label, "");
         let fw = (w * 0.45).max(160.0).min(w);
+        flat_row(g, x, y, w, label, "", w - fw - 12.0);
         (x + w - fw, y + (ROW_H - CTL_H) / 2.0, fw, CTL_H)
     };
     let focused = s.input == Some(field);
@@ -7189,22 +7203,32 @@ fn draw_preedit_and_caret(
 /// 안내문을 낱말 경계에서 접는다. `wrap_text` 는 글자 단위라 편집 중인 입력에는
 /// 맞지만, 읽기만 하는 안내문에 쓰면 「넷버드(VP / N)」처럼 낱말 가운데가 갈린다.
 fn wrap_words(g: &mut gpu::GpuRenderer, text: &str, max_w: f32, font: f32) -> Vec<String> {
+    let translated = crate::native_strings::text(text);
+    wrap_measured(&translated, max_w, |line| g.measure_chrome_text(line, font, false))
+}
+
+fn wrap_measured(text: &str, max_w: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
+    if max_w <= 0.0 { return Vec::new(); }
     let mut out = Vec::new();
     let mut line = String::new();
-    for word in text.split(' ') {
-        let next = if line.is_empty() {
-            word.to_string()
-        } else {
-            format!("{line} {word}")
-        };
-        if !line.is_empty() && g.measure_chrome_text(&next, font, false) > max_w {
-            out.push(std::mem::replace(&mut line, word.to_string()));
-        } else {
-            line = next;
+    for paragraph in text.split('\n') {
+        for word in paragraph.split_whitespace() {
+            let next = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+            if measure(&next) <= max_w {
+                line = next;
+                continue;
+            }
+            if !line.is_empty() { out.push(std::mem::take(&mut line)); }
+            // URLs and CJK prose have no spaces to break on.
+            for ch in word.chars() {
+                let next = format!("{line}{ch}");
+                if !line.is_empty() && measure(&next) > max_w {
+                    out.push(std::mem::take(&mut line));
+                }
+                if measure(&ch.to_string()) <= max_w { line.push(ch); }
+            }
         }
-    }
-    if !line.is_empty() {
-        out.push(line);
+        if !line.is_empty() { out.push(std::mem::take(&mut line)); }
     }
     out
 }
@@ -7560,6 +7584,9 @@ fn fit(g: &mut gpu::GpuRenderer, text: &str, width: f32, font: f32, bold: bool) 
     if g.measure_chrome_text(text, font, bold) <= width {
         return text.to_string();
     }
+    if width <= 0.0 || g.measure_chrome_text("…", font, bold) > width {
+        return String::new();
+    }
     let mut out = String::new();
     for ch in text.chars() {
         let candidate = format!("{out}{ch}…");
@@ -7589,6 +7616,21 @@ fn color_for_word(word: &str) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrap_measured_keeps_long_unspaced_text_inside_available_width() {
+        for width in [1.0, 4.0, 12.0, 80.0] {
+            for input in ["긴기계이름과공백없는설명입니다", "https://example.invalid/very/long/path", "account one failed\nplease retry"] {
+                let lines = wrap_measured(input, width, |line| line.chars().count() as f32);
+                assert!(lines.iter().all(|line| line.chars().count() as f32 <= width));
+                let actual: String = lines.join("").chars().filter(|ch| !ch.is_whitespace()).collect();
+                let expected: String = input.chars().filter(|ch| !ch.is_whitespace()).collect();
+                assert_eq!(actual, expected);
+            }
+        }
+        assert!(wrap_measured("text", 0.0, |_| 4.0).is_empty());
+        assert_eq!(wrap_measured("two words\nnext", 20.0, |line| line.len() as f32), vec!["two words", "next"]);
+    }
 
     fn usage_account(windows: Vec<crate::UsageWindowBadge>) -> AccountChoice {
         let usage_windows = windows.clone();
