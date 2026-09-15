@@ -1959,7 +1959,7 @@ impl App {
         let sb_scroll = self.sidebar_scroll_geom(sb_win_h);
         // 방 목록이 실제로 보이는 세로 구간 `(top, height)`. 그리기의 시저와 아래
         // 히트렉트 자르기가 **같은 값**을 봐야 한다 — 갈리면 화면엔 없는 방이 눌린다.
-        let sb_view = (TITLE_HEIGHT + 18.0, self.sidebar_avail_h(sb_win_h));
+        let sb_view = (self.sidebar_content_top(), self.sidebar_avail_h(sb_win_h));
         let sb_over_before = self.win_tab_first > 0;
         let sb_over_after = sb_tabs
             .last()
@@ -2872,6 +2872,8 @@ impl App {
                 g.rect(0.0, 0.0, tab_strip_w, sb_win_h, theme::panel_bg());
                 g.rect(tab_strip_w - 1.0, 0.0, 1.0, sb_win_h, theme::border());
             }
+            crate::sidebar_navigation::draw(g, &mut self.info, sb_cursor, tab_strip_w,
+                (0.0, sb_view.0, tab_strip_w, sb_view.1));
             // 사이드바 토글. 자리는 `sidebar_toggle_rect` 가 정한다 — 접혔으면
             // 신호등 오른쪽, 폈으면 사이드바 오른쪽 위. 글리프는 그대로다(왼쪽
             // 칼럼이 찬 판 모양). 탭이 위로 가면 토글할 세로 스트립이 없다.
@@ -4521,7 +4523,7 @@ impl App {
                         g.queue_icon(
                             "chevron-up",
                             ccx,
-                            TITLE_HEIGHT + 3.0,
+                            sb_view.0 - 13.0,
                             cis,
                             theme::text_mute(),
                         );
@@ -10319,6 +10321,18 @@ impl App {
             // 박스는 라이브가 아닌 tab 드래그(멀티탭 탭 추출)의 착지 지점 힌트로만 남긴다.
             if let Some((zx, zy, zw, zh)) = drop_zone_rect {
                 g.rect(zx, zy, zw, zh, theme::with_alpha(theme::accent(), 90));
+            }
+            if self.info.navigation.machine.is_some() && !self.info.navigation.picker
+                && self.info.machine_menu.is_none() && tab_strip_w > 0.0
+                && sb_cursor.0 >= sb_plus.0 && sb_cursor.0 <= sb_plus.0 + sb_plus.2
+                && sb_cursor.1 >= sb_plus.1 && sb_cursor.1 <= sb_plus.1 + sb_plus.3
+            {
+                Self::draw_hover_tip(g, "이 기기에 새 방 만들기", sb_plus.0, sb_plus.1,
+                    win_px.0 / scale, sb_win_h);
+            }
+            crate::sidebar_navigation::draw_picker(g, &mut self.info, sb_cursor, tab_strip_w, sb_win_h - status_h);
+            if self.info.machine_menu.is_some() {
+                info::draw_machine_menu(g, sb_cursor, &mut self.info, 0.0, tab_strip_w.max(240.0), TITLE_HEIGHT, sb_win_h - status_h);
             }
             // Launch build banner, bottom-right, painted last so it sits
             // on top. Faint and short-lived — fades out after a few

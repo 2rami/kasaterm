@@ -3797,9 +3797,19 @@ impl App {
         // 별도창으로 뗀 pane 은 어느 트리에도 없다 — 그 OS 창을 앞으로 보내는 것이
         // 「거기로 가기」다(알림 클릭·소켓 focus 가 조용히 실패하지 않게).
         if let Some(ai) = self.aux_terminal_index(&outer) {
+            if exact_surface {
+                let mut ws = self.ws.lock().unwrap();
+                if let Some(pane) = ws.panes.get_mut(&outer) {
+                    if let Some(index) = pane.tabs.iter().position(|tab| tab.pid.as_deref() == Some(requested)) {
+                        pane.active_tab = index;
+                        pane.dirty = true;
+                    }
+                }
+            }
             let w = &self.aux.terminals[ai].window;
             w.set_minimized(false);
             w.focus_window();
+            w.request_redraw();
             return true;
         }
         let Some(wi) = self.window_of_pane(&outer) else {
@@ -5075,7 +5085,7 @@ impl App {
     /// 먹고, 24px 는 chevron-down 오버플로 힌트 자리다.
     pub(crate) fn sidebar_avail_h(&self, win_h: f32) -> f32 {
         // 10px slot above the first tab hosts the overflow chevron-up.
-        let top = TITLE_HEIGHT + 18.0;
+        let top = self.sidebar_content_top();
         // 상태줄도 바닥을 먹는다. 안 빼면 마지막 방 카드가 그 위로 넘치는데,
         // 사이드바는 클립을 안 세우므로 **잘리지 않고 그대로 덮어 그려진다** — 화면은
         // 멀쩡해 보이고 카드만 엉뚱한 자리에 있는 종류의 버그가 된다.
@@ -5094,7 +5104,7 @@ impl App {
     /// 제각각이라 인덱스 비율과 픽셀 비율이 어긋나므로, 앞쪽 카드 높이를 실제로
     /// 더해 픽셀로 환산한다.
     pub(crate) fn sidebar_scroll_geom(&self, win_h: f32) -> Option<(f32, f32, f32, f32)> {
-        if self.tabs_on_top {
+        if self.tabs_on_top || self.info.navigation.machine.is_some() {
             return None;
         }
         let n = self.windows.len();
@@ -5110,7 +5120,7 @@ impl App {
         let scrolled = self
             .sidebar_scroll_px
             .clamp(0.0, (content_h - viewport_h).max(0.0));
-        Some((TITLE_HEIGHT + 18.0, viewport_h, content_h, scrolled))
+        Some((self.sidebar_content_top(), viewport_h, content_h, scrolled))
     }
 
     /// 목록을 끝까지 내렸을 때의 스크롤 위치(px). 넘치지 않으면 0.
@@ -5182,8 +5192,13 @@ impl App {
         }
         let tab_x = SIDEBAR_TAB_INSET;
         let tab_w = (self.tab_strip_w() - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
+        if self.info.navigation.machine.is_some() {
+            let plus = self.sidebar_tray_rects(win_h)
+                .map_or((tab_x, win_h - SIDEBAR_TRAY_H, tab_w, 28.0), |(_, p, ..)| p);
+            return (Vec::new(), Vec::new(), plus, Vec::new(), Vec::new(), Vec::new());
+        }
         // 10px slot above the first tab hosts the overflow chevron-up.
-        let top = TITLE_HEIGHT + 18.0;
+        let top = self.sidebar_content_top();
         // Rows that fit above the "+" button; the dock strip eats the bottom
         // of the column, and 24px stays free for "+"-adjacent chrome + the
         // chevron-down overflow hint.

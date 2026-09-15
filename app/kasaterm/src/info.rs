@@ -1,4 +1,4 @@
-//! Info 패널 — 활성 pane 의 셸 아래에서 도는 프로세스와, 그것들이 listen 중인
+//! Info 패널 — 열린 모든 방의 pane 에서 도는 프로세스와, 그것들이 listen 중인
 //! 포트. 개발 중엔 "dev 서버가 아직 살아 있나, 몇 번 포트를 잡았나"를 확인하려고
 //! `lsof -i` 를 치는 일이 잦은데, 그 답이 pane 옆에 상주하면 물어볼 일이 없다.
 //!
@@ -215,6 +215,9 @@ pub(crate) struct PaneGroup {
     /// 거의 모든 pane 이 그 경우다. 첫 탭도 여기 포함된다(바깥 pane id 와 같은
     /// 줄이 되지만, 형제 탭이 있는 한 그 사실 자체가 보여야 할 정보다).
     pub(crate) tabs: Vec<TabRow>,
+    pub(crate) status: String,
+    pub(crate) harness: String,
+    pub(crate) registered: Option<crate::server_restore::ServerOverview>,
 }
 
 /// pane 하나 안의 탭. 탭은 **바깥 pane 자리에 겹쳐 사는 또 하나의 셸**이라,
@@ -249,6 +252,30 @@ pub(crate) struct TabRow {
     /// 탭 수만큼 반복하면 정작 다른 곳을 보는 탭이 안 튄다.
     pub(crate) cwd: String,
     pub(crate) rows: Vec<ProcRow>,
+    pub(crate) status: String,
+    pub(crate) harness: String,
+    pub(crate) registered: Option<crate::server_restore::ServerOverview>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ContextLines {
+    /// Stable machine/source/local-PTY identity, not a reusable display pane number.
+    pub pane_id: String,
+    pub session_id: String,
+    pub harness: String,
+    pub summary: Vec<String>,
+    pub details: Vec<(String, Vec<String>)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum InfoScope { #[default] AllRooms, CurrentRoom, SelectedPane }
+
+fn in_scope(group: &PaneGroup, scope: InfoScope, room: usize, selected: Option<&str>) -> bool {
+    match scope {
+        InfoScope::AllRooms => true,
+        InfoScope::CurrentRoom => group.window == room,
+        InfoScope::SelectedPane => selected.is_some_and(|id| group.pane == id || group.tabs.iter().any(|tab| tab.pane == id)),
+    }
 }
 
 /// 한 번의 수집 결과.
@@ -266,6 +293,10 @@ pub(crate) struct InfoSnap {
     pub(crate) tasks: HashMap<String, TaskLine>,
     /// 예약(반복·타이머) — 하단바 「예약」 칩과 팝오버가 읽는다.
     pub(crate) schedules: Vec<kasa_mcp::ScheduleItem>,
+    pub(crate) contexts: HashMap<String, ContextLines>,
+    pub(crate) execution_states: HashMap<String, String>,
+    pub(crate) collection_error: Option<String>,
+    pub(crate) board_error: bool,
 }
 
 /// 학생 줄에 붙는 작업 한 줄. `attention` 이면 줄이 주황으로 튄다(승인·질문 대기).
@@ -278,10 +309,20 @@ pub(crate) struct TaskLine {
 }
 
 /// 수집 결과에 보드 쪽 정보를 덧댄다 — 작업 한 줄(collab board)·예약.
-fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>>) -> InfoSnap {
+fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>>, targets: &[PaneTarget]) -> InfoSnap {
     if let Some(b) = backend {
         if let Ok(rows) = kasa_socket::backend::Backend::collab_board(&*b) {
             for r in rows {
+                if !r.title.is_empty() {
+                    for group in &mut snap.panes {
+                        if group.pane == r.surface_id { group.session = r.title.clone(); }
+                        for tab in &mut group.tabs { if tab.pane == r.surface_id { tab.session = r.title.clone(); } }
+                    }
+                }
+                let state = if r.done_outcome.as_deref() == Some("failed") { "실패" } else {
+                    match r.status.as_str() { "working" => "실행", "waiting" | "idle" | "attention" => "대기", "ended" | "done" => "종료", "offline" | "disconnected" | "stale" => "연결끊김", _ => "미확인" }
+                };
+                snap.execution_states.insert(r.surface_id.clone(), state.into());
                 snap.tasks.insert(
                     r.surface_id.clone(),
                     TaskLine {
@@ -291,7 +332,18 @@ fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>
                     },
                 );
             }
-        }
+        } else { snap.board_error = true; }
+    }
+    for target in targets.iter().filter(|target| target.active && !target.harness.is_empty()) {
+        let path = if target.machine.is_some() { None } else {
+            target.session_path.clone().or_else(|| if target.session_id.is_empty() { None } else if target.harness == "codex" {
+                crate::socket::codex_rollout_for_session(&target.session_id)
+            } else { crate::socket::transcript_path_for_session(&target.session_id) })
+        };
+        let evidence = crate::context_info::snapshot(&crate::context_info::ContextRequest {
+            session_id: format!("{}:{}", target.machine_identity, target.session_id), harness: target.harness.clone(), path,
+        });
+        snap.contexts.insert(target.id.clone(), ContextLines { pane_id: format!("{}:{}", target.machine_identity, target.pty_id), session_id: target.session_id.clone(), harness: target.harness.clone(), summary: evidence.summary_lines(), details: evidence.detail_sections() });
     }
     snap.schedules = kasa_mcp::schedule_snapshot();
     snap
@@ -301,6 +353,8 @@ fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>
 /// GUI 는 `ps`/`lsof`/`git` 을 돌리면 안 되니 경계가 여기다.
 #[derive(Clone, Default)]
 pub(crate) struct PaneTarget {
+    pub(crate) pty_id: String,
+    pub(crate) machine_identity: String,
     pub(crate) id: String,
     pub(crate) shell_pid: u32,
     pub(crate) label: String,
@@ -334,6 +388,10 @@ pub(crate) struct PaneTarget {
     /// 못 세우지만, 목록에서 통째로 빼면 「인포에 맥미니 세션이 안 보인다」가
     /// 된다(2026-08-29 지적) — 자리는 남기고 셸·pid 대신 ⇄ 기계를 적는다.
     pub(crate) machine: Option<String>,
+    pub(crate) session_id: String,
+    pub(crate) harness: String,
+    pub(crate) registered: Option<crate::server_restore::ServerOverview>,
+    pub(crate) remote_disconnected: bool,
 }
 
 /// `ps` 한 줄에서 뽑은 원시 레코드. 좀비도 담는다 — 목록에는 안 올리지만
@@ -351,9 +409,7 @@ struct Raw {
 /// 부모 바로 밑에 자식이 오도록 정렬해 들여쓰기가 말이 되게 한다.
 pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     let table = process_snapshot();
-    if table.is_empty() {
-        return InfoSnap::default();
-    }
+    let collection_error = table.is_empty().then(|| "프로세스 정보를 수집하지 못했어요".to_string());
     let by_pid: HashMap<u32, &Raw> = table.iter().map(|r| (r.pid, r)).collect();
     let mut panes: Vec<PaneGroup> = targets
         .iter()
@@ -389,6 +445,9 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
             // 여기선 늘 빈 값이다 — 탭 접기는 포트 귀속이 끝난 **맨 뒤**에서 한다
             // (`fold_tabs`).
             tabs: Vec::new(),
+            status: if t.machine.is_some() { if t.remote_disconnected { "연결끊김" } else { "원격 실행 미확인" } } else if collection_error.is_some() { "수집실패" } else if !by_pid.contains_key(&t.shell_pid) { "종료" } else { "대기" }.into(),
+            harness: t.harness.clone(),
+            registered: t.registered.clone(),
         })
         .collect();
     // 방이 먼저, 그 안에서 pane 번호순. 방을 1차 키로 두어야 같은 방의 pane 이
@@ -479,7 +538,7 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
                 label: pane
                     .as_deref()
                     .and_then(|id| panes.iter().find(|g| g.pane == id))
-                    .map(|g| g.label.clone())
+                    .map(|g| if !owner.contains_key(&pid) && !env_panes.contains_key(&pid) { format!("폴더로 추정 · {}", g.label) } else { g.label.clone() })
                     .unwrap_or_default(),
                 // pane 경유 조회가 끊긴 서버 — 띄운 pane 이 이미 닫힌 dev 서버가
                 // 대표다 — 는 이름 없는 묶음에 깔렸는데, 정작 분류가 필요한 것이
@@ -532,8 +591,8 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
     // `closed` retain 보다 **앞**이어야 한다. 순서를 바꾸면 닫힌 바깥 pane 이 먼저
     // 사라지고 그 탭만 최상위에 고아로 남는다.
     fold_tabs(&mut panes, targets);
-    panes.retain(|g| !g.closed);
-    InfoSnap { panes, ports, outside, ..Default::default() }
+    panes.retain(|g| !g.closed || g.registered.as_ref().is_some_and(|server| server.status == "실행" || server.status == "대기"));
+    InfoSnap { panes, ports, outside, collection_error, ..Default::default() }
 }
 
 /// 탭 그룹을 바깥 pane 그룹 **안으로** 옮겨 담는다.
@@ -599,6 +658,7 @@ fn fold_tabs(panes: &mut Vec<PaneGroup>, targets: &[PaneTarget]) {
                 index: t.tab_index,
                 cwd: g.cwd.clone(),
                 rows: std::mem::take(&mut g.rows),
+                status: g.status.clone(), harness: g.harness.clone(), registered: g.registered.take(),
             },
         ));
     }
@@ -1568,6 +1628,22 @@ impl App {
     /// 워커가 하나 도는 동안 다시 띄우지 않도록 `busy` 로 막는다.
     pub(crate) fn pump_info(&mut self) {
         use std::sync::atomic::Ordering::Relaxed;
+        if crate::verification_run() && std::env::var("KASATERM_AUTOINFO").is_ok_and(|value| matches!(value.as_str(), "execution" | "execution-details" | "execution-scroll" | "execution-stale" | "execution-unknown")) {
+            self.run_pending_autoinfo();
+            return;
+        }
+        self.info.active_room = self.active_window;
+        self.info.selected_pane = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone());
+        let selected_pid = self.ws.lock().ok().and_then(|ws| ws.active_pane.as_deref().map(|pane| ws.active_tab_pid(pane)));
+        self.info.selected_pid = selected_pid.as_ref().map(|pid| {
+            let source = kasa_mcp::remote::remote_info(pid).map(|remote| format!("{}:{}", remote.base, remote.remote_id)).unwrap_or_else(|| "local".into());
+            format!("{source}:{pid}")
+        }).unwrap_or_default();
+        self.info.selected_session_id = selected_pid.as_ref().and_then(|pid| self.pane_claude_sid.get(pid)).cloned().unwrap_or_default();
+        self.info.selected_harness = selected_pid.as_ref().and_then(|pid| self.pty.get(pid)).and_then(|session| session.active_agent()).map(|kind| kind.as_str().to_string()).or_else(|| selected_pid.as_ref().and_then(|pid| {
+            kasa_mcp::remote::remote_info(pid)?;
+            Some(crate::machinescol::remote_pane_facts(pid).and_then(|(_, row)| row.get("harness").and_then(|value| value.as_str()).map(str::to_string)).unwrap_or_else(|| "unknown".into()))
+        })).unwrap_or_default();
         // 탭 판정보다 앞이다 — "열기" 앱 목록은 Info 의 버튼뿐 아니라 우클릭
         // 메뉴·설정도 쓰는데, 훑는 데 100ms 넘게 걸리는 Spotlight 질의라
         // 누구든 처음 부르는 쪽이 프레임을 통째로 잡아먹는다. 첫 프레임에
@@ -1664,7 +1740,7 @@ impl App {
         let proxy = self.proxy.clone();
         let backend = self.socket_backend.clone();
         std::thread::spawn(move || {
-            let next = enrich(collect(&targets, &sites), backend);
+            let next = enrich(collect(&targets, &sites), backend, &targets);
             let changed = match snap.lock() {
                 Ok(mut g) => {
                     let differs = *g != next;
@@ -1758,6 +1834,12 @@ impl App {
                         .map(str::to_string)
                 };
                 Some(PaneTarget {
+                    pty_id: id.clone(),
+                    machine_identity: remote.as_ref().map(|remote| format!("{}:{}", remote.base, remote.remote_id)).unwrap_or_else(|| "local".into()),
+                    session_id: self.pane_claude_sid.get(id).cloned().unwrap_or_default(),
+                    harness: s.active_agent().map(|kind| kind.as_str().to_string()).or_else(|| remote_str("harness")).unwrap_or_else(|| if remote.is_some() { "unknown".into() } else { String::new() }),
+                    registered: ws.panes.get(host).and_then(|pane| pane.tabs.get(tab_index)).and_then(|tab| tab.server.as_ref()).map(crate::server_restore::RegisteredServer::overview),
+                    remote_disconnected: remote_str("status").is_some_and(|status| matches!(status.as_str(), "offline" | "disconnected")),
                     // 셸만 도는 pane 엔 학생 이름을 안 붙인다. 배정은 spawn 때 **모든**
                     // pane 에 되지만(`assign_character_env`) 표시는 클로드가 실제로 돌
                     // 때만이다 — 테두리·타이틀바가 쓰는 조건과 같아야 한 pane 이 자리마다
@@ -1787,8 +1869,7 @@ impl App {
                     } else {
                         self.pane_view_cwd.get(id).or_else(|| self.pane_cwd_cache.get(id)).cloned()
                     },
-                    active: active.as_deref() == Some(leaf.as_str())
-                        || (remote.is_some() && tab_active && active.as_deref() == Some(host)),
+                    active: tab_active && (active.as_deref() == Some(leaf.as_str()) || active.as_deref() == Some(host)),
                     window,
                     // `window_labels.0` 은 안 쓴다 — 그 자리는 대표 pane 의 OSC
                     // 타이틀이라 셸만 떠 있으면 방마다 똑같이 `zsh` 가 된다(실측).
@@ -1807,10 +1888,7 @@ impl App {
                         .unwrap_or_default(),
                     // 경로 해석까지만 GUI 가 한다 — 제목을 읽으려면 jsonl 꼬리를
                     // 훑어야 해서 그건 워커 몫이다(session_title).
-                    session_path: remote.is_none().then(|| self
-                        .pane_claude_sid
-                        .get(id)
-                        .and_then(|sid| crate::socket::transcript_path_for_session(sid))).flatten(),
+                    session_path: None,
                     closed: self.stashed_record(id).is_some(),
                     id: leaf,
                     // 원격 pane 은 로컬 셸이 없다 — 0 으로 남기고 machine 이 그
@@ -1908,7 +1986,7 @@ impl App {
                     .view
                     .panes
                     .iter()
-                    .flat_map(|g| &g.rows)
+                    .flat_map(|g| g.rows.iter().chain(g.tabs.iter().flat_map(|tab| tab.rows.iter())))
                     .find(|r| r.pid == pid)
                     .map(|r| {
                         if r.rest.is_empty() {
@@ -2080,6 +2158,166 @@ const EMPTY_H: f32 = 22.0;
 /// Info 탭 본문 — 기기마다 「방 › 학생 줄」, 그 밑에 닫힌 pane 과 예약. 프로세스·
 /// 포트·pid·요약 숫자는 걷었다(2026-09-14 지시) — 하단바가 이미 말하는 것이라
 /// 여기서는 「누가 어디서 무엇을」만 남긴다.
+fn execution_key(group: &PaneGroup) -> String {
+    format!("runtime:{}:{}", group.machine.as_deref().unwrap_or("local"), group.pane)
+}
+
+#[cfg(test)]
+mod execution_overview_tests {
+    use super::*;
+    #[test]
+    fn scopes_preserve_all_rooms_and_match_inner_tabs() {
+        let group = PaneGroup { pane: "%1".into(), window: 2, tabs: vec![TabRow { pane: "%7".into(), ..Default::default() }], ..Default::default() };
+        assert!(in_scope(&group, InfoScope::AllRooms, 0, None));
+        assert!(!in_scope(&group, InfoScope::CurrentRoom, 0, None));
+        assert!(in_scope(&group, InfoScope::SelectedPane, 0, Some("%7")));
+        assert!(!in_scope(&group, InfoScope::SelectedPane, 0, Some("%8")));
+        assert_ne!(execution_key(&group), execution_key(&PaneGroup { machine: Some("other".into()), ..group.clone() }));
+    }
+    #[test]
+    fn remote_unknown_and_collection_failure_are_not_local_running() {
+        assert_eq!(execution_state("원격 실행 미확인", true, &[ProcRow::default()], Some(&"실행".into())), "원격 실행 미확인");
+        assert_eq!(execution_state("수집실패", false, &[], None), "수집실패");
+        assert_eq!(execution_state("종료", false, &[], None), "종료");
+        assert_eq!(execution_state("대기", false, &[], None), "대기");
+    }
+    #[test]
+    fn failed_collection_keeps_pane_identity_visible() {
+        let snap = InfoSnap { panes: vec![PaneGroup { pane: "%1".into(), status: "수집실패".into(), ..Default::default() }], collection_error: Some("ps unavailable".into()), ..Default::default() };
+        let lines = execution_lines(&snap, &state::InfoState::default());
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Group(group, _) if group.pane == "%1")));
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Text(text, _) if text.contains("수집실패"))));
+    }
+    #[test]
+    fn expanded_inner_tab_processes_are_not_omitted_or_duplicated() {
+        let group = PaneGroup { pane: "%1".into(), tabs: vec![TabRow { pane: "%7".into(), rows: vec![ProcRow { pid: 17, name: "worker".into(), ..Default::default() }], ..Default::default() }], ..Default::default() };
+        let mut info = state::InfoState::default(); info.pane_expanded.insert(execution_key(&group));
+        let snap = InfoSnap { panes: vec![group], ..Default::default() };
+        assert_eq!(execution_lines(&snap, &info).iter().filter(|line| matches!(line, ExecutionLine::Process(process) if process.pid == 17)).count(), 1);
+    }
+    #[test]
+    fn previous_tab_context_is_hidden_even_without_a_bound_session_id() {
+        let mut info = state::InfoState::default(); info.selected_pane = Some("%1".into()); info.selected_pid = "%8".into(); info.selected_harness = "codex".into();
+        let mut snap = InfoSnap { panes: vec![PaneGroup { pane: "%1".into(), ..Default::default() }], ..Default::default() };
+        snap.contexts.insert("%7".into(), ContextLines { pane_id: "%7".into(), harness: "codex".into(), summary: vec!["old evidence".into()], ..Default::default() });
+        assert!(!execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == "old evidence")));
+        snap.contexts.get_mut("%7").unwrap().pane_id = "%8".into();
+        assert!(execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == "old evidence")));
+        info.selected_pid = "remote-base:remote-source:%8".into();
+        assert!(!execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == "old evidence")));
+    }
+    #[test]
+    fn compact_layout_has_finite_height_and_one_summary_per_selected_agent() {
+        let group = PaneGroup { pane: "%1".into(), ..Default::default() };
+        let mut snap = InfoSnap { panes: vec![group], ..Default::default() };
+        snap.contexts.insert("%1".into(), ContextLines { pane_id: "%1".into(), harness: "claude".into(), summary: vec!["one".into(), "two".into(), "three".into(), "extra".into()], ..Default::default() });
+        let info = state::InfoState { selected_pane: Some("%1".into()), selected_pid: "%1".into(), selected_harness: "claude".into(), ..Default::default() };
+        let lines = execution_lines(&snap, &info);
+        assert_eq!(lines.iter().filter(|line| matches!(line, ExecutionLine::Context(_))).count(), 3);
+        assert!(lines.iter().map(ExecutionLine::height).sum::<f32>().is_finite());
+    }
+}
+
+fn execution_state(status: &str, remote: bool, rows: &[ProcRow], board: Option<&String>) -> String {
+    if remote || matches!(status, "수집실패" | "종료" | "연결끊김") { return status.into(); }
+    if let Some(state) = board { return state.clone(); }
+    if rows.is_empty() { "대기".into() } else { "실행".into() }
+}
+
+enum ExecutionLine<'a> {
+    Section(String),
+    Group(&'a PaneGroup, String),
+    Text(String, bool),
+    Context(String),
+    Process(&'a ProcRow),
+    Schedule(&'a kasa_mcp::ScheduleItem),
+}
+impl ExecutionLine<'_> {
+    fn height(&self) -> f32 {
+        match self { Self::Section(_) => DEV_H, Self::Group(..) => GROUP_H, Self::Schedule(_) => GROUP_H, _ => ROW_H }
+    }
+}
+
+fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<ExecutionLine<'a>> {
+    let mut lines = Vec::new();
+    if let Some(error) = &snap.collection_error { lines.push(ExecutionLine::Text(format!("수집실패 · {error}"), true)); }
+    if snap.board_error { lines.push(ExecutionLine::Text("작업 상태 수집실패 · 실행 정보만 표시".into(), true)); }
+    let mut room = None;
+    for group in snap.panes.iter().filter(|group| in_scope(group, info.scope, info.active_room, info.selected_pane.as_deref())) {
+        if room != Some(group.window) {
+            room = Some(group.window);
+            lines.push(ExecutionLine::Section(if group.window_label.is_empty() { format!("방 {}", group.window + 1) } else { format!("방 {} · {}", group.window + 1, group.window_label) }));
+        }
+        let key = execution_key(group);
+        let expanded = info.pane_expanded.contains(&key);
+        lines.push(ExecutionLine::Group(group, key));
+        if group.closed { lines.push(ExecutionLine::Text("접힌 pane에서 등록 서버 실행".into(), true)); }
+        let task = snap.tasks.get(&group.pane);
+        let mut runtime = if group.harness.is_empty() { group.rows.first().map(|row| row.name.as_str()).unwrap_or(if group.shell.is_empty() { "실행 대상 없음" } else { &group.shell }) } else { &group.harness }.to_string();
+        let mut state = execution_state(&group.status, group.machine.is_some(), &group.rows, snap.execution_states.get(&group.pane));
+        if !group.tabs.is_empty() {
+            let states: Vec<_> = group.tabs.iter().map(|tab| execution_state(&tab.status, group.machine.is_some(), &tab.rows, snap.execution_states.get(&tab.pane))).collect();
+            state = ["실패", "수집실패", "연결끊김", "실행", "원격 실행 미확인"].into_iter().find(|candidate| states.iter().any(|state| state == candidate)).unwrap_or(if states.iter().all(|state| state == "종료") { "종료" } else { "대기" }).into();
+            runtime = format!("탭 {}개 · 프로세스 {}개", group.tabs.len(), group.tabs.iter().map(|tab| tab.rows.len()).sum::<usize>());
+        }
+        lines.push(ExecutionLine::Text(format!("{state} · {runtime}"), state == "실패" || state == "수집실패"));
+        if let Some(task) = task.filter(|task| !task.label.is_empty()) { lines.push(ExecutionLine::Text(task.label.clone(), task.attention)); }
+        if let Some(server) = &group.registered { lines.push(ExecutionLine::Text(format!("{} · {} · 등록 실행", server.status, server.name), false)); }
+        for tab in &group.tabs {
+            let name = if !tab.title.is_empty() { tab.title.as_str() } else if !tab.session.is_empty() { &tab.session } else if !tab.label.is_empty() { &tab.label } else { "셸" };
+            let state = execution_state(&tab.status, group.machine.is_some(), &tab.rows, snap.execution_states.get(&tab.pane));
+            lines.push(ExecutionLine::Text(format!("탭 {}{} · {} · {}", tab.index + 1, if tab.active { " (선택)" } else { "" }, state, name), false));
+            if let Some(task) = snap.tasks.get(&tab.pane).filter(|task| !task.label.is_empty()) { lines.push(ExecutionLine::Text(task.label.clone(), task.attention)); }
+            if let Some(server) = &tab.registered { lines.push(ExecutionLine::Text(format!("{} · {} · 등록 실행", server.status, server.name), false)); }
+        }
+        let selected = info.selected_pane.as_deref().is_some_and(|selected| group.pane == selected || group.tabs.iter().any(|tab| tab.pane == selected));
+        let context = selected.then(|| snap.contexts.values().find(|context| context.pane_id == info.selected_pid)).flatten();
+        let context = context.filter(|context| context.session_id == info.selected_session_id && context.harness == info.selected_harness);
+        if let Some(context) = context {
+            for summary in context.summary.iter().take(3) { lines.push(ExecutionLine::Context(summary.clone())); }
+        } else if selected && !info.selected_harness.is_empty() {
+            lines.push(ExecutionLine::Context("미확인 · 선택 에이전트 정보 갱신 중".into()));
+        }
+        if expanded {
+            if !group.cwd.is_empty() { lines.push(ExecutionLine::Text(format!("작업 폴더 · {}", group.cwd), false)); }
+            if let Some(server) = &group.registered { lines.push(ExecutionLine::Text(server.command.clone(), false)); }
+            for process in &group.rows { lines.push(ExecutionLine::Process(process)); }
+            for tab in &group.tabs {
+                if let Some(server) = &tab.registered { lines.push(ExecutionLine::Text(server.command.clone(), false)); }
+                for process in &tab.rows { lines.push(ExecutionLine::Process(process)); }
+            }
+            if group.rows.is_empty() && group.tabs.iter().all(|tab| tab.rows.is_empty()) {
+                lines.push(ExecutionLine::Text(if group.machine.is_some() { "원격 프로세스·포트는 로컬에서 확인하지 못함" } else if group.status == "수집실패" { "실행 상세 수집실패" } else { "추가 실행 프로세스 없음" }.into(), false));
+            }
+            if let Some(context) = context {
+                for (title, details) in &context.details {
+                    lines.push(ExecutionLine::Section(title.clone()));
+                    for detail in details { lines.push(ExecutionLine::Context(detail.clone())); }
+                }
+            }
+        }
+    }
+    if room.is_none() { lines.push(ExecutionLine::Text("열린 pane 없음".into(), false)); }
+    if !snap.schedules.is_empty() {
+        lines.push(ExecutionLine::Section("예약".into()));
+        for schedule in &snap.schedules { lines.push(ExecutionLine::Schedule(schedule)); }
+    }
+    lines
+}
+
+fn wrap_context_line(g: &mut gpu::GpuRenderer, text: &str, width: f32) -> Vec<String> {
+    let mut result = Vec::new(); let mut line = String::new();
+    for character in text.chars() {
+        let candidate = format!("{line}{character}");
+        if character == '\n' || (!line.is_empty() && g.measure_chrome_text(&candidate, 10.5, false) > width.max(1.0)) {
+            result.push(std::mem::take(&mut line));
+        }
+        if character != '\n' { line.push(character); }
+    }
+    if !line.is_empty() { result.push(line); }
+    result
+}
+
 pub(crate) fn draw_info_col(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
@@ -2089,324 +2327,79 @@ pub(crate) fn draw_info_col(
     top: f32,
     bottom: f32,
 ) {
-    let prof = profiling().then(Instant::now);
-    // 커서가 이 안에 있는 동안은 목록을 갈아끼우지 않는다(pump_info 참고).
     info.panel_rect = Some((x, top, w, (bottom - top).max(0.0)));
-    let x0 = x + 14.0;
-    let right = x + w - 12.0;
-    // 스냅샷을 잠그거나 복사하지 않고 잠시 꺼내 쓴다 — 이 함수는 매 프레임 도는데
-    // `pump_info` 가 이미 갱신될 때만 사본을 만들어 뒀다. `take` 는 빈 값과
-    // 맞바꾸는 것뿐이라 할당이 없고, 끝에서 그대로 돌려놓는다.
     let snap = std::mem::take(&mut info.view);
-    info.group_rects.clear();
-    info.proc_rects.clear();
-    info.kill_rects.clear();
-    info.machine_rects.clear();
-    info.machine_pane_rects.clear();
-    info.sec_rects.clear();
-    info.dir_btn_rects.clear();
-
-    // 이 기기에 열린 pane(거울 포함). 방이 하나뿐이면 방 머리를 안 그린다 — 늘 같은
-    // 이름 한 줄이 목록 맨 위를 차지하면서 알려주는 게 없다.
-    let local_panes = viewer_panes(&snap);
-    let show_windows = local_panes.first().is_some_and(|first|
-        local_panes.iter().any(|g| g.window != first.window));
-    let local_h = if info.procs_collapsed {
-        0.0
-    } else if local_panes.is_empty() {
-        EMPTY_H
-    } else {
-        let mut h = 0.0;
-        let mut prev: Option<usize> = None;
-        for gp in &local_panes {
-            if show_windows && prev != Some(gp.window) {
-                h += ROOM_H;
-                prev = Some(gp.window);
-            }
-            h += GROUP_H + gp.tabs.len() as f32 * ROW_H;
-        }
-        h
-    };
-    // 끝난 이사의 체크리스트는 잠시 두었다가 걷는다 — 결과를 읽을 시간은 주되,
-    // 다음 이사 때까지 옛 것이 남아 있으면 지금 것으로 오독한다.
-    if info
-        .machines_col
-        .progress
-        .as_ref()
-        .is_some_and(|p| p.finished.is_some_and(|(t, _)| t.elapsed().as_secs() > 20))
-    {
-        info.machines_col.progress = None;
-    }
-    // 다른 기계 — 명부가 비면(혼자 쓰는 사람) 섹션째 없다. 도는 이사가 있으면 그
-    // 기계 줄 밑에 단계 수만큼 더 선다.
-    let stages_h = info
-        .machines_col
-        .progress
-        .as_ref()
-        .map(|p| p.stages.len() as f32 * STAGE_H + 6.0)
-        .unwrap_or(0.0);
-    let machine_heights: Vec<f32> = {
-        let prog = info.machines_col.progress.as_ref();
-        info
-            .machines_col
-            .machines
-            .iter()
-            .map(|m| {
-                let mut h = DEV_H + SEC_GAP;
-                if info.machine_collapsed.contains(&m.label) {
-                    return h;
-                }
-                if prog.is_some_and(|p| p.machine == m.label) {
-                    h += stages_h;
-                }
-                if m.online {
-                    let mut last_room = "";
-                    for r in machine_rows(m) {
-                        if !r.room.is_empty() && r.room != last_room {
-                            h += ROOM_H;
-                            last_room = &r.room;
-                        }
-                        h += GROUP_H;
-                    }
-                    if m.closed > 0 {
-                        h += ROOM_H;
-                    }
-                    if machine_rows(m).is_empty() { h += EMPTY_H; }
-                } else {
-                    h += EMPTY_H;
-                }
-                h
-            })
-            .collect()
-    };
-    let machines_h: f32 = machine_heights.iter().sum();
-    // 예약은 있을 때만 선다 — 빈 머리 한 줄은 「예약이라는 기능이 있다」 말고는
-    // 알려주는 게 없다.
-    let sched_h = if snap.schedules.is_empty() {
-        0.0
-    } else {
-        DEV_H + snap.schedules.len() as f32 * GROUP_H + SEC_GAP
-    };
-    let content = DEV_H + local_h + SEC_GAP + machines_h + sched_h + 14.0;
-    info.content_h = content;
-    info.scroll = info.scroll.clamp(0.0, (content - (bottom - top)).max(0.0));
-    // 본문 전체를 시저로 가둔다. 섹션·행마다 `y + H > top && y < bottom` 으로 거르는
-    // 건 **완전히** 밖인 것만 막는다 — 위로 반쯤 걸친 행은 통째로 그려져 탭 줄 위로
-    // 올라탔다. 그 검사들은 컬링으로 그대로 남기고(안 남기면 목록이 길 때 인스턴스가
-    // 수천 개 늘어난다), 삐져나온 픽셀만 여기서 자른다.
-    g.push_clip(x, top, w, (bottom - top).max(0.0));
-    // 시저는 픽셀만 자르지 클릭은 안 자른다. 막을 것이 둘인데 **시점이 다르다**:
-    //
-    // ① **이 프레임의 호버** — 커서가 잘려 안 보이는 부분에 있는데 행의 보이는
-    //    쪽에 하이라이트가 그려지는 것. 커서를 여기서 한 번 걸러 막는다.
-    // ② **나중의 클릭** — 아래에서 쌓는 히트렉트는 `handler.rs` 가 **다음 클릭
-    //    좌표로 다시** 검사한다. 저장되는 rect 자체가 잘려 있어야 한다. 그건 이
-    //    함수 끝의 `clip_rects!` 가 한다.
-    let raw_cursor = cursor;
-    let cursor = match g.clip_hit((cursor.0, cursor.1, 1.0, 1.0)) {
-        Some(_) => cursor,
-        None => (f32::MIN, f32::MIN),
-    };
+    info.group_rects.clear(); info.proc_rects.clear(); info.kill_rects.clear();
+    info.machine_rects.clear(); info.machine_pane_rects.clear(); info.sec_rects.clear(); info.dir_btn_rects.clear();
+    let lines: Vec<_> = execution_lines(&snap, info).into_iter().flat_map(|line| match line {
+        ExecutionLine::Context(text) => wrap_context_line(g, &text, (w - 26.0).max(1.0)).into_iter().map(ExecutionLine::Context).collect(),
+        line => vec![line],
+    }).collect();
+    let height: f32 = lines.iter().map(ExecutionLine::height).sum();
+    info.content_h = height + 12.0;
+    info.scroll = info.scroll.clamp(0.0, (info.content_h - (bottom - top).max(0.0)).max(0.0));
     let mut y = top - info.scroll;
-
-    // ── 이 기기 ──
-    let t_local = prof.map(|_| Instant::now());
-    let local = local_machine_name();
-    let r = draw_device_head(
-        g, cursor, if local.is_empty() { "이 기기" } else { local }, local, "이 기기", true,
-        local_panes.len(), x, w, x0, right, y, top, bottom,
-    );
-    info.sec_rects.push((state::InfoSection::Procs, r));
-    y += DEV_H;
-    if !info.procs_collapsed {
-        if local_panes.is_empty() {
-            draw_empty(g, x0, y, top, bottom, "열린 pane 없음");
-            y += EMPTY_H;
-        }
-        let mut prev_win: Option<usize> = None;
-        for gp in &local_panes {
-            if show_windows && prev_win != Some(gp.window) {
-                prev_win = Some(gp.window);
-                if y + ROOM_H > top && y < bottom {
-                    // 번호를 앞에 세운다 — 방 이름은 작업 폴더에서 오는데 두 방이 같은
-                    // 폴더면 이름만으론 구분이 안 된다(실측: 방 셋이 전부 `Desktop`).
-                    let name = if gp.window_label.is_empty() {
-                        format!("방 {}", gp.window + 1)
-                    } else {
-                        format!("방 {} · {}", gp.window + 1, gp.window_label)
-                    };
-                    draw_room_head(g, &name, x0, right, y);
+    let x0 = x + 14.0; let right = x + w - 12.0;
+    g.push_clip(x, top, w.max(0.0), (bottom - top).max(0.0));
+    for line in &lines {
+        let row_h = line.height();
+        if y + row_h > top && y < bottom {
+            match line {
+                ExecutionLine::Section(title) => draw_room_head(g, title, x0, right, y + 3.0),
+                ExecutionLine::Group(group, key) => {
+                    let rect = (x, y, w, row_h);
+                    if hit(cursor, &rect) { g.rect(x, y, w, row_h, theme::surface()); }
+                    let name = if !group.tabs.is_empty() { format!("pane {} · 탭 {}개", group.pane, group.tabs.len()) } else if !group.session.is_empty() { group.session.clone() } else if !group.label.is_empty() { group.label.clone() } else { format!("셸 {}", group.pane) };
+                    let name = if let Some(machine) = &group.machine { format!("{name} · {machine}") } else { name };
+                    let affordance = if info.pane_expanded.contains(key) { "접기" } else { "실행 상세" };
+                    let aw = g.measure_chrome_text(affordance, 10.0, false);
+                    let name = fit_text(g, &name, (right - x0 - aw - 12.0).max(0.0), 12.0, true);
+                    g.draw_text(x0, y + 5.0, &name, gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false });
+                    g.draw_text(right - aw, y + 6.0, affordance, gpu::DrawOpts { font_size: 10.0, color: theme::text_dim(), bold: false, italic: false });
+                    if let Some(clipped) = g.clip_hit(rect) { info.group_rects.push((key.clone(), clipped)); }
                 }
-                y += ROOM_H;
-            }
-            if y + GROUP_H > top && y < bottom {
-                // 탭 묶음의 머리는 자리를 말하지 한 탭을 말하지 않는다 — 점은 탭 전부를
-                // 모아(하나라도 승인 대기면 주황, 하나라도 도는 중이면 초록) 찍고, 작업
-                // 한 줄은 각 탭 줄이 제 것을 든다. 첫 탭 것을 그대로 쓰면 뒤 탭이 승인을
-                // 기다려도 머리는 잠잠하다.
-                let folded;
-                let task = if gp.tabs.len() > 1 {
-                    let (mut attention, mut working) = (false, false);
-                    for tk in gp.tabs.iter().filter_map(|t| snap.tasks.get(&t.pane)) {
-                        attention |= tk.attention;
-                        working |= tk.working;
-                    }
-                    folded = TaskLine { label: String::new(), attention, working };
-                    Some(&folded)
-                } else {
-                    snap.tasks.get(&gp.pane)
-                };
-                let dot = row_dot(task.is_some_and(|t| t.attention), task.is_some_and(|t| t.working));
-                draw_group_head(g, cursor, gp, task, dot, x, w, x0, right, y);
-            }
-            info.group_rects.push((gp.pane.clone(), (x, y, w, GROUP_H)));
-            y += GROUP_H;
-            // 탭이 여럿인 pane 만 이 경로로 온다(`fold_tabs`). 탭은 바깥 pane 자리에
-            // 겹쳐 사는 또 하나의 셸이라 한 단 들여 세운다.
-            let n = gp.tabs.len();
-            for (i, t) in gp.tabs.iter().enumerate() {
-                if y + ROW_H > top && y < bottom {
-                    let task = snap.tasks.get(&t.pane);
-                    draw_tab_row(g, t, task, &gp.cwd, i + 1 == n, x, w, x0, right, y);
+                ExecutionLine::Text(text, attention) => {
+                    let text = fit_text(g, text, (right - x0).max(0.0), 11.0, false);
+                    g.draw_text(x0, y + 5.0, &text, gpu::DrawOpts { font_size: 11.0, color: if *attention { theme::attention() } else { theme::text_dim() }, bold: false, italic: false });
                 }
-                y += ROW_H;
+                ExecutionLine::Context(text) => { g.draw_text(x0, y + 5.0, text, gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false }); }
+                ExecutionLine::Process(process) => {
+                    let left = x0 + 8.0 + f32::from(process.depth.min(5)) * 10.0;
+                    let ports = if process.ports.is_empty() { String::new() } else { format!(" · 포트 {}", process.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")) };
+                    let detail = format!("{} · {} · CPU {:.0}% · {}{}", process.name, process.pid, process.cpu, process.mem_label(), ports);
+                    let text = fit_text(g, &detail, (right - left).max(0.0), 10.5, false);
+                    g.draw_text(left, y + 5.0, &text, gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false });
+                    if let Some(rect) = g.clip_hit((x, y, w, row_h)) { info.proc_rects.push((process.pid, rect)); }
+                }
+                ExecutionLine::Schedule(schedule) => draw_schedule_row(g, schedule, x0, right, y),
             }
         }
+        y += row_h;
     }
-    let d_local = t_local.map(|t| t.elapsed().as_secs_f32() * 1000.0).unwrap_or(0.0);
-    y += SEC_GAP;
-
-    // ── 다른 기기 ── 이 기기와 같은 「방 › 학생 줄」 모양이다.
-    for (m, section_h) in info.machines_col.machines.iter().zip(machine_heights) {
-        let shut = info.machine_collapsed.contains(&m.label);
-        let status = machine_status(m);
-        let r = draw_device_head(
-            g, cursor, &m.label, &m.label, &status, m.online, machine_open_count(m),
-            x, w, x0, right, y, top, bottom,
-        );
-        info.machine_rects.push((m.label.clone(), r));
-        y += DEV_H;
-        if !shut {
-            if let Some(p) = info.machines_col.progress.as_ref().filter(|p| p.machine == m.label) {
-                y = draw_migrate_stages(g, p, x0, right, y, top, bottom);
-            }
-            if m.online {
-                let mut last_room = "";
-                for r in machine_rows(m) {
-                    if !r.room.is_empty() && r.room != last_room {
-                        if y + ROOM_H > top && y < bottom {
-                            draw_room_head(g, &r.room, x0, right, y);
-                        }
-                        last_room = &r.room;
-                        y += ROOM_H;
-                    }
-                    let mirrored = !r.pane.is_empty();
-                    let mut close_rect = None;
-                    if y + GROUP_H > top && y < bottom {
-                        if mirrored {
-                            // 거울이 앉은 이쪽 방 — 방이 하나뿐이면 라벨이 비어 「이 창」이 된다.
-                            let room = snap
-                                .panes
-                                .iter()
-                                .find(|p| p.pane == r.pane)
-                                .map(|p| p.window_label.as_str())
-                                .unwrap_or("");
-                            draw_machine_hole_row(g, cursor, r, room, x, w, x0, right, y);
-                        } else {
-                            close_rect = draw_machine_pane_row(g, cursor, r, x, w, x0, right, y);
-                        }
-                    }
-                    if let Some(cr) = close_rect {
-                        let close = state::MachinesColBtn::Close {
-                            label: m.label.clone(),
-                            remote_id: if mirrored { String::new() } else { r.remote_id.clone() },
-                            name: r.name.clone(),
-                            pane: r.pane.clone(),
-                        };
-                        info.machine_pane_rects.push((m.label.clone(), Some(close), None, cr));
-                    }
-                    let act = (!mirrored && !r.remote_id.is_empty()).then(|| state::MachinesColBtn::Mirror {
-                        label: m.label.clone(), remote_id: r.remote_id.clone(),
-                        name: r.name.clone(), cwd: r.remote_cwd.clone(),
-                    });
-                    info.machine_pane_rects.push((
-                        m.label.clone(), act, mirrored.then(|| r.pane.clone()), (x, y, w, GROUP_H),
-                    ));
-                    y += GROUP_H;
-                }
-                if m.closed > 0 {
-                    if y + ROOM_H > top && y < bottom {
-                        draw_room_head(
-                            g, &format!("닫힌 pane {} · 원본 기기에서 되살리기", m.closed), x0, right, y,
-                        );
-                    }
-                    y += ROOM_H;
-                }
-                if machine_rows(m).is_empty() {
-                    draw_empty(g, x0, y, top, bottom, "열린 pane 없음");
-                    y += EMPTY_H;
-                }
-            } else {
-                draw_empty(g, x0, y, top, bottom, "연결할 수 없음");
-                y += EMPTY_H;
-            }
-        }
-        let _ = section_h;
-        y += SEC_GAP;
-    }
-
-    // ── 예약 ── 하단바 「예약」 칩과 같은 목록. 누를 수 없다 — 여닫는 손잡이는 칩 쪽.
-    if !snap.schedules.is_empty() {
-        if y + DEV_H > top && y < bottom {
-            draw_plain_head(g, "clock", "예약", &snap.schedules.len().to_string(), x0, right, y);
-        }
-        y += DEV_H;
-        for it in &snap.schedules {
-            if y + GROUP_H > top && y < bottom {
-                draw_schedule_row(g, it, x0, right, y);
-            }
-            y += GROUP_H;
-        }
-    }
-
-    // ── 히트렉트를 본문과 교집합 ──
-    // 여기 한 곳에서 몰아서 하는 이유: rect 를 여러 갈래로 쌓고 그중 몇은 헬퍼 안에서
-    // 쌓는다. 쌓는 자리마다 교집합을 내면 **새 줄을 추가하는 사람이 반드시 빠뜨린다**
-    // — 빠뜨려도 화면은 멀쩡하고 컴파일도 초록이라, 안 보이는 줄이 눌리기 전까지
-    // 아무도 모른다. 클립이 아직 서 있는 지금 걸러 두면 그 자리가 한 곳으로 모인다.
-    macro_rules! clip_rects {
-        ($v:expr, $i:tt) => {
-            $v.retain_mut(|e| match g.clip_hit(e.$i) {
-                Some(h) => {
-                    e.$i = h;
-                    true
-                }
-                None => false,
-            })
-        };
-    }
-    clip_rects!(info.sec_rects, 1);
-    clip_rects!(info.group_rects, 1);
-    clip_rects!(info.machine_rects, 1);
-    clip_rects!(info.machine_pane_rects, 3);
-    // `refresh_rect`·`tab_rects` 는 스크롤 밖(탭 줄)이라 건드리지 않는다 — 여기서
-    // 자르면 멀쩡한 단추가 사라진다.
-
-    // 메뉴는 클립 **밖**이다 — 목록 위에 얹히는 오버레이라 본문 사각형에 가두면
-    // 아래쪽 행에서 연 메뉴가 잘린다. 커서도 거르지 않은 것을 쓴다.
     g.pop_clip();
-    draw_pane_menu(g, raw_cursor, info, x, w, top, bottom);
-    draw_machine_menu(g, raw_cursor, info, x, w, top, bottom);
+    draw_pane_menu(g, cursor, info, x, w, top, bottom);
+    draw_execution_menu(g, cursor, info, x, w, top, bottom);
     info.view = snap;
-    if let Some(t) = prof {
-        eprintln!(
-            "[profile] info_col {:.2}ms (local {d_local:.2}) panes={}",
-            t.elapsed().as_secs_f32() * 1000.0,
-            info.view.panes.len()
-        );
-    }
 }
 
+fn draw_execution_menu(g: &mut gpu::GpuRenderer, cursor: (f32, f32), info: &mut state::InfoState, x: f32, w: f32, top: f32, bottom: f32) {
+    info.ctx_menu_rects.clear();
+    let Some((cx, cy, _)) = info.ctx_menu else { return };
+    let menu_w = w.min(220.0).max(0.0); let height = (bottom - top).max(0.0).min(112.0);
+    let left = cx.clamp(x, (x + w - menu_w).max(x)); let start = cy.clamp(top, (bottom - height).max(top));
+    g.push_clip(x, top, w.max(0.0), (bottom - top).max(0.0));
+    round_rect(g, left, start, menu_w, height, theme::radius_sm(), theme::surface());
+    use state::InfoMenuAction as A;
+    for (index, (action, label)) in [(A::CopyCmd, "명령 복사"), (A::CopyPid, "PID 복사"), (A::Terminate, "종료"), (A::ForceKill, "강제 종료")].into_iter().enumerate() {
+        let rect = (left, start + index as f32 * 28.0, menu_w, 28.0);
+        if let Some(rect) = g.clip_hit(rect) {
+            if hit(cursor, &rect) { g.rect(rect.0, rect.1, rect.2, rect.3, theme::surface_hover()); }
+            g.draw_text(left + 10.0, start + index as f32 * 28.0 + 7.0, label, gpu::DrawOpts { font_size: 11.0, color: if index > 1 { theme::attention() } else { theme::text() }, bold: false, italic: false });
+            info.ctx_menu_rects.push((action, rect));
+        }
+    }
+    g.pop_clip();
+}
 /// 학생 줄 오른쪽 끝 점 — 확인 필요면 주황, 도는 중이면 초록, 나머지는 흐림.
 fn row_dot(attention: bool, working: bool) -> [u8; 4] {
     if attention {
@@ -3395,7 +3388,7 @@ fn draw_machine_hole_row(
 /// 거울 열기, 이사 간 학생마다 데려오기. 옛 「원격」 탭이 본문에 펼쳐 두던 것을
 /// 줄 하나 뒤로 접은 것이다(2026-09-07 지시). 항목 rect 는 `machines_col.btn_rects`
 /// 에 실어 클릭이 옛 탭과 같은 길(`machines_col_click`)을 탄다.
-fn draw_machine_menu(
+pub(crate) fn draw_machine_menu(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     info: &mut state::InfoState,

@@ -3946,7 +3946,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 사이드바 pane 행 → 숨기기 메뉴. 이 띠는 좌클릭을 통째로 삼키므로
                 // (아래 `window_strip_click` 게이트) 우클릭도 여기서 끝낸다.
                 if self.sidebar_visible && !self.tabs_on_top && cx < self.tab_strip_w() {
-                    if self.sidebar_row_right_click(cx, cy) {
+                    if self.sidebar_navigation_right_click((cx, cy)) || self.sidebar_row_right_click(cx, cy) {
                         window.request_redraw();
                     }
                     return;
@@ -4242,6 +4242,20 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(action) = action {
                         self.run_ft_menu_action(action);
                     }
+                    window.request_redraw();
+                    return;
+                }
+                if matches!(state, ElementState::Pressed) && self.info.machine_menu.is_some() {
+                    let (cx, cy) = self.cursor_px;
+                    self.machines_col_click(cx, cy);
+                    self.info.machine_menu = None;
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                    return;
+                }
+                if matches!(state, ElementState::Pressed) && self.info.navigation.picker
+                    && self.sidebar_navigation_click(self.cursor_px)
+                {
                     window.request_redraw();
                     return;
                 }
@@ -4892,6 +4906,10 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    if self.sidebar_navigation_click((cx, cy)) {
+                        window.request_redraw();
+                        return;
+                    }
                     if self.sidebar_visible && cx < self.tab_strip_w() {
                         let over = |rect: (f32, f32, f32, f32)| {
                             cx >= rect.0
@@ -5292,15 +5310,6 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        // 기계 메뉴가 떠 있으면 그게 최상단이다 — 항목이면 실행하고,
-                        // 밖이면 닫기만 하고 클릭을 삼킨다(프로세스 메뉴와 같은 규칙).
-                        if self.info.machine_menu.is_some() {
-                            self.machines_col_click(cx, cy);
-                            self.info.machine_menu = None;
-                            self.chrome_dirty = true;
-                            window.request_redraw();
-                            return;
-                        }
                         // 프로세스·포트 우클릭 메뉴가 떠 있으면 그게 최상단이다.
                         // 밖을 눌렀으면 닫기만 하고 클릭을 삼킨다 — 메뉴를 닫는
                         // 클릭이 밑의 행까지 누르면 놀란다.
@@ -5483,6 +5492,15 @@ impl ApplicationHandler<UserEvent> for App {
                                 .find(|(_, r)| inside(r))
                                 .map(|(p, _)| p.clone())
                             {
+                                if pane.starts_with("runtime:") {
+                                    if !self.info.pane_expanded.remove(&pane) {
+                                        self.info.pane_expanded.insert(pane);
+                                    }
+                                    self.info.last_group_click = None;
+                                    self.chrome_dirty = true;
+                                    window.request_redraw();
+                                    return;
+                                }
                                 // 한 번 = 접기/펴기, 두 번 = 그 학생으로 포커스.
                                 // 더블클릭이면 접기 토글이 두 번 걸려 제자리로
                                 // 돌아오므로, 여기선 포커스만 얹으면 된다.
@@ -6993,6 +7011,21 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if self.sidebar_navigation_key(&event) {
+                    window.request_redraw();
+                    return;
+                }
+                if matches!(event.state, ElementState::Pressed)
+                    && matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                    && (self.info.navigation.picker || self.info.machine_menu.is_some())
+                {
+                    self.info.navigation.picker = false;
+                    self.info.machine_menu = None;
+                    self.info.machines_col.btn_rects.clear();
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                    return;
+                }
                 // Confirm-close modal: Enter = 기본 버튼(저장 안 한 게 있으면
                 // 저장, 아니면 닫기), Esc = 취소. Swallow all other keys so
                 // nothing reaches the PTY behind the dim.
@@ -7713,6 +7746,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoghost();
         self.run_pending_autoview();
         self.run_pending_autoinfo();
+        self.run_pending_sidebar_navigation_probe(event_loop);
         self.run_pending_autonotify();
         // 커서 배치보다 **앞**이다 — 스크롤이 정해진 뒤라야 AUTOCURSOR 가 놓은
         // 자리가 「잘려 안 보이는 행」위인지가 의미를 갖는다.

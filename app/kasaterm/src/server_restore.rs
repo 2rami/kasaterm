@@ -117,6 +117,14 @@ pub(crate) struct RegisteredServer {
     state: Mutex<RunState>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ServerOverview {
+    pub name: String,
+    pub command: String,
+    pub cwd: String,
+    pub status: String,
+}
+
 fn child_process(table: &[(u32, u32, String)], shell: u32) -> Option<u32> {
     table
         .iter()
@@ -158,6 +166,18 @@ fn update_run_state(
 }
 
 impl RegisteredServer {
+    pub(crate) fn overview(&self) -> ServerOverview {
+        let status = match self.state.try_lock() {
+            Ok(state) => match *state {
+                RunState::Queued(_) | RunState::Starting(_) => "대기",
+                RunState::Running(_) => "실행",
+                RunState::Ended => "종료",
+            },
+            Err(_) => "수집실패",
+        };
+        ServerOverview { name: self.spec.name.clone().unwrap_or_else(|| "등록 서버".into()), command: self.spec.command.clone(), cwd: self.spec.cwd.clone(), status: status.into() }
+    }
+
     fn new(spec: ServerSpec, session: &Arc<kasa_pty::PtySession>, process: Option<u32>) -> Self {
         Self {
             spec,

@@ -1937,6 +1937,7 @@ impl App {
         eprintln!("[kasaterm] paste: clipboard has neither text nor image");
     }
     pub(crate) fn handle_wheel(&mut self, delta: MouseScrollDelta) {
+        if self.sidebar_navigation_wheel(&delta) { return; }
         let wdbg = std::env::var_os("KASATERM_WHEEL_DEBUG").is_some();
         let dy_cells = match delta {
             // Mouse wheel: winit normalises one notch to y=±1.0. At 0.3 cells a

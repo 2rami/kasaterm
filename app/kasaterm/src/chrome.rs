@@ -884,10 +884,11 @@ impl App {
     pub(crate) fn effective_right_chrome_w(&self) -> f32 {
         self.git_col_w()
     }
-    /// 「다른 기계」 절이 지금 화면에 있어야 하나 — Info 탭이 열려 있으면. 접혀
-    /// 있어도 머리의 수·배지는 그리므로 접힘은 안 본다. (본문은 machinescol.rs.)
+    /// 기기 목록은 우측 탭과 독립적으로 갱신돼야 왼쪽에서 고른 기기가 굳지 않는다.
     pub(crate) fn machines_section_active(&self) -> bool {
-        self.git.col_visible && self.info.tab == state::SideTab::Info
+        (self.sidebar_visible && !self.tabs_on_top)
+            || (self.git.col_visible && self.info.tab == state::SideTab::Info)
+            || self.info.machine_menu.is_some()
     }
     /// Git-column width (0 when hidden).
     pub(crate) fn git_col_w(&self) -> f32 {
@@ -2097,6 +2098,7 @@ impl App {
             .map(|r| inside(&r))
             .unwrap_or(false)
         {
+            self.info.navigation.machine = None;
             // 피커 항목은 Windows 설치 셸뿐 — macOS/Linux 는 목록이 비므로
             // 메뉴 대신 즉시 기본 셸 새 윈도우("Claude 학생" 항목은 폐기 —
             // split+claude 수동 부팅으로 충분, 거노).

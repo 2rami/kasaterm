@@ -703,7 +703,14 @@ pub(crate) enum InfoMenuAction {
 /// `root`/`root_is_repo` 는 파일트리가 앵커한 디렉터리로, 그게 git 레포라서
 /// 골라진 것인지를 패널이 정직하게 밝히는 데 쓴다.
 pub(crate) struct InfoState {
+    pub(crate) scope: crate::info::InfoScope,
+    pub(crate) active_room: usize,
+    pub(crate) selected_pane: Option<String>,
+    pub(crate) selected_pid: String,
+    pub(crate) selected_session_id: String,
+    pub(crate) selected_harness: String,
     pub(crate) tab: SideTab,
+    pub(crate) navigation: crate::sidebar_navigation::NavigationState,
     /// 이사 탭 본문 상태. App 필드가 아니라 여기 있는 건 병렬 작업 규칙 때문이다
     /// (struct App 정의는 충돌 핫스팟 — 탭 상태는 탭 선택과 같은 집에 있어도
     /// 자연스럽다).
@@ -789,7 +796,14 @@ pub(crate) struct InfoState {
 impl Default for InfoState {
     fn default() -> Self {
         Self {
+            scope: crate::info::InfoScope::AllRooms,
+            active_room: 0,
+            selected_pane: None,
+            selected_pid: String::new(),
+            selected_session_id: String::new(),
+            selected_harness: String::new(),
             tab: SideTab::Git,
+            navigation: crate::sidebar_navigation::NavigationState::default(),
             machines_col: MachinesColState::default(),
             snap: std::sync::Arc::new(std::sync::Mutex::new(crate::info::InfoSnap::default())),
             view: crate::info::InfoSnap::default(),
