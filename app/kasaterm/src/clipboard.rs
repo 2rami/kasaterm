@@ -66,6 +66,15 @@ fn last_seen() -> &'static Mutex<String> {
     S.get_or_init(|| Mutex::new(String::new()))
 }
 
+pub(crate) fn isolated_probe() -> bool {
+    cfg!(debug_assertions) && std::env::var("KASATERM_CLIPBOARD_PROBE").as_deref() == Ok("1")
+}
+
+pub(crate) fn probe_copied_text() -> &'static Mutex<String> {
+    static S: OnceLock<Mutex<String>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(String::new()))
+}
+
 /// 토큰·키처럼 생겼나 — 한 덩어리(공백 없음)에 글자와 숫자가 섞여 길거나, 알려진
 /// 머리(`sk-`·`ghp_`·`xox`·`AKIA`·JWT·PEM)로 시작한다. 놓치는 쪽보다 과하게 잡는
 /// 쪽이 싸다 — 가려진 것은 `paste --show` 로 풀 수 있지만 찍힌 것은 못 지운다.
@@ -163,6 +172,7 @@ pub(crate) fn json_list() -> Vec<serde_json::Value> {
 /// 반환은 「목록이 늘었나」 — 부른 쪽이 화면을 다시 그릴지 정하는 데 쓴다. 매 틱
 /// 다시 그리면 노는 화면이 계속 깨어난다.
 pub(crate) fn poll() -> bool {
+    if isolated_probe() { return false; }
     let Ok(mut cb) = arboard::Clipboard::new() else {
         return false;
     };
@@ -184,23 +194,39 @@ pub(crate) fn poll() -> bool {
 /// 기계 것을 본다), 기계끼리는 이것으로 잇는다(2026-09-14 지시). 다른 기계에서 온 것은
 /// 부르지 않는다 — 그건 `clipboard_set_from_peer` 가 담기만 한다.
 pub(crate) fn share(text: &str, secret: bool) {
+    if isolated_probe() { return; }
     kasa_mcp::machines::share_clipboard(text.to_string(), secret);
 }
 
 fn set_system(text: &str) -> Option<()> {
+    if isolated_probe() {
+        *probe_copied_text().lock().unwrap() = text.to_string();
+        return Some(());
+    }
     let mut cb = arboard::Clipboard::new().ok()?;
     cb.set_text(text.to_string()).ok()
 }
 
-/// 목록의 한 칸을 다시 클립보드로. 성공하면 그 글을 돌려준다(부른 쪽이 띄울 수 있게).
-pub(crate) fn pick(idx: usize) -> Option<String> {
-    let item = store().lock().unwrap().get(idx).cloned()?;
-    set_system(&item.text)?;
-    // 고른 것이 맨 앞으로 올라온다 — 방금 쓴 것이 목록 아래에 있으면 다음에 또 찾아야
-    // 한다. `remember` 가 last_seen 도 갱신하므로 폴링이 이것을 새 복사로 또 담지 않는다.
-    remember_as(&item.text, Some(item.secret));
-    share(&item.text, item.secret);
-    Some(item.text)
+pub(crate) fn remove(id: u64) {
+    store().lock().unwrap().retain(|item| item.id != id);
+}
+
+// 픽셀 폭으로 나누므로 공백 없는 URL과 한글도 같은 경계 안에 머문다.
+pub(crate) fn wrap_text(text: &str, width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.replace('\t', "    ").split('\n') {
+        let mut line = String::new();
+        for c in paragraph.trim_end_matches('\r').chars() {
+            let mut next = line.clone();
+            next.push(c);
+            if !line.is_empty() && measure(&next) > width.max(1.0) {
+                lines.push(std::mem::take(&mut line));
+            }
+            line.push(c);
+        }
+        lines.push(line);
+    }
+    lines
 }
 
 /// id 로 고른다 — 폰이 「그것을 PC 클립보드로」 할 때.
@@ -260,6 +286,26 @@ mod tests {
 
     fn texts() -> Vec<String> {
         history().into_iter().map(|i| i.text).collect()
+    }
+
+    #[test]
+    fn wrapping_preserves_multiline_text_and_breaks_long_tokens() {
+        let text = "긴한글본문\nhttps://example.com/abcdef\n\n끝";
+        let lines = wrap_text(text, 4.0, |s| s.chars().count() as f32);
+        assert!(lines.iter().all(|s| s.chars().count() <= 4));
+        assert_eq!(lines.concat(), text.replace('\n', ""));
+        assert!(lines.contains(&String::new()));
+    }
+
+    #[test]
+    fn removal_uses_identity_after_new_copies_shift_rows() {
+        let _guard = lock();
+        let first = remember_as("first", None).unwrap();
+        let second = remember_as("second", None).unwrap();
+        remember_as("third", None);
+        remove(first.id);
+        assert!(get(first.id).is_none());
+        assert_eq!(get(second.id).unwrap().text, "second");
     }
 
     /// 같은 것을 다시 복사하면 목록이 늘지 않고 **맨 앞으로 올라온다** — 지금 쓰는

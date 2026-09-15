@@ -3943,6 +3943,10 @@ impl ApplicationHandler<UserEvent> for App {
                 ..
             } => {
                 let (cx, cy) = self.cursor_px;
+                if self.clipboard_context_click(cx, cy) {
+                    window.request_redraw();
+                    return;
+                }
                 // 사이드바 pane 행 → 숨기기 메뉴. 이 띠는 좌클릭을 통째로 삼키므로
                 // (아래 `window_strip_click` 게이트) 우클릭도 여기서 끝낸다.
                 if self.sidebar_visible && !self.tabs_on_top && cx < self.tab_strip_w() {
@@ -4220,6 +4224,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.statusbar.tunnel_rect,
                         self.statusbar.chrome_rect,
                         self.statusbar.res_rect,
+                        self.statusbar.clip_rect,
                     ]
                     .into_iter()
                     .flatten()
@@ -7775,6 +7780,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_forcesurfacehalf();
         self.run_pending_layergeom();
         self.run_pending_automenuclick(event_loop);
+        self.run_clipboard_probe(event_loop);
         self.run_pending_autohdrmenu(event_loop);
         self.run_pending_autopillclick(event_loop);
         self.run_pending_autoinfodbl(event_loop);

@@ -64,14 +64,7 @@ pub(crate) fn paint_popover(
     }
 }
 
-/// 최근 복사한 것들 — 골라서 다시 클립보드에 올린다.
-///
-/// 클립보드는 한 칸짜리 그릇이라 다음 복사가 앞의 것을 지운다. 그 사고는 조용해서
-/// 붙여넣어 봐야 알고, 그때는 이미 잃은 뒤다. 여기서는 지나간 것이 남아 있어 되찾을 수
-/// 있다(2026-09-06 지시).
-///
-/// 줄은 **한 줄로 눕혀** 보인다. 목록은 내용을 알아보는 자리지 읽는 자리가 아니고, 화면
-/// 한 판을 복사한 칸이 목록을 통째로 밀어내면 고르는 일이 붙여넣기보다 오래 걸린다.
+// 내용을 확인하는 클릭이 현재 클립보드를 바꾸지 않도록 펼치기와 복사를 분리한다.
 fn paint_clipboard_popover(
     g: &mut gpu::GpuRenderer,
     sb: &mut state::StatusbarState,
@@ -81,14 +74,20 @@ fn paint_clipboard_popover(
     win_h: f32,
 ) {
     const HEAD_H: f32 = 34.0;
-    const ROW: f32 = 26.0;
+    const ROW: f32 = 34.0;
+    const LINE: f32 = 18.0;
     let items = crate::clipboard::history();
-    let w = 360.0_f32.min(win_w - 16.0);
-    // 창이 낮으면 목록을 잘라서라도 팝오버가 화면 밖으로 나가지 않게 한다 — 나가면
-    // 아래쪽 줄은 눌러 볼 수조차 없다.
-    let room = ((win_h - 24.0 - HEAD_H) / ROW).floor().max(1.0) as usize;
-    let shown = items.len().min(room);
-    let h = HEAD_H + ROW * shown as f32 + 8.0;
+    let w = 400.0_f32.min((win_w - 16.0).max(1.0));
+    if !items.iter().any(|item| Some(item.id) == sb.clip_expanded) {
+        sb.clip_expanded = None;
+    }
+    let detail = items.iter().find(|item| Some(item.id) == sb.clip_expanded).map(|item| {
+        let text = if item.secret { "비밀 값은 가려져 있어요. 복사해서 사용하세요.".to_string() } else { item.text.clone() };
+        crate::clipboard::wrap_text(&text, (w - 44.0).max(1.0), |line| g.measure_chrome_text(line, 12.0, false))
+    }).unwrap_or_default();
+    let body = ROW * items.len().max(1) as f32 + if detail.is_empty() { 0.0 } else { detail.len() as f32 * LINE + 12.0 };
+    let inner = body.min((anchor.1.min(win_h) - HEAD_H - 22.0).max(1.0)).min((win_h * 0.65).max(1.0));
+    let h = HEAD_H + inner + 8.0;
     let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
     let y = (anchor.1 - h - 6.0).max(8.0);
     sb.popover_rect = Some((x, y, w, h));
@@ -100,37 +99,56 @@ fn paint_clipboard_popover(
         "최근 복사",
         gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
     );
-    // 맨 윗줄이 지금 클립보드에 든 것이다 — 그 사실을 말해 두지 않으면 「고르면 무엇이
-    // 달라지나」가 안 보인다.
-    let hint_w = g.measure_chrome_text("맨 위 = 지금 것", 10.0, false);
+    let hint = crate::info::fit_text(g, "눌러서 내용 보기", (w - 100.0).max(0.0), 10.0, false);
+    let hint_w = g.measure_chrome_text(&hint, 10.0, false);
     g.draw_text(
         x + w - 12.0 - hint_w,
         y + 12.0,
-        "맨 위 = 지금 것",
+        &hint,
         gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
     );
 
-    let mut oy = y + HEAD_H;
-    for (i, item) in items.iter().take(shown).enumerate() {
+    sb.popover_scroll = sb.popover_scroll.clamp(0.0, (body - inner).max(0.0));
+    g.push_clip(x + 6.0, y + HEAD_H, (w - 12.0).max(0.0), inner);
+    let mut oy = y + HEAD_H - sb.popover_scroll;
+    for (i, item) in items.iter().enumerate() {
+        let expanded = sb.clip_expanded == Some(item.id);
         let r = (x + 6.0, oy, w - 12.0, ROW);
         let hov = hit(cursor, &r);
-        if hov {
+        if hov || expanded {
             round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
         }
         // 지금 것은 굵게 — 목록에서 눈이 먼저 닿아야 하는 줄이다. 비밀은 가린 채.
+        let preview = crate::info::fit_text(g, &crate::clipboard::preview_item(item, 120), (w - 114.0).max(0.0), 12.0, i == 0);
+        g.queue_icon(if expanded { "chevron-down" } else { "chevron-right" }, r.0 + 5.0, oy + 10.0, 14.0, theme::text_dim());
         g.draw_text(
-            r.0 + 8.0,
-            oy + 7.0,
-            &crate::clipboard::preview_item(item, 46),
+            r.0 + 24.0,
+            oy + 10.0,
+            &preview,
             gpu::DrawOpts {
-                font_size: 11.0,
+                font_size: 12.0,
                 color: if i == 0 { theme::text() } else { theme::text_dim() },
                 bold: i == 0,
                 italic: false,
             },
         );
-        sb.popover_hits.push((state::StatusbarHit::PickClip(i), r));
+        if let Some(rect) = g.clip_hit((r.0, r.1, (r.2 - 58.0).max(0.0), r.3)) {
+            sb.popover_hits.push((state::StatusbarHit::PickClip(item.id), rect));
+        }
+        let copy = (x + w - 62.0, oy + 3.0, 48.0, 28.0);
+        round_rect(g, copy.0, copy.1, copy.2, copy.3, theme::radius_sm(), if hit(cursor, &copy) { theme::surface_hover() } else { theme::surface() });
+        g.draw_text(copy.0 + 12.0, copy.1 + 7.0, "복사", gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: false, italic: false });
+        if let Some(rect) = g.clip_hit(copy) { sb.popover_hits.push((state::StatusbarHit::CopyClip(item.id), rect)); }
         oy += ROW;
+        if expanded {
+            for line in &detail {
+                if g.clip_visible(x, oy, w, LINE) {
+                    g.draw_text(x + 22.0, oy + 3.0, line, gpu::DrawOpts { font_size: 12.0, color: theme::text_dim(), bold: false, italic: false });
+                }
+                oy += LINE;
+            }
+            oy += 12.0;
+        }
     }
     if items.is_empty() {
         g.draw_text(
@@ -144,6 +162,27 @@ fn paint_clipboard_popover(
                 italic: false,
             },
         );
+    }
+    g.pop_clip();
+    if body > inner {
+        let thumb = (inner * inner / body).max(16.0).min(inner);
+        let ty = y + HEAD_H + (inner - thumb) * sb.popover_scroll / (body - inner);
+        round_rect(g, x + w - 5.0, ty, 3.0, thumb, 1.5, theme::text_mute());
+    }
+    if let Some((id, mx, my)) = sb.clip_menu {
+        if items.iter().any(|item| item.id == id) {
+            let mw = 142.0_f32.min((win_w - 16.0).max(1.0));
+            let mx = mx.clamp(8.0, (win_w - mw - 8.0).max(8.0));
+            let my = my.clamp(8.0, (win_h - 72.0).max(8.0));
+            panel_rect_outlined(g, mx, my, mw, 64.0, theme::radius_sm(), theme::surface());
+            for (n, label, action) in [(0, "복사", state::StatusbarHit::CopyClip(id)), (1, "목록에서 삭제", state::StatusbarHit::RemoveClip(id))] {
+                let rect = (mx + 4.0, my + 4.0 + n as f32 * 28.0, mw - 8.0, 28.0);
+                if hit(cursor, &rect) { round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), theme::surface_hover()); }
+                let label = crate::info::fit_text(g, label, rect.2 - 16.0, 12.0, false);
+                g.draw_text(rect.0 + 8.0, rect.1 + 7.0, &label, gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: false, italic: false });
+                sb.popover_hits.insert(0, (action, rect));
+            }
+        } else { sb.clip_menu = None; }
     }
 }
 
@@ -1417,6 +1456,15 @@ fn port_row(
 }
 
 impl crate::App {
+    pub(crate) fn clipboard_context_click(&mut self, cx: f32, cy: f32) -> bool {
+        if !matches!(self.statusbar.popover, Some((state::StatusbarPopover::Clipboard, _))) { return false; }
+        self.statusbar.clip_menu = self.statusbar.popover_hits.iter().find_map(|(action, rect)| {
+            if !hit((cx, cy), rect) { return None; }
+            match action { state::StatusbarHit::PickClip(id) | state::StatusbarHit::CopyClip(id) => Some((*id, cx, cy)), _ => None }
+        });
+        self.chrome_dirty = true;
+        true
+    }
     /// 팝오버 안 클릭. 상태줄 칩보다 **먼저** 봐야 한다 — 팝오버가 위에 떠 있는데
     /// 아래 칩이 먼저 잡으면 열자마자 닫히거나 엉뚱한 게 눌린다.
     ///
@@ -1436,6 +1484,13 @@ impl crate::App {
         }
         let inside =
             |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
+        if self.statusbar.clip_menu.is_some()
+            && !self.statusbar.popover_hits.iter().take(2).any(|(_, rect)| inside(rect))
+        {
+            self.statusbar.clip_menu = None;
+            self.chrome_dirty = true;
+            return true;
+        }
         // 죽이기(×)를 열기(행)보다 먼저 — 둘이 겹쳐 있어 순서가 뒤집히면 ×가
         // 행에 삼켜져 영영 안 눌린다.
         let hit = self
@@ -1600,15 +1655,28 @@ impl crate::App {
                 let _ = self.open_settings_room(Some(crate::SettingsCat::Machines));
                 return true;
             }
-            Some(state::StatusbarHit::PickClip(i)) => {
-                // 고른 줄을 다시 클립보드로. 무엇을 집었는지 앞머리를 함께 띄운다 —
-                // 목록에서 눈으로 고른 것과 실제로 담긴 것이 같은지는 그렇게만 확인된다.
-                if let Some(text) = crate::clipboard::pick(i) {
-                    self.set_toast(format!("복사됨 · {}", crate::clipboard::preview(&text, 30)));
-                }
-                // 골랐으면 목록은 할 일을 마쳤다 — 붙여넣으러 가는 손이 팝오버를 한 번
-                // 더 닫게 하지 않는다.
-                self.statusbar.popover = None;
+            Some(state::StatusbarHit::PickClip(id)) => {
+                self.statusbar.clip_expanded = if self.statusbar.clip_expanded == Some(id) { None } else { Some(id) };
+                self.statusbar.clip_menu = None;
+                self.chrome_dirty = true;
+                return true;
+            }
+            Some(state::StatusbarHit::CopyClip(id)) => {
+                if let Some(item) = crate::clipboard::pick_id(id) {
+                    crate::clipboard::share(&item.text, item.secret);
+                    if self.statusbar.clip_expanded == Some(id) { self.statusbar.clip_expanded = Some(item.id); }
+                    self.statusbar.popover_scroll = 0.0;
+                    self.set_toast("클립보드에 복사했어요".to_string());
+                } else { self.set_toast("복사하지 못했어요. 다시 시도해 주세요".to_string()); }
+                self.statusbar.clip_menu = None;
+                self.chrome_dirty = true;
+                return true;
+            }
+            Some(state::StatusbarHit::RemoveClip(id)) => {
+                crate::clipboard::remove(id);
+                self.statusbar.clip_menu = None;
+                self.set_toast("복사 목록에서 삭제했어요".to_string());
+                self.chrome_dirty = true;
                 return true;
             }
             None => {}
@@ -1651,6 +1719,7 @@ impl crate::App {
         let same = matches!(self.statusbar.popover, Some((k, _)) if k == kind);
         self.statusbar.popover = (!same).then_some((kind, anchor));
         self.statusbar.popover_scroll = 0.0;
+        self.statusbar.clip_menu = None;
         if !same && kind == state::StatusbarPopover::Chrome {
             self.statusbar.chrome_candidates = kasa_mcp::machines::kasachrome_candidates();
             let chosen = kasa_mcp::machines::kasachrome_machine();

@@ -95,6 +95,8 @@ pub(crate) struct StatusbarState {
     pub(crate) res_rect: Option<(f32, f32, f32, f32)>,
     /// 클립보드 칩(하단바 오른쪽 그룹) — 누르면 최근 복사 목록이 펼쳐진다.
     pub(crate) clip_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) clip_expanded: Option<u64>,
+    pub(crate) clip_menu: Option<(u64, f32, f32)>,
     /// 펫 칩 — 바탕화면 캐릭터를 켜고 끈다.
     pub(crate) pet_rect: Option<(f32, f32, f32, f32)>,
     /// 물리 메모리 압박 — 위의 `res` 와 **다른 것을 잰다**. `res` 는 우리 트리가
@@ -189,8 +191,10 @@ pub(crate) enum StatusbarHit {
     ChooseChrome(String),
     /// 열려 있을 때의 주소를 클립보드로.
     CopyTunnelHost,
-    /// 최근 복사 목록의 한 줄 — 그 글을 다시 클립보드에 올린다.
-    PickClip(usize),
+    // 새 복사로 목록 순서가 바뀌어도 클릭한 대상을 유지한다.
+    PickClip(u64),
+    CopyClip(u64),
+    RemoveClip(u64),
     /// 주소 줄 클릭 — 완성 주소(토큰 포함)를 기본 브라우저로 연다. 복사와 열기
     /// 둘 다 있다(2026-08-17 「누르면 바로 열리게, 복사버튼도 괜찮은데 둘다」).
     OpenTunnelUrl,

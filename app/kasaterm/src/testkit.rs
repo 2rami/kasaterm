@@ -3045,6 +3045,61 @@ impl App {
         }
         eprintln!("[automenuclick] idx{idx} {act:?} 클릭 @({:.0},{:.0})", self.cursor_px.0, self.cursor_px.1);
     }
+
+    pub(crate) fn run_clipboard_probe(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        if !crate::clipboard::isolated_probe() { return; }
+        static START: OnceLock<Instant> = OnceLock::new();
+        static STEP: AtomicUsize = AtomicUsize::new(0);
+        let step = STEP.load(Ordering::Relaxed);
+        if step > 6 || START.get_or_init(Instant::now).elapsed().as_millis() < 2000 + step as u128 * 1200 { return; }
+        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return; };
+        let mut button = MouseButton::Left;
+        let rect = match step {
+            0 => {
+                crate::clipboard::remember_as("sk-synthetic-secret-0123456789", Some(true));
+                crate::clipboard::remember_as("짧은 항목", Some(false));
+                crate::clipboard::remember_as(&format!("{}\nhttps://example.com/{}\n\n마지막 줄", "긴 한글 본문 줄바꿈 확인 ".repeat(20), "long-path".repeat(30)), Some(false));
+                self.statusbar.clip_rect
+            }
+            1 => self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::PickClip(_)).then_some(*r)),
+            2 => {
+                let expanded = self.statusbar.clip_expanded.is_some();
+                let untouched = crate::clipboard::probe_copied_text().lock().unwrap().is_empty();
+                eprintln!("[clipboard-probe] expand={} clipboard_untouched={}", expanded, untouched);
+                self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::CopyClip(_)).then_some(*r))
+            }
+            3 => {
+                let copied = crate::clipboard::history().first().is_some_and(|item| *crate::clipboard::probe_copied_text().lock().unwrap() == item.text);
+                eprintln!("[clipboard-probe] exact_copy={} popover_open={}", copied, self.statusbar.popover.is_some());
+                button = MouseButton::Right;
+                self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::PickClip(_)).then_some(*r))
+            }
+            4 => self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::RemoveClip(_)).then_some(*r)),
+            5 => {
+                let removed = crate::clipboard::history().len() == 2;
+                eprintln!("[clipboard-probe] remove={} menu_closed={}", removed, self.statusbar.clip_menu.is_none());
+                self.statusbar.popover_hits.iter().find_map(|(a, r)| matches!(a, state::StatusbarHit::PickClip(_)).then_some(*r))
+            }
+            _ => {
+                eprintln!("[clipboard-probe] completed=true");
+                STEP.store(7, Ordering::Relaxed);
+                return;
+            }
+        };
+        let Some(r) = rect else {
+            eprintln!("[clipboard-probe] FAILED missing_target step={step}");
+            STEP.store(7, Ordering::Relaxed);
+            return;
+        };
+        STEP.store(step + 1, Ordering::Relaxed);
+        self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+        for state in [ElementState::Pressed, ElementState::Released] {
+            self.window_event(event_loop, wid, WindowEvent::MouseInput { device_id: DeviceId::dummy(), state, button });
+        }
+        self.chrome_dirty = true;
+    }
     /// `KASATERM_AUTOHDRMENU_MS` — 헤더 우클릭 → ⋮ 메뉴 경로를 통째로 검증한다.
     /// 0: 활성 pane 헤더 켜기 → 1: 헤더 띠 중앙 **진짜 우클릭**(winit MouseInput
     /// 을 window_event 로) → 메뉴가 열렸는지 → 2: 메뉴의 상단바 토글 항목 좌클릭
