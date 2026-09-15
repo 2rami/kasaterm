@@ -148,6 +148,8 @@ const ICONS = {
   monitor: 'M3 4.5h18a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1ZM12 16.5v3M8.5 19.5h7',
   // 되돌리는 화살표.
   reset: 'M4 11a8 8 0 1 1 2.3 5.7M4 5.5V11h5.5',
+  // 눕힌 몸체를 도는 화살표.
+  rotate: 'M3 8.5h13a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1ZM16.5 6a6 6 0 0 1 5 5M21.5 6.5V11H17',
 }
 
 function deviceIcon(kind) {
@@ -167,9 +169,14 @@ function deviceIcon(kind) {
 
 // 지금 걸린 것이 어느 버튼인지. 기기 이름이 아니라 **크기**로 맞춘다 — 학생이 도구로 건 기기는
 // 이 목록에 없을 수 있고(Pixel 7·Surface 등), 그때 아무 버튼도 안 눌린 것으로 두는 편이 정직하다.
+// 뒤집힌 크기도 같은 기기로 본다. 안 그러면 가로로 눕히는 순간 눌린 버튼이 사라져, 방금 누른
+// 사람이 「기기 뷰가 꺼졌나」로 읽는다.
 function currentDevice(emul) {
   if (!emul?.on) return null
-  return DEVICES.find((d) => d.w === emul.width && d.h === emul.height) || null
+  const upright = DEVICES.find((d) => d.w === emul.width && d.h === emul.height)
+  if (upright) return { ...upright, landscape: false }
+  const flipped = DEVICES.find((d) => d.w === emul.height && d.h === emul.width)
+  return flipped ? { ...flipped, landscape: true } : null
 }
 
 function devicePane(emul, tabId) {
@@ -209,12 +216,36 @@ function devicePane(emul, tabId) {
   }
   wrap.append(grid)
 
+  // 눕히기. 기기가 걸려 있어야 뒤집을 것이 있으므로 그때만 누를 수 있다 — 안 그러면 「뭐가
+  // 안 되는 거지」가 되고, 그 답이 화면에 없다.
+  const flip = el('button', here?.landscape ? 'dev-flip on' : 'dev-flip')
+  flip.disabled = !here
+  flip.setAttribute('aria-pressed', String(!!here?.landscape))
+  flip.title = here ? `${here.label} 을 ${here.landscape ? '세로로 세웁니다' : '가로로 눕힙니다'}` : '기기를 먼저 고르세요'
+  flip.append(deviceIcon('rotate'), el('span', 'dev-l', here?.landscape ? '세로로 세우기' : '가로로 눕히기'))
+  flip.addEventListener('click', async () => {
+    if (!here) return
+    flip.disabled = true
+    const r = await ask('emulate', { args: { tabId, device: here.key, landscape: !here.landscape } })
+    if (r && r.ok === false) {
+      note.textContent = r.error || '방향을 바꾸지 못했습니다'
+      wrap.classList.add('bad')
+      flip.disabled = false
+      return
+    }
+    lastSig = null
+    await tick()
+  })
+  wrap.append(flip)
+
   // 창보다 큰 화면은 줄여서 넣는다. 그 사실을 안 밝히면 「왜 글자가 작지」가 페이지 탓으로 읽힌다.
   note.textContent = emul?.on
     ? (emul.scale < 0.999
       ? `${emul.width}×${emul.height} · 창에 맞춰 ${Math.round(emul.scale * 100)}% 로 줄여 보여줍니다. CSS 크기는 그대로라 반응형 규칙은 제 값으로 걸립니다.`
       : `${emul.width}×${emul.height} 로 보고 있습니다.`)
-    : '누르면 이 탭에만 걸립니다. 창 크기는 그대로예요 — 창은 이 브라우저를 함께 쓰는 모두의 것이라 건드리지 않습니다.'
+    // 폰·태블릿은 UA 까지 바꿔서 다시 불러온다. 안 그러면 이미 받아둔 데스크톱 HTML 이 폰 폭에
+    // 남아 세로로 끝없이 늘어난다 — 그게 「폰 크기가 안 맞는다」로 보인다.
+    : '누르면 이 탭에만 걸립니다. 창 크기는 그대로예요 — 창은 이 브라우저를 함께 쓰는 모두의 것이라 건드리지 않습니다. 폰·태블릿은 서버가 모바일 화면을 주도록 페이지를 다시 불러옵니다.'
   wrap.append(note)
   return wrap
 }

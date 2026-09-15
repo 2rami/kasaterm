@@ -257,7 +257,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // 팝업에는 세션이 없다. dispatch 의 ctx.client 를 비워 두면 그대로 통과한다 —
     // emulate_device 는 탭만 보고 일하지 누가 불렀는지 묻지 않는다.
     dispatch('emulate_device', msg.args || {}, {})
-      .then((result) => sendResponse({ ok: true, result }))
+      .then(async (result) => {
+        // ★UA 는 **다음 요청부터** 서버에 전달된다. 다시 안 불러오면 이미 받아둔 데스크톱 HTML 이
+        // 폰 폭에 그대로 남아, 페이지가 요구하는 레이아웃 폭으로 늘어난 채 세로로 끝없이 길어진다
+        // (2026-09-16 실측: 위키백과에 393x852 를 걸었는데 페이지가 본 뷰포트는 1120x2428 이었고,
+        // 같은 주소를 다시 여니 393x852 가 됐다). 사람이 버튼을 눌러 기기를 바꾼 것이니 그 기기의
+        // 화면을 보려는 뜻이 분명하다 — 도구로 부르는 쪽(emulate_device)은 입력하던 폼이 날아가면
+        // 안 되니 그대로 두고, 여기서만 다시 부른다.
+        const tabId = msg.args?.tabId
+        if (tabId != null && (result?.uaOverridden || result?.emulating === false)) {
+          await chrome.tabs.reload(tabId).catch(() => {})
+        }
+        sendResponse({ ok: true, result })
+      })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
     return true
   }

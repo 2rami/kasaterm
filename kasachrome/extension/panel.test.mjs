@@ -69,7 +69,7 @@ function mockChrome(state, emulation = { on: false }) {
         if (msg.op === 'state') return cb(state)
         if (msg.op === 'layoutState') return cb({ ok: true, on: false, src: null, tabId: 7 })
         if (msg.op === 'emulateState') return cb(emulation)
-        if (msg.op === 'emulate') { calls.push(msg.args); return cb({ ok: true }) }
+        if (msg.op === 'emulate') { calls.push(msg.args); return cb({ ok: true, result: { emulating: true } }) }
         cb({ ok: true })
       },
       lastError: null,
@@ -144,6 +144,47 @@ test('device buttons apply to the tab the human is looking at, and go back', asy
   grid.children.find((b) => labelOf(b) === '원래대로').handlers.get('click')()
   await settle()
   assert.deepEqual(calls.at(-1), { tabId: 7, off: true })
+})
+
+test('rotating needs a device first, and flips the one already applied', async () => {
+  const byId = mockDom()
+  const { calls } = mockChrome(SESSION)
+  await import(`./panel.js?test=${Date.now()}${Math.random()}`)
+  await settle()
+  byId.get('nav').children[1].handlers.get('click')()
+  await settle()
+
+  const flipOf = (root) => root.children[0].children.find((c) => c.className?.startsWith('dev-flip'))
+  // 아무것도 안 걸렸으면 뒤집을 것이 없다. 눌리는 단추로 두면 「왜 안 되지」가 되고 답이 화면에 없다.
+  assert.equal(flipOf(byId.get('root')).disabled, true)
+
+  const byId2 = mockDom()
+  const m2 = mockChrome(SESSION, { on: true, width: 393, height: 852, scale: 1 })
+  await import(`./panel.js?test=${Date.now()}${Math.random()}`)
+  await settle()
+  byId2.get('nav').children[1].handlers.get('click')()
+  await settle()
+  const flip = flipOf(byId2.get('root'))
+  assert.equal(flip.disabled, false)
+  flip.handlers.get('click')()
+  await settle()
+  assert.deepEqual(m2.calls.at(-1), { tabId: 7, device: 'iphone-15-pro', landscape: true })
+})
+
+test('a device lying on its side still shows its button pressed', async () => {
+  const byId = mockDom()
+  // 뒤집힌 크기를 같은 기기로 못 읽으면 눕히는 순간 눌린 버튼이 사라져, 기기 뷰가 꺼진 것처럼 보인다.
+  mockChrome(SESSION, { on: true, width: 852, height: 393, scale: 0.9 })
+  await import(`./panel.js?test=${Date.now()}${Math.random()}`)
+  await settle()
+  byId.get('nav').children[1].handlers.get('click')()
+  await settle()
+  const root = byId.get('root')
+  const grid = root.children[0].children.find((c) => c.className === 'dev-grid')
+  const pressed = grid.children.filter((b) => b.getAttribute('aria-pressed') === 'true')
+  assert.equal(pressed.length, 1)
+  assert.equal(pressed[0].children.find((c) => c.className === 'dev-l').textContent, '폰')
+  assert.match(root.text, /세로로 세우기/)
 })
 
 test('a device already applied shows which button is pressed, and says it was scaled down', async () => {
