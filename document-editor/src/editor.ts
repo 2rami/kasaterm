@@ -246,7 +246,15 @@ window.kasatermEditor = {
   }, setContent, command, setTheme: applyTheme, ...vault,
   setSaveState(data) { live.textContent = data.state === 'error' ? (data.message || '저장하지 못했어요. 다시 저장해주세요.') : ''; live.classList.toggle('visible', data.state === 'error'); },
 };
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && !e.isComposing) dismissTools(); });
+document.addEventListener('keydown', e => {
+  if (e.isComposing || composing) return;
+  const toolFocus = bubble.contains(document.activeElement) || slash.contains(document.activeElement) || document.activeElement === addBlock;
+  if (e.key === 'Escape') { dismissTools(); if (toolFocus) editor?.view.focus(); return; }
+  if (!slash.hidden && toolFocus && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    e.preventDefault(); slashIndex = (slashIndex + (e.key === 'ArrowDown' ? 1 : -1) + slashItems.length) % Math.max(1, slashItems.length);
+    updateMenus(); const selected = slash.querySelector<HTMLButtonElement>('[aria-selected=true]'); selected?.focus({ preventScroll: true }); selected?.scrollIntoView({ block: 'nearest' });
+  } else if (!slash.hidden && toolFocus && e.key === 'Enter') { e.preventDefault(); runSlash(slashIndex); }
+});
 document.addEventListener('mousedown', e => { if (!panel.contains(e.target as globalThis.Node) && !bubble.contains(e.target as globalThis.Node) && !slash.contains(e.target as globalThis.Node) && !addBlock.contains(e.target as globalThis.Node)) { panel.hidden = true; blockMenu = false; if (!root.contains(e.target as globalThis.Node)) dismissTools(); } });
 document.addEventListener('mouseover', e => {
   const target = e.target as HTMLElement;
