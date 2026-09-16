@@ -3605,6 +3605,12 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                // 사이드바 기기 끌기 — 피커 항목·머리줄을 잡아 아래로 내리는 중.
+                if self.sidebar_navigation_drag_move() {
+                    window.set_cursor(CursorIcon::Grabbing);
+                    window.request_redraw();
+                    return;
+                }
                 // 사이드바 pane 줄 드래그. 떨어질 자리는 **커서가 얹힌 줄의 위/아래
                 // 절반**이라, 같은 방 안 재배치와 다른 방으로 옮기기가 한 규칙으로
                 // 처리된다(목록이 방 경계를 넘어 이어져 있어서다).
@@ -4150,6 +4156,11 @@ impl ApplicationHandler<UserEvent> for App {
                 // expand/preview click already fired on press.
                 if matches!(state, ElementState::Released) {
                     if self.native_settings_end_drag() {
+                        window.request_redraw();
+                        return;
+                    }
+                    // 사이드바 기기 끌기 끝 — 놓은 자리에 따라 고르기·피커 열기·아래에 붙이기.
+                    if self.sidebar_navigation_release(self.cursor_px) {
                         window.request_redraw();
                         return;
                     }

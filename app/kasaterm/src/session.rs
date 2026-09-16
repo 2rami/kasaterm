@@ -5075,6 +5075,15 @@ impl App {
     /// 방 목록이 세로로 쓸 수 있는 높이(logical px). 트레이·독·상태줄이 바닥을
     /// 먹고, 24px 는 chevron-down 오버플로 힌트 자리다.
     pub(crate) fn sidebar_avail_h(&self, win_h: f32) -> f32 {
+        let full = self.sidebar_full_avail_h(win_h);
+        // 아래에 끌어다 둔 기기 절이 바닥을 먹는다. 안 빼면 방 카드가 그 절 위로
+        // 덮어 그려진다 — 사이드바는 클립을 안 세우는 종류의 버그다.
+        (full - crate::sidebar_navigation::pinned_total_h(&self.info, full))
+            .max(SIDEBAR_TAB_H + SIDEBAR_TAB_GAP)
+    }
+
+    /// 아래 절까지 포함한 세로 구간 — 절 배치는 이 값으로 잰다.
+    pub(crate) fn sidebar_full_avail_h(&self, win_h: f32) -> f32 {
         // 10px slot above the first tab hosts the overflow chevron-up.
         let top = self.sidebar_content_top();
         // 상태줄도 바닥을 먹는다. 안 빼면 마지막 방 카드가 그 위로 넘치는데,
