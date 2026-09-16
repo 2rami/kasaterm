@@ -59,9 +59,12 @@ fn row_tab_of(p: &serde_json::Value) -> Option<String> {
 /// 없어 폴더 꼬리로 남되, 묶는 것은 `window` 번호가 한다.
 fn remote_room(p: &serde_json::Value) -> String {
     let window = p.get("window").and_then(|v| v.as_u64());
-    let label = p.get("room_label").and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .or_else(|| p.get("window_name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
+    // 원본의 방 이름은 그쪽 사이드바 카드의 「이름 · 폴더」 그대로다 — 그 앞에 「방 N ·」을
+    // 붙이면 본기기 카드와 모양이 갈린다(2026-09-16 지적 「똑같이 안 떠」).
+    if let Some(label) = p.get("room_label").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        return label.to_string();
+    }
+    let label = p.get("window_name").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
         .or_else(|| p.get("cwd").and_then(|v| v.as_str())
             .and_then(|s| s.rsplit('/').find(|s| !s.is_empty())));
     match (window, label) {
@@ -360,6 +363,11 @@ impl App {
             if remote.is_none() && !self.pane_claude_ready(id) {
                 continue;
             }
+            // 저쪽 pane 이 그 자체로 거울(우리 pane 을 비추는 창)이면 거울의 거울이다 — 그 기계
+            // 절에 「맥북」 방이 서서 우리 자신을 되비추던 것(2026-09-16 지적).
+            if facts.as_ref().is_some_and(|(_, row)| row.get("mirror_of").and_then(|v| v.as_str()).is_some()) {
+                continue;
+            }
             let remote_str = |k: &str| {
                 facts
                     .as_ref()
@@ -432,11 +440,21 @@ impl App {
                 let remote = panes
                     .map(|arr| {
                         // (원격 방 인덱스, 행) — 로컬과 같은 이유로 방 순서로 이어 앉힌다.
+                        // 거울 자리와 그 탭들은 그 기계의 「보기 창」이다 — 원본 기기 절에서 이미
+                        // 보이므로 여기엔 안 세운다(방째 빠진다).
+                        let mirror_outers: std::collections::HashSet<&str> = arr
+                            .iter()
+                            .filter(|p| p.get("mirror_of").and_then(|v| v.as_str()).is_some())
+                            .filter_map(|p| p.get("id").and_then(|v| v.as_str()))
+                            .collect();
                         let mut rows: Vec<(u64, state::MachinesColRow)> = arr
                             .iter()
                             .filter_map(|p| {
                                 if p.get("mirror_of").and_then(|v| v.as_str()).is_some() {
                                     return None; // A viewer is listed under its source device.
+                                }
+                                if row_tab_of(p).is_some_and(|outer| mirror_outers.contains(outer.as_str())) {
+                                    return None;
                                 }
                                 let rid = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
                                 if mirror_ids.contains(rid) {

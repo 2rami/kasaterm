@@ -12,6 +12,8 @@ const DROP_H: f32 = 40.0;
 /// 아래에 끌어다 둔 기기 하나. 절마다 따로 굴러야 위 목록과 스크롤이 안 얽힌다.
 pub(crate) struct Pinned {
     pub(crate) label: String,
+    /// 연결돼 있어서 저절로 선 절 — 끊기면 저절로 빠진다. 끌어다 놓은 절은 남는다.
+    auto: bool,
     scroll: f32,
     content_h: f32,
     view: Option<Rect>,
@@ -31,6 +33,8 @@ pub(crate) struct NavigationState {
     pub(crate) picker: bool,
     pub(crate) scroll: f32,
     pub(crate) pinned: Vec<Pinned>,
+    /// x 로 닫은 기기 — 연결돼 있어도 저절로 다시 서지 않는다. 끌어다 놓으면 풀린다.
+    dismissed: std::collections::HashSet<String>,
     pub(crate) drag: Option<NavDrag>,
     /// 지금 보는 창이 어느 기계의 어떤 원격 pane 들인가 — 그 방 카드를 활성으로 그린다.
     /// 렌더가 프레임마다 `App::remote_view_of_window` 로 채운다.
@@ -121,6 +125,14 @@ fn decks<'a>(list: &[&'a state::MachinesColRow]) -> Vec<Vec<&'a state::MachinesC
         }
     }
     out.into_iter().map(|(_, deck)| deck).collect()
+}
+
+/// 원본이 준 방 이름은 「이름 · 폴더」 한 줄이다 — 본기기 카드처럼 두 줄로 가른다.
+fn room_title(room: &str) -> (&str, &str) {
+    if room.is_empty() {
+        return ("방 이름 없음", "");
+    }
+    room.split_once(" · ").unwrap_or((room, ""))
 }
 
 /// 방 카드 본문(배치도) 높이 — 본기기 `sidebar_card_metrics` 와 같은 식이라 두 기기의
@@ -315,20 +327,15 @@ fn draw_rows(
             } else if hover {
                 panel_rect(g, tab_x, y, tab_w, h, theme::radius_md(), theme::surface_hover());
             }
-            // 본기기 카드와 같은 자리·크기 — 이름 13.5px 는 y+11, 부제 11px 는 y+30.
+            // 본기기 카드와 같은 자리·크기 — 이름 13.5px 는 y+11, 폴더 11px 는 y+30, 글은 x+26.
             let badge = (tab_x + tab_w - 30.0, y + 8.0, 24.0, 20.0);
-            let label = if room.is_empty() { "방 이름 없음" } else { room.as_str() };
-            text(g, label, tab_x + 12.0, y + 11.0, tab_w - 12.0 - 36.0, 13.5,
+            let (name, folder) = room_title(room);
+            let text_x = tab_x + 26.0;
+            text(g, name, text_x, y + 11.0, tab_w - 26.0 - 36.0, 13.5,
                 if active { theme::text() } else { theme::text_dim() }, active);
-            let busy = list.iter().filter(|r| matches!(r.status.as_str(), "working" | "compacting")).count();
-            let stacks = decks(list).len();
-            let sub = match (stacks == list.len(), busy) {
-                (true, 0) => format!("pane {}", list.len()),
-                (true, n) => format!("pane {} · 작업 중 {n}", list.len()),
-                (false, 0) => format!("pane {stacks} · 탭 {}", list.len()),
-                (false, n) => format!("pane {stacks} · 탭 {} · 작업 중 {n}", list.len()),
-            };
-            text(g, &sub, tab_x + 12.0, y + 30.0, tab_w - 12.0 - 36.0, 11.0, theme::text_dim(), false);
+            if !folder.is_empty() {
+                text(g, folder, text_x, y + 30.0, tab_w - 26.0 - 36.0, 11.0, theme::text_dim(), false);
+            }
             let badge_hover = hit(cursor, badge);
             if badge_hover { g.rect(badge.0, badge.1, badge.2, badge.3, theme::surface_active()); }
             g.queue_icon(if collapsed { "chevron-right" } else { "chevron-down" }, badge.0 + 5.0, badge.1 + 3.0, 14.0,
@@ -399,6 +406,18 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     }
     g.rect(12.0, TITLE_HEIGHT + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
 
+    // 연결된 기기는 끌어다 놓지 않아도 아래에 선다(2026-09-16 지시). x 로 닫은 것과 위에
+    // 고른 것만 빼고, 저절로 선 절은 끊기면 저절로 빠진다.
+    for m in machines.iter().filter(|m| m.online) {
+        if nav.machine.as_deref() == Some(m.label.as_str())
+            || nav.dismissed.contains(&m.label)
+            || nav.pinned.iter().any(|p| p.label == m.label)
+        {
+            continue;
+        }
+        nav.pinned.push(Pinned { label: m.label.clone(), auto: true, scroll: 0.0, content_h: 0.0, view: None });
+    }
+    nav.pinned.retain(|p| !p.auto || machines.iter().any(|m| m.label == p.label && m.online));
     let NavigationState { pinned, collapsed_rooms, hits, machine: main, scroll, content_h, viewport: main_view, viewing, .. } = nav;
     let viewing = viewing.as_ref();
     let heights = section_heights(machines, pinned, collapsed_rooms, viewport.3);
@@ -660,8 +679,10 @@ impl App {
             nav.machine = None;
             nav.scroll = 0.0;
         }
-        if !nav.pinned.iter().any(|p| p.label == label) {
-            nav.pinned.push(Pinned { label, scroll: 0.0, content_h: 0.0, view: None });
+        nav.dismissed.remove(&label);
+        match nav.pinned.iter_mut().find(|p| p.label == label) {
+            Some(pin) => pin.auto = false,
+            None => nav.pinned.push(Pinned { label, auto: false, scroll: 0.0, content_h: 0.0, view: None }),
         }
         // 위 목록이 짧아졌으니 굴림도 새 한계 안으로.
         if let Some(win_h) = self.window.as_ref().map(|w| w.inner_size().height as f32 / self.effective_scale()) {
@@ -706,7 +727,10 @@ impl App {
                 }
                 self.info.machines_col.last_refresh = None;
             }
-            Action::Unpin(label) => self.info.navigation.pinned.retain(|p| p.label != label),
+            Action::Unpin(label) => {
+                self.info.navigation.pinned.retain(|p| p.label != label);
+                self.info.navigation.dismissed.insert(label);
+            }
             Action::Room(key) => {
                 if !self.info.navigation.collapsed_rooms.remove(&key) { self.info.navigation.collapsed_rooms.insert(key); }
             }
@@ -908,6 +932,34 @@ mod tests {
         assert_eq!(clipped((10.0, 80.0, 180.0, 44.0), viewport), Some((10.0, 100.0, 180.0, 24.0)));
         assert!(clipped((10.0, 50.0, 180.0, 44.0), viewport).is_none());
         assert!(!hit((20.0, 99.0), clipped((10.0, 80.0, 180.0, 44.0), viewport).unwrap()));
+    }
+
+    #[test]
+    fn pinned_sections_take_at_most_an_equal_share_and_shrink_to_content() {
+        let pin = |label: &str| Pinned { label: label.into(), auto: false, scroll: 0.0, content_h: 0.0, view: None };
+        let collapsed = std::collections::HashSet::new();
+        let m = machine();
+        let body = content_height(&m, &collapsed);
+        assert_eq!(section_heights(&[machine()], &[pin("test")], &collapsed, 1000.0), vec![SECTION_H + body]);
+        assert_eq!(section_heights(&[machine()], &[pin("test")], &collapsed, 300.0), vec![150.0]);
+        assert_eq!(section_heights(&[machine()], &[pin("없음")], &collapsed, 1000.0), vec![SECTION_H + PANE_H]);
+        assert!(section_heights(&[machine()], &[], &collapsed, 1000.0).is_empty());
+    }
+
+    #[test]
+    fn drop_lands_only_inside_the_sidebar_below_the_header() {
+        let full = (0.0, TITLE_HEIGHT + HEADER_H + 10.0, 220.0, 500.0);
+        assert!(drop_target((30.0, full.1 + 300.0), 220.0, full));
+        assert!(!drop_target((300.0, full.1 + 300.0), 220.0, full));
+        assert!(!drop_target((30.0, TITLE_HEIGHT + 10.0), 220.0, full));
+        assert!(!drop_target((30.0, full.1 + full.3 + 60.0), 220.0, full));
+    }
+
+    #[test]
+    fn room_title_splits_name_and_folder_like_the_local_card() {
+        assert_eq!(room_title("mission-control · …mo/sionic/mission-control"), ("mission-control", "…mo/sionic/mission-control"));
+        assert_eq!(room_title("방 3"), ("방 3", ""));
+        assert_eq!(room_title(""), ("방 이름 없음", ""));
     }
 
     #[test]
