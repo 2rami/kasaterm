@@ -924,6 +924,11 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = reply.send(id);
                 return;
             }
+            UserEvent::SocketSpawnShellAt(at, reply) => {
+                let out = self.spawn_shell_pane_at(&at);
+                let _ = reply.send(out);
+                return;
+            }
             UserEvent::TransferSnapshot(machine, sender) => {
                 transfer_endpoints::reply(sender, Ok(self.transfer_snapshot_gui(machine)));
                 return;

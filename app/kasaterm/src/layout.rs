@@ -814,6 +814,67 @@ impl App {
         id
     }
 
+    /// `/spawn-shell` 의 자리 지정판 — 새 방·pane 옆·탭. 다른 기계의 보기 창이 이쪽과 같은
+    /// 자리에 세우려고 부른다(2026-09-17). 보이지 않는 방이어도 트리에 꽂힌다(`split_fleet`).
+    pub(crate) fn spawn_shell_pane_at(
+        &mut self,
+        at: &kasa_socket::backend::SpawnShellAt,
+    ) -> kasa_socket::backend::SpawnShellReply {
+        use kasa_socket::backend::{SpawnShellReply, SpawnWindow};
+        let empty = SpawnShellReply::default();
+        let cwd = at
+            .cwd
+            .clone()
+            .or_else(|| kasa_socket::home_dir().map(|p| p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "/".to_string());
+        // 새 방 — 이쪽 「+」 와 같다. 그 방의 첫 pane 이 곧 자리다.
+        if matches!(at.window, Some(SpawnWindow::New)) {
+            self.pending_character = None;
+            self.new_window();
+            let Some(surface) = self.ws.lock().unwrap().active_pane.clone() else { return empty };
+            return SpawnShellReply { surface, window: Some(self.active_window) };
+        }
+        // 탭 — 그 자리의 탭으로. 활성 탭은 안 뺏는다(저쪽 사람이 보던 화면).
+        if let Some(outer) = at.tab_of.as_deref() {
+            let outer = self.ws.lock().unwrap().outer_for_pty(outer).unwrap_or_else(|| outer.to_string());
+            self.pending_character = None;
+            self.pending_spawn_cwd = Some(cwd);
+            let out = self.spawn_new_tab(&outer, false);
+            self.pending_spawn_cwd = None;
+            return match out {
+                Ok(surface) => SpawnShellReply { window: self.window_of_pane(&outer), surface },
+                Err(e) => {
+                    eprintln!("[spawn_shell] tab failed: {e:#}");
+                    empty
+                }
+            };
+        }
+        // 지목한 pane 옆, 또는 번호로 지목한 방의 첫 pane 옆.
+        let host = at.beside.clone().or_else(|| match at.window {
+            Some(SpawnWindow::Index(n)) => self.window_leaves(n).into_iter().next(),
+            _ => None,
+        });
+        if let Some(host) = host {
+            self.pending_character = None;
+            self.pending_spawn_cwd = Some(cwd);
+            let out = self.split_fleet(1, Some(&host), 0.5);
+            self.pending_spawn_cwd = None;
+            return match out.map(|made| made.into_iter().next()) {
+                Ok(Some(surface)) => {
+                    let window = self.window_of_pane(&surface);
+                    self.publish_pty_layout();
+                    SpawnShellReply { surface, window }
+                }
+                Ok(None) => empty,
+                Err(e) => {
+                    eprintln!("[spawn_shell] split beside failed: {e:#}");
+                    empty
+                }
+            };
+        }
+        let surface = self.spawn_shell_pane(at.cwd.as_deref());
+        SpawnShellReply { surface, window: Some(self.active_window) }
+    }
     /// pane 여러 개를 **한 번에** 배치한다 — 부른 pane 이 크게 남고 학생들이 균등하게.
     ///
     /// 옛 경로는 CLI 가 split 을 N 번 부르면서 **직전에 만든 pane 을 다음 대상으로**
@@ -950,7 +1011,7 @@ impl App {
             crate::settings_room::SettingsMutation::Split,
         )?;
         let new_id = self.alloc_pane_id();
-        if let Some(session) = self.spawn_inherited_remote_session(active, &new_id)? {
+        if let Some(session) = self.spawn_inherited_remote_session(active, &new_id, false)? {
             self.pump_pty_screens(
                 session.screens.clone(),
                 new_id.clone(),
@@ -1006,6 +1067,7 @@ impl App {
         &mut self,
         source: &str,
         new_id: &str,
+        as_tab: bool,
     ) -> Result<Option<Arc<kasa_pty::PtySession>>> {
         // 기계를 지정해 들어온 스폰 요청은 현지에서 처리해야 왕복 소환이 없다.
         if self.pending_spawn_cwd.is_some() || self.pending_character.is_some() {
@@ -1018,9 +1080,21 @@ impl App {
             }
             return Ok(None);
         };
-        // A view is not a remote execution context. Splitting/tabbing its local
-        // container must never POST /spawn-shell into the host's active room.
-        if info.view { return Ok(None); }
+        // 보기 거울(view)은 원래 실행 자리가 아니다. 다만 **보기 창**(leaf 전부 한 기계의
+        // 거울) 안의 split/탭은 저쪽 그 방의 같은 자리에 세운다(2026-09-17 지시) — 보통 방에
+        // 섞인 보기 거울 옆은 예전처럼 로컬 셸이다.
+        if info.view
+            && self
+                .window_of_pane(source)
+                .is_none_or(|w| self.remote_view_of_window(w).is_none())
+        {
+            return Ok(None);
+        }
+        let placement = kasa_socket::backend::SpawnShellAt {
+            beside: (!as_tab && info.remote_id.starts_with('%')).then(|| info.remote_id.clone()),
+            tab_of: (as_tab && info.remote_id.starts_with('%')).then(|| info.remote_id.clone()),
+            ..Default::default()
+        };
         let cwd = self
             .pty
             .get(&source_pid)
@@ -1054,7 +1128,8 @@ impl App {
                 if input.lock().unwrap().overflowed {
                     anyhow::bail!(REMOTE_PENDING_INPUT_ERROR);
                 }
-                let id = kasa_mcp::remote::spawn_shell_pane(&info.base, cwd.as_deref(), None)?;
+                let at = kasa_socket::backend::SpawnShellAt { cwd: cwd.clone(), ..placement };
+                let (id, _) = kasa_mcp::remote::spawn_shell_pane_at(&info.base, &at, None)?;
                 remote_id = Some(id.clone());
                 if expected.strong_count() == 0 {
                     anyhow::bail!("생성 중인 pane이 닫혔어요");
@@ -1299,7 +1374,7 @@ impl App {
             .unwrap_or_else(|| self.window_cells());
         let cwd = self.spawn_cwd_from(Some(outer));
         let new_pid = self.alloc_pane_id();
-        let inherited = self.spawn_inherited_remote_session(outer, &new_pid)?;
+        let inherited = self.spawn_inherited_remote_session(outer, &new_pid, true)?;
         // 탭도 split 과 **같은 대접**이다: 방은 상속하고 학생은 새로 배정한다.
         // 이게 없던 동안 탭으로 띄운 학생은 캐릭터가 아예 없어서 보더색·프사·입력박스
         // 도색은 물론 페르소나 env 와 board 등재까지 통째로 빠졌다(사용자 2026-08-07:

@@ -1981,10 +1981,11 @@ async fn spawn_shell_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let cwd = params.get("cwd").map(String::as_str).filter(|s| !s.is_empty());
-    let body = match backend.spawn_shell(cwd) {
-        Ok(surface) if !surface.is_empty() => {
-            serde_json::json!({ "ok": true, "surface": surface })
+    // `window=new|<n>`·`beside=%id`·`tab_of=%id` — 자리 지정(2026-09-17). 없으면 활성 방.
+    let at = kasa_socket::backend::SpawnShellAt::from_query(&params);
+    let body = match backend.spawn_shell_at(&at) {
+        Ok(reply) if !reply.surface.is_empty() => {
+            serde_json::json!({ "ok": true, "surface": reply.surface, "window": reply.window })
         }
         Ok(_) => serde_json::json!({
             "ok": false,

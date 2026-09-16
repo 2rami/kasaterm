@@ -480,6 +480,42 @@ pub struct WindowOverview {
     pub aspect: Option<f32>,
 }
 
+/// 어느 방에 세울까 — 새 방, 또는 번호로.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnWindow {
+    New,
+    Index(usize),
+}
+
+/// `POST /spawn-shell` 의 자리 지정. 전부 비면 옛 뜻(활성 방에 하나).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpawnShellAt {
+    pub cwd: Option<String>,
+    pub window: Option<SpawnWindow>,
+    /// 이 pane 옆에 쪼개서(그 pane 이 든 방, 축은 그 칸의 종횡비로).
+    pub beside: Option<String>,
+    /// 이 pane 의 탭으로.
+    pub tab_of: Option<String>,
+}
+
+impl SpawnShellAt {
+    pub fn from_query(params: &std::collections::HashMap<String, String>) -> Self {
+        let text = |k: &str| params.get(k).map(String::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+        let window = match text("window").as_deref() {
+            Some("new") => Some(SpawnWindow::New),
+            Some(n) => n.parse().ok().map(SpawnWindow::Index),
+            None => None,
+        };
+        Self { cwd: text("cwd"), window, beside: text("beside"), tab_of: text("tab_of") }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SpawnShellReply {
+    pub surface: String,
+    pub window: Option<usize>,
+}
+
 /// Plug point for terminal operations. Host apps implement this on a
 /// type that already owns the tmux session / portable-pty handle and
 /// the renderer state.
@@ -714,6 +750,13 @@ pub trait Backend: Send + Sync {
     /// 자기 pane 으로 비출 자리다. 새 pane id 를 돌려주고, 빈 문자열은 못 세운 것.
     fn spawn_shell(&self, _cwd: Option<&str>) -> Result<String> {
         anyhow::bail!("spawn_shell unsupported by this backend")
+    }
+    /// 자리를 지정한 셸 pane — 새 방·특정 pane 옆·특정 pane 의 탭. 다른 기계의 보기
+    /// 창에서 split/탭/새 방을 하면 이쪽 같은 자리에 세워야 두 기기의 배치도가 같다
+    /// (2026-09-17). 옛 백엔드는 자리를 모르고 활성 방에 세운다.
+    fn spawn_shell_at(&self, at: &SpawnShellAt) -> Result<SpawnShellReply> {
+        let surface = self.spawn_shell(at.cwd.as_deref())?;
+        Ok(SpawnShellReply { surface, window: None })
     }
     fn transfer_snapshot(&self) -> Result<crate::transfer::MachineSnapshot> {
         anyhow::bail!("room transfer unsupported by this backend")
@@ -1492,5 +1535,24 @@ mod tests {
         assert!(parse_agents_json("").is_empty());
         assert!(parse_agents_json("not json").is_empty());
         assert!(parse_agents_json("[]").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod spawn_at_tests {
+    use super::*;
+
+    #[test]
+    fn spawn_query_parses_window_beside_and_tab() {
+        let q = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        assert_eq!(SpawnShellAt::from_query(&q(&[])), SpawnShellAt::default());
+        let at = SpawnShellAt::from_query(&q(&[("window", "new"), ("cwd", "/tmp")]));
+        assert_eq!(at.window, Some(SpawnWindow::New));
+        assert_eq!(at.cwd.as_deref(), Some("/tmp"));
+        let at = SpawnShellAt::from_query(&q(&[("window", "2"), ("beside", "%4"), ("tab_of", "")]));
+        assert_eq!(at.window, Some(SpawnWindow::Index(2)));
+        assert_eq!(at.beside.as_deref(), Some("%4"));
+        assert_eq!(at.tab_of, None);
+        assert_eq!(SpawnShellAt::from_query(&q(&[("window", "x")])).window, None);
     }
 }

@@ -1221,6 +1221,68 @@ impl App {
         Ok(())
     }
 
+    /// 다른 기기에 **새 방**을 만들고 그 첫 pane 을 여기 보기 창으로 연다 — 기기 절 머리의
+    /// 「+」(2026-09-17 지시). 저쪽엔 그쪽 「+」 를 누른 것과 같은 방이 생기고, 이쪽 창은
+    /// 그 방의 보기 창이라 로컬 방 목록엔 안 선다. 옛 판 기기는 활성 방에 pane 만 세운다.
+    pub(crate) fn new_remote_room(&mut self, label: &str) -> Result<()> {
+        if self.tmux.is_some() {
+            anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
+        }
+        let m = kasa_mcp::machines::find(label)
+            .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
+        self.set_toast(format!("{label} 에 새 방 여는 중…"));
+        self.render_frame();
+        let at = kasa_socket::backend::SpawnShellAt {
+            window: Some(kasa_socket::backend::SpawnWindow::New),
+            ..Default::default()
+        };
+        let (remote_id, window) = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None)?;
+        self.new_window();
+        let owner = self.active_window;
+        let Some(host) = self.ws.lock().unwrap().active_pane.clone() else {
+            anyhow::bail!("새 창의 기본 pane 을 못 얻었다");
+        };
+        let remote = kasa_mcp::remote::connect_view(
+            kasa_mcp::remote::RemoteSpec {
+                base: m.base.clone(),
+                pane: Some(remote_id.clone()),
+                cwd: None,
+                token: None,
+                identity: kasa_mcp::remote::RemoteIdentity {
+                    label: m.label.clone(),
+                    remote_cwd: None,
+                    origin_cwd: None,
+                    owned: true,
+                },
+            },
+            &host,
+        )?;
+        if let Some(old) = self.pty.get(&host).cloned() {
+            old.stop_reader();
+        }
+        self.insert_pty(host.clone(), remote.session.clone());
+        self.pump_pty_screens(
+            remote.session.screens.clone(),
+            host.clone(),
+            std::sync::Arc::downgrade(&remote.session),
+        );
+        self.dead_panes.lock().unwrap().retain(|x| x != &host);
+        self.ws.lock().unwrap().panes.entry(host.clone()).or_default();
+        if let Some(w) = window {
+            self.window_name_override.insert(owner, format!("방 {}", w + 1));
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        self.session_touched = true;
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        self.set_toast(format!("{label} 에 새 방 — {remote_id}"));
+        Ok(())
+    }
+
     /// `i` 번 창이 다른 기기 방의 **보기 창**인가 — 모든 leaf 가 한 기계의 거울(view)이면
     /// `(기계 라벨, 원격 pane id 들)`. 이런 창은 이 기기 방 목록에 안 서고, 그 기계 절의
     /// 방 카드가 탭 노릇을 한다(2026-09-16 지시 「새로 여는 게 아니라 눌러서 보이게」).

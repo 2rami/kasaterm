@@ -3811,6 +3811,8 @@ enum UserEvent {
     SocketSpawnStudent(String, std::sync::mpsc::Sender<String>),
     /// 다른 기계의 `to` 가 비출 맨 셸 pane — (cwd, 회신=새 pane id).
     SocketSpawnShell(Option<String>, std::sync::mpsc::Sender<String>),
+    /// 자리를 지정한 셸 pane(새 방·pane 옆·탭) — 다른 기계의 보기 창이 같은 자리에 세울 때.
+    SocketSpawnShellAt(kasa_socket::backend::SpawnShellAt, std::sync::mpsc::Sender<kasa_socket::backend::SpawnShellReply>),
     TransferSnapshot((String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::MachineSnapshot, String>>),
     TransferPrepareSpawn(kasa_socket::transfer::SpawnRequest, std::sync::mpsc::Sender<std::result::Result<transfer_endpoints::SpawnPlan, String>>),
     TransferFinishSpawn(Arc<transfer_endpoints::Spawned>, (String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::SessionRow, String>>, bool),

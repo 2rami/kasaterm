@@ -868,10 +868,37 @@ pub fn spawn_student_pane(base: &str, character: &str, token: Option<&str>) -> R
 /// 지시 「to 로 붙으면 거기도 생기게, 원격을 터미널로 조종한다는 느낌으로」). 창구가
 /// 없는 낡은 서버·kasa-serve-web 은 실패하고, 호출자는 web 셸로 물러선다.
 pub fn spawn_shell_pane(base: &str, cwd: Option<&str>, token: Option<&str>) -> Result<String> {
+    let at = kasa_socket::backend::SpawnShellAt { cwd: cwd.map(str::to_string), ..Default::default() };
+    spawn_shell_pane_at(base, &at, token).map(|(id, _)| id)
+}
+
+/// 자리를 지정해 세운다 — 새 방(`window=new`)·pane 옆(`beside`)·탭(`tab_of`). 돌려주는
+/// 것은 `(pane id, 그 방 번호)`. 옛 서버는 자리를 몰라 활성 방에 세우고 번호를 안 준다.
+pub fn spawn_shell_pane_at(
+    base: &str,
+    at: &kasa_socket::backend::SpawnShellAt,
+    token: Option<&str>,
+) -> Result<(String, Option<usize>)> {
+    use kasa_socket::backend::SpawnWindow;
+    let mut q: Vec<String> = Vec::new();
+    if let Some(c) = &at.cwd {
+        q.push(format!("cwd={}", urlencode(c)));
+    }
+    match at.window {
+        Some(SpawnWindow::New) => q.push("window=new".into()),
+        Some(SpawnWindow::Index(n)) => q.push(format!("window={n}")),
+        None => {}
+    }
+    if let Some(b) = &at.beside {
+        q.push(format!("beside={}", urlencode(b)));
+    }
+    if let Some(t) = &at.tab_of {
+        q.push(format!("tab_of={}", urlencode(t)));
+    }
     let u = format!(
         "{}/spawn-shell{}",
         base.trim_end_matches('/'),
-        cwd.map(|c| format!("?cwd={}", urlencode(c))).unwrap_or_default()
+        if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) }
     );
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -903,7 +930,8 @@ pub fn spawn_shell_pane(base: &str, cwd: Option<&str>, token: Option<&str>) -> R
     if id.is_empty() {
         anyhow::bail!("원격이 pane id 를 안 돌려줬어요");
     }
-    Ok(id)
+    let window = v.get("window").and_then(|x| x.as_u64()).map(|n| n as usize);
+    Ok((id, window))
 }
 
 fn transfer_request(base: &str, action: &str, body: Option<serde_json::Value>, seconds: u64) -> Result<serde_json::Value> {

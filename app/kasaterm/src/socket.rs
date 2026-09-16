@@ -994,6 +994,16 @@ impl Backend for PtyBackend {
             .unwrap_or_default())
     }
 
+    fn spawn_shell_at(&self, at: &kasa_socket::backend::SpawnShellAt) -> Result<kasa_socket::backend::SpawnShellReply> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy
+            .send_event(UserEvent::SocketSpawnShellAt(at.clone(), tx))
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        Ok(rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_default())
+    }
+
     fn transfer_snapshot(&self) -> Result<kasa_socket::transfer::MachineSnapshot> {
         let machine = crate::transfer_endpoints::machine_context()?.clone();
         let (tx, rx) = std::sync::mpsc::channel();

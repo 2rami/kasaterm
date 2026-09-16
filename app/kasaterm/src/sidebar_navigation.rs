@@ -62,6 +62,8 @@ enum Action {
     Room(String),
     /// 그 기기의 방을 여기 방으로 연다 — 카드 머리나 칸. `focus` 는 누른 칸의 원격 id.
     Open { label: String, window: Option<u64>, room: String, focus: Option<String> },
+    /// 그 기기에 새 방을 만들고 바로 보기 창으로 연다(절 머리의 +).
+    NewRoom(String),
     /// 아래 절의 머리줄 — 누르는 일은 없고 우클릭 메뉴의 대상만 된다.
     Section(String),
     Unpin(String),
@@ -411,7 +413,8 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     let label = nav.machine.as_deref().unwrap_or_else(|| crate::info::local_machine_name());
     let label = if label.is_empty() { "이 기기" } else { label };
     let head = (8.0, TITLE_HEIGHT + 4.0, width - 16.0, HEADER_H - 8.0);
-    let menu_w = if selected.is_some() { 28.0 } else { 0.0 };
+    // 고른 기기엔 「…」 메뉴와 「+ 새 방」 이 머리 오른쪽에 선다.
+    let menu_w = if selected.is_some() { 56.0 } else { 0.0 };
     let choose = (head.0, head.1, head.2 - menu_w, head.3);
     if hit(cursor, choose) || nav.picker {
         g.rect(head.0, head.1, choose.2, head.3, theme::surface_hover());
@@ -429,10 +432,14 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     g.queue_icon("chevron-down", choose.0 + choose.2 - 18.0, head.1 + 13.0, 12.0, theme::text_dim());
     nav.hits.push((Action::Picker, choose));
     if let Some(machine) = selected {
-        let r = (head.0 + head.2 - menu_w, head.1, menu_w, head.3);
-        if hit(cursor, r) { g.rect(r.0, r.1, r.2, r.3, theme::surface_hover()); }
-        g.hover_pointer |= hit(cursor, r);
-        g.queue_icon("ellipsis-horizontal", r.0 + 7.0, r.1 + 13.0, 14.0, theme::text_dim());
+        let plus = (head.0 + head.2 - menu_w, head.1, 28.0, head.3);
+        let r = (head.0 + head.2 - 28.0, head.1, 28.0, head.3);
+        for (rect, icon) in [(plus, "plus"), (r, "ellipsis-horizontal")] {
+            if hit(cursor, rect) { g.rect(rect.0, rect.1, rect.2, rect.3, theme::surface_hover()); }
+            g.hover_pointer |= hit(cursor, rect);
+            g.queue_icon(icon, rect.0 + 7.0, rect.1 + 13.0, 14.0, theme::text_dim());
+        }
+        nav.hits.push((Action::NewRoom(machine.label.clone()), plus));
         nav.hits.push((Action::Menu(machine.label.clone()), r));
     }
     g.rect(12.0, TITLE_HEIGHT + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
@@ -475,18 +482,26 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         let head = (8.0, y + 2.0, width - 16.0, SECTION_H - 4.0);
         let unpin = (width - 32.0, y + 7.0, 22.0, 22.0);
         let menu = (width - 54.0, y + 7.0, 22.0, 22.0);
+        let plus = (width - 76.0, y + 7.0, 22.0, 22.0);
         if hit(cursor, head) { g.rect(head.0, head.1, head.2, head.3, theme::surface_hover()); }
         let tint = if machine.is_some() { crate::render::machine_tint(&pin.label) } else { theme::text_dim() };
         g.queue_icon("monitor", 14.0, y + 11.0, 14.0, tint);
-        text(g, &pin.label, 36.0, y + 4.0, width - 96.0, 11.5, theme::text(), true);
+        text(g, &pin.label, 36.0, y + 4.0, width - 118.0, 11.5, theme::text(), true);
         let sub = machine.map_or_else(|| "등록되지 않은 기기".to_string(), status);
-        text(g, &sub, 36.0, y + 20.0, width - 96.0, 9.5, theme::text_dim(), false);
-        g.hover_pointer |= hit(cursor, menu) || hit(cursor, unpin);
+        text(g, &sub, 36.0, y + 20.0, width - 118.0, 9.5, theme::text_dim(), false);
+        g.hover_pointer |= hit(cursor, menu) || hit(cursor, unpin) || hit(cursor, plus);
+        // 「+」 = 그 기기에 새 방(본기기 사이드바의 + 와 같은 뜻). 연결돼 있을 때만.
+        if machine.is_some_and(|m| m.online) {
+            g.queue_icon("plus", plus.0 + 4.0, plus.1 + 4.0, 14.0, if hit(cursor, plus) { theme::text() } else { theme::text_dim() });
+        }
         g.queue_icon("ellipsis-horizontal", menu.0 + 4.0, menu.1 + 4.0, 14.0, theme::text_dim());
         g.queue_icon("x", unpin.0 + 5.0, unpin.1 + 5.0, 12.0, if hit(cursor, unpin) { theme::attention() } else { theme::text_dim() });
         // 작은 단추가 머리줄보다 앞이어야 한다 — 맞춤은 앞선 것이 이긴다.
         hits.push((Action::Unpin(pin.label.clone()), unpin));
         hits.push((Action::Menu(pin.label.clone()), menu));
+        if machine.is_some_and(|m| m.online) {
+            hits.push((Action::NewRoom(pin.label.clone()), plus));
+        }
         hits.push((Action::Section(pin.label.clone()), head));
         let body = (viewport.0, y + SECTION_H, viewport.2, (h - SECTION_H).max(0.0));
         pin.view = Some(body);
@@ -759,6 +774,12 @@ impl App {
                 }
                 self.info.machines_col.last_refresh = None;
             }
+            Action::NewRoom(label) => {
+                if let Err(e) = self.new_remote_room(&label) {
+                    self.set_toast(format!("{label} 에 새 방 실패 — {e:#}"));
+                }
+                self.info.machines_col.last_refresh = None;
+            }
             Action::Unpin(label) => {
                 self.info.navigation.pinned.retain(|p| p.label != label);
                 self.info.navigation.dismissed.insert(label);
@@ -809,7 +830,8 @@ impl App {
         if self.info.navigation.picker { self.info.navigation.picker = false; self.chrome_dirty = true; return true; }
         let action = self.info.navigation.hits.iter().find(|(_, r)| hit(cursor, *r)).map(|(a, _)| a.clone());
         let label = match action {
-            Some(Action::Menu(label) | Action::Section(label) | Action::Unpin(label) | Action::Open { label, .. }) => Some(label),
+            Some(Action::Menu(label) | Action::Section(label) | Action::Unpin(label) | Action::NewRoom(label)
+                | Action::Open { label, .. }) => Some(label),
             Some(Action::Picker) => self.info.navigation.machine.clone(),
             _ => None,
         };
