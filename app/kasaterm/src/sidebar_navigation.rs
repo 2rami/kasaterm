@@ -53,7 +53,10 @@ pub(crate) struct NavigationState {
     /// 목록 본문으로 보는 방(키) — 본기기 카드의 「목록으로 보기」와 같다.
     list_rooms: std::collections::HashSet<String>,
     /// 방 카드 우클릭 메뉴. 본기기 방 메뉴와 같은 항목(본문 보기·이름·닫기).
+    /// 칸(pane)에서 열면 칸 메뉴가 된다.
     pub(crate) room_menu: Option<RoomMenu>,
+    /// 배치도 칸을 잡아 끄는 중 — 놓은 자리의 칸과 자리를 바꾼다(그쪽 `surface.move`).
+    pub(crate) cell_drag: Option<CellDrag>,
     room_menu_rects: Vec<(RoomMenuAction, Rect)>,
     /// 이름을 고치는 중인 원격 방 — (카드 키, 캐럿 포함 글). 렌더가 프레임마다 채운다.
     pub(crate) rename: Option<(String, String)>,
@@ -61,7 +64,7 @@ pub(crate) struct NavigationState {
     picker_hits: Vec<(Option<String>, Rect)>,
 }
 
-/// 방 카드 우클릭 메뉴 — 어느 기기의 어느 방인가와 뜬 자리.
+/// 방 카드 우클릭 메뉴 — 어느 기기의 어느 방인가와 뜬 자리. `pane` 이 있으면 **칸 메뉴**다.
 pub(crate) struct RoomMenu {
     x: f32,
     y: f32,
@@ -69,6 +72,17 @@ pub(crate) struct RoomMenu {
     window: Option<u64>,
     room: String,
     key: String,
+    pane: Option<String>,
+}
+
+/// 잡은 칸. 문턱을 넘어야 `active` — 그 전에 놓으면 그냥 여는 클릭이다(머리줄 끌기와 같은 규칙).
+pub(crate) struct CellDrag {
+    label: String,
+    room: String,
+    window: Option<u64>,
+    pane: String,
+    start: (f32, f32),
+    pub(crate) active: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -77,6 +91,9 @@ enum RoomMenuAction {
     MapBody,
     Rename,
     Close,
+    ClosePane,
+    SplitBeside,
+    NewTab,
 }
 
 #[derive(Clone)]
@@ -106,6 +123,17 @@ fn clipped(r: Rect, viewport: Rect) -> Option<Rect> {
     let right = (r.0 + r.2).min(viewport.0 + viewport.2);
     let bottom = (r.1 + r.3).min(viewport.1 + viewport.3);
     (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+}
+
+/// 끌던 칸을 놓을 방향 — 목표 칸에서 볼 때 **원래 칸이 어느 쪽**인가. 두 중심이 더 크게
+/// 벌어진 축을 고른다(본기기 pane 끌기와 같은 규칙). 오른쪽으로 끌었으면 그 칸의 왼쪽에서
+/// 온 것이므로 "left" 다.
+fn drop_direction(source: Rect, target: Rect) -> &'static str {
+    let dx = (target.0 + target.2 / 2.0) - (source.0 + source.2 / 2.0);
+    let dy = (target.1 + target.3 / 2.0) - (source.1 + source.3 / 2.0);
+    if dx.abs() >= dy.abs() {
+        if dx > 0.0 { "left" } else { "right" }
+    } else if dy > 0.0 { "up" } else { "down" }
 }
 
 fn room_key(machine: &str, room: &str) -> String {
@@ -279,16 +307,22 @@ fn draw_cell(
     cell: Rect,
     cursor: (f32, f32),
     view: Rect,
+    drag: Option<&str>,
 ) {
     let row = deck[0];
     let (mx, my, mw, mh) = cell;
     let Some(visible) = clipped(cell, view) else { return };
     let hover = hit(cursor, visible);
+    // 끌고 있는 칸은 옅게, 놓일 칸은 테두리로 — 본기기 pane 끌기와 같은 신호.
+    let dragging = drag.is_some_and(|d| d == row.remote_id.as_str());
+    let drop_here = drag.is_some_and(|d| d != row.remote_id.as_str()) && hover;
     g.hover_pointer |= hover && !row.closed;
     let busy = deck.iter().any(|r| matches!(r.status.as_str(), "working" | "compacting"));
     let waiting = deck.iter().any(|r| r.status.contains("wait") || r.status.contains("attention"));
     let signal = waiting.then(|| (theme::attention(), 0.9));
-    round_rect(g, mx, my, mw, mh, 2.0, if let Some((c, _)) = signal {
+    round_rect(g, mx, my, mw, mh, 2.0, if drop_here {
+        theme::accent()
+    } else if let Some((c, _)) = signal {
         c
     } else if cur {
         theme::accent()
@@ -337,6 +371,9 @@ fn draw_cell(
             round_rect(g, dx, dy, w, dot, dot / 2.0, col);
             dx += w + gap;
         }
+    }
+    if dragging && mw > 5.0 && mh > 5.0 {
+        round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5, theme::with_alpha(theme::bg(), 0x88));
     }
     if !row.closed {
         hits.push((Action::Open {
@@ -404,11 +441,20 @@ pub(crate) fn draw_menu(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, c
     nav.room_menu_rects.clear();
     let Some(menu) = nav.room_menu.as_ref() else { return };
     let listed = nav.list_rooms.contains(&menu.key);
-    let items: [(RoomMenuAction, &str); 3] = [
-        if listed { (RoomMenuAction::MapBody, "배치도로 보기") } else { (RoomMenuAction::ListBody, "목록으로 보기") },
-        (RoomMenuAction::Rename, "이름 바꾸기"),
-        (RoomMenuAction::Close, "방 닫기"),
-    ];
+    // 칸에서 열었으면 칸 메뉴 — 본기기 pane 메뉴와 같은 자리에 같은 골격으로 뜬다.
+    let items: Vec<(RoomMenuAction, &str)> = if menu.pane.is_some() {
+        vec![
+            (RoomMenuAction::SplitBeside, "옆에 세우기"),
+            (RoomMenuAction::NewTab, "탭으로 세우기"),
+            (RoomMenuAction::ClosePane, "pane 닫기"),
+        ]
+    } else {
+        vec![
+            if listed { (RoomMenuAction::MapBody, "배치도로 보기") } else { (RoomMenuAction::ListBody, "목록으로 보기") },
+            (RoomMenuAction::Rename, "이름 바꾸기"),
+            (RoomMenuAction::Close, "방 닫기"),
+        ]
+    };
     const MIH: f32 = 28.0;
     let widest = items.iter().map(|(_, l)| g.measure_chrome_text(l, 13.0, false)).fold(0.0f32, f32::max);
     let mw = (widest + 32.0).min((width - 8.0).max(80.0));
@@ -433,6 +479,8 @@ pub(crate) fn draw_menu(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, c
 struct RowsCtx<'a> {
     collapsed: &'a std::collections::HashSet<String>,
     listed: &'a std::collections::HashSet<String>,
+    /// 지금 끌고 있는 칸의 원격 pane id.
+    drag: Option<&'a str>,
     viewing: Option<&'a (String, Vec<String>)>,
     viewing_cur: Option<&'a str>,
     rename: Option<&'a (String, String)>,
@@ -540,7 +588,7 @@ fn draw_rows(
             let heads: Vec<&state::MachinesColRow> = stacks.iter().map(|d| d[0]).collect();
             for (deck, cell) in stacks.iter().zip(cell_rects(&heads, ma)) {
                 let cur = active && ctx.viewing_cur.is_some_and(|c| deck.iter().any(|r| r.remote_id == c));
-                draw_cell(g, hits, machine, room, deck, cur, cell, cursor, view);
+                draw_cell(g, hits, machine, room, deck, cur, cell, cursor, view, ctx.drag);
             }
         }
         y += h + SIDEBAR_TAB_GAP;
@@ -611,10 +659,11 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         nav.pinned.push(Pinned { label: m.label.clone(), auto: true, scroll: 0.0, content_h: 0.0, view: None });
     }
     nav.pinned.retain(|p| !p.auto || machines.iter().any(|m| m.label == p.label && m.online));
-    let NavigationState { pinned, collapsed_rooms, hits, machine: main, scroll, content_h, viewport: main_view, viewing, viewing_cur, list_rooms, rename, .. } = nav;
+    let NavigationState { pinned, collapsed_rooms, hits, machine: main, scroll, content_h, viewport: main_view, viewing, viewing_cur, list_rooms, rename, cell_drag, .. } = nav;
     let ctx = RowsCtx {
         collapsed: collapsed_rooms,
         listed: list_rooms,
+        drag: cell_drag.as_ref().filter(|d| d.active).map(|d| d.pane.as_str()),
         viewing: viewing.as_ref(),
         viewing_cur: viewing_cur.as_deref(),
         rename: rename.as_ref(),
@@ -752,7 +801,7 @@ impl App {
         let Ok(folder) = std::env::var("KASATERM_AUTONAV_DIR") else { return; };
         static STEP: OnceLock<Mutex<(Instant, usize)>> = OnceLock::new();
         let mut step = STEP.get_or_init(|| Mutex::new((Instant::now(), 0))).lock().unwrap();
-        if step.1 >= 17 || step.0.elapsed().as_millis() < if step.1 == 0 { 10000 } else { 700 } { return; }
+        if step.1 >= 19 || step.0.elapsed().as_millis() < if step.1 == 0 { 10000 } else { 700 } { return; }
         let Some(window) = self.window.as_ref().map(|w| w.id()) else { return; };
         let click = |app: &mut Self, r: Rect| {
             app.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
@@ -886,6 +935,22 @@ impl App {
                 self.cancel_room_rename();
                 report = format!("rename_cancelled={}", self.room_rename.remote.is_none() && self.room_rename.editing.is_none());
             }
+            17 => {
+                // 배치도 칸 우클릭 — 방 메뉴가 아니라 **칸 메뉴**가 떠야 한다.
+                let cell = self.info.navigation.hits.iter().find_map(|(a, r)|
+                    matches!(a, Action::Open { label, focus: Some(_), .. } if label == "맥북").then_some(*r));
+                if let Some(r) = cell {
+                    self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                    self.sidebar_navigation_right_click(self.cursor_px);
+                }
+                report = format!("cell_menu={}", self.info.navigation.room_menu.as_ref().is_some_and(|m| m.pane.is_some()));
+            }
+            18 => {
+                let items = self.info.navigation.room_menu_rects.len();
+                let first = self.info.navigation.room_menu_rects.first().map(|(_, r)| *r);
+                if let Some(r) = first { self.sidebar_navigation_menu_click((r.0 + r.2 / 2.0, r.1 + r.3 / 2.0)); }
+                report = format!("cell_menu_items={items} menu_closed={}", self.info.navigation.room_menu.is_none());
+            }
             _ => {}
         }
         self.chrome_dirty = true;
@@ -968,12 +1033,20 @@ impl App {
                 self.info.machines_col.last_refresh = None;
             }
             Action::Section(_) => {}
-            Action::Open { label, window, room, focus } => {
-                if let Err(e) = self.open_remote_room(&label, window, &room, focus.as_deref()) {
-                    self.set_toast(format!("방 열기 실패 — {e:#}"));
+            Action::Open { label, window, room, focus } => match focus {
+                // 칸은 잡아 끌 수 있다 — 문턱을 안 넘고 놓으면 그냥 연다.
+                Some(pane) => {
+                    self.info.navigation.cell_drag = Some(CellDrag {
+                        label, room, window, pane, start: cursor, active: false,
+                    });
                 }
-                self.info.machines_col.last_refresh = None;
-            }
+                None => {
+                    if let Err(e) = self.open_remote_room(&label, window, &room, None) {
+                        self.set_toast(format!("방 열기 실패 — {e:#}"));
+                    }
+                    self.info.machines_col.last_refresh = None;
+                }
+            },
             Action::NewRoom(label) => {
                 if let Err(e) = self.new_remote_room(&label) {
                     self.set_toast(format!("{label} 에 새 방 실패 — {e:#}"));
@@ -999,6 +1072,12 @@ impl App {
     /// 끌기 중이면 true 를 돌려 다른 hover 처리가 끼어들지 않게 한다.
     pub(crate) fn sidebar_navigation_drag_move(&mut self) -> bool {
         let cursor = self.cursor_px;
+        if let Some(cell) = self.info.navigation.cell_drag.as_mut() {
+            let (dx, dy) = (cursor.0 - cell.start.0, cursor.1 - cell.start.1);
+            if !cell.active && dx * dx + dy * dy > 9.0 { cell.active = true; }
+            if cell.active { self.chrome_dirty = true; }
+            return cell.active;
+        }
         let Some(drag) = self.info.navigation.drag.as_mut() else { return false; };
         let (dx, dy) = (cursor.0 - drag.start.0, cursor.1 - drag.start.1);
         if !drag.active && dx * dx + dy * dy > 9.0 { drag.active = true; }
@@ -1011,6 +1090,18 @@ impl App {
     /// 눌렀던 것을 놓았다. 문턱을 안 넘었으면 클릭(고르기·피커 열기), 넘었으면
     /// 사이드바 안에 놓았을 때만 아래 절로 붙인다.
     pub(crate) fn sidebar_navigation_release(&mut self, cursor: (f32, f32)) -> bool {
+        if let Some(cell) = self.info.navigation.cell_drag.take() {
+            if !cell.active {
+                if let Err(e) = self.open_remote_room(&cell.label, cell.window, &cell.room, Some(&cell.pane)) {
+                    self.set_toast(format!("방 열기 실패 — {e:#}"));
+                }
+                self.info.machines_col.last_refresh = None;
+            } else {
+                self.drop_remote_cell(&cell, cursor);
+            }
+            self.chrome_dirty = true;
+            return true;
+        }
         let Some(drag) = self.info.navigation.drag.take() else { return false; };
         if let Some(window) = &self.window { window.set_cursor(CursorIcon::Default); }
         if !drag.active {
@@ -1034,9 +1125,16 @@ impl App {
         let action = self.info.navigation.hits.iter().find(|(_, r)| hit(cursor, *r)).map(|(a, _)| a.clone());
         // 방 카드(머리·칸·×)는 방 메뉴, 절 머리·피커는 기기 메뉴.
         let action = match action {
-            Some(Action::Open { label, window, room, .. }) | Some(Action::CloseRoom { label, window, room }) => {
+            Some(Action::Open { label, window, room, focus }) => {
                 let key = room_key(&label, &room);
-                self.info.navigation.room_menu = Some(RoomMenu { x: cursor.0, y: cursor.1, label, window, room, key });
+                self.info.navigation.room_menu = Some(RoomMenu { x: cursor.0, y: cursor.1, label, window, room, key, pane: focus });
+                self.info.machine_menu = None;
+                self.chrome_dirty = true;
+                return true;
+            }
+            Some(Action::CloseRoom { label, window, room }) => {
+                let key = room_key(&label, &room);
+                self.info.navigation.room_menu = Some(RoomMenu { x: cursor.0, y: cursor.1, label, window, room, key, pane: None });
                 self.info.machine_menu = None;
                 self.chrome_dirty = true;
                 return true;
@@ -1142,6 +1240,17 @@ mod tests {
             remote: vec![row("", "%12", "A"), row("", "%2", "A"), row("", "%8", "B")],
             mirrored: vec![row("%99", "%7", "A")],
         }
+    }
+
+    #[test]
+    fn dropping_a_cell_names_the_side_it_came_from() {
+        let source = (10.0, 10.0, 40.0, 40.0);
+        assert_eq!(drop_direction(source, (60.0, 10.0, 40.0, 40.0)), "left", "오른쪽 칸에 놓으면 왼쪽에서 온 것");
+        assert_eq!(drop_direction(source, (-40.0, 10.0, 40.0, 40.0)), "right");
+        assert_eq!(drop_direction(source, (10.0, 60.0, 40.0, 40.0)), "up");
+        assert_eq!(drop_direction(source, (10.0, -40.0, 40.0, 40.0)), "down");
+        // 가로로 더 벌어졌으면 가로가 이긴다 — 대각선에서 축이 흔들리면 안 된다.
+        assert_eq!(drop_direction(source, (70.0, 30.0, 40.0, 40.0)), "left");
     }
 
     #[test]
@@ -1289,6 +1398,15 @@ impl App {
                 None => self.set_toast("옛 판 기기의 방은 이름을 바꿀 수 없어요".to_string()),
             },
             Some(RoomMenuAction::Close) => self.confirm_or_close_remote_room(&menu.label, menu.window, &menu.room),
+            Some(RoomMenuAction::ClosePane) => {
+                if let Some(pane) = menu.pane { self.close_remote_cell(&menu.label, &pane); }
+            }
+            Some(RoomMenuAction::SplitBeside) => {
+                if let Some(pane) = menu.pane { self.spawn_beside_remote_cell(&menu.label, &pane, false); }
+            }
+            Some(RoomMenuAction::NewTab) => {
+                if let Some(pane) = menu.pane { self.spawn_beside_remote_cell(&menu.label, &pane, true); }
+            }
             None => {}
         }
     }
@@ -1346,6 +1464,71 @@ impl App {
             let params = serde_json::json!({ "surface_id": pane, "title": name });
             if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "window.rename", params) {
                 eprintln!("[remote] room rename failed: {e:#}");
+            }
+            kasa_mcp::machines::poke();
+        });
+    }
+
+    /// 그 기기의 칸 하나를 닫는다 — 사람이 그 기계에서 pane 을 닫은 것과 같다(되살리기 대열에 남는다).
+    pub(crate) fn close_remote_cell(&mut self, label: &str, pane: &str) {
+        let Some(m) = kasa_mcp::machines::find(label) else {
+            self.set_toast(format!("{label} 가 명부(machines.json)에 없어요"));
+            return;
+        };
+        let (base, pane) = (m.base.clone(), pane.to_string());
+        self.set_toast(format!("{label} 의 pane 닫는 중…"));
+        std::thread::spawn(move || {
+            if let Err(e) = kasa_mcp::remote::close_remote_pane(&base, &pane, None, false) {
+                eprintln!("[remote] pane close failed: {e:#}");
+            }
+            kasa_mcp::machines::poke();
+        });
+    }
+
+    /// 그 칸 **옆에**(`as_tab` 이면 그 칸의 탭으로) 새 셸을 세운다. 자리는 저쪽이 정한다 —
+    /// 우리 배치도는 그 기계 배치의 사본이라, 여기서 자리를 지어 보내면 어긋난다.
+    pub(crate) fn spawn_beside_remote_cell(&mut self, label: &str, pane: &str, as_tab: bool) {
+        let Some(m) = kasa_mcp::machines::find(label) else {
+            self.set_toast(format!("{label} 가 명부(machines.json)에 없어요"));
+            return;
+        };
+        let at = kasa_socket::backend::SpawnShellAt {
+            beside: (!as_tab).then(|| pane.to_string()),
+            tab_of: as_tab.then(|| pane.to_string()),
+            ..Default::default()
+        };
+        let (base, label) = (m.base.clone(), label.to_string());
+        self.set_toast(format!("{label} 에 {} 세우는 중…", if as_tab { "탭을" } else { "옆자리를" }));
+        std::thread::spawn(move || {
+            if let Err(e) = kasa_mcp::remote::spawn_shell_pane_at(&base, &at, None) {
+                eprintln!("[remote] spawn beside failed: {e:#}");
+            }
+            kasa_mcp::machines::poke();
+        });
+    }
+
+    /// 끌던 칸을 놓았다 — 커서 아래의 **같은 방 다른 칸**과 자리를 바꾼다. 방향은 두 칸의
+    /// 중심이 어느 쪽으로 더 벌어졌는지로 정한다(본기기 pane 끌기와 같은 규칙).
+    fn drop_remote_cell(&mut self, cell: &CellDrag, cursor: (f32, f32)) {
+        let target = self.info.navigation.hits.iter().find_map(|(action, rect)| match action {
+            Action::Open { label, room, focus: Some(pane), .. }
+                if hit(cursor, *rect) && *label == cell.label && *room == cell.room && *pane != cell.pane =>
+                Some((pane.clone(), *rect)),
+            _ => None,
+        });
+        let Some((target, rect)) = target else { return };
+        let Some(source) = self.info.navigation.hits.iter().find_map(|(action, r)| match action {
+            Action::Open { focus: Some(pane), .. } if *pane == cell.pane => Some(*r),
+            _ => None,
+        }) else { return };
+        let direction = drop_direction(source, rect);
+        let Some(m) = kasa_mcp::machines::find(&cell.label) else { return };
+        let (base, label, pane) = (m.base.clone(), cell.label.clone(), cell.pane.clone());
+        self.set_toast(format!("{label} 에서 자리 옮기는 중…"));
+        std::thread::spawn(move || {
+            let params = serde_json::json!({ "surface_id": pane, "target": target, "direction": direction });
+            if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "surface.move", params) {
+                eprintln!("[remote] pane move failed: {e:#}");
             }
             kasa_mcp::machines::poke();
         });
