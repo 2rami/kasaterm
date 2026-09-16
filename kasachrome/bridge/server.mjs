@@ -10,6 +10,11 @@ import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { PORT } from '../extension/port.js'
 import { HOST, HOST_ID } from './host.mjs'
+import { withLocalProfile } from './profile-fill.mjs'
+
+// 캐릭터 명부·프사를 읽는 어댑터. 배포 빌드는 이 파일을 통째로 빼므로 없으면 없는 대로 간다.
+let host = null
+try { host = await import('../mcp/kasaterm.mjs') } catch { /* 배포판엔 이 파일이 없다 */ }
 
 // 배포판이 개인판과 같은 로그 폴더를 쓰지 않도록 패키지 이름을 따라간다
 const PKG = JSON.parse(readFileSync(join(dirname(dirname(fileURLToPath(import.meta.url))), 'package.json'), 'utf8'))
@@ -44,6 +49,13 @@ let nextId = 1
 let nextClient = 1
 const pending = new Map() // bridgeId -> {client, clientId, timer, tool}
 const clients = new Map() // sock -> {key, identity, profile}
+
+// 원격 기기에서 온 신원에 이 기계의 프사를 채운다. 규칙과 근거는 profile-fill.mjs 에 있다.
+function fillProfile(identity) {
+  const out = withLocalProfile(identity, host?.lookup)
+  if (out !== identity) log(`profile filled locally for ${identity.name}`)
+  return out
+}
 
 // 목록 순서는 붙은 순. 클라이언트가 프로필을 안 고르면 첫 번째를 쓰므로, 순서가 흔들리면
 // 같은 pane 의 연속 호출이 서로 다른 크롬으로 갈라진다 — Map 의 삽입 순서에 기댄다.
@@ -265,7 +277,7 @@ wss.on('connection', (sock) => {
         broadcastStatus()
       } else {
         const key = `c${nextClient++}`
-        const identity = msg.identity || null
+        const identity = fillProfile(msg.identity || null)
         clients.set(sock, { key, identity, profile: msg.profile || null })
         if (identity) {
           log(`client ${key} = ${identity.name} (${identity.paneId || 'pane?'})`)

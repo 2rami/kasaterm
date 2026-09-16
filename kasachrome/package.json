@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "터미널의 에이전트가 평소 쓰는 크롬을 조작한다 — MV3 확장 + 로컬 브리지 + MCP",
   "scripts": {
-    "test": "node --test extension/*.test.mjs mcp/*.test.mjs",
+    "test": "node --test extension/*.test.mjs mcp/*.test.mjs bridge/*.test.mjs",
     "bridge": "node bridge/server.mjs",
     "mcp": "node mcp/server.mjs",
     "icons": "node scripts/icons.mjs",
