@@ -7908,7 +7908,12 @@ pub fn spawn_http_server_opts(
                                     body,
                                 )
                             }
-                        }),
+                        })
+                        // axum 의 `Bytes` 추출기는 기본 2MB 에서 413 을 낸다. 긴 claude
+                        // 대화는 요청 몸통이 2MB 를 넘고, 그러면 API 에 닿기도 전에
+                        // 관문이 막아 claude 가 「Request too large (max 32MB)」로
+                        // 오판했다(2026-09-16 실측). 상류 한도는 상류가 판정하게 둔다.
+                        .layer(axum::extract::DefaultBodyLimit::max(PROXY_BODY_LIMIT)),
                     )
                     .nest_service("/mcp", service)
                     // 부작용 있는 요청에 두르는 마지막 한 겹. 라우트마다 손으로
