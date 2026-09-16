@@ -122,6 +122,51 @@ pub fn unregister(token: &str) {
     save_tokens(&list);
 }
 
+/// 폰이 말한 환경이 틀렸을 때(개발 서명 판이 「prod」라 한 것) 실제로 받아 준 쪽으로 고쳐 적는다.
+fn set_env(token: &str, env: &str) {
+    let mut list = tokens();
+    if let Some(t) = list.iter_mut().find(|t| t.token == token) {
+        t.env = env.into();
+        save_tokens(&list);
+    }
+}
+
+fn host_of(env: &str) -> &'static str {
+    if env == "dev" {
+        "https://api.sandbox.push.apple.com"
+    } else {
+        "https://api.push.apple.com"
+    }
+}
+
+/// 한 통을 한 서버에. 실패는 (상태, 애플이 준 본문).
+async fn post_once(
+    env: &str,
+    token: &str,
+    bearer: &str,
+    payload: &Value,
+    collapse: Option<&str>,
+) -> Result<(), (reqwest::StatusCode, String)> {
+    let mut req = client()
+        .post(format!("{}/3/device/{token}", host_of(env)))
+        .header("authorization", format!("bearer {bearer}"))
+        .header("apns-topic", TOPIC)
+        .header("apns-push-type", "alert")
+        .header("apns-priority", "10")
+        .json(payload);
+    if let Some(c) = collapse {
+        req = req.header("apns-collapse-id", c.chars().take(64).collect::<String>());
+    }
+    match req.send().await {
+        Ok(r) if r.status().is_success() => Ok(()),
+        Ok(r) => {
+            let status = r.status();
+            Err((status, r.text().await.unwrap_or_default()))
+        }
+        Err(e) => Err((reqwest::StatusCode::default(), e.to_string())),
+    }
+}
+
 fn key_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("apns").join("key.json"))
 }
@@ -276,33 +321,33 @@ pub async fn send(alert: &Alert) -> usize {
             "avatar": avatar,
             "url": alert.url,
         });
-        let host = if t.env == "dev" {
-            "https://api.sandbox.push.apple.com"
-        } else {
-            "https://api.push.apple.com"
-        };
-        let mut req = client()
-            .post(format!("{host}/3/device/{}", t.token))
-            .header("authorization", format!("bearer {bearer}"))
-            .header("apns-topic", TOPIC)
-            .header("apns-push-type", "alert")
-            .header("apns-priority", "10")
-            .json(&payload);
-        if let Some(c) = &alert.collapse {
-            req = req.header("apns-collapse-id", c.chars().take(64).collect::<String>());
-        }
-        match req.send().await {
-            Ok(r) if r.status().is_success() => sent += 1,
-            Ok(r) => {
-                let status = r.status();
-                let text = r.text().await.unwrap_or_default();
+        let collapse = alert.collapse.as_deref();
+        match post_once(&t.env, &t.token, &bearer, &payload, collapse).await {
+            Ok(()) => sent += 1,
+            Err((status, text)) if text.contains("BadDeviceToken") => {
+                // 토큰은 환경마다 다르다 — 폰이 말한 환경이 틀린 것일 수 있다(개발 서명
+                // 판은 release 로 구워도 샌드박스 토큰이다). 반대쪽에 한 번 더 쏴 보고,
+                // 받아 주면 그쪽으로 고쳐 적는다. 양쪽 다 거절해야 진짜 죽은 토큰이다.
+                let other = if t.env == "dev" { "prod" } else { "dev" };
+                match post_once(other, &t.token, &bearer, &payload, collapse).await {
+                    Ok(()) => {
+                        eprintln!("[push] 환경 바로잡음 {}→{other} (폰이 잘못 말함)", t.env);
+                        set_env(&t.token, other);
+                        sent += 1;
+                    }
+                    Err((s2, t2)) => {
+                        eprintln!("[push] {status} {text} / {s2} {t2} — 양쪽 다 거절, 토큰 걷음");
+                        unregister(&t.token);
+                    }
+                }
+            }
+            Err((status, text)) => {
                 eprintln!("[push] {status} {text} (env={})", t.env);
                 // 지운 앱·옛 토큰은 다시 안 쏘게 걷는다(애플이 410 으로 말해 준다).
-                if status.as_u16() == 410 || text.contains("BadDeviceToken") || text.contains("Unregistered") {
+                if status.as_u16() == 410 || text.contains("Unregistered") {
                     unregister(&t.token);
                 }
             }
-            Err(e) => eprintln!("[push] 못 보냄: {e}"),
         }
     }
     sent

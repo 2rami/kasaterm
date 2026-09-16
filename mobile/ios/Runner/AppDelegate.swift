@@ -56,13 +56,21 @@ import UserNotifications
     }
   }
 
-  /// 디버그 빌드는 샌드박스 서버, TestFlight·앱스토어는 본 서버 — 서버가 갈라 쏜다.
+  /// 샌드박스(dev)인지 본 서버(prod)인지 — 서버가 갈라 쏜다. 빌드 모드가 아니라
+  /// 서명 프로필의 `aps-environment` 가 정한다: `phone.sh` 는 release 로 굽지만
+  /// Apple Development 로 서명해 토큰이 샌드박스 것이 된다(2026-09-17, 「prod」라
+  /// 등록돼 본 서버가 BadDeviceToken 으로 지워 버렸다). 앱스토어 판은 프로필이 없다.
   private static var env: String {
-    #if DEBUG
-      return "dev"
-    #else
+    guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+      let data = try? Data(contentsOf: url),
+      let text = String(data: data, encoding: .isoLatin1),
+      let key = text.range(of: "<key>aps-environment</key>"),
+      let open = text.range(of: "<string>", range: key.upperBound..<text.endIndex),
+      let close = text.range(of: "</string>", range: open.upperBound..<text.endIndex)
+    else {
       return "prod"
-    #endif
+    }
+    return text[open.upperBound..<close.lowerBound] == "development" ? "dev" : "prod"
   }
 
   override func application(
