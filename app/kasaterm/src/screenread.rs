@@ -257,12 +257,21 @@ pub(crate) fn overlay_codex_session_label(
     if start == 0 || used == 0 {
         return;
     }
-    // 앞 한 칸까지 함께 본다 — 옆 글자에 딱 붙으면 배지로 안 읽힌다.
+    // 앞 한 칸까지 함께 본다 — 옆 글자에 딱 붙으면 배지로 안 읽힌다. Astra 의 점은
+    // 빈칸으로 친다: 그걸 글자로 세는 동안 gpt-6-astra pane 은 점이 자리에 앉은
+    // 프레임마다 배지가 통째로 빠져, 세션 이름이 아예 안 보였다(2026-09-16 지적).
     if rows[line][start.saturating_sub(1)..end]
         .iter()
-        .any(|c| c.ch != ' ' && c.ch != '\0')
+        .any(|c| !is_blank_glyph(c.ch))
     {
         return;
+    }
+    // 자리에 앉아 있던 점은 지우고 그린다 — 남겨 두면 배지 앞뒤에 점이 달라붙어
+    // 이름이 한 덩어리로 안 읽힌다.
+    for cell in rows[line][start.saturating_sub(1)..end].iter_mut() {
+        if is_particle(cell.ch) {
+            cell.ch = ' ';
+        }
     }
     let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     let mut col = start;
@@ -7156,6 +7165,41 @@ mod prompt_box_tests {
             row_from(""),
         ];
         assert_eq!(find_claude_spinner(&live), Some((0, 0)));
+    }
+
+    #[test]
+    fn codex_session_badge_survives_astra_particles_in_its_slot() {
+        let filled = |s: &str| {
+            let mut r = row_from(s);
+            r.resize(60, GridCell::blank());
+            for c in r.iter_mut() {
+                if c.ch == '\0' {
+                    c.ch = ' ';
+                }
+                c.bg = kasa_bridge::screen::Color::Rgb(63, 69, 77);
+            }
+            r
+        };
+        // gpt-6-astra 실측(2026-09-16): 배지 자리(입력창 안쪽 첫 줄 우측)에 점이 앉는다.
+        // 점을 글자로 세는 동안 배지가 통째로 빠져 세션 이름이 안 보였다.
+        let mut rows = vec![
+            row_from("• Ran git status --short"),
+            filled("      ⠈        ⠐     ⠄        ⡀     ⠈     ⠠"),
+            filled("› Ask Codex to do anything"),
+            filled("    ⠠⢀        ⡀⠄        ⠈        ⠂"),
+        ];
+        overlay_codex_session_label(&mut rows, "카사크롬 탭 그룹", [200, 120, 255, 255]);
+        // 폭 2 글자 뒤의 스페이서(`\0`)를 걷어내고 본다 — 실제 그리드와 같은 모양이다.
+        let line: String = rows[1].iter().map(|c| c.ch).filter(|c| *c != '\0').collect();
+        assert!(
+            line.contains("카사크롬 탭 그룹"),
+            "점자 위에 배지를 못 그렸다: {line:?}"
+        );
+        let badge_at = line.find('카').expect("배지");
+        assert!(
+            !line[badge_at..].chars().any(is_particle),
+            "배지에 점이 달라붙었다: {line:?}"
+        );
     }
 
     #[test]

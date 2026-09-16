@@ -2235,6 +2235,71 @@ fn publish_screen_update(
     tx.try_send(update)
 }
 
+/// 이 출력 청크가 **반짝임만 다시 그린 프레임**인가 — 박동(`output_beats`)에서 뺄지 가른다.
+///
+/// codex 의 Astra 효과(gpt-6-astra)는 **노는 동안에도** 입력창 둘레에 점자 「별」을
+/// 계속 흩뿌린다. 그 프레임 하나하나가 PTY read 로 잡히니, 박동이 1Hz 넘게 찍혀
+/// `output_heartbeat` 가 영영 참이 됐다 — pane 은 놀고 있는데 헤더 working 바가
+/// 멈추지 않고 지나다녔다(2026-09-16 지적). 박동은 「스피너 경과시간이 1초마다 다시
+/// 그려진다」를 재는 자라, 말이 없는 장식 프레임은 그 자에 들어오면 안 된다.
+///
+/// 판정: ESC 시퀀스(커서 이동·색)를 걷어낸 뒤 남은 글자가 **전부** 공백·제어·점자면
+/// 장식이다. 진짜 생성 중이면 경과시간 숫자가 함께 갱신되므로 이 관문에 안 걸린다.
+/// claude 의 점자 스피너(`⠋ Computing… (3s)`)도 같은 청크에 글자가 실려 통과한다.
+fn chunk_is_only_particles(buf: &[u8]) -> bool {
+    let mut i = 0usize;
+    let mut saw = false;
+    while i < buf.len() {
+        let b = buf[i];
+        if b == 0x1b {
+            i += 1;
+            match buf.get(i) {
+                // CSI: 파라미터·중간 바이트를 지나 최종 바이트(0x40~0x7E)까지.
+                Some(b'[') => {
+                    i += 1;
+                    while i < buf.len() && !(0x40..=0x7e).contains(&buf[i]) {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                // OSC/DCS/APC 류: BEL 이나 ST(ESC \) 까지.
+                Some(b']') | Some(b'P') | Some(b'_') | Some(b'^') | Some(b'X') => {
+                    i += 1;
+                    while i < buf.len() {
+                        if buf[i] == 0x07 {
+                            i += 1;
+                            break;
+                        }
+                        if buf[i] == 0x1b && buf.get(i + 1) == Some(&b'\\') {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => i += 1,
+            }
+            continue;
+        }
+        // 점자 한 글자(U+2800~U+28FF = E2 A0 80 ~ E2 A3 BF).
+        if b == 0xe2
+            && matches!(buf.get(i + 1), Some(0xa0..=0xa3))
+            && matches!(buf.get(i + 2), Some(0x80..=0xbf))
+        {
+            saw = true;
+            i += 3;
+            continue;
+        }
+        // 공백과 제어문자는 장식 프레임의 자리 이동이라 말로 안 친다.
+        if b == b' ' || b < 0x20 || b == 0x7f {
+            i += 1;
+            continue;
+        }
+        return false;
+    }
+    saw
+}
+
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     reader_stop: Arc<std::sync::atomic::AtomicBool>,
@@ -2386,18 +2451,21 @@ fn spawn_reader_thread(
                 Ok(n) => {
                     // 출력 박동 — 실제 read 여기 한 곳만 찍는다(struct 필드 주석).
                     // 250ms 안의 연속 청크는 같은 burst 로 보고 한 번만 센다.
-                    let now = Instant::now();
-                    let mut beats = output_beats.lock().unwrap();
-                    if beats
-                        .back()
-                        .is_none_or(|t| now.duration_since(*t).as_millis() >= 250)
-                    {
-                        if beats.len() >= 8 {
-                            beats.pop_front();
+                    // 말 없는 장식 프레임(codex Astra 의 점자 반짝임)은 빼고 센다 —
+                    // `chunk_is_only_particles` 머리말.
+                    if !chunk_is_only_particles(&buf[..n]) {
+                        let now = Instant::now();
+                        let mut beats = output_beats.lock().unwrap();
+                        if beats
+                            .back()
+                            .is_none_or(|t| now.duration_since(*t).as_millis() >= 250)
+                        {
+                            if beats.len() >= 8 {
+                                beats.pop_front();
+                            }
+                            beats.push_back(now);
                         }
-                        beats.push_back(now);
                     }
-                    drop(beats);
                     n
                 }
                 Err(e) => {
@@ -6879,5 +6947,28 @@ mod handoff_tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         assert!(reaped, "입양자를 버렸는데 셸이 안 죽었다");
+    }
+}
+
+#[cfg(test)]
+mod astra_heartbeat_tests {
+    use super::chunk_is_only_particles;
+
+    #[test]
+    fn decorative_particle_frames_do_not_beat() {
+        // codex Astra 가 노는 동안 되풀이하는 프레임 — 커서 이동·색·점자·공백뿐.
+        let frame = b"\x1b[2;7H\x1b[38;5;240m\xe2\xa0\x88   \xe2\xa1\x80 \x1b[0m\x1b[3;40H\xe2\xa0\x84";
+        assert!(chunk_is_only_particles(frame), "별밭을 박동으로 셌다");
+    }
+
+    #[test]
+    fn a_frame_with_words_beats() {
+        // 진짜 생성 중이면 경과시간이 함께 갱신된다.
+        assert!(!chunk_is_only_particles(
+            "\x1b[2;1H⠋ Computing… (3s)".as_bytes()
+        ));
+        assert!(!chunk_is_only_particles(b"\x1b[2J\x1b[Hhello"));
+        // 점 하나 없는 커서 이동만 — 박동으로 셀 근거도, 뺄 근거도 아니다.
+        assert!(!chunk_is_only_particles(b"\x1b[2;7H"));
     }
 }

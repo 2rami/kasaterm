@@ -3752,10 +3752,24 @@ fn screen_shows_working(screen: &str) -> bool {
         // 윈도우 claude 는 이 자리에 ASCII `*` 를 쓴다 — `is_spinner_head` 참고.
         // 여기서 빠뜨리면 mtime-fallback 의 working 판정이 윈도우에서만 죽는다.
         let has_star = line.chars().any(crate::screenread::is_spinner_head);
-        let has_braille = line
-            .chars()
-            .any(|c| (0x2800..=0x28FF).contains(&(c as u32)));
-        (has_star && line.contains('…')) || has_braille
+        if has_star && line.contains('…') {
+            return true;
+        }
+        // 점자는 **행 머리에 하나뿐이고 뒤에 말이 올 때만** 스피너다(`spinner_row_col`
+        // 과 같은 자). 점자가 있기만 하면 working 으로 치던 동안, codex 의 Astra 효과가
+        // 입력창 둘레에 흩뿌리는 점 때문에 노는 pane 이 보드에서 영영 working 이었다
+        // (gpt-6-astra, 2026-09-16 지적).
+        let trimmed = line.trim_start();
+        let mut chars = trimmed.chars();
+        let Some(head) = chars.next() else {
+            return false;
+        };
+        if !crate::screenread::is_particle(head) {
+            return false;
+        }
+        let rest = chars.as_str();
+        !rest.chars().any(crate::screenread::is_particle)
+            && rest.chars().any(char::is_alphanumeric)
     })
 }
 
@@ -7589,7 +7603,30 @@ mod agents_view_tests {
         // 전부 글리프면 빈 문자열(매칭 스킵 신호).
         assert_eq!(title_session_name("⠐⠑ "), "");
     }
+
+    #[test]
+    fn astra_particle_screen_is_not_working() {
+        // gpt-6-astra 실측 화면(2026-09-16): 노는 codex 인데 입력창 둘레에 점자가
+        // 흩뿌려진다. 점자가 있기만 하면 working 으로 치던 동안 보드가 그 pane 을
+        // 영영 working 으로 보고했다.
+        let idle = "\
+• Ran git status --short
+  └ (no output)
+
+• 선생님, 지침 이름을 바꿨어요.
+
+    ⠈                    ⢀  ⠈                      ⠐     ⠐  ⠄
+› Ask Codex to do anything   ⠈                     ⠄       ⢀
+      ⠠⢀                            ⠠                ⡀⠄   ⡀
+  gpt-6-astra xhigh · main · kasaterm · Context 6% used";
+        assert!(!screen_shows_working(idle), "별밭을 working 으로 읽었다");
+
+        // claude 의 점자 스피너는 그대로 잡혀야 한다 — 점 하나 뒤에 말이 온다.
+        assert!(screen_shows_working("⠋ Computing… (3s · ↓ 1.2k tokens)"));
+        assert!(screen_shows_working("✻ Cerebrating… (12s · esc to interrupt)"));
+    }
 }
+
 
 /// 한도 자동 계정 전환의 판정부. 전부 순수 함수라 실제 인증 저장소·설정 파일을
 /// 건드리지 않고 검증된다 — 이 기능의 실수는 남의 로그인을 갈아치우는 실수라
