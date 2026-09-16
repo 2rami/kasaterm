@@ -929,6 +929,11 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = reply.send(out);
                 return;
             }
+            UserEvent::RemoteNewRoom(label, reply) => {
+                let out = self.new_remote_room(&label).map_err(|e| format!("{e:#}"));
+                let _ = reply.send(out);
+                return;
+            }
             UserEvent::TransferSnapshot(machine, sender) => {
                 transfer_endpoints::reply(sender, Ok(self.transfer_snapshot_gui(machine)));
                 return;

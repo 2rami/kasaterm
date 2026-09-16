@@ -1224,7 +1224,7 @@ impl App {
     /// 다른 기기에 **새 방**을 만들고 그 첫 pane 을 여기 보기 창으로 연다 — 기기 절 머리의
     /// 「+」(2026-09-17 지시). 저쪽엔 그쪽 「+」 를 누른 것과 같은 방이 생기고, 이쪽 창은
     /// 그 방의 보기 창이라 로컬 방 목록엔 안 선다. 옛 판 기기는 활성 방에 pane 만 세운다.
-    pub(crate) fn new_remote_room(&mut self, label: &str) -> Result<()> {
+    pub(crate) fn new_remote_room(&mut self, label: &str) -> Result<(String, Option<usize>)> {
         if self.tmux.is_some() {
             anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
         }
@@ -1280,7 +1280,7 @@ impl App {
             w.request_redraw();
         }
         self.set_toast(format!("{label} 에 새 방 — {remote_id}"));
-        Ok(())
+        Ok((remote_id, window))
     }
 
     /// `i` 번 창이 다른 기기 방의 **보기 창**인가 — 모든 leaf 가 한 기계의 거울(view)이면

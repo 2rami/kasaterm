@@ -1644,6 +1644,46 @@ impl Backend for PtyBackend {
             .map_err(anyhow::Error::msg)
     }
 
+    /// `remote.spawn_shell` — 다른 기계에 셸 pane. 새 방은 GUI 스레드가 보기 창까지 열고,
+    /// 옆·탭은 여기서 바로 HTTP 로 세운다(이쪽 보기 창엔 mirror_sync 가 곧 거울을 붙인다).
+    fn remote_spawn_shell(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        use kasa_socket::backend::{SpawnShellAt, SpawnWindow};
+        let label = params["machine"].as_str().filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("machine(기계 라벨)이 필요해요"))?;
+        let m = kasa_mcp::machines::find(label)
+            .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
+        let text = |k: &str| params[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+        let window = match &params["window"] {
+            serde_json::Value::String(s) if s == "new" => Some(SpawnWindow::New),
+            serde_json::Value::Number(n) => n.as_u64().map(|n| SpawnWindow::Index(n as usize)),
+            serde_json::Value::String(s) => s.parse().ok().map(SpawnWindow::Index),
+            _ => None,
+        };
+        if window == Some(SpawnWindow::New) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.proxy
+                .send_event(UserEvent::RemoteNewRoom(m.label.clone(), tx))
+                .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+            return match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+                Ok(Ok((surface, window))) => Ok(serde_json::json!({
+                    "machine": m.label, "surface": surface, "window": window, "viewed": true,
+                    "summary": format!("{} 에 새 방 — {surface}{} · 여기 보기 창으로 열었어요", m.label,
+                        window.map(|w| format!(" (방 {})", w + 1)).unwrap_or_default()),
+                })),
+                Ok(Err(why)) => anyhow::bail!("{why}"),
+                Err(_) => anyhow::bail!("새 방 응답 없음(60초)"),
+            };
+        }
+        let at = SpawnShellAt { cwd: text("cwd"), window, beside: text("beside"), tab_of: text("tab_of") };
+        let (surface, window) = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None)?;
+        let how = if at.tab_of.is_some() { "탭으로" } else if at.beside.is_some() { "옆에" } else { "활성 방에" };
+        Ok(serde_json::json!({
+            "machine": m.label, "surface": surface, "window": window, "viewed": false,
+            "summary": format!("{} 에 {how} 세움 — {surface}{}", m.label,
+                window.map(|w| format!(" (방 {})", w + 1)).unwrap_or_default()),
+        }))
+    }
+
     fn unfold_machine(&self, label: &str) -> Result<String> {
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self

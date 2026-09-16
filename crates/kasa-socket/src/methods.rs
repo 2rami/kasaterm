@@ -140,6 +140,9 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "collab.inspect" => match backend.collab_inspect(&req.params) {
             Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
         },
+        "remote.spawn_shell" => match backend.remote_spawn_shell(&req.params) {
+            Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+        },
         "collab.tell" => match backend.collab_tell(&req.params) {
             Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
         },

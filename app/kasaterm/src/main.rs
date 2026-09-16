@@ -3813,6 +3813,8 @@ enum UserEvent {
     SocketSpawnShell(Option<String>, std::sync::mpsc::Sender<String>),
     /// 자리를 지정한 셸 pane(새 방·pane 옆·탭) — 다른 기계의 보기 창이 같은 자리에 세울 때.
     SocketSpawnShellAt(kasa_socket::backend::SpawnShellAt, std::sync::mpsc::Sender<kasa_socket::backend::SpawnShellReply>),
+    /// CLI `window-new --machine` — 저쪽에 새 방을 만들고 여기 보기 창으로(GUI 스레드).
+    RemoteNewRoom(String, std::sync::mpsc::Sender<std::result::Result<(String, Option<usize>), String>>),
     TransferSnapshot((String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::MachineSnapshot, String>>),
     TransferPrepareSpawn(kasa_socket::transfer::SpawnRequest, std::sync::mpsc::Sender<std::result::Result<transfer_endpoints::SpawnPlan, String>>),
     TransferFinishSpawn(Arc<transfer_endpoints::Spawned>, (String, String), std::sync::mpsc::Sender<std::result::Result<kasa_socket::transfer::SessionRow, String>>, bool),

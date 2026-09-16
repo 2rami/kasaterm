@@ -626,6 +626,11 @@ pub trait Backend: Send + Sync {
     fn unfold_machine(&self, _label: &str) -> Result<String> {
         anyhow::bail!("unfold: 이 백엔드는 지원하지 않는다")
     }
+    /// 다른 기계에 셸 pane 을 세운다 — `{machine, window:"new"|n, beside:"%N", tab_of:"%N", cwd}`.
+    /// 새 방이면 이쪽에 보기 창까지 연다. CLI `window-new --machine`·`split %N@기계`·`tab %N@기계`.
+    fn remote_spawn_shell(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
+        anyhow::bail!("remote.spawn_shell: 이 백엔드는 지원하지 않는다")
+    }
     /// 명부의 본진(home:true) 기계 — `Some((라벨, 지금 닿는가))`, 미설정이면
     /// `None`. 셰임의 순정 `claude` 디스패치가 이걸 물어 태생지를 고른다.
     fn home_machine(&self) -> Result<Option<(String, bool)>> {

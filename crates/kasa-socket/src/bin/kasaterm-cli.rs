@@ -1324,7 +1324,8 @@ fn print_help() {
     eprintln!(
         "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N] [--host-ratio 0.6]  # 기본 no-focus·이 pane 을 쪼갬. --count N 은 부른 쪽을 크게 두고 N 명을 균등하게 배치(몫이 반감하지 않는다). 창이 좁으면 앉힌 인원이 요청보다 적고 note 에 적힌다"
     );
-    eprintln!("  kasaterm-cli window-new                    # 새 창
+    eprintln!("  kasaterm-cli window-new [--machine <기계>]  # 새 창. --machine 이면 그 기계에 새 방을 만들고 여기 보기 창으로 연다
+  kasaterm-cli split <방향> %N@<기계> | tab %N@<기계>   # 그 기계의 그 pane 옆/탭에 세운다(축은 저쪽이 고름, --cwd 가능)
   kasaterm-cli open  <url> [%surface]        # URL 을 사람이 보는 브라우저로 — 어느 기기로 갈지는 사람이 하단바·폰 허브 「브라우저 기기」에서 고른다(폰이면 쪽지+알림). 네가 기기를 바꾸지 마라
   kasaterm-cli web   <url> [%surface]        # URL 을 그 pane 옆 웹(브라우저) pane 으로 (기본: 이 pane 옆)
   kasaterm-cli web-text  [%surface]          # 웹 pane 본문 읽기 (innerText). %surface 생략 = 웹 pane 이 하나일 때
@@ -1390,6 +1391,21 @@ fn print_help() {
     eprintln!(
         "Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default (Unix /tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)"
     );
+}
+
+/// `--flag 값` 꼴의 값.
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).filter(|v| !v.starts_with("--")).cloned()
+}
+
+/// 다른 기계의 pane 을 가리키는 인자 — `%N@기계`, 또는 `%N` + `--machine 기계`. `(pane, 기계)`.
+fn remote_target(args: &[String]) -> Option<(String, String)> {
+    if let Some((pane, machine)) = args.iter().find(|a| a.starts_with('%')).and_then(|a| a.split_once('@')) {
+        if !machine.is_empty() { return Some((pane.to_string(), machine.to_string())); }
+    }
+    let machine = flag_value(args, "--machine")?;
+    let pane = args.iter().find(|a| a.starts_with('%') && !a.contains('@'))?;
+    Some((pane.clone(), machine))
 }
 
 fn server_params(args: &[String]) -> Result<Value> {
@@ -1582,6 +1598,11 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             )
         }
         "split" => {
+            // `%N@기계` 또는 `--machine 기계` — 저쪽 그 pane 옆에 세운다(축은 저쪽이 고른다).
+            if let Some(remote) = remote_target(args) {
+                return Ok(Request { id, method: "remote.spawn_shell".into(),
+                    params: json!({ "machine": remote.1, "beside": remote.0, "cwd": flag_value(args, "--cwd") }) });
+            }
             // 기본 no-focus(자동화: tell 처럼 포커스 안 뺏음). --focus 로 옵트인.
             let focus = args.iter().any(|a| a == "--focus");
             // 방향은 **선택**이다 — 생략하면 `auto`, 즉 앱이 pane 의 종횡비를 보고 긴
@@ -1610,7 +1631,14 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             )
         }
         // 새 창(사이드바에 하나 더). 창 간 이동(`move`)의 목적지를 만들 때 쓴다.
-        "window-new" => ("window.new", json!({})),
+        "window-new" => {
+            // `--machine 기계` — 저쪽에 새 방을 만들고 여기 보기 창으로 연다.
+            if let Some(machine) = flag_value(args, "--machine") {
+                return Ok(Request { id, method: "remote.spawn_shell".into(),
+                    params: json!({ "machine": machine, "window": "new", "cwd": flag_value(args, "--cwd") }) });
+            }
+            ("window.new", json!({}))
+        }
         "server" => ("surface.server", server_params(args)?),
         // 도는 pane 을 로컬 상주 데몬으로 **무중단 승격** — 셸·claude 는 그대로,
         // 소유권만 앱 밖으로. 이후 앱을 굽고 껐다 켜도 그 캐릭터는 안 죽는다.
@@ -1765,6 +1793,10 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         // 기본은 no-focus — 부모(부른 쪽) 화면이 그대로 남는다. --focus 만 새 탭을
         // 앞으로 올린다(split 의 --focus 와 같은 규약).
         "tab" => {
+            if let Some(remote) = remote_target(args) {
+                return Ok(Request { id, method: "remote.spawn_shell".into(),
+                    params: json!({ "machine": remote.1, "tab_of": remote.0, "cwd": flag_value(args, "--cwd") }) });
+            }
             let focus = args.iter().any(|a| a == "--focus");
             let outer = args
                 .iter()
