@@ -22,6 +22,10 @@ final class NotificationService: UNNotificationServiceExtension {
       return
     }
     let info = request.content.userInfo
+    // 소리는 종류로 고른다 — 파일은 앱 본체(Runner/Sounds)에 있고 서버는 "default" 만
+    // 실어 보낸다. 확장이 못 돌면 그 기본음이 남는다(2026-09-17 「알림음 바꾸자」).
+    mutable.sound = UNNotificationSound(
+      named: UNNotificationSoundName(Self.soundFile(for: info["kind"] as? String)))
     let sender = (info["sender"] as? String).flatMap { $0.isEmpty ? nil : $0 }
     let avatar = (info["avatar"] as? String).flatMap(URL.init(string:))
     guard let sender else {
@@ -31,6 +35,14 @@ final class NotificationService: UNNotificationServiceExtension {
     fetch(avatar) { data in
       self.finish(Self.asMessage(mutable, from: sender, image: data, thread: mutable.threadIdentifier))
     }
+  }
+
+  /// 기다림(승인·질문)은 또렷한 상승 3음, 끝냄은 부드러운 2음, 나머지(쪽지·주소)는 가벼운 1음.
+  static func soundFile(for kind: String?) -> String {
+    let k = kind ?? ""
+    if k.hasPrefix("waiting") { return "kasa-wait.caf" }
+    if k == "done" { return "kasa-done.caf" }
+    return "kasa-note.caf"
   }
 
   override func serviceExtensionTimeWillExpire() {
