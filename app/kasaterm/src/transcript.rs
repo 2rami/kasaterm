@@ -1424,6 +1424,80 @@ pub fn parse_turn(line: &str) -> Option<ConversationTurn> {
     }
 }
 
+/// 하네스가 기록에 남긴 턴 상태 — 「지금 생성 중인가」의 정본.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnState {
+    /// 턴이 열려 있다 — 프롬프트를 받았거나 도구 결과를 기다리거나 답을 쓰는 중.
+    Working,
+    /// 턴이 닫혔다 — 마지막 답을 끝냈거나 사람이 끊었다.
+    Idle,
+}
+
+/// 기록 꼬리에서 턴 경계를 읽는다. 화면 글리프·출력 박동은 하네스 UI 가 바뀔 때마다
+/// 틀렸다(윈도우 `*`·점 프레임·reduce motion·gpt-6-astra 의 장식 점자). 하네스는 턴의
+/// 시작과 끝을 스스로 적어 두므로 그것을 읽으면 UI 가 어떻게 그리든 판정이 산다.
+///
+/// - claude: 마지막 메시지 기록이 정한다. `assistant` 는 `stop_reason` — `tool_use`
+///   (도구 결과를 기다림)·없음(쓰는 중)이면 열림, `end_turn` 류면 닫힘. `user` 는
+///   프롬프트·`tool_result` 라 열림이되, 사람이 끊은 표식(`[Request interrupted…`)은
+///   닫힘. 슬래시 명령 기록(`<command-name>`)과 meta 주입은 턴이 아니라 건너뛴다.
+/// - codex: `task_started` 가 열림, `task_complete`·`turn_aborted` 가 닫힘. 창 안에
+///   경계가 없고 활동 기록만 있으면 아직 도는 긴 턴이다 — 닫힌 턴은 반드시
+///   `task_complete` 로 끝나 창의 맨 끝에 있다. `session_meta` 까지 올라오면 턴이
+///   없던 것이다.
+/// - 그 밖의 포맷(agy 등)은 `None` — 호출자가 화면 폴백으로 간다.
+pub fn turn_state_from_tail(tail: &str) -> Option<TurnState> {
+    let mut codex_activity = false;
+    for line in tail.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if let Some(p) = v.get("payload").and_then(|p| p.as_object()) {
+            let sub = p.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match (kind, sub) {
+                ("event_msg", "task_started") => return Some(TurnState::Working),
+                ("event_msg", "task_complete" | "turn_aborted") => return Some(TurnState::Idle),
+                ("session_meta", _) => return Some(TurnState::Idle),
+                ("response_item", _) => codex_activity = true,
+                ("event_msg", "token_count" | "thread_settings_applied") => {}
+                ("event_msg", _) => codex_activity = true,
+                _ => {}
+            }
+            continue;
+        }
+        let Some(m) = v.get("message") else { continue };
+        match kind {
+            "assistant" => {
+                return Some(match m.get("stop_reason").and_then(|s| s.as_str()) {
+                    Some("tool_use") | None => TurnState::Working,
+                    Some(_) => TurnState::Idle,
+                });
+            }
+            "user" => {
+                if v.get("isMeta").and_then(|b| b.as_bool()) == Some(true) {
+                    continue;
+                }
+                let content = m.get("content");
+                let text: String = match content {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(serde_json::Value::Array(items)) => items
+                        .iter()
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    _ => String::new(),
+                };
+                if text.contains("<command-name>") || text.contains("<local-command-stdout>") {
+                    continue;
+                }
+                let interrupted = text.trim_start().starts_with("[Request interrupted");
+                return Some(if interrupted { TurnState::Idle } else { TurnState::Working });
+            }
+            _ => {}
+        }
+    }
+    codex_activity.then_some(TurnState::Working)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2137,5 +2211,65 @@ mod image_paste_tests {
         let empty = r#"{"type":"user","imagePasteIds":[5],"message":{"content":[{"type":"text","text":"없음"}]}}"#;
         let tail = format!("{}\n{}", user_line(&[5], &[b"REAL"]), empty);
         assert_eq!(image_paste_bytes(&tail, 5).as_deref(), Some(&b"REAL"[..]));
+    }
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use super::*;
+
+    fn claude(lines: &[&str]) -> Option<TurnState> {
+        turn_state_from_tail(&lines.join("\n"))
+    }
+
+    #[test]
+    fn claude_turn_closes_on_end_turn_and_opens_on_tool_use_or_prompt() {
+        let done = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"끝"}]}}"#;
+        let tool = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}}"#;
+        let result = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#;
+        let prompt = r#"{"type":"user","message":{"role":"user","content":"다음 일 해줘"}}"#;
+        assert_eq!(claude(&[tool, result, done]), Some(TurnState::Idle));
+        assert_eq!(claude(&[done, tool]), Some(TurnState::Working));
+        assert_eq!(claude(&[done, tool, result]), Some(TurnState::Working));
+        assert_eq!(claude(&[done, prompt]), Some(TurnState::Working));
+    }
+
+    #[test]
+    fn claude_trailing_bookkeeping_and_slash_commands_do_not_reopen_a_turn() {
+        let done = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"끝"}]}}"#;
+        let tail = [
+            done,
+            r#"{"type":"system","subtype":"turn_duration","message":null}"#,
+            r#"{"type":"last-prompt","lastPrompt":"x"}"#,
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<system-reminder>…</system-reminder>"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<local-command-stdout>ok</local-command-stdout>"}}"#,
+            r#"{"type":"ai-title","aiTitle":"제목"}"#,
+        ];
+        assert_eq!(claude(&tail), Some(TurnState::Idle));
+        let interrupted = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#;
+        let tool = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}}"#;
+        assert_eq!(claude(&[tool, interrupted]), Some(TurnState::Idle));
+    }
+
+    #[test]
+    fn codex_turn_follows_task_events_and_long_open_turns_stay_open() {
+        let started = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"task_started","turn_id":"1"}}"#;
+        let call = r#"{"timestamp":"t","type":"response_item","payload":{"type":"function_call","name":"shell"}}"#;
+        let tokens = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{}}}"#;
+        let complete = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"task_complete","turn_id":"1"}}"#;
+        let aborted = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"1"}}"#;
+        let meta = r#"{"timestamp":"t","type":"session_meta","payload":{"id":"s","cwd":"/"}}"#;
+        assert_eq!(claude(&[meta, started, call, complete, tokens]), Some(TurnState::Idle));
+        assert_eq!(claude(&[meta, started, call]), Some(TurnState::Working));
+        assert_eq!(claude(&[meta, started, call, aborted]), Some(TurnState::Idle));
+        assert_eq!(claude(&[call, tokens, call]), Some(TurnState::Working));
+        assert_eq!(claude(&[meta]), Some(TurnState::Idle));
+        assert_eq!(claude(&[tokens]), None);
+    }
+
+    #[test]
+    fn unknown_formats_and_empty_tails_defer_to_the_screen() {
+        assert_eq!(turn_state_from_tail(""), None);
+        assert_eq!(turn_state_from_tail("{\"type\":\"agy-event\",\"x\":1}\nnot json"), None);
     }
 }

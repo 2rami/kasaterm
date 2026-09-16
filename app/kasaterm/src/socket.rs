@@ -413,6 +413,11 @@ pub(crate) fn agents_error_sids_cached() -> HashSet<String> {
 }
 
 impl PtyBackend {
+    /// 이 surface 에 결속된 기록 파일 — GUI 의 턴 판정(`refresh_turn_states`)이 보드와
+    /// 같은 파일을 읽게 한다. 결속이 없으면 None(화면 폴백).
+    pub(crate) fn bound_transcript(&self, surface: &str) -> Option<PathBuf> {
+        self.bound.lock().unwrap().get(surface).cloned()
+    }
     pub(crate) fn tell_binding_epoch(&self, surface: &str) -> u64 {
         self.tell_binding_epochs.lock().unwrap().get(surface).copied().unwrap_or(0)
     }
@@ -2758,6 +2763,8 @@ impl Backend for PtyBackend {
         };
         let labels = self.sessions().labels;
         let attention: HashSet<String> = self.attention.lock().unwrap().keys().cloned().collect();
+        let attention_kind: HashMap<String,String> = self.attention.lock().unwrap().iter()
+            .map(|(id,flag)|(id.clone(),flag.kind.clone())).collect();
         let mut panes = Vec::new();
         let mut observed_bindings = Vec::new();
         for id in live {
@@ -2771,22 +2778,37 @@ impl Backend for PtyBackend {
             let supported = harness.as_deref().is_some_and(|h|matches!(h,"claude"|"codex"|"agy"));
             let evidence = binding.as_ref().filter(|_|supported).map(|path| {
                 let (tail,idle) = read_tail(path,128*1024);
+                let turn = crate::transcript::turn_state_from_tail(&tail);
                 let metadata = snapshot_from_tail(&id,&tail,idle);
-                (metadata,!tail.trim().is_empty())
+                (metadata,!tail.trim().is_empty(),turn)
             });
+            let turn = evidence.as_ref().and_then(|(_,_,turn)|*turn);
             let generating = screens.get(&id).is_some_and(|(_,working)|*working);
+            // 60초 방치(idle_prompt) 표식은 새 턴이 열리면 낡은 것이다 — 기록이 열렸다고
+            // 하는데 「기다림」으로 남기지 않는다. 승인·질문은 턴이 열린 채 사람을 기다리는
+            // 것이라 그대로 앞선다.
+            let waiting = attention.contains(&id) && !(attention_kind.get(&id).is_some_and(|k|k=="idle")
+                && turn == Some(crate::transcript::TurnState::Working));
             let (status,reason) = if kasa_mcp::remote::is_remote_pane(&id) {
                 ("unknown","remote mirror; observe agent on its source machine")
             } else if !supported {
                 ("unknown","live place; supported agent activity unavailable")
+            } else if waiting {
+                ("waiting","pane attention signal observed")
+            } else if let Some(turn) = turn {
+                // 하네스가 스스로 적은 턴 경계가 화면 판독보다 앞선다 — 화면은 하네스 UI 가
+                // 바뀔 때마다 틀렸다(gpt-6-astra 의 장식 점자로 노는 pane 이 영영 working,
+                // 2026-09-16). 화면은 기록이 없는 pane 의 폴백으로만 남는다.
+                match turn {
+                    crate::transcript::TurnState::Working => ("working","transcript turn open"),
+                    crate::transcript::TurnState::Idle => ("idle","transcript turn closed"),
+                }
             } else if generating {
                 ("working","terminal activity observed")
-            } else if attention.contains(&id) {
-                ("waiting","pane attention signal observed")
-            } else if evidence.as_ref().is_some_and(|(_,present)|*present) {
+            } else if evidence.as_ref().is_some_and(|(_,present,_)|*present) {
                 ("idle","no current terminal generation signal; transcript available")
             } else { ("unknown","supported agent observed; transcript activity unavailable") };
-            let meta = evidence.map(|(row,_)|row).unwrap_or_default();
+            let meta = evidence.map(|(row,_,_)|row).unwrap_or_default();
             let title = screens.get(&id).and_then(|(title,_)|title.as_deref())
                 .map(crate::strip_activity_prefix).filter(|s|!s.is_empty()).unwrap_or(&meta.title);
             let window = windows.get(&id).copied();

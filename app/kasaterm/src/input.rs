@@ -766,6 +766,48 @@ impl App {
         );
     }
 
+    /// 하네스 기록의 턴 경계를 pane 마다 읽어 둔다(`transcript::turn_state_from_tail`).
+    /// 보드가 읽는 것과 같은 파일이라 헤더 바와 보드가 서로 다른 말을 하지 않는다.
+    /// 파일 모습(길이·mtime)이 그대로면 안 읽는다 — 노는 pane 은 틱마다 stat 하나뿐이다.
+    pub(crate) fn refresh_turn_states(&mut self) {
+        const WINDOW: u64 = 32 * 1024;
+        let Some(backend) = self.socket_backend.clone() else { return };
+        let live: Vec<String> = self
+            .pty
+            .iter()
+            .filter(|(_, p)| p.active_agent().is_some())
+            .map(|(id, _)| id.clone())
+            .collect();
+        let turn = &mut self.collab.turn;
+        turn.retain(|id, _| live.contains(id));
+        for id in live {
+            let Some(path) = backend.bound_transcript(&id) else {
+                turn.remove(&id);
+                continue;
+            };
+            let Ok(meta) = std::fs::metadata(&path) else {
+                turn.remove(&id);
+                continue;
+            };
+            let (len, mtime) = (meta.len(), meta.modified().ok());
+            if turn
+                .get(&id)
+                .is_some_and(|o| o.path == path && o.len == len && o.mtime == mtime)
+            {
+                continue;
+            }
+            let (tail, _) = crate::socket::read_tail(&path, WINDOW);
+            match crate::transcript::turn_state_from_tail(&tail) {
+                Some(state) => {
+                    turn.insert(id, crate::state::TurnObservation { state, path, len, mtime });
+                }
+                None => {
+                    turn.remove(&id);
+                }
+            }
+        }
+    }
+
     pub(crate) fn refresh_pane_activity(&mut self) {
         let now = Instant::now();
         if let Some(t) = self.pane_busy_check {
@@ -818,6 +860,7 @@ impl App {
         // 꼬리 스캔이 **먼저**다 — 아래 ultracode 판정이 그 결과를 읽는다. 뒤에 두면
         // 켜고 끈 것이 한 틱 늦게 화면에 온다.
         self.sync_session_titles();
+        self.refresh_turn_states();
         self.refresh_pane_ultracode();
         self.refresh_tunnel_chip();
         self.run_pending_autotitlesync();
@@ -840,6 +883,10 @@ impl App {
             // 프로브는 락 밖 필드라 ws 가드와 나란히 빌린다 — 메서드로 빼면 &mut self
             // 가 통째로 필요해 가드와 충돌한다.
             let probe = &mut self.spinner_probe;
+            // 훅이 세운 대기 표식(승인·질문·방치). ws 락 밖에서 한 번 뜬다 — 소켓 스레드가
+            // 이 맵을 ws 와 다른 순서로 잡으므로 안에서 잡으면 서로 기다릴 수 있다.
+            let attention: std::collections::HashSet<String> =
+                self.collab.attention.lock().unwrap().keys().cloned().collect();
             let ws = self.ws.lock().unwrap();
             let mut rows = Vec::with_capacity(ws.panes.len());
             let mut bg = std::collections::HashSet::new();
@@ -911,13 +958,36 @@ impl App {
                             .get(ws.active_tab_pid(id).as_str())
                             .is_some_and(|p| p.active_agent().is_some() && p.output_heartbeat());
                         let heartbeat = !busy_glyph && approval.is_none() && hb_raw;
-                        let busy = busy_glyph || heartbeat;
+                        let screen_busy = busy_glyph || heartbeat;
+                        // 하네스가 기록에 남긴 턴 경계가 있으면 그것이 정본이다 — 보드와
+                        // 같은 재료(`refresh_turn_states`). 화면 글리프·박동은 기록이 없는
+                        // pane 의 폴백으로만 남는다. 노는 codex 가 입력창 둘레에 흩뿌리는
+                        // 점자(gpt-6-astra)가 바를 영영 돌리던 것이 여기서 끊긴다(2026-09-16).
+                        let tab_pid = ws.active_tab_pid(id);
+                        let turn = self.collab.turn.get(tab_pid.as_str()).map(|o| o.state);
+                        let waits = attention.contains(id) || attention.contains(tab_pid.as_str());
+                        let busy = match turn {
+                            // 턴이 열려 있다 — 화면이 조용해도 일하는 중. 승인·질문 프롬프트가
+                            // 보이면 사람을 기다리는 것이라 바를 돌리지 않는다.
+                            Some(crate::transcript::TurnState::Working) => approval.is_none() && !waits,
+                            // 턴이 닫혔다 — 화면의 점·박동은 장식이다. 방금 Enter 가 들어갔으면
+                            // 기록보다 화면이 앞서므로 그 몇 초만 화면을 믿는다.
+                            Some(crate::transcript::TurnState::Idle) => {
+                                screen_busy
+                                    && self.pty.get(tab_pid.as_str()).is_some_and(|p| {
+                                        p.last_submit().is_some_and(|s| {
+                                            now.duration_since(s) < Self::SUBMIT_TRUST
+                                        })
+                                    })
+                            }
+                            None => screen_busy,
+                        };
                         // 검증 rig 전용 — 판정 재료를 틱마다 흘린다(하네스 env 로만 켜짐).
                         // hb_raw 는 게이트 전 원신호다: 글리프가 살아 있으면 heartbeat 는
                         // 늘 false 라, 그것만 찍으면 박동이 도는지 밖에서 알 길이 없다.
                         if std::env::var_os("KASATERM_HB_LOG").is_some() {
                             eprintln!(
-                                "[hb] {id} strict={strict} boosted={boosted} hb_raw={hb_raw} busy={busy}"
+                                "[hb] {id} strict={strict} boosted={boosted} hb_raw={hb_raw} turn={turn:?} busy={busy}"
                             );
                         }
                         let prompt = if busy { None } else { approval };

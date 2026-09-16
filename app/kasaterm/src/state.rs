@@ -1049,6 +1049,15 @@ mod hook_activity_tests {
     }
 }
 
+/// pane 의 하네스 기록에서 읽은 턴 상태와, 그 판정을 낸 파일 모습. 모습이 같으면
+/// 다시 읽지 않는다 — 틱마다 stat 하나로 끝난다.
+pub(crate) struct TurnObservation {
+    pub(crate) state: crate::transcript::TurnState,
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) len: u64,
+    pub(crate) mtime: Option<std::time::SystemTime>,
+}
+
 /// Collab completion toast + munder-style approval card. `toast` is the
 /// "✓ %3 완료" message for a sibling pane's working→idle flip (faded by
 /// `collab_toast_alpha`); `toast_action` = Some(pane id) pins it as an
@@ -1067,6 +1076,9 @@ pub(crate) struct CollabState {
     /// pane → 훅이 보고한 in-flight. `attention` 과 같이 socket `PtyBackend` 와 Arc
     /// 공유 — 쓰는 쪽은 훅(소켓 스레드), 읽는 쪽은 진행 표시(GUI 스레드)다.
     pub(crate) hook_activity: std::sync::Arc<std::sync::Mutex<HashMap<String, HookActivity>>>,
+    /// pty id → 기록에서 읽은 턴 상태. 헤더 working 바의 정본 — 보드와 같은 파일·같은
+    /// 판정(`transcript::turn_state_from_tail`)이라 둘이 다른 말을 하지 않는다.
+    pub(crate) turn: HashMap<String, TurnObservation>,
     #[allow(dead_code)] // board badge count — bumped, render/clear lands with sidebar work
     pub(crate) unread: u32,
 }
