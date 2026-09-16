@@ -294,6 +294,16 @@ pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)>
         .iter()
         .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(info.remote_id.as_str()))?
         .clone();
+    // pane 번호는 그 기계가 재시작하면 재사용된다 — 거울이 아는 surface_key 와 다르면 지금
+    // 그 번호에 앉은 건 남이다(2026-09-17: 죽은 셸의 거울이 모모이로 둔갑해 「탭」이 됐다).
+    if let (Some(mine), Some(theirs)) = (
+        kasa_mcp::remote::remote_surface_key(id),
+        row.get("surface_key").and_then(|v| v.as_str()),
+    ) {
+        if mine != theirs {
+            return None;
+        }
+    }
     Some((label, row))
 }
 
@@ -434,6 +444,20 @@ impl App {
                 let host = reg.map(|r| r.host.clone()).unwrap_or_default();
                 let kvm = reg.and_then(|r| r.kvm.clone());
                 let (mirror_ids, mirror_rows) = mirrored.remove(&label).unwrap_or_default();
+                // 같은 원본 pane 을 비추는 거울이 둘이면(보기 창 둘·재시작 뒤 번호 재사용) 한 줄만
+                // 세운다 — 둘 다 세우면 카드가 같은 사람을 탭으로 접는다. 원본을 아는 쪽이 대표.
+                let mirror_rows = {
+                    let mut kept: Vec<state::MachinesColRow> = Vec::new();
+                    for row in mirror_rows {
+                        match kept.iter_mut().find(|k| !k.remote_id.is_empty() && k.remote_id == row.remote_id) {
+                            Some(k) => {
+                                if k.window.is_none() && row.window.is_some() { *k = row; }
+                            }
+                            None => kept.push(row),
+                        }
+                    }
+                    kept
+                };
                 let panes = m.get("panes").and_then(|p| p.as_array());
                 // 그 기계에서 닫힌 pane(되살리기 대열) — 화면에 없는 학생을 목록에 세우면
                 // 「하나도 없는데 왜 뜨나」가 된다(2026-09-07 지적). 개수만 남긴다.

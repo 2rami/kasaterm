@@ -105,10 +105,12 @@ impl App {
                 live_source = true;
                 for row in m["panes"].as_array().into_iter().flatten() {
                     let same_id = row["id"].as_str() == Some(info.remote_id.as_str());
-                    let same_key = key.is_some() && row["surface_key"].as_str() == key.as_deref();
-                    if same_id || same_key {
+                    let same_key = row["surface_key"].as_str() == key.as_deref();
+                    // 번호는 재시작 뒤 재사용된다 — 열쇠를 아는 거울은 열쇠로만 「있음」을 믿는다.
+                    let present = if key.is_some() { same_key } else { same_id };
+                    if present {
                         found = true;
-                        marked_closed |= same_id && row["closed"].as_bool() == Some(true);
+                        marked_closed |= row["closed"].as_bool() == Some(true);
                     }
                 }
             }
