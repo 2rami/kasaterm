@@ -306,29 +306,61 @@ struct DoneReport {
 /// `claude agents --json` 의 sessionId→status (2s static 캐시). board(PtyBackend.
 /// agents_status)와 터미널 타이틀바(render)가 같은 데이터로 claude 실행/working 판정을
 /// 일치시킨다(사용자: gui 동기화). 전역이라 PtyBackend 인스턴스 없이 App 도 호출.
-static AGENTS_CACHE: LazyLock<
-    Mutex<
-        Option<(
-            std::time::Instant,
-            HashMap<String, String>,
-            HashMap<String, String>,
-            HashSet<String>,
-        )>,
-    >,
-> = LazyLock::new(|| Mutex::new(None));
+/// `claude agents --json` 의 결과 — 세션 상태·이름→sid·오류 세션. 뒤 스레드가 채운다.
+#[derive(Default)]
+struct AgentsCache {
+    at: Option<std::time::Instant>,
+    status: HashMap<String, String>,
+    names: HashMap<String, String>,
+    errors: HashSet<String>,
+    refreshing: bool,
+}
 
+static AGENTS_CACHE: LazyLock<Mutex<AgentsCache>> = LazyLock::new(|| Mutex::new(AgentsCache::default()));
+
+/// 캐시를 돌려주고, 낡았으면 **뒤에서** 새로 읽는다. `claude agents --json` 은 node 를
+/// 띄우는 일이라 수백 ms 가 걸리는데, GUI 틱(`refresh_pane_activity`)이 2초마다 그걸
+/// 제자리에서 기다렸다 — 화면이 주기적으로 멈추던 「뚝뚝」의 한 원인(2026-09-16 샘플:
+/// 메인 스레드가 이 poll 에 8%, 부하 걸리면 훨씬). 첫 호출은 빈 값이고 한 바퀴 뒤부터
+/// 찬다 — 오류 삼각형·이름 칩이 몇 초 늦는 것이 화면이 멈추는 것보다 낫다.
 fn agents_cached() -> (
     HashMap<String, String>,
     HashMap<String, String>,
     HashSet<String>,
 ) {
-    const TTL: std::time::Duration = std::time::Duration::from_secs(2);
-    let now = std::time::Instant::now();
-    if let Some((at, status, names, errors)) = AGENTS_CACHE.lock().unwrap().as_ref() {
-        if now.duration_since(*at) < TTL {
-            return (status.clone(), names.clone(), errors.clone());
-        }
+    const TTL: std::time::Duration = std::time::Duration::from_secs(5);
+    let mut cache = AGENTS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let stale = cache.at.is_none_or(|at| at.elapsed() >= TTL);
+    if stale && !cache.refreshing {
+        cache.refreshing = true;
+        std::thread::spawn(|| {
+            // 어떻게 끝나든 다음 새로고침이 막히지 않게.
+            struct Done;
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    if let Ok(mut c) = AGENTS_CACHE.lock() {
+                        c.refreshing = false;
+                    }
+                }
+            }
+            let _done = Done;
+            let (status, names, errors) = read_agents();
+            let mut cache = AGENTS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            cache.status = status;
+            cache.names = names;
+            cache.errors = errors;
+            cache.at = Some(std::time::Instant::now());
+        });
     }
+    (cache.status.clone(), cache.names.clone(), cache.errors.clone())
+}
+
+/// `claude agents --json` 을 실제로 읽는다 — GUI 밖 스레드에서만 부른다.
+fn read_agents() -> (
+    HashMap<String, String>,
+    HashMap<String, String>,
+    HashSet<String>,
+) {
     let mut map: HashMap<String, String> = HashMap::new();
     // 세션 name → sessionId. agents 피커로 attach 한 pane 은 kasaterm 이 어느 세션인지
     // 알 길이 없어(피커는 이벤트도 argv 흔적도 없음), pane OSC 타이틀(=세션 name)로
@@ -392,7 +424,6 @@ fn agents_cached() -> (
         names.remove(n);
     }
     errors.retain(|sid| map.get(sid).is_some_and(|status| status == "waiting"));
-    *AGENTS_CACHE.lock().unwrap() = Some((now, map.clone(), names.clone(), errors.clone()));
     (map, names, errors)
 }
 
