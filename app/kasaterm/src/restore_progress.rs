@@ -83,11 +83,17 @@ pub(crate) struct RestoreProgress {
 pub(crate) const PENDING_LINES_MAX: usize = 4;
 
 #[derive(Clone, Copy)]
-enum RestoreStage { Pane, Agent, RemoteConnection, RemoteScreen, Web }
+enum RestoreStage { Pane, Agent, RemoteConnection, RemoteScreen, Web, Missing }
 
 /// 셸은 떴는데 학생(claude)이 안 돌아올 때 더 기다릴 시간. 이 뒤로는 그 항목을 끝난 것으로
 /// 세고 「안 돌아왔다」고 말한다 — 전엔 영원히 기다려 복원 창이 안 닫혔다(2026-09-17 지적).
 const AGENT_GRACE: Duration = Duration::from_secs(25);
+/// 창 자체가 안 생긴 항목(트리에도 PTY 에도 없다)을 기다릴 시간. 이 뒤로는 포기한 것으로
+/// 세되 **저장된 기록은 계속 지킨다** — 카드는 닫히고 대화는 안 잃는다(2026-09-17: 12개 중
+/// 11개만 생겨 카드가 영영 떠 있었다).
+const HOST_GRACE: Duration = Duration::from_secs(20);
+/// 거울이 저쪽에 못 붙을 때 기다릴 시간. 붙기는 뒤에서 계속 다시 시도한다.
+const REMOTE_GRACE: Duration = Duration::from_secs(40);
 
 struct RestoreEntry {
     remote: bool,
@@ -98,6 +104,10 @@ struct RestoreEntry {
     shell_since: Option<Instant>,
     /// 기다릴 만큼 기다렸는데 학생이 안 돌아왔다.
     agent_missing: bool,
+    /// 창을 못 찾기 시작한 시각.
+    missing_since: Option<Instant>,
+    /// 더 안 기다린다 — 완료를 막지 않는다. `ready` 는 아니라 저장 기록은 계속 지킨다.
+    given_up: bool,
     // Agent startup and terminal input readiness are not the same thing. A
     // resumed CLI may be at login/error/permission UI or process detection may
     // lag; its live local PTY must remain usable while the toast is visible.
@@ -152,7 +162,16 @@ impl RestoreEntry {
             RestoreStage::Agent => format!("{} 불러오는 중…", object_name(self.character.as_deref().unwrap_or("학생"))),
             RestoreStage::RemoteConnection => format!("{} 연결하는 중…", object_name(self.remote_label.as_deref().unwrap_or("원격 기기"))),
             RestoreStage::RemoteScreen => format!("{}의 화면을 불러오는 중…", self.remote_label.as_deref().unwrap_or("원격 기기")),
+            RestoreStage::Missing => "창을 못 찾았어요 — 조금 더 기다려요".into(),
         }
+    }
+
+    /// 창을 못 찾았다. 유예가 지나면 포기하고 true — 카드가 그것 때문에 안 닫히면 안 된다.
+    fn miss(&mut self, grace: Duration) -> bool {
+        self.stage = RestoreStage::Missing;
+        let since = *self.missing_since.get_or_insert_with(Instant::now);
+        self.given_up |= since.elapsed() >= grace;
+        self.given_up
     }
 }
 
@@ -203,7 +222,7 @@ impl RestoreProgress {
     pub(crate) fn pending_lines(&self) -> Vec<String> {
         if !self.built { return vec!["저장된 pane과 탭을 불러오는 중…".into()] }
         let pending: Vec<&String> = self.entry_order.iter()
-            .filter(|id| self.entries.get(*id).is_some_and(|e| !e.ready)).collect();
+            .filter(|id| self.entries.get(*id).is_some_and(|e| !e.ready && !e.given_up)).collect();
         let mut lines: Vec<String> = pending.iter().take(PENDING_LINES_MAX)
             .filter_map(|id| self.entries.get(*id).map(|e| format!("{} · {}", e.who(id), e.status_line())))
             .collect();
@@ -212,6 +231,11 @@ impl RestoreProgress {
         }
         if lines.is_empty() { lines.push("마무리하는 중…".into()); }
         lines
+    }
+
+    /// 더 안 기다리기로 한 항목 수(창이 아예 안 생겼거나 거울이 못 붙은 것).
+    pub(crate) fn given_up_count(&self) -> usize {
+        self.entries.values().filter(|entry| entry.given_up).count()
     }
 
     /// 기다림을 놓아 준 학생들 — 복원이 끝난 뒤 한 번 알린다.
@@ -349,6 +373,8 @@ impl RestoreProgress {
             ready: false,
             shell_since: None,
             agent_missing: false,
+            missing_since: None,
+            given_up: false,
             local_input_ready: false,
             character: record.get("character").and_then(|v| v.as_str()).and_then(character_label),
             remote_label: record.get("remote_label").and_then(|v| v.as_str()).and_then(display_label),
@@ -523,19 +549,24 @@ impl App {
         let Some(progress) = self.restore_progress.as_mut().filter(|p| p.built) else { return };
         let old_status = progress.status_line();
         let mut ready = 0;
+        // 포기한 것까지 세는 「더 기다릴 것이 없다」 — 완료 판정은 이걸 쓴다.
+        let mut settled = 0;
         let mut failure = None;
         for id in &progress.entry_order {
             let Some(entry) = progress.entries.get_mut(id) else { continue; };
             // This is launch progress, not a perpetual health monitor. Once a
             // pane became usable, a later shell/tool transition or reconnect
             // must not put it back into the restoration loading screen.
-            if !entry.begin_readiness_check() { ready += 1; continue; }
+            if entry.given_up { settled += 1; continue; }
+            if !entry.begin_readiness_check() { ready += 1; settled += 1; continue; }
             // Switching sessions parks the whole workspace. Pending restore
             // entries still belong to that workspace, not the new active one.
             let host = find_restore_host(std::iter::once((&self.pty, &self.ws))
                 .chain(self.sessions.iter().flatten().map(|s| (&s.pty, &s.ws))), id);
             let Some((pty, ws)) = host else {
-                failure.get_or_insert_with(|| format!("{id} 창을 되살리지 못했어요"));
+                if entry.miss(HOST_GRACE) { settled += 1; } else {
+                    failure.get_or_insert_with(|| format!("{id} 창을 되살리지 못했어요"));
+                }
                 continue;
             };
             let ws = ws.lock().unwrap();
@@ -543,11 +574,14 @@ impl App {
                 if ws.panes.contains_key(id) && self.pending_web_hosts.is_empty() {
                     entry.ready = true;
                     ready += 1;
+                    settled += 1;
                 }
                 continue;
             }
             let Some(session) = pty.get(id) else {
-                failure.get_or_insert_with(|| format!("{id} 창을 되살리지 못했어요"));
+                if entry.miss(HOST_GRACE) { settled += 1; } else {
+                    failure.get_or_insert_with(|| format!("{id} 창을 되살리지 못했어요"));
+                }
                 continue;
             };
             let term = ws.panes.values().flat_map(|pane| &pane.tabs)
@@ -562,16 +596,27 @@ impl App {
                     Some((true, generation, _)) if has_grid && term.is_some_and(|term| term.output_generation == generation) => {
                         entry.ready = true;
                         ready += 1;
+                        settled += 1;
                     }
-                    Some((_, _, Some(error))) => { failure.get_or_insert_with(|| format!("{id} · {error}")); }
-                    None => { failure.get_or_insert_with(|| format!("{id} 원격 연결이 끝났어요")); }
-                    _ => {}
+                    // 못 붙는 거울은 유예 뒤 놓아 준다 — 붙기는 뒤에서 계속 다시 시도한다.
+                    Some((_, _, Some(error))) => {
+                        if entry.miss(REMOTE_GRACE) { settled += 1; } else {
+                            failure.get_or_insert_with(|| format!("{id} · {error}"));
+                        }
+                    }
+                    None => {
+                        if entry.miss(REMOTE_GRACE) { settled += 1; } else {
+                            failure.get_or_insert_with(|| format!("{id} 원격 연결이 끝났어요"));
+                        }
+                    }
+                    _ => { if entry.missing_since.take().is_some() && !entry.given_up { entry.stage = RestoreStage::RemoteConnection; } }
                 }
             } else {
                 let commands_pending = self.pending_restores.iter().any(|(pending, _, _)| Arc::ptr_eq(pending, session));
                 entry.update_local(has_grid, commands_pending, session.active_agent().is_some());
                 if entry.ready {
                     ready += 1;
+                    settled += 1;
                 }
             }
         }
@@ -579,10 +624,10 @@ impl App {
         // 남은 것들이 다 준비되면 끝낸다(2026-09-17: 카드가 한 시간을 떠 있었다).
         let tracked = progress.entries.len();
         let missing_surfaces = tracked != progress.expected;
-        if ready < tracked && progress.started.elapsed() >= Duration::from_secs(45) {
+        if settled < tracked && progress.started.elapsed() >= Duration::from_secs(45) {
             failure.get_or_insert_with(|| "아직 준비되지 않은 창이 있어요. 연결을 확인하고 다시 시도해 주세요".to_string());
         }
-        let complete = ready >= tracked && failure.is_none();
+        let complete = settled >= tracked && failure.is_none();
         let changed = progress.ready != ready || progress.failure != failure || progress.status_line() != old_status;
         if progress.ready != ready {
             eprintln!("[restore] progress={ready}/{}", progress.expected);
@@ -590,12 +635,14 @@ impl App {
         if complete {
             eprintln!("[restore] complete={ready}/{}", progress.expected);
         }
-        let notes = complete.then(|| (progress.missing_agents(), missing_surfaces));
+        let notes = complete.then(|| (progress.missing_agents(), progress.given_up_count(), missing_surfaces));
         progress.ready = ready;
         progress.failure = failure;
         if complete { self.restore_progress = None; }
-        if let Some((missing_agents, missing_surfaces)) = notes {
-            if !missing_agents.is_empty() {
+        if let Some((missing_agents, given_up, missing_surfaces)) = notes {
+            if given_up > 0 {
+                self.set_toast(format!("{given_up}개는 못 되살렸어요 — 저장된 기록은 그대로 남겨 뒀어요"));
+            } else if !missing_agents.is_empty() {
                 self.set_toast(format!("{} 안 돌아왔어요 — 되살리기에서 다시 열 수 있어요", missing_agents.join(", ")));
             } else if missing_surfaces {
                 self.set_toast("저장된 창·탭 일부를 되살리지 못했어요".into());
@@ -893,6 +940,35 @@ mod tests {
         progress.entries.get_mut("%1").unwrap().ready = true;
         progress.entries.get_mut("%agent").unwrap().update_local(true, false, false);
         assert_eq!(progress.status_line(), "학생을 불러오는 중…");
+    }
+
+    #[test]
+    fn a_window_that_never_appeared_is_given_up_but_its_record_is_kept() {
+        let mut entry = RestoreEntry {
+            remote: false, agent: false, web: false, ready: false, shell_since: None,
+            agent_missing: false, missing_since: None, given_up: false, local_input_ready: false,
+            character: None, remote_label: None, stage: RestoreStage::Pane,
+            record: serde_json::json!({"pane_id": "%12", "session_id": "keep-me"}),
+        };
+        assert!(!entry.miss(HOST_GRACE), "바로 포기하면 늦게 뜨는 창을 잃는다");
+        assert_eq!(entry.status_line(), "창을 못 찾았어요 — 조금 더 기다려요");
+        entry.missing_since = Some(Instant::now() - HOST_GRACE - Duration::from_secs(1));
+        assert!(entry.miss(HOST_GRACE), "유예가 지나면 카드를 놓아 준다");
+        assert!(!entry.ready, "포기는 성공이 아니다 — 기록을 계속 지켜야 한다");
+    }
+
+    #[test]
+    fn a_given_up_entry_keeps_its_saved_record_and_leaves_the_pending_list() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track("%gone", &serde_json::json!({"pane_id": "%gone", "session_id": "keep-me", "character": "코유키"}));
+        progress.track("%live", &serde_json::json!({"pane_id": "%live", "character": "아로나"}));
+        progress.built = true;
+        progress.entries.get_mut("%gone").unwrap().given_up = true;
+        assert_eq!(progress.given_up_count(), 1);
+        assert_eq!(progress.pending_lines().len(), 1, "포기한 것은 목록에서 빠진다");
+        let mut record = serde_json::json!({"pane_id": "%gone", "session_id": null});
+        progress.preserve_record(&mut record);
+        assert_eq!(record["session_id"], "keep-me", "포기해도 저장된 대화 번호는 지킨다");
     }
 
     #[test]
