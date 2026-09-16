@@ -32,40 +32,12 @@ impl Mood {
     }
 }
 
-/// 사람이 지금 보고 있는 pane 의 요약 — 「내가 포커스한 창이 뭐고 어디까지 했나」
-/// (2026-09-14). 펫을 한 번 누르면 이걸 말한다.
+/// 사람이 지금 보고 있는 pane — 「이 창」 질문은 이 pane 을 두고 간다. 판이 함께 적어 두는
+/// 요약(누가·무슨 일·몇 분째)은 이제 안 읽는다: 말풍선은 나쵸가 말하는 자리라, 그 이야기는
+/// 나쵸가 판을 보고 제 말로 한다(2026-09-17 지시).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Focus {
     pub pane: String,
-    pub who: String,
-    pub task: String,
-    pub state: String,
-    pub what: String,
-    pub mins: u64,
-}
-
-impl Focus {
-    /// 말풍선 두 줄: 누가 무슨 일감을 / 지금 무엇을 몇 분째.
-    pub fn line(&self) -> String {
-        let who = if self.who.is_empty() { "이 pane".to_string() } else { self.who.clone() };
-        let head = if self.task.is_empty() {
-            match self.state.as_str() {
-                "busy" => format!("{who} 일하는 중"),
-                "wait" => format!("{who} 답 기다리는 중"),
-                "error" => format!("{who} 막힘"),
-                _ => format!("{who} 쉬는 중"),
-            }
-        } else {
-            format!("{who} · {}", self.task)
-        };
-        let tail = match (self.what.is_empty(), self.mins) {
-            (true, 0) => String::new(),
-            (true, m) => format!("{m}분째"),
-            (false, 0) => self.what.clone(),
-            (false, m) => format!("{} · {m}분째", self.what),
-        };
-        if tail.is_empty() { head } else { format!("{head}\n{tail}") }
-    }
 }
 
 /// 파일 한 장을 읽어 상태와 할 말로. 파일이 없거나 깨졌으면 조용한 것으로 친다.
@@ -83,16 +55,8 @@ pub fn read(path: &std::path::Path) -> (Mood, String, String, Option<Focus>) {
             .unwrap_or("")
             .to_string()
     };
-    let focus = v.get("focus").filter(|f| f.is_object()).map(|f| {
-        let fs = |k: &str| f.get(k).and_then(|s| s.as_str()).unwrap_or("").to_string();
-        Focus {
-            pane: fs("pane"),
-            who: fs("who"),
-            task: fs("task"),
-            state: fs("state"),
-            what: fs("what"),
-            mins: f.get("mins").and_then(|m| m.as_u64()).unwrap_or(0),
-        }
+    let focus = v.get("focus").filter(|f| f.is_object()).map(|f| Focus {
+        pane: f.get("pane").and_then(|s| s.as_str()).unwrap_or("").to_string(),
     });
     // 지금 누구 이야기인지 — 되받아 말할 때 그 pane 으로 보낸다.
     (mood, str_of("text"), str_of("pane"), focus)
@@ -151,10 +115,9 @@ mod tests {
         assert_eq!(Mood::parse("뭔지모를것"), Mood::Idle);
     }
 
-    /// 포커스 요약은 판에 실려 오고, 없으면(내부 방) None 이다. 말은 두 줄 —
-    /// 누가 무슨 일감을 / 지금 무엇을 몇 분째.
+    /// 포커스 pane 은 판에 실려 오고, 없으면(내부 방) None 이다.
     #[test]
-    fn focus_rides_the_board_and_speaks_two_lines() {
+    fn focus_rides_the_board() {
         let dir = std::env::temp_dir().join(format!("kasapet-board-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("board.json");
@@ -164,9 +127,7 @@ mod tests {
         )
         .unwrap();
         let (_, _, _, focus) = read(&f);
-        let focus = focus.expect("focus");
-        assert_eq!(focus.pane, "%3");
-        assert_eq!(focus.line(), "아즈사 · UI UX\n파일 고치는 중 · 3분째");
+        assert_eq!(focus.expect("focus").pane, "%3");
         std::fs::write(&f, r#"{"state":"idle","text":"","pane":"","focus":null}"#).unwrap();
         assert!(read(&f).3.is_none());
         let _ = std::fs::remove_dir_all(&dir);

@@ -111,6 +111,11 @@ struct App {
     /// 지금 도는 자동 모션이 한 번 보여 주고 끝나는 반응인가. 끝나면 Idle 로 돌아간다.
     reaction_once: bool,
     nacho: Nacho,
+    /// 지금 가는 질문이 사람이 친 것이 아니라 펫이 스스로 꺼낸 것(인사·승인 알림)인가.
+    /// 이런 건 실패해도 「닿지 못했어요」를 안 띄운다 — 묻지도 않은 사람에게 오류를 보이는 셈이다.
+    ask_auto: bool,
+    /// 켜질 때 나쵸가 한 번 말을 걸었나.
+    greeted: bool,
     /// 나쵸가 이 답에 골라 준 동작 그룹. 목록에 있는 것만 받는다.
     nacho_group: Option<String>,
     /// 나쵸가 켠 표정의 번호 — 답을 내리거나 다음 답이 오면 끈다.
@@ -958,6 +963,14 @@ impl App {
             .unwrap_or_else(|| self.subject.clone())
     }
 
+    /// 펫이 스스로 나쵸에게 한 마디 부탁한다(켜질 때 인사, 승인 기다리는 학생 알림).
+    /// 이미 묻는 중이면 건너뛴다 — 사람이 친 질문이 먼저다.
+    fn ask_auto(&mut self, text: &str) {
+        if self.ask.busy() || self.ask_pane().is_empty() { return; }
+        self.ask_now(text);
+        self.ask_auto = true;
+    }
+
     /// 나쵸에게 묻는다. 답은 말풍선으로 온다(`poll_ask`).
     fn ask_now(&mut self, text: &str) {
         let pane = self.ask_pane();
@@ -997,6 +1010,10 @@ impl App {
             if self.preferences.ask_always && !self.ask_open() && self.win.is_some() && self.frames >= 2 {
                 self.open_ask(false);
             }
+            if !self.greeted && self.frames >= 30 && self.pet_dir.is_some() && std::env::var_os("KASAPET_AUTOASK").is_none() && !self.ask_pane().is_empty() {
+                self.greeted = true;
+                self.ask_auto("방금 켜졌어. 한 줄로 인사하고 지금 학생들 판을 한두 줄로 알려줘");
+            }
             let events = self.ask_bar.as_ref().map(|bar| bar.events()).unwrap_or_default();
             for event in events {
                 match event {
@@ -1027,6 +1044,11 @@ impl App {
                             eprintln!("ASK_APP_ACT:{}|{}", answer.motion.as_deref().unwrap_or("-"), answer.expression.as_deref().unwrap_or("-"));
                         }
                         self.perform(answer.motion, answer.expression);
+                    }
+                    Err(()) if self.ask_auto => {
+                        self.say.clear();
+                        self.rebuild_bubble_text();
+                        self.set_nacho(Nacho::Idle, false);
                     }
                     Err(()) => {
                         self.speak("나쵸에게 닿지 못했어요.".into(), false);
@@ -1120,24 +1142,17 @@ impl App {
             return;
         }
         self.board_seen = m;
-        let (mood, text, pane, focus) = board::read(&f);
+        let (mood, _, pane, focus) = board::read(&f);
         self.subject = pane;
         self.focus = focus;
         self.stirred = std::time::Instant::now();
         let urgent = matches!(mood, board::Mood::Wait | board::Mood::Error);
-        if (self.journal_shown || self.answer_shown) && !urgent { return; }
-        if self.answer_shown { self.clear_nacho_expression(); self.set_nacho(Nacho::Idle, false); }
-        self.answer_shown = false;
-        self.journal_shown = false;
-        if text != self.say {
-            self.say = text;
-            self.said_at = std::time::Instant::now();
-            self.rebuild_bubble_text();
-        }
-        // 사람 손이 필요한 말은 안 접는다 — 12초 뒤 사라지면 자리를 비운 사이의 승인
-        // 요청을 통째로 놓친다. 그리고 그런 말이 새로 뜰 땐 한 번 튄다.
-        if urgent && !self.urgent && !self.resting && self.preferences.animations {
-            self.start_bounce();
+        // 판의 글(「미도리 · crm」)은 말풍선에 안 띄운다 — 거기는 나쵸가 말하는 자리다
+        // (2026-09-17 지시). 사람 손이 필요해지는 순간만 나쵸에게 한 줄 부탁하고, 그런 말이
+        // 새로 뜰 땐 캐릭터가 한 번 튄다 — 자리를 비운 사이의 승인 요청을 놓치지 않게.
+        if urgent && !self.urgent {
+            if !self.resting && self.preferences.animations { self.start_bounce(); }
+            self.ask_auto("지금 사람 손이 필요한 학생이 누구고 무엇을 기다리는지 한두 줄로 알려줘");
         }
         self.urgent = urgent;
         if mood != self.mood {
@@ -1215,6 +1230,7 @@ impl App {
 
     /// 질문을 보냈다 — 판을 보는 동작으로.
     fn begin_looking(&mut self) {
+        self.ask_auto = false;
         self.speak("나쵸가 보는 중…".into(), false);
         self.clear_nacho_expression();
         self.set_nacho(Nacho::Looking, false);
@@ -1264,23 +1280,8 @@ impl App {
         self.resting = false;
         if self.mood == board::Mood::Sleep { self.apply_mood(board::Mood::Idle); }
         self.stirred = std::time::Instant::now();
-        // 누르면 **지금 보고 있는 pane** 이야기를 한다 — 세션이 여럿일 때 「이 창이
-        // 뭐고 어디까지 했나」를 화면을 뒤지지 않고 듣는다(사용자 2026-09-14). 손이
-        // 필요한 말이 떠 있으면 그건 그대로 둔다 — 급한 쪽이 이긴다.
-        if !self.urgent {
-            if let Some(f) = self.focus.clone() {
-                let line = f.line();
-                if !line.is_empty() {
-                    self.journal_shown = false;
-                    self.answer_shown = false;
-                    self.subject = f.pane;
-                    self.say = line;
-                    self.rebuild_bubble_text();
-                }
-            }
-        }
-        // 접힌 말을 다시 띄운다 — 「방금 뭐라고 했더라」를 누르면 볼 수 있어야, 말이
-        // 잠깐 뒤 사라지는 것이 손해가 아니게 된다.
+        // 접힌 나쵸 말을 다시 띄운다 — 「방금 뭐라고 했더라」를 누르면 볼 수 있어야, 말이
+        // 잠깐 뒤 사라지는 것이 손해가 아니게 된다. 이 창 이야기는 바에 물으면 된다.
         self.said_at = std::time::Instant::now();
         let Some(i) = self.catalog.touch() else { return };
         if self.play_motion(i, false) {
@@ -2016,7 +2017,7 @@ fn main() {
         popup: None,
         menu_probe_started:None,menu_probe_phase:0,menu_probe_frames:0,
         menu_probe_motion:0.0,menu_probe_mesh:0,menu_probe_motion_checked:false,
-        said_at: std::time::Instant::now(), urgent: false, bounce: None, reaction_once: false, nacho: Nacho::Idle, nacho_group: None, nacho_expression: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
+        said_at: std::time::Instant::now(), urgent: false, bounce: None, reaction_once: false, nacho: Nacho::Idle, ask_auto: false, greeted: false, nacho_group: None, nacho_expression: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
         catalog, expressions: catalog::Expressions::default(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
         shot_path: std::env::var("KASAPET_SHOT").ok(),
