@@ -2273,6 +2273,17 @@ impl App {
     /// new usable width (every layout calc reads `effective_sidebar_w()`),
     /// so we just flip the flag, resize the PTYs to the new cols/rows, and
     /// repaint.
+    /// 다른 기기 방의 이름을 고치기 시작한다 — 같은 편집칸·같은 키 처리를 쓰고, 끝날 때
+    /// 그 기계의 `window.rename` 으로 보낸다.
+    pub(crate) fn begin_remote_room_rename(&mut self, label: &str, window: u64, key: &str, current: &str) {
+        self.room_rename.cursor = current.chars().count();
+        self.room_rename.editing = Some((usize::MAX, current.to_string()));
+        self.room_rename.remote = Some((label.to_string(), window, key.to_string()));
+        self.room_rename.last_click = None;
+        let _ = self.hangul.flush();
+        self.mark_room_label_dirty();
+    }
+
     /// 편집 중이면 버퍼를 방 이름으로 확정한다. **빈 문자열이면 override 를 지워**
     /// 기본 라벨(캐릭터 이름)로 되돌린다 — 빈 이름을 저장하면 방이 무명이 된다.
     pub(crate) fn commit_room_rename(&mut self) {
@@ -2286,6 +2297,11 @@ impl App {
         }
         self.end_room_rename_ime();
         let name = buf.trim().to_string();
+        if let Some((label, window, _)) = self.room_rename.remote.take() {
+            self.mark_room_label_dirty();
+            self.rename_remote_room(&label, window, &name);
+            return;
+        }
         if name.is_empty() {
             self.window_name_override.remove(&idx);
         } else {
@@ -2298,6 +2314,7 @@ impl App {
 
     /// 편집을 버린다(Esc).
     pub(crate) fn cancel_room_rename(&mut self) {
+        self.room_rename.remote = None;
         if self.room_rename.editing.take().is_some() {
             let _ = self.hangul.flush();
             self.end_room_rename_ime();
@@ -3390,7 +3407,7 @@ impl App {
             None => self.do_close(PendingClose::Session(idx)),
         }
     }
-    fn open_confirm_close(&mut self, proc: String, action: PendingClose) {
+    pub(crate) fn open_confirm_close(&mut self, proc: String, action: PendingClose) {
         self.raise_confirm(ConfirmClose {
             why: CloseWhy::Busy(proc),
             action,
@@ -3427,6 +3444,8 @@ impl App {
                     .unwrap_or_default();
             }
             PendingClose::Pane { pane } => vec![pane.clone()],
+            // 다른 기기의 방 — 여기 문서가 아니라 그쪽 것이다.
+            PendingClose::RemoteRoom { .. } => Vec::new(),
             PendingClose::AuxEditor(id) => {
                 return self
                     .aux_doc(*id)
@@ -3678,6 +3697,9 @@ impl App {
                 if let Err(e) = self.close_window(idx) {
                     eprintln!("[window] close failed: {e:#}");
                 }
+            }
+            PendingClose::RemoteRoom { label, window, room } => {
+                self.close_remote_room(&label, window, &room);
             }
             PendingClose::AuxEditor(id) => self.close_aux_by_id(id),
             PendingClose::Window => {}

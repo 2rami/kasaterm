@@ -50,8 +50,33 @@ pub(crate) struct NavigationState {
     picker_view: Option<Rect>,
     picker_content_h: f32,
     collapsed_rooms: std::collections::HashSet<String>,
+    /// 목록 본문으로 보는 방(키) — 본기기 카드의 「목록으로 보기」와 같다.
+    list_rooms: std::collections::HashSet<String>,
+    /// 방 카드 우클릭 메뉴. 본기기 방 메뉴와 같은 항목(본문 보기·이름·닫기).
+    pub(crate) room_menu: Option<RoomMenu>,
+    room_menu_rects: Vec<(RoomMenuAction, Rect)>,
+    /// 이름을 고치는 중인 원격 방 — (카드 키, 캐럿 포함 글). 렌더가 프레임마다 채운다.
+    pub(crate) rename: Option<(String, String)>,
     hits: Vec<(Action, Rect)>,
     picker_hits: Vec<(Option<String>, Rect)>,
+}
+
+/// 방 카드 우클릭 메뉴 — 어느 기기의 어느 방인가와 뜬 자리.
+pub(crate) struct RoomMenu {
+    x: f32,
+    y: f32,
+    label: String,
+    window: Option<u64>,
+    room: String,
+    key: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum RoomMenuAction {
+    ListBody,
+    MapBody,
+    Rename,
+    Close,
 }
 
 #[derive(Clone)]
@@ -67,6 +92,8 @@ enum Action {
     /// 아래 절의 머리줄 — 누르는 일은 없고 우클릭 메뉴의 대상만 된다.
     Section(String),
     Unpin(String),
+    /// 카드 머리의 × — 그 기기의 방을 닫는다(확인은 본기기 방과 같은 모달).
+    CloseRoom { label: String, window: Option<u64>, room: String },
 }
 
 fn hit(p: (f32, f32), r: Rect) -> bool {
@@ -141,16 +168,26 @@ fn room_title(room: &str) -> (&str, &str) {
 
 /// 방 카드 본문(배치도) 높이 — 본기기 `sidebar_card_metrics` 와 같은 식이라 두 기기의
 /// 카드가 같은 키로 선다.
-fn room_body_h(panes: usize) -> f32 {
-    (36.0 + 13.0 * panes as f32).clamp(46.0, 150.0)
+/// 카드 본문 높이 — 본기기 `sidebar_card_metrics` 와 같은 식. 목록이면 줄 수만큼.
+fn room_body_h(panes: usize, listed: bool) -> f32 {
+    if listed {
+        panes as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD
+    } else {
+        (36.0 + 13.0 * panes as f32).clamp(46.0, 150.0)
+    }
 }
 
-fn content_height(machine: &state::MachinesColMachine, collapsed: &std::collections::HashSet<String>) -> f32 {
+fn content_height(
+    machine: &state::MachinesColMachine,
+    collapsed: &std::collections::HashSet<String>,
+    listed: &std::collections::HashSet<String>,
+) -> f32 {
     let groups = rooms(machine);
     let mut height = 0.0;
     for (room, list) in &groups {
         height += SIDEBAR_TAB_H;
-        if !collapsed.contains(&room_key(&machine.label, room)) { height += room_body_h(decks(list).len()); }
+        let key = room_key(&machine.label, room);
+        if !collapsed.contains(&key) { height += room_body_h(decks(list).len(), listed.contains(&key)); }
         height += SIDEBAR_TAB_GAP;
     }
     if groups.is_empty() { height = PANE_H; }
@@ -178,21 +215,29 @@ fn section_heights(
     machines: &[state::MachinesColMachine],
     pinned: &[Pinned],
     collapsed: &std::collections::HashSet<String>,
+    listed: &std::collections::HashSet<String>,
     avail: f32,
 ) -> Vec<f32> {
     if pinned.is_empty() { return Vec::new(); }
     let share = (avail / (pinned.len() + 1) as f32).max(SECTION_H + PANE_H);
     pinned.iter().map(|pin| {
         let body = machines.iter().find(|m| m.label == pin.label)
-            .map_or(PANE_H, |m| content_height(m, collapsed));
+            .map_or(PANE_H, |m| content_height(m, collapsed, listed));
         (SECTION_H + body).min(share)
     }).collect()
 }
 
 /// 아래 절이 통째로 먹는 높이 — 위 방 목록은 그만큼 짧아진다.
 pub(crate) fn pinned_total_h(info: &state::InfoState, avail: f32) -> f32 {
-    section_heights(&info.machines_col.machines, &info.navigation.pinned, &info.navigation.collapsed_rooms, avail)
-        .iter().sum()
+    section_heights(
+        &info.machines_col.machines,
+        &info.navigation.pinned,
+        &info.navigation.collapsed_rooms,
+        &info.navigation.list_rooms,
+        avail,
+    )
+    .iter()
+    .sum()
 }
 
 /// 끌던 기기를 놓았을 때 절로 받는 자리 — 머리줄 아래 사이드바 전부.
@@ -250,11 +295,12 @@ fn draw_cell(
     } else if hover {
         theme::surface_hover()
     } else {
-        crate::render::pane_identity::minimap_border(theme::panel_bg(), None, theme::with_alpha(theme::border(), 0x66))
+        // 칸은 기기색을 문다 — 본기기 배치도의 다른 기기 칸과 같은 규칙.
+        crate::render::pane_identity::minimap_border(theme::panel_bg(), Some(&machine.label), theme::with_alpha(theme::border(), 0x66))
     });
-    if (cur || signal.is_some()) && mw > 5.0 && mh > 5.0 {
+    if mw > 5.0 && mh > 5.0 {
         round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5,
-            crate::render::pane_identity::minimap_background(theme::panel_bg(), None));
+            crate::render::pane_identity::minimap_background(theme::panel_bg(), Some(&machine.label)));
     }
     if let Some((col, period)) = signal {
         if mw > 5.0 && mh > 5.0 {
@@ -300,14 +346,102 @@ fn draw_cell(
     }
 }
 
+/// 목록 본문의 한 줄 — 본기기 목록 줄(render.rs)과 같은 문법: 얼굴(도는 중이면 걷기)·
+/// 이름·줄 끝 상태 점(기다림이면 깜빡). 누르면 그 자리로 보기 창을 연다.
+fn draw_list_row(
+    g: &mut gpu::GpuRenderer,
+    hits: &mut Vec<(Action, Rect)>,
+    machine: &state::MachinesColMachine,
+    room: &str,
+    deck: &[&state::MachinesColRow],
+    cur: bool,
+    row: Rect,
+    separator: bool,
+    cursor: (f32, f32),
+    view: Rect,
+) {
+    let head = deck[0];
+    let (rx, ry, rw, rh) = row;
+    let Some(visible) = clipped(row, view) else { return };
+    if separator {
+        g.rect(rx + 6.0, ry, rw - 12.0, 1.0, theme::with_alpha(theme::border(), 0x50));
+    }
+    let hover = hit(cursor, visible);
+    g.hover_pointer |= hover && !head.closed;
+    if hover { round_rect(g, rx, ry, rw, rh, theme::radius_sm(), theme::surface_hover()); }
+    if cur { g.rect(rx, ry + 3.0, 2.0, rh - 6.0, theme::accent()); }
+    let busy = deck.iter().any(|r| matches!(r.status.as_str(), "working" | "compacting"));
+    let waiting = deck.iter().any(|r| r.status.contains("wait") || r.status.contains("attention"));
+    let who = deck.iter().find(|r| !r.name.is_empty()).map_or("", |r| r.name.as_str());
+    let phase = crate::sprites::anim_phase_secs();
+    let face = rh - 6.0;
+    let walked = busy && crate::sprites::draw_student_walk(g, who, rx + 5.0, ry + 1.0, rh - 2.0, phase);
+    let has_face = walked || crate::sprites::draw_student_face_anim(g, who, rx + 7.0, ry + 3.0, face, phase);
+    let col = if head.closed { theme::text_mute() } else if busy { theme::accent() } else { theme::success() };
+    if !has_face { circle_rect(g, rx + 9.0, ry + rh / 2.0 - 3.0, 6.0, col); }
+    let name_x = rx + 7.0 + face + 6.0;
+    let label = if !who.is_empty() { who } else if !head.title.is_empty() { head.title.as_str() } else { head.remote_id.as_str() };
+    text(g, label, name_x, ry + (rh - 11.0) / 2.0, (rx + rw - 14.0 - name_x).max(0.0), 11.0,
+        if head.closed { theme::text_mute() } else if cur { theme::text() } else { theme::text_dim() }, false);
+    let (dot_x, dot_y) = (rx + rw - 6.0, ry + rh / 2.0 - 3.0);
+    if waiting {
+        crate::sprites::blink_dot(g, dot_x, dot_y, 6.0, theme::attention(), 0.9);
+    } else {
+        circle_rect(g, dot_x, dot_y, 6.0, col);
+    }
+    if !head.closed {
+        hits.push((Action::Open {
+            label: machine.label.clone(), window: head.window, room: room.to_string(),
+            focus: Some(deck.iter().find(|r| !r.name.is_empty()).unwrap_or(&head).remote_id.clone()),
+        }, visible));
+    }
+}
+
+/// 방 카드 우클릭 메뉴 — 본기기 방 메뉴와 같은 골격·치수·자리 규칙(사이드바 안에 가둔다).
+/// 렌더가 칼럼의 맨 끝에 부른다 — 카드 위에 떠야 한다.
+pub(crate) fn draw_menu(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor: (f32, f32), width: f32, bottom: f32) {
+    let nav = &mut info.navigation;
+    nav.room_menu_rects.clear();
+    let Some(menu) = nav.room_menu.as_ref() else { return };
+    let listed = nav.list_rooms.contains(&menu.key);
+    let items: [(RoomMenuAction, &str); 3] = [
+        if listed { (RoomMenuAction::MapBody, "배치도로 보기") } else { (RoomMenuAction::ListBody, "목록으로 보기") },
+        (RoomMenuAction::Rename, "이름 바꾸기"),
+        (RoomMenuAction::Close, "방 닫기"),
+    ];
+    const MIH: f32 = 28.0;
+    let widest = items.iter().map(|(_, l)| g.measure_chrome_text(l, 13.0, false)).fold(0.0f32, f32::max);
+    let mw = (widest + 32.0).min((width - 8.0).max(80.0));
+    let mh = 12.0 + items.len() as f32 * MIH;
+    let mx = menu.x.min((width - mw - 4.0).max(4.0)).max(4.0);
+    let my = menu.y.min((bottom - mh - 6.0).max(TITLE_HEIGHT)).max(TITLE_HEIGHT);
+    panel_rect_outlined(g, mx, my, mw, mh, theme::radius_md(), theme::surface());
+    for (i, (action, label)) in items.iter().enumerate() {
+        let r = (mx + 4.0, my + 6.0 + i as f32 * MIH, mw - 8.0, MIH);
+        let hov = hit(cursor, r);
+        g.hover_pointer |= hov;
+        if hov { hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm()); }
+        g.draw_text(r.0 + 12.0, r.1 + (MIH - 13.0) / 2.0, label,
+            gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
+        nav.room_menu_rects.push((*action, r));
+    }
+}
+
 /// 한 기기의 방을 본기기와 같은 **카드 + 배치도**로 `view` 안에 그린다. 위 목록과
 /// 아래 절이 같은 함수를 쓴다 — 두 자리의 방이 달리 보이면 같은 방인지 헷갈린다.
+/// 카드를 그리는 데 필요한 nav 상태 — 위 목록과 아래 절이 같은 것을 본다.
+struct RowsCtx<'a> {
+    collapsed: &'a std::collections::HashSet<String>,
+    listed: &'a std::collections::HashSet<String>,
+    viewing: Option<&'a (String, Vec<String>)>,
+    viewing_cur: Option<&'a str>,
+    rename: Option<&'a (String, String)>,
+}
+
 fn draw_rows(
     g: &mut gpu::GpuRenderer,
     hits: &mut Vec<(Action, Rect)>,
-    collapsed_rooms: &std::collections::HashSet<String>,
-    viewing: Option<&(String, Vec<String>)>,
-    viewing_cur: Option<&str>,
+    ctx: &RowsCtx,
     machine: &state::MachinesColMachine,
     cursor: (f32, f32),
     width: f32,
@@ -324,14 +458,15 @@ fn draw_rows(
         text(g, message, 16.0, y + 12.0, width - 32.0, 11.0, theme::text_dim(), false);
         y += PANE_H;
     }
-    let active_room = groups.iter().position(|(_, list)| viewing.is_some_and(|(label, ids)| {
+    let active_room = groups.iter().position(|(_, list)| ctx.viewing.is_some_and(|(label, ids)| {
         *label == machine.label && list.iter().any(|r| ids.contains(&r.remote_id))
     }));
     for (index, (room, list)) in groups.iter().enumerate() {
         let key = room_key(&machine.label, room);
-        let collapsed = collapsed_rooms.contains(&key);
+        let collapsed = ctx.collapsed.contains(&key);
+        let listed = ctx.listed.contains(&key);
         let stacks = decks(list);
-        let body_h = if collapsed { 0.0 } else { room_body_h(stacks.len()) };
+        let body_h = if collapsed { 0.0 } else { room_body_h(stacks.len(), listed) };
         let h = SIDEBAR_TAB_H + body_h;
         let head = (tab_x, y, tab_w, SIDEBAR_TAB_H);
         let active = active_room == Some(index);
@@ -359,11 +494,20 @@ fn draw_rows(
             let (name, folder) = room_title(room);
             let text_x = tab_x + 26.0;
             let tab_right = tab_x + tab_w;
-            let name_budget = (tab_right - 6.0 - text_x).max(0.0);
+            // 이름 줄 오른쪽엔 ×(본기기 카드와 같은 자리: 이름 줄 가운데, 오른쪽 끝 3px).
+            let cs = 14.0;
+            let close = (tab_x + tab_w - cs - 3.0, y + 11.0, cs, cs);
+            let name_budget = (close.0 - 6.0 - text_x).max(0.0);
             let folder_budget = (tab_right - 8.0 - (badge_w + 14.0) - text_x).max(0.0);
             let name_y = if folder.is_empty() { y + ((SIDEBAR_TAB_H - 17.0) / 2.0).round() } else { y + 11.0 };
-            text(g, name, text_x, name_y, name_budget, 13.5,
-                if active { theme::text() } else { theme::text_dim() }, active);
+            // 이름을 고치는 중이면 본기기처럼 버퍼(캐럿 포함)가 이름 자리에 선다.
+            let renaming = ctx.rename.filter(|(k, _)| *k == key).map(|(_, t)| t.as_str());
+            text(g, renaming.unwrap_or(name), text_x, name_y, name_budget, 13.5,
+                if active || renaming.is_some() { theme::text() } else { theme::text_dim() }, active);
+            let x_hover = hit(cursor, close);
+            if x_hover { hover_rect(g, close.0, close.1, close.2, close.3, theme::radius_sm()); }
+            g.queue_icon("x", close.0 + (cs - 12.0) / 2.0, close.1 + (cs - 12.0) / 2.0, 12.0,
+                if x_hover { theme::text() } else { theme::text_mute() });
             if !folder.is_empty() {
                 text(g, folder, text_x, y + 30.0, folder_budget, 11.0, theme::text_dim(), false);
             }
@@ -375,16 +519,27 @@ fn draw_rows(
                 gpu::DrawOpts { font_size: 11.0, color: fg, bold: false, italic: false });
             // 배지는 접고 펴고, 머리 나머지는 본기기 방 탭처럼 그 방으로 간다. 배지가
             // 앞이어야 한다 — 맞춤은 앞선 것이 이긴다.
+            if let Some(c) = clipped(close, view) {
+                hits.push((Action::CloseRoom { label: machine.label.clone(), window: list[0].window, room: room.clone() }, c));
+            }
             if let Some(b) = clipped(badge, view) { hits.push((Action::Room(key.clone()), b)); }
             hits.push((Action::Open {
                 label: machine.label.clone(), window: list[0].window, room: room.clone(), focus: None,
             }, head_visible));
         }
-        if !collapsed {
+        if !collapsed && listed {
+            // 목록 보기 — 배치도 자리에 학생 줄(본기기 목록 줄과 같은 기하).
+            for (k, deck) in stacks.iter().enumerate() {
+                let row = (tab_x + 8.0, y + SIDEBAR_TAB_H + SIDEBAR_ROW_PAD / 2.0 + k as f32 * SIDEBAR_ROW_H,
+                    tab_w - 16.0, SIDEBAR_ROW_H);
+                let cur = active && ctx.viewing_cur.is_some_and(|c| deck.iter().any(|r| r.remote_id == c));
+                draw_list_row(g, hits, machine, room, deck, cur, row, k > 0, cursor, view);
+            }
+        } else if !collapsed {
             let ma = (tab_x + 10.0, y + SIDEBAR_TAB_H + 3.0, tab_w - 20.0, body_h - 8.0);
             let heads: Vec<&state::MachinesColRow> = stacks.iter().map(|d| d[0]).collect();
             for (deck, cell) in stacks.iter().zip(cell_rects(&heads, ma)) {
-                let cur = active && viewing_cur.is_some_and(|c| deck.iter().any(|r| r.remote_id == c));
+                let cur = active && ctx.viewing_cur.is_some_and(|c| deck.iter().any(|r| r.remote_id == c));
                 draw_cell(g, hits, machine, room, deck, cur, cell, cursor, view);
             }
         }
@@ -456,10 +611,15 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         nav.pinned.push(Pinned { label: m.label.clone(), auto: true, scroll: 0.0, content_h: 0.0, view: None });
     }
     nav.pinned.retain(|p| !p.auto || machines.iter().any(|m| m.label == p.label && m.online));
-    let NavigationState { pinned, collapsed_rooms, hits, machine: main, scroll, content_h, viewport: main_view, viewing, viewing_cur, .. } = nav;
-    let viewing = viewing.as_ref();
-    let viewing_cur = viewing_cur.as_deref();
-    let heights = section_heights(machines, pinned, collapsed_rooms, viewport.3);
+    let NavigationState { pinned, collapsed_rooms, hits, machine: main, scroll, content_h, viewport: main_view, viewing, viewing_cur, list_rooms, rename, .. } = nav;
+    let ctx = RowsCtx {
+        collapsed: collapsed_rooms,
+        listed: list_rooms,
+        viewing: viewing.as_ref(),
+        viewing_cur: viewing_cur.as_deref(),
+        rename: rename.as_ref(),
+    };
+    let heights = section_heights(machines, pinned, collapsed_rooms, list_rooms, viewport.3);
     let pinned_total: f32 = heights.iter().sum();
     let view = (viewport.0, viewport.1, viewport.2, (viewport.3 - pinned_total).max(0.0));
     *main_view = Some(view);
@@ -467,9 +627,9 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         match selected {
             None => text(g, "기기를 다시 선택해 주세요", 16.0, view.1 + 12.0, width - 32.0, 11.0, theme::text_dim(), false),
             Some(machine) => {
-                *content_h = content_height(machine, collapsed_rooms);
+                *content_h = content_height(machine, collapsed_rooms, list_rooms);
                 *scroll = scroll.clamp(0.0, (*content_h - view.3).max(0.0));
-                draw_rows(g, hits, collapsed_rooms, viewing, viewing_cur, machine, cursor, width, view, *scroll);
+                draw_rows(g, hits, &ctx, machine, cursor, width, view, *scroll);
                 scrollbar(g, view, *content_h, *scroll, width);
             }
         }
@@ -508,9 +668,9 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         match machine {
             None => text(g, "기기 목록에서 사라졌어요", 16.0, body.1 + 12.0, width - 32.0, 11.0, theme::text_dim(), false),
             Some(machine) => {
-                pin.content_h = content_height(machine, collapsed_rooms);
+                pin.content_h = content_height(machine, collapsed_rooms, list_rooms);
                 pin.scroll = pin.scroll.clamp(0.0, (pin.content_h - body.3).max(0.0));
-                draw_rows(g, hits, collapsed_rooms, viewing, viewing_cur, machine, cursor, width, body, pin.scroll);
+                draw_rows(g, hits, &ctx, machine, cursor, width, body, pin.scroll);
                 scrollbar(g, body, pin.content_h, pin.scroll, width);
             }
         }
@@ -592,7 +752,7 @@ impl App {
         let Ok(folder) = std::env::var("KASATERM_AUTONAV_DIR") else { return; };
         static STEP: OnceLock<Mutex<(Instant, usize)>> = OnceLock::new();
         let mut step = STEP.get_or_init(|| Mutex::new((Instant::now(), 0))).lock().unwrap();
-        if step.1 >= 12 || step.0.elapsed().as_millis() < if step.1 == 0 { 10000 } else { 700 } { return; }
+        if step.1 >= 17 || step.0.elapsed().as_millis() < if step.1 == 0 { 10000 } else { 700 } { return; }
         let Some(window) = self.window.as_ref().map(|w| w.id()) else { return; };
         let click = |app: &mut Self, r: Rect| {
             app.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
@@ -685,6 +845,46 @@ impl App {
                     nav.pinned.first().is_some_and(|p| p.view.is_some()), !self.window_tab_rects.is_empty(),
                     self.sidebar_avail_h(win_h) < self.sidebar_full_avail_h(win_h),
                     nav.hits.iter().any(|(a, _)| matches!(a, Action::Open { label, .. } if label == "맥북")));
+            }
+            12 => {
+                // 아래 절의 방 카드 머리를 우클릭 — 본기기 방 메뉴와 같은 메뉴가 떠야 한다.
+                let head = self.info.navigation.hits.iter()
+                    .find_map(|(a, r)| matches!(a, Action::Open { label, .. } if label == "맥북").then_some(*r));
+                if let Some(r) = head {
+                    self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                    self.sidebar_navigation_right_click(self.cursor_px);
+                }
+                report = format!("room_menu={}", self.info.navigation.room_menu.is_some());
+            }
+            13 => {
+                // 첫 항목(목록으로 보기) — 본문이 학생 줄로 바뀌고 메뉴는 닫힌다.
+                let item = self.info.navigation.room_menu_rects.first().map(|(_, r)| *r);
+                if let Some(r) = item { self.sidebar_navigation_menu_click((r.0 + r.2 / 2.0, r.1 + r.3 / 2.0)); }
+                let nav = &self.info.navigation;
+                report = format!("listed={} menu_closed={}", !nav.list_rooms.is_empty(), nav.room_menu.is_none());
+            }
+            14 => {
+                // 다시 우클릭 — 항목 사각은 다음 프레임의 그리기가 채우므로 누르기는 다음 단계.
+                let head = self.info.navigation.hits.iter()
+                    .find_map(|(a, r)| matches!(a, Action::Open { label, .. } if label == "맥북").then_some(*r));
+                if let Some(r) = head {
+                    self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                    self.sidebar_navigation_right_click(self.cursor_px);
+                }
+                let close = self.info.navigation.hits.iter()
+                    .find_map(|(a, r)| matches!(a, Action::CloseRoom { label, .. } if label == "맥북").then_some(*r));
+                report = format!("room_menu_again={} close_hit={} close={:?} scale={}", self.info.navigation.room_menu.is_some(),
+                    close.is_some(), close, self.effective_scale());
+            }
+            15 => {
+                // 둘째 항목(이름 바꾸기) — 편집칸(캐럿)이 카드 머리에 선다.
+                let item = self.info.navigation.room_menu_rects.get(1).map(|(_, r)| *r);
+                if let Some(r) = item { self.sidebar_navigation_menu_click((r.0 + r.2 / 2.0, r.1 + r.3 / 2.0)); }
+                report = format!("renaming={}", self.room_rename.remote.is_some());
+            }
+            16 => {
+                self.cancel_room_rename();
+                report = format!("rename_cancelled={}", self.room_rename.remote.is_none() && self.room_rename.editing.is_none());
             }
             _ => {}
         }
@@ -784,6 +984,9 @@ impl App {
                 self.info.navigation.pinned.retain(|p| p.label != label);
                 self.info.navigation.dismissed.insert(label);
             }
+            Action::CloseRoom { label, window, room } => {
+                self.confirm_or_close_remote_room(&label, window, &room);
+            }
             Action::Room(key) => {
                 if !self.info.navigation.collapsed_rooms.remove(&key) { self.info.navigation.collapsed_rooms.insert(key); }
             }
@@ -829,9 +1032,19 @@ impl App {
     pub(crate) fn sidebar_navigation_right_click(&mut self, cursor: (f32, f32)) -> bool {
         if self.info.navigation.picker { self.info.navigation.picker = false; self.chrome_dirty = true; return true; }
         let action = self.info.navigation.hits.iter().find(|(_, r)| hit(cursor, *r)).map(|(a, _)| a.clone());
+        // 방 카드(머리·칸·×)는 방 메뉴, 절 머리·피커는 기기 메뉴.
+        let action = match action {
+            Some(Action::Open { label, window, room, .. }) | Some(Action::CloseRoom { label, window, room }) => {
+                let key = room_key(&label, &room);
+                self.info.navigation.room_menu = Some(RoomMenu { x: cursor.0, y: cursor.1, label, window, room, key });
+                self.info.machine_menu = None;
+                self.chrome_dirty = true;
+                return true;
+            }
+            other => other,
+        };
         let label = match action {
-            Some(Action::Menu(label) | Action::Section(label) | Action::Unpin(label) | Action::NewRoom(label)
-                | Action::Open { label, .. }) => Some(label),
+            Some(Action::Menu(label) | Action::Section(label) | Action::Unpin(label) | Action::NewRoom(label)) => Some(label),
             Some(Action::Picker) => self.info.navigation.machine.clone(),
             _ => None,
         };
@@ -870,6 +1083,13 @@ impl App {
 
     pub(crate) fn sidebar_navigation_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
+        if event.state.is_pressed() && self.info.navigation.room_menu.is_some()
+            && matches!(event.logical_key, Key::Named(NamedKey::Escape))
+        {
+            self.info.navigation.room_menu = None;
+            self.chrome_dirty = true;
+            return true;
+        }
         if event.state.is_pressed() && self.info.navigation.drag.is_some()
             && matches!(event.logical_key, Key::Named(NamedKey::Escape))
         {
@@ -925,6 +1145,19 @@ mod tests {
     }
 
     #[test]
+    fn list_body_is_a_row_per_deck_like_the_local_card() {
+        let m = machine();
+        let (room, list) = rooms(&m).into_iter().next().unwrap();
+        let key = room_key(&m.label, &room);
+        let listed: std::collections::HashSet<String> = [key].into_iter().collect();
+        let map = content_height(&m, &Default::default(), &Default::default());
+        let as_list = content_height(&m, &Default::default(), &listed);
+        let n = decks(&list).len();
+        assert_eq!(as_list - map, room_body_h(n, true) - room_body_h(n, false));
+        assert_eq!(room_body_h(n, true), n as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD);
+    }
+
+    #[test]
     fn remote_navigation_keeps_source_order_and_mirror_destination() {
         let m = machine();
         let rows = rows(&m);
@@ -936,9 +1169,9 @@ mod tests {
     fn remote_room_collapse_changes_scroll_height_without_losing_other_rooms() {
         let m = machine();
         let mut collapsed = std::collections::HashSet::new();
-        let full = content_height(&m, &collapsed);
+        let full = content_height(&m, &collapsed, &Default::default());
         collapsed.insert(room_key("test", "A"));
-        assert_eq!(full - content_height(&m, &collapsed), room_body_h(3));
+        assert_eq!(full - content_height(&m, &collapsed, &Default::default()), room_body_h(3, false));
         assert_eq!(rows(&m).len(), 4);
         assert_eq!(rooms(&m).iter().map(|(r, l)| (r.as_str(), l.len())).collect::<Vec<_>>(), [("A", 3), ("B", 1)]);
     }
@@ -957,8 +1190,8 @@ mod tests {
         assert_eq!(stacks.len(), 2);
         assert_eq!(stacks[0].iter().map(|r| r.remote_id.as_str()).collect::<Vec<_>>(), ["%8"]);
         assert_eq!(stacks[1].iter().map(|r| r.remote_id.as_str()).collect::<Vec<_>>(), ["%12", "%2"]);
-        assert_eq!(content_height(&m, &Default::default()),
-            2.0 * (SIDEBAR_TAB_H + SIDEBAR_TAB_GAP) + room_body_h(2) + room_body_h(1) + PANE_H + 8.0);
+        assert_eq!(content_height(&m, &Default::default(), &Default::default()),
+            2.0 * (SIDEBAR_TAB_H + SIDEBAR_TAB_GAP) + room_body_h(2, false) + room_body_h(1, false) + PANE_H + 8.0);
     }
 
     #[test]
@@ -993,11 +1226,11 @@ mod tests {
         let pin = |label: &str| Pinned { label: label.into(), auto: false, scroll: 0.0, content_h: 0.0, view: None };
         let collapsed = std::collections::HashSet::new();
         let m = machine();
-        let body = content_height(&m, &collapsed);
-        assert_eq!(section_heights(&[machine()], &[pin("test")], &collapsed, 1000.0), vec![SECTION_H + body]);
-        assert_eq!(section_heights(&[machine()], &[pin("test")], &collapsed, 300.0), vec![150.0]);
-        assert_eq!(section_heights(&[machine()], &[pin("없음")], &collapsed, 1000.0), vec![SECTION_H + PANE_H]);
-        assert!(section_heights(&[machine()], &[], &collapsed, 1000.0).is_empty());
+        let body = content_height(&m, &collapsed, &Default::default());
+        assert_eq!(section_heights(&[machine()], &[pin("test")], &collapsed, &Default::default(), 1000.0), vec![SECTION_H + body]);
+        assert_eq!(section_heights(&[machine()], &[pin("test")], &collapsed, &Default::default(), 300.0), vec![150.0]);
+        assert_eq!(section_heights(&[machine()], &[pin("없음")], &collapsed, &Default::default(), 1000.0), vec![SECTION_H + PANE_H]);
+        assert!(section_heights(&[machine()], &[], &collapsed, &Default::default(), 1000.0).is_empty());
     }
 
     #[test]
@@ -1021,5 +1254,112 @@ mod tests {
         let mut m = machine();
         m.online = false;
         assert!(rows(&m).is_empty());
+    }
+}
+
+impl App {
+    /// 그 기기의 그 방에 앉은 줄들 — 카드가 묶는 규칙(`rooms`)과 같다: 방 번호가 있으면
+    /// 번호로, 없으면 이름으로.
+    fn remote_room_panes(&self, label: &str, window: Option<u64>, room: &str) -> Vec<&state::MachinesColRow> {
+        self.info.machines_col.machines.iter().find(|m| m.label == label)
+            .map(|m| m.remote.iter().chain(m.mirrored.iter())
+                .filter(|r| !r.closed && match (window, r.window) {
+                    (Some(a), Some(b)) => a == b,
+                    (None, None) => r.room == room,
+                    _ => false,
+                })
+                .collect())
+            .unwrap_or_default()
+    }
+
+    /// 방 카드 메뉴가 떠 있을 때의 클릭 — 항목이면 실행하고, 어디를 눌렀든 메뉴는 닫힌다.
+    pub(crate) fn sidebar_navigation_menu_click(&mut self, cursor: (f32, f32)) {
+        let Some(menu) = self.info.navigation.room_menu.take() else { return };
+        let action = self.info.navigation.room_menu_rects.iter().find(|(_, r)| hit(cursor, *r)).map(|(a, _)| *a);
+        self.info.navigation.room_menu_rects.clear();
+        self.chrome_dirty = true;
+        match action {
+            Some(RoomMenuAction::ListBody) => { self.info.navigation.list_rooms.insert(menu.key); }
+            Some(RoomMenuAction::MapBody) => { self.info.navigation.list_rooms.remove(&menu.key); }
+            Some(RoomMenuAction::Rename) => match menu.window {
+                Some(window) => {
+                    let name = room_title(&menu.room).0.to_string();
+                    self.begin_remote_room_rename(&menu.label, window, &menu.key, &name);
+                }
+                None => self.set_toast("옛 판 기기의 방은 이름을 바꿀 수 없어요".to_string()),
+            },
+            Some(RoomMenuAction::Close) => self.confirm_or_close_remote_room(&menu.label, menu.window, &menu.room),
+            None => {}
+        }
+    }
+
+    /// 다른 기기의 방 닫기 — 본기기 방과 같은 문: 누가 도는 중이면 확인 모달, 아니면 바로.
+    pub(crate) fn confirm_or_close_remote_room(&mut self, label: &str, window: Option<u64>, room: &str) {
+        let busy = self.remote_room_panes(label, window, room).into_iter()
+            .find(|r| matches!(r.status.as_str(), "working" | "compacting"))
+            .map(|r| if r.name.is_empty() { "claude".to_string() } else { r.name.clone() });
+        let action = PendingClose::RemoteRoom { label: label.to_string(), window, room: room.to_string() };
+        match busy {
+            Some(proc) => self.open_confirm_close(proc, action),
+            None => self.do_close(action),
+        }
+    }
+
+    /// 그 기계에 `window.close` 를 보낸다(방 번호가 없는 옛 판은 pane 하나씩). 답은 폴링
+    /// 대신 `poke` 로 바로 받는다 — 카드가 5초 뒤에 사라지면 안 닫힌 줄 안다.
+    pub(crate) fn close_remote_room(&mut self, label: &str, window: Option<u64>, room: &str) {
+        let Some(m) = kasa_mcp::machines::find(label) else {
+            self.set_toast(format!("{label} 가 명부(machines.json)에 없어요"));
+            return;
+        };
+        let mut ids: Vec<String> = self.remote_room_panes(label, window, room).into_iter().map(|r| r.remote_id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        if window.is_none() && ids.is_empty() { return; }
+        self.set_toast(format!("{label} 의 방 닫는 중…"));
+        let base = m.base.clone();
+        std::thread::spawn(move || {
+            let result = match window {
+                Some(idx) => kasa_mcp::remote::remote_cmd(&base, "window.close", serde_json::json!({ "idx": idx })).map(|_| ()),
+                None => ids.iter().try_for_each(|id| kasa_mcp::remote::close_remote_pane(&base, id, None, true)),
+            };
+            if let Err(e) = result {
+                eprintln!("[remote] room close failed: {e:#}");
+            }
+            kasa_mcp::machines::poke();
+        });
+    }
+
+    /// 편집칸의 이름을 그 기계의 `window.rename` 으로 보낸다 — 그쪽은 pane 으로 방을 짚으므로
+    /// 그 방의 첫 pane 을 함께 준다.
+    pub(crate) fn rename_remote_room(&mut self, label: &str, window: u64, name: &str) {
+        let Some(m) = kasa_mcp::machines::find(label) else {
+            self.set_toast(format!("{label} 가 명부(machines.json)에 없어요"));
+            return;
+        };
+        let Some(pane) = self.remote_room_panes(label, Some(window), "").first().map(|r| r.remote_id.clone()) else {
+            self.set_toast("그 방의 pane 을 못 찾아 이름을 못 바꿨어요".to_string());
+            return;
+        };
+        let (base, name) = (m.base.clone(), name.to_string());
+        std::thread::spawn(move || {
+            let params = serde_json::json!({ "surface_id": pane, "title": name });
+            if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "window.rename", params) {
+                eprintln!("[remote] room rename failed: {e:#}");
+            }
+            kasa_mcp::machines::poke();
+        });
+    }
+
+    /// 원격 방 이름 편집칸의 글(캐럿 포함) — 본기기 `overlay_room_rename_label` 과 같은 식.
+    pub(crate) fn remote_rename_overlay(&self) -> Option<(String, String)> {
+        let (_, _, key) = self.room_rename.remote.as_ref()?;
+        let (idx, buf) = self.room_rename.editing.as_ref()?;
+        let composing = match self.ime_focus {
+            Some(crate::ImeFocus::RoomRename(i)) if i == *idx => self.preedit.as_str(),
+            _ => "",
+        };
+        let (before, after) = crate::lineedit::split(buf, self.room_rename.cursor);
+        Some((key.clone(), format!("{before}{composing}\u{258c}{after}")))
     }
 }

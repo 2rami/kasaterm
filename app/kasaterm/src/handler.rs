@@ -1672,8 +1672,15 @@ impl ApplicationHandler<UserEvent> for App {
                 // so the sidebar session reads the rename override even when this
                 // pane isn't the window's representative leaf.
                 if let Some(wi) = self.window_of_pane(id) {
-                    self.window_name_override.insert(wi, title.clone());
+                    // 빈 이름은 손 이름을 걷는 것 — 사이드바 편집칸과 같은 규칙.
+                    if title.trim().is_empty() {
+                        self.window_name_override.remove(&wi);
+                    } else {
+                        self.window_name_override.insert(wi, title.clone());
+                    }
                     self.window_labels_at = None; // force a relabel next paint
+                    // 다른 기기가 이 방 이름을 보고 있다 — 바로 알린다.
+                    kasa_mcp::changes::bump();
                 }
                 self.chrome_dirty = true;
                 self.render_frame();
@@ -4275,6 +4282,12 @@ impl ApplicationHandler<UserEvent> for App {
                     self.machines_col_click(cx, cy);
                     self.info.machine_menu = None;
                     self.chrome_dirty = true;
+                    window.request_redraw();
+                    return;
+                }
+                // 다른 기기 방 카드의 우클릭 메뉴 — 항목이면 실행, 어디를 눌러도 닫힌다.
+                if matches!(state, ElementState::Pressed) && self.info.navigation.room_menu.is_some() {
+                    self.sidebar_navigation_menu_click(self.cursor_px);
                     window.request_redraw();
                     return;
                 }
@@ -8182,6 +8195,9 @@ impl App {
                 PendingClose::Tab { pane, idx } => self.confirm_or_close_tab(&pane, idx),
                 PendingClose::Pane { pane } => self.confirm_or_close_pane(&pane),
                 PendingClose::Session(i) => self.confirm_or_close_session(i),
+                PendingClose::RemoteRoom { label, window, room } => {
+                    self.confirm_or_close_remote_room(&label, window, &room);
+                }
                 PendingClose::AuxEditor(id) => self.close_aux_by_id(id),
             }
             return;

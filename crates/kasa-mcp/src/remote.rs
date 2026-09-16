@@ -1402,6 +1402,45 @@ pub fn close_remote_pane(base: &str, pane: &str, token: Option<&str>, kill: bool
     Ok(())
 }
 
+/// 원격 앱의 `/cmd` 창구 — 소켓 명령(`window.close`·`window.rename` 등)을 HTTP 로 보낸다.
+/// 다른 기기 방 카드의 ×·이름 바꾸기가 이 길로 간다(2026-09-17). 허용 목록 밖은 그쪽이
+/// 거절한다. 답의 `ok` 가 거짓이면 그 사유를 오류로 돌려준다.
+pub fn remote_cmd(base: &str, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    let token = connection_auth_token(base);
+    let u = format!("{}/cmd", base.trim_end_matches('/'));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("cmd runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("http client")?;
+        let mut req = client
+            .post(&u)
+            .json(&serde_json::json!({ "method": method, "params": params }));
+        if let Some(t) = token.as_deref() {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("원격 cmd 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        let why = v
+            .get("error")
+            .map(|e| e.get("message").and_then(|m| m.as_str()).map(str::to_string).unwrap_or_else(|| e.to_string()))
+            .unwrap_or_else(|| "알 수 없는 이유".into());
+        anyhow::bail!("{why}");
+    }
+    Ok(v)
+}
+
 /// 원격 pane 의 (model, effort) — `/term/panes` 행의 `model`·`effort`. 낡은 원격은
 /// 그 필드가 없어 None — 부른 쪽은 그때 기본값으로 물러선다.
 pub fn remote_pane_cfg(base: &str, pane: &str, token: Option<&str>) -> Option<(String, String)> {

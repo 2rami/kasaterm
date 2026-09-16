@@ -1400,6 +1400,8 @@ enum PendingClose {
     /// Close one sidebar session (window `idx`) — the app stays open. Distinct
     /// from `Window` (whole-app quit): only this session's panes are killed.
     Session(usize),
+    /// 다른 기기의 방(사이드바 절의 카드 ×·메뉴). 그쪽 `window.close` 로 보낸다.
+    RemoteRoom { label: String, window: Option<u64>, room: String },
     /// Close one detached document window. The WindowId stays stable while
     /// Vec indices move when another auxiliary window closes.
     AuxEditor(WindowId),
@@ -3391,6 +3393,9 @@ struct RoomRename {
     editing: Option<(usize, String)>,
     /// 버퍼 안 커서(문자 단위). 편집을 열 때 이름 끝에 둔다.
     cursor: usize,
+    /// 다른 기기의 방을 고치는 중 — (기기, 그쪽 방 번호, 카드 키). `editing` 의 인덱스는
+    /// 이때 자리표시(`usize::MAX`)라 본기기 방과 안 겹친다.
+    remote: Option<(String, u64, String)>,
 }
 
 /// 닫는 동안 목록 자리를 얼려 두는 상태 — 되살리기 목록·pane 헤더 탭·사이드바 방.

@@ -2580,6 +2580,8 @@ impl App {
             })
             .flatten();
         let mut board_paint = None;
+        // 원격 방 이름 편집칸 — GPU 를 빌리기 전에 읽어 둔다.
+        self.info.navigation.rename = self.remote_rename_overlay();
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -4730,6 +4732,8 @@ impl App {
                     }
                 }
             }
+            // 다른 기기 방 카드의 우클릭 메뉴 — 본기기 방 메뉴와 같은 자리(칼럼의 맨 끝).
+            crate::sidebar_navigation::draw_menu(g, &mut self.info, sb_cursor, tab_strip_w, sb_win_h);
             // ── File-tree column ── independent of the tab strip, parked just
             // right of it (VSCode explorer). Root = active pane's cwd; folders
             // first — click a folder to expand, a file to preview. Rows laid
@@ -12200,6 +12204,7 @@ impl App {
                 let what = match dlg.action {
                     crate::PendingClose::Window => "앱을",
                     crate::PendingClose::Session(_) => "이 세션을",
+                    crate::PendingClose::RemoteRoom { .. } => "그 기기의 방을",
                     crate::PendingClose::Pane { .. } => "이 pane 을",
                     crate::PendingClose::Tab { .. } => "이 탭을",
                     crate::PendingClose::AuxEditor(_) => "이 문서 창을",
