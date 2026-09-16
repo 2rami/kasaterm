@@ -18,7 +18,7 @@ hook 경로 해석(`locate_collab_hooks_dir`): env `KASATERM_COLLAB_HOOKS_DIR` �
 
 ## 협업 흐름
 
-사용자가 정한 범위에서 [협업 지침](collab-protocol.md)을 따른다. `board --all`로 최신 주소를 확인하고, 필요한 대상만 `activity --address`로 읽고, `tell --address`로 전달한다. 변경 추적은 `board-watch --all --json`, 전송 확인은 `tell-status`, 본인 완료 보고는 `done`을 사용한다.
+사용자가 정한 범위에서 [협업 지침](collab-protocol.md)을 따른다. `board --all`로 최신 주소를 확인하고, 필요한 대상만 `activity --address`로 읽고, `tell 이름@기계 "본문"`(또는 `tell --address`)으로 전달한다 — 다른 기기의 학생도 같은 한 줄이다. 변경 추적은 `board-watch --all --json`, 전송 확인은 `tell-status`, 본인 완료 보고는 `done`을 사용한다.
 
 세부 형식과 지원 범위는 [조회 계약](../../../docs/board-collaboration.md)과 [전달 계약](../../../docs/tell-protocol.md)에 있다. 접수·입력 전달은 모델이 읽었다는 보장이 아니며, 새 API 미지원 시 구형 전송으로 우회하지 않는다.
 

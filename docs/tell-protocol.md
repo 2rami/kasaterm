@@ -8,7 +8,10 @@ from the collaboration board. The receiver validates every identity component;
 missing session or instance evidence never authorizes injection. Remote requests
 use a known machine route, the existing HTTP authentication/origin guard, and the
 same complete address. No Claude registry, peer socket, or attach is involved.
-CLI accepts `tell [--id ID] --address '<JSON>' --stdin` and retains local `%N`.
+CLI accepts `tell [--id ID] --address '<JSON>' --stdin` and retains local `%N`. It also
+accepts a name (`tell 이름 …`, `tell 이름@기계 …`, `tell %N@기계 …`): the CLI resolves it
+against `board --all` and refuses ambiguous matches by listing the candidates. It records
+each sent ID's address locally so `tell-status ID` works without `--address`.
 It prints the ID before dispatch so a disconnected caller can inspect/retry that
 same ID. An old server produces an unsupported-method error; there is no fallback.
 

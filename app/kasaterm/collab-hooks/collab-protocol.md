@@ -14,18 +14,20 @@
 
 ## 필요한 상세만 읽기
 
-- 문제가 의심되는 캐릭터만 `kasaterm-cli activity --address '<주소 JSON>' [limit]`로 확인한다.
+- 문제가 의심되는 캐릭터만 `kasaterm-cli activity --address '<주소 JSON>' [limit]`로 확인한다. 주소는 `board --all`의 `address` 전체다(surface_key 하나로는 안 된다).
 - 요약만으로 도구 성공·실패를 단정하지 않는다. 상세도 확인한 범위만 설명한다.
 - 주소가 오래됐거나 신원이 다르면 board를 다시 읽는다. 다른 세션으로 바꿔 끼우지 않는다.
 
 ## 메시지 전달
 
 ```sh
-kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin
-kasaterm-cli tell-status ID --address '<주소 JSON>'
+kasaterm-cli tell 이름@기계 "본문"     # 같은 기기든 다른 기기든 이 한 줄. 이름이 하나뿐이면 @기계 생략
+kasaterm-cli tell-status ID            # 영수증. 이 기계에서 보낸 ID 는 주소 없이 된다
+kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자동화용 원형
 ```
 
-- 첫 전송은 `--id ID`를 빼면 ID가 생성된다. 본문은 표준 입력으로 주고 ID·주소·본문을 보관한다.
+- 이름을 치면 CLI가 `board --all`의 주소로 바꿔 보낸다. 후보가 여럿이면 목록을 내고 멈추니 `이름@기계`로 고른다. 주소를 짐작하지 않는다. 다른 기기의 학생도 같은 tell이다 — `ssh`로 그 기계 CLI를 치지 않는다(소켓 경로를 몰라 실패, 필요도 없다). SendMessage·ListAgents는 다른 기기에 닿지 않는다.
+- 첫 전송은 `--id ID`를 빼면 ID가 생성된다. ID·주소·본문을 보관한다.
 - 목적·담당·완료 조건을 짧게 보낸다. 본문에 발신자 이름을 붙이지 않는다.
 - `accepted`는 보관 접수, `submitted`는 입력 전달이다. 어느 쪽도 모델이 읽었다는 뜻은 아니다.
 - 결과가 불확실하면 `tell-status`로 확인한다. 재시도는 같은 ID·주소·본문만 사용한다.

@@ -1,6 +1,6 @@
 ---
 name: kasapane
-description: kasaterm/kasaspace pane을 다루고, 그 안에서 긴 잡(빌드·dev server·배포)을 풀 사이클로 돌리고, 작업 결과(이미지·마크다운)를 창 안 pane에 띄우고, 여러 pane의 claude(또는 codex·antigravity 등)가 같은 레포를 동시에 만질 때 충돌 없이 협업하고(board 패널·SendMessage·peek), kasaterm 자체 UI를 빌드→스폰→스크린샷→확인 사이클로 자체검증하고, TeamCreate로 띄운 팀원 pane의 race·좀비를 청소한다. 사용자가 "모니터 띄워줘", "로그 따로 보게 해줘", "pane 쪼개/이름/색", "dev 서버 옆에 띄워", "이미지/마크다운 띄워줘", "다른/옆 pane 뭐하는지", "협업", "충돌 피해", "같이 작업", "팀원 pane 정리", "팀 좀비 청소", "빌드 돌려줘", "kasaterm 화면 확인해줘", "스크린샷 찍어서 봐줘" 같은 요청, 또는 멀티 pane 환경(KASATERM_PANE_ID env 존재)에서 코드 작업을 시작하거나 작업 중 만든 스샷·문서를 사용자 화면에 보여줄 때 사용. raw tmux(비-kasaterm) 컨텍스트는 tmux-pane-job 스킬로.
+description: kasaterm/kasaspace pane을 다루고, 그 안에서 긴 잡(빌드·dev server·배포)을 풀 사이클로 돌리고, 작업 결과(이미지·마크다운)를 창 안 pane에 띄우고, 여러 pane의 claude(또는 codex·antigravity 등)가 같은 레포를 동시에 만질 때 충돌 없이 협업하고(board·tell·peek — 다른 기기의 학생까지 한 줄로), kasaterm 자체 UI를 빌드→스폰→스크린샷→확인 사이클로 자체검증하고, TeamCreate로 띄운 팀원 pane의 race·좀비를 청소한다. 사용자가 "모니터 띄워줘", "로그 따로 보게 해줘", "pane 쪼개/이름/색", "dev 서버 옆에 띄워", "이미지/마크다운 띄워줘", "다른/옆 pane 뭐하는지", "협업", "충돌 피해", "같이 작업", "팀원 pane 정리", "팀 좀비 청소", "빌드 돌려줘", "kasaterm 화면 확인해줘", "스크린샷 찍어서 봐줘" 같은 요청, 또는 멀티 pane 환경(KASATERM_PANE_ID env 존재)에서 코드 작업을 시작하거나 작업 중 만든 스샷·문서를 사용자 화면에 보여줄 때 사용. raw tmux(비-kasaterm) 컨텍스트는 tmux-pane-job 스킬로.
 version: 0.4.0
 user-invocable: true
 argument-hint: "[pane 작업 또는 검증할 UI 항목]"
@@ -75,7 +75,13 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 | `resize <id> <ratio>` | 직계 split에서 차지 비중 `0..1`(오케스트레이터 pane 크게). **split 직후 새 pane엔 즉시 안 먹힘**(`no such pane`) → 기존 pane에만 | — |
 | `send [--surface <id>] <text>` | **입력만, 제출 X.** 셸 명령 주입 전용 — 개행은 `$'cmd\n'`로 직접. 사람·claude엔 절대 쓰지 마라 → `tell` | — |
 | `key [--surface <id>] <name>` | 키 1개 전송. name: `enter tab escape up down left right home end pageup pagedown backspace delete` | — |
-| `tell <id> <text>` | send+제출(`\r`). idle claude를 새 턴으로 깨움 (§5) | — |
+| `tell <이름 \| 이름@기계 \| %id \| --address JSON> <text>` | **안전 전달**(§5) — 상대 입력창이 빌 때 붙여넣고 제출하고 **영수증 ID** 를 돌려준다. 이름만 치면 보드에서 주소를 찾고(여럿이면 후보를 보여 주고 멈춤), **다른 기기의 학생도 같은 한 줄**. 승인·질문 화면·초안·한글 조합 중이면 큐에 남는다 | 영수증 JSON(`message_id`·`address`·`state`) |
+| `tell-status <ID> [--address JSON]` | 영수증 조회. 이 기계에서 보낸 ID 는 주소 없이 된다. `accepted`(보관)→`submitted`(입력 전달)→ 또는 `failed`(사유 포함)·`uncertain`. 어느 것도 「모델이 읽었다」는 뜻은 아니다 | 영수증 JSON |
+| `board --all` / `board --local` | **모든 기기**의 방·학생·상태·`address`(기기 id·surface·session·instance). tell 이 쓰는 주소의 정본 (§5) | `result.sources`·`result.panes` |
+| `rooms` | 기기·방별 사람 읽는 표 — 이름이 헷갈릴 때 | plain text |
+| `activity --address '<JSON>' [N]` | 그 pane 의 최근 도구·결과. **주소 JSON 전체**를 `board --all` 에서 그대로 복사(surface_key 하나로는 안 됨) | `result.events` |
+| `board-watch --all --json [--since CURSOR]` | 변경분 스트림 — 별도 감시(Monitor)에 먹인다 | JSON 줄 |
+| `done succeeded\|failed '<요약>'` | 내 작업 완료 보고 — 보드에 실린다 | — |
 
 **배치·현황 조회 (read-only, 부작용 없음)**
 
@@ -367,7 +373,7 @@ kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude\n'
 
 teammate 플래그로 부팅된 세션은 **`~/.claude/teams/<팀>/inboxes/<슬러그(agent-name)>.json`을 스스로 폴링**해서, 새 항목을 `<teammate-message>` user 턴으로 즉시 주입받는다(미드런 OK·발신자 이름·색·summary 표시). SendMessage 도구의 실체가 이 파일 append다 — 즉 **파일만 쓰면 누구든(오케스트레이터·kasaterm·스크립트) 네이티브로 메시지를 꽂을 수 있다.** 전 경로 왕복 재검증 완료(2026-07-13, collab-native 실측): 리더→학생(파일 append) / 학생↔학생(SendMessage 상호 지목) / 학생→리더(team-lead inbox) / idle 자동 알림 — 순서만 지키면(분할→config 선작성→부팅) 수동 스폰으로 완전한 네이티브 팀이 된다.
 
-**⚡ shim 자동 부착은 복원됐다(2026-08-04)**: 2026-07-24~08-03 사이엔 꺼져 있었다. 껐던 이유 둘 — `--resume` 마다 agent 이름 꼬리(sid4)가 바뀌어 **옛 이름 인박스가 고아화**(SendMessage 조용히 유실)되고 유령 인박스가 재시작마다 쌓인 것 — 은 **꼬리가 세션 id 였던 탓**이라, 꼬리를 **pane 번호**(`<슬러그>-p<번호>`)로 바꿔 둘 다 사라졌다: pane 은 생애 동안 번호가 안 바뀌어 몇 번을 resume 해도 같은 인박스고, 인박스 수는 방의 pane 슬롯 수로 묶인다. 진짜 동기였던 `@이름` 칩(입력박스 구분선에서 `/rename` 세션 이름 자리를 뺏음)은 render.rs `strip_teammate_chip` 이 칩만 지워 해결한다. 이제 pane claude 는 전부 팀원이라 **SendMessage 가 기본**이고, env `KASATERM_TEAM`/`KASATERM_AGENT` 도 다시 자동 설정된다. tell 은 SendMessage 가 안 닿는 상대(다른 방·bg 세션·비-claude)에만. **config.json 없이도 수신 주입·SendMessage 발신이 전부 동작한다(v2.1.211 재실측)** — 아래 config 선작성은 idle 자동보고·`claude agents` 명부가 필요한 오케스트레이션용이고, 단순 지시·보고엔 불필요.
+**⚡ shim 자동 부착은 복원됐다(2026-08-04)**: 2026-07-24~08-03 사이엔 꺼져 있었다. 껐던 이유 둘 — `--resume` 마다 agent 이름 꼬리(sid4)가 바뀌어 **옛 이름 인박스가 고아화**(SendMessage 조용히 유실)되고 유령 인박스가 재시작마다 쌓인 것 — 은 **꼬리가 세션 id 였던 탓**이라, 꼬리를 **pane 번호**(`<슬러그>-p<번호>`)로 바꿔 둘 다 사라졌다: pane 은 생애 동안 번호가 안 바뀌어 몇 번을 resume 해도 같은 인박스고, 인박스 수는 방의 pane 슬롯 수로 묶인다. 진짜 동기였던 `@이름` 칩(입력박스 구분선에서 `/rename` 세션 이름 자리를 뺏음)은 render.rs `strip_teammate_chip` 이 칩만 지워 해결한다. 이제 pane claude 는 전부 팀원이라 **SendMessage 가 기본**이고, env `KASATERM_TEAM`/`KASATERM_AGENT` 도 다시 자동 설정된다. tell 은 SendMessage 가 안 닿는 상대(다른 방·**다른 기기**·bg 세션·비-claude)에 — 다른 기기는 tell 뿐이다. **config.json 없이도 수신 주입·SendMessage 발신이 전부 동작한다(v2.1.211 재실측)** — 아래 config 선작성은 idle 자동보고·`claude agents` 명부가 필요한 오케스트레이션용이고, 단순 지시·보고엔 불필요.
 
 **⚠️ detach(←←) 포크는 팀에서 이탈한다(2026-07-16 실측)**: detach는 같은 프로세스 유지가 아니라 **데몬이 argv를 재구성한 새 포크 프로세스**다 — teammate 트리플·`--append-system-prompt`(persona)·`--model`이 전부 유실되고 인박스 폴러가 안 돈다(인박스에 써도 미소비 실측). env도 원 pane이 아니라 **데몬을 낳은 옛 pane의 env**를 물려받아 계보가 틀리다. 백그라운드 포크에 SendMessage는 닿지 않는다 — 팀원으로 되살리려면 pane에서 `claude --resume <포크 sid>`에 **트리플을 명시 부착**해 재부팅해야 한다(2026-07-24 자동 재부착 제거 — 플래그 없이 resume하면 일반 세션으로 돌아올 뿐 팀원이 아니다). persona는 kasaterm SessionStart 훅이 세션 바인딩(/persona 엔드포인트)으로 자동 재주입한다.
 
@@ -798,16 +804,16 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 
 ---
 
-## 5) pane 협업 — board(현황) + SendMessage(소통) + board-watch(대기)
+## 5) pane 협업 — board(현황) + tell(소통, 모든 기기) + SendMessage(같은 팀 안) + board-watch(대기)
 
 §4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 떠 있는 pane들끼리 — claude든 codex·antigravity든 — 소통하고 충돌을 피한다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용. 네 축이다:
 
 - **board** — 누가 뭘 하나. `kasaterm-cli board`로 **직접 조회**한다(옛 `kasaterm-board-context.py` 자동주입은 폐기 — settings 미등록). 충돌 회피·합류 판단에 쓴다.
-- **SendMessage** — **pane 간 소통의 기본**(2026-08-04 shim 자동 트리플 복원 후). `to:` 는 상대의 `$KASATERM_AGENT`. 인박스 네이티브 주입이라 상대 입력창을 안 건드리고 발신자 이름·색으로 렌더된다. **유휴로 프롬프트만 떠 있는 pane 도 5초 안에 읽는다**(실측 2026-08-04 — 넣자마자 드레인+턴 시작). 깨우려고 tell 을 덧댈 필요 없다.
+- **SendMessage** — **같은 기계·같은 팀(방) 안**의 기본. `to:` 는 상대의 `$KASATERM_AGENT`. ⚠️ **다른 기기의 학생에겐 안 닿는다** — ListAgents 에 안 뜬다(2026-09-16 유령 세션 걷음). 기기를 넘는 말은 전부 tell. 인박스 네이티브 주입이라 상대 입력창을 안 건드리고 발신자 이름·색으로 렌더된다. **유휴로 프롬프트만 떠 있는 pane 도 5초 안에 읽는다**(실측 2026-08-04 — 넣자마자 드레인+턴 시작). 깨우려고 tell 을 덧댈 필요 없다.
   - ⚠️ **팀이 다르면 조용히 사라진다.** 팀은 방(cwd) 단위라 **다른 레포에 띄운 학생은 다른 팀**이다. 이때 SendMessage 는 실패하지 않고 *내 팀* 인박스에 그 이름의 고아 파일을 만들 뿐이며, 상대는 자기 팀 파일만 본다. 실사고(2026-08-04): mission-control 방에서 demo-showcase 방의 코하루에게 브리프 → 무응답. 내 팀 인박스 `koharu-p7.json` 1121B, 코하루가 읽는 파일은 `[]`.
   - 보내기 전에 `kasaterm-cli board` 로 상대의 **`team` 이 내 `$KASATERM_TEAM` 과 같은지** 확인해라 — board 가 `agent`·`team` 을 pane 프로세스에서 실측해 싣는다(2026-08-04 추가). 이름을 `<슬러그>-p<번호>` 규칙으로 짐작하지 마라: 어긋나도 오류가 안 난다.
   - **팀이 다르면 tell 로 지시하고, 브리프에 「보고는 하지 마라」고 적어라.** 반대 방향도 안 닿으므로 그 학생의 보고는 영영 오지 않는다 — 결과는 커밋과 `peek`·`transcript` 로 오케스트레이터가 직접 확인한다.
-- **tell** — **그 외 전부의 기본 채널**: 스폰 관계 없는 같은 방 pane·다른 방·bg 세션·비-claude(codex·antigravity·셸)·학생→오케스트레이터 보고·`/model` 같은 슬래시 명령 주입·idle claude 즉시 깨우기. 2026-07-24부터 받는 pane에 발신 학생 프사+학생색으로 렌더되어 거노 입력과 구분된다. 서버가 발신자를 기록해 웹뷰 대화에도 발신 학생 이름으로 뜬다.
+- **tell** — **그 외 전부의 정본 채널, 그리고 다른 기기 학생에겐 유일한 채널**: 스폰 관계 없는 같은 방 pane·다른 방·**다른 기기**·bg 세션·비-claude(codex·antigravity)·학생→오케스트레이터 보고·`/model` 같은 슬래시 명령 주입·idle claude 즉시 깨우기. `kasaterm-cli tell 이름@기계 "본문"` 한 줄, 영수증으로 확인(아래). 2026-07-24부터 받는 pane에 발신 학생 프사+학생색으로 렌더되어 거노 입력과 구분된다. 서버가 발신자를 기록해 웹뷰 대화에도 발신 학생 이름으로 뜬다.
 - **wait** — 동료 작업이 끝나길 기다릴 때. `tell`로 깨우거나 `board`를 반복 조회하지 말고, 상대의 보고를 그냥 받는다. 보고가 올 수 없는 상태만 `board-watch`로 지켜본다(아래).
 
 ### board — 각 pane이 뭘 하는지 (직접 조회)
@@ -836,28 +842,34 @@ kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|attention)|
 
 빌드·CI·서버 로그처럼 **기계**를 지켜보는 것은 규칙이 다르다 — 한 번만 알면 되는 것(빌드 끝남)은 Bash `run_in_background`로 스스로 끝나는 명령을 던지고 턴을 놓고, 생길 때마다 알아야 하는 것(오류 발생)만 Monitor다. 자기 턴 안에서 `sleep`을 도는 것이 셋 중 가장 비싸다.
 
-### tell — 폴백·TUI 조작 채널 (send+제출)
+### tell — 안전 전달 채널 (같은 기기든 다른 기기든 한 줄)
 
 ```bash
-kasaterm-cli tell %3 "socket.rs 동결 해제 — 이어서 진행해"
+kasaterm-cli tell 미도리 "socket.rs 동결 해제 — 이어서 진행해"          # 이름만 — 보드에서 주소를 찾는다
+kasaterm-cli tell 미도리@nachoneko "칸반 흐리게 하는 건 내가 맡을게"    # 같은 이름이 여럿이면 @기계
+kasaterm-cli tell %3 "…"                                              # 같은 기기의 pane 번호도 된다
+kasaterm-cli tell-status kt1.1789582774860.13972-…                    # 영수증 — accepted → submitted
 ```
 
-`tell`은 대상 PTY에 텍스트 주입 후 `\r`로 제출 — idle claude를 새 user turn으로 깨운다. focus는 안 바뀐다. **SendMessage는 본인이 스폰한 학생에게만, 그 외 전부 tell이 기본**(2026-07-24 거노 확정). 발신 pane의 `$KASATERM_CHARACTER` 마커가 자동 프리픽스되어 받는 pane에 발신 학생 프사+학생색으로 렌더된다(2026-07-24). ⚠️ **그러니 본문에 발신자 이름을 직접 쓰지 말 것** — 「아로나: 확인했어요」가 아니라 「확인했어요」. 자동 마커 위에 한 번 더 찍혀 중복으로 보인다(2026-08-02 거노 지적). kasaterm-cli가 발신 메타(from_pane+plain)를 동봉하고 서버가 방 기준 `messages.jsonl`에 기록해, 웹뷰 대화에도 발신 학생 이름 버블로 뜬다(2026-07-12).
-
-- **상대가 working/선택지 대기면 입력창에 큐잉**되고 즉시 처리 안 된다. 급한 게 아니면 `board-watch`로 idle을 기다렸다 tell — 브리프 여러 건을 working 상대에게 연달아 쏘지 말 것.
-- tell 텍스트는 **개행 없는 한 줄**로(개행=조기 제출).
-- `send`(=`surface.send_text`)는 `\r` 없이 글자만 남는다 — 입력창에 텍스트만 걸린 채 **제출 안 됨**(실측 2026-07-01). `send`는 오직 셸 명령 주입(개행 직접 포함)용, 동료에게 보내는 텍스트는 무조건 `tell`.
-- (구)`kasacollab msg`는 내부에서 tell을 타는 별칭이 됐다(2026-07-12) — 새 자동화엔 tell을 직접 써라. `kasacollab task add/list`(작업 분담 선언)는 별개 기능으로 유지.
+- **주소는 보드가 정본이다.** `kasaterm-cli board --all` 의 `panes[].address`(기기 id·surface·session·instance)를 그대로 쓴다. 이름으로 치면 CLI 가 그걸 대신 찾아 준다 — 세션 이름·창 번호로 주소를 **짐작하지 마라**. 후보가 여럿이면 CLI 가 `이름@기기 · 방 · 상태` 목록을 내고 멈춘다 → `이름@기계` 로 다시.
+- **다른 기기라고 다른 방법이 없다.** 주소에 기기 id 가 들어 있어 카사텀이 알아서 그 기계로 보낸다(직통 터널 → 없으면 관문 우회). ⚠️ **`ssh` 로 그 기계에 들어가 거기 CLI 를 치지 마라** — 소켓 경로를 몰라 `/tmp/cmux.sock 없음` 으로 실패하고, 애초에 필요 없다(실사고 2026-09-16 아리스).
+- **영수증을 읽어라.** `accepted` 는 보관만, `submitted` 는 붙여넣기+Enter 성공, `failed` 는 사유 포함(대상 PTY 교체·신원 바뀜·입력 닫힘 등), `uncertain` 은 모름 — **새 ID 로 다시 보내지 마라**, `tell-status` 로 같은 ID 를 확인하고 상대의 답·보고·결과로 판단한다. 어느 상태도 「모델이 읽었다」는 뜻은 아니다.
+- **상대가 working 이어도 보낸다** — 큐에 걸렸다가 입력창이 비면 들어간다. 승인·질문 화면, 사람이 치던 초안, 한글 조합 중이면 그것을 보존한 채 기다린다. 그러니 브리프 여러 건을 연달아 쏘지 말고 한 건에 목적·담당·완료 조건을 담아라.
+- 받는 pane 엔 발신 학생 프사+학생색으로 렌더된다 — **본문에 발신자 이름을 붙이지 마라.** 텍스트는 개행 없는 한 줄(긴 본문은 `--stdin`).
+- `send` 는 셸 명령 주입 전용(`\r` 없이 글자만 남는다) — 동료에게 하는 말은 무조건 `tell`. (구)`kasacollab msg` 는 tell 별칭.
 
 ### 함정
 
 | 안 됨 | 왜 |
 |---|---|
 | 다른 방(cwd) pane에 SendMessage | 팀명이 방 단위라 인박스가 갈린다 — 안 닿으면 tell 로 |
+| **다른 기기** 학생에게 SendMessage·ListAgents | 유령 세션은 걷어냈다(2026-09-16) — 원격 학생은 ListAgents 에 안 뜬다. `tell 이름@기계` 뿐 |
+| `ssh 기계 'kasaterm-cli …'` 로 남의 기계 CLI | 소켓 경로를 몰라 실패 — 이 기계의 `board --all`·`tell` 이 그 기계까지 간다 |
+| `activity --address` 에 surface_key 만 | 주소 JSON **전체**가 필요(`inspect requires surface_id`) — `board --all` 에서 복사 |
 | working 상대에게 브리프 연발 tell | 입력창 큐잉·선택지 오염. 브리프는 SendMessage(인박스 주입 — 상대 턴 안 깨뜨림), tell 밖에 없는 상대면 board-watch로 idle 기다렸다 1건 |
 | inbox(`kasacollab inbox`)를 소통 채널로 설계 | 모모톡/inbox UI는 폐기(2026-07-12, board tell-피드로 대체). msg는 tell 별칭일 뿐 |
 | `send`로 깨우려 함 | `\r` 없음 → 글자만. idle 깨우기는 `tell` |
-| `tell`에 surface_id 생략 | 항상 `<surface_id> <text>`. 자기 자신엔 안 씀 |
+| `tell`에 대상 생략 | 항상 `<이름 \| 이름@기계 \| %id> <text>`. 자기 자신엔 안 씀 |
 | board가 비어 보임 | 미bind이거나, **소켓 탈취**(claude pane에서 `cargo run`이 메인 .app 소켓 가로챔 — 2026-06-08 수정). 인스턴스 난립 의심 |
 | board status 단독 신뢰 | `agents --json` 2s 캐시 지연으로 생성 중이 idle로 뜰 수 있음 — board-watch 헛울림 포함, 판단 전 `peek`로 실화면 확인 |
 
