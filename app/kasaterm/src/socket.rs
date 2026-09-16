@@ -2795,7 +2795,22 @@ impl Backend for PtyBackend {
                     if word == flag { words.get(i+1).filter(|sid|is_uuid(sid)).map(|sid|sid.to_string()) }
                     else { word.strip_prefix(&format!("{flag}=")).filter(|sid|is_uuid(sid)).map(str::to_owned) }
                 }));
-                value.ok_or_else(||anyhow::anyhow!("full current Claude session unavailable; tell withheld"))?
+                match value {
+                    Some(sid) => sid,
+                    None => {
+                        // 새로 뜬 claude 는 argv 에 세션이 없다(`--resume` 없이 시작). 그 세션은 claude
+                        // 자신이 SessionStart 훅으로 이 pane 에 결속해 둔 기록 파일이다 — 보드 주소의
+                        // session_id 도 같은 자리에서 온다. 그것마저 없으면 보류한다(2026-09-17:
+                        // 새로 띄운 모모이에게 tell 이 「session unavailable」로 영영 안 닿았다).
+                        let cwd = pid_cwd(shell);
+                        let declared = cwd.as_deref().and_then(|cwd| roster_transcript(surface, cwd))
+                            .or_else(|| self.bound.lock().unwrap().get(surface).cloned())
+                            .filter(|path| path.exists());
+                        declared.as_ref().and_then(|p| p.file_stem()).and_then(|s| s.to_str())
+                            .filter(|s| is_uuid(s)).map(str::to_owned)
+                            .ok_or_else(||anyhow::anyhow!("full current Claude session unavailable; tell withheld"))?
+                    }
+                }
             }
             kasa_pty::AgentKind::Codex => {
                 let roots: HashSet<_> = codex_open_rollouts(pid).iter().filter_map(|path| {
