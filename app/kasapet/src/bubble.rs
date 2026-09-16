@@ -99,7 +99,10 @@ pub fn preview(text: &str, viewport: (f32, f32), requested_pt: f32) -> Option<Pr
     }
     let margin = 8.0_f32.min(viewport.0 / 4.0).min(viewport.1 / 4.0);
     let pad = (HALO + 1) as f32 * 2.0 / SCALE;
-    let font = FontRef::from_index(font_data(), 0)?;
+    let faces = faces();
+    if faces.is_empty() {
+        return None;
+    }
     let mut chars: Vec<char> = text.trim().chars().take(2049).collect();
     let input_cut = chars.len() > 2048;
     chars.truncate(2048);
@@ -111,9 +114,9 @@ pub fn preview(text: &str, viewport: (f32, f32), requested_pt: f32) -> Option<Pr
         if width < 1.0 || height <= pad {
             continue;
         }
-        let Some(mut pt) = point_size(&font, &chars, requested_pt, width, height, pad) else { continue };
+        let Some(mut pt) = point_size(&faces, &chars, requested_pt, width, height, pad) else { continue };
         let fits = |body: &str, pt: f32| {
-            let layout = layout(&font, body, pt * SCALE, width * SCALE);
+            let layout = layout(&faces, body, pt * SCALE, width * SCALE);
             layout.width.ceil() / SCALE + pad <= width + pad
                 && (layout.lines.len() as f32 * layout.line_h).ceil() / SCALE + pad <= height
         };
@@ -157,15 +160,14 @@ pub fn preview(text: &str, viewport: (f32, f32), requested_pt: f32) -> Option<Pr
 
 /// 상자에 맞는 글자 크기 — 요청한 크기에서 시작해, 한 줄 높이나 가장 넓은 글자가 상자를
 /// 넘으면 그만큼 줄인다.
-fn point_size(font: &FontRef, chars: &[char], requested_pt: f32, width: f32, height: f32, pad: f32) -> Option<f32> {
+fn point_size(faces: &[FontRef], chars: &[char], requested_pt: f32, width: f32, height: f32, pad: f32) -> Option<f32> {
     let mut pt = requested_pt.min((height - pad) / LINE_SPACING);
-    let metrics = font.glyph_metrics(&[]).scale(pt * SCALE);
-    let map = font.charmap();
+    let metrics: Vec<_> = faces.iter().map(|face| face.glyph_metrics(&[]).scale(pt * SCALE)).collect();
     let widest = chars
         .iter()
         .copied()
         .chain(['…'])
-        .map(|c| metrics.advance_width(map.map(c as u32)) / SCALE)
+        .map(|c| { let (face, gid) = glyph_for(faces, c); metrics[face].advance_width(gid) / SCALE })
         .fold(0.0_f32, f32::max);
     if widest > width {
         pt *= width / widest;
@@ -188,13 +190,62 @@ const FALLBACK_FONT: &str = "/System/Library/Fonts/AppleSDGothicNeo.ttc";
 /// 되는 조건이라 레포에 넣었다(assets/fonts/LICENSE-Maplestory.txt).
 const BUNDLED_FONT: &str = "Maplestory Bold.ttf";
 
-fn font_data() -> &'static [u8] {
-    static FONT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    FONT.get_or_init(|| {
-        bundled_font_path()
+/// 첫 글꼴에 없는 글자를 빌려 오는 순서. 나쵸의 카오모지 「(=^･ω･^=)」「(｡•ᴗ•｡)」는
+/// 반각 가나·중점·특수 기호라 메이플스토리체엔 없고, 없는 글자는 네모로 찍힌다
+/// (2026-09-17 「카오모지 깨진다」). 히라기노가 반각 가나·중점을, Arial Unicode 가 나머지
+/// 기호를 맡는다(실측: 30자 중 ᴗ 하나만 어느 글꼴에도 없다).
+const BORROWED_FONTS: [&str; 3] = [
+    "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    FALLBACK_FONT,
+];
+
+/// 글꼴 사슬의 바이트 — 첫 칸이 주 글꼴, 나머지가 빌려 오는 순서. 없는 파일은 건너뛴다.
+fn faces_data() -> &'static [Vec<u8>] {
+    static FONTS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+    FONTS.get_or_init(|| {
+        let primary = bundled_font_path()
             .and_then(|p| std::fs::read(p).ok())
-            .unwrap_or_else(|| std::fs::read(FALLBACK_FONT).unwrap_or_default())
+            .unwrap_or_else(|| std::fs::read(FALLBACK_FONT).unwrap_or_default());
+        let mut out = vec![primary];
+        for path in BORROWED_FONTS {
+            if let Ok(bytes) = std::fs::read(path) {
+                if !out.iter().any(|have| have.len() == bytes.len() && *have == bytes) {
+                    out.push(bytes);
+                }
+            }
+        }
+        out
     })
+}
+
+/// 사슬의 글꼴들. 파싱이 안 되는 파일은 빠진다.
+fn faces() -> Vec<FontRef<'static>> {
+    faces_data().iter().filter_map(|data| FontRef::from_index(data, 0)).collect()
+}
+
+/// 어느 시스템 글꼴에도 없는 글자의 닮은꼴. 「(｡•ᴗ•｡)」의 ᴗ(작은 대문자 U)가 그렇다 —
+/// 아래가 둥근 ◡ 로 찍으면 같은 얼굴이다.
+fn lookalike(ch: char) -> Option<char> {
+    match ch {
+        'ᴗ' | 'ᵕ' => Some('◡'),
+        _ => None,
+    }
+}
+
+/// 이 글자를 가진 첫 글꼴과 그 글리프. 어느 글꼴에도 없으면 닮은꼴을, 그것도 없으면 주
+/// 글꼴의 빈 글리프(0).
+fn glyph_for(faces: &[FontRef], ch: char) -> (usize, u16) {
+    for (i, face) in faces.iter().enumerate() {
+        let gid = face.charmap().map(ch as u32);
+        if gid != 0 {
+            return (i, gid);
+        }
+    }
+    match lookalike(ch) {
+        Some(other) => glyph_for(faces, other),
+        None => (0, 0),
+    }
 }
 
 /// 앱 번들 Resources 아니면 개발 트리의 assets/fonts.
@@ -209,6 +260,7 @@ fn bundled_font_path() -> Option<std::path::PathBuf> {
 }
 
 struct Glyph {
+    face: usize,
     gid: u16,
     adv: f32,
 }
@@ -224,10 +276,9 @@ struct Layout {
 
 /// 낱말이 있으면 낱말에서, 없으면 글자에서 끊는다 — 한국어는 띄어쓰기 없이 오래
 /// 이어지는 문장이 많아 글자 단위가 없으면 한 줄이 상한을 뚫는다. `\n` 은 그대로 줄.
-fn layout(font: &FontRef, text: &str, px: f32, max_w: f32) -> Layout {
-    let m = font.metrics(&[]).scale(px);
-    let metrics = font.glyph_metrics(&[]).scale(px);
-    let charmap = font.charmap();
+fn layout(faces: &[FontRef], text: &str, px: f32, max_w: f32) -> Layout {
+    let m = faces[0].metrics(&[]).scale(px);
+    let metrics: Vec<_> = faces.iter().map(|face| face.glyph_metrics(&[]).scale(px)).collect();
     let mut lines: Vec<Vec<Glyph>> = Vec::new();
     let mut cur: Vec<Glyph> = Vec::new();
     let mut cur_w = 0.0_f32;
@@ -240,8 +291,8 @@ fn layout(font: &FontRef, text: &str, px: f32, max_w: f32) -> Layout {
             last_space = None;
             continue;
         }
-        let gid = charmap.map(ch as u32);
-        let adv = metrics.advance_width(gid);
+        let (face, gid) = glyph_for(faces, ch);
+        let adv = metrics[face].advance_width(gid);
         if cur_w + adv > max_w && !cur.is_empty() {
             match last_space {
                 Some(i) => {
@@ -261,7 +312,7 @@ fn layout(font: &FontRef, text: &str, px: f32, max_w: f32) -> Layout {
             last_space = Some(cur.len());
         }
         cur_w += adv;
-        cur.push(Glyph { gid, adv });
+        cur.push(Glyph { face, gid, adv });
     }
     lines.push(cur);
     let width = lines.iter().map(|l| sum(l)).fold(0.0_f32, f32::max);
@@ -281,9 +332,12 @@ fn raster(text: &str, max_w: f32, pt: f32) -> Option<(Vec<u8>, u32, u32)> {
     if text.is_empty() {
         return None;
     }
-    let font = FontRef::from_index(font_data(), 0)?;
+    let faces = faces();
+    if faces.is_empty() {
+        return None;
+    }
     let px = pt * SCALE;
-    let lay = layout(&font, text, px, max_w * SCALE);
+    let lay = layout(&faces, text, px, max_w * SCALE);
     // 글자가 위아래로 삐져나오지 않게 한 줄 높이 안에 ascent+descent 를 가운데 둔다.
     // 테두리가 잘리지 않게 사방을 그만큼 넓혀 둔다.
     let pad = HALO as u32 + 1;
@@ -292,7 +346,6 @@ fn raster(text: &str, max_w: f32, pt: f32) -> Option<(Vec<u8>, u32, u32)> {
     let mut buf = vec![0u8; (w * h * 4) as usize];
 
     let mut ctx = ScaleContext::new();
-    let mut scaler = ctx.builder(font).size(px).hint(true).build();
     let mut render = Render::new(&[
         Source::ColorOutline(0),
         Source::ColorBitmap(StrikeWith::BestFit),
@@ -300,10 +353,21 @@ fn raster(text: &str, max_w: f32, pt: f32) -> Option<(Vec<u8>, u32, u32)> {
         Source::Bitmap(StrikeWith::BestFit),
     ]);
     render.format(Format::Alpha);
+    // 글꼴마다 한 바퀴 — 스케일러는 한 글꼴에 하나만 살 수 있어, 줄을 따라가며 글꼴을
+    // 바꿔 끼우는 대신 같은 자리를 글꼴 수만큼 지나간다(사슬은 넷을 안 넘는다).
+    for (face_index, face) in faces.iter().enumerate() {
+        if !lay.lines.iter().flatten().any(|g| g.face == face_index) {
+            continue;
+        }
+    let mut scaler = ctx.builder(*face).size(px).hint(true).build();
     let mut baseline = lay.ascent + (lay.line_h - (lay.ascent + lay.descent)) / 2.0;
     for line in &lay.lines {
         let mut pen = 0.0_f32;
         for g in line {
+            if g.face != face_index {
+                pen += g.adv;
+                continue;
+            }
             if let Some(img) = render.render(&mut scaler, g.gid) {
                 let (pw, ph) = (img.placement.width as i32, img.placement.height as i32);
                 let x0 = pen.round() as i32 + img.placement.left + pad as i32;
@@ -343,6 +407,7 @@ fn raster(text: &str, max_w: f32, pt: f32) -> Option<(Vec<u8>, u32, u32)> {
             pen += g.adv;
         }
         baseline += lay.line_h;
+    }
     }
 
     // 글자 밑에 어두운 테두리를 깔아 어떤 바탕화면 위에서도 읽힌다. 글자 알파를 조금
@@ -439,9 +504,27 @@ mod tests {
     use super::*;
 
     fn lines_of(text: &str, max_w: f32) -> (usize, f32) {
-        let font = FontRef::from_index(font_data(), 0).expect("시스템 한글 폰트");
-        let lay = layout(&font, text, FONT_PT * SCALE, max_w * SCALE);
+        let lay = layout(&faces(), text, FONT_PT * SCALE, max_w * SCALE);
         (lay.lines.len(), lay.width / SCALE)
+    }
+
+    /// 나쵸의 카오모지는 주 글꼴에 없어도 사슬에서 빌려 온다 — 네모로 찍히면 말투가
+    /// 깨진 것처럼 보인다. 어느 글꼴에도 없는 ᴗ 는 닮은꼴 ◡ 로 찍는다.
+    #[test]
+    fn kaomoji_glyphs_are_borrowed_from_the_font_chain() {
+        let faces = faces();
+        assert!(faces.len() >= 2, "빌려 올 글꼴이 없다: {}", faces.len());
+        let mut missing = Vec::new();
+        for ch in "(=^･ω･^=)(=｀ω´=)(=ↀωↀ=)(｡•ᴗ•｡)(・ω・)(｡>﹏<｡)(´･_･`)(ﾉ´ヮ`)ﾉ*:･ﾟ♪…·■".chars() {
+            if glyph_for(&faces, ch).1 == 0 {
+                missing.push(ch);
+            }
+        }
+        assert!(missing.is_empty(), "빌려 오지 못한 글자: {missing:?}");
+        // 빌려 온 글자도 실제로 찍힌다.
+        let (buf, w, h) = raster("･ω･", 260.0, FONT_PT).unwrap();
+        assert!(w > 0 && h > 0);
+        assert!(buf.chunks(4).filter(|p| p[3] > 0 && p[0] > 128).count() > 30);
     }
 
     #[test]

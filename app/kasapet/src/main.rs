@@ -116,6 +116,8 @@ struct App {
     ask_auto: bool,
     /// 켜질 때 나쵸가 한 번 말을 걸었나.
     greeted: bool,
+    /// 사람이 입력 바를 끌어 옮긴 만큼(제자리 기준). state.json 에 함께 남긴다.
+    ask_offset: (f64, f64),
     /// 나쵸가 이 답에 골라 준 동작 그룹. 목록에 있는 것만 받는다.
     nacho_group: Option<String>,
     /// 나쵸가 켠 표정의 번호 — 답을 내리거나 다음 답이 오면 끈다.
@@ -923,6 +925,7 @@ impl App {
             if self.chat_open() { self.close_chat(); }
             if self.ask_bar.is_none() {
                 self.ask_bar = self.win.as_ref().and_then(|win| ask_bar::Bar::new(win));
+                if let Some(bar) = &self.ask_bar { bar.set_offset(self.ask_offset); }
             }
             let Some(bar) = &self.ask_bar else { self.action_error("유리 바를 열지 못했어요."); return };
             if focus { set_hand_cursor(false); bar.show(); } else { bar.show_quiet(); }
@@ -1060,8 +1063,14 @@ impl App {
             // 다른 창으로 넘어가면 접는다. 늘 떠 있는 입력줄은 바탕화면에 얹어 둔 판이
             // 되고, 사람은 그 판을 곧 안 보게 된다 — 상시 표시는 그걸 알고 켜는 것이다.
             if !self.preferences.ask_always && self.ask_bar.as_ref().is_some_and(|bar| bar.lost_focus()) { self.close_ask(); }
-            if let Some(bar) = self.ask_bar.as_ref().filter(|bar| bar.visible()) {
+            let moved = self.ask_bar.as_ref().filter(|bar| bar.visible()).map(|bar| {
                 bar.sync(HEADROOM * self.scale as f64);
+                bar.offset()
+            });
+            // 사람이 끌어 옮긴 자리는 그때 적어 둔다 — 종료를 기다리면 SIGTERM 으로 죽을 때 못 남긴다.
+            if let Some(offset) = moved.filter(|o| *o != self.ask_offset) {
+                self.ask_offset = offset;
+                self.save_state();
             }
         }
     }
@@ -1085,8 +1094,8 @@ impl App {
     fn save_state(&self) {
         let Some(d) = &self.pet_dir else { return };
         let j = format!(
-            "{{\"x\":{:.0},\"y\":{:.0},\"scale\":{:.3}}}",
-            self.x, self.y, self.chat_restore_scale.unwrap_or(self.scale)
+            "{{\"x\":{:.0},\"y\":{:.0},\"scale\":{:.3},\"ask_dx\":{:.0},\"ask_dy\":{:.0}}}",
+            self.x, self.y, self.chat_restore_scale.unwrap_or(self.scale), self.ask_offset.0, self.ask_offset.1
         );
         let _ = std::fs::write(d.join("state.json"), j);
     }
@@ -1974,11 +1983,14 @@ fn main() {
     let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let pet_dir = dir.parent().filter(|p| p.join("current").exists()).map(|p| p.to_path_buf());
     let (mut x, mut y, mut scale) = (60.0_f64, 80.0_f64, 1.0_f32);
+    let mut ask_offset = (0.0_f64, 0.0_f64);
     if let Some(t) = pet_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join("state.json")).ok()) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
             x = v.get("x").and_then(|n| n.as_f64()).unwrap_or(x);
             y = v.get("y").and_then(|n| n.as_f64()).unwrap_or(y);
             scale = v.get("scale").and_then(|n| n.as_f64()).unwrap_or(scale as f64) as f32;
+            let num = |k: &str| v.get(k).and_then(|n| n.as_f64()).filter(|n| n.is_finite()).unwrap_or(0.0);
+            ask_offset = (num("ask_dx"), num("ask_dy"));
         }
     }
     let preferences = pet_dir.as_ref().map(|d| kasa_pet_config::read(d)).unwrap_or_default();
@@ -2017,7 +2029,7 @@ fn main() {
         popup: None,
         menu_probe_started:None,menu_probe_phase:0,menu_probe_frames:0,
         menu_probe_motion:0.0,menu_probe_mesh:0,menu_probe_motion_checked:false,
-        said_at: std::time::Instant::now(), urgent: false, bounce: None, reaction_once: false, nacho: Nacho::Idle, ask_auto: false, greeted: false, nacho_group: None, nacho_expression: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
+        said_at: std::time::Instant::now(), urgent: false, bounce: None, reaction_once: false, nacho: Nacho::Idle, ask_auto: false, greeted: false, ask_offset, nacho_group: None, nacho_expression: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
         catalog, expressions: catalog::Expressions::default(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
         shot_path: std::env::var("KASAPET_SHOT").ok(),

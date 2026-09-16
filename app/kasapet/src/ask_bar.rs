@@ -1,6 +1,8 @@
-//! 펫 머리 위에 붙는 짧은 유리 바 — 한 줄 묻는 자리다. 답은 여기 안 찍히고 펫 말풍선으로
+//! 펫 머리 옆에 붙는 짧은 유리 바 — 한 줄 묻는 자리다. 답은 여기 안 찍히고 펫 말풍선으로
 //! 나간다(2026-09-17 지시 「답변이 채팅창 밖으로」) — 바는 입력 한 줄이 전부라 늘 띄워
-//! 둬도 바탕화면을 가리지 않는다.
+//! 둬도 바탕화면을 가리지 않는다. 머리 **위**가 아니라 **옆**인 것은 말풍선과 겹치지
+//! 않기 위해서다(같은 날 「입력하는 것도 안 겹치게」) — 위는 나쵸가 말하는 자리다.
+//! 빈 곳을 잡고 끌면 옮겨지고, 옮긴 만큼은 펫을 따라다니며 유지된다.
 //!
 //! 대화창(`chat_panel.rs`)과 따로 두는 이유는 쓰는 순간이 다르기 때문이다. 저쪽은
 //! 앉아서 읽는 판이라 360x260 을 차지해도 되지만, 이쪽은 하던 일을 멈추지 않은 채
@@ -24,6 +26,23 @@ const ROW: f64 = 46.0;
 pub enum Event { Send(String), Close }
 
 struct Ivars { input: Retained<NSTextField>, events: Rc<RefCell<Vec<Event>>> }
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "KasapetAskBody"]
+    struct Body;
+    unsafe impl NSObjectProtocol for Body {}
+    impl Body {
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn first_mouse(&self, _event: Option<&NSEvent>) -> bool { true }
+        /// 입력칸·× 를 비켜 간 곳을 잡으면 바가 끌린다.
+        #[unsafe(method(mouseDown:))]
+        fn drag(&self, event: &NSEvent) {
+            if let Some(window) = self.window() { window.performWindowDragWithEvent(event); }
+        }
+    }
+);
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -53,6 +72,10 @@ pub struct Bar {
     _actions: Retained<Actions>,
     events: Rc<RefCell<Vec<Event>>>,
     origin: RefCell<NSPoint>,
+    /// 사람이 끌어 옮긴 만큼. 제자리(머리 옆)에 이걸 더한 곳이 바의 자리다.
+    offset: RefCell<(f64, f64)>,
+    /// 지난 동기화 때 펫 창의 자리 — 펫이 움직인 프레임에는 바의 이동을 사람 손으로 안 친다.
+    parent_origin: RefCell<(f64, f64)>,
     shown: RefCell<std::time::Instant>,
 }
 
@@ -82,12 +105,14 @@ impl Bar {
         panel.setHasShadow(false);
         panel.setHidesOnDeactivate(false);
         panel.setBecomesKeyOnlyIfNeeded(false);
-        panel.setMovable(false);
+        panel.setMovable(true);
+        panel.setMovableByWindowBackground(false);
         for button in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
             if let Some(button) = panel.standardWindowButton(button) { button.setHidden(true); }
         }
 
-        let body = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, WIDTH, ROW));
+        let body: Retained<Body> = unsafe { msg_send![Body::alloc(mtm), initWithFrame: rect(0.0, 0.0, WIDTH, ROW)] };
+        let body: Retained<NSView> = Retained::into_super(body);
         let input = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect(14.0, 11.0, WIDTH - 14.0 - 34.0, 24.0));
         input.setPlaceholderString(Some(&NSString::from_str("나쵸에게 물어보세요 — 이 창이든, 모든 기기든")));
         input.setFont(Some(&NSFont::systemFontOfSize(13.0)));
@@ -118,6 +143,8 @@ impl Bar {
         Some(Self {
             panel, parent, body, input, _actions: actions, events,
             origin: RefCell::new(NSPoint::new(0.0, 0.0)),
+            offset: RefCell::new((0.0, 0.0)),
+            parent_origin: RefCell::new((f64::NAN, f64::NAN)),
             shown: RefCell::new(std::time::Instant::now()),
         })
     }
@@ -140,6 +167,8 @@ impl Bar {
         self.panel.makeFirstResponder(Some(&*self.input));
     }
     pub fn hide(&self) { self.panel.orderOut(None); }
+    pub fn offset(&self) -> (f64, f64) { *self.offset.borrow() }
+    pub fn set_offset(&self, offset: (f64, f64)) { *self.offset.borrow_mut() = offset; }
     pub fn visible(&self) -> bool { self.panel.isVisible() }
     pub fn clear_input(&self) { self.input.setStringValue(&NSString::new()); }
     pub fn events(&self) -> Vec<Event> { self.events.borrow_mut().drain(..).collect() }
@@ -160,19 +189,30 @@ impl Bar {
     }
 
     /// 펫이 움직이면 따라온다. `headroom` 은 창 위쪽에서 캐릭터 머리까지 비워 둔 높이라,
-    /// 그만큼 내려와야 바가 머리 「바로」 위에 앉는다.
+    /// 그만큼 내려온 곳이 머리 높이다. 펫이 안 움직였는데 바가 우리가 둔 자리에서 벗어나
+    /// 있으면 그건 사람이 끈 것이다 — 그만큼을 기억해 두고 이후로도 그 자리를 지킨다.
     pub fn sync(&self, headroom: f64) {
         if !self.visible() { return; }
         let Some(screen) = self.parent.screen() else { return };
         let bounds = screen.visibleFrame();
         let parent = self.parent.frame();
+        let parent_moved = {
+            let last = *self.parent_origin.borrow();
+            (last.0 - parent.origin.x).abs() > 0.5 || (last.1 - parent.origin.y).abs() > 0.5
+        };
+        *self.parent_origin.borrow_mut() = (parent.origin.x, parent.origin.y);
         let bar = self.panel.frame();
-        let (x, y) = placement(
+        let (bx, by) = placement(
             (parent.origin.x, parent.origin.y, parent.size.width, parent.size.height),
             (bar.size.width, bar.size.height), headroom,
             (bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height),
         );
         let previous = *self.origin.borrow();
+        if !parent_moved && ((bar.origin.x - previous.x).abs() > 0.5 || (bar.origin.y - previous.y).abs() > 0.5) {
+            *self.offset.borrow_mut() = (bar.origin.x - bx, bar.origin.y - by);
+        }
+        let offset = *self.offset.borrow();
+        let (x, y) = (bx + offset.0, by + offset.1);
         if (previous.x - x).abs() > 0.5 || (previous.y - y).abs() > 0.5 {
             self.panel.setFrameOrigin(NSPoint::new(x, y));
             *self.origin.borrow_mut() = NSPoint::new(x, y);
@@ -314,15 +354,17 @@ fn backdrop(mtm: MainThreadMarker, body: &NSView) -> Retained<NSView> {
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect { NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)) }
 
-/// 바가 앉을 자리. 가로는 펫의 한가운데, 세로는 머리 바로 위 — 화면 밖으로 나가면
-/// 안쪽으로 끌어당긴다. 펫을 화면 끝에 바짝 붙여 두는 사람이 바를 못 쓰면 안 된다.
+/// 바가 앉을 자리. 펫 창 오른쪽 옆, 머리 높이 — 오른쪽에 자리가 없으면 왼쪽. 머리 위는
+/// 말풍선 자리라 비워 둔다. 화면 밖으로 나가면 안쪽으로 끌어당긴다.
 fn placement(pet: (f64, f64, f64, f64), bar: (f64, f64), headroom: f64, screen: (f64, f64, f64, f64)) -> (f64, f64) {
     let (px, py, pw, ph) = pet;
     let (bw, bh) = bar;
     let (sx, sy, sw, sh) = screen;
-    let x = (px + pw / 2.0 - bw / 2.0).clamp(sx, (sx + sw - bw).max(sx));
+    const GAP: f64 = 8.0;
+    let right = px + pw + GAP;
+    let x = if right + bw <= sx + sw { right } else { (px - GAP - bw).max(sx) };
     let head = py + ph - headroom;
-    let y = (head + 4.0).clamp(sy, (sy + sh - bh).max(sy));
+    let y = (head - bh / 2.0).clamp(sy, (sy + sh - bh).max(sy));
     (x, y)
 }
 
@@ -330,12 +372,13 @@ fn placement(pet: (f64, f64, f64, f64), bar: (f64, f64), headroom: f64, screen: 
 mod tests {
     use super::placement;
 
-    /// 바는 머리 바로 위에 앉는다 — 창 꼭대기가 아니라, 말풍선 자리만큼 내려온 곳이다.
+    /// 바는 머리 옆에 앉는다 — 머리 위는 말풍선 자리다. 오른쪽이 막히면 왼쪽으로.
     #[test]
-    fn the_bar_sits_on_the_head_not_on_the_window_top() {
+    fn the_bar_sits_beside_the_head_not_above_it() {
         let (x, y) = placement((500.0, 100.0, 420.0, 710.0), (320.0, 46.0), 110.0, (0.0, 30.0, 1440.0, 850.0));
-        assert_eq!(x, 550.0);
-        assert_eq!(y, 704.0);
+        assert_eq!((x, y), (928.0, 677.0));
+        let (x, _) = placement((1100.0, 100.0, 420.0, 710.0), (320.0, 46.0), 110.0, (0.0, 30.0, 1440.0, 850.0));
+        assert_eq!(x, 772.0);
     }
 
     /// 화면 끝에 바짝 붙인 펫이라도 바는 화면 안에 남는다.
