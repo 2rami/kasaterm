@@ -12721,8 +12721,10 @@ impl App {
                 let ready = progress.map_or(0, |p| p.ready);
                 let failed = progress.is_some_and(|p| p.failure.is_some());
                 let msg = "pane을 복원하는 중…";
-                let sub = progress.map(|p| p.status_line()).unwrap_or_else(|| "저장된 pane과 탭을 불러오는 중…".to_string());
-                let layout = crate::restore_progress::toast_layout(win_w, win_h, restore_bottom_reserved);
+                // 남은 것을 **하나씩** 세운다 — 전엔 첫 줄 하나뿐이라 무엇이 남았는지 몰랐다.
+                let detail = progress.map(|p| p.pending_lines())
+                    .unwrap_or_else(|| vec!["저장된 pane과 탭을 불러오는 중…".to_string()]);
+                let layout = crate::restore_progress::toast_layout_for(win_w, win_h, restore_bottom_reserved, detail.len());
                 let (x, y, card_w, card_h) = layout.card;
                 let pad = 16.0_f32.min(card_w / 8.0);
                 let width = (card_w - 2.0 * pad).max(1.0);
@@ -12730,7 +12732,8 @@ impl App {
                 let count_w = g.measure_chrome_text(&count, 12.0, false);
                 let title_width = (width - count_w - 12.0).max(1.0);
                 let msg = crate::info::fit_text(g, msg, title_width, 14.0, true);
-                let lines = crate::info::fit_text_lines(g, &sub, width, 12.0, false, 2, false);
+                let lines: Vec<String> = detail.iter()
+                    .map(|line| crate::info::fit_text(g, line, width, 12.0, false)).collect();
                 panel_rect_outlined(g, x, y, card_w, card_h, theme::radius_md() * 1.5, theme::surface_active());
                 if card_h >= 52.0 && width >= count_w + 24.0 {
                     g.draw_text(x + pad, y + 14.0, &msg, gpu::DrawOpts {

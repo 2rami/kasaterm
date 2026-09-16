@@ -33,6 +33,8 @@ impl App {
         // GUI event serialization makes allocation and publication one operation
         // across all rooms. The old pane name is deliberately NOT a fallback.
         self.pane_claude_sid.remove(pane);
+        // 새 학생이 앉았다 — 옛 비석은 여기서 지운다.
+        self.pane_last_seat.remove(pane);
         if sid.is_empty() { self.pane_session_id.remove(pane); }
         else { self.pane_session_id.insert(pane.into(), sid.into()); }
         {
@@ -65,9 +67,14 @@ impl App {
             self.pane_agent_launches.remove(&pane);
             self.file_tree.instruction_launches.remove(&pane);
             self.pane_session_id.remove(&pane);
-            self.pane_claude_sid.remove(&pane);
+            // 자리를 비우기 전에 비석을 남긴다 — 이 자리가 닫히면 되살리기 줄이 이걸로
+            // 얼굴과 대화 번호를 되찾는다(없으면 기록을 손으로 뒤져야 했다).
+            let sid = self.pane_claude_sid.remove(&pane).unwrap_or_default();
             let mut ws = self.ws.lock().unwrap();
-            ws.pane_character.remove(&pane);
+            let character = ws.pane_character.remove(&pane).unwrap_or_default();
+            if !character.is_empty() || !sid.is_empty() {
+                self.pane_last_seat.insert(pane.clone(), (character, sid));
+            }
             ws.pane_launch_character.insert(pane.clone(), String::new());
             if let Some(outer) = ws.outer_for_pty(&pane) {
                 if let Some(state) = ws.panes.get_mut(&outer) { state.character = None; state.dirty = true; }

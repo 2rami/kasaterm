@@ -5492,6 +5492,11 @@ struct App {
     /// pane_session_id(백엔드 발급)와 달리 fork/detach 시 갈라진 진짜 세션이라, 이걸로
     /// bg_agents 를 조회해 포크/백그라운드 배지를 판정한다.
     pane_claude_sid: HashMap<String, String>,
+    /// pane id → 마지막으로 그 자리에 앉았던 (학생 이름, 대화 번호). **비석이다** —
+    /// claude 가 죽으면 산 자리 표식(`pane_character`·`pane_claude_sid`)은 바로 걷히는데,
+    /// 그 뒤에 닫힌 자리의 되살리기 줄이 얼굴도 번호도 없이 남았다(2026-09-17 지적:
+    /// 「되살리기에 프사가 안 나와서 기록에서 찾았어」). 자리를 새로 차지하면 지운다.
+    pane_last_seat: HashMap<String, (String, String)>,
     /// 계정이 바뀐 뒤에도 **옛 계정으로 도는** pane → (떠난 계정 이름, 새 계정 이름).
     ///
     /// 계정은 프로세스 env 라 pane 이 뜰 때 박히고, 도는 프로세스는 못 바꾼다. 그래서
@@ -6084,6 +6089,7 @@ impl App {
             remote_keep: std::collections::HashSet::new(),
             pane_session_id: HashMap::new(),
             pane_claude_sid: HashMap::new(),
+            pane_last_seat: HashMap::new(),
             pane_account_stale: HashMap::new(),
             socket_backend: None,
             bg_agents: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),

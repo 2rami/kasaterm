@@ -3865,6 +3865,22 @@ impl App {
         let Some(mut rec) = rec.get("leaf").cloned().filter(|r| !r.is_null()) else {
             return;
         };
+        // 학생이 먼저 죽고 나중에 닫힌 자리 — 산 표식은 이미 걷혀 이름도 대화 번호도 없다.
+        // 비석으로 채워 둬야 되살리기 줄에 얼굴이 뜨고, 눌러서 그 대화를 이어 열 수 있다.
+        let mut character = character;
+        if let Some((seat_name, seat_sid)) = self.pane_last_seat.get(pane).cloned() {
+            if character.is_empty() { character.clone_from(&seat_name); }
+            if let Some(obj) = rec.as_object_mut() {
+                if !seat_name.is_empty() && obj.get("character").and_then(|v| v.as_str()).is_none() {
+                    obj.insert("character".into(), serde_json::json!(seat_name));
+                }
+                if !seat_sid.is_empty() && obj.get("session_id").and_then(|v| v.as_str()).is_none() {
+                    let harness = if socket::codex_root_rollout_for_session(&seat_sid).is_some() { "codex" } else { "claude" };
+                    obj.insert("session_id".into(), serde_json::json!(seat_sid));
+                    obj.insert("was_agent".into(), serde_json::json!(harness));
+                }
+            }
+        }
         if let Some(progress) = &self.restore_progress { progress.preserve_record(&mut rec); }
         // cwd 캐시는 `lsof` 로 채워져 갓 만든 pane 에선 아직 비어 있다 — 그때는
         // 레코드에 실린 cwd 로 되짚는다(복원도 그 값을 쓰므로 어긋날 일이 없다).
@@ -10330,6 +10346,50 @@ mod room_name_tests {
         // 이름이 임시 루트로 시작할 뿐인 경로는 임시가 아니다.
         assert!(!is_temp_path(Path::new("/tmpfs/repo")));
         assert!(!is_temp_path(Path::new("/Users/kasa/tmp/repo")));
+    }
+}
+
+#[cfg(test)]
+mod dead_agent_seat_tests {
+    //! 학생이 죽은 뒤 닫힌 자리 — 되살리기 줄이 얼굴과 대화 번호를 되찾는지.
+    //! 산 표식(`pane_character`·`pane_claude_sid`)은 죽는 순간 걷히므로 비석이 정본이다.
+
+    /// `close_pane` 이 비석으로 기록을 메우는 규칙만 떼어낸 것(App 없이 검사한다).
+    fn fill_from_seat(rec: &mut serde_json::Value, character: &mut String, seat: (&str, &str)) {
+        let (seat_name, seat_sid) = seat;
+        if character.is_empty() { *character = seat_name.to_string(); }
+        let Some(obj) = rec.as_object_mut() else { return };
+        if !seat_name.is_empty() && obj.get("character").and_then(|v| v.as_str()).is_none() {
+            obj.insert("character".into(), serde_json::json!(seat_name));
+        }
+        if !seat_sid.is_empty() && obj.get("session_id").and_then(|v| v.as_str()).is_none() {
+            obj.insert("session_id".into(), serde_json::json!(seat_sid));
+            obj.insert("was_agent".into(), serde_json::json!("claude"));
+        }
+    }
+
+    #[test]
+    fn a_dead_students_seat_restores_face_and_conversation() {
+        let mut rec = serde_json::json!({"pane_id": "%13", "was_agent": null, "session_id": null,
+            "cwd": "/Users/kasa/Desktop"});
+        let mut character = String::new();
+        fill_from_seat(&mut rec, &mut character, ("코유키", "fd844548"));
+        assert_eq!(character, "코유키");
+        assert_eq!(rec["character"], "코유키");
+        assert_eq!(rec["session_id"], "fd844548");
+        assert_eq!(rec["was_agent"], "claude");
+    }
+
+    #[test]
+    fn a_live_record_is_never_overwritten_by_the_headstone() {
+        let mut rec = serde_json::json!({"pane_id": "%3", "character": "아로나", "session_id": "live-sid",
+            "was_agent": "codex"});
+        let mut character = "아로나".to_string();
+        fill_from_seat(&mut rec, &mut character, ("코유키", "fd844548"));
+        assert_eq!(character, "아로나");
+        assert_eq!(rec["character"], "아로나");
+        assert_eq!(rec["session_id"], "live-sid");
+        assert_eq!(rec["was_agent"], "codex", "산 기록의 하네스를 비석이 덮으면 안 된다");
     }
 }
 

@@ -16,7 +16,17 @@ pub(crate) struct ToastLayout {
 
 /// Coordinates use the same units as the window. Reserve the actual bottom
 /// chrome height, so the toast never covers the device selector/status bar.
+/// `lines` 는 카드 본문에 세울 줄 수 — 남은 항목을 하나씩 보여주므로 카드가 그만큼 자란다.
+pub(crate) fn toast_layout_for(width: f32, height: f32, bottom_reserved: f32, lines: usize) -> ToastLayout {
+    let extra = 17.0 * (lines.clamp(1, PENDING_LINES_MAX + 1) as f32 - 1.0);
+    toast_layout_h(width, height, bottom_reserved, 132.0 + extra)
+}
+
 pub(crate) fn toast_layout(width: f32, height: f32, bottom_reserved: f32) -> ToastLayout {
+    toast_layout_h(width, height, bottom_reserved, 132.0)
+}
+
+fn toast_layout_h(width: f32, height: f32, bottom_reserved: f32, card_h: f32) -> ToastLayout {
     let finite = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
     let width = finite(width);
     let height = finite(height);
@@ -24,7 +34,7 @@ pub(crate) fn toast_layout(width: f32, height: f32, bottom_reserved: f32) -> Toa
     let margin_x = 12.0_f32.min(width / 4.0);
     let margin_y = 12.0_f32.min(available / 4.0);
     let w = 360.0_f32.min((width - 2.0 * margin_x).max(0.0));
-    let h = 132.0_f32.min((available - 2.0 * margin_y).max(0.0));
+    let h = card_h.min((available - 2.0 * margin_y).max(0.0));
     let x = width - margin_x - w;
     let y = available - margin_y - h;
     let pad = 12.0_f32.min(w / 4.0).min(h / 4.0);
@@ -69,14 +79,25 @@ pub(crate) struct RestoreProgress {
     cancelled_ids: HashSet<String>,
 }
 
+/// 진행 카드에 세울 줄 수 상한 — 넘치면 마지막 줄이 「외 N개」를 맡는다.
+pub(crate) const PENDING_LINES_MAX: usize = 4;
+
 #[derive(Clone, Copy)]
 enum RestoreStage { Pane, Agent, RemoteConnection, RemoteScreen, Web }
+
+/// 셸은 떴는데 학생(claude)이 안 돌아올 때 더 기다릴 시간. 이 뒤로는 그 항목을 끝난 것으로
+/// 세고 「안 돌아왔다」고 말한다 — 전엔 영원히 기다려 복원 창이 안 닫혔다(2026-09-17 지적).
+const AGENT_GRACE: Duration = Duration::from_secs(25);
 
 struct RestoreEntry {
     remote: bool,
     agent: bool,
     web: bool,
     ready: bool,
+    /// 셸이 준비된 시각 — 학생을 기다린 시간을 여기서 잰다.
+    shell_since: Option<Instant>,
+    /// 기다릴 만큼 기다렸는데 학생이 안 돌아왔다.
+    agent_missing: bool,
     // Agent startup and terminal input readiness are not the same thing. A
     // resumed CLI may be at login/error/permission UI or process detection may
     // lag; its live local PTY must remain usable while the toast is visible.
@@ -97,8 +118,24 @@ impl RestoreEntry {
 
     fn update_local(&mut self, has_live_grid: bool, commands_pending: bool, agent_seen: bool) {
         self.local_input_ready = has_live_grid && !commands_pending;
-        self.ready = self.local_input_ready && (!self.agent || agent_seen);
+        if self.local_input_ready {
+            self.shell_since.get_or_insert_with(Instant::now);
+        } else {
+            self.shell_since = None;
+        }
+        // 셸이 떴는데 학생이 안 돌아오는 경우가 있다(resume 실패·claude 가 또 죽음). 그때
+        // 기다림을 놓아 주지 않으면 복원 창이 영영 안 닫힌다.
+        let waited = self.shell_since.is_some_and(|at| at.elapsed() >= AGENT_GRACE);
+        self.agent_missing = self.agent && !agent_seen && waited;
+        self.ready = self.local_input_ready && (!self.agent || agent_seen || waited);
         self.stage = if has_live_grid && self.agent { RestoreStage::Agent } else { RestoreStage::Pane };
+    }
+
+    /// 화면에 세울 이름 — 학생 이름, 없으면 기기 이름, 그것도 없으면 pane 번호.
+    fn who(&self, id: &str) -> String {
+        self.character.clone()
+            .or_else(|| self.remote_label.clone())
+            .unwrap_or_else(|| id.to_string())
     }
 
     fn update_remote(&mut self, live_label: Option<&str>, connected: bool) {
@@ -159,6 +196,29 @@ impl RestoreProgress {
         if !self.built { return "pane을 복원하는 중…".into(); }
         self.entry_order.iter().filter_map(|id| self.entries.get(id))
             .find(|entry| !entry.ready).map_or_else(|| "pane을 복원하는 중…".into(), RestoreEntry::status_line)
+    }
+
+    /// 아직 안 끝난 것들을 **하나씩** 세운다 — 전엔 첫 줄 하나만 보여서 무엇이 남았는지
+    /// 알 수 없었다(2026-09-17 「복원 중 자세히 나오게」). 「이름 · 무엇을 기다리는지」.
+    pub(crate) fn pending_lines(&self) -> Vec<String> {
+        if !self.built { return vec!["저장된 pane과 탭을 불러오는 중…".into()] }
+        let pending: Vec<&String> = self.entry_order.iter()
+            .filter(|id| self.entries.get(*id).is_some_and(|e| !e.ready)).collect();
+        let mut lines: Vec<String> = pending.iter().take(PENDING_LINES_MAX)
+            .filter_map(|id| self.entries.get(*id).map(|e| format!("{} · {}", e.who(id), e.status_line())))
+            .collect();
+        if pending.len() > lines.len() {
+            lines.push(format!("외 {}개", pending.len() - lines.len()));
+        }
+        if lines.is_empty() { lines.push("마무리하는 중…".into()); }
+        lines
+    }
+
+    /// 기다림을 놓아 준 학생들 — 복원이 끝난 뒤 한 번 알린다.
+    pub(crate) fn missing_agents(&self) -> Vec<String> {
+        self.entry_order.iter()
+            .filter_map(|id| self.entries.get(id).filter(|e| e.agent_missing).map(|e| e.who(id)))
+            .collect()
     }
 
     /// Preserve execution identity while taking layout/presentation from the
@@ -287,6 +347,8 @@ impl RestoreProgress {
             agent: record.get("was_agent").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()),
             web,
             ready: false,
+            shell_since: None,
+            agent_missing: false,
             local_input_ready: false,
             character: record.get("character").and_then(|v| v.as_str()).and_then(character_label),
             remote_label: record.get("remote_label").and_then(|v| v.as_str()).and_then(display_label),
@@ -297,16 +359,28 @@ impl RestoreProgress {
 
     /// Retry only the wait for unfinished entries. The original layout,
     /// assigned IDs and completed sessions are never reconstructed here.
-    fn retry_pending(&mut self, now: Instant) -> Vec<String> {
+    fn retry_pending(&mut self, now: Instant) -> (Vec<String>, Vec<(String, serde_json::Value)>) {
         if !self.built {
             // An invalid/unbuilt snapshot needs an explicit recovery choice,
             // not another destructive whole-workspace restore.
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         self.started = now;
         self.failure = None;
-        self.entry_order.iter().filter(|id| self.entries.get(*id).is_some_and(|entry| entry.remote && !entry.ready))
-            .cloned().collect()
+        let remote = self.entry_order.iter()
+            .filter(|id| self.entries.get(*id).is_some_and(|entry| entry.remote && !entry.ready))
+            .cloned().collect();
+        // 로컬 학생은 전엔 아무것도 안 했다 — 눌러도 반응이 없던 이유다(2026-09-17 지적).
+        // 저장된 기록으로 그 자리에 되살리기 명령을 한 번 더 넣는다. 기다림도 처음부터.
+        let mut local = Vec::new();
+        for id in &self.entry_order {
+            let Some(entry) = self.entries.get_mut(id) else { continue };
+            if entry.ready || entry.remote || entry.web || !entry.agent { continue; }
+            entry.shell_since = None;
+            entry.agent_missing = false;
+            local.push((id.clone(), entry.record.clone()));
+        }
+        (remote, local)
     }
 }
 
@@ -413,11 +487,30 @@ impl App {
         // those newly ready panes before selecting links to refresh.
         self.tick_restore_progress();
         let Some(progress) = self.restore_progress.as_mut() else { return };
-        let pending_remote = progress.retry_pending(Instant::now());
+        let (pending_remote, pending_local) = progress.retry_pending(Instant::now());
         for id in pending_remote {
             // Wake only existing unfinished links, never replace their parser
             // or attach a new source pane when an old source has disappeared.
             kasa_mcp::remote::retry_pending_restore(&id);
+        }
+        // 로컬 학생 — 그 pane 에 claude 가 없을 때만 되살리기 줄을 다시 넣는다. 도는 중에
+        // 보내면 그건 입력창에 글자를 밀어넣는 짓이 된다.
+        let mut called = Vec::new();
+        for (id, record) in pending_local {
+            let Some(session) = self.pty.get(&id).cloned() else { continue };
+            if session.active_agent().is_some() { continue; }
+            if self.pending_restores.iter().any(|(pending, _, _)| Arc::ptr_eq(pending, &session)) { continue; }
+            let harness = record.get("was_agent").and_then(|v| v.as_str()).unwrap_or_default();
+            let sid = record.get("session_id").and_then(|v| v.as_str()).unwrap_or_default();
+            if harness.is_empty() || sid.is_empty() { continue; }
+            let cwd = record.get("cwd").and_then(|v| v.as_str()).unwrap_or_default();
+            let line = kasa_socket::sessions::resume_command(harness, sid, cwd);
+            let at = Instant::now() + Duration::from_millis(300);
+            self.pending_restores.push((session, format!("{line}\r"), at));
+            called.push(id);
+        }
+        if !called.is_empty() {
+            self.set_toast(format!("{}개 자리에 되살리기를 다시 넣었어요", called.len()));
         }
         // Keep each PTY/parser and queued local resume commands alive.
         // Never schedule restore_session_state: it clears every current pane.
@@ -482,13 +575,14 @@ impl App {
                 }
             }
         }
-        if progress.entries.len() != progress.expected {
-            failure.get_or_insert_with(|| "저장된 창·탭 일부를 되살리지 못했어요".to_string());
-        }
-        if ready < progress.expected && progress.started.elapsed() >= Duration::from_secs(45) {
+        // 아예 못 세운 창이 있으면 알리되, 그것 때문에 진행 카드가 영영 안 닫히면 안 된다 —
+        // 남은 것들이 다 준비되면 끝낸다(2026-09-17: 카드가 한 시간을 떠 있었다).
+        let tracked = progress.entries.len();
+        let missing_surfaces = tracked != progress.expected;
+        if ready < tracked && progress.started.elapsed() >= Duration::from_secs(45) {
             failure.get_or_insert_with(|| "아직 준비되지 않은 창이 있어요. 연결을 확인하고 다시 시도해 주세요".to_string());
         }
-        let complete = ready == progress.expected && failure.is_none();
+        let complete = ready >= tracked && failure.is_none();
         let changed = progress.ready != ready || progress.failure != failure || progress.status_line() != old_status;
         if progress.ready != ready {
             eprintln!("[restore] progress={ready}/{}", progress.expected);
@@ -496,9 +590,17 @@ impl App {
         if complete {
             eprintln!("[restore] complete={ready}/{}", progress.expected);
         }
+        let notes = complete.then(|| (progress.missing_agents(), missing_surfaces));
         progress.ready = ready;
         progress.failure = failure;
         if complete { self.restore_progress = None; }
+        if let Some((missing_agents, missing_surfaces)) = notes {
+            if !missing_agents.is_empty() {
+                self.set_toast(format!("{} 안 돌아왔어요 — 되살리기에서 다시 열 수 있어요", missing_agents.join(", ")));
+            } else if missing_surfaces {
+                self.set_toast("저장된 창·탭 일부를 되살리지 못했어요".into());
+            }
+        }
         if changed || complete {
             self.chrome_dirty = true;
             if let Some(window) = &self.window { window.request_redraw(); }
@@ -557,11 +659,11 @@ mod tests {
                 "a later foreground-process change must not reopen startup progress");
             assert!(progress.entries.get_mut("%pending").unwrap().begin_readiness_check());
             assert!(!progress.blocks_surface("%ready"));
-            assert_eq!(progress.retry_pending(Instant::now()), ["%pending"]);
+            assert_eq!(progress.retry_pending(Instant::now()).0, ["%pending"]);
         }
         progress.entries.get_mut("%pending").unwrap().ready = true;
         assert!(progress.entries.values_mut().all(|entry| !entry.begin_readiness_check()));
-        assert!(progress.retry_pending(Instant::now()).is_empty());
+        assert_eq!(progress.retry_pending(Instant::now()), (Vec::new(), Vec::new()));
     }
 
     #[test]
@@ -593,7 +695,7 @@ mod tests {
         assert_eq!(progress.expected, 1);
         assert_eq!(progress.entry_order, ["%tab"]);
         assert!(progress.blocks_surface("%tab"));
-        assert_eq!(progress.retry_pending(Instant::now()), ["%tab"]);
+        assert_eq!(progress.retry_pending(Instant::now()).0, ["%tab"]);
         let mut current = serde_json::json!({"sessions":[{"windows":[{"leaf":{"pane_id":"%tab"}}]}]});
         progress.preserve_snapshot(&mut current);
         assert_eq!(current["sessions"][0]["windows"].as_array().unwrap().len(), 1);
@@ -684,7 +786,7 @@ mod tests {
         progress.forget_surface("%1");
         assert_eq!((progress.expected, progress.ready), (0, 0));
         assert!(progress.entry_order.is_empty());
-        assert!(progress.retry_pending(Instant::now()).is_empty());
+        assert_eq!(progress.retry_pending(Instant::now()), (Vec::new(), Vec::new()));
         assert!(!progress.blocks_surface("%1"));
         let mut state = serde_json::json!({"sessions":[{"windows":[{"leaf":{"pane_id":"%new"}}]}],
             "stashed_panes":[{"rec":closed}]});
@@ -794,6 +896,36 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_agent_stops_blocking_after_the_grace_and_is_named() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        progress.track("%local", &serde_json::json!({"was_agent": "claude", "character": "코유키"}));
+        progress.built = true;
+        let entry = progress.entries.get_mut("%local").unwrap();
+        entry.update_local(true, false, false);
+        assert!(!entry.ready, "셸만 떴을 때는 아직 기다린다");
+        entry.shell_since = Some(Instant::now() - AGENT_GRACE - Duration::from_secs(1));
+        entry.update_local(true, false, false);
+        assert!(entry.ready, "학생이 안 돌아와도 복원 카드는 끝나야 한다");
+        assert_eq!(progress.missing_agents(), ["코유키"]);
+    }
+
+    #[test]
+    fn pending_lines_name_each_unfinished_entry_and_fold_the_rest() {
+        let mut progress = RestoreProgress::new(serde_json::json!({}));
+        for (id, character) in [("%1", "코유키"), ("%2", "아로나"), ("%3", "미도리"),
+            ("%4", "유우카"), ("%5", "시로코")] {
+            progress.track(id, &serde_json::json!({"was_agent": "claude", "character": character}));
+        }
+        progress.built = true;
+        let lines = progress.pending_lines();
+        assert_eq!(lines.len(), PENDING_LINES_MAX + 1);
+        assert!(lines[0].starts_with("코유키 · "), "{:?}", lines);
+        assert_eq!(lines[PENDING_LINES_MAX], "외 1개");
+        for id in ["%1", "%2", "%3", "%4", "%5"] { progress.entries.get_mut(id).unwrap().ready = true; }
+        assert_eq!(progress.pending_lines(), ["마무리하는 중…"]);
+    }
+
+    #[test]
     fn retry_order_is_stable_and_skips_completed_targets() {
         let mut progress = RestoreProgress::new(serde_json::json!({}));
         for id in ["%20", "%3", "%11"] {
@@ -801,7 +933,7 @@ mod tests {
         }
         progress.built = true;
         progress.entries.get_mut("%3").unwrap().ready = true;
-        for _ in 0..4 { assert_eq!(progress.retry_pending(Instant::now()), ["%20", "%11"]); }
+        for _ in 0..4 { assert_eq!(progress.retry_pending(Instant::now()).0, ["%20", "%11"]); }
         assert_eq!(progress.entry_order, ["%20", "%3", "%11"]);
     }
 
@@ -814,7 +946,11 @@ mod tests {
         progress.entries.get_mut("%local").unwrap().update_local(true, false, false);
         assert!(!progress.blocks_surface("%local"), "live local terminal must accept recovery/login input");
         assert!(!progress.entries["%local"].ready, "shell output alone is not successful agent restoration");
-        assert!(progress.retry_pending(Instant::now()).is_empty(), "retry must not relaunch its agent");
+        // 2026-09-17: 로컬 학생도 다시 부를 대상으로 나온다 — 전엔 아무것도 안 해서 「눌러도
+        // 반응이 없다」였다. 실제 발송은 App 이 지킨다(claude 가 도는 pane 엔 안 보낸다).
+        let (remote, local) = progress.retry_pending(Instant::now());
+        assert!(remote.is_empty());
+        assert_eq!(local.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["%local"]);
         assert!(!progress.blocks_surface("%local"));
         progress.entries.get_mut("%local").unwrap().update_local(true, false, true);
         assert!(progress.entries["%local"].ready, "late process detection can still complete restore");
@@ -936,7 +1072,7 @@ mod tests {
         progress.ready = 5;
         progress.failure = Some("timeout".into());
         let now = Instant::now();
-        let mut pending = progress.retry_pending(now);
+        let mut pending = progress.retry_pending(now).0;
         pending.sort();
         assert_eq!(pending, ["%5", "%6"]);
         assert_eq!((progress.ready, progress.expected, progress.entries.len()), (5, 7, 7));
@@ -946,19 +1082,22 @@ mod tests {
         assert!(progress.failure.is_none());
         // Repeated clicks do not allocate IDs, reset completion or repeat work
         // for already restored panes (whose live PTYs belong to the App).
-        assert_eq!(progress.retry_pending(now).len(), 2);
+        assert_eq!(progress.retry_pending(now).0.len(), 2);
         assert_eq!(progress.ready, 5);
         assert!(progress.entries["%0"].ready);
     }
 
     #[test]
-    fn retry_does_not_requeue_local_agent_commands_or_web_hosts() {
+    fn retry_requeues_local_agents_but_never_web_hosts() {
         let mut progress = RestoreProgress::new(serde_json::json!({}));
         progress.built = true;
         progress.track("%agent", &serde_json::json!({"was_agent": "claude"}));
         progress.track("%web", &serde_json::json!({"web_url": "https://example.invalid"}));
         progress.track("%remote", &serde_json::json!({"remote_base": "http://restore.invalid"}));
-        assert_eq!(progress.retry_pending(Instant::now()), ["%remote"]);
+        let (remote, local) = progress.retry_pending(Instant::now());
+        assert_eq!(remote, ["%remote"]);
+        assert_eq!(local.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["%agent"],
+            "웹 화면은 다시 띄울 명령이 없다 — 학생만 다시 부른다");
         assert_eq!(progress.entries.len(), 3);
     }
 
@@ -967,7 +1106,7 @@ mod tests {
         let mut progress = RestoreProgress::new(serde_json::json!({"invalid": true}));
         progress.failure = Some("invalid snapshot".into());
         let started = progress.started;
-        assert!(progress.retry_pending(Instant::now()).is_empty());
+        assert_eq!(progress.retry_pending(Instant::now()), (Vec::new(), Vec::new()));
         assert!(!progress.built);
         assert_eq!(progress.started, started);
         assert_eq!(progress.failure.as_deref(), Some("invalid snapshot"));
@@ -996,7 +1135,7 @@ mod tests {
         }
         progress.built = true;
         progress.ready = 5;
-        let mut retry = progress.retry_pending(Instant::now());
+        let mut retry = progress.retry_pending(Instant::now()).0;
         retry.sort();
         assert_eq!(retry, ["%6", "%7"], "retry targets existing local links, not source IDs");
         assert_eq!((progress.ready, progress.expected), (5, 7));
