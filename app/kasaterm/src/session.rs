@@ -1221,6 +1221,31 @@ impl App {
         Ok(())
     }
 
+    /// `i` 번 창이 다른 기기 방의 **보기 창**인가 — 모든 leaf 가 한 기계의 거울(view)이면
+    /// `(기계 라벨, 원격 pane id 들)`. 이런 창은 이 기기 방 목록에 안 서고, 그 기계 절의
+    /// 방 카드가 탭 노릇을 한다(2026-09-16 지시 「새로 여는 게 아니라 눌러서 보이게」).
+    /// 셸을 하나라도 끼워 넣으면 그 순간 보통 방이 된다 — 표식이 아니라 내용으로 가른다.
+    pub(crate) fn remote_view_of_window(&self, i: usize) -> Option<(String, Vec<String>)> {
+        let leaves = self.window_leaves(i);
+        if leaves.is_empty() {
+            return None;
+        }
+        let mut base: Option<String> = None;
+        let mut ids = Vec::with_capacity(leaves.len());
+        for leaf in &leaves {
+            let info = kasa_mcp::remote::remote_info(leaf).filter(|r| r.view)?;
+            match &base {
+                Some(b) if !kasa_mcp::machines::same_machine_bases(b, &info.base) => return None,
+                None => base = Some(info.base.clone()),
+                _ => {}
+            }
+            ids.push(info.remote_id);
+        }
+        let base = base?;
+        let label = kasa_mcp::machines::label_for_base(&base).unwrap_or(base);
+        Some((label, ids))
+    }
+
     pub(crate) fn reveal_pane_tab(&mut self, pid: &str) -> bool {
         self.focus_surface(pid)
     }
@@ -5238,7 +5263,13 @@ impl App {
     /// **같은 값**을 봐야 하므로 한 곳에서만 만든다.
     pub(crate) fn sidebar_card_heights(&self) -> Vec<f32> {
         (0..self.windows.len())
-            .map(|i| SIDEBAR_TAB_H + self.sidebar_card_metrics(i).1)
+            .map(|i| {
+                // 다른 기기 방의 보기 창은 이 목록에 안 선다 — 높이 0.
+                if self.remote_view_of_window(i).is_some() {
+                    return 0.0;
+                }
+                SIDEBAR_TAB_H + self.sidebar_card_metrics(i).1
+            })
             .collect()
     }
 
@@ -5401,6 +5432,10 @@ impl App {
         // 클릭 판정이 함께 쓰는 값이고, 클릭은 시저가 안 자른다.
         let mut y = top - scroll;
         for i in 0..n {
+            // 다른 기기 방의 보기 창은 그 기계 절의 방 카드가 탭이다 — 여기엔 안 세운다.
+            if self.remote_view_of_window(i).is_some() {
+                continue;
+            }
             // 펼친 카드는 **배치도 하나**다. 예전엔 목록 뷰로 갈아 끼울 수 있었는데,
             // 그 목록은 info 탭이 방→pane→탭→프로세스로 이미 그리는 것의 얕은
             // 사본이었다(2026-08-24 지시: "목록표시는 info에서 보면되고").

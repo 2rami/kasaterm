@@ -1962,6 +1962,8 @@ impl App {
         let sb_view = (self.sidebar_content_top(), self.sidebar_avail_h(sb_win_h));
         // 기기 절까지 합친 높이 — 절 배치는 그 안에서 스스로 나눈다.
         let sb_full_h = self.sidebar_full_avail_h(sb_win_h);
+        // 지금 보는 창이 다른 기기 방의 보기 창이면 그 기계 절의 카드가 「보는 중」으로 선다.
+        self.info.navigation.viewing = self.remote_view_of_window(self.active_window);
         let sb_over_before = self.win_tab_first > 0;
         let sb_over_after = sb_tabs
             .last()

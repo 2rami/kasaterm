@@ -32,6 +32,9 @@ pub(crate) struct NavigationState {
     pub(crate) scroll: f32,
     pub(crate) pinned: Vec<Pinned>,
     pub(crate) drag: Option<NavDrag>,
+    /// 지금 보는 창이 어느 기계의 어떤 원격 pane 들인가 — 그 방 카드를 활성으로 그린다.
+    /// 렌더가 프레임마다 `App::remote_view_of_window` 로 채운다.
+    pub(crate) viewing: Option<(String, Vec<String>)>,
     picker_scroll: f32,
     picker_index: usize,
     content_h: f32,
@@ -277,6 +280,7 @@ fn draw_rows(
     g: &mut gpu::GpuRenderer,
     hits: &mut Vec<(Action, Rect)>,
     collapsed_rooms: &std::collections::HashSet<String>,
+    viewing: Option<&(String, Vec<String>)>,
     machine: &state::MachinesColMachine,
     cursor: (f32, f32),
     width: f32,
@@ -299,16 +303,23 @@ fn draw_rows(
         let body_h = if collapsed { 0.0 } else { room_body_h(list.len()) };
         let h = SIDEBAR_TAB_H + body_h;
         let head = (tab_x, y, tab_w, SIDEBAR_TAB_H);
+        // 이 방을 지금 보는 중인가 — 본기기의 활성 방 카드와 같은 채움.
+        let active = viewing.is_some_and(|(label, ids)| {
+            *label == machine.label && list.iter().any(|r| ids.contains(&r.remote_id))
+        });
         if let Some(head_visible) = clipped(head, view) {
             let hover = hit(cursor, head_visible);
             g.hover_pointer |= hover;
-            if hover {
+            if active {
+                panel_rect(g, tab_x, y, tab_w, h, theme::radius_md(), theme::surface_active());
+            } else if hover {
                 panel_rect(g, tab_x, y, tab_w, h, theme::radius_md(), theme::surface_hover());
             }
             // 본기기 카드와 같은 자리·크기 — 이름 13.5px 는 y+11, 부제 11px 는 y+30.
             let badge = (tab_x + tab_w - 30.0, y + 8.0, 24.0, 20.0);
             let label = if room.is_empty() { "방 이름 없음" } else { room.as_str() };
-            text(g, label, tab_x + 12.0, y + 11.0, tab_w - 12.0 - 36.0, 13.5, theme::text(), false);
+            text(g, label, tab_x + 12.0, y + 11.0, tab_w - 12.0 - 36.0, 13.5,
+                if active { theme::text() } else { theme::text_dim() }, active);
             let busy = list.iter().filter(|r| matches!(r.status.as_str(), "working" | "compacting")).count();
             let stacks = decks(list).len();
             let sub = match (stacks == list.len(), busy) {
@@ -388,7 +399,8 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     }
     g.rect(12.0, TITLE_HEIGHT + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
 
-    let NavigationState { pinned, collapsed_rooms, hits, machine: main, scroll, content_h, viewport: main_view, .. } = nav;
+    let NavigationState { pinned, collapsed_rooms, hits, machine: main, scroll, content_h, viewport: main_view, viewing, .. } = nav;
+    let viewing = viewing.as_ref();
     let heights = section_heights(machines, pinned, collapsed_rooms, viewport.3);
     let pinned_total: f32 = heights.iter().sum();
     let view = (viewport.0, viewport.1, viewport.2, (viewport.3 - pinned_total).max(0.0));
@@ -399,7 +411,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
             Some(machine) => {
                 *content_h = content_height(machine, collapsed_rooms);
                 *scroll = scroll.clamp(0.0, (*content_h - view.3).max(0.0));
-                draw_rows(g, hits, collapsed_rooms, machine, cursor, width, view, *scroll);
+                draw_rows(g, hits, collapsed_rooms, viewing, machine, cursor, width, view, *scroll);
                 scrollbar(g, view, *content_h, *scroll, width);
             }
         }
@@ -432,7 +444,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
             Some(machine) => {
                 pin.content_h = content_height(machine, collapsed_rooms);
                 pin.scroll = pin.scroll.clamp(0.0, (pin.content_h - body.3).max(0.0));
-                draw_rows(g, hits, collapsed_rooms, machine, cursor, width, body, pin.scroll);
+                draw_rows(g, hits, collapsed_rooms, viewing, machine, cursor, width, body, pin.scroll);
                 scrollbar(g, body, pin.content_h, pin.scroll, width);
             }
         }
