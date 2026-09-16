@@ -1283,6 +1283,86 @@ impl App {
         Ok((remote_id, window))
     }
 
+    /// 보기 창의 배치를 **원본 방의 배치**에 맞춘다. 거울은 순서대로 쪼개져 앉거나(옛 unfold·
+    /// 자동 동기) 저장본대로 되살아나서, 미니맵은 원본 좌표로 같아 보여도 안의 배치는 달랐다
+    /// (2026-09-17 지적 「미니맵은 똑같은데 안에 배치가 달라」). 원본이 정본이다 — 2초마다
+    /// 원본 칸 좌표(명부 캐시 `/term/panes` 의 `rect`)로 BSP 를 되살려 다르면 갈아 끼운다.
+    /// 좌표를 모르는 옛 판 기기·풍차 배치는 그대로 둔다.
+    pub(crate) fn sync_remote_view_layouts(&mut self) {
+        use std::sync::{Mutex, OnceLock};
+        static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+        {
+            let mut last = LAST.get_or_init(|| Mutex::new(None)).lock().unwrap();
+            if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        let mut changed_active = false;
+        let mut changed_any = false;
+        for i in 0..self.windows.len() {
+            let Some((label, _)) = self.remote_view_of_window(i) else { continue };
+            let tree = if i == self.active_window { self.pty_layout.as_ref() } else { self.windows[i].as_ref() };
+            let Some(tree) = tree else { continue };
+            let leaves: Vec<String> = tree.leaves().iter().map(|s| s.to_string()).collect();
+            if leaves.len() < 2 {
+                continue;
+            }
+            // 원본 칸 — leaf 마다 그 거울의 원격 pane 을 명부 캐시에서 찾는다. 하나라도 모르거나
+            // 원본 방이 갈리면 손대지 않는다.
+            let mut cells: Vec<(String, [f32; 4])> = Vec::with_capacity(leaves.len());
+            let mut source_window: Option<u64> = None;
+            let mut complete = true;
+            for leaf in &leaves {
+                let Some(info) = kasa_mcp::remote::remote_info(leaf) else { complete = false; break };
+                let Some(row) = kasa_mcp::machines::cached_pane(&label, &info.remote_id) else { complete = false; break };
+                let (Some(rect), Some(win)) = (crate::machinescol::row_rect(&row), row.get("window").and_then(|v| v.as_u64())) else { complete = false; break };
+                if source_window.is_some_and(|w| w != win) { complete = false; break }
+                source_window = Some(win);
+                cells.push((leaf.clone(), rect));
+            }
+            if !complete {
+                continue;
+            }
+            // 지금 배치와 같으면 그대로 — 매번 갈아 끼우면 사람이 끄는 분할선이 튄다.
+            let current: std::collections::HashMap<String, [f32; 4]> = tree
+                .leaf_rects(1000, 1000)
+                .into_iter()
+                .map(|(id, x, y, w, h)| (id, [x as f32 / 1000.0, y as f32 / 1000.0, w as f32 / 1000.0, h as f32 / 1000.0]))
+                .collect();
+            let same = cells.iter().all(|(id, want)| {
+                current.get(id).is_some_and(|have| have.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.03))
+            });
+            if same {
+                continue;
+            }
+            let Some(fresh) = crate::layout::layout_from_rects(&cells) else { continue };
+            changed_any = true;
+            if i == self.active_window {
+                self.pty_layout = Some(fresh);
+                self.zoomed_pane = None;
+                changed_active = true;
+            } else {
+                self.windows[i] = Some(fresh);
+            }
+        }
+        if !changed_any {
+            return;
+        }
+        if changed_active {
+            let (cols, rows) = self.window_cells();
+            self.resize_backend(cols, rows);
+        }
+        self.publish_pty_layout();
+        self.session_touched = true;
+        if changed_active {
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
     /// `i` 번 창이 다른 기기 방의 **보기 창**인가 — 모든 leaf 가 한 기계의 거울(view)이면
     /// `(기계 라벨, 원격 pane id 들)`. 이런 창은 이 기기 방 목록에 안 서고, 그 기계 절의
     /// 방 카드가 탭 노릇을 한다(2026-09-16 지시 「새로 여는 게 아니라 눌러서 보이게」).

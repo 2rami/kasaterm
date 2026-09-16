@@ -867,6 +867,7 @@ impl App {
         // 켜고 끈 것이 한 틱 늦게 화면에 온다.
         self.sync_session_titles();
         self.refresh_turn_states();
+        self.sync_remote_view_layouts();
         self.refresh_pane_ultracode();
         self.refresh_tunnel_chip();
         self.run_pending_autotitlesync();
