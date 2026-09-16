@@ -2,7 +2,6 @@ use super::*;
 
 type Rect = (f32, f32, f32, f32);
 pub(crate) const HEADER_H: f32 = 48.0;
-const ROOM_H: f32 = 30.0;
 const PANE_H: f32 = 44.0;
 const DEVICE_H: f32 = 42.0;
 /// 아래에 끌어다 둔 기기 절의 머리줄 높이.
@@ -44,7 +43,6 @@ pub(crate) struct NavigationState {
     collapsed_rooms: std::collections::HashSet<String>,
     hits: Vec<(Action, Rect)>,
     picker_hits: Vec<(Option<String>, Rect)>,
-    last_click: Option<(std::time::Instant, String)>,
 }
 
 #[derive(Clone)]
@@ -75,12 +73,6 @@ fn room_key(machine: &str, room: &str) -> String {
     format!("{}:{machine}{room}", machine.len())
 }
 
-fn mirror_double_click(last: &mut Option<(Instant, String)>, key: String, now: Instant) -> bool {
-    let double = last.as_ref().is_some_and(|(at, previous)| *previous == key && now.duration_since(*at).as_millis() < 400);
-    *last = if double { None } else { Some((now, key)) };
-    double
-}
-
 fn rows(machine: &state::MachinesColMachine) -> Vec<&state::MachinesColRow> {
     if !machine.online { return Vec::new(); }
     let mut rows: Vec<_> = machine.remote.iter().chain(machine.mirrored.iter()).collect();
@@ -92,19 +84,49 @@ fn rows(machine: &state::MachinesColMachine) -> Vec<&state::MachinesColRow> {
     rows
 }
 
-fn content_height(machine: &state::MachinesColMachine, collapsed: &std::collections::HashSet<String>) -> f32 {
-    let mut last_room = None;
-    let mut height = 0.0;
+/// 기기의 줄을 방 순서대로 묶는다(`rows` 가 방→번호로 정렬해 둔다).
+fn rooms(machine: &state::MachinesColMachine) -> Vec<(String, Vec<&state::MachinesColRow>)> {
+    let mut out: Vec<(String, Vec<&state::MachinesColRow>)> = Vec::new();
     for row in rows(machine) {
-        if last_room != Some(row.room.as_str()) {
-            height += ROOM_H;
-            last_room = Some(row.room.as_str());
+        match out.last_mut() {
+            Some((room, list)) if *room == row.room => list.push(row),
+            _ => out.push((row.room.clone(), vec![row])),
         }
-        if !collapsed.contains(&room_key(&machine.label, &row.room)) { height += PANE_H; }
     }
-    if height == 0.0 { height = PANE_H; }
+    out
+}
+
+/// 방 카드 본문(배치도) 높이 — 본기기 `sidebar_card_metrics` 와 같은 식이라 두 기기의
+/// 카드가 같은 키로 선다.
+fn room_body_h(panes: usize) -> f32 {
+    (36.0 + 13.0 * panes as f32).clamp(46.0, 150.0)
+}
+
+fn content_height(machine: &state::MachinesColMachine, collapsed: &std::collections::HashSet<String>) -> f32 {
+    let groups = rooms(machine);
+    let mut height = 0.0;
+    for (room, list) in &groups {
+        height += SIDEBAR_TAB_H;
+        if !collapsed.contains(&room_key(&machine.label, room)) { height += room_body_h(list.len()); }
+        height += SIDEBAR_TAB_GAP;
+    }
+    if groups.is_empty() { height = PANE_H; }
     if machine.closed > 0 { height += PANE_H; }
     height + 8.0
+}
+
+/// 배치도 칸 — 원본 기기가 준 칸(0..1)을 상자에 얹는다. 옛 판 기기라 칸이 없으면
+/// 가로로 고르게 나눈다. 1px 씩 깎아 칸 사이 틈을 낸다(본기기 배치도와 같은 규칙).
+fn cell_rects(list: &[&state::MachinesColRow], ma: Rect) -> Vec<Rect> {
+    let n = list.len().max(1) as f32;
+    let placed = list.iter().all(|r| r.rect.is_some());
+    list.iter().enumerate().map(|(k, row)| {
+        let [x, y, w, h] = match row.rect {
+            Some(r) if placed => r,
+            _ => [k as f32 / n, 0.0, 1.0 / n, 1.0],
+        };
+        (ma.0 + x * ma.2, ma.1 + y * ma.3, (w * ma.2 - 1.0).max(2.0), (h * ma.3 - 1.0).max(2.0))
+    }).collect()
 }
 
 /// 아래 절들의 높이. 절 수로 고르게 나눈 몫을 상한으로 두되 내용이 적으면 그만큼만
@@ -156,8 +178,60 @@ fn scrollbar(g: &mut gpu::GpuRenderer, view: Rect, content_h: f32, scroll: f32, 
     g.rect(width - 4.0, y, 2.0, h, theme::text_mute());
 }
 
-/// 한 기기의 방·pane 줄을 `view` 안에 그린다. 위 목록과 아래 절이 같은 함수를 쓴다 —
-/// 두 자리의 줄이 달리 보이면 같은 pane 인지 헷갈린다.
+/// 배치도 칸 하나 — 본기기 배치도 칸과 같은 문법(기기색 테두리·얼굴·걷기·대기 숨쉬기).
+/// 눌리는 사각은 잘린 칸이다 — 보이지 않는 부분이 눌리면 안 된다.
+fn draw_cell(
+    g: &mut gpu::GpuRenderer,
+    hits: &mut Vec<(Action, Rect)>,
+    machine: &state::MachinesColMachine,
+    row: &state::MachinesColRow,
+    cell: Rect,
+    cursor: (f32, f32),
+    view: Rect,
+) {
+    let (mx, my, mw, mh) = cell;
+    let Some(visible) = clipped(cell, view) else { return };
+    let hover = hit(cursor, visible);
+    g.hover_pointer |= hover && !row.closed;
+    let mirrored = !row.pane.is_empty();
+    let busy = matches!(row.status.as_str(), "working" | "compacting");
+    let waiting = row.status.contains("wait") || row.status.contains("attention");
+    let device = Some(machine.label.as_str());
+    let border = if waiting {
+        theme::attention()
+    } else if mirrored {
+        // 이 기기에서 보는 중 — 본기기의 「지금 보는 칸」과 같은 테두리.
+        theme::accent()
+    } else if hover {
+        theme::surface_hover()
+    } else {
+        crate::render::pane_identity::minimap_border(theme::panel_bg(), device, theme::with_alpha(theme::border(), 0x66))
+    };
+    round_rect(g, mx, my, mw, mh, 2.0, border);
+    if mw > 5.0 && mh > 5.0 {
+        round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5,
+            crate::render::pane_identity::minimap_background(theme::panel_bg(), device));
+        if waiting {
+            let mut c = theme::attention();
+            c[3] = (30.0 + 120.0 * crate::sprites::blink(crate::sprites::anim_phase_secs(), 0.9)) as u8;
+            round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5, c);
+        }
+    }
+    let (fx, fy, face) = crate::render::minimap_face_box(mx, my, mw, mh);
+    let phase = crate::sprites::anim_phase_secs();
+    let walked = busy && crate::sprites::draw_student_walk(g, &row.name, fx - 2.0, fy - 2.0, face + 4.0, phase);
+    if !walked && !crate::sprites::draw_student_face_anim(g, &row.name, fx, fy, face, phase) {
+        let size = face.min(16.0);
+        g.queue_icon(if mirrored { "external-link" } else { "terminal" },
+            mx + (mw - size) / 2.0, my + (mh - size) / 2.0, size, theme::text_dim());
+    }
+    if !row.closed {
+        hits.push((Action::Pane(machine.label.clone(), row.clone()), visible));
+    }
+}
+
+/// 한 기기의 방을 본기기와 같은 **카드 + 배치도**로 `view` 안에 그린다. 위 목록과
+/// 아래 절이 같은 함수를 쓴다 — 두 자리의 방이 달리 보이면 같은 방인지 헷갈린다.
 fn draw_rows(
     g: &mut gpu::GpuRenderer,
     hits: &mut Vec<(Action, Rect)>,
@@ -169,69 +243,47 @@ fn draw_rows(
     scroll: f32,
 ) {
     g.push_clip(view.0, view.1, view.2, view.3);
+    let tab_x = SIDEBAR_TAB_INSET;
+    let tab_w = (width - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
     let mut y = view.1 - scroll;
-    let mut last_room = None;
-    let machine_rows = rows(machine);
-    if machine_rows.is_empty() {
+    let groups = rooms(machine);
+    if groups.is_empty() {
         let message = if machine.online { "열린 pane 없음" } else { "기기에 연결할 수 없음" };
         text(g, message, 16.0, y + 12.0, width - 32.0, 11.0, theme::text_dim(), false);
         y += PANE_H;
     }
-    for row in machine_rows {
-        let key = room_key(&machine.label, &row.room);
+    for (room, list) in &groups {
+        let key = room_key(&machine.label, room);
         let collapsed = collapsed_rooms.contains(&key);
-        if last_room != Some(row.room.as_str()) {
-            let r = (8.0, y, width - 16.0, ROOM_H);
-            if let Some(r) = clipped(r, view) {
-                if hit(cursor, r) { g.rect(r.0, r.1, r.2, r.3, theme::surface_hover()); }
-                g.hover_pointer |= hit(cursor, r);
-                g.queue_icon(if collapsed { "chevron-right" } else { "chevron-down" }, 14.0, y + 9.0, 12.0, theme::text_dim());
-                text(g, if row.room.is_empty() { "방 이름 없음" } else { &row.room }, 34.0, y + 8.0, width - 50.0, 11.0, theme::text_dim(), true);
-                hits.push((Action::Room(key.clone()), r));
+        let body_h = if collapsed { 0.0 } else { room_body_h(list.len()) };
+        let h = SIDEBAR_TAB_H + body_h;
+        let head = (tab_x, y, tab_w, SIDEBAR_TAB_H);
+        if let Some(head_visible) = clipped(head, view) {
+            let hover = hit(cursor, head_visible);
+            g.hover_pointer |= hover;
+            if hover {
+                panel_rect(g, tab_x, y, tab_w, h, theme::radius_md(), theme::surface_hover());
             }
-            last_room = Some(row.room.as_str());
-            y += ROOM_H;
+            // 본기기 카드와 같은 자리·크기 — 이름 13.5px 는 y+11, 부제 11px 는 y+30.
+            let badge = (tab_x + tab_w - 30.0, y + 8.0, 24.0, 20.0);
+            let label = if room.is_empty() { "방 이름 없음" } else { room.as_str() };
+            text(g, label, tab_x + 12.0, y + 11.0, tab_w - 12.0 - 36.0, 13.5, theme::text(), false);
+            let busy = list.iter().filter(|r| matches!(r.status.as_str(), "working" | "compacting")).count();
+            let sub = if busy > 0 { format!("pane {} · 작업 중 {busy}", list.len()) } else { format!("pane {}", list.len()) };
+            text(g, &sub, tab_x + 12.0, y + 30.0, tab_w - 12.0 - 36.0, 11.0, theme::text_dim(), false);
+            let badge_hover = hit(cursor, badge);
+            if badge_hover { g.rect(badge.0, badge.1, badge.2, badge.3, theme::surface_active()); }
+            g.queue_icon(if collapsed { "chevron-right" } else { "chevron-down" }, badge.0 + 5.0, badge.1 + 3.0, 14.0,
+                if badge_hover { theme::text() } else { theme::lerp(theme::text_dim(), theme::text(), 0.55) });
+            hits.push((Action::Room(key.clone()), head_visible));
         }
-        if collapsed { continue; }
-        let full = (14.0, y, width - 24.0, PANE_H);
-        if let Some(r) = clipped(full, view) {
-            let hover = hit(cursor, r);
-            if hover { g.rect(full.0, y, full.2, full.3, theme::surface_hover()); }
-            g.hover_pointer |= hover && !row.closed;
-            let mirrored = !row.pane.is_empty();
-            let close = (width - 34.0, y + 8.0, 24.0, 28.0);
-            let right = if hover && !row.closed { width - 40.0 } else { width - 16.0 };
-            if mirrored {
-                crate::render::dashed_rect(g, full.0, y + 2.0, full.2, PANE_H - 4.0, theme::border());
-            }
-            g.queue_icon(if mirrored { "external-link" } else { "terminal" }, 22.0, y + 7.0, 13.0, theme::text_dim());
-            let title = if row.title.is_empty() { row.name.as_str() } else { row.title.as_str() };
-            let title = if title.is_empty() { row.remote_id.as_str() } else { title };
-            text(g, title, 43.0, y + 5.0, right - 43.0, 11.5, theme::text(), false);
-            let details = if row.closed {
-                "닫힘 · 원본 기기에서 되살리기".to_string()
-            } else if mirrored {
-                "이 기기에서 보는 중".to_string()
-            } else if row.status.contains("wait") || row.status.contains("attention") {
-                format!("{} · 기다림", row.remote_id)
-            } else {
-                format!("{} · 두 번 눌러 열기", row.remote_id)
-            };
-            text(g, &details, 43.0, y + 24.0, right - 43.0, 10.0, theme::text_dim(), false);
-            if !row.closed {
-                if hover {
-                    g.queue_icon("x", close.0 + 6.0, close.1 + 8.0, 12.0, if hit(cursor, close) { theme::attention() } else { theme::text_dim() });
-                    if let Some(r) = clipped(close, view) {
-                        hits.push((Action::Close(state::MachinesColBtn::Close {
-                            label: machine.label.clone(), remote_id: row.remote_id.clone(),
-                            name: row.name.clone(), pane: row.pane.clone(),
-                        }), r));
-                    }
-                }
-                hits.push((Action::Pane(machine.label.clone(), row.clone()), r));
+        if !collapsed {
+            let ma = (tab_x + 10.0, y + SIDEBAR_TAB_H + 3.0, tab_w - 20.0, body_h - 8.0);
+            for (row, cell) in list.iter().zip(cell_rects(list, ma)) {
+                draw_cell(g, hits, machine, row, cell, cursor, view);
             }
         }
-        y += PANE_H;
+        y += h + SIDEBAR_TAB_GAP;
     }
     if machine.closed > 0 {
         text(g, &format!("닫힌 pane {} · 원본에서 되살리기", machine.closed), 16.0, y + 12.0, width - 32.0, 10.0, theme::text_dim(), false);
@@ -532,7 +584,6 @@ impl App {
         if let Some(label) = &label { nav.pinned.retain(|p| &p.label != label); }
         nav.machine = label;
         nav.scroll = 0.0;
-        nav.last_click = None;
     }
 
     /// 기기를 아래 절로 붙인다. 위 목록에 서 있던 기기면 위는 이 기기로 돌아간다 —
@@ -597,7 +648,6 @@ impl App {
                     })
                 });
                 if let Some(pane) = existing {
-                    self.info.navigation.last_click = None;
                     if !self.reveal_pane_tab(&pane) {
                         let hidden = self.closed_pane_index(&pane).filter(|&i| {
                             self.closed_panes[i].alive && self.closed_panes[i].stashed
@@ -605,12 +655,8 @@ impl App {
                         if let Some(i) = hidden { self.reopen_closed_pane_at(i); }
                     }
                 } else if !row.remote_id.is_empty() && !row.closed {
-                    let now = std::time::Instant::now();
-                    let key = room_key(&label, &row.remote_id);
-                    let double = mirror_double_click(&mut self.info.navigation.last_click, key, now);
-                    if double {
-                        self.machines_col_act(state::MachinesColBtn::Mirror { label, remote_id: row.remote_id, name: row.name, cwd: row.remote_cwd });
-                    }
+                    // 본기기 칸처럼 한 번 눌러 연다 — 여기 자리가 없으면 거울을 세운다.
+                    self.machines_col_act(state::MachinesColBtn::Mirror { label, remote_id: row.remote_id, name: row.name, cwd: row.remote_cwd });
                 }
             }
         }
@@ -738,7 +784,7 @@ mod tests {
     fn machine() -> state::MachinesColMachine {
         let row = |pane: &str, remote: &str, room: &str| state::MachinesColRow {
             pane: pane.into(), remote_id: remote.into(), room: room.into(), remote_cwd: String::new(),
-            name: String::new(), title: String::new(), status: String::new(), closed: false,
+            name: String::new(), title: String::new(), status: String::new(), closed: false, rect: None,
         };
         state::MachinesColMachine {
             label: "test".into(), online: true, ago_secs: None, outdated: false,
@@ -762,8 +808,28 @@ mod tests {
         let mut collapsed = std::collections::HashSet::new();
         let full = content_height(&m, &collapsed);
         collapsed.insert(room_key("test", "A"));
-        assert_eq!(full - content_height(&m, &collapsed), PANE_H * 3.0);
+        assert_eq!(full - content_height(&m, &collapsed), room_body_h(3));
         assert_eq!(rows(&m).len(), 4);
+        assert_eq!(rooms(&m).iter().map(|(r, l)| (r.as_str(), l.len())).collect::<Vec<_>>(), [("A", 3), ("B", 1)]);
+    }
+
+    #[test]
+    fn cells_follow_source_layout_and_split_evenly_without_one() {
+        let m = machine();
+        let list = rooms(&m).remove(0).1;
+        let ma = (10.0, 20.0, 100.0, 50.0);
+        let even = cell_rects(&list, ma);
+        assert_eq!(even.len(), 3);
+        assert!((even[1].0 - (10.0 + 100.0 / 3.0)).abs() < 0.01);
+        assert!((even[2].3 - 49.0).abs() < 0.01);
+        let mut placed: Vec<state::MachinesColRow> = list.iter().map(|r| (*r).clone()).collect();
+        placed[0].rect = Some([0.0, 0.0, 0.5, 1.0]);
+        placed[1].rect = Some([0.5, 0.0, 0.5, 0.5]);
+        placed[2].rect = Some([0.5, 0.5, 0.5, 0.5]);
+        let refs: Vec<&state::MachinesColRow> = placed.iter().collect();
+        let cells = cell_rects(&refs, ma);
+        assert_eq!(cells[0], (10.0, 20.0, 49.0, 49.0));
+        assert_eq!(cells[2], (60.0, 45.0, 49.0, 24.0));
     }
 
     #[test]
@@ -772,42 +838,6 @@ mod tests {
         assert_eq!(clipped((10.0, 80.0, 180.0, 44.0), viewport), Some((10.0, 100.0, 180.0, 24.0)));
         assert!(clipped((10.0, 50.0, 180.0, 44.0), viewport).is_none());
         assert!(!hit((20.0, 99.0), clipped((10.0, 80.0, 180.0, 44.0), viewport).unwrap()));
-    }
-
-    #[test]
-    fn opening_a_new_mirror_requires_two_clicks_on_the_same_source() {
-        let mut last = None;
-        let now = Instant::now();
-        let next = now + std::time::Duration::from_millis(100);
-        assert!(!mirror_double_click(&mut last, "one/%2".into(), now));
-        assert!(!mirror_double_click(&mut last, "two/%2".into(), next));
-        assert!(mirror_double_click(&mut last, "two/%2".into(), next));
-        assert!(last.is_none());
-        assert!(!mirror_double_click(&mut last, "two/%2".into(), next));
-        assert!(!mirror_double_click(&mut last, "two/%2".into(), next + std::time::Duration::from_millis(500)));
-    }
-
-    #[test]
-    fn pinned_sections_take_at_most_an_equal_share_and_shrink_to_content() {
-        let pin = |label: &str| Pinned { label: label.into(), scroll: 0.0, content_h: 0.0, view: None };
-        let collapsed = std::collections::HashSet::new();
-        let m = machine();
-        let body = content_height(&m, &collapsed);
-        assert_eq!(section_heights(&[machine()], &[pin("test")], &collapsed, 1000.0), vec![SECTION_H + body]);
-        assert_eq!(section_heights(&[machine()], &[pin("test")], &collapsed, 300.0), vec![150.0]);
-        assert_eq!(section_heights(&[machine()], &[pin("없음")], &collapsed, 1000.0), vec![SECTION_H + PANE_H]);
-        assert!(section_heights(&[machine()], &[], &collapsed, 1000.0).is_empty());
-        let two = section_heights(&[machine()], &[pin("test"), pin("없음")], &collapsed, 240.0);
-        assert_eq!(two, vec![SECTION_H + PANE_H, SECTION_H + PANE_H]);
-    }
-
-    #[test]
-    fn drop_lands_only_inside_the_sidebar_below_the_header() {
-        let full = (0.0, TITLE_HEIGHT + HEADER_H + 10.0, 220.0, 500.0);
-        assert!(drop_target((30.0, full.1 + 300.0), 220.0, full));
-        assert!(!drop_target((300.0, full.1 + 300.0), 220.0, full));
-        assert!(!drop_target((30.0, TITLE_HEIGHT + 10.0), 220.0, full));
-        assert!(!drop_target((30.0, full.1 + full.3 + 60.0), 220.0, full));
     }
 
     #[test]

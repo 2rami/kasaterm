@@ -2595,11 +2595,13 @@ impl App {
                         pane: "%2".into(), remote_id: "%13".into(), name: "하치와레".into(),
                         title: "브라우저 연동".into(), status: "working".into(),
                         room: "방 1 · 브라우저".into(), remote_cwd: String::new(), closed: false,
+                        rect: Some([0.0, 0.0, 1.0, 1.0]),
                     }],
                     remote: vec![crate::state::MachinesColRow {
                         pane: String::new(), remote_id: "%4".into(), name: "히후미".into(),
                         title: "모바일 연결".into(), status: "idle".into(),
                         room: "방 2 · 모바일".into(), remote_cwd: String::new(), closed: false,
+                        rect: Some([0.0, 0.0, 0.6, 1.0]),
                     }],
                 }];
             }

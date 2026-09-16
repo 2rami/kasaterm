@@ -4542,6 +4542,14 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     // 별도 OS 창으로 뗀 pane — 방엔 속하지만 배치 칸엔 없어 폰이 따로 표시한다.
     let undocked: std::collections::HashSet<String> =
         backend.undocked_panes().into_iter().collect();
+    // 방 안의 칸 — 폰 미니맵과 같은 백분율 사각. 다른 기기의 사이드바가 이 방을
+    // 본기기 방처럼 배치도로 그린다(2026-09-16 지시). 없으면 그쪽이 칸을 고르게 나눈다.
+    let rects: std::collections::HashMap<String, serde_json::Value> = backend
+        .windows_overview()
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|w| w.panes.iter().map(|r| (r.surface_id.clone(), serde_json::json!([r.x, r.y, r.w, r.h]))))
+        .collect();
     // cwd 도 board 만으론 순수 셸이 빠진다 — 셸 pid 에서 직접 읽는 폴백. 이 값이
     // 비면 그 pane 의 거울은 레포를 몰라 재접속 자동 따라잡기가 통째로 건너뛴다.
     let pane_cwds: std::collections::HashMap<String, String> =
@@ -4594,6 +4602,9 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                     row["closed"] = serde_json::json!(!pane_windows.contains_key(&id));
                     row["undocked"] = serde_json::json!(undocked.contains(&id));
                     row["mirror_of"] = serde_json::Value::String(label);
+                    // 칸은 이쪽 방 안의 자리다 — 저쪽 목록의 칸을 그대로 두면 거울이
+                    // 저쪽 방의 자리에 그려진다.
+                    row["rect"] = rects.get(&id).cloned().unwrap_or(serde_json::Value::Null);
                     return row;
                 }
             }
@@ -4601,6 +4612,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
             serde_json::json!({
                 "id": id,
                 "surface_key": crate::surface_keys::get(&id),
+                "rect": rects.get(&id),
                 "mirror_of": mirror_label,
                 "name": b.and_then(|p| p.character.clone()),
                 "title": b.map(|p| p.title.clone()).filter(|s| !s.is_empty()),

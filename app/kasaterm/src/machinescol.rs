@@ -36,6 +36,19 @@ mod visibility_tests {
     }
 }
 
+/// `/term/panes` 행의 칸(백분율) → 0..1. 없거나 모양이 다르면 None.
+pub(crate) fn row_rect(p: &serde_json::Value) -> Option<[f32; 4]> {
+    let a = p.get("rect")?.as_array()?;
+    if a.len() != 4 {
+        return None;
+    }
+    let mut out = [0.0f32; 4];
+    for (slot, v) in out.iter_mut().zip(a) {
+        *slot = v.as_f64()? as f32 / 100.0;
+    }
+    Some(out)
+}
+
 /// Room identity comes from the source device, including for an existing mirror.
 fn remote_room(p: &serde_json::Value) -> String {
     let window = p.get("window").and_then(|v| v.as_u64());
@@ -368,6 +381,7 @@ impl App {
                 room: if closed { "닫힌 pane · 되살리기 대기".into() }
                     else { facts.as_ref().map(|(_, p)| remote_room(p)).unwrap_or_else(|| room_of(win)) },
                 closed,
+                rect: facts.as_ref().and_then(|(_, p)| row_rect(p)),
             };
             match remote {
                 Some(info) => {
@@ -457,6 +471,7 @@ impl App {
                                             .to_string(),
                                         room,
                                         closed: false,
+                                        rect: row_rect(p),
                                     },
                                 ))
                             })

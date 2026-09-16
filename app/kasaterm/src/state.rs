@@ -420,6 +420,9 @@ pub(crate) struct MachinesColRow {
     /// 저쪽에서 닫힌 pane(되살리기 대열) — 거울 행에만 뜬다: 원격 목록은 닫힌 것을
     /// 아예 안 세우지만, 이쪽 거울은 pane 이 남아 있어 「닫힘」으로 표시한다.
     pub(crate) closed: bool,
+    /// 원본 기기 방 안의 칸 `[x, y, w, h]`(0..1). 사이드바가 그 방을 본기기처럼
+    /// 배치도로 그리는 재료 — 옛 판 기기는 안 실어 주므로 그때는 칸을 고르게 나눈다.
+    pub(crate) rect: Option<[f32; 4]>,
 }
 
 #[derive(Clone, PartialEq)]
