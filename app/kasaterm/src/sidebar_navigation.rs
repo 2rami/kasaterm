@@ -39,6 +39,8 @@ pub(crate) struct NavigationState {
     /// 지금 보는 창이 어느 기계의 어떤 원격 pane 들인가 — 그 방 카드를 활성으로 그린다.
     /// 렌더가 프레임마다 `App::remote_view_of_window` 로 채운다.
     pub(crate) viewing: Option<(String, Vec<String>)>,
+    /// 보는 중인 원격 방에서 지금 포커스한 칸의 원격 pane id.
+    pub(crate) viewing_cur: Option<String>,
     picker_scroll: f32,
     picker_index: usize,
     content_h: f32,
@@ -217,14 +219,16 @@ fn scrollbar(g: &mut gpu::GpuRenderer, view: Rect, content_h: f32, scroll: f32, 
     g.rect(width - 4.0, y, 2.0, h, theme::text_mute());
 }
 
-/// 배치도 칸 하나 — 본기기 배치도 칸과 같은 문법(기기색 테두리·얼굴·걷기·대기 숨쉬기).
-/// 눌리는 사각은 잘린 칸이다 — 보이지 않는 부분이 눌리면 안 된다.
+/// 배치도 칸 하나 — 본기기 배치도 칸(render.rs)과 **같은 문법·같은 치수**: 테두리 2px 둥근
+/// 사각, 기다림이면 칸째 숨쉬기, 얼굴·걷기, 바닥 working 바, 탭은 점 줄. 눌리는 사각은
+/// 잘린 칸이다 — 보이지 않는 부분이 눌리면 안 된다.
 fn draw_cell(
     g: &mut gpu::GpuRenderer,
     hits: &mut Vec<(Action, Rect)>,
     machine: &state::MachinesColMachine,
     room: &str,
     deck: &[&state::MachinesColRow],
+    cur: bool,
     cell: Rect,
     cursor: (f32, f32),
     view: Rect,
@@ -234,49 +238,57 @@ fn draw_cell(
     let Some(visible) = clipped(cell, view) else { return };
     let hover = hit(cursor, visible);
     g.hover_pointer |= hover && !row.closed;
-    // 탭이 든 자리는 뒤에 장을 겹쳐 덱으로 — 본기기 배치도가 탭 수를 말하는 그림.
-    if deck.len() > 1 && mw > 12.0 && mh > 12.0 {
-        for k in (1..deck.len().min(3)).rev() {
-            let off = 2.0 * k as f32;
-            round_rect(g, mx + off, my - off, mw - off, mh, 2.0, theme::with_alpha(theme::border(), 0x66));
-        }
-    }
-    let mirrored = deck.iter().any(|r| !r.pane.is_empty());
     let busy = deck.iter().any(|r| matches!(r.status.as_str(), "working" | "compacting"));
     let waiting = deck.iter().any(|r| r.status.contains("wait") || r.status.contains("attention"));
-    let device = Some(machine.label.as_str());
-    let border = if waiting {
-        theme::attention()
-    } else if mirrored {
-        // 이 기기에서 보는 중 — 본기기의 「지금 보는 칸」과 같은 테두리.
+    let signal = waiting.then(|| (theme::attention(), 0.9));
+    round_rect(g, mx, my, mw, mh, 2.0, if let Some((c, _)) = signal {
+        c
+    } else if cur {
         theme::accent()
     } else if hover {
         theme::surface_hover()
     } else {
-        crate::render::pane_identity::minimap_border(theme::panel_bg(), device, theme::with_alpha(theme::border(), 0x66))
-    };
-    round_rect(g, mx, my, mw, mh, 2.0, border);
-    if mw > 5.0 && mh > 5.0 {
+        crate::render::pane_identity::minimap_border(theme::panel_bg(), None, theme::with_alpha(theme::border(), 0x66))
+    });
+    if (cur || signal.is_some()) && mw > 5.0 && mh > 5.0 {
         round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5,
-            crate::render::pane_identity::minimap_background(theme::panel_bg(), device));
-        if waiting {
-            let mut c = theme::attention();
-            c[3] = (30.0 + 120.0 * crate::sprites::blink(crate::sprites::anim_phase_secs(), 0.9)) as u8;
+            crate::render::pane_identity::minimap_background(theme::panel_bg(), None));
+    }
+    if let Some((col, period)) = signal {
+        if mw > 5.0 && mh > 5.0 {
+            let mut c = col;
+            c[3] = (30.0 + 120.0 * crate::sprites::blink(crate::sprites::anim_phase_secs(), period)) as u8;
             round_rect(g, mx + 1.5, my + 1.5, mw - 3.0, mh - 3.0, 1.5, c);
         }
     }
     let (fx, fy, face) = crate::render::minimap_face_box(mx, my, mw, mh);
     let phase = crate::sprites::anim_phase_secs();
-    // 얼굴은 덱에서 이름 있는 첫 줄 — 바깥이 셸이고 탭에 학생이 앉은 자리도 얼굴이 선다.
     let who = deck.iter().find(|r| !r.name.is_empty()).map_or("", |r| r.name.as_str());
     let walked = busy && crate::sprites::draw_student_walk(g, who, fx - 2.0, fy - 2.0, face + 4.0, phase);
     if !walked && !crate::sprites::draw_student_face_anim(g, who, fx, fy, face, phase) {
         let size = face.min(16.0);
-        g.queue_icon(if mirrored { "external-link" } else { "terminal" },
-            mx + (mw - size) / 2.0, my + (mh - size) / 2.0, size, theme::text_dim());
+        g.queue_icon("terminal", mx + (mw - size) / 2.0, my + (mh - size) / 2.0, size, theme::text_dim());
     }
-    if deck.len() > 1 && mw > 22.0 && mh > 14.0 {
-        text(g, &format!("{}", deck.len()), mx + mw - 10.0, my + 1.0, 10.0, 9.0, theme::text_dim(), true);
+    let has_bar = crate::render::minimap_has_bar(mw, mh);
+    if has_bar && busy {
+        let (bar_h, pad) = (crate::render::MINI_BAR_H, crate::render::MINI_BAR_PAD);
+        g.working_bar(mx + 2.0, my + mh - bar_h - pad, mw - 4.0, bar_h, theme::accent());
+    }
+    // 탭은 바닥의 점 줄 — 첫 점(바깥 자리)이 넓고, 나머지는 흐리게. 본기기와 같은 그림.
+    if deck.len() > 1 && mw > 16.0 && mh > 16.0 {
+        let (dot, gap) = (2.5, 1.5);
+        let dy = if has_bar {
+            my + mh - crate::render::MINI_BAR_H - crate::render::MINI_BAR_PAD - dot - 2.0
+        } else {
+            my + mh - dot - 2.0
+        };
+        let mut dx = mx + 3.0;
+        for (k, _) in deck.iter().take(6).enumerate() {
+            let w = if k == 0 { dot * 1.8 } else { dot };
+            let col = if k == 0 { theme::text_dim() } else { theme::with_alpha(theme::text_mute(), 0x70) };
+            round_rect(g, dx, dy, w, dot, dot / 2.0, col);
+            dx += w + gap;
+        }
     }
     if !row.closed {
         hits.push((Action::Open {
@@ -293,6 +305,7 @@ fn draw_rows(
     hits: &mut Vec<(Action, Rect)>,
     collapsed_rooms: &std::collections::HashSet<String>,
     viewing: Option<&(String, Vec<String>)>,
+    viewing_cur: Option<&str>,
     machine: &state::MachinesColMachine,
     cursor: (f32, f32),
     width: f32,
@@ -309,16 +322,17 @@ fn draw_rows(
         text(g, message, 16.0, y + 12.0, width - 32.0, 11.0, theme::text_dim(), false);
         y += PANE_H;
     }
-    for (room, list) in &groups {
+    let active_room = groups.iter().position(|(_, list)| viewing.is_some_and(|(label, ids)| {
+        *label == machine.label && list.iter().any(|r| ids.contains(&r.remote_id))
+    }));
+    for (index, (room, list)) in groups.iter().enumerate() {
         let key = room_key(&machine.label, room);
         let collapsed = collapsed_rooms.contains(&key);
-        let body_h = if collapsed { 0.0 } else { room_body_h(list.len()) };
+        let stacks = decks(list);
+        let body_h = if collapsed { 0.0 } else { room_body_h(stacks.len()) };
         let h = SIDEBAR_TAB_H + body_h;
         let head = (tab_x, y, tab_w, SIDEBAR_TAB_H);
-        // 이 방을 지금 보는 중인가 — 본기기의 활성 방 카드와 같은 채움.
-        let active = viewing.is_some_and(|(label, ids)| {
-            *label == machine.label && list.iter().any(|r| ids.contains(&r.remote_id))
-        });
+        let active = active_room == Some(index);
         if let Some(head_visible) = clipped(head, view) {
             let hover = hit(cursor, head_visible);
             g.hover_pointer |= hover;
@@ -327,19 +341,36 @@ fn draw_rows(
             } else if hover {
                 panel_rect(g, tab_x, y, tab_w, h, theme::radius_md(), theme::surface_hover());
             }
-            // 본기기 카드와 같은 자리·크기 — 이름 13.5px 는 y+11, 폴더 11px 는 y+30, 글은 x+26.
-            let badge = (tab_x + tab_w - 30.0, y + 8.0, 24.0, 20.0);
+            // 본기기 카드와 같은 문법: 카드 사이 흐린 구분선(활성 카드 앞뒤엔 없음).
+            if !active && index + 1 < groups.len() && active_room != Some(index + 1) {
+                let ly = (y + h + SIDEBAR_TAB_GAP / 2.0).round();
+                g.rect(tab_x + 10.0, ly, tab_w - 20.0, 1.0, theme::with_alpha(theme::border(), 0x60));
+            }
+            // 접힌 방의 기다림은 머리의 숨쉬는 점이 말한다 — 펴진 방은 칸이 말하므로 조용히.
+            let waits = list.iter().any(|r| r.status.contains("wait") || r.status.contains("attention"));
+            if collapsed && waits {
+                crate::sprites::blink_dot(g, tab_x + 12.0, y + 13.0, 9.0, theme::attention(), 0.9);
+            }
+            // 펼침 배지 — 본기기 `window_expand_rect` 와 같은 pill(칸 수 포함).
+            let badge_w = if stacks.len() >= 10 { 44.0 } else { 37.0 };
+            let badge = (tab_x + tab_w - 8.0 - badge_w, y + 26.0, badge_w, 20.0);
             let (name, folder) = room_title(room);
             let text_x = tab_x + 26.0;
-            text(g, name, text_x, y + 11.0, tab_w - 26.0 - 36.0, 13.5,
+            let tab_right = tab_x + tab_w;
+            let name_budget = (tab_right - 6.0 - text_x).max(0.0);
+            let folder_budget = (tab_right - 8.0 - (badge_w + 14.0) - text_x).max(0.0);
+            let name_y = if folder.is_empty() { y + ((SIDEBAR_TAB_H - 17.0) / 2.0).round() } else { y + 11.0 };
+            text(g, name, text_x, name_y, name_budget, 13.5,
                 if active { theme::text() } else { theme::text_dim() }, active);
             if !folder.is_empty() {
-                text(g, folder, text_x, y + 30.0, tab_w - 26.0 - 36.0, 11.0, theme::text_dim(), false);
+                text(g, folder, text_x, y + 30.0, folder_budget, 11.0, theme::text_dim(), false);
             }
             let badge_hover = hit(cursor, badge);
-            if badge_hover { g.rect(badge.0, badge.1, badge.2, badge.3, theme::surface_active()); }
-            g.queue_icon(if collapsed { "chevron-right" } else { "chevron-down" }, badge.0 + 5.0, badge.1 + 3.0, 14.0,
-                if badge_hover { theme::text() } else { theme::lerp(theme::text_dim(), theme::text(), 0.55) });
+            if badge_hover { hover_rect(g, badge.0, badge.1, badge.2, badge.3, theme::radius_sm()); }
+            let fg = if badge_hover { theme::text() } else { theme::lerp(theme::text_dim(), theme::text(), 0.55) };
+            g.queue_icon(if collapsed { "chevron-right" } else { "chevron-down" }, badge.0 + 5.0, badge.1 + 3.0, 14.0, fg);
+            g.draw_text(badge.0 + 21.0, badge.1 + 5.0, &stacks.len().to_string(),
+                gpu::DrawOpts { font_size: 11.0, color: fg, bold: false, italic: false });
             // 배지는 접고 펴고, 머리 나머지는 본기기 방 탭처럼 그 방으로 간다. 배지가
             // 앞이어야 한다 — 맞춤은 앞선 것이 이긴다.
             if let Some(b) = clipped(badge, view) { hits.push((Action::Room(key.clone()), b)); }
@@ -349,10 +380,10 @@ fn draw_rows(
         }
         if !collapsed {
             let ma = (tab_x + 10.0, y + SIDEBAR_TAB_H + 3.0, tab_w - 20.0, body_h - 8.0);
-            let stacks = decks(list);
             let heads: Vec<&state::MachinesColRow> = stacks.iter().map(|d| d[0]).collect();
             for (deck, cell) in stacks.iter().zip(cell_rects(&heads, ma)) {
-                draw_cell(g, hits, machine, room, deck, cell, cursor, view);
+                let cur = active && viewing_cur.is_some_and(|c| deck.iter().any(|r| r.remote_id == c));
+                draw_cell(g, hits, machine, room, deck, cur, cell, cursor, view);
             }
         }
         y += h + SIDEBAR_TAB_GAP;
@@ -418,8 +449,9 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         nav.pinned.push(Pinned { label: m.label.clone(), auto: true, scroll: 0.0, content_h: 0.0, view: None });
     }
     nav.pinned.retain(|p| !p.auto || machines.iter().any(|m| m.label == p.label && m.online));
-    let NavigationState { pinned, collapsed_rooms, hits, machine: main, scroll, content_h, viewport: main_view, viewing, .. } = nav;
+    let NavigationState { pinned, collapsed_rooms, hits, machine: main, scroll, content_h, viewport: main_view, viewing, viewing_cur, .. } = nav;
     let viewing = viewing.as_ref();
+    let viewing_cur = viewing_cur.as_deref();
     let heights = section_heights(machines, pinned, collapsed_rooms, viewport.3);
     let pinned_total: f32 = heights.iter().sum();
     let view = (viewport.0, viewport.1, viewport.2, (viewport.3 - pinned_total).max(0.0));
@@ -430,7 +462,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
             Some(machine) => {
                 *content_h = content_height(machine, collapsed_rooms);
                 *scroll = scroll.clamp(0.0, (*content_h - view.3).max(0.0));
-                draw_rows(g, hits, collapsed_rooms, viewing, machine, cursor, width, view, *scroll);
+                draw_rows(g, hits, collapsed_rooms, viewing, viewing_cur, machine, cursor, width, view, *scroll);
                 scrollbar(g, view, *content_h, *scroll, width);
             }
         }
@@ -463,7 +495,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
             Some(machine) => {
                 pin.content_h = content_height(machine, collapsed_rooms);
                 pin.scroll = pin.scroll.clamp(0.0, (pin.content_h - body.3).max(0.0));
-                draw_rows(g, hits, collapsed_rooms, viewing, machine, cursor, width, body, pin.scroll);
+                draw_rows(g, hits, collapsed_rooms, viewing, viewing_cur, machine, cursor, width, body, pin.scroll);
                 scrollbar(g, body, pin.content_h, pin.scroll, width);
             }
         }

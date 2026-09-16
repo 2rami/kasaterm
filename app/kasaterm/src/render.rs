@@ -130,8 +130,8 @@ const PINNED_INPUT_SCAN_ROWS: usize = 24;
 /// 옮겨 앉혔다(2026-09-05 실측). 이제 여백만큼 전부 당기므로 상한이 아니다.
 const BOTTOM_PULL_SCAN_ROWS: usize = 48;
 
-const MINI_BAR_H: f32 = 2.0;
-const MINI_BAR_PAD: f32 = 2.0;
+pub(crate) const MINI_BAR_H: f32 = 2.0;
+pub(crate) const MINI_BAR_PAD: f32 = 2.0;
 /// 걷는 학생 상자가 얼굴보다 큰 몫(위 2 + 아래 2). 원본이 정사각 전신이라
 /// `draw_student_walk` 은 얼굴 상자를 4px 키워 그린다 — 자리를 셈할 때도 그만큼 본다.
 const MINI_WALK_PAD: f32 = 4.0;
@@ -1964,6 +1964,9 @@ impl App {
         let sb_full_h = self.sidebar_full_avail_h(sb_win_h);
         // 지금 보는 창이 다른 기기 방의 보기 창이면 그 기계 절의 카드가 「보는 중」으로 선다.
         self.info.navigation.viewing = self.remote_view_of_window(self.active_window);
+        // 그 방 안에서 지금 포커스한 거울의 원본 pane — 본기기 배치도의 「지금 보는 칸」 테두리.
+        self.info.navigation.viewing_cur = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone())
+            .and_then(|pane| kasa_mcp::remote::remote_info(&pane)).map(|info| info.remote_id);
         let sb_over_before = self.win_tab_first > 0;
         let sb_over_after = sb_tabs
             .last()
