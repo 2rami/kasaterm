@@ -520,4 +520,29 @@ mod tests {
         let tok = super::jwt(&key).expect("애플 .p8 로 ES256 서명");
         assert_eq!(tok.split('.').count(), 3);
     }
+
+    /// 진짜 열쇠·토큰이 있는 기계에서, 앱과 같은 경로(ring JWT + reqwest h2)로 한 통 쏜다.
+    /// 폰에 실제로 울리므로 `--ignored` 로만 — 「서버가 쏘는데 폰이 안 받나」를 가를 때.
+    #[test]
+    #[ignore]
+    fn live_send_one_alert() {
+        if !super::configured() || super::tokens().is_empty() {
+            return;
+        }
+        let alert = super::Alert {
+            title: "시로코 · 서버 경로 시험".into(),
+            body: "앱과 같은 코드로 보낸 알림".into(),
+            machine: None,
+            pane: "%0".into(),
+            kind: "test".into(),
+            collapse: None,
+            sender: Some("시로코".into()),
+            avatar_slug: crate::character::slug_for_any("시로코"),
+            url: None,
+        };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let n = rt.block_on(super::send(&alert));
+        eprintln!("[live_send] 보낸 폰 수 = {n}");
+        assert!(n > 0, "APNs 가 거절했거나 못 보냄 — stderr 의 [push] 줄을 봐라");
+    }
 }
