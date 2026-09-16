@@ -96,6 +96,8 @@ struct App {
     urgent: bool,
     /// 튀는 중 — 시작한 때와 제자리 y. 튀는 동안 오는 `Moved` 는 자리로 안 친다.
     bounce: Option<(std::time::Instant, f64)>,
+    /// 지금 도는 자동 모션이 한 번 보여 주고 끝나는 반응인가. 끝나면 Idle 로 돌아간다.
+    reaction_once: bool,
     /// 말 거는 중이면 친 글. None 이면 평소처럼 듣기만 한다.
     typing: Option<String>,
     journal: journal::Client,
@@ -1126,11 +1128,19 @@ impl App {
     }
 
     fn resume_automatic(&mut self) {
-        if let Some(i) = self.playback.target(&self.catalog, self.automatic_group()) {
-            if !self.play_motion(i, true) { self.motion = None; }
+        let group = self.automatic_group();
+        // 「일하는 중」은 알릴 일이지 계속 보여 줄 상태가 아니다 — 학생 하나라도 일하면
+        // 판은 거의 늘 busy 라, 그 모션을 돌려 두면 펫이 하루 종일 부산스럽다(2026-09-17
+        // 「베개가 계속 생겨」: 후후의 Busy 모션이 베개다). 한 번 보여 주고 Idle 로 돌아간다.
+        // 사람 손이 필요한 Think·Error 와 잠은 그대로 돈다 — 그건 봐 달라는 신호다.
+        let once = self.playback.selected.is_none() && group == "Busy" && self.catalog.group("Busy").is_some();
+        if let Some(i) = self.playback.target(&self.catalog, group) {
+            if !self.play_motion(i, !once) { self.motion = None; }
+            self.reaction_once = once;
         } else {
             self.motion = None;
             self.motion_params.clear();
+            self.reaction_once = false;
         }
     }
 
@@ -1316,6 +1326,13 @@ impl App {
         self.tick_bounce();
         let finished = self.motion.as_ref().is_some_and(|m| m.is_finished());
         if self.playback.finish_once(finished) { self.resume_automatic(); }
+        else if finished && self.reaction_once && self.playback.selected.is_none() {
+            self.reaction_once = false;
+            match self.catalog.group("Idle") {
+                Some(i) => { if !self.play_motion(i, true) { self.motion = None; } }
+                None => { self.motion = None; self.motion_params.clear(); }
+            }
+        }
         let moving = self.playback.selected.is_some() || self.typing.is_some() || (self.preferences.animations
             && (!self.resting || self.catalog.group("Sleep").is_some()));
         let dt = self.last.elapsed().as_secs_f32().min(0.1);
@@ -1910,7 +1927,7 @@ fn main() {
         popup: None,
         menu_probe_started:None,menu_probe_phase:0,menu_probe_frames:0,
         menu_probe_motion:0.0,menu_probe_mesh:0,menu_probe_motion_checked:false,
-        said_at: std::time::Instant::now(), urgent: false, bounce: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
+        said_at: std::time::Instant::now(), urgent: false, bounce: None, reaction_once: false, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
         catalog, expressions: catalog::Expressions::default(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
         shot_path: std::env::var("KASAPET_SHOT").ok(),
