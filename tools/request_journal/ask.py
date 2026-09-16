@@ -1,10 +1,14 @@
-"""펫 머리 위 유리 바가 묻는 「지금 보는 창」 질문 — 짧게 답하고, 시키면 움직인다.
+"""펫 머리 위 유리 바가 묻는 질문 — 지금 보는 창이든 모든 기기든, 판을 근거로 답하고 시키면 움직인다.
 
 `/api/chat` 은 시킨 일의 장부를 검산하는 느린 길이고 모델 출력을 실행하지 않는다.
-이 길은 반대다 — 지금 포커스한 pane 의 화면·상태를 실어 몇 초 안에 답하고, 「이 창
-미니로 이사해줘」 같은 말은 kasaterm-cli 로 실제로 옮긴다(2026-09-14 지시). 실행은
-모델이 아래 도구를 골랐을 때만, 그것도 이 목록의 것만이다. 화면 글자는 그대로 모델에
-가지만 디스크에는 남기지 않는다.
+이 길은 반대다 — 판(`board --all`)과 포커스한 pane 의 화면을 실어 몇 초 안에 답하고,
+「이 창 미니로 이사해줘」 같은 말은 kasaterm-cli 로 실제로 옮긴다(2026-09-14 지시).
+실행은 모델이 아래 도구를 골랐을 때만, 그것도 이 목록의 것만이다. 화면 글자는 그대로
+모델에 가지만 디스크에는 남기지 않는다.
+
+답은 펫 말풍선에 그대로 뜬다(2026-09-17 지시 「답변이 채팅창 밖으로 나와야 한다」).
+그래서 말투가 곧 캐릭터다 — 성격 원본은 나쵸 레포(`prompts/system.md`)에서 읽어 오고,
+여기에는 베끼지 않는다. 베끼면 두 벌이 되어 한쪽만 고쳐지는 날이 온다.
 """
 from __future__ import annotations
 
@@ -13,7 +17,9 @@ import json
 import os
 import shutil
 import subprocess
+import re
 import threading
+from collections import Counter
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -37,17 +43,50 @@ TOOLS = [
 ]
 TOOL_NAMES = tuple(t["name"] for t in TOOLS)
 
-SYSTEM = (
-    "너는 카사텀의 나쵸다. 사용자는 지금 보고 있는 터미널 창(pane) 하나를 두고 묻는다. "
-    "아래 맥락만 근거로 한국어 반말로 두세 문장 안에 답해라. 코드 식별자·경로·명령은 빼고, "
-    "무엇을 하고 있는지·어디까지 됐는지·막힌 게 있는지·사람이 할 게 있는지로 말해라. "
-    "모르면 모른다고 해라. 사용자가 옮기라·데려오라·앞으로·전달하라처럼 분명히 시킬 때만 도구를 쓰고, "
-    "묻기만 하면 도구 없이 답만 해라. 도구를 썼으면 무엇을 했는지 한 문장으로 말해라."
+NACHO_REPO = Path(__file__).resolve().parents[3] / "nacho-neko"
+# 성격 원본은 이 제목 앞까지만 쓴다 — 그 뒤는 메모리 볼트·도구 사용법이라 펫 자리에서는
+# 존재하지 않는 경로를 가리키는 틀린 지시가 된다.
+PERSONA_STOP = "\n# 메모리"
+FALLBACK_PERSONA = (
+    "너는 나쵸네코 — 고양이 모티프의 메이트 봇이다. 조용조용하고 귀여운 반말로 말한다. "
+    "어미는 부드럽게(~야·~지·~네·~당·~겡), 카오모지는 환영하고 유니코드 이모지는 쓰지 않는다. "
+    "존댓말은 쓰지 않는다. 확신이 없으면 「음... 확실하진 않은데」처럼 솔직하게 말한다."
 )
+
+PET_RULES = """
+# 지금 자리 — 카사텀 바탕화면 펫
+너는 지금 바탕화면 펫으로 떠 있고, 사용자가 펫 머리 위 바에 한 마디 묻는다. 네 답은 펫 말풍선에 그대로 뜬다.
+근거는 아래 자료뿐이다. 자료에 없는 것은 지어내지 말고 모른다고 해라.
+- 「이 창」「얘」처럼 하나를 물으면 [지금 보는 창] 으로 답한다 — 무엇을 하는지·어디까지 됐는지·막힌 게 있는지·사람이 할 게 있는지. 두세 문장.
+- 「전체」「모든 기기」「다들 뭐 해」처럼 판 전체를 물으면 [모든 기기] 로 답한다. 이때는 짧게 답하는 규칙의 예외다.
+  기계마다 한 단락: 첫 줄에 기계 이름과 연결 상태, 그 아래 학생마다 한 줄(이름 · 무슨 일 · 어디까지 · 막힘이나 기다림).
+  사람 손이 필요한 학생을 맨 앞에 두고, 끊긴 기계는 「끊김」 한 줄로, 쉬는 학생이 많으면 이름만 묶어 한 줄로. 기계당 3~6줄, 전체 700자 안.
+- 마크다운 기호(**, #, 코드펜스)는 쓰지 마라 — 말풍선은 글자를 그대로 보여 준다. 줄 앞은 「·」 정도면 된다.
+- 코드 식별자·경로·명령·창 번호는 빼고 사람 말로 옮긴다. 학생이 보고한 것과 실제 반영은 다르니 「~했대」로 귀속한다.
+- 도구는 사용자가 옮기라·데려오라·앞으로 가져오라·전달하라고 분명히 시킬 때만 쓴다. 묻기만 하면 답만 한다. 도구를 썼으면 무엇을 했는지 한 문장.
+"""
 
 CLI_TIMEOUT = 8
 PEEK_LINES = 40
-MAX_CHARS = 6000
+MAX_CHARS = 9000
+FLEET_CHARS = 5500
+MACHINE_CHARS = 2200
+LINE_CHARS = 240
+NEEDS_HUMAN = ("waiting", "blocked", "error", "needs_attention", "dead")
+
+
+def persona(repo: Path = NACHO_REPO) -> str:
+    """나쵸 성격 원본의 앞부분(정체·톤·답 길이·예시)만 떼어 온다."""
+    try:
+        text = (repo / "prompts/system.md").read_text(encoding="utf-8")
+    except OSError:
+        return FALLBACK_PERSONA
+    head = text.split(PERSONA_STOP, 1)[0].strip()
+    return head or FALLBACK_PERSONA
+
+
+def system_prompt(repo: Path = NACHO_REPO) -> str:
+    return persona(repo) + "\n" + PET_RULES
 
 
 def cli_path() -> str | None:
@@ -109,41 +148,165 @@ def _json_result(raw: str) -> dict:
     return value.get("result", value) if isinstance(value, dict) else {}
 
 
-def pane_context(pane: str) -> dict:
-    """모델에 실을 맥락 — 판(누가·무슨 일·상태), 화면 꼬리, 기계 목록."""
-    who = {}
+def _machines_http() -> list[dict]:
+    """앱의 기계 목록 — 다른 기계 pane 의 대기 사유·쉰 시간처럼 판에는 없는 것을 여기서 채운다."""
+    try:
+        with urlopen(Request("http://127.0.0.1:8765/machines"), timeout=3) as resp:
+            rows = json.load(resp).get("machines", [])
+    except Exception:
+        return []
+    return [m for m in rows if isinstance(m, dict)]
+
+
+def _clip(text, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _state(status: str, waiting: str) -> tuple[int, str]:
+    """사람이 읽을 상태와 정렬 순위 — 사람 손이 필요한 학생이 맨 앞이다."""
+    if waiting or status in NEEDS_HUMAN:
+        return 0, "사람 손 필요"
+    if status == "working":
+        return 1, "일하는 중"
+    if status == "idle":
+        return 2, "쉬는 중"
+    return 3, "불명"
+
+
+def fleet(board_all: dict, local_rows: dict[str, dict], machines_http: list[dict]) -> list[dict]:
+    """`board --all` 을 기계별·방별로 묶는다.
+
+    다른 기계에 비친 거울 줄(status_reason 이 remote mirror)은 뺀다 — 같은 학생이 두 기계에
+    한 번씩, 두 번 세어진다. 이 기기 줄은 로컬 판으로, 다른 기계 줄은 기계 목록의 pane 으로
+    대기 사유·쉰 시간·지금 하는 일을 채운다.
+    """
+    remote: dict[tuple[str, str], dict] = {}
+    for machine in machines_http:
+        route = str(machine.get("route") or "")
+        if not route.startswith("~"):
+            continue
+        for pane in machine.get("panes") or []:
+            if isinstance(pane, dict) and pane.get("id"):
+                remote[(route[1:], str(pane["id"]))] = pane
+    machines: dict[str, dict] = {}
+    for source in board_all.get("sources") or []:
+        if not isinstance(source, dict) or not source.get("machine_id"):
+            continue
+        machines[source["machine_id"]] = {
+            "label": source.get("label") or source["machine_id"],
+            "online": source.get("state") == "online",
+            "is_local": bool(source.get("is_local")),
+            "rooms": {},
+        }
+    for pane in board_all.get("panes") or []:
+        if not isinstance(pane, dict) or str(pane.get("status_reason") or "").startswith("remote mirror"):
+            continue
+        address = pane.get("address") or {}
+        machine_id = address.get("machine_id") or ""
+        machine = machines.get(machine_id)
+        if machine is None:
+            continue
+        surface = str(address.get("surface_id") or "")
+        extra = local_rows.get(surface, {}) if machine["is_local"] else remote.get((machine_id, surface), {})
+        waiting = _clip(extra.get("waiting_for"), 80)
+        rank, state = _state(str(pane.get("status") or ""), waiting)
+        idle = extra.get("idle_secs")
+        entry = {
+            "pane": surface,
+            "name": pane.get("character") or extra.get("name") or extra.get("character") or "(캐릭터 없음)",
+            "rank": rank,
+            "state": state,
+            "title": _clip(pane.get("title") or extra.get("title"), 60),
+            "request": _clip(pane.get("request") or extra.get("last_prompt"), 70),
+            "progress": _clip(pane.get("progress") or extra.get("last_reply"), 100),
+            "doing": _clip(extra.get("doing") or extra.get("intent"), 70),
+            "waiting": waiting,
+            "idle_min": int(idle // 60) if isinstance(idle, (int, float)) and idle >= 60 else 0,
+            "stale": pane.get("freshness") not in (None, "fresh"),
+        }
+        machine["rooms"].setdefault(pane.get("room_label") or "방 없음", []).append(entry)
+    ordered = sorted(machines.values(), key=lambda m: (not m["is_local"], not m["online"], m["label"]))
+    for machine in ordered:
+        for rows in machine["rooms"].values():
+            rows.sort(key=lambda e: (e["rank"], e["name"]))
+        # 사람 손이 필요한 학생이 있는 방이 앞이다 — 모델이 앞에서부터 읽고 앞에서부터 말한다.
+        machine["rooms"] = dict(sorted(machine["rooms"].items(), key=lambda room: min(e["rank"] for e in room[1])))
+    return ordered
+
+
+def _entry_line(entry: dict) -> str:
+    parts = [f"{entry['name']} · {entry['state']}"]
+    if entry["title"]:
+        parts.append(entry["title"])
+    if entry["waiting"]:
+        parts.append(f"기다림: {entry['waiting']}")
+    if entry["request"]:
+        parts.append(f"지시: {entry['request']}")
+    if entry["progress"]:
+        parts.append(f"진행: {entry['progress']}")
+    if entry["doing"] and entry["state"] == "일하는 중":
+        parts.append(f"지금: {entry['doing']}")
+    if entry["idle_min"]:
+        parts.append(f"{entry['idle_min']}분째 조용")
+    if entry["stale"]:
+        parts.append("(오래된 관측)")
+    return _clip(" · ".join(parts), LINE_CHARS)
+
+
+def digest(machines: list[dict]) -> str:
+    """모델에 실을 판 — 기계마다 한 덩어리. 비어 있으면 그렇다고 적는다(빈 줄은 「판을
+    못 읽었다」와 구분이 안 된다)."""
+    if not machines:
+        return "(기계 목록이 비어 있다)"
+    blocks = []
+    for machine in machines:
+        label = machine["label"] + (" (이 기기)" if machine["is_local"] else "")
+        if not machine["online"]:
+            blocks.append(f"■ {label} — 끊김")
+            continue
+        entries = [e for rows in machine["rooms"].values() for e in rows]
+        counts = Counter(e["state"] for e in entries)
+        tally = " · ".join(f"{state} {counts[state]}" for state in ("사람 손 필요", "일하는 중", "쉬는 중", "불명") if counts[state])
+        lines = [f"■ {label} — 연결됨 · 학생 {len(entries)}" + (f" ({tally})" if tally else "")]
+        for room, rows in machine["rooms"].items():
+            lines.append(f" [{room}]")
+            lines.extend("  · " + _entry_line(e) for e in rows)
+        block = "\n".join(lines)
+        blocks.append(block if len(block) <= MACHINE_CHARS else block[: MACHINE_CHARS - 1] + "…")
+    text = "\n".join(blocks)
+    return text if len(text) <= FLEET_CHARS else text[: FLEET_CHARS - 1] + "…"
+
+
+def context(pane: str) -> dict:
+    """모델에 실을 맥락 — 포커스한 pane(판 줄·화면 꼬리)과 모든 기기의 판."""
+    local_rows: dict[str, dict] = {}
     ok, raw = run_cli("board")
     if ok:
         for row in _json_result(raw).get("board", []) or []:
-            if isinstance(row, dict) and row.get("surface_id") == pane:
-                who = row
-                break
+            if isinstance(row, dict) and row.get("surface_id"):
+                local_rows[str(row["surface_id"])] = row
+    ok, raw = run_cli("board", "--all")
+    fleet_text = digest(fleet(_json_result(raw), local_rows, _machines_http())) if ok else f"(판을 읽지 못했다: {raw})"
     screen = ""
     ok, raw = run_cli("peek", pane)
     if ok:
         text = str(_json_result(raw).get("text", ""))
         lines = [line.rstrip() for line in text.splitlines() if line.strip()]
         screen = "\n".join(lines[-PEEK_LINES:])
-    machines = []
-    try:
-        with urlopen(Request("http://127.0.0.1:8765/machines"), timeout=3) as resp:
-            for m in json.load(resp).get("machines", []):
-                machines.append(f"{m.get('label')}({'연결됨' if m.get('online') else '끊김'})")
-    except Exception:
-        pass
-    return {"who": who, "screen": screen, "machines": machines}
+    return {"who": local_rows.get(pane, {}), "screen": screen, "fleet": fleet_text}
 
 
 def build_prompt(text: str, pane: str, ctx: dict) -> str:
     who = ctx["who"]
     head = (
         f"[질문] {text}\n\n"
-        f"[창] {pane} · 학생 {who.get('character') or '미배정'} · 세션 {who.get('peer_name') or '-'} · "
+        f"[지금 보는 창] {pane} · 학생 {who.get('character') or '미배정'} · 세션 {who.get('peer_name') or '-'} · "
         f"상태 {who.get('status') or '-'} · 기계 {who.get('machine') or '이 기기'} · 폴더 {who.get('cwd') or '-'}\n"
         f"[마지막 지시] {(who.get('last_prompt') or '')[:600]}\n"
-        f"[마지막 답] {(who.get('last_reply') or '')[:800]}\n"
-        f"[기계 목록] {', '.join(ctx['machines']) or '없음'}\n"
-        f"[화면 끝 부분]\n"
+        f"[마지막 답] {(who.get('last_reply') or '')[:800]}\n\n"
+        f"[모든 기기]\n{ctx['fleet']}\n\n"
+        f"[지금 보는 창의 화면 끝 부분]\n"
     )
     room = max(MAX_CHARS - len(head), 800)
     return head + ctx["screen"][-room:]
@@ -187,9 +350,8 @@ def llm_client(provider_factory):
             os.environ["OPENGATEWAY_API_KEY"] = key
     from .remote_helper import load_client
 
-    repo = Path(__file__).resolve().parents[3] / "nacho-neko"
     try:
-        return load_client(repo)
+        return load_client(NACHO_REPO)
     except Exception:
         return None
 
@@ -204,19 +366,19 @@ def answer(provider_factory, body: dict) -> tuple[int, dict]:
     client = llm_client(provider_factory)
     if client is None:
         return 503, {"error": "llm_unavailable"}
-    ctx = pane_context(pane)
-    prompt = build_prompt(text, pane, ctx)
+    prompt = build_prompt(text, pane, context(pane))
 
     async def call():
         return await asyncio.wait_for(
             client.messages(
-                system=SYSTEM,
+                system=system_prompt(),
                 messages=[{"role": "user", "content": prompt}],
                 tools=TOOLS,
-                max_tokens=500,
-                temperature=0.2,
+                # 전체 요약은 기계마다 한 단락이라 한 창 답보다 서너 배 길다.
+                max_tokens=900,
+                temperature=0.3,
             ),
-            timeout=25.0,
+            timeout=35.0,
         )
 
     try:
@@ -228,5 +390,14 @@ def answer(provider_factory, body: dict) -> tuple[int, dict]:
     if not reply and actions:
         reply = " · ".join(a["detail"] for a in actions)
     if not reply:
-        reply = "답을 못 만들었어."
-    return 200, {"answer": reply[:600], "actions": actions}
+        reply = "음... 답을 못 만들었엉"
+    return 200, {"answer": plain(reply)[:1500], "actions": actions}
+
+
+def plain(text: str) -> str:
+    """말풍선은 글자를 그대로 찍는다 — 모델이 습관처럼 붙이는 굵게·제목·코드펜스 기호를 걷는다."""
+    text = re.sub(r"```[a-zA-Z]*\n?", "", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", text)
+    text = re.sub(r"(?m)^\s*[-*]\s+", "· ", text)
+    return text.strip()

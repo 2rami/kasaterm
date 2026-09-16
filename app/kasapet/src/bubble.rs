@@ -82,6 +82,13 @@ pub struct Preview {
 
 /// Keep notifications as previews. Wrapping respects the current viewport and
 /// the chosen font size; an ellipsis marks content available in the full view.
+/// 짧은 말이 앉는 상자. 머리 위 빈자리(HEADROOM)에 맞춘 크기다.
+const COMPACT: (f32, f32) = (260.0, 110.0);
+/// 긴 답(나쵸의 모든 기기 요약)이 앉는 상자의 너비. 높이는 창의 절반 조금 못 미치게 —
+/// 작은 상자가 넘칠 때만 이리로 커진다(2026-09-17 지시 「답이 채팅창 밖 말풍선으로」).
+const ROOMY_WIDTH: f32 = 400.0;
+const ROOMY_HEIGHT_RATIO: f32 = 0.45;
+
 pub fn preview(text: &str, viewport: (f32, f32), requested_pt: f32) -> Option<Preview> {
     if text.trim().is_empty()
         || ![viewport.0, viewport.1, requested_pt]
@@ -92,15 +99,65 @@ pub fn preview(text: &str, viewport: (f32, f32), requested_pt: f32) -> Option<Pr
     }
     let margin = 8.0_f32.min(viewport.0 / 4.0).min(viewport.1 / 4.0);
     let pad = (HALO + 1) as f32 * 2.0 / SCALE;
-    let width = (260.0_f32.min(viewport.0 - 2.0 * margin) - pad).floor();
-    let height = 110.0_f32.min(viewport.1 - 2.0 * margin);
-    if width < 1.0 || height <= pad {
-        return None;
-    }
     let font = FontRef::from_index(font_data(), 0)?;
     let mut chars: Vec<char> = text.trim().chars().take(2049).collect();
     let input_cut = chars.len() > 2048;
     chars.truncate(2048);
+    let all: String = chars.iter().collect();
+    let roomy = (ROOMY_WIDTH, (viewport.1 * ROOMY_HEIGHT_RATIO).max(COMPACT.1));
+    for (last, (box_w, box_h)) in [(false, COMPACT), (true, roomy)] {
+        let width = (box_w.min(viewport.0 - 2.0 * margin) - pad).floor();
+        let height = box_h.min(viewport.1 - 2.0 * margin);
+        if width < 1.0 || height <= pad {
+            continue;
+        }
+        let Some(mut pt) = point_size(&font, &chars, requested_pt, width, height, pad) else { continue };
+        let fits = |body: &str, pt: f32| {
+            let layout = layout(&font, body, pt * SCALE, width * SCALE);
+            layout.width.ceil() / SCALE + pad <= width + pad
+                && (layout.lines.len() as f32 * layout.line_h).ceil() / SCALE + pad <= height
+        };
+        if !input_cut && fits(&all, pt) {
+            return Some(Preview { text: all, width, pt });
+        }
+        if !last {
+            continue;
+        }
+        // 큰 상자도 넘치면 글자를 조금 줄여 본다 — 요약을 뒷부분만 잘라 내는 것보다
+        // 한 단계 작은 글자로 다 보이는 쪽이 낫다. 그래도 안 들어가면 그때 자른다.
+        for shrink in [0.85_f32, 0.72] {
+            let smaller = pt * shrink;
+            if !input_cut && smaller >= 9.0 && fits(&all, smaller) {
+                return Some(Preview { text: all, width, pt: smaller });
+            }
+        }
+        pt = (pt * 0.72).max(9.0_f32.min(pt));
+        let fits = |body: &str| fits(body, pt);
+        if !fits("…") {
+            return None;
+        }
+        let (mut low, mut high) = (0, chars.len());
+        while low < high {
+            let mid = (low + high + 1) / 2;
+            let candidate = format!("{}…", chars[..mid].iter().collect::<String>().trim_end());
+            if fits(&candidate) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        return Some(Preview {
+            text: format!("{}…", chars[..low].iter().collect::<String>().trim_end()),
+            width,
+            pt,
+        });
+    }
+    None
+}
+
+/// 상자에 맞는 글자 크기 — 요청한 크기에서 시작해, 한 줄 높이나 가장 넓은 글자가 상자를
+/// 넘으면 그만큼 줄인다.
+fn point_size(font: &FontRef, chars: &[char], requested_pt: f32, width: f32, height: f32, pad: f32) -> Option<f32> {
     let mut pt = requested_pt.min((height - pad) / LINE_SPACING);
     let metrics = font.glyph_metrics(&[]).scale(pt * SCALE);
     let map = font.charmap();
@@ -113,40 +170,7 @@ pub fn preview(text: &str, viewport: (f32, f32), requested_pt: f32) -> Option<Pr
     if widest > width {
         pt *= width / widest;
     }
-    if !pt.is_finite() || pt <= 0.0 {
-        return None;
-    }
-    let fits = |body: &str| {
-        let layout = layout(&font, body, pt * SCALE, width * SCALE);
-        layout.width.ceil() / SCALE + pad <= width + pad
-            && (layout.lines.len() as f32 * layout.line_h).ceil() / SCALE + pad <= height
-    };
-    let all: String = chars.iter().collect();
-    if !input_cut && fits(&all) {
-        return Some(Preview {
-            text: all,
-            width,
-            pt,
-        });
-    }
-    if !fits("…") {
-        return None;
-    }
-    let (mut low, mut high) = (0, chars.len());
-    while low < high {
-        let mid = (low + high + 1) / 2;
-        let candidate = format!("{}…", chars[..mid].iter().collect::<String>().trim_end());
-        if fits(&candidate) {
-            low = mid;
-        } else {
-            high = mid - 1;
-        }
-    }
-    Some(Preview {
-        text: format!("{}…", chars[..low].iter().collect::<String>().trim_end()),
-        width,
-        pt,
-    })
+    (pt.is_finite() && pt > 0.0).then_some(pt)
 }
 
 /// 글자 둘레에 두르는 어두운 테두리의 두께(래스터 픽셀). 말풍선 판을 걷어내고 글자만
@@ -502,6 +526,23 @@ mod tests {
         assert!(!rect.contains((rect.left, rect.top + rect.height + 0.1)));
     }
 
+    /// 작은 상자를 넘치는 답은 잘리지 않고 큰 상자로 통째로 들어간다 — 나쵸의 모든 기기
+    /// 요약이 말풍선에서 두 줄 만에 「…」로 끝나면 채팅창에서 꺼낸 뜻이 없다.
+    #[test]
+    fn an_answer_that_overflows_the_compact_box_grows_instead_of_truncating() {
+        let short = "코하루 · 나쵸";
+        let plan = preview(short, (634.0, 1072.0), 13.0).unwrap();
+        assert_eq!(plan.text, short);
+        assert!(plan.width <= COMPACT.0);
+        let summary = (1..=8).map(|i| format!("{i}번 학생은 파일을 고치는 중이고 사람 손은 아직 필요 없어\n")).collect::<String>();
+        let plan = preview(summary.trim(), (634.0, 1072.0), 13.0).unwrap();
+        assert!(!plan.text.ends_with('…'), "잘림: {}", plan.text);
+        assert!(plan.width > COMPACT.0);
+        let (_, w, h) = raster(&plan.text, plan.width, plan.pt).unwrap();
+        assert!(h as f32 / SCALE > COMPACT.1, "높이 {h}");
+        assert!(w as f32 / SCALE <= ROOMY_WIDTH);
+    }
+
     #[test]
     fn long_korean_large_font_and_resizes_only_shorten_the_preview() {
         let raw = "재시작한뒤곽향말풍선과나쵸대화를확인해주세요 긴 한글 안내입니다. ".repeat(100);
@@ -520,7 +561,8 @@ mod tests {
                 assert!(plan.text.ends_with('…') && plan.text.len() < raw.len());
                 let (_, w, h) = raster(&plan.text, plan.width, plan.pt).unwrap();
                 assert!(w as f32 / SCALE <= viewport.0);
-                assert!(h as f32 / SCALE <= 110.0_f32.min(viewport.1));
+                let roomy = (viewport.1 * ROOMY_HEIGHT_RATIO).max(COMPACT.1);
+                assert!(h as f32 / SCALE <= roomy.min(viewport.1));
                 let rect =
                     geometry(viewport, (w as f32 / SCALE, h as f32 / SCALE), (1.5, -1.5)).unwrap();
                 assert!(

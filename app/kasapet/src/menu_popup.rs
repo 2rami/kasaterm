@@ -65,7 +65,17 @@ define_class!(
         #[unsafe(method(acceptsFirstMouse:))]
         fn first_mouse(&self,_event:Option<&NSEvent>)->bool {true}
         #[unsafe(method(mouseDown:))]
-        fn clicked(&self,event:&NSEvent) { let p=self.convertPoint_fromView(event.locationInWindow(),None); let _=self.ivars().tx.send(Input::Click(p)); }
+        fn clicked(&self,event:&NSEvent) {
+            let p=self.convertPoint_fromView(event.locationInWindow(),None);
+            // 머리띠는 손잡이다(2026-09-17 지시 「우클릭 메뉴 옮길 수 있게」). 닫기(×)와
+            // 뒤로(◀) 자리만 단추로 남긴다.
+            let on_button = p.x > WIDTH-40.0 || (self.ivars().state.borrow().page != 0 && p.x < 40.0);
+            if p.y < HEADER && !on_button {
+                if let Some(window)=self.window() { window.performWindowDragWithEvent(event); }
+                return;
+            }
+            let _=self.ivars().tx.send(Input::Click(p));
+        }
         #[unsafe(method(keyDown:))]
         fn key(&self,event:&NSEvent) { let _=self.ivars().tx.send(Input::Key(event.keyCode())); }
         #[unsafe(method(scrollWheel:))]
@@ -336,7 +346,7 @@ impl Popup {
                     if p.y < HEADER {
                         if p.x > WIDTH - 40.0 {
                             self.hide();
-                        } else if self.state.borrow().page != 0 {
+                        } else if p.x < 40.0 && self.state.borrow().page != 0 {
                             let mut s = self.state.borrow_mut();
                             s.page = 0;
                             s.scroll = 0;

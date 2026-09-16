@@ -1,4 +1,6 @@
-//! 펫 머리 위에 붙는 짧은 유리 바 — 지금 보고 있는 창을 두고 한 줄 묻고 한 줄 받는다.
+//! 펫 머리 위에 붙는 짧은 유리 바 — 한 줄 묻는 자리다. 답은 여기 안 찍히고 펫 말풍선으로
+//! 나간다(2026-09-17 지시 「답변이 채팅창 밖으로」) — 바는 입력 한 줄이 전부라 늘 띄워
+//! 둬도 바탕화면을 가리지 않는다.
 //!
 //! 대화창(`chat_panel.rs`)과 따로 두는 이유는 쓰는 순간이 다르기 때문이다. 저쪽은
 //! 앉아서 읽는 판이라 360x260 을 차지해도 되지만, 이쪽은 하던 일을 멈추지 않은 채
@@ -18,8 +20,6 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 const WIDTH: f64 = 320.0;
 /// 입력 한 줄이 앉는 띠의 높이.
 const ROW: f64 = 46.0;
-/// 답 한두 줄이 앉는 띠의 높이. 답이 없으면 바는 이만큼 접힌다.
-const ANSWER: f64 = 38.0;
 
 pub enum Event { Send(String), Close }
 
@@ -47,15 +47,11 @@ define_class!(
 pub struct Bar {
     panel: Retained<NSPanel>,
     parent: Retained<NSWindow>,
-    /// 유리(또는 그것이 없는 판에서의 대체 바탕). 바 높이가 바뀌면 같이 늘린다.
-    backdrop: Retained<NSView>,
+    /// 검증 창구(`snapshot`)가 그림을 뜨는 판.
     body: Retained<NSView>,
     input: Retained<NSTextField>,
-    answer: Retained<NSTextField>,
     _actions: Retained<Actions>,
     events: Rc<RefCell<Vec<Event>>>,
-    /// 답이 붙어 바가 펴져 있는가. 접힌 바는 입력 한 줄이 전부다.
-    open: RefCell<bool>,
     origin: RefCell<NSPoint>,
     shown: RefCell<std::time::Instant>,
 }
@@ -93,7 +89,7 @@ impl Bar {
 
         let body = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, WIDTH, ROW));
         let input = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect(14.0, 11.0, WIDTH - 14.0 - 34.0, 24.0));
-        input.setPlaceholderString(Some(&NSString::from_str("이 창에 대해 물어보세요")));
+        input.setPlaceholderString(Some(&NSString::from_str("나쵸에게 물어보세요 — 이 창이든, 모든 기기든")));
         input.setFont(Some(&NSFont::systemFontOfSize(13.0)));
         input.setMaximumNumberOfLines(1);
         input.setBezeled(false);
@@ -115,50 +111,38 @@ impl Bar {
         close.setKeyEquivalent(&NSString::from_str("\u{1b}"));
         body.addSubview(&close);
 
-        let answer = NSTextField::labelWithString(&NSString::new(), mtm);
-        answer.setFrame(rect(14.0, ROW, WIDTH - 28.0, ANSWER - 8.0));
-        answer.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-        answer.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        answer.setMaximumNumberOfLines(2);
-        answer.setHidden(true);
-        body.addSubview(&answer);
-
         let backdrop = backdrop(mtm, &body);
         panel.setContentView(Some(&backdrop));
         unsafe { parent.addChildWindow_ordered(&panel, NSWindowOrderingMode::Above); }
         panel.orderOut(None);
         Some(Self {
-            panel, parent, backdrop, body, input, answer, _actions: actions, events,
-            open: RefCell::new(false), origin: RefCell::new(NSPoint::new(0.0, 0.0)),
+            panel, parent, body, input, _actions: actions, events,
+            origin: RefCell::new(NSPoint::new(0.0, 0.0)),
             shown: RefCell::new(std::time::Instant::now()),
         })
     }
 
+    /// 띄우고 키를 준다 — 사람이 부른 바다.
     pub fn show(&self) {
         *self.shown.borrow_mut() = std::time::Instant::now();
         self.panel.makeKeyAndOrderFront(None);
+        self.panel.makeFirstResponder(Some(&*self.input));
+    }
+    /// 키를 뺏지 않고 띄운다 — 상시 표시로 펫이 뜰 때 쓰는 길. 여기서 키를 가져가면
+    /// 펫이 켜지는 순간 사람이 치던 창에서 커서가 사라진다.
+    pub fn show_quiet(&self) {
+        *self.shown.borrow_mut() = std::time::Instant::now();
+        self.panel.orderFront(None);
+    }
+    /// 이미 떠 있는 바에 커서를 준다.
+    pub fn focus(&self) {
+        self.panel.makeKeyWindow();
         self.panel.makeFirstResponder(Some(&*self.input));
     }
     pub fn hide(&self) { self.panel.orderOut(None); }
     pub fn visible(&self) -> bool { self.panel.isVisible() }
     pub fn clear_input(&self) { self.input.setStringValue(&NSString::new()); }
     pub fn events(&self) -> Vec<Event> { self.events.borrow_mut().drain(..).collect() }
-
-    /// 답(또는 기다리는 중이라는 말)을 붙인다. 빈 글을 주면 바가 도로 접힌다.
-    pub fn say(&self, text: &str) {
-        let open = !text.trim().is_empty();
-        self.answer.setStringValue(&NSString::from_str(text));
-        self.answer.setHidden(!open);
-        if *self.open.borrow() == open { return; }
-        *self.open.borrow_mut() = open;
-        let height = if open { ROW + ANSWER } else { ROW };
-        let frame = self.panel.frame();
-        // 아래 모서리가 머리에 붙어 있으니 자라는 쪽은 위다. 위를 고정하면 답이 붙을
-        // 때마다 바가 캐릭터를 파고든다.
-        self.panel.setFrame_display(rect(frame.origin.x, frame.origin.y, WIDTH, height), true);
-        self.backdrop.setFrame(rect(0.0, 0.0, WIDTH, height));
-        self.body.setFrame(rect(0.0, 0.0, WIDTH, height));
-    }
 
     /// 다른 창으로 포커스가 넘어갔는가 — 넘어갔으면 바를 접는다. 방금 띄운 창은
     /// 아직 키를 못 받았을 수 있어 잠깐 봐준다.
@@ -259,7 +243,6 @@ pub fn probe() {
     let mut client = crate::ask::Client::default();
     client.ask(service.clone(), "이 창 맥미니로 이사해줘".into(), "%3".into());
     bar.clear_input();
-    bar.say("나쵸가 보는 중…");
 
     let started = std::time::Instant::now();
     let mut answered = false;
@@ -273,8 +256,8 @@ pub fn probe() {
             if let Some(result) = client.poll() {
                 answered = true;
                 match result {
-                    Ok(answer) => { println!("ASK_PROBE_ANSWER:{}", answer.line().replace('\n', " | ")); bar.say(&answer.line()); }
-                    Err(()) => { println!("ASK_PROBE_ANSWER:실패"); bar.say("나쵸에게 닿지 못했어요."); }
+                    Ok(answer) => println!("ASK_PROBE_ANSWER:{}", answer.line().replace('\n', " | ")),
+                    Err(()) => println!("ASK_PROBE_ANSWER:실패"),
                 }
                 println!("ASK_PROBE_BAR_HEIGHT:{}", bar.panel.frame().size.height);
             }

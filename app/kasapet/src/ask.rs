@@ -1,4 +1,4 @@
-//! 머리 위 유리 바가 묻는 곳 — 지금 보고 있는 창을 두고 한 마디 묻고 한 마디 받는다.
+//! 머리 위 유리 바가 묻는 곳 — 지금 보고 있는 창이든 모든 기기든 한 마디 묻고, 답은 말풍선으로 받는다.
 //!
 //! 대화창(`chat.rs`)과 갈라 둔 이유는 오가는 것의 모양이 다르기 때문이다. 저쪽은
 //! 이어지는 대화라 기록을 쌓고 페이지를 넘기지만, 이쪽은 한 번 묻고 한 번 받는 것이
@@ -79,8 +79,9 @@ impl Client {
 fn run(service: &Path, text: &str, pane: &str) -> Result<Answer, ()> {
     let port = crate::journal::service(service)?;
     let body = json!({ "text": text, "pane": pane });
-    // 서버가 창을 옮기는 일까지 하고 답하므로 장부 조회보다 한참 오래 걸린다.
-    let value = crate::journal::request_within(port, "POST", "/api/ask", Some(&body), Duration::from_secs(30))?;
+    // 서버가 판을 다 읽고 창을 옮기는 일까지 하고 답하므로 장부 조회보다 한참 오래 걸린다
+    // (모델 대기 35초 + kasaterm-cli 네 번).
+    let value = crate::journal::request_within(port, "POST", "/api/ask", Some(&body), Duration::from_secs(50))?;
     parse(&value)
 }
 
@@ -99,7 +100,8 @@ fn parse(value: &Value) -> Result<Answer, ()> {
         })
         .take(3)
         .collect();
-    Ok(Answer { text: text.chars().take(300).collect(), actions })
+    // 모든 기기 요약은 기계마다 한 단락이라 한 창 답보다 서너 배 길다. 말풍선이 받는다.
+    Ok(Answer { text: text.chars().take(1500).collect(), actions })
 }
 
 #[cfg(test)]

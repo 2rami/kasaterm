@@ -3,6 +3,8 @@ use kasa_pet_config::{PetPreferences, PreferenceChange};
 #[derive(Clone, Copy)]
 pub enum Action {
     Ask,
+    /// 정해진 질문을 바 없이 바로 묻는다 — 답은 말풍선으로 온다.
+    AskNow(&'static str),
     Chat,
     ChatAsk(&'static str),
     Talk,
@@ -81,6 +83,7 @@ pub fn content(
 ) -> Content {
     let home = vec![
         action("바로 묻기", true, Action::Ask),
+        action("모든 기기 요약", true, Action::AskNow("지금 모든 기기의 학생들 상황을 요약해줘")),
         action(
             if chatting {
                 "나쵸 대화 닫기"
@@ -203,6 +206,11 @@ pub fn content(
             prefs.lock_position,
             PreferenceChange::LockPosition(!prefs.lock_position),
         ),
+        (
+            "입력창 상시 표시",
+            prefs.ask_always,
+            PreferenceChange::AskAlways(!prefs.ask_always),
+        ),
     ]
     .into_iter()
     .map(|(s, on, p)| check(s, can_save, on, Action::Preference(p)))
@@ -286,10 +294,14 @@ mod tests {
         ));
         assert!(matches!(
             data.pages[0].1[1].item,
-            Item::Action(Action::Chat, false)
+            Item::Action(Action::AskNow(_), false)
         ));
         assert!(matches!(
             data.pages[0].1[2].item,
+            Item::Action(Action::Chat, false)
+        ));
+        assert!(matches!(
+            data.pages[0].1[3].item,
             Item::Action(Action::ChatAsk(_), false)
         ));
         assert!(!data.pages[2].1[0].enabled);

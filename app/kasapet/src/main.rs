@@ -103,6 +103,9 @@ struct App {
     chat: chat::Chat,
     /// 머리 위 유리 바가 서버에 묻고 있는 것. 한 번에 하나다.
     ask: ask::Client,
+    /// 나쵸의 답이 말풍선에 떠 있다. 판이 바뀌어도 안 덮고, 사람이 누르거나 다시 묻거나
+    /// 한참 지날 때까지 안 접는다 — 읽으라고 띄운 요약이 12초 뒤 사라지면 안 띄운 것과 같다.
+    answer_shown: bool,
     #[cfg(target_os = "macos")]
     chat_panel: Option<chat_panel::Panel>,
     #[cfg(target_os = "macos")]
@@ -441,8 +444,8 @@ impl ApplicationHandler for App {
         #[cfg(target_os="macos")]
         if let Ok(question) = std::env::var("KASAPET_AUTOASK") {
             let question = question.trim().to_string();
-            if self.frames==30 && !self.ask_open() {
-                self.toggle_ask();
+            if self.frames==30 {
+                if !self.ask_open() { self.toggle_ask(); }
                 let pet = self.win.as_ref().and_then(|w| w.outer_position().ok()).map(|p| p.y as f64);
                 match self.ask_bar.as_ref() {
                     Some(bar) => eprintln!("ASK_APP_OPEN:{} FRAME:{:?} PET_TOP:{:?}", bar.visible(), bar.probe_frame(), pet),
@@ -453,12 +456,14 @@ impl ApplicationHandler for App {
                         .unwrap_or_else(|| self.ask_pane());
                     eprintln!("ASK_APP_PANE:{pane}");
                     if let Some(path) = self.journal_path() {
-                        eprintln!("ASK_APP_SERVICE:{} SENT:{}", path.display(), self.ask.ask(path.clone(), question.clone(), pane));
-                        if let Some(bar) = &self.ask_bar { bar.say("나쵸가 보는 중…"); }
+                        let sent = self.ask.ask(path.clone(), question.clone(), pane);
+                        eprintln!("ASK_APP_SERVICE:{} SENT:{}", path.display(), sent);
+                        if sent { self.speak("나쵸가 보는 중…".into(), false); }
                     }
                 }
             }
-            if self.frames>60 && !self.ask.busy() { el.exit(); }
+            // 답이 말풍선에 찍힌 뒤 한 장 뜨고 나간다 — 답을 받자마자 나가면 그림에 답이 없다.
+            if self.frames>60 && !self.ask.busy() && (self.shot_path.is_none() || self.frames > self.shot_at) { el.exit(); }
         }
         if let Some(w) = &self.win { w.request_redraw(); }
     }
@@ -508,6 +513,7 @@ impl App {
         match action {
             Some(menu::Action::Talk) => self.toggle_typing(),
             Some(menu::Action::Ask) => self.toggle_ask(),
+            Some(menu::Action::AskNow(question)) => self.ask_now(question),
             Some(menu::Action::Chat) => self.toggle_chat(),
             Some(menu::Action::ChatAsk(question)) => {
                 if !self.chat_open() { self.toggle_chat(); }
@@ -555,6 +561,11 @@ impl App {
 
     fn apply_preferences(&mut self, prefs: kasa_pet_config::PetPreferences) {
         let previous = std::mem::replace(&mut self.preferences, prefs);
+        if previous.ask_always && !self.preferences.ask_always && self.ask_open() {
+            self.ask.cancel();
+            #[cfg(target_os = "macos")]
+            if let Some(bar) = &self.ask_bar { bar.hide(); }
+        }
         if self.preferences.always_on_top != previous.always_on_top {
             if let Some(w) = &self.win {
                 w.set_window_level(if self.preferences.always_on_top {
@@ -878,30 +889,47 @@ impl App {
         { false }
     }
 
-    /// 머리 위 유리 바를 열고 닫는다. 대화창과 달리 창을 차지하지 않으므로 펫 크기를
-    /// 줄이지 않는다 — 하던 일을 멈추지 않은 채 한 마디 던지는 자리다.
-    fn toggle_ask(&mut self) {
+    /// 머리 위 유리 바를 연다. 대화창과 달리 창을 차지하지 않으므로 펫 크기를 줄이지
+    /// 않는다 — 하던 일을 멈추지 않은 채 한 마디 던지는 자리다. `focus` 가 거짓이면 키를
+    /// 안 뺏는다(상시 표시로 펫이 뜰 때).
+    fn open_ask(&mut self, focus: bool) {
         #[cfg(target_os = "macos")]
         {
-            if self.ask_open() { self.close_ask(); return; }
             if self.typing.is_some() { self.toggle_typing(); }
             if self.chat_open() { self.close_chat(); }
             if self.ask_bar.is_none() {
                 self.ask_bar = self.win.as_ref().and_then(|win| ask_bar::Bar::new(win));
             }
             let Some(bar) = &self.ask_bar else { self.action_error("유리 바를 열지 못했어요."); return };
-            set_hand_cursor(false);
-            bar.clear_input();
-            bar.say("");
-            bar.show();
+            if focus { set_hand_cursor(false); bar.show(); } else { bar.show_quiet(); }
             bar.sync(HEADROOM * self.scale as f64);
         }
+        #[cfg(not(target_os = "macos"))]
+        { let _ = focus; }
     }
 
+    /// 메뉴·두 번 누름. 늘 떠 있는 바라면 여닫는 대신 커서를 준다 — 상시 표시를 켠 사람이
+    /// 「바로 묻기」를 눌렀는데 바가 사라지면 그건 반대로 간 것이다.
+    fn toggle_ask(&mut self) {
+        if self.ask_open() {
+            #[cfg(target_os = "macos")]
+            if self.preferences.ask_always {
+                if let Some(bar) = &self.ask_bar { set_hand_cursor(false); bar.focus(); }
+                return;
+            }
+            self.close_ask();
+            return;
+        }
+        self.open_ask(true);
+    }
+
+    /// Esc·×·포커스 잃음. 늘 떠 있는 바는 키만 내려놓고 자리에 남는다.
     fn close_ask(&mut self) {
         self.ask.cancel();
         #[cfg(target_os = "macos")]
-        if let Some(bar) = &self.ask_bar { bar.hide(); }
+        if let Some(bar) = &self.ask_bar {
+            if self.preferences.ask_always { bar.clear_input(); resign_key(); } else { bar.hide(); }
+        }
     }
 
     /// 지금 이야기의 주인공 pane. 사람이 보고 있는 창이 먼저고, 그것이 없으면 말풍선이
@@ -911,9 +939,43 @@ impl App {
             .unwrap_or_else(|| self.subject.clone())
     }
 
+    /// 나쵸에게 묻는다. 답은 말풍선으로 온다(`poll_ask`).
+    fn ask_now(&mut self, text: &str) {
+        let pane = self.ask_pane();
+        let Some(path) = self.journal_path() else { return };
+        if self.ask.ask(path, text.to_string(), pane) {
+            self.speak("나쵸가 보는 중…".into(), false);
+        }
+    }
+
+    /// 나쵸의 말을 말풍선에 띄운다. `sticky` 면 사람이 누르거나 다시 묻기 전까지 안 접는다.
+    fn speak(&mut self, text: String, sticky: bool) {
+        self.journal_shown = false;
+        self.answer_shown = sticky;
+        self.urgent = false;
+        self.say = text;
+        self.said_at = std::time::Instant::now();
+        self.rebuild_bubble_text();
+    }
+
+    /// 나쵸의 답을 내린다. 판 글이 다시 흐르도록 판을 새로 읽게 한다.
+    fn dismiss_answer(&mut self) {
+        self.answer_shown = false;
+        self.say.clear();
+        self.board_seen = None;
+        self.rebuild_bubble_text();
+    }
+
+    /// 읽으라고 띄운 답이라도 이만큼 지나면 내린다 — 오래된 판 요약은 지금 이야기가 아니다.
+    const ANSWER_LINGER: std::time::Duration = std::time::Duration::from_secs(180);
+
     fn poll_ask(&mut self) {
         #[cfg(target_os = "macos")]
         {
+            // 상시 표시 — 창이 생기면 키를 뺏지 않고 띄운다.
+            if self.preferences.ask_always && !self.ask_open() && self.win.is_some() && self.frames >= 2 {
+                self.open_ask(false);
+            }
             let events = self.ask_bar.as_ref().map(|bar| bar.events()).unwrap_or_default();
             for event in events {
                 match event {
@@ -922,10 +984,8 @@ impl App {
                         let pane = self.ask_pane();
                         if let Some(path) = self.journal_path() {
                             if self.ask.ask(path, text, pane) {
-                                if let Some(bar) = &self.ask_bar {
-                                    bar.clear_input();
-                                    bar.say("나쵸가 보는 중…");
-                                }
+                                if let Some(bar) = &self.ask_bar { bar.clear_input(); }
+                                self.speak("나쵸가 보는 중…".into(), false);
                             }
                         }
                     }
@@ -937,17 +997,17 @@ impl App {
                         Ok(answer) => answer.line().replace('\n', " | "),
                         Err(()) => "닿지 못했어요".to_string(),
                     });
+                    if self.shot_path.is_some() { self.shot_at = self.frames + 30; }
                 }
-                if let Some(bar) = &self.ask_bar {
-                    match result {
-                        Ok(answer) => bar.say(&answer.line()),
-                        Err(()) => bar.say("나쵸에게 닿지 못했어요."),
-                    }
+                match result {
+                    Ok(answer) => self.speak(answer.line(), true),
+                    Err(()) => self.speak("나쵸에게 닿지 못했어요.".into(), false),
                 }
             }
-            // 다른 창으로 넘어가면 접는다. 늘 떠 있는 입력줄은 바탕화면에 얹어 둔
-            // 판이 되고, 사람은 그 판을 곧 안 보게 된다.
-            if self.ask_bar.as_ref().is_some_and(|bar| bar.lost_focus()) { self.close_ask(); }
+            if self.answer_shown && self.said_at.elapsed() > Self::ANSWER_LINGER { self.dismiss_answer(); }
+            // 다른 창으로 넘어가면 접는다. 늘 떠 있는 입력줄은 바탕화면에 얹어 둔 판이
+            // 되고, 사람은 그 판을 곧 안 보게 된다 — 상시 표시는 그걸 알고 켜는 것이다.
+            if !self.preferences.ask_always && self.ask_bar.as_ref().is_some_and(|bar| bar.lost_focus()) { self.close_ask(); }
             if let Some(bar) = self.ask_bar.as_ref().filter(|bar| bar.visible()) {
                 bar.sync(HEADROOM * self.scale as f64);
             }
@@ -1035,7 +1095,8 @@ impl App {
         self.focus = focus;
         self.stirred = std::time::Instant::now();
         let urgent = matches!(mood, board::Mood::Wait | board::Mood::Error);
-        if self.journal_shown && !urgent { return; }
+        if (self.journal_shown || self.answer_shown) && !urgent { return; }
+        self.answer_shown = false;
         self.journal_shown = false;
         if text != self.say {
             self.say = text;
@@ -1110,6 +1171,7 @@ impl App {
                 let line = f.line();
                 if !line.is_empty() {
                     self.journal_shown = false;
+                    self.answer_shown = false;
                     self.subject = f.pane;
                     self.say = line;
                     self.rebuild_bubble_text();
@@ -1132,7 +1194,7 @@ impl App {
         if self.say.is_empty() || !self.preferences.bubbles {
             return 0.0;
         }
-        board::say_alpha(self.said_at.elapsed(), self.urgent, self.preferences.say_seconds)
+        board::say_alpha(self.said_at.elapsed(), self.urgent || self.answer_shown, self.preferences.say_seconds)
     }
 
     /// 말풍선이 지금 떠 있어야 하나.
@@ -1152,6 +1214,10 @@ impl App {
     /// 말풍선이 가리키는 pane 을 앞으로 꺼낸다. pane 고르기와 창 올리기는 따로다 —
     /// 앱이 뒤에 있으면 고르기만 해서는 화면에 안 뜬다.
     fn jump_to_subject(&mut self) {
+        if self.answer_shown {
+            self.dismiss_answer();
+            return;
+        }
         if self.journal_shown {
             self.request_journal(journal::Action::Open);
             return;
@@ -1835,6 +1901,7 @@ fn main() {
         chat: chat::Chat::default(), chat_restore_scale: None,
         chat_prefill: None,
         ask: ask::Client::default(),
+        answer_shown: false,
         #[cfg(target_os = "macos")]
         chat_panel: None,
         #[cfg(target_os = "macos")]
