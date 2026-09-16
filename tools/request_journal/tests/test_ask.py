@@ -109,7 +109,7 @@ class AnswerTests(unittest.TestCase):
 
             async def messages(self, **kw):
                 self.calls.append(kw)
-                return {"content": [{"type": "text", "text": "음... 다들 조용하네 (=^･ω･^=)"}, {"type": "tool_use", "name": "evil", "input": {}}, {"type": "tool_use", "name": "focus_pane", "input": {}}]}
+                return {"content": [{"type": "text", "text": "#연출 동작=Error 표정=cry\n음... 다들 조용하네 (=^･ω･^=)"}, {"type": "tool_use", "name": "evil", "input": {}}, {"type": "tool_use", "name": "focus_pane", "input": {}}]}
 
             @staticmethod
             def extract_text(resp, names):
@@ -133,15 +133,38 @@ class AnswerTests(unittest.TestCase):
             return True, "{}"
 
         with patch.object(ask, "llm_client", return_value=client), patch.object(ask, "run_cli", side_effect=cli), patch.object(ask, "_machines_http", return_value=MACHINES):
-            status, payload = ask.answer(lambda _cancel: None, {"text": "다들 뭐 해?", "pane": "%9"})
+            status, payload = ask.answer(lambda _cancel: None, {"text": "다들 뭐 해?", "pane": "%9", "catalog": CATALOG})
         self.assertEqual(status, 200)
         self.assertEqual(payload["answer"], "음... 다들 조용하네 (=^･ω･^=)")
+        self.assertEqual(payload["act"], {"motion": "Error", "expression": "cry"})
+        self.assertIn("[할 수 있는 동작]", client.calls[0]["messages"][0]["content"])
         self.assertEqual([a["kind"] for a in payload["actions"]], ["focus_pane"])
         self.assertIn(("focus", "%9"), calls)
         prompt = client.calls[0]["messages"][0]["content"]
         self.assertIn("■ 미니 — 연결됨", prompt)
         self.assertIn("# 지금 자리", client.calls[0]["system"])
         self.assertEqual(client.calls[0]["max_tokens"], 900)
+
+
+CATALOG = {"motions": [{"group": "Idle", "label": "대기"}, {"group": "Think", "label": "생각"}, {"group": "Error", "label": "곤란"}],
+           "expressions": [{"name": "blush", "label": "홍조"}, {"name": "cry", "label": "눈물"}]}
+
+
+class PerformTests(unittest.TestCase):
+    def test_the_act_line_is_taken_off_the_answer_and_checked_against_the_catalog(self):
+        text, act = ask.perform("#연출 동작=think 표정=Blush\n음... 확인 중이야", CATALOG)
+        self.assertEqual(text, "음... 확인 중이야")
+        self.assertEqual(act, {"motion": "Think", "expression": "blush"})
+        text, act = ask.perform("#연출 동작=Dance 표정=없음\n꺄", CATALOG)
+        self.assertEqual((text, act), ("꺄", {"motion": None, "expression": None}))
+        text, act = ask.perform("연출 없이 온 답", CATALOG)
+        self.assertEqual((text, act["motion"]), ("연출 없이 온 답", None))
+
+    def test_the_prompt_lists_what_the_character_can_do(self):
+        prompt = ask.build_prompt("뭐 해?", "%9", {"who": {}, "screen": "", "fleet": "-"}, CATALOG)
+        self.assertIn("[할 수 있는 동작] Idle(대기), Think(생각), Error(곤란)", prompt)
+        self.assertIn("[지을 수 있는 표정] blush(홍조), cry(눈물)", prompt)
+        self.assertNotIn("[할 수 있는 동작]", ask.build_prompt("뭐 해?", "%9", {"who": {}, "screen": "", "fleet": "-"}, None))
 
 
 class PlainTests(unittest.TestCase):

@@ -13,6 +13,9 @@ use std::time::Duration;
 pub struct Answer {
     pub text: String,
     pub actions: Vec<String>,
+    /// 나쵸가 이 답에 맞춰 고른 동작 그룹과 표정 이름. 펫이 보낸 목록 안의 것만 온다.
+    pub motion: Option<String>,
+    pub expression: Option<String>,
 }
 
 impl Answer {
@@ -43,7 +46,8 @@ impl Client {
 
     /// 묻는다. 이미 묻고 있으면 아무 일도 안 한다 — 답이 둘 오면 어느 것이 이 질문의
     /// 답인지 바가 알 방법이 없다.
-    pub fn ask(&mut self, service: PathBuf, text: String, pane: String) -> bool {
+    /// `catalog` 는 이 캐릭터가 할 수 있는 동작·표정 목록 — 나쵸가 답에 맞춰 고른다.
+    pub fn ask(&mut self, service: PathBuf, text: String, pane: String, catalog: Value) -> bool {
         if self.busy() || text.trim().is_empty() {
             return false;
         }
@@ -51,7 +55,7 @@ impl Client {
         let (sender, receiver) = mpsc::channel();
         self.pending = Some(receiver);
         std::thread::spawn(move || {
-            let _ = sender.send(run(&service, &text, &pane));
+            let _ = sender.send(run(&service, &text, &pane, &catalog));
         });
         true
     }
@@ -76,9 +80,9 @@ impl Client {
     }
 }
 
-fn run(service: &Path, text: &str, pane: &str) -> Result<Answer, ()> {
+fn run(service: &Path, text: &str, pane: &str, catalog: &Value) -> Result<Answer, ()> {
     let port = crate::journal::service(service)?;
-    let body = json!({ "text": text, "pane": pane });
+    let body = json!({ "text": text, "pane": pane, "catalog": catalog });
     // 서버가 판을 다 읽고 창을 옮기는 일까지 하고 답하므로 장부 조회보다 한참 오래 걸린다
     // (모델 대기 35초 + kasaterm-cli 네 번).
     let value = crate::journal::request_within(port, "POST", "/api/ask", Some(&body), Duration::from_secs(50))?;
@@ -100,8 +104,9 @@ fn parse(value: &Value) -> Result<Answer, ()> {
         })
         .take(3)
         .collect();
+    let pick = |key: &str| value["act"][key].as_str().map(str::trim).filter(|v| !v.is_empty()).map(|v| v.chars().take(40).collect());
     // 모든 기기 요약은 기계마다 한 단락이라 한 창 답보다 서너 배 길다. 말풍선이 받는다.
-    Ok(Answer { text: text.chars().take(1500).collect(), actions })
+    Ok(Answer { text: text.chars().take(1500).collect(), actions, motion: pick("motion"), expression: pick("expression") })
 }
 
 #[cfg(test)]
@@ -113,6 +118,15 @@ mod tests {
         let answer = parse(&json!({"answer": "아즈사가 파일을 고치는 중이에요."})).unwrap();
         assert!(answer.actions.is_empty());
         assert_eq!(answer.line(), "아즈사가 파일을 고치는 중이에요.");
+        assert!(answer.motion.is_none() && answer.expression.is_none());
+    }
+
+    /// 나쵸가 고른 연출은 답과 따로 온다 — 빈 이름은 「없음」이다.
+    #[test]
+    fn the_performance_nacho_picked_rides_along() {
+        let answer = parse(&json!({"answer": "꺄 됐당", "act": {"motion": "Talk", "expression": ""}})).unwrap();
+        assert_eq!(answer.motion.as_deref(), Some("Talk"));
+        assert!(answer.expression.is_none());
     }
 
     /// 벌어진 일은 성패까지 같이 적는다 — 「이사해줘」라고 말했는데 조용히 실패하면
@@ -155,7 +169,7 @@ mod tests {
         let mut client = Client::default();
         let (_sender, receiver) = mpsc::channel();
         client.pending = Some(receiver);
-        assert!(!client.ask(PathBuf::from("/없다.json"), "질문".into(), "%1".into()));
+        assert!(!client.ask(PathBuf::from("/없다.json"), "질문".into(), "%1".into(), Value::Null));
         client.cancel();
         assert!(!client.busy());
     }
@@ -163,7 +177,7 @@ mod tests {
     #[test]
     fn a_blank_question_is_never_sent() {
         let mut client = Client::default();
-        assert!(!client.ask(PathBuf::from("/없다.json"), "   ".into(), "%1".into()));
+        assert!(!client.ask(PathBuf::from("/없다.json"), "   ".into(), "%1".into(), Value::Null));
         assert!(!client.busy());
     }
 }

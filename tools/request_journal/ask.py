@@ -64,7 +64,13 @@ PET_RULES = """
 - 마크다운 기호(**, #, 코드펜스)는 쓰지 마라 — 말풍선은 글자를 그대로 보여 준다. 줄 앞은 「·」 정도면 된다.
 - 코드 식별자·경로·명령·창 번호는 빼고 사람 말로 옮긴다. 학생이 보고한 것과 실제 반영은 다르니 「~했대」로 귀속한다.
 - 도구는 사용자가 옮기라·데려오라·앞으로 가져오라·전달하라고 분명히 시킬 때만 쓴다. 묻기만 하면 답만 한다. 도구를 썼으면 무엇을 했는지 한 문장.
+- 답 맨 첫 줄에 이번 답의 연출을 적어라: `#연출 동작=<그룹> 표정=<이름>`. [할 수 있는 동작]·[지을 수 있는 표정] 목록의
+  이름만 쓰고, 안 고르면 `없음`. 답의 기분에 맞춰 고른다 — 궁금·확인 중이면 생각(Think), 반갑거나 잘됐으면 대화(Talk),
+  곤란·실패·막힘이면 곤란(Error), 나른하거나 조용하면 졸기(Sleep), 별일 없으면 대기(Idle). 표정은 어울릴 때만.
 """
+
+ACT_LINE = re.compile(r"^\s*#\s*연출\s*동작\s*=\s*(\S+)\s*표정\s*=\s*(\S+)\s*$", re.MULTILINE)
+NONE_WORDS = {"없음", "none", "null", "-", "x"}
 
 CLI_TIMEOUT = 8
 PEEK_LINES = 40
@@ -297,10 +303,50 @@ def context(pane: str) -> dict:
     return {"who": local_rows.get(pane, {}), "screen": screen, "fleet": fleet_text}
 
 
-def build_prompt(text: str, pane: str, ctx: dict) -> str:
+def catalog_lines(catalog) -> str:
+    """펫이 보낸 동작·표정 목록을 모델이 읽을 두 줄로. 목록이 없으면 연출 없이 답한다."""
+    if not isinstance(catalog, dict):
+        return ""
+    def items(rows, key):
+        out = []
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and row.get(key):
+                name = str(row[key])[:40]
+                label = str(row.get("label") or "").strip()[:20]
+                out.append(f"{name}({label})" if label else name)
+        return out
+    motions = items(catalog.get("motions"), "group")
+    expressions = items(catalog.get("expressions"), "name")
+    if not motions and not expressions:
+        return ""
+    return f"[할 수 있는 동작] {', '.join(motions) or '없음'}\n[지을 수 있는 표정] {', '.join(expressions) or '없음'}\n"
+
+
+def perform(reply: str, catalog) -> tuple[str, dict]:
+    """답 첫 줄의 연출 지시를 떼어 낸다. 목록에 없는 이름은 「없음」이다 — 모델이 지어낸
+    동작을 펫에 넘기면 펫이 못 찾고 조용히 무시하니, 여기서 거른다."""
+    act = {"motion": None, "expression": None}
+    match = ACT_LINE.search(reply)
+    if not match:
+        return reply, act
+    def known(value, rows, key):
+        if value.lower() in NONE_WORDS:
+            return None
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and str(row.get(key, "")).lower() == value.lower():
+                return str(row[key])
+        return None
+    rows = catalog if isinstance(catalog, dict) else {}
+    act["motion"] = known(match.group(1), rows.get("motions"), "group")
+    act["expression"] = known(match.group(2), rows.get("expressions"), "name")
+    return (reply[: match.start()] + reply[match.end():]).strip(), act
+
+
+def build_prompt(text: str, pane: str, ctx: dict, catalog=None) -> str:
     who = ctx["who"]
     head = (
         f"[질문] {text}\n\n"
+        f"{catalog_lines(catalog)}"
         f"[지금 보는 창] {pane} · 학생 {who.get('character') or '미배정'} · 세션 {who.get('peer_name') or '-'} · "
         f"상태 {who.get('status') or '-'} · 기계 {who.get('machine') or '이 기기'} · 폴더 {who.get('cwd') or '-'}\n"
         f"[마지막 지시] {(who.get('last_prompt') or '')[:600]}\n"
@@ -366,7 +412,8 @@ def answer(provider_factory, body: dict) -> tuple[int, dict]:
     client = llm_client(provider_factory)
     if client is None:
         return 503, {"error": "llm_unavailable"}
-    prompt = build_prompt(text, pane, context(pane))
+    catalog = body.get("catalog")
+    prompt = build_prompt(text, pane, context(pane), catalog)
 
     async def call():
         return await asyncio.wait_for(
@@ -389,9 +436,10 @@ def answer(provider_factory, body: dict) -> tuple[int, dict]:
     actions = execute(pane, client.extract_tool_uses(resp))
     if not reply and actions:
         reply = " · ".join(a["detail"] for a in actions)
+    reply, act = perform(reply, catalog)
     if not reply:
         reply = "음... 답을 못 만들었엉"
-    return 200, {"answer": plain(reply)[:1500], "actions": actions}
+    return 200, {"answer": plain(reply)[:1500], "actions": actions, "act": act}
 
 
 def plain(text: str) -> str:

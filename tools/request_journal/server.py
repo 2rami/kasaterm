@@ -267,7 +267,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 동기(최대 25초). 장부 채팅(`/api/chat`)과 달리 모델이 고른 도구를 실행한다.
                 if self.server.chat is None:
                     return self.reply(503, {"error": "chat_unavailable"})
-                if not isinstance(body, dict) or set(body) - {"text", "pane"}:
+                if not isinstance(body, dict) or set(body) - {"text", "pane", "catalog"}:
                     return self.reply(400, {"error": "invalid_ask_request"})
                 from .ask import answer
                 status, payload = answer(self.server.chat.provider_factory, body)

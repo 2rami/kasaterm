@@ -30,16 +30,6 @@ impl Mood {
             _ => Mood::Idle,
         }
     }
-
-    pub fn group(self) -> &'static str {
-        match self {
-            Mood::Idle => "Idle",
-            Mood::Busy => "Busy",
-            Mood::Wait => "Think",
-            Mood::Error => "Error",
-            Mood::Sleep => "Sleep",
-        }
-    }
 }
 
 /// 사람이 지금 보고 있는 pane 의 요약 — 「내가 포커스한 창이 뭐고 어디까지 했나」
@@ -137,13 +127,6 @@ mod tests {
         assert_eq!(m, Mood::Idle);
         assert!(t.is_empty());
         assert!(pane.is_empty());
-    }
-
-    #[test]
-    fn board_states_use_named_groups() {
-        assert_eq!(Mood::Wait.group(), "Think");
-        assert_eq!(Mood::Busy.group(), "Busy");
-        assert_eq!(Mood::Sleep.group(), "Sleep");
     }
 
     #[test]

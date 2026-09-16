@@ -241,7 +241,7 @@ pub fn probe() {
     let asked = bar.events().into_iter().any(|event| matches!(event, Event::Send(text) if text.contains("이사")));
     println!("ASK_PROBE_SEND_EVENT:{asked}");
     let mut client = crate::ask::Client::default();
-    client.ask(service.clone(), "이 창 맥미니로 이사해줘".into(), "%3".into());
+    client.ask(service.clone(), "이 창 맥미니로 이사해줘".into(), "%3".into(), serde_json::Value::Null);
     bar.clear_input();
 
     let started = std::time::Instant::now();

@@ -43,6 +43,18 @@ fn preview_mode() -> bool {
 }
 
 
+/// 나쵸 자신의 상태. 모션은 학생들 판이 아니라 이걸 따른다(2026-09-17 지시 「학생들 상태
+/// 별개로 나쵸네코 상태에 따라서」) — 판이 늘 busy 라고 펫이 하루 종일 부산할 이유는 없다.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Nacho {
+    #[default]
+    Idle,
+    /// 질문을 받고 판을 보는 중.
+    Looking,
+    /// 답하는 중 — 나쵸가 고른 동작을 한 번 보여 주고 Idle 로 돌아간다.
+    Speaking,
+}
+
 struct Gfx {
     dev: wgpu::Device, q: wgpu::Queue, surf: wgpu::Surface<'static>, fmt: wgpu::TextureFormat,
     bgl: wgpu::BindGroupLayout, samp: wgpu::Sampler,
@@ -98,6 +110,11 @@ struct App {
     bounce: Option<(std::time::Instant, f64)>,
     /// 지금 도는 자동 모션이 한 번 보여 주고 끝나는 반응인가. 끝나면 Idle 로 돌아간다.
     reaction_once: bool,
+    nacho: Nacho,
+    /// 나쵸가 이 답에 골라 준 동작 그룹. 목록에 있는 것만 받는다.
+    nacho_group: Option<String>,
+    /// 나쵸가 켠 표정의 번호 — 답을 내리거나 다음 답이 오면 끈다.
+    nacho_expression: Option<usize>,
     /// 말 거는 중이면 친 글. None 이면 평소처럼 듣기만 한다.
     typing: Option<String>,
     journal: journal::Client,
@@ -458,9 +475,9 @@ impl ApplicationHandler for App {
                         .unwrap_or_else(|| self.ask_pane());
                     eprintln!("ASK_APP_PANE:{pane}");
                     if let Some(path) = self.journal_path() {
-                        let sent = self.ask.ask(path.clone(), question.clone(), pane);
+                        let sent = self.ask.ask(path.clone(), question.clone(), pane, self.act_catalog());
                         eprintln!("ASK_APP_SERVICE:{} SENT:{}", path.display(), sent);
-                        if sent { self.speak("나쵸가 보는 중…".into(), false); }
+                        if sent { self.begin_looking(); }
                     }
                 }
             }
@@ -533,7 +550,7 @@ impl App {
             Some(menu::Action::Next) => self.next_character(),
             Some(menu::Action::Motion(i)) => self.select_motion(i),
             Some(menu::Action::Expression(i)) => self.select_expression(i),
-            Some(menu::Action::ResetExpressions) => self.expressions.clear(),
+            Some(menu::Action::ResetExpressions) => { self.expressions.clear(); self.nacho_expression = None; }
             Some(menu::Action::RepeatMotion) => {
                 let repeat = !self.playback.repeat;
                 if let Some(i) = self.playback.selected {
@@ -945,8 +962,8 @@ impl App {
     fn ask_now(&mut self, text: &str) {
         let pane = self.ask_pane();
         let Some(path) = self.journal_path() else { return };
-        if self.ask.ask(path, text.to_string(), pane) {
-            self.speak("나쵸가 보는 중…".into(), false);
+        if self.ask.ask(path, text.to_string(), pane, self.act_catalog()) {
+            self.begin_looking();
         }
     }
 
@@ -966,6 +983,8 @@ impl App {
         self.say.clear();
         self.board_seen = None;
         self.rebuild_bubble_text();
+        self.clear_nacho_expression();
+        self.set_nacho(Nacho::Idle, false);
     }
 
     /// 읽으라고 띄운 답이라도 이만큼 지나면 내린다 — 오래된 판 요약은 지금 이야기가 아니다.
@@ -985,9 +1004,9 @@ impl App {
                     ask_bar::Event::Send(text) => {
                         let pane = self.ask_pane();
                         if let Some(path) = self.journal_path() {
-                            if self.ask.ask(path, text, pane) {
+                            if self.ask.ask(path, text, pane, self.act_catalog()) {
                                 if let Some(bar) = &self.ask_bar { bar.clear_input(); }
-                                self.speak("나쵸가 보는 중…".into(), false);
+                                self.begin_looking();
                             }
                         }
                     }
@@ -1002,8 +1021,17 @@ impl App {
                     if self.shot_path.is_some() { self.shot_at = self.frames + 30; }
                 }
                 match result {
-                    Ok(answer) => self.speak(answer.line(), true),
-                    Err(()) => self.speak("나쵸에게 닿지 못했어요.".into(), false),
+                    Ok(answer) => {
+                        self.speak(answer.line(), true);
+                        if std::env::var_os("KASAPET_AUTOASK").is_some() {
+                            eprintln!("ASK_APP_ACT:{}|{}", answer.motion.as_deref().unwrap_or("-"), answer.expression.as_deref().unwrap_or("-"));
+                        }
+                        self.perform(answer.motion, answer.expression);
+                    }
+                    Err(()) => {
+                        self.speak("나쵸에게 닿지 못했어요.".into(), false);
+                        self.perform(Some("Error".into()), None);
+                    }
                 }
             }
             if self.answer_shown && self.said_at.elapsed() > Self::ANSWER_LINGER { self.dismiss_answer(); }
@@ -1098,6 +1126,7 @@ impl App {
         self.stirred = std::time::Instant::now();
         let urgent = matches!(mood, board::Mood::Wait | board::Mood::Error);
         if (self.journal_shown || self.answer_shown) && !urgent { return; }
+        if self.answer_shown { self.clear_nacho_expression(); self.set_nacho(Nacho::Idle, false); }
         self.answer_shown = false;
         self.journal_shown = false;
         if text != self.say {
@@ -1116,25 +1145,87 @@ impl App {
         }
     }
 
+    /// 판의 기분은 잠(오래 조용함)에만 쓴다. 나머지 모션은 나쵸 상태가 정한다 — 학생이
+    /// 일하는 것은 학생 사정이지 나쵸가 부산할 일이 아니다.
     fn apply_mood(&mut self, mood: board::Mood) {
+        let before = self.automatic_group();
         self.mood = mood;
+        if self.automatic_group() != before { self.restart_automatic(); }
+    }
+
+    fn automatic_group(&self) -> String {
+        if self.resting || self.mood == board::Mood::Sleep { "Sleep".into() }
+        else if self.typing.is_some() { "Talk".into() }
+        else {
+            match self.nacho {
+                Nacho::Looking => "Think".into(),
+                Nacho::Speaking => self.nacho_group.clone().unwrap_or_else(|| "Talk".into()),
+                Nacho::Idle => "Idle".into(),
+            }
+        }
+    }
+
+    /// 나쵸 상태를 바꾼다. 그룹이 달라지면 모션을 새로 돌리고, `force` 면 같은 그룹이라도
+    /// 다시 돌린다 — 답마다 동작은 새로 보여 주는 것이다.
+    fn set_nacho(&mut self, state: Nacho, force: bool) {
+        let before = self.automatic_group();
+        self.nacho = state;
+        if force || self.automatic_group() != before { self.restart_automatic(); }
+    }
+
+    fn restart_automatic(&mut self) {
         if self.playback.selected.is_none() && (self.preferences.animations || self.typing.is_some()) { self.resume_automatic(); }
     }
 
-    fn automatic_group(&self) -> &'static str {
-        if self.resting { "Sleep" }
-        else if self.typing.is_some() { "Talk" }
-        else { self.mood.group() }
+    /// 이 캐릭터가 할 수 있는 동작·표정 — 나쵸에게 보내 답에 맞춰 고르게 한다. 그룹은 한 번씩,
+    /// 이름 옆에 한국어 뜻을 붙인다(후후의 파일 이름은 병음이라 그것만으로는 못 고른다).
+    fn act_catalog(&self) -> serde_json::Value {
+        let word = |label: String| label.split(" · ").next().unwrap_or("").to_string();
+        let mut seen = std::collections::BTreeSet::new();
+        let motions: Vec<serde_json::Value> = self.catalog.motions.iter()
+            .filter(|m| m.available && seen.insert(m.group.clone()))
+            .map(|m| serde_json::json!({"group": m.group, "label": word(m.label())}))
+            .collect();
+        let expressions: Vec<serde_json::Value> = self.catalog.expressions.iter()
+            .filter(|e| e.available && !e.unlinked)
+            .map(|e| serde_json::json!({"name": e.name, "label": word(e.label())}))
+            .collect();
+        serde_json::json!({"motions": motions, "expressions": expressions})
+    }
+
+    /// 나쵸가 답과 함께 고른 동작·표정을 입힌다. 목록 밖 이름은 무시한다.
+    fn perform(&mut self, motion: Option<String>, expression: Option<String>) {
+        self.clear_nacho_expression();
+        self.nacho_group = motion.filter(|group| self.catalog.group(group).is_some());
+        if let Some(name) = expression {
+            if let Some(i) = self.catalog.expressions.iter().position(|e| e.name == name && e.available && !e.unlinked) {
+                if !self.expressions.indices().contains(&i) && self.expressions.toggle(&self.catalog, i).is_ok() {
+                    self.nacho_expression = Some(i);
+                }
+            }
+        }
+        self.set_nacho(Nacho::Speaking, true);
+    }
+
+    fn clear_nacho_expression(&mut self) {
+        if let Some(i) = self.nacho_expression.take() {
+            if self.expressions.indices().contains(&i) { let _ = self.expressions.toggle(&self.catalog, i); }
+        }
+    }
+
+    /// 질문을 보냈다 — 판을 보는 동작으로.
+    fn begin_looking(&mut self) {
+        self.speak("나쵸가 보는 중…".into(), false);
+        self.clear_nacho_expression();
+        self.set_nacho(Nacho::Looking, false);
     }
 
     fn resume_automatic(&mut self) {
         let group = self.automatic_group();
-        // 「일하는 중」은 알릴 일이지 계속 보여 줄 상태가 아니다 — 학생 하나라도 일하면
-        // 판은 거의 늘 busy 라, 그 모션을 돌려 두면 펫이 하루 종일 부산스럽다(2026-09-17
-        // 「베개가 계속 생겨」: 후후의 Busy 모션이 베개다). 한 번 보여 주고 Idle 로 돌아간다.
-        // 사람 손이 필요한 Think·Error 와 잠은 그대로 돈다 — 그건 봐 달라는 신호다.
-        let once = self.playback.selected.is_none() && group == "Busy" && self.catalog.group("Busy").is_some();
-        if let Some(i) = self.playback.target(&self.catalog, group) {
+        // 답하는 동작은 한 번 보여 주고 Idle 로 돌아간다 — 돌려 두면 펫이 하루 종일
+        // 부산스럽다(2026-09-17 「베개가 계속 생겨」). 잠·대화·판 보는 중은 그대로 돈다.
+        let once = self.playback.selected.is_none() && self.nacho == Nacho::Speaking && !self.resting && self.typing.is_none();
+        if let Some(i) = self.playback.target(&self.catalog, &group) {
             if !self.play_motion(i, !once) { self.motion = None; }
             self.reaction_once = once;
         } else {
@@ -1328,10 +1419,8 @@ impl App {
         if self.playback.finish_once(finished) { self.resume_automatic(); }
         else if finished && self.reaction_once && self.playback.selected.is_none() {
             self.reaction_once = false;
-            match self.catalog.group("Idle") {
-                Some(i) => { if !self.play_motion(i, true) { self.motion = None; } }
-                None => { self.motion = None; self.motion_params.clear(); }
-            }
+            if self.nacho == Nacho::Speaking { self.nacho = Nacho::Idle; }
+            self.resume_automatic();
         }
         let moving = self.playback.selected.is_some() || self.typing.is_some() || (self.preferences.animations
             && (!self.resting || self.catalog.group("Sleep").is_some()));
@@ -1927,7 +2016,7 @@ fn main() {
         popup: None,
         menu_probe_started:None,menu_probe_phase:0,menu_probe_frames:0,
         menu_probe_motion:0.0,menu_probe_mesh:0,menu_probe_motion_checked:false,
-        said_at: std::time::Instant::now(), urgent: false, bounce: None, reaction_once: false, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
+        said_at: std::time::Instant::now(), urgent: false, bounce: None, reaction_once: false, nacho: Nacho::Idle, nacho_group: None, nacho_expression: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,
         catalog, expressions: catalog::Expressions::default(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
         shot_path: std::env::var("KASAPET_SHOT").ok(),
