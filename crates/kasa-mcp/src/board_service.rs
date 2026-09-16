@@ -267,15 +267,21 @@ fn collect_local(service: &Service, machine: &str, label: &str) -> bool {
     };
     let mut store = service.store.lock().unwrap_or_else(|e| e.into_inner());
     let before = store.cursor();
-    if result
-        .and_then(|source| {
-            if field(&source, "machine_id") != Some(machine) {
-                bail!("local source machine mismatch");
-            }
-            store.observe(&source)
-        })
-        .is_err()
-    {
+    if let Err(e) = result.and_then(|source| {
+        if field(&source, "machine_id") != Some(machine) {
+            bail!("local source machine mismatch");
+        }
+        store.observe(&source)
+    }) {
+        // 이유를 남긴다 — 보드가 「관측 불가」로만 서면 30분이 지나도 무엇이 막는지 알 길이
+        // 없다(2026-09-16). 같은 이유는 한 번만 적는다.
+        static LAST: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+        let text = format!("{e:#}");
+        let mut last = LAST.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+        if *last != text {
+            eprintln!("[board] local observation failed: {text}");
+            *last = text;
+        }
         store.fail_source(machine, label, "local observation unavailable");
     }
     if store.cursor() != before {

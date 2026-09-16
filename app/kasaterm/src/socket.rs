@@ -414,9 +414,11 @@ pub(crate) fn agents_error_sids_cached() -> HashSet<String> {
 
 impl PtyBackend {
     /// 이 surface 에 결속된 기록 파일 — GUI 의 턴 판정(`refresh_turn_states`)이 보드와
-    /// 같은 파일을 읽게 한다. 결속이 없으면 None(화면 폴백).
-    pub(crate) fn bound_transcript(&self, surface: &str) -> Option<PathBuf> {
-        self.bound.lock().unwrap().get(surface).cloned()
+    /// 같은 파일을 읽게 한다. `Ok(None)` 은 결속 없음(화면 폴백), `Err` 은 **지금 잠겨
+    /// 있음** — GUI 스레드는 기다리지 않는다. 소켓 쪽이 이 맵을 쥔 채 pane 마다
+    /// 512KB 기록을 읽는 동안 헤더가 초 단위로 멈췄다(2026-09-16 실측 3초 중 1.8초).
+    pub(crate) fn bound_transcript(&self, surface: &str) -> Result<Option<PathBuf>, ()> {
+        self.bound.try_lock().map(|b| b.get(surface).cloned()).map_err(|_| ())
     }
     pub(crate) fn tell_binding_epoch(&self, surface: &str) -> u64 {
         self.tell_binding_epochs.lock().unwrap().get(surface).copied().unwrap_or(0)
@@ -2878,7 +2880,10 @@ impl Backend for PtyBackend {
                 .cloned()
                 .collect()
         };
-        let bound = self.bound.lock().unwrap();
+        // 사본으로 푼다 — 이 아래는 pane 마다 512KB 기록을 읽고 프로세스 환경을 뒤지는
+        // 긴 길이라, 잠금을 쥔 채 가면 GUI 의 짧은 조회까지 그만큼 멈춘다(2026-09-16
+        // 「뚝뚝 끊김」의 원인).
+        let bound: HashMap<String, PathBuf> = self.bound.lock().unwrap().clone();
         let mut attention = self.attention.lock().unwrap();
         // 방별 분리(사용자): 각 pane 의 character 는 *그 pane 의 방(room)* collab dir
         // 에서 읽는다 — 같은 cwd 라도 방마다 캐릭터가 다르다. pane_room

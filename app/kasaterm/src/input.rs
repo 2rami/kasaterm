@@ -781,7 +781,13 @@ impl App {
         let turn = &mut self.collab.turn;
         turn.retain(|id, _| live.contains(id));
         for id in live {
-            let Some(path) = backend.bound_transcript(&id) else {
+            // 소켓 쪽이 결속 맵을 쥐고 있으면 기다리지 않는다 — 지난 관측의 파일을 그대로
+            // 다시 본다(결속은 좀처럼 안 바뀐다). 처음 보는 pane 만 다음 틱으로 미룬다.
+            let path = match backend.bound_transcript(&id) {
+                Ok(path) => path,
+                Err(()) => turn.get(&id).map(|o| o.path.clone()),
+            };
+            let Some(path) = path else {
                 turn.remove(&id);
                 continue;
             };
@@ -885,8 +891,13 @@ impl App {
             let probe = &mut self.spinner_probe;
             // 훅이 세운 대기 표식(승인·질문·방치). ws 락 밖에서 한 번 뜬다 — 소켓 스레드가
             // 이 맵을 ws 와 다른 순서로 잡으므로 안에서 잡으면 서로 기다릴 수 있다.
-            let attention: std::collections::HashSet<String> =
-                self.collab.attention.lock().unwrap().keys().cloned().collect();
+            // 잠겨 있으면 빈 집합으로 간다 — 승인 프롬프트는 화면 감지가 따로 막는다.
+            let attention: std::collections::HashSet<String> = self
+                .collab
+                .attention
+                .try_lock()
+                .map(|a| a.keys().cloned().collect())
+                .unwrap_or_default();
             let ws = self.ws.lock().unwrap();
             let mut rows = Vec::with_capacity(ws.panes.len());
             let mut bg = std::collections::HashSet::new();
