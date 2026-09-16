@@ -1448,7 +1448,7 @@ mod tests {
         let row = |local: &str, source: &str| state::MachinesColRow {
             pane: local.into(), remote_id: source.into(), remote_cwd: "/work/project".into(),
             name: "모모이".into(), title: "작업".into(), status: "working".into(),
-            room: "방 1".into(), closed: false, rect: None,
+            room: "방 1".into(), closed: false, rect: None, window: None, tab_of: None,
         };
         let mut machine = state::MachinesColMachine {
             label: "원본 기기".into(), online: true, ago_secs: Some(0), outdated: false,

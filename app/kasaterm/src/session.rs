@@ -1051,6 +1051,176 @@ impl App {
 
     /// pid 가 보조 탭이면 그 바깥 pane 을 포커스하고 그 탭을 앞으로 — 창이 다르면
     /// 창부터 바꾼다. `focus_pane` 은 바깥 pane 만 알아서 탭 pid 로는 못 찾는다.
+    /// 다른 기기의 방 하나를 **여기 방으로** 연다 — 사이드바에서 그 방(또는 그 안의 칸)을
+    /// 눌렀을 때. 이미 그 방의 거울이 여기 있으면 그리로 간다(누른 pane 의 거울이 있으면
+    /// 그것). 없으면 새 창을 세우고 바깥 pane 마다 거울을 앉힌 뒤 원본 칸 좌표로 배치를
+    /// 되살리고, 탭은 그 자리의 탭으로 연다. 거울 하나가 지금 방에 끼어들던 예전 동작과
+    /// 다르다(2026-09-16 지시 「거기 방처럼 보이게」).
+    pub(crate) fn open_remote_room(
+        &mut self,
+        label: &str,
+        window: Option<u64>,
+        room_label: &str,
+        focus: Option<&str>,
+    ) -> Result<()> {
+        if self.tmux.is_some() {
+            anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
+        }
+        let m = kasa_mcp::machines::find(label)
+            .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
+        let rows: Vec<crate::state::MachinesColRow> = self
+            .info
+            .machines_col
+            .machines
+            .iter()
+            .find(|x| x.label == label)
+            .map(|x| {
+                x.remote
+                    .iter()
+                    .chain(x.mirrored.iter())
+                    .filter(|r| !r.closed && !r.remote_id.is_empty())
+                    .filter(|r| if window.is_some() { r.window == window } else { r.room == room_label })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if rows.is_empty() {
+            anyhow::bail!("{label} 의 그 방에 열 pane 이 없다");
+        }
+        let mirror_of = |rid: &str| {
+            kasa_pty::live_sessions().into_iter().find(|id| {
+                kasa_mcp::remote::remote_info(id).is_some_and(|i| {
+                    kasa_mcp::machines::same_machine_bases(&i.base, &m.base) && i.remote_id == rid
+                })
+            })
+        };
+        let existing = focus
+            .and_then(mirror_of)
+            .or_else(|| rows.iter().find_map(|r| mirror_of(&r.remote_id)));
+        if let Some(existing) = existing {
+            self.focus_surface(&existing);
+            return Ok(());
+        }
+        self.new_window();
+        let owner = self.active_window;
+        let Some(host) = self.ws.lock().unwrap().active_pane.clone() else {
+            anyhow::bail!("새 창의 기본 pane 을 못 얻었다");
+        };
+        let (win_cols, win_rows) = self.window_cells();
+        let outers: Vec<&crate::state::MachinesColRow> = rows.iter().filter(|r| r.tab_of.is_none()).collect();
+        let mut seated: Vec<(String, String)> = Vec::new();
+        let mut fail: Vec<String> = Vec::new();
+        for row in &outers {
+            let local_id = if seated.is_empty() { host.clone() } else { self.alloc_pane_id() };
+            let spec = kasa_mcp::remote::RemoteSpec {
+                base: m.base.clone(),
+                pane: Some(row.remote_id.clone()),
+                cwd: None,
+                token: None,
+                identity: kasa_mcp::remote::RemoteIdentity {
+                    label: m.label.clone(),
+                    remote_cwd: (!row.remote_cwd.is_empty()).then(|| row.remote_cwd.clone()),
+                    origin_cwd: None,
+                    owned: false,
+                },
+            };
+            match kasa_mcp::remote::connect_view(spec, &local_id) {
+                Ok(remote) => {
+                    if seated.is_empty() {
+                        if let Some(old) = self.pty.get(&host).cloned() {
+                            old.stop_reader();
+                        }
+                    }
+                    self.insert_pty(local_id.clone(), remote.session.clone());
+                    self.pump_pty_screens(
+                        remote.session.screens.clone(),
+                        local_id.clone(),
+                        std::sync::Arc::downgrade(&remote.session),
+                    );
+                    self.dead_panes.lock().unwrap().retain(|x| x != &local_id);
+                    self.ws.lock().unwrap().panes.entry(local_id.clone()).or_default();
+                    seated.push((local_id, row.remote_id.clone()));
+                }
+                Err(e) => fail.push(format!("{}: {e:#}", row.remote_id)),
+            }
+        }
+        if seated.is_empty() {
+            anyhow::bail!("거울을 하나도 못 열었다 — {}", fail.join(" · "));
+        }
+        if seated.len() > 1 {
+            // 원본 칸 좌표가 다 있으면 그 배치 그대로, 아니면 고르게 나눈다.
+            let cells: Vec<(String, [f32; 4])> = seated
+                .iter()
+                .filter_map(|(local, rid)| {
+                    let rect = outers.iter().find(|r| &r.remote_id == rid)?.rect?;
+                    Some((local.clone(), rect))
+                })
+                .collect();
+            let tree = (cells.len() == seated.len())
+                .then(|| crate::layout::layout_from_rects(&cells))
+                .flatten()
+                .unwrap_or_else(|| {
+                    let others: Vec<String> = seated.iter().skip(1).map(|(id, _)| id.clone()).collect();
+                    let dir = crate::layout::pick_split_axis(
+                        win_cols as f32 * self.cell.w.max(1.0),
+                        win_rows as f32 * self.cell.h.max(1.0),
+                        win_cols,
+                        win_rows,
+                    );
+                    kasa_pty::fleet(&seated[0].0, &others, dir, 1.0 / seated.len() as f32)
+                });
+            if !self.pty_layout.as_mut().is_some_and(|l| l.replace_leaf(&seated[0].0, tree)) {
+                fail.push("배치 트리 심기 실패".into());
+            }
+        }
+        for (local, rid) in &seated {
+            let name = rows
+                .iter()
+                .find(|r| &r.remote_id == rid)
+                .map(|r| r.name.clone())
+                .filter(|n| !n.is_empty())
+                .or_else(|| kasa_mcp::remote::remote_pane_character(&m.base, rid, None))
+                .unwrap_or_default();
+            if !name.is_empty() {
+                self.relabel_pane(local, &name);
+            }
+        }
+        self.ws.lock().unwrap().active_pane = Some(seated[0].0.clone());
+        self.resize_backend(win_cols, win_rows);
+        self.publish_pty_layout();
+        // 탭 — 바깥 pane 의 거울을 활성으로 두고 그 탭으로 연다(`mirror_remote_pane` 이
+        // 활성 pane 의 탭으로 여는 자리다).
+        for row in rows.iter().filter(|r| r.tab_of.is_some()) {
+            let Some((local, _)) = seated.iter().find(|(_, rid)| Some(rid) == row.tab_of.as_ref()) else {
+                continue;
+            };
+            self.ws.lock().unwrap().active_pane = Some(local.clone());
+            if let Err(e) = self.mirror_remote_pane(label, &row.remote_id, &row.name, &row.remote_cwd) {
+                fail.push(format!("{} 탭: {e:#}", row.remote_id));
+            }
+        }
+        if !room_label.is_empty() {
+            self.window_name_override.insert(owner, room_label.to_string());
+        }
+        match focus.and_then(mirror_of) {
+            Some(target) => {
+                self.focus_surface(&target);
+            }
+            None => {
+                self.ws.lock().unwrap().active_pane = Some(seated[0].0.clone());
+            }
+        }
+        self.session_touched = true;
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        if !fail.is_empty() {
+            self.set_toast(format!("일부는 못 열었어요 — {}", fail.join(" · ")));
+        }
+        Ok(())
+    }
+
     pub(crate) fn reveal_pane_tab(&mut self, pid: &str) -> bool {
         self.focus_surface(pid)
     }

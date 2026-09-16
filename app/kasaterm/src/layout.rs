@@ -189,6 +189,45 @@ mod mirror_hit_bounds_tests {
 /// 최소 줄수가 16인 이유: claude 입력박스만 5줄이라 12줄짜리 pane 은 대화가 두 줄
 /// 보인다. 「좁은 것보다 짧은 게 낫다」가 성립하려면 짧은 쪽이 실제로 쓸 만해야 한다 —
 /// 12로 뒀다가 80×24 pane(표준 크기)이 12줄 두 장으로 갈렸다.
+/// 칸 좌표(0..1 `[x,y,w,h]`)에서 BSP 트리를 되살린다 — 원본 기기의 방 배치를 이쪽 창에
+/// 그대로 세울 때. 칸들은 BSP 에서 나온 것이라 늘 한 직선으로 둘로 가를 수 있다(길로틴).
+/// 반올림 오차만큼(`EPS`) 너그럽게 본다. 못 가르면 None — 호출자가 고른 나눔으로 간다.
+pub(crate) fn layout_from_rects(cells: &[(String, [f32; 4])]) -> Option<kasa_pty::PtyLayout> {
+    const EPS: f32 = 0.02;
+    match cells {
+        [] => return None,
+        [(id, _)] => return Some(kasa_pty::PtyLayout::single(id)),
+        _ => {}
+    }
+    let x0 = cells.iter().map(|(_, r)| r[0]).fold(f32::MAX, f32::min);
+    let y0 = cells.iter().map(|(_, r)| r[1]).fold(f32::MAX, f32::min);
+    let x1 = cells.iter().map(|(_, r)| r[0] + r[2]).fold(f32::MIN, f32::max);
+    let y1 = cells.iter().map(|(_, r)| r[1] + r[3]).fold(f32::MIN, f32::max);
+    // 세로선(x)으로 먼저, 안 되면 가로선(y). 한쪽 후보는 어떤 칸의 오른쪽 변이다.
+    for (dir, lo, hi, axis) in [
+        (kasa_pty::SplitDir::Horizontal, x0, x1, 0usize),
+        (kasa_pty::SplitDir::Vertical, y0, y1, 1usize),
+    ] {
+        let mut cuts: Vec<f32> = cells.iter().map(|(_, r)| r[axis] + r[axis + 2])
+            .filter(|&c| c > lo + EPS && c < hi - EPS).collect();
+        cuts.sort_by(f32::total_cmp);
+        cuts.dedup_by(|a, b| (*a - *b).abs() < EPS);
+        for cut in cuts {
+            let (a, b): (Vec<_>, Vec<_>) = cells.iter().cloned()
+                .partition(|(_, r)| r[axis] + r[axis + 2] <= cut + EPS);
+            if a.is_empty() || b.is_empty() || b.iter().any(|(_, r)| r[axis] < cut - EPS) {
+                continue;
+            }
+            let (Some(la), Some(lb)) = (layout_from_rects(&a), layout_from_rects(&b)) else { continue };
+            return Some(kasa_pty::PtyLayout::Split {
+                dir, ratio: ((cut - lo) / (hi - lo)).clamp(0.05, 0.95),
+                a: Box::new(la), b: Box::new(lb),
+            });
+        }
+    }
+    None
+}
+
 pub(crate) fn pick_split_axis(px_w: f32, px_h: f32, cols: u16, rows: u16) -> kasa_pty::SplitDir {
     use kasa_pty::SplitDir::{Horizontal, Vertical};
     let long_axis = if px_w >= px_h { Horizontal } else { Vertical };
@@ -3351,5 +3390,45 @@ mod orphan_leaf_tests {
             !leaf_is_orphan(false, true, false),
             "웹·이미지·마크다운 pane 은 셸이 없어도 산 것"
         );
+    }
+}
+
+#[cfg(test)]
+mod rect_layout_tests {
+    use super::*;
+
+    fn cells(v: &[(&str, [f32; 4])]) -> Vec<(String, [f32; 4])> {
+        v.iter().map(|(id, r)| (id.to_string(), *r)).collect()
+    }
+
+    #[test]
+    fn rebuilds_a_guillotine_layout_with_source_ratios() {
+        let tree = layout_from_rects(&cells(&[
+            ("%1", [0.0, 0.0, 0.5, 1.0]),
+            ("%2", [0.5, 0.0, 0.5, 0.5]),
+            ("%3", [0.5, 0.5, 0.5, 0.5]),
+        ])).unwrap();
+        assert_eq!(tree.leaves(), ["%1", "%2", "%3"]);
+        let rects = tree.leaf_rects(1000, 1000);
+        assert_eq!(rects[0], ("%1".into(), 0, 0, 500, 1000));
+        assert_eq!(rects[2].2, 500);
+        let kasa_pty::PtyLayout::Split { dir, ratio, .. } = &tree else { panic!("split") };
+        assert_eq!(*dir, kasa_pty::SplitDir::Horizontal);
+        assert!((ratio - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn tolerates_rounding_and_refuses_pinwheels() {
+        assert!(layout_from_rects(&cells(&[
+            ("%1", [0.0, 0.0, 0.34, 1.0]),
+            ("%2", [0.33, 0.0, 0.67, 1.0]),
+        ])).is_some());
+        assert!(layout_from_rects(&cells(&[
+            ("%1", [0.0, 0.0, 0.6, 0.4]),
+            ("%2", [0.6, 0.0, 0.4, 0.6]),
+            ("%3", [0.4, 0.6, 0.6, 0.4]),
+            ("%4", [0.0, 0.4, 0.4, 0.6]),
+        ])).is_none());
+        assert!(layout_from_rects(&[]).is_none());
     }
 }

@@ -4544,12 +4544,22 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
         backend.undocked_panes().into_iter().collect();
     // 방 안의 칸 — 폰 미니맵과 같은 백분율 사각. 다른 기기의 사이드바가 이 방을
     // 본기기 방처럼 배치도로 그린다(2026-09-16 지시). 없으면 그쪽이 칸을 고르게 나눈다.
-    let rects: std::collections::HashMap<String, serde_json::Value> = backend
-        .windows_overview()
-        .unwrap_or_default()
-        .iter()
-        .flat_map(|w| w.panes.iter().map(|r| (r.surface_id.clone(), serde_json::json!([r.x, r.y, r.w, r.h]))))
-        .collect();
+    // 탭은 바깥 pane 의 칸을 함께 쓴다 — `tab_of` 로 어느 자리의 탭인지 말해 주면
+    // 받는 쪽이 한 칸(덱)으로 접는다. 방 이름도 싣는다: 받는 쪽이 pane 마다 폴더
+    // 꼬리로 방을 지어 한 방이 셋으로 갈라졌다(2026-09-16 지적).
+    let mut rects: std::collections::HashMap<String, (serde_json::Value, Option<String>)> = Default::default();
+    for w in backend.windows_overview().unwrap_or_default() {
+        for r in &w.panes {
+            let rect = serde_json::json!([r.x, r.y, r.w, r.h]);
+            for pid in &r.tabs {
+                if pid != &r.surface_id {
+                    rects.insert(pid.clone(), (rect.clone(), Some(r.surface_id.clone())));
+                }
+            }
+            rects.insert(r.surface_id.clone(), (rect, None));
+        }
+    }
+    let room_labels = backend.sessions().labels;
     // cwd 도 board 만으론 순수 셸이 빠진다 — 셸 pid 에서 직접 읽는 폴백. 이 값이
     // 비면 그 pane 의 거울은 레포를 몰라 재접속 자동 따라잡기가 통째로 건너뛴다.
     let pane_cwds: std::collections::HashMap<String, String> =
@@ -4604,7 +4614,9 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                     row["mirror_of"] = serde_json::Value::String(label);
                     // 칸은 이쪽 방 안의 자리다 — 저쪽 목록의 칸을 그대로 두면 거울이
                     // 저쪽 방의 자리에 그려진다.
-                    row["rect"] = rects.get(&id).cloned().unwrap_or(serde_json::Value::Null);
+                    row["rect"] = rects.get(&id).map(|(r, _)| r.clone()).unwrap_or(serde_json::Value::Null);
+                    row["tab_of"] = serde_json::json!(rects.get(&id).and_then(|(_, t)| t.clone()));
+                    row["room_label"] = serde_json::json!(pane_windows.get(&id).and_then(|w| room_labels.get(*w)));
                     return row;
                 }
             }
@@ -4612,7 +4624,9 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
             serde_json::json!({
                 "id": id,
                 "surface_key": crate::surface_keys::get(&id),
-                "rect": rects.get(&id),
+                "rect": rects.get(&id).map(|(r, _)| r),
+                "tab_of": rects.get(&id).and_then(|(_, t)| t.clone()),
+                "room_label": pane_windows.get(&id).and_then(|w| room_labels.get(*w)),
                 "mirror_of": mirror_label,
                 "name": b.and_then(|p| p.character.clone()),
                 "title": b.map(|p| p.title.clone()).filter(|s| !s.is_empty()),

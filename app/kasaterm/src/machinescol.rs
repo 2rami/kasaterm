@@ -49,11 +49,19 @@ pub(crate) fn row_rect(p: &serde_json::Value) -> Option<[f32; 4]> {
     Some(out)
 }
 
+fn row_tab_of(p: &serde_json::Value) -> Option<String> {
+    p.get("tab_of").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
 /// Room identity comes from the source device, including for an existing mirror.
+/// 이름은 원본 기기가 준 방 이름(`room_label`)이 먼저다 — pane 마다 폴더 꼬리로 지으면
+/// 한 방의 탭들이 폴더가 달라 방 셋으로 갈라진다(2026-09-16 지적). 옛 판 기기는 그 필드가
+/// 없어 폴더 꼬리로 남되, 묶는 것은 `window` 번호가 한다.
 fn remote_room(p: &serde_json::Value) -> String {
     let window = p.get("window").and_then(|v| v.as_u64());
-    let label = p.get("window_name").and_then(|v| v.as_str())
+    let label = p.get("room_label").and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
+        .or_else(|| p.get("window_name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
         .or_else(|| p.get("cwd").and_then(|v| v.as_str())
             .and_then(|s| s.rsplit('/').find(|s| !s.is_empty())));
     match (window, label) {
@@ -382,6 +390,8 @@ impl App {
                     else { facts.as_ref().map(|(_, p)| remote_room(p)).unwrap_or_else(|| room_of(win)) },
                 closed,
                 rect: facts.as_ref().and_then(|(_, p)| row_rect(p)),
+                window: facts.as_ref().and_then(|(_, p)| p.get("window").and_then(|v| v.as_u64())),
+                tab_of: facts.as_ref().and_then(|(_, p)| row_tab_of(p)),
             };
             match remote {
                 Some(info) => {
@@ -472,6 +482,8 @@ impl App {
                                         room,
                                         closed: false,
                                         rect: row_rect(p),
+                                        window: win,
+                                        tab_of: row_tab_of(p),
                                     },
                                 ))
                             })

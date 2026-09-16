@@ -423,6 +423,10 @@ pub(crate) struct MachinesColRow {
     /// 원본 기기 방 안의 칸 `[x, y, w, h]`(0..1). 사이드바가 그 방을 본기기처럼
     /// 배치도로 그리는 재료 — 옛 판 기기는 안 실어 주므로 그때는 칸을 고르게 나눈다.
     pub(crate) rect: Option<[f32; 4]>,
+    /// 원본 기기의 방(창) 번호 — 방 묶기의 정본. 이름은 바뀌어도 번호는 그 방이다.
+    pub(crate) window: Option<u64>,
+    /// 이 pane 이 어느 바깥 pane 의 탭인가(원격 id). 탭은 바깥 칸과 자리를 함께 쓴다.
+    pub(crate) tab_of: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]

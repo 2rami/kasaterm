@@ -2595,13 +2595,23 @@ impl App {
                         pane: "%2".into(), remote_id: "%13".into(), name: "하치와레".into(),
                         title: "브라우저 연동".into(), status: "working".into(),
                         room: "방 1 · 브라우저".into(), remote_cwd: String::new(), closed: false,
-                        rect: Some([0.0, 0.0, 1.0, 1.0]),
+                        rect: Some([0.0, 0.0, 1.0, 1.0]), window: Some(0), tab_of: None,
                     }],
                     remote: vec![crate::state::MachinesColRow {
                         pane: String::new(), remote_id: "%4".into(), name: "히후미".into(),
                         title: "모바일 연결".into(), status: "idle".into(),
                         room: "방 2 · 모바일".into(), remote_cwd: String::new(), closed: false,
-                        rect: Some([0.0, 0.0, 0.6, 1.0]),
+                        rect: Some([0.0, 0.0, 0.6, 1.0]), window: Some(1), tab_of: None,
+                    }, crate::state::MachinesColRow {
+                        pane: String::new(), remote_id: "%5".into(), name: "아루".into(),
+                        title: "탭 학생".into(), status: "idle".into(),
+                        room: "방 2 · 모바일".into(), remote_cwd: String::new(), closed: false,
+                        rect: Some([0.0, 0.0, 0.6, 1.0]), window: Some(1), tab_of: Some("%4".into()),
+                    }, crate::state::MachinesColRow {
+                        pane: String::new(), remote_id: "%6".into(), name: "카즈사".into(),
+                        title: "옆 자리".into(), status: "waiting".into(),
+                        room: "방 2 · 모바일".into(), remote_cwd: String::new(), closed: false,
+                        rect: Some([0.6, 0.0, 0.4, 1.0]), window: Some(1), tab_of: None,
                     }],
                 }];
             }
