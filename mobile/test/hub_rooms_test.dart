@@ -15,6 +15,20 @@ Pane pane(String id, int window, {String status = 'idle', String name = 'a'}) =>
 
 void main() {
   filterTests();
+  test('거울(다른 기기 방의 보기 창)은 이 기기 방으로 안 선다', () {
+    final mirror = Pane(
+      id: '%9',
+      name: '시로코',
+      title: '',
+      status: 'working',
+      window: 1,
+      cwd: '/',
+      mirrorOf: '맥북',
+    );
+    final rooms = HubModel.rooms([pane('%1', 0), mirror], const ['첫 방']);
+    expect(rooms.map((r) => r.title), ['첫 방']);
+    expect(rooms[0].panes.map((p) => p.id), ['%1']);
+  });
   test('방마다 배치가 붙고, 배치 없는 방은 목록만', () {
     final layouts = [
       WindowLayout.fromJson({

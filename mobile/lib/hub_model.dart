@@ -359,6 +359,9 @@ class HubModel extends ChangeNotifier {
     for (final p in panes) {
       // 되살리기 목록의 pane 은 어느 방에도 없다 — 1번방에 끼워 넣지 않는다.
       if (p.closed) continue;
+      // 거울(다른 기기 방의 보기 창)은 몸통이 저쪽이라 저쪽 기기 절에 따로 온다 —
+      // 여기 실으면 맥북 학생이 맥미니 절에, 맥미니 학생이 맥북 절에 겹쳐 뜬다(09-17).
+      if (p.mirrorOf != null && p.mirrorOf!.isNotEmpty) continue;
       byWindow.putIfAbsent(p.window, () => []).add(p);
     }
     final layoutOf = {for (final l in layouts) l.idx: l};
