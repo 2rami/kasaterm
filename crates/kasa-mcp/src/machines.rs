@@ -895,12 +895,6 @@ fn tunnel_tick() {
                         .unwrap_or_default()
                 );
                 t.insert(label, Tunnel { child, target, port, spawned: Instant::now() });
-                // 터널이 서면 유령 동기를 곧 깨운다 — 5초 주기를 기다리지 않고 원격
-                // 세션이 ListAgents 에 뜨게(ssh 가 붙는 시간만큼만 늦춘다).
-                std::thread::spawn(|| {
-                    std::thread::sleep(Duration::from_millis(1500));
-                    crate::peermirror::poke();
-                });
             }
             Err(e) => eprintln!("[machines] {label} 터널 스폰 실패: {e}"),
         }

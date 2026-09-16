@@ -787,7 +787,6 @@ pub(crate) mod tests {
             "agents_cached(",
             "rebind_agents_panes(",
             "peers::",
-            "peermirror::",
         ] {
             assert!(!source.contains(forbidden), "new source called {forbidden}");
         }

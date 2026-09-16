@@ -27,7 +27,7 @@ mod http;
 pub mod persona;
 mod proxy;
 mod register;
-pub mod peermirror;
+pub mod relayconf;
 pub mod relay;
 pub mod remote;
 pub mod remote_restore;

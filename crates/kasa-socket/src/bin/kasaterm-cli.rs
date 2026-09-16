@@ -494,26 +494,6 @@ fn run() -> Result<Option<Response>> {
                 if n("mirrored") > 0 {
                     s.push_str(&format!(" · 거울 {}", n("mirrored")));
                 }
-                // 세션 명단(유령) — 말을 걸 수 있는 세션 수. 명단을 못 받고 있으면 그 이유.
-                match m.get("peers_error").and_then(|v| v.as_str()) {
-                    Some(err) if !err.is_empty() => {
-                        let age = m.get("peers_age_secs").and_then(|v| v.as_u64());
-                        s.push_str(&format!(
-                            " · 세션 명단 못 받음({}){}",
-                            err.split(':').next().unwrap_or(err).trim(),
-                            match age {
-                                Some(a) if a < 3600 => format!(" — {}초 전까지 받음", a),
-                                Some(_) => " — 한참 전".to_string(),
-                                None => String::new(),
-                            }
-                        ));
-                    }
-                    _ => {
-                        if m.get("peers").is_some() {
-                            s.push_str(&format!(" · 말 걸 세션 {}", n("peers")));
-                        }
-                    }
-                }
                 if m.get("guest").and_then(|v| v.as_bool()).unwrap_or(false) {
                     s.push_str(" · 그쪽이 열어 둔 길");
                 }

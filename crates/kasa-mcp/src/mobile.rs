@@ -425,10 +425,8 @@ pub fn rewrite(path: &str) -> Rewrite {
 /// 이 기계를 폰 화면에서 부를 이름. 릴레이 설정의 machine_id 가 있으면 그것(다른
 /// 기계 명부와 같은 이름이라 헷갈리지 않는다), 없으면 OS 의 컴퓨터 이름.
 pub fn machine_name() -> String {
-    if let Some(c) = crate::peermirror::relay_conf() {
-        if !c.machine_id.trim().is_empty() {
-            return c.machine_id;
-        }
+    if let Some(id) = crate::relayconf::machine_id() {
+        return id;
     }
     #[cfg(target_os = "macos")]
     {

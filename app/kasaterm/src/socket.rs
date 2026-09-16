@@ -1630,12 +1630,9 @@ impl Backend for PtyBackend {
             }
         }
         let snap = kasa_mcp::machines::snapshot();
-        // 세션 명단 동기 상태(유령 수·마지막 수신·오류) — 「말 걸 수 있는 세션」의 근거.
-        let peer_stats = kasa_mcp::peermirror::machine_stats();
         let machines: Vec<serde_json::Value> = kasa_mcp::machines::machines()
             .into_iter()
             .map(|m| {
-                let ps = peer_stats.get(&m.label);
                 let hit = snap
                     .iter()
                     .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(m.label.as_str()));
@@ -1673,9 +1670,6 @@ impl Backend for PtyBackend {
                     "students": panes.len(),
                     "waiting": waiting,
                     "mirrored": mirrors.get(&m.label).copied().unwrap_or(0),
-                    "peers": ps.and_then(|v| v.get("peers").cloned()),
-                    "peers_age_secs": ps.and_then(|v| v.get("peers_age_secs").cloned()),
-                    "peers_error": ps.and_then(|v| v.get("peers_error").cloned()),
                 })
             })
             .collect();
