@@ -318,6 +318,8 @@ pub(crate) struct MachinesColState {
     /// 「이 맥북」 — 원격 링크가 없는 로컬 학생들.
     pub(crate) locals: Vec<MachinesColRow>,
     pub(crate) last_refresh: Option<std::time::Instant>,
+    /// 마지막으로 읽은 machines 캐시 세대. 바뀌면 1초 스로틀을 건너뛴다.
+    pub(crate) last_generation: u64,
     /// 기계 메뉴 항목의 hit rect(다른 메뉴와 같은 규칙 — 매 paint 재생성).
     pub(crate) btn_rects: Vec<(MachinesColBtn, (f32, f32, f32, f32))>,
     /// 이사가 도는 중인 (pane, 진행 문구) — 워커가 단계마다 갱신한다. 한 번에 하나.

@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 pub mod character;
 pub mod board_service;
+pub mod changes;
 pub mod browser_route;
 pub mod browser_target;
 pub mod codexhome;

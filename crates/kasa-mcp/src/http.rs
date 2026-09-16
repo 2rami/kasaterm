@@ -4534,6 +4534,15 @@ fn pane_session_name(p: &kasa_socket::backend::PaneActivity) -> Option<String> {
         })
 }
 
+/// 배치가 `since` 뒤로 바뀔 때까지 매달려 있다가 번호를 돌려준다(롱폴). 관문 우회는
+/// 답 머리를 20초까지만 기다리므로 그 안에서 끊는다.
+async fn term_changes_handler(q: Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+    let since = q.get("since").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let wait = q.get("wait").and_then(|v| v.parse::<u64>().ok()).unwrap_or(15).min(15);
+    let epoch = crate::changes::wait_past(since, std::time::Duration::from_secs(wait)).await;
+    Json(serde_json::json!({ "epoch": epoch }))
+}
+
 async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     let board = backend.collab_board().unwrap_or_default();
     // 방별 그룹핑(폰 목록을 사이드바처럼) — board 는 claude 바인딩 pane 만 담아
@@ -7344,6 +7353,7 @@ pub fn spawn_http_server_opts(
                         "/term/panes",
                         get(move || term_panes_handler(panes_backend.clone())),
                     )
+                    .route("/term/changes", get(term_changes_handler))
                     .route(
                         "/term/shot",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {

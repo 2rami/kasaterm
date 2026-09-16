@@ -32,6 +32,7 @@ struct Ready {
 pub(crate) struct MirrorSyncState {
     planner: plan::Planner,
     last_poll: Option<Instant>,
+    last_generation: u64,
     queue: VecDeque<Candidate>,
     pending: HashSet<String>,
     opened_rooms: HashSet<(String, u64, Instant)>,
@@ -67,10 +68,14 @@ impl App {
     pub(crate) fn poll_mirror_sync(&mut self) {
         if self.tmux.is_some() { return; }
         self.finish_mirror_sync();
-        if self.mirror_sync.last_poll.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+        let generation = kasa_mcp::machines::generation();
+        if generation == self.mirror_sync.last_generation
+            && self.mirror_sync.last_poll.is_some_and(|t| t.elapsed() < Duration::from_secs(1))
+        {
             return;
         }
         self.mirror_sync.last_poll = Some(Instant::now());
+        self.mirror_sync.last_generation = generation;
         let machines = kasa_mcp::machines::snapshot();
         // Compatibility fallback for older hosts and a dropped control frame.
         // Missing/stale rows are NOT proof of closure during host restart.

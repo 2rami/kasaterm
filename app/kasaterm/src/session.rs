@@ -1290,13 +1290,15 @@ impl App {
     /// 좌표를 모르는 옛 판 기기·풍차 배치는 그대로 둔다.
     pub(crate) fn sync_remote_view_layouts(&mut self) {
         use std::sync::{Mutex, OnceLock};
-        static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+        static LAST: OnceLock<Mutex<Option<(Instant, u64)>>> = OnceLock::new();
         {
+            // 기계 캐시가 새로 채워졌으면 2초를 기다리지 않는다.
+            let generation = kasa_mcp::machines::generation();
             let mut last = LAST.get_or_init(|| Mutex::new(None)).lock().unwrap();
-            if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
+            if last.is_some_and(|(t, g)| g == generation && t.elapsed() < std::time::Duration::from_secs(2)) {
                 return;
             }
-            *last = Some(Instant::now());
+            *last = Some((Instant::now(), generation));
         }
         let mut changed_active = false;
         let mut changed_any = false;

@@ -2293,6 +2293,7 @@ impl App {
         }
         self.window_labels_at = None;
         self.mark_room_label_dirty();
+        kasa_mcp::changes::bump();
     }
 
     /// 편집을 버린다(Esc).

@@ -23,6 +23,7 @@
 //! 백그라운드 루프가 미리 받아 두고, `snapshot()` 은 캐시만 즉시 읽는다.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,8 @@ use serde_json::Value;
 
 const POLL_EVERY: Duration = Duration::from_secs(5);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(4);
+/// `/term/changes` 롱폴 한 번의 길이. 관문 우회는 답 머리를 20초까지만 기다린다.
+const CHANGES_WAIT_SECS: u64 = 15;
 /// 이보다 오래 소식이 없으면 offline 으로 표시한다. 폴링 두 번을 놓쳐도 살아
 /// 있게 여유를 둔다(순간 부하로 한 번 늦는 것과 꺼진 것을 가른다).
 const STALE_AFTER: Duration = Duration::from_secs(20);
@@ -1239,6 +1242,7 @@ async fn fetch_panes(client: &reqwest::Client, base: &str) -> Option<Vec<Value>>
 pub async fn poll_loop() {
     let client = reqwest::Client::new();
     let mut announced: Vec<String> = Vec::new();
+    let mut watchers: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     loop {
         let list = raw_machines();
         let labels: Vec<String> = list.iter().map(|m| m.label.clone()).collect();
@@ -1268,7 +1272,87 @@ pub async fn poll_loop() {
                 }
             }
         }
-        tokio::time::sleep(POLL_EVERY).await;
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+        sync_watchers(&client, &list, &mut watchers);
+        tokio::select! {
+            _ = tokio::time::sleep(POLL_EVERY) => {}
+            _ = poke_signal().notified() => {}
+        }
+    }
+}
+
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 캐시가 새로 채워진 횟수. GUI 는 이 번호가 바뀌면 스로틀을 건너뛰고 바로 다시 읽는다.
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Relaxed)
+}
+
+fn poke_signal() -> &'static tokio::sync::Notify {
+    static NOTIFY: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    NOTIFY.get_or_init(tokio::sync::Notify::new)
+}
+
+/// 다음 5초를 기다리지 않고 지금 한 바퀴 더 돈다.
+pub fn poke() {
+    poke_signal().notify_one();
+}
+
+/// 기계마다 `/term/changes` 에 매달려 있다가 배치 번호가 오르면 `poke` 한다.
+/// 목록이 바뀌면 빠진 기계의 감시는 거두고 새 기계 것을 띄운다.
+fn sync_watchers(
+    client: &reqwest::Client,
+    list: &[Machine],
+    watchers: &mut HashMap<String, tokio::task::JoinHandle<()>>,
+) {
+    let bases: HashSet<&str> = list.iter().map(|m| m.base.as_str()).collect();
+    watchers.retain(|base, task| {
+        let keep = bases.contains(base.as_str()) && !task.is_finished();
+        if !keep {
+            task.abort();
+        }
+        keep
+    });
+    for m in list {
+        if watchers.contains_key(&m.base) {
+            continue;
+        }
+        let client = client.clone();
+        let base = m.base.clone();
+        watchers.insert(m.base.clone(), tokio::spawn(async move { watch_changes(client, base).await }));
+    }
+}
+
+async fn watch_changes(client: reqwest::Client, base: String) {
+    let mut since = 0u64;
+    loop {
+        let resp = client
+            .get(format!("{base}/term/changes?since={since}&wait={CHANGES_WAIT_SECS}"))
+            .timeout(Duration::from_secs(CHANGES_WAIT_SECS + 10))
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let epoch = r
+                    .json::<Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| v.get("epoch").and_then(Value::as_u64));
+                match epoch {
+                    Some(e) if since != 0 && e != since => {
+                        since = e;
+                        poke();
+                    }
+                    Some(e) => since = e,
+                    // 답은 왔는데 모양이 다르면 옛 판이다 — 5초 폴링으로 충분하다.
+                    None => tokio::time::sleep(Duration::from_secs(60)).await,
+                }
+            }
+            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+            _ => tokio::time::sleep(Duration::from_secs(3)).await,
+        }
     }
 }
 

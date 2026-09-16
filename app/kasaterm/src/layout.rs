@@ -586,6 +586,8 @@ impl App {
         // every code path that adds/removes panes or moves focus goes
         // through publish_pty_layout, so this is the one spot we have
         // to wire the cmux mirror.
+        // 다른 기기가 이 방 목록을 5초 폴링 대신 즉시 받게 한다.
+        kasa_mcp::changes::bump();
     }
     /// Resize every backend session so its grid matches the new window
     /// size. In tmux mode the daemon redistributes for us. In PTY mode

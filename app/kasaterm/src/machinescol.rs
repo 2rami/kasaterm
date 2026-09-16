@@ -306,15 +306,18 @@ impl App {
         if !self.machines_section_active() {
             return;
         }
-        if self
-            .info
-            .machines_col
-            .last_refresh
-            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1))
+        let generation = kasa_mcp::machines::generation();
+        if generation == self.info.machines_col.last_generation
+            && self
+                .info
+                .machines_col
+                .last_refresh
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1))
         {
             return;
         }
         self.info.machines_col.last_refresh = Some(std::time::Instant::now());
+        self.info.machines_col.last_generation = generation;
 
         // 로컬 pane 들 — claude 가 붙어 학생이 앉은 자리만(사이드바와 같은 기준).
         let mut pane_ids: Vec<String> = self.pty.keys().cloned().collect();
