@@ -182,12 +182,27 @@ impl App {
             && owner.is_none_or(|owner|owner == surface || self.ws.lock().unwrap().active_tab_pid(owner) == surface)
     }
 
+    /// 증명 뒤 대상이 바뀌었나 — 바뀌었으면 무엇이 바뀌었는지. 영수증에 그 말이 실린다.
+    fn tell_target_change(&self, delivery: &Commit) -> Option<&'static str> {
+        let Ok(proof) = &delivery.proof else { return Some("proof missing") };
+        let surface = delivery.record.address.surface_id.as_str();
+        if !self.socket_backend.as_ref().is_some_and(|backend|backend.tell_binding_epoch(surface) == proof.binding_epoch) {
+            return Some("target transcript binding changed");
+        }
+        if kasa_mcp::surface_keys::get(surface).as_deref() != Some(delivery.record.address.surface_key.as_str()) {
+            return Some("target surface identity changed");
+        }
+        // 탭 안의 학생도 받는다 — 바깥 pane 의 **활성 탭**이 아니라 그 surface 의 PTY 를 본다.
+        // 활성 탭이 다른 학생이면 늘 「PTY 바뀜」으로 실패했다(2026-09-16 미니 미도리 실측).
+        if !self.pty.get(surface).is_some_and(|current|Arc::ptr_eq(current,&delivery.pty)) {
+            return Some("target PTY replaced");
+        }
+        if delivery.pty.input_closed() { return Some("target input closed"); }
+        None
+    }
+
     fn tell_target_unchanged(&self, delivery: &Commit) -> bool {
-        let Ok(proof) = &delivery.proof else { return false };
-        self.socket_backend.as_ref().is_some_and(|backend|backend.tell_binding_epoch(&delivery.record.address.surface_id) == proof.binding_epoch)
-            && kasa_mcp::surface_keys::get(&delivery.record.address.surface_id).as_deref() == Some(delivery.record.address.surface_key.as_str())
-            && self.pty_for_pane(&delivery.record.address.surface_id).is_some_and(|current|Arc::ptr_eq(current,&delivery.pty))
-            && !delivery.pty.input_closed()
+        self.tell_target_change(delivery).is_none()
     }
 
     fn tell_proof_current(&self, delivery: &Commit) -> bool {
@@ -230,8 +245,9 @@ impl App {
     }
 
     pub(crate) fn safe_tell_ready(&mut self, delivery: &Commit) {
-        if !self.tell_target_unchanged(delivery) {
-            finish(&delivery.record,State::Failed,"target generation or PTY changed before the first write");
+        if let Some(why) = self.tell_target_change(delivery) {
+            eprintln!("[tell] {} → {} 실패: {why}", delivery.record.message_id, delivery.record.address.surface_id);
+            finish(&delivery.record,State::Failed,&format!("{why} before the first write"));
             return;
         }
         let proof = delivery.proof.as_ref().unwrap();
