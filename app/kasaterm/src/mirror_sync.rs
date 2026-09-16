@@ -33,6 +33,9 @@ pub(crate) struct MirrorSyncState {
     planner: plan::Planner,
     last_poll: Option<Instant>,
     last_generation: u64,
+    /// 거울을 처음 본 시각 — 「원본 목록에 없다」는 판단은 이 뒤 한참 지나서만 한다(방금
+    /// 세운 거울은 캐시가 아직 그 pane 을 모른다).
+    first_seen: HashMap<String, Instant>,
     queue: VecDeque<Candidate>,
     pending: HashSet<String>,
     opened_rooms: HashSet<(String, u64, Instant)>,
@@ -77,18 +80,39 @@ impl App {
         self.mirror_sync.last_poll = Some(Instant::now());
         self.mirror_sync.last_generation = generation;
         let machines = kasa_mcp::machines::snapshot();
+        let now = Instant::now();
+        self.mirror_sync.first_seen.retain(|local, _| self.pty.contains_key(local));
+        for local in self.pty.keys() {
+            self.mirror_sync.first_seen.entry(local.clone()).or_insert(now);
+        }
         // Compatibility fallback for older hosts and a dropped control frame.
-        // Missing/stale rows are NOT proof of closure during host restart.
+        // 원본이 `closed` 로 표시했거나, 살아 있는 직결 목록에 id 도 surface_key 도 없으면
+        // (죽였거나 사라짐) 거울도 걷는다. 전엔 표시된 것만 봐서 사라진 pane 의 거울이
+        // 카드와 보기 창에 남았다(2026-09-17 「미니맵엔 둘, 들어가면 하나」). 호스트 재시작
+        // 중의 빈 목록·방금 세운 거울을 오판하지 않게, 처음 본 뒤 한참 지나서만 「없음」을 믿는다.
         let closed: Vec<String> = self.pty.keys().filter_map(|local| {
             let info = kasa_mcp::remote::remote_info(local)?;
             if !info.view || self.window_of_pane(local).is_none() { return None; }
-            machines.iter().filter(|m| m["online_via"].as_str() == Some("direct"))
+            let settled = self.mirror_sync.first_seen.get(local)
+                .is_some_and(|at| at.elapsed() > Duration::from_secs(15));
+            let key = kasa_mcp::remote::remote_surface_key(local);
+            let (mut live_source, mut found, mut marked_closed) = (false, false, false);
+            for m in machines.iter()
+                .filter(|m| m["online"].as_bool() == Some(true) && m["online_via"].as_str() == Some("direct"))
                 .filter(|m| m["base"].as_str().is_some_and(|base|
                     kasa_mcp::machines::same_machine_bases(&info.base, base)))
-                .flat_map(|m| m["panes"].as_array().into_iter().flatten())
-                .any(|row| row["id"].as_str() == Some(info.remote_id.as_str())
-                    && row["closed"].as_bool() == Some(true))
-                .then(|| local.clone())
+            {
+                live_source = true;
+                for row in m["panes"].as_array().into_iter().flatten() {
+                    let same_id = row["id"].as_str() == Some(info.remote_id.as_str());
+                    let same_key = key.is_some() && row["surface_key"].as_str() == key.as_deref();
+                    if same_id || same_key {
+                        found = true;
+                        marked_closed |= same_id && row["closed"].as_bool() == Some(true);
+                    }
+                }
+            }
+            (marked_closed || (live_source && settled && !found)).then(|| local.clone())
         }).collect();
         for local in closed {
             self.remote_keep.insert(local.clone());
