@@ -77,9 +77,11 @@ pub fn status(params: &Value) -> Result<Value> {
 }
 
 fn remote(address: &Address, params: &Value, path: &'static str) -> Result<Value> {
+    // 직통(검증된 길) → 명부의 base → 관문 우회. 우회는 넷버드·터널 없이도 닿는다.
     let base = crate::board_service::known_route(&address.machine_id)
         .or_else(||crate::machines::machines().into_iter()
             .find(|m|m.machine_id.as_deref() == Some(address.machine_id.as_str())).map(|m|m.base))
+        .or_else(||crate::board_service::relay_base(&address.machine_id))
         .context("remote machine identity has no verified known route")?;
     let expected = address.clone();
     let mut body = params.clone(); body["local_only"] = json!(true);

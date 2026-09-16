@@ -572,9 +572,30 @@ fn run() -> Result<Option<Response>> {
         run_statusline();
         return Ok(None);
     }
+    let mut args = args;
+    // 사람은 주소 JSON 을 안 친다(2026-09-16 지시 「몇 개 안 쳐도 바로 되게」) —
+    // `tell 이름 본문` 은 보드에서 주소를 찾고, `tell-status ID` 는 보낼 때 적어 둔 주소를 쓴다.
+    if cmd == "tell" {
+        resolve_tell_target(&mut args)?;
+    }
+    if cmd == "tell-status" && args.len() == 1 && !args[0].starts_with("--") {
+        let address = load_receipt(&args[0]).ok_or_else(|| anyhow!(
+            "이 ID 의 주소를 모르겠어요 — 이 기계에서 보낸 것이 아니면 --address 를 함께 주세요"
+        ))?;
+        args.push("--address".into());
+        args.push(address.to_string());
+    }
     let request = build_request(&cmd, &args)?;
     let socket_path = resolve_socket_path()?;
     let mut response = roundtrip(&socket_path, &request)?;
+    if cmd == "tell" && response.ok {
+        if let (Some(id), Some(address)) = (
+            request.params.get("message_id").and_then(|v| v.as_str()),
+            response.result.as_ref().and_then(|r| r.get("address")).filter(|a| a.is_object()),
+        ) {
+            save_receipt(id, address);
+        }
+    }
     if cmd == "server" {
         if let Some(error) = response.error.as_mut() {
             if error.code == kasa_socket::protocol::codes::METHOD_NOT_FOUND {
@@ -1326,8 +1347,8 @@ fn print_help() {
     eprintln!("  kasaterm-cli send  <text>");
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
     eprintln!("  kasaterm-cli key   [--surface <id>] <enter|tab|escape|up|down|left|right|...>  # 특정 pane에 키/선택");
-    eprintln!("  kasaterm-cli tell [--id ID] <%surface | --address JSON> <text>  # safe queued message; returns a receipt");
-    eprintln!("  kasaterm-cli tell-status ID --address JSON                    # inspect the original receiver receipt");
+    eprintln!("  kasaterm-cli tell <이름 | 이름@기계 | %surface | --address JSON> <text>  # 이름만 치면 보드에서 주소를 찾는다; 영수증 ID 를 돌려준다");
+    eprintln!("  kasaterm-cli tell-status ID [--address JSON]                  # 이 기계에서 보낸 ID 는 주소 없이 조회된다");
     eprintln!("  kasaterm-cli board [screen_lines]         # what every pane is doing (+ screen tail if N given)");
     eprintln!("  kasaterm-cli [--api BASE] rooms           # 기기·방별 상태. 연락 주소는 board --all의 address 전체 사용");
     eprintln!("  kasaterm-cli board-watch [interval_s]     # stream changed pane status (1 line/change) — feed a Claude Code Monitor");
@@ -2293,6 +2314,77 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         method: method.to_string(),
         params,
     })
+}
+
+/// `tell` 의 대상이 이름이면 보드에서 주소로 바꾼다 — `이름`·`이름@기계`·`%N@기계`·방 제목.
+/// `%N`·`--address` 는 그대로 둔다. 하나만 맞아야 보낸다 — 둘 이상이면 후보를 보여 주고 멈춘다.
+fn resolve_tell_target(args: &mut Vec<String>) -> Result<()> {
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "--id" => i += 2,
+            "--stdin" | "--force" => i += 1,
+            "--address" | "--" => return Ok(()),
+            a if a.starts_with('%') && !a.contains('@') => return Ok(()),
+            a if a.starts_with("--") => return Err(anyhow!("모르는 옵션: {a}")),
+            _ => break,
+        }
+    }
+    let Some(target) = args.get(i).cloned() else { return Ok(()) };
+    let socket_path = resolve_socket_path()?;
+    let snapshot = roundtrip(&socket_path, &Request {
+        id: json!(format!("cli-{}", std::process::id())),
+        method: "collab.snapshot".into(),
+        params: json!({"scope": "all"}),
+    })?;
+    let panes = snapshot.result.as_ref().and_then(|r| r.get("panes")).and_then(|p| p.as_array()).cloned()
+        .ok_or_else(|| anyhow!("보드를 못 읽었어요 — 앱이 떠 있는지 확인"))?;
+    let (name, machine_wanted) = target.rsplit_once('@').map(|(n, m)| (n, Some(m))).unwrap_or((target.as_str(), None));
+    let text = |p: &Value, k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let hits: Vec<&Value> = panes.iter().filter(|p| {
+        let machine = text(p, "machine_label");
+        let surface = p.get("address").and_then(|a| a.get("surface_id")).and_then(|v| v.as_str()).unwrap_or("");
+        let name_ok = name == text(p, "character") || name == text(p, "title") || name == surface;
+        let machine_ok = machine_wanted.is_none_or(|m| m == machine || machine.starts_with(m));
+        name_ok && machine_ok && p.get("address").and_then(|a| a.get("session_id")).is_some()
+    }).collect();
+    let describe = |p: &Value| format!("{}@{} · {} · {}", text(p, "character"), text(p, "machine_label"), text(p, "room_label"), text(p, "status"));
+    match hits.as_slice() {
+        [] => Err(anyhow!("「{target}」 이(가) 보드에 없어요 — `kasaterm-cli rooms` 로 이름을 확인하세요")),
+        [one] => {
+            let address = one.get("address").cloned().unwrap_or(Value::Null);
+            eprintln!("→ {}", describe(one));
+            args.splice(i..i + 1, ["--address".to_string(), address.to_string()]);
+            Ok(())
+        }
+        many => Err(anyhow!("「{target}」 이(가) 여럿이에요 — 이름@기계 로 골라 주세요:\n{}",
+            many.iter().map(|p| format!("  {}", describe(p))).collect::<Vec<_>>().join("\n"))),
+    }
+}
+
+/// 이 기계에서 보낸 tell 의 ID → 주소. `tell-status ID` 를 주소 없이 치게 해 준다.
+fn receipts_path() -> Option<std::path::PathBuf> {
+    Some(kasa_socket::home_dir()?.join(".config/kasaterm/tell-receipts.json"))
+}
+
+fn load_receipt(id: &str) -> Option<Value> {
+    let path = receipts_path()?;
+    let map: serde_json::Map<String, Value> = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    map.get(id).cloned()
+}
+
+fn save_receipt(id: &str, address: &Value) {
+    let Some(path) = receipts_path() else { return };
+    let mut map: serde_json::Map<String, Value> = std::fs::read_to_string(&path).ok()
+        .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    map.insert(id.to_string(), address.clone());
+    // 영수증은 24시간 뒤 만료된다 — 오래된 것부터 걷어 200개만 둔다(ID 앞이 발행 시각).
+    while map.len() > 200 {
+        let Some(oldest) = map.keys().min().cloned() else { break };
+        map.remove(&oldest);
+    }
+    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+    let _ = std::fs::write(&path, serde_json::to_string(&Value::Object(map)).unwrap_or_default());
 }
 
 fn resolve_socket_path() -> Result<String> {

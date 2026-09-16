@@ -33,10 +33,47 @@ pub struct CollectorConfig {
 
 impl Service {
     fn machines(&self) -> Vec<crate::machines::Machine> {
-        self.configured_machines
-            .clone()
-            .unwrap_or_else(crate::machines::machines)
+        if let Some(fixed) = self.configured_machines.clone() {
+            return fixed;
+        }
+        let mut out = crate::machines::machines();
+        // 직통 길과 나란히 **관문 우회 길**도 세운다 — 기계 id 를 아는 기계마다 하나. 넷버드·
+        // 터널이 죽어도 폴링이 우회로 관측을 잇고, `verified_route` 는 직통이 살아 있는 한
+        // 직통을 고른다(하이브리드, 2026-09-16 지시). id 는 명부 값이거나 지난 폴링이 그
+        // base 에서 본 것(`aliases`).
+        let aliases = self.aliases.lock().map(|a| a.clone()).unwrap_or_default();
+        let mut relays = Vec::new();
+        for m in &out {
+            let Some(id) = m
+                .machine_id
+                .clone()
+                .or_else(|| aliases.get(&m.base).cloned())
+                .filter(|id| !id.is_empty() && *id != self.machine_id && !id.starts_with("unresolved:"))
+            else {
+                continue;
+            };
+            let Some(base) = relay_base(&id) else { break };
+            if out.iter().any(|x| x.base == base) || relays.iter().any(|x: &crate::machines::Machine| x.base == base) {
+                continue;
+            }
+            relays.push(crate::machines::Machine { base, machine_id: Some(id), ..m.clone() });
+        }
+        out.extend(relays);
+        out
     }
+}
+
+/// 관문을 거치는 우회 base — 직통 길이 없을 때의 폴백. 관문의 `/u/<slug>/m/~<id>/…` 가 그
+/// 기계의 업링크로 흘리므로 이 뒤에 `/collab/…` 를 그대로 붙이면 된다. slug 는 이 기계 주인의
+/// 폰 주소(자격)라 토큰이 따로 없다. 관문이 꺼져 있거나 주인 유저가 없으면 None.
+pub fn relay_base(machine_id: &str) -> Option<String> {
+    let gateway = crate::mobile::gateway()?;
+    let slug = crate::mobile::owner()?.slug;
+    Some(format!("{}/u/{slug}/m/~{machine_id}", gateway.trim_end_matches('/')))
+}
+
+pub fn is_relay_base(base: &str) -> bool {
+    base.contains("/u/") && base.contains("/m/~")
 }
 
 fn isolated() -> bool {
@@ -415,15 +452,11 @@ async fn refresh_remotes(service: &Service, client: &reqwest::Client) {
     let machines: Vec<_> = service
         .machines()
         .into_iter()
+        // base 마다 한 번 — 한 기계에 직통·우회 두 길이 있으면 둘 다 물어 어느 쪽이 사는지 안다.
         .filter(|machine| {
             !machine.base.is_empty()
                 && machine.machine_id.as_deref() != Some(&local)
-                && seen.insert(
-                    machine
-                        .machine_id
-                        .clone()
-                        .unwrap_or_else(|| machine.base.clone()),
-                )
+                && seen.insert(machine.base.clone())
         })
         .take(128)
         .collect();
@@ -462,7 +495,19 @@ async fn refresh_remotes(service: &Service, client: &reqwest::Client) {
                     store.fail_source(&previous, &machine.label, "route_identity_changed");
                 }
                 store.resolve_alias(&unresolved_id(&machine.base), &id);
-                if id == local || !resolved.insert(id.clone()) {
+                if id == local {
+                    continue;
+                }
+                if !resolved.insert(id.clone()) {
+                    // 이번 바퀴에 다른 길로 이미 관측했다 — 이쪽이 직통이고 잡힌 길이 우회면
+                    // 길만 직통으로 갈아 끼운다(관측은 한 번이면 된다).
+                    let mut routes = service.routes.lock().unwrap_or_else(|e| e.into_inner());
+                    if !is_relay_base(&machine.base)
+                        && routes.get(&id).is_some_and(|m| is_relay_base(&m.base))
+                    {
+                        machine.machine_id = Some(id.clone());
+                        routes.insert(id, machine);
+                    }
                     continue;
                 }
                 machine.machine_id = Some(id.clone());
@@ -581,7 +626,8 @@ fn verified_route(service: &Service, machine: &str) -> Option<String> {
         })
         .map(|m| m.base.clone())
         .collect();
-    candidates.sort();
+    // 직통이 앞, 우회가 뒤 — 둘 다 살아 있으면 직통.
+    candidates.sort_by_key(|base| (is_relay_base(base), base.clone()));
     candidates.dedup();
     if candidates.contains(&preferred) {
         Some(preferred)
@@ -600,8 +646,9 @@ pub fn inspect(backend: &dyn Backend, params: &Value) -> Result<Value> {
         if params["local_only"] == true {
             bail!("remote inspection must terminate at its source");
         }
-        let base =
-            known_route(machine).context("remote source has no current unambiguous route")?;
+        let base = known_route(machine)
+            .or_else(|| relay_base(machine))
+            .context("remote source has no current unambiguous route")?;
         let mut remote_params = params.clone();
         remote_params["local_only"] = json!(true);
         remote_params["limit"] = json!(limit);
