@@ -66,6 +66,7 @@ status() {
   say "dist 번들   $(mtime dist/kasaterm.app/Contents/MacOS/kasaterm)"
   say "설치본      $(mtime "$HOME/Applications/kasaterm.app/Contents/MacOS/kasaterm")"
   say "설치본 펫   $(mtime "$HOME/Applications/kasaterm.app/Contents/Resources/kasapet")"
+  say "화면 배치(window.json ui) $(python3 -c 'import json;print(json.load(open("'"$HOME"'/.config/kasaterm/window.json")).get("ui","없음"))' 2>/dev/null || echo '읽기 실패')"
   local pid=""; [[ -f "$HOME/.config/kasaterm/pet.pid" ]] && pid="$(tr -dc 0-9 < "$HOME/.config/kasaterm/pet.pid")"
   if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then say "펫 도는 중(pid $pid)"; else say "펫 꺼짐"; fi
   local health; health="$(curl -s --max-time 3 "$(python3 -c 'import json;print(json.load(open("'"$HOME"'/.config/kasaterm/request-journal/service.json"))["base_url"])' 2>/dev/null)/health" 2>/dev/null | head -c 80 || true)"
