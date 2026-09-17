@@ -664,7 +664,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::ValidateTransfer(identity, reply) => {
                 let result = self.validate_transfer_identity(identity).and_then(|_| {
-                    if Self::pane_agent_working(&self.ws.lock().unwrap(), &identity.pane_id) {
+                    if { let ws = self.ws.lock().unwrap(); self.pane_agent_working(&ws, &identity.pane_id) } {
                         anyhow::bail!("세션이 다시 작업을 시작했어요. 이번 이사는 중단했어요");
                     }
                     Ok(())
@@ -7902,9 +7902,7 @@ impl ApplicationHandler<UserEvent> for App {
             // 로그가 「pane_working 이라 펌프한다」고 하는데 실제론 안 걸린다.
             if {
                 let visible = self.visible_pane_ids();
-                self.pane_activity.iter().any(|(id, a)| {
-                    matches!(a.status.as_str(), "working" | "compacting") && visible.contains(id)
-                })
+                self.pane_activity.iter().any(|(id, a)| a.state.is_busy() && visible.contains(id))
             } {
                 why.push("pane_working");
             }
@@ -7929,11 +7927,7 @@ impl ApplicationHandler<UserEvent> for App {
             if !self.window_alert.is_empty() {
                 why.push("window_alert");
             }
-            if self
-                .pane_activity
-                .values()
-                .any(|a| crate::chrome::status_needs_you(&a.status))
-            {
+            if self.pane_activity.values().any(|a| a.state.needs_you()) {
                 why.push("needs_you");
             }
             if !self.md_scroll_anim.is_empty() {
@@ -8008,10 +8002,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let visible = self.visible_pane_ids();
                 self.pane_activity
                     .iter()
-                    .any(|(id, a)| {
-                        matches!(a.status.as_str(), "working" | "compacting")
-                            && visible.contains(id)
-                    })
+                    .any(|(id, a)| a.state.is_busy() && visible.contains(id))
             }
             || !self.pending_capture.is_empty()
             || self.pending_autogit.is_some()
@@ -8027,10 +8018,7 @@ impl ApplicationHandler<UserEvent> for App {
             // 계속 나가야 한다(커서 블링크에 얹혀 있던 시절엔 공짜였다).
             || !self.window_alert.is_empty()
             // 손을 기다리는 pane 의 핑크 깜빡임(사이드바 줄 + pane 테두리)도 같은 이유로.
-            || self
-                .pane_activity
-                .values()
-                .any(|a| crate::chrome::status_needs_you(&a.status))
+            || self.pane_activity.values().any(|a| a.state.needs_you())
             // 노치 스크롤 관성이 목표에 붙을 때까지 프레임을 펌프한다.
             || !self.md_scroll_anim.is_empty()
             // 테마 전환 디졸브가 걷히는 동안.

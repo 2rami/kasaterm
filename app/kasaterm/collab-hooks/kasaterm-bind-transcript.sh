@@ -59,6 +59,14 @@ if [ -z "$has_persona" ]; then
   fi
   [ -n "$persona" ] && printf '%s\n' "$persona"
 fi
+# 턴 경계 — SessionStart 의 `source` 가 compact 면 압축이 끝난 것이고, 그 밖(startup·
+# resume·clear·fork)은 새 세션이라 이 pane 이 쥐고 있던 턴·압축·대기 표식을 전부 비운다.
+# 아래 dedup 조기 종료 **앞**에 둔다 — 같은 기록으로 다시 뜬 세션도 경계는 새로 온 것이다.
+src="$(printf '%s' "$input" | sed -n 's/.*"source"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p' | head -n 1)"
+case "$src" in
+  compact) kasaterm-cli turn compact_end >/dev/null 2>&1 || true ;;
+  *) kasaterm-cli turn reset >/dev/null 2>&1 || true ;;
+esac
 marker="/tmp/kasaterm-bound-${KASATERM_PANE_ID//[^A-Za-z0-9]/_}"
 # bind는 데몬 메모리에만 산다(재시작하면 소실). marker는 /tmp에 영속이라, sock
 # inode를 dedup 키에 섞지 않으면 데몬 재시작 후에도 "이미 bind함"으로 오판해 영영

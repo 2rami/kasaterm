@@ -837,6 +837,7 @@ pub trait Backend: Send + Sync {
         _ctx_tokens: u64,
         _model: &str,
         _effort: &str,
+        _model_label: &str,
     ) -> Result<()> {
         Ok(())
     }
@@ -1029,6 +1030,15 @@ pub trait Backend: Send + Sync {
         _label: &str,
     ) -> Result<()> {
         anyhow::bail!("agent_status unsupported by this backend")
+    }
+    /// 하네스가 알린 **턴 경계** — `UserPromptSubmit`(start) · `Stop`(end) · `PreCompact`
+    /// (compact_start) · `SessionStart`(compact 면 compact_end, 그 밖은 reset) 훅이
+    /// `kasaterm-cli turn` 으로 부른다. pane 상태(일하는 중·압축 중·놀고 있음)의 정본이
+    /// 화면 글자에서 이 신호로 옮겨 온 자리(2026-09-17). `permission_mode` 는 훅 payload 가
+    /// 실어 주는 값(bypassPermissions 등) — 복원 때 화면을 안 읽고 이걸 쓴다.
+    /// Default unsupported.
+    fn turn(&self, _surface_id: &str, _phase: &str, _permission_mode: &str) -> Result<()> {
+        anyhow::bail!("turn unsupported by this backend")
     }
     /// Multi-session (tmux-style tab) state for the session panel. Default
     /// is a single session — backends that don't support sessions just

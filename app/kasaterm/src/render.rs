@@ -1644,10 +1644,10 @@ impl App {
                             .get(&id)
                             .map(|a| a.bg_active)
                             .unwrap_or(false),
-                        compacting: self
-                            .pane_activity
-                            .get(&id)
-                            .is_some_and(|a| a.status == "compacting"),
+                        compacting: matches!(
+                            self.agent_state(&id),
+                            crate::agent_state::AgentState::Compacting
+                        ),
                         compact_pct: self.pane_activity.get(&id).and_then(|a| a.compact_pct),
                         codex_status,
                         color: pane.color,
@@ -7906,8 +7906,8 @@ impl App {
                         let (st, pct) = self
                             .pane_activity
                             .get(fid)
-                            .map_or(("", None), |a| (a.status.as_str(), a.compact_pct));
-                        if st == "compacting" {
+                            .map_or((crate::agent_state::AgentState::Unknown, None), |a| (a.state.clone(), a.compact_pct));
+                        if matches!(st, crate::agent_state::AgentState::Compacting) {
                             if let Some(p) = pct {
                                 // 화면의 `▰▰▱ N%` 그대로 — 진짜 진행률(2026-08-13
                                 // 지시)을 칸 게이지 + 숫자로(2026-08-15 지시, 헤더
@@ -7932,7 +7932,7 @@ impl App {
                                 g.rect(*fx, *fy, *fw, BAR_H, theme::with_alpha(accent, 0x2e));
                                 g.compact_bar(*fx, *fy, *fw, BAR_H, accent);
                             }
-                        } else if st == "working" {
+                        } else if matches!(st, crate::agent_state::AgentState::Working) {
                             g.rect(*fx, *fy, *fw, BAR_H, theme::with_alpha(accent, 0x2e));
                             let seg = (fw * 0.32).clamp(36.0, 160.0);
                             let span = fw + seg;
@@ -7958,7 +7958,7 @@ impl App {
                     if self
                         .pane_activity
                         .get(fid)
-                        .is_some_and(|a| crate::chrome::status_needs_you(&a.status))
+                        .is_some_and(|a| a.state.needs_you())
                     {
                         let mut col = theme::attention();
                         col[3] = (90.0 + 165.0 * breathe(anim_phase, 1.1)) as u8;
@@ -13603,9 +13603,9 @@ impl App {
         // 아무리 바빠도 화면에 없다. 좁히지 않으면 claude 를 여러 방에 띄운 것만으로
         // 상시 애니메이션 모드가 되어, 유휴여도 30fps 로 9~11ms 프레임을 계속 갈았다.
         // (사이드바에 뜨는 다른 방의 상태 표시는 정적이고, 깜빡이는 것들은
-        // `window_alert`·`status_needs_you` 가 따로 펌프를 건다 — 여기서 좁혀도 안 멈춘다.)
+        // `window_alert`·`needs_you` 가 따로 펌프를 건다 — 여기서 좁혀도 안 멈춘다.)
         let bar_animating = self.pane_activity.iter().any(|(id, a)| {
-            a.status != "idle" && !a.status.is_empty() && visible_panes.contains(id)
+            (a.state.is_busy() || a.state.needs_you()) && visible_panes.contains(id)
         });
         // Split "needs a full chrome+grid rebuild" from "only the working-bar
         // sweep advances". A bar-only frame redraws cached chrome with a fresh

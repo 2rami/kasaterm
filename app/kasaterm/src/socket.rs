@@ -236,6 +236,8 @@ pub struct PtyBackend {
     /// 진행 표시(GUI)다. 이게 있기 전엔 transcript 꼬리에서 런치·회수를 짝지었는데,
     /// 꼬리가 64KB 라 세션이 커지면 런치가 밀려나 **오래 걸리는 작업일수록 안 보였다**.
     hook_activity: Arc<Mutex<HashMap<String, crate::state::HookActivity>>>,
+    /// pane 상태의 정본(훅 턴 경계·압축·attention 시각·기록·명부). GUI 와 Arc 공유.
+    hub: Arc<crate::agent_state::StateHub>,
     /// hook-free 발견 스로틀 — `discover_unbound` 의 ps/lsof 비용을 board 폴(1/s)
     /// 마다 다 치르지 않도록 2s 에 1회로 제한한 마지막 실행 시각.
     last_discover: Arc<Mutex<Option<std::time::Instant>>>,
@@ -269,6 +271,9 @@ pub struct PtyBackend {
     /// 나 화면 표시명이라 사람이 읽기엔 낫지만 `[1m]` 이 없어, 복원 명령에 되먹이면 1M
     /// 세션이 200k 로 강등된다. 여기 담기는 `model.id` 만이 CLI 에 그대로 돌려줄 수 있다.
     reported_agent_cfg: Arc<Mutex<HashMap<String, (String, String)>>>,
+    /// surface_id → statusline 이 보고한 모델 **표시명**("Opus 4.8 1M"). 보드의 model 칸.
+    /// 화면에서 읽던 시절엔 좁은 pane 에서 "(1M context)" 꼬리가 잘렸다.
+    reported_model_label: Mutex<HashMap<String, String>>,
     /// surface_id → {cwd, git badge}, filled by the GUI each frame (shared Arc).
     /// `window_layout` reads it to stamp cwd/branch/diff onto each `PaneRect` so
     /// the BA GUI can draw a Warp-style bar without this thread shelling out to
@@ -531,11 +536,14 @@ impl PtyBackend {
         hook_activity: Arc<Mutex<HashMap<String, crate::state::HookActivity>>>,
         pane_status_pub: Arc<Mutex<HashMap<String, PaneStatus>>>,
         bg_agents: Arc<Mutex<HashMap<String, Option<String>>>>,
+        hub: Arc<crate::agent_state::StateHub>,
     ) -> Self {
         Self {
             proxy,
             ws,
-            bound: Arc::new(Mutex::new(HashMap::new())),
+            // 결속 맵은 허브 것을 함께 쓴다 — 판정이 어느 기록을 읽을지 여기서 안다.
+            bound: hub.bound.clone(),
+            hub,
             tell_binding_epochs: Mutex::new(HashMap::new()),
             spawned_by: Arc::new(Mutex::new(HashMap::new())),
             attention,
@@ -549,6 +557,7 @@ impl PtyBackend {
             last_ctx: Arc::new(Mutex::new(HashMap::new())),
             codex_rollouts: Arc::new(Mutex::new(HashMap::new())),
             reported_agent_cfg: Arc::new(Mutex::new(HashMap::new())),
+            reported_model_label: Mutex::new(HashMap::new()),
             pane_status_pub,
             bg_agents,
             nudged: Arc::new(Mutex::new(HashMap::new())),
@@ -947,8 +956,18 @@ impl Backend for PtyBackend {
     }
 
     fn compacting_panes(&self) -> Vec<(String, Option<u8>)> {
+        // 압축 중인지는 허브(PreCompact 훅)가 정하고, 퍼센트는 GUI 가 화면에서 읽어
+        // `ws.compacting` 에 장식으로 얹어 둔 것이다.
+        self.hub.refresh();
         let ws = self.ws.lock().unwrap();
-        ws.compacting.iter().map(|(k, v)| (k.clone(), *v)).collect()
+        kasa_pty::live_sessions()
+            .into_iter()
+            .filter(|id| matches!(self.hub.state(id), crate::agent_state::AgentState::Compacting))
+            .map(|id| {
+                let pct = ws.compacting.get(&id).copied().flatten();
+                (id, pct)
+            })
+            .collect()
     }
 
     fn pane_cwds(&self) -> Vec<(String, String)> {
@@ -1436,11 +1455,18 @@ impl Backend for PtyBackend {
         ctx_tokens: u64,
         model: &str,
         effort: &str,
+        model_label: &str,
     ) -> Result<()> {
         self.reported_cwd
             .lock()
             .unwrap()
             .insert(surface_id.to_string(), cwd.to_string());
+        if !model_label.is_empty() {
+            self.reported_model_label
+                .lock()
+                .unwrap()
+                .insert(surface_id.to_string(), model_label.to_string());
+        }
         // 둘 중 **하나라도** 실려 오면 채택한다. 빈 값은 "미보고"라 종전 값을 안 덮는다 —
         // effort 는 아예 안 정한 세션이 흔해서, 빈 effort 때문에 model 까지 버리면 안 된다.
         if !model.is_empty() || !effort.is_empty() {
@@ -2865,17 +2891,18 @@ impl Backend for PtyBackend {
         let table = kasa_pty::process_table_shared();
         let (rooms,characters,windows,screens) = {
             let ws = self.ws.lock().unwrap();
-            let screens: HashMap<String,(Option<String>,bool)> = live.iter().filter_map(|id| {
+            let screens: HashMap<String,Option<String>> = live.iter().filter_map(|id| {
                 let outer = ws.outer_for_pty(id).unwrap_or_else(||id.clone());
                 let pane = ws.panes.get(&outer)?.tab_for_pid(id);
-                Some((id.clone(),(pane.title.clone(),screen_shows_working(&pane.visible_text(14)))))
+                Some((id.clone(),pane.title.clone()))
             }).collect();
             (ws.pane_room.clone(),ws.pane_character.clone(),ws.pane_window.clone(),screens)
         };
         let labels = self.sessions().labels;
-        let attention: HashSet<String> = self.attention.lock().unwrap().keys().cloned().collect();
-        let attention_kind: HashMap<String,String> = self.attention.lock().unwrap().iter()
-            .map(|(id,flag)|(id.clone(),flag.kind.clone())).collect();
+        // 상태는 허브 판정 하나 — 훅 턴 경계·기록 턴 경계·attention·명부·박동을 모은 것이고,
+        // GUI 의 헤더 바·미니맵이 읽는 값과 같다. attention 잠금을 쥔 채 부르면 판정이
+        // 그 표식을 못 본다(try_lock) — 여기서는 아무 잠금도 없다.
+        self.hub.refresh();
         let mut panes = Vec::new();
         let mut observed_bindings = Vec::new();
         for id in live {
@@ -2887,24 +2914,21 @@ impl Backend for PtyBackend {
             let harness = managed.as_ref().and_then(|pty|pty.shell_pid())
                 .and_then(|pid|kasa_pty::agent_for_shell(&table,pid)).map(|kind|kind.as_str().to_owned());
             let supported = harness.as_deref().is_some_and(|h|matches!(h,"claude"|"codex"|"agy"));
-            let evidence = binding.as_ref().filter(|_|supported).map(|path| {
+            let meta = binding.as_ref().filter(|_|supported).map(|path| {
                 let (tail,idle) = read_tail(path,128*1024);
-                let turn = crate::transcript::turn_state_from_tail(&tail);
-                let metadata = snapshot_from_tail(&id,&tail,idle);
-                (metadata,!tail.trim().is_empty(),turn,crate::state::transcript_stale(path))
-            });
-            let turn = evidence.as_ref().and_then(|(_,_,turn,_)|*turn);
-            let stale = evidence.as_ref().is_some_and(|(_,_,_,stale)|*stale);
-            let generating = screens.get(&id).is_some_and(|(_,working)|*working);
-            // 60초 방치(idle_prompt) 표식은 새 턴이 열리면 낡은 것이다 — 기록이 열렸다고
-            // 하는데 「기다림」으로 남기지 않는다. 승인·질문은 턴이 열린 채 사람을 기다리는
-            // 것이라 그대로 앞선다.
-            let waiting = attention.contains(&id) && !(attention_kind.get(&id).is_some_and(|k|k=="idle")
-                && turn == Some(crate::transcript::TurnState::Working));
-            let present = evidence.as_ref().is_some_and(|(_,present,_,_)|*present);
-            let (status,reason) = collab_status(kasa_mcp::remote::is_remote_pane(&id), supported, waiting, turn, stale, generating, present);
-            let meta = evidence.map(|(row,_,_,_)|row).unwrap_or_default();
-            let title = screens.get(&id).and_then(|(title,_)|title.as_deref())
+                snapshot_from_tail(&id,&tail,idle)
+            }).unwrap_or_default();
+            let (status,reason): (&'static str,&'static str) = if kasa_mcp::remote::is_remote_pane(&id) {
+                ("unknown","remote mirror; observe agent on its source machine")
+            } else if !supported {
+                ("unknown","live place; supported agent activity unavailable")
+            } else {
+                match self.hub.resolved(&id) {
+                    Some(r) => (r.state.board_word(),r.reason),
+                    None => ("unknown","supported agent observed; state not resolved yet"),
+                }
+            };
+            let title = screens.get(&id).and_then(|title|title.as_deref())
                 .map(crate::strip_activity_prefix).filter(|s|!s.is_empty()).unwrap_or(&meta.title);
             let window = windows.get(&id).copied();
             let detached = window.is_none();
@@ -2915,6 +2939,11 @@ impl Backend for PtyBackend {
                 "request":meta.last_prompt,"progress":if meta.last_reply.is_empty() {meta.intent} else {meta.last_reply},
                 "status":status,"status_reason":reason,"detached":detached,
                 "place_state":if detached {"detached"} else {"visible"}});
+            // 기다리는 이유·종류 — 다른 기기의 학생이 「무엇을 기다리나」를 보드만 보고 안다.
+            if let Some(crate::agent_state::AgentState::Waiting { kind, reason }) = self.hub.resolved(&id).map(|r| r.state) {
+                row["attention_kind"] = json!(kind.as_str());
+                if !reason.is_empty() { row["waiting_for"] = json!(reason); }
+            }
             let mut done = self.done_reports.lock().unwrap();
             if done.get(&id).is_some_and(|report|report.idle_seen && status == "working") { done.remove(&id); }
             if let Some(report) = done.get_mut(&id) {
@@ -2957,27 +2986,16 @@ impl Backend for PtyBackend {
         // agents/attach 뷰 pane 은 discovery 대신 여기서 세션을 역추적해 (재)바인딩 —
         // 피커에서 세션을 갈아타면 bound 가 낡아 unbound 게이트로는 못 잡는다.
         self.rebind_agents_panes(&live);
-        let agents = self.agents_status();
-        // claude 가 실제 생성 중이면 화면 푸터에 스피너+"esc to interrupt" 가 뜬다.
-        // mtime(60s) 휴리스틱이 ESC/완료 후에도 working 으로 stuck 이라(사용자), 이 화면
-        // 신호를 mtime-fallback(아래 None 분기)의 진짜 working 기준으로 쓴다.
-        let generating: HashSet<String> = {
-            let ws = self.ws.lock().unwrap();
-            live.iter()
-                .filter(|sid| {
-                    ws.panes
-                        .get(sid.as_str())
-                        .map(|p| screen_shows_working(&p.visible_text(14)))
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect()
-        };
+        // 명부 캐시를 먼저 갱신한다 — 아래 허브 판정이 `agents_status_cached` 로 읽는다.
+        let _ = self.agents_status();
+        // 상태는 허브 판정 하나 — 훅 턴 경계·기록 턴 경계·attention·명부·박동을 모은 것이고,
+        // GUI 의 헤더 바·미니맵·펫이 읽는 값과 같다. attention·bound 잠금을 쥔 채 부르면
+        // 판정이 그 재료를 못 본다(try_lock) — 아무 잠금도 없는 여기서 한 번.
+        self.hub.refresh();
         // 사본으로 푼다 — 이 아래는 pane 마다 512KB 기록을 읽고 프로세스 환경을 뒤지는
         // 긴 길이라, 잠금을 쥔 채 가면 GUI 의 짧은 조회까지 그만큼 멈춘다(2026-09-16
         // 「뚝뚝 끊김」의 원인).
         let bound: HashMap<String, PathBuf> = self.bound.lock().unwrap().clone();
-        let mut attention = self.attention.lock().unwrap();
         // 방별 분리(사용자): 각 pane 의 character 는 *그 pane 의 방(room)* collab dir
         // 에서 읽는다 — 같은 cwd 라도 방마다 캐릭터가 다르다. pane_room
         // 없으면(기본 방) 기존 cwd-slug. ws(공유)에서 복제해 아래 map 클로저서 쓴다.
@@ -3126,13 +3144,7 @@ impl Backend for PtyBackend {
                     row.rate_resets_at = snapshot.rate_resets_at;
                     row.plan_type = snapshot.plan_type;
                 }
-                // Prefer claude's official status when it reports this session
-                // (matched by transcript filename stem == sessionId). The
-                // mtime heuristic above is only a fallback for sessions claude
-                // doesn't list. `effectively_idle` then drives the attention
-                // (permission-prompt) override below.
                 let stem = path.file_stem().and_then(|s| s.to_str());
-                let official = stem.and_then(|s| agents.get(s)).map(|s| s.as_str());
                 // 어느 하네스인지 — codex 는 인박스가 없어 agent/team 칸이 영영 비고,
                 // 그것만으론 "트리플 없이 뜬 claude" 와 구별이 안 된다. 종류를 밝혀야
                 // 오케스트레이터가 SendMessage 대신 tell 을 고른다. reach 판정이 이
@@ -3153,52 +3165,17 @@ impl Backend for PtyBackend {
                     .as_str()
                     .to_string();
                 row.peer_name = peer.map(|p| p.name.clone()).filter(|n| !n.is_empty());
-                let effectively_idle = match official {
-                    Some("busy") => {
-                        row.status = "working".into();
-                        false
-                    }
-                    Some("waiting") => {
-                        row.status = "waiting".into();
-                        false
-                    }
-                    Some(_) => {
-                        // official 이 idle 이어도 화면에 생성 스피너("esc to interrupt")가
-                        // 떠 있으면 working — agents --json 은 2s 캐시+데몬 보고라 TUI 보다
-                        // 늦어, Generating 중인데 board 가 idle 로 새던 실측(프라나) 교정.
-                        if generating.contains(sid.as_str()) {
-                            row.status = "working".into();
-                            false
-                        } else {
-                            row.status = "idle".into();
-                            true
+                // 상태·기다리는 이유·종류는 허브 판정에서 — 명부(`official`)·attention 표식의
+                // 우선순위와 되살아남 규칙은 전부 `agent_state::resolve` 한 곳에 있다.
+                match self.hub.resolved(sid) {
+                    Some(r) => {
+                        row.status = r.state.board_word().into();
+                        if let crate::agent_state::AgentState::Waiting { kind, reason } = &r.state {
+                            row.waiting_for = (!reason.is_empty()).then(|| reason.clone());
+                            row.attention_kind = Some(kind.as_str().to_string());
                         }
                     }
-                    None => {
-                        // mtime 만 보면 ESC 취소·완료 후 60s 간 working 으로 stuck →
-                        // 화면에 생성중 스피너가 있을 때만 working, 없으면 idle 로 교정
-                        // (사용자: ESC 눌러서 취소해도 '생각 중' 으로 남는 문제).
-                        if generating.contains(sid.as_str()) {
-                            row.status = "working".into();
-                            false
-                        } else {
-                            row.status = "idle".into();
-                            true
-                        }
-                    }
-                };
-                // A claude blocked on a permission/input prompt writes nothing
-                // and reports idle, so its Notification hook flag is the only
-                // `waiting` signal. Apply it only when otherwise idle; drop the
-                // stale flag once the pane is active again.
-                if effectively_idle {
-                    if let Some(flag) = attention.get(sid) {
-                        row.status = "waiting".to_string();
-                        row.waiting_for = (!flag.reason.is_empty()).then(|| flag.reason.clone());
-                        row.attention_kind = (!flag.kind.is_empty()).then(|| flag.kind.clone());
-                    }
-                } else {
-                    attention.remove(sid);
+                    None => row.status = "idle".into(),
                 }
                 // idle 로 들어온 지 얼마나 됐나 — 「방금 끝냈다」와 「한참 쉼」을 폰·알림이
                 // 가른다. 다른 상태로 나가면 잊는다.
@@ -3394,8 +3371,9 @@ impl Backend for PtyBackend {
                 row
             })
             .collect();
-        // Drop flags for panes that have closed since they were set.
-        attention.retain(|sid, _| live.contains(sid.as_str()));
+        // Drop flags for panes that have closed since they were set. 잠금은 여기 한 줄만 —
+        // 위 허브 판정(`refresh`)이 try_lock 으로 이 맵을 보므로 길게 쥐면 표식을 놓친다.
+        self.attention.lock().unwrap().retain(|sid, _| live.contains(sid.as_str()));
         self.done_reports
             .lock()
             .unwrap()
@@ -3414,18 +3392,12 @@ impl Backend for PtyBackend {
         // 화면 스냅샷은 in-memory(visible_text)라 싸다 — 락 짧게.
         // 화면 스냅샷 + OSC title 을 한 락에서. title 은 board row 라벨을 터미널 탭
         // 렌더(render.rs)와 같은 소스(OSC title)로 통일 — 양쪽 "미도리 · 작업명".
-        let (screens, osc_titles, pinned): (
-            HashMap<String, String>,
-            HashMap<String, String>,
-            std::collections::HashSet<String>,
-        ) = {
+        let (osc_titles, pinned): (HashMap<String, String>, std::collections::HashSet<String>) = {
             let ws = self.ws.lock().unwrap();
-            let mut screens = HashMap::new();
             let mut osc_titles = HashMap::new();
             let mut pinned = std::collections::HashSet::new();
             for r in &board {
                 if let Some(p) = ws.panes.get(&r.surface_id) {
-                    screens.insert(r.surface_id.clone(), p.visible_text(8));
                     if let Some(t) = p.title.clone().filter(|t| !t.is_empty()) {
                         osc_titles.insert(r.surface_id.clone(), t);
                     }
@@ -3434,7 +3406,7 @@ impl Backend for PtyBackend {
                     }
                 }
             }
-            (screens, osc_titles, pinned)
+            (osc_titles, pinned)
         };
         // claude saved default effort(settings.json) — resume 직후 effort 카드 폴백(사용자). 작은 파일
         // 1회 읽어 모든 행에 동일 적용(글로벌 설정이라 pane 무관).
@@ -3467,12 +3439,12 @@ impl Backend for PtyBackend {
             if let Some(vc) = self.reported_cwd.lock().unwrap().get(&row.surface_id) {
                 row.view_cwd = vc.clone();
             }
-            if let Some(screen) = screens.get(&row.surface_id) {
-                // 모델명만 상태바에서 — "Opus 4.8 (1M context)" 처럼 1M 변형까지 정확.
-                // 컨텍스트 %는 상태바를 안 쓴다: 터미널이 좁아 statusline 이 잘리면 % 가 화면 밖이라
-                // 0 으로 떨어진다(사용자: 화면파싱 말고 정확 추적). transcript usage 만 정확 소스.
-                if let Some(m) = parse_status_model(screen) {
-                    row.model = m;
+            // 모델 표시명은 statusline 이 `report-cwd` 로 보고한 것(`model_label`) — 화면에서
+            // 읽던 시절엔 좁은 pane 에서 "(1M context)" 꼬리가 잘려 1M 세션이 200k 로 보였다.
+            // 없으면 기록의 model id 그대로. 컨텍스트 %도 상태바를 안 쓴다(transcript usage).
+            if let Some(m) = self.reported_model_label.lock().unwrap().get(&row.surface_id) {
+                if !m.is_empty() {
+                    row.model = m.clone();
                 }
             }
             // 컨텍스트 창 — statusLine 이 보고한 하네스 정본이 최우선. transcript 의 model
@@ -3561,6 +3533,9 @@ impl Backend for PtyBackend {
         // attention flag so the board drops back to idle even if the resume
         // didn't write enough transcript to flip `idle` first.
         self.attention.lock().unwrap().remove(surface_id);
+        // Stop 훅의 drain 이 부른다 — 턴이 닫혔다는 정본 신호. 기록이 닫는 줄을 아직 못
+        // 썼어도 여기서 닫힌다.
+        self.hub.turn(surface_id, "end", None);
         // Hand off to the GUI thread — the desktop alert (objc/osascript) and
         // any pane/sidebar flash both need App state we can't touch here.
         let _ = self.proxy.send_event(UserEvent::Notify {
@@ -3648,6 +3623,7 @@ impl Backend for PtyBackend {
             crate::stream::AttentionFlag {
                 reason: reason.to_string(),
                 kind: kind.to_string(),
+                at: Some(std::time::Instant::now()),
             },
         );
         let _ = self.proxy.send_event(UserEvent::Attention {
@@ -3734,6 +3710,17 @@ impl Backend for PtyBackend {
         entry.apply(phase, kind, key, label);
         if entry.is_empty() {
             map.remove(surface_id);
+        }
+        drop(map);
+        // 도구 훅이 왔다 = 하네스가 살아 움직인다. 열린 턴의 staleness 시계를 되돌린다.
+        self.hub.beat(surface_id);
+        Ok(())
+    }
+
+    fn turn(&self, surface_id: &str, phase: &str, permission_mode: &str) -> Result<()> {
+        self.hub.turn(surface_id, phase, (!permission_mode.is_empty()).then_some(permission_mode));
+        if phase == "reset" {
+            self.hook_activity.lock().unwrap().remove(surface_id);
         }
         Ok(())
     }
@@ -3858,109 +3845,6 @@ pub(crate) fn key_to_bytes(key: &str) -> Vec<u8> {
 /// is the last activity time; no need to parse ISO timestamps). The leading
 /// (possibly mid-line) fragment of a tail read just fails to parse in
 /// `snapshot_from_tail`, so it's harmless. Any IO error → empty + idle.
-/// claude 가 실제로 생성 중이면 라이브 푸터에 "✳ Verbing… (12s · esc to interrupt)"
-/// 가 뜬다. `rows_show_working`(input.rs)의 문자열판 — visible_text 의 마지막 비공백
-/// 행들을 본다. transcript mtime(60s) 휴리스틱은 ESC 취소·완료 후에도 working 으로
-/// stuck 이라(사용자: ESC 눌러도 생각 중), 이 화면 신호를 mtime-fallback 의 진짜
-/// working 기준으로 쓴다. 완료 요약("✻ Churned for 42s")은 별은 있어도 말줄임표가
-/// 없어 제외된다.
-/// 보드 한 줄의 상태 판정. 하네스가 스스로 적은 턴 경계가 화면 판독보다 앞선다 — 화면은
-/// 하네스 UI 가 바뀔 때마다 틀렸다(gpt-6-astra 의 장식 점자로 노는 pane 이 영영 working,
-/// 2026-09-16). 화면은 기록이 없는 pane 의 폴백으로만 남는다. 다만 열린 턴이라도 기록이
-/// `TURN_STALE` 넘게 조용하고 화면에 생성 신호가 없으면 닫는 줄을 못 남긴 턴이다 — 그때는
-/// idle 로 내린다(2026-09-17 시로코). 순수 함수인 것은 시험하려고.
-fn collab_status(
-    remote: bool,
-    supported: bool,
-    waiting: bool,
-    turn: Option<crate::transcript::TurnState>,
-    stale: bool,
-    generating: bool,
-    present: bool,
-) -> (&'static str, &'static str) {
-    if remote {
-        ("unknown", "remote mirror; observe agent on its source machine")
-    } else if !supported {
-        ("unknown", "live place; supported agent activity unavailable")
-    } else if waiting {
-        ("waiting", "pane attention signal observed")
-    } else if let Some(turn) = turn {
-        match turn {
-            crate::transcript::TurnState::Working if stale && !generating => {
-                ("idle", "transcript turn open but stale; no terminal activity")
-            }
-            crate::transcript::TurnState::Working => ("working", "transcript turn open"),
-            crate::transcript::TurnState::Idle => ("idle", "transcript turn closed"),
-        }
-    } else if generating {
-        ("working", "terminal activity observed")
-    } else if present {
-        ("idle", "no current terminal generation signal; transcript available")
-    } else {
-        ("unknown", "supported agent observed; transcript activity unavailable")
-    }
-}
-
-#[cfg(test)]
-mod collab_status_tests {
-    use super::collab_status;
-    use crate::transcript::TurnState::{Idle, Working};
-
-    /// 열린 턴은 일하는 중이다 — 기록이 살아 있거나 화면에 생성 신호가 있는 한.
-    #[test]
-    fn an_open_turn_is_working_while_fresh_or_generating() {
-        assert_eq!(collab_status(false, true, false, Some(Working), false, false, true).0, "working");
-        assert_eq!(collab_status(false, true, false, Some(Working), true, true, true).0, "working");
-    }
-
-    /// 기록이 한참 조용하고 화면도 조용하면 닫는 줄을 못 남긴 턴이다 — idle.
-    #[test]
-    fn a_stale_open_turn_with_a_quiet_screen_is_idle() {
-        let (status, reason) = collab_status(false, true, false, Some(Working), true, false, true);
-        assert_eq!(status, "idle");
-        assert!(reason.contains("stale"), "{reason}");
-    }
-
-    /// 승인 대기·닫힌 턴·거울·미지원은 종전대로.
-    #[test]
-    fn other_rules_are_unchanged() {
-        assert_eq!(collab_status(false, true, true, Some(Working), true, false, true).0, "waiting");
-        assert_eq!(collab_status(false, true, false, Some(Idle), false, true, true).0, "idle");
-        assert_eq!(collab_status(true, true, false, Some(Working), false, true, true).0, "unknown");
-        assert_eq!(collab_status(false, false, false, None, false, true, true).0, "unknown");
-        assert_eq!(collab_status(false, true, false, None, false, true, false).0, "working");
-        assert_eq!(collab_status(false, true, false, None, false, false, true).0, "idle");
-    }
-}
-
-fn screen_shows_working(screen: &str) -> bool {
-    screen.lines().rev().take(10).any(|line| {
-        if line.contains("esc to interrupt") {
-            return true;
-        }
-        // 윈도우 claude 는 이 자리에 ASCII `*` 를 쓴다 — `is_spinner_head` 참고.
-        // 여기서 빠뜨리면 mtime-fallback 의 working 판정이 윈도우에서만 죽는다.
-        let has_star = line.chars().any(crate::screenread::is_spinner_head);
-        if has_star && line.contains('…') {
-            return true;
-        }
-        // 점자는 **행 머리에 하나뿐이고 뒤에 말이 올 때만** 스피너다(`spinner_row_col`
-        // 과 같은 자). 점자가 있기만 하면 working 으로 치던 동안, codex 의 Astra 효과가
-        // 입력창 둘레에 흩뿌리는 점 때문에 노는 pane 이 보드에서 영영 working 이었다
-        // (gpt-6-astra, 2026-09-16 지적).
-        let trimmed = line.trim_start();
-        let mut chars = trimmed.chars();
-        let Some(head) = chars.next() else {
-            return false;
-        };
-        if !crate::screenread::is_particle(head) {
-            return false;
-        }
-        let rest = chars.as_str();
-        !rest.chars().any(crate::screenread::is_particle)
-            && rest.chars().any(char::is_alphanumeric)
-    })
-}
 
 pub(crate) fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool) {
     use std::io::{Read, Seek, SeekFrom};
@@ -7546,25 +7430,6 @@ fn recent_jsonls(cwd: &std::path::Path, within: std::time::Duration) -> Vec<std:
         .collect()
 }
 
-/// claude TUI 상태바 첫 칸의 모델 표시명. 예 "Opus 4.8 (1M context)" / "Sonnet 4.6".
-/// transcript 의 model id("claude-opus-4-8")로는 1M context 변형을 구분 못 해(둘 다
-/// 같은 id) — 상태바가 유일하게 "(1M context)" 까지 보여준다(사용자 지적). 선두 글리프/
-/// 공백 뒤 첫 영문자부터 첫 ┃ 까지.
-fn parse_status_model(screen: &str) -> Option<String> {
-    for line in screen.lines() {
-        if !line.contains('┃') {
-            continue;
-        }
-        let first = line.split('┃').next()?;
-        let start = first.find(|c: char| c.is_ascii_alphabetic())?;
-        let model = first[start..].trim();
-        if !model.is_empty() && model.len() < 60 {
-            return Some(model.to_string());
-        }
-    }
-    None
-}
-
 /// claude 가 cwd 를 projects 폴더 이름으로 굳힐 때 쓰는 규칙 — `/` 와 `.` 이 `-`.
 pub(crate) fn project_slug(cwd: &std::path::Path) -> String {
     cwd.to_string_lossy().replace(['/', '.'], "-")
@@ -7919,28 +7784,6 @@ mod agents_view_tests {
         assert_eq!(title_session_name("  tmuxify-58 "), "tmuxify-58");
         // 전부 글리프면 빈 문자열(매칭 스킵 신호).
         assert_eq!(title_session_name("⠐⠑ "), "");
-    }
-
-    #[test]
-    fn astra_particle_screen_is_not_working() {
-        // gpt-6-astra 실측 화면(2026-09-16): 노는 codex 인데 입력창 둘레에 점자가
-        // 흩뿌려진다. 점자가 있기만 하면 working 으로 치던 동안 보드가 그 pane 을
-        // 영영 working 으로 보고했다.
-        let idle = "\
-• Ran git status --short
-  └ (no output)
-
-• 선생님, 지침 이름을 바꿨어요.
-
-    ⠈                    ⢀  ⠈                      ⠐     ⠐  ⠄
-› Ask Codex to do anything   ⠈                     ⠄       ⢀
-      ⠠⢀                            ⠠                ⡀⠄   ⡀
-  gpt-6-astra xhigh · main · kasaterm · Context 6% used";
-        assert!(!screen_shows_working(idle), "별밭을 working 으로 읽었다");
-
-        // claude 의 점자 스피너는 그대로 잡혀야 한다 — 점 하나 뒤에 말이 온다.
-        assert!(screen_shows_working("⠋ Computing… (3s · ↓ 1.2k tokens)"));
-        assert!(screen_shows_working("✻ Cerebrating… (12s · esc to interrupt)"));
     }
 }
 

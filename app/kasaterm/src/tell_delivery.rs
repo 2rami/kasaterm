@@ -219,6 +219,9 @@ impl App {
         for (index,row) in &screen.dirty {
             if let Some(target) = cells.get_mut(*index as usize) { *target = row.clone(); }
         }
+        // 사람 차례(승인·질문)면 글을 안 넣는다 — 판정이 정본이고, 아래 화면 검사는 지금
+        // 커서 아래에 승인 위젯이 그려져 있나 보는 기계적 보호막이다(배경 탭 포함).
+        if self.collab.hub.state(&record.address.surface_id).needs_you() { return false; }
         if crate::input::rows_show_approval_prompt(&cells).is_some() { return false; }
         !empty || (!pty.input_draft_present() && pty.input_quiet_for(Duration::from_millis(300))
             && prompt_empty_at(&cells,screen.cursor_row as usize,screen.cursor_col as usize,harness))

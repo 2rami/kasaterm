@@ -410,17 +410,9 @@ impl App {
         self.pane_ultracode.contains(id).hash(&mut hash);
         self.turn_done_panes.contains(id).hash(&mut hash);
         self.notify_flash_factor(id).is_some().hash(&mut hash);
-        self.spinner_probe
-            .get(id)
-            .map(|(_, _, confirmed, _)| *confirmed)
-            .hash(&mut hash);
+        format!("{:?}", self.agent_state(id)).hash(&mut hash);
         if let Some(session) = self.pty.get(id) {
             format!("{:?}", session.active_agent()).hash(&mut hash);
-            session
-                .last_submit()
-                .is_some_and(|at| at.elapsed() < Self::SUBMIT_TRUST)
-                .hash(&mut hash);
-            session.output_heartbeat_fresh().hash(&mut hash);
         }
         hash.finish()
     }
@@ -1584,59 +1576,86 @@ impl App {
                 let n = composed.len();
                 replace_banner_title(&mut composed, 0, 0, 0, n, CODEX_TITLE, name, accent);
             }
-            // working 스피너 자리 → 학생이 제자리 걸음으로 "작업 중".
-            // 스피너 글리프 셀은 스냅샷에서 비우고, 그 자리(스피너 행
-            // 바닥 정렬, 2행 높이)에 walk 도트를 icon 패스로 얹는다.
-            // 스피너가 없고 승인 프롬프트가 떠 있으면 → 질문 행 텍스트
-            // 끝 옆에서 폴짝 바운스("선생님, 승인 기다려요!"). pane
-            // 우상단은 collab 승인 토스트(윈도우 우상단)와 겹친다.
-            // 스피너 walk·승인대기 바운스가 뜨는 동안은 standing 도트를
-            // 숨긴다 — 같은 학생이 화면에 두 명 서 있으면 버그로 보인다.
-            let mut pet_busy = false;
-            // 본판정 + 프로브 확정 후보(턴 시작 첫 ~3초의 괄호 없는
-            // `✢ Transmuting…`). 확정은 refresh_pane_activity 가 글리프
-            // 변화로 세운다 — 여기서는 읽기만.
-            // 프로브 확정 전이라도 이 pane 에 방금 제출(Enter)이 있었으면
-            // 후보를 그 프레임부터 신뢰한다 — refresh 틱(100~300ms)을
-            // 기다리는 동안 claude 원색 스피너가 그대로 보이던 마지막
-            // 깜빡임 조각(사용자 2026-08-20 「치자마자 0.1초동안
-            // 적용안되는거」). runs_claude 게이트 안이라 셸 출력 오탐
-            // 걱정은 없다.
-            let spinner_hit = find_claude_spinner(&composed).or_else(|| {
-                let trusted = self
-                    .spinner_probe
-                    .get(tab_pid.as_str())
-                    .is_some_and(|&(_, _, confirmed, _)| confirmed)
-                    || self
-                        .pty
-                        .get(tab_pid.as_str())
-                        .and_then(|p| p.last_submit())
-                        .is_some_and(|s| s.elapsed() < Self::SUBMIT_TRUST);
-                trusted
-                    .then(|| unconfirmed_spinner_row(&composed))
-                    .flatten()
-                    .map(|(r, c, _)| (r, c))
-                    .or_else(|| {
-                        // 박동 확정 pane 은 글리프 집합 없이 위치만 잡는다
-                        // (lenient_spinner_row 머리말) — 스피너 모양이 또
-                        // 바뀌어도 도트·테마가 함께 죽지 않게.
-                        self.pty
-                            .get(tab_pid.as_str())
-                            .is_some_and(|p| p.output_heartbeat_fresh())
-                            .then(|| lenient_spinner_row(&composed))
-                            .flatten()
-                    })
-            });
-            if let Some((sr, sc)) = spinner_hit {
-                pet_busy = true;
-                // 스피너 행 텍스트("Cerebrating… · esc to interrupt")를
-                // 학생 accent 색으로 — walk 도트 + 텍스트색이 함께
-                // "이 학생이 작업 중"임을 말한다. 여기에 glow shimmer:
-                // accent 위로 밝은 밴드가 좌→우로 흐른다(claude code 의
-                // 반짝이는 텍스트). 밴드 중심은 시간에 따라 이동하고 각
-                // 셀은 중심과의 거리(가우시안)만큼 흰색에 lerp 된다.
-                // working 중엔 walk 애니 33ms 펌프가 재렌더를 이미 돌려
-                // 애니 비용이 추가로 들지 않는다.
+            // 걷느냐·손 흔드느냐·서느냐는 판정(`agent_state`)이 정하고, 화면은 **자리**만
+            // 준다. 스피너 글리프가 화면에 남아 있어도 상태가 아니면 안 걷고, 일하는 중인데
+            // 스피너 자리를 못 찾으면 입력창 위 standing 자리에서 제자리 걸음이다 — 글 위에
+            // 앉는 일이 없다(2026-09-17 「왜 저기서 걷고 있어」). 한 학생이 화면에 둘 서는
+            // 일도 없다: 계획은 하나다.
+            let scene_state = self.agent_state(id);
+            // ① 입력창 위 standing 앵커 — statusline 표식(claude) → 채운 입력행(codex) →
+            // agy 순. 표식 셀(U+FFFC)은 신호일 뿐이라 지운다(프사는 여기 안 그린다,
+            // 2026-08-11). 자리표시자를 아예 없애면 agents 뷰 판정·stale statusline 복구·
+            // 이 앵커가 한꺼번에 죽는다.
+            let mut stand_anchor: Option<(usize, f32)> = None;
+            if let Some((sr, sc, len)) = find_statusline_face(&composed) {
+                for cell in composed[sr].iter_mut().skip(sc).take(len) {
+                    *cell = GridCell::blank();
+                }
+                stand_anchor = find_standing_anchor(&composed, sr, cols_now as usize);
+                // `KASATERM_STUDENT_DEBUG=1` — 왜 학생이 안 서는지 앱이 직접 말한다.
+                if std::env::var_os("KASATERM_STUDENT_DEBUG").is_some() {
+                    use std::sync::{Mutex, OnceLock};
+                    static LAST: OnceLock<Mutex<std::time::Instant>> = OnceLock::new();
+                    let last = LAST.get_or_init(|| Mutex::new(std::time::Instant::now()));
+                    let mut g = last.lock().unwrap();
+                    if g.elapsed() >= std::time::Duration::from_millis(1000) {
+                        *g = std::time::Instant::now();
+                        eprintln!(
+                            "[student-debug] pane={id} slug={slug} face_row={sr} cols={cols_now} state={scene_state:?} spinner={} anchor={stand_anchor:?} rows={}",
+                            find_claude_spinner(&composed).is_some(),
+                            composed.len(),
+                        );
+                    }
+                }
+            }
+            if stand_anchor.is_none() {
+                stand_anchor = find_filled_standing_anchor(&composed, cols_now as usize);
+            }
+            // agy — 자리표시자도 채운 입력행도 없다. 마커가 ASCII `>` 라 공용 판정에서
+            // 빠져 있어 statusline 자리만 「맨 아래 보더 다음 행」으로 잡아 준다.
+            if stand_anchor.is_none() {
+                stand_anchor = find_agy_standing_anchor(&composed, cols_now as usize);
+            }
+            // ② 자리 후보 — 상태가 허락할 때만 화면을 읽는다. 일하는 중이면 괄호 없는
+            // 후보(`✢ Transmuting…`)와 박동 게이트 후보도 자리로 받는다.
+            let spinner_hit = if !scene_state.is_busy() {
+                None
+            } else {
+                find_claude_spinner(&composed).or_else(|| {
+                    unconfirmed_spinner_row(&composed)
+                        .map(|(r, c, _)| (r, c))
+                        .or_else(|| {
+                            self.pty
+                                .get(tab_pid.as_str())
+                                .is_some_and(|p| p.output_heartbeat_fresh())
+                                .then(|| lenient_spinner_row(&composed))
+                                .flatten()
+                        })
+                })
+            };
+            let prompt_hit = if scene_state.needs_you()
+                && crate::input::rows_show_approval_prompt(&composed).is_some()
+            {
+                approval_anchor(&composed)
+            } else {
+                None
+            };
+            let plan = crate::screenread::sprite_plan(
+                &scene_state,
+                spinner_hit.is_some(),
+                prompt_hit.is_some(),
+                stand_anchor.is_some(),
+                self.turn_done_panes.contains(id),
+                self.notify_flash_factor(&id).is_some(),
+            );
+            match plan {
+                crate::screenread::SpritePlan::WalkAtSpinner => {
+                    let Some((sr, sc)) = spinner_hit else { unreachable!() };
+                    // 스피너 행 텍스트("Cerebrating… · esc to interrupt")를 학생 accent
+                    // 색으로 — walk 도트 + 텍스트색이 함께 "이 학생이 작업 중"임을 말한다.
+                    // 여기에 glow shimmer: accent 위로 밝은 밴드가 좌→우로 흐른다(claude
+                    // code 의 반짝이는 텍스트). working 중엔 walk 애니 33ms 펌프가 재렌더를
+                    // 이미 돌려 애니 비용이 추가로 들지 않는다.
                 if let Some(a) = accent {
                     animated_cells = true;
                     use kasa_bridge::screen::Color;
@@ -1698,24 +1717,24 @@ impl App {
                 }
                 // 스피너 글리프를 지우는 건 그 자리에 학생을 세울 수
                 // 있을 때만. 못 세우면 도는 표시가 통째로 없어진다.
-                if student_has_sprite(slug, "walk") {
-                    composed[sr][sc] = GridCell::blank();
-                    let top_r = sr.saturating_sub(1);
-                    spinner_slots.push((
-                        slug,
-                        (
-                            body_left + sc as f32 * scw,
-                            body_top + top_r as f32 * sch,
-                            2.0 * scw,
-                            (sr - top_r + 1) as f32 * sch,
-                        ),
-                    ));
+                    if student_has_sprite(slug, "walk") {
+                        composed[sr][sc] = GridCell::blank();
+                        let top_r = sr.saturating_sub(1);
+                        spinner_slots.push((
+                            slug,
+                            (
+                                body_left + sc as f32 * scw,
+                                body_top + top_r as f32 * sch,
+                                2.0 * scw,
+                                (sr - top_r + 1) as f32 * sch,
+                            ),
+                        ));
+                    }
                 }
-            } else if !crate::input::rows_show_working(&composed)
-                && crate::input::rows_show_approval_prompt(&composed).is_some()
-            {
-                if let Some((ar, ac)) = approval_anchor(&composed) {
-                    pet_busy = true;
+                crate::screenread::SpritePlan::WaveAtPrompt => {
+                    // 질문 행 텍스트 끝 옆에서 폴짝("승인 기다려요!"). pane 우상단은 collab
+                    // 승인 토스트(윈도우 우상단)와 겹쳐 프롬프트 자체에 앵커한다.
+                    let Some((ar, ac)) = prompt_hit else { unreachable!() };
                     const DOT: f32 = 40.0;
                     if student_has_sprite(slug, "wave") {
                         let pane_w = cols_now as f32 * scw;
@@ -1730,116 +1749,27 @@ impl App {
                         }
                     }
                 }
-            }
-            // 입력창 위 standing 앵커. claude 는 statusline 표식(U+FFFC)에서
-            // 출발하지만 codex 는 그게 없어(위 `find_filled_standing_anchor`
-            // 주석) 입력행에서 바로 잡는다. 둘 다 못 잡으면 안 세운다.
-            let mut stand_anchor: Option<(usize, f32)> = None;
-            if let Some((sr, sc, len)) = find_statusline_face(&composed) {
-                for cell in composed[sr].iter_mut().skip(sc).take(len) {
-                    *cell = GridCell::blank();
-                }
-                // 프사는 여기 안 그린다(사용자 2026-08-11: "클로드코드 상태줄
-                // 학생프사는 없애자"). statusline 은 이제 `● 이름` 을 직접
-                // 찍고, 남은 U+FFFC 한 칸은 **신호**다 — 위 blank 로 지우고
-                // `sr` 만 standing 앵커로 쓴다. 자리표시자를 아예 없애면
-                // agents 뷰 판정(`has_profile_slot`)·stale statusline 복구
-                // (socket.rs)·이 앵커가 한꺼번에 죽는다.
-                let _ = (sc, len);
-                // 입력박스 위에 서 있는 학생(전신 idle) — 프롬프트 위
-                // 스페이서 행(effort 칩·context 경고가 뜨는 자리) 우측.
-                // statusline 바로 위 행이 아래 테두리(전폭 '─')면 그
-                // 위로 첫 '─' 행이 입력박스 윗 테두리다 — ❯ 영역이
-                // 여러 줄로 자라도 스캔이라 따라간다. 발은 윗 테두리
-                // 줄에 닿고, 칩이 떠 있으면 그 왼쪽으로 비켜 선다.
-                // working/승인대기 중엔 스피너 walk·바운스 도트가 이미
-                // 학생을 그리므로(pet_busy) 세우지 않는다. 앵커 규칙은
-                // 앵커 규칙은 `find_standing_anchor` 한 곳에 둔다.
-                // `KASATERM_STUDENT_DEBUG=1` — 왜 학생이 안 서는지 앱이
-                // 직접 말한다. 이 자리는 조건 셋(스피너 감지·pet_busy·앵커)이
-                // 겹쳐 있고 실패하면 **아무것도 안 그려** 밖에서 원인을 가릴
-                // 수 없다. 정적 스프라이트(프사)만 뜨고 애니가 안 뜬다는
-                // 신고를 받고도 코드 읽기로는 못 좁혔다(2026-08-05).
-                if std::env::var_os("KASATERM_STUDENT_DEBUG").is_some() {
-                    use std::sync::{Mutex, OnceLock};
-                    static LAST: OnceLock<Mutex<std::time::Instant>> = OnceLock::new();
-                    let last = LAST.get_or_init(|| Mutex::new(std::time::Instant::now()));
-                    let mut g = last.lock().unwrap();
-                    if g.elapsed() >= std::time::Duration::from_millis(1000) {
-                        *g = std::time::Instant::now();
-                        let a = find_standing_anchor(&composed, sr, cols_now as usize);
-                        eprintln!(
-                            "[student-debug] pane={id} slug={slug} face_row={sr} cols={cols_now} pet_busy={pet_busy} spinner={} anchor={a:?} rows={}",
-                            find_claude_spinner(&composed).is_some(),
-                            composed.len(),
-                        );
-                        if sr >= 4 {
-                            let rule = |r: usize| {
-                                let row = &composed[r];
-                                let d = row.iter().filter(|c| c.ch == '─').count();
-                                let l = row
-                                    .iter()
-                                    .filter(|c| !matches!(c.ch, '─' | ' ' | '\0'))
-                                    .count();
-                                format!("dash={d}/{} label={l}", row.len())
-                            };
-                            eprintln!(
-                                "[student-debug]   아래테두리 rows[{}] {}",
-                                sr - 1,
-                                rule(sr - 1)
-                            );
-                        }
-                    }
-                }
-                stand_anchor = find_standing_anchor(&composed, sr, cols_now as usize);
-            }
-            // statusline 자리표시자가 없는 하네스(codex) — 입력행에서 바로.
-            if stand_anchor.is_none() {
-                stand_anchor = find_filled_standing_anchor(&composed, cols_now as usize);
-            }
-            // agy — 자리표시자도 채운 입력행도 없다. 모양은 claude 와 같은
-            // 대시 보더 두 줄인데 마커가 ASCII `>` 라 공용 판정에서 빠져 있다
-            // (인용문·diff 오인 방지, 2026-07-22). 앵커 규칙은 그대로 쓰고
-            // statusline 자리만 「맨 아래 보더 다음 행」으로 잡아 준다.
-            if stand_anchor.is_none() {
-                stand_anchor = find_agy_standing_anchor(&composed, cols_now as usize);
-            }
-            {
-                if !pet_busy {
+                crate::screenread::SpritePlan::WalkInPlace
+                | crate::screenread::SpritePlan::WaveInPlace
+                | crate::screenread::SpritePlan::Stand(_) => {
+                    let motion = plan.motion();
                     if let Some((anchor, left_c)) = stand_anchor {
-                        {
-                            // 턴 완료 직후 ~1.8s(notify_flash)는 양팔 만세
-                            // cheer, 그 뒤로 계속 대기하면 손 흔들며 기다리는
-                            // wave("선생님, 다음 지시 기다려요"). 학생 pane 은
-                            // bypass 모드라 승인 프롬프트가 안 떠 우상단 wave
-                            // 트리거가 사실상 죽어 있다 — wave 를 standing 순환에
-                            // 넣어야 "입력 기다림"이 보인다. 사용자가 이 pane 에
-                            // 타이핑하면 idle 로.
-                            let motion = if self.turn_done_panes.contains(id) {
-                                if self.notify_flash_factor(&id).is_some() {
-                                    "cheer"
-                                } else {
-                                    "wave"
-                                }
-                            } else {
-                                "idle"
-                            };
-                            if student_has_sprite(slug, motion) {
-                                standing_slots.push((
-                                    slug,
-                                    motion,
-                                    standing_slot_rect(
-                                        anchor,
-                                        left_c,
-                                        rows_now,
-                                        (body_left, body_top),
-                                        (scw, sch),
-                                    ),
-                                ));
-                            }
+                        if student_has_sprite(slug, motion) {
+                            standing_slots.push((
+                                slug,
+                                motion,
+                                standing_slot_rect(
+                                    anchor,
+                                    left_c,
+                                    rows_now,
+                                    (body_left, body_top),
+                                    (scw, sch),
+                                ),
+                            ));
                         }
                     }
                 }
+                crate::screenread::SpritePlan::None => {}
             }
         }
         // 학생 accent 는 입력박스 보더·@배지 도색에만(사용자 2026-07-18:

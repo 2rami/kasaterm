@@ -13,6 +13,8 @@ mod autosuggest;
 mod auxterm;
 mod auxwin;
 mod board_room;
+mod agent_state;
+mod agent_transitions;
 mod bridge;
 mod cells;
 mod chrome;
@@ -5100,12 +5102,6 @@ struct App {
     /// busy scan walks every pane's grid, so it runs at most a few times a
     /// second rather than per frame. `None` until the first scan.
     pane_busy_check: Option<Instant>,
-    /// Last time each pane's grid showed a spinner glyph. The claude spinner
-    /// blanks/scrolls between frames, so a raw per-scan check flickers
-    /// working↔idle and fires a bogus "완료" toast every blink. We hold `busy`
-    /// for `BUSY_GRACE` after the last spinner sighting so only a real stop
-    /// (grace elapsed) counts as completion.
-    pane_last_busy: HashMap<String, Instant>,
     /// 계정 전환 뒤 되띄우기를 기다리는 pane 이 **언제부터 조용한가**. 스피너는 도구
     /// 결과가 오가는 찰나에 잠깐 사라져서, 「지금 idle」 하나로 판정하면 일하는 중인
     /// pane 을 그 틈에 끊는다 — 2026-08-15 에 사용자가 대화하던 pane 이 그렇게
@@ -5391,10 +5387,6 @@ struct App {
     /// 바뀌면 확정 = 진짜 스피너(인용문은 멈춰 있다). 방금 Enter 가 들어간
     /// pane(`PtySession::last_submit`)은 확정을 기다리지 않고 즉시 신뢰한다.
     /// 목격 시각은 미확정 후보가 있는 동안만 스캔 박자를 좁히는 근거(1.2초 상한 —
-    /// 인용문 후보는 영영 확정이 안 돼, 상한 없이는 그 화면 내내 프레임 박자로
-    /// 돈다). 규칙 본문은 screenread::unconfirmed_spinner_row.
-    /// `refresh_pane_activity`가 갱신하고 render 걷기 도트가 읽는다.
-    spinner_probe: std::collections::HashMap<String, (usize, char, bool, std::time::Instant)>,
     /// 직전 틱의 팔레트 명암 — 라이트↔다크 플립을 `poll_claude_retheme` 이
     /// 감지하는 기준값. 어느 입구로 테마가 바뀌든(설정 화면·웹뷰·system 폴링)
     /// 전부 팔레트에 수렴하므로, 입구마다 훅을 다는 대신 결과를 비교한다.
@@ -5461,10 +5453,6 @@ struct App {
     /// Collab completion toast + approval card, grouped into a sub-struct
     /// (state.rs) so collab-UI work touches one file — CLAUDE.md 병렬 규칙.
     collab: state::CollabState,
-    /// 승인 프롬프트가 떠 있는 pane → "사용자 직행(단독)인가". 그리드 스캔
-    /// (`route_approval_prompts`)의 edge-trigger 상태: 새로 뜨면 라우팅 1회,
-    /// 풀리면 board waiting 플래그까지 함께 걷는다.
-    pane_prompt_wait: HashMap<String, bool>,
     /// When we last recomputed the macOS window title. Rate-limits
     /// `maybe_update_window_title` to ~200ms because it locks the
     /// workspace + calls `ps -A` (process-tree lookup) on every hit,
@@ -6014,7 +6002,6 @@ impl App {
             dock_chip_close_rects: Vec::new(),
             copy_toast_at: None,
             pane_busy_check: None,
-            pane_last_busy: HashMap::new(),
             pane_account_quiet_since: HashMap::new(),
             pane_bg_mtime: HashMap::new(),
             pane_deep_prompts: HashMap::new(),
@@ -6081,7 +6068,6 @@ impl App {
             last_claude_status: None,
             pane_activity: HashMap::new(),
             pane_ultracode: std::collections::HashSet::new(),
-            spinner_probe: std::collections::HashMap::new(),
             theme_light_last: None,
             retheme_queue: HashMap::new(),
             window_focused: true,
@@ -6096,7 +6082,6 @@ impl App {
             unread_panes: std::collections::HashSet::new(),
             dock_badge_n: 0,
             collab: Default::default(),
-            pane_prompt_wait: HashMap::new(),
             last_window_title_check: None,
             pane_cwd_cache: HashMap::new(),
             pane_view_cwd: HashMap::new(),
@@ -7522,16 +7507,25 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // **발신자 한 줄만** 낸다. 그 좁힘을 풀면 같은 비용이 그대로 돌아온다.
             // stdout 에 JSON 을 내므로 ultracode-mark 와 **다른 그룹**에 둔다(Stop 의
             // stop-drain 과 같은 이유 — 한 그룹에 섞이면 결정이 깨질 수 있다).
+            // 턴 경계(`kasaterm-turn.sh`) — pane 상태의 정본. 프롬프트 제출이 열고 Stop 이
+            // 닫으며, PreCompact 가 압축 시작을 알린다(끝은 SessionStart(source=compact) 를
+            // bind-transcript 가 받는다). 화면의 스피너를 읽어 상태를 짐작하던 것을 대신한다.
+            // bash+sed 뿐이라 프롬프트 핫패스에 인터프리터가 안 뜬다.
             "UserPromptSubmit": [
+                { "hooks": [cmd("kasaterm-turn.sh start", 5)] },
                 { "hooks": [cmd("kasaterm-closed-pane-guard.py", 5000)] },
                 { "hooks": [cmd("ultracode-mark.py", 3000)] },
                 { "hooks": [cmd("kasaterm-peer-name.py", 5000)] }
+            ],
+            "PreCompact": [
+                { "hooks": [cmd("kasaterm-turn.sh compact_start", 5)] }
             ],
             // 두 훅을 **다른 그룹**으로 나눠 둔다 — stop-drain 은 인박스가 있으면
             // stdout 에 block JSON 을 내는데, 같은 그룹이면 진행 표시 훅의 출력과
             // 섞여 그 결정이 깨질 수 있다. agent-status 는 stdout 을 안 쓰지만
             // 나란히 두는 것 자체가 나중에 그 규칙을 잊게 만든다.
             "Stop": [
+                { "hooks": [cmd("kasaterm-turn.sh end", 5)] },
                 { "hooks": [cmd("kasaterm-stop-drain.sh", 5000)] },
                 { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
             ],
@@ -9802,6 +9796,7 @@ mod tests {
             "PreToolUse",
             "PostToolUse",
             "UserPromptSubmit",
+            "PreCompact",
             "Stop",
             "Notification",
         ] {

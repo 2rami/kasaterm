@@ -110,8 +110,19 @@ def get_git_branch(cwd):
     return None
 
 
+def model_label(d, ctx_win):
+    """보드에 뜨는 모델 표시명 — 아래 상태줄에 찍는 것과 같은 글자(창 크기 꼬리 포함).
+    앱이 화면에서 이 글자를 읽어 내던 것을 그만두고 여기서 직접 보고한다 — 좁은 pane 에서
+    상태줄이 잘리면 화면 판독은 꼬리를 잃었다."""
+    m = ((d.get("model") or {}).get("display_name") or "").split(" (")[0]
+    if not m:
+        return ""
+    win = "1M" if ctx_win >= 1_000_000 else (f"{ctx_win // 1000}k" if ctx_win else "")
+    return f"{m} {win}".strip()
+
+
 def report_cwd_to_kasaterm(cwd, session_id, ctx_window=0, ctx_tokens=0,
-                           model_id="", effort=""):
+                           model_id="", effort="", label=""):
     """kasaterm pane 안에서만 — claude 내부 cd 와 컨텍스트 창을 GUI 에 보고.
     claude 는 셸 위에서 돌아 lsof(최상위 셸 cwd)로는 내부 cd 가 안 보여, statusLine 이
     매 렌더 현재 cwd 를 직접 보고한다. pane 밖(KASATERM_PANE_ID 없음)에선 무동작.
@@ -134,7 +145,7 @@ def report_cwd_to_kasaterm(cwd, session_id, ctx_window=0, ctx_tokens=0,
     argv = [
         "kasaterm-cli", "report-cwd", pane, str(cwd), session_id or "",
         str(int(ctx_window or 0)), str(int(ctx_tokens or 0)),
-        model_id or "", effort or "",
+        model_id or "", effort or "", label or "",
     ]
     try:
         subprocess.Popen(
@@ -186,6 +197,7 @@ def main():
         cwd, session_id, ctx_win, ctx_tot,
         (d.get("model") or {}).get("id", ""),
         (d.get("effort") or {}).get("level") or "",
+        model_label(d, ctx_win),
     )
 
     sep = f" {DIM}{ansi(C_SEP)}{sep_char}{RESET} "

@@ -301,11 +301,29 @@ pub(crate) fn codex_rollout_snapshot(head: &str, tail: &str) -> CodexRolloutSnap
     newest.snapshot
 }
 
-/// Claude Code·Codex 전사본의 가장 최근 활동이 오류인가.
+/// 기록의 가장 최근 활동이 오류일 때 그 사연. `hard` 는 하네스 자체가 멈춘 오류
+/// (API 오류·codex 작업 실패·스트림 끊김)이고, 아니면 도구 하나가 실패한 것이라 턴은
+/// 계속 돈다 — 상태를 Error 로 내리는 건 hard 뿐이고, 도구 실패는 미니맵 삼각형만 켠다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HarnessError {
+    pub(crate) label: String,
+    pub(crate) hard: bool,
+}
+
+fn short_label(text: &str, fallback: &str) -> String {
+    let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let one = one.trim();
+    if one.is_empty() {
+        return fallback.to_string();
+    }
+    one.chars().take(60).collect()
+}
+
+/// Claude Code·Codex 전사본의 가장 최근 활동이 오류인가 — 그렇다면 무슨 오류인가.
 ///
 /// 과거 실패를 세는 함수가 아니다. 오류 뒤에 새 도구 호출·답변·사용자 입력이 있으면
-/// 복구가 시작된 것이므로 즉시 false가 된다. 미니맵은 이 현재 상태만 표시한다.
-pub(crate) fn latest_harness_error(tail: &str) -> bool {
+/// 복구가 시작된 것이므로 즉시 None 이 된다. 미니맵·보드는 이 현재 상태만 표시한다.
+pub(crate) fn harness_error(tail: &str) -> Option<HarnessError> {
     for line in tail.lines().rev() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         let kind = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
@@ -313,27 +331,35 @@ pub(crate) fn latest_harness_error(tail: &str) -> bool {
         if let Some(payload) = v.get("payload").and_then(|x| x.as_object()) {
             let sub = payload.get("type").and_then(|x| x.as_str()).unwrap_or("");
             if kind == "event_msg" && matches!(sub, "error" | "stream_error" | "task_failed") {
-                return true;
+                let message = payload.get("message").and_then(|x| x.as_str()).unwrap_or("");
+                let fallback = if sub == "task_failed" { "작업 실패" } else { "오류" };
+                return Some(HarnessError { label: short_label(message, fallback), hard: true });
             }
             if kind == "event_msg" && sub == "item_completed" {
-                return payload
+                let failed = payload
                     .get("item")
                     .and_then(|x| x.get("status"))
                     .and_then(|x| x.as_str())
                     .is_some_and(|status| status.eq_ignore_ascii_case("failed"));
+                return failed.then(|| HarnessError { label: "도구 실패".into(), hard: false });
             }
             if kind == "event_msg"
                 && matches!(sub, "item_started" | "agent_message" | "user_message")
                 || matches!(kind, "response_item" | "turn_context")
             {
-                return false;
+                return None;
             }
             continue;
         }
 
         if kind == "system" {
             if v.get("subtype").and_then(|x| x.as_str()) == Some("api_error") {
-                return true;
+                let message = v
+                    .get("content")
+                    .and_then(|x| x.as_str())
+                    .or_else(|| v.pointer("/error/message").and_then(|x| x.as_str()))
+                    .unwrap_or("");
+                return Some(HarnessError { label: short_label(message, "API 오류"), hard: true });
             }
             continue;
         }
@@ -349,18 +375,23 @@ pub(crate) fn latest_harness_error(tail: &str) -> bool {
                         }
                     }
                     if saw_result {
-                        return failed;
+                        return failed.then(|| HarnessError { label: "도구 실패".into(), hard: false });
                     }
                 }
-                Some(serde_json::Value::String(_)) => return false,
+                Some(serde_json::Value::String(_)) => return None,
                 _ => {}
             }
         }
         if kind == "assistant" {
-            return false;
+            return None;
         }
     }
-    false
+    None
+}
+
+/// 예전 창구 — 오류가 있기만 하면 참. 미니맵 삼각형이 쓴다.
+pub(crate) fn latest_harness_error(tail: &str) -> bool {
+    harness_error(tail).is_some()
 }
 
 /// `item.content[]` 의 텍스트 조각을 잇는다.

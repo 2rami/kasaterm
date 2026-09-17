@@ -18,8 +18,12 @@ pub struct DockedView {
 /// gate can tell when a pane flips working↔idle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PaneStatusView {
-    /// "working" | "building" | "blocked" | "idle" | "waiting".
+    /// "working" | "compacting" | "idle" | "waiting" — `state.view_word()`. 문자열은 보드·
+    /// JSON 소비자를 위한 투영이고, GUI 판단은 `state` 를 본다.
     pub status: String,
+    /// 판정 자체(`agent_state::resolve`). 직렬화하지 않는다 — 낱말이면 밖에는 충분하다.
+    #[serde(skip)]
+    pub state: crate::agent_state::AgentState,
     /// Free-text "what + why" shown in the completion toast.
     pub intent: String,
     /// Why `status == "waiting"` (claude blocked on a prompt). None unless waiting.
@@ -55,8 +59,12 @@ pub struct PaneStatusView {
 }
 
 /// 사람을 기다린다는 표시 — 이유(훅의 message)와 종류(`attention_kind` 참고).
+/// `at` 은 표식이 선 때다 — 그보다 새 기록·훅 박동·Stop 이 오면 사람이 이미 답한 것이라
+/// 표식은 낡은 것으로 본다(`agent_state::resolve`). 화면에서 프롬프트가 사라졌는지 보던
+/// 판정을 이 시각이 대신한다.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AttentionFlag {
     pub reason: String,
     pub kind: String,
+    pub at: Option<std::time::Instant>,
 }

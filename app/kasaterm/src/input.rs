@@ -766,66 +766,10 @@ impl App {
         );
     }
 
-    /// 하네스 기록의 턴 경계를 pane 마다 읽어 둔다(`transcript::turn_state_from_tail`).
-    /// 보드가 읽는 것과 같은 파일이라 헤더 바와 보드가 서로 다른 말을 하지 않는다.
-    /// 파일 모습(길이·mtime)이 그대로면 안 읽는다 — 노는 pane 은 틱마다 stat 하나뿐이다.
-    pub(crate) fn refresh_turn_states(&mut self) {
-        const WINDOW: u64 = 32 * 1024;
-        let Some(backend) = self.socket_backend.clone() else { return };
-        let live: Vec<String> = self
-            .pty
-            .iter()
-            .filter(|(_, p)| p.active_agent().is_some())
-            .map(|(id, _)| id.clone())
-            .collect();
-        let turn = &mut self.collab.turn;
-        turn.retain(|id, _| live.contains(id));
-        for id in live {
-            // 소켓 쪽이 결속 맵을 쥐고 있으면 기다리지 않는다 — 지난 관측의 파일을 그대로
-            // 다시 본다(결속은 좀처럼 안 바뀐다). 처음 보는 pane 만 다음 틱으로 미룬다.
-            let path = match backend.bound_transcript(&id) {
-                Ok(path) => path,
-                Err(()) => turn.get(&id).map(|o| o.path.clone()),
-            };
-            let Some(path) = path else {
-                turn.remove(&id);
-                continue;
-            };
-            let Ok(meta) = std::fs::metadata(&path) else {
-                turn.remove(&id);
-                continue;
-            };
-            let (len, mtime) = (meta.len(), meta.modified().ok());
-            if turn
-                .get(&id)
-                .is_some_and(|o| o.path == path && o.len == len && o.mtime == mtime)
-            {
-                continue;
-            }
-            let (tail, _) = crate::socket::read_tail(&path, WINDOW);
-            match crate::transcript::turn_state_from_tail(&tail) {
-                Some(state) => {
-                    turn.insert(id, crate::state::TurnObservation { state, path, len, mtime });
-                }
-                None => {
-                    turn.remove(&id);
-                }
-            }
-        }
-    }
-
     pub(crate) fn refresh_pane_activity(&mut self) {
         let now = Instant::now();
         if let Some(t) = self.pane_busy_check {
-            // 미확정 스피너 후보가 살아 있는 동안은 박자를 100ms 로 좁힌다 —
-            // 확정이 글리프 변화(≈스피너 주기)를 기다리는 동안 300ms 틱 두 번
-            // (최악 0.6초)이 무테마로 새는 것을 줄인다. Enter 없는 턴 시작
-            // (인박스 주입 등)이 이 경로의 수혜자다. 인용문 후보는 영영 확정이
-            // 안 되므로 후보별 목격 시각 1.2초로 자른다.
-            let hot = self.spinner_probe.values().any(|&(_, _, conf, seen)| {
-                !conf && now.duration_since(seen).as_millis() < 1200
-            });
-            if now.duration_since(t).as_millis() < if hot { 100 } else { 300 } {
+            if now.duration_since(t).as_millis() < 300 {
                 return;
             }
         }
@@ -860,13 +804,12 @@ impl App {
         if crate::clipboard::poll() {
             self.chrome_dirty = true;
         }
-        // 닫아 둔 pane 의 유휴도 같은 박자로 본다 — 판정 재료(`term_is_working`)가
-        // 같으니, 화면에서 뗀 pane 만 따로 스캔할 이유가 없다.
+        // 닫아 둔 pane 의 유휴도 같은 박자로 본다 — 판정(`agent_state`)이 같으니,
+        // 화면에서 뗀 pane 만 따로 볼 이유가 없다.
         self.reap_idle_closed_panes();
         // 꼬리 스캔이 **먼저**다 — 아래 ultracode 판정이 그 결과를 읽는다. 뒤에 두면
         // 켜고 끈 것이 한 틱 늦게 화면에 온다.
         self.sync_session_titles();
-        self.refresh_turn_states();
         self.sync_remote_view_layouts();
         self.sync_device_colors();
         self.refresh_pane_ultracode();
@@ -874,253 +817,89 @@ impl App {
         self.run_pending_autotitlesync();
         self.run_pending_autoultrascan();
 
-        // Scan under the lock, then mutate `pane_activity` after dropping it —
-        // the completion-toast path takes no further workspace lock. The same
-        // pass also looks for a pending approval prompt (munder BLOCK_HINTS):
-        // only meaningful when the spinner is gone, so busy panes skip it.
-        // `bg_tab_busy` = **안 보이는 탭**에서 클로드가 도는 pane. 스캔이 활성 탭만
-        // 보던 동안 뒤 탭 학생은 화면에 아무 흔적이 없었다 — busy 바도 완료 펄스도.
-        // 그렇다고 스윕바를 띄우면 노는 화면 위에서 "이 화면이 일한다"는 거짓말이
-        // 되므로, 있는 언어를 쓴다: 보이는 것은 busy, 안 보이는 것은 bg 펄스.
-        let (busy_now, bg_tab_busy, compacting_now, stalled_now): (
-            Vec<(String, bool, Option<ApprovalPrompt>)>,
-            std::collections::HashSet<String>,
-            std::collections::HashMap<String, Option<u8>>,
-            std::collections::HashMap<String, &'static str>,
-        ) = {
-            // 프로브는 락 밖 필드라 ws 가드와 나란히 빌린다 — 메서드로 빼면 &mut self
-            // 가 통째로 필요해 가드와 충돌한다.
-            let probe = &mut self.spinner_probe;
-            // 훅이 세운 대기 표식(승인·질문·방치). ws 락 밖에서 한 번 뜬다 — 소켓 스레드가
-            // 이 맵을 ws 와 다른 순서로 잡으므로 안에서 잡으면 서로 기다릴 수 있다.
-            // 잠겨 있으면 빈 집합으로 간다 — 승인 프롬프트는 화면 감지가 따로 막는다.
-            let attention: std::collections::HashSet<String> = self
-                .collab
-                .attention
-                .try_lock()
-                .map(|a| a.keys().cloned().collect())
-                .unwrap_or_default();
+        // ── 판정은 허브가, 화면은 자리·장식만 ────────────────────────────
+        // 화면에서 읽는 것은 둘뿐이다: codex·agy pane 의 승인 프롬프트(훅이 없어 남긴
+        // 폴백)와 압축 진행률 %(장식 — 상태는 PreCompact 훅이 정한다). 나머지 판정은
+        // `agent_state::resolve` 가 훅·기록·명부·박동으로 한다.
+        let mut compacting_now: std::collections::HashMap<String, Option<u8>> =
+            std::collections::HashMap::new();
+        let mut bg_tab_busy: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let panes: Vec<(String, String)> = {
             let ws = self.ws.lock().unwrap();
-            let mut rows = Vec::with_capacity(ws.panes.len());
-            let mut bg = std::collections::HashSet::new();
-            // compact 중인 pane → 화면에서 읽은 진행률. 같은 스캔에서 뽑는다 — 따로
-            // 한 바퀴 돌면 ws 락을 두 번 잡고, 그 사이 화면이 바뀌어 어긋난다.
-            let mut compacting = std::collections::HashMap::new();
-            // 연결이 끊겨 멈춘 pane → 화면에서 읽은 사연. `busy` 와 무관하게 본다 —
-            // 멈추면 스피너가 사라져 idle 로 보이므로, busy 안에서만 재면 정작
-            // 표시해야 할 상태를 통째로 놓친다.
-            let mut stalled = std::collections::HashMap::new();
+            let mut screen_wait = self.collab.hub.screen_wait.lock().unwrap();
+            let mut out = Vec::with_capacity(ws.panes.len());
             for (id, pane) in ws.panes.iter() {
+                let tab = ws.active_tab_pid(id);
+                let harness = self.pty.get(tab.as_str()).and_then(|p| p.active_agent());
+                let hookless = matches!(&harness, Some(k) if !matches!(k, kasa_pty::AgentKind::Claude));
                 match pane.term() {
                     Some(t) => {
-                        // 턴 시작 첫 ~3초는 스피너가 `✢ Transmuting…` 뿐이라 본판정
-                        // (경과시간 괄호 요구)이 거부한다. 글리프가 틱 사이에 바뀌면
-                        // 진짜 스피너로 확정 — 인용문은 멈춰 있다. 규칙 본문은
-                        // screenread::unconfirmed_spinner_row 주석.
-                        let strict = term_is_working(t);
-                        let boosted = if strict {
-                            probe.remove(id);
-                            false
+                        if hookless && rows_show_approval_prompt(&t.cells).is_some() {
+                            screen_wait.insert(tab.clone(), "승인 프롬프트".to_string());
                         } else {
-                            match crate::render::unconfirmed_spinner_row(&t.cells) {
-                                Some((r, _c, g)) => {
-                                    // 방금 Enter 가 들어간 에이전트 pane 은 후보를 즉시
-                                    // 신뢰한다(SUBMIT_TRUST 머리말). 에이전트 pane 한정 —
-                                    // 셸 명령 출력이 우연히 이 모양이면 Enter 마다 4초씩
-                                    // busy 로 오르는 것을 막는다.
-                                    let submitted = self
-                                        .pty
-                                        .get(ws.active_tab_pid(id).as_str())
-                                        .is_some_and(|p| {
-                                            p.active_agent().is_some()
-                                                && p.last_submit().is_some_and(|s| {
-                                                    now.duration_since(s) < Self::SUBMIT_TRUST
-                                                })
-                                        });
-                                    let (conf, seen) = match probe.get(id) {
-                                        Some(&(pr, pg, pc, ps)) if pr == r => {
-                                            (submitted || pc || pg != g, ps)
-                                        }
-                                        _ => (submitted, now),
-                                    };
-                                    probe.insert(id.clone(), (r, g, conf, seen));
-                                    conf
-                                }
-                                None => {
-                                    probe.remove(id);
-                                    false
-                                }
-                            }
-                        };
-                        let busy_glyph = strict || boosted;
-                        // 승인 프롬프트가 **보이면** 아래 박동보다 우선한다 — 프롬프트가
-                        // 뜨는 순간의 재그리기가 박동 여열(≤2.2초)로 남아, 승인 도트가
-                        // 그만큼 늦게 뜨는 회귀를 막는다.
-                        let approval = if busy_glyph {
-                            None
-                        } else {
-                            rows_show_approval_prompt(&t.cells)
-                        };
-                        // 백엔드 출력 박동 — 글리프와 독립인 working 신호(**OR 전용**:
-                        // 세울 수만 있고 내리지 못한다). 스피너 글리프가 또 바뀌어도
-                        // (윈도우 `*`·점 프레임·reduce motion `●` 전례 셋) 바·bg 펄스·
-                        // 완료 판정이 함께 죽지 않는다. 에이전트 pane 한정 — 셸의
-                        // `tail -f` 류 출력까지 바를 돌리지 않는다.
-                        let hb_raw = self
-                            .pty
-                            .get(ws.active_tab_pid(id).as_str())
-                            .is_some_and(|p| p.active_agent().is_some() && p.output_heartbeat());
-                        let heartbeat = !busy_glyph && approval.is_none() && hb_raw;
-                        let screen_busy = busy_glyph || heartbeat;
-                        // 하네스가 기록에 남긴 턴 경계가 있으면 그것이 정본이다 — 보드와
-                        // 같은 재료(`refresh_turn_states`). 화면 글리프·박동은 기록이 없는
-                        // pane 의 폴백으로만 남는다. 노는 codex 가 입력창 둘레에 흩뿌리는
-                        // 점자(gpt-6-astra)가 바를 영영 돌리던 것이 여기서 끊긴다(2026-09-16).
-                        let tab_pid = ws.active_tab_pid(id);
-                        let observation = self.collab.turn.get(tab_pid.as_str());
-                        let turn = observation.map(|o| o.state);
-                        let turn_stale = observation.is_some_and(|o| o.stale());
-                        let waits = attention.contains(id) || attention.contains(tab_pid.as_str());
-                        let busy = match turn {
-                            // 턴이 열려 있다 — 화면이 조용해도 일하는 중. 승인·질문 프롬프트가
-                            // 보이면 사람을 기다리는 것이라 바를 돌리지 않는다. 단 기록이
-                            // 한참 조용한데 화면에도 스피너·박동이 없으면 닫는 줄을 못 남기고
-                            // 끝난 턴이다(`TURN_STALE`) — 그때는 화면을 믿는다.
-                            Some(crate::transcript::TurnState::Working) => {
-                                approval.is_none() && !waits && (screen_busy || !turn_stale)
-                            }
-                            // 턴이 닫혔다 — 화면의 점·박동은 장식이다. 방금 Enter 가 들어갔으면
-                            // 기록보다 화면이 앞서므로 그 몇 초만 화면을 믿는다.
-                            Some(crate::transcript::TurnState::Idle) => {
-                                screen_busy
-                                    && self.pty.get(tab_pid.as_str()).is_some_and(|p| {
-                                        p.last_submit().is_some_and(|s| {
-                                            now.duration_since(s) < Self::SUBMIT_TRUST
-                                        })
-                                    })
-                            }
-                            None => screen_busy,
-                        };
-                        // 검증 rig 전용 — 판정 재료를 틱마다 흘린다(하네스 env 로만 켜짐).
-                        // hb_raw 는 게이트 전 원신호다: 글리프가 살아 있으면 heartbeat 는
-                        // 늘 false 라, 그것만 찍으면 박동이 도는지 밖에서 알 길이 없다.
-                        if std::env::var_os("KASATERM_HB_LOG").is_some() {
-                            eprintln!(
-                                "[hb] {id} strict={strict} boosted={boosted} hb_raw={hb_raw} turn={turn:?} busy={busy}"
-                            );
+                            screen_wait.remove(&tab);
                         }
-                        let prompt = if busy { None } else { approval };
-                        // compact 중에도 스피너는 돌아서 busy 가 이미 참이다. 그 안에서만
-                        // 좁히므로, 스크롤을 되짚다 옛 알림을 만나 바가 켜지는 일은 없다.
-                        if busy {
-                            if let Some(pct) = rows_show_compacting(&t.cells) {
-                                compacting.insert(id.clone(), pct);
-                            }
+                        if let Some(pct) = compact_pct_on_screen(&t.cells) {
+                            compacting_now.insert(id.clone(), pct);
                         }
-                        if let Some(why) = crate::screenread::find_connection_trouble(&t.cells) {
-                            stalled.insert(id.clone(), why);
-                        }
-                        rows.push((id.clone(), busy, prompt));
                     }
-                    None => rows.push((id.clone(), false, None)),
+                    None => {
+                        screen_wait.remove(&tab);
+                    }
                 }
                 let active = pane.active_tab.min(pane.tabs.len().saturating_sub(1));
-                // 뒤 탭도 활성 탭과 같은 이중 신호(글리프 ∨ 박동)로 본다 — 한쪽만
-                // 글리프면 글리프가 바뀔 때 bg 펄스만 조용히 죽는다.
                 if pane.tabs.iter().enumerate().any(|(i, t)| {
-                    i != active
-                        && (t.term().is_some_and(term_is_working)
-                            || t.pid.as_deref().is_some_and(|pid| {
-                                self.pty.get(pid).is_some_and(|p| {
-                                    p.active_agent().is_some() && p.output_heartbeat()
-                                })
-                            }))
+                    i != active && t.pid.as_deref().is_some_and(|pid| self.collab.hub.state(pid).is_busy())
                 }) {
-                    bg.insert(id.clone());
+                    bg_tab_busy.insert(id.clone());
                 }
+                out.push((id.clone(), tab));
             }
-            (rows, bg, compacting, stalled)
+            out
         };
+        self.collab.hub.refresh();
 
-        // The claude spinner blanks/scrolls between frames, so the raw glyph
-        // scan flickers working↔idle. Hold `busy` for BUSY_GRACE past the last
-        // spinner sighting; only a real stop (grace elapsed with no spinner)
-        // counts as completion — otherwise every blink fired a bogus toast.
         let claude_error_sids = crate::socket::agents_error_sids_cached();
-        let mut completed: Vec<String> = Vec::new();
-        for (id, raw_busy, _) in &busy_now {
-            if *raw_busy {
-                self.pane_last_busy.insert(id.clone(), now);
+        let mut events: Vec<(String, Vec<crate::agent_transitions::Transition>)> = Vec::new();
+        for (id, tab) in &panes {
+            let resolved = self.collab.hub.resolved(tab).or_else(|| self.collab.hub.resolved(id));
+            let state = resolved.as_ref().map(|r| r.state.clone()).unwrap_or_default();
+            let official_error = self
+                .pane_claude_sid
+                .get(tab.as_str())
+                .or_else(|| self.pane_claude_sid.get(id))
+                .is_some_and(|sid| claude_error_sids.contains(sid));
+            let bg_active = resolved.as_ref().is_some_and(|r| r.bg_active) || bg_tab_busy.contains(id);
+            let has_error = resolved.as_ref().is_some_and(|r| r.has_error) || official_error;
+            let intent = resolved.as_ref().map(|r| r.intent.clone()).unwrap_or_default();
+            let compact_pct = matches!(state, crate::agent_state::AgentState::Compacting)
+                .then(|| compacting_now.get(id).copied().flatten())
+                .flatten();
+            if !matches!(state, crate::agent_state::AgentState::Compacting) {
+                compacting_now.remove(id);
             }
-            let busy = *raw_busy
-                || self
-                    .pane_last_busy
-                    .get(id)
-                    .map_or(false, |t| now.duration_since(*t) < Self::BUSY_GRACE);
-            // Only a real "working" run counts toward the completion toast —
-            // a pane leaving `blocked`/`waiting` (prompt answered) didn't
-            // finish anything, it just got unstuck.
-            // compact 도 「일하던 중」에 든다 — 여기서 빼면 compact 로 시작해 그대로 끝난
-            // 턴이 완료로 안 잡혀 토스트가 사라진다.
-            let was_busy = self
-                .pane_activity
-                .get(id)
-                .map_or(false, |a| matches!(a.status.as_str(), "working" | "compacting"));
-            if was_busy && !busy {
-                completed.push(id.clone());
-                self.pane_last_busy.remove(id);
-            }
-            // compact 중이면 「working」보다 좁게 적는다 — 헤더가 쓸림바 대신 차오르는
-            // 바를 그리는 갈림길이 이 한 값이다. `busy` 가 grace 로 늘어나 있는 동안에도
-            // 화면에 알림이 남아 있으면 compacting 으로 유지된다(끝나면 알림이 사라져
-            // 자동으로 working→idle 로 떨어진다).
-            let compact = compacting_now.get(id).copied();
-            // **에이전트가 도는 pane 만** 빨갛게 둔다. 셸에서는 사람이 그 문구를
-            // 직접 쳐 넣거나 남의 로그를 흘려보내는 일이 흔해서, 화면 글자만으로는
-            // 진짜 끊김과 구분이 안 된다.
-            let stalled = self
-                .pty
-                .get(id)
-                .and_then(|p| p.active_agent())
-                .and(stalled_now.get(id).copied())
-                .map(str::to_string);
-            let status = if busy {
-                if compact.is_some() {
-                    "compacting"
-                } else {
-                    "working"
-                }
-            } else {
-                "idle"
+            let stalled = match &state {
+                crate::agent_state::AgentState::Error { label } => Some(label.clone()),
+                _ => None,
             };
-            let compact_pct = compact.flatten();
-            // A visibly-working pane already shows the sweep, so skip the tail
-            // read; only idle panes need the "background job running" check, and
-            // their transcript rarely changes so the mtime cache keeps IO ~zero.
-            let (bg_active, has_error) = if busy {
-                (false, false)
-            } else {
-                // ⚠️ `||` 로 단축평가하지 마라 — bg 탭이 바쁘면 `pane_bg_active` 가
-                // 통째로 안 불려 sticky 띠 글감이 안 채워진다(위 주석과 같은 사고).
-                let source_id = self.ws.lock().unwrap().active_tab_pid(id);
-                let official_error = self
-                    .pane_claude_sid
-                    .get(source_id.as_str())
-                    .or_else(|| self.pane_claude_sid.get(id))
-                    .is_some_and(|sid| claude_error_sids.contains(sid));
-                let (from_pane, transcript_error) = self.pane_tail_state(id, &source_id);
-                (bg_tab_busy.contains(id) || from_pane, official_error || transcript_error)
+            let waiting_for = match &state {
+                crate::agent_state::AgentState::Waiting { reason, .. } => Some(reason.clone()),
+                _ => None,
             };
-            // 「도는 중」이 이어지는 동안 기준점을 유지하고, 멈추면 버린다. 직접
-            // 일하는 것과 뒤에서 도는 것을 함께 센다 — 그림 굽는 배치는 claude 가
-            // 「끝났나」로 되물으며 기다리는 사이 status 가 오가지만, 사람이 알고
-            // 싶은 것은 그 일이 시작된 뒤로 흐른 시간이다.
-            let running = bg_active || (status != "idle" && !crate::chrome::status_needs_you(status));
-            let now = std::time::Instant::now();
+            let status = state.view_word().to_string();
+            // 「도는 중」이 이어지는 동안 기준점을 유지하고, 멈추면 버린다. 직접 일하는
+            // 것과 뒤에서 도는 것을 함께 센다 — 사람이 알고 싶은 것은 그 일이 시작된
+            // 뒤로 흐른 시간이다.
+            let running = bg_active || state.is_busy();
+            let prev = self.pane_activity.get(id).map(|a| a.state.clone());
+            let evs = crate::agent_transitions::transitions(prev.as_ref(), &state);
             self.pane_activity
                 .entry(id.clone())
                 .and_modify(|a| {
-                    a.status = status.to_string();
+                    a.status = status.clone();
+                    a.state = state.clone();
+                    a.intent = intent.clone();
+                    a.waiting_for = waiting_for.clone();
                     a.bg_active = bg_active;
                     a.has_error = has_error;
                     a.compact_pct = compact_pct;
@@ -1128,26 +907,27 @@ impl App {
                     a.busy_since = running.then(|| a.busy_since.unwrap_or(now));
                 })
                 .or_insert_with(|| crate::stream::PaneStatusView {
-                    status: status.to_string(),
+                    status,
+                    state: state.clone(),
+                    intent,
+                    waiting_for,
                     bg_active,
                     has_error,
                     compact_pct,
                     stalled,
                     busy_since: running.then_some(now),
-                    ..Default::default()
                 });
+            if !evs.is_empty() {
+                events.push((id.clone(), evs));
+            }
         }
         // Drop entries for panes that no longer exist (closed/undocked).
-        self.pane_activity
-            .retain(|k, _| busy_now.iter().any(|(id, _, _)| id == k));
+        self.pane_activity.retain(|k, _| panes.iter().any(|(id, _)| id == k));
         if let Ok(mut ws) = self.ws.lock() {
             if ws.compacting != compacting_now {
                 ws.compacting = compacting_now;
             }
         }
-        self.pane_last_busy
-            .retain(|k, _| busy_now.iter().any(|(id, _, _)| id == k));
-        self.route_approval_prompts(&busy_now, now);
 
         // 계정 전환 때 일하고 있어서 못 되띄운 pane — 방금 갱신한 활동 상태가
         // idle 로 떨어졌으면 여기서 따라 돌린다(같은 300ms 박자, 표시가 없으면 공짜).
@@ -1156,16 +936,17 @@ impl App {
             self.set_toast(deferred_account_restart_toast(switched));
         }
 
-        if completed.is_empty() {
+        if events.is_empty() {
             return;
         }
-        // A sibling finished: 헤더 펄스 + 학생 cheer 만 남긴다. 완료 "토스트"는
-        // glyph 스캔 기반이라 오탐(엉뚱한 pane·타이밍)이 잦아 제거(사용자 요청).
-        for id in completed {
-            self.notify_flash.insert(id.clone(), now);
-            // 턴 완료 → 학생 cheer 시작. 사용자가 이 pane 에 입력할 때까지 유지.
-            self.turn_done_panes.insert(id);
+        // 알림은 전이에서만 나온다 — 완료·승인·오류 각각 한 번. 훅이 먼저 알린 것과는
+        // `notify_desktop` 의 dedup 키가 접는다.
+        for (id, evs) in events {
+            for ev in evs {
+                self.apply_transition_event(&id, ev);
+            }
         }
+        self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
@@ -1527,94 +1308,6 @@ impl App {
     /// 사용자를 부르고 — sticky 토스트 + 승인/거부 칩 + 데스크탑 알림 — 워커의
     /// 프롬프트는 board `waiting` 으로만 흘려 오케스트레이터가 처리하게 둔다. 프롬프트가
     /// 사라지거나(답함) pane 이 다시 일하면 플래그·토스트를 걷는다.
-    fn route_approval_prompts(
-        &mut self,
-        scan: &[(String, bool, Option<ApprovalPrompt>)],
-        now: Instant,
-    ) {
-        let mut changed = false;
-        for (id, raw_busy, prompt) in scan {
-            let busy = *raw_busy
-                || self
-                    .pane_last_busy
-                    .get(id)
-                    .map_or(false, |t| now.duration_since(*t) < Self::BUSY_GRACE);
-            let flagged = self.pane_prompt_wait.contains_key(id);
-            if !busy && prompt.is_some() {
-                if !flagged {
-                    // 솔로(자동통솔 폐기 06-18) — 모든 pane 이 사용자 직행.
-                    let faces_user = true;
-                    self.pane_prompt_wait.insert(id.clone(), faces_user);
-                    // ⚠️ 여기에 `notify_flash` 를 넣지 마라. 그 맵은 **턴 완료** 전용
-                    // 채널이라(초록 펄스 + 학생 만세), 승인 대기에 진입하는 순간
-                    // 막혀 선 학생이 「끝난 학생」으로 보였다 — 없는 신호보다 나쁜
-                    // 틀린 신호다(2026-08-11). 대기는 attention 색이 말한다.
-                    // board 에 waiting 으로 노출 — 오케스트레이터가 board 로 본다.
-                    self.collab
-                        .attention
-                        .lock()
-                        .unwrap()
-                        .insert(
-                            id.clone(),
-                            crate::stream::AttentionFlag {
-                                reason: "승인 대기 (화면 감지)".to_string(),
-                                kind: "permission".to_string(),
-                            },
-                        );
-                    // 화면 승인 토스트/칩은 화면 감지 오탐이 있어 제거(사용자 요청).
-                    // 승인 신호는 board attention(위) + (pane 안 볼 때) 데스크탑 알림
-                    // 으로만 남긴다 — toast_action 은 Sparkle 업데이트 토스트가 공유해
-                    // 건드리지 않는다.
-                    if faces_user {
-                        // 보고 있는 pane 이라고 삼키지 않는다 — 사용자 2026-08-11
-                        // "pane별로 그냥 다오게하자". 프사가 붙어 누구 건지 갈린다.
-                        let ch = self.pane_character_if_known(id);
-                        let who = ch.clone().unwrap_or_else(|| "pane".to_string());
-                        // 훅 경로(`chrome.rs` 의 `⚠ 권한 필요`)와 같은 열쇠 — 같은
-                        // 프롬프트에 배너가 둘 나가는 걸 발사구에서 막는다.
-                        let sid = self.pane_claude_sid.get(id).cloned();
-                        crate::chrome::notify_desktop(
-                            "⚠ 승인 필요",
-                            &who,
-                            ch.as_deref(),
-                            Some(&format!("approval:{id}")),
-                            Some((id, sid.as_deref())),
-                        );
-                    }
-                    changed = true;
-                }
-                let st = if self.pane_prompt_wait.get(id).copied().unwrap_or(false) {
-                    "blocked"
-                } else {
-                    "waiting"
-                };
-                if let Some(a) = self.pane_activity.get_mut(id) {
-                    if a.status != st {
-                        a.status = st.to_string();
-                        changed = true;
-                    }
-                }
-            } else if flagged {
-                self.pane_prompt_wait.remove(id);
-                self.collab.attention.lock().unwrap().remove(id);
-                if self.collab.toast_action.as_deref() == Some(id.as_str()) {
-                    self.clear_approval_toast();
-                }
-                changed = true;
-            }
-        }
-        self.pane_prompt_wait
-            .retain(|k, _| scan.iter().any(|(id, _, _)| id == k));
-        if changed {
-            self.chrome_dirty = true;
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
-        }
-    }
-
-    /// Drop the sticky approval toast and its chip hit-rects in one place —
-    /// called when the prompt resolves, a chip is clicked, or it's dismissed.
     pub(crate) fn clear_approval_toast(&mut self) {
         self.collab.toast = None;
         self.collab.toast_action = None;
@@ -1628,6 +1321,14 @@ impl App {
     /// 확정한다 — 메뉴에 'n' 을 보내면 글자는 무시되고 \r 만 남아 Yes 를 골라버리는
     /// 오발이 있어서, munder처럼 y\r 맹발사하지 않는다.
     pub(crate) fn respond_approval(&mut self, pane_id: &str, approve: bool) {
+        // 상태가 승인 대기가 아니면 아무 바이트도 안 보낸다 — 노는 pane 에 Enter 를 넣는
+        // 사고를 막는다. 어떤 바이트를 보낼지는 화면의 위젯 모양이 정본이라 그건 본다.
+        if !matches!(
+            self.agent_state(pane_id),
+            crate::agent_state::AgentState::Waiting { kind: crate::agent_state::WaitKind::Permission, .. }
+        ) {
+            return;
+        }
         let kind = {
             let ws = self.ws.lock().unwrap();
             ws.panes
@@ -4082,16 +3783,6 @@ impl App {
     }
 }
 
-/// True when a pane's grid shows a live "working" animation in its bottom rows:
-/// Braille spinners (U+2800..U+28FF — npm, pure-prompt) or Dingbat stars
-/// (U+2731..U+274F — Claude Code's ✻/✶/✷ thinking indicator). Claude clears
-/// this line the moment it goes idle, so the absence of a marker is a reliable
-/// idle signal. Only the last ~10 rows are scanned (the live status sits at the
-/// bottom); scrollback above is ignored.
-pub(crate) fn term_is_working(t: &TerminalPane) -> bool {
-    rows_show_working(&t.cells)
-}
-
 /// 수식키 **단독** 입력인가.
 ///
 /// 조합기를 쓰는 입구들은 하나같이 "자모도 Backspace 도 아니면 조합을 확정한다"로
@@ -4243,7 +3934,7 @@ pub(crate) fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
 /// 아래 진행률 행(`▰▰▱ 45%`)에서 읽은 값. claude 는 진행률을 화면에만 내놓으므로
 /// 글자에서 읽는 수밖에 없고, 그 행이 안 보이는 프레임은 `Some(None)` — 바는
 /// 시간 루프로 폴백한다(2026-08-13 지시: 퍼센트 파싱해서 진짜 진행률로).
-pub(crate) fn rows_show_compacting(cells: &[Vec<GridCell>]) -> Option<Option<u8>> {
+pub(crate) fn compact_pct_on_screen(cells: &[Vec<GridCell>]) -> Option<Option<u8>> {
     let (r, _) = crate::render::find_claude_spinner(cells)?;
     let text: String = cells[r].iter().map(|c| c.ch).collect();
     if !text.contains("ompacting") {
@@ -5150,11 +4841,11 @@ mod working_scan_tests {
     // 여부와 뒤에 붙는 말이 버전마다 흔들려도 남는 조각이다.
     #[test]
     fn compacting_notice_is_detected_in_either_wording() {
-        assert!(rows_show_compacting(&[row(
+        assert!(compact_pct_on_screen(&[row(
             "✻ Compacting conversation… (3m 31s · ↓ 8.7k tokens)"
         )])
         .is_some());
-        assert!(rows_show_compacting(&[row(
+        assert!(compact_pct_on_screen(&[row(
             "✻ compacting history (esc to interrupt)"
         )])
         .is_some());
@@ -5163,9 +4854,9 @@ mod working_scan_tests {
     // 평범한 working 화면을 compact 로 오인하면 모든 바쁜 pane 이 채워지는 바를 단다.
     #[test]
     fn ordinary_working_screen_is_not_compacting() {
-        assert!(rows_show_compacting(&[row("✻ Pondering… (esc to interrupt)")]).is_none());
-        assert!(rows_show_compacting(&[row("")]).is_none());
-        assert!(rows_show_compacting(&[]).is_none());
+        assert!(compact_pct_on_screen(&[row("✻ Pondering… (esc to interrupt)")]).is_none());
+        assert!(compact_pct_on_screen(&[row("")]).is_none());
+        assert!(compact_pct_on_screen(&[]).is_none());
     }
 
     // ★회귀: 알림과 맨 아랫줄 사이에 todo 트리와 입력박스가 끼어도 잡아야 한다.
@@ -5181,7 +4872,7 @@ mod working_scan_tests {
         for _ in 0..8 {
             cells.push(row("│ 입력박스와 statusline"));
         }
-        assert_eq!(rows_show_compacting(&cells), Some(Some(45)));
+        assert_eq!(compact_pct_on_screen(&cells), Some(Some(45)));
     }
 
     // ★회귀: 경과시간 괄호가 아예 없는 변형(2026-08-13 스샷 실측). 이 행이 그
@@ -5192,7 +4883,7 @@ mod working_scan_tests {
     fn compacting_notice_without_elapsed_suffix_is_detected_and_busy() {
         let cells = vec![row("· Compacting conversation…")];
         assert!(rows_show_working(&cells));
-        assert_eq!(rows_show_compacting(&cells), Some(None));
+        assert_eq!(compact_pct_on_screen(&cells), Some(None));
     }
 
     // ★회귀: 실제 compact 화면 그대로 — 알림 아래 진행률 행과 `⎿ Tip:` 행이 깔린다
@@ -5206,7 +4897,7 @@ mod working_scan_tests {
             row("⎿  Tip: Did you know you can drag and drop image files into your terminal?"),
         ];
         assert!(rows_show_working(&cells));
-        assert_eq!(rows_show_compacting(&cells), Some(Some(7)));
+        assert_eq!(compact_pct_on_screen(&cells), Some(Some(7)));
     }
 
     // Tip 행의 우연한 %(예: "100% faster")를 진행률로 줍지 않는가 — 스캔은 알림
@@ -5221,7 +4912,7 @@ mod working_scan_tests {
         // Tip 행도 스캔 창(직하 2행) 안이라 숫자+% 는 읽힌다 — 형태만으로는 못
         // 가른다. 대신 실제 화면에선 진행률 행이 항상 알림 바로 아래라 Tip 이
         // 먼저 잡힐 일이 없다. 이 테스트는 그 순서 의존을 문서화한다.
-        assert_eq!(rows_show_compacting(&cells), Some(Some(100)));
+        assert_eq!(compact_pct_on_screen(&cells), Some(Some(100)));
     }
 
     // 스크롤백에 굳은 옛 알림은 무시돼야 한다 — 안 그러면 compact 가 끝난 뒤에도
@@ -5232,7 +4923,7 @@ mod working_scan_tests {
             row("✻ Compacting conversation… (3m 31s · ↓ 8.7k tokens)"),
             row("⎿ 그 뒤에 이어진 도구 출력"),
         ];
-        assert!(rows_show_compacting(&cells).is_none());
+        assert!(compact_pct_on_screen(&cells).is_none());
     }
 
     #[test]

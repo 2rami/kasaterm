@@ -1970,7 +1970,7 @@ impl App {
         if !fresh && !force {
             let working = {
                 let ws = self.ws.lock().unwrap();
-                Self::pane_agent_working(&ws, pid)
+                self.pane_agent_working(&ws, pid)
             };
             if working {
                 self.migrate_queue.push(PendingMigration {
@@ -2366,7 +2366,7 @@ impl App {
         if !force {
             let working = {
                 let ws = self.ws.lock().unwrap();
-                Self::pane_agent_working(&ws, pid)
+                self.pane_agent_working(&ws, pid)
             };
             if working {
                 self.migrate_queue.retain(|q| q.pane != pid);
@@ -2932,7 +2932,7 @@ impl App {
         // 권한 모드도 끄기 전에 화면에서 뜬다 — 계정을 갈았다고 bypass 학생이
         // 물어보는 모드로 떨어질 이유가 없다(복원·이사와 같은 승계 원칙).
         // claude 가 이미 죽었어도 얼어붙은 화면에 푸터가 남아 있어 읽힌다.
-        let bypass = Self::pane_bypass_on(&self.ws.lock().unwrap(), pane);
+        let bypass = { let ws = self.ws.lock().unwrap(); self.pane_bypass_on(&ws, pane) };
         let (cols, rows) = self.window_cells();
         // 옛 PTY 종료 — 여기서 옛 계정 토큰을 문 프로세스가 사라진다. pump 스레드는
         // EOF 로 빠진다.
@@ -3418,7 +3418,7 @@ impl App {
                     focused: focused.as_deref() == Some(id.as_str()),
                     closed: self.stashed_record(&id).is_some(),
                     busy: account_restart_busy(
-                        self.pane_prompt_wait.contains_key(&id),
+                        self.pane_activity.get(&id).is_some_and(|a| a.status == "waiting"),
                         self.pane_activity
                             .get(&id)
                             .map(|a| (a.status.as_str(), a.bg_active)),
@@ -3455,7 +3455,7 @@ impl App {
                     focused: focused.as_deref() == Some(id.as_str()),
                     closed: self.stashed_record(&id).is_some(),
                     busy: account_restart_busy(
-                        self.pane_prompt_wait.contains_key(&id),
+                        self.pane_activity.get(&id).is_some_and(|a| a.status == "waiting"),
                         self.pane_activity
                             .get(&id)
                             .map(|activity| (activity.status.as_str(), activity.bg_active)),
@@ -3667,7 +3667,7 @@ impl App {
             // 대화를 잇지만 진행 중이던 턴은 죽는다. 활동 기록이 아직 없는 pane 도
             // 다음 틱(300ms)까지 미룬다.
             let busy = account_restart_busy(
-                self.pane_prompt_wait.contains_key(&id),
+                self.pane_activity.get(&id).is_some_and(|a| a.status == "waiting"),
                 self.pane_activity
                     .get(&id)
                     .map(|a| (a.status.as_str(), a.bg_active)),
@@ -6313,7 +6313,13 @@ impl App {
     /// 프로세스 argv 는 claude 가 실행 중 제목으로 덮어써 못 믿는다(2026-08-30
     /// 실측: 도는 claude 가 `ps` 의 command 에서 통째로 사라졌다). 글리프 접두까지
     /// 정확히 맞춰 본다 — 대화 본문이 그 문구를 말하는 것과 갈라야 해서다.
-    pub(crate) fn pane_bypass_on(ws: &Workspace, pane_id: &str) -> bool {
+    /// 이 pane 의 claude 가 bypass 모드인가 — 훅이 실어 준 permission_mode 가 정본이고,
+    /// 새 훅 이전에 뜬 세션(아직 `turn` 을 안 보낸)만 화면 푸터를 읽는다.
+    pub(crate) fn pane_bypass_on(&self, ws: &Workspace, pane_id: &str) -> bool {
+        let tab = ws.active_tab_pid(pane_id);
+        if let Some(mode) = self.collab.hub.permission_mode(&tab).or_else(|| self.collab.hub.permission_mode(pane_id)) {
+            return mode == "bypassPermissions";
+        }
         ws.panes
             .get(pane_id)
             .and_then(|p| p.term())
@@ -6336,12 +6342,12 @@ impl App {
     /// 이 pane 의 에이전트가 지금 턴 중인가 — 헤더 working 바와 **같은** 화면
     /// 스피너 판정(input.rs `rows_show_working`)이다. 원격 미러 pane 도 원격
     /// 화면을 같은 그리드로 그리므로 그대로 통한다.
-    pub(crate) fn pane_agent_working(ws: &Workspace, pane_id: &str) -> bool {
-        ws.panes
-            .get(pane_id)
-            .and_then(|p| p.term())
-            .map(|t| crate::input::rows_show_working(&t.cells))
-            .unwrap_or(false)
+    /// 이사·정지 게이트 — 화면이 아니라 판정(`agent_state`)을 본다. 모르면 일하는 중으로
+    /// 친다: 이사를 미루는 쪽이 턴을 자르는 쪽보다 낫다.
+    pub(crate) fn pane_agent_working(&self, ws: &Workspace, pane_id: &str) -> bool {
+        let tab = ws.active_tab_pid(pane_id);
+        self.collab.hub.refresh();
+        self.collab.hub.is_working(&tab)
     }
 
     /// 이사 예약 실행기 — 틱마다 불려, 예약된 pane 의 턴이 끝났는지(스피너 꺼짐이
@@ -6364,7 +6370,7 @@ impl App {
                 let ws = self.ws.lock().unwrap();
                 let mut i = 0;
                 while i < self.migrate_queue.len() {
-                    let working = Self::pane_agent_working(&ws, &self.migrate_queue[i].pane);
+                    let working = self.pane_agent_working(&ws, &self.migrate_queue[i].pane);
                     let q = &mut self.migrate_queue[i];
                     if working {
                         q.idle_since = None;
@@ -8040,6 +8046,7 @@ impl App {
             self.collab.hook_activity.clone(),
             self.pane_status_pub.clone(),
             self.bg_agents.clone(),
+            self.collab.hub.clone(),
         ));
         backend.start_session_discovery();
         // GUI 쪽에도 핸들 보관 — ResumeSession 이 attach/재개 pane 의 transcript 를

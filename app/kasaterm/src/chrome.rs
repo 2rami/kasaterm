@@ -393,15 +393,10 @@ impl App {
         // 완료 화면 토스트는 제거(사용자 2026-07-27) — 학생이 많아 턴마다 떠서 시야를
         // 가린다. 완료 신호는 탭 펄스·dock 배지·백그라운드 데스크톱 알림(아래)으로
         // 전달된다.
-        self.pane_last_busy.remove(surface_id);
-        self.pane_activity
-            .entry(surface_id.to_string())
-            .and_modify(|a| a.status = "idle".to_string())
-            .or_insert_with(|| crate::stream::PaneStatusView {
-                status: "idle".to_string(),
-                ..Default::default()
-            });
-        self.notify_flash.insert(surface_id.to_string(), now);
+        // 상태 자체는 허브가 닫는다(`PtyBackend::notify` → `turn end`); 다음 틱의 전이
+        // 관찰자가 TurnDone 으로 펄스·cheer 를 켠다. 여기서는 바로 되투영만 시킨다.
+        self.pane_busy_check = None;
+        let _ = now;
         // 턴이 끝났다 = 사용량이 방금 움직였다. 폴러를 깨워 남은 잠을 건너뛰게 한다
         // (`usage_poke`) — 그러지 않으면 방금 쓴 몫이 최대 1분 뒤에야 표에 뜬다.
         crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
@@ -426,14 +421,15 @@ impl App {
             Some(c) => format!("{c} · {title}"),
             None => title.to_string(),
         };
-        // 완료는 열쇠를 안 준다 — 턴마다 정당하게 떠야 하고, 학생이 여럿이면 서로
-        // 다른 pane 의 완료가 같은 창 안에 겹치는 게 정상이다.
+        // 열쇠는 pane 별 `done:<id>` — 전이 관찰자(`apply_transition_event` 의 TurnDone)가
+        // 같은 열쇠로 한 번 더 내므로, 8초 창 안에서 먼저 온 이쪽(훅) 하나만 나간다. pane 이
+        // 다르면 열쇠도 달라 학생 여럿의 완료가 겹쳐 뜨는 것은 그대로다.
         let sid = self.pane_claude_sid.get(surface_id).cloned();
         notify_desktop(
             &titled,
             body,
             who.as_deref(),
-            None,
+            Some(&format!("done:{surface_id}")),
             Some((surface_id, sid.as_deref())),
         );
         // 배너는 `notify_desktop` 이 줄 세운다 — 한때 여기서 따로 push 했는데,
@@ -485,14 +481,84 @@ impl App {
         // 화면 감지 경로(`input.rs` 의 `⚠ 승인 필요`)와 **같은 열쇠**를 쓴다 — 승인
         // 프롬프트 하나에 배너가 둘 나가던 것을 여기서 하나로 만든다. 훅이 먼저 오면
         // reason 이 실린 이쪽이 이기고, 화면 감지가 뒤따라 와도 조용히 접힌다.
-        let sid = self.pane_claude_sid.get(surface_id).cloned();
-        notify_desktop(
-            "⚠ 권한 필요",
-            &body,
-            character.as_deref(),
-            Some(&format!("approval:{surface_id}")),
-            Some((surface_id, sid.as_deref())),
-        );
+        // 데스크톱 알림은 전이 관찰자(`apply_transition_event` 의 Waiting)가 같은 열쇠
+        // `approval:<id>` 로 낸다 — 훅이 알린 표식은 허브가 다음 틱에 Waiting 으로 투영하고
+        // 그 전이가 한 번 알린다. 여기서 또 내면 같은 승인이 두 번 울린다.
+        let _ = body;
+        self.pane_busy_check = None;
+    }
+
+    /// pane 의 판정. 없으면 Unknown.
+    pub(crate) fn agent_state(&self, id: &str) -> crate::agent_state::AgentState {
+        self.pane_activity.get(id).map(|a| a.state.clone()).unwrap_or_default()
+    }
+
+    /// 상태 전이 하나를 화면·알림으로 옮긴다. 완료 → 펄스·cheer·데스크톱 알림, 사람 차례 →
+    /// 토스트·알림, 오류 → 알림 한 번. 전부 `notify_desktop` 의 dedup 키를 지나므로 훅과
+    /// 겹쳐도 한 번이다.
+    pub(crate) fn apply_transition_event(&mut self, id: &str, ev: crate::agent_transitions::Transition) {
+        use crate::agent_transitions::Transition;
+        let now = std::time::Instant::now();
+        if std::env::var_os("KASATERM_STATE_LOG").is_some() {
+            eprintln!("[state] {id} {ev:?}");
+        }
+        let character = self.pane_character_if_known(id);
+        let who = character.clone().unwrap_or_else(|| "pane".to_string());
+        let sid = self.pane_claude_sid.get(id).cloned();
+        let is_active_pane = self.ws.lock().unwrap().active_pane.as_deref() == Some(id);
+        let background_window = self.window_of_pane(id).filter(|wi| *wi != self.active_window);
+        match ev {
+            Transition::TurnDone => {
+                self.notify_flash.insert(id.to_string(), now);
+                self.turn_done_panes.insert(id.to_string());
+                crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(wi) = background_window {
+                    self.window_alert.insert(wi);
+                }
+                if !(self.window_focused && is_active_pane) {
+                    self.unread_panes.insert(id.to_string());
+                    let intent = self.pane_activity.get(id).map(|a| a.intent.clone()).unwrap_or_default();
+                    notify_desktop(
+                        &format!("{who} · 완료"),
+                        &intent,
+                        character.as_deref(),
+                        Some(&format!("done:{id}")),
+                        Some((id, sid.as_deref())),
+                    );
+                }
+            }
+            Transition::Waiting { kind, reason } => {
+                self.notify_flash.remove(id);
+                if let Some(wi) = background_window {
+                    self.window_alert.insert(wi);
+                }
+                if self.collab.toast_action.as_deref() != Some(id) {
+                    self.collab.toast = Some((format_attention_toast(character.as_deref(), &reason), now));
+                    self.collab.toast_rect = None;
+                }
+                if !(self.window_focused && is_active_pane) {
+                    self.unread_panes.insert(id.to_string());
+                }
+                let title = match kind {
+                    crate::agent_state::WaitKind::Permission => "⚠ 권한 필요",
+                    crate::agent_state::WaitKind::Question => "❓ 질문",
+                    crate::agent_state::WaitKind::Idle => "⏸ 대기",
+                };
+                let body = if reason.is_empty() { who.clone() } else { format!("{who} — {reason}") };
+                notify_desktop(title, &body, character.as_deref(), Some(&format!("approval:{id}")), Some((id, sid.as_deref())));
+            }
+            Transition::Error { label } => {
+                if let Some(wi) = background_window {
+                    self.window_alert.insert(wi);
+                }
+                if !(self.window_focused && is_active_pane) {
+                    self.unread_panes.insert(id.to_string());
+                }
+                notify_desktop("⚠ 오류", &format!("{who} — {label}"), character.as_deref(), Some(&format!("error:{id}")), Some((id, sid.as_deref())));
+            }
+            Transition::Recovered | Transition::CompactStart | Transition::CompactEnd => {}
+        }
+        self.chrome_dirty = true;
     }
 
     /// pane 이 현존하고 캐릭터가 배정됐으면 그 이름(고정값) — 토스트 "누가" 소스.
@@ -584,20 +650,18 @@ impl App {
     /// 기다리는지"를 말하는 근거다 — 대기가 먼저다: 작업 중은 놔두면 끝나지만
     /// 대기는 내가 손대야 풀리므로, 둘이 겹치면 급한 쪽을 보여야 한다.
     pub(crate) fn pane_state_color(&self, id: &str) -> [u8; 4] {
-        let st = self.pane_activity.get(id);
-        // 끊김이 가장 먼저다 — 멈춘 pane 은 스피너가 없어 idle 로 보이므로, 아래
-        // 어느 갈래에도 안 걸려 「조용한 정상」과 똑같이 회색으로 앉는다. 그게 이
-        // 표시를 만든 이유다(2026-08-26 지시).
-        if st.is_some_and(|a| a.stalled.is_some()) {
+        let state = self.agent_state(id);
+        // 오류가 가장 먼저다 — 멈춘 pane 은 어느 갈래에도 안 걸려 「조용한 정상」과 똑같이
+        // 회색으로 앉는다. 그게 이 표시를 만든 이유다(2026-08-26 지시).
+        if matches!(state, crate::agent_state::AgentState::Error { .. }) {
             theme::danger()
-        } else if st.is_some_and(|a| status_needs_you(&a.status)) {
+        } else if state.needs_you() {
             theme::attention()
         } else if self.notify_flash_factor(id).is_some() {
             theme::success()
-        } else if st.is_some_and(|a| a.status != "idle" && !a.status.is_empty())
+        } else if state.is_busy()
             // 파란 점은 **지금 보고 있는 pane** 에만 준다. 작업 중인 pane 이 여럿이면
-            // 목록이 온통 파래져 정작 손이 필요한 빨강·끝난 초록이 묻혔다 — 남의
-            // 진행은 배너 바가 이미 말하고 있으니 여기서 한 번 더 외칠 자리가 아니다.
+            // 목록이 온통 파래져 정작 손이 필요한 빨강·끝난 초록이 묻혔다.
             && self.ws.lock().unwrap().active_pane.as_deref() == Some(id)
         {
             theme::accent()
@@ -606,22 +670,14 @@ impl App {
         }
     }
     /// 그 pane 이 **도는 중**인가 — 헤더 진행 바와 사이드바 걷기가 같이 쓴다.
-    ///
-    /// 기다리는 중(`waiting`·`blocked`)은 도는 게 아니다. 사람 답을 기다리는데 바가
-    /// 계속 차오르면 "일하는 줄" 알고 지나치게 된다(사용자 2026-08-11: "프로세스바
-    /// 제대로 안되는거"). 사이드바는 이미 그걸 갈라 놨는데 헤더만 안 갈려 있었다 —
-    /// 같은 판정이 두 벌이면 한쪽만 고쳐진다.
+    /// 기다리는 중은 도는 게 아니다(사람 답을 기다리는데 바가 차오르면 지나친다).
     pub(crate) fn pane_is_busy(&self, id: &str) -> bool {
-        self.pane_activity.get(id).is_some_and(|a| {
-            !a.status.is_empty() && a.status != "idle" && !status_needs_you(&a.status)
-        })
+        self.agent_state(id).is_busy()
     }
 
     /// 그 pane 이 **내 손을 기다리는 중**인가 — 승인 프롬프트든 질문이든.
     pub(crate) fn pane_needs_you(&self, id: &str) -> bool {
-        self.pane_activity
-            .get(id)
-            .is_some_and(|a| status_needs_you(&a.status))
+        self.agent_state(id).needs_you()
     }
 
     /// 계정 전환 반짝임의 진행도 `1.0 → 0.0`. 끝났으면 `None` — 호출부가 그걸로
@@ -3796,27 +3852,24 @@ impl App {
                 .pane_character_if_known(id)
                 .unwrap_or_else(|| "누군가".to_string());
             let pane = id.clone();
-            if a.stalled.is_some() || a.has_error {
-                stalled.push((who, pane));
-            } else if a.status == "waiting" || a.status == "blocked" {
-                waiting.push((who, doing_now(a.waiting_for.as_deref().unwrap_or("")), pane));
-            } else if a.status == "working" || a.status == "building" || a.bg_active {
-                // 몇 분째인지가 「지금 뭐 하나」의 절반이다 — 잠깐 도는 일과 오래 도는
-                // 일이 같은 문장으로 보이면 어느 쪽을 봐야 할지 알 수가 없다.
-                let mins = a
-                    .busy_since
-                    .map(|t| t.elapsed().as_secs() / 60)
-                    .unwrap_or(0);
-                // 대화를 줄이는 중이면 그게 지금 하는 일이다.
-                let what = match a.compact_pct {
-                    Some(p) => format!("대화 줄이는 중 {p}%"),
-                    None => doing_now(&a.intent),
-                };
-                let task = titles
-                    .get(id)
-                    .map(|t| task_name(t, &who))
-                    .unwrap_or_default();
-                busy.push((who, task, what, mins, pane));
+            let (st, what) = pet_state_of(&a.state, a.bg_active, a.compact_pct, &a.intent);
+            match st {
+                "error" => stalled.push((who, pane)),
+                "wait" => waiting.push((who, what, pane)),
+                "busy" => {
+                    // 몇 분째인지가 「지금 뭐 하나」의 절반이다 — 잠깐 도는 일과 오래 도는
+                    // 일이 같은 문장으로 보이면 어느 쪽을 봐야 할지 알 수가 없다.
+                    let mins = a
+                        .busy_since
+                        .map(|t| t.elapsed().as_secs() / 60)
+                        .unwrap_or(0);
+                    let task = titles
+                        .get(id)
+                        .map(|t| task_name(t, &who))
+                        .unwrap_or_default();
+                    busy.push((who, task, what, mins, pane));
+                }
+                _ => {}
             }
         }
         waiting.sort();
@@ -3836,21 +3889,7 @@ impl App {
                 .pane_activity
                 .get(&id)
                 .map(|a| {
-                    let st = if a.stalled.is_some() || a.has_error {
-                        "error"
-                    } else if status_needs_you(&a.status) {
-                        "wait"
-                    } else if a.status == "working" || a.status == "building" || a.bg_active {
-                        "busy"
-                    } else {
-                        "idle"
-                    };
-                    let what = match a.compact_pct {
-                        Some(p) => format!("대화 줄이는 중 {p}%"),
-                        None if st == "wait" => doing_now(a.waiting_for.as_deref().unwrap_or("")),
-                        None if st == "error" => a.stalled.clone().unwrap_or_else(|| "막혔어요".into()),
-                        None => doing_now(&a.intent),
-                    };
+                    let (st, what) = pet_state_of(&a.state, a.bg_active, a.compact_pct, &a.intent);
                     let mins = a.busy_since.map(|t| t.elapsed().as_secs() / 60).unwrap_or(0);
                     (st, what, mins)
                 })
@@ -3892,8 +3931,8 @@ impl App {
             subject = pane.clone();
             let why = self
                 .pane_activity
-                .values()
-                .find_map(|a| a.stalled.clone())
+                .get(pane)
+                .and_then(|a| a.stalled.clone())
                 .unwrap_or_else(|| "막혔어요".to_string());
             ("error", format!("{who}{} {why}", josa(who, "은", "는")))
         } else if !waiting.is_empty() {
@@ -3990,8 +4029,53 @@ fn doc_name(path: &str) -> String {
 /// 사이드바 깜빡임도 방 탭 점도 전부 죽어 있었다(2026-08-11 조사).
 ///
 /// 판정을 여기 한 벌로 둔다. 같은 조건을 여섯 군데 적어 두면 한쪽만 고쳐진다.
-pub(crate) fn status_needs_you(status: &str) -> bool {
-    status == "waiting" || status == "blocked"
+/// 펫 board.json 의 상태 낱말(idle·busy·wait·error)과 「지금 뭐 하나」 한 마디 — 판정 하나에서.
+/// 기다림은 종류별 기본 문구(승인·답·다음 지시)가 있어 이유가 비어도 말이 된다.
+pub(crate) fn pet_state_of(
+    state: &crate::agent_state::AgentState,
+    bg_active: bool,
+    compact_pct: Option<u8>,
+    intent: &str,
+) -> (&'static str, String) {
+    use crate::agent_state::AgentState;
+    match state {
+        AgentState::Error { label } => (
+            "error",
+            if label.is_empty() { "막혔어요".to_string() } else { label.clone() },
+        ),
+        AgentState::Waiting { kind, reason } => (
+            "wait",
+            doing_now(if reason.is_empty() { kind.default_reason() } else { reason }),
+        ),
+        AgentState::Working | AgentState::Compacting => (
+            "busy",
+            match compact_pct {
+                Some(p) => format!("대화 줄이는 중 {p}%"),
+                None => doing_now(intent),
+            },
+        ),
+        AgentState::Idle | AgentState::Unknown if bg_active => ("busy", doing_now(intent)),
+        AgentState::Idle | AgentState::Unknown => ("idle", String::new()),
+    }
+}
+
+#[cfg(test)]
+mod pet_state_tests {
+    use super::pet_state_of;
+    use crate::agent_state::{AgentState, WaitKind};
+
+    #[test]
+    fn each_state_maps_to_one_pet_word() {
+        assert_eq!(pet_state_of(&AgentState::Idle, false, None, "Edit a.rs").0, "idle");
+        assert_eq!(pet_state_of(&AgentState::Idle, true, None, "cargo build").0, "busy");
+        assert_eq!(pet_state_of(&AgentState::Working, false, None, "").0, "busy");
+        assert_eq!(pet_state_of(&AgentState::Compacting, false, Some(40), ""), ("busy", "대화 줄이는 중 40%".into()));
+        let w = AgentState::Waiting { kind: WaitKind::Permission, reason: String::new() };
+        let (st, what) = pet_state_of(&w, false, None, "");
+        assert_eq!(st, "wait");
+        assert!(!what.is_empty(), "이유가 비어도 종류별 기본 문구가 있다");
+        assert_eq!(pet_state_of(&AgentState::Error { label: "연결 끊김".into() }, false, None, ""), ("error", "연결 끊김".into()));
+    }
 }
 
 /// 같은 열쇠의 알림은 이 창 안에서 한 번만 나간다.
@@ -4987,17 +5071,6 @@ mod room_rename_tests {
     #[test]
     fn 직전_클릭이_없으면_편집이_아니다() {
         assert!(!starts_room_rename(None, 1, 1, Instant::now()));
-    }
-
-    /// 대기 어휘가 둘(`waiting`/`blocked`)인데 표시 여섯 자리가 앞의 것만 보고 있었고,
-    /// 정작 화면 감지는 뒤의 것만 쓴다 — 그래서 승인 대기가 아무 데도 안 그려졌다.
-    #[test]
-    fn 대기_판정은_두_어휘를_모두_받는다() {
-        assert!(status_needs_you("waiting"));
-        assert!(status_needs_you("blocked"));
-        assert!(!status_needs_you("working"));
-        assert!(!status_needs_you("idle"));
-        assert!(!status_needs_you(""));
     }
 
     /// 같은 승인에 훅과 화면 감지가 각각 쏘던 것을 발사구에서 막는다.

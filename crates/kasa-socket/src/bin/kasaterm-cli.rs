@@ -1592,6 +1592,8 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             let ctx_tokens: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
             let model = args.get(5).map(|s| s.as_str()).unwrap_or("");
             let effort = args.get(6).map(|s| s.as_str()).unwrap_or("");
+            // 여덟째: 상태줄에 찍는 모델 표시명("Opus 4.8 1M"). 보드가 화면 대신 이걸 쓴다.
+            let model_label = args.get(7).map(|s| s.as_str()).unwrap_or("");
             (
                 "surface.report_cwd",
                 json!({
@@ -1602,6 +1604,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                     "ctx_tokens": ctx_tokens,
                     "model": model,
                     "effort": effort,
+                    "model_label": model_label,
                 }),
             )
         }
@@ -2127,6 +2130,35 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             (
                 "surface.attention",
                 json!({ "surface_id": surface, "reason": reason, "kind": kind }),
+            )
+        }
+        "turn" => {
+            let (surface, rest): (String, &[String]) =
+                if args.first().is_some_and(|a| a == "--surface") {
+                    let s = args
+                        .get(1)
+                        .ok_or_else(|| anyhow!("--surface needs an id"))?
+                        .clone();
+                    (s, args.get(2..).unwrap_or(&[]))
+                } else {
+                    let s = std::env::var("KASATERM_PANE_ID").map_err(|_| {
+                        anyhow!("turn needs --surface <id> or $KASATERM_PANE_ID")
+                    })?;
+                    (s, &args[..])
+                };
+            let phase = rest
+                .first()
+                .ok_or_else(|| anyhow!("turn needs <start|end|compact_start|compact_end|reset>"))?
+                .clone();
+            let mode = rest
+                .iter()
+                .position(|a| a == "--permission-mode")
+                .and_then(|i| rest.get(i + 1))
+                .cloned()
+                .unwrap_or_default();
+            (
+                "surface.turn",
+                json!({ "surface_id": surface, "phase": phase, "permission_mode": mode }),
             )
         }
         "agent-status" => {

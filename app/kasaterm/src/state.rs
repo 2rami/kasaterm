@@ -1077,13 +1077,27 @@ pub(crate) struct TurnObservation {
     pub(crate) path: std::path::PathBuf,
     pub(crate) len: u64,
     pub(crate) mtime: Option<std::time::SystemTime>,
+    /// 마지막 활동이 오류였나(라벨·세기). 새 활동이 붙으면 None.
+    pub(crate) error: Option<crate::transcript::HarnessError>,
+    /// 지금 무엇을 하는 중인지 한 줄(`snapshot_from_tail` 의 intent).
+    pub(crate) intent: String,
+    /// 꼬리에서 본 뒤 작업(서브에이전트·백그라운드)이 아직 안 돌아왔나.
+    pub(crate) bg: bool,
 }
 
-/// 기록이 이만큼 조용하면 「열린 턴」을 더는 믿지 않는다. 하네스는 턴을 닫는 줄을 못 남기고
-/// 끝날 때가 있다 — 도구 결과 뒤 답 없이 프롬프트로 돌아간 경우(API 오류·빈 답). 그러면
-/// 기록은 영영 「열림」이고 미니맵·헤더 바·보드가 다 「일하는 중」으로 굳는다(2026-09-17
-/// 시로코: 5분째 프롬프트인데 걷고 있었다). 진짜 일하는 턴은 도구 스피너(esc to interrupt)나
-/// 출력 박동이 화면에 있거나 기록이 계속 자라므로, 둘 다 없으면 닫힌 것으로 본다.
+/// 훅이 알린 턴 경계 — UserPromptSubmit 이 열고 Stop 이 닫는다. 기록보다 먼저 온다(ms)
+/// 고, 기록이 닫는 줄을 못 남기고 끝나도 Stop 은 온다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HookTurn {
+    Open,
+    Closed,
+}
+
+/// 열린 턴의 신호(훅 박동·훅 턴 경계·기록 mtime 중 가장 새것)가 이만큼 조용하고 PTY 출력
+/// 박동도 없으면 「열린 턴」을 더는 믿지 않는다. 하네스는 턴을 닫는 줄을 못 남기고 끝날 때가
+/// 있다 — 도구 결과 뒤 답 없이 프롬프트로 돌아간 경우(API 오류·빈 답). 그러면 기록은 영영
+/// 「열림」이고 미니맵·헤더 바·보드가 다 「일하는 중」으로 굳는다(2026-09-17 시로코: 5분째
+/// 프롬프트인데 걷고 있었다). 긴 빌드 도구는 출력 박동이 살려 둔다. 규칙은 `agent_state::turn_open`.
 pub(crate) const TURN_STALE: std::time::Duration = std::time::Duration::from_secs(90);
 
 impl TurnObservation {
@@ -1110,7 +1124,6 @@ pub(crate) fn transcript_stale(path: &std::path::Path) -> bool {
 /// approve/deny card whose chip rects (`toast_approve_rect`/`toast_deny_rect`)
 /// route a response key to that pane. `attention` is the board `waiting` flag
 /// map, shared (Arc) with the socket `PtyBackend`. `unread` badges the board.
-#[derive(Default)]
 pub(crate) struct CollabState {
     pub(crate) toast: Option<(String, std::time::Instant)>,
     pub(crate) toast_rect: Option<(f32, f32, f32, f32)>,
@@ -1122,9 +1135,29 @@ pub(crate) struct CollabState {
     /// pane → 훅이 보고한 in-flight. `attention` 과 같이 socket `PtyBackend` 와 Arc
     /// 공유 — 쓰는 쪽은 훅(소켓 스레드), 읽는 쪽은 진행 표시(GUI 스레드)다.
     pub(crate) hook_activity: std::sync::Arc<std::sync::Mutex<HashMap<String, HookActivity>>>,
-    /// pty id → 기록에서 읽은 턴 상태. 헤더 working 바의 정본 — 보드와 같은 파일·같은
-    /// 판정(`transcript::turn_state_from_tail`)이라 둘이 다른 말을 하지 않는다.
-    pub(crate) turn: HashMap<String, TurnObservation>,
+    /// pane 상태의 정본 — 훅·기록·명부·박동을 한 판정으로 모은다(`agent_state`). 헤더 바·
+    /// 사이드바·미니맵·보드·펫이 전부 이것을 읽어 서로 다른 말을 하지 않는다. socket
+    /// `PtyBackend` 와 Arc 공유 — 훅 핸들러가 쓰고 GUI 틱과 보드 빌더가 읽는다.
+    pub(crate) hub: std::sync::Arc<crate::agent_state::StateHub>,
     #[allow(dead_code)] // board badge count — bumped, render/clear lands with sidebar work
     pub(crate) unread: u32,
+}
+
+impl Default for CollabState {
+    /// `attention`·`hook_activity` 는 허브 것의 **같은 Arc** 다. `#[derive(Default)]` 로 두면
+    /// 셋이 따로 만들어져 훅이 적은 승인 표식을 판정이 영영 못 본다.
+    fn default() -> Self {
+        let hub = std::sync::Arc::new(crate::agent_state::StateHub::default());
+        Self {
+            toast: None,
+            toast_rect: None,
+            toast_action: None,
+            toast_approve_rect: None,
+            toast_deny_rect: None,
+            attention: hub.attention.clone(),
+            hook_activity: hub.hook_activity.clone(),
+            hub,
+            unread: 0,
+        }
+    }
 }

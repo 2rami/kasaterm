@@ -186,6 +186,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.attention" => surface_attention(backend, id, &req.params),
         "surface.done" => surface_done(backend, id, &req.params),
         "surface.agent_status" => surface_agent_status(backend, id, &req.params),
+        "surface.turn" => surface_turn(backend, id, &req.params),
         "nacho.report" => nacho_report(backend, id, &req.params),
         "clipboard.set" => clipboard_set(backend, id, &req.params),
         "clipboard.get" => clipboard_get(backend, id),
@@ -558,6 +559,31 @@ fn nacho_report(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     }
 }
 
+fn surface_turn(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.turn requires `surface_id` (string)"),
+    };
+    let phase = match params.get("phase").and_then(|v| v.as_str()) {
+        Some(p @ ("start" | "end" | "compact_start" | "compact_end" | "reset")) => p,
+        Some(other) => {
+            return param_err(
+                id,
+                format!("surface.turn `phase` must be start|end|compact_start|compact_end|reset, got \"{other}\""),
+            )
+        }
+        None => return param_err(id, "surface.turn requires `phase`"),
+    };
+    let mode = params.get("permission_mode").and_then(|v| v.as_str()).unwrap_or("");
+    if mode.len() > 64 || !mode.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return param_err(id, "surface.turn `permission_mode` must be a short identifier");
+    }
+    match backend.turn(surface_id, phase, mode) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
 fn surface_agent_status(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
         Some(s) => s,
@@ -792,8 +818,10 @@ fn surface_report_cwd(backend: &dyn Backend, id: Value, params: &Value) -> Respo
     // 모델·effort 도 선택 — 빈 문자열이면 "미보고"라 종전 값을 안 덮는다.
     let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("");
     let effort = params.get("effort").and_then(|v| v.as_str()).unwrap_or("");
+    // 상태줄에 찍는 모델 표시명("Opus 4.8 1M") — 보드의 model 칸. 화면 판독을 대신한다.
+    let model_label = params.get("model_label").and_then(|v| v.as_str()).unwrap_or("");
     match backend.report_cwd(
-        surface_id, cwd, session_id, ctx_window, ctx_tokens, model, effort,
+        surface_id, cwd, session_id, ctx_window, ctx_tokens, model, effort, model_label,
     ) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),

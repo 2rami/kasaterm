@@ -4038,7 +4038,9 @@ pub(crate) fn paint_student_overlays(
     for (slug, motion, (bx, by, bw, bh)) in &slots.standing {
         ensure_anim(g, slug, motion);
         let pfx = sprite_key_prefix(motion);
-        g.queue_image_above(&format!("student:{slug}:{pfx}{anim_idx}"), *bx, *by, *bw, *bh);
+        // 제자리 걸음(일하는 중인데 스피너 자리를 못 찾은 때)은 walk 의 6프레임 시계다.
+        let idx = if *motion == "walk" { walk_idx } else { anim_idx };
+        g.queue_image_above(&format!("student:{slug}:{pfx}{idx}"), *bx, *by, *bw, *bh);
     }
     for (slug, (bx, by, bw, bh)) in &slots.profile {
         let key = format!("student:{slug}:profile");
@@ -4270,58 +4272,6 @@ pub(crate) fn standing_slot_rect(
     )
 }
 
-/// Claude Code 라이브 스피너("✻ Verbing…" 별 dingbat, 또는 braille) 위치 감지 —
-/// `rows_show_working`(input.rs)과 같은 신호를 행·열 좌표로 돌려준다. 마지막
-/// non-blank 30행, 행 앞머리(col<8)만 본다(본문 인용 별표 오탐 방지). 스피너
-/// 셀은 blank 처리하고 그 자리에 학생 working 도트를 얹는 용도.
-/// 연결이 끊겨 멈춘 pane 의 사연 — 화면에 뜬 claude 의 문구를 그대로 읽는다.
-///
-/// 인터넷이 끊기거나 API 가 안 붙으면 claude 는 조용히 서지 않고 화면에 문구를
-/// 남긴다. 그런데 그건 **스크롤백 어딘가의 글자**일 뿐이라, 옆에서 보는 사람에게는
-/// 도는 pane 과 멈춘 pane 이 똑같아 보인다(2026-08-26 지시: 「인터넷안되거나 뭐
-/// 갖가지 상황으로 연결끊겨서 멈추면 빨간색으로 표시되는거하자」).
-///
-/// 문구는 claude 2.1.246 바이너리에서 실측해 뽑았다 — 짐작으로 적으면 판에 따라
-/// 안 걸리고, 안 걸리는 감지는 없는 것과 같다.
-///
-/// **마지막 몇 행만 본다.** 위쪽 스크롤백에는 몇 시간 전에 지나간 오류가 그대로
-/// 남아 있어서, 전체를 훑으면 이미 회복한 pane 이 영영 빨갛게 굳는다. 사람도
-/// 화면 아래를 보고 「지금 멈췄나」를 판단한다.
-pub(crate) fn find_connection_trouble(rows: &[Vec<GridCell>]) -> Option<&'static str> {
-    let last = rows
-        .iter()
-        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
-    let start = (last + 1).saturating_sub(CONNECTION_TROUBLE_ROWS);
-    for row in rows[start..=last].iter() {
-        let text = row_text_only(row);
-        if let Some(hit) = connection_trouble_in(&text) {
-            return Some(hit);
-        }
-    }
-    None
-}
-
-/// 화면 아래에서 이만큼만 본다. 입력박스(3행)+상태줄+오류 몇 줄이 들어가는 깊이다.
-const CONNECTION_TROUBLE_ROWS: usize = 12;
-
-/// 한 줄에서 끊김 문구를 찾는다. 반환값은 **사람에게 보여줄 짧은 말**이라 원문이
-/// 아니라 우리 말로 옮긴 것이다 — 헤더에 들어가야 해서 길면 못 쓴다.
-///
-/// `App` 을 안 들고 다니므로 테스트가 된다.
-pub(crate) fn connection_trouble_in(line: &str) -> Option<&'static str> {
-    // 원문은 claude 2.1.246 실측. 왼쪽이 화면에 뜨는 글자, 오른쪽이 헤더에 적을 말.
-    const SIGNS: &[(&str, &str)] = &[
-        ("A network error occurred", "연결 끊김"),
-        ("Connection error", "연결 끊김"),
-        ("(offline)", "오프라인"),
-        ("request timed out", "응답 없음"),
-        ("Retrying in", "재시도 중"),
-    ];
-    // 대소문자는 판에 따라 갈릴 수 있어 낮춰서 본다. 화면 한 줄이라 비용은 무시할 만하다.
-    let low = line.to_lowercase();
-    SIGNS.iter().find(|(needle, _)| low.contains(&needle.to_lowercase())).map(|(_, label)| *label)
-}
-
 pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
     let last = rows
         .iter()
@@ -4424,7 +4374,7 @@ pub(crate) fn spinner_tip_rescue(rows: &[Vec<GridCell>], r: usize) -> Option<usi
 /// 바뀌고 인용문은 멈춰 있다. (행, 열, 글리프)를 돌려준다.
 ///
 /// reduce motion(`●` 고정)은 글리프가 안 움직여 이 확정이 영영 안 난다 — 그래도
-/// Enter 직후는 SUBMIT_TRUST 즉시 신뢰가 덮고, 나머지는 ~3초 뒤 경과시간 괄호가
+/// Enter 직후는 판정의 제출 브리지(`agent_state::SUBMIT_BRIDGE`)가 덮고, 나머지는 ~3초 뒤 경과시간 괄호가
 /// 붙는 순간 본판정이 잡는다. 이 모드의 조기 부착만 포기하는 것이고 감지는 산다.
 pub(crate) fn unconfirmed_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, usize, char)> {
     let last = rows
@@ -4518,8 +4468,13 @@ pub(crate) fn lenient_spinner_row(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
 /// 거리(N행 이내)로 자르지 않은 이유: todo 트리가 스피너와 입력박스 사이에 끼면
 /// 그 거리가 통째로 흔들려, 넉넉히 잡으면 인용줄이 들어오고 좁게 잡으면 진짜가
 /// 빠진다. 마커 유무는 todo 가 몇 행이든 영향을 안 받는다.
+///
+/// 스캔은 **입력창 윗 테두리 위**까지다. 입력창 아래에는 statusline 과 서브에이전트
+/// 목록(`⏺ main` · `○ Plan`)이 오는데, 그 목록의 ⏺ 를 대화 마커로 세면 살아 있는 스피너가
+/// 「옛 인용」이 되어 학생이 스피너에 안 붙었다(2026-09-17 지적, 서브에이전트 여럿일 때).
 pub(crate) fn spinner_is_live(rows: &[Vec<GridCell>], r: usize) -> bool {
-    !rows[r + 1..].iter().any(|row| {
+    let end = input_box_top_below(rows, r).unwrap_or(rows.len());
+    !rows[r + 1..end].iter().any(|row| {
         let Some(fi) = row.iter().position(|c| !matches!(c.ch, ' ' | '\0')) else {
             return false;
         };
@@ -4547,6 +4502,137 @@ pub(crate) fn spinner_is_live(rows: &[Vec<GridCell>], r: usize) -> bool {
             _ => false,
         }
     })
+}
+
+/// `r` 아래에서 처음 만나는 입력창 테두리 행(`─` 가 내용 폭의 과반, 라벨 24자 이하) —
+/// 마커 스캔의 하한. 규칙은 `find_standing_anchor` 의 `is_rule` 과 같다.
+fn input_box_top_below(rows: &[Vec<GridCell>], r: usize) -> Option<usize> {
+    (r + 1..rows.len()).find(|&i| {
+        let (mut dashes, mut label, mut width) = (0usize, 0usize, 0usize);
+        for (k, c) in rows[i].iter().enumerate() {
+            match c.ch {
+                '─' => {
+                    dashes += 1;
+                    width = k + 1;
+                }
+                ' ' | '\0' => {}
+                _ => {
+                    label += 1;
+                    width = k + 1;
+                }
+            }
+        }
+        dashes >= 8 && dashes > width / 2 && label <= 24
+    })
+}
+
+/// 학생 도트를 **어떻게** 그릴지 — 여부는 상태가, 자리는 화면이 준다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpritePlan {
+    /// 스피너 행에서 걷는다(글로우 스윕도 여기서만).
+    WalkAtSpinner,
+    /// 일하는 중인데 스피너 자리가 없다 — 입력창 위 standing 자리에서 제자리 걸음.
+    WalkInPlace,
+    /// 승인·질문 위젯 옆에서 손 흔들기.
+    WaveAtPrompt,
+    /// 사람 차례인데 위젯 자리가 없다 — standing 자리에서 손 흔들기.
+    WaveInPlace,
+    /// standing 자리에 서기(idle · cheer · wave).
+    Stand(&'static str),
+    None,
+}
+
+impl SpritePlan {
+    pub(crate) fn motion(self) -> &'static str {
+        match self {
+            Self::WalkAtSpinner | Self::WalkInPlace => "walk",
+            Self::WaveAtPrompt | Self::WaveInPlace => "wave",
+            Self::Stand(m) => m,
+            Self::None => "idle",
+        }
+    }
+}
+
+/// 상태 → 그림. 화면 판독(`spinner_row`·`prompt_anchor`·`has_stand_anchor`)은 **있다/없다**
+/// 만 들어온다 — 그 셀이 스피너인지 옛 인용인지는 여기서 안 가린다. 상태가 일하는 중이
+/// 아니면 스피너 자리가 있어도 안 걷는다(2026-09-17 「왜 저기서 걷고 있어」).
+pub(crate) fn sprite_plan(
+    state: &crate::agent_state::AgentState,
+    spinner_row: bool,
+    prompt_anchor: bool,
+    has_stand_anchor: bool,
+    turn_done: bool,
+    flashing: bool,
+) -> SpritePlan {
+    if state.is_busy() {
+        return if spinner_row {
+            SpritePlan::WalkAtSpinner
+        } else if has_stand_anchor {
+            SpritePlan::WalkInPlace
+        } else {
+            SpritePlan::None
+        };
+    }
+    if state.needs_you() {
+        return if prompt_anchor {
+            SpritePlan::WaveAtPrompt
+        } else if has_stand_anchor {
+            SpritePlan::WaveInPlace
+        } else {
+            SpritePlan::None
+        };
+    }
+    if !has_stand_anchor {
+        return SpritePlan::None;
+    }
+    // 턴 완료 직후 ~1.8s(notify_flash)는 양팔 만세 cheer, 그 뒤로 계속 대기하면 손 흔들며
+    // 기다리는 wave("다음 지시 기다려요"). 사용자가 이 pane 에 타이핑하면 idle 로.
+    SpritePlan::Stand(if turn_done {
+        if flashing { "cheer" } else { "wave" }
+    } else {
+        "idle"
+    })
+}
+
+#[cfg(test)]
+mod sprite_plan_tests {
+    use super::{sprite_plan, SpritePlan};
+    use crate::agent_state::{AgentState, WaitKind};
+
+    fn waiting() -> AgentState {
+        AgentState::Waiting { kind: WaitKind::Permission, reason: String::new() }
+    }
+
+    /// 화면에 스피너처럼 보이는 줄이 있어도 상태가 아니면 안 걷는다.
+    #[test]
+    fn a_finished_pane_stands_even_if_the_screen_still_looks_like_a_spinner() {
+        assert_eq!(sprite_plan(&AgentState::Idle, true, false, true, false, false), SpritePlan::Stand("idle"));
+        assert_eq!(sprite_plan(&AgentState::Idle, true, false, false, false, false), SpritePlan::None);
+        assert_eq!(sprite_plan(&AgentState::Error { label: "x".into() }, true, false, true, false, false), SpritePlan::Stand("idle"));
+    }
+
+    #[test]
+    fn working_walks_at_the_spinner_or_in_place_never_on_prose() {
+        assert_eq!(sprite_plan(&AgentState::Working, true, false, true, false, false), SpritePlan::WalkAtSpinner);
+        assert_eq!(sprite_plan(&AgentState::Working, false, false, true, false, false), SpritePlan::WalkInPlace);
+        assert_eq!(sprite_plan(&AgentState::Compacting, false, false, true, false, false), SpritePlan::WalkInPlace);
+        assert_eq!(sprite_plan(&AgentState::Working, false, false, false, false, false), SpritePlan::None);
+    }
+
+    #[test]
+    fn waiting_waves_at_the_prompt_or_in_place() {
+        assert_eq!(sprite_plan(&waiting(), false, true, true, false, false), SpritePlan::WaveAtPrompt);
+        assert_eq!(sprite_plan(&waiting(), false, false, true, false, false), SpritePlan::WaveInPlace);
+        assert_eq!(sprite_plan(&waiting(), true, false, false, false, false), SpritePlan::None);
+    }
+
+    #[test]
+    fn finished_pane_cheers_then_waves() {
+        assert_eq!(sprite_plan(&AgentState::Idle, false, false, true, true, true), SpritePlan::Stand("cheer"));
+        assert_eq!(sprite_plan(&AgentState::Idle, false, false, true, true, false), SpritePlan::Stand("wave"));
+        assert_eq!(SpritePlan::WalkInPlace.motion(), "walk");
+        assert_eq!(SpritePlan::WaveInPlace.motion(), "wave");
+    }
 }
 
 /// 한 행이 claude 의 working 스피너 행인가 — 맞으면 스피너 글리프의 col.
@@ -5784,6 +5870,37 @@ mod spinner_tests {
             .collect()
     }
 
+    // 서브에이전트 목록 회귀 방지(2026-09-17): 입력창 **아래** statusline 다음에 뜨는
+    // `⏺ main / ○ Plan` 목록의 ⏺ 를 대화 마커로 세면 살아 있는 스피너가 「옛 인용」이 되어
+    // 학생이 스피너에 안 붙었다. 마커 스캔은 입력창 윗 테두리에서 멈춘다.
+    #[test]
+    fn spinner_stays_live_with_an_agent_list_below_the_input_box() {
+        let rows = vec![
+            row_from("⏺ 지시대로 고칠게요."),
+            row_from("✻ Thinking… (3s · ↓ 1.2k tokens)"),
+            row_from("  ⎿  Tip: 시험을 먼저 돌려 보세요"),
+            row_from(""),
+            row_from("────────────────────────────────────────"),
+            row_from("❯ "),
+            row_from("────────────────────────────────────────"),
+            row_from("￼ Opus 4.8 1M ┃ main ┃ kasaterm ┃ 12%"),
+            row_from("⏺ main"),
+            row_from("○ Plan"),
+            row_from("○ Explore"),
+        ];
+        assert_eq!(find_claude_spinner(&rows), Some((1, 0)));
+        // 입력창 **위**에 마커가 있으면 여전히 옛 인용이다.
+        let quoted = vec![
+            row_from("✻ Thinking… (3s · ↓ 1.2k tokens)"),
+            row_from("⏺ 이건 지나간 답이다."),
+            row_from("────────────────────────────────────────"),
+            row_from("❯ "),
+            row_from("────────────────────────────────────────"),
+            row_from("⏺ main"),
+        ];
+        assert_eq!(find_claude_spinner(&quoted), None);
+    }
+
     // 윈도우 회귀 방지: claude 는 맥에서 Dingbats 별(✻)을 쓰지만 **윈도우에서는
     // ASCII `*`** 로 떨어뜨린다. 아래 문자열은 2026-08-31 윈도우 pane 화면 그대로다.
     // 별 범위만 보던 동안 윈도우에서는 스피너를 못 찾아 학생 도트도 working 바도
@@ -5892,7 +6009,7 @@ mod spinner_tests {
 
     /// 그 완화가 관문을 무의미하게 만들면 안 된다 — 시간 없이 토큰만 있는 꼬리는
     /// 여전히 스피너가 아니다(`tokens` 의 s 는 앞이 글자라 시간으로 안 센다).
-    /// 이쪽은 `spinner_probe`·제출 직후 신뢰 창이 따로 구제하는 몫이다.
+    /// 이쪽은 판정(`agent_state`)이 일하는 중일 때 자리 후보로만 쓰인다.
     #[test]
     fn spinner_rejects_tokens_without_elapsed() {
         let rows = vec![row_from("✶ Skedaddling… (↓ 1.2k tokens)")];
@@ -7948,72 +8065,6 @@ mod image_block_tests {
         let b = find_image_blocks(&g).remove(0);
         blank_image_block(&mut g, &b);
         assert!(g.iter().all(|r| row_is_blank(r)));
-    }
-}
-
-/// 끊김 문구 판독 — **claude 2.1.246 바이너리에서 실측한 원문**으로 검사한다.
-///
-/// 짐작으로 적은 문구는 판이 바뀌면 조용히 안 걸리고, 안 걸리는 감지는 없는 것과
-/// 같다. 여기 있는 왼쪽 글자들이 실제로 화면에 뜨는 것들이다(2026-08-26).
-#[cfg(test)]
-mod connection_trouble_tests {
-    use super::{connection_trouble_in, find_connection_trouble, GridCell};
-
-    fn row(s: &str) -> Vec<GridCell> {
-        s.chars()
-            .map(|c| {
-                let mut cell = GridCell::blank();
-                cell.ch = c;
-                cell
-            })
-            .collect()
-    }
-
-    #[test]
-    fn the_real_claude_wordings_are_caught() {
-        for (line, want) in [
-            ("API Error: Connection error.", "연결 끊김"),
-            ("A network error occurred. Please check your connection.", "연결 끊김"),
-            ("  ⎿  (request timed out)", "응답 없음"),
-            ("claude (offline)", "오프라인"),
-            ("Retrying in 3 seconds… (attempt 2/10)", "재시도 중"),
-        ] {
-            assert_eq!(connection_trouble_in(line), Some(want), "{line}");
-        }
-    }
-
-    #[test]
-    fn ordinary_lines_stay_quiet() {
-        for line in [
-            "",
-            "❯ 연결해줘",
-            "  ⎿  Read 40 lines",
-            "error: could not compile `kasaterm`",
-            "  ✻ Thinking… (12s · esc to interrupt)",
-        ] {
-            assert_eq!(connection_trouble_in(line), None, "{line}");
-        }
-    }
-
-    /// **화면 아래만 본다.** 위쪽 스크롤백에는 몇 시간 전 오류가 그대로 남아 있어서,
-    /// 전체를 훑으면 이미 회복한 pane 이 영영 빨갛게 굳는다.
-    #[test]
-    fn an_old_error_scrolled_far_up_no_longer_counts() {
-        let mut rows = vec![row("API Error: Connection error.")];
-        rows.extend((0..40).map(|i| row(&format!("  ⎿  Read {i} lines"))));
-        assert_eq!(find_connection_trouble(&rows), None, "옛 오류가 계속 빨갛게 만든다");
-
-        // 같은 줄이 아래쪽(최근)에 있으면 잡혀야 한다.
-        let mut fresh = vec![row("  ⎿  Read 1 lines")];
-        fresh.push(row("API Error: Connection error."));
-        fresh.push(row("❯ "));
-        assert_eq!(find_connection_trouble(&fresh), Some("연결 끊김"));
-    }
-
-    #[test]
-    fn an_empty_screen_is_not_a_stall() {
-        assert_eq!(find_connection_trouble(&[]), None);
-        assert_eq!(find_connection_trouble(&[row("   "), row("")]), None);
     }
 }
 
