@@ -135,14 +135,17 @@ def run_cli(*args: str, timeout: int = CLI_TIMEOUT) -> tuple[bool, str]:
     except subprocess.TimeoutExpired:
         return False, "kasaterm-cli 가 응답하지 않는다"
     out = (done.stdout or "").strip()
-    if done.returncode != 0:
-        return False, (done.stderr or out or "실패").strip()[:400]
+    # 파이프로 부르면 CLI 는 실패도 JSON 봉투로 찍고 1 로 끝난다 — 봉투째 돌려주면
+    # 말풍선에 `{"id":"cli-3","ok":false,…}` 가 그대로 뜬다(2026-09-17 실측). 이유만 꺼낸다.
     try:
         parsed = json.loads(out)
-        if isinstance(parsed, dict) and parsed.get("ok") is False:
-            return False, str(parsed.get("error", {}).get("message", "실패"))[:400]
     except ValueError:
-        pass
+        parsed = None
+    if isinstance(parsed, dict) and parsed.get("ok") is False:
+        error = parsed.get("error") or {}
+        return False, str(error.get("message") if isinstance(error, dict) else error or "실패")[:400]
+    if done.returncode != 0:
+        return False, (done.stderr.strip() or out or "실패")[:400]
     return True, out
 
 
@@ -367,7 +370,12 @@ def execute(pane: str, uses: list[dict]) -> list[dict]:
         if name == "migrate_pane":
             machine = str(args.get("machine", "")).strip()
             ok, detail = (False, "기계 이름이 없다") if not machine else run_cli("migrate", pane, machine, timeout=60)
-            results.append({"kind": name, "ok": ok, "detail": f"{machine}로 이사" if ok else detail})
+            if ok:
+                # 일하는 중인 학생은 바로 안 가고 턴이 끝나면 간다 — 앱이 그 말을 remote_id 자리에
+                # 실어 준다. 「이사」라고만 하면 사람은 옮겨진 줄 알고 그 창을 찾아 헤맨다.
+                note = str(_json_result(detail).get("remote_id") or "")
+                detail = note if "예약" in note else f"{machine}로 이사"
+            results.append({"kind": name, "ok": ok, "detail": detail})
         elif name == "focus_pane":
             ok, detail = run_cli("focus", pane)
             results.append({"kind": name, "ok": ok, "detail": "앞으로 가져옴" if ok else detail})
