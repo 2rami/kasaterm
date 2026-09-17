@@ -12,11 +12,17 @@
 #   app      pull → build-app.sh (앱 전체; 반영은 사람이 앱을 껐다 켜야 한다)
 #   pet      pull → pet-reload.sh (펫만, 즉시 반영)
 #   journal  pull → request-journal 서비스 재시작(펫의 뇌·나쵸 말투·집컴 전원)
+#   log      최근 기록(이 스크립트·펫 띄우기·펫의 뇌) 꼬리 — 실패 원인을 터널 너머에서 본다
 #   --force  app 에서 다른 pane 이 Rust 를 만지는 중이어도 강행
+#
+# ⚠️전체를 main() 에 넣고 맨 끝에서 부른다 — pull 이 이 파일 자체를 바꾸는데, bash 는 스크립트를
+# 읽어 가며 실행하므로 도중에 파일이 바뀌면 옛 줄과 새 줄이 섞여 돈다(2026-09-17 실측: pull 뒤
+# status 가 옛 코드로 돌았다). 함수 하나로 감싸면 실행 전에 전부 읽는다.
 #
 # ssh 세션엔 로그인 셸 PATH 가 없다 — cargo·brew·kasaterm-cli 를 여기서 채운다. 굽기 가드가
 # board 를 읽으므로 살아 있는 앱 소켓도 골라 준다. 기록은 ~/.local/state/remote-bake.log.
 set -uo pipefail
+main() {
 REPO="${KASATERM_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$REPO" || { echo "[remote-bake] 레포가 없다: $REPO" >&2; exit 1; }
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$HOME/Applications/kasaterm.app/Contents/MacOS:$PATH"
@@ -36,8 +42,8 @@ for a in "$@"; do
     *) echo "[remote-bake] 모르는 옵션: $a" >&2; exit 2 ;;
   esac
 done
-case "$VERB" in status|pull|app|pet|journal) ;; *)
-  echo "[remote-bake] 동사는 status·pull·app·pet·journal 중 하나다 (받은 것: $VERB)" >&2; exit 2 ;;
+case "$VERB" in status|pull|app|pet|journal|log) ;; *)
+  echo "[remote-bake] 동사는 status·pull·app·pet·journal·log 중 하나다 (받은 것: $VERB)" >&2; exit 2 ;;
 esac
 
 say() { printf '[remote-bake] %s\n' "$*"; }
@@ -66,9 +72,18 @@ status() {
   say "펫의 뇌(request-journal) ${health:-응답 없음}"
 }
 
+logs() {
+  local tmp; tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp/)"
+  for f in "$LOG" "${tmp}kasapet-reload.log" "$HOME/.config/kasaterm/request-journal/service.log"; do
+    say "── $f"
+    [[ -f "$f" ]] && tail -n 15 "$f" | cut -c1-200 || say "(없음)"
+  done
+}
+
 run() {
   case "$VERB" in
     status) status ;;
+    log) logs ;;
     pull) pull ;;
     app)
       pull || return 1
@@ -88,3 +103,5 @@ run() {
 
 { say "── $(date '+%m-%d %H:%M:%S') $VERB ${FORCE[*]:-} (from ${SSH_CONNECTION%% *})"; run; rc=$?; say "끝 rc=$rc"; exit $rc; } 2>&1 | tee -a "$LOG"
 exit "${PIPESTATUS[0]}"
+}
+main "$@"

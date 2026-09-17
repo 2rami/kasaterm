@@ -84,12 +84,38 @@ if [[ -f "$PIDFILE" ]]; then
 fi
 
 LOG="${TMPDIR:-/tmp}/kasapet-reload.log"
-# 클로드 pane 에서 불러도 그 표식을 펫에 물리지 않는다. ssh 로 들어와 부르면(맥미니에서 굽기)
-# GUI 세션이 아니라 창을 못 여니 `launchctl asuser` 로 로그인 세션에 얹는다 — 실행 파일을
-# 그 자리에서 바꿔치기(exec)하므로 pid 는 그대로 펫이다.
-SPAWN=(env -u CLAUDE_CODE_CHILD_SESSION -u TEAMMATE_MODE -u SESSION_ID)
-[[ -n "${SSH_CONNECTION:-}" ]] && SPAWN=(launchctl asuser "$(id -u)" "${SPAWN[@]}")
-nohup "${SPAWN[@]}" "$INSTALLED/Contents/Resources/kasapet" "$MODEL" >"$LOG" 2>&1 &
+# ssh 로 들어와 부르면(맥미니에서 굽기) GUI 세션이 아니라 창을 못 연다. `launchctl asuser` 는
+# root 가 아니면 「Operation not permitted」로 끝난다(2026-09-17 실측). 그래서 도는 앱의 탭
+# 하나를 빌려 — 그 셸은 로그인 세션 안이다 — 거기서 이 스크립트를 한 번 더(빌드 없이) 돌리고
+# 탭을 닫는다. 앱이 안 떠 있으면 파일만 갈아 끼운 채 끝낸다: 다음에 펫을 켜면 그게 새 펫이다.
+if [[ -n "${SSH_CONNECTION:-}" ]]; then
+  TAB=""
+  if command -v kasaterm-cli >/dev/null 2>&1; then
+    OUTER="$(kasaterm-cli board 2>/dev/null | python3 -c 'import json,sys
+b=(json.load(sys.stdin).get("result") or {}).get("board") or []
+print(b[0].get("surface_id","") if b else "")' 2>/dev/null || true)"
+    TAB="$(kasaterm-cli tab ${OUTER:+"$OUTER"} 2>/dev/null | python3 -c 'import json,sys
+print((((json.load(sys.stdin).get("result") or {}).get("surface") or {}).get("id")) or "")' 2>/dev/null || true)"
+  fi
+  if [[ -z "$TAB" ]]; then
+    echo "[pet] 파일은 갈아 끼웠다. ssh 세션이라 창을 못 열고 앱 탭도 못 빌렸다 — 앱 하단바 펫 칩으로 켜면 새 펫이다"
+    exit 0
+  fi
+  kasaterm-cli send --surface "$TAB" "'$ROOT/scripts/pet-reload.sh' --no-build; exit"$'\n' >/dev/null
+  for _ in $(seq 1 60); do
+    sleep 0.5
+    PID="$(tr -dc 0-9 < "$PIDFILE" 2>/dev/null || true)"
+    if [[ -n "$PID" ]] && ps -o comm= -p "$PID" 2>/dev/null | grep -q kasapet; then
+      echo "[pet] 새 펫 띄움(pid $PID) — 앱 탭 $TAB 을 빌려 로그인 세션에서 띄웠다"
+      exit 0
+    fi
+  done
+  echo "[pet] 앱 탭 $TAB 에 맡겼는데 30초 안에 새 펫이 안 떴다 — remote-bake log 로 확인" >&2
+  exit 1
+fi
+# 클로드 pane 에서 불러도 그 표식을 펫에 물리지 않는다.
+env -u CLAUDE_CODE_CHILD_SESSION -u TEAMMATE_MODE -u SESSION_ID \
+  nohup "$INSTALLED/Contents/Resources/kasapet" "$MODEL" >"$LOG" 2>&1 &
 echo $! > "$PIDFILE"
 disown
 sleep 1
