@@ -7698,6 +7698,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.refresh_registered_servers();
         self.tick_restore_progress();
+        self.tick_migrate_handoff();
         self.run_restore_probe();
         self.run_mirror_focus_probe(event_loop);
         self.run_character_assignment_probe();
@@ -8088,6 +8089,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 조용한 셸에서도 이사·복원 명령이 제때 발사되어야 한다. 이 만기를
                 // 빼면 다음 키 입력이나 무관한 출력이 올 때까지 실행이 밀린다.
                 .chain(self.pending_restores.iter().map(|(_, _, at)| *at))
+                .chain(self.migrate_handoff.as_ref().map(|h| h.at))
                 .chain(self.restore_applying.as_ref().map(|(_, at)| *at))
                 .chain(self.restore_progress.as_ref().map(|_| std::time::Instant::now() + std::time::Duration::from_millis(100)))
                 .min();

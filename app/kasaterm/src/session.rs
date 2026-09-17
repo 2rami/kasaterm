@@ -1229,19 +1229,16 @@ impl App {
     /// 다른 기기에 **새 방**을 만들고 그 첫 pane 을 여기 보기 창으로 연다 — 기기 절 머리의
     /// 「+」(2026-09-17 지시). 저쪽엔 그쪽 「+」 를 누른 것과 같은 방이 생기고, 이쪽 창은
     /// 그 방의 보기 창이라 로컬 방 목록엔 안 선다. 옛 판 기기는 활성 방에 pane 만 세운다.
-    pub(crate) fn new_remote_room(&mut self, label: &str) -> Result<(String, Option<usize>)> {
-        if self.tmux.is_some() {
-            anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
-        }
-        let m = kasa_mcp::machines::find(label)
-            .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
-        self.set_toast(format!("{label} 에 새 방 여는 중…"));
-        self.render_frame();
-        let at = kasa_socket::backend::SpawnShellAt {
-            window: Some(kasa_socket::backend::SpawnWindow::New),
-            ..Default::default()
-        };
-        let (remote_id, window) = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None)?;
+    /// 새 창을 열고 그 기기의 pane 하나를 보기 창으로 앉힌다 — 「+ 새 방」과 `to` 뒤처리가 같이
+    /// 쓴다. `owned` 는 이 창을 닫을 때 저쪽 pane 도 끝낼지(내가 만든 방이면 참).
+    pub(crate) fn seat_remote_view_window(
+        &mut self,
+        label: &str,
+        base: &str,
+        remote_id: &str,
+        owned: bool,
+        name: Option<String>,
+    ) -> Result<()> {
         self.new_window();
         let owner = self.active_window;
         let Some(host) = self.ws.lock().unwrap().active_pane.clone() else {
@@ -1249,15 +1246,15 @@ impl App {
         };
         let remote = kasa_mcp::remote::connect_view(
             kasa_mcp::remote::RemoteSpec {
-                base: m.base.clone(),
-                pane: Some(remote_id.clone()),
+                base: base.to_string(),
+                pane: Some(remote_id.to_string()),
                 cwd: None,
                 token: None,
                 identity: kasa_mcp::remote::RemoteIdentity {
-                    label: m.label.clone(),
+                    label: label.to_string(),
                     remote_cwd: None,
                     origin_cwd: None,
-                    owned: true,
+                    owned,
                 },
             },
             &host,
@@ -1273,8 +1270,8 @@ impl App {
         );
         self.dead_panes.lock().unwrap().retain(|x| x != &host);
         self.ws.lock().unwrap().panes.entry(host.clone()).or_default();
-        if let Some(w) = window {
-            self.window_name_override.insert(owner, format!("방 {}", w + 1));
+        if let Some(name) = name {
+            self.window_name_override.insert(owner, name);
         }
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
@@ -1284,6 +1281,40 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+        Ok(())
+    }
+
+    /// `to` 의 뒤처리. 명령이 저쪽에 닿을 시간이 지나면 원래 자리를 걷고(저쪽 pane 은 남긴다)
+    /// 그 기기 방을 보기 창으로 연다 — 거울을 원래 방에 남기면 기기 절과 중복이고, 번호가
+    /// 재사용되면 남으로 둔갑했다(2026-09-17).
+    pub(crate) fn tick_migrate_handoff(&mut self) {
+        if self.migrate_handoff.as_ref().is_none_or(|h| h.at > Instant::now()) {
+            return;
+        }
+        let Some(h) = self.migrate_handoff.take() else { return };
+        if self.pty.contains_key(&h.pid) {
+            self.remote_keep.insert(h.pid.clone());
+            self.remove_pane(&h.pid);
+        }
+        if let Err(e) = self.seat_remote_view_window(&h.label, &h.base, &h.remote_id, false, None) {
+            self.set_toast(format!("{} 의 방을 보기 창으로 못 열었어요 — {e:#}", h.label));
+        }
+    }
+
+    pub(crate) fn new_remote_room(&mut self, label: &str) -> Result<(String, Option<usize>)> {
+        if self.tmux.is_some() {
+            anyhow::bail!("tmux 백엔드에선 원격 pane 을 쓰지 않는다");
+        }
+        let m = kasa_mcp::machines::find(label)
+            .ok_or_else(|| anyhow::anyhow!("기계 {label} 가 명부(machines.json)에 없다"))?;
+        self.set_toast(format!("{label} 에 새 방 여는 중…"));
+        self.render_frame();
+        let at = kasa_socket::backend::SpawnShellAt {
+            window: Some(kasa_socket::backend::SpawnWindow::New),
+            ..Default::default()
+        };
+        let (remote_id, window) = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None)?;
+        self.seat_remote_view_window(&m.label, &m.base, &remote_id, true, window.map(|w| format!("방 {}", w + 1)))?;
         self.set_toast(format!("{label} 에 새 방 — {remote_id}"));
         Ok((remote_id, window))
     }
@@ -2234,6 +2265,15 @@ impl App {
             // 갓 소환된 pane 은 셸이 뜨는 데 한 박자 더 걸린다.
             std::time::Instant::now() + std::time::Duration::from_millis(2200),
         ));
+        // 원래 자리는 명령이 닿은 뒤 걷는다 — 그때까지는 이 링크가 명령을 나른다. 저쪽에
+        // 방 pane 이 안 생긴(헤드리스 `web-` 셸) 경우는 이 링크가 유일한 손잡이라 남긴다.
+        self.migrate_handoff = r.remote_pane.is_some().then(|| crate::MigrateHandoff {
+            pid: pid.to_string(),
+            label: kasa_mcp::machines::label_for_base(&r.base).unwrap_or_default(),
+            base: r.base.clone(),
+            remote_id: remote.remote_id.clone(),
+            at: std::time::Instant::now() + std::time::Duration::from_millis(3500),
+        });
         let (wc, wr) = self.window_cells();
         self.resize_backend(wc, wr);
         self.publish_pty_layout();

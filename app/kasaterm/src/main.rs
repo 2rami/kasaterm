@@ -1390,6 +1390,15 @@ enum ImageBtn {
     Reset,
 }
 
+/// `to` 가 끝난 뒤 걷을 자리와 열 방. `at` 이 지나면 `tick_migrate_handoff` 가 처리한다.
+struct MigrateHandoff {
+    pid: String,
+    label: String,
+    base: String,
+    remote_id: String,
+    at: std::time::Instant,
+}
+
 /// What a confirmed close-dialog should actually close.
 #[derive(Clone, Debug)]
 enum PendingClose {
@@ -5490,6 +5499,9 @@ struct App {
     /// 닫을 때 **저쪽 pane 은 남길** 원격 pane(메뉴 「닫기 — 저쪽 pane 은 남김」).
     /// `to` 로 세운 자리는 기본이 함께 끄기라, 예외만 여기 적는다.
     remote_keep: std::collections::HashSet<String>,
+    /// `to` 로 보낸 자리의 뒤처리 — 명령이 저쪽에 닿은 뒤 이 자리를 걷고 그 기기 방을 보기 창으로
+    /// 연다(2026-09-17 결정: 원래 자리에 거울을 남기지 않는다).
+    migrate_handoff: Option<MigrateHandoff>,
     /// pane id → current launch's conversation ID, never a permanent shell ID.
     pane_session_id: HashMap<String, String>,
     /// pane id → claude 실제 sessionId(transcript stem, `SocketSessionBound` 로 도착).
@@ -6093,6 +6105,7 @@ impl App {
             pane_agent_launches: HashMap::new(),
             pending_spawn_cwd: None,
             remote_keep: std::collections::HashSet::new(),
+            migrate_handoff: None,
             pane_session_id: HashMap::new(),
             pane_claude_sid: HashMap::new(),
             pane_last_seat: HashMap::new(),
