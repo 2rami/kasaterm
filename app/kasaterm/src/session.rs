@@ -1366,12 +1366,16 @@ impl App {
         let tree = if window == self.active_window { self.pty_layout.as_ref() }
             else { self.windows.get(window).and_then(Option::as_ref) };
         let Some(ratio) = tree.and_then(|t| t.ratio_at(path)) else { return };
+        // 트리 경로는 기기마다 달라 못 쓴다 — 분할선 양쪽의 pane 하나씩으로 짚는다.
+        let Some((left, right)) = tree.and_then(|t| t.split_leaves_at(path)) else { return };
+        let remote = |local: &str| kasa_mcp::remote::remote_info(local).map(|i| i.remote_id);
+        let (Some(a), Some(b)) = (left.first().and_then(|l| remote(l)), right.first().and_then(|l| remote(l))) else { return };
         let Some(m) = kasa_mcp::machines::find(&label) else { return };
         self.remote_view_push_at = Some(Instant::now());
-        let (base, path) = (m.base.clone(), path.to_vec());
+        let base = m.base.clone();
         std::thread::spawn(move || {
-            let params = serde_json::json!({ "path": path, "ratio": ratio });
-            if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "surface.resize_divider", params) {
+            let params = serde_json::json!({ "a": a, "b": b, "ratio": ratio });
+            if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "surface.set_ratio_between", params) {
                 eprintln!("[remote] divider push failed: {e:#}");
             }
             kasa_mcp::machines::poke();

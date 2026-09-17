@@ -127,6 +127,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         },
         "surface.resize_divider" => surface_resize_divider(backend, id, &req.params),
         "surface.set_ratio" => surface_set_ratio(backend, id, &req.params),
+        "surface.set_ratio_between" => surface_set_ratio_between(backend, id, &req.params),
         "surface.peek" => surface_peek(backend, id, &req.params),
         "surface.open_preview" => surface_open_preview(backend, id, &req.params),
         "surface.open_url" => surface_open_url(backend, id, &req.params),
@@ -301,6 +302,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.repersona",
                 "surface.resize_divider",
                 "surface.set_ratio",
+                "surface.set_ratio_between",
                 "collab.board",
                 "collab.snapshot",
                 "collab.changes",
@@ -860,6 +862,25 @@ fn surface_move(backend: &dyn Backend, id: Value, params: &Value) -> Response {
         _ => return param_err(id, "surface.move requires `direction` (left/right/up/down)"),
     };
     match backend.move_surface(surface_id, target, dir) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_set_ratio_between(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let a = match params.get("a").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.set_ratio_between requires `a` (surface_id)"),
+    };
+    let b = match params.get("b").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.set_ratio_between requires `b` (surface_id)"),
+    };
+    let ratio = match params.get("ratio").and_then(|v| v.as_f64()) {
+        Some(r) => r as f32,
+        None => return param_err(id, "surface.set_ratio_between requires `ratio` (number, 0..1)"),
+    };
+    match backend.set_ratio_between(a, b, ratio) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

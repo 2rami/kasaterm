@@ -890,6 +890,11 @@ pub trait Backend: Send + Sync {
     fn resize_divider(&self, _path: &[u8], _ratio: f32) -> Result<()> {
         anyhow::bail!("resize_divider unsupported by this backend")
     }
+    /// `a` 와 `b` 를 가르는 분할선의 비율(`a` 쪽 몫)을 놓는다 — 다른 기기의 거울이 분할선을
+    /// 끌 때 쓴다. 트리 경로는 기기마다 달라 pane 으로 짚는다. Default: unsupported.
+    fn set_ratio_between(&self, _a: &str, _b: &str, _ratio: f32) -> Result<()> {
+        anyhow::bail!("set_ratio_between unsupported by this backend")
+    }
     /// Make `surface_id` take `ratio` (0..1) of its *immediate* split
     /// container — the pane-addressed cousin of `resize_divider` (which
     /// needs a tree path callers like the CLI don't know). Orchestration

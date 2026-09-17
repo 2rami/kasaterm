@@ -2905,6 +2905,30 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// Detaches the moving leaf (its PTY stays alive) and re-attaches it
     /// beside the target, then resizes every pane to its new rect. No-op
     /// when source and target are the same pane.
+    /// `pane` 이 앉은 방의 트리를 고친다 — 활성 방이면 `pty_layout`, 아니면 `windows[i]`.
+    /// 바뀌었으면 배치를 발행하고(다른 기기가 바로 받는다) 활성 방이면 PTY 크기도 맞춘다.
+    pub(crate) fn edit_layout_of_pane(
+        &mut self,
+        pane: &str,
+        edit: impl FnOnce(&mut kasa_pty::PtyLayout) -> bool,
+    ) -> bool {
+        let Some(window) = self.window_of_pane(pane) else { return false };
+        let active = window == self.active_window;
+        let tree = if active { self.pty_layout.as_mut() }
+            else { self.windows.get_mut(window).and_then(|w| w.as_mut()) };
+        let Some(tree) = tree else { return false };
+        if !edit(tree) { return false; }
+        if active {
+            let (cols, rows) = self.window_cells();
+            self.resize_backend(cols, rows);
+        }
+        self.publish_pty_layout();
+        self.session_touched = true;
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window { w.request_redraw(); }
+        true
+    }
+
     pub(crate) fn move_pane(&mut self, moving: &str, target: &str, zone: DropZone) {
         // 거울 창 안의 이동은 원본에도 같은 이동을 건다 — 안 그러면 당겨오기가 되돌린다.
         if let Some(window) = self.window_of_pane(target) {
@@ -2945,9 +2969,24 @@ for p in glob.glob(os.path.join(d, '*.json')):
             .map(|t| t.leaves().contains(&target))
             .unwrap_or(false);
         if !in_active {
-            if let Some(dst_idx) = self.window_of_pane(target) {
-                self.move_pane_cross_window(moving, target, dir, before, dst_idx);
+            let Some(dst_idx) = self.window_of_pane(target) else { return };
+            // 둘 다 같은 비활성 방이면 그 방 트리 안에서 옮긴다 — 예전엔 활성 방 트리에서
+            // 못 찾아 조용히 포기했고, 다른 기기의 거울이 보낸 이동이 그래서 안 먹었다.
+            if self.window_of_pane(moving) == Some(dst_idx) {
+                let moving = moving.to_string();
+                let target = target.to_string();
+                self.edit_layout_of_pane(&target, |tree| {
+                    if !tree.remove_leaf(&moving) { return false; }
+                    if !tree.insert_beside(&target, dir, before, moving.clone()) {
+                        if let Some(anchor) = tree.leaves().first().map(|s| s.to_string()) {
+                            tree.insert_beside(&anchor, dir, before, moving.clone());
+                        }
+                    }
+                    true
+                });
+                return;
             }
+            self.move_pane_cross_window(moving, target, dir, before, dst_idx);
             return;
         }
         if let Some(tree) = self.pty_layout.as_mut() {

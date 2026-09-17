@@ -796,30 +796,27 @@ impl ApplicationHandler<UserEvent> for App {
                 self.close_arona_panel();
                 return;
             }
+            // 아래 셋은 **그 pane 이 있는 방**의 트리를 만진다 — 활성 방만 보면 다른 기기의
+            // 거울이 보낸 명령(원본은 다른 방을 보는 중)이 조용히 버려진다(2026-09-17).
+            // swap 은 leaf id 교환이라 자리가 바뀐 두 PTY 의 크기가 다를 수 있다 — 활성 방이면
+            // `edit_layout_of_pane` 이 resize 로 SIGWINCH 를 보낸다.
             UserEvent::SocketSwap(a, b) => {
-                // swap_dir 와 같은 시퀀스: leaf id 교환 → 자리가 바뀐 두 PTY
-                // 의 그리드 크기가 다를 수 있으니 resize 로 SIGWINCH.
-                let swapped = self
-                    .pty_layout
-                    .as_mut()
-                    .is_some_and(|tree| tree.swap_leaves(a, b));
-                if swapped {
-                    let (cols, rows) = self.window_cells();
-                    self.resize_backend(cols, rows);
-                    self.chrome_dirty = true;
+                let (a, b) = (a.clone(), b.clone());
+                if self.edit_layout_of_pane(&a, |tree| tree.swap_leaves(&a, &b)) {
                     self.render_frame();
                 }
                 return;
             }
             UserEvent::SocketSetRatio(id, ratio) => {
-                let changed = self
-                    .pty_layout
-                    .as_mut()
-                    .is_some_and(|tree| tree.set_leaf_ratio(id, *ratio));
-                if changed {
-                    let (cols, rows) = self.window_cells();
-                    self.resize_backend(cols, rows);
-                    self.chrome_dirty = true;
+                let (id, ratio) = (id.clone(), *ratio);
+                if self.edit_layout_of_pane(&id, |tree| tree.set_leaf_ratio(&id, ratio)) {
+                    self.render_frame();
+                }
+                return;
+            }
+            UserEvent::SocketSetRatioBetween(a, b, ratio) => {
+                let (a, b, ratio) = (a.clone(), b.clone(), *ratio);
+                if self.edit_layout_of_pane(&a, |tree| tree.set_ratio_between(&a, &b, ratio)) {
                     self.render_frame();
                 }
                 return;

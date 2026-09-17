@@ -586,6 +586,52 @@ impl PtyLayout {
 
     /// Set the split ratio at `path` directly (daemon side of a divider drag).
     /// Mirrors resize_at's 0.1..0.9 clamp so the seam can't collapse a pane.
+    /// `a` 와 `b` 를 가르는 분할선(둘의 최소 공통 조상 Split)의 비율을 놓는다 — `ratio` 는
+    /// `a` 쪽 몫. 경로 대신
+    /// pane 으로 짚는 이유는 다른 기기의 거울 트리가 원본과 모양이 달라 경로가 안 맞기
+    /// 때문이다(2026-09-17). 둘이 같은 잎이거나 어느 쪽이 없으면 false.
+    pub fn set_ratio_between(&mut self, a: &str, b: &str, ratio: f32) -> bool {
+        if a == b {
+            return false;
+        }
+        match self {
+            PtyLayout::Leaf { .. } => false,
+            PtyLayout::Split { ratio: r, a: left, b: right, .. } => {
+                let in_left = |id: &str| left.leaves().iter().any(|l| *l == id);
+                let in_right = |id: &str| right.leaves().iter().any(|l| *l == id);
+                // `ratio` 는 **a 쪽** 몫이다 — a 가 오른쪽 자식이면 뒤집어 넣는다.
+                match (in_left(a), in_right(b), in_right(a), in_left(b)) {
+                    (true, true, _, _) => {
+                        *r = ratio.clamp(0.1, 0.9);
+                        true
+                    }
+                    (_, _, true, true) => {
+                        *r = (1.0 - ratio).clamp(0.1, 0.9);
+                        true
+                    }
+                    _ if in_left(a) && in_left(b) => left.set_ratio_between(a, b, ratio),
+                    _ if in_right(a) && in_right(b) => right.set_ratio_between(a, b, ratio),
+                    _ => false,
+                }
+            }
+        }
+    }
+
+    /// `path` 의 Split 아래 두 자식의 잎들 — 거울이 분할선 하나를 「이 두 pane 사이」로
+    /// 원본에 말할 때 쓴다.
+    pub fn split_leaves_at(&self, path: &[u8]) -> Option<(Vec<String>, Vec<String>)> {
+        let PtyLayout::Split { a, b, .. } = self else {
+            return None;
+        };
+        match path.split_first() {
+            None => Some((
+                a.leaves().iter().map(|s| s.to_string()).collect(),
+                b.leaves().iter().map(|s| s.to_string()).collect(),
+            )),
+            Some((head, tail)) => if *head == 0 { a.split_leaves_at(tail) } else { b.split_leaves_at(tail) },
+        }
+    }
+
     pub fn set_ratio_at(&mut self, path: &[u8], ratio: f32) -> bool {
         let PtyLayout::Split { ratio: r, a, b, .. } = self else {
             return false;
@@ -788,6 +834,26 @@ pub struct Divider {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ratio_between_picks_the_split_that_separates_the_two_panes() {
+        // split( A , split( B , C ) ) — A|B 사이는 바깥 분할선, B|C 사이는 안쪽 분할선.
+        let mut t = PtyLayout::single("%a");
+        assert!(t.insert_beside("%a", SplitDir::Horizontal, false, "%b".into()));
+        assert!(t.insert_beside("%b", SplitDir::Vertical, false, "%c".into()));
+        assert!(t.set_ratio_between("%a", "%c", 0.3), "A 와 C 를 가르는 건 바깥 분할선");
+        assert!(t.set_ratio_between("%c", "%b", 0.8), "B 와 C 를 가르는 건 안쪽 분할선");
+        let rects = t.leaf_rects(1000, 1000);
+        let w = |id: &str| rects.iter().find(|r| r.0 == id).map(|r| (r.3, r.4)).unwrap();
+        assert!((w("%a").0 as i32 - 300).abs() <= 2, "A 폭 30%: {:?}", w("%a"));
+        assert!((w("%b").1 as i32 - 200).abs() <= 2, "B 높이 20% (C 가 80%): {:?}", w("%b"));
+        assert!(!t.set_ratio_between("%a", "%a", 0.5));
+        assert!(!t.set_ratio_between("%a", "%zzz", 0.5));
+        let (left, right) = t.split_leaves_at(&[]).unwrap();
+        assert_eq!((left, right), (vec!["%a".to_string()], vec!["%b".to_string(), "%c".to_string()]));
+        assert_eq!(t.split_leaves_at(&[1]).unwrap(), (vec!["%b".to_string()], vec!["%c".to_string()]));
+        assert!(t.split_leaves_at(&[0]).is_none(), "잎엔 분할선이 없다");
+    }
+
     use super::*;
 
     #[test]

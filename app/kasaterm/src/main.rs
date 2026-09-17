@@ -4001,6 +4001,8 @@ enum UserEvent {
     /// `surface.set_ratio` delegated from the socket thread — make a pane
     /// take `ratio` of its immediate split container ("오케스트레이터 pane 크게" 자동화).
     SocketSetRatio(String, f32),
+    /// `a`·`b` 사이 분할선의 비율 — 다른 기기의 거울이 분할선을 끌었을 때.
+    SocketSetRatioBetween(String, String, f32),
     /// `surface.rename` / `surface.set_color` delegated from the socket thread.
     /// Pane header title / accent band live in `ws.panes` which only the GUI
     /// thread may touch, so the backend routes them here. `(surface_id, title)`

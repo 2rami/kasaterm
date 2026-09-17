@@ -1900,6 +1900,11 @@ impl Backend for PtyBackend {
     ///
     /// rect 는 **활성 창만** 채운다 — ws 에 실리는 layout 트리가 활성 창 하나뿐이다.
     /// 비활성 창은 pane 목록만 준다(이동 대상을 고르는 데는 그걸로 충분하다).
+    fn set_ratio_between(&self, a: &str, b: &str, ratio: f32) -> Result<()> {
+        let _ = self.proxy.send_event(UserEvent::SocketSetRatioBetween(a.to_string(), b.to_string(), ratio));
+        Ok(())
+    }
+
     fn device_colors(&self) -> Result<serde_json::Value> {
         Ok(crate::render::pane_identity::device_color_sync_table())
     }

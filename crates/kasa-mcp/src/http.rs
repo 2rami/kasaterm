@@ -2051,6 +2051,7 @@ async fn cmd_handler(
         "surface.move",
         // 거울 창에서 분할선을 끌거나 자리를 옮기면 그대로 저쪽에 보낸다(2026-09-17).
         "surface.set_ratio",
+        "surface.set_ratio_between",
         "surface.resize_divider",
         "surface.focus",
         "window.new",
