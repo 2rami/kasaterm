@@ -91,9 +91,11 @@ print((((json.load(sys.stdin).get("result") or {}).get("surface") or {}).get("id
     sleep 0.5
     text="$(kasaterm-cli peek "$tab" 2>/dev/null | python3 -c 'import json,sys
 print(((json.load(sys.stdin).get("result") or {}).get("text")) or "")' 2>/dev/null || true)"
-    if [[ "$text" == *"$marker="* ]]; then
+    # 화면에는 친 명령줄(`…=$?`)도 그대로 보인다 — 숫자가 붙은 것만 끝 표식이다. 여기서
+    # 틀리면 빌드 도중 탭을 닫아 굽기를 죽인다(2026-09-17 실측).
+    if printf '%s\n' "$text" | grep -qE "$marker=[0-9]+"; then
       printf '%s\n' "$text" | grep -vE '^\s*$' | tail -14
-      rc="$(printf '%s\n' "$text" | sed -n "s/.*$marker=\([0-9]*\).*/\1/p" | tail -1)"
+      rc="$(printf '%s\n' "$text" | grep -oE "$marker=[0-9]+" | tail -1 | cut -d= -f2)"
       kasaterm-cli dismiss "$tab" >/dev/null 2>&1 || true
       return "${rc:-1}"
     fi
