@@ -84,14 +84,14 @@ pub struct Preview {
 /// the chosen font size; an ellipsis marks content available in the full view.
 /// 짧은 말이 앉는 상자. 머리 위 빈자리(HEADROOM)에 맞춘 크기다.
 const COMPACT: (f32, f32) = (260.0, 110.0);
-/// 긴 답(나쵸의 모든 기기 요약)이 앉는 상자의 너비. 높이는 창의 절반 조금 못 미치게 —
-/// 작은 상자가 넘칠 때만 이리로 커진다(2026-09-17 지시 「답이 채팅창 밖 말풍선으로」).
-const ROOMY_WIDTH: f32 = 400.0;
+/// 긴 답(나쵸의 모든 기기 요약)이 앉는 상자. 너비는 설정(`bubble_width`)이고 높이는 창의
+/// 절반 조금 못 미치게 — 작은 상자가 넘칠 때만 이리로 커진다(2026-09-17 지시 「답이
+/// 채팅창 밖 말풍선으로」).
 const ROOMY_HEIGHT_RATIO: f32 = 0.45;
 
-pub fn preview(text: &str, viewport: (f32, f32), requested_pt: f32) -> Option<Preview> {
+pub fn preview(text: &str, viewport: (f32, f32), requested_pt: f32, roomy_width: f32) -> Option<Preview> {
     if text.trim().is_empty()
-        || ![viewport.0, viewport.1, requested_pt]
+        || ![viewport.0, viewport.1, requested_pt, roomy_width]
             .into_iter()
             .all(|v| v.is_finite() && v > 0.0)
     {
@@ -107,7 +107,7 @@ pub fn preview(text: &str, viewport: (f32, f32), requested_pt: f32) -> Option<Pr
     let input_cut = chars.len() > 2048;
     chars.truncate(2048);
     let all: String = chars.iter().collect();
-    let roomy = (ROOMY_WIDTH, (viewport.1 * ROOMY_HEIGHT_RATIO).max(COMPACT.1));
+    let roomy = (roomy_width.max(COMPACT.0), (viewport.1 * ROOMY_HEIGHT_RATIO).max(COMPACT.1));
     for (last, (box_w, box_h)) in [(false, COMPACT), (true, roomy)] {
         let width = (box_w.min(viewport.0 - 2.0 * margin) - pad).floor();
         let height = box_h.min(viewport.1 - 2.0 * margin);
@@ -181,7 +181,12 @@ const HALO: i32 = 3;
 
 /// 글자도 테두리도 없는 자리의 알파. 0 이면 macOS 가 그 픽셀의 마우스를 아래 창으로
 /// 넘겨 버려 말풍선을 누를 수 없다 — 눌러서 그 pane 으로 가는 길이 거기서 끊긴다.
-const FLOOR_A: u32 = 6;
+/// 6 이던 것을 2 로 — 말풍선이 커지자(400x300) 그 네모가 바탕화면 위에 옅게 비쳤다
+/// (2026-09-17 「텍스트 배경이 은은하게 보인다」). 바닥은 글자 근처(`FLOOR_REACH`)에만 깐다.
+const FLOOR_A: u32 = 2;
+/// 바닥을 까는 범위 — 글자 획에서 이만큼(래스터 픽셀) 떨어진 곳까지. 줄 사이 틈은 메우고
+/// 상자 귀퉁이의 빈 바탕은 안 건드린다.
+const FLOOR_REACH: i32 = 14;
 
 /// 시스템 한글 폰트 — 담아 온 메이플스토리체를 못 찾았을 때만.
 const FALLBACK_FONT: &str = "/System/Library/Fonts/AppleSDGothicNeo.ttc";
@@ -413,6 +418,7 @@ fn raster(text: &str, max_w: f32, pt: f32) -> Option<(Vec<u8>, u32, u32)> {
     // 글자 밑에 어두운 테두리를 깔아 어떤 바탕화면 위에서도 읽힌다. 글자 알파를 조금
     // 부풀린 것이 테두리이고, 결과는 미리곱 알파라 색은 글자 몫만 남긴다.
     let mut out = vec![0u8; buf.len()];
+    let near = near_ink(&buf, w, h, FLOOR_REACH);
     for y in 0..h as i32 {
         for x in 0..w as i32 {
             let at = |xx: i32, yy: i32| -> u32 {
@@ -441,10 +447,35 @@ fn raster(text: &str, max_w: f32, pt: f32) -> Option<(Vec<u8>, u32, u32)> {
             // **정확히 0** 인 픽셀의 마우스를 아래 창으로 통과시켜서, 0 으로 두면 글자 획을
             // 정확히 짚지 않는 한 말풍선을 누를 수도 없고 커서도 손모양이 안 된다
             // (2026-09-08 실측: 말풍선 띠 전체에서 화살표였다). 눈에는 안 보인다.
-            out[o + 3] = (a + halo * (255 - a) / 255).clamp(FLOOR_A, 255) as u8;
+            let floor = if near[(y as u32 * w + x as u32) as usize] { FLOOR_A } else { 0 };
+            out[o + 3] = (a + halo * (255 - a) / 255).clamp(floor, 255) as u8;
         }
     }
     Some((out, w, h))
+}
+
+/// 글자 획에서 `reach` 픽셀 안에 드는 자리 — 가로·세로 두 번의 최대값 훑기로 상자(마름모가
+/// 아니라 네모 반경)를 넓힌다. 픽셀마다 반경을 도는 것보다 반경 배만큼 싸다.
+fn near_ink(buf: &[u8], w: u32, h: u32, reach: i32) -> Vec<bool> {
+    let (w, h) = (w as usize, h as usize);
+    let ink: Vec<bool> = (0..w * h).map(|i| buf[i * 4 + 3] > 0).collect();
+    let mut rows = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let lo = x.saturating_sub(reach as usize);
+            let hi = (x + reach as usize).min(w - 1);
+            rows[y * w + x] = ink[y * w + lo..=y * w + hi].iter().any(|v| *v);
+        }
+    }
+    let mut out = vec![false; w * h];
+    for x in 0..w {
+        for y in 0..h {
+            let lo = y.saturating_sub(reach as usize);
+            let hi = (y + reach as usize).min(h - 1);
+            out[y * w + x] = (lo..=hi).any(|yy| rows[yy * w + x]);
+        }
+    }
+    out
 }
 
 /// 글자만 그린 투명 텍스처. 반환은 (view, 논리폭, 논리높이).
@@ -494,8 +525,9 @@ pub fn render_preview(
     text: &str,
     viewport: (f32, f32),
     pt: f32,
+    roomy_width: f32,
 ) -> Option<(wgpu::TextureView, f32, f32)> {
-    let plan = preview(text, viewport, pt)?;
+    let plan = preview(text, viewport, pt, roomy_width)?;
     render_text(dev, q, &plan.text, plan.width, plan.pt)
 }
 
@@ -582,6 +614,11 @@ mod tests {
         assert!(w > 0 && h > 0);
         let painted = buf.chunks(4).filter(|p| p[3] > 0).count();
         assert!(painted > 20, "찍힌 픽셀 {painted}");
+        // 바닥 알파는 글자 근처에만 — 상자 전체에 깔면 큰 말풍선이 네모로 비친다.
+        let (buf2, w2, h2) = raster("가\n\n\n\n나", 260.0, FONT_PT).unwrap();
+        let mid = ((h2 / 2) * w2 + w2 / 2) as usize * 4;
+        assert_eq!(buf2[mid + 3], 0, "빈 줄 한가운데는 완전히 투명해야 한다");
+        assert!(buf2.chunks(4).filter(|p| p[3] == FLOOR_A as u8).count() > 0, "글자 곁에는 바닥이 있다");
         // 글자 속은 흰색(RGB = 알파), 둘레는 검은 테두리(RGB 0 에 알파만) — 어느 쪽이든
         // RGB 가 알파를 넘지 않아야 미리곱 알파가 성립한다.
         assert!(buf
@@ -614,16 +651,19 @@ mod tests {
     #[test]
     fn an_answer_that_overflows_the_compact_box_grows_instead_of_truncating() {
         let short = "코하루 · 나쵸";
-        let plan = preview(short, (634.0, 1072.0), 13.0).unwrap();
+        let plan = preview(short, (634.0, 1072.0), 13.0, 400.0).unwrap();
         assert_eq!(plan.text, short);
         assert!(plan.width <= COMPACT.0);
         let summary = (1..=8).map(|i| format!("{i}번 학생은 파일을 고치는 중이고 사람 손은 아직 필요 없어\n")).collect::<String>();
-        let plan = preview(summary.trim(), (634.0, 1072.0), 13.0).unwrap();
+        let plan = preview(summary.trim(), (634.0, 1072.0), 13.0, 400.0).unwrap();
         assert!(!plan.text.ends_with('…'), "잘림: {}", plan.text);
         assert!(plan.width > COMPACT.0);
         let (_, w, h) = raster(&plan.text, plan.width, plan.pt).unwrap();
         assert!(h as f32 / SCALE > COMPACT.1, "높이 {h}");
-        assert!(w as f32 / SCALE <= ROOMY_WIDTH);
+        assert!(w as f32 / SCALE <= 400.0);
+        // 너비 설정을 줄이면 상자도 준다.
+        let narrow = preview(summary.trim(), (634.0, 1072.0), 13.0, 280.0).unwrap();
+        assert!(narrow.width <= 280.0 && narrow.width < plan.width);
     }
 
     #[test]
@@ -638,7 +678,7 @@ mod tests {
             (32.0, 24.0),
         ] {
             for pt in [8.0, 13.0, 40.0, 120.0] {
-                let Some(plan) = preview(&raw, viewport, pt) else {
+                let Some(plan) = preview(&raw, viewport, pt, 400.0) else {
                     continue;
                 };
                 assert!(plan.text.ends_with('…') && plan.text.len() < raw.len());
@@ -667,10 +707,10 @@ mod tests {
             (f32::NAN, 100.0),
             (100.0, f32::INFINITY),
         ] {
-            assert!(preview("안내", viewport, 40.0).is_none());
+            assert!(preview("안내", viewport, 40.0, 400.0).is_none());
             assert!(geometry(viewport, (260.0, 110.0), (0.0, 0.0)).is_none());
         }
         assert!(geometry((168.0, 284.0), (f32::NAN, 20.0), (0.0, 0.0)).is_none());
-        assert!(preview("안내", (168.0, 284.0), f32::NAN).is_none());
+        assert!(preview("안내", (168.0, 284.0), f32::NAN, 400.0).is_none());
     }
 }

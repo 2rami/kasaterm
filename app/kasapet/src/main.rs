@@ -619,6 +619,8 @@ impl App {
             self.text_pt = self.preferences.text_pt as f32;
             self.rebuild_bubble_text();
             self.rebuild_typed();
+        } else if self.preferences.bubble_width != previous.bubble_width {
+            self.rebuild_bubble_text();
         }
         if !self.preferences.follow_cursor { self.look_now = (0.0, 0.0); }
         if !self.preferences.animations || !self.preferences.activity_reactions || self.preferences.lock_position {
@@ -799,7 +801,7 @@ impl App {
             self.typing.clone().unwrap_or_default(),
             self.preedit
         );
-        self.typed_tex = bubble::render_preview(&g.dev, &g.q, &body, viewport, self.text_pt);
+        self.typed_tex = bubble::render_preview(&g.dev, &g.q, &body, viewport, self.text_pt, self.preferences.bubble_width as f32);
     }
 
     fn request_journal(&mut self, action: journal::Action) {
@@ -1401,7 +1403,7 @@ impl App {
         self.bubble_geometry=None;
         let Some(viewport)=self.bubble_viewport() else {self.bubble_text=None;return;};
         let Some(g) = &self.gfx else { return };
-        self.bubble_text = bubble::render_preview(&g.dev, &g.q, &self.say, viewport, self.text_pt);
+        self.bubble_text = bubble::render_preview(&g.dev, &g.q, &self.say, viewport, self.text_pt, self.preferences.bubble_width as f32);
     }
 
     fn bubble_viewport(&self)->Option<(f32,f32)> {

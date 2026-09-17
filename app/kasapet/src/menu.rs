@@ -52,6 +52,15 @@ fn check(label: impl Into<String>, enabled: bool, checked: bool, value: Action) 
         item: Item::Action(value, true),
     }
 }
+/// 값을 한 칸씩 바꾸는 줄 — 메뉴를 닫지 않아 연달아 누를 수 있다.
+fn adjust(label: String, enabled: bool, value: Action) -> Row {
+    Row {
+        label,
+        enabled,
+        checked: None,
+        item: Item::Action(value, true),
+    }
+}
 fn page(label: &str, index: usize) -> Row {
     Row {
         label: label.into(),
@@ -175,7 +184,13 @@ pub fn content(
         Action::ResetExpressions,
     ));
     effects.push(heading("겹치는 효과는 자동으로 바뀝니다"));
-    let settings = [
+    let mut settings = vec![
+        adjust(format!("글자 작게 · {}pt", prefs.text_pt), can_save, Action::Preference(PreferenceChange::TextPt(prefs.text_pt.saturating_sub(1).max(8)))),
+        adjust(format!("글자 크게 · {}pt", prefs.text_pt), can_save, Action::Preference(PreferenceChange::TextPt((prefs.text_pt + 1).min(40)))),
+        adjust(format!("말풍선 좁게 · {}px", prefs.bubble_width), can_save, Action::Preference(PreferenceChange::BubbleWidth(prefs.bubble_width.saturating_sub(40).max(240)))),
+        adjust(format!("말풍선 넓게 · {}px", prefs.bubble_width), can_save, Action::Preference(PreferenceChange::BubbleWidth((prefs.bubble_width + 40).min(800)))),
+    ];
+    settings.extend([
         (
             "말풍선 표시",
             prefs.bubbles,
@@ -213,8 +228,7 @@ pub fn content(
         ),
     ]
     .into_iter()
-    .map(|(s, on, p)| check(s, can_save, on, Action::Preference(p)))
-    .collect();
+    .map(|(s, on, p)| check(s, can_save, on, Action::Preference(p))));
     let more = vec![
         action(
             if typing {

@@ -17,6 +17,8 @@ pub struct PetPreferences {
     pub ask_always: bool,
     pub scale_percent: Option<u32>,
     pub text_pt: u32,
+    /// 긴 말(나쵸 요약)이 앉는 말풍선의 최대 너비(논리 px).
+    pub bubble_width: u32,
     pub say_seconds: u32,
     pub sleep_minutes: u32,
 }
@@ -33,6 +35,7 @@ impl Default for PetPreferences {
             ask_always: true,
             scale_percent: None,
             text_pt: 13,
+            bubble_width: 400,
             say_seconds: 12,
             sleep_minutes: 8,
         }
@@ -50,6 +53,7 @@ pub enum PreferenceChange {
     AskAlways(bool),
     ScalePercent(Option<u32>),
     TextPt(u32),
+    BubbleWidth(u32),
     SaySeconds(u32),
     SleepMinutes(u32),
 }
@@ -66,6 +70,7 @@ impl PreferenceChange {
             Self::AskAlways(v) => ("ask_always", json!(v)),
             Self::ScalePercent(v) => ("scale_percent", json!(v.map(|n| n.clamp(40, 300)))),
             Self::TextPt(v) => ("text_pt", json!(v.clamp(8, 40))),
+            Self::BubbleWidth(v) => ("bubble_width", json!(v.clamp(240, 800))),
             Self::SaySeconds(v) => ("say_seconds", json!(v.clamp(3, 60))),
             Self::SleepMinutes(v) => ("sleep_minutes", json!(v.min(60))),
         }
@@ -110,6 +115,7 @@ pub fn read(dir: &Path) -> PetPreferences {
             .filter(|n| n.as_i64().is_some())
             .map(|n| number(Some(n), 100, 40, 300)),
         text_pt: number(v.get("text_pt"), legacy_pt, 8, 40),
+        bubble_width: number(v.get("bubble_width"), d.bubble_width, 240, 800),
         say_seconds: number(v.get("say_seconds"), d.say_seconds, 3, 60),
         sleep_minutes: number(v.get("sleep_minutes"), d.sleep_minutes, 0, 60),
     }

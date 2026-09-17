@@ -181,6 +181,7 @@ fn english(value: &str) -> Option<&'static str> {
         "모습" => "Appearance",
         "펫 크기" => "Pet size",
         "말풍선 글자 크기" => "Bubble text size",
+        "말풍선 너비" => "Bubble width",
         "항상 위에 표시" => "Always on top",
         "움직임" => "Movement",
         "마우스 시선 따라가기" => "Follow cursor with eyes",

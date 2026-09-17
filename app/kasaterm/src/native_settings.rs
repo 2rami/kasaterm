@@ -4253,6 +4253,9 @@ fn paint_pet(
     pet_value_row(g, s, hits, x, y, w, "말풍선 글자 크기", &format!("{}pt", prefs.text_pt),
         Change::TextPt(prefs.text_pt.saturating_sub(1).max(8)),
         Change::TextPt((prefs.text_pt + 1).min(40)));
+    pet_value_row(g, s, hits, x, y, w, "말풍선 너비", &format!("{}px", prefs.bubble_width),
+        Change::BubbleWidth(prefs.bubble_width.saturating_sub(40).max(240)),
+        Change::BubbleWidth((prefs.bubble_width + 40).min(800)));
     toggle_row(g, s, hits, x, y, w, "항상 위에 표시", prefs.always_on_top,
         SettingsAction::PetPreference(Change::AlwaysOnTop(!prefs.always_on_top)));
 
