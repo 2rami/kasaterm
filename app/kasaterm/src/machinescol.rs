@@ -342,8 +342,10 @@ pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)>
         .clone();
     // pane 번호는 그 기계가 재시작하면 재사용된다 — 거울이 아는 surface_key 와 다르면 지금
     // 그 번호에 앉은 건 남이다(2026-09-17: 죽은 셸의 거울이 모모이로 둔갑해 「탭」이 됐다).
+    // `legacy:%N` 은 열쇠가 아니라 「옛 기록이라 열쇠를 모른다」는 자리표시다 — 대조하면 멀쩡한
+    // 자기 pane 을 남으로 본다(2026-09-17: 재시작 뒤 옛 `to` 링크가 정리 후보에서 빠졌다).
     if let (Some(mine), Some(theirs)) = (
-        kasa_mcp::remote::remote_surface_key(id),
+        kasa_mcp::remote::remote_surface_key(id).filter(|k| !k.starts_with("legacy:")),
         row.get("surface_key").and_then(|v| v.as_str()),
     ) {
         if mine != theirs {

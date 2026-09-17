@@ -95,7 +95,8 @@ impl App {
             if !info.view || self.window_of_pane(local).is_none() { return None; }
             let settled = self.mirror_sync.first_seen.get(local)
                 .is_some_and(|at| at.elapsed() > Duration::from_secs(15));
-            let key = kasa_mcp::remote::remote_surface_key(local);
+            // `legacy:` 자리표시는 열쇠가 아니다 — 번호로만 대조한다.
+            let key = kasa_mcp::remote::remote_surface_key(local).filter(|k| !k.starts_with("legacy:"));
             let (mut live_source, mut found, mut marked_closed) = (false, false, false);
             for m in machines.iter()
                 .filter(|m| m["online"].as_bool() == Some(true) && m["online_via"].as_str() == Some("direct"))
