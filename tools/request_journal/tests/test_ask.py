@@ -167,6 +167,29 @@ class PerformTests(unittest.TestCase):
         self.assertNotIn("[할 수 있는 동작]", ask.build_prompt("뭐 해?", "%9", {"who": {}, "screen": "", "fleet": "-"}, None))
 
 
+class CliTests(unittest.TestCase):
+    def test_a_failed_cli_call_yields_the_reason_not_the_json_envelope(self):
+        import subprocess
+        envelope = '{"id":"cli-3","ok":false,"error":{"code":"backend","message":"%9 은 이미 원격 pane 이다 — 이사할 로컬이 없다"}}'
+        done = subprocess.CompletedProcess(["kasaterm-cli"], 1, stdout=envelope, stderr="")
+        with patch.object(ask, "cli_path", return_value="/bin/kasaterm-cli"), patch.object(ask, "socket_path", return_value=None), patch.object(ask.subprocess, "run", return_value=done):
+            ok, detail = ask.run_cli("migrate", "%9", "나쵸네코")
+        self.assertFalse(ok)
+        self.assertEqual(detail, "%9 은 이미 원격 pane 이다 — 이사할 로컬이 없다")
+        done = subprocess.CompletedProcess(["kasaterm-cli"], 2, stdout="", stderr="kasaterm-cli: 소켓이 없다\n")
+        with patch.object(ask, "cli_path", return_value="/bin/kasaterm-cli"), patch.object(ask, "socket_path", return_value=None), patch.object(ask.subprocess, "run", return_value=done):
+            self.assertEqual(ask.run_cli("focus", "%9"), (False, "kasaterm-cli: 소켓이 없다"))
+
+    def test_a_queued_migration_says_so_instead_of_claiming_the_move(self):
+        queued = '{"id":"cli-4","ok":true,"result":{"ok":true,"remote_id":"예약됨 — %9 가 하던 턴을 마치면 이사간다"}}'
+        with patch.object(ask, "run_cli", return_value=(True, queued)):
+            rows = ask.execute("%9", [{"name": "migrate_pane", "input": {"machine": "나쵸네코"}}])
+        self.assertEqual(rows[0]["detail"], "예약됨 — %9 가 하던 턴을 마치면 이사간다")
+        with patch.object(ask, "run_cli", return_value=(True, '{"id":"cli-5","ok":true,"result":{"ok":true,"remote_id":"%3"}}')):
+            rows = ask.execute("%9", [{"name": "migrate_pane", "input": {"machine": "나쵸네코"}}])
+        self.assertEqual(rows[0]["detail"], "나쵸네코로 이사")
+
+
 class PlainTests(unittest.TestCase):
     def test_markdown_marks_are_stripped_for_the_bubble(self):
         self.assertEqual(ask.plain("**■ 맥북** — 연결됨\n- **아리스** — 질문 중\n### 끝\n```\nx\n```"), "■ 맥북 — 연결됨\n· 아리스 — 질문 중\n끝\nx")
