@@ -9267,7 +9267,7 @@ impl App {
                 let seg_x0 = x;
                 let widget_count = ["ports", "schedules", "pet", "clipboard", "resources", "version", "tunnel", "link"]
                     .iter().filter(|id| status_prefs.visible(id))
-                    .map(|id| if matches!(*id, "tunnel" | "link") { 2 } else { 1 }).sum::<usize>().max(1);
+                    .map(|id| if *id == "tunnel" { 2 } else { 1 }).sum::<usize>().max(1);
                 let compact_tools = (win_w * 0.68 - 24.0) / (widget_count as f32) < 28.0;
                 let account_right = if status_prefs.visible("claude") || status_prefs.visible("codex") {
                     if compact_tools { seg_x0 + 16.0 } else { (win_w * 0.32).max(seg_x0).min(win_w - 12.0) }
@@ -9793,21 +9793,19 @@ impl App {
                     let icon = tool_icon;
                     let gap = if compact_tools { 0.0 } else { 3.0_f32 };
                     if status_prefs.visible("link") && !links.is_empty() {
-                        let text = if compact_tools || win_w < 900.0 {
-                            links.iter().map(|l| l.short()).collect::<Vec<_>>().join(" ")
-                        } else {
-                            links.iter().map(|l| l.long()).collect::<Vec<_>>().join(" · ")
-                        };
+                        // 한 칸에 요약만 — 이름은 아이콘의 기기색과 팝오버가 말한다.
+                        let text = if compact_tools { String::new() } else { crate::machinescol::status_links_summary(&links) };
                         let worst = links.iter().map(|l| l.tone()).min().unwrap_or(2);
                         let col = status_prefs.color("link", match worst {
                             0 => theme::attention(),
                             1 => theme::text(),
                             _ => theme::text_dim(),
                         });
-                        let text = crate::info::fit_text(g, &text, (slot_w * 2.0 - 24.0).max(0.0), fs, false);
+                        let icon_col = crate::machinescol::status_links_tint(&links).unwrap_or(col);
+                        let text = crate::info::fit_text(g, &text, (slot_w - 24.0).max(0.0), fs, false);
                         let w = g.measure_chrome_text(&text, fs, false);
                         rx -= w + icon + gap + 14.0;
-                        g.queue_icon("monitor", rx, sy + (status_h - icon) / 2.0, icon, col);
+                        g.queue_icon("monitor", rx, sy + (status_h - icon) / 2.0, icon, icon_col);
                         g.draw_text(rx + icon + gap, ty, &text,
                             gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false });
                         let r = (rx - chip / 2.0, sy, w + icon + gap + chip, status_h);
@@ -10165,7 +10163,7 @@ impl App {
                         .filter(|id| status_prefs.visible(id))
                     {
                         let slot_right = rx;
-                        let allocated = slot_w * if id == "tunnel" || id == "link" { 2.0 } else { 1.0 };
+                        let allocated = slot_w * if id == "tunnel" { 2.0 } else { 1.0 };
                         g.push_clip(slot_right - allocated, sy, allocated, status_h);
                         match id.as_str() {
                             "resources" => draw_resources_widget!(),
