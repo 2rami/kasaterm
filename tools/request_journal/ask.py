@@ -406,8 +406,15 @@ def homepc(action: str) -> tuple[bool, str]:
         return False, "action 은 on·off·status 중 하나다"
     if not HOMEPC_BIN.is_file():
         return False, f"집컴 전원 명령이 없다: {HOMEPC_BIN}"
+    # launchd 의 PATH 에는 홈브루·~/.local/bin 이 없다. homepc 가 터널로 갈 때 ssh 설정의
+    # ProxyCommand 가 `cloudflared` 를 이름으로 부르므로, 그게 없으면 「거점에 못 닿았다」로만 끝난다.
+    env = dict(os.environ)
+    home = str(Path.home())
+    env["HOME"] = env.get("HOME") or home
+    extra = [f"{home}/.local/bin", f"{home}/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+    env["PATH"] = ":".join(extra + [p for p in env.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin").split(":") if p and p not in extra])
     try:
-        done = subprocess.run([str(HOMEPC_BIN), action], capture_output=True, text=True, timeout=HOMEPC_TIMEOUT)
+        done = subprocess.run([str(HOMEPC_BIN), action], capture_output=True, text=True, timeout=HOMEPC_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
         return False, f"집컴 {action} 응답이 {HOMEPC_TIMEOUT}초 안에 안 왔다"
     except OSError as e:

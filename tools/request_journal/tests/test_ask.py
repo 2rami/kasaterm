@@ -205,6 +205,13 @@ class HomepcTests(unittest.TestCase):
         self.assertEqual(rows, [{"kind": "homepc", "ok": True, "detail": "켜기 신호 보냄"}])
         with patch.object(ask, "HOMEPC_BIN", Path(d) / "없다"):
             self.assertIn("없다", ask.homepc("on")[1])
+        # launchd 의 빈 PATH 라도 홈브루·~/.local/bin 이 앞에 붙는다 — cloudflared 를 찾는 길이다.
+        script.write_text("#!/bin/sh\necho \"$PATH\"\n")
+        with patch.object(ask, "HOMEPC_BIN", script), patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+            ok, path = ask.homepc("status")
+        self.assertTrue(ok)
+        self.assertTrue(path.startswith(str(Path.home() / ".local/bin")), path)
+        self.assertIn("/opt/homebrew/bin", path)
 
 
 class PlainTests(unittest.TestCase):
