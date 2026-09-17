@@ -1288,6 +1288,10 @@ impl App {
     /// 그 기기 방을 보기 창으로 연다 — 거울을 원래 방에 남기면 기기 절과 중복이고, 번호가
     /// 재사용되면 남으로 둔갑했다(2026-09-17).
     pub(crate) fn tick_migrate_handoff(&mut self) {
+        if self.migrate_handoff.is_none() {
+            self.sweep_migrated_links();
+            return;
+        }
         if self.migrate_handoff.as_ref().is_none_or(|h| h.at > Instant::now()) {
             return;
         }
@@ -1299,6 +1303,34 @@ impl App {
         if let Err(e) = self.seat_remote_view_window(&h.label, &h.base, &h.remote_id, false, None) {
             self.set_toast(format!("{} 의 방을 보기 창으로 못 열었어요 — {e:#}", h.label));
         }
+    }
+
+    /// 예전 `to` 가 남긴 거울 — 재시작 때 세션에서 되살아나 이쪽 방에 그대로 앉는다. 그 기계
+    /// 목록에 그 pane 이 보이면(캐시가 찼으면) 그 방을 보기 창으로 열고 이 자리를 걷는다.
+    /// 한 번에 하나만 — 여럿이면 다음 틱에 이어서. 복원이 도는 동안은 손대지 않는다.
+    fn sweep_migrated_links(&mut self) {
+        if self.tmux.is_some() || self.restore_progress.is_some() || self.restore_applying.is_some() {
+            return;
+        }
+        let candidate = self.pty.keys().find_map(|id| {
+            let info = kasa_mcp::remote::remote_info(id)?;
+            if info.view || info.owned || !info.remote_id.starts_with('%') { return None; }
+            let window = self.window_of_pane(id)?;
+            if self.remote_view_of_window(window).is_some() { return None; }
+            let (label, facts) = crate::machinescol::remote_pane_facts(id)?;
+            let source_window = facts.get("window").and_then(|v| v.as_u64())?;
+            let room = crate::machinescol::remote_room(&facts);
+            Some((id.clone(), label, source_window, room, info.remote_id))
+        });
+        let Some((id, label, source_window, room, remote_id)) = candidate else { return };
+        // 보기 창부터 연다 — 못 열면 이 링크가 아직 손잡이다.
+        if let Err(e) = self.open_remote_room(&label, Some(source_window), &room, Some(&remote_id)) {
+            eprintln!("[migrate] leftover mirror {id} → {label} view failed: {e:#}");
+            return;
+        }
+        self.remote_keep.insert(id.clone());
+        self.remove_pane(&id);
+        self.set_toast(format!("{label} 로 간 자리를 걷고 그 방을 보기 창으로 열었어요"));
     }
 
     pub(crate) fn new_remote_room(&mut self, label: &str) -> Result<(String, Option<usize>)> {

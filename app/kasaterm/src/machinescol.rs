@@ -57,7 +57,7 @@ fn row_tab_of(p: &serde_json::Value) -> Option<String> {
 /// 이름은 원본 기기가 준 방 이름(`room_label`)이 먼저다 — pane 마다 폴더 꼬리로 지으면
 /// 한 방의 탭들이 폴더가 달라 방 셋으로 갈라진다(2026-09-16 지적). 옛 판 기기는 그 필드가
 /// 없어 폴더 꼬리로 남되, 묶는 것은 `window` 번호가 한다.
-fn remote_room(p: &serde_json::Value) -> String {
+pub(crate) fn remote_room(p: &serde_json::Value) -> String {
     let window = p.get("window").and_then(|v| v.as_u64());
     // 원본의 방 이름은 그쪽 사이드바 카드의 「이름 · 폴더」 그대로다 — 그 앞에 「방 N ·」을
     // 붙이면 본기기 카드와 모양이 갈린다(2026-09-16 지적 「똑같이 안 떠」).
