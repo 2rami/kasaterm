@@ -5249,14 +5249,18 @@ impl App {
         let base = base.to_string();
         std::thread::spawn(move || {
             let query = format!("/term/tree?path={}", kasa_mcp::remote::urlencode(&dir.to_string_lossy()));
-            let entries: Vec<(String, bool, bool)> = kasa_mcp::remote::remote_get_json(&base, &query)
-                .ok()
-                .and_then(|v| v.get("entries")?.as_array().map(|arr| arr.iter().filter_map(|e| Some((
+            let entries: Vec<(String, bool, bool)> = match kasa_mcp::remote::remote_get_json(&base, &query) {
+                Ok(v) => v.get("entries").and_then(|e| e.as_array()).map(|arr| arr.iter().filter_map(|e| Some((
                     e.get("name")?.as_str()?.to_string(),
                     e.get("is_dir")?.as_bool()?,
                     e.get("is_repo").and_then(|v| v.as_bool()).unwrap_or(false),
-                ))).collect()))
-                .unwrap_or_default();
+                ))).collect()).unwrap_or_default(),
+                // 빈 트리는 「왜 비었나」를 못 말한다 — 옛 판(창구 없음)이면 한 줄로 알린다.
+                Err(e) if e.to_string().contains("404") => vec![
+                    ("(그 기기가 옛 판이라 목록을 못 받아요 — 새 판으로 띄우면 보여요)".to_string(), false, false),
+                ],
+                Err(_) => vec![("(목록을 못 받았어요 — 연결을 확인해 주세요)".to_string(), false, false)],
+            };
             if let Ok(mut c) = cache.lock() { c.insert(dir.clone(), entries); }
             if let Ok(mut p) = pending.lock() { p.remove(&dir); }
             dirty.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -5281,9 +5285,11 @@ impl App {
             let Some(root) = self.file_tree.root.clone() else { return };
             let name = root.file_name().map(|n| nfc_hangul(&n.to_string_lossy()))
                 .unwrap_or_else(|| root.to_string_lossy().into_owned());
+            // 기기 이름은 안 붙인다 — 배경 기기색이 이미 말한다(2026-09-17 지적).
+            let _ = &label;
             self.file_tree.nodes.push(FileNode {
                 path: root.clone(),
-                name: format!("{label} · {name}"),
+                name,
                 is_dir: true,
                 depth: 0,
                 ignored: false,

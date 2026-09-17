@@ -389,6 +389,15 @@ pub(crate) fn reset_all_device_colors() {
 
 /// The interior is opaque so active/hover fills cannot erase device identity.
 /// Attention still owns the outer border and its pulse is painted above this.
+/// 넓은 판(파일트리·깃 패널)에 기기색을 묻히는 정도. 배치도 칸(22%)만큼 칠하면 옆 pane 과
+/// 딴 색이 되어 어색하다(2026-09-17 지적) — 어느 기기인지만 알리게 옅게.
+const PANEL_TINT: f32 = 0.07;
+
+/// 파일트리·깃 패널 배경 — 다른 기기 것을 볼 때만 기기색을 옅게 묻힌다.
+pub(crate) fn panel_background(base: [u8; 4], machine: Option<&str>) -> [u8; 4] {
+    machine.map_or(base, |label| theme::lerp(base, machine_tint(label), PANEL_TINT))
+}
+
 pub(crate) fn minimap_background(base: [u8; 4], machine: Option<&str>) -> [u8; 4] {
     machine.map_or(base, |label| theme::lerp(base, machine_tint(label), MINIMAP_TINT))
 }

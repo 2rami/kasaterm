@@ -922,10 +922,10 @@ impl App {
             .ok()
             .and_then(|r| r.as_ref().map(|(label, _)| label.clone()))
             .map_or(theme::panel_bg(), |label| {
-                pane_identity::minimap_background(theme::panel_bg(), Some(&label))
+                pane_identity::panel_background(theme::panel_bg(), Some(&label))
             });
         let tree_col_bg = self.file_tree.remote.as_ref().map_or(theme::panel_bg(), |(label, _)| {
-            pane_identity::minimap_background(theme::panel_bg(), Some(label))
+            pane_identity::panel_background(theme::panel_bg(), Some(label))
         });
         let git_reserve = if git_col_w > 0.0 {
             git_col_w + WINDOW_PADDING
