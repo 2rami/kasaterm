@@ -66,7 +66,8 @@ define_class!(
 pub struct Bar {
     panel: Retained<NSPanel>,
     parent: Retained<NSWindow>,
-    /// 검증 창구(`snapshot`)가 그림을 뜨는 판.
+    /// 검증 창구(`snapshot`, 디버그 빌드에만 있다)가 그림을 뜨는 판.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     body: Retained<NSView>,
     input: Retained<NSTextField>,
     _actions: Retained<Actions>,
