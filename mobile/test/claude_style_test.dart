@@ -45,6 +45,7 @@ void main() {
   bannerTests();
   pinnedTests();
   historyTests();
+  footerFlushTests();
 
   test(
     'opposite-mode Codex input fill uses viewer base, preserves diff colors',
@@ -343,7 +344,11 @@ void main() {
     expect(status, isNot(contains('kasaterm')), reason: '폴더부터 뺀다');
     expect(status, contains('main'), reason: '브랜치는 아직 들어간다');
     expect(v.slots.map((s) => s.motion), contains('icon:claude'));
-    expect(text(v.lines[5]).trimRight(), '  ⏵⏵ bypass permissions on');
+    expect(
+      text(v.lines[5]).trimRight(),
+      '⏵⏵ bypass permissions on',
+      reason: '바닥줄은 0열부터',
+    );
     expect(cols(v.lines[0]), greaterThan(42), reason: '본문은 손대지 않는다');
   });
 
@@ -355,15 +360,16 @@ void main() {
       '  \uFFFC\uE0C0 Fable 5.1 1M ┃ \uE0A0 main ┃ \uF07B kasaterm ┃ 42% ┃ \uF0E7 xhigh',
       '  hint that is far too long to fit anywhere at all',
     ], cols: 90);
-    final v = restyleClaude(g, st, 0, wrapCols: 30);
+    // 앞 여백 2칸을 걷은 뒤에도 30열엔 딱 들어가므로 28열로 좁혀야 빼는 규칙이 돈다.
+    final v = restyleClaude(g, st, 0, wrapCols: 28);
     final status = text(v.lines[3]).trimRight();
-    expect(cols(v.lines[3]), lessThanOrEqualTo(30));
+    expect(cols(v.lines[3]), lessThanOrEqualTo(28));
     expect(status, isNot(contains('main')));
     expect(status, isNot(contains('1M')));
     expect(status, contains('42%'));
     expect(status, endsWith('xhigh'));
     final hint = text(v.lines[4]);
-    expect(cols(v.lines[4]), lessThanOrEqualTo(30));
+    expect(cols(v.lines[4]), lessThanOrEqualTo(28));
     expect(hint, endsWith('…'));
   });
 
@@ -614,5 +620,39 @@ void historyTests() {
     expect(shortHomePath('/home/pi/x'), '~/x');
     expect(shortHomePath('/Users/kasa'), '~');
     expect(shortHomePath('/opt/app'), '/opt/app');
+  });
+}
+
+void footerFlushTests() {
+  test('바닥 상태줄은 0열부터 — 프사 자리·앞 여백을 걷고 로고가 첫 칸에 앉는다', () {
+    final g = gridOf([
+      '──────────────────────────────',
+      '❯ ',
+      '──────────────────────────────',
+      '  ￼ Fable 5.1 1M ┃  main ┃ kasaterm',
+      '  ⏵⏵ bypass permissions on',
+    ], cols: 60);
+    const style = StudentStyle(
+      slug: null,
+      accent: accent,
+      bg: bg,
+      cwd: '/Users/me/Desktop/kasaterm',
+    );
+    final v = restyleClaude(g, style, 0);
+    final icon = v.slots.singleWhere((s) => s.motion == 'icon:claude');
+    expect(icon.row, 3);
+    expect(icon.col, 0);
+    // 0열은 로고 자리(빈칸), 그 뒤 「 폴더 경로」.
+    expect(text(v.lines[3]), '  \u{F07B} ~/Desktop/kasaterm');
+    expect(text(v.lines[4]), startsWith('⏵⏵'));
+  });
+
+  test('경로를 모르는 셸 화면도 상태줄은 0열부터', () {
+    final g = gridOf(['  ￼ Fable 5.1 1M ┃ main'], cols: 60);
+    const style = StudentStyle(slug: null, accent: accent, bg: bg);
+    final v = restyleClaude(g, style, 0);
+    expect(v.slots.single.motion, 'icon:claude');
+    expect(v.slots.single.col, 0);
+    expect(text(v.lines[0]), '  Fable 5.1 1M ┃ main', reason: '0열은 로고 자리');
   });
 }

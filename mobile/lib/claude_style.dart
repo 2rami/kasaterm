@@ -1293,6 +1293,10 @@ void _fitFooterRows(
   };
   for (var r = from; r < rows.length; r++) {
     final row = rows[r];
+    // 바닥줄은 왼쪽에 붙인다 — 데스크톱은 프사 자리와 여백을 앞에 두지만 폰은 그
+    // 자리를 비워 두면 상태줄만 안으로 들어가 보인다(2026-09-17 지시 「상태줄 왼쪽으로
+    // 밀착」). 프사 자리표는 위에서 이미 빈칸이 됐다.
+    if (_flushLeft(row)) touched.add(r);
     final status = row.any(
       (c) => c.rune == statusModelClaude || c.rune == statusModelGpt,
     );
@@ -1306,6 +1310,17 @@ void _fitFooterRows(
         : _fitPlainRow(row, width);
     if (changed) touched.add(r);
   }
+}
+
+/// 앞의 빈칸을 걷어 첫 글자를 0열에 — 걷은 게 있으면 true.
+bool _flushLeft(List<_Cell> row) {
+  var n = 0;
+  while (n < row.length && row[n].blank) {
+    n++;
+  }
+  if (n == 0 || n == row.length) return false;
+  row.removeRange(0, n);
+  return true;
 }
 
 /// 상태줄을 「로고 · 폴더 아이콘 · 경로」로 다시 쓴다. 홈은 `~`, 그래도 넘치면 앞
@@ -1386,6 +1401,9 @@ StyledGrid restyleClaude(
     for (var i = 0; i < row.length; i++) {
       final g = row[i].rune;
       if (g != statusModelClaude && g != statusModelGpt) continue;
+      if (row.sublist(0, i).every((c) => c.blank) && _flushLeft(row)) {
+        i = 0;
+      }
       final col = _colOf(row, i);
       _blankCell(row[i]);
       touched.add(r);

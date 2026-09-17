@@ -11,6 +11,7 @@ import 'package:kasaterm_mobile/image_attachment.dart';
 import 'package:kasaterm_mobile/photo_attachment_button.dart';
 import 'package:kasaterm_mobile/server.dart';
 import 'package:kasaterm_mobile/term_session.dart';
+import 'package:kasaterm_mobile/hub_model.dart';
 import 'package:kasaterm_mobile/screens/terminal.dart';
 
 const slug = 'abcdefghij0123456789abcde';
@@ -52,6 +53,7 @@ class AttachmentSession extends TermSession {
 }
 
 void main() {
+  disabledReasonTests();
   testWidgets('draft mode can send a photo without text, only after upload', (
     tester,
   ) async {
@@ -336,4 +338,90 @@ void main() {
       });
     },
   );
+}
+
+void disabledReasonTests() {
+  testWidgets('꺼진 버튼을 누르면 이유가 뜬다 — 셸 창', (tester) async {
+    final server = AttachmentServer();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: PhotoAttachmentButton(
+            server: server,
+            pane: target,
+            enabled: false,
+            disabledReason: '학생이 도는 창에서만 사진을 붙일 수 있어요.',
+            pickImage: () async => Uint8List.fromList([1]),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byTooltip('사진 첨부'));
+    await tester.pump();
+    expect(find.textContaining('학생이 도는 창에서만'), findsOneWidget);
+    expect(server.requests, isEmpty);
+  });
+
+  testWidgets('열어 둔 화면이 목록을 다시 받아 셸 → 학생으로 바뀐다', (tester) async {
+    final server = RefreshingServer();
+    const shell = Pane(
+      id: '%7',
+      name: '',
+      title: '',
+      status: '',
+      window: 0,
+      cwd: '',
+      machine: '~mini-stable',
+    );
+    final session = AttachmentSession(server, shell);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TerminalScreen(
+          server: server,
+          pane: shell,
+          session: session,
+          pickImage: () async => Uint8List.fromList([1]),
+        ),
+      ),
+    );
+    expect(find.text('셸'), findsOneWidget);
+    expect(
+      tester
+          .widget<IconButton>(
+            find.byWidgetPredicate(
+              (w) => w is IconButton && w.tooltip == '사진 첨부',
+            ),
+          )
+          .onPressed,
+      isNotNull,
+    );
+    server.next = [
+      const Pane(
+        id: '%7',
+        name: '세이아',
+        title: '',
+        status: 'compacting',
+        window: 0,
+        cwd: '/',
+        harness: 'claude',
+        machine: '~mini-stable',
+        compactPct: 40,
+      ),
+    ];
+    await tester.pump(HubModel.pollEvery);
+    await tester.pump();
+    expect(find.text('세이아'), findsOneWidget);
+    expect(find.textContaining('컴팩트 중 · 40%'), findsOneWidget);
+    expect(server.listed, ['~mini-stable']);
+  });
+}
+
+class RefreshingServer extends AttachmentServer {
+  List<Pane> next = const [];
+  final listed = <String?>[];
+  @override
+  Future<List<Pane>> panes({String? machine}) async {
+    listed.add(machine);
+    return next;
+  }
 }

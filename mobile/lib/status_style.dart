@@ -59,7 +59,7 @@ class StatusStyle {
       return StatusStyle(
         mood: PaneMood.working,
         label: p.busyLabel,
-        icon: Icons.bolt_rounded,
+        icon: p.isCompacting ? Icons.compress_rounded : Icons.bolt_rounded,
         color: scheme.primary,
       );
     }

@@ -1047,6 +1047,12 @@ pub trait Backend: Send + Sync {
     fn undocked_panes(&self) -> Vec<String> {
         Vec::new()
     }
+    /// 지금 compact(대화 압축) 중인 pane 과 진행률 — GUI 만 화면에서 읽는다. board 의
+    /// 상태는 transcript 기반이라 compact 를 「working」으로만 알아, 폰이 그 사이를
+    /// 「작업 중」으로 뭉갰다. 기본은 빈 목록.
+    fn compacting_panes(&self) -> Vec<(String, Option<u8>)> {
+        Vec::new()
+    }
     /// Switch the visible session to index `idx`. Default unsupported.
     fn switch_session(&self, _idx: usize) -> Result<()> {
         anyhow::bail!("switch_session not supported")

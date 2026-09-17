@@ -1133,6 +1133,11 @@ impl App {
         // Drop entries for panes that no longer exist (closed/undocked).
         self.pane_activity
             .retain(|k, _| busy_now.iter().any(|(id, _, _)| id == k));
+        if let Ok(mut ws) = self.ws.lock() {
+            if ws.compacting != compacting_now {
+                ws.compacting = compacting_now;
+            }
+        }
         self.pane_last_busy
             .retain(|k, _| busy_now.iter().any(|(id, _, _)| id == k));
         self.route_approval_prompts(&busy_now, now);

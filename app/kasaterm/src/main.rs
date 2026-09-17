@@ -3482,6 +3482,9 @@ struct Workspace {
     /// 별도 OS 창으로 뗀 pane(auxterm.rs). `pane_window` 에는 떠나온 방으로 실리고
     /// 여기엔 「트리 밖」이라는 표시만 — 폰·board 가 닫힌 pane 과 가른다.
     undocked: std::collections::HashSet<String>,
+    /// compact 중인 pane → 진행률. `pane_activity` 는 App 것이라 소켓 백엔드(별 스레드)가
+    /// 못 보므로 활동 틱마다 여기로 미러 — `/term/panes` 가 폰에 「컴팩트 중」을 싣는다.
+    compacting: HashMap<String, Option<u8>>,
     /// 방(윈도우)마다의 화면 배치 — 폰 허브의 미니맵이 「어느 방에 누가 어떤 크기로」를
     /// 그리는 재료. `layout` 은 보고 있는 방 하나뿐이라 따로 둔다.
     window_layouts: HashMap<usize, Layout>,
@@ -3503,6 +3506,7 @@ impl Default for Workspace {
             active_window_panes: std::collections::HashSet::new(),
             pane_window: HashMap::new(),
             undocked: std::collections::HashSet::new(),
+            compacting: HashMap::new(),
             window_layouts: HashMap::new(),
             grid_aspect: None,
         }

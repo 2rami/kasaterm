@@ -946,6 +946,11 @@ impl Backend for PtyBackend {
         ws.undocked.iter().cloned().collect()
     }
 
+    fn compacting_panes(&self) -> Vec<(String, Option<u8>)> {
+        let ws = self.ws.lock().unwrap();
+        ws.compacting.iter().map(|(k, v)| (k.clone(), *v)).collect()
+    }
+
     fn pane_cwds(&self) -> Vec<(String, String)> {
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = self.proxy.send_event(UserEvent::SocketPaneCwds(tx));

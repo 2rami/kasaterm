@@ -32,6 +32,7 @@ class Pane {
     this.harness,
     this.mirrorOf,
     this.contextPct,
+    this.compactPct,
     this.branch,
     this.modelLabel,
     this.effortLabel,
@@ -78,6 +79,9 @@ class Pane {
   /// 이 자리가 다른 기계 pane 의 거울이면 그 기계 이름. 몸통은 저쪽에 있다.
   final String? mirrorOf;
   final int? contextPct;
+
+  /// compact(대화 압축) 진행률 — 상태가 `compacting` 일 때만 온다.
+  final int? compactPct;
   final String? branch;
 
   /// 사람 말로 다듬은 모델 이름(「Fable 5.1 1M」)과 effort — 상태줄 재료.
@@ -97,6 +101,12 @@ class Pane {
   /// 작업 중일 때 정확한 한 마디. 백그라운드가 있으면 그 설명이 먼저다 — 최신 도구
   /// 라벨은 턴이 끝난 뒤에도 남아, 감시만 도는 pane 에 옛 「Edit …」가 붙는다.
   String get busyLabel {
+    // compact 는 도구 라벨보다 먼저 — 그동안 학생은 답을 못 하니 「무엇을 하던 중」
+    // 보다 「지금 압축 중」이 사람이 알아야 할 말이다.
+    if (isCompacting) {
+      final pct = compactPct;
+      return pct == null ? '컴팩트 중' : '컴팩트 중 · $pct%';
+    }
     if (background.isNotEmpty) {
       final n = background.length;
       return n == 1
@@ -133,6 +143,7 @@ class Pane {
   /// 사람 손이 필요한가 — 답·승인·질문 어느 쪽이든.
   bool get isWaiting => status == 'waiting' || status == 'blocked';
   bool get isIdle => status == 'idle';
+  bool get isCompacting => status == 'compacting';
 
   /// 끝낸 지 얼마 안 됐다 — 마지막 답을 읽을 차례.
   bool get justDone => isIdle && idleSecs != null && idleSecs! < 600;
@@ -188,6 +199,7 @@ class Pane {
     harness: j['harness'] as String?,
     mirrorOf: j['mirror_of'] as String?,
     contextPct: (j['context_pct'] as num?)?.toInt(),
+    compactPct: (j['compact_pct'] as num?)?.toInt(),
     branch: j['branch'] as String?,
     modelLabel: j['model_label'] as String?,
     effortLabel: j['effort_label'] as String?,
@@ -537,7 +549,9 @@ class Server {
     if (b is! Map) return null;
     return BrowserTarget(
       machine: b['machine'] as String? ?? '',
-      candidates: [for (final c in (b['candidates'] as List?) ?? const []) '$c'],
+      candidates: [
+        for (final c in (b['candidates'] as List?) ?? const []) '$c',
+      ],
       local: b['local'] as String? ?? '',
       phone: b['phone'] == true,
     );
@@ -868,11 +882,10 @@ class Server {
     String text, {
     bool secret = false,
     String? machine,
-  }) => _postOk(
-    'term/clipboard',
-    {'text': text, 'secret': secret},
-    machine: machine,
-  );
+  }) => _postOk('term/clipboard', {
+    'text': text,
+    'secret': secret,
+  }, machine: machine);
 
   /// 목록 한 칸을 데스크톱 클립보드로 되올린다.
   Future<void> clipboardPick(int id, {String? machine}) =>

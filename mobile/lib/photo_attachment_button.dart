@@ -13,12 +13,17 @@ class PhotoAttachmentButton extends StatefulWidget {
     required this.enabled,
     this.onBusy,
     this.onAttached,
+    this.disabledReason,
     this.pickImage = pickAttachmentImage,
   });
 
   final Server server;
   final Pane pane;
   final bool enabled;
+
+  /// 꺼져 있을 때 눌렀을 때 띄울 이유. 없으면 아무 반응 없이 회색 — 왜 안 눌리는지
+  /// 모르게 된다(2026-09-17 지적 「사진첨부 버튼 왜 안 눌리냐」).
+  final String? disabledReason;
   final ValueChanged<bool>? onBusy;
   final VoidCallback? onAttached;
   final Future<Uint8List?> Function() pickImage;
@@ -79,15 +84,27 @@ class _PhotoAttachmentButtonState extends State<PhotoAttachmentButton> {
   }
 
   @override
-  Widget build(BuildContext context) => IconButton(
-    tooltip: _busy ? (_uploading ? '사진 첨부 중' : '사진 선택 중') : '사진 첨부',
-    onPressed: widget.enabled && !_busy ? _attach : null,
-    icon: _busy
-        ? const SizedBox(
-            width: 18,
-            height: 18,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          )
-        : const Icon(Icons.add_photo_alternate_outlined, size: 22),
-  );
+  Widget build(BuildContext context) {
+    final reason = widget.disabledReason;
+    final off = !widget.enabled && reason != null;
+    return IconButton(
+      tooltip: _busy ? (_uploading ? '사진 첨부 중' : '사진 선택 중') : '사진 첨부',
+      onPressed: _busy
+          ? null
+          : widget.enabled
+          ? _attach
+          : off
+          ? () => _message(reason)
+          : null,
+      // 꺼진 모양은 그대로 — 눌러서 이유를 들을 수 있을 뿐 켜진 것처럼 보이면 안 된다.
+      color: off ? Theme.of(context).disabledColor : null,
+      icon: _busy
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.add_photo_alternate_outlined, size: 22),
+    );
+  }
 }

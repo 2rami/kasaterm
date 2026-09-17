@@ -1,3 +1,4 @@
+import 'dart:async';
 import '../device_shape.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +8,7 @@ import '../grid_canvas.dart';
 import '../live_input.dart';
 import '../image_attachment.dart';
 import '../photo_attachment_button.dart';
+import '../hub_model.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
@@ -49,6 +51,13 @@ class _TerminalScreenState extends State<TerminalScreen>
   bool _attaching = false;
   bool _pendingAttachment = false;
 
+  /// 지금의 pane — 열 때 받은 것으로 시작해 목록을 다시 받아 갈아 끼운다. 셸에서
+  /// claude 를 띄우면 이름·얼굴·상태가 따라오고, 사진 버튼도 그때 켜진다(2026-09-17
+  /// 지적 「머리글은 셸인데 버튼은 되는데?」·「학생 이미지 안 보여」).
+  late Pane _pane = widget.pane;
+  Timer? _paneTimer;
+  bool _paneRefreshing = false;
+
   /// 바로 치기(기본) — 확정된 글자가 곧바로 화면의 입력상자에 붙는다. 끄면 아래
   /// 칸에 적어 두었다 한 번에 보낸다(긴 글을 다듬을 때).
   bool _live = true;
@@ -72,10 +81,53 @@ class _TerminalScreenState extends State<TerminalScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _session.connect();
+    _startPaneRefresh();
   }
+
+  void _startPaneRefresh() {
+    _paneTimer ??= Timer.periodic(HubModel.pollEvery, (_) => _refreshPane());
+  }
+
+  void _stopPaneRefresh() {
+    _paneTimer?.cancel();
+    _paneTimer = null;
+  }
+
+  /// 허브와 같은 박자로 이 pane 한 줄만 다시 받는다. 실패는 조용히 — 다음 바퀴가 있다.
+  Future<void> _refreshPane() async {
+    if (_paneRefreshing || !mounted) return;
+    _paneRefreshing = true;
+    try {
+      final panes = await widget.server.panes(machine: widget.pane.machine);
+      final found = panes.where((p) => p.id == widget.pane.id).firstOrNull;
+      if (found == null || !mounted || _samePane(found, _pane)) return;
+      setState(() => _pane = found);
+    } catch (_) {
+      // 목록 한 번 못 받은 것 — 화면은 열 때 정보로 계속 그린다.
+    } finally {
+      _paneRefreshing = false;
+    }
+  }
+
+  static bool _samePane(Pane a, Pane b) =>
+      a.name == b.name &&
+      a.slug == b.slug &&
+      a.status == b.status &&
+      a.kind == b.kind &&
+      a.idleSecs == b.idleSecs &&
+      a.doing == b.doing &&
+      a.compactPct == b.compactPct &&
+      a.session == b.session &&
+      a.harness == b.harness &&
+      a.cwd == b.cwd &&
+      a.branch == b.branch &&
+      a.mirrorOf == b.mirrorOf &&
+      a.contextPct == b.contextPct &&
+      a.closed == b.closed;
 
   @override
   void dispose() {
+    _stopPaneRefresh();
     WidgetsBinding.instance.removeObserver(this);
     _session.dispose();
     _input.dispose();
@@ -88,10 +140,12 @@ class _TerminalScreenState extends State<TerminalScreen>
     switch (state) {
       case AppLifecycleState.resumed:
         _session.resume();
+        _startPaneRefresh();
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
       case AppLifecycleState.hidden:
         _session.pause();
+        _stopPaneRefresh();
       case AppLifecycleState.inactive:
         break;
     }
@@ -179,7 +233,7 @@ class _TerminalScreenState extends State<TerminalScreen>
     TermState.connecting => '연결 중…',
     // 웹 셸은 서버가 id 로 붙는 모든 연결을 미러로 보지만 데스크톱에 원본 화면이 없다.
     TermState.connected =>
-      s.mirror && !widget.pane.isWebShell ? '데스크톱 화면 그대로' : '웹 셸',
+      s.mirror && !_pane.isWebShell ? '데스크톱 화면 그대로' : '웹 셸',
     TermState.reconnecting => '다시 연결 중…',
     TermState.gone => '끝난 화면',
   };
@@ -222,7 +276,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       final theme = Theme.of(context);
       final scheme = theme.colorScheme;
       final s = _session;
-      final pane = widget.pane;
+      final pane = _pane;
       final accent = studentAccent(context, pane, s.tokens);
       final slug = pane.slug;
       return _StudentFrame(
@@ -358,6 +412,11 @@ class _TerminalScreenState extends State<TerminalScreen>
                           !_sending &&
                           !pane.isShell &&
                           !pane.isWebShell,
+                      disabledReason: pane.isShell || pane.isWebShell
+                          ? '학생이 도는 창에서만 사진을 붙일 수 있어요. 셸에서는 먼저 claude 를 띄워 주세요.'
+                          : s.state == TermState.connected
+                          ? '보내는 중이에요. 잠시 뒤 다시 눌러 주세요.'
+                          : '연결이 끊겨 사진을 붙일 수 없어요. 다시 연결되면 켜져요.',
                       onBusy: (busy) => setState(() => _attaching = busy),
                       onAttached: () => setState(() {
                         _pendingAttachment = true;
@@ -469,7 +528,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       source: tokens,
     );
     if (_wrap) {
-      final pane = widget.pane;
+      final pane = _pane;
       return WrappedCanvas(
         grid: s.grid,
         history: s.history,

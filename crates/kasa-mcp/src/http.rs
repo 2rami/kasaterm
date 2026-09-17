@@ -4552,6 +4552,10 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     // 별도 OS 창으로 뗀 pane — 방엔 속하지만 배치 칸엔 없어 폰이 따로 표시한다.
     let undocked: std::collections::HashSet<String> =
         backend.undocked_panes().into_iter().collect();
+    // compact 중인 pane — board 는 transcript 만 봐서 「working」으로 뭉개므로 GUI 의
+    // 화면 판독을 덧씌운다. 폰이 「컴팩트 중 NN%」로 가른다.
+    let compacting: std::collections::HashMap<String, Option<u8>> =
+        backend.compacting_panes().into_iter().collect();
     // 방 안의 칸 — 폰 미니맵과 같은 백분율 사각. 다른 기기의 사이드바가 이 방을
     // 본기기 방처럼 배치도로 그린다(2026-09-16 지시). 없으면 그쪽이 칸을 고르게 나눈다.
     // 탭은 바깥 pane 의 칸을 함께 쓴다 — `tab_of` 로 어느 자리의 탭인지 말해 주면
@@ -4640,7 +4644,10 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "mirror_of": mirror_label,
                 "name": b.and_then(|p| p.character.clone()),
                 "title": b.map(|p| p.title.clone()).filter(|s| !s.is_empty()),
-                "status": b.map(|p| p.status.clone()).filter(|s| !s.is_empty()),
+                "status": b.map(|p| p.status.clone()).filter(|s| !s.is_empty()).map(|s| {
+                    if s == "working" && compacting.contains_key(&id) { "compacting".to_string() } else { s }
+                }),
+                "compact_pct": compacting.get(&id).copied().flatten(),
                 // 무엇을 기다리나(permission·question·idle) · 그 이유 · 쉰 지 몇 초 —
                 // 폰이 「승인 기다림 / 질문 기다림 / 답 기다림 / 방금 끝냄 / 쉬는 중」을 가른다.
                 "kind": b.and_then(|p| p.attention_kind.clone()),
