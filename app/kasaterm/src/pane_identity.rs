@@ -339,28 +339,95 @@ pub(crate) fn parse_color_input(text: &str) -> Option<[u8; 3]> {
     Some(out)
 }
 
-fn write_overrides(edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>)) {
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// 색 표와 「언제 바꿨나」 표를 함께 고친다. 시각은 다른 기기와 맞출 때 누가 이기는지를
+/// 정한다(더 새로운 쪽) — 지운 것도 시각만 남겨 저쪽의 옛 색이 되살아나지 않게 한다.
+fn write_overrides(
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>, &mut serde_json::Map<String, serde_json::Value>),
+) {
     let settings = socket::read_settings();
     let mut map = settings
         .get("device_colors")
         .and_then(|v| v.as_object())
         .cloned()
         .unwrap_or_default();
-    edit(&mut map);
+    let mut at = settings
+        .get("device_colors_at")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    edit(&mut map, &mut at);
     socket::write_setting("device_colors", serde_json::Value::Object(map));
+    socket::write_setting("device_colors_at", serde_json::Value::Object(at));
     reload_device_colors();
+}
+
+fn stamp(at: &mut serde_json::Map<String, serde_json::Value>, label: &str, ms: u64) {
+    let key = normalize_device(label);
+    at.retain(|k, _| normalize_device(k) != key);
+    at.insert(label.trim().to_string(), serde_json::json!(ms));
+}
+
+/// 다른 기기와 맞추기 위한 표 — 색과 바꾼 시각. `/term/device-colors` 로 나간다.
+pub(crate) fn device_color_sync_table() -> serde_json::Value {
+    let settings = socket::read_settings();
+    serde_json::json!({
+        "colors": settings.get("device_colors").cloned().unwrap_or(serde_json::json!({})),
+        "at": settings.get("device_colors_at").cloned().unwrap_or(serde_json::json!({})),
+    })
+}
+
+/// 다른 기기의 표를 받아 **더 새로운 항목만** 들인다(색을 고친 것도, 지운 것도). 시각은
+/// 저쪽 것을 그대로 적어 양쪽이 같은 값으로 수렴한다. 바뀐 것이 있으면 true.
+pub(crate) fn merge_device_colors(remote: &serde_json::Value) -> bool {
+    let Some(remote_at) = remote.get("at").and_then(|v| v.as_object()) else { return false };
+    let remote_colors = remote.get("colors").and_then(|v| v.as_object());
+    let settings = socket::read_settings();
+    let local_at = settings.get("device_colors_at").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let stamp_of = |map: &serde_json::Map<String, serde_json::Value>, key: &str| {
+        map.iter().find(|(k, _)| normalize_device(k) == key).and_then(|(_, v)| v.as_u64()).unwrap_or(0)
+    };
+    let mut newer: Vec<(String, u64, Option<String>)> = Vec::new();
+    for (label, ms) in remote_at {
+        let Some(ms) = ms.as_u64() else { continue };
+        let key = normalize_device(label);
+        if ms <= stamp_of(&local_at, &key) { continue; }
+        let color = remote_colors
+            .and_then(|c| c.iter().find(|(k, _)| normalize_device(k) == key))
+            .and_then(|(_, v)| v.as_str().and_then(parse_color_input))
+            .map(theme::hex_str);
+        newer.push((label.clone(), ms, color));
+    }
+    if newer.is_empty() { return false; }
+    write_overrides(|map, at| {
+        for (label, ms, color) in newer {
+            let key = normalize_device(&label);
+            map.retain(|k, _| normalize_device(k) != key);
+            if let Some(hex) = color {
+                map.insert(label.trim().to_string(), serde_json::Value::String(hex));
+            }
+            stamp(at, &label, ms);
+        }
+    });
+    true
 }
 
 /// 기기 하나의 색을 설정에 굳힌다. 이름 키는 표시 이름 그대로 두어 파일을 열었을
 /// 때 어느 기계인지 읽히게 하고, 찾을 때만 대소문자·공백을 접는다.
 pub(crate) fn set_device_color(label: &str, rgb: [u8; 3]) {
     let key = normalize_device(label);
-    write_overrides(|map| {
+    write_overrides(|map, at| {
         map.retain(|k, _| normalize_device(k) != key);
         map.insert(
             label.trim().to_string(),
             serde_json::Value::String(theme::hex_str(rgb)),
         );
+        stamp(at, label, now_ms());
     });
 }
 
@@ -380,11 +447,19 @@ pub(crate) fn preview_device_color(label: &str, rgb: [u8; 3]) {
 
 pub(crate) fn reset_device_color(label: &str) {
     let key = normalize_device(label);
-    write_overrides(|map| map.retain(|k, _| normalize_device(k) != key));
+    write_overrides(|map, at| {
+        map.retain(|k, _| normalize_device(k) != key);
+        stamp(at, label, now_ms());
+    });
 }
 
 pub(crate) fn reset_all_device_colors() {
-    write_overrides(|map| map.clear());
+    write_overrides(|map, at| {
+        let now = now_ms();
+        let labels: Vec<String> = map.keys().cloned().collect();
+        map.clear();
+        for label in labels { stamp(at, &label, now); }
+    });
 }
 
 /// The interior is opaque so active/hover fills cannot erase device identity.

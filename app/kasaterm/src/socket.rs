@@ -1874,6 +1874,10 @@ impl Backend for PtyBackend {
     ///
     /// rect 는 **활성 창만** 채운다 — ws 에 실리는 layout 트리가 활성 창 하나뿐이다.
     /// 비활성 창은 pane 목록만 준다(이동 대상을 고르는 데는 그걸로 충분하다).
+    fn device_colors(&self) -> Result<serde_json::Value> {
+        Ok(crate::render::pane_identity::device_color_sync_table())
+    }
+
     fn git_col_view(&self, path: &str, commits: usize) -> Result<serde_json::Value> {
         let view = crate::handler::fetch_git_col_view(std::path::Path::new(path), commits)
             .ok_or_else(|| anyhow::anyhow!("여기는 git 레포가 아니에요"))?;

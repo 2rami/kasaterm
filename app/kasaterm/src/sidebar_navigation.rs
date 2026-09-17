@@ -106,6 +106,8 @@ enum Action {
     Open { label: String, window: Option<u64>, room: String, focus: Option<String> },
     /// 그 기기에 새 방을 만들고 바로 보기 창으로 연다(절 머리의 +).
     NewRoom(String),
+    /// 이 기기에 새 방 — 머리줄의 +. 기기 절과 같은 자리·같은 모양(2026-09-17 지시).
+    NewLocalRoom,
     /// 아래 절의 머리줄 — 누르는 일은 없고 우클릭 메뉴의 대상만 된다.
     Section(String),
     Unpin(String),
@@ -605,8 +607,9 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     let label = nav.machine.as_deref().unwrap_or_else(|| crate::info::local_machine_name());
     let label = if label.is_empty() { "이 기기" } else { label };
     let head = (8.0, TITLE_HEIGHT + 4.0, width - 16.0, HEADER_H - 8.0);
-    // 고른 기기엔 「…」 메뉴와 「+ 새 방」 이 머리 오른쪽에 선다.
-    let menu_w = if selected.is_some() { 56.0 } else { 0.0 };
+    // 고른 기기엔 「…」 메뉴와 「+ 새 방」 이, 이 기기엔 「+ 새 방」 이 머리 오른쪽에 선다 —
+    // 방 추가 단추가 어느 기기든 같은 자리에 있어야 한다.
+    let menu_w = if selected.is_some() { 56.0 } else { 28.0 };
     let choose = (head.0, head.1, head.2 - menu_w, head.3);
     if hit(cursor, choose) || nav.picker {
         g.rect(head.0, head.1, choose.2, head.3, theme::surface_hover());
@@ -633,6 +636,12 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         }
         nav.hits.push((Action::NewRoom(machine.label.clone()), plus));
         nav.hits.push((Action::Menu(machine.label.clone()), r));
+    } else {
+        let plus = (head.0 + head.2 - 28.0, head.1, 28.0, head.3);
+        if hit(cursor, plus) { g.rect(plus.0, plus.1, plus.2, plus.3, theme::surface_hover()); }
+        g.hover_pointer |= hit(cursor, plus);
+        g.queue_icon("plus", plus.0 + 7.0, plus.1 + 13.0, 14.0, theme::text_dim());
+        nav.hits.push((Action::NewLocalRoom, plus));
     }
     g.rect(12.0, TITLE_HEIGHT + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
 
@@ -1042,6 +1051,7 @@ impl App {
                 }
                 self.info.machines_col.last_refresh = None;
             }
+            Action::NewLocalRoom => self.new_window(),
             Action::Unpin(label) => {
                 self.info.navigation.pinned.retain(|p| p.label != label);
                 self.info.navigation.dismissed.insert(label);

@@ -868,6 +868,7 @@ impl App {
         self.sync_session_titles();
         self.refresh_turn_states();
         self.sync_remote_view_layouts();
+        self.sync_device_colors();
         self.refresh_pane_ultracode();
         self.refresh_tunnel_chip();
         self.run_pending_autotitlesync();
@@ -3588,7 +3589,9 @@ impl App {
                     }
                     if let Some(idx) = room_digit(code) {
                         if self.tmux.is_none() {
-                            self.goto_room(idx);
+                            if let Some(window) = self.room_window_by_number(idx) {
+                                self.goto_room(window);
+                            }
                             return;
                         }
                     }

@@ -1086,6 +1086,8 @@ pub fn map_remote_to_local(m: &Machine, remote: &str) -> Option<String> {
 struct Seen {
     /// `/term/panes` 한 번 왕복에 걸린 밀리초 — 하단바가 「얼마나 가까운가」로 쓴다.
     rtt_ms: Option<u64>,
+    /// 그 기계의 기기색 표(`/term/device-colors`). 옛 판은 None.
+    device_colors: Option<Value>,
     at: Instant,
     panes: Vec<Value>,
     sync: bool,
@@ -1219,6 +1221,21 @@ async fn announce_to(client: &reqwest::Client, base: &str) {
         .await;
 }
 
+async fn fetch_json(client: &reqwest::Client, base: &str, path: &str) -> Option<Value> {
+    let resp = client.get(format!("{base}{path}")).timeout(FETCH_TIMEOUT).send().await.ok()?;
+    if !resp.status().is_success() { return None; }
+    serde_json::from_str(&resp.text().await.ok()?).ok()
+}
+
+/// 붙어 있는 기계들의 기기색 표 — (이름, 표). 캐시라 공짜다.
+pub fn cached_device_colors() -> Vec<(String, Value)> {
+    let Ok(c) = cache().lock() else { return Vec::new() };
+    c.iter()
+        .filter(|(_, seen)| seen.at.elapsed() < STALE_AFTER)
+        .filter_map(|(label, seen)| seen.device_colors.clone().map(|v| (label.clone(), v)))
+        .collect()
+}
+
 async fn fetch_panes(client: &reqwest::Client, base: &str) -> Option<Vec<Value>> {
     let resp = client
         .get(format!("{base}/term/panes"))
@@ -1258,12 +1275,15 @@ pub async fn poll_loop() {
                 let rtt_ms = Some(asked.elapsed().as_millis() as u64);
                 let sync = probe_sync(&client, &m.base).await;
                 let version = fetch_version(&client, &m.base).await.unwrap_or_default();
+                let device_colors = fetch_json(&client, &m.base, "/term/device-colors").await
+                    .filter(|v| v.get("at").is_some());
                 let build = version.build.or_else(|| guest_build(&m.label));
                 if let Ok(mut c) = cache().lock() {
                     c.insert(
                         m.label.clone(),
                         Seen {
                             rtt_ms,
+                            device_colors,
                             at: Instant::now(),
                             panes,
                             sync,

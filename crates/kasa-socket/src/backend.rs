@@ -1380,6 +1380,11 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("git_col_view not supported")
     }
 
+    /// 기기색 표(색·바꾼 시각) — 다른 기기가 자기 표와 맞춘다(더 새로운 쪽이 이김).
+    fn device_colors(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+
     /// Read the visible screen text (last `lines` rows) of a pane so a
     /// sibling can check on a build or long-running job without focusing
     /// it. Default unsupported.

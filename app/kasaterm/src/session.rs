@@ -3789,6 +3789,31 @@ impl App {
     /// 로 트리만 바꿔 넣으면 돌아갈 자리(return_pane)·캐시 새로 읽기 같은 진입 절차가
     /// 빠지므로 각자의 열기 함수로 보낸다 — 사이드바 카드의 `⌘N` 배지가 그 방에서도
     /// 참말이려면 이 갈래가 필요했다(2026-09-07 지시 「커맨드 키 있으면 작동하게」).
+    /// ⌘+숫자의 n 번째 방 — 사이드바에 보이는 순서다: 이 기기 방들 먼저, 그 뒤 다른 기기의
+    /// 보기 창들(기기 절에 열린 순서). 전엔 창 번호를 그대로 써서 보기 창은 번호가 어긋나거나
+    /// 아예 못 갔다(2026-09-17 지시).
+    pub(crate) fn room_window_by_number(&self, n: usize) -> Option<usize> {
+        let local = (0..self.windows.len()).filter(|&i| self.remote_view_of_window(i).is_none());
+        let views = (0..self.windows.len()).filter(|&i| self.remote_view_of_window(i).is_some());
+        local.chain(views).nth(n)
+    }
+
+    /// 다른 기기의 기기색 표를 받아 더 새로운 항목을 들인다 — 양쪽이 같은 색을 쓰게(5초마다).
+    pub(crate) fn sync_device_colors(&mut self) {
+        use std::sync::{Mutex, OnceLock};
+        static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+        {
+            let mut last = LAST.get_or_init(|| Mutex::new(None)).lock().unwrap();
+            if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(5)) { return; }
+            *last = Some(Instant::now());
+        }
+        let mut changed = false;
+        for (_, table) in kasa_mcp::machines::cached_device_colors() {
+            changed |= crate::render::pane_identity::merge_device_colors(&table);
+        }
+        if changed { self.chrome_dirty = true; }
+    }
+
     pub(crate) fn goto_room(&mut self, idx: usize) {
         if idx >= self.windows.len() {
             return;
