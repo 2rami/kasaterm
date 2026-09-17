@@ -561,6 +561,10 @@ class _KeyBar extends StatelessWidget {
         icon: Icons.backspace_outlined,
         onTap: tap(() => s.sendText('\x7f')),
       ),
+      // 줄바꿈 — 데스크톱의 Shift+Enter 와 같은 바이트(LF). claude·codex 둘 다
+      // CR 은 제출, 맨 LF 는 줄바꿈으로 읽는다. 폰 자판엔 Shift+Enter 가 없어
+      // 여러 줄 프롬프트를 칠 길이 없었다(2026-09-17 지적).
+      _Key(label: '⇧↵', onTap: tap(() => s.sendText('\n'))),
       _Key(
         icon: Icons.keyboard_return,
         onTap: tap(() {

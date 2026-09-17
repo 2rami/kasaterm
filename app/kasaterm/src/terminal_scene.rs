@@ -1842,11 +1842,64 @@ impl App {
                 }
             }
         }
+        // 학생 accent 는 입력박스 보더·@배지 도색에만(사용자 2026-07-18:
+        // 응답 본문·"Reading 1 file" 상태줄까지 학생색이면 헷갈린다 —
+        // 출력 글자는 테마 기본 fg. 옛 본문 틴트 폐기). 게이트는 pane
+        // 테두리와 동일: 배정 캐릭터 + claude 가 foreground 일 때만
+        // (active_process_name=="claude", 500ms 캐시 — 순정 셸 오염
+        // 방지, 사용자 실사고). agents 목록 뷰는 중립.
+        // resume 피커(claude 시스템 UI)는 `╭─╮ Search ╰─╯` 박스가 pane
+        // 입력박스로 오인돼 학생 accent 후처리가 오발동한다(사용자: 빈 초록
+        // 사각형). agents 목록 뷰처럼 학생 accent·세션 제목 인레이를 끈다.
+        let resume_picker = screen_is_resume_picker(&composed);
+        // AskUserQuestion picker 도 `❯ 1. …` 옵션줄 + 하단 힌트 박스가
+        // 입력박스로 오인돼 accent 사각형이 남는다(사용자: "question 이나
+        // resume" 둘 다). team member/bg 세션 입력박스는 @칩 대신 세션
+        // 제목이 상단보더에 와서 @칩 게이트론 못 가른다 → 화면 시그니처
+        // ("Chat about this" 등)로 감지해 resume 와 동일하게 accent 를 끈다.
+        let ask_picker = screen_is_ask_picker(&composed);
+        let prompt_accent = active_prompt_accent(
+            agent_kind,
+            agents_view || resume_picker || ask_picker,
+            // 로컬·원격 공통 harness 판정으로 관문을 지킨다. `pane.character` 는 pane 단위라 탭이
+            // 둘이면 마지막 출력 탭이 이겨, 접힌 `true_char` 와 색이 갈렸다.
+            true_char
+                .as_deref()
+                .and_then(|n| {
+                    theme::character_accent_n(
+                        n,
+                        theme::character_ordinal(&ws.pane_character, &tab_pid),
+                    )
+                }),
+        );
         // ` ultracode ` 배지는 지운다 — 모드는 입력박스 글로우가 이미
         // 말하므로 글자는 중복이고, 그 자리는 /rename 세션명 자리라 이름이
         // 바뀐 것처럼 읽힌다(2026-08-12 지적 「/rename 그자리에 ultracode
         // 써진다」). find_titled_rule 보다 먼저 — 지운 뒤엔 순수 rule 이다.
         erase_ultracode_badge(&mut composed);
+        // claude 자리의 세션 이름 배지 — `/rename` 전에도. codex 배지(아래)와 뜻은
+        // 같은데 자리가 다르다: claude 는 위보더 우측 끝, claude 가 /rename 뒤 스스로
+        // 그리는 그 자리다. 아웃라인(find_titled_rule)이 진짜 /rename 이름과 똑같이
+        // 두르도록 그보다 먼저 심는다. 이름은 명부(`~/.claude/sessions`)의 세션
+        // 이름 — 사람이 `/rename` 으로 붙였든 부팅 때 자동으로 붙었든 claude 가
+        // 남에게 말하는 자기 이름이다. 헤더 제목과는 겹이 다르다(2026-09-14 결정:
+        // 헤더 = 캐릭터 + pane 번호 + 작업명, 세션 이름 = 입력박스 보더 우측).
+        // 피커 화면은 입력박스 오탐이 있어 accent 와 같은 조건으로 끈다.
+        if !(agents_view || resume_picker || ask_picker)
+            && agent_kind == Some(kasa_pty::AgentKind::Claude)
+        {
+            if let Some(name) = self
+                .pane_claude_sid
+                .get(&tab_pid)
+                .and_then(|sid| peer_name_by_sid(sid))
+            {
+                overlay_claude_session_label(
+                    &mut composed,
+                    &name,
+                    prompt_accent.unwrap_or_else(|| theme::accent_color(theme::accent_name())),
+                );
+            }
+        }
         // /rename 세션명 아웃라인 — claude 입력박스 위 "── 세션명 ──" 구분선의
         // 이름 텍스트 섬을 찾아 그 셀 범위를 rename/학생 색 사각 테두리로 두른다
         // (사용자). 순수 '─' rule·statusline·입력행은 걸러진다. 테두리 패스에서 소비.
@@ -2316,36 +2369,6 @@ impl App {
                 }
             }
         }
-        // 학생 accent 는 입력박스 보더·@배지 도색에만(사용자 2026-07-18:
-        // 응답 본문·"Reading 1 file" 상태줄까지 학생색이면 헷갈린다 —
-        // 출력 글자는 테마 기본 fg. 옛 본문 틴트 폐기). 게이트는 pane
-        // 테두리와 동일: 배정 캐릭터 + claude 가 foreground 일 때만
-        // (active_process_name=="claude", 500ms 캐시 — 순정 셸 오염
-        // 방지, 사용자 실사고). agents 목록 뷰는 중립.
-        // resume 피커(claude 시스템 UI)는 `╭─╮ Search ╰─╯` 박스가 pane
-        // 입력박스로 오인돼 학생 accent 후처리가 오발동한다(사용자: 빈 초록
-        // 사각형). agents 목록 뷰처럼 학생 accent·세션 제목 인레이를 끈다.
-        let resume_picker = screen_is_resume_picker(&composed);
-        // AskUserQuestion picker 도 `❯ 1. …` 옵션줄 + 하단 힌트 박스가
-        // 입력박스로 오인돼 accent 사각형이 남는다(사용자: "question 이나
-        // resume" 둘 다). team member/bg 세션 입력박스는 @칩 대신 세션
-        // 제목이 상단보더에 와서 @칩 게이트론 못 가른다 → 화면 시그니처
-        // ("Chat about this" 등)로 감지해 resume 와 동일하게 accent 를 끈다.
-        let ask_picker = screen_is_ask_picker(&composed);
-        let prompt_accent = active_prompt_accent(
-            agent_kind,
-            agents_view || resume_picker || ask_picker,
-            // 로컬·원격 공통 harness 판정으로 관문을 지킨다. `pane.character` 는 pane 단위라 탭이
-            // 둘이면 마지막 출력 탭이 이겨, 접힌 `true_char` 와 색이 갈렸다.
-            true_char
-                .as_deref()
-                .and_then(|n| {
-                    theme::character_accent_n(
-                        n,
-                        theme::character_ordinal(&ws.pane_character, &tab_pid),
-                    )
-                }),
-        );
         // ultracode 는 학생 배정과 무관한 pane 상태다 — 학생 accent 게이트
         // (Some 일 때만 칠함) 안쪽에 두면 미배정 pane 은 마커가 있어도 영영
         // 안 칠해진다(2026-08-12 조사). 피커 게이트는 prompt_accent 와 같은
@@ -2368,10 +2391,10 @@ impl App {
             style_prompt_box(&mut composed, accent);
             // 칩 제거는 위 `runs_claude` 블록에서 이미 끝났다 — 여기서 한 번
         }
-        // codex 자리의 세션 이름 배지. claude 는 CLI 가 스스로 위보더 우측에
-        // 그리지만 codex 는 안 그려서, 화면만 보고는 무슨 일을 하는 자리인지
-        // 알 수가 없었다(2026-09-05 지적). 피커 화면은 입력박스 오탐이 있어
-        // accent 와 같은 조건으로 끈다.
+        // codex 자리의 세션 이름 배지. claude 는 CLI 가 /rename 뒤 스스로 위보더
+        // 우측에 그리고(그 전에는 위의 claude 배지가 채운다) codex 는 안 그려서,
+        // 화면만 보고는 무슨 일을 하는 자리인지 알 수가 없었다(2026-09-05 지적).
+        // 피커 화면은 입력박스 오탐이 있어 accent 와 같은 조건으로 끈다.
         //
         // **핀이 선 제목만** 쓴다 — OSC 로 들어온 폴더 이름을 배지로 띄우면
         // 창마다 「kasaterm」 이 반복될 뿐이다. 핀은 사람의 개명이나 스캔이

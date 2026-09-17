@@ -223,7 +223,6 @@ pub(crate) fn overlay_codex_session_label(
     name: &str,
     accent: [u8; 4],
 ) {
-    use unicode_width::UnicodeWidthChar;
     let Some(PromptBox::Filled { rows: r }) = prompt_box(rows) else {
         return;
     };
@@ -238,19 +237,7 @@ pub(crate) fn overlay_codex_session_label(
     if budget < 6 {
         return;
     }
-    let mut shown = String::new();
-    let mut used = 0usize;
-    for ch in name.chars() {
-        // 한글은 두 칸이다 — 글자 수로 세면 배지가 자리를 넘어 입력창까지 민다.
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
-        if used + cw > budget - 1 {
-            shown.push('…');
-            used += 1;
-            break;
-        }
-        shown.push(ch);
-        used += cw;
-    }
+    let (shown, used) = fit_label(name, budget);
     // claude 가 위보더 끝에 대시 한 칸을 남기듯 오른쪽에 한 칸 띄운다.
     let end = w.saturating_sub(1);
     let start = end.saturating_sub(used);
@@ -273,6 +260,90 @@ pub(crate) fn overlay_codex_session_label(
             cell.ch = ' ';
         }
     }
+    paint_label(rows, line, start, end, &shown, accent);
+}
+
+/// claude 자리의 세션 이름 배지 — `/rename` 을 안 한 창에도.
+///
+/// claude 는 `/rename` 을 친 뒤에야 위보더 우측 끝에 이름을 그린다. 그 전에는 명부
+/// (`~/.claude/sessions/<pid>.json`)에 부팅 때 붙은 이름(`momoi-p11-9oc` 꼴)이 있어도
+/// 화면엔 아무것도 없어서, codex 창에 배지를 단 뒤에도 claude 창만 화면으로는 무슨
+/// 자리인지 알 수 없었다(2026-09-17 지적 「/rename 안 해도 코덱스처럼 프롬프트
+/// 입력창에 나오게」). 그 자리를 앱이 대신 채운다 — claude 가 그리는 것과 같은 꼴
+/// (`── 이름 ─`)로, 같은 자리에. 그래서 `/rename` 아웃라인(`find_titled_rule`)도
+/// 이 배지를 진짜 이름과 똑같이 두른다.
+///
+/// **그 구간이 전부 대시일 때만** 심는다. claude 가 스스로 그린 `/rename` 이름이나
+/// 팀메이트 안내(`── View teammates: … ─`)가 거기 있으면 건드리지 않는다 — 이름 둘이
+/// 겹치면 어느 쪽이 정본인지 화면이 거짓말한다. 폭의 삼분의 일 넘게는 안 먹고 앞쪽
+/// 대시 열 칸은 남긴다: 대시가 줄어들면 `prompt_box` 가 그 줄을 테두리로 안 본다.
+pub(crate) fn overlay_claude_session_label(
+    rows: &mut [Vec<GridCell>],
+    name: &str,
+    accent: [u8; 4],
+) {
+    let Some(PromptBox::Bordered { top, .. }) = prompt_box(rows) else {
+        return;
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    let row = &rows[top];
+    // 우측 끝의 대시 — 둥근 모서리(╮)·행끝 여백은 건너뛴다. 그 대시 한 칸은 남긴다.
+    let Some(last_dash) = row.iter().rposition(|c| c.ch == '─') else {
+        return;
+    };
+    let budget = row.len() / 3;
+    if budget < 6 {
+        return;
+    }
+    let (shown, used) = fit_label(name, budget);
+    if used == 0 {
+        return;
+    }
+    // ` 이름 ` — 앞뒤 공백 한 칸씩, 그 뒤에 남겨 둔 대시.
+    let end = last_dash;
+    let Some(start) = end.checked_sub(used + 2) else {
+        return;
+    };
+    if start < 10 || row[start..end].iter().any(|c| c.ch != '─') {
+        return;
+    }
+    rows[top][start].ch = ' ';
+    rows[top][end - 1].ch = ' ';
+    paint_label(rows, top, start + 1, end - 1, &shown, accent);
+}
+
+/// 이름을 배지 폭에 맞춘다 — 넘치면 `…` 으로 끊는다. 한글은 두 칸이라 글자 수로
+/// 세면 배지가 자리를 넘어 입력창까지 민다. `(보일 글자, 차지하는 칸 수)`.
+fn fit_label(name: &str, budget: usize) -> (String, usize) {
+    use unicode_width::UnicodeWidthChar;
+    let mut shown = String::new();
+    let mut used = 0usize;
+    for ch in name.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        if used + cw > budget - 1 {
+            shown.push('…');
+            used += 1;
+            break;
+        }
+        shown.push(ch);
+        used += cw;
+    }
+    (shown, used)
+}
+
+/// 맞춘 이름을 `line` 행의 `[start, end)` 에 accent 색으로 심는다.
+fn paint_label(
+    rows: &mut [Vec<GridCell>],
+    line: usize,
+    start: usize,
+    end: usize,
+    shown: &str,
+    accent: [u8; 4],
+) {
+    use unicode_width::UnicodeWidthChar;
     let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     let mut col = start;
     for ch in shown.chars() {
@@ -7200,6 +7271,50 @@ mod prompt_box_tests {
             !line[badge_at..].chars().any(is_particle),
             "배지에 점이 달라붙었다: {line:?}"
         );
+    }
+
+    /// claude 창은 `/rename` 전에도 명부의 세션 이름을 위보더 우측(claude 가 /rename
+    /// 뒤 스스로 그리는 자리)에 단다. 이미 그려진 이름이 있으면 겹쳐 쓰지 않는다.
+    #[test]
+    fn claude_session_badge_fills_only_the_empty_rename_slot() {
+        let bordered = |s: &str| {
+            let mut r = row_from(s);
+            r.resize(60, GridCell::blank());
+            r
+        };
+        let dashes = "─".repeat(60);
+        let top_of = |rows: &[Vec<GridCell>]| -> String {
+            rows[1].iter().map(|c| c.ch).filter(|c| *c != '\0').collect()
+        };
+        let mut rows = vec![
+            row_from("• 답을 쓰는 중"),
+            bordered(&dashes),
+            bordered("❯ "),
+            bordered(&dashes),
+        ];
+        overlay_claude_session_label(&mut rows, "momoi-p11-9oc", [200, 120, 255, 255]);
+        let top = top_of(&rows);
+        assert!(top.ends_with(" momoi-p11-9oc ─"), "배지가 우측 끝에 안 붙었다: {top:?}");
+        assert!(top.starts_with(&"─".repeat(10)), "앞쪽 대시가 남아야 테두리다: {top:?}");
+        assert_eq!(
+            find_titled_rule(&rows).map(|(r, _, _)| r),
+            Some(1),
+            "/rename 아웃라인이 이 배지를 이름으로 봐야 한다"
+        );
+        assert!(matches!(prompt_box(&rows), Some(PromptBox::Bordered { top: 1, .. })));
+
+        // claude 가 /rename 이름을 이미 그린 줄 — 그대로 둔다.
+        let own = format!("{} my-work ─", "─".repeat(50));
+        let mut rows = vec![row_from("x"), bordered(&own), bordered("❯ "), bordered(&dashes)];
+        overlay_claude_session_label(&mut rows, "momoi-p11-9oc", [200, 120, 255, 255]);
+        let top = top_of(&rows);
+        assert!(top.ends_with(" my-work ─") && !top.contains("momoi"), "{top:?}");
+
+        // 한글 이름은 두 칸씩 — 스페이서를 걷으면 그대로 읽힌다.
+        let mut rows = vec![row_from("x"), bordered(&dashes), bordered("❯ "), bordered(&dashes)];
+        overlay_claude_session_label(&mut rows, "카사크롬 탭 그룹", [200, 120, 255, 255]);
+        let top = top_of(&rows);
+        assert!(top.ends_with(" 카사크롬 탭 그룹 ─"), "{top:?}");
     }
 
     #[test]
