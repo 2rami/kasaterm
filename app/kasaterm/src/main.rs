@@ -5501,6 +5501,8 @@ struct App {
     /// 그 뒤에 닫힌 자리의 되살리기 줄이 얼굴도 번호도 없이 남았다(2026-09-17 지적:
     /// 「되살리기에 프사가 안 나와서 기록에서 찾았어」). 자리를 새로 차지하면 지운다.
     pane_last_seat: HashMap<String, (String, String)>,
+    /// 거울 창 배치를 원본에 보낸 시각 — 그 직후의 당겨오기를 잠시 멈춘다.
+    remote_view_push_at: Option<std::time::Instant>,
     /// 계정이 바뀐 뒤에도 **옛 계정으로 도는** pane → (떠난 계정 이름, 새 계정 이름).
     ///
     /// 계정은 프로세스 env 라 pane 이 뜰 때 박히고, 도는 프로세스는 못 바꾼다. 그래서
@@ -6094,6 +6096,7 @@ impl App {
             pane_session_id: HashMap::new(),
             pane_claude_sid: HashMap::new(),
             pane_last_seat: HashMap::new(),
+            remote_view_push_at: None,
             pane_account_stale: HashMap::new(),
             socket_backend: None,
             bg_agents: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),

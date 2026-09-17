@@ -2906,6 +2906,10 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// beside the target, then resizes every pane to its new rect. No-op
     /// when source and target are the same pane.
     pub(crate) fn move_pane(&mut self, moving: &str, target: &str, zone: DropZone) {
+        // 거울 창 안의 이동은 원본에도 같은 이동을 건다 — 안 그러면 당겨오기가 되돌린다.
+        if let Some(window) = self.window_of_pane(target) {
+            self.push_remote_view_move(window, moving, target, zone);
+        }
         if moving == target
             || self
                 .ensure_user_mutation_target(

@@ -1084,6 +1084,8 @@ pub fn map_remote_to_local(m: &Machine, remote: &str) -> Option<String> {
 /// `/version` 응답(없는 옛 판이면 None) — 이쪽과 다르면 기계 탭·`to` 가 경고한다.
 #[derive(Clone)]
 struct Seen {
+    /// `/term/panes` 한 번 왕복에 걸린 밀리초 — 하단바가 「얼마나 가까운가」로 쓴다.
+    rtt_ms: Option<u64>,
     at: Instant,
     panes: Vec<Value>,
     sync: bool,
@@ -1251,7 +1253,9 @@ pub async fn poll_loop() {
             announced = labels;
         }
         for m in &list {
+            let asked = std::time::Instant::now();
             if let Some(panes) = fetch_panes(&client, &m.base).await {
+                let rtt_ms = Some(asked.elapsed().as_millis() as u64);
                 let sync = probe_sync(&client, &m.base).await;
                 let version = fetch_version(&client, &m.base).await.unwrap_or_default();
                 let build = version.build.or_else(|| guest_build(&m.label));
@@ -1259,6 +1263,7 @@ pub async fn poll_loop() {
                     c.insert(
                         m.label.clone(),
                         Seen {
+                            rtt_ms,
                             at: Instant::now(),
                             panes,
                             sync,
@@ -1470,6 +1475,8 @@ fn snapshot_machine(
     let build = direct_online
         .then(|| hit.and_then(|seen| seen.build.clone()))
         .flatten();
+    // 왕복 시간도 직통으로 읽은 것만 쓴다 — 끊긴 뒤 남은 옛 값은 「가깝다」는 거짓말이다.
+    let rtt = direct_online.then(|| hit.and_then(|seen| seen.rtt_ms)).flatten();
     let route_id = uplink
         .map(|value| value.id.as_str())
         .or(m.machine_id.as_deref())
@@ -1483,6 +1490,7 @@ fn snapshot_machine(
         "guest": m.guest,
         "online": online,
         "online_via": via,
+        "rtt_ms": rtt,
         "ago_secs": age.map(|value| value.as_secs()),
         "sync_capable": hit.map(|seen| seen.sync).unwrap_or(true),
         // 빌드 대조 — 같다고 확인된 것만 true. 모르는 것(옛 판·아직 못 물음)은

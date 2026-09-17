@@ -9222,6 +9222,7 @@ impl App {
                         self.status_account_rect,
                         self.status_version_rect,
                         self.statusbar.tunnel_rect,
+                        self.statusbar.link_rect,
                         self.statusbar.chrome_rect,
                         self.statusbar.res_rect,
                         self.statusbar.clip_rect,
@@ -9245,9 +9246,9 @@ impl App {
                     }
                 }
                 let seg_x0 = x;
-                let widget_count = ["ports", "schedules", "pet", "clipboard", "resources", "version", "tunnel"]
+                let widget_count = ["ports", "schedules", "pet", "clipboard", "resources", "version", "tunnel", "link"]
                     .iter().filter(|id| status_prefs.visible(id))
-                    .map(|id| if *id == "tunnel" { 2 } else { 1 }).sum::<usize>().max(1);
+                    .map(|id| if matches!(*id, "tunnel" | "link") { 2 } else { 1 }).sum::<usize>().max(1);
                 let compact_tools = (win_w * 0.68 - 24.0) / (widget_count as f32) < 28.0;
                 let account_right = if status_prefs.visible("claude") || status_prefs.visible("codex") {
                     if compact_tools { seg_x0 + 16.0 } else { (win_w * 0.32).max(seg_x0).min(win_w - 12.0) }
@@ -9758,12 +9759,45 @@ impl App {
                 let mut rx = right_edge;
                 self.status_version_rect = None;
                 self.statusbar.tunnel_rect = None;
+                self.statusbar.link_rect = None;
                 self.statusbar.chrome_rect = None;
                 self.statusbar.res_rect = None;
                 self.statusbar.port_rect = None;
                 self.statusbar.schedule_rect = None;
                 self.statusbar.pet_rect = None;
                 self.statusbar.clip_rect = None;
+                // 다른 기기와 어떻게·얼마나 가깝게 붙어 있나. 직통(그 기계에 바로)과
+                // 중계(공용 관문 경유)는 체감이 딴판이라, 숫자와 함께 한눈에 보여야 한다.
+                macro_rules! draw_link_widget {
+                    () => {{
+                    let links = crate::machinescol::status_links();
+                    let icon = tool_icon;
+                    let gap = if compact_tools { 0.0 } else { 3.0_f32 };
+                    if status_prefs.visible("link") && !links.is_empty() {
+                        let text = if compact_tools || win_w < 900.0 {
+                            links.iter().map(|l| l.short()).collect::<Vec<_>>().join(" ")
+                        } else {
+                            links.iter().map(|l| l.long()).collect::<Vec<_>>().join(" · ")
+                        };
+                        let worst = links.iter().map(|l| l.tone()).min().unwrap_or(2);
+                        let col = status_prefs.color("link", match worst {
+                            0 => theme::attention(),
+                            1 => theme::text(),
+                            _ => theme::text_dim(),
+                        });
+                        let text = crate::info::fit_text(g, &text, (slot_w * 2.0 - 24.0).max(0.0), fs, false);
+                        let w = g.measure_chrome_text(&text, fs, false);
+                        rx -= w + icon + gap + 14.0;
+                        g.queue_icon("monitor", rx, sy + (status_h - icon) / 2.0, icon, col);
+                        g.draw_text(rx + icon + gap, ty, &text,
+                            gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false });
+                        let r = (rx - chip / 2.0, sy, w + icon + gap + chip, status_h);
+                        let (hx, hy) = self.cursor_px;
+                        g.hover_pointer |= hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3;
+                        self.statusbar.link_rect = Some(r);
+                    }
+                    }};
+                }
                 macro_rules! draw_version_widget {
                     () => {{
                     // 판 번호 — 이 줄의 **맨 오른쪽**(2026-09-06 지시: 「하단바
@@ -10108,14 +10142,15 @@ impl App {
                         .order
                         .iter()
                         .rev()
-                        .filter(|id| matches!(id.as_str(), "resources" | "tunnel" | "version"))
+                        .filter(|id| matches!(id.as_str(), "resources" | "link" | "tunnel" | "version"))
                         .filter(|id| status_prefs.visible(id))
                     {
                         let slot_right = rx;
-                        let allocated = slot_w * if id == "tunnel" { 2.0 } else { 1.0 };
+                        let allocated = slot_w * if id == "tunnel" || id == "link" { 2.0 } else { 1.0 };
                         g.push_clip(slot_right - allocated, sy, allocated, status_h);
                         match id.as_str() {
                             "resources" => draw_resources_widget!(),
+                            "link" => draw_link_widget!(),
                             "tunnel" => draw_tunnel_widget!(),
                             "version" => draw_version_widget!(),
                             _ => {}

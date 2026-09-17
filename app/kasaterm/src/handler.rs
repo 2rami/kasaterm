@@ -3530,6 +3530,8 @@ impl ApplicationHandler<UserEvent> for App {
                             tree.resize_divider(&path, pos, cols, rows);
                         }
                         self.last_divider_pos = Some(pos);
+                        // 거울 창이면 같은 비율을 원본에도 건다.
+                        self.push_remote_view_divider(self.active_window, &path);
                         // Ctrl+드래그 중 하단 세로선(split_htov_at 이 만든 [..,1])이 상단
                         // 세로선과 ratio 정렬되면 관통 세로선으로 재병합 — 그때부턴 상하가
                         // 같이 움직인다(사용자: 위에랑 맞춰지면 같이). resize_drag 를 관통

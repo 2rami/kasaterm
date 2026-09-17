@@ -3010,6 +3010,7 @@ fn statusbar_widget_label(id: &str) -> &'static str {
         "clipboard" => "클립보드",
         "resources" => "기기 상태",
         "tunnel" => "모바일 연결",
+        "link" => "기기 연결",
         "version" => "앱 버전",
         _ => "알 수 없는 항목",
     }
@@ -3044,6 +3045,7 @@ fn statusbar_preview_text(s: &Snapshot, id: &str) -> String {
         "clipboard" => "클립보드",
         "resources" => "CPU 18% · RAM 42%",
         "tunnel" => "모바일 연결됨",
+        "link" => "나쵸네코 직통 10ms",
         "version" => "v0.2.0",
         _ => "",
     }

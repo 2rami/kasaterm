@@ -81,6 +81,8 @@ pub(crate) struct StatusbarState {
     /// 자유함수가 상태를 못 갖기 때문이다.
     pub(crate) cpu_track: crate::input::CpuTrack,
     pub(crate) tunnel_rect: Option<(f32, f32, f32, f32)>,
+    /// 기기 연결 위젯(직통·중계·왕복)의 눌림 사각.
+    pub(crate) link_rect: Option<(f32, f32, f32, f32)>,
     /// 하단바 왼쪽에 적는 웹터미널 포트(Orca 하단바처럼 — 2026-08-15 지시).
     /// 포트 파일은 bind 뒤에 써지므로 부팅 직후 조회는 폴백(8765)일 수 있어
     /// 터널 폴과 같은 5초 박자로 읽어 여기 캐시한다. 클릭 = /term 열기.

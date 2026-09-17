@@ -1288,12 +1288,62 @@ impl App {
     /// (2026-09-17 지적 「미니맵은 똑같은데 안에 배치가 달라」). 원본이 정본이다 — 2초마다
     /// 원본 칸 좌표(명부 캐시 `/term/panes` 의 `rect`)로 BSP 를 되살려 다르면 갈아 끼운다.
     /// 좌표를 모르는 옛 판 기기·풍차 배치는 그대로 둔다.
+    /// 거울 창에서 바꾼 배치를 **원본에** 보낸다. 안 보내면 2초 뒤 당겨오기가 되돌려
+    /// 놓아, 크기를 조절해도 제자리로 튀어 오른다(2026-09-17 지시).
+    pub(crate) fn push_remote_view_divider(&mut self, window: usize, path: &[u8]) {
+        let Some((label, _)) = self.remote_view_of_window(window) else { return };
+        let tree = if window == self.active_window { self.pty_layout.as_ref() }
+            else { self.windows.get(window).and_then(Option::as_ref) };
+        let Some(ratio) = tree.and_then(|t| t.ratio_at(path)) else { return };
+        let Some(m) = kasa_mcp::machines::find(&label) else { return };
+        self.remote_view_push_at = Some(Instant::now());
+        let (base, path) = (m.base.clone(), path.to_vec());
+        std::thread::spawn(move || {
+            let params = serde_json::json!({ "path": path, "ratio": ratio });
+            if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "surface.resize_divider", params) {
+                eprintln!("[remote] divider push failed: {e:#}");
+            }
+            kasa_mcp::machines::poke();
+        });
+    }
+
+    /// 거울 창 안에서 pane 을 옮겼다 — 같은 이동을 원본에도 건다.
+    pub(crate) fn push_remote_view_move(&mut self, window: usize, moving: &str, target: &str, zone: crate::DropZone) {
+        if self.remote_view_of_window(window).is_none() { return }
+        let Some((label, _)) = self.remote_view_of_window(window) else { return };
+        let remote = |local: &str| kasa_mcp::remote::remote_info(local).map(|i| i.remote_id);
+        let (Some(source), Some(anchor)) = (remote(moving), remote(target)) else { return };
+        let Some(m) = kasa_mcp::machines::find(&label) else { return };
+        let direction = match zone {
+            crate::DropZone::Left => "left",
+            crate::DropZone::Right => "right",
+            crate::DropZone::Up => "up",
+            crate::DropZone::Down => "down",
+            // 가운데 놓기는 탭으로 합치는 것 — 자리 이동이 아니라 여기선 안 보낸다.
+            crate::DropZone::Center => return,
+        };
+        self.remote_view_push_at = Some(Instant::now());
+        let base = m.base.clone();
+        std::thread::spawn(move || {
+            let params = serde_json::json!({ "surface_id": source, "target": anchor, "direction": direction });
+            if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "surface.move", params) {
+                eprintln!("[remote] view move push failed: {e:#}");
+            }
+            kasa_mcp::machines::poke();
+        });
+    }
+
     pub(crate) fn sync_remote_view_layouts(&mut self) {
         use std::sync::{Mutex, OnceLock};
         static LAST: OnceLock<Mutex<Option<(Instant, u64)>>> = OnceLock::new();
         {
             // 기계 캐시가 새로 채워졌으면 2초를 기다리지 않는다.
             let generation = kasa_mcp::machines::generation();
+            // 방금 저쪽에 보낸 직후면 당겨오지 않는다 — 도착 전에 옛 배치로 되돌리면
+            // 손으로 맞춘 크기가 튀어 오른다.
+            if self.remote_view_push_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(3)) {
+                return;
+            }
             let mut last = LAST.get_or_init(|| Mutex::new(None)).lock().unwrap();
             if last.is_some_and(|(t, g)| g == generation && t.elapsed() < std::time::Duration::from_secs(2)) {
                 return;

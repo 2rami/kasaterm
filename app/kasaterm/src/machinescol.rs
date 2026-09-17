@@ -279,6 +279,52 @@ fn hung_screen_share_pids() -> Vec<String> {
 /// 원격 거울 pane 의 **저쪽 사실** — (기계 라벨, 폴링 캐시의 그 pane 행). 이름·제목·
 /// 상태가 로컬엔 없어(프로세스가 저쪽에서 돈다) 여기서 온다. 링크가 없거나 캐시에
 /// 그 pane 이 없으면 None.
+/// 하단바에 세울 기기 연결 한 줄. 붙어 있는 기계만, 명부 순서 그대로.
+pub(crate) struct StatusLink {
+    label: String,
+    /// 직통(그 기계에 바로) 인가 — 아니면 공용 관문을 거치는 중계다.
+    direct: bool,
+    rtt_ms: Option<u64>,
+}
+
+impl StatusLink {
+    /// 좁을 때 — 이름 없이 경로와 숫자만.
+    pub(crate) fn short(&self) -> String {
+        match self.rtt_ms {
+            Some(ms) => format!("{} {ms}ms", if self.direct { "직통" } else { "중계" }),
+            None => if self.direct { "직통".into() } else { "중계".into() },
+        }
+    }
+
+    pub(crate) fn long(&self) -> String {
+        match self.rtt_ms {
+            Some(ms) => format!("{} {} {ms}ms", self.label, if self.direct { "직통" } else { "중계" }, ms = ms),
+            None => format!("{} {}", self.label, if self.direct { "직통" } else { "중계" }),
+        }
+    }
+
+    /// 0=나쁨(중계거나 느림) · 1=보통 · 2=좋음. 가장 나쁜 것이 위젯 색을 정한다.
+    pub(crate) fn tone(&self) -> u8 {
+        match self.rtt_ms {
+            Some(ms) if !self.direct || ms >= 150 => 0,
+            Some(ms) if ms >= 60 => 1,
+            _ => if self.direct { 2 } else { 0 },
+        }
+    }
+}
+
+/// 붙어 있는 다른 기기들의 연결 상태. 폴링 캐시라 읽기는 공짜다.
+pub(crate) fn status_links() -> Vec<StatusLink> {
+    kasa_mcp::machines::snapshot().iter()
+        .filter(|m| m["online"].as_bool() == Some(true))
+        .map(|m| StatusLink {
+            label: m["label"].as_str().unwrap_or("기기").to_string(),
+            direct: m["online_via"].as_str() == Some("direct"),
+            rtt_ms: m["rtt_ms"].as_u64(),
+        })
+        .collect()
+}
+
 pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)> {
     let info = kasa_mcp::remote::remote_info(id)?;
     let label = kasa_mcp::machines::label_for_base(&info.base).unwrap_or_else(|| {
