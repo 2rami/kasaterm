@@ -2887,35 +2887,19 @@ impl Backend for PtyBackend {
                 let (tail,idle) = read_tail(path,128*1024);
                 let turn = crate::transcript::turn_state_from_tail(&tail);
                 let metadata = snapshot_from_tail(&id,&tail,idle);
-                (metadata,!tail.trim().is_empty(),turn)
+                (metadata,!tail.trim().is_empty(),turn,crate::state::transcript_stale(path))
             });
-            let turn = evidence.as_ref().and_then(|(_,_,turn)|*turn);
+            let turn = evidence.as_ref().and_then(|(_,_,turn,_)|*turn);
+            let stale = evidence.as_ref().is_some_and(|(_,_,_,stale)|*stale);
             let generating = screens.get(&id).is_some_and(|(_,working)|*working);
             // 60초 방치(idle_prompt) 표식은 새 턴이 열리면 낡은 것이다 — 기록이 열렸다고
             // 하는데 「기다림」으로 남기지 않는다. 승인·질문은 턴이 열린 채 사람을 기다리는
             // 것이라 그대로 앞선다.
             let waiting = attention.contains(&id) && !(attention_kind.get(&id).is_some_and(|k|k=="idle")
                 && turn == Some(crate::transcript::TurnState::Working));
-            let (status,reason) = if kasa_mcp::remote::is_remote_pane(&id) {
-                ("unknown","remote mirror; observe agent on its source machine")
-            } else if !supported {
-                ("unknown","live place; supported agent activity unavailable")
-            } else if waiting {
-                ("waiting","pane attention signal observed")
-            } else if let Some(turn) = turn {
-                // 하네스가 스스로 적은 턴 경계가 화면 판독보다 앞선다 — 화면은 하네스 UI 가
-                // 바뀔 때마다 틀렸다(gpt-6-astra 의 장식 점자로 노는 pane 이 영영 working,
-                // 2026-09-16). 화면은 기록이 없는 pane 의 폴백으로만 남는다.
-                match turn {
-                    crate::transcript::TurnState::Working => ("working","transcript turn open"),
-                    crate::transcript::TurnState::Idle => ("idle","transcript turn closed"),
-                }
-            } else if generating {
-                ("working","terminal activity observed")
-            } else if evidence.as_ref().is_some_and(|(_,present,_)|*present) {
-                ("idle","no current terminal generation signal; transcript available")
-            } else { ("unknown","supported agent observed; transcript activity unavailable") };
-            let meta = evidence.map(|(row,_,_)|row).unwrap_or_default();
+            let present = evidence.as_ref().is_some_and(|(_,present,_,_)|*present);
+            let (status,reason) = collab_status(kasa_mcp::remote::is_remote_pane(&id), supported, waiting, turn, stale, generating, present);
+            let meta = evidence.map(|(row,_,_,_)|row).unwrap_or_default();
             let title = screens.get(&id).and_then(|(title,_)|title.as_deref())
                 .map(crate::strip_activity_prefix).filter(|s|!s.is_empty()).unwrap_or(&meta.title);
             let window = windows.get(&id).copied();
@@ -3876,6 +3860,75 @@ pub(crate) fn key_to_bytes(key: &str) -> Vec<u8> {
 /// stuck 이라(사용자: ESC 눌러도 생각 중), 이 화면 신호를 mtime-fallback 의 진짜
 /// working 기준으로 쓴다. 완료 요약("✻ Churned for 42s")은 별은 있어도 말줄임표가
 /// 없어 제외된다.
+/// 보드 한 줄의 상태 판정. 하네스가 스스로 적은 턴 경계가 화면 판독보다 앞선다 — 화면은
+/// 하네스 UI 가 바뀔 때마다 틀렸다(gpt-6-astra 의 장식 점자로 노는 pane 이 영영 working,
+/// 2026-09-16). 화면은 기록이 없는 pane 의 폴백으로만 남는다. 다만 열린 턴이라도 기록이
+/// `TURN_STALE` 넘게 조용하고 화면에 생성 신호가 없으면 닫는 줄을 못 남긴 턴이다 — 그때는
+/// idle 로 내린다(2026-09-17 시로코). 순수 함수인 것은 시험하려고.
+fn collab_status(
+    remote: bool,
+    supported: bool,
+    waiting: bool,
+    turn: Option<crate::transcript::TurnState>,
+    stale: bool,
+    generating: bool,
+    present: bool,
+) -> (&'static str, &'static str) {
+    if remote {
+        ("unknown", "remote mirror; observe agent on its source machine")
+    } else if !supported {
+        ("unknown", "live place; supported agent activity unavailable")
+    } else if waiting {
+        ("waiting", "pane attention signal observed")
+    } else if let Some(turn) = turn {
+        match turn {
+            crate::transcript::TurnState::Working if stale && !generating => {
+                ("idle", "transcript turn open but stale; no terminal activity")
+            }
+            crate::transcript::TurnState::Working => ("working", "transcript turn open"),
+            crate::transcript::TurnState::Idle => ("idle", "transcript turn closed"),
+        }
+    } else if generating {
+        ("working", "terminal activity observed")
+    } else if present {
+        ("idle", "no current terminal generation signal; transcript available")
+    } else {
+        ("unknown", "supported agent observed; transcript activity unavailable")
+    }
+}
+
+#[cfg(test)]
+mod collab_status_tests {
+    use super::collab_status;
+    use crate::transcript::TurnState::{Idle, Working};
+
+    /// 열린 턴은 일하는 중이다 — 기록이 살아 있거나 화면에 생성 신호가 있는 한.
+    #[test]
+    fn an_open_turn_is_working_while_fresh_or_generating() {
+        assert_eq!(collab_status(false, true, false, Some(Working), false, false, true).0, "working");
+        assert_eq!(collab_status(false, true, false, Some(Working), true, true, true).0, "working");
+    }
+
+    /// 기록이 한참 조용하고 화면도 조용하면 닫는 줄을 못 남긴 턴이다 — idle.
+    #[test]
+    fn a_stale_open_turn_with_a_quiet_screen_is_idle() {
+        let (status, reason) = collab_status(false, true, false, Some(Working), true, false, true);
+        assert_eq!(status, "idle");
+        assert!(reason.contains("stale"), "{reason}");
+    }
+
+    /// 승인 대기·닫힌 턴·거울·미지원은 종전대로.
+    #[test]
+    fn other_rules_are_unchanged() {
+        assert_eq!(collab_status(false, true, true, Some(Working), true, false, true).0, "waiting");
+        assert_eq!(collab_status(false, true, false, Some(Idle), false, true, true).0, "idle");
+        assert_eq!(collab_status(true, true, false, Some(Working), false, true, true).0, "unknown");
+        assert_eq!(collab_status(false, false, false, None, false, true, true).0, "unknown");
+        assert_eq!(collab_status(false, true, false, None, false, true, false).0, "working");
+        assert_eq!(collab_status(false, true, false, None, false, false, true).0, "idle");
+    }
+}
+
 fn screen_shows_working(screen: &str) -> bool {
     screen.lines().rev().take(10).any(|line| {
         if line.contains("esc to interrupt") {

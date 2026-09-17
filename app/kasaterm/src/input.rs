@@ -976,12 +976,18 @@ impl App {
                         // pane 의 폴백으로만 남는다. 노는 codex 가 입력창 둘레에 흩뿌리는
                         // 점자(gpt-6-astra)가 바를 영영 돌리던 것이 여기서 끊긴다(2026-09-16).
                         let tab_pid = ws.active_tab_pid(id);
-                        let turn = self.collab.turn.get(tab_pid.as_str()).map(|o| o.state);
+                        let observation = self.collab.turn.get(tab_pid.as_str());
+                        let turn = observation.map(|o| o.state);
+                        let turn_stale = observation.is_some_and(|o| o.stale());
                         let waits = attention.contains(id) || attention.contains(tab_pid.as_str());
                         let busy = match turn {
                             // 턴이 열려 있다 — 화면이 조용해도 일하는 중. 승인·질문 프롬프트가
-                            // 보이면 사람을 기다리는 것이라 바를 돌리지 않는다.
-                            Some(crate::transcript::TurnState::Working) => approval.is_none() && !waits,
+                            // 보이면 사람을 기다리는 것이라 바를 돌리지 않는다. 단 기록이
+                            // 한참 조용한데 화면에도 스피너·박동이 없으면 닫는 줄을 못 남기고
+                            // 끝난 턴이다(`TURN_STALE`) — 그때는 화면을 믿는다.
+                            Some(crate::transcript::TurnState::Working) => {
+                                approval.is_none() && !waits && (screen_busy || !turn_stale)
+                            }
                             // 턴이 닫혔다 — 화면의 점·박동은 장식이다. 방금 Enter 가 들어갔으면
                             // 기록보다 화면이 앞서므로 그 몇 초만 화면을 믿는다.
                             Some(crate::transcript::TurnState::Idle) => {

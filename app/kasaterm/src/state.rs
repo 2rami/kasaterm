@@ -1079,6 +1079,31 @@ pub(crate) struct TurnObservation {
     pub(crate) mtime: Option<std::time::SystemTime>,
 }
 
+/// 기록이 이만큼 조용하면 「열린 턴」을 더는 믿지 않는다. 하네스는 턴을 닫는 줄을 못 남기고
+/// 끝날 때가 있다 — 도구 결과 뒤 답 없이 프롬프트로 돌아간 경우(API 오류·빈 답). 그러면
+/// 기록은 영영 「열림」이고 미니맵·헤더 바·보드가 다 「일하는 중」으로 굳는다(2026-09-17
+/// 시로코: 5분째 프롬프트인데 걷고 있었다). 진짜 일하는 턴은 도구 스피너(esc to interrupt)나
+/// 출력 박동이 화면에 있거나 기록이 계속 자라므로, 둘 다 없으면 닫힌 것으로 본다.
+pub(crate) const TURN_STALE: std::time::Duration = std::time::Duration::from_secs(90);
+
+impl TurnObservation {
+    /// 이 판정을 낸 기록이 `TURN_STALE` 넘게 안 바뀌었나. mtime 을 모르면 낡은 것으로 친다.
+    pub(crate) fn stale(&self) -> bool {
+        self.mtime
+            .and_then(|m| m.elapsed().ok())
+            .is_none_or(|age| age >= TURN_STALE)
+    }
+}
+
+/// 보드 쪽이 쓰는 같은 판정 — 기록 파일의 mtime 으로.
+pub(crate) fn transcript_stale(path: &std::path::Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_none_or(|age| age >= TURN_STALE)
+}
+
 /// Collab completion toast + munder-style approval card. `toast` is the
 /// "✓ %3 완료" message for a sibling pane's working→idle flip (faded by
 /// `collab_toast_alpha`); `toast_action` = Some(pane id) pins it as an
