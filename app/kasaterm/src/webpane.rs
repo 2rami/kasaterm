@@ -530,6 +530,8 @@ impl App {
 
     /// 폰 쪽지로 — 누르면 사파리로 열린다. 이 기계의 쪽지 파일에 남고 푸시는 여기
     /// 등록된 폰으로만 간다(본진에서 열렸으면 폰 목록엔 그 기계 칸으로 뜬다).
+    /// 이 기계 주소(localhost·사설망)는 폰이 못 여니 쪽지에 넣기 전에 임시 터널로
+    /// 바깥 주소를 받는다 — 터널이 서는 수 초는 스레드에서 기다린다.
     fn open_url_to_phone(&mut self, url: &str, target: Option<&str>) {
         let pane = target
             .filter(|t| *t != "__local_browser__")
@@ -543,26 +545,35 @@ impl App {
             .get(&pane)
             .cloned()
             .unwrap_or_default();
-        let summary = url.to_string();
-        let input = kasa_mcp::notes::NoteInput {
-            pane: if pane.is_empty() { "-".to_string() } else { pane.clone() },
-            character: character.clone(),
-            kind: "link".to_string(),
-            summary: summary.clone(),
-            asked: String::new(),
-            did: String::new(),
-            when: None,
-            image: None,
-            url: url.to_string(),
-        };
-        let added = kasa_mcp::notes::add(input);
         let proxy = self.proxy.clone();
         let url_owned = url.to_string();
         std::thread::spawn(move || {
-            if let Some(n) = added {
-                kasa_mcp::push::note_arrived_blocking(&n.character, &n.kind, &n.summary, &n.pane, Some(&url_owned));
+            let (public, did) = match kasa_mcp::quicktunnel::public_url(&url_owned) {
+                Ok(p) if p != url_owned => (p, format!("원래 주소 {url_owned}")),
+                Ok(p) => (p, String::new()),
+                // 터널을 못 세워도 쪽지는 보낸다 — 같은 와이파이면 열릴 수 있고, 이유가 남아야 고친다.
+                Err(e) => (url_owned.clone(), format!("바깥 주소를 못 만들었어요: {e}")),
+            };
+            let input = kasa_mcp::notes::NoteInput {
+                pane: if pane.is_empty() { "-".to_string() } else { pane.clone() },
+                character: character.clone(),
+                kind: "link".to_string(),
+                summary: public.clone(),
+                asked: String::new(),
+                did,
+                when: None,
+                image: None,
+                url: public.clone(),
+            };
+            if let Some(n) = kasa_mcp::notes::add(input) {
+                kasa_mcp::push::note_arrived_blocking(&n.character, &n.kind, &n.summary, &n.pane, Some(&public));
             }
-            let _ = proxy.send_event(UserEvent::SocketToast("폰 쪽지로 보냈어요".to_string()));
+            let toast = if public == url_owned {
+                "폰 쪽지로 보냈어요".to_string()
+            } else {
+                format!("폰 쪽지로 보냈어요 · {}", public.trim_start_matches("https://"))
+            };
+            let _ = proxy.send_event(UserEvent::SocketToast(toast));
         });
     }
 

@@ -12,13 +12,20 @@
 static TUNNEL_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
 
 /// cloudflared 실행 파일. GUI 앱은 셸 PATH 를 물려받지 않으므로(Finder 실행엔
-/// 셸 환경 자체가 없다) homebrew 의 두 자리를 직접 짚고, 마지막에야 PATH 를 믿는다.
-fn cloudflared_bin() -> std::path::PathBuf {
-    ["/opt/homebrew/bin/cloudflared", "/usr/local/bin/cloudflared"]
-        .iter()
-        .map(std::path::PathBuf::from)
-        .find(|p| p.exists())
-        .unwrap_or_else(|| std::path::PathBuf::from("cloudflared"))
+/// 셸 환경 자체가 없다) homebrew 의 두 자리와 홈 아래 설치 자리(미니는
+/// `~/.local/bin`)를 직접 짚고, 마지막에야 PATH 를 믿는다. quicktunnel 도 쓴다.
+pub(crate) fn cloudflared_bin() -> std::path::PathBuf {
+    let home = kasa_socket::home_var().unwrap_or_default();
+    [
+        "/opt/homebrew/bin/cloudflared".to_string(),
+        "/usr/local/bin/cloudflared".to_string(),
+        format!("{home}/.local/bin/cloudflared"),
+        format!("{home}/bin/cloudflared"),
+    ]
+    .iter()
+    .map(std::path::PathBuf::from)
+    .find(|p| p.exists())
+    .unwrap_or_else(|| std::path::PathBuf::from("cloudflared"))
 }
 
 /// 살아 있는 터널의 pid. 우리 자식 우선(끝났으면 여기서 회수해 좀비를 막는다),

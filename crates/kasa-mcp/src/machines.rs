@@ -242,7 +242,8 @@ pub const KASACHROME_PORT: u16 = 8777;
 /// 사람에게 보여 줄 페이지가 갈 곳 — `""` 이면 「카사크롬이 쓰는 크롬」과 같은 기계,
 /// `"phone"` 이면 폰(쪽지+알림). 폰에는 학생이 조작할 크롬이 없어 이 둘은 갈라 둔다:
 /// 학생 도구가 쓰는 크롬은 그대로 두고 `open` 의 도착지만 폰으로 간다(2026-09-10 지시
-/// 「폰일 때는 폰에서도 볼 수 있게」).
+/// 「폰일 때는 폰에서도 볼 수 있게」). 이 기계 주소(localhost 등)는 폰이 못 여니
+/// 쪽지에 넣기 전에 quicktunnel 로 바깥 주소를 받는다(2026-09-17).
 pub const OPEN_TARGET_PHONE: &str = "phone";
 
 pub fn open_url_target() -> String {
@@ -928,6 +929,8 @@ pub fn stop_tunnels() {
             }
         }
     }
+    // 폰 쪽지용 임시 터널(quicktunnel)도 앱과 함께 — 잠깐 보여 주는 주소를 상시 노출로 남기지 않는다.
+    crate::quicktunnel::shutdown();
 }
 
 fn raw_machines() -> Vec<Machine> {
@@ -1579,7 +1582,8 @@ mod tests {
         guest.label = "mini.local".into(); guest.guest = true; guest.ssh = None;
         guest.base = "http://127.0.0.1:19011".into(); guest.home = false; guest.roots.clear();
         let seen = |age| Seen { at: Instant::now() - age, panes: vec![], sync:true,
-            build:Some("build".into()), machine_id:Some("same-stable-machine-id".into()) };
+            build:Some("build".into()), machine_id:Some("same-stable-machine-id".into()),
+            rtt_ms: None, device_colors: None };
         let mut c = Cache::from([(configured.label.clone(), seen(Duration::ZERO)),
             (guest.label.clone(), seen(Duration::ZERO))]);
         for rows in [vec![configured.clone(), guest.clone()], vec![guest.clone(), configured.clone()]] {
@@ -1643,6 +1647,8 @@ mod tests {
             sync: true,
             build: Some("same-build".to_string()),
             machine_id: Some("stable-mini-1".to_string()),
+            rtt_ms: None,
+            device_colors: None,
         };
         let uplink = crate::uplink::GatewayMachine {
             id: "stable-mini-1".to_string(),
@@ -1670,6 +1676,8 @@ mod tests {
             sync: true,
             build: None,
             machine_id: Some("stable-mini-1".to_string()),
+            rtt_ms: None,
+            device_colors: None,
         };
         let live = vec![crate::uplink::GatewayMachine {
             id: "stable-mini-1".to_string(),
