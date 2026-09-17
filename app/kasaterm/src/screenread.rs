@@ -1124,9 +1124,9 @@ pub(crate) fn tell_marker_line(row: &[GridCell]) -> Option<(usize, usize, String
         .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
         .collect();
     let mut first = chars.iter().position(|&c| c != ' ')?;
-    // claude TUI 는 제출된 user 턴을 `❯ ` 프롬프트 마커로 시작해 그린다 — 마커는
-    // 그 뒤에 온다.
-    if chars[first] == '❯' {
+    // claude TUI 는 제출된 user 턴을 `❯ ` 프롬프트 마커로, codex 는 `› ` 로 시작해
+    // 그린다 — 마커는 그 뒤에 온다.
+    if matches!(chars[first], '❯' | '›') {
         first = chars[first + 1..]
             .iter()
             .position(|&c| c != ' ')
@@ -6290,8 +6290,13 @@ mod teammate_msg_tests {
         let prompted = row_from("❯ ⟦프라나⟧ 검증 메시지", 80);
         let (start, _, name) = tell_marker_line(&prompted).expect("❯ 뒤 마커도 인정");
         assert_eq!((start, name.as_str()), (2, "프라나"), "마커 시작 = ❯ + 공백 뒤");
+        // codex TUI 는 제출된 user 턴을 `› ` 로 그린다 — 같은 자리의 마커를 인정한다.
+        let codex = row_from("› ⟦아로나⟧ codex 에게", 80);
+        let (start, _, name) = tell_marker_line(&codex).expect("› 뒤 마커도 인정");
+        assert_eq!((start, name.as_str()), (2, "아로나"));
         assert!(tell_marker_line(&row_from("그냥 내 입력", 80)).is_none());
         assert!(tell_marker_line(&row_from("❯ 마커 없는 제출", 80)).is_none());
+        assert!(tell_marker_line(&row_from("› 마커 없는 제출", 80)).is_none());
         assert!(tell_marker_line(&row_from("⟦없는캐릭⟧ x", 80)).is_none());
     }
 

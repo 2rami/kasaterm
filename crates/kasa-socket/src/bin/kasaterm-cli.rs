@@ -2006,6 +2006,12 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             } else {
                 args.get(index..).filter(|a|!a.is_empty()).ok_or_else(||anyhow!("tell needs a message or --stdin"))?.join(" ")
             };
+            // 발신 학생 마커 — 받는 pane 이 tell 을 발신자 테마색·프사로 그리려면 화면에
+            // 앵커가 필요하다(그리드라 transcript 로 user 턴을 못 집는다). 옛 tell 이 심던
+            // `⟦이름⟧` 을 collab.tell 로 옮기며 빠뜨려, 남이 보낸 tell 이 사용자 발신처럼
+            // 무테마로 떴다(2026-09-17 지적 「tell 로 보내면 학생 프사 나오면서 그거 왜 안 되지」).
+            // 사람이 직접 친 cli 는 env 가 없어 마커 없이(사용자 발신=무색) 나간다.
+            let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
             params["body"] = json!(kasa_socket::tell::normalize(&body)?);
             kasa_socket::tell::valid_id(params["message_id"].as_str().unwrap())?;
             eprintln!("tell receipt ID: {}",params["message_id"].as_str().unwrap());
@@ -2346,6 +2352,15 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         method: method.to_string(),
         params,
     })
+}
+
+/// tell 본문 머리에 발신 학생 마커 `⟦이름⟧ ` 를 심는다. 이미 마커로 시작하면(재시도·
+/// 중계) 두 번 심지 않는다. 이름이 없으면(사람이 친 cli) 본문 그대로.
+fn mark_tell_sender(body: String, character: Option<&str>) -> String {
+    let Some(name) = character.map(str::trim).filter(|s| !s.is_empty()) else { return body };
+    let trimmed = body.trim_start();
+    if trimmed.starts_with('⟦') { return body; }
+    format!("⟦{name}⟧ {trimmed}")
 }
 
 /// `tell` 의 대상이 이름이면 보드에서 주소로 바꾼다 — `이름`·`이름@기계`·`%N@기계`·방 제목.
@@ -3162,6 +3177,15 @@ fn run_statusline() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tell_marks_sender_character_once() {
+        assert_eq!(super::mark_tell_sender("본문".into(), Some("아로나")), "⟦아로나⟧ 본문");
+        assert_eq!(super::mark_tell_sender("  두 줄\n둘째".into(), Some("아로나")), "⟦아로나⟧ 두 줄\n둘째");
+        assert_eq!(super::mark_tell_sender("⟦아로나⟧ 이미".into(), Some("아로나")), "⟦아로나⟧ 이미");
+        assert_eq!(super::mark_tell_sender("본문".into(), None), "본문");
+        assert_eq!(super::mark_tell_sender("본문".into(), Some(" ")), "본문");
+    }
+
     #[test]
     fn rooms_use_machine_and_room_identity_without_peer_addresses() {
         let pane = |machine: &str,room: &str,character: &str| serde_json::json!({
