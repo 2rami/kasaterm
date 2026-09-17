@@ -609,6 +609,17 @@ impl App {
                             failure.get_or_insert_with(|| format!("{id} 원격 연결이 끝났어요"));
                         }
                     }
+                    // 붙었는데 화면이 조용한 링크(`to` 로 보낸 학생이 쉬는 중) — 유예 뒤 준비로 친다.
+                    Some((true, _, _)) => {
+                        if entry.miss(REMOTE_GRACE) {
+                            entry.given_up = false;
+                            entry.ready = true;
+                            ready += 1;
+                            settled += 1;
+                        } else {
+                            entry.stage = RestoreStage::RemoteScreen;
+                        }
+                    }
                     _ => { if entry.missing_since.take().is_some() && !entry.given_up { entry.stage = RestoreStage::RemoteConnection; } }
                 }
             } else {

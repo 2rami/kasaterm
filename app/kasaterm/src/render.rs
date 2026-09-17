@@ -5035,7 +5035,7 @@ impl App {
                         quick_top,
                         tree_col_w - 1.0,
                         quick_h,
-                        theme::panel_bg(),
+                        tree_col_bg,
                     );
                     let mut qy = quick_top;
                     g.draw_text(

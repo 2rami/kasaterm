@@ -1309,12 +1309,15 @@ impl App {
     /// 목록에 그 pane 이 보이면(캐시가 찼으면) 그 방을 보기 창으로 열고 이 자리를 걷는다.
     /// 한 번에 하나만 — 여럿이면 다음 틱에 이어서. 복원이 도는 동안은 손대지 않는다.
     fn sweep_migrated_links(&mut self) {
-        if self.tmux.is_some() || self.restore_progress.is_some() || self.restore_applying.is_some() {
+        // 복원 카드가 남아 있어도(조용한 링크는 준비로 안 잡히기도 한다) 링크가 붙어 있으면
+        // 걷는다 — 배치를 세우는 중(`restore_applying`)만 피한다.
+        if self.tmux.is_some() || self.restore_applying.is_some() {
             return;
         }
         let candidate = self.pty.keys().find_map(|id| {
             let info = kasa_mcp::remote::remote_info(id)?;
             if info.view || info.owned || !info.remote_id.starts_with('%') { return None; }
+            if !kasa_mcp::remote::connection_readiness(id).is_some_and(|(connected, _, _)| connected) { return None; }
             let window = self.window_of_pane(id)?;
             if self.remote_view_of_window(window).is_some() { return None; }
             let (label, facts) = crate::machinescol::remote_pane_facts(id)?;
