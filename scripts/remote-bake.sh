@@ -9,6 +9,7 @@
 #
 #   status   지금 판(HEAD·미커밋·dist/설치본 시각·펫·서비스)
 #   pull     git pull --ff-only 만
+#   mini     구운 dist 를 미니에 파일만 부친다(갈아 끼우기·되띄우기는 미니에서)
 #   app      pull → build-app.sh (앱 전체; 반영은 사람이 앱을 껐다 켜야 한다)
 #   pet      pull → pet-reload.sh (펫만, 즉시 반영)
 #   journal  pull → request-journal 서비스 재시작(펫의 뇌·나쵸 말투·집컴 전원)
@@ -42,8 +43,8 @@ for a in "$@"; do
     *) echo "[remote-bake] 모르는 옵션: $a" >&2; exit 2 ;;
   esac
 done
-case "$VERB" in status|pull|app|pet|journal|log) ;; *)
-  echo "[remote-bake] 동사는 status·pull·app·pet·journal·log 중 하나다 (받은 것: $VERB)" >&2; exit 2 ;;
+case "$VERB" in status|pull|app|pet|journal|log|mini) ;; *)
+  echo "[remote-bake] 동사는 status·pull·app·pet·journal·log·mini 중 하나다 (받은 것: $VERB)" >&2; exit 2 ;;
 esac
 
 say() { printf '[remote-bake] %s\n' "$*"; }
@@ -135,6 +136,19 @@ run() {
       launchctl kickstart -k "gui/$(id -u)/com.kasaterm.request-journal" || return 1
       sleep 3
       status | grep '펫의 뇌' ;;
+    mini)
+      # 구운 dist 를 미니에 **파일만** 부친다 — 갈아 끼우기·되띄우기는 그쪽(사람)이 한다.
+      # 미니에서 굽기를 시킨 학생이 번들을 당겨 올 길이 없어서(미니→맥북 열쇠는 이 관문만
+      # 허용) 관문에 동사를 하나 더 둔 것(2026-09-17).
+      local host="${KASATERM_MINI_HOST:-nachoneko}"
+      [[ -d dist/kasaterm.app ]] || { say "dist/kasaterm.app 이 없다 — 먼저 app"; return 1; }
+      say "미니($host)로 부치는 중… $(date -r dist/kasaterm.app/Contents/MacOS/kasaterm '+%m-%d %H:%M')"
+      rsync -a --delete -e ssh dist/kasaterm.app/ "$host:kasaterm-dist/kasaterm.app/" || return 1
+      if [[ -d "$HOME/.config/kasaterm/pet" ]]; then
+        ssh "$host" mkdir -p .config/kasaterm/pet
+        rsync -a -e ssh --exclude board.json --exclude state.json "$HOME/.config/kasaterm/pet/" "$host:.config/kasaterm/pet/" || true
+      fi
+      say "부쳤다 — 미니에서 ~/kasaterm-dist/install.sh 로 갈아 끼운다" ;;
   esac
 }
 
