@@ -978,6 +978,7 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+        self.save_ui_state();
     }
     /// Show/hide pane `id`'s status bar. Collapsing returns the footer rows to
     /// the cell grid, so the PTY is reshaped; an open dropdown on that bar is
@@ -1675,6 +1676,7 @@ impl App {
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.chrome_dirty = true;
+        self.save_ui_state();
     }
     /// 칼럼 발치 「최근 커밋」 구역의 크기조절 — 누르기·끌기·놓기 세 짝.
     ///
@@ -1777,6 +1779,23 @@ impl App {
         let sz = win.inner_size();
         let pos = win.outer_position().ok().map(|p| (p.x as f64, p.y as f64));
         crate::socket::write_window_frame(sz.width as f64 / scale, sz.height as f64 / scale, pos);
+        self.save_ui_state();
+    }
+
+    /// 마지막에 쓰던 화면 배치를 적어 둔다 — 토글·크기조절 때마다. 종료를 기다리면
+    /// SIGTERM·강제 종료 때 못 남긴다. 검증 실행은 `save_window_frame` 과 같은 이유로 안 쓴다.
+    pub(crate) fn save_ui_state(&self) {
+        if crate::verification_run() {
+            return;
+        }
+        crate::socket::write_window_ui(&crate::socket::WindowUi {
+            sidebar_visible: Some(self.sidebar_visible),
+            sidebar_w: Some(self.sidebar_w_logical),
+            file_tree_visible: Some(self.file_tree.visible),
+            file_tree_w: Some(self.file_tree.w_logical),
+            git_col_visible: Some(self.git.col_visible),
+            git_col_w: Some(self.git.col_w_logical),
+        });
     }
 
     /// Hit-test a press against the window-tab strip controls, in paint order:
@@ -2447,6 +2466,7 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+        self.save_ui_state();
     }
     /// Show/hide the file-tree column. Same reflow path as `toggle_sidebar`.
     pub(crate) fn toggle_file_tree(&mut self) {
@@ -2463,6 +2483,7 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+        self.save_ui_state();
     }
     /// Drop a word off the end of the input buffer (for Ctrl-W /
     /// Alt-Backspace): eat trailing spaces, then non-spaces.

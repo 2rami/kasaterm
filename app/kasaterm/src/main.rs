@@ -5919,6 +5919,8 @@ impl App {
                 let _ = visual_proxy.send_event(UserEvent::Redraw);
             }));
         }
+        // 마지막에 쓰던 화면 배치. 검증 실행은 저장도 안 하니 읽지도 않는다(짝이 맞는다).
+        let ui = if verification_run() { socket::WindowUi::default() } else { socket::read_window_ui() };
         Self {
             viewer_only,
             viewer_resumed: false,
@@ -6064,7 +6066,7 @@ impl App {
             session_saved_hash: None,
             pane_tab_hover: None,
             image_btn_rects: Vec::new(),
-            sidebar_w_logical: SIDEBAR_W,
+            sidebar_w_logical: ui.sidebar_w.unwrap_or(SIDEBAR_W),
             sidebar_resize: None,
             last_resized_cells: (0, 0),
             pending_resize: None,
@@ -6122,8 +6124,8 @@ impl App {
             git: state::GitState {
                 col_visible: std::env::var("KASASPACE_GIT_PANEL")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false),
-                col_w_logical: GIT_COL_W,
+                    .unwrap_or_else(|_| ui.git_col_visible.unwrap_or(false)),
+                col_w_logical: ui.git_col_w.unwrap_or(GIT_COL_W),
                 // KASATERM_FORCE_ACCOUNT_MENU 와 같은 헤드리스 검증용 — 클릭 합성
                 // 없이 모달이 열린 프레임을 캡처한다(모달은 창 안 모든 것 위에
                 // 떠야 해서 겹침 회귀가 나기 쉬운 자리다).
@@ -6173,9 +6175,10 @@ impl App {
                 // Headless test override (KASATERM_TEST_FILETREE) forces the
                 // sidebar open at launch so quick-files/tree captures render
                 // without needing a chrome click the PTY-only autosend can't do.
-                visible: socket::read_file_tree_default()
+                // 마지막에 쓰던 대로가 먼저고, 그 기록이 없을 때만 설정의 기본값이다.
+                visible: ui.file_tree_visible.unwrap_or_else(socket::read_file_tree_default)
                     || std::env::var("KASATERM_TEST_FILETREE").is_ok(),
-                w_logical: FILE_TREE_W,
+                w_logical: ui.file_tree_w.unwrap_or(FILE_TREE_W),
                 ..Default::default()
             },
             git_ignore_req: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -6295,7 +6298,8 @@ impl App {
             // button or the "보기 → 세션 패널" menu item.
             // 카드 덱 호버 명단은 사이드바 배치도 위에서만 뜬다. 헤드리스는
             // 마우스를 못 움직이니 AUTODECKTIP 일 때만 열어 둔 채 띄운다.
-            sidebar_visible: std::env::var_os("KASATERM_AUTODECKTIP").is_some(),
+            sidebar_visible: std::env::var_os("KASATERM_AUTODECKTIP").is_some()
+                || ui.sidebar_visible.unwrap_or(false),
             // 기본은 side(사이드바 탭) — read_tab_position 이 "top" 만 top 으로,
             // 그 외/키없음은 side 로 폴백한다.
             tabs_on_top: socket::read_tab_position() == "top",

@@ -6850,16 +6850,19 @@ impl ApplicationHandler<UserEvent> for App {
                         // the live width is already in self.sidebar_w_logical).
                         if self.sidebar_resize.take().is_some() {
                             window.set_cursor(CursorIcon::Default);
+                            self.save_ui_state();
                             return;
                         }
                         // End a file-tree column resize drag.
                         if self.file_tree.resize.take().is_some() {
                             window.set_cursor(CursorIcon::Default);
+                            self.save_ui_state();
                             return;
                         }
                         // End a git-column resize drag.
                         if self.git.col_resize.take().is_some() {
                             window.set_cursor(CursorIcon::Default);
+                            self.save_ui_state();
                             return;
                         }
                         // 「최근 커밋」 구역 높이 드래그 끝 (놓는 김에 새 개수로 한 번

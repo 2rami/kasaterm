@@ -6470,20 +6470,148 @@ pub fn read_shim_inject() -> bool {
 /// physical px. `pos: None` keeps whatever position the file already has — the
 /// size-only callers must not erase a previously saved position.
 pub fn write_window_frame(w: f64, h: f64, pos: Option<(f64, f64)>) {
-    use std::io::Write;
     let Some(path) = window_size_path() else {
         return;
     };
+    write_window_frame_at(&path, w, h, pos);
+}
+
+/// 파일의 다른 키(`ui` 등)는 그대로 두고 크기·위치만 바꾼다 — 통째로 다시 쓰면 마지막에
+/// 쓰던 화면 배치가 창을 옮길 때마다 지워진다.
+fn write_window_frame_at(path: &std::path::Path, w: f64, h: f64, pos: Option<(f64, f64)>) {
+    let mut doc = read_window_doc_at(path);
+    doc["w"] = serde_json::json!(w);
+    doc["h"] = serde_json::json!(h);
+    if let Some((x, y)) = pos {
+        doc["x"] = serde_json::json!(x);
+        doc["y"] = serde_json::json!(y);
+    }
+    write_window_doc_at(path, &doc);
+}
+
+fn read_window_doc_at(path: &std::path::Path) -> serde_json::Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn write_window_doc_at(path: &std::path::Path, doc: &serde_json::Value) {
+    use std::io::Write;
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let pos = pos.or_else(read_window_pos);
-    let body = match pos {
-        Some((x, y)) => format!("{{\"w\":{w},\"h\":{h},\"x\":{x},\"y\":{y}}}"),
-        None => format!("{{\"w\":{w},\"h\":{h}}}"),
+    if let Ok(mut f) = std::fs::File::create(path) {
+        let _ = f.write_all(doc.to_string().as_bytes());
+    }
+}
+
+/// 마지막에 쓰던 화면 배치 — 사이드바·파일트리·git 칸의 보임과 너비. 껐다 켜면 그대로
+/// 돌아온다(2026-09-17 지시 「재시작하면 마지막에 썼던 UI 유지되게」). 값이 없는 칸은
+/// 종전 기본(설정의 file_tree_default 등)을 따른다.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct WindowUi {
+    pub(crate) sidebar_visible: Option<bool>,
+    pub(crate) sidebar_w: Option<f32>,
+    pub(crate) file_tree_visible: Option<bool>,
+    pub(crate) file_tree_w: Option<f32>,
+    pub(crate) git_col_visible: Option<bool>,
+    pub(crate) git_col_w: Option<f32>,
+}
+
+/// 칸 너비로 말이 되는 범위. 사람이 파일을 손으로 고쳤거나 옛 판이 이상한 값을 남겼을 때
+/// 칸이 화면을 다 먹거나 0 으로 접히지 않게.
+fn sane_width(v: f32) -> Option<f32> {
+    (v.is_finite() && (100.0..=1600.0).contains(&v)).then_some(v)
+}
+
+pub(crate) fn read_window_ui() -> WindowUi {
+    window_size_path().map(|p| read_window_ui_at(&p)).unwrap_or_default()
+}
+
+fn read_window_ui_at(path: &std::path::Path) -> WindowUi {
+    let doc = read_window_doc_at(path);
+    let ui = &doc["ui"];
+    let flag = |k: &str| ui.get(k).and_then(|v| v.as_bool());
+    let width = |k: &str| ui.get(k).and_then(|v| v.as_f64()).and_then(|v| sane_width(v as f32));
+    WindowUi {
+        sidebar_visible: flag("sidebar_visible"),
+        sidebar_w: width("sidebar_w"),
+        file_tree_visible: flag("file_tree_visible"),
+        file_tree_w: width("file_tree_w"),
+        git_col_visible: flag("git_col_visible"),
+        git_col_w: width("git_col_w"),
+    }
+}
+
+pub(crate) fn write_window_ui(ui: &WindowUi) {
+    let Some(path) = window_size_path() else {
+        return;
     };
-    if let Ok(mut f) = std::fs::File::create(&path) {
-        let _ = f.write_all(body.as_bytes());
+    write_window_ui_at(&path, ui);
+}
+
+fn write_window_ui_at(path: &std::path::Path, ui: &WindowUi) {
+    let mut doc = read_window_doc_at(path);
+    let mut block = serde_json::Map::new();
+    let mut put = |k: &str, v: Option<serde_json::Value>| {
+        if let Some(v) = v {
+            block.insert(k.to_string(), v);
+        }
+    };
+    put("sidebar_visible", ui.sidebar_visible.map(serde_json::Value::from));
+    put("sidebar_w", ui.sidebar_w.map(|v| serde_json::json!(v)));
+    put("file_tree_visible", ui.file_tree_visible.map(serde_json::Value::from));
+    put("file_tree_w", ui.file_tree_w.map(|v| serde_json::json!(v)));
+    put("git_col_visible", ui.git_col_visible.map(serde_json::Value::from));
+    put("git_col_w", ui.git_col_w.map(|v| serde_json::json!(v)));
+    doc["ui"] = serde_json::Value::Object(block);
+    write_window_doc_at(path, &doc);
+}
+
+#[cfg(test)]
+mod window_ui_tests {
+    use super::*;
+
+    /// 시험이 나란히 돌아 같은 나노초에 이름을 지으면 서로의 파일을 밟는다(실측 한 번 튐) —
+    /// 번호를 하나씩 올려 갈라 둔다.
+    fn scratch() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("kasaterm-window-ui-{}-{n}-{nonce}.json", std::process::id()))
+    }
+
+    /// 창 크기를 다시 써도 화면 배치는 남고, 배치를 다시 써도 창 크기는 남는다.
+    #[test]
+    fn frame_and_ui_survive_each_other() {
+        let p = scratch();
+        write_window_frame_at(&p, 1100.0, 860.0, Some((10.0, 20.0)));
+        let ui = WindowUi { sidebar_visible: Some(true), sidebar_w: Some(240.0), file_tree_visible: Some(true), file_tree_w: Some(300.0), git_col_visible: Some(false), git_col_w: Some(420.0) };
+        write_window_ui_at(&p, &ui);
+        assert_eq!(read_window_ui_at(&p), ui);
+        write_window_frame_at(&p, 900.0, 700.0, None);
+        let doc = read_window_doc_at(&p);
+        assert_eq!((doc["w"].as_f64(), doc["x"].as_f64()), (Some(900.0), Some(10.0)), "위치는 남는다");
+        assert_eq!(read_window_ui_at(&p), ui, "배치도 남는다");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// 파일이 없거나 깨졌거나 너비가 말이 안 되면 「모른다」로 — 기본값으로 뜬다.
+    #[test]
+    fn missing_broken_or_absurd_values_read_as_unknown() {
+        let p = scratch();
+        assert_eq!(read_window_ui_at(&p), WindowUi::default());
+        std::fs::write(&p, "{").unwrap();
+        assert_eq!(read_window_ui_at(&p), WindowUi::default());
+        std::fs::write(&p, r#"{"w":1100,"h":860,"ui":{"sidebar_visible":"yes","sidebar_w":5,"git_col_w":99999,"file_tree_w":260}}"#).unwrap();
+        let ui = read_window_ui_at(&p);
+        assert_eq!(ui.sidebar_visible, None);
+        assert_eq!(ui.sidebar_w, None);
+        assert_eq!(ui.git_col_w, None);
+        assert_eq!(ui.file_tree_w, Some(260.0));
+        let _ = std::fs::remove_file(&p);
     }
 }
 
