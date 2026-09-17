@@ -88,7 +88,7 @@ run() {
     app)
       pull || return 1
       say "build-app.sh ${FORCE[*]:-} 시작 — 몇 분 걸린다"
-      bash scripts/build-app.sh "${FORCE[@]}" || return 1
+      bash scripts/build-app.sh ${FORCE[@]+"${FORCE[@]}"} || return 1
       say "구움. 반영은 앱을 껐다 켜야 한다(자기설치). 펫까지 바꿨으면 그 뒤 펫도 껐다 켠다" ;;
     pet)
       pull || return 1
