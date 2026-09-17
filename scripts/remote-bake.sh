@@ -72,6 +72,36 @@ status() {
   say "펫의 뇌(request-journal) ${health:-응답 없음}"
 }
 
+# ssh 세션은 로그인 세션이 아니라 키체인의 애플 인증서 키를 못 쓴다 — build-app.sh 의 최종 서명이
+# `errSecInternalComponent` 로 죽는다(2026-09-17 실측; 펫 하나 서명은 됐는데 번들은 안 됐다). 그래서
+# 굽기는 도는 앱의 탭 하나를 빌려 그 셸(로그인 세션)에서 돌리고, 끝 표식을 화면에서 읽는다.
+# 탭 셸은 KASATERM_PANE_ID 를 갖고 있어 pane 가드가 자기 자신을 빼고 판정한다.
+tab_run() {
+  local cmd="$1" marker="REMOTE_BAKE_RC" outer tab text rc
+  command -v kasaterm-cli >/dev/null 2>&1 || { say "kasaterm-cli 가 없다 — 앱 탭을 못 빌린다"; return 1; }
+  outer="$(kasaterm-cli board 2>/dev/null | python3 -c 'import json,sys
+b=(json.load(sys.stdin).get("result") or {}).get("board") or []
+print(b[0].get("surface_id","") if b else "")' 2>/dev/null || true)"
+  tab="$(kasaterm-cli tab ${outer:+"$outer"} 2>/dev/null | python3 -c 'import json,sys
+print((((json.load(sys.stdin).get("result") or {}).get("surface") or {}).get("id")) or "")' 2>/dev/null || true)"
+  [[ -n "$tab" ]] || { say "앱 탭을 못 열었다 — 맥북 앱이 꺼져 있나"; return 1; }
+  say "앱 탭 $tab 에서 돌린다: $cmd"
+  kasaterm-cli send --surface "$tab" "cd '$REPO' && $cmd; echo $marker=\$?"$'\n' >/dev/null
+  for _ in $(seq 1 1440); do
+    sleep 0.5
+    text="$(kasaterm-cli peek "$tab" 2>/dev/null | python3 -c 'import json,sys
+print(((json.load(sys.stdin).get("result") or {}).get("text")) or "")' 2>/dev/null || true)"
+    if [[ "$text" == *"$marker="* ]]; then
+      printf '%s\n' "$text" | grep -vE '^\s*$' | tail -14
+      rc="$(printf '%s\n' "$text" | sed -n "s/.*$marker=\([0-9]*\).*/\1/p" | tail -1)"
+      kasaterm-cli dismiss "$tab" >/dev/null 2>&1 || true
+      return "${rc:-1}"
+    fi
+  done
+  say "탭 $tab 에서 12분 안에 안 끝났다 — 탭은 그대로 둔다"
+  return 1
+}
+
 logs() {
   local tmp; tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp/)"
   for f in "$LOG" "${tmp}kasapet-reload.log" "$HOME/.config/kasaterm/request-journal/service.log"; do
@@ -88,7 +118,11 @@ run() {
     app)
       pull || return 1
       say "build-app.sh ${FORCE[*]:-} 시작 — 몇 분 걸린다"
-      bash scripts/build-app.sh ${FORCE[@]+"${FORCE[@]}"} || return 1
+      if [[ -n "${SSH_CONNECTION:-}" ]]; then
+        tab_run "bash scripts/build-app.sh ${FORCE[*]:-}" || return 1
+      else
+        bash scripts/build-app.sh ${FORCE[@]+"${FORCE[@]}"} || return 1
+      fi
       say "구움. 반영은 앱을 껐다 켜야 한다(자기설치). 펫까지 바꿨으면 그 뒤 펫도 껐다 켠다" ;;
     pet)
       pull || return 1
