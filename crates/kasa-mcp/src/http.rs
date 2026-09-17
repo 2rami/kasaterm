@@ -960,8 +960,11 @@ async fn open_image_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
-/// `GET /open-url?url=<url>&pane=<pid>` — pane 셸의 `open` 셰임과 `kasaterm-cli
-/// open` 이 부른다. 호스트가 「그 pane 을 보는 거울」로 되돌리거나 직접 연다.
+/// `GET /open-url?url=<url>&pane=<pid>` — pane 셸의 `open` 셰임·`kasaterm-cli
+/// open`·카사크롬 `browser_show_human` 이 부른다. 호스트가 「그 pane 을 보는 거울」로
+/// 되돌리거나 직접 연다. 도착지가 「폰」이면 여기서 먼저 임시 터널로 바깥 주소를
+/// 만들어 `url` 로 돌려준다 — 부른 쪽(학생)이 그 링크를 답장에 적을 수 있게.
+/// GUI 의 폰 경로는 이미 바깥 주소면 그대로 쪽지에 넣으므로 두 번 세우지 않는다.
 async fn open_url_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -970,8 +973,23 @@ async fn open_url_handler(
     let pane = if params.get("local").is_some_and(|v| v == "1") {
         Some("__local_browser__")
     } else { params.get("pane").map(|s| s.as_str()).filter(|s| !s.is_empty()) };
-    let body = match backend.open_url(&url, pane) {
-        Ok(()) => serde_json::json!({ "ok": true }),
+    let phone = crate::machines::opens_on_phone();
+    let mut tunnel_error = None;
+    let shown = if phone && !url.is_empty() {
+        let raw = url.clone();
+        match tokio::task::spawn_blocking(move || crate::quicktunnel::public_url(&raw)).await {
+            Ok(Ok(public)) => public,
+            Ok(Err(e)) => { tunnel_error = Some(e); url.clone() }
+            Err(e) => { tunnel_error = Some(e.to_string()); url.clone() }
+        }
+    } else { url.clone() };
+    let body = match backend.open_url(&shown, pane) {
+        Ok(()) => {
+            let mut body = serde_json::json!({ "ok": true, "url": shown,
+                "target": if phone { "phone".to_string() } else { crate::machines::kasachrome_machine() } });
+            if let Some(e) = tunnel_error { body["tunnel_error"] = serde_json::json!(e); }
+            body
+        }
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))

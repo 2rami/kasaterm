@@ -16,6 +16,7 @@ import { PORT } from '../extension/port.js'
 import { HOST, HOST_ID } from '../bridge/host.mjs'
 import { bridgeRoute, needsFreshBrowserHandles } from './bridge-route.mjs'
 import { resolveBrowserArgs } from './localhost-route.mjs'
+import { humanOnPhone, withHumanNote, showHuman, PHONE_NOTE } from './human-route.mjs'
 
 // 서버 이름은 한 곳에만. 배포판은 이 한 줄만 치환하면 로그·MCP 핸드셰이크가 함께 따라온다.
 const NAME = 'kasachrome'
@@ -39,16 +40,27 @@ const ENV_BRIDGE_URLS = (process.env.KASACHROME_BRIDGE_URLS || LOCAL_BRIDGE_URL)
   .split(',').map((s) => s.trim()).filter(Boolean)
 const KASATERM_SETTINGS = process.env.KASATERM_SETTINGS_FILE || join(homedir(), '.config', 'kasaterm', 'settings.json')
 let lastRoute = null
+let lastSettings = {}
+function readSettings() {
+  const settings = JSON.parse(readFileSync(KASATERM_SETTINGS, 'utf8'))
+  lastSettings = settings
+  return settings
+}
 function currentRoute() {
   let settings = {}
   try {
-    settings = JSON.parse(readFileSync(KASATERM_SETTINGS, 'utf8'))
+    settings = readSettings()
   } catch {
     // Never jump to a different browser during a transient/partial settings write.
     if (lastRoute) return lastRoute
   }
   lastRoute = bridgeRoute(settings, ENV_BRIDGE_URLS, LOCAL_BRIDGE_URL)
   return lastRoute
+}
+// 「브라우저 기기」가 「폰」인가 — 크롬 선택과 별개다(조작은 그대로 이 크롬, 보여 주기만 폰).
+// 매번 다시 읽어 하단바에서 바꾼 것이 다음 도구 호출에 바로 보인다.
+function onPhone() {
+  try { return humanOnPhone(readSettings()) } catch { return humanOnPhone(lastSettings) }
 }
 let activeUrl = null
 let routeKey = null
@@ -279,6 +291,7 @@ function where() {
     chrome: { ...chrome, selectedMachine: lastRoute?.selected ?? null, connected: !!ws && ws.readyState === 1,
       ...(!activeUrl ? { host: null, hostId: null } : {}) },
     session: { host: HOST, hostId: HOST_ID },
+    human: onPhone() ? { onPhone: true, note: PHONE_NOTE } : { onPhone: false },
   }
 }
 
@@ -320,14 +333,14 @@ tool('browser_list_tabs', 'List all open tabs in the real Chrome profile (with t
   async (a) => text(await call('list_tabs', a)))
 
 tool('browser_new_tab', 'Open a new tab and wait for it to finish loading. This is the DEFAULT way to open a page — prefer it over browser_new_window every time, unless you need a specific window width and height. Opens in the BACKGROUND by default so the human keeps whatever they were looking at — the tab is fully operable while hidden. Pass active:true only when the page must actually be visible (animation, video, anything driven by rAF).\n\nThe tab is placed in YOUR OWN tab group (named and colored after you) so it never gets mixed in among the human\'s tabs — the returned groupId is that group. Tabs you open are yours to clean up: close each one with browser_close_tab the moment it has served its purpose — a page you already read is clutter sitting in the human\'s tab strip, and tabs pile up fast when you keep them "just in case". The one exception is the END of the task: leave exactly ONE tab open, the page that shows what you did — the layout you fixed, the flow that now works, the page the human asked about — so they can look at the result without making you run it again. Close every other tab you opened. If the task produced nothing worth looking at (you only read text, measured something, checked a value), close them all. Never close a tab you did not open.', { url: z.string().optional(), active: z.boolean().optional(), windowId: z.number().int().optional() },
-  async (a) => text(await call('new_tab', a, 40000)))
+  async (a) => text(withHumanNote(await call('new_tab', a, 40000), onPhone())))
 
 tool('browser_new_window', 'Open a SEPARATE Chrome window. This is a LAST RESORT, not your default — use browser_new_tab for essentially every page you open. A background tab is invisible to the human; a window is not. Even opened unfocused it appears on their screen, and one per pane means four panes put four windows in front of someone trying to work. Reach for a window in exactly two cases: you need a specific width+height that a tab cannot give you, or the human asked for a window. For a phone-sized layout do NOT use this at all — use browser_emulate_device, which Chrome cannot clamp the way it clamps window width.\n\nIf an agent window already exists — no matter which pane opened it — this opens a tab there instead and answers with reused:true (resizing that window if you asked for a size). Agent windows are shared on purpose: the alternative is a window per pane. Pass reuse:false only when you genuinely need two windows side by side. Opens UNFOCUSED by default; pass focused:true only when the page must be visible to run (animation, media, rAF) — and if what you actually need is the human to type something, use browser_ask_human instead. Pass tabId to tear an existing tab out into its own window (that window is not registered as an agent window, and the torn-out tab keeps whatever group it had since it may be the human\'s). Windows you open are yours to clean up — close them with browser_close_window as soon as you are done, and before you finish the task. The end-of-task rule from browser_new_tab applies inside the window too: close the tabs you are finished with, and leave open the one page worth looking at. Close the window itself only when nothing in it is worth keeping.', {
   url: z.string().optional(), tabId: z.number().int().optional(),
   focused: z.boolean().optional(), incognito: z.boolean().optional(),
   width: z.number().int().optional(), height: z.number().int().optional(),
   reuse: z.boolean().optional(),
-}, async (a) => text(await call('new_window', a, 40000)))
+}, async (a) => text(withHumanNote(await call('new_window', a, 40000), onPhone())))
 
 tool('browser_close_window', 'Close a window and every tab in it. Use it only on windows you opened yourself. Agent windows are shared between panes, so this refuses with WINDOW_SHARED when the window still holds tabs another agent is using — close your own tabs with browser_close_tab instead, or pass force:true if you really do mean to close theirs too.', { windowId: z.number().int(), force: z.boolean().optional() },
   async (a) => text(await call('close_window', a)))
@@ -345,7 +358,10 @@ tool('browser_ask_human', 'Hand the screen to the human: activates the tab, rais
   async (a) => text(await call('ask_human', a)))
 
 tool('browser_navigate', 'Navigate a tab to a URL, or pass "back"/"forward" for history.', { tabId, url: z.string() },
-  async (a) => text(await call('navigate', a, 45000)))
+  async (a) => text(withHumanNote(await call('navigate', a, 45000), onPhone())))
+
+tool('browser_show_human', 'Show a page to the HUMAN, wherever they are looking right now — this is how "leave the result open for them" actually reaches them. It follows the kasaterm "browser device" setting (bottom bar · settings · phone hub): when it is the PHONE, the page goes to their phone as a note + push, a localhost/LAN URL is first wrapped in a temporary public tunnel, and the reply carries that public link — paste that link verbatim into your answer, the human taps it. When it is a machine, the page opens in that machine\'s own browser. This never drives the Chrome you use for testing (browser_new_tab keeps working for your own inspection); it is only about the human\'s eyes. Call it once, at the end, with the one page worth looking at. `browser_status` tells you in `human.onPhone` whether the human is on the phone.', { url: z.string().describe('http(s) page to show. localhost is fine — kasaterm turns it into a link that works off-machine.') },
+  async (a) => text(await showHuman(a.url)))
 
 tool('browser_read_page', 'Accessibility-style snapshot with [ref=eN] handles for clicking. Always includes visibilityState — if it is "hidden", animations/scroll/media are frozen and you must not diagnose page code from it.', {
   tabId, filter: z.enum(['interactive', 'all']).optional(), maxChars: z.number().int().optional(),

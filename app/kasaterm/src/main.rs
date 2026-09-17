@@ -7048,11 +7048,21 @@ if [ "$#" -eq 1 ]; then
   case "$1" in
     http://*|https://*)
       port=${KASASPACE_MCP_PORT:-8765}
-      if curl -s -m 3 --get --data-urlencode "url=$1" \
+      # 폰 도착지면 앱이 임시 터널을 세우느라 수십 초 걸릴 수 있다 — 그 링크를 찍어 준다.
+      out=$(curl -s -m 75 --get --data-urlencode "url=$1" \
           --data-urlencode "pane=${KASATERM_PANE_ID:-}" \
-          "http://127.0.0.1:$port/open-url" 2>/dev/null | grep -q '"ok":true'; then
-        exit 0
-      fi
+          "http://127.0.0.1:$port/open-url" 2>/dev/null)
+      case "$out" in
+        *'"ok":true'*)
+          case "$out" in
+            *'"target":"phone"'*)
+              link=$(printf '%s' "$out" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
+              [ -n "$link" ] && echo "폰 쪽지로 보냈어요: $link"
+              ;;
+          esac
+          exit 0
+          ;;
+      esac
       ;;
   esac
 fi
