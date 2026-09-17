@@ -53,6 +53,7 @@ pub(crate) fn paint_popover(
             paint_schedules_popover(g, sb, view, cursor, anchor, win_w, win_h)
         }
         state::StatusbarPopover::Tunnel => paint_tunnel_popover(g, sb, cursor, anchor, win_w),
+        state::StatusbarPopover::Link => paint_link_popover(g, sb, anchor, win_w),
         state::StatusbarPopover::Chrome => paint_chrome_popover(g, sb, cursor, anchor, win_w, win_h),
         state::StatusbarPopover::Build => paint_build_popover(g, sb, cursor, anchor, win_w),
         state::StatusbarPopover::Usage => {
@@ -691,6 +692,60 @@ fn fit_addr(g: &mut gpu::GpuRenderer, host: &str, path: &str, avail: f32) -> Str
 /// 앱으로 열기·앱 설치·웹에서 보기를 거기서 고른다(2026-09-08 지시 「QR 코드로 앱 설치
 /// 가능하고 웹에서 보기 가능하게」). 하단바의 「원격」과 「카사크롬 다리」도 이 칩 하나로
 /// 합쳤다 — 둘 다 「이 맥 밖의 기기와 어떻게 이어져 있나」라서, 다리 상태는 여기 한 줄.
+/// 기기 연결 — 명부의 기기마다 한 줄: 이름 · 직통/중계 · 왕복. 중계로 붙어 있으면 왜
+/// 느린지 여기서 바로 보인다(2026-09-17 지시 「직통인지 중계인지도 보이게, 속도도」).
+fn paint_link_popover(
+    g: &mut gpu::GpuRenderer,
+    sb: &mut state::StatusbarState,
+    anchor: (f32, f32, f32, f32),
+    win_w: f32,
+) {
+    let machines = kasa_mcp::machines::snapshot();
+    let rows: Vec<(String, bool, bool, Option<u64>)> = machines.iter().map(|m| (
+        m["label"].as_str().unwrap_or("기기").to_string(),
+        m["online"].as_bool() == Some(true),
+        m["online_via"].as_str() == Some("direct"),
+        m["rtt_ms"].as_u64(),
+    )).collect();
+    let relayed = rows.iter().any(|(_, online, direct, _)| *online && !*direct);
+    let w = 300.0_f32.min((win_w - 16.0).max(200.0));
+    let row_h = 24.0_f32;
+    let h = 52.0 + row_h * rows.len().max(1) as f32 + if relayed { 34.0 } else { 12.0 };
+    let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
+    let y = (anchor.1 - h - 6.0).max(8.0);
+    sb.popover_rect = Some((x, y, w, h));
+    panel_rect_outlined(g, x, y, w, h, theme::radius_md(), theme::surface());
+    g.queue_icon("monitor", x + 16.0, y + 15.0, 18.0, theme::accent());
+    let text = |g: &mut gpu::GpuRenderer, xx, yy, value: &str, size, color, bold| {
+        g.draw_text(xx, yy, value, gpu::DrawOpts { font_size: size, color, bold, italic: false });
+    };
+    text(g, x + 42.0, y + 15.0, "기기 연결", 13.0, theme::text(), true);
+    let mut ry = y + 48.0;
+    if rows.is_empty() {
+        text(g, x + 16.0, ry + 4.0, "등록된 기기가 없어요", 11.0, theme::text_dim(), false);
+    }
+    for (label, online, direct, rtt) in &rows {
+        let (dot, state_text, col) = match (online, direct, rtt) {
+            (false, _, _) => (theme::with_alpha(theme::text_dim(), 140), "연결 안 됨".to_string(), theme::text_mute()),
+            (true, true, Some(ms)) if *ms >= 150 => (theme::attention(), format!("직통 · {ms}ms · 느림"), theme::attention()),
+            (true, true, Some(ms)) => (theme::success(), format!("직통 · {ms}ms"), theme::text()),
+            (true, true, None) => (theme::success(), "직통".into(), theme::text()),
+            (true, false, Some(ms)) => (theme::attention(), format!("중계 · {ms}ms"), theme::attention()),
+            (true, false, None) => (theme::attention(), "중계".into(), theme::attention()),
+        };
+        round_rect(g, x + 18.0, ry + 8.0, 6.0, 6.0, 3.0, dot);
+        let label = crate::info::fit_text(g, label, 110.0, 12.0, true);
+        text(g, x + 32.0, ry + 4.0, &label, 12.0, theme::text(), true);
+        let sw = g.measure_chrome_text(&state_text, 11.0, false);
+        text(g, x + w - 16.0 - sw, ry + 5.0, &state_text, 11.0, col, false);
+        ry += row_h;
+    }
+    if relayed {
+        text(g, x + 16.0, ry + 8.0, "중계는 공용 관문을 거쳐요 — 넷버드를 다시 붙이면 직통이 될 수 있어요",
+            10.0, theme::text_dim(), false);
+    }
+}
+
 fn paint_tunnel_popover(
     g: &mut gpu::GpuRenderer,
     sb: &mut state::StatusbarState,

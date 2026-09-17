@@ -1499,9 +1499,28 @@ impl App {
             return;
         }
         let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
-        let resolved = active
+        // 다른 기기의 거울이면 패널은 **그 기계의** 레포를 본다 — 경로는 저쪽 것이고 읽기도
+        // 저쪽 창구로 간다(2026-09-17 지시 「파일트리나 깃 패널 기기 달라도 뜨게」).
+        let remote = active
             .as_ref()
-            .and_then(|id| self.pane_cwd_cache.get(id).cloned());
+            .and_then(|id| kasa_mcp::remote::remote_info(id))
+            .filter(|info| info.view)
+            .and_then(|info| {
+                kasa_mcp::machines::label_for_base(&info.base)
+                    .map(|label| (label, info.base.clone(), info.remote_cwd.clone()))
+            });
+        if let Ok(mut guard) = self.git.col_remote.lock() {
+            *guard = remote.as_ref().map(|(label, base, _)| (label.clone(), base.clone()));
+        }
+        let resolved = match &remote {
+            Some((_, _, remote_cwd)) => active
+                .as_ref()
+                .and_then(|id| {
+                    self.pane_view_cwd.get(id).cloned().or_else(|| self.pane_cwd_cache.get(id).cloned())
+                })
+                .or_else(|| remote_cwd.as_deref().map(std::path::PathBuf::from)),
+            None => active.as_ref().and_then(|id| self.pane_cwd_cache.get(id).cloned()),
+        };
         if let Ok(mut guard) = self.git.col_cwd.lock() {
             match resolved {
                 // A confidently-resolved pane cwd always wins.
@@ -1522,6 +1541,11 @@ impl App {
     /// read the column's repo from the poller's snapshot so the action always
     /// targets what the user sees.
     pub(crate) fn run_git_col_action(&mut self, btn: GitColBtn) {
+        // 남의 기기 레포는 여기서 못 고친다 — 경로가 이 기계엔 없거나 다른 것이다.
+        if self.git.col_remote.lock().ok().is_some_and(|r| r.is_some()) {
+            self.set_toast("다른 기기의 레포는 여기서 못 고쳐요 — 그 기기에서 하세요".into());
+            return;
+        }
         let cwd = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone());
         let Some(cwd) = cwd else { return };
         match btn {

@@ -170,6 +170,8 @@ pub(crate) enum StatusbarPopover {
     /// 미니는 굽지 못해 맥북이 구운 것을 부쳐야 하는데, 그때마다 학생에게 말로 시키던
     /// 것을 단추로(2026-09-08 지시 「빌드 다름 누르면 메뉴 열려서 빌드 버튼」).
     Build,
+    /// 붙어 있는 기기들의 연결 — 직통·중계와 왕복 시간.
+    Link,
 }
 
 /// 팝오버 행을 눌렀을 때 할 일.
@@ -285,6 +287,9 @@ pub(crate) struct GitState {
     pub(crate) commit_focused: bool,
     pub(crate) commit_input_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) col_data: std::sync::Arc<std::sync::Mutex<GitColView>>,
+    /// 지금 패널이 보는 레포가 다른 기기 것이면 (기기 이름, base). 일꾼이 그쪽 창구로 읽고,
+    /// 배경은 기기색을 문다. 고치는 단추는 막는다(여기서 git 을 돌리면 남의 경로다).
+    pub(crate) col_remote: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
     pub(crate) op: Option<&'static str>,
     pub(crate) col_cwd: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     pub(crate) col_pinned_cwd: Option<std::path::PathBuf>,
@@ -900,6 +905,11 @@ pub(crate) struct FileTreeState {
     /// 이걸로 clamp 해야 동적 헤더 높이를 정확히 반영(하드코딩하면 max_scroll 틀림).
     pub(crate) body_rect: (f32, f32, f32, f32),
     pub(crate) root: Option<std::path::PathBuf>,
+    /// 다른 기기의 폴더를 보는 중 — (기기 이름, base). 목록은 저쪽 `/term/tree` 로 받아
+    /// `remote_cache` 에 두고, 아직 안 온 폴더는 `remote_pending` 에 적어 두 번 묻지 않는다.
+    pub(crate) remote: Option<(String, String)>,
+    pub(crate) remote_cache: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Vec<(String, bool, bool)>>>>,
+    pub(crate) remote_pending: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     /// git 레포 앵커 계산의 1-엔트리 캐시: `(pane cwd, 그 cwd 를 감싸는 레포 루트)`.
     /// 앵커는 cwd 부터 위로 `.git` 을 훑으므로 깊이만큼 stat 이 든다 —
     /// `refresh_file_tree` 가 매 프레임 불리니 cwd 가 그대로면 재계산하지 않는다.

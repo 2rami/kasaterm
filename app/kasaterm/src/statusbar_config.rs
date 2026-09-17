@@ -15,8 +15,8 @@ pub(crate) const WIDGETS: [&str; 10] = [
     "pet",
     "clipboard",
     "resources",
-    "tunnel",
     "link",
+    "tunnel",
     "version",
 ];
 pub(crate) const USAGE_FIELDS: [&str; 5] = ["account", "email", "session", "weekly", "model"];
@@ -209,6 +209,14 @@ fn normalized_order<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
     }
     for id in WIDGETS {
         if seen.insert(id.to_string()) {
+            // 새로 생긴 「기기 연결」은 모바일 연결 옆이 제자리 — 저장된 순서 끝에 붙이면
+            // 버전 뒤로 밀려 연결 둘이 갈라진다.
+            if id == "link" {
+                if let Some(at) = out.iter().position(|x| x == "tunnel") {
+                    out.insert(at, id.to_string());
+                    continue;
+                }
+            }
             out.push(id.to_string());
         }
     }

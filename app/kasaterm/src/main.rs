@@ -4173,7 +4173,7 @@ pub(crate) fn resets_in_label(resets_at: Option<u64>) -> Option<String> {
 /// poller fills it from `kasa_mcp::git::git_status` (off the main thread);
 /// the render reads it. Kept as a flat, render-ready struct so the gpu block
 /// (which can't re-borrow `&self` to call helpers) paints straight from it.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct GitColView {
     /// cwd this snapshot was computed for — so a stale repo's rows aren't
     /// shown after a pane switch until the poller catches the new cwd.

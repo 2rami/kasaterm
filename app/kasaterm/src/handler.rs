@@ -2218,6 +2218,7 @@ impl ApplicationHandler<UserEvent> for App {
             let panel_cwd = self.git.col_cwd.clone();
             let panel_data = self.git.col_data.clone();
             let panel_want = self.git.col_commit_want.clone();
+            let panel_remote = self.git.col_remote.clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_millis(1200));
                 let cwd = panel_cwd.lock().ok().and_then(|g| g.clone());
@@ -2227,7 +2228,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // pane commits, a half-written index, …) returns None — skip
                 // this tick and keep the last good snapshot so the column never
                 // flashes the notice mid-operation.
-                let Some(view) = fetch_git_col_view(&cwd, want) else {
+                // 다른 기기의 레포면 그 기계 창구로 읽는다 — 여기 git 은 그 경로를 모른다.
+                let remote = panel_remote.lock().ok().and_then(|r| r.clone());
+                let view = match remote {
+                    Some((_, base)) => fetch_remote_git_col_view(&base, &cwd, want),
+                    None => fetch_git_col_view(&cwd, want),
+                };
+                let Some(view) = view else {
                     continue;
                 };
                 let mut guard = match panel_data.lock() {
@@ -6030,6 +6037,13 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    if let Some(r) = self.statusbar.link_rect {
+                        if sb_hit(&r) {
+                            self.toggle_statusbar_popover(state::StatusbarPopover::Link, r);
+                            window.request_redraw();
+                            return;
+                        }
+                    }
                     if let Some(r) = self.statusbar.chrome_rect {
                         if sb_hit(&r) {
                             self.toggle_statusbar_popover(state::StatusbarPopover::Chrome, r);
@@ -8451,6 +8465,19 @@ fn fetch_claude_usage(
 
 /// `commits` = 발치 「최근 커밋」 구역에 지금 들어가는 줄 수. 0 이면 아직 그 구역을
 /// 한 번도 안 그린 것이라(첫 tick) 기본값을 쓴다.
+/// 다른 기기의 레포 — 그 기계가 `fetch_git_col_view` 를 돌려 준 것을 그대로 받는다.
+pub(crate) fn fetch_remote_git_col_view(base: &str, cwd: &std::path::Path, commits: usize) -> Option<GitColView> {
+    let query = format!(
+        "/term/gitcol?path={}&commits={commits}",
+        kasa_mcp::remote::urlencode(&cwd.to_string_lossy())
+    );
+    let v = kasa_mcp::remote::remote_get_json(base, &query).ok()?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        return Some(GitColView { cwd: Some(cwd.to_path_buf()), no_repo: true, ..Default::default() });
+    }
+    serde_json::from_value(v.get("view")?.clone()).ok()
+}
+
 pub(crate) fn fetch_git_col_view(cwd: &std::path::Path, commits: usize) -> Option<GitColView> {
     let v = kasa_mcp::git::git_status(cwd);
     if v.get("error").is_some() {

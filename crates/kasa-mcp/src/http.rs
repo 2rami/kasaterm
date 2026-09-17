@@ -4539,6 +4539,67 @@ fn pane_session_name(p: &kasa_socket::backend::PaneActivity) -> Option<String> {
 
 /// 배치가 `since` 뒤로 바뀔 때까지 매달려 있다가 번호를 돌려준다(롱폴). 관문 우회는
 /// 답 머리를 20초까지만 기다리므로 그 안에서 끊는다.
+/// 다른 기기의 깃 패널 재료 — 그 기계가 자기 레포를 읽어 그대로 준다(2026-09-17).
+async fn term_gitcol_get(
+    backend: Arc<dyn Backend>,
+    q: Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(path) = q.get("path").filter(|p| p.starts_with('/')).cloned() else {
+        return Json(serde_json::json!({ "ok": false, "error": "`path`(절대경로) 가 필요해요" }));
+    };
+    let commits = q.get("commits").and_then(|v| v.parse().ok()).unwrap_or(20usize).min(200);
+    match backend.git_col_view(&path, commits) {
+        Ok(view) => Json(serde_json::json!({ "ok": true, "view": view })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+/// 폴더 한 층 — 다른 기기의 파일트리가 이걸로 그린다. `.git` 은 빼고, 폴더 먼저.
+async fn term_tree_get(
+    q: Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(path) = q.get("path").filter(|p| p.starts_with('/')).cloned() else {
+        return Json(serde_json::json!({ "ok": false, "error": "`path`(절대경로) 가 필요해요" }));
+    };
+    let Ok(rd) = std::fs::read_dir(&path) else {
+        return Json(serde_json::json!({ "ok": false, "error": "폴더를 못 읽어요" }));
+    };
+    let mut entries: Vec<(bool, String, bool)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name == ".git" { return None; }
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let is_repo = is_dir && e.path().join(".git").exists();
+            Some((is_dir, name, is_repo))
+        })
+        .collect();
+    entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    let entries: Vec<serde_json::Value> = entries.into_iter()
+        .map(|(is_dir, name, is_repo)| serde_json::json!({ "name": name, "is_dir": is_dir, "is_repo": is_repo }))
+        .collect();
+    Json(serde_json::json!({ "ok": true, "path": path, "entries": entries }))
+}
+
+/// 파일 하나 — 다른 기기에서 열어 보기용. 4MB 까지만.
+async fn term_file_get(
+    q: Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let Some(path) = q.get("path").filter(|p| p.starts_with('/')).cloned() else {
+        return (axum::http::StatusCode::BAD_REQUEST, "`path`(절대경로) 가 필요해요").into_response();
+    };
+    match std::fs::metadata(&path) {
+        Ok(m) if m.is_file() && m.len() <= 4 * 1024 * 1024 => {}
+        Ok(m) if m.is_file() => return (axum::http::StatusCode::PAYLOAD_TOO_LARGE, "4MB 를 넘어요").into_response(),
+        _ => return (axum::http::StatusCode::NOT_FOUND, "그런 파일이 없어요").into_response(),
+    }
+    match std::fs::read(&path) {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response(),
+        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn term_changes_handler(q: Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let since = q.get("since").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
     let wait = q.get("wait").and_then(|v| v.parse::<u64>().ok()).unwrap_or(15).min(15);
@@ -7174,6 +7235,7 @@ pub fn spawn_http_server_opts(
                 let migrate_backend = backend.clone();
                 let persona_backend = backend.clone();
                 let panes_backend = backend.clone();
+                let gitcol_backend = backend.clone();
                 let clip_backend = backend.clone();
                 let shot_backend = backend.clone();
                 let session_switch_backend = backend.clone();
@@ -7364,6 +7426,14 @@ pub fn spawn_http_server_opts(
                         get(move || term_panes_handler(panes_backend.clone())),
                     )
                     .route("/term/changes", get(term_changes_handler))
+                    .route(
+                        "/term/gitcol",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            term_gitcol_get(gitcol_backend.clone(), q)
+                        }),
+                    )
+                    .route("/term/tree", get(term_tree_get))
+                    .route("/term/file", get(term_file_get))
                     .route(
                         "/term/shot",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {

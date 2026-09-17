@@ -306,7 +306,7 @@ impl Write for WsWriter {
     }
 }
 
-fn urlencode(s: &str) -> String {
+pub fn urlencode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
@@ -1400,6 +1400,61 @@ pub fn close_remote_pane(base: &str, pane: &str, token: Option<&str>, kill: bool
         );
     }
     Ok(())
+}
+
+/// 그 기계의 HTTP 창구를 GET 으로 읽는다 — 파일트리·깃 패널이 저쪽 것을 그대로 싣는다.
+pub fn remote_get_json(base: &str, path_and_query: &str) -> Result<serde_json::Value> {
+    let token = connection_auth_token(base);
+    let u = format!("{}{}", base.trim_end_matches('/'), path_and_query);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("get runtime")?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("http client")?;
+        let mut req = client.get(&u);
+        if let Some(t) = token.as_deref() {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("원격 GET 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("HTTP {status}: {text}");
+        }
+        serde_json::from_str(&text).context("원격 답 해석")
+    })
+}
+
+/// 그 기계의 파일 하나를 통째로 받는다(4MB 상한은 저쪽이 건다).
+pub fn remote_get_bytes(base: &str, path_and_query: &str) -> Result<Vec<u8>> {
+    let token = connection_auth_token(base);
+    let u = format!("{}{}", base.trim_end_matches('/'), path_and_query);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("get runtime")?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("http client")?;
+        let mut req = client.get(&u);
+        if let Some(t) = token.as_deref() {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("원격 파일 요청")?;
+        let status = r.status();
+        if !status.is_success() {
+            anyhow::bail!("HTTP {status}: {}", r.text().await.unwrap_or_default());
+        }
+        Ok(r.bytes().await.context("원격 파일 본문")?.to_vec())
+    })
 }
 
 /// 원격 앱의 `/cmd` 창구 — 소켓 명령(`window.close`·`window.rename` 등)을 HTTP 로 보낸다.

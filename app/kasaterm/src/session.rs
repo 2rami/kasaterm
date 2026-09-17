@@ -1087,13 +1087,18 @@ impl App {
         if rows.is_empty() {
             anyhow::bail!("{label} 의 그 방에 열 pane 이 없다");
         }
-        let mirror_of = |rid: &str| {
-            kasa_pty::live_sessions().into_iter().find(|id| {
-                kasa_mcp::remote::remote_info(id).is_some_and(|i| {
-                    kasa_mcp::machines::same_machine_bases(&i.base, &m.base) && i.remote_id == rid
-                })
-            })
-        };
+        // 이미 있는 거울은 **그 기기의 보기 창**에 앉은 것만 친다. `to` 로 보낸 학생의
+        // 거울은 여기 방(원래 방)에 앉아 있어서, 그걸 찾아 가면 기기 방을 눌렀는데 이쪽
+        // 방이 열렸다(2026-09-17 지적). 그 방은 따로 보기 창으로 연다.
+        let view_mirrors: Vec<(String, String)> = kasa_pty::live_sessions().into_iter().filter_map(|id| {
+            let info = kasa_mcp::remote::remote_info(&id)?;
+            if !kasa_mcp::machines::same_machine_bases(&info.base, &m.base) { return None; }
+            let in_view = self.window_of_pane(&id)
+                .and_then(|w| self.remote_view_of_window(w))
+                .is_some_and(|(view_label, _)| view_label == label);
+            in_view.then(|| (id, info.remote_id))
+        }).collect();
+        let mirror_of = |rid: &str| view_mirrors.iter().find(|(_, r)| r == rid).map(|(id, _)| id.clone());
         let existing = focus
             .and_then(mirror_of)
             .or_else(|| rows.iter().find_map(|r| mirror_of(&r.remote_id)));
@@ -4644,6 +4649,43 @@ impl App {
             self.rebuild_file_tree_nodes();
         }
         let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
+        // 다른 기기의 거울이면 **그 기계의** 폴더를 본다 — 목록은 저쪽 창구로 받는다
+        // (2026-09-17 지시 「파일트리나 깃 패널 기기 달라도 뜨게」).
+        let remote = active
+            .as_ref()
+            .and_then(|id| kasa_mcp::remote::remote_info(id))
+            .filter(|info| info.view)
+            .and_then(|info| {
+                kasa_mcp::machines::label_for_base(&info.base)
+                    .map(|label| (label, info.base.clone(), info.remote_cwd.clone()))
+            });
+        if let Some((label, base, remote_cwd)) = remote {
+            let cwd = active
+                .as_ref()
+                .and_then(|id| {
+                    self.pane_view_cwd.get(id).cloned().or_else(|| self.pane_cwd_cache.get(id).cloned())
+                })
+                .or_else(|| remote_cwd.map(std::path::PathBuf::from));
+            let Some(cwd) = cwd else { return };
+            let same_machine = self.file_tree.remote.as_ref()
+                .is_some_and(|(l, b)| *l == label && *b == base);
+            if !same_machine {
+                if let Ok(mut cache) = self.file_tree.remote_cache.lock() { cache.clear(); }
+                if let Ok(mut pending) = self.file_tree.remote_pending.lock() { pending.clear(); }
+            }
+            if !same_machine || self.file_tree.root.as_ref() != Some(&cwd) {
+                self.file_tree.remote = Some((label, base));
+                self.file_tree.expanded.insert(cwd.clone());
+                self.file_tree.root = Some(cwd);
+                self.file_tree.scroll = 0.0;
+                self.rebuild_file_tree_nodes();
+            }
+            return;
+        }
+        if self.file_tree.remote.take().is_some() {
+            // 로컬로 돌아왔다 — 아래 비교가 「바뀜」으로 보게 뿌리를 비운다.
+            self.file_tree.root = None;
+        }
         let root = active
             .as_ref()
             // "pane 이 보는 경로"(statusline report / transcript bind)가 셸 cwd 보다
@@ -4859,6 +4901,19 @@ impl App {
         target: Option<String>,
         as_tab: bool,
     ) {
+        // 다른 기기의 파일이면 받아다 임시 자리에 두고 그 사본을 연다.
+        let path = match self.file_tree.remote.clone() {
+            Some((label, base)) if self.file_tree.root.as_ref().is_some_and(|r| path.starts_with(r)) => {
+                match Self::fetch_remote_file(&label, &base, &path) {
+                    Ok(local) => local,
+                    Err(e) => {
+                        self.set_toast(format!("{label} 의 파일을 못 받았어요 — {e:#}"));
+                        return;
+                    }
+                }
+            }
+            _ => path,
+        };
         self.open_file_routed(path, target, as_tab, !as_tab);
     }
 
@@ -5078,8 +5133,97 @@ impl App {
         self.queue_aux_file(path, true);
     }
     /// Walk the root + every expanded folder into the flat `file_tree_nodes`.
+    /// 원격 폴더의 자식들 — 캐시에 있으면 세우고, 없으면 `missing` 에 적어 받아 오게 한다.
+    fn walk_remote(
+        dir: &std::path::Path,
+        depth: usize,
+        expanded: &std::collections::HashSet<std::path::PathBuf>,
+        cache: &HashMap<std::path::PathBuf, Vec<(String, bool, bool)>>,
+        out: &mut Vec<FileNode>,
+        missing: &mut Vec<std::path::PathBuf>,
+    ) {
+        let Some(entries) = cache.get(dir) else {
+            missing.push(dir.to_path_buf());
+            return;
+        };
+        for (name, is_dir, is_repo) in entries {
+            let path = dir.join(name);
+            out.push(FileNode {
+                path: path.clone(),
+                name: nfc_hangul(name),
+                is_dir: *is_dir,
+                depth,
+                ignored: name.starts_with('.'),
+                is_repo: *is_repo,
+            });
+            if *is_dir && expanded.contains(&path) {
+                Self::walk_remote(&path, depth + 1, expanded, cache, out, missing);
+            }
+        }
+    }
+
+    /// 원격 폴더 한 층을 받아 온다. 오면 `fs_dirty` 로 다시 짓게 한다.
+    fn request_remote_dir(&self, base: &str, dir: std::path::PathBuf) {
+        if let Ok(mut pending) = self.file_tree.remote_pending.lock() {
+            if !pending.insert(dir.clone()) { return; }
+        }
+        let cache = self.file_tree.remote_cache.clone();
+        let pending = self.file_tree.remote_pending.clone();
+        let dirty = self.file_tree.fs_dirty.clone();
+        let proxy = self.proxy.clone();
+        let base = base.to_string();
+        std::thread::spawn(move || {
+            let query = format!("/term/tree?path={}", kasa_mcp::remote::urlencode(&dir.to_string_lossy()));
+            let entries: Vec<(String, bool, bool)> = kasa_mcp::remote::remote_get_json(&base, &query)
+                .ok()
+                .and_then(|v| v.get("entries")?.as_array().map(|arr| arr.iter().filter_map(|e| Some((
+                    e.get("name")?.as_str()?.to_string(),
+                    e.get("is_dir")?.as_bool()?,
+                    e.get("is_repo").and_then(|v| v.as_bool()).unwrap_or(false),
+                ))).collect()))
+                .unwrap_or_default();
+            if let Ok(mut c) = cache.lock() { c.insert(dir.clone(), entries); }
+            if let Ok(mut p) = pending.lock() { p.remove(&dir); }
+            dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = proxy.send_event(UserEvent::Redraw);
+        });
+    }
+
+    /// 다른 기기의 파일을 받아 임시 자리에 둔다 — 열기는 그 사본으로(읽기 전용).
+    fn fetch_remote_file(label: &str, base: &str, path: &std::path::Path) -> Result<std::path::PathBuf> {
+        let query = format!("/term/file?path={}", kasa_mcp::remote::urlencode(&path.to_string_lossy()));
+        let bytes = kasa_mcp::remote::remote_get_bytes(base, &query)?;
+        let rel = path.strip_prefix("/").unwrap_or(path);
+        let local = std::env::temp_dir().join("kasaterm-remote").join(label).join(rel);
+        if let Some(parent) = local.parent() { std::fs::create_dir_all(parent)?; }
+        std::fs::write(&local, bytes)?;
+        Ok(local)
+    }
+
     pub(crate) fn rebuild_file_tree_nodes(&mut self) {
         self.file_tree.nodes.clear();
+        if let Some((label, base)) = self.file_tree.remote.clone() {
+            let Some(root) = self.file_tree.root.clone() else { return };
+            let name = root.file_name().map(|n| nfc_hangul(&n.to_string_lossy()))
+                .unwrap_or_else(|| root.to_string_lossy().into_owned());
+            self.file_tree.nodes.push(FileNode {
+                path: root.clone(),
+                name: format!("{label} · {name}"),
+                is_dir: true,
+                depth: 0,
+                ignored: false,
+                is_repo: false,
+            });
+            let cache = self.file_tree.remote_cache.lock().map(|c| c.clone()).unwrap_or_default();
+            let mut missing = Vec::new();
+            if self.file_tree.expanded.contains(&root) {
+                Self::walk_remote(&root, 1, &self.file_tree.expanded, &cache, &mut self.file_tree.nodes, &mut missing);
+            }
+            for dir in missing { self.request_remote_dir(&base, dir); }
+            // 이 기계의 감시는 쉰다 — 저쪽 폴더는 여기 파일시스템에 없다.
+            if let Ok(mut watch) = self.file_tree.watch.lock() { watch.clear(); }
+            return;
+        }
         if let Some(root) = self.file_tree.root.clone() {
             // Show the project root itself as the first row (depth 0) so the
             // sidebar is anchored on the folder you're in, not a rootless list

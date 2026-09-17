@@ -910,6 +910,19 @@ impl App {
         // 0 when the column is hidden (so the pane keeps hugging the edge).
         let git_col_w = self.git_col_w();
         let git_col_x = (win_px.0 / scale - git_col_w).max(0.0);
+        // 다른 기기 레포를 보는 중이면 칼럼이 그 기기색을 문다 — 어느 기계 것인지 배경이 말한다.
+        let git_col_bg = self
+            .git
+            .col_remote
+            .lock()
+            .ok()
+            .and_then(|r| r.as_ref().map(|(label, _)| label.clone()))
+            .map_or(theme::panel_bg(), |label| {
+                pane_identity::minimap_background(theme::panel_bg(), Some(&label))
+            });
+        let tree_col_bg = self.file_tree.remote.as_ref().map_or(theme::panel_bg(), |(label, _)| {
+            pane_identity::minimap_background(theme::panel_bg(), Some(label))
+        });
         let git_reserve = if git_col_w > 0.0 {
             git_col_w + WINDOW_PADDING
         } else {
@@ -4748,7 +4761,7 @@ impl App {
                     TITLE_HEIGHT,
                     tree_col_w,
                     col_h,
-                    theme::panel_bg(),
+                    tree_col_bg,
                 );
                 g.rect(
                     tree_col_x + tree_col_w - 1.0,
@@ -5700,7 +5713,7 @@ impl App {
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
                 // Background + left hairline so the column reads as its own pane.
-                g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
+                g.rect(git_col_x, top, git_col_w, bottom - top, git_col_bg);
                 g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
                 // ── Row 0: Git | Info 탭 + ⤢ ✕ (두 탭 공통 머리)
                 let mut y = info::draw_side_tabs(
@@ -6963,7 +6976,7 @@ impl App {
                 } + status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
-                g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
+                g.rect(git_col_x, top, git_col_w, bottom - top, git_col_bg);
                 g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
                 let body_top = info::draw_side_tabs(
                     g,
@@ -7001,7 +7014,7 @@ impl App {
                 } + status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
-                g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
+                g.rect(git_col_x, top, git_col_w, bottom - top, git_col_bg);
                 g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
                 let body_top = info::draw_side_tabs(
                     g,
@@ -7036,7 +7049,7 @@ impl App {
                 } + status_h;
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - bottom_h).max(top);
-                g.rect(git_col_x, top, git_col_w, bottom - top, theme::panel_bg());
+                g.rect(git_col_x, top, git_col_w, bottom - top, git_col_bg);
                 g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
                 let body_top = info::draw_side_tabs(
                     g,
