@@ -131,6 +131,10 @@ impl Backend for StandaloneBackend {
     fn collab_tell_status(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
         crate::tell_service::status(params)
     }
+
+    fn nacho_report(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        crate::nacho_service::submit(params)
+    }
     fn send_key(&self, _surface_id: Option<&str>, _key: &str) -> Result<()> {
         anyhow::bail!("standalone webview server has no live panes")
     }

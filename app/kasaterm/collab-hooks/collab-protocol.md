@@ -54,6 +54,15 @@ kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자�
 - 빌드·검사는 성공·실패 때 끝나는 별도 잡으로 돌린다. 현재 턴에서 sleep을 반복하지 않는다.
 - 계속 지켜볼 일은 변경분만 감시하고 진행·실패·끊김을 함께 받는다.
 
+## 나쵸네코가 띄운 일
+
+env `KASATERM_ORIGIN=nacho`(브리프 첫 줄 `[origin=nacho …]`)가 있는 창만 해당한다. 없으면 나쵸에게 보고하지 않는다. 상세는 [나쵸 계약](../../../docs/nacho-orchestrator.md).
+
+- 끝났을 때(done)·못 풀고 막혔을 때(blocked)·재시작이 있어야 이어질 때(needs_restart)·머지·배포처럼 승인이 필요할 때(needs_approval) **즉시** `kasaterm-cli nacho-report --status <상태> --summary "한 일" --changed "파일,파일" --tests "검사와 결과" --next "나쵸가 할 것"` 으로 보고한다. 재시작·머지·배포는 직접 하지 않는다.
+- blocked·needs_restart 는 `--next` 를 채운다. 토큰·비밀이 들어가면 접수가 거부된다.
+- 상태가 바뀔 때 한 번씩만 보낸다. 같은 보고는 `duplicate` 로 한 번만 깨운다. 답이 없다고 다시 보내거나 tell 로 나쵸를 찾지 않는다 — 나쵸는 pane 이 아니다.
+- 영수증 `wake` 가 `socket` 이면 나쵸가 지금 깼고 `queued` 면 다음에 집는다. 어느 쪽이든 `kasaterm-cli done` 까지 하고 턴을 끝낸다. 나쵸의 후속 지시는 tell 로 온다.
+
 ## 선생님께 알리기
 
 - 위험·취향·범위 선택은 질문 도구로 선생님께 직접 묻는다. 승인된 일은 이어서 한다.
