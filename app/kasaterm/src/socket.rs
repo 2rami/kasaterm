@@ -1387,7 +1387,7 @@ impl Backend for PtyBackend {
             .or_else(|| self.active_cwd())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
         // 60개. 20이면 이 폴더의 목록이 최근 claude 로만 채워져, 같은 폴더에서
-        // codex 로 일한 기록이 한 줄도 안 보인다(tmuxify 실측: 20칸 전부 claude,
+        // codex 로 일한 기록이 한 줄도 안 보인다(kasaterm 실측: 20칸 전부 claude,
         // 60칸이면 비-claude 6개가 올라온다). 값은 release 로 재고 정했다.
         Ok(recent_sessions_here(&base, 60))
     }
@@ -7786,7 +7786,7 @@ mod agents_view_tests {
             "학생 프사 크기와 전신 모션 개선"
         );
         // 스피너 없는 생 타이틀·앞뒤 공백도 name 으로 수렴.
-        assert_eq!(title_session_name("  tmuxify-58 "), "tmuxify-58");
+        assert_eq!(title_session_name("  kasaterm-58 "), "kasaterm-58");
         // 전부 글리프면 빈 문자열(매칭 스킵 신호).
         assert_eq!(title_session_name("⠐⠑ "), "");
     }

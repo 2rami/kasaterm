@@ -349,7 +349,7 @@ mod tests {
         use kasa_pty::AgentKind::{Claude,Codex};
         for (harness,prompt,footer) in [
             (Claude,"❯","  bypass permissions on (shift+tab to cycle)"),
-            (Codex,"›","  gpt-5.5 medium · tmuxify · main · Ask for approval · Context 3% used"),
+            (Codex,"›","  gpt-5.5 medium · kasaterm · main · Ask for approval · Context 3% used"),
         ] {
             let empty = input_box(harness,&[prompt.into()],footer);
             assert!(prompt_empty_at(&empty,2,2,harness));

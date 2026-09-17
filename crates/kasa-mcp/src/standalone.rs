@@ -151,7 +151,7 @@ impl Backend for StandaloneBackend {
         // 전역 목록이 필요해지면 `recent_claude_sessions_all` 이 이미 있다.
         let base = cwd.map(PathBuf::from).unwrap_or_else(|| self.root.clone());
         // 60개. 20이면 이 폴더의 목록이 최근 claude 로만 채워져, 같은 폴더에서
-        // codex 로 일한 기록이 한 줄도 안 보인다(tmuxify 실측: 20칸 전부 claude,
+        // codex 로 일한 기록이 한 줄도 안 보인다(kasaterm 실측: 20칸 전부 claude,
         // 60칸이면 비-claude 6개가 올라온다). 값은 release 로 재고 정했다.
         Ok(recent_sessions_here(&base, 60))
     }

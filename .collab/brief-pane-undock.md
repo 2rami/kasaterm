@@ -6,10 +6,10 @@
 kasaterm의 일반 pane을 **별도 OS 창으로 분리(undock)** 하는 기능. 데몬 제거 때 빠진 미구현 항목(dock/undock)의 부활이다. 거노 원문: "그냥 pane도 별도창 기능해줘".
 
 ## 작업 디렉토리
-레포 = `/Users/kasa/Desktop/momewomo/tmuxify` — 네 세션 cwd가 sionic이어도 무관하게 **절대경로로** Read/Edit 해라.
+레포 = `/Users/kasa/Desktop/momewomo/kasaterm` — 네 세션 cwd가 sionic이어도 무관하게 **절대경로로** Read/Edit 해라.
 
 ## 먼저 읽을 것 (read-only 탐색 단계)
-1. `/Users/kasa/Desktop/momewomo/tmuxify/CLAUDE.md` — 코드맵(App 8모듈 분할)·병렬 작업 충돌 회피 규칙
+1. `/Users/kasa/Desktop/momewomo/kasaterm/CLAUDE.md` — 코드맵(App 8모듈 분할)·병렬 작업 충돌 회피 규칙
 2. `.memory/MEMORY.md` 의 관련 토픽 — 특히 설정화면이 오버레이→**별도 aux wgpu 윈도우**로 이전된 전례(reference_kasaterm_settings_screen)
 3. 별도 창 전례 코드: `app/kasaterm/src/auxwin.rs`(설정 aux 윈도우), `main.rs`의 `preview_windows`/`aux_windows` 필드, `OpenMarkdownWindow`(md 풀뷰어 새 워크스페이스), `mcp__kasaspace__kasaspace_panel`(git/session 패널 별도창)
 4. `session.rs`/`layout.rs` — pane·PtySession 소유 구조(App.pty가 PTY 직접 소유, 로컬 모드)

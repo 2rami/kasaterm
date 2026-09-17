@@ -4992,7 +4992,7 @@ mod clawd_banner_tests {
         "      ▄▀▀▄        Antigravity CLI 1.1.12",
         "     ▀▀▀▀▀▀       test.user@example.test (Google AI Pro)",
         "    ▀▀▀▀▀▀▀▀      Gemini 3.5 Flash (High)",
-        "   ▄▀▀    ▀▀▄     ~/Desktop/momewomo/tmuxify",
+        "   ▄▀▀    ▀▀▄     ~/Desktop/momewomo/kasaterm",
         "  ▄▀▀      ▀▀▄",
     ];
 
@@ -7201,7 +7201,7 @@ mod prompt_box_tests {
         let rows = vec![
             row_from("⚠ MCP startup incomplete"),
             filled("› Use /skills to list available skills"),
-            row_from("gpt-5.5 medium · tmuxify · main · Context 0% used"),
+            row_from("gpt-5.5 medium · kasaterm · main · Context 0% used"),
         ];
         assert!(matches!(prompt_box(&rows), Some(PromptBox::Filled { ref rows }) if *rows == (1..2)));
 
@@ -7212,7 +7212,7 @@ mod prompt_box_tests {
             filled(&" ".repeat(50)),
             filled("› Use /skills to list available skills"),
             filled(&" ".repeat(50)),
-            row_from("gpt-5.5 medium · tmuxify · main · Context 0% used"),
+            row_from("gpt-5.5 medium · kasaterm · main · Context 0% used"),
         ];
         assert!(
             matches!(prompt_box(&boxed), Some(PromptBox::Filled { ref rows }) if *rows == (1..4)),
@@ -7454,7 +7454,7 @@ mod prompt_box_tests {
             filled(&" ".repeat(50)),
             filled("› Write tests for @filename"),
             filled(&" ".repeat(50)),
-            row_from("gpt-5.5 medium · tmuxify · main · Context 0% used"),
+            row_from("gpt-5.5 medium · kasaterm · main · Context 0% used"),
         ];
         let (anchor, left_c) = find_filled_standing_anchor(&rows, 80).expect("앵커");
         assert_eq!(anchor, 1, "여백 행까지 포함한 상자(2..5) 바로 위");
@@ -7776,7 +7776,7 @@ This came from another Claude session";
     const ROSTER_FILE: &str = r#"{
         "pid": 78476,
         "sessionId": "53b6a9c9-b6e8-4f15-87ae-fbf9ee9d5b4b",
-        "cwd": "/Users/kasa/Desktop/momewomo/tmuxify",
+        "cwd": "/Users/kasa/Desktop/momewomo/kasaterm",
         "messagingSocketPath": "/tmp/cc-socks/78476.sock",
         "name": "mcp, skill사이드바",
         "status": "idle"

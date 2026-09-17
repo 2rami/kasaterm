@@ -507,15 +507,15 @@ mod tests {
 
     #[test]
     fn team_name_is_slug_safe_and_unique() {
-        let t1 = team_name_for("-Users-kasa-Desktop-momewomo-tmuxify__room_room-1");
-        let t2 = team_name_for("-Users-kasa-Desktop-momewomo-tmuxify__room_room-2");
+        let t1 = team_name_for("-Users-kasa-Desktop-momewomo-kasaterm__room_room-1");
+        let t2 = team_name_for("-Users-kasa-Desktop-momewomo-kasaterm__room_room-2");
         assert_ne!(t1, t2);
         assert!(t1.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
         assert!(!t1.starts_with('-'));
         // 비ASCII 만 다른 두 rslug(한글 디렉토리)도 해시 꼬리가 가른다.
         assert_ne!(team_name_for("-Users-kasa-내드라이브"), team_name_for("-Users-kasa-새폴더브"));
         // 결정론.
-        assert_eq!(t1, team_name_for("-Users-kasa-Desktop-momewomo-tmuxify__room_room-1"));
+        assert_eq!(t1, team_name_for("-Users-kasa-Desktop-momewomo-kasaterm__room_room-1"));
     }
 
     #[test]

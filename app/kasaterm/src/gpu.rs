@@ -512,7 +512,7 @@ impl GpuRenderer {
         // Live-resize would otherwise show the layer's stale pixels stretched
         // into the new bounds until our next frame lands. Pinning the layer's
         // contentsGravity to top-left keeps content anchored — same trick
-        // ghostty uses (see feedback_tmuxify_rendering_pipeline).
+        // ghostty uses (see feedback_kasaterm_rendering_pipeline).
         #[cfg(target_os = "macos")]
         unsafe {
             patch_metal_layer_gravity(&window);

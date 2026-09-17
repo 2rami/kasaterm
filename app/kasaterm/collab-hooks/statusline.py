@@ -9,7 +9,7 @@
 """
 Claude Code Statusline — kasaterm 미니멀.
 
-    <model> Opus 5 1M ┃ <git> main ┃ <dir> tmuxify ┃ 8% ┃ <bolt> xhigh
+    <model> Opus 5 1M ┃ <git> main ┃ <dir> kasaterm ┃ 8% ┃ <bolt> xhigh
 
 - 학생: kasaterm 안에선 U+FFFC 표식 한 칸만 내보낸다(프사는 pane 헤더가 이미 보여준다).
   kasaterm 이 그 칸을 blank 로 지우므로 화면엔 왼쪽 공백 한 칸으로 남고, 구분자를 안

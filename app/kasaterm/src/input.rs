@@ -4714,12 +4714,12 @@ mod working_scan_tests {
         assert!(rows_show_working(&[
             row("• Working (12s • esc to interrupt)"),
             row("› Run /review on my current changes"),
-            row("  gpt-5.5 medium · tmuxify · main · Ask for approval · Context 3% used"),
+            row("  gpt-5.5 medium · kasaterm · main · Ask for approval · Context 3% used"),
         ]));
         // 답이 끝나면 그 줄이 사라진다 → idle. 상태줄만 남은 화면은 working 이 아니다.
         assert!(!rows_show_working(&[
             row("› Run /review on my current changes"),
-            row("  gpt-5.5 medium · tmuxify · main · Ask for approval · Context 3% used"),
+            row("  gpt-5.5 medium · kasaterm · main · Ask for approval · Context 3% used"),
         ]));
     }
 

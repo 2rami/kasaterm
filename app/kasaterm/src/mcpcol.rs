@@ -169,7 +169,7 @@ impl McpRow {
 /// 이 함수는 cwd 없이는 절반만 아는 셈이고, cwd 가 없으면 전역만 켜진 채로 돌려준다.
 ///
 /// 꺼진 목록에만 있고 정의가 어디에도 없는 이름들(claude.ai 커넥터, 플러그인 서버, 예전에
-/// 지운 것들 — 실측 tmuxify 에서 14개 중 대부분)은 싣지 않는다. 실행 커맨드도 URL 도 알 수
+/// 지운 것들 — 실측 kasaterm 에서 14개 중 대부분)은 싣지 않는다. 실행 커맨드도 URL 도 알 수
 /// 없어 이름만 남는 줄이 되는데, 그건 「무엇이 붙어 있나」에 답하지 못한다.
 fn claude_mcp(home: &std::path::Path, cwd: Option<&std::path::Path>) -> Vec<McpRow> {
     let Ok(text) = std::fs::read_to_string(home.join(".claude.json")) else {

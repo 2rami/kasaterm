@@ -8910,8 +8910,8 @@ mod tests {
     #[test]
     fn mode_slug_matches_python_rule() {
         assert_eq!(
-            mode_slug(std::path::Path::new("/Users/kasa/Desktop/momewomo/tmuxify")),
-            "-Users-kasa-Desktop-momewomo-tmuxify"
+            mode_slug(std::path::Path::new("/Users/kasa/Desktop/momewomo/kasaterm")),
+            "-Users-kasa-Desktop-momewomo-kasaterm"
         );
         // '.' 포함 경로 — slug 엣지케이스
         assert_eq!(

@@ -4010,7 +4010,7 @@ impl App {
             );
             // 되살리기 목록의 학생 이름도 「클로드가 돌던 pane 인가」 관문을 지난다 —
             // 배정은 spawn 때 **모든** pane 에 되므로(`assign_character_env`) 안 걸면
-            // 순수 셸을 닫아도 `%7 이로하 · tmuxify` 로 남는다(사용자 2026-08-20).
+            // 순수 셸을 닫아도 `%7 이로하 · kasaterm` 로 남는다(사용자 2026-08-20).
             // 닫는 순간 claude 가 이미 내려갔을 수 있어 바인딩된 세션 id 도 함께 본다 —
             // `count_claude_panes` 가 쓰는 기준과 같다.
             let was_agent = self.pane_claude_sid.contains_key(pane)

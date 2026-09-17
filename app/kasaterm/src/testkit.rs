@@ -8078,8 +8078,8 @@ impl App {
                 owner_dead: dead,
             };
             self.info.view.ports = vec![
-                row(5173, 111, "tmuxify", "kasaterm 웹터미널", "node", "코하루", false, false),
-                row(3000, 222, "tmuxify", "arona-ui", "npm", "코하루", true, false),
+                row(5173, 111, "kasaterm", "kasaterm 웹터미널", "node", "코하루", false, false),
+                row(3000, 222, "kasaterm", "arona-ui", "npm", "코하루", true, false),
                 row(8080, 333, "mission-control", "Mission Control", "next-server", "유우카", true, true),
                 row(4000, 444, "", "(제목 없음)", "python3", "", true, false),
             ];

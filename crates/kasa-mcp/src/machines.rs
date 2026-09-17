@@ -1775,8 +1775,8 @@ mod tests {
             Some("/Users/miku/nacho-neko")
         );
         assert_eq!(
-            map_local_to_remote(&m, "/Users/kasa/Desktop/momewomo/tmuxify").as_deref(),
-            Some("/Users/miku/momewomo/tmuxify")
+            map_local_to_remote(&m, "/Users/kasa/Desktop/momewomo/kasaterm").as_deref(),
+            Some("/Users/miku/momewomo/kasaterm")
         );
         assert_eq!(
             map_local_to_remote(&m, "/Users/kasa/Desktop").as_deref(),
@@ -1799,8 +1799,8 @@ mod tests {
             Some("/Users/kasa/Desktop/momewomo/nacho-neko")
         );
         assert_eq!(
-            map_remote_to_local(&m, "/Users/miku/momewomo/tmuxify").as_deref(),
-            Some("/Users/kasa/Desktop/momewomo/tmuxify")
+            map_remote_to_local(&m, "/Users/miku/momewomo/kasaterm").as_deref(),
+            Some("/Users/kasa/Desktop/momewomo/kasaterm")
         );
     }
 

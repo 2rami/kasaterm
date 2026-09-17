@@ -55,7 +55,7 @@ pub struct QueueTask {
     #[serde(default)]
     pub origin: String,
     /// 작업 레포 절대경로. split 은 **그때 활성 pane** 의 cwd 를 물려받아, 다른 창을
-    /// 보고 있었다면 학생이 엉뚱한 레포에서 뜬다(실측: tmuxify 지시인데 mission-control
+    /// 보고 있었다면 학생이 엉뚱한 레포에서 뜬다(실측: kasaterm 지시인데 mission-control
     /// 에서 부팅됐다). 그래서 지시를 받은 시점의 경로를 작업에 새겨 두고 스폰할 때 cd 한다.
     #[serde(default)]
     pub cwd: String,
