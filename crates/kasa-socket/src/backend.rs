@@ -1351,6 +1351,12 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("current tell session identity cannot be verified by this backend")
     }
 
+    /// 나쵸네코 인박스 보고(`nacho.report`). 기본은 **이 기계의 인박스**에 넣는다 —
+    /// 라우팅(나쵸가 다른 기계에 살 때)은 kasa-mcp 를 아는 백엔드가 덮어쓴다.
+    fn nacho_report(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        crate::nacho_inbox::submit_local(params)
+    }
+
     /// Geometry of the panes in the visible window, as window-relative
     /// percentages — so a caller can see who sits where (right half, top
     /// third) and pick a spot to split. Default: empty (backends that don't

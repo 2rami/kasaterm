@@ -34,6 +34,7 @@ pub mod remote;
 pub mod remote_restore;
 pub mod surface_keys;
 pub mod tell_service;
+pub mod nacho_service;
 #[cfg(unix)]
 pub mod adopt;
 pub mod machines;

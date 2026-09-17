@@ -2529,8 +2529,10 @@ mod collab_protocol_tests {
     #[test]
     fn default_protocol_is_concise_and_keeps_the_collaboration_flow() {
         let protocol = DEFAULT_COLLAB_PROTOCOL.trim();
+        // 2026-09-17 나쵸네코 절(7줄)이 들어오며 한도를 65→75줄·6→7 KiB 로 올렸다 —
+        // 그 절도 명령 한 줄과 규칙 넷뿐이고 봉투·인박스 상세는 docs/nacho-orchestrator.md 다.
         assert!(
-            protocol.lines().count() <= 65 && protocol.len() <= 6 * 1024,
+            protocol.lines().count() <= 75 && protocol.len() <= 7 * 1024,
             "규약은 짧게 유지하고 API 상세는 연결된 문서에 둬야 한다"
         );
         // 캐릭터 정체성 문장에 규약이 이어붙으면 한 문단이 된다.
