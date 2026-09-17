@@ -100,8 +100,8 @@ fn run() -> Result<Option<Response>> {
     }
     let cmd = args.remove(0);
     if API_TARGET.get().is_some() {
-        if !matches!(cmd.as_str(),"board"|"board-watch"|"rooms"|"activity"|"tell"|"tell-status") {
-            return Err(anyhow!("--api supports board, board-watch, rooms, activity, tell and tell-status"));
+        if !matches!(cmd.as_str(),"board"|"board-watch"|"rooms"|"activity"|"tell"|"tell-status"|"nacho-report") {
+            return Err(anyhow!("--api supports board, board-watch, rooms, activity, tell, tell-status and nacho-report"));
         }
         if matches!(cmd.as_str(),"board"|"board-watch") && !args.iter().any(|s|matches!(s.as_str(),"--all"|"--local")) {
             args.push("--all".into());
@@ -168,6 +168,12 @@ fn run() -> Result<Option<Response>> {
             .open(dir.join("inbox.jsonl"))?;
         writeln!(f, "{line}")?;
         return Ok(None);
+    }
+    // `nacho-report` — 나쵸가 띄운 학생의 구조화 보고. 나쵸가 이 기계에 살면 소켓을
+    // 안 거치고 인박스 파일에 바로 놓는다(앱이 꺼져 있어도 남고, 옛 앱이라도 된다).
+    // 나쵸가 다른 기계면 앱(소켓)이나 --api 로 그 기계까지 넘긴다.
+    if cmd == "nacho-report" {
+        return run_nacho_report(&args);
     }
     // `rooms` 는 board 를 방(창)별로 접어 사람이 읽는 표로 낸다 — 위임 상대를 고르는 자리.
     if cmd == "rooms" {
@@ -1382,6 +1388,8 @@ fn print_help() {
     eprintln!("  kasaterm-cli notify [--surface <id>] <title> [body]  # fire a work-complete notification (Stop hook)");
     eprintln!("  kasaterm-cli attention [--surface <id>] [reason]     # flag a pane blocked on a permission/input prompt (Notification hook)");
     eprintln!("  kasaterm-cli done [--surface <id>] <succeeded|failed> [한 줄 요약]  # 브리프 완료 보고 — board 가 idle 추정 대신 이걸 정본으로 싣는다");
+    eprintln!("  kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> --summary <글> [--changed <파일,…>]… [--tests <글>] [--next <글>] [--dry-run]");
+    eprintln!("                                            # 나쵸가 띄운 학생(KASATERM_ORIGIN=nacho)만. 나쵸 인박스에 원자적으로 넣고 살아 있으면 즉시 깨운다. 토큰·비밀은 거부");
     eprintln!("  kasaterm-cli agent-status <start|end|clear> <subagent|background> [key] [라벨]  # 진행 표시 정본(PreToolUse/PostToolUse 훅)");
     eprintln!("  kasaterm-cli pet-say [--from <곳>] [--state busy|wait|error] <문안>  # 바탕화면 펫에게 한 줄(앱이 꺼져 있어도 쌓인다)");
     eprintln!("  kasaterm-cli sessions [N]                 # 최근 claude 세션 목록(캐릭터색·캐릭터명, /resume 이 숨기는 팀 세션 포함)");
@@ -2419,6 +2427,112 @@ fn save_receipt(id: &str, address: &Value) {
     let _ = std::fs::write(&path, serde_json::to_string(&Value::Object(map)).unwrap_or_default());
 }
 
+/// `nacho-report` 인자 + env → `nacho.report` 파라미터. env 를 함수로 받는 것은 테스트가
+/// 프로세스 env 를 안 건드리고 origin 게이트를 재기 위해서다.
+fn nacho_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<String>) -> Result<Value> {
+    use kasa_socket::nacho_inbox as inbox;
+    let origin = inbox::origin_from(get_env).ok_or_else(|| anyhow!(
+        "nacho-report is only for panes nacho started ({}=nacho is not set here) — report to whoever gave you the brief instead",
+        inbox::ENV_ORIGIN))?;
+    let mut params = json!({
+        "origin": inbox::ORIGIN,
+        "conv": origin.conv,
+        "task_id": origin.task_id,
+        "machine_id": origin.machine,
+        "surface": get_env("KASATERM_PANE_ID").unwrap_or_default(),
+        "cwd": std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        "character": get_env("KASATERM_CHARACTER").unwrap_or_default(),
+        "harness": if get_env("CLAUDECODE").is_some() { "claude" } else if get_env("CODEX_HOME").is_some() { "codex" } else { "" },
+        "changed": [],
+    });
+    let mut index = 0;
+    let mut stdin = false;
+    let mut dry_run = false;
+    let mut changed: Vec<String> = Vec::new();
+    while let Some(arg) = args.get(index) {
+        let value = |flag: &str| args.get(index + 1).cloned().ok_or_else(|| anyhow!("{flag} needs a value"));
+        match arg.as_str() {
+            "--status" => { params["status"] = json!(value("--status")?); index += 2; }
+            "--summary" => { params["summary"] = json!(value("--summary")?); index += 2; }
+            "--tests" => { params["tests"] = json!(value("--tests")?); index += 2; }
+            "--next" => { params["next"] = json!(value("--next")?); index += 2; }
+            "--changed" => { changed.push(value("--changed")?); index += 2; }
+            "--conv" => { params["conv"] = json!(value("--conv")?); index += 2; }
+            "--task" => { params["task_id"] = json!(value("--task")?); index += 2; }
+            "--machine" => { params["machine_id"] = json!(value("--machine")?); index += 2; }
+            "--stdin" => { stdin = true; index += 1; }
+            "--dry-run" => { dry_run = true; index += 1; }
+            other => return Err(anyhow!("nacho-report: unknown argument {other:?} (flags: --status --summary --changed --tests --next --conv --task --machine --stdin --dry-run)")),
+        }
+    }
+    if stdin {
+        use std::io::Read;
+        let mut text = String::new();
+        std::io::stdin().take(inbox::MAX_BYTES as u64 + 1).read_to_string(&mut text)?;
+        let extra: Value = serde_json::from_str(&text).context("--stdin expects a JSON object with status/summary/changed/tests/next")?;
+        let obj = extra.as_object().ok_or_else(|| anyhow!("--stdin JSON must be an object"))?;
+        for (k, v) in obj {
+            if matches!(k.as_str(), "origin" | "machine_id" | "conv" | "task_id") && !params[k].as_str().unwrap_or("").is_empty() {
+                continue; // env 가 정한 origin 은 stdin 이 못 덮는다
+            }
+            if k == "changed" { if let Some(items) = v.as_array() { changed.extend(items.iter().filter_map(|x| x.as_str()).map(str::to_string)); } else if let Some(t) = v.as_str() { changed.push(t.to_string()); } continue; }
+            params[k] = v.clone();
+        }
+    }
+    params["changed"] = json!(changed.iter().flat_map(|c| c.split(|ch| ch == ',' || ch == '\n')).map(str::trim).filter(|c| !c.is_empty()).collect::<Vec<_>>());
+    if params["host"].is_null() {
+        let machine_id = get_env("KASATERM_MACHINE_ID").filter(|v| !v.trim().is_empty())
+            .or_else(|| kasa_socket::home_dir().and_then(|h| std::fs::read_to_string(h.join(".config/kasaterm/machine-id")).ok()).map(|t| t.trim().to_string()))
+            .unwrap_or_default();
+        let label = get_env("KASATERM_SELF_LABEL").filter(|v| !v.trim().is_empty())
+            .or_else(|| std::process::Command::new("hostname").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()))
+            .unwrap_or_default();
+        params["host"] = json!({"machine_id": machine_id, "label": label});
+    }
+    if dry_run { params["dry_run"] = json!(true); }
+    Ok(params)
+}
+
+fn run_nacho_report(args: &[String]) -> Result<Option<Response>> {
+    use kasa_socket::nacho_inbox as inbox;
+    let get_env = |k: &str| std::env::var(k).ok();
+    let mut params = nacho_report_params(args, &get_env)?;
+    let dry_run = params["dry_run"] == true;
+    params.as_object_mut().map(|o| o.remove("dry_run"));
+    // build 를 여기서 한 번 돌려 오류를 학생에게 바로 보인다(원격이면 저쪽이 또 검증한다).
+    let envelope = inbox::build(&params)?;
+    if dry_run {
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+        return Ok(None);
+    }
+    let target = params["machine_id"].as_str().unwrap_or("").trim().to_string();
+    let local_id = params["host"]["machine_id"].as_str().unwrap_or("").trim().to_string();
+    let local_label = params["host"]["label"].as_str().unwrap_or("").trim().to_string();
+    let is_local = target.is_empty() || target == local_id || (!local_label.is_empty() && target == local_label);
+    let receipt = if is_local && API_TARGET.get().is_none() {
+        inbox::deposit(&envelope)?
+    } else {
+        let request = Request { id: json!(format!("cli-{}", std::process::id())), method: "nacho.report".into(), params };
+        let response = roundtrip(&resolve_socket_path()?, &request)?;
+        if !response.ok {
+            return Ok(Some(response));
+        }
+        response.result.unwrap_or(json!({}))
+    };
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        let wake = match receipt["wake"].as_str() {
+            Some("socket") => "나쵸가 지금 깼다".to_string(),
+            Some("queued") => format!("나쵸가 안 듣는다 — 파일은 남았고 다음 부팅·폴링에서 집는다 ({})", receipt["wake_note"].as_str().unwrap_or("")),
+            _ => "앞선 같은 보고가 이미 깨웠다".to_string(),
+        };
+        println!("나쵸 인박스 {} · {} · {}", receipt["state"].as_str().unwrap_or("?"), wake, receipt["report_id"].as_str().unwrap_or(""));
+    } else {
+        println!("{}", serde_json::to_string(&receipt)?);
+    }
+    Ok(None)
+}
+
 fn resolve_socket_path() -> Result<String> {
     // Per-platform default avoids carrying a Unix-only `/tmp/...` path
     // into Windows builds, where pipe names live in their own
@@ -2461,6 +2575,7 @@ fn api_roundtrip(target: &ApiTarget, request: &Request) -> Result<Response> {
         "collab.inspect" => ("/collab/inspect",false),
         "collab.tell" => ("/collab/tell",true),
         "collab.tell_status" => ("/collab/tell/status",true),
+        "nacho.report" => ("/nacho/report",true),
         _ => return Err(anyhow!("this command has no safe HTTP mapping; use board --all or activity --address")),
     };
     let quote = |text: &str| format!("\"{}\"",text.replace('\\',"\\\\").replace('"',"\\\"").replace('\n',"\\n").replace('\r',"\\r"));
@@ -3214,6 +3329,39 @@ mod tests {
         assert!(response.ok); assert_eq!(response.result.unwrap()["accepted"],true);
         server.join().unwrap();
         assert!(api_roundtrip(&target,&Request{id:json!("test"),method:"surface.send".into(),params:json!({})}).is_err());
+    }
+
+    /// nacho-report 는 origin env 가 없으면 파라미터도 못 만든다 — 거노가 손수 띄운
+    /// 학생이 쳐도 인박스 근처에 못 간다. 있으면 env 의 conv/task/machine 이 실린다.
+    #[test]
+    fn nacho_report_requires_origin_env_and_carries_it() {
+        let none = |_: &str| None::<String>;
+        let err = super::nacho_report_params(&["--status".into(),"done".into(),"--summary".into(),"x".into()], &none).unwrap_err().to_string();
+        assert!(err.contains("KASATERM_ORIGIN=nacho"), "{err}");
+        let env = |k: &str| match k {
+            "KASATERM_ORIGIN" => Some("nacho".to_string()),
+            "KASATERM_ORIGIN_CONV" => Some("discord:42".to_string()),
+            "KASATERM_ORIGIN_TASK" => Some("t-7".to_string()),
+            "KASATERM_ORIGIN_MACHINE" => Some("mini-id".to_string()),
+            "KASATERM_PANE_ID" => Some("%9".to_string()),
+            "KASATERM_CHARACTER" => Some("와카모".to_string()),
+            "KASATERM_MACHINE_ID" => Some("student-id".to_string()),
+            "KASATERM_SELF_LABEL" => Some("맥북".to_string()),
+            "CLAUDECODE" => Some("1".to_string()),
+            _ => None,
+        };
+        let args: Vec<String> = ["--status","needs_restart","--summary","셀프케어 고침","--changed","selfcare.sh, main.py","--changed","worklog.py","--tests","pytest 3 ok","--next","재시작 뒤 E2E"].iter().map(|s|s.to_string()).collect();
+        let p = super::nacho_report_params(&args, &env).unwrap();
+        assert_eq!(p["origin"],"nacho"); assert_eq!(p["conv"],"discord:42"); assert_eq!(p["task_id"],"t-7");
+        assert_eq!(p["machine_id"],"mini-id"); assert_eq!(p["surface"],"%9"); assert_eq!(p["character"],"와카모");
+        assert_eq!(p["harness"],"claude"); assert_eq!(p["host"]["machine_id"],"student-id"); assert_eq!(p["host"]["label"],"맥북");
+        assert_eq!(p["changed"],json!(["selfcare.sh","main.py","worklog.py"]));
+        let envelope = kasa_socket::nacho_inbox::build(&p).unwrap();
+        assert_eq!(envelope["status"],"needs_restart");
+        assert!(super::nacho_report_params(&["--bogus".into()], &env).is_err());
+        // --api 매핑: 원격 기계로 갈 때 HTTP 로도 같은 메서드가 간다.
+        let mut args = vec!["--api".into(),"http://127.0.0.1:1".into(),"nacho-report".into()];
+        assert!(super::parse_api_target(&mut args).unwrap().is_some());
     }
 
     #[test]

@@ -186,6 +186,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.attention" => surface_attention(backend, id, &req.params),
         "surface.done" => surface_done(backend, id, &req.params),
         "surface.agent_status" => surface_agent_status(backend, id, &req.params),
+        "nacho.report" => nacho_report(backend, id, &req.params),
         "clipboard.set" => clipboard_set(backend, id, &req.params),
         "clipboard.get" => clipboard_get(backend, id),
         "clipboard.list" => clipboard_list(backend, id),
@@ -541,6 +542,18 @@ fn surface_done(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let summary = params.get("summary").and_then(|v| v.as_str()).unwrap_or("");
     match backend.pane_done(surface_id, outcome, summary) {
         Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// 나쵸가 띄운 학생의 구조화 보고 — 검증(origin·status·비밀)은 `nacho_inbox::build` 가
+/// 하고, 여기서는 백엔드에 넘겨 인박스(또는 나쵸가 사는 기계)로 보낸다.
+fn nacho_report(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    if !params.is_object() {
+        return param_err(id, "nacho.report requires an object: {origin,status,summary,…}");
+    }
+    match backend.nacho_report(params) {
+        Ok(receipt) => Response::success(id, receipt),
         Err(e) => backend_err(id, e),
     }
 }
@@ -1319,6 +1332,8 @@ mod tests {
         board: Vec<crate::backend::PaneActivity>,
         // 완료 보고 기록 — surface.done 이 outcome 검증을 통과했을 때만 쌓인다.
         done: Mutex<Vec<(String, String, String)>>,
+        // 나쵸 인박스 보고 — 디스크 대신 여기 쌓는다(검증은 실물 build 를 그대로 탄다).
+        reports: Mutex<Vec<Value>>,
     }
 
     impl Backend for FakeBackend {
@@ -1391,6 +1406,11 @@ mod tests {
                 summary.to_string(),
             ));
             Ok(())
+        }
+        fn nacho_report(&self, params: &Value) -> anyhow::Result<Value> {
+            let envelope = crate::nacho_inbox::build(params)?;
+            self.reports.lock().unwrap().push(envelope.clone());
+            Ok(json!({"ok": true, "report_id": envelope["report_id"], "state": "accepted"}))
         }
     }
 
@@ -1638,6 +1658,32 @@ mod tests {
         assert!(backend.sent_text.lock().unwrap().is_empty());
     }
 
+
+    /// 나쵸 보고는 origin 이 nacho 인 것만 백엔드에 닿는다 — 거노가 손수 띄운 학생이
+    /// 실수로 쳐도 인박스에 아무것도 안 남아야 한다. 상태 오타도 입구에서 막는다.
+    #[test]
+    fn nacho_report_gates_origin_and_status() {
+        let backend = FakeBackend::default();
+        let r = dispatch(&backend, req("nacho.report", json!({"status": "done", "summary": "x"})));
+        assert!(!r.ok);
+        assert!(r.error.unwrap().message.contains("origin"));
+        let r = dispatch(&backend, req("nacho.report", json!({"origin": "nacho", "status": "nearly", "summary": "x"})));
+        assert!(!r.ok);
+        assert!(r.error.unwrap().message.contains("needs_approval"), "고칠 값을 알려줘야 한다");
+        assert!(backend.reports.lock().unwrap().is_empty(), "거부했으면 기록하지 않는다");
+        let r = dispatch(&backend, req("nacho.report", json!({
+            "origin": "nacho", "conv": "discord:1", "task_id": "t-9", "surface": "%3",
+            "status": "needs_restart", "summary": "selfcare 고침", "changed": "selfcare.sh", "tests": "bash -n ok", "next": "재시작 뒤 E2E"
+        })));
+        assert!(r.ok, "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["state"], "accepted");
+        let stored = backend.reports.lock().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0]["task_id"], "t-9");
+        assert_eq!(stored[0]["changed"], json!(["selfcare.sh"]));
+        let r = dispatch(&backend, req("nacho.report", json!("not an object")));
+        assert!(!r.ok);
+    }
 
     /// done 의 outcome 은 두 값뿐 — status 칸에서 겪은 "free text 라더니 소비부는
     /// 정확 일치" 함정을 서버 입구에서 막는다. 통과한 보고만 backend 에 닿는다.

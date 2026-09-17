@@ -32,6 +32,7 @@ pub mod session_storage;
 pub mod transport;
 pub mod transfer;
 pub mod tell;
+pub mod nacho_inbox;
 
 pub use backend::{Backend, SplitDirection};
 pub use protocol::{ErrorObj, Request, Response};

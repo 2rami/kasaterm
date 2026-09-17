@@ -7218,6 +7218,7 @@ pub fn spawn_http_server_opts(
                 let transfer_migrate_backend = backend.clone();
                 let tell_backend = backend.clone();
                 let tell_status_backend = backend.clone();
+                let nacho_report_backend = backend.clone();
                 let events_backend = backend.clone();
                 let messages_backend = backend.clone();
                 let list_dir_backend = backend.clone();
@@ -7400,6 +7401,12 @@ pub fn spawn_http_server_opts(
                     .route("/collab/tell", post(move |Json(params): Json<serde_json::Value>| {
                         let backend = tell_backend.clone();
                         collab_tell_post(backend,Json(params))
+                    }).layer(axum::extract::DefaultBodyLimit::max(24 * 1024)))
+                    // 나쵸가 띄운 학생의 구조화 보고 — 다른 기계에서 넘어온 것도 여기서 그 기계
+                    // 인박스에 놓인다(tell 과 같은 24 KiB 상한, 같은 인증·origin 가드).
+                    .route("/nacho/report", post(move |Json(params): Json<serde_json::Value>| {
+                        let backend = nacho_report_backend.clone();
+                        nacho_report_post(backend, Json(params))
                     }).layer(axum::extract::DefaultBodyLimit::max(24 * 1024)))
                     .route("/collab/tell/status", post(move |Json(params): Json<serde_json::Value>| {
                         let backend = tell_status_backend.clone();
@@ -7959,6 +7966,14 @@ pub fn spawn_http_server_opts(
         })?;
 
     Ok(port)
+}
+
+pub(crate) async fn nacho_report_post(backend: Arc<dyn Backend>, Json(params): Json<serde_json::Value>) -> Json<serde_json::Value> {
+    match tokio::task::spawn_blocking(move || backend.nacho_report(&params)).await {
+        Ok(Ok(value)) => Json(value),
+        Ok(Err(error)) => Json(serde_json::json!({"ok":false,"error":error.to_string()})),
+        Err(_) => Json(serde_json::json!({"ok":false,"error":"nacho report worker stopped; check the inbox before re-sending"})),
+    }
 }
 
 pub(crate) async fn collab_tell_post(backend: Arc<dyn Backend>, Json(params): Json<serde_json::Value>) -> Json<serde_json::Value> {
