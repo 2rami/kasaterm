@@ -125,17 +125,6 @@ fn clipped(r: Rect, viewport: Rect) -> Option<Rect> {
     (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
 }
 
-/// 끌던 칸을 놓을 방향 — 목표 칸에서 볼 때 **원래 칸이 어느 쪽**인가. 두 중심이 더 크게
-/// 벌어진 축을 고른다(본기기 pane 끌기와 같은 규칙). 오른쪽으로 끌었으면 그 칸의 왼쪽에서
-/// 온 것이므로 "left" 다.
-fn drop_direction(source: Rect, target: Rect) -> &'static str {
-    let dx = (target.0 + target.2 / 2.0) - (source.0 + source.2 / 2.0);
-    let dy = (target.1 + target.3 / 2.0) - (source.1 + source.3 / 2.0);
-    if dx.abs() >= dy.abs() {
-        if dx > 0.0 { "left" } else { "right" }
-    } else if dy > 0.0 { "up" } else { "down" }
-}
-
 fn room_key(machine: &str, room: &str) -> String {
     format!("{}:{machine}{room}", machine.len())
 }
@@ -1243,17 +1232,6 @@ mod tests {
     }
 
     #[test]
-    fn dropping_a_cell_names_the_side_it_came_from() {
-        let source = (10.0, 10.0, 40.0, 40.0);
-        assert_eq!(drop_direction(source, (60.0, 10.0, 40.0, 40.0)), "left", "오른쪽 칸에 놓으면 왼쪽에서 온 것");
-        assert_eq!(drop_direction(source, (-40.0, 10.0, 40.0, 40.0)), "right");
-        assert_eq!(drop_direction(source, (10.0, 60.0, 40.0, 40.0)), "up");
-        assert_eq!(drop_direction(source, (10.0, -40.0, 40.0, 40.0)), "down");
-        // 가로로 더 벌어졌으면 가로가 이긴다 — 대각선에서 축이 흔들리면 안 된다.
-        assert_eq!(drop_direction(source, (70.0, 30.0, 40.0, 40.0)), "left");
-    }
-
-    #[test]
     fn list_body_is_a_row_per_deck_like_the_local_card() {
         let m = machine();
         let (room, list) = rooms(&m).into_iter().next().unwrap();
@@ -1507,8 +1485,9 @@ impl App {
         });
     }
 
-    /// 끌던 칸을 놓았다 — 커서 아래의 **같은 방 다른 칸**과 자리를 바꾼다. 방향은 두 칸의
-    /// 중심이 어느 쪽으로 더 벌어졌는지로 정한다(본기기 pane 끌기와 같은 규칙).
+    /// 끌던 칸을 놓았다 — 커서 아래의 **같은 방 다른 칸**과 자리를 바꾼다(`surface.swap`).
+    /// 「B 의 왼쪽에 넣기」 식 방향 이동은 옆 칸으로 끌면 제자리라 아무 일도 안 일어났다
+    /// (2026-09-17 지적) — 두 칸을 맞바꾸는 것이 끌어 놓기의 뜻이다.
     fn drop_remote_cell(&mut self, cell: &CellDrag, cursor: (f32, f32)) {
         let target = self.info.navigation.hits.iter().find_map(|(action, rect)| match action {
             Action::Open { label, room, focus: Some(pane), .. }
@@ -1516,19 +1495,15 @@ impl App {
                 Some((pane.clone(), *rect)),
             _ => None,
         });
-        let Some((target, rect)) = target else { return };
-        let Some(source) = self.info.navigation.hits.iter().find_map(|(action, r)| match action {
-            Action::Open { focus: Some(pane), .. } if *pane == cell.pane => Some(*r),
-            _ => None,
-        }) else { return };
-        let direction = drop_direction(source, rect);
+        let Some((target, _)) = target else { return };
         let Some(m) = kasa_mcp::machines::find(&cell.label) else { return };
         let (base, label, pane) = (m.base.clone(), cell.label.clone(), cell.pane.clone());
-        self.set_toast(format!("{label} 에서 자리 옮기는 중…"));
+        let proxy = self.proxy.clone();
+        self.set_toast(format!("{label} 에서 자리 바꾸는 중…"));
         std::thread::spawn(move || {
-            let params = serde_json::json!({ "surface_id": pane, "target": target, "direction": direction });
-            if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "surface.move", params) {
-                eprintln!("[remote] pane move failed: {e:#}");
+            let params = serde_json::json!({ "a": pane, "b": target });
+            if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "surface.swap", params) {
+                let _ = proxy.send_event(UserEvent::SocketToast(format!("{label} 자리 바꾸기 실패 — {e:#}")));
             }
             kasa_mcp::machines::poke();
         });
