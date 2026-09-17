@@ -8116,6 +8116,17 @@ mod peer_label_fallback_tests {
 #[cfg(test)]
 #[cfg(test)]
 mod pinned_input_tests {
+    #[test]
+    fn auto_session_addresses_are_not_names() {
+        // 부팅 때 자동으로 붙는 주소 꼴 — 배지·헤더 어디에도 안 뜬다.
+        assert!(label_is_roster_agent("momoi-p11-9oc"));
+        assert!(label_is_roster_agent("yuzu-p0-4iz"));
+        // 사람이 /rename 으로 붙인 이름은 남는다.
+        assert!(!label_is_roster_agent("crm"));
+        assert!(!label_is_roster_agent("미러링 속도"));
+        assert!(!label_is_roster_agent("momoi-crm"));
+    }
+
     use super::*;
 
     fn row(s: &str) -> Vec<GridCell> {

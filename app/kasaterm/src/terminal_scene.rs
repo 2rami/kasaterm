@@ -1818,10 +1818,14 @@ impl App {
         if !(agents_view || resume_picker || ask_picker)
             && agent_kind == Some(kasa_pty::AgentKind::Claude)
         {
+            // 부팅 때 자동으로 붙는 세션 **주소**(`momoi-p11-9oc` 꼴)는 안 띄운다 — 2026-09-14
+            // 「자동으로 붙는 거 아예 없애도 돼」로 헤더에서 걷은 것이 여기로 되돌아와 있었다
+            // (2026-09-17 지적). 사람이 `/rename` 으로 붙인 이름만 배지가 된다.
             if let Some(name) = self
                 .pane_claude_sid
                 .get(&tab_pid)
                 .and_then(|sid| peer_name_by_sid(sid))
+                .filter(|name| !label_is_roster_agent(name))
             {
                 overlay_claude_session_label(
                     &mut composed,
