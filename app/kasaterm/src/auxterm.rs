@@ -672,6 +672,7 @@ impl App {
                     dim: false,
                     links: Vec::new(),
                     default_fg: crate::cells::default_fg(),
+                    source: None,
                 };
                 t.gpu.draw_cells(&[slot]);
                 crate::screenread::paint_status_model_icons(&mut t.gpu, &c.status_model_icons);

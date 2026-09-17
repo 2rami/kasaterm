@@ -63,6 +63,22 @@ pub(crate) fn asset(slug: &str, motion: &str, frame: usize) -> Option<Arc<[u8]>>
     c.sources.values().find_map(|a| a.assets.get(&(slug.to_string(), motion.to_string(), frame)).cloned())
 }
 
+/// 원본 기기 팔레트의 배경·글자색 — 거울 pane 셀 색 되돌림(`cells::adapt_to_viewer`)의 기준.
+/// 토큰은 그 기기 거울을 한 번이라도 앞에 둔 뒤에야 받아 두므로, 그 전엔 None(되돌림 없음).
+pub(crate) fn source_palette(base: &str) -> Option<crate::cells::SourcePalette> {
+    let c = cache().lock().ok()?;
+    let palette = c.sources.get(base)?.tokens.get("palette")?;
+    let bg = color(palette.get("bg")?)?;
+    let fg = color(palette.get("fg")?)?;
+    Some(crate::cells::SourcePalette { bg: [bg[0], bg[1], bg[2]], fg: [fg[0], fg[1], fg[2]] })
+}
+
+/// 이 pane 이 거울이면 그 원본 기기의 팔레트. 로컬 pane 은 None.
+pub(crate) fn pane_source_palette(pane_id: &str) -> Option<crate::cells::SourcePalette> {
+    let info = kasa_mcp::remote::remote_info(pane_id)?;
+    source_palette(&info.base)
+}
+
 fn color(value: &serde_json::Value) -> Option<[u8; 4]> {
     let text = value.as_str()?.strip_prefix('#')?;
     if text.len() != 6 { return None; }
@@ -351,5 +367,20 @@ mod tests {
         assert_eq!(student.color, Some([0xab, 0xcd, 0xef, 255]));
         assert!(!result.characters.contains_key("유우카"));
         assert_eq!(&*result.assets[&(student.slug.to_string(), "profile".into(), 0)], b"remote-avatar");
+    }
+
+    #[test]
+    fn source_palette_reads_host_bg_and_fg_only_after_tokens_arrive() {
+        let base = "palette-test-host";
+        assert_eq!(source_palette(base), None);
+        let mut appearance = Appearance::default();
+        appearance.tokens = serde_json::json!({"palette": {"bg": "#eff1f5", "fg": "#4c4f69", "accent": "#5a8ce6"}});
+        cache().lock().unwrap().sources.insert(base.into(), appearance);
+        assert_eq!(source_palette(base), Some(crate::cells::SourcePalette { bg: [0xef, 0xf1, 0xf5], fg: [0x4c, 0x4f, 0x69] }));
+        // 팔레트가 반쪽이면(bg 만) 되돌림 기준으로 못 쓴다.
+        cache().lock().unwrap().sources.get_mut(base).unwrap().tokens = serde_json::json!({"palette": {"bg": "#eff1f5"}});
+        assert_eq!(source_palette(base), None);
+        cache().lock().unwrap().sources.remove(base);
+        assert_eq!(pane_source_palette("%no-such-local-pane"), None);
     }
 }

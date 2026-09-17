@@ -135,6 +135,56 @@ pub fn cell_bg_with(cell: &Cell, dfg: [u8; 4]) -> [u8; 4] {
     bg
 }
 
+/// 거울 pane 의 **원본 기기** 팔레트(그쪽 `/design-tokens` 의 `palette.bg`·`fg`).
+///
+/// 원본에서 도는 claude 는 그 기기 밝기의 테마로 색을 **절대값(truecolor)** 으로 찍는다 —
+/// 예약 메시지 칩 배경 `rgb(240,240,240)`, 글자 `rgb(76,79,105)` 처럼. 원본 화면에선 그
+/// 색이 pane 배경과 거의 같아 칩이 묻히는데, 바이트를 그대로 받는 어두운 거울에선 흰
+/// 덩어리가 된다(2026-09-17 실측, catppuccin-latte 원본 → 어두운 거울). 원본이 「내
+/// 배경/글자색」이라고 찍은 색만 기본색으로 되돌려 보는 쪽 팔레트를 따르게 한다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourcePalette {
+    pub bg: [u8; 3],
+    pub fg: [u8; 3],
+}
+
+/// 「원본 배경과 같은 색」으로 볼 채널당 오차. claude 라이트 칩 240 vs latte 배경
+/// 239·241·245 처럼 테마가 조금 어긋난 값을 잡되, diff 블록(220,255,220) 같은
+/// 의미색은 건드리지 않는 폭.
+pub const SOURCE_MATCH_TOLERANCE: u8 = 16;
+
+fn near(c: &Color, target: [u8; 3]) -> bool {
+    match c {
+        Color::Rgb(r, g, b) => [*r, *g, *b]
+            .iter()
+            .zip(target.iter())
+            .all(|(a, b)| a.abs_diff(*b) <= SOURCE_MATCH_TOLERANCE),
+        _ => false,
+    }
+}
+
+/// 원본 팔레트에 맞춰 찍힌 명시색을 보는 쪽 기본색으로. 바꿀 게 없으면 빌려만 준다(셀당
+/// 복제 0). `source` 가 없는 pane(로컬·팔레트 미수신)은 그대로다.
+pub fn adapt_to_viewer<'c>(
+    cell: &'c Cell,
+    source: Option<&SourcePalette>,
+) -> std::borrow::Cow<'c, Cell> {
+    let Some(sp) = source else { return std::borrow::Cow::Borrowed(cell) };
+    let bg_hit = near(&cell.bg, sp.bg);
+    let fg_hit = near(&cell.fg, sp.fg);
+    if !bg_hit && !fg_hit {
+        return std::borrow::Cow::Borrowed(cell);
+    }
+    let mut out = cell.clone();
+    if bg_hit {
+        out.bg = Color::Default;
+    }
+    if fg_hit {
+        out.fg = Color::Default;
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// Draw one row of cells. `origin_y` is the row's top in logical pixels.
 /// `text_baseline_offset` shifts where the glyph baseline lands relative
 /// to the row top — sugarloaf's `text.draw` uses the baseline as the
@@ -466,5 +516,54 @@ mod box_line_tests {
         let drew = box_line_rects('\u{250D}', 9.0, 22.0, &mut |_, _, _, _, _| n += 1);
         assert!(!drew);
         assert_eq!(n, 0);
+    }
+}
+
+#[cfg(test)]
+mod source_palette_tests {
+    use super::*;
+
+    fn cell(fg: Color, bg: Color) -> Cell {
+        Cell { fg, bg, ..Cell::blank() }
+    }
+
+    const LATTE: SourcePalette = SourcePalette { bg: [0xef, 0xf1, 0xf5], fg: [0x4c, 0x4f, 0x69] };
+
+    #[test]
+    fn queued_chip_from_light_host_falls_back_to_viewer_colors() {
+        // 실측 바이트: ESC[0;38;2;76;79;105;48;2;240;240;240m — 원본(latte) 배경·글자와 오차 안.
+        let c = cell(Color::Rgb(76, 79, 105), Color::Rgb(240, 240, 240));
+        let out = adapt_to_viewer(&c, Some(&LATTE));
+        assert!(matches!(out, std::borrow::Cow::Owned(_)));
+        assert_eq!(out.bg, Color::Default);
+        assert_eq!(out.fg, Color::Default);
+    }
+
+    #[test]
+    fn semantic_colors_and_indexed_colors_are_left_alone() {
+        // diff 블록 배경(연두)·ANSI 색·원본과 먼 회색은 의미색이라 그대로.
+        for c in [
+            cell(Color::Default, Color::Rgb(220, 255, 220)),
+            cell(Color::Idx(7), Color::Idx(0)),
+            cell(Color::Rgb(140, 143, 161), Color::Rgb(200, 200, 200)),
+        ] {
+            let out = adapt_to_viewer(&c, Some(&LATTE));
+            assert!(matches!(out, std::borrow::Cow::Borrowed(_)), "{c:?}");
+            assert_eq!(*out, c);
+        }
+    }
+
+    #[test]
+    fn local_panes_are_untouched() {
+        let c = cell(Color::Rgb(76, 79, 105), Color::Rgb(240, 240, 240));
+        assert!(matches!(adapt_to_viewer(&c, None), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn only_the_matching_side_is_replaced() {
+        let c = cell(Color::Rgb(215, 119, 87), Color::Rgb(239, 241, 245));
+        let out = adapt_to_viewer(&c, Some(&LATTE));
+        assert_eq!(out.bg, Color::Default);
+        assert_eq!(out.fg, Color::Rgb(215, 119, 87));
     }
 }

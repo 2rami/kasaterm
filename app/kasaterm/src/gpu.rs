@@ -346,6 +346,9 @@ pub struct PaneSlot<'a> {
     /// 테마 default fg 를 쓰는 셀만 이 색으로 풀리고 명시 색(ANSI/truecolor)은
     /// 그대로다. 무틴트 pane 은 `cells::default_fg()` 를 넣는다(셀당 추가 분기 0).
     pub default_fg: [u8; 4],
+    /// 거울 pane 이면 원본 기기의 팔레트. 원본 배경·글자색과 같은 명시색을 보는 쪽
+    /// 기본색으로 되돌린다(`cells::adapt_to_viewer`). 로컬 pane 은 None.
+    pub source: Option<crate::cells::SourcePalette>,
 }
 
 /// Pending chrome instances accumulated between `clear()` and the
@@ -5020,6 +5023,8 @@ impl GpuRenderer {
             let cell_h_px = self.cell_h * self.scale * pane.font_scale;
             for (r, row) in pane.rows.iter().enumerate() {
                 for (col, cell) in row.iter().enumerate() {
+                    let adapted = crate::cells::adapt_to_viewer(cell, pane.source.as_ref());
+                    let cell = adapted.as_ref();
                     let want_bg = !matches!(cell.bg, kasa_bridge::screen::Color::Default)
                         || cell.inverse;
                     let bg = cell_bg_rgba(cell, pane.default_fg);
@@ -5049,6 +5054,8 @@ impl GpuRenderer {
                 // room any more, so `fit_cell_glyph` is told about it.
                 let mut glyph_right = f32::NEG_INFINITY;
                 for (col, cell) in row.iter().enumerate() {
+                    let adapted = crate::cells::adapt_to_viewer(cell, pane.source.as_ref());
+                    let cell = adapted.as_ref();
                     // Blanks contribute no glyph.
                     let ch = cell.ch;
                     if ch == ' ' || ch == '\0' {

@@ -740,6 +740,7 @@ impl App {
                 .into_owned()
         });
         let default_fg = crate::cells::default_fg();
+        let source = crate::mirror_theme::pane_source_palette(pane);
         let g = self.gpu.as_mut()?;
         let slot = gpu::PaneSlot {
             rows: &snap,
@@ -748,6 +749,7 @@ impl App {
             dim: false,
             links: Vec::new(),
             default_fg,
+            source,
         };
         Some(match g.render_cells_offscreen(&[slot], w, h, &path, max_w) {
             Ok((ow, oh)) => {
@@ -826,6 +828,8 @@ impl App {
             /// pane 기본 전경색(tmux window-style fg 등가) — 학생 pane 은 accent
             /// 틴트, 무배정은 테마 default fg. slot 빌드 시 pane 당 1회 결정.
             default_fg: [u8; 4],
+            /// 거울 pane 의 원본 팔레트(없으면 None) — gpu::PaneSlot::source.
+            source: Option<crate::cells::SourcePalette>,
         }
         // Header chrome carried in LOGICAL px — gpu.rect/draw_text
         // promote to physical internally, matching the cell pass.
@@ -1342,6 +1346,7 @@ impl App {
                     font_scale: pane_font_scale,
                     links: hover_links,
                     default_fg: cells::default_fg(),
+                    source: crate::mirror_theme::pane_source_palette(id.as_str()),
                 });
                 // Body box (header band excluded, inset by the same
                 // PANE_INNER margins the cell grid uses) in logical px.
@@ -1748,6 +1753,7 @@ impl App {
                 font_scale: s.font_scale,
                 links: s.links.clone(),
                 default_fg: s.default_fg,
+                source: s.source,
             })
             .collect();
         // Recompute the inline suggestion against the freshly-applied
