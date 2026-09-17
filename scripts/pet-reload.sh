@@ -104,7 +104,7 @@ print((((json.load(sys.stdin).get("result") or {}).get("surface") or {}).get("id
   kasaterm-cli send --surface "$TAB" "'$ROOT/scripts/pet-reload.sh' --no-build; exit"$'\n' >/dev/null
   for _ in $(seq 1 60); do
     sleep 0.5
-    PID="$(tr -dc 0-9 < "$PIDFILE" 2>/dev/null || true)"
+    PID=""; [[ -f "$PIDFILE" ]] && PID="$(tr -dc 0-9 < "$PIDFILE")"
     if [[ -n "$PID" ]] && ps -o comm= -p "$PID" 2>/dev/null | grep -q kasapet; then
       echo "[pet] 새 펫 띄움(pid $PID) — 앱 탭 $TAB 을 빌려 로그인 세션에서 띄웠다"
       exit 0
