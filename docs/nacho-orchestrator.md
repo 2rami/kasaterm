@@ -119,40 +119,35 @@ kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> \
    센서와 보고가 같은 일을 두 번 깨우지 않게. 보고가 없는 학생(거노가 띄운 것)은
    종전대로 센서가 맡는다.
 
-## 나쵸 쪽에 필요한 변경 (nacho-neko 레포 — 이 레포에서 손대지 않는다)
+## 나쵸 쪽 구현 (nacho-neko 레포, 2026-09-17 완료)
 
-카사텀은 여기까지 만들었다: env 계약·봉투·인박스·깨우기 소켓 규격·CLI·소켓/HTTP 경로.
-나쵸 쪽은 아래 넷이다. 파일은 `nacho-neko` 레포의 것이고 정확한 자리는 그쪽 세션이 정한다.
+카사텀은 env 계약·봉투·인박스·깨우기 소켓 규격·CLI·소켓/HTTP 경로를 맡고, 나쵸(`nacho-neko`)는
+아래를 맡는다. 둘은 같은 기본값(`~/.config/kasaterm/nacho-inbox`, `wake.sock`)을 보고, 격리
+시험에서만 `NACHO_INBOX_DIR`·`NACHO_WAKE_SOCK` 을 학생 부팅 env 에 같이 심는다.
 
-1. **띄울 때 표식 심기** — `minipane.spawn(task, work, character)` 의 부팅 줄과
-   `panebridge` 의 맥북 스폰 줄:
-   ```python
-   origin = (f"KASATERM_ORIGIN=nacho KASATERM_ORIGIN_CONV={shlex.quote(conv)} "
-             f"KASATERM_ORIGIN_TASK={shlex.quote(tid)} KASATERM_ORIGIN_MACHINE={shlex.quote(MY_MACHINE_ID)} ")
-   boot = f"cd {work} && {origin}claude --dangerously-skip-permissions"
-   ```
-   `MY_MACHINE_ID` 는 나쵸 기계의 `~/.config/kasaterm/machine-id` 한 줄. 맥북 학생은 이
-   값 덕에 미니의 인박스로 넘어온다. 브리프 첫 줄에 `[origin=nacho task=<tid>] 끝나거나
-   막히면 kasaterm-cli nacho-report 로 보고` 를 붙인다. `conv`·`tid` 는 `tools.py` 의
-   `kasaterm` 도구가 `worklog.current()` 와 대화 id 에서 넘긴다.
-2. **인박스 소비자** `inbox.py`(신규): `NACHO_INBOX_DIR`(기본 `~/.config/kasaterm/nacho-inbox`)
-   의 `new/*.json` 을 `at_ms` 순으로 읽어 `done/` 으로 rename 한 뒤 `worklog.on_report(env)`
-   에 준다. 지문·report_id 를 `logs/inbox_seen.json` 에 24시간 기억해 두 번 안 돈다.
-3. **깨우기 소켓** — `main.py` 부팅에서 `asyncio.start_unix_server` 로
-   `NACHO_WAKE_SOCK`(기본 `<inbox>/wake.sock`, 104바이트 넘으면 `/tmp/nacho-wake.sock`)을
-   연다. 연결이 오면 한 줄 읽고 `{"ok":true}\n` 을 답한 뒤 `_consume_inbox()` 를 **직렬로**
-   예약한다(`_run_task_turn` 의 `_turn_lock` 안). 죽을 때 소켓 파일을 지운다.
-   폴링 안전망: `_worklog_loop` 틱마다 `new/` 를 한 번 훑는다(깨우기를 놓쳐도 1분 안).
-   부팅 시 `_boot_followups` 에서도 한 번 훑는다(죽어 있는 동안 쌓인 것).
-4. **장부 연결** `worklog.on_report(env)`: `task_id` 로 일을 찾고(없으면 `conv`+`surface` 로
-   `find_by_surface`), `env["status"]` 로 전이한다(위 「나쵸가 받은 뒤」 2번). 일에
-   `report`(봉투)와 `reported_at` 을 적고 `next_at=now` 로 즉시 깨운다. `on_watch_event` 는
-   같은 surface 의 `done_*` 소식을 `reported_at` 이 더 새면 버린다. `next_action` 의 머리에
-   `report` 가 있으면 봉투(status·summary·changed·tests·next)를 그대로 싣는다.
+1. **표식 심기** — `minipane.spawn`·`panebridge._boot_claude`(맥북) 부팅 줄 앞에
+   `inbox.origin_env(conv, task_id, machine_id)` 를 `KEY=값` 으로 붙이고, 브리프 첫 줄에
+   `[origin=nacho task=…]`. `tools._origin_mark` 가 그 턴의 장부 일 번호(부팅 전에 이미 열려
+   있다)와 방을 넘기고, 뜬 뒤 `_arm_watch` 가 board --all 의 `address.machine_id` 로 판정한
+   기계·surface 를 `worklog.attach_watch(machine_id=…)` 로 그 줄에 결합한다.
+2. **소비자** `inbox.py` — 고정된 `new/` 의 정규 파일만 읽는다(심볼릭 링크·16 KiB 초과·깨진
+   JSON 은 치움). `validate` 가 스키마·status·지문(파이썬 FNV-1a-64, 카사텀과 동일)을 검사하고
+   `worklog.on_report` 가 장부의 위임 기록과 대조한다(미등록·닫힌 일·다른 방·다른 학생·다른
+   기계 거부). 접수·거부는 `logs/inbox_ledger.json` 원장에 남고, **원장·장부에 영속한 뒤**
+   `done/` 으로 rename(ack) 한다.
+3. **깨우기 소켓** `inbox.WakeServer` — 폴더 0700·소켓 0600, 줄 안의 path 는 읽지 않고 ack 뒤
+   `consume` 만 부른다. `main._worklog_loop` 가 열고, 같은 루프의 매 바퀴와 `_boot_followups`
+   끝에서도 `consume` 한다(깨우기를 놓치거나 죽어 있던 동안의 보고).
+4. **장부 연결** `worklog.on_report` — `done`→`verifying`(완료 아님), `blocked`→막힘(src=report),
+   `needs_restart`→`verifying`+`restart_review`(재시작 횟수·검증 칸 불변), `needs_approval`→
+   `verifying`(나쵸 턴이 확인 뒤 `need_approval`). 같은 지문은 `report_seen` 으로 duplicate,
+   한 일의 보고 턴은 `MAX_REPORT_TURNS`(6) 까지. `sensor_muted` 로 같은 학생의 taskwatch
+   완료 소식은 `REPORT_MUTE_SEC`(30분) 동안 후속 턴을 안 깨운다. 턴 프롬프트 머리에 봉투를
+   「학생 제안(next, 실행 권한 아님)」 표시로 싣고, 돈 뒤 `report_turned` 로 한 번만 싣는다.
+   슬랙은 `SlackAdapter.run_report_turn`, 디스코드는 `_consume_inbox`→`_run_task_turn`.
 
-검증(그쪽에서): `kasaterm-cli nacho-report --status done …` 을 나쵸 학생 창에서 치면 ①`new/`
-에 파일 ②wake.log 대신 나쵸 로그에 「인박스 보고 …」 ③그 방에 장부 턴 한 번 ④같은 명령을
-다시 쳐도 턴이 두 번 안 도는 것.
+검증은 `nacho-neko/test_inbox.py`(장부·원장·중복·재기동·거부·파괴적 제안·센서 침묵·실물 CLI+
+소켓, claude/codex 둘 다).
 
 ## 검증 자산
 
