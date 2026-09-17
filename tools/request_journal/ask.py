@@ -40,6 +40,12 @@ TOOLS = [
         "description": "그 pane 의 학생에게 한 줄 지시를 넣는다(Enter 포함). 사용자가 전달해 달라·시켜 달라고 했을 때만.",
         "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
     },
+    {
+        "name": "homepc",
+        "description": "집 데스크톱 전원. on 은 켜기(30초쯤 걸림), off 는 끄기, status 는 켜져 있는지 확인. "
+        "사용자가 집컴·내 컴퓨터·데스크탑을 켜라·꺼라·켜져 있냐고 했을 때만.",
+        "input_schema": {"type": "object", "properties": {"action": {"type": "string", "enum": ["on", "off", "status"]}}, "required": ["action"]},
+    },
 ]
 TOOL_NAMES = tuple(t["name"] for t in TOOLS)
 
@@ -73,6 +79,10 @@ ACT_LINE = re.compile(r"^\s*#\s*연출\s*동작\s*=\s*(\S+)\s*표정\s*=\s*(\S+)
 NONE_WORDS = {"없음", "none", "null", "-", "x"}
 
 CLI_TIMEOUT = 8
+# 집컴 전원 명령 — 이 기계(펫이 도는 맥북)에 이미 깔린 것을 그대로 부른다. launchd 밑에는
+# PATH 에 ~/.local/bin 이 없어 절대 경로로 간다.
+HOMEPC_BIN = Path(os.environ.get("HOMEPC_BIN", str(Path.home() / ".local/bin/homepc")))
+HOMEPC_TIMEOUT = 40
 PEEK_LINES = 40
 MAX_CHARS = 9000
 FLEET_CHARS = 5500
@@ -383,7 +393,29 @@ def execute(pane: str, uses: list[dict]) -> list[dict]:
             line = str(args.get("text", "")).strip()
             ok, detail = (False, "보낼 글이 없다") if not line else run_cli("send", "--surface", pane, line + "\n")
             results.append({"kind": name, "ok": ok, "detail": f"전달: {line[:60]}" if ok else detail})
+        elif name == "homepc":
+            ok, detail = homepc(str(args.get("action", "")).strip().lower())
+            results.append({"kind": name, "ok": ok, "detail": detail})
     return results
+
+
+def homepc(action: str) -> tuple[bool, str]:
+    """집컴 전원 스크립트를 부르고 그 말을 그대로 돌려준다. 이 서버는 사용자 본인 기계에서만
+    도니(로컬 원점 검사) 따로 사람을 가리지 않는다."""
+    if action not in ("on", "off", "status"):
+        return False, "action 은 on·off·status 중 하나다"
+    if not HOMEPC_BIN.is_file():
+        return False, f"집컴 전원 명령이 없다: {HOMEPC_BIN}"
+    try:
+        done = subprocess.run([str(HOMEPC_BIN), action], capture_output=True, text=True, timeout=HOMEPC_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, f"집컴 {action} 응답이 {HOMEPC_TIMEOUT}초 안에 안 왔다"
+    except OSError as e:
+        return False, f"집컴 전원 명령을 못 돌렸다: {e}"
+    out = (done.stdout or "").strip() or (done.stderr or "").strip()
+    if done.returncode != 0:
+        return False, (out or f"종료 코드 {done.returncode}")[:300]
+    return True, (out or {"on": "켜기 신호를 보냈다 — 30초쯤 뒤에 켜진다", "off": "끄기 신호를 보냈다", "status": "상태 응답이 비었다"}[action])[:300]
 
 
 def llm_client(provider_factory):

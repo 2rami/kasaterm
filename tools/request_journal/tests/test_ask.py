@@ -190,6 +190,23 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rows[0]["detail"], "나쵸네코로 이사")
 
 
+class HomepcTests(unittest.TestCase):
+    def test_home_pc_tool_relays_the_script_line_and_its_outcome(self):
+        import os, stat, subprocess
+        d = tempfile.mkdtemp()
+        script = Path(d) / "homepc"
+        script.write_text("#!/bin/sh\ncase \"$1\" in on) echo \"켜기 신호 보냄\";; *) echo \"터널 안 뜸\" >&2; exit 1;; esac\n")
+        os.chmod(script, stat.S_IRWXU)
+        with patch.object(ask, "HOMEPC_BIN", script):
+            self.assertEqual(ask.homepc("on"), (True, "켜기 신호 보냄"))
+            self.assertEqual(ask.homepc("status"), (False, "터널 안 뜸"))
+            self.assertEqual(ask.homepc("dance")[0], False)
+            rows = ask.execute("%9", [{"name": "homepc", "input": {"action": "on"}}])
+        self.assertEqual(rows, [{"kind": "homepc", "ok": True, "detail": "켜기 신호 보냄"}])
+        with patch.object(ask, "HOMEPC_BIN", Path(d) / "없다"):
+            self.assertIn("없다", ask.homepc("on")[1])
+
+
 class PlainTests(unittest.TestCase):
     def test_markdown_marks_are_stripped_for_the_bubble(self):
         self.assertEqual(ask.plain("**■ 맥북** — 연결됨\n- **아리스** — 질문 중\n### 끝\n```\nx\n```"), "■ 맥북 — 연결됨\n· 아리스 — 질문 중\n끝\nx")
