@@ -84,9 +84,12 @@ if [[ -f "$PIDFILE" ]]; then
 fi
 
 LOG="${TMPDIR:-/tmp}/kasapet-reload.log"
-# 클로드 pane 에서 불러도 그 표식을 펫에 물리지 않는다.
-env -u CLAUDE_CODE_CHILD_SESSION -u TEAMMATE_MODE -u SESSION_ID \
-  nohup "$INSTALLED/Contents/Resources/kasapet" "$MODEL" >"$LOG" 2>&1 &
+# 클로드 pane 에서 불러도 그 표식을 펫에 물리지 않는다. ssh 로 들어와 부르면(맥미니에서 굽기)
+# GUI 세션이 아니라 창을 못 여니 `launchctl asuser` 로 로그인 세션에 얹는다 — 실행 파일을
+# 그 자리에서 바꿔치기(exec)하므로 pid 는 그대로 펫이다.
+SPAWN=(env -u CLAUDE_CODE_CHILD_SESSION -u TEAMMATE_MODE -u SESSION_ID)
+[[ -n "${SSH_CONNECTION:-}" ]] && SPAWN=(launchctl asuser "$(id -u)" "${SPAWN[@]}")
+nohup "${SPAWN[@]}" "$INSTALLED/Contents/Resources/kasapet" "$MODEL" >"$LOG" 2>&1 &
 echo $! > "$PIDFILE"
 disown
 sleep 1
