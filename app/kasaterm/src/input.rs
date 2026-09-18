@@ -817,34 +817,51 @@ impl App {
         self.run_pending_autotitlesync();
         self.run_pending_autoultrascan();
 
-        // ── 판정은 허브가, 화면은 자리·장식만 ────────────────────────────
-        // 화면에서 읽는 것은 둘뿐이다: codex·agy pane 의 승인 프롬프트(훅이 없어 남긴
-        // 폴백)와 압축 진행률 %(장식 — 상태는 PreCompact 훅이 정한다). 나머지 판정은
-        // `agent_state::resolve` 가 훅·기록·명부·박동으로 한다.
+        // ── 판정은 허브가, 화면은 둘째 눈 ────────────────────────────────
+        // 화면 격자에서 표식 셋(살아 있는 스피너·승인 위젯·끊김 문구)을 읽어 허브에 준다.
+        // 정본은 훅·기록·명부지만 그것이 없거나 어긋날 때 화면이 바로잡는다(2026-09-18
+        // 「둘 다 확인해서 정확하게」, 규칙은 `agent_state::resolve`). 압축 진행률 %는 장식.
         let mut compacting_now: std::collections::HashMap<String, Option<u8>> =
             std::collections::HashMap::new();
         let mut bg_tab_busy: std::collections::HashSet<String> = std::collections::HashSet::new();
         let panes: Vec<(String, String)> = {
             let ws = self.ws.lock().unwrap();
-            let mut screen_wait = self.collab.hub.screen_wait.lock().unwrap();
+            let mut screen = self.collab.hub.screen.lock().unwrap();
             let mut out = Vec::with_capacity(ws.panes.len());
             for (id, pane) in ws.panes.iter() {
                 let tab = ws.active_tab_pid(id);
-                let harness = self.pty.get(tab.as_str()).and_then(|p| p.active_agent());
-                let hookless = matches!(&harness, Some(k) if !matches!(k, kasa_pty::AgentKind::Claude));
-                match pane.term() {
-                    Some(t) => {
-                        if hookless && rows_show_approval_prompt(&t.cells).is_some() {
-                            screen_wait.insert(tab.clone(), "승인 프롬프트".to_string());
-                        } else {
-                            screen_wait.remove(&tab);
+                // 배경 탭도 본다 — 그 탭의 claude 도 판정 대상이고, 화면을 못 본 탭(None)은 화면
+                // 규칙이 쉬어 조용한 열린 턴을 일찍 닫지 않는다.
+                let active = pane.active_tab.min(pane.tabs.len().saturating_sub(1));
+                for (i, t) in pane.tabs.iter().enumerate() {
+                    let key = if i == active {
+                        tab.clone()
+                    } else {
+                        match t.pid.clone() {
+                            Some(p) => p,
+                            None => continue,
                         }
-                        if let Some(pct) = compact_pct_on_screen(&t.cells) {
-                            compacting_now.insert(id.clone(), pct);
+                    };
+                    match t.term() {
+                        Some(term) => {
+                            let signs = crate::agent_state::ScreenSigns {
+                                spinner: crate::screenread::find_claude_spinner(&term.cells).is_some(),
+                                approval: rows_show_approval_prompt(&term.cells).map(|p| match p {
+                                    ApprovalPrompt::Menu => "선택을 기다려요".to_string(),
+                                    ApprovalPrompt::YesNo => "y/n 답을 기다려요".to_string(),
+                                }),
+                                trouble: crate::screenread::find_connection_trouble(&term.cells),
+                            };
+                            screen.insert(key, signs);
+                        }
+                        None => {
+                            screen.remove(&key);
                         }
                     }
-                    None => {
-                        screen_wait.remove(&tab);
+                }
+                if let Some(t) = pane.term() {
+                    if let Some(pct) = compact_pct_on_screen(&t.cells) {
+                        compacting_now.insert(id.clone(), pct);
                     }
                 }
                 let active = pane.active_tab.min(pane.tabs.len().saturating_sub(1));

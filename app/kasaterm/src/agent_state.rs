@@ -144,12 +144,25 @@ pub(crate) struct Evidence {
     pub heartbeat: bool,
     /// 사람이 Enter 를 친 지.
     pub last_submit_age: Option<Duration>,
-    /// codex·agy 전용 화면 승인 폴백 — 롤아웃에 승인 요청 이벤트가 없어 남긴 유일한
-    /// 화면 판독. claude 에는 안 쓴다.
-    pub screen_wait: Option<String>,
+    /// 화면이 지금 보여 주는 것 — 훅·기록을 **대조**하는 둘째 눈(2026-09-18 「둘 다 확인해서
+    /// 정확하게」). 정본이 아니라, 정본이 없거나 정본과 어긋날 때만 판정을 바꾼다. None 은 그
+    /// pane 의 격자를 못 본 것(원격·아직 스캔 전) — 그때는 화면 규칙이 전부 쉰다.
+    pub screen: Option<ScreenSigns>,
     /// 훅·기록이 본 뒤 작업(서브에이전트·백그라운드).
     pub bg_active: bool,
     pub intent: String,
+}
+
+/// GUI 스캔이 화면 격자에서 읽어 오는 표식들. 셀은 안 들고 온다 — 있다/없다와 짧은 라벨뿐.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScreenSigns {
+    /// 살아 있는 스피너 행(`find_claude_spinner`: 첫 글리프·줄임표·경과시간 괄호·아래에
+    /// 대화 마커 없음)이 보인다.
+    pub spinner: bool,
+    /// 승인 위젯(`rows_show_approval_prompt`)이 떠 있다 — 라벨은 위젯 종류.
+    pub approval: Option<String>,
+    /// 끊김 문구(`find_connection_trouble`)가 화면 아래 몇 줄 안에 있다.
+    pub trouble: Option<&'static str>,
 }
 
 /// 판정 결과.
@@ -171,6 +184,10 @@ pub(crate) struct Resolved {
 pub(crate) const SUBMIT_BRIDGE: Duration = Duration::from_secs(4);
 /// PreCompact 뒤 이만큼 지나면 압축은 끝난 것으로 본다(SessionStart(compact) 를 놓쳐도).
 const COMPACT_MAX: Duration = Duration::from_secs(600);
+/// 열린 턴인데 화면에 스피너가 없고 출력 박동도 없는 채 이만큼 지나면 닫힌 것으로 본다 —
+/// 닫는 줄을 못 남긴 턴(API 오류·빈 답)을 `TURN_STALE`(90초)보다 훨씬 일찍 접는다. 승인 위젯이
+/// 떠 있으면 스피너가 없는 게 정상이라 이 시계를 안 돌린다.
+const QUIET_CLOSE: Duration = Duration::from_secs(6);
 /// agy 는 턴 경계를 안 남긴다 — 기록이 이만큼 안에 자랐으면 도는 중.
 const AGY_ACTIVE: Duration = Duration::from_secs(15);
 
@@ -222,20 +239,46 @@ fn turn_open(e: &Evidence) -> Option<&'static str> {
                 .flatten()
                 .min();
             let stale = freshest.is_none_or(|age| age >= TURN_STALE) && !e.heartbeat;
-            if !stale {
-                Some(reason)
-            } else {
+            // 화면 대조: 스피너도 박동도 승인 위젯도 없이 몇 초 조용하면 90초를 안 기다린다.
+            let quiet = e.screen.as_ref().is_some_and(|s| !s.spinner && s.approval.is_none())
+                && !e.heartbeat
+                && freshest.is_some_and(|age| age >= QUIET_CLOSE);
+            if stale {
                 bridge.then_some("enter bridge")
+            } else if quiet {
+                None
+            } else {
+                Some(reason)
             }
         }
-        Some((false, _, _)) => bridge.then_some("enter bridge"),
+        Some((false, _, _)) => {
+            if bridge {
+                Some("enter bridge")
+            } else if e.screen.as_ref().is_some_and(|s| s.spinner) && e.heartbeat {
+                // 훅·기록은 닫혔다는데 화면은 살아 돈다 — 훅이 죽었거나(설정 오류) 기록이
+                // 밀린 것이다. 둘 다 확인하기로 했으니 도는 쪽을 믿는다.
+                Some("screen spinner")
+            } else {
+                None
+            }
+        }
         None if bridge => Some("enter bridge"),
         None => match e.harness {
             Some(kasa_pty::AgentKind::Agy) => {
                 let fresh = e.transcript_age.is_some_and(|age| age < AGY_ACTIVE);
                 (fresh || e.heartbeat).then_some("agy fresh")
             }
-            _ => matches!(e.official, Some(Official::Busy)).then_some("official busy"),
+            _ => {
+                if matches!(e.official, Some(Official::Busy)) {
+                    Some("official busy")
+                } else if e.screen.as_ref().is_some_and(|s| s.spinner) && e.heartbeat {
+                    // 훅도 기록도 명부도 없는 하네스(gemini·hermes…) — 화면 스피너가 유일하다.
+                    // 박동까지 요구하는 이유: 스크롤백에 굳은 스피너 글자로 영영 working 이 되지 않게.
+                    Some("screen spinner")
+                } else {
+                    None
+                }
+            }
         },
     }
 }
@@ -269,19 +312,27 @@ pub(crate) fn resolve(e: &Evidence) -> (AgentState, &'static str) {
     if e.harness.is_none() {
         return (AgentState::Idle, "shell");
     }
+    // 화면이 살아 돈다(스피너 + 출력 박동) = 사람이 이미 답했다. 훅 attention 표식은 Stop·기록
+    // 성장이 와야 풀리는데 그 사이 몇 초를 「대기」로 남기던 것을 화면이 먼저 푼다.
+    let screen_running = e.screen.as_ref().is_some_and(|s| s.spinner) && e.heartbeat;
     if let Some((kind, reason, age)) = &e.attention {
-        if matches!(kind, WaitKind::Permission | WaitKind::Question) && attention_live(e, *kind, *age) {
+        if matches!(kind, WaitKind::Permission | WaitKind::Question)
+            && attention_live(e, *kind, *age)
+            && !screen_running
+        {
             let reason = if reason.trim().is_empty() { kind.default_reason().to_string() } else { reason.clone() };
             return (AgentState::Waiting { kind: *kind, reason }, "hook attention");
         }
     }
-    if let (Some(reason), Some(kind)) = (&e.screen_wait, &e.harness) {
-        if !matches!(kind, kasa_pty::AgentKind::Claude) {
-            return (
-                AgentState::Waiting { kind: WaitKind::Permission, reason: reason.clone() },
-                "screen approval (no hooks)",
-            );
-        }
+    if let Some((reason, false)) = e.screen.as_ref().and_then(|s| s.approval.as_ref().map(|r| (r, s.spinner))) {
+        // 승인 위젯이 떠 있으면 하네스가 무엇이든 사람 차례다. claude 는 보통 attention 훅이
+        // 먼저 오지만, 훅이 안 걸린 세션(옛 --settings)이나 훅이 죽은 날엔 이게 유일한 눈이다
+        // (2026-09-18 실측: 따옴표 버그로 턴 훅이 하루 동안 안 닿았다). 스피너가 같이 보이면
+        // 위젯 글자는 본문 인용이다 — 진짜 위젯이 떠 있는 동안 스피너는 안 돈다.
+        return (
+            AgentState::Waiting { kind: WaitKind::Permission, reason: reason.clone() },
+            "screen approval",
+        );
     }
     if matches!(e.official, Some(Official::Waiting { error: false })) {
         let signal_newer = e.hook_beat.is_some_and(|a| a < Duration::from_secs(5))
@@ -309,6 +360,10 @@ pub(crate) fn resolve(e: &Evidence) -> (AgentState, &'static str) {
             return (AgentState::Error { label: err.label.clone() }, "harness error");
         }
     }
+    if let Some(label) = e.screen.as_ref().and_then(|s| s.trouble) {
+        // 끊김 문구가 화면 아래에 있다 — 기록엔 안 남는 종류(재시도 중·오프라인)도 잡는다.
+        return (AgentState::Error { label: label.to_string() }, "screen trouble");
+    }
     if matches!(e.official, Some(Official::Waiting { error: true })) {
         return (AgentState::Error { label: "오류 복구 대기".into() }, "official error");
     }
@@ -335,8 +390,8 @@ pub(crate) struct StateHub {
     pub hook_beat: Mutex<HashMap<String, Instant>>,
     pub compact: Mutex<HashMap<String, Instant>>,
     pub perm_mode: Mutex<HashMap<String, String>>,
-    /// codex·agy pane 의 화면 승인 폴백 — GUI 스캔이 채운다.
-    pub screen_wait: Mutex<HashMap<String, String>>,
+    /// pane 의 화면 표식 — GUI 스캔(`refresh_pane_activity`)이 틱마다 채운다.
+    pub screen: Mutex<HashMap<String, ScreenSigns>>,
     transcript: Mutex<HashMap<String, TurnObservation>>,
     resolved: Mutex<(Option<Instant>, HashMap<String, Resolved>)>,
 }
@@ -430,9 +485,8 @@ impl StateHub {
         for map in [&self.hook_beat, &self.compact] {
             map.lock().unwrap().retain(|id, _| live.contains(id));
         }
-        for map in [&self.perm_mode, &self.screen_wait] {
-            map.lock().unwrap().retain(|id, _| live.contains(id));
-        }
+        self.perm_mode.lock().unwrap().retain(|id, _| live.contains(id));
+        self.screen.lock().unwrap().retain(|id, _| live.contains(id));
         let official = crate::socket::agents_status_cached();
         let official_errors = crate::socket::agents_error_sids_cached();
         let bound: HashMap<String, PathBuf> = match self.bound.try_lock() {
@@ -500,7 +554,7 @@ impl StateHub {
                     .try_lock()
                     .ok()
                     .is_some_and(|h| h.get(id).is_some_and(|a| !a.is_empty()));
-                evidence.screen_wait = self.screen_wait.lock().unwrap().get(id).cloned();
+                evidence.screen = self.screen.lock().unwrap().get(id).cloned();
             }
             let (state, reason) = resolve(&evidence);
             let since = previous
@@ -565,6 +619,10 @@ mod tests {
 
     fn claude() -> Evidence {
         Evidence { harness: Some(AgentKind::Claude), transcript_present: true, ..Default::default() }
+    }
+    /// 화면을 본다 — 비어 있어도 「봤는데 조용하다」는 뜻이다.
+    fn sc(e: &mut Evidence) -> &mut ScreenSigns {
+        e.screen.get_or_insert_with(Default::default)
     }
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
@@ -698,22 +756,83 @@ mod tests {
         let mut e = Evidence { harness: Some(AgentKind::Codex), transcript_present: true, ..Default::default() };
         e.transcript_turn = Some(TurnState::Working);
         e.transcript_age = Some(secs(3));
+        sc(&mut e).spinner = true;
         assert_eq!(resolve(&e).0, AgentState::Working);
-        e.screen_wait = Some("Allow command?".into());
+        sc(&mut e).spinner = false;
+        sc(&mut e).approval = Some("Allow command?".into());
         assert_eq!(
             resolve(&e),
-            (AgentState::Waiting { kind: WaitKind::Permission, reason: "Allow command?".into() }, "screen approval (no hooks)")
+            (AgentState::Waiting { kind: WaitKind::Permission, reason: "Allow command?".into() }, "screen approval")
         );
         let mut c = claude();
         c.transcript_turn = Some(TurnState::Working);
         c.transcript_age = Some(secs(3));
-        c.screen_wait = Some("Allow?".into());
-        assert_eq!(resolve(&c).0, AgentState::Working, "claude 는 화면 승인을 안 믿는다");
+        sc(&mut c).approval = Some("Allow?".into());
+        assert_eq!(resolve(&c).0, AgentState::Waiting { kind: WaitKind::Permission, reason: "Allow?".into() }, "claude 도 화면 승인 위젯이 보이면 사람 차례다 — 훅이 안 걸린 세션의 유일한 눈");
         let mut a = Evidence { harness: Some(AgentKind::Agy), transcript_present: true, ..Default::default() };
         a.transcript_age = Some(secs(5));
         assert_eq!(resolve(&a), (AgentState::Working, "agy fresh"));
         a.transcript_age = Some(secs(50));
         assert_eq!(resolve(&a).0, AgentState::Idle);
+    }
+
+    /// 화면은 둘째 눈이다 — 정본이 없거나 정본과 어긋날 때만 판정을 바꾼다.
+    #[test]
+    fn the_screen_cross_checks_the_hooks() {
+        // ① 열린 턴인데 화면·박동 모두 6초 조용 → 90초를 안 기다리고 닫는다.
+        let mut e = claude();
+        e.hook_turn = Some((HookTurn::Open, secs(8)));
+        e.hook_beat = Some(secs(8));
+        assert_eq!(resolve(&e).0, AgentState::Working, "화면을 못 본 pane(배경 탭·원격)은 화면 규칙이 쉰다");
+        sc(&mut e);
+        assert_eq!(resolve(&e), (AgentState::Idle, "turn closed"), "조용한 화면이 열린 턴을 일찍 닫는다");
+        sc(&mut e).spinner = true;
+        assert_eq!(resolve(&e), (AgentState::Working, "hook turn open"), "스피너가 살아 있으면 닫지 않는다");
+        sc(&mut e).spinner = false;
+        e.heartbeat = true;
+        assert_eq!(resolve(&e).0, AgentState::Working, "출력 박동도 살아 있는 증거다");
+        e.heartbeat = false;
+        sc(&mut e).approval = Some("Do you want to proceed?".into());
+        assert_eq!(resolve(&e).0, AgentState::Waiting { kind: WaitKind::Permission, reason: "Do you want to proceed?".into() }, "승인 위젯은 스피너 없는 게 정상 — 닫지 않고 대기");
+        // ② 훅이 닫았다는데 화면은 살아 돈다(훅 죽음·기록 밀림) → 도는 쪽을 믿는다.
+        let mut d = claude();
+        d.hook_turn = Some((HookTurn::Closed, secs(2)));
+        sc(&mut d).spinner = true;
+        d.heartbeat = true;
+        assert_eq!(resolve(&d), (AgentState::Working, "screen spinner"));
+        d.heartbeat = false;
+        assert_eq!(resolve(&d).0, AgentState::Idle, "스피너 글자만 남고 박동이 없으면 옛 화면이다");
+        // ③ 훅·기록·명부가 아무것도 없는 하네스 → 스피너가 유일한 눈.
+        let mut o = Evidence { harness: AgentKind::from_id("gemini"), ..Default::default() };
+        assert!(matches!(o.harness, Some(AgentKind::Other(_))));
+        assert_eq!(resolve(&o), (AgentState::Unknown, "no evidence"));
+        sc(&mut o).spinner = true;
+        assert_eq!(resolve(&o).0, AgentState::Unknown, "박동 없는 스피너 글자는 굳은 화면일 수 있다");
+        o.heartbeat = true;
+        assert_eq!(resolve(&o), (AgentState::Working, "screen spinner"));
+        // ⑤ 훅 attention 이 남아 있어도 화면이 살아 돌면 사람이 답한 것이다.
+        let mut w = claude();
+        w.attention = Some((WaitKind::Permission, "Bash".into(), Some(secs(3))));
+        w.hook_turn = Some((HookTurn::Open, secs(20)));
+        w.hook_beat = Some(secs(20));
+        assert_eq!(resolve(&w).0, AgentState::Waiting { kind: WaitKind::Permission, reason: "Bash".into() });
+        sc(&mut w).spinner = true;
+        w.heartbeat = true;
+        assert_eq!(resolve(&w), (AgentState::Working, "hook turn open"));
+        // ⑥ 스피너와 위젯 글자가 함께 보이면 위젯은 인용이다.
+        let mut q = claude();
+        q.hook_turn = Some((HookTurn::Open, secs(1)));
+        sc(&mut q).spinner = true;
+        sc(&mut q).approval = Some("Do you want to proceed?".into());
+        assert_eq!(resolve(&q).0, AgentState::Working);
+        // ④ 끊김 문구는 오류 — 기록엔 안 남는 종류라 화면만 안다. 열린 턴이 이긴다(재시도 중은 돌고 있는 것).
+        let mut t = claude();
+        t.transcript_present = true;
+        sc(&mut t).trouble = Some("연결 끊김");
+        assert_eq!(resolve(&t), (AgentState::Error { label: "연결 끊김".into() }, "screen trouble"));
+        t.hook_turn = Some((HookTurn::Open, secs(1)));
+        sc(&mut t).spinner = true;
+        assert_eq!(resolve(&t).0, AgentState::Working);
     }
 
     #[test]

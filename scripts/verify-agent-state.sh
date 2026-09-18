@@ -13,6 +13,12 @@ APPBIN="$ROOT/target/debug/kasaterm"
 [ -x "$CLI" ] && [ -x "$APPBIN" ] || { echo "먼저 cargo build -p kasaterm -p kasa-socket"; exit 2; }
 printf 'fn main(){std::thread::sleep(std::time::Duration::from_secs(600));}' > "$D/probe/c.rs"
 rustc -o "$D/probe/claude" "$D/probe/c.rs" >/dev/null 2>&1 || { echo "rustc 실패"; exit 2; }
+# 화면 시나리오용 가짜들 — 이름은 전부 claude(하네스 판정은 프로세스 이름), 화면만 다르다.
+mkdir -p "$D/approval" "$D/trouble" "$D/spin"
+printf '%s' 'fn main(){println!("Do you want to proceed?");println!("❯ 1. Yes");println!("  2. No");std::thread::sleep(std::time::Duration::from_secs(600));}' > "$D/approval/c.rs"
+printf '%s' 'fn main(){println!("API Error: Connection error.");std::thread::sleep(std::time::Duration::from_secs(600));}' > "$D/trouble/c.rs"
+printf '%s' 'fn main(){use std::io::Write;for i in 0..1500u32{print!("\r✻ Thinking… ({}s · ↓ 1.2k tokens)",i/2);std::io::stdout().flush().ok();std::thread::sleep(std::time::Duration::from_millis(400));}}' > "$D/spin/c.rs"
+for k in approval trouble spin; do rustc -o "$D/$k/claude" "$D/$k/c.rs" >/dev/null 2>&1 || { echo "rustc $k 실패"; exit 2; }; done
 
 KASATERM_SESSION_FILE="$D/session.json" \
 KASATERM_SETTINGS_FILE="$D/settings.json" \
@@ -104,6 +110,18 @@ expect "notify (Stop drain)" idle "turn closed" "$CLI" notify "✓ 완료" "작�
 expect "turn start" working "hook turn open" "$CLI" turn start
 expect "attention idle(턴 열림→무시)" working "hook turn open" "$CLI" attention --kind idle "60초 방치"
 expect "turn reset" unknown "" "$CLI" turn reset
+# ── 화면이 둘째 눈 — 훅 없이 화면만으로, 그리고 훅과 어긋날 때 ──
+ctrlc() { "$CLI" send --surface "$PANE" $'\x03' >/dev/null 2>&1; }
+launch() { "$CLI" send --surface "$PANE" "clear; $1"$'\n' >/dev/null 2>&1; }
+# 셸 pane 은 보드 계약상 「unknown / live place」다(학생이 아니다) — 판정의 Idle(shell) 은 GUI 용.
+expect "Ctrl-C → 셸" unknown "live place" ctrlc
+expect "승인 위젯만(훅 없음)" waiting "screen approval" launch "$D/approval/claude"
+expect "Ctrl-C → 셸" unknown "live place" ctrlc
+expect "끊김 문구만(훅 없음)" idle "screen trouble" launch "$D/trouble/claude"
+expect "Ctrl-C → 셸" unknown "live place" ctrlc
+expect "스피너+박동만(훅 없음)" working "screen spinner" launch "$D/spin/claude"
+expect "turn end 인데 화면은 돈다" working "screen spinner" "$CLI" turn end
+expect "Ctrl-C → 셸" unknown "live place" ctrlc
 echo "실패 $FAIL 건"
 echo "--- [state] 전이 로그(이 실행분) ---"
 tail -n +"$((LOG_FROM + 1))" "$STDERR_LOG" 2>/dev/null | grep -E '^\[state\]' || echo "(전이 로그 없음)"
