@@ -21,6 +21,7 @@ class SplitTests(unittest.TestCase):
     def test_a_long_line_is_clipped_to_one_glance(self):
         [line] = chatter.split("가" * 200, 1)
         self.assertEqual(len(line), chatter.LINE_CHARS)
+        self.assertLessEqual(chatter.LINE_CHARS, 40, "한눈에 안 들어오면 사람은 읽기를 미룬다")
 
     def test_markdown_emphasis_never_reaches_the_bubble(self):
         self.assertEqual(chatter.split("**굵은 말**이다넹", 1), ["굵은 말이다넹"])

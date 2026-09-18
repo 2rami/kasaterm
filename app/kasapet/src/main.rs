@@ -1029,7 +1029,10 @@ impl App {
             }
             if !self.greeted && self.frames >= 30 && self.pet_dir.is_some() && std::env::var_os("KASAPET_AUTOASK").is_none() && !self.ask_pane().is_empty() {
                 self.greeted = true;
-                self.ask_auto("방금 켜졌어. 한 줄로 인사하고 지금 학생들 판을 한두 줄로 알려줘");
+                // 판 이야기를 여기서 시키지 않는다 — 그 말을 꺼내면 나쵸가 기계마다 한
+                // 단락씩 늘어놓는 전체 판 모드로 답하고, 그 긴 글이 첫 화면을 덮는다.
+                // 판은 먼저 거는 말(`poll_chatter`)이 10초에 한 줄씩 알아서 흘린다.
+                self.ask_auto("방금 켜졌어. 판 이야기는 빼고 한 줄로 짧게 인사만 해줘");
             }
             let events = self.ask_bar.as_ref().map(|bar| bar.events()).unwrap_or_default();
             for event in events {
@@ -1194,7 +1197,7 @@ impl App {
         // 새로 뜰 땐 캐릭터가 한 번 튄다 — 자리를 비운 사이의 승인 요청을 놓치지 않게.
         if urgent && !self.urgent {
             if !self.resting && self.preferences.animations { self.start_bounce(); }
-            self.ask_auto("지금 사람 손이 필요한 학생이 누구고 무엇을 기다리는지 한두 줄로 알려줘");
+            self.ask_auto("사람 손이 필요한 학생 하나만, 누가 무엇을 기다리는지 한 줄로 알려줘");
         }
         self.urgent = urgent;
         if mood != self.mood {
