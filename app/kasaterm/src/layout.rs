@@ -935,8 +935,10 @@ impl App {
             host_rect.0,
             host_rect.1,
         );
-        // 하한을 지키며 앉을 수 있는 만큼만. 0 이면 한 명도 못 앉힌다 —
-        // 그때는 조용히 좁은 pane 을 만드는 대신 사유를 올린다.
+        // 쓸 만한 하한(80칸·16줄)을 지키며 앉을 수 있는 인원만큼 자른다 — 다만 0 이어도
+        // 막지 않는다. 좁은 칸도 사람이 쪼개면 쪼개진다(2026-09-18 지시 「거절 없이 그냥
+        // 되게」 — 전엔 「한 명도 못 앉힌다」로 거절해 다른 기기의 좁은 방에서 쪼개기가 영영
+        // 안 됐다). 물리 하한(20칸·6줄)은 `split_extent` 가 지킨다.
         let room = kasa_pty::fleet_capacity(
             dir,
             host_ratio,
@@ -946,13 +948,12 @@ impl App {
             MIN_PANE_ROWS,
         );
         if room == 0 {
-            anyhow::bail!(
-                "{host} 칸이 {}x{} 라 캐릭터 한 명도 못 앉힌다 — 창을 키우거나 탭으로 띄워라",
-                host_rect.0,
-                host_rect.1
+            eprintln!(
+                "[split] {host} 칸이 {}x{} 라 쓸 만한 하한 밑이지만 그대로 쪼갠다",
+                host_rect.0, host_rect.1
             );
         }
-        let want = count.min(room);
+        let want = count.min(room.max(1));
 
         let mut made: Vec<String> = Vec::new();
         for _ in 0..want {
