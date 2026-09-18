@@ -7447,16 +7447,23 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     // 배정만 사라지므로 설치된 sh.exe 절대경로를 설정에 굽는다.
     let hook_sh = hook_shell_program();
     let cmd = |script: &str, timeout: u64| {
+        // 「kasaterm-turn.sh end」처럼 인자가 붙은 것은 **경로만** 따옴표에 넣는다 — 통째로
+        // 감싸면 sh 가 「…/kasaterm-turn.sh end」라는 파일을 찾아 No such file 로 죽고,
+        // 턴 경계가 앱에 한 번도 안 닿았다(2026-09-18 실측: Stop 훅 오류가 매 턴 떴다).
+        let (file, args) = match script.split_once(' ') {
+            Some((f, a)) => (f, format!(" {a}")),
+            None => (script, String::new()),
+        };
         let run = if cfg!(windows) {
-            match script.strip_suffix(".py") {
+            match file.strip_suffix(".py") {
                 Some(_) => format!(
-                    "{} -X utf8 \"{hd}/{script}\"",
+                    "{} -X utf8 \"{hd}/{file}\"{args}",
                     python3_program().unwrap_or("python3")
                 ),
-                None => format!("\"{hook_sh}\" \"{hd}/{script}\""),
+                None => format!("\"{hook_sh}\" \"{hd}/{file}\"{args}"),
             }
         } else {
-            format!("\"{hd}/{script}\"")
+            format!("\"{hd}/{file}\"{args}")
         };
         serde_json::json!({ "type": "command", "command": run, "timeout": timeout })
     };
