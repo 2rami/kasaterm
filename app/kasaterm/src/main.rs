@@ -1717,6 +1717,8 @@ struct SidebarRowDrag {
     /// 떨어질 자리 — `(기준 pane, 어느 모서리에)`. 목록 줄은 Up/Down 만, 배치도
     /// 칸은 네 모서리가 다 나온다(Center 는 안 쓴다). 아무 줄 위도 아니면 None.
     target: Option<(String, DropZone)>,
+    /// 다른 기기의 카드 위 — 놓으면 그 기기로 **이사**(2026-09-18 지시). `target` 과 배타.
+    machine: Option<String>,
 }
 
 struct WinTabDrag {

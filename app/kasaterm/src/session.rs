@@ -1074,16 +1074,22 @@ impl App {
 
     /// 보기 창 `window` 에 원본 pane 하나의 거울 leaf 를 새로 앉힌다 — 자리는 첫 leaf 옆이고,
     /// 정확한 칸은 바로 뒤의 좌표 동기가 원본대로 잡는다.
-    fn seat_remote_view_leaf(
+    /// `at` 은 `(기준 leaf, 축, 앞에)` — 없으면 첫 leaf 오른쪽.
+    pub(crate) fn seat_remote_view_leaf(
         &mut self,
         window: usize,
         m: &kasa_mcp::machines::Machine,
         remote_id: &str,
         name: &str,
         remote_cwd: &str,
+        at: Option<(String, kasa_pty::SplitDir, bool)>,
     ) -> Result<String> {
-        let Some(anchor) = self.window_leaves(window).first().cloned() else {
-            anyhow::bail!("보기 창이 비어 있다");
+        let (anchor, dir, before) = match at {
+            Some(at) => at,
+            None => match self.window_leaves(window).first().cloned() {
+                Some(first) => (first, kasa_pty::SplitDir::Horizontal, false),
+                None => anyhow::bail!("보기 창이 비어 있다"),
+            },
         };
         let new_id = self.alloc_pane_id();
         let remote = kasa_mcp::remote::connect_view(
@@ -1113,7 +1119,7 @@ impl App {
         let planted = {
             let tree = if active { self.pty_layout.as_mut() }
                 else { self.windows.get_mut(window).and_then(|w| w.as_mut()) };
-            tree.is_some_and(|t| t.insert_beside(&anchor, kasa_pty::SplitDir::Horizontal, false, new_id.clone()))
+            tree.is_some_and(|t| t.insert_beside(&anchor, dir, before, new_id.clone()))
         };
         if !planted {
             self.remove_pane(&new_id);
@@ -1220,7 +1226,7 @@ impl App {
                         // 바깥이 이 창에 없다 — 바깥이 거울 대상이 아니거나 다음 바퀴에.
                         None => continue,
                     },
-                    None => self.seat_remote_view_leaf(i, &m, &rid, &name, &cwd)
+                    None => self.seat_remote_view_leaf(i, &m, &rid, &name, &cwd, None)
                         .map(|local| { outer_of.insert(rid.clone(), local); }),
                 };
                 match outcome {

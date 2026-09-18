@@ -2129,6 +2129,7 @@ impl App {
                 start: (cx, cy),
                 active: false,
                 target: None,
+                machine: None,
             });
             self.chrome_dirty = true;
             return true;

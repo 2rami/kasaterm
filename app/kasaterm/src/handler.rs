@@ -3684,11 +3684,14 @@ impl ApplicationHandler<UserEvent> for App {
                             let last = self.window_leaves(wi).into_iter().last()?;
                             (last != src).then_some((last, crate::DropZone::Down))
                         });
+                    // 이 기기 줄·칸 어디도 아니면 다른 기기 카드인가 — 놓으면 그리로 이사.
+                    let machine = if target.is_none() { self.navigation_machine_at((px, py)) } else { None };
                     if let Some(d) = self.sidebar_row_drag.as_mut() {
                         if !d.active && dx * dx + dy * dy > 9.0 {
                             d.active = true;
                         }
                         d.target = target;
+                        d.machine = machine;
                     }
                     if self
                         .sidebar_row_drag
@@ -6591,9 +6594,16 @@ impl ApplicationHandler<UserEvent> for App {
                         // 있을 때만 옮긴다 — 포커스는 press 가 이미 했다.
                         if let Some(d) = self.sidebar_row_drag.take() {
                             window.set_cursor(CursorIcon::Default);
-                            if let (true, Some((target, zone))) = (d.active, d.target) {
-                                self.move_pane(&d.pane, &target, zone);
-                                self.chrome_dirty = true;
+                            match (d.active, d.target, d.machine) {
+                                (true, Some((target, zone)), _) => {
+                                    self.move_pane(&d.pane, &target, zone);
+                                    self.chrome_dirty = true;
+                                }
+                                (true, None, Some(label)) => {
+                                    self.send_pane_to_machine(&d.pane, &label);
+                                    self.chrome_dirty = true;
+                                }
+                                _ => {}
                             }
                             window.request_redraw();
                             return;

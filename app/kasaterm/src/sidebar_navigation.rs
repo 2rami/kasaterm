@@ -1495,9 +1495,73 @@ impl App {
         });
     }
 
+    /// 커서 아래가 어느 기기의 카드·칸·절 머리인가 — 이 기기 pane 을 끌어다 놓을 때
+    /// 「그 기기로 이사」의 과녁이다(2026-09-18 지시).
+    pub(crate) fn navigation_machine_at(&self, cursor: (f32, f32)) -> Option<String> {
+        let nav = &self.info.navigation;
+        let by_hit = nav.hits.iter().find(|(_, r)| hit(cursor, *r)).and_then(|(a, _)| match a {
+            Action::Open { label, .. } | Action::Menu(label) | Action::Section(label)
+            | Action::NewRoom(label) | Action::Unpin(label) | Action::CloseRoom { label, .. } => Some(label.clone()),
+            _ => None,
+        });
+        by_hit
+            .or_else(|| nav.pinned.iter().find(|p| p.view.is_some_and(|v| hit(cursor, v))).map(|p| p.label.clone()))
+            .or_else(|| nav.machine.clone().filter(|_| nav.viewport.is_some_and(|v| hit(cursor, v))))
+    }
+
+    /// 이 기기의 pane 을 다른 기기 카드에 놓았다 — 그 기기로 이사(「보내기」와 같은 길).
+    pub(crate) fn send_pane_to_machine(&mut self, pane: &str, label: &str) {
+        let pid = self.leaf_pty_id(pane);
+        if let Some(info) = kasa_mcp::remote::remote_info(&pid) {
+            let here = kasa_mcp::machines::label_for_base(&info.base).unwrap_or(info.label);
+            self.set_toast(if here == label {
+                format!("이미 {label} 에 있는 학생이에요")
+            } else {
+                "기기 사이 직접 이사는 아직 — 먼저 이 기기로 데려온 뒤 보내 주세요".to_string()
+            });
+            return;
+        }
+        self.machines_col_act(state::MachinesColBtn::Send { pane: pid, label: label.to_string() });
+    }
+
+    /// 다른 기기의 칸을 **이 기기 방 카드**에 놓았다 — 그 자리에 거울을 앉힌 뒤 데려온다
+    /// (거울 자리에 그대로 이어지는 「데려오기」 길이라 놓은 자리에 학생이 선다).
+    fn bring_remote_cell_into(&mut self, cell: &CellDrag, window: usize, at: Option<(String, kasa_pty::SplitDir, bool)>) {
+        let Some(m) = kasa_mcp::machines::find(&cell.label) else {
+            self.set_toast(format!("{} 가 명부(machines.json)에 없어요", cell.label));
+            return;
+        };
+        let row = self.info.machines_col.machines.iter().find(|x| x.label == cell.label)
+            .and_then(|x| x.remote.iter().chain(x.mirrored.iter()).find(|r| r.remote_id == cell.pane).cloned());
+        let (name, cwd) = row.map(|r| (r.name, r.remote_cwd)).unwrap_or_default();
+        let who = if name.is_empty() { cell.pane.clone() } else { name.clone() };
+        self.set_toast(format!("{who} 를 {} 에서 데려오는 중…", cell.label));
+        self.render_frame();
+        let local = match self.seat_remote_view_leaf(window, &m, &cell.pane, &name, &cwd, at) {
+            Ok(id) => id,
+            Err(e) => {
+                self.set_toast(format!("{who} 데려오기 실패 — 자리를 못 잡았어요: {e:#}"));
+                return;
+            }
+        };
+        #[cfg(unix)]
+        let outcome = self.migrate_pane_back(&local, None, false);
+        #[cfg(not(unix))]
+        let outcome: anyhow::Result<String> = Err(anyhow::anyhow!("이사는 아직 Windows 에서 안 된다"));
+        match outcome {
+            Ok(msg) => self.set_toast(msg),
+            Err(e) => {
+                self.set_toast(format!("{who} 데려오기 실패 — {e:#}"));
+                self.remove_pane(&local);
+            }
+        }
+        self.info.machines_col.last_refresh = None;
+    }
+
     /// 끌던 칸을 놓았다 — 커서 아래의 **같은 방 다른 칸**과 자리를 바꾼다(`surface.swap`).
     /// 「B 의 왼쪽에 넣기」 식 방향 이동은 옆 칸으로 끌면 제자리라 아무 일도 안 일어났다
     /// (2026-09-17 지적) — 두 칸을 맞바꾸는 것이 끌어 놓기의 뜻이다.
+    /// 이 기기의 방 카드에 놓으면 **이 기기로 이사**, 다른 기기 카드면 아직 안 된다고 말한다.
     fn drop_remote_cell(&mut self, cell: &CellDrag, cursor: (f32, f32)) {
         let target = self.info.navigation.hits.iter().find_map(|(action, rect)| match action {
             Action::Open { label, room, focus: Some(pane), .. }
@@ -1505,7 +1569,42 @@ impl App {
                 Some((pane.clone(), *rect)),
             _ => None,
         });
-        let Some((target, _)) = target else { return };
+        let Some((target, _)) = target else {
+            if let Some(other) = self.navigation_machine_at(cursor).filter(|l| *l != cell.label) {
+                self.set_toast(format!("{other} 로 바로 이사는 아직 — 먼저 이 기기로 데려온 뒤 보내 주세요"));
+                return;
+            }
+            // 이 기기의 방 카드·칸·줄 — 칸이면 그 모서리, 줄이면 아래, 카드면 첫 칸 옆.
+            let inside = |r: &Rect| hit(cursor, *r);
+            let landing = self.sidebar_mini_rects.iter().find(|(_, _, r)| inside(r)).map(|(w, id, r)| {
+                let nx = (cursor.0 - (r.0 + r.2 / 2.0)) / (r.2 / 2.0).max(1.0);
+                let ny = (cursor.1 - (r.1 + r.3 / 2.0)) / (r.3 / 2.0).max(1.0);
+                let (dir, before) = match crate::layout::drop_edge_for_offsets(nx, ny) {
+                    DropZone::Left => (kasa_pty::SplitDir::Horizontal, true),
+                    DropZone::Up => (kasa_pty::SplitDir::Vertical, true),
+                    DropZone::Down => (kasa_pty::SplitDir::Vertical, false),
+                    _ => (kasa_pty::SplitDir::Horizontal, false),
+                };
+                (*w, Some((id.clone(), dir, before)))
+            }).or_else(|| self.sidebar_row_rects.iter().find(|(_, _, r)| inside(r))
+                .map(|(w, id, _)| (*w, Some((id.clone(), kasa_pty::SplitDir::Vertical, false)))))
+            .or_else(|| self.window_tab_rects.iter().find(|(_, r)| inside(r)).map(|(w, _)| (*w, None)));
+            let Some((window, at)) = landing else { return };
+            if self.internal_room_kind_at(window).is_some() {
+                self.set_toast("그 방엔 학생이 못 앉아요".to_string());
+                return;
+            }
+            if let Some((label, _)) = self.remote_view_of_window(window) {
+                self.set_toast(if label == cell.label {
+                    "같은 기기의 다른 방으로는 그 방을 열어 옮겨 주세요".to_string()
+                } else {
+                    format!("{label} 로 바로 이사는 아직 — 먼저 이 기기로 데려온 뒤 보내 주세요")
+                });
+                return;
+            }
+            self.bring_remote_cell_into(cell, window, at);
+            return;
+        };
         let Some(m) = kasa_mcp::machines::find(&cell.label) else { return };
         let (base, label, pane) = (m.base.clone(), cell.label.clone(), cell.pane.clone());
         let proxy = self.proxy.clone();
