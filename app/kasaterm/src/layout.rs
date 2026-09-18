@@ -1974,7 +1974,15 @@ impl App {
         //    pty ids decoupled from stage-3 onward, so this avoids any
         //    clash with the moved tab's pid (which may have been the old
         //    source's outer id).
-        let new_outer = self.alloc_pane_id();
+        //    다만 그 pid 가 지금 어디에도 안 쓰이면(방금 비운 소스의 옛 바깥 번호가 보통
+        //    그렇다) **그 번호를 그대로 쓴다** — 거울 등록·학생 자리·PTY 가 전부 그 번호에
+        //    걸려 있어, 새 번호를 주면 거울이 「PTY 없는 빈 자리」가 되고 자리 배정은 옛
+        //    번호 주인으로 둔갑한다(2026-09-18: 거울 방에서 아리스를 탭으로 합쳤다 빼내니
+        //    미도리 이름을 달고 보드에서 거울이 아니게 됐다).
+        let reusable = moved.pid.clone().filter(|pid| {
+            !self.ws.lock().unwrap().panes.contains_key(pid) && self.window_of_pane(pid).is_none()
+        });
+        let new_outer = reusable.unwrap_or_else(|| self.alloc_pane_id());
         let (dir, before) = match zone {
             DropZone::Left => (kasa_pty::SplitDir::Horizontal, true),
             DropZone::Right => (kasa_pty::SplitDir::Horizontal, false),
