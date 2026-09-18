@@ -58,7 +58,10 @@ fn source_rows(machine: &serde_json::Value) -> Vec<plan::SourcePane> {
             let room = row.get("window").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
             Some(plan::SourcePane {
                 id: id.into(), room,
+                // 탭(`tab_of`)은 leaf 로 앉히지 않는다 — 바깥 거울의 탭으로는
+                // `sync_remote_view_members` 가 붙인다(2026-09-18).
                 eligible: room != u64::MAX && id.starts_with('%')
+                    && row.get("tab_of").and_then(|v| v.as_str()).is_none_or(str::is_empty)
                     && row.get("closed").and_then(|v| v.as_bool()) != Some(true)
                     && row.get("undocked").and_then(|v| v.as_bool()) != Some(true)
                     && !row.get("mirror_of").is_some_and(|v| !v.is_null()),

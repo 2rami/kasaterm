@@ -1072,6 +1072,107 @@ impl App {
         Ok(new_id)
     }
 
+    /// 보기 창이 원본과 어긋난 자리를 바로잡는다 — 원본에선 탭인데 여기선 옆 칸으로 앉은
+    /// 거울은 그 바깥 거울의 탭으로 접고(옛 `unfold`·복원본·경쟁 착지), 원본에서 다른 방으로
+    /// 옮겨 간 pane 의 거울은 걷는다(5초 넘게 그대로일 때 — 그 방의 보기 창이 있으면 그쪽이
+    /// 다시 앉힌다). 어긋난 leaf 하나가 좌표 동기 전체를 멈추던 것을 푼다(2026-09-18).
+    /// 반환값 = 무엇이든 바꿨는가.
+    fn repair_remote_view_window(&mut self, window: usize, label: &str, panes: &[serde_json::Value]) -> bool {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+        static MOVED_SINCE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+        let leaves = self.window_leaves(window);
+        if leaves.len() < 2 {
+            return false;
+        }
+        let row_of = |rid: &str| panes.iter().find(|p| p.get("id").and_then(|v| v.as_str()) == Some(rid));
+        let source_of = |s: &Self, leaf: &str| kasa_mcp::remote::remote_info(&s.leaf_pty_id(leaf)).map(|i| i.remote_id);
+        let mut outer_of: HashMap<String, String> = HashMap::new();
+        let mut windows: Vec<u64> = Vec::new();
+        for leaf in &leaves {
+            let Some(rid) = source_of(self, leaf) else { continue };
+            if let Some(w) = row_of(&rid).and_then(|r| r.get("window").and_then(|v| v.as_u64())) {
+                windows.push(w);
+            }
+            outer_of.insert(rid, leaf.clone());
+        }
+        // 이 창이 비추는 원본 방 = 거울 원본이 가장 많이 앉은 방.
+        let mut counts: HashMap<u64, usize> = HashMap::new();
+        for w in &windows { *counts.entry(*w).or_default() += 1; }
+        let Some((&home, _)) = counts.iter().max_by_key(|(w, n)| (**n, std::cmp::Reverse(**w))) else { return false };
+        for leaf in &leaves {
+            let Some(rid) = source_of(self, leaf) else { continue };
+            let Some(row) = row_of(&rid) else { continue };
+            let key = format!("{label}/{rid}");
+            let in_home = row.get("window").and_then(|v| v.as_u64()) == Some(home);
+            if !in_home {
+                let since = *MOVED_SINCE.get_or_init(Default::default).lock().unwrap()
+                    .entry(key.clone()).or_insert_with(Instant::now);
+                if since.elapsed() < std::time::Duration::from_secs(5) {
+                    continue;
+                }
+                MOVED_SINCE.get_or_init(Default::default).lock().unwrap().remove(&key);
+                eprintln!("[view] {label} {rid} 는 원본에서 다른 방으로 갔다 — 이 보기 창에서 걷는다");
+                self.remote_keep.insert(leaf.clone());
+                self.remove_pane(leaf);
+                return true;
+            }
+            MOVED_SINCE.get_or_init(Default::default).lock().unwrap().remove(&key);
+            let Some(outer_rid) = row.get("tab_of").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else { continue };
+            let Some(outer) = outer_of.get(outer_rid).cloned().filter(|o| o != leaf) else { continue };
+            eprintln!("[view] {label} {rid} 는 원본에선 {outer_rid} 의 탭 — 옆 칸을 탭으로 접는다");
+            self.fold_leaf_into_tabs(window, leaf, &outer);
+            return true;
+        }
+        false
+    }
+
+    /// leaf `src` 를 같은 창의 `dst` 탭으로 접는다 — 활성 창이면 `merge_pane_into_tabs`,
+    /// 안 보이는 창이면 그 창의 트리에서 직접(그 함수는 활성 트리만 만진다).
+    fn fold_leaf_into_tabs(&mut self, window: usize, src: &str, dst: &str) {
+        {
+            // 거울 leaf 의 첫 탭은 pid 가 비어 있다(leaf 번호가 곧 PTY) — 탭으로 옮기면 그
+            // 번호를 달아야 화면이 그 탭으로 배달된다.
+            let mut ws = self.ws.lock().unwrap();
+            if let Some(p) = ws.panes.get_mut(src) {
+                for t in p.tabs.iter_mut().filter(|t| t.pid.is_none()) {
+                    t.pid = Some(src.to_string());
+                }
+            }
+        }
+        if window == self.active_window {
+            self.merge_pane_into_tabs(src, dst);
+            return;
+        }
+        let moved: Vec<PaneTab> = {
+            let mut ws = self.ws.lock().unwrap();
+            if !ws.panes.contains_key(dst) { return }
+            match ws.panes.get_mut(src) {
+                Some(s) if !s.tabs.is_empty() => std::mem::take(&mut s.tabs),
+                _ => return,
+            }
+        };
+        {
+            let mut ws = self.ws.lock().unwrap();
+            for t in &moved {
+                if let Some(pid) = t.pid.clone() {
+                    ws.pid_to_pane.insert(pid, dst.to_string());
+                }
+            }
+            if let Some(d) = ws.panes.get_mut(dst) {
+                d.tabs.extend(moved);
+                d.dirty = true;
+            }
+            ws.panes.remove(src);
+        }
+        if let Some(tree) = self.windows.get_mut(window).and_then(|w| w.as_mut()) {
+            tree.remove_leaf(src);
+        }
+        self.publish_pty_layout();
+        self.session_touched = true;
+        self.chrome_dirty = true;
+    }
+
     /// 보기 창 `window` 에 원본 pane 하나의 거울 leaf 를 새로 앉힌다 — 자리는 첫 leaf 옆이고,
     /// 정확한 칸은 바로 뒤의 좌표 동기가 원본대로 잡는다.
     /// `at` 은 `(기준 leaf, 축, 앞에)` — 없으면 첫 leaf 오른쪽.
@@ -1196,7 +1297,14 @@ impl App {
                     present.insert(info.remote_id);
                 }
             }
-            let (true, Some(source_window)) = (consistent, source_window) else { continue };
+            let (true, Some(source_window)) = (consistent, source_window) else {
+                self.repair_remote_view_window(i, &label, panes);
+                continue;
+            };
+            if self.repair_remote_view_window(i, &label, panes) {
+                // 구성이 바뀌었다 — 다음 바퀴에 새 모습으로 다시 본다.
+                continue;
+            }
             // 원본 방의 pane 들 — 바깥이 먼저, 탭은 그 다음(바깥이 같은 바퀴에 생겨도 붙는다).
             let mut rows: Vec<&serde_json::Value> = panes.iter().filter(|p| {
                 p.get("window").and_then(|v| v.as_u64()) == Some(source_window)
@@ -1616,9 +1724,22 @@ impl App {
             // 기계 캐시가 새로 채워졌으면 2초를 기다리지 않는다.
             let generation = kasa_mcp::machines::generation();
             // 방금 저쪽에 보낸 직후면 당겨오지 않는다 — 도착 전에 옛 배치로 되돌리면
-            // 손으로 맞춘 크기가 튀어 오른다.
-            if self.remote_view_push_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(3)) {
-                return;
+            // 손으로 맞춘 크기가 튀어 오른다. 3초가 지나도 **보낸 뒤에 읽은 명부가 아직
+            // 없으면**(느린 기기) 15초까지 더 기다린다 — 옛 명부로 되돌리는 게 튐의 원인이다.
+            if let Some(at) = self.remote_view_push_at {
+                let since = at.elapsed();
+                if since < std::time::Duration::from_secs(3) {
+                    return;
+                }
+                if since < std::time::Duration::from_secs(15) {
+                    let stale = kasa_mcp::machines::snapshot().iter().any(|m| {
+                        m.get("ago_secs").and_then(|v| v.as_u64())
+                            .is_some_and(|ago| ago as f32 > since.as_secs_f32())
+                    });
+                    if stale {
+                        return;
+                    }
+                }
             }
             let mut last = LAST.get_or_init(|| Mutex::new(None)).lock().unwrap();
             if last.is_some_and(|(t, g)| g == generation && t.elapsed() < std::time::Duration::from_secs(2)) {
@@ -1705,7 +1826,13 @@ impl App {
         let mut base: Option<String> = None;
         let mut ids = Vec::with_capacity(leaves.len());
         for leaf in &leaves {
-            let info = kasa_mcp::remote::remote_info(&self.leaf_pty_id(leaf)).filter(|r| r.view)?;
+            let pid = self.leaf_pty_id(leaf);
+            // PTY 도 링크도 없는 빈 자리(복원이 못 채운 leaf)는 방의 성격을 못 가른다 —
+            // 그 하나 때문에 보기 창이 보통 방으로 둔갑하지 않게 건너뛴다(2026-09-18).
+            if !self.pty.contains_key(&pid) && kasa_mcp::remote::remote_info(&pid).is_none() {
+                continue;
+            }
+            let info = kasa_mcp::remote::remote_info(&pid).filter(|r| r.view)?;
             match &base {
                 Some(b) if !kasa_mcp::machines::same_machine_bases(b, &info.base) => return None,
                 None => base = Some(info.base.clone()),
