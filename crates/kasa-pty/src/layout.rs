@@ -134,7 +134,11 @@ pub fn fleet_capacity(
             if h < min_rows {
                 return 0;
             }
-            (cols / min_cols.max(1)) as usize
+            // 폭은 이 split 이 안 건드리는 축이다 — 호스트가 이미 하한보다 좁아도(77칸) 그
+            // 폭에서 살고 있으니 한 명은 같은 폭으로 앉을 수 있다. 0 을 답하면 다른 기기의
+            // 좁은 창에서 위/아래로 가르는 것까지 「한 명도 못 앉힌다」로 막혔다(2026-09-18).
+            let n = (cols / min_cols.max(1)) as usize;
+            if n == 0 && cols >= MIN_PANE_COLS { 1 } else { n }
         }
     }
 }
@@ -1276,6 +1280,10 @@ mod tests {
         // 세로 배치는 갈리는 축이 폭이다.
         assert_eq!(fleet_capacity(SplitDir::Vertical, 0.6, 240, 100, 80, 16), 3);
         assert_eq!(fleet_capacity(SplitDir::Vertical, 0.9, 240, 100, 80, 16), 0);
+        // 폭이 이미 하한 밑인 호스트를 위/아래로 — 폭은 안 변하니 한 명은 앉는다.
+        assert_eq!(fleet_capacity(SplitDir::Vertical, 0.5, 77, 46, 80, 16), 1);
+        assert_eq!(fleet_capacity(SplitDir::Vertical, 0.5, 10, 46, 80, 16), 0, "물리 하한 밑이면 그래도 0");
+        assert_eq!(fleet_capacity(SplitDir::Horizontal, 0.5, 77, 46, 80, 16), 0, "좌/우는 폭을 더 줄이니 그대로 막는다");
     }
 
     /// 용량대로 앉히면 **정말로** 하한을 지키는지. 창 크기를 훑는 이유는 이 둘이
