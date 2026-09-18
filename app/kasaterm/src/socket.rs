@@ -2894,6 +2894,22 @@ impl Backend for PtyBackend {
         use serde_json::json;
         let mut live = self.live_surfaces();
         live.extend(kasa_pty::live_sessions());
+        // 제어문자가 섞였거나 너무 긴 id 는 판에 못 싣는다(저장소 `identity` 검사). 전에는 그
+        // 한 줄이 관측 전체를 실패시켜 이 기계 판이 다른 기계에서 30분 넘게 「관측 불가」였다
+        // (2026-09-18 맥북). 여기서 걸러 내고, **어느 id 인지** 한 번 남긴다 — 출처를 잡으려면
+        // 그 글자가 보여야 한다.
+        live.retain(|id| {
+            let ok = id.len() <= 256 && !id.chars().any(char::is_control);
+            if !ok {
+                static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+                let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+                if !seen.contains(id) {
+                    eprintln!("[board] surface skipped: id has control chars or is too long: {id:?}");
+                    seen.push(id.clone());
+                }
+            }
+            ok
+        });
         // Discovery binds transcripts from owned process trees; it does not
         // query Claude's agent inventory or the cross-session peer registry.
         self.discover_unbound(&live);

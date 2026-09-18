@@ -13,6 +13,7 @@
 #   app      pull → build-app.sh (앱 전체; 반영은 사람이 앱을 껐다 켜야 한다)
 #   pet      pull → pet-reload.sh (펫만, 즉시 반영)
 #   journal  pull → request-journal 서비스 재시작(펫의 뇌·나쵸 말투·집컴 전원)
+#   applog   앱 stderr 로그의 판·상태·패닉 줄(고정 패턴, 인자 없음)
 #   log      최근 기록(이 스크립트·펫 띄우기·펫의 뇌) 꼬리 — 실패 원인을 터널 너머에서 본다
 #   --force  app 에서 다른 pane 이 Rust 를 만지는 중이어도 강행
 #
@@ -43,8 +44,8 @@ for a in "$@"; do
     *) echo "[remote-bake] 모르는 옵션: $a" >&2; exit 2 ;;
   esac
 done
-case "$VERB" in status|pull|app|pet|journal|log|mini) ;; *)
-  echo "[remote-bake] 동사는 status·pull·app·pet·journal·log·mini 중 하나다 (받은 것: $VERB)" >&2; exit 2 ;;
+case "$VERB" in status|pull|app|pet|journal|log|applog|mini) ;; *)
+  echo "[remote-bake] 동사는 status·pull·app·pet·journal·log·applog·mini 중 하나다 (받은 것: $VERB)" >&2; exit 2 ;;
 esac
 
 say() { printf '[remote-bake] %s\n' "$*"; }
@@ -106,6 +107,20 @@ print(((json.load(sys.stdin).get("result") or {}).get("text")) or "")' 2>/dev/nu
   return 1
 }
 
+# 앱 자체의 stderr 로그(`$TMPDIR/kasaterm-app.log`)에서 판·상태·패닉 줄만 — 미니에서 맥북 앱이
+# 왜 그 기계 판을 못 내는지 볼 때(2026-09-18 「invalid surface_id」). 패턴은 고정이다: ssh 를
+# 거치는 인자는 저쪽 셸이 다시 풀어 `[`·`|` 가 글롭·파이프가 되므로 받지 않는다.
+applog() {
+  local tmp; tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp/)"
+  local f="${tmp}kasaterm-app.log"
+  say "── $f"
+  if [[ -f "$f" ]]; then
+    grep -nE '\[board\]|\[state\]|panicked|invalid|skipped' "$f" | tail -n 40 | cut -c1-240
+  else
+    say "(없음)"
+  fi
+}
+
 logs() {
   local tmp; tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp/)"
   for f in "$LOG" "${tmp}kasapet-reload.log" "$HOME/.config/kasaterm/request-journal/service.log"; do
@@ -118,6 +133,7 @@ run() {
   case "$VERB" in
     status) status ;;
     log) logs ;;
+    applog) applog ;;
     pull) pull ;;
     app)
       pull || return 1

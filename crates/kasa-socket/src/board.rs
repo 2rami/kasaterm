@@ -252,24 +252,28 @@ pub fn normalize_panes(machine: &str, label: &str, rows: &[Value], at: u64) -> R
     let mut ids = HashSet::new();
     let mut surfaces = HashSet::new();
     rows.iter()
-        .map(|row| {
+        .filter_map(|row| {
             let address = &row["address"];
             if field(address, "machine_id") != Some(machine) {
-                bail!("source machine mismatch");
+                return Some(Err(anyhow::anyhow!("source machine mismatch")));
             }
-            let key = identity(address, "surface_key")?;
-            let surface = identity(address, "surface_id")?;
+            // 한 줄의 신원이 깨졌으면(제어문자·256자 초과) **그 줄만** 버린다. 전에는 여기서
+            // 관측 전체가 실패해 그 기계 판이 「관측 불가」로 30분 넘게 굳었다(2026-09-18
+            // 맥북). 어느 id 였는지는 생산자 쪽(`collab_board_source`)이 로그로 말한다.
+            let (Ok(key), Ok(surface)) = (identity(address, "surface_key"), identity(address, "surface_id")) else {
+                return None;
+            };
             let id = pane_id(machine, &key);
             if !ids.insert(id.clone()) || !surfaces.insert(surface.clone()) {
-                bail!("ambiguous surface identity");
+                return Some(Err(anyhow::anyhow!("ambiguous surface identity")));
             }
             let mut clean = json!({"id":id,"address":{"machine_id":machine,
             "surface_key":key,"surface_id":surface},"machine_label":short(label,256),
             "room_label":"","title":"","request":"","progress":"","status":"unknown",
             "observed_at_ms":at,"freshness":"fresh"});
             for name in ["session_id", "instance_id"] {
-                if field(address, name).is_some() {
-                    clean["address"][name] = json!(identity(address, name)?);
+                if let Ok(value) = identity(address, name) {
+                    clean["address"][name] = json!(value);
                 }
             }
             for name in TRACKED.iter().copied().filter(|name| *name != "address") {
@@ -294,9 +298,30 @@ pub fn normalize_panes(machine: &str, label: &str, rows: &[Value], at: u64) -> R
             ) {
                 clean["status"] = json!("unknown");
             }
-            Ok(clean)
+            Some(Ok(clean))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod normalize_panes_tests {
+    use super::*;
+
+    /// 깨진 id 한 줄이 그 기계 판 전체를 버리지 않는다 — 멀쩡한 줄은 남는다.
+    #[test]
+    fn a_row_with_a_control_character_id_is_dropped_alone() {
+        let rows = vec![
+            json!({"address":{"machine_id":"m","surface_key":"k1","surface_id":"%1"},"status":"working"}),
+            json!({"address":{"machine_id":"m","surface_key":"k2","surface_id":"%2\u{7}"},"status":"idle"}),
+            json!({"address":{"machine_id":"m","surface_key":"k3","surface_id":"%3","session_id":"bad\u{1b}"},"status":"idle"}),
+        ];
+        let out = normalize_panes("m", "M", &rows, 1).unwrap();
+        let surfaces: Vec<&str> = out.iter().filter_map(|r| field(&r["address"], "surface_id")).collect();
+        assert_eq!(surfaces, vec!["%1", "%3"]);
+        assert!(field(&out[1]["address"], "session_id").is_none(), "깨진 session_id 는 칸만 비운다");
+        let other = vec![json!({"address":{"machine_id":"other","surface_key":"k","surface_id":"%1"}})];
+        assert!(normalize_panes("m", "M", &other, 1).is_err(), "기계가 다른 줄은 여전히 관측 실패다");
+    }
 }
 
 pub struct BoardStore {

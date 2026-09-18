@@ -527,6 +527,10 @@ impl App {
                     );
                 }
             }
+            // 60초 방치는 알릴 일이 아니다 — 학생이 답을 마치고 서 있는 것뿐이고, 그건 완료 알림과
+            // 입력창 위 손 흔들기가 이미 말했다. 여기서 토스트·알림·읽지 않음을 세우면 승인처럼
+            // 보인다(2026-09-18 코유키).
+            Transition::Waiting { kind: crate::agent_state::WaitKind::Idle, .. } => {}
             Transition::Waiting { kind, reason } => {
                 self.notify_flash.remove(id);
                 if let Some(wi) = background_window {
@@ -4043,6 +4047,8 @@ pub(crate) fn pet_state_of(
             "error",
             if label.is_empty() { "막혔어요".to_string() } else { label.clone() },
         ),
+        // 60초 방치는 펫이 재촉할 일이 아니다 — 승인·질문만 「기다려요」.
+        AgentState::Waiting { kind: crate::agent_state::WaitKind::Idle, .. } => ("idle", String::new()),
         AgentState::Waiting { kind, reason } => (
             "wait",
             doing_now(if reason.is_empty() { kind.default_reason() } else { reason }),
@@ -4074,6 +4080,8 @@ mod pet_state_tests {
         let (st, what) = pet_state_of(&w, false, None, "");
         assert_eq!(st, "wait");
         assert!(!what.is_empty(), "이유가 비어도 종류별 기본 문구가 있다");
+        let idle_prompt = AgentState::Waiting { kind: WaitKind::Idle, reason: "x".into() };
+        assert_eq!(pet_state_of(&idle_prompt, false, None, "").0, "idle", "60초 방치는 재촉 대상이 아니다");
         assert_eq!(pet_state_of(&AgentState::Error { label: "연결 끊김".into() }, false, None, ""), ("error", "연결 끊김".into()));
     }
 }

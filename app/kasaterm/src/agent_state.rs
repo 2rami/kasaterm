@@ -76,8 +76,11 @@ impl AgentState {
     pub(crate) fn is_busy(&self) -> bool {
         matches!(self, Self::Working | Self::Compacting)
     }
+    /// 사람 손이 있어야 풀리는가 — 승인·질문뿐이다. 60초 방치(idle_prompt)는 「답을 마치고
+    /// 다음 지시를 기다림」이라 보드에는 waiting/idle 로 실리지만 주황 깜빡임·알림·tell 거부는
+    /// 안 받는다(2026-09-18 「선택하는 거 아닌데 왜 주황색 깜빡임」).
     pub(crate) fn needs_you(&self) -> bool {
-        matches!(self, Self::Waiting { .. })
+        matches!(self, Self::Waiting { kind: WaitKind::Permission | WaitKind::Question, .. })
     }
     /// 같은 상태인가(이유·라벨 글자는 무시) — 전이 관찰과 `since` 계산용.
     pub(crate) fn same_kind(&self, other: &Self) -> bool {
@@ -711,6 +714,15 @@ mod tests {
         assert_eq!(resolve(&a), (AgentState::Working, "agy fresh"));
         a.transcript_age = Some(secs(50));
         assert_eq!(resolve(&a).0, AgentState::Idle);
+    }
+
+    #[test]
+    fn an_idle_prompt_is_not_a_hand_needed() {
+        let idle = AgentState::Waiting { kind: WaitKind::Idle, reason: "Claude is waiting for your input".into() };
+        assert!(!idle.needs_you());
+        assert!(!idle.is_busy());
+        assert_eq!(idle.board_word(), "waiting", "보드 낱말은 종전 계약대로 — attention_kind 가 idle 로 가른다");
+        assert!(AgentState::Waiting { kind: WaitKind::Question, reason: String::new() }.needs_you());
     }
 
     #[test]
