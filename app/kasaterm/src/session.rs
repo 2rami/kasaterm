@@ -1372,7 +1372,7 @@ impl App {
         // 분할선 하나만 움직여 나머지 줄이 당겨오기에 되돌아 보였다(2026-09-18). 양쪽 모든
         // 쌍을 축과 함께 보내고 원본이 같은 축의 분할선만 고른다.
         let Some((left, right)) = tree.and_then(|t| t.split_leaves_at(path)) else { return };
-        let remote = |local: &str| kasa_mcp::remote::remote_info(local).map(|i| i.remote_id);
+        let remote = |local: &str| kasa_mcp::remote::remote_info(&self.leaf_pty_id(local)).map(|i| i.remote_id);
         let left: Vec<String> = left.iter().filter_map(|l| remote(l)).collect();
         let right: Vec<String> = right.iter().filter_map(|l| remote(l)).collect();
         if left.is_empty() || right.is_empty() { return }
@@ -1396,7 +1396,7 @@ impl App {
     pub(crate) fn push_remote_view_move(&mut self, window: usize, moving: &str, target: &str, zone: crate::DropZone) {
         if self.remote_view_of_window(window).is_none() { return }
         let Some((label, _)) = self.remote_view_of_window(window) else { return };
-        let remote = |local: &str| kasa_mcp::remote::remote_info(local).map(|i| i.remote_id);
+        let remote = |local: &str| kasa_mcp::remote::remote_info(&self.leaf_pty_id(local)).map(|i| i.remote_id);
         let (Some(source), Some(anchor)) = (remote(moving), remote(target)) else { return };
         let Some(m) = kasa_mcp::machines::find(&label) else { return };
         let direction = match zone {
@@ -1451,7 +1451,7 @@ impl App {
             let mut source_window: Option<u64> = None;
             let mut complete = true;
             for leaf in &leaves {
-                let Some(info) = kasa_mcp::remote::remote_info(leaf) else { complete = false; break };
+                let Some(info) = kasa_mcp::remote::remote_info(&self.leaf_pty_id(leaf)) else { complete = false; break };
                 let Some(row) = kasa_mcp::machines::cached_pane(&label, &info.remote_id) else { complete = false; break };
                 let (Some(rect), Some(win)) = (crate::machinescol::row_rect(&row), row.get("window").and_then(|v| v.as_u64())) else { complete = false; break };
                 if source_window.is_some_and(|w| w != win) { complete = false; break }
@@ -1512,7 +1512,7 @@ impl App {
         let mut base: Option<String> = None;
         let mut ids = Vec::with_capacity(leaves.len());
         for leaf in &leaves {
-            let info = kasa_mcp::remote::remote_info(leaf).filter(|r| r.view)?;
+            let info = kasa_mcp::remote::remote_info(&self.leaf_pty_id(leaf)).filter(|r| r.view)?;
             match &base {
                 Some(b) if !kasa_mcp::machines::same_machine_bases(b, &info.base) => return None,
                 None => base = Some(info.base.clone()),
@@ -3558,6 +3558,16 @@ impl App {
             crate::claude_auth::SwapOutcome::VaultEmpty
                 | crate::claude_auth::SwapOutcome::WriteFailed
         );
+        // 연결된 기기들도 같은 계정으로 — 본진에서 바꾸면 작업대가, 작업대에서 바꾸면
+        // 본진이 따라온다(2026-09-18 지시). 자격증명은 기계마다 따로라 옮기지 않고
+        // 신원(이메일·조직)과 별명만 보내며, 받는 쪽은 자기 슬롯 중 같은 것을 고른다.
+        if !self.account_switch_from_peer {
+            let identity = crate::settings::account_identity(to).unwrap_or_default();
+            let label = self.set_claude_accounts.iter().find(|a| a.id == to)
+                .map(|a| a.label.clone()).filter(|l| !l.is_empty())
+                .unwrap_or_else(|| to_label.clone());
+            propagate_account_switch(identity, label);
+        }
         (
             from_label,
             to_label,
@@ -3565,6 +3575,21 @@ impl App {
             deferred,
             focused_pending,
             live,
+        )
+    }
+
+    /// 다른 기기가 보낸 신원·별명에 맞는 내 슬롯. 신원이 같은 슬롯이 먼저, 없으면 별명이
+    /// 같은 슬롯. `""` 는 기본 로그인.
+    pub(crate) fn peer_account_slot(&self, identity: &str, label: &str) -> Option<String> {
+        let slots: Vec<(String, String)> = std::iter::once((String::new(), String::new()))
+            .chain(self.set_claude_accounts.iter().map(|a| (a.id.clone(), a.label.clone())))
+            .collect();
+        peer_account_slot_in(
+            &slots,
+            |id| crate::settings::account_identity(id),
+            |id| self.claude_account_display(id),
+            identity,
+            label,
         )
     }
 
@@ -5676,6 +5701,14 @@ impl App {
     /// `i` 번 방의 pane id 들. 활성 방의 트리만 `pty_layout` 에 나가 있어 슬롯이
     /// 비는데, 그걸 모르고 `windows[i]` 만 보면 지금 보고 있는 방이 늘 빈 방이 된다
     /// — 사이드바·라벨·상태 점이 다 이 갈래를 각자 쓰고 있어 한 곳으로 모은다.
+    /// leaf 가 가리키는 PTY 번호 — 보통 leaf 번호 그대로지만, 탭을 빼내 새 번호를 받은
+    /// pane 은 PTY·거울 등록이 첫 탭의 pid 에 남아 있다(2026-09-18). 거울 판정·저장은
+    /// 이걸로 찾는다. 렌더가 ws 를 쥔 채 부를 수 있어 `try_lock` — 못 잡으면 leaf 그대로.
+    pub(crate) fn leaf_pty_id(&self, leaf: &str) -> String {
+        self.ws.try_lock().ok()
+            .and_then(|ws| ws.panes.get(leaf).and_then(|p| p.tabs.first()).and_then(|t| t.pid.clone()))
+            .unwrap_or_else(|| leaf.to_string())
+    }
     pub(crate) fn window_leaves(&self, i: usize) -> Vec<String> {
         let layout = if i == self.active_window {
             self.pty_layout.as_ref()
@@ -6672,9 +6705,12 @@ impl App {
                     let pane = ws.panes.get(pane_id);
                     // leaf 의 몫은 **첫 탭**이다 — 바깥 pane id 가 곧 첫 탭의 pid 다.
                     let first = pane.and_then(|p| p.tabs.first());
+                    // 탭을 빼내 번호가 갈린 pane 은 PTY·원격 명세가 첫 탭 pid 에 있다 — 그걸로
+                    // 채워야 거울이 「빈 자리」로 저장되지 않는다(2026-09-18).
+                    let record_of = first.and_then(|t| t.pid.as_deref()).unwrap_or(pane_id);
                     Self::fill_surface_record(
                         obj,
-                        pane_id,
+                        record_of,
                         first
                             .filter(|t| t.title_pinned)
                             .and_then(|t| t.title.as_deref()),
@@ -9542,6 +9578,54 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
     }
 }
 
+/// `peer_account_slot` 의 순수한 몸통 — `slots` 는 `(id, 별명)`, 기본 로그인 `""` 포함.
+pub(crate) fn peer_account_slot_in(
+    slots: &[(String, String)],
+    identity_of: impl Fn(&str) -> Option<String>,
+    display_of: impl Fn(&str) -> String,
+    identity: &str,
+    label: &str,
+) -> Option<String> {
+    if !identity.is_empty() {
+        if let Some((id, _)) = slots.iter().find(|(id, _)| identity_of(id).as_deref() == Some(identity)) {
+            return Some(id.clone());
+        }
+    }
+    if label.is_empty() {
+        return None;
+    }
+    slots.iter()
+        .find(|(id, l)| (!l.is_empty() && l == label) || display_of(id) == label)
+        .map(|(id, _)| id.clone())
+}
+
+/// 계정 전환을 명부의 다른 기기 전부에 알린다 — `claude-account-identity` 액션. 닿지 않는
+/// 기기는 건너뛴다(그쪽이 켜지면 사람이 한 번 맞추면 된다).
+fn propagate_account_switch(identity: String, label: String) {
+    let peers: Vec<kasa_mcp::machines::Machine> = kasa_mcp::machines::machines()
+        .into_iter()
+        .filter(|m| !m.base.trim().is_empty())
+        .collect();
+    if peers.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for m in peers {
+            let r = kasa_mcp::remote::settings_action(
+                &m.base, "claude-account-identity", Some(&identity), Some(&label), None,
+            );
+            match r {
+                Ok(v) if v.get("ok").and_then(|b| b.as_bool()) == Some(false) => eprintln!(
+                    "[account] {} 는 같은 계정을 못 골랐다: {}", m.label,
+                    v.get("error").and_then(|e| e.as_str()).unwrap_or("?")
+                ),
+                Ok(_) => {}
+                Err(e) => eprintln!("[account] {} 에 계정 전환을 못 전했다: {e:#}", m.label),
+            }
+        }
+    });
+}
+
 /// 거울의 분할선 밀어내기는 한 줄로 세워 보낸다. 드래그 중 칸 경계마다 스레드를 띄우면 도착
 /// 순서가 뒤바뀌어 원본이 마지막이 아닌 비율에 멈추고, 3초 뒤 당겨오기가 거울을 그 자리로
 /// 되돌린다(2026-09-18). 같은 분할선의 것이 쌓였으면 마지막 것만 보낸다 — 다른 분할선의
@@ -9585,6 +9669,28 @@ fn queue_remote_divider(base: String, params: serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn peer_account_slot_prefers_identity_then_label_and_never_guesses() {
+        let slots = vec![
+            (String::new(), String::new()),
+            ("acct-1".to_string(), "지메일".to_string()),
+            ("acct-4".to_string(), "사이오닉팀".to_string()),
+            ("acct-9".to_string(), String::new()),
+        ];
+        let identity_of = |id: &str| match id {
+            "acct-1" => Some("me@gmail.com".to_string()),
+            "acct-4" => Some("Sionic".to_string()),
+            _ => None,
+        };
+        let display_of = |id: &str| match id { "acct-9" => "계정 5".to_string(), "" => "기본 계정".to_string(), _ => id.to_string() };
+        let pick = |identity: &str, label: &str| super::peer_account_slot_in(&slots, identity_of, display_of, identity, label);
+        assert_eq!(pick("Sionic", "엉뚱한 별명").as_deref(), Some("acct-4"), "신원이 별명보다 먼저");
+        assert_eq!(pick("nobody@x", "지메일").as_deref(), Some("acct-1"), "신원이 없으면 별명");
+        assert_eq!(pick("", "계정 5").as_deref(), Some("acct-9"), "별명이 비면 표시 이름");
+        assert_eq!(pick("", "기본 계정").as_deref(), Some(""), "기본 로그인도 후보");
+        assert_eq!(pick("nobody@x", ""), None, "아무것도 안 맞으면 안 바꾼다");
+    }
+
     #[test]
     fn mixed_character_picks_replace_conflicts_without_changing_other_choices() {
         use super::updated_character_picks;

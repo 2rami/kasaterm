@@ -5410,6 +5410,8 @@ struct App {
     /// 계정이 바뀐 순간 — 계정 칩 둘레가 잠깐 반짝인다. 끝나면 `None` 으로 걷어야
     /// 프레임 펌프가 멎는다(안 걷으면 창 하나가 상시 8ms 로 돈다).
     account_flash: Option<std::time::Instant>,
+    /// 다른 기기가 바꾼 계정을 따라가는 중 — 이때는 다시 퍼뜨리지 않는다(핑퐁 방지).
+    account_switch_from_peer: bool,
     /// Panes whose last turn finished and the user hasn't typed into since —
     /// drives the student's cheer (arms-up) standing pose. Set on turn
     /// completion, cleared on the next `forward_key` into that pane, so the
@@ -6076,6 +6078,7 @@ impl App {
             window_focused: true,
             notify_flash: HashMap::new(),
             account_flash: None,
+            account_switch_from_peer: false,
             turn_done_panes: std::collections::HashSet::new(),
             window_alert: std::collections::HashSet::new(),
             expanded_windows: std::collections::HashSet::new(),

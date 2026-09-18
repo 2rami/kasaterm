@@ -2064,6 +2064,28 @@ impl App {
                 }
                 Ok(awaiting || self.set_claude_account == id)
             }
+            // 다른 기기가 계정을 바꿨다 — 같은 신원(id 자리에 이메일·조직)이나 별명의 내
+            // 슬롯으로 따라간다. 확인 창 없이 바로 적용한다(그쪽에서 이미 정한 일이다).
+            "claude-account-identity" => {
+                let want = id.trim();
+                let Some(slot) = self.peer_account_slot(want, &arg) else {
+                    return Err(no_slot(if want.is_empty() { arg.as_str() } else { want }));
+                };
+                if slot == self.set_claude_account {
+                    return Ok(true);
+                }
+                self.account_switch_from_peer = true;
+                let (_, to_label, restarted, deferred, focused, live) =
+                    self.apply_claude_account_switch(&slot);
+                self.account_switch_from_peer = false;
+                self.account_flash = Some(std::time::Instant::now());
+                self.set_toast(format!(
+                    "다른 기기를 따라 {}",
+                    crate::session::account_switch_toast(&to_label, false, restarted, deferred, focused, live)
+                ));
+                self.chrome_dirty = true;
+                Ok(true)
+            }
             "add-claude-account" => {
                 let before = self.set_claude_accounts.len();
                 self.settings_apply(SettingsAction::AddClaudeAccount);
