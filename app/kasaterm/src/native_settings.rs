@@ -4249,6 +4249,14 @@ fn paint_pet(
         &format!("{}{}", prefs.say_seconds, crate::native_strings::text("초")),
         Change::SaySeconds(prefs.say_seconds.saturating_sub(1).max(3)),
         Change::SaySeconds((prefs.say_seconds + 1).min(60)));
+    toggle_row(g, s, hits, x, y, w, "먼저 말 걸기", prefs.chatter,
+        SettingsAction::PetPreference(Change::Chatter(!prefs.chatter)));
+    if prefs.chatter {
+        pet_value_row(g, s, hits, x, y, w, "말 거는 간격",
+            &format!("{}{}", prefs.chatter_seconds, crate::native_strings::text("초")),
+            Change::ChatterSeconds(prefs.chatter_seconds.saturating_sub(5).max(5)),
+            Change::ChatterSeconds((prefs.chatter_seconds + 5).min(120)));
+    }
 
     pet_section(g, x, y, "펫 조작");
     for text in [

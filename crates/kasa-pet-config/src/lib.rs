@@ -20,6 +20,10 @@ pub struct PetPreferences {
     /// 긴 말(나쵸 요약)이 앉는 말풍선의 최대 너비(논리 px).
     pub bubble_width: u32,
     pub say_seconds: u32,
+    /// 묻지 않아도 먼저 말을 건다 — 지금 보는 창을 보고 몇 초에 한 줄씩.
+    pub chatter: bool,
+    /// 그 말과 말 사이. 나쵸를 그때마다 부르는 게 아니라 여러 줄을 미리 받아 푼다.
+    pub chatter_seconds: u32,
     pub sleep_minutes: u32,
 }
 
@@ -37,6 +41,8 @@ impl Default for PetPreferences {
             text_pt: 13,
             bubble_width: 400,
             say_seconds: 12,
+            chatter: true,
+            chatter_seconds: 10,
             sleep_minutes: 8,
         }
     }
@@ -55,6 +61,8 @@ pub enum PreferenceChange {
     TextPt(u32),
     BubbleWidth(u32),
     SaySeconds(u32),
+    Chatter(bool),
+    ChatterSeconds(u32),
     SleepMinutes(u32),
 }
 
@@ -72,6 +80,8 @@ impl PreferenceChange {
             Self::TextPt(v) => ("text_pt", json!(v.clamp(8, 40))),
             Self::BubbleWidth(v) => ("bubble_width", json!(v.clamp(240, 800))),
             Self::SaySeconds(v) => ("say_seconds", json!(v.clamp(3, 60))),
+            Self::Chatter(v) => ("chatter", json!(v)),
+            Self::ChatterSeconds(v) => ("chatter_seconds", json!(v.clamp(5, 120))),
             Self::SleepMinutes(v) => ("sleep_minutes", json!(v.min(60))),
         }
     }
@@ -117,6 +127,8 @@ pub fn read(dir: &Path) -> PetPreferences {
         text_pt: number(v.get("text_pt"), legacy_pt, 8, 40),
         bubble_width: number(v.get("bubble_width"), d.bubble_width, 240, 800),
         say_seconds: number(v.get("say_seconds"), d.say_seconds, 3, 60),
+        chatter: flag("chatter", d.chatter),
+        chatter_seconds: number(v.get("chatter_seconds"), d.chatter_seconds, 5, 120),
         sleep_minutes: number(v.get("sleep_minutes"), d.sleep_minutes, 0, 60),
     }
 }

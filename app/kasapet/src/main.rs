@@ -20,6 +20,7 @@ const MASK: u32 = 2048;
 
 mod board;
 mod bubble;
+mod chatter;
 mod menu;
 mod catalog;
 mod journal;
@@ -124,6 +125,11 @@ struct App {
     nacho_expression: Option<usize>,
     /// 말 거는 중이면 친 글. None 이면 평소처럼 듣기만 한다.
     typing: Option<String>,
+    /// 묻지 않아도 먼저 거는 말을 대 주는 곳.
+    chatter: chatter::Client,
+    /// 말풍선에 글자를 한 자씩 찍는 중 — (지금까지 찍은 글자 수, 마지막으로 찍은 때).
+    /// 비어 있으면 통째로 보여 준다.
+    typed: Option<(usize, std::time::Instant)>,
     journal: journal::Client,
     journal_shown: bool,
     chat: chat::Chat,
@@ -992,6 +998,7 @@ impl App {
         self.urgent = false;
         self.say = text;
         self.said_at = std::time::Instant::now();
+        self.typed = (self.say.chars().count() <= Self::TYPE_LIMIT).then(|| (1, std::time::Instant::now()));
         self.rebuild_bubble_text();
     }
 
@@ -1007,6 +1014,11 @@ impl App {
 
     /// 읽으라고 띄운 답이라도 이만큼 지나면 내린다 — 오래된 판 요약은 지금 이야기가 아니다.
     const ANSWER_LINGER: std::time::Duration = std::time::Duration::from_secs(180);
+
+    /// 먼저 거는 말이 떠 있는 답을 비켜 주는 시간. 답은 안 접히는 것이 규칙이라(3분),
+    /// 그것을 그대로 기다리면 켤 때 인사 한 줄에 3분을 내주게 되고 먼저 거는 말은 없는
+    /// 기능이 된다. 사람이 한 줄을 읽기에는 넉넉하고 잡담이 끊기기에는 짧은 자리다.
+    const ANSWER_RESPECT: std::time::Duration = std::time::Duration::from_secs(45);
 
     fn poll_ask(&mut self) {
         #[cfg(target_os = "macos")]
@@ -1074,6 +1086,25 @@ impl App {
                 self.ask_offset = offset;
                 self.save_state();
             }
+        }
+    }
+
+    /// 묻지 않아도 먼저 거는 말. 사람이 지금 읽을 것이 떠 있거나 무언가 묻는 중이면
+    /// 끼어들지 않는다 — 혼잣말이 사람이 기다리던 답을 덮으면 그건 방해다.
+    fn poll_chatter(&mut self) {
+        if !self.preferences.chatter || !self.preferences.bubbles { return; }
+        let gap = std::time::Duration::from_secs(self.preferences.chatter_seconds as u64);
+        // 사람 손이 필요하다는 말 위에 잡담을 얹지 않는다 — 그 한 줄이 여기 있는 이유가 그것이다.
+        let reading = self.answer_shown && self.said_at.elapsed() < Self::ANSWER_RESPECT;
+        let quiet = self.urgent || reading || self.journal_shown || self.ask.busy()
+            || self.typing.is_some() || self.chat.network_active();
+        // 자는 펫이 떠들면 자는 것이 아니다.
+        if self.resting || self.mood == board::Mood::Sleep { return; }
+        let Some(path) = self.journal_path() else { return };
+        let pane = self.ask_pane();
+        if let Some(line) = self.chatter.poll(&path, &pane, gap, quiet) {
+            self.speak(line, false);
+            self.perform(Some("Talk".into()), None);
         }
     }
 
@@ -1403,7 +1434,29 @@ impl App {
         self.bubble_geometry=None;
         let Some(viewport)=self.bubble_viewport() else {self.bubble_text=None;return;};
         let Some(g) = &self.gfx else { return };
-        self.bubble_text = bubble::render_preview(&g.dev, &g.q, &self.say, viewport, self.text_pt, self.preferences.bubble_width as f32);
+        let say = match self.typed {
+            Some((shown, _)) => self.say.chars().take(shown).collect(),
+            None => self.say.clone(),
+        };
+        self.bubble_text = bubble::render_preview(&g.dev, &g.q, &say, viewport, self.text_pt, self.preferences.bubble_width as f32);
+    }
+
+    /// 한 자를 찍는 데 드는 시간. 사람이 읽는 속도보다 빠르되, 글자가 돋아나는 것이
+    /// 보이는 만큼은 느려야 효과가 효과로 읽힌다.
+    const TYPE_STEP: std::time::Duration = std::time::Duration::from_millis(45);
+    /// 이보다 긴 말은 한 번에 보여 준다 — 판 전체 요약을 한 자씩 찍으면 다 뜨기 전에
+    /// 말풍선이 접힐 시간이 된다.
+    const TYPE_LIMIT: usize = 160;
+
+    /// 찍는 중이면 한 자 더. 다 찍었으면 통째로 보여 주는 상태로 돌아간다.
+    fn tick_typewriter(&mut self) {
+        let Some((shown, at)) = self.typed else { return };
+        let total = self.say.chars().count();
+        let steps = (at.elapsed().as_millis() / Self::TYPE_STEP.as_millis().max(1)) as usize;
+        if shown < total && steps == 0 { return; }
+        let next = shown.saturating_add(steps);
+        self.typed = (next < total).then(|| (next, std::time::Instant::now()));
+        self.rebuild_bubble_text();
     }
 
     fn bubble_viewport(&self)->Option<(f32,f32)> {
@@ -1426,6 +1479,8 @@ impl App {
         self.poll_journal();
         self.poll_chat();
         self.poll_ask();
+        self.poll_chatter();
+        self.tick_typewriter();
         self.tick_bounce();
         let finished = self.motion.as_ref().is_some_and(|m| m.is_finished());
         if self.playback.finish_once(finished) { self.resume_automatic(); }
@@ -2023,6 +2078,8 @@ fn main() {
         chat_prefill: None,
         ask: ask::Client::default(),
         answer_shown: false,
+        chatter: chatter::Client::default(),
+        typed: None,
         #[cfg(target_os = "macos")]
         chat_panel: None,
         #[cfg(target_os = "macos")]

@@ -255,7 +255,8 @@ class Handler(BaseHTTPRequestHandler):
         pet_request = route == "/api/pet-summary"
         chat_request = route == "/api/chat"
         ask_request = route == "/api/ask"
-        if not pet_request and not chat_request and not ask_request and (len(parts) != 4 or parts[:2] != ["api", "requests"] or parts[3] != "ack"):
+        chatter_request = route == "/api/pet-chatter"
+        if not pet_request and not chat_request and not ask_request and not chatter_request and (len(parts) != 4 or parts[:2] != ["api", "requests"] or parts[3] != "ack"):
             return self.reply(404, {"error": "not_found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -271,6 +272,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(400, {"error": "invalid_ask_request"})
                 from .ask import answer
                 status, payload = answer(self.server.chat.provider_factory, body)
+                return self.reply(status, payload)
+            if chatter_request:
+                # 펫이 먼저 거는 말 — 아무도 묻지 않았고 아무것도 실행하지 않는다.
+                if self.server.chat is None:
+                    return self.reply(503, {"error": "chat_unavailable"})
+                if not isinstance(body, dict) or set(body) - {"pane", "count"}:
+                    return self.reply(400, {"error": "invalid_chatter_request"})
+                from .chatter import chatter
+                status, payload = chatter(self.server.chat.provider_factory, body)
                 return self.reply(status, payload)
             if chat_request:
                 if self.server.chat is None:
