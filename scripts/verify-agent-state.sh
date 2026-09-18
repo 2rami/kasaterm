@@ -68,23 +68,32 @@ FAIL=0
 expect() {
   local label="$1" want="$2" why="$3"; shift 3
   "$@" >/dev/null 2>&1 || echo "  (CLI 실패: $*)"
-  local t0=$(date +%s) got="" ok=0
-  for _ in $(seq 1 40); do
+  # 반영까지 걸린 시간(ms) — 관측이 신호로 깨는지가 곧 이 숫자다(2026-09-18 「보드가 느리네」).
+  local t0=$(python3 -c 'import time; print(int(time.time()*1000))') got="" ok=0
+  local seen=""
+  for _ in $(seq 1 80); do
     got="$(row)"
     case "$got" in
       "$want | "*"$why"*) ok=1; break ;;
     esac
-    sleep 0.25
+    # 기대값이 오기 전에 보드가 보여 준 중간값 — 느린 단계의 원인이 여기 찍힌다.
+    case "$seen" in *"$got"*) ;; *) seen="$seen
+      ⋯ $(python3 -c 'import time; print(int(time.time()*1000)%100000)') $got" ;; esac
+    sleep 0.1
   done
-  local dt=$(( $(date +%s) - t0 ))
+  [ -n "$seen" ] && [ "$ok" = 1 ] && printf '%s\n' "$seen"
+  local dt=$(( $(python3 -c 'import time; print(int(time.time()*1000))') - t0 ))
   if [ "$ok" = 1 ]; then
-    printf 'OK   %-28s %ss → %s\n' "$label" "$dt" "$got"
+    printf 'OK   %-28s %5sms → %s\n' "$label" "$dt" "$got"
   else
     FAIL=$((FAIL + 1))
     printf 'FAIL %-28s      → %s (기대 %s / %s)\n' "$label" "$got" "$want" "$why"
   fi
 }
 expect "fake claude(엔터 브리지)" working "enter bridge" true
+# 브리지(4초)가 끝나길 기다린다 — 안 그러면 뒤 단계의 훅 신호와 브리지가 섞여 반영 시간이
+# 브리지 만료 시각에 끌려간다(2026-09-18 실측: turn end 1.1초·reset 0.6초가 그것이었다).
+sleep 1.5
 expect "turn start (bypass)" working "hook turn open" "$CLI" turn start --permission-mode bypassPermissions
 expect "attention permission" waiting "hook attention" "$CLI" attention --kind permission "Bash 승인"
 expect "turn end" idle "turn closed" "$CLI" turn end

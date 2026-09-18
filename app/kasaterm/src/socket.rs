@@ -3545,6 +3545,7 @@ impl Backend for PtyBackend {
         // Stop 훅의 drain 이 부른다 — 턴이 닫혔다는 정본 신호. 기록이 닫는 줄을 아직 못
         // 썼어도 여기서 닫힌다.
         self.hub.turn(surface_id, "end", None);
+        kasa_mcp::board_service::poke();
         // Hand off to the GUI thread — the desktop alert (objc/osascript) and
         // any pane/sidebar flash both need App state we can't touch here.
         let _ = self.proxy.send_event(UserEvent::Notify {
@@ -3639,6 +3640,8 @@ impl Backend for PtyBackend {
             surface_id: surface_id.to_string(),
             reason: reason.to_string(),
         });
+        self.hub.invalidate();
+        kasa_mcp::board_service::poke();
         Ok(())
     }
 
@@ -3655,6 +3658,7 @@ impl Backend for PtyBackend {
                 idle_seen: false,
             },
         );
+        kasa_mcp::board_service::poke();
         // 소환한 pane 에 **직접 전한다.** 여태 보고는 여기 쌓이기만 하고 아무에게도
         // 안 갔다 — 오케스트레이터가 알려면 손으로 board 를 조회하는 수밖에 없어서,
         // 학생은 보고했다고 하는데 시킨 쪽은 모르는 상태가 됐다(2026-08-15 지적).
@@ -3723,6 +3727,7 @@ impl Backend for PtyBackend {
         drop(map);
         // 도구 훅이 왔다 = 하네스가 살아 움직인다. 열린 턴의 staleness 시계를 되돌린다.
         self.hub.beat(surface_id);
+        kasa_mcp::board_service::poke();
         Ok(())
     }
 
@@ -3731,6 +3736,8 @@ impl Backend for PtyBackend {
         if phase == "reset" {
             self.hook_activity.lock().unwrap().remove(surface_id);
         }
+        // 턴 경계가 곧 보드의 status 다 — 관측 주기를 기다리지 않고 바로 긁게 한다.
+        kasa_mcp::board_service::poke();
         Ok(())
     }
 }

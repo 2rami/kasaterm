@@ -186,9 +186,16 @@ fn remote_state(word: &str, reason: Option<&str>) -> AgentState {
 /// 턴이 열려 있나 — 훅과 기록 중 **더 새로운** 경계가 정하고, 그 위에 staleness 를 건다.
 /// 둘 다 없으면 명부·브리지·agy 폴백.
 fn turn_open(e: &Evidence) -> Option<&'static str> {
-    if e.last_submit_age.is_some_and(|age| age < SUBMIT_BRIDGE) {
-        return Some("enter bridge");
-    }
+    // Enter 브리지는 **그 Enter 뒤에 아무 신호도 안 온 동안**만 잇는다 — 훅이나 기록이 그
+    // 뒤에 말했으면(열렸든 닫혔든) 그쪽이 정본이다. Enter 3초 뒤 Stop 이 닫았는데 브리지가
+    // 1초를 더 「일하는 중」으로 붙잡던 것(2026-09-18 리그 실측).
+    let bridge = e.last_submit_age.is_some_and(|submit| {
+        submit < SUBMIT_BRIDGE
+            && [e.hook_turn.map(|(_, at)| at), e.transcript_age]
+                .into_iter()
+                .flatten()
+                .all(|signal| signal > submit)
+    });
     let hook = e.hook_turn;
     let transcript = e.transcript_turn.zip(e.transcript_age);
     let newest = match (hook, transcript) {
@@ -212,9 +219,14 @@ fn turn_open(e: &Evidence) -> Option<&'static str> {
                 .flatten()
                 .min();
             let stale = freshest.is_none_or(|age| age >= TURN_STALE) && !e.heartbeat;
-            if stale { None } else { Some(reason) }
+            if !stale {
+                Some(reason)
+            } else {
+                bridge.then_some("enter bridge")
+            }
         }
-        Some((false, _, _)) => None,
+        Some((false, _, _)) => bridge.then_some("enter bridge"),
+        None if bridge => Some("enter bridge"),
         None => match e.harness {
             Some(kasa_pty::AgentKind::Agy) => {
                 let fresh = e.transcript_age.is_some_and(|age| age < AGY_ACTIVE);
@@ -335,6 +347,12 @@ impl StateHub {
     // ── 훅이 부르는 쓰기 ──────────────────────────────────────────────
     pub(crate) fn beat(&self, surface: &str) {
         self.hook_beat.lock().unwrap().insert(surface.to_string(), Instant::now());
+        self.invalidate();
+    }
+    /// 재료가 바뀌었다 — 다음 `refresh` 는 메모를 건너뛰고 다시 판정한다. 훅 직후 보드가
+    /// 옛 판정을 읽던 한 박자(최대 250ms, 관측 주기까지 겹치면 2초)를 없앤다.
+    pub(crate) fn invalidate(&self) {
+        self.resolved.lock().unwrap().0 = None;
     }
     /// `surface.turn` 의 phase 하나를 적는다. 모르는 phase 는 무시.
     pub(crate) fn turn(&self, surface: &str, phase: &str, permission_mode: Option<&str>) {
@@ -371,6 +389,7 @@ impl StateHub {
             self.perm_mode.lock().unwrap().insert(key.clone(), mode.to_string());
         }
         self.hook_beat.lock().unwrap().insert(key, now);
+        self.invalidate();
     }
     pub(crate) fn permission_mode(&self, surface: &str) -> Option<String> {
         self.perm_mode.lock().unwrap().get(surface).cloned()
@@ -643,6 +662,20 @@ mod tests {
     }
 
     #[test]
+    /// Enter 뒤에 훅이 닫았으면 브리지가 아니다 — Stop 이 정본. 반대로 훅이 닫힌 뒤 Enter 를
+    /// 쳤으면 브리지가 잇는다.
+    #[test]
+    fn a_hook_after_the_enter_beats_the_bridge() {
+        let mut e = Evidence { harness: Some(kasa_pty::AgentKind::Claude), ..Default::default() };
+        e.last_submit_age = Some(Duration::from_secs(3));
+        e.hook_turn = Some((HookTurn::Closed, Duration::from_millis(100)));
+        assert_eq!(resolve(&e), (AgentState::Idle, "turn closed"));
+        e.hook_turn = Some((HookTurn::Closed, Duration::from_secs(9)));
+        assert_eq!(resolve(&e), (AgentState::Working, "enter bridge"));
+        e.hook_turn = Some((HookTurn::Open, Duration::from_millis(100)));
+        assert_eq!(resolve(&e), (AgentState::Working, "hook turn open"));
+    }
+
     fn enter_bridge_and_official_busy_cover_the_hookless_gaps() {
         let mut e = claude();
         e.transcript_turn = Some(TurnState::Idle);

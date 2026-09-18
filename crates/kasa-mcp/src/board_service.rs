@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 struct Service {
@@ -20,7 +20,16 @@ struct Service {
     aliases: Mutex<HashMap<String, String>>,
     stop: AtomicBool,
     source_override: Option<Value>,
+    /// 로컬 관측을 지금 다시 하라는 신호(`poke`). 훅·판정이 바뀐 순간 보드가 따라오게 —
+    /// 주기(`LOCAL_FALLBACK`)만 믿으면 그만큼 늦는다(2026-09-18 「보드가 실시간이 아닌가」).
+    wake: (Mutex<bool>, Condvar),
 }
+
+/// 아무 신호가 없어도 이만큼마다 한 번은 긁는다 — 훅이 없는 하네스(codex·agy)의 기록 변화,
+/// 닫힌 pane 정리 같은 것은 신호 없이 일어난다.
+const LOCAL_FALLBACK: Duration = Duration::from_secs(2);
+/// 다른 기계 판을 당겨 오는 주기. 저쪽 판도 신호로 곧장 갱신되므로 이 주기가 곧 기계 간 지연이다.
+const REMOTE_EVERY: Duration = Duration::from_secs(2);
 
 pub struct CollectorConfig {
     pub machine_id: String,
@@ -240,6 +249,7 @@ pub fn register_with_config(
         aliases: Mutex::new(HashMap::new()),
         stop: AtomicBool::new(false),
         source_override: config.source_override,
+        wake: (Mutex::new(false), Condvar::new()),
     });
     {
         let mut current = slot().lock().unwrap_or_else(|e| e.into_inner());
@@ -256,11 +266,24 @@ pub fn register_with_config(
             if service.stop.load(Ordering::Acquire) {
                 break;
             }
+            let started = std::time::Instant::now();
             if !collect_local(&service, &machine, &label) {
                 break;
             }
+            if std::env::var_os("KASATERM_STATE_LOG").is_some() {
+                eprintln!("[board] local observe {}ms", started.elapsed().as_millis());
+            }
+            // 신호가 오면 바로, 없으면 주기마다. 관측 중에 온 신호는 플래그로 남아 다음 바퀴가
+            // 곧장 돈다 — 잠든 사이의 변화를 한 번에 접어 긁는다.
+            {
+                let (flag, cv) = &service.wake;
+                let mut poked = flag.lock().unwrap_or_else(|e| e.into_inner());
+                if !*poked {
+                    poked = cv.wait_timeout(poked, LOCAL_FALLBACK).unwrap_or_else(|e| e.into_inner()).0;
+                }
+                *poked = false;
+            }
             drop(service);
-            std::thread::sleep(Duration::from_secs(2));
         })?;
     if !config.remote_enabled {
         return Ok(CollectorGuard(service));
@@ -284,7 +307,7 @@ pub fn register_with_config(
                     }
                     refresh_remotes(&service, &client).await;
                     drop(service);
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::time::sleep(REMOTE_EVERY).await;
                 }
             });
         })?;
@@ -325,6 +348,22 @@ fn collect_local(service: &Service, machine: &str, label: &str) -> bool {
         store.persist();
     }
     true
+}
+
+/// 로컬 판을 지금 다시 긁으라고 깨운다. 훅 핸들러(turn·attention·notify·done·bind)와 GUI 의
+/// 상태 투영이 부른다. 수집기가 없으면 아무 일도 없다 — 호출부가 신경 쓸 것 없다.
+pub fn poke() {
+    let Ok(service) = service() else { return };
+    let (flag, cv) = &service.wake;
+    *flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
+    cv.notify_one();
+}
+
+/// 지금 판의 커서 — 바뀌었는지만 보려는 독자(보드 방)가 스냅샷 전체를 안 뜨고 비교한다.
+pub fn cursor() -> Option<String> {
+    let service = service().ok()?;
+    let cursor = service.store.lock().unwrap_or_else(|e| e.into_inner()).cursor();
+    Some(cursor)
 }
 
 fn service() -> Result<Arc<Service>> {
@@ -793,6 +832,7 @@ pub(crate) mod tests {
             aliases: Mutex::new(HashMap::new()),
             stop: AtomicBool::new(false),
             source_override: None,
+            wake: (Mutex::new(false), Condvar::new()),
         };
         assert!(collect_local(&service, "synthetic", "Synthetic"));
         for _ in 0..100 {
@@ -964,6 +1004,7 @@ pub(crate) mod tests {
             aliases: Mutex::new(HashMap::new()),
             stop: AtomicBool::new(false),
             source_override: None,
+            wake: (Mutex::new(false), Condvar::new()),
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

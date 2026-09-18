@@ -713,7 +713,9 @@ fn render_rooms(snapshot: &Value, me: &str, caller_machine: Option<&str>) -> Res
 fn run_collab_watch(socket_path: &str, args: &[String]) -> Result<()> {
     let mut scope = "all";
     let mut since: Option<String> = None;
-    let mut interval = 3;
+    // 변경분 조회(`collab.changes`)는 캐시 한 번이라 1초 폴링이 싸다 — 3초는 판이 신호로
+    // 바로 갱신되는 지금 병목이었다.
+    let mut interval = 1;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {

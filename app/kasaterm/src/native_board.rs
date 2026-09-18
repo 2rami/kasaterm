@@ -715,11 +715,20 @@ impl Scene {
         &self.git_message
     }
 
+    /// 판이 바뀌었으면(커서) 바로, 아니어도 2.2초마다 한 번. 커서 비교는 잠금 하나라 매 틱
+    /// 해도 싸고, 실패가 이어져도 300ms 바닥이 있어 헛돌지 않는다.
     pub(crate) fn refresh_due(&self) -> bool {
-        !self.refreshing
-            && self
-                .last_refresh
-            .is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(2200))
+        if self.refreshing {
+            return false;
+        }
+        let since = self.last_refresh.map(|at| at.elapsed());
+        let Some(since) = since else { return true };
+        if since >= std::time::Duration::from_millis(2200) {
+            return true;
+        }
+        since >= std::time::Duration::from_millis(300)
+            && kasa_mcp::board_service::cursor()
+                .is_some_and(|cursor| cursor != self.data.overview.cursor)
     }
 
     pub(crate) fn request_refresh(
