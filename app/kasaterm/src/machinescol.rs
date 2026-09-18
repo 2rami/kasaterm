@@ -17,7 +17,7 @@
 
 use super::*;
 
-fn remote_pane_closed(row: &serde_json::Value) -> bool {
+pub(crate) fn remote_pane_closed(row: &serde_json::Value) -> bool {
     row.get("closed").and_then(serde_json::Value::as_bool) == Some(true)
         || row.get("detached").and_then(serde_json::Value::as_bool) == Some(true)
 }
