@@ -163,6 +163,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         if matches!(&event, UserEvent::Redraw) {
+            self.drain_drag_transfers();
             self.aux_request_redraws();
         }
         // 어떤 이벤트가 루프를 깨우는지 — 종류별로 센다. 「UserEvent 쪽이
@@ -5751,6 +5752,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // exactly like a header-bar drag. This is how a
                         // header-less pane gets dragged at all.
                         self.focus_pane(&pid);
+                        self.begin_drag_identity(self.drag_endpoint(&pid));
                         self.header_drag = Some(HeaderDrag {
                             pane: pid,
                             start: self.cursor_px,
@@ -6170,6 +6172,11 @@ impl ApplicationHandler<UserEvent> for App {
                         // (no movement) switches to this tab on release; a
                         // drag past the threshold reorders instead.
                         self.focus_pane(&pid);
+                        let drag_pid = self.ws.lock().unwrap().panes.get(&pid)
+                            .and_then(|pane| pane.tabs.get(idx)).and_then(|tab| tab.pid.clone());
+                        if let Some(drag_pid) = drag_pid {
+                            self.begin_drag_identity(self.drag_endpoint_for_pid(&drag_pid));
+                        }
                         self.tab_drag = Some(TabDrag {
                             pane: pid.clone(),
                             from: idx,
@@ -6205,6 +6212,7 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                         self.focus_pane(&pane);
+                        self.begin_drag_identity(self.drag_endpoint(&pane));
                         self.header_drag = Some(HeaderDrag {
                             pane,
                             start: self.cursor_px,
@@ -6483,16 +6491,8 @@ impl ApplicationHandler<UserEvent> for App {
                         // 있을 때만 옮긴다 — 포커스는 press 가 이미 했다.
                         if let Some(d) = self.sidebar_row_drag.take() {
                             window.set_cursor(CursorIcon::Default);
-                            match (d.active, d.target, d.machine) {
-                                (true, Some((target, zone)), _) => {
-                                    self.move_pane(&d.pane, &target, zone);
-                                    self.chrome_dirty = true;
-                                }
-                                (true, None, Some(label)) => {
-                                    self.send_pane_to_machine(&d.pane, &label);
-                                    self.chrome_dirty = true;
-                                }
-                                _ => {}
+                            if d.active {
+                                self.drop_pane_on_sidebar(&d.pane, self.cursor_px);
                             }
                             window.request_redraw();
                             return;
@@ -6526,20 +6526,44 @@ impl ApplicationHandler<UserEvent> for App {
                             // 그 전에는 탭을 일단 탭 밖으로 꺼내야만 방을 옮길 수 있었다
                             // (2026-09-14 지시).
                             if td.active {
-                                if let Some(anchor) = self
-                                    .sidebar_window_drop_target(self.cursor_px.0, self.cursor_px.1)
+                                if self.sidebar_pane_drop_target(self.cursor_px.0, self.cursor_px.1).is_none()
+                                    && self.navigation_machine_at(self.cursor_px).is_some()
+                                {
+                                    self.drop_pane_on_sidebar(&td.pane, self.cursor_px);
+                                    window.request_redraw();
+                                    return;
+                                }
+                                if let Some((destination, zone)) = self
+                                    .sidebar_pane_drop_target(self.cursor_px.0, self.cursor_px.1)
                                 {
                                     if let Some(orig) = self.drag_orig_layout.take() {
                                         self.pty_layout = Some(orig);
+                                        let (cols, rows) = self.window_cells();
+                                        self.resize_backend(cols, rows);
                                     }
                                     self.drag_live_applied = None;
+                                    let tab_pid = self.ws.lock().unwrap().panes.get(&td.pane)
+                                        .and_then(|pane| pane.tabs.get(td.from)).and_then(|tab| tab.pid.clone());
+                                    if let Some(pid) = tab_pid {
+                                        if self.route_drag_move(self.drag_endpoint_for_pid(&pid), destination.clone(), zone) {
+                                            self.chrome_dirty = true;
+                                            window.request_redraw();
+                                            return;
+                                        }
+                                    }
+                                    let crate::drag_transfer::DragEndpoint::LocalPane(anchor) = destination else {
+                                        self.set_toast("이 탭은 기기 간 이사를 지원하지 않아요".into());
+                                        window.request_redraw();
+                                        return;
+                                    };
+                                    let anchor = self.ws.lock().unwrap().pid_to_pane.get(&anchor).cloned().unwrap_or(anchor);
                                     let src_pane = td.pane.clone();
                                     self.drop_tab_into_body(&td, &src_pane, DropZone::Right);
                                     // 꺼낸 pane 의 id — drop_tab_into_body 가 active_pane
                                     // 에 남긴다(반환값이 없다).
                                     let lifted = self.ws.lock().unwrap().active_pane.clone();
                                     if let Some(lifted) = lifted {
-                                        self.move_pane(&lifted, &anchor, DropZone::Right);
+                                        self.move_pane(&lifted, &anchor, zone);
                                     }
                                     self.chrome_dirty = true;
                                     window.request_redraw();
@@ -6817,14 +6841,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 // 그렇다) 그걸 먼저 확정하면 사이드바 드롭이 통째로
                                 // 스킵된다 — 그게 "윈도우 간 pane 이동이 안 되던" 버그.
                                 // 라이브로 옮겨진 자리를 원본으로 되돌린 뒤 옮긴다.
-                                if let Some(target) = self
-                                    .sidebar_window_drop_target(self.cursor_px.0, self.cursor_px.1)
-                                {
-                                    if let Some(orig) = self.drag_orig_layout.take() {
-                                        self.pty_layout = Some(orig);
-                                    }
-                                    self.drag_live_applied = None;
-                                    self.move_pane(&hd.pane, &target, DropZone::Right);
+                                if self.drop_pane_on_sidebar(&hd.pane, self.cursor_px) {
                                 } else if self.take_center_drop(&hd.pane) {
                                     // 타깃 중앙(헤더 띠 또는 본문 가운데)에 놓았다 —
                                     // 화면을 더 쪼개는 게 아니라 그 pane 의 탭으로
@@ -7165,7 +7182,7 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
                         if let Some(idx) = crate::input::room_digit(code) {
-                            self.goto_room(idx);
+                            self.goto_room_number(idx);
                             window.request_redraw();
                             return;
                         }
@@ -7272,6 +7289,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.flush_aux_opens(event_loop);
         let web_visual_deadline = self.publish_web_visual_scenes();
+        self.warm_visible_drag_identities();
         // 신원 조회가 값을 채웠으면 그 자리에서 다시 그린다. 조회는 백그라운드
         // 스레드라 스스로 화면을 못 깨우고, 그게 없으면 로그인을 마친 뒤에도
         // 옛 「로그인 필요」가 화면에 남는다(2026-09-07).

@@ -154,6 +154,7 @@ pub(crate) fn execute_with_progress(
     let mut room = request.destination_room.clone();
     for source in request.sessions {
         if !seen.insert(source.canonical_key()) { continue; }
+        let mut submitted = false;
         let result = (|| -> Result<TransferResult> {
             if !request.confirmed { anyhow::bail!("이사 확인이 필요해요"); }
             if source.machine_id == request.destination_machine { anyhow::bail!("현재 기기와 같아요. 기존 방 이동을 이용해 주세요"); }
@@ -173,6 +174,7 @@ pub(crate) fn execute_with_progress(
             if row.unavailable_reason.is_some() || row.status == "unknown" { anyhow::bail!("세션 상태를 확인할 수 없어 이사를 시작하지 않았어요"); }
             progress(report(&source, TransferStatus::Running, "도착 방을 준비하고 이사하고 있어요", None));
             let migrate = MigrateRequest { session: source.clone(), destination_machine: request.destination_machine.clone(), room: room.clone() };
+            submitted = true;
             let response = match &origin {
                 Some(machine) => kasa_mcp::remote::transfer_migrate(&machine.base, &migrate),
                 None => backend.transfer_migrate(&migrate),
@@ -209,7 +211,7 @@ pub(crate) fn execute_with_progress(
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
-        })().unwrap_or_else(|error| report(&source, TransferStatus::Failed, format!("{error:#}"), None));
+        })().unwrap_or_else(|error| report(&source, if submitted { TransferStatus::Unknown } else { TransferStatus::Failed }, format!("{error:#}"), None));
         progress(result.clone());
         out.push(result);
     }

@@ -1691,32 +1691,6 @@ impl App {
         queue_remote_divider(m.base.clone(), params);
     }
 
-    /// 거울 창 안에서 pane 을 옮겼다 — 같은 이동을 원본에도 건다.
-    pub(crate) fn push_remote_view_move(&mut self, window: usize, moving: &str, target: &str, zone: crate::DropZone) {
-        if self.remote_view_of_window(window).is_none() { return }
-        let Some((label, _)) = self.remote_view_of_window(window) else { return };
-        let remote = |local: &str| kasa_mcp::remote::remote_info(&self.leaf_pty_id(local)).map(|i| i.remote_id);
-        let (Some(source), Some(anchor)) = (remote(moving), remote(target)) else { return };
-        let Some(m) = kasa_mcp::machines::find(&label) else { return };
-        let direction = match zone {
-            crate::DropZone::Left => "left",
-            crate::DropZone::Right => "right",
-            crate::DropZone::Up => "up",
-            crate::DropZone::Down => "down",
-            // 가운데 놓기는 탭으로 합치는 것 — 자리 이동이 아니라 여기선 안 보낸다.
-            crate::DropZone::Center => return,
-        };
-        self.remote_view_push_at = Some(Instant::now());
-        let base = m.base.clone();
-        std::thread::spawn(move || {
-            let params = serde_json::json!({ "surface_id": source, "target": anchor, "direction": direction });
-            if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "surface.move", params) {
-                eprintln!("[remote] view move push failed: {e:#}");
-            }
-            kasa_mcp::machines::poke();
-        });
-    }
-
     pub(crate) fn sync_remote_view_layouts(&mut self) {
         use std::sync::{Mutex, OnceLock};
         static LAST: OnceLock<Mutex<Option<(Instant, u64)>>> = OnceLock::new();
@@ -4155,17 +4129,48 @@ impl App {
         (requested < total).then_some(requested != active)
     }
 
-    /// 방 단축키·사이드바 클릭이 함께 쓰는 「그 방으로」. 설정·보드는 `switch_window`
-    /// 로 트리만 바꿔 넣으면 돌아갈 자리(return_pane)·캐시 새로 읽기 같은 진입 절차가
-    /// 빠지므로 각자의 열기 함수로 보낸다 — 사이드바 카드의 `⌘N` 배지가 그 방에서도
-    /// 참말이려면 이 갈래가 필요했다(2026-09-07 지시 「커맨드 키 있으면 작동하게」).
-    /// ⌘+숫자의 n 번째 방 — 사이드바에 보이는 순서다: 이 기기 방들 먼저, 그 뒤 다른 기기의
-    /// 보기 창들(기기 절에 열린 순서). 전엔 창 번호를 그대로 써서 보기 창은 번호가 어긋나거나
-    /// 아예 못 갔다(2026-09-17 지시).
-    pub(crate) fn room_window_by_number(&self, n: usize) -> Option<usize> {
-        let local = (0..self.windows.len()).filter(|&i| self.remote_view_of_window(i).is_none());
-        let views = (0..self.windows.len()).filter(|&i| self.remote_view_of_window(i).is_some());
-        local.chain(views).nth(n)
+    /// 보기 창 생성 여부가 번호를 바꾸지 않도록 원본 기기의 방을 정본으로 삼는다.
+    pub(crate) fn remote_room_navigation(&self) -> Vec<(String, Option<u64>, String)> {
+        let labels = crate::sidebar_navigation::section_labels(&self.info);
+        labels.iter().filter_map(|label| self.info.machines_col.machines.iter().find(|m| &m.label == label))
+            .flat_map(|m| crate::sidebar_navigation::rooms(m).into_iter()
+                .map(|(name, rows)| (m.label.clone(), rows[0].window, name)))
+            .collect()
+    }
+
+    pub(crate) fn room_navigation_count(&self) -> usize {
+        (0..self.windows.len()).filter(|&i| self.remote_view_of_window(i).is_none()).count()
+            + self.remote_room_navigation().len()
+    }
+
+    pub(crate) fn room_number_for_window(&self, window: usize) -> Option<usize> {
+        let local: Vec<_> = (0..self.windows.len()).filter(|&i| self.remote_view_of_window(i).is_none()).collect();
+        if let Some(n) = local.iter().position(|&i| i == window) { return Some(n); }
+        let (label, ids) = self.remote_view_of_window(window)?;
+        let machine = self.info.machines_col.machines.iter().find(|m| m.label == label)?;
+        let source = machine.remote.iter().chain(&machine.mirrored).find(|row| ids.contains(&row.remote_id))?;
+        self.remote_room_navigation().iter().position(|(l, w, name)| {
+            l == &label && match (*w, source.window) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => name == &source.room,
+                _ => false,
+            }
+        }).map(|n| local.len() + n)
+    }
+
+    pub(crate) fn goto_room_number(&mut self, number: usize) {
+        self.chrome_dirty = true;
+        let local: Vec<_> = (0..self.windows.len()).filter(|&i| self.remote_view_of_window(i).is_none()).collect();
+        if let Some(&window) = local.get(number) {
+            self.info.navigation.machine = None;
+            self.goto_room(window);
+        } else if let Some((label, window, room)) = number.checked_sub(local.len())
+            .and_then(|n| self.remote_room_navigation().get(n).cloned()) {
+            self.info.navigation.machine = None;
+            if let Err(error) = self.open_remote_room(&label, window, &room, None) {
+                self.set_toast(format!("방을 열 수 없음: {error}"));
+            }
+        }
     }
 
     /// 다른 기기의 기기색 표를 받아 더 새로운 항목을 들인다 — 양쪽이 같은 색을 쓰게(5초마다).
@@ -4184,6 +4189,7 @@ impl App {
         if changed { self.chrome_dirty = true; }
     }
 
+    /// 내부 방은 트리 교체 외의 진입 절차도 필요하므로 각자의 열기 함수로 보낸다.
     pub(crate) fn goto_room(&mut self, idx: usize) {
         if idx >= self.windows.len() {
             return;
@@ -4767,6 +4773,23 @@ impl App {
         // 같이 옮긴다 — 설정·보드 방을 닫을 때와 같은 규칙이다. 안 옮기면 닫은
         // 방의 펼침·알림·이름이 다음 방에 그대로 얹혀, 엉뚱한 방이 펴져 있거나
         // 남의 이름을 달고 있었다.
+        self.remap_removed_window_metadata(idx);
+        // 픽셀 스크롤이라 인덱스를 당길 것이 없다 — 닫는 동안은 `close_freeze` 가
+        // 그 위치를 붙잡고, 범위 밖 값은 `sidebar_layout` 이 클램프한다.
+        // 여기서 활성 방을 보이게 끌어오지 않는다 — 방을 하나 닫을 때마다 목록이
+        // 그쪽으로 튀어, ×를 한자리에서 연달아 누를 수가 없었다(2026-08-27 지시:
+        // "크롬처럼 한곳에서 마우스누르다가 떼면 재정렬되고"). 새 방·방 전환은
+        // 그 방이 보여야 하는 동작이라 `win_tab_reveal` 을 그대로 둔다.
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        Ok(())
+    }
+    /// 방이 사라지면 이름·펼침·복원 위치가 다음 방에 잘못 붙지 않게 함께 당긴다.
+    pub(crate) fn remap_removed_window_metadata(&mut self, idx: usize) {
         let remap = |i: usize| crate::internal_room::remap_after_removal(i, idx).unwrap_or(0);
         self.window_name_override = std::mem::take(&mut self.window_name_override)
             .into_iter()
@@ -4801,24 +4824,9 @@ impl App {
             t.home_window = crate::internal_room::remap_after_removal(t.home_window, idx)
                 .unwrap_or(self.active_window);
         }
-        // 픽셀 스크롤이라 인덱스를 당길 것이 없다 — 닫는 동안은 `close_freeze` 가
-        // 그 위치를 붙잡고, 범위 밖 값은 `sidebar_layout` 이 클램프한다.
-        // 여기서 활성 방을 보이게 끌어오지 않는다 — 방을 하나 닫을 때마다 목록이
-        // 그쪽으로 튀어, ×를 한자리에서 연달아 누를 수가 없었다(2026-08-27 지시:
-        // "크롬처럼 한곳에서 마우스누르다가 떼면 재정렬되고"). 새 방·방 전환은
-        // 그 방이 보여야 하는 동작이라 `win_tab_reveal` 을 그대로 둔다.
-        let (cols, rows) = self.window_cells();
-        self.resize_backend(cols, rows);
-        self.publish_pty_layout();
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-        Ok(())
+        self.window_labels_at = None;
     }
-    /// Refresh the per-window tab labels (window name + cwd). cwd resolution
-    /// shells out to `lsof`, so this is throttled to ~1s and also re-runs
-    /// whenever the window count changes (new/switch/close). The render path
-    /// calls this each frame; the throttle keeps it cheap.
+
     pub(crate) fn refresh_window_labels(&mut self) {
         let now = Instant::now();
         let fresh = self.window_labels.len() == self.windows.len()
@@ -6114,11 +6122,16 @@ impl App {
     /// 방 목록이 세로로 쓸 수 있는 높이(logical px). 트레이·독·상태줄이 바닥을
     /// 먹고, 24px 는 chevron-down 오버플로 힌트 자리다.
     pub(crate) fn sidebar_avail_h(&self, win_h: f32) -> f32 {
-        let full = self.sidebar_full_avail_h(win_h);
-        // 아래에 끌어다 둔 기기 절이 바닥을 먹는다. 안 빼면 방 카드가 그 절 위로
-        // 덮어 그려진다 — 사이드바는 클립을 안 세우는 종류의 버그다.
-        (full - crate::sidebar_navigation::pinned_total_h(&self.info, full))
-            .max(SIDEBAR_TAB_H + SIDEBAR_TAB_GAP)
+        self.sidebar_full_avail_h(win_h)
+    }
+
+    pub(crate) fn sidebar_local_content_h(&self) -> f32 {
+        self.sidebar_card_heights().iter().filter(|h| **h > 0.0)
+            .map(|h| h + SIDEBAR_TAB_GAP).sum()
+    }
+
+    pub(crate) fn sidebar_content_h(&self) -> f32 {
+        self.sidebar_local_content_h() + crate::sidebar_navigation::remote_content_h(&self.info)
     }
 
     /// 아래 절까지 포함한 세로 구간 — 절 배치는 이 값으로 잰다.
@@ -6150,8 +6163,7 @@ impl App {
         if n == 0 {
             return None;
         }
-        let heights = self.sidebar_card_heights();
-        let content_h = heights.iter().sum::<f32>() + SIDEBAR_TAB_GAP * n.saturating_sub(1) as f32;
+        let content_h = self.sidebar_content_h();
         let viewport_h = self.sidebar_avail_h(win_h);
         if content_h <= viewport_h + 0.5 {
             return None;
@@ -6164,11 +6176,7 @@ impl App {
 
     /// 목록을 끝까지 내렸을 때의 스크롤 위치(px). 넘치지 않으면 0.
     pub(crate) fn sidebar_max_scroll(&self, win_h: f32) -> f32 {
-        max_scroll_for(
-            &self.sidebar_card_heights(),
-            self.sidebar_avail_h(win_h),
-            SIDEBAR_TAB_GAP,
-        )
+        (self.sidebar_content_h() - self.sidebar_avail_h(win_h)).max(0.0)
     }
 
     pub(crate) fn sidebar_layout(

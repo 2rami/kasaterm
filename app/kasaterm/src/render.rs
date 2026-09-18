@@ -1956,6 +1956,14 @@ impl App {
             .flatten();
         self.refresh_window_labels();
         let sb_labels = self.window_labels.clone();
+        let sb_room_numbers: Vec<_> = (0..self.windows.len())
+            .map(|i| self.room_number_for_window(i)).collect();
+        let local_count = (0..self.windows.len())
+            .filter(|&i| self.remote_view_of_window(i).is_none()).count();
+        self.info.navigation.room_numbers = self.remote_room_navigation().into_iter().enumerate()
+            .map(|(n, (label, window, room))| (label, window, room, local_count + n)).collect();
+        self.info.navigation.local_content_h = self.sidebar_local_content_h();
+        self.info.navigation.shared_scroll = self.sidebar_scroll_px.clamp(0.0, self.sidebar_max_scroll(sb_win_h));
         // 방마다 탭 글리프 — 내부 방(설정·보드)은 셸이 아니라 자기 아이콘을 단다.
         // 이름으로 고르는 `tab_icon_glyph` 는 「설정」에도 터미널 글리프를 줘서
         // 타이틀 알약이 `>_ Settings` 였다. 페인트 루프는 `&self` 를 못 빌리므로
@@ -3792,8 +3800,9 @@ impl App {
                     // 아주 좁을 때는 번호를 접는다. 남는 폭이 40px 남짓인데 배지가
                     // 그 절반을 가져가면 방 이름이 한 글자도 안 남아, 「어느 방인가」를
                     // 못 읽는다 — 단축키는 못 봐도 눌러지지만 이름은 안 보이면 끝이다.
-                    let kbd = (!show_close && *i < 9 && sb_dens.at_least_compact())
-                        .then(|| format!("\u{2318}{}", *i + 1));
+                    let kbd = sb_room_numbers.get(*i).copied().flatten()
+                        .filter(|n| !show_close && *n < 9 && sb_dens.at_least_compact())
+                        .map(|n| format!("\u{2318}{}", n + 1));
                     let kfs = 11.0_f32;
                     let kbd_w = kbd
                         .as_deref()

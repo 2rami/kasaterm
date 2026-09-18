@@ -1304,7 +1304,7 @@ impl App {
                     .and_then(|d| d.parse::<usize>().ok())
                     .and_then(|n| n.checked_sub(1))
                 {
-                    self.switch_window(n);
+                    self.goto_room_number(n);
                 } else {
                     eprintln!("[webpane] chord {other}: 모르는 동작");
                     refocus_main = false;

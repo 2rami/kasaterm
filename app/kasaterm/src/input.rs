@@ -142,6 +142,12 @@ impl App {
                 return true;
             }
             if self.account_menu {
+                // App shortcuts keep their normal destination; only ordinary typing belongs to the popup.
+                if self.host_mod() && event.state == ElementState::Pressed && !event.repeat {
+                    self.close_account_menu();
+                    self.chrome_dirty = true;
+                    return false;
+                }
                 if escape && event.state == ElementState::Pressed {
                     self.account_menu_escape_release = true;
                     self.close_account_menu();
@@ -3576,9 +3582,7 @@ impl App {
                     }
                     if let Some(idx) = room_digit(code) {
                         if self.tmux.is_none() {
-                            if let Some(window) = self.room_window_by_number(idx) {
-                                self.goto_room(window);
-                            }
+                            self.goto_room_number(idx);
                             return;
                         }
                     }

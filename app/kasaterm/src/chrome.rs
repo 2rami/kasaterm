@@ -2124,6 +2124,7 @@ impl App {
             self.focus_pane(&pane);
             // 포커스는 누르는 즉시(목록에서 pane 을 고르는 게 이 줄의 본업이다),
             // 옮기기는 여기서 장전만. 문턱을 못 넘으면 release 가 그냥 버린다.
+            self.begin_drag_identity(self.drag_endpoint(&pane));
             self.sidebar_row_drag = Some(crate::SidebarRowDrag {
                 pane,
                 start: (cx, cy),

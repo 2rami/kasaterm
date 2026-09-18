@@ -46,6 +46,7 @@ mod screenread;
 mod session;
 mod server_restore;
 mod session_transfer;
+mod drag_transfer;
 mod settings;
 mod settings_media;
 mod settings_room;

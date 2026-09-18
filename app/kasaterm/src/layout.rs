@@ -2889,26 +2889,64 @@ for p in glob.glob(os.path.join(d, '*.json')):
         }
         None
     }
-    /// Window chip in the left sidebar under the cursor, resolved to that
-    /// window's anchor leaf — the drop target for a cross-window header drag.
-    /// Returns None when off every chip or over the already-active window (its
-    /// panes are on screen, so an in-window drop is `drop_target_at`'s job).
-    /// The daemon's `move_surface` does the actual cross-window detach/insert.
-    pub(crate) fn sidebar_window_drop_target(&self, x: f32, y: f32) -> Option<String> {
-        let inside =
-            |r: &(f32, f32, f32, f32)| x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3;
-        let idx = self
-            .window_tab_rects
-            .iter()
-            .find(|(_, r)| inside(r))
-            .map(|(i, _)| *i)?;
-        if idx == self.active_window || self.internal_room_kind_at(idx).is_some() {
-            return None;
+    pub(crate) fn sidebar_pane_drop_target(&self, x: f32, y: f32) -> Option<(crate::drag_transfer::DragEndpoint, DropZone)> {
+        if let Some(target) = self.navigation_drop_target((x, y)) { return Some(target); }
+        let inside = |r: &(f32, f32, f32, f32)| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
+        let cell = self.sidebar_mini_rects.iter().find(|(_, _, r)| inside(r)).map(|(_, pane, r)| {
+            let nx = (x - r.0 - r.2 / 2.0) / (r.2 / 2.0).max(1.0);
+            let ny = (y - r.1 - r.3 / 2.0) / (r.3 / 2.0).max(1.0);
+            (pane.clone(), drop_edge_for_offsets(nx, ny))
+        }).or_else(|| self.sidebar_row_rects.iter().find(|(_, _, r)| inside(r)).map(|(_, pane, r)| {
+            (pane.clone(), if y < r.1 + r.3 / 2.0 { DropZone::Up } else { DropZone::Down })
+        })).or_else(|| {
+            let index = self.window_tab_rects.iter().find(|(_, r)| inside(r)).map(|(index, _)| *index)?;
+            if self.internal_room_kind_at(index).is_some() { return None; }
+            self.window_leaves(index).into_iter().last().map(|pane| (pane, DropZone::Right))
+        });
+        cell.map(|(pane, zone)| (self.drag_endpoint(&pane), zone))
+    }
+
+    pub(crate) fn warm_visible_drag_identities(&self) {
+        static LAST: std::sync::OnceLock<std::sync::Mutex<Option<Instant>>> = std::sync::OnceLock::new();
+        let mut last = LAST.get_or_init(Default::default).lock().unwrap();
+        if last.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2)) { return; }
+        *last = Some(Instant::now());
+        drop(last);
+        if let Some(pane) = self.pty.keys().next() {
+            self.warm_drag_identity(crate::drag_transfer::DragEndpoint::LocalPane(pane.clone()));
         }
-        self.windows
-            .get(idx)
-            .and_then(|w| w.as_ref())
-            .and_then(|l| l.leaves().first().map(|s| s.to_string()))
+        for machine in self.info.machines_col.machines.iter().filter(|m| m.online) {
+            let Some(peer) = kasa_mcp::machines::find(&machine.label) else { continue };
+            let Some(row) = machine.remote.iter().chain(&machine.mirrored).next() else { continue };
+            self.warm_drag_identity(crate::drag_transfer::DragEndpoint::RemotePane {
+                label: machine.label.clone(), base: peer.base, pane: row.remote_id.clone(),
+            });
+        }
+    }
+
+    pub(crate) fn drop_pane_on_sidebar(&mut self, pane: &str, cursor: (f32, f32)) -> bool {
+        let target = self.sidebar_pane_drop_target(cursor.0, cursor.1);
+        if target.is_none() && self.navigation_machine_at(cursor).is_none() { return false; }
+        // Hover previews are local-only and must not survive a remote drop or failed preflight.
+        if let Some(original) = self.drag_orig_layout.take() {
+            self.pty_layout = Some(original);
+            let (cols, rows) = self.window_cells();
+            self.resize_backend(cols, rows);
+        }
+        self.drag_live_applied = None;
+        if let Some((destination, zone)) = target {
+            let source = self.drag_endpoint(pane);
+            if !self.route_drag_move(source, destination.clone(), zone) {
+                if let crate::drag_transfer::DragEndpoint::LocalPane(target) = destination {
+                    let target = self.ws.lock().unwrap().pid_to_pane.get(&target).cloned().unwrap_or(target);
+                    self.move_pane(pane, &target, zone);
+                }
+            }
+        } else {
+            self.set_toast("이사할 방이나 칸 위에 놓아 주세요. 연결 상태도 확인해 주세요".into());
+        }
+        self.chrome_dirty = true;
+        true
     }
     /// Relocate `moving` next to `target` along the edge given by `zone`.
     /// Detaches the moving leaf (its PTY stays alive) and re-attaches it
@@ -2939,9 +2977,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
     }
 
     pub(crate) fn move_pane(&mut self, moving: &str, target: &str, zone: DropZone) {
-        // 거울 창 안의 이동은 원본에도 같은 이동을 건다 — 안 그러면 당겨오기가 되돌린다.
-        if let Some(window) = self.window_of_pane(target) {
-            self.push_remote_view_move(window, moving, target, zone);
+        // 원본 기기가 다른 칸을 로컬 트리에 섞으면 다음 거울 동기화가 이동을 되돌린다.
+        if self.route_drag_move(self.drag_endpoint(moving), self.drag_endpoint(target), zone) {
+            return;
         }
         if moving == target
             || self
@@ -2968,6 +3006,14 @@ for p in glob.glob(os.path.join(d, '*.json')):
             // whole-pane move; ignore rather than picking a random edge.
             DropZone::Center => return,
         };
+        let source_window = self.window_of_pane(moving);
+        let target_window = self.window_of_pane(target);
+        if let (Some(source), Some(destination)) = (source_window, target_window) {
+            if source != destination {
+                self.move_pane_cross_window(moving, target, dir, before, destination);
+                return;
+            }
+        }
         // Cross-window relocation: the sidebar chip drop hands us a target leaf
         // that lives in another (parked) window. The active pty_layout can't
         // insert beside a leaf it doesn't own, so move the leaf across trees
@@ -3156,17 +3202,30 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 「옮기면 제자리로 돌아간다」— 09-17 수정은 move_pane 경로만 잡았다).
     pub(crate) fn finish_live_drag(&mut self, moving: &str) -> bool {
         let applied = self.drag_live_applied.take();
-        self.drag_orig_layout = None;
-        let Some((target, zone)) = applied else { return false };
+        let Some((target, zone)) = applied else { self.drag_orig_layout = None; return false };
         if zone != DropZone::Center {
-            self.push_remote_view_move(self.active_window, moving, &target, zone);
+            let source = self.drag_endpoint(moving);
+            let destination = self.drag_endpoint(&target);
+            if matches!(source, crate::drag_transfer::DragEndpoint::RemotePane { .. })
+                || matches!(destination, crate::drag_transfer::DragEndpoint::RemotePane { .. })
+            {
+                if let Some(original) = self.drag_orig_layout.take() {
+                    self.pty_layout = Some(original);
+                    let (cols, rows) = self.window_cells();
+                    self.resize_backend(cols, rows);
+                }
+                self.route_drag_move(source, destination, zone);
+                self.chrome_dirty = true;
+                return true;
+            }
         }
+        self.drag_orig_layout = None;
         self.publish_pty_layout();
         self.session_touched = true;
         true
     }
 
-    /// Detach `moving` from the active window and graft it beside `target`,
+    /// Detach `moving` from its source window and graft it beside `target`,
     /// which lives in window `dst_idx`'s parked tree. The PTY stays alive — only
     /// the BSP trees are rewired. If the active window held `moving` as its sole
     /// pane it empties out, so we fold that slot away and follow the pane into
@@ -3179,66 +3238,83 @@ for p in glob.glob(os.path.join(d, '*.json')):
         before: bool,
         dst_idx: usize,
     ) {
-        // remove_leaf returns false for a root-level (single) leaf, so detect
-        // the sole-pane case up front instead of relying on its return.
-        let src_only = self
-            .pty_layout
-            .as_ref()
-            .map(|t| {
-                let l = t.leaves();
-                l.len() == 1 && l[0] == moving
-            })
-            .unwrap_or(false);
-        if !src_only {
-            let removed = self
-                .pty_layout
-                .as_mut()
-                .map(|t| t.remove_leaf(moving))
-                .unwrap_or(false);
-            if !removed {
-                return;
-            }
+        let Some(src_idx) = self.window_of_pane(moving) else { return };
+        if src_idx == dst_idx { return; }
+        let source = if src_idx == self.active_window { self.pty_layout.as_ref() }
+            else { self.windows.get(src_idx).and_then(Option::as_ref) };
+        let destination = if dst_idx == self.active_window { self.pty_layout.as_ref() }
+            else { self.windows.get(dst_idx).and_then(Option::as_ref) };
+        let (Some(source), Some(destination)) = (source, destination) else { return };
+        let Some((source, destination)) = relocated_window_layouts(source, destination, moving, target, dir, before) else { return };
+        let follow = src_idx == self.active_window;
+        let empty_source = source.is_none();
+        if follow { self.pty_layout = source; } else { self.windows[src_idx] = source; }
+        if dst_idx == self.active_window { self.pty_layout = Some(destination); }
+            else { self.windows[dst_idx] = Some(destination); }
+        let mut destination_index = dst_idx;
+        if empty_source {
+            self.windows.remove(src_idx);
+            if destination_index > src_idx { destination_index -= 1; }
+            if self.active_window > src_idx { self.active_window -= 1; }
         }
-        // Graft beside the target in the destination window's tree.
-        let grafted = self
-            .windows
-            .get_mut(dst_idx)
-            .and_then(|w| w.as_mut())
-            .map(|t| t.insert_beside(target, dir, before, moving.to_string()))
-            .unwrap_or(false);
-        if !grafted {
-            return;
-        }
-        if src_only {
-            // The active window is now empty. Its slot is None (the tree lived
-            // in pty_layout, which we discard), so drop it and shift the
-            // destination index down if it sat above the removed slot.
-            self.windows.remove(self.active_window);
-            let dst = if dst_idx > self.active_window {
-                dst_idx - 1
+        if follow {
+            if empty_source {
+                self.active_window = destination_index;
+                self.pty_layout = self.windows[destination_index].take();
             } else {
-                dst_idx
-            };
-            self.pty_layout = self.windows[dst].take();
-            self.active_window = dst;
-            self.window_alert.remove(&dst);
-            let (cols, rows) = self.window_cells();
-            self.resize_backend(cols, rows);
-            self.chrome_dirty = true;
-            self.ws.lock().unwrap().active_pane = Some(moving.to_string());
-            self.publish_pty_layout();
-            if let Some(w) = &self.window {
-                w.request_redraw();
+                self.switch_window(destination_index);
             }
-        } else {
-            // Source window keeps other panes — resize it before parking, then
-            // follow the moved pane into its new home (switch_window resizes and
-            // repaints the destination).
-            let (cols, rows) = self.window_cells();
-            self.resize_backend(cols, rows);
-            self.switch_window(dst_idx);
             self.ws.lock().unwrap().active_pane = Some(moving.to_string());
         }
+        if empty_source { self.remap_removed_window_metadata(src_idx); }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        self.session_touched = true;
+        self.chrome_dirty = true;
+        if let Some(window) = &self.window { window.request_redraw(); }
+    }
+}
+
+fn relocated_window_layouts(
+    source: &kasa_pty::PtyLayout, destination: &kasa_pty::PtyLayout,
+    moving: &str, target: &str, direction: kasa_pty::SplitDir, before: bool,
+) -> Option<(Option<kasa_pty::PtyLayout>, kasa_pty::PtyLayout)> {
+    if !source.leaves().contains(&moving) || destination.leaves().contains(&moving) { return None; }
+    // Build both replacements before committing either tree; an invalid target cannot orphan a pane.
+    let mut destination = destination.clone();
+    if !destination.insert_beside(target, direction, before, moving.to_string()) { return None; }
+    let source = if source.leaves().len() == 1 { None } else {
+        let mut source = source.clone();
+        if !source.remove_leaf(moving) { return None; }
+        Some(source)
+    };
+    Some((source, destination))
+}
+
+#[cfg(test)]
+mod cross_room_move_tests {
+    use super::*;
+
+    #[test]
+    fn inactive_source_can_move_without_mutating_an_unrelated_active_tree() {
+        let active = kasa_pty::PtyLayout::single("visible");
+        let source = kasa_pty::PtyLayout::single("moving");
+        let destination = kasa_pty::PtyLayout::single("target");
+        let (remaining, landed) = relocated_window_layouts(&source, &destination, "moving", "target", kasa_pty::SplitDir::Horizontal, false).unwrap();
+        assert!(remaining.is_none());
+        assert_eq!(landed.leaves(), vec!["target", "moving"]);
+        assert_eq!(active.leaves(), vec!["visible"]);
+        assert_eq!(source.leaves(), vec!["moving"]);
+    }
+
+    #[test]
+    fn missing_target_or_duplicate_destination_never_detaches_source() {
+        let source = kasa_pty::PtyLayout::single("moving");
+        let destination = kasa_pty::PtyLayout::single("target");
+        assert!(relocated_window_layouts(&source, &destination, "moving", "missing", kasa_pty::SplitDir::Vertical, false).is_none());
+        assert!(relocated_window_layouts(&source, &source, "moving", "moving", kasa_pty::SplitDir::Vertical, false).is_none());
+        assert_eq!(source.leaves(), vec!["moving"]);
     }
 }
 
