@@ -3269,6 +3269,7 @@ impl App {
     /// (드롭다운 행 인덱스)으로 주면 그 항목까지 눌러 전환 결과를 확인한다.
     /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
     pub(crate) fn run_pending_autopillclick(&mut self, event_loop: &ActiveEventLoop) {
+        self.run_account_menu_contract_probe(event_loop);
         use std::sync::atomic::{AtomicU8, Ordering};
         use std::sync::OnceLock;
         use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
@@ -3360,6 +3361,113 @@ impl App {
             }
         }
     }
+    fn run_account_menu_contract_probe(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::{Mutex, OnceLock};
+        use winit::event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
+        if !cfg!(debug_assertions) || !crate::verification_run()
+            || std::env::var("KASATERM_ACCOUNT_MENU_PROBE").as_deref() != Ok("1") { return; }
+        static STATE: OnceLock<Mutex<(Instant, usize, usize)>> = OnceLock::new();
+        let mut state = STATE.get_or_init(|| Mutex::new((Instant::now(), 0, 0))).lock().unwrap();
+        if state.1 >= 9 || state.0.elapsed().as_millis() < 5500 + state.1 as u128 * 700 { return; }
+        let temporary = |key: &str| std::env::var_os(key)
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .is_some_and(|path| path.starts_with("/private/tmp") || path.starts_with("/tmp"));
+        if !temporary("KASATERM_SETTINGS_FILE") || !temporary("KASATERM_SESSION_FILE") {
+            eprintln!("[account-menu-probe] FAILED: isolated files required");
+            state.1 = 9;
+            return;
+        }
+        let Some(window) = self.window.as_ref() else { return };
+        let wid = window.id();
+        let scale = window.scale_factor();
+        let outside = (window.inner_size().width as f32 / scale as f32 - 8.0, TITLE_HEIGHT + 8.0);
+        let step = state.1;
+        state.1 += 1;
+        let mut check = |ok: bool, label: &str| {
+            if !ok { state.2 += 1; }
+            eprintln!("[account-menu-probe] {} {label}", if ok { "PASS" } else { "FAIL" });
+        };
+        let move_to = |app: &mut Self, point: (f32, f32)| {
+            app.window_event(event_loop, wid, WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: winit::dpi::PhysicalPosition::new(point.0 as f64 * scale, point.1 as f64 * scale),
+            });
+        };
+        let click = |app: &mut Self, point: (f32, f32), button| {
+            move_to(app, point);
+            for state in [ElementState::Pressed, ElementState::Released] {
+                app.window_event(event_loop, wid, WindowEvent::MouseInput { device_id: DeviceId::dummy(), state, button });
+            }
+        };
+        let center = |r: (f32, f32, f32, f32)| (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+        match step {
+            0 => {
+                check(self.account_menu, "fixture opens popup");
+                if let (Some(panel), Some(anchor)) = (self.account_menu_rect, self.status_account_rect) {
+                    check(panel.1 + panel.3 <= anchor.1 + 1.0, "panel stays above statusbar");
+                    check(anchor.1 - panel.1 - panel.3 <= 12.0, "panel is attached to statusbar");
+                } else { check(false, "panel and anchor geometry available"); }
+            }
+            1 | 2 => {
+                let provider = if step == 1 { AccountProvider::Codex } else { AccountProvider::Claude };
+                let hit = self.account_menu_hits.iter().find(|(item, _)| *item == AccountMenuItem::Provider(provider)).map(|(_, rect)| *rect);
+                if let Some(rect) = hit {
+                    let previous = self.account_menu_provider;
+                    move_to(self, center(rect));
+                    check(self.account_menu_provider == previous, "provider hover does not move rows under pointer");
+                    click(self, center(rect), MouseButton::Left);
+                    check(self.account_menu_provider == Some(provider), "provider click opens inline accounts");
+                } else { check(false, "provider hit exists"); }
+            }
+            3 => {
+                if let Some(rect) = self.account_menu_rect {
+                    click(self, (rect.0 + 2.0, rect.1 + 2.0), MouseButton::Left);
+                    check(self.account_menu, "blank popup padding does not dismiss");
+                } else { check(false, "blank popup test has geometry"); }
+            }
+            4 => {
+                let before = self.ws.lock().unwrap().active_pane.clone();
+                move_to(self, outside);
+                self.window_event(event_loop, wid, WindowEvent::MouseWheel {
+                    device_id: DeviceId::dummy(), delta: MouseScrollDelta::LineDelta(0.0, -3.0), phase: TouchPhase::Moved,
+                });
+                check(self.account_menu && self.ws.lock().unwrap().active_pane == before, "outside wheel does not focus or dismiss underlying pane");
+            }
+            5 => {
+                let before = (self.active_window, self.ws.lock().unwrap().active_pane.clone());
+                click(self, outside, MouseButton::Left);
+                check(!self.account_menu, "outside click dismisses popup");
+                check(before == (self.active_window, self.ws.lock().unwrap().active_pane.clone()), "outside click does not focus background");
+                check(self.account_menu_suppressed_buttons.is_empty(), "matching release is consumed");
+            }
+            6 => {
+                if let Some(rect) = self.status_account_rect {
+                    click(self, center(rect), MouseButton::Left);
+                    check(self.account_menu, "statusbar reopens popup");
+                } else { check(false, "statusbar hit exists"); }
+            }
+            7 => {
+                let hit = self.account_menu_hits.iter().find(|(item, _)| *item == AccountMenuItem::UsageDetails).map(|(_, rect)| *rect);
+                let was = self.set_usage_compact;
+                if let Some(rect) = hit {
+                    click(self, center(rect), MouseButton::Left);
+                    check(self.account_menu && self.set_usage_compact != was, "usage detail stays here and changes density");
+                } else { check(false, "usage detail hit exists"); }
+            }
+            8 => {
+                let hit = self.account_menu_hits.iter().find(|(item, _)| *item == AccountMenuItem::ManageAccounts).map(|(_, rect)| *rect);
+                if let Some(rect) = hit {
+                    click(self, center(rect), MouseButton::Left);
+                    check(!self.account_menu && self.settings_room_active(), "account management navigates to settings");
+                } else { check(false, "account management hit exists"); }
+            }
+            _ => {}
+        }
+        if step == 8 {
+            eprintln!("[account-menu-probe] DONE failures={}", state.2);
+        }
+    }
+
     /// Headless inline-settings repro: open settings after
     // 실제 카드 클릭과 저장을 격리 환경에서만 확인해 사용자 명단 변경을 막는다.
     pub(crate) fn run_character_pick_probe(&mut self, event_loop: &ActiveEventLoop) {

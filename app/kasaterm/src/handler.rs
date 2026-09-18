@@ -2959,6 +2959,9 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let main_window = self.window.as_ref().is_some_and(|window| window.id() == id);
+        if main_window && self.account_menu_event(event_loop, &event) {
+            return;
+        }
         if main_window && (self.restore_applying.is_some() || self.restore_progress.is_some()) {
             let scale = self.effective_scale();
             if restore_toast_captures_pointer(&event, self.cursor_px, scale, self.restore_toast_rect) {
@@ -4738,127 +4741,6 @@ impl ApplicationHandler<UserEvent> for App {
                         self.account_menu_provider = None;
                         self.account_menu_anchor = None;
                         self.toggle_statusbar_popover(state::StatusbarPopover::Build, r);
-                        window.request_redraw();
-                        return;
-                    }
-                    // 손잡이가 둘이다 — Info 탭의 계정 행과, 늘 보이는 상태줄 세그먼트.
-                    // 어느 쪽으로 열었는지 기억해 두고 메뉴를 그 자리에 붙인다.
-                    let chip_hit = self.account_chip_rect.as_ref().is_some_and(&inside);
-                    let status_hit = self.status_account_rect.as_ref().is_some_and(&inside);
-                    if chip_hit {
-                        self.account_menu_anchor = self.account_chip_rect;
-                    } else if status_hit {
-                        self.account_menu_anchor = self.status_account_rect;
-                    }
-                    let chip_hit = chip_hit || status_hit;
-                    if self.account_menu {
-                        // 히트박스는 **다음 프레임의 render 가** 채운다. 그 전에 온
-                        // 클릭은 어느 항목에도 안 맞아 「메뉴 밖」으로 판정되고, 메뉴가
-                        // 열리자마자 닫힌다(토키 2026-08-15). 사람 손엔 잘 안 걸리지만
-                        // 자동화와 빠른 손에는 걸리고, 걸렸을 때 「눌렀는데 아무 일도
-                        // 안 일어났다」로 보여 원인을 못 찾는다. 아직 한 번도 안 그려진
-                        // 메뉴는 클릭을 삼키고 그리기를 기다린다 — 손잡이를 다시 누른
-                        // 것만 예외다(닫으려는 뜻이 분명하다).
-                        if self.account_menu_hits.is_empty() && !chip_hit {
-                            window.request_redraw();
-                            return;
-                        }
-                        let pick = self
-                            .account_menu_hits
-                            .iter()
-                            .find(|(_, r)| {
-                                cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                            })
-                            .map(|(item, _)| item.clone());
-                        self.account_menu = false;
-                        self.chrome_dirty = true;
-                        window.request_redraw();
-                        match pick {
-                            // 제공자 행은 **메뉴를 닫지 않는다** — 계정 목록을 옆으로
-                            // 여는 손잡이라, 열자마자 닫히면 아무 데도 못 간다. 같은
-                            // 행을 다시 누르면 접힌다.
-                            Some(AccountMenuItem::Provider(p)) => {
-                                self.account_menu_provider =
-                                    (self.account_menu_provider != Some(p)).then_some(p);
-                                self.account_menu = true;
-                                return;
-                            }
-                            // 밀도도 그 자리에서 바뀌는 것을 봐야 하므로 메뉴를 유지한다.
-                            Some(AccountMenuItem::Density(c)) => {
-                                self.set_usage_compact = c;
-                                self.settings_save();
-                                self.account_menu = true;
-                                return;
-                            }
-                            // 계정 전환은 살아 있는 pane 을 갑자기 끊으면 안 된다.
-                            // Claude/Codex 모두 쉬는 pane 은 대화를 이어 다시 띄우고,
-                            // 일하는 pane 은 끝날 때까지 기다린 뒤 적용한다.
-                            Some(AccountMenuItem::Select(p, id)) => {
-                                self.account_menu_provider = None;
-                                match p {
-                                    AccountProvider::Claude => {
-                                        self.ask_or_switch_claude_account(
-                                            &id,
-                                            crate::session::ConfirmSurface::Main,
-                                        );
-                                    }
-                                    AccountProvider::Codex => {
-                                        self.ask_or_switch_codex_account(
-                                            &id,
-                                            crate::session::ConfirmSurface::Main,
-                                        );
-                                    }
-                                }
-                                return;
-                            }
-                            // 다시 로그인·빼기는 그 자리에서 처리하고 메뉴를 닫는다.
-                            // 로그인 진행은 설정 계정 칸에 뜨고 코드도 거기서 받는다.
-                            Some(AccountMenuItem::Reauth(p, id)) => {
-                                self.account_menu = false;
-                                self.account_menu_provider = None;
-                                self.settings_apply(crate::SettingsAction::ReauthAccount(
-                                    p,
-                                    id,
-                                    crate::settings::LoginBrowser::Default,
-                                ));
-                                let _ = self.open_settings_room(Some(crate::SettingsCat::Accounts));
-                                return;
-                            }
-                            Some(AccountMenuItem::Forget(p, id)) => {
-                                self.account_menu = false;
-                                self.account_menu_provider = None;
-                                self.settings_apply(match p {
-                                    AccountProvider::Claude => {
-                                        crate::SettingsAction::RemoveClaudeAccount(id)
-                                    }
-                                    AccountProvider::Codex => {
-                                        crate::SettingsAction::RemoveCodexAccount(id)
-                                    }
-                                });
-                                return;
-                            }
-                            Some(AccountMenuItem::UsageDetails)
-                            | Some(AccountMenuItem::ManageAccounts) => {
-                                self.account_menu_provider = None;
-                                self.open_settings_window(
-                                    event_loop,
-                                    Some(SettingsCat::Accounts),
-                                    None,
-                                );
-                                self.session_touched = session_touched_before_event;
-                                return;
-                            }
-                            None => self.account_menu_provider = None,
-                        }
-                        // 메뉴 밖 클릭은 **닫기만 하고 소비한다.** 예전엔 pane focus 를
-                        // 위해 흘려보냈는데, 메뉴가 창 하단에 뜨는 데다 pane 하단바를
-                        // 여는 손잡이가 바로 그 아래라 「닫으려고 눌렀는데 하단바가
-                        // 열리는」 꼴이었다(사용자 2026-08-13 지적). 팝오버 밖 클릭을
-                        // 삼키는 것이 데스크톱 관례고 Orca(radix Popover)도 그렇다.
-                        return;
-                    } else if chip_hit {
-                        self.account_menu = true;
-                        self.chrome_dirty = true;
                         window.request_redraw();
                         return;
                     }

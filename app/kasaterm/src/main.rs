@@ -5032,6 +5032,12 @@ struct App {
     /// 타이틀바 Claude 계정 칩의 드롭다운이 열려 있는지. ⋮ 핸들 메뉴와 같은 짝 —
     /// render 가 매 프레임 rect 를 채우고 handler 가 이전 프레임 rect 로 힛테스트.
     account_menu: bool,
+    account_menu_rect: Option<(f32, f32, f32, f32)>,
+    account_menu_body_rect: Option<(f32, f32, f32, f32)>,
+    account_menu_scroll: f32,
+    account_menu_scroll_max: f32,
+    account_menu_suppressed_buttons: Vec<MouseButton>,
+    account_menu_escape_release: bool,
     /// 사용량 pill 의 rect(클릭 = 계정 드롭다운 토글). pill 을 안 그리는 프레임엔 None.
     account_chip_rect: Option<(f32, f32, f32, f32)>,
     /// 하단 상태줄의 계정 세그먼트 rect. Info 탭을 안 열어도 **항상** 있는 손잡이라
@@ -5996,6 +6002,12 @@ impl App {
             // KASATERM_FORCE_HANDLE_MENU 와 같은 헤드리스 검증용 — 클릭 합성 없이
             // 드롭다운이 열린 프레임을 캡처한다.
             account_menu: std::env::var_os("KASATERM_FORCE_ACCOUNT_MENU").is_some(),
+            account_menu_rect: None,
+            account_menu_body_rect: None,
+            account_menu_scroll: 0.0,
+            account_menu_scroll_max: 0.0,
+            account_menu_suppressed_buttons: Vec::new(),
+            account_menu_escape_release: false,
             account_chip_rect: None,
             status_account_rect: None,
             status_version_rect: None,

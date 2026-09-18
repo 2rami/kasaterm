@@ -1,6 +1,268 @@
 //! 키/마우스/휠 입력 + 클립보드 + claude 상태 글리프/타이틀.
 use super::*;
 
+fn account_menu_contains(rect: Option<(f32, f32, f32, f32)>, point: (f32, f32)) -> bool {
+    rect.is_some_and(|(x, y, w, h)| {
+        w > 0.0 && h > 0.0 && point.0 >= x && point.0 < x + w && point.1 >= y && point.1 < y + h
+    })
+}
+
+#[derive(PartialEq, Eq)]
+enum AccountMenuPress {
+    Dismiss,
+    Blank,
+    Action(AccountMenuItem),
+}
+
+fn account_menu_press(
+    rect: Option<(f32, f32, f32, f32)>,
+    hits: &[(AccountMenuItem, (f32, f32, f32, f32))],
+    point: (f32, f32),
+) -> AccountMenuPress {
+    // The first frame has not published its bounds yet, so an empty hit list
+    // must not turn a quick second event into an accidental outside click.
+    if rect.is_none() {
+        return AccountMenuPress::Blank;
+    }
+    if !account_menu_contains(rect, point) {
+        return AccountMenuPress::Dismiss;
+    }
+    let hit = |(_, rect): &&(AccountMenuItem, (f32, f32, f32, f32))| {
+        account_menu_contains(Some(*rect), point)
+    };
+    // Row actions overlap their parent account row and must win regardless of
+    // the order in which the renderer adds the parent hit rectangle.
+    hits.iter().rev().filter(hit)
+        .find(|(item, _)| matches!(item, AccountMenuItem::Reauth(..) | AccountMenuItem::Forget(..)))
+        .or_else(|| hits.iter().rev().find(hit))
+        .map(|(item, _)| AccountMenuPress::Action(item.clone()))
+        .unwrap_or(AccountMenuPress::Blank)
+}
+
+fn account_menu_capture_button(
+    open: bool,
+    suppressed: &mut Vec<MouseButton>,
+    state: ElementState,
+    button: MouseButton,
+) -> bool {
+    if state == ElementState::Released {
+        let captured = suppressed.contains(&button);
+        suppressed.retain(|held| *held != button);
+        return open || captured;
+    }
+    if open && !suppressed.contains(&button) {
+        suppressed.push(button);
+    }
+    open
+}
+
+impl App {
+    fn close_account_menu(&mut self) {
+        self.account_menu = false;
+        self.account_menu_provider = None;
+        self.account_menu_anchor = None;
+        self.account_menu_rect = None;
+        self.account_menu_body_rect = None;
+        self.account_menu_hits.clear();
+        self.account_menu_scroll = 0.0;
+        self.account_menu_scroll_max = 0.0;
+    }
+
+    pub(crate) fn account_menu_event(&mut self, _event_loop: &ActiveEventLoop, event: &WindowEvent) -> bool {
+        if matches!(event, WindowEvent::Focused(false)) {
+            self.account_menu_suppressed_buttons.clear();
+            self.account_menu_escape_release = false;
+            if self.account_menu {
+                self.close_account_menu();
+                self.chrome_dirty = true;
+            }
+            return false;
+        }
+        if let WindowEvent::MouseInput { state, button, .. } = event {
+            let opening_anchor = if !self.account_menu
+                && *state == ElementState::Pressed && *button == MouseButton::Left
+                && !self.restoration_blocks_input()
+                && self.confirm_close.is_none()
+                && self.restore_prompt.is_none()
+                && self.character_swap_confirm.is_none()
+                && !self.git.commit_modal_open
+                && !self.account_switch_confirm.as_ref().is_some_and(|pending| {
+                    pending.surface == crate::session::ConfirmSurface::Main
+                })
+            {
+                self.status_account_rect.filter(|rect| account_menu_contains(Some(*rect), self.cursor_px))
+                    .or_else(|| self.account_chip_rect.filter(|rect| account_menu_contains(Some(*rect), self.cursor_px)))
+            } else { None };
+            if let Some(anchor) = opening_anchor {
+                self.handle_menu = None;
+                self.shell_menu_open = false;
+                self.sidebar_menu = None;
+                self.statusbar.popover = None;
+                self.statusbar.clip_menu = None;
+                self.file_tree.ctx_menu = None;
+                self.info.ctx_menu = None;
+                self.info.pane_menu = None;
+                self.info.machine_menu = None;
+                self.info.navigation.room_menu = None;
+                self.info.navigation.picker = false;
+                self.git.commit_menu_open = false;
+                self.git.path_menu_open = false;
+                self.git.branch_menu_open = false;
+                self.account_menu = true;
+                self.account_menu_anchor = Some(anchor);
+                self.account_menu_rect = None;
+                self.account_menu_hits.clear();
+                self.account_menu_scroll = 0.0;
+                self.account_menu_provider = None;
+                self.chrome_dirty = true;
+            }
+            if !account_menu_capture_button(self.account_menu, &mut self.account_menu_suppressed_buttons, *state, *button) {
+                return false;
+            }
+            if opening_anchor.is_none() && self.account_menu && *state == ElementState::Pressed {
+                let pick = account_menu_press(self.account_menu_rect, &self.account_menu_hits, self.cursor_px);
+                if pick == AccountMenuPress::Dismiss
+                    || account_menu_contains(self.account_menu_anchor, self.cursor_px)
+                {
+                    self.close_account_menu();
+                } else if *button == MouseButton::Left {
+                    if let AccountMenuPress::Action(action) = pick {
+                        self.account_menu_action(action);
+                    }
+                }
+                self.chrome_dirty = true;
+            }
+            if let Some(window) = &self.window { window.request_redraw(); }
+            return true;
+        }
+        if let WindowEvent::KeyboardInput { event, .. } = event {
+            let escape = matches!(event.logical_key, Key::Named(NamedKey::Escape));
+            if escape && event.state == ElementState::Released && self.account_menu_escape_release {
+                self.account_menu_escape_release = false;
+                return true;
+            }
+            if self.account_menu {
+                if escape && event.state == ElementState::Pressed {
+                    self.account_menu_escape_release = true;
+                    self.close_account_menu();
+                    self.chrome_dirty = true;
+                    if let Some(window) = &self.window { window.request_redraw(); }
+                }
+                return true;
+            }
+        }
+        if !self.account_menu { return false; }
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale = self.effective_scale();
+                self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                let pick = account_menu_press(self.account_menu_rect, &self.account_menu_hits, self.cursor_px);
+                let pointer = matches!(pick, AccountMenuPress::Action(_));
+                self.text_cursor_shown = false;
+                self.chrome_dirty = true;
+                if let Some(window) = &self.window {
+                    window.set_cursor(if pointer { CursorIcon::Pointer } else { CursorIcon::Default });
+                    window.request_redraw();
+                }
+                true
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if account_menu_contains(self.account_menu_body_rect, self.cursor_px) {
+                    let dy = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => *y * 36.0,
+                        MouseScrollDelta::PixelDelta(position) => position.y as f32 / self.effective_scale(),
+                    };
+                    self.account_menu_scroll = (self.account_menu_scroll - dy).clamp(0.0, self.account_menu_scroll_max.max(0.0));
+                    self.chrome_dirty = true;
+                    if let Some(window) = &self.window { window.request_redraw(); }
+                }
+                true
+            }
+            WindowEvent::Ime(_) | WindowEvent::Touch(_) | WindowEvent::PinchGesture { .. }
+            | WindowEvent::DroppedFile(_) | WindowEvent::HoveredFile(_) | WindowEvent::HoveredFileCancelled => true,
+            _ => false,
+        }
+    }
+
+    fn account_menu_action(&mut self, action: AccountMenuItem) {
+        match action {
+            AccountMenuItem::Provider(provider) => {
+                self.account_menu_provider = (self.account_menu_provider != Some(provider)).then_some(provider);
+                self.account_menu_scroll = 0.0;
+            }
+            AccountMenuItem::Density(compact) => {
+                self.set_usage_compact = compact;
+                self.settings_save();
+            }
+            AccountMenuItem::UsageDetails => {
+                self.set_usage_compact = !self.set_usage_compact;
+                self.settings_save();
+            }
+            AccountMenuItem::ManageAccounts => {
+                self.close_account_menu();
+                let _ = self.open_settings_room(Some(SettingsCat::Accounts));
+            }
+            AccountMenuItem::Select(provider, id) => {
+                self.close_account_menu();
+                match provider {
+                    AccountProvider::Claude => self.ask_or_switch_claude_account(&id, crate::session::ConfirmSurface::Main),
+                    AccountProvider::Codex => self.ask_or_switch_codex_account(&id, crate::session::ConfirmSurface::Main),
+                }
+            }
+            AccountMenuItem::Reauth(provider, id) => {
+                self.close_account_menu();
+                self.settings_apply(SettingsAction::ReauthAccount(provider, id, crate::settings::LoginBrowser::Default));
+                let _ = self.open_settings_room(Some(SettingsCat::Accounts));
+            }
+            AccountMenuItem::Forget(provider, id) => {
+                self.close_account_menu();
+                self.settings_apply(match provider {
+                    AccountProvider::Claude => SettingsAction::RemoveClaudeAccount(id),
+                    AccountProvider::Codex => SettingsAction::RemoveCodexAccount(id),
+                });
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod account_menu_input_tests {
+    use super::*;
+
+    #[test]
+    fn popup_distinguishes_outside_padding_and_controls() {
+        let rect = Some((10.0, 10.0, 100.0, 100.0));
+        let hits = vec![(AccountMenuItem::UsageDetails, (20.0, 20.0, 50.0, 20.0))];
+        assert!(account_menu_press(rect, &hits, (5.0, 30.0)) == AccountMenuPress::Dismiss);
+        assert!(account_menu_press(rect, &hits, (15.0, 15.0)) == AccountMenuPress::Blank);
+        assert!(account_menu_press(None, &[], (15.0, 15.0)) == AccountMenuPress::Blank);
+        assert!(account_menu_press(rect, &hits, (25.0, 25.0)) == AccountMenuPress::Action(AccountMenuItem::UsageDetails));
+    }
+
+    #[test]
+    fn popup_actions_win_over_parent_rows_and_topmost_control_wins() {
+        let rect = Some((0.0, 0.0, 100.0, 100.0));
+        let hits = vec![
+            (AccountMenuItem::Forget(AccountProvider::Claude, "a".into()), (50.0, 20.0, 20.0, 20.0)),
+            (AccountMenuItem::Select(AccountProvider::Claude, "a".into()), (10.0, 20.0, 80.0, 20.0)),
+        ];
+        assert!(account_menu_press(rect, &hits, (55.0, 25.0)) == AccountMenuPress::Action(hits[0].0.clone()));
+        let hits = vec![(AccountMenuItem::Density(true), rect.unwrap()), (AccountMenuItem::Density(false), rect.unwrap())];
+        assert!(account_menu_press(rect, &hits, (50.0, 50.0)) == AccountMenuPress::Action(AccountMenuItem::Density(false)));
+    }
+
+    #[test]
+    fn popup_owns_release_after_dismissal_for_each_mouse_button() {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            let mut suppressed = Vec::new();
+            assert!(account_menu_capture_button(true, &mut suppressed, ElementState::Pressed, button));
+            assert!(account_menu_capture_button(false, &mut suppressed, ElementState::Released, button));
+            assert!(!account_menu_capture_button(false, &mut suppressed, ElementState::Pressed, button));
+            assert!(!account_menu_capture_button(false, &mut suppressed, ElementState::Released, button));
+        }
+    }
+}
+
 fn image_paste_restore_error(layout_blocked: bool, surface_blocked: bool) -> Option<&'static str> {
     (layout_blocked || surface_blocked)
         .then_some("아직 복원 중인 pane이에요. 준비되면 사진을 다시 붙여 주세요")
