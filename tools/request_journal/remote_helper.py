@@ -146,11 +146,20 @@ def load_client(repo, use_existing_runtime=False, reasoning_effort=None):
     # helper opts in; the bot and local provider keep their existing settings.
     previous_effort = os.environ.get("NACHO_REASONING_EFFORT")
     override_effort = use_existing_runtime and reasoning_effort == "low"
+    # llm.py imports its siblings by bare name. The remote helper runs from the
+    # repo so cwd covers that, but an in-process caller has no such path and the
+    # import fails at module level. Lend the path for the exec only.
+    root = str(Path(repo).resolve())
+    lent = root not in sys.path
     try:
         if override_effort:
             os.environ["NACHO_REASONING_EFFORT"] = "low"
+        if lent:
+            sys.path.insert(0, root)
         spec.loader.exec_module(module)
     finally:
+        if lent and sys.path and sys.path[0] == root:
+            sys.path.pop(0)
         if override_effort:
             if previous_effort is None:
                 os.environ.pop("NACHO_REASONING_EFFORT",None)
