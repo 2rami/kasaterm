@@ -170,6 +170,7 @@ struct App {
     motion: Option<mocari::motion::MotionPlayer>,
     last: std::time::Instant, t: f32, frames: u32, fps_t: std::time::Instant, fps_n: u32, dts: Vec<f32>,
     shot_path: Option<String>,
+    shot_seq: u32,
     /// 이 프레임에 이르면 화면을 파일로 뜬다. 사람 눈 대신 쓰는 검증 창구다.
     shot_at: u32,
 }
@@ -495,7 +496,9 @@ impl ApplicationHandler for App {
                 }
             }
             // 답이 말풍선에 찍힌 뒤 한 장 뜨고 나간다 — 답을 받자마자 나가면 그림에 답이 없다.
-            if self.frames>60 && !self.ask.busy() && (self.shot_path.is_none() || self.frames > self.shot_at) { el.exit(); }
+            // 시퀀스는 shot_at 부터 shot_seq 장을 찍는다 — 그 끝까지는 나가면 안 된다.
+            let shot_end = self.shot_at + self.shot_seq;
+            if self.frames>60 && !self.ask.busy() && (self.shot_path.is_none() || self.frames > shot_end) { el.exit(); }
         }
         if let Some(w) = &self.win { w.request_redraw(); }
     }
@@ -684,6 +687,7 @@ impl App {
         let nx = ((gx - cx) / sz.width.max(1.0)).clamp(-1.0, 1.0);
         let ny = ((cy - gy) / sz.height.max(1.0)).clamp(-1.0, 1.0);
         self.look = look_override().unwrap_or((nx as f32, ny as f32));
+        if let Some(t) = self.shot_sweep() { self.look = (t, 0.0); self.look_now = (t, 0.0); }
         let (lx, ly) = (gx - pos.x, gy - pos.y);
         self.local = (lx >= 0.0 && ly >= 0.0 && lx < sz.width && ly < sz.height)
             .then_some((lx as f32, ly as f32));
@@ -1452,6 +1456,14 @@ impl App {
     const TYPE_LIMIT: usize = 160;
 
     /// 찍는 중이면 한 자 더. 다 찍었으면 통째로 보여 주는 상태로 돌아간다.
+    /// 스윕 중이면 이번 프레임의 좌우 값(-1..1). 아니면 None.
+    fn shot_sweep(&self) -> Option<f32> {
+        if !look_sweep() || self.shot_seq < 2 || self.frames < self.shot_at { return None; }
+        let n = self.frames - self.shot_at;
+        if n >= self.shot_seq { return None; }
+        Some(-1.0 + 2.0 * n as f32 / (self.shot_seq - 1) as f32)
+    }
+
     fn tick_typewriter(&mut self) {
         let Some((shown, at)) = self.typed else { return };
         let total = self.say.chars().count();
@@ -1780,7 +1792,19 @@ impl App {
                 set_hand_cursor(true);
             }
         }
-        if self.frames == self.shot_at {
+        // 연속 촬영 — KASAPET_SHOT_SEQ=<장수> 를 주면 shot_at 부터 그만큼을
+        // `<경로>_0000.png` 로 이어 찍는다. 곽향 같은 상용 모델의 움직임을
+        // 배경 없이(알파 그대로) 참조 영상으로 뽑으려고 붙였다(2026-09-18).
+        if self.shot_seq > 0 && self.frames >= self.shot_at
+            && self.frames < self.shot_at + self.shot_seq {
+            if let Some(path) = self.shot_path.clone() {
+                let n = self.frames - self.shot_at;
+                let seq = path.replace(".png", &format!("_{:04}.png", n));
+                save_shot(g, &frame.texture, &seq);
+                if n + 1 == self.shot_seq { frame.present(); std::process::exit(0); }
+            }
+        }
+        if self.shot_seq == 0 && self.frames == self.shot_at {
             if let Some(path) = self.shot_path.clone() {
                 save_shot(g, &frame.texture, &path);
                 if preview_mode() {
@@ -1865,6 +1889,13 @@ fn save_shot(g: &Gfx, tex: &wgpu::Texture, path: &str) {
 
 /// 시선을 손으로 박아 보는 창구(`KASAPET_LOOK=0.9,-0.5`). 커서를 못 움직이는 자리에서
 /// 「정말 따라보는가」를 가르는 유일한 길이다 — 화면 두 장을 견주면 바로 보인다.
+/// 상용 리그의 「고개를 돌리면 정확히 무엇이 얼마나 움직이나」를 재려면 한 프로세스
+/// 안에서 각도만 바꾼 연속 프레임이 필요하다. 두 번 띄워 찍으면 배율·아이들 위상이
+/// 달라 두 장을 견줄 수 없다(2026-09-18 실측: 눈 간격이 +95% 로 나왔다).
+/// `KASAPET_LOOK_SWEEP=1` + `KASAPET_SHOT_SEQ=N` 이면 시퀀스 구간에서 좌우를
+/// -1 → +1 로 균등하게 훑는다. 이징도 건너뛰어 프레임과 각도가 1:1 로 맞는다.
+fn look_sweep() -> bool { std::env::var_os("KASAPET_LOOK_SWEEP").is_some() }
+
 fn look_override() -> Option<(f32, f32)> {
     let v = std::env::var("KASAPET_LOOK").ok()?;
     let (a, b) = v.split_once(',')?;
@@ -2095,7 +2126,8 @@ fn main() {
         catalog, expressions: catalog::Expressions::default(), bufs: Vec::new(), ubs: Vec::new(), look: (0.0, 0.0), look_now: (0.0, 0.0), motion_params,
         model, motion, last: std::time::Instant::now(), t: 0.0, fps_t: std::time::Instant::now(), fps_n: 0, dts: Vec::new(), frames: 0,
         shot_path: std::env::var("KASAPET_SHOT").ok(),
-        shot_at: std::env::var("KASAPET_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(120) };
+        shot_at: std::env::var("KASAPET_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(120),
+        shot_seq: std::env::var("KASAPET_SHOT_SEQ").ok().and_then(|v| v.parse().ok()).unwrap_or(0) };
     if let Some(i) = requested_motion {
         app.playback.repeat = app.motion.as_ref().is_some_and(|m| m.is_looping());
         app.select_motion(i);
