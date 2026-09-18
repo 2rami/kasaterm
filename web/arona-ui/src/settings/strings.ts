@@ -333,10 +333,17 @@ export const ko = {
     browserHint:
       '「다시 로그인」도 「계정 추가」도 쓰던 브라우저에서 열려요 — 그 브라우저에 지금 로그인된 계정으로 붙습니다. 다른 계정을 붙이려면 브라우저에서 계정을 먼저 바꾸거나, 「빈 창으로」를 쓰세요.',
     removeSlot: '빼기',
-    /// 활성 슬롯 표시. 「쓰는 중」이었는데 진행형이라 **로딩으로 읽혔다**
-    /// (거노 2026-08-15 「계정 쓰는중은 뭐야 로딩중도 아니고」). 테마 카드 쪽
-    /// (`theme.inUse`)은 「79명 · 쓰는 중」처럼 문장으로 읽혀 그대로 둔다.
-    inUse: '사용 중',
+    // 선택은 로그인 성공을 보장하지 않으므로 인증 상태와 구분한다.
+    inUse: '선택됨',
+    selectAccount: '이 계정 선택',
+    manageAccount: '계정 관리',
+    noAccounts: '등록된 Claude 계정이 없어요. 계정을 추가하면 여기서 선택하고 사용량을 볼 수 있어요. 기존 Claude 로그인은 그대로 유지돼요.',
+    noSelection: '계정을 선택해 주세요. 기존 Claude 로그인은 그대로 유지돼요.',
+    loginRequired: '로그인 필요',
+    lookupFailed: '조회 실패',
+    checking: '확인 중…',
+    previousLookup: '이전 조회',
+    usageCurrent: '사용량 확인됨',
     labelPlaceholder: '별명 (비우면 이메일로 불러요)',
     /// 하단바에 나머지 슬롯까지 세울지. 「어디로 옮기나」에 답하려고 드롭다운을
     /// 여는 손을 없앤 것이라, 이름은 화면에서 무엇이 늘어나는지로 부른다.
@@ -348,7 +355,7 @@ export const ko = {
     autoSwitchHint:
       '한도가 차면 다음에 뜨는 claude 부터 다음 계정으로 — 떠난 계정은 풀릴 때까지 쉬어요',
     /// 갈 곳이 없는데 켜 놓고 「안 되네」 하는 게 이 기능에서 제일 흔한 오해다.
-    autoSwitchLone: '계정이 하나뿐이라 지금은 넘어갈 곳이 없어요',
+    autoSwitchLone: '자동 전환은 등록된 Claude 계정이 2개 이상일 때 사용할 수 있어요',
     switchAt: '전환 시점',
     switchAtHint: '이 사용률을 넘으면 다음 계정으로 넘어가요',
     model: '모델',
@@ -674,7 +681,16 @@ export const en: Strings = {
     browserHint:
       '“Sign in again” and “Add account” both open the browser you already use — they attach whichever account is signed in there. For a different account, switch accounts in that browser first, or use “Blank window”.',
     removeSlot: 'Remove',
-    inUse: 'Active',
+    inUse: 'Selected',
+    selectAccount: 'Select this account',
+    manageAccount: 'Manage account',
+    noAccounts: 'No Claude accounts added. Add an account to select it and see usage here. Your existing Claude sign-in is kept.',
+    noSelection: 'Select an account. Your existing Claude sign-in is kept.',
+    loginRequired: 'Sign-in needed',
+    lookupFailed: 'Lookup failed',
+    checking: 'Checking…',
+    previousLookup: 'Previous lookup',
+    usageCurrent: 'Usage checked',
     labelPlaceholder: 'Nickname (empty = called by its email)',
     statusbarAll: 'Other accounts too',
     statusbarAllHint:
@@ -683,7 +699,7 @@ export const en: Strings = {
     autoSwitch: 'Auto switch',
     autoSwitchHint:
       'When a limit fills, the next claude starts on the next account — the tired one rests until it clears',
-    autoSwitchLone: 'Only one account, so there’s nowhere to switch to yet',
+    autoSwitchLone: 'Auto switch needs at least two registered Claude accounts',
     switchAt: 'Switch at',
     switchAtHint: 'Move to the next account past this usage',
     model: 'Model',

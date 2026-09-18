@@ -20,6 +20,38 @@ fn open_path(path: &std::path::Path) {
 }
 
 impl App {
+    pub(crate) fn claude_account_usage(&self, id: &str) -> Option<crate::UsageBadge> {
+        let probe = (!id.is_empty()).then(|| auth_probe(id)).flatten();
+        if id.is_empty()
+            || !self.set_claude_accounts.iter().any(|account| account.id == id)
+            || probe.as_ref().is_some_and(|probe| probe.verified && !probe.logged_in)
+        {
+            return None;
+        }
+        let dir = crate::claude_auth::runtime_dir_for_cached(id, &self.set_claude_account)
+            .map_or(String::new(), |path| path.to_string_lossy().into_owned());
+        // 전환 직후의 옛 계정 숫자와 실패 전의 캐시가 최신 관측을 덮지 않게 한다.
+        let active = self.claude_usage.lock().ok().and_then(|value| value.clone())
+            .filter(|badge| id == self.set_claude_account && badge.account_dir == dir);
+        active.or_else(|| self.claude_usage_all.lock().ok()?.get(&dir).cloned())
+            .map(|mut badge| {
+                badge.stale |= probe.as_ref().is_some_and(|p| !p.verified)
+                    || crate::handler::claude_usage_attempt(&dir) == Some(false);
+                badge
+            })
+    }
+
+    pub(crate) fn claude_account_status(&self, id: &str) -> &'static str {
+        if id.is_empty() || !self.set_claude_accounts.iter().any(|account| account.id == id) {
+            return "unselected";
+        }
+        let probe = auth_probe(id);
+        let logged_in = probe.filter(|p| p.verified).map(|p| p.logged_in);
+        let dir = crate::claude_auth::runtime_dir_for_cached(id, &self.set_claude_account)
+            .map_or(String::new(), |path| path.to_string_lossy().into_owned());
+        claude_usage_state(logged_in, self.claude_account_usage(id).as_ref(), crate::handler::claude_usage_attempt(&dir))
+    }
+
     /// Sidebar "Settings" entry — same tab-box style as the session tabs, sat
     /// just below the "+" new-window button so it reads as the last item in the
     /// tab list (Warp-style). Logical px; mirrors `sidebar_layout`'s geometry.
@@ -1170,6 +1202,10 @@ impl App {
                 self.settings_save();
             }
             SettingsAction::ToggleAccountAutoswitch => {
+                if !self.set_account_autoswitch && self.set_claude_accounts.len() < 2 {
+                    self.set_toast("자동 전환은 등록 계정이 둘 이상일 때 사용할 수 있어요".into());
+                    return;
+                }
                 self.set_account_autoswitch = !self.set_account_autoswitch;
                 // 켜는 순간 옛 쿨다운은 버린다 — 며칠 전 소진 기록이 남아 있으면
                 // 켜자마자 "갈 곳이 없다"로 조용히 아무 일도 안 하게 된다.
@@ -1404,8 +1440,7 @@ impl App {
             }
             SettingsAction::RemoveClaudeAccount(id) => {
                 self.set_claude_accounts.retain(|a| a.id != id);
-                // 지운 계정이 활성이었으면 기본 로그인으로 — 아무도 로그인할 수
-                // 없는 저장소를 계속 가리키면 pane 이 통째로 로그아웃 상태로 뜬다.
+                // 목록에서 제거해도 실행 중인 로그인과 대화는 그대로 보존한다.
                 if self.set_claude_account == id {
                     self.set_claude_account = String::new();
                 }
@@ -2053,11 +2088,11 @@ impl App {
                 Ok(self.set_claude_extra == arg)
             }
             "claude-account" => {
-                if !id.is_empty() && !self.set_claude_accounts.iter().any(|a| a.id == id) {
+                if id.is_empty() || !self.set_claude_accounts.iter().any(|a| a.id == id) {
                     return Err(no_slot(id));
                 }
                 let confirm = self
-                    .request_web_account_switch(crate::session::AccountSwitchProvider::Claude, id);
+                    .request_web_account_switch(crate::session::AccountSwitchProvider::Claude, id)?;
                 let awaiting = confirm.is_some();
                 if let Some(confirm) = confirm {
                     put_web_code("confirm", confirm);
@@ -2078,6 +2113,9 @@ impl App {
                 let (_, to_label, restarted, deferred, focused, live) =
                     self.apply_claude_account_switch(&slot);
                 self.account_switch_from_peer = false;
+                if !live {
+                    return Err(reject("account_switch_failed", "계정을 전환하지 못했어요. 로그인 상태를 확인해 주세요".into()));
+                }
                 self.account_flash = Some(std::time::Instant::now());
                 self.set_toast(format!(
                     "다른 기기를 따라 {}",
@@ -2115,7 +2153,7 @@ impl App {
                     return Err(no_slot(id));
                 }
                 let confirm = self
-                    .request_web_account_switch(crate::session::AccountSwitchProvider::Codex, id);
+                    .request_web_account_switch(crate::session::AccountSwitchProvider::Codex, id)?;
                 let awaiting = confirm.is_some();
                 if let Some(confirm) = confirm {
                     put_web_code("confirm", confirm);
@@ -2379,54 +2417,20 @@ impl App {
             )
         }));
 
-        // 계정 한 행. "기본" 행(슬롯 아님, `slot: false`)은 **계정을 아직 안
-        // 골랐을 때만** — 작업대 시대에는 기본 자리가 곧 활성 계정의 작업대라,
-        // 슬롯이 활성인 동안 이 행을 주면 같은 로그인이 두 줄로 떠 계정이 하나
-        // 더 있는 것처럼 읽힌다(2026-08-17 「왜 다섯개로 떠」 — 네이티브 카드
-        // 목록·상태바 서브메뉴와 같은 규칙).
-        // 계정별 한도 — 하단바가 쓰는 우물(표: 폴러가 채움, 활성: 활성 게이지)
-        // 그대로. 설정을 열 때 따로 묻지 않아 즉시 뜬다(2026-08-31 지적 「하단바랑
-        // 다르게 사용량 바로 안 뜨고」). 값이 없는 슬롯은 null — 0% 로 그리면
-        // 여유 있다는 거짓말이 된다(하단바와 같은 규칙).
-        let usage_table = self
-            .claude_usage_all
-            .lock()
-            .ok()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-        let active_usage = self.claude_usage.lock().ok().and_then(|g| g.clone());
         let active_acct = self.set_claude_account.clone();
         let claude_rows: Vec<serde_json::Value> = self
-            .set_claude_account
-            .is_empty()
-            .then(|| (String::new(), String::new(), None))
-            .into_iter()
-            .chain(
-                self.set_claude_accounts
-                    .iter()
-                    .enumerate()
-                    .map(|(i, a)| (a.id.clone(), a.label.clone(), Some(i))),
-            )
+            .set_claude_accounts
+            .iter()
+            .filter(|account| !account.id.is_empty())
+            .enumerate()
+            .map(|(i, a)| (a.id.clone(), a.label.clone(), i))
             .map(|(id, label, idx)| {
                 let probe = auth_probe(&id);
                 let dir = crate::claude_auth::runtime_dir_for_cached(&id, &active_acct)
                     .map_or(String::new(), |p| p.to_string_lossy().into_owned());
-                // 활성 게이지가 표보다 새로우므로 먼저 본다. 순서를 뒤집으면
-                // 방금 실패해 stale=true가 된 값 위로 옛 stale=false 표가 덮인다.
-                // account_dir 대조는 전환 직후 떠나온 계정 값이 새 이름에 붙는 것을 막는다.
-                let usage = active_usage
-                    .clone()
-                    .filter(|b| id == active_acct && b.account_dir == dir)
-                    .or_else(|| usage_table.get(&dir).cloned());
-                let usage_state = if probe.as_ref().is_some_and(|value| !value.logged_in) {
-                    "logged_out"
-                } else if usage.is_some() {
-                    "ready"
-                } else if crate::handler::claude_usage_attempt(&dir) == Some(false) {
-                    "failed"
-                } else {
-                    "loading"
-                };
+                let usage = self.claude_account_usage(&id);
+                let logged_in = probe.as_ref().filter(|p| p.verified).map(|p| p.logged_in);
+                let usage_state = claude_usage_state(logged_in, usage.as_ref(), crate::handler::claude_usage_attempt(&dir));
                 // 답이 아직 없는 두 경우(첫 조회 중 · 토큰 갱신 중)에 비우지 않는다.
                 // 비우면 계정이 사라진 것처럼 보인다 — 없다고 말하지 말고 아직
                 // 모른다고 말한다.
@@ -2434,7 +2438,7 @@ impl App {
                 // 코드가 붙는 것은 우리가 지어낸 말 셋뿐이다. 이메일·조직명은
                 // 데이터라 옮길 것이 없다.
                 let (mut sub, kind, mut sub_code) = match &probe {
-                    Some(p) if !p.logged_in => {
+                    Some(p) if p.verified && !p.logged_in => {
                         ("로그인 필요".to_string(), "danger", Some("account_login_required"))
                     }
                     Some(p) if !p.email.is_empty() => (p.email.clone(), "mute", None),
@@ -2446,18 +2450,9 @@ impl App {
                     // 사라지므로 그때는 서버 문구를 그대로 쓰게 둔다.
                     sub_code = None;
                 }
-                let numbered = idx.map(|i| format!("계정 {}", i + 2));
-                let name = match (&idx, &numbered) {
-                    (None, _) => "기본".to_string(),
-                    (Some(_), Some(fb)) => account_display(&id, &label, fb),
-                    (Some(_), None) => String::new(),
-                };
-                // 라벨도 이메일도 없어 번호로 부르는 경우만 옮길 말이다.
-                let name_code = match (&idx, &numbered) {
-                    (None, _) => Some("account_default"),
-                    (Some(_), Some(fb)) if *fb == name => Some("account_numbered"),
-                    _ => None,
-                };
+                let numbered = format!("계정 {}", idx + 1);
+                let name = account_display(&id, &label, &numbered);
+                let name_code = (name == numbered).then_some("account_numbered");
                 let sub = match sub.strip_prefix(name.as_str()) {
                     Some(rest) => rest.trim_start_matches(" · ").to_string(),
                     None => sub,
@@ -2468,9 +2463,9 @@ impl App {
                 serde_json::json!({
                     "id": id, "label": label, "name": name,
                     "name_code": name_code,
-                    "name_args": idx.map(|i| serde_json::json!({ "n": i + 2 })),
+                    "name_args": { "n": idx + 1 },
                     "sub": sub, "sub_kind": kind, "sub_code": sub_code,
-                    "slot": idx.is_some(),
+                    "slot": true,
                     "usage": usage.as_ref().map(|b| b.pct),
                     "usage_stale": usage.as_ref().map(|b| b.stale),
                     "usage_label": usage.as_ref().map(|b| b.label.clone()),
@@ -2482,7 +2477,7 @@ impl App {
                         "pct": window.pct,
                         "resets_at": window.resets_at,
                     })).collect::<Vec<_>>()),
-                    "logged_in": probe.as_ref().map(|p| p.logged_in),
+                    "logged_in": logged_in,
                 })
             })
             .collect();
@@ -4547,6 +4542,7 @@ fn open_default_browser(url: &str) {
 #[derive(Clone)]
 pub(crate) struct AuthProbe {
     pub(crate) logged_in: bool,
+    pub(crate) verified: bool,
     pub(crate) email: String,
     /// 그 슬롯 토큰이 속한 조직. 이메일 하나에 개인 조직과 팀 조직이 둘 다 달려
     /// 있으면 슬롯 둘이 **같은 이메일로** 보여 어느 쪽이 회사 것인지 알 수 없다
@@ -4648,11 +4644,13 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
         let probe = match slot_identity_full(dir.as_deref()) {
             SlotIdentity::Known { email, org } => Some(AuthProbe {
                 logged_in: true,
+                verified: true,
                 email,
                 org,
             }),
             SlotIdentity::NoToken => Some(AuthProbe {
                 logged_in: false,
+                verified: true,
                 email: String::new(),
                 org: String::new(),
             }),
@@ -4660,6 +4658,7 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
                 let (email, org) = remembered_identity(&key);
                 (!email.is_empty()).then(|| AuthProbe {
                     logged_in: true,
+                    verified: false,
                     email,
                     org,
                 })
@@ -4670,7 +4669,10 @@ pub(crate) fn auth_probe(id: &str) -> Option<AuthProbe> {
             let mut m = probe_cache().lock().unwrap();
             // 조회 자체가 실패했으면(셸이 안 뜸·JSON 이 아님) 알던 값을 유지한다 —
             // 답을 못 받은 것과 "로그인 안 됐다" 는 답을 받은 것은 다르다.
-            let v = probe.or_else(|| m.get(&key).and_then(|(_, v)| v.clone()));
+            let v = probe.or_else(|| m.get(&key).and_then(|(_, v)| v.clone()).map(|mut old| {
+                old.verified = false;
+                old
+            }));
             if let Some(p) = v.as_ref().filter(|p| !p.email.is_empty()) {
                 remember_account_identity(&key, &p.email, &p.org);
             }
@@ -4957,11 +4959,41 @@ pub(crate) fn toggle(g: &mut gpu::GpuRenderer, r: Rect, on: bool, cursor: (f32, 
     circle_rect(g, kx, r.1 + 3.0, knob, theme::text());
 }
 
+pub(crate) fn claude_usage_state(
+    logged_in: Option<bool>,
+    usage: Option<&crate::UsageBadge>,
+    attempted: Option<bool>,
+) -> &'static str {
+    if logged_in == Some(false) {
+        "logged_out"
+    } else if usage.is_some_and(|badge| badge.stale) || attempted == Some(false) {
+        "failed"
+    } else if usage.is_some() {
+        "ready"
+    } else {
+        "loading"
+    }
+}
+
 #[cfg(test)]
 mod account_label_tests {
     use super::{
         codex_account_display_from_identity, label_is_auto, merge_web_codes, put_web_code,
     };
+
+    #[test]
+    fn claude_usage_does_not_mask_auth_failure_or_stale_observations() {
+        let mut badge = crate::UsageBadge {
+            pct: 32.0, label: "5h".into(),
+            resets_at: None, stale: false, account_dir: String::new(), windows: vec![],
+        };
+        assert_eq!(super::claude_usage_state(Some(false), Some(&badge), Some(true)), "logged_out");
+        assert_eq!(super::claude_usage_state(Some(true), Some(&badge), Some(false)), "failed");
+        assert_eq!(super::claude_usage_state(Some(true), Some(&badge), Some(true)), "ready");
+        badge.stale = true;
+        assert_eq!(super::claude_usage_state(None, Some(&badge), Some(true)), "failed");
+        assert_eq!(super::claude_usage_state(None, None, None), "loading");
+    }
 
     #[test]
     fn auto_labels_yield_to_email() {

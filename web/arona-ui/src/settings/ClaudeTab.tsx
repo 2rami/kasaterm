@@ -15,14 +15,6 @@ import { serverText, useT } from './lang';
 import type { AccountRow, ClaudeValues } from './types';
 import type { AccountSwitchConfirmation } from './api';
 
-/// 부제 색. 「로그인 필요」는 경고, 이메일은 보통, 「확인 중…」은 더 흐리게 —
-/// 아직 모른다는 것과 없다는 것을 색으로 가른다.
-const SUB_COLOR: Record<string, string> = {
-  danger: 'var(--kt-danger-text-surface)',
-  mute: 'var(--kt-text-mute)',
-  faint: 'color-mix(in srgb, var(--kt-text-mute) 60%, transparent)',
-};
-
 /// 하단바와 같은 임계 — 90 위험, 70 주의, 그 밑은 중립(초록으로 안심시키지 않는다).
 function usageColor(p: number): string {
   if (p >= 90) return 'var(--kt-danger-text-surface)';
@@ -30,9 +22,6 @@ function usageColor(p: number): string {
   return 'var(--kt-text-mute)';
 }
 
-/// 계정 한 줄. 카드 전체가 「이 계정 쓰기」이고 관리 버튼은 hover 때만 보인다 —
-/// 네이티브와 같은 규칙이다. `invisible` 로 숨기는 게 `opacity-0` 보다 맞다:
-/// 투명한 버튼은 여전히 눌리고 탭으로도 잡힌다.
 function AccountCard({
   row,
   active,
@@ -58,36 +47,26 @@ function AccountCard({
   // 사용자가 붙인 별명, 이메일, 팀 조직명이라 옮길 말이 아니다.
   const name = serverText(t, row.name_code, row.name, row.name_args ?? undefined);
   const sub = serverText(t, row.sub_code, row.sub);
+  const loginRequired = row.logged_in === false || row.usage_state === 'logged_out'
+    || row.sub_code === 'account_login_required';
+  const failed = row.usage_state === 'failed';
+  const hasUsage = !loginRequired && row.usage != null && Number.isFinite(row.usage);
+  const stale = hasUsage && (row.usage_stale === true || failed);
+  const status = loginRequired ? t.claude.loginRequired
+    : failed ? t.claude.lookupFailed
+      : stale ? t.claude.previousLookup
+        : hasUsage ? t.claude.usageCurrent : t.claude.checking;
+  const identity = row.sub_code ? '' : sub;
   return (
     <div
-      className="group relative mb-1.5 flex items-center gap-3 px-4 py-2.5"
-      // 안에 관리 버튼이 들어가므로 `<button>` 으로 만들 수 없다(버튼 중첩은 잘못된
-      // HTML). role/tabIndex 로 같은 조작을 준다.
-      role="button"
-      tabIndex={0}
-      aria-current={active}
-      onClick={() => !active && onSelect()}
-      onKeyDown={(e) => {
-        if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
-          e.preventDefault();
-          if (!active) onSelect();
-        }
-      }}
+      className="kt-account-row"
+      aria-busy={busy}
       style={{
-        borderRadius: 'var(--kt-radius-md)',
         background: active ? 'var(--kt-surface-active)' : 'var(--kt-surface)',
-        boxShadow: 'inset 0 0 0 var(--kt-border-w) var(--kt-border)',
-        cursor: active ? 'default' : 'pointer',
       }}
     >
-      {active && (
-        <span
-          className="absolute left-0 top-0 h-full w-[3px]"
-          style={{ background: 'var(--kt-accent)' }}
-        />
-      )}
-      <div className="min-w-0 flex-1">
-        {renaming ? (
+      {renaming ? (
+        <div className="p-3">
           <TextField
             label={t.claude.labelPlaceholder}
             value={row.label}
@@ -99,24 +78,37 @@ function AccountCard({
             // 나가기·Esc 면 폼이 영영 남았다(설정 창을 껐다 켜야 풀리던 문제).
             onDone={() => setRenaming(false)}
           />
-        ) : (
-          <>
-            <div className="truncate text-[13px] text-[var(--kt-text)]">{name}</div>
-            {sub && (
-              <div
-                className="truncate text-[12px]"
-                style={{ color: SUB_COLOR[row.sub_kind] ?? 'var(--kt-text-mute)' }}
-              >
-                {sub}
-              </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="kt-account-select"
+          aria-pressed={active}
+          disabled={busy}
+          onClick={() => { if (!active) onSelect(); }}
+        >
+          <span className="kt-account-heading">
+            <span className="kt-account-name">{name}</span>
+            <span className="kt-account-selected">{active ? t.claude.inUse : t.claude.selectAccount}</span>
+          </span>
+          {identity && <span className="kt-account-identity">{identity}</span>}
+          <span className="kt-account-status">
+            <span style={{ color: loginRequired || failed ? 'var(--kt-danger-text-surface)' : undefined }}>
+              {status}
+            </span>
+            {hasUsage && (
+              <span className="tabular-nums" title={row.usage_label ?? undefined}
+                style={{ color: stale ? undefined : usageColor(row.usage!) }}>
+                {stale && failed ? `${t.claude.previousLookup} ` : ''}
+                {row.usage_label ? `${row.usage_label} ` : ''}{Math.round(row.usage!)}%
+                {!stale && row.usage_resets ? ` · ${row.usage_resets}` : ''}
+              </span>
             )}
-          </>
-        )}
-      </div>
-      {/* 기본 로그인도 만료되므로 다시 로그인은 남긴다. 이름·빈 창·빼기만 우리가
-          만든 슬롯에 한정한다. */}
+          </span>
+        </button>
+      )}
       {!renaming && (
-        <div className="invisible flex shrink-0 gap-1 group-focus-within:visible group-hover:visible">
+        <div className="kt-account-actions" role="group" aria-label={`${name} · ${t.claude.manageAccount}`}>
           {row.slot && (
             <MiniButton label={t.claude.rename} disabled={busy} onClick={() => setRenaming(true)} />
           )}
@@ -132,23 +124,6 @@ function AccountCard({
             </>
           )}
         </div>
-      )}
-      {/* 한도 — 하단바가 쓰는 우물 그대로라 열자마자 뜬다(2026-08-31 지적
-          「하단바랑 다르게 사용량 바로 안 뜨고」). `~` 는 낡은 값(하단바와 같은
-          문법). 값이 없으면 아무것도 안 그린다 — 0% 는 여유 있다는 거짓말이다. */}
-      {row.usage != null && !renaming && (
-        <span
-          className="shrink-0 text-[12px] tabular-nums"
-          title={row.usage_label ?? undefined}
-          style={{ color: usageColor(row.usage), opacity: row.usage_stale ? 0.65 : 1 }}
-        >
-          {row.usage_stale ? '~' : ''}
-          {Math.round(row.usage)}%
-          {row.usage_resets ? ` · ${row.usage_resets}` : ''}
-        </span>
-      )}
-      {active && !renaming && (
-        <span className="shrink-0 text-[11px] text-[var(--kt-text-mute)]">{t.claude.inUse}</span>
       )}
     </div>
   );
@@ -166,9 +141,8 @@ export function ClaudeTab({
   const [confirm, setConfirm] = useState<AccountSwitchConfirmation | null>(null);
   const confirmDialog = useRef<HTMLDivElement>(null);
   const confirmTrigger = useRef<HTMLElement | null>(null);
-  // 계정이 하나뿐이면 자동 전환이 갈 곳이 없어 아무 일도 안 일어난다. 켜 놓고
-  // "안 되네" 하는 게 이 기능에서 제일 흔한 오해라, 그 상태를 미리 말해 준다.
-  const lone = data.accounts.filter((a) => a.slot).length === 0;
+  const claudeAccounts = data.accounts.filter((row) => row.id !== '');
+  const lone = claudeAccounts.length < 2;
 
   const selectAccount = async (provider: 'claude' | 'codex', id: string) => {
     confirmTrigger.current = document.activeElement as HTMLElement | null;
@@ -197,12 +171,18 @@ export function ClaudeTab({
     activeId: string
   ) => (
     <>
+      {provider === 'claude' && !rows.length && (
+        <p className="kt-account-empty">{t.claude.noAccounts}</p>
+      )}
+      {provider === 'claude' && rows.length > 0 && !rows.some((row) => row.id === activeId) && (
+        <p className="kt-account-empty">{t.claude.noSelection}</p>
+      )}
       {rows.map((row) => (
         <AccountCard
           key={row.id || '(default)'}
           row={row}
           active={row.id === activeId}
-          busy={busy}
+          busy={busy || confirm !== null}
           onSelect={() => void selectAccount(provider, row.id)}
           onRename={(label) => void run(`${provider}-account-label`, { id: row.id, label })}
           onReauth={() => void run('reauth-account', { id: row.id, label: provider })}
@@ -313,7 +293,7 @@ export function ClaudeTab({
       </Row>
 
       <Section title={t.claude.account} hint={t.claude.accountHint}>
-        {accountList('claude', data.accounts, data.account)}
+        {accountList('claude', claudeAccounts, data.account)}
       </Section>
 
       <Row
@@ -323,7 +303,7 @@ export function ClaudeTab({
         <Toggle
           label={t.claude.autoSwitch}
           on={data.autoswitch}
-          disabled={busy}
+          disabled={busy || (lone && !data.autoswitch)}
           onToggle={() => void run('toggle-account-autoswitch')}
         />
       </Row>

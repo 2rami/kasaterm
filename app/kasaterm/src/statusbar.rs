@@ -1393,10 +1393,11 @@ fn paint_schedules_popover(
         let when = if !it.enabled {
             "멈춤".to_string()
         } else if it.kind == "loop" {
-            format!("매 {}분", (it.interval_sec / 60).max(1))
+            format!("매 {}", crate::remaining_duration_label(it.interval_sec.max(60)))
         } else {
             let left = it.next_ts - now;
-            if left <= 0.0 { "곧".to_string() } else if left < 3600.0 { format!("{}분 뒤", (left / 60.0).ceil() as u64) } else { format!("{}시간 뒤", (left / 3600.0).floor() as u64) }
+            let duration = crate::remaining_duration_label(left.max(0.0) as u64);
+            if left < 60.0 { duration } else { format!("{duration} 뒤") }
         };
         let meta = format!("{} · {} · {when}", it.kind, it.surface);
         let meta = crate::info::fit_text(g, &meta, text_w, 10.5, false);

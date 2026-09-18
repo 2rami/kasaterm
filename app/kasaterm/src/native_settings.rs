@@ -301,10 +301,10 @@ fn account_usage_state(
 ) -> AccountUsageState {
     if logged_in == Some(false) {
         AccountUsageState::LoggedOut
-    } else if has_usage || attempted == Some(true) {
-        AccountUsageState::Ready
     } else if attempted == Some(false) {
         AccountUsageState::Failed
+    } else if has_usage || attempted == Some(true) {
+        AccountUsageState::Ready
     } else {
         AccountUsageState::Loading
     }
@@ -359,61 +359,17 @@ fn codex_usage_badge(id: &str, limits: &crate::codexlimits::CodexLimits) -> Opti
 }
 
 fn account_choices(app: &App) -> Vec<AccountChoice> {
-    let usage_table = app
-        .claude_usage_all
-        .lock()
-        .ok()
-        .map(|guard| guard.clone())
-        .unwrap_or_default();
-    let active_usage = app.claude_usage.lock().ok().and_then(|guard| guard.clone());
     let active_id = app.set_claude_account.clone();
     let mut rows = Vec::new();
 
-    if active_id.is_empty() {
-        let probe = crate::settings::auth_probe("");
-        let usage = active_usage.clone().filter(|badge| badge.account_dir.is_empty());
-        let usage_state = account_usage_state(
-            probe.as_ref().map(|value| value.logged_in),
-            usage.is_some(),
-            crate::handler::claude_usage_attempt(""),
-        );
-        let usage_windows = usage
-            .as_ref()
-            .map(|badge| badge.windows.clone())
-            .unwrap_or_default();
-        rows.push(AccountChoice {
-            email: probe.as_ref().map(|p| p.email.clone()).unwrap_or_default(),
-            provider: AccountProvider::Claude,
-            id: String::new(),
-            name: "기본 로그인".to_string(),
-            sub: probe
-                .as_ref()
-                .map(|value| {
-                    if value.logged_in {
-                        account_sub(&value.email, &value.org)
-                    } else {
-                        "로그인 필요".to_string()
-                    }
-                })
-                .unwrap_or_else(|| "확인 중…".to_string()),
-            sub_kind: match probe {
-                Some(ref value) if !value.logged_in => "danger",
-                Some(_) => "mute",
-                None => "faint",
-            },
-            active: true,
-            slot: false,
-            usage,
-            usage_windows,
-            usage_state,
-        });
-    }
-    for (index, account) in app.set_claude_accounts.iter().enumerate() {
+    for (index, account) in app.set_claude_accounts.iter().filter(|account| !account.id.is_empty()).enumerate() {
         let probe = crate::settings::auth_probe(&account.id);
         let sub = probe
             .as_ref()
             .map(|value| {
-                if value.logged_in {
+                if !value.verified {
+                    if value.email.is_empty() { "로그인 확인 중…".to_string() } else { format!("{} · 로그인 확인 중…", value.email) }
+                } else if value.logged_in {
                     account_sub(&value.email, &value.org)
                 } else {
                     "로그인 필요".to_string()
@@ -422,15 +378,17 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
             .unwrap_or_else(|| "확인 중…".to_string());
         let dir = crate::claude_auth::runtime_dir_for_cached(&account.id, &active_id)
             .map_or(String::new(), |path| path.to_string_lossy().into_owned());
-        let usage = active_usage
-            .clone()
-            .filter(|badge| account.id == active_id && badge.account_dir == dir)
-            .or_else(|| usage_table.get(&dir).cloned());
-        let usage_state = account_usage_state(
-            probe.as_ref().map(|value| value.logged_in),
-            usage.is_some(),
+        let usage = app.claude_account_usage(&account.id);
+        let usage_state = match crate::settings::claude_usage_state(
+            probe.as_ref().filter(|value| value.verified).map(|value| value.logged_in),
+            usage.as_ref(),
             crate::handler::claude_usage_attempt(&dir),
-        );
+        ) {
+            "logged_out" => AccountUsageState::LoggedOut,
+            "failed" => AccountUsageState::Failed,
+            "ready" => AccountUsageState::Ready,
+            _ => AccountUsageState::Loading,
+        };
         let usage_windows = usage
             .as_ref()
             .map(|badge| badge.windows.clone())
@@ -442,11 +400,11 @@ fn account_choices(app: &App) -> Vec<AccountChoice> {
             name: crate::settings::account_display(
                 &account.id,
                 &account.label,
-                &format!("계정 {}", index + 2),
+                &format!("계정 {}", index + 1),
             ),
             sub,
             sub_kind: match probe {
-                Some(ref value) if !value.logged_in => "danger",
+                Some(ref value) if value.verified && !value.logged_in => "danger",
                 Some(_) => "mute",
                 None => "faint",
             },
@@ -3976,24 +3934,28 @@ fn paint_accounts(
     w: f32,
 ) {
     account_group(g, s, hits, caret, x, y, w, AccountProvider::Claude);
-    *y += 12.0;
-    account_group(g, s, hits, caret, x, y, w, AccountProvider::Codex);
     *y += 14.0;
-    toggle_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "한도에 맞춰 자동 전환",
-        s.home_accounts.as_ref().map_or(s.account_autoswitch, |h| h.autoswitch),
-        SettingsAction::ToggleAccountAutoswitch,
-    );
-    let switch_on = s.home_accounts.as_ref().map_or(s.account_autoswitch, |h| h.autoswitch);
-    let switch_pct = s
-        .home_accounts
-        .as_ref()
+    let switch_home = s.home_accounts.as_ref().filter(|_| s.account_scope_home);
+    let switch_on = switch_home.map_or(s.account_autoswitch, |h| h.autoswitch);
+    let switch_accounts = switch_home.map_or(s.accounts.as_ref(), |h| h.accounts.as_ref());
+    let named_count = switch_accounts.iter().filter(|row| row.provider == AccountProvider::Claude && !row.id.is_empty()).count();
+    if named_count >= 2 || switch_on {
+        toggle_row(
+            g,
+            s,
+            hits,
+            x,
+            y,
+            w,
+            "한도에 맞춰 자동 전환",
+            switch_on,
+            SettingsAction::ToggleAccountAutoswitch,
+        );
+    } else {
+        flat_row(g, x, *y, w, "한도에 맞춰 자동 전환", "Claude 계정을 2개 이상 등록하면 켤 수 있어요", w);
+        *y += ROW_H;
+    }
+    let switch_pct = switch_home
         .map_or(s.account_autoswitch_pct, |h| h.autoswitch_pct)
         .round() as u32;
     if switch_on {
@@ -4029,6 +3991,8 @@ fn paint_accounts(
             ],
         );
     }
+    *y += 14.0;
+    account_group(g, s, hits, caret, x, y, w, AccountProvider::Codex);
 }
 
 /// 명부 한 줄을 화면에 옮긴 것. 파일 형식(다른 필드가 여럿 딸린 json)을 그대로
@@ -5501,6 +5465,9 @@ fn home_accounts_view() -> Option<HomeAccountsView> {
         .iter()
         .filter_map(|v| {
             let id = v.get("id")?.as_str()?.to_string();
+            if id.is_empty() {
+                return None;
+            }
             let windows: Vec<crate::UsageWindowBadge> = v
                 .get("usage_windows")
                 .and_then(serde_json::Value::as_array)
@@ -5540,9 +5507,11 @@ fn home_accounts_view() -> Option<HomeAccountsView> {
                 .get("usage_state")
                 .and_then(serde_json::Value::as_str)
             {
-                Some("ready") => AccountUsageState::Ready,
-                Some("failed") => AccountUsageState::Failed,
                 Some("logged_out") => AccountUsageState::LoggedOut,
+                _ if usage.as_ref().is_some_and(|badge| badge.stale) => AccountUsageState::Failed,
+                Some("failed") => AccountUsageState::Failed,
+                Some("loading") => AccountUsageState::Loading,
+                Some("ready") => AccountUsageState::Ready,
                 _ if usage.is_some() => AccountUsageState::Ready,
                 _ => AccountUsageState::Loading,
             };
@@ -5564,7 +5533,7 @@ fn home_accounts_view() -> Option<HomeAccountsView> {
                     Some("faint") => "faint",
                     _ => "mute",
                 },
-                slot: v.get("slot").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                slot: true,
                 id,
                 usage,
                 usage_windows,
@@ -5634,7 +5603,7 @@ fn account_group(
     *y += 23.0;
     let blurb = match provider {
         AccountProvider::Claude => {
-            "한도가 차면 다음 계정으로 스스로 넘어갑니다. 한 계정만 쓰신다면 더 넣지 않으셔도 됩니다."
+            "등록한 계정을 선택해 사용합니다. 계정이 2개 이상이면 한도에 맞춰 자동 전환할 수 있어요."
         }
         AccountProvider::Codex => {
             "코덱스도 같은 방식으로 여러 계정을 둘 수 있습니다. 인증은 이 기기에 남습니다."
@@ -5696,17 +5665,25 @@ fn account_group(
             s,
             hits,
             (x + w - 104.0, *y, 104.0, 30.0),
-            "＋ 계정 추가",
+            "계정 추가",
             Target::Setting(add),
             false,
         );
     }
     *y += 26.0;
+    let rows: Vec<&AccountChoice> = home.map_or(s.accounts.as_ref(), |h| h.accounts.as_ref())
+        .iter().filter(|row| row.provider == provider && (provider != AccountProvider::Claude || !row.id.is_empty())).collect();
+    let selection_note = if provider == AccountProvider::Claude && !rows.iter().any(|row| row.active) {
+        "계정 선택 필요 · 외부 CLI 로그인은 그대로 유지됩니다"
+    } else {
+        "계정을 눌러 선택하고 사용량을 펼쳐 확인하세요"
+    };
+    let selection_note = fit(g, selection_note, w, 10.5, false);
     draw_text(
         g,
         x,
         *y,
-        "한도가 차면 위에서부터 차례로 넘어갑니다",
+        &selection_note,
         10.5,
         theme::text_mute(),
         false,
@@ -5721,25 +5698,16 @@ fn account_group(
             }
             *y += 3.0;
         }
-        if h.accounts.is_empty() && h.error.is_none() {
-            draw_text(
-                g,
-                x + 2.0,
-                *y,
-                "아직 등록된 계정이 없어요 — 위 「계정 추가」로 하나 넣어 주세요",
-                11.0,
-                theme::text_mute(),
-                false,
-            );
-            *y += 22.0;
+    }
+    if rows.is_empty() && home.is_none_or(|h| h.error.is_none()) {
+        for line in wrap_words(g, "등록된 계정이 없어요. 위의 ‘계정 추가’로 시작하세요.", w - 4.0, 11.0) {
+            draw_text(g, x + 2.0, *y, &line, 11.0, theme::text_dim(), false);
+            *y += 16.0;
         }
-        for row in h.accounts.iter() {
-            account_row(g, s, hits, caret, x, y, w, row);
-        }
-    } else {
-        for row in s.accounts.iter().filter(|row| row.provider == provider) {
-            account_row(g, s, hits, caret, x, y, w, row);
-        }
+        *y += 8.0;
+    }
+    for row in rows {
+        account_row(g, s, hits, caret, x, y, w, row);
     }
 
     if needs_code {
@@ -5850,7 +5818,7 @@ fn account_row(
     } else {
         0.0
     };
-    let rect = (x, *y, w, if editing { 62.0 } else { 54.0 + detail_h });
+    let rect = (x, *y, w, if editing { 62.0 } else { 84.0 + detail_h });
     choice_card(
         g,
         s,
@@ -5908,21 +5876,19 @@ fn account_row(
     let text_x = rect.0 + 40.0;
     let avail = (rect.0 + rect.2 - actions_w - text_x).max(80.0);
 
-    // 첫 줄: 이름 + 「활성」 알약. 카드 테두리 색만으로 지금 쓰이는 줄을 알리던
-    // 것을 낱말로 바꾼다 — 색은 활성과 호버가 서로 비슷해 읽히지 않았다.
-    let badge = if row.active { Some("활성") } else { None };
+    // 선택만으로 로그인 완료를 단정할 수 없다.
+    let badge = if row.active { Some("선택됨") } else { None };
     let badge_w = badge
         .map(|t| g.measure_chrome_text(t, 9.5, false) + 22.0)
         .unwrap_or(0.0);
-    let shown = fit(g, &row.name, avail - badge_w, 12.0, row.active);
+    let shown = fit(g, &row.name, w - 54.0 - badge_w, 12.0, row.active);
     let name_w = g.measure_chrome_text(&shown, 12.0, row.active);
     draw_text(g, text_x, rect.1 + 8.0, &shown, 12.0, theme::text(), row.active);
     if let Some(t) = badge {
         pill(g, text_x + name_w + 8.0, rect.1 + 7.0, t, true);
     }
 
-    // 둘째 줄: 신원과 사용량 요약. 사용량은 계정 전환과 다른 클릭이므로 오른쪽에
-    // 고정하고 chevron을 붙인다. 값이 없어도 상태를 눌러 이유를 펼칠 수 있다.
+    // 긴 신원 문자열이 관리 단추에 가리지 않도록 사용량과 동작은 다음 줄에 둔다.
     let home_sub = s.home_accounts.as_ref().and_then(|h| {
         let (id, state, err) = h.login.as_ref()?;
         (id == &row.id).then(|| match state.as_str() {
@@ -5946,19 +5912,19 @@ fn account_row(
     let (usage_text, usage_pct) = account_usage_summary(row);
     let usage_text = fit(g, &usage_text, (avail - 20.0).max(24.0), 10.5, false);
     let usage_w = g.measure_chrome_text(&usage_text, 10.5, false) + 22.0;
-    let usage_right = text_x + avail;
-    let usage_left = (usage_right - usage_w).max(text_x);
+    let usage_left = text_x;
+    let usage_right = usage_left + usage_w.min(avail);
     let sub_value = job_sub.as_deref().unwrap_or(&row.sub);
     let mut sub_x = text_x;
     // 메일 서비스 표지는 **부제가 그 계정을 말할 때만** — 로그인 진행 같은 상태
     // 문구 앞에 세우면 그게 주소인 줄로 읽힌다.
-    if job_sub.is_none() && !row.email.is_empty() && usage_left - sub_x >= 32.0 {
+    if job_sub.is_none() && !row.email.is_empty() && w >= 100.0 {
         let d = email_provider_mark(g, sub_x, rect.1 + 27.0, &row.email, 14.0);
         if d > 0.0 {
             sub_x += d + 6.0;
         }
     }
-    let sub_room = usage_left - sub_x - 8.0;
+    let sub_room = rect.0 + w - 14.0 - sub_x;
     if !sub_value.is_empty() && sub_room >= 24.0 {
         let sub = fit(g, sub_value, sub_room, 10.5, false);
         draw_text(
@@ -5978,7 +5944,7 @@ fn account_row(
     draw_text(
         g,
         usage_left,
-        rect.1 + 29.0,
+        rect.1 + 58.0,
         &usage_text,
         10.5,
         usage_pct.map_or_else(
@@ -5990,13 +5956,13 @@ fn account_row(
     g.queue_icon(
         if expanded { "chevron-up" } else { "chevron-down" },
         usage_right - 14.0,
-        rect.1 + 28.0,
+        rect.1 + 57.0,
         13.0,
         theme::text_mute(),
     );
     let usage_hit = (
         usage_left - 6.0,
-        rect.1 + 23.0,
+        rect.1 + 51.0,
         (usage_right - usage_left + 8.0).max(34.0),
         27.0,
     );
@@ -6010,7 +5976,7 @@ fn account_row(
     g.hover_pointer |= contains(usage_hit, s.cursor);
 
     if expanded {
-        let detail = (rect.0 + 8.0, rect.1 + 55.0, rect.2 - 16.0, detail_h - 8.0);
+        let detail = (rect.0 + 8.0, rect.1 + 85.0, rect.2 - 16.0, detail_h - 8.0);
         g.rect(detail.0, detail.1 - 1.0, detail.2, 1.0, theme::border());
         match row.usage_state {
             AccountUsageState::Ready => {
@@ -6044,7 +6010,7 @@ fn account_row(
     }
 
     if show_actions {
-        let by = rect.1 + 14.0;
+        let by = rect.1 + 51.0;
         let mut rx = rect.0 + rect.2 - 8.0 - w_reauth;
         if show_slot_actions {
             rx = rect.0 + rect.2 - 8.0 - w_remove;
@@ -6208,8 +6174,12 @@ fn account_usage_state_text(state: AccountUsageState) -> &'static str {
 fn account_usage_summary(row: &AccountChoice) -> (String, Option<f32>) {
     match (row.usage_state, row.usage.as_ref()) {
         (AccountUsageState::Ready, Some(usage)) => (
-            format!("{}{:.0}%", if usage.stale { "~" } else { "" }, usage.pct),
-            Some(usage.pct),
+            format!("{}{:.0}%", if usage.stale { "이전 " } else { "" }, usage.pct),
+            (!usage.stale).then_some(usage.pct),
+        ),
+        (AccountUsageState::Failed, Some(usage)) => (
+            format!("이전 {:.0}% · 조회 실패", usage.pct),
+            None,
         ),
         (state, _) => (account_usage_state_text(state).to_string(), None),
     }
@@ -7597,10 +7567,27 @@ mod tests {
             AccountUsageState::Failed
         );
         assert_eq!(
+            account_usage_state(Some(true), true, Some(false)),
+            AccountUsageState::Failed
+        );
+        assert_eq!(
             account_usage_state(Some(false), true, Some(true)),
             AccountUsageState::LoggedOut,
             "로그아웃이 옛 캐시보다 우선해야 한다"
         );
+    }
+
+    #[test]
+    fn previous_usage_is_never_presented_as_current_or_logged_in() {
+        let mut row = usage_account(vec![]);
+        row.usage.as_mut().unwrap().pct = 42.0;
+        row.usage_state = AccountUsageState::Failed;
+        assert_eq!(account_usage_summary(&row), ("이전 42% · 조회 실패".into(), None));
+        row.usage_state = AccountUsageState::LoggedOut;
+        assert_eq!(account_usage_summary(&row), ("로그인 후 사용량을 볼 수 있어요".into(), None));
+        row.usage_state = AccountUsageState::Ready;
+        row.usage.as_mut().unwrap().stale = true;
+        assert_eq!(account_usage_summary(&row), ("이전 42%".into(), None));
     }
 
     #[test]

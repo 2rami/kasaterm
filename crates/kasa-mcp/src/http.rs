@@ -3479,7 +3479,7 @@ async fn refresh_claude_token(dir: &str) -> Option<String> {
     // 그 자리에서 죽는다. slot_has_live_claude 는 env 문자열만 봐서 env 없이
     // 작업대를 쓰는 활성 pane 들을 못 보고, 그래서 활성 금고를 늘 「안 쓰는
     // 슬롯」으로 판정한다 — 그 게이트만으론 못 막는다(2026-08-19 조사 확정).
-    if is_active_vault_dir(dir) {
+    if managed_vault_refresh_forbidden(dir) {
         eprintln!("[claude-token] 활성 계정 금고 회전 거부 — 작업대가 정본이다");
         return None;
     }
@@ -3611,20 +3611,26 @@ fn active_vault_in(root: &std::path::Path, stamp_json: &str) -> Option<String> {
     Some(root.join(acct).to_string_lossy().into_owned())
 }
 
-fn is_active_vault_dir(dir: &str) -> bool {
-    if dir.is_empty() {
-        return false; // 빈 dir = 작업대 자신. 금고가 아니다.
-    }
-    let p = std::path::Path::new(dir);
-    let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else {
+fn managed_vault_refresh_forbidden(dir: &str) -> bool {
+    let path = std::path::Path::new(dir);
+    let Some(parent) = path.parent() else { return false };
+    let stamp = std::fs::read_to_string(parent.join("_active/workbench-stamp.json")).ok();
+    managed_vault_refresh_forbidden_in(path, stamp.as_deref())
+}
+
+fn managed_vault_refresh_forbidden_in(path: &std::path::Path, stamp: Option<&str>) -> bool {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { return false };
+    let managed = parent.file_name().is_some_and(|name| name == "claude-accounts") || stamp.is_some();
+    if !managed {
         return false;
-    };
-    let stamp = parent.join("_active").join("workbench-stamp.json");
-    let active = std::fs::read_to_string(&stamp)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .and_then(|v| v.get("account").and_then(|a| a.as_str().map(str::to_string)));
-    active.as_deref() == name.to_str()
+    }
+    // Without ownership evidence any managed vault may share the running workbench's one-use token.
+    let owner = stamp.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|v| v.get("account").and_then(|id| id.as_str()).map(str::to_owned));
+    match owner.filter(|id| !id.is_empty()) {
+        Some(owner) => name == owner.as_str(),
+        None => true,
+    }
 }
 
 fn refresh_slot_once(dir: &str) {
@@ -3633,7 +3639,7 @@ fn refresh_slot_once(dir: &str) {
     // ⚠️ **활성 계정의 금고는 절대 refresh 하지 않는다**(is_active_vault_dir 주석).
     // kasaterm 쪽 runtime_dir_for 도 같은 이유로 금고 폴백을 막지만, 이 프록시는
     // 아로나 UI 등 다른 클라이언트도 부르므로 여기 자체 가드가 이중 방어다.
-    if is_active_vault_dir(dir) {
+    if managed_vault_refresh_forbidden(dir) {
         eprintln!("[usage] 활성 계정 금고 refresh 거부 — 작업대가 정본이다");
         return;
     }
@@ -8841,19 +8847,31 @@ mod tests {
         let vault = active_vault_in(&tmp, stamp).expect("지문이 계정을 말하면 경로가 나온다");
         assert!(vault.ends_with("acct-5"));
         assert!(
-            is_active_vault_dir(&vault),
+            managed_vault_refresh_forbidden(&vault),
             "폴백 경로가 활성 금고로 안 보이면 refresh 거부를 통과해 버린다"
         );
 
         // 다른 슬롯은 활성이 아니다 — 그쪽은 회전해도 작업대와 무관하다.
         let other = tmp.join("acct-1").to_string_lossy().into_owned();
-        assert!(!is_active_vault_dir(&other));
+        assert!(!managed_vault_refresh_forbidden(&other));
 
         // 지문에 계정이 없으면 폴백 자체가 없다(빈 경로를 만들어 기본 슬롯을
         // 두 번 치는 일이 없어야 한다).
         assert_eq!(active_vault_in(&tmp, r#"{"account":""}"#), None);
         assert_eq!(active_vault_in(&tmp, "{}"), None);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn unidentified_managed_workbench_forbids_vault_refresh() {
+        let vault = std::path::Path::new("/test/claude-accounts/acct-1");
+        for stamp in [None, Some("{}"), Some(r#"{"account":""}"#), Some("invalid")] {
+            assert!(managed_vault_refresh_forbidden_in(vault, stamp));
+        }
+        assert!(managed_vault_refresh_forbidden_in(vault, Some(r#"{"account":"acct-1"}"#)));
+        assert!(!managed_vault_refresh_forbidden_in(vault, Some(r#"{"account":"acct-2"}"#)));
+        assert!(!managed_vault_refresh_forbidden_in(std::path::Path::new(""), None));
+        assert!(!managed_vault_refresh_forbidden_in(std::path::Path::new("/test/standalone"), None));
     }
 
     #[test]

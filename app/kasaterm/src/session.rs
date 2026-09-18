@@ -3380,9 +3380,9 @@ impl App {
             Some(i) => crate::settings::account_display(
                 id,
                 &self.set_claude_accounts[i].label,
-                &format!("계정 {}", i + 2),
+                &format!("계정 {}", i + 1),
             ),
-            None => crate::settings::account_display("", "", "기본 계정"),
+            None => "계정 선택 필요".to_string(),
         }
     }
 
@@ -3513,20 +3513,25 @@ impl App {
     }
 
     /// 확인 없이 지금 바꾼다. 옛 `SettingsAction::ClaudeAccount` 팔의 본문 그대로다.
-    pub(crate) fn claude_account_switch_now(&mut self, id: &str) {
+    pub(crate) fn claude_account_switch_now(&mut self, id: &str) -> bool {
         self.settings_input = None;
         let same = id == self.set_claude_account;
         // 바뀐 자리를 반짝여 준다 — 우상단 토스트만으로는 정작 계정 칩이 아무 변화
         // 없이 그대로라 「바뀐 줄 모르겠다」가 된다. 같은 계정을 다시 누른 경우엔
         // 켜지 않는다(아무것도 안 바뀌었는데 축포를 터뜨리는 꼴이다).
+        let (_, to_label, restarted, deferred, focused, live) =
+            self.apply_claude_account_switch(id);
+        if !live {
+            self.set_toast("계정을 전환하지 못했어요. 해당 계정의 로그인을 확인해 주세요".to_string());
+            return false;
+        }
         if !same {
             self.account_flash = Some(std::time::Instant::now());
         }
-        let (_, to_label, restarted, deferred, focused, live) =
-            self.apply_claude_account_switch(id);
         self.set_toast(crate::session::account_switch_toast(
             &to_label, same, restarted, deferred, focused, live,
         ));
+        true
     }
 
     /// 두 공급자가 같은 확인 카드와 안전 규칙을 쓰게 모은다. 카드에만 상태를 담아
@@ -3609,7 +3614,7 @@ impl App {
         &mut self,
         provider: AccountSwitchProvider,
         to: &str,
-    ) -> Option<serde_json::Value> {
+    ) -> Result<Option<serde_json::Value>, String> {
         if self
             .account_switch_confirm
             .as_ref()
@@ -3629,10 +3634,14 @@ impl App {
         };
         if !impact.needs_confirm() {
             match provider {
-                AccountSwitchProvider::Claude => self.claude_account_switch_now(to),
+                AccountSwitchProvider::Claude => {
+                    if !self.claude_account_switch_now(to) {
+                        return Err("계정을 전환하지 못했어요. 해당 계정의 로그인을 확인해 주세요".to_string());
+                    }
+                }
                 AccountSwitchProvider::Codex => self.codex_account_switch_now(to),
             }
-            return None;
+            return Ok(None);
         }
         let nonce = self.show_account_switch_confirm(
             provider,
@@ -3641,13 +3650,13 @@ impl App {
             impact,
             ConfirmSurface::Web,
         );
-        Some(web_account_confirm_json(
+        Ok(Some(web_account_confirm_json(
             provider,
             to,
             &to_label,
             &impact,
             &nonce,
-        ))
+        )))
     }
 
     /// 웹 확인 카드의 두 번째 단계. 응답이 현재 대기표와 정확히 맞을 때만 소비한다.
@@ -3667,7 +3676,11 @@ impl App {
         )?;
         if let Some((provider, to)) = picked {
             match provider {
-                AccountSwitchProvider::Claude => self.claude_account_switch_now(&to),
+                AccountSwitchProvider::Claude => {
+                    if !self.claude_account_switch_now(&to) {
+                        return Err("계정을 전환하지 못했어요. 해당 계정의 로그인을 확인해 주세요".to_string());
+                    }
+                }
                 AccountSwitchProvider::Codex => self.codex_account_switch_now(&to),
             }
         }
@@ -3699,7 +3712,7 @@ impl App {
         };
         if btn == AccountSwitchBtn::Switch {
             match p.provider {
-                AccountSwitchProvider::Claude => self.claude_account_switch_now(&p.to),
+                AccountSwitchProvider::Claude => { self.claude_account_switch_now(&p.to); }
                 AccountSwitchProvider::Codex => self.codex_account_switch_now(&p.to),
             }
         }
@@ -3831,25 +3844,25 @@ impl App {
     ) -> (String, String, usize, usize, bool, bool) {
         let from_label = self.claude_account_display(&self.set_claude_account.clone());
         let to_label = self.claude_account_display(to);
+        if to.is_empty() || !self.set_claude_accounts.iter().any(|account| account.id == to) {
+            return (from_label, to_label, 0, 0, false, false);
+        }
         // ① 작업대를 새 계정으로 갈아 끼운다. 이것만으로 **작업대를 보고 도는 pane 은
         // 전부** 다음 요청부터 새 계정이 된다 — 재시작도, 대화 끊김도 없다. claude 가
         // 요청 직전마다 저장소를 다시 읽고, 자기 것과 다른 토큰이 있으면 그대로
         // 채택하기 때문이다(claude_auth 모듈 머리말).
         let swapped = crate::claude_auth::swap_active(to, socket::claude_account_dir);
+        if matches!(swapped, crate::claude_auth::SwapOutcome::VaultEmpty | crate::claude_auth::SwapOutcome::WriteFailed) {
+            return (from_label, to_label, 0, 0, false, false);
+        }
         // /status 가 보여주는 신원 캐시(~/.claude.json oauthAccount)도 함께 갈아
         // 끼운다 — 저장소만 바꾸면 과금은 새 계정인데 /status 는 옛말을 한다.
         // AlreadyActive 여도 부른다: 캐시는 다른 로그인(밖에서 친 claude /login)이
         // 언제든 덮을 수 있어, 「맞추기」 클릭이 그걸 바로잡는 손이 된다.
-        if !matches!(
-            swapped,
-            crate::claude_auth::SwapOutcome::VaultEmpty
-                | crate::claude_auth::SwapOutcome::WriteFailed
-        ) {
-            crate::claude_auth::adopt_oauth_account_cache(
-                crate::mcp_panel_port(),
-                socket::claude_account_dir(to),
-            );
-        }
+        crate::claude_auth::adopt_oauth_account_cache(
+            crate::mcp_panel_port(),
+            socket::claude_account_dir(to),
+        );
         // ② 재시작이 필요한 pane 은 **작업대를 안 보는** 것들뿐이다 — 이 기능이 생기기
         // 전에 뜬 pane 은 특정 금고에 못 박혀 있어 갈아 끼우기가 안 닿는다.
         let target_dir = self.claude_target_dir(to);
@@ -3870,22 +3883,12 @@ impl App {
             self.pane_account_stale
                 .insert(f.id, (boot_label, to_label.clone()));
         }
-        if matches!(swapped, crate::claude_auth::SwapOutcome::WriteFailed) {
-            // 조용히 넘어가면 「바꿨는데 안 바뀐다」가 된다. 재시작 폴백은 그대로
-            // 도니 기능은 살지만, 왜 느린지는 로그에 남겨 둔다.
-            eprintln!("[account] 작업대 갈아 끼우기 실패 — 재시작 폴백으로만 반영된다");
-        }
         self.set_claude_account = to.to_string();
         // shim 재굽기가 재시작보다 **먼저**여야 새로 뜨는 claude 가 새 계정을 탄다.
         self.settings_save();
         let restarted = self.run_pending_account_restarts();
         let (deferred, focused_pending) =
             self.pending_account_restart_state(kasa_pty::AgentKind::Claude);
-        let live = !matches!(
-            swapped,
-            crate::claude_auth::SwapOutcome::VaultEmpty
-                | crate::claude_auth::SwapOutcome::WriteFailed
-        );
         // 연결된 기기들도 같은 계정으로 — 본진에서 바꾸면 작업대가, 작업대에서 바꾸면
         // 본진이 따라온다(2026-09-18 지시). 자격증명은 기계마다 따로라 옮기지 않고
         // 신원(이메일·조직)과 별명만 보내며, 받는 쪽은 자기 슬롯 중 같은 것을 고른다.
@@ -3902,15 +3905,15 @@ impl App {
             restarted,
             deferred,
             focused_pending,
-            live,
+            true,
         )
     }
 
     /// 다른 기기가 보낸 신원·별명에 맞는 내 슬롯. 신원이 같은 슬롯이 먼저, 없으면 별명이
-    /// 같은 슬롯. `""` 는 기본 로그인.
+    /// 같은 슬롯. 비어 있거나 중복된 후보는 고르지 않는다.
     pub(crate) fn peer_account_slot(&self, identity: &str, label: &str) -> Option<String> {
-        let slots: Vec<(String, String)> = std::iter::once((String::new(), String::new()))
-            .chain(self.set_claude_accounts.iter().map(|a| (a.id.clone(), a.label.clone())))
+        let slots: Vec<(String, String)> = self.set_claude_accounts.iter()
+            .filter(|a| !a.id.is_empty()).map(|a| (a.id.clone(), a.label.clone()))
             .collect();
         peer_account_slot_in(
             &slots,
@@ -9906,7 +9909,7 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
     }
 }
 
-/// `peer_account_slot` 의 순수한 몸통 — `slots` 는 `(id, 별명)`, 기본 로그인 `""` 포함.
+/// 빈 id는 미선택이므로 다른 기기의 계정 요청과 매칭하지 않는다.
 pub(crate) fn peer_account_slot_in(
     slots: &[(String, String)],
     identity_of: impl Fn(&str) -> Option<String>,
@@ -9915,16 +9918,21 @@ pub(crate) fn peer_account_slot_in(
     label: &str,
 ) -> Option<String> {
     if !identity.is_empty() {
-        if let Some((id, _)) = slots.iter().find(|(id, _)| identity_of(id).as_deref() == Some(identity)) {
+        let mut matches = slots.iter().filter(|(id, _)| !id.is_empty() && identity_of(id).as_deref() == Some(identity));
+        if let Some((id, _)) = matches.next() {
+            if matches.next().is_some() {
+                return None;
+            }
             return Some(id.clone());
         }
     }
     if label.is_empty() {
         return None;
     }
-    slots.iter()
-        .find(|(id, l)| (!l.is_empty() && l == label) || display_of(id) == label)
-        .map(|(id, _)| id.clone())
+    let mut matches = slots.iter()
+        .filter(|(id, l)| !id.is_empty() && ((!l.is_empty() && l == label) || display_of(id) == label));
+    let id = matches.next()?.0.clone();
+    matches.next().is_none().then_some(id)
 }
 
 /// 계정 전환을 명부의 다른 기기 전부에 알린다 — `claude-account-identity` 액션. 닿지 않는
@@ -10006,16 +10014,17 @@ mod tests {
             ("acct-9".to_string(), String::new()),
         ];
         let identity_of = |id: &str| match id {
-            "acct-1" => Some("me@gmail.com".to_string()),
+            "" | "acct-1" => Some("me@gmail.com".to_string()),
             "acct-4" => Some("Sionic".to_string()),
             _ => None,
         };
         let display_of = |id: &str| match id { "acct-9" => "계정 5".to_string(), "" => "기본 계정".to_string(), _ => id.to_string() };
         let pick = |identity: &str, label: &str| super::peer_account_slot_in(&slots, identity_of, display_of, identity, label);
         assert_eq!(pick("Sionic", "엉뚱한 별명").as_deref(), Some("acct-4"), "신원이 별명보다 먼저");
+        assert_eq!(pick("me@gmail.com", "").as_deref(), Some("acct-1"), "같은 신원의 기본 작업대는 후보가 아니다");
         assert_eq!(pick("nobody@x", "지메일").as_deref(), Some("acct-1"), "신원이 없으면 별명");
         assert_eq!(pick("", "계정 5").as_deref(), Some("acct-9"), "별명이 비면 표시 이름");
-        assert_eq!(pick("", "기본 계정").as_deref(), Some(""), "기본 로그인도 후보");
+        assert_eq!(pick("", "기본 계정"), None, "미선택은 계정 후보가 아니다");
         assert_eq!(pick("nobody@x", ""), None, "아무것도 안 맞으면 안 바꾼다");
     }
 

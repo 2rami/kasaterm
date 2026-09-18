@@ -5949,28 +5949,29 @@ pub struct ClaudeAccount {
     pub label: String,
 }
 
-/// Configured extra logins, in display order. The default login (whatever
-/// `claude` already uses) is *not* in this list — it is the implicit first row.
+/// Registered Claude logins, in display order. Empty ids are not accounts.
 pub fn read_claude_accounts() -> Vec<ClaudeAccount> {
     read_settings()
         .get("claude_accounts")
         .and_then(|v| serde_json::from_value::<Vec<ClaudeAccount>>(v.clone()).ok())
         .unwrap_or_default()
+        .into_iter().filter(|a| !a.id.is_empty()).collect()
 }
 
-/// Active account id, or `""` for the default login. An id that is no longer in
-/// `read_claude_accounts` reads as `""` — a deleted account must fall back to
-/// the default rather than point `claude` at a store nothing can log into.
+/// An unresolved selection stays empty so it cannot impersonate a registered login.
 pub fn read_claude_account() -> String {
     let id = read_settings()
         .get("claude_account")
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .to_string();
-    if id.is_empty() || read_claude_accounts().iter().any(|a| a.id == id) {
+    let accounts = read_claude_accounts();
+    if !id.is_empty() && accounts.iter().any(|a| a.id == id) {
         id
     } else {
-        String::new()
+        crate::claude_auth::workbench_account()
+            .filter(|owner| accounts.iter().any(|a| a.id == *owner))
+            .unwrap_or_default()
     }
 }
 
@@ -6352,7 +6353,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// 다음으로 옮겨갈 계정 id. 후보는 `""`(기본 로그인) + 설정 목록 순서이고,
+/// 다음으로 옮겨갈 계정 id. 후보는 등록된 계정 목록 순서이고,
 /// 현재 계정 **다음** 자리부터 한 바퀴 돌며 쿨다운이 풀린 첫 후보를 고른다.
 /// 전부 잠겨 있으면 `None` — 어차피 갈 곳이 없는데 옮기면 멀쩡한 계정에서
 /// 소진된 계정으로 내려앉는 꼴이 된다.
@@ -6361,21 +6362,8 @@ pub fn pick_next_account(
     accounts: &[ClaudeAccount],
     cooldowns: &std::collections::HashMap<String, u64>,
     now: u64,
-    default_usable: bool,
 ) -> Option<String> {
-    // `default_usable` = 기본 로그인(접미 없는 자리)을 후보로 쓸 수 있나.
-    //
-    // 기본은 kasaterm 밖에서 `claude` 를 그냥 칠 때 쓰는 자리라, 슬롯을 만들어
-    // 쓰는 사람에게는 대개 **슬롯 중 하나와 같은 계정**이다. 그런데도 후보에 늘
-    // 들어 있어서, 한도가 찬 계정에서 「기본」으로 옮겨 봐야 같은 계정이라 여전히
-    // 100% 였다 — 옮기고 5분 쉬고 또 옮기는 헛돌이가 된다(2026-09-05 실측: 기본과
-    // acct-1 이 이메일·조직까지 같았다. 사용자 「기본계정은 뭐야 굳이 있는 이유를
-    // 모르겠다」).
-    let mut all: Vec<&str> = Vec::new();
-    if default_usable {
-        all.push("");
-    }
-    all.extend(accounts.iter().map(|a| a.id.as_str()));
+    let all: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).filter(|id| !id.is_empty()).collect();
     if all.is_empty() {
         return None;
     }
@@ -6389,41 +6377,6 @@ pub fn pick_next_account(
         .into_iter()
         .find(|id| cooldowns.get(*id).is_none_or(|&t| t <= now))
         .map(str::to_string)
-}
-
-/// 기본 로그인이 지금 쓰는 슬롯과 **다른 계정**인가.
-///
-/// 같은 계정이면 자동 전환의 후보로 둘 이유가 없다 — 옮겨도 한도가 그대로다.
-/// 신원은 설정에 적어 둔 이메일·조직으로 가른다(같은 이메일이라도 개인 조직과 팀
-/// 조직은 한도가 따로 도는 별개 계정이라 둘을 함께 본다).
-///
-/// **모르면 `true`** — 판정할 값이 없다고 멀쩡한 후보를 잃으면 갈 곳이 없어진다.
-pub fn default_account_is_distinct(active: &str) -> bool {
-    if active.is_empty() {
-        return true;
-    }
-    let cfg = read_settings();
-    let pick = |key: &str, id: &str| -> Option<String> {
-        cfg.get(key)?.get(id)?.as_str().map(str::to_string)
-    };
-    let (Some(de), Some(ae)) = (
-        pick("claude_account_emails", ""),
-        pick("claude_account_emails", active),
-    ) else {
-        return true;
-    };
-    if de != ae {
-        return true;
-    }
-    match (
-        pick("claude_account_orgs", ""),
-        pick("claude_account_orgs", active),
-    ) {
-        (Some(d), Some(a)) => d != a,
-        // 이메일은 같은데 조직을 모른다 — 같은 계정으로 본다. 이메일까지 같은
-        // 자리가 실제로 다른 계정인 경우는 팀 조직뿐이고, 그건 조직이 적혀 있다.
-        _ => false,
-    }
 }
 
 /// shim 주입 전역 스위치(설정 "shim_inject"). false 면 install_pane_shims 가 shim dir 를
@@ -7936,18 +7889,17 @@ mod account_autoswitch_tests {
     fn pick_next_account_rotates_from_the_current_slot() {
         let a = accts(&["acct-1", "acct-2"]);
         let none = Default::default();
-        // 기본 → 첫 슬롯 → 둘째 슬롯 → 다시 기본.
         assert_eq!(
-            pick_next_account("", &a, &none, 0, true).as_deref(),
+            pick_next_account("", &a, &none, 0).as_deref(),
             Some("acct-1")
         );
         assert_eq!(
-            pick_next_account("acct-1", &a, &none, 0, true).as_deref(),
+            pick_next_account("acct-1", &a, &none, 0).as_deref(),
             Some("acct-2")
         );
         assert_eq!(
-            pick_next_account("acct-2", &a, &none, 0, true).as_deref(),
-            Some("")
+            pick_next_account("acct-2", &a, &none, 0).as_deref(),
+            Some("acct-1")
         );
     }
 
@@ -7958,23 +7910,24 @@ mod account_autoswitch_tests {
         cool.insert("acct-1".to_string(), 500_u64);
         // acct-1 은 아직 잠겨 있으니 건너뛴다.
         assert_eq!(
-            pick_next_account("", &a, &cool, 100, true).as_deref(),
+            pick_next_account("", &a, &cool, 100).as_deref(),
             Some("acct-2")
         );
         // 풀린 뒤에는 다시 1순위.
         assert_eq!(
-            pick_next_account("", &a, &cool, 600, true).as_deref(),
+            pick_next_account("", &a, &cool, 600).as_deref(),
             Some("acct-1")
         );
         // 전부 잠기면 안 옮긴다 — 멀쩡한 자리에서 소진된 자리로 내려앉지 않게.
         cool.insert("acct-2".to_string(), 500);
         cool.insert(String::new(), 500);
-        assert_eq!(pick_next_account("acct-1", &a, &cool, 100, true), None);
+        assert_eq!(pick_next_account("acct-1", &a, &cool, 100), None);
     }
 
     #[test]
     fn pick_next_account_has_nowhere_to_go_with_a_single_login() {
-        assert_eq!(pick_next_account("", &[], &Default::default(), 0, true), None);
+        assert_eq!(pick_next_account("", &[], &Default::default(), 0), None);
+        assert_eq!(pick_next_account("acct-1", &accts(&["", "acct-1"]), &Default::default(), 0), None);
     }
 
     /// 기본이 슬롯 하나와 같은 계정이면 후보에서 뺀다 — 옮겨도 한도가 그대로라
@@ -7988,12 +7941,12 @@ mod account_autoswitch_tests {
         let none = std::collections::HashMap::new();
         // acct-1 에서 떠난다 — 기본을 못 쓰면 acct-2 로만 갈 수 있다.
         assert_eq!(
-            pick_next_account("acct-1", &a, &none, 0, false).as_deref(),
+            pick_next_account("acct-1", &a, &none, 0).as_deref(),
             Some("acct-2")
         );
         // 한 바퀴 돌아도 기본은 안 나온다.
         assert_eq!(
-            pick_next_account("acct-2", &a, &none, 0, false).as_deref(),
+            pick_next_account("acct-2", &a, &none, 0).as_deref(),
             Some("acct-1")
         );
     }
@@ -8008,13 +7961,13 @@ mod account_autoswitch_tests {
         ];
         let none = std::collections::HashMap::new();
         assert_eq!(
-            pick_next_account("", &a, &none, 0, false).as_deref(),
+            pick_next_account("", &a, &none, 0).as_deref(),
             Some("acct-1")
         );
         // 첫 슬롯이 쿨다운이면 다음으로 — 건너뛴 자리가 생기지 않는다.
         let cool = std::collections::HashMap::from([("acct-1".to_string(), 500u64)]);
         assert_eq!(
-            pick_next_account("", &a, &cool, 100, false).as_deref(),
+            pick_next_account("", &a, &cool, 100).as_deref(),
             Some("acct-2")
         );
     }

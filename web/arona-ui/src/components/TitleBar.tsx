@@ -1,6 +1,7 @@
 import { CSSProperties, useState } from 'react';
 import { useIsPhone } from '@/lib/useIsPhone';
 import { usagePressure, type ClaudeUsage } from '@/lib/mcp';
+import { formatRemainingTime } from '@/lib/utils';
 
 // 슬림 아이콘 바 — 모든 버튼을 IconBtn 으로 통일(거노: 디자인 통일), 로고·기어 제거.
 // 좌측엔 방 하나, 나머지(업무·교실·집중)는 전부 우측에 모았다(거노: task 아이콘 우측으로).
@@ -93,19 +94,16 @@ function FocusIcon() {
   );
 }
 
-// 리셋까지 남은 시간 — "2h 15m 후".
 function fmtReset(iso: string): string {
-  const ms = new Date(iso).getTime() - Date.now();
-  if (ms <= 0) return '곧';
-  const h = Math.floor(ms / 3600000);
-  const m = Math.floor((ms % 3600000) / 60000);
-  return h > 0 ? `${h}h ${m}m 후` : `${m}m 후`;
+  const remaining = formatRemainingTime(new Date(iso).getTime() - Date.now());
+  return !remaining || remaining === '곧' ? remaining : `${remaining} 후`;
 }
 
 // claude 사용량 미니 게이지 — 5시간/주간 한도를 막대+%로. 70%↑ 호박, 90%↑ 산호.
 function UsagePill({ label, pct, resetsAt, stale }: { label: string; pct: number; resetsAt: string | null; stale?: boolean }) {
   const color = pct >= 90 ? 'var(--cth-coral)' : pct >= 70 ? '#FFB020' : 'var(--cth-sky)';
-  const reset = resetsAt ? ` · 리셋 ${fmtReset(resetsAt)}` : '';
+  const resetLabel = resetsAt ? fmtReset(resetsAt) : '';
+  const reset = resetLabel ? ` · 리셋 ${resetLabel}` : '';
   return (
     <div
       title={`claude ${label} 한도 ${pct.toFixed(0)}%${reset}${stale ? ' (지금 값이 아님 — 사용량 조회가 막혀 마지막 값)' : ''}`}

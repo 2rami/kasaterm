@@ -25,12 +25,18 @@ pub(crate) fn text(value: &str) -> Cow<'_, str> {
     if let Some(value) = value.strip_prefix("최근 값 · ") {
         let value = value
             .strip_suffix(" 뒤 초기화")
-            .map(|time| format!("resets in {time}"))
+            .map(|time| format!("resets in {}", english_duration(time).unwrap_or_else(|| time.to_string())))
             .unwrap_or_else(|| value.to_string());
         return Cow::Owned(format!("Last value · {value}"));
     }
     if let Some(value) = value.strip_suffix(" 뒤 초기화") {
-        return Cow::Owned(format!("Resets in {value}"));
+        return Cow::Owned(format!("Resets in {}", english_duration(value).unwrap_or_else(|| value.to_string())));
+    }
+    if let Some(duration) = english_duration(value) {
+        return Cow::Owned(duration);
+    }
+    if let Some(identity) = value.strip_suffix(" · 로그인 확인 중…") {
+        return Cow::Owned(format!("{identity} · Checking sign-in…"));
     }
     if let Some(model) = value.strip_suffix(" · 7일") {
         return Cow::Owned(format!("{model} · 7 days"));
@@ -65,6 +71,22 @@ pub(crate) fn text(value: &str) -> Cow<'_, str> {
         }
     }
     Cow::Borrowed(value)
+}
+
+fn english_duration(value: &str) -> Option<String> {
+    if value == "곧" {
+        return Some("soon".to_string());
+    }
+    let mut parts = Vec::new();
+    for part in value.split_whitespace() {
+        let (number, unit) = [("시간", "h"), ("일", "d"), ("분", "m")].iter()
+            .find_map(|(ko, en)| part.strip_suffix(*ko).map(|number| (number, *en)))?;
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        parts.push(format!("{number}{unit}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 fn english(value: &str) -> Option<&'static str> {
@@ -156,6 +178,14 @@ fn english(value: &str) -> Option<&'static str> {
         "사용량에 넣을 정보" => "Usage details",
         "서비스 이름은 유지하고 필요한 수치만 각각 고릅니다" => "Keep service names and choose each detail you need",
         "계정 별명" => "Account label",
+        "계정 선택 필요" => "Select an account",
+        "선택됨" => "Selected",
+        "조회 실패" => "Unable to fetch",
+        "확인 못 함" => "Not confirmed",
+        "이전 조회" => "Previous reading",
+        "계정 선택 필요 · 외부 CLI 로그인은 그대로 유지됩니다" => "Select an account · Existing CLI sign-in is preserved",
+        "등록된 계정이 없어요. 위의 ‘계정 추가’로 시작하세요." => "No registered accounts. Choose Add account above to get started.",
+        "로그인 확인 중…" => "Checking sign-in…",
         "이메일" => "Email",
         "5시간" => "5 hours",
         "7일" => "7 days",
@@ -387,6 +417,16 @@ fn english(value: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_translation_keeps_day_and_hour_units() {
+        set_language("en");
+        assert_eq!(text("7일 9시간 뒤 초기화"), "Resets in 7d 9h");
+        assert_eq!(text("최근 값 · 8시간 4분 뒤 초기화"), "Last value · resets in 8h 4m");
+        assert_eq!(text("곧"), "soon");
+        assert_eq!(text("person@example.com"), "person@example.com");
+        set_language("ko");
+    }
 
     #[test]
     fn language_switch_changes_real_settings_and_onboarding_copy() {

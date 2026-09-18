@@ -130,6 +130,9 @@ pub(crate) fn vault_ready(
     account_id: &str,
     vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
 ) -> bool {
+    if account_id.is_empty() {
+        return false;
+    }
     let vault = vault_dir_of(account_id);
     read_credentials(vault.as_deref()).is_some_and(|b| blob_alive(&b))
 }
@@ -345,7 +348,55 @@ fn keychain_account() -> String {
 /// 채운 적 없음) None. `claude auth status` 프로브처럼 「이 계정을 어느 자리로
 /// 물어야 하나」를 정할 때 쓴다 — 활성 계정은 금고가 아니라 작업대가 정본이다.
 pub(crate) fn workbench_account() -> Option<String> {
-    read_stamp_in(&active_dir()?).map(|(a, _)| a)
+    read_stamp_in(&active_dir()?).map(|(a, _)| a).filter(|a| !a.is_empty())
+}
+
+pub(crate) fn recover_workbench_account(accounts: &[crate::socket::ClaudeAccount]) -> Option<String> {
+    let stamp_home = active_dir()?;
+    recover_workbench_account_in(
+        &stamp_home,
+        workbench_store().as_deref(),
+        &accounts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        crate::socket::claude_account_dir,
+    )
+}
+
+fn recover_workbench_account_in(
+    stamp_home: &Path,
+    store: Option<&Path>,
+    accounts: &[&str],
+    vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
+) -> Option<String> {
+    let current = read_credentials(store)?;
+    if let Some((id, _)) = read_stamp_in(stamp_home) {
+        if !id.is_empty() && accounts.contains(&id.as_str()) {
+            return Some(id);
+        }
+    }
+    // Shared tokens prove ownership without trusting the shared profile cache or refreshing a slot.
+    let mut matches = accounts.iter().filter(|id| !id.is_empty()).filter_map(|id| {
+        let vault = vault_dir_of(id).and_then(|dir| read_credentials(Some(&dir)))?;
+        credentials_match(&current, &vault).then(|| (id.to_string(), digest_of(&vault)))
+    });
+    let (id, vault_digest) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    // A different workbench digest must remain pending so read-back saves refreshed tokens before switching away.
+    write_stamp_in(stamp_home, &id, &vault_digest);
+    bump_workbench_generation();
+    Some(id)
+}
+
+fn credentials_match(a: &[u8], b: &[u8]) -> bool {
+    let (Ok(a), Ok(b)) = (serde_json::from_slice::<serde_json::Value>(a), serde_json::from_slice::<serde_json::Value>(b)) else {
+        return false;
+    };
+    ["accessToken", "refreshToken"].iter().any(|key| {
+        let token = |v: &serde_json::Value| v.get("claudeAiOauth").unwrap_or(v).get(*key)
+            .and_then(|t| t.as_str()).filter(|t| !t.is_empty()).map(str::to_owned);
+        token(&a).is_some_and(|value| token(&b).as_ref() == Some(&value))
+    })
 }
 
 /// 그 계정을 **지금 실제로 읽어야 하는 자리**. 활성 계정은 작업대(도는 pane 들이 보는
@@ -359,8 +410,8 @@ pub(crate) fn workbench_account() -> Option<String> {
 /// 반환의 빈 경로(`PathBuf::new()`)가 곧 작업대다 — 문자열로 펴면 `""` 가 되고,
 /// 그 빈 문자열이 이 앱 전체에서 「기본 자리」를 뜻하는 관례라(프록시 쿼리·env·
 /// 사용량 표 키) 호출부는 아무것도 바꿀 것이 없다.
-pub(crate) fn runtime_dir_for(account_id: &str, active_account: &str) -> Option<PathBuf> {
-    if account_id == active_account {
+pub(crate) fn runtime_dir_for(account_id: &str, _active_account: &str) -> Option<PathBuf> {
+    if !account_id.is_empty() {
         if let Some(stamp_home) = active_dir() {
             // 작업대가 정말 이 계정 것으로 채워져 있을 때만. 아직 못 채웠으면 금고가
             // 정본이고, 그때는 pane 도 금고를 보고 있다(shim 폴백과 같은 판정).
@@ -375,11 +426,6 @@ pub(crate) fn runtime_dir_for(account_id: &str, active_account: &str) -> Option<
                 // 로그아웃된다 — 2026-08-18 22:04 재시작에서 실제로 일어났고, 금고
                 // (만료 06:20)가 작업대(06:05)보다 새것인 상태가 그 지문이었다.
                 // 사용량 한 사이클을 놓치는 것 < 전 세션 로그아웃.
-                if read_credentials(workbench_store().as_deref()).is_none() {
-                    eprintln!(
-                        "[account] 작업대 읽기 일시 실패 — 금고 폴백 대신 작업대 유지 ({account_id})"
-                    );
-                }
                 return Some(PathBuf::new());
             }
         }
@@ -478,6 +524,9 @@ fn read_back_in(
         // 아직 한 번도 우리가 쓴 적 없는 작업대 — 되받을 정본이 없다.
         return false;
     };
+    if stamped_account.is_empty() {
+        return false;
+    }
     let Some(now) = read_credentials(store) else { return false };
     let digest = digest_of(&now);
     if digest == stamped_digest {
@@ -507,9 +556,14 @@ pub(crate) fn ensure_active(
     account_id: &str,
     vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
 ) -> Option<PathBuf> {
+    if account_id.is_empty() {
+        return Some(PathBuf::new());
+    }
     match swap_active(account_id, vault_dir_of) {
         // 빈 경로 = 작업대(기본 자리). shim 은 이 경우 env 를 아예 안 붙인다.
         SwapOutcome::Swapped | SwapOutcome::AlreadyActive => Some(PathBuf::new()),
+        SwapOutcome::VaultEmpty | SwapOutcome::WriteFailed
+            if workbench_account().as_deref() == Some(account_id) => Some(PathBuf::new()),
         SwapOutcome::VaultEmpty | SwapOutcome::WriteFailed => None,
     }
 }
@@ -529,10 +583,13 @@ fn swap_active_in(
     account_id: &str,
     vault_dir_of: impl Fn(&str) -> Option<PathBuf>,
 ) -> SwapOutcome {
+    if account_id.is_empty() {
+        return SwapOutcome::VaultEmpty;
+    }
     // 지문이 아직 없다 = 작업대를 한 번도 우리 것으로 채운 적이 없다. 기본 자리에
     // 있던 원래 로그인을 먼저 떠 둔다 — 등록 안 된 계정이었으면 이 백업이 유일한
     // 사본이 된다. 백업 금고가 이미 차 있으면 안 덮는다(첫 백업이 원본이다).
-    if read_stamp_in(stamp_home).is_none() {
+    if read_stamp_in(stamp_home).is_none_or(|(account, _)| account.is_empty()) {
         if let Some(original) = read_credentials(store) {
             let backup = vault_dir_of(DEFAULT_BACKUP_SLOT);
             if backup.is_some() && read_credentials(backup.as_deref()).is_none() {
@@ -567,7 +624,7 @@ fn swap_active_in(
     if read_stamp_in(stamp_home).is_some_and(|(a, _)| a == account_id) {
         match read_credentials(store) {
             Some(cur) => {
-                if is_newer(&blob, &cur) {
+                if is_newer(&blob, &cur) || expires_at(&blob).zip(expires_at(&cur)).is_some_and(|(a, b)| a == b) {
                     eprintln!(
                         "[account] {account_id} 재적용 — 작업대가 금고보다 새것이라 덮지 않음"
                     );
@@ -581,7 +638,7 @@ fn swap_active_in(
             // 정말 비어 있는 경우는 pane 의 /login 이 정도(正道)다.
             None => {
                 eprintln!("[account] {account_id} 재적용 보류 — 작업대 읽기 실패(일시일 수 있음)");
-                return SwapOutcome::AlreadyActive;
+                return SwapOutcome::WriteFailed;
             }
         }
     }
@@ -826,6 +883,66 @@ mod tests {
 
     fn creds(expires: i64, tag: &str) -> Vec<u8> {
         format!(r#"{{"claudeAiOauth":{{"expiresAt":{expires},"tag":"{tag}"}}}}"#).into_bytes()
+    }
+
+    #[test]
+    fn unselected_switch_preserves_workbench_and_named_stamp() {
+        let s = Slots::new("unselected");
+        let (stamp, bench) = s.bench();
+        let original = creds(1000, "external");
+        assert!(write_credentials(Some(&bench), &original));
+        write_stamp_in(&stamp, "a", &digest_of(&original));
+        assert_eq!(swap_active_in(&stamp, Some(&bench), "", s.vault_of()), SwapOutcome::VaultEmpty);
+        assert_eq!(read_credentials(Some(&bench)), Some(original));
+        assert_eq!(read_stamp_in(&stamp).unwrap().0, "a");
+        assert!(!s.dir("vault-").exists());
+    }
+
+    #[test]
+    fn blank_legacy_stamp_never_reads_back_to_workbench_alias() {
+        let s = Slots::new("blank-stamp");
+        let (stamp, bench) = s.bench();
+        let original = creds(1000, "external");
+        assert!(write_credentials(Some(&bench), &original));
+        write_stamp_in(&stamp, "", "old");
+        assert!(!read_back_in(&stamp, Some(&bench), |_| panic!("empty owner must not resolve a vault")));
+        assert_eq!(read_credentials(Some(&bench)), Some(original));
+    }
+
+    #[test]
+    fn recovery_adopts_unique_token_owner_without_copying_credentials() {
+        let s = Slots::new("recover");
+        let (stamp, bench) = s.bench();
+        let current = br#"{"claudeAiOauth":{"expiresAt":2000,"accessToken":"fake-current","refreshToken":"fake-shared"}}"#;
+        let vault = br#"{"claudeAiOauth":{"expiresAt":1000,"accessToken":"fake-old","refreshToken":"fake-shared"}}"#;
+        assert!(write_credentials(Some(&bench), current));
+        assert!(write_credentials(Some(&s.dir("vault-a")), vault));
+        write_stamp_in(&stamp, "", &digest_of(current));
+        assert_eq!(recover_workbench_account_in(&stamp, Some(&bench), &["a", "b"], s.vault_of()).as_deref(), Some("a"));
+        assert_eq!(read_credentials(Some(&bench)).unwrap(), current);
+        assert_eq!(read_credentials(Some(&s.dir("vault-a"))).unwrap(), vault);
+        assert_eq!(read_stamp_in(&stamp).unwrap(), ("a".into(), digest_of(vault)));
+        assert_eq!(recover_workbench_account_in(&stamp, Some(&bench), &["a", "b"], s.vault_of()).as_deref(), Some("a"));
+        assert_eq!(read_stamp_in(&stamp).unwrap().1, digest_of(vault));
+        assert!(write_credentials(Some(&s.dir("vault-b")), &creds(1000, "b")));
+        assert_eq!(swap_active_in(&stamp, Some(&bench), "b", s.vault_of()), SwapOutcome::Swapped);
+        assert_eq!(read_credentials(Some(&s.dir("vault-a"))).unwrap(), current);
+    }
+
+    #[test]
+    fn recovery_leaves_unknown_or_ambiguous_login_unselected() {
+        let s = Slots::new("recover-ambiguous");
+        let (stamp, bench) = s.bench();
+        let current = br#"{"claudeAiOauth":{"expiresAt":2000,"accessToken":"fake-shared"}}"#;
+        assert!(write_credentials(Some(&bench), current));
+        assert_eq!(recover_workbench_account_in(&stamp, Some(&bench), &["a", "b"], s.vault_of()), None);
+        for id in ["a", "b"] {
+            assert!(write_credentials(s.vault_of()(id).as_deref(), current));
+        }
+        assert_eq!(recover_workbench_account_in(&stamp, Some(&bench), &["a", "b"], s.vault_of()), None);
+        assert_eq!(read_credentials(Some(&bench)).unwrap(), current);
+        assert!(read_stamp_in(&stamp).is_none());
+        assert!(!credentials_match(&creds(1000, "a"), &creds(1000, "a")));
     }
 
     /// ★2026-08-18 재시작 전-pane 로그아웃의 안전벨트들.

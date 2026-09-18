@@ -113,3 +113,88 @@ select:focus-visible,
   background: var(--kt-accent);
   color: var(--kt-on-accent);
 }
+
+.kt-account-row {
+  min-width: 0;
+  margin-bottom: 8px;
+  border-radius: var(--kt-radius-md);
+  box-shadow: inset 0 0 0 var(--kt-border-w) var(--kt-border);
+}
+
+.kt-account-select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 12px 16px;
+  text-align: left;
+  border-radius: var(--kt-radius-md);
+  color: var(--kt-text);
+  cursor: pointer;
+}
+
+.kt-account-select:hover:not(:disabled) {
+  background: var(--kt-surface-hover);
+}
+
+.kt-account-select:disabled {
+  cursor: default;
+  opacity: .6;
+}
+
+.kt-account-heading,
+.kt-account-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+}
+
+.kt-account-name {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.kt-account-identity {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.kt-account-identity,
+.kt-account-selected,
+.kt-account-status,
+.kt-account-empty {
+  font-size: 12px;
+  color: var(--kt-text-dim);
+}
+
+.kt-account-status {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.kt-account-selected {
+  font-weight: 600;
+}
+
+.kt-account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 16px 12px;
+}
+
+.kt-account-empty {
+  margin-bottom: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+@media (hover: none) {
+  .kt-account-actions button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}

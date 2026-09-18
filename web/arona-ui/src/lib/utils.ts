@@ -84,6 +84,22 @@ export function formatDuration(ms: number | undefined | null): string {
   return `${(m / 60).toFixed(1)}h`;
 }
 
+export function formatRemainingTime(ms: number): string {
+  if (!Number.isFinite(ms)) return "";
+  if (ms <= 0) return "곧";
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 1) return "곧";
+  if (minutes < 60) return `${minutes}분`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    const rest = minutes % 60;
+    return `${hours}시간${rest ? ` ${rest}분` : ""}`;
+  }
+  const days = Math.floor(hours / 24);
+  const rest = hours % 24;
+  return `${days}일${rest ? ` ${rest}시간` : ""}`;
+}
+
 export function stringifyToolInput(input: unknown): string {
   if (input == null) return "";
   if (typeof input === "string") return input;

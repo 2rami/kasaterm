@@ -1733,17 +1733,21 @@ impl ApplicationHandler<UserEvent> for App {
                 // `apply_claude_account_switch`(session.rs) 하나가 한다. 수동 전환과
                 // 같은 꼬리라 두 경로의 동작이 갈릴 수 없다.
                 let same = *to == self.set_claude_account;
-                if !same {
-                    self.account_flash = Some(std::time::Instant::now());
-                }
                 let (from_label, to_label, restarted, deferred, focused, live) =
                     self.apply_claude_account_switch(to);
-                self.set_toast(format!(
+                if !live {
+                    self.set_toast("자동 계정 전환에 실패했어요. 해당 계정의 로그인을 확인해 주세요".to_string());
+                } else {
+                    if !same {
+                        self.account_flash = Some(std::time::Instant::now());
+                    }
+                    self.set_toast(format!(
                     "{from_label} 사용량 {pct:.0}% — {}",
                     crate::session::account_switch_toast(
                         &to_label, same, restarted, deferred, focused, live
                     )
-                ));
+                    ));
+                }
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;
@@ -1762,7 +1766,11 @@ impl ApplicationHandler<UserEvent> for App {
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map_or(0, |d| d.as_secs()),
                         );
-                        format!("{}분 뒤 풀려요", left.div_ceil(60))
+                        if left < 60 {
+                            "곧 풀려요".to_string()
+                        } else {
+                            format!("{} 뒤 풀려요", crate::remaining_duration_label(left))
+                        }
                     })
                     .unwrap_or_else(|| "언제 풀리는지는 모르겠어요".to_string());
                 let body = format!("사용량 {pct:.0}% — 옮겨갈 계정이 없어요. {when}");
@@ -2356,6 +2364,8 @@ impl ApplicationHandler<UserEvent> for App {
                         others_at = None;
                         let _ = usage_proxy.send_event(UserEvent::Redraw);
                     }
+                    // An unidentified workbench may share a refresh token with a vault; probing both can revoke it.
+                    if !active_id.is_empty() {
                     // 도는 세션이 갱신해 둔 토큰을 금고로 되받는다. 안 하면 금고의
                     // refresh token 이 이미 쓴 값으로 굳어, 다음에 그 계정을 꺼낼 때
                     // 로그아웃된 채로 꺼내진다(1회용이라 되돌릴 수도 없다).
@@ -2483,9 +2493,7 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(b) = active_badge {
                             all.insert(b.account_dir.clone(), b);
                         }
-                        let mut dirs: Vec<String> =
-                            vec![crate::claude_auth::runtime_dir_for("", &active_id)
-                                .map_or(String::new(), |p| p.to_string_lossy().into_owned())];
+                        let mut dirs: Vec<String> = Vec::new();
                         dirs.extend(socket::read_claude_accounts().iter().filter_map(|a| {
                             crate::claude_auth::runtime_dir_for(&a.id, &active_id)
                                 .map(|p| p.to_string_lossy().into_owned())
@@ -2656,10 +2664,11 @@ impl ApplicationHandler<UserEvent> for App {
                                     socket::read_claude_accounts()
                                         .into_iter()
                                         .filter(|a| {
-                                            let Some(g) = g.as_ref() else { return true };
+                                            let Some(g) = g.as_ref() else { return false };
                                             crate::claude_auth::runtime_dir_for(&a.id, &active_id)
                                                 .is_some_and(|d| {
-                                                    g.contains_key(d.to_string_lossy().as_ref())
+                                                    g.get(d.to_string_lossy().as_ref())
+                                                        .is_some_and(|badge| !badge.stale)
                                                 })
                                         })
                                         .collect()
@@ -2669,9 +2678,6 @@ impl ApplicationHandler<UserEvent> for App {
                                     &usable,
                                     &socket::read_account_cooldowns(),
                                     now,
-                                    // 기본 로그인이 지금 자리와 같은 계정이면 후보에서
-                                    // 뺀다 — 옮겨도 한도가 그대로라 헛돌이가 된다.
-                                    socket::default_account_is_distinct(&active_id),
                                 );
                                 match to {
                                     Some(to) => {
@@ -2707,6 +2713,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                             }
                         }
+                    }
                     }
                     // 60초를 5초씩 쪼개 자며 활성 계정이 바뀌었는지 본다. 바뀌면 즉시
                     // 다시 조회한다 — 서버 캐시도 계정별로 갈렸으니 그 조회는 캐시

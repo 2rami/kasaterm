@@ -4164,25 +4164,39 @@ pub(crate) struct UsageBadge {
     pub(crate) windows: Vec<UsageWindowBadge>,
 }
 
-/// `resets_at` → `2h13m` / `47m` / `곧`. 남은 시간이 없으면 None(자리 자체를 비운다).
-///
 /// 분까지만 쓴다 — 초는 매 프레임 바뀌어 눈이 그리로 끌리는데, 이 숫자로 하는 판단은
 /// "지금 계정을 옮길까"라 분 단위면 충분하다.
+pub(crate) fn remaining_duration_label(seconds: u64) -> String {
+    let (first, first_unit, second, second_unit) = if seconds >= 86400 {
+        (seconds / 86400, "일", seconds % 86400 / 3600, "시간")
+    } else if seconds >= 3600 {
+        (seconds / 3600, "시간", seconds % 3600 / 60, "분")
+    } else if seconds >= 60 {
+        return format!("{}분", seconds / 60);
+    } else {
+        return "곧".to_string();
+    };
+    if second == 0 {
+        format!("{first}{first_unit}")
+    } else {
+        format!("{first}{first_unit} {second}{second_unit}")
+    }
+}
+
 pub(crate) fn resets_in_label(resets_at: Option<u64>) -> Option<String> {
-    let at = resets_at?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
+    resets_in_label_at(resets_at, now)
+}
+
+fn resets_in_label_at(resets_at: Option<u64>, now: u64) -> Option<String> {
+    let at = resets_at?;
     let left = at.saturating_sub(now);
     if left == 0 {
         return None; // 이미 지났다 — 다음 조회가 0% 를 실어 온다
     }
-    let (h, m) = (left / 3600, (left % 3600) / 60);
-    Some(match (h, m) {
-        (0, 0) => "곧".to_string(),
-        (0, m) => format!("{m}m"),
-        (h, m) => format!("{h}h{m}m"),
-    })
+    Some(remaining_duration_label(left))
 }
 
 /// Parsed `git status` snapshot for the right-hand git column. The background
@@ -6582,6 +6596,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Install pane shims before anything spawns a shell — every PtySession
     // reads KASATERM_TMUX_SHIM_DIR we set here (kasaterm-cli/preview/OSC133).
     // best-effort: failures just log and skip, the rest still works.
+        let _ = crate::claude_auth::recover_workbench_account(&socket::read_claude_accounts());
         install_pane_shims();
     // 죽은 인스턴스가 남긴 소켓 잔재 청소(재시작·빌드 반복 누적). 살아있는
     // 소켓은 connect 로 가려 건드리지 않으므로 멀티 인스턴스에서도 안전.
@@ -8907,6 +8922,23 @@ fn stage_shim(src: &std::path::Path, target: &std::path::Path) -> std::io::Resul
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn remaining_duration_uses_days_hours_and_minutes() {
+        for (seconds, expected) in [
+            (0, "곧"), (59, "곧"), (60, "1분"), (3599, "59분"),
+            (3600, "1시간"), (484 * 60, "8시간 4분"),
+            (24 * 3600, "1일"), (177 * 3600, "7일 9시간"),
+        ] {
+            assert_eq!(remaining_duration_label(seconds), expected);
+            if seconds > 0 {
+                assert_eq!(resets_in_label_at(Some(1000 + seconds), 1000).as_deref(), Some(expected));
+            }
+        }
+        assert_eq!(resets_in_label_at(None, 1000), None);
+        assert_eq!(resets_in_label_at(Some(999), 1000), None);
+        assert_eq!(resets_in_label_at(Some(1000), 1000), None);
+    }
 
     /// 화면 한 줄을 실제 그리드처럼 만든다 — 넓은 글자 뒤에 뒷칸(진짜 공백)이 붙는다.
     fn grid_row(s: &str, width: usize) -> Vec<GridCell> {

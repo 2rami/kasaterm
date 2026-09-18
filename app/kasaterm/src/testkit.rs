@@ -3553,16 +3553,18 @@ impl App {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |duration| duration.as_secs());
                 self.set_account_scope_home = false;
-                self.set_claude_account.clear();
+                self.set_claude_account = "acct-1".to_string();
                 self.set_claude_accounts = vec![crate::socket::ClaudeAccount {
                     id: "acct-1".to_string(),
                     label: "아주 긴 업무 계정 별명".to_string(),
                 }];
+                let account_dir = crate::claude_auth::runtime_dir_for_cached("acct-1", "acct-1")
+                    .map_or(String::new(), |path| path.to_string_lossy().into_owned());
                 let badge = crate::UsageBadge {
                     pct: 74.0,
                     label: "7d".to_string(),
                     stale: false,
-                    account_dir: String::new(),
+                    account_dir: account_dir.clone(),
                     resets_at: Some(now + 7200),
                     windows: vec![
                         crate::UsageWindowBadge {
@@ -3586,19 +3588,20 @@ impl App {
                     *usage = Some(badge.clone());
                 }
                 if let Ok(mut usage) = self.claude_usage_all.lock() {
-                    usage.insert(String::new(), badge);
+                    usage.insert(account_dir, badge);
                 }
                 crate::settings::seed_auth_probe(
-                    "",
+                    "acct-1",
                     Some(crate::settings::AuthProbe {
                         logged_in: true,
+                        verified: true,
                         email: "teacher@example.com".to_string(),
                         org: String::new(),
                     }),
                 );
                 self.refresh_native_settings_dynamic_cache();
                 self.settings_scene
-                    .toggle_account_usage("claude\0".to_string());
+                    .toggle_account_usage("claude\0acct-1".to_string());
                 self.chrome_dirty = true;
                 eprintln!("[autosettings] Claude 계정 사용량 상세 시드");
             }
@@ -7874,6 +7877,10 @@ impl App {
             self.set_usage_compact = want.ends_with("compact");
             self.set_claude_accounts = vec![
                 crate::socket::ClaudeAccount {
+                    id: "acct-1".to_string(),
+                    label: "아주 긴 업무용 계정 별명".to_string(),
+                },
+                crate::socket::ClaudeAccount {
                     id: "acct-2".to_string(),
                     label: "사이오닉팀플랜".to_string(),
                 },
@@ -7882,7 +7889,7 @@ impl App {
                     label: "개인계정".to_string(),
                 },
             ];
-            self.set_claude_account = String::new();
+            self.set_claude_account = "acct-1".to_string();
             // 리셋 시각을 심는다 — 이 목록은 「지금 옮길까 기다릴까」를 정하는
             // 자리라, 퍼센트만 있으면 90% 가 12분 뒤 풀리는 것인지 3시간 뒤인지
             // 구별이 안 된다(사용자 2026-08-25).
@@ -7906,8 +7913,10 @@ impl App {
                         .collect(),
                 }
             };
+            let active_dir = crate::claude_auth::runtime_dir_for_cached("acct-1", "acct-1")
+                .map_or(String::new(), |path| path.to_string_lossy().into_owned());
             let base = mk(
-                "",
+                &active_dir,
                 vec![("5h", 12.0), ("7d", 95.0), ("7d Fable", 64.0)],
                 false,
                 7980,
@@ -7916,7 +7925,7 @@ impl App {
                 *g = Some(base.clone());
             }
             if let Ok(mut g) = self.claude_usage_all.lock() {
-                g.insert(String::new(), base);
+                g.insert(active_dir, base);
                 if let Some(d) = crate::socket::claude_account_dir("acct-2") {
                     g.insert(
                         d.to_string_lossy().into_owned(),
@@ -7927,12 +7936,12 @@ impl App {
             }
             // 슬롯이 누구인지도 심는다 — 별명(「사이오닉팀플랜」) 옆에 조직이
             // 붙는지는 신원이 있어야 볼 수 있고, 리그에는 로그인이 없다.
-            // 활성 슬롯(하네스는 기본 로그인을 쓴다) — 하단바가 별명 옆에 이메일을
-            // 세우는지는 이 값이 있어야 보인다.
+            // 등록 계정만으로 설정과 하단바가 같은 상태를 그리는지 확인한다.
             crate::settings::seed_auth_probe(
-                "",
+                "acct-1",
                 Some(crate::settings::AuthProbe {
                     logged_in: true,
+                    verified: true,
                     email: "sampleuser@mailb.example.test".to_string(),
                     org: "sampleuser@mailb.example.test's Organization".to_string(),
                 }),
@@ -7941,6 +7950,7 @@ impl App {
                 "acct-2",
                 Some(crate::settings::AuthProbe {
                     logged_in: true,
+                    verified: true,
                     email: "workuser@work.example.test".to_string(),
                     org: "Sionic AI".to_string(),
                 }),
@@ -7949,6 +7959,7 @@ impl App {
                 "acct-3",
                 Some(crate::settings::AuthProbe {
                     logged_in: false,
+                    verified: true,
                     email: String::new(),
                     org: String::new(),
                 }),

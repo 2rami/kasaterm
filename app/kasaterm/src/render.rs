@@ -2601,6 +2601,9 @@ impl App {
         let mut board_paint = None;
         // 원격 방 이름 편집칸 — GPU 를 빌리기 전에 읽어 둔다.
         self.info.navigation.rename = self.remote_rename_overlay();
+        let claude_observations: std::collections::HashMap<_, _> = self.set_claude_accounts.iter()
+            .map(|account| (account.id.clone(), (self.claude_account_usage(&account.id), self.claude_account_status(&account.id))))
+            .collect();
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -9215,7 +9218,7 @@ impl App {
                 g.rect(0.0, sy, win_w, 1.0, theme::border());
 
                 let status_prefs = self.set_statusbar.clone();
-                let badge = self.claude_usage.lock().ok().and_then(|v| v.clone());
+                let badge = claude_observations.get(&self.set_claude_account).and_then(|(badge, _)| badge.clone());
                 let acct_name = claude_account_label(
                     &self.set_claude_account,
                     &self.set_claude_accounts,
@@ -9291,6 +9294,27 @@ impl App {
                     );
                     x += 17.0;
                 }
+
+                let account_state = claude_observations.get(&self.set_claude_account).map_or("unselected", |(_, state)| *state);
+                if account_state != "ready" {
+                    let note = match account_state {
+                        "unselected" => "계정 선택 필요",
+                        "logged_out" => "로그인 필요",
+                        "failed" => "확인 못 함",
+                        _ => "확인 중…",
+                    };
+                    let label = if account_state == "unselected" {
+                        note.to_string()
+                    } else {
+                        format!("{acct_name} · {note}")
+                    };
+                    let label = crate::info::fit_text(g, &label, (account_right - x).max(0.0), fs, false);
+                    g.draw_text(x, ty, &label, gpu::DrawOpts {
+                        font_size: fs, color: if account_state == "logged_out" { theme::danger() } else { theme::text_dim() },
+                        bold: false, italic: false,
+                    });
+                    x += g.measure_chrome_text(&label, fs, false) + 10.0;
+                } else {
 
                 // 게이지 — Orca 처럼 **항상 중립색**이다. 하단바에서까지 빨갛게 하면
                 // 시야 끝에서 늘 깜빡이는 경고가 되어 오히려 안 보게 된다. 위험은
@@ -9489,14 +9513,13 @@ impl App {
                 // 슬롯 표시명 전체. 이름을 줄일 때 겹침을 판정하는 근거이자,
                 // 아래 나머지 계정 줄이 그대로 쓰는 목록이다.
                 let all_names: Vec<String> =
-                    std::iter::once(crate::settings::account_display("", "", "기본"))
-                        .chain(self.set_claude_accounts.iter().enumerate().map(|(i, a)| {
+                        self.set_claude_accounts.iter().enumerate().map(|(i, a)| {
                             crate::settings::account_display(
                                 &a.id,
                                 &a.label,
-                                &format!("계정 {}", i + 2),
+                                &format!("계정 {}", i + 1),
                             )
-                        }))
+                        })
                         .collect();
                 if win_w >= 720.0
                     && (status_prefs.has_usage_field("claude", "account")
@@ -9528,6 +9551,7 @@ impl App {
                         (false, Some(e)) => e,
                         (false, None) => String::new(),
                     };
+                    let short = crate::info::fit_text(g, &short, (account_right - x).max(0.0), fs, false);
                     let short = short.as_str();
                     if !short.is_empty() {
                         g.draw_text(
@@ -9543,6 +9567,7 @@ impl App {
                         );
                         x += g.measure_chrome_text(short, fs, true);
                     }
+                }
                 }
                 }
                     }};
@@ -10497,28 +10522,17 @@ impl App {
 
                 // ── 값 읽기 ──────────────────────────────────────────────────
                 // 슬롯별 한도표. 폴러가 계정 디렉터리를 키로 채운다.
-                let usage_of = |id: &str| -> Option<crate::UsageBadge> {
-                    // 폴러가 조회한 자리가 곧 키다 — 활성 계정만 작업대라 여기서도
-                    // 같은 규칙을 써야 그 한 줄이 빈칸이 되지 않는다.
-                    // 메뉴가 열려 있는 동안 계정 수만큼 **매 프레임** 돈다 —
-                    // 활성 계정 차례에서 프로세스를 띄우므로 캐시판을 쓴다.
-                    let key =
-                        crate::claude_auth::runtime_dir_for_cached(id, &self.set_claude_account)
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                    self.claude_usage_all.lock().ok()?.get(&key).cloned()
-                };
+                let usage_of = |id: &str| -> Option<crate::UsageBadge> { claude_observations.get(id).and_then(|(badge, _)| badge.clone()) };
                 // 로스터 행은 **활성 계정의** 한도를 말한다. 표에 아직 없으면 상태줄이
                 // 쓰는 값으로 떨어진다 — 둘 다 지금 계정을 가리키므로 숫자가 갈리지 않는다.
-                let claude_badge = usage_of(&self.set_claude_account)
-                    .or_else(|| self.claude_usage.lock().ok().and_then(|v| v.clone()));
+                let claude_badge = usage_of(&self.set_claude_account);
                 let codex_limits = crate::codexlimits::snapshot();
 
                 // `62% 씀 · 5h` — 퍼센트가 먼저다. 창 이름이 앞에 오면 눈이 «어느 창인가»
                 // 를 먼저 읽는데, 정작 판단을 가르는 건 숫자다.
                 let usage_text = |b: &crate::UsageBadge| -> String {
                     let head = if b.stale {
-                        format!("~{:.0}% 씀", b.pct)
+                        format!("이전 {:.0}% 씀", b.pct)
                     } else {
                         format!("{:.0}% 씀", b.pct)
                     };
@@ -11104,30 +11118,17 @@ impl App {
                 if let Some((p, py)) = sub_anchor {
                     let rows: Vec<(String, String, bool)> = match p {
                         AccountProvider::Claude => {
-                            // "기본" 행은 계정 미선택일 때만 — 슬롯이 활성이면 기본
-                            // 자리가 곧 그 계정의 작업대라 같은 로그인이 두 줄로 떠
-                            // 계정이 하나 더 있는 것처럼 읽힌다(2026-08-17 「왜
-                            // 다섯개로 떠」, 설정 화면 카드 목록과 같은 규칙).
-                            let mut v = Vec::new();
-                            if self.set_claude_account.is_empty() {
-                                v.push((
-                                    String::new(),
-                                    crate::settings::account_display("", "", "기본"),
-                                    true,
-                                ));
-                            }
-                            v.extend(self.set_claude_accounts.iter().enumerate().map(|(i, a)| {
+                            self.set_claude_accounts.iter().filter(|account| !account.id.is_empty()).enumerate().map(|(i, a)| {
                                 (
                                     a.id.clone(),
                                     crate::settings::account_display(
                                         &a.id,
                                         &a.label,
-                                        &format!("계정 {}", i + 2),
+                                        &format!("계정 {}", i + 1),
                                     ),
                                     self.set_claude_account == a.id,
                                 )
-                            }));
-                            v
+                            }).collect()
                         }
                         AccountProvider::Codex => {
                             let mut v = vec![(
@@ -11149,7 +11150,7 @@ impl App {
                             v
                         }
                     };
-                    let sw = 300.0_f32;
+                    let sw = 340.0_f32.min((win_w - 16.0).max(0.0));
                     let codex_note = (p == AccountProvider::Codex)
                         .then(|| {
                             let snapshot = codex_rollout.as_ref()?;
@@ -11166,7 +11167,7 @@ impl App {
                     let row_heights: Vec<f32> = rows
                         .iter()
                         .map(|(id, _, _)| {
-                            if compact {
+                            if compact && p != AccountProvider::Claude {
                                 return row_h;
                             }
                             let lines = match p {
@@ -11197,17 +11198,19 @@ impl App {
                                     }
                                 }
                             };
-                            28.0 + 16.0 * lines.max(1) as f32
+                            28.0 + 16.0 * lines.max(1) as f32 + if p == AccountProvider::Claude { 30.0 } else { 0.0 }
                         })
                         .collect();
-                    let footer_h = row_h
+                    let footer_h = row_h + 8.0
                         + if p == AccountProvider::Codex {
                             18.0
                         } else {
                             0.0
                         };
+                    let empty_h = if rows.is_empty() { 32.0 } else { 0.0 };
                     let sh = pad * 2.0
                         + lab_h
+                        + empty_h
                         + row_heights.iter().sum::<f32>()
                         + rule
                         + footer_h;
@@ -11217,7 +11220,7 @@ impl App {
                     } else {
                         (mx - sw - 4.0).max(4.0)
                     };
-                    let sy = (py - pad).min(win_h - sh - 4.0).max(4.0);
+                    let sy = (py - pad).min(win_h - status_h - sh - 8.0).max(4.0);
                     panel_rect_outlined(
                         g,
                         sx,
@@ -11259,9 +11262,16 @@ impl App {
                         }
                         sry += lab_h;
                     }
+                    if rows.is_empty() {
+                        let note = crate::info::fit_text(g, "등록한 계정이 없어요", sw - pad_x * 2.0, f - 1.0, false);
+                        g.draw_text(sx + pad_x, sry + 6.0, &note, gpu::DrawOpts {
+                            font_size: f - 1.0, color: theme::text_dim(), bold: false, italic: false,
+                        });
+                        sry += empty_h;
+                    }
                     for (row_index, (id, label, active)) in rows.into_iter().enumerate() {
                         let arow_h = row_heights[row_index];
-                        let two_line = !compact;
+                        let two_line = !compact || p == AccountProvider::Claude;
                         let on = hmx >= sx && hmx <= sx + sw && hmy >= sry && hmy <= sry + arow_h;
                         // 활성 행은 갈 곳이 없다 — hover 도 히트박스도 손모양도 없다.
                         g.hover_pointer |= on && !active;
@@ -11282,6 +11292,7 @@ impl App {
                         } else {
                             sry + (arow_h - f) / 2.0 - 1.0
                         };
+                        let label = crate::info::fit_text(g, &label, sw - pad_x * 2.0 - 56.0, f, active);
                         g.draw_text(
                             sx + pad_x,
                             line1,
@@ -11334,7 +11345,7 @@ impl App {
                         // 활성 표시는 오른쪽 배지. 체크 아이콘이나 왼쪽 막대와 달리,
                         // 그 자리에 다른 계정이 쓰는 한도 숫자와 같은 층으로 읽힌다.
                         if active {
-                            let t = "사용 중";
+                            let t = if p == AccountProvider::Claude { "선택됨" } else { "사용 중" };
                             let tw = g.measure_chrome_text(t, tf, true);
                             g.draw_text(
                                 right - tw,
@@ -11370,25 +11381,12 @@ impl App {
                         match p {
                             AccountProvider::Claude => match (usage_of(&id), two_line) {
                                 (Some(b), true) => {
-                                    if let Some(t) = crate::resets_in_label(b.resets_at) {
-                                        let tw = g.measure_chrome_text(&t, tf, false);
-                                        let badge_w = if active {
-                                            g.measure_chrome_text("사용 중", tf, true) + 8.0
-                                        } else {
-                                            0.0
-                                        };
-                                        g.draw_text(
-                                            right - badge_w - tw,
-                                            line1,
-                                            &t,
-                                            gpu::DrawOpts {
-                                                font_size: tf,
-                                                color: theme::text_mute(),
-                                                bold: false,
-                                                italic: false,
-                                            },
-                                        );
-                                    }
+                                    let note = if b.stale { "이전 조회".to_string() }
+                                        else { crate::resets_in_label(b.resets_at).map(|s| format!("{s} 뒤 초기화")).unwrap_or_default() };
+                                    let note = crate::info::fit_text(g, &note, (sw - 172.0).max(0.0), tf, false);
+                                    g.draw_text(sx + pad_x, sry + arow_h - 22.0, &note, gpu::DrawOpts {
+                                        font_size: tf, color: theme::text_dim(), bold: false, italic: false,
+                                    });
                                     let wins: Vec<(String, f32)> = if b.windows.is_empty() {
                                         vec![(b.label.clone(), b.pct)]
                                     } else {
@@ -11431,11 +11429,11 @@ impl App {
                                     );
                                 }
                                 (None, _) => {
-                                    let signed_out = !crate::settings::auth_probe(&id)
-                                        .is_none_or(|probe| probe.logged_in);
-                                    let t = if signed_out { "로그인 필요" } else { "한도 모름" };
+                                    let status = claude_observations.get(&id).map_or("unselected", |(_, state)| *state);
+                                    let signed_out = status == "logged_out";
+                                    let t = match status { "logged_out" => "로그인 필요", "failed" => "확인 못 함", _ => "확인 중…" };
                                     let ty2 = if two_line {
-                                        sry + arow_h - 16.0
+                                        sry + 28.0
                                     } else {
                                         sry + (arow_h - tf) / 2.0 - 1.0
                                     };
@@ -11626,9 +11624,9 @@ impl App {
                         // 리셋 시각과 자리를 다투고, 계정이 넷이면 그 줄이 단추밭이
                         // 된다. 히트는 줄 전체(전환)보다 **먼저** 넣는다 — 찾기가
                         // 첫 매치를 쓰므로 순서가 곧 우선순위다.
-                        if on {
+                        if on || p == AccountProvider::Claude {
                             let bf = tf - 0.5;
-                            let by = sry + 7.0;
+                            let by = if p == AccountProvider::Claude { sry + arow_h - 22.0 } else { sry + 7.0 };
                             let mut bx = right;
                             for (label, item, skip) in [
                                 (
@@ -13895,12 +13893,12 @@ fn claude_account_label(id: &str, accounts: &[crate::socket::ClaudeAccount]) -> 
         Some(index) => {
             let label = accounts[index].label.trim();
             if label.is_empty() {
-                format!("계정 {}", index + 2)
+                format!("계정 {}", index + 1)
             } else {
                 label.to_string()
             }
         }
-        None => "기본 계정".to_string(),
+        None => "계정 선택 필요".to_string(),
     }
 }
 

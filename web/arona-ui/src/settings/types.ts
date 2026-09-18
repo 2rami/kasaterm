@@ -189,8 +189,10 @@ export type AccountRow = {
   sub: string;
   /// 부제를 어떤 색으로 읽을지 — `danger`(로그인 필요) · `mute` · `faint`(확인 중).
   sub_kind: string;
-  /// false = 첫 행(지금 로그인). 지울 것도 이름 붙일 것도 없다.
+  /// Codex의 외부 기본 로그인은 관리 슬롯이 아니다.
   slot: boolean;
+  logged_in?: boolean | null;
+  usage_state?: 'ready' | 'loading' | 'failed' | 'logged_out';
   /// 위 `name`·`sub` 의 **언어 없는 이름**. 있으면 화면이 사전에서 그 나라 말로
   /// 만들고, `null` 이면 그 자리는 옮길 말이 아니라 **데이터**다 — 사용자가 붙인
   /// 별명, 이메일, 팀 조직명. 부제에 조직명이 이어 붙는 경우도 코드가 빠진다
@@ -201,7 +203,7 @@ export type AccountRow = {
   /// 한도 — 하단바가 쓰는 우물 그대로라 열자마자 온다. `null`/없음 = 아직 모름
   /// (0 으로 그리면 여유 있다는 거짓말이 된다).
   usage?: number | null;
-  /// 마지막 성공값 재사용 중(`~62%` 로 흐리게).
+  /// 마지막 성공값 재사용 중. 현재 사용량으로 오해하지 않도록 명시한다.
   usage_stale?: boolean | null;
   /// 어느 한도 창인지(`5h`/`7d` …) — 툴팁용.
   usage_label?: string | null;
