@@ -3142,11 +3142,19 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 라이브 드래그 종료: 현재 `pty_layout`(=마지막으로 라이브 적용된 상태)을 그대로
     /// 확정하고 백업/throttle 상태를 비운다. 유효 드롭이 한 번도 없었으면 원본이
     /// 이미 복원돼 있으니 정리만 한다. 반환값 = 라이브로 실제 이동이 적용됐는지.
-    pub(crate) fn finish_live_drag(&mut self) -> bool {
-        let applied = self.drag_live_applied.is_some();
+    /// `moving` 은 끌던 pane — 라이브 재배치는 `move_pane` 을 안 타므로, 거울 창이면 여기서
+    /// 원본에 같은 이동을 보낸다. 안 보내면 3초 뒤 당겨오기가 제자리로 되돌린다(2026-09-18
+    /// 「옮기면 제자리로 돌아간다」— 09-17 수정은 move_pane 경로만 잡았다).
+    pub(crate) fn finish_live_drag(&mut self, moving: &str) -> bool {
+        let applied = self.drag_live_applied.take();
         self.drag_orig_layout = None;
-        self.drag_live_applied = None;
-        applied
+        let Some((target, zone)) = applied else { return false };
+        if zone != DropZone::Center {
+            self.push_remote_view_move(self.active_window, moving, &target, zone);
+        }
+        self.publish_pty_layout();
+        self.session_touched = true;
+        true
     }
 
     /// Detach `moving` from the active window and graft it beside `target`,

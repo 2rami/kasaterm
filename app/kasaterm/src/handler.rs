@@ -6661,7 +6661,7 @@ impl ApplicationHandler<UserEvent> for App {
                             // 단일탭 pane 을 라이브로 통째 옮긴 경우: 이미 실제
                             // 재배치가 끝났으니 백업만 정리하고 확정한다. 아래의
                             // split/move 경로를 또 타면 이중 적용된다.
-                            if self.finish_live_drag() {
+                            if self.finish_live_drag(&td.pane) {
                                 self.chrome_dirty = true;
                                 window.request_redraw();
                                 return;
@@ -6933,7 +6933,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 } else {
                                     // 같은 창 안 — 라이브로 이미 재배치된 현재
                                     // pty_layout 이 최종. 백업/throttle 만 정리한다.
-                                    self.finish_live_drag();
+                                    self.finish_live_drag(&hd.pane);
                                 }
                                 window.request_redraw();
                             } else if hd.from_handle {
