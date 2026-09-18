@@ -20,7 +20,7 @@
 //! sidebar metadata) fall through to METHOD_NOT_FOUND. They're listed
 //! in `system.capabilities` only when the host opts in.
 
-use crate::backend::{Backend, SplitDirection};
+use crate::backend::{Backend, SeamAxis, SplitDirection};
 use crate::protocol::{codes, ErrorObj, Request, Response};
 use serde_json::{json, Value};
 
@@ -868,19 +868,40 @@ fn surface_move(backend: &dyn Backend, id: Value, params: &Value) -> Response {
 }
 
 fn surface_set_ratio_between(backend: &dyn Backend, id: Value, params: &Value) -> Response {
-    let a = match params.get("a").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return param_err(id, "surface.set_ratio_between requires `a` (surface_id)"),
-    };
-    let b = match params.get("b").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return param_err(id, "surface.set_ratio_between requires `b` (surface_id)"),
-    };
+    // 쌍은 `pairs: [[a, b], …]` 로 여럿, 또는 옛 판처럼 `a`/`b` 하나.
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    if let Some(list) = params.get("pairs").and_then(Value::as_array) {
+        for p in list {
+            let (Some(a), Some(b)) = (p.get(0).and_then(Value::as_str), p.get(1).and_then(Value::as_str)) else {
+                return param_err(id, "surface.set_ratio_between `pairs` must be [[a, b], …] of surface_ids");
+            };
+            pairs.push((a.to_string(), b.to_string()));
+        }
+    } else {
+        let a = match params.get("a").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return param_err(id, "surface.set_ratio_between requires `a` (surface_id) or `pairs`"),
+        };
+        let b = match params.get("b").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return param_err(id, "surface.set_ratio_between requires `b` (surface_id)"),
+        };
+        pairs.push((a.to_string(), b.to_string()));
+    }
+    if pairs.is_empty() {
+        return param_err(id, "surface.set_ratio_between `pairs` is empty");
+    }
     let ratio = match params.get("ratio").and_then(|v| v.as_f64()) {
         Some(r) => r as f32,
         None => return param_err(id, "surface.set_ratio_between requires `ratio` (number, 0..1)"),
     };
-    match backend.set_ratio_between(a, b, ratio) {
+    let axis = match params.get("dir").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
+        None => None,
+        Some("horizontal") => Some(SeamAxis::Horizontal),
+        Some("vertical") => Some(SeamAxis::Vertical),
+        Some(_) => return param_err(id, "surface.set_ratio_between `dir` must be horizontal or vertical"),
+    };
+    match backend.set_ratio_between(&pairs, ratio, axis) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
@@ -1374,6 +1395,8 @@ mod tests {
         sent_text: Mutex<Vec<(Option<String>, String)>>,
         sent_keys: Mutex<Vec<(Option<String>, String)>>,
         resized: Mutex<Vec<(Vec<u8>, f32)>>,
+        // 거울이 보낸 분할선 — (쌍들, 비율, 축).
+        ratio_between: Mutex<Vec<(Vec<(String, String)>, f32, Option<SeamAxis>)>>,
         // tell 기록(log_agent_tell)의 slug 소스 — 테스트가 스크래치 경로를 지정해
         // 실제 방 slug 를 오염시키지 않게 한다. None 이면 trait 기본(None)과 동일.
         cwd: Option<std::path::PathBuf>,
@@ -1448,6 +1471,10 @@ mod tests {
             self.resized.lock().unwrap().push((path.to_vec(), ratio));
             Ok(())
         }
+        fn set_ratio_between(&self, pairs: &[(String, String)], ratio: f32, axis: Option<SeamAxis>) -> anyhow::Result<()> {
+            self.ratio_between.lock().unwrap().push((pairs.to_vec(), ratio, axis));
+            Ok(())
+        }
         fn pane_done(&self, surface_id: &str, outcome: &str, summary: &str) -> anyhow::Result<()> {
             self.done.lock().unwrap().push((
                 surface_id.to_string(),
@@ -1487,6 +1514,30 @@ mod tests {
         assert!(methods.iter().any(|m| m == "surface.split"));
         assert!(methods.iter().any(|m| m == "system.ping"));
         assert!(methods.iter().any(|m| m == "surface.resize_divider"));
+    }
+
+    #[test]
+    fn set_ratio_between_takes_many_pairs_with_an_axis_and_still_the_old_single_pair() {
+        let backend = FakeBackend::default();
+        let r = dispatch(&backend, req("surface.set_ratio_between", json!({
+            "pairs": [["%1", "%2"], ["%3", "%4"]], "ratio": 0.3, "dir": "Horizontal",
+            "a": "%1", "b": "%2",
+        })));
+        assert!(r.ok, "{:?}", r.error);
+        let r = dispatch(&backend, req("surface.set_ratio_between", json!({"a": "%7", "b": "%8", "ratio": 0.6})));
+        assert!(r.ok, "{:?}", r.error);
+        let calls = backend.ratio_between.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, vec![("%1".to_string(), "%2".to_string()), ("%3".to_string(), "%4".to_string())]);
+        assert_eq!(calls[0].2, Some(SeamAxis::Horizontal), "축 이름은 대소문자를 안 가린다");
+        assert_eq!(calls[1].0, vec![("%7".to_string(), "%8".to_string())]);
+        assert_eq!(calls[1].2, None);
+        drop(calls);
+        let bad = dispatch(&backend, req("surface.set_ratio_between", json!({"pairs": [["%1"]], "ratio": 0.3})));
+        assert!(!bad.ok, "짝이 안 맞는 쌍은 거절");
+        let bad = dispatch(&backend, req("surface.set_ratio_between", json!({"a": "%1", "b": "%2", "ratio": 0.3, "dir": "diagonal"})));
+        assert!(!bad.ok, "모르는 축은 거절");
+        assert_eq!(backend.ratio_between.lock().unwrap().len(), 2);
     }
 
     #[test]

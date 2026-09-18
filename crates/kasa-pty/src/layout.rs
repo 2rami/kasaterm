@@ -590,17 +590,22 @@ impl PtyLayout {
     /// `a` 쪽 몫. 경로 대신
     /// pane 으로 짚는 이유는 다른 기기의 거울 트리가 원본과 모양이 달라 경로가 안 맞기
     /// 때문이다(2026-09-17). 둘이 같은 잎이거나 어느 쪽이 없으면 false.
-    pub fn set_ratio_between(&mut self, a: &str, b: &str, ratio: f32) -> bool {
+    /// `dir` 가 있으면 그 축의 분할선만 만진다. 거울 트리는 원본과 모양이 다를 수 있어서
+    /// (정렬된 2×2 격자를 거울은 늘 세로선부터 자른다) 거울이 「세로선 양쪽」이라고 보낸
+    /// 쌍이 여기선 가로선의 양쪽일 수 있고, 그걸 만지면 엉뚱한 축이 움직인다(2026-09-18).
+    pub fn set_ratio_between(&mut self, a: &str, b: &str, ratio: f32, dir: Option<SplitDir>) -> bool {
         if a == b {
             return false;
         }
         match self {
             PtyLayout::Leaf { .. } => false,
-            PtyLayout::Split { ratio: r, a: left, b: right, .. } => {
+            PtyLayout::Split { dir: here, ratio: r, a: left, b: right } => {
                 let in_left = |id: &str| left.leaves().iter().any(|l| *l == id);
                 let in_right = |id: &str| right.leaves().iter().any(|l| *l == id);
+                let axis_ok = dir.is_none_or(|d| d == *here);
                 // `ratio` 는 **a 쪽** 몫이다 — a 가 오른쪽 자식이면 뒤집어 넣는다.
                 match (in_left(a), in_right(b), in_right(a), in_left(b)) {
+                    (true, true, _, _) | (_, _, true, true) if !axis_ok => false,
                     (true, true, _, _) => {
                         *r = ratio.clamp(0.1, 0.9);
                         true
@@ -609,11 +614,22 @@ impl PtyLayout {
                         *r = (1.0 - ratio).clamp(0.1, 0.9);
                         true
                     }
-                    _ if in_left(a) && in_left(b) => left.set_ratio_between(a, b, ratio),
-                    _ if in_right(a) && in_right(b) => right.set_ratio_between(a, b, ratio),
+                    _ if in_left(a) && in_left(b) => left.set_ratio_between(a, b, ratio, dir),
+                    _ if in_right(a) && in_right(b) => right.set_ratio_between(a, b, ratio, dir),
                     _ => false,
                 }
             }
+        }
+    }
+
+    /// `path` 의 Split 방향 — 거울이 분할선을 원본에 말할 때 축까지 함께 보낸다.
+    pub fn dir_at(&self, path: &[u8]) -> Option<SplitDir> {
+        let PtyLayout::Split { dir, a, b, .. } = self else {
+            return None;
+        };
+        match path.split_first() {
+            None => Some(*dir),
+            Some((head, tail)) => if *head == 0 { a.dir_at(tail) } else { b.dir_at(tail) },
         }
     }
 
@@ -840,18 +856,43 @@ mod tests {
         let mut t = PtyLayout::single("%a");
         assert!(t.insert_beside("%a", SplitDir::Horizontal, false, "%b".into()));
         assert!(t.insert_beside("%b", SplitDir::Vertical, false, "%c".into()));
-        assert!(t.set_ratio_between("%a", "%c", 0.3), "A 와 C 를 가르는 건 바깥 분할선");
-        assert!(t.set_ratio_between("%c", "%b", 0.8), "B 와 C 를 가르는 건 안쪽 분할선");
+        assert!(t.set_ratio_between("%a", "%c", 0.3, None), "A 와 C 를 가르는 건 바깥 분할선");
+        assert!(t.set_ratio_between("%c", "%b", 0.8, None), "B 와 C 를 가르는 건 안쪽 분할선");
         let rects = t.leaf_rects(1000, 1000);
         let w = |id: &str| rects.iter().find(|r| r.0 == id).map(|r| (r.3, r.4)).unwrap();
         assert!((w("%a").0 as i32 - 300).abs() <= 2, "A 폭 30%: {:?}", w("%a"));
         assert!((w("%b").1 as i32 - 200).abs() <= 2, "B 높이 20% (C 가 80%): {:?}", w("%b"));
-        assert!(!t.set_ratio_between("%a", "%a", 0.5));
-        assert!(!t.set_ratio_between("%a", "%zzz", 0.5));
+        assert!(!t.set_ratio_between("%a", "%a", 0.5, None));
+        assert!(!t.set_ratio_between("%a", "%zzz", 0.5, None));
         let (left, right) = t.split_leaves_at(&[]).unwrap();
         assert_eq!((left, right), (vec!["%a".to_string()], vec!["%b".to_string(), "%c".to_string()]));
         assert_eq!(t.split_leaves_at(&[1]).unwrap(), (vec!["%b".to_string()], vec!["%c".to_string()]));
         assert!(t.split_leaves_at(&[0]).is_none(), "잎엔 분할선이 없다");
+        assert_eq!(t.dir_at(&[]), Some(SplitDir::Horizontal));
+        assert_eq!(t.dir_at(&[1]), Some(SplitDir::Vertical));
+        assert_eq!(t.dir_at(&[0]), None);
+    }
+
+    #[test]
+    fn ratio_between_only_moves_a_seam_of_the_asked_axis_so_aligned_grids_follow_row_by_row() {
+        // 원본은 위/아래 먼저, 각 줄이 좌/우 — 정렬된 2×2. 거울은 같은 칸을 세로선부터 잘라
+        // H(V(A/C) | V(B/D)) 로 들고 있어 세로선을 끌면 (A,B)·(A,D)·(C,B)·(C,D) 를 다 보낸다.
+        // 가로선이 갈라 놓은 (A,D)·(C,B) 는 건너뛰고, 두 줄의 세로선만 같은 비율로 움직여야 한다.
+        let mut t = PtyLayout::single("%a");
+        assert!(t.insert_beside("%a", SplitDir::Vertical, false, "%c".into()));
+        assert!(t.insert_beside("%a", SplitDir::Horizontal, false, "%b".into()));
+        assert!(t.insert_beside("%c", SplitDir::Horizontal, false, "%d".into()));
+        let seam = Some(SplitDir::Horizontal);
+        assert!(!t.set_ratio_between("%a", "%d", 0.3, seam), "A·D 를 가르는 건 가로선");
+        assert!(!t.set_ratio_between("%c", "%b", 0.3, seam));
+        assert!(t.set_ratio_between("%a", "%b", 0.3, seam));
+        assert!(t.set_ratio_between("%c", "%d", 0.3, seam));
+        let rects = t.leaf_rects(1000, 1000);
+        let size = |id: &str| rects.iter().find(|r| r.0 == id).map(|r| (r.3 as i32, r.4 as i32)).unwrap();
+        assert!((size("%a").0 - 300).abs() <= 2 && (size("%c").0 - 300).abs() <= 2, "두 줄 다 30%: {rects:?}");
+        assert!((size("%a").1 - 500).abs() <= 2, "위/아래는 그대로: {rects:?}");
+        assert!(t.set_ratio_between("%a", "%d", 0.7, None), "축을 안 대면 종전처럼 최소 공통 조상");
+        assert!((t.leaf_rects(1000, 1000).iter().find(|r| r.0 == "%a").unwrap().4 as i32 - 700).abs() <= 2);
     }
 
     use super::*;

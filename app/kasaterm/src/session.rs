@@ -1366,20 +1366,30 @@ impl App {
         let tree = if window == self.active_window { self.pty_layout.as_ref() }
             else { self.windows.get(window).and_then(Option::as_ref) };
         let Some(ratio) = tree.and_then(|t| t.ratio_at(path)) else { return };
-        // 트리 경로는 기기마다 달라 못 쓴다 — 분할선 양쪽의 pane 하나씩으로 짚는다.
+        let Some(dir) = tree.and_then(|t| t.dir_at(path)) else { return };
+        // 트리 경로는 기기마다 달라 못 쓴다 — 분할선 양쪽의 pane 으로 짚는다. 한 쌍만 보내면
+        // 정렬된 2×2 격자(거울은 늘 세로선부터 자르고 원본은 가로선부터일 수 있다)에서 원본
+        // 분할선 하나만 움직여 나머지 줄이 당겨오기에 되돌아 보였다(2026-09-18). 양쪽 모든
+        // 쌍을 축과 함께 보내고 원본이 같은 축의 분할선만 고른다.
         let Some((left, right)) = tree.and_then(|t| t.split_leaves_at(path)) else { return };
         let remote = |local: &str| kasa_mcp::remote::remote_info(local).map(|i| i.remote_id);
-        let (Some(a), Some(b)) = (left.first().and_then(|l| remote(l)), right.first().and_then(|l| remote(l))) else { return };
+        let left: Vec<String> = left.iter().filter_map(|l| remote(l)).collect();
+        let right: Vec<String> = right.iter().filter_map(|l| remote(l)).collect();
+        if left.is_empty() || right.is_empty() { return }
+        let pairs: Vec<serde_json::Value> = left.iter()
+            .flat_map(|a| right.iter().map(move |b| serde_json::json!([a, b])))
+            .collect();
         let Some(m) = kasa_mcp::machines::find(&label) else { return };
         self.remote_view_push_at = Some(Instant::now());
-        let base = m.base.clone();
-        std::thread::spawn(move || {
-            let params = serde_json::json!({ "a": a, "b": b, "ratio": ratio });
-            if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "surface.set_ratio_between", params) {
-                eprintln!("[remote] divider push failed: {e:#}");
-            }
-            kasa_mcp::machines::poke();
+        let axis = match dir {
+            kasa_pty::SplitDir::Horizontal => "horizontal",
+            kasa_pty::SplitDir::Vertical => "vertical",
+        };
+        // `a`/`b` 는 `pairs` 를 모르는 옛 판(2026-09-17) 원본용.
+        let params = serde_json::json!({
+            "pairs": pairs, "ratio": ratio, "dir": axis, "a": left[0], "b": right[0],
         });
+        queue_remote_divider(m.base.clone(), params);
     }
 
     /// 거울 창 안에서 pane 을 옮겼다 — 같은 이동을 원본에도 건다.
@@ -9529,6 +9539,47 @@ fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
         cmd.replace("{}", &q)
     } else {
         format!("{} {q}", cmd.trim())
+    }
+}
+
+/// 거울의 분할선 밀어내기는 한 줄로 세워 보낸다. 드래그 중 칸 경계마다 스레드를 띄우면 도착
+/// 순서가 뒤바뀌어 원본이 마지막이 아닌 비율에 멈추고, 3초 뒤 당겨오기가 거울을 그 자리로
+/// 되돌린다(2026-09-18). 같은 분할선의 것이 쌓였으면 마지막 것만 보낸다 — 다른 분할선의
+/// 마지막은 지우지 않는다(끝내고 바로 다른 선을 잡았을 때 앞 선의 최종 위치가 사라진다).
+fn queue_remote_divider(base: String, params: serde_json::Value) {
+    use std::sync::mpsc::{channel, Sender};
+    use std::sync::{Mutex, OnceLock};
+    type Push = (String, serde_json::Value);
+    static TX: OnceLock<Mutex<Sender<Push>>> = OnceLock::new();
+    let tx = TX.get_or_init(|| {
+        let (tx, rx) = channel::<Push>();
+        std::thread::spawn(move || {
+            while let Ok(first) = rx.recv() {
+                let mut batch = vec![first];
+                while let Ok(next) = rx.try_recv() {
+                    batch.push(next);
+                }
+                let key = |(base, p): &Push| (base.clone(), p.get("pairs").cloned(), p.get("dir").cloned());
+                let mut i = 0;
+                while i < batch.len() {
+                    let k = key(&batch[i]);
+                    if batch[i + 1..].iter().any(|later| key(later) == k) { batch.remove(i); } else { i += 1; }
+                }
+                for (base, params) in batch {
+                    if let Err(e) = kasa_mcp::remote::remote_cmd(&base, "surface.set_ratio_between", params) {
+                        eprintln!("[remote] divider push failed: {e:#}");
+                    }
+                }
+                // 원본은 명령을 GUI 스레드에 넘기고 바로 답한다 — 그 직후 명부를 당기면 옛
+                // 칸이 캐시에 앉는다. 한 프레임쯤 기다린 뒤 당긴다(배치 발행이 롱폴도 깨운다).
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                kasa_mcp::machines::poke();
+            }
+        });
+        Mutex::new(tx)
+    });
+    if let Ok(tx) = tx.lock() {
+        let _ = tx.send((base, params));
     }
 }
 

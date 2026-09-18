@@ -11,6 +11,16 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+/// 분할선의 축 — `set_ratio_between` 이 거울이 끈 분할선과 같은 축의 분할선만 만지게 한다.
+/// kasa-pty 의 `SplitDir` 과 같은 뜻인데 이 crate 는 kasa-pty 를 모른다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeamAxis {
+    /// 좌/우 배치(세로 분할선).
+    Horizontal,
+    /// 위/아래 배치(가로 분할선).
+    Vertical,
+}
+
 /// Direction passed to `Backend::split_surface`. Mirrors cmux's
 /// `surface.split` `direction` parameter exactly so the JSON enum
 /// values are stable wire shapes.
@@ -890,9 +900,11 @@ pub trait Backend: Send + Sync {
     fn resize_divider(&self, _path: &[u8], _ratio: f32) -> Result<()> {
         anyhow::bail!("resize_divider unsupported by this backend")
     }
-    /// `a` 와 `b` 를 가르는 분할선의 비율(`a` 쪽 몫)을 놓는다 — 다른 기기의 거울이 분할선을
-    /// 끌 때 쓴다. 트리 경로는 기기마다 달라 pane 으로 짚는다. Default: unsupported.
-    fn set_ratio_between(&self, _a: &str, _b: &str, _ratio: f32) -> Result<()> {
+    /// 쌍마다 `a` 와 `b` 를 가르는 분할선의 비율(`a` 쪽 몫)을 놓는다 — 다른 기기의 거울이
+    /// 분할선을 끌 때 쓴다. 트리 경로는 기기마다 달라 pane 으로 짚고, 거울 트리가 원본과
+    /// 모양이 다를 수 있어 양쪽 모든 쌍을 축과 함께 받는다(원본은 같은 축의 분할선만 만진다).
+    /// Default: unsupported.
+    fn set_ratio_between(&self, _pairs: &[(String, String)], _ratio: f32, _axis: Option<SeamAxis>) -> Result<()> {
         anyhow::bail!("set_ratio_between unsupported by this backend")
     }
     /// Make `surface_id` take `ratio` (0..1) of its *immediate* split

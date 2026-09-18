@@ -814,9 +814,13 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
-            UserEvent::SocketSetRatioBetween(a, b, ratio) => {
-                let (a, b, ratio) = (a.clone(), b.clone(), *ratio);
-                if self.edit_layout_of_pane(&a, |tree| tree.set_ratio_between(&a, &b, ratio)) {
+            UserEvent::SocketSetRatioBetween(pairs, ratio, dir) => {
+                let (pairs, ratio, dir) = (pairs.clone(), *ratio, *dir);
+                let mut changed = false;
+                for (a, b) in &pairs {
+                    changed |= self.edit_layout_of_pane(a, |tree| tree.set_ratio_between(a, b, ratio, dir));
+                }
+                if changed {
                     self.render_frame();
                 }
                 return;
