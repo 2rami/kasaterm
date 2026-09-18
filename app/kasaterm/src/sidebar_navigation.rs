@@ -3,52 +3,19 @@ use super::*;
 type Rect = (f32, f32, f32, f32);
 pub(crate) const HEADER_H: f32 = 48.0;
 const PANE_H: f32 = 44.0;
-const DEVICE_H: f32 = 42.0;
-/// 아래에 끌어다 둔 기기 절의 머리줄 높이.
 const SECTION_H: f32 = 36.0;
-/// 끌고 있는 동안 바닥에 그리는 착지 안내 띠.
-const DROP_H: f32 = 40.0;
-
-/// 연결이 끊겨도 기기 상태를 목록에서 확인할 수 있도록 보관한다.
-pub(crate) struct Pinned {
-    pub(crate) label: String,
-    content_h: f32,
-    view: Option<Rect>,
-}
-
-/// 피커 항목이나 머리줄에서 잡은 끌기. 문턱을 넘어야 `active` — 그 전에 놓으면 클릭이다.
-pub(crate) struct NavDrag {
-    label: String,
-    start: (f32, f32),
-    from_picker: bool,
-    pub(crate) active: bool,
-}
 
 #[derive(Default)]
 pub(crate) struct NavigationState {
-    pub(crate) machine: Option<String>,
-    pub(crate) picker: bool,
-    pub(crate) scroll: f32,
     pub(crate) local_content_h: f32,
     pub(crate) shared_scroll: f32,
     pub(crate) room_numbers: Vec<(String, Option<u64>, String, usize)>,
-    pub(crate) pinned: Vec<Pinned>,
-    /// x 로 닫은 기기 — 연결돼 있어도 저절로 다시 서지 않는다. 끌어다 놓으면 풀린다.
-    dismissed: std::collections::HashSet<String>,
-    pub(crate) drag: Option<NavDrag>,
     /// 지금 보는 창이 어느 기계의 어떤 원격 pane 들인가 — 그 방 카드를 활성으로 그린다.
     /// 렌더가 프레임마다 `App::remote_view_of_window` 로 채운다.
     pub(crate) viewing: Option<(String, Vec<String>)>,
     /// 보는 중인 원격 방에서 지금 포커스한 칸의 원격 pane id.
     pub(crate) viewing_cur: Option<String>,
-    picker_scroll: f32,
-    picker_index: usize,
-    content_h: f32,
-    viewport: Option<Rect>,
-    /// 위 목록과 아래 절을 합친 세로 구간 — 끌어다 놓을 자리 판정에 쓴다.
-    full_view: Option<Rect>,
-    picker_view: Option<Rect>,
-    picker_content_h: f32,
+    device_views: Vec<(String, Rect)>,
     collapsed_rooms: std::collections::HashSet<String>,
     /// 목록 본문으로 보는 방(키) — 본기기 카드의 「목록으로 보기」와 같다.
     list_rooms: std::collections::HashSet<String>,
@@ -61,7 +28,6 @@ pub(crate) struct NavigationState {
     /// 이름을 고치는 중인 원격 방 — (카드 키, 캐럿 포함 글). 렌더가 프레임마다 채운다.
     pub(crate) rename: Option<(String, String)>,
     hits: Vec<(Action, Rect)>,
-    picker_hits: Vec<(Option<String>, Rect)>,
 }
 
 /// 방 카드 우클릭 메뉴 — 어느 기기의 어느 방인가와 뜬 자리. `pane` 이 있으면 **칸 메뉴**다.
@@ -75,7 +41,7 @@ pub(crate) struct RoomMenu {
     pane: Option<String>,
 }
 
-/// 잡은 칸. 문턱을 넘어야 `active` — 그 전에 놓으면 그냥 여는 클릭이다(머리줄 끌기와 같은 규칙).
+/// 문턱을 넘어야 끌기가 되어 방을 여는 클릭과 pane 이동을 구분한다.
 pub(crate) struct CellDrag {
     label: String,
     room: String,
@@ -98,7 +64,6 @@ enum RoomMenuAction {
 
 #[derive(Clone)]
 enum Action {
-    Picker,
     Menu(String),
     /// 방 접기·펴기(배지).
     Room(String),
@@ -108,9 +73,8 @@ enum Action {
     NewRoom(String),
     /// 이 기기에 새 방 — 머리줄의 +. 기기 절과 같은 자리·같은 모양(2026-09-17 지시).
     NewLocalRoom,
-    /// 아래 절의 머리줄 — 누르는 일은 없고 우클릭 메뉴의 대상만 된다.
+    /// 기기 머리줄은 우클릭 메뉴와 pane 이동의 대상이 된다.
     Section(String),
-    Unpin(String),
     /// 카드 머리의 × — 그 기기의 방을 닫는다(확인은 본기기 방과 같은 모달).
     CloseRoom { label: String, window: Option<u64>, room: String },
 }
@@ -232,48 +196,15 @@ fn cell_rects(list: &[&state::MachinesColRow], ma: Rect) -> Vec<Rect> {
     }).collect()
 }
 
-/// 방과 기기가 같은 스크롤을 쓰므로 각 절은 내용의 실제 높이를 유지한다.
-fn section_heights(
-    machines: &[state::MachinesColMachine],
-    pinned: &[Pinned],
-    collapsed: &std::collections::HashSet<String>,
-    listed: &std::collections::HashSet<String>,
-    _avail: f32,
-) -> Vec<f32> {
-    if pinned.is_empty() { return Vec::new(); }
-    pinned.iter().map(|pin| {
-        let body = machines.iter().find(|m| m.label == pin.label)
-            .map_or(PANE_H, |m| content_height(m, collapsed, listed));
-        SECTION_H + body
-    }).collect()
-}
-
-/// 렌더 전에 읽어도 같은 순서를 돌려줘야 첫 프레임부터 단축키와 높이가 일치한다.
+/// 기기 표시·순서의 정본을 공유해 새 기기와 오프라인 기기가 양쪽에 함께 나타난다.
 pub(crate) fn section_labels(info: &state::InfoState) -> Vec<String> {
-    let nav = &info.navigation;
-    let mut labels: Vec<String> = info.machines_col.machines.iter()
-        .filter(|m| (m.online || nav.pinned.iter().any(|p| p.label == m.label))
-            && !nav.dismissed.contains(&m.label))
-        .map(|m| m.label.clone()).collect();
-    for pin in &nav.pinned {
-        if !labels.contains(&pin.label) {
-            labels.push(pin.label.clone());
-        }
-    }
-    labels
+    info.machines_col.machines.iter().map(|m| m.label.clone()).collect()
 }
 
 pub(crate) fn remote_content_h(info: &state::InfoState) -> f32 {
-    section_labels(info).iter().map(|label| {
-        SECTION_H + info.machines_col.machines.iter().find(|m| &m.label == label)
-            .map_or(PANE_H, |m| content_height(m, &info.navigation.collapsed_rooms, &info.navigation.list_rooms))
+    info.machines_col.machines.iter().map(|machine| {
+        SECTION_H + content_height(machine, &info.navigation.collapsed_rooms, &info.navigation.list_rooms)
     }).sum()
-}
-
-/// 끌던 기기를 놓았을 때 절로 받는 자리 — 머리줄 아래 사이드바 전부.
-fn drop_target(cursor: (f32, f32), width: f32, full: Rect) -> bool {
-    cursor.0 >= 0.0 && cursor.0 < width
-        && cursor.1 >= TITLE_HEIGHT + HEADER_H && cursor.1 < full.1 + full.3 + 24.0
 }
 
 fn text(g: &mut gpu::GpuRenderer, value: &str, x: f32, y: f32, width: f32, size: f32, color: [u8; 4], bold: bool) {
@@ -287,13 +218,6 @@ fn status(machine: &state::MachinesColMachine) -> String {
     } else {
         crate::machinescol::ago_label(machine.ago_secs)
     }
-}
-
-fn scrollbar(g: &mut gpu::GpuRenderer, view: Rect, content_h: f32, scroll: f32, width: f32) {
-    if content_h <= view.3 { return; }
-    let h = (view.3 * view.3 / content_h).max(20.0).min(view.3);
-    let y = view.1 + (view.3 - h) * scroll / (content_h - view.3);
-    g.rect(width - 4.0, y, 2.0, h, theme::text_mute());
 }
 
 /// 배치도 칸 하나 — 본기기 배치도 칸(render.rs)과 **같은 문법·같은 치수**: 테두리 2px 둥근
@@ -476,8 +400,7 @@ pub(crate) fn draw_menu(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, c
 }
 
 /// 한 기기의 방을 본기기와 같은 **카드 + 배치도**로 `view` 안에 그린다. 위 목록과
-/// 아래 절이 같은 함수를 쓴다 — 두 자리의 방이 달리 보이면 같은 방인지 헷갈린다.
-/// 카드를 그리는 데 필요한 nav 상태 — 위 목록과 아래 절이 같은 것을 본다.
+/// 기기가 달라도 카드의 상태와 조작은 같은 문법을 따른다.
 struct RowsCtx<'a> {
     numbers: &'a [(String, Option<u64>, String, usize)],
     collapsed: &'a std::collections::HashSet<String>,
@@ -620,73 +543,27 @@ fn draw_rows(
 }
 
 pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor: (f32, f32), width: f32, viewport: Rect) {
-    let labels = section_labels(info);
     let nav = &mut info.navigation;
     nav.hits.clear();
-    nav.viewport = None;
-    nav.full_view = (width > 0.0).then_some(viewport);
-    for pin in &mut nav.pinned { pin.view = None; }
-    if width <= 0.0 {
-        nav.picker = false;
-        nav.picker_hits.clear();
-        nav.drag = None;
-        return;
-    }
-    let machines = &info.machines_col.machines;
-    let selected = nav.machine.as_deref().and_then(|name| machines.iter().find(|m| m.label == name));
-    let label = nav.machine.as_deref().unwrap_or_else(|| crate::info::local_machine_name());
+    nav.device_views.clear();
+    if width <= 0.0 { return; }
+    let label = crate::info::local_machine_name();
     let label = if label.is_empty() { "이 기기" } else { label };
+    let compact = width < 180.0;
     let head = (8.0, TITLE_HEIGHT + 4.0, width - 16.0, HEADER_H - 8.0);
-    // 고른 기기엔 「…」 메뉴와 「+ 새 방」 이, 이 기기엔 「+ 새 방」 이 머리 오른쪽에 선다 —
-    // 방 추가 단추가 어느 기기든 같은 자리에 있어야 한다.
-    let menu_w = if selected.is_some() { 56.0 } else { 28.0 };
-    let choose = (head.0, head.1, head.2 - menu_w, head.3);
-    if hit(cursor, choose) || nav.picker {
-        g.rect(head.0, head.1, choose.2, head.3, theme::surface_hover());
-    }
-    g.hover_pointer |= hit(cursor, choose);
-    let tint = if selected.is_some() { crate::render::machine_tint(label) } else { theme::text_dim() };
-    g.queue_icon("monitor", 14.0, head.1 + 12.0, 16.0, tint);
-    text(g, label, 38.0, head.1 + 4.0, choose.2 - 54.0, 12.0, theme::text(), true);
-    let sub = match selected {
-        Some(m) => status(m),
-        None if nav.machine.is_some() => "등록되지 않은 기기".into(),
-        None => "이 기기 · 방과 pane".into(),
-    };
-    text(g, &sub, 38.0, head.1 + 22.0, choose.2 - 54.0, 10.0, theme::text_dim(), false);
-    g.queue_icon("chevron-down", choose.0 + choose.2 - 18.0, head.1 + 13.0, 12.0, theme::text_dim());
-    nav.hits.push((Action::Picker, choose));
-    if let Some(machine) = selected {
-        let plus = (head.0 + head.2 - menu_w, head.1, 28.0, head.3);
-        let r = (head.0 + head.2 - 28.0, head.1, 28.0, head.3);
-        for (rect, icon) in [(plus, "plus"), (r, "ellipsis-horizontal")] {
-            if hit(cursor, rect) { g.rect(rect.0, rect.1, rect.2, rect.3, theme::surface_hover()); }
-            g.hover_pointer |= hit(cursor, rect);
-            g.queue_icon(icon, rect.0 + 7.0, rect.1 + 13.0, 14.0, theme::text_dim());
-        }
-        nav.hits.push((Action::NewRoom(machine.label.clone()), plus));
-        nav.hits.push((Action::Menu(machine.label.clone()), r));
-    } else {
-        let plus = (head.0 + head.2 - 28.0, head.1, 28.0, head.3);
-        if hit(cursor, plus) { g.rect(plus.0, plus.1, plus.2, plus.3, theme::surface_hover()); }
-        g.hover_pointer |= hit(cursor, plus);
-        g.queue_icon("plus", plus.0 + 7.0, plus.1 + 13.0, 14.0, theme::text_dim());
-        nav.hits.push((Action::NewLocalRoom, plus));
-    }
+    let plus = (width - 36.0, head.1, 28.0, head.3);
+    let text_x = if compact { 12.0 } else { 38.0 };
+    if !compact { g.queue_icon("monitor", 14.0, head.1 + 12.0, 16.0, theme::text_dim()); }
+    text(g, label, text_x, head.1 + 4.0, plus.0 - text_x - 4.0, 12.0, theme::text(), true);
+    text(g, "이 기기", text_x, head.1 + 22.0, plus.0 - text_x - 4.0, 10.0, theme::text_dim(), false);
+    if hit(cursor, plus) { g.rect(plus.0, plus.1, plus.2, plus.3, theme::surface_hover()); }
+    g.hover_pointer |= hit(cursor, plus);
+    g.queue_icon("plus", plus.0 + 7.0, plus.1 + 13.0, 14.0, theme::text_dim());
+    nav.hits.push((Action::NewLocalRoom, plus));
     g.rect(12.0, TITLE_HEIGHT + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
 
-    // 끊긴 기기도 머리줄을 남겨 일시적인 연결 실패가 방 삭제처럼 보이지 않게 한다.
-    for m in machines.iter().filter(|m| m.online) {
-        if nav.machine.as_deref() == Some(m.label.as_str())
-            || nav.dismissed.contains(&m.label)
-            || nav.pinned.iter().any(|p| p.label == m.label)
-        {
-            continue;
-        }
-        nav.pinned.push(Pinned { label: m.label.clone(), content_h: 0.0, view: None });
-    }
-    nav.pinned.sort_by_key(|p| labels.iter().position(|l| l == &p.label).unwrap_or(usize::MAX));
-    let NavigationState { pinned, collapsed_rooms, hits, machine: main, scroll, content_h, viewport: main_view, viewing, viewing_cur, list_rooms, rename, cell_drag, local_content_h, shared_scroll, room_numbers, .. } = nav;
+    let NavigationState { collapsed_rooms, hits, viewing, viewing_cur, list_rooms, rename, cell_drag,
+        local_content_h, shared_scroll, room_numbers, device_views, .. } = nav;
     let ctx = RowsCtx {
         numbers: room_numbers,
         collapsed: collapsed_rooms,
@@ -696,123 +573,36 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         viewing_cur: viewing_cur.as_deref(),
         rename: rename.as_ref(),
     };
-    let heights = section_heights(machines, pinned, collapsed_rooms, list_rooms, viewport.3);
-    let view = viewport;
-    *main_view = Some(view);
-    if main.is_some() {
-        match selected {
-            None => text(g, "기기를 다시 선택해 주세요", 16.0, view.1 + 12.0, width - 32.0, 11.0, theme::text_dim(), false),
-            Some(machine) => {
-                *content_h = content_height(machine, collapsed_rooms, list_rooms);
-                *scroll = scroll.clamp(0.0, (*content_h - view.3).max(0.0));
-                draw_rows(g, hits, &ctx, machine, cursor, width, view, *scroll);
-                scrollbar(g, view, *content_h, *scroll, width);
-            }
-        }
-    }
-    if main.is_some() { return; }
     let mut y = viewport.1 + *local_content_h - *shared_scroll;
     g.push_clip(viewport.0, viewport.1, viewport.2, viewport.3);
-    for (pin, h) in pinned.iter_mut().zip(heights) {
-        let machine = machines.iter().find(|m| m.label == pin.label);
+    for machine in &info.machines_col.machines {
+        let body_h = content_height(machine, collapsed_rooms, list_rooms);
         g.rect(12.0, y, (width - 24.0).max(0.0), 1.0, theme::border());
         let head = (8.0, y + 2.0, width - 16.0, SECTION_H - 4.0);
-        let unpin = (width - 32.0, y + 7.0, 22.0, 22.0);
-        let menu = (width - 54.0, y + 7.0, 22.0, 22.0);
-        let plus = (width - 76.0, y + 7.0, 22.0, 22.0);
-        if hit(cursor, head) { g.rect(head.0, head.1, head.2, head.3, theme::surface_hover()); }
-        let tint = if machine.is_some() { crate::render::machine_tint(&pin.label) } else { theme::text_dim() };
-        g.queue_icon("monitor", 14.0, y + 11.0, 14.0, tint);
-        text(g, &pin.label, 36.0, y + 4.0, width - 118.0, 11.5, theme::text(), true);
-        let sub = machine.map_or_else(|| "등록되지 않은 기기".to_string(), status);
-        text(g, &sub, 36.0, y + 20.0, width - 118.0, 9.5, theme::text_dim(), false);
-        g.hover_pointer |= hit(cursor, menu) || hit(cursor, unpin) || hit(cursor, plus);
-        // 「+」 = 그 기기에 새 방(본기기 사이드바의 + 와 같은 뜻). 연결돼 있을 때만.
-        if machine.is_some_and(|m| m.online) {
-            g.queue_icon("plus", plus.0 + 4.0, plus.1 + 4.0, 14.0, if hit(cursor, plus) { theme::text() } else { theme::text_dim() });
+        let menu = (width - 30.0, y + 7.0, 22.0, 22.0);
+        let plus = (width - 54.0, y + 7.0, 22.0, 22.0);
+        let text_x = if compact { 12.0 } else { 36.0 };
+        let text_right = plus.0 - 4.0;
+        if !compact { g.queue_icon("monitor", 14.0, y + 11.0, 14.0, crate::render::machine_tint(&machine.label)); }
+        text(g, &machine.label, text_x, y + 4.0, text_right - text_x, 11.5, theme::text(), true);
+        text(g, &status(machine), text_x, y + 20.0, text_right - text_x, 9.5, theme::text_dim(), false);
+        g.hover_pointer |= clipped(menu, viewport).is_some_and(|r| hit(cursor, r))
+            || machine.online && clipped(plus, viewport).is_some_and(|r| hit(cursor, r));
+        if machine.online {
+            g.queue_icon("plus", plus.0 + 4.0, plus.1 + 4.0, 14.0, theme::text_dim());
+            if let Some(r) = clipped(plus, viewport) { hits.push((Action::NewRoom(machine.label.clone()), r)); }
         }
         g.queue_icon("ellipsis-horizontal", menu.0 + 4.0, menu.1 + 4.0, 14.0, theme::text_dim());
-        g.queue_icon("x", unpin.0 + 5.0, unpin.1 + 5.0, 12.0, if hit(cursor, unpin) { theme::attention() } else { theme::text_dim() });
-        // 작은 단추가 머리줄보다 앞이어야 한다 — 맞춤은 앞선 것이 이긴다.
-        if let Some(r) = clipped(unpin, viewport) { hits.push((Action::Unpin(pin.label.clone()), r)); }
-        if let Some(r) = clipped(menu, viewport) { hits.push((Action::Menu(pin.label.clone()), r)); }
-        if machine.is_some_and(|m| m.online) {
-            if let Some(r) = clipped(plus, viewport) { hits.push((Action::NewRoom(pin.label.clone()), r)); }
+        if let Some(r) = clipped(menu, viewport) { hits.push((Action::Menu(machine.label.clone()), r)); }
+        if let Some(r) = clipped(head, viewport) { hits.push((Action::Section(machine.label.clone()), r)); }
+        let body = (viewport.0, y + SECTION_H, viewport.2, body_h);
+        if let Some(visible) = clipped(body, viewport) {
+            device_views.push((machine.label.clone(), visible));
+            draw_rows(g, hits, &ctx, machine, cursor, width, visible, visible.1 - body.1);
         }
-        if let Some(r) = clipped(head, viewport) { hits.push((Action::Section(pin.label.clone()), r)); }
-        let body = (viewport.0, y + SECTION_H, viewport.2, (h - SECTION_H).max(0.0));
-        pin.view = clipped(body, viewport);
-        match machine {
-            None => text(g, "기기 목록에서 사라졌어요", 16.0, body.1 + 12.0, width - 32.0, 11.0, theme::text_dim(), false),
-            Some(machine) => {
-                pin.content_h = content_height(machine, collapsed_rooms, list_rooms);
-                if let Some(visible) = pin.view {
-                    draw_rows(g, hits, &ctx, machine, cursor, width, visible, visible.1 - body.1);
-                }
-            }
-        }
-        y += h;
+        y += SECTION_H + body_h;
     }
     g.pop_clip();
-}
-
-/// 끌고 있는 기기 — 커서를 따르는 칩과 바닥의 착지 띠. 다른 오버레이 뒤에 그려야
-/// 피커·메뉴에 가리지 않는다.
-pub(crate) fn draw_drag(g: &mut gpu::GpuRenderer, info: &state::InfoState, cursor: (f32, f32), width: f32) {
-    let nav = &info.navigation;
-    let (Some(drag), Some(full)) = (nav.drag.as_ref().filter(|d| d.active), nav.full_view) else { return; };
-    if width <= 0.0 { return; }
-    let over = drop_target(cursor, width, full);
-    let tone = if over { theme::accent() } else { theme::text_mute() };
-    let band = (8.0, full.1 + full.3 - DROP_H, (width - 16.0).max(0.0), DROP_H - 4.0);
-    g.rect(band.0, band.1, band.2, band.3, theme::with_alpha(tone, if over { 60 } else { 28 }));
-    crate::render::dashed_rect(g, band.0, band.1, band.2, band.3, tone);
-    text(g, "놓으면 아래에 같이 보여요", band.0 + 10.0, band.1 + 12.0, band.2 - 20.0, 10.5,
-        if over { theme::text() } else { theme::text_dim() }, false);
-    // 칩은 커서 위에 띄운다 — 옆에 두면 좁은 사이드바에선 착지 띠의 안내 문구를 덮는다.
-    let chip_w = 160.0_f32.min(width - 24.0).max(60.0);
-    let chip = ((cursor.0 - 24.0).clamp(8.0, (width - chip_w - 8.0).max(8.0)), cursor.1 - 44.0, chip_w, 28.0);
-    g.rect(chip.0, chip.1, chip.2, chip.3, theme::surface_active());
-    crate::render::dashed_rect(g, chip.0, chip.1, chip.2, chip.3, theme::border());
-    g.queue_icon("monitor", chip.0 + 8.0, chip.1 + 7.0, 14.0, crate::render::machine_tint(&drag.label));
-    text(g, &drag.label, chip.0 + 28.0, chip.1 + 7.0, chip.2 - 36.0, 11.5, theme::text(), true);
-}
-
-pub(crate) fn draw_picker(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor: (f32, f32), width: f32, bottom: f32) {
-    let nav = &mut info.navigation;
-    nav.picker_hits.clear();
-    nav.picker_view = None;
-    if !nav.picker || width <= 0.0 { return; }
-    let top = TITLE_HEIGHT + HEADER_H;
-    nav.picker_content_h = (info.machines_col.machines.len() + 1) as f32 * DEVICE_H;
-    let height = nav.picker_content_h.min((bottom - top - 8.0).max(0.0));
-    let viewport = (8.0, top, (width - 16.0).max(0.0), height);
-    nav.picker_view = Some(viewport);
-    nav.picker_scroll = nav.picker_scroll.clamp(0.0, (nav.picker_content_h - height).max(0.0));
-    g.rect(viewport.0, top, viewport.2, height, theme::panel_bg());
-    g.push_clip(viewport.0, top, viewport.2, height);
-    for (index, machine) in std::iter::once(None).chain(info.machines_col.machines.iter().map(Some)).enumerate() {
-        let selection = machine.map(|m| m.label.clone());
-        let y = top + index as f32 * DEVICE_H - nav.picker_scroll;
-        let full = (viewport.0, y, viewport.2, DEVICE_H);
-        let Some(r) = clipped(full, viewport) else { continue; };
-        let selected = nav.machine == selection;
-        let pinned = selection.as_ref().is_some_and(|l| nav.pinned.iter().any(|p| &p.label == l));
-        if selected || index == nav.picker_index || hit(cursor, r) { g.rect(full.0, full.1, full.2, full.3, if selected { theme::surface_active() } else { theme::surface_hover() }); }
-        g.hover_pointer |= hit(cursor, r);
-        let label = machine.map(|m| m.label.as_str()).unwrap_or_else(|| crate::info::local_machine_name());
-        text(g, if label.is_empty() { "이 기기" } else { label }, 20.0, y + 5.0, width - 52.0, 12.0, theme::text(), true);
-        let detail = match machine {
-            None => "이 기기".to_string(),
-            Some(m) if pinned => format!("{} · 아래에 보는 중", status(m)),
-            Some(m) => format!("{} · 아래로 끌어 함께 보기", status(m)),
-        };
-        text(g, &detail, 20.0, y + 24.0, width - 44.0, 10.0, theme::text_dim(), false);
-        if selected { g.queue_icon("check", width - 32.0, y + 13.0, 14.0, theme::accent()); }
-        nav.picker_hits.push((selection, r));
-    }
-    g.pop_clip();
-    g.rect(viewport.0, top + height, viewport.2, 1.0, theme::border());
 }
 
 impl App {
@@ -848,7 +638,7 @@ impl App {
                 }
             }
         }
-        if step.1 >= 19 || step.0.elapsed().as_millis() < if step.1 == 0 { 10000 } else { 700 } { return; }
+        if step.1 >= 20 || step.0.elapsed().as_millis() < if step.1 == 0 { 10000 } else { 700 } { return; }
         let Some(window) = self.window.as_ref().map(|w| w.id()) else { return; };
         let click = |app: &mut Self, r: Rect| {
             app.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
@@ -862,19 +652,15 @@ impl App {
         let stage = step.1;
         match stage {
             0 => {
-                let head = self.info.navigation.hits.iter().find_map(|(a, r)| matches!(a, Action::Picker).then_some(*r));
-                if let Some(r) = head { click(self, r); }
-                report = format!("picker_open={}", self.info.navigation.picker);
+                report = format!("direct_devices={} local_rooms_visible={}", section_labels(&self.info).len(), !self.window_tab_rects.is_empty());
             }
             1 => {
-                let item = self.info.navigation.picker_hits.iter().find_map(|(s, r)| (s.as_deref() == Some("맥북")).then_some(*r));
-                if let Some(r) = item { click(self, r); }
-                report = format!("remote_selected={}", self.info.navigation.machine.as_deref() == Some("맥북"));
-            }
-            2 => {
                 let menu = self.info.navigation.hits.iter().find_map(|(a, r)| matches!(a, Action::Menu(_)).then_some(*r));
                 if let Some(r) = menu { click(self, r); }
-                report = format!("machine_menu={} local_hits_cleared={}", self.info.machine_menu.is_some(), self.window_tab_rects.is_empty());
+                report = format!("machine_menu={}", self.info.machine_menu.is_some());
+            }
+            2 => {
+                report = format!("machine_menu={} local_rooms_visible={}", self.info.machine_menu.is_some(), !self.window_tab_rects.is_empty());
             }
             3 => {
                 click(self, (self.tab_strip_w() + 360.0, 150.0, 1.0, 1.0));
@@ -884,14 +670,12 @@ impl App {
                 report.push_str(&format!(" room_collapsed={}", !self.info.navigation.collapsed_rooms.is_empty()));
             }
             4 => {
-                let head = self.info.navigation.hits.iter().find_map(|(a, r)| matches!(a, Action::Picker).then_some(*r));
-                if let Some(r) = head { click(self, r); }
-                report = format!("picker_reopened={}", self.info.navigation.picker);
+                let room = self.info.navigation.hits.iter().find_map(|(a, r)| matches!(a, Action::Room(_)).then_some(*r));
+                if let Some(r) = room { click(self, r); }
+                report = format!("room_expanded={}", self.info.navigation.collapsed_rooms.is_empty());
             }
             5 => {
-                let item = self.info.navigation.picker_hits.iter().find_map(|(s, r)| s.is_none().then_some(*r));
-                if let Some(r) = item { click(self, r); }
-                report = format!("local_selected={}", self.info.navigation.machine.is_none());
+                report = format!("canonical_device_order={}", section_labels(&self.info) == self.info.machines_col.machines.iter().map(|m| m.label.clone()).collect::<Vec<_>>());
             }
             6 => {
                 self.cursor_px = (30.0, self.sidebar_content_top() + 100.0);
@@ -903,50 +687,24 @@ impl App {
                 report.push_str(&format!(" room_navigation_count={} remote_room_count={}", self.room_navigation_count(), self.remote_room_navigation().len()));
             }
             8 => {
-                let head = self.info.navigation.hits.iter().find_map(|(a, r)| matches!(a, Action::Picker).then_some(*r));
-                if let Some(r) = head { click(self, r); }
-                report = format!("picker_for_drag={}", self.info.navigation.picker);
+                report = format!("remote_numbers_available={}", !self.info.navigation.room_numbers.is_empty());
             }
             9 => {
-                // 피커 항목을 잡아 바닥으로 끌어 놓는다 — 누르기·이동·놓기를 따로 보내야
-                // 문턱 판정이 실제 경로를 탄다.
-                let item = self.info.navigation.picker_hits.iter().find_map(|(s, r)| (s.as_deref() == Some("맥북")).then_some(*r));
-                if let Some(r) = item {
-                    let scale = self.effective_scale();
-                    self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
-                    self.window_event(event_loop, window, WindowEvent::MouseInput {
-                        device_id: winit::event::DeviceId::dummy(), state: ElementState::Pressed, button: MouseButton::Left,
-                    });
-                    let full = self.info.navigation.full_view.unwrap_or((0.0, 200.0, 200.0, 400.0));
-                    let to = (30.0, full.1 + full.3 - 20.0);
-                    self.window_event(event_loop, window, WindowEvent::CursorMoved {
-                        device_id: winit::event::DeviceId::dummy(),
-                        position: winit::dpi::PhysicalPosition::new((to.0 * scale) as f64, (to.1 * scale) as f64),
-                    });
-                    let nav = &self.info.navigation;
-                    report = format!("drag_active={} picker_closed={}", nav.drag.as_ref().is_some_and(|d| d.active), !nav.picker);
-                }
+                report = format!("local_add_available={}", self.info.navigation.hits.iter().any(|(a, _)| matches!(a, Action::NewLocalRoom)));
             }
             10 => {
-                // 끌던 것을 놓는다 — 직전 단계의 캡처가 끌기 중 화면(칩·착지 띠)을 담는다.
-                self.window_event(event_loop, window, WindowEvent::MouseInput {
-                    device_id: winit::event::DeviceId::dummy(), state: ElementState::Released, button: MouseButton::Left,
-                });
-                let nav = &self.info.navigation;
-                report = format!("pinned={} main_local={} drag_cleared={}", nav.pinned.len(), nav.machine.is_none(), nav.drag.is_none());
+                report = format!("device_count={}", section_labels(&self.info).len());
             }
             11 => {
                 let win_h = self.window.as_ref().map_or(0.0, |w| w.inner_size().height as f32 / self.effective_scale());
-                let nav = &self.info.navigation;
-                report = format!("pinned_view={} shared_viewport={} pinned_hits={}",
-                    nav.pinned.first().is_some_and(|p| p.view.is_some()),
+                report = format!("shared_viewport={} remote_hits={}",
                     self.sidebar_avail_h(win_h) == self.sidebar_full_avail_h(win_h),
-                    nav.hits.iter().any(|(a, _)| matches!(a, Action::Open { label, .. } if label == "맥북")));
+                    self.info.navigation.hits.iter().any(|(a, _)| matches!(a, Action::Open { label, .. } if label == "맥북")));
             }
             12 => {
-                // 아래 절의 방 카드 머리를 우클릭 — 본기기 방 메뉴와 같은 메뉴가 떠야 한다.
+                // 기기의 방 카드도 본기기 방과 같은 우클릭 메뉴를 제공해야 한다.
                 let head = self.info.navigation.hits.iter()
-                    .find_map(|(a, r)| matches!(a, Action::Open { label, .. } if label == "맥북").then_some(*r));
+                    .find_map(|(a, r)| matches!(a, Action::Open { label, focus: None, .. } if label == "맥북").then_some(*r));
                 if let Some(r) = head {
                     self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
                     self.sidebar_navigation_right_click(self.cursor_px);
@@ -963,7 +721,7 @@ impl App {
             14 => {
                 // 다시 우클릭 — 항목 사각은 다음 프레임의 그리기가 채우므로 누르기는 다음 단계.
                 let head = self.info.navigation.hits.iter()
-                    .find_map(|(a, r)| matches!(a, Action::Open { label, .. } if label == "맥북").then_some(*r));
+                    .find_map(|(a, r)| matches!(a, Action::Open { label, focus: None, .. } if label == "맥북").then_some(*r));
                 if let Some(r) = head {
                     self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
                     self.sidebar_navigation_right_click(self.cursor_px);
@@ -975,7 +733,8 @@ impl App {
             }
             15 => {
                 // 둘째 항목(이름 바꾸기) — 편집칸(캐럿)이 카드 머리에 선다.
-                let item = self.info.navigation.room_menu_rects.get(1).map(|(_, r)| *r);
+                let item = self.info.navigation.room_menu_rects.iter()
+                    .find(|(action, _)| *action == RoomMenuAction::Rename).map(|(_, rect)| *rect);
                 if let Some(r) = item { self.sidebar_navigation_menu_click((r.0 + r.2 / 2.0, r.1 + r.3 / 2.0)); }
                 report = format!("renaming={}", self.room_rename.remote.is_some());
             }
@@ -999,6 +758,16 @@ impl App {
                 if let Some(r) = first { self.sidebar_navigation_menu_click((r.0 + r.2 / 2.0, r.1 + r.3 / 2.0)); }
                 report = format!("cell_menu_items={items} menu_closed={}", self.info.navigation.room_menu.is_none());
             }
+            19 => {
+                let terminals = self.pty.len();
+                let viewport = self.window.as_ref().map(|w| (w.inner_size().width as f32 / self.effective_scale(), w.inner_size().height as f32 / self.effective_scale()));
+                let visible = self.room_list_add_rect.zip(viewport).is_some_and(|(r, (w, h))|
+                    r.0 >= 0.0 && r.1 >= 0.0 && r.0 + r.2 <= w && r.1 + r.3 <= h);
+                if let Some(rect) = self.room_list_add_rect { click(self, rect); }
+                report = format!("device_settings={} no_new_terminal={} add_field_focused={} add_button_visible={visible}",
+                    self.settings_room_active() && self.settings_scene.category() == SettingsCat::Machines,
+                    self.pty.len() == terminals, self.machine_edit.is_some());
+            }
             _ => {}
         }
         self.chrome_dirty = true;
@@ -1020,64 +789,11 @@ impl App {
 
     pub(crate) fn sidebar_content_top(&self) -> f32 { TITLE_HEIGHT + HEADER_H + 10.0 }
 
-    fn open_navigation_picker(&mut self) {
-        self.info.navigation.picker = true;
-        self.info.navigation.picker_index = self.info.navigation.machine.as_ref()
-            .and_then(|name| self.info.machines_col.machines.iter().position(|m| &m.label == name))
-            .map_or(0, |index| index + 1);
-    }
-
-    fn select_navigation_machine(&mut self, label: Option<String>) {
-        let nav = &mut self.info.navigation;
-        if let Some(label) = &label { nav.dismissed.remove(label); }
-        nav.machine = label;
-        nav.scroll = 0.0;
-    }
-
-    /// 기기를 아래 절로 붙인다. 위 목록에 서 있던 기기면 위는 이 기기로 돌아간다 —
-    /// 「밑으로 끌어 내린」 것이지 복사한 것이 아니다.
-    fn pin_navigation_machine(&mut self, label: String) {
-        let nav = &mut self.info.navigation;
-        if nav.machine.as_deref() == Some(label.as_str()) {
-            nav.machine = None;
-            nav.scroll = 0.0;
-        }
-        nav.dismissed.remove(&label);
-        if !nav.pinned.iter().any(|p| p.label == label) {
-            nav.pinned.push(Pinned { label, content_h: 0.0, view: None });
-        }
-        // 위 목록이 짧아졌으니 굴림도 새 한계 안으로.
-        if let Some(win_h) = self.window.as_ref().map(|w| w.inner_size().height as f32 / self.effective_scale()) {
-            self.sidebar_scroll_px = self.sidebar_scroll_px.min(self.sidebar_max_scroll(win_h));
-        }
-    }
-
     pub(crate) fn sidebar_navigation_click(&mut self, cursor: (f32, f32)) -> bool {
         if self.tabs_on_top || self.tab_strip_w() <= 0.0 { return false; }
-        if self.info.navigation.picker {
-            let selected = self.info.navigation.picker_hits.iter().find(|(_, r)| hit(cursor, *r)).map(|(s, _)| s.clone());
-            match selected {
-                // 다른 기기는 놓을 때 정한다 — 그대로 놓으면 고르기, 끌면 아래에 붙이기.
-                Some(Some(label)) => {
-                    self.info.navigation.drag = Some(NavDrag { label, start: cursor, from_picker: true, active: false });
-                }
-                Some(None) => {
-                    self.info.navigation.picker = false;
-                    self.select_navigation_machine(None);
-                }
-                None => self.info.navigation.picker = false,
-            }
-            self.chrome_dirty = true;
-            return true;
-        }
         let action = self.info.navigation.hits.iter().find(|(_, r)| hit(cursor, *r)).map(|(a, _)| a.clone());
         let Some(action) = action else { return false; };
         match action {
-            Action::Picker => match self.info.navigation.machine.clone() {
-                // 머리줄도 잡아 내릴 수 있다. 피커는 놓을 때 연다.
-                Some(label) => self.info.navigation.drag = Some(NavDrag { label, start: cursor, from_picker: false, active: false }),
-                None => self.open_navigation_picker(),
-            },
             Action::Menu(label) => {
                 self.info.machine_menu = Some((cursor.0, cursor.1, label));
                 self.info.machines_col.last_refresh = None;
@@ -1109,10 +825,6 @@ impl App {
                 self.info.machines_col.last_refresh = None;
             }
             Action::NewLocalRoom => self.new_window(),
-            Action::Unpin(label) => {
-                self.info.navigation.pinned.retain(|p| p.label != label);
-                self.info.navigation.dismissed.insert(label);
-            }
             Action::CloseRoom { label, window, room } => {
                 self.confirm_or_close_remote_room(&label, window, &room);
             }
@@ -1124,8 +836,7 @@ impl App {
         true
     }
 
-    /// 커서가 움직일 때 — 잡은 기기가 문턱을 넘으면 끌기가 되고 피커는 닫힌다.
-    /// 끌기 중이면 true 를 돌려 다른 hover 처리가 끼어들지 않게 한다.
+    /// 문턱을 넘은 칸 끌기는 다른 hover 처리가 가로채지 않게 한다.
     pub(crate) fn sidebar_navigation_drag_move(&mut self) -> bool {
         let cursor = self.cursor_px;
         if let Some(cell) = self.info.navigation.cell_drag.as_mut() {
@@ -1134,17 +845,10 @@ impl App {
             if cell.active { self.chrome_dirty = true; }
             return cell.active;
         }
-        let Some(drag) = self.info.navigation.drag.as_mut() else { return false; };
-        let (dx, dy) = (cursor.0 - drag.start.0, cursor.1 - drag.start.1);
-        if !drag.active && dx * dx + dy * dy > 9.0 { drag.active = true; }
-        if !drag.active { return false; }
-        self.info.navigation.picker = false;
-        self.chrome_dirty = true;
-        true
+        false
     }
 
-    /// 눌렀던 것을 놓았다. 문턱을 안 넘었으면 클릭(고르기·피커 열기), 넘었으면
-    /// 사이드바 안에 놓았을 때만 아래 절로 붙인다.
+    /// 클릭은 방을 열고, 끌기는 실제 pane 이동 경로로 전달한다.
     pub(crate) fn sidebar_navigation_release(&mut self, cursor: (f32, f32)) -> bool {
         if let Some(cell) = self.info.navigation.cell_drag.take() {
             if !cell.active {
@@ -1158,31 +862,15 @@ impl App {
             self.chrome_dirty = true;
             return true;
         }
-        let Some(drag) = self.info.navigation.drag.take() else { return false; };
-        if let Some(window) = &self.window { window.set_cursor(CursorIcon::Default); }
-        if !drag.active {
-            if drag.from_picker {
-                self.info.navigation.picker = false;
-                self.select_navigation_machine(Some(drag.label));
-            } else {
-                self.open_navigation_picker();
-            }
-        } else {
-            let width = self.tab_strip_w();
-            let landed = self.info.navigation.full_view.is_some_and(|full| drop_target(cursor, width, full));
-            if landed { self.pin_navigation_machine(drag.label); }
-        }
-        self.chrome_dirty = true;
-        true
+        false
     }
 
     pub(crate) fn sidebar_navigation_right_click(&mut self, cursor: (f32, f32)) -> bool {
-        if self.info.navigation.picker { self.info.navigation.picker = false; self.chrome_dirty = true; return true; }
         let action = self.info.navigation.hits.iter()
             .find(|(a, r)| matches!(a, Action::Open { .. }) && hit(cursor, *r))
             .or_else(|| self.info.navigation.hits.iter().find(|(_, r)| hit(cursor, *r)))
             .map(|(a, _)| a.clone());
-        // 방 카드(머리·칸·×)는 방 메뉴, 절 머리·피커는 기기 메뉴.
+        // 작은 버튼 위에서 우클릭해도 그 버튼이 속한 방의 메뉴를 연다.
         let action = match action {
             Some(Action::Open { label, window, room, focus }) => {
                 let key = room_key(&label, window, &room);
@@ -1201,37 +889,13 @@ impl App {
             other => other,
         };
         let label = match action {
-            Some(Action::Menu(label) | Action::Section(label) | Action::Unpin(label) | Action::NewRoom(label)) => Some(label),
-            Some(Action::Picker) => self.info.navigation.machine.clone(),
+            Some(Action::Menu(label) | Action::Section(label) | Action::NewRoom(label)) => Some(label),
             _ => None,
         };
         let Some(label) = label else { return false; };
         self.info.machine_menu = Some((cursor.0, cursor.1, label));
         self.chrome_dirty = true;
         true
-    }
-
-    pub(crate) fn sidebar_navigation_wheel(&mut self, delta: &MouseScrollDelta) -> bool {
-        if self.tabs_on_top || self.tab_strip_w() <= 0.0 { return false; }
-        let cursor = self.cursor_px;
-        let nav = &mut self.info.navigation;
-        let dy = match delta { MouseScrollDelta::LineDelta(_, y) => y * 42.0, MouseScrollDelta::PixelDelta(p) => p.y as f32 };
-        let handled = if nav.picker {
-            if nav.picker_view.is_some_and(|r| hit(cursor, r)) {
-                let height = nav.picker_view.unwrap().3;
-                nav.picker_scroll = (nav.picker_scroll - dy).clamp(0.0, (nav.picker_content_h - height).max(0.0));
-            }
-            true
-        } else if nav.machine.is_some() && nav.viewport.is_some_and(|r| hit(cursor, r)) {
-            let height = nav.viewport.unwrap().3;
-            nav.scroll = (nav.scroll - dy).clamp(0.0, (nav.content_h - height).max(0.0));
-            true
-        } else { false };
-        if handled {
-            self.chrome_dirty = true;
-            if let Some(window) = &self.window { window.request_redraw(); }
-        }
-        handled
     }
 
     pub(crate) fn sidebar_navigation_key(&mut self, event: &winit::event::KeyEvent) -> bool {
@@ -1243,40 +907,9 @@ impl App {
             self.chrome_dirty = true;
             return true;
         }
-        if event.state.is_pressed() && self.info.navigation.drag.is_some()
-            && matches!(event.logical_key, Key::Named(NamedKey::Escape))
-        {
-            self.info.navigation.drag = None;
-            if let Some(window) = &self.window { window.set_cursor(CursorIcon::Default); }
-            self.chrome_dirty = true;
-            return true;
-        }
-        if !self.info.navigation.picker || !event.state.is_pressed() { return false; }
-        let max = self.info.machines_col.machines.len();
-        let nav = &mut self.info.navigation;
-        match event.logical_key {
-            Key::Named(NamedKey::ArrowDown) => nav.picker_index = (nav.picker_index + 1).min(max),
-            Key::Named(NamedKey::ArrowUp) => nav.picker_index = nav.picker_index.saturating_sub(1),
-            Key::Named(NamedKey::Home) => nav.picker_index = 0,
-            Key::Named(NamedKey::End) => nav.picker_index = max,
-            Key::Named(NamedKey::Enter | NamedKey::Space) => {
-                let label = nav.picker_index.checked_sub(1)
-                    .and_then(|index| self.info.machines_col.machines.get(index)).map(|m| m.label.clone());
-                nav.picker = false;
-                self.select_navigation_machine(label);
-                self.chrome_dirty = true;
-                return true;
-            }
-            Key::Named(NamedKey::Escape | NamedKey::Tab) => nav.picker = false,
-            _ => return true,
-        }
-        let height = nav.picker_view.map_or(DEVICE_H, |r| r.3);
-        let top = nav.picker_index as f32 * DEVICE_H;
-        if top < nav.picker_scroll { nav.picker_scroll = top; }
-        if top + DEVICE_H > nav.picker_scroll + height { nav.picker_scroll = (top + DEVICE_H - height).max(0.0); }
-        self.chrome_dirty = true;
-        true
+        false
     }
+
 }
 
 #[cfg(test)]
@@ -1375,34 +1008,23 @@ mod tests {
     }
 
     #[test]
-    fn device_sections_keep_content_height_in_the_shared_scroll() {
-        let pin = |label: &str| Pinned { label: label.into(), content_h: 0.0, view: None };
-        let collapsed = std::collections::HashSet::new();
-        let m = machine();
-        let body = content_height(&m, &collapsed, &Default::default());
-        assert_eq!(section_heights(&[machine()], &[pin("test")], &collapsed, &Default::default(), 1000.0), vec![SECTION_H + body]);
-        assert_eq!(section_heights(&[machine()], &[pin("test")], &collapsed, &Default::default(), 300.0), vec![SECTION_H + body]);
-        assert_eq!(section_heights(&[machine()], &[pin("없음")], &collapsed, &Default::default(), 1000.0), vec![SECTION_H + PANE_H]);
-        assert!(section_heights(&[machine()], &[], &collapsed, &Default::default(), 1000.0).is_empty());
-    }
-
-    #[test]
-    fn device_order_is_available_before_render_and_retains_offline_headers() {
+    fn devices_follow_canonical_order_and_keep_offline_headers_without_prior_render() {
         let mut info = state::InfoState::default();
-        info.machines_col.machines = vec![machine()];
-        assert_eq!(section_labels(&info), ["test"]);
-        let height = remote_content_h(&info);
-        assert!(height > SECTION_H);
-        info.navigation.machine = Some("test".into());
-        assert_eq!(section_labels(&info), ["test"]);
-        info.navigation.pinned.push(Pinned { label: "test".into(), content_h: 0.0, view: None });
-        info.machines_col.machines[0].online = false;
-        assert_eq!(section_labels(&info), ["test"]);
+        let mut offline = machine();
+        offline.label = "offline".into();
+        offline.online = false;
+        info.machines_col.machines = vec![offline, machine()];
+        assert_eq!(section_labels(&info), ["offline", "test"]);
         assert!(rooms(&info.machines_col.machines[0]).is_empty());
-        info.navigation.pinned.clear();
-        info.navigation.dismissed.insert("test".into());
-        info.machines_col.machines[0].online = true;
-        assert!(section_labels(&info).is_empty());
+        let expected: f32 = info.machines_col.machines.iter()
+            .map(|m| SECTION_H + content_height(m, &Default::default(), &Default::default())).sum();
+        assert_eq!(remote_content_h(&info), expected);
+        info.machines_col.machines.reverse();
+        assert_eq!(section_labels(&info), ["test", "offline"]);
+        info.machines_col.machines[0].label = "renamed".into();
+        assert_eq!(section_labels(&info), ["renamed", "offline"]);
+        info.machines_col.machines.remove(1);
+        assert_eq!(section_labels(&info), ["renamed"]);
     }
 
     #[test]
@@ -1428,15 +1050,6 @@ mod tests {
         let listed = [key].into_iter().collect();
         assert_eq!(content_height(&m, &Default::default(), &listed) - full,
             room_body_h(2, true) - room_body_h(2, false));
-    }
-
-    #[test]
-    fn drop_lands_only_inside_the_sidebar_below_the_header() {
-        let full = (0.0, TITLE_HEIGHT + HEADER_H + 10.0, 220.0, 500.0);
-        assert!(drop_target((30.0, full.1 + 300.0), 220.0, full));
-        assert!(!drop_target((300.0, full.1 + 300.0), 220.0, full));
-        assert!(!drop_target((30.0, TITLE_HEIGHT + 10.0), 220.0, full));
-        assert!(!drop_target((30.0, full.1 + full.3 + 60.0), 220.0, full));
     }
 
     #[test]
@@ -1601,12 +1214,11 @@ impl App {
         let nav = &self.info.navigation;
         let by_hit = nav.hits.iter().find(|(_, r)| hit(cursor, *r)).and_then(|(a, _)| match a {
             Action::Open { label, .. } | Action::Menu(label) | Action::Section(label)
-            | Action::NewRoom(label) | Action::Unpin(label) | Action::CloseRoom { label, .. } => Some(label.clone()),
+            | Action::NewRoom(label) | Action::CloseRoom { label, .. } => Some(label.clone()),
             _ => None,
         });
         by_hit
-            .or_else(|| nav.pinned.iter().find(|p| p.view.is_some_and(|v| hit(cursor, v))).map(|p| p.label.clone()))
-            .or_else(|| nav.machine.clone().filter(|_| nav.viewport.is_some_and(|v| hit(cursor, v))))
+            .or_else(|| nav.device_views.iter().find(|(_, view)| hit(cursor, *view)).map(|(label, _)| label.clone()))
     }
 
     pub(crate) fn navigation_drop_target(&self, cursor: (f32, f32)) -> Option<(crate::drag_transfer::DragEndpoint, DropZone)> {

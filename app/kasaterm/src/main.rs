@@ -5035,6 +5035,12 @@ struct App {
     account_menu: bool,
     account_menu_rect: Option<(f32, f32, f32, f32)>,
     account_menu_body_rect: Option<(f32, f32, f32, f32)>,
+    account_menu_submenu_rect: Option<(f32, f32, f32, f32)>,
+    account_menu_submenu_body_rect: Option<(f32, f32, f32, f32)>,
+    account_menu_corridor_rect: Option<(f32, f32, f32, f32)>,
+    account_menu_submenu_scroll: f32,
+    account_menu_submenu_scroll_max: f32,
+    account_menu_submenu_hit_start: usize,
     account_menu_scroll: f32,
     account_menu_scroll_max: f32,
     account_menu_suppressed_buttons: Vec<MouseButton>,
@@ -5225,10 +5231,10 @@ struct App {
     /// 닫은 pane 스택(최근이 뒤). ⌘⇧T 가 뒤에서 꺼내 되살리고, 인포가 흐린 줄로
     /// 보여 준다 — 되돌릴 수 있다는 걸 알리지 않으면 있으나 마나다.
     closed_panes: Vec<ClosedPane>,
-    /// Sidebar "+" new-window button rect, logical px. None before first paint.
-    new_window_btn_rect: Option<(f32, f32, f32, f32)>,
+    /// One hit rectangle keeps the bottom device action and top-tab room action aligned with their paint.
+    room_list_add_rect: Option<(f32, f32, f32, f32)>,
     /// Whether the "+" shell picker popup is open. Toggled by clicking the
-    /// sidebar "+"; dismissed on item-click or an outside click.
+    /// top-tab "+"; dismissed on item-click or an outside click.
     shell_menu_open: bool,
     /// Popup item hit rects `(shell_command, rect)`, logical px. Rebuilt each
     /// paint while the menu is open; consumed by the MouseInput handler.
@@ -6005,6 +6011,12 @@ impl App {
             account_menu: std::env::var_os("KASATERM_FORCE_ACCOUNT_MENU").is_some(),
             account_menu_rect: None,
             account_menu_body_rect: None,
+            account_menu_submenu_rect: None,
+            account_menu_submenu_body_rect: None,
+            account_menu_corridor_rect: None,
+            account_menu_submenu_scroll: 0.0,
+            account_menu_submenu_scroll_max: 0.0,
+            account_menu_submenu_hit_start: 0,
             account_menu_scroll: 0.0,
             account_menu_scroll_max: 0.0,
             account_menu_suppressed_buttons: Vec::new(),
@@ -6054,7 +6066,7 @@ impl App {
             win_tab_wheel_accum: 0.0,
             win_tab_drag: None,
             closed_panes: Vec::new(),
-            new_window_btn_rect: None,
+            room_list_add_rect: None,
             shell_menu_open: false,
             shell_menu_hits: Vec::new(),
             pending_shell: None,

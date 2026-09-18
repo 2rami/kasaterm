@@ -4162,11 +4162,9 @@ impl App {
         self.chrome_dirty = true;
         let local: Vec<_> = (0..self.windows.len()).filter(|&i| self.remote_view_of_window(i).is_none()).collect();
         if let Some(&window) = local.get(number) {
-            self.info.navigation.machine = None;
             self.goto_room(window);
         } else if let Some((label, window, room)) = number.checked_sub(local.len())
             .and_then(|n| self.remote_room_navigation().get(n).cloned()) {
-            self.info.navigation.machine = None;
             if let Err(error) = self.open_remote_room(&label, window, &room, None) {
                 self.set_toast(format!("방을 열 수 없음: {error}"));
             }
@@ -6156,7 +6154,7 @@ impl App {
     /// 제각각이라 인덱스 비율과 픽셀 비율이 어긋나므로, 앞쪽 카드 높이를 실제로
     /// 더해 픽셀로 환산한다.
     pub(crate) fn sidebar_scroll_geom(&self, win_h: f32) -> Option<(f32, f32, f32, f32)> {
-        if self.tabs_on_top || self.info.navigation.machine.is_some() {
+        if self.tabs_on_top {
             return None;
         }
         let n = self.windows.len();
@@ -6239,11 +6237,6 @@ impl App {
         }
         let tab_x = SIDEBAR_TAB_INSET;
         let tab_w = (self.tab_strip_w() - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
-        if self.info.navigation.machine.is_some() {
-            let plus = self.sidebar_tray_rects(win_h)
-                .map_or((tab_x, win_h - SIDEBAR_TRAY_H, tab_w, 28.0), |(_, p, ..)| p);
-            return (Vec::new(), Vec::new(), plus, Vec::new(), Vec::new(), Vec::new());
-        }
         // 10px slot above the first tab hosts the overflow chevron-up.
         let top = self.sidebar_content_top();
         // Rows that fit above the "+" button; the dock strip eats the bottom

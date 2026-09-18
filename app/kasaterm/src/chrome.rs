@@ -2199,11 +2199,17 @@ impl App {
             return true;
         }
         if self
-            .new_window_btn_rect
+            .room_list_add_rect
             .map(|r| inside(&r))
             .unwrap_or(false)
         {
-            self.info.navigation.machine = None;
+            if !self.tabs_on_top {
+                self.shell_menu_open = false;
+                let _ = self.open_settings_room(Some(SettingsCat::Machines));
+                self.settings_apply(SettingsAction::AddMachine);
+                self.chrome_dirty = true;
+                return true;
+            }
             // 피커 항목은 Windows 설치 셸뿐 — macOS/Linux 는 목록이 비므로
             // 메뉴 대신 즉시 기본 셸 새 윈도우("Claude 학생" 항목은 폐기 —
             // split+claude 수동 부팅으로 충분, 사용자).
@@ -2305,7 +2311,7 @@ impl App {
             let right = (strip - SIDEBAR_TAB_INSET - 4.0 - b).max(left);
             return Some((
                 line_y,
-                (left, y, b, b),
+                (left, y, (right - b - gap * 2.0 - left).max(b), b),
                 (right - 4.0 - b, y, b, b),
                 (right, y, b, b),
             ));

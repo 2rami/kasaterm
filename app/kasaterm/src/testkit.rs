@@ -3409,6 +3409,15 @@ impl App {
                 } else { check(false, "panel and anchor geometry available"); }
             }
             1 | 2 => {
+                if step == 2 {
+                    if let (Some(parent), Some(child)) = (self.account_menu_rect, self.account_menu_submenu_rect) {
+                        let width = outside.0 + 8.0;
+                        if parent.0 + parent.2 + 4.0 + child.2 <= width - 8.0 {
+                            check(child.0 >= parent.0 + parent.2, "account flyout opens right when space permits");
+                        }
+                        check(child.0 >= 0.0 && child.0 + child.2 <= width, "account flyout stays inside window");
+                    } else { check(false, "account flyout geometry available"); }
+                }
                 let provider = if step == 1 { AccountProvider::Codex } else { AccountProvider::Claude };
                 let hit = self.account_menu_hits.iter().find(|(item, _)| *item == AccountMenuItem::Provider(provider)).map(|(_, rect)| *rect);
                 if let Some(rect) = hit {
@@ -3424,6 +3433,15 @@ impl App {
                     click(self, (rect.0 + 2.0, rect.1 + 2.0), MouseButton::Left);
                     check(self.account_menu, "blank popup padding does not dismiss");
                 } else { check(false, "blank popup test has geometry"); }
+                if let Some(rect) = self.account_menu_submenu_rect {
+                    let provider = self.account_menu_provider;
+                    click(self, (rect.0 + 2.0, rect.1 + 2.0), MouseButton::Left);
+                    check(self.account_menu && self.account_menu_provider == provider, "child padding masks parent actions");
+                }
+                if let Some(rect) = self.account_menu_corridor_rect {
+                    click(self, center(rect), MouseButton::Left);
+                    check(self.account_menu, "panel bridge does not dismiss or click through");
+                }
             }
             4 => {
                 let before = self.ws.lock().unwrap().active_pane.clone();

@@ -4315,12 +4315,6 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
-                if matches!(state, ElementState::Pressed) && self.info.navigation.picker
-                    && self.sidebar_navigation_click(self.cursor_px)
-                {
-                    window.request_redraw();
-                    return;
-                }
                 // 인포·사이드바의 우클릭 메뉴가 떠 있으면 **어디를 눌러도** 항목이 아닌
                 // 한 닫힌다. 전엔 그 칼럼 안의 클릭만 닫아서, pane 을 눌러도 메뉴가
                 // 남아 오른쪽 빈 곳을 눌러야 했다(2026-09-09 지적). 닫는 클릭은 삼킨다.
@@ -6991,9 +6985,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if matches!(event.state, ElementState::Pressed)
                     && matches!(event.logical_key, Key::Named(NamedKey::Escape))
-                    && (self.info.navigation.picker || self.info.machine_menu.is_some())
+                    && self.info.machine_menu.is_some()
                 {
-                    self.info.navigation.picker = false;
                     self.info.machine_menu = None;
                     self.info.machines_col.btn_rects.clear();
                     self.chrome_dirty = true;
