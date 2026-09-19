@@ -125,6 +125,10 @@ struct App {
     nacho_expression: Option<usize>,
     /// 말 거는 중이면 친 글. None 이면 평소처럼 듣기만 한다.
     typing: Option<String>,
+    /// 판이 급한 국면에서 이미 한 번 물었다. `urgent` 는 말풍선을 접지 않으려고 두는
+    /// 표시라 말을 할 때마다 꺼지는데, 그것으로 「물었는가」를 판정하면 판이 갱신될
+    /// 때마다 같은 것을 다시 묻게 된다.
+    urgent_asked: bool,
     /// 묻지 않아도 먼저 거는 말을 대 주는 곳.
     chatter: chatter::Client,
     /// 말풍선에 글자를 한 자씩 찍는 중 — (지금까지 찍은 글자 수, 마지막으로 찍은 때).
@@ -491,7 +495,7 @@ impl ApplicationHandler for App {
                     if let Some(path) = self.journal_path() {
                         let sent = self.ask.ask(path.clone(), question.clone(), pane, self.act_catalog());
                         eprintln!("ASK_APP_SERVICE:{} SENT:{}", path.display(), sent);
-                        if sent { self.begin_looking(); }
+                        if sent { self.begin_looking(true); }
                     }
                 }
             }
@@ -982,16 +986,20 @@ impl App {
     /// 이미 묻는 중이면 건너뛴다 — 사람이 친 질문이 먼저다.
     fn ask_auto(&mut self, text: &str) {
         if self.ask.busy() || self.ask_pane().is_empty() { return; }
-        self.ask_now(text);
+        self.ask_at(text, false);
         self.ask_auto = true;
     }
 
     /// 나쵸에게 묻는다. 답은 말풍선으로 온다(`poll_ask`).
     fn ask_now(&mut self, text: &str) {
+        self.ask_at(text, true);
+    }
+
+    fn ask_at(&mut self, text: &str, announce: bool) {
         let pane = self.ask_pane();
         let Some(path) = self.journal_path() else { return };
         if self.ask.ask(path, text.to_string(), pane, self.act_catalog()) {
-            self.begin_looking();
+            self.begin_looking(announce);
         }
     }
 
@@ -1047,7 +1055,7 @@ impl App {
                         if let Some(path) = self.journal_path() {
                             if self.ask.ask(path, text, pane, self.act_catalog()) {
                                 if let Some(bar) = &self.ask_bar { bar.clear_input(); }
-                                self.begin_looking();
+                                self.begin_looking(true);
                             }
                         }
                     }
@@ -1104,7 +1112,10 @@ impl App {
         // 사람 손이 필요하다는 말 위에 잡담을 얹지 않는다 — 그 한 줄이 여기 있는 이유가 그것이다.
         let reading = self.answer_shown && self.said_at.elapsed() < Self::ANSWER_RESPECT;
         let quiet = self.urgent || reading || self.journal_shown || self.ask.busy()
-            || self.typing.is_some() || self.chat.network_active();
+            || self.typing.is_some() || self.chat.network_active()
+            // 아직 찍는 중인 말이 있다 — 문장이 끝나기 전에 갈아 치우면 사람은 그 줄을
+            // 읽지도 못하고 잃는다.
+            || self.typed.is_some();
         // 자는 펫이 떠들면 자는 것이 아니다.
         if self.resting || self.mood == board::Mood::Sleep { return; }
         let Some(path) = self.journal_path() else { return };
@@ -1199,10 +1210,12 @@ impl App {
         // 판의 글(「미도리 · crm」)은 말풍선에 안 띄운다 — 거기는 나쵸가 말하는 자리다
         // (2026-09-17 지시). 사람 손이 필요해지는 순간만 나쵸에게 한 줄 부탁하고, 그런 말이
         // 새로 뜰 땐 캐릭터가 한 번 튄다 — 자리를 비운 사이의 승인 요청을 놓치지 않게.
-        if urgent && !self.urgent {
+        if urgent && !self.urgent_asked {
+            self.urgent_asked = true;
             if !self.resting && self.preferences.animations { self.start_bounce(); }
             self.ask_auto("사람 손이 필요한 학생 하나만, 누가 무엇을 기다리는지 한 줄로 알려줘");
         }
+        if !urgent { self.urgent_asked = false; }
         self.urgent = urgent;
         if mood != self.mood {
             self.apply_mood(mood);
@@ -1278,9 +1291,14 @@ impl App {
     }
 
     /// 질문을 보냈다 — 판을 보는 동작으로.
-    fn begin_looking(&mut self) {
+    /// `announce` 는 묻고 있다는 것을 말풍선으로 알릴지. 사람이 친 질문에는 알리지만
+    /// 펫이 스스로 묻는 것은 조용히 한다 — 읽던 말이 「보는 중」으로 덮이면 사람은
+    /// 자기가 읽던 문장이 어디로 갔는지 알 수 없다.
+    fn begin_looking(&mut self, announce: bool) {
         self.ask_auto = false;
-        self.speak("나쵸가 보는 중…".into(), false);
+        if announce {
+            self.speak("나쵸가 보는 중…".into(), false);
+        }
         self.clear_nacho_expression();
         self.set_nacho(Nacho::Looking, false);
     }
@@ -2112,6 +2130,7 @@ fn main() {
         chat_prefill: None,
         ask: ask::Client::default(),
         answer_shown: false,
+        urgent_asked: false,
         chatter: chatter::Client::default(),
         typed: None,
         #[cfg(target_os = "macos")]
