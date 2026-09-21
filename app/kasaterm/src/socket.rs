@@ -6287,6 +6287,67 @@ pub fn usage_windows(v: &serde_json::Value) -> Vec<UsagePressure> {
     out
 }
 
+/// Unknown model or surface constraints must not spend another model's account allowance.
+pub fn usage_windows_for_models(v: &serde_json::Value, models: &[String]) -> Vec<UsagePressure> {
+    let limits = v.get("limits").and_then(|value| value.as_array());
+    let selected: Vec<serde_json::Value> = limits.into_iter().flatten()
+        .filter(|window| usage_window_applies_to_models(window, models))
+        .cloned().collect();
+    let filtered = serde_json::json!({ "limits": selected, "five_hour": v.get("five_hour") });
+    usage_windows(&filtered)
+}
+
+pub fn usage_pressure_for_models(v: &serde_json::Value, models: &[String]) -> Option<UsagePressure> {
+    usage_windows_for_models(v, models).into_iter().max_by(|a, b| a.pct.total_cmp(&b.pct))
+}
+
+fn usage_window_applies_to_models(window: &serde_json::Value, models: &[String]) -> bool {
+    let kind = window.get("kind").and_then(|value| value.as_str());
+    let scope = window.get("scope").filter(|scope| !scope.is_null());
+    let Some(scope) = scope else {
+        return matches!(kind, Some("session" | "weekly_all"));
+    };
+    let Some(scope) = scope.as_object() else { return false };
+    if scope.iter().any(|(key, value)| key != "model" && !value.is_null()) {
+        return false;
+    }
+    let model = scope.get("model").filter(|model| !model.is_null());
+    let Some(model) = model else {
+        return matches!(kind, Some("session" | "weekly_all"));
+    };
+    if kind != Some("weekly_scoped") {
+        return false;
+    }
+    if let Some(id) = model.get("id").and_then(|value| value.as_str()).filter(|id| !id.trim().is_empty()) {
+        return models.iter().any(|active| normalized_model_id(active) == normalized_model_id(id));
+    }
+    let Some(display) = model.get("display_name").and_then(|value| value.as_str()) else { return false };
+    let Some(expected) = model_display_parts(display) else { return false };
+    models.iter().any(|active| model_display_parts(active).is_some_and(|actual| {
+        actual == expected || (expected.len() == 1 && actual.first() == expected.first())
+    }))
+}
+
+fn normalized_model_id(model: &str) -> String {
+    let lower = model.trim().to_ascii_lowercase();
+    lower.strip_suffix("[1m]").unwrap_or(&lower).trim().to_string()
+}
+
+fn model_display_parts(model: &str) -> Option<Vec<String>> {
+    let normalized = normalized_model_id(model);
+    let normalized = normalized.strip_suffix(" 1m").unwrap_or(&normalized);
+    let model = normalized.strip_prefix("claude-").unwrap_or(normalized);
+    let parts: Vec<String> = model.split(|ch: char| ch == '-' || ch == '.' || ch.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .filter(|part| !(part.len() == 8 && part.bytes().all(|byte| byte.is_ascii_digit())))
+        .map(str::to_string).collect();
+    if parts.is_empty() || !parts[0].bytes().all(|byte| byte.is_ascii_alphabetic())
+        || parts[1..].iter().any(|part| !part.bytes().all(|byte| byte.is_ascii_digit())) {
+        return None;
+    }
+    Some(parts)
+}
+
 pub fn usage_pressure(v: &serde_json::Value) -> Option<UsagePressure> {
     let top = v.get("limits").and_then(|l| l.as_array()).and_then(|arr| {
         arr.iter()
@@ -7888,6 +7949,49 @@ mod account_autoswitch_tests {
                 label: String::new(),
             })
             .collect()
+    }
+
+    #[test]
+    fn scoped_pressure_never_exhausts_unrelated_models() {
+        let value = serde_json::json!({"limits":[
+            {"kind":"session","group":"session","percent":12},
+            {"kind":"weekly_all","group":"weekly","percent":35,"scope":null},
+            {"kind":"weekly_scoped","group":"weekly","percent":100,
+             "scope":{"model":{"id":null,"display_name":"Fable"},"surface":null}}
+        ]});
+        assert_eq!(usage_pressure(&value).unwrap().pct, 100.0);
+        for models in [vec![], vec!["claude-opus-5".into()], vec!["unknown".into()]] {
+            assert_eq!(usage_pressure_for_models(&value, &models).unwrap().pct, 35.0);
+        }
+        for model in ["claude-fable-5", "Fable 5.1 1M", "claude-fable-5-1[1m]", "fable"] {
+            let pressure = usage_pressure_for_models(&value, &[model.into()]).unwrap();
+            assert_eq!(pressure.pct, 100.0, "{model}");
+            assert_eq!(pressure.label, "7d Fable");
+        }
+        assert_eq!(usage_pressure_for_models(&value, &["claude-opus-5".into(), "claude-fable-5".into()]).unwrap().pct, 100.0);
+    }
+
+    #[test]
+    fn scoped_pressure_requires_explicit_model_and_scope_evidence() {
+        for scope in [serde_json::Value::Null, serde_json::json!({}), serde_json::json!({"model":{}}),
+            serde_json::json!({"model":{"display_name":"Fable"},"surface":"web"})] {
+            let value = serde_json::json!({"limits":[{"kind":"weekly_scoped","percent":99,"scope":scope}]});
+            assert_eq!(usage_pressure_for_models(&value, &["claude-fable-5".into()]), None);
+        }
+        let value = serde_json::json!({"limits":[{"kind":"weekly_scoped","percent":98,
+            "scope":{"model":{"id":"claude-fable-5","display_name":"Opus"}}}]});
+        assert_eq!(usage_pressure_for_models(&value, &["claude-opus-5".into()]), None);
+        assert_eq!(usage_pressure_for_models(&value, &["claude-fable-5-1".into()]), None);
+        assert_eq!(usage_pressure_for_models(&value, &["claude-fable-5[1m]".into()]).unwrap().pct, 98.0);
+        let unknown = serde_json::json!({"limits":[{"kind":"mystery","percent":100}]});
+        assert_eq!(usage_pressure_for_models(&unknown, &[]), None);
+        let constrained = serde_json::json!({"limits":[{"kind":"weekly_all","percent":100,"scope":{"surface":"web"}}]});
+        assert_eq!(usage_pressure_for_models(&constrained, &[]), None);
+        let version = serde_json::json!({"limits":[{"kind":"weekly_scoped","percent":99,"scope":{"model":{"display_name":"Fable 5.1"}}}]});
+        assert_eq!(usage_pressure_for_models(&version, &["claude-fable-5".into()]), None);
+        assert_eq!(usage_pressure_for_models(&version, &["claude-fable-5-1[1m]".into()]).unwrap().pct, 99.0);
+        let legacy = serde_json::json!({"five_hour":{"utilization":91}});
+        assert_eq!(usage_pressure_for_models(&legacy, &[]).unwrap().pct, 91.0);
     }
 
     #[test]

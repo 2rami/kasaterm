@@ -1717,18 +1717,21 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::ClaudeAccountAutoswitch {
+                from,
                 to,
-                cooldown_until,
                 pct,
+                label,
             } => {
+                if !socket::read_account_autoswitch()
+                    || *from != self.set_claude_account
+                    || *from != socket::read_claude_account()
+                    || *pct < socket::read_account_autoswitch_pct()
+                {
+                    return;
+                }
                 // 사람에게 물어보려고 띄워 둔 확인은 버린다 — 그 숫자는 이미 낡았고,
                 // 자동 전환은 사람이 없는 사이에도 돌아야 해서 확인을 안 탄다.
                 self.account_switch_confirm = None;
-                // 떠나는 계정을 먼저 잠근다 — 저장 순서가 반대면 그 사이 폴러가
-                // 한 번 더 판정해 방금 소진한 계정으로 되돌아갈 수 있다.
-                if let Some(until) = *cooldown_until {
-                    socket::write_account_cooldown(&self.set_claude_account, until);
-                }
                 // 어느 pane 이 어느 계정으로 도는지는 실측하고, 쉬는 pane 은 그
                 // 자리에서 대화 이어 재시작한다 — 판정·재시작·shim 재굽기 전부
                 // `apply_claude_account_switch`(session.rs) 하나가 한다. 수동 전환과
@@ -1743,7 +1746,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.account_flash = Some(std::time::Instant::now());
                     }
                     self.set_toast(format!(
-                    "{from_label} 사용량 {pct:.0}% — {}",
+                    "{from_label} · {label} 사용량 {pct:.0}% — {}",
                     crate::session::account_switch_toast(
                         &to_label, same, restarted, deferred, focused, live
                     )
@@ -1753,39 +1756,17 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::ClaudeAccountExhausted { pct, resets_at } => {
-                // 갈 곳이 없다. 토스트만 띄우면 창을 안 보고 있을 때 놓치므로 데스크톱
-                // 알림까지 쏜다 — 이건 「일하다 막혔다」라서 지금 알아야 하는 종류다.
-                //
-                // 폴러가 60초마다 보낸다. `dedup` 키를 **풀리는 시각**으로 잡아 같은
-                // 한도 창에서는 한 번만 울리게 한다(시각을 모르면 pct 로라도 묶는다 —
-                // 키가 매번 달라지면 매분 알림이 뜬다).
-                let when = resets_at
-                    .map(|t| {
-                        let left = t.saturating_sub(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map_or(0, |d| d.as_secs()),
-                        );
-                        if left < 60 {
-                            "곧 풀려요".to_string()
-                        } else {
-                            format!("{} 뒤 풀려요", crate::remaining_duration_label(left))
-                        }
-                    })
-                    .unwrap_or_else(|| "언제 풀리는지는 모르겠어요".to_string());
-                let body = format!("사용량 {pct:.0}% — 옮겨갈 계정이 없어요. {when}");
+            UserEvent::ClaudeQuotaWarning(alert) => {
+                if alert.account != self.set_claude_account { return; }
+                let account = self.claude_account_display(&alert.account);
+                let when = alert.resets_at.map(|reset| {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |duration| duration.as_secs());
+                    format!(" · {} 뒤 초기화", crate::remaining_duration_label(reset.saturating_sub(now)))
+                }).unwrap_or_default();
+                let body = format!("{account} · {} 사용량 {}%{when}", alert.label, alert.percent);
                 self.set_toast(body.clone());
-                crate::chrome::notify_desktop(
-                    "계정 한도",
-                    &body,
-                    None,
-                    Some(&format!(
-                        "acct-exhausted:{}",
-                        resets_at.map_or_else(|| format!("pct{pct:.0}"), |t| t.to_string())
-                    )),
-                    None,
-                );
+                crate::chrome::notify_desktop("Claude 사용량", &body, None, None, None);
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;
@@ -2272,7 +2253,15 @@ impl ApplicationHandler<UserEvent> for App {
             let usage_proxy = self.proxy.clone();
             let usage_cache = self.claude_usage.clone();
             let usage_all = self.claude_usage_all.clone();
+            let usage_backend = self.shared_backend.clone();
             std::thread::spawn(move || {
+                // 90% 를 넘은 한도 창을 사람에게 한 번씩만 알린다. 폴러는 60초마다 도니
+                // 이 기억이 없으면 같은 말을 매분 한다.
+                let mut quota_alerts = crate::quota_alerts::AlertTracker::default();
+                // 자동 전환 판정이 쓰는 값 — 신선한 조회만 담고, 지금 도는 모델의 한도만
+                // 골라 본다. 아무도 안 쓰는 모델의 주간 한도로 계정을 옮기면 멀쩡한 자리를
+                // 버리는 셈이다.
+                let mut fresh_usage = crate::quota_alerts::FreshUsageCache::default();
                 // 방금 전환했으면 잠시 **자동 전환 판정만** 쉰다(표시는 계속 갱신).
                 let mut last_switch: Option<std::time::Instant> = None;
                 let mut seen_account = socket::read_claude_account();
@@ -2393,6 +2382,20 @@ impl ApplicationHandler<UserEvent> for App {
                         continue;
                     }
                     record_claude_usage_attempt(&active_dir, fetched.is_some());
+                    let polled_at = std::time::Instant::now();
+                    fresh_usage.record(&active_dir, &active_id, fetched.as_ref(), polled_at);
+                    if let Some((u, stale, _)) = fetched.as_ref() {
+                        // 갈 곳이 있든 없든 알린다. 전에는 「옮겨갈 계정이 없을 때」만
+                        // 울려서, 전환이 되는 동안에는 한도에 닿는 줄도 몰랐다.
+                        let mut gone = false;
+                        for alert in quota_alerts.observe(&active_id, u, !*stale) {
+                            if usage_proxy.send_event(UserEvent::ClaudeQuotaWarning(alert)).is_err() {
+                                gone = true;
+                                break;
+                            }
+                        }
+                        if gone { break; }
+                    }
                     let usage = fetched.as_ref().map(|(u, _, _)| u);
                     let next = fetched.as_ref().and_then(|(u, stale, dir)| {
                         socket::usage_pressure(u).map(|p| crate::UsageBadge {
@@ -2635,10 +2638,17 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                         }
                     }
-                    if let (Some(u), true, true, true) =
+                    if let (Some(_), true, true, true) =
                         (usage, socket::read_account_autoswitch(), rested, fresh)
                     {
-                        if let Some(p) = socket::usage_pressure(u) {
+                        // 이 기계에서 **지금 그 계정으로 도는** claude 들의 모델. 못 읽으면
+                        // 빈 목록이고, 그러면 모델 한정 한도는 전부 빠진다 — 모르는 채로
+                        // 옮기느니 계정 전체 한도만 보고 판단하는 쪽이 낫다.
+                        let models = crate::quota_alerts::active_models(
+                            usage_backend.lock().ok().and_then(|held| held.clone()).as_deref(),
+                            &active_dir,
+                        );
+                        if let Some(p) = fresh_usage.pressure(&active_dir, &active_id, &models, polled_at) {
                             if p.pct >= socket::read_account_autoswitch_pct() {
                                 let now = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -2684,33 +2694,19 @@ impl ApplicationHandler<UserEvent> for App {
                                     Some(to) => {
                                         last_switch = Some(std::time::Instant::now());
                                         let ev = UserEvent::ClaudeAccountAutoswitch {
+                                            from: active_id.clone(),
                                             to,
-                                            cooldown_until: p.resets_at,
                                             pct: p.pct,
+                                            label: p.label.clone(),
                                         };
                                         if usage_proxy.send_event(ev).is_err() {
                                             break;
                                         }
                                     }
-                                    None => {
-                                        // 갈 곳이 없다 — 남은 계정이 전부 쿨다운이거나
-                                        // 등록된 게 하나뿐이다. 전에는 여기서 **조용히**
-                                        // 아무 일도 안 일어나, 리밋에 걸린 줄 모르고 손으로
-                                        // 계정마다 로그인하는 일이 벌어졌다(사용자 2026-08-13:
-                                        // "방금도 리밋걸린거 하나씩 로그인함").
-                                        //
-                                        // 폴러는 60초마다 도는 백그라운드 스레드라 알림을
-                                        // 직접 쏘면 매분 뜬다. GUI 로 넘겨 dedup 을 태운다.
-                                        if usage_proxy
-                                            .send_event(UserEvent::ClaudeAccountExhausted {
-                                                pct: p.pct,
-                                                resets_at: p.resets_at,
-                                            })
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
+                                    // 갈 곳이 없어도 여기서 따로 알리지 않는다 — 90% 경고가
+                                    // 위에서 이미 나갔고, 그쪽은 전환이 되는 경우까지 덮는다.
+                                    // 둘 다 울리면 같은 사실로 알림이 두 번 뜬다.
+                                    None => {}
                                 }
                             }
                         }

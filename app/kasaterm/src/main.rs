@@ -38,6 +38,7 @@ mod native_settings;
 mod native_strings;
 mod notify_banner;
 mod onboarding;
+mod quota_alerts;
 mod render;
 mod rich_document;
 mod vault;
@@ -4065,20 +4066,13 @@ enum UserEvent {
     /// 사용량 폴러가 "지금 계정이 임계를 넘었고, 갈 만한 다른 계정이 있다"고
     /// 판정했다. 실제 전환은 GUI 스레드 몫이다 — `settings_save` 가 shim 을 다시
     /// 깔아야 이미 열려 있는 pane 도 다음 claude 부터 새 계정으로 뜬다.
-    /// 페이로드 = (옮겨갈 id, 떠나는 창이 풀리는 시각 epoch, 그때 사용률).
     ClaudeAccountAutoswitch {
+        from: String,
         to: String,
-        cooldown_until: Option<u64>,
         pct: f32,
+        label: String,
     },
-    /// 한도에 닿았는데 **옮겨갈 계정이 없다**(남은 슬롯이 전부 쿨다운이거나 하나뿐).
-    /// 전에는 이 경우 조용히 아무 일도 안 일어나, 리밋에 걸린 줄 모른 채 손으로
-    /// 계정마다 로그인하는 일이 벌어졌다. 폴러가 60초마다 보내므로 받는 쪽에서
-    /// dedup 해야 한다(`notify_desktop` 의 dedup 키).
-    ClaudeAccountExhausted {
-        pct: f32,
-        resets_at: Option<u64>,
-    },
+    ClaudeQuotaWarning(quota_alerts::QuotaAlert),
     /// macOS `.md` 더블클릭(odoc Apple Event) 또는 argv → 새 워크스페이스에
     /// 마크다운 풀 뷰어. `SocketOpenPreview`(현재 창 split)와 달리 별도 탭의
     /// 단독 pane 으로 띄워 기존 작업 워크스페이스를 안 건드린다. 페이로드 = 경로.
@@ -5552,6 +5546,11 @@ struct App {
     /// bind hook 이 안 떠서 board discovery 의 recent-jsonl 추측이 남의 활성 세션에
     /// 오귀속됐다(사용자: 왼쪽 pane 둘 다 프라나).
     socket_backend: Option<std::sync::Arc<socket::PtyBackend>>,
+    /// 사용량 폴러에게 빌려주는 같은 핸들. 폴러 스레드는 소켓 backend 가 생기기 전에
+    /// 뜰 수 있어 `socket_backend` 를 그때 클론해 갈 수 없다 — 이 자리를 통해 나중에
+    /// 받는다. 폴러는 「지금 어느 모델이 도는가」를 알아야 안 쓰는 모델의 한도 때문에
+    /// 계정을 옮기는 일을 피한다.
+    shared_backend: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<socket::PtyBackend>>>>,
     /// claude sessionId → parentSessionId(background kind 세션만). `claude agents
     /// --json --all` 폴러(handler.rs resumed)가 3초마다 갱신. 타이틀바 배지·학생 유지
     /// (부모 캐릭터 상속)가 읽는다. 백그라운드 세션이 아니면 키 없음.
@@ -6146,6 +6145,7 @@ impl App {
             remote_view_push_at: None,
             pane_account_stale: HashMap::new(),
             socket_backend: None,
+            shared_backend: Default::default(),
             bg_agents: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             claude_usage: std::sync::Arc::new(std::sync::Mutex::new(None)),
             claude_usage_all: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
