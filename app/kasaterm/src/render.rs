@@ -988,8 +988,8 @@ impl App {
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Vec::new();
         // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
         // pane_id). logical px. 스캔 루프에서 감지·수집, chrome 패스에서 그린다.
-        // (px, py, pw, ph, 텍스트, pane_id, ↑ rect, ↓ rect). 화살표 자리는 셀 폭을
-        // 아는 스캔 루프에서 미리 재 둔다 — chrome 패스에서 되재면 어긋난다.
+        // (px, py, pw, ph, 텍스트, pane_id, ↑ rect, ↓ rect, ↡ rect). 화살표 자리는 셀
+        // 폭을 아는 스캔 루프에서 미리 재 둔다 — chrome 패스에서 되재면 어긋난다.
         type StickySlot = (
             f32,
             f32,
@@ -999,13 +999,15 @@ impl App {
             String,
             Option<(f32, f32, f32, f32)>,
             Option<(f32, f32, f32, f32)>,
+            Option<(f32, f32, f32, f32)>,
         );
         let mut sticky_pill_slots: Vec<StickySlot> = Vec::new();
-        // 대화 턴 헤더 — (pane_id, 바 rect, ↑ rect, ↓ rect, 헤더 내용). logical px.
+        // 대화 턴 헤더 — (pane_id, 바 rect, ↑ rect, ↓ rect, ↡ rect, 헤더 내용). logical px.
         // 화살표 rect 는 갈 곳이 있을 때만 담긴다(흐린 화살표는 눌러도 무반응).
         type TurnSlot = (
             String,
             (f32, f32, f32, f32),
+            Option<(f32, f32, f32, f32)>,
             Option<(f32, f32, f32, f32)>,
             Option<(f32, f32, f32, f32)>,
             crate::turnjump::TurnHeader,
@@ -2681,7 +2683,7 @@ impl App {
             // 화살표가 통째로 사라진다 — 화면은 멀쩡한데 안 눌리는, 스크린샷이
             // 절대 못 잡는 부류다(실제로 그렇게 짰다가 여기서 잡았다).
             crate::turnjump::TURN_HITS.with(|s| s.borrow_mut().clear());
-            for (px, py, pw, ph, text, pane_id, a_up, a_down) in &sticky_pill_slots {
+            for (px, py, pw, ph, text, pane_id, a_up, a_down, a_bottom) in &sticky_pill_slots {
                 STICKY_PILLS.with(|s| {
                     s.borrow_mut()
                         .push((pane_id.clone(), (*px, *py, *pw, *ph), text.clone()))
@@ -2696,13 +2698,16 @@ impl App {
                     if let Some(r) = a_down {
                         v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::SeekNext));
                     }
+                    if let Some(r) = a_bottom {
+                        v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::SeekBottom));
+                    }
                 });
             }
             // 대화 턴 헤더의 클릭 영역. 그림은 이미 셀로 그려졌고 여기선 자리만
             // 넘긴다. **바를 먼저, 화살표를 나중에** 담는 순서가 곧 우선순위다 —
             // 조회가 역순이라 겹치는 자리에서 화살표가 이긴다(화면에서 위에 있는
             // 것이 클릭도 가져간다).
-            for (pane_id, bar, up, down, h) in &turn_header_slots {
+            for (pane_id, bar, up, down, bottom, h) in &turn_header_slots {
                 crate::turnjump::TURN_HITS.with(|s| {
                     let mut v = s.borrow_mut();
                     v.push((
@@ -2715,6 +2720,11 @@ impl App {
                     }
                     if let (Some(r), Some(a)) = (down, h.next_abs) {
                         v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::Next(a)));
+                    }
+                    // 맨 아래로는 **갈 곳 조건이 없다** — 헤더가 떠 있다는 것이 이미
+                    // 스크롤이 올라가 있다는 뜻이라, 앞뒤 화살표처럼 흐려질 일이 없다.
+                    if let Some(r) = bottom {
+                        v.push((pane_id.clone(), *r, crate::turnjump::TurnHit::Bottom));
                     }
                 });
             }

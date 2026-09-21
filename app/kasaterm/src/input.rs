@@ -3101,12 +3101,31 @@ impl App {
     /// 이미 끝에 있으면 아무 일도 안 한다(공짜 질의라 매번 물어도 된다).
     fn follow_live_tail_now(&mut self) {
         let Some(id) = self.target_surface() else { return };
-        self.mirror_view_scroll.remove(&id);
-        self.turn.clear_mirror_target(&id);
-        let Some(sess) = self.pty_for_pane(&id) else { return };
-        if sess.view_state().0 > 0 {
-            sess.scroll_to_bottom();
+        self.follow_live_tail_at(&id);
+    }
+
+    /// 그 pane 의 **터미널 스크롤백**을 살아 있는 끝으로 되돌렸나.
+    ///
+    /// `false` 는 「되돌릴 스크롤백이 없다」는 뜻이고, 그것이 곧 **대체화면 claude**
+    /// 다 — 그쪽은 스크롤을 자기가 쥐고 있어 파서 offset 이 늘 0 이라, 맨 아래로
+    /// 가려면 휠을 넘겨 주는 길(`begin_sticky_bottom`)밖에 없다. 모드를 바꿔
+    /// 통일하지 않는 이유는 `TurnHit::SeekBottom` 주석에 적었다.
+    pub(crate) fn follow_live_tail_at(&mut self, pane: &str) -> bool {
+        // 거울 스크롤 기억과 턴 목적지는 **백엔드 pid** 로 적힌다(`handle_wheel`·
+        // `jump_mirror_abs`). 바깥 pane id 로만 지우면 탭이 있는 pane 에서 기억이
+        // 남아, 끝으로 왔는데도 다음 프레임이 다시 옛 자리로 끌어올린다.
+        let pid = self.ws.lock().map(|ws| ws.active_tab_pid(pane)).unwrap_or_else(|_| pane.into());
+        for key in [pane, pid.as_str()] {
+            self.mirror_view_scroll.remove(key);
+            self.turn.clear_mirror_target(key);
         }
+        let Some(sess) = self.pty_for_pane(pane) else { return false };
+        if sess.view_state().0 == 0 {
+            return false;
+        }
+        sess.scroll_to_bottom();
+        self.chrome_dirty = true;
+        true
     }
 
     pub(crate) fn forward_key(&mut self, event: &KeyEvent) {

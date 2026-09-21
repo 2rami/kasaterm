@@ -572,6 +572,7 @@ impl App {
     }
 }
 
+/// 띠 한 줄: 자리(x·y·w·h) · 글 · pane id · ↑ · ↓ · ↡(맨 아래로) 의 클릭 rect.
 pub(crate) type StickySlot = (
     f32,
     f32,
@@ -581,10 +582,13 @@ pub(crate) type StickySlot = (
     String,
     Option<(f32, f32, f32, f32)>,
     Option<(f32, f32, f32, f32)>,
+    Option<(f32, f32, f32, f32)>,
 );
+/// 헤더 한 줄: pane id · 바 전체 · ↑ · ↓ · ↡ · 그린 내용.
 pub(crate) type TurnSlot = (
     String,
     (f32, f32, f32, f32),
+    Option<(f32, f32, f32, f32)>,
     Option<(f32, f32, f32, f32)>,
     Option<(f32, f32, f32, f32)>,
     crate::turnjump::TurnHeader,
@@ -1309,7 +1313,7 @@ impl App {
                 // 한 칸은 손가락으로 누르기 좁다 — 좌우 반 칸씩 넓혀 잡는다.
                 (px + c as f32 * scw - scw * 0.5, py, scw * 2.0, sch)
             };
-            let (a_up, a_down) = crate::turnjump::sticky_arrow_cols(ncols);
+            let arrows = crate::turnjump::sticky_arrow_cols(ncols);
             sticky_pill_slots.push((
                 px,
                 py,
@@ -1317,8 +1321,9 @@ impl App {
                 sch,
                 sticky.text.clone(),
                 id.clone(),
-                a_up.map(arrow_rect),
-                a_down.map(arrow_rect),
+                arrows.up.map(arrow_rect),
+                arrows.down.map(arrow_rect),
+                arrows.bottom.map(arrow_rect),
             ));
             if let Some(row) = composed.get_mut(sticky.row) {
                 // 원본 셀(등폭 그리드)을 지우지 않고 그 자리에서 선명화만
@@ -1354,7 +1359,8 @@ impl App {
                 let amount = if light { 0.10 } else { 0.18 };
                 let fill = tint_toward([base[0], base[1], base[2]], accent, amount);
                 let text = theme::text();
-                let (up_col, down_col) = crate::turnjump::sticky_arrow_cols(row.len());
+                let arrows = crate::turnjump::sticky_arrow_cols(row.len());
+                let (up_col, down_col, bottom_col) = (arrows.up, arrows.down, arrows.bottom);
                 // 그 질문 줄이 화면에 그려져 있으면 **셀을 그대로 옮긴다.**
                 // 눌러서 그 줄이 맨 위에 서면 띠와 본문이 같은 그림이라 딱
                 // 겹친다(2026-09-03 지시: 「코덱스처럼 딱붙게 클로드도」).
@@ -1368,7 +1374,11 @@ impl App {
                         *dst = s.clone();
                     }
                     // 화살표는 그 칸 배경을 그대로 두고 글자만 얹는다.
-                    for (at, ch) in [(up_col, '\u{2191}'), (down_col, '\u{2193}')] {
+                    // ↡ = 맨 아래로(라이브 바닥). 띠가 떠 있다는 것 자체가 스크롤이
+                    // 올라가 있다는 뜻이라 늘 갈 곳이 있다.
+                    for (at, ch) in
+                        [(up_col, '\u{2191}'), (down_col, '\u{2193}'), (bottom_col, '\u{21A1}')]
+                    {
                         if let Some(i) = at {
                             if let Some(c) = row.get_mut(i) {
                                 c.ch = ch;
@@ -1405,12 +1415,13 @@ impl App {
                         cell.dim = false;
                         cell.inverse = false;
                         cell.bg = fill.clone();
-                        cell.fg =
-                            if cell.ch == '\u{276f}' || Some(i) == up_col || Some(i) == down_col {
-                                kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2])
-                            } else {
-                                kasa_bridge::screen::Color::Rgb(text[0], text[1], text[2])
-                            };
+                        let is_arrow =
+                            [up_col, down_col, bottom_col].iter().any(|c| *c == Some(i));
+                        cell.fg = if cell.ch == '\u{276f}' || is_arrow {
+                            kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2])
+                        } else {
+                            kasa_bridge::screen::Color::Rgb(text[0], text[1], text[2])
+                        };
                         if Some(i) == up_col {
                             cell.ch = '\u{2191}';
                             cell.bold = true;
@@ -1418,6 +1429,11 @@ impl App {
                         }
                         if Some(i) == down_col {
                             cell.ch = '\u{2193}';
+                            cell.bold = true;
+                            continue;
+                        }
+                        if Some(i) == bottom_col {
+                            cell.ch = '\u{21A1}';
                             cell.bold = true;
                         }
                     }
@@ -1452,6 +1468,7 @@ impl App {
                     (body_left, body_top, cols_now as f32 * hcw, hch),
                     cols.up.map(rect_at),
                     cols.down.map(rect_at),
+                    cols.bottom.map(rect_at),
                     h.clone(),
                 ));
             }

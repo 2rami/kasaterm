@@ -2850,6 +2850,9 @@ pub(crate) struct StickySeek {
     /// 처음 정한 방향. 목적지가 화면에 보일 때는 그 줄을 맨 위로 올리려고 방향을
     /// 뒤집는데, 다시 안 보이게 되면 여기로 돌아온다.
     pub orig_down: bool,
+    /// 「맨 아래로」인가. 그러면 목적지가 글자가 아니라 **띠가 사라진 상태**다 —
+    /// 띠 글이 바뀌는 것(앞뒤 되짚기의 종료 조건)으로는 중간 질문에서 멈춰 버린다.
+    pub to_bottom: bool,
 }
 
 /// 그 화면 줄이 `want` 질문의 머리줄인가.
@@ -2922,6 +2925,37 @@ pub(crate) fn begin_sticky_seek(
             reached: false,
             near: false,
             orig_down: down,
+            to_bottom: false,
+        });
+    });
+}
+
+/// 「맨 아래로」 — 띠가 **걷힐 때까지** 아래로 굴린다.
+///
+/// 앞뒤 되짚기와 달리 목적지가 글자가 아니라 **상태**다: 띠는 스크롤이 올라가 있을
+/// 때만 뜨므로, 사라졌다는 것이 곧 라이브 바닥이다. 그래서 `target` 도 `want` 도
+/// 없이 돌고, 종료는 `to_bottom` 이 가르는 한 줄로 끝난다.
+///
+/// 이 길이 필요한 이유: 대체화면 claude 는 스크롤을 자기가 쥐어 파서 offset 이 늘
+/// 0 이라 `scroll_to_bottom` 이 할 일을 못 찾는다. 그렇다고 버튼이 모드를 classic
+/// 으로 바꿔 버리면 입력창 자리가 통째로 뛴다 — 그건 「맨 아래로」가 아니다.
+pub(crate) fn begin_sticky_bottom(pane_id: String, cell: (u16, u16)) {
+    let now = std::time::Instant::now();
+    STICKY_SEEK.with(|s| {
+        *s.borrow_mut() = Some(StickySeek {
+            pane_id,
+            target: String::new(),
+            down: true,
+            cell,
+            last_send: now.checked_sub(STICKY_SEEK_INTERVAL).unwrap_or(now),
+            sent: 0,
+            last_fp: None,
+            stall: 0,
+            want: None,
+            reached: false,
+            near: false,
+            orig_down: true,
+            to_bottom: true,
         });
     });
 }
@@ -2936,15 +2970,21 @@ pub(crate) fn sticky_seek_step() -> Option<(String, u16, u16, bool)> {
         let seek = b.as_mut()?;
         // 가려던 질문을 알면 **그 줄이 화면 위쪽에 들어왔나**가 정본이다(`note_sticky_view`
         // 가 적어 준다). 모를 때만 종전 규칙 — 띠 글이 바뀌었거나 띠가 사라졌으면 완료.
-        let reached = match &seek.want {
-            Some(_) => {
-                // 목적지를 알아도 **띠가 사라진 것**은 여전히 끝이다(라이브 바닥 도달).
-                seek.reached || sticky_text_for(&seek.pane_id).is_none()
+        let reached = if seek.to_bottom {
+            // 「맨 아래로」는 띠가 걷히는 것만이 끝이다 — 지나치는 질문마다 띠 글이
+            // 바뀌지만 그건 아직 바닥이 아니다.
+            sticky_text_for(&seek.pane_id).is_none()
+        } else {
+            match &seek.want {
+                Some(_) => {
+                    // 목적지를 알아도 **띠가 사라진 것**은 여전히 끝이다(라이브 바닥 도달).
+                    seek.reached || sticky_text_for(&seek.pane_id).is_none()
+                }
+                None => match sticky_text_for(&seek.pane_id) {
+                    None => true,
+                    Some(t) => t != seek.target,
+                },
             }
-            None => match sticky_text_for(&seek.pane_id) {
-                None => true,
-                Some(t) => t != seek.target,
-            },
         };
         if reached || seek.sent >= STICKY_SEEK_MAX || seek.stall >= STICKY_SEEK_STALL {
             *b = None;
@@ -8316,5 +8356,38 @@ mod pinned_input_tests {
         }
         let rows = vec![row("지나간 답변"), filled];
         assert_eq!(blank_tail(&rows), 0);
+    }
+
+    /// 띠에 뜬 글을 갈아 끼운다 — 렌더가 매 프레임 하는 일의 시험용 대역.
+    fn put_pill(pane: &str, text: Option<&str>) {
+        STICKY_PILLS.with(|s| {
+            let mut v = s.borrow_mut();
+            v.clear();
+            if let Some(t) = text {
+                v.push((pane.to_string(), (0.0, 0.0, 10.0, 1.0), t.to_string()));
+            }
+        });
+    }
+
+    /// 「맨 아래로」는 **지나치는 질문마다 멈추지 않는다.** 앞뒤 되짚기의 종료 조건
+    /// (띠 글이 바뀌면 도착)을 그대로 쓰면 첫 질문을 지나자마자 서 버려, 버튼이
+    /// 「한 턴 아래로」가 된다. 바닥은 띠가 **걷힐 때**뿐이다.
+    #[test]
+    fn 맨아래로는_띠가_걷힐_때까지_굴린다() {
+        put_pill("%9", Some("질문 하나"));
+        begin_sticky_bottom("%9".into(), (4, 9));
+        // 첫 노치는 바로 나간다.
+        let first = sticky_seek_step().expect("첫 노치");
+        assert_eq!((first.0.as_str(), first.3), ("%9", true), "아래로 굴려야 한다");
+        // 질문 하나를 지나쳐 띠 글이 바뀌었다 — 아직 바닥이 아니다.
+        put_pill("%9", Some("질문 둘"));
+        std::thread::sleep(STICKY_SEEK_INTERVAL * 2);
+        assert!(sticky_seek_step().is_some(), "지나친 질문에서 멈추면 안 된다");
+        // 띠가 걷혔다 = 라이브 바닥. 여기서 끝나고 상태도 비운다.
+        put_pill("%9", None);
+        std::thread::sleep(STICKY_SEEK_INTERVAL * 2);
+        assert!(sticky_seek_step().is_none(), "바닥에 닿으면 멈춘다");
+        assert!(!sticky_seek_active(), "끝난 seek 은 상태를 남기지 않는다");
+        put_pill("%9", None);
     }
 }

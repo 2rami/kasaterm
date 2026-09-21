@@ -44,11 +44,20 @@ pub(crate) enum TurnHit {
     Jump(i64),
     Prev(i64),
     Next(i64),
+    /// 살아 있는 끝으로 — 스크롤백을 쥔 세계라 한 번에 닿는다.
+    Bottom,
     /// claude 가 **자기 버퍼를** 스크롤하는 세계의 앞/뒤 질문. 그쪽은 좌표가 없어
     /// 절대 줄로 말할 수가 없고, 「지금 맨 위에 붙은 질문이 바뀔 때까지 굴린다」로만
     /// 표현된다 — 목적지는 누를 때 화면에서 읽으므로 여기 담을 것이 없다.
     SeekPrev,
     SeekNext,
+    /// 같은 세계의 「맨 아래로」. 여기서도 좌표가 없으니 **띠가 사라질 때까지**
+    /// 아래로 굴리는 것이 곧 바닥이다 — 띠는 스크롤이 올라가 있을 때만 뜬다.
+    ///
+    /// 모드(대체화면/스크롤백)를 바꿔서 통일하지 않는 이유: 그 전환은 claude 의
+    /// 입력창 자리를 옮긴다. 버튼 하나 누르자고 화면이 통째로 뛰면 「맨 아래로」가
+    /// 아니라 「화면이 바뀌었다」가 된다(2026-09-21 지시).
+    SeekBottom,
 }
 
 thread_local! {
@@ -140,15 +149,26 @@ impl TurnJump {
     }
 }
 
-/// claude sticky pill 줄에서 ↑↓ 가 놓일 열. 줄이 너무 짧으면 `(None, None)`.
+/// claude sticky pill 줄에서 ↑ ↓ ↡ 가 놓일 열. 줄이 너무 짧으면 전부 `None`.
 ///
 /// 헤더(`paint_header_row`)와 **같은 자리 규칙**을 쓴다 — 두 세계(터미널 스크롤백과
 /// claude 자기 버퍼)에서 화살표가 다른 자리에 있으면 같은 기능으로 안 읽힌다.
-pub(crate) fn sticky_arrow_cols(len: usize) -> (Option<usize>, Option<usize>) {
-    if len < 6 {
-        return (None, None);
+///
+/// 맨 아래(`↡`)를 **오른쪽 끝**에 두는 것은 claude 자신이 "Jump to bottom ↓" 을
+/// 줄 끝에 그리기 때문이다 — 손이 가는 자리가 같아야 한 기능으로 읽힌다.
+pub(crate) fn sticky_arrow_cols(len: usize) -> StickyArrowCols {
+    if len < 8 {
+        return StickyArrowCols { up: None, down: None, bottom: None };
     }
-    (Some(len - 4), Some(len - 2))
+    StickyArrowCols { up: Some(len - 6), down: Some(len - 4), bottom: Some(len - 2) }
+}
+
+/// 띠·헤더 줄에서 화살표 세 개가 놓인 열.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct StickyArrowCols {
+    pub up: Option<usize>,
+    pub down: Option<usize>,
+    pub bottom: Option<usize>,
 }
 
 /// 헤더 줄에서 화살표가 놓인 열 — 클릭 rect 를 그 자리에 맞추는 데 쓴다.
@@ -156,6 +176,9 @@ pub(crate) fn sticky_arrow_cols(len: usize) -> (Option<usize>, Option<usize>) {
 pub(crate) struct HeaderCols {
     pub up: Option<usize>,
     pub down: Option<usize>,
+    /// 맨 아래로. 헤더가 떠 있다는 것 자체가 「스크롤이 올라가 있다」라, 갈 곳은
+    /// 늘 있다 — 앞뒤 화살표와 달리 흐려질 일이 없다.
+    pub bottom: Option<usize>,
 }
 
 /// The pinned header is copied after the terminal's palette pass. Apply the
@@ -203,10 +226,12 @@ pub(crate) fn paint_header_row(row: &mut [GridCell], h: &TurnHeader) -> HeaderCo
         }
     }
     // 오른쪽 끝 화살표 자리부터 잡는다 — 본문은 그 앞까지만 쓴다.
-    // `↑ ↓ ` 로 넉 칸. claude 가 "Jump to bottom ↓" 에 같은 계열 글리프를 쓰고 있어
-    // 폰트 폴백이 확인된 문자다.
-    let (mut up_col, mut down_col) = (None, None);
-    let text_end = if let (Some(up), Some(down)) = sticky_arrow_cols(row.len()) {
+    // `↑ ↓ ↡ ` 로 여섯 칸. claude 가 "Jump to bottom ↓" 에 같은 계열 글리프를 쓰고
+    // 있어 폰트 폴백이 확인된 블록이다(↡ = U+21A1, Menlo 실측 확인 2026-09-21 —
+    // 의미가 더 맞는 ⤓(U+2913)는 Menlo 에 없어 폴백 폰트로 새어 자간이 흔들린다).
+    let (mut up_col, mut down_col, mut bottom_col) = (None, None, None);
+    let cols = sticky_arrow_cols(row.len());
+    let text_end = if let (Some(up), Some(down), Some(bottom)) = (cols.up, cols.down, cols.bottom) {
         let put = |row: &mut [GridCell], at: usize, ch: char, on: bool| {
             // 그 칸의 **배경은 그대로 두고** 글자만 얹는다 — 원본을 옮겨 온 줄에서
             // 배경까지 바꾸면 화살표 자리만 색이 튄다.
@@ -219,15 +244,17 @@ pub(crate) fn paint_header_row(row: &mut [GridCell], h: &TurnHeader) -> HeaderCo
         };
         put(row, up, '↑', h.prev_abs.is_some());
         put(row, down, '↓', h.next_abs.is_some());
+        put(row, bottom, '↡', true);
         up_col = h.prev_abs.map(|_| up);
         down_col = h.next_abs.map(|_| down);
+        bottom_col = Some(bottom);
         up.saturating_sub(1)
     } else {
         row.len()
     };
     // 원본을 옮겼으면 본문은 이미 제자리에 있다.
     if from_source {
-        return HeaderCols { up: up_col, down: down_col };
+        return HeaderCols { up: up_col, down: down_col, bottom: bottom_col };
     }
     let mut w = 0usize;
     let put = |row: &mut [GridCell], ch: char, fg: [u8; 4], bold: bool, w: &mut usize| {
@@ -266,7 +293,7 @@ pub(crate) fn paint_header_row(row: &mut [GridCell], h: &TurnHeader) -> HeaderCo
             break;
         }
     }
-    HeaderCols { up: up_col, down: down_col }
+    HeaderCols { up: up_col, down: down_col, bottom: bottom_col }
 }
 
 impl crate::App {
@@ -325,6 +352,28 @@ impl crate::App {
                         eprintln!("[turn] click {hit:?} pane={pane_id} → display_offset={off}");
                     }
                 }
+            }
+            // 맨 아래로 — 스크롤백을 쥔 세계라 되짚을 것 없이 끝으로 놓는다.
+            // 타이핑이 살아 있는 끝으로 되돌리는 것(`follow_live_tail_now`)과 **같은
+            // 세 가지**를 한다: 거울 스크롤 기억·턴 목적지·파서 뷰포트.
+            TurnHit::Bottom => {
+                self.follow_live_tail_at(&pane_id);
+                if dbg {
+                    eprintln!("[turn] bottom pane={pane_id} → live tail");
+                }
+            }
+            // 같은 「맨 아래로」의 claude 자기 버퍼 판. 거울이면 자기 기록이 있으니
+            // 한 번에 놓고, 아니면 띠가 걷힐 때까지 아래로 굴린다 — 띠는 스크롤이
+            // 올라가 있을 때만 뜨므로, 걷혔다는 것이 곧 바닥에 닿았다는 뜻이다.
+            TurnHit::SeekBottom => {
+                if self.follow_live_tail_at(&pane_id) {
+                    return true;
+                }
+                let cell = self.px_to_pane_cell(x, y).map(|(_, c, r)| (c, r)).unwrap_or((1, 1));
+                if dbg {
+                    eprintln!("[turn] seek-bottom pane={pane_id} cell={cell:?}");
+                }
+                crate::render::begin_sticky_bottom(pane_id, cell);
             }
             // claude 자기 버퍼 세계 — 좌표가 없어 「지금 맨 위 질문이 바뀔 때까지」
             // 굴리는 되짚기뿐이다. 목적지는 지금 화면에 붙어 있는 그 줄이므로 여기서
@@ -415,6 +464,7 @@ impl crate::App {
                         ("bar", TurnHit::Jump(_))
                             | ("up", TurnHit::Prev(_) | TurnHit::SeekPrev)
                             | ("down", TurnHit::Next(_) | TurnHit::SeekNext)
+                            | ("bottom", TurnHit::Bottom | TurnHit::SeekBottom)
                     )
                 })
                 .map(|(_, r, hit)| (*r, *hit))
@@ -530,6 +580,32 @@ mod tests {
         assert!(read(&row).starts_with("\u{203a} 원본 질문"), "옮긴 글: {:?}", read(&row));
         assert!(row[0].bold, "원본의 굵기까지 따라와야 옮긴 것이다");
         assert!(cols.up.is_some() && cols.down.is_some());
+    }
+
+    /// 맨 아래로(↡)는 **앞뒤 질문이 없어도 선다.** 헤더가 떠 있다는 것 자체가 스크롤이
+    /// 올라가 있다는 뜻이라, 살아 있는 끝은 언제나 갈 곳이다. 앞뒤 화살표와 같은
+    /// 조건을 걸면 대화의 첫 턴·마지막 턴에서만 하필 이 버튼이 죽는다.
+    #[test]
+    fn the_bottom_arrow_stands_even_with_no_neighbours() {
+        let mut row = vec![GridCell::blank(); 24];
+        let cols = paint_header_row(&mut row, &header(None, false, false));
+        let bottom = cols.bottom.expect("↡ 는 이웃과 무관하게 선다");
+        assert_eq!(row[bottom].ch, '↡');
+        assert!(row[bottom].bold, "누를 수 있는 것은 굵게 — 흐린 ↑↓ 와 구별된다");
+        assert!(cols.up.is_none() && cols.down.is_none(), "갈 곳 없는 이웃은 흐린 채로");
+    }
+
+    /// 화살표 셋은 **서로 다른 칸**에 서고 본문은 그 앞에서 끊긴다. 자리가 겹치면
+    /// 한 칸이 다른 기능을 덮어써, 화면은 멀쩡한데 엉뚱한 곳으로 간다.
+    #[test]
+    fn three_arrows_never_share_a_column() {
+        let cols = sticky_arrow_cols(24);
+        let (up, down, bottom) = (cols.up.unwrap(), cols.down.unwrap(), cols.bottom.unwrap());
+        assert!(up < down && down < bottom, "↑ ↓ ↡ 순서: {up} {down} {bottom}");
+        assert_eq!((down - up, bottom - down), (2, 2), "한 칸씩 띄워 손가락이 안 겹친다");
+        // 줄이 짧으면 셋 다 접는다 — 둘만 그리면 자리 규칙이 두 세계에서 갈린다.
+        let narrow = sticky_arrow_cols(7);
+        assert!(narrow.up.is_none() && narrow.down.is_none() && narrow.bottom.is_none());
     }
 
     /// 화살표는 **그 칸의 배경을 그대로 두고** 글자만 얹는다 — 배경까지 바꾸면 원본을
