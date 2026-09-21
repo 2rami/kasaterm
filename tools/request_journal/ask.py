@@ -15,6 +15,10 @@
 `~/.config/kasaterm/nacho-ask.json` `{"version":1,"url":"http://…"}`(또는 env `NACHO_ASK_URL`)이 정하고,
 그 파일이 없으면 넘기지 않는다 — 즉 기본 동작은 전과 같다.
 
+★**조작은 언제나 이 기계가 돌린다.** 창 이사·포커스·글 넣기·집컴 전원은 전부 이 기계의 명령이라
+나쵸(다른 기계일 수 있다)는 **고르기만** 한다 — 나쵸가 답에 실어 보낸 `do` 를 여기서 `execute` 로 돌리고
+그 결과를 `actions` 에 채워 펫에 준다. 그래서 펫이 보는 계약은 프록시든 폴백이든 똑같다.
+
 폴백 경로의 말투가 곧 캐릭터다 — 성격 원본은 나쵸 레포(`prompts/system.md`)에서 읽어 오고,
 여기에는 베끼지 않는다. 베끼면 두 벌이 되어 한쪽만 고쳐지는 날이 온다.
 """
@@ -496,15 +500,23 @@ def ask_nacho(text: str, pane: str, ctx: dict, catalog=None) -> dict | None:
     except Exception as exc:
         _note(f"나쵸에 못 닿았다({type(exc).__name__}: {str(exc)[:80]}) — 이 기계 모델로 답한다")
         return None
-    answer_text = str((payload or {}).get("answer") or "").strip() if isinstance(payload, dict) else ""
-    if not answer_text:
+    if not isinstance(payload, dict):
+        _note("나쵸가 이상한 것을 줬다 — 이 기계 모델로 답한다")
+        return None
+    answer_text = str(payload.get("answer") or "").strip()
+    has_do = isinstance(payload.get("do"), list) and payload["do"]
+    if not answer_text and not has_do:
+        # 말도 조작도 없으면 빈손이다. 조작만 고른 답은 아래에서 실행 결과로 말이 채워진다.
         _note("나쵸가 빈 답을 줬다 — 이 기계 모델로 답한다")
         return None
     actions = payload.get("actions")
     act = payload.get("act")
+    do = payload.get("do")
     return {"answer": answer_text[:1500],
             "actions": actions if isinstance(actions, list) else [],
-            "act": act if isinstance(act, dict) else {"motion": None, "expression": None}}
+            "act": act if isinstance(act, dict) else {"motion": None, "expression": None},
+            "do": [row for row in (do if isinstance(do, list) else [])
+                   if isinstance(row, dict) and row.get("name") in TOOL_NAMES][:3]}
 
 
 def llm_client(provider_factory):
@@ -543,7 +555,16 @@ def answer(provider_factory, body: dict) -> tuple[int, dict]:
     ctx = context(pane)
     relayed = ask_nacho(text, pane, ctx, catalog)
     if relayed is not None:
-        return 200, relayed
+        # 나쵸가 고른 조작을 **여기서** 돌린다. execute 는 목록 밖 이름을 이미 거른다.
+        actions = execute(pane, relayed.pop("do", []))
+        if actions:
+            relayed["actions"] = actions
+            if not relayed["answer"]:
+                relayed["answer"] = " · ".join(a["detail"] for a in actions)
+        if not str(relayed.get("answer") or "").strip():
+            _note("나쵸가 말도 조작도 없이 끝냈다 — 이 기계 모델로 답한다")
+        else:
+            return 200, relayed
     client = llm_client(provider_factory)
     if client is None:
         return 503, {"error": "llm_unavailable"}
