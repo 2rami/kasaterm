@@ -81,7 +81,7 @@ impl Client {
 }
 
 fn run(service: &Path, text: &str, pane: &str, catalog: &Value) -> Result<Answer, ()> {
-    let port = crate::journal::service(service)?;
+    let port = crate::journal::ask_service(service)?;
     let body = json!({ "text": text, "pane": pane, "catalog": catalog });
     // 서버가 판을 다 읽고 창을 옮기는 일까지 하고 답하므로 장부 조회보다 한참 오래 걸린다
     // (모델 대기 35초 + kasaterm-cli 네 번).

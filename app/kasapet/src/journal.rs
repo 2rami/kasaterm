@@ -88,6 +88,22 @@ pub(crate) fn request_within(port: u16, method: &str, route: &str, body: Option<
 }
 
 pub(crate) fn service(path: &std::path::Path) -> Result<u16, ()> {
+    service_named(path, &["request-journal"])
+}
+
+/// 묻고 답하는 길(`/api/ask`)만 쓰는 창구. 장부 채팅과 달리 **나쵸 본체**가 직접 받아도 된다.
+///
+/// 맥미니엔 장부(request-journal)가 없다 — launchd 가 `~/Desktop` 에 못 들어가(TCC) 모듈을
+/// 못 찾고 죽는다. 그래서 그 기계의 펫은 대리인 없이 나쵸를 직접 부르고, 나쵸는 자기 이름
+/// (`nacho-ask`)으로 답한다. 판·화면 모으기와 조작 실행도 그쪽이 스스로 한다.
+///
+/// ⚠️ `service()` 를 통째로 열지 않는 이유 — 장부 채팅(`/api/chat`)·요약·열기는 나쵸에 그
+/// 길이 없다. 이름을 넓히면 그 기능들이 있는 척하다 조용히 실패한다.
+pub(crate) fn ask_service(path: &std::path::Path) -> Result<u16, ()> {
+    service_named(path, &["request-journal", "nacho-ask"])
+}
+
+fn service_named(path: &std::path::Path, accepted: &[&str]) -> Result<u16, ()> {
     let bytes = std::fs::read(path).map_err(|_| ())?;
     if bytes.len() > 8192 { return Err(()); }
     let descriptor: Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
@@ -95,7 +111,11 @@ pub(crate) fn service(path: &std::path::Path) -> Result<u16, ()> {
     let base = descriptor["base_url"].as_str().ok_or(())?;
     let port = port(base)?;
     let health = get(port, "/health")?;
-    if health["ok"] != true || health["version"] != 1 || health["service"] != "request-journal" {
+    if health["ok"] != true || health["version"] != 1 {
+        return Err(());
+    }
+    let name = health["service"].as_str().ok_or(())?;
+    if !accepted.contains(&name) {
         return Err(());
     }
     Ok(port)
@@ -139,6 +159,44 @@ mod tests {
         assert_eq!(intent("재시작하면 뭐가 달라져?"), Some(Action::Waiting));
         assert_eq!(intent("재시작하면 뭐가 달라져 기능 만들어줘"), None);
         assert_eq!(intent("여기 버그 고쳐줘"), None);
+    }
+
+    /// 그 이름을 대는 서버를 세우고, 서술자를 가리켜 두 창구가 각각 무엇을 받는지 본다.
+    fn serve_health(service: &'static str) -> (std::path::PathBuf, std::thread::JoinHandle<()>) {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let thread = std::thread::spawn(move || {
+            // 두 창구가 각각 한 번씩 물어 온다.
+            for _ in 0..2 {
+                let Ok((mut socket, _)) = listener.accept() else { return };
+                read_request(&mut socket);
+                let body = format!("{{\"ok\":true,\"version\":1,\"service\":\"{service}\"}}");
+                let _ = socket.write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes(),
+                );
+            }
+        });
+        let path = std::env::temp_dir().join(format!("pet-journal-{service}-{port}.json"));
+        std::fs::write(&path, format!("{{\"version\":1,\"base_url\":\"http://127.0.0.1:{port}\"}}")).unwrap();
+        (path, thread)
+    }
+
+    #[test]
+    fn only_the_ask_door_accepts_nacho_itself() {
+        // 미니엔 장부가 없어 나쵸가 직접 받는다 — 묻는 길만 그 이름을 받아들인다.
+        let (path, thread) = serve_health("nacho-ask");
+        assert!(ask_service(&path).is_ok(), "묻는 길은 나쵸 본체를 받는다");
+        assert!(service(&path).is_err(), "장부 기능은 나쵸에 없다 — 있는 척하면 안 된다");
+        std::fs::remove_file(&path).unwrap();
+        thread.join().unwrap();
+
+        // 장부가 있는 기계에서는 둘 다 그대로 열린다.
+        let (path, thread) = serve_health("request-journal");
+        assert!(ask_service(&path).is_ok());
+        assert!(service(&path).is_ok());
+        std::fs::remove_file(&path).unwrap();
+        thread.join().unwrap();
     }
 
     #[test]
