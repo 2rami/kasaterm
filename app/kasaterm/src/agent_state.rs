@@ -192,6 +192,9 @@ const QUIET_CLOSE: Duration = Duration::from_secs(6);
 /// agy 는 턴 경계를 안 남긴다 — 기록이 이만큼 안에 자랐으면 도는 중.
 const AGY_ACTIVE: Duration = Duration::from_secs(15);
 
+/// 방치를 알리는 판정 이유. 종류 칸을 안 보내는 기계에서는 이 글자가 유일한 단서다.
+pub(crate) const IDLE_PROMPT: &str = "idle prompt";
+
 /// 다른 기계가 보낸 낱말을 되살린다. `kind` 는 그쪽 보드의 `attention_kind` — 없으면
 /// 승인으로 친다. 방치(`idle`)를 승인으로 잘못 보는 편이 그 반대보다 덜 위험해서가
 /// 아니라, 옛 판 기계는 그 칸을 안 보내기 때문이다. 보내 주면 그대로 가른다.
@@ -374,7 +377,7 @@ pub(crate) fn resolve(e: &Evidence) -> (AgentState, &'static str) {
     if let Some((WaitKind::Idle, reason, age)) = &e.attention {
         if attention_live(e, WaitKind::Idle, *age) {
             let reason = if reason.trim().is_empty() { WaitKind::Idle.default_reason().to_string() } else { reason.clone() };
-            return (AgentState::Waiting { kind: WaitKind::Idle, reason }, "idle prompt");
+            return (AgentState::Waiting { kind: WaitKind::Idle, reason }, IDLE_PROMPT);
         }
     }
     if e.transcript_present || e.hook_turn.is_some() {
@@ -521,7 +524,13 @@ impl StateHub {
                 let kind = facts
                     .as_ref()
                     .and_then(|v| v.get("attention_kind").and_then(|s| s.as_str()))
-                    .and_then(WaitKind::parse);
+                    .and_then(WaitKind::parse)
+                    // 종류를 안 보내는 판(옛 앱)에서는 판정 이유가 유일한 단서다. 이것마저
+                    // 없으면 승인으로 치게 되고, 그냥 쉬는 학생이 주황으로 깜빡인다.
+                    .or_else(|| {
+                        let why = facts.as_ref()?.get("status_reason")?.as_str()?;
+                        (why == IDLE_PROMPT).then_some(WaitKind::Idle)
+                    });
                 evidence.remote = Some((word, why, kind));
             } else if harness.is_some() {
                 if let Some(p) = session.as_ref() {
@@ -865,6 +874,22 @@ mod tests {
         // 옛 판 기계는 그 칸을 안 보낸다 — 그때는 종전대로 승인으로 친다.
         e.remote = Some(("waiting".into(), None, None));
         assert!(resolve(&e).0.needs_you());
+    }
+
+    #[test]
+    fn a_board_without_the_kind_column_is_read_from_its_reason() {
+        let pane = |reason: &str| serde_json::json!({"status": "waiting", "status_reason": reason});
+        let read = |row: &serde_json::Value| {
+            row.get("attention_kind").and_then(|v| v.as_str()).and_then(WaitKind::parse)
+                .or_else(|| {
+                    let why = row.get("status_reason")?.as_str()?;
+                    (why == IDLE_PROMPT).then_some(WaitKind::Idle)
+                })
+        };
+        assert_eq!(read(&pane(IDLE_PROMPT)), Some(WaitKind::Idle));
+        assert_eq!(read(&pane("permission prompt")), None, "모르는 이유는 지어내지 않는다");
+        let with_kind = serde_json::json!({"attention_kind": "question", "status_reason": IDLE_PROMPT});
+        assert_eq!(read(&with_kind), Some(WaitKind::Question), "칸이 있으면 그것이 먼저다");
     }
 
     #[test]

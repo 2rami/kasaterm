@@ -2948,12 +2948,17 @@ impl Backend for PtyBackend {
                 let (tail,idle) = read_tail(path,128*1024);
                 snapshot_from_tail(&id,&tail,idle)
             }).unwrap_or_default();
-            let (status,reason): (&'static str,&'static str) = if kasa_mcp::remote::is_remote_pane(&id) {
+            // 판정은 **한 번만** 묻는다. 아래 attention 칸이 이것을 다시 물었는데, 그
+            // 사이 GUI 틱이 허브를 갱신하면 두 값이 갈렸다 — 낱말은 「기다림」인데 종류
+            // 칸만 빠져, 받는 기계가 무슨 기다림인지 모른 채 승인으로 치고 주황을 켰다.
+            let resolved = self.hub.resolved(&id);
+            let mirrored = kasa_mcp::remote::is_remote_pane(&id);
+            let (status,reason): (&'static str,&'static str) = if mirrored {
                 ("unknown","remote mirror; observe agent on its source machine")
             } else if !supported {
                 ("unknown","live place; supported agent activity unavailable")
             } else {
-                match self.hub.resolved(&id) {
+                match &resolved {
                     Some(r) => (r.state.board_word(),r.reason),
                     None => ("unknown","supported agent observed; state not resolved yet"),
                 }
@@ -2970,7 +2975,11 @@ impl Backend for PtyBackend {
                 "status":status,"status_reason":reason,"detached":detached,
                 "place_state":if detached {"detached"} else {"visible"}});
             // 기다리는 이유·종류 — 다른 기기의 학생이 「무엇을 기다리나」를 보드만 보고 안다.
-            if let Some(crate::agent_state::AgentState::Waiting { kind, reason }) = self.hub.resolved(&id).map(|r| r.state) {
+            // 거울 줄에는 안 싣는다. 그 줄의 상태는 `unknown` 이고, 거기 종류만 붙으면
+            // 읽는 쪽이 이 기계가 그 학생을 관측한 것으로 읽는다 — 정본은 원본 기계 줄이다.
+            if let Some(crate::agent_state::AgentState::Waiting { kind, reason }) =
+                resolved.map(|r| r.state).filter(|_| !mirrored)
+            {
                 row["attention_kind"] = json!(kind.as_str());
                 if !reason.is_empty() { row["waiting_for"] = json!(reason); }
             }
