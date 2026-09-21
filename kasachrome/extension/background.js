@@ -194,7 +194,44 @@ function connected() {
 chrome.tabs.onRemoved.addListener((tabId) => { forgetTab(tabId); forgetEmulation(tabId).catch(() => {}); forgetLayout(tabId).catch(() => {}) })
 
 // 페이지가 새로 뜨면 오버레이가 통째로 날아간다. 담당 세션이 있는 탭이면 칩을 다시 붙인다.
+// claude 계정 로그인의 승인은 `platform.claude.com` 으로 되돌아온다 — localhost 가 아니라
+// 코드가 화면에 뜨고 사람이 그걸 복사해 터미널로 옮겨야 한다. 그 화면을 보는 것은 브라우저
+// 뿐이니, 여기서 주워 kasaterm 에 넘기면 그 단계가 통째로 사라진다. 주소를 우리 것으로 바꾸는
+// 길은 막혀 있다(토큰 교환이 승인 때와 같은 주소를 요구한다).
+const CLAUDE_LOGIN_CALLBACK = 'https://platform.claude.com/oauth/code/callback'
+
+async function handOffClaudeLoginCode(tabId, rawUrl) {
+  if (!rawUrl || !rawUrl.startsWith(CLAUDE_LOGIN_CALLBACK)) return
+  let code = '', state = ''
+  try {
+    const u = new URL(rawUrl)
+    code = u.searchParams.get('code') || ''
+    state = u.searchParams.get('state') || ''
+  } catch { return }
+  if (!code) return
+  // 화면이 보여 주는 것과 같은 모양으로 보낸다 — CLI 가 `코드#state` 를 받는다.
+  const payload = state ? `${code}#${state}` : code
+  let taken = false
+  try {
+    const res = await fetch('http://127.0.0.1:8765/claude-login-code', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: payload }),
+    })
+    taken = !!(await res.json())?.taken
+  } catch {
+    // 카사텀이 안 떠 있거나 다른 포트다. 사람이 손으로 복사하는 원래 길이 그대로 남는다.
+    return
+  }
+  // 기다리던 로그인이 실제로 받았을 때만 치운다. 안 그러면 사람이 직접 쓰려던 코드를
+  // 눈앞에서 없애는 꼴이 된다.
+  if (taken) chrome.tabs.remove(tabId).catch(() => {})
+}
+
 chrome.tabs.onUpdated.addListener((tabId, info) => {
+  // 주소는 `complete` 를 기다리지 않는다 — 코드는 이미 주소에 들어 있고, 페이지가 다 그려질
+  // 때까지 두면 사람이 그 화면을 먼저 본다.
+  if (info.url) handOffClaudeLoginCode(tabId, info.url).catch(() => {})
   if (info.status !== 'complete') return
   restoreOverlay(tabId).catch(() => {})
   // 폰뷰도 같은 이유로 되돌린다. 새 문서에서 터치 에뮬레이션이 풀린 채 남으면 크기만 폰이고
