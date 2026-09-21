@@ -123,7 +123,8 @@ pub(crate) enum Official {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Evidence {
     /// 다른 기기의 거울 pane — 그쪽 판이 준 낱말(`working`·`idle`·`waiting`·`unknown`)과 사유.
-    pub remote: Option<(String, Option<String>)>,
+    /// (보드 낱말, 기다리는 이유, 그 기다림의 종류). 종류는 옛 판 기계에서 안 온다.
+    pub remote: Option<(String, Option<String>, Option<WaitKind>)>,
     /// None = 셸(에이전트가 안 돈다).
     pub harness: Option<kasa_pty::AgentKind>,
     /// 훅이 알린 턴 경계와 그 나이.
@@ -191,12 +192,15 @@ const QUIET_CLOSE: Duration = Duration::from_secs(6);
 /// agy 는 턴 경계를 안 남긴다 — 기록이 이만큼 안에 자랐으면 도는 중.
 const AGY_ACTIVE: Duration = Duration::from_secs(15);
 
-fn remote_state(word: &str, reason: Option<&str>) -> AgentState {
+/// 다른 기계가 보낸 낱말을 되살린다. `kind` 는 그쪽 보드의 `attention_kind` — 없으면
+/// 승인으로 친다. 방치(`idle`)를 승인으로 잘못 보는 편이 그 반대보다 덜 위험해서가
+/// 아니라, 옛 판 기계는 그 칸을 안 보내기 때문이다. 보내 주면 그대로 가른다.
+fn remote_state(word: &str, reason: Option<&str>, kind: Option<WaitKind>) -> AgentState {
     match word {
         "working" => AgentState::Working,
         "idle" => AgentState::Idle,
         "waiting" => AgentState::Waiting {
-            kind: WaitKind::Permission,
+            kind: kind.unwrap_or(WaitKind::Permission),
             reason: reason.unwrap_or("").to_string(),
         },
         _ => AgentState::Unknown,
@@ -306,8 +310,8 @@ fn attention_live(e: &Evidence, kind: WaitKind, age: Option<Duration>) -> bool {
 
 /// 순수 판정. 우선순위는 위에서 아래 — 첫 줄이 맞으면 거기서 끝.
 pub(crate) fn resolve(e: &Evidence) -> (AgentState, &'static str) {
-    if let Some((word, reason)) = &e.remote {
-        return (remote_state(word, reason.as_deref()), "remote");
+    if let Some((word, reason, kind)) = &e.remote {
+        return (remote_state(word, reason.as_deref(), *kind), "remote");
     }
     if e.harness.is_none() {
         return (AgentState::Idle, "shell");
@@ -514,7 +518,11 @@ impl StateHub {
                     .as_ref()
                     .and_then(|v| v.get("waiting_for").and_then(|s| s.as_str()))
                     .map(str::to_string);
-                evidence.remote = Some((word, why));
+                let kind = facts
+                    .as_ref()
+                    .and_then(|v| v.get("attention_kind").and_then(|s| s.as_str()))
+                    .and_then(WaitKind::parse);
+                evidence.remote = Some((word, why, kind));
             } else if harness.is_some() {
                 if let Some(p) = session.as_ref() {
                     evidence.heartbeat = p.output_heartbeat();
@@ -632,10 +640,10 @@ mod tests {
     fn a_shell_or_a_mirror_is_decided_before_anything_else() {
         assert_eq!(resolve(&Evidence::default()).0, AgentState::Idle);
         let mut e = claude();
-        e.remote = Some(("working".into(), None));
+        e.remote = Some(("working".into(), None, None));
         e.transcript_turn = Some(TurnState::Idle);
         assert_eq!(resolve(&e), (AgentState::Working, "remote"));
-        e.remote = Some(("nonsense".into(), None));
+        e.remote = Some(("nonsense".into(), None, None));
         assert_eq!(resolve(&e).0, AgentState::Unknown);
     }
 
@@ -842,6 +850,21 @@ mod tests {
         assert!(!idle.is_busy());
         assert_eq!(idle.board_word(), "waiting", "보드 낱말은 종전 계약대로 — attention_kind 가 idle 로 가른다");
         assert!(AgentState::Waiting { kind: WaitKind::Question, reason: String::new() }.needs_you());
+    }
+
+    #[test]
+    fn a_remote_idle_prompt_does_not_become_a_hand_needed() {
+        let mut e = Evidence { harness: Some(kasa_pty::AgentKind::Claude), ..Default::default() };
+        // 그 기계가 종류를 보내 주면 그대로 가른다 — 방치는 사람을 부르지 않는다.
+        e.remote = Some(("waiting".into(), Some("다음 지시 기다림".into()), Some(WaitKind::Idle)));
+        let (state, reason) = resolve(&e);
+        assert_eq!(reason, "remote");
+        assert!(!state.needs_you(), "방치 알림은 주황으로 부르지 않는다");
+        e.remote = Some(("waiting".into(), Some("Bash".into()), Some(WaitKind::Permission)));
+        assert!(resolve(&e).0.needs_you());
+        // 옛 판 기계는 그 칸을 안 보낸다 — 그때는 종전대로 승인으로 친다.
+        e.remote = Some(("waiting".into(), None, None));
+        assert!(resolve(&e).0.needs_you());
     }
 
     #[test]

@@ -20,6 +20,11 @@ const TRACKED: &[&str] = &[
     "progress",
     "status",
     "status_reason",
+    // 「기다린다」는 두 가지다 — 승인·질문(사람을 부른다)과 방치(그냥 쉬는 것). 이 둘을
+    // 가르는 칸이 집계에서 잘리면 읽는 쪽은 모든 기다림을 사람 손 필요로 세고, 노는 학생
+    // 마다 주황이 깜빡인다(2026-09-21 「waiting 이라기엔 idle인데」).
+    "attention_kind",
+    "waiting_for",
     "done_outcome",
     "done_summary",
     "detached",
