@@ -7,7 +7,15 @@
 모델에 가지만 디스크에는 남기지 않는다.
 
 답은 펫 말풍선에 그대로 뜬다(2026-09-17 지시 「답변이 채팅창 밖으로 나와야 한다」).
-그래서 말투가 곧 캐릭터다 — 성격 원본은 나쵸 레포(`prompts/system.md`)에서 읽어 오고,
+
+★**두뇌는 나쵸 하나다**(2026-09-21 지시 「슬랙 DM·디코 DM·카사텀 펫을 두뇌 하나로」). 판·화면은
+이 기계에서만 모을 수 있으니 여기서 모아 나쵸의 물음 창구(`POST <base>/api/ask`)로 넘기고, 답은
+나쵸 본체가 낸다 — 기억도 대화도 그쪽에 있다. 여기 남은 모델 호출은 **폴백**이다: 나쵸가 안 닿거나
+200 이 아니거나 느리면 그 길로 답한다(펫이 멍청해지면 안 된다). 넘길 곳은 서술자
+`~/.config/kasaterm/nacho-ask.json` `{"version":1,"url":"http://…"}`(또는 env `NACHO_ASK_URL`)이 정하고,
+그 파일이 없으면 넘기지 않는다 — 즉 기본 동작은 전과 같다.
+
+폴백 경로의 말투가 곧 캐릭터다 — 성격 원본은 나쵸 레포(`prompts/system.md`)에서 읽어 오고,
 여기에는 베끼지 않는다. 베끼면 두 벌이 되어 한쪽만 고쳐지는 날이 온다.
 """
 from __future__ import annotations
@@ -18,6 +26,7 @@ import os
 import shutil
 import subprocess
 import re
+import sys
 import threading
 from collections import Counter
 from pathlib import Path
@@ -50,6 +59,13 @@ TOOLS = [
 TOOL_NAMES = tuple(t["name"] for t in TOOLS)
 
 NACHO_REPO = Path(__file__).resolve().parents[3] / "nacho-neko"
+# 나쵸 물음 창구. 서술자가 없으면 넘기지 않는다(옛 동작 그대로).
+NACHO_ASK_DESCRIPTOR = Path(os.environ.get(
+    "NACHO_ASK_DESCRIPTOR", str(Path.home() / ".config/kasaterm/nacho-ask.json")))
+NACHO_ASK_TOKEN_FILE = Path(os.environ.get(
+    "NACHO_ASK_TOKEN_FILE", str(Path.home() / ".config/nacho-ask.key")))
+# 펫 클라이언트가 50초를 기다린다(kasapet journal.rs). 폴백까지 그 안에 끝나야 하므로 넉넉히 못 준다.
+NACHO_ASK_TIMEOUT = float(os.environ.get("NACHO_ASK_TIMEOUT", "40"))
 # 성격 원본은 이 제목 앞까지만 쓴다 — 그 뒤는 메모리 볼트·도구 사용법이라 펫 자리에서는
 # 존재하지 않는 경로를 가리키는 틀린 지시가 된다.
 PERSONA_STOP = "\n# 메모리"
@@ -306,14 +322,19 @@ def context(pane: str) -> dict:
             if isinstance(row, dict) and row.get("surface_id"):
                 local_rows[str(row["surface_id"])] = row
     ok, raw = run_cli("board", "--all")
-    fleet_text = digest(fleet(_json_result(raw), local_rows, _machines_http())) if ok else f"(판을 읽지 못했다: {raw})"
+    board = _json_result(raw) if ok else {}
+    fleet_text = digest(fleet(board, local_rows, _machines_http())) if ok else f"(판을 읽지 못했다: {raw})"
+    # 나쵸는 여러 기계의 펫을 받으므로 **어느 바탕화면에서 온 물음인지** 알아야 한다. 보드가
+    # 스스로 말하는 이 기계 이름을 쓴다 — hostname 은 사람이 부르는 이름과 다를 때가 있다.
+    machine = next((str(src.get("label") or "") for src in board.get("sources", []) or []
+                    if isinstance(src, dict) and src.get("is_local")), "")
     screen = ""
     ok, raw = run_cli("peek", pane)
     if ok:
         text = str(_json_result(raw).get("text", ""))
         lines = [line.rstrip() for line in text.splitlines() if line.strip()]
         screen = "\n".join(lines[-PEEK_LINES:])
-    return {"who": local_rows.get(pane, {}), "screen": screen, "fleet": fleet_text}
+    return {"who": local_rows.get(pane, {}), "screen": screen, "fleet": fleet_text, "machine": machine}
 
 
 def catalog_lines(catalog) -> str:
@@ -425,6 +446,67 @@ def homepc(action: str) -> tuple[bool, str]:
     return True, (out or {"on": "켜기 신호를 보냈다 — 30초쯤 뒤에 켜진다", "off": "끄기 신호를 보냈다", "status": "상태 응답이 비었다"}[action])[:300]
 
 
+def nacho_base() -> str:
+    """나쵸 물음 창구 주소. env → 서술자 파일 순. 없으면 빈 문자열(넘기지 않는다)."""
+    url = os.environ.get("NACHO_ASK_URL", "").strip()
+    if url:
+        return url.rstrip("/")
+    try:
+        raw = NACHO_ASK_DESCRIPTOR.read_bytes()
+    except OSError:
+        return ""
+    if len(raw) > 8192:
+        return ""
+    try:
+        descriptor = json.loads(raw)
+    except ValueError:
+        return ""
+    if not isinstance(descriptor, dict) or descriptor.get("version") != 1:
+        return ""
+    url = str(descriptor.get("url") or "").strip().rstrip("/")
+    return url if url.startswith(("http://", "https://")) else ""
+
+
+def _note(line: str) -> None:
+    """폴백한 까닭을 남긴다 — 조용히 옛 두뇌로 돌아가면 사람은 나쵸가 답한 줄 안다."""
+    print(f"[nacho-ask] {line}", file=sys.stderr, flush=True)
+
+
+def ask_nacho(text: str, pane: str, ctx: dict, catalog=None) -> dict | None:
+    """판·화면을 실어 나쵸에 묻는다. 답이 오면 그 payload 그대로, 아니면 None(폴백)."""
+    base = nacho_base()
+    if not base:
+        return None
+    body = json.dumps({"text": text, "pane": pane, "machine": ctx.get("machine") or "",
+                       "catalog": catalog, "context": ctx}, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json", "X-Journal-Request": "1"}
+    try:
+        token = NACHO_ASK_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        token = ""
+    if token:
+        headers["X-Nacho-Token"] = token
+    try:
+        with urlopen(Request(f"{base}/api/ask", data=body, headers=headers, method="POST"),
+                     timeout=NACHO_ASK_TIMEOUT) as resp:
+            if resp.status != 200:
+                _note(f"나쵸가 {resp.status} 를 줬다 — 이 기계 모델로 답한다")
+                return None
+            payload = json.loads(resp.read(1024 * 1024))
+    except Exception as exc:
+        _note(f"나쵸에 못 닿았다({type(exc).__name__}: {str(exc)[:80]}) — 이 기계 모델로 답한다")
+        return None
+    answer_text = str((payload or {}).get("answer") or "").strip() if isinstance(payload, dict) else ""
+    if not answer_text:
+        _note("나쵸가 빈 답을 줬다 — 이 기계 모델로 답한다")
+        return None
+    actions = payload.get("actions")
+    act = payload.get("act")
+    return {"answer": answer_text[:1500],
+            "actions": actions if isinstance(actions, list) else [],
+            "act": act if isinstance(act, dict) else {"motion": None, "expression": None}}
+
+
 def llm_client(provider_factory):
     """모델 통로 — 장부 채팅이 쓰는 provider 에 클라이언트가 있으면 그것, 없으면(이 기계는
     미니 터널로 요약을 시키는 구성이라 없다) 나쵸의 LLM 클라이언트를 이 자리에서 직접 연다.
@@ -456,11 +538,16 @@ def answer(provider_factory, body: dict) -> tuple[int, dict]:
         return 400, {"error": "empty_question"}
     if not pane.startswith("%"):
         return 400, {"error": "pane_required"}
+    catalog = body.get("catalog")
+    # 판·화면은 이 기계에서만 모인다. 먼저 모으고 **나쵸에게 답을 맡긴다**(두뇌 하나).
+    ctx = context(pane)
+    relayed = ask_nacho(text, pane, ctx, catalog)
+    if relayed is not None:
+        return 200, relayed
     client = llm_client(provider_factory)
     if client is None:
         return 503, {"error": "llm_unavailable"}
-    catalog = body.get("catalog")
-    prompt = build_prompt(text, pane, context(pane), catalog)
+    prompt = build_prompt(text, pane, ctx, catalog)
 
     async def call():
         return await asyncio.wait_for(

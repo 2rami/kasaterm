@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -148,6 +149,162 @@ class AnswerTests(unittest.TestCase):
 
 CATALOG = {"motions": [{"group": "Idle", "label": "대기"}, {"group": "Think", "label": "생각"}, {"group": "Error", "label": "곤란"}],
            "expressions": [{"name": "blush", "label": "홍조"}, {"name": "cry", "label": "눈물"}]}
+
+
+class NachoRelayTests(unittest.TestCase):
+    """두뇌 하나 — 판·화면은 여기서 모으고 답은 나쵸가 낸다(2026-09-21). 나쵸가 없으면 옛 길로."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="nacho-ask-"))
+        self.descriptor = self.tmp / "nacho-ask.json"
+        self.token = self.tmp / "key"
+        self.ctx = {"who": {"character": "유우카"}, "screen": "화면 끝", "fleet": "■ 미니 — 연결됨", "machine": "맥북"}
+
+    def _cli(self):
+        def cli(*args, **kw):
+            if args == ("board", "--all"):
+                return True, json.dumps({"result": board_all()})
+            if args == ("board",):
+                return True, json.dumps({"result": {"board": list(LOCAL.values())}})
+            if args[0] == "peek":
+                return True, json.dumps({"result": {"text": "화면 끝"}})
+            return True, "{}"
+        return cli
+
+    def test_without_a_descriptor_nothing_is_relayed(self):
+        with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.tmp / "없다.json"), \
+                patch.dict(os.environ, {}, clear=False), patch.object(ask, "urlopen") as opened:
+            os.environ.pop("NACHO_ASK_URL", None)
+            self.assertEqual(ask.nacho_base(), "")
+            self.assertIsNone(ask.ask_nacho("안녕", "%9", self.ctx))
+        opened.assert_not_called()
+
+    def test_a_bad_descriptor_is_ignored(self):
+        for bad in ('{"version":2,"url":"http://x"}', '{"version":1,"url":"ftp://x"}', "not json", "{}"):
+            self.descriptor.write_text(bad, encoding="utf-8")
+            with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.descriptor):
+                os.environ.pop("NACHO_ASK_URL", None)
+                self.assertEqual(ask.nacho_base(), "", bad)
+
+    def test_the_question_goes_to_nacho_with_the_fleet_and_its_answer_is_returned(self):
+        self.descriptor.write_text(json.dumps({"version": 1, "url": "http://10.0.0.1:8792/"}), encoding="utf-8")
+        self.token.write_text("s3cret\n", encoding="utf-8")
+        sent = {}
+
+        class Resp:
+            status = 200
+
+            def read(self, _n=None):
+                return json.dumps({"answer": "유우카가 펫 고치는 중이래", "actions": [],
+                                   "act": {"motion": "Talk", "expression": None}}).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_open(req, timeout=None):
+            sent["url"], sent["timeout"] = req.full_url, timeout
+            sent["headers"] = {k.lower(): v for k, v in req.headers.items()}
+            sent["body"] = json.loads(req.data)
+            return Resp()
+
+        with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.descriptor), \
+                patch.object(ask, "NACHO_ASK_TOKEN_FILE", self.token), \
+                patch.object(ask, "urlopen", side_effect=fake_open), \
+                patch.object(ask, "run_cli", side_effect=self._cli()), \
+                patch.object(ask, "_machines_http", return_value=MACHINES), \
+                patch.object(ask, "llm_client") as local_brain:
+            os.environ.pop("NACHO_ASK_URL", None)
+            status, payload = ask.answer(lambda _c: None, {"text": "다들 뭐 해?", "pane": "%9", "catalog": CATALOG})
+        self.assertEqual((status, payload["answer"]), (200, "유우카가 펫 고치는 중이래"))
+        self.assertEqual(payload["act"], {"motion": "Talk", "expression": None})
+        local_brain.assert_not_called()          # 나쵸가 답했으면 이 기계 모델은 안 돈다
+        self.assertEqual(sent["url"], "http://10.0.0.1:8792/api/ask")
+        self.assertEqual(sent["headers"]["x-journal-request"], "1")
+        self.assertEqual(sent["headers"]["x-nacho-token"], "s3cret")
+        self.assertLessEqual(sent["timeout"], 45)
+        self.assertEqual(sent["body"]["pane"], "%9")
+        self.assertEqual(sent["body"]["machine"], "맥북")          # 보드가 말하는 이 기계 이름
+        self.assertIn("■ 미니 — 연결됨", sent["body"]["context"]["fleet"])
+        self.assertEqual(sent["body"]["context"]["screen"], "화면 끝")
+        self.assertEqual(sent["body"]["catalog"], CATALOG)
+
+    def test_no_token_file_means_no_token_header(self):
+        self.descriptor.write_text(json.dumps({"version": 1, "url": "http://10.0.0.1:8792"}), encoding="utf-8")
+        seen = {}
+
+        class Resp:
+            status = 200
+            def read(self, _n=None):
+                return b'{"answer":"\uc751"}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        def fake_open(req, timeout=None):
+            seen.update({k.lower(): v for k, v in req.headers.items()})
+            return Resp()
+
+        with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.descriptor), \
+                patch.object(ask, "NACHO_ASK_TOKEN_FILE", self.tmp / "없다"), \
+                patch.object(ask, "urlopen", side_effect=fake_open):
+            os.environ.pop("NACHO_ASK_URL", None)
+            out = ask.ask_nacho("안녕", "%9", self.ctx)
+        self.assertEqual(out, {"answer": "응", "actions": [], "act": {"motion": None, "expression": None}})
+        self.assertNotIn("x-nacho-token", seen)
+
+    def test_when_nacho_fails_the_local_brain_answers(self):
+        self.descriptor.write_text(json.dumps({"version": 1, "url": "http://10.0.0.1:8792"}), encoding="utf-8")
+
+        class Down:
+            status = 504
+            def read(self, _n=None):
+                return b"{}"
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        class Empty(Down):
+            status = 200
+            def read(self, _n=None):
+                return b'{"answer":"   "}'
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+            async def messages(self, **kw):
+                self.calls.append(kw)
+                return {"content": [{"type": "text", "text": "여기서 답했어"}]}
+            @staticmethod
+            def extract_text(resp, names):
+                return resp["content"][0]["text"]
+            @staticmethod
+            def extract_tool_uses(resp):
+                return []
+
+        for opener in (OSError("메시 끊김"), Down(), Empty()):
+            client = Client()
+            side = (lambda *a, **k: (_ for _ in ()).throw(opener)) if isinstance(opener, Exception) else (lambda *a, **k: opener)
+            with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.descriptor), \
+                    patch.object(ask, "NACHO_ASK_TOKEN_FILE", self.tmp / "없다"), \
+                    patch.object(ask, "urlopen", side_effect=side), \
+                    patch.object(ask, "llm_client", return_value=client), \
+                    patch.object(ask, "run_cli", side_effect=self._cli()), \
+                    patch.object(ask, "_machines_http", return_value=MACHINES):
+                os.environ.pop("NACHO_ASK_URL", None)
+                status, payload = ask.answer(lambda _c: None, {"text": "다들 뭐 해?", "pane": "%9", "catalog": CATALOG})
+            self.assertEqual((status, payload["answer"]), (200, "여기서 답했어"), repr(opener))
+            self.assertIn("■ 미니 — 연결됨", client.calls[0]["messages"][0]["content"])
+
+    def test_an_env_url_wins_over_the_descriptor(self):
+        self.descriptor.write_text(json.dumps({"version": 1, "url": "http://파일:1"}), encoding="utf-8")
+        with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.descriptor), \
+                patch.dict(os.environ, {"NACHO_ASK_URL": "http://환경:2/"}):
+            self.assertEqual(ask.nacho_base(), "http://환경:2")
 
 
 class PerformTests(unittest.TestCase):
