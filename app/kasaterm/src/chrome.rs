@@ -548,7 +548,13 @@ impl App {
                         (
                             format!("{who} · 완료"),
                             format!("done:{id}"),
-                            if intent.trim().is_empty() { "한 턴을 마쳤어요".to_string() } else { intent },
+                            // 끝났을 때 사람이 알고 싶은 것은 「무슨 도구를 썼나」가 아니라
+                            // **뭐라고 했나**다(2026-09-21 지시). 마지막 말이 있으면 그것을
+                            // 싣고, 아직 아무 말도 없었을 때만 하던 일로 대신한다.
+                            {
+                                let text = detail([self.pane_last_reply(id), Some(intent)]);
+                                if text.is_empty() { "한 턴을 마쳤어요".to_string() } else { text }
+                            },
                         )
                     };
                     notify_desktop(
@@ -601,6 +607,21 @@ impl App {
     /// pane 이 현존하고 캐릭터가 배정됐으면 그 이름(고정값) — 토스트 "누가" 소스.
     /// 미현존(resume/재사용으로 surface_id 가 stale)이거나 순정 pane 이면 None →
     /// 호출부는 hook 정보만으로 폴백(토스트를 드롭하지 않는다).
+    /// 그 pane 의 학생이 **마지막으로 한 말**. 알림 본문에 쓴다.
+    ///
+    /// 기록 꼬리를 그 자리에서 읽는다 — 매 틱 도는 길이 아니라 알림이 나갈 때 한 번뿐이라
+    /// 싸고, 캐시를 하나 더 두면 그것이 낡는 자리가 또 생긴다. 묶인 기록이 없으면(훅이 아직
+    /// 안 붙은 pane) None 이고, 그때는 부르는 쪽이 하던 일로 대신한다.
+    pub(crate) fn pane_last_reply(&self, id: &str) -> Option<String> {
+        let path = self.collab.hub.bound.lock().ok()?.get(id).cloned()?;
+        let (tail, idle) = crate::socket::read_tail(&path, 128 * 1024);
+        let said = crate::transcript::snapshot_from_tail(id, &tail, idle).last_reply;
+        let said = said.trim();
+        // 한 줄만 — 알림은 두어 줄이면 잘리고, 첫 문장이 대개 결론이다.
+        let first = said.lines().find(|line| !line.trim().is_empty())?.trim();
+        (!first.is_empty()).then(|| first.chars().take(120).collect())
+    }
+
     pub(crate) fn pane_character_if_known(&self, id: &str) -> Option<String> {
         let ws = self.ws.lock().unwrap();
         let key = ws.active_tab_pid(id);
