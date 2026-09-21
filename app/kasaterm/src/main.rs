@@ -10119,7 +10119,7 @@ mod tests {
     fn restore_command_picks_the_harness_it_was() {
         // 여기서는 **하네스 갈래만** 본다 — 모델·effort 조합은 session.rs 쪽에 건다.
         let cmd = |a, s, r| crate::session::restore_agent_command(a, s, r, None, None);
-        assert_eq!(cmd(Some("codex"), None, false), "codex\r");
+        assert_eq!(cmd(Some("codex"), None, false), "codex -c check_for_update_on_startup=false\r");
         assert_eq!(
             cmd(
                 Some("codex"),
@@ -10130,7 +10130,7 @@ mod tests {
         );
         // rollout 이 사라졌으면 새로 — `resume --last` 로 흘리지 않는다(미러된
         // ~/.codex/sessions 전체에서 골라 남의 대화를 물어온다).
-        assert_eq!(cmd(Some("codex"), Some("019fd187-ba6e"), false), "codex\r");
+        assert_eq!(cmd(Some("codex"), Some("019fd187-ba6e"), false), "codex -c check_for_update_on_startup=false\r");
         assert_eq!(
             cmd(Some("claude"), Some("abcd-1234"), true),
             "claude --resume abcd-1234\r"

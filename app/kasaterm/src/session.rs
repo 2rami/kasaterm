@@ -9737,7 +9737,8 @@ pub(crate) fn restore_agent_command(
         (Some("codex"), Some(sid)) => {
             format!("codex resume {sid} -c check_for_update_on_startup=false")
         }
-        (Some("codex"), None) => "codex".to_string(),
+        // Automatic restoration cannot wait for an updater that exits to the shell.
+        (Some("codex"), None) => "codex -c check_for_update_on_startup=false".to_string(),
         // agy 는 아직 세션 id 가 안 들어온다 — bind-transcript 훅이 claude·codex
         // shim 에만 걸려 있어서다. 그래도 하네스는 맞춰 띄운다: 여기 없으면 agy
         // pane 이 claude 로 되살아난다.
@@ -10845,7 +10846,7 @@ mod agy_restore_tests {
     fn every_harness_restores_as_itself() {
         for (agent, fresh) in [
             ("claude", "claude\r"),
-            ("codex", "codex\r"),
+            ("codex", "codex -c check_for_update_on_startup=false\r"),
             ("agy", "agy\r"),
         ] {
             assert_eq!(cmd(Some(agent), None, false), fresh, "{agent} 새로 띄우기");
@@ -10869,7 +10870,7 @@ mod agy_restore_tests {
     #[test]
     fn unresumable_drops_the_id() {
         assert_eq!(cmd(Some("agy"), Some("s3"), false), "agy\r");
-        assert_eq!(cmd(Some("codex"), Some("s2"), false), "codex\r");
+        assert_eq!(cmd(Some("codex"), Some("s2"), false), "codex -c check_for_update_on_startup=false\r");
     }
 
     /// 모델·effort 문법이 하네스마다 다르다. 한 판에서 복붙하다 갈리기 쉬운 자리라
@@ -11036,7 +11037,7 @@ mod agy_restore_tests {
         assert_eq!(agent, Some("codex"));
         assert_eq!(
             restore_agent_command(agent, explicit_codex["session_id"].as_str(), false, None, None),
-            "codex\r",
+            "codex -c check_for_update_on_startup=false\r",
             "명시 Codex의 rollout이 사라졌으면 fresh Codex"
         );
     }

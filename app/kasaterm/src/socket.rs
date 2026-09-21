@@ -666,6 +666,11 @@ impl PtyBackend {
                     if let Some(path) = discover_codex_rollout(&id, agent_pid) {
                         let same = self.bound.lock().unwrap().get(&id) == Some(&path);
                         if same {
+                            // Launch preparation clears the GUI identity even when resume
+                            // reopens this same file; the backend cache is not a GUI receipt.
+                            if let Some(sid) = codex_sid_from_rollout(&path) {
+                                let _ = self.proxy.send_event(UserEvent::SocketSessionBound(id.clone(), sid));
+                            }
                             self.codex_bound_pids
                                 .lock()
                                 .unwrap()
