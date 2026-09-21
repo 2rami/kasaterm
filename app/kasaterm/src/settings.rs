@@ -4228,7 +4228,7 @@ fn spawn_hidden_login(
                                         let _ = std::fs::create_dir_all(prof);
                                         open_isolated_browser(&url, prof);
                                     }
-                                    None => open_default_browser(&url),
+                                    None => open_default_browser(&with_account_chooser(&url)),
                                 }
                             }
                         }
@@ -4395,6 +4395,25 @@ fn login_profile(browser: LoginBrowser, id: &str) -> Option<std::path::PathBuf> 
 /// 프로세스 한 줄에서 로그인 URL 을 뽑는다. claude·codex 를 같이 받는다 — 접히지
 /// 않은 한 줄이라 공백까지 자르면 끝이고, PTY 화면을 폴링하며 접힌 URL 을 이어 붙이던
 /// 곡예(state 를 정확히 43자로 끊어야 다음 줄 첫 단어가 안 딸려왔다)가 필요 없다.
+/// 쓰던 브라우저로 열 때 **계정을 고를 기회**를 한 번 준다.
+///
+/// 그 창에 붙어 있는 claude.ai 세션이 그대로 승인되면 슬롯이 전부 같은 계정이 된다.
+/// 2026-09-21 실측: 팀 계정 자리가 개인 계정으로 덮여 두 슬롯이 같은 계정이 됐고,
+/// 한도를 나누려고 슬롯을 가른 뜻이 사라졌다. 격리 프로필은 그 함정을 피하지만 빈
+/// 크롬에서 비밀번호와 2단계를 매번 치는 값이 비싸다(2026-08-15 지시로 기본에서 뺐다).
+/// `prompt=login` 은 쓰던 브라우저를 그대로 쓰면서 그 화면만 한 번 세운다.
+///
+/// ⚠️ `redirect_uri`·`state`·`code_challenge` 는 건드리지 않는다 — 토큰 교환은 authorize
+/// 에 쓴 것과 같은 값을 다시 보내야 하고, 그걸 고쳤다가 승인까지 마치고 400 이 뜬 적이
+/// 있다(2026-09-07). 덧붙이는 것은 표준 파라미터 하나뿐이고, 서버가 모르면 무시된다.
+fn with_account_chooser(url: &str) -> String {
+    if url.contains("prompt=") {
+        return url.to_string();
+    }
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}prompt=login")
+}
+
 fn login_url_in(line: &str) -> Option<String> {
     let at = line.find("https://")?;
     let url: String = line[at..]
@@ -4407,7 +4426,7 @@ fn login_url_in(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod login_url_tests {
-    use super::login_url_in;
+    use super::{login_url_in, with_account_chooser};
 
     #[test]
     fn codex_default_login_keeps_the_official_browser_callback() {
@@ -4454,6 +4473,24 @@ mod login_url_tests {
             login_url_in("visit https://auth.openai.com/oauth/authorize?x=1 and paste the code")
                 .expect("URL");
         assert!(u.ends_with("x=1"), "뒷말이 딸려 왔다: {u}");
+    }
+
+    #[test]
+    fn the_account_chooser_is_added_once_and_never_touches_the_oauth_proof() {
+        let url = "https://claude.com/cai/oauth/authorize?client_id=x&redirect_uri=https%3A%2F%2Fy&state=abc&code_challenge=z";
+        let out = with_account_chooser(url);
+        assert!(out.starts_with(url), "원래 주소를 앞에 그대로 둔다");
+        assert!(out.ends_with("&prompt=login"));
+        for keep in ["redirect_uri=https%3A%2F%2Fy", "state=abc", "code_challenge=z"] {
+            assert!(out.contains(keep), "{keep} 이 사라졌다 — 토큰 교환이 깨진다");
+        }
+        // 두 번 부르거나 CLI 가 이미 붙여 왔으면 덧대지 않는다.
+        assert_eq!(with_account_chooser(&out), out);
+        assert_eq!(
+            with_account_chooser("https://example.com/a?prompt=consent"),
+            "https://example.com/a?prompt=consent"
+        );
+        assert_eq!(with_account_chooser("https://example.com/a"), "https://example.com/a?prompt=login");
     }
 
     /// 로그인과 무관한 링크는 무시한다 — 안내문에 도움말 URL 이 섞여 나온다.
