@@ -517,20 +517,43 @@ impl App {
                 }
                 if !(self.window_focused && is_active_pane) {
                     self.unread_panes.insert(id.to_string());
-                    let intent = self.pane_activity.get(id).map(|a| a.intent.clone()).unwrap_or_default();
+                    let activity = self.pane_activity.get(id);
+                    let intent = activity.map(|a| a.intent.clone()).unwrap_or_default();
                     // 멈춘 것을 「완료」로 부르면 알림 전체가 못 믿을 것이 된다 — 사람이
                     // 그 줄을 보고 「끝났구나」로 읽고 넘기기 때문이다(2026-09-21 지시
                     // 「api error 로 일시정지된 것도 완료로 알림이 와」). 화면 문구가 놓친
                     // 종류도 기록·명부가 남긴 오류 표식으로 한 번 더 거른다.
                     let stalled = self.collab.hub.resolved(id).is_some_and(|r| r.has_error);
-                    let (title, key) = if stalled {
-                        (format!("{who} · 멈춤"), format!("stalled:{id}"))
+                    let why = activity.and_then(|a| a.stalled.clone());
+                    // 본문이 비면 이름만 뜬 알림이 된다 — 무엇을 하다 그리 됐는지가 빠지면
+                    // 사람은 그 pane 을 열어 봐야 하고, 그러느니 안 보게 된다(2026-09-21
+                    // 「캐릭터랑 세션 이름만 오던데」). 있는 재료를 순서대로 잇는다.
+                    let detail = |parts: [Option<String>; 2]| -> String {
+                        parts.into_iter().flatten()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                    };
+                    let (title, key, body) = if stalled {
+                        (
+                            format!("{who} · 멈춤"),
+                            format!("stalled:{id}"),
+                            {
+                                let text = detail([why, Some(intent.clone())]);
+                                if text.is_empty() { "까닭은 그 창 화면에 있어요".to_string() } else { text }
+                            },
+                        )
                     } else {
-                        (format!("{who} · 완료"), format!("done:{id}"))
+                        (
+                            format!("{who} · 완료"),
+                            format!("done:{id}"),
+                            if intent.trim().is_empty() { "한 턴을 마쳤어요".to_string() } else { intent },
+                        )
                     };
                     notify_desktop(
                         &title,
-                        &intent,
+                        &body,
                         character.as_deref(),
                         Some(&key),
                         Some((id, sid.as_deref())),
