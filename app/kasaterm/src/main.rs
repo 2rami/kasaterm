@@ -3637,6 +3637,8 @@ enum UserEvent {
     /// A background git op (push/pull/commit) finished — clears the panel's
     /// spinner. Carries nothing: only one git op runs at a time.
     GitOpDone,
+    /// 다른 기기 레포에 시킨 깃 동작이 실패했다 — 사유를 토스트로.
+    GitOpFailed(String),
     /// Local cmux socket backend → GUI delegation. The socket server runs on
     /// its own thread and can't touch `self.pty` (not Arc<Mutex>), so it routes
     /// pane writes / split / focus to the GUI thread via the proxy. `surface_id`

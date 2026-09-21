@@ -1430,6 +1430,39 @@ pub fn remote_get_json(base: &str, path_and_query: &str) -> Result<serde_json::V
     })
 }
 
+/// 그 기계의 HTTP 창구에 POST 한다 — 읽기만 하던 길(`remote_get_json`)의 짝이다.
+///
+/// 깃 패널이 다른 기기 레포를 **읽기만** 하고 고치지는 못하던 자리를 위해 열었다. 그
+/// 경로는 이 기계에 없으니 여기서 git 을 돌 수는 없고, 그 기계에 시키는 길이 필요하다.
+/// 시간 상한을 읽기보다 길게 두는 이유는 push 가 네트워크를 타기 때문이다.
+pub fn remote_post_json(base: &str, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+    let token = connection_auth_token(base);
+    let u = format!("{}{}", base.trim_end_matches('/'), path);
+    let body = body.clone();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("post runtime")?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(90))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("http client")?;
+        let mut req = client.post(&u).json(&body);
+        if let Some(t) = token.as_deref() {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("원격 POST 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("HTTP {status}: {text}");
+        }
+        serde_json::from_str(&text).context("원격 답 해석")
+    })
+}
+
 /// 그 기계의 파일 하나를 통째로 받는다(4MB 상한은 저쪽이 건다).
 pub fn remote_get_bytes(base: &str, path_and_query: &str) -> Result<Vec<u8>> {
     let token = connection_auth_token(base);

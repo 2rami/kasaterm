@@ -1710,6 +1710,13 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::GitOpFailed(why) => {
+                self.git.op = None;
+                self.set_toast(why.clone());
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::GitOpDone => {
                 self.git.op = None;
                 self.chrome_dirty = true;

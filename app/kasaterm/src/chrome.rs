@@ -1656,13 +1656,59 @@ impl App {
     /// read the column's repo from the poller's snapshot so the action always
     /// targets what the user sees.
     pub(crate) fn run_git_col_action(&mut self, btn: GitColBtn) {
-        // 남의 기기 레포는 여기서 못 고친다 — 경로가 이 기계엔 없거나 다른 것이다.
-        if self.git.col_remote.lock().ok().is_some_and(|r| r.is_some()) {
-            self.set_toast("다른 기기의 레포는 여기서 못 고쳐요 — 그 기기에서 하세요".into());
-            return;
-        }
         let cwd = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone());
         let Some(cwd) = cwd else { return };
+        // 남의 기기 레포는 **그 기계에 시킨다** — 경로가 이 기계엔 없어 여기서 git 을 돌 수는
+        // 없지만, 읽는 길(`/term/gitcol`)이 이미 그쪽 창구를 타고 있었다. 고치는 길만 막혀
+        // 있어 남의 기기 레포를 보면서도 커밋·푸시는 그 기계로 건너가야 했다(2026-09-21 지시).
+        let remote = self.git.col_remote.lock().ok().and_then(|r| r.clone());
+        if let Some((label, base)) = remote {
+            let (op, message) = match btn {
+                GitColBtn::Pull => ("pull", String::new()),
+                GitColBtn::Push => ("push", String::new()),
+                GitColBtn::Commit => {
+                    let msg = self.git.commit_msg.trim().to_string();
+                    if msg.is_empty() {
+                        self.git.commit_focused = true;
+                        self.chrome_dirty = true;
+                        return;
+                    }
+                    ("commit", msg)
+                }
+                _ => {
+                    self.set_toast(format!("그건 {label} 에서 해야 해요 — 여기서는 받기·올리기·커밋만 돼요"));
+                    return;
+                }
+            };
+            self.git.op = Some(match op {
+                "pull" => "Pulling",
+                "push" => "Pushing",
+                _ => "Committing",
+            });
+            if op == "commit" {
+                self.git.commit_msg.clear();
+                self.git.commit_cursor = 0;
+            }
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                let body = serde_json::json!({
+                    "path": cwd.to_string_lossy(), "op": op, "message": message,
+                });
+                let said = match kasa_mcp::remote::remote_post_json(&base, "/term/gitop", &body) {
+                    Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => None,
+                    Ok(v) => Some(v.get("output").or_else(|| v.get("error"))
+                        .and_then(|o| o.as_str()).unwrap_or("실패했어요").to_string()),
+                    Err(e) => Some(e.to_string()),
+                };
+                let _ = proxy.send_event(UserEvent::GitOpDone);
+                if let Some(why) = said {
+                    // 실패는 조용히 지나가면 안 된다 — 단추를 눌렀는데 아무 일도 없던 것과
+                    // 구분이 안 된다. 사유를 그대로 띄운다(충돌·인증이 대부분이다).
+                    let _ = proxy.send_event(UserEvent::GitOpFailed(format!("{label}: {why}")));
+                }
+            });
+            return;
+        }
         match btn {
             GitColBtn::Pull => {
                 self.git.op = Some("Pulling");

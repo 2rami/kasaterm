@@ -4607,6 +4607,43 @@ async fn term_gitcol_get(
     }
 }
 
+/// `POST /term/gitop {path, op, message?}` — 다른 기기의 깃 패널이 시키는 일.
+///
+/// 읽기(`/term/gitcol`)는 있었는데 고치는 길이 없어, 남의 기기 레포를 보면서도 커밋·푸시는
+/// 그 기계로 가서 해야 했다(2026-09-21 지시). 경로는 **그 기계의 것**이라 부르는 쪽에서
+/// git 을 돌 수 없다 — 시키는 수밖에 없다.
+///
+/// 되돌리기 어려운 것은 받지 않는다: pull·push·commit(스테이지된 것)뿐이고, 브랜치 전환이나
+/// 되감기는 없다. 워킹트리를 여럿이 함께 쓰는 기계에서 그건 남의 pane 을 통째로 끌고 간다.
+async fn term_gitop_post(body: axum::body::Bytes) -> impl IntoResponse {
+    let err = |m: &str| Json(serde_json::json!({ "ok": false, "error": m }));
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return err("JSON body 가 필요해요");
+    };
+    let Some(path) = v.get("path").and_then(|p| p.as_str()).filter(|p| p.starts_with('/')) else {
+        return err("`path`(절대경로) 가 필요해요");
+    };
+    let op = v.get("op").and_then(|o| o.as_str()).unwrap_or_default();
+    let message = v.get("message").and_then(|m| m.as_str()).unwrap_or_default().trim();
+    let path = std::path::Path::new(path).to_path_buf();
+    let message = message.to_string();
+    let op = op.to_string();
+    let done = tokio::task::spawn_blocking(move || match op.as_str() {
+        "pull" => Some(crate::git::git_pull(&path)),
+        "push" => Some(crate::git::git_push(&path)),
+        "commit" if !message.is_empty() => Some(crate::git::git_commit_staged(&path, &message)),
+        _ => None,
+    })
+    .await
+    .unwrap_or(None);
+    // git 함수는 `{ok, output}` 을 그대로 준다 — 실패 사유(충돌·인증)를 부르는 쪽 토스트가
+    // 보여줘야 하므로 통째로 넘긴다.
+    match done {
+        Some(result) => Json(result),
+        None => err("`op` 은 pull·push·commit 중 하나여야 하고, commit 은 `message` 가 필요해요"),
+    }
+}
+
 /// 폴더 한 층 — 다른 기기의 파일트리가 이걸로 그린다. `.git` 은 빼고, 폴더 먼저.
 async fn term_tree_get(
     q: Query<std::collections::HashMap<String, String>>,
@@ -7484,6 +7521,7 @@ pub fn spawn_http_server_opts(
                         get(move || term_panes_handler(panes_backend.clone())),
                     )
                     .route("/term/changes", get(term_changes_handler))
+                    .route("/term/gitop", post(term_gitop_post))
                     .route(
                         "/term/gitcol",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
