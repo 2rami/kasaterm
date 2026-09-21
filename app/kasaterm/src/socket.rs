@@ -2895,6 +2895,10 @@ impl Backend for PtyBackend {
         kasa_mcp::board_service::address(surface,session.as_deref())
     }
 
+    fn submit_login_code(&self, code: &str) -> bool {
+        crate::settings::submit_login_code(code)
+    }
+
     fn collab_board_source(&self) -> Result<serde_json::Value> {
         use serde_json::json;
         let mut live = self.live_surfaces();

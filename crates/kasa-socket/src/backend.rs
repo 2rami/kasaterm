@@ -1346,6 +1346,16 @@ pub trait Backend: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// 브라우저가 OAuth 승인을 마치고 받은 코드. 기본은 받지 않는다 — 로그인을 돌리는
+    /// 백엔드만 이걸 구현한다. `true` 면 기다리던 로그인에 실제로 넣었다는 뜻이다.
+    ///
+    /// 이 길이 있는 이유는 claude CLI 의 승인이 `platform.claude.com` 으로 되돌아오기
+    /// 때문이다. localhost 로 안 오니 코드가 화면에 뜨고 사람이 그것을 옮겨야 하는데,
+    /// 그 화면을 보는 것은 브라우저 쪽뿐이다 — 거기서 주워 여기로 넘긴다.
+    fn submit_login_code(&self, _code: &str) -> bool {
+        false
+    }
+
     fn collab_board_source(&self) -> Result<serde_json::Value> {
         anyhow::bail!("local collaboration source unsupported by this backend")
     }

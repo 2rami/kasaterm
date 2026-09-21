@@ -1094,6 +1094,34 @@ async fn machines_announce_handler(body: axum::body::Bytes) -> impl IntoResponse
     Json(serde_json::json!({ "ok": true }))
 }
 
+/// `POST /claude-login-code` body `{code}` — 브라우저가 주운 OAuth 코드.
+///
+/// claude CLI 의 승인은 `platform.claude.com` 으로 되돌아온다(localhost 가 아니다).
+/// 그래서 코드가 화면에 뜨고 사람이 그것을 복사해 옮겨야 하는데, 그 화면을 보는 것은
+/// 브라우저뿐이다 — 확장이 콜백 탭을 보는 순간 여기로 넘기면 사람 손이 빠진다.
+/// `redirect_uri` 를 우리 주소로 바꾸는 길은 막혀 있다(토큰 교환이 같은 주소를 요구해
+/// 승인까지 마치고 400 이 났다, 2026-09-07) — 그래서 코드를 **대신 받는** 쪽으로 푼다.
+///
+/// 기다리는 로그인이 없으면 `false` 다. 코드는 일회용이라 보관하지 않는다.
+async fn claude_login_code_handler(
+    backend: Arc<dyn Backend>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let code = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_owned))
+        .unwrap_or_default();
+    let code = code.trim().to_string();
+    // 길이 상한은 넉넉히 — `<코드>#<state>` 꼴이고 둘 다 base64url 이다.
+    if code.is_empty() || code.len() > 512 || code.contains(char::is_whitespace) {
+        return Json(serde_json::json!({ "ok": false, "error": "코드가 없거나 모양이 아니에요" }));
+    }
+    let taken = tokio::task::spawn_blocking(move || backend.submit_login_code(&code))
+        .await
+        .unwrap_or(false);
+    Json(serde_json::json!({ "ok": true, "taken": taken }))
+}
+
 /// `POST /pane-migrate` body `{pane, target, cwd?, force?}` — 이사를 웹 UI 에서.
 /// `target` 은 기계 라벨 또는 `"local"`(데려오기). 주소·경로 매핑은 여기(서버)가
 /// 푼다 — UI 가 기계의 파일시스템 구조를 알 이유가 없다.
@@ -7254,6 +7282,7 @@ pub fn spawn_http_server_opts(
                 let ai_backend = backend.clone();
                 let sessions_backend = backend.clone();
                 let board_backend = backend.clone();
+                let login_code_backend = backend.clone();
                 let collab_snapshot_backend = backend.clone();
                 let collab_changes_backend = backend.clone();
                 let collab_inspect_backend = backend.clone();
@@ -7380,6 +7409,8 @@ pub fn spawn_http_server_opts(
                     .route("/collab/inspect", get(move |q: Query<std::collections::HashMap<String,String>>|
                         collab_read_handler(collab_inspect_backend.clone(),"inspect",q)))
                     .route("/machines/announce", post(machines_announce_handler))
+                    .route("/claude-login-code", post(move |body: axum::body::Bytes|
+                        claude_login_code_handler(login_code_backend.clone(), body)))
                     .route("/version", get(version_handler))
                     .route(
                         "/pane-migrate",
