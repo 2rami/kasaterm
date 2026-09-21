@@ -5480,6 +5480,10 @@ struct App {
     /// haven't been opened since — drives the Dock badge count. Cleared when
     /// the pane becomes the focused active pane (`sync_dock_badge`).
     unread_panes: std::collections::HashSet<String>,
+    /// 앱이 뜬 시각. 막 켜진 동안은 상태 판정이 한 번 흔들린다 — 훅·기록·명부가 아직 다 안
+    /// 모여 일하는 중으로 보였다가 곧 쉬는 중이 되고, 그 사이가 「완료」 전이로 읽힌다.
+    /// 그것을 알림·읽지 않음으로 세우면 껐다 켤 때마다 안 본 것이 쌓인 것처럼 보인다.
+    booted_at: std::time::Instant,
     /// Last value pushed to the Dock badge, so AppKit is only touched on change.
     dock_badge_n: usize,
     /// Collab completion toast + approval card, grouped into a sub-struct
@@ -6124,6 +6128,7 @@ impl App {
             account_flash: None,
             account_switch_from_peer: false,
             turn_done_panes: std::collections::HashSet::new(),
+            booted_at: std::time::Instant::now(),
             window_alert: std::collections::HashSet::new(),
             expanded_windows: std::collections::HashSet::new(),
             expand_anim: None,

@@ -494,11 +494,24 @@ impl App {
     }
 
     /// 상태 전이 하나를 화면·알림으로 옮긴다. 완료 → 펄스·cheer·데스크톱 알림, 사람 차례 →
+    /// 켜진 뒤 이만큼은 전이를 알리지 않는다. 훅 한 번·기록 한 번·명부 한 번이 모이는 데
+    /// 드는 시간이고, 그 뒤의 전이는 실제로 그 pane 에서 일어난 일이다.
+    const BOOT_QUIET: std::time::Duration = std::time::Duration::from_secs(12);
+
     /// 토스트·알림, 오류 → 알림 한 번. 전부 `notify_desktop` 의 dedup 키를 지나므로 훅과
     /// 겹쳐도 한 번이다.
     pub(crate) fn apply_transition_event(&mut self, id: &str, ev: crate::agent_transitions::Transition) {
         use crate::agent_transitions::Transition;
         let now = std::time::Instant::now();
+        // 막 켜진 동안의 전이는 알리지 않는다. 그때는 판정이 한 번 흔들려(훅·기록·명부가
+        // 아직 다 안 모였다) 일하는 중 → 쉬는 중이 스치고, 그것이 「완료」로 읽힌다. 알림과
+        // 읽지 않음 표시를 거기서 세우면 껐다 켤 때마다 안 본 것이 쌓인 것처럼 보인다
+        // (2026-09-21 「껐다 켜면 확인 안 한 것처럼 깜빡이는 거」). 오류는 예외다 — 그건
+        // 켜자마자 알아야 하고, 흔들림으로 생기지도 않는다.
+        if self.booted_at.elapsed() < Self::BOOT_QUIET && !matches!(ev, Transition::Error { .. }) {
+            self.chrome_dirty = true;
+            return;
+        }
         if std::env::var_os("KASATERM_STATE_LOG").is_some() {
             eprintln!("[state] {id} {ev:?}");
         }
