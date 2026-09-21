@@ -518,11 +518,21 @@ impl App {
                 if !(self.window_focused && is_active_pane) {
                     self.unread_panes.insert(id.to_string());
                     let intent = self.pane_activity.get(id).map(|a| a.intent.clone()).unwrap_or_default();
+                    // 멈춘 것을 「완료」로 부르면 알림 전체가 못 믿을 것이 된다 — 사람이
+                    // 그 줄을 보고 「끝났구나」로 읽고 넘기기 때문이다(2026-09-21 지시
+                    // 「api error 로 일시정지된 것도 완료로 알림이 와」). 화면 문구가 놓친
+                    // 종류도 기록·명부가 남긴 오류 표식으로 한 번 더 거른다.
+                    let stalled = self.collab.hub.resolved(id).is_some_and(|r| r.has_error);
+                    let (title, key) = if stalled {
+                        (format!("{who} · 멈춤"), format!("stalled:{id}"))
+                    } else {
+                        (format!("{who} · 완료"), format!("done:{id}"))
+                    };
                     notify_desktop(
-                        &format!("{who} · 완료"),
+                        &title,
                         &intent,
                         character.as_deref(),
-                        Some(&format!("done:{id}")),
+                        Some(&key),
                         Some((id, sid.as_deref())),
                     );
                 }

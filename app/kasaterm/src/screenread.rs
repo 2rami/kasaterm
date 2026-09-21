@@ -4314,6 +4314,18 @@ pub(crate) fn connection_trouble_in(line: &str) -> Option<&'static str> {
         ("(offline)", "오프라인"),
         ("request timed out", "응답 없음"),
         ("Retrying in", "재시도 중"),
+        // 여기까지는 연결 문제고, 아래는 **서버·계정이 거절한 것**이다. 둘을 같은 목록에
+        // 두는 이유는 쓰이는 자리가 같아서다 — 어느 쪽이든 그 pane 은 일하다 멈췄고, 그걸
+        // 「완료」로 알리면 사람이 알림을 안 믿게 된다(2026-09-21 지시 「api error 로
+        // 일시정지된 것도 완료로 알림이 와」).
+        //
+        // `API Error` 는 claude 가 상태코드를 앞에 달고 내는 접두어라 500·529·400 을 한
+        // 번에 덮는다. 본문에 그 글자가 그대로 나올 일은 드물고, 화면 아래 12줄만 보므로
+        // 옛 오류가 다시 잡히지도 않는다.
+        ("API Error", "API 오류"),
+        ("overloaded_error", "서버 혼잡"),
+        ("usage limit reached", "한도 소진"),
+        ("Credit balance is too low", "잔액 부족"),
     ];
     // 대소문자는 판에 따라 갈릴 수 있어 낮춰서 본다. 화면 한 줄이라 비용은 무시할 만하다.
     let low = line.to_lowercase();
@@ -8152,6 +8164,11 @@ mod connection_trouble_tests {
             ("  ⎿  (request timed out)", "응답 없음"),
             ("claude (offline)", "오프라인"),
             ("Retrying in 3 seconds… (attempt 2/10)", "재시도 중"),
+            // 서버·계정이 거절한 것도 같은 자리에서 잡는다 — 「완료」로 새면 안 된다.
+            ("API Error: 500 {\"type\":\"error\"}", "API 오류"),
+            ("API Error: 529 overloaded_error", "API 오류"),
+            ("Claude usage limit reached. Your limit will reset at 3pm", "한도 소진"),
+            ("Credit balance is too low", "잔액 부족"),
         ] {
             assert_eq!(connection_trouble_in(line), Some(want), "{line}");
         }
