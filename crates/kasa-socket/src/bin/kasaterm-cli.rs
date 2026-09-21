@@ -599,7 +599,15 @@ fn run() -> Result<Option<Response>> {
             request.params.get("message_id").and_then(|v| v.as_str()),
             response.result.as_ref().and_then(|r| r.get("address")).filter(|a| a.is_object()),
         ) {
-            save_receipt(id, address);
+            let (id, address) = (id.to_string(), address.clone());
+            save_receipt(&id, &address);
+            // 보관(`accepted`)만 보고 나가면 「갔나?」를 확인할 길이 tell-status 나 peek 뿐이다.
+            // 붙여넣기와 Enter 는 1초 안에 끝나므로 여기서 그 결과까지 보고 나간다
+            // (2026-09-21 지시 「전송됐는지 peek 말고 빠르게」).
+            if let Some(settled) = await_tell_settled(&socket_path, &id, &address) {
+                eprintln!("tell: {}", tell_state_line(&settled));
+                response.result = Some(settled);
+            }
         }
     }
     if cmd == "server" {
@@ -629,6 +637,55 @@ fn run() -> Result<Option<Response>> {
         return Ok(None);
     }
     Ok(Some(response))
+}
+
+/// 붙여넣기와 Enter 가 끝날 때까지만 기다린다. 상대가 일하는 중이면 큐에 남아 보관
+/// 상태로 오래 있을 수 있으니, 그때는 기다리지 않고 지금 상태를 그대로 돌려준다 —
+/// 기다리는 시간이 길어지면 「빠르게 확인」이라는 목적 자체가 사라진다.
+fn await_tell_settled(socket_path: &str, id: &str, address: &Value) -> Option<Value> {
+    // 첫 쓰기는 160ms 뒤 확인으로 이어진다. 그 두 배를 상한으로 잡고 짧게 되묻는다.
+    const TRIES: usize = 12;
+    const GAP: std::time::Duration = std::time::Duration::from_millis(160);
+    let mut last = None;
+    for attempt in 0..TRIES {
+        std::thread::sleep(GAP);
+        let request = Request {
+            id: json!("tell-settle"),
+            method: "collab.tell_status".into(),
+            params: json!({ "message_id": id, "address": address }),
+        };
+        let Ok(response) = roundtrip(socket_path, &request) else { break };
+        if !response.ok {
+            break;
+        }
+        let Some(receipt) = response.result else { break };
+        let settled = receipt
+            .get("state")
+            .and_then(|s| s.as_str())
+            // 보관·전달중은 아직 가는 길이다. 그 밖은 이미 결론이라 더 기다릴 것이 없다.
+            .is_some_and(|state| !matches!(state, "accepted" | "dispatching"));
+        last = Some(receipt);
+        if settled {
+            break;
+        }
+        let _ = attempt;
+    }
+    last
+}
+
+/// 사람이 한눈에 읽을 한 줄. 영수증 JSON 은 그대로 표준 출력으로도 나간다.
+fn tell_state_line(receipt: &Value) -> String {
+    let state = receipt.get("state").and_then(|s| s.as_str()).unwrap_or("?");
+    let reason = receipt.get("reason").and_then(|s| s.as_str()).unwrap_or_default();
+    let said = match state {
+        "submitted" => "들어갔다(모델이 읽었는지는 별개)",
+        "accepted" => "아직 큐 — 상대 입력창이 비면 들어간다",
+        "dispatching" => "보내는 중",
+        "failed" => "실패",
+        "uncertain" => "확인 못 함 — 같은 ID 로만 다시 확인해라",
+        _ => state,
+    };
+    if reason.is_empty() { said.to_string() } else { format!("{said} · {reason}") }
 }
 
 /// Machine and room identity must precede reusable pane numbers.

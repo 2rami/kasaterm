@@ -5,6 +5,9 @@ use std::time::Duration;
 use std::collections::{BTreeMap,HashSet};
 use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering};
 
+/// 붙여넣기가 화면에 닿았는지 보는 앞머리 길이(공백 제외). 짧은 본문은 통째로 확인된다.
+const PROBE_CHARS: usize = 24;
+
 const PROOF_DEADLINE: Duration = Duration::from_secs(2);
 const PROOF_FRESHNESS: Duration = Duration::from_millis(250);
 const WORKERS: usize = 4;
@@ -285,8 +288,13 @@ impl App {
             && commit.proof.as_ref().is_ok_and(|proof|self.tell_ready(&commit.record,&commit.pty,proof.harness,false));
         let tail = commit.pty.visible_text(30);
         let compact = |text: &str|text.chars().filter(|c|!c.is_whitespace()).collect::<String>();
-        let probe = compact(&commit.record.body);
-        let echoed = compact(&tail).contains(&probe) || tail.contains("[Pasted text #");
+        // 붙여넣은 글이 화면에 **통째로** 보여야 한다고 요구하면, 입력창이 접히거나 긴 본문이
+        // tail 밖으로 밀린 자리에서 Enter 가 영영 안 나간다 — 글은 들어갔는데 제출만 안 된
+        // 채로 끝난다(2026-09-21 「tell 엔터 안 되는 버그」). 앞머리만 본다: 내가 쓴 글이
+        // 거기 있다는 증거로는 그것으로 충분하고, 이 길이가 남의 글과 우연히 겹치지 않는다.
+        let probe: String = compact(&commit.record.body).chars().take(PROBE_CHARS).collect();
+        let echoed = !probe.is_empty()
+            && (compact(&tail).contains(&probe) || tail.contains("[Pasted text #"));
         if !unchanged || !echoed {
             finish(&commit.record,State::Uncertain,"input, session, prompt or paste confirmation changed; Enter withheld");
             return;
