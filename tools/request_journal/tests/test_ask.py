@@ -253,7 +253,7 @@ class NachoRelayTests(unittest.TestCase):
                 patch.object(ask, "urlopen", side_effect=fake_open):
             os.environ.pop("NACHO_ASK_URL", None)
             out = ask.ask_nacho("안녕", "%9", self.ctx)
-        self.assertEqual(out, {"answer": "응", "actions": [], "act": {"motion": None, "expression": None}})
+        self.assertEqual(out, {"answer": "응", "actions": [], "act": {"motion": None, "expression": None}, "do": []})
         self.assertNotIn("x-nacho-token", seen)
 
     def test_when_nacho_fails_the_local_brain_answers(self):
@@ -299,6 +299,107 @@ class NachoRelayTests(unittest.TestCase):
                 status, payload = ask.answer(lambda _c: None, {"text": "다들 뭐 해?", "pane": "%9", "catalog": CATALOG})
             self.assertEqual((status, payload["answer"]), (200, "여기서 답했어"), repr(opener))
             self.assertIn("■ 미니 — 연결됨", client.calls[0]["messages"][0]["content"])
+
+    def test_the_actions_nacho_picks_are_run_here_and_reported_back(self):
+        """조작은 나쵸가 고르고 **이 기계가** 돌린다 — 다른 기계는 이 창을 못 옮긴다."""
+        self.descriptor.write_text(json.dumps({"version": 1, "url": "http://10.0.0.1:8792"}), encoding="utf-8")
+
+        def reply(do, answer="미니로 옮길게"):
+            class Resp:
+                status = 200
+                def read(self, _n=None):
+                    return json.dumps({"answer": answer, "actions": [], "act": {"motion": None, "expression": None},
+                                       "do": do}).encode()
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    return False
+            return Resp()
+
+        ran = []
+
+        def cli(*args, **kw):
+            ran.append(args)
+            if args == ("board", "--all"):
+                return True, json.dumps({"result": board_all()})
+            if args == ("board",):
+                return True, json.dumps({"result": {"board": list(LOCAL.values())}})
+            if args[0] == "peek":
+                return True, json.dumps({"result": {"text": "화면 끝"}})
+            if args[0] == "migrate":
+                return True, json.dumps({"result": {}})
+            return True, "{}"
+
+        with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.descriptor), \
+                patch.object(ask, "NACHO_ASK_TOKEN_FILE", self.tmp / "없다"), \
+                patch.object(ask, "urlopen", side_effect=lambda *a, **k: reply([{"name": "migrate_pane", "input": {"machine": "미니"}}])), \
+                patch.object(ask, "run_cli", side_effect=cli), \
+                patch.object(ask, "_machines_http", return_value=MACHINES), \
+                patch.object(ask, "llm_client") as local_brain:
+            os.environ.pop("NACHO_ASK_URL", None)
+            status, payload = ask.answer(lambda _c: None, {"text": "이 창 미니로", "pane": "%9", "catalog": CATALOG})
+        self.assertEqual(status, 200)
+        self.assertIn(("migrate", "%9", "미니"), ran)                  # 실제로 돌았다
+        self.assertEqual([a["kind"] for a in payload["actions"]], ["migrate_pane"])
+        self.assertEqual(payload["answer"], "미니로 옮길게")
+        self.assertNotIn("do", payload)                                 # 펫은 do 를 모른다
+        local_brain.assert_not_called()
+
+        # 말 없이 조작만 고르면 실행 결과가 말이 된다
+        with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.descriptor), \
+                patch.object(ask, "NACHO_ASK_TOKEN_FILE", self.tmp / "없다"), \
+                patch.object(ask, "urlopen", side_effect=lambda *a, **k: reply([{"name": "focus_pane", "input": {}}], "")), \
+                patch.object(ask, "run_cli", side_effect=cli), \
+                patch.object(ask, "_machines_http", return_value=MACHINES), \
+                patch.object(ask, "llm_client") as local_brain:
+            status, payload = ask.answer(lambda _c: None, {"text": "보여 줘", "pane": "%9"})
+        self.assertEqual((status, payload["answer"]), (200, "앞으로 가져옴"))
+        local_brain.assert_not_called()
+
+    def test_a_made_up_action_is_dropped_and_falls_back_when_nothing_is_left(self):
+        self.descriptor.write_text(json.dumps({"version": 1, "url": "http://10.0.0.1:8792"}), encoding="utf-8")
+
+        class Resp:
+            status = 200
+            def read(self, _n=None):
+                return json.dumps({"answer": "", "do": [{"name": "rm_rf", "input": {"path": "/"}}]}).encode()
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+            async def messages(self, **kw):
+                self.calls.append(kw)
+                return {"content": [{"type": "text", "text": "여기서 답했어"}]}
+            @staticmethod
+            def extract_text(resp, names):
+                return resp["content"][0]["text"]
+            @staticmethod
+            def extract_tool_uses(resp):
+                return []
+
+        def cli(*args, **kw):
+            if args == ("board", "--all"):
+                return True, json.dumps({"result": board_all()})
+            if args == ("board",):
+                return True, json.dumps({"result": {"board": list(LOCAL.values())}})
+            if args[0] == "peek":
+                return True, json.dumps({"result": {"text": "화면 끝"}})
+            return True, "{}"
+
+        client = Client()
+        with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.descriptor), \
+                patch.object(ask, "NACHO_ASK_TOKEN_FILE", self.tmp / "없다"), \
+                patch.object(ask, "urlopen", side_effect=lambda *a, **k: Resp()), \
+                patch.object(ask, "run_cli", side_effect=cli), \
+                patch.object(ask, "_machines_http", return_value=MACHINES), \
+                patch.object(ask, "llm_client", return_value=client):
+            os.environ.pop("NACHO_ASK_URL", None)
+            status, payload = ask.answer(lambda _c: None, {"text": "지워 줘", "pane": "%9"})
+        self.assertEqual((status, payload["answer"]), (200, "여기서 답했어"))   # 지어낸 조작은 안 돈다
 
     def test_an_env_url_wins_over_the_descriptor(self):
         self.descriptor.write_text(json.dumps({"version": 1, "url": "http://파일:1"}), encoding="utf-8")
