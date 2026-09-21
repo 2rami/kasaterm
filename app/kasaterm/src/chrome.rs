@@ -1997,6 +1997,16 @@ impl App {
                     self.reopen_closed_pane_at(i);
                 }
             }
+            SidebarMenuAction::ClosePane => {
+                // 숨기기와 같은 이유로 그 방을 먼저 활성으로 만든다 — 다른 방 pane 을
+                // 활성 트리에서 찾으면 엉뚱한 자리를 닫는다.
+                if wi != self.active_window {
+                    self.switch_window(wi);
+                }
+                if wi == self.active_window {
+                    self.close_pane(pane);
+                }
+            }
             SidebarMenuAction::Dock => {
                 if let Some(i) = self.aux_terminal_index(pane) {
                     self.dock_pane_terminal(i);

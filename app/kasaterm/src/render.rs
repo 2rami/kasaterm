@@ -4721,13 +4721,20 @@ impl App {
                             (SidebarMenuAction::CloseRoom, "방 닫기"),
                         ]
                     } else if hidden {
+                        // 숨긴 것은 「무엇이었나」부터 궁금하다 — 배치를 안 건드리고 보는
+                        // 길을 먼저 둔다(2026-09-21 지시 「숨긴건 누르면 미리보기랑 보이기」).
                         vec![(SidebarMenuAction::Unhide, "다시 보이기")]
                     } else if self.aux.terminals.iter().any(|t| t.pane_id == pane) {
                         // 별도창 pane 에 「숨기기」를 주면 stash 가 remove_pane 으로 새어
                         // 트리 밖 pane 을 죽인다 — 되돌리기 하나만.
                         vec![(SidebarMenuAction::Dock, "본창으로 되돌리기")]
                     } else {
-                        vec![(SidebarMenuAction::Hide, "pane 숨기기")]
+                        // 다른 기기 pane 메뉴와 같은 두 줄이다 — 자리가 같으면 항목도 같아야
+                        // 누른 사람이 기계마다 다른 것을 외우지 않는다.
+                        vec![
+                            (SidebarMenuAction::ClosePane, "pane 닫기"),
+                            (SidebarMenuAction::Hide, "pane 숨기기"),
+                        ]
                     };
                     const MIH: f32 = 28.0;
                     let widest = items

@@ -4257,6 +4257,8 @@ enum SidebarMenuAction {
     Hide,
     /// 숨겨 둔 것을 제자리로.
     Unhide,
+    /// pane 닫기 — 숨기기와 달리 실제로 끝낸다.
+    ClosePane,
     /// 별도 OS 창으로 뗀 pane 을 본창으로 되꽂는다(auxterm.rs).
     Dock,
     /// 방 카드 본문을 학생 줄 목록으로(모든 방 공통, settings.json `sidebar_body`).

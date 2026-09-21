@@ -369,11 +369,10 @@ pub(crate) fn draw_menu(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, c
     let listed = nav.list_rooms.contains(&menu.key);
     // 칸에서 열었으면 칸 메뉴 — 본기기 pane 메뉴와 같은 자리에 같은 골격으로 뜬다.
     let items: Vec<(RoomMenuAction, &str)> = if menu.pane.is_some() {
-        vec![
-            (RoomMenuAction::SplitBeside, "옆에 세우기"),
-            (RoomMenuAction::NewTab, "탭으로 세우기"),
-            (RoomMenuAction::ClosePane, "pane 닫기"),
-        ]
+        // 본기기 pane 메뉴와 **같은 항목**이어야 한다 — 자리가 같은데 줄이 다르면 누른
+        // 사람이 기계마다 다른 것을 외우게 된다(2026-09-21 지시 「세우기 없애고 닫기랑
+        // 숨기기만」). 세우기는 방 카드 쪽 「+」 로 남는다.
+        vec![(RoomMenuAction::ClosePane, "pane 닫기")]
     } else {
         vec![
             if listed { (RoomMenuAction::MapBody, "배치도로 보기") } else { (RoomMenuAction::ListBody, "목록으로 보기") },
