@@ -7509,26 +7509,14 @@ impl ApplicationHandler<UserEvent> for App {
                     crate::macos_sparkle::check_for_updates(c);
                 }
             } else if self.quit_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
-                // ⌘Q → 종료 확인(ghostty 식). 확인 시 event_loop.exit() 로 정상 종료
-                // (exiting() 콜백이 window.json·세션 저장). 취소면 무시.
-                // 로컬에서 도는 작업 수를 실어 「지금 끄면 무엇이 끊기는지」까지
-                // 말한다 — 거울 pane 은 몸통이 남의 기계라 세지 않는다.
-                // 도는 게 없으면 묻지 않는다 — 창 닫기(CloseRequested)와 같은 규칙.
-                // 빈 셸만 열린 앱을 끄는데 확인을 받는 건 클릭 하나를 더 뺏는 일이다.
-                let jobs = self.local_running_job_count();
-                #[cfg(target_os = "macos")]
-                let ok = jobs == 0 || crate::macos_open::confirm_quit_with_local_jobs(jobs);
-                #[cfg(not(target_os = "macos"))]
-                let ok = true;
-                if ok {
-                    // exiting() 이 저장하는 건 세션 스냅샷이지 편집기 버퍼가
-                    // 아니다 — 저장 안 한 문서가 있으면 여기서 먼저 묻는다.
-                    if self.guard_dirty(&PendingClose::Window) {
-                        return;
-                    }
+                // ⌘Q 는 빨간 버튼(CloseRequested)과 같은 길이다 — 도는 작업이 있으면
+                // 앱 안 모달로 묻고, 없으면 바로 끈다. 전에는 NSAlert `runModal` 을
+                // 띄웠는데 그 동안 winit 루프가 통째로 서서 화면·출력 펌프가 멈췄다
+                // (「경고창 있으면 왜 멈춰」). 시스템 대화상자를 다시 쓰지 마라.
+                if !self.confirm_or_close_window() {
                     event_loop.exit();
-                    return;
                 }
+                return;
             }
         }
         // Headless git-panel demo (expand diff / open modal) before the capture.

@@ -6361,8 +6361,9 @@ impl App {
                 .and_then(|v| v.as_str())
                 == Some("list"),
             room_list_body: std::collections::HashMap::new(),
-            cursor_shape: socket::read_cursor_shape(),
-            cursor_thickness: socket::read_cursor_thickness(),
+            // lite 는 Ghostty 프롬프트처럼 얇은 바 — 설정 화면이 색뿐이라 여기서 박는다.
+            cursor_shape: if lite { cursor::CursorShape::Bar } else { socket::read_cursor_shape() },
+            cursor_thickness: if lite { 1.0 } else { socket::read_cursor_thickness() },
             mouse_cursor: socket::read_mouse_cursor(),
             pending_open_md: Vec::new(),
             aux: auxwin::AuxWindows::load(viewer_only),

@@ -8089,9 +8089,22 @@ impl App {
                             ("external-link", ActionKind::Undock),
                             ("x", ActionKind::Close),
                         ];
+                        // lite 의 ⋮ 는 새 탭·쪼개기·최대화·닫기뿐 — 헤더·하단바 토글은
+                        // 걷어낸 크롬이고, 별도창·렌더러 새로고침은 본판의 일이다.
+                        let lite = self.lite;
                         let items: Vec<(&str, ActionKind)> = items
                             .into_iter()
                             .filter(|(_, a)| term_tab || *a != ActionKind::Undock)
+                            .filter(|(_, a)| {
+                                !lite
+                                    || !matches!(
+                                        a,
+                                        ActionKind::ToggleHeader
+                                            | ActionKind::ToggleStatusbar
+                                            | ActionKind::RefreshRenderer
+                                            | ActionKind::Undock
+                                    )
+                            })
                             .collect();
                         let bw = 30.0_f32;
                         let bh = 28.0_f32;
