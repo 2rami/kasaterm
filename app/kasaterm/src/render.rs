@@ -2928,7 +2928,7 @@ impl App {
             // 사이드바 토글. 자리는 `sidebar_toggle_rect` 가 정한다 — 접혔으면
             // 신호등 오른쪽, 폈으면 사이드바 오른쪽 위. 글리프는 그대로다(왼쪽
             // 칼럼이 찬 판 모양). 탭이 위로 가면 토글할 세로 스트립이 없다.
-            if !self.tabs_on_top {
+            if !self.lite && !self.tabs_on_top {
                 let (bx, by, bw, bh) = sidebar_toggle;
                 let hover = sb_cursor.0 >= bx
                     && sb_cursor.0 <= bx + bw
@@ -2956,7 +2956,7 @@ impl App {
             }
             // File-tree toggle, just right of the sidebar toggle. Same chip
             // treatment; lit when the tree column is shown.
-            {
+            if !self.lite {
                 let (bx, by, bw, bh) = file_tree_toggle;
                 let hover = sb_cursor.0 >= bx
                     && sb_cursor.0 <= bx + bw
@@ -3008,7 +3008,8 @@ impl App {
                     fg,
                 );
             }
-            {
+            // lite 는 오른쪽 패널(git 컬럼)이 없다 — 토글도 안 그린다.
+            if !self.lite {
                 let bw = 26.0_f32;
                 let bh = 22.0_f32;
                 #[cfg(not(windows))]
@@ -7495,6 +7496,9 @@ impl App {
                     vec![]
                 } else if tab_strip {
                     vec![("ellipsis-vertical", None, Some(ActionKind::HandleMenu))]
+                } else if self.lite {
+                    // lite 는 헤더에 버튼을 두지 않는다 — 분할은 단축키·⋮·CLI 로.
+                    vec![]
                 } else {
                     // The status-bar toggle reads "filled" (panel-bottom) when the
                     // bar is shown and "dashed" when it's collapsed, so the icon
@@ -8166,8 +8170,10 @@ impl App {
             self.statusbar.diff_rects.clear();
             let (sb_mx, sb_my) = self.cursor_px;
             for (fid, fx, fy, fw, fbox_h) in &footer_slots {
-                let fvis = self.statusbar.shown.contains(fid)
-                    || (!self.statusbar.hidden.contains(fid) && self.set_footer_default);
+                // `statusbar_visible` 과 같은 판정 — lite 는 pane 하단바도 없다.
+                let fvis = !self.lite
+                    && (self.statusbar.shown.contains(fid)
+                        || (!self.statusbar.hidden.contains(fid) && self.set_footer_default));
                 if !fvis || *fbox_h < pane_footer_h + 4.0 {
                     continue;
                 }
@@ -9243,7 +9249,8 @@ impl App {
             // 그 손이 아까워 안 보다가 한도에 부딪힌다(사용자 2026-08-11 「orca랑
             // 똑같이 하단바 그 형식으로」). 형식은 Orca 하단바에서 가져왔다:
             // 게이지 + 퍼센트 + 언제 풀리는지, 폭이 좁아지면 정해진 순서로 무너진다.
-            {
+            // lite 는 이 줄 자체가 없다(status_h 도 0).
+            if !self.lite {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
                 let sy = win_h - status_h;

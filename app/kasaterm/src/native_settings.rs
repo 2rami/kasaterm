@@ -1517,16 +1517,17 @@ impl App {
             if self.settings_scene.first_run() {
                 return self.native_onboarding_key(event);
             }
-            let at = SettingsCat::NAV
+            let nav = SettingsCat::nav();
+            let at = nav
                 .iter()
                 .position(|cat| *cat == self.settings_scene.category())
                 .unwrap_or(0);
             let next = match event.logical_key {
                 Key::Named(NamedKey::ArrowUp) => at.saturating_sub(1),
-                Key::Named(NamedKey::ArrowDown) => (at + 1).min(SettingsCat::NAV.len() - 1),
+                Key::Named(NamedKey::ArrowDown) => (at + 1).min(nav.len() - 1),
                 _ => return false,
             };
-            self.settings_scene.set_category(SettingsCat::NAV[next]);
+            self.settings_scene.set_category(nav[next]);
             self.chrome_dirty = true;
             return true;
         };
@@ -2096,7 +2097,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     draw_text(g, ax + 20.0, ay + 24.0, "설정", 13.0, theme::text_dim(), false);
 
     let mut ny = ay + 56.0;
-    for cat in SettingsCat::NAV {
+    for &cat in SettingsCat::nav() {
         let (label, icon, _) = category_meta(cat);
         let rect = (ax + 12.0, ny, nav_w - 24.0, 32.0);
         // 테마 페이지는 「캐릭터」 밑으로 들어갔다 — 거기 있는 동안도 캐릭터 칸이 켜진다.
@@ -2780,6 +2781,10 @@ fn paint_appearance(
         })
         .collect();
     chips_owned(g, s, hits, x, y, w, accents);
+    // lite 는 색까지만 — 형태·글자·배율·탭 위치는 본판의 일이다.
+    if crate::lite_mode() {
+        return;
+    }
     let shapes: Vec<(&str, bool, SettingsAction)> = theme::SHAPE_PRESETS
         .iter()
         .map(|(key, label, _)| (*label, s.shape == *key, SettingsAction::Shape(key)))

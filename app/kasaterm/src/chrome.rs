@@ -1034,7 +1034,7 @@ impl App {
     /// (`set_footer_default`) decides it unless this pane sits in an exception
     /// set: `shown` forces it on, `hidden` forces it off.
     pub(crate) fn statusbar_visible(&self, id: &str) -> bool {
-        if self.pane_is_internal(id) {
+        if self.lite || self.pane_is_internal(id) {
             return false;
         }
         if self.statusbar.shown.contains(id) {
@@ -1068,6 +1068,10 @@ impl App {
     /// strip (mirrors the file-tree toggle on the left). Needs the window
     /// width, so it returns `None` before the first paint.
     pub(crate) fn git_col_toggle_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        // lite 는 타이틀바 오른쪽 버튼(패널·설정 기어)이 없다 — settings_title_rect 도 여길 탄다.
+        if self.lite {
+            return None;
+        }
         let w = 26.0;
         let h = 22.0;
         let win_w = self.window.as_ref().map(|win| {
@@ -1439,6 +1443,10 @@ impl App {
     /// (2026-09-05 지적 「설정창 켜면 하단바 잘리는 것」). 자리를 안 주려면 그리지도
     /// 말아야 하는데 그리기로 한 이상, 높이는 어느 방에서나 같아야 한다.
     pub(crate) fn status_h(&self) -> f32 {
+        // lite 는 창 하단 상태줄이 없다 — 그 줄이 있던 만큼 셀이 돌아온다.
+        if self.lite {
+            return 0.0;
+        }
         self.set_status_h
     }
 

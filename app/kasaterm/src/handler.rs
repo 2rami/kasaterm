@@ -4753,7 +4753,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // traffic lights). Caught before the title-bar drag path
                     // so the click toggles instead of moving the window. Not
                     // painted with tabs on top, so don't eat the click either.
-                    if !self.tabs_on_top {
+                    if !self.lite && !self.tabs_on_top {
                         let (bx, by, bw, bh) = self.sidebar_toggle_rect();
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
                             self.toggle_sidebar();
@@ -4761,7 +4761,7 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     // File-tree toggle, just right of the sidebar toggle.
-                    {
+                    if !self.lite {
                         let (bx, by, bw, bh) = self.file_tree_toggle_rect();
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
                             self.toggle_file_tree();

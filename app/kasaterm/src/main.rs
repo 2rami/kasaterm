@@ -4418,6 +4418,15 @@ impl SettingsCat {
         Self::Feedback,
     ];
 
+    /// 옆 목록에 실제로 서는 칸 — lite 는 「색만」이라 모양 하나뿐이다.
+    pub(crate) fn nav() -> &'static [SettingsCat] {
+        if crate::lite_mode() {
+            &[Self::Appearance]
+        } else {
+            &Self::NAV
+        }
+    }
+
     /// 웹 설정(arona-ui)이 쓰는 카테고리 키. 딥링크를 URL 과 스크립트 양쪽으로
     /// 보내야 해서 이름이 한 곳에 있어야 한다 — 문자열을 부르는 자리마다 적으면
     /// 오타가 나도 **아무 일도 안 일어나** 원인을 못 찾는다(모르는 값은 무시된다).
@@ -6577,6 +6586,13 @@ fn install_panic_logger(suffix: &str) {
     }));
 }
 
+/// `ViewerLaunch::lite` 의 전역 사본 — App 을 못 받는 자유함수(설정 페인터·nav)가
+/// 묻는다. 부팅에서 한 번 세우고 다시 안 바뀐다.
+static LITE_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) fn lite_mode() -> bool {
+    LITE_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ViewerLaunch {
     viewer_only: bool,
@@ -6621,6 +6637,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         install_stderr_log(log_suffix);
         scrub_inherited_claude_markers();
         if launch.lite {
+            LITE_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
             apply_lite_env();
         }
     // `open`(1) doesn't forward shell env to the launched .app, but the
