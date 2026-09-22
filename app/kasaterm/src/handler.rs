@@ -2191,7 +2191,7 @@ impl ApplicationHandler<UserEvent> for App {
         // changed — an idle repo costs one cheap git call per distinct cwd
         // every interval, with no repaint. Dedups cwds so N windows in one
         // repo run git once.
-        {
+        if !self.lite {
             let git_proxy = self.proxy.clone();
             let poll_cwds = self.git_poll_cwds.clone();
             let git_cache = self.window_git.clone();
@@ -2768,7 +2768,8 @@ impl ApplicationHandler<UserEvent> for App {
         // parentSessionId 맵을 채운다. 타이틀바 배지·학생 유지(부모 캐릭터 상속)가
         // 이 맵을 읽는다. raw 출력엔 parentSessionId 가 없어(kind/pid 만) pid argv 의
         // `--resume` 로 부모를 잇는다(background_agents_handler 와 동일 방식).
-        {
+        // lite 는 명부·배경 세션이 없다 — 3초마다 claude 를 띄우는 비용만 든다.
+        if !self.lite {
             let bg_proxy = self.proxy.clone();
             let bg_cache = self.bg_agents.clone();
             std::thread::spawn(move || {

@@ -366,6 +366,10 @@ fn read_agents() -> (
     HashMap<String, String>,
     HashSet<String>,
 ) {
+    // lite 는 명부(`claude agents --json`)를 안 본다 — 헤더 상태는 화면·기록으로 충분하다.
+    if crate::lite_mode() {
+        return Default::default();
+    }
     let mut map: HashMap<String, String> = HashMap::new();
     // 세션 name → sessionId. agents 피커로 attach 한 pane 은 kasaterm 이 어느 세션인지
     // 알 길이 없어(피커는 이벤트도 argv 흔적도 없음), pane OSC 타이틀(=세션 name)로

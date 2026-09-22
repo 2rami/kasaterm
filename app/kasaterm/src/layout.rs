@@ -2228,6 +2228,10 @@ impl App {
     /// is interactive and rare, and archiving is advisory). A resume re-binds
     /// the pane fresh, which drops `archived` again (④).
     fn archive_roster_pane(target: &str) {
+        // lite 는 명부가 없다 — 보관할 것도, 띄울 python 도 없다.
+        if crate::lite_mode() {
+            return;
+        }
         const SCRIPT: &str = r#"
 import sys, os, json, glob
 try:
@@ -2262,7 +2266,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
         let Some(py) = crate::python3_program() else {
             return;
         };
-        let _ = crate::proc::command(py)
+        let child = crate::proc::command(py)
             .arg("-X")
             .arg("utf8")
             .arg("-c")
@@ -2272,6 +2276,13 @@ for p in glob.glob(os.path.join(d, '*.json')):
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();
+        // 거두지 않으면 닫은 pane 마다 python 좀비가 앱이 끝날 때까지 남는다(실측).
+        // GUI 스레드는 기다리지 않는다 — 딴 스레드가 wait 만 한다.
+        if let Ok(mut child) = child {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
     }
     /// stash 트리(Option 슬롯)에서 leaf 하나 제거. 마지막 leaf 면 트리째 비운다
     /// (`None`). 제거했으면 true.
