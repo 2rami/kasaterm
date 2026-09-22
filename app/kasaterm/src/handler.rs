@@ -7513,10 +7513,11 @@ impl ApplicationHandler<UserEvent> for App {
                 // (exiting() 콜백이 window.json·세션 저장). 취소면 무시.
                 // 로컬에서 도는 작업 수를 실어 「지금 끄면 무엇이 끊기는지」까지
                 // 말한다 — 거울 pane 은 몸통이 남의 기계라 세지 않는다.
+                // 도는 게 없으면 묻지 않는다 — 창 닫기(CloseRequested)와 같은 규칙.
+                // 빈 셸만 열린 앱을 끄는데 확인을 받는 건 클릭 하나를 더 뺏는 일이다.
+                let jobs = self.local_running_job_count();
                 #[cfg(target_os = "macos")]
-                let ok = crate::macos_open::confirm_quit_with_local_jobs(
-                    self.local_running_job_count(),
-                );
+                let ok = jobs == 0 || crate::macos_open::confirm_quit_with_local_jobs(jobs);
                 #[cfg(not(target_os = "macos"))]
                 let ok = true;
                 if ok {
