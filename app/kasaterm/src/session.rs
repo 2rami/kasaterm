@@ -11610,8 +11610,15 @@ fn replacement_snapshot_requires_registration_before_pump() {
 }
 
 /// 승격된 학생들이 사는 로컬 상주 데몬(kasa-serve-web)의 HTTP 포트.
+///
+/// ⚠️ 8790 을 쓰면 안 된다 — 기계 간 중계소(`kasa-relay`)의 포트다. 미니는 중계소
+/// 본체가, 맥북은 그걸 끌어오는 터널 LaunchAgent(`kasa-relay-tunnel` 의
+/// `-L 8790:127.0.0.1:8790`)가 상시 물고 있다. `kasa-serve-web` 은 요청한 포트를
+/// 못 잡으면 임의 포트로 도망가는 대신 **즉시 종료**하므로(입양 소켓 이름이 포트에
+/// 묶여 판정이 어긋난다), 승격이 「데몬이 5초 안에 안 떴어요」로 두 기계 모두에서
+/// 실패한다.
 #[cfg(unix)]
-pub(crate) const LOCAL_PTYD_PORT: u16 = 8790;
+pub(crate) const LOCAL_PTYD_PORT: u16 = 8767;
 
 /// 데려오기(`migrate … local`)가 이어갈 세션 id 를 정한다 — 이 창이 기억하는 것이
 /// 먼저, 없으면 원격이 답한 것. 둘 다 없으면 이유를 사람 말로.
