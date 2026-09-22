@@ -25,8 +25,12 @@ jobs:
   build-msi:
     runs-on: windows-latest
     steps:
+      # 그림 에셋이 git-lfs 라 lfs:true 가 없으면 130바이트 포인터가 내려오고,
+      # build.rs 의 에셋 검사가 거기서 빌드를 세운다(의도된 loud failure).
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -93,8 +97,12 @@ jobs:
   build-dmg:
     runs-on: macos-latest
     steps:
+      # 그림 에셋이 git-lfs 라 lfs:true 가 없으면 130바이트 포인터가 내려오고,
+      # build.rs 의 에셋 검사가 거기서 빌드를 세운다(의도된 loud failure).
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
