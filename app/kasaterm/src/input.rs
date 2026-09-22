@@ -1985,6 +1985,36 @@ impl App {
         )
     }
 
+    /// 마우스가 **터미널 글자판 본문** 위에 있는가 — I-beam 을 줄 자리. 타이틀바·pane
+    /// 헤더 띠·하단 상태줄은 아니다. `px_to_pane_cell` 은 가장자리에서 가장 가까운
+    /// 셀로 접어 주므로 그것만으로는 타이틀바 위에서도 Some 이 나온다.
+    pub(crate) fn over_terminal_text(&self, cx: f32, cy: f32) -> bool {
+        if cy <= TITLE_HEIGHT {
+            return false;
+        }
+        let Some((pid, _, _)) = self.px_to_pane_cell(cx, cy) else {
+            return false;
+        };
+        if !self.pane_is_terminal(&pid) {
+            return false;
+        }
+        let (cols, rows) = self.window_cells();
+        let Some((_, _, y_cells, _, _)) = self
+            .effective_leaf_rects(cols, rows)
+            .into_iter()
+            .find(|(id, ..)| *id == pid)
+        else {
+            return false;
+        };
+        let body_top = TITLE_HEIGHT + y_cells as f32 * self.cell.h + self.pane_header_px(&pid);
+        let bottom = self
+            .window
+            .as_ref()
+            .map_or(f32::MAX, |w| w.inner_size().height as f32 / self.effective_scale())
+            - self.status_h();
+        cy >= body_top && cy < bottom
+    }
+
     /// 더블클릭한 셀이 속한 단어의 열 범위(양끝 포함). 경계 글자는 Ghostty 의
     /// 기본과 같다 — 공백과 따옴표·괄호류. 경계 글자 위를 눌렀으면 그 한 칸.
     pub(crate) fn word_span(row: &[GridCell], col: usize) -> (u16, u16) {

@@ -3870,9 +3870,11 @@ impl ApplicationHandler<UserEvent> for App {
                 ) {
                     self.selection = Some(Selection { anchor, end: cell });
                     // 글자를 고르는 중엔 I-beam 그대로 — 이 길은 아래 커서 사슬을 안 탄다.
-                    if self.mouse_cursor == "ibeam" && !self.text_cursor_shown {
-                        self.text_cursor_shown = true;
-                        window.set_cursor(CursorIcon::Text);
+                    let want = self.mouse_cursor == "ibeam"
+                        && self.over_terminal_text(self.cursor_px.0, self.cursor_px.1);
+                    if want != self.text_cursor_shown {
+                        self.text_cursor_shown = want;
+                        window.set_cursor(if want { CursorIcon::Text } else { CursorIcon::Default });
                     }
                     window.request_redraw();
                 } else {
@@ -3989,9 +3991,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // 되덮어, 설정을 켜도 안 먹었다(「커서는 안 돼」).
                     let icon = if matches!(icon, CursorIcon::Default)
                         && self.mouse_cursor == "ibeam"
-                        && self
-                            .px_to_pane_cell(cx, cy)
-                            .is_some_and(|(pid, _, _)| self.pane_is_terminal(&pid))
+                        && self.over_terminal_text(cx, cy)
                     {
                         CursorIcon::Text
                     } else {
