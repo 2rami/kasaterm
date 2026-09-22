@@ -498,6 +498,10 @@ impl App {
     /// 기어/⌘, 진입점. 이미 만든 방이 있으면 그것을 재사용하고, 없을 때만 PTY 없는
     /// marker 방을 하나 만든다.
     pub(crate) fn open_settings_room(&mut self, category: Option<SettingsCat>) -> bool {
+        // lite 는 설정 화면이 없다 — ⌘,·기어·inline/window 전부 여길 지난다.
+        if self.lite {
+            return false;
+        }
         // 아로나/보드 자식 웹뷰가 떠 있으면 native 방 위를 계속 덮는다. 설정으로
         // 들어가는 순간 먼저 걷어 한 화면의 소유자를 하나로 만든다.
         self.close_inline_web();

@@ -4833,6 +4833,8 @@ struct RethemeState {
 
 struct App {
     viewer_only: bool,
+    /// KasaLite 고정판 — `ViewerLaunch::lite`. 부가 화면·서버·자기설치의 진입점이 이걸 본다.
+    lite: bool,
     viewer_resumed: bool,
     web_visual: render::terminal_scene::VisualPump,
     window: Option<Arc<Window>>,
@@ -5941,7 +5943,7 @@ struct App {
 }
 
 impl App {
-    fn new(proxy: EventLoopProxy<UserEvent>, viewer_only: bool) -> Self {
+    fn new(proxy: EventLoopProxy<UserEvent>, viewer_only: bool, lite: bool) -> Self {
         if !viewer_only {
             let visual_proxy = proxy.clone();
             kasa_mcp::visual::register_producer(Arc::new(move || {
@@ -5952,6 +5954,7 @@ impl App {
         let ui = if verification_run() { socket::WindowUi::default() } else { socket::read_window_ui() };
         Self {
             viewer_only,
+            lite,
             viewer_resumed: false,
             web_visual: Default::default(),
             window: None,
@@ -6512,13 +6515,13 @@ fn scrub_inherited_claude_markers() {
 /// 미확정으로 남겼다. 터미널에 붙어 있으면(`cargo run`) 그대로 둔다. 5MB 를 넘으면
 /// 부팅 때 한 번 비운다 — 최근 부팅 몇 번이 남는 쪽이 디스크보다 값이 있다.
 #[cfg(target_os = "macos")]
-fn install_stderr_log() {
+fn install_stderr_log(suffix: &str) {
     use std::os::unix::io::AsRawFd;
     // SAFETY: isatty 는 fd 번호 하나를 읽기만 한다.
     if unsafe { libc::isatty(2) } == 1 {
         return;
     }
-    let log = std::env::temp_dir().join("kasaterm-app.log");
+    let log = std::env::temp_dir().join(format!("kasaterm{suffix}-app.log"));
     if std::fs::metadata(&log)
         .map(|m| m.len() > 5 * 1024 * 1024)
         .unwrap_or(false)
@@ -6545,12 +6548,12 @@ fn install_stderr_log() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn install_stderr_log() {}
+fn install_stderr_log(_suffix: &str) {}
 
-fn install_panic_logger() {
+fn install_panic_logger(suffix: &str) {
     let prev = std::panic::take_hook();
+    let log = std::env::temp_dir().join(format!("kasaterm{suffix}-panic.log"));
     std::panic::set_hook(Box::new(move |info| {
-        let log = std::env::temp_dir().join("kasaterm-panic.log");
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -6577,20 +6580,27 @@ fn install_panic_logger() {
 #[derive(Debug, PartialEq, Eq)]
 struct ViewerLaunch {
     viewer_only: bool,
+    /// 터미널만 남긴 고정판(KasaLite). 캐릭터·board·서버·자기설치가 뜨지 않고
+    /// 설정·소켓은 `~/.config/kasaterm-lite` 로 갈린다 — 본판을 굽고 껐다 켜도
+    /// 이 창은 그대로다. `viewer_only` 와 배타이며 뷰어 동작은 하나도 안 탄다.
+    lite: bool,
     paths: Vec<std::path::PathBuf>,
 }
 
 impl ViewerLaunch {
     fn detect(executable: Option<&std::ffi::OsStr>, mut args: Vec<std::ffi::OsString>) -> Self {
-        let named_viewer = executable
-            .and_then(|name| std::path::Path::new(name).file_stem())
-            == Some(std::ffi::OsStr::new("kasaterm-viewer"));
+        let stem = executable.and_then(|name| std::path::Path::new(name).file_stem());
+        let named_viewer = stem == Some(std::ffi::OsStr::new("kasaterm-viewer"));
+        let named_lite = stem == Some(std::ffi::OsStr::new("kasaterm-lite"));
         let flagged = args.first().is_some_and(|arg| arg == "--viewer");
-        if flagged {
+        let flagged_lite = args.first().is_some_and(|arg| arg == "--lite");
+        if flagged || flagged_lite {
             args.remove(0);
         }
+        let viewer_only = named_viewer || flagged;
         Self {
-            viewer_only: named_viewer || flagged,
+            viewer_only,
+            lite: !viewer_only && (named_lite || flagged_lite),
             paths: args.into_iter().map(std::path::PathBuf::from).collect(),
         }
     }
@@ -6606,9 +6616,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .and_then(|path| path.file_name().map(std::ffi::OsStr::to_owned));
     let launch = ViewerLaunch::detect(executable.as_deref(), args);
     if !launch.viewer_only {
-        install_panic_logger();
-        install_stderr_log();
+        let log_suffix = if launch.lite { "-lite" } else { "" };
+        install_panic_logger(log_suffix);
+        install_stderr_log(log_suffix);
         scrub_inherited_claude_markers();
+        if launch.lite {
+            apply_lite_env();
+        }
     // `open`(1) doesn't forward shell env to the launched .app, but the
     // .app's screen-recording TCC permission only applies when launched
     // via `open` (not when the binary runs directly). So a capture/test
@@ -6622,7 +6636,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::thread::spawn(info::local_machine_name);
     // 첫 설치 여부는 어떤 부팅 작업도 ~/.config/kasaterm 을 만들기 전에 확정한다.
     // 기존 설정 파일이 있던 사용자는 완료 표식만 보강하고 화면을 띄우지 않는다.
-        onboarding::prepare_boot();
+        if !launch.lite {
+            onboarding::prepare_boot();
+        }
     // Apply the persisted theme + accent into the global color slots before any
     // window or pane paints, so the first frame is already in the right palette.
         theme::apply_from_settings();
@@ -6630,15 +6646,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Install pane shims before anything spawns a shell — every PtySession
     // reads KASATERM_TMUX_SHIM_DIR we set here (kasaterm-cli/preview/OSC133).
     // best-effort: failures just log and skip, the rest still works.
-        let _ = crate::claude_auth::recover_workbench_account(&socket::read_claude_accounts());
-        install_pane_shims();
+        if !launch.lite {
+            let _ = crate::claude_auth::recover_workbench_account(&socket::read_claude_accounts());
+        }
+        install_pane_shims(launch.lite);
     // 죽은 인스턴스가 남긴 소켓 잔재 청소(재시작·빌드 반복 누적). 살아있는
     // 소켓은 connect 로 가려 건드리지 않으므로 멀티 인스턴스에서도 안전.
     // 그렇게 얻은 live pid 목록으로 죽은 인스턴스의 캐릭터 마커도 지운다 — 예전엔
     // "다른 인스턴스가 하나도 없을 때만" 이라는 게이트를 뒀는데, 개발용 `cargo run`
     // 하나만 떠 있어도 청소가 통째로 건너뛰어져 마커가 재시작마다 쌓였다(그 끝이
     // 배정 풀 고갈 = 같은 학생 중복). 이제 주인 pid 로 가리므로 게이트가 필요 없다.
-        if !verification_run() {
+        // lite 는 마커를 안 쓰고, 청소 함수들은 본판 설정 폴더를 하드코딩으로 본다.
+        if !verification_run() && !launch.lite {
             let live = live_kasaterm_pids();
             // An isolated/custom socket directory is not a complete process
             // inventory. Keep any owner still alive outside that directory;
@@ -6697,7 +6716,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    let mut app = App::new(proxy, launch.viewer_only);
+    let mut app = App::new(proxy, launch.viewer_only, launch.lite);
     if launch.viewer_only {
         app.configure_viewer_vault_startup(!launch.paths.is_empty());
         for path in launch.paths {
@@ -6737,6 +6756,20 @@ mod viewer_launch_tests {
             vec!["note.md".into()],
         );
         assert!(!launch.viewer_only);
+        assert!(!launch.lite);
+    }
+
+    #[test]
+    fn lite_by_executable_name_or_flag_never_becomes_viewer() {
+        let named = ViewerLaunch::detect(Some(OsStr::new("kasaterm-lite")), vec![]);
+        assert!(named.lite && !named.viewer_only);
+
+        let flagged = ViewerLaunch::detect(
+            Some(OsStr::new("kasaterm")),
+            vec!["--lite".into(), "note.md".into()],
+        );
+        assert!(flagged.lite && !flagged.viewer_only);
+        assert_eq!(flagged.paths, vec![std::path::PathBuf::from("note.md")]);
     }
 }
 
@@ -6824,19 +6857,52 @@ fn write_shim_data(path: &std::path::Path, body: impl AsRef<[u8]>) -> std::io::R
     write_shim_inner(path, body.as_ref(), false)
 }
 
-fn install_pane_shims() {
+/// KasaLite 의 살림을 본판과 가른다 — `prepare_session_storage` 보다 먼저.
+///
+/// 격리 창구는 검증 리그가 쓰는 env 그대로다(docs/verify-app.md). 전부 **조건 없이**
+/// 덮어쓴다: lite 를 본판 pane 안에서 띄우면 `KASATERM_SOCKET_PATH`·
+/// `KASATERM_TMUX_SHIM_DIR` 를 물려받는데, 후자는 kasa-pty 가 그대로 PATH/ZDOTDIR 에
+/// 붙여 **본판의 claude 래퍼(훅 포함)가 lite pane 에 들어간다.** 상속이 곧 위험이라
+/// 「없을 때만」이 아니다. 뿌리는 `KASATERM_LITE_ROOT`(검증용) 아니면
+/// `~/.config/kasaterm-lite`.
+fn apply_lite_env() {
+    let root = std::env::var_os("KASATERM_LITE_ROOT")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| kasa_socket::home_dir().map(|h| h.join(".config/kasaterm-lite")))
+        .unwrap_or_else(|| std::env::temp_dir().join("kasaterm-lite"));
+    if let Err(e) = std::fs::create_dir_all(&root) {
+        eprintln!("[lite] mkdir {root:?} failed: {e}");
+    }
+    let set = |k: &str, v: std::path::PathBuf| std::env::set_var(k, v);
+    set("KASATERM_SESSION_FILE", root.join("session.json"));
+    set("KASATERM_SETTINGS_FILE", root.join("settings.json"));
+    set("KASATERM_WINDOW_FILE", root.join("window.json"));
+    set("KASATERM_STUDENTS_DIR", root.join("students"));
+    set("KASATERM_COLLAB_ROOT", root.clone());
+    set("KASATERM_MACHINES", root.join("machines.json"));
+    set("KASATERM_MOBILE_USERS", root.join("mobile-users.json"));
+    set("KASATERM_SOCKET_PATH", root.join("lite.sock"));
+    set("CMUX_SOCKET_PATH", root.join("lite.sock"));
+    std::env::remove_var("KASATERM_TMUX_SHIM_DIR");
+}
+
+/// `lite` 면 최소 shim 만 — rc 셋 + `kasaterm-cli`. claude 래퍼·훅·caps.json·미리보기
+/// 셰임은 전부 뺀다. CLI 는 이 shim dir 로만 pane PATH 에 오르므로 shim 을 통째로
+/// 끄는 `shim_inject=off` 와는 다르다(그러면 lite 안에서 split/send 가 안 된다).
+fn install_pane_shims(lite: bool) {
     // 전역 shim 스위치 OFF → shim dir 자체를 안 만든다. KASATERM_TMUX_SHIM_DIR 이 미설정
     // 이면 pty-backend(state.rs)가 PATH prepend·ZDOTDIR 를 건드리지 않아 자식 셸이 순정
     // 이 된다 — claude wrapper·imgopen·훅·프록시 배선 전무(진짜 독립). 기본 ON(하위호환).
     // install 은 부팅 1회라 이 스위치 변경은 재시작 후 적용된다.
-    if !socket::read_shim_inject() {
+    if !lite && !socket::read_shim_inject() {
         eprintln!("[shim] shim_inject=off — 순정 모드, pane shim 미설치");
         return;
     }
     // 렌더러 capability 공표 — statusline.py 가 이걸 보고서만 SGR8(conceal) 세션 id
     // 마커를 내보낸다. 게이트가 없으면 .app 설치 직후(재시작 전) 구버전 렌더러가
     // 마커를 그대로 그려 화면에 `⟦a1b2c3d4⟧` 가 노출된다(conceal 미지원).
-    {
+    if !lite {
         let caps = kasa_socket::home_dir()
             .unwrap_or_default()
             .join(".config/kasaterm/caps.json");
@@ -6845,7 +6911,11 @@ fn install_pane_shims() {
         }
         let _ = std::fs::write(&caps, "{\"sgr_conceal\":true}\n");
     }
-    let shim_dir = std::env::temp_dir().join(format!("kasaterm-shim-{}", std::process::id()));
+    let shim_dir = std::env::temp_dir().join(format!(
+        "kasaterm{}-shim-{}",
+        if lite { "-lite" } else { "" },
+        std::process::id()
+    ));
     if let Err(e) = std::fs::create_dir_all(&shim_dir) {
         eprintln!("[shim] mkdir {shim_dir:?} failed: {e}");
         return;
@@ -6867,6 +6937,7 @@ fn install_pane_shims() {
             eprintln!("[shim] stage kasaterm-cli {cmux_src:?} -> {cmux_target:?} failed: {e}");
         }
     }
+    if !lite {
     // Drop `imgopen` / `mdopen` on the pane PATH so the user (or Claude) can
     // open an image viewer / markdown editor in the current workspace with
     // zero install — each just curls the host's MCP open-preview endpoint.
@@ -6890,6 +6961,7 @@ fn install_pane_shims() {
     // 내장 `/rename` 을 가리는 대체 커맨드. 셰임이 아니라 `~/.claude/commands` 라
     // shim_dir 을 안 받는다.
     remove_rename_command();
+    }
     // Force our shim dir to the FRONT of PATH even after the user's rc
     // files run. A login+interactive zsh sources brew's zprofile, which
     // prepends /opt/homebrew/bin (the real tmux) ahead of the PATH we

@@ -23,7 +23,7 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
 - **`KASATERM_AUTORESTORE=fresh`** — 저장된 세션을 복원하지 않고 빈 창으로 뜬다. 사용자 pane 의 claude 세션과 같은 id 를 다툴 경로가 사라지고, 캡처가 복원 모달만 찍는 일도 없어진다.
 - **`KASATERM_STUDENTS_DIR`** 로 그림 폴더를 격리한다 — 업로드·삭제를 검증하면서 사용자가 실제로 쓰는 `~/.config/kasaterm/students/` 를 건드리지 않는다.
 - **`KASATERM_WINDOW_FILE`** 도 빠뜨리지 마라. 안 걸면 검증용 앱이 자기 창 크기를 사용자의 `window.json` 에 적어 두고, 다음에 사람이 앱을 열 때 엉뚱한 크기로 뜬다(2026-08-31 실제로 덮었다 — 세션은 격리해 무사했는데 이 하나가 목록에 없었다).
-- **격리 창구가 없는 것도 안다.** `session_characters.json`(세션↔학생 바인딩)과 `caps.json` 은 언제나 `~/.config/kasaterm/` 을 쓴다. 다만 전자는 **읽고 병합해** 쓰므로 검증 세션의 학생이 항목으로 늘 뿐 사람의 바인딩을 지우지는 않고, 후자는 같은 터미널이면 같은 값이라 무해하다. 그래도 깨끗하게 두고 싶으면 검증 전에 복사해 두고 끝나면 되돌려라.
+- **`KASATERM_COLLAB_ROOT`** 로 `session_characters.json`(세션↔학생 바인딩)·bind 마커·`agent-roster/` 를 가른다. 안 걸면 본판 폴더를 **읽고 병합해** 쓰므로 검증 세션의 학생이 항목으로 늘 뿐 사람의 바인딩을 지우지는 않지만, 같은 cwd 의 같은 pane 번호(`%2`)가 본판 세션에 결합해 글리프가 남의 것을 보는 일이 생긴다. `caps.json` 만은 격리 창구가 없다 — 같은 터미널이면 같은 값이라 무해하다.
 - ⚠️ **`KASATERM_SOCKET_PATH` 를 띄울 때도 주고, `kasaterm-cli` 를 부를 때도 줘라.** CLI 는 `$KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > /tmp/cmux.sock` 순으로 붙고 **포트는 안 본다** — 리그를 다른 포트로 띄웠어도 CLI 에 이 변수를 안 주면 그 명령이 **사용자 앱으로 간다**(2026-09-03 실측: `split right` 이 사용자 창에 pane 을 만들었고, `send` 가 도는 학생의 입력창에 글자를 밀어넣었다). 앱 부팅 줄과 CLI 호출 양쪽에 같은 경로를 걸어라:
   `export KASATERM_SOCKET_PATH=/tmp/<네이름>/rig.sock` 를 먼저 하고 그 셸에서 둘 다 부르는 것이 가장 안전하다.
 - **화면을 판정할 때 `kasaterm-cli capture <pane>` 을 믿지 마라 — 원본 글자판이다.** 그건 `capture_pane_offscreen` 이라 `t.cells` 를 그대로 찍어, 렌더러가 화면을 만들며 하는 일(스크롤백 당김·입력창 붙잡기 같은 재구성)이 **안 보인다**. 렌더 변경을 눈으로 확인하려면 `kasaterm-cli capture --window <path>`(창 프레임) 이나 `KASATERM_AUTOCAPTURE_MS`/`_PATH` 를 써라. 2026-09-03 에 이걸 몰라 "코드가 안 돈다"고 한동안 오판했다(계측을 심어 보니 값은 맞게 돌고 있었다).
@@ -49,3 +49,22 @@ kasaterm-cli send --surface "%N" "claude --resume <sid> --model '<model>' --effo
 3. **자동 입력** — `KASATERM_AUTOSEND="claude" KASATERM_AUTOSEND_MS=6000`. send_bytes 직접 주입이라 **IME 조합 경로는 재현 못 함** — 한글 조합 버그는 사용자가 직접 타이핑해야 함 (`KASATERM_IME_DEBUG=1` 로 키 코드포인트 로깅).
 4. **체감(스크롤·입력 지연)은 반드시 release** — `cargo run --release -p kasaterm`. 디버그 빌드는 원래 버벅임(debug=느림, release/.app=빠름). 디버그로 "느리다" 판단 금지.
 5. **시각 확인** — 스크린샷 본 후 어색한 부분 직접 짚어내고 수정. "어때보여요?" 묻지 말고 너의 판단으로 다음 액션.
+
+## KasaLite(터미널 고정판) 리그
+
+`scripts/build-lite-app.sh` 가 굽는 `dist/KasaLite.app` 은 같은 바이너리를 `kasaterm-lite` 로 이름만 바꾼 것이다. 부팅에서
+`apply_lite_env`(main.rs)가 위 격리 env 를 **전부 스스로** 건다 — 뿌리는 `KASATERM_LITE_ROOT`, 없으면 `~/.config/kasaterm-lite`.
+그래서 리그는 뿌리 하나만 주면 된다:
+
+```bash
+KASATERM_LITE_ROOT=/tmp/<네이름>-lite KASATERM_NO_FOCUS=1 dist/KasaLite.app/Contents/MacOS/kasaterm-lite \
+  > /tmp/<네이름>-lite.log 2>&1 &
+APP=$!
+export KASATERM_SOCKET_PATH=/tmp/<네이름>-lite/lite.sock     # CLI 도 같은 소켓으로
+```
+
+- 본판 pane 안에서 띄워도 된다 — `apply_lite_env` 가 `KASATERM_SOCKET_PATH`·`KASATERM_TMUX_SHIM_DIR` 상속을 **조건 없이** 덮는다.
+- lite 는 HTTP 서버(8765)·자기설치·마커 청소·온보딩·계정 복구를 타지 않는다. 사후에 `~/.config/kasaterm/` 해시가 그대로인지,
+  `$TMPDIR/kasaterm-selfinstall.log` 가 안 생겼는지로 확인한다. 로그는 `$TMPDIR/kasaterm-lite-app.log`.
+- shim 은 최소(rc 셋 + `kasaterm-cli`)라 pane 에서 `which claude` 가 **진짜** claude 여야 하고 `which kasaterm-cli` 는
+  `$TMPDIR/kasaterm-lite-shim-<pid>/` 여야 한다.

@@ -1092,7 +1092,7 @@ impl App {
     /// flag, resize the PTYs to the new usable cols, repaint. Publishes the
     /// active cwd so the poller has something to refresh the moment it opens.
     pub(crate) fn toggle_git_col(&mut self) {
-        if self.internal_room_active_any() {
+        if self.lite || self.internal_room_active_any() {
             return;
         }
         self.git.col_visible = !self.git.col_visible;
@@ -2650,6 +2650,9 @@ impl App {
     }
 
     pub(crate) fn toggle_sidebar(&mut self) {
+        if self.lite {
+            return;
+        }
         self.sidebar_visible = !self.sidebar_visible;
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
@@ -2867,6 +2870,9 @@ impl App {
         self.toggle_board_room();
     }
     pub(crate) fn open_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
+        if self.lite {
+            return;
+        }
         if !crate::socket::read_shim_inject() {
             self.set_toast("아로나 화면은 Agent 연동을 켠 뒤 열 수 있어요".to_string());
             return;

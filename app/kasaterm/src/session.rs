@@ -8374,7 +8374,14 @@ impl App {
         // 정본 포트. 이미 물려 있으면 spawn_http_server 가 임시 포트로 떨어지고,
         // 그러면 register_clients 가 전역 등록을 건너뛴다(주인 주소 보호).
         const CANONICAL_MCP_PORT: u16 = 8765;
-        let http_port = match kasa_mcp::spawn_http_server(backend.clone(), CANONICAL_MCP_PORT) {
+        // lite 는 HTTP 서버를 안 띄운다 — `register_clients` 가 `~/.claude.json` 을 쓰고,
+        // 포트 파일이 본판 것과 섞인다. 아래 unix 소켓(CLI)은 그대로.
+        let http_port = if self.lite {
+            Err(std::io::Error::other("lite: no http server"))
+        } else {
+            kasa_mcp::spawn_http_server(backend.clone(), CANONICAL_MCP_PORT)
+        };
+        let http_port = match http_port {
             Ok(port) => {
                 eprintln!("[kasaspace-mcp] HTTP MCP on 127.0.0.1:{port}/mcp");
                 std::env::set_var("KASASPACE_MCP_PORT", port.to_string());
@@ -8387,7 +8394,9 @@ impl App {
                 Some(port)
             }
             Err(e) => {
-                eprintln!("[kasaspace-mcp] HTTP MCP start failed: {e}");
+                if !self.lite {
+                    eprintln!("[kasaspace-mcp] HTTP MCP start failed: {e}");
+                }
                 None
             }
         };

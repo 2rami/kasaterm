@@ -36,6 +36,9 @@ impl App {
     }
 
     pub(crate) fn open_board_room(&mut self) -> bool {
+        if self.lite {
+            return false;
+        }
         self.close_inline_web();
         let return_pane = self.active_user_pane().or_else(|| {
             self.settings_room_active()

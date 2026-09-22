@@ -7418,8 +7418,12 @@ fn discover_transcript(pane_id: &str, shell_pid: u32) -> Option<std::path::PathB
 /// authoritative). `archived`(죽은 세션) 는 무시, 파일이 실제 존재할 때만 반환.
 fn roster_transcript(pane_id: &str, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     let slug = cwd.to_string_lossy().replace(['/', '.'], "-");
-    let roster = kasa_socket::home_dir()?
-        .join(".config/kasaterm/agent-roster")
+    // 격리 인스턴스(lite·검증 리그)는 자기 collab root 를 본다. 본판 것을 읽으면 같은
+    // cwd 의 같은 pane 번호(`%2`)가 남의 세션에 결합해 글리프가 남의 것을 보고
+    // session.json 에 남의 sid 가 실린다.
+    let roster = kasa_socket::isolated_collab_root()
+        .or_else(|| kasa_socket::home_dir().map(|h| h.join(".config/kasaterm")))?
+        .join("agent-roster")
         .join(format!("{slug}.json"));
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&roster).ok()?).ok()?;

@@ -3900,8 +3900,15 @@ fn scan_kitty_graphics(
 /// so the next spawn sees this run's timestamp.
 fn build_last_login_line(tty: Option<&str>) -> Option<String> {
     let tty = tty?;
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
-    let dir = home.join(".config").join("kasaterm");
+    // 격리 인스턴스(KasaLite·검증 리그)는 세션 파일이 사는 폴더에 쓴다 — 이 한 줄이
+    // 본판 `~/.config/kasaterm` 을 건드리는 유일한 자리였다.
+    let dir = std::env::var_os("KASATERM_SESSION_FILE")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| std::path::PathBuf::from(v).parent().map(|d| d.to_path_buf()))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".config").join("kasaterm"))
+        })?;
     let path = dir.join("last_login");
     let previous = std::fs::read_to_string(&path)
         .ok()

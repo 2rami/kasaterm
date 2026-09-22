@@ -1855,7 +1855,11 @@ impl ApplicationHandler<UserEvent> for App {
         // Persist the window size + position so the next launch restores the
         // frame instead of the hardcoded default (껐던 크기·위치 복원).
         self.save_window_frame();
-        crate::arm_self_install();
+        // lite 는 「업데이트 안 함」이 계약이다 — 설치본 경로가 달라 어차피 None 이지만
+        // 코드로 못 박는다.
+        if !self.lite {
+            crate::arm_self_install();
+        }
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -1979,7 +1983,9 @@ impl ApplicationHandler<UserEvent> for App {
             self.quit_menu_item = Some(quit_item);
             self.menu = Some(menu);
             // Sparkle 자동 업데이트 시작(.app 빌드에서만 — dev 는 framework 없어 no-op).
-            self.sparkle_updater = crate::macos_sparkle::init();
+            if !self.lite {
+                self.sparkle_updater = crate::macos_sparkle::init();
+            }
         }
         // WaitUntil so the cursor blink ticks even when no terminal output
         // is arriving — the redraw inside RedrawRequested re-arms the
@@ -2256,7 +2262,8 @@ impl ApplicationHandler<UserEvent> for App {
         // 주기는 60초지만 **5초 단위로 쪼개 자며** 계정이 바뀌었는지 본다. 전에는 통째로
         // 60초를 자서, 계정을 눌러도 숫자가 최대 1분(+서버 캐시 1분) 동안 옛 계정 것으로
         // 남았다 — 사용자: "누를때마다 바뀐다는 표시가 없고".
-        {
+        // lite 는 HTTP 서버가 없어 칠 곳이 없고, 자동 계정 전환도 안 한다.
+        if !self.lite {
             let usage_proxy = self.proxy.clone();
             let usage_cache = self.claude_usage.clone();
             let usage_all = self.claude_usage_all.clone();
@@ -2963,7 +2970,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let main_window = self.window.as_ref().is_some_and(|window| window.id() == id);
-        if main_window && self.account_menu_event(event_loop, &event) {
+        if main_window && !self.lite && self.account_menu_event(event_loop, &event) {
             return;
         }
         if main_window && (self.restore_applying.is_some() || self.restore_progress.is_some()) {
