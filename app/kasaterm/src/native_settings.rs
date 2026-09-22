@@ -13,6 +13,19 @@ const ROW_H: f32 = 40.0;
 /// 조작 부품 높이(목업 `.ctl` 26).
 const CTL_H: f32 = 26.0;
 const CONTENT_MAX_W: f32 = 800.0;
+
+/// 읽기 열의 가로 자리 — `(x, 폭)`.
+///
+/// 열은 `CONTENT_MAX_W` 에서 자라기를 멈추므로, 창이 그보다 넓어지면 남는 폭이
+/// **전부 오른쪽에 쌓인다**. 2560 창에서 본문 오른쪽이 1026px(창 폭의 40%) 비어
+/// 글이 왼쪽 벽에 붙어 보였다(2026-09-22 실측). 남는 만큼을 좌우로 나눠 세운다.
+/// 좁은 창은 열이 남는 폭을 다 쓰므로 나눌 것이 없어 예전 배치 그대로다.
+fn content_column(ax: f32, aw: f32, nav_w: f32) -> (f32, f32) {
+    let gutter = if aw < 760.0 { 20.0 } else { 28.0 };
+    let avail = (aw - nav_w - gutter * 2.0).max(180.0);
+    let w = avail.min(CONTENT_MAX_W);
+    (ax + nav_w + gutter + ((avail - w) * 0.5).floor(), w)
+}
 const SPRITE_DROP_MAX_BYTES: u64 = 4 << 20;
 const THEMEGEN_DROP_MAX_BYTES: u64 = 32 << 20;
 
@@ -2179,10 +2192,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     );
     register(&mut hits, Target::Close, close, HitCursor::Pointer);
 
-    let content_x = ax + nav_w + if aw < 760.0 { 20.0 } else { 28.0 };
-    let content_w = (aw - nav_w - if aw < 760.0 { 40.0 } else { 56.0 })
-        .max(180.0)
-        .min(CONTENT_MAX_W);
+    let (content_x, content_w) = content_column(ax, aw, nav_w);
     let (title, _, _blurb) = category_meta(snapshot.cat);
     draw_text(g, content_x, ay + 26.0, title, 20.0, theme::text(), true);
 
@@ -7517,6 +7527,32 @@ fn color_for_word(word: &str) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 넓은 창에서 남는 폭은 좌우로 똑같이 갈라져야 한다. 고치기 전에는 열이
+    /// nav 바로 옆에 못박혀 남는 폭이 전부 오른쪽에 쌓였다(2560 창 기준 1026px).
+    #[test]
+    fn content_column_centers_the_surplus_on_wide_windows() {
+        let nav = 200.0;
+        let (x, w) = content_column(0.0, 2360.0, nav);
+        assert_eq!(w, CONTENT_MAX_W, "열은 상한에서 자라기를 멈춘다");
+        let left = x - nav;
+        let right = 2360.0 - (x + w);
+        assert!(
+            (left - right).abs() <= 1.0,
+            "좌여백 {left} 과 우여백 {right} 이 갈라지지 않았다"
+        );
+    }
+
+    /// 열이 남는 폭을 다 쓰는 좁은 창은 나눌 것이 없다 — 예전 배치 그대로 gutter 하나.
+    #[test]
+    fn content_column_keeps_the_old_gutter_when_there_is_no_surplus() {
+        let nav = 200.0;
+        for (aw, gutter) in [(700.0, 20.0), (1000.0, 28.0)] {
+            let (x, w) = content_column(0.0, aw, nav);
+            assert_eq!(x, nav + gutter, "aw={aw} 에서 열이 밀렸다");
+            assert!(w < CONTENT_MAX_W, "aw={aw} 는 상한에 닿지 않는 폭이어야 한다");
+        }
+    }
 
     #[test]
     fn wrap_measured_keeps_long_unspaced_text_inside_available_width() {
