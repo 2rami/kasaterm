@@ -1117,6 +1117,11 @@ impl App {
     /// 대신 이 소식은 **안 접히게**(sticky) 올린다. 판 글이 덮으면 인계를 못 보고 지나친다.
     fn poll_postbox(&mut self) {
         let Some(path) = self.journal_path() else { return };
+        // 말한 id 를 펫 폴더에 남긴다 — 껐다 켠 뒤에 같은 인계를 다시 말하지 않으려고.
+        // 폴더를 모르는 검증 실행에서는 안 남기고 그 판에서만 메모리로 간다.
+        if let Some(dir) = self.pet_dir.as_ref() {
+            self.postbox.remember_at(dir.join("postbox-spoken.json"));
+        }
         self.postbox.pump(&path);
 
         // 바에 걸린 「맡은 일」 — 바뀔 때만 손댄다.

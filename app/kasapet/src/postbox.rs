@@ -9,6 +9,10 @@
 //! - **말한 것만 받았다고 한다.** 서버는 ACK 를 받고서야 그 줄을 지운다 — 받아 들고 오다
 //!   끊기거나 펫이 죽으면 다음에 다시 온다. 그래서 인계 소식이 조용히 사라지지 않는다.
 //! - **두 번 말하지 않는다.** ACK 가 유실되면 같은 줄이 **같은 id** 로 다시 오므로 id 로 막는다.
+//!   ⚠️그 기억이 **메모리에만 있으면 펫을 껐다 켠 뒤에 다시 말한다** — ACK 가 유실된 채로
+//!   재기동하면 서버는 그 줄을 아직 들고 있고 펫은 처음 보는 것으로 읽는다(2026-09-22 검수에서
+//!   지적받은 자리). 그래서 말한 id 를 펫 폴더에 남긴다(`remember_at`). 자리를 못 받았으면
+//!   (검증 실행처럼 펫 폴더가 없을 때) 메모리만 쓰고, 그 판에서는 이 보장이 없다.
 //! - **끼어들지 않는다.** 여기는 줄을 받아 쌓아만 두고, 말할지 말지는 부르는 쪽이 정한다
 //!   (사람이 읽는 답 위에 덮지 않으려고 — 무조건 팝업·포커스 뺏기는 안 한다).
 //! - **못 닿으면 조용히 물러난다.** 뒤로 갈수록 뜸하게 다시 걸고, 화면에 실패를 안 띄운다.
@@ -83,6 +87,8 @@ pub struct Client {
     spoken: VecDeque<String>,
     queue: VecDeque<Line>,
     task: Option<Task>,
+    /// 말한 id 를 남겨 두는 자리. 없으면(펫 폴더를 모르는 검증 실행) 메모리만 쓴다.
+    memo: Option<std::path::PathBuf>,
     next_at: Option<Instant>,
     /// 지금 도는 왕복이 언제 떠났나 — 너무 빨리 돌아온 성공에 쉬는 시간을 주려고 든다.
     started: Option<Instant>,
@@ -90,6 +96,38 @@ pub struct Client {
 }
 
 impl Client {
+    /// 말한 id 를 남길 자리를 준다. 펫이 켜질 때 한 번 — 여기서 지난 판의 기억을 읽어 온다.
+    ///
+    /// **기계마다 파일이 갈린다**(펫 폴더가 그 바탕화면의 것이다). 한 기계의 기억이 다른
+    /// 기계의 재전달을 막으면 그쪽 인계가 조용히 사라진다.
+    pub fn remember_at(&mut self, path: std::path::PathBuf) {
+        if self.memo.as_deref() == Some(path.as_path()) {
+            return;
+        }
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(Value::Array(rows)) = serde_json::from_str::<Value>(&text) {
+                self.spoken = rows.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.chars().take(40).collect::<String>())
+                    .filter(|s| !s.is_empty())
+                    .rev().take(SPOKEN_CAP).collect::<Vec<_>>()
+                    .into_iter().rev().collect();
+            }
+        }
+        self.memo = Some(path);
+    }
+
+    fn remember(&self) {
+        let Some(path) = self.memo.as_ref() else { return };
+        let rows: Vec<&String> = self.spoken.iter().collect();
+        let Ok(text) = serde_json::to_string(&rows) else { return };
+        // 반쯤 쓰다 죽으면 기억이 통째로 깨진다 — 옆에 쓰고 갈아 끼운다.
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+
     /// 필요하면 한 번 더 들른다. 매 프레임 불러도 된다 — 도는 중이거나 쉴 때는 아무 일도 안 한다.
     pub fn pump(&mut self, service: &Path) {
         self.collect();
@@ -151,6 +189,8 @@ impl Client {
         }
         self.spoken.push_back(line.id.clone());
         self.acks.push(line.id.clone());
+        // ★**말하기 전에** 남긴다. 말한 뒤에 남기면 그 사이에 죽었을 때 같은 줄을 또 말한다.
+        self.remember();
         Some(line)
     }
 
@@ -343,6 +383,78 @@ mod tests {
         // 제대로 붙잡아 준 왕복(롱폴)은 쉬지 않고 바로 다시 건다 — 소식이 늦으면 안 된다.
         fed_after(&mut client, &json!({"messages": []}), Duration::from_secs(20));
         assert!(client.next_at.is_none());
+    }
+
+    /// ★**펫을 껐다 켠 뒤에도 두 번 말하지 않는다.** ACK 가 유실된 채로 재기동하면 서버는
+    /// 그 줄을 아직 들고 있고, 기억이 메모리에만 있으면 펫이 처음 보는 것으로 읽는다
+    /// (2026-09-22 검수 지적 — 그 전까지 이 보장은 한 프로세스 안에서만 참이었다).
+    #[test]
+    fn what_was_spoken_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("kasapet-postbox-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let memo = dir.join("spoken.json");
+        let _ = std::fs::remove_file(&memo);
+
+        let mut client = Client::default();
+        client.remember_at(memo.clone());
+        fed(&mut client, &json!({"messages": [{"id": "a", "text": "한 번만 할 말"}]}));
+        assert_eq!(client.take().unwrap().text, "한 번만 할 말");
+
+        // 껐다 켠다 — 새 Client 다. ACK 는 유실돼 서버가 같은 줄을 다시 준다.
+        let mut reborn = Client::default();
+        reborn.remember_at(memo.clone());
+        fed(&mut reborn, &json!({"messages": [{"id": "a", "text": "한 번만 할 말"}]}));
+        assert!(!reborn.waiting(), "재기동해도 다시 말하지 않는다");
+        assert_eq!(reborn.acks, vec!["a".to_string()], "대신 다시 ACK 한다");
+
+        // 자리를 안 준 판(펫 폴더를 모르는 검증 실행)은 기억이 없다 — 그 판에서는 다시 말한다.
+        let mut bare = Client::default();
+        fed(&mut bare, &json!({"messages": [{"id": "a", "text": "한 번만 할 말"}]}));
+        assert!(bare.waiting(), "자리를 안 주면 이 보장이 없다 — 문서와 같아야 한다");
+
+        std::fs::remove_file(&memo).unwrap();
+    }
+
+    /// 기억은 **바탕화면마다 갈린다.** 한 기계의 기억이 다른 기계의 재전달을 막으면 그쪽
+    /// 인계가 조용히 사라진다.
+    #[test]
+    fn two_desktops_keep_separate_memories() {
+        let dir = std::env::temp_dir().join(format!("kasapet-postbox-two-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mini, book) = (dir.join("mini.json"), dir.join("book.json"));
+        for p in [&mini, &book] {
+            let _ = std::fs::remove_file(p);
+        }
+
+        let mut on_mini = Client::default();
+        on_mini.remember_at(mini.clone());
+        fed(&mut on_mini, &json!({"machine": "미니", "messages": [{"id": "m1", "text": "미니 인계"}]}));
+        assert_eq!(on_mini.take().unwrap().text, "미니 인계");
+
+        // 같은 id 가 **다른 바탕화면**에 왔다. 그쪽은 처음 보는 것이므로 말해야 한다.
+        let mut on_book = Client::default();
+        on_book.remember_at(book.clone());
+        fed(&mut on_book, &json!({"machine": "맥북", "messages": [{"id": "m1", "text": "맥북 인계"}]}));
+        assert_eq!(on_book.take().unwrap().text, "맥북 인계");
+
+        for p in [&mini, &book] {
+            std::fs::remove_file(p).unwrap();
+        }
+    }
+
+    /// 기억 파일이 깨졌거나 없으면 **조용히 빈손으로 시작한다** — 여기서 터지면 펫이 안 뜬다.
+    #[test]
+    fn a_broken_memo_does_not_stop_the_pet() {
+        let dir = std::env::temp_dir().join(format!("kasapet-postbox-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let memo = dir.join("bad.json");
+        std::fs::write(&memo, "이건 JSON 이 아니다").unwrap();
+        let mut client = Client::default();
+        client.remember_at(memo.clone());
+        assert!(client.spoken.is_empty());
+        fed(&mut client, &json!({"messages": [{"id": "a", "text": "말한다"}]}));
+        assert!(client.waiting());
+        std::fs::remove_file(&memo).unwrap();
     }
 
     /// 쌓이는 줄에 상한이 있다. 며칠 자리를 비운 뒤 수십 줄이 한꺼번에 오면 펫이 그것만
