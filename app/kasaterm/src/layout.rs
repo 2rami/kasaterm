@@ -2451,6 +2451,12 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// Ordinary close blocks input, requests cancellation and retains the PTY
     /// for ten seconds of undo. Afterwards only the recovery record remains.
     pub(crate) fn hide_pane(&mut self, target: &str) {
+        // 라이트는 되살리기 유예가 없다 — 닫는 즉시 PTY 를 놓아 다음 셸이 그 tty
+        // 번호를 바로 받는다(「닫자마자 다른 거 열면 바로 초기화되게」).
+        if self.lite {
+            self.remove_pane(target);
+            return;
+        }
         self.tuck_pane(target, false);
         if self.stashed_record(target).is_some_and(|c| !c.stashed) {
             self.set_toast("창을 닫았어요 · 10초 뒤 실행 종료 · ⌘⇧T로 되살리기".into());

@@ -3327,7 +3327,35 @@ impl App {
                     }
                 };
                 let start = ((win_w - pw) / 2.0).clamp(left_lim, (right_lim - pw).max(left_lim));
-                if !title_text.is_empty() {
+                // 라이트: 창 제목 하나만 가운데 — 경로 칩·아이콘·알약·배지 없음. 셸이
+                // 제목을 안 정했으면(OSC 없음) 경로가 제목이다(Ghostty 셸 통합과 같다).
+                if self.lite {
+                    let osc = {
+                        let ws = self.ws.lock().unwrap();
+                        ws.active_pane
+                            .as_deref()
+                            .and_then(|id| self.pty.get(id))
+                            .and_then(|p| p.osc_title())
+                            .filter(|t| !t.trim().is_empty())
+                    };
+                    let plain = osc.unwrap_or_else(|| cwd_str.clone());
+                    if !plain.is_empty() {
+                        let w = g.measure_chrome_text(&plain, chrome_font, false);
+                        let x = ((win_w - w) / 2.0).max(TRAFFIC_LIGHT_WIDTH + 12.0);
+                        g.draw_text(
+                            x,
+                            ty,
+                            &plain,
+                            gpu::DrawOpts {
+                                font_size: chrome_font,
+                                color: theme::text_dim(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                    }
+                }
+                if !self.lite && !title_text.is_empty() {
                     let icon_name = sb_icons
                         .get(sb_active)
                         .copied()
@@ -3384,7 +3412,7 @@ impl App {
                         );
                     }
                 }
-                if !cwd_str.is_empty() {
+                if !self.lite && !cwd_str.is_empty() {
                     let isz = theme::ICON_SIZE;
                     let cx0 = px0 + 12.0;
                     g.queue_icon(
@@ -12407,7 +12435,7 @@ impl App {
             }
             // Confirm-close modal: a dim scrim + centered card with 취소/닫기,
             // queued last so it sits over every pane, overlay and toast.
-            if let Some(dlg) = self.confirm_close.clone() {
+            if let Some(dlg) = self.confirm_close.clone().filter(|_| !self.confirm_native) {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
                 g.rect(

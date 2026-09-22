@@ -3651,6 +3651,28 @@ impl App {
         });
     }
     fn raise_confirm(&mut self, dlg: ConfirmClose) {
+        // 도는 작업 확인은 OS 시트로(「경고창 OS 기본으로」). 저장 안 한 문서·거울
+        // 닫기는 버튼이 셋이거나 상태가 바뀌어 앱 안 카드가 맡는다.
+        #[cfg(target_os = "macos")]
+        let native = match (&dlg.why, self.window.as_ref()) {
+            (CloseWhy::Busy(proc), Some(window)) => {
+                let what = match &dlg.action {
+                    PendingClose::Window => "앱을 종료할까요?",
+                    PendingClose::Session(_) => "이 방을 닫을까요?",
+                    _ => "이 창을 닫을까요?",
+                };
+                crate::macos_open::confirm_close_sheet(
+                    window,
+                    what,
+                    &format!("{proc} 이(가) 아직 실행 중이에요. 닫으면 끊겨요."),
+                    self.proxy.clone(),
+                )
+            }
+            _ => false,
+        };
+        #[cfg(not(target_os = "macos"))]
+        let native = false;
+        self.confirm_native = native;
         self.confirm_close = Some(dlg);
         self.chrome_dirty = true;
         if let Some(w) = &self.window {

@@ -1589,6 +1589,13 @@ impl ApplicationHandler<UserEvent> for App {
                 self.open_url_for_pane(url, target.as_deref());
                 return;
             }
+            UserEvent::NativeConfirm(ok) => {
+                self.confirm_native = false;
+                self.confirm_dialog_pick(
+                    if *ok { ConfirmBtn::Close } else { ConfirmBtn::Cancel },
+                    event_loop,
+                );
+            }
             UserEvent::RemoteOpenUrl(pane, url) => {
                 self.open_url_here(url, Some(pane));
                 return;

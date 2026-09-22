@@ -3873,6 +3873,8 @@ enum UserEvent {
     /// 원격 호스트가 거울로 되돌려 보낸 `open-url` — (로컬 pane id, url). 이 기계의
     /// 기본 브라우저로 연다(맥북에서 미니 학생의 페이지를 보는 길).
     RemoteOpenUrl(String, String),
+    /// OS 닫기 확인 시트의 답 — true 면 「닫기」.
+    NativeConfirm(bool),
     /// 웹뷰 안에서 친 앱 단축키(Cmd+D 분할 등). 자식 창이 key 인 동안 winit
     /// 키 이벤트는 앱에 안 오므로(WKWebView 가 first responder), 웹뷰에 심은
     /// 초기화 스크립트가 keydown 을 잡아 wry IPC → 이 이벤트로 넘긴다.
@@ -5317,6 +5319,8 @@ struct App {
     /// dialog is painted over everything and swallows input until the user
     /// picks 취소/닫기.
     confirm_close: Option<ConfirmClose>,
+    /// `confirm_close` 를 OS 시트가 대신 보여 주는 중 — 앱 안 카드는 안 그린다.
+    confirm_native: bool,
     /// Confirm-modal button hit rects, refreshed each frame: `(btn, rect)`.
     confirm_btn_rects: Vec<(ConfirmBtn, (f32, f32, f32, f32))>,
     /// Chrome-style restore prompt shown at launch: the saved session state
@@ -6108,6 +6112,7 @@ impl App {
             image_pan_drag: None,
             text_cursor_shown: false,
             confirm_close: None,
+            confirm_native: false,
             confirm_btn_rects: Vec::new(),
             restore_prompt: None,
             restore_applying: None,
