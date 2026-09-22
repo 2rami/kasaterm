@@ -1602,10 +1602,13 @@ impl App {
                     };
                     // Append the pane's real OS tty (ghostty-style) — daemon
                     // cache first (the daemon owns the PTY), else local pty.
-                    let tty =
+                    let tty = if self.lite {
+                        None
+                    } else {
                         self.pane_tty_cache.get(&id).cloned().or_else(|| {
                             self.pty.get(&id).and_then(|p| p.tty().map(str::to_string))
-                        });
+                        })
+                    };
                     let label = match tty {
                         Some(t) => format!("{label}  ·  {t}"),
                         None => label,
@@ -3209,7 +3212,9 @@ impl App {
                             })
                             .unwrap_or_default();
                         // Append the pane's real OS tty (ghostty-style).
-                        let tty = active.as_deref().and_then(|id| {
+                        // lite 는 tty 이름을 안 단다 — OS 가 셸마다 새 번호를 주는 것이라
+                        // 「계속 늘어나는 숫자」로만 읽힌다.
+                        let tty = active.as_deref().filter(|_| !self.lite).and_then(|id| {
                             self.pane_tty_cache.get(id).cloned().or_else(|| {
                                 self.pty.get(id).and_then(|p| p.tty().map(str::to_string))
                             })
