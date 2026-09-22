@@ -29,20 +29,19 @@ env가 비어 있거나 list가 실패하면 pane 조작을 시도하지 말고 
 
 ---
 
-## 도구 경계 — MCP vs Bash (가장 먼저 읽기)
+## 도구 경계 — 전부 kasaterm-cli (가장 먼저 읽기)
 
-`mcp__kasaspace__*` 와 `kasaterm-cli`(bash) 둘 다 같은 socket을 친다. 결과는 같다. **언제 무엇을 쓸지**가 다르다.
+pane 조작은 `kasaterm-cli`(bash) 하나로 한다. `mcp__kasaspace__*` 로도 같은 socket 을 칠 수 있었으나,
+CLI 와 하는 일이 완전히 겹쳐 2026-09-22 에 내렸다. MCP 쪽을 찾는 지시가 남아 있으면 CLI 로 읽는다.
 
 | 상황 | 쓰는 도구 | 왜 |
 |---|---|---|
-| 사용자가 직접 "이 이미지/문서 띄워" 시킨 일회성 GUI 액션 | **MCP** `mcp__kasaspace__*` | 의도 명확, 한 번이면 끝, 호출 흔적이 turn에 명시적으로 남음 |
-| pane 분할·이름·색·send·focus를 **루프나 다단계로** 엮는 자동화 | **Bash** `kasaterm-cli` | 변수 캡처(`NEW=$(...)`), 파이프, jq 등 셸 도구 결합 자유 |
-| TeamCreate 직후 race 검증·좀비 청소·config.json 조작 | **Bash** | jq + 조건 분기 + 파일 편집까지 한 흐름. MCP 없음 |
-| 빌드·dev server·테스트 풀 사이클 (tee+DONE+Monitor) | **Bash** | 시퀀스가 길고 로그 파일 회수까지 결합 |
-| 이미지·마크다운 결과물을 메인 창에 띄우기 (자동화의 마지막 한 컷) | **Bash** `imgopen`/`mdopen` | 자동화 흐름의 일부이면 셸로 끝맺음 |
-| 사용자가 명시적으로 "이 결과 보여줘" 하면 | **MCP**도 OK | 일회성·명시적 GUI 액션이라 MCP가 의도 표현 더 깨끗 |
+| pane 분할·이름·색·send·focus | `kasaterm-cli` | 변수 캡처(`NEW=$(...)`), 파이프, jq 등 셸 도구 결합 자유 |
+| TeamCreate 직후 race 검증·좀비 청소·config.json 조작 | `kasaterm-cli` + jq | 조건 분기와 파일 편집까지 한 흐름 |
+| 빌드·dev server·테스트 풀 사이클 (tee+DONE+Monitor) | `kasaterm-cli` | 시퀀스가 길고 로그 파일 회수까지 결합 |
+| 이미지·마크다운 결과물을 메인 창에 띄우기 | `imgopen`/`mdopen` | 자동화 흐름의 마지막 한 컷 |
 
-**원칙 한 줄**: *제어 루프와 자동화는 bash, 사용자 의도의 일회성 GUI 액션은 MCP*.
+**원칙 한 줄**: *pane 을 건드리는 모든 길은 `kasaterm-cli` 다.*
 
 MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)에.
 
@@ -897,29 +896,37 @@ kasaterm-cli tell-status kt1.1789582774860.13972-…                    # 영수
 - 셸 밖에선 socket을 못 찾는다 — 1·2번은 전제 점검 먼저, 3번은 셸 무관.
 - 자체검증 후 `session.json` 백업 복원 잊지 말 것 — 빠뜨리면 사용자가 다음에 빈 kasaterm을 보게 된다.
 
-## 부록 A — MCP 도구 카탈로그
+## 부록 A — pane 조작 카탈로그
 
-`mcp__kasaspace__*`. kasaterm-cli과 1:1 매핑되는 도구는 같은 줄에 표시. **자동화는 kasaterm-cli 우선**, 사용자가 명시적으로 시킨 일회성 GUI 액션은 MCP.
+`kasaterm-cli`. 전체 목록은 `kasaterm-cli --help` 가 정본이고, 여기에는 자주 쓰는 것만 둔다.
+예전 `mcp__kasaspace__*` 는 이 명령들과 완전히 겹쳐 2026-09-22 에 내렸다.
 
-| MCP 도구 | 인자 | kasaterm-cli 동치 | 비고 |
-|---|---|---|---|
-| `kasaspace_list` | — | `kasaterm-cli list surfaces` | surface 목록 + id |
-| `kasaspace_split` | `direction` (left/right/up/down) | `kasaterm-cli split <dir>` | 현재 focused pane 기준 분할 |
-| `kasaspace_focus` | `surface_id` | `kasaterm-cli focus <id>` | 포커스 이동 |
-| `kasaspace_close` | `surface_id` | `kasaterm-cli close <id>` | pane 종료. 사용자 작업 중일 수 있으니 신중 |
-| `kasaspace_rename` | `surface_id`, `title` | `kasaterm-cli rename <id> <제목>` | 헤더 제목 |
-| `kasaspace_set_color` | `surface_id`, `color` | `kasaterm-cli color <id> <#rgb>` | 헤더 accent |
-| `kasaspace_swap` | `a`, `b` | `kasaterm-cli swap <a> <b>` | 위치 교환(내용 유지) |
-| `kasaspace_send` | `text`, `[surface_id]` | `kasaterm-cli send --surface <id> <text>` | 텍스트 전송. 엔터 필요하면 `text`에 `\n` 포함 |
-| `kasaspace_send_key` | `key`(enter/tab/escape/…), `[surface_id]` | `kasaterm-cli key <id> …` | 명명 키 전송 |
-| `kasaspace_run_job` | `command`, `[title]`, `[color]`, `[direction]`, `[auto_close]` | (없음 — 직접 split+rename+color+send 조합) | **사용자 옆에서 실시간 진행 보여주는 잡 전용**. 출력 스트림은 모델한테 안 옴(pane 안에만). 빌드/dev/배포 사용자 시연용 |
-| `kasaspace_workspace_current` | — | (tmux session 정보) | 현재 워크스페이스 |
-| `kasaspace_workspace_list` | — | (tmux session 정보) | 워크스페이스 전수 |
+| 하는 일 | 명령 | 비고 |
+|---|---|---|
+| surface 목록 + id | `kasaterm-cli list surfaces` | 워크스페이스는 `list workspaces` |
+| 지금 내가 어느 pane 인가 | `kasaterm-cli identify` | workspace 와 surface 를 함께 준다 |
+| 분할 | `kasaterm-cli split <left\|right\|up\|down>` | 현재 pane 기준. `--focus` 는 앞으로 |
+| 포커스 이동 | `kasaterm-cli focus <id>` | |
+| pane 종료 | `kasaterm-cli close <id>` | 사용자 작업 중일 수 있으니 신중. **되살리기 목록에 남는다** |
+| 진짜로 끄기 | `kasaterm-cli closed <%pane>` | 인자 없이 `closed` 면 되살리기 목록만 본다 |
+| 헤더 제목 | `kasaterm-cli rename <id> <제목>` | 자기 pane 은 `"$KASATERM_PANE_ID"` |
+| 헤더 accent | `kasaterm-cli color <id> <#rrggbb>` | |
+| 위치 교환(내용 유지) | `kasaterm-cli swap <a> <b>` | |
+| 텍스트 전송 | `kasaterm-cli send --surface <id> <text>` | 엔터가 필요하면 본문에 실제 줄바꿈 |
+| 명명 키 전송 | `kasaterm-cli key --surface <id> <enter\|tab\|escape\|…>` | |
 
-**`kasaspace_run_job` 주의**: 사용자가 "옆에 띄워서 보여줘" 요청하면 이게 가장 깔끔(타이틀+색+자동분할+자동종료 옵션 한 번에). 단 출력이 셸로 안 오니까 **로그 회수 필요한 자동화엔 부적합** — 그건 `kasaterm-cli send` + `tee /tmp/<task>.log` + Monitor.
+**옆에서 실시간으로 보여주는 잡**은 split → rename → color → send 를 이어 붙인다.
 
-**언제 MCP를 쓸지 결정 흐름**:
-1. 사용자가 "지금 이거 띄워" 한 번 시킴? → MCP (`kasaspace_run_job`, `kasaspace_send` 등)
-2. 자동 사이클(빌드→로그→완료알림)의 일부? → bash
-3. config.json 검사·좀비 제거·jq 파이프? → bash (MCP에 없음)
-4. 그냥 split·rename·color 한두 번? → 둘 다 OK, 흐름에 자연스러운 쪽
+```bash
+NEW=$(kasaterm-cli split right | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["surface"]["id"])')
+kasaterm-cli rename "$NEW" '빌드'
+kasaterm-cli color "$NEW" '#7aa2f7'
+kasaterm-cli send --surface "$NEW" 'npm run build
+'
+```
+
+pane 안에만 흐르는 출력은 모델에게 오지 않는다. **로그를 회수해야 하는 자동화**라면
+`tee /tmp/<task>.log` 를 붙이고 Monitor 로 지켜본다 — 사용자 시연용과 자동화용은 다른 일이다.
+
+**`close` 는 종료가 아니다.** 되살리기 목록에 남아 `list surfaces` 에서만 빠진다. 임시로 띄운 pane 을
+정말 없애려면 `kasaterm-cli closed <%pane>` 까지 해야 한다 — 안 하면 목록에 유령이 쌓인다.
