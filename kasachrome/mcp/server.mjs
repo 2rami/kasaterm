@@ -300,7 +300,18 @@ const server = new McpServer({ name: NAME, version: '0.1.0' })
 const tabId = z.number().int().optional().describe('Target tab id from list_tabs. Omit to use the active tab.')
 const ref = z.string().describe('Element ref like "e12" from read_page or find.')
 
+// CLI 가 같은 정의를 쓰도록 등록해 둔다 — 도구 목록·인자·설명을 CLI 쪽에 따로 적으면
+// 도구가 늘 때마다 두 곳을 고쳐야 하고, 빠뜨린 쪽이 조용히 낡는다.
+const TOOLS = new Map()
+
 function tool(name, description, schema, run, { timeoutMs = 30000 } = {}) {
+  TOOLS.set(name, { description, schema, run: async (args) => {
+    try {
+      return await run(args)
+    } catch (e) {
+      return { content: [{ type: 'text', text: `ERROR: ${e.message}` }], isError: true }
+    }
+  } })
   server.registerTool(name, { description, inputSchema: schema }, async (args) => {
     try {
       return await run(args)
@@ -536,6 +547,22 @@ tool('browser_dev_reload', 'Reload this extension itself after its source change
 tool('browser_cdp_raw', 'Escape hatch: send any raw Chrome DevTools Protocol command (e.g. "Emulation.setDeviceMetricsOverride"). Everything CDP can do is reachable here. One command is guarded: Input.dispatchTouchEvent on a hidden tab never gets acknowledged, so it is rejected with an explanation instead of hanging until the tool times out — for a whole gesture, prefer browser_swipe.', {
   tabId, method: z.string(), params: z.record(z.string(), z.any()).optional(),
 }, async (a) => text(await call('cdp_raw', a, 45000)))
+
+// --cli 면 stdio MCP 대신 한 번 호출하고 끝낸다. 도구 스키마 45개를 상주로 들고
+// 다니지 않으려는 쪽을 위한 길이며, 지나는 경로는 MCP 와 완전히 같다.
+const cliAt = process.argv.indexOf('--cli')
+if (cliAt !== -1) {
+  const { runCli } = await import('./cli.mjs')
+  let code = 0
+  try {
+    code = await runCli(process.argv.slice(cliAt + 1), TOOLS)
+  } catch (e) {
+    process.stderr.write(`${e.message}\n`)
+    code = 1
+  }
+  try { ws?.close() } catch {}
+  process.exit(code)
+}
 
 const transport = new StdioServerTransport()
 await server.connect(transport)

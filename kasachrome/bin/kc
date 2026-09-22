@@ -1,0 +1,12 @@
+#!/bin/sh
+# 카사크롬 도구를 터미널에서. MCP 서버와 같은 코드·같은 기기 라우팅을 지나간다.
+# PATH 에는 링크로 걸리므로 $0 의 링크를 끝까지 풀어야 레포를 옮겨도 따라온다.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+exec node "$(cd "$(dirname "$self")/.." && pwd)/mcp/server.mjs" --cli "$@"
