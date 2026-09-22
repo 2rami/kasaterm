@@ -2918,7 +2918,8 @@ impl ApplicationHandler<UserEvent> for App {
         // 시작」·닫기는 `restore_dialog_pick` 이 푼다.
         // 기준은 claude 수가 아니라 전체 pane 수 — 셸만 쓰던 창도 레이아웃과
         // 스크롤백은 되살릴 값이 있다(claude 기준이면 아무것도 못 되살린다).
-        let saved = (!want_tmux && (!crate::verification_run() || crate::server_restore::verification_restore_fixture()))
+        // lite 는 복원이 없다 — 켤 때마다 새 셸 하나. 저장도 안 한다(아래 두 저장 함수).
+        let saved = (!want_tmux && !self.lite && (!crate::verification_run() || crate::server_restore::verification_restore_fixture()))
             .then(crate::socket::read_session_state)
             .flatten()
             .map(crate::restore_progress::with_file_time)
@@ -2942,11 +2943,6 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if let Some(state) = saved {
             self.restore_prompt = Some(state);
-            // lite 는 묻지 않고 그대로 이어간다 — 복원 창도 크롬이다. 저장된 배치와
-            // `--resume` 이 그 자리에 돌아온다.
-            if self.lite {
-                self.restore_dialog_pick(RestoreBtn::Restore);
-            }
         }
         // cold-launch 로 디퍼됐던 `.md` 오픈을 연다 — 이제 window·pty_layout(%0)
         // 둘 다 준비됨. 빈손이면 무비용.

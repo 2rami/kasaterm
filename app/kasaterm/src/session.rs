@@ -6647,6 +6647,9 @@ impl App {
     /// 덮어써** 영영 잃는다(복원할지 말지 못 정하고 그냥 껐을 때). autosave_session
     /// 과 같은 이유.
     pub(crate) fn save_session_state(&self) {
+        if self.lite {
+            return;
+        }
         self.save_aux_windows_state();
         // Once the layout exists, keep new work while preserving the original
         // execution records of unfinished surfaces in session_state_json.
@@ -6667,6 +6670,9 @@ impl App {
     pub(crate) fn autosave_session(&mut self) {
         self.session_saved_at = std::time::Instant::now();
         self.session_touched = false;
+        if self.lite {
+            return;
+        }
         self.save_aux_windows_state();
         // 복원 창이 떠 있는 동안은 절대 저장하지 않는다 — 사용자가 "복원"을 고르기
         // 전의 화면은 빈 새 세션이라, 자동 저장이 복원 대상 자체를 덮어써 버린다
