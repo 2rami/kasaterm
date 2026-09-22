@@ -535,11 +535,7 @@ impl App {
                     cursor_cell_width(&t.cells, t.cursor_row, t.cursor_col),
                 )
             });
-            // 화면을 아래로 당긴 pane 은 커서도 같은 만큼 내린다(본창 render 와 같은 근거).
-            let pulled = pane
-                .and_then(|p| p.term())
-                .map(|t| self.bottom_pull_rows(&tab_pid, t, t.cells.len()).len() as u16)
-                .unwrap_or(0);
+            let pulled: u16 = 0;
             let cursor_color = ws
                 .pane_character
                 .get(&tab_pid)

@@ -5592,9 +5592,6 @@ struct App {
     /// 사람이 옮길 곳을 못 고른다. 활성이 아닌 계정도 조회할 수 있는 것은 usage 프록시가
     /// 슬롯별 토큰을 직접 읽기 때문이다(`/claude-usage?dir=<슬롯>`) — 전환이 필요 없다.
     claude_usage_all: std::sync::Arc<std::sync::Mutex<HashMap<String, UsageBadge>>>,
-    /// Per-pane controlling tty short name (pane id → "ttys004") from the
-    /// daemon's StateView. Shown in the pane header; fixed per pane.
-    pane_tty_cache: HashMap<String, String>,
     /// Sidebar git badge cache (cwd → branch/+ins/-del). A background thread
     /// polls each window's cwd directly (not via the daemon), so this stays
     /// off `%0`'s daemon path. Render reads it; the poller writes it.
@@ -6178,7 +6175,6 @@ impl App {
             bg_agents: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             claude_usage: std::sync::Arc::new(std::sync::Mutex::new(None)),
             claude_usage_all: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             pane_status_pub: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),

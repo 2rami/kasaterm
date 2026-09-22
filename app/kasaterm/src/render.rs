@@ -195,82 +195,6 @@ fn elapsed_style(secs: u64) -> ([u8; 4], bool) {
 }
 
 impl App {
-    /// classic claude 가 화면 밑에 남긴 빈 줄을 메울 **위쪽 행들** — 없으면 빈 벡터.
-    ///
-    /// classic claude 는 입력창·상태줄을 그린 뒤 화면 맨 아래 한두 줄을 안 쓴다.
-    /// 대체화면 claude 는 화면 끝까지 그리므로, 두 창을 나란히 놓으면 이쪽만
-    /// pane 바닥에 빈 띠가 남아 보인다(2026-09-03 지적: "하단공간이 넓잖아").
-    /// 그 빈 줄 수만큼 스크롤백에서 더 읽어 화면을 아래로 당기면, 상태줄이
-    /// pane 바닥에 붙고 위에는 지나간 대화가 그만큼 더 보인다.
-    ///
-    /// 스크롤 여부와 **무관하게 늘** 당긴다 — 바닥에서만 당기면 스크롤을 올리는
-    /// 순간 화면이 한두 줄 튄다. 그래서 커서 오버레이도 같은 값을 물어봐야 한다
-    /// (안 그러면 커서만 입력창 위로 떠오른다).
-    ///
-    /// 위가 부족하면(부팅 직후) 아무것도 안 한다 — 빈 줄을 위에 새로 만들어
-    /// 넣느니 여백을 그대로 두는 편이 낫다.
-    pub(crate) fn bottom_pull_rows(
-        &self,
-        tab_pid: &str,
-        term: &TerminalPane,
-        rows_now: usize,
-    ) -> Vec<kasa_bridge::screen::Row> {
-        let sess = match self.pty.get(tab_pid) {
-            Some(s) => s,
-            None => return Vec::new(),
-        };
-        // 대체화면 앱(vim·helix·기본 claude)은 스크롤백이 없어 당길 위가 없고,
-        // 애초에 화면 끝까지 그려 여백도 없다.
-        //
-        // 그리고 **claude 로 좁힌다** — 여백 한 줄은 classic claude 의 성질이지
-        // 하네스 일반의 성질이 아니다. codex 는 대화가 짧을 때 화면 아래를 통째로
-        // 비워 두는데(2026-09-03 리그 실측), 거기서 위를 끌어다 채우면 그 앱이
-        // 의도한 레이아웃을 터미널이 제멋대로 밀어 올리는 꼴이 된다.
-        // 「하단바 위치가 이상하다」를 잡는 계측(2026-09-05). 어느 게이트에서 멈추는지,
-        // 여백을 몇 줄로 쟀는지가 화면이 얼마나 당겨지는지를 그대로 정한다.
-        let dbg = std::env::var_os("KASATERM_VIEWSHIFT_DEBUG").is_some();
-        if term.alt_screen
-            || !matches!(sess.active_agent(), Some(kasa_pty::AgentKind::Claude))
-        {
-            if dbg {
-                eprintln!(
-                    "[bottompull] pane={tab_pid} 멈춤: alt={} agent={:?}",
-                    term.alt_screen,
-                    sess.active_agent()
-                );
-            }
-            return Vec::new();
-        }
-        // 빈 줄은 **살아 있는 화면**에서 잰다 — 뷰포트가 아니라. 스크롤을 올리면
-        // 뷰포트 꼬리는 지나간 대화라 빈 줄이 없고, 그러면 바닥에서만 당겨져
-        // 스크롤을 오갈 때 화면이 한 줄씩 튄다. claude 가 남기는 여백은 화면의
-        // 성질이므로 스크롤 위치와 무관하게 같은 값이어야 한다.
-        let blank = crate::screenread::blank_tail(&sess.live_tail_rows(BOTTOM_PULL_SCAN_ROWS));
-        // 화면이 통째로 비면(부팅 직후) 당길 것이 아니라 그냥 빈 화면이다.
-        if blank == 0 || blank >= rows_now {
-            if dbg {
-                eprintln!("[bottompull] pane={tab_pid} 멈춤: blank={blank} rows_now={rows_now}");
-            }
-            return Vec::new();
-        }
-        let mut above = sess.rows_above(blank);
-        // 스크롤백이 모자라면 **빈 줄로 메운다**. 목적은 입력창을 바닥에 붙이는 것이지
-        // 지난 대화로 화면을 채우는 것이 아니다 — 모자라다고 통째로 포기하면 갓 뜬
-        // claude 는 입력창이 화면 한가운데 떠 있고, 스크롤백이 쌓이는 순간 그 자리가
-        // 툭 뛴다(2026-09-05 실측: 같은 pane 이 7줄 위 → 4줄 위 → 바닥).
-        //
-        // 모자란 몫은 **뒤에** 채운다: 이 vec 은 가까운 순([0] = 뷰포트 위 1줄)이고
-        // 렌더가 앞에서부터 화면 위로 밀어 넣으므로, 뒤에 붙은 빈 줄이 맨 위에 앉는다.
-        let missing = blank - above.len().min(blank);
-        above.resize(blank, Vec::new());
-        if dbg {
-            eprintln!(
-                "[bottompull] pane={tab_pid} blank={blank} above={} (빈줄 {missing}) rows_now={rows_now}",
-                above.len()
-            );
-        }
-        above
-    }
 
     /// Phase 2a path. Collects every pane's live cell grid and hands
     /// it to the cell-renderer pipeline. Chrome (sidebar, tabs,
@@ -356,17 +280,7 @@ impl App {
                     // spaces the PTY echoes), so trust it directly.
                     // Image/markdown panes have no PTY cursor — their terminal
                     // block cursor stays hidden (the Raw editor draws its own).
-                    // 화면을 아래로 당긴 pane 은 커서도 같은 만큼 내린다 — 안 그러면
-                    // 입력창은 바닥에 붙었는데 커서만 그 위 빈 자리에 남는다
-                    // (근거는 `bottom_pull_rows`). 셀 폭·조합 비교는 당기기 전
-                    // 좌표로 해야 원본 그리드와 어긋나지 않는다.
-                    let pulled = pane
-                        .term()
-                        .map(|t| {
-                            self.bottom_pull_rows(ws.active_tab_pid(&id).as_str(), t, t.cells.len())
-                                .len() as u16
-                        })
-                        .unwrap_or(0);
+                    let pulled: u16 = 0;
                     let (raw_row, raw_col, source_vis, source_cols, cur_w) = match pane.term() {
                         Some(t) => (
                             t.cursor_row,
@@ -1599,19 +1513,6 @@ impl App {
                         } else {
                             format!("{shown_id} · {base}")
                         }
-                    };
-                    // Append the pane's real OS tty (ghostty-style) — daemon
-                    // cache first (the daemon owns the PTY), else local pty.
-                    let tty = if self.lite {
-                        None
-                    } else {
-                        self.pane_tty_cache.get(&id).cloned().or_else(|| {
-                            self.pty.get(&id).and_then(|p| p.tty().map(str::to_string))
-                        })
-                    };
-                    let label = match tty {
-                        Some(t) => format!("{label}  ·  {t}"),
-                        None => label,
                     };
                     // 웹 pane 로딩 상태 — host 실물(web_hosts)이 쥔다. 헤더 작업
                     // 바(busy)와 리로드↔정지 아이콘이 읽는다.
@@ -3211,19 +3112,7 @@ impl App {
                                 })
                             })
                             .unwrap_or_default();
-                        // Append the pane's real OS tty (ghostty-style).
-                        // lite 는 tty 이름을 안 단다 — OS 가 셸마다 새 번호를 주는 것이라
-                        // 「계속 늘어나는 숫자」로만 읽힌다.
-                        let tty = active.as_deref().filter(|_| !self.lite).and_then(|id| {
-                            self.pane_tty_cache.get(id).cloned().or_else(|| {
-                                self.pty.get(id).and_then(|p| p.tty().map(str::to_string))
-                            })
-                        });
-                        match (title.is_empty(), tty) {
-                            (false, Some(t)) => format!("{title}  ·  {t}"),
-                            (true, Some(t)) => t,
-                            (_, None) => title,
-                        }
+                        title
                     }
                 };
                 // The title is a label on the header, not a separate button.

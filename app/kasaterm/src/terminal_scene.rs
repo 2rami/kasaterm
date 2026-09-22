@@ -1026,35 +1026,12 @@ impl App {
         // 여기 들어오지 않는다. 기본 설정의 claude 도 대체화면을 쓰므로
         // 평소엔 잠들어 있다 — `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` 로
         // classic 을 켠 pane 에서만 깨어난다.
-        // classic claude 가 화면 밑에 남긴 빈 줄만큼 화면을 아래로 당겨,
-        // 상태줄이 pane 바닥에 붙게 한다 — 근거는 `bottom_pull_rows`.
         // 이 pane 을 어떻게 옮겨 그렸는지 — 복사가 되짚을 유일한 기록.
         let mut view_shift = crate::PaneViewShift { projection: projection.clone(), ..Default::default() };
-        // lite 는 당기지 않는다 — 화면을 그대로 보여 주는 터미널이다. 당기면 claude 가
-        // 다시 그릴 때(크기 변경) 스크롤백에 남은 옛 배너가 위에서 되살아나 「복제」로
-        // 보인다(2026-09-22 실측: 접힌 배너 3장 위에 새 배너).
-        let pulled = match term.filter(|_| desktop_view && projection.is_none() && !self.lite) {
-            Some(t) => {
-                let above = self.bottom_pull_rows(tab_pid.as_str(), t, rows_now);
-                let n = above.len();
-                if n > 0 && n < composed.len() {
-                    composed.truncate(composed.len() - n);
-                    // rows_above 는 가까운 순([0] = 뷰포트 위 1줄)이라, 앞에
-                    // 차례로 밀어 넣으면 먼 줄이 저절로 위로 간다.
-                    for r in above {
-                        let row = normalise(&r);
-                        // composed 와 **같은 순서**로 쌓는다 — 둘 다 앞에
-                        // 밀어 넣어야 화면 맨 위 행이 서로 같은 줄을 가리킨다.
-                        view_shift.above.insert(0, row.clone());
-                        composed.insert(0, row);
-                    }
-                    n
-                } else {
-                    0
-                }
-            }
-            None => 0,
-        };
+        // 스크롤백을 끌어올려 화면 아래 빈 줄을 채우던 「당김」은 걷었다(2026-09-22).
+        // claude 가 다시 그릴 때(크기 변경) 스크롤백에 남은 옛 배너가 위에서 되살아나
+        // 「복제」로 보였다 — 화면은 앱이 그린 그대로 둔다.
+        let pulled = 0usize;
         if desktop_view && projection.is_none() && runs_claude && !composed.is_empty() {
             if let Some(sess) = self.pty.get(tab_pid.as_str()) {
                 if sess.view_state().0 > 0 {
