@@ -1827,6 +1827,9 @@ impl Drop for PtySession {
             SessionIo::Local { child, .. } => {
                 if let Ok(mut child) = child.lock() {
                     let _ = child.kill();
+                    // 죽인 뒤 거둔다 — 안 거두면 닫은 pane 마다 좀비(<defunct>)가
+                    // 앱이 끝날 때까지 남는다(2026-09-22 실측). SIGKILL 이라 바로 돌아온다.
+                    let _ = child.wait();
                 }
             }
             // External: 원격 세션은 detach 로 살아남는 것이 목적이다 — 정말 죽일
