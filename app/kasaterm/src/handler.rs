@@ -6430,11 +6430,49 @@ impl ApplicationHandler<UserEvent> for App {
                                     }
                                 }
                             } else {
-                                self.drag_anchor = Some((col, row));
-                                self.selection = Some(Selection {
-                                    anchor: (col, row),
-                                    end: (col, row),
-                                });
+                                // 같은 칸을 400ms 안에 다시 누르면 두 번째는 단어,
+                                // 세 번째는 줄을 고른다(Ghostty 와 같다). 그때는 드래그
+                                // 앵커를 세우지 않아 손을 떼도 선택이 남는다.
+                                let now = Instant::now();
+                                let count = match self.cell_click {
+                                    Some((t, cell, n))
+                                        if cell == (col, row)
+                                            && now.duration_since(t).as_millis() < 400 =>
+                                    {
+                                        n % 3 + 1
+                                    }
+                                    _ => 1,
+                                };
+                                self.cell_click = Some((now, (col, row), count));
+                                let multi = if count > 1 {
+                                    self.active_view_rows()
+                                        .and_then(|rows| rows.get(row as usize).cloned())
+                                        .map(|line| {
+                                            if count == 2 {
+                                                Self::word_span(&line, col as usize)
+                                            } else {
+                                                (0, line.len().saturating_sub(1) as u16)
+                                            }
+                                        })
+                                } else {
+                                    None
+                                };
+                                match multi {
+                                    Some((s, e)) => {
+                                        self.drag_anchor = None;
+                                        self.selection = Some(Selection {
+                                            anchor: (s, row),
+                                            end: (e, row),
+                                        });
+                                    }
+                                    None => {
+                                        self.drag_anchor = Some((col, row));
+                                        self.selection = Some(Selection {
+                                            anchor: (col, row),
+                                            end: (col, row),
+                                        });
+                                    }
+                                }
                             }
                             self.last_input_at = Instant::now();
                             if let Some(tmux) = self.tmux.as_ref() {

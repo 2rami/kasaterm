@@ -1966,24 +1966,14 @@ impl App {
         }
         true
     }
-    pub(crate) fn copy_selection(&self) {
-        if self.copy_md_render_selection() {
-            return;
-        }
-        let Some(sel) = self.selection else {
-            return;
-        };
-        let rows = {
-            let ws = self.ws.lock().unwrap();
-            let base = match ws.active().and_then(|p| p.term()) {
-                Some(t) => t.cells.clone(),
-                None => return,
-            };
-            // 화면은 렌더가 **옮겨 그린 것**이라 원본 글자판과 행이 어긋난다. 드래그
-            // 좌표는 화면 기준이므로 같은 옮김을 되짚어야 고른 자리의 글자가 담긴다 —
-            // 원본을 그대로 쓰면 당긴 줄 수만큼 아래 글자가 복사된다(2026-09-05 지적:
-            // "복사가 이상하게 되고"). classic claude 가 기본이 된 뒤로 이 옮김이
-            // 모든 claude pane 에서 돌아 눈에 띄게 됐다.
+    /// 활성 pane 의 글자판을 **화면에 보이는 대로**. 렌더가 옮겨 그린 것이라 원본과
+    /// 행이 어긋나는데, 마우스 좌표는 화면 기준이므로 같은 옮김을 되짚어야 고른
+    /// 자리의 글자가 나온다 — 원본을 그대로 쓰면 당긴 줄 수만큼 아래 글자가 잡힌다
+    /// (2026-09-05 「복사가 이상하게 되고」). 선택 복사와 더블클릭 단어 판정이 같이 쓴다.
+    pub(crate) fn active_view_rows(&self) -> Option<Vec<Vec<GridCell>>> {
+        let ws = self.ws.lock().unwrap();
+        let base = ws.active().and_then(|p| p.term()).map(|t| t.cells.clone())?;
+        Some(
             match ws
                 .active_pane
                 .as_deref()
@@ -1991,7 +1981,40 @@ impl App {
             {
                 Some(shift) => shift.compose(&base),
                 None => base,
-            }
+            },
+        )
+    }
+
+    /// 더블클릭한 셀이 속한 단어의 열 범위(양끝 포함). 경계 글자는 Ghostty 의
+    /// 기본과 같다 — 공백과 따옴표·괄호류. 경계 글자 위를 눌렀으면 그 한 칸.
+    pub(crate) fn word_span(row: &[GridCell], col: usize) -> (u16, u16) {
+        let is_boundary = |ch: char| ch.is_whitespace() || ch == '\0' || "\"'`{}[]()<>".contains(ch);
+        let Some(cell) = row.get(col) else {
+            return (col as u16, col as u16);
+        };
+        if is_boundary(cell.ch) {
+            return (col as u16, col as u16);
+        }
+        let mut s = col;
+        while s > 0 && !is_boundary(row[s - 1].ch) {
+            s -= 1;
+        }
+        let mut e = col;
+        while e + 1 < row.len() && !is_boundary(row[e + 1].ch) {
+            e += 1;
+        }
+        (s as u16, e as u16)
+    }
+
+    pub(crate) fn copy_selection(&self) {
+        if self.copy_md_render_selection() {
+            return;
+        }
+        let Some(sel) = self.selection else {
+            return;
+        };
+        let Some(rows) = self.active_view_rows() else {
+            return;
         };
         let text = extract_selection(&rows, sel);
         if text.is_empty() {
@@ -5539,5 +5562,31 @@ pub(crate) fn room_digit(code: winit::keyboard::KeyCode) -> Option<usize> {
         KeyCode::Digit8 | KeyCode::Numpad8 => Some(7),
         KeyCode::Digit9 | KeyCode::Numpad9 => Some(8),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod word_span_tests {
+    use super::*;
+
+    fn row(text: &str) -> Vec<GridCell> {
+        text.chars()
+            .map(|ch| GridCell { ch, ..GridCell::blank() })
+            .collect()
+    }
+
+    #[test]
+    fn 단어_가운데를_누르면_양쪽_경계까지() {
+        let r = row("cd ~/foo-bar (baz) 'q'");
+        assert_eq!(App::word_span(&r, 5), (3, 11));
+        assert_eq!(App::word_span(&r, 14), (14, 16));
+        assert_eq!(App::word_span(&r, 0), (0, 1));
+    }
+
+    #[test]
+    fn 경계_글자_위는_그_한_칸() {
+        let r = row("a (b)");
+        assert_eq!(App::word_span(&r, 1), (1, 1));
+        assert_eq!(App::word_span(&r, 2), (2, 2));
     }
 }

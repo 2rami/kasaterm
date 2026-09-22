@@ -5376,6 +5376,8 @@ struct App {
     /// this for us when the OS owns the titlebar, but our
     /// fullsize_content_view setup means we intercept those clicks.
     last_left_click: Option<(Instant, (f32, f32))>,
+    /// 터미널 셀 위 연속 클릭 — (시각, 셀, 횟수). 두 번이면 단어, 세 번이면 줄을 고른다.
+    cell_click: Option<(Instant, (u16, u16), u8)>,
     /// Last file-tree row click (time + path). A second click on the *same*
     /// file row within the double-click window opens it in a split — folders
     /// keep their single-click expand, so files need their own gate.
@@ -6124,6 +6126,7 @@ impl App {
             pending_resize: None,
             mouse_forward_pane: None,
             last_left_click: None,
+            cell_click: None,
             last_tree_click: None,
             zoomed_pane: None,
             saved_window_frame: None,
@@ -6364,7 +6367,8 @@ impl App {
             // lite 는 Ghostty 프롬프트처럼 얇은 바 — 설정 화면이 색뿐이라 여기서 박는다.
             cursor_shape: if lite { cursor::CursorShape::Bar } else { socket::read_cursor_shape() },
             cursor_thickness: if lite { 1.0 } else { socket::read_cursor_thickness() },
-            mouse_cursor: socket::read_mouse_cursor(),
+            // lite 는 Ghostty 처럼 글자 위에서 I-beam.
+            mouse_cursor: if lite { "ibeam".to_string() } else { socket::read_mouse_cursor() },
             pending_open_md: Vec::new(),
             aux: auxwin::AuxWindows::load(viewer_only),
             banners: Vec::new(),
