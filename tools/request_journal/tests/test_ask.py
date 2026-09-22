@@ -7,6 +7,22 @@ from unittest.mock import patch
 
 from tools.request_journal import ask
 
+# ⚠️**이 검사들은 진짜 나쵸를 부르면 안 된다.**
+#
+# `ask.answer()` 는 판·화면을 모은 뒤 나쵸 물음 창구로 넘기고(두뇌 하나), 넘길 곳은 서술자
+# `~/.config/kasaterm/nacho-ask.json` 이 정한다 — 그 파일은 **사람이 쓰는 기계에 실제로 있다.**
+# 그래서 로컬 두뇌(폴백)를 보려고 `llm_client` 만 가짜로 바꾼 검사가 조용히 네트워크로 나가
+# **도는 봇**에게 묻고, 그 진짜 답을 받아 와 어긋났다(2026-09-22: 미니에서 `nacho_base()` 가
+# `http://127.0.0.1:8792` 를 가리켰고 그 포트의 `/health` 가 `nacho-ask` 였다). 기대를 넓혀
+# 덮을 일이 아니다 — 검사가 사람의 봇에 말을 걸고 그쪽 대화 기록을 늘리는 것 자체가 문제다.
+#
+# 그래서 이 모듈은 **없는 서술자**를 가리켜 기본적으로 아무 데도 안 넘긴다. 중계를 보는
+# 검사(`NachoRelayTests`)는 자기 자리에서 가짜 서술자·가짜 `urlopen` 을 세워 쓴다.
+_ISOLATED = Path(tempfile.mkdtemp(prefix="ask-test-isolated-")) / "없는-서술자.json"
+ask.NACHO_ASK_DESCRIPTOR = _ISOLATED
+ask.NACHO_ASK_TOKEN_FILE = _ISOLATED.with_name("없는-열쇠")
+os.environ.pop("NACHO_ASK_URL", None)
+
 
 def board_all():
     return {
@@ -133,8 +149,11 @@ class AnswerTests(unittest.TestCase):
                 return True, json.dumps({"result": {"text": "화면 끝"}})
             return True, "{}"
 
-        with patch.object(ask, "llm_client", return_value=client), patch.object(ask, "run_cli", side_effect=cli), patch.object(ask, "_machines_http", return_value=MACHINES):
+        with patch.object(ask, "llm_client", return_value=client), patch.object(ask, "run_cli", side_effect=cli), \
+                patch.object(ask, "_machines_http", return_value=MACHINES), patch.object(ask, "urlopen") as opened:
             status, payload = ask.answer(lambda _cancel: None, {"text": "다들 뭐 해?", "pane": "%9", "catalog": CATALOG})
+        # ★로컬 두뇌를 보는 검사다 — **밖으로 한 번도 나가지 않아야** 한다.
+        opened.assert_not_called()
         self.assertEqual(status, 200)
         self.assertEqual(payload["answer"], "음... 다들 조용하네 (=^･ω･^=)")
         self.assertEqual(payload["act"], {"motion": "Error", "expression": "cry"})
@@ -149,6 +168,18 @@ class AnswerTests(unittest.TestCase):
 
 CATALOG = {"motions": [{"group": "Idle", "label": "대기"}, {"group": "Think", "label": "생각"}, {"group": "Error", "label": "곤란"}],
            "expressions": [{"name": "blush", "label": "홍조"}, {"name": "cry", "label": "눈물"}]}
+
+
+class IsolationTests(unittest.TestCase):
+    """검사가 **사람이 쓰는 봇**에 말을 걸지 않는지. 이 한 건이 무너지면 나머지가 전부
+    네트워크 검사가 되고, 실패는 남의 기계 사정에 따라 오간다(2026-09-22)."""
+
+    def test_no_test_in_this_module_relays_to_a_real_nacho(self):
+        self.assertEqual(ask.nacho_base(), "", "기본은 아무 데도 안 넘긴다")
+        self.assertFalse(ask.NACHO_ASK_DESCRIPTOR.exists(), str(ask.NACHO_ASK_DESCRIPTOR))
+        with patch.object(ask, "urlopen") as opened:
+            self.assertIsNone(ask.ask_nacho("안녕", "%1", {"machine": "맥북"}))
+        opened.assert_not_called()
 
 
 class NachoRelayTests(unittest.TestCase):
@@ -406,6 +437,141 @@ class NachoRelayTests(unittest.TestCase):
         with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.descriptor), \
                 patch.dict(os.environ, {"NACHO_ASK_URL": "http://환경:2/"}):
             self.assertEqual(ask.nacho_base(), "http://환경:2")
+
+
+class PetPollTests(unittest.TestCase):
+    """펫이 인계·완료 소식을 **끌어가는** 길(2026-09-22). 이 기계 이름만 여기서 채우고
+    나머지는 나쵸 우편함을 그대로 중계한다."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="pet-poll-"))
+        self.descriptor = self.tmp / "nacho-ask.json"
+        self.descriptor.write_text(json.dumps({"version": 1, "url": "http://10.0.0.1:8792"}), encoding="utf-8")
+        ask._MACHINE.update(label="", at=0.0)
+
+    def _board(self, *args, **kw):
+        if args == ("board", "--all"):
+            return True, json.dumps({"result": board_all()})
+        return True, "{}"
+
+    def _relay(self, body, reply, status=200, cli=None):
+        sent = {}
+
+        class Resp:
+            def read(self, _n=None):
+                return json.dumps(reply).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        Resp.status = status
+
+        def fake_open(req, timeout=None):
+            sent["url"], sent["timeout"] = req.full_url, timeout
+            sent["body"] = json.loads(req.data)
+            return Resp()
+
+        with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.descriptor), \
+                patch.object(ask, "NACHO_ASK_TOKEN_FILE", self.tmp / "없다"), \
+                patch.object(ask, "urlopen", side_effect=fake_open), \
+                patch.object(ask, "run_cli", side_effect=cli or self._board):
+            os.environ.pop("NACHO_ASK_URL", None)
+            got = ask.relay_poll(body)
+        return got, sent
+
+    def test_the_machine_name_is_filled_in_here_and_handed_back(self):
+        # 펫은 자기가 어느 바탕화면인지 모른다 — 그 이름이 곧 나쵸 쪽 대화 자리다.
+        (status, payload), sent = self._relay(
+            {"wait": 20}, {"ok": True, "conv": "kasapet:맥북", "messages": [{"id": "a", "text": "이어받을게"}]})
+        self.assertEqual(status, 200)
+        self.assertEqual(sent["url"], "http://10.0.0.1:8792/api/pet/poll")
+        self.assertEqual(sent["body"]["machine"], "맥북")
+        self.assertEqual(payload["machine"], "맥북")      # 펫이 다음에 그대로 들고 온다
+        self.assertEqual(payload["messages"][0]["id"], "a")
+
+    def test_the_pet_can_carry_the_name_itself(self):
+        _got, sent = self._relay({"machine": "나쵸네코", "ack": ["a", "b"], "wait": 5}, {"ok": True, "messages": []})
+        self.assertEqual(sent["body"]["machine"], "나쵸네코")
+        self.assertEqual(sent["body"]["ack"], ["a", "b"])
+        self.assertEqual(sent["body"]["wait"], 5)
+
+    def test_an_unknown_machine_never_binds_to_a_default_seat(self):
+        # 이름을 못 읽었는데 기본값으로 붙이면 그 펫이 **남의 바탕화면 소식**을 받는다.
+        (status, payload), sent = self._relay({}, {"ok": True}, cli=lambda *a, **k: (False, "판을 못 읽었다"))
+        self.assertEqual((status, payload["error"]), (503, "machine_unknown"))
+        self.assertEqual(sent, {}, "자리를 모르면 나쵸에 묻지도 않는다")
+
+    def test_when_nacho_is_unreachable_the_pet_is_told_to_come_back_later(self):
+        with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.descriptor), \
+                patch.object(ask, "urlopen", side_effect=OSError("끊김")), \
+                patch.object(ask, "run_cli", side_effect=self._board):
+            os.environ.pop("NACHO_ASK_URL", None)
+            status, payload = ask.relay_poll({"machine": "맥북", "wait": 0})
+        self.assertEqual((status, payload["error"]), (503, "nacho_unreachable"))
+
+    def test_the_wait_is_capped_so_the_pet_is_never_left_hanging(self):
+        _got, sent = self._relay({"machine": "맥북", "wait": 9999}, {"ok": True, "messages": []})
+        self.assertEqual(sent["body"]["wait"], ask.POLL_WAIT_CAP)
+        # 왕복 여유를 얹어 기다린다 — 여기서 먼저 끊으면 준 줄이 못 받은 것으로 남는다.
+        self.assertGreater(sent["timeout"], ask.POLL_WAIT_CAP)
+
+    def test_the_machine_name_is_held_for_a_while(self):
+        calls = []
+
+        def counting(*args, **kw):
+            calls.append(args)
+            return self._board(*args, **kw)
+
+        self._relay({}, {"ok": True, "messages": []}, cli=counting)
+        self._relay({}, {"ok": True, "messages": []}, cli=counting)
+        self.assertEqual(len([c for c in calls if c == ("board", "--all")]), 1,
+                         "몇 초마다 들르는 길이라 판을 매번 읽지 않는다")
+
+    def test_the_handed_over_work_rides_along_when_the_pet_asks(self):
+        """펫이 이어받은 일 이름표를 실으면 나쵸에 그대로 넘어간다 — 그래야 여기서 한 말이
+        그 일의 이야기로 남는다."""
+        sent = {}
+
+        class Resp:
+            status = 200
+
+            def read(self, _n=None):
+                return json.dumps({"answer": "그거 검사까지 끝났대", "actions": [], "act": {}}).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_open(req, timeout=None):
+            sent["body"] = json.loads(req.data)
+            return Resp()
+
+        def cli(*args, **kw):
+            if args == ("board", "--all"):
+                return True, json.dumps({"result": board_all()})
+            if args == ("board",):
+                return True, json.dumps({"result": {"board": list(LOCAL.values())}})
+            if args[0] == "peek":
+                return True, json.dumps({"result": {"text": "화면"}})
+            return True, "{}"
+
+        with patch.object(ask, "NACHO_ASK_DESCRIPTOR", self.descriptor), \
+                patch.object(ask, "NACHO_ASK_TOKEN_FILE", self.tmp / "없다"), \
+                patch.object(ask, "urlopen", side_effect=fake_open), \
+                patch.object(ask, "run_cli", side_effect=cli), \
+                patch.object(ask, "_machines_http", return_value=MACHINES), \
+                patch.object(ask, "llm_client") as local_brain:
+            os.environ.pop("NACHO_ASK_URL", None)
+            status, _payload = ask.answer(lambda _c: None,
+                                          {"text": "어디까지 됐어?", "pane": "%9", "task": "w123"})
+        self.assertEqual(status, 200)
+        self.assertEqual(sent["body"]["task"], "w123")
+        local_brain.assert_not_called()
 
 
 class PerformTests(unittest.TestCase):

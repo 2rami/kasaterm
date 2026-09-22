@@ -32,6 +32,7 @@ import subprocess
 import re
 import sys
 import threading
+import time
 from collections import Counter
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -104,6 +105,10 @@ CLI_TIMEOUT = 8
 HOMEPC_BIN = Path(os.environ.get("HOMEPC_BIN", str(Path.home() / ".local/bin/homepc")))
 HOMEPC_TIMEOUT = 40
 PEEK_LINES = 40
+# 펫이 소식을 기다리며 붙잡는 시간의 상한과, 그 위에 얹는 왕복 여유. 나쵸 쪽 상한과 같아야
+# 여기서 먼저 끊겨 「받았는데 못 받은 것으로」 남지 않는다.
+POLL_WAIT_CAP = 25.0
+POLL_SLACK = 10.0
 MAX_CHARS = 9000
 FLEET_CHARS = 5500
 MACHINE_CHARS = 2200
@@ -476,13 +481,12 @@ def _note(line: str) -> None:
     print(f"[nacho-ask] {line}", file=sys.stderr, flush=True)
 
 
-def ask_nacho(text: str, pane: str, ctx: dict, catalog=None) -> dict | None:
-    """판·화면을 실어 나쵸에 묻는다. 답이 오면 그 payload 그대로, 아니면 None(폴백)."""
+def nacho_call(route: str, payload: dict, timeout: float) -> tuple[int, dict | None]:
+    """나쵸 창구에 한 번. (상태, 몸통). 못 닿으면 (0, None) — 부르는 쪽이 사정을 정한다."""
     base = nacho_base()
     if not base:
-        return None
-    body = json.dumps({"text": text, "pane": pane, "machine": ctx.get("machine") or "",
-                       "catalog": catalog, "context": ctx}, ensure_ascii=False).encode("utf-8")
+        return 0, None
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json", "X-Journal-Request": "1"}
     try:
         token = NACHO_ASK_TOKEN_FILE.read_text(encoding="utf-8").strip()
@@ -491,17 +495,30 @@ def ask_nacho(text: str, pane: str, ctx: dict, catalog=None) -> dict | None:
     if token:
         headers["X-Nacho-Token"] = token
     try:
-        with urlopen(Request(f"{base}/api/ask", data=body, headers=headers, method="POST"),
-                     timeout=NACHO_ASK_TIMEOUT) as resp:
-            if resp.status != 200:
-                _note(f"나쵸가 {resp.status} 를 줬다 — 이 기계 모델로 답한다")
-                return None
-            payload = json.loads(resp.read(1024 * 1024))
+        with urlopen(Request(f"{base}{route}", data=body, headers=headers, method="POST"),
+                     timeout=timeout) as resp:
+            got = json.loads(resp.read(1024 * 1024))
+            return resp.status, got if isinstance(got, dict) else None
     except Exception as exc:
-        _note(f"나쵸에 못 닿았다({type(exc).__name__}: {str(exc)[:80]}) — 이 기계 모델로 답한다")
+        _note(f"나쵸에 못 닿았다({type(exc).__name__}: {str(exc)[:80]}) — {route}")
+        return 0, None
+
+
+def ask_nacho(text: str, pane: str, ctx: dict, catalog=None, task: str = "") -> dict | None:
+    """판·화면을 실어 나쵸에 묻는다. 답이 오면 그 payload 그대로, 아니면 None(폴백)."""
+    if not nacho_base():
         return None
-    if not isinstance(payload, dict):
-        _note("나쵸가 이상한 것을 줬다 — 이 기계 모델로 답한다")
+    status, payload = nacho_call("/api/ask", {
+        "text": text, "pane": pane, "machine": ctx.get("machine") or "",
+        # 이 바탕화면이 이어받은 일 — 있으면 나쵸가 그 일에 묶어 답하고, 뒤따르는 소식도
+        # 같은 자리로 돌아온다. 이름표가 어긋나면 나쵸가 알아서 무시한다.
+        "task": task, "catalog": catalog, "context": ctx,
+    }, NACHO_ASK_TIMEOUT)
+    if status and status != 200:
+        _note(f"나쵸가 {status} 를 줬다 — 이 기계 모델로 답한다")
+        return None
+    if payload is None:
+        _note("나쵸가 빈손이거나 이상한 것을 줬다 — 이 기계 모델로 답한다")
         return None
     answer_text = str(payload.get("answer") or "").strip()
     has_do = isinstance(payload.get("do"), list) and payload["do"]
@@ -517,6 +534,52 @@ def ask_nacho(text: str, pane: str, ctx: dict, catalog=None) -> dict | None:
             "act": act if isinstance(act, dict) else {"motion": None, "expression": None},
             "do": [row for row in (do if isinstance(do, list) else [])
                    if isinstance(row, dict) and row.get("name") in TOOL_NAMES][:3]}
+
+
+# 이 기계의 이름. 판을 읽어 알아내고 잠시 들고 있는다 — 펫이 몇 초마다 소식을 끌어가는데
+# 그때마다 `board --all` 을 돌리면 그 한 줄 때문에 CLI 가 쉴 새 없이 뜬다.
+_MACHINE: dict = {"label": "", "at": 0.0}
+MACHINE_TTL = 300.0
+
+
+def machine_label() -> str:
+    """판이 스스로 말하는 이 기계 이름. 못 읽으면 빈 문자열(그때는 자리를 안 정한다)."""
+    now = time.monotonic()
+    if _MACHINE["label"] and now - _MACHINE["at"] < MACHINE_TTL:
+        return _MACHINE["label"]
+    ok, raw = run_cli("board", "--all")
+    label = ""
+    if ok:
+        label = next((str(src.get("label") or "") for src in _json_result(raw).get("sources", []) or []
+                      if isinstance(src, dict) and src.get("is_local")), "")
+    if label:
+        _MACHINE.update(label=label, at=now)
+    return label
+
+
+def relay_poll(body: dict) -> tuple[int, dict]:
+    """펫이 끌어가는 소식을 나쵸에서 받아 그대로 넘긴다.
+
+    ★**이 기계 이름을 여기서 채운다.** 펫은 자기가 어느 바탕화면인지 모르고, 나쵸는 여러
+    기계의 펫을 받으므로 그 이름이 곧 대화 자리(`kasapet:<기계>`)다. 이름을 못 읽으면
+    **아무 자리나 고르지 않고** 물러난다 — 틀린 자리에 붙으면 남의 바탕화면 소식을 받는다.
+
+    나쵸에 못 닿으면 503 이다. 펫은 조용히 다음에 다시 들른다 — 옛 파일 인박스(`pet-say`)는
+    그대로 살아 있어서 이 기계의 소식은 여전히 흐른다.
+    """
+    machine = str(body.get("machine") or "").strip() or machine_label()
+    if not machine:
+        return 503, {"error": "machine_unknown"}
+    if not nacho_base():
+        return 503, {"error": "nacho_not_configured"}
+    wait = max(0.0, min(POLL_WAIT_CAP, float(body.get("wait") or 0)))
+    acks = [str(i)[:40] for i in (body.get("ack") or [])][:32] if isinstance(body.get("ack"), list) else []
+    status, payload = nacho_call("/api/pet/poll", {"machine": machine, "ack": acks, "wait": wait},
+                                 wait + POLL_SLACK)
+    if status != 200 or payload is None:
+        return 503, {"error": "nacho_unreachable", "status": status}
+    payload["machine"] = machine        # 펫이 다음 들를 때 그대로 들고 온다
+    return 200, payload
 
 
 def llm_client(provider_factory):
@@ -553,7 +616,7 @@ def answer(provider_factory, body: dict) -> tuple[int, dict]:
     catalog = body.get("catalog")
     # 판·화면은 이 기계에서만 모인다. 먼저 모으고 **나쵸에게 답을 맡긴다**(두뇌 하나).
     ctx = context(pane)
-    relayed = ask_nacho(text, pane, ctx, catalog)
+    relayed = ask_nacho(text, pane, ctx, catalog, str(body.get("task") or "").strip()[:40])
     if relayed is not None:
         # 나쵸가 고른 조작을 **여기서** 돌린다. execute 는 목록 밖 이름을 이미 거른다.
         actions = execute(pane, relayed.pop("do", []))
