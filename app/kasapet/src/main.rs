@@ -26,6 +26,7 @@ mod catalog;
 mod journal;
 mod chat;
 mod ask;
+mod postbox;
 #[cfg(target_os = "macos")]
 mod chat_panel;
 #[cfg(target_os = "macos")]
@@ -139,6 +140,10 @@ struct App {
     chat: chat::Chat,
     /// 머리 위 유리 바가 서버에 묻고 있는 것. 한 번에 하나다.
     ask: ask::Client,
+    /// 나쵸가 넘긴 소식을 **끌어오는** 곳(인계·학생 완료·막힘). 물음과 반대 방향이다.
+    postbox: postbox::Client,
+    /// 바에 걸어 둔 「맡은 일」 한 줄 — 바뀔 때만 다시 그린다.
+    task_line: String,
     /// 나쵸의 답이 말풍선에 떠 있다. 판이 바뀌어도 안 덮고, 사람이 누르거나 다시 묻거나
     /// 한참 지날 때까지 안 접는다 — 읽으라고 띄운 요약이 12초 뒤 사라지면 안 띄운 것과 같다.
     answer_shown: bool,
@@ -493,7 +498,7 @@ impl ApplicationHandler for App {
                         .unwrap_or_else(|| self.ask_pane());
                     eprintln!("ASK_APP_PANE:{pane}");
                     if let Some(path) = self.journal_path() {
-                        let sent = self.ask.ask(path.clone(), question.clone(), pane, self.act_catalog());
+                        let sent = self.ask.ask(path.clone(), question.clone(), pane, self.act_catalog(), self.postbox.task_id());
                         eprintln!("ASK_APP_SERVICE:{} SENT:{}", path.display(), sent);
                         if sent { self.begin_looking(true); }
                     }
@@ -998,7 +1003,7 @@ impl App {
     fn ask_at(&mut self, text: &str, announce: bool) {
         let pane = self.ask_pane();
         let Some(path) = self.journal_path() else { return };
-        if self.ask.ask(path, text.to_string(), pane, self.act_catalog()) {
+        if self.ask.ask(path, text.to_string(), pane, self.act_catalog(), self.postbox.task_id()) {
             self.begin_looking(announce);
         }
     }
@@ -1053,7 +1058,7 @@ impl App {
                     ask_bar::Event::Send(text) => {
                         let pane = self.ask_pane();
                         if let Some(path) = self.journal_path() {
-                            if self.ask.ask(path, text, pane, self.act_catalog()) {
+                            if self.ask.ask(path, text, pane, self.act_catalog(), self.postbox.task_id()) {
                                 if let Some(bar) = &self.ask_bar { bar.clear_input(); }
                                 self.begin_looking(true);
                             }
@@ -1102,6 +1107,40 @@ impl App {
                 self.save_state();
             }
         }
+    }
+
+    /// 나쵸가 넘긴 소식을 끌어와 말풍선에 올린다 — 인계(「여기서 이어받을게」)와 학생
+    /// 완료·막힘. 묻는 길과 **반대 방향**이라 따로 돈다.
+    ///
+    /// ★**창을 앞으로 끌어내거나 키를 뺏지 않는다.** 말풍선에 올리기만 한다 — 사람이 다른
+    /// 일을 하는 중에 바탕화면 펫이 앞으로 튀어나오면 그건 알림이 아니라 방해다.
+    /// 대신 이 소식은 **안 접히게**(sticky) 올린다. 판 글이 덮으면 인계를 못 보고 지나친다.
+    fn poll_postbox(&mut self) {
+        let Some(path) = self.journal_path() else { return };
+        self.postbox.pump(&path);
+
+        // 바에 걸린 「맡은 일」 — 바뀔 때만 손댄다.
+        let line = self.postbox.task().map(postbox::Task::line).unwrap_or_default();
+        if line != self.task_line {
+            self.task_line = line;
+            #[cfg(target_os = "macos")]
+            if let Some(bar) = &self.ask_bar {
+                bar.set_task(&self.task_line);
+            }
+        }
+
+        if !self.postbox.waiting() {
+            return;
+        }
+        // 사람이 읽고 있는 답·찍는 중인 말·기다리는 물음 위에 얹지 않는다. 소식은 우편함에
+        // 그대로 남아 있으므로(ACK 전에는 안 꺼낸다) 잠시 뒤에 나온다.
+        let reading = self.answer_shown && self.said_at.elapsed() < Self::ANSWER_RESPECT;
+        if self.ask.busy() || reading || self.typed.is_some() {
+            return;
+        }
+        let Some(got) = self.postbox.take() else { return };
+        self.speak(got.text, true);
+        self.perform(Some(if got.kind == "watch" { "Talk" } else { "Think" }.into()), None);
     }
 
     /// 묻지 않아도 먼저 거는 말. 사람이 지금 읽을 것이 떠 있거나 무언가 묻는 중이면
@@ -1512,6 +1551,7 @@ impl App {
         self.poll_journal();
         self.poll_chat();
         self.poll_ask();
+        self.poll_postbox();
         self.poll_chatter();
         self.tick_typewriter();
         self.tick_bounce();
@@ -2129,6 +2169,8 @@ fn main() {
         chat: chat::Chat::default(), chat_restore_scale: None,
         chat_prefill: None,
         ask: ask::Client::default(),
+        postbox: postbox::Client::default(),
+        task_line: String::new(),
         answer_shown: false,
         urgent_asked: false,
         chatter: chatter::Client::default(),

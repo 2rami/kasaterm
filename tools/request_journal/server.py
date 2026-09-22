@@ -256,7 +256,10 @@ class Handler(BaseHTTPRequestHandler):
         chat_request = route == "/api/chat"
         ask_request = route == "/api/ask"
         chatter_request = route == "/api/pet-chatter"
-        if not pet_request and not chat_request and not ask_request and not chatter_request and (len(parts) != 4 or parts[:2] != ["api", "requests"] or parts[3] != "ack"):
+        poll_request = route == "/api/pet/poll"
+        if (not pet_request and not chat_request and not ask_request and not chatter_request
+                and not poll_request
+                and (len(parts) != 4 or parts[:2] != ["api", "requests"] or parts[3] != "ack")):
             return self.reply(404, {"error": "not_found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -268,10 +271,19 @@ class Handler(BaseHTTPRequestHandler):
                 # 동기(최대 25초). 장부 채팅(`/api/chat`)과 달리 모델이 고른 도구를 실행한다.
                 if self.server.chat is None:
                     return self.reply(503, {"error": "chat_unavailable"})
-                if not isinstance(body, dict) or set(body) - {"text", "pane", "catalog"}:
+                if not isinstance(body, dict) or set(body) - {"text", "pane", "catalog", "task"}:
                     return self.reply(400, {"error": "invalid_ask_request"})
                 from .ask import answer
                 status, payload = answer(self.server.chat.provider_factory, body)
+                return self.reply(status, payload)
+            if poll_request:
+                # 펫이 인계·완료 소식을 **끌어가는** 길(2026-09-22). 모델도 장부도 안 쓰고
+                # 나쵸의 우편함을 그대로 중계한다 — 이 기계 이름만 여기서 채워 준다(펫은
+                # 자기가 어느 바탕화면인지 모르고, 그 이름이 곧 나쵸 쪽 대화 자리다).
+                if not isinstance(body, dict) or set(body) - {"machine", "ack", "wait"}:
+                    return self.reply(400, {"error": "invalid_poll_request"})
+                from .ask import relay_poll
+                status, payload = relay_poll(body)
                 return self.reply(status, payload)
             if chatter_request:
                 # 펫이 먼저 거는 말 — 아무도 묻지 않았고 아무것도 실행하지 않는다.

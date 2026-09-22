@@ -43,6 +43,41 @@ class ServerTests(unittest.TestCase):
     def ack(self, status="applied", evidence="", headers=None):
         return self.call(f"/api/requests/{self.id}/ack", "POST", json.dumps({"applied_status": status, "evidence": evidence}), headers or {"Content-Type": "application/json", "X-Journal-Request": "1"})
 
+    def post_json(self, route, body):
+        return self.call(route, "POST", json.dumps(body),
+                         {"Content-Type": "application/json", "X-Journal-Request": "1"})
+
+    def test_the_pet_pull_door_is_relayed_and_guards_its_shape(self):
+        """펫이 인계 소식을 끌어가는 길(2026-09-22). 이 서버는 판단하지 않고 중계만 한다."""
+        from unittest.mock import patch
+
+        with patch("tools.request_journal.ask.relay_poll", return_value=(200, {"ok": True, "messages": []})) as relay:
+            status, _, raw = self.post_json("/api/pet/poll", {"machine": "맥북", "ack": ["a"], "wait": 5})
+        self.assertEqual((status, json.loads(raw)), (200, {"ok": True, "messages": []}))
+        relay.assert_called_once_with({"machine": "맥북", "ack": ["a"], "wait": 5})
+
+        # 모르는 칸이 섞여 오면 안 넘긴다 — 중계하는 자리라 모양을 여기서 못 박는다.
+        status, _, _raw = self.post_json("/api/pet/poll", {"machine": "맥북", "몰래": 1})
+        self.assertEqual(status, 400)
+
+        # 저널 헤더 없이는 아예 안 받는다(다른 길과 같은 문지기).
+        status, _, _raw = self.call("/api/pet/poll", "POST", json.dumps({"machine": "맥북"}),
+                                    {"Content-Type": "application/json"})
+        self.assertEqual(status, 415)
+
+    def test_the_handed_over_work_is_an_allowed_field_on_the_ask_door(self):
+        """펫이 이어받은 일 이름표를 실어 보낸다 — 모르는 칸으로 걸러 버리면 그 왕복이 끊긴다."""
+        from unittest.mock import patch
+
+        class Chat:
+            provider_factory = staticmethod(lambda _cancel: None)
+
+        self.server.chat = Chat()
+        with patch("tools.request_journal.ask.answer", return_value=(200, {"answer": "네"})) as answered:
+            status, _, _raw = self.post_json("/api/ask", {"text": "어디까지?", "pane": "%1", "task": "w1"})
+        self.assertEqual(status, 200)
+        self.assertEqual(answered.call_args[0][1]["task"], "w1")
+
     def test_final_report_does_not_confirm_application(self):
         status, _, body = self.call("/api/requests")
         rows = json.loads(body)["requests"]

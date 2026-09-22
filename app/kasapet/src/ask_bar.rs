@@ -115,7 +115,7 @@ impl Bar {
         let body: Retained<Body> = unsafe { msg_send![Body::alloc(mtm), initWithFrame: rect(0.0, 0.0, WIDTH, ROW)] };
         let body: Retained<NSView> = Retained::into_super(body);
         let input = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect(14.0, 11.0, WIDTH - 14.0 - 34.0, 24.0));
-        input.setPlaceholderString(Some(&NSString::from_str("나쵸에게 물어보세요 — 이 창이든, 모든 기기든")));
+        input.setPlaceholderString(Some(&NSString::from_str(PROMPT)));
         input.setFont(Some(&NSFont::systemFontOfSize(13.0)));
         input.setMaximumNumberOfLines(1);
         input.setBezeled(false);
@@ -172,6 +172,16 @@ impl Bar {
     pub fn set_offset(&self, offset: (f64, f64)) { *self.offset.borrow_mut() = offset; }
     pub fn visible(&self) -> bool { self.panel.isVisible() }
     pub fn clear_input(&self) { self.input.setStringValue(&NSString::new()); }
+
+    /// 이 바탕화면이 이어받은 일을 바에 건다. 비면 원래 안내로 돌아간다.
+    ///
+    /// 빈 입력줄의 안내 자리를 쓰는 것은 **아무것도 안 밀어내기 때문**이다 — 줄을 하나
+    /// 더 얹으면 바가 커지고 펫 머리 옆에서 자리를 다시 잡아야 한다. 인계된 일이 무엇인지는
+    /// 말풍선이 먼저 말하고, 이 줄은 「지금 무엇에 대해 묻는 자리인가」를 남겨 두는 표다.
+    pub fn set_task(&self, line: &str) {
+        let text = if line.trim().is_empty() { PROMPT } else { line };
+        self.input.setPlaceholderString(Some(&NSString::from_str(text)));
+    }
     pub fn events(&self) -> Vec<Event> { self.events.borrow_mut().drain(..).collect() }
 
     /// 다른 창으로 포커스가 넘어갔는가 — 넘어갔으면 바를 접는다. 방금 띄운 창은
@@ -226,6 +236,9 @@ impl Bar {
 /// 실제로 찍히는 데까지를 돌린다. 서버·바·클라이언트가 한 줄로 이어지는지는 이 길로만
 /// 확인된다(화면 캡처는 창 번호를 받아 밖에서 찍는다).
 #[cfg(debug_assertions)]
+/// 빈 입력줄에 뜨는 안내. 이어받은 일이 있으면 그 자리를 그 일이 쓴다(`set_task`).
+const PROMPT: &str = "나쵸에게 물어보세요 — 이 창이든, 모든 기기든";
+
 pub fn probe() {
     use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
     use std::io::{Read, Write};
@@ -282,7 +295,7 @@ pub fn probe() {
     let asked = bar.events().into_iter().any(|event| matches!(event, Event::Send(text) if text.contains("이사")));
     println!("ASK_PROBE_SEND_EVENT:{asked}");
     let mut client = crate::ask::Client::default();
-    client.ask(service.clone(), "이 창 맥미니로 이사해줘".into(), "%3".into(), serde_json::Value::Null);
+    client.ask(service.clone(), "이 창 맥미니로 이사해줘".into(), "%3".into(), serde_json::Value::Null, String::new());
     bar.clear_input();
 
     let started = std::time::Instant::now();

@@ -47,7 +47,10 @@ impl Client {
     /// 묻는다. 이미 묻고 있으면 아무 일도 안 한다 — 답이 둘 오면 어느 것이 이 질문의
     /// 답인지 바가 알 방법이 없다.
     /// `catalog` 는 이 캐릭터가 할 수 있는 동작·표정 목록 — 나쵸가 답에 맞춰 고른다.
-    pub fn ask(&mut self, service: PathBuf, text: String, pane: String, catalog: Value) -> bool {
+    /// `task` 는 이 바탕화면이 **이어받은 일**의 이름표(`postbox`)다 — 있으면 나쵸가 그 일에
+    /// 묶어 답하고, 그 뒤의 소식도 이 바탕화면으로 돌아온다. 없으면 빈 문자열이다.
+    pub fn ask(&mut self, service: PathBuf, text: String, pane: String, catalog: Value,
+               task: String) -> bool {
         if self.busy() || text.trim().is_empty() {
             return false;
         }
@@ -55,7 +58,7 @@ impl Client {
         let (sender, receiver) = mpsc::channel();
         self.pending = Some(receiver);
         std::thread::spawn(move || {
-            let _ = sender.send(run(&service, &text, &pane, &catalog));
+            let _ = sender.send(run(&service, &text, &pane, &catalog, &task));
         });
         true
     }
@@ -80,9 +83,9 @@ impl Client {
     }
 }
 
-fn run(service: &Path, text: &str, pane: &str, catalog: &Value) -> Result<Answer, ()> {
+fn run(service: &Path, text: &str, pane: &str, catalog: &Value, task: &str) -> Result<Answer, ()> {
     let port = crate::journal::ask_service(service)?;
-    let body = json!({ "text": text, "pane": pane, "catalog": catalog });
+    let body = json!({ "text": text, "pane": pane, "catalog": catalog, "task": task });
     // 서버가 판을 다 읽고 창을 옮기는 일까지 하고 답하므로 장부 조회보다 한참 오래 걸린다
     // (모델 대기 35초 + kasaterm-cli 네 번).
     let value = crate::journal::request_within(port, "POST", "/api/ask", Some(&body), Duration::from_secs(50))?;
@@ -169,7 +172,7 @@ mod tests {
         let mut client = Client::default();
         let (_sender, receiver) = mpsc::channel();
         client.pending = Some(receiver);
-        assert!(!client.ask(PathBuf::from("/없다.json"), "질문".into(), "%1".into(), Value::Null));
+        assert!(!client.ask(PathBuf::from("/없다.json"), "질문".into(), "%1".into(), Value::Null, String::new()));
         client.cancel();
         assert!(!client.busy());
     }
@@ -177,7 +180,7 @@ mod tests {
     #[test]
     fn a_blank_question_is_never_sent() {
         let mut client = Client::default();
-        assert!(!client.ask(PathBuf::from("/없다.json"), "   ".into(), "%1".into(), Value::Null));
+        assert!(!client.ask(PathBuf::from("/없다.json"), "   ".into(), "%1".into(), Value::Null, String::new()));
         assert!(!client.busy());
     }
 }
