@@ -4882,10 +4882,11 @@ mod cursor_settings_tests {
 /// 터미널은 글자를 고르는 자리라 I-beam 이 맞다는 사람과, 화살표여야 클릭 대상이
 /// 보인다는 사람이 갈린다. 텍스트 입력칸(파일트리 검색 등) 위 I-beam 은 이 설정과
 /// 무관하게 늘 뜬다 — 거긴 정말 글자를 치는 자리다.
+/// 기본은 I-beam(Ghostty 와 같다, 2026-09-22) — 화살표는 설정으로 고른다.
 pub fn read_mouse_cursor() -> String {
     match read_settings().get("mouse_cursor").and_then(|x| x.as_str()) {
-        Some("ibeam") => "ibeam".to_string(),
-        _ => "arrow".to_string(),
+        Some("arrow") => "arrow".to_string(),
+        _ => "ibeam".to_string(),
     }
 }
 

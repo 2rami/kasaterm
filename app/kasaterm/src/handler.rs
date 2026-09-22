@@ -3404,13 +3404,11 @@ impl ApplicationHandler<UserEvent> for App {
                     // 끝에서 다시 세우므로 거기(마지막 단계)가 정본이다.
                     let want_text = (self.file_tree.visible && hit(self.file_tree.search_rect))
                         || (self.file_tree.new.is_some() && hit(self.file_tree.new_row_rect));
-                    if want_text != self.text_cursor_shown {
-                        self.text_cursor_shown = want_text;
-                        window.set_cursor(if want_text {
-                            CursorIcon::Text
-                        } else {
-                            CursorIcon::Default
-                        });
+                    // 켜는 쪽만 — 끄는 건 아래 사슬이 한다. 여기서 화살표로 되돌리면
+                    // 드래그 선택 중(사슬이 안 도는 길)에 글자 위 I-beam 이 풀린다.
+                    if want_text && !self.text_cursor_shown {
+                        self.text_cursor_shown = true;
+                        window.set_cursor(CursorIcon::Text);
                     }
                 }
                 // ghostty ⋮ 핸들: pane 상단 띠(top_zone) 진입/이탈 시 redraw해
@@ -3871,6 +3869,11 @@ impl ApplicationHandler<UserEvent> for App {
                     self.px_to_cell_active(self.cursor_px.0, self.cursor_px.1),
                 ) {
                     self.selection = Some(Selection { anchor, end: cell });
+                    // 글자를 고르는 중엔 I-beam 그대로 — 이 길은 아래 커서 사슬을 안 탄다.
+                    if self.mouse_cursor == "ibeam" && !self.text_cursor_shown {
+                        self.text_cursor_shown = true;
+                        window.set_cursor(CursorIcon::Text);
+                    }
                     window.request_redraw();
                 } else {
                     // Hover feedback: show a resize cursor over a seam or the
