@@ -6532,6 +6532,18 @@ enum Frame {
     Control(String),
 }
 
+/// raw 구독 연결이 **자기 viewport 요청으로** 바꾼 격자. 출력 쪽은 격자가 바뀌면
+/// 「남이 바꿨다」고 보고 연결을 닫아 재접속으로 스냅샷을 새로 받게 하는데, 자기가
+/// 바꾼 것까지 그렇게 하면 acquire 는 소유권을 놓고 release 는 화면을 깜빡인다 —
+/// 그 경우엔 입력 쪽이 같은 채널로 size+스냅샷을 넣으니 닫을 이유가 없다.
+#[derive(Clone, Copy)]
+enum SelfSized {
+    Idle,
+    /// 요청을 처리하는 중 — 격자가 바뀌어도 아직 무엇으로 바뀔지 모른다.
+    Pending,
+    At((u16, u16)),
+}
+
 /// pane 별 거울 제어 송신자 — `term_ws_run` 이 거울(mirrored)로 붙을 때 등록하고
 /// 끝날 때 뺀다. 호스트가 「이 pane 을 누가 보고 있나」를 아는 유일한 창구다.
 ///
@@ -6759,11 +6771,16 @@ async fn term_ws_run(
     };
     // `id` 는 이 연결이 실제로 붙은 세션 — 새 셸은 서버가 지은 web-uuid 라 클라가
     // 이걸 받아야 목록에서 자기 행(「보는 중」)을 안다.
+    // 식별자는 여기서 한 번 읽어 이 연결 내내 같은 값을 쓴다 — 거울은 첫 악수의
+    // 값을 기억해 두고 뒤에 오는 size 마다 대조하므로, 그 사이 키가 새로 생겨
+    // 다른 값이 실리면 「원본이 바뀌었다」로 읽고 끊는다(viewport 처리기의 in-band size).
+    let handshake_key = crate::surface_keys::get(&self_id);
+    let input_surface_key = handshake_key.clone();
     let _ = ws_tx
         .send(Message::Text(
             serde_json::json!({
                 "t": "size", "cols": c, "rows": r, "mirror": mirrored, "id": self_id,
-                "surface_key": crate::surface_keys::get(&self_id),
+                "surface_key": handshake_key,
                 "capabilities": if native_scene {
                     serde_json::json!({ "mirror_viewport": 1, "native_scene": 1 })
                 } else { serde_json::json!({ "mirror_viewport": 1 }) },
@@ -6827,6 +6844,9 @@ async fn term_ws_run(
 
     let sess_in = sess.clone();
     let sess_sz = sess.clone();
+    let self_sized = Arc::new(std::sync::Mutex::new(SelfSized::Idle));
+    let self_sized_in = self_sized.clone();
+    let self_sized_out = self_sized.clone();
     let output_session_id = self_id.clone();
     let input_session_id = self_id.clone();
     let replaced = Arc::new(tokio::sync::Notify::new());
@@ -6859,7 +6879,13 @@ async fn term_ws_run(
                     // on a quiet GUI resize. Reattach atomically to the resized
                     // parser rather than mixing a new snapshot with queued old
                     // byte deltas. Grid subscribers already receive that frame.
-                    if !want_grid && sess_sz.size() != last_size {
+                    // 이 연결의 viewport 요청이 바꾼 격자면 재접속하지 않는다(SelfSized 주석).
+                    let foreign = match *self_sized_out.lock().unwrap() {
+                        SelfSized::Idle => true,
+                        SelfSized::Pending => false,
+                        SelfSized::At(size) => size != sess_sz.size(),
+                    };
+                    if !want_grid && sess_sz.size() != last_size && foreign {
                         let _ = ws_tx.send(Message::Close(None)).await;
                         break;
                     }
@@ -6897,8 +6923,19 @@ async fn term_ws_run(
                     // 한 자씩 세로로 꺾이는 그 화면이 된다. 크기 변경은 반드시
                     // full snapshot 출력을 동반하므로(chunk) 여기서 보면 놓치지 않는다.
                     let now = sess_sz.size();
+                    let self_caused = {
+                        let mut marker = self_sized_out.lock().unwrap();
+                        match *marker {
+                            SelfSized::Pending => true,
+                            SelfSized::At(size) if size == now => {
+                                *marker = SelfSized::Idle;
+                                true
+                            }
+                            _ => false,
+                        }
+                    };
                     if now != last_size {
-                        if !want_grid {
+                        if !want_grid && !self_caused {
                             // A byte delta can beat the quiet-resize timer.
                             // It cannot repair already-reflowed source history,
                             // and can itself have been queued at the old width.
@@ -6908,12 +6945,17 @@ async fn term_ws_run(
                             break;
                         }
                         last_size = now;
-                        let msg = serde_json::json!({
-                            "t": "size", "cols": now.0, "rows": now.1, "mirror": mirrored,
-                        })
-                        .to_string();
-                        if ws_tx.send(Message::Text(msg.into())).await.is_err() {
-                            break;
+                        // raw 구독자의 자기-유발 변경은 viewport 처리기가 surface_key 까지
+                        // 실은 size 와 스냅샷을 이 채널에 이미 넣었다 — 여기서 또 보내면
+                        // 식별자 없는 size 가 앞질러 가 거울이 「원본이 바뀌었다」고 끊는다.
+                        if want_grid {
+                            let msg = serde_json::json!({
+                                "t": "size", "cols": now.0, "rows": now.1, "mirror": mirrored,
+                            })
+                            .to_string();
+                            if ws_tx.send(Message::Text(msg.into())).await.is_err() {
+                                break;
+                            }
                         }
                     }
                     // 셸이 끝났다(reader 의 EOF 센티널) — 「gone」으로 거울의 재접속을
@@ -7087,6 +7129,8 @@ async fn term_ws_run(
                     }
                     if v.get("t").and_then(|x| x.as_str()) == Some("viewport") {
                         let mut clear_reflow = false;
+                        let before = sess_in.size();
+                        *self_sized_in.lock().unwrap() = SelfSized::Pending;
                         let granted = match v.get("op").and_then(|x| x.as_str()) {
                             Some("acquire" | "resize") => {
                                 viewport_dimensions(&v).map_or(false, |(cols, rows)| {
@@ -7111,6 +7155,29 @@ async fn term_ws_run(
                         };
                         if clear_reflow {
                             let _ = btx_shell.send(Frame::Reflow).await;
+                        }
+                        // raw 구독자는 격자가 바뀌어도 스냅샷을 못 받는다(publish_full_snapshot
+                        // 은 그리드 tap 에만 간다). 남이 바꾼 격자면 출력 쪽이 연결을 닫아
+                        // 재접속으로 받게 하지만, 자기 요청(acquire·resize·release)으로 바뀐
+                        // 격자는 재접속이 곧 소유권 포기(acquire)거나 헛된 깜빡임(release)이라
+                        // 그 길을 못 탄다 — 그래서 여기서 직접 밀어 넣는다. size 는 첫 악수와
+                        // 같은 필드(id·surface_key)를 실어야 거울이 「다른 원본」이라 오해하지
+                        // 않고, `snapshot` 표식이 「스냅샷이 뒤따르니 제자리에서 받아라」다.
+                        let now = sess_in.size();
+                        if !want_grid && now != before {
+                            *self_sized_in.lock().unwrap() = SelfSized::At(now);
+                            let (bytes, (cols, rows)) = sess_in.sized_snapshot_bytes();
+                            let size = serde_json::json!({
+                                "t": "size", "cols": cols, "rows": rows, "mirror": mirrored,
+                                "id": input_session_id,
+                                "surface_key": input_surface_key,
+                                "snapshot": true,
+                            })
+                            .to_string();
+                            let _ = btx_shell.send(Frame::Control(size)).await;
+                            let _ = btx_shell.send(Frame::Bytes(bytes)).await;
+                        } else {
+                            *self_sized_in.lock().unwrap() = SelfSized::Idle;
                         }
                         let reply = serde_json::json!({"t": "viewport", "granted": granted});
                         let _ = btx_shell.send(Frame::Control(reply.to_string())).await;

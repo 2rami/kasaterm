@@ -1661,20 +1661,34 @@ impl PtySession {
     /// replays narrow rows at a wide margin, destroying their soft-wrap flags.
     pub fn tap_bytes_with_sized_snapshot(&self) -> (Receiver<Vec<u8>>, Vec<u8>, (u16, u16)) {
         let t = self.term.lock().unwrap();
+        let (bytes, size) = self.sized_snapshot_locked(&t);
+        // 탭 등록은 스냅샷과 같은 락 안이어야 한다 — 둘 사이에 들어온 프레임은
+        // 스냅샷에도 탭에도 없이 사라진다.
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        self.byte_taps.lock().unwrap().push(tx);
+        (rx, bytes, size)
+    }
+
+    /// 지금 화면(스크롤백 포함)을 ANSI 바이트로 — 탭을 새로 열지 않는다. 이미 붙어
+    /// 있는 raw 구독자에게 격자 변경 뒤 화면을 다시 세워 줄 때 쓴다(재접속 대신).
+    pub fn sized_snapshot_bytes(&self) -> (Vec<u8>, (u16, u16)) {
+        let t = self.term.lock().unwrap();
+        self.sized_snapshot_locked(&t)
+    }
+
+    fn sized_snapshot_locked(&self, t: &Term<PtyEventForwarder>) -> (Vec<u8>, (u16, u16)) {
         // resize_effective reshapes the parser before publishing self.size.
         // The parser is canonical while holding its lock.
         let (cols, rows) = (t.grid().columns() as u16, t.grid().screen_lines() as u16);
-        let hist = history_ansi(&t, cols, rows);
+        let hist = history_ansi(t, cols, rows);
         // A subscriber starts at the live screen, independently of where the
         // source GUI is reading. Its damage belongs to that GUI, not this tap.
-        let snap = live_snapshot(&t, cols, rows, &self.pane_id, &self.title_handle);
-        let (tx, rx) = crossbeam_channel::bounded(64);
-        self.byte_taps.lock().unwrap().push(tx);
+        let snap = live_snapshot(t, cols, rows, &self.pane_id, &self.title_handle);
         // 스크롤백은 primary 화면의 것이다 — alt 화면(vim 등)에 붙는 미러에
         // 실으면 ?1049h 앞에 찍혀 primary 를 더럽힌다.
         let mut bytes = if snap.alt_screen { Vec::new() } else { hist };
         bytes.extend_from_slice(&raw_screen_ansi(&snap));
-        (rx, bytes, (cols, rows))
+        (bytes, (cols, rows))
     }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let mut sizes = self.viewport_sizes.lock().unwrap();

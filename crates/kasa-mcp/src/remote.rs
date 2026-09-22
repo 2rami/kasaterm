@@ -82,6 +82,12 @@ impl Drop for DetachOnDrop {
     fn drop(&mut self) {
         self.viewport.detached.store(true, Ordering::Release);
         self.viewport.retry.notify_one();
+        // 확대한 채로 pane 을 닫으면 호스트가 키워진 격자로 남는다 — 떼기 전에 놓는다.
+        if self.viewport.expanded.lock().unwrap().take().is_some() {
+            let _ = self.outgoing.send(Out::Control(
+                serde_json::json!({"t": "viewport", "op": "release"}).to_string(),
+            ));
+        }
         let _ = self.outgoing.send(Out::Detach);
     }
 }
@@ -98,6 +104,16 @@ struct ViewportState {
     connection_error: Mutex<Option<String>>,
     retry: tokio::sync::Notify,
     surface_key: Mutex<Option<String>>,
+    /// 확대 동안 원본 격자를 키우는 길. `on_resize` 는 거울에서 닫혀 있고
+    /// (뷰어가 원본 크기를 흔들면 다른 뷰어와 호스트가 서로 덮는다) 그 문을
+    /// 사람이 확대한 순간에만 여는 것이 `expand_source` 다.
+    outgoing: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Out>>>,
+    /// 확대로 호스트에 요청한 격자. Some 이면 「지금 소유권을 쥐고 있어야 하는
+    /// 상태」다. 되돌릴 격자는 **서버가** 안다(`viewport_sizes.effective()` — 쥔
+    /// 뷰어가 없으면 호스트 자기 크기로 돌아간다). 크기를 기억하는 이유는 재접속이다:
+    /// 남(호스트·다른 뷰어)이 격자를 바꾸면 서버가 연결을 닫아 재접속시키고, 그때
+    /// 소유권은 옛 연결과 함께 죽는다 — 새 연결의 첫 악수 뒤에 이 크기로 다시 잡는다.
+    expanded: Mutex<Option<(u16, u16)>>,
 }
 
 impl ViewportState {
@@ -247,6 +263,54 @@ pub fn set_viewport(local_id: &str, cols: u16, rows: u16) -> bool {
     let Some(link) = map.get(local_id).filter(|link| link.view) else { return false };
     *link.viewport.target.lock().unwrap() = Some((cols.clamp(2, 1000), rows.clamp(1, 1000)));
     true
+}
+
+/// 거울이 **확대되어 있는 동안만** 원본 격자를 키운다.
+///
+/// 평상시 창 크기 변화는 원본에 닿지 않는다(`on_resize` 의 view 가드) — 예전에
+/// 그 길을 열어 두었더니 「미러링할때 크기 줄이면 미러링되는곳도 줄어들어」가 됐다.
+/// 사람이 확대를 누른 순간은 뜻이 다르다: 접혀 있던 줄을 보겠다는 것이고, 접힌
+/// 줄은 호스트가 그 rows 로 그리지 않아 스크롤백에도 없으므로 원본을 키우는 것
+/// 말고는 길이 없다. 그래서 **키우는 방향으로만** 연다.
+///
+/// `current` 는 호출부가 읽은 지금 격자다(로컬 파서는 호스트 격자를 그대로 쓴다).
+/// 되돌릴 크기는 이쪽이 적어 두지 않는다 — 서버가 viewport 소유권으로 안다.
+pub fn expand_source(local_id: &str, cols: u16, rows: u16, current: (u16, u16)) -> bool {
+    let map = links().lock().unwrap();
+    let Some(link) = map.get(local_id).filter(|link| link.view) else { return false };
+    // 어느 방향으로도 좁히지 않는다 — 확대는 더 보려는 동작이고, 호스트를 좁히면
+    // 거기 앉은 사람의 화면만 망가진다. 차원마다 지금 격자와 요청 중 큰 쪽을 쓰고,
+    // 그래서 아무것도 안 커지면 보내지 않는다.
+    let (cols, rows) = (cols.clamp(2, 1000).max(current.0), rows.clamp(1, 1000).max(current.1));
+    if (cols, rows) == current {
+        return false;
+    }
+    // 처음 키울 때만 소유권을 잡고(acquire), 쥔 뒤에는 크기만 바꾼다(resize).
+    let mut expanded = link.viewport.expanded.lock().unwrap();
+    let op = if expanded.is_some() { "resize" } else { "acquire" };
+    if !send_viewport(link, serde_json::json!({"t": "viewport", "op": op, "cols": cols, "rows": rows})) {
+        return false;
+    }
+    *expanded = Some((cols, rows));
+    true
+}
+
+/// 확대를 풀 때 원본을 원래 격자로 되돌린다. 키운 적이 없으면 아무것도 안 한다 —
+/// 그래서 확대와 무관한 pane 에 대고 불러도 안전하다(리사이즈마다 훑는 호출부의 전제).
+pub fn restore_source(local_id: &str) -> bool {
+    let map = links().lock().unwrap();
+    let Some(link) = map.get(local_id).filter(|link| link.view) else { return false };
+    if link.viewport.expanded.lock().unwrap().take().is_none() {
+        return false;
+    }
+    // 크기를 지정하지 않는다 — 놓으면 호스트가 자기 격자로 돌아간다.
+    send_viewport(link, serde_json::json!({"t": "viewport", "op": "release"}))
+}
+
+fn send_viewport(link: &Link, frame: serde_json::Value) -> bool {
+    let outgoing = link.viewport.outgoing.lock().unwrap();
+    let Some(tx) = outgoing.as_ref() else { return false };
+    tx.send(Out::Control(frame.to_string())).is_ok()
 }
 
 /// 원격 pane 의 전송 명세 + 정체 한 벌. remote_meta 와 달리 표시·역이사가 쓴다.
@@ -420,6 +484,7 @@ fn connect_inner(
         surface_key: Mutex::new(hint.as_ref().and_then(|hint| hint.surface_key.clone())),
         ..Default::default()
     });
+    *viewport.outgoing.lock().unwrap() = Some(otx.as_ref().clone());
     let manager_viewport = viewport.clone();
     let (ktx, krx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let (htx, hrx) =
@@ -642,7 +707,15 @@ async fn manager(
                                         }
                                         let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
                                         let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
-                                        if connection_size.is_some_and(|previous| previous != (c, r)) {
+                                        let changed = connection_size.is_some_and(|previous| previous != (c, r));
+                                        // `snapshot` 표식은 「이 연결로 스냅샷이 뒤따른다」 — 내 viewport
+                                        // 요청(확대·해제)에 호스트가 같은 연결로 답한 것이다. 재접속하면
+                                        // 서버 쪽 ViewerViewport 가 떨어져 방금 잡은 소유권을 놓으므로
+                                        // 제자리에서 RIS 로 옛 격자를 비우고 받는다(http.rs SelfSized).
+                                        let in_band = v.get("snapshot").and_then(|x| x.as_bool()) == Some(true);
+                                        if changed && in_band {
+                                            reset_before_frame = true;
+                                        } else if changed {
                                             // Old hosts send size+raw deltas on
                                             // resize, without replacing their
                                             // reflowed scrollback. Reconnect to
@@ -666,11 +739,24 @@ async fn manager(
                                             // 스크롤백을 비운다(모듈 머리말 참고).
                                             reset_before_frame = true;
                                         }
+                                        let fresh_connection = !sized_this_conn;
                                         sized_this_conn = true;
                                         if !had_attach {
                                             had_attach = true;
                                             let id = remote_id.clone().unwrap_or_default();
                                             let _ = htx.try_send(Ok((id, c, r)));
+                                        }
+                                        // 확대 중에 (남이 바꾼 격자로) 재접속했으면 소유권은 옛 연결과
+                                        // 함께 죽었다 — 새 연결의 첫 악수 뒤에 같은 크기로 다시 잡는다.
+                                        // 같은 연결 안의 size(내 요청의 결과)에는 걸리지 않는다.
+                                        if fresh_connection {
+                                            if let Some((cols, rows)) = *viewport.expanded.lock().unwrap() {
+                                                if let Some(out) = viewport.outgoing.lock().unwrap().as_ref() {
+                                                    let _ = out.send(Out::Control(serde_json::json!({
+                                                        "t": "viewport", "op": "acquire", "cols": cols, "rows": rows,
+                                                    }).to_string()));
+                                                }
+                                            }
                                         }
                                     }
                                     // 호스트가 「이 페이지를 네 쪽에서 열어라」 —
@@ -3213,6 +3299,75 @@ mod tests {
         wait_for(|| !is_view_pane("%viewport-passive-first") && !is_view_pane("%viewport-passive-second"),
             "viewers did not detach");
         assert_eq!(source.size(), (100, 30), "viewer detach changed source dimensions");
+        let _ = events.send(ExtEvent::Eof);
+    }
+
+    /// 확대한 동안만 원본을 키운다 — claude 가 접어 둔 줄은 호스트가 그 rows 로
+    /// 그리지 않아 스크롤백에도 없으므로, 거울에서 아무리 재투영해도 안 나온다.
+    #[test]
+    fn zoomed_mirror_expands_source_then_restores_it() {
+        fn wait_for(mut condition: impl FnMut() -> bool, message: &str) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !condition() {
+                assert!(std::time::Instant::now() < deadline, "{message}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let id = format!("zoom-source-{}", uuid::Uuid::new_v4());
+        let (events, receiver) = crossbeam_channel::unbounded();
+        let source = Arc::new(PtySession::start_external(
+            PtyOptions { pane_id: id.clone(), cols: 100, rows: 30, ..Default::default() },
+            ExternalIo {
+                events: receiver,
+                writer: Box::new(std::io::sink()),
+                on_resize: Arc::new(|_, _| {}),
+            },
+        ).unwrap());
+        kasa_pty::register_session(&id, &source);
+        let backend: Arc<dyn kasa_socket::backend::Backend> = Arc::new(
+            crate::standalone::StandaloneBackend::new(std::env::temp_dir()),
+        );
+        let port = crate::spawn_http_server_opts(backend, 0, false).unwrap();
+        let local = format!("%zoom-mirror-{}", uuid::Uuid::new_v4());
+        let mirror = connect_view(RemoteSpec {
+            base: format!("http://127.0.0.1:{port}"), pane: Some(id),
+            cwd: None, token: None, identity: Default::default(),
+        }, &local).unwrap();
+        wait_for(|| mirror.session.size() == (100, 30), "거울이 호스트 격자를 못 받았다");
+
+        // 평상시 창 크기 기록은 원본에 닿지 않는다 — 「줄이면 저쪽도 줄어들어」의 자리.
+        assert!(set_viewport(&local, 200, 60));
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(source.size(), (100, 30), "viewport 기록이 원본 격자를 흔들었다");
+
+        assert!(expand_source(&local, 200, 60, (100, 30)));
+        wait_for(|| source.has_viewer_size_control(), "확대가 viewport 소유권을 못 잡았다");
+        wait_for(|| source.size() == (200, 60), "확대가 원본 격자를 못 키웠다");
+        // 거울도 같은 연결로 키운 격자를 받는다 — 재접속했다면 소유권이 풀려 위가 깨진다.
+        wait_for(|| mirror.session.size() == (200, 60), "거울이 키운 격자를 못 받았다");
+        // 맨 아래 행에 찍는다 — `visible_text(n)` 은 아래쪽 n 행만 본다.
+        events.send(ExtEvent::Bytes(b"\x1b[2J\x1b[60;1HEXPANDED!".to_vec())).unwrap();
+        assert!(wait_visible(&mirror.session, "EXPANDED!", 5), "확대 뒤 화면이 거울에 안 온다");
+
+        // 확대한 채 창을 더 늘려도 되돌릴 자리는 처음 격자를 지킨다.
+        assert!(expand_source(&local, 220, 70, (200, 60)));
+        wait_for(|| source.size() == (220, 70), "확대 중 재확대가 안 먹었다");
+
+        // 좁히는 요청은 보내지 않는다 — 호스트에 앉은 사람 화면만 망가진다.
+        assert!(!expand_source(&local, 40, 10, (220, 70)), "확대가 원본을 좁히려 했다");
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(source.size(), (220, 70), "좁히는 요청이 원본에 닿았다");
+
+        assert!(restore_source(&local));
+        wait_for(|| source.size() == (100, 30), "확대를 풀었는데 원본이 안 돌아왔다");
+        assert!(!restore_source(&local), "키운 적 없는데 복원이 무언가를 보냈다");
+
+        // 확대한 채 pane 을 닫아도 호스트는 원래 격자로 남는다.
+        assert!(expand_source(&local, 180, 50, (100, 30)));
+        wait_for(|| source.size() == (180, 50), "닫기 전 확대가 안 먹었다");
+        drop(mirror);
+        wait_for(|| source.size() == (100, 30), "확대한 채 뗐더니 호스트가 커진 채 남았다");
+
         let _ = events.send(ExtEvent::Eof);
     }
 

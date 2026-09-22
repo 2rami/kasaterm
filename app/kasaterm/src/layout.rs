@@ -648,6 +648,7 @@ impl App {
         for (id, (pc, pr)) in &leaf_cells {
             if kasa_mcp::remote::is_view_pane(id) {
                 kasa_mcp::remote::set_viewport(id, *pc, *pr);
+                self.fit_zoomed_mirror(id, id, *pc, *pr);
                 continue;
             }
             if let Some(sess) = self.pty.get(id) {
@@ -678,6 +679,8 @@ impl App {
             for pid in pids {
                 if kasa_mcp::remote::is_view_pane(&pid) {
                     kasa_mcp::remote::set_viewport(&pid, pc, pr);
+                    // 확대 판정은 바깥 leaf 로 한다 — 탭은 그 자리를 함께 쓴다.
+                    self.fit_zoomed_mirror(&outer, &pid, pc, pr);
                     continue;
                 }
                 if let Some(sess) = self.pty.get(&pid) {
@@ -689,6 +692,23 @@ impl App {
         // shifted (rounding) and the renderer caches the previous tree.
         self.publish_pty_layout();
     }
+    /// 확대된 거울만 원본 격자를 함께 키운다(풀면 되돌린다).
+    ///
+    /// 거울은 원본 크기를 절대 안 건드리는 것이 기본이다 — 창을 줄일 때마다
+    /// 호스트가 따라 줄면 거기 앉은 사람 화면이 망가진다. 다만 확대는 뜻이
+    /// 다르다: claude 가 접어 둔 줄(`+N lines`)은 호스트가 그 rows 로 그리지
+    /// 않아 **스크롤백에도 없으므로**, 재투영으로는 영영 못 본다. 원본이 커져야
+    /// 비로소 그려진다. 그래서 확대한 동안만 키우고, 풀면 원래 격자로 돌린다.
+    fn fit_zoomed_mirror(&self, zoom_key: &str, pid: &str, cols: u16, rows: u16) {
+        if self.zoomed_pane.as_deref() != Some(zoom_key) {
+            kasa_mcp::remote::restore_source(pid);
+            return;
+        }
+        // 지금 격자는 로컬 파서에서 읽는다 — 거울의 파서는 호스트 격자를 그대로 쓴다.
+        let Some(sess) = self.pty.get(pid) else { return };
+        kasa_mcp::remote::expand_source(pid, cols, rows, sess.size());
+    }
+
     /// If the cursor (logical px) rests on a split seam, return the BSP
     /// tree path of that split plus its axis. A few px of tolerance makes
     /// the thin seam easy to grab. None when not over any divider.
