@@ -3400,14 +3400,9 @@ impl ApplicationHandler<UserEvent> for App {
                     // I-beam over the file-tree text inputs (search box / inline
                     // new-entry name). The commit modal + settings screen are
                     // full-window overlays, handled by the earlier branch.
-                    // 터미널 셀 위에서도 I-beam 을 쓸지는 설정이 정한다(기본 화살표).
-                    // 글자를 고르는 자리라 I-beam 이 맞다는 쪽과, 화살표여야 클릭 대상이
-                    // 보인다는 쪽이 갈려서 고르는 몫을 사람에게 넘긴다. 위 입력칸 판정은
-                    // 설정과 무관하게 그대로다 — 거긴 정말 글자를 치는 자리다.
-                    let over_cells =
-                        self.mouse_cursor == "ibeam" && self.px_to_pane_cell(cx, cy).is_some();
-                    let want_text = over_cells
-                        || (self.file_tree.visible && hit(self.file_tree.search_rect))
+                    // 터미널 셀 위 I-beam 은 여기서 정하지 않는다 — 이 뒤의 커서 사슬이
+                    // 끝에서 다시 세우므로 거기(마지막 단계)가 정본이다.
+                    let want_text = (self.file_tree.visible && hit(self.file_tree.search_rect))
                         || (self.file_tree.new.is_some() && hit(self.file_tree.new_row_rect));
                     if want_text != self.text_cursor_shown {
                         self.text_cursor_shown = want_text;
@@ -3986,6 +3981,20 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         icon
                     };
+                    // 터미널 글자 위 I-beam(설정 `mouse_cursor`). 반드시 이 사슬의 끝이어야
+                    // 한다 — 앞쪽 분기에서 세운 I-beam 을 여기 `set_cursor` 가 화살표로
+                    // 되덮어, 설정을 켜도 안 먹었다(「커서는 안 돼」).
+                    let icon = if matches!(icon, CursorIcon::Default)
+                        && self.mouse_cursor == "ibeam"
+                        && self
+                            .px_to_pane_cell(cx, cy)
+                            .is_some_and(|(pid, _, _)| self.pane_is_terminal(&pid))
+                    {
+                        CursorIcon::Text
+                    } else {
+                        icon
+                    };
+                    self.text_cursor_shown = matches!(icon, CursorIcon::Text);
                     window.set_cursor(icon);
                     // Hover glow on chrome buttons (+ / action cluster) needs
                     // a redraw on every move — paint reads self.cursor_px to
