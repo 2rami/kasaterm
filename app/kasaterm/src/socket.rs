@@ -5141,9 +5141,11 @@ pub fn invalidate_theme_rows() {
 
 static THEME_ROWS: std::sync::RwLock<Option<Vec<ThemeRow>>> = std::sync::RwLock::new(None);
 
-/// 미리보기로 몇 명을 세울지. 셋이면 "여러 명이 든 한 벌"이라는 게 보이고, 카드가
-/// 목록으로 늘어설 만큼 좁게 남는다.
-const THEME_PREVIEW_FACES: usize = 3;
+/// 미리보기로 몇 명까지 보낼지. 셋이던 것은 카드가 한 줄로 늘어서던 시절의 값인데,
+/// 2열 카드(394px)가 되면서 얼굴 셋이 왼쪽에 몰리고 가운데 174px 가 빈 띠로 남았다
+/// (2026-09-22). 그리는 쪽이 카드 폭에 맞춰 이 중에서 들어갈 만큼만 쓴다 —
+/// 여기서는 넉넉히 보내고 자르는 일은 화면이 한다.
+const THEME_PREVIEW_FACES: usize = 6;
 
 fn build_theme_rows() -> Vec<ThemeRow> {
     // 번들이 맨 앞 — 폴더가 없어 `list_themes` 에 안 잡히지만 「지금 무엇을

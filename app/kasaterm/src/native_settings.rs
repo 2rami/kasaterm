@@ -7,7 +7,13 @@ use super::*;
 
 pub(crate) type Rect = (f32, f32, f32, f32);
 
-const HEADER_H: f32 = 64.0;
+/// 페이지 이름이 앉는 머리 칸. 이름은 `ay + 26` 에 20pt 로 그려지고 본문은 이
+/// 칸 아래 14px 에서 시작하므로, 이 값이 곧 **이름과 첫 묶음 제목 사이의 공백**을
+/// 정한다. 64 일 때 그 사이가 63px 로 벌어져 묶음 제목–첫 행 간격(25px)의 2.5배가
+/// 됐다 — 이름만 위에 떠 보인다(2026-09-22 실측). 44 면 43px 로, 이름이 묶음보다
+/// 큰 단위라는 것은 남기면서 떨어져 보이지는 않는다. 아래로는 본문이 스크롤해
+/// 지나가므로 이름 밑에 14px 는 남긴다.
+const HEADER_H: f32 = 44.0;
 /// 플랫 행 한 줄 높이(목업 `.row` min-height 40).
 const ROW_H: f32 = 40.0;
 /// 조작 부품 높이(목업 `.ctl` 26).
@@ -4711,7 +4717,11 @@ fn paint_themes(
             theme::text_dim(),
             false,
         );
-        for (j, (slug, _)) in theme_row.faces.iter().take(3).enumerate() {
+        // 얼굴은 카드 폭이 허락하는 만큼. 오른쪽 아래 단추 세 개(또는 「기본」 알약)가
+        // 서는 자리까지만 밀고 들어간다 — 고정 개수로 두면 넓은 카드 가운데가 빈다.
+        let face_room = (rect.2 - 106.0 - 12.0).max(0.0);
+        let face_fit = ((face_room / 34.0).floor() as usize).clamp(1, theme_row.faces.len());
+        for (j, (slug, _)) in theme_row.faces.iter().take(face_fit).enumerate() {
             let face = (
                 rect.0 + 12.0 + j as f32 * 34.0,
                 rect.1 + 60.0,
@@ -4760,6 +4770,14 @@ fn paint_themes(
                 "x",
                 Target::Setting(SettingsAction::DeleteTheme(theme_row.id.clone())),
             );
+        } else {
+            // 번들 테마는 폴더가 없어 이름 바꾸기·열기·지우기가 **없는 동작**이다.
+            // 그렇다고 그 자리를 비워 두면 카드마다 오른쪽 아래가 있다 없다 해서
+            // 줄이 어긋나 보인다(2026-09-22 판독). 왜 없는지를 같은 자리에 적는다 —
+            // 못 쓰는 단추를 세우는 것보다 정직하고, 줄도 선다.
+            let text = "기본";
+            let pw = g.measure_chrome_text(text, 9.5, false) + 14.0;
+            pill(g, rect.0 + rect.2 - 12.0 - pw, rect.1 + 72.5, text, false);
         }
     }
     let rows = (s.themes.len() + cols - 1) / cols;
