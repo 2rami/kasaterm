@@ -8,11 +8,22 @@
 //! 지키는 선
 //! - **말한 것만 받았다고 한다.** 서버는 ACK 를 받고서야 그 줄을 지운다 — 받아 들고 오다
 //!   끊기거나 펫이 죽으면 다음에 다시 온다. 그래서 인계 소식이 조용히 사라지지 않는다.
-//! - **두 번 말하지 않는다.** ACK 가 유실되면 같은 줄이 **같은 id** 로 다시 오므로 id 로 막는다.
-//!   ⚠️그 기억이 **메모리에만 있으면 펫을 껐다 켠 뒤에 다시 말한다** — ACK 가 유실된 채로
-//!   재기동하면 서버는 그 줄을 아직 들고 있고 펫은 처음 보는 것으로 읽는다(2026-09-22 검수에서
-//!   지적받은 자리). 그래서 말한 id 를 펫 폴더에 남긴다(`remember_at`). 자리를 못 받았으면
-//!   (검증 실행처럼 펫 폴더가 없을 때) 메모리만 쓰고, 그 판에서는 이 보장이 없다.
+//! - **두 번 말하지 않는다** — 다만 **정확히 한 번은 아니다.** 아래 「어디까지 보장하나」를 봐라.
+//!   ACK 가 유실되면 같은 줄이 **같은 id** 로 다시 오므로 id 로 막는다(이미 말한 것·아직 안
+//!   꺼낸 것 양쪽 모두). ⚠️그 기억이 **메모리에만 있으면 펫을 껐다 켠 뒤에 다시 말한다** —
+//!   ACK 가 유실된 채로 재기동하면 서버는 그 줄을 아직 들고 있고 펫은 처음 보는 것으로 읽는다
+//!   (2026-09-22 검수 지적). 그래서 말한 id 를 펫 폴더에 남긴다(`remember_at`).
+//!
+//! ■ 어디까지 보장하나 — **at-least-once 에 가깝고 exactly-once 가 아니다**
+//!   ·소식이 **사라지지는 않는다**: ACK 전까지 서버가 들고 있고, 만료(하루) 전에 다시 온다.
+//!   ·같은 줄을 두 번 말하는 창이 **남아 있다**. 셋 다 좁지만 없다고 하면 거짓말이다:
+//!     ①`remember_at` 으로 자리를 못 받은 판(펫 폴더를 모르는 검증 실행)은 메모리만 쓴다.
+//!     ②기억 파일 쓰기가 실패하면(디스크 참, 권한) 그 판에서는 **조용히 넘어간다** — 여기서
+//!       멈추면 인계가 통째로 막히기 때문이다. 다음 재기동에 그 줄을 다시 말할 수 있다.
+//!     ③기억을 남긴 **직후·말풍선에 올리기 전**에 죽으면, 그 줄은 「말했다」로 기록됐지만
+//!       사람은 못 봤다. 그래도 이 순서인 것은 반대가 더 나쁘기 때문이다 — 말한 뒤에 남기면
+//!       흔한 종료마다 되풀이가 생긴다. 드물게 **한 줄을 놓치는** 쪽을 골랐다.
+//!   ·그래서 「받았다」의 정본은 펫이 아니라 **나쵸의 영수증**이다(`petbox.delivered`).
 //! - **끼어들지 않는다.** 여기는 줄을 받아 쌓아만 두고, 말할지 말지는 부르는 쪽이 정한다
 //!   (사람이 읽는 답 위에 덮지 않으려고 — 무조건 팝업·포커스 뺏기는 안 한다).
 //! - **못 닿으면 조용히 물러난다.** 뒤로 갈수록 뜸하게 다시 걸고, 화면에 실패를 안 띄운다.
@@ -117,6 +128,11 @@ impl Client {
         self.memo = Some(path);
     }
 
+    /// 말한 id 를 자리에 남긴다. **실패해도 멈추지 않는다.**
+    ///
+    /// 여기서 막아서면 디스크가 찼다는 이유로 인계가 통째로 안 뜬다 — 그건 되풀이보다 나쁘다.
+    /// 대신 그 판에서는 되풀이를 못 막는다는 것을 모듈 머리글의 「어디까지 보장하나」에 적어
+    /// 뒀다. 조용히 넘어가되 없는 보장을 있는 척하지는 않는다.
     fn remember(&self) {
         let Some(path) = self.memo.as_ref() else { return };
         let rows: Vec<&String> = self.spoken.iter().collect();
@@ -172,6 +188,13 @@ impl Client {
             // 이미 말한 것은 **다시 말하지 않고 다시 ACK 만** 한다(ACK 가 유실된 재전달).
             if self.spoken.contains(&line.id) {
                 self.acks.push(line.id);
+                continue;
+            }
+            // ★아직 안 꺼낸 줄도 겹치지 않는다. 서버는 ACK 전까지 같은 줄을 계속 주는데,
+            // 사람이 글자를 치는 동안에는 아무도 안 꺼낸다 — 그 사이 폴링이 도는 만큼 같은
+            // id 가 쌓이고 나중에 그만큼 되풀이해 말하게 된다(2026-09-22 검수). 여기서는
+            // **ACK 도 안 한다**: 아직 안 말했는데 ACK 하면 서버가 지워 그 줄이 사라진다.
+            if self.queue.iter().any(|row| row.id == line.id) {
                 continue;
             }
             if self.queue.len() >= QUEUE_CAP {
@@ -385,6 +408,24 @@ mod tests {
         assert!(client.next_at.is_none());
     }
 
+    /// ★**안 꺼낸 채로 다시 받아도 줄이 겹치지 않는다.** 서버는 ACK 전까지 같은 줄을 계속
+    /// 주는데, 사람이 글자를 치는 동안에는 `take` 를 안 한다(끼어들지 않으려고). 그 사이
+    /// 폴링이 여러 번 돌면 **같은 id 가 큐에 여러 개 쌓이고**, 나중에 그만큼 되풀이해 말하게
+    /// 된다(2026-09-22 검수 지적).
+    #[test]
+    fn the_same_line_never_piles_up_while_the_person_is_typing() {
+        let mut client = Client::default();
+        let same = json!({"messages": [{"id": "a", "text": "인계 한 줄"}]});
+        for _ in 0..5 {
+            fed(&mut client, &same);        // 사람이 치는 동안 아무도 안 꺼낸다
+        }
+        assert_eq!(client.queue.len(), 1, "같은 줄은 한 자리만 차지한다");
+        assert_eq!(client.take().unwrap().text, "인계 한 줄");
+        assert!(client.take().is_none(), "되풀이해 말하지 않는다");
+        // 아직 안 말한 줄을 ACK 하면 서버가 지워 버린다 — 겹친 것은 조용히 버린다.
+        assert_eq!(client.acks, vec!["a".to_string()]);
+    }
+
     /// ★**펫을 껐다 켠 뒤에도 두 번 말하지 않는다.** ACK 가 유실된 채로 재기동하면 서버는
     /// 그 줄을 아직 들고 있고, 기억이 메모리에만 있으면 펫이 처음 보는 것으로 읽는다
     /// (2026-09-22 검수 지적 — 그 전까지 이 보장은 한 프로세스 안에서만 참이었다).
@@ -440,6 +481,30 @@ mod tests {
         for p in [&mini, &book] {
             std::fs::remove_file(p).unwrap();
         }
+    }
+
+    /// 기억을 **못 남기는** 자리라도 인계는 뜬다 — 되풀이를 못 막을 뿐이다(머리글 ②).
+    /// 여기서 막아서면 디스크가 찼다는 이유로 소식이 통째로 안 뜬다.
+    #[test]
+    fn a_memo_that_cannot_be_written_still_lets_the_line_through() {
+        let dir = std::env::temp_dir().join(format!("kasapet-postbox-ro-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 파일 자리에 **폴더**를 두면 쓰기가 반드시 실패한다.
+        let memo = dir.join("spoken.json");
+        let _ = std::fs::remove_file(&memo);
+        std::fs::create_dir_all(&memo).unwrap();
+
+        let mut client = Client::default();
+        client.remember_at(memo.clone());
+        fed(&mut client, &json!({"messages": [{"id": "a", "text": "그래도 말한다"}]}));
+        assert_eq!(client.take().unwrap().text, "그래도 말한다");
+        // 기억은 못 남았다 — 재기동하면 다시 말하게 된다(그 한계가 문서에 적혀 있다).
+        let mut reborn = Client::default();
+        reborn.remember_at(memo.clone());
+        fed(&mut reborn, &json!({"messages": [{"id": "a", "text": "그래도 말한다"}]}));
+        assert!(reborn.waiting(), "기억을 못 남기면 되풀이를 못 막는다 — 문서와 같아야 한다");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// 기억 파일이 깨졌거나 없으면 **조용히 빈손으로 시작한다** — 여기서 터지면 펫이 안 뜬다.

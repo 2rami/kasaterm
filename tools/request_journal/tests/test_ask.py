@@ -7,6 +7,22 @@ from unittest.mock import patch
 
 from tools.request_journal import ask
 
+# ⚠️**이 검사들은 진짜 나쵸를 부르면 안 된다.**
+#
+# `ask.answer()` 는 판·화면을 모은 뒤 나쵸 물음 창구로 넘기고(두뇌 하나), 넘길 곳은 서술자
+# `~/.config/kasaterm/nacho-ask.json` 이 정한다 — 그 파일은 **사람이 쓰는 기계에 실제로 있다.**
+# 그래서 로컬 두뇌(폴백)를 보려고 `llm_client` 만 가짜로 바꾼 검사가 조용히 네트워크로 나가
+# **도는 봇**에게 묻고, 그 진짜 답을 받아 와 어긋났다(2026-09-22: 미니에서 `nacho_base()` 가
+# `http://127.0.0.1:8792` 를 가리켰고 그 포트의 `/health` 가 `nacho-ask` 였다). 기대를 넓혀
+# 덮을 일이 아니다 — 검사가 사람의 봇에 말을 걸고 그쪽 대화 기록을 늘리는 것 자체가 문제다.
+#
+# 그래서 이 모듈은 **없는 서술자**를 가리켜 기본적으로 아무 데도 안 넘긴다. 중계를 보는
+# 검사(`NachoRelayTests`)는 자기 자리에서 가짜 서술자·가짜 `urlopen` 을 세워 쓴다.
+_ISOLATED = Path(tempfile.mkdtemp(prefix="ask-test-isolated-")) / "없는-서술자.json"
+ask.NACHO_ASK_DESCRIPTOR = _ISOLATED
+ask.NACHO_ASK_TOKEN_FILE = _ISOLATED.with_name("없는-열쇠")
+os.environ.pop("NACHO_ASK_URL", None)
+
 
 def board_all():
     return {
@@ -133,8 +149,11 @@ class AnswerTests(unittest.TestCase):
                 return True, json.dumps({"result": {"text": "화면 끝"}})
             return True, "{}"
 
-        with patch.object(ask, "llm_client", return_value=client), patch.object(ask, "run_cli", side_effect=cli), patch.object(ask, "_machines_http", return_value=MACHINES):
+        with patch.object(ask, "llm_client", return_value=client), patch.object(ask, "run_cli", side_effect=cli), \
+                patch.object(ask, "_machines_http", return_value=MACHINES), patch.object(ask, "urlopen") as opened:
             status, payload = ask.answer(lambda _cancel: None, {"text": "다들 뭐 해?", "pane": "%9", "catalog": CATALOG})
+        # ★로컬 두뇌를 보는 검사다 — **밖으로 한 번도 나가지 않아야** 한다.
+        opened.assert_not_called()
         self.assertEqual(status, 200)
         self.assertEqual(payload["answer"], "음... 다들 조용하네 (=^･ω･^=)")
         self.assertEqual(payload["act"], {"motion": "Error", "expression": "cry"})
@@ -149,6 +168,18 @@ class AnswerTests(unittest.TestCase):
 
 CATALOG = {"motions": [{"group": "Idle", "label": "대기"}, {"group": "Think", "label": "생각"}, {"group": "Error", "label": "곤란"}],
            "expressions": [{"name": "blush", "label": "홍조"}, {"name": "cry", "label": "눈물"}]}
+
+
+class IsolationTests(unittest.TestCase):
+    """검사가 **사람이 쓰는 봇**에 말을 걸지 않는지. 이 한 건이 무너지면 나머지가 전부
+    네트워크 검사가 되고, 실패는 남의 기계 사정에 따라 오간다(2026-09-22)."""
+
+    def test_no_test_in_this_module_relays_to_a_real_nacho(self):
+        self.assertEqual(ask.nacho_base(), "", "기본은 아무 데도 안 넘긴다")
+        self.assertFalse(ask.NACHO_ASK_DESCRIPTOR.exists(), str(ask.NACHO_ASK_DESCRIPTOR))
+        with patch.object(ask, "urlopen") as opened:
+            self.assertIsNone(ask.ask_nacho("안녕", "%1", {"machine": "맥북"}))
+        opened.assert_not_called()
 
 
 class NachoRelayTests(unittest.TestCase):
