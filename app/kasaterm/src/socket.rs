@@ -1770,12 +1770,16 @@ impl Backend for PtyBackend {
                             .collect()
                     })
                     .unwrap_or_default();
+                // 방치(`attention_kind: idle`)는 세지 않는다 — 기다림 수는 「사람 손이
+                // 필요한 칸」을 말하고, 그게 주황과 같은 근거여야 화면과 숫자가 안 어긋난다.
                 let waiting = panes
                     .iter()
                     .filter(|p| {
                         p.get("status")
                             .and_then(|v| v.as_str())
-                            .is_some_and(|st| st.contains("wait") || st.contains("attention"))
+                            .is_some_and(|st| st.contains("wait"))
+                            && crate::agent_state::wait_kind_of_row(p)
+                                != Some(crate::agent_state::WaitKind::Idle)
                     })
                     .count();
                 serde_json::json!({

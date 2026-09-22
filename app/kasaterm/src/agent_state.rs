@@ -195,6 +195,20 @@ const AGY_ACTIVE: Duration = Duration::from_secs(15);
 /// 방치를 알리는 판정 이유. 종류 칸을 안 보내는 기계에서는 이 글자가 유일한 단서다.
 pub(crate) const IDLE_PROMPT: &str = "idle prompt";
 
+/// 보드 행에서 기다림의 **종류**를 읽는다 — `attention_kind` 칸이 먼저고, 없으면 판정
+/// 이유가 유일한 단서다. 종류를 안 보내는 옛 판 기계에서 이것마저 없으면 읽는 쪽이 모든
+/// 기다림을 승인으로 쳐, 그냥 쉬는 학생이 주황으로 깜빡인다. 거울 판정과 기기 목록이
+/// 같은 답을 내려면 둘 다 여기를 거쳐야 한다.
+pub(crate) fn wait_kind_of_row(row: &serde_json::Value) -> Option<WaitKind> {
+    row.get("attention_kind")
+        .and_then(|v| v.as_str())
+        .and_then(WaitKind::parse)
+        .or_else(|| {
+            let why = row.get("status_reason")?.as_str()?;
+            (why == IDLE_PROMPT).then_some(WaitKind::Idle)
+        })
+}
+
 /// 다른 기계가 보낸 낱말을 되살린다. `kind` 는 그쪽 보드의 `attention_kind` — 없으면
 /// 승인으로 친다. 방치(`idle`)를 승인으로 잘못 보는 편이 그 반대보다 덜 위험해서가
 /// 아니라, 옛 판 기계는 그 칸을 안 보내기 때문이다. 보내 주면 그대로 가른다.
@@ -521,16 +535,7 @@ impl StateHub {
                     .as_ref()
                     .and_then(|v| v.get("waiting_for").and_then(|s| s.as_str()))
                     .map(str::to_string);
-                let kind = facts
-                    .as_ref()
-                    .and_then(|v| v.get("attention_kind").and_then(|s| s.as_str()))
-                    .and_then(WaitKind::parse)
-                    // 종류를 안 보내는 판(옛 앱)에서는 판정 이유가 유일한 단서다. 이것마저
-                    // 없으면 승인으로 치게 되고, 그냥 쉬는 학생이 주황으로 깜빡인다.
-                    .or_else(|| {
-                        let why = facts.as_ref()?.get("status_reason")?.as_str()?;
-                        (why == IDLE_PROMPT).then_some(WaitKind::Idle)
-                    });
+                let kind = facts.as_ref().and_then(wait_kind_of_row);
                 evidence.remote = Some((word, why, kind));
             } else if harness.is_some() {
                 if let Some(p) = session.as_ref() {
@@ -879,13 +884,7 @@ mod tests {
     #[test]
     fn a_board_without_the_kind_column_is_read_from_its_reason() {
         let pane = |reason: &str| serde_json::json!({"status": "waiting", "status_reason": reason});
-        let read = |row: &serde_json::Value| {
-            row.get("attention_kind").and_then(|v| v.as_str()).and_then(WaitKind::parse)
-                .or_else(|| {
-                    let why = row.get("status_reason")?.as_str()?;
-                    (why == IDLE_PROMPT).then_some(WaitKind::Idle)
-                })
-        };
+        let read = wait_kind_of_row;
         assert_eq!(read(&pane(IDLE_PROMPT)), Some(WaitKind::Idle));
         assert_eq!(read(&pane("permission prompt")), None, "모르는 이유는 지어내지 않는다");
         let with_kind = serde_json::json!({"attention_kind": "question", "status_reason": IDLE_PROMPT});

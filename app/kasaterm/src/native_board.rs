@@ -184,6 +184,9 @@ struct OverviewPane {
     progress: String,
     status: String,
     status_reason: Option<String>,
+    /// 기다림의 종류(`permission`·`question`·`idle`). 낱말 `waiting` 하나로는 사람을
+    /// 부르는 기다림과 방치를 못 가른다.
+    attention_kind: Option<String>,
     done_outcome: Option<String>,
     done_summary: Option<String>,
     observed_at_ms: u64,
@@ -1459,7 +1462,11 @@ fn overview_name(row: &OverviewPane) -> &str {
 fn overview_status(row: &OverviewPane) -> (&'static str, u8) {
     if row.freshness == "offline" { return ("연결 끊김", 1); }
     if row.freshness != "fresh" { return ("오래된 정보", 2); }
-    if matches!(row.status.as_str(), "waiting" | "attention" | "blocked") { return ("확인 필요", 0); }
+    // 방치(60초 조용)는 「답을 마치고 다음 지시를 기다림」이라 사람을 부르지 않는다 —
+    // 세어 올리면 요약의 「확인 필요 N」이 실제 손댈 칸보다 부풀고, 정작 급한 칸이 묻힌다.
+    if matches!(row.status.as_str(), "waiting" | "attention" | "blocked") && !overview_row_is_idle_wait(row) {
+        return ("확인 필요", 0);
+    }
     match row.done_outcome.as_deref() {
         Some("succeeded") => return ("완료 보고", 5),
         Some("failed") => return ("실패 보고", 0),
@@ -1468,7 +1475,17 @@ fn overview_status(row: &OverviewPane) -> (&'static str, u8) {
     match row.status.as_str() {
         "working" | "running" | "building" | "thinking" | "compacting" => ("작업 중", 3),
         "idle" => ("대기 중", 4),
+        "waiting" => ("대기 중", 4),
         _ => ("미확인", 2),
+    }
+}
+
+/// 그 기다림이 방치인가 — 칸이 먼저, 없으면 판정 이유(`wait_kind_of_row` 와 같은 규칙).
+/// 종류를 안 보내는 옛 판 기계는 승인으로 친다.
+fn overview_row_is_idle_wait(row: &OverviewPane) -> bool {
+    match row.attention_kind.as_deref() {
+        Some(kind) => kind == crate::agent_state::WaitKind::Idle.as_str(),
+        None => row.status_reason.as_deref() == Some(crate::agent_state::IDLE_PROMPT),
     }
 }
 
@@ -2806,6 +2823,11 @@ pub(crate) fn status_label(row: &PaneActivity) -> String {
 }
 
 pub(crate) fn agent_needs_attention(row: &PaneActivity) -> bool {
+    // 방치에도 `waiting_for`("Claude is waiting for your input")가 실린다 — 그 칸만 보면
+    // 쉬는 학생까지 「확인 필요」가 된다. 종류가 가른다.
+    if row.attention_kind.as_deref() == Some(crate::agent_state::WaitKind::Idle.as_str()) {
+        return false;
+    }
     row.waiting_for.is_some() || row.status == "blocked"
 }
 
@@ -3401,6 +3423,30 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    /// 「확인 필요」는 사람이 손대야 풀리는 칸만 센다. 60초 방치는 답을 마치고 다음
+    /// 지시를 기다리는 것이라 대기 중이다 — 세어 올리면 요약이 부풀어 급한 칸이 묻힌다.
+    #[test]
+    fn an_idle_wait_is_not_a_call_for_you() {
+        let row = |kind: Option<&str>, reason: Option<&str>| OverviewPane {
+            status: "waiting".into(),
+            freshness: "fresh".into(),
+            attention_kind: kind.map(str::to_string),
+            status_reason: reason.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(overview_status(&row(Some("idle"), Some("idle prompt"))).0, "대기 중");
+        assert_eq!(overview_status(&row(Some("permission"), None)).0, "확인 필요");
+        assert_eq!(overview_status(&row(Some("question"), None)).0, "확인 필요");
+        assert_eq!(
+            overview_status(&row(None, Some("idle prompt"))).0, "대기 중",
+            "종류 칸이 없는 옛 판 기계는 판정 이유로 가른다",
+        );
+        assert_eq!(
+            overview_status(&row(None, Some("hook attention"))).0, "확인 필요",
+            "모르는 이유는 지어내지 않는다 — 종전대로 승인으로 친다",
+        );
+    }
+
     use super::*;
 
     #[test]

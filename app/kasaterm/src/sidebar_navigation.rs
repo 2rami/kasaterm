@@ -244,7 +244,7 @@ fn draw_cell(
     let drop_here = drag.is_some_and(|d| d != row.remote_id.as_str()) && hover;
     g.hover_pointer |= hover && !row.closed;
     let busy = deck.iter().any(|r| matches!(r.status.as_str(), "working" | "compacting"));
-    let waiting = deck.iter().any(|r| r.status.contains("wait") || r.status.contains("attention"));
+    let waiting = deck.iter().any(|r| r.needs_you());
     let signal = waiting.then(|| (theme::attention(), 0.9));
     round_rect(g, mx, my, mw, mh, 2.0, if drop_here {
         theme::accent()
@@ -334,7 +334,7 @@ fn draw_list_row(
     if hover { round_rect(g, rx, ry, rw, rh, theme::radius_sm(), theme::surface_hover()); }
     if cur { g.rect(rx, ry + 3.0, 2.0, rh - 6.0, theme::accent()); }
     let busy = deck.iter().any(|r| matches!(r.status.as_str(), "working" | "compacting"));
-    let waiting = deck.iter().any(|r| r.status.contains("wait") || r.status.contains("attention"));
+    let waiting = deck.iter().any(|r| r.needs_you());
     let who = deck.iter().find(|r| !r.name.is_empty()).map_or("", |r| r.name.as_str());
     let phase = crate::sprites::anim_phase_secs();
     let face = rh - 6.0;
@@ -457,7 +457,7 @@ fn draw_rows(
                 g.rect(tab_x + 10.0, ly, tab_w - 20.0, 1.0, theme::with_alpha(theme::border(), 0x60));
             }
             // 접힌 방의 기다림은 머리의 숨쉬는 점이 말한다 — 펴진 방은 칸이 말하므로 조용히.
-            let waits = list.iter().any(|r| r.status.contains("wait") || r.status.contains("attention"));
+            let waits = list.iter().any(|r| r.needs_you());
             if collapsed && waits {
                 crate::sprites::blink_dot(g, tab_x + 12.0, y + 13.0, 9.0, theme::attention(), 0.9);
             }
@@ -919,7 +919,7 @@ mod tests {
         let row = |pane: &str, remote: &str, room: &str| state::MachinesColRow {
             pane: pane.into(), remote_id: remote.into(), room: room.into(), remote_cwd: String::new(),
             name: String::new(), title: String::new(), status: String::new(), closed: false, rect: None,
-            window: None, tab_of: None,
+            window: None, tab_of: None, attention_kind: None,
         };
         state::MachinesColMachine {
             label: "test".into(), online: true, ago_secs: None, outdated: false,
@@ -927,6 +927,24 @@ mod tests {
             remote: vec![row("", "%12", "A"), row("", "%2", "A"), row("", "%8", "B")],
             mirrored: vec![row("%99", "%7", "A")],
         }
+    }
+
+    /// 기다림 낱말은 하나인데 뜻은 셋이다. 주황(숨쉬는 점)은 사람을 부르는 둘에만
+    /// 준다 — 방치는 쉬는 것과 다르지 않다(2026-09-18 「선택하는 거 아닌데 왜 주황색
+    /// 깜빡임」, 원격 목록에서 되살아났던 것).
+    #[test]
+    fn only_permission_and_question_blink_orange() {
+        let row = |status: &str, kind: Option<&str>| state::MachinesColRow {
+            pane: String::new(), remote_id: "%1".into(), room: "A".into(), remote_cwd: String::new(),
+            name: String::new(), title: String::new(), status: status.into(), closed: false,
+            rect: None, window: None, tab_of: None, attention_kind: kind.map(str::to_string),
+        };
+        assert!(row("waiting", Some("permission")).needs_you());
+        assert!(row("waiting", Some("question")).needs_you());
+        assert!(!row("waiting", Some("idle")).needs_you(), "방치는 주황으로 부르지 않는다");
+        assert!(row("waiting", None).needs_you(), "종류를 안 보내는 옛 판 기계는 승인으로 친다");
+        assert!(!row("working", None).needs_you());
+        assert!(!row("idle", None).needs_you());
     }
 
     #[test]

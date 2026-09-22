@@ -1449,6 +1449,7 @@ mod tests {
             pane: local.into(), remote_id: source.into(), remote_cwd: "/work/project".into(),
             name: "모모이".into(), title: "작업".into(), status: "working".into(),
             room: "방 1".into(), closed: false, rect: None, window: None, tab_of: None,
+            attention_kind: None,
         };
         let mut machine = state::MachinesColMachine {
             label: "원본 기기".into(), online: true, ago_secs: Some(0), outdated: false,
@@ -3477,7 +3478,7 @@ fn draw_machine_pane_row(
     let hovered = hit(cursor, &(x, y, w, GROUP_H));
     let close_rect = hovered.then_some((right - 18.0, y, 22.0, GROUP_H));
     let content_right = if hovered { right - 26.0 } else { right };
-    let waiting = r.status.contains("wait") || r.status.contains("attention");
+    let waiting = r.needs_you();
     let group = PaneGroup {
         pane: r.remote_id.clone(),
         label: r.name.clone(),
@@ -3609,7 +3610,7 @@ pub(crate) fn draw_machine_menu(
                 items.push((None, if i == 0 { head.sep() } else { head }));
                 last_room = r.room.clone();
             }
-            let waiting = r.status.contains("wait") || r.status.contains("attention");
+            let waiting = r.needs_you();
             let mut text = format!("{} 거울 열기", r.name);
             if waiting {
                 text.push_str(" · 기다림");

@@ -436,6 +436,20 @@ pub(crate) struct MachinesColRow {
     pub(crate) window: Option<u64>,
     /// 이 pane 이 어느 바깥 pane 의 탭인가(원격 id). 탭은 바깥 칸과 자리를 함께 쓴다.
     pub(crate) tab_of: Option<String>,
+    /// 기다림의 종류(`permission`·`question`·`idle`) — 보드의 같은 칸. `status` 는 셋을
+    /// 모두 `waiting` 한 낱말로 뭉개므로, 주황으로 부를지는 이 칸이 가른다.
+    /// 안 보내는 옛 판 기계에서는 None.
+    pub(crate) attention_kind: Option<String>,
+}
+
+impl MachinesColRow {
+    /// 사람 손이 있어야 풀리는 기다림인가 — 승인·질문뿐이다. 60초 방치(`idle`)는
+    /// 「답을 마치고 다음 지시를 기다림」이라 쉬는 것과 다르지 않아 주황으로 안 부른다
+    /// (`agent_state::AgentState::needs_you` 와 같은 규칙). 종류를 안 보내는 옛 판
+    /// 기계는 승인으로 친다 — 가를 근거가 없다.
+    pub(crate) fn needs_you(&self) -> bool {
+        self.status.contains("wait") && self.attention_kind.as_deref() != Some("idle")
+    }
 }
 
 #[derive(Clone, PartialEq)]

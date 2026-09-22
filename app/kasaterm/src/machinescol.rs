@@ -487,6 +487,18 @@ impl App {
                 rect: facts.as_ref().and_then(|(_, p)| row_rect(p)),
                 window: facts.as_ref().and_then(|(_, p)| p.get("window").and_then(|v| v.as_u64())),
                 tab_of: facts.as_ref().and_then(|(_, p)| row_tab_of(p)),
+                // 칸이 없는 옛 판 기계는 판정 이유로 가른다 — 거울 판정과 같은 창구
+                // (`wait_kind_of_row`)를 써야 목록과 헤더가 같은 답을 낸다.
+                attention_kind: facts
+                    .as_ref()
+                    .and_then(|(_, r)| crate::agent_state::wait_kind_of_row(r))
+                    .map(|k| k.as_str().to_string())
+                    .or_else(|| match self.pane_activity.get(id).map(|v| &v.state) {
+                        Some(crate::agent_state::AgentState::Waiting { kind, .. }) => {
+                            Some(kind.as_str().to_string())
+                        }
+                        _ => None,
+                    }),
             };
             match remote {
                 Some(info) => {
@@ -603,6 +615,8 @@ impl App {
                                         rect: row_rect(p),
                                         window: win,
                                         tab_of: row_tab_of(p),
+                                        attention_kind: crate::agent_state::wait_kind_of_row(p)
+                                            .map(|k| k.as_str().to_string()),
                                     },
                                 ))
                             })
