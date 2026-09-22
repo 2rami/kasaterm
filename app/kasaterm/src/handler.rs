@@ -2942,6 +2942,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if let Some(state) = saved {
             self.restore_prompt = Some(state);
+            // lite 는 묻지 않고 그대로 이어간다 — 복원 창도 크롬이다. 저장된 배치와
+            // `--resume` 이 그 자리에 돌아온다.
+            if self.lite {
+                self.restore_dialog_pick(RestoreBtn::Restore);
+            }
         }
         // cold-launch 로 디퍼됐던 `.md` 오픈을 연다 — 이제 window·pty_layout(%0)
         // 둘 다 준비됨. 빈손이면 무비용.

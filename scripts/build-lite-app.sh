@@ -23,8 +23,8 @@ done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-ICON="$ROOT/assets/AppIcon.icns"
-[[ -f "$ICON" ]] || { echo "error: assets/AppIcon.icns missing" >&2; exit 1; }
+ICON="$ROOT/assets/LiteIcon.icns"
+[[ -f "$ICON" ]] || { echo "error: assets/LiteIcon.icns missing" >&2; exit 1; }
 
 VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
 if [[ "$PROFILE" == release ]]; then
@@ -51,7 +51,7 @@ cp "$SOURCE_BIN" "$STAGE/Contents/MacOS/kasaterm-lite"
 # kasaterm-cli sits next to the executable: `locate_cmux_compat_binary` looks
 # there first, so the minimal shim stages it onto every pane's PATH.
 cp "$CLI_BIN" "$STAGE/Contents/MacOS/kasaterm-cli"
-cp "$ICON" "$STAGE/Contents/Resources/AppIcon.icns"
+cp "$ICON" "$STAGE/Contents/Resources/LiteIcon.icns"
 
 cat > "$STAGE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -77,7 +77,7 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>
     <string>kasaterm-lite</string>
     <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
+    <string>LiteIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>NSHighResolutionCapable</key>
