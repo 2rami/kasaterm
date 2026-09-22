@@ -576,10 +576,15 @@ const TITLE_HEIGHT: f32 = 36.0;
 /// reserved for the native buttons; our drag handler ignores them so a
 /// click on the red dot still closes the window.
 ///
-/// Windows 는 프레임리스라 비켜 줄 신호등이 없다 — 두 참조처(`sidebar_toggle_rect`,
-/// 타이틀바 드래그 판정)가 모두 `cfg(not(windows))` 라 상수도 같이 접는다.
-#[cfg(not(windows))]
-const TRAFFIC_LIGHT_WIDTH: f32 = 78.0;
+/// Windows 는 프레임리스라 비켜 줄 신호등이 없으니 0 이다.
+///
+/// 예전엔 참조처가 `sidebar_toggle_rect` 와 타이틀바 드래그 판정 둘뿐이고 둘 다
+/// `cfg(not(windows))` 라 상수도 같이 접었다. 그 뒤 라이트 제목을 가운데 놓는
+/// 자리(`render.rs`)가 생겼는데 거기는 양쪽에서 도는 코드였고, 접힌 상수를 쓰는
+/// 바람에 **Windows 빌드만** 섰다 — 맥에서는 끝까지 멀쩡해 보이고 크로스 컴파일도
+/// `ring` 의 C 코드에서 먼저 막혀서, CI 윈도우 러너에 올리기 전까지 아무 데서도
+/// 안 드러난다. 그래서 접지 않고 값으로 가른다(2026-09-23).
+const TRAFFIC_LIGHT_WIDTH: f32 = if cfg!(windows) { 0.0 } else { 78.0 };
 /// iTerm-style per-pane header height in logical pixels. Each split
 /// pane gets one of these strips above its cell grid; a single
 /// un-split window renders no header at all (matches the iTerm
