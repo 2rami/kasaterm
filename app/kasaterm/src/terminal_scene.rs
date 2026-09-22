@@ -1030,7 +1030,10 @@ impl App {
         // 상태줄이 pane 바닥에 붙게 한다 — 근거는 `bottom_pull_rows`.
         // 이 pane 을 어떻게 옮겨 그렸는지 — 복사가 되짚을 유일한 기록.
         let mut view_shift = crate::PaneViewShift { projection: projection.clone(), ..Default::default() };
-        let pulled = match term.filter(|_| desktop_view && projection.is_none()) {
+        // lite 는 당기지 않는다 — 화면을 그대로 보여 주는 터미널이다. 당기면 claude 가
+        // 다시 그릴 때(크기 변경) 스크롤백에 남은 옛 배너가 위에서 되살아나 「복제」로
+        // 보인다(2026-09-22 실측: 접힌 배너 3장 위에 새 배너).
+        let pulled = match term.filter(|_| desktop_view && projection.is_none() && !self.lite) {
             Some(t) => {
                 let above = self.bottom_pull_rows(tab_pid.as_str(), t, rows_now);
                 let n = above.len();
