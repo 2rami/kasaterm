@@ -1926,21 +1926,22 @@ impl ApplicationHandler<UserEvent> for App {
             use muda::accelerator::Accelerator;
             use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
             let menu = Menu::new();
-            let app_m = Submenu::new("kasaterm", true);
+            // lite 의 앱 메뉴는 정보·종료와 편집뿐이다 — 업데이트·보기(패널) 항목이 없다.
+            let app_name = if self.lite { "KasaLite" } else { "kasaterm" };
+            let app_m = Submenu::new(app_name, true);
             let update_item = MenuItem::new("업데이트 확인…", true, None);
             // ⌘Q 를 가로채 종료 확인(ghostty 식)을 띄우려면 PredefinedMenuItem::quit(OS 가
             // 직접 terminate 라 가로채기 불가) 대신 커스텀 항목으로 — MenuEvent 로 받아 NSAlert.
             let quit_item = MenuItem::new(
-                "kasaterm 종료",
+                format!("{app_name} 종료"),
                 true,
                 "CmdOrCtrl+Q".parse::<Accelerator>().ok(),
             );
-            let _ = app_m.append_items(&[
-                &PredefinedMenuItem::about(None, None),
-                &update_item,
-                &PredefinedMenuItem::separator(),
-                &quit_item,
-            ]);
+            let _ = app_m.append(&PredefinedMenuItem::about(None, None));
+            if !self.lite {
+                let _ = app_m.append(&update_item);
+            }
+            let _ = app_m.append_items(&[&PredefinedMenuItem::separator(), &quit_item]);
             let view_m = Submenu::new("보기", true);
             let git_item = MenuItem::new("Git 패널 켜기/끄기", true, None);
             let session_item = MenuItem::new("세션 패널 켜기/끄기", true, None);
@@ -1971,7 +1972,9 @@ impl ApplicationHandler<UserEvent> for App {
             ]);
             let _ = menu.append(&app_m);
             let _ = menu.append(&edit_m);
-            let _ = menu.append(&view_m);
+            if !self.lite {
+                let _ = menu.append(&view_m);
+            }
             menu.init_for_nsapp();
             self.git_menu_item = Some(git_item);
             self.session_menu_item = Some(session_item);

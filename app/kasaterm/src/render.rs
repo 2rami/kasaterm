@@ -1743,7 +1743,7 @@ impl App {
         // Collab completion toast (top-right). Pre-read here like toast_alpha so
         // the render block below never re-borrows self while g is held.
         let collab_toast_alpha = self.collab_toast_alpha();
-        let collab_toast_msg = self.collab.toast.as_ref().map(|(m, _)| m.clone());
+        let collab_toast_msg = if self.lite { None } else { self.collab.toast.as_ref().map(|(m, _)| m.clone()) };
         let collab_toast_action_on = self.collab.toast_action.is_some();
         // 업데이트 토스트(win_sparkle 센티널)면 칩 라벨이 승인/거부 대신 설치/나중에.
         let update_toast_on =

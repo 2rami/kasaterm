@@ -382,6 +382,9 @@ impl App {
     /// alert for the cases that actually need attention (background window or
     /// a sibling pane).
     pub(crate) fn handle_notify(&mut self, surface_id: &str, title: &str, body: &str) {
+        if self.lite {
+            return;
+        }
         let now = std::time::Instant::now();
         let is_active_pane = self.ws.lock().unwrap().active_pane.as_deref() == Some(surface_id);
         // claude's Stop hook fired → this pane's turn is DONE. Trust this push
@@ -448,6 +451,9 @@ impl App {
     /// `waiting` flag is set separately in `collab_board` (socket thread, off
     /// the shared attention map); here we only own the GUI-side surfacing.
     pub(crate) fn handle_attention(&mut self, surface_id: &str, reason: &str) {
+        if self.lite {
+            return;
+        }
         let now = std::time::Instant::now();
         let is_active_pane = self.ws.lock().unwrap().active_pane.as_deref() == Some(surface_id);
         // 캐릭터명(pane 고정) + hook reason(완료 순간). OSC 작업명은 안 쓴다.
@@ -502,6 +508,12 @@ impl App {
     /// 겹쳐도 한 번이다.
     pub(crate) fn apply_transition_event(&mut self, id: &str, ev: crate::agent_transitions::Transition) {
         use crate::agent_transitions::Transition;
+        // lite 는 전이를 알리지 않는다(토스트·펄스·읽지 않음·알림 전부). 헤더 working
+        // 바는 상태를 직접 읽으므로 여기와 무관하다.
+        if self.lite {
+            self.chrome_dirty = true;
+            return;
+        }
         let now = std::time::Instant::now();
         // 막 켜진 동안의 전이는 알리지 않는다. 그때는 판정이 한 번 흔들려(훅·기록·명부가
         // 아직 다 안 모였다) 일하는 중 → 쉬는 중이 스치고, 그것이 「완료」로 읽힌다. 알림과
@@ -1324,6 +1336,10 @@ impl App {
     }
     /// Surface a transient top-right toast (reuses the collab toast slot).
     pub(crate) fn set_toast(&mut self, msg: String) {
+        // lite 는 토스트가 없다 — 그리는 쪽(render)도 같이 막혀 있어 직접 세운 것도 안 뜬다.
+        if self.lite {
+            return;
+        }
         self.collab.toast = Some((msg, std::time::Instant::now()));
         self.collab.toast_rect = None;
         if let Some(w) = self.window.as_ref() {
@@ -2782,6 +2798,9 @@ impl App {
     /// gone. Also the single source of truth for "is the banner still
     /// animating" (alpha > 0).
     pub(crate) fn version_alpha(&self) -> f32 {
+        if self.lite {
+            return 0.0;
+        }
         let e = self.version_anim_start.elapsed().as_millis();
         if e < VERSION_HOLD_MS {
             1.0
@@ -2850,7 +2869,9 @@ impl App {
                 return;
             }
         }
-        self.copy_toast_at = Some(Instant::now());
+        if !self.lite {
+            self.copy_toast_at = Some(Instant::now());
+        }
     }
     pub(crate) fn toggle_session_panel(&mut self, _event_loop: &ActiveEventLoop) {
         let replacing_inline = self.inline_web.is_some();
@@ -4324,7 +4345,8 @@ pub(crate) fn notify_desktop(
     dedup: Option<&str>,
     route: Option<(&str, Option<&str>)>,
 ) {
-    if dedup.is_some_and(|k| !notify_dedup_passes(k)) {
+    // lite 는 알림(시스템·자체 배너)을 내지 않는다.
+    if crate::lite_mode() || dedup.is_some_and(|k| !notify_dedup_passes(k)) {
         return;
     }
     // 알림센터가 켜져 있고 허락까지 받았으면 그쪽이 정본이다 — 같은 알림이 자체
