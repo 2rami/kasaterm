@@ -6408,7 +6408,7 @@ pub fn usage_pressure(v: &serde_json::Value) -> Option<UsagePressure> {
 
 /// `2026-07-30T11:49:59.589840+00:00` → epoch 초. chrono 를 끌어오기엔 쓰임이
 /// 이거 하나뿐이라 직접 판다. 오프셋(`Z`/`±HH:MM`)까지 반영한다.
-fn rfc3339_epoch(s: &str) -> Option<u64> {
+pub(crate) fn rfc3339_epoch(s: &str) -> Option<u64> {
     let b = s.as_bytes();
     if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || (b[10] != b'T' && b[10] != b' ') {
         return None;

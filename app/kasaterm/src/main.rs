@@ -27,6 +27,8 @@ mod gpu;
 mod handler;
 mod homeaccounts;
 mod input;
+// claude 한도 초기화권 — 잔량 읽기와 쓰는 페이지 열기.
+mod limit_reset;
 mod layout;
 mod lineedit;
 mod markdown;
@@ -1577,6 +1579,8 @@ pub(crate) enum AccountMenuItem {
     ManageAccounts,
     /// 표시 밀도 — `true` = Compact(가장 빡빡한 창 하나만).
     Density(bool),
+    /// claude 블록의 초기화권 줄 곁 단추 — claude.ai 사용량 페이지를 연다.
+    UseLimitReset,
 }
 
 /// 계정을 가진 하네스. 저장소도 전환 수단도 갈려서(claude 는 자격 저장소 env,

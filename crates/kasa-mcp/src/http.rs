@@ -3819,6 +3819,37 @@ async fn claude_identity_handler(
     (cors, Json(out))
 }
 
+/// 사용량 조회에 claude CLI 와 같은 User-Agent 를 단다. 서버가 이 값으로 「Claude Code
+/// 에서 온 요청」인지 가르고, 아니면 초기화권(`cedar_ember`)을 `ineligible_reason:
+/// "surface"` 로 비워 보낸다(2026-09-23 실측: 같은 토큰이 UA 하나로 0장↔1장).
+/// 지어낸 값(`claude-cli/0.0.0 (external, kasaterm)`)도 같은 이유로 거절됐다 — 설치된
+/// 판 번호를 그대로 쓴다.
+fn claude_cli_user_agent() -> &'static str {
+    static UA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    UA.get_or_init(|| {
+        let bin = claude_bin();
+        let semver = |s: &str| {
+            let parts: Vec<&str> = s.split('.').collect();
+            parts.len() == 3 && parts.iter().all(|p| p.parse::<u32>().is_ok())
+        };
+        // 네이티브 설치는 `versions/<판>` 으로 가는 링크라 프로세스를 안 띄우고 읽힌다.
+        let version = std::fs::canonicalize(&bin)
+            .ok()
+            .and_then(|p| p.file_name()?.to_str().map(str::to_string))
+            .filter(|n| semver(n))
+            .or_else(|| {
+                let out = crate::no_window_command(bin.to_string_lossy().as_ref())
+                    .arg("--version")
+                    .output()
+                    .ok()?;
+                let text = String::from_utf8(out.stdout).ok()?;
+                text.split_whitespace().next().filter(|v| semver(v)).map(str::to_string)
+            })
+            .unwrap_or_default();
+        format!("claude-cli/{version} (external, cli)")
+    })
+}
+
 async fn claude_usage_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -3937,10 +3968,12 @@ async fn claude_usage_handler(
             why = "rate_limited";
             continue;
         }
+        // `cedar_ember=1` 이 한도 초기화권 잔량을 함께 싣는다(limit_reset.rs 가 읽는다).
         let resp = reqwest::Client::new()
-            .get("https://api.anthropic.com/api/oauth/usage")
+            .get("https://api.anthropic.com/api/oauth/usage?cedar_ember=1")
             .header("authorization", format!("Bearer {token}"))
             .header("anthropic-beta", "oauth-2025-04-20")
+            .header("user-agent", claude_cli_user_agent())
             .send()
             .await;
         match resp {

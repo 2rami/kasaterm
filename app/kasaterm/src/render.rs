@@ -10511,6 +10511,7 @@ impl App {
                 // 로스터 행은 **활성 계정의** 한도를 말한다. 표에 아직 없으면 상태줄이
                 // 쓰는 값으로 떨어진다 — 둘 다 지금 계정을 가리키므로 숫자가 갈리지 않는다.
                 let claude_badge = usage_of(&self.set_claude_account);
+                let claude_reset = crate::limit_reset::current(&self.set_claude_account);
                 let codex_limits = crate::codexlimits::snapshot();
 
                 // `62% 씀 · 5h` — 퍼센트가 먼저다. 창 이름이 앞에 오면 눈이 «어느 창인가»
@@ -10659,15 +10660,24 @@ impl App {
                     let missing: Vec<&str> = ["5h", "7d"].into_iter().filter(|w| !has(w)).collect();
                     (!missing.is_empty()).then(|| format!("{} 미제공", missing.join("·")))
                 };
+                // 초기화권 줄은 「간단히」에서도 세운다 — 드물게 생기는 것이라 자리를
+                // 오래 먹지 않고, 쓰는 단추가 접힌 쪽에 숨으면 가진 줄을 모른다.
+                let reset_h = |p: AccountProvider| -> f32 {
+                    if p == AccountProvider::Claude && claude_reset.is_some() {
+                        win_h_row
+                    } else {
+                        0.0
+                    }
+                };
                 let provider_h = |p: AccountProvider| -> f32 {
                     if compact {
-                        return blk_top + ph_h + blk_bot;
+                        return blk_top + ph_h + reset_h(p) + blk_bot;
                     }
                     let mut lines = rows_of(p).len();
                     if p == AccountProvider::Codex && codex_missing().is_some() {
                         lines += 1;
                     }
-                    blk_top + ph_h + win_h_row * lines.max(1) as f32 + blk_bot
+                    blk_top + ph_h + win_h_row * lines.max(1) as f32 + reset_h(p) + blk_bot
                 };
                 let rule = 5.0_f32;
                 // 판 줄. 액션 행보다 낮다 — 누르는 자리가 아니라 읽는 자리다.
@@ -11042,6 +11052,62 @@ impl App {
                                 row.sub, stale,
                             );
                             wy += win_h_row;
+                        }
+                    }
+                    if let (AccountProvider::Claude, Some(grant)) = (p, claude_reset.as_ref()) {
+                        let wy = ry + prow_h - blk_bot - win_h_row;
+                        let bf = f - 2.5;
+                        let action = "웹에서 쓰기";
+                        // 글자 끝을 위 줄들(플랜·퍼센트)과 같은 `right` 에 세운다 — 누르는
+                        // 칸은 그 둘레로 5px 씩 번진다.
+                        let tw = if grant.usable_now {
+                            g.measure_chrome_text(action, bf, false)
+                        } else {
+                            0.0
+                        };
+                        let bw = if grant.usable_now { tw + 10.0 } else { 0.0 };
+                        let nf = f - 2.0;
+                        let text = crate::info::fit_text(
+                            g,
+                            &crate::limit_reset::label(grant),
+                            (right - tw - 16.0 - ix).max(0.0),
+                            nf,
+                            false,
+                        );
+                        draw_usage_note(g, ix, wy, win_h_row, nf, &text, theme::text_dim());
+                        // 누르면 claude.ai 사용량 페이지가 열릴 뿐 바로 쓰이지 않는다 —
+                        // 곁 단추(다시 로그인·빼기)와 같은 무게로 둔다.
+                        if grant.usable_now {
+                            let r = (right - tw - 5.0, wy + (win_h_row - 18.0) / 2.0, bw, 18.0);
+                            let hot = body_hover
+                                && hmx >= r.0
+                                && hmx <= r.0 + r.2
+                                && hmy >= r.1
+                                && hmy <= r.1 + r.3;
+                            g.hover_pointer |= hot;
+                            if hot {
+                                round_rect(
+                                    g,
+                                    r.0,
+                                    r.1,
+                                    r.2,
+                                    r.3,
+                                    theme::radius_sm(),
+                                    theme::surface_hover(),
+                                );
+                            }
+                            g.draw_text(
+                                r.0 + 5.0,
+                                r.1 + (r.3 - bf) / 2.0 - 1.0,
+                                action,
+                                gpu::DrawOpts {
+                                    font_size: bf,
+                                    color: if hot { theme::text() } else { theme::accent() },
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                            self.account_menu_hits.push((AccountMenuItem::UseLimitReset, r));
                         }
                     }
                     self.account_menu_hits

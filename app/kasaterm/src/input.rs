@@ -43,7 +43,7 @@ fn account_menu_press(
     // Row actions overlap their parent account row and must win regardless of
     // the order in which the renderer adds the parent hit rectangle.
     hits.iter().rev().filter(hit)
-        .find(|(item, _)| matches!(item, AccountMenuItem::Reauth(..) | AccountMenuItem::Forget(..)))
+        .find(|(item, _)| matches!(item, AccountMenuItem::Reauth(..) | AccountMenuItem::Forget(..) | AccountMenuItem::UseLimitReset))
         .or_else(|| hits.iter().rev().find(hit))
         .map(|(item, _)| AccountMenuPress::Action(item.clone()))
         .unwrap_or(AccountMenuPress::Blank)
@@ -251,6 +251,10 @@ impl App {
                 self.settings_apply(SettingsAction::ReauthAccount(provider, id, crate::settings::LoginBrowser::Default));
                 let _ = self.open_settings_room(Some(SettingsCat::Accounts));
             }
+            AccountMenuItem::UseLimitReset => {
+                self.close_account_menu();
+                self.use_claude_limit_reset();
+            }
             AccountMenuItem::Forget(provider, id) => {
                 self.close_account_menu();
                 self.settings_apply(match provider {
@@ -294,6 +298,13 @@ mod account_menu_input_tests {
         assert!(account_menu_press(rect, rect, None, &hits, 0, (55.0, 25.0)) == AccountMenuPress::Action(hits[0].0.clone()));
         let hits = vec![(AccountMenuItem::Density(true), rect.unwrap()), (AccountMenuItem::Density(false), rect.unwrap())];
         assert!(account_menu_press(rect, None, None, &hits, hits.len(), (50.0, 50.0)) == AccountMenuPress::Action(AccountMenuItem::Density(false)));
+        // 초기화권 단추는 제공자 블록 안에 서고, 블록 hit 이 그 뒤에 쌓인다.
+        let hits = vec![
+            (AccountMenuItem::UseLimitReset, (60.0, 40.0, 30.0, 18.0)),
+            (AccountMenuItem::Provider(AccountProvider::Claude), (0.0, 0.0, 100.0, 60.0)),
+        ];
+        assert!(account_menu_press(rect, None, None, &hits, hits.len(), (70.0, 45.0)) == AccountMenuPress::Action(AccountMenuItem::UseLimitReset));
+        assert!(account_menu_press(rect, None, None, &hits, hits.len(), (20.0, 45.0)) == AccountMenuPress::Action(AccountMenuItem::Provider(AccountProvider::Claude)));
     }
 
     #[test]

@@ -2420,6 +2420,13 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         if gone { break; }
                     }
+                    if let Some((u, _, _)) = fetched.as_ref() {
+                        if crate::limit_reset::record(&active_id, u)
+                            && usage_proxy.send_event(UserEvent::Redraw).is_err()
+                        {
+                            break;
+                        }
+                    }
                     let usage = fetched.as_ref().map(|(u, _, _)| u);
                     let next = fetched.as_ref().and_then(|(u, stale, dir)| {
                         socket::usage_pressure(u).map(|p| crate::UsageBadge {

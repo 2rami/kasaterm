@@ -7823,6 +7823,42 @@ impl App {
         // 가른다 — 캡처는 실행당 한 장이므로 어차피 두 번 돌려야 한다.
         let want = std::env::var("KASATERM_AUTOPOPOVER").unwrap_or_default();
         let tunnel = want.starts_with("tunnel");
+        // `statusbar-live` 는 실제 한도 응답 그대로 연다 — 초기화권 줄은 프록시가 claude
+        // CLI 의 User-Agent 로 물어야만 차므로(limit_reset.rs) 그 연결까지 본다.
+        // `statusbar-reset` 은 실측 응답을 심는다. oauth/usage 는 금방 429 로 막혀서
+        // 리그가 새로 묻는 길로는 화면을 못 볼 때가 많다.
+        if want == "statusbar-live" || want == "statusbar-reset" {
+            if step == 0 && want == "statusbar-reset" {
+                let sample = serde_json::json!({ "cedar_ember": {
+                    "eligible": true,
+                    "grants": [{
+                        "id": "opus55-launch-promax-20260921", "resets_left": 1, "paused": false,
+                        "ends_at": "2026-10-22T16:00:00+00:00", "usable_now": true
+                    }],
+                    "next_grant_id": "opus55-launch-promax-20260921"
+                }});
+                crate::limit_reset::record(&self.set_claude_account, &sample);
+                self.chrome_dirty = true;
+            }
+            if step == 1 {
+                match self.status_account_rect {
+                    Some(r) => {
+                        self.account_menu = true;
+                        self.account_menu_anchor = Some(r);
+                        self.chrome_dirty = true;
+                        eprintln!("[autoportpop] 사용량 메뉴 폈다 anchor={r:?}");
+                    }
+                    None => eprintln!("[autoportpop] FAIL — 계정 칩이 아직 안 그려졌다"),
+                }
+            }
+            if step == 2 {
+                eprintln!(
+                    "[autoportpop] limit_reset={:?}",
+                    crate::limit_reset::current(&self.set_claude_account)
+                );
+            }
+            return;
+        }
         // 계정 게이지·드롭다운은 실제 한도 응답이 있어야 그려진다 — 격리 리그에는
         // 없으므로 값을 심는다. 5시간이 낮고 주간이 높은 조합인 것은 그게 정확히
         // 2026-08-05 사고의 형태이고, 「둘 다 나란히」가 그걸 막는지 보는 것이
