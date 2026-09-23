@@ -17,7 +17,7 @@ const HEADER_H: f32 = 44.0;
 /// 플랫 행 한 줄 높이(목업 `.row` min-height 40).
 const ROW_H: f32 = 40.0;
 /// 조작 부품 높이(목업 `.ctl` 26).
-const CTL_H: f32 = 26.0;
+pub(crate) const CTL_H: f32 = 26.0;
 const CONTENT_MAX_W: f32 = 800.0;
 
 /// 읽기 열의 가로 자리 — `(x, 폭)`.
@@ -7186,7 +7186,7 @@ fn wrap_text(g: &mut gpu::GpuRenderer, text: &str, max_w: f32, font: f32) -> Vec
 /// 설정 부품의 모서리. 워프 기준(버튼·입력창·팝업 5px, 칩 3px, 분절 상자 바깥 4px/안 3px)
 /// 을 상한으로 두고, 테마 모양(Rounded/Sharp/Pixel)이 그보다 작으면 그걸 따른다 —
 /// Pixel 은 0 그대로다.
-fn ctrl_radius() -> f32 {
+pub(crate) fn ctrl_radius() -> f32 {
     theme::radius_md().min(5.0)
 }
 

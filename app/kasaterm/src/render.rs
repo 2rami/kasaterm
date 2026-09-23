@@ -10660,24 +10660,15 @@ impl App {
                     let missing: Vec<&str> = ["5h", "7d"].into_iter().filter(|w| !has(w)).collect();
                     (!missing.is_empty()).then(|| format!("{} 미제공", missing.join("·")))
                 };
-                // 초기화권 줄은 「간단히」에서도 세운다 — 드물게 생기는 것이라 자리를
-                // 오래 먹지 않고, 쓰는 단추가 접힌 쪽에 숨으면 가진 줄을 모른다.
-                let reset_h = |p: AccountProvider| -> f32 {
-                    if p == AccountProvider::Claude && claude_reset.is_some() {
-                        win_h_row
-                    } else {
-                        0.0
-                    }
-                };
                 let provider_h = |p: AccountProvider| -> f32 {
                     if compact {
-                        return blk_top + ph_h + reset_h(p) + blk_bot;
+                        return blk_top + ph_h + blk_bot;
                     }
                     let mut lines = rows_of(p).len();
                     if p == AccountProvider::Codex && codex_missing().is_some() {
                         lines += 1;
                     }
-                    blk_top + ph_h + win_h_row * lines.max(1) as f32 + reset_h(p) + blk_bot
+                    blk_top + ph_h + win_h_row * lines.max(1) as f32 + blk_bot
                 };
                 let rule = 5.0_f32;
                 // 판 줄. 액션 행보다 낮다 — 누르는 자리가 아니라 읽는 자리다.
@@ -10776,7 +10767,16 @@ impl App {
                     (p, rows, row_heights, codex_note, lab_h, empty_h)
                 });
                 let content_h = provs.iter().map(|(p, _)| provider_h(*p)).sum::<f32>();
-                let fixed_h = pad * 2.0 + head_h + rule * 3.0 + row_h * 2.0 + ver_h;
+                // 초기화권은 머리 바로 아래 고정 줄이다 — 제공자 블록은 사용률 순으로 자리를
+                // 바꾸고 목록은 굴러가므로, 그 안에 두면 누를 단추가 매번 다른 곳에 있다.
+                // 「간단히」에서도 세운다: 드물게 생기는 것이고, 접힌 쪽에 숨으면 가진 줄을 모른다.
+                let reset_row_h = if claude_reset.is_some() { 38.0_f32 } else { 0.0 };
+                let fixed_h = pad * 2.0
+                    + head_h
+                    + rule * 3.0
+                    + row_h * 2.0
+                    + ver_h
+                    + if claude_reset.is_some() { reset_row_h + rule } else { 0.0 };
                 let layout = account_popover::layout(
                     (win_w, win_h),
                     (ax, ay, aw, ah),
@@ -10853,6 +10853,96 @@ impl App {
 
                 g.rect(mx + pad_x, ry + 2.0, mw - pad_x * 2.0, 1.0, theme::border());
                 ry += rule;
+
+                // ── 초기화권 ────────────────────────────────────────────────
+                if let Some(grant) = claude_reset.as_ref() {
+                    let pi = 14.0_f32;
+                    let cy = ry + reset_row_h / 2.0;
+                    g.queue_icon(
+                        AccountProvider::Claude.icon(),
+                        mx + pad_x,
+                        cy - pi / 2.0,
+                        pi,
+                        theme::text_dim(),
+                    );
+                    let tx = mx + pad_x + pi + 7.0;
+                    // 설정 화면의 주 버튼과 한 벌이다(`native_settings::button`): 채움 없이
+                    // 강조색 테두리와 글자, 몸통 높이는 CTL_H.
+                    let bf = 12.0_f32;
+                    let action = "웹에서 쓰기";
+                    let bw = if grant.usable_now {
+                        g.measure_chrome_text(action, bf, true) + 20.0 + 12.0 + 4.0
+                    } else {
+                        0.0
+                    };
+                    let tf = f - 1.0;
+                    let text = crate::info::fit_text(
+                        g,
+                        &crate::limit_reset::label(grant),
+                        (mx + mw - pad_x - bw - 10.0 - tx).max(0.0),
+                        tf,
+                        false,
+                    );
+                    g.draw_text(
+                        tx,
+                        cy - tf / 2.0 - 1.0,
+                        &text,
+                        gpu::DrawOpts {
+                            font_size: tf,
+                            color: theme::text(),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    if grant.usable_now {
+                        let h = crate::native_settings::CTL_H;
+                        let r = (mx + mw - pad_x - bw, cy - h / 2.0, bw, h);
+                        let hot = hmx >= r.0 && hmx <= r.0 + r.2 && hmy >= r.1 && hmy <= r.1 + r.3;
+                        g.hover_pointer |= hot;
+                        // 주 버튼은 호버에 꺼지는 대신 한 톤 밝아진다 — 강조색은 그대로 두고
+                        // 바탕에만 옅게 깐다.
+                        if hot {
+                            round_rect(
+                                g,
+                                r.0,
+                                r.1,
+                                r.2,
+                                r.3,
+                                crate::native_settings::ctrl_radius(),
+                                theme::with_alpha(theme::accent(), 28),
+                            );
+                        }
+                        g.round_rect_stroke(
+                            r.0,
+                            r.1,
+                            r.2,
+                            r.3,
+                            crate::native_settings::ctrl_radius(),
+                            theme::border_w().max(1.0),
+                            theme::accent(),
+                        );
+                        let lw = g.measure_chrome_text(action, bf, true);
+                        let lx = r.0 + (r.2 - (lw + 4.0 + 12.0)) / 2.0;
+                        // 한글은 아래 삐침이 없어 글자 상자 가운데가 눈의 가운데보다 높다 —
+                        // 같은 공식이면 옆 아이콘보다 1pt 남짓 떠 보였다(px 실측).
+                        g.draw_text(
+                            lx,
+                            cy - bf / 2.0 + 0.5,
+                            action,
+                            gpu::DrawOpts {
+                                font_size: bf,
+                                color: theme::accent(),
+                                bold: true,
+                                italic: false,
+                            },
+                        );
+                        g.queue_icon("external-link", lx + lw + 4.0, cy - 6.0, 12.0, theme::accent());
+                        self.account_menu_hits.push((AccountMenuItem::UseLimitReset, r));
+                    }
+                    ry += reset_row_h;
+                    g.rect(mx + pad_x, ry + 2.0, mw - pad_x * 2.0, 1.0, theme::border());
+                    ry += rule;
+                }
                 let body_top = ry;
                 let body_rect = (mx + pad, body_top, mw - pad * 2.0, body_h);
                 self.account_menu_body_rect = Some(body_rect);
@@ -11052,62 +11142,6 @@ impl App {
                                 row.sub, stale,
                             );
                             wy += win_h_row;
-                        }
-                    }
-                    if let (AccountProvider::Claude, Some(grant)) = (p, claude_reset.as_ref()) {
-                        let wy = ry + prow_h - blk_bot - win_h_row;
-                        let bf = f - 2.5;
-                        let action = "웹에서 쓰기";
-                        // 글자 끝을 위 줄들(플랜·퍼센트)과 같은 `right` 에 세운다 — 누르는
-                        // 칸은 그 둘레로 5px 씩 번진다.
-                        let tw = if grant.usable_now {
-                            g.measure_chrome_text(action, bf, false)
-                        } else {
-                            0.0
-                        };
-                        let bw = if grant.usable_now { tw + 10.0 } else { 0.0 };
-                        let nf = f - 2.0;
-                        let text = crate::info::fit_text(
-                            g,
-                            &crate::limit_reset::label(grant),
-                            (right - tw - 16.0 - ix).max(0.0),
-                            nf,
-                            false,
-                        );
-                        draw_usage_note(g, ix, wy, win_h_row, nf, &text, theme::text_dim());
-                        // 누르면 claude.ai 사용량 페이지가 열릴 뿐 바로 쓰이지 않는다 —
-                        // 곁 단추(다시 로그인·빼기)와 같은 무게로 둔다.
-                        if grant.usable_now {
-                            let r = (right - tw - 5.0, wy + (win_h_row - 18.0) / 2.0, bw, 18.0);
-                            let hot = body_hover
-                                && hmx >= r.0
-                                && hmx <= r.0 + r.2
-                                && hmy >= r.1
-                                && hmy <= r.1 + r.3;
-                            g.hover_pointer |= hot;
-                            if hot {
-                                round_rect(
-                                    g,
-                                    r.0,
-                                    r.1,
-                                    r.2,
-                                    r.3,
-                                    theme::radius_sm(),
-                                    theme::surface_hover(),
-                                );
-                            }
-                            g.draw_text(
-                                r.0 + 5.0,
-                                r.1 + (r.3 - bf) / 2.0 - 1.0,
-                                action,
-                                gpu::DrawOpts {
-                                    font_size: bf,
-                                    color: if hot { theme::text() } else { theme::accent() },
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                            self.account_menu_hits.push((AccountMenuItem::UseLimitReset, r));
                         }
                     }
                     self.account_menu_hits
