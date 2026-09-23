@@ -232,13 +232,19 @@ impl Bar {
     }
 }
 
+/// 빈 입력줄에 뜨는 안내. 이어받은 일이 있으면 그 자리를 그 일이 쓴다(`set_task`).
+///
+/// ⚠️`#[cfg(debug_assertions)]` 아래에 두지 마라. 이 상수가 아래 `probe()` 의 cfg 와
+/// 그 doc 주석 **사이에** 끼어 있던 동안, 속성이 probe 대신 이 상수를 먹었다 — 늘 있어야
+/// 할 안내가 release 에서 사라지고, 디버그 전용인 probe 가 release 에 남아 역시 디버그
+/// 전용인 `snapshot` 을 불러 **release 빌드만** 섰다. `cargo check` 는 dev 라 로컬에서
+/// 한 번도 안 보이고 CI 에서만 터진다(2026-09-23).
+const PROMPT: &str = "나쵸에게 물어보세요 — 이 창이든, 모든 기기든";
+
 /// 사람 눈 대신 쓰는 창구 — 가짜 장부 서버를 하나 띄워 놓고 바에 질문을 넣어 답이
 /// 실제로 찍히는 데까지를 돌린다. 서버·바·클라이언트가 한 줄로 이어지는지는 이 길로만
 /// 확인된다(화면 캡처는 창 번호를 받아 밖에서 찍는다).
 #[cfg(debug_assertions)]
-/// 빈 입력줄에 뜨는 안내. 이어받은 일이 있으면 그 자리를 그 일이 쓴다(`set_task`).
-const PROMPT: &str = "나쵸에게 물어보세요 — 이 창이든, 모든 기기든";
-
 pub fn probe() {
     use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
     use std::io::{Read, Write};
