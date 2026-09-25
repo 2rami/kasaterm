@@ -5,6 +5,7 @@ import 'app_link.dart';
 import 'hub_prefs.dart';
 import 'push.dart';
 import 'screens/connect.dart';
+import 'screens/conversation_view.dart';
 import 'screens/hub.dart';
 import 'screens/terminal.dart';
 import 'server.dart';
@@ -21,6 +22,7 @@ void main() {
   WidgetsFlutterBinding.ensureInitialized();
   AppLinkObserver.instance.install();
   const ThemePrefs().load().then((m) => phoneThemeMode.value = m);
+  const PaneViewPrefs().load().then((v) => paneView.value = v);
   runApp(const KasatermApp());
 }
 

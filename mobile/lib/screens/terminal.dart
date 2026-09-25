@@ -14,6 +14,7 @@ import '../status_style.dart';
 import '../student_art.dart';
 import '../term_session.dart';
 import '../theme_prefs.dart';
+import 'conversation_view.dart';
 
 /// 학생 하나의 화면. 위는 격자(또는 그림), 아래는 키 줄과 답장 입력창.
 class TerminalScreen extends StatefulWidget {
@@ -269,9 +270,17 @@ class _TerminalScreenState extends State<TerminalScreen>
     if (mounted) Navigator.of(context).pop();
   }
 
+  /// 대화 기록이 있는 창인가 — 셸·웹 셸엔 학생이 없어 격자만 있다.
+  static bool _canChat(Pane p) => !p.isShell && !p.isWebShell;
+
+  void _showTerminal() {
+    paneView.value = PaneView.terminal;
+    const PaneViewPrefs().save(PaneView.terminal);
+  }
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: _session,
+    listenable: Listenable.merge([_session, paneView]),
     builder: (context, _) {
       final theme = Theme.of(context);
       final scheme = theme.colorScheme;
@@ -279,6 +288,8 @@ class _TerminalScreenState extends State<TerminalScreen>
       final pane = _pane;
       final accent = studentAccent(context, pane, s.tokens);
       final slug = pane.slug;
+      final canChat = _canChat(pane);
+      final chat = canChat && paneView.value == PaneView.chat;
       return _StudentFrame(
         accent: accent,
         child: Scaffold(
@@ -368,20 +379,24 @@ class _TerminalScreenState extends State<TerminalScreen>
                 ),
               ],
             ),
+            bottom: canChat ? const PaneViewSwitch() : null,
             actions: [
-              // 글자 선택 — 격자는 손가락으로 못 긁으니 화면 글자를 그대로 선택 상자에
-              // 띄운다(2026-09-10 지시 「꾹 누르는 건 선택이 안 되는데 클립보드 기능」).
-              IconButton(
-                tooltip: '글자 선택·복사',
-                onPressed: () => _selectText(s),
-                icon: const Icon(Icons.content_copy_outlined),
-              ),
-              IconButton(
-                tooltip: _wrap ? '데스크톱 격자 그대로 보기' : '폰 폭에 맞춰 보기',
-                isSelected: _wrap,
-                onPressed: () => setState(() => _wrap = !_wrap),
-                icon: const Icon(Icons.wrap_text),
-              ),
+              // 글자 선택·접기는 격자 얘기다 — 대화 보기에선 말풍선을 꾹 눌러 복사한다.
+              if (!chat) ...[
+                // 글자 선택 — 격자는 손가락으로 못 긁으니 화면 글자를 그대로 선택 상자에
+                // 띄운다(2026-09-10 지시 「꾹 누르는 건 선택이 안 되는데 클립보드 기능」).
+                IconButton(
+                  tooltip: '글자 선택·복사',
+                  onPressed: () => _selectText(s),
+                  icon: const Icon(Icons.content_copy_outlined),
+                ),
+                IconButton(
+                  tooltip: _wrap ? '데스크톱 격자 그대로 보기' : '폰 폭에 맞춰 보기',
+                  isSelected: _wrap,
+                  onPressed: () => setState(() => _wrap = !_wrap),
+                  icon: const Icon(Icons.wrap_text),
+                ),
+              ],
               IconButton(
                 tooltip: 'pane 닫기',
                 onPressed: () => _closePane(pane),
@@ -392,75 +407,103 @@ class _TerminalScreenState extends State<TerminalScreen>
           body: SafeArea(
             child: Column(
               children: [
-                // 좌우 숨 — 글자가 화면 끝에 닿으면 답답하고, 0열에 잉크가 있는 글자가
-                // 잘려 보인다. 학생색 테는 화면 가장자리의 _StudentFrame 이 두른다.
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-                    child: _view(s),
-                  ),
-                ),
-                if (s.note != null) _NoteBar(text: s.note!),
-                Row(
-                  children: [
-                    PhotoAttachmentButton(
+                if (chat)
+                  Expanded(
+                    child: ConversationView(
                       server: widget.server,
                       pane: pane,
-                      pickImage: widget.pickImage ?? pickAttachmentImage,
-                      enabled:
-                          s.state == TermState.connected &&
-                          !_sending &&
-                          !pane.isShell &&
-                          !pane.isWebShell,
-                      disabledReason: pane.isShell || pane.isWebShell
-                          ? '학생이 도는 창에서만 사진을 붙일 수 있어요. 셸에서는 먼저 claude 를 띄워 주세요.'
-                          : s.state == TermState.connected
-                          ? '보내는 중이에요. 잠시 뒤 다시 눌러 주세요.'
-                          : '연결이 끊겨 사진을 붙일 수 없어요. 다시 연결되면 켜져요.',
-                      onBusy: (busy) => setState(() => _attaching = busy),
-                      onAttached: () => setState(() {
-                        _pendingAttachment = true;
-                        _bottomTick++;
-                      }),
+                      session: s,
+                      accent: accent,
+                      onTerminal: _showTerminal,
+                      bottomTick: _bottomTick,
                     ),
-                    Expanded(
-                      child: AbsorbPointer(
-                        absorbing: _attaching,
-                        child: _KeyBar(
-                          session: s,
-                          ctrl: _ctrl,
-                          onCtrl: () => setState(() => _ctrl = !_ctrl),
-                          onKey: _toBottom,
-                          onSubmit: () => _pendingAttachment = false,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                if (_live)
-                  _LiveBar(
-                    controller: _input,
-                    focusNode: _inputFocus,
-                    enabled: s.state != TermState.gone && !_attaching,
-                    onChanged: _onLiveChanged,
-                    onSubmit: _liveSubmit,
-                    onDraft: _toggleLive,
                   )
                 else
-                  _ReplyBar(
+                  // 좌우 숨 — 글자가 화면 끝에 닿으면 답답하고, 0열에 잉크가 있는 글자가
+                  // 잘려 보인다. 학생색 테는 화면 가장자리의 _StudentFrame 이 두른다.
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+                      child: _view(s),
+                    ),
+                  ),
+                if (s.note != null) _NoteBar(text: s.note!),
+                if (chat)
+                  ChatComposer(
                     controller: _input,
                     focusNode: _inputFocus,
                     enabled:
                         s.state != TermState.gone && !_sending && !_attaching,
                     onSend: _send,
-                    onLive: _toggleLive,
+                    leading: _photoButton(s, pane),
+                    onStop: pane.isBusy && s.canSend
+                        ? () => s.sendText('\x1b')
+                        : null,
+                  )
+                else ...[
+                  Row(
+                    children: [
+                      _photoButton(s, pane),
+                      Expanded(
+                        child: AbsorbPointer(
+                          absorbing: _attaching,
+                          child: _KeyBar(
+                            session: s,
+                            ctrl: _ctrl,
+                            onCtrl: () => setState(() => _ctrl = !_ctrl),
+                            onKey: _toBottom,
+                            onSubmit: () => _pendingAttachment = false,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
+                  if (_live)
+                    _LiveBar(
+                      controller: _input,
+                      focusNode: _inputFocus,
+                      enabled: s.state != TermState.gone && !_attaching,
+                      onChanged: _onLiveChanged,
+                      onSubmit: _liveSubmit,
+                      onDraft: _toggleLive,
+                    )
+                  else
+                    _ReplyBar(
+                      controller: _input,
+                      focusNode: _inputFocus,
+                      enabled:
+                          s.state != TermState.gone && !_sending && !_attaching,
+                      onSend: _send,
+                      onLive: _toggleLive,
+                    ),
+                ],
               ],
             ),
           ),
         ),
       );
     },
+  );
+
+  Widget _photoButton(TermSession s, Pane pane) => PhotoAttachmentButton(
+    server: widget.server,
+    pane: pane,
+    pickImage: widget.pickImage ?? pickAttachmentImage,
+    enabled:
+        s.state == TermState.connected &&
+        !_sending &&
+        !pane.isShell &&
+        !pane.isWebShell,
+    disabledReason: pane.isShell || pane.isWebShell
+        ? '학생이 도는 창에서만 사진을 붙일 수 있어요. 셸에서는 먼저 claude 를 띄워 주세요.'
+        : s.state == TermState.connected
+        ? '보내는 중이에요. 잠시 뒤 다시 눌러 주세요.'
+        : '연결이 끊겨 사진을 붙일 수 없어요. 다시 연결되면 켜져요.',
+    onBusy: (busy) => setState(() => _attaching = busy),
+    onAttached: () => setState(() {
+      _pendingAttachment = true;
+      _bottomTick++;
+    }),
   );
 
   /// 지난 줄과 살아 있는 화면을 글자로 이어 붙여 iOS 선택 손잡이가 붙는 상자에 띄운다.

@@ -660,6 +660,27 @@ class Server {
     }
   }
 
+  /// 대화 보기의 재료 — pane 에 묶인 transcript 의 `offset` 이후 줄. 0 이면 꼬리 창을
+  /// `reset` 으로 준다. 아직 묶인 기록이 없으면(셸·막 띄운 claude) null.
+  Future<({String raw, int offset, bool reset})?> transcriptRaw(
+    String pane,
+    int offset, {
+    String? machine,
+  }) async {
+    final body = await _getJson(
+      'transcript-raw',
+      query: {'surface': pane, 'offset': '$offset'},
+      machine: machine,
+    );
+    if (body is! Map || body['ok'] != true) return null;
+    final next = body['offset'];
+    return (
+      raw: body['raw'] is String ? body['raw'] as String : '',
+      offset: next is int ? next : offset,
+      reset: body['reset'] == true,
+    );
+  }
+
   /// Existing native paste path sets the clipboard on the actual harness host;
   /// the server also forwards through nested mirrors. This does not press Enter.
   static const maxImageBytes = 32 << 20;
