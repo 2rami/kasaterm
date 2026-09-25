@@ -8519,10 +8519,11 @@ pub(crate) fn install_student_shims(shim_dir: &std::path::Path) {
     // 「말투」 토글이 꺼져 있으면 런처도 말투를 안 싣는다 — 이름·얼굴만 갈아 끼운다.
     let persona_on = socket::read_claude_persona();
     for name in kasa_mcp::character::member_names(&chars) {
-        let persona = persona_on
-            .then(|| kasa_mcp::character::persona_for(&chars, &name))
-            .flatten()
-            .unwrap_or_default();
+        let persona = if persona_on {
+            kasa_mcp::character::persona_for(&chars, &name).unwrap_or_default()
+        } else {
+            kasa_mcp::character::protocol_only()
+        };
         // 이 학생의 모델·통로를 스크립트에 굽는다. claude shim 과 달리 여기서는
         // 학생이 이미 정해져 있으므로 값을 직접 실을 수 있다.
         let model = kasa_mcp::character::model_for(&chars, &name).unwrap_or_default();

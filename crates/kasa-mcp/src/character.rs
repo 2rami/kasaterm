@@ -993,6 +993,15 @@ pub fn collab_protocol() -> String {
     DEFAULT_COLLAB_PROTOCOL.to_string()
 }
 
+/// 말투 토글이 꺼진 학생에게 싣는 지시 — 협업 규약만, 앞 빈 줄 없이.
+///
+/// 토글의 뜻은 「말투만 끄기」다. 규약이 persona 뒤에만 붙던 동안 말투를 끄면 보드·전달·
+/// 나쵸 보고 안내와 카사텀 화면 규칙까지 함께 빠졌다(2026-09-25 확인). 정체성과 무관한
+/// 하네스라 토글과 상관없이 싣는다 — 게이트마다 「꺼짐」 갈래가 이 값을 쓴다.
+pub fn protocol_only() -> String {
+    collab_protocol().trim_start_matches('\n').to_string()
+}
+
 /// The editable source can differ from the preferred save location before an override exists.
 pub fn collab_protocol_source_path() -> Option<PathBuf> {
     protocol_candidate_paths().into_iter().find(|path| {
@@ -2558,6 +2567,28 @@ mod collab_protocol_tests {
     /// `persona_for` 한 곳에서 받으므로 여기서 규약이 뒤에 붙는지만 본다.
     /// 규약 본문을 직접 비교하지 않는 것은 옆 테스트가 규약 경로 env 를 잠깐
     /// 바꾸기 때문이다 — 두 번 읽으면 서로 다른 파일을 볼 수 있다.
+    #[test]
+    fn protocol_only_is_the_protocol_without_a_leading_gap() {
+        let got = protocol_only();
+        assert!(got.starts_with("# "), "말투를 꺼도 규약은 제목부터 실린다: {got:.40}");
+    }
+
+    /// 말투 게이트가 있는 자리는 꺼짐 갈래에서 규약을 실어야 한다 — 한 곳이라도 빈 값을
+    /// 내리면 그 경로로 뜬 학생만 보드·보고 안내 없이 뜨고, 화면에서는 티가 안 난다.
+    #[test]
+    fn every_persona_gate_keeps_the_protocol_when_the_voice_is_off() {
+        for (name, source, gates) in [
+            ("session.rs", include_str!("../../../app/kasaterm/src/session.rs"), 2),
+            ("transfer_endpoints.rs", include_str!("../../../app/kasaterm/src/transfer_endpoints.rs"), 1),
+            ("agent_identity.rs", include_str!("../../../app/kasaterm/src/agent_identity.rs"), 1),
+            ("main.rs 학생 런처", include_str!("../../../app/kasaterm/src/main.rs"), 1),
+            ("http.rs 재주입", include_str!("http.rs"), 1),
+        ] {
+            let found = source.matches("character::protocol_only()").count();
+            assert!(found >= gates, "{name}: 말투 꺼짐 갈래 {gates}곳 중 {found}곳만 규약을 싣는다");
+        }
+    }
+
     #[test]
     fn persona_carries_the_protocol_after_identity() {
         let chars = serde_json::json!({

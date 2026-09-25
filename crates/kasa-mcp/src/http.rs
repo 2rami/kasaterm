@@ -2299,8 +2299,11 @@ async fn persona_handler(
     // ⚠️ 「말투」 토글을 여기서도 본다. shim 의 `--append-system-prompt` 만 막으면
     // **이 재주입 경로로 그대로 새어 들어간다** — 토글을 꺼도 말투가 계속 붙던 것이
     // 그 때문이다(사용자 2026-08-25 "토글꺼도 적용안되던데").
-    let body = if sid.is_empty() || !crate::character::persona_enabled() {
+    let body = if sid.is_empty() {
         String::new()
+    } else if !crate::character::persona_enabled() {
+        // 말투만 끈다 — 협업 규약은 포크에도 다시 싣는다.
+        crate::character::protocol_only()
     } else {
         // 활성 명부에 없는 이름(다른 테마 팩에서 고른 학생)도 합집합으로 찾는다 —
         // 활성만 보면 그 학생의 resume 부팅에 빈 답이 가서 shim 이 spawn 때의 말투를

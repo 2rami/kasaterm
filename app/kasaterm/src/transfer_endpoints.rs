@@ -129,6 +129,8 @@ pub(crate) fn spawn(plan: SpawnPlan) -> Spawned {
                 if let Some(persona) = kasa_mcp::character::persona_for_any(name) {
                     env.push(("KASATERM_PERSONA".into(), persona));
                 }
+            } else {
+                env.push(("KASATERM_PERSONA".into(), kasa_mcp::character::protocol_only()));
             }
             sid = Some(assigned);
         }

@@ -38,7 +38,7 @@ impl App {
         let persona = if socket::read_claude_persona() {
             kasa_mcp::character::persona_for_any(&name)
                 .ok_or_else(|| anyhow::anyhow!("assigned character has no instructions"))?
-        } else { String::new() };
+        } else { kasa_mcp::character::protocol_only() };
         let model = roster.as_ref().and_then(|r| kasa_mcp::character::model_for(r, &name)).unwrap_or_default();
         let backend = roster.as_ref().and_then(|r| kasa_mcp::character::backend_for(r, &name)).unwrap_or_default();
         if !sid.is_empty() { kasa_mcp::character::bind_session_character(sid, &name)?; }

@@ -548,12 +548,15 @@ impl App {
         // 파일) 각자 게이트를 달면 언젠가 한 곳이 빠진다 — 실제로 codex 쪽엔 없었고,
         // 그 래퍼는 정적 문자열이라 Rust 값을 박을 자리도 없다. 근원에서 한 번 막는다.
         // 캐릭터 이름·색·그림은 그대로다 — 토글의 뜻은 「말투만 끄기」다.
+        // 꺼져도 협업 규약은 싣는다 — 말투가 아니라 하네스다(`protocol_only`).
         if socket::read_claude_persona() {
             if let Some(p) = kasa_mcp::character::persona_for(&chars, &name)
                 .or_else(|| kasa_mcp::character::persona_for_any(&name))
             {
                 env.push(("KASATERM_PERSONA".to_string(), p));
             }
+        } else {
+            env.push(("KASATERM_PERSONA".to_string(), kasa_mcp::character::protocol_only()));
         }
         // 학생별 모델·실행 통로 — claude shim 이 전역 노브보다 이것을 먼저 본다
         // (2026-08-24 지시: 학생 한 명당 모델 선택). shim 은 부팅 1회 생성이라
@@ -9836,7 +9839,7 @@ pub(crate) fn write_persona_override(pane: &str, character: &str) {
             .or_else(|| kasa_mcp::character::persona_for_any(character))
             .unwrap_or_default()
     } else {
-        String::new()
+        kasa_mcp::character::protocol_only()
     };
     let base = dir.join(format!("repersona-{pane}"));
     let _ = std::fs::write(base.with_extension("persona"), persona);
