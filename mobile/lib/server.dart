@@ -3,8 +3,11 @@ import 'package:http/http.dart' as http;
 
 /// 사용자에게 보여도 되는 오류 — 주소(slug)가 들어 있지 않다.
 class ServerException implements Exception {
-  const ServerException(this.message);
+  const ServerException(this.message, {this.status});
   final String message;
+
+  /// HTTP 응답 번호 — 닿기는 했을 때만. 404 는 「그 길이 없는 옛 판」이라 부르는 쪽이 가른다.
+  final int? status;
 
   @override
   String toString() => message;
@@ -298,6 +301,19 @@ class Machine {
   final List<Pane> panes;
 }
 
+/// `/term/changes` 한 번의 답.
+class Changes {
+  const Changes({required this.epoch, required this.status});
+
+  /// 서버 롱폴 상한(15초)과 같다 — 더 달라 해도 서버가 자른다.
+  static const longPollSecs = 15;
+
+  final int epoch;
+
+  /// 학생 상태 전이에도 번호가 오른다 — 거짓이면 배치 변화만이라 상태는 폴링으로 본다.
+  final bool status;
+}
+
 class Me {
   const Me({required this.name, required this.owner, this.machine});
   final String name;
@@ -491,15 +507,20 @@ class Server {
     String path, {
     Map<String, String>? query,
     String? machine,
+    Duration? timeout,
   }) async {
     final http.Response res;
     try {
-      res = await _client.get(uri(path, query: query, machine: machine));
+      final req = _client.get(uri(path, query: query, machine: machine));
+      res = await (timeout == null ? req : req.timeout(timeout));
     } catch (_) {
       throw ServerException('${describe()} 에 닿지 못했다');
     }
     if (res.statusCode != 200) {
-      throw ServerException('${describe()} 응답 ${res.statusCode} ($path)');
+      throw ServerException(
+        '${describe()} 응답 ${res.statusCode} ($path)',
+        status: res.statusCode,
+      );
     }
     try {
       return jsonDecode(utf8.decode(res.bodyBytes));
@@ -621,6 +642,30 @@ class Server {
         for (final w in list)
           if (w is Map) WindowLayout.fromJson(w.cast<String, Object?>()),
     ];
+  }
+
+  /// 목록이 바뀌었나 — `since` 보다 새 번호가 나오거나 `wait` 초가 지나면 돌아온다.
+  /// 서버가 번호를 올리는 때에 학생 상태 전이까지 들었는지는 `status` 가 말한다.
+  Future<Changes> changes({
+    String? machine,
+    required int since,
+    int wait = Changes.longPollSecs,
+  }) async {
+    final j = await _getJson(
+      'term/changes',
+      query: {'since': '$since', 'wait': '$wait'},
+      machine: machine,
+      // 서버가 기다리는 시간 위에 관문 왕복을 얹는다 — 그보다 길면 끊긴 것이다.
+      timeout: Duration(seconds: wait + 10),
+    );
+    final epoch = j is Map ? j['epoch'] : null;
+    if (epoch is! num) {
+      throw const ServerException('변경 알림을 모르는 판', status: 404);
+    }
+    return Changes(
+      epoch: epoch.toInt(),
+      status: j is Map && j['status'] == true,
+    );
   }
 
   Future<List<Machine>> machines() async {

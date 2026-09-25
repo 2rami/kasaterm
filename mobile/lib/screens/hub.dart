@@ -198,6 +198,14 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
               ),
             ),
             RefreshIndicator(onRefresh: _model.refresh, child: _body(theme)),
+            // 지난번 목록을 먼저 그렸다 — 새 목록이 닿을 때까지 위에 얇게 「확인 중」.
+            if (_model.showingCached)
+              const Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: LinearProgressIndicator(minHeight: 2),
+              ),
           ],
         ),
       );
