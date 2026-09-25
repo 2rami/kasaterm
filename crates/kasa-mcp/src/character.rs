@@ -2531,8 +2531,11 @@ mod collab_protocol_tests {
         let protocol = DEFAULT_COLLAB_PROTOCOL.trim();
         // 2026-09-17 나쵸네코 절(7줄)이 들어오며 한도를 65→75줄·6→7 KiB 로 올렸다 —
         // 그 절도 명령 한 줄과 규칙 넷뿐이고 봉투·인박스 상세는 docs/nacho-orchestrator.md 다.
+        // 2026-09-25 카사텀 화면 절(8줄)로 82줄·7.5 KiB. 학생이 HTML 시안을 claude.ai
+        // 페이지로 올려 「이게 실제 화면인가」를 되묻게 한 일이 있어, 프로젝트 지침만이
+        // 아니라 cwd 와 무관하게 모든 학생에게 실리는 이 규약에 둔다.
         assert!(
-            protocol.lines().count() <= 75 && protocol.len() <= 7 * 1024,
+            protocol.lines().count() <= 82 && protocol.len() <= 7 * 1024 + 512,
             "규약은 짧게 유지하고 API 상세는 연결된 문서에 둬야 한다"
         );
         // 캐릭터 정체성 문장에 규약이 이어붙으면 한 문단이 된다.
@@ -2545,6 +2548,23 @@ mod collab_protocol_tests {
         ] {
             assert!(protocol.contains(command), "핵심 협업 흐름 누락: {command}");
         }
+        for rule in ["Claude 아티팩트", "Rust+wgpu/winit", "Flutter 실제 위젯", "웹 제품"] {
+            assert!(protocol.contains(rule), "카사텀 화면 규칙 누락: {rule}");
+        }
+    }
+
+    /// 규칙이 파일에만 있고 학생 프롬프트에 안 붙으면 아무도 모른다. claude
+    /// (`--append-system-prompt`)·codex(`CODEX_HOME/AGENTS.md`)·런처가 전부
+    /// `persona_for` 한 곳에서 받으므로 여기서 규약이 뒤에 붙는지만 본다.
+    /// 규약 본문을 직접 비교하지 않는 것은 옆 테스트가 규약 경로 env 를 잠깐
+    /// 바꾸기 때문이다 — 두 번 읽으면 서로 다른 파일을 볼 수 있다.
+    #[test]
+    fn persona_carries_the_protocol_after_identity() {
+        let chars = serde_json::json!({
+            "members": [{ "name": "치나츠", "persona": "너는 치나츠." }]
+        });
+        let got = persona_for(&chars, "치나츠").expect("persona");
+        assert!(got.starts_with("너는 치나츠.\n\n# "), "정체성 뒤 빈 줄 두 칸과 규약 제목: {got:.40}");
     }
 
     /// 파일에서 읽은 규약도 코드 기본값과 **같은 모양**이어야 한다 — 앞의 빈 줄
