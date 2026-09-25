@@ -196,3 +196,108 @@ pub(crate) fn accept_restart(facts: &Facts, req: &JobRequest, proxy: &winit::eve
     }
     Ok(serde_json::json!({"ok": true, "job_id": req.job.job_id, "created": created}))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kasa_socket::app_restart::{authorize_run, authorize_target, build_plan, job_id, target_authority, target_hash, Fetch, Job, Plan};
+    use std::collections::HashMap;
+
+    fn request(plan: &Plan, approval_id: &str, facts: &Facts, authority: &str) -> JobRequest {
+        JobRequest {
+            job: Job {
+                schema: SCHEMA.into(),
+                job_id: job_id(&plan.hash, &facts.machine_id),
+                plan_hash: plan.hash.clone(),
+                machine_id: facts.machine_id.clone(),
+                target_hash: target_hash(facts),
+                old_pid: facts.pid,
+                created_at_ms: facts.observed_at_ms,
+            },
+            approval_id: approval_id.into(),
+            authority: authority.into(),
+        }
+    }
+
+    /// 나쵸 레포의 실제 승인 서버(임시 폴더·가짜 키)에 이 앱의 실제 나쵸 클라이언트로 붙어, 러스트가 세운 scope 로 소비하고
+    /// 나쵸에서 읽은 승인으로 대상 판정까지 돈다. `scripts/nacho-restart-interop.sh` 가 서버를 띄우고 env 를 걸어 부른다.
+    #[test]
+    #[ignore]
+    fn nacho_restart_round_trip_against_isolated_nacho() {
+        let read = |path: &str| -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap() };
+        let case = read(&std::env::var("KASATERM_RESTART_INTEROP").expect("KASATERM_RESTART_INTEROP"));
+        let fx = read(case["fixture"].as_str().unwrap());
+        let now = kasa_socket::board::now_ms();
+        let want = &fx["plan"];
+        let controller = want["controller"].as_str().unwrap().to_string();
+        let mut facts: HashMap<String, Facts> = HashMap::new();
+        for t in want["targets"].as_array().unwrap() {
+            let mut f: Facts = serde_json::from_value(t["facts"].clone()).unwrap();
+            f.observed_at_ms = now;
+            facts.insert(f.machine_id.clone(), f);
+        }
+        let ids: Vec<String> = facts.keys().cloned().collect();
+        let plan_of = |facts: &HashMap<String, Facts>| build_plan(&controller, &ids, &|id| facts.get(id).cloned().ok_or_else(|| "없음".to_string()), now);
+        let plan = plan_of(&facts);
+        assert_eq!(plan.scope, want["scope"], "러스트가 세운 scope = 고정 자료");
+        let mac = plan.targets[0].machine_id.clone();
+        let mac_facts = facts[&mac].clone();
+        let id = |k: &str| case["ids"][k].as_str().unwrap().to_string();
+        let nacho = NachoAuthority::local();
+        let main = id("main");
+
+        match case["mode"].as_str().unwrap() {
+            "off" => {
+                assert_eq!(nacho.get(&main).unwrap_err(), "approvals_disabled");
+                assert_eq!(authorize_run(&plan, &main, &nacho).unwrap_err(), "approvals_disabled", "승인된 요청이 있어도 꺼져 있으면 못 쓴다");
+                return;
+            }
+            "bad_key" => {
+                assert_eq!(nacho.get(&main).unwrap_err(), "bad_token");
+                assert_eq!(authorize_run(&plan, &main, &nacho).unwrap_err(), "bad_token");
+                return;
+            }
+            mode => assert_eq!(mode, "on"),
+        }
+
+        let before = nacho.get(&main).unwrap();
+        assert_eq!(before.scope_hash, fx["get"]["200"]["approval"]["scope_hash"].as_str().unwrap(), "나쵸 정규화 해시 = 고정 자료");
+        assert!(authorize_target(&request(&plan, &main, &mac_facts, &controller), &mac_facts, &nacho, now).unwrap_err().contains("소비"), "소비 전");
+        let used = authorize_run(&plan, &main, &nacho).expect("러스트 scope 로 실제 나쵸 소비");
+        assert_eq!(used.consumed_by.as_deref(), Some(controller.as_str()));
+        assert_eq!(authorize_run(&plan, &main, &nacho).unwrap_err(), "already_used");
+        assert_eq!(authorize_target(&request(&plan, &main, &mac_facts, &controller), &mac_facts, &nacho, now), Ok(()), "나쵸에서 읽은 승인으로 대상 통과");
+        let mut moved = mac_facts.clone();
+        moved.pid += 1;
+        assert!(authorize_target(&request(&plan, &main, &moved, &controller), &moved, &nacho, now).is_err(), "그 사이 pid 가 바뀐 대상");
+
+        let other = id("wrong_consumer");
+        assert_eq!(nacho.consume(&other, &plan.scope, &mac).unwrap_err(), "wrong_consumer");
+        assert!(authorize_target(&request(&plan, &other, &mac_facts, &controller), &mac_facts, &nacho, now).is_err(), "남이 쓰려던 승인은 소비 전 그대로");
+        let changed = id("changed");
+        let mut shifted = facts.clone();
+        shifted.get_mut(&mac).unwrap().pid += 1;
+        assert_eq!(authorize_run(&plan_of(&shifted), &changed, &nacho).unwrap_err(), "scope_changed");
+        assert!(authorize_run(&plan, &changed, &nacho).is_ok(), "바뀐 scope 시도는 한 번을 쓰지 않았다");
+        assert!(authorize_run(&plan, &other, &nacho).is_ok(), "다른 기기 시도도 한 번을 쓰지 않았다");
+        let pending = id("pending");
+        assert_eq!(authorize_run(&plan, &pending, &nacho).unwrap_err(), "not_approved:pending");
+        assert!(authorize_target(&request(&plan, &pending, &mac_facts, &controller), &mac_facts, &nacho, now).is_err());
+        assert_eq!(nacho.get(&format!("ap_{}", "0".repeat(32))).unwrap_err(), "no_approval");
+
+        let entries = vec![
+            serde_json::json!({"label": "controller", "machine_id": controller, "restart_approvals": true}),
+            serde_json::json!({"label": "target", "machine_id": mac}),
+        ];
+        let connect = |who: &str| -> Result<Fetch, String> {
+            let who = who.to_string();
+            Ok(Box::new(move |path: &str| {
+                let view = NachoAuthority::local().get(path.rsplit('/').next().unwrap_or(""))?;
+                Ok(serde_json::json!({"machine_id": who, "approval": view}))
+            }))
+        };
+        let relay = target_authority(false, &entries, &controller, connect).unwrap().expect("키 없는 대상은 위임 중계");
+        assert_eq!(authorize_target(&request(&plan, &main, &mac_facts, &controller), &mac_facts, &relay, now), Ok(()), "위임 중계로 읽은 실제 나쵸 승인");
+        assert!(target_authority(false, &entries, &mac, |_| panic!("요청이 고른 기기엔 연결하지 않는다")).is_err());
+    }
+}

@@ -1146,6 +1146,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 나쵸가 내준 재시작 승인 고정 자료(나쵸 레포 `docs/development/api/fixtures/approval.kasaterm_restart.implemented.json`)를
+    /// 카사텀의 해시·계획·판정 함수가 그대로 내고 받는가. 나쵸는 파이썬으로 옮긴 식으로 값을 채웠다 — 어긋나면 모든 소비가
+    /// scope_changed 로 막힌다. `NACHO_DESK_FIXTURES=<그 폴더>` 로 가리켜 `--ignored` 로 돈다(`scripts/nacho-restart-interop.sh`).
+    #[test]
+    #[ignore]
+    fn nacho_restart_fixture_matches_rust() {
+        let dir = PathBuf::from(std::env::var("NACHO_DESK_FIXTURES").expect("NACHO_DESK_FIXTURES"));
+        let fx: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("approval.kasaterm_restart.implemented.json")).unwrap()).unwrap();
+        let want = &fx["plan"];
+        let listed = want["targets"].as_array().unwrap();
+        let facts_of: HashMap<String, Facts> = listed.iter()
+            .map(|t| (t["machine_id"].as_str().unwrap().to_string(), serde_json::from_value(t["facts"].clone()).unwrap()))
+            .collect();
+        for t in listed {
+            assert_eq!(target_hash(&facts_of[t["machine_id"].as_str().unwrap()]), t["hash"].as_str().unwrap(), "대상 해시");
+        }
+        let controller = want["controller"].as_str().unwrap();
+        let mut requested: Vec<String> = listed.iter().map(|t| t["machine_id"].as_str().unwrap().to_string()).collect();
+        requested.reverse();
+        let plan = build_plan(controller, &requested, &|id| facts_of.get(id).cloned().ok_or_else(|| "없음".to_string()), want["created_at_ms"].as_u64().unwrap());
+        assert_eq!(serde_json::to_value(&plan).unwrap(), *want, "계획 전체 — plan 해시·scope·조종 기기 맨 뒤·거부 없음");
+        let body = &fx["consume"]["request"]["body"];
+        assert_eq!(body["scope"], plan.scope, "소비 본문 scope = 카사텀이 싣는 scope");
+        assert_eq!(body["consumer_machine_id"], controller);
+
+        let fresh: ApprovalView = serde_json::from_value(fx["get"]["200"]["approval"].clone()).unwrap();
+        let used: ApprovalView = serde_json::from_value(fx["consume"]["200"]["approval"].clone()).unwrap();
+        assert_eq!((fresh.scope == plan.scope, used.scope == plan.scope), (true, true));
+        assert_eq!(authorize_run(&plan, &used.id, &Says(used.clone())).map(|v| v.consumed_by), Ok(Some(controller.to_string())));
+        let at = used.consumed_at_ms.unwrap();
+        let mac = listed[0]["machine_id"].as_str().unwrap();
+        let mut mac_facts = facts_of[mac].clone();
+        mac_facts.observed_at_ms = at;
+        let req = JobRequest {
+            job: Job { schema: SCHEMA.into(), job_id: job_id(&plan.hash, mac), plan_hash: plan.hash.clone(), machine_id: mac.into(), target_hash: target_hash(&mac_facts), old_pid: mac_facts.pid, created_at_ms: at },
+            approval_id: used.id.clone(),
+            authority: controller.into(),
+        };
+        assert!(authorize_target(&req, &mac_facts, &Says(fresh), at).is_err(), "소비 전 view");
+        assert_eq!(authorize_target(&req, &mac_facts, &Says(used.clone()), at), Ok(()));
+        assert!(authorize_target(&req, &mac_facts, &Says(used.clone()), used.expires_at_ms).is_err(), "만료");
+        let reply = serde_json::json!({"machine_id": controller, "approval": fx["consume"]["200"]["approval"]});
+        let relay = RelayAuthority { machine_id: controller.into(), fetch: Box::new(move |_| Ok(reply.clone())) };
+        assert_eq!(authorize_target(&req, &mac_facts, &relay, at), Ok(()), "위임 중계로 받은 나쵸 view");
+        for word in ["already_used", "scope_changed", "wrong_consumer", "expired", "no_approval", "approvals_disabled"] {
+            let named = fx["consume"].as_object().unwrap().values().any(|v| v["error"] == word);
+            assert!(named, "카사텀이 그대로 전하는 나쵸 오류 낱말 {word}");
+        }
+    }
+
     fn job(id: &str) -> Job {
         Job { schema: SCHEMA.into(), job_id: job_id("plan", id), plan_hash: "plan".into(), machine_id: id.into(), target_hash: "t".into(), old_pid: 41, created_at_ms: NOW }
     }
