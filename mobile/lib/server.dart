@@ -292,6 +292,8 @@ class Machine {
     String? route,
     required this.online,
     required this.panes,
+    this.agoSecs,
+    this.rttMs,
   }) : route = route ?? label;
   final String label;
 
@@ -299,6 +301,10 @@ class Machine {
   final String route;
   final bool online;
   final List<Pane> panes;
+
+  /// 마지막으로 닿은 지 몇 초 — 옛 서버는 안 준다.
+  final int? agoSecs;
+  final int? rttMs;
 }
 
 /// `/term/changes` 한 번의 답.
@@ -679,6 +685,8 @@ class Server {
               label: m['label'] as String? ?? '',
               route: m['route'] as String? ?? m['label'] as String? ?? '',
               online: m['online'] == true,
+              agoSecs: (m['ago_secs'] as num?)?.toInt(),
+              rttMs: (m['rtt_ms'] as num?)?.toInt(),
               panes: _panesFrom(
                 m['panes'],
                 machine: m['route'] as String? ?? m['label'] as String?,

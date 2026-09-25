@@ -327,7 +327,7 @@ void main() {
       s.hold?.complete();
     });
 
-    testWidgets('작업: 판단 필요·진행·끝남으로 나뉘고 프로젝트로 거른다', (tester) async {
+    testWidgets('작업: 거노 차례·진행·완료로 나뉘고 프로젝트로 거른다', (tester) async {
       final s = FakeNacho()
         ..cards = [
           card('w1', '크론 켜기', 'attention', project: 'mission-control', state: 'approval_needed'),
@@ -340,15 +340,16 @@ void main() {
       await tester.tap(find.text('작업'));
       await settle(tester);
       await tester.pump(const Duration(milliseconds: 400));
-      expect(find.text('판단 필요 1'), findsOneWidget);
-      expect(find.text('진행 중 1'), findsOneWidget);
-      expect(find.text('끝남·실패 1'), findsOneWidget);
+      expect(find.text('거노 차례 1'), findsOneWidget);
+      expect(find.text('진행 1'), findsOneWidget);
+      expect(find.text('완료 1'), findsOneWidget);
       await tester.tap(find.widgetWithText(FilterChip, 'mission-control'));
       await settle(tester);
       expect(find.text('크론 켜기'), findsOneWidget);
       expect(find.text('폰 화면 고쳐'), findsNothing);
       d.stop();
       s.hold?.complete();
+      await tester.pumpWidget(const SizedBox());
     });
 
     testWidgets('상세: 승인은 기존 창구 확인 필요, 판이 바뀌면 알리고 다시 읽는다', (tester) async {
