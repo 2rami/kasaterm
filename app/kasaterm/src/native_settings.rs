@@ -102,6 +102,10 @@ pub(crate) struct HomeAccountsView {
 
 #[derive(Clone, Default)]
 pub(crate) struct SettingsCache {
+    preferred_agent: String,
+    agent_permissions: [String; 2],
+    agent_statusline: [bool; 3],
+    agent_statusline_customized: bool,
     pub(crate) ready: bool,
     pub(crate) palettes: Arc<Vec<PaletteChoice>>,
     characters: Arc<Vec<CharacterChoice>>,
@@ -143,6 +147,10 @@ impl std::fmt::Debug for SettingsCache {
 
 impl SettingsCache {
     pub(crate) fn refresh(&mut self) {
+        self.preferred_agent = crate::agent_preferences::preferred_agent().to_string();
+        self.agent_permissions = ["claude", "codex"].map(|provider| crate::agent_preferences::permission(provider).to_string());
+        self.agent_statusline = ["model", "usage", "cwd"].map(crate::agent_preferences::statusline_enabled);
+        self.agent_statusline_customized = crate::agent_preferences::statusline_customized();
         let saved = socket::read_settings();
         self.refresh_palette_from(&saved);
         let roster = kasa_mcp::character::characters_json();
@@ -541,6 +549,7 @@ pub(crate) enum DropdownId {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Target {
     Category(SettingsCat),
+    Disclosure(&'static str),
     /// 선택 상자 머리 — 누르면 펼치고, 다시 누르면 닫는다.
     Dropdown(DropdownId),
     /// 펼친 선택 상자 바깥 — 누르면 닫기만 한다.
@@ -637,6 +646,11 @@ fn take_paint_feedback() -> PaintFeedback {
 }
 
 pub(crate) struct Snapshot {
+    pub(crate) preferred_agent: String,
+    pub(crate) disclosures: std::collections::HashSet<&'static str>,
+    pub(crate) agent_permissions: [String; 2],
+    pub(crate) agent_statusline: [bool; 3],
+    pub(crate) agent_statusline_customized: bool,
     pub(crate) area: Rect,
     pub(crate) cat: SettingsCat,
     pub(crate) cursor: (f32, f32),
@@ -862,6 +876,11 @@ impl App {
             })
             .unwrap_or_else(theme::cursor);
         Some(Snapshot {
+            preferred_agent: cache.preferred_agent.clone(),
+            disclosures: scene.disclosures().clone(),
+            agent_permissions: cache.agent_permissions.clone(),
+            agent_statusline: cache.agent_statusline,
+            agent_statusline_customized: cache.agent_statusline_customized,
             area,
             cat: scene.category(),
             cursor: self.cursor_px,
@@ -1026,6 +1045,10 @@ impl App {
             self.settings_scene.close_dropdown();
         }
         match target {
+            Some(Target::Disclosure(id)) => {
+                self.native_settings_blur();
+                self.settings_scene.toggle_disclosure(id);
+            }
             Some(Target::Dropdown(id)) => {
                 self.native_settings_blur();
                 self.settings_scene.toggle_dropdown(id);
@@ -1966,6 +1989,10 @@ fn action_refreshes_cache(action: &SettingsAction) -> bool {
     matches!(
         action,
         SettingsAction::UiLanguage(_)
+            | SettingsAction::PreferredAgent(_)
+            | SettingsAction::AgentPermission(_, _)
+            | SettingsAction::AgentStatusline(_, _)
+            | SettingsAction::AgentStatuslineCustom(_)
             | SettingsAction::ThemeMode(_)
             | SettingsAction::ThemeSystemSlot(_, _)
             | SettingsAction::StartCustomTheme
@@ -2102,7 +2129,7 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
 pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutput {
     crate::native_strings::set_language(&snapshot.language);
     if snapshot.first_run {
-        return crate::native_onboarding::paint(g, &snapshot.onboarding);
+        return crate::native_onboarding::paint(g, &snapshot.onboarding, snapshot);
     }
     begin_paint_feedback();
     let (ax, ay, aw, ah) = snapshot.area;
@@ -2116,7 +2143,11 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     draw_text(g, ax + 20.0, ay + 24.0, "설정", 13.0, theme::text_dim(), false);
 
     let mut ny = ay + 56.0;
-    for &cat in SettingsCat::nav() {
+    for (index, &cat) in SettingsCat::nav().iter().enumerate() {
+        if index == 0 || index == 4 {
+            draw_text(g, ax + 20.0, ny, if index == 0 { "내 작업 환경" } else { "연결과 앱" }, 10.5, theme::text_mute(), false);
+            ny += 24.0;
+        }
         let (label, icon, _) = category_meta(cat);
         let rect = (ax + 12.0, ny, nav_w - 24.0, 32.0);
         // 테마 페이지는 「캐릭터」 밑으로 들어갔다 — 거기 있는 동안도 캐릭터 칸이 켜진다.
@@ -2621,6 +2652,10 @@ fn paint_appearance(
     y: &mut f32,
     w: f32,
 ) {
+    paint_setup_section(g, s, hits, caret, x, y, w, 1);
+    if !disclosure(g, s, hits, x, y, w, "appearance", "세부 모양 · 팔레트, 강조색, 글꼴과 배율") {
+        return;
+    }
     section_title(
         g,
         x,
@@ -2801,11 +2836,6 @@ fn paint_appearance(
     if crate::lite_mode() {
         return;
     }
-    let shapes: Vec<(&str, bool, SettingsAction)> = theme::SHAPE_PRESETS
-        .iter()
-        .map(|(key, label, _)| (*label, s.shape == *key, SettingsAction::Shape(key)))
-        .collect();
-    seg_row(g, s, hits, x, y, w, "모서리 형태", &shapes);
     let contrast: Vec<(&str, bool, SettingsAction)> = theme::CONTRAST_PRESETS
         .iter()
         .map(|(label, value)| {
@@ -3796,35 +3826,14 @@ fn paint_shell(
     y: &mut f32,
     w: f32,
 ) {
+    paint_setup_section(g, s, hits, caret, x, y, w, 3);
+    if !disclosure(g, s, hits, x, y, w, "terminal", "세부 터미널 · 글꼴, 셸 경로와 커서") {
+        return;
+    }
+    crate::native_onboarding::paint_fonts(g, &s.onboarding, hits, x, y, w);
     section_title(g, x, *y, "셸", "");
     *y += 54.0;
     let known = matches!(s.shell.as_str(), "" | "/bin/zsh" | "/bin/bash");
-    seg_row(
-        g,
-        s,
-        hits,
-        x,
-        y,
-        w,
-        "새 pane의 셸",
-        &[
-            (
-                "시스템 기본",
-                s.shell.is_empty(),
-                SettingsAction::ShellPreset(String::new()),
-            ),
-            (
-                "zsh",
-                s.shell == "/bin/zsh",
-                SettingsAction::ShellPreset("/bin/zsh".to_string()),
-            ),
-            (
-                "bash",
-                s.shell == "/bin/bash",
-                SettingsAction::ShellPreset("/bin/bash".to_string()),
-            ),
-        ],
-    );
     text_field(
         g,
         s,
@@ -3851,6 +3860,131 @@ fn paint_shell(
     paint_cursor(g, s, hits, x, y, w);
 }
 
+fn disclosure(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    id: &'static str,
+    label: &str,
+) -> bool {
+    let expanded = s.disclosures.contains(id);
+    let rect = (x, *y, w, ROW_H);
+    flat_row(g, x, *y, w, label, "", w - 40.0);
+    g.queue_icon(if expanded { "chevron-down" } else { "chevron-right" }, x + w - 22.0, *y + 13.0, 14.0, theme::text_dim());
+    register_clipped(g, hits, Target::Disclosure(id), rect, HitCursor::Pointer);
+    g.hover_pointer |= contains(rect, s.cursor);
+    *y += ROW_H;
+    expanded
+}
+
+pub(crate) fn paint_setup_section(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    caret: &mut Option<Rect>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    section: u8,
+) {
+    match section {
+        0 => {
+            row_label(g, x, y, "캐릭터 테마");
+            let choices = s.themes.iter().map(|row| (
+                row.label.clone(), s.character_theme == row.id,
+                SettingsAction::SelectTheme(row.id.clone()),
+            )).collect();
+            chips_owned(g, s, hits, x, y, w, choices);
+        }
+        1 => {
+            row_label(g, x, y, "색상 테마");
+            let choices = s.palettes.iter().map(|palette| (
+                palette.label.clone(), s.theme == palette.key,
+                SettingsAction::ThemeMode(palette.key.clone()),
+            )).collect();
+            chips_owned(g, s, hits, x, y, w, choices);
+            if !crate::lite_mode() {
+                let shapes: Vec<_> = theme::SHAPE_PRESETS.iter().map(|(key, label, _)|
+                    (*label, s.shape == *key, SettingsAction::Shape(key))).collect();
+                seg_row(g, s, hits, x, y, w, "모서리 형태", &shapes);
+            }
+        }
+        2 => {
+            seg_row(g, s, hits, x, y, w, "기본 에이전트", &[
+                ("Claude Code", s.preferred_agent == "claude", SettingsAction::PreferredAgent("claude")),
+                ("Codex", s.preferred_agent == "codex", SettingsAction::PreferredAgent("codex")),
+            ]);
+            row_label(g, x, y, "권한 기본값 · 새 작업부터 적용");
+            for (i, (provider, label)) in [("claude", "Claude Code"), ("codex", "Codex")].iter().enumerate() {
+                let cells: Vec<_> = [("기존 설정", "default"), ("작업 폴더", "workspace"), ("제한 없음", "unrestricted")].iter().map(|(label, mode)|
+                    (*label, s.agent_permissions[i] == *mode, SettingsAction::AgentPermission(provider, mode))).collect();
+                seg_row(g, s, hits, x, y, w, label, &cells);
+            }
+            plain_hint(g, x, y, w, "Claude는 파일 편집을 자동 승인하고, Codex는 작업 폴더 쓰기를 허용합니다.");
+            plain_hint(g, x, y, w, "제한 없음은 승인 확인을 건너뜁니다.");
+            section_title(g, x, *y, "에이전트 상태줄", "");
+            *y += 54.0;
+            toggle_row(g, s, hits, x, y, w, "상태줄 직접 설정", s.agent_statusline_customized, SettingsAction::AgentStatuslineCustom(!s.agent_statusline_customized));
+            if !s.agent_statusline_customized {
+                plain_hint(g, x, y, w, "각 에이전트의 기존 상태줄 설정을 유지합니다.");
+                return;
+            }
+            row_label(g, x, y, "선택 항목 미리보기 · 예시");
+            let preview = agent_statusline_preview(s.agent_statusline);
+            flat_row(g, x, *y, w, &preview, "", w);
+            *y += ROW_H;
+            for (i, (field, label)) in [("model", "모델 이름"), ("usage", "컨텍스트 사용량"), ("cwd", "작업 폴더")].iter().enumerate() {
+                toggle_row(g, s, hits, x, y, w, label, s.agent_statusline[i], SettingsAction::AgentStatusline(field, !s.agent_statusline[i]));
+            }
+            plain_hint(g, x, y, w, "Claude는 다음 표시부터, Codex는 새 작업부터 적용됩니다.");
+            plain_hint(g, x, y, w, "협업 상태 수집은 유지됩니다. 앱 하단바는 별도 메뉴에서 설정해요.");
+        }
+        3 => {
+            if cfg!(target_os = "windows") {
+                crate::native_onboarding::paint_platform(g, &s.onboarding, hits, caret, x, y, w);
+            } else {
+                seg_row(g, s, hits, x, y, w, "기본 셸", &[
+                    ("시스템 기본", s.shell.is_empty(), SettingsAction::ShellPreset(String::new())),
+                    ("zsh", s.shell == "/bin/zsh", SettingsAction::ShellPreset("/bin/zsh".into())),
+                    ("bash", s.shell == "/bin/bash", SettingsAction::ShellPreset("/bin/bash".into())),
+                ]);
+            }
+            stepper_row(g, s, hits, x, y, w, "터미널 글자 크기", &format!("{:.0}px", s.font_size), SettingsAction::FontSizeDelta(-1), SettingsAction::FontSizeDelta(1));
+            seg_row(g, s, hits, x, y, w, "커서 모양", &[
+                ("블록", s.cursor_shape == cursor::CursorShape::Block, SettingsAction::CursorShape(cursor::CursorShape::Block)),
+                ("빔", s.cursor_shape == cursor::CursorShape::Bar, SettingsAction::CursorShape(cursor::CursorShape::Bar)),
+                ("밑줄", s.cursor_shape == cursor::CursorShape::Underline, SettingsAction::CursorShape(cursor::CursorShape::Underline)),
+            ]);
+        }
+        _ => {}
+    }
+}
+
+fn plain_hint(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, message: &str) {
+    let translated = crate::native_strings::text(message);
+    let mut line = String::new();
+    for ch in translated.chars() {
+        let candidate = format!("{line}{ch}");
+        if !line.is_empty() && g.measure_chrome_text(&candidate, 10.5, false) > w {
+            draw_text(g, x, *y + 6.0, &line, 10.5, theme::text_dim(), false);
+            *y += 18.0;
+            line.clear();
+        }
+        line.push(ch);
+    }
+    draw_text(g, x, *y + 6.0, &line, 10.5, theme::text_dim(), false);
+    *y += 26.0;
+}
+
+fn agent_statusline_preview(fields: [bool; 3]) -> String {
+    let labels = ["Claude Sonnet", "사용량 24%", "~/project"];
+    let parts: Vec<_> = labels.into_iter().zip(fields).filter_map(|(label, enabled)| enabled.then_some(label)).collect();
+    if parts.is_empty() { "선택한 항목 없음".into() } else { parts.join("  ·  ") }
+}
+
 fn paint_claude(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -3860,11 +3994,15 @@ fn paint_claude(
     y: &mut f32,
     w: f32,
 ) {
+    paint_setup_section(g, s, hits, caret, x, y, w, 2);
+    if !disclosure(g, s, hits, x, y, w, "agent", "세부 에이전트 · 모델, 생각 깊이와 협업") {
+        return;
+    }
     section_title(
         g,
         x,
         *y,
-        "Agent 기본값",
+        "Claude Code 기본값",
         "새로 띄우는 Claude와 Codex 작업대에 적용됩니다",
     );
     *y += 54.0;
@@ -5004,7 +5142,10 @@ fn paint_students(
     w: f32,
 ) {
     if s.student_selected.is_none() {
-        paint_character_theme_row(g, s, hits, x, y, w);
+        paint_setup_section(g, s, hits, caret, x, y, w, 0);
+        if disclosure(g, s, hits, x, y, w, "characters", "세부 캐릭터 · 사용할 캐릭터와 개별 편집") {
+            paint_character_theme_row(g, s, hits, x, y, w);
+        }
         return;
     }
     paint_themegen_engine(g, s, hits, caret, x, y, w);
@@ -6420,7 +6561,7 @@ fn cursor_sample(
 fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str) {
     match cat {
         SettingsCat::General => (
-            "일반",
+            "앱 일반",
             "settings-2",
             "시작 위치와 파일, 스크롤의 기본값을 정합니다",
         ),
@@ -6430,7 +6571,7 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
             "색과 글자 크기, 화면 배율을 한 화면에서 맞춥니다",
         ),
         SettingsCat::Statusbar => (
-            "하단바",
+            "앱 하단바",
             "panel-bottom",
             "보이는 정보와 순서, 색을 내 작업에 맞춥니다",
         ),
@@ -6445,7 +6586,7 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
             "바탕화면에 서서 학생들 상황을 알려 주는 캐릭터입니다",
         ),
         SettingsCat::Claude => (
-            "Agent",
+            "코딩 에이전트",
             "claude",
             "모델과 협업 연결의 기본값을 정합니다",
         ),
@@ -6455,11 +6596,11 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
             "로그인을 넣고, 한도가 차면 넘어갈 차례를 정합니다",
         ),
         SettingsCat::Machines => (
-            "기계",
+            "연결 기기",
             "server",
             "ssh 로 붙는 다른 컴퓨터를 등록합니다",
         ),
-        SettingsCat::Theme => ("테마", "image", "캐릭터 명단과 그림을 한 벌로 갈아낍니다"),
+        SettingsCat::Theme => ("캐릭터 테마", "image", "캐릭터 명단과 그림을 한 벌로 갈아낍니다"),
         SettingsCat::Students => ("캐릭터", "users", "테마를 섞어 사용할 캐릭터를 고릅니다"),
         SettingsCat::Feedback => (
             "피드백",
@@ -7545,6 +7686,26 @@ fn color_for_word(word: &str) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_preferences_refresh_the_visible_controls() {
+        for action in [
+            SettingsAction::PreferredAgent("codex"),
+            SettingsAction::AgentPermission("claude", "workspace"),
+            SettingsAction::AgentStatusline("model", false),
+            SettingsAction::AgentStatuslineCustom(true),
+            SettingsAction::AgentStatuslineCustom(false),
+        ] {
+            assert!(action_refreshes_cache(&action));
+        }
+    }
+
+    #[test]
+    fn statusline_preview_tracks_visible_fields_and_empty_state() {
+        assert_eq!(agent_statusline_preview([false, false, false]), "선택한 항목 없음");
+        assert_eq!(agent_statusline_preview([true, false, true]), "Claude Sonnet  ·  ~/project");
+        assert_eq!(agent_statusline_preview([false, true, false]), "사용량 24%");
+    }
 
     /// 넓은 창에서 남는 폭은 좌우로 똑같이 갈라져야 한다. 고치기 전에는 열이
     /// nav 바로 옆에 못박혀 남는 폭이 전부 오른쪽에 쌓였다(2560 창 기준 1026px).

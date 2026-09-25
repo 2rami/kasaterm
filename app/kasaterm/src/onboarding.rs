@@ -50,6 +50,11 @@ pub(crate) fn prepare_boot() {
     // explicit onboarding rig.
     let isolated = std::env::var_os("KASATERM_SETTINGS_FILE").is_some() && force.is_none();
     let plan = boot_plan(existed, stored, force.as_deref(), isolated);
+    if !existed {
+        if let Err(error) = crate::agent_preferences::initialize_fresh_defaults() {
+            eprintln!("[onboarding] could not save agent defaults: {error}");
+        }
+    }
     if plan.mark_existing {
         let _ = crate::socket::write_settings_patch_atomic(&[("onboarding_version", serde_json::json!(VERSION))]);
     }

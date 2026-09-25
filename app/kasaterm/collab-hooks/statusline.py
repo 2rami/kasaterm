@@ -176,6 +176,16 @@ def resolve_context(d):
     return win, pct, tot
 
 
+def statusline_fields():
+    path = os.environ.get("KASATERM_SETTINGS_FILE") or str(Path.home() / ".config/kasaterm/settings.json")
+    try:
+        with open(path, encoding="utf-8") as stream:
+            settings = json.load(stream)
+        return {key: settings.get(f"agent_statusline_{key}") is not False for key in ("model", "usage", "cwd")}
+    except (OSError, ValueError, AttributeError):
+        return dict.fromkeys(("model", "usage", "cwd"), True)
+
+
 def main():
     try:
         d = json.loads(sys.stdin.read())
@@ -184,6 +194,7 @@ def main():
         return
 
     cfg = load_config()
+    fields = statusline_fields()
     ic = ICON_SETS.get(cfg.get("icon_set", "nerd-font"), ICON_SETS["nerd-font"])
     sep_char = cfg.get("separator", "┃")  # 기본 ┃ (사용자 설정)
 
@@ -247,7 +258,7 @@ def main():
     # 모델과 못 잇는다. `display_name` 의 "(1M context)" 꼬리는 안 쓴다 — 200k 일 땐
     # 아무 말도 안 해서, 둘을 구분하려면 우리가 창 크기로 직접 적어야 한다.
     model = (d.get("model") or {}).get("display_name")
-    if model:
+    if model and fields["model"]:
         model = model.split(" (")[0]
         win_s = (f"1M" if ctx_win >= 1_000_000
                  else (f"{ctx_win // 1000}k" if ctx_win else ""))
@@ -269,11 +280,13 @@ def main():
     if branch:
         parts.append(f"{ansi(C_GIT)}{ic['git']} {branch}{RESET}")
 
-    parts.append(f"{ansi(C_DIR)}{ic['folder']} {Path(cwd).name}{RESET}")
+    if fields["cwd"]:
+        parts.append(f"{ansi(C_DIR)}{ic['folder']} {Path(cwd).name}{RESET}")
 
     # 퍼센트 하나만. 분모는 위 모델 옆에 적혀 있으므로 여기서 또 말할 필요가 없다.
     c_ctx = ansi("f7768e") if ctx_pct >= 90 else ansi(C_CTX)
-    parts.append(f"{c_ctx}{ctx_pct:.0f}%{RESET}")
+    if fields["usage"]:
+        parts.append(f"{c_ctx}{ctx_pct:.0f}%{RESET}")
 
     lvl = (d.get("effort") or {}).get("level")
     if lvl:

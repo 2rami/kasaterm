@@ -3208,6 +3208,11 @@ fn run_statusline() {
             .unwrap_or("nerd-font"),
     );
     let sep_char = cfg.get("separator").and_then(|v| v.as_str()).unwrap_or("┃");
+    let settings_path = sl_env("KASATERM_SETTINGS_FILE").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| sl_home().join(".config/kasaterm/settings.json"));
+    let settings = sl_read_json(&settings_path).unwrap_or(Value::Null);
+    let field_on = |field: &str| settings.get(format!("agent_statusline_{field}"))
+        .and_then(Value::as_bool).unwrap_or(true);
 
     let cwd = d
         .get("cwd")
@@ -3320,7 +3325,7 @@ fn run_statusline() {
         .get("model")
         .and_then(|m| m.get("display_name"))
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && field_on("model"))
     {
         // "(1M context)" 등 괄호 꼬리는 ctx% 의 "·1M" 과 중복 — 잘라 truncate 방지.
         let model = model.split(" (").next().unwrap_or(model);
@@ -3343,11 +3348,11 @@ fn run_statusline() {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    parts.push(format!(
+    if field_on("cwd") { parts.push(format!(
         "{}{} {dir_name}{SL_RESET}",
         ansi_fg(SL_C_DIR),
         ic.folder
-    ));
+    )); }
 
     let (win, pct, _) = sl_context(&d);
     let win_s = if win >= 1_000_000 {
@@ -3362,7 +3367,7 @@ fn run_statusline() {
     } else {
         ansi_fg(SL_C_CTX)
     };
-    parts.push(format!("{c_ctx}{pct:.0}%{SL_DIM}{win_s}{SL_RESET}"));
+    if field_on("usage") { parts.push(format!("{c_ctx}{pct:.0}%{SL_DIM}{win_s}{SL_RESET}")); }
 
     if let Some(lvl) = d
         .get("effort")

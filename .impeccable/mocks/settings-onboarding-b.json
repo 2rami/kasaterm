@@ -1,0 +1,7 @@
+{
+  "approved": true,
+  "approved_direction": "B: 핵심 설정 요약 + 필요한 항목 펼치기",
+  "purpose": "설치·설정 공통 정보 구조와 펼침 배치 시안",
+  "implementation_constraints": "기존 플랫·아웃라인 토큰 유지. 시안의 임의 모델명·글꼴·테마명·카드 장식은 사용하지 않는다.",
+  "generator": "built-in image_gen"
+}

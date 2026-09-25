@@ -84,6 +84,7 @@ impl App {
         if let Ok(dir) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
             let dir = std::path::Path::new(&dir);
             install_claude_hook_shim(dir);
+            install_codex_shim(dir);
             install_student_shims(dir);
         }
     }
@@ -721,6 +722,34 @@ impl App {
             return;
         }
         match action {
+            SettingsAction::PreferredAgent(provider) => {
+                if let Err(error) = agent_preferences::set_preferred_agent(provider) {
+                    self.collab.toast = Some((error, Instant::now()));
+                } else {
+                    self.regen_pane_shims();
+                }
+            }
+            SettingsAction::AgentPermission(provider, mode) => {
+                if let Err(error) = agent_preferences::set_permission(provider, mode) {
+                    self.collab.toast = Some((error, Instant::now()));
+                } else {
+                    self.regen_pane_shims();
+                }
+            }
+            SettingsAction::AgentStatusline(field, on) => {
+                if let Err(error) = agent_preferences::set_statusline(field, on) {
+                    self.collab.toast = Some((error, Instant::now()));
+                } else {
+                    self.regen_pane_shims();
+                }
+            }
+            SettingsAction::AgentStatuslineCustom(on) => {
+                if let Err(error) = agent_preferences::set_statusline_custom(on) {
+                    self.collab.toast = Some((error, Instant::now()));
+                } else {
+                    self.regen_pane_shims();
+                }
+            }
             SettingsAction::UiLanguage(language) => {
                 socket::write_setting("language", serde_json::json!(language));
             }
@@ -2063,6 +2092,28 @@ impl App {
             }
 
             // ── Claude ───────────────────────────────────────────────────
+            "agent-permission" => {
+                let provider = pick(agent_preferences::PROVIDERS, id).ok_or_else(|| unknown(id))?;
+                let mode = pick(agent_preferences::MODES, label.unwrap_or("")).ok_or_else(|| unknown(label.unwrap_or("")))?;
+                self.settings_apply(SettingsAction::AgentPermission(provider, mode));
+                Ok(agent_preferences::permission(provider) == mode)
+            }
+            "preferred-agent" => {
+                let provider = pick(agent_preferences::PROVIDERS, id).ok_or_else(|| unknown(id))?;
+                self.settings_apply(SettingsAction::PreferredAgent(provider));
+                Ok(agent_preferences::preferred_agent() == provider)
+            }
+            "agent-statusline" => {
+                let field = pick(agent_preferences::FIELDS, id).ok_or_else(|| unknown(id))?;
+                let on = match label { Some("true") => true, Some("false") => false, _ => return Err(unknown(label.unwrap_or(""))) };
+                self.settings_apply(SettingsAction::AgentStatusline(field, on));
+                Ok(agent_preferences::statusline_enabled(field) == on)
+            }
+            "agent-statusline-custom" => {
+                let on = match label { Some("true") => true, Some("false") => false, _ => return Err(unknown(label.unwrap_or(""))) };
+                self.settings_apply(SettingsAction::AgentStatuslineCustom(on));
+                Ok(agent_preferences::statusline_customized() == on)
+            }
             "toggle-shim-inject" => {
                 self.settings_apply(SettingsAction::ToggleShimInject);
                 Ok(saved_bool("shim_inject") == Some(self.set_shim_inject))
@@ -2702,6 +2753,7 @@ impl App {
                 "ui_zoom": self.ui_zoom,
             },
             "shell": { "shell": self.set_shell },
+            "agents": agent_preferences::values(),
             "claude": {
                 "shim_inject": self.set_shim_inject,
                 "accounts": claude_rows,

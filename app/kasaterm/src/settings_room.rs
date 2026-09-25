@@ -50,12 +50,13 @@ pub(crate) struct SettingsScene {
     dropdown: Option<crate::native_settings::DropdownId>,
     dropdown_scroll: f32,
     dropdown_scroll_max: f32,
+    disclosures: std::collections::HashSet<&'static str>,
 }
 
 impl Default for SettingsScene {
     fn default() -> Self {
         Self {
-            category: SettingsCat::General,
+            category: SettingsCat::Students,
             return_pane: None,
             cache: crate::native_settings::SettingsCache::default(),
             scroll: 0.0,
@@ -79,11 +80,21 @@ impl Default for SettingsScene {
             dropdown: None,
             dropdown_scroll: 0.0,
             dropdown_scroll_max: 0.0,
+            disclosures: std::collections::HashSet::new(),
         }
     }
 }
 
 impl SettingsScene {
+    pub(crate) fn disclosures(&self) -> &std::collections::HashSet<&'static str> {
+        &self.disclosures
+    }
+
+    pub(crate) fn toggle_disclosure(&mut self, id: &'static str) {
+        if !self.disclosures.remove(id) {
+            self.disclosures.insert(id);
+        }
+    }
     #[allow(dead_code)] // 다음 단계의 native painter 진입점.
     pub(crate) fn snapshot(&self) -> SettingsSceneSnapshot {
         SettingsSceneSnapshot {
@@ -713,6 +724,17 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detail_groups_start_closed_and_retain_state_across_categories() {
+        let mut scene = SettingsScene::default();
+        assert!(scene.disclosures().is_empty());
+        scene.toggle_disclosure("agent");
+        scene.set_category(SettingsCat::Appearance);
+        assert!(scene.disclosures().contains("agent"));
+        scene.toggle_disclosure("agent");
+        assert!(scene.disclosures().is_empty());
+    }
 
     #[test]
     fn marker_finds_singleton_after_room_reorder() {

@@ -51,6 +51,7 @@ mod server_restore;
 mod session_transfer;
 mod drag_transfer;
 mod settings;
+mod agent_preferences;
 mod settings_media;
 mod settings_room;
 mod socket;
@@ -4419,14 +4420,14 @@ impl SettingsCat {
     /// (2026-09-10 목업 IA: 셸+커서→터미널, 테마+캐릭터→캐릭터). 페이지 자체는
     /// 캐릭터 페이지의 「테마 관리」로 연다. 웹 대조는 그대로 `ALL` 이다.
     pub(crate) const NAV: [SettingsCat; 10] = [
-        Self::General,
+        Self::Students,
         Self::Appearance,
-        Self::Statusbar,
-        Self::Shell,
         Self::Claude,
+        Self::Shell,
         Self::Accounts,
         Self::Machines,
-        Self::Students,
+        Self::General,
+        Self::Statusbar,
         Self::Pet,
         Self::Feedback,
     ];
@@ -4529,6 +4530,10 @@ pub(crate) enum SettingsInput {
 /// hit-testing. String-carrying variants (shell presets) keep this `Clone`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsAction {
+    PreferredAgent(&'static str),
+    AgentPermission(&'static str, &'static str),
+    AgentStatusline(&'static str, bool),
+    AgentStatuslineCustom(bool),
     /// 설정과 웹 화면이 쓸 언어(`ko`/`en`).
     UiLanguage(&'static str),
     /// 「카사크롬이 쓰는 크롬」 — 명부의 기계 라벨, 빈 문자열=이 기계.
@@ -8062,11 +8067,13 @@ fi\n\
 # 목록 키가 안 잡히면서 Task 도구 자체가 세션에 안 실린다(2026-09-15 실측).\n\
 [ -n \"$SID\" ] && export CLAUDE_CODE_TASK_LIST_ID=\"$SID\"\n\
 {mblk}\
+{permissions}\
 if [ \"$USER_SETTINGS\" = 1 ] || [ ! -f \"$SETTINGS\" ]; then\n\
   exec \"$REAL\" \"$@\"\n\
 fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
-        hd = hd, tblk = team_block, pblk = persona_block, ablk = account_block, mblk = mcp_block);
+        hd = hd, tblk = team_block, pblk = persona_block, ablk = account_block, mblk = mcp_block,
+        permissions = format!("if [ -n \"$PERSONA_OK\" ]; then\n{}fi\n", agent_preferences::permission_shell("claude", agent_preferences::permission("claude")) + ":\n"));
     let wrapper_path = shim_dir.join("claude");
     if let Err(e) = write_shim(&wrapper_path, wrapper) {
         eprintln!("[shim] write claude wrapper failed: {e}");
@@ -8189,13 +8196,10 @@ export KASATERM_LAUNCH_OWNER="$SELF_DIR:$KASATERM_PANE_ID"
 ///    (세션·플러그인·스킬·캐시·인증 공유).
 /// 2. **`config.toml` 만 복사한다.** codex 가 신뢰 목록을 여기 되쓰는데,
 ///    심볼릭이면 그 쓰기가 사용자 개인 설정으로 샌다. 매 실행 다시 복사해 안 낡는다.
-/// 3. **자동 실행 승인은 codex 전용 플래그로 푼다.** 명령 실행 승인과 샌드박스는
-///    `--dangerously-bypass-approvals-and-sandbox`(codex 판 "욜로")가 맡는다.
-///    claude pane 의 `--dangerously-skip-permissions` 와 대응하는 자리다.
+/// Permission defaults stay pane-local so they never rewrite the user's config.
 pub(crate) fn install_codex_shim(shim_dir: &std::path::Path) {
     install_agent_identity_helper(shim_dir);
-    // 래퍼는 Rust 쪽 값이 하나도 안 박혀 정적 문자열이다 — hooks 경로는 위 json 안에
-    // 있고 나머지는 전부 실행 시점에 셸이 푼다. 덕분에 format! 이스케이프가 없다.
+    // Named replacements keep shell quoting separate from Rust formatting.
     let wrapper = r#"#!/bin/sh
 # kasaterm pane-only codex wrapper — pane 전용 CODEX_HOME 을 세워 훅·페르소나를 얹는다.
 # ~/.codex 는 읽기만 한다. pane 밖에선 이 래퍼가 PATH 에 없어 순정 codex 가 돈다.
@@ -8275,15 +8279,7 @@ cp "$SRC/AGENTS.md" "$INSTRUCTIONS" 2>/dev/null || : > "$INSTRUCTIONS"
 [ -n "$KASATERM_PERSONA" ] && printf '\n%s\n' "$KASATERM_PERSONA" >> "$INSTRUCTIONS"
 mv "$INSTRUCTIONS" "$CH/AGENTS.md" || exit 1
 export CODEX_HOME="$CH"
-# 승인·샌드박스도 함께 우회한다 — claude pane 이 `--dangerously-skip-permissions` 로
-# 뜨는 것과 같은 자리다. 이게 없으면 학생이 첫 명령에서 승인 프롬프트에 멈춰 서고,
-# 오케스트레이터는 그걸 「일하는 중」으로 읽는다(화면 하단에 "Ask for approval").
-# 승인 정책이나 샌드박스를 직접 지정한 호출은 그 뜻을 존중해 건드리지 않는다.
-case " $* " in
-  *" --dangerously-bypass-approvals-and-sandbox "*) ;;
-  *" --ask-for-approval "*|*" -a "*|*" --sandbox "*|*" -s "*) ;;
-  *) set -- --dangerously-bypass-approvals-and-sandbox "$@" ;;
-esac
+# KASATERM_PERMISSION_DEFAULT
 # 계정 슬롯은 auth.json 하나로 갈린다. keyring/auto 저장이면 CODEX_HOME이 달라도
 # OS 키링 하나를 함께 보므로, 슬롯을 쓰는 pane만 공식 file 저장 모드로 고정한다.
 # 끝에 붙여 사용자가 앞에서 준 같은 키보다 이 값이 이긴다.
@@ -8292,7 +8288,8 @@ if [ -n "$ACCT" ]; then
 fi
 exec "$REAL" "$@"
 "#;
-    let wrapper = wrapper.replace("# KASATERM_LAUNCH_IDENTITY", &identity_bootstrap_sh("codex", ""));
+    let wrapper = wrapper.replace("# KASATERM_LAUNCH_IDENTITY", &identity_bootstrap_sh("codex", ""))
+        .replace("# KASATERM_PERMISSION_DEFAULT", &(agent_preferences::permission_shell("codex", agent_preferences::permission("codex")) + &agent_preferences::codex_statusline_shell()));
     let wrapper_path = shim_dir.join("codex");
     if let Err(e) = write_shim(&wrapper_path, wrapper) {
         eprintln!("[shim] write codex wrapper failed: {e}");
@@ -8507,11 +8504,11 @@ if [ -n \"$KASATERM_PANE_ID\" ]; then\n\
     --data-urlencode \"character={name_sq}\" \\\n\
     \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/repersona\" >/dev/null 2>&1\n\
 fi\n\
-# 하네스·모델 선택 — `{name}` 는 claude(기본), `{name} codex` 는 codex 로 뜬다.\n\
+# An explicit provider must win over the saved launcher default.\n\
 # `{name} kimi` 는 kimi 모델로 claude 를, `{name} kimi codex` 는 kimi 로 codex 를 띄운다.\n\
 # 모델 이름은 ~/.local/bin/kasa-ai 심링크(kimi·glm)로 PATH 에 있어 exec 이 닿는다.\n\
 # 아는 이름일 때만 소비하므로 `{name} \"버그 고쳐\"` 같은 프롬프트 전달은 그대로다.\n\
-H=claude\n\
+H={preferred_agent}\n\
 M=\n\
 case \"$1\" in\n\
   claude|codex|agy) H=$1; shift ;;\n\
@@ -8525,6 +8522,7 @@ exec \"$H\" \"$@\"\n",
             persona_sq = sq(&persona),
             model_sq = sq(&model),
             backend_sq = sq(&backend),
+            preferred_agent = agent_preferences::preferred_agent(),
         );
         // 한글 정식 이름 + 로마자 슬러그 별칭(IME 전환 없이도 실행) 둘 다 스테이징.
         let mut cmd_names: Vec<String> = vec![name.clone()];
@@ -10269,8 +10267,8 @@ mod tests {
             "명령 승인과 무관한 훅 trust 우회는 시작 경고만 만들므로 강제하지 않는다"
         );
         assert!(
-            body.contains("--dangerously-bypass-approvals-and-sandbox"),
-            "훅 신뢰만 풀면 명령 승인이 남아 학생이 첫 명령에서 멈춘다 — 둘은 별개 플래그다"
+            body.contains(&agent_preferences::permission_shell("codex", agent_preferences::permission("codex"))),
+            "The wrapper must use the configured permission policy"
         );
         assert!(
             body.contains("export CODEX_HOME="),

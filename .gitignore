@@ -8,6 +8,7 @@ Cargo.lock
 .memory
 .claude/scheduled_tasks.lock
 .playwright-mcp/
+/.impeccable/verification/
 
 # Sparkle vendored framework·bin (build-app.sh 가 없으면 재다운로드)
 /vendor/

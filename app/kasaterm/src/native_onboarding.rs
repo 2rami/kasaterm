@@ -118,7 +118,6 @@ pub(crate) struct Data {
     restart_required: bool,
     shells: Arc<Vec<ShellChoice>>,
     selected_shell: String,
-    preferred: Option<AccountProvider>,
     claude: AuthInfo,
     codex: AuthInfo,
 }
@@ -133,7 +132,6 @@ impl Default for Data {
             restart_required: false,
             shells: Arc::new(Vec::new()),
             selected_shell: String::new(),
-            preferred: None,
             claude: AuthInfo {
                 status: AuthStatus::Checking,
                 account: None,
@@ -148,7 +146,6 @@ impl Default for Data {
 
 impl Data {
     fn load() -> Self {
-        let saved = socket::read_settings();
         let platform = platform_key();
         let shells: Vec<ShellChoice> = available_shells()
             .into_iter()
@@ -176,14 +173,6 @@ impl Data {
             restart_required: onboarding::font_restart_required(),
             shells: Arc::new(shells),
             selected_shell,
-            preferred: match saved
-                .get("preferred_agent")
-                .and_then(|value| value.as_str())
-            {
-                Some("claude") => Some(AccountProvider::Claude),
-                Some("codex") => Some(AccountProvider::Codex),
-                _ => None,
-            },
             claude: AuthInfo::load(AccountProvider::Claude),
             codex: AuthInfo::load(AccountProvider::Codex),
         }
@@ -228,10 +217,9 @@ fn shell_id(label: &str) -> &'static str {
 #[derive(Clone, Debug)]
 pub(crate) struct State {
     step: u8,
-    furthest: u8,
+    expanded: Option<u8>,
+    details: [bool; 4],
     appearance: AppearanceMode,
-    preferred: Option<AccountProvider>,
-    preferred_touched: bool,
     last_imported: Option<String>,
     data: Arc<Data>,
     loaded: bool,
@@ -246,10 +234,9 @@ impl Default for State {
     fn default() -> Self {
         Self {
             step: 0,
-            furthest: 0,
+            expanded: None,
+            details: [false; 4],
             appearance: AppearanceMode::Manual,
-            preferred: None,
-            preferred_touched: false,
             last_imported: None,
             data: Arc::new(Data::default()),
             loaded: false,
@@ -279,16 +266,6 @@ impl State {
     }
 
     fn apply_loaded(&mut self, data: Data) {
-        if !self.preferred_touched {
-            self.preferred = data
-                .preferred
-                .filter(|provider| data.auth(*provider).logged_in())
-                .or_else(|| {
-                    [AccountProvider::Claude, AccountProvider::Codex]
-                        .into_iter()
-                        .find(|provider| data.auth(*provider).logged_in())
-                });
-        }
         if !self.loaded {
             self.appearance =
                 if data.platform == "macos" && data.imports.iter().any(import_supported) {
@@ -312,11 +289,12 @@ impl State {
     }
 
     fn go(&mut self, step: u8) -> bool {
-        if step > self.furthest || step > 3 {
+        if step > 3 || !self.loaded {
             return false;
         }
-        let changed = self.step != step;
+        let changed = self.expanded != Some(step);
         self.step = step;
+        self.expanded = Some(step);
         self.notice = None;
         changed
     }
@@ -326,7 +304,6 @@ impl State {
             return false;
         }
         let step = (self.step + 1).min(3);
-        self.furthest = self.furthest.max(step);
         self.go(step)
     }
 
@@ -361,10 +338,9 @@ impl State {
             self.data = Arc::new(data);
             if logged_in || left <= 1 || (!waiting_login && settled) {
                 self.auth_poll = None;
-                if logged_in && !self.preferred_touched && self.preferred.is_none() {
-                    self.preferred = Some(provider);
+                if waiting_login {
+                    self.notice = logged_in.then(|| (true, "로그인을 확인했어요".to_string()));
                 }
-                self.notice = logged_in.then(|| (true, "로그인을 확인했어요".to_string()));
             } else {
                 self.auth_poll = Some((
                     provider,
@@ -389,12 +365,7 @@ impl State {
         self.data = Arc::new(data);
     }
 
-    fn set_imported(
-        &mut self,
-        id: String,
-        restart_required: bool,
-        font_family: Option<String>,
-    ) {
+    fn set_imported(&mut self, id: String, restart_required: bool, font_family: Option<String>) {
         self.last_imported = Some(id);
         if restart_required || font_family.is_some() {
             let mut data = (*self.data).clone();
@@ -419,7 +390,7 @@ impl State {
     fn force_step_for_capture(&mut self, step: u8) {
         let step = step.min(3);
         self.step = step;
-        self.furthest = self.furthest.max(step);
+        self.expanded = Some(step);
     }
 }
 
@@ -491,13 +462,14 @@ fn take_auth_data(generation: u64, provider: AccountProvider) -> Option<AuthInfo
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     Go(u8),
+    ToggleSection(u8),
+    ToggleDetails(u8),
     Back,
     Next,
     Skip,
     Finish,
     Appearance(AppearanceMode),
     Import(String),
-    Theme(String),
     Font(String),
     FontDelta(i8),
     Accent(String),
@@ -520,6 +492,7 @@ pub(crate) struct Snapshot {
     theme: String,
     accent: String,
     font_size: f32,
+    preferred_agent: String,
     palettes: Arc<Vec<crate::native_settings::PaletteChoice>>,
     state: State,
     language: String,
@@ -538,6 +511,7 @@ pub(crate) fn snapshot(app: &App, area: Rect) -> Snapshot {
         theme: theme::theme_name(),
         accent: theme::accent_name().to_string(),
         font_size: app.font_size,
+        preferred_agent: crate::agent_preferences::preferred_agent().to_string(),
         palettes: app.settings_scene.cache().palettes.clone(),
         state: app.settings_scene.onboarding().clone(),
         language: app.settings_scene.cache().language().to_string(),
@@ -561,9 +535,13 @@ impl App {
     }
 
     pub(crate) fn pump_native_onboarding(&mut self) {
-        if !self.settings_scene.first_run() {
+        if !self.settings_scene.first_run() && self.settings_scene.category() != SettingsCat::Shell
+        {
             return;
         }
+        self.settings_scene
+            .onboarding_mut()
+            .request_load(self.proxy.clone());
         let loaded = self
             .settings_scene
             .onboarding()
@@ -592,16 +570,14 @@ impl App {
             return false;
         }
         let action = match event.logical_key {
-            Key::Named(NamedKey::ArrowLeft) => Action::Back,
-            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Enter) => {
-                if self.settings_scene.onboarding().step == 3 {
-                    Action::Finish
-                } else {
-                    Action::Next
-                }
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp) => Action::Back,
+            Key::Named(NamedKey::ArrowRight | NamedKey::ArrowDown) => Action::Next,
+            Key::Named(NamedKey::Enter) if self.host_mod() => Action::Finish,
+            Key::Named(NamedKey::Enter) => {
+                Action::ToggleSection(self.settings_scene.onboarding().step)
             }
             Key::Named(NamedKey::Home) => Action::Go(0),
-            Key::Named(NamedKey::End) => Action::Go(self.settings_scene.onboarding().furthest),
+            Key::Named(NamedKey::End) => Action::Go(3),
             _ => return true,
         };
         self.native_onboarding_action(action);
@@ -610,6 +586,30 @@ impl App {
 
     pub(crate) fn native_onboarding_action(&mut self, action: Action) {
         match action {
+            Action::ToggleSection(section) => {
+                if section > 3 || !self.settings_scene.onboarding().loaded {
+                    return;
+                }
+                self.native_settings_blur();
+                let state = self.settings_scene.onboarding_mut();
+                state.step = section;
+                state.expanded = if state.expanded == Some(section) {
+                    None
+                } else {
+                    Some(section)
+                };
+                self.settings_scene.reset_scroll();
+            }
+            Action::ToggleDetails(section) => {
+                if let Some(details) = self
+                    .settings_scene
+                    .onboarding_mut()
+                    .details
+                    .get_mut(section as usize)
+                {
+                    *details = !*details;
+                }
+            }
             Action::Go(step) => {
                 if self.settings_scene.onboarding_mut().go(step) {
                     self.native_settings_blur();
@@ -633,7 +633,17 @@ impl App {
                 if !self.settings_scene.onboarding().loaded {
                     return;
                 }
-                let preferred = self.settings_scene.onboarding().preferred;
+                let preferred = match crate::agent_preferences::preferred_agent() {
+                    "codex" => AccountProvider::Codex,
+                    _ => AccountProvider::Claude,
+                };
+                let preferred = self
+                    .settings_scene
+                    .onboarding()
+                    .data
+                    .auth(preferred)
+                    .logged_in()
+                    .then_some(preferred);
                 self.finish_native_onboarding(preferred, false);
             }
             Action::Appearance(mode) => {
@@ -650,20 +660,17 @@ impl App {
                     self.begin_theme_fx();
                     self.repaint_all();
                     self.settings_scene.refresh_cache();
-                    self.settings_scene
-                        .onboarding_mut()
-                        .set_imported(
-                            id,
-                            applied.restart_required,
-                            onboarding::current_font_family(),
-                        );
+                    self.settings_scene.onboarding_mut().set_imported(
+                        id,
+                        applied.restart_required,
+                        onboarding::current_font_family(),
+                    );
                 }
                 Err(error) => self
                     .settings_scene
                     .onboarding_mut()
                     .set_notice(false, error),
             },
-            Action::Theme(key) => self.settings_apply(SettingsAction::ThemeMode(key)),
             Action::Font(family) => match onboarding::apply_font_family(&family) {
                 Ok(()) => {
                     self.settings_scene.onboarding_mut().set_font(family);
@@ -709,9 +716,11 @@ impl App {
                     .auth(provider)
                     .logged_in()
                 {
-                    let onboarding = self.settings_scene.onboarding_mut();
-                    onboarding.preferred = Some(provider);
-                    onboarding.preferred_touched = true;
+                    self.settings_apply(SettingsAction::PreferredAgent(match provider {
+                        AccountProvider::Claude => "claude",
+                        AccountProvider::Codex => "codex",
+                    }));
+                    self.settings_scene.refresh_cache();
                 }
             }
             Action::Shell(id) => match onboarding::apply_default_shell(&id) {
@@ -724,6 +733,11 @@ impl App {
                     .onboarding_mut()
                     .set_notice(false, error),
             },
+        }
+        if !self.settings_scene.first_run() {
+            if let Some((_, message)) = self.settings_scene.onboarding_mut().notice.take() {
+                self.set_toast(message);
+            }
         }
         self.chrome_dirty = true;
         if let Some(window) = self.window.as_ref() {
@@ -773,160 +787,258 @@ impl App {
 pub(crate) fn paint(
     g: &mut gpu::GpuRenderer,
     snapshot: &Snapshot,
+    settings: &crate::native_settings::Snapshot,
 ) -> crate::native_settings::PaintOutput {
     crate::native_strings::set_language(&snapshot.language);
     use crate::native_settings::{HitCursor, PaintOutput, Target};
     let (ax, ay, aw, ah) = snapshot.area;
-    let rail_w = if aw < 760.0 { 154.0 } else { 190.0 };
-    let footer_h = 62.0;
+    let (rail_w, mx, mw) = quick_columns(ax, aw);
+    let feedback = snapshot
+        .state
+        .notice
+        .as_ref()
+        .map(|(ok, text)| (*ok, text.as_str()))
+        .or_else(|| {
+            snapshot
+                .state
+                .data
+                .restart_required
+                .then_some((true, "새 글꼴은 kasaterm을 다시 열면 적용돼요."))
+        });
+    let footer_h = if feedback.is_some() { 102.0 } else { 62.0 };
     let mut hits = Vec::new();
     let mut caret_rect = None;
     g.rect(ax, ay, aw, ah, theme::bg());
-    // 왼쪽 목록 — 설정창·보드 방과 같은 판. 채움 없이 이름표 두 줄.
     g.rect(ax, ay, rail_w, ah, theme::panel_bg());
-    text(g, ax + 20.0, ay + 24.0, "kasaterm", 13.0, theme::text(), true);
-    text(g, ax + 20.0, ay + 44.0, "처음 설정", 11.0, theme::text_dim(), false);
-
-    let steps = ["외형", "Agent", "터미널", "완료"];
-    let mut py = ay + 72.0;
-    for (index, label) in steps.iter().enumerate() {
-        let step = index as u8;
-        let enabled = step <= snapshot.state.furthest;
-        let current = step == snapshot.state.step;
-        let rect = (ax + 12.0, py, rail_w - 24.0, 32.0);
-        let hover = enabled && inside(rect, snapshot.cursor);
-        if current || hover {
-            round_rect(
-                g,
-                rect.0,
-                rect.1,
-                rect.2,
-                rect.3,
-                theme::radius_md().min(5.0),
-                if current {
-                    theme::surface_active()
-                } else {
-                    theme::surface_hover()
-                },
-            );
-        }
-        // 번호는 채움 없는 동그라미 — 현재 단계만 강조색.
-        let dot = (rect.0 + 10.0, rect.1 + 7.0, 18.0, 18.0);
-        g.round_rect_stroke(
-            dot.0,
-            dot.1,
-            dot.2,
-            dot.3,
-            9.0,
-            1.0,
-            if current { theme::accent() } else { theme::border() },
+    text(
+        g,
+        ax + 20.0,
+        ay + 24.0,
+        "kasaterm",
+        13.0,
+        theme::text(),
+        true,
+    );
+    text(
+        g,
+        ax + 20.0,
+        ay + 58.0,
+        "처음 설정",
+        11.0,
+        theme::text_dim(),
+        false,
+    );
+    for (index, (label, icon, _)) in QUICK_SECTIONS.iter().enumerate() {
+        let rect = (
+            ax + 12.0,
+            ay + 88.0 + index as f32 * 40.0,
+            rail_w - 24.0,
+            40.0,
         );
-        let number = ["1", "2", "3", "4"][index];
-        let nw = g.measure_chrome_text(number, 10.0, false);
-        text(
-            g,
-            dot.0 + (18.0 - nw) / 2.0,
-            dot.1 + 3.0,
-            number,
-            10.0,
-            if current { theme::accent() } else { theme::text_dim() },
-            false,
-        );
-        text(
-            g,
-            rect.0 + 38.0,
-            rect.1 + 9.0,
-            label,
-            12.0,
-            if enabled { theme::text() } else { theme::text_dim() },
-            current,
-        );
-        if enabled {
+        let on = snapshot.state.expanded == Some(index as u8);
+        let color = if on {
+            theme::accent()
+        } else {
+            theme::text_dim()
+        };
+        g.queue_icon(icon, rect.0 + 8.0, rect.1 + 12.0, 16.0, color);
+        text(g, rect.0 + 32.0, rect.1 + 13.0, label, 12.0, color, on);
+        if snapshot.state.loaded {
             hit(
                 &mut hits,
-                Target::Onboarding(Action::Go(step)),
+                Target::Onboarding(Action::ToggleSection(index as u8)),
                 rect,
                 HitCursor::Pointer,
             );
+            g.hover_pointer |= inside(rect, snapshot.cursor);
         }
-        py += 36.0;
     }
-    let skip = (ax + 12.0, ay + ah - 46.0, rail_w - 24.0, 32.0);
-    let skip_hover = inside(skip, snapshot.cursor);
-    if skip_hover {
-        round_rect(
-            g,
-            skip.0,
-            skip.1,
-            skip.2,
-            skip.3,
-            theme::radius_md().min(5.0),
-            theme::surface_hover(),
-        );
-    }
-    text(
+    text(g, mx, ay + 24.0, "빠른 설정", 20.0, theme::text(), true);
+    let hint = fit(
         g,
-        skip.0 + 12.0,
-        skip.1 + 9.0,
-        "건너뛰고 터미널 열기",
+        "핵심만 고르고 시작하세요. 나중에도 설정에서 바꿀 수 있어요.",
+        mw,
         11.5,
-        if skip_hover { theme::text() } else { theme::text_dim() },
         false,
     );
-    hit(
-        &mut hits,
-        Target::Onboarding(Action::Skip),
-        skip,
-        HitCursor::Pointer,
-    );
+    text(g, mx, ay + 56.0, &hint, 11.5, theme::text_dim(), false);
 
-    let mx = ax + rail_w + if aw < 760.0 { 20.0 } else { 28.0 };
-    let mw = (aw - rail_w - if aw < 760.0 { 40.0 } else { 56.0 })
-        .max(180.0)
-        .min(800.0);
-    let (title, subtitle) = step_copy(snapshot.state.step);
-    text(g, mx, ay + 22.0, title, 20.0, theme::text(), true);
-    text(g, mx, ay + 52.0, subtitle, 11.5, theme::text_dim(), false);
-    divider(g, mx, ay + 82.0, mw);
-
-    let body_top = ay + 97.0;
-    let body_bottom = ay + ah - footer_h - 8.0;
-    let view_h = (body_bottom - body_top).max(1.0);
+    let body_top = ay + 88.0;
+    let view_h = (ah - 88.0 - footer_h - 8.0).max(1.0);
+    let nav_hit_count = hits.len();
     g.push_clip(mx, body_top, mw, view_h);
     let mut y = body_top - snapshot.scroll;
-    if snapshot.state.loading && !snapshot.state.loaded {
+    if !snapshot.state.loaded {
         loading_slab(g, mx, &mut y, mw);
     } else {
-        match snapshot.state.step {
-            0 => paint_appearance(g, snapshot, &mut hits, mx, &mut y, mw),
-            1 => paint_auth(g, snapshot, &mut hits, mx, &mut y, mw),
-            2 => paint_platform(g, snapshot, &mut hits, &mut caret_rect, mx, &mut y, mw),
-            _ => paint_ready(g, snapshot, mx, &mut y, mw),
+        for (index, (label, icon, hint)) in QUICK_SECTIONS.iter().enumerate() {
+            let section = index as u8;
+            let expanded = snapshot.state.expanded == Some(section);
+            let value = quick_value(snapshot, settings, section);
+            let row_h = if mw < 470.0 { 80.0 } else { 64.0 };
+            let row = (mx, y, mw, row_h);
+            g.queue_icon(icon, mx, y + 14.0, 16.0, theme::text_dim());
+            text(g, mx + 26.0, y + 12.0, label, 12.0, theme::text(), true);
+            let desc = fit(
+                g,
+                hint,
+                if mw < 470.0 {
+                    mw - 100.0
+                } else {
+                    mw * 0.48 - 26.0
+                },
+                10.5,
+                false,
+            );
+            text(
+                g,
+                mx + 26.0,
+                y + 33.0,
+                &desc,
+                10.5,
+                theme::text_dim(),
+                false,
+            );
+            let value_w = if mw < 470.0 {
+                mw - 100.0
+            } else {
+                mw * 0.48 - 86.0
+            };
+            let shown = fit(g, &value, value_w.max(40.0), 11.5, false);
+            let value_x = if mw < 470.0 {
+                mx + 26.0
+            } else {
+                mx + mw * 0.52
+            };
+            text(
+                g,
+                value_x,
+                y + if mw < 470.0 { 56.0 } else { 23.0 },
+                &shown,
+                11.5,
+                theme::text_dim(),
+                false,
+            );
+            button(
+                g,
+                snapshot,
+                &mut hits,
+                (mx + mw - 64.0, y + 12.0, 64.0, 26.0),
+                if expanded { "접기" } else { "변경" },
+                Target::Onboarding(Action::ToggleSection(section)),
+                expanded,
+            );
+            y += row.3;
+            if expanded {
+                if section == 2 {
+                    paint_auth(g, snapshot, &mut hits, mx, &mut y, mw);
+                }
+                if section == 3 && snapshot.state.data.platform == "windows" {
+                    paint_platform(g, snapshot, &mut hits, &mut caret_rect, mx, &mut y, mw);
+                } else {
+                    crate::native_settings::paint_setup_section(
+                        g,
+                        settings,
+                        &mut hits,
+                        &mut caret_rect,
+                        mx,
+                        &mut y,
+                        mw,
+                        section,
+                    );
+                    if section == 3 {
+                        onboarding_shell_field(g, snapshot, &mut hits, &mut caret_rect, mx, y, mw);
+                        y += 60.0;
+                    }
+                }
+                if section == 1 || section == 3 {
+                    let detail_rect = (mx, y, mw, 40.0);
+                    g.queue_icon(
+                        if snapshot.state.details[index] {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        mx,
+                        y + 12.0,
+                        16.0,
+                        theme::text_dim(),
+                    );
+                    text(
+                        g,
+                        mx + 26.0,
+                        y + 13.0,
+                        if section == 1 {
+                            "세부 설정 · 기존 터미널에서 가져오기"
+                        } else {
+                            "세부 설정 · 터미널 글꼴"
+                        },
+                        11.5,
+                        theme::text_dim(),
+                        false,
+                    );
+                    hit(
+                        &mut hits,
+                        Target::Onboarding(Action::ToggleDetails(section)),
+                        detail_rect,
+                        HitCursor::Pointer,
+                    );
+                    g.hover_pointer |= inside(detail_rect, snapshot.cursor);
+                    y += 40.0;
+                    if snapshot.state.details[index] {
+                        if section == 1 {
+                            paint_appearance(g, snapshot, &mut hits, mx, &mut y, mw);
+                        } else {
+                            paint_fonts(g, snapshot, &mut hits, mx, &mut y, mw);
+                        }
+                    }
+                }
+                y += 14.0;
+            }
+            divider(g, mx, y, mw);
         }
+        y += 24.0;
+        paint_preview(g, snapshot, settings, mx, &mut y, mw);
     }
-    if let Some((ok, notice)) = snapshot.state.notice.as_ref() {
-        notice_slab(g, mx, &mut y, mw, *ok, notice);
-    }
-    clip_hits(g, &mut hits);
+    // The scrolling content clip must not erase the fixed navigation targets.
+    let mut content_hits = hits.split_off(nav_hit_count);
+    clip_hits(g, &mut content_hits);
+    hits.extend(content_hits);
     g.pop_clip();
 
     divider(g, mx, ay + ah - footer_h, mw);
-    if snapshot.state.step > 0 {
-        button(
+    if let Some((ok, message)) = feedback {
+        let feedback_y = ay + ah - footer_h + 12.0;
+        g.queue_icon(
+            if ok { "check" } else { "triangle-alert" },
+            mx,
+            feedback_y,
+            14.0,
+            if ok {
+                theme::text_dim()
+            } else {
+                theme::danger()
+            },
+        );
+        let shown = fit(g, message, mw - 24.0, 11.5, false);
+        text(
             g,
-            snapshot,
-            &mut hits,
-            (mx, ay + ah - 47.0, 72.0, 32.0),
-            "이전",
-            Target::Onboarding(Action::Back),
+            mx + 24.0,
+            feedback_y + 1.0,
+            &shown,
+            11.5,
+            theme::text(),
             false,
         );
     }
-    let (label, action) = if snapshot.state.step == 3 {
-        ("kasaterm 열기", Action::Finish)
-    } else {
-        ("다음", Action::Next)
-    };
+    text_button(
+        g,
+        snapshot,
+        &mut hits,
+        (mx, ay + ah - 47.0, 100.0, 32.0),
+        "건너뛰기",
+        Target::Onboarding(Action::Skip),
+    );
     let forward = (mx + mw - 120.0, ay + ah - 47.0, 120.0, 32.0);
     if snapshot.state.loaded {
         button(
@@ -934,44 +1046,32 @@ pub(crate) fn paint(
             snapshot,
             &mut hits,
             forward,
-            label,
-            Target::Onboarding(action),
+            "시작하기",
+            Target::Onboarding(Action::Finish),
             true,
         );
     } else {
-        // 아직 못 누르는 단추 — 흐린 테두리와 흐린 글자만.
-        g.round_rect_stroke(
-            forward.0,
-            forward.1,
-            forward.2,
-            forward.3,
-            theme::radius_md().min(5.0),
-            1.0,
-            theme::with_alpha(theme::border(), 120),
-        );
-        let lw = g.measure_chrome_text(label, 11.5, false);
+        stroke(g, forward, theme::border());
         text(
             g,
-            forward.0 + (forward.2 - lw) / 2.0,
+            forward.0 + 24.0,
             forward.1 + 9.0,
-            label,
+            "확인 중…",
             11.5,
             theme::text_mute(),
             false,
         );
     }
-
     let content_h = (y + snapshot.scroll - body_top + 18.0).max(view_h);
     crate::native_settings::paint_scroll_affordance(
         g,
         mx,
         body_top,
-        mw,
+        mw + 14.0,
         view_h,
         content_h,
         snapshot.scroll,
     );
-
     PaintOutput {
         hits,
         dropdown_scroll_max: 0.0,
@@ -983,6 +1083,131 @@ pub(crate) fn paint(
     }
 }
 
+const QUICK_SECTIONS: [(&str, &str, &str); 4] = [
+    ("캐릭터", "users", "함께 사용할 캐릭터 테마"),
+    ("모양", "sparkles", "색상과 화면 형태"),
+    ("코딩 에이전트", "claude", "연결 계정과 권한 기본값"),
+    ("터미널", "terminal", "새 작업의 셸과 글꼴"),
+];
+
+fn quick_columns(ax: f32, width: f32) -> (f32, f32, f32) {
+    let rail = if width < 760.0 { 154.0 } else { 190.0 };
+    let pad = if width < 760.0 { 20.0 } else { 28.0 };
+    let available = (width - rail - pad * 2.0).max(1.0);
+    let content = available.min(800.0);
+    (rail, ax + rail + pad + (available - content) / 2.0, content)
+}
+
+fn quick_value(s: &Snapshot, settings: &crate::native_settings::Snapshot, section: u8) -> String {
+    match section {
+        0 => settings
+            .themes
+            .iter()
+            .find(|row| row.id == settings.character_theme)
+            .map(|row| row.label.clone())
+            .unwrap_or_else(|| "기본 테마".into()),
+        1 => {
+            let label = s
+                .palettes
+                .iter()
+                .find(|p| p.key == s.theme)
+                .map(|p| p.label.as_str())
+                .unwrap_or(&s.theme);
+            let shape = match settings.shape.as_str() {
+                "sharp" => "각지게",
+                "pixel" => "픽셀",
+                _ => "둥글게",
+            };
+            format!("{label} · {shape}")
+        }
+        2 => {
+            let provider = if settings.preferred_agent == "codex" {
+                AccountProvider::Codex
+            } else {
+                AccountProvider::Claude
+            };
+            format!(
+                "{} · {}",
+                provider.label(),
+                auth_label(s.state.data.auth(provider).status)
+            )
+        }
+        _ => {
+            if s.shell.is_empty() {
+                "시스템 기본".into()
+            } else {
+                s.shell.clone()
+            }
+        }
+    }
+}
+
+fn paint_preview(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    settings: &crate::native_settings::Snapshot,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    text(g, x, *y, "미리보기", 11.0, theme::text_dim(), false);
+    *y += 24.0;
+    let rect = (x, *y, w, 112.0);
+    stroke(g, rect, theme::border());
+    text(
+        g,
+        x + 14.0,
+        *y + 12.0,
+        "kasaterm · 터미널 예시",
+        11.0,
+        theme::text_dim(),
+        false,
+    );
+    divider(g, x, *y + 34.0, w);
+    text(
+        g,
+        x + 14.0,
+        *y + 49.0,
+        "$ pwd",
+        12.0,
+        theme::accent(),
+        false,
+    );
+    text(
+        g,
+        x + 14.0,
+        *y + 72.0,
+        "~/project",
+        12.0,
+        theme::text(),
+        false,
+    );
+    if let Some(row) = settings
+        .themes
+        .iter()
+        .find(|row| row.id == settings.character_theme)
+    {
+        if let Some((slug, _)) = row.faces.first() {
+            settings
+                .media
+                .draw_face(g, &row.id, slug, (x + w - 60.0, *y + 42.0, 40.0, 54.0));
+        }
+    }
+    *y += 124.0;
+    let summary = fit(
+        g,
+        &format!(
+            "{} · {}",
+            quick_value(s, settings, 0),
+            quick_value(s, settings, 1)
+        ),
+        w,
+        10.5,
+        false,
+    );
+    text(g, x, *y, &summary, 10.5, theme::text_dim(), false);
+    *y += 24.0;
+}
 fn paint_appearance(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -1130,56 +1355,30 @@ fn paint_appearance(
         return;
     }
 
-    section(g, x, y, "색상 테마", "앱과 터미널 ANSI 색이 함께 바뀝니다");
-    let gap = 10.0;
-    let cols = if w >= 620.0 { 3 } else { 2 };
-    let card_w = (w - gap * (cols - 1) as f32) / cols as f32;
-    for (index, palette) in s.palettes.iter().enumerate() {
-        let rect = (
-            x + (index % cols) as f32 * (card_w + gap),
-            *y + (index / cols) as f32 * 88.0,
-            card_w,
-            78.0,
-        );
-        let selected = s.theme == palette.key;
-        choice(
-            g,
-            s,
-            hits,
-            rect,
-            selected,
-            Target::Onboarding(Action::Theme(palette.key.clone())),
-        );
-        round_rect(
-            g,
-            rect.0 + 9.0,
-            rect.1 + 9.0,
-            rect.2 - 18.0,
-            34.0,
-            theme::radius_sm(),
-            palette.bg,
-        );
-        text(
-            g,
-            rect.0 + 16.0,
-            rect.1 + 19.0,
-            "❯ Aa",
-            11.0,
-            palette.text,
-            true,
-        );
-        let shown = fit(g, &palette.label, rect.2 - 20.0, 10.5, false);
-        text(
-            g,
-            rect.0 + 10.0,
-            rect.1 + 54.0,
-            &shown,
-            10.5,
-            if selected { theme::accent() } else { theme::text_dim() },
-            false,
-        );
-    }
-    *y += ((s.palettes.len() + cols - 1) / cols) as f32 * 88.0 + 12.0;
+    paint_fonts(g, s, hits, x, y, w);
+    *y += 12.0;
+    section(g, x, y, "강조색", "선택 영역과 커서, 링크에 함께 씁니다");
+    let accents = theme::ACCENT_PRESETS
+        .iter()
+        .map(|(name, _)| {
+            (
+                (*name).to_string(),
+                s.accent == *name,
+                Action::Accent((*name).to_string()),
+            )
+        })
+        .collect();
+    chips(g, s, hits, x, y, w, accents);
+}
+
+pub(crate) fn paint_fonts(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<crate::native_settings::Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
     section(
         g,
         x,
@@ -1223,19 +1422,6 @@ fn paint_appearance(
         Action::FontDelta(-1),
         Action::FontDelta(1),
     );
-    *y += 12.0;
-    section(g, x, y, "강조색", "선택 영역과 커서, 링크에 함께 씁니다");
-    let accents = theme::ACCENT_PRESETS
-        .iter()
-        .map(|(name, _)| {
-            (
-                (*name).to_string(),
-                s.accent == *name,
-                Action::Accent((*name).to_string()),
-            )
-        })
-        .collect();
-    chips(g, s, hits, x, y, w, accents);
 }
 
 fn paint_auth(
@@ -1283,7 +1469,11 @@ fn auth_row(
 ) {
     use crate::native_settings::Target;
     let auth = s.state.data.auth(provider);
-    let selected = s.state.preferred == Some(provider);
+    let selected = s.preferred_agent
+        == match provider {
+            AccountProvider::Claude => "claude",
+            AccountProvider::Codex => "codex",
+        };
     let rect = (x, *y, w, 56.0);
     if selected {
         // 목업 .sel — 행을 살짝 감싸는 강조색 테두리만.
@@ -1305,7 +1495,15 @@ fn auth_row(
         theme::text(),
     );
     let label = provider.label();
-    text(g, rect.0 + 40.0, rect.1 + 10.0, label, 12.5, theme::text(), true);
+    text(
+        g,
+        rect.0 + 40.0,
+        rect.1 + 10.0,
+        label,
+        12.5,
+        theme::text(),
+        true,
+    );
     if selected {
         let lw = g.measure_chrome_text(label, 12.5, true);
         text(
@@ -1379,7 +1577,7 @@ fn auth_row(
     *y += 56.0;
 }
 
-fn paint_platform(
+pub(crate) fn paint_platform(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
     hits: &mut Vec<crate::native_settings::Hit>,
@@ -1412,7 +1610,15 @@ fn paint_platform(
                 );
             }
             let hover = inside(rect, s.cursor);
-            text(g, rect.0, rect.1 + 8.0, &shell.label, 12.5, theme::text(), true);
+            text(
+                g,
+                rect.0,
+                rect.1 + 8.0,
+                &shell.label,
+                12.5,
+                theme::text(),
+                true,
+            );
             text(
                 g,
                 rect.0,
@@ -1486,64 +1692,6 @@ fn paint_platform(
     );
 }
 
-fn paint_ready(g: &mut gpu::GpuRenderer, s: &Snapshot, x: f32, y: &mut f32, w: f32) {
-    // 목업: 채움 없는 강조색 동그라미 안에 체크 하나.
-    let mark = (x + w / 2.0 - 20.0, *y + 8.0, 40.0, 40.0);
-    g.round_rect_stroke(mark.0, mark.1, mark.2, mark.3, 20.0, 1.0, theme::accent());
-    g.queue_icon("check", mark.0 + 10.0, mark.1 + 10.0, 20.0, theme::accent());
-    *y += 72.0;
-    let theme_label = s
-        .palettes
-        .iter()
-        .find(|palette| palette.key == s.theme)
-        .map(|palette| palette.label.as_str())
-        .unwrap_or(s.theme.as_str());
-    summary_row(
-        g,
-        x,
-        y,
-        w,
-        "외형",
-        &format!("{theme_label} · {:.0}px", s.font_size),
-    );
-    let signed = [AccountProvider::Claude, AccountProvider::Codex]
-        .into_iter()
-        .filter(|provider| s.state.data.auth(*provider).logged_in())
-        .count();
-    let agent = match s.state.preferred {
-        Some(provider) => format!("{} · 기본", provider.label()),
-        None if signed > 0 => format!("{signed}개 로그인됨"),
-        None => "나중에 연결".to_string(),
-    };
-    summary_row(g, x, y, w, "Agent", &agent);
-    summary_row(
-        g,
-        x,
-        y,
-        w,
-        "터미널",
-        if s.shell.is_empty() {
-            "시스템 기본"
-        } else {
-            &s.shell
-        },
-    );
-    if s.state.data.restart_required {
-        let rect = (x, *y + 12.0, w, 36.0);
-        g.rect(rect.0, rect.1, 2.0, rect.3, theme::attention());
-        text(
-            g,
-            rect.0 + 14.0,
-            rect.1 + 11.0,
-            "새 글꼴은 kasaterm을 다시 열면 적용돼요.",
-            11.5,
-            theme::text(),
-            false,
-        );
-        *y += 60.0;
-    }
-}
-
 fn onboarding_shell_field(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -1554,15 +1702,7 @@ fn onboarding_shell_field(
     w: f32,
 ) {
     use crate::native_settings::{HitCursor, Target};
-    text(
-        g,
-        x,
-        y,
-        "셸 경로 직접 입력",
-        11.0,
-        theme::text_dim(),
-        false,
-    );
+    text(g, x, y, "셸 경로 직접 입력", 11.0, theme::text_dim(), false);
     let rect = (x, y + 18.0, w, 32.0);
     let focused = s.input == Some(SettingsInput::Shell);
     g.round_rect_stroke(
@@ -1626,27 +1766,6 @@ fn auth_label(status: AuthStatus) -> &'static str {
     }
 }
 
-fn step_copy(step: u8) -> (&'static str, &'static str) {
-    match step {
-        0 => (
-            "익숙한 터미널 모습으로 시작하세요",
-            "기존 설정을 가져오거나 색과 글꼴을 직접 고릅니다",
-        ),
-        1 => (
-            "이미 로그인한 Agent를 그대로 씁니다",
-            "Claude Code와 Codex의 기존 인증만 확인합니다",
-        ),
-        2 => (
-            "새 pane의 환경을 확인하세요",
-            "운영체제에 맞는 셸과 외형을 마지막으로 확인합니다",
-        ),
-        _ => (
-            "준비가 끝났어요",
-            "지금 고른 값은 나중에도 설정 방에서 바꿀 수 있습니다",
-        ),
-    }
-}
-
 fn loading_slab(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32) {
     // 목업(플랫): 채움 없이 아이콘 하나와 두 줄.
     g.queue_icon("rotate-cw", x, *y + 10.0, 16.0, theme::accent());
@@ -1676,33 +1795,6 @@ fn empty_slab(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, message: &s
     text(g, x, *y + 14.0, message, 11.0, theme::text_mute(), false);
     divider(g, x, *y + 43.0, w);
     *y += 52.0;
-}
-
-fn notice_slab(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, ok: bool, message: &str) {
-    // 목업(플랫): 채움·아이콘 없이 왼쪽 2px 색선만.
-    let _ = w;
-    let rect = (x, *y + 8.0, w, 36.0);
-    g.rect(
-        rect.0,
-        rect.1,
-        2.0,
-        rect.3,
-        if ok {
-            theme::success()
-        } else {
-            theme::danger()
-        },
-    );
-    text(
-        g,
-        rect.0 + 14.0,
-        rect.1 + 11.0,
-        message,
-        11.5,
-        theme::text(),
-        false,
-    );
-    *y += 56.0;
 }
 
 /// 묶음 머리 한 줄 — 「제목 — 설명」 흐린 글자(목업 .group h2). 줄을 나아가게 한다.
@@ -1968,7 +2060,11 @@ fn button(
         rect.1 + (rect.3 - 12.0) / 2.0 - 1.0,
         &shown,
         11.5,
-        if primary { theme::accent() } else { theme::text() },
+        if primary {
+            theme::accent()
+        } else {
+            theme::text()
+        },
         false,
     );
     hit(
@@ -1998,7 +2094,11 @@ fn text_button(
         rect.1 + (rect.3 - 12.0) / 2.0 - 1.0,
         &shown,
         11.5,
-        if hover { theme::text() } else { theme::text_dim() },
+        if hover {
+            theme::text()
+        } else {
+            theme::text_dim()
+        },
         false,
     );
     hit(
@@ -2102,28 +2202,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn progress_never_jumps_past_the_furthest_step() {
+    fn quick_setup_opens_any_section_after_loading_without_overwriting_choices() {
         let mut state = State::default();
+        assert_eq!(state.expanded, None);
         assert!(!state.go(2));
-        assert_eq!(state.step, 0);
         state.loaded = true;
-        assert!(state.next());
-        assert_eq!((state.step, state.furthest), (1, 1));
+        state.details[1] = true;
+        assert!(state.go(3));
+        assert_eq!(state.expanded, Some(3));
         assert!(state.back());
-        assert!(state.go(1));
+        assert_eq!(state.expanded, Some(2));
+        assert!(state.go(0));
+        assert!(state.next());
+        assert_eq!(state.expanded, Some(1));
+        assert!(state.details[1]);
+        assert!(!state.go(4));
     }
 
     #[test]
-    fn first_logged_in_agent_becomes_the_default_without_overriding_a_choice() {
+    fn quick_setup_column_stays_inside_window_and_centers_at_wide_sizes() {
+        for width in [520.0, 640.0, 760.0, 1280.0, 2560.0] {
+            let (rail, x, content) = quick_columns(0.0, width);
+            assert!(x >= rail + 20.0);
+            assert!(content <= 800.0 && content > 0.0);
+            assert!(x + content <= width - 20.0);
+            let left = x - rail;
+            let right = width - x - content;
+            assert!((left - right).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn auth_reload_preserves_expanded_controls() {
         let mut state = State::default();
         let mut data = Data::default();
         data.claude.status = AuthStatus::LoggedIn;
         state.apply_loaded(data.clone());
-        assert_eq!(state.preferred, Some(AccountProvider::Claude));
-        state.preferred = Some(AccountProvider::Codex);
-        state.preferred_touched = true;
+        state.go(2);
+        state.details[1] = true;
         state.apply_loaded(data);
-        assert_eq!(state.preferred, Some(AccountProvider::Codex));
+        assert_eq!(state.expanded, Some(2));
+        assert!(state.details[1]);
+        assert!(state.data.auth(AccountProvider::Claude).logged_in());
     }
 
     #[test]
@@ -2161,11 +2281,17 @@ mod tests {
             .0;
         assert!(!variants.contains("Settings"));
         for removed in ["student_web_webview", "student_web_window"] {
-            assert!(!main.contains(removed), "desktop Settings still owns Wry: {removed}");
+            assert!(
+                !main.contains(removed),
+                "desktop Settings still owns Wry: {removed}"
+            );
         }
         let chrome = include_str!("chrome.rs");
         for removed in ["open_student_web_window", "settings.html"] {
-            assert!(!chrome.contains(removed), "desktop Settings Wry route remains: {removed}");
+            assert!(
+                !chrome.contains(removed),
+                "desktop Settings Wry route remains: {removed}"
+            );
         }
         let socket = include_str!("socket.rs");
         assert!(socket.contains("\"onboarding-state\""));
@@ -2205,7 +2331,9 @@ mod tests {
             .split_once("/// 결과를 기록한다")
             .unwrap()
             .0;
-        assert!(spawn.find("LoginState::Running").unwrap() < spawn.find("std::thread::spawn").unwrap());
+        assert!(
+            spawn.find("LoginState::Running").unwrap() < spawn.find("std::thread::spawn").unwrap()
+        );
 
         let action = include_str!("native_onboarding.rs")
             .split_once("Action::Login(provider) =>")
@@ -2214,7 +2342,9 @@ mod tests {
             .split_once("Action::CancelLogin")
             .unwrap()
             .0;
-        assert!(action.find("hidden_login_running").unwrap() < action.find("settings_apply").unwrap());
+        assert!(
+            action.find("hidden_login_running").unwrap() < action.find("settings_apply").unwrap()
+        );
     }
 
     #[test]
@@ -2224,7 +2354,7 @@ mod tests {
             .split_once("Action::Import(id) =>")
             .unwrap()
             .1
-            .split_once("Action::Theme(key)")
+            .split_once("Action::Font(family)")
             .unwrap()
             .0;
         assert!(import.contains("onboarding::current_font_family()"));
