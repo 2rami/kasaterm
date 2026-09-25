@@ -133,11 +133,18 @@ fn task_lane(task: &TaskCard, verdict: Verdict) -> (Lane, Option<Finish>) {
     }
 }
 
-/// 장부의 작업이 가리키는 창. 기기와 창 번호가 둘 다 맞아야 잇는다 — 창 번호만으로
-/// 이으면 다른 기기의 같은 `%3` 에 붙고, 창 번호는 재사용된다.
+/// 장부의 작업이 가리키는 창. 일↔창의 정본은 장부의 (기기 id, 창 열쇠)다 — 열쇠가 오면 그것만
+/// 보고, 옛 나쵸처럼 창 번호(`%N`)뿐이면 기기 id 와 함께 맞을 때만 잇는다(번호는 재사용된다).
+/// 장부가 그 창이 다른 일로 넘어갔다고 하면 잇지 않는다.
 fn linked_pane<'a>(data: &'a OverviewData, task: &TaskCard) -> Option<&'a OverviewPane> {
-    let surface = task.surface()?;
+    if task.superseded() {
+        return None;
+    }
     let machine = task.machine_id()?;
+    if let Some(key) = task.surface_key() {
+        return data.panes.iter().find(|row| row.address.machine_id == machine && row.address.surface_key == key);
+    }
+    let surface = task.surface()?;
     data.panes.iter().find(|row| {
         row.address.machine_id == machine && (row.address.surface_key == surface || row.address.surface_id == surface)
     })
@@ -240,12 +247,24 @@ fn machine_label<'a>(data: &'a OverviewData, machine_id: &'a str) -> &'a str {
         .unwrap_or(if machine_id.is_empty() { "기기 미확인" } else { machine_id })
 }
 
+/// 장부가 목록에서 뺀 것을 한 줄로 — 빠진 줄은 화면에서 안 보이므로 적지 않으면 「없다」로 읽힌다.
+fn book_scope_note(book: &TaskBook) -> String {
+    let mut note = String::new();
+    if !book.desk_scope() {
+        note.push_str(" · 나쵸가 아직 폰·펫 창구 일만 보내요(디스코드·슬랙 일은 빠짐)");
+    }
+    if book.hidden_count() > 0 {
+        note.push_str(&format!(" · 사내 채널에서 맡긴 일 {}건은 싣지 않았어요", book.hidden_count()));
+    }
+    note
+}
+
 fn book_line(book: &TaskBook, now: u64) -> (String, [u8; 4]) {
     match (book.source(), book.error()) {
-        (BookSource::Fixture, _) => ("검증용 가상 장부 · 실제 작업이 아니에요".into(), theme::text_dim()),
+        (BookSource::Fixture, _) => (format!("검증용 가상 장부 · 실제 작업이 아니에요{}", book_scope_note(book)), theme::text_dim()),
         (BookSource::Unasked, _) => ("나쵸 장부를 확인하고 있어요".into(), theme::text_dim()),
         (BookSource::Live, None) => (
-            format!("나쵸 장부 · 작업 {}개 · {} 확인", book.tasks().len(), board_relative_time(now, book.checked_at_ms())),
+            format!("나쵸 장부 · 작업 {}개 · {} 확인{}", book.tasks().len(), board_relative_time(now, book.checked_at_ms()), book_scope_note(book)),
             theme::text_dim(),
         ),
         (BookSource::Live, Some(error)) if book.stale() => (
@@ -580,10 +599,20 @@ fn paint_detail(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: 
     for row in evidence {
         paint_overview_summary(g, x, y, w, "증거", &row, 3);
     }
-    if let Some(approval) = detail.and_then(|d| d.approval.as_ref()).filter(|a| a.needed) {
-        let what = if approval.what.is_empty() { "승인할 내용 미확인" } else { &approval.what };
-        paint_overview_summary(g, x, y, w, "승인", what, 2);
-        overview_note(g, x, y, w, "승인 단추는 서버가 1회용·범위·만료를 확인할 수 있게 된 뒤 켭니다", theme::text_mute());
+    if let Some(approval) = task.and_then(|t| book.approval(t)) {
+        let what = [approval.action.as_str(), approval.what.as_str()].into_iter().find(|v| !v.is_empty()).unwrap_or("승인할 내용 미확인");
+        let mut line = what.to_string();
+        if approval.one_use { line.push_str(" · 1회용"); }
+        if approval.expires_at_ms > 0 {
+            let now = data.observed_at_ms.max(book.checked_at_ms());
+            line.push_str(&if approval.expires_at_ms > now {
+                format!(" · {}분 뒤 만료", (approval.expires_at_ms - now).div_ceil(60_000))
+            } else {
+                " · 만료됨".to_string()
+            });
+        }
+        paint_overview_summary(g, x, y, w, "승인", &line, 2);
+        overview_note(g, x, y, w, "승인 실행은 기기 인증이 정해진 뒤 켭니다 · 지금은 보기만 해요", theme::text_mute());
     }
     if let Some(row) = pane {
         let mut choices = vec![("주소 복사".into(), Target::OverviewCopy(row.address.clone()), false, true)];
@@ -717,8 +746,8 @@ mod tests {
     fn a_task_claims_its_pane_only_when_machine_and_surface_both_match() {
         let data = overview(vec![pane("1", "working", None, None), pane("2", "working", None, None)]);
         let tasks = book_of(vec![
-            ("w1", Some(TaskPlace { surface: Some("%1".into()), host: None, machine_id: "m1".into() })),
-            ("w2", Some(TaskPlace { surface: Some("%2".into()), host: None, machine_id: "other".into() })),
+            ("w1", Some(TaskPlace { surface: Some("%1".into()), machine_id: "m1".into(), ..Default::default() })),
+            ("w2", Some(TaskPlace { surface: Some("%2".into()), machine_id: "other".into(), ..Default::default() })),
         ]);
         let items = work_items(&data, &tasks);
         let panes: Vec<_> = items.iter().filter(|i| matches!(i.key, WorkKey::Pane(_))).map(|i| i.pane_id.clone().unwrap()).collect();
@@ -735,7 +764,9 @@ mod tests {
     struct StaticLedger(Vec<TaskCard>);
 
     impl crate::nacho_tasks::Ledger for StaticLedger {
-        fn list(&self) -> Result<Vec<TaskCard>, String> { Ok(self.0.clone()) }
+        fn list(&self) -> Result<crate::nacho_tasks::TaskList, String> {
+            Ok(crate::nacho_tasks::TaskList { tasks: self.0.clone(), ..Default::default() })
+        }
         fn detail(&self, _: &str) -> Result<crate::nacho_tasks::TaskDetail, String> { Err("없음".into()) }
     }
 
@@ -749,6 +780,20 @@ mod tests {
         assert!(finishes.contains(&Finish::Verified));
         assert!(finishes.contains(&Finish::Unverified), "검증 기록 없는 끝남은 따로 보여야 한다");
         assert!(finishes.contains(&Finish::Failed));
+    }
+
+    #[test]
+    fn surface_key_decides_the_link_and_superseded_tasks_let_go() {
+        let data = overview(vec![pane("1", "working", None, None)]);
+        let place = |key: Option<&str>, superseded: Option<&str>| Some(TaskPlace {
+            surface: Some("%1".into()), surface_key: key.map(str::to_string), superseded_by: superseded.map(str::to_string),
+            host: None, machine_id: "m1".into(),
+        });
+        let linked = |p| work_items(&data, &book_of(vec![("w1", p)])).iter().any(|i| i.key == WorkKey::Task("w1".into()) && i.pane_id.is_some());
+        assert!(linked(place(Some("key-1"), None)), "열쇠가 맞으면 잇는다");
+        assert!(!linked(place(Some("other-key"), None)), "열쇠가 오면 번호가 맞아도 열쇠로만 판단한다");
+        assert!(!linked(place(Some("key-1"), Some("w2"))), "다른 일로 넘어간 창은 잇지 않는다");
+        assert!(linked(place(None, None)), "옛 나쵸(열쇠 없음)는 기기+번호로");
     }
 
     #[test]

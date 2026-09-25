@@ -79,11 +79,15 @@ impl<'de> serde::Deserialize<'de> for TaskState {
     }
 }
 
-/// 장부의 `watch` — 이 일을 맡은 창. `surface` 는 `%N` 이라 기계 id 와 함께만 뜻이 있다.
+/// 장부의 `watch` — 이 일을 맡은 창. `surface` 는 `%N` 이라 기계 id 와 함께만 뜻이 있고
+/// 재사용된다. `surface_key`(판 주소의 UUID)가 오면 그것이 창의 정본이다.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct TaskPlace {
     pub(crate) surface: Option<String>,
+    pub(crate) surface_key: Option<String>,
+    /// 그 창이 다른 일로 넘어갔으면 그 일 id — 이때는 이 일에 창을 잇지 않는다.
+    pub(crate) superseded_by: Option<String>,
     pub(crate) host: Option<String>,
     pub(crate) machine_id: String,
 }
@@ -108,6 +112,13 @@ pub(crate) struct TaskCard {
     pub(crate) created_ms: u64,
     pub(crate) updated_ms: u64,
     pub(crate) rev: String,
+    /// 아래 넷은 데스크 범위 계약(2026-09-25 합의)에서 오는 칸. 옛 나쵸는 안 싣는다.
+    /// `direct`·`self`·`other` — 직접 답한 일(`direct`)은 확인 없이 닫힌다.
+    pub(crate) kind: Option<String>,
+    /// 같은 판(rev)에 장부가 적은 마지막 검증. 없으면 `None` — 통과로 채우지 않는다.
+    pub(crate) verify_ok: Option<bool>,
+    pub(crate) run_id: Option<String>,
+    pub(crate) approval: Option<TaskApproval>,
 }
 
 impl TaskCard {
@@ -117,6 +128,15 @@ impl TaskCard {
 
     pub(crate) fn surface(&self) -> Option<&str> {
         self.student.as_ref().and_then(|s| s.surface.as_deref()).filter(|s| !s.is_empty())
+    }
+
+    pub(crate) fn surface_key(&self) -> Option<&str> {
+        self.student.as_ref().and_then(|s| s.surface_key.as_deref()).filter(|s| !s.is_empty())
+    }
+
+    /// 창이 다른 일로 넘어갔다 — 장부가 그렇게 말하면 창 번호가 맞아도 잇지 않는다.
+    pub(crate) fn superseded(&self) -> bool {
+        self.student.as_ref().and_then(|s| s.superseded_by.as_deref()).is_some_and(|id| !id.is_empty())
     }
 
     pub(crate) fn needs_you(&self) -> bool {
@@ -150,12 +170,23 @@ pub(crate) struct TaskReport {
     pub(crate) at_ms: u64,
 }
 
+/// 승인. 옛 모양은 `{needed, what, note}`, 합의된 모양은 1회용·범위·만료를 더 싣는다
+/// (`docs/development/orchestrator.md` §6, 나쵸). 이 파일은 **읽기만** 한다 — 소모 POST 는
+/// 기기 인증 결정이 나기 전까지 PC·폰 모두 부르지 않기로 했다.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct TaskApproval {
     pub(crate) needed: bool,
     pub(crate) what: String,
     pub(crate) note: String,
+    pub(crate) id: String,
+    pub(crate) action: String,
+    pub(crate) scope_hash: String,
+    pub(crate) expires_at_ms: u64,
+    pub(crate) one_use: bool,
+    pub(crate) approver: String,
+    /// `pending`·`approved`·`denied`·`expired`.
+    pub(crate) state: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
@@ -201,9 +232,24 @@ pub(crate) enum BookSource {
     Fixture,
 }
 
+/// 목록 한 번의 답.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct TaskList {
+    pub(crate) tasks: Vec<TaskCard>,
+    /// `app`(폰·펫 창구가 닿은 일만) 또는 `desk`(주인이 맡긴 일 전부). 옛 나쵸는 안 싣는다 — 그때는 `app` 이다.
+    pub(crate) scope: String,
+    /// 데스크 범위에서 사내 채널·남의 DM 에서 맡긴 일이라 싣지 않은 개수.
+    pub(crate) hidden_count: u64,
+    /// 목록 판 이름표 — 롱폴의 `since` 로 돌려준다(아직 이 판은 롱폴을 안 쓴다).
+    pub(crate) board_rev: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TaskBook {
     source: BookSource,
+    scope: String,
+    hidden_count: u64,
     tasks: Vec<TaskCard>,
     details: HashMap<String, TaskDetail>,
     checked_at_ms: u64,
@@ -228,6 +274,15 @@ impl TaskBook {
         self.error.as_deref()
     }
 
+    /// 나쵸가 데스크 범위로 답했나. 아니면 디스코드·슬랙에서 맡긴 일이 목록에 없다.
+    pub(crate) fn desk_scope(&self) -> bool {
+        self.scope == "desk"
+    }
+
+    pub(crate) fn hidden_count(&self) -> u64 {
+        self.hidden_count
+    }
+
     pub(crate) fn checked_at_ms(&self) -> u64 {
         self.checked_at_ms
     }
@@ -241,13 +296,24 @@ impl TaskBook {
         self.error.is_some() && !self.tasks.is_empty()
     }
 
-    /// 상세가 이 판(rev)의 것일 때만 믿는다 — 옛 판의 `verify` 로 새 판을 성공이라 부르지 않게.
+    /// 카드의 `verify_ok` 가 먼저, 없으면 이 판(rev)의 상세 — 옛 판의 `verify` 로 새 판을
+    /// 성공이라 부르지 않게.
     pub(crate) fn verdict(&self, card: &TaskCard) -> Verdict {
-        match self.details.get(&card.id).filter(|d| d.rev == card.rev).and_then(|d| d.verify.as_ref()) {
-            Some(v) if v.ok => Verdict::Passed,
-            Some(_) => Verdict::Failed,
+        let ok = card.verify_ok.or_else(|| {
+            self.details.get(&card.id).filter(|d| d.rev == card.rev).and_then(|d| d.verify.as_ref()).map(|v| v.ok)
+        });
+        match ok {
+            Some(true) => Verdict::Passed,
+            Some(false) => Verdict::Failed,
             None => Verdict::None,
         }
+    }
+
+    /// 카드에 실린 승인이 먼저, 없으면 이 판의 상세.
+    pub(crate) fn approval<'a>(&'a self, card: &'a TaskCard) -> Option<&'a TaskApproval> {
+        card.approval.as_ref()
+            .or_else(|| self.details.get(&card.id).filter(|d| d.rev == card.rev).and_then(|d| d.approval.as_ref()))
+            .filter(|a| a.needed || a.state == "pending")
     }
 }
 
@@ -280,6 +346,10 @@ pub(crate) fn merge_cards(previous: &[TaskCard], fresh: Vec<TaskCard>) -> Vec<Ta
 
 /// 상세를 새로 받아야 하는 줄 — 판정이 상세에 달린 줄(끝남·승인·확인 중)이면서 캐시가 옛 판인 것.
 fn wants_detail(card: &TaskCard, cached: Option<&TaskDetail>) -> bool {
+    // 카드가 검증을 이미 싣고 있으면 끝난 줄은 상세가 판정을 안 바꾼다.
+    if card.state.closed() && card.verify_ok.is_some() {
+        return false;
+    }
     let decisive = card.state.closed()
         || matches!(card.state, TaskState::ApprovalNeeded | TaskState::Verifying | TaskState::PostRestartVerifying)
         || card.needs_you();
@@ -296,15 +366,15 @@ pub(crate) fn refresh(previous: &TaskBook) -> TaskBook {
 
 /// 장부를 읽는 통로. 시험에서는 가짜로 갈아 끼운다.
 pub(crate) trait Ledger {
-    fn list(&self) -> Result<Vec<TaskCard>, String>;
+    fn list(&self) -> Result<TaskList, String>;
     fn detail(&self, id: &str) -> Result<TaskDetail, String>;
 }
 
 pub(crate) fn refresh_with(previous: &TaskBook, now: u64, ledger: &dyn Ledger) -> TaskBook {
     let mut book = previous.clone();
     book.checked_at_ms = now;
-    let fresh = match ledger.list() {
-        Ok(fresh) => fresh,
+    let reply = match ledger.list() {
+        Ok(reply) => reply,
         Err(error) => {
             book.error = Some(error);
             if book.source == BookSource::Unasked {
@@ -316,7 +386,9 @@ pub(crate) fn refresh_with(previous: &TaskBook, now: u64, ledger: &dyn Ledger) -
     book.source = BookSource::Live;
     book.error = None;
     book.last_ok_ms = now;
-    book.tasks = merge_cards(&previous.tasks, fresh);
+    book.scope = if reply.scope.is_empty() { "app".into() } else { reply.scope };
+    book.hidden_count = reply.hidden_count;
+    book.tasks = merge_cards(&previous.tasks, reply.tasks);
     book.details.retain(|id, _| book.tasks.iter().any(|c| &c.id == id));
     let wanted: Vec<String> = book.tasks.iter()
         .filter(|c| wants_detail(c, book.details.get(&c.id)))
@@ -338,14 +410,11 @@ pub(crate) fn refresh_with(previous: &TaskBook, now: u64, ledger: &dyn Ledger) -
 struct HttpLedger;
 
 impl Ledger for HttpLedger {
-    fn list(&self) -> Result<Vec<TaskCard>, String> {
-        #[derive(serde::Deserialize)]
-        struct List {
-            #[serde(default)]
-            tasks: Vec<TaskCard>,
-        }
-        let body = app_get("/api/app/tasks")?;
-        serde_json::from_slice::<List>(&body).map(|l| l.tasks).map_err(|_| "나쵸 장부 응답을 읽지 못했어요".into())
+    fn list(&self) -> Result<TaskList, String> {
+        // 데스크 범위를 먼저 청한다. 옛 나쵸는 모르는 질의를 무시하고 폰 범위로 답하며,
+        // 그 사실은 답의 `scope` 가 비는 것으로 드러난다.
+        let body = app_get("/api/app/tasks?scope=desk")?;
+        serde_json::from_slice::<TaskList>(&body).map_err(|_| "나쵸 장부 응답을 읽지 못했어요".into())
     }
 
     fn detail(&self, id: &str) -> Result<TaskDetail, String> {
@@ -411,7 +480,7 @@ pub(crate) fn fixture_book(at: u64) -> TaskBook {
         project: project.into(),
         place: place.into(),
         attention: attention.into(),
-        student: surface.map(|(machine, surface)| TaskPlace { surface: Some(surface.into()), host: None, machine_id: machine.into() }),
+        student: surface.map(|(machine, surface)| TaskPlace { surface: Some(surface.into()), machine_id: machine.into(), ..Default::default() }),
         updated_ms: at.saturating_sub(age),
         rev: at.saturating_sub(age).to_string(),
         ..Default::default()
@@ -430,14 +499,14 @@ pub(crate) fn fixture_book(at: u64) -> TaskBook {
         request: card.goal.clone(),
         verify: verify.map(|ok| TaskVerify { ok, note: if ok { "검사 12건 통과".into() } else { "검사 2건 실패".into() }, at_ms: card.updated_ms }),
         report: Some(TaskReport { summary: "변경을 남기고 결과를 보고했어요".into(), tests: "단위 검사 통과".into(), ..Default::default() }),
-        approval: (card.state == TaskState::ApprovalNeeded).then(|| TaskApproval { needed: true, what: "원격 반영".into(), note: String::new() }),
+        approval: (card.state == TaskState::ApprovalNeeded).then(|| TaskApproval { needed: true, what: "원격 반영".into(), one_use: true, state: "pending".into(), ..Default::default() }),
         ..Default::default()
     };
     let mut details = HashMap::new();
     for (card, verify) in tasks.iter().zip([None, None, None, Some(true), None, Some(false)]) {
         details.insert(card.id.clone(), detail(card, verify));
     }
-    TaskBook { source: BookSource::Fixture, tasks, details, checked_at_ms: at, last_ok_ms: at, error: None }
+    TaskBook { source: BookSource::Fixture, scope: "desk".into(), hidden_count: 2, tasks, details, checked_at_ms: at, last_ok_ms: at, error: None }
 }
 
 #[cfg(test)]
@@ -450,13 +519,13 @@ mod tests {
     }
 
     struct Fake {
-        list: RefCell<Result<Vec<TaskCard>, String>>,
+        list: RefCell<Result<TaskList, String>>,
         details: HashMap<String, TaskDetail>,
         asked: RefCell<Vec<String>>,
     }
 
     impl Ledger for Fake {
-        fn list(&self) -> Result<Vec<TaskCard>, String> {
+        fn list(&self) -> Result<TaskList, String> {
             self.list.borrow().clone()
         }
         fn detail(&self, id: &str) -> Result<TaskDetail, String> {
@@ -467,7 +536,7 @@ mod tests {
 
     fn fake(list: Result<Vec<TaskCard>, String>, details: Vec<TaskDetail>) -> Fake {
         Fake {
-            list: RefCell::new(list),
+            list: RefCell::new(list.map(|tasks| TaskList { tasks, ..Default::default() })),
             details: details.into_iter().map(|d| (d.id.clone(), d)).collect(),
             asked: RefCell::new(Vec::new()),
         }
@@ -534,6 +603,34 @@ mod tests {
         let again = fake(Ok(list), vec![]);
         refresh_with(&book, 2, &again);
         assert!(again.asked.borrow().is_empty(), "같은 판이면 다시 묻지 않는다");
+    }
+
+    #[test]
+    fn desk_contract_fields_are_read_and_old_servers_fall_back_to_app_scope() {
+        let reply: TaskList = serde_json::from_str(r#"{"ok":true,"scope":"desk","hidden_count":3,"board_rev":"b9",
+            "tasks":[{"id":"w1","state":"done","rev":"5","kind":"direct","verify_ok":null,"run_id":null,
+              "student":{"surface":"%3","surface_key":"k-1","superseded_by":"w2","machine_id":"m"},
+              "approval":{"id":"a1","action":"push","scope_hash":"h","expires_at_ms":9,"one_use":true,"approver":"owner","state":"pending"}}]}"#).unwrap();
+        assert_eq!((reply.scope.as_str(), reply.hidden_count, reply.board_rev.as_str()), ("desk", 3, "b9"));
+        let card = reply.tasks[0].clone();
+        assert_eq!(card.verify_ok, None, "null 은 통과가 아니다");
+        assert_eq!(card.surface_key(), Some("k-1"));
+        assert!(card.superseded());
+        assert_eq!(card.approval.as_ref().map(|a| (a.one_use, a.state.as_str())), Some((true, "pending")));
+        let desk = refresh_with(&TaskBook::default(), 1, &Fake { list: RefCell::new(Ok(reply)), details: HashMap::new(), asked: RefCell::new(Vec::new()) });
+        assert!(desk.desk_scope());
+        let old = refresh_with(&TaskBook::default(), 1, &fake(Ok(vec![card.clone()]), vec![]));
+        assert!(!old.desk_scope(), "scope 를 안 싣는 옛 나쵸는 폰 범위다");
+    }
+
+    #[test]
+    fn card_verify_wins_and_skips_the_detail_request() {
+        let mut done = card("w1", "done", 4);
+        done.verify_ok = Some(false);
+        let ledger = fake(Ok(vec![done.clone()]), vec![TaskDetail { id: "w1".into(), rev: "4".into(), verify: Some(TaskVerify { ok: true, ..Default::default() }), ..Default::default() }]);
+        let book = refresh_with(&TaskBook::default(), 1, &ledger);
+        assert!(ledger.asked.borrow().is_empty(), "카드가 검증을 실으면 상세를 안 묻는다");
+        assert_eq!(book.verdict(&book.tasks()[0]), Verdict::Failed);
     }
 
     #[test]
