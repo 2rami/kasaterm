@@ -8234,6 +8234,18 @@ if [ "$KASATERM_LAUNCH_OWNER" = "$SELF_DIR:$KASATERM_PANE_ID" ]; then
 fi
 SRC="$HOME/.codex"
 CH="$SELF_DIR/codex-home-${KASATERM_PANE_ID:-solo}"
+# macOS 에서는 실체를 /tmp 의 짧은 경로에 두고 여기엔 링크만 건다. codex 는 CODEX_HOME 을
+# 실경로로 풀어 그 아래에 제어 소켓을 여는데, $TMPDIR 밑 경로는 소켓 주소 상한(104바이트)을
+# 넘어 데몬이 못 뜬다(2026-09-25 실측: 132바이트, "path must be shorter than SUN_LEN").
+# 이 이름을 그대로 두는 건 pane 홈을 이 경로로 찾는 쪽(rollout 결속·상태 db 수리) 때문이다.
+if [ ! -e "$CH" ] && [ "$(uname)" = Darwin ]; then
+  SD="/tmp/kasaterm-shim-${SELF_DIR##*kasaterm-shim-}-$(id -u)"
+  mkdir -m 700 "$SD" 2>/dev/null
+  if [ -O "$SD" ] && [ ! -L "$SD" ]; then
+    SH="$SD/$(printf '%s' "${KASATERM_PANE_ID:-solo}" | cksum | cut -d' ' -f1)"
+    mkdir -p "$SH" 2>/dev/null && ln -sfn "$SH" "$CH" 2>/dev/null
+  fi
+fi
 mkdir -p "$CH" 2>/dev/null || exec "$REAL" "$@"
 # ~/.codex 를 심볼릭으로 미러 — 세션·플러그인·스킬·캐시·인증을 원본과 공유해 pane 안
 # codex 가 pane 밖 codex 와 같은 것을 본다. auth.json 도 심볼릭이라 토큰 갱신이 원본에
