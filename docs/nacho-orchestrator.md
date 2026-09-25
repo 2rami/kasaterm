@@ -196,7 +196,22 @@ kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> \
 
 - 접수 상태: `accepted → queued(앞 턴을 기다림) → running → answered | failed | refused | interrupted | restart`.
   도는 턴은 끊지 않는다. 나쵸가 다시 뜨면 돌던 턴은 `interrupted` 로 닫고 몰래 다시 돌리지 않는다.
-- 펫 말풍선에서 오간 말은 원장에 `surface: "pet"` 로 옮겨 적힌다(보이기만, 턴은 펫 자리에서 한 번).
+- **펫과 이어 보기는 사람이 고른 펫 한 대만**(`GET pets` · `POST pets/link {conv}` — 나쵸에 다녀간 적이 있는
+  펫만 고를 수 있다. 다른 펫을 고르면 앞 연결은 풀린다). 모든 바탕화면에 뿌리지 않는다.
+  - `alive` 는 다녀간 자국(묻기 `/api/ask` 포함), `can_receive` 는 **우편함(`/api/pet/poll`)을 끌어간 적이
+    있나**다. 묻기만 하는 옛 판 펫은 떠 있어도 말풍선으로 못 받으므로 폰에 「말풍선 받기 확인 안 됨」으로
+    보이고, 그 펫에 넣은 줄은 까닭(설치판 확인 필요)을 단 채 대기로 남는다. 2026-09-25 미니에 설치된
+    펫(9/22 19:18 판)은 `/api/pet/poll` 문자열이 없는 판이다.
+  - 연결된 펫은 폰과 **같은 대화 기록**(`kasaapp:owner`)으로 묻는다 — 같은 맥락이다. 그 요청의 「지금 대화
+    상황」에는 펫 자리가 적힌다(`send_and_collect(place=…)`). 연결 안 된 펫은 제 대화(`kasapet:<기계>`)에
+    남고, 폰과는 「다른 창구 최근 말」(crosstalk)로만 닿는다 — 두뇌는 같아도 맥락은 다르다.
+  - 연결된 펫에서 오간 말은 원장에 `surface: "pet"` 로 옮겨 적힌다(보이기만, 턴은 펫에서 한 번).
+  - 폰의 답은 연결된 펫 우편함(petbox, kind `app`, key `app:<답 순번>`)에 한 줄로 들어간다. 원장의 `deliver`
+    줄이 `queued → delivered(펫의 ACK 영수증) | expired(받기 전에 사라짐) | no_target(연결 없음) | failed`
+    를 적고, 폰은 답 아래에 그대로 보인다. 펫이 꺼져 있으면 켜질 때 받아 간다(하루 뒤 만료).
+  - 펫 쪽 코드는 이번에 안 바꿨다. 지금 소스의 펫(`app/kasapet` postbox.rs·main.rs, 201a98de 이후)은 우편함의
+    모든 줄을 말풍선으로 띄우고 ACK 를 돌려주지만, **그 판이 설치돼 있어야** 한다. 설치된 펫의 판은 따로
+    확인해야 한다(맥북 펫은 이 폴링 판의 배포가 보류된 적이 있다).
 - 확인 버튼이 필요한 도구(머지·pane 입력·화면 조작)는 앱 턴에서 돌지 않는다 — 원장에 「기존 창구 확인
   필요」가 남는다. 작업 단위 승인(`approval_needed`)도 앱에서 풀지 않는다.
 

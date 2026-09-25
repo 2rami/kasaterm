@@ -18,6 +18,8 @@ class FakeNacho extends Server {
   int dropNextPosts = 0;
   (int, Map<String, Object?>)? postReply;
   Completer<void>? hold;
+  List<Map<String, Object?>> pets = [];
+  String? linked;
 
   int get lastSeq => ledger.isEmpty ? 0 : ledger.last['seq'] as int;
 
@@ -55,6 +57,18 @@ class FakeNacho extends Server {
         add({'kind': 'message', 'id': id, 'text': body['text'], 'task': body['task']});
       }
       return (200, {'ok': true, 'receipt': {'id': id, 'state': 'accepted'}});
+    }
+    if (path == 'pets') {
+      return (200, {'ok': true, 'linked': linked, 'pets': [
+        for (final p in pets) {...p, 'linked': p['conv'] == linked},
+      ]});
+    }
+    if (path == 'pets/link') {
+      final conv = body!['conv'] as String;
+      if (conv.isNotEmpty && !pets.any((p) => p['conv'] == conv)) return (404, {'ok': false, 'error': 'no_pet'});
+      linked = conv.isEmpty ? null : conv;
+      add({'kind': 'notice', 'notice': 'link', 'target': linked, 'text': '연결 바뀜'});
+      return (200, {'ok': true, 'linked': linked});
     }
     if (path == 'tasks') {
       return (200, {'ok': true, 'tasks': cards, 'groups': {
@@ -144,6 +158,71 @@ void main() {
       expect(d.outgoing, isEmpty, reason: '거절된 말은 보내는 중으로 남기지 않는다');
       s.postReply = (503, {'ok': false, 'error': 'app_key_missing'});
       await expectLater(d.send('x'), throwsA(isA<NachoError>().having((e) => e.message, 'm', contains('키 설정'))));
+    });
+  });
+
+  group('펫과 이어 보기', () {
+    testWidgets('답 아래에 펫 전달 상태 — 표시됨·대기·만료·폰에만', (tester) async {
+      final s = FakeNacho()
+        ..add({'kind': 'message', 'id': 'a', 'text': '하나'})
+        ..add({'kind': 'reply', 'message': 'a', 'text': '답 하나'})
+        ..add({'kind': 'deliver', 'reply': 2, 'state': 'queued', 'target': 'kasapet:미니'})
+        ..add({'kind': 'deliver', 'reply': 2, 'state': 'delivered', 'target': 'kasapet:미니'})
+        ..add({'kind': 'message', 'id': 'b', 'text': '둘'})
+        ..add({'kind': 'reply', 'message': 'b', 'text': '답 둘'})
+        ..add({'kind': 'deliver', 'reply': 6, 'state': 'queued', 'target': 'kasapet:맥북'})
+        ..add({'kind': 'message', 'id': 'c', 'text': '셋'})
+        ..add({'kind': 'reply', 'message': 'c', 'text': '답 셋'})
+        ..add({'kind': 'deliver', 'reply': 9, 'state': 'no_target'})
+        ..add({'kind': 'message', 'id': 'd', 'text': '넷'})
+        ..add({'kind': 'reply', 'message': 'd', 'text': '답 넷'})
+        ..add({'kind': 'deliver', 'reply': 12, 'state': 'expired', 'target': 'kasapet:맥북'});
+      final d = NachoDesk(s);
+      await tester.pumpWidget(MaterialApp(home: NachoHome(server: s, onChangeAddress: () async {}, desk: d)));
+      await settle(tester);
+      expect(find.text('펫(미니)에도 표시됨'), findsOneWidget, reason: '받아 간 영수증이 있을 때만');
+      expect(find.text('펫(맥북) 우편함 대기 — 펫이 받아 가면 표시'), findsOneWidget);
+      expect(find.text('연결된 펫 없음 — 폰에만'), findsOneWidget);
+      expect(find.text('펫(맥북)이 받아 가기 전에 만료'), findsOneWidget);
+      d.stop();
+      s.hold?.complete();
+    });
+
+    testWidgets('펫 고르기 — 꺼진 펫은 꺼져 있다고, 한 대만 잇는다', (tester) async {
+      final s = FakeNacho()
+        ..pets = [
+          {'conv': 'kasapet:미니', 'place': '미니', 'alive': true, 'seen_ago_s': 5, 'can_receive': true},
+          {'conv': 'kasapet:맥북', 'place': '맥북', 'alive': false, 'seen_ago_s': 7200, 'can_receive': true},
+          {'conv': 'kasapet:옛판', 'place': '옛판', 'alive': true, 'seen_ago_s': 3, 'can_receive': false},
+        ];
+      final d = NachoDesk(s);
+      await tester.pumpWidget(MaterialApp(home: NachoHome(server: s, onChangeAddress: () async {}, desk: d)));
+      await settle(tester);
+      await tester.tap(find.byTooltip('펫 연결 — 지금은 폰에만'));
+      await settle(tester);
+      expect(find.text('켜져 있음'), findsOneWidget);
+      expect(find.text('꺼져 있음 · 2시간 전까지'), findsOneWidget, reason: '떠 있다고 짐작하지 않는다');
+      expect(find.text('켜져 있음 · 말풍선 받기 확인 안 됨(우편함을 끌어가는 펫 판 필요)'), findsOneWidget,
+          reason: '묻기만 하는 옛 판은 받을 수 있다고 하지 않는다');
+      await tester.tap(find.widgetWithText(FilledButton, '잇기').first);
+      await settle(tester);
+      expect(s.linked, 'kasapet:미니');
+      expect(s.asked.where((a) => a.$1 == 'pets/link').single.$3, {'conv': 'kasapet:미니'});
+      expect(find.text('연결됨 · 켜져 있음'), findsOneWidget);
+      d.stop();
+      s.hold?.complete();
+    });
+
+    testWidgets('펫이 하나도 없으면 없다고 말한다', (tester) async {
+      final s = FakeNacho();
+      final d = NachoDesk(s);
+      await tester.pumpWidget(MaterialApp(home: NachoHome(server: s, onChangeAddress: () async {}, desk: d)));
+      await settle(tester);
+      await tester.tap(find.byTooltip('펫 연결 — 지금은 폰에만'));
+      await settle(tester);
+      expect(find.text('이을 수 있는 펫이 없어요'), findsOneWidget);
+      d.stop();
+      s.hold?.complete();
     });
   });
 

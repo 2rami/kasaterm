@@ -95,6 +95,13 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
             ),
             actions: [
               IconButton(
+                tooltip: _desk.linkedPet == null
+                    ? '펫 연결 — 지금은 폰에만'
+                    : '펫 연결 — ${_desk.linkedPet!.replaceFirst('kasapet:', '')}',
+                onPressed: _openPets,
+                icon: Icon(_desk.linkedPet == null ? Icons.link_off_rounded : Icons.link_rounded),
+              ),
+              IconButton(
                 tooltip: '학생 화면',
                 onPressed: _openStudents,
                 icon: const Icon(Icons.terminal_rounded),
@@ -136,6 +143,14 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
     ),
   );
 
+  void _openPets() {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (_) => NachoPetSheet(desk: _desk),
+    );
+  }
+
   void _openTask(String id) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -144,6 +159,80 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
           taskId: id,
           onOpenStudents: _openStudents,
         ),
+      ),
+    );
+  }
+}
+
+/// 어느 펫에서 이 대화를 이어 볼지 — 사람이 한 대를 고른다. 모든 바탕화면에 뿌리지 않는다.
+class NachoPetSheet extends StatefulWidget {
+  const NachoPetSheet({super.key, required this.desk});
+
+  final NachoDesk desk;
+
+  @override
+  State<NachoPetSheet> createState() => _NachoPetSheetState();
+}
+
+class _NachoPetSheetState extends State<NachoPetSheet> {
+  late Future<(String?, List<NachoPet>)> _load = widget.desk.pets();
+  bool _busy = false;
+
+  Future<void> _link(String? conv) async {
+    setState(() => _busy = true);
+    try {
+      await widget.desk.linkPet(conv);
+      final next = widget.desk.pets();
+      if (mounted) {
+        setState(() {
+          _load = next;
+        });
+      }
+    } on NachoError catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return SafeArea(
+      child: FutureBuilder<(String?, List<NachoPet>)>(
+        future: _load,
+        builder: (context, snap) {
+          final data = snap.data;
+          final children = <Widget>[
+            const ListTile(
+              title: Text('펫과 이어 보기', style: TextStyle(fontWeight: FontWeight.w700)),
+              subtitle: Text('고른 펫 한 대만 이 대화를 말풍선으로 받고, 그 펫에서 물으면 같은 대화로 이어져요.'),
+            ),
+          ];
+          if (snap.hasError) {
+            children.add(ListTile(title: Text('${snap.error}', style: TextStyle(color: scheme.error))));
+          } else if (data == null) {
+            children.add(const Padding(padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator())));
+          } else if (data.$2.isEmpty) {
+            children.add(const ListTile(
+              title: Text('이을 수 있는 펫이 없어요'),
+              subtitle: Text('컴퓨터에서 카사텀 펫을 켜면 여기에 나와요. 그 전까지 대화는 폰에만 있어요.'),
+            ));
+          } else {
+            for (final p in data.$2) {
+              children.add(ListTile(
+                leading: Icon(p.alive ? Icons.desktop_mac_rounded : Icons.desktop_access_disabled_rounded,
+                    color: p.alive ? scheme.primary : scheme.onSurfaceVariant),
+                title: Text('펫(${p.place})'),
+                subtitle: Text(p.linked ? '연결됨 · ${p.status}' : p.status),
+                trailing: p.linked
+                    ? TextButton(onPressed: _busy ? null : () => _link(null), child: const Text('끊기'))
+                    : FilledButton(onPressed: _busy ? null : () => _link(p.conv), child: const Text('잇기')),
+              ));
+            }
+          }
+          return ListView(shrinkWrap: true, children: children);
+        },
       ),
     );
   }
@@ -426,6 +515,17 @@ class _NachoBubble extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 3),
                 child: Text(origin, style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
               ),
+            if (desk.deliveryOf(event.seq) case final d?)
+              Padding(
+                padding: const EdgeInsets.only(top: 3),
+                child: Text(
+                  deliveryLabel(d.state, d.target),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: d.state == 'expired' || d.state == 'failed' ? scheme.error : scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
             for (var i = 0; i < event.files.length; i++)
               if (_isImage(event.files[i]))
                 Padding(
@@ -483,6 +583,7 @@ class _NoticeRow extends StatelessWidget {
     final icon = switch (event.notice) {
       'confirm_needed' => Icons.gpp_maybe_rounded,
       'hop' => Icons.swap_horiz_rounded,
+      'link' => Icons.link_rounded,
       'restart' => Icons.restart_alt_rounded,
       'watch' => Icons.visibility_outlined,
       _ => Icons.info_outline_rounded,

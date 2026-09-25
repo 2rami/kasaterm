@@ -35,6 +35,8 @@ class NachoEvent {
     this.files = const [],
     this.surface = 'app',
     this.place,
+    this.target,
+    this.reply = 0,
   });
 
   factory NachoEvent.fromJson(Map<String, Object?> j) => NachoEvent(
@@ -53,6 +55,8 @@ class NachoEvent {
     ],
     surface: j['surface'] as String? ?? 'app',
     place: _str(j['place']),
+    target: _str(j['target']),
+    reply: (j['reply'] as num?)?.toInt() ?? 0,
   );
 
   final int seq;
@@ -72,6 +76,10 @@ class NachoEvent {
   /// 어느 화면에서 오간 말인가 — `app`(카사모바일) · `pet`(바탕화면 펫). 같은 나쵸의 두 화면이다.
   final String surface;
   final String? place;
+
+  /// 펫 전달·연결 줄의 대상 펫(`kasapet:<기계>`). `reply` 는 전달 줄이 가리키는 답의 순번.
+  final String? target;
+  final int reply;
 
   /// 앱에서 한 말이 아니면 「펫(미니)에서」처럼 출처를 단다.
   String? get origin => surface == 'pet' ? '펫${place == null ? '' : '($place)'}에서' : null;
@@ -96,6 +104,50 @@ String receiptLabel(String state) => switch (state) {
   'unsent' => '보내지 못함',
   _ => state,
 };
+
+/// 펫 한 대 — 이어 볼 수 있는 바탕화면.
+class NachoPet {
+  const NachoPet(this.raw);
+
+  final Map<String, Object?> raw;
+
+  String get conv => raw['conv'] as String? ?? '';
+  String get place => raw['place'] as String? ?? '펫';
+  bool get alive => raw['alive'] == true;
+  bool get linked => raw['linked'] == true;
+
+  /// 우편함을 끌어간 적이 있나 — 묻기만 하는 옛 판 펫은 떠 있어도 말풍선으로 못 받는다.
+  bool get canReceive => raw['can_receive'] == true;
+  int? get seenAgoS => (raw['seen_ago_s'] as num?)?.toInt();
+
+  /// 떠 있는지를 짐작하지 않는다 — 마지막으로 다녀간 때를 그대로.
+  String get status {
+    final head = _presence;
+    return canReceive ? head : '$head · 말풍선 받기 확인 안 됨(우편함을 끌어가는 펫 판 필요)';
+  }
+
+  String get _presence {
+    if (alive) return '켜져 있음';
+    final s = seenAgoS;
+    if (s == null) return '다녀간 기록 없음';
+    if (s < 3600) return '꺼져 있음 · ${(s / 60).ceil()}분 전까지';
+    if (s < 86400) return '꺼져 있음 · ${(s / 3600).floor()}시간 전까지';
+    return '꺼져 있음 · ${(s / 86400).floor()}일 전까지';
+  }
+}
+
+/// 답 하나가 연결된 펫에 어떻게 갔나. 펫이 받아 간 영수증이 있을 때만 「표시됨」이다.
+String deliveryLabel(String state, String? target) {
+  final pet = target == null ? '펫' : '펫(${target.replaceFirst('kasapet:', '')})';
+  return switch (state) {
+    'delivered' => '$pet에도 표시됨',
+    'queued' => '$pet 우편함 대기 — 펫이 받아 가면 표시',
+    'expired' => '$pet이 받아 가기 전에 만료',
+    'no_target' => '연결된 펫 없음 — 폰에만',
+    'failed' => '$pet에 못 넣음',
+    _ => '',
+  };
+}
 
 class NachoTaskCard {
   const NachoTaskCard(this.raw);
@@ -324,6 +376,49 @@ class NachoDesk extends ChangeNotifier {
       if (e.kind == 'progress' && e.message == id) return e.text;
     }
     return null;
+  }
+
+  /// 그 답(순번)의 펫 전달 — 원장의 마지막 deliver 줄. 없으면 null.
+  ({String state, String? target})? deliveryOf(int replySeq) {
+    for (final e in events.reversed) {
+      if (e.kind == 'deliver' && e.reply == replySeq) {
+        return (state: e.state ?? '', target: e.target);
+      }
+    }
+    return null;
+  }
+
+  /// 지금 연결된 펫(원장의 마지막 연결 줄). 서버가 정본이라 목록은 `pets()` 로 다시 읽는다.
+  String? get linkedPet {
+    for (final e in events.reversed) {
+      if (e.kind == 'notice' && e.notice == 'link') return e.target;
+    }
+    return null;
+  }
+
+  Future<(String?, List<NachoPet>)> pets() async {
+    final (status, j) = await server.nacho('pets');
+    if (status != 200) {
+      final code = j['error'] as String? ?? '$status';
+      throw NachoError(code, _why(code, j), status: status);
+    }
+    return (
+      _str(j['linked']),
+      [
+        for (final p in (j['pets'] as List? ?? const []))
+          if (p is Map) NachoPet(p.cast<String, Object?>()),
+      ],
+    );
+  }
+
+  /// 이 펫 한 대를 잇는다. null 이면 끊는다.
+  Future<void> linkPet(String? conv) async {
+    final (status, j) = await server.nacho('pets/link', body: {'conv': conv ?? ''});
+    if (status != 200) {
+      final code = j['error'] as String? ?? '$status';
+      throw NachoError(code, code == 'no_pet' ? '그 펫은 다녀간 기록이 없어 이을 수 없다' : _why(code, j), status: status);
+    }
+    unawaited(_catchUp());
   }
 
   /// 아직 원장에 안 적힌 보낸 말(보내는 중·못 보냄).
