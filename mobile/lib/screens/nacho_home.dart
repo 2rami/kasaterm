@@ -13,6 +13,7 @@ import 'nacho_reply_view.dart';
 import 'nacho_task.dart';
 import 'nacho_typing.dart';
 import 'terminal.dart';
+import 'workboard_view.dart';
 
 /// 카사모바일 첫 화면 — 나쵸와의 대화와, 그 대화에서 맡은 일의 목록.
 ///
@@ -146,7 +147,16 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
                       onOpenPane: _openPane,
                       onLink: _openLink,
                     ),
-                    NachoTasks(desk: _desk, onOpenTask: _openTask),
+                    Builder(
+                      builder: (tabs) => WorkBoardView(
+                        desk: _desk,
+                        server: widget.server,
+                        students: _students,
+                        onOpenTask: _openTask,
+                        onOpenPane: _openPane,
+                        onGoChat: () => DefaultTabController.of(tabs).animateTo(0),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -767,158 +777,16 @@ Widget nachoComposer({
 }) => _Composer(controller: controller, hint: hint, sending: sending, onSend: onSend);
 
 // ── 작업 ─────────────────────────────────────────────────────────────────
-class NachoTasks extends StatefulWidget {
-  const NachoTasks({super.key, required this.desk, required this.onOpenTask});
 
-  final NachoDesk desk;
-  final ValueChanged<String> onOpenTask;
+Widget nachoPill(String text, {bool strong = false}) => _Pill(text: text, strong: strong);
 
-  @override
-  State<NachoTasks> createState() => _NachoTasksState();
-}
-
-class _NachoTasksState extends State<NachoTasks> {
-  String? _project;
-
-  static const _order = ['attention', 'active', 'closed'];
-  static const _label = {'attention': '판단 필요', 'active': '진행 중', 'closed': '끝남·실패'};
-
-  @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: widget.desk,
-    builder: (context, _) {
-      final desk = widget.desk;
-      final projects = {for (final t in desk.tasks) t.project}.toList()..sort();
-      final shown = [
-        for (final t in desk.tasks)
-          if (_project == null || t.project == _project) t,
-      ];
-      final children = <Widget>[
-        if (desk.tasksProblem != null) _Banner(text: desk.tasksProblem!),
-        if (projects.length > 1)
-          SizedBox(
-            height: 48,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              children: [
-                _chip('전체', _project == null, () => setState(() => _project = null)),
-                for (final p in projects)
-                  _chip(p, _project == p, () => setState(() => _project = p)),
-              ],
-            ),
-          ),
-      ];
-      for (final g in _order) {
-        final rows = [for (final t in shown) if (t.group == g) t];
-        if (rows.isEmpty) continue;
-        children.add(_SectionHeader(text: '${_label[g]} ${rows.length}'));
-        for (final t in rows) {
-          children.add(_TaskTile(card: t, onTap: () => widget.onOpenTask(t.id)));
-        }
-      }
-      if (shown.isEmpty && desk.tasksProblem == null) {
-        children.add(
-          const SizedBox(
-            height: 320,
-            child: _Empty(text: '아직 맡긴 일이 없어요.\n대화에서 일을 시키면 여기로 분류돼요.'),
-          ),
-        );
-      }
-      return RefreshIndicator(
-        onRefresh: desk.loadTasks,
-        child: ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.only(bottom: 24),
-          children: children,
-        ),
-      );
-    },
-  );
-
-  Widget _chip(String text, bool on, VoidCallback onTap) => Padding(
-    padding: const EdgeInsets.only(right: 6),
-    child: FilterChip(label: Text(text), selected: on, onSelected: (_) => onTap()),
-  );
-}
-
-class _SectionHeader extends StatelessWidget {
-  const _SectionHeader({required this.text});
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
-    child: Semantics(
-      header: true,
-      child: Text(
-        text,
-        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    ),
-  );
-}
-
-class _TaskTile extends StatelessWidget {
-  const _TaskTile({required this.card, required this.onTap});
-
-  final NachoTaskCard card;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final sub = card.attention.isNotEmpty ? card.attention : card.step;
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                card.goal,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 6,
-                runSpacing: 4,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  _Pill(text: card.stateLabel, strong: card.group == 'attention'),
-                  _Pill(text: card.project),
-                  if (card.place.isNotEmpty && card.place != '카사모바일') _Pill(text: card.place),
-                  Text(
-                    agoLabel(card.updatedMs),
-                    style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
-                  ),
-                ],
-              ),
-              if (sub.isNotEmpty) ...[
-                const SizedBox(height: 6),
-                Text(
-                  sub,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+String agoLabel(int ms, {DateTime? now}) {
+  if (ms <= 0) return '';
+  final d = (now ?? DateTime.now()).difference(DateTime.fromMillisecondsSinceEpoch(ms));
+  if (d.inMinutes < 1) return '방금';
+  if (d.inHours < 1) return '${d.inMinutes}분 전';
+  if (d.inDays < 1) return '${d.inHours}시간 전';
+  return '${d.inDays}일 전';
 }
 
 class _Pill extends StatelessWidget {
@@ -945,15 +813,4 @@ class _Pill extends StatelessWidget {
       ),
     );
   }
-}
-
-Widget nachoPill(String text, {bool strong = false}) => _Pill(text: text, strong: strong);
-
-String agoLabel(int ms, {DateTime? now}) {
-  if (ms <= 0) return '';
-  final d = (now ?? DateTime.now()).difference(DateTime.fromMillisecondsSinceEpoch(ms));
-  if (d.inMinutes < 1) return '방금';
-  if (d.inHours < 1) return '${d.inMinutes}분 전';
-  if (d.inDays < 1) return '${d.inHours}시간 전';
-  return '${d.inDays}일 전';
 }
