@@ -78,6 +78,8 @@ pub struct Shaper {
     /// 재면 된다.
     cell_adv: std::collections::HashMap<u32, f32>,
     variation_weight: Option<f32>,
+    /// (폴백 슬롯, 크기 비트) → 한글 굵게에 더 얹을 윤곽 팽창(px). 처음 한 번 잰다.
+    cjk_bold_embolden: std::collections::HashMap<(usize, u32), f32>,
 }
 
 /// One baked glyph's raster + metric. Coordinates follow the swash /
@@ -168,6 +170,29 @@ fn widen_alpha_horizontal(data: &mut [u8], w: usize, h: usize) {
     }
 }
 
+/// 한글 굵게가 보통보다 이만큼은 진해야 라틴 굵게와 나란히 읽힌다. JetBrains Mono
+/// Bold 가 Regular 대비 잉크 ×1.35 쯤이라 거기에 맞췄다.
+const CJK_BOLD_INK_TARGET: f32 = 1.35;
+const CJK_BOLD_PROBE: [char; 3] = ['한', '글', '국'];
+/// 팽창 상한(em 비). 이보다 두꺼우면 한글 획 사이 빈틈이 메워진다.
+const CJK_BOLD_EMBOLDEN_MAX: f32 = 0.04;
+
+/// 윤곽 하나를 알파로 래스터해 잉크 총량(커버리지 합)을 잰다.
+fn outline_ink(ctx: &mut ScaleContext, data: &[u8], index: u32, ch: char, size: f32, embolden: f32) -> f32 {
+    let Some(font) = FontRef::from_index(data, index as usize) else { return 0.0 };
+    let gid = font.charmap().map(ch as u32);
+    if gid == 0 {
+        return 0.0;
+    }
+    let mut scaler = ctx.builder(font).size(size).hint(true).build();
+    let mut render = Render::new(&[Source::Outline]);
+    render.format(Format::Alpha).embolden(embolden);
+    render
+        .render(&mut scaler, gid)
+        .map(|img| img.data.iter().map(|&a| a as f32 / 255.0).sum())
+        .unwrap_or(0.0)
+}
+
 impl Shaper {
     pub fn from_bytes(font_data: Vec<u8>, font_index: u32) -> Result<Self> {
         FontRef::from_index(&font_data, font_index as usize)
@@ -179,6 +204,7 @@ impl Shaper {
             scale_ctx: ScaleContext::new(),
             cell_adv: std::collections::HashMap::new(),
             variation_weight: None,
+            cjk_bold_embolden: std::collections::HashMap::new(),
         })
     }
 
@@ -221,6 +247,7 @@ impl Shaper {
             scale_ctx: ScaleContext::new(),
             cell_adv: std::collections::HashMap::new(),
             variation_weight: None,
+            cjk_bold_embolden: std::collections::HashMap::new(),
         })
     }
 
@@ -372,6 +399,58 @@ impl Shaper {
 
     pub fn rasterize(&mut self, ch: char, size_px: f32) -> Option<Rasterized> {
         self.rasterize_styled(ch, size_px, false, false)
+    }
+
+    /// 폴백 슬롯의 한글 굵게가 모자란 만큼 얹을 윤곽 팽창(px). 한글은 라틴처럼
+    /// 알파 팽창을 걸 수 없고(획이 촘촘해 빈틈이 메워진다), 폴백의 designed bold 는
+    /// 약한 경우가 있다 — D2Coding Bold 는 Regular 대비 잉크 ×1.06~1.13 이라 같은
+    /// 줄의 라틴 굵게(×1.35) 옆에서 한글만 안 굵어 보였다. 그래서 슬롯·크기마다 한 번 재서
+    /// 목표 비율에 닿는 최소 팽창을 찾는다. 이미 충분히 굵은 얼굴은 0 이다.
+    ///
+    /// 크기마다 따로 잰다. 힌팅이 획을 픽셀에 붙이기 때문에 같은 D2Coding Bold 가
+    /// 64px 에선 ×1.33 인데 24px 에선 ×1.1 이다 — 큰 크기 하나로 재면 정작 화면
+    /// 크기에서 모자란다.
+    ///
+    /// 필드를 따로 받는 것은 부르는 자리가 이미 얼굴 바이트를 빌려 쥐고 있어서다.
+    fn cjk_bold_embolden(
+        cache: &mut std::collections::HashMap<(usize, u32), f32>,
+        ctx: &mut ScaleContext,
+        faces: &[(FontData, u32)],
+        bold_faces: &[(FontData, u32)],
+        slot: usize,
+        px: f32,
+    ) -> f32 {
+        let key = (slot, px.to_bits());
+        if let Some(&strength) = cache.get(&key) {
+            return strength;
+        }
+        let (reg, reg_idx) = &faces[slot];
+        let (bold, bold_idx) = match bold_faces.get(slot) {
+            Some((b, i)) if !b.is_empty() => (b, *i),
+            _ => (reg, *reg_idx),
+        };
+        let mut ink = |data: &[u8], idx: u32, strength: f32| -> f32 {
+            CJK_BOLD_PROBE.iter().map(|&ch| outline_ink(ctx, data, idx, ch, px, strength)).sum()
+        };
+        let regular = ink(reg.as_slice(), *reg_idx, 0.0);
+        let target = regular * CJK_BOLD_INK_TARGET;
+        let strength = if regular <= 0.0 || ink(bold.as_slice(), bold_idx, 0.0) >= target {
+            0.0
+        } else {
+            // 잉크는 팽창에 대해 단조 증가라 이분 탐색으로 충분하다.
+            let (mut lo, mut hi) = (0.0f32, CJK_BOLD_EMBOLDEN_MAX * px);
+            for _ in 0..8 {
+                let mid = (lo + hi) / 2.0;
+                if ink(bold.as_slice(), bold_idx, mid) >= target {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            hi
+        };
+        cache.insert(key, strength);
+        strength
     }
 
     /// Style-aware variant. `bold=true` routes to the installed bold face
@@ -555,7 +634,19 @@ impl Shaper {
             } else {
                 1.0
             };
-            let render_at = |scale_ctx: &mut ScaleContext, face_size: f32| {
+            let cjk_embolden = if bold && face_idx != 0 && is_cjk_wide(ch) {
+                Self::cjk_bold_embolden(
+                    &mut self.cjk_bold_embolden,
+                    &mut self.scale_ctx,
+                    &self.faces,
+                    &self.bold_faces,
+                    face_idx,
+                    size_px * cjk_fit,
+                )
+            } else {
+                0.0
+            };
+            let render_at = |scale_ctx: &mut ScaleContext, face_size: f32, embolden: f32| {
                 let font = FontRef::from_index(font_data, font_index).unwrap();
                 let builder = scale_ctx.builder(font).size(face_size).hint(true);
                 let mut scaler = if let Some(weight) = variation_weight {
@@ -572,7 +663,7 @@ impl Shaper {
                     Source::Outline,
                     Source::Bitmap(StrikeWith::BestFit),
                 ]);
-                render.format(Format::Alpha);
+                render.format(Format::Alpha).embolden(embolden);
                 if let Some(t) = italic_skew {
                     render.transform(Some(t));
                 }
@@ -583,9 +674,28 @@ impl Shaper {
             } else {
                 size_px * cjk_fit
             };
-            let Some(mut image) = render_at(&mut self.scale_ctx, first_size) else {
+            let Some(mut image) = render_at(&mut self.scale_ctx, first_size, cjk_embolden) else {
                 continue;
             };
+            // 팽창량은 크기마다 하나지만 잉크 증가는 획 둘레에 비례한다 — 뷁·醫 처럼
+            // 획이 촘촘한 글자는 같은 팽창에 잉크가 ×1.5 까지 불어 빈틈이 좁아졌다.
+            // 그런 글자는 목표에 닿는 만큼만 남긴다(잉크는 팽창에 거의 선형이다).
+            if cjk_embolden > 0.0 {
+                let ink = |d: &[u8]| d.iter().map(|&a| a as f32 / 255.0).sum::<f32>();
+                let full = ink(&image.data);
+                let (reg, reg_idx) = &self.faces[face_idx];
+                let target = outline_ink(&mut self.scale_ctx, reg.as_slice(), *reg_idx, ch, first_size, 0.0)
+                    * CJK_BOLD_INK_TARGET;
+                if full > target {
+                    let bare = render_at(&mut self.scale_ctx, first_size, 0.0).map_or(0.0, |img| ink(&img.data));
+                    if full > bare {
+                        let s = cjk_embolden * ((target - bare) / (full - bare)).clamp(0.0, 1.0);
+                        if let Some(img) = render_at(&mut self.scale_ctx, first_size, s) {
+                            image = img;
+                        }
+                    }
+                }
+            }
             if image.placement.width == 0 || image.placement.height == 0 {
                 // Empty outline — try next face.
                 continue;
@@ -597,7 +707,7 @@ impl Shaper {
             // terminal lays it out as a single column.
             if !is_cjk_wide(ch) && advance > 0.0 && image.placement.width as f32 > advance {
                 let fit = first_size * (advance / image.placement.width as f32);
-                if let Some(img) = render_at(&mut self.scale_ctx, fit) {
+                if let Some(img) = render_at(&mut self.scale_ctx, fit, 0.0) {
                     if img.placement.width > 0 && img.placement.height > 0 {
                         image = img;
                     }
@@ -639,5 +749,45 @@ impl Shaper {
             });
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ink(r: Rasterized) -> f32 {
+        r.data.iter().map(|&a| a as f32 / 255.0).sum()
+    }
+
+    /// 폴백 한글 굵게가 라틴 굵게와 같은 비율로 진해져야 한다. 설치 글꼴에 기대므로
+    /// 없으면 건너뛴다(CI·Windows).
+    #[test]
+    fn fallback_hangul_bold_matches_latin_weight_gain() {
+        let Ok(home) = std::env::var("HOME") else { return };
+        let f = |n: &str| format!("{home}/Library/Fonts/{n}");
+        let paths = [
+            f("JetBrainsMonoNerdFontMono-Regular.ttf"),
+            f("JetBrainsMonoNerdFontMono-Bold.ttf"),
+            f("D2CodingLigatureNerdFont-Regular.ttf"),
+            f("D2CodingLigatureNerdFont-Bold.ttf"),
+        ];
+        if paths.iter().any(|p| !std::path::Path::new(p).exists()) {
+            return;
+        }
+        let mut s = Shaper::from_path(&paths[0], 0).unwrap();
+        s.set_bold_face_path(0, &paths[1], 0);
+        s.add_fallback_with_bold(&paths[2], 0, Some((paths[3].clone(), 0)));
+        for px in [20.0, 24.0, 28.0] {
+            for ch in ['한', '글', '뷁', '醫'] {
+                let regular = ink(s.rasterize_styled(ch, px, false, false).unwrap());
+                let bold = ink(s.rasterize_styled(ch, px, true, false).unwrap());
+                let ratio = bold / regular;
+                assert!(
+                    (1.25..=1.45).contains(&ratio),
+                    "{ch} {px}px 굵게 잉크 x{ratio:.2} — 라틴 굵게(x1.35)와 어긋난다"
+                );
+            }
+        }
     }
 }
