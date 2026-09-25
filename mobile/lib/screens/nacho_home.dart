@@ -395,7 +395,7 @@ class _NachoChatState extends State<NachoChat> {
     final out = <Widget>[];
     // 학생 카드는 그 일의 첫 답(띄웠다는 보고) 밑에만 — 뒤의 답은 「작업 보기」 칩으로 충분하다.
     final carded = <String>{};
-    for (final e in desk.events) {
+    for (final e in timeline(desk.events)) {
       switch (e.kind) {
         case 'message':
           final id = e.id ?? '';

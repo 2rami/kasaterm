@@ -37,6 +37,10 @@ class NachoEvent {
     this.place,
     this.target,
     this.reply = 0,
+    this.turn,
+    this.mirror = false,
+    this.notify = true,
+    this.askedMs,
   });
 
   factory NachoEvent.fromJson(Map<String, Object?> j) => NachoEvent(
@@ -57,6 +61,10 @@ class NachoEvent {
     place: _str(j['place']),
     target: _str(j['target']),
     reply: (j['reply'] as num?)?.toInt() ?? 0,
+    turn: _str(j['turn']),
+    mirror: j['mirror'] == true,
+    notify: j['notify'] != false,
+    askedMs: (j['asked_ms'] as num?)?.toInt(),
   );
 
   final int seq;
@@ -73,16 +81,62 @@ class NachoEvent {
   final String? notice;
   final List<String> files;
 
-  /// 어느 화면에서 오간 말인가 — `app`(카사모바일) · `pet`(바탕화면 펫). 같은 나쵸의 두 화면이다.
+  /// 어느 창구에서 오간 말인가 — `app`(카사모바일) · `pet`(바탕화면 펫) · `discord`·`slack`(거노 DM).
+  /// 거노 창구는 한 대화라, 다른 창구의 한 번도 이 원장에 옮겨 적힌다.
   final String surface;
+
+  /// 사람이 읽는 창구 이름 — `디스코드 DM`·`슬랙 DM`, 펫은 기계 이름.
   final String? place;
 
   /// 펫 전달·연결 줄의 대상 펫(`kasapet:<기계>`). `reply` 는 전달 줄이 가리키는 답의 순번.
   final String? target;
   final int reply;
 
-  /// 앱에서 한 말이 아니면 「펫(미니)에서」처럼 출처를 단다.
-  String? get origin => surface == 'pet' ? '펫${place == null ? '' : '($place)'}에서' : null;
+  /// 그 한 번의 이름표 — 재시도해도 같다.
+  final String? turn;
+
+  /// 다른 창구에서 끝난 한 번을 옮겨 적은 줄. 답이 끝난 뒤에 한꺼번에 적힌다.
+  final bool mirror;
+
+  /// false 면 알림(소리·배너·햅틱)을 내지 않는다 — 알림은 거노가 지금 쓰는 창구 하나에서만.
+  final bool notify;
+
+  /// 원래 창구에서 거노가 말한 시각. 원장은 답이 끝난 순서라, 두 창구에서 겹쳐 말하면 뒤바뀐다.
+  final int? askedMs;
+
+  /// 앱에서 한 말이 아니면 「디코 DM에서」처럼 출처를 단다.
+  String? get origin => switch (surface) {
+    'app' => null,
+    'pet' => '펫${place == null ? '' : '($place)'}에서',
+    'discord' => '디코 DM에서',
+    'slack' => '슬랙 DM에서',
+    _ => place == null ? null : '$place에서',
+  };
+}
+
+/// 말풍선 순서. 옮겨 적힌 한 번은 답이 끝난 때 원장에 들어오므로, 거노가 말한 시각(`asked_ms`)
+/// 자리로 당겨 그 앞뒤 대화 사이에 선다. 그 한 번의 답·상태 줄은 말 바로 뒤에 붙는다.
+/// `asked_ms` 가 없는 원장은 순번 그대로다.
+List<NachoEvent> timeline(List<NachoEvent> events) {
+  if (!events.any((e) => e.askedMs != null)) return events;
+  final asked = <String, int>{
+    for (final e in events)
+      if (e.kind == 'message' && e.id != null && e.askedMs != null)
+        e.id!: e.askedMs!,
+  };
+  int keyOf(NachoEvent e) {
+    if (e.kind == 'message') return e.askedMs ?? e.atMs;
+    // 옮겨 적힌 한 번의 답·상태만 그 말 자리로 — 앱에서 한 말의 답은 제 시각에 선다.
+    if (e.mirror && e.message != null) return asked[e.message] ?? e.atMs;
+    return e.atMs;
+  }
+
+  final keyed = [for (final e in events) (keyOf(e), e)];
+  keyed.sort((a, b) {
+    final k = a.$1.compareTo(b.$1);
+    return k != 0 ? k : a.$2.seq.compareTo(b.$2.seq);
+  });
+  return [for (final k in keyed) k.$2];
 }
 
 String? _str(Object? v) {
@@ -116,6 +170,9 @@ class NachoPet {
   bool get alive => raw['alive'] == true;
   bool get linked => raw['linked'] == true;
 
+  /// 기계 번호. 우편함 이름은 판의 라벨이라 바뀌어, 한 기계가 옛·새 이름 여럿으로 갈린다.
+  String? get machine => _str(raw['machine']);
+
   /// 우편함을 끌어간 적이 있나 — 묻기만 하는 옛 판 펫은 떠 있어도 말풍선으로 못 받는다.
   bool get canReceive => raw['can_receive'] == true;
   int? get seenAgoS => (raw['seen_ago_s'] as num?)?.toInt();
@@ -134,6 +191,36 @@ class NachoPet {
     if (s < 86400) return '꺼져 있음 · ${(s / 3600).floor()}시간 전까지';
     return '꺼져 있음 · ${(s / 86400).floor()}일 전까지';
   }
+}
+
+/// 같은 기계의 옛·새 이름을 한 줄로. 남기는 것은 연결된 것 → 켜진 것 → 말풍선을 받는 것 →
+/// 가장 최근에 다녀간 것 순. 기계 번호를 모르는 펫은 그대로 둔다(짐작해 묶지 않는다).
+List<NachoPet> groupPets(List<NachoPet> pets) {
+  int rank(NachoPet p) =>
+      (p.linked ? 8 : 0) + (p.alive ? 4 : 0) + (p.canReceive ? 2 : 0);
+  bool better(NachoPet a, NachoPet b) {
+    final r = rank(a).compareTo(rank(b));
+    if (r != 0) return r > 0;
+    return (a.seenAgoS ?? 1 << 30) < (b.seenAgoS ?? 1 << 30);
+  }
+
+  final out = <NachoPet>[];
+  final at = <String, int>{};
+  for (final p in pets) {
+    final m = p.machine;
+    if (m == null) {
+      out.add(p);
+      continue;
+    }
+    final i = at[m];
+    if (i == null) {
+      at[m] = out.length;
+      out.add(p);
+    } else if (better(p, out[i])) {
+      out[i] = p;
+    }
+  }
+  return out;
 }
 
 /// 답 하나가 연결된 펫에 어떻게 갔나. 펫이 받아 간 영수증이 있을 때만 「표시됨」이다.
@@ -227,6 +314,7 @@ String _why(String code, Map<String, Object?> j) => switch (code) {
   'id_conflict' => '같은 번호로 다른 말이 이미 접수됐다',
   'secret_like' => '비밀처럼 보이는 글은 앱 기록에 남기지 않는다',
   'too_long' => '글이 너무 길다',
+  'pet_cannot_receive' => '이 펫은 아직 말풍선을 받을 수 없어요 — 우편함을 끌어가는 판의 펫을 골라 주세요',
   _ => '나쵸가 받지 않았다 ($code)',
 };
 
@@ -419,7 +507,8 @@ class NachoDesk extends ChangeNotifier {
         if (e.kind == 'reply' && e.message != null) e.message!,
     };
     for (final e in events.reversed) {
-      if (e.kind != 'message' || e.id == null) continue;
+      // 옮겨 적힌 줄은 다른 창구에서 이미 끝난 한 번이라 이 폰의 기다림과 무관하다.
+      if (e.kind != 'message' || e.id == null || e.mirror) continue;
       final id = e.id!;
       if (replied.contains(id)) return null;
       return answeringStates.contains(stateOf(id)) ? id : null;
@@ -461,10 +550,10 @@ class NachoDesk extends ChangeNotifier {
     }
     return (
       _str(j['linked']),
-      [
+      groupPets([
         for (final p in (j['pets'] as List? ?? const []))
           if (p is Map) NachoPet(p.cast<String, Object?>()),
-      ],
+      ]),
     );
   }
 
