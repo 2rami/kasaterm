@@ -575,6 +575,31 @@ mod tests {
                "status":status,"summary":summary,"changed":["a.py","b.py"],"tests":"pytest ok","next":"검증해 줘"})
     }
 
+    /// 나쵸가 내준 지문 대조표(나쵸 레포 `docs/development/api/fixtures/report-envelopes.json`)를
+    /// 카사텀의 지문 함수와 봉투 생성기가 같은 값으로 내는가. `NACHO_DESK_FIXTURES=<그 폴더>` 로
+    /// 가리켜 `--ignored` 로 돈다 — 두 레포가 지문 규칙을 따로 들고 있어서 어긋나면 보고가 전부 거부된다.
+    #[test]
+    #[ignore]
+    fn nacho_fingerprint_vectors_match() {
+        let dir = std::path::PathBuf::from(std::env::var("NACHO_DESK_FIXTURES").expect("NACHO_DESK_FIXTURES"));
+        let table: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("report-envelopes.json")).unwrap()).unwrap();
+        let vectors = table["fingerprint_vectors"].as_array().expect("fingerprint_vectors");
+        assert!(!vectors.is_empty());
+        for vector in vectors {
+            let name = vector["name"].as_str().unwrap_or("?");
+            let envelope = &vector["envelope"];
+            let want = vector["fingerprint"].as_str().unwrap();
+            assert_eq!(fingerprint(envelope), want, "{name}: 지문 함수");
+            let built = build(envelope).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(built["fingerprint"], want, "{name}: 봉투 생성기");
+            for tag in ["surface_key", "run_id"] {
+                if let Some(value) = envelope[tag].as_str() {
+                    assert_eq!(built[tag], value, "{name}: 선택 칸 {tag} 가 그대로 실려야 한다");
+                }
+            }
+        }
+    }
+
     #[test]
     fn optional_tags_ride_outside_the_fingerprint_and_bad_ones_are_dropped() {
         let plain = build(&params("done", "x")).unwrap();

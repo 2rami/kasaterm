@@ -641,6 +641,22 @@ mod tests {
         assert_eq!(kept.last_ok_ms(), 2);
     }
 
+    /// 실기 확인 — 데스크 범위를 아는 나쵸(8b8af17 이후)에서 `--ignored` 로 돈다. 디스코드·슬랙에서
+    /// 맡긴 일까지 오는지(`scope == desk`)를 본다. 목표 문구 같은 본문은 찍지 않는다.
+    #[test]
+    #[ignore]
+    fn live_desk_scope_answers() {
+        let book = refresh(&TaskBook::default());
+        assert_eq!(book.error(), None);
+        assert!(book.desk_scope(), "나쵸가 데스크 범위로 답하지 않았다");
+        for card in book.tasks() {
+            assert!(!card.id.is_empty() && card.state != TaskState::Unknown, "{}", card.id);
+        }
+        let keyed = book.tasks().iter().filter(|c| c.surface_key().is_some()).count();
+        eprintln!("desk: tasks={} keyed={} hidden={} ids={:?}", book.tasks().len(), keyed, book.hidden_count(),
+            book.tasks().iter().map(|c| (&c.id, c.state)).collect::<Vec<_>>());
+    }
+
     /// 나쵸가 내준 응답 fixture(구현된 모양·목표 모양) 전부를 이 파일의 타입으로 읽는다.
     /// fixture 는 나쵸 레포에 있어 `NACHO_DESK_FIXTURES=<그 폴더>` 로 가리켜 `--ignored` 로 돈다.
     #[test]
@@ -648,17 +664,24 @@ mod tests {
     fn nacho_desk_fixtures_parse() {
         let dir = std::path::PathBuf::from(std::env::var("NACHO_DESK_FIXTURES").expect("NACHO_DESK_FIXTURES"));
         let read = |name: &str| std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
-        for name in ["tasks.app.implemented.json", "tasks.desk.planned.json"] {
+        // 나쵸가 칸을 구현하면 fixture 이름이 `planned` → `implemented` 로 바뀐다 — 구현판이 먼저다.
+        let pick = |names: &[&'static str]| -> &'static str {
+            names.iter().copied().find(|n| dir.join(n).exists()).unwrap_or(names[0])
+        };
+        let desk_list = pick(&["tasks.desk.implemented.json", "tasks.desk.planned.json"]);
+        let desk_unchanged = pick(&["tasks.desk.unchanged.implemented.json", "tasks.desk.unchanged.planned.json"]);
+        let desk_detail = pick(&["task.detail.desk.implemented.json", "task.detail.desk.planned.json"]);
+        for name in ["tasks.app.implemented.json", desk_list] {
             let list: TaskList = serde_json::from_slice(&read(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(!list.tasks.is_empty(), "{name}");
             assert!(list.tasks.iter().all(|c| !c.id.is_empty() && c.state != TaskState::Unknown), "{name}");
         }
-        let desk: TaskList = serde_json::from_slice(&read("tasks.desk.planned.json")).unwrap();
+        let desk: TaskList = serde_json::from_slice(&read(desk_list)).unwrap();
         assert_eq!(desk.scope, "desk");
-        assert!(desk.tasks.iter().any(|c| c.surface_key().is_some()), "목표 모양은 창 열쇠를 싣는다");
-        let unchanged: TaskList = serde_json::from_slice(&read("tasks.desk.unchanged.planned.json")).unwrap();
+        assert!(desk.tasks.iter().any(|c| c.surface_key().is_some()), "데스크 모양은 창 열쇠를 싣는다");
+        let unchanged: TaskList = serde_json::from_slice(&read(desk_unchanged)).unwrap();
         assert!(unchanged.unchanged && unchanged.tasks.is_empty());
-        for name in ["task.detail.implemented.json", "task.detail.desk.planned.json"] {
+        for name in ["task.detail.implemented.json", desk_detail, "task.detail.desk.planned.json"] {
             #[derive(serde::Deserialize)]
             struct One { task: TaskDetail }
             let one: One = serde_json::from_slice(&read(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
