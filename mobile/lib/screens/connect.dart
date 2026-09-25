@@ -58,7 +58,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text('kasaterm', style: theme.textTheme.headlineMedium),
+                  Text('카사모바일', style: theme.textTheme.headlineMedium),
                   const SizedBox(height: 8),
                   Text(
                     '데스크톱 카사텀 허브에서 「폰 주소」를 복사해 여기 붙여 넣어라. 그 주소가 곧 열쇠다.',

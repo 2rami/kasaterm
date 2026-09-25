@@ -1,11 +1,11 @@
 {
-    "name": "kasaterm_mobile",
-    "short_name": "kasaterm_mobile",
+    "name": "카사모바일",
+    "short_name": "카사모바일",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "나쵸와 대화하고 맡긴 일을 보는 카사텀 폰 앱",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
