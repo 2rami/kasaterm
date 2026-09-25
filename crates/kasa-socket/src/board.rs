@@ -29,6 +29,9 @@ const TRACKED: &[&str] = &[
     "done_summary",
     "detached",
     "place_state",
+    // 나쵸가 띄운 세션이면 bind 때 env 에 있던 일 id — 표시용 출처일 뿐 판정·등록 근거가 아니다
+    // (일↔창의 정본은 나쵸 장부의 machine_id·surface_key). 대화 id·본문은 안 싣는다.
+    "origin_task_env",
 ];
 
 pub fn now_ms() -> u64 {
@@ -221,7 +224,7 @@ pub fn guard_observation(
     for key in ["title", "request", "progress"] {
         row[key] = json!("");
     }
-    for key in ["character", "harness", "done_outcome", "done_summary"] {
+    for key in ["character", "harness", "done_outcome", "done_summary", "origin_task_env"] {
         row[key] = Value::Null;
     }
     row["status"] = json!("unknown");
@@ -326,6 +329,19 @@ mod normalize_panes_tests {
         assert!(field(&out[1]["address"], "session_id").is_none(), "깨진 session_id 는 칸만 비운다");
         let other = vec![json!({"address":{"machine_id":"other","surface_key":"k","surface_id":"%1"}})];
         assert!(normalize_panes("m", "M", &other, 1).is_err(), "기계가 다른 줄은 여전히 관측 실패다");
+    }
+
+    /// 표시용 출처는 판을 건너 다른 기계로도 가고, 관측 도중 바인딩이 바뀌면 함께 비워진다 —
+    /// 앞 학생의 일 id 가 새 학생 줄에 남으면 출처가 거짓말이 된다.
+    #[test]
+    fn origin_task_hint_survives_normalizing_and_clears_on_binding_change() {
+        let rows = vec![json!({"address":{"machine_id":"m","surface_key":"k1","surface_id":"%1"},"status":"working","origin_task_env":"we409f946"})];
+        let out = normalize_panes("m", "M", &rows, 1).unwrap();
+        assert_eq!(out[0]["origin_task_env"], "we409f946");
+        let mut row = out[0].clone();
+        let moved = json!({"machine_id":"m","surface_key":"k2","surface_id":"%1"});
+        assert!(!guard_observation(&mut row, &moved, true, true));
+        assert!(row["origin_task_env"].is_null());
     }
 }
 

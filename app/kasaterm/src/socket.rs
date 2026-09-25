@@ -2957,6 +2957,7 @@ impl Backend for PtyBackend {
         // GUI 의 헤더 바·미니맵이 읽는 값과 같다. attention 잠금을 쥔 채 부르면 판정이
         // 그 표식을 못 본다(try_lock) — 여기서는 아무 잠금도 없다.
         self.hub.refresh();
+        let origin_tasks = kasa_socket::nacho_inbox::origin_tasks();
         let mut panes = Vec::new();
         let mut observed_bindings = Vec::new();
         for id in live {
@@ -3013,6 +3014,11 @@ impl Backend for PtyBackend {
                 if status == "idle" { report.idle_seen = true; }
                 row["done_outcome"] = json!(report.outcome);
                 row["done_summary"] = json!(report.summary);
+            }
+            drop(done);
+            // 표시용 출처(`nacho_inbox::origin_tasks`). 거울 줄엔 안 싣는다 — 정본은 원본 기계 줄이다.
+            if let Some(task) = session.as_deref().and_then(|sid| origin_tasks.get(sid)).filter(|_| !mirrored) {
+                row["origin_task_env"] = json!(task);
             }
             panes.push(row);
             observed_bindings.push((id,binding,managed));

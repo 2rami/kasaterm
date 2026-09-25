@@ -163,6 +163,37 @@ pub fn origin_for_session_at(path: &Path, session_id: &str) -> Option<Origin> {
     [&origin.conv, &origin.task_id, &origin.machine, &origin.run].iter().all(|v| origin_value_ok(v)).then_some(origin)
 }
 
+/// 세션 id → 그 세션이 bind 될 때 env 에 있던 **일 id** — 판 줄의 `origin_task_env`(표시용 출처).
+///
+/// 판정·등록 근거가 아니다: env 표식은 떠 있는 창에 새 일을 넘기면 옛 일을 가리킨다. 일↔창의
+/// 정본은 나쵸 장부의 `(machine_id, surface_key)` 다. 대화 id·세대는 싣지 않고 일 id 만 낸다.
+/// 판은 수백 ms 마다 새로 그려지므로 파일은 수정 시각이 바뀔 때만 다시 읽는다.
+pub fn origin_tasks() -> std::collections::HashMap<String, String> {
+    type Cache = Option<(std::path::PathBuf, std::time::SystemTime, std::collections::HashMap<String, String>)>;
+    static CACHE: std::sync::Mutex<Cache> = std::sync::Mutex::new(None);
+    let Ok(path) = origins_path() else { return Default::default() };
+    let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) else { return Default::default() };
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((p, at, tasks)) = cache.as_ref() {
+        if *p == path && *at == modified {
+            return tasks.clone();
+        }
+    }
+    let tasks = origin_tasks_at(&path);
+    *cache = Some((path, modified, tasks.clone()));
+    tasks
+}
+
+pub fn origin_tasks_at(path: &Path) -> std::collections::HashMap<String, String> {
+    let Some(map) = std::fs::read_to_string(path).ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Map<String, Value>>(&t).ok()) else { return Default::default() };
+    map.into_iter().filter(|(sid, _)| valid_session_id(sid)).filter_map(|(sid, entry)| {
+        let task = entry.get("task_id")?.as_str()?.trim().to_string();
+        let ok = !task.is_empty() && task.len() <= 64 && task.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+        ok.then_some((sid, task))
+    }).collect()
+}
+
 /// 복원 명령 앞에 붙일 env 한 줄(끝에 빈칸). 나쵸가 학생을 띄울 때와 같은 모양이다.
 /// 값은 작은따옴표로 감싼다 — 대화 id 에 `:` 가, 세대에 `.` 가 들고 셸이 그것을 건드리면 안 된다.
 pub fn origin_env_prefix(origin: &Origin) -> String {
@@ -574,6 +605,23 @@ mod tests {
         let later = 1_000 + ORIGIN_RETENTION_MS + 1;
         remember_origin_at(&path, "aaaaaaaa-0000-0000-0000-000000000000", &origin, later).unwrap();
         assert_eq!(origin_for_session_at(&path, "0fd9e73e-3f56-4683-ad9d-6ebfc84833df"), None, "보관 기한이 지나면 걷힌다");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn origin_tasks_expose_only_well_formed_task_ids() {
+        let root = tmp_root("origin-tasks");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("nacho-origins.json");
+        std::fs::write(&path, r#"{
+            "0fd9e73e-3f56-4683-ad9d-6ebfc84833df":{"conv":"discord:809","task_id":"we409f946","machine":"","run":""},
+            "11111111-2222-3333-4444-555555555555":{"conv":"discord:809","task_id":"bad id; rm","machine":"","run":""},
+            "../escape":{"task_id":"w1"}
+        }"#).unwrap();
+        let tasks = origin_tasks_at(&path);
+        assert_eq!(tasks.len(), 1, "모양이 어긋난 일 id·세션 열쇠는 판에 안 싣는다: {tasks:?}");
+        assert_eq!(tasks["0fd9e73e-3f56-4683-ad9d-6ebfc84833df"], "we409f946");
+        assert!(tasks.values().all(|t| !t.contains("discord")), "대화 id 는 안 낸다");
         let _ = std::fs::remove_dir_all(&root);
     }
 

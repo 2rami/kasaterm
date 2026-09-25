@@ -547,6 +547,9 @@ fn paint_detail(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: 
         pane.map(|row| format!(" · {}", row.address.surface_id)).unwrap_or_default(),
     );
     paint_overview_summary(g, x, y, w, "맡음", &who, 2);
+    if let Some(hint) = pane.and_then(|row| row.origin_task_env.as_deref()).filter(|h| !h.is_empty()) {
+        paint_overview_summary(g, x, y, w, "표식", &origin_hint_line(hint, task.map(|t| t.id.as_str())), 2);
+    }
     let source = data.sources.iter().find(|src| src.machine_id == item.machine_id);
     let link = match (source, pane) {
         (Some(src), Some(row)) => format!(
@@ -633,6 +636,15 @@ fn paint_detail(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: 
     }
     text_button(g, s, hits, (x, *y, 60.0, 28.0), "닫기", Target::WorkSelect(item.key.clone()), false);
     *y += 34.0;
+}
+
+/// 창의 env 표식 한 줄. 표식은 출처 힌트라, 장부가 이은 일과 다르면(떠 있는 창에 새 일을 넘긴
+/// 경우) 다르다고 적는다 — 판정은 여전히 장부 몫이다.
+fn origin_hint_line(hint: &str, task: Option<&str>) -> String {
+    match task {
+        Some(id) if id != hint => format!("창 env 는 나쵸 작업 {hint} · 이 일과 다름 · 표시용"),
+        _ => format!("창 env 의 나쵸 작업 {hint} · 표시용, 판정 근거 아님"),
+    }
 }
 
 fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, x: f32, y: &mut f32, w: f32) {
@@ -794,6 +806,13 @@ mod tests {
         assert!(!linked(place(Some("other-key"), None)), "열쇠가 오면 번호가 맞아도 열쇠로만 판단한다");
         assert!(!linked(place(Some("key-1"), Some("w2"))), "다른 일로 넘어간 창은 잇지 않는다");
         assert!(linked(place(None, None)), "옛 나쵸(열쇠 없음)는 기기+번호로");
+    }
+
+    #[test]
+    fn origin_hint_is_labeled_display_only_and_flags_a_different_task() {
+        assert!(origin_hint_line("we409f946", None).contains("판정 근거 아님"));
+        assert!(origin_hint_line("we409f946", Some("we409f946")).contains("표시용"));
+        assert!(origin_hint_line("wf66d6f5a", Some("we409f946")).contains("이 일과 다름"));
     }
 
     #[test]

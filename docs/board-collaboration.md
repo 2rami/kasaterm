@@ -27,6 +27,12 @@ agent exited. Unsupported activity stays `unknown`. No connection tokens appear
 in this contract. Source failures retain the last pane rows with stale freshness;
 only a complete, successful source can prove that its own pane disappeared.
 
+Optional `origin_task_env` names the nacho task ID that was in the pane's env when
+its session was bound (`nacho-origins.json`). It is display provenance only — it
+can point at an older task after a live pane is handed new work, so never use it
+to register or accept reports; the task↔pane source of truth is nacho's ledger
+`(machine_id, surface_key)`. Conversation IDs and bodies are not carried.
+
 `collab.changes {since:"epoch:sequence",limit:100,scope:"all"}` /
 `GET /collab/changes?since=...` returns `cursor`, `changes`, `reset_required`,
 `reset_reason`, `has_more`. Changes carry `cursor`, `at_ms`, `kind`, optional

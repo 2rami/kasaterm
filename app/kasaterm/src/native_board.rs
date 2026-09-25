@@ -197,6 +197,8 @@ struct OverviewPane {
     attention_kind: Option<String>,
     done_outcome: Option<String>,
     done_summary: Option<String>,
+    /// 나쵸가 띄운 세션이면 env 에 있던 일 id — 표시용 출처, 판정 근거 아님.
+    origin_task_env: Option<String>,
     observed_at_ms: u64,
     freshness: String,
     detached: bool,
@@ -1269,6 +1271,7 @@ fn board_probe_value() -> serde_json::Value {
             "status":status,"status_reason":if status == "unknown" {"아직 지원되는 활동 신호가 없어요"} else {""},
             "attention_kind":if status == "waiting" {Some("question")} else {None},
             "done_outcome":if index == 3 {Some("succeeded")} else {None},"done_summary":if index == 3 {Some("확인을 마쳤고 변경을 남겼어요")} else {None},
+            "origin_task_env":if index == 1 {Some("wfix0000")} else {None},
             "observed_at_ms":if freshness == "fresh" {at-4_000} else {at-180_000},"freshness":freshness}));
     }
     serde_json::json!({"schema_version":1,"scope":"all","cursor":"fixture:9","observed_at_ms":at,"local_machine_id":"device-a","reset_required":true,
