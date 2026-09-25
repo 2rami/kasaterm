@@ -669,9 +669,11 @@ impl GpuRenderer {
         if crate::theme::viewer_chrome() {
             md_bold_shaper.set_variation_weight(600.0);
         }
-        if crate::theme::viewer_chrome() {
-            md_bold_shaper.set_bold_face_path(0, &md_bold_font, md_bold_idx);
-        }
+        // 이 shaper 는 이미 굵은 얼굴인데 부르는 쪽이 bold 키를 함께 넘긴다. 굵은 얼굴을
+        // 제 슬롯에 걸어 두지 않으면 shaper 가 「굵은 얼굴 없음」으로 보고 라틴에 합성
+        // 팽창을 한 번 더 얹는다 — 한글은 팽창 대상이 아니라 라틴만 두 배로 굵어졌다
+        // (24px 실측 잉크: 라틴 ×2.2, 한글 ×1.48). 걸면 둘 다 ×1.5 로 맞는다.
+        md_bold_shaper.set_bold_face_path(0, &md_bold_font, md_bold_idx);
         attach_fallback_chain(&mut md_bold_shaper);
         let cell_w = cell_w_for(&mut shaper, font_size_px as f32);
         // Use the font's natural line metric (ascent+descent+leading)
