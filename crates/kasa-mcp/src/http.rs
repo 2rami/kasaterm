@@ -4838,6 +4838,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 // 무엇을 기다리나(permission·question·idle) · 그 이유 · 쉰 지 몇 초 —
                 // 폰이 「승인 기다림 / 질문 기다림 / 답 기다림 / 방금 끝냄 / 쉬는 중」을 가른다.
                 "kind": b.and_then(|p| p.attention_kind.clone()),
+                "attention_kind": b.and_then(|p| p.attention_kind.clone()),
                 "waiting_for": b.and_then(|p| p.waiting_for.clone()),
                 "idle_secs": b.and_then(|p| p.idle_secs),
                 // 무엇을 하는 중인가 — 폰이 「작업 중」 대신 정확한 말을 쓴다(2026-09-08 지시

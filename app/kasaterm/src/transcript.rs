@@ -2299,6 +2299,27 @@ mod turn_tests {
     }
 
     #[test]
+    fn codex_async_question_acceptance_does_not_close_or_reopen_turns() {
+        let started = r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"1"}}"#;
+        let question = r#"{"type":"response_item","payload":{"type":"function_call","name":"request_user_input_async","call_id":"question-1","arguments":"{}"}}"#;
+        let accepted = r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"question-1","output":"{\"accepted\":true}"}}"#;
+        let complete = r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"1"}}"#;
+        let settings = r#"{"type":"event_msg","payload":{"type":"thread_settings_applied"}}"#;
+        assert_eq!(claude(&[started, question]), Some(TurnState::Working));
+        assert_eq!(claude(&[started, question, accepted]), Some(TurnState::Working));
+        assert_eq!(claude(&[started, question, accepted, complete, settings]), Some(TurnState::Idle));
+    }
+
+    #[test]
+    fn codex_interrupted_turn_resumes_only_at_new_task_start() {
+        let aborted = r#"{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"1"}}"#;
+        let context = r#"{"type":"turn_context","payload":{"model":"test-model"}}"#;
+        let started = r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"2"}}"#;
+        assert_eq!(claude(&[aborted, context]), Some(TurnState::Idle));
+        assert_eq!(claude(&[aborted, context, started, "{\"type\":"]), Some(TurnState::Working));
+    }
+
+    #[test]
     fn unknown_formats_and_empty_tails_defer_to_the_screen() {
         assert_eq!(turn_state_from_tail(""), None);
         assert_eq!(turn_state_from_tail("{\"type\":\"agy-event\",\"x\":1}\nnot json"), None);

@@ -244,7 +244,7 @@ fn draw_cell(
     let drop_here = drag.is_some_and(|d| d != row.remote_id.as_str()) && hover;
     g.hover_pointer |= hover && !row.closed;
     let busy = deck.iter().any(|r| matches!(r.status.as_str(), "working" | "compacting"));
-    let waiting = deck.iter().any(|r| r.needs_you());
+    let waiting = machine.online && deck.iter().any(|r| r.needs_you());
     let signal = waiting.then(|| (theme::attention(), 0.9));
     round_rect(g, mx, my, mw, mh, 2.0, if drop_here {
         theme::accent()
@@ -334,7 +334,7 @@ fn draw_list_row(
     if hover { round_rect(g, rx, ry, rw, rh, theme::radius_sm(), theme::surface_hover()); }
     if cur { g.rect(rx, ry + 3.0, 2.0, rh - 6.0, theme::accent()); }
     let busy = deck.iter().any(|r| matches!(r.status.as_str(), "working" | "compacting"));
-    let waiting = deck.iter().any(|r| r.needs_you());
+    let waiting = machine.online && deck.iter().any(|r| r.needs_you());
     let who = deck.iter().find(|r| !r.name.is_empty()).map_or("", |r| r.name.as_str());
     let phase = crate::sprites::anim_phase_secs();
     let face = rh - 6.0;
@@ -457,7 +457,7 @@ fn draw_rows(
                 g.rect(tab_x + 10.0, ly, tab_w - 20.0, 1.0, theme::with_alpha(theme::border(), 0x60));
             }
             // 접힌 방의 기다림은 머리의 숨쉬는 점이 말한다 — 펴진 방은 칸이 말하므로 조용히.
-            let waits = list.iter().any(|r| r.needs_you());
+            let waits = machine.online && list.iter().any(|r| r.needs_you());
             if collapsed && waits {
                 crate::sprites::blink_dot(g, tab_x + 12.0, y + 13.0, 9.0, theme::attention(), 0.9);
             }
@@ -942,7 +942,12 @@ mod tests {
         assert!(row("waiting", Some("permission")).needs_you());
         assert!(row("waiting", Some("question")).needs_you());
         assert!(!row("waiting", Some("idle")).needs_you(), "방치는 주황으로 부르지 않는다");
-        assert!(row("waiting", None).needs_you(), "종류를 안 보내는 옛 판 기계는 승인으로 친다");
+        assert!(!row("waiting", None).needs_you());
+        assert!(!row("waiting", Some("unknown")).needs_you());
+        assert!(!row("unknown", Some("permission")).needs_you());
+        let mut closed = row("waiting", Some("permission"));
+        closed.closed = true;
+        assert!(!closed.needs_you());
         assert!(!row("working", None).needs_you());
         assert!(!row("idle", None).needs_you());
     }

@@ -1248,6 +1248,7 @@ fn board_probe_value() -> serde_json::Value {
             "title":"주문 내역 화면 점검","request":"좁은 화면에서도 주문 상태와 다음 행동을 읽을 수 있게 정리해 주세요. 긴 한글 문장과 https://example.test/a/very-long-unbroken-path-for-layout-checking 도 잘리지 않아야 합니다.",
             "progress":if status == "waiting" {"연결할 자료를 선택해 주세요"} else {"요청과 진행을 나누고, 이전 기록이 다른 창에 표시되지 않는지 확인하고 있어요"},
             "status":status,"status_reason":if status == "unknown" {"아직 지원되는 활동 신호가 없어요"} else {""},
+            "attention_kind":if status == "waiting" {Some("question")} else {None},
             "done_outcome":if index == 3 {Some("succeeded")} else {None},"done_summary":if index == 3 {Some("확인을 마쳤고 변경을 남겼어요")} else {None},
             "observed_at_ms":if freshness == "fresh" {at-4_000} else {at-180_000},"freshness":freshness}));
     }
@@ -1464,7 +1465,9 @@ fn overview_status(row: &OverviewPane) -> (&'static str, u8) {
     if row.freshness != "fresh" { return ("오래된 정보", 2); }
     // 방치(60초 조용)는 「답을 마치고 다음 지시를 기다림」이라 사람을 부르지 않는다 —
     // 세어 올리면 요약의 「확인 필요 N」이 실제 손댈 칸보다 부풀고, 정작 급한 칸이 묻힌다.
-    if matches!(row.status.as_str(), "waiting" | "attention" | "blocked") && !overview_row_is_idle_wait(row) {
+    if matches!(row.status.as_str(), "waiting" | "attention" | "blocked")
+        && row.attention_kind.as_deref().and_then(crate::agent_state::WaitKind::parse)
+            .is_some_and(crate::agent_state::WaitKind::needs_you) {
         return ("확인 필요", 0);
     }
     match row.done_outcome.as_deref() {
@@ -1475,13 +1478,13 @@ fn overview_status(row: &OverviewPane) -> (&'static str, u8) {
     match row.status.as_str() {
         "working" | "running" | "building" | "thinking" | "compacting" => ("작업 중", 3),
         "idle" => ("대기 중", 4),
-        "waiting" => ("대기 중", 4),
+        "waiting" if overview_row_is_idle_wait(row) => ("대기 중", 4),
+        "blocked" => ("막힘", 2),
         _ => ("미확인", 2),
     }
 }
 
 /// 그 기다림이 방치인가 — 칸이 먼저, 없으면 판정 이유(`wait_kind_of_row` 와 같은 규칙).
-/// 종류를 안 보내는 옛 판 기계는 승인으로 친다.
 fn overview_row_is_idle_wait(row: &OverviewPane) -> bool {
     match row.attention_kind.as_deref() {
         Some(kind) => kind == crate::agent_state::WaitKind::Idle.as_str(),
@@ -2807,8 +2810,15 @@ fn fit(g: &mut gpu::GpuRenderer, value: &str, width: f32, size: f32, bold: bool)
 }
 
 pub(crate) fn status_label(row: &PaneActivity) -> String {
-    if agent_needs_attention(row) {
+    if row.reach == "stale" || row.status == "unknown" {
+        "미확인".to_string()
+    } else if agent_needs_attention(row) {
         "확인 필요".to_string()
+    } else if row.status == "blocked" {
+        "막힘".to_string()
+    } else if row.status == "waiting" && row.attention_kind.as_deref()
+        .and_then(crate::agent_state::WaitKind::parse).is_none() {
+        "미확인".to_string()
     } else if let Some(outcome) = &row.done_outcome {
         if outcome == "succeeded" { "완료 보고".to_string() } else { "실패 보고".to_string() }
     } else if row.status == "thinking" {
@@ -2823,18 +2833,16 @@ pub(crate) fn status_label(row: &PaneActivity) -> String {
 }
 
 pub(crate) fn agent_needs_attention(row: &PaneActivity) -> bool {
-    // 방치에도 `waiting_for`("Claude is waiting for your input")가 실린다 — 그 칸만 보면
-    // 쉬는 학생까지 「확인 필요」가 된다. 종류가 가른다.
-    if row.attention_kind.as_deref() == Some(crate::agent_state::WaitKind::Idle.as_str()) {
-        return false;
-    }
-    row.waiting_for.is_some() || row.status == "blocked"
+    row.reach != "stale"
+        && matches!(row.status.as_str(), "waiting" | "attention" | "blocked")
+        && row.attention_kind.as_deref().and_then(crate::agent_state::WaitKind::parse)
+            .is_some_and(crate::agent_state::WaitKind::needs_you)
 }
 
 pub(crate) fn agent_is_working(row: &PaneActivity) -> bool {
     matches!(
         row.status.as_str(),
-        "working" | "building" | "waiting" | "compacting" | "thinking"
+        "working" | "building" | "compacting" | "thinking"
     )
 }
 
@@ -3442,9 +3450,36 @@ mod tests {
             "종류 칸이 없는 옛 판 기계는 판정 이유로 가른다",
         );
         assert_eq!(
-            overview_status(&row(None, Some("hook attention"))).0, "확인 필요",
-            "모르는 이유는 지어내지 않는다 — 종전대로 승인으로 친다",
+            overview_status(&row(None, Some("hook attention"))).0, "미확인",
+            "모르는 이유에서 승인 대기를 추측하지 않는다",
         );
+        assert_eq!(overview_status(&row(Some("unknown"), None)).0, "미확인");
+        let mut stale = row(Some("permission"), None);
+        stale.freshness = "stale".into();
+        assert_eq!(overview_status(&stale).0, "오래된 정보");
+        stale.freshness = "offline".into();
+        assert_eq!(overview_status(&stale).0, "연결 끊김");
+    }
+
+    #[test]
+    fn board_attention_requires_a_live_typed_request() {
+        let mut row = PaneActivity {
+            status: "waiting".into(), waiting_for: Some("Claude is waiting for your input".into()),
+            ..Default::default()
+        };
+        for kind in [None, Some("idle"), Some("unknown")] {
+            row.attention_kind = kind.map(str::to_string);
+            assert!(!agent_needs_attention(&row));
+            assert!(!agent_is_working(&row));
+        }
+        for kind in ["permission", "question"] {
+            row.attention_kind = Some(kind.into());
+            assert!(agent_needs_attention(&row));
+            row.reach = "stale".into();
+            assert!(!agent_needs_attention(&row));
+            assert_eq!(status_label(&row), "미확인");
+            row.reach.clear();
+        }
     }
 
     use super::*;

@@ -1778,11 +1778,11 @@ impl Backend for PtyBackend {
                 let waiting = panes
                     .iter()
                     .filter(|p| {
-                        p.get("status")
+                        online && p.get("status")
                             .and_then(|v| v.as_str())
                             .is_some_and(|st| st.contains("wait"))
                             && crate::agent_state::wait_kind_of_row(p)
-                                != Some(crate::agent_state::WaitKind::Idle)
+                                .is_some_and(crate::agent_state::WaitKind::needs_you)
                     })
                     .count();
                 serde_json::json!({
@@ -1947,6 +1947,9 @@ impl Backend for PtyBackend {
         let ws = self.ws.lock().unwrap();
         let mut by_win: std::collections::BTreeMap<usize, Vec<String>> = Default::default();
         for (pane, idx) in &ws.pane_window {
+            if crate::internal_room::InternalRoomKind::from_pane(pane).is_some() {
+                continue;
+            }
             by_win.entry(*idx).or_default().push(pane.clone());
         }
         // 활성 창 = 활성 leaf 집합의 아무 pane 이 속한 창.
@@ -2005,11 +2008,11 @@ impl Backend for PtyBackend {
                 kasa_socket::backend::WindowOverview {
                     idx,
                     active,
-                    panes: stamp_tabs(if active {
+                    panes: stamp_tabs(window_member_rects(&surfaces, if active {
                         active_rects.clone()
                     } else {
                         others.get(&idx).cloned().unwrap_or_default()
-                    }),
+                    })),
                     surfaces,
                     aspect,
                 }
@@ -3794,6 +3797,13 @@ impl Backend for PtyBackend {
 }
 
 fn apply_remote_board_facts(row: &mut PaneActivity, facts: &serde_json::Value) {
+    if facts.get("state_fresh").and_then(|v| v.as_bool()) == Some(false) {
+        row.status = "unknown".into();
+        row.reach = "stale".into();
+        row.waiting_for = None;
+        row.attention_kind = None;
+        return;
+    }
     // 필드가 없는 옛 호스트·연결 유실은 종료로 단정하지 않는다.
     if facts.get("harness").is_none() {
         return;
@@ -3823,7 +3833,8 @@ fn apply_remote_board_facts(row: &mut PaneActivity, facts: &serde_json::Value) {
         current.background = strings("background");
         current.subagents = strings("subagents");
         current.waiting_for = text("waiting_for");
-        current.attention_kind = text("kind");
+        current.attention_kind = crate::agent_state::wait_kind_of_row(facts)
+            .map(|kind| kind.as_str().to_string());
         current.idle_secs = facts.get("idle_secs").and_then(|v| v.as_u64());
         current.context_pct = facts.get("context_pct").and_then(|v| v.as_u64()).unwrap_or(0).min(100) as u8;
         current.branch = text("branch");
@@ -3865,6 +3876,31 @@ mod remote_board_tests {
         let before = row.character.clone();
         apply_remote_board_facts(&mut row, &serde_json::json!({}));
         assert_eq!(row.character, before);
+    }
+
+    #[test]
+    fn remote_attention_preserves_typed_idle_and_rejects_stale_approval() {
+        let mut row = PaneActivity::default();
+        for harness in ["claude", "codex"] {
+            for kind in [None, Some("idle"), Some("permission"), Some("question"), Some("unknown")] {
+                apply_remote_board_facts(&mut row, &serde_json::json!({
+                    "harness": harness, "name": "current student", "status": "waiting",
+                    "kind": kind, "waiting_for": "Claude is waiting for your input"
+                }));
+                assert_eq!(crate::native_board::agent_needs_attention(&row),
+                    matches!(kind, Some("permission" | "question")));
+            }
+        }
+        apply_remote_board_facts(&mut row, &serde_json::json!({
+            "harness": "codex", "status": "waiting", "attention_kind": "question", "kind": "idle",
+            "name": "current student"
+        }));
+        assert_eq!(row.attention_kind.as_deref(), Some("question"));
+        assert!(crate::native_board::agent_needs_attention(&row));
+        apply_remote_board_facts(&mut row, &serde_json::json!({"state_fresh": false}));
+        assert_eq!(row.character.as_deref(), Some("current student"));
+        assert_eq!(row.status, "unknown");
+        assert!(!crate::native_board::agent_needs_attention(&row));
     }
 }
 
@@ -8330,6 +8366,12 @@ mod theme_import_tests {
     }
 }
 
+fn window_member_rects(surfaces: &[String], rects: Vec<PaneRect>) -> Vec<PaneRect> {
+    // Internal room markers become %0 in the numeric tmux layout adapter. They
+    // must not overwrite a real %0 pane's geometry in another room.
+    rects.into_iter().filter(|rect| surfaces.contains(&rect.surface_id)).collect()
+}
+
 /// tmux 배치 트리의 leaf 들을 창 대비 백분율 사각형으로 — 미니맵·`layout` 명령이 같이 쓴다.
 /// 크기가 0 인 배치는 빈 목록.
 fn rects_of(layout: &Layout) -> Vec<PaneRect> {
@@ -8356,6 +8398,40 @@ fn rects_of(layout: &Layout) -> Vec<PaneRect> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod window_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn settings_room_cannot_replace_real_pane_zero_geometry() {
+        let source = kasa_pty::PtyLayout::Split {
+            dir: kasa_pty::SplitDir::Vertical,
+            ratio: 0.5,
+            a: Box::new(kasa_pty::PtyLayout::single("%8")),
+            b: Box::new(kasa_pty::PtyLayout::single("%0")),
+        };
+        let real = window_member_rects(
+            &["%8".into(), "%0".into()],
+            rects_of(&source.to_tmux_layout(100, 100)),
+        );
+        for kind in crate::internal_room::InternalRoomKind::ALL {
+            let marker = kind.pane_id();
+            let ghost = rects_of(&kasa_pty::PtyLayout::single(marker).to_tmux_layout(100, 100));
+            assert_eq!(ghost[0].surface_id, "%0");
+            assert!(window_member_rects(&[marker.into()], ghost).is_empty());
+        }
+        assert_eq!(real.len(), 2);
+        let bottom = real.iter().find(|r| r.surface_id == "%0").unwrap();
+        assert_eq!((bottom.x, bottom.y, bottom.w, bottom.h), (0, 50, 100, 50));
+        let cells = real.into_iter().map(|r| (r.surface_id, [
+            r.x as f32 / 100.0, r.y as f32 / 100.0,
+            r.w as f32 / 100.0, r.h as f32 / 100.0,
+        ])).collect::<Vec<_>>();
+        assert!(matches!(crate::layout::layout_from_rects(&cells),
+            Some(kasa_pty::PtyLayout::Split { dir: kasa_pty::SplitDir::Vertical, .. })));
+    }
 }
 
 #[cfg(test)]

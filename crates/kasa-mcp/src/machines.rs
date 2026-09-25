@@ -1250,10 +1250,105 @@ async fn fetch_panes(client: &reqwest::Client, base: &str) -> Option<Vec<Value>>
         return None;
     }
     let text = resp.text().await.ok()?;
-    serde_json::from_str::<Value>(&text)
+    let mut panes = serde_json::from_str::<Value>(&text)
         .ok()?
         .as_array()
-        .cloned()
+        .cloned()?;
+    if !overlapping_rooms(&panes).is_empty() {
+        if let Some(windows) = fetch_json(client, base, "/windows").await {
+            repair_room_geometry(&mut panes, &windows);
+        }
+    }
+    Some(panes)
+}
+
+fn pane_rect(row: &Value) -> Option<[f64; 4]> {
+    let values = row.get("rect")?.as_array()?;
+    if values.len() != 4 { return None; }
+    let rect = [values[0].as_f64()?, values[1].as_f64()?, values[2].as_f64()?, values[3].as_f64()?];
+    (rect.iter().all(|v| v.is_finite()) && rect[2] > 0.0 && rect[3] > 0.0).then_some(rect)
+}
+
+fn overlapping_rooms(panes: &[Value]) -> std::collections::BTreeSet<u64> {
+    let mut rooms = std::collections::BTreeSet::new();
+    for (index, a) in panes.iter().enumerate() {
+        if a.get("tab_of").is_some_and(|v| !v.is_null()) { continue; }
+        let (Some(window), Some(ar)) = (a.get("window").and_then(Value::as_u64), pane_rect(a)) else { continue };
+        for b in &panes[index + 1..] {
+            if b.get("window").and_then(Value::as_u64) != Some(window)
+                || b.get("tab_of").is_some_and(|v| !v.is_null()) { continue; }
+            let Some(br) = pane_rect(b) else { continue };
+            // Percent rectangles round at their edges; a one-point overlap is harmless.
+            if (ar[0] + ar[2]).min(br[0] + br[2]) - ar[0].max(br[0]) > 1.0
+                && (ar[1] + ar[3]).min(br[1] + br[3]) - ar[1].max(br[1]) > 1.0 {
+                rooms.insert(window);
+            }
+        }
+    }
+    rooms
+}
+
+fn repair_room_geometry(panes: &mut Vec<Value>, overview: &Value) {
+    let Some(windows) = overview.get("windows").and_then(Value::as_array) else { return };
+    for room in overlapping_rooms(panes) {
+        let Some(window) = windows.iter().find(|w| w.get("idx").and_then(Value::as_u64) == Some(room)) else { continue };
+        let (Some(members), Some(rects)) = (window.get("surfaces").and_then(Value::as_array), window.get("panes").and_then(Value::as_array)) else { continue };
+        let mut repaired = panes.clone();
+        for row in repaired.iter_mut().filter(|r| r.get("window").and_then(Value::as_u64) == Some(room)) {
+            let Some(id) = row.get("id").and_then(Value::as_str) else { continue };
+            if id.starts_with('\0') || !members.iter().any(|m| m.as_str() == Some(id)) { continue; }
+            let outer = row.get("tab_of").and_then(Value::as_str).unwrap_or(id);
+            let Some(rect) = rects.iter().find(|r| r.get("surface_id").and_then(Value::as_str) == Some(outer)
+                && members.iter().any(|m| m.as_str() == Some(outer))) else { continue };
+            let candidate = serde_json::json!({"rect": [rect["x"], rect["y"], rect["w"], rect["h"]]});
+            if pane_rect(&candidate).is_some() { row["rect"] = candidate["rect"].clone(); }
+        }
+        // Older sources can publish a settings marker as %0. Only a consistent
+        // room-scoped overview may replace the colliding flattened geometry.
+        if !overlapping_rooms(&repaired).contains(&room) { *panes = repaired; }
+    }
+}
+
+#[cfg(test)]
+mod room_geometry_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn old_source_settings_ghost_does_not_flip_the_mirrored_split() {
+        let mut panes = vec![
+            json!({"id":"%8","window":0,"rect":[0,0,100,50],"tab_of":null}),
+            json!({"id":"%0","window":0,"rect":[0,0,100,100],"tab_of":null}),
+        ];
+        let overview = json!({"windows":[
+            {"idx":0,"surfaces":["%0","%8"],"panes":[
+                {"surface_id":"%8","x":0,"y":0,"w":100,"h":50},
+                {"surface_id":"%0","x":0,"y":50,"w":100,"h":50}]},
+            {"idx":1,"surfaces":["\u{0000}kasaterm-settings"],"panes":[
+                {"surface_id":"%0","x":0,"y":0,"w":100,"h":100}]}
+        ]});
+        assert_eq!(overlapping_rooms(&panes).len(), 1);
+        let original = panes.clone();
+        repair_room_geometry(&mut panes, &json!({"windows":[overview["windows"][1]]}));
+        assert_eq!(panes, original);
+        repair_room_geometry(&mut panes, &overview);
+        assert_eq!(panes[0]["rect"], json!([0,0,100,50]));
+        assert_eq!(panes[1]["rect"], json!([0,50,100,50]));
+        assert!(overlapping_rooms(&panes).is_empty());
+        let valid = panes.clone();
+        repair_room_geometry(&mut panes, &json!({"windows":[]}));
+        assert_eq!(panes, valid);
+    }
+
+    #[test]
+    fn tabs_and_distinct_rooms_may_share_rectangles() {
+        let panes = vec![
+            json!({"id":"%0","window":0,"rect":[0,0,100,100]}),
+            json!({"id":"%1","window":0,"rect":[0,0,100,100],"tab_of":"%0"}),
+            json!({"id":"%2","window":1,"rect":[0,0,100,100]}),
+        ];
+        assert!(overlapping_rooms(&panes).is_empty());
+    }
 }
 
 /// 백그라운드 폴링. 명부는 **매 바퀴 다시 읽는다** — 부팅 때 한 번만 잡으면
@@ -1401,16 +1496,38 @@ async fn watch_changes(client: reqwest::Client, base: String) {
 /// 떠, 미니 미러링된 건데」). 폴링 캐시라 기계가 방금 죽었어도 마지막 모습이 남는다.
 pub fn cached_pane(label: &str, pane: &str) -> Option<Value> {
     let c = cache().lock().ok()?;
+    cached_pane_from(&c, label, pane, false)
+}
+
+pub fn cached_fresh_pane(label: &str, pane: &str) -> Option<Value> {
+    let c = cache().lock().ok()?;
+    cached_pane_from(&c, label, pane, true)
+}
+
+fn cached_pane_from(c: &Cache, label: &str, pane: &str, require_fresh: bool) -> Option<Value> {
     let own = c.get(label)?;
     let seen = if own.at.elapsed() < STALE_AFTER { own } else {
         own.machine_id.as_ref().and_then(|id| c.values()
             .filter(|s| s.machine_id.as_ref() == Some(id)).max_by_key(|s| s.at)).unwrap_or(own)
     };
-    seen
+    let fresh = seen.at.elapsed() < STALE_AFTER;
+    if require_fresh && !fresh {
+        return None;
+    }
+    let mut row = seen
         .panes
         .iter()
         .find(|row| row.get("id").and_then(Value::as_str) == Some(pane))
-        .cloned()
+        .cloned()?;
+    // Retain the last identity for reconnecting, but never replay an old approval as current.
+    row["state_fresh"] = Value::Bool(fresh);
+    if !fresh {
+        row["status"] = Value::String("unknown".into());
+        for field in ["kind", "attention_kind", "waiting_for", "idle_secs", "compact_pct"] {
+            row[field] = Value::Null;
+        }
+    }
+    Some(row)
 }
 
 /// Last known native seats on other devices, including temporarily offline
@@ -1573,6 +1690,30 @@ mod tunnel_backoff_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_pane_keeps_identity_without_replaying_attention() {
+        let seen = |age| Seen {
+            at: Instant::now() - age,
+            panes: vec![serde_json::json!({"id":"%8", "name":"test character",
+                "status":"waiting", "kind":"permission", "waiting_for":"approve"})],
+            sync: true, build: None, machine_id: Some("same-device".into()),
+            rtt_ms: None, device_colors: None,
+        };
+        let mut c = Cache::from([("mini".into(), seen(Duration::ZERO))]);
+        assert_eq!(cached_pane_from(&c, "mini", "%8", true).unwrap()["kind"], "permission");
+        c.get_mut("mini").unwrap().at = Instant::now() - STALE_AFTER;
+        assert!(cached_pane_from(&c, "mini", "%8", true).is_none());
+        let stale = cached_pane_from(&c, "mini", "%8", false).unwrap();
+        assert_eq!(stale["name"], "test character");
+        assert_eq!(stale["status"], "unknown");
+        assert_eq!(stale["state_fresh"], false);
+        assert!(stale["kind"].is_null() && stale["waiting_for"].is_null());
+        c.insert("new-route".into(), seen(Duration::ZERO));
+        let recovered = cached_pane_from(&c, "mini", "%8", true).unwrap();
+        assert_eq!(recovered["state_fresh"], true);
+        assert_eq!(recovered["kind"], "permission");
+    }
 
     #[test]
     fn student_inventory_ignores_mirrors_closed_seats_and_duplicate_routes() {

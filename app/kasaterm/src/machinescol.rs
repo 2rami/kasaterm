@@ -360,7 +360,7 @@ pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)>
     let m = snap
         .iter()
         .find(|v| v.get("label").and_then(|l| l.as_str()) == Some(label.as_str()))?;
-    let row = m
+    let mut row = m
         .get("panes")?
         .as_array()?
         .iter()
@@ -377,6 +377,12 @@ pub(crate) fn remote_pane_facts(id: &str) -> Option<(String, serde_json::Value)>
         if mine != theirs {
             return None;
         }
+    }
+    if m.get("online").and_then(|v| v.as_bool()) != Some(true) {
+        row["status"] = serde_json::json!("unknown");
+        row["attention_kind"] = serde_json::Value::Null;
+        row["kind"] = serde_json::Value::Null;
+        row["status_reason"] = serde_json::Value::Null;
     }
     Some((label, row))
 }
@@ -493,7 +499,7 @@ impl App {
                     .as_ref()
                     .and_then(|(_, r)| crate::agent_state::wait_kind_of_row(r))
                     .map(|k| k.as_str().to_string())
-                    .or_else(|| match self.pane_activity.get(id).map(|v| &v.state) {
+                    .or_else(|| match self.pane_activity.get(id).filter(|_| remote.is_none()).map(|v| &v.state) {
                         Some(crate::agent_state::AgentState::Waiting { kind, .. }) => {
                             Some(kind.as_str().to_string())
                         }

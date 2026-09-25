@@ -240,6 +240,16 @@ pub fn cached_pane(local_id: &str) -> Option<serde_json::Value> {
     crate::machines::cached_pane(&label, &info.remote_id)
 }
 
+pub fn cached_fresh_pane(local_id: &str) -> Option<serde_json::Value> {
+    let info = remote_info(local_id)?;
+    let label = if info.label.is_empty() {
+        crate::machines::label_for_base(&info.base)?
+    } else {
+        info.label
+    };
+    crate::machines::cached_fresh_pane(&label, &info.remote_id)
+}
+
 /// 캐시가 없거나 구 호스트가 실행 상태를 안 주는 것은 종료 증거가 아니다.
 pub fn cached_agent_running(local_id: &str) -> Option<bool> {
     let row = cached_pane(local_id)?;

@@ -34,6 +34,10 @@ pub(crate) enum WaitKind {
 }
 
 impl WaitKind {
+    pub(crate) fn needs_you(self) -> bool {
+        matches!(self, Self::Permission | Self::Question)
+    }
+
     pub(crate) fn parse(kind: &str) -> Option<Self> {
         match kind {
             "permission" => Some(Self::Permission),
@@ -80,7 +84,7 @@ impl AgentState {
     /// 다음 지시를 기다림」이라 보드에는 waiting/idle 로 실리지만 주황 깜빡임·알림·tell 거부는
     /// 안 받는다(2026-09-18 「선택하는 거 아닌데 왜 주황색 깜빡임」).
     pub(crate) fn needs_you(&self) -> bool {
-        matches!(self, Self::Waiting { kind: WaitKind::Permission | WaitKind::Question, .. })
+        matches!(self, Self::Waiting { kind, .. } if kind.needs_you())
     }
     /// 같은 상태인가(이유·라벨 글자는 무시) — 전이 관찰과 `since` 계산용.
     pub(crate) fn same_kind(&self, other: &Self) -> bool {
@@ -195,29 +199,27 @@ const AGY_ACTIVE: Duration = Duration::from_secs(15);
 /// 방치를 알리는 판정 이유. 종류 칸을 안 보내는 기계에서는 이 글자가 유일한 단서다.
 pub(crate) const IDLE_PROMPT: &str = "idle prompt";
 
-/// 보드 행에서 기다림의 **종류**를 읽는다 — `attention_kind` 칸이 먼저고, 없으면 판정
-/// 이유가 유일한 단서다. 종류를 안 보내는 옛 판 기계에서 이것마저 없으면 읽는 쪽이 모든
-/// 기다림을 승인으로 쳐, 그냥 쉬는 학생이 주황으로 깜빡인다. 거울 판정과 기기 목록이
-/// 같은 답을 내려면 둘 다 여기를 거쳐야 한다.
+/// 보드와 터미널 미러가 같은 상태를 서로 다른 필드명으로 보낸다.
+/// 종류를 잃어버린 대기를 승인으로 추측하면 끝난 작업도 사람을 계속 부르게 된다.
 pub(crate) fn wait_kind_of_row(row: &serde_json::Value) -> Option<WaitKind> {
     row.get("attention_kind")
         .and_then(|v| v.as_str())
         .and_then(WaitKind::parse)
+        .or_else(|| row.get("kind").and_then(|v| v.as_str()).and_then(WaitKind::parse))
         .or_else(|| {
             let why = row.get("status_reason")?.as_str()?;
             (why == IDLE_PROMPT).then_some(WaitKind::Idle)
         })
 }
 
-/// 다른 기계가 보낸 낱말을 되살린다. `kind` 는 그쪽 보드의 `attention_kind` — 없으면
-/// 승인으로 친다. 방치(`idle`)를 승인으로 잘못 보는 편이 그 반대보다 덜 위험해서가
-/// 아니라, 옛 판 기계는 그 칸을 안 보내기 때문이다. 보내 주면 그대로 가른다.
+/// 오래된 호스트가 종류를 생략한 대기는 사람 차례인지 확인할 수 없다.
 fn remote_state(word: &str, reason: Option<&str>, kind: Option<WaitKind>) -> AgentState {
     match word {
         "working" => AgentState::Working,
+        "compacting" => AgentState::Compacting,
         "idle" => AgentState::Idle,
-        "waiting" => AgentState::Waiting {
-            kind: kind.unwrap_or(WaitKind::Permission),
+        "waiting" if kind.is_some() => AgentState::Waiting {
+            kind: kind.unwrap(),
             reason: reason.unwrap_or("").to_string(),
         },
         _ => AgentState::Unknown,
@@ -354,16 +356,6 @@ pub(crate) fn resolve(e: &Evidence) -> (AgentState, &'static str) {
             AgentState::Waiting { kind: WaitKind::Permission, reason: reason.clone() },
             "screen approval",
         );
-    }
-    if matches!(e.official, Some(Official::Waiting { error: false })) {
-        let signal_newer = e.hook_beat.is_some_and(|a| a < Duration::from_secs(5))
-            || e.transcript_age.is_some_and(|a| a < Duration::from_secs(5));
-        if !signal_newer {
-            return (
-                AgentState::Waiting { kind: WaitKind::Permission, reason: "승인 대기".into() },
-                "official waiting",
-            );
-        }
     }
     if let Some(age) = e.compact_age {
         let closed_after = e
@@ -525,7 +517,7 @@ impl StateHub {
             let harness = session.as_ref().and_then(|p| p.active_agent());
             let mut evidence = Evidence { harness, ..Default::default() };
             if kasa_mcp::remote::is_remote_pane(id) {
-                let facts = kasa_mcp::remote::cached_pane(id);
+                let facts = kasa_mcp::remote::cached_fresh_pane(id);
                 let word = facts
                     .as_ref()
                     .and_then(|v| v.get("status").and_then(|s| s.as_str()))
@@ -876,9 +868,9 @@ mod tests {
         assert!(!state.needs_you(), "방치 알림은 주황으로 부르지 않는다");
         e.remote = Some(("waiting".into(), Some("Bash".into()), Some(WaitKind::Permission)));
         assert!(resolve(&e).0.needs_you());
-        // 옛 판 기계는 그 칸을 안 보낸다 — 그때는 종전대로 승인으로 친다.
+        // 종류가 없는 대기는 승인이라고 단정할 수 없다.
         e.remote = Some(("waiting".into(), None, None));
-        assert!(resolve(&e).0.needs_you());
+        assert_eq!(resolve(&e).0, AgentState::Unknown);
     }
 
     #[test]
@@ -889,6 +881,39 @@ mod tests {
         assert_eq!(read(&pane("permission prompt")), None, "모르는 이유는 지어내지 않는다");
         let with_kind = serde_json::json!({"attention_kind": "question", "status_reason": IDLE_PROMPT});
         assert_eq!(read(&with_kind), Some(WaitKind::Question), "칸이 있으면 그것이 먼저다");
+    }
+
+    #[test]
+    fn terminal_mirror_and_board_preserve_the_same_attention_kind() {
+        assert_eq!(remote_state("compacting", None, None), AgentState::Compacting);
+        for harness in ["claude", "codex"] {
+            for kind in ["idle", "permission", "question"] {
+                let mirror = serde_json::json!({"status":"waiting", "kind":kind, "harness":harness,
+                    "waiting_for":"waiting for your input"});
+                let board = serde_json::json!({"status":"waiting", "attention_kind":kind});
+                assert_eq!(wait_kind_of_row(&mirror), wait_kind_of_row(&board));
+                let state = remote_state("waiting", None, wait_kind_of_row(&mirror));
+                assert_eq!(state.needs_you(), kind != "idle");
+            }
+        }
+        let canonical = serde_json::json!({"attention_kind":"idle", "kind":"permission"});
+        assert_eq!(wait_kind_of_row(&canonical), Some(WaitKind::Idle));
+        for row in [serde_json::json!({"status":"waiting"}), serde_json::json!({"kind":"unknown"})] {
+            assert_eq!(remote_state("waiting", None, wait_kind_of_row(&row)), AgentState::Unknown);
+        }
+    }
+
+    #[test]
+    fn unclassified_official_wait_is_not_an_approval_request() {
+        let mut e = Evidence { harness: Some(AgentKind::Claude),
+            official: Some(Official::Waiting { error: false }), ..Default::default() };
+        assert_eq!(resolve(&e).0, AgentState::Unknown);
+        e.attention = Some((WaitKind::Idle, "next instruction".into(), Some(secs(60))));
+        assert!(!resolve(&e).0.needs_you());
+        e.attention = Some((WaitKind::Question, "choose".into(), Some(secs(1))));
+        assert!(resolve(&e).0.needs_you());
+        e.hook_turn = Some((HookTurn::Closed, Duration::ZERO));
+        assert_eq!(resolve(&e).0, AgentState::Idle);
     }
 
     #[test]

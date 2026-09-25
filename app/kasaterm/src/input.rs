@@ -4906,10 +4906,10 @@ pub(crate) enum ApprovalPrompt {
 ///   - "(y/n)" counts only on the LAST non-blank row (the cursor line). An
 ///     answered shell prompt scrolls up but stays on screen ("proceed? (y/n) y"),
 ///     so matching it anywhere re-flags long after it was answered;
-///   - a Menu match is REJECTED if a bare chevron row ("❯" with nothing after
-///     it) sits BELOW it. That bare "❯ " is claude's idle input line; a *live*
+///   - a Menu match is REJECTED if a non-option chevron row sits BELOW it.
+///     An input line can contain a placeholder or a draft; a *live*
 ///     approval menu replaces the input line with its options, so a real menu
-///     never has a bare chevron under it. When one does, the "menu" text is
+///     never has an ordinary input line under it. When one does, the "menu" text is
 ///     just quoted history in the transcript (e.g. a `peek` dump of another
 ///     pane's prompt) — matching it made an idle orchestrator pane toast itself and,
 ///     worse, a chip click injected Enter into its own input line. (사용자
@@ -4923,41 +4923,41 @@ pub(crate) fn rows_show_approval_prompt(cells: &[Vec<GridCell>]) -> Option<Appro
     // 메뉴는 옵션 + 안내문으로 working 스캔(10행)보다 길 수 있어 14행까지 본다.
     let start = (last + 1).saturating_sub(14);
     let mut menu_found = false;
-    let mut bare_chevron_below_menu = false;
+    let mut input_below_menu = false;
     for (i, row) in cells[start..=last].iter().enumerate() {
         let line: String = row
             .iter()
             .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
             .collect();
-        if let Some(pos) = line.find(['❯', '›']) {
-            let rest = line[pos + line[pos..].chars().next().unwrap().len_utf8()..].trim();
-            if rest.is_empty() {
-                // bare "❯ " = claude idle 입력행. 이미 찾은 메뉴 후보 아래에
-                // 있으면 그 메뉴는 인용된 가짜 → 뒤에서 reject.
-                if menu_found {
-                    bare_chevron_below_menu = true;
-                }
-                continue;
-            }
+        let lower = line.to_lowercase();
+        let inline_yesno = start + i == last && (lower.contains("(y/n)") || lower.contains("[y/n]"));
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix('❯').or_else(|| trimmed.strip_prefix('›')) {
+            let rest = rest.trim();
             // "❯ 12. …" — 커서가 올라간 번호 옵션.
             let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
             if digits > 0 && rest[digits..].starts_with('.') {
                 menu_found = true;
                 continue;
             }
+            // A draft or Codex placeholder still marks the normal composer below history.
+            input_below_menu |= menu_found;
+            if inline_yesno {
+                return Some(ApprovalPrompt::YesNo);
+            }
+            continue;
         }
-        let lower = line.to_lowercase();
         // claude 승인 메뉴의 헤더 — 메뉴 행이 잘려도(좁은 pane) 이 문구로 Menu 판정.
         if lower.contains("do you want to proceed") {
             menu_found = true;
             continue;
         }
         // YesNo 는 last 행에서만(인라인 셸 질문). 메뉴와 독립이라 즉시 반환.
-        if start + i == last && (lower.contains("(y/n)") || lower.contains("[y/n]")) {
+        if inline_yesno {
             return Some(ApprovalPrompt::YesNo);
         }
     }
-    if menu_found && !bare_chevron_below_menu {
+    if menu_found && !input_below_menu {
         return Some(ApprovalPrompt::Menu);
     }
     None
@@ -5277,6 +5277,21 @@ mod working_scan_tests {
             rows_show_approval_prompt(&[row("❯ 12. 마지막 옵션")]),
             Some(ApprovalPrompt::Menu)
         );
+    }
+
+    #[test]
+    fn codex_live_choices_are_distinct_from_history_above_the_composer() {
+        for prompt in ["› Proceed? (y/n)", "❯ Continue? [y/n]"] {
+            assert_eq!(rows_show_approval_prompt(&[row(prompt)]), Some(ApprovalPrompt::YesNo));
+        }
+        let menu = vec![row("› 1. Yes, proceed (y)"), row("  2. No, and tell Codex what to do differently (esc)")];
+        assert_eq!(rows_show_approval_prompt(&menu), Some(ApprovalPrompt::Menu));
+        for composer in ["› ", "› Explain this codebase", "› 계속 진행해줘", "❯ 다음 작업"] {
+            let mut cells = menu.clone();
+            cells.push(row(composer));
+            assert_eq!(rows_show_approval_prompt(&cells), None, "{composer}");
+        }
+        assert_eq!(rows_show_approval_prompt(&[row("The old choice was › 1. Yes, proceed")]), None);
     }
 
     // compact 알림을 잡는가. 문구는 claude 번들 실측(`Compacting conversation`·

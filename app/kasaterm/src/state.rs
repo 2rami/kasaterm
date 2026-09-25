@@ -449,10 +449,13 @@ pub(crate) struct MachinesColRow {
 impl MachinesColRow {
     /// 사람 손이 있어야 풀리는 기다림인가 — 승인·질문뿐이다. 60초 방치(`idle`)는
     /// 「답을 마치고 다음 지시를 기다림」이라 쉬는 것과 다르지 않아 주황으로 안 부른다
-    /// (`agent_state::AgentState::needs_you` 와 같은 규칙). 종류를 안 보내는 옛 판
-    /// 기계는 승인으로 친다 — 가를 근거가 없다.
+    /// (`agent_state::AgentState::needs_you` 와 같은 규칙). 종류가 없으면 승인 근거도 없다.
     pub(crate) fn needs_you(&self) -> bool {
-        self.status.contains("wait") && self.attention_kind.as_deref() != Some("idle")
+        !self.closed
+            && matches!(self.status.as_str(), "waiting" | "attention" | "blocked")
+            && self.attention_kind.as_deref()
+                .and_then(crate::agent_state::WaitKind::parse)
+                .is_some_and(crate::agent_state::WaitKind::needs_you)
     }
 }
 
