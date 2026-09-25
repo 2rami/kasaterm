@@ -166,44 +166,14 @@ void main() {
     expect(freshSecsLabel(null), '언제인지 모름');
   });
 
-  testWidgets('예시 판 — 띠·거노 차례·기기 단추', (tester) async {
-    tester.view.physicalSize = const Size(390 * 3, 844 * 3);
-    tester.view.devicePixelRatio = 3;
-    addTearDown(tester.view.reset);
-    final server = Server(Uri.parse('http://127.0.0.1:1/'));
-    final desk = NachoDesk(server);
-    final students = StudentLookup(server);
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: ThemeData(colorSchemeSeed: const Color(0xff4a90e2)),
-        home: MediaQuery(
-          data: const MediaQueryData(
-            size: Size(390, 844),
-            disableAnimations: true,
-          ),
-          child: Scaffold(
-            body: WorkBoardView(
-              desk: desk,
-              server: server,
-              students: students,
-              demo: true,
-              onOpenTask: (_) {},
-              onOpenPane: (_) {},
-              onGoChat: () {},
-            ),
-          ),
-        ),
-      ),
-    );
-    await tester.pump();
+  // 동작 확인과 골든 비교를 가른다 — 골든은 Flutter 판마다 글자 번짐이 달라 어긋나는데,
+  // 한 검사 안에 두면 그 실패가 뒤의 확인(허용 단추가 꺼져 있나)까지 막는다.
+  testWidgets('예시 판 — 띠·거노 차례·기기 단추, 승인 시트의 허용은 꺼짐', (tester) async {
+    final board = await _pumpDemoBoard(tester);
     expect(find.text('예시 데이터 — 실제 작업이 아니에요'), findsOneWidget);
     expect(find.text('거노 차례 2'), findsOneWidget);
     expect(find.text('기기 2/3'), findsOneWidget);
     expect(find.text('검토'), findsOneWidget);
-    await expectLater(
-      find.byType(Scaffold),
-      matchesGoldenFile('goldens/workboard_demo.png'),
-    );
 
     await tester.tap(find.text('검토'));
     await tester.pumpAndSettle();
@@ -215,13 +185,63 @@ void main() {
     );
     expect(allow.onPressed, isNull, reason: '서버가 범위·만료·1회용을 검증하기 전엔 켜지 않는다');
     expect(find.textContaining('Face ID 는 이 폰의 잠금 확인일 뿐'), findsOneWidget);
+    await board.close(tester);
+  });
+
+  testWidgets('예시 판 골든 — 판과 승인 시트', (tester) async {
+    final board = await _pumpDemoBoard(tester);
+    await expectLater(
+      find.byType(Scaffold),
+      matchesGoldenFile('goldens/workboard_demo.png'),
+    );
+    await tester.tap(find.text('검토'));
+    await tester.pumpAndSettle();
     await expectLater(
       find.byType(Scaffold),
       matchesGoldenFile('goldens/workboard_approval.png'),
     );
-
-    await tester.pumpWidget(const SizedBox());
-    desk.dispose();
-    students.dispose();
+    await board.close(tester);
   });
+}
+
+/// 390×844 폰에 예시 데이터 판을 띄운다. 동작 줄이기를 켜 움직이는 그림 대신 정지 얼굴로.
+Future<({Future<void> Function(WidgetTester) close})> _pumpDemoBoard(
+  WidgetTester tester,
+) async {
+  tester.view.physicalSize = const Size(390 * 3, 844 * 3);
+  tester.view.devicePixelRatio = 3;
+  addTearDown(tester.view.reset);
+  final server = Server(Uri.parse('http://127.0.0.1:1/'));
+  final desk = NachoDesk(server);
+  final students = StudentLookup(server);
+  await tester.pumpWidget(
+    MaterialApp(
+      theme: ThemeData(colorSchemeSeed: const Color(0xff4a90e2)),
+      home: MediaQuery(
+        data: const MediaQueryData(
+          size: Size(390, 844),
+          disableAnimations: true,
+        ),
+        child: Scaffold(
+          body: WorkBoardView(
+            desk: desk,
+            server: server,
+            students: students,
+            demo: true,
+            onOpenTask: (_) {},
+            onOpenPane: (_) {},
+            onGoChat: () {},
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.pump();
+  return (
+    close: (WidgetTester t) async {
+      await t.pumpWidget(const SizedBox());
+      desk.dispose();
+      students.dispose();
+    },
+  );
 }
