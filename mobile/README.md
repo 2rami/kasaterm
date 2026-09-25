@@ -1,4 +1,4 @@
-# kasaterm mobile — 아이폰 원격 조종 앱 (Flutter)
+# 카사모바일 — 나쵸와 얘기하고 맡긴 일을 보는 아이폰 앱 (Flutter)
 
 카사텀 서버가 폰 웹 화면에 내주는 통로(`term/panes` · `term/ws?grid=1` · `send` · `term/shot`)에
 그대로 붙는 네이티브 앱이다. 학생 목록을 보고, 한 학생의 화면을 격자로 보고, 답장을 보내고,
@@ -22,11 +22,12 @@ lib/
   main.dart            테마(SCHALE 흰/연하늘 표면·네이비 잉크) · 첫 화면 분기
   server.dart          Server(root) — uri/wsUri/me/panes/sessions/machines/shot/send · describe() 는 slug 를 가린다
   address_store.dart   주소(slug 포함) → Keychain(flutter_secure_storage)
+  nacho.dart           나쵸 창구 — 대화 원장 이어 받기(순번) · 같은 id 재전송 · 작업 장부 읽기
   hub_model.dart       기계→방→학생 트리 · 5초 폴링 · 대기→작업중→쉼 정렬 · 대기 전이 배지+햅틱
   grid.dart            순수 Dart 격자 모델 — dirty 행 교체 · 글자 폭 표 · 256 팔레트
   term_session.dart    WS 수명(백오프·gone·pause/resume) · 키 바이트 · 답장 · 그림 폴링
   grid_canvas.dart     CustomPainter 렌더러(행 캐시) + InteractiveViewer 폭 맞춤·핀치
-  screens/             connect · hub · terminal · settings
+  screens/             nacho_home(첫 화면: 대화·작업) · nacho_task · connect · hub · terminal · settings
 tool/devproxy.dart     크롬 개발용 같은 출처 역프록시
 test/                  유닛 · 골든(goldens/) · live/(실서버, KASA_ROOT 있을 때만)
 ```

@@ -166,3 +166,55 @@ kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> \
   ②갓 뜬 codex 는 rollout 이 없어 `tell` 이 「conversation ambiguous」로 미룬다 — 첫 브리프는
   나쵸가 지금 하듯 `/send`(+Enter)로 넣는다. 그리고 codex 는 명령이 둘 다 실패했는데도
   `done succeeded` 를 쳤다 — 나쵸는 `done` 요약이 아니라 **인박스 봉투와 실제 변경**을 믿어야 한다.
+
+## 카사모바일 앱 창구 (2026-09-25)
+
+폰 앱(카사모바일)은 나쵸와 얘기하는 **주 창구**다. 디스코드·슬랙은 보조 창구로 남는다. 바탕화면 펫과
+카사모바일은 같은 나쵸의 두 화면이라 작업 공간이 하나다(대화 원장 하나·작업 장부 하나).
+
+```
+폰 ── /u/<slug>/nacho/app/<rest> ──▶ 이 허브(kasa-mcp nacho_relay.rs) ── <url>/api/app/<rest> ──▶ 나쵸 askserve(:8792)
+```
+
+- **신원은 허브가 정한다.** 주인 주소(`owner`)로 온 요청만 받고, 폰이 보낸 헤더는 하나도 옮기지 않는다.
+  허브가 `X-Kasa-User`(퍼센트 인코딩)·`X-Kasa-Owner: 1`·`X-Kasa-Machine`·`X-Nacho-Token`·
+  `X-Journal-Request: 1` 을 새로 싣는다. 손님 주소·주소 없는 로컬 호출은 403, 경로에 `..` 이 끼면 404.
+- **닫힘이 기본.** 넘길 곳은 펫 대리인과 같은 서술자 `~/.config/kasaterm/nacho-ask.json`(또는
+  `NACHO_ASK_URL`), 키는 `~/.config/nacho-ask.key`(또는 `NACHO_ASK_TOKEN_FILE`). 서술자가 없으면
+  `nacho_unconfigured`, 키가 없으면 `nacho_key_missing` 으로 503. 나쵸 쪽도 키가 없으면 앱 창구를 닫는다.
+- `m/<기계>/` 로 다른 기계를 거치지 않는다 — 그 길은 신원 헤더를 버린다. 폰이 붙은 허브가 서술자의
+  나쵸로 **직접** 넘긴다(미니 허브는 `127.0.0.1:8792`, 맥북 허브는 메시 주소).
+
+나쵸 쪽 계약(`nacho-neko/nacho/adapters/appserve.py` 머리말이 정본):
+
+| 경로 | 뜻 |
+|---|---|
+| `GET events?tail=N` · `GET events?after=<seq>&wait=<초>` | 대화 원장. 순번(seq)으로 이어 받는다 — 끊겼다 붙어도 빠짐·겹침이 없다 |
+| `POST messages {id, text, task?, rev?}` | 한 말. 같은 id·같은 내용은 처음 영수증, 내용이 다르면 409. `task` 가 있으면 그 일에 대한 방향 수정이고, 싣는 `rev` 가 지금 판과 다르면 409(`stale_rev`) |
+| `GET tasks` · `GET tasks/<id>` | 작업 장부 그대로 — 판단 필요·진행 중·끝남/실패, 프로젝트(학생 작업 폴더). 없는 검증·사진은 비어 온다 |
+| `GET tasks/<id>/shot` · `GET files/<seq>/<i>` | 나쵸가 실제로 찍은 결과 사진·답에 붙은 그림(원장에 적힌 경로만) |
+
+- 접수 상태: `accepted → queued(앞 턴을 기다림) → running → answered | failed | refused | interrupted | restart`.
+  도는 턴은 끊지 않는다. 나쵸가 다시 뜨면 돌던 턴은 `interrupted` 로 닫고 몰래 다시 돌리지 않는다.
+- 펫 말풍선에서 오간 말은 원장에 `surface: "pet"` 로 옮겨 적힌다(보이기만, 턴은 펫 자리에서 한 번).
+- 확인 버튼이 필요한 도구(머지·pane 입력·화면 조작)는 앱 턴에서 돌지 않는다 — 원장에 「기존 창구 확인
+  필요」가 남는다. 작업 단위 승인(`approval_needed`)도 앱에서 풀지 않는다.
+
+### 후속: 앱 안 승인(Face ID) 설계 — 아직 구현하지 않음
+
+로컬 Face ID 성공(참/거짓)을 서버가 믿는 방식은 쓰지 않는다. 기기 키 서명으로 **특정 요청 하나**를 승인한다.
+
+1. 등록(주인이 직접, 한 번): 앱이 Secure Enclave 에 P-256 키를 만든다(`kSecAttrTokenIDSecureEnclave`,
+   접근 제어 `.privateKeyUsage` + `.biometryCurrentSet`). 공개키를 나쵸에 올리고, 나쵸는 **기존 창구(디코/
+   슬랙) 확인 버튼**으로 등록을 승인받은 뒤에만 기기 목록에 넣는다. 생체 정보가 바뀌면 키가 무효가 되어
+   재등록해야 한다. 폐기는 나쵸 쪽 목록에서 지운다.
+2. 승인: 나쵸가 승인 요청마다 도전값 `{nonce, task_id, action, target, rev, exp}` 을 만든다(1회용, 짧은 만료).
+   앱은 그 내용을 사람에게 보이고 Face ID 로 키를 풀어 **정규화한 도전값 전체**에 서명한다. 나쵸는 서명·
+   기기·nonce 미사용·만료·task_id/action/target/rev 일치를 모두 확인한 뒤에만 그 한 동작을 진행한다.
+   재전송(같은 nonce)·변조(내용 불일치)·다른 작업 재사용·만료·폐기된 기기는 전부 거부(닫힘).
+3. 범위: 이 승인은 나쵸 작업의 동작 승인이다. 맥 비밀번호 자동 입력·1Password 잠금 해제·비밀번호 원문
+   전송/저장은 하지 않는다. 1Password 는 공식 기능(데스크톱 앱 연동 CLI 의 Touch ID 잠금 해제 — 새
+   터미널마다 인증, 10분 세션·12시간 상한)만 사람이 직접 쓴다. 서비스 계정 토큰으로 사람 인증을
+   대신하지 않는다.
+4. 검사 계획: 서명 검증 단위 검사(정상·nonce 재사용·만료·필드 변조·다른 task_id·폐기 기기), 등록 흐름,
+   앱 쪽 Face ID 실패/취소 시 아무것도 안 보내는지. Face ID 자체는 실기기에서만 확인된다.

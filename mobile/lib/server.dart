@@ -917,6 +917,42 @@ class Server {
   Uri noteImage(int id, {String? machine}) =>
       uri('term/notes/$id.png', machine: machine);
 
+  /// 나쵸 앱 창구(`nacho/app/…`). 이 허브가 주인 주소로 확인한 신원으로 나쵸에 넘긴다 —
+  /// 다른 기계로 건너가는 `m/` 는 안 붙인다(신원이 그 길에서 떨어진다).
+  /// 4xx 도 던지지 않고 (상태, 본문)으로 돌려준다 — 거절 까닭(`error`)이 화면에 나가야 해서다.
+  Future<(int, Map<String, Object?>)> nacho(
+    String path, {
+    Map<String, String>? query,
+    Map<String, Object?>? body,
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    final u = uri('nacho/app/$path', query: query);
+    final http.Response res;
+    try {
+      res = body == null
+          ? await _client.get(u).timeout(timeout)
+          : await _client
+                .post(
+                  u,
+                  headers: {'content-type': 'application/json'},
+                  body: jsonEncode(body),
+                )
+                .timeout(timeout);
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    Object? j;
+    try {
+      j = jsonDecode(utf8.decode(res.bodyBytes));
+    } catch (_) {
+      j = null;
+    }
+    return (res.statusCode, j is Map ? j.cast<String, Object?>() : <String, Object?>{});
+  }
+
+  Uri nachoUri(String path, {Map<String, String>? query}) =>
+      uri('nacho/app/$path', query: query);
+
   void close() => _client.close();
 }
 
