@@ -4694,7 +4694,7 @@ async fn term_changes_handler(q: Query<std::collections::HashMap<String, String>
     let since = q.get("since").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
     let wait = q.get("wait").and_then(|v| v.parse::<u64>().ok()).unwrap_or(15).min(15);
     let epoch = crate::changes::wait_past(since, std::time::Duration::from_secs(wait)).await;
-    Json(serde_json::json!({ "epoch": epoch }))
+    Json(serde_json::json!({ "epoch": epoch, "status": crate::changes::status_aware() }))
 }
 
 async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {

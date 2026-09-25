@@ -1220,6 +1220,9 @@ impl App {
         // 어느 pane 이든 판정이 달라졌으면 보드도 바로 따라오게 관측을 깨운다 — 훅이 없는
         // 하네스(codex·agy)의 기록 변화는 이 틱에서만 보인다.
         let mut state_changed = false;
+        // 폰 목록이 매달린 변경 번호는 이 기계 몸통의 전이만 올린다 — 거울의 전이는
+        // 저쪽 기계가 제 번호로 알리고, 여기서도 올리면 두 기계가 서로를 다시 읽게 된다.
+        let mut own_moved = false;
         for (id, tab) in &panes {
             let resolved = self.collab.hub.resolved(tab).or_else(|| self.collab.hub.resolved(id));
             let state = resolved.as_ref().map(|r| r.state.clone()).unwrap_or_default();
@@ -1252,6 +1255,8 @@ impl App {
             let running = bg_active || state.is_busy();
             let prev = self.pane_activity.get(id).map(|a| a.state.clone());
             state_changed |= prev.as_ref() != Some(&state);
+            own_moved |= !prev.as_ref().is_some_and(|p| p.same_kind(&state))
+                && !kasa_mcp::remote::is_remote_pane(tab);
             let evs = crate::agent_transitions::transitions(prev.as_ref(), &state);
             self.pane_activity
                 .entry(id.clone())
@@ -1292,6 +1297,7 @@ impl App {
         if state_changed {
             kasa_mcp::board_service::poke();
         }
+        kasa_mcp::changes::status_tick(own_moved);
         // 계정 전환 때 일하고 있어서 못 되띄운 pane — 방금 갱신한 활동 상태가
         // idle 로 떨어졌으면 여기서 따라 돌린다(같은 300ms 박자, 표시가 없으면 공짜).
         let switched = self.run_pending_account_restarts();
