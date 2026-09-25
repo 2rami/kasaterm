@@ -1032,9 +1032,12 @@ impl Backend for PtyBackend {
         self.proxy
             .send_event(UserEvent::SocketSpawnShellAt(at.clone(), tx))
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
-        Ok(rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap_or_default())
+        Ok(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or_else(|_| {
+            kasa_socket::backend::SpawnShellReply {
+                error: Some("원본 앱이 5초 안에 답하지 않았어요".into()),
+                ..Default::default()
+            }
+        }))
     }
 
     fn transfer_snapshot(&self) -> Result<kasa_socket::transfer::MachineSnapshot> {
@@ -1714,7 +1717,7 @@ impl Backend for PtyBackend {
                 Err(_) => anyhow::bail!("새 방 응답 없음(60초)"),
             };
         }
-        let at = SpawnShellAt { cwd: text("cwd"), window, beside: text("beside"), tab_of: text("tab_of") };
+        let at = SpawnShellAt { cwd: text("cwd"), window, beside: text("beside"), tab_of: text("tab_of"), ..Default::default() };
         let (surface, window) = kasa_mcp::remote::spawn_shell_pane_at(&m.base, &at, None)?;
         let how = if at.tab_of.is_some() { "탭으로" } else if at.beside.is_some() { "옆에" } else { "활성 방에" };
         Ok(serde_json::json!({
@@ -1920,6 +1923,12 @@ impl Backend for PtyBackend {
         });
         let _ = self.proxy.send_event(UserEvent::SocketSetRatioBetween(pairs.to_vec(), ratio, dir));
         Ok(())
+    }
+
+    fn layout_barrier(&self, client: u64, seq: u64) -> Result<()> {
+        self.proxy
+            .send_event(UserEvent::LayoutBarrier(client, seq))
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))
     }
 
     fn device_colors(&self) -> Result<serde_json::Value> {

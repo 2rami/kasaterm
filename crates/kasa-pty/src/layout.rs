@@ -143,7 +143,7 @@ pub fn fleet_capacity(
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PtyLayout {
     Leaf {
         pane_id: String,

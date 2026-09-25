@@ -2033,9 +2033,9 @@ async fn spawn_shell_handler(
         Ok(reply) if !reply.surface.is_empty() => {
             serde_json::json!({ "ok": true, "surface": reply.surface, "window": reply.window })
         }
-        Ok(_) => serde_json::json!({
+        Ok(reply) => serde_json::json!({
             "ok": false,
-            "error": "pane 을 못 세웠어요(설정 화면이 앞이거나 쪼갤 자리가 없음)"
+            "error": reply.error.unwrap_or_else(|| "pane 을 못 세웠어요(설정 화면이 앞이거나 쪼갤 자리가 없음)".into())
         }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
@@ -6668,6 +6668,18 @@ fn viewport_dimensions(v: &serde_json::Value) -> Option<(u16, u16)> {
     Some((cols as u16, rows as u16))
 }
 
+/// 방 배치 채널 — 거울이 붙어 트리를 받고 분할선 명령을 보낸다(`layout_feed`).
+async fn term_layout_ws_handler(
+    backend: Arc<dyn Backend>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> axum::response::Response {
+    if !ws_origin_ok(&headers) {
+        return (axum::http::StatusCode::FORBIDDEN, "cross-origin websocket refused").into_response();
+    }
+    ws.on_upgrade(move |socket| crate::layout_feed::serve(socket, backend)).into_response()
+}
+
 async fn term_ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
@@ -7426,6 +7438,7 @@ pub fn spawn_http_server_opts(
                 let migrate_backend = backend.clone();
                 let persona_backend = backend.clone();
                 let panes_backend = backend.clone();
+                let layout_ws_backend = backend.clone();
                 let gitcol_backend = backend.clone();
                 let colors_backend = backend.clone();
                 let clip_backend = backend.clone();
@@ -7621,6 +7634,12 @@ pub fn spawn_http_server_opts(
                         get(move || term_panes_handler(panes_backend.clone())),
                     )
                     .route("/term/changes", get(term_changes_handler))
+                    .route(
+                        "/term/layout/ws",
+                        get(move |headers: HeaderMap, ws: WebSocketUpgrade| {
+                            term_layout_ws_handler(layout_ws_backend.clone(), headers, ws)
+                        }),
+                    )
                     .route("/term/gitop", post(term_gitop_post))
                     .route(
                         "/term/gitcol",

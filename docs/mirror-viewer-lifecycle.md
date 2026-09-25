@@ -4,6 +4,13 @@ A mirror owns its layout and reading position, not the source workspace.
 
 - Split/tab on a mirror creates a local shell. Resolve the viewer's mapped local
   directory; never spawn on the source machine or its currently selected room.
+- A view window takes the source room's BSP tree as pushed over `/term/layout/ws`
+  (`layout_feed` on the source, `layout_watch` + `mirror_layout.rs` on the viewer).
+  Never rebuild it from cell rects: rects cannot tell which seam was cut first.
+  Rect polling remains only for sources without that route. Divider drags go over
+  the same socket; a snapshot whose `ack` is below the last sent op is stale and
+  ignored. Splits send `dir`/`before` so the source cuts the same axis, and anchor
+  on a neighbour when the mirrored source pane is no longer in any room.
 - A newly created source pane follows into an existing matching mirror room.
   The initial snapshot is a baseline, not a request to open historical panes.
   Locally dismissed mirrors stay dismissed; mirrors are never mirrored again.

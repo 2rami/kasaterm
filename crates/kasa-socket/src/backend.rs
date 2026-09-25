@@ -21,6 +21,23 @@ pub enum SeamAxis {
     Vertical,
 }
 
+impl SeamAxis {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.to_ascii_lowercase().as_str() {
+            "horizontal" => Some(Self::Horizontal),
+            "vertical" => Some(Self::Vertical),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Horizontal => "horizontal",
+            Self::Vertical => "vertical",
+        }
+    }
+}
+
 /// Direction passed to `Backend::split_surface`. Mirrors cmux's
 /// `surface.split` `direction` parameter exactly so the JSON enum
 /// values are stable wire shapes.
@@ -502,10 +519,15 @@ pub enum SpawnWindow {
 pub struct SpawnShellAt {
     pub cwd: Option<String>,
     pub window: Option<SpawnWindow>,
-    /// 이 pane 옆에 쪼개서(그 pane 이 든 방, 축은 그 칸의 종횡비로).
+    /// 이 pane 옆에 쪼개서(그 pane 이 든 방). 축은 `dir`, 없으면 그 칸의 종횡비로.
     pub beside: Option<String>,
     /// 이 pane 의 탭으로.
     pub tab_of: Option<String>,
+    /// `beside` 의 축. 거울에서 쪼갠 방향 그대로 원본을 쪼개야 한다 — 비우면 원본이 자기
+    /// 칸 비율로 다시 골라, 화면 크기가 다른 두 기기에서 방향이 갈렸다(2026-09-25).
+    pub dir: Option<SeamAxis>,
+    /// 새 칸을 `beside` 의 왼쪽/위(참) 또는 오른쪽/아래(거짓)에.
+    pub before: bool,
 }
 
 impl SpawnShellAt {
@@ -516,7 +538,11 @@ impl SpawnShellAt {
             Some(n) => n.parse().ok().map(SpawnWindow::Index),
             None => None,
         };
-        Self { cwd: text("cwd"), window, beside: text("beside"), tab_of: text("tab_of") }
+        Self {
+            cwd: text("cwd"), window, beside: text("beside"), tab_of: text("tab_of"),
+            dir: text("dir").as_deref().and_then(SeamAxis::parse),
+            before: text("before").is_some_and(|v| v == "1" || v == "true"),
+        }
     }
 }
 
@@ -524,6 +550,9 @@ impl SpawnShellAt {
 pub struct SpawnShellReply {
     pub surface: String,
     pub window: Option<usize>,
+    /// 못 세웠으면 그 이유 — 부른 기기가 그대로 보여 준다. 전엔 이유를 로그에만 남기고
+    /// 「설정 화면이 앞이거나 쪼갤 자리가 없음」 한 줄로 뭉개 원인을 짐작도 못 했다.
+    pub error: Option<String>,
 }
 
 /// Plug point for terminal operations. Host apps implement this on a
@@ -771,7 +800,7 @@ pub trait Backend: Send + Sync {
     /// (2026-09-17). 옛 백엔드는 자리를 모르고 활성 방에 세운다.
     fn spawn_shell_at(&self, at: &SpawnShellAt) -> Result<SpawnShellReply> {
         let surface = self.spawn_shell(at.cwd.as_deref())?;
-        Ok(SpawnShellReply { surface, window: None })
+        Ok(SpawnShellReply { surface, window: None, error: None })
     }
     fn transfer_snapshot(&self) -> Result<crate::transfer::MachineSnapshot> {
         anyhow::bail!("room transfer unsupported by this backend")
@@ -906,6 +935,13 @@ pub trait Backend: Send + Sync {
     /// Default: unsupported.
     fn set_ratio_between(&self, _pairs: &[(String, String)], _ratio: f32, _axis: Option<SeamAxis>) -> Result<()> {
         anyhow::bail!("set_ratio_between unsupported by this backend")
+    }
+    /// 배치 채널(`/term/layout/ws`)의 순번 표지. 앞서 넣은 배치 명령이 GUI 에서 다 적용된
+    /// **뒤에** `client` 연결의 `seq` 를 확인해 준다 — 명령과 같은 이벤트 줄로 보내야 순서가
+    /// 지켜진다. 거울은 이 확인이 오기 전의 배치를 옛 모습으로 보고 버린다.
+    /// Default: unsupported(채널이 곧바로 확인한다).
+    fn layout_barrier(&self, _client: u64, _seq: u64) -> Result<()> {
+        anyhow::bail!("layout_barrier unsupported by this backend")
     }
     /// Make `surface_id` take `ratio` (0..1) of its *immediate* split
     /// container — the pane-addressed cousin of `resize_divider` (which
@@ -1619,5 +1655,9 @@ mod spawn_at_tests {
         assert_eq!(at.beside.as_deref(), Some("%4"));
         assert_eq!(at.tab_of, None);
         assert_eq!(SpawnShellAt::from_query(&q(&[("window", "x")])).window, None);
+        let at = SpawnShellAt::from_query(&q(&[("beside", "%4"), ("dir", "Vertical"), ("before", "1")]));
+        assert_eq!((at.dir, at.before), (Some(SeamAxis::Vertical), true));
+        let at = SpawnShellAt::from_query(&q(&[("beside", "%4"), ("dir", "diagonal")]));
+        assert_eq!((at.dir, at.before), (None, false));
     }
 }

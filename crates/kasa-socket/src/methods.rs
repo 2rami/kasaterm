@@ -895,11 +895,12 @@ fn surface_set_ratio_between(backend: &dyn Backend, id: Value, params: &Value) -
         Some(r) => r as f32,
         None => return param_err(id, "surface.set_ratio_between requires `ratio` (number, 0..1)"),
     };
-    let axis = match params.get("dir").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
+    let axis = match params.get("dir").and_then(Value::as_str) {
         None => None,
-        Some("horizontal") => Some(SeamAxis::Horizontal),
-        Some("vertical") => Some(SeamAxis::Vertical),
-        Some(_) => return param_err(id, "surface.set_ratio_between `dir` must be horizontal or vertical"),
+        Some(text) => match SeamAxis::parse(text) {
+            Some(axis) => Some(axis),
+            None => return param_err(id, "surface.set_ratio_between `dir` must be horizontal or vertical"),
+        },
     };
     match backend.set_ratio_between(&pairs, ratio, axis) {
         Ok(()) => Response::success(id, json!({"ok": true})),

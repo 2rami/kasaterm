@@ -977,6 +977,12 @@ pub fn spawn_shell_pane_at(
     }
     if let Some(b) = &at.beside {
         q.push(format!("beside={}", urlencode(b)));
+        if let Some(dir) = at.dir {
+            q.push(format!("dir={}", dir.as_str()));
+        }
+        if at.before {
+            q.push("before=1".into());
+        }
     }
     if let Some(t) = &at.tab_of {
         q.push(format!("tab_of={}", urlencode(t)));

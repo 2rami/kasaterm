@@ -1679,21 +1679,23 @@ impl App {
             .flat_map(|a| right.iter().map(move |b| serde_json::json!([a, b])))
             .collect();
         let Some(m) = kasa_mcp::machines::find(&label) else { return };
-        self.remote_view_push_at = Some(Instant::now());
-        let axis = match dir {
-            kasa_pty::SplitDir::Horizontal => "horizontal",
-            kasa_pty::SplitDir::Vertical => "vertical",
-        };
         // `a`/`b` 는 `pairs` 를 모르는 옛 판(2026-09-17) 원본용.
         let params = serde_json::json!({
-            "pairs": pairs, "ratio": ratio, "dir": axis, "a": left[0], "b": right[0],
+            "pairs": pairs, "ratio": ratio, "dir": crate::layout::seam_axis(dir).as_str(),
+            "a": left[0], "b": right[0],
         });
+        // 배치 채널이 있으면 그 소켓으로 — 순서가 지켜지고 원본이 적용을 확인해 준다.
+        if kasa_mcp::layout_watch::send_ratio(&m.base, &params) {
+            return;
+        }
+        self.remote_view_push_at = Some(Instant::now());
         queue_remote_divider(m.base.clone(), params);
     }
 
     pub(crate) fn sync_remote_view_layouts(&mut self) {
         use std::sync::{Mutex, OnceLock};
         static LAST: OnceLock<Mutex<Option<(Instant, u64)>>> = OnceLock::new();
+        self.watch_view_machines();
         {
             // 기계 캐시가 새로 채워졌으면 2초를 기다리지 않는다.
             let generation = kasa_mcp::machines::generation();
@@ -1721,11 +1723,16 @@ impl App {
             }
             *last = Some((Instant::now(), generation));
         }
-        // 구성원부터 — 새로 앉힌 leaf 의 칸은 바로 아래 좌표 동기가 원본대로 잡는다.
+        // 구성원부터 — 새로 앉힌 leaf 의 칸은 바로 아래에서 원본대로 잡는다.
         self.sync_remote_view_members();
+        // 배치 채널이 산 기계는 원본 트리 그대로. 아래 좌표 되짓기는 채널 없는 옛 판 원본용.
+        let live = self.apply_remote_view_trees();
         let mut changed_active = false;
         let mut changed_any = false;
         for i in 0..self.windows.len() {
+            if live.contains(&i) {
+                continue;
+            }
             let Some((label, _)) = self.remote_view_of_window(i) else { continue };
             let tree = if i == self.active_window { self.pty_layout.as_ref() } else { self.windows[i].as_ref() };
             let Some(tree) = tree else { continue };

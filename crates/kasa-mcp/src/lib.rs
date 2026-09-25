@@ -37,6 +37,8 @@ pub mod tell_service;
 pub mod nacho_service;
 #[cfg(unix)]
 pub mod adopt;
+pub mod layout_feed;
+pub mod layout_watch;
 pub mod machines;
 pub mod mobile;
 pub mod notes;

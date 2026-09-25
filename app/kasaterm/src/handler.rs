@@ -826,6 +826,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::LayoutBarrier(client, seq) => {
+                // 앞선 명령의 결과를 먼저 싣고 확인한다 — 순서가 바뀌면 거울이 옛 배치를 받는다.
+                self.publish_layout_feed();
+                kasa_mcp::layout_feed::ack(*client, *seq);
+                return;
+            }
             UserEvent::SocketRevealTerminal(show, focus_pane) => {
                 if let Some(w) = &self.window {
                     w.set_visible(*show);
@@ -2123,6 +2129,15 @@ impl ApplicationHandler<UserEvent> for App {
         window.set_ime_allowed(false);
         #[cfg(not(target_os = "macos"))]
         window.set_ime_allowed(true);
+        // 다른 기기의 방 배치가 오면 그 자리에서 깨운다 — 안 깨우면 다음 깜빡임까지 옛 배치다.
+        {
+            let proxy = std::sync::Mutex::new(self.proxy.clone());
+            kasa_mcp::layout_watch::set_waker(move || {
+                if let Ok(proxy) = proxy.lock() {
+                    let _ = proxy.send_event(UserEvent::Redraw);
+                }
+            });
+        }
         // Cursor-blink timer thread. Ticks every blink half-period and
         // wakes the loop through the proxy, so about_to_wait can sit on
         // ControlFlow::Wait — no WaitUntil timer in the hot path for
@@ -7394,6 +7409,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.refresh_machines_col();
         self.refresh_mirror_theme();
         self.poll_mirror_sync();
+        self.publish_layout_feed();
+        self.poll_layout_watch();
         // 참조 그림으로 굽는 잡의 진행을 걷는다 — 다 구운 것을 설치하고 프로바이더
         // 감지 캐시를 갱신한다. 설치가 GUI 스레드 몫인 이유는 로스터 갱신과 캐시
         // 무효화를 함께 해야 해서다(themegen.rs 참조).

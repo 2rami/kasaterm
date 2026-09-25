@@ -1272,34 +1272,46 @@ pub async fn poll_loop() {
             eprintln!("[machines] {} 곳 폴링: {}", list.len(), labels.join(", "));
             announced = labels;
         }
-        for m in &list {
-            let asked = std::time::Instant::now();
-            if let Some(panes) = fetch_panes(&client, &m.base).await {
+        // 기계마다 따로, 한 기계 안의 요청도 함께 — 꺼진 기계 하나의 타임아웃(4초)이 다른
+        // 기계의 갱신까지 붙잡았고, 요청 넷을 줄지어 보내 배치 하나가 늦게 왔다(2026-09-25).
+        // 먼저 온 기계부터 캐시에 앉히고 번호를 올린다.
+        let mut jobs: futures_util::stream::FuturesUnordered<_> = list.iter().map(|m| {
+            let client = &client;
+            async move {
+                let asked = std::time::Instant::now();
+                let panes = fetch_panes(client, &m.base).await?;
                 let rtt_ms = Some(asked.elapsed().as_millis() as u64);
-                let sync = probe_sync(&client, &m.base).await;
-                let version = fetch_version(&client, &m.base).await.unwrap_or_default();
-                let device_colors = fetch_json(&client, &m.base, "/term/device-colors").await
-                    .filter(|v| v.get("at").is_some());
-                let build = version.build.or_else(|| guest_build(&m.label));
-                if let Ok(mut c) = cache().lock() {
-                    c.insert(
-                        m.label.clone(),
-                        Seen {
-                            rtt_ms,
-                            device_colors,
-                            at: Instant::now(),
-                            panes,
-                            sync,
-                            build,
-                            machine_id: version.machine_id,
-                        },
-                    );
-                }
-                if m.tunneled {
-                    announce_to(&client, &m.base).await;
-                }
+                let (sync, version, device_colors) = tokio::join!(
+                    probe_sync(client, &m.base),
+                    fetch_version(client, &m.base),
+                    fetch_json(client, &m.base, "/term/device-colors"),
+                );
+                let version = version.unwrap_or_default();
+                let seen = Seen {
+                    rtt_ms,
+                    device_colors: device_colors.filter(|v| v.get("at").is_some()),
+                    at: Instant::now(),
+                    panes,
+                    sync,
+                    build: version.build.or_else(|| guest_build(&m.label)),
+                    machine_id: version.machine_id,
+                };
+                Some((m, seen))
+            }
+        }).collect();
+        let mut announce = Vec::new();
+        while let Some(done) = futures_util::StreamExt::next(&mut jobs).await {
+            let Some((m, seen)) = done else { continue };
+            if let Ok(mut c) = cache().lock() {
+                c.insert(m.label.clone(), seen);
+            }
+            GENERATION.fetch_add(1, Ordering::Relaxed);
+            if m.tunneled {
+                announce.push(m.base.clone());
             }
         }
+        drop(jobs);
+        futures_util::future::join_all(announce.iter().map(|base| announce_to(&client, base))).await;
         GENERATION.fetch_add(1, Ordering::Relaxed);
         sync_watchers(&client, &list, &mut watchers);
         tokio::select! {
