@@ -4,9 +4,7 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
-# Streamable-HTTP MCP server that exposes kasaterm pane control as
-# model-invoked tools, driven directly by the host's agent_socket::Backend.
-# Replaces the external python bridge (mcp/kasaspace_mcp.py).
+# kasaterm 호스트의 HTTP 서버(보드·원격 방·모바일·웹 pane). 이름은 MCP 서버였던 시절의 것이다.
 
 [dependencies]
 kasa-socket = { path = "../kasa-socket" }
@@ -27,8 +25,6 @@ axum = { version = "0.8.9", features = ["ws"] }
 tower = "0.5"
 # 업링크가 관문에서 흘러온 요청 바디를 reqwest 스트림으로 넘길 때.
 tokio-stream = "0.1"
-rmcp = { version = "1.7.0", features = ["server", "macros", "transport-streamable-http-server"] }
-schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

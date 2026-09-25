@@ -6870,7 +6870,7 @@ impl App {
                 obj.insert("remote_origin_cwd".into(), serde_json::json!(cwd));
             }
         }
-        // 붙인 이름(`/rename`·`surface.rename`·`kasaspace_rename`). 이게
+        // 붙인 이름(`/rename`·`surface.rename`). 이게
         // 없으면 재시작마다 이름이 증발해 OSC 제목으로 되돌아갔다 — 이 앱은
         // 종료 시 자기 설치를 하므로 껐다 켜는 일이 잦고, 그래서 이름을
         // 붙이는 행위 자체가 몇 분짜리가 됐다.
@@ -8381,14 +8381,10 @@ impl App {
     /// modes — the caller decides which concrete `Backend` impl to plug
     /// in (TmuxBackend in tmux mode, PtyBackend in PTY mode).
     pub(crate) fn start_socket_with(&self, backend: Arc<dyn kasa_socket::Backend>) {
-        // Model-invoked tools for the claude running inside a pane: the
-        // same Backend, exposed over MCP-on-HTTP. Replaces the external
-        // python bridge (mcp/kasa_mcp.py).
-        // 정본 포트. 이미 물려 있으면 spawn_http_server 가 임시 포트로 떨어지고,
-        // 그러면 register_clients 가 전역 등록을 건너뛴다(주인 주소 보호).
+        // 정본 포트. 이미 물려 있으면 spawn_http_server 가 임시 포트로 떨어진다.
         const CANONICAL_MCP_PORT: u16 = 8765;
-        // lite 는 HTTP 서버를 안 띄운다 — `register_clients` 가 `~/.claude.json` 을 쓰고,
-        // 포트 파일이 본판 것과 섞인다. 아래 unix 소켓(CLI)은 그대로.
+        // lite 는 HTTP 서버를 안 띄운다 — 포트 파일이 본판 것과 섞인다.
+        // 아래 unix 소켓(CLI)은 그대로.
         let http_port = if self.lite {
             Err(std::io::Error::other("lite: no http server"))
         } else {
@@ -8396,19 +8392,17 @@ impl App {
         };
         let http_port = match http_port {
             Ok(port) => {
-                eprintln!("[kasaspace-mcp] HTTP MCP on 127.0.0.1:{port}/mcp");
+                eprintln!("[kasaspace-mcp] HTTP on 127.0.0.1:{port}");
                 std::env::set_var("KASASPACE_MCP_PORT", port.to_string());
                 // 다른 기계가 `/version` 으로 묻는 빌드 표식 — 앱 build.rs 가 박은
                 // git 리비전. kasa-mcp 는 자기 것이 없어 여기서 넘긴다.
                 kasa_mcp::machines::set_build_id(env!("KASATERM_GIT_REV"));
-                // No MCP auto-discovery: write our address into each AI
-                // client's config so any agent on this machine finds us.
-                kasa_mcp::register_clients(port, CANONICAL_MCP_PORT);
+                kasa_mcp::unregister_clients();
                 Some(port)
             }
             Err(e) => {
                 if !self.lite {
-                    eprintln!("[kasaspace-mcp] HTTP MCP start failed: {e}");
+                    eprintln!("[kasaspace-mcp] HTTP start failed: {e}");
                 }
                 None
             }
@@ -8475,7 +8469,7 @@ impl App {
     /// 그대로 덮어, 이름이 한 번 깜빡이고 사라진다.
     ///
     /// ★ **사람이 정한 이름이 이긴다.** 지금 제목이 우리가 마지막에 심은 값과 다르면
-    /// 그 사이 누군가(`surface.rename`·`kasaspace_rename`·파일 탭)가 직접 정한 것이라
+    /// 그 사이 누군가(`surface.rename`·파일 탭)가 직접 정한 것이라
     /// 비켜선다. 처음 보는 pane 에 이미 핀이 서 있으면 그것도 남의 것이다.
     ///
     /// 같은 꼬리에서 **ultracode 상태**도 함께 뽑는다(`ultra_verdict_in`). 두 사실이

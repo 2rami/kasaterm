@@ -71,7 +71,7 @@ macOS·Windows·Linux를 같은 코드로 굴린다. PTY는 `portable-pty`로 �
 | **`kasa-ime`** | 두벌식 한글 입력 오토마타. OS IME 비의존 | 한글 입력이 필요한 Rust 앱 |
 | **`kasa-socket`** | cmux 호환 Unix-socket JSON-RPC 서버. `kasaterm-cli` 포함 | pane 제어 프로토콜 |
 | **`kasa-bridge`** | tmux control-mode(`-C`) 브리지. GUI 비의존, 이벤트·화면 채널만 넘긴다 | tmux를 붙이는 다른 UI |
-| **`kasa-mcp`** | pane 제어 MCP 서버 + 원격 세션·기계 명부·폰 관문의 HTTP 층 | Claude/Antigravity 연동 |
+| **`kasa-mcp`** | 원격 세션·기계 명부·폰 관문·보드의 HTTP 층 | 폰·다른 기기·웹 pane 연동 |
 | `app/kasaterm` | 메인 바이너리 — winit+wgpu 윈도우, chrome UI, 입력·단축키 라우팅 | — |
 
 ---
@@ -165,7 +165,7 @@ cargo run -p kasaterm
 cargo run --release -p kasaterm
 ```
 
-macOS `.app`은 `scripts/build-app.sh`, Windows `.msi`와 portable ZIP은 `scripts/windows/package.ps1`로 빌드한다. Windows 패키징은 완성된 MSI를 다시 추출해 앱·CLI·아로나 UI·학생 로스터·협업 훅의 누락까지 검사한다. 앱을 실행하면 pane 제어 CLI(`kasaterm-cli`)와 MCP 서버가 함께 뜨고, MCP는 Claude Code/Antigravity 설정에 자동 등록된다.
+macOS `.app`은 `scripts/build-app.sh`, Windows `.msi`와 portable ZIP은 `scripts/windows/package.ps1`로 빌드한다. Windows 패키징은 완성된 MSI를 다시 추출해 앱·CLI·아로나 UI·학생 로스터·협업 훅의 누락까지 검사한다. 앱을 실행하면 pane 제어 CLI(`kasaterm-cli`)를 바로 쓸 수 있다.
 
 <details>
 <summary><b>예전 <code>tmuxify</code> 폴더를 쓰고 있다면 (펼치기)</b></summary>
@@ -201,7 +201,7 @@ claude plugin marketplace add 2rami/kasaterm
 claude plugin install kasapane@kasaterm
 ```
 
-설치 후 `/kasapane`으로 호출한다. 스킬이 쓰는 `kasaterm-cli`·MCP는 앱 빌드에 내장돼 있다.
+설치 후 `/kasapane`으로 호출한다. 스킬이 쓰는 `kasaterm-cli`는 앱 빌드에 내장돼 있다.
 
 ---
 
@@ -249,7 +249,7 @@ pane 사이 비율 조절은 **경계선(divider) 마우스 드래그**, pane을
 ## 구조
 
 <details>
-<summary><b>렌더러 env · MCP 도구 (펼치기)</b></summary>
+<summary><b>렌더러 env · 모델이 쓰는 도구 (펼치기)</b></summary>
 
 워크스페이스 멤버는 [강점 — 재사용 가능한 crate](#재사용-가능한-crate) 표 참고. `spikes/*`는 iced/egui/gpui/warpui 등 채택 안 된 GUI 프레임워크 PoC다.
 
@@ -265,17 +265,9 @@ pane 사이 비율 조절은 **경계선(divider) 마우스 드래그**, pane을
 | `KASATERM_AUTOCAPTURE_MS` / `_PATH` | N초 후 자동 스크린샷 (자체 테스트용) |
 | `KASATERM_AUTOSEND` / `_MS` | N초 후 키 자동 전송 (자체 테스트용) |
 
-### MCP 서버 도구
+### 모델이 쓰는 도구
 
-`crates/kasa-mcp`가 띄우는 streamable-HTTP MCP 서버로, 모델이 창 구조를 읽고 자기 pane 이름을 붙인다. 앱이 부팅하면 자동으로 켜지고 Claude Code/Antigravity 설정에 자동 등록된다(별도 빌드·설치 불필요).
-
-| 도구 | 무엇 |
-|---|---|
-| `kasaspace_list` | pane(surface)과 워크스페이스 목록 — 다른 도구에 넘길 id가 여기서 나온다 |
-| `kasaspace_rename` | 자기 pane 이름을 지금 하는 일로 바꾼다 (`window=true`면 사이드바 라벨까지) |
-| `kasaspace_workspace_list` / `kasaspace_workspace_current` | 워크스페이스 목록 / 지금 포커스된 것 |
-
-split·close·focus·send 같은 **조작은 `kasaterm-cli`**가 맡는다(앱 빌드에 내장). 모델이 셸에서 그대로 부르는 편이 왕복이 적어 MCP 도구에서는 걷어냈다 — `kasaterm-cli board`로 남이 뭘 하는지 보고, `kasaterm-cli tell`·cross-session 메시지로 말을 건다.
+pane 목록·이름·분할·전송 같은 **조작은 전부 `kasaterm-cli`**가 맡는다(앱 빌드에 내장). 모델이 셸에서 그대로 부르는 편이 왕복이 적고, 도구 설명이 매 요청 실리지도 않는다 — `kasaterm-cli board`로 남이 뭘 하는지 보고, `kasaterm-cli tell`로 말을 건다. 예전의 kasaspace MCP 도구는 이것과 겹쳐 걷었고, 앱이 부팅할 때 옛 등록 항목을 AI 클라이언트 설정에서 지운다.
 
 </details>
 
