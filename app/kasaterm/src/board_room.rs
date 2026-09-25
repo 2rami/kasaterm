@@ -296,15 +296,25 @@ mod tests {
     }
 
     /// 보드 방 진입점이 메뉴막대 「보기」 안에만 있었다 — 단축키도 없어 사람이
-    /// 찾을 길이 없었다(2026-09-05 「보드방은 뭐눌러야되는거야」). 우측 Info 탭의
-    /// 버튼 줄에도 둔다, 아로나 바로 옆에.
+    /// 찾을 길이 없었다(2026-09-05 「보드방은 뭐눌러야되는거야」). 그때 Info 탭 단추 줄에
+    /// 두었다가 2026-09-08 지시로 그 줄을 통째로 걷었다(b93ce735) — 이 검사가 Info 를
+    /// 가리키던 채로 남아 그날부터 빨간불이었다. 지키려던 것은 「메뉴막대가 유일한 길이 아니다」
+    /// 이므로 이제 ⇧⌘B 단축키로 본다. 아로나와 같은 이유로 내부 방이 키를 삼키기 전에 잡아야
+    /// 보드 안에서도 눌러 돌아온다.
     #[test]
     fn board_has_an_entry_point_outside_the_menu_bar() {
-        let info = include_str!("info.rs");
-        assert!(
-            info.contains("state::InfoAction::Board"),
-            "Info 탭에 진입점이 없으면 메뉴막대가 보드로 가는 유일한 길이 된다"
-        );
+        let handler = include_str!("handler.rs");
+        let shortcut = handler
+            .split_once("winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyB)")
+            .expect("보드 단축키가 없으면 메뉴막대가 보드로 가는 유일한 길이 된다")
+            .1;
+        let body = &shortcut[..shortcut.find("return;").expect("단축키 갈래 끝")];
+        assert!(body.contains("self.toggle_board_room();"), "⇧⌘B 는 보드를 여닫는다");
+        let at = handler.find("self.toggle_board_room();").expect("보드 토글");
+        for marker in ["self.native_settings_key(&event);", "self.native_board_key(&event);"] {
+            assert!(at < handler.find(marker).expect(marker), "내부 방이 키를 삼키기 전에 잡아야 한다");
+        }
+        assert!(handler.contains("보드 켜기/끄기  ⇧⌘B"), "메뉴가 단축키를 알려 줘야 사람이 찾는다");
     }
 
     #[test]

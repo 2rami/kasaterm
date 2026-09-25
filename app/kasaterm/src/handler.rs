@@ -1958,7 +1958,7 @@ impl ApplicationHandler<UserEvent> for App {
             let view_m = Submenu::new("보기", true);
             let git_item = MenuItem::new("Git 패널 켜기/끄기", true, None);
             let session_item = MenuItem::new("세션 패널 켜기/끄기", true, None);
-            let board_item = MenuItem::new("board 패널 켜기/끄기", true, None);
+            let board_item = MenuItem::new("보드 켜기/끄기  ⇧⌘B", true, None);
             let arona_item = MenuItem::new("아로나 켜기/끄기", true, None);
             let _ = view_m.append(&git_item);
             let _ = view_m.append(&session_item);
@@ -7255,6 +7255,23 @@ impl ApplicationHandler<UserEvent> for App {
                     )
                 {
                     self.toggle_arona_panel(event_loop);
+                    window.request_redraw();
+                    return;
+                }
+                // 보드도 같은 자리에서 잡는다 — 보드 안에서 눌러 작업 방으로 돌아올 수 있어야 한다.
+                // Info 단추 줄을 걷은 뒤(2026-09-08) 보드로 가는 길이 메뉴막대 하나뿐이었다. 메뉴
+                // 가속키로 걸지 않는 것은 macOS 에서 메뉴와 이 처리기가 같은 키를 두 번 받아 열자마자
+                // 닫히기 때문이다.
+                if matches!(event.state, ElementState::Pressed)
+                    && !event.repeat
+                    && self.host_mod()
+                    && self.modifiers.shift_key()
+                    && matches!(
+                        event.physical_key,
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyB)
+                    )
+                {
+                    self.toggle_board_room();
                     window.request_redraw();
                     return;
                 }
