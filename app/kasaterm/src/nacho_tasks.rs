@@ -170,9 +170,9 @@ pub(crate) struct TaskReport {
     pub(crate) at_ms: u64,
 }
 
-/// 승인. 옛 모양은 `{needed, what, note}`, 합의된 모양은 1회용·범위·만료를 더 싣는다
-/// (`docs/development/orchestrator.md` §6, 나쵸). 이 파일은 **읽기만** 한다 — 소모 POST 는
-/// 기기 인증 결정이 나기 전까지 PC·폰 모두 부르지 않기로 했다.
+/// 승인. 지금 나쵸는 `{needed, what, note}` 만, 확정 모양은 1회용·범위·만료를 더 싣는다
+/// (정본: 나쵸 레포 `docs/development/api/desk-api.md` 「승인」). 이 파일은 **읽기만** 한다 —
+/// 결정 POST 는 기기 인증 결정이 나기 전까지 PC·폰 모두 부르지 않기로 했다.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct TaskApproval {
@@ -180,8 +180,12 @@ pub(crate) struct TaskApproval {
     pub(crate) what: String,
     pub(crate) note: String,
     pub(crate) id: String,
+    pub(crate) task_id: String,
+    pub(crate) run_id: Option<String>,
     pub(crate) action: String,
+    pub(crate) risk: String,
     pub(crate) scope_hash: String,
+    pub(crate) created_at_ms: u64,
     pub(crate) expires_at_ms: u64,
     pub(crate) one_use: bool,
     pub(crate) approver: String,
@@ -243,6 +247,8 @@ pub(crate) struct TaskList {
     pub(crate) hidden_count: u64,
     /// 목록 판 이름표 — 롱폴의 `since` 로 돌려준다(아직 이 판은 롱폴을 안 쓴다).
     pub(crate) board_rev: String,
+    /// 롱폴이 바뀐 것 없이 끝났다 — `tasks` 가 안 실린다. 빈 목록으로 읽으면 판이 통째로 빈다.
+    pub(crate) unchanged: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -386,6 +392,9 @@ pub(crate) fn refresh_with(previous: &TaskBook, now: u64, ledger: &dyn Ledger) -
     book.source = BookSource::Live;
     book.error = None;
     book.last_ok_ms = now;
+    if reply.unchanged {
+        return book;
+    }
     book.scope = if reply.scope.is_empty() { "app".into() } else { reply.scope };
     book.hidden_count = reply.hidden_count;
     book.tasks = merge_cards(&previous.tasks, reply.tasks);
@@ -621,6 +630,46 @@ mod tests {
         assert!(desk.desk_scope());
         let old = refresh_with(&TaskBook::default(), 1, &fake(Ok(vec![card.clone()]), vec![]));
         assert!(!old.desk_scope(), "scope 를 안 싣는 옛 나쵸는 폰 범위다");
+    }
+
+    #[test]
+    fn unchanged_long_poll_keeps_the_list() {
+        let first = refresh_with(&TaskBook::default(), 1, &fake(Ok(vec![card("w1", "working", 1)]), vec![]));
+        let same = TaskList { unchanged: true, scope: "desk".into(), ..Default::default() };
+        let kept = refresh_with(&first, 2, &Fake { list: RefCell::new(Ok(same)), details: HashMap::new(), asked: RefCell::new(Vec::new()) });
+        assert_eq!(kept.tasks().len(), 1, "목록 없는 답은 「그대로」다");
+        assert_eq!(kept.last_ok_ms(), 2);
+    }
+
+    /// 나쵸가 내준 응답 fixture(구현된 모양·목표 모양) 전부를 이 파일의 타입으로 읽는다.
+    /// fixture 는 나쵸 레포에 있어 `NACHO_DESK_FIXTURES=<그 폴더>` 로 가리켜 `--ignored` 로 돈다.
+    #[test]
+    #[ignore]
+    fn nacho_desk_fixtures_parse() {
+        let dir = std::path::PathBuf::from(std::env::var("NACHO_DESK_FIXTURES").expect("NACHO_DESK_FIXTURES"));
+        let read = |name: &str| std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        for name in ["tasks.app.implemented.json", "tasks.desk.planned.json"] {
+            let list: TaskList = serde_json::from_slice(&read(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(!list.tasks.is_empty(), "{name}");
+            assert!(list.tasks.iter().all(|c| !c.id.is_empty() && c.state != TaskState::Unknown), "{name}");
+        }
+        let desk: TaskList = serde_json::from_slice(&read("tasks.desk.planned.json")).unwrap();
+        assert_eq!(desk.scope, "desk");
+        assert!(desk.tasks.iter().any(|c| c.surface_key().is_some()), "목표 모양은 창 열쇠를 싣는다");
+        let unchanged: TaskList = serde_json::from_slice(&read("tasks.desk.unchanged.planned.json")).unwrap();
+        assert!(unchanged.unchanged && unchanged.tasks.is_empty());
+        for name in ["task.detail.implemented.json", "task.detail.desk.planned.json"] {
+            #[derive(serde::Deserialize)]
+            struct One { task: TaskDetail }
+            let one: One = serde_json::from_slice(&read(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(!one.task.id.is_empty(), "{name}");
+        }
+        #[derive(serde::Deserialize)]
+        struct Planned { task: TaskCard }
+        let planned: Planned = serde_json::from_slice(&read("task.detail.desk.planned.json")).unwrap();
+        if let Some(a) = planned.task.approval.as_ref() {
+            assert!(!a.id.is_empty() && a.expires_at_ms > 0, "확정 승인 칸: {a:?}");
+        }
     }
 
     #[test]
