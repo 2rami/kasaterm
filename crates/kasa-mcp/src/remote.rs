@@ -2771,7 +2771,20 @@ mod tests {
                     if let Message::Text(text) = message { assert!(!text.contains("kill")); }
                     else if matches!(message, Message::Close(_)) { break; }
                 }
-                assert!(tokio::time::timeout(Duration::from_millis(250), listener.accept()).await.is_err(), "explicit close must not start restore retries");
+                // 닫힌 뒤 오는 접속은 전부 재시도로 친다 — 단 하나, 카사텀 창 안에서 검사를 돌리면
+                // 앱의 Info 패널이 창 프로세스 트리의 열린 포트 제목을 `GET / HTTP/1.0` 으로 찍어
+                // 보는데(app/kasaterm/src/info.rs `http_title`), 업그레이드 없는 그 모양만 흘린다.
+                // 창은 첫 재접속 대기(`reconnect_pause` 500ms)보다 길어야 한다 — 250ms 였을 때는
+                // 닫은 뒤에도 재접속하도록 일부러 망가뜨린 클라이언트를 한 번도 못 잡았다.
+                let window = tokio::time::Instant::now() + Duration::from_millis(1500);
+                while let Ok(Ok((mut extra, _))) = tokio::time::timeout_at(window, listener.accept()).await {
+                    use tokio::io::AsyncReadExt;
+                    let mut head = [0u8; 1024];
+                    let read = tokio::time::timeout(Duration::from_millis(500), extra.read(&mut head)).await;
+                    let head = String::from_utf8_lossy(&head[..read.ok().and_then(Result::ok).unwrap_or(0)]).to_ascii_lowercase();
+                    let port_probe = head.starts_with("get / http/") && !head.contains("upgrade:");
+                    assert!(port_probe, "explicit close must not start restore retries");
+                }
             });
         });
         let local = format!("explicit-close-{}", uuid::Uuid::new_v4());
@@ -3206,6 +3219,9 @@ mod tests {
             "소유자 resize 가 막혀 버렸다"
         );
         assert!(kill_remote("%vw0"));
+        // kill 은 서버를 거쳐 늦게 닿는다 — 이 검사가 붙든 셸이 뒤 검사 시간까지 살아
+        // `/term/panes` 에 남지 않게 직접 놓는다.
+        kasa_pty::release_session(&rid);
     }
 
     #[test]
@@ -3269,7 +3285,9 @@ mod tests {
             fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
         }
         let input = Arc::new(Mutex::new(Vec::new()));
-        let id = format!("viewport-source-{}", uuid::Uuid::new_v4());
+        // standalone 이 여는 창은 `web-` 이고 방이 없다. 이름이 다르면 `/term/panes` 가 이 창을
+        // 「닫았지만 산 창」으로 내, 열쇠로 되찾는 재접속 후보에서 빠진다.
+        let id = format!("web-viewport-source-{}", uuid::Uuid::new_v4());
         let (events, receiver) = crossbeam_channel::unbounded();
         let source = Arc::new(PtySession::start_external(
             PtyOptions { pane_id: id.clone(), cols: 120, rows: 40, ..Default::default() },
@@ -3280,12 +3298,16 @@ mod tests {
             },
         ).unwrap());
         kasa_pty::register_session(&id, &source);
+        // 열쇠를 먼저 붙여 거울이 실제 앱처럼 **늘** 열쇠 재접속 길을 타게 한다. 안 붙이면 서버의
+        // 보드 수집기가 악수보다 먼저 도느냐에 따라 길이 갈렸다 — 앞 검사가 프로세스 표 캐시를
+        // 데워 두면 수집기가 먼저 돌아 열쇠를 붙였고, 단독으로는 악수가 이겨 열쇠 없이 붙었다.
+        let key = crate::surface_keys::ensure(&id);
         let backend: Arc<dyn kasa_socket::backend::Backend> = Arc::new(
             crate::standalone::StandaloneBackend::new(std::env::temp_dir()),
         );
         let port = crate::spawn_http_server_opts(backend, 0, false).unwrap();
         let spec = RemoteSpec {
-            base: format!("http://127.0.0.1:{port}"), pane: Some(id),
+            base: format!("http://127.0.0.1:{port}"), pane: Some(id.clone()),
             cwd: None, token: None, identity: Default::default(),
         };
         let mirror = connect_view(spec.clone(), "%viewport-passive-first").unwrap();
@@ -3315,7 +3337,9 @@ mod tests {
         wait_for(|| !is_view_pane("%viewport-passive-first") && !is_view_pane("%viewport-passive-second"),
             "viewers did not detach");
         assert_eq!(source.size(), (100, 30), "viewer detach changed source dimensions");
+        assert_eq!(crate::surface_keys::get(&id).as_deref(), Some(key.as_str()), "재접속이 원본 열쇠를 바꿨다");
         let _ = events.send(ExtEvent::Eof);
+        crate::surface_keys::remove(&id);
     }
 
     /// 확대한 동안만 원본을 키운다 — claude 가 접어 둔 줄은 호스트가 그 rows 로
