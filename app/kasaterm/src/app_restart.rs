@@ -118,26 +118,30 @@ pub(crate) fn mark_restart_booted() {
     }
 }
 
-/// 나쵸 승인 창구. 이 기기에 나쵸 앱 키가 있으면 나쵸에 직접 묻고, 없으면 승인을 쥔 기기(명부의 machine_id)의
+/// 나쵸 승인 창구. 이 기기에 나쵸 앱 키가 있으면 나쵸에 직접 묻고, 없으면 사람이 명부 파일에 위임한 기기의
 /// 카사텀이 **읽기만** 대신해 준다 — 키는 그 기기 밖으로 안 나가고, 소비는 키가 있는 조종 기기에서만 된다.
-pub(crate) struct NachoAuthority {
-    relay: Option<String>,
+pub(crate) enum NachoAuthority {
+    Local,
+    Relay(kasa_socket::app_restart::RelayAuthority),
 }
 
 impl NachoAuthority {
     pub(crate) fn local() -> Self {
-        Self { relay: None }
+        Self::Local
     }
 
-    pub(crate) fn for_request(authority_machine: &str) -> Result<Self, String> {
-        if kasa_mcp::nacho_app_target().is_ok() {
-            return Ok(Self::local());
-        }
-        let valid = !authority_machine.is_empty() && authority_machine.len() <= 128
-            && authority_machine.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        let machine = valid.then(|| kasa_mcp::machines::find_route(&format!("~{authority_machine}"))).flatten()
-            .ok_or_else(|| format!("승인을 쥔 기기({authority_machine})가 이 기기 명부에 없다"))?;
-        Ok(Self { relay: Some(machine.base) })
+    /// 요청이 댄 기기로 신뢰원을 고르지 않는다(`kasa_socket::app_restart::target_authority`).
+    pub(crate) fn for_request(requested: &str) -> Result<Self, String> {
+        let local_key = kasa_mcp::nacho_app_target().is_ok();
+        let relay = kasa_socket::app_restart::target_authority(local_key, &kasa_mcp::machines::listed_entries(), requested, |id| {
+            // 위임한 파일 항목의 주소만 쓴다 — `find_route` 는 끊긴 파일 항목을 같은 id 를 댄 손님 경로로 갈아 끼운다.
+            let base = kasa_mcp::machines::listed_machines().into_iter()
+                .find(|m| m.machine_id.as_deref() == Some(id))
+                .map(|m| m.base)
+                .ok_or_else(|| format!("위임한 기기({id})의 주소가 명부 파일에 없다"))?;
+            Ok(Box::new(move |path: &str| kasa_mcp::remote::remote_get_json(&base, path).map_err(|e| e.to_string())))
+        })?;
+        Ok(relay.map_or(Self::Local, Self::Relay))
     }
 }
 
@@ -154,26 +158,20 @@ fn nacho_approval(method: &str, path: &str, body: Option<serde_json::Value>) -> 
 
 impl Authority for NachoAuthority {
     fn get(&self, approval_id: &str) -> Result<ApprovalView, String> {
-        if !kasa_socket::app_restart::valid_approval_id(approval_id) {
-            return Err("approval id 모양이 아니다".into());
-        }
-        match &self.relay {
-            None => nacho_approval("GET", &format!("/api/app/approvals/{approval_id}"), None),
-            Some(base) => kasa_mcp::remote::remote_get_json(base, &format!("/app/restart/approvals/{approval_id}"))
-                .map_err(|e| e.to_string())
-                .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string())),
+        match self {
+            Self::Relay(relay) => relay.get(approval_id),
+            Self::Local if !kasa_socket::app_restart::valid_approval_id(approval_id) => Err("approval id 모양이 아니다".into()),
+            Self::Local => nacho_approval("GET", &format!("/api/app/approvals/{approval_id}"), None),
         }
     }
 
     fn consume(&self, approval_id: &str, scope: &serde_json::Value, consumer: &str) -> Result<ApprovalView, String> {
-        if self.relay.is_some() {
-            return Err("승인 소비는 나쵸 앱 키가 있는 조종 기기에서만 한다".into());
+        match self {
+            Self::Relay(relay) => relay.consume(approval_id, scope, consumer),
+            Self::Local if !kasa_socket::app_restart::valid_approval_id(approval_id) => Err("approval id 모양이 아니다".into()),
+            Self::Local => nacho_approval("POST", &format!("/api/app/approvals/{approval_id}/consume"),
+                Some(serde_json::json!({"scope": scope, "consumer_machine_id": consumer}))),
         }
-        if !kasa_socket::app_restart::valid_approval_id(approval_id) {
-            return Err("approval id 모양이 아니다".into());
-        }
-        nacho_approval("POST", &format!("/api/app/approvals/{approval_id}/consume"),
-            Some(serde_json::json!({"scope": scope, "consumer_machine_id": consumer})))
     }
 }
 

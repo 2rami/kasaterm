@@ -979,11 +979,16 @@ fn seen_for_machine<'a>(machine: &Machine, c: &'a Cache) -> Option<&'a Seen> {
 /// 명부 파일(또는 env)의 항목만 — 알려 온 기계는 뺀다. 터널 스폰이 이걸 본다:
 /// 알려 온 기계로는 이쪽이 터널을 들 필요가 없다(그쪽이 이미 들고 있다).
 pub fn listed_machines() -> Vec<Machine> {
+    parse(&Value::Array(listed_entries()))
+}
+
+/// 명부 파일(검증용 인스턴스는 env `KASATERM_MACHINES`)의 항목 그대로. 손님 항목·폴링으로 배운 id 가
+/// 섞이지 않는다 — 사람이 적은 것만 믿어야 하는 판정(재시작 승인 위임)이 이것을 읽는다.
+pub fn listed_entries() -> Vec<Value> {
     if let Ok(s) = std::env::var("KASATERM_MACHINES") {
         if let Ok(v) = serde_json::from_str::<Value>(&s) {
-            let m = parse(&v);
-            if !m.is_empty() {
-                return m;
+            if !parse(&v).is_empty() {
+                return v.as_array().cloned().unwrap_or_default();
             }
         }
     }
@@ -993,7 +998,7 @@ pub fn listed_machines() -> Vec<Machine> {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .map(|v| parse(&v))
+        .and_then(|v| v.as_array().cloned())
         .unwrap_or_default()
 }
 

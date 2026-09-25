@@ -7743,8 +7743,10 @@ pub fn spawn_http_server_opts(
                         move |AxPath(id): AxPath<String>| {
                             let backend = backend.clone();
                             async move {
-                                match tokio::task::spawn_blocking(move || backend.restart_approval(&id)).await {
-                                    Ok(Ok(view)) => Json(serde_json::to_value(view).unwrap_or_default()).into_response(),
+                                let read = move || Ok::<_, anyhow::Error>((crate::board_service::local_id()?, backend.restart_approval(&id)?));
+                                match tokio::task::spawn_blocking(read).await {
+                                    // 받는 쪽이 위임한 기기인지 대조하도록 이 기기의 id 를 함께 싣는다.
+                                    Ok(Ok((machine_id, view))) => Json(serde_json::json!({"machine_id": machine_id, "approval": view})).into_response(),
                                     Ok(Err(e)) => (axum::http::StatusCode::CONFLICT, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),
                                     Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
                                 }

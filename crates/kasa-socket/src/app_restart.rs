@@ -325,12 +325,96 @@ pub fn authorize_run(plan: &Plan, approval_id: &str, authority: &dyn Authority) 
     Ok(view)
 }
 
-/// 대상 기기에 가는 작업 요청. `authority` 는 승인을 읽을 기기(명부의 machine_id)다.
+/// 대상 기기에 가는 작업 요청. `authority` 는 조종 기기가 믿는 승인 기기라는 **주장**일 뿐이다 —
+/// 대상은 그것으로 신뢰원을 고르지 않는다(`trust_source`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobRequest {
     pub job: Job,
     pub approval_id: String,
     pub authority: String,
+}
+
+/// 대상이 승인을 읽을 곳.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrustSource {
+    /// 이 기기의 나쵸 앱 키로 나쵸에 직접.
+    Local,
+    /// 사람이 명부 파일에 위임을 적은 기기의 카사텀이 읽기만 중계.
+    Relay(String),
+}
+
+/// 대상 쪽 신뢰원 — 키가 있으면 `None`(자기 나쵸), 없으면 위임된 기기의 중계. `connect` 는 위임된 machine_id 로만
+/// 불리고, 요청이 댄 기기로는 연결조차 하지 않는다.
+pub fn target_authority(
+    local_key: bool,
+    entries: &[serde_json::Value],
+    requested: &str,
+    connect: impl FnOnce(&str) -> std::result::Result<Fetch, String>,
+) -> std::result::Result<Option<RelayAuthority>, String> {
+    match trust_source(local_key, delegated_authority(entries), requested)? {
+        TrustSource::Local => Ok(None),
+        TrustSource::Relay(machine_id) => Ok(Some(RelayAuthority { fetch: connect(&machine_id)?, machine_id })),
+    }
+}
+
+/// 신뢰원은 이 기기 안에서만 정해진다. 요청이 대는 기기는 고르는 데 쓰지 않고, 위임된 기기와 다르면
+/// 거부해 잘못 걸린 요청을 드러낸다 — 요청자가 명부의 아무 기기나 대서 그 기기의 답을 믿게 만들 수 없다.
+pub fn trust_source(local_key: bool, delegated: std::result::Result<String, String>, requested: &str) -> std::result::Result<TrustSource, String> {
+    if local_key {
+        return Ok(TrustSource::Local);
+    }
+    let delegated = delegated?;
+    if requested != delegated {
+        return Err(format!("요청이 댄 승인 기기({requested})는 이 기기가 위임한 기기({delegated})가 아니다"));
+    }
+    Ok(TrustSource::Relay(delegated))
+}
+
+/// 명부에 있다는 것은 위임이 아니다. 명부 **파일**에 사람이 `"restart_approvals": true` 와 `machine_id` 를 함께
+/// 적은 항목 하나만 승인 중계원이다. 손님 항목은 파일에 없고, 폴링으로 배운 id 는 상대가 스스로 댄 값이라 안 본다.
+pub fn delegated_authority(entries: &[serde_json::Value]) -> std::result::Result<String, String> {
+    let marked: Vec<&serde_json::Value> = entries.iter().filter(|e| e["restart_approvals"] == serde_json::Value::Bool(true)).collect();
+    let [entry] = marked.as_slice() else {
+        return Err(if marked.is_empty() {
+            "재시작 승인을 중계할 기기가 명부 파일에 위임돼 있지 않다(restart_approvals)".into()
+        } else {
+            "재시작 승인 위임이 명부 파일에 여럿이다 — 하나만 둔다".into()
+        });
+    };
+    entry["machine_id"].as_str()
+        .filter(|id| (8..=128).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)))
+        .map(str::to_string)
+        .ok_or_else(|| "위임 항목에 machine_id 가 적혀 있지 않다".into())
+}
+
+/// 위임된 기기의 카사텀이 중계한 승인(`GET /app/restart/approvals/{id}`). 답이 스스로 밝힌 기기가 위임된
+/// 기기여야 한다 — 끊긴 터널 자리를 다른 경로가 대신 받은 답을 거른다. 소비는 여기서 하지 않는다.
+pub struct RelayAuthority {
+    pub machine_id: String,
+    pub fetch: Fetch,
+}
+
+/// 중계 기기에 경로 하나를 GET 해 JSON 을 받는다.
+pub type Fetch = Box<dyn Fn(&str) -> std::result::Result<serde_json::Value, String> + Send + Sync>;
+
+pub fn relayed_view(reply: &serde_json::Value, machine_id: &str) -> std::result::Result<ApprovalView, String> {
+    if reply["machine_id"].as_str() != Some(machine_id) {
+        return Err("위임한 기기가 아닌 곳이 승인을 답했다".into());
+    }
+    serde_json::from_value(reply["approval"].clone()).map_err(|_| "중계된 승인을 읽지 못했다".into())
+}
+
+impl Authority for RelayAuthority {
+    fn get(&self, approval_id: &str) -> std::result::Result<ApprovalView, String> {
+        if !valid_approval_id(approval_id) {
+            return Err("approval id 모양이 아니다".into());
+        }
+        relayed_view(&(self.fetch)(&format!("/app/restart/approvals/{approval_id}"))?, &self.machine_id)
+    }
+
+    fn consume(&self, _: &str, _: &serde_json::Value, _: &str) -> std::result::Result<ApprovalView, String> {
+        Err("승인 소비는 나쵸 앱 키가 있는 조종 기기에서만 한다".into())
+    }
 }
 
 /// 대상 쪽 — 요청이 말하는 것을 믿지 않고, 나쵸에서 읽은 승인과 지금 이 기기의 사실로만 판정한다.
@@ -347,6 +431,9 @@ pub fn authorize_target(req: &JobRequest, facts: &Facts, authority: &dyn Authori
         return Err("작업이 이 기기의 지금 정체와 맞지 않는다".into());
     }
     let view = authority.get(&req.approval_id)?;
+    if view.id != req.approval_id {
+        return Err("요청한 승인이 아닌 승인이 돌아왔다".into());
+    }
     if view.action != ACTION || view.state != "approved" {
         return Err(format!("승인되지 않았다({} {})", view.action, view.state));
     }
@@ -954,6 +1041,109 @@ mod tests {
         let mut lie = req.clone();
         lie.job.plan_hash = "0000".into();
         assert!(authorize_target(&lie, &facts("a", 1), &nacho, NOW).is_err(), "요청이 다른 계획을 말한다");
+    }
+
+    fn entries(value: serde_json::Value) -> Vec<serde_json::Value> {
+        value.as_array().cloned().unwrap()
+    }
+
+    #[test]
+    fn registration_alone_is_not_a_delegation_to_vouch_for_approvals() {
+        let id = "4af3d95d64374ea3bdf951942caf19b2";
+        assert!(delegated_authority(&entries(serde_json::json!([{"label": "mini", "machine_id": id}]))).is_err(), "등록만으로는 위임이 아니다");
+        assert_eq!(delegated_authority(&entries(serde_json::json!([{"label": "mini", "machine_id": id, "restart_approvals": true}]))), Ok(id.to_string()));
+        assert!(delegated_authority(&entries(serde_json::json!([{"label": "mini", "machine_id": id, "restart_approvals": "true"}]))).is_err(), "참 값만");
+        assert!(delegated_authority(&entries(serde_json::json!([{"label": "mini", "restart_approvals": true}]))).is_err(), "폴링으로 배운 id 는 위임이 아니다");
+        assert!(delegated_authority(&entries(serde_json::json!([
+            {"label": "mini", "machine_id": id, "restart_approvals": true},
+            {"label": "evil", "machine_id": "evil-machine", "restart_approvals": true},
+        ]))).is_err(), "위임이 둘이면 아무것도 안 믿는다");
+    }
+
+    #[test]
+    fn the_request_cannot_pick_who_vouches_for_the_approval() {
+        assert_eq!(trust_source(true, Err("없음".into()), "evil-machine"), Ok(TrustSource::Local), "키가 있으면 요청이 무엇을 대든 자기 나쵸");
+        assert_eq!(trust_source(false, Ok("ctl-machine".into()), "ctl-machine"), Ok(TrustSource::Relay("ctl-machine".into())));
+        assert!(trust_source(false, Ok("ctl-machine".into()), "evil-machine").is_err(), "명부에 있는 다른 기기");
+        assert!(trust_source(false, Err("위임 없음".into()), "ctl-machine").is_err(), "위임이 없으면 중계도 없다");
+    }
+
+    /// 승인 쪽이 무엇을 묻든 같은 view 를 돌려주는 거짓 창구.
+    struct Says(ApprovalView);
+
+    impl Authority for Says {
+        fn get(&self, _: &str) -> std::result::Result<ApprovalView, String> {
+            Ok(self.0.clone())
+        }
+        fn consume(&self, _: &str, _: &serde_json::Value, _: &str) -> std::result::Result<ApprovalView, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn forged_or_misrouted_approvals_never_start_a_restart() {
+        let lookup = |id: &str| Ok(facts(id, 1));
+        let plan = build_plan("ctl", &["a".into(), "ctl".into()], &lookup, NOW);
+        let mut req = request_for(&plan, "a", 1);
+        let forged = ApprovalView {
+            id: AP.into(), action: ACTION.into(), scope: plan.scope.clone(), state: "approved".into(),
+            expires_at_ms: NOW + 1000, consumed_at_ms: Some(NOW), consumed_by: Some("ctl".into()), ..Default::default()
+        };
+        let registry = entries(serde_json::json!([
+            {"label": "ctl", "machine_id": "ctl-machine", "restart_approvals": true},
+            {"label": "evil", "machine_id": "evil-machine"},
+        ]));
+        let connected = RefCell::new(Vec::new());
+        let answering = |who: &'static str, view: &ApprovalView| {
+            let reply = serde_json::json!({"machine_id": who, "approval": view});
+            let connected = &connected;
+            move |id: &str| -> std::result::Result<Fetch, String> {
+                connected.borrow_mut().push(id.to_string());
+                Ok(Box::new(move |_: &str| Ok(reply.clone())))
+            }
+        };
+
+        req.authority = "evil-machine".into();
+        assert!(target_authority(false, &registry, &req.authority, answering("evil-machine", &forged)).is_err(), "명부에 있는 다른 기기를 대도");
+        let unmarked = entries(serde_json::json!([{"label": "ctl", "machine_id": "ctl-machine"}]));
+        assert!(target_authority(false, &unmarked, "ctl-machine", answering("ctl-machine", &forged)).is_err(), "위임이 없으면");
+        assert!(connected.borrow().is_empty(), "고르지 못한 기기에는 연결조차 안 한다");
+
+        req.authority = "ctl-machine".into();
+        let run = |who: &'static str, view: &ApprovalView| {
+            let relay = target_authority(false, &registry, &req.authority, answering(who, view)).unwrap().unwrap();
+            authorize_target(&req, &facts("a", 1), &relay, NOW)
+        };
+        assert!(run("evil-machine", &forged).unwrap_err().contains("위임한 기기가 아닌"), "끊긴 터널 자리를 다른 기기가 받아 답했다");
+        let raw = RelayAuthority { machine_id: "ctl-machine".into(), fetch: Box::new(|_| Ok(serde_json::json!({"approved": true, "id": AP}))) };
+        assert!(authorize_target(&req, &facts("a", 1), &raw, NOW).is_err(), "기기를 안 밝힌 자기주장");
+        let mut other_consumer = forged.clone();
+        other_consumer.consumed_by = Some("a".into());
+        assert!(run("ctl-machine", &other_consumer).is_err(), "조종 기기가 아닌 기기가 썼다");
+        let mut other_id = forged.clone();
+        other_id.id = "ap_ffffffffffffffffffffffffffffffff".into();
+        assert!(run("ctl-machine", &other_id).is_err(), "다른 승인");
+        assert!(run("ctl-machine", &forged).is_ok(), "위임한 기기가 밝힌 소비된 승인만 통과한다");
+        assert_eq!(connected.borrow().iter().filter(|id| id.as_str() != "ctl-machine").count(), 0);
+
+        assert!(authorize_run(&plan, AP, &Says(other_consumer.clone())).is_err(), "조종 쪽도 남이 쓴 소비를 안 받는다");
+        let nacho = FakeNacho::approving(&plan.scope, "approved", NOW + 1000);
+        assert_eq!(nacho.consume(AP, &plan.scope, "a").unwrap_err(), "wrong_consumer", "나쵸 계약: 소비는 scope 의 조종 기기만");
+        assert!(RelayAuthority { machine_id: "ctl-machine".into(), fetch: Box::new(|_| unreachable!()) }.consume(AP, &plan.scope, "ctl").is_err(), "중계는 소비하지 않는다");
+    }
+
+    #[test]
+    fn one_approval_creates_at_most_one_job_per_machine() {
+        let dir = tmp("once");
+        let lookup = |id: &str| Ok(facts(id, 1));
+        let plan = build_plan("ctl", &["a".into(), "ctl".into()], &lookup, NOW);
+        let nacho = FakeNacho::approving(&plan.scope, "approved", NOW + 1000);
+        authorize_run(&plan, AP, &nacho).unwrap();
+        let req = request_for(&plan, "a", 1);
+        assert_eq!(accept_job(&req, &facts("a", 1), &nacho, &dir, NOW), Ok(true));
+        assert_eq!(accept_job(&req, &facts("a", 1), &nacho, &dir, NOW), Ok(false), "같은 승인을 다시 보내도 새 작업은 없다");
+        assert!(accept_job(&request_for(&plan, "a", 2), &facts("a", 2), &nacho, &dir, NOW).is_err(), "재기동 뒤(새 pid) 같은 승인은 대상이 아니다");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn job(id: &str) -> Job {
