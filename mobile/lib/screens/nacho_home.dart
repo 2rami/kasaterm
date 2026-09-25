@@ -1,13 +1,18 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../hub_prefs.dart';
 import '../nacho.dart';
+import '../nacho_reply.dart';
+import '../nacho_student.dart';
 import '../server.dart';
 import 'hub.dart';
+import 'nacho_reply_view.dart';
 import 'nacho_task.dart';
 import 'nacho_typing.dart';
+import 'terminal.dart';
 
 /// 카사모바일 첫 화면 — 나쵸와의 대화와, 그 대화에서 맡은 일의 목록.
 ///
@@ -33,6 +38,7 @@ class NachoHome extends StatefulWidget {
 
 class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
   late final NachoDesk _desk = widget.desk ?? NachoDesk(widget.server);
+  late final StudentLookup _students = StudentLookup(widget.server);
 
   @override
   void initState() {
@@ -45,6 +51,7 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     if (widget.desk == null) _desk.dispose();
+    _students.dispose();
     super.dispose();
   }
 
@@ -132,7 +139,13 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
               Expanded(
                 child: TabBarView(
                   children: [
-                    NachoChat(desk: _desk, onOpenTask: _openTask),
+                    NachoChat(
+                      desk: _desk,
+                      students: _students,
+                      onOpenTask: _openTask,
+                      onOpenPane: _openPane,
+                      onLink: _openLink,
+                    ),
                     NachoTasks(desk: _desk, onOpenTask: _openTask),
                   ],
                 ),
@@ -159,9 +172,46 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
           desk: _desk,
           taskId: id,
           onOpenStudents: _openStudents,
+          students: _students,
+          onOpenPane: _openPane,
+          onLink: _openLink,
         ),
       ),
     );
+  }
+
+  void _openPane(Pane pane) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => TerminalScreen(server: widget.server, pane: pane),
+      ),
+    );
+  }
+
+  /// 답 속 링크. 이 서버의 학생 화면 링크면 앱 안에서 그 학생을 열고, 아니면 밖(사파리)으로.
+  Future<void> _openLink(String url) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final term = termLinkOf(url, widget.server.root);
+    if (term != null) {
+      Pane? pane;
+      try {
+        pane = await _students.fresh(term.machine, term.pane);
+      } on ServerException catch (e) {
+        messenger.showSnackBar(SnackBar(content: Text(e.message)));
+        return;
+      }
+      if (!mounted) return;
+      if (pane == null) {
+        messenger.showSnackBar(const SnackBar(content: Text('그 창을 지금 목록에서 못 찾았어요 — 닫혔을 수 있어요')));
+        return;
+      }
+      _openPane(pane);
+      return;
+    }
+    final uri = externalUri(url);
+    if (uri == null || !await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      messenger.showSnackBar(const SnackBar(content: Text('링크를 열지 못했어요')));
+    }
   }
 }
 
@@ -264,10 +314,20 @@ class _Banner extends StatelessWidget {
 
 // ── 대화 ─────────────────────────────────────────────────────────────────
 class NachoChat extends StatefulWidget {
-  const NachoChat({super.key, required this.desk, required this.onOpenTask});
+  const NachoChat({
+    super.key,
+    required this.desk,
+    required this.students,
+    required this.onOpenTask,
+    required this.onOpenPane,
+    required this.onLink,
+  });
 
   final NachoDesk desk;
+  final StudentLookup students;
   final ValueChanged<String> onOpenTask;
+  final void Function(Pane pane) onOpenPane;
+  final ValueChanged<String> onLink;
 
   @override
   State<NachoChat> createState() => _NachoChatState();
@@ -333,6 +393,8 @@ class _NachoChatState extends State<NachoChat> {
 
   List<Widget> _rows(NachoDesk desk) {
     final out = <Widget>[];
+    // 학생 카드는 그 일의 첫 답(띄웠다는 보고) 밑에만 — 뒤의 답은 「작업 보기」 칩으로 충분하다.
+    final carded = <String>{};
     for (final e in desk.events) {
       switch (e.kind) {
         case 'message':
@@ -349,12 +411,17 @@ class _NachoChatState extends State<NachoChat> {
           );
         case 'reply':
           final work = desk.workOf(e.task);
+          final seated = work != null && work.student != null && carded.add(work.id);
           out.add(
             _NachoBubble(
               event: e,
               desk: desk,
               work: work,
+              card: seated,
+              students: widget.students,
               onOpenTask: widget.onOpenTask,
+              onOpenPane: widget.onOpenPane,
+              onLink: widget.onLink,
             ),
           );
         case 'notice':
@@ -481,18 +548,33 @@ class _NachoBubble extends StatelessWidget {
     required this.event,
     required this.desk,
     required this.work,
+    required this.card,
+    required this.students,
     required this.onOpenTask,
+    required this.onOpenPane,
+    required this.onLink,
   });
 
   final NachoEvent event;
   final NachoDesk desk;
   final NachoTaskCard? work;
+
+  /// 이 답 밑에 맡은 학생 카드를 세우나.
+  final bool card;
+  final StudentLookup students;
   final ValueChanged<String> onOpenTask;
+  final void Function(Pane pane) onOpenPane;
+  final ValueChanged<String> onLink;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final text = event.text.trim().isEmpty ? '(할 말 없이 끝냈다)' : event.text;
+    final view = splitReply(
+      event.text,
+      root: desk.server.root,
+      seatPane: card ? (work?.student?['surface'] as String?) : null,
+    );
+    final text = event.text.trim().isEmpty ? '(할 말 없이 끝냈다)' : view.body;
     final origin = event.origin;
     return Align(
       alignment: Alignment.centerLeft,
@@ -501,17 +583,20 @@ class _NachoBubble extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: scheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(16),
+            if (text.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: ReplyText(
+                  text: text,
+                  onLink: onLink,
+                  style: TextStyle(color: scheme.onSurface, fontSize: 15, height: 1.4),
+                ),
               ),
-              child: SelectableText(
-                text,
-                style: TextStyle(color: scheme.onSurface, fontSize: 15, height: 1.4),
-              ),
-            ),
+            if (view.meta != null) ReplyMetaLine(meta: view.meta!),
             if (origin != null)
               Padding(
                 padding: const EdgeInsets.only(top: 3),
@@ -551,7 +636,14 @@ class _NachoBubble extends StatelessWidget {
                   '파일: ${event.files[i]}',
                   style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
                 ),
-            if (work != null)
+            if (card)
+              StudentWorkCard(
+                work: work!,
+                lookup: students,
+                onOpenPane: onOpenPane,
+                onOpenTask: onOpenTask,
+              )
+            else if (work != null)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
                 child: ActionChip(
@@ -560,6 +652,7 @@ class _NachoBubble extends StatelessWidget {
                   onPressed: () => onOpenTask(work!.id),
                 ),
               ),
+            if (view.folded) ReplyDetails(view: view),
           ],
         ),
       ),

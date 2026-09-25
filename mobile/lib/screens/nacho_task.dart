@@ -4,7 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../nacho.dart';
+import '../nacho_reply.dart';
+import '../nacho_student.dart';
+import '../server.dart';
 import 'nacho_home.dart';
+import 'nacho_reply_view.dart';
 
 /// 작업 하나 — 목표·진행·결과·근거·승인 상태, 그리고 이 일에 주는 방향.
 ///
@@ -16,11 +20,19 @@ class NachoTaskScreen extends StatefulWidget {
     required this.desk,
     required this.taskId,
     required this.onOpenStudents,
+    this.students,
+    this.onOpenPane,
+    this.onLink,
   });
 
   final NachoDesk desk;
   final String taskId;
   final VoidCallback onOpenStudents;
+
+  /// 맡은 학생을 실제 pane 으로 이어 그 화면을 곧장 연다. 없으면 학생 목록으로 보낸다.
+  final StudentLookup? students;
+  final void Function(Pane pane)? onOpenPane;
+  final ValueChanged<String>? onLink;
 
   @override
   State<NachoTaskScreen> createState() => _NachoTaskScreenState();
@@ -214,7 +226,14 @@ class _NachoTaskScreenState extends State<NachoTaskScreen> {
               _Shot(url: widget.desk.fileUri(seq, i, task: t.id).toString(), label: name),
           ],
         ),
-      if (student != null)
+      if (student != null && widget.students != null && widget.onOpenPane != null)
+        _Box(
+          title: '맡은 학생',
+          children: [
+            StudentWorkCard(work: t, lookup: widget.students!, onOpenPane: widget.onOpenPane!),
+          ],
+        )
+      else if (student != null)
         _Box(
           title: '맡은 학생',
           children: [
@@ -246,11 +265,13 @@ class _NachoTaskScreenState extends State<NachoTaskScreen> {
         title: '이 작업의 대화',
         children: [
           for (final e in t.events)
-            if (e.kind == 'message' || e.kind == 'reply' || e.kind == 'notice')
+            if (e.kind == 'reply')
+              _ReplyEntry(event: e, root: widget.desk.server.root, onLink: widget.onLink)
+            else if (e.kind == 'message' || e.kind == 'notice')
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
                 child: Text(
-                  '${e.kind == 'message' ? '나' : e.kind == 'reply' ? '나쵸' : '알림'} · '
+                  '${e.kind == 'message' ? '나' : '알림'} · '
                   '${e.kind == 'message' ? receiptLabel(widget.desk.stateOf(e.id ?? '')) : _clock(e.atMs)}\n${e.text}',
                   style: const TextStyle(fontSize: 13, height: 1.35),
                 ),
@@ -260,6 +281,38 @@ class _NachoTaskScreenState extends State<NachoTaskScreen> {
         ],
       ),
     ];
+  }
+}
+
+/// 작업 대화 속 나쵸 답 — 대화 탭과 같이 링크는 라벨로, 실행 명령·사용량은 접힌 상세로.
+class _ReplyEntry extends StatelessWidget {
+  const _ReplyEntry({required this.event, required this.root, this.onLink});
+
+  final NachoEvent event;
+  final Uri root;
+  final ValueChanged<String>? onLink;
+
+  @override
+  Widget build(BuildContext context) {
+    final view = splitReply(event.text, root: root);
+    const style = TextStyle(fontSize: 13, height: 1.35);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('나쵸 · ${_clock(event.atMs)}', style: style),
+          if (view.body.isNotEmpty)
+            ReplyText(
+              text: view.body,
+              onLink: onLink ?? (url) => launchUrl(externalUri(url) ?? Uri(), mode: LaunchMode.externalApplication),
+              style: style,
+            ),
+          if (view.meta != null) ReplyMetaLine(meta: view.meta!),
+          if (view.folded) ReplyDetails(view: view),
+        ],
+      ),
+    );
   }
 }
 

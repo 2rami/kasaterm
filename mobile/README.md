@@ -38,6 +38,8 @@ lib/
   server.dart          Server(root) — uri/wsUri/me/panes/sessions/machines/shot/send · describe() 는 slug 를 가린다
   address_store.dart   주소(slug 포함) → Keychain(flutter_secure_storage)
   nacho.dart           나쵸 창구 — 대화 원장 이어 받기(순번) · 같은 id 재전송 · 작업 장부 읽기
+  nacho_reply.dart     나쵸 답 가르기 — 실행·진단 줄과 사용량 꼬리를 접힌 상세로(원문 보존) · 학생 링크 읽기
+  nacho_student.dart   장부의 맡은 학생(surface·host·machine_id) → 실제 pane. 기계를 못 정하면 짐작 안 함
   hub_model.dart       기계→방→학생 트리 · 기계마다 따로 받아 온 것부터 · `term/changes` 롱폴 · 대기 전이 배지+햅틱
   grid.dart            순수 Dart 격자 모델 — dirty 행 교체 · 글자 폭 표 · 256 팔레트
   term_session.dart    WS 수명(백오프·gone·pause/resume) · 키 바이트 · 답장 · 그림 폴링
