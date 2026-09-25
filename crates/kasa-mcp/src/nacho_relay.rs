@@ -7,7 +7,7 @@
 //! 닫힘이 기본이다.
 //! - 주인 주소(`owner`)로 온 요청만. 다른 사용자 주소·주소 없는 로컬 호출은 403 — 로컬 도구는 나쵸를
 //!   직접 부르면 되고, 여기로 오면 신원을 지어낼 길이 생긴다.
-//! - 나쵸 자리 서술자(`nacho-ask.json` 또는 `NACHO_ASK_URL`)가 없으면 503, 키 파일이 없으면 503.
+//! - 나쵸 자리 서술자(`nacho-ask.json` 또는 `NACHO_ASK_URL`)가 없으면 503, 앱 키(`nacho-app.key`)가 없으면 503.
 //! - `m/<기계>/` 로 다른 기계를 거쳐 넘기지 않는다 — 그 길은 신원 헤더를 버린다. 폰이 붙은 허브가
 //!   서술자에 적힌 나쵸로 **직접** 넘긴다(맥북 허브면 메시 주소, 미니면 127.0.0.1).
 
@@ -36,13 +36,15 @@ fn descriptor_path() -> Option<PathBuf> {
         .or_else(|| home().map(|h| h.join(".config/kasaterm/nacho-ask.json")))
 }
 
+/// 앱 창구 전용 키. 펫 창구 키(`nacho-ask.key`)와 **따로다** — 펫은 토큰을 안 싣는 판이 있어 그 키를 만들면
+/// 펫이 끊긴다. 폰이 붙는 허브와 나쵸가 같은 기계면 그 기계 한 곳에만 둔다.
 fn key_path() -> Option<PathBuf> {
-    std::env::var_os("NACHO_ASK_TOKEN_FILE")
+    std::env::var_os("NACHO_APP_TOKEN_FILE")
         .map(PathBuf::from)
-        .or_else(|| home().map(|h| h.join(".config/nacho-ask.key")))
+        .or_else(|| home().map(|h| h.join(".config/nacho-app.key")))
 }
 
-/// 넘길 곳과 키. 펫 대리인(`tools/request_journal/ask.py`)과 같은 서술자·같은 키 파일을 읽는다.
+/// 넘길 곳과 키. 넘길 곳은 펫 대리인(`tools/request_journal/ask.py`)과 같은 서술자, 키는 앱 전용 파일.
 pub(crate) fn target_from(env_url: Option<String>, desc: Option<&Path>, key: Option<&Path>) -> Result<Target, &'static str> {
     let url = env_url
         .map(|u| u.trim().to_string())
@@ -205,7 +207,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nacho-relay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let desc = dir.join("nacho-ask.json");
-        let key = dir.join("nacho-ask.key");
+        let key = dir.join("nacho-app.key");
         assert_eq!(target_from(None, Some(&desc), Some(&key)), Err("nacho_unconfigured"));
         std::fs::write(&desc, r#"{"version":1,"url":"http://127.0.0.1:8792/"}"#).unwrap();
         assert_eq!(target_from(None, Some(&desc), Some(&key)), Err("nacho_key_missing"));

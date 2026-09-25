@@ -180,7 +180,7 @@ kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> \
   허브가 `X-Kasa-User`(퍼센트 인코딩)·`X-Kasa-Owner: 1`·`X-Kasa-Machine`·`X-Nacho-Token`·
   `X-Journal-Request: 1` 을 새로 싣는다. 손님 주소·주소 없는 로컬 호출은 403, 경로에 `..` 이 끼면 404.
 - **닫힘이 기본.** 넘길 곳은 펫 대리인과 같은 서술자 `~/.config/kasaterm/nacho-ask.json`(또는
-  `NACHO_ASK_URL`), 키는 `~/.config/nacho-ask.key`(또는 `NACHO_ASK_TOKEN_FILE`). 서술자가 없으면
+  `NACHO_ASK_URL`), 키는 **앱 전용** `~/.config/nacho-app.key`(또는 `NACHO_APP_TOKEN_FILE`) — 펫 창구 키 `nacho-ask.key` 와 따로다(펫은 토큰을 안 싣는 판이 있어 그 키를 만들면 펫이 끊긴다). 폰 허브와 나쵸가 같은 기계(미니)면 그 한 곳에만 둔다. 서술자가 없으면
   `nacho_unconfigured`, 키가 없으면 `nacho_key_missing` 으로 503. 나쵸 쪽도 키가 없으면 앱 창구를 닫는다.
 - `m/<기계>/` 로 다른 기계를 거치지 않는다 — 그 길은 신원 헤더를 버린다. 폰이 붙은 허브가 서술자의
   나쵸로 **직접** 넘긴다(미니 허브는 `127.0.0.1:8792`, 맥북 허브는 메시 주소).
