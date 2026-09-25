@@ -1172,9 +1172,9 @@ fn term_scrollback_lines(t: &TerminalPane) -> Vec<String> {
 struct PaneViewShift {
     /// Independent viewer layout with exact display-to-source cell mapping.
     projection: Option<Arc<crate::mirror_view::Projection>>,
-    /// classic claude 가 화면 끝에 남긴 여백만큼 위(스크롤백)에서 당겨 온 줄.
-    /// 화면 맨 위 `above.len()` 행이 이것이고, 그 아래부터 원본이 같은 수만큼 밀린다.
-    above: Vec<Vec<GridCell>>,
+    /// classic claude 가 화면 끝에 남긴 여백을 **입력창 위로** 옮겨 끼운 빈 행.
+    /// 이 화면 행들엔 원본이 없고, 그 아래부터 원본이 `gap.len()` 만큼 밀린다.
+    gap: std::ops::Range<usize>,
     /// 스크롤 중 바닥에 붙잡아 둔 입력창 — 화면 맨 아래 `pinned.len()` 행.
     /// 살아 있는 화면에서 떠 온 것이라 지나간 대화를 담은 뷰포트에는 없다.
     pinned: Vec<Vec<GridCell>>,
@@ -1187,7 +1187,7 @@ impl PaneViewShift {
     /// 옮김이 아예 없나 — 평범한 pane, 그리고 **대체화면 claude**(노플리커)가 그렇다.
     /// 그쪽은 claude 가 화면 끝까지 직접 그려 메울 여백이 없다.
     fn is_identity(&self) -> bool {
-        self.projection.is_none() && (self.rows == 0 || (self.above.is_empty() && self.pinned.is_empty()))
+        self.projection.is_none() && (self.rows == 0 || (self.gap.is_empty() && self.pinned.is_empty()))
     }
 
     /// 화면 행 `r` 에 **실제로 그려진** 줄. 화면 좌표를 쓰는 모든 판독(복사·링크
@@ -1197,19 +1197,16 @@ impl PaneViewShift {
         if self.is_identity() {
             return base.get(r);
         }
-        if r < self.above.len() {
-            return self.above.get(r);
-        }
         let pin_start = self.rows.saturating_sub(self.pinned.len());
         if r >= pin_start {
             return self.pinned.get(r - pin_start);
         }
-        base.get(r - self.above.len())
+        base.get(self.term_row(r)?)
     }
 
     /// 화면 행을 **앱이 아는 행**으로 되돌린다 — 마우스 이벤트를 TUI 로 넘길 때
     /// 쓴다. 우리가 화면을 옮겨 그렸으므로 그대로 보내면 그 앱은 다른 줄을 눌린
-    /// 것으로 안다. 당겨 온 구간(스크롤백)은 앱 화면에 없으니 `None`.
+    /// 것으로 안다. 끼워 넣은 빈 행은 앱 화면에 없으니 `None`.
     fn term_row(&self, r: usize) -> Option<usize> {
         if let Some(projection) = &self.projection {
             return projection.source_map.get(r)?.iter().flatten().next().map(|&(row, _)| row);
@@ -1217,10 +1214,10 @@ impl PaneViewShift {
         if self.is_identity() {
             return Some(r);
         }
-        if r < self.above.len() {
+        if self.gap.contains(&r) {
             return None;
         }
-        Some(r - self.above.len())
+        Some(if r < self.gap.start { r } else { r - self.gap.len() })
     }
 
     fn term_pos(&self, row: usize, col: usize) -> Option<(usize, usize)> {
@@ -1236,7 +1233,9 @@ impl PaneViewShift {
                 cells.iter().position(|cell| *cell == Some((row, col))).map(|c| (r, c))
             });
         }
-        Some((row + self.above.len(), col))
+        let row = if row < self.gap.start { row } else { row + self.gap.len() };
+        // 입력창 밑 빈 줄(꼬리)은 입력창 위로 옮겨 갔다 — 거기 있던 커서는 화면 밖이다.
+        (self.rows == 0 || row < self.rows).then_some((row, col))
     }
 
     /// 화면에 실제로 그려진 그대로의 행들. 복사는 원본이 아니라 이걸 봐야 한다.
@@ -9108,27 +9107,26 @@ mod tests {
         }
     }
 
-    /// 위에서 줄을 당겨 그린 pane 에서, 복사가 **화면에 보이는 그 줄**을 담는다.
+    /// 입력창을 바닥으로 내려 그린 pane 에서, 복사·마우스·커서가 **화면에 보이는
+    /// 그 줄**을 가리킨다.
     ///
-    /// classic claude 는 화면 끝에 여백을 남기고, 렌더는 그만큼 스크롤백에서 당겨
-    /// 화면을 아래로 민다(`bottom_pull_rows`). 원본 글자판을 그대로 복사하면 그
-    /// 당긴 줄 수만큼 **아래 글자**가 담긴다(2026-09-05: "복사가 이상하게 되고").
+    /// classic claude 는 화면 끝에 여백을 남기고, 렌더는 그 여백을 입력창 위로 옮겨
+    /// 입력창을 바닥에 붙인다. 원본 글자판을 그대로 보면 끼운 빈 줄 수만큼 **아래
+    /// 글자**를 집는다(2026-09-05: "복사가 이상하게 되고").
     #[test]
-    fn copy_follows_pulled_rows() {
+    fn view_follows_gap_above_input() {
         const W: usize = 8;
         let base: Vec<Vec<GridCell>> = (0..5).map(|i| grid_row(&format!("b{i}"), W)).collect();
-        let shift = PaneViewShift {
-            above: vec![grid_row("a0", W)],
-            pinned: Vec::new(),
-            rows: 5,
-            projection: None,
-        };
+        let shift = PaneViewShift { gap: 2..4, rows: 5, ..Default::default() };
         let view = shift.compose(&base);
-        // 화면 = [a0, b0, b1, b2, b3] — 원본 마지막 줄(b4)은 잘려 나갔다.
-        assert_eq!(extract_selection(&view, whole_row(0, W)), "a0");
-        assert_eq!(extract_selection(&view, whole_row(2, W)), "b1");
-        // 옮김을 안 되짚으면 한 줄 아래를 집는다 — 이게 고치기 전 동작이다.
-        assert_eq!(extract_selection(&base, whole_row(2, W)), "b2");
+        // 화면 = [b0, b1, 빈, 빈, b2] — 원본 꼬리의 빈 줄(b3·b4 자리)이 위로 갔다.
+        assert_eq!(extract_selection(&view, whole_row(1, W)), "b1");
+        assert_eq!(extract_selection(&view, whole_row(2, W)), "");
+        assert_eq!(extract_selection(&view, whole_row(4, W)), "b2");
+        assert_eq!(shift.term_row(3), None, "끼운 빈 줄은 앱 화면에 없다");
+        assert_eq!(shift.term_row(4), Some(2));
+        assert_eq!(shift.display_pos(2, 5), Some((4, 5)), "입력창 커서도 함께 내려간다");
+        assert_eq!(shift.display_pos(1, 5), Some((1, 5)));
     }
 
     /// 스크롤 중 바닥에 붙잡아 둔 입력창을 복사하면 **붙잡힌 그 글자**가 담긴다.
@@ -9139,10 +9137,9 @@ mod tests {
         const W: usize = 8;
         let base: Vec<Vec<GridCell>> = (0..5).map(|i| grid_row(&format!("b{i}"), W)).collect();
         let shift = PaneViewShift {
-            above: Vec::new(),
             pinned: vec![grid_row("p0", W), grid_row("p1", W)],
             rows: 5,
-            projection: None,
+            ..Default::default()
         };
         let view = shift.compose(&base);
         // 화면 = [b0, b1, b2, p0, p1]

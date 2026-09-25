@@ -93,19 +93,8 @@ impl PromptBox {
     }
 }
 
-/// 스크롤을 올렸을 때 뷰포트 맨 아래에 붙잡아 둘 **첫 행** — 입력박스의 위 테두리
-/// (codex 는 테두리가 없어 입력행 자신). 이 행부터 살아 있는 화면 **끝까지**를
-/// 통째로 옮긴다.
-///
-/// 박스 **아래**까지 함께 옮기는 이유: claude 는 테두리 밑에 모드·단축키 힌트를
-/// 한두 줄 더 그린다. 박스만 떠서 덮으면 그 줄들이 스크롤을 따라 흘러가, 붙잡아
-/// 둔 입력창 밑으로 지나간 대화가 비쳐 화면이 어긋나 보인다.
-///
-/// 끝을 「글자가 남은 마지막 행」에서 끊지 않고 **화면 끝까지** 가는 이유: claude 는
-/// 화면 맨 아래 한두 줄을 비워 두는데, 거기서 끊고 뷰포트 바닥에 맞춰 붙이면 그 빈
-/// 줄 수만큼 입력창이 아래로 밀린다 — 스크롤을 올리는 순간 한 칸 내려앉았다가 바닥에
-/// 닿으면 제자리로 뛴다(2026-09-03 지적: "프롬프트 입력하는거 움직여 하단바").
-/// 빈 줄까지 함께 옮기면 두 화면의 높이가 같아 자리가 정확히 겹친다.
+/// 바닥에 붙일 입력 띠의 **첫 행** — 입력박스의 위 테두리(codex 는 테두리가 없어
+/// 입력행 자신).
 ///
 /// 살아 있는 화면(`live_tail_rows`)을 받는다 — 뷰포트가 아니라. 뷰포트에는
 /// 스크롤을 올린 순간 입력창이 이미 없다.
@@ -116,12 +105,28 @@ pub(crate) fn pinned_input_top(rows: &[Vec<GridCell>]) -> Option<usize> {
     })
 }
 
+/// pane 바닥에 붙일 **입력 띠** — 입력박스 위 테두리부터 마지막 글자 줄까지.
+///
+/// 박스 **아래**까지 함께 옮기는 이유: claude 는 테두리 밑에 상태줄·모드 힌트를 한두
+/// 줄 더 그린다. 박스만 옮기면 그 줄들이 따로 놀아, 스크롤 중엔 붙잡아 둔 입력창
+/// 밑으로 지나간 대화가 비친다.
+///
+/// 끝을 **마지막 글자 줄**에서 끊는 이유: classic claude 는 화면 맨 아래 한두 줄을
+/// 비워 두는데, 그 빈 줄까지 띠에 넣으면 입력창이 바닥에서 그만큼 뜬다. 맨 아래를 볼
+/// 때와 스크롤을 올렸을 때 모두 이 띠의 끝을 바닥에 맞추므로, 스크롤을 올리는 순간
+/// 입력창이 한 칸 내려앉는 일이 없다(2026-09-03 지적: "프롬프트 입력하는거 움직여
+/// 하단바").
+pub(crate) fn input_band(rows: &[Vec<GridCell>]) -> Option<std::ops::Range<usize>> {
+    let band = pinned_input_top(rows)?..rows.len() - blank_tail(rows);
+    (!band.is_empty()).then_some(band)
+}
+
 /// 화면 **꼬리의 빈 줄 수** — 글자도 배경색도 없는 행이 바닥에서 몇 개 이어지나.
 ///
 /// classic claude 는 입력창·상태줄을 그린 뒤 화면 맨 아래 한두 줄을 안 쓴 채 남긴다.
 /// 대체화면 claude 는 화면 끝까지 그리므로 두 창을 나란히 놓으면 이쪽만 pane 바닥에
-/// 빈 띠가 생겨 보인다(2026-09-03 지적: "하단공간이 넓잖아" / "이게 지금"). 그 빈 줄
-/// 수를 세어 두면 렌더러가 그만큼 위에서 더 읽어 화면을 아래로 당길 수 있다.
+/// 빈 띠가 생겨 보인다(2026-09-03 지적: "하단공간이 넓잖아" / "이게 지금"). 렌더는
+/// 이 빈 줄을 입력창 위로 옮겨 입력창을 바닥에 붙인다(`input_band`).
 ///
 /// 배경색까지 보는 이유: codex 입력창은 채움색 행이라 글자가 없어도 빈 줄이 아니다.
 pub(crate) fn blank_tail(rows: &[Vec<GridCell>]) -> usize {
@@ -3565,19 +3570,26 @@ pub(crate) fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> 
     // 통째로 안 잡혀** 부팅 화면에 학생 테마가 안 붙었다(2026-08-20 사용자
     // 스샷 + 격리 리그 실측: 컴팩트·박스형 웰컴 둘 다 같은 3행 아트).
     // 옛 버전으로 도는 pane 도 있을 수 있어 두 세대를 다 훑는다.
-    const GENS: [(&[char], &[char], &[char]); 2] = [
+    // 발 행은 (글리프, 배너 좌단에서 들여쓴 칸수) — 한 세대 안에서도 판마다 다르다.
+    type Feet = &'static [(&'static [char], usize)];
+    const GENS: [(&[char], &[char], Feet); 2] = [
         // 2.1.23x — 눈 달린 아트(2026-08-20 peek 실측).
         (
             &['▐', '▛', '█', '█', '█', '▛', '█'],
             &['▝', '▜', '█', '█', '█', '█', '█', '█', '▀'],
-            // 발 행: 배너 좌단 기준 2칸 들여쓰기, 양옆은 공백.
-            &['▝', '▝', ' ', '▝', '▝'],
+            &[
+                (&['▝', '▝', ' ', '▝', '▝'], 2),
+                // 2.1.282 — 두 발 사이가 세 칸(바이트 실측). 이 모양을 모르는 동안 위가
+                // 잘려 발만 남은 배너가 안 잡혀 맨 윗줄에 주황 글리프가 남았다
+                // (2026-09-25 스샷).
+                (&['▝', '▝', ' ', ' ', ' ', '▝', '▝'], 1),
+            ],
         ),
         // ~2.1.212 — 민짜 아트.
         (
             &['▐', '▛', '█', '█', '█', '▜', '▌'],
             &['▝', '▜', '█', '█', '█', '█', '█', '▛', '▘'],
-            &['▘', '▘', ' ', '▝', '▝'],
+            &[(&['▘', '▘', ' ', '▝', '▝'], 2)],
         ),
     ];
     let blank = |cell: &GridCell| matches!(cell.ch, ' ' | '\0');
@@ -3587,7 +3599,7 @@ pub(crate) fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> 
     };
     let mut out = Vec::new();
     let n = rows.len();
-    for (head, body, feet) in GENS {
+    for (head, body, feet_forms) in GENS {
         for r in 0..n {
             let row = &rows[r];
             let mut c = 0usize;
@@ -3609,21 +3621,22 @@ pub(crate) fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> 
                 c += 1;
             }
         }
-        // 위로 2행 잘림: 최상단에 발만 남은 경우. 발 글리프는 짧아 양옆
-        // 공백(배너 폭 9칸 확보)까지 요구해 오탐을 줄인다.
+        // 위로 2행 잘림: 최상단에 발만 남은 경우. 발 글리프는 짧아 배너 폭 9칸의
+        // 나머지가 전부 공백인 것까지 요구해 오탐을 줄인다.
         if let Some(row) = rows.first() {
-            let mut p = 2usize;
-            while p + feet.len() + 2 <= row.len() {
-                if matches_at(row, p, feet)
-                    && blank(&row[p - 2])
-                    && blank(&row[p - 1])
-                    && blank(&row[p + 5])
-                    && blank(&row[p + 6])
-                {
-                    out.push((-2, p - 2));
-                    p += feet.len();
+            let mut left = 0usize;
+            while left + CLAWD_COLS <= row.len() {
+                let hit = feet_forms.iter().any(|&(feet, indent)| {
+                    let p = left + indent;
+                    matches_at(row, p, feet)
+                        && row[left..p].iter().all(blank)
+                        && row[p + feet.len()..left + CLAWD_COLS].iter().all(blank)
+                });
+                if hit {
+                    out.push((-2, left));
+                    left += CLAWD_COLS;
                 } else {
-                    p += 1;
+                    left += 1;
                 }
             }
         }
@@ -5253,6 +5266,14 @@ mod clawd_banner_tests {
     #[test]
     fn feet_only_at_top_row_detected() {
         let rows = vec![row_from(FEET), row_from(""), row_from("")];
+        assert_eq!(find_clawd_banners(&rows), vec![(-2, 0)]);
+    }
+
+    // 2.1.282 아트의 발(` ▝▝   ▝▝`)도 발만 남았을 때 잡는다 — 한 칸 간격만 알던
+    // 동안 맨 윗줄에 주황 글리프가 그대로 남았다(2026-09-25 스샷).
+    #[test]
+    fn wide_gap_feet_at_top_row_detected() {
+        let rows = vec![row_from(" ▝▝   ▝▝   ~/Desktop/momewomo/kasaterm"), row_from(""), row_from("")];
         assert_eq!(find_clawd_banners(&rows), vec![(-2, 0)]);
     }
 
@@ -8312,7 +8333,7 @@ mod pinned_input_tests {
     }
 
     #[test]
-    fn 입력박스는_위테두리부터_화면_끝까지_붙잡는다() {
+    fn 입력_띠는_위테두리부터_마지막_글자줄까지다() {
         // claude 화면 꼬리 — 지나간 대화, 입력박스, 그 아래 모드 힌트.
         let border = "─".repeat(20);
         let rows: Vec<Vec<GridCell>> = [
@@ -8326,8 +8347,9 @@ mod pinned_input_tests {
         .iter()
         .map(|s| row(s))
         .collect();
-        // 테두리(1)부터 화면 끝까지 — 뒤따르는 빈 줄도 함께 옮겨야 자리가 겹친다.
+        // 테두리(1)부터 모드 힌트(4)까지 — 꼬리의 빈 줄은 빼야 입력창이 바닥에 닿는다.
         assert_eq!(pinned_input_top(&rows), Some(1));
+        assert_eq!(input_band(&rows), Some(1..5));
     }
 
     #[test]
@@ -8335,6 +8357,7 @@ mod pinned_input_tests {
         let rows: Vec<Vec<GridCell>> =
             ["빌드 로그 한 줄", "또 한 줄"].iter().map(|s| row(s)).collect();
         assert_eq!(pinned_input_top(&rows), None);
+        assert_eq!(input_band(&rows), None);
     }
 
     #[test]
@@ -8343,7 +8366,7 @@ mod pinned_input_tests {
             .iter()
             .map(|s| row(s))
             .collect();
-        // 글자가 없는 두 줄 — 그만큼 화면을 아래로 당길 수 있다.
+        // 글자가 없는 두 줄 — 그만큼 입력창을 내려 바닥에 붙인다.
         assert_eq!(blank_tail(&rows), 2);
     }
 

@@ -496,7 +496,7 @@ impl App {
         // compose 는 슬롯을 본창 셀 크기(`self.cell`)로 놓는다 — 이 창의 셀 크기와의
         // 비율을 font_scale 로 넘겨야 얼굴·아이콘이 이 창의 글자 위에 앉는다.
         let font_scale = if cw > 0.0 && self.cell.w > 0.0 { cw / self.cell.w } else { 1.0 };
-        let (composition, student, labels, tab_state, tab_pid, cursor, pulled, cursor_color, alive) = {
+        let (composition, student, labels, tab_state, tab_pid, cursor, cursor_color, alive) = {
             let ws = self.ws.lock().unwrap();
             let pane = ws.panes.get(&pane_id);
             let tab_pid = ws.active_tab_pid(&pane_id);
@@ -535,7 +535,6 @@ impl App {
                     cursor_cell_width(&t.cells, t.cursor_row, t.cursor_col),
                 )
             });
-            let pulled: u16 = 0;
             let cursor_color = ws
                 .pane_character
                 .get(&tab_pid)
@@ -546,7 +545,7 @@ impl App {
                     )
                 })
                 .unwrap_or_else(theme::cursor);
-            (composition, student, labels, tab_state, tab_pid, cursor, pulled, cursor_color, pane.is_some())
+            (composition, student, labels, tab_state, tab_pid, cursor, cursor_color, pane.is_some())
         };
         // 색은 실제로 학생이 도는 pane 만(본창 pane 테두리와 같은 규칙), 이름은
         // 배정만으로 뜬다(본창 pane 헤더와 같은 규칙) — 두 규칙이 원래 다르다.
@@ -573,7 +572,7 @@ impl App {
         });
         let cursor = cursor.and_then(|(row, col, visible, width)| {
             let position = view_shift.as_ref().map(|shift| shift.display_pos(row as usize, col as usize))
-                .unwrap_or(Some((row as usize + pulled as usize, col as usize)));
+                .unwrap_or(Some((row as usize, col as usize)));
             position.map(|(row, col)| (row, col, visible, width))
         });
         let Some(t) = self.aux.terminals.get_mut(idx) else { return };

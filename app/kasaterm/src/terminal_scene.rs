@@ -1014,49 +1014,40 @@ impl App {
                 })
             });
         let runs_claude = agent_kind.is_some();
-        // 스크롤을 올려도 **입력창은 맨 아래에 붙잡는다**. 대체화면을 끈
-        // claude 는 입력창이 대화의 마지막 줄일 뿐이라, 스크롤백을 거슬러
-        // 올라가면 타이핑할 자리가 화면 밖으로 나간다(2026-08-30 지적:
-        // "노플리커 끄니까 하단 채팅창 고정되는게 안된다"). 위쪽 sticky
-        // 띠가 지나간 질문을 붙잡는 것과 같은 원리로, 살아 있는 화면에서
-        // 입력박스를 떠다 뷰포트 맨 아래 행에 덮는다.
+        // classic claude 의 입력창은 **늘 바닥에** 둔다. 대체화면을 끈 claude 는 입력창이
+        // 대화의 마지막 줄일 뿐이라, 대화가 짧으면 화면 한가운데 떠 있고 스크롤을 올리면
+        // 화면 밖으로 나간다(2026-08-30 "노플리커 끄니까 하단 채팅창 고정되는게 안된다",
+        // 2026-09-25 "tui 풀스크린 끄고 … 하단바 고정안되고"). 노플리커처럼 대화는 위에
+        // 그대로 두고 입력창부터만 내린다.
         //
-        // 스크롤이 0 이면 아무것도 안 한다 — 그때는 원래 자리에 있다.
-        // 대체화면 앱(vim·helix)은 스크롤백이 없어 offset 이 늘 0 이므로
-        // 여기 들어오지 않는다. 기본 설정의 claude 도 대체화면을 쓰므로
-        // 평소엔 잠들어 있다 — `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` 로
-        // classic 을 켠 pane 에서만 깨어난다.
-        // 이 pane 을 어떻게 옮겨 그렸는지 — 복사가 되짚을 유일한 기록.
+        // - 맨 아래를 보고 있으면: 화면 끝의 빈 줄을 입력창 **위로** 옮긴다. 그 여백을
+        //   스크롤백에서 당겨 메우던 길은 걷었다(2026-09-22) — claude 가 다시 그릴 때
+        //   스크롤백에 남은 옛 배너가 위에서 되살아나 「복제」로 보였다.
+        // - 스크롤을 올렸으면: 살아 있는 화면에서 입력창을 떠다 뷰포트 바닥에 덮는다.
+        //   위쪽 sticky 띠가 지나간 질문을 붙잡는 것과 같은 원리다. 두 경우 모두 입력창의
+        //   **마지막 글자 줄**이 바닥에 닿으므로 스크롤을 올리는 순간 자리가 안 뛴다.
+        //
+        // 대체화면 앱(vim·helix)과 노플리커 claude 는 여기 안 온다 — claude 가 아니거나
+        // 화면 끝까지 직접 그려 옮길 여백이 없다.
         let mut view_shift = crate::PaneViewShift { projection: projection.clone(), ..Default::default() };
-        // 스크롤백을 끌어올려 화면 아래 빈 줄을 채우던 「당김」은 걷었다(2026-09-22).
-        // claude 가 다시 그릴 때(크기 변경) 스크롤백에 남은 옛 배너가 위에서 되살아나
-        // 「복제」로 보였다 — 화면은 앱이 그린 그대로 둔다.
-        let pulled = 0usize;
         if desktop_view && projection.is_none() && runs_claude && !composed.is_empty() {
             if let Some(sess) = self.pty.get(tab_pid.as_str()) {
                 if sess.view_state().0 > 0 {
-                    let live_all: Vec<Vec<GridCell>> = sess
-                        // 아래에서 `pulled` 만큼 걷어내므로 그만큼 더 떠 온다 —
-                        // 안 그러면 많이 당긴 pane 에서 스캔 폭이 좁아져 입력박스
-                        // 위 테두리를 놓치고 붙잡기가 조용히 쉰다.
-                        .live_tail_rows(PINNED_INPUT_SCAN_ROWS + pulled)
+                    let live: Vec<Vec<GridCell>> = sess
+                        .live_tail_rows(PINNED_INPUT_SCAN_ROWS)
                         .iter()
                         .map(normalise)
                         .collect();
-                    // 뷰포트에서 꼬리 빈 줄을 걷어 냈으면 살아 있는 화면에서도
-                    // 같은 수를 걷는다 — 안 그러면 얹는 순간 그 빈 줄이 다시
-                    // 바닥에 들어와 입력창만 그만큼 떠오른다.
-                    let live = &live_all[..live_all.len().saturating_sub(pulled)];
-                    if let Some(top) = crate::screenread::pinned_input_top(live) {
-                        // 두 화면은 높이가 같다 — 살아 있는 화면의 **아래
-                        // 몇 줄**을 뷰포트의 같은 수만큼에 그대로 얹으면
-                        // 입력창이 원래 있던 줄에 정확히 앉는다. 글자가
-                        // 남은 데서 끊으면 화면 밑 빈 줄만큼 밀려 내려간다.
-                        let h = (live.len() - top).min(composed.len());
+                    if let Some(band) = crate::screenread::input_band(&live) {
+                        let h = band.len().min(composed.len());
                         let base = composed.len() - h;
-                        composed[base..].clone_from_slice(&live[live.len() - h..]);
-                        view_shift.pinned = live[live.len() - h..].to_vec();
+                        composed[base..].clone_from_slice(&live[band.end - h..band.end]);
+                        view_shift.pinned = composed[base..].to_vec();
                     }
+                } else if let Some(band) = crate::screenread::input_band(&composed) {
+                    let gap = composed.len() - band.end;
+                    composed[band.start..].rotate_right(gap);
+                    view_shift.gap = band.start..band.start + gap;
                 }
             }
         }
@@ -1068,14 +1059,14 @@ impl App {
         if desktop_view && std::env::var_os("KASATERM_VIEWSHIFT_DEBUG").is_some() {
             let prev = self.pane_view_shift.get(id.as_str());
             let changed = prev.map_or(true, |p| {
-                p.above.len() != view_shift.above.len()
+                p.gap != view_shift.gap
                     || p.pinned.len() != view_shift.pinned.len()
                     || p.rows != view_shift.rows
             });
             if changed {
                 eprintln!(
-                    "[viewshift] pane={id} pulled={} pinned={} rows={} claude={runs_claude}",
-                    view_shift.above.len(),
+                    "[viewshift] pane={id} gap={:?} pinned={} rows={} claude={runs_claude}",
+                    view_shift.gap,
                     view_shift.pinned.len(),
                     view_shift.rows,
                 );
@@ -1138,13 +1129,19 @@ impl App {
             let (icw, ich) = (self.cell.w * fs, self.cell.h * fs);
             let clip_y0 = body_top;
             let clip_y1 = body_top + rows_now as f32 * ich;
+            // 앵커는 **뷰포트** 좌표다. 입력창을 바닥으로 내려 그린 pane 은 그림도
+            // 같은 옮김을 거쳐야 글 흐름과 안 어긋난다 — 커서·조합 오버레이와 같은
+            // 이유다. classic claude 는 OSC 1337 을 안 써서 지금은 셸 pane 만 이
+            // 길로 오지만(그쪽은 옮김이 없다), 보정을 빼 두면 나중에 조용히 어긋난다.
+            let shift = view_shifts.last().map(|(_, s)| s).filter(|s| s.projection.is_none());
             for v in &t.inline_images {
-                // 앵커는 **뷰포트** 좌표다. 화면을 아래로 당긴 pane 은 그림도
-                // 같은 만큼 내려야 글 흐름과 안 어긋난다 — 커서·조합 오버레이가
-                // `pulled` 를 더하는 것과 같은 이유다. classic claude 는 OSC
-                // 1337 을 안 써서 지금은 셸 pane 만 이 길로 오지만(그쪽은 당김이
-                // 없다), 보정을 빼 두면 나중에 조용히 어긋난다.
-                let vrow = v.row as usize + pulled;
+                let vrow = match shift {
+                    Some(s) => match s.display_pos(v.row as usize, v.col as usize) {
+                        Some((r, _)) => r,
+                        None => continue,
+                    },
+                    None => v.row as usize,
+                };
                 inline_slots.push((
                     format!("inline:{}:{}:{}", tab_pid, v.id, v.path),
                     v.path.clone(),
@@ -1555,6 +1552,7 @@ impl App {
             // claude 의 Clawd 아트와 agy 의 Antigravity 로고는 모양도 크기도
             // 다르다. 어느 하네스로 떴는지 따지지 않고 둘 다 훑는다 — 화면에
             // 실제로 그려진 로고가 정본이고, 한 pane 에 둘이 함께 뜰 일은 없다.
+            let banner_start = banner_slots.len();
             compose_student_banners(
                 &mut composed,
                 name,
@@ -1612,6 +1610,16 @@ impl App {
             // 빠져 있어 statusline 자리만 「맨 아래 보더 다음 행」으로 잡아 준다.
             if stand_anchor.is_none() {
                 stand_anchor = find_agy_standing_anchor(&composed, cols_now as usize);
+            }
+            // 배너 바로 밑이 입력창이면(대화 전, 입력창을 내릴 여백이 없을 때) 서 있을
+            // 자리가 배너 도트 옆이 된다 — 같은 학생이 나란히 둘 선다(2026-09-25 스샷).
+            // 배너의 도트가 이미 그 학생이니 서 있는 그림을 뺀다.
+            if let Some((anchor, _)) = stand_anchor {
+                let foot = body_top + (anchor + 1) as f32 * sch;
+                let head = foot - crate::screenread::INPUT_STANDING_ROWS as f32 * sch;
+                if banner_slots[banner_start..].iter().any(|(_, (_, y, _, h), _)| *y < foot && y + h > head) {
+                    stand_anchor = None;
+                }
             }
             // ② 자리 후보 — 상태가 허락할 때만 화면을 읽는다. 일하는 중이면 괄호 없는
             // 후보(`✢ Transmuting…`)와 박동 게이트 후보도 자리로 받는다.

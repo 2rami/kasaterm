@@ -280,7 +280,6 @@ impl App {
                     // spaces the PTY echoes), so trust it directly.
                     // Image/markdown panes have no PTY cursor — their terminal
                     // block cursor stays hidden (the Raw editor draws its own).
-                    let pulled: u16 = 0;
                     let (raw_row, raw_col, source_vis, source_cols, cur_w) = match pane.term() {
                         Some(t) => (
                             t.cursor_row,
@@ -293,7 +292,7 @@ impl App {
                     };
                     let shift = self.pane_view_shift.get(&id);
                     let position = shift.map(|view| view.display_pos(raw_row as usize, raw_col as usize))
-                        .unwrap_or(Some((raw_row as usize + pulled as usize, raw_col as usize)));
+                        .unwrap_or(Some((raw_row as usize, raw_col as usize)));
                     let (cur_row, cur_col) = position.map(|(row, col)| (row as u16, col as u16))
                         .unwrap_or((0, 0));
                     let cur_vis = source_vis && position.is_some();
