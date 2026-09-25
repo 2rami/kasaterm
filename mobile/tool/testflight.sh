@@ -15,15 +15,27 @@ read -r KEY_ID ISSUER P8 < <(python3 -c 'import json,os,sys; c=json.load(open(sy
 team=${ASC_TEAM_ID:-$(python3 tool/asc.py team | awk 'NR==1{print $1}')}
 [ -n "$team" ] || { echo "팀 ID 를 못 받았다 — API 키 권한을 확인해 달라" >&2; exit 1; }
 
+sign=(DEVELOPMENT_TEAM="$team" CODE_SIGN_STYLE=Automatic
+  -allowProvisioningUpdates -authenticationKeyPath "$P8" -authenticationKeyID "$KEY_ID" -authenticationKeyIssuerID "$ISSUER")
+# 맥미니: 로그인 키체인에 개발 키가 없고 옛 개발 키체인은 암호가 안 맞는다. 자동 서명에 맡기면 그 잠긴
+# 신원을 골라 암호창에서 멈추므로, 전용 키체인의 인증서만 든 수동 프로파일로 아카이브한다(배포 서명은 그대로 클라우드).
+kc=$HOME/Library/Keychains/ios-signing.keychain-db
+if [ -f "$kc" ]; then
+  security unlock-keychain -p "$(cat "$(dirname "$cfg")/ios-signing.pw")" "$kc"
+  sign=(DEVELOPMENT_TEAM="$team" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Development"
+    OTHER_CODE_SIGN_FLAGS="--keychain $kc"
+    'PROVISIONING_PROFILE_SPECIFIER=$(KASA_PROFILE_$(PRODUCT_BUNDLE_IDENTIFIER:identifier))'
+    KASA_PROFILE_com_debimarlene_kasatermMobile="kasaterm mini dev app"
+    KASA_PROFILE_com_debimarlene_kasatermMobile_NotificationService="kasaterm mini dev notif")
+fi
+
 build=$(date +%y%m%d%H%M)
 NO_PROXY='127.0.0.1,localhost' flutter build ios --release --no-codesign --build-number="$build"
 
 arch=build/ios/archive/Runner.xcarchive
 rm -rf "$arch"
 xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner -configuration Release \
-  -destination 'generic/platform=iOS' -archivePath "$arch" archive \
-  DEVELOPMENT_TEAM="$team" CODE_SIGN_STYLE=Automatic \
-  -allowProvisioningUpdates -authenticationKeyPath "$P8" -authenticationKeyID "$KEY_ID" -authenticationKeyIssuerID "$ISSUER" \
+  -destination 'generic/platform=iOS' -archivePath "$arch" archive "${sign[@]}" \
   | tail -3
 
 opts=$(mktemp -t export.XXXX.plist)

@@ -4727,7 +4727,7 @@ async fn term_changes_handler(q: Query<std::collections::HashMap<String, String>
     let since = q.get("since").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
     let wait = q.get("wait").and_then(|v| v.parse::<u64>().ok()).unwrap_or(15).min(15);
     let epoch = crate::changes::wait_past(since, std::time::Duration::from_secs(wait)).await;
-    Json(serde_json::json!({ "epoch": epoch }))
+    Json(serde_json::json!({ "epoch": epoch, "status": crate::changes::status_aware() }))
 }
 
 async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
@@ -6322,6 +6322,21 @@ async fn machine_proxy(
         .unwrap_or_else(|_| axum::http::StatusCode::BAD_GATEWAY.into_response())
 }
 
+/// 카사모바일 → 나쵸 앱 창구. 신원은 이 요청의 `MobileAuth`(주소로 확인한 사용자)만 믿는다 —
+/// 폰이 실어 보낸 헤더는 `nacho_relay` 가 하나도 옮기지 않는다.
+async fn nacho_app_relay(
+    AxPath(rest): AxPath<String>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    let user = req.extensions().get::<MobileAuth>().map(|a| a.0.clone());
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, crate::nacho_relay::BODY_LIMIT).await {
+        Ok(b) => b,
+        Err(_) => return (axum::http::StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response(),
+    };
+    crate::nacho_relay::relay(user, parts.method, &rest, parts.uri.query(), &parts.headers, bytes).await
+}
+
 /// 폰 ↔ 이 기계 ↔ 대상 기계의 WS 를 양방향으로 잇는다. Ping/Pong 도 **그대로 옮긴다** —
 /// 대상 서버는 Pong 이 75초 없으면 피어가 잠든 것으로 보고 끊는데(`term_ws_run`),
 /// tungstenite 의 자동 pong 은 다음 쓰기 때까지 안 나가서 그 판정에 걸린다.
@@ -7753,6 +7768,7 @@ pub fn spawn_http_server_opts(
                             .delete(mobile_users_delete),
                     )
                     .route("/m/{label}/{*rest}", axum::routing::any(machine_proxy))
+                    .route("/nacho/app/{*rest}", axum::routing::any(nacho_app_relay))
                     .route(
                         "/term/character-theme",
                         post(move |q: Query<std::collections::HashMap<String, String>>,

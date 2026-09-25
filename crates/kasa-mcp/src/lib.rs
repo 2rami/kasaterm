@@ -35,6 +35,7 @@ pub mod remote_restore;
 pub mod surface_keys;
 pub mod tell_service;
 pub mod nacho_service;
+mod nacho_relay;
 #[cfg(unix)]
 pub mod adopt;
 pub mod layout_feed;

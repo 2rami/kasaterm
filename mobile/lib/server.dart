@@ -3,8 +3,11 @@ import 'package:http/http.dart' as http;
 
 /// 사용자에게 보여도 되는 오류 — 주소(slug)가 들어 있지 않다.
 class ServerException implements Exception {
-  const ServerException(this.message);
+  const ServerException(this.message, {this.status});
   final String message;
+
+  /// HTTP 응답 번호 — 닿기는 했을 때만. 404 는 「그 길이 없는 옛 판」이라 부르는 쪽이 가른다.
+  final int? status;
 
   @override
   String toString() => message;
@@ -298,6 +301,19 @@ class Machine {
   final List<Pane> panes;
 }
 
+/// `/term/changes` 한 번의 답.
+class Changes {
+  const Changes({required this.epoch, required this.status});
+
+  /// 서버 롱폴 상한(15초)과 같다 — 더 달라 해도 서버가 자른다.
+  static const longPollSecs = 15;
+
+  final int epoch;
+
+  /// 학생 상태 전이에도 번호가 오른다 — 거짓이면 배치 변화만이라 상태는 폴링으로 본다.
+  final bool status;
+}
+
 class Me {
   const Me({required this.name, required this.owner, this.machine});
   final String name;
@@ -491,15 +507,20 @@ class Server {
     String path, {
     Map<String, String>? query,
     String? machine,
+    Duration? timeout,
   }) async {
     final http.Response res;
     try {
-      res = await _client.get(uri(path, query: query, machine: machine));
+      final req = _client.get(uri(path, query: query, machine: machine));
+      res = await (timeout == null ? req : req.timeout(timeout));
     } catch (_) {
       throw ServerException('${describe()} 에 닿지 못했다');
     }
     if (res.statusCode != 200) {
-      throw ServerException('${describe()} 응답 ${res.statusCode} ($path)');
+      throw ServerException(
+        '${describe()} 응답 ${res.statusCode} ($path)',
+        status: res.statusCode,
+      );
     }
     try {
       return jsonDecode(utf8.decode(res.bodyBytes));
@@ -621,6 +642,30 @@ class Server {
         for (final w in list)
           if (w is Map) WindowLayout.fromJson(w.cast<String, Object?>()),
     ];
+  }
+
+  /// 목록이 바뀌었나 — `since` 보다 새 번호가 나오거나 `wait` 초가 지나면 돌아온다.
+  /// 서버가 번호를 올리는 때에 학생 상태 전이까지 들었는지는 `status` 가 말한다.
+  Future<Changes> changes({
+    String? machine,
+    required int since,
+    int wait = Changes.longPollSecs,
+  }) async {
+    final j = await _getJson(
+      'term/changes',
+      query: {'since': '$since', 'wait': '$wait'},
+      machine: machine,
+      // 서버가 기다리는 시간 위에 관문 왕복을 얹는다 — 그보다 길면 끊긴 것이다.
+      timeout: Duration(seconds: wait + 10),
+    );
+    final epoch = j is Map ? j['epoch'] : null;
+    if (epoch is! num) {
+      throw const ServerException('변경 알림을 모르는 판', status: 404);
+    }
+    return Changes(
+      epoch: epoch.toInt(),
+      status: j is Map && j['status'] == true,
+    );
   }
 
   Future<List<Machine>> machines() async {
@@ -937,6 +982,42 @@ class Server {
 
   Uri noteImage(int id, {String? machine}) =>
       uri('term/notes/$id.png', machine: machine);
+
+  /// 나쵸 앱 창구(`nacho/app/…`). 이 허브가 주인 주소로 확인한 신원으로 나쵸에 넘긴다 —
+  /// 다른 기계로 건너가는 `m/` 는 안 붙인다(신원이 그 길에서 떨어진다).
+  /// 4xx 도 던지지 않고 (상태, 본문)으로 돌려준다 — 거절 까닭(`error`)이 화면에 나가야 해서다.
+  Future<(int, Map<String, Object?>)> nacho(
+    String path, {
+    Map<String, String>? query,
+    Map<String, Object?>? body,
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    final u = uri('nacho/app/$path', query: query);
+    final http.Response res;
+    try {
+      res = body == null
+          ? await _client.get(u).timeout(timeout)
+          : await _client
+                .post(
+                  u,
+                  headers: {'content-type': 'application/json'},
+                  body: jsonEncode(body),
+                )
+                .timeout(timeout);
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    Object? j;
+    try {
+      j = jsonDecode(utf8.decode(res.bodyBytes));
+    } catch (_) {
+      j = null;
+    }
+    return (res.statusCode, j is Map ? j.cast<String, Object?>() : <String, Object?>{});
+  }
+
+  Uri nachoUri(String path, {Map<String, String>? query}) =>
+      uri('nacho/app/$path', query: query);
 
   void close() => _client.close();
 }

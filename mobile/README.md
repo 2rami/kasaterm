@@ -1,8 +1,23 @@
-# kasaterm mobile — 아이폰 원격 조종 앱 (Flutter)
+# 카사모바일 — 나쵸와 얘기하고 맡긴 일을 보는 아이폰 앱 (Flutter)
 
 카사텀 서버가 폰 웹 화면에 내주는 통로(`term/panes` · `term/ws?grid=1` · `send` · `term/shot`)에
 그대로 붙는 네이티브 앱이다. 학생 목록을 보고, 한 학생의 화면을 격자로 보고, 답장을 보내고,
 허락 대기가 생기면 배지·햅틱으로 알린다. 서버 규약은 `docs/webterm-handoff.md`.
+
+## 학생 목록이 빨리 뜨고 바로 바뀌는 길
+
+관문 너머 요청 하나가 0.7~1.4초라, 목록을 단계마다 차례로 기다리면 첫 화면까지 3~6초가 걸렸다
+(2026-09-25 실측). 지금은 이렇게 간다.
+
+- 주소 기계 목록·방 이름·배치·명부·쪽지를 **한 번에** 묻고, 온 것부터 그린다. 명부를 기억하면
+  원격 기계도 같은 차례에 묻는다. 요청마다 10초 상한이 있어 느린 기계는 그 절만 직전 것으로 남는다.
+- 앱이 살아 있는 동안 마지막 목록을 기억한다. 첫 화면(나쵸 창구)이 뜰 때 미리 한 바퀴 받아 두어,
+  허브를 열면 곧바로 그려지고 새 목록이 닿을 때까지 위에 얇은 진행 막대가 선다.
+- 기계마다 `term/changes?since=N&wait=15` 에 매달려 있다가 번호가 오르면 그 기계만 다시 읽는다.
+  답의 `status:true` 는 그 서버가 **학생 상태 전이**(작업 중·기다림·쉼)에도 번호를 올린다는 뜻이고,
+  그때 폴링은 도구 이름·컨텍스트 % 용으로 15초에 한 번만 한다. `status` 가 없는 옛 판은 5초 폴링,
+  길 자체가 없으면(404) 폴링만 한다. 끊기면 2→30초로 물러서며 다시 붙는다.
+- 읽는 중에 또 부르면 겹쳐 쏘지 않고 끝난 뒤 한 번만 더 읽는다. 앱이 쉬면 멈추고 돌아오면 바로 다시 읽는다.
 
 ## 사진 첨부와 화면 밝기
 
@@ -22,11 +37,15 @@ lib/
   main.dart            테마(SCHALE 흰/연하늘 표면·네이비 잉크) · 첫 화면 분기
   server.dart          Server(root) — uri/wsUri/me/panes/sessions/machines/shot/send · describe() 는 slug 를 가린다
   address_store.dart   주소(slug 포함) → Keychain(flutter_secure_storage)
-  hub_model.dart       기계→방→학생 트리 · 5초 폴링 · 대기→작업중→쉼 정렬 · 대기 전이 배지+햅틱
+  nacho.dart           나쵸 창구 — 대화 원장 이어 받기(순번) · 같은 id 재전송 · 작업 장부 읽기
+  nacho_reply.dart     나쵸 답 가르기 — 실행·진단 줄과 사용량 꼬리를 접힌 상세로(원문 보존) · 학생 링크 읽기
+  nacho_student.dart   장부의 맡은 학생(surface·host·machine_id) → 실제 pane. 기계를 못 정하면 짐작 안 함
+  hub_model.dart       기계→방→학생 트리 · 기계마다 따로 받아 온 것부터 · `term/changes` 롱폴 · 대기 전이 배지+햅틱
   grid.dart            순수 Dart 격자 모델 — dirty 행 교체 · 글자 폭 표 · 256 팔레트
   term_session.dart    WS 수명(백오프·gone·pause/resume) · 키 바이트 · 답장 · 그림 폴링
   grid_canvas.dart     CustomPainter 렌더러(행 캐시) + InteractiveViewer 폭 맞춤·핀치
-  screens/             connect · hub · terminal · settings
+  conversation.dart    학생 대화 모델 — transcript-raw(claude)·rollout(codex) 줄 → 말풍선·도구 묶음 · 화면의 선택 메뉴 읽기
+  screens/             nacho_home(첫 화면: 대화·작업) · nacho_task · connect · hub · terminal(「터미널|대화」 전환) · conversation_view · settings
 tool/devproxy.dart     크롬 개발용 같은 출처 역프록시
 test/                  유닛 · 골든(goldens/) · live/(실서버, KASA_ROOT 있을 때만)
 ```
