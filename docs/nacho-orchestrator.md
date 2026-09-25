@@ -25,6 +25,7 @@
 | `KASATERM_ORIGIN_CONV` | 나쵸의 대화 id(`discord:<채널>`·`slack:<채널>`) — 보고가 돌아갈 방 |
 | `KASATERM_ORIGIN_TASK` | 나쵸 작업 장부(worklog)의 일 번호 |
 | `KASATERM_ORIGIN_MACHINE` | 나쵸가 사는 기계의 `machine_id`(또는 명부 라벨). 비면 「이 기계」 |
+| `KASATERM_ORIGIN_RUN` | (선택) 나쵸 오케스트레이터의 실행 세대 `<task>.r<n>`. 봉투의 `run_id` 로 간다 |
 
 브리프 첫 줄에도 같은 표식을 사람이 읽게 넣는다: `[origin=nacho task=<번호>]`.
 거노가 손수 띄운 학생에는 이 env 가 없다. `kasaterm-cli nacho-report` 는 env 가 없으면
@@ -37,6 +38,7 @@
 ```json
 {"schema":"nacho-report/1","report_id":"nr1.<unix-ms>.<hex>","at_ms":0,"fingerprint":"<fnv1a64>",
  "origin":"nacho","conv":"discord:123","task_id":"t-…","surface":"%7",
+ "surface_key":"<판 주소 UUID 또는 빈 값>","run_id":"<t-….r2 또는 빈 값>",
  "host":{"machine_id":"…","label":"nachoneko"},"cwd":"/Users/…/nacho-neko",
  "harness":"claude|codex|","character":"와카모",
  "status":"done|blocked|needs_restart|needs_approval",
@@ -53,6 +55,21 @@
   FNV-1a-64. `report_id`·`at_ms` 는 안 들어간다 — 같은 말을 두 번 치면 같은 지문이다.
 - `host` 는 학생이 도는 기계다(소켓·HTTP 로 오면 서버가 채운다). 나쵸가 사는 기계는
   `machine_id` 파라미터(=`KASATERM_ORIGIN_MACHINE`)로 따로 간다.
+- `surface_key`·`run_id` 는 **선택 칸이고 지문에 안 든다** — 옛 나쵸·옛 CLI 끼리 지문이 어긋나
+  거부되지 않게. `surface_key` 는 CLI 가 보고 순간 이 기계 판(`collab.snapshot` local)에서
+  `KASATERM_PANE_ID` 로 찾는다(같은 번호가 둘이거나 판을 못 읽으면 빈 값 — 창 번호는 재사용되므로
+  나쵸는 이 열쇠로 등록 줄을 찾는다). `run_id` 는 `--run` > `KASATERM_ORIGIN_RUN`. 모양이 어긋나면
+  보고를 막지 않고 칸만 비운다.
+
+## 재시작 뒤 표식 복원
+
+앱 재시작 복원은 pane env 를 새로 만들고 `claude --resume <sid>`(codex 는 `codex resume`)만
+친다 — 부팅 명령의 표식이 사라져 복원된 학생의 보고가 거부됐다. 그래서 bind 훅의
+`kasaterm-cli bind-transcript` 가 성공할 때 env 에 표식이 있으면 **세션 id → 표식**을
+`~/.config/kasaterm/nacho-origins.json`(격리 리그는 collab 루트 아래, 0600, 14일·500개)에 남기고,
+`restore_agent_command` 가 그 세션을 되살릴 때만 `KASATERM_ORIGIN=nacho KASATERM_ORIGIN_…='…'`
+를 명령 앞에 붙인다. 새로 띄우는 명령·분할·새 탭은 세션이 달라 안 물려받는다. 표식은 표시·보고
+자격일 뿐 일↔창의 정본은 나쵸 장부의 `(machine_id, surface_key)` 다.
 
 ## 인박스 — 디스크가 정본
 

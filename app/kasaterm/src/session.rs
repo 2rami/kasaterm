@@ -9747,12 +9747,29 @@ fn saved_effort(rec: &serde_json::Value) -> Option<&str> {
 /// 표시용 이름(`Gemini 3.6 Flash (Low)`)이라 수집 쪽에서 일부러 안 담는다. 나중에
 /// 담게 되거든 **`agy models` 목록과 대조하고 나서** 담아라: agy 는 없는 모델값에
 /// 에러를 안 내고 조용히 기본값으로 돌아, 틀려도 아무 데도 안 남는다.
+///
+/// 나쵸가 띄운 세션이면 그 표식(`KASATERM_ORIGIN*`)을 명령 앞 env 로 되붙인다 — 새 pane
+/// env 에는 부팅 명령의 표식이 없어, 복원된 학생의 `nacho-report` 가 거부됐다.
 pub(crate) fn restore_agent_command(
     agent: Option<&str>,
     session_id: Option<&str>,
     resumable: bool,
     model: Option<&str>,
     effort: Option<&str>,
+) -> String {
+    let origin = session_id
+        .filter(|_| resumable)
+        .and_then(kasa_socket::nacho_inbox::origin_for_session);
+    restore_agent_command_for(agent, session_id, resumable, model, effort, origin.as_ref())
+}
+
+fn restore_agent_command_for(
+    agent: Option<&str>,
+    session_id: Option<&str>,
+    resumable: bool,
+    model: Option<&str>,
+    effort: Option<&str>,
+    origin: Option<&kasa_socket::nacho_inbox::Origin>,
 ) -> String {
     // 값은 작은따옴표로 감싼다 — `claude-opus-5[1m]` 의 `[1m]` 이 zsh 글롭이라 무인용
     // 이면 "no matches found" 로 명령이 통째 실패한다. shim 쪽에서 같은 사고가 실제로
@@ -9792,6 +9809,9 @@ pub(crate) fn restore_agent_command(
         if let Some(e) = effort {
             cmd.push_str(&format!(" --effort {}", q(e)));
         }
+    }
+    if let (Some(origin), Some(_)) = (origin, resume) {
+        cmd.insert_str(0, &kasa_socket::nacho_inbox::origin_env_prefix(origin));
     }
     cmd.push('\r');
     cmd
@@ -10806,7 +10826,7 @@ mod room_label_tests {
 #[cfg(test)]
 mod agy_restore_tests {
     use super::{
-        normalize_saved_agent_map_with, restore_agent_command, saved_agent, saved_agent_map_with,
+        normalize_saved_agent_map_with, restore_agent_command, restore_agent_command_for, saved_agent, saved_agent_map_with,
         saved_agent_marker, saved_effort, saved_model, saved_model_fits_agent,
         saved_sid_fits_agent_with,
     };
@@ -10933,6 +10953,27 @@ mod agy_restore_tests {
             restore_agent_command(Some("agy"), Some("s3"), true, None, Some("low")),
             "agy --conversation s3 --effort 'low'\r"
         );
+    }
+
+    /// 나쵸가 띄운 세션을 되살릴 때만 표식이 앞에 붙는다. 새로 띄우는 명령(세션 없음)에
+    /// 붙으면 나쵸가 안 띄운 학생이 나쵸에게 보고할 자격을 얻는다.
+    #[test]
+    fn restore_reattaches_nacho_origin_only_to_the_resumed_session() {
+        let origin = kasa_socket::nacho_inbox::Origin {
+            conv: "discord:809".into(), task_id: "we409f946".into(), machine: String::new(), run: "we409f946.r2".into(),
+        };
+        assert_eq!(
+            restore_agent_command_for(Some("claude"), Some("sid-1"), true, None, None, Some(&origin)),
+            "KASATERM_ORIGIN=nacho KASATERM_ORIGIN_CONV='discord:809' KASATERM_ORIGIN_TASK='we409f946' KASATERM_ORIGIN_RUN='we409f946.r2' claude --resume sid-1\r"
+        );
+        assert!(restore_agent_command_for(Some("codex"), Some("sid-1"), true, None, None, Some(&origin))
+            .starts_with("KASATERM_ORIGIN=nacho "), "codex 복원도 같은 표식");
+        assert_eq!(
+            restore_agent_command_for(Some("claude"), Some("sid-1"), false, None, None, Some(&origin)),
+            "claude\r",
+            "되살리지 않는 새 부팅엔 표식이 없다"
+        );
+        assert_eq!(restore_agent_command(Some("claude"), Some("s1"), true, None, None), "claude --resume s1\r", "기억이 없으면 전과 같다");
     }
 
     /// 값이 없으면 **플래그 자체가 빠져야** 한다 — 빈 문자열을 흘리면 `--model ''` 이

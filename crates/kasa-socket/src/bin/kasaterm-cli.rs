@@ -594,6 +594,16 @@ fn run() -> Result<Option<Response>> {
     let request = build_request(&cmd, &args)?;
     let socket_path = resolve_socket_path()?;
     let mut response = roundtrip(&socket_path, &request)?;
+    // 나쵸가 띄운 세션이면 세션 id(기록 파일 이름)에 표식을 남긴다 — 앱 재시작 복원이
+    // `--resume` 할 때 되붙인다(`nacho_inbox::remember_origin`). 실패해도 bind 는 성공이다.
+    if cmd == "bind-transcript" && response.ok {
+        if let (Some(origin), Some(sid)) = (
+            kasa_socket::nacho_inbox::origin_from_env(),
+            args.first().and_then(|p| Path::new(p).file_stem()).and_then(|s| s.to_str()),
+        ) {
+            let _ = kasa_socket::nacho_inbox::remember_origin(sid, &origin);
+        }
+    }
     if cmd == "tell" && response.ok {
         if let (Some(id), Some(address)) = (
             request.params.get("message_id").and_then(|v| v.as_str()),
@@ -2545,6 +2555,7 @@ fn nacho_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<String>
         "conv": origin.conv,
         "task_id": origin.task_id,
         "machine_id": origin.machine,
+        "run_id": origin.run,
         "surface": get_env("KASATERM_PANE_ID").unwrap_or_default(),
         "cwd": std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
         "character": get_env("KASATERM_CHARACTER").unwrap_or_default(),
@@ -2566,9 +2577,10 @@ fn nacho_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<String>
             "--conv" => { params["conv"] = json!(value("--conv")?); index += 2; }
             "--task" => { params["task_id"] = json!(value("--task")?); index += 2; }
             "--machine" => { params["machine_id"] = json!(value("--machine")?); index += 2; }
+            "--run" => { params["run_id"] = json!(value("--run")?); index += 2; }
             "--stdin" => { stdin = true; index += 1; }
             "--dry-run" => { dry_run = true; index += 1; }
-            other => return Err(anyhow!("nacho-report: unknown argument {other:?} (flags: --status --summary --changed --tests --next --conv --task --machine --stdin --dry-run)")),
+            other => return Err(anyhow!("nacho-report: unknown argument {other:?} (flags: --status --summary --changed --tests --next --conv --task --machine --run --stdin --dry-run)")),
         }
     }
     if stdin {
@@ -2578,7 +2590,7 @@ fn nacho_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<String>
         let extra: Value = serde_json::from_str(&text).context("--stdin expects a JSON object with status/summary/changed/tests/next")?;
         let obj = extra.as_object().ok_or_else(|| anyhow!("--stdin JSON must be an object"))?;
         for (k, v) in obj {
-            if matches!(k.as_str(), "origin" | "machine_id" | "conv" | "task_id") && !params[k].as_str().unwrap_or("").is_empty() {
+            if matches!(k.as_str(), "origin" | "machine_id" | "conv" | "task_id" | "run_id") && !params[k].as_str().unwrap_or("").is_empty() {
                 continue; // env 가 정한 origin 은 stdin 이 못 덮는다
             }
             if k == "changed" { if let Some(items) = v.as_array() { changed.extend(items.iter().filter_map(|x| x.as_str()).map(str::to_string)); } else if let Some(t) = v.as_str() { changed.push(t.to_string()); } continue; }
@@ -2599,10 +2611,37 @@ fn nacho_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<String>
     Ok(params)
 }
 
+/// 이 창의 판 주소 UUID. 창 번호(`%N`)는 재사용되므로 나쵸는 이것으로 등록 줄을 찾는다.
+/// 이 기계의 판에서 번호로 찾고, 못 찾으면 빈 값 — 보고는 번호만으로도 간다.
+fn local_surface_key(surface: &str) -> String {
+    if surface.is_empty() || API_TARGET.get().is_some() {
+        return String::new();
+    }
+    let Ok(socket_path) = resolve_socket_path() else { return String::new() };
+    let request = Request { id: json!(format!("cli-{}", std::process::id())), method: "collab.snapshot".into(), params: json!({"scope": "local"}) };
+    let Ok(response) = roundtrip(&socket_path, &request) else { return String::new() };
+    surface_key_in(response.result.as_ref(), surface)
+}
+
+fn surface_key_in(snapshot: Option<&Value>, surface: &str) -> String {
+    let panes = snapshot.and_then(|r| r.get("panes")).and_then(|p| p.as_array());
+    let keys: Vec<&str> = panes.into_iter().flatten()
+        .filter_map(|p| p.get("address"))
+        .filter(|a| a.get("surface_id").and_then(|v| v.as_str()) == Some(surface))
+        .filter_map(|a| a.get("surface_key").and_then(|v| v.as_str()))
+        .collect();
+    // 같은 번호가 둘이면(거울 창 등) 어느 쪽인지 모른다 — 고르지 않고 비운다.
+    match keys.as_slice() { [one] => one.to_string(), _ => String::new() }
+}
+
 fn run_nacho_report(args: &[String]) -> Result<Option<Response>> {
     use kasa_socket::nacho_inbox as inbox;
     let get_env = |k: &str| std::env::var(k).ok();
     let mut params = nacho_report_params(args, &get_env)?;
+    let key = local_surface_key(params["surface"].as_str().unwrap_or(""));
+    if !key.is_empty() {
+        params["surface_key"] = json!(key);
+    }
     let dry_run = params["dry_run"] == true;
     params.as_object_mut().map(|o| o.remove("dry_run"));
     // build 를 여기서 한 번 돌려 오류를 학생에게 바로 보인다(원격이면 저쪽이 또 검증한다).
@@ -3479,9 +3518,28 @@ mod tests {
         let envelope = kasa_socket::nacho_inbox::build(&p).unwrap();
         assert_eq!(envelope["status"],"needs_restart");
         assert!(super::nacho_report_params(&["--bogus".into()], &env).is_err());
+        assert_eq!(p["run_id"], "", "세대 env 가 없으면 빈 칸");
+        let with_run = |k: &str| if k == "KASATERM_ORIGIN_RUN" { Some("t-7.r3".to_string()) } else { env(k) };
+        assert_eq!(super::nacho_report_params(&args, &with_run).unwrap()["run_id"], "t-7.r3");
+        let mut flagged = args.clone();
+        flagged.extend(["--run".to_string(), "t-8.r1".to_string()]);
+        assert_eq!(super::nacho_report_params(&flagged, &with_run).unwrap()["run_id"], "t-8.r1", "브리프가 준 --run 이 env 를 이긴다");
         // --api 매핑: 원격 기계로 갈 때 HTTP 로도 같은 메서드가 간다.
         let mut args = vec!["--api".into(),"http://127.0.0.1:1".into(),"nacho-report".into()];
         assert!(super::parse_api_target(&mut args).unwrap().is_some());
+    }
+
+    #[test]
+    fn surface_key_comes_from_the_local_board_only_when_the_number_is_unique() {
+        let snap = json!({"panes":[
+            {"address":{"surface_id":"%1","surface_key":"k-1"}},
+            {"address":{"surface_id":"%2","surface_key":"k-2a"}},
+            {"address":{"surface_id":"%2","surface_key":"k-2b"}},
+        ]});
+        assert_eq!(super::surface_key_in(Some(&snap), "%1"), "k-1");
+        assert_eq!(super::surface_key_in(Some(&snap), "%2"), "", "같은 번호가 둘이면 고르지 않는다");
+        assert_eq!(super::surface_key_in(Some(&snap), "%9"), "");
+        assert_eq!(super::surface_key_in(None, "%1"), "", "판을 못 읽어도 보고는 간다");
     }
 
     #[test]
