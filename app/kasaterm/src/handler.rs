@@ -896,6 +896,19 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = reply.send(pids);
                 return;
             }
+            UserEvent::RestartExit(job) => {
+                // 수락과 종료 사이에 굽기가 끝나 자기설치가 끼면 재시작이 업그레이드가 된다 — 끄지 않고 실패로 적는다.
+                // 이미 뜬 도우미는 앱이 안 꺼지면 상한 뒤 스스로 실패를 적고 끝난다.
+                if crate::install_pending_paths().is_some() {
+                    if let Ok(dir) = kasa_socket::app_restart::jobs_dir() {
+                        let _ = kasa_socket::app_restart::advance(&dir, &job, kasa_socket::app_restart::JobState::Failed, "self install became pending before exit; not exiting");
+                    }
+                    return;
+                }
+                eprintln!("[app-restart] exiting for job {job}");
+                event_loop.exit();
+                return;
+            }
             UserEvent::SocketRestartFacts(reply) => {
                 let _ = reply.send(self.restart_facts());
                 return;

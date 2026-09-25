@@ -932,6 +932,26 @@ impl Backend for PtyBackend {
         }
     }
 
+    fn restart_approval(&self, approval_id: &str) -> Result<kasa_socket::app_restart::ApprovalView> {
+        use kasa_socket::app_restart::Authority;
+        crate::app_restart::NachoAuthority::local().get(approval_id).map_err(anyhow::Error::msg)
+    }
+
+    fn restart_consume(&self, approval_id: &str, scope: &serde_json::Value, consumer: &str) -> Result<kasa_socket::app_restart::ApprovalView> {
+        use kasa_socket::app_restart::Authority;
+        crate::app_restart::NachoAuthority::local().consume(approval_id, scope, consumer).map_err(anyhow::Error::msg)
+    }
+
+    fn restart_start(&self, machine: Option<&str>, req: &kasa_socket::app_restart::JobRequest) -> Result<serde_json::Value> {
+        match restart_remote(machine)? {
+            Some(base) => kasa_mcp::remote::remote_post_json(&base, "/app/restart/jobs", &serde_json::to_value(req)?),
+            None => {
+                let facts = self.restart_facts(None)?;
+                crate::app_restart::accept_restart(&facts, req, &self.proxy).map_err(anyhow::Error::msg)
+            }
+        }
+    }
+
     fn restart_job(&self, machine: Option<&str>, job_id: &str) -> Result<kasa_socket::app_restart::JobStatus> {
         anyhow::ensure!(kasa_socket::app_restart::valid_job_id(job_id), "invalid job id");
         match restart_remote(machine)? {

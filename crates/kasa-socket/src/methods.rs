@@ -191,6 +191,9 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "nacho.report" => nacho_report(backend, id, &req.params),
         "app.restart_facts" => app_restart_facts(backend, id, &req.params),
         "app.restart_job" => app_restart_job(backend, id, &req.params),
+        "app.restart_approval" => app_restart_approval(backend, id, &req.params),
+        "app.restart_consume" => app_restart_consume(backend, id, &req.params),
+        "app.restart_start" => app_restart_start(backend, id, &req.params),
         "clipboard.set" => clipboard_set(backend, id, &req.params),
         "clipboard.get" => clipboard_get(backend, id),
         "clipboard.list" => clipboard_list(backend, id),
@@ -563,7 +566,42 @@ fn nacho_report(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     }
 }
 
-/// 재시작 계획용 사실 — 읽기만 한다. 실행 메서드는 없다(사람 승인 흐름이 생기기 전까지).
+fn app_restart_approval(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let Some(approval_id) = params.get("approval_id").and_then(|v| v.as_str()) else {
+        return param_err(id, "app.restart_approval requires `approval_id`");
+    };
+    match backend.restart_approval(approval_id) {
+        Ok(view) => Response::success(id, serde_json::to_value(view).unwrap_or_default()),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn app_restart_consume(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let (Some(approval_id), Some(scope), Some(consumer)) = (
+        params.get("approval_id").and_then(|v| v.as_str()),
+        params.get("scope").filter(|v| v.is_object()),
+        params.get("consumer_machine_id").and_then(|v| v.as_str()),
+    ) else {
+        return param_err(id, "app.restart_consume requires `approval_id`, `scope` and `consumer_machine_id`");
+    };
+    match backend.restart_consume(approval_id, scope, consumer) {
+        Ok(view) => Response::success(id, serde_json::to_value(view).unwrap_or_default()),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn app_restart_start(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let request = match params.get("request").map(|v| serde_json::from_value::<crate::app_restart::JobRequest>(v.clone())) {
+        Some(Ok(request)) => request,
+        _ => return param_err(id, "app.restart_start requires `request` {job, approval_id, authority}"),
+    };
+    match backend.restart_start(params.get("machine_id").and_then(|v| v.as_str()), &request) {
+        Ok(value) => Response::success(id, value),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// 재시작 계획용 사실 — 읽기만 한다.
 fn app_restart_facts(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     match backend.restart_facts(params.get("machine_id").and_then(|v| v.as_str())) {
         Ok(facts) => Response::success(id, serde_json::to_value(facts).unwrap_or_default()),

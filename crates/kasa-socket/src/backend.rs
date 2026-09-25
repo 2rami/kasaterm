@@ -1126,6 +1126,18 @@ pub trait Backend: Send + Sync {
         anyhow::ensure!(machine.is_none(), "remote restart jobs are not supported by this backend");
         crate::app_restart::job_status(&crate::app_restart::jobs_dir()?, job_id)
     }
+    /// 나쵸 승인 읽기(이 기기의 나쵸 앱 창구). 기본은 미지원.
+    fn restart_approval(&self, _approval_id: &str) -> Result<crate::app_restart::ApprovalView> {
+        anyhow::bail!("app restart approvals are not supported by this backend")
+    }
+    /// 나쵸 승인 소비 — 서버에서 원자적 1회. 기본은 미지원.
+    fn restart_consume(&self, _approval_id: &str, _scope: &serde_json::Value, _consumer: &str) -> Result<crate::app_restart::ApprovalView> {
+        anyhow::bail!("app restart approvals are not supported by this backend")
+    }
+    /// 재시작 작업 걸기 — 이 기기면 수락 판정 뒤 도우미·종료, 다른 기기면 명부 경유로 넘긴다. 기본은 미지원.
+    fn restart_start(&self, _machine: Option<&str>, _req: &crate::app_restart::JobRequest) -> Result<serde_json::Value> {
+        anyhow::bail!("app restart is not supported by this backend")
+    }
     /// Switch the visible session to index `idx`. Default unsupported.
     fn switch_session(&self, _idx: usize) -> Result<()> {
         anyhow::bail!("switch_session not supported")

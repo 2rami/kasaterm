@@ -10,9 +10,11 @@
 //!   앞 기기가 실패하면 뒤 기기는 손대지 않는다.
 //! - **같은 작업은 한 번만.** 작업 id 는 계획 해시와 기기 id 로 정해지고, 대상 기기 디스크에
 //!   `create_new` 로 적힌다 — 같은 요청이 다시 와도 두 번 돌지 않는다.
-//! - **승인 없이는 아무것도 안 한다.** 지금은 승인 흐름이 없어 `check_approval(None)` 이 늘 거부한다.
+//! - **승인은 나쵸 서버가 쥔다.** 조종 쪽은 실행 직전 계획을 다시 재서 나쵸 `consume`(서버에서 원자적 1회)이
+//!   성공한 한 번만 진행하고, 대상 쪽은 나쵸에서 읽은 승인(승인됨·소비됨·만료 전·자기 기기와 해시가 scope 에
+//!   있음)을 확인한 뒤에만 도우미를 띄운다. 요청이 스스로 「승인됐다」고 말하는 것은 어디서도 안 믿는다.
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::io::Write;
@@ -209,6 +211,8 @@ pub struct Plan {
     pub controller: String,
     pub targets: Vec<PlanTarget>,
     pub hash: String,
+    /// 승인에 묶이는 정확한 대상 — 나쵸가 이 객체로 `scope_hash` 를 계산하고, 실행 직전 같은 객체로 소비한다.
+    pub scope: serde_json::Value,
 }
 
 impl Plan {
@@ -254,37 +258,117 @@ pub fn build_plan(
         .collect();
     let parts: Vec<String> = targets.iter().map(|t| format!("{}={}", t.machine_id, t.hash)).collect();
     let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+    let hash = fnv(&refs);
+    let scope = json!({
+        "action": ACTION,
+        "plan": hash,
+        "controller": controller,
+        "targets": targets.iter().enumerate()
+            .map(|(n, t)| json!({"order": n + 1, "machine_id": t.machine_id, "hash": t.hash}))
+            .collect::<Vec<_>>(),
+    });
     Plan {
         schema: SCHEMA.into(),
         created_at_ms: now_ms,
         expires_at_ms: now_ms + PLAN_TTL_MS,
         controller: controller.into(),
-        hash: fnv(&refs),
+        hash,
+        scope,
         targets,
     }
 }
 
-/// 사람이 준 승인 — 계획 해시·대상 기기·만료·한 번. 지금은 이것을 만드는 창구가 없다.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Approval {
-    pub plan_hash: String,
-    pub machine_ids: Vec<String>,
+/// 나쵸 승인의 `action` — 나쵸 `approvals.ACTIONS` 에 같은 낱말이 있어야 요청이 만들어진다.
+pub const ACTION: &str = "kasaterm_restart";
+
+/// 나쵸가 돌려주는 승인(`approvals.public`). 카사텀은 이것을 **나쵸에게서** 읽을 뿐, 만들거나 고치지 않는다.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApprovalView {
+    pub id: String,
+    pub action: String,
+    pub scope: serde_json::Value,
+    pub scope_hash: String,
+    pub state: String,
     pub expires_at_ms: u64,
-    pub nonce: String,
+    pub consumed_at_ms: Option<u64>,
+    /// 한 번을 쓴 기기 — 나쵸가 `scope.controller` 와 같을 때만 소비를 받는다.
+    pub consumed_by: Option<String>,
 }
 
-pub fn check_approval(plan: &Plan, approval: Option<&Approval>, nonce_used: bool, now_ms: u64) -> Result<()> {
-    let Some(approval) = approval else {
-        bail!("approval_flow_unavailable: 사람 승인 흐름이 아직 없어 실행하지 않는다 — plan/status 만 쓸 수 있다");
-    };
-    ensure!(!nonce_used, "approval_used: 이 승인은 이미 한 번 쓰였다");
-    ensure!(now_ms < approval.expires_at_ms && now_ms < plan.expires_at_ms, "approval_expired: 승인 또는 계획이 만료됐다");
-    ensure!(approval.plan_hash == plan.hash, "approval_scope: 승인한 계획과 지금 계획이 다르다");
-    let planned: Vec<&str> = plan.targets.iter().map(|t| t.machine_id.as_str()).collect();
-    let approved: Vec<&str> = approval.machine_ids.iter().map(String::as_str).collect();
-    ensure!(planned == approved, "approval_scope: 승인한 기기와 계획의 기기가 다르다");
-    ensure!(plan.runnable(), "plan_refused: 거부 사유가 남은 계획은 실행하지 않는다");
+/// 승인을 쥔 곳(나쵸). 운영은 나쵸 앱 창구, 검사는 가짜.
+pub trait Authority {
+    fn get(&self, approval_id: &str) -> std::result::Result<ApprovalView, String>;
+    /// 서버가 `scope` 로 해시를 다시 계산해 승인한 대상과 같고 `consumer` 가 scope 의 조종 기기일 때만
+    /// **한 번** 성공한다(나쵸 `POST /api/app/approvals/{id}/consume`).
+    fn consume(&self, approval_id: &str, scope: &serde_json::Value, consumer: &str) -> std::result::Result<ApprovalView, String>;
+}
+
+pub fn valid_approval_id(id: &str) -> bool {
+    id.len() == 35 && id.starts_with("ap_") && id[3..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// 조종 쪽 — 실행 직전의 계획으로 승인을 소비한다. 성공한 한 번만 진행한다.
+pub fn authorize_run(plan: &Plan, approval_id: &str, authority: &dyn Authority) -> std::result::Result<ApprovalView, String> {
+    if !valid_approval_id(approval_id) {
+        return Err("approval id 모양이 아니다(ap_<32 hex>)".into());
+    }
+    if !plan.runnable() {
+        return Err("거부 사유가 남은 계획은 승인을 소비하지 않는다".into());
+    }
+    let view = authority.consume(approval_id, &plan.scope, &plan.controller)?;
+    if view.action != ACTION || view.scope != plan.scope || view.consumed_at_ms.is_none()
+        || view.consumed_by.as_deref() != Some(plan.controller.as_str())
+    {
+        return Err("나쵸가 돌려준 승인이 이 계획과 맞지 않는다".into());
+    }
+    Ok(view)
+}
+
+/// 대상 기기에 가는 작업 요청. `authority` 는 승인을 읽을 기기(명부의 machine_id)다.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobRequest {
+    pub job: Job,
+    pub approval_id: String,
+    pub authority: String,
+}
+
+/// 대상 쪽 — 요청이 말하는 것을 믿지 않고, 나쵸에서 읽은 승인과 지금 이 기기의 사실로만 판정한다.
+pub fn authorize_target(req: &JobRequest, facts: &Facts, authority: &dyn Authority, now_ms: u64) -> std::result::Result<(), String> {
+    if let Some(refusal) = refusals(&facts.machine_id, facts, now_ms).first() {
+        return Err(refusal.message());
+    }
+    if !valid_approval_id(&req.approval_id) {
+        return Err("approval id 모양이 아니다".into());
+    }
+    let hash = target_hash(facts);
+    let job = &req.job;
+    if job.machine_id != facts.machine_id || job.target_hash != hash || job.job_id != job_id(&job.plan_hash, &facts.machine_id) {
+        return Err("작업이 이 기기의 지금 정체와 맞지 않는다".into());
+    }
+    let view = authority.get(&req.approval_id)?;
+    if view.action != ACTION || view.state != "approved" {
+        return Err(format!("승인되지 않았다({} {})", view.action, view.state));
+    }
+    if view.consumed_at_ms.is_none() || view.consumed_by.as_deref() != view.scope["controller"].as_str() {
+        return Err("조종 기기가 이 승인을 소비하지 않았다".into());
+    }
+    if now_ms >= view.expires_at_ms {
+        return Err("승인이 만료됐다".into());
+    }
+    let mine = view.scope["targets"].as_array().into_iter().flatten().any(|t| {
+        t["machine_id"].as_str() == Some(facts.machine_id.as_str()) && t["hash"].as_str() == Some(hash.as_str())
+    });
+    if view.scope["plan"].as_str() != Some(job.plan_hash.as_str()) || !mine {
+        return Err("승인한 대상에 이 기기의 지금 정체가 없다".into());
+    }
     Ok(())
+}
+
+/// 대상 쪽 수락 — 판정을 통과하면 작업을 적는다. 같은 작업이 다시 오면 새로 만들지 않는다(`false`).
+pub fn accept_job(req: &JobRequest, facts: &Facts, authority: &dyn Authority, dir: &Path, now_ms: u64) -> std::result::Result<bool, String> {
+    authorize_target(req, facts, authority, now_ms)?;
+    create_job(dir, &req.job).map(|(_, created)| created).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------- 작업 기록
@@ -575,8 +659,8 @@ pub fn spawn_helper(spec: &HelperSpec) -> Result<u32> {
 /// 기기 하나에 닿는 길. 운영은 앱 소켓·명부 경유 HTTP, 검사는 가짜.
 pub trait Transport {
     fn facts(&self, machine_id: &str) -> std::result::Result<Facts, String>;
-    /// 대상 앱에 작업을 건다. 대상이 자기 검사를 다시 하고 거부할 수 있다.
-    fn start(&self, machine_id: &str, job: &Job) -> std::result::Result<(), String>;
+    /// 대상 앱에 작업을 건다. 대상이 나쵸 승인과 자기 사실로 다시 판정하고 거부할 수 있다.
+    fn start(&self, machine_id: &str, req: &JobRequest) -> std::result::Result<(), String>;
     fn status(&self, machine_id: &str, job_id: &str) -> std::result::Result<JobState, String>;
 }
 
@@ -598,17 +682,29 @@ pub enum TargetOutcome {
     Skipped { reason: String },
 }
 
-/// 계획대로 한 대씩 재시작한다. 승인은 부르는 쪽이 `check_approval` 로 먼저 통과시켜야 한다.
-pub fn run(plan: &Plan, transport: &dyn Transport, policy: &RunPolicy, now_ms: &dyn Fn() -> u64) -> Vec<(String, TargetOutcome)> {
+/// 계획대로 한 대씩 재시작한다. 먼저 나쵸에서 승인을 소비하고, 실패하면 아무 기기도 건드리지 않는다.
+pub fn run(
+    plan: &Plan,
+    approval_id: &str,
+    authority_machine: &str,
+    authority: &dyn Authority,
+    transport: &dyn Transport,
+    policy: &RunPolicy,
+    now_ms: &dyn Fn() -> u64,
+) -> Vec<(String, TargetOutcome)> {
     let mut out = Vec::new();
     let mut stop: Option<String> = None;
+    if let Err(reason) = authorize_run(plan, approval_id, authority) {
+        stop = Some(format!("승인을 쓰지 못해 시작하지 않았다 · {reason}"));
+    }
+    let request = |job: Job| JobRequest { job, approval_id: approval_id.into(), authority: authority_machine.into() };
     for target in &plan.targets {
         let id = target.machine_id.clone();
         if let Some(reason) = &stop {
             out.push((id, TargetOutcome::Skipped { reason: reason.clone() }));
             continue;
         }
-        let outcome = run_one(plan, target, transport, policy, now_ms);
+        let outcome = run_one(plan, target, transport, policy, now_ms, &request);
         if !matches!(outcome, TargetOutcome::Verified { .. } | TargetOutcome::HandedOff { .. }) {
             stop = Some(format!("앞 기기({id})가 끝나지 않아 멈췄다"));
         }
@@ -617,7 +713,14 @@ pub fn run(plan: &Plan, transport: &dyn Transport, policy: &RunPolicy, now_ms: &
     out
 }
 
-fn run_one(plan: &Plan, target: &PlanTarget, transport: &dyn Transport, policy: &RunPolicy, now_ms: &dyn Fn() -> u64) -> TargetOutcome {
+fn run_one(
+    plan: &Plan,
+    target: &PlanTarget,
+    transport: &dyn Transport,
+    policy: &RunPolicy,
+    now_ms: &dyn Fn() -> u64,
+    request: &dyn Fn(Job) -> JobRequest,
+) -> TargetOutcome {
     let id = &target.machine_id;
     let fail = |job_id: Option<String>, reason: String| TargetOutcome::Failed { job_id, reason };
     let facts = match transport.facts(id) {
@@ -639,39 +742,41 @@ fn run_one(plan: &Plan, target: &PlanTarget, transport: &dyn Transport, policy: 
         old_pid: facts.pid,
         created_at_ms: now_ms(),
     };
-    if let Err(e) = transport.start(id, &job) {
-        return fail(Some(job.job_id), format!("대상이 작업을 받지 않았다 · {e}"));
+    let job_id = job.job_id.clone();
+    let old_pid = job.old_pid;
+    if let Err(e) = transport.start(id, &request(job)) {
+        return fail(Some(job_id), format!("대상이 작업을 받지 않았다 · {e}"));
     }
     if target.controller {
-        return TargetOutcome::HandedOff { job_id: job.job_id };
+        return TargetOutcome::HandedOff { job_id: job_id.clone() };
     }
     let started = std::time::Instant::now();
     let mut errors = 0;
     loop {
-        match transport.status(id, &job.job_id) {
+        match transport.status(id, &job_id.clone()) {
             Ok(JobState::Booted) | Ok(JobState::Verified) => break,
-            Ok(JobState::Failed) => return fail(Some(job.job_id), "대상 도우미가 실패를 적었다 — 기록을 확인".into()),
-            Ok(JobState::Cancelled) => return fail(Some(job.job_id), "작업이 취소됐다".into()),
+            Ok(JobState::Failed) => return fail(Some(job_id.clone()), "대상 도우미가 실패를 적었다 — 기록을 확인".into()),
+            Ok(JobState::Cancelled) => return fail(Some(job_id.clone()), "작업이 취소됐다".into()),
             Ok(_) => errors = 0,
             Err(_) => {
                 errors += 1;
                 if errors > policy.max_status_errors {
-                    return fail(Some(job.job_id), "재기동 뒤 다시 닿지 못했다 — 사람 확인 필요".into());
+                    return fail(Some(job_id.clone()), "재기동 뒤 다시 닿지 못했다 — 사람 확인 필요".into());
                 }
             }
         }
         if started.elapsed() > policy.boot_timeout {
-            return fail(Some(job.job_id), "제한 시간 안에 새 앱이 도착하지 않았다 — 사람 확인 필요".into());
+            return fail(Some(job_id.clone()), "제한 시간 안에 새 앱이 도착하지 않았다 — 사람 확인 필요".into());
         }
         std::thread::sleep(policy.poll_every);
     }
     match transport.facts(id) {
-        Ok(after) if after.pid != job.old_pid && after.binary == facts.binary && after.machine_id == *id => {
-            TargetOutcome::Verified { job_id: job.job_id, new_pid: after.pid }
+        Ok(after) if after.pid != old_pid && after.binary == facts.binary && after.machine_id == *id => {
+            TargetOutcome::Verified { job_id: job_id.clone(), new_pid: after.pid }
         }
-        Ok(after) if after.binary != facts.binary => fail(Some(job.job_id), "다시 뜬 앱의 바이너리가 다르다 — 재시작이 업그레이드가 됐다".into()),
-        Ok(_) => fail(Some(job.job_id), "새 pid 가 옛 pid 와 같다 — 재기동되지 않았다".into()),
-        Err(e) => fail(Some(job.job_id), format!("재기동 뒤 사실을 못 읽었다 · {e}")),
+        Ok(after) if after.binary != facts.binary => fail(Some(job_id.clone()), "다시 뜬 앱의 바이너리가 다르다 — 재시작이 업그레이드가 됐다".into()),
+        Ok(_) => fail(Some(job_id.clone()), "새 pid 가 옛 pid 와 같다 — 재기동되지 않았다".into()),
+        Err(e) => fail(Some(job_id.clone()), format!("재기동 뒤 사실을 못 읽었다 · {e}")),
     }
 }
 
@@ -765,20 +870,90 @@ mod tests {
         assert_eq!(target_hash(&f), base, "관측 시각·바쁨은 정체가 아니다(거부는 따로)");
     }
 
+    const AP: &str = "ap_0123456789abcdef0123456789abcdef";
+
+    /// 나쵸 서버 대역 — 상태·만료·범위·소비 기기·한 번을 서버처럼 판정한다.
+    struct FakeNacho {
+        items: RefCell<HashMap<String, (ApprovalView, serde_json::Value)>>,
+    }
+
+    impl FakeNacho {
+        fn approving(scope: &serde_json::Value, state: &str, expires_at_ms: u64) -> Self {
+            let view = ApprovalView { id: AP.into(), action: ACTION.into(), scope: scope.clone(), state: state.into(), expires_at_ms, ..Default::default() };
+            FakeNacho { items: RefCell::new(HashMap::from([(AP.to_string(), (view, scope.clone()))])) }
+        }
+    }
+
+    impl Authority for FakeNacho {
+        fn get(&self, id: &str) -> std::result::Result<ApprovalView, String> {
+            self.items.borrow().get(id).map(|(v, _)| v.clone()).ok_or_else(|| "no_approval".into())
+        }
+        fn consume(&self, id: &str, scope: &serde_json::Value, consumer: &str) -> std::result::Result<ApprovalView, String> {
+            let mut items = self.items.borrow_mut();
+            let (view, approved) = items.get_mut(id).ok_or("no_approval")?;
+            if view.state != "approved" { return Err(format!("not_approved:{}", view.state)); }
+            if view.consumed_at_ms.is_some() { return Err("already_used".into()); }
+            if NOW >= view.expires_at_ms { return Err("expired".into()); }
+            if scope != approved { return Err("scope_changed".into()); }
+            if approved["controller"].as_str() != Some(consumer) { return Err("wrong_consumer".into()); }
+            view.consumed_at_ms = Some(NOW);
+            view.consumed_by = Some(consumer.into());
+            Ok(view.clone())
+        }
+    }
+
     #[test]
-    fn no_approval_means_nothing_runs_and_scope_is_exact() {
+    fn approval_is_consumed_once_on_the_server_for_exactly_this_plan() {
         let lookup = |id: &str| Ok(facts(id, 1));
-        let plan = build_plan("ctl", &["a".into()], &lookup, NOW);
-        let err = check_approval(&plan, None, false, NOW).unwrap_err().to_string();
-        assert!(err.starts_with("approval_flow_unavailable"), "{err}");
-        let ok = Approval { plan_hash: plan.hash.clone(), machine_ids: vec!["a".into()], expires_at_ms: NOW + 1000, nonce: "n1".into() };
-        assert!(check_approval(&plan, Some(&ok), false, NOW).is_ok());
-        assert!(check_approval(&plan, Some(&ok), true, NOW).is_err(), "한 번만");
-        assert!(check_approval(&plan, Some(&ok), false, NOW + 1000).is_err(), "만료");
-        let other = Approval { machine_ids: vec!["a".into(), "b".into()], ..ok.clone() };
-        assert!(check_approval(&plan, Some(&other), false, NOW).is_err(), "기기 범위");
-        let stale = Approval { plan_hash: "0000".into(), ..ok };
-        assert!(check_approval(&plan, Some(&stale), false, NOW).is_err(), "계획 해시");
+        let plan = build_plan("ctl", &["a".into(), "ctl".into()], &lookup, NOW);
+        assert_eq!(plan.scope["targets"][1]["order"], 2, "대상은 순서대로, 숫자는 정수");
+        let nacho = FakeNacho::approving(&plan.scope, "approved", NOW + 1000);
+        assert!(authorize_run(&plan, AP, &nacho).is_ok());
+        assert_eq!(authorize_run(&plan, AP, &nacho).unwrap_err(), "already_used", "한 번만");
+        for state in ["pending", "denied", "expired"] {
+            let n = FakeNacho::approving(&plan.scope, state, NOW + 1000);
+            assert!(authorize_run(&plan, AP, &n).unwrap_err().starts_with("not_approved"), "{state}");
+        }
+        assert_eq!(authorize_run(&plan, AP, &FakeNacho::approving(&plan.scope, "approved", NOW)).unwrap_err(), "expired");
+        let changed = build_plan("ctl", &["a".into(), "ctl".into()], &|id: &str| Ok(facts(id, if id == "a" { 2 } else { 1 })), NOW);
+        let n = FakeNacho::approving(&plan.scope, "approved", NOW + 1000);
+        assert_eq!(authorize_run(&changed, AP, &n).unwrap_err(), "scope_changed", "승인 뒤 pid 가 바뀌었다");
+        let other = build_plan("a", &["a".into(), "ctl".into()], &lookup, NOW);
+        let n = FakeNacho::approving(&plan.scope, "approved", NOW + 1000);
+        assert!(authorize_run(&other, AP, &n).is_err(), "다른 조종 기기");
+        assert!(authorize_run(&plan, "approved:true", &nacho).is_err(), "자기주장은 id 모양부터 거부");
+    }
+
+    fn request_for(plan: &Plan, id: &str, pid: u32) -> JobRequest {
+        let f = facts(id, pid);
+        JobRequest {
+            job: Job { schema: SCHEMA.into(), job_id: job_id(&plan.hash, id), plan_hash: plan.hash.clone(), machine_id: id.into(), target_hash: target_hash(&f), old_pid: pid, created_at_ms: NOW },
+            approval_id: AP.into(),
+            authority: "ctl".into(),
+        }
+    }
+
+    #[test]
+    fn a_target_believes_only_what_nacho_says_and_its_own_facts() {
+        let lookup = |id: &str| Ok(facts(id, 1));
+        let plan = build_plan("ctl", &["a".into(), "ctl".into()], &lookup, NOW);
+        let req = request_for(&plan, "a", 1);
+        let pending = FakeNacho::approving(&plan.scope, "approved", NOW + 1000);
+        assert!(authorize_target(&req, &facts("a", 1), &pending, NOW).unwrap_err().contains("소비"), "조종 쪽 소비 전");
+        let nacho = FakeNacho::approving(&plan.scope, "approved", NOW + 1000);
+        authorize_run(&plan, AP, &nacho).unwrap();
+        assert!(authorize_target(&req, &facts("a", 1), &nacho, NOW).is_ok());
+        assert!(authorize_target(&req, &facts("a", 2), &nacho, NOW).is_err(), "그 사이 pid 가 바뀐 대상");
+        assert!(authorize_target(&req, &facts("b", 1), &nacho, NOW).is_err(), "다른 기기에 온 작업");
+        assert!(authorize_target(&req, &facts("a", 1), &nacho, NOW + 1000).is_err(), "만료");
+        let mut busy = facts("a", 1);
+        busy.busy = vec![BusyPane { surface: "%1".into(), character: "치나츠".into(), state: "working".into() }];
+        assert!(authorize_target(&req, &busy, &nacho, NOW).is_err(), "그 사이 학생이 일을 시작했다");
+        let nobody = FakeNacho { items: RefCell::default() };
+        assert_eq!(authorize_target(&req, &facts("a", 1), &nobody, NOW).unwrap_err(), "no_approval", "나쵸에 없는 승인");
+        let mut lie = req.clone();
+        lie.job.plan_hash = "0000".into();
+        assert!(authorize_target(&lie, &facts("a", 1), &nacho, NOW).is_err(), "요청이 다른 계획을 말한다");
     }
 
     fn job(id: &str) -> Job {
@@ -950,6 +1125,130 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 격리 E2E 의 기기 한 대 — 번들 경로를 흉내 낸 가짜 앱 프로세스와 그 기기의 작업 기록.
+    struct FakeMachine {
+        exe: String,
+        pid: RefCell<u32>,
+        /// 처음 띄운 앱 — 검사 프로세스의 자식이라 끈 뒤 거둬야 좀비로 「살아 있음」이 되지 않는다.
+        first: RefCell<Option<std::process::Child>>,
+        jobs: PathBuf,
+        exits: bool,
+    }
+
+    /// 대상 앱이 하는 일을 그대로 한다: 나쵸 승인·자기 사실로 수락 → 도우미 → 스스로 종료. 새 앱은 부팅 때 도착을 적는다.
+    struct FakeFleet {
+        machines: HashMap<String, FakeMachine>,
+        nacho: FakeNacho,
+    }
+
+    impl FakeFleet {
+        fn machine(root: &Path, id: &str, exits: bool) -> (String, FakeMachine) {
+            let dir = root.join(id);
+            let exe = fake_app(&dir);
+            let child = start_fake(&exe);
+            (id.into(), FakeMachine { exe, pid: RefCell::new(child.id()), first: RefCell::new(Some(child)), jobs: dir.join("jobs"), exits })
+        }
+    }
+
+    impl Transport for FakeFleet {
+        fn facts(&self, id: &str) -> std::result::Result<Facts, String> {
+            let m = self.machines.get(id).ok_or("모르는 기기")?;
+            Ok(Facts { active_job: active_job(&m.jobs, NOW), ..facts(id, *m.pid.borrow()) })
+        }
+        fn start(&self, id: &str, req: &JobRequest) -> std::result::Result<(), String> {
+            let m = self.machines.get(id).ok_or("모르는 기기")?;
+            let facts = self.facts(id)?;
+            if !accept_job(req, &facts, &self.nacho, &m.jobs, NOW)? {
+                return Ok(());
+            }
+            let old = *m.pid.borrow();
+            spawn_helper(&HelperSpec { dir: m.jobs.clone(), job_id: req.job.job_id.clone(), old_pid: old, app_exe: m.exe.clone(), launch: fake_launch(&m.exe), exit_timeout_s: 3, boot_timeout_s: 5 }).map_err(|e| e.to_string())?;
+            if m.exits {
+                if let Some(mut child) = m.first.borrow_mut().take().filter(|c| c.id() == old) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+            Ok(())
+        }
+        fn status(&self, id: &str, job_id: &str) -> std::result::Result<JobState, String> {
+            let m = self.machines.get(id).ok_or("모르는 기기")?;
+            let status = job_status(&m.jobs, job_id).map_err(|e| e.to_string())?;
+            if status.state == JobState::Launched {
+                let new: u32 = status.events.last().unwrap().note.trim_start_matches("pid ").parse().unwrap();
+                *m.pid.borrow_mut() = new;
+                mark_booted(&m.jobs, id, new, "abc", NOW);
+                return Ok(job_status(&m.jobs, job_id).map_err(|e| e.to_string())?.state);
+            }
+            Ok(status.state)
+        }
+    }
+
+    fn e2e_policy() -> RunPolicy {
+        RunPolicy { poll_every: std::time::Duration::from_millis(50), boot_timeout: std::time::Duration::from_secs(10), max_status_errors: 3 }
+    }
+
+    fn wait_booted(fleet: &FakeFleet, id: &str, job: &str) -> JobState {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let state = fleet.status(id, job).unwrap_or(JobState::Accepted);
+            if state == JobState::Booted || state.terminal() || std::time::Instant::now() > until {
+                return state;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn reap(fleet: &FakeFleet) {
+        for m in fleet.machines.values() {
+            if let Some(mut child) = m.first.borrow_mut().take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let _ = std::process::Command::new("/bin/kill").arg(m.pid.borrow().to_string()).status();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn e2e_remote_first_then_controller_with_one_consumed_approval() {
+        let root = tmp("e2e-ok");
+        let machines = HashMap::from([FakeFleet::machine(&root, "a", true), FakeFleet::machine(&root, "ctl", true)]);
+        let mut fleet = FakeFleet { machines, nacho: FakeNacho { items: RefCell::default() } };
+        let plan = build_plan("ctl", &["ctl".into(), "a".into()], &|id: &str| fleet.facts(id), NOW);
+        assert!(plan.runnable(), "{:?}", plan.targets.iter().map(|t| &t.refusals).collect::<Vec<_>>());
+        fleet.nacho = FakeNacho::approving(&plan.scope, "approved", NOW + 60_000);
+        let (old_a, old_ctl) = (*fleet.machines["a"].pid.borrow(), *fleet.machines["ctl"].pid.borrow());
+        let out = run(&plan, AP, "ctl", &fleet.nacho, &fleet, &e2e_policy(), &|| NOW);
+        assert!(matches!(out[0], (ref id, TargetOutcome::Verified { new_pid, .. }) if id == "a" && new_pid != old_a), "{out:?}");
+        let TargetOutcome::HandedOff { job_id: ctl_job } = &out[1].1 else { panic!("{out:?}") };
+        assert_eq!(wait_booted(&fleet, "ctl", ctl_job), JobState::Booted, "조종 기기는 넘긴 뒤 새 앱이 도착을 적는다");
+        assert_ne!(*fleet.machines["ctl"].pid.borrow(), old_ctl);
+        // 같은 계획·승인을 다시 보내도 새로 돌지 않는다 — 승인은 이미 쓰였다.
+        let again = run(&plan, AP, "ctl", &fleet.nacho, &fleet, &e2e_policy(), &|| NOW);
+        assert!(again.iter().all(|(_, o)| matches!(o, TargetOutcome::Skipped { .. })), "{again:?}");
+        reap(&fleet);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn e2e_remote_failure_leaves_the_controller_untouched() {
+        let root = tmp("e2e-fail");
+        let machines = HashMap::from([FakeFleet::machine(&root, "a", false), FakeFleet::machine(&root, "ctl", true)]);
+        let mut fleet = FakeFleet { machines, nacho: FakeNacho { items: RefCell::default() } };
+        let plan = build_plan("ctl", &["a".into(), "ctl".into()], &|id: &str| fleet.facts(id), NOW);
+        fleet.nacho = FakeNacho::approving(&plan.scope, "approved", NOW + 60_000);
+        let old_ctl = *fleet.machines["ctl"].pid.borrow();
+        let out = run(&plan, AP, "ctl", &fleet.nacho, &fleet, &e2e_policy(), &|| NOW);
+        assert!(matches!(out[0].1, TargetOutcome::Failed { .. }), "안 꺼지는 원격 앱은 실패로: {out:?}");
+        assert!(matches!(out[1].1, TargetOutcome::Skipped { .. }));
+        assert_eq!(*fleet.machines["ctl"].pid.borrow(), old_ctl, "조종 기기 앱은 그대로");
+        assert!(active_job(&fleet.machines["ctl"].jobs, NOW).is_none() && !fleet.machines["ctl"].jobs.exists(), "조종 기기엔 작업조차 없다");
+        reap(&fleet);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     struct Fake {
         facts: RefCell<HashMap<String, Vec<std::result::Result<Facts, String>>>>,
         states: RefCell<HashMap<String, Vec<std::result::Result<JobState, String>>>>,
@@ -981,7 +1280,7 @@ mod tests {
         fn facts(&self, id: &str) -> std::result::Result<Facts, String> {
             pop(&self.facts, id).unwrap_or_else(|| Err("모름".into()))
         }
-        fn start(&self, id: &str, _job: &Job) -> std::result::Result<(), String> {
+        fn start(&self, id: &str, _req: &JobRequest) -> std::result::Result<(), String> {
             if self.refuse_start.iter().any(|x| x == id) {
                 return Err("대상이 거부".into());
             }
@@ -997,6 +1296,20 @@ mod tests {
         RunPolicy { poll_every: std::time::Duration::from_millis(1), boot_timeout: std::time::Duration::from_millis(200), max_status_errors: 3 }
     }
 
+    fn approved(plan: &Plan) -> FakeNacho {
+        FakeNacho::approving(&plan.scope, "approved", NOW + 60_000)
+    }
+
+    #[test]
+    fn without_a_consumable_approval_no_machine_is_touched() {
+        let plan = plan_for(&["a", "ctl"], "ctl");
+        let fake = Fake::new().facts_seq("a", vec![Ok(facts("a", 1))]).facts_seq("ctl", vec![Ok(facts("ctl", 1))]);
+        let pending = FakeNacho::approving(&plan.scope, "pending", NOW + 60_000);
+        let out = run(&plan, AP, "ctl", &pending, &fake, &policy(), &|| NOW);
+        assert!(out.iter().all(|(_, o)| matches!(o, TargetOutcome::Skipped { .. })), "{out:?}");
+        assert!(fake.started.borrow().is_empty());
+    }
+
     fn plan_for(ids: &[&str], controller: &str) -> Plan {
         let lookup = |id: &str| Ok(facts(id, 1));
         build_plan(controller, &ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &lookup, NOW)
@@ -1009,7 +1322,7 @@ mod tests {
             .facts_seq("a", vec![Ok(facts("a", 1)), Ok(facts("a", 2))])
             .facts_seq("ctl", vec![Ok(facts("ctl", 1))])
             .states_seq("a", vec![Err("끊김".into()), Err("끊김".into()), Ok(JobState::Launched), Ok(JobState::Booted)]);
-        let out = run(&plan, &fake, &policy(), &|| NOW);
+        let out = run(&plan, AP, "ctl", &approved(&plan), &fake, &policy(), &|| NOW);
         assert_eq!(*fake.started.borrow(), ["a", "ctl"], "원격 먼저, 조종 기기 마지막");
         assert!(matches!(out[0].1, TargetOutcome::Verified { new_pid: 2, .. }));
         assert!(matches!(out[1].1, TargetOutcome::HandedOff { .. }));
@@ -1022,7 +1335,7 @@ mod tests {
             .facts_seq("a", vec![Ok(facts("a", 1))])
             .facts_seq("b", vec![Ok(facts("b", 1))])
             .states_seq("a", vec![Ok(JobState::Failed)]);
-        let out = run(&plan, &fake, &policy(), &|| NOW);
+        let out = run(&plan, AP, "ctl", &approved(&plan), &fake, &policy(), &|| NOW);
         assert!(matches!(out[0].1, TargetOutcome::Failed { .. }));
         assert!(matches!(out[1].1, TargetOutcome::Skipped { .. }));
         assert!(matches!(out[2].1, TargetOutcome::Skipped { .. }), "조종 기기도 손대지 않는다");
@@ -1035,7 +1348,7 @@ mod tests {
         let mut changed = facts("a", 1);
         changed.binary.build = "newer".into();
         let fake = Fake::new().facts_seq("a", vec![Ok(changed)]);
-        let out = run(&plan, &fake, &policy(), &|| NOW);
+        let out = run(&plan, AP, "ctl", &approved(&plan), &fake, &policy(), &|| NOW);
         assert!(matches!(&out[0].1, TargetOutcome::Failed { reason, .. } if reason.contains("바뀌었다")));
         assert!(fake.started.borrow().is_empty());
     }
@@ -1044,13 +1357,13 @@ mod tests {
     fn offline_after_restart_and_same_pid_are_failures_not_success() {
         let plan = plan_for(&["a"], "ctl");
         let lost = Fake::new().facts_seq("a", vec![Ok(facts("a", 1))]).states_seq("a", vec![Err("끊김".into())]);
-        assert!(matches!(&run(&plan, &lost, &policy(), &|| NOW)[0].1, TargetOutcome::Failed { reason, .. } if reason.contains("닿지")));
+        assert!(matches!(&run(&plan, AP, "ctl", &approved(&plan), &lost, &policy(), &|| NOW)[0].1, TargetOutcome::Failed { reason, .. } if reason.contains("닿지")));
         let same = Fake::new().facts_seq("a", vec![Ok(facts("a", 1)), Ok(facts("a", 1))]).states_seq("a", vec![Ok(JobState::Booted)]);
-        assert!(matches!(&run(&plan, &same, &policy(), &|| NOW)[0].1, TargetOutcome::Failed { reason, .. } if reason.contains("pid")));
+        assert!(matches!(&run(&plan, AP, "ctl", &approved(&plan), &same, &policy(), &|| NOW)[0].1, TargetOutcome::Failed { reason, .. } if reason.contains("pid")));
         let mut upgraded = facts("a", 2);
         upgraded.binary.inode = 8;
         let up = Fake::new().facts_seq("a", vec![Ok(facts("a", 1)), Ok(upgraded)]).states_seq("a", vec![Ok(JobState::Booted)]);
-        assert!(matches!(&run(&plan, &up, &policy(), &|| NOW)[0].1, TargetOutcome::Failed { reason, .. } if reason.contains("업그레이드")));
+        assert!(matches!(&run(&plan, AP, "ctl", &approved(&plan), &up, &policy(), &|| NOW)[0].1, TargetOutcome::Failed { reason, .. } if reason.contains("업그레이드")));
     }
 
     #[test]
@@ -1058,7 +1371,7 @@ mod tests {
         let plan = plan_for(&["a", "b"], "ctl");
         let mut fake = Fake::new().facts_seq("a", vec![Ok(facts("a", 1))]).facts_seq("b", vec![Ok(facts("b", 1))]);
         fake.refuse_start = vec!["a".into()];
-        let out = run(&plan, &fake, &policy(), &|| NOW);
+        let out = run(&plan, AP, "ctl", &approved(&plan), &fake, &policy(), &|| NOW);
         assert!(matches!(&out[0].1, TargetOutcome::Failed { reason, .. } if reason.contains("거부")));
         assert!(matches!(out[1].1, TargetOutcome::Skipped { .. }));
     }

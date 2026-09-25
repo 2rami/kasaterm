@@ -3838,6 +3838,8 @@ enum UserEvent {
     SocketQuerySessions(std::sync::mpsc::Sender<(usize, usize, Vec<(String, String)>)>),
     /// 재시작 계획용 사실 — 바쁜 학생·미저장 편집기는 GUI 스레드만 안다.
     SocketRestartFacts(std::sync::mpsc::Sender<kasa_socket::app_restart::Facts>),
+    /// 승인된 재시작 작업을 받아 도우미를 띄웠다 — 이제 정상 종료(`exiting`)로 끈다.
+    RestartExit(String),
     /// `POST /session-switch?idx=N` 위임 — 보이는 윈도우를 idx 로 전환(사용자: GUI 에서
     /// 방=윈도우 클릭 시 그 터미널 윈도우로). `switch_window` 가 resize·redraw 자체 처리.
     SocketSwitchSession(usize),

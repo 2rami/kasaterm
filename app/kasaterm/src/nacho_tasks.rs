@@ -442,28 +442,49 @@ impl Ledger for HttpLedger {
 /// 나쵸 앱 창구 GET 한 번. 창구는 루프백·메시의 평문 HTTP 라 의존성 없이 소켓으로 부른다 —
 /// 판 갱신 스레드가 비동기 런타임을 들고 있지 않다.
 fn app_get(path: &str) -> Result<Vec<u8>, String> {
+    let raw = app_exchange("GET", path, None)?;
+    split_response(&raw)
+}
+
+/// 나쵸 앱 창구 요청 한 번 — (상태 코드, 본문). 판정(409·410·503 의 뜻)은 부르는 쪽 몫이다.
+/// 키는 이 함수 안에서만 읽고 돌려주지 않는다.
+pub(crate) fn app_request(method: &str, path: &str, body: Option<&[u8]>) -> Result<(u16, Vec<u8>), String> {
+    let raw = app_exchange(method, path, body)?;
+    let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("나쵸 응답이 잘렸어요")?;
+    let status = String::from_utf8_lossy(&raw[..head_end]).split_whitespace().nth(1).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
+    Ok((status, raw[head_end + 4..].to_vec()))
+}
+
+fn app_exchange(method: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>, String> {
     let (url, key) = kasa_mcp::nacho_app_target().map_err(|code| match code {
-        "nacho_key_missing" => "이 기기에는 나쵸 앱 키가 없어 장부를 읽지 않았어요".to_string(),
-        _ => "나쵸 자리 정보가 없어 장부를 읽지 않았어요".to_string(),
+        "nacho_key_missing" => "이 기기에는 나쵸 앱 키가 없어 나쵸에 묻지 않았어요".to_string(),
+        _ => "나쵸 자리 정보가 없어 나쵸에 묻지 않았어요".to_string(),
     })?;
-    let authority = url.strip_prefix("http://").ok_or("나쵸 주소가 평문 HTTP 가 아니라 읽지 않았어요")?;
+    let authority = url.strip_prefix("http://").ok_or("나쵸 주소가 평문 HTTP 가 아니라 묻지 않았어요")?;
     let authority = authority.split('/').next().unwrap_or("");
     let addr = std::net::ToSocketAddrs::to_socket_addrs(authority)
         .ok()
         .and_then(|mut a| a.next())
         .ok_or("나쵸 주소를 해석하지 못했어요")?;
     let timeout = std::time::Duration::from_millis(1500);
-    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).map_err(|_| "나쵸 장부에 연결하지 못했어요".to_string())?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).map_err(|_| "나쵸에 연결하지 못했어요".to_string())?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
     // HTTP/1.0 으로 물어 청크 전송을 피한다 — 본문 끝은 연결이 닫히는 자리다.
-    let request = format!(
-        "GET {path} HTTP/1.0\r\nHost: {authority}\r\nX-Nacho-Token: {key}\r\nX-Kasa-Owner: 1\r\nX-Kasa-User: desktop\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    let mut request = format!(
+        "{method} {path} HTTP/1.0\r\nHost: {authority}\r\nX-Nacho-Token: {key}\r\nX-Kasa-Owner: 1\r\nX-Kasa-User: desktop\r\nAccept: application/json\r\nConnection: close\r\n"
     );
-    stream.write_all(request.as_bytes()).map_err(|_| "나쵸 장부에 요청을 보내지 못했어요".to_string())?;
+    if let Some(body) = body {
+        request.push_str(&format!("Content-Type: application/json\r\nX-Journal-Request: 1\r\nContent-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).map_err(|_| "나쵸에 요청을 보내지 못했어요".to_string())?;
+    if let Some(body) = body {
+        stream.write_all(body).map_err(|_| "나쵸에 본문을 보내지 못했어요".to_string())?;
+    }
     let mut raw = Vec::new();
-    stream.take(2 * 1024 * 1024).read_to_end(&mut raw).map_err(|_| "나쵸 장부 응답이 끊겼어요".to_string())?;
-    split_response(&raw)
+    stream.take(2 * 1024 * 1024).read_to_end(&mut raw).map_err(|_| "나쵸 응답이 끊겼어요".to_string())?;
+    Ok(raw)
 }
 
 fn split_response(raw: &[u8]) -> Result<Vec<u8>, String> {
