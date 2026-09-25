@@ -16,11 +16,16 @@ use crate::session_transfer::{SessionIdentity, SessionRow, TransferSnapshot, Tra
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod work;
+
 pub(crate) type Rect = (f32, f32, f32, f32);
 
+/// 보드를 열면 서는 탭은 `#[default]` 한 곳이 정한다. 할 일 판(B안)이 기본이고, 옛 방별
+/// 보드로 되돌리려면 이 표시를 `Overview` 로 옮기면 된다 — 두 탭 모두 그대로 남는다.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum BoardTab {
     #[default]
+    Work,
     Overview,
     Agents,
     Schedule,
@@ -29,7 +34,8 @@ pub(crate) enum BoardTab {
 }
 
 impl BoardTab {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Work,
         Self::Overview,
         Self::Agents,
         Self::Schedule,
@@ -39,6 +45,7 @@ impl BoardTab {
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
+            Self::Work => "할 일",
             Self::Overview => "보드",
             Self::Agents => "에이전트",
             Self::Schedule => "스케줄",
@@ -50,6 +57,7 @@ impl BoardTab {
     /// 머리글 밑 한 줄 설명(목업 .sub).
     pub(crate) const fn desc(self) -> &'static str {
         match self {
+            Self::Work => "답할 것부터 · 진행·검증·완료와 기기·학생",
             Self::Overview => "연결된 기기의 모든 방과 최근 변경",
             Self::Agents => "pane 밖에서도 계속 도는 대화",
             Self::Schedule => "지정한 때에 학생에게 지시를 보냅니다",
@@ -299,6 +307,7 @@ pub(crate) struct BoardData {
     pub(crate) faces: Arc<Vec<FaceAsset>>,
     pub(crate) error: Option<String>,
     overview: Arc<OverviewData>,
+    tasks: Arc<crate::nacho_tasks::TaskBook>,
 }
 
 #[derive(Clone, Debug)]
@@ -335,6 +344,8 @@ pub(crate) enum Target {
     OverviewCopy(BoardAddress),
     OverviewFocus(BoardAddress),
     OverviewSave(BoardAddress),
+    WorkProject(Option<String>),
+    WorkSelect(work::WorkKey),
     ResumeBackground(String, String),
     StopBackground(LocalBackgroundProcess),
     ConfirmStopBackground(LocalBackgroundProcess),
@@ -397,6 +408,7 @@ pub(crate) struct Snapshot {
     pub(crate) caret_on: bool,
     pub(crate) toast: Option<(bool, String)>,
     overview: OverviewUi,
+    work: work::WorkUi,
     pub(crate) pending_stop: Option<LocalBackgroundProcess>,
     transfer: TransferUi,
     fixture: bool,
@@ -439,6 +451,7 @@ pub(crate) struct Scene {
     git_selected: HashSet<String>,
     toast: Option<(bool, String, Instant)>,
     overview: OverviewUi,
+    work: work::WorkUi,
     pending_stop: Option<LocalBackgroundProcess>,
     transfer: TransferUi,
     transfer_generation: u64,
@@ -447,7 +460,7 @@ pub(crate) struct Scene {
 impl Default for Scene {
     fn default() -> Self {
         Self {
-            tab: BoardTab::Overview,
+            tab: BoardTab::default(),
             return_pane: None,
             target_pane: None,
             target_window: 0,
@@ -476,6 +489,7 @@ impl Default for Scene {
             git_selected: HashSet::new(),
             toast: None,
             overview: OverviewUi::default(),
+            work: work::WorkUi::default(),
             pending_stop: None,
             transfer: TransferUi::default(),
             transfer_generation: 0,
@@ -601,6 +615,7 @@ impl Scene {
             caret_on,
             toast: self.toast.as_ref().map(|(ok, text, _)| (*ok, text.clone())),
             overview: self.overview.clone(),
+            work: self.work.clone(),
             pending_stop: self.pending_stop.clone(),
             transfer: self.transfer.clone(),
             fixture: transfer_fixture_active() || board_fixture_active(),
@@ -767,12 +782,16 @@ impl Scene {
             }
             let names = overview.panes.iter().filter_map(|row| row.character.as_deref()).collect::<HashSet<_>>();
             let faces = collect_overview_faces(names);
-            self.data = Arc::new(BoardData { overview: Arc::new(overview), faces: Arc::new(faces), ..Default::default() });
+            let tasks = Arc::new(crate::nacho_tasks::fixture_book(overview.observed_at_ms));
+            self.data = Arc::new(BoardData { overview: Arc::new(overview), faces: Arc::new(faces), tasks, ..Default::default() });
             self.revalidate_overview();
             if first {
                 self.applied_generation = 1;
                 if let Ok(id) = std::env::var("KASATERM_TEST_BOARD_SELECT") {
                     self.toggle_overview_detail(id);
+                }
+                if let Ok(id) = std::env::var("KASATERM_TEST_WORK_SELECT") {
+                    self.select_work(work::WorkKey::Task(id));
                 }
             }
             self.last_refresh = if first && self.overview.selection.is_some() { None } else { Some(Instant::now()) };
@@ -824,7 +843,7 @@ impl Scene {
         let target_cwd = self.target_cwd.clone();
         let previous = self.data.clone();
         let tab = self.tab;
-        let selection = (self.tab == BoardTab::Overview).then(|| self.overview.selection.clone()).flatten();
+        let selection = matches!(self.tab, BoardTab::Overview | BoardTab::Work).then(|| self.overview.selection.clone()).flatten();
         std::thread::spawn(move || {
             let data = collect_data(&backend, target_window, &target_cwd, tab, &previous, selection);
             let mut mailbox = mailbox.lock().unwrap();
@@ -1276,11 +1295,17 @@ fn collect_data(
     previous: &BoardData,
     selection: Option<OverviewSelection>,
 ) -> BoardData {
-    if tab == BoardTab::Overview {
+    if matches!(tab, BoardTab::Overview | BoardTab::Work) {
         let overview = collect_overview(backend, &previous.overview, selection);
         let names = overview.panes.iter().filter_map(|row| row.character.as_deref()).collect::<HashSet<_>>();
         let faces = collect_overview_faces(names);
-        return BoardData { overview: Arc::new(overview), faces: Arc::new(faces), error: None, ..previous.clone() };
+        // 장부는 할 일 판만 읽는다 — 방별 보드가 나쵸를 기다리며 늦어지지 않게.
+        let tasks = if tab == BoardTab::Work {
+            Arc::new(crate::nacho_tasks::refresh(&previous.tasks))
+        } else {
+            previous.tasks.clone()
+        };
+        return BoardData { overview: Arc::new(overview), faces: Arc::new(faces), tasks, error: None, ..previous.clone() };
     }
     let mut errors = Vec::new();
     let mut agents = match backend.collab_board() {
@@ -1330,6 +1355,7 @@ fn collect_data(
         faces: Arc::new(faces),
         error: (!errors.is_empty()).then(|| errors.join(" · ")),
         overview: previous.overview.clone(),
+        tasks: previous.tasks.clone(),
     }
 }
 
@@ -1691,20 +1717,24 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     hit(g, &mut hits, Target::Return, back, false);
 
     let content_x = ax + nav_w + if aw < 760.0 { 20.0 } else { 28.0 };
-    let content_w = (aw - nav_w - if aw < 760.0 { 40.0 } else { 56.0 })
-        .max(1.0)
-        .min(800.0);
+    let avail_w = (aw - nav_w - if aw < 760.0 { 40.0 } else { 56.0 }).max(1.0);
+    let content_w = avail_w.min(800.0);
+    // 할 일 판만 옆 칸(기기·학생·상세)을 둔다. 읽기 열 800 은 그대로 두고 남는 폭이
+    // 옆 칸 최소(260)를 넘을 때만 세운다 — 좁으면 같은 내용이 열 아래로 내려간다.
+    let side = (snapshot.tab == BoardTab::Work && avail_w >= 800.0 + 24.0 + 260.0)
+        .then(|| (content_x + content_w + 24.0, (avail_w - content_w - 24.0).min(340.0)));
+    let head_w = side.map_or(content_w, |(sx, sw)| sx + sw - content_x);
     text(g, content_x, ay + 22.0, snapshot.tab.label(), 20.0, theme::text(), true);
     // 기준 pane 알약: 채움 없는 테두리, pane 이름만 강조색(목업 .head .pill).
-    let refresh = (content_x + content_w - 30.0, ay + 18.0, 30.0, 30.0);
-    let pane = if snapshot.tab == BoardTab::Overview {
+    let refresh = (content_x + head_w - 30.0, ay + 18.0, 30.0, 30.0);
+    let pane = if matches!(snapshot.tab, BoardTab::Overview | BoardTab::Work) {
         "모든 방".into()
     } else if snapshot.target_cwd.is_empty() {
         snapshot.target_pane.clone()
     } else {
         format!("{} {}", snapshot.target_pane, short_path(&snapshot.target_cwd))
     };
-    let prefix = if snapshot.tab == BoardTab::Overview { "" } else { "기준 pane · " };
+    let prefix = if matches!(snapshot.tab, BoardTab::Overview | BoardTab::Work) { "" } else { "기준 pane · " };
     let prefix_w = g.measure_chrome_text(prefix, 11.0, false);
     let pane = fit(g, &pane, content_w * 0.5 - prefix_w - 40.0, 11.0, false);
     let pane_w = g.measure_chrome_text(&pane, 11.0, false);
@@ -1720,12 +1750,12 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     }
     let description = fit(g, snapshot.tab.desc(), content_w, 11.5, false);
     text(g, content_x, ay + 52.0, &description, 11.5, theme::text_dim(), false);
-    divider(g, content_x, ay + 82.0, content_w);
+    divider(g, content_x, ay + 82.0, head_w);
 
     let body_top = ay + 97.0;
     let body_bottom = ay + ah - 14.0;
     let view_h = (body_bottom - body_top).max(0.0);
-    g.push_clip(content_x, body_top, content_w, view_h);
+    g.push_clip(content_x, body_top, head_w, view_h);
     let mut y = body_top - snapshot.scroll;
     if let Some((ok, message)) = &snapshot.toast {
         notice(g, content_x, &mut y, content_w, message, *ok);
@@ -1734,6 +1764,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         notice(g, content_x, &mut y, content_w, error, false);
     }
     match snapshot.tab {
+        BoardTab::Work => work::paint_work(g, snapshot, &mut hits, content_x, &mut y, content_w, side),
         BoardTab::Overview => paint_overview(g, snapshot, &mut hits, content_x, &mut y, content_w),
         BoardTab::Agents => paint_agents(g, snapshot, &mut hits, content_x, &mut y, content_w),
         BoardTab::Schedule => paint_schedule(
@@ -3032,7 +3063,8 @@ impl App {
         if board_fixture_requested()
             && !matches!(target, Target::Tab(_) | Target::Return | Target::Refresh
                 | Target::OverviewMachine(_) | Target::OverviewRoom(_) | Target::OverviewSort(_)
-                | Target::OverviewDetail(_) | Target::OverviewChanges | Target::OverviewCopy(_))
+                | Target::OverviewDetail(_) | Target::OverviewChanges | Target::OverviewCopy(_)
+                | Target::WorkProject(_) | Target::WorkSelect(_))
         {
             self.board_scene.report_error("검증용 보드에서는 실제 창을 조작하지 않아요");
             self.chrome_dirty = true;
@@ -3103,6 +3135,11 @@ impl App {
             Target::OverviewSave(_) => {
                 self.board_scene.report_error("저장은 해당 창에서 실행해 주세요. 보드에서는 저장 순간의 대화를 확인할 수 없어요");
             }
+            Target::WorkProject(project) => {
+                self.board_scene.work.project = project;
+                self.board_scene.scroll = 0.0;
+            }
+            Target::WorkSelect(key) => self.board_scene.select_work(key),
             Target::ResumeBackground(id, cwd) => {
                 self.resume_background_in_target_room(id, cwd);
             }
@@ -3737,7 +3774,8 @@ mod tests {
     fn overview_collection_exits_before_legacy_agent_and_remote_loaders() {
         let source = include_str!("native_board.rs");
         let collection = source.split_once("fn collect_data(").unwrap().1;
-        let overview = collection.split_once("if tab == BoardTab::Overview {").unwrap().1
+        // 할 일 판도 같은 갈래를 탄다 — 구형 수집기를 부르면 판 갱신이 나쵸·git 을 기다린다.
+        let overview = collection.split_once("if matches!(tab, BoardTab::Overview | BoardTab::Work) {").unwrap().1
             .split_once("let mut errors = Vec::new();").unwrap().0;
         assert!(overview.contains("collect_overview"));
         assert!(overview.contains("return BoardData"));

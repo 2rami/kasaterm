@@ -7158,10 +7158,11 @@ impl App {
         }
         self.autoboard_at = None;
         self.toggle_board_room();
-        // KASATERM_AUTOBOARD_TAB=overview|agents|schedule|git|machines — 캡처용 탭 선택.
+        // KASATERM_AUTOBOARD_TAB=work|overview|agents|schedule|git|machines — 캡처용 탭 선택.
         if let Ok(tab) = std::env::var("KASATERM_AUTOBOARD_TAB") {
             use crate::native_board::BoardTab;
             let tab = match tab.as_str() {
+                "work" => Some(BoardTab::Work),
                 "agents" => Some(BoardTab::Agents),
                 "schedule" => Some(BoardTab::Schedule),
                 "git" => Some(BoardTab::Git),

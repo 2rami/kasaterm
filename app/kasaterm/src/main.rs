@@ -33,6 +33,7 @@ mod layout;
 mod lineedit;
 mod markdown;
 mod native_board;
+mod nacho_tasks;
 mod transfer_endpoints;
 mod tell_delivery;
 mod native_onboarding;

@@ -23,6 +23,8 @@
 - `bridge.rs` — bg SendMessage 브리지(teammate 플래그 유실된 detach 세션 인박스를 `claude attach` pty 로 직접 주입)
 - `stream.rs` — 제거된 데몬 스트림 프로토콜에서 남은 GUI 뷰 타입(`DockedView`/`PaneStatusView`)
 - `agent_state.rs` — pane 상태의 **정본**: `AgentState`(Idle/Working/Compacting/Waiting/Error) 를 훅 턴 경계·기록 턴 경계·attention·명부(`agents --json`)·PTY 박동에서 `resolve` 하는 순수 함수 + `StateHub`(App.collab.hub, PtyBackend 와 Arc 공유, 250ms 메모). 헤더 바·사이드바·미니맵·보드·펫·스프라이트가 전부 이것을 읽는다. **화면은 둘째 눈**(`ScreenSigns`: 살아 있는 스피너·승인 위젯·끊김 문구) — 정본(훅·기록·명부)이 없거나 어긋날 때만 판정을 바꾼다(조용한 열린 턴 6초 조기 닫기, 훅 죽었는데 도는 스피너, 훅 없는 하네스, 승인 위젯, 끊김). 화면으로 정본을 **대체**하지 마라
+- `native_board.rs` — 운영 보드(wgpu). 첫 탭 「할 일」은 자식 모듈 `native_board/work.rs`(B안: 답할 것 → 진행·검증·완료, 기기·학생, 상세의 출처·증거·연결)
+- `nacho_tasks.rs` — 나쵸 작업 장부의 타입 클라이언트(`/api/app/tasks`). 같은 id 는 큰 `rev` 하나, 끊기면 마지막 목록 유지, `done` 과 검증 통과를 가른다
 - `agent_transitions.rs` — 상태 전이 → 알림 이벤트(TurnDone/Waiting/Error/…) 순수 함수. 데스크톱 알림·토스트·펄스는 `chrome.rs apply_transition_event` 한 곳에서 낸다
 
 새 App 메서드 추가 시 도메인 맞는 모듈에. 다른 모듈/crate root 에서 호출되면 `pub(crate)`. 상세 [[reference_kasaterm_main_module_split]].

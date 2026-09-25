@@ -68,6 +68,12 @@ fn target() -> Result<Target, &'static str> {
     target_from(std::env::var("NACHO_ASK_URL").ok(), descriptor_path().as_deref(), key_path().as_deref())
 }
 
+/// 같은 기계의 데스크톱 화면(할 일 판)이 나쵸 앱 창구를 직접 부를 때의 자리와 키. 폰 중계와
+/// **같은** 서술자·키 파일이라야 두 화면이 같은 장부를 본다 — 따로 읽으면 한쪽만 옛 자리를 본다.
+pub fn app_target() -> Result<(String, String), &'static str> {
+    target().map(|t| (t.url, t.key))
+}
+
 /// `<rest>` 가 앱 창구 안의 경로인가. 점 조각(`..`)이나 이상한 글자로 `/api/app` 밖(`/api/ask`)을
 /// 가리키지 못하게 조각마다 본다.
 pub(crate) fn valid_rest(rest: &str) -> bool {
