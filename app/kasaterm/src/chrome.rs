@@ -3682,7 +3682,7 @@ impl App {
 
     /// Every unsaved editor that `action` would destroy, with the file name to
     /// show. Empty means nothing would be lost.
-    fn dirty_docs(&self, action: &PendingClose) -> Vec<(DirtyDoc, String)> {
+    pub(crate) fn dirty_docs(&self, action: &PendingClose) -> Vec<(DirtyDoc, String)> {
         let panes: Vec<String> = match action {
             PendingClose::Tab { pane, idx } => {
                 let ws = self.ws.lock().unwrap();

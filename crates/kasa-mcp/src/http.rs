@@ -7508,6 +7508,7 @@ pub fn spawn_http_server_opts(
                 let tell_backend = backend.clone();
                 let tell_status_backend = backend.clone();
                 let nacho_report_backend = backend.clone();
+                let restart_backend = backend.clone();
                 let events_backend = backend.clone();
                 let messages_backend = backend.clone();
                 let list_dir_backend = backend.clone();
@@ -7714,6 +7715,29 @@ pub fn spawn_http_server_opts(
                     }).layer(axum::extract::DefaultBodyLimit::max(24 * 1024)))
                     // 나쵸가 띄운 학생의 구조화 보고 — 다른 기계에서 넘어온 것도 여기서 그 기계
                     // 인박스에 놓인다(tell 과 같은 24 KiB 상한, 같은 인증·origin 가드).
+                    // 앱 재시작 — 이 기기의 사실과 작업 상태만 읽는다(다른 기기는 `/m/<route>/…` 로 온다).
+                    // 실행은 사람 승인 흐름이 생기기 전까지 받지 않는다 — 가짜 승인으로 통과할 길을 안 만든다.
+                    .route("/app/restart/facts", get(move || {
+                        let backend = restart_backend.clone();
+                        async move {
+                            match tokio::task::spawn_blocking(move || backend.restart_facts(None)).await {
+                                Ok(Ok(facts)) => Json(serde_json::to_value(facts).unwrap_or_default()).into_response(),
+                                Ok(Err(e)) => (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),
+                                Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                            }
+                        }
+                    }))
+                    .route("/app/restart/jobs/{id}", get(|AxPath(id): AxPath<String>| async move {
+                        let status = kasa_socket::app_restart::jobs_dir()
+                            .and_then(|dir| kasa_socket::app_restart::job_status(&dir, &id));
+                        match status {
+                            Ok(status) => Json(serde_json::to_value(status).unwrap_or_default()).into_response(),
+                            Err(e) => (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),
+                        }
+                    }))
+                    .route("/app/restart/jobs", post(|| async {
+                        (axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({"ok": false, "error": "approval_flow_unavailable"})))
+                    }))
                     .route("/nacho/report", post(move |Json(params): Json<serde_json::Value>| {
                         let backend = nacho_report_backend.clone();
                         nacho_report_post(backend, Json(params))

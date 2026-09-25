@@ -81,6 +81,7 @@ mod mirror_view;
 mod mirror_focus_probe;
 mod character_assignment;
 mod agent_identity;
+mod app_restart;
 mod restore_progress;
 mod mirror_close;
 mod close_grace;
@@ -3835,6 +3836,8 @@ enum UserEvent {
     /// 상태를 직접 못 봐(별 스레드) `SocketQueryPanePids` 패턴으로 질의: 응답은
     /// (윈도우 수, 활성 idx, [(name, cwd)] 라벨). arona-ui 좌측 방 네비가 쓴다.
     SocketQuerySessions(std::sync::mpsc::Sender<(usize, usize, Vec<(String, String)>)>),
+    /// 재시작 계획용 사실 — 바쁜 학생·미저장 편집기는 GUI 스레드만 안다.
+    SocketRestartFacts(std::sync::mpsc::Sender<kasa_socket::app_restart::Facts>),
     /// `POST /session-switch?idx=N` 위임 — 보이는 윈도우를 idx 로 전환(사용자: GUI 에서
     /// 방=윈도우 클릭 시 그 터미널 윈도우로). `switch_window` 가 resize·redraw 자체 처리.
     SocketSwitchSession(usize),

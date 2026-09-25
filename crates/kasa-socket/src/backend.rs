@@ -1116,6 +1116,16 @@ pub trait Backend: Send + Sync {
     fn compacting_panes(&self) -> Vec<(String, Option<u8>)> {
         Vec::new()
     }
+    /// 앱 재시작 계획용 사실(`app_restart::Facts`). `machine` 이 비었거나 이 기기면 스스로 재고,
+    /// 다른 기기면 명부의 그 기기에 묻는다. 기본은 미지원.
+    fn restart_facts(&self, _machine: Option<&str>) -> Result<crate::app_restart::Facts> {
+        anyhow::bail!("app restart facts are not supported by this backend")
+    }
+    /// 재시작 작업 상태. 이 기기 것은 작업 기록을 직접 읽는다.
+    fn restart_job(&self, machine: Option<&str>, job_id: &str) -> Result<crate::app_restart::JobStatus> {
+        anyhow::ensure!(machine.is_none(), "remote restart jobs are not supported by this backend");
+        crate::app_restart::job_status(&crate::app_restart::jobs_dir()?, job_id)
+    }
     /// Switch the visible session to index `idx`. Default unsupported.
     fn switch_session(&self, _idx: usize) -> Result<()> {
         anyhow::bail!("switch_session not supported")

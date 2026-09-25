@@ -189,6 +189,8 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.agent_status" => surface_agent_status(backend, id, &req.params),
         "surface.turn" => surface_turn(backend, id, &req.params),
         "nacho.report" => nacho_report(backend, id, &req.params),
+        "app.restart_facts" => app_restart_facts(backend, id, &req.params),
+        "app.restart_job" => app_restart_job(backend, id, &req.params),
         "clipboard.set" => clipboard_set(backend, id, &req.params),
         "clipboard.get" => clipboard_get(backend, id),
         "clipboard.list" => clipboard_list(backend, id),
@@ -557,6 +559,24 @@ fn nacho_report(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     }
     match backend.nacho_report(params) {
         Ok(receipt) => Response::success(id, receipt),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// 재시작 계획용 사실 — 읽기만 한다. 실행 메서드는 없다(사람 승인 흐름이 생기기 전까지).
+fn app_restart_facts(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    match backend.restart_facts(params.get("machine_id").and_then(|v| v.as_str())) {
+        Ok(facts) => Response::success(id, serde_json::to_value(facts).unwrap_or_default()),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn app_restart_job(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let Some(job_id) = params.get("job_id").and_then(|v| v.as_str()) else {
+        return param_err(id, "app.restart_job requires `job_id`");
+    };
+    match backend.restart_job(params.get("machine_id").and_then(|v| v.as_str()), job_id) {
+        Ok(status) => Response::success(id, serde_json::to_value(status).unwrap_or_default()),
         Err(e) => backend_err(id, e),
     }
 }

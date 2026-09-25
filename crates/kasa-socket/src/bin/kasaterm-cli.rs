@@ -175,6 +175,10 @@ fn run() -> Result<Option<Response>> {
     if cmd == "nacho-report" {
         return run_nacho_report(&args);
     }
+    // `app-restart` — 등록된 기기의 카사텀 앱 재시작 계획·상태. 실행은 사람 승인 흐름이 생기기 전까지 거부한다.
+    if cmd == "app-restart" {
+        return run_app_restart(&args);
+    }
     // `rooms` 는 board 를 방(창)별로 접어 사람이 읽는 표로 낸다 — 위임 상대를 고르는 자리.
     if cmd == "rooms" {
         let socket_path = resolve_socket_path()?;
@@ -1459,6 +1463,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli done [--surface <id>] <succeeded|failed> [한 줄 요약]  # 브리프 완료 보고 — board 가 idle 추정 대신 이걸 정본으로 싣는다");
     eprintln!("  kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> --summary <글> [--changed <파일,…>]… [--tests <글>] [--next <글>] [--dry-run]");
     eprintln!("                                            # 나쵸가 띄운 학생(KASATERM_ORIGIN=nacho)만. 나쵸 인박스에 원자적으로 넣고 살아 있으면 즉시 깨운다. 토큰·비밀은 거부");
+    eprintln!("  app-restart plan [--machine ID]… [--json] # 등록된 기기의 앱 재시작 계획(읽기만). status JOB · run 은 사람 승인 흐름 전까지 거부");
     eprintln!("  kasaterm-cli agent-status <start|end|clear> <subagent|background> [key] [라벨]  # 진행 표시 정본(PreToolUse/PostToolUse 훅)");
     eprintln!("  kasaterm-cli pet-say [--from <곳>] [--state busy|wait|error] <문안>  # 바탕화면 펫에게 한 줄(앱이 꺼져 있어도 쌓인다)");
     eprintln!("  kasaterm-cli sessions [N]                 # 최근 claude 세션 목록(캐릭터색·캐릭터명, /resume 이 숨기는 팀 세션 포함)");
@@ -2609,6 +2614,94 @@ fn nacho_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<String>
     }
     if dry_run { params["dry_run"] = json!(true); }
     Ok(params)
+}
+
+/// `app-restart plan [--machine ID]… [--json]` · `status JOB [--machine ID]` · `run …`(거부).
+/// 기기는 명부의 안정 id 로만 고른다 — 이 기기는 소켓으로, 다른 기기는 이 앱이 명부 경유로 묻는다.
+fn run_app_restart(args: &[String]) -> Result<Option<Response>> {
+    use kasa_socket::app_restart as restart;
+    let sub = args.first().map(String::as_str).unwrap_or("");
+    let mut machines: Vec<String> = Vec::new();
+    let mut json_out = false;
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 1;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "--machine" => {
+                let value = args.get(i + 1).ok_or_else(|| anyhow!("--machine needs a machine id"))?;
+                machines.extend(value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+                i += 2;
+            }
+            "--json" => { json_out = true; i += 1; }
+            other if other.starts_with("--") => return Err(anyhow!("app-restart: unknown option {other:?}")),
+            other => { positional.push(other.to_string()); i += 1; }
+        }
+    }
+    let socket = resolve_socket_path()?;
+    let ask = |method: &str, params: Value| -> std::result::Result<Value, String> {
+        let request = Request { id: json!(format!("cli-{}", std::process::id())), method: method.into(), params };
+        let response = roundtrip(&socket, &request).map_err(|e| e.to_string())?;
+        if !response.ok {
+            return Err(response.error.map(|e| e.message).unwrap_or_else(|| "request failed".into()));
+        }
+        Ok(response.result.unwrap_or(Value::Null))
+    };
+    let now = kasa_socket::board::now_ms();
+    match sub {
+        "plan" | "run" => {
+            let lookup = |id: &str| -> std::result::Result<restart::Facts, String> {
+                let params = if id.is_empty() { json!({}) } else { json!({"machine_id": id}) };
+                serde_json::from_value(ask("app.restart_facts", params)?).map_err(|e| format!("사실을 읽지 못했다: {e}"))
+            };
+            // 조종 기기는 이 앱이 스스로 대는 id 다 — 파일을 따로 읽으면 격리 리그·옛 판에서 어긋난다.
+            let local = lookup("").map_err(anyhow::Error::msg)?.machine_id;
+            anyhow::ensure!(!local.is_empty(), "이 앱이 자기 machine id 를 대지 못했다");
+            if machines.is_empty() { machines.push(local.clone()); }
+            let plan = restart::build_plan(&local, &machines, &lookup, now);
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else {
+                print!("{}", render_restart_plan(&plan));
+            }
+            if sub == "run" {
+                if let Err(e) = restart::check_approval(&plan, None, false, now) {
+                    eprintln!("app-restart run: {e}");
+                    std::process::exit(3);
+                }
+            }
+            Ok(None)
+        }
+        "status" => {
+            let job = positional.first().ok_or_else(|| anyhow!("app-restart status needs a job id"))?;
+            let value = ask("app.restart_job", json!({"job_id": job, "machine_id": machines.first()})).map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(None)
+        }
+        _ => Err(anyhow!("app-restart plan [--machine ID]… [--json] | status JOB [--machine ID] | run (사람 승인 흐름 전까지 거부)")),
+    }
+}
+
+fn render_restart_plan(plan: &kasa_socket::app_restart::Plan) -> String {
+    let mut out = format!("재시작 계획 {} · {}분 유효 · 순서대로 한 대씩(조종 기기는 마지막)\n", plan.hash, kasa_socket::app_restart::PLAN_TTL_MS / 60_000);
+    for (n, target) in plan.targets.iter().enumerate() {
+        let name = if target.label.is_empty() { target.machine_id.clone() } else { format!("{} ({})", target.label, target.machine_id) };
+        out.push_str(&format!("{}. {}{}\n", n + 1, name, if target.controller { " · 조종 기기" } else { "" }));
+        if let Some(f) = &target.facts {
+            out.push_str(&format!(
+                "   pid {} · 빌드 {} · 이어지는 학생 대화 {} · 새 셸로만 오는 창 {} · 등록 서버 {} · 펫 {}\n",
+                f.pid, f.binary.build, f.restorable_sessions, f.plain_shells, f.registered_servers,
+                match f.pet_alive { Some(true) => "켜짐", Some(false) => "꺼짐", None => "모름" },
+            ));
+        }
+        if target.refusals.is_empty() {
+            out.push_str("   재시작 가능\n");
+        }
+        for refusal in &target.refusals {
+            out.push_str(&format!("   거부 · {}\n", refusal.message()));
+        }
+    }
+    out.push_str(if plan.runnable() { "모든 기기 가능 — 실행은 사람 승인 흐름이 생기기 전까지 꺼져 있다\n" } else { "거부 사유가 있어 실행할 수 없다\n" });
+    out
 }
 
 /// 이 창의 판 주소 UUID. 창 번호(`%N`)는 재사용되므로 나쵸는 이것으로 등록 줄을 찾는다.

@@ -896,6 +896,10 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = reply.send(pids);
                 return;
             }
+            UserEvent::SocketRestartFacts(reply) => {
+                let _ = reply.send(self.restart_facts());
+                return;
+            }
             UserEvent::SocketQuerySessions(reply) => {
                 // 방=윈도우 목록. 라벨(name, cwd)은 refresh_window_labels 가 채운다.
                 self.refresh_window_labels();

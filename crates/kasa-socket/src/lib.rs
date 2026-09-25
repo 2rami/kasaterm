@@ -33,6 +33,7 @@ pub mod transport;
 pub mod transfer;
 pub mod tell;
 pub mod nacho_inbox;
+pub mod app_restart;
 
 pub use backend::{Backend, SplitDirection};
 pub use protocol::{ErrorObj, Request, Response};

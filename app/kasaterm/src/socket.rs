@@ -918,6 +918,28 @@ impl Backend for PtyBackend {
 
     /// 로컬 PTY 모드의 '방' = App 윈도우. GUI 스레드에 질의해(별 스레드라 직접 못 봄)
     /// 윈도우 수·활성 idx·라벨을 받는다. arona-ui 좌측 방 네비가 폴링한다(사용자).
+    fn restart_facts(&self, machine: Option<&str>) -> Result<kasa_socket::app_restart::Facts> {
+        match restart_remote(machine)? {
+            None => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.proxy
+                    .send_event(UserEvent::SocketRestartFacts(tx))
+                    .map_err(|_| anyhow::anyhow!("app event loop is gone"))?;
+                rx.recv_timeout(std::time::Duration::from_secs(2))
+                    .map_err(|_| anyhow::anyhow!("app did not answer restart facts in time"))
+            }
+            Some(base) => Ok(serde_json::from_value(kasa_mcp::remote::remote_get_json(&base, "/app/restart/facts")?)?),
+        }
+    }
+
+    fn restart_job(&self, machine: Option<&str>, job_id: &str) -> Result<kasa_socket::app_restart::JobStatus> {
+        anyhow::ensure!(kasa_socket::app_restart::valid_job_id(job_id), "invalid job id");
+        match restart_remote(machine)? {
+            None => kasa_socket::app_restart::job_status(&kasa_socket::app_restart::jobs_dir()?, job_id),
+            Some(base) => Ok(serde_json::from_value(kasa_mcp::remote::remote_get_json(&base, &format!("/app/restart/jobs/{job_id}"))?)?),
+        }
+    }
+
     fn sessions(&self) -> SessionsInfo {
         let (tx, rx) = std::sync::mpsc::channel();
         if self
@@ -7032,6 +7054,19 @@ fn scan_projects_for_session(projects: &std::path::Path, sid: &str) -> Option<st
 ///
 /// uuid 는 `-` 를 품으므로 뒤에서 5토막을 떼어 붙인다(8-4-4-4-12). 타임스탬프도 `-` 를
 /// 품어 앞에서 세는 방식은 못 쓴다.
+/// 재시작 대상 기기의 HTTP 자리. 이 기기면 `None`, 다른 기기면 명부에 등록된 그 기기의 base —
+/// 명부 밖 호스트나 임의 주소는 받지 않는다.
+fn restart_remote(machine: Option<&str>) -> Result<Option<String>> {
+    let Some(id) = machine.map(str::trim).filter(|id| !id.is_empty()) else { return Ok(None) };
+    if kasa_mcp::board_service::local_id().ok().as_deref() == Some(id) {
+        return Ok(None);
+    }
+    anyhow::ensure!(id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "machine id must be a registered stable id");
+    let machine = kasa_mcp::machines::find_route(&format!("~{id}"))
+        .ok_or_else(|| anyhow::anyhow!("machine {id} is not registered on this device"))?;
+    Ok(Some(machine.base))
+}
+
 pub(crate) fn codex_sid_from_rollout(path: &std::path::Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     let rest = stem.strip_prefix("rollout-")?;
