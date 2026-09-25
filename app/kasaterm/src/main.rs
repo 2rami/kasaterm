@@ -10789,16 +10789,27 @@ mod tests {
                 mark = mark.display().to_string()
             );
             write_shim(&path, script.as_bytes()).unwrap();
-            let child = std::process::Command::new(&path)
+            let mut child = std::process::Command::new(&path)
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
                 .spawn()
                 .unwrap();
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while !mark.exists() && std::time::Instant::now() < deadline {
+            // 자식이 첫 줄에 닿기까지는 기계 부하에 달렸다(검사 여섯 벌을 함께 돌리면 1.8초,
+            // 빌드가 겹친 날은 10초를 넘겨 이 자리에서 떨어졌다). 그래서 시계로 재지 않고
+            // **자식이 살아 있는지**로 가른다 — 표식 없이 끝났으면 셰임이 못 돈 것이니 바로
+            // 실패, 살아 있으면 기다린다. 상한은 매달림을 끊는 용도일 뿐이다.
+            let waited = std::time::Instant::now();
+            while !mark.exists() {
+                if let Some(status) = child.try_wait().unwrap() {
+                    if mark.exists() {
+                        break;
+                    }
+                    let out = child.wait_with_output().unwrap();
+                    panic!("자식이 셰임을 실행하지 못했다: {status} · {}", String::from_utf8_lossy(&out.stderr).trim());
+                }
+                assert!(waited.elapsed() < Duration::from_secs(60), "자식이 60초 동안 셰임 첫 줄에 닿지 못했다");
                 std::thread::sleep(Duration::from_millis(5));
             }
-            assert!(mark.exists(), "자식이 셰임을 실행하지 못했다");
             swap(&path);
             let out = child.wait_with_output().unwrap();
             let _ = std::fs::remove_dir_all(&dir);
