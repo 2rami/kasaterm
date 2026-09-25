@@ -7,6 +7,7 @@ import '../nacho.dart';
 import '../server.dart';
 import 'hub.dart';
 import 'nacho_task.dart';
+import 'nacho_typing.dart';
 
 /// 카사모바일 첫 화면 — 나쵸와의 대화와, 그 대화에서 맡은 일의 목록.
 ///
@@ -342,7 +343,6 @@ class _NachoChatState extends State<NachoChat> {
               text: e.text,
               state: state,
               note: desk.noteOf(id),
-              progress: state == 'running' ? desk.progressOf(id) : null,
               direction: e.task != null,
               origin: e.origin,
             ),
@@ -376,6 +376,17 @@ class _NachoChatState extends State<NachoChat> {
         ),
       );
     }
+    final awaiting = desk.awaiting;
+    if (awaiting != null) {
+      out.add(
+        NachoTyping(
+          key: const ValueKey('nacho-typing'),
+          progress: desk.stateOf(awaiting) == 'running'
+              ? desk.progressOf(awaiting)
+              : null,
+        ),
+      );
+    }
     return out;
   }
 }
@@ -403,7 +414,6 @@ class _UserBubble extends StatelessWidget {
     required this.text,
     required this.state,
     this.note = '',
-    this.progress,
     this.direction = false,
     this.onRetry,
     this.origin,
@@ -412,7 +422,6 @@ class _UserBubble extends StatelessWidget {
   final String text;
   final String state;
   final String note;
-  final String? progress;
   final bool direction;
   final VoidCallback? onRetry;
   final String? origin;
@@ -421,10 +430,11 @@ class _UserBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final bad = const {'failed', 'refused', 'interrupted', 'unsent'}.contains(state);
+    // 도는 중은 나쵸 자리의 점이 말한다 — 같은 뜻을 내 말 밑에 한 번 더 적지 않는다.
     final meta = [
       ?origin,
       if (direction) '방향 수정',
-      receiptLabel(state),
+      if (state != 'running') receiptLabel(state),
       if (note.isNotEmpty && bad) note,
     ].join(' · ');
     return Align(
@@ -445,28 +455,20 @@ class _UserBubble extends StatelessWidget {
                 style: TextStyle(color: scheme.onPrimary, fontSize: 15, height: 1.35),
               ),
             ),
-            const SizedBox(height: 3),
-            GestureDetector(
-              onTap: onRetry,
-              child: Text(
-                meta,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: bad ? scheme.error : scheme.onSurfaceVariant,
-                  decoration: onRetry == null ? null : TextDecoration.underline,
-                ),
-              ),
-            ),
-            if (progress != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
+            if (meta.isNotEmpty) ...[
+              const SizedBox(height: 3),
+              GestureDetector(
+                onTap: onRetry,
                 child: Text(
-                  progress!,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+                  meta,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: bad ? scheme.error : scheme.onSurfaceVariant,
+                    decoration: onRetry == null ? null : TextDecoration.underline,
+                  ),
                 ),
               ),
+            ],
           ],
         ),
       ),

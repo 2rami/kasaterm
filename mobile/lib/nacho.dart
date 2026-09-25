@@ -402,6 +402,31 @@ class NachoDesk extends ChangeNotifier {
     return '';
   }
 
+  /// 서버가 받아 두었고 아직 끝나지 않은 상태 — 이 동안 나쵸 자리에 「답하는 중」 점을 띄운다.
+  static const answeringStates = {'accepted', 'queued', 'running'};
+
+  /// 나쵸가 지금 답을 만들고 있는 말의 id. 없으면 null — 점은 이 하나로만 띄운다.
+  ///
+  /// 첫 답(`reply`)이 오거나 끝 상태(답함·실패·거절·끊김·재시작)가 되면 내린다. 나쵸는 말을 받은
+  /// 차례대로 하나씩 도므로, 뒤에 보낸 말이 이미 답을 받았으면 그 앞의 말도 끝난 것이다 — 서버가
+  /// 끝 상태를 못 적고 죽은 옛 말이 점을 영영 붙잡지 않게 한다.
+  String? get awaiting {
+    for (final o in _outbox.values) {
+      if (answeringStates.contains(o.state)) return o.id;
+    }
+    final replied = <String>{
+      for (final e in events)
+        if (e.kind == 'reply' && e.message != null) e.message!,
+    };
+    for (final e in events.reversed) {
+      if (e.kind != 'message' || e.id == null) continue;
+      final id = e.id!;
+      if (replied.contains(id)) return null;
+      return answeringStates.contains(stateOf(id)) ? id : null;
+    }
+    return null;
+  }
+
   /// 그 말이 도는 동안의 마지막 진행 한 줄.
   String? progressOf(String id) {
     for (final e in events.reversed) {
