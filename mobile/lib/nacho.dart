@@ -263,6 +263,11 @@ class NachoDesk extends ChangeNotifier {
   bool _disposed = false;
 
   static const pollWait = 25;
+  static const pageRows = 500;
+  static const tailRows = 200;
+
+  /// 한 번에 넘길 페이지 상한 — 끝없이 도는 서버 오류를 막는 안전판. 넘으면 다음 바퀴가 이어 받는다.
+  static const maxDrainPages = 40;
 
   Future<void> start() async {
     if (_running) return;
@@ -279,19 +284,33 @@ class NachoDesk extends ChangeNotifier {
     _gen++;
   }
 
+  /// 검사용 — 그 커서에서 한 번 따라잡는다.
+  @visibleForTesting
+  Future<void> catchUpForTest({required int after}) {
+    lastSeq = after;
+    loaded = true;
+    return _catchUp();
+  }
+
+  /// 처음 붙을 때만 최근 [tailRows] 줄(그 앞은 일부러 안 받는다). 그 뒤로는 커서 뒤를 **다 받을 때까지**
+  /// 페이지를 넘긴다 — 끊겨 있던 동안 쌓인 줄이 한 페이지를 넘어도 빠지지 않게.
   Future<void> _catchUp() async {
     try {
-      final (status, j) = lastSeq == 0
-          ? await server.nacho('events', query: {'tail': '200'})
-          : await server.nacho(
-              'events',
-              query: {'after': '$lastSeq', 'limit': '500'},
-            );
-      if (status != 200) {
-        _fail(_why(j['error'] as String? ?? '$status', j));
-        return;
+      var first = !loaded && lastSeq == 0;
+      for (var page = 0; page < maxDrainPages; page++) {
+        final (status, j) = first
+            ? await server.nacho('events', query: {'tail': '$tailRows'})
+            : await server.nacho(
+                'events',
+                query: {'after': '$lastSeq', 'limit': '$pageRows'},
+              );
+        first = false;
+        if (status != 200) {
+          _fail(_why(j['error'] as String? ?? '$status', j));
+          return;
+        }
+        if (!_absorb(j).more) return;
       }
-      _absorb(j);
     } on ServerException catch (e) {
       _fail(e.message);
     }
@@ -299,11 +318,13 @@ class NachoDesk extends ChangeNotifier {
 
   Future<void> _loop(int gen) async {
     var backoff = 1;
+    var more = false;
     while (_running && gen == _gen && !_disposed) {
       try {
+        // 더 받을 것이 남았으면 기다리지 않고 바로 다음 페이지를 받는다.
         final (status, j) = await server.nacho(
           'events',
-          query: {'after': '$lastSeq', 'wait': '$pollWait', 'limit': '500'},
+          query: {'after': '$lastSeq', 'wait': more ? '0' : '$pollWait', 'limit': '$pageRows'},
           timeout: const Duration(seconds: pollWait + 15),
         );
         if (gen != _gen) return;
@@ -314,7 +335,9 @@ class NachoDesk extends ChangeNotifier {
           continue;
         }
         backoff = 1;
-        if (_absorb(j)) unawaited(loadTasks());
+        final got = _absorb(j);
+        more = got.more;
+        if (got.added) unawaited(loadTasks());
       } on ServerException catch (e) {
         if (gen != _gen) return;
         _fail(e.message);
@@ -330,25 +353,34 @@ class NachoDesk extends ChangeNotifier {
     _notify();
   }
 
-  /// 새 줄을 받았으면 true. 같은 순번은 두 번 안 넣는다(재접속이 겹쳐도).
-  bool _absorb(Map<String, Object?> j) {
+  /// 한 페이지를 넣는다. 같은 순번은 두 번 안 넣는다(재접속이 겹쳐도).
+  ///
+  /// ★커서는 **이 페이지에서 실제로 받은 마지막 순번**까지만 전진한다. 서버가 알려 주는 원장 끝
+  /// (`head_seq`, 옛 서버의 `last_seq`)으로 뛰면 한 번에 못 받은 나머지가 통째로 빠진다(2026-09-25 검수:
+  /// 500개를 넘게 밀린 채 다시 붙으면 첫 500개 뒤로 끝까지 건너뛰었다).
+  ({bool added, bool more}) _absorb(Map<String, Object?> j) {
     var added = false;
-    for (final raw in (j['events'] as List? ?? const [])) {
+    var pageLast = 0;
+    final page = j['events'] as List? ?? const [];
+    for (final raw in page) {
       if (raw is! Map) continue;
       final e = NachoEvent.fromJson(raw.cast<String, Object?>());
+      pageLast = math.max(pageLast, e.seq);
       if (e.seq <= 0 || !_seen.add(e.seq)) continue;
       events.add(e);
       added = true;
       if (e.kind == 'message' && e.id != null) _outbox.remove(e.id);
     }
     if (added) events.sort((a, b) => a.seq.compareTo(b.seq));
-    final last = (j['last_seq'] as num?)?.toInt() ?? 0;
-    lastSeq = math.max(lastSeq, math.max(last, events.isEmpty ? 0 : events.last.seq));
+    lastSeq = math.max(lastSeq, pageLast);
+    // 더 받을 것이 있나 — 서버가 말해 주면 그대로, 말이 없는 옛 서버면 페이지가 꽉 찼는지로.
+    final hasMore = j['has_more'];
+    final more = hasMore is bool ? hasMore : page.length >= pageRows;
     online = true;
     problem = null;
     loaded = true;
     _notify();
-    return added;
+    return (added: added, more: more);
   }
 
   /// 그 말의 지금 상태 — 원장의 마지막 status, 아직 원장에 없으면 보내는 쪽 상태.

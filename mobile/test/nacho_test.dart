@@ -20,6 +20,11 @@ class FakeNacho extends Server {
   Completer<void>? hold;
   List<Map<String, Object?>> pets = [];
   String? linked;
+  final List<int> pages = [];
+  void Function()? onPage;
+
+  /// 옛 서버처럼 last_seq 에 원장 끝을 싣는다 — 클라이언트가 그걸 믿고 건너뛰는지 본다.
+  bool legacyHead = false;
 
   int get lastSeq => ledger.isEmpty ? 0 : ledger.last['seq'] as int;
 
@@ -40,10 +45,16 @@ class FakeNacho extends Server {
       }
       final after = int.tryParse(query?['after'] ?? '') ?? 0;
       final tail = int.tryParse(query?['tail'] ?? '');
+      final limit = int.tryParse(query?['limit'] ?? '') ?? 200;
+      // 서버(appdesk.window/tail)와 같은 계약 — 한 번에 limit 개까지, 커서는 돌려준 마지막 줄.
       final evs = tail != null
           ? ledger.skip(ledger.length > tail ? ledger.length - tail : 0).toList()
-          : [for (final e in ledger) if ((e['seq'] as int) > after) e];
-      return (200, {'ok': true, 'events': evs, 'last_seq': lastSeq});
+          : [for (final e in ledger) if ((e['seq'] as int) > after) e].take(limit).toList();
+      final next = evs.isEmpty ? (tail != null ? 0 : after) : evs.last['seq'] as int;
+      pages.add(evs.length);
+      onPage?.call();
+      return (200, {'ok': true, 'events': evs, 'head_seq': lastSeq, 'next_after': next,
+        'has_more': next < lastSeq, 'last_seq': legacyHead ? lastSeq : next});
     }
     if (path == 'messages') {
       if (dropNextPosts > 0) {
@@ -130,6 +141,61 @@ void main() {
       expect(receiptLabel('queued'), '앞 턴이 끝나면 이어서');
       d.stop();
       s.hold?.complete();
+    });
+  });
+
+  group('밀린 원장 이어 받기', () {
+    List<int> seqs(NachoDesk d) => d.events.map((e) => e.seq).toList();
+
+    test('끊긴 동안 1001건 밀려도 전부 — 받은 데까지만 전진하고 남은 것은 바로 더 받는다', () async {
+      final s = FakeNacho()..add({'kind': 'message', 'id': 'first', 'text': '처음'});
+      final d = NachoDesk(s);
+      await d.start();                       // tail 로 처음 붙는다
+      d.stop();
+      s.hold?.complete();
+      for (var i = 0; i < 1001; i++) {
+        s.add({'kind': 'progress', 'message': 'x', 'text': 'b$i'});
+      }
+      var added = 0;
+      s.onPage = () {                         // 받는 도중에 새 줄이 붙는다
+        if (added < 7 && s.pages.length > 2) {
+          added++;
+          s.add({'kind': 'progress', 'message': 'late', 'text': 'l$added'});
+        }
+      };
+      await d.start();                        // 다시 붙는다 — 커서 뒤부터
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(seqs(d), List.generate(s.lastSeq, (i) => i + 1), reason: '빠짐·겹침 없이 전부');
+      expect(d.lastSeq, s.lastSeq);
+      d.stop();
+      s.hold?.complete();
+    });
+
+    test('옛 서버가 last_seq 에 원장 끝을 실어도 받은 데를 넘어 건너뛰지 않는다', () async {
+      final s = FakeNacho()..legacyHead = true;
+      for (var i = 0; i < 1200; i++) {
+        s.add({'kind': 'progress', 'message': 'x', 'text': 'b$i'});
+      }
+      final d = NachoDesk(s)..lastSeq = 0;
+      await d.catchUpForTest(after: 0);
+      expect(seqs(d).length, 1200);
+      expect(seqs(d), List.generate(1200, (i) => i + 1));
+    });
+
+    test('빈 페이지·재접속 반복에서 같은 줄을 다시 넣지 않고 커서도 안 뒤로 간다', () async {
+      final s = FakeNacho();
+      for (var i = 0; i < 3; i++) {
+        s.add({'kind': 'progress', 'message': 'x', 'text': 'a$i'});
+      }
+      final d = NachoDesk(s);
+      for (var i = 0; i < 4; i++) {
+        await d.start();
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        d.stop();
+        s.hold?.complete();
+      }
+      expect(seqs(d), [1, 2, 3]);
+      expect(d.lastSeq, 3);
     });
   });
 

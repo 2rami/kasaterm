@@ -189,7 +189,7 @@ kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> \
 
 | 경로 | 뜻 |
 |---|---|
-| `GET events?tail=N` · `GET events?after=<seq>&wait=<초>` | 대화 원장. 순번(seq)으로 이어 받는다 — 끊겼다 붙어도 빠짐·겹침이 없다 |
+| `GET events?tail=N` · `GET events?after=<seq>&limit=&wait=<초>` | 대화 원장. 순번(seq)으로 이어 받는다. 응답의 `next_after`(실제로 돌려준 마지막 순번)까지만 전진하고 `has_more` 면 곧바로 다시 묻는다 — 원장 끝(`head_seq`)으로 건너뛰면 한 페이지를 넘게 밀린 줄이 빠진다. `tail` 은 처음 붙을 때 최근 N 줄만(`truncated_before`), 그 뒤는 빠짐 없이 이어진다. `last_seq` 는 옛 이름으로 `next_after` 와 같다 |
 | `POST messages {id, text, task?, rev?}` | 한 말. 같은 id·같은 내용은 처음 영수증, 내용이 다르면 409. `task` 가 있으면 그 일에 대한 방향 수정이고, 싣는 `rev` 가 지금 판과 다르면 409(`stale_rev`) |
 | `GET tasks` · `GET tasks/<id>` | 작업 장부 그대로 — 판단 필요·진행 중·끝남/실패, 프로젝트(학생 작업 폴더). 없는 검증·사진은 비어 온다 |
 | `GET tasks/<id>/shot` · `GET files/<seq>/<i>` | 나쵸가 실제로 찍은 결과 사진·답에 붙은 그림(원장에 적힌 경로만) |
