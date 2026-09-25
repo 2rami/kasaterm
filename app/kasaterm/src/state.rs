@@ -101,6 +101,10 @@ pub(crate) struct StatusbarState {
     pub(crate) clip_menu: Option<(u64, f32, f32)>,
     /// 펫 칩 — 바탕화면 캐릭터를 켜고 끈다.
     pub(crate) pet_rect: Option<(f32, f32, f32, f32)>,
+    /// 도구 칩이 직전 프레임에 실제로 쓴 폭. 오른쪽 칩은 왼쪽 칩들 몫을 남기고
+    /// 나머지를 쓰는데, 그 몫을 칸 전체로 잡으면 숫자 하나짜리 칩 때문에 가운데가
+    /// 빈 채로 판 번호·기기 이름이 잘린다.
+    pub(crate) tool_used: std::collections::HashMap<String, f32>,
     /// 물리 메모리 압박 — 위의 `res` 와 **다른 것을 잰다**. `res` 는 우리 트리가
     /// 쓰는 양이라 앱을 닫으면 돌아오고, 이쪽은 기계 전체에서 **안 돌아오는**
     /// 몫이다. 그래서 재시작을 권하는 근거는 이쪽뿐이다(2026-08-27 지시).

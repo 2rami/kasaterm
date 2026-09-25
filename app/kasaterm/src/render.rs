@@ -9767,15 +9767,32 @@ impl App {
                 g.pop_clip();
                 // 양끝 그룹이 같은 폭을 서로 예약하지 않도록 각 도구의 공간을 먼저 나눈다.
                 let tool_left = account_right + 12.0;
-                let slot_w = ((win_w - 12.0 - tool_left) / widget_count as f32).max(1.0);
+                let fair_w = ((win_w - 12.0 - tool_left) / widget_count as f32).max(1.0);
+                // 칩 하나가 이번에 쓸 수 있는 폭. 아래 두 루프가 칩마다 다시 정한다.
+                let mut slot_w: f32;
+                // 아직 안 그린 칩들 몫의 합. 칩마다 직전 프레임에 실제로 쓴 폭만 잡는다.
+                let mut later_reserve: f32 = status_prefs
+                    .order
+                    .iter()
+                    .filter(|id| statusbar_tool_weight(id) > 0.0)
+                    .filter(|id| status_prefs.visible(id))
+                    .map(|id| {
+                        statusbar_tool_reserve(
+                            self.statusbar.tool_used.get(id.as_str()).copied(),
+                            fair_w * statusbar_tool_weight(id),
+                        )
+                    })
+                    .sum();
                 // 오른쪽 끝에서 왼쪽으로 자라는 자들의 공통 기준선. 판 번호가
                 // 이 끝을 먼저 먹고, 터널 스위치와 나머지 칩이 그 왼쪽으로 선다.
                 let right_edge = win_w - 12.0;
                 // 칩 사이 간격. 12 로는 아이콘·글자가 서로 붙어 어디까지가 한 칩인지
                 // 눈으로 안 갈렸다(2026-09-07 지적 「간격이 너무 없어서」).
-                let chip = 12.0_f32.min(slot_w * 0.2);
-                let tool_icon = 12.0_f32.min((slot_w - chip - 2.0).max(1.0));
-                let mut rx = right_edge;
+                let chip = 12.0_f32.min(fair_w * 0.2);
+                let tool_icon = 12.0_f32.min((fair_w - chip - 2.0).max(1.0));
+                // 칩은 저마다 오른쪽에 `chip` 간격을 달고 선다. 맨 오른쪽 칩의 그 간격을
+                // 바깥 여백 자리에 겹쳐야 오른쪽 끝이 왼쪽 계정 줄과 같은 12 에 선다.
+                let mut rx = right_edge + chip;
                 self.status_version_rect = None;
                 self.statusbar.tunnel_rect = None;
                 self.statusbar.link_rect = None;
@@ -9804,7 +9821,7 @@ impl App {
                         let icon_col = crate::machinescol::status_links_tint(&links).unwrap_or(col);
                         let text = crate::info::fit_text(g, &text, (slot_w - 24.0).max(0.0), fs, false);
                         let w = g.measure_chrome_text(&text, fs, false);
-                        rx -= w + icon + gap + 14.0;
+                        rx -= w + icon + gap + chip;
                         g.queue_icon("monitor", rx, sy + (status_h - icon) / 2.0, icon, icon_col);
                         g.draw_text(rx + icon + gap, ty, &text,
                             gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false });
@@ -9853,7 +9870,7 @@ impl App {
                         }
                         let s_ver = crate::info::fit_text(g, &s_ver, (slot_w - 21.0).max(0.0), fs, false);
                         let w = g.measure_chrome_text(&s_ver, fs, true);
-                        rx -= w + 14.0;
+                        rx -= w + chip;
                         g.draw_text(
                             rx,
                             ty,
@@ -9877,7 +9894,7 @@ impl App {
                         // 눌러서 여는 곳은 그대로 계정 드롭다운이다 — 몇 커밋 앞인지는
                         // 거기 있고, 자리를 옮겼다고 그 동선까지 잃으면 판 번호는
                         // 읽을 수만 있고 캐물을 수 없는 글자가 된다.
-                        let vr = (rx - 7.0, sy, w + 14.0, status_h);
+                        let vr = (rx - chip / 2.0, sy, w + chip, status_h);
                         {
                             let (hx, hy) = self.cursor_px;
                             g.hover_pointer |=
@@ -10155,6 +10172,7 @@ impl App {
                     }
                         }};
                     }
+                    let device_right = rx;
                     for id in status_prefs
                         .order
                         .iter()
@@ -10163,7 +10181,16 @@ impl App {
                         .filter(|id| status_prefs.visible(id))
                     {
                         let slot_right = rx;
-                        let allocated = slot_w * if id == "tunnel" { 2.0 } else { 1.0 };
+                        let weight = statusbar_tool_weight(id);
+                        let share = fair_w * weight;
+                        later_reserve -= statusbar_tool_reserve(
+                            self.statusbar.tool_used.get(id.as_str()).copied(),
+                            share,
+                        );
+                        let allocated =
+                            statusbar_slot_cap(rx - tool_left, share, later_reserve.max(0.0));
+                        // 터널은 모바일·브라우저 두 칩이 칸을 반씩 나눠 쓴다.
+                        slot_w = allocated / weight;
                         g.push_clip(slot_right - allocated, sy, allocated, status_h);
                         match id.as_str() {
                             "resources" => draw_resources_widget!(),
@@ -10177,15 +10204,20 @@ impl App {
                         self.statusbar.chrome_rect = self.statusbar.chrome_rect.and_then(|r| if id == "tunnel" { g.clip_hit(r) } else { Some(r) });
                         self.statusbar.res_rect = self.statusbar.res_rect.and_then(|r| if id == "resources" { g.clip_hit(r) } else { Some(r) });
                         g.pop_clip();
-                        rx = slot_right - allocated;
+                        rx = statusbar_next_right(slot_right, rx, allocated);
+                        self.statusbar.tool_used.insert(id.clone(), slot_right - rx);
                     }
-                    let has_device = ["resources", "tunnel", "version"]
-                        .iter()
-                        .any(|id| status_prefs.visible(id));
+                    // 기기 칩이 실제로 섰는지는 켜 둔 설정이 아니라 `rx` 가 움직였는지로
+                    // 본다 — 값이 아직 없는 칩은 이제 자리를 안 먹으므로 설정만 보면 빈
+                    // 자리 옆에 선만 남는다.
+                    let has_device = rx < device_right;
                     let has_work = ["ports", "pet", "clipboard"]
                         .iter()
                         .any(|id| status_prefs.visible(id));
                     if status_prefs.separators && has_device && has_work {
+                        // 선 오른쪽에도 칩 사이와 같은 간격을 둔다. 왼쪽 간격은 다음 칩이
+                        // 스스로 달고 온다.
+                        rx -= chip;
                         g.rect(
                             rx,
                             sy + 6.0,
@@ -10404,6 +10436,12 @@ impl App {
                         .filter(|id| status_prefs.visible(id))
                     {
                         let slot_right = rx;
+                        later_reserve -= statusbar_tool_reserve(
+                            self.statusbar.tool_used.get(id.as_str()).copied(),
+                            fair_w,
+                        );
+                        slot_w =
+                            statusbar_slot_cap(rx - tool_left, fair_w, later_reserve.max(0.0));
                         g.push_clip(slot_right - slot_w, sy, slot_w, status_h);
                         match id.as_str() {
                             "ports" => draw_ports_widget!(),
@@ -10417,7 +10455,8 @@ impl App {
                         self.statusbar.pet_rect = self.statusbar.pet_rect.and_then(|r| if id == "pet" { g.clip_hit(r) } else { Some(r) });
                         self.statusbar.clip_rect = self.statusbar.clip_rect.and_then(|r| if id == "clipboard" { g.clip_hit(r) } else { Some(r) });
                         g.pop_clip();
-                        rx = slot_right - slot_w;
+                        rx = statusbar_next_right(slot_right, rx, slot_w);
+                        self.statusbar.tool_used.insert(id.clone(), slot_right - rx);
                     }
 
                 // 팝오버는 상태줄 **뒤**다 — 같은 자리 위로 떠야 하고, 칩을 그린
@@ -14067,6 +14106,36 @@ fn codex_statusbar_visible(win_w: f32, logged_in: bool, configured: bool) -> boo
     win_w >= 720.0 && (logged_in || configured)
 }
 
+/// 하단바 도구 칩 하나를 그린 뒤 다음 칩이 설 오른쪽 끝. 칸(`allocated`)은 칩이 옆
+/// 칩을 침범하지 않게 막는 **상한**일 뿐이다 — 칸 끝으로 건너뛰면 짧은 칩마다 남은
+/// 칸이 빈 틈이 되어 줄이 띄엄띄엄해진다(2026-09-25, 1200 창에서 틈 71~97px).
+/// 값이 없어 아무것도 안 그린 칩은 자리를 먹지 않는다.
+fn statusbar_next_right(slot_right: f32, drawn_left: f32, allocated: f32) -> f32 {
+    drawn_left.max(slot_right - allocated)
+}
+
+/// 하단바 도구 칩이 차지하는 칸 수. 도구가 아닌 것(계정)은 0.
+fn statusbar_tool_weight(id: &str) -> f32 {
+    match id {
+        "tunnel" => 2.0,
+        "resources" | "link" | "version" | "ports" | "schedules" | "pet" | "clipboard" => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// 아직 안 그린 칩을 위해 남겨 둘 폭 — 직전 프레임에 실제로 쓴 폭, 처음 보는 칩은
+/// 제 몫(`share`) 통째. 제 몫을 넘겨 잡지는 않는다.
+fn statusbar_tool_reserve(last_used: Option<f32>, share: f32) -> f32 {
+    last_used.map_or(share, |w| w.min(share))
+}
+
+/// 이번 칩이 쓸 수 있는 폭. 아직 안 그린 칩들 몫(`later_reserve`)만 남기고 나머지는
+/// 이번 칩 차지다 — 숫자 하나짜리 칩에 칸을 통째로 남겨 두면 가운데가 빈 채로 기기
+/// 이름·판 번호가 「…」로 잘린다. 제 몫(`share`)보다 적게 받는 칩은 없다.
+fn statusbar_slot_cap(room: f32, share: f32, later_reserve: f32) -> f32 {
+    (room - later_reserve).max(share)
+}
+
 fn codex_account_name(id: &str, accounts: &[crate::socket::CodexAccount]) -> String {
     match accounts.iter().position(|account| account.id == id) {
         Some(index) => crate::settings::codex_account_display(
@@ -14170,6 +14239,32 @@ mod tests {
         assert!(codex_statusbar_visible(720.0, false, true));
         assert!(!codex_statusbar_visible(719.0, true, true));
         assert!(!codex_statusbar_visible(1200.0, false, false));
+    }
+
+    #[test]
+    fn statusbar_tools_advance_by_drawn_width_not_slot() {
+        // 88 칸에 30 짜리 칩: 다음 칩은 칩 바로 옆에 선다.
+        assert_eq!(statusbar_next_right(1000.0, 970.0, 88.0), 970.0);
+        // 아무것도 안 그린 칩은 자리를 안 먹는다.
+        assert_eq!(statusbar_next_right(1000.0, 1000.0, 88.0), 1000.0);
+        // 칸보다 넓게 그렸어도 칸 밖으로는 안 민다.
+        assert_eq!(statusbar_next_right(1000.0, 880.0, 88.0), 912.0);
+    }
+
+    #[test]
+    fn statusbar_tools_reserve_only_what_later_chips_used() {
+        // 처음 보는 칩은 제 몫 통째 — 그때는 칸이 고르게 나뉠 때와 같다.
+        assert_eq!(statusbar_tool_reserve(None, 100.0), 100.0);
+        assert_eq!(statusbar_slot_cap(900.0, 100.0, 800.0), 100.0);
+        // 숫자 칩이 30 만 썼으면 30 만 남겨 두고, 나머지는 판 번호가 쓴다.
+        assert_eq!(statusbar_tool_reserve(Some(30.0), 100.0), 30.0);
+        assert_eq!(statusbar_slot_cap(900.0, 100.0, 4.0 * 30.0), 780.0);
+        // 제 몫보다 많이 썼어도(두 칸짜리 등) 예약은 제 몫까지만.
+        assert_eq!(statusbar_tool_reserve(Some(250.0), 200.0), 200.0);
+        // 자리가 모자라도 제 몫 밑으로는 안 내려간다.
+        assert_eq!(statusbar_slot_cap(150.0, 100.0, 100.0), 100.0);
+        assert_eq!(statusbar_tool_weight("tunnel"), 2.0);
+        assert_eq!(statusbar_tool_weight("claude"), 0.0);
     }
 
     #[test]
