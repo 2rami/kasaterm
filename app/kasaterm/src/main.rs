@@ -8286,6 +8286,29 @@ export CODEX_HOME="$CH"
 if [ -n "$ACCT" ]; then
   set -- "$@" -c 'cli_auth_credentials_store="file"'
 fi
+# codex 는 홈마다 app-server 데몬을 띄우고(기능 daemon_auto_start) pane 이 닫혀도 남겨 둔다.
+# 홈이 pane 마다 따로라 codex pane 을 열 때마다 하나씩 쌓였다(2026-09-25 실측: 도는 codex 0,
+# 데몬 3). 그래서 이 codex 를 띄운 셸(pane 의 셸)이 사라지면 그 홈의 데몬을 내린다.
+# codex 가 꺼질 때 내리지 않는 건 codex 의 계약 때문이다 — 화면을 나가면 「작업은 계속
+# 돈다, codex resume 으로 다시 붙어라」라고 안내한다. pane 이 살아 있는 동안은 그걸 지킨다.
+# 감시자는 두 번 fork 해 pane 프로세스 트리 밖(ppid 1)에 둔다 — pane 을 닫을 때 트리째
+# SIGKILL 하고(terminate_local), 에이전트 판별은 셸 자손 중 가장 새 것을 codex 로 읽는다.
+# 같은 pane 에서 다시 켜면 새 실행이 표식을 덮고, 옛 감시자는 그걸 보고 손을 뗀다.
+# `daemon stop` 은 업데이터(pid-update-loop)를 남기므로 그 pid 파일로 따로 거둔다.
+case "$(uname)" in
+  Darwin|Linux)
+    OWNER="$CH/kasaterm-launch.pid"
+    echo $$ > "$OWNER"
+    PANE_SH=$PPID
+    [ "$PANE_SH" -gt 1 ] 2>/dev/null || PANE_SH=$$
+    ( ( trap '' HUP INT
+        while kill -0 "$PANE_SH" 2>/dev/null && [ "$(cat "$OWNER" 2>/dev/null)" = "$$" ]; do sleep 3; done
+        [ "$(cat "$OWNER" 2>/dev/null)" = "$$" ] || exit 0
+        "$REAL" app-server daemon stop >/dev/null 2>&1
+        UP=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$CH/app-server-daemon/daemon-updater.pid" 2>/dev/null)
+        [ -n "$UP" ] && ps -o command= -p "$UP" 2>/dev/null | grep -q 'pid-update-loop' && kill "$UP" 2>/dev/null
+      ) </dev/null >/dev/null 2>&1 & ) ;;
+esac
 exec "$REAL" "$@"
 "#;
     let wrapper = wrapper.replace("# KASATERM_LAUNCH_IDENTITY", &identity_bootstrap_sh("codex", ""))
@@ -10293,6 +10316,11 @@ mod tests {
         assert!(
             body.contains("cli_auth_credentials_store=\"file\""),
             "계정 슬롯이 keyring을 쓰면 CODEX_HOME을 갈라도 같은 로그인을 공유한다"
+        );
+        assert!(
+            body.contains("( ( trap '' HUP INT")
+                && body.find("kasaterm-launch.pid").unwrap() < body.rfind("exec \"$REAL\" \"$@\"").unwrap(),
+            "데몬 감시자가 exec 전에 pane 트리 밖에 서지 않으면 pane 을 닫을 때 같이 죽어 데몬이 남는다"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
