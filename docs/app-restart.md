@@ -20,7 +20,7 @@
 
 1. 나쵸(마시로): `approvals.ACTIONS` 에 `kasaterm_restart`(risk low), `GET /api/app/approvals/{id}`·
    `POST …/{id}/consume {scope, consumer_machine_id}`, 주인 확인 단추로만 decide, `NACHO_APPROVALS=on` env 게이트(기본 off).
-2. 거노: 그 게이트를 켜는 결정. 실제 켜기(env·재시작)는 나쵸 selfcare.
+2. 주인: 그 게이트를 켜는 결정. 실제 켜기(env·재시작)는 나쵸 selfcare.
 3. 나쵸 키가 없는 기기(맥북): 그 기기의 명부 **파일**(`~/.config/kasaterm/machines.json`)에서 나쵸가 도는 기기 항목에
    `"machine_id": "<그 기기 id>"` 와 `"restart_approvals": true` 를 사람이 적는다. 이 표시가 없으면 그 기기는 어떤 승인도
    믿지 않는다(아래 「믿는 것과 안 믿는 것」).
@@ -62,7 +62,7 @@ kasaterm-cli app-restart run                           # 지금은 계획을 보
 
 ## 실행 절차
 
-1. 거노가 나쵸 대화에서 재시작을 부탁한다 → 나쵸 도구가 `kasaterm-cli app-restart plan --machine … --json` 의 `.scope` 를
+1. 주인이 나쵸 대화에서 재시작을 부탁한다 → 나쵸 도구가 `kasaterm-cli app-restart plan --machine … --json` 의 `.scope` 를
    **그대로** 승인 요청으로 만들고(모델이 JSON 을 짓지 않는다), 대상·도는 학생 수·「멈추고 --resume 로 돌아온다」를
    주인 확인 단추로 보인다. 누르면 나쵸가 decide(10분 만료, 한 번). `approval_id` 가 도구 결과로 나온다.
 2. `kasaterm-cli app-restart run --machine <id>,… --approval ap_…` (나쵸 도구가 부른다). 조종 기기 앱이 계획을 다시 재고
@@ -95,7 +95,7 @@ kasaterm-cli app-restart run                           # 지금은 계획을 보
 
 ## 승인 경계 — 한 번 승인한 뒤
 
-거노가 계획 하나(해시·기기 목록)를 승인하면 그 범위 안에서는 기기마다 다시 묻지 않고 한 대씩 진행한다.
+주인이 계획 하나(해시·기기 목록)를 승인하면 그 범위 안에서는 기기마다 다시 묻지 않고 한 대씩 진행한다.
 다음 중 하나라도 생기면 **그 자리에서 멈추고 다시 묻는다**:
 
 - 계획 뒤 대상이 바뀜(다른 pid·다른 바이너리·자기설치 예정이 새로 생김) — 해시 불일치
@@ -125,7 +125,7 @@ kasaterm-cli app-restart run                           # 지금은 계획을 보
   바뀌어 같은 승인이 대상에 맞지 않는다.
 - 남는 위험: 위임한 기기 자체나, 끊긴 터널 포트를 가로챈 같은 사용자 프로세스는 위조 응답을 낼 수 있다. 닫는 길은 나쵸가
   승인 view 에 서명하고(Ed25519, 대상 `{id, action, scope_hash, state, expires_at_ms, consumed_at_ms, consumed_by}` 정렬
-  JSON) 각 기기가 공개키를 고정하는 것 — 새 키 발급이라 거노 결정, 3단계 후보.
+  JSON) 각 기기가 공개키를 고정하는 것 — 새 키 발급이라 주인 결정, 3단계 후보.
 - 같은 사용자의 로컬 프로세스(소켓 접근자)는 승인된 **그 동작**을 먼저 쓸 수는 있어도 새 권한을 만들 수 없다 —
   승인 생성·결정은 나쵸와 주인 확인 단추에만 있다.
 
