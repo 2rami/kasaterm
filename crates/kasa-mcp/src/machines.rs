@@ -970,10 +970,9 @@ fn canonical_roster(list: Vec<Machine>, c: &Cache) -> Vec<Machine> {
 
 fn seen_for_machine<'a>(machine: &Machine, c: &'a Cache) -> Option<&'a Seen> {
     let own = c.get(&machine.label);
-    if own.is_some_and(|seen| seen.at.elapsed() < STALE_AFTER) { return own; }
     let id = machine.machine_id.as_deref().or_else(|| own?.machine_id.as_deref());
     id.and_then(|id| c.values().filter(|seen| seen.machine_id.as_deref() == Some(id))
-        .max_by_key(|seen| seen.at)).or(own)
+        .max_by_key(|seen| seen.requested_at)).or(own)
 }
 
 /// 명부 파일(또는 env)의 항목만 — 알려 온 기계는 뺀다. 터널 스폰이 이걸 본다:
@@ -1092,6 +1091,7 @@ struct Seen {
     /// 그 기계의 기기색 표(`/term/device-colors`). 옛 판은 None.
     device_colors: Option<Value>,
     at: Instant,
+    requested_at: Instant,
     panes: Vec<Value>,
     sync: bool,
     build: Option<String>,
@@ -1102,6 +1102,70 @@ type Cache = HashMap<String, Seen>;
 fn cache() -> &'static Mutex<Cache> {
     static C: OnceLock<Mutex<Cache>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn merge_seen(c: &mut Cache, label: &str, seen: Seen) -> bool {
+    // A poll can finish its metadata probes after a post-command pane refresh.
+    if c.get(label).is_some_and(|old| old.requested_at >= seen.requested_at) {
+        return false;
+    }
+    c.insert(label.to_string(), seen);
+    true
+}
+
+fn refresh_target(list: &[Machine], base: &str) -> anyhow::Result<Machine> {
+    let mut matches = list.iter().filter(|m| m.base == base);
+    let target = matches.next().ok_or_else(|| anyhow::anyhow!("pane host is no longer registered"))?;
+    anyhow::ensure!(matches.next().is_none(), "pane host has ambiguous registrations");
+    Ok(target.clone())
+}
+
+fn merge_refreshed_panes(
+    c: &mut Cache,
+    list: &[Machine],
+    target: &Machine,
+    expected_id: Option<&str>,
+    requested_at: Instant,
+    panes: Option<Vec<Value>>,
+) -> anyhow::Result<bool> {
+    let current = refresh_target(list, &target.base)?;
+    anyhow::ensure!(current.label == target.label && current.machine_id == target.machine_id
+        && current.ssh == target.ssh && current.guest == target.guest,
+        "pane host registration changed during refresh");
+    let old = c.get(&target.label);
+    let current_id = current.machine_id.as_deref().or_else(|| old?.machine_id.as_deref());
+    anyhow::ensure!(current_id == expected_id, "pane host identity changed during refresh");
+    let panes = panes.ok_or_else(|| anyhow::anyhow!("could not refresh remote panes"))?;
+    let mut seen = old.cloned().unwrap_or(Seen {
+        rtt_ms: None, device_colors: None, at: requested_at, requested_at,
+        panes: Vec::new(), sync: true, build: None, machine_id: current.machine_id,
+    });
+    seen.panes = panes;
+    seen.at = requested_at;
+    seen.requested_at = requested_at;
+    Ok(merge_seen(c, &target.label, seen))
+}
+
+/// Worker-only: a confirmed move must reach the cache without waiting for metadata polling.
+pub fn refresh_panes_now(base: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(tokio::runtime::Handle::try_current().is_err(),
+        "pane refresh requires a blocking worker thread");
+    let target = refresh_target(&raw_machines(), base.trim_end_matches('/'))?;
+    let expected_id = {
+        let c = cache().lock().map_err(|_| anyhow::anyhow!("machine cache unavailable"))?;
+        target.machine_id.clone().or_else(|| c.get(&target.label)?.machine_id.clone())
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let requested_at = Instant::now();
+    let panes = runtime.block_on(async {
+        fetch_panes(&reqwest::Client::new(), &target.base).await
+    });
+    let list = raw_machines();
+    let mut c = cache().lock().map_err(|_| anyhow::anyhow!("machine cache unavailable"))?;
+    if merge_refreshed_panes(&mut c, &list, &target, expected_id.as_deref(), requested_at, panes)? {
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 /// 그 기계 프로그램에 repo-sync 창구가 있나 — 낡은 판은 라우트 자체가 없어
@@ -1385,7 +1449,8 @@ pub async fn poll_loop() {
                 let seen = Seen {
                     rtt_ms,
                     device_colors: device_colors.filter(|v| v.get("at").is_some()),
-                    at: Instant::now(),
+                    at: asked,
+                    requested_at: asked,
                     panes,
                     sync,
                     build: version.build.or_else(|| guest_build(&m.label)),
@@ -1398,9 +1463,10 @@ pub async fn poll_loop() {
         while let Some(done) = futures_util::StreamExt::next(&mut jobs).await {
             let Some((m, seen)) = done else { continue };
             if let Ok(mut c) = cache().lock() {
-                c.insert(m.label.clone(), seen);
+                if merge_seen(&mut c, &m.label, seen) {
+                    GENERATION.fetch_add(1, Ordering::Relaxed);
+                }
             }
-            GENERATION.fetch_add(1, Ordering::Relaxed);
             if m.tunneled {
                 announce.push(m.base.clone());
             }
@@ -1506,10 +1572,8 @@ pub fn cached_fresh_pane(label: &str, pane: &str) -> Option<Value> {
 
 fn cached_pane_from(c: &Cache, label: &str, pane: &str, require_fresh: bool) -> Option<Value> {
     let own = c.get(label)?;
-    let seen = if own.at.elapsed() < STALE_AFTER { own } else {
-        own.machine_id.as_ref().and_then(|id| c.values()
-            .filter(|s| s.machine_id.as_ref() == Some(id)).max_by_key(|s| s.at)).unwrap_or(own)
-    };
+    let seen = own.machine_id.as_ref().and_then(|id| c.values()
+        .filter(|s| s.machine_id.as_ref() == Some(id)).max_by_key(|s| s.requested_at)).unwrap_or(own);
     let fresh = seen.at.elapsed() < STALE_AFTER;
     if require_fresh && !fresh {
         return None;
@@ -1536,7 +1600,7 @@ fn cached_pane_from(c: &Cache, label: &str, pane: &str, require_fresh: bool) -> 
 pub fn cached_character_assignments() -> Vec<String> {
     let Ok(cache) = cache().lock() else { return Vec::new() };
     let mut seen: Vec<_> = cache.iter().collect();
-    seen.sort_by_key(|(_, seen)| std::cmp::Reverse(seen.at));
+    seen.sort_by_key(|(_, seen)| std::cmp::Reverse(seen.requested_at));
     let mut machines = HashSet::new();
     let rows = seen.into_iter().filter(|(label, seen)| machines.insert(seen.machine_id.as_deref().unwrap_or(label).to_string()))
         .flat_map(|(label, seen)| seen.panes.iter().map(move |pane| (seen.machine_id.as_deref().unwrap_or(label), pane)));
@@ -1691,10 +1755,92 @@ mod tunnel_backoff_tests {
 mod tests {
     use super::*;
 
+    fn move_seen(requested_at: Instant, window: u64) -> Seen {
+        Seen {
+            at: requested_at, requested_at,
+            panes: vec![serde_json::json!({"id":"%8", "window":window})],
+            sync: false, build: Some("known-build".into()), machine_id: Some("device-one".into()),
+            rtt_ms: Some(12), device_colors: Some(serde_json::json!({"at":123})),
+        }
+    }
+
+    #[test]
+    fn move_refresh_rejects_delayed_poll_without_losing_metadata() {
+        let target = m();
+        let before = Instant::now() - Duration::from_secs(2);
+        let after = Instant::now();
+        let mut c = Cache::from([(target.label.clone(), move_seen(before, 1))]);
+        let mut delayed_poll = move_seen(before + Duration::from_millis(1), 1);
+        delayed_poll.at = after + Duration::from_millis(1);
+        assert!(merge_refreshed_panes(&mut c, &[target.clone()], &target, Some("device-one"),
+            after, Some(move_seen(after, 2).panes)).unwrap());
+        assert!(!merge_seen(&mut c, &target.label, delayed_poll));
+        let hit = &c[&target.label];
+        assert_eq!(hit.panes[0]["window"], 2);
+        assert_eq!(hit.build.as_deref(), Some("known-build"));
+        assert_eq!(hit.rtt_ms, Some(12));
+        assert_eq!(hit.device_colors, Some(serde_json::json!({"at":123})));
+        assert!(!hit.sync);
+        let mut older_alias = move_seen(before, 1);
+        older_alias.at = Instant::now();
+        c.insert("alternate".into(), older_alias);
+        assert_eq!(seen_for_machine(&target, &c).unwrap().panes[0]["window"], 2);
+        assert_eq!(cached_pane_from(&c, "alternate", "%8", true).unwrap()["window"], 2);
+    }
+
+    #[test]
+    fn move_refresh_failure_or_route_change_preserves_cache() {
+        let target = m();
+        let before = Instant::now() - Duration::from_secs(1);
+        let after = Instant::now();
+        let mut c = Cache::from([(target.label.clone(), move_seen(before, 1))]);
+        assert!(merge_refreshed_panes(&mut c, &[target.clone()], &target, Some("device-one"), after, None).is_err());
+        let mut changed = target.clone();
+        changed.base.push_str("/other");
+        assert!(merge_refreshed_panes(&mut c, &[changed], &target, Some("device-one"), after,
+            Some(move_seen(after, 2).panes)).is_err());
+        let mut reused_route = target.clone();
+        reused_route.label = "another host".into();
+        assert!(merge_refreshed_panes(&mut c, &[reused_route], &target, Some("device-one"), after,
+            Some(move_seen(after, 2).panes)).is_err());
+        assert!(merge_refreshed_panes(&mut c, &[target.clone()], &target, Some("other-device"), after,
+            Some(move_seen(after, 2).panes)).is_err());
+        assert!(refresh_target(&[target.clone(), target.clone()], &target.base).is_err());
+        assert_eq!(c[&target.label].requested_at, before);
+        assert_eq!(c[&target.label].panes[0]["window"], 1);
+        assert!(merge_refreshed_panes(&mut c, &[target.clone()], &target, Some("device-one"), after,
+            Some(move_seen(after, 2).panes)).unwrap());
+        assert_eq!(c[&target.label].panes[0]["window"], 2);
+    }
+
+    #[test]
+    fn move_refresh_transport_reads_only_panes_for_valid_geometry() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut buffer = [0; 4096];
+            let size = socket.read(&mut buffer).unwrap();
+            assert!(String::from_utf8_lossy(&buffer[..size]).starts_with("GET /term/panes HTTP/1.1\r\n"));
+            let body = r#"[{"id":"%8","window":2,"rect":[0,0,100,100]}]"#;
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let panes = runtime.block_on(async {
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            fetch_panes(&client, &base).await
+        }).unwrap();
+        server.join().unwrap();
+        assert_eq!(panes[0]["window"], 2);
+    }
+
     #[test]
     fn expired_pane_keeps_identity_without_replaying_attention() {
         let seen = |age| Seen {
             at: Instant::now() - age,
+            requested_at: Instant::now() - age,
             panes: vec![serde_json::json!({"id":"%8", "name":"test character",
                 "status":"waiting", "kind":"permission", "waiting_for":"approve"})],
             sync: true, build: None, machine_id: Some("same-device".into()),
@@ -1734,7 +1880,7 @@ mod tests {
         let mut guest = configured.clone();
         guest.label = "mini.local".into(); guest.guest = true; guest.ssh = None;
         guest.base = "http://127.0.0.1:19011".into(); guest.home = false; guest.roots.clear();
-        let seen = |age| Seen { at: Instant::now() - age, panes: vec![], sync:true,
+        let seen = |age| Seen { at: Instant::now() - age, requested_at: Instant::now() - age, panes: vec![], sync:true,
             build:Some("build".into()), machine_id:Some("same-stable-machine-id".into()),
             rtt_ms: None, device_colors: None };
         let mut c = Cache::from([(configured.label.clone(), seen(Duration::ZERO)),
@@ -1796,6 +1942,7 @@ mod tests {
     fn uplink_only는_online이지만_stale_direct_자료를_되살리지_않는다() {
         let stale = Seen {
             at: Instant::now() - STALE_AFTER,
+            requested_at: Instant::now() - STALE_AFTER,
             panes: vec![serde_json::json!({"id":"old"})],
             sync: true,
             build: Some("same-build".to_string()),
@@ -1825,6 +1972,7 @@ mod tests {
     fn 표시별명과_달라도_학습한_stable_id로만_잇는다() {
         let seen = Seen {
             at: Instant::now() - STALE_AFTER,
+            requested_at: Instant::now() - STALE_AFTER,
             panes: Vec::new(),
             sync: true,
             build: None,
