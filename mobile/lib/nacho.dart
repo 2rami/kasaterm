@@ -301,7 +301,8 @@ class NachoError implements Exception {
   String toString() => message;
 }
 
-String _why(String code, Map<String, Object?> j) => switch (code) {
+/// 나쵸·허브 중계가 준 오류어를 사람 말로. 작업 모드 창구(`work_mode.dart`)도 같은 말을 쓴다.
+String nachoWhy(String code, Map<String, Object?> j) => switch (code) {
   'app_key_missing' => '나쵸 앱 창구가 아직 열리지 않았다(나쵸 쪽 키 설정 필요)',
   'nacho_key_missing' => '이 허브에 나쵸 키가 없다 — 허브 설정이 필요하다',
   'nacho_unconfigured' => '이 허브가 나쵸 자리를 모른다 — 허브 설정이 필요하다',
@@ -314,6 +315,10 @@ String _why(String code, Map<String, Object?> j) => switch (code) {
   'id_conflict' => '같은 번호로 다른 말이 이미 접수됐다',
   'secret_like' => '비밀처럼 보이는 글은 앱 기록에 남기지 않는다',
   'too_long' => '글이 너무 길다',
+  'bad_token' => '나쵸가 이 허브의 앱 키를 받지 않았다 — 허브 설정이 필요하다',
+  'bad_mode' => '나쵸가 모르는 모드다',
+  'rev_required' || 'bad_nonce' || 'json_request_required' =>
+    '나쵸가 요청 모양을 받지 않았다 ($code) — 앱 업데이트가 필요할 수 있다',
   'pet_cannot_receive' => '이 펫은 아직 말풍선을 받을 수 없어요 — 우편함을 끌어가는 판의 펫을 골라 주세요',
   _ => '나쵸가 받지 않았다 ($code)',
 };
@@ -394,7 +399,7 @@ class NachoDesk extends ChangeNotifier {
               );
         first = false;
         if (status != 200) {
-          _fail(_why(j['error'] as String? ?? '$status', j));
+          _fail(nachoWhy(j['error'] as String? ?? '$status', j));
           return;
         }
         if (!_absorb(j).more) return;
@@ -417,7 +422,7 @@ class NachoDesk extends ChangeNotifier {
         );
         if (gen != _gen) return;
         if (status != 200) {
-          _fail(_why(j['error'] as String? ?? '$status', j));
+          _fail(nachoWhy(j['error'] as String? ?? '$status', j));
           await Future<void>.delayed(Duration(seconds: backoff));
           backoff = math.min(backoff * 2, 30);
           continue;
@@ -546,7 +551,7 @@ class NachoDesk extends ChangeNotifier {
     final (status, j) = await server.nacho('pets');
     if (status != 200) {
       final code = j['error'] as String? ?? '$status';
-      throw NachoError(code, _why(code, j), status: status);
+      throw NachoError(code, nachoWhy(code, j), status: status);
     }
     return (
       _str(j['linked']),
@@ -562,7 +567,7 @@ class NachoDesk extends ChangeNotifier {
     final (status, j) = await server.nacho('pets/link', body: {'conv': conv ?? ''});
     if (status != 200) {
       final code = j['error'] as String? ?? '$status';
-      throw NachoError(code, code == 'no_pet' ? '그 펫은 다녀간 기록이 없어 이을 수 없다' : _why(code, j), status: status);
+      throw NachoError(code, code == 'no_pet' ? '그 펫은 다녀간 기록이 없어 이을 수 없다' : nachoWhy(code, j), status: status);
     }
     unawaited(_catchUp());
   }
@@ -609,7 +614,7 @@ class NachoDesk extends ChangeNotifier {
         _notify();
         throw NachoError(
           code,
-          _why(code, j),
+          nachoWhy(code, j),
           status: status,
           task: card == null ? null : NachoTaskCard(card),
         );
@@ -635,7 +640,7 @@ class NachoDesk extends ChangeNotifier {
     try {
       final (status, j) = await server.nacho('tasks');
       if (status != 200) {
-        tasksProblem = _why(j['error'] as String? ?? '$status', j);
+        tasksProblem = nachoWhy(j['error'] as String? ?? '$status', j);
         _notify();
         return;
       }
@@ -659,7 +664,7 @@ class NachoDesk extends ChangeNotifier {
     final (status, j) = await server.nacho('tasks/$id');
     if (status != 200) {
       final code = j['error'] as String? ?? '$status';
-      throw NachoError(code, _why(code, j), status: status);
+      throw NachoError(code, nachoWhy(code, j), status: status);
     }
     return NachoTaskDetail(
       ((j['task'] as Map?) ?? const {}).cast<String, Object?>(),

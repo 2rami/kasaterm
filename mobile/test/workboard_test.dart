@@ -202,6 +202,16 @@ void main() {
     );
     await board.close(tester);
   });
+
+  testWidgets('머리 아래 모드 줄 — 누르면 모드·권한 시트, 예시는 바꿀 수 없다', (tester) async {
+    final board = await _pumpDemoBoard(tester);
+    expect(find.text('조율 모드'), findsOneWidget);
+    await tester.tap(find.text('조율 모드'));
+    await tester.pumpAndSettle();
+    expect(find.text('작업 모드'), findsOneWidget);
+    expect(find.text('예시 데이터라 바꿀 수 없어요'), findsOneWidget);
+    await board.close(tester);
+  });
 }
 
 /// 390×844 폰에 예시 데이터 판을 띄운다. 동작 줄이기를 켜 움직이는 그림 대신 정지 얼굴로.

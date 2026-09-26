@@ -8,7 +8,9 @@ import '../nacho_student.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
+import '../work_mode.dart';
 import '../workboard.dart';
+import 'work_mode_sheet.dart';
 
 /// 나쵸 「작업」 탭 — 거노 차례를 맨 위에, 그 아래 진행·검증·완료. 프로젝트로 거르고, 기기와
 /// 학생은 머리의 「기기」 단추로 본다(2026-09-25 B안 — 할 일 먼저).
@@ -23,6 +25,7 @@ class WorkBoardView extends StatefulWidget {
     required this.onGoChat,
     this.demo = const bool.fromEnvironment('KASA_DEMO_BOARD'),
     this.roster,
+    this.modes,
   });
 
   final NachoDesk desk;
@@ -40,6 +43,9 @@ class WorkBoardView extends StatefulWidget {
   @visibleForTesting
   final LiveRoster? roster;
 
+  @visibleForTesting
+  final WorkModeDesk? modes;
+
   @override
   State<WorkBoardView> createState() => _WorkBoardViewState();
 }
@@ -47,6 +53,8 @@ class WorkBoardView extends StatefulWidget {
 class _WorkBoardViewState extends State<WorkBoardView>
     with WidgetsBindingObserver {
   late final LiveRoster _roster = widget.roster ?? LiveRoster(widget.server);
+  late final WorkModeDesk _modes =
+      widget.modes ?? (widget.demo ? demoModes() : WorkModeDesk(widget.server));
   String? _project;
   bool _showDone = false;
 
@@ -54,13 +62,17 @@ class _WorkBoardViewState extends State<WorkBoardView>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    if (!widget.demo) _roster.start();
+    if (!widget.demo) {
+      _roster.start();
+      unawaited(_modes.load());
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     if (widget.roster == null) _roster.dispose();
+    if (widget.modes == null) _modes.dispose();
     super.dispose();
   }
 
@@ -70,6 +82,7 @@ class _WorkBoardViewState extends State<WorkBoardView>
     switch (state) {
       case AppLifecycleState.resumed:
         _roster.start();
+        unawaited(_modes.load());
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
       case AppLifecycleState.detached:
@@ -88,12 +101,21 @@ class _WorkBoardViewState extends State<WorkBoardView>
         );
 
   Future<void> _refresh() async {
-    await Future.wait([widget.desk.loadTasks(), _roster.refresh()]);
+    await Future.wait([
+      widget.desk.loadTasks(),
+      _roster.refresh(),
+      _modes.load(),
+    ]);
   }
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: Listenable.merge([widget.desk, _roster, widget.students]),
+    listenable: Listenable.merge([
+      widget.desk,
+      _roster,
+      widget.students,
+      _modes,
+    ]),
     builder: (context, _) {
       final board = _board();
       final project = board.projects.any((p) => p.name == _project)
@@ -127,6 +149,7 @@ class _WorkBoardViewState extends State<WorkBoardView>
           devices: board.devices,
           onDevices: () => _openDevices(board),
         ),
+        _ModeRow(desk: _modes, onTap: _openModes),
         if (board.projects.length > 1)
           _ProjectChips(
             projects: board.projects,
@@ -222,6 +245,16 @@ class _WorkBoardViewState extends State<WorkBoardView>
       isScrollControlled: true,
       builder: (_) =>
           DevicesSheet(devices: board.devices, server: widget.server),
+    );
+  }
+
+  void _openModes() {
+    unawaited(_modes.load());
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (_) => WorkModeSheet(desk: _modes),
     );
   }
 
@@ -323,6 +356,70 @@ class _Head extends StatelessWidget {
             label: Text('기기 $online/${devices.length}'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 지금 작업 모드 한 줄 — 누르면 모드·권한 시트. 나쵸가 모드를 안 알려 주면 모른다고 적는다.
+class _ModeRow extends StatelessWidget {
+  const _ModeRow({required this.desk, required this.onTap});
+
+  final WorkModeDesk desk;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final state = desk.state;
+    final label = state == null ? '모드 모름' : '${desk.labelOf(state.mode)} 모드';
+    final line = state == null
+        ? (desk.problem ?? '나쵸에 묻는 중')
+        : desk.caps?.info(state.mode)?.summary ?? state.mode.blurb;
+    return InkWell(
+      onTap: onTap,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 44),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
+          child: Row(
+            children: [
+              Icon(
+                Icons.tune_rounded,
+                size: 18,
+                color: scheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: state == null
+                      ? scheme.onSurfaceVariant
+                      : scheme.onSurface,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  line,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              Text(
+                '권한',
+                style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
+              ),
+              Icon(Icons.chevron_right_rounded, color: scheme.onSurfaceVariant),
+            ],
+          ),
+        ),
       ),
     );
   }
