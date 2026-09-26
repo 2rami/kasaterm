@@ -7345,6 +7345,22 @@ async fn collab_read_handler(
     }
 }
 
+/// 나쵸 승인 읽기를 중계한다 — 이 창구가 맡은 동작(`relay.action`)의 승인만 답한다. 나쵸는 이 기기 자신의 읽기와 중계를
+/// 가를 수 없어서(같은 키), 거르지 않으면 「재시작 승인」으로 위임된 기기가 다른 동작의 승인까지 나른다.
+async fn relay_approval(backend: Arc<dyn Backend>, id: String, relay: kasa_socket::app_restart::Relay) -> axum::response::Response {
+    let read = move || Ok::<_, anyhow::Error>((crate::board_service::local_id()?, backend.restart_approval(&id)?));
+    match tokio::task::spawn_blocking(read).await {
+        Ok(Ok((_, view))) if view.action != relay.action => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"ok": false, "error": format!("no_approval — 이 창구는 {} 승인만 중계한다", relay.action)})),
+        ).into_response(),
+        // 받는 쪽이 위임한 기기인지 대조하도록 이 기기의 id 를 함께 싣는다.
+        Ok(Ok((machine_id, view))) => Json(serde_json::json!({"machine_id": machine_id, "approval": view})).into_response(),
+        Ok(Err(e)) => (axum::http::StatusCode::CONFLICT, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 pub fn spawn_http_server(
     backend: Arc<dyn Backend>,
     preferred_port: u16,
@@ -7748,18 +7764,7 @@ pub fn spawn_http_server_opts(
                     }))
                     .route("/app/restart/approvals/{id}", get({
                         let backend = restart_backend.clone();
-                        move |AxPath(id): AxPath<String>| {
-                            let backend = backend.clone();
-                            async move {
-                                let read = move || Ok::<_, anyhow::Error>((crate::board_service::local_id()?, backend.restart_approval(&id)?));
-                                match tokio::task::spawn_blocking(read).await {
-                                    // 받는 쪽이 위임한 기기인지 대조하도록 이 기기의 id 를 함께 싣는다.
-                                    Ok(Ok((machine_id, view))) => Json(serde_json::json!({"machine_id": machine_id, "approval": view})).into_response(),
-                                    Ok(Err(e)) => (axum::http::StatusCode::CONFLICT, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),
-                                    Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-                                }
-                            }
-                        }
+                        move |AxPath(id): AxPath<String>| relay_approval(backend.clone(), id, kasa_socket::app_restart::RESTART_RELAY)
                     }))
                     // 작업 걸기 — 요청이 무엇을 말하든 나쵸에서 읽은 승인과 이 기기의 지금 사실로만 판정한다.
                     .route("/app/restart/jobs", post({
@@ -7777,13 +7782,23 @@ pub fn spawn_http_server_opts(
                     }).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)))
                     // 앱 업데이트 — 요청은 URL·경로·명령을 싣지 못한다(`kasa_socket::app_update::check_job`). 받는 곳은 공식 피드와
                     // 공식 릴리스뿐이고, 판정은 나쵸에서 읽은 승인과 이 기기의 지금 사실로만 한다. 설치 스위치가 꺼져 있으면 거부.
-                    .route("/app/update/jobs/{id}", get(|AxPath(id): AxPath<String>| async move {
-                        let status = kasa_socket::app_update::jobs_dir()
-                            .and_then(|dir| kasa_socket::app_update::status(&dir, &id));
-                        match status {
-                            Ok(status) => Json(serde_json::to_value(status).unwrap_or_default()).into_response(),
-                            Err(e) => (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),
+                    .route("/app/update/jobs/{id}", get({
+                        let backend = restart_backend.clone();
+                        move |AxPath(id): AxPath<String>| {
+                            let backend = backend.clone();
+                            async move {
+                                match tokio::task::spawn_blocking(move || backend.update_job(None, &id)).await {
+                                    Ok(Ok(status)) => Json(serde_json::to_value(status).unwrap_or_default()).into_response(),
+                                    Ok(Err(e)) => (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),
+                                    Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                                }
+                            }
                         }
+                    }))
+                    // 키 없는 기기가 update 승인을 읽는 중계 — 재시작 중계와 창구를 가른다(각자 제 동작만 답한다).
+                    .route("/app/update/approvals/{id}", get({
+                        let backend = restart_backend.clone();
+                        move |AxPath(id): AxPath<String>| relay_approval(backend.clone(), id, kasa_socket::app_update::UPDATE_RELAY)
                     }))
                     .route("/app/update/jobs", post({
                         let backend = restart_backend.clone();

@@ -138,8 +138,13 @@ impl NachoAuthority {
 
     /// 요청이 댄 기기로 신뢰원을 고르지 않는다(`kasa_socket::app_restart::target_authority`).
     pub(crate) fn for_request(requested: &str) -> Result<Self, String> {
+        Self::for_relay(&kasa_socket::app_restart::RESTART_RELAY, requested)
+    }
+
+    /// 동작마다 중계 갈래가 따로다 — 키 없는 기기는 그 동작의 위임 표식(`Relay::delegation`)이 명부 파일에 있어야 읽는다.
+    pub(crate) fn for_relay(relay: &kasa_socket::app_restart::Relay, requested: &str) -> Result<Self, String> {
         let local_key = kasa_mcp::nacho_app_target().is_ok();
-        let relay = kasa_socket::app_restart::target_authority(local_key, &kasa_mcp::machines::listed_entries(), requested, |id| {
+        let relay = kasa_socket::app_restart::target_authority_for(relay, local_key, &kasa_mcp::machines::listed_entries(), requested, |id| {
             // 위임한 파일 항목의 주소만 쓴다 — `find_route` 는 끊긴 파일 항목을 같은 id 를 댄 손님 경로로 갈아 끼운다.
             let base = kasa_mcp::machines::listed_machines().into_iter()
                 .find(|m| m.machine_id.as_deref() == Some(id))

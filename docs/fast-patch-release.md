@@ -31,8 +31,8 @@ status: 원격 태그·CI·피드 + 기기마다 지금 판(버전 · SHA) → �
    `kasaterm_release` 가 있어야 열리고 기본은 닫혀 있다 — 여는 것은 주인 확인 카드로 따로 한다.
 3. **원격 설치 창구** — 기기 앱 창구는 붙었다([app-update.md](app-update.md)): 공식 릴리스만 받아 sha256·EdDSA·팀·
    공증을 보고 곁에 둔 뒤, 바쁜 학생이 없을 때 스스로 꺼서 갈아 끼우고 새 판이 안 뜨면 되돌린다. 다만 설치 실행은 기기마다
-   기본 꺼짐이고(`KASATERM_APP_UPDATE`), 작업을 받아들일 나쵸 승인 동작 `kasaterm_update` 가 아직 없다. 창구가 든 판을
-   기기마다 한 번은 사람이 설치해야 한다.
+   기본 꺼짐이고(`KASATERM_APP_UPDATE`), 나쵸 `kasaterm_update` 승인 창구도 기본 닫혀 있다. 키 없는 맥북은 명부 파일의
+   `update_approvals` 위임이 있어야 승인을 읽는다(지금 없음). 창구가 든 판을 기기마다 한 번은 사람이 설치해야 한다.
 
 실행 주체는 나쵸 도구다(주인 결정). 학생·에이전트 창에서 live 를 치면 도구가 거절한다(아래 「누가 치나」).
 
@@ -62,6 +62,8 @@ python3 -m tools.release.fastpatch status <plan_id> [--json]
 
 # 6) 기기 업데이트 계획(읽기): 앱 재시작 사실로 기기마다 막힘·여섯 단계, --json 은 보낼 작업·나쵸 승인 범위까지.
 python3 -m tools.release.fastpatch device-plan <plan_id> [--json]
+# 7) 기기 업데이트 러너(나쵸 도구만): rollout 하나를 한 번 승인으로 차례로 — 조종 기기 마지막, 앞 기기가 새 판이어야 다음.
+python3 -m tools.release.fastpatch device-apply <plan_id> --rollout <rollout_id> --approval ap_… [--live]
 ```
 
 상태 폴더는 `~/.config/kasaterm/releases/`(`KASATERM_RELEASE_DIR`·`--state-dir`).
@@ -259,8 +261,9 @@ windesktop → 앱 재시작 사실이 안 닿아 blocked. 기기마다 「지�
 ## 검사
 
 ```sh
-python3 -m unittest tools.release.tests.test_fastpatch      # 53건 — 아래
-cargo test -p kasa-socket app_update                         # 기기 업데이트 창구 20건(app-update.md 「검사」)
+python3 -m unittest tools.release.tests.test_fastpatch      # 55건 — 아래
+cargo test -p kasa-socket app_update                         # 기기 업데이트 창구·러너 32건(app-update.md 「검사」)
+bash scripts/nacho-update-interop.sh                         # 실제 나쵸 update 승인 서버(격리)와 러너·기기 왕복
 bash scripts/nacho-release-interop.sh                        # 실제 나쵸 승인 서버(격리)와 왕복 17건
 cargo test -p kasaterm --release version::tests             # 판 번호 줄 입구 선택
 cargo test -p kasaterm --release self_install               # 자기설치 백업·되돌리기(실제 sh)

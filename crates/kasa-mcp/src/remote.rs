@@ -3490,3 +3490,263 @@ mod tests {
         assert!(url.ends_with("&t=tok"));
     }
 }
+
+/// 앱 업데이트 창구를 실제 HTTP 로 — 같은 프로세스에 기기 서버를 둘 띄우고, 조종 쪽 러너(`kasa_socket::app_update::run`)가 앱이 다른
+/// 기기에 넘길 때와 같은 클라이언트(`remote_get_json`·`remote_post_json`)로 사실·작업·상태를 주고받는다. 기기 판정은 실제 `accept`
+/// (나쵸 승인은 가짜)이고, 받기·갈아 끼우기는 한 걸음씩 흉내 낸다 — 그 경로는 kasa-socket 검사가 실제 sh 도우미로 돈다.
+#[cfg(all(test, unix))]
+mod update_http_e2e {
+    use super::*;
+    use kasa_socket::app_restart::{ApprovalView, Authority, BinaryId, Facts};
+    use kasa_socket::app_update::{self as update, Outcome, Reach, State};
+    use kasa_socket::backend::Backend;
+    use base64::Engine as _;
+
+    const NOW_BASE: u64 = 1_790_000_000_000;
+    const AP: &str = "ap_0123456789abcdef0123456789abcdef";
+    const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const COMMIT: &str = "5e4d138684156c710831055f5b042688b335f617";
+
+    struct Nacho(Mutex<ApprovalView>);
+
+    impl Authority for Nacho {
+        fn get(&self, _: &str) -> std::result::Result<ApprovalView, String> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        fn consume(&self, _: &str, scope: &serde_json::Value, consumer: &str) -> std::result::Result<ApprovalView, String> {
+            let mut v = self.0.lock().unwrap();
+            if v.consumed_at_ms.is_some() {
+                return Err("already_used".into());
+            }
+            if &v.scope != scope {
+                return Err("scope_changed".into());
+            }
+            v.consumed_at_ms = Some(kasa_socket::board::now_ms());
+            v.consumed_by = Some(consumer.into());
+            v.expires_at_ms = kasa_socket::board::now_ms() + 2 * 35 * 60_000;
+            Ok(v.clone())
+        }
+    }
+
+    /// 기기 하나 — 사실·작업 기록·나쵸 읽기를 쥔 앱 흉내. 받은 뒤 상태를 물을 때마다 한 걸음씩 나아가고, 적용 직전에 `waits` 만큼
+    /// 「바쁜 학생」으로 기다린다(다시 보내기가 올 때마다 하나씩 풀린다).
+    struct Target {
+        facts: Mutex<Facts>,
+        dir: std::path::PathBuf,
+        nacho: Arc<Nacho>,
+        waits: Mutex<u32>,
+        posts: Mutex<u32>,
+        relay_views: Mutex<std::collections::HashMap<String, ApprovalView>>,
+    }
+
+    impl Backend for Target {
+        fn list_workspaces(&self) -> Result<Vec<kasa_socket::backend::WorkspaceInfo>> { Ok(vec![]) }
+        fn current_workspace(&self) -> Result<Option<kasa_socket::backend::WorkspaceInfo>> { Ok(None) }
+        fn list_surfaces(&self) -> Result<Vec<kasa_socket::backend::SurfaceInfo>> { Ok(vec![]) }
+        fn focus_surface(&self, _: &str) -> Result<()> { anyhow::bail!("unexpected") }
+        fn split_surface(&self, _: kasa_socket::SplitDirection, _: bool, _: Option<&str>) -> Result<kasa_socket::backend::SurfaceInfo> { anyhow::bail!("unexpected") }
+        fn send_text(&self, _: Option<&str>, _: &str) -> Result<()> { anyhow::bail!("unexpected") }
+        fn send_key(&self, _: Option<&str>, _: &str) -> Result<()> { anyhow::bail!("unexpected") }
+        fn restart_facts(&self, _: Option<&str>) -> Result<Facts> {
+            let mut f = self.facts.lock().unwrap().clone();
+            f.observed_at_ms = kasa_socket::board::now_ms();
+            Ok(f)
+        }
+        fn restart_approval(&self, id: &str) -> Result<ApprovalView> {
+            self.relay_views.lock().unwrap().get(id).cloned().ok_or_else(|| anyhow!("no_approval"))
+        }
+        fn update_start(&self, _: Option<&str>, req: &update::UpdateRequest) -> Result<serde_json::Value> {
+            *self.posts.lock().unwrap() += 1;
+            {
+                let mut w = self.waits.lock().unwrap();
+                *w = w.saturating_sub(u32::from(*self.posts.lock().unwrap() > 1));
+            }
+            let facts = self.restart_facts(None)?;
+            let (s, created) = update::accept(req, &facts, "0.2.0", &*self.nacho, true, &self.dir, kasa_socket::board::now_ms())
+                .map_err(anyhow::Error::msg)?;
+            Ok(serde_json::json!({"ok": true, "state": s.state.word(), "created": created}))
+        }
+        fn update_job(&self, _: Option<&str>, id: &str) -> Result<update::Status> {
+            let now = update::status(&self.dir, id)?;
+            let next = [State::Fetched, State::Checked, State::Staged, State::Armed, State::HelperStarted, State::Exited,
+                        State::Swapped, State::Launched, State::Booted, State::Done]
+                .into_iter().find(|s| *s > now.state).filter(|_| !now.state.terminal());
+            match next {
+                Some(State::Armed) if *self.waits.lock().unwrap() > 0 => {
+                    update::note(&self.dir, id, "waiting: 일하는 중이거나 사람 답을 기다리는 학생 1명")?;
+                }
+                Some(next) => {
+                    update::advance(&self.dir, id, next, "http e2e")?;
+                    if next == State::Done {
+                        let mut f = self.facts.lock().unwrap();
+                        f.pid += 1000;
+                        f.binary.build = COMMIT[..8].into();
+                    }
+                }
+                None => {}
+            }
+            update::status(&self.dir, id)
+        }
+    }
+
+    fn target(mid: &str, pid: u32, nacho: &Arc<Nacho>, waits: u32) -> (Arc<Target>, String) {
+        let app = "/Users/x/Applications/kasaterm.app";
+        let dir = std::env::temp_dir().join(format!("kasa-update-http-{mid}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let facts = Facts {
+            schema: kasa_socket::app_restart::SCHEMA.into(), machine_id: mid.into(), label: mid.into(), os: "macos".into(),
+            capability: kasa_socket::app_restart::CAPABILITY, app_path: app.into(), pid, running_exe: format!("{app}/Contents/MacOS/kasaterm"),
+            binary: BinaryId { inode: 1, mtime_ms: 2, build: "8933a0ca".into() }, observed_at_ms: NOW_BASE,
+            update_capability: update::CAPABILITY, update_enabled: true, ..Facts::default()
+        };
+        let t = Arc::new(Target { facts: Mutex::new(facts), dir, nacho: nacho.clone(), waits: Mutex::new(waits), posts: Mutex::new(0),
+                                  relay_views: Mutex::new(Default::default()) });
+        let port = crate::spawn_http_server_opts(t.clone() as Arc<dyn Backend>, 0, false).expect("server");
+        (t, format!("http://127.0.0.1:{port}"))
+    }
+
+    fn job_for(t: &Target, rid: &str) -> update::UpdateJob {
+        let f = t.facts.lock().unwrap().clone();
+        let tag = "v0.2.1";
+        update::UpdateJob {
+            schema: update::SCHEMA.into(), job_id: update::job_id(rid, &f.machine_id, SHA), plan_hash: rid.into(),
+            machine_id: f.machine_id.clone(), target_hash: kasa_socket::app_restart::target_hash(&f), tag: tag.into(),
+            version: "0.2.1".into(), commit: COMMIT.into(), build: COMMIT.into(),
+            asset: update::Asset { name: update::asset_name(tag), url: update::asset_url(tag, &update::asset_name(tag)), size: 10,
+                                   sha256: SHA.into(), ed_signature: base64::engine::general_purpose::STANDARD.encode([7u8; 64]) },
+            team: "L366799VND".into(), require_notarized: true, old_pid: f.pid, created_at_ms: NOW_BASE,
+        }
+    }
+
+    fn rollout(jobs: Vec<update::UpdateJob>, controller: &str) -> update::Rollout {
+        let scope = update::rollout_scope(&jobs, controller);
+        update::Rollout { id: jobs[0].plan_hash.clone(), release_plan: "0011223344556677".into(), created_at_ms: NOW_BASE,
+                          approval_scope_hash: update::scope_hash(&scope), approval_scope: scope, jobs, excluded: vec![] }
+    }
+
+    /// 기기들과 조종 쪽이 같은 나쵸를 본다 — rollout 을 지은 뒤 그 범위로 승인을 채운다.
+    fn approve(nacho: &Nacho, r: &update::Rollout) {
+        *nacho.0.lock().unwrap() = ApprovalView {
+            id: AP.into(), action: update::ACTION.into(), scope: r.approval_scope.clone(), scope_hash: r.approval_scope_hash.clone(),
+            state: "approved".into(), expires_at_ms: kasa_socket::board::now_ms() + 600_000, consumed_at_ms: None, consumed_by: None,
+        };
+    }
+
+    /// 조종 쪽이 쓰는 길 — 앱이 다른 기기에 넘길 때와 같은 HTTP 클라이언트·같은 경로.
+    struct Http(std::collections::HashMap<String, String>);
+
+    impl update::Transport for Http {
+        fn facts(&self, id: &str) -> std::result::Result<Facts, String> {
+            let v = remote_get_json(&self.0[id], "/app/restart/facts").map_err(|e| format!("{e:#}"))?;
+            serde_json::from_value(v).map_err(|e| e.to_string())
+        }
+        fn start(&self, id: &str, req: &update::UpdateRequest) -> std::result::Result<serde_json::Value, Reach> {
+            remote_post_json(&self.0[id], "/app/update/jobs", &serde_json::to_value(req).unwrap()).map_err(|e| update::reach_of(&format!("{e:#}")))
+        }
+        fn status(&self, id: &str, job_id: &str) -> std::result::Result<update::Status, String> {
+            let v = remote_get_json(&self.0[id], &format!("/app/update/jobs/{job_id}")).map_err(|e| format!("{e:#}"))?;
+            serde_json::from_value(v).map_err(|e| e.to_string())
+        }
+    }
+
+    fn fast() -> update::RunPolicy {
+        update::RunPolicy { poll_every: Duration::from_millis(5), resend_every_ms: 40, ..update::RunPolicy::default() }
+    }
+
+    fn go(r: &update::Rollout, nacho: &Nacho, http: &Http) -> Vec<(String, Outcome)> {
+        update::run(r, AP, nacho, http, &fast(), None, &|_| Ok(()), &kasa_socket::board::now_ms, &std::thread::sleep)
+    }
+
+    fn words(out: &[(String, Outcome)]) -> Vec<String> {
+        out.iter().map(|(_, o)| serde_json::to_value(o).unwrap()["outcome"].as_str().unwrap().to_string()).collect()
+    }
+
+    fn fleet(names: &[(&str, u32, u32)]) -> (Arc<Nacho>, Vec<Arc<Target>>, Http, update::Rollout) {
+        let nacho = Arc::new(Nacho(Mutex::new(ApprovalView::default())));
+        let mut targets = Vec::new();
+        let mut bases = std::collections::HashMap::new();
+        for (mid, pid, waits) in names {
+            let (t, base) = target(mid, *pid, &nacho, *waits);
+            bases.insert(mid.to_string(), base);
+            targets.push(t);
+        }
+        let controller = names.last().unwrap().0;
+        let r = rollout(targets.iter().map(|t| job_for(t, "abcdef0123456789")).collect(), controller);
+        approve(&nacho, &r);
+        (nacho, targets, Http(bases), r)
+    }
+
+    #[test]
+    fn the_runner_updates_over_real_http_waits_out_a_busy_machine_and_hands_off_last() {
+        let (nacho, t, http, r) = fleet(&[("mac-http-a", 11, 1), ("ctl-http-a", 22, 0)]);
+        let out = go(&r, &nacho, &http);
+        assert_eq!(words(&out), ["updated", "handed_off"], "{out:?}");
+        assert_eq!(*t[0].posts.lock().unwrap(), 2, "처음 한 번 + 바쁜 학생을 기다리며 한 번");
+        assert!(update::status(&t[0].dir, &r.jobs[0].job_id).unwrap().events.iter().any(|e| e.note.starts_with("waiting: ")));
+        assert_eq!(nacho.0.lock().unwrap().consumed_by.as_deref(), Some("ctl-http-a"), "한 번 소비");
+        assert!(matches!(&out[0].1, Outcome::Updated { new_pid: 1011, .. }));
+    }
+
+    #[test]
+    fn a_revoked_approval_is_refused_by_the_machine_over_http_and_nothing_after_it_runs() {
+        let (nacho, t, http, r) = fleet(&[("mac-http-b", 11, 1000), ("ctl-http-b", 22, 0)]);
+        let revoker = nacho.clone();
+        // 첫 기기가 기다리는 사이 주인이 거둔다 — 다음 다시 보내기를 기기가 409 로 거절한다.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            revoker.0.lock().unwrap().state = "revoked".into();
+        });
+        let out = go(&r, &nacho, &http);
+        assert!(matches!(&out[0].1, Outcome::Failed { reason, .. } if reason.contains("revoked")), "{out:?}");
+        assert!(matches!(&out[1].1, Outcome::Skipped { .. }));
+        assert_eq!(*t[1].posts.lock().unwrap(), 0, "뒤 기기에는 보내지 않았다");
+    }
+
+    #[test]
+    fn an_unreachable_machine_stops_the_rollout_before_anything_is_consumed() {
+        let (nacho, t, mut http, r) = fleet(&[("mac-http-c", 11, 0), ("ctl-http-c", 22, 0)]);
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = dead.local_addr().unwrap().port();
+        drop(dead);
+        http.0.insert("mac-http-c".into(), format!("http://127.0.0.1:{port}"));
+        let out = go(&r, &nacho, &http);
+        assert!(matches!(&out[0].1, Outcome::Failed { .. }), "{out:?}");
+        assert!(nacho.0.lock().unwrap().consumed_at_ms.is_none(), "닿지 않는 기기가 있으면 소비하지 않는다");
+        assert_eq!(*t[1].posts.lock().unwrap(), 0);
+        assert!(matches!(update::reach_of("원격 POST 요청: error sending request"), Reach::Unreachable(_)));
+        assert!(matches!(update::reach_of("HTTP 409 Conflict: {\"ok\":false,\"error\":\"downgrade\"}"), Reach::Refused(_)));
+    }
+
+    /// 승인 중계는 동작마다 창구가 따로다 — 재시작 창구는 재시작 승인만, 업데이트 창구는 업데이트 승인만 답한다.
+    #[test]
+    fn each_relay_route_answers_only_its_own_action() {
+        let (nacho, t, http, r) = fleet(&[("relay-http", 11, 0)]);
+        let base = http.0["relay-http"].clone();
+        let mut restart_view = nacho.0.lock().unwrap().clone();
+        restart_view.action = kasa_socket::app_restart::ACTION.into();
+        let upd = format!("ap_{}", "1".repeat(32));
+        let rst = format!("ap_{}", "2".repeat(32));
+        t[0].relay_views.lock().unwrap().insert(upd.clone(), ApprovalView { id: upd.clone(), ..nacho.0.lock().unwrap().clone() });
+        t[0].relay_views.lock().unwrap().insert(rst.clone(), ApprovalView { id: rst.clone(), ..restart_view });
+        assert_eq!(remote_get_json(&base, &format!("/app/update/approvals/{upd}")).unwrap()["approval"]["action"], update::ACTION);
+        assert!(remote_get_json(&base, &format!("/app/update/approvals/{rst}")).unwrap_err().to_string().contains("404"));
+        assert_eq!(remote_get_json(&base, &format!("/app/restart/approvals/{rst}")).unwrap()["approval"]["action"], kasa_socket::app_restart::ACTION);
+        assert!(remote_get_json(&base, &format!("/app/restart/approvals/{upd}")).unwrap_err().to_string().contains("404"),
+                "재시작으로 위임된 중계가 업데이트 승인을 나르지 않는다");
+        // 키 없는 기기가 쓰는 실제 중계 클라이언트 — 위임 표식이 update_approvals 인 항목만 고른다.
+        let me = crate::board_service::local_id().unwrap();
+        let entries = vec![serde_json::json!({"machine_id": me, "restart_approvals": true})];
+        assert!(kasa_socket::app_restart::target_authority_for(&update::UPDATE_RELAY, false, &entries, &me, |_| unreachable!()).is_err(),
+                "재시작 위임만 있으면 update 승인은 못 읽는다");
+        let entries = vec![serde_json::json!({"machine_id": me, "update_approvals": true})];
+        let fetch_base = base.clone();
+        let relay = kasa_socket::app_restart::target_authority_for(&update::UPDATE_RELAY, false, &entries, &me, move |_| {
+            let b = fetch_base.clone();
+            Ok(Box::new(move |path: &str| remote_get_json(&b, path).map_err(|e| e.to_string())))
+        }).unwrap().expect("update 위임 중계");
+        assert_eq!(relay.get(&upd).unwrap().action, update::ACTION);
+        assert!(relay.get(&rst).is_err());
+        let _ = r;
+    }
+}

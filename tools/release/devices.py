@@ -142,12 +142,22 @@ def fnv(parts):
     return f"{h:016x}"
 
 
+def target_hash(facts):
+    """`kasa_socket::app_restart::target_hash` 와 같은 값 — 기기 정체(pid·바이너리·자기설치 예정)가 계획 때와 같은지 재는 표."""
+    b = facts.get("binary") or {}
+    p = facts.get("install_pending")
+    pending = f"{p['dist_path']}@{p['dist_mtime_ms']}" if p else ""
+    return fnv([facts["machine_id"], facts["app_path"], str(facts["pid"]), str(b.get("inode", 0)), str(b.get("mtime_ms", 0)),
+                b.get("build", ""), pending, str(facts.get("capability", 0))])
+
+
 def update_job_id(plan_hash, machine_id, sha256):
     return "up" + fnv([plan_hash, machine_id, sha256])
 
 
-def update_job(plan, state, target, now_ms):
-    """(작업, 못 짓는 까닭) — 기기의 `check_job` 이 받는 모양 그대로. 주소는 태그에서 지은 공식 주소뿐이다."""
+def update_job(plan, state, target, now_ms, plan_hash=None):
+    """(작업, 못 짓는 까닭) — 기기의 `check_job` 이 받는 모양 그대로. 주소는 태그에서 지은 공식 주소뿐이다.
+    `plan_hash` 는 rollout id(`update_rollout`) — 없으면 릴리스 plan_id(보이기용)."""
     facts = (target or {}).get("facts") or {}
     if facts.get("os") != "macos":
         return None, "mac 만 이 창구로 받는다 — 윈도는 WinSparkle"
@@ -163,7 +173,8 @@ def update_job(plan, state, target, now_ms):
     if not art["size"] or art["size"] > MAX_ASSET_BYTES:
         return None, "산출물 크기가 상한 밖이다"
     mid = target["machine_id"]
-    return {"schema": UPDATE_SCHEMA, "job_id": update_job_id(plan["plan_id"], mid, art["sha256"]), "plan_hash": plan["plan_id"],
+    plan_hash = plan_hash or plan["plan_id"]
+    return {"schema": UPDATE_SCHEMA, "job_id": update_job_id(plan_hash, mid, art["sha256"]), "plan_hash": plan_hash,
             "machine_id": mid, "target_hash": target.get("hash") or "", "tag": plan["tag"], "version": plan["version"],
             "commit": plan["commit"], "build": plan["commit"],
             "asset": {"name": art["name"], "url": art["url"], "size": art["size"], "sha256": art["sha256"], "ed_signature": signature},
@@ -176,3 +187,49 @@ def update_scope(job, controller, order=1):
             "version": job["version"], "commit": job["commit"],
             "asset": {"name": job["asset"]["name"], "sha256": job["asset"]["sha256"], "size": job["asset"]["size"]},
             "targets": [{"order": order, "machine_id": job["machine_id"], "hash": job["target_hash"]}]}
+
+
+def rollout_scope(jobs, controller):
+    """대상 여럿을 한 승인으로 — `kasa_socket::app_update::rollout_scope` 와 같은 키 8개(나쵸 `validate_update_scope`)."""
+    first = jobs[0]
+    return {"action": UPDATE_ACTION, "plan": first["plan_hash"], "controller": controller, "tag": first["tag"],
+            "version": first["version"], "commit": first["commit"],
+            "asset": {"name": first["asset"]["name"], "sha256": first["asset"]["sha256"], "size": first["asset"]["size"]},
+            "targets": [{"order": n, "machine_id": j["machine_id"], "hash": j["target_hash"]} for n, j in enumerate(jobs, 1)]}
+
+
+def rollout_id(release_plan, sha256, targets, created_at_ms):
+    """이번 굴림의 id — 같은 릴리스 계획을 다시 굴려도 기기 작업 id 가 옛 실패 기록과 겹치지 않게 만든 시각까지 넣는다."""
+    return fnv([release_plan, sha256, *(f"{mid}={h}" for mid, h in targets), str(created_at_ms)])
+
+
+def update_rollout(plan, state, targets, rows, now_ms):
+    """(rollout, 까닭) — ready·deferred 인 mac 을 계획 순서로, 조종 기기는 맨 뒤에. 나쵸가 `approval_scope` 를 그대로 사람에게
+    보이고 승인하며, 러너(`kasaterm-cli app-update run`)는 작업들로 범위를 다시 지어 대조한다."""
+    from tools.release.nacho import scope_hash
+    controller = plan["controller"]
+    order = [r for r in rows if r["machine_id"] != controller] + [r for r in rows if r["machine_id"] == controller]
+    picked, excluded = [], []
+    for r in order:
+        if r["os"] != "macos":
+            excluded.append({"machine_id": r["machine_id"], "code": "not_macos", "why": "mac 만 이 창구로 받는다 — 윈도는 WinSparkle"})
+        elif r["status"] == "blocked":
+            hard = next((x for x in r["reasons"] if x["code"] not in WAITS), r["reasons"][0])
+            excluded.append({"machine_id": r["machine_id"], "code": hard["code"], "why": hard["why"]})
+        else:
+            picked.append(r)
+    probe = []
+    for r in picked:
+        job, why = update_job(plan, state, targets.get(r["machine_id"]), now_ms, plan_hash="0" * 16)
+        if job:
+            probe.append((r, job))
+        else:
+            excluded.append({"machine_id": r["machine_id"], "code": "job_unbuildable", "why": why})
+    if not probe:
+        return None, "보낼 기기가 없다"
+    sha = probe[0][1]["asset"]["sha256"]
+    rid = rollout_id(plan["plan_id"], sha, [(j["machine_id"], j["target_hash"]) for _, j in probe], now_ms)
+    jobs = [update_job(plan, state, targets.get(r["machine_id"]), now_ms, plan_hash=rid)[0] for r, _ in probe]
+    scope = rollout_scope(jobs, controller)
+    return {"id": rid, "release_plan": plan["plan_id"], "created_at_ms": now_ms, "approval_scope": scope,
+            "approval_scope_hash": scope_hash(scope), "jobs": jobs, "excluded": excluded}, None

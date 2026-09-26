@@ -355,9 +355,30 @@ pub fn target_authority(
     requested: &str,
     connect: impl FnOnce(&str) -> std::result::Result<Fetch, String>,
 ) -> std::result::Result<Option<RelayAuthority>, String> {
-    match trust_source(local_key, delegated_authority(entries), requested)? {
+    target_authority_for(&RESTART_RELAY, local_key, entries, requested, connect)
+}
+
+/// 중계 한 갈래 — 명부 파일의 위임 표식과 그 표식이 여는 창구. 동작마다 따로 둔다: 사람이 「재시작 승인」으로 위임한 기기가
+/// 다른 동작의 승인까지 나르지 않게.
+#[derive(Clone, Copy, Debug)]
+pub struct Relay {
+    pub delegation: &'static str,
+    pub route: &'static str,
+    pub action: &'static str,
+}
+
+pub const RESTART_RELAY: Relay = Relay { delegation: "restart_approvals", route: "/app/restart/approvals", action: ACTION };
+
+pub fn target_authority_for(
+    relay: &Relay,
+    local_key: bool,
+    entries: &[serde_json::Value],
+    requested: &str,
+    connect: impl FnOnce(&str) -> std::result::Result<Fetch, String>,
+) -> std::result::Result<Option<RelayAuthority>, String> {
+    match trust_source(local_key, delegated_authority_for(entries, relay.delegation), requested)? {
         TrustSource::Local => Ok(None),
-        TrustSource::Relay(machine_id) => Ok(Some(RelayAuthority { fetch: connect(&machine_id)?, machine_id })),
+        TrustSource::Relay(machine_id) => Ok(Some(RelayAuthority { fetch: connect(&machine_id)?, machine_id, route: relay.route })),
     }
 }
 
@@ -377,12 +398,16 @@ pub fn trust_source(local_key: bool, delegated: std::result::Result<String, Stri
 /// 명부에 있다는 것은 위임이 아니다. 명부 **파일**에 사람이 `"restart_approvals": true` 와 `machine_id` 를 함께
 /// 적은 항목 하나만 승인 중계원이다. 손님 항목은 파일에 없고, 폴링으로 배운 id 는 상대가 스스로 댄 값이라 안 본다.
 pub fn delegated_authority(entries: &[serde_json::Value]) -> std::result::Result<String, String> {
-    let marked: Vec<&serde_json::Value> = entries.iter().filter(|e| e["restart_approvals"] == serde_json::Value::Bool(true)).collect();
+    delegated_authority_for(entries, RESTART_RELAY.delegation)
+}
+
+pub fn delegated_authority_for(entries: &[serde_json::Value], key: &str) -> std::result::Result<String, String> {
+    let marked: Vec<&serde_json::Value> = entries.iter().filter(|e| e[key] == serde_json::Value::Bool(true)).collect();
     let [entry] = marked.as_slice() else {
         return Err(if marked.is_empty() {
-            "재시작 승인을 중계할 기기가 명부 파일에 위임돼 있지 않다(restart_approvals)".into()
+            format!("승인을 중계할 기기가 명부 파일에 위임돼 있지 않다({key})")
         } else {
-            "재시작 승인 위임이 명부 파일에 여럿이다 — 하나만 둔다".into()
+            format!("승인 위임이 명부 파일에 여럿이다({key}) — 하나만 둔다")
         });
     };
     entry["machine_id"].as_str()
@@ -396,6 +421,8 @@ pub fn delegated_authority(entries: &[serde_json::Value]) -> std::result::Result
 pub struct RelayAuthority {
     pub machine_id: String,
     pub fetch: Fetch,
+    /// 위임 표식이 연 창구(`Relay::route`) — 그 동작의 승인만 답한다.
+    pub route: &'static str,
 }
 
 /// 중계 기기에 경로 하나를 GET 해 JSON 을 받는다.
@@ -413,7 +440,7 @@ impl Authority for RelayAuthority {
         if !valid_approval_id(approval_id) {
             return Err("approval id 모양이 아니다".into());
         }
-        relayed_view(&(self.fetch)(&format!("/app/restart/approvals/{approval_id}"))?, &self.machine_id)
+        relayed_view(&(self.fetch)(&format!("{}/{approval_id}", self.route))?, &self.machine_id)
     }
 
     fn consume(&self, _: &str, _: &serde_json::Value, _: &str) -> std::result::Result<ApprovalView, String> {
@@ -1119,7 +1146,7 @@ mod tests {
             authorize_target(&req, &facts("a", 1), &relay, NOW)
         };
         assert!(run("evil-machine", &forged).unwrap_err().contains("위임한 기기가 아닌"), "끊긴 터널 자리를 다른 기기가 받아 답했다");
-        let raw = RelayAuthority { machine_id: "ctl-machine".into(), fetch: Box::new(|_| Ok(serde_json::json!({"approved": true, "id": AP}))) };
+        let raw = RelayAuthority { machine_id: "ctl-machine".into(), fetch: Box::new(|_| Ok(serde_json::json!({"approved": true, "id": AP}))), route: RESTART_RELAY.route };
         assert!(authorize_target(&req, &facts("a", 1), &raw, NOW).is_err(), "기기를 안 밝힌 자기주장");
         let mut other_consumer = forged.clone();
         other_consumer.consumed_by = Some("a".into());
@@ -1133,7 +1160,7 @@ mod tests {
         assert!(authorize_run(&plan, AP, &Says(other_consumer.clone())).is_err(), "조종 쪽도 남이 쓴 소비를 안 받는다");
         let nacho = FakeNacho::approving(&plan.scope, "approved", NOW + 1000);
         assert_eq!(nacho.consume(AP, &plan.scope, "a").unwrap_err(), "wrong_consumer", "나쵸 계약: 소비는 scope 의 조종 기기만");
-        assert!(RelayAuthority { machine_id: "ctl-machine".into(), fetch: Box::new(|_| unreachable!()) }.consume(AP, &plan.scope, "ctl").is_err(), "중계는 소비하지 않는다");
+        assert!(RelayAuthority { machine_id: "ctl-machine".into(), fetch: Box::new(|_| unreachable!()), route: RESTART_RELAY.route }.consume(AP, &plan.scope, "ctl").is_err(), "중계는 소비하지 않는다");
     }
 
     #[test]
@@ -1192,7 +1219,7 @@ mod tests {
         assert_eq!(authorize_target(&req, &mac_facts, &Says(used.clone()), at), Ok(()));
         assert!(authorize_target(&req, &mac_facts, &Says(used.clone()), used.expires_at_ms).is_err(), "만료");
         let reply = serde_json::json!({"machine_id": controller, "approval": fx["consume"]["200"]["approval"]});
-        let relay = RelayAuthority { machine_id: controller.into(), fetch: Box::new(move |_| Ok(reply.clone())) };
+        let relay = RelayAuthority { machine_id: controller.into(), fetch: Box::new(move |_| Ok(reply.clone())), route: RESTART_RELAY.route };
         assert_eq!(authorize_target(&req, &mac_facts, &relay, at), Ok(()), "위임 중계로 받은 나쵸 view");
         for word in ["already_used", "scope_changed", "wrong_consumer", "expired", "no_approval", "approvals_disabled"] {
             let named = fx["consume"].as_object().unwrap().values().any(|v| v["error"] == word);

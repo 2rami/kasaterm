@@ -392,6 +392,63 @@ def save_plan(plan, state_dir=None):
     return d
 
 
+def rollout_path(plan_id, rollout_id, state_dir=None, suffix=".json"):
+    if not re.fullmatch(r"[0-9a-f]{16}", rollout_id or ""):
+        raise Refused("rollout id 는 16자리 소문자 hex 다")
+    return plan_dir(plan_id, state_dir) / "rollouts" / f"{rollout_id}{suffix}"
+
+
+def save_rollout(plan_id, rollout, state_dir=None):
+    path = rollout_path(plan_id, rollout["id"], state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rollout, ensure_ascii=False, indent=2))
+    return path
+
+
+def device_apply(plan_id, plan, state, rollout_id, approval_id, live, state_dir=None, runner=None, env=None):
+    """기기 업데이트 러너를 띄운다 — 나쵸 도구만(live 가드는 게시와 같다). 소비·차례·기다림·중단은 러너
+    (`kasaterm-cli app-update run`, `kasa_socket::app_update::run`)가 하고, 여기는 계획·게시 상태·rollout 을 맞춰 본 뒤 넘긴다."""
+    try:
+        path = rollout_path(plan_id, rollout_id, state_dir)
+    except Refused as e:
+        print(f"멈춤: {e}", file=sys.stderr)
+        return 2
+    if not path.exists():
+        print(f"멈춤: rollout {rollout_id} 가 없다 — device-plan 을 먼저", file=sys.stderr)
+        return 2
+    rollout = json.loads(path.read_text())
+    stages = state.get("stages") or {}
+    problems = [p for p in (
+        None if rollout.get("release_plan") == plan["plan_id"] else "rollout 이 이 계획의 것이 아니다",
+        None if plan_hash_ok(plan) else "계획 파일이 바뀌었다",
+        None if all(stages.get(s, {}).get("status") == "done" for s in ("release", "feed")) else "릴리스·피드 단계가 끝나지 않았다",
+        None if nacho.valid_approval_id(approval_id or "") else "--approval ap_… 가 없다",
+    ) if p]
+    if problems:
+        print("멈춤: " + " · ".join(problems), file=sys.stderr)
+        return 2
+    cli = devices.cli_path()
+    grant = rollout_path(plan_id, rollout_id, state_dir, ".grant.json")
+    argv = [cli or "kasaterm-cli", "app-update", "run", "--approval", approval_id, "--rollout", str(path), "--record", str(grant)]
+    if not live:
+        print("미리보기(아무것도 안 보냄): " + " ".join(argv))
+        print(f"  차례: {', '.join(j['machine_id'] for j in rollout['jobs'])} · 대상당 최대 {(30 * 60 + 210) // 60}분")
+        return 0
+    why = invoker_problem(os.environ if env is None else env)
+    if why:
+        print(f"멈춤: {why}", file=sys.stderr)
+        return 2
+    if not cli:
+        print("멈춤: kasaterm-cli 를 찾지 못했다", file=sys.stderr)
+        return 2
+    runner = runner or Runner("live")
+    r = runner.run(argv, timeout=len(rollout["jobs"]) * 2100 + 120, kind="publish")
+    print(r.out, end="")
+    if r.err:
+        print(r.err, end="", file=sys.stderr)
+    return 0 if r.ok else 1
+
+
 def load(plan_id, state_dir=None):
     d = plan_dir(plan_id, state_dir)
     plan = json.loads((d / "plan.json").read_text())
@@ -560,15 +617,17 @@ def main(argv=None):
     p.add_argument("--version", default=None)
     p.add_argument("--ios-build", default=None)
     p.add_argument("--json", action="store_true")
-    for name in ("dry-run", "status", "run", "device-plan"):
+    for name in ("dry-run", "status", "run", "device-plan", "device-apply"):
         s = sub.add_parser(name)
         s.add_argument("plan_id")
         s.add_argument("--repo", default=".")
         if name in ("status", "device-plan"):
             s.add_argument("--json", action="store_true")
-        if name == "run":
+        if name in ("run", "device-apply"):
             s.add_argument("--live", action="store_true", help="게시 단계까지 — 나쵸 승인을 한 번 소비한다")
             s.add_argument("--approval", default=None)
+        if name == "device-apply":
+            s.add_argument("--rollout", required=True)
     a = ap.parse_args(argv)
 
     if a.cmd == "plan":
@@ -585,14 +644,17 @@ def main(argv=None):
     if a.cmd == "device-plan":
         targets, problem = devices.gather_facts(Runner("dry"), plan["device_ids"])
         rows = devices.plan_devices(plan, state, targets, problem)
+        now = int(time.time() * 1000)
+        rollout, why_none = devices.update_rollout(plan, state, targets, rows, now)
+        if rollout:
+            save_rollout(a.plan_id, rollout, a.state_dir)
         if a.json:
-            now = int(time.time() * 1000)
             out = []
             for r in rows:
                 job, why = devices.update_job(plan, state, targets.get(r["machine_id"]), now)
-                out.append({**r, "job": job, "job_problem": why,
-                            "scope": devices.update_scope(job, plan["controller"]) if job else None})
-            print(json.dumps({"plan_id": plan["plan_id"], "dry_run": True, "devices": out}, ensure_ascii=False, indent=2))
+                out.append({**r, "job": job, "job_problem": why})
+            print(json.dumps({"plan_id": plan["plan_id"], "dry_run": True, "devices": out, "rollout": rollout,
+                              "rollout_problem": why_none}, ensure_ascii=False, indent=2))
             return 0
         print(f"기기 받기·설치 예약 계획(dry-run) · {plan['tag']} · 기기 {len(rows)}대" + (f" · {problem}" if problem else ""))
         for r in rows:
@@ -602,7 +664,14 @@ def main(argv=None):
             for i, step in enumerate(r["steps"], 1):
                 print(f"      {i}. {step}")
             print(f"      지금 받는 길: {r['fallback']}")
+        if rollout:
+            names = ", ".join(j["machine_id"][:8] for j in rollout["jobs"])
+            print(f"  rollout {rollout['id']} — 차례: {names} · 승인 범위 {rollout['approval_scope_hash'][:19]}")
+        else:
+            print(f"  rollout 없음 — {why_none}")
         return 0
+    if a.cmd == "device-apply":
+        return device_apply(a.plan_id, plan, state, a.rollout, a.approval, a.live, a.state_dir)
     if a.cmd == "status":
         backend = backend_for(a.repo, plan, "dry", a.state_dir)
         state["remote"] = backend.observe(plan)

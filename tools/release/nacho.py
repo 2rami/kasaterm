@@ -24,6 +24,10 @@ class Denied(Exception):
     """나쵸가 준 거절 낱말(no_approval·already_used·scope_changed…) 또는 여기서 본 까닭."""
 
 
+def valid_approval_id(aid):
+    return bool(_AID.match(aid or ""))
+
+
 def scope_hash(scope):
     raw = json.dumps(scope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()

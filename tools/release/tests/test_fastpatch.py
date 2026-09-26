@@ -7,7 +7,10 @@ import subprocess
 import tempfile
 import threading
 import time
+import contextlib
+import io
 import unittest
+from unittest import mock
 
 from tools.release import deps
 from tools.release import fastpatch as fp
@@ -910,6 +913,79 @@ class DevicePlanTests(Fixture):
         self.assertIn("mac 만", fp.devices.update_job(plan, state, self.facts("win-1", "windows"), 1000)[1])
         # 기기(kasa_socket::app_update `the_job_id_matches_the_controller_side`)와 같은 값.
         self.assertEqual(fp.devices.update_job_id("abcdef0123456789", "mac-1", "sha256:" + "0" * 64), "upd4e7a732ffa7a1c8")
+
+    def rollout_case(self):
+        old = sh(self.work, "git", "rev-parse", "v0.2.0")[:8]
+        devs = [self.device("미니", "0.2.0", old, "mac-1"), self.device("맥북", "0.2.0", old, "mac-2"),
+                self.device("윈도", "0.2.0", old, "win-1"), self.device("꺼진 맥", "0.2.0", old, "mac-3")]
+        plan = self.plan(devs)
+        plan["controller"] = "mac-1"
+        plan["plan_id"] = fp.sha256_bytes(fp.canonical(fp.core_of(plan)))[7:23]
+        release = {"status": "done", "detail": {"assets": {"macos": {"name": "kasaterm-v0.2.1.dmg", "size": 10, "sha256": "sha256:" + "a" * 64}}}}
+        state = {"stages": {"release": release, "feed": {"status": "done", "detail": {"signatures": {"macos": "c2ln"}}}}}
+        on = {"capability": 1, "enabled": True}
+        targets = {"mac-1": self.facts("mac-1", **on), "mac-2": self.facts("mac-2", refusals=("busy_students",), **on),
+                   "win-1": self.facts("win-1", "windows", refusals=("unsupported_os",)), "mac-3": self.facts("mac-3", capability=1)}
+        rows = fp.devices.plan_devices(plan, state, targets)
+        return plan, state, targets, rows
+
+    def test_one_rollout_carries_every_ready_mac_in_order_with_the_controller_last(self):
+        plan, state, targets, rows = self.rollout_case()
+        rollout, why = fp.devices.update_rollout(plan, state, targets, rows, 1790000000000)
+        self.assertIsNone(why)
+        self.assertEqual([j["machine_id"] for j in rollout["jobs"]], ["mac-2", "mac-1"], "바쁜 맥도 싣는다(적용만 기다림), 조종 기기는 맨 뒤")
+        self.assertEqual({e["machine_id"]: e["code"] for e in rollout["excluded"]}, {"win-1": "not_macos", "mac-3": "update_disabled"})
+        scope = rollout["approval_scope"]
+        self.assertEqual(sorted(scope), ["action", "asset", "commit", "controller", "plan", "tag", "targets", "version"])
+        self.assertEqual(scope["targets"], [{"order": 1, "machine_id": "mac-2", "hash": "tmac-2"}, {"order": 2, "machine_id": "mac-1", "hash": "tmac-1"}])
+        self.assertEqual(rollout["approval_scope_hash"], fp.nacho.scope_hash(scope))
+        self.assertEqual(rollout["id"], fp.devices.fnv([plan["plan_id"], "sha256:" + "a" * 64, "mac-2=tmac-2", "mac-1=tmac-1", "1790000000000"]))
+        for job in rollout["jobs"]:
+            self.assertEqual(job["plan_hash"], rollout["id"])
+            self.assertEqual(job["job_id"], fp.devices.update_job_id(rollout["id"], job["machine_id"], job["asset"]["sha256"]))
+        again, _ = fp.devices.update_rollout(plan, state, targets, rows, 1790000000001)
+        self.assertNotEqual(again["id"], rollout["id"], "다시 굴리면 새 id — 기기의 옛 실패 기록과 안 겹친다")
+        # 러스트(`the_scope_hash_is_the_one_nacho_computes`)와 같은 정규화.
+        vector = {"action": "kasaterm_update", "plan": "abcdef0123456789", "controller": "ctl", "tag": "v0.2.1", "version": "0.2.1",
+                  "commit": "5e4d138684156c710831055f5b042688b335f617", "asset": {"name": "kasaterm-v0.2.1.dmg", "sha256": "sha256:" + "a" * 64, "size": 10},
+                  "targets": [{"order": 1, "machine_id": "mac-a", "hash": "0123456789abcdef"}, {"order": 2, "machine_id": "ctl", "hash": "fedcba9876543210"}]}
+        self.assertEqual(fp.nacho.scope_hash(vector), "sha256:5352981248969a5cb4a59cf3e9a06ea348894a5d01a3d21dc65af53f03d9f720")
+        self.assertIsNone(fp.devices.update_rollout(plan, {"stages": {}}, targets, rows, 1)[0], "게시 전엔 보낼 것이 없다")
+        # 러스트 `the_target_hash_matches_the_controller_side` 와 같은 값.
+        self.assertEqual(fp.devices.target_hash({"machine_id": "mac-a", "app_path": "/Users/x/Applications/kasaterm.app", "pid": 11,
+                                                 "binary": {"inode": 1, "mtime_ms": 2, "build": "8933a0ca"}, "capability": 1}), "d206bd151df55dd2")
+
+    def test_device_apply_hands_the_rollout_to_the_runner_only_from_the_nacho_tool(self):
+        plan, state, targets, rows = self.rollout_case()
+        rollout, _ = fp.devices.update_rollout(plan, state, targets, rows, 1790000000000)
+        sd = self.tmp / "state"
+        path = fp.save_rollout(plan["plan_id"], rollout, sd)
+        aid = "ap_" + "0" * 32
+        calls = []
+
+        class Rec:
+            def run(self, argv, timeout=None, kind=None):
+                calls.append((argv, timeout, kind))
+                return Result(0, "mac-2 {}\n")
+        def apply(st, **kw):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return fp.device_apply(plan["plan_id"], plan, st, rollout["id"], kw.get("aid", aid), kw.get("live", True), sd,
+                                       runner=Rec(), env=kw.get("env", {"KASATERM_RELEASE_INVOKER": "nacho-tool"}))
+        self.assertEqual(apply({"stages": {"release": state["stages"]["release"]}}), 2, "피드 확인 전엔 안 띄운다")
+        self.assertEqual(apply(state, aid="ap_x"), 2)
+        self.assertEqual(apply(state, env={"KASATERM_PANE_ID": "%3", "KASATERM_RELEASE_INVOKER": "nacho-tool"}), 2, "창 안에서는 못 친다")
+        self.assertEqual(apply(state, env={}), 2)
+        self.assertEqual(apply(state, live=False), 0)
+        self.assertEqual(calls, [], "미리보기·거절은 아무것도 안 띄운다")
+        with mock.patch.object(fp.devices, "cli_path", return_value="/x/kasaterm-cli"):
+            self.assertEqual(apply(state), 0)
+        argv, timeout, kind = calls[-1]
+        self.assertEqual(argv, ["/x/kasaterm-cli", "app-update", "run", "--approval", aid, "--rollout", str(path),
+                                "--record", str(path.with_name(rollout["id"] + ".grant.json"))])
+        self.assertEqual((timeout, kind), (2 * 2100 + 120, "publish"))
+        other = {**plan, "plan_id": "f" * 16}
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(fp.device_apply(other["plan_id"], other, state, rollout["id"], aid, False, sd), 2, "다른 계획의 rollout")
 
     def test_facts_come_from_the_app_restart_plan_read_only(self):
         answer = {"targets": [self.facts("mac-1")]}

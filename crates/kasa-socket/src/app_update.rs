@@ -21,7 +21,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 
-use crate::app_restart::{self, Authority, Facts};
+use crate::app_restart::{self, ApprovalView, Authority, Facts};
 
 pub const SCHEMA: &str = "kasaterm-update/1";
 /// 이 창구가 든 판이 `Facts::update_capability` 로 알린다.
@@ -35,6 +35,9 @@ pub const RELEASE_PREFIX: &str = "https://github.com/2rami/kasaterm/releases/dow
 /// Sparkle·WinSparkle 과 같은 EdDSA 공개키(scripts/build-app.sh `SUPublicEDKey`). 새 키가 아니다.
 pub const ED_PUBLIC_KEY: &str = "E4tFAb2UND+0QhgTSv2pFYKIC3ReT/dLia20KHfZxKw=";
 const JOB_TTL_MS: u64 = 60 * 60_000;
+/// 이 기기가 받은 뒤 적용을 기다리는 상한(자기 시계). 나쵸는 소비한 update 승인을 대상마다 35분씩 살려 둔다 —
+/// 이 30분 + 종료 60초 + 부팅 90초 + 여유.
+pub const MAX_WAIT_MS: u64 = 30 * 60_000;
 
 /// 설치 실행 스위치 — 기본 꺼짐. 받기·확인·준비·갈아 끼우기가 전부 이 뒤에 있다.
 pub fn install_enabled(get: &dyn Fn(&str) -> Option<String>) -> bool {
@@ -132,6 +135,9 @@ pub fn check_job(job: &UpdateJob) -> std::result::Result<(), String> {
     if job.team.len() != 10 || !job.team.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
         return Err("요구 서명 팀이 Apple 팀 id 모양이 아니다".into());
     }
+    if !job.require_notarized {
+        return Err("공증 요구를 끌 수 없다".into());
+    }
     if job.job_id != job_id(&job.plan_hash, &job.machine_id, &a.sha256) {
         return Err("작업 id 가 계획·기기·파일과 맞지 않는다".into());
     }
@@ -182,7 +188,7 @@ pub fn authorize(
     authority: &dyn Authority,
     enabled: bool,
     now_ms: u64,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<ApprovalView, String> {
     if !enabled {
         return Err("update_disabled — 이 기기의 설치 창구가 꺼져 있다(KASATERM_APP_UPDATE)".into());
     }
@@ -204,20 +210,7 @@ pub fn authorize(
     if !app_restart::valid_approval_id(&req.approval_id) {
         return Err("approval id 모양이 아니다".into());
     }
-    let view = authority.get(&req.approval_id)?;
-    if view.id != req.approval_id {
-        return Err("요청한 승인이 아닌 승인이 돌아왔다".into());
-    }
-    if view.action != ACTION || view.state != "approved" {
-        return Err(format!("승인되지 않았다({} {})", view.action, view.state));
-    }
-    let controller = view.scope["controller"].as_str();
-    if controller.is_none() || view.consumed_at_ms.is_none() || view.consumed_by.as_deref() != controller {
-        return Err("조종 기기가 이 승인을 소비하지 않았다".into());
-    }
-    if now_ms >= view.expires_at_ms {
-        return Err("승인이 만료됐다".into());
-    }
+    let view = usable_approval(authority, &req.approval_id, now_ms)?;
     let s = &view.scope;
     let same = s["plan"].as_str() == Some(&job.plan_hash)
         && s["tag"].as_str() == Some(&job.tag)
@@ -231,7 +224,30 @@ pub fn authorize(
     if !same || !mine {
         return Err("승인한 대상·판·파일에 이 작업이 없다".into());
     }
-    Ok(())
+    Ok(view)
+}
+
+/// 지금 쓸 수 있는 update 승인인가 — 받을 때마다(다시 보내기 포함), 그리고 갈아 끼우기 직전에 다시 본다. 주인이 거둔
+/// 승인(`revoked`)·만료된 승인은 여기서 걸린다. 이미 도우미에 넘긴 뒤에는 못 멈춘다.
+pub fn usable_approval(authority: &dyn Authority, approval_id: &str, now_ms: u64) -> std::result::Result<ApprovalView, String> {
+    if !app_restart::valid_approval_id(approval_id) {
+        return Err("approval id 모양이 아니다".into());
+    }
+    let view = authority.get(approval_id)?;
+    if view.id != approval_id {
+        return Err("요청한 승인이 아닌 승인이 돌아왔다".into());
+    }
+    if view.action != ACTION || view.state != "approved" {
+        return Err(format!("승인되지 않았다({} {})", view.action, view.state));
+    }
+    let controller = view.scope["controller"].as_str();
+    if controller.is_none() || view.consumed_at_ms.is_none() || view.consumed_by.as_deref() != controller {
+        return Err("조종 기기가 이 승인을 소비하지 않았다".into());
+    }
+    if now_ms >= view.expires_at_ms {
+        return Err("승인이 만료됐다".into());
+    }
+    Ok(view)
 }
 
 /// 재시작 쪽 거부 중 이 작업을 막는 것. 받기·준비(`apply=false`)는 바쁜 학생·미저장 편집기·굽기를 기다리지 않는다 —
@@ -245,13 +261,98 @@ pub fn blocking(facts: &Facts, job_id: &str, now_ms: u64, apply: bool) -> Vec<ap
     }).collect()
 }
 
-/// 나쵸가 승인할 범위 — 조종 기기가 만들고 한 번 소비한다(재시작 scope 와 같은 결).
-pub fn scope(job: &UpdateJob, controller: &str, order: u32) -> serde_json::Value {
+/// 나쵸가 승인할 범위 — 대상 여럿을 한 번에(키 8개, 나쵸 `validate_update_scope` 와 같은 선). 조종 기기가 만들고 한 번 소비한다.
+/// 모든 작업은 같은 rollout·판·파일이어야 한다(`check_rollout`).
+pub fn rollout_scope(jobs: &[UpdateJob], controller: &str) -> serde_json::Value {
+    let first = jobs.first();
     serde_json::json!({
-        "action": ACTION, "plan": job.plan_hash, "controller": controller, "tag": job.tag, "version": job.version,
-        "commit": job.commit, "asset": {"name": job.asset.name, "sha256": job.asset.sha256, "size": job.asset.size},
-        "targets": [{"order": order, "machine_id": job.machine_id, "hash": job.target_hash}],
+        "action": ACTION,
+        "plan": first.map(|j| j.plan_hash.as_str()).unwrap_or(""),
+        "controller": controller,
+        "tag": first.map(|j| j.tag.as_str()).unwrap_or(""),
+        "version": first.map(|j| j.version.as_str()).unwrap_or(""),
+        "commit": first.map(|j| j.commit.as_str()).unwrap_or(""),
+        "asset": first.map(|j| serde_json::json!({"name": j.asset.name, "sha256": j.asset.sha256, "size": j.asset.size})).unwrap_or_default(),
+        "targets": jobs.iter().enumerate()
+            .map(|(n, j)| serde_json::json!({"order": n + 1, "machine_id": j.machine_id, "hash": j.target_hash}))
+            .collect::<Vec<_>>(),
     })
+}
+
+/// 나쵸 `approvals.scope_hash` 와 같은 값 — 키를 정렬한 빈칸 없는 JSON 의 sha256.
+pub fn scope_hash(scope: &serde_json::Value) -> String {
+    fn canonical(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(m) => {
+                let sorted: std::collections::BTreeMap<&String, serde_json::Value> = m.iter().map(|(k, v)| (k, canonical(v))).collect();
+                serde_json::to_value(sorted).unwrap_or_default()
+            }
+            serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(canonical).collect()),
+            other => other.clone(),
+        }
+    }
+    format!("sha256:{:x}", sha2::Sha256::digest(canonical(scope).to_string().as_bytes()))
+}
+
+pub const MAX_TARGETS: usize = 16;
+/// 키 없는 기기가 update 승인을 읽는 중계 — 명부 파일의 별도 위임 표식이 있어야 한다(재시작 위임으로는 안 나른다).
+pub const UPDATE_RELAY: app_restart::Relay = app_restart::Relay { delegation: "update_approvals", route: "/app/update/approvals", action: ACTION };
+
+/// 한 번의 승인으로 여러 기기에 차례로 보내는 묶음(`device-plan --json` 의 `rollout` 한 칸 그대로). `tools/release` 가 짓고, 나쵸가
+/// `approval_scope` 를 사람에게 보여 승인을 받는다. 조종 쪽 러너(`run`)는 이 파일을 믿지 않고 작업들로 범위를 다시 지어 대조한다.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rollout {
+    pub id: String,
+    pub release_plan: String,
+    pub created_at_ms: u64,
+    pub approval_scope: serde_json::Value,
+    pub approval_scope_hash: String,
+    pub jobs: Vec<UpdateJob>,
+    /// 이번에 안 보내는 기기와 까닭 — 보이기만 한다.
+    #[serde(default)]
+    pub excluded: Vec<serde_json::Value>,
+}
+
+impl Rollout {
+    /// 승인을 소비하는 기기 — 범위에 적힌 조종 기기(러너가 서 있는 곳).
+    pub fn controller(&self) -> &str {
+        self.approval_scope["controller"].as_str().unwrap_or("")
+    }
+}
+
+pub fn check_rollout(r: &Rollout) -> std::result::Result<(), String> {
+    if r.controller().is_empty() {
+        return Err("범위에 조종 기기가 없다".into());
+    }
+    if r.jobs.is_empty() || r.jobs.len() > MAX_TARGETS {
+        return Err(format!("대상이 없거나 {MAX_TARGETS}대를 넘는다"));
+    }
+    if !hex(&r.id, 16, 16) {
+        return Err("rollout id 가 16자리 소문자 hex 가 아니다".into());
+    }
+    let first = &r.jobs[0];
+    let mut seen = std::collections::HashSet::new();
+    for job in &r.jobs {
+        check_job(job).map_err(|e| format!("{}: {e}", job.machine_id))?;
+        if job.plan_hash != r.id || job.tag != first.tag || job.version != first.version || job.commit != first.commit
+            || job.asset != first.asset || job.team != first.team || job.build != first.build
+        {
+            return Err("작업들이 한 rollout·판·파일이 아니다".into());
+        }
+        if !seen.insert(job.machine_id.as_str()) {
+            return Err(format!("같은 기기가 두 번 있다({})", job.machine_id));
+        }
+    }
+    if let Some(n) = r.jobs.iter().position(|j| j.machine_id == r.controller()) {
+        if n + 1 != r.jobs.len() {
+            return Err("조종 기기는 맨 뒤여야 한다 — 러너가 거기 서 있다".into());
+        }
+    }
+    let scope = rollout_scope(&r.jobs, r.controller());
+    if r.approval_scope != scope || r.approval_scope_hash != scope_hash(&scope) {
+        return Err("승인 범위가 작업들로 다시 지은 범위와 다르다".into());
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- 작업 기록
@@ -397,7 +498,7 @@ pub fn active_job(dir: &Path, now_ms: u64) -> Option<Status> {
     std::fs::read_dir(dir).ok()?.flatten().filter_map(|e| {
         let id = e.file_name().to_string_lossy().strip_suffix(".json")?.to_string();
         let s = status(dir, &id).ok()?;
-        (!s.state.terminal() && now_ms.saturating_sub(s.job.created_at_ms) < JOB_TTL_MS).then_some(s)
+        (!s.state.terminal() && now_ms.saturating_sub(accepted_at_ms(&s)) < JOB_TTL_MS).then_some(s)
     }).next()
 }
 
@@ -418,6 +519,11 @@ pub fn accept(
     }
     let (_, created) = create_job(dir, &req.job).map_err(|e| e.to_string())?;
     Ok((status(dir, &req.job.job_id).map_err(|e| e.to_string())?, created))
+}
+
+/// 이 기기가 작업을 처음 받은 때(자기 시계) — 기다림 상한·부팅 표식 창은 조종 쪽이 적은 `created_at_ms` 가 아니라 이것으로 잰다.
+pub fn accepted_at_ms(s: &Status) -> u64 {
+    s.events.first().map(|e| e.at_s * 1000).unwrap_or(s.job.created_at_ms)
 }
 
 // ---------------------------------------------------------------- 받기·확인·준비
@@ -486,17 +592,31 @@ pub fn work_dir(cache: &Path, job: &UpdateJob) -> PathBuf {
     cache.join(job.asset.sha256.trim_start_matches("sha256:").get(..16).unwrap_or("unknown"))
 }
 
-fn identity_problem(ident: &Identity, job: &UpdateJob, what: &str) -> Option<String> {
+/// 요구 팀은 요청이 아니라 **설치본 자신의 서명**에서 온다(요청의 `team` 은 그것과 같아야 할 뿐). 공증은 늘 요구한다 — 둘 다 승인
+/// 범위에 없는 칸이라, 요청이 느슨한 값을 대서 검사를 풀 수 없게.
+fn identity_problem(ident: &Identity, team: &str, what: &str) -> Option<String> {
     if !ident.verified {
         return Some(format!("{what} 서명이 깨졌다"));
     }
-    if ident.team.as_deref() != Some(job.team.as_str()) {
-        return Some(format!("{what} 서명 팀이 설치본과 다르다({} ≠ {})", ident.team.as_deref().unwrap_or("없음"), job.team));
+    if ident.team.as_deref() != Some(team) {
+        return Some(format!("{what} 서명 팀이 설치본과 다르다({} ≠ {team})", ident.team.as_deref().unwrap_or("없음")));
     }
-    if job.require_notarized && !ident.notarized {
+    if !ident.notarized {
         return Some(format!("{what} 가 공증되지 않았다"));
     }
     None
+}
+
+/// 설치본의 서명 팀 — 설치본 서명이 멀쩡하고 팀이 있어야 하며, 요청이 댄 팀과 같아야 한다.
+fn installed_team(effects: &dyn Effects, installed: &Path, job: &UpdateJob) -> std::result::Result<String, String> {
+    let own = effects.identity(installed)?;
+    let Some(team) = own.team.filter(|_| own.verified) else {
+        return Err("설치본의 서명 팀을 잴 수 없다 — 무엇과 견줄지 몰라 받지 않는다".into());
+    };
+    if team != job.team {
+        return Err(format!("요청이 댄 팀({})이 설치본 팀({team})과 다르다", job.team));
+    }
+    Ok(team)
 }
 
 /// 받기 → 확인 → 준비. 단계마다 기록을 남긴다.
@@ -579,12 +699,13 @@ pub fn prepare(
     let mnt = work.join("mnt");
     let _ = std::fs::remove_dir_all(&mnt);
     std::fs::create_dir_all(&mnt).map_err(|e| fail(e.to_string()))?;
+    let team = installed_team(effects, installed, job).map_err(&fail)?;
     effects.mount(&file, &mnt).map_err(|e| fail(format!("dmg 를 열지 못했다 — {e}")))?;
     let staged = staged_path(installed);
     let result = (|| -> std::result::Result<(), String> {
         let app = mnt.join("kasaterm.app");
         let ident = effects.identity(&app)?;
-        if let Some(why) = identity_problem(&ident, job, "dmg 안 번들") {
+        if let Some(why) = identity_problem(&ident, &team, "dmg 안 번들") {
             return Err(why);
         }
         if bundle_version(&app).as_deref() != Some(job.version.as_str()) {
@@ -596,7 +717,7 @@ pub fn prepare(
     effects.unmount(&mnt);
     if let Err(why) = result.and_then(|_| {
         let ident = effects.identity(&staged)?;
-        identity_problem(&ident, job, "준비한 번들").map_or(Ok(()), Err)
+        identity_problem(&ident, &team, "준비한 번들").map_or(Ok(()), Err)
     }) {
         let _ = std::fs::remove_dir_all(&staged);
         return Err(fail(why));
@@ -608,20 +729,20 @@ pub fn prepare(
 /// 운영 효과 — 모두 시스템 경로의 도구다. 받기는 https 만, 넘겨주기(리다이렉트)도 https 만, 크기 상한을 건다.
 pub struct SystemEffects;
 
-fn run(argv: &[&str]) -> std::result::Result<std::process::Output, String> {
+fn exec(argv: &[&str]) -> std::result::Result<std::process::Output, String> {
     std::process::Command::new(argv[0]).args(&argv[1..]).output().map_err(|e| format!("{}: {e}", argv[0]))
 }
 
 impl Effects for SystemEffects {
     fn feed(&self, url: &str, max: u64) -> std::result::Result<String, String> {
-        let out = run(&["/usr/bin/curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "20",
+        let out = exec(&["/usr/bin/curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "20",
                         "--max-filesize", &max.to_string(), url])?;
         out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
             .ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 
     fn fetch(&self, url: &str, max: u64, dest: &Path) -> std::result::Result<(), FetchError> {
-        let out = run(&["/usr/bin/curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "900",
+        let out = exec(&["/usr/bin/curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "900",
                         "--max-filesize", &max.to_string(), "-o", &dest.display().to_string(), url]).map_err(FetchError::Cut)?;
         match out.status.code() {
             Some(0) => Ok(()),
@@ -632,29 +753,29 @@ impl Effects for SystemEffects {
     }
 
     fn mount(&self, dmg: &Path, at: &Path) -> std::result::Result<(), String> {
-        let out = run(&["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint",
+        let out = exec(&["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint",
                         &at.display().to_string(), &dmg.display().to_string()])?;
         out.status.success().then_some(()).ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 
     fn unmount(&self, at: &Path) {
-        let _ = run(&["/usr/bin/hdiutil", "detach", &at.display().to_string()]);
+        let _ = exec(&["/usr/bin/hdiutil", "detach", &at.display().to_string()]);
     }
 
     fn identity(&self, app: &Path) -> std::result::Result<Identity, String> {
         let path = app.display().to_string();
-        let verified = run(&["/usr/bin/codesign", "--verify", "--deep", "--strict", &path])?.status.success();
-        let shown = run(&["/usr/bin/codesign", "-dvv", &path])?;
+        let verified = exec(&["/usr/bin/codesign", "--verify", "--deep", "--strict", &path])?.status.success();
+        let shown = exec(&["/usr/bin/codesign", "-dvv", &path])?;
         let text = String::from_utf8_lossy(&shown.stderr);
         let team = text.lines().find_map(|l| l.strip_prefix("TeamIdentifier=")).map(str::trim)
             .filter(|t| *t != "not set").map(str::to_string);
-        let gate = run(&["/usr/sbin/spctl", "--assess", "--type", "execute", "-vv", &path])?;
+        let gate = exec(&["/usr/sbin/spctl", "--assess", "--type", "execute", "-vv", &path])?;
         let notarized = gate.status.success() && String::from_utf8_lossy(&gate.stderr).contains("Notarized");
         Ok(Identity { verified, team, notarized })
     }
 
     fn copy_bundle(&self, from: &Path, to: &Path) -> std::result::Result<(), String> {
-        let out = run(&["/usr/bin/ditto", &from.display().to_string(), &to.display().to_string()])?;
+        let out = exec(&["/usr/bin/ditto", &from.display().to_string(), &to.display().to_string()])?;
         out.status.success().then_some(()).ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 }
@@ -802,6 +923,7 @@ pub fn drive(
     dev: &Device,
     job: &UpdateJob,
     facts_now: &dyn Fn() -> std::result::Result<Facts, String>,
+    approval_now: &dyn Fn() -> std::result::Result<(), String>,
     now_ms: &dyn Fn() -> u64,
 ) -> std::result::Result<Step, String> {
     if !dev.enabled {
@@ -815,8 +937,9 @@ pub fn drive(
         return Err(why.into());
     }
     // 부팅 표식은 한 시간 안의 작업에만 붙는다(`active_job`) — 오래 기다린 작업을 지금 갈아 끼우면 새 판의 도착을 못 적는다.
-    if now_ms().saturating_sub(job.created_at_ms) > JOB_TTL_MS / 2 {
-        let why = "작업이 30분 넘게 기다렸다 — 새 계획·승인으로 다시 한다";
+    let accepted = status(&dev.dir, &job.job_id).map(|s| accepted_at_ms(&s)).unwrap_or(job.created_at_ms);
+    if now_ms().saturating_sub(accepted) > MAX_WAIT_MS {
+        let why = "받은 지 30분 넘게 기다렸다 — 새 계획·승인으로 다시 한다";
         let _ = advance(&dev.dir, &job.job_id, State::Failed, why);
         return Err(why.into());
     }
@@ -824,6 +947,12 @@ pub fn drive(
         let why = refusal.message();
         let _ = note(&dev.dir, &job.job_id, &format!("waiting: {why}"));
         return Ok(Step::Waiting(why));
+    }
+    // 도우미에 넘기기 직전에 승인을 한 번 더 — 기다리는 사이 주인이 거뒀거나 만료됐으면 준비한 채 끝낸다.
+    if let Err(why) = approval_now() {
+        let why = format!("승인을 더 쓸 수 없다 — {why}");
+        let _ = advance(&dev.dir, &job.job_id, State::Failed, &why);
+        return Err(why);
     }
     let spec = SwapSpec {
         dir: dev.dir.clone(),
@@ -845,13 +974,308 @@ pub fn mark_booted(dir: &Path, machine_id: &str, pid: u32, build: &str, now_ms: 
     if s.job.machine_id != machine_id || !waiting || pid == s.job.old_pid {
         return None;
     }
+    let same = build_matches(build, &s.job.build);
     let build = build.trim_end_matches('+');
-    let same = build.len() >= 7 && (s.job.build.starts_with(build) || build.starts_with(&s.job.build));
     let id = s.job.job_id.clone();
     let _ = advance(dir, &id, State::Booted, &format!("pid {pid} build {build}"));
     let end = if same { State::Done } else { State::Failed };
     let _ = advance(dir, &id, end, &if same { "build matches".to_string() } else { format!("booted build {build} ≠ {}", s.job.build) });
     Some((id, end))
+}
+
+// ---------------------------------------------------------------- 조종 쪽 러너
+
+/// 조종 기기가 대상에 닿는 길. 운영은 앱 소켓(다른 기기는 앱이 명부 경유 HTTP 로 넘긴다), 검사는 가짜·실제 HTTP.
+pub trait Transport {
+    fn facts(&self, machine_id: &str) -> std::result::Result<Facts, String>;
+    fn start(&self, machine_id: &str, req: &UpdateRequest) -> std::result::Result<serde_json::Value, Reach>;
+    fn status(&self, machine_id: &str, job_id: &str) -> std::result::Result<Status, String>;
+}
+
+/// 작업 걸기가 안 된 까닭 — 기기가 판정해 거절한 것과 닿지 못한 것을 가른다. 거절은 다시 보내도 같고, 닿지 못함은 다시 해 본다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reach {
+    Refused(String),
+    Unreachable(String),
+}
+
+/// 작업 걸기 오류 글을 가른다 — 원격(`kasa_mcp::remote`)이 닿지 못했거나 앱 소켓이 끊긴 것은 `Unreachable`, 기기가 판정해 답한
+/// 것(HTTP 4xx·앱의 거절 글)은 `Refused`.
+pub fn reach_of(err: &str) -> Reach {
+    const CUT: [&str; 6] = ["원격 POST 요청", "원격 답 해석", "error sending request", "timed out", "Connection refused", "connect to"];
+    if CUT.iter().any(|w| err.contains(w)) {
+        Reach::Unreachable(err.to_string())
+    } else {
+        Reach::Refused(err.to_string())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RunPolicy {
+    pub poll_every: std::time::Duration,
+    /// 기기가 기다림(`waiting:`)·끊김(`retry:`)을 적는 동안 같은 작업을 다시 보내는 간격 — 기기는 그때마다 사실·승인을 다시 잰다.
+    pub resend_every_ms: u64,
+    /// 도우미에 넘기기 전까지 기다리는 상한. 기기 쪽 `MAX_WAIT_MS` 와 같다.
+    pub wait_cap_ms: u64,
+    /// 도우미에 넘긴 뒤 새 판 도착까지 — 종료 60초 + 부팅 90초 + 여유.
+    pub boot_cap_ms: u64,
+    /// 재기동 중 끊기는 것은 정상이다 — 연달아 이만큼 못 물으면 실패로 친다.
+    pub max_status_errors: u32,
+}
+
+impl Default for RunPolicy {
+    fn default() -> Self {
+        Self { poll_every: std::time::Duration::from_secs(2), resend_every_ms: 20_000, wait_cap_ms: MAX_WAIT_MS,
+               boot_cap_ms: (60 + 90 + 60) * 1000, max_status_errors: 60 }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Outcome {
+    Updated { job_id: String, new_pid: u32, build: String },
+    /// 조종 기기 — 도우미에 넘기면 자기를 끈다. 새 판 확인은 다시 뜬 뒤 `status` 로 본다.
+    HandedOff { job_id: String },
+    Failed { job_id: Option<String>, reason: String },
+    Skipped { reason: String },
+}
+
+/// 한 번 소비한 기록. 다시 굴릴 때 이것이 있으면 소비하지 않고 나쵸에서 읽기만 한다.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Grant {
+    pub rollout: String,
+    pub approval_id: String,
+    pub scope_hash: String,
+    pub consumed_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+fn last_note(s: &Status) -> &str {
+    s.events.last().map(|e| e.note.as_str()).unwrap_or("")
+}
+
+/// 대상 하나가 지금 새 판을 받아도 되는가 — 소비 전 한 번씩. 기다리면 풀리는 것(바쁜 학생 등)은 막지 않는다.
+fn preflight(job: &UpdateJob, facts: &Facts, now_ms: u64) -> std::result::Result<(), String> {
+    if facts.machine_id != job.machine_id {
+        return Err("다른 기기가 답했다".into());
+    }
+    if facts.update_capability < CAPABILITY {
+        return Err("이 기기 앱엔 업데이트 창구가 없다(update_endpoint_missing)".into());
+    }
+    if !facts.update_enabled {
+        return Err("update_disabled — 이 기기의 설치 스위치가 꺼져 있다".into());
+    }
+    if let Some(refusal) = blocking(facts, &job.job_id, now_ms, false).first() {
+        return Err(refusal.message());
+    }
+    if app_restart::target_hash(facts) != job.target_hash {
+        return Err("계획 뒤 대상이 바뀌었다(pid·바이너리·자기설치 예정) — 새 rollout 으로".into());
+    }
+    Ok(())
+}
+
+/// rollout 을 한 대씩 굴린다. 모두 준비가 됐을 때만 승인을 한 번 소비하고(기록이 있으면 읽기만), 앞 기기가 새 판으로 끝나야
+/// 다음 기기로 간다. 한 대라도 끝나지 않으면 뒤는 건드리지 않는다. 조종 기기는 맨 뒤라 넘기고 끝난다.
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    rollout: &Rollout,
+    approval_id: &str,
+    authority: &dyn Authority,
+    transport: &dyn Transport,
+    policy: &RunPolicy,
+    grant: Option<&Grant>,
+    save_grant: &dyn Fn(&Grant) -> std::result::Result<(), String>,
+    now_ms: &dyn Fn() -> u64,
+    sleep: &dyn Fn(std::time::Duration),
+) -> Vec<(String, Outcome)> {
+    let ids: Vec<String> = rollout.jobs.iter().map(|j| j.machine_id.clone()).collect();
+    let stop_all = |failed: Option<(usize, String)>, why: String| -> Vec<(String, Outcome)> {
+        ids.iter().enumerate().map(|(n, id)| {
+            let outcome = match &failed {
+                Some((k, reason)) if *k == n => Outcome::Failed { job_id: None, reason: reason.clone() },
+                _ => Outcome::Skipped { reason: why.clone() },
+            };
+            (id.clone(), outcome)
+        }).collect()
+    };
+    if let Err(why) = check_rollout(rollout) {
+        return stop_all(None, format!("rollout 을 믿을 수 없어 시작하지 않았다 · {why}"));
+    }
+    if !app_restart::valid_approval_id(approval_id) {
+        return stop_all(None, "approval id 모양이 아니다(ap_<32 hex>)".into());
+    }
+    // 앞서 굴려 이미 새 판인 기기는 건너뛴다 — 그 기기의 지금 정체는 rollout 과 다르다(새 pid).
+    let done: Vec<bool> = rollout.jobs.iter()
+        .map(|j| grant.is_some() && matches!(transport.status(&j.machine_id, &j.job_id), Ok(s) if s.state == State::Done))
+        .collect();
+    let started: Vec<bool> = rollout.jobs.iter()
+        .map(|j| grant.is_some() && transport.status(&j.machine_id, &j.job_id).is_ok())
+        .collect();
+    for (n, job) in rollout.jobs.iter().enumerate() {
+        if done[n] || started[n] {
+            continue;
+        }
+        let checked = transport.facts(&job.machine_id).and_then(|f| preflight(job, &f, now_ms()));
+        if let Err(why) = checked {
+            return stop_all(Some((n, why)), "앞 기기가 준비되지 않아 승인을 소비하지 않았다".into());
+        }
+    }
+    let scope = &rollout.approval_scope;
+    let hash = scope_hash(scope);
+    let expires_at_ms = match grant {
+        Some(g) if g.rollout != rollout.id || g.approval_id != approval_id || g.scope_hash != hash => {
+            return stop_all(None, "이 rollout 은 다른 승인으로 이미 소비됐다 — 기록을 확인".into());
+        }
+        Some(g) => match usable_approval(authority, approval_id, now_ms()) {
+            Ok(view) if view.scope_hash == hash && view.consumed_by.as_deref() == Some(rollout.controller()) => view.expires_at_ms,
+            Ok(_) => return stop_all(None, "나쵸의 승인이 소비 기록과 다르다".into()),
+            Err(why) => return stop_all(None, format!("이미 소비한 승인을 더 쓸 수 없다({}) · {why}", g.approval_id)),
+        },
+        None => {
+            let view = match authority.consume(approval_id, scope, rollout.controller()) {
+                Ok(view) => view,
+                Err(why) => return stop_all(None, format!("승인을 쓰지 못해 시작하지 않았다 · {why}")),
+            };
+            if view.action != ACTION || view.scope != *scope || view.consumed_by.as_deref() != Some(rollout.controller()) {
+                return stop_all(None, "나쵸가 돌려준 승인이 이 rollout 과 맞지 않는다".into());
+            }
+            let record = Grant { rollout: rollout.id.clone(), approval_id: approval_id.into(), scope_hash: hash.clone(),
+                                 consumed_at_ms: view.consumed_at_ms.unwrap_or_else(now_ms), expires_at_ms: view.expires_at_ms };
+            if let Err(why) = save_grant(&record) {
+                return stop_all(None, format!("소비는 됐는데 기록을 못 남겼다 — 다시 굴리기 전에 사람 확인 · {why}"));
+            }
+            view.expires_at_ms
+        }
+    };
+    let mut out = Vec::new();
+    let mut stop: Option<String> = None;
+    for (n, job) in rollout.jobs.iter().enumerate() {
+        let id = job.machine_id.clone();
+        if let Some(reason) = &stop {
+            out.push((id, Outcome::Skipped { reason: reason.clone() }));
+            continue;
+        }
+        let controller = id == rollout.controller();
+        let outcome = if done[n] {
+            match transport.facts(&id) {
+                Ok(f) => Outcome::Updated { job_id: job.job_id.clone(), new_pid: f.pid, build: f.binary.build },
+                Err(e) => Outcome::Failed { job_id: Some(job.job_id.clone()), reason: format!("새 판 사실을 못 읽었다 · {e}") },
+            }
+        } else {
+            run_one(job, approval_id, rollout.controller(), controller, expires_at_ms, transport, policy, now_ms, sleep)
+        };
+        if !matches!(outcome, Outcome::Updated { .. } | Outcome::HandedOff { .. }) {
+            stop = Some(format!("앞 기기({id})가 새 판으로 끝나지 않아 멈췄다"));
+        }
+        out.push((id, outcome));
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_one(
+    job: &UpdateJob,
+    approval_id: &str,
+    authority_machine: &str,
+    controller: bool,
+    expires_at_ms: u64,
+    transport: &dyn Transport,
+    policy: &RunPolicy,
+    now_ms: &dyn Fn() -> u64,
+    sleep: &dyn Fn(std::time::Duration),
+) -> Outcome {
+    let id = &job.machine_id;
+    let job_id = job.job_id.clone();
+    let fail = |reason: String| Outcome::Failed { job_id: Some(job_id.clone()), reason };
+    if now_ms() >= expires_at_ms {
+        return fail("승인이 만료됐다 — 이 기기부터는 새 승인으로".into());
+    }
+    let req = UpdateRequest { job: job.clone(), approval_id: approval_id.into(), authority: authority_machine.into() };
+    let send = || -> std::result::Result<(), Reach> { transport.start(id, &req).map(|_| ()) };
+    let mut errors = 0u32;
+    let mut sent_at = now_ms();
+    loop {
+        match send() {
+            Ok(()) => break,
+            Err(Reach::Refused(why)) => return fail(format!("기기가 작업을 받지 않았다 · {why}")),
+            Err(Reach::Unreachable(why)) => {
+                errors += 1;
+                if errors > policy.max_status_errors || now_ms() >= expires_at_ms {
+                    return fail(format!("기기에 닿지 못했다 · {why}"));
+                }
+            }
+        }
+        sleep(policy.poll_every);
+        sent_at = now_ms();
+    }
+    let started = now_ms();
+    let mut armed_at: Option<u64> = None;
+    errors = 0;
+    loop {
+        match transport.status(id, &job_id) {
+            Ok(s) => {
+                errors = 0;
+                match s.state {
+                    State::Done => break,
+                    State::Failed | State::RolledBack | State::Cancelled => {
+                        return fail(format!("기기가 {} 로 끝냈다 · {}", s.state.word(), last_note(&s)));
+                    }
+                    st if st >= State::Armed => {
+                        if controller {
+                            return Outcome::HandedOff { job_id: job_id.clone() };
+                        }
+                        armed_at.get_or_insert(now_ms());
+                    }
+                    _ => {
+                        let note = last_note(&s);
+                        let stalled = note.starts_with("waiting: ") || note.starts_with("retry: ");
+                        if stalled && now_ms().saturating_sub(sent_at) >= policy.resend_every_ms {
+                            if now_ms() >= expires_at_ms {
+                                return fail(format!("승인이 만료될 때까지 적용하지 못했다 · {note}"));
+                            }
+                            match send() {
+                                Ok(()) => {}
+                                Err(Reach::Refused(why)) => return fail(format!("다시 보내기를 기기가 거절했다 · {why}")),
+                                Err(Reach::Unreachable(_)) => errors += 1,
+                            }
+                            sent_at = now_ms();
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                errors += 1;
+                if errors > policy.max_status_errors {
+                    let when = if armed_at.is_some() { "재기동 뒤" } else { "적용 전" };
+                    return fail(format!("{when} 기기에 다시 닿지 못했다 — 사람 확인 필요 · {e}"));
+                }
+            }
+        }
+        match armed_at {
+            None if now_ms().saturating_sub(started) > policy.wait_cap_ms => {
+                return fail("30분 안에 적용하지 못했다(바쁜 학생·미저장 편집기) — 새 rollout 으로".into());
+            }
+            Some(at) if now_ms().saturating_sub(at) > policy.boot_cap_ms => {
+                return fail("제한 시간 안에 새 판이 도착하지 않았다 — 사람 확인 필요".into());
+            }
+            _ => {}
+        }
+        sleep(policy.poll_every);
+    }
+    match transport.facts(id) {
+        Ok(after) if after.pid != job.old_pid && build_matches(&after.binary.build, &job.build) => {
+            Outcome::Updated { job_id: job_id.clone(), new_pid: after.pid, build: after.binary.build }
+        }
+        Ok(after) if after.pid == job.old_pid => fail("기기는 끝났다고 했지만 옛 pid 가 그대로다".into()),
+        Ok(after) => fail(format!("다시 뜬 앱의 빌드가 태그 커밋이 아니다({})", after.binary.build)),
+        Err(e) => fail(format!("새 판 사실을 못 읽었다 · {e}")),
+    }
+}
+
+/// 앱이 대는 빌드 표식(`git rev-parse --short`, 더러우면 `+`)이 태그 커밋과 같은가.
+pub fn build_matches(build: &str, commit: &str) -> bool {
+    let build = build.trim_end_matches('+');
+    build.len() >= 7 && (commit.starts_with(build) || build.starts_with(commit))
 }
 
 #[cfg(test)]
@@ -948,7 +1372,7 @@ mod tests {
 
     fn approved(job: &UpdateJob) -> Nacho {
         Nacho(ApprovalView {
-            id: AP.into(), action: ACTION.into(), scope: scope(job, "ctl", 1), scope_hash: "sha256:x".into(),
+            id: AP.into(), action: ACTION.into(), scope: rollout_scope(std::slice::from_ref(job), "ctl"), scope_hash: "sha256:x".into(),
             state: "approved".into(), expires_at_ms: NOW + 600_000, consumed_at_ms: Some(NOW), consumed_by: Some("ctl".into()),
         })
     }
@@ -976,6 +1400,7 @@ mod tests {
             (UpdateJob { asset: Asset { sha256: "md5:x".into(), ..job.asset.clone() }, ..job.clone() }, "sha256"),
             (UpdateJob { tag: "v0.2.2".into(), ..job.clone() }, "태그"),
             (UpdateJob { team: "".into(), ..job.clone() }, "팀"),
+            (UpdateJob { require_notarized: false, ..job.clone() }, "공증"),
             (UpdateJob { job_id: "up0000000000000000".into(), ..job.clone() }, "작업 id"),
         ];
         for (bad, word) in cases {
@@ -1009,14 +1434,14 @@ mod tests {
         let f = facts(Path::new("/Users/x/Applications/kasaterm.app"));
         let job = job_for(&f, &key);
         let ok = approved(&job);
-        assert_eq!(authorize(&req(&job), &f, "0.2.0", &ok, true, NOW), Ok(()));
+        assert_eq!(authorize(&req(&job), &f, "0.2.0", &ok, true, NOW).map(|_| ()), Ok(()));
         let err = |f: &Facts, v: &str, n: &Nacho, on: bool, j: &UpdateJob| authorize(&req(j), f, v, n, on, NOW).unwrap_err();
         assert!(err(&f, "0.2.0", &ok, false, &job).starts_with("update_disabled"));
         assert!(err(&Facts { os: "windows".into(), ..f.clone() }, "0.2.0", &ok, true, &job).starts_with("unsupported_os"));
         let busy = Facts { busy: vec![app_restart::BusyPane { surface: "%1".into(), character: "아리스".into(), state: "working".into() }], ..f.clone() };
         // 바쁜 학생·미저장 편집기는 받기·준비를 막지 않는다 — 갈아 끼울 때(`blocking(apply)`) 막는다.
         let dirty = Facts { dirty_editors: 1, ..f.clone() };
-        assert_eq!(authorize(&req(&job), &busy, "0.2.0", &ok, true, NOW), Ok(()));
+        assert_eq!(authorize(&req(&job), &busy, "0.2.0", &ok, true, NOW).map(|_| ()), Ok(()));
         assert!(blocking(&busy, &job.job_id, NOW, true)[0].message().contains("아리스"));
         assert!(blocking(&dirty, &job.job_id, NOW, true)[0].message().contains("저장"));
         assert!(blocking(&dirty, &job.job_id, NOW, false).is_empty());
@@ -1152,6 +1577,7 @@ mod tests {
         *fx.body.borrow_mut() = DMG.to_vec();
         *fx.inner_version.borrow_mut() = "0.2.1".into();
         *fx.inner_identity.borrow_mut() = Identity { verified: true, team: Some(TEAM.into()), notarized: true };
+        fx.identities.borrow_mut().insert(installed.display().to_string(), Identity { verified: true, team: Some(TEAM.into()), notarized: true });
         let dir = root.join("jobs");
         create_job(&dir, &job).unwrap();
         World { dir, cache: root.join("cache"), installed, key, job, fx }
@@ -1231,6 +1657,10 @@ mod tests {
             ("unsigned", |w| *w.fx.inner_identity.borrow_mut() = Identity::default(), "서명이 깨졌다"),
             ("notarize", |w| *w.fx.inner_identity.borrow_mut() = Identity { verified: true, team: Some(TEAM.into()), notarized: false }, "공증"),
             ("version", |w| *w.fx.inner_version.borrow_mut() = "0.2.0".into(), "판이 작업의 판과 다르다"),
+            // 설치본이 다른 팀으로 서명돼 있으면 요청이 댄 팀(=dmg 팀)과 맞아도 받지 않는다 — 기준은 설치본이다.
+            ("installed-team", |w| { w.fx.identities.borrow_mut().insert(w.installed.display().to_string(),
+                Identity { verified: true, team: Some("OTHERTEAM1".into()), notarized: true }); }, "설치본 팀"),
+            ("installed-unsigned", |w| { w.fx.identities.borrow_mut().remove(&w.installed.display().to_string()); }, "설치본의 서명 팀"),
         ];
         for (name, breaker, word) in cases {
             let w = world(&format!("bad-{name}"));
@@ -1440,14 +1870,14 @@ mod tests {
         let dev = device(&w, fake_launch(&exe), &public);
         let busy = Facts { busy: vec![app_restart::BusyPane { surface: "%2".into(), character: "모모이".into(), state: "working".into() }],
                            dirty_editors: 1, ..f.clone() };
-        let step = drive(&dev, &w.job, &|| Ok(busy.clone()), &|| NOW).unwrap();
+        let step = drive(&dev, &w.job, &|| Ok(busy.clone()), &|| Ok(()), &|| NOW).unwrap();
         assert!(matches!(&step, Step::Waiting(why) if why.contains("모모이")), "{step:?}");
         assert_eq!(w.state(), State::Staged);
         assert_eq!(marker(&w.installed), "old");
-        let step = drive(&dev, &w.job, &|| Ok(f.clone()), &|| NOW).unwrap();
+        let step = drive(&dev, &w.job, &|| Ok(f.clone()), &|| Ok(()), &|| NOW).unwrap();
         assert!(matches!(step, Step::Armed(_)), "{step:?}");
         assert_eq!(*w.fx.fetches.borrow(), 1, "기다린 뒤에도 다시 받지 않는다");
-        assert!(drive(&dev, &w.job, &|| Ok(f.clone()), &|| NOW).is_err(), "도우미는 한 번만");
+        assert!(drive(&dev, &w.job, &|| Ok(f.clone()), &|| Ok(()), &|| NOW).is_err(), "도우미는 한 번만");
         old.kill().unwrap();
         let _ = old.wait();
         assert_eq!(wait_for(&w, &[State::Launched], 8), State::Launched);
@@ -1464,17 +1894,20 @@ mod tests {
         let w = world("drive-moved");
         let public = w.key.public();
         let off = Device { enabled: false, ..device(&w, vec!["/usr/bin/true".into()], &public) };
-        assert!(drive(&off, &w.job, &|| Ok(facts(&w.installed)), &|| NOW).unwrap_err().starts_with("update_disabled"));
+        assert!(drive(&off, &w.job, &|| Ok(facts(&w.installed)), &|| Ok(()), &|| NOW).unwrap_err().starts_with("update_disabled"));
         assert_eq!(*w.fx.fetches.borrow(), 0, "꺼져 있으면 받지도 않는다");
         let dev = device(&w, vec!["/usr/bin/true".into()], &public);
-        let stale = drive(&dev, &w.job, &|| Ok(facts(&w.installed)), &|| NOW + JOB_TTL_MS / 2 + 1).unwrap_err();
+        // 기다림 상한은 조종 쪽이 적은 시각이 아니라 이 기기가 받은 때부터 잰다.
+        let accepted = accepted_at_ms(&status(&w.dir, &w.job.job_id).unwrap());
+        assert!(accepted > w.job.created_at_ms);
+        let stale = drive(&dev, &w.job, &|| Ok(facts(&w.installed)), &|| Ok(()), &|| accepted + MAX_WAIT_MS + 1).unwrap_err();
         assert!(stale.contains("30분"), "{stale}");
         assert_eq!(w.state(), State::Failed);
         let w = world("drive-moved-2");
         let public = w.key.public();
         let dev = device(&w, vec!["/usr/bin/true".into()], &public);
         let moved = Facts { pid: 999, ..facts(&w.installed) };
-        assert!(drive(&dev, &w.job, &|| Ok(moved.clone()), &|| NOW).unwrap_err().contains("정체"));
+        assert!(drive(&dev, &w.job, &|| Ok(moved.clone()), &|| Ok(()), &|| NOW).unwrap_err().contains("정체"));
         assert_eq!(w.state(), State::Failed);
         assert_eq!(marker(&w.installed), "old");
         let pending = Facts { install_pending: Some(app_restart::PendingInstall { dist_path: "/x/dist".into(), dist_mtime_ms: 1 }), ..facts(&w.installed) };
@@ -1483,5 +1916,348 @@ mod tests {
         assert!(blocking(&own, &w.job.job_id, NOW, true).is_empty(), "자기 작업은 진행 중인 작업으로 안 친다");
         let other = Facts { active_job: Some("rs0123456789abcdef".into()), ..facts(&w.installed) };
         assert!(!blocking(&other, &w.job.job_id, NOW, false).is_empty(), "재시작이 도는 중이면 막는다");
+    }
+
+    #[test]
+    fn a_revoked_or_expired_approval_is_not_usable() {
+        let key = Key::new();
+        let job = job_for(&facts(Path::new("/Users/x/Applications/kasaterm.app")), &key);
+        let mut v = approved(&job).0;
+        assert!(usable_approval(&Nacho(v.clone()), AP, NOW).is_ok());
+        v.state = "revoked".into();
+        assert!(usable_approval(&Nacho(v.clone()), AP, NOW).unwrap_err().contains("revoked"));
+        v.state = "approved".into();
+        assert!(usable_approval(&Nacho(v), AP, NOW + 600_000).unwrap_err().contains("만료"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_approval_revoked_while_waiting_stops_the_swap_before_the_helper() {
+        let w = world("drive-revoked");
+        let public = w.key.public();
+        let dev = device(&w, vec!["/usr/bin/true".into()], &public);
+        let why = drive(&dev, &w.job, &|| Ok(facts(&w.installed)), &|| Err("승인되지 않았다(kasaterm_update revoked)".into()), &|| NOW).unwrap_err();
+        assert!(why.contains("revoked"), "{why}");
+        assert_eq!(w.state(), State::Failed, "거둔 승인이면 끝낸다 — 재시작을 오래 막지 않게");
+        assert_eq!(marker(&w.installed), "old");
+        assert!(!status(&w.dir, &w.job.job_id).unwrap().events.iter().any(|e| e.state == State::Armed), "도우미에 넘기지 않았다");
+    }
+
+    // ---------------------------------------------------------------- 러너
+
+    const RID: &str = "abcdef0123456789";
+    const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn fleet_facts(mid: &str, pid: u32, build: &str) -> Facts {
+        let app = "/Users/x/Applications/kasaterm.app";
+        Facts {
+            schema: app_restart::SCHEMA.into(), machine_id: mid.into(), label: mid.into(), os: "macos".into(),
+            capability: app_restart::CAPABILITY, app_path: app.into(), pid, running_exe: format!("{app}/Contents/MacOS/kasaterm"),
+            binary: BinaryId { inode: 1, mtime_ms: 2, build: build.into() }, observed_at_ms: NOW,
+            update_capability: CAPABILITY, update_enabled: true, ..Facts::default()
+        }
+    }
+
+    fn fleet_job(f: &Facts) -> UpdateJob {
+        let tag = "v0.2.1";
+        UpdateJob {
+            schema: SCHEMA.into(), job_id: job_id(RID, &f.machine_id, SHA), plan_hash: RID.into(), machine_id: f.machine_id.clone(),
+            target_hash: target_hash(f), tag: tag.into(), version: "0.2.1".into(),
+            commit: "5e4d138684156c710831055f5b042688b335f617".into(), build: "5e4d138684156c710831055f5b042688b335f617".into(),
+            asset: Asset { name: asset_name(tag), url: asset_url(tag, &asset_name(tag)), size: 10, sha256: SHA.into(),
+                           ed_signature: base64::engine::general_purpose::STANDARD.encode([7u8; 64]) },
+            team: TEAM.into(), require_notarized: true, old_pid: f.pid, created_at_ms: NOW,
+        }
+    }
+
+    fn rollout_of(jobs: Vec<UpdateJob>, controller: &str) -> Rollout {
+        let scope = rollout_scope(&jobs, controller);
+        Rollout { id: RID.into(), release_plan: "0011223344556677".into(), created_at_ms: NOW,
+                  approval_scope_hash: scope_hash(&scope), approval_scope: scope, jobs, excluded: vec![] }
+    }
+
+    #[test]
+    fn the_scope_hash_is_the_one_nacho_computes() {
+        let scope = serde_json::json!({"action": "kasaterm_update", "plan": RID, "controller": "ctl", "tag": "v0.2.1", "version": "0.2.1",
+            "commit": "5e4d138684156c710831055f5b042688b335f617", "asset": {"name": "kasaterm-v0.2.1.dmg", "sha256": SHA, "size": 10},
+            "targets": [{"order": 1, "machine_id": "mac-a", "hash": "0123456789abcdef"}, {"order": 2, "machine_id": "ctl", "hash": "fedcba9876543210"}]});
+        // tools/release/nacho.py·나쵸 approvals.scope_hash 와 같은 정규화(키 정렬·빈칸 없음)로 파이썬이 잰 값.
+        assert_eq!(scope_hash(&scope), "sha256:5352981248969a5cb4a59cf3e9a06ea348894a5d01a3d21dc65af53f03d9f720");
+    }
+
+    /// 조종 쪽 파이썬(tools/release/devices.py `target_hash`)도 같은 값을 짓는다 — 격리 왕복이 파이썬이 지은 rollout 을 이 판정에 넣는다.
+    #[test]
+    fn the_target_hash_matches_the_controller_side() {
+        assert_eq!(target_hash(&fleet_facts("mac-a", 11, "8933a0ca")), "d206bd151df55dd2");
+    }
+
+    #[test]
+    fn a_rollout_must_be_one_file_one_version_controller_last_and_its_own_scope() {
+        let (a, c) = (fleet_facts("mac-a", 11, "8933a0ca"), fleet_facts("ctl", 22, "8933a0ca"));
+        let ok = rollout_of(vec![fleet_job(&a), fleet_job(&c)], "ctl");
+        assert_eq!(check_rollout(&ok), Ok(()));
+        assert_eq!(ok.approval_scope.as_object().unwrap().len(), 8, "나쵸 계약 키 8개");
+        let last = rollout_of(vec![fleet_job(&c), fleet_job(&a)], "ctl");
+        assert!(check_rollout(&last).unwrap_err().contains("맨 뒤"));
+        let mut mixed = ok.clone();
+        mixed.jobs[1].version = "0.2.2".into();
+        mixed.jobs[1].tag = "v0.2.2".into();
+        assert!(check_rollout(&mixed).is_err());
+        let mut forged = ok.clone();
+        forged.approval_scope["targets"][0]["hash"] = serde_json::json!("ffffffffffffffff");
+        assert!(check_rollout(&forged).unwrap_err().contains("다시 지은 범위"));
+        let twice = rollout_of(vec![fleet_job(&a), fleet_job(&a)], "ctl");
+        assert!(check_rollout(&twice).unwrap_err().contains("두 번"));
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mode { Normal, Busy(u32), FailAt, RefuseResend, NeverArm, Gap(u32), WrongBuild }
+
+    struct Dev { facts: Facts, mode: Mode, job: Option<UpdateJob>, polls: u32, sends: Vec<u64>, done: bool }
+
+    struct Fleet { devs: RefCell<HashMap<String, Dev>>, clock: std::rc::Rc<std::cell::Cell<u64>> }
+
+    impl Fleet {
+        fn new(devs: Vec<(Facts, Mode)>, clock: std::rc::Rc<std::cell::Cell<u64>>) -> Self {
+            Self { devs: RefCell::new(devs.into_iter().map(|(f, m)| (f.machine_id.clone(),
+                   Dev { facts: f, mode: m, job: None, polls: 0, sends: vec![], done: false })).collect()), clock }
+        }
+        fn sends(&self, id: &str) -> Vec<u64> { self.devs.borrow()[id].sends.clone() }
+        fn started(&self, id: &str) -> bool { self.devs.borrow()[id].job.is_some() }
+    }
+
+    fn st(job: &UpdateJob, state: State, note: &str) -> Status {
+        Status { job: job.clone(), state, events: vec![Event { at_s: NOW / 1000, state, note: note.into() }] }
+    }
+
+    impl Transport for Fleet {
+        fn facts(&self, id: &str) -> std::result::Result<Facts, String> {
+            let devs = self.devs.borrow();
+            let d = devs.get(id).ok_or("없는 기기")?;
+            let mut f = d.facts.clone();
+            if d.done {
+                f.pid += 1000;
+                f.binary.build = if d.mode == Mode::WrongBuild { "deadbeef".into() } else { "5e4d138".into() };
+            }
+            Ok(f)
+        }
+        fn start(&self, id: &str, req: &UpdateRequest) -> std::result::Result<serde_json::Value, Reach> {
+            let mut devs = self.devs.borrow_mut();
+            let d = devs.get_mut(id).unwrap();
+            if d.mode == Mode::RefuseResend && !d.sends.is_empty() {
+                return Err(Reach::Refused("승인되지 않았다(kasaterm_update revoked)".into()));
+            }
+            d.sends.push(self.clock.get());
+            d.job = Some(req.job.clone());
+            Ok(serde_json::json!({"ok": true}))
+        }
+        fn status(&self, id: &str, job_id: &str) -> std::result::Result<Status, String> {
+            let mut devs = self.devs.borrow_mut();
+            let d = devs.get_mut(id).unwrap();
+            if d.done {
+                return Ok(st(d.job.as_ref().unwrap(), State::Done, "build matches"));
+            }
+            let Some(job) = d.job.clone() else { return Err("no such job".into()) };
+            assert_eq!(job.job_id, job_id);
+            d.polls += 1;
+            let waiting = "waiting: 일하는 중이거나 사람 답을 기다리는 학생 1명";
+            let s = match d.mode {
+                Mode::FailAt => st(&job, State::Failed, "받은 파일의 sha256 이 작업과 다르다"),
+                Mode::NeverArm | Mode::RefuseResend => st(&job, State::Staged, waiting),
+                Mode::Busy(n) if (d.sends.len() as u32) <= n => st(&job, State::Staged, waiting),
+                Mode::Gap(n) => match d.polls {
+                    1 => st(&job, State::Armed, ""),
+                    p if p <= 1 + n => return Err("재기동 중 — 닿지 않음".into()),
+                    _ => { d.done = true; st(&job, State::Done, "") }
+                },
+                _ if d.polls > 3 => { d.done = true; st(&job, State::Done, "build matches") }
+                _ => st(&job, State::Armed, ""),
+            };
+            Ok(s)
+        }
+    }
+
+    struct Counting { view: RefCell<ApprovalView>, consumes: RefCell<u32>, gets: RefCell<u32>, ttl: std::cell::Cell<u64> }
+
+    impl Authority for Counting {
+        fn get(&self, _: &str) -> std::result::Result<ApprovalView, String> {
+            *self.gets.borrow_mut() += 1;
+            Ok(self.view.borrow().clone())
+        }
+        fn consume(&self, _: &str, scope: &serde_json::Value, consumer: &str) -> std::result::Result<ApprovalView, String> {
+            *self.consumes.borrow_mut() += 1;
+            let mut v = self.view.borrow_mut();
+            if v.consumed_at_ms.is_some() {
+                return Err("already_used".into());
+            }
+            assert_eq!(scope, &v.scope);
+            v.consumed_at_ms = Some(NOW);
+            v.consumed_by = Some(consumer.into());
+            v.expires_at_ms = NOW + self.ttl.get();
+            Ok(v.clone())
+        }
+    }
+
+    fn nacho_for(r: &Rollout) -> Counting {
+        Counting { view: RefCell::new(ApprovalView { id: AP.into(), action: ACTION.into(), scope: r.approval_scope.clone(),
+                   scope_hash: r.approval_scope_hash.clone(), state: "approved".into(), expires_at_ms: NOW + 600_000,
+                   consumed_at_ms: None, consumed_by: None }), consumes: RefCell::new(0), gets: RefCell::new(0),
+                   ttl: std::cell::Cell::new(2 * 35 * 60_000) }
+    }
+
+    struct Harness { clock: std::rc::Rc<std::cell::Cell<u64>>, saved: RefCell<Option<Grant>> }
+
+    impl Harness {
+        fn new() -> Self { Self { clock: std::rc::Rc::new(std::cell::Cell::new(NOW)), saved: RefCell::new(None) } }
+        fn go(&self, r: &Rollout, nacho: &Counting, fleet: &Fleet, grant: Option<&Grant>, policy: &RunPolicy) -> Vec<(String, Outcome)> {
+            let clock = self.clock.clone();
+            run(r, AP, nacho, fleet, policy, grant, &|g| { *self.saved.borrow_mut() = Some(g.clone()); Ok(()) },
+                &|| clock.get(), &|d| clock.set(clock.get() + d.as_millis() as u64))
+        }
+    }
+
+    fn outcome_words(out: &[(String, Outcome)]) -> Vec<String> {
+        out.iter().map(|(id, o)| format!("{id}:{}", serde_json::to_value(o).unwrap()["outcome"].as_str().unwrap())).collect()
+    }
+
+    fn two(mode_a: Mode) -> (Rollout, Vec<(Facts, Mode)>) {
+        let (a, c) = (fleet_facts("mac-a", 11, "8933a0ca"), fleet_facts("ctl", 22, "8933a0ca"));
+        (rollout_of(vec![fleet_job(&a), fleet_job(&c)], "ctl"), vec![(a, mode_a), (c, Mode::Normal)])
+    }
+
+    #[test]
+    fn the_runner_consumes_once_updates_in_order_and_hands_off_on_the_controller() {
+        let h = Harness::new();
+        let (r, devs) = two(Mode::Normal);
+        let fleet = Fleet::new(devs, h.clock.clone());
+        let nacho = nacho_for(&r);
+        let out = h.go(&r, &nacho, &fleet, None, &RunPolicy::default());
+        assert_eq!(outcome_words(&out), ["mac-a:updated", "ctl:handed_off"]);
+        assert_eq!(*nacho.consumes.borrow(), 1);
+        let g = h.saved.borrow().clone().expect("소비 기록");
+        assert_eq!((g.rollout.as_str(), g.approval_id.as_str(), g.scope_hash.as_str()), (RID, AP, r.approval_scope_hash.as_str()));
+        assert!(matches!(&out[0].1, Outcome::Updated { new_pid: 1011, build, .. } if build == "5e4d138"));
+        assert!(fleet.sends("ctl")[0] > fleet.sends("mac-a")[0], "맥북이 새 판으로 끝난 뒤에 조종 기기");
+    }
+
+    #[test]
+    fn nothing_is_consumed_unless_every_target_is_ready_now() {
+        let h = Harness::new();
+        let (r, mut devs) = two(Mode::Normal);
+        devs[1].0.update_enabled = false;
+        let fleet = Fleet::new(devs, h.clock.clone());
+        let nacho = nacho_for(&r);
+        let out = h.go(&r, &nacho, &fleet, None, &RunPolicy::default());
+        assert_eq!(outcome_words(&out), ["mac-a:skipped", "ctl:failed"]);
+        assert_eq!(*nacho.consumes.borrow(), 0);
+        assert!(!fleet.started("mac-a"));
+        // 계획 뒤 pid 가 바뀐 기기도 같다.
+        let (r, mut devs) = two(Mode::Normal);
+        devs[0].0.pid = 99;
+        let out = h.go(&r, &nacho_for(&r), &Fleet::new(devs, h.clock.clone()), None, &RunPolicy::default());
+        assert!(matches!(&out[0].1, Outcome::Failed { reason, .. } if reason.contains("바뀌었다")));
+        // 바쁜 학생은 소비를 막지 않는다 — 적용만 기다린다.
+        let (r, mut devs) = two(Mode::Normal);
+        devs[0].0.busy = vec![app_restart::BusyPane { surface: "%2".into(), character: "모모이".into(), state: "working".into() }];
+        let nacho = nacho_for(&r);
+        h.go(&r, &nacho, &Fleet::new(devs, h.clock.clone()), None, &RunPolicy::default());
+        assert_eq!(*nacho.consumes.borrow(), 1);
+    }
+
+    #[test]
+    fn a_busy_target_is_resent_on_a_steady_beat_until_it_applies() {
+        let h = Harness::new();
+        let (r, devs) = two(Mode::Busy(2));
+        let fleet = Fleet::new(devs, h.clock.clone());
+        let policy = RunPolicy::default();
+        let out = h.go(&r, &nacho_for(&r), &fleet, None, &policy);
+        assert_eq!(outcome_words(&out), ["mac-a:updated", "ctl:handed_off"]);
+        let sends = fleet.sends("mac-a");
+        assert_eq!(sends.len(), 3, "처음 한 번 + 기다리는 동안 두 번");
+        assert!(sends.windows(2).all(|w| w[1] - w[0] >= policy.resend_every_ms), "{sends:?}");
+    }
+
+    #[test]
+    fn a_failed_or_refused_or_stuck_target_stops_everything_after_it() {
+        for (mode, word) in [(Mode::FailAt, "sha256"), (Mode::RefuseResend, "revoked"), (Mode::NeverArm, "30분"), (Mode::WrongBuild, "빌드")] {
+            let h = Harness::new();
+            let (r, devs) = two(mode);
+            let fleet = Fleet::new(devs, h.clock.clone());
+            let out = h.go(&r, &nacho_for(&r), &fleet, None, &RunPolicy::default());
+            assert!(matches!(&out[0].1, Outcome::Failed { reason, .. } if reason.contains(word)), "{word}: {:?}", out[0].1);
+            assert!(matches!(&out[1].1, Outcome::Skipped { .. }), "{word}");
+            assert!(!fleet.started("ctl"), "{word}: 뒤 기기는 건드리지 않는다");
+        }
+    }
+
+    #[test]
+    fn losing_the_target_while_it_restarts_is_normal_up_to_a_limit() {
+        let h = Harness::new();
+        let (r, devs) = two(Mode::Gap(3));
+        let out = h.go(&r, &nacho_for(&r), &Fleet::new(devs, h.clock.clone()), None, &RunPolicy::default());
+        assert_eq!(outcome_words(&out), ["mac-a:updated", "ctl:handed_off"]);
+        let (r, devs) = two(Mode::Gap(10));
+        let tight = RunPolicy { max_status_errors: 2, ..RunPolicy::default() };
+        let out = h.go(&r, &nacho_for(&r), &Fleet::new(devs, h.clock.clone()), None, &tight);
+        assert!(matches!(&out[0].1, Outcome::Failed { reason, .. } if reason.contains("재기동 뒤")), "{:?}", out[0].1);
+    }
+
+    #[test]
+    fn a_rerun_reads_the_grant_instead_of_consuming_and_skips_finished_targets() {
+        let h = Harness::new();
+        let (r, devs) = two(Mode::Normal);
+        let fleet = Fleet::new(devs, h.clock.clone());
+        let nacho = nacho_for(&r);
+        h.go(&r, &nacho, &fleet, None, &RunPolicy::default());
+        let grant = h.saved.borrow().clone().unwrap();
+        // 조종 기기에서 새 러너가 다시 뜬 상황 — 맥북은 이미 새 판, 조종 기기는 다시 이어 간다.
+        fleet.devs.borrow_mut().get_mut("ctl").unwrap().job = None;
+        let out = h.go(&r, &nacho, &fleet, Some(&grant), &RunPolicy::default());
+        assert_eq!(outcome_words(&out), ["mac-a:updated", "ctl:handed_off"]);
+        assert_eq!(*nacho.consumes.borrow(), 1, "두 번 소비하지 않는다");
+        assert_eq!(fleet.sends("mac-a").len(), 1, "끝난 기기엔 다시 안 보낸다");
+        let other = Grant { approval_id: format!("ap_{}", "1".repeat(32)), ..grant.clone() };
+        let out = h.go(&r, &nacho, &fleet, Some(&other), &RunPolicy::default());
+        assert!(out.iter().all(|(_, o)| matches!(o, Outcome::Skipped { reason } if reason.contains("다른 승인"))));
+        nacho.view.borrow_mut().state = "revoked".into();
+        let out = h.go(&r, &nacho, &fleet, Some(&grant), &RunPolicy::default());
+        assert!(out.iter().all(|(_, o)| matches!(o, Outcome::Skipped { reason } if reason.contains("revoked"))), "{out:?}");
+    }
+
+    #[test]
+    fn an_expired_approval_stops_before_the_next_target() {
+        let h = Harness::new();
+        let (r, devs) = two(Mode::Normal);
+        let fleet = Fleet::new(devs, h.clock.clone());
+        let nacho = nacho_for(&r);
+        // 첫 기기가 끝났을 때 이미 만료 — 조종 기기엔 보내지 않는다.
+        nacho.ttl.set(5_000);
+        let out = h.go(&r, &nacho, &fleet, None, &RunPolicy::default());
+        assert!(matches!(&out[1].1, Outcome::Failed { reason, .. } if reason.contains("만료")), "{out:?}");
+        assert!(!fleet.started("ctl"));
+    }
+
+    /// 나쵸 고정 자료(approval.kasaterm_update.implemented.json)를 이 러스트 계약으로 읽는다 — rollout 모양·범위 재구성·해시,
+    /// 나쵸가 적은 소비 뒤 만료(대상 × 2100초), 거둔 승인. `scripts/nacho-update-interop.sh` 가 `NACHO_DESK_FIXTURES` 로 부른다.
+    #[test]
+    #[ignore]
+    fn nacho_update_fixture_matches_rust() {
+        let dir = std::env::var("NACHO_DESK_FIXTURES").expect("NACHO_DESK_FIXTURES");
+        let fx: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{dir}/approval.kasaterm_update.implemented.json")).unwrap()).unwrap();
+        let rollout: Rollout = serde_json::from_value(fx["plan"].clone()).expect("rollout 모양");
+        assert_eq!(check_rollout(&rollout), Ok(()));
+        assert_eq!(fx["window"]["runner_max_per_target_sec"].as_u64(), Some((RunPolicy::default().wait_cap_ms + RunPolicy::default().boot_cap_ms) / 1000));
+        let consumed: ApprovalView = serde_json::from_value(fx["views"]["consumed"].clone()).unwrap();
+        assert_eq!(consumed.scope_hash, rollout.approval_scope_hash, "나쵸 정규화 해시 = 러스트");
+        assert_eq!(consumed.scope, rollout.approval_scope);
+        let per = fx["window"]["update_target_sec"].as_u64().unwrap() * 1000;
+        assert_eq!(consumed.expires_at_ms, consumed.consumed_at_ms.unwrap() + per * rollout.jobs.len() as u64);
+        assert!(per >= RunPolicy::default().wait_cap_ms + RunPolicy::default().boot_cap_ms, "대상 하나의 러너 최대 시간이 나쵸 창 안");
+        let at = consumed.consumed_at_ms.unwrap();
+        assert!(usable_approval(&Nacho(consumed.clone()), &consumed.id, at + 1).is_ok());
+        let revoked: ApprovalView = serde_json::from_value(fx["views"]["revoked"].clone()).unwrap();
+        assert!(usable_approval(&Nacho(revoked), &consumed.id, at + 1).unwrap_err().contains("revoked"));
+        let unconsumed: ApprovalView = serde_json::from_value(fx["views"]["approved_unconsumed"].clone()).unwrap();
+        assert!(usable_approval(&Nacho(unconsumed), &consumed.id, at + 1).unwrap_err().contains("소비"));
     }
 }

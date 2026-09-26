@@ -1467,7 +1467,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli done [--surface <id>] <succeeded|failed> [한 줄 요약]  # 브리프 완료 보고 — board 가 idle 추정 대신 이걸 정본으로 싣는다");
     eprintln!("  kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> --summary <글> [--changed <파일,…>]… [--tests <글>] [--next <글>] [--dry-run]");
     eprintln!("                                            # 나쵸가 띄운 학생(KASATERM_ORIGIN=nacho)만. 나쵸 인박스에 원자적으로 넣고 살아 있으면 즉시 깨운다. 토큰·비밀은 거부");
-    eprintln!("  app-update start --machine ID --request FILE|- · status JOB [--machine ID] # 기기의 앱 업데이트(공식 릴리스만·나쵸 승인·기기 스위치 KASATERM_APP_UPDATE=on)");
+    eprintln!("  app-update run --approval ap_… --rollout FILE [--record FILE] · start --machine ID --request FILE|- · status JOB [--machine ID] # 기기 앱 업데이트(공식 릴리스만·나쵸 승인 1회·차례로·조종 기기 마지막·기기 스위치 KASATERM_APP_UPDATE=on)");
     eprintln!("  app-restart plan [--machine ID]… [--json] # 등록된 기기의 앱 재시작 계획(읽기만). run --approval ap_… 는 나쵸 승인을 서버에서 한 번 소비한 뒤 한 대씩 · status JOB");
     eprintln!("  kasaterm-cli agent-status <start|end|clear> <subagent|background> [key] [라벨]  # 진행 표시 정본(PreToolUse/PostToolUse 훅)");
     eprintln!("  kasaterm-cli pet-say [--from <곳>] [--state busy|wait|error] <문안>  # 바탕화면 펫에게 한 줄(앱이 꺼져 있어도 쌓인다)");
@@ -2705,17 +2705,22 @@ fn run_app_restart(args: &[String]) -> Result<Option<Response>> {
     }
 }
 
-/// `app-update start --machine ID --request FILE|-` · `status JOB [--machine ID]`.
+/// `app-update start --machine ID --request FILE|-` · `status JOB [--machine ID]` ·
+/// `run --approval ap_… --rollout FILE [--record FILE]` (조종 쪽 러너 — `kasa_socket::app_update::run`).
 /// 요청(`kasa_socket::app_update::UpdateRequest`)은 조종 쪽이 계획·나쵸 승인으로 만든다. 이 CLI 는 모양만 보고 넘기며,
 /// 받을지·갈아 끼울지는 대상 기기 앱이 자기 사실과 나쵸 승인으로 다시 판정한다.
 fn run_app_update(args: &[String]) -> Result<Option<Response>> {
     let sub = args.first().map(String::as_str).unwrap_or("");
     let (mut machine, mut request, mut positional) = (None::<String>, None::<String>, Vec::new());
+    let (mut approval, mut rollout_path, mut record_path) = (String::new(), None::<String>, None::<String>);
     let mut i = 1;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
             "--machine" => { machine = Some(args.get(i + 1).ok_or_else(|| anyhow!("--machine needs a machine id"))?.clone()); i += 2; }
             "--request" => { request = Some(args.get(i + 1).ok_or_else(|| anyhow!("--request needs a file or -"))?.clone()); i += 2; }
+            "--approval" => { approval = args.get(i + 1).ok_or_else(|| anyhow!("--approval needs an approval id"))?.clone(); i += 2; }
+            "--rollout" => { rollout_path = Some(args.get(i + 1).ok_or_else(|| anyhow!("--rollout needs a file"))?.clone()); i += 2; }
+            "--record" => { record_path = Some(args.get(i + 1).ok_or_else(|| anyhow!("--record needs a file"))?.clone()); i += 2; }
             other if other.starts_with("--") => return Err(anyhow!("app-update: unknown option {other:?}")),
             other => { positional.push(other.to_string()); i += 1; }
         }
@@ -2747,11 +2752,62 @@ fn run_app_update(args: &[String]) -> Result<Option<Response>> {
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(None)
         }
-        _ => Err(anyhow!("app-update start --machine ID --request FILE|- | status JOB [--machine ID]")),
+        "run" => {
+            use kasa_socket::app_update as update;
+            let path = rollout_path.ok_or_else(|| anyhow!("app-update run needs --rollout FILE"))?;
+            anyhow::ensure!(!approval.is_empty(), "app-update run 은 나쵸 대화에서 받은 --approval ap_… 가 있어야 한다");
+            let rollout: update::Rollout = serde_json::from_str(&std::fs::read_to_string(&path)?).map_err(|e| anyhow!("rollout 을 읽지 못했다: {e}"))?;
+            let ask_s = |method: &str, params: Value| ask(method, params).map_err(|e| e.to_string());
+            let local: kasa_socket::app_restart::Facts = serde_json::from_value(ask_s("app.restart_facts", json!({})).map_err(anyhow::Error::msg)?)?;
+            // 러너는 조종 기기에 서 있어야 한다 — 승인을 소비하는 기기이고, 자기를 마지막에 넘긴다.
+            anyhow::ensure!(local.machine_id == rollout.controller(), "이 기기({})는 rollout 의 조종 기기({})가 아니다", local.machine_id, rollout.controller());
+            let record = record_path.clone();
+            let grant: Option<update::Grant> = match &record {
+                Some(p) if std::path::Path::new(p).exists() => Some(serde_json::from_str(&std::fs::read_to_string(p)?)?),
+                _ => None,
+            };
+            let save = |g: &update::Grant| -> std::result::Result<(), String> {
+                let Some(p) = &record else { return Ok(()) };
+                let tmp = format!("{p}.tmp");
+                std::fs::write(&tmp, serde_json::to_string_pretty(g).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                std::fs::rename(&tmp, p).map_err(|e| e.to_string())
+            };
+            let transport = CliUpdateTransport { ask: &ask_s };
+            let authority = CliAuthority { ask: &ask_s };
+            let outcomes = update::run(&rollout, &approval, &authority, &transport, &update::RunPolicy::default(), grant.as_ref(), &save,
+                                       &kasa_socket::board::now_ms, &std::thread::sleep);
+            let mut ok = true;
+            for (machine, outcome) in &outcomes {
+                ok &= matches!(outcome, update::Outcome::Updated { .. } | update::Outcome::HandedOff { .. });
+                println!("{machine} {}", serde_json::to_string(outcome)?);
+            }
+            if !ok {
+                std::process::exit(1);
+            }
+            Ok(None)
+        }
+        _ => Err(anyhow!("app-update start --machine ID --request FILE|- | status JOB [--machine ID] | run --approval ap_… --rollout FILE [--record FILE]")),
     }
 }
 
 type Ask<'a> = &'a dyn Fn(&str, Value) -> std::result::Result<Value, String>;
+
+/// 업데이트 대상에 닿는 길 — 이 기기 앱의 소켓을 거친다(다른 기기는 앱이 명부 경유 HTTP 로 넘긴다).
+struct CliUpdateTransport<'a> {
+    ask: Ask<'a>,
+}
+
+impl kasa_socket::app_update::Transport for CliUpdateTransport<'_> {
+    fn facts(&self, machine_id: &str) -> std::result::Result<kasa_socket::app_restart::Facts, String> {
+        serde_json::from_value((self.ask)("app.restart_facts", json!({"machine_id": machine_id}))?).map_err(|e| e.to_string())
+    }
+    fn start(&self, machine_id: &str, req: &kasa_socket::app_update::UpdateRequest) -> std::result::Result<Value, kasa_socket::app_update::Reach> {
+        (self.ask)("app.update_start", json!({"machine_id": machine_id, "request": req})).map_err(|e| kasa_socket::app_update::reach_of(&e))
+    }
+    fn status(&self, machine_id: &str, job_id: &str) -> std::result::Result<kasa_socket::app_update::Status, String> {
+        serde_json::from_value((self.ask)("app.update_job", json!({"job_id": job_id, "machine_id": machine_id}))?).map_err(|e| e.to_string())
+    }
+}
 
 /// 대상 기기에 닿는 길 — 전부 이 기기 앱의 소켓을 거친다(다른 기기는 앱이 명부 경유로 넘긴다).
 struct CliRestartTransport<'a> {
