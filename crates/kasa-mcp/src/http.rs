@@ -6340,6 +6340,14 @@ async fn nacho_app_relay(
     crate::nacho_relay::relay(user, parts.method, &rest, parts.uri.query(), &parts.headers, bytes).await
 }
 
+/// 키 없는 기기 데스크톱의 모드·권한 표 읽기(`nacho_relay::read_relay`). 판정 재료는 여기서만 뽑는다 —
+/// 원격(전달 헤더 포함)인가, 폰 주소로 왔나. 호출자 헤더·몸통은 넘기지 않는다.
+async fn nacho_read_relay(AxPath(name): AxPath<String>, req: axum::extract::Request) -> axum::response::Response {
+    let remote = is_remote_peer(&req);
+    let phone = req.extensions().get::<MobileAuth>().is_some();
+    crate::nacho_relay::read_relay(req.method(), &name, remote, phone).await
+}
+
 /// 폰 ↔ 이 기계 ↔ 대상 기계의 WS 를 양방향으로 잇는다. Ping/Pong 도 **그대로 옮긴다** —
 /// 대상 서버는 Pong 이 75초 없으면 피어가 잠든 것으로 보고 끊는데(`term_ws_run`),
 /// tungstenite 의 자동 pong 은 다음 쓰기 때까지 안 나가서 그 판정에 걸린다.
@@ -7825,6 +7833,7 @@ pub fn spawn_http_server_opts(
                     )
                     .route("/m/{label}/{*rest}", axum::routing::any(machine_proxy))
                     .route("/nacho/app/{*rest}", axum::routing::any(nacho_app_relay))
+                    .route("/nacho/read/{*name}", axum::routing::any(nacho_read_relay))
                     .route(
                         "/term/character-theme",
                         post(move |q: Query<std::collections::HashMap<String, String>>,

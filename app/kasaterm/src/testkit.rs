@@ -3074,8 +3074,8 @@ impl App {
         eprintln!("[automenuclick] idx{idx} {act:?} 클릭 @({:.0},{:.0})", self.cursor_px.0, self.cursor_px.1);
     }
 
-    /// `KASATERM_WORKMODE_PROBE=<organize|coordinate>` — 작업 탭의 모드 단추를 **진짜 클릭**(winit MouseInput)으로
-    /// 한 번 누르고, 나쵸가 적은 모드가 바뀌었는지 찍는다. 격리 리그(`verification_run`)에서만 돈다.
+    /// `KASATERM_WORKMODE_PROBE=<organize|coordinate|via>` — 작업 탭의 모드 단추(또는 키 없는 기기의 첫 읽기 기기
+    /// 단추)를 **진짜 클릭**(winit MouseInput)으로 한 번 누르고, 나쵸 모드와 경유 기기를 찍는다. 격리 리그(`verification_run`)에서만 돈다.
     pub(crate) fn run_work_mode_probe(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
         use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
@@ -3084,22 +3084,30 @@ impl App {
         if !crate::verification_run() {
             return;
         }
-        let Some(target) = std::env::var("KASATERM_WORKMODE_PROBE").ok().and_then(|w| crate::work_mode::WorkMode::parse(w.trim())) else {
+        let Some(word) = std::env::var("KASATERM_WORKMODE_PROBE").ok().map(|w| w.trim().to_string()) else {
             return;
         };
+        let target = crate::work_mode::WorkMode::parse(&word);
+        if target.is_none() && word != "via" {
+            return;
+        }
         let start = *START.get_or_init(Instant::now);
         let after = std::env::var("KASATERM_WORKMODE_PROBE_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(6000);
         let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
         match STEP.load(Ordering::Relaxed) {
             0 if start.elapsed().as_millis() as u64 >= after => {
-                let Some(r) = self.work_side.mode_button(target) else {
+                let button = match target {
+                    Some(mode) => self.work_side.mode_button(mode),
+                    None => self.work_side.via_button(),
+                };
+                let Some(r) = button else {
                     if start.elapsed().as_millis() as u64 > after + 8000 {
-                        eprintln!("[workmode-probe] FAILED button_not_clickable target={}", target.wire());
+                        eprintln!("[workmode-probe] FAILED button_not_clickable target={word}");
                         STEP.store(9, Ordering::Relaxed);
                     }
                     return;
                 };
-                eprintln!("[workmode-probe] before={:?} click={} at=({:.0},{:.0})", self.work_side.nacho_mode().map(|m| m.wire()), target.wire(), r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                eprintln!("[workmode-probe] before={:?} via={:?} click={word} at=({:.0},{:.0})", self.work_side.nacho_mode().map(|m| m.wire()), self.work_side.mode_via(), r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
                 STEP.store(1, Ordering::Relaxed);
                 self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
                 for state in [ElementState::Pressed, ElementState::Released] {
@@ -3108,7 +3116,7 @@ impl App {
                 self.chrome_dirty = true;
             }
             1 if start.elapsed().as_millis() as u64 >= after + 5000 => {
-                eprintln!("[workmode-probe] after={:?} expected={}", self.work_side.nacho_mode().map(|m| m.wire()), target.wire());
+                eprintln!("[workmode-probe] after={:?} via={:?} expected={word}", self.work_side.nacho_mode().map(|m| m.wire()), self.work_side.mode_via());
                 STEP.store(9, Ordering::Relaxed);
             }
             _ => {}

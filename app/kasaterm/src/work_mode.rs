@@ -76,7 +76,7 @@ pub(crate) enum Reach {
 impl Reach {
     pub(crate) fn sentence(&self) -> String {
         match self {
-            Self::NoKey => "이 기기엔 나쵸 연결 키가 없어요 — 나쵸가 도는 기기에서 바꿀 수 있어요".into(),
+            Self::NoKey => "이 기기엔 나쵸 연결 키가 없어요 — 모드는 나쵸가 도는 기기나 폰에서 바꿔요".into(),
             Self::OldNacho => "이 나쵸는 아직 작업 모드를 몰라요".into(),
             Self::Failed(why) => format!("나쵸에 확인하지 못했어요 ({why})"),
         }
@@ -280,6 +280,72 @@ pub(crate) fn fetch_capabilities() -> Result<Capabilities, Reach> {
     }
 }
 
+/// 키 없는 기기가 모드·권한 표를 **읽어** 올 기기 — 사람이 이 탭에서 한 번 고른 명부 항목
+/// (docs/nacho-read-relay.md). 받은 값은 화면 표시에만 쓴다: 쓰기·승인·재시작 판단(`NachoAuthority`)은
+/// 이 길을 모른다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReadVia {
+    pub(crate) label: String,
+    base: String,
+}
+
+const VIA_KEY: &str = "nacho_read_via";
+
+/// 고른 이름을 **사람이 적은 명부**에서만 찾는다 — 알려 온 손님 기기·폴링으로 배운 id 는 대상이 못 된다.
+pub(crate) fn pick_via(want: &str, listed: &[kasa_mcp::machines::Machine]) -> Option<ReadVia> {
+    let want = want.trim();
+    if want.is_empty() {
+        return None;
+    }
+    listed
+        .iter()
+        .find(|m| m.label == want || m.machine_id.as_deref() == Some(want))
+        .map(|m| ReadVia { label: m.label.clone(), base: m.base.trim_end_matches('/').to_string() })
+}
+
+/// 사람이 고른 이름 그대로(명부에서 사라졌을 수도 있다).
+pub(crate) fn via_setting() -> Option<String> {
+    crate::socket::read_settings().get(VIA_KEY)?.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+pub(crate) fn read_via() -> Option<ReadVia> {
+    pick_via(&via_setting()?, &kasa_mcp::machines::listed_machines())
+}
+
+/// 고를 수 있는 기기 — 명부에 사람이 적은 것만.
+pub(crate) fn via_choices() -> Vec<String> {
+    kasa_mcp::machines::listed_machines().into_iter().map(|m| m.label).collect()
+}
+
+pub(crate) fn set_read_via(label: Option<&str>) {
+    crate::socket::write_setting(VIA_KEY, label.map_or(Value::Null, |l| Value::from(l)));
+}
+
+fn via_get(via: &ReadVia, name: &str) -> Result<(u16, Vec<u8>), Reach> {
+    crate::nacho_tasks::plain_get(&via.base, &format!("/nacho/read/{name}"), &via.label).map_err(Reach::Failed)
+}
+
+/// 읽기 창구의 답. 그 기기 카사텀이 창구를 모르면(라우트 없음) 옛 판이라고 말한다 — 나쵸의 옛 판과 가른다.
+fn via_reply(status: u16, body: &[u8]) -> Result<Value, Reach> {
+    let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    match status {
+        200 => Ok(value),
+        404 if value.get("error").is_none() => Err(Reach::Failed("그 기기 카사텀이 읽기 창구를 아직 몰라요".into())),
+        _ => Err(Reach::Failed(error_word(&value, status))),
+    }
+}
+
+pub(crate) fn fetch_mode_via(via: &ReadVia) -> Result<ModeState, Reach> {
+    let (status, body) = via_get(via, "work-mode")?;
+    let value = via_reply(status, &body)?;
+    parse_state(value.get("work_mode").unwrap_or(&value)).ok_or_else(|| Reach::Failed("모드 응답을 읽지 못함".into()))
+}
+
+pub(crate) fn fetch_capabilities_via(via: &ReadVia) -> Result<Capabilities, Reach> {
+    let (status, body) = via_get(via, "capabilities")?;
+    via_reply(status, &body).map(|v| parse_capabilities(&v))
+}
+
 const CACHE_KEY: &str = "work_mode_cache";
 
 pub(crate) fn read_cache() -> Option<ModeState> {
@@ -319,6 +385,34 @@ mod tests {
         assert_eq!(parse_mode_reply(400, br#"{"ok":false,"error":"bad_mode"}"#), Err(Reach::Failed("bad_mode".into())));
         assert_eq!(parse_mode_reply(404, b"404: Not Found"), Err(Reach::OldNacho));
         assert_eq!(parse_mode_reply(403, br#"{"ok":false,"error":"bad_token"}"#), Err(Reach::Failed("bad_token".into())));
+    }
+
+    #[test]
+    fn a_keyless_device_reads_only_from_a_machine_a_person_listed() {
+        let listed = kasa_mcp::machines::parse_listed(&serde_json::json!([
+            {"label": "맥미니", "base": "http://127.0.0.1:18765/", "machine_id": "4af3d95d"},
+            {"label": "집컴", "base": "http://127.0.0.1:18766"}
+        ]));
+        assert_eq!(pick_via("맥미니", &listed).unwrap(), ReadVia { label: "맥미니".into(), base: "http://127.0.0.1:18765".into() });
+        assert_eq!(pick_via("4af3d95d", &listed).unwrap().label, "맥미니");
+        assert_eq!(pick_via(" ", &listed), None, "안 골랐으면 아무 데도 묻지 않는다");
+        assert_eq!(pick_via("손님기기", &listed), None, "명부에 사람이 안 적은 기기는 대상이 못 된다");
+        assert_eq!(via_reply(404, b"").unwrap_err(), Reach::Failed("그 기기 카사텀이 읽기 창구를 아직 몰라요".into()));
+        assert_eq!(via_reply(403, br#"{"ok":false,"error":"local_only"}"#).unwrap_err(), Reach::Failed("local_only".into()));
+        assert_eq!(via_reply(503, br#"{"ok":false,"error":"nacho_key_missing"}"#).unwrap_err(), Reach::Failed("nacho_key_missing".into()));
+    }
+
+    /// 읽기로 받은 모드는 화면 표시에만 — 앱 재시작의 나쵸 권위·승인 판정은 이 길을 모른다.
+    #[test]
+    fn relayed_reads_never_reach_the_restart_authority() {
+        for (name, src) in [("app_restart.rs", include_str!("app_restart.rs")), ("socket.rs", include_str!("socket.rs"))] {
+            for word in ["work_mode", "read_via", "nacho/read", "fetch_mode_via"] {
+                assert!(!src.contains(word), "{name} 이 {word} 를 쓴다 — 읽기 값이 권위·승인 판정에 섞인다");
+            }
+        }
+        for word in ["NachoAuthority::", "app_restart::", "authorize("] {
+            assert!(!include_str!("work_mode.rs").split("#[cfg(test)]").next().unwrap().contains(word), "work_mode.rs 가 {word} 에 닿는다");
+        }
     }
 
     #[test]
@@ -372,6 +466,26 @@ mod tests {
 
     /// 나쵸가 내준 고정 자료(나쵸 레포 `docs/development/api/fixtures/{work_mode,capabilities}.implemented.json`)를
     /// 이 파서가 그대로 읽는가. `NACHO_DESK_FIXTURES=<그 폴더>` 로 가리켜 `--ignored` 로 돈다.
+    /// 나쵸 읽기 범위 고정 자료(`get_read`)를 읽기 창구 해석으로 대조한다 — 사람 이름(changed_by)이 없어야 한다.
+    #[test]
+    #[ignore]
+    fn nacho_read_scope_fixture_matches() {
+        let Ok(dir) = std::env::var("NACHO_DESK_FIXTURES") else { return };
+        let raw = std::fs::read_to_string(format!("{dir}/work_mode.implemented.json")).unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        let read = &v["get_read"];
+        let headers = &read["request"]["headers"];
+        assert_eq!(headers["X-Kasa-Read"], "1");
+        assert_eq!(headers["X-Kasa-Owner"], "0");
+        assert_eq!(headers["X-Kasa-User"], "relay-read");
+        let ok = serde_json::to_vec(&read["200"]).unwrap();
+        let state = via_reply(200, &ok).and_then(|v| parse_state(&v["work_mode"]).ok_or(Reach::OldNacho)).unwrap();
+        assert!(state.changed_by.is_empty(), "읽기 범위는 사람 이름을 싣지 않는다");
+        assert_eq!(state.rev, "1");
+        let denied = serde_json::to_vec(&read["403_read_only"]).unwrap();
+        assert_eq!(via_reply(403, &denied).unwrap_err(), Reach::Failed("read_only".into()));
+    }
+
     #[test]
     #[ignore]
     fn nacho_work_mode_fixtures_match() {

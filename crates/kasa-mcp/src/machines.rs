@@ -333,6 +333,11 @@ fn meta_cache() -> &'static Mutex<HashMap<String, RemoteMeta>> {
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 명부 모양 JSON(파일·env 와 같은 꼴)을 기계 목록으로 — 파일을 거치지 않고 판정을 검사할 때 쓴다.
+pub fn parse_listed(v: &Value) -> Vec<Machine> {
+    parse(v)
+}
+
 fn parse(v: &Value) -> Vec<Machine> {
     let Some(arr) = v.as_array() else {
         return Vec::new();

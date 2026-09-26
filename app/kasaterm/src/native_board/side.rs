@@ -37,6 +37,13 @@ pub(crate) struct SideData {
     caps: Option<Result<Capabilities, Reach>>,
     caps_at: Option<Instant>,
     notice: Option<String>,
+    /// 나쵸 키가 없어 다른 기기의 읽기 창구로 받아 온 값이면 그 기기 이름 — 표시만 한다.
+    mode_via: Option<String>,
+    caps_via: Option<String>,
+    /// 사람이 고른 읽기 기기(설정 값), 그 길의 문제, 아직 안 골랐을 때 고를 수 있는 명부 기기.
+    via_setting: Option<String>,
+    via_problem: Option<String>,
+    via_choices: Vec<String>,
     /// 가상 보드 — 실제 작업이 아니다.
     fixture: bool,
 }
@@ -44,6 +51,8 @@ pub(crate) struct SideData {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SideHit {
     Mode(WorkMode),
+    Via(String),
+    ViaClear,
     Local(String),
     Board(WorkKey),
     OpenBoard,
@@ -89,12 +98,15 @@ impl Default for WorkSide {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModeOrigin {
     Nacho,
+    /// 키 없는 기기가 다른 기기의 읽기 창구로 받은 나쵸 값.
+    Relayed,
     Cache,
     Unknown,
 }
 
-pub(crate) fn shown_mode(nacho: Option<&ModeState>, cache: Option<&ModeState>) -> (Option<WorkMode>, ModeOrigin) {
+pub(crate) fn shown_mode(nacho: Option<&ModeState>, cache: Option<&ModeState>, relayed: bool) -> (Option<WorkMode>, ModeOrigin) {
     match (nacho, cache) {
+        (Some(state), _) if relayed => (Some(state.mode), ModeOrigin::Relayed),
         (Some(state), _) => (Some(state.mode), ModeOrigin::Nacho),
         (None, Some(state)) => (Some(state.mode), ModeOrigin::Cache),
         (None, None) => (None, ModeOrigin::Unknown),
@@ -303,7 +315,7 @@ fn collect(
     previous: &SideData,
     write: Option<(WorkMode, String, String)>,
 ) -> SideData {
-    let mut data = SideData { caps: previous.caps.clone(), caps_at: previous.caps_at, ..Default::default() };
+    let mut data = SideData { caps: previous.caps.clone(), caps_at: previous.caps_at, caps_via: previous.caps_via.clone(), ..Default::default() };
     let fetched = match write {
         Some((mode, rev, nonce)) => match crate::work_mode::post_mode(mode, &rev, &nonce) {
             Err(Reach::Failed(word)) if word == "stale_rev" => {
@@ -319,10 +331,35 @@ fn collect(
             crate::work_mode::write_cache(&state);
             data.mode = Some(state);
         }
+        Err(Reach::NoKey) => {
+            data.mode_reach = Some(Reach::NoKey);
+            data.via_setting = crate::work_mode::via_setting();
+            let via = data.via_setting.as_deref().map(|want| (want, crate::work_mode::pick_via(want, &kasa_mcp::machines::listed_machines())));
+            match via {
+                None => data.via_choices = crate::work_mode::via_choices(),
+                Some((want, None)) => data.via_problem = Some(format!("명부에 없는 기기를 골랐어요 — {want}")),
+                Some((_, Some(via))) => match crate::work_mode::fetch_mode_via(&via) {
+                    Ok(state) => {
+                        crate::work_mode::write_cache(&state);
+                        data.mode = Some(state);
+                        data.mode_via = Some(via.label);
+                    }
+                    Err(reach) => data.via_problem = Some(format!("{} 경유로 읽지 못했어요 — {}", via.label, via_why(&reach))),
+                },
+            }
+        }
         Err(reach) => data.mode_reach = Some(reach),
     }
     if data.caps_at.is_none_or(|at| at.elapsed() >= Duration::from_millis(CAPS_MS)) {
-        data.caps = Some(crate::work_mode::fetch_capabilities());
+        let (caps, via) = match crate::work_mode::fetch_capabilities() {
+            Err(Reach::NoKey) => match crate::work_mode::read_via() {
+                Some(via) => (crate::work_mode::fetch_capabilities_via(&via), Some(via.label)),
+                None => (Err(Reach::NoKey), None),
+            },
+            other => (other, None),
+        };
+        data.caps = Some(caps);
+        data.caps_via = via;
         data.caps_at = Some(Instant::now());
     }
     let shown = data.mode.as_ref().map(|s| s.mode).or(mode);
@@ -356,6 +393,13 @@ fn collect(
     data
 }
 
+fn via_why(reach: &Reach) -> String {
+    match reach {
+        Reach::Failed(word) => word.clone(),
+        other => other.sentence(),
+    }
+}
+
 fn focus_row<'a>(data: &'a OverviewData, focus: &Focus) -> Option<&'a OverviewPane> {
     if focus.surface.is_empty() {
         return None;
@@ -366,7 +410,7 @@ fn focus_row<'a>(data: &'a OverviewData, focus: &Focus) -> Option<&'a OverviewPa
 
 impl WorkSide {
     fn shown(&self) -> (Option<WorkMode>, ModeOrigin) {
-        shown_mode(self.data.mode.as_ref(), self.cache.as_ref())
+        shown_mode(self.data.mode.as_ref(), self.cache.as_ref(), self.data.mode_via.is_some())
     }
 
     /// 검증 훅이 누를 자리 — 마지막 프레임에 그 단추가 눌릴 수 있게 그려졌을 때만.
@@ -376,6 +420,15 @@ impl WorkSide {
 
     pub(crate) fn nacho_mode(&self) -> Option<WorkMode> {
         self.data.mode.as_ref().map(|state| state.mode)
+    }
+
+    /// 검증 훅이 누를 첫 읽기 기기 단추.
+    pub(crate) fn via_button(&self) -> Option<Rect> {
+        self.hits.iter().find(|(_, hit)| matches!(hit, SideHit::Via(_))).map(|(rect, _)| *rect)
+    }
+
+    pub(crate) fn mode_via(&self) -> Option<&str> {
+        self.data.mode_via.as_deref()
     }
 }
 
@@ -455,6 +508,16 @@ impl App {
                 self.work_side.writing = Some(mode);
                 self.work_side.queued_write = Some((mode, rev, crate::work_mode::new_nonce()));
                 self.work_side.scroll = 0.0;
+            }
+            SideHit::Via(label) => {
+                crate::work_mode::set_read_via(Some(&label));
+                self.work_side.data = Arc::new(SideData::default());
+                self.work_side.last_refresh = None;
+            }
+            SideHit::ViaClear => {
+                crate::work_mode::set_read_via(None);
+                self.work_side.data = Arc::new(SideData::default());
+                self.work_side.last_refresh = None;
             }
             SideHit::Local(surface) => {
                 self.focus_surface(&surface);
@@ -567,6 +630,7 @@ pub(crate) fn paint_work_side(
     y += 34.0;
     let origin_note = match origin {
         ModeOrigin::Nacho => None,
+        ModeOrigin::Relayed => Some(format!("{} 경유로 읽은 값이에요 — 표시만 해요", data.mode_via.as_deref().unwrap_or("다른 기기"))),
         ModeOrigin::Cache => Some("마지막으로 확인한 값이에요".to_string()),
         ModeOrigin::Unknown => Some("모드를 아직 모릅니다 — 고른 척하지 않아요".to_string()),
     };
@@ -590,6 +654,10 @@ pub(crate) fn paint_work_side(
     for note in notes {
         wrapped(g, x, &mut y, w, &note, 10.5, theme::text_mute(), 3);
     }
+    if data.mode_reach == Some(Reach::NoKey) && !data.fixture {
+        y += 6.0;
+        paint_via(g, cursor, side, &data, x, &mut y, w);
+    }
     y += 10.0;
 
     if data.fixture {
@@ -604,6 +672,9 @@ pub(crate) fn paint_work_side(
     }
     y += 6.0;
     head(g, x, &mut y, w, "권한");
+    if let Some(via) = &data.caps_via {
+        wrapped(g, x, &mut y, w, &format!("{via} 경유로 읽은 표예요"), 10.5, theme::text_mute(), 2);
+    }
     let restart = side.refusals.as_ref().map(|(r, _)| r.as_slice());
     for row in permission_rows(data.caps.as_ref(), restart) {
         let label = fit(g, &row.label, w, 11.0, false);
@@ -617,6 +688,38 @@ pub(crate) fn paint_work_side(
     side.scroll_max = (content_h - view_h).max(0.0);
     g.pop_clip();
     side.hits.retain(|(r, _)| r.1 + r.3 > top && r.1 < bottom);
+}
+
+/// 키 없는 기기의 읽기 기기 — 안 골랐으면 명부 기기 단추, 골랐으면 그 이름과 해제. 고르는 것도 사람이 누를 때만.
+fn paint_via(g: &mut gpu::GpuRenderer, cursor: (f32, f32), side: &mut WorkSide, data: &SideData, x: f32, y: &mut f32, w: f32) {
+    let bw = w.min(200.0);
+    match &data.via_setting {
+        Some(label) => {
+            let (line, color) = match &data.via_problem {
+                Some(problem) => (problem.clone(), theme::danger()),
+                None => (format!("읽기: {label} 경유 — 이 기기에선 모드를 바꾸지 않아요"), theme::text_dim()),
+            };
+            wrapped(g, x, y, w, &line, 10.5, color, 3);
+            *y += 4.0;
+            let rect = (x, *y, bw.min(120.0), 26.0);
+            outline_button(g, cursor, rect, "읽기 해제", false, true);
+            side.hits.push((rect, SideHit::ViaClear));
+            *y += 32.0;
+        }
+        None if data.via_choices.is_empty() => {
+            wrapped(g, x, y, w, "명부에 기기가 없어 읽어 올 곳이 없어요 — 설정의 기기 목록에서 먼저 이어 주세요", 10.5, theme::text_mute(), 3);
+        }
+        None => {
+            wrapped(g, x, y, w, "모드·권한 표를 읽어 올 기기 — 나쵸 키가 있는 기기를 고르면 읽기만 해요", 10.5, theme::text_dim(), 3);
+            *y += 4.0;
+            for label in data.via_choices.iter().take(4) {
+                let rect = (x, *y, bw, 26.0);
+                outline_button(g, cursor, rect, label, false, true);
+                side.hits.push((rect, SideHit::Via(label.clone())));
+                *y += 32.0;
+            }
+        }
+    }
 }
 
 fn paint_organize(g: &mut gpu::GpuRenderer, side: &WorkSide, data: &SideData, x: f32, y: &mut f32, w: f32) {
@@ -735,9 +838,10 @@ mod tests {
     fn nacho_decides_the_mode_and_nothing_is_guessed() {
         let nacho = state(WorkMode::Organize, "3");
         let cache = state(WorkMode::Coordinate, "2");
-        assert_eq!(shown_mode(Some(&nacho), Some(&cache)), (Some(WorkMode::Organize), ModeOrigin::Nacho));
-        assert_eq!(shown_mode(None, Some(&cache)), (Some(WorkMode::Coordinate), ModeOrigin::Cache));
-        assert_eq!(shown_mode(None, None), (None, ModeOrigin::Unknown), "모르면 고른 척하지 않는다");
+        assert_eq!(shown_mode(Some(&nacho), Some(&cache), false), (Some(WorkMode::Organize), ModeOrigin::Nacho));
+        assert_eq!(shown_mode(Some(&nacho), Some(&cache), true), (Some(WorkMode::Organize), ModeOrigin::Relayed));
+        assert_eq!(shown_mode(None, Some(&cache), false), (Some(WorkMode::Coordinate), ModeOrigin::Cache));
+        assert_eq!(shown_mode(None, None, false), (None, ModeOrigin::Unknown), "모르면 고른 척하지 않는다");
     }
 
     #[test]
@@ -745,6 +849,7 @@ mod tests {
         let nacho = state(WorkMode::Coordinate, "3");
         assert_eq!(write_block(None, Some(&nacho), false), None);
         assert!(write_block(Some(&Reach::NoKey), None, false).unwrap().contains("키가 없어요"), "키 없는 기기는 읽기만");
+        assert!(write_block(Some(&Reach::NoKey), Some(&nacho), false).is_some(), "다른 기기로 읽어 왔어도 이 기기는 쓰지 않는다");
         assert!(write_block(Some(&Reach::OldNacho), None, false).unwrap().contains("모드를 몰라요"));
         assert!(write_block(None, None, false).is_some(), "나쵸 값을 모르면 쓰지 않는다");
         assert!(write_block(None, Some(&nacho), true).is_some(), "누른 뒤 답을 받기 전엔 다시 안 받는다");

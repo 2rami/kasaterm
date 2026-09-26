@@ -460,30 +460,42 @@ fn app_exchange(method: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>
         "nacho_key_missing" => "이 기기에는 나쵸 앱 키가 없어 나쵸에 묻지 않았어요".to_string(),
         _ => "나쵸 자리 정보가 없어 나쵸에 묻지 않았어요".to_string(),
     })?;
-    let authority = url.strip_prefix("http://").ok_or("나쵸 주소가 평문 HTTP 가 아니라 묻지 않았어요")?;
+    let mut headers = format!("X-Nacho-Token: {key}\r\nX-Kasa-Owner: 1\r\nX-Kasa-User: desktop\r\n");
+    if let Some(body) = body {
+        headers.push_str(&format!("Content-Type: application/json\r\nX-Journal-Request: 1\r\nContent-Length: {}\r\n", body.len()));
+    }
+    exchange(&url, method, path, &headers, body, "나쵸")
+}
+
+/// 키 없이 GET 한 번 — (상태 코드, 본문). 다른 기기의 읽기 창구(`/nacho/read/*`)를 부를 때 쓴다.
+pub(crate) fn plain_get(url: &str, path: &str, who: &str) -> Result<(u16, Vec<u8>), String> {
+    let raw = exchange(url, "GET", path, "", None, who)?;
+    let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or(format!("{who} 응답이 잘렸어요"))?;
+    let status = String::from_utf8_lossy(&raw[..head_end]).split_whitespace().nth(1).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
+    Ok((status, raw[head_end + 4..].to_vec()))
+}
+
+fn exchange(url: &str, method: &str, path: &str, headers: &str, body: Option<&[u8]>, who: &str) -> Result<Vec<u8>, String> {
+    let authority = url.strip_prefix("http://").ok_or(format!("{who} 주소가 평문 HTTP 가 아니라 묻지 않았어요"))?;
     let authority = authority.split('/').next().unwrap_or("");
     let addr = std::net::ToSocketAddrs::to_socket_addrs(authority)
         .ok()
         .and_then(|mut a| a.next())
-        .ok_or("나쵸 주소를 해석하지 못했어요")?;
+        .ok_or(format!("{who} 주소를 해석하지 못했어요"))?;
     let timeout = std::time::Duration::from_millis(1500);
-    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).map_err(|_| "나쵸에 연결하지 못했어요".to_string())?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).map_err(|_| format!("{who}에 연결하지 못했어요"))?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
     // HTTP/1.0 으로 물어 청크 전송을 피한다 — 본문 끝은 연결이 닫히는 자리다.
-    let mut request = format!(
-        "{method} {path} HTTP/1.0\r\nHost: {authority}\r\nX-Nacho-Token: {key}\r\nX-Kasa-Owner: 1\r\nX-Kasa-User: desktop\r\nAccept: application/json\r\nConnection: close\r\n"
+    let request = format!(
+        "{method} {path} HTTP/1.0\r\nHost: {authority}\r\n{headers}Accept: application/json\r\nConnection: close\r\n\r\n"
     );
+    stream.write_all(request.as_bytes()).map_err(|_| format!("{who}에 요청을 보내지 못했어요"))?;
     if let Some(body) = body {
-        request.push_str(&format!("Content-Type: application/json\r\nX-Journal-Request: 1\r\nContent-Length: {}\r\n", body.len()));
-    }
-    request.push_str("\r\n");
-    stream.write_all(request.as_bytes()).map_err(|_| "나쵸에 요청을 보내지 못했어요".to_string())?;
-    if let Some(body) = body {
-        stream.write_all(body).map_err(|_| "나쵸에 본문을 보내지 못했어요".to_string())?;
+        stream.write_all(body).map_err(|_| format!("{who}에 본문을 보내지 못했어요"))?;
     }
     let mut raw = Vec::new();
-    stream.take(2 * 1024 * 1024).read_to_end(&mut raw).map_err(|_| "나쵸 응답이 끊겼어요".to_string())?;
+    stream.take(2 * 1024 * 1024).read_to_end(&mut raw).map_err(|_| format!("{who} 응답이 끊겼어요"))?;
     Ok(raw)
 }
 
