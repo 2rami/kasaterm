@@ -109,6 +109,14 @@ pub fn self_label() -> String {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty());
         by_scutil
+            // 윈도우엔 scutil 이 없고 hostname.exe 는 `-s` 를 거부한다 — 그 둘만 보면 윈도우
+            // 기기가 다른 기기 보드에 「이 기계」로 떴다(2026-09-27).
+            .or_else(|| {
+                std::env::var("COMPUTERNAME")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
             .or_else(|| {
                 std::process::Command::new("hostname")
                     .arg("-s")
