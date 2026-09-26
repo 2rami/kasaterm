@@ -5,11 +5,13 @@ import 'package:flutter/material.dart';
 import '../character_stage.dart';
 import '../nacho.dart';
 import '../nacho_student.dart';
+import '../organize.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
 import '../work_mode.dart';
 import '../workboard.dart';
+import 'organize_sheet.dart';
 import 'work_mode_sheet.dart';
 
 /// 나쵸 「작업」 탭 — 거노 차례를 맨 위에, 그 아래 진행·검증·완료. 프로젝트로 거르고, 기기와
@@ -229,12 +231,46 @@ class _WorkBoardViewState extends State<WorkBoardView>
             : () => widget.onOpenPane(i.pane!),
       );
     }
+    // 정리 모드면 누를 때 정리가 먼저, 조율 모드면 길게 누를 때 — 모드는 나쵸 값만 본다.
+    final organizing = _modes.state?.mode == WorkMode.organize;
     return _WorkRow(
       item: i,
       server: widget.server,
       attention: attention,
-      onTap: open,
+      onTap: organizing ? () => _openOrganize(i) : open,
+      onLongPress: () => _openOrganize(i),
       action: action,
+    );
+  }
+
+  void _openOrganize(WorkItem i) {
+    final demo = i.source == WorkSource.demo;
+    final task = i.taskId;
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sheet) => OrganizeSheet(
+        item: i,
+        load: demo
+            ? Future.value(demoTaskDetail(i))
+            : task == null
+            ? null
+            : widget.desk.task(task),
+        ledgerProblem: demo ? null : widget.desk.tasksProblem,
+        onOpenTask: demo || task == null
+            ? null
+            : () {
+                Navigator.of(sheet).pop();
+                widget.onOpenTask(task);
+              },
+        onOpenPane: i.pane == null || i.source != WorkSource.live
+            ? null
+            : () {
+                Navigator.of(sheet).pop();
+                widget.onOpenPane(i.pane!);
+              },
+      ),
     );
   }
 
@@ -612,6 +648,7 @@ class _WorkRow extends StatelessWidget {
     required this.server,
     this.attention = false,
     this.onTap,
+    this.onLongPress,
     this.action,
   });
 
@@ -619,6 +656,7 @@ class _WorkRow extends StatelessWidget {
   final Server server;
   final bool attention;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
   final Widget? action;
 
   static String sourceLabel(WorkSource s) => switch (s) {
@@ -655,6 +693,7 @@ class _WorkRow extends StatelessWidget {
           : Colors.transparent,
       child: InkWell(
         onTap: onTap,
+        onLongPress: onLongPress,
         child: Container(
           constraints: const BoxConstraints(minHeight: 64),
           padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),

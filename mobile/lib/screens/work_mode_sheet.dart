@@ -122,7 +122,12 @@ class WorkModeSheet extends StatelessWidget {
       const SizedBox(height: 4),
     ];
     if (caps == null) {
-      out.add(Text(desk.capsProblem ?? '나쵸에 묻는 중', style: dim));
+      out.add(
+        Text(
+          desk.capsProblem ?? (desk.demo ? '예시에는 권한 표가 없어요' : '나쵸에 묻는 중'),
+          style: dim,
+        ),
+      );
       return out;
     }
     for (final tier in caps.tiers) {
@@ -243,6 +248,14 @@ class _ModeCard extends StatelessWidget {
               padding: const EdgeInsets.only(top: 2),
               child: Text('· $e', style: dim),
             ),
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(switch (mode) {
+              WorkMode.organize =>
+                '이 폰: 작업판 줄을 누르면 그 일의 현재·변경·다음·막힘·검증 정리가 먼저 떠요',
+              WorkMode.coordinate => '이 폰: 작업판 줄을 누르면 작업 상세, 길게 누르면 정리',
+            }, style: dim.copyWith(color: on ? scheme.primary : null)),
+          ),
         ],
       ),
     );
