@@ -16,6 +16,7 @@ use crate::session_transfer::{SessionIdentity, SessionRow, TransferSnapshot, Tra
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub(crate) mod side;
 mod work;
 
 pub(crate) type Rect = (f32, f32, f32, f32);

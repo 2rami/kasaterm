@@ -5358,6 +5358,11 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
+                        if self.info.tab == state::SideTab::Work && self.work_side_click(cx, cy) {
+                            self.chrome_dirty = true;
+                            window.request_redraw();
+                            return;
+                        }
                         if self.info.tab == state::SideTab::Mcp && self.mcp_col_click(cx, cy) {
                             self.chrome_dirty = true;
                             window.request_redraw();
@@ -7865,6 +7870,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_layergeom();
         self.run_pending_automenuclick(event_loop);
         self.run_clipboard_probe(event_loop);
+        self.run_work_mode_probe(event_loop);
         self.run_pending_autohdrmenu(event_loop);
         self.run_pending_autopillclick(event_loop);
         self.run_pending_autoinfodbl(event_loop);

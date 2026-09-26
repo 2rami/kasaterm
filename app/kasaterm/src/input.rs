@@ -2624,6 +2624,21 @@ impl App {
             return;
         }
         if self.git.col_visible
+            && self.info.tab == state::SideTab::Work
+            && self.cursor_px.1 > TITLE_HEIGHT
+            && self.cursor_px.0 >= self.git_col_x()
+        {
+            let next = (self.work_side.scroll - lines as f32 * 22.0).max(0.0);
+            if (next - self.work_side.scroll).abs() > 0.01 {
+                self.work_side.scroll = next;
+                self.chrome_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            return;
+        }
+        if self.git.col_visible
             && self.info.tab == state::SideTab::Sessions
             && self.cursor_px.1 > TITLE_HEIGHT
             && self.cursor_px.0 >= self.git_col_x()

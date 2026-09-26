@@ -316,6 +316,8 @@ pub(crate) enum SideTab {
     Sessions,
     /// 하네스별 MCP 서버와 스킬 — 무엇이 붙어 있고 무엇이 꺼져 있나.
     Mcp,
+    /// 정리(지금 창)·조율(모든 기기) 작업 모드와 권한 표 — `native_board::side`.
+    Work,
 }
 
 /// Info 탭 「다른 기계」 절의 재료 — 조립은 `refresh_machines_col`. 절에는 기계마다

@@ -708,6 +708,7 @@ impl App {
         self.pump_info();
         self.pump_sessions_col();
         self.pump_mcp_col();
+        self.pump_work_side();
         // Every pane's status bar wants its own repo badge — feed all pane cwds
         // to the same poller.
         self.publish_pane_git_cwds();
@@ -7028,6 +7029,36 @@ impl App {
                     g,
                     self.cursor_px,
                     &mut self.mcp_col,
+                    git_col_x,
+                    git_col_w,
+                    body_top,
+                    bottom,
+                );
+            }
+            // 작업 탭 — 위 셋과 형제 블록.
+            if git_col_w > 0.0 && self.info.tab == state::SideTab::Work {
+                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
+                    0.0
+                } else {
+                    DOCK_HEIGHT
+                } + status_h;
+                let top = TITLE_HEIGHT;
+                let bottom = (win_px.1 / scale - bottom_h).max(top);
+                g.rect(git_col_x, top, git_col_w, bottom - top, git_col_bg);
+                g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
+                let body_top = info::draw_side_tabs(
+                    g,
+                    self.cursor_px,
+                    &mut self.info,
+                    &mut self.git,
+                    git_col_x,
+                    git_col_w,
+                    top,
+                );
+                crate::native_board::side::paint_work_side(
+                    g,
+                    self.cursor_px,
+                    &mut self.work_side,
                     git_col_x,
                     git_col_w,
                     body_top,

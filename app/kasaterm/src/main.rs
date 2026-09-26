@@ -34,6 +34,7 @@ mod lineedit;
 mod markdown;
 mod native_board;
 mod nacho_tasks;
+mod work_mode;
 mod transfer_endpoints;
 mod tell_delivery;
 mod native_onboarding;
@@ -5643,6 +5644,7 @@ struct App {
     /// 우측 칼럼의 MCP·Skill 탭 — 하네스별로 무엇이 붙어 있나. 위 둘과 칼럼
     /// 폭·닫기를 공유하고 본문과 수집 스레드만 여기 있다.
     mcp_col: state::McpColState,
+    work_side: native_board::side::WorkSide,
     /// Per-pane status bar (cwd/branch/diff chips at each pane's foot) + the
     /// open dropdown's state. Grouped into a sub-struct (state.rs) so statusbar
     /// work touches one file, not this App definition — CLAUDE.md 병렬 규칙.
@@ -6222,6 +6224,8 @@ impl App {
                     state::SideTab::Sessions
                 } else if std::env::var("KASATERM_TEST_MCP").is_ok() {
                     state::SideTab::Mcp
+                } else if std::env::var("KASATERM_TEST_WORK_SIDE").is_ok() {
+                    state::SideTab::Work
                 } else {
                     state::SideTab::Git
                 },
@@ -6244,6 +6248,7 @@ impl App {
                     }),
                 ..Default::default()
             },
+            work_side: Default::default(),
             statusbar: Default::default(),
             turn: Default::default(),
             pane_cwd_check: None,

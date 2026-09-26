@@ -45,7 +45,7 @@ pub(crate) enum Finish {
 }
 
 impl Finish {
-    const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Verified => "성공 확인",
             Self::Unverified => "끝남 · 검증 안 됨",

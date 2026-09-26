@@ -2153,6 +2153,7 @@ pub(crate) fn draw_side_tabs(
         (state::SideTab::Info, "Info"),
         (state::SideTab::Sessions, "세션"),
         (state::SideTab::Mcp, "MCP"),
+        (state::SideTab::Work, "작업"),
     ] {
         let active = info.tab == tab;
         let tw = g.measure_chrome_text(label, 12.0, active);
