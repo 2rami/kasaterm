@@ -1585,6 +1585,8 @@ pub(crate) enum AccountMenuItem {
     Density(bool),
     /// claude 블록의 초기화권 줄 곁 단추 — claude.ai 사용량 페이지를 연다.
     UseLimitReset,
+    /// 바닥의 판 번호 줄 — 이 기기의 업데이터로 최신 판을 확인·받는다(`version::update_entry`).
+    CheckUpdates,
 }
 
 /// 계정을 가진 하네스. 저장소도 전환 수단도 갈려서(claude 는 자격 저장소 env,
@@ -6474,32 +6476,48 @@ pub(crate) fn install_pending() -> bool {
     v
 }
 
-fn arm_self_install() {
-    let Some((installed, dist)) = install_pending_paths() else {
-        return;
-    };
+/// 자기설치 도우미 스크립트. 설치 직전 재확인 두 개는 arm 시점 검사와 별개로 필요하다 —
+/// 헬퍼는 pid 가 사라지길 기다리는데, 그 pid 가 다른 장수 프로세스로 재사용되면 며칠 뒤에야
+/// 발화할 수 있고, 사람이 끄자마자 다시 켜면 새 인스턴스가 이미 떠 있을 수도 있다. 그 상태로
+/// 설치본을 치우면 도는 앱의 서명 페이지가 무효가 되어 macOS 가 앱을 SIGKILL 한다 — 그래서
+/// (1) dist 가 지금도 더 새것인지, (2) 설치본을 도는 프로세스가 없는지 를 발화 시점에 다시 본다.
+///
+/// 설치본은 지우지 않고 [backup] 으로 옮겨 둔다(같은 폴더라 이름만 바뀐다). 복사가 중간에
+/// 실패하면 반쯤 복사된 것을 걷고 옮겨 둔 판을 되돌린다 — 전에는 `rm -rf` 뒤 `cp` 라 복사가
+/// 실패하면 앱이 통째로 사라졌고, 다음 판을 받을 길(업데이터·자기설치)도 함께 사라졌다.
+/// 이름 끝이 `.app` 이 아니라 Launch Services 가 두 번째 카사텀으로 치지 않는다.
+fn self_install_script(
+    pid: u32,
+    installed: &std::path::Path,
+    dist: &std::path::Path,
+    backup: &std::path::Path,
+) -> String {
     let running = installed.join("Contents/MacOS/kasaterm");
     let fresh = dist.join("Contents/MacOS/kasaterm");
-    let log = std::env::temp_dir().join("kasaterm-selfinstall.log");
-    // 설치 직전 재확인 두 개는 arm 시점 검사와 별개로 필요하다. 헬퍼는 pid 가
-    // 사라지길 기다리는데, 그 pid 가 다른 장수 프로세스로 재사용되면 며칠 뒤에야
-    // 발화할 수 있고, 사람이 끄자마자 다시 켜면 새 인스턴스가 이미 떠 있을 수도
-    // 있다. 그 상태로 `rm -rf` 를 하면 도는 앱의 서명 페이지가 무효가 되어 macOS
-    // 가 앱을 SIGKILL 한다 — 그래서 (1) dist 가 지금도 더 새것인지, (2) 설치본을
-    // 도는 프로세스가 없는지 를 발화 시점에 다시 본다.
-    let script = format!(
+    format!(
         "while kill -0 {pid} 2>/dev/null; do sleep 0.3; done\n\
          [ '{fresh}' -nt '{run}' ] || {{ echo \"skipped: dist not newer $(date)\"; exit 0; }}\n\
          ! /usr/bin/pgrep -f '{run}' >/dev/null 2>&1 \
          || {{ echo \"skipped: app running $(date)\"; exit 0; }}\n\
-         rm -rf '{inst}' && cp -R '{dist}' '{inst}' && touch '{inst}' \
-         && echo \"installed $(date)\" || echo \"install FAILED $(date)\"\n",
-        pid = std::process::id(),
+         rm -rf '{bak}' && mv '{inst}' '{bak}' || {{ echo \"skipped: backup failed $(date)\"; exit 0; }}\n\
+         if cp -R '{dist}' '{inst}' && touch '{inst}'; then echo \"installed $(date)\"; \
+         else rm -rf '{inst}'; mv '{bak}' '{inst}' && echo \"install FAILED, previous restored $(date)\" \
+         || echo \"install FAILED, restore FAILED — previous is at {bak} $(date)\"; fi\n",
         inst = installed.display(),
         dist = dist.display(),
+        bak = backup.display(),
         fresh = fresh.display(),
         run = running.display(),
-    );
+    )
+}
+
+fn arm_self_install() {
+    let Some((installed, dist)) = install_pending_paths() else {
+        return;
+    };
+    let log = std::env::temp_dir().join("kasaterm-selfinstall.log");
+    let backup = installed.with_file_name(".kasaterm.app.previous");
+    let script = self_install_script(std::process::id(), &installed, &dist, &backup);
     let Ok(out) = std::fs::File::create(&log) else {
         return;
     };
@@ -9107,6 +9125,48 @@ fn stage_shim(src: &std::path::Path, target: &std::path::Path) -> std::io::Resul
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// 자기설치 도우미를 실제 sh 로 돌린다 — 성공하면 이전 판이 곁에 남고, 복사가 실패하면
+    /// 설치본이 되돌아오고(앱이 사라지면 다음 판을 받을 길도 사라진다), 더 새것이 아니면 손대지 않는다.
+    #[test]
+    fn self_install_keeps_the_previous_bundle_and_restores_it_on_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("selfinstall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let bundle = |dir: &std::path::Path, body: &str| {
+            std::fs::create_dir_all(dir.join("Contents/MacOS")).unwrap();
+            std::fs::write(dir.join("Contents/MacOS/kasaterm"), body).unwrap();
+        };
+        let read = |dir: &std::path::Path| std::fs::read_to_string(dir.join("Contents/MacOS/kasaterm")).ok();
+        let (inst, dist, bak) = (tmp.join("Applications/kasaterm.app"), tmp.join("dist/kasaterm.app"), tmp.join("Applications/.kasaterm.app.previous"));
+        let gone = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = gone.id();
+        let _ = { let mut c = gone; c.wait() };
+        let run = || {
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(self_install_script(pid, &inst, &dist, &bak)).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+
+        bundle(&inst, "old");
+        std::thread::sleep(Duration::from_millis(1100));
+        bundle(&dist, "new");
+        assert!(run().starts_with("installed"));
+        assert_eq!((read(&inst).as_deref(), read(&bak).as_deref()), (Some("new"), Some("old")));
+
+        assert!(run().starts_with("skipped: dist not newer"));
+        assert_eq!(read(&inst).as_deref(), Some("new"));
+
+        std::thread::sleep(Duration::from_millis(1100));
+        bundle(&dist, "newer");
+        std::fs::create_dir_all(dist.join("Contents/Locked")).unwrap();
+        std::fs::write(dist.join("Contents/Locked/x"), "x").unwrap();
+        std::fs::set_permissions(dist.join("Contents/Locked/x"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let log = run();
+        std::fs::set_permissions(dist.join("Contents/Locked/x"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(log.contains("install FAILED, previous restored"), "{log}");
+        assert_eq!(read(&inst).as_deref(), Some("new"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn remaining_duration_uses_days_hours_and_minutes() {

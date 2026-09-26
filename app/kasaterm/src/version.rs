@@ -132,3 +132,66 @@ fn fetch() -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
+
+/// 업데이터가 없는 판이 새 판을 받는 곳 — CI 가 서명해 올린 릴리스 파일. 소스·빌드 환경이 없어도 된다.
+pub(crate) const RELEASES: &str = "https://github.com/2rami/kasaterm/releases/latest";
+
+/// 판 번호 줄을 눌렀을 때 쓰는 길. 업데이터가 있으면 그 창이 확인·받기·설치를 사람에게 묻는다
+/// (EdDSA 서명 확인도 업데이터 몫이고, 설치·재실행은 거기서 사람이 고른다 — 여기서 끄지 않는다).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UpdateEntry {
+    Sparkle,
+    WinSparkle,
+    /// 업데이터가 없다 — 까닭을 말하고 릴리스 페이지를 연다.
+    Download(&'static str),
+}
+
+pub(crate) fn update_entry(sparkle: bool, winsparkle: bool, windows: bool) -> UpdateEntry {
+    match (sparkle, winsparkle, windows) {
+        (true, _, false) => UpdateEntry::Sparkle,
+        (_, true, true) => UpdateEntry::WinSparkle,
+        (_, _, true) => UpdateEntry::Download("MSI 로 설치한 판이 아니라 업데이터가 없어요 — 릴리스 페이지에서 받아 주세요"),
+        _ => UpdateEntry::Download("이 판은 .app 번들이 아니라 업데이터가 없어요 — 릴리스 페이지에서 받아 주세요"),
+    }
+}
+
+impl crate::App {
+    pub(crate) fn check_for_updates_now(&mut self) {
+        #[cfg(target_os = "macos")]
+        let sparkle = self.sparkle_updater.is_some();
+        #[cfg(not(target_os = "macos"))]
+        let sparkle = false;
+        match update_entry(sparkle, crate::win_sparkle::available(), cfg!(windows)) {
+            UpdateEntry::Sparkle => {
+                #[cfg(target_os = "macos")]
+                if let Some(c) = self.sparkle_updater.as_ref() {
+                    crate::macos_sparkle::check_for_updates(c);
+                }
+            }
+            UpdateEntry::WinSparkle => crate::win_sparkle::install(),
+            UpdateEntry::Download(why) => {
+                self.set_toast(why.to_string());
+                crate::chrome::open_url_in_browser(RELEASES);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_version_row_uses_the_updater_the_install_has() {
+        assert_eq!(update_entry(true, false, false), UpdateEntry::Sparkle);
+        assert_eq!(update_entry(false, true, true), UpdateEntry::WinSparkle);
+        // 업데이터가 없으면 조용히 아무것도 안 하지 않는다 — 까닭과 서명된 릴리스 파일로 가는 길.
+        for (s, w, win) in [(false, false, false), (false, false, true), (false, true, false)] {
+            let UpdateEntry::Download(why) = update_entry(s, w, win) else {
+                panic!("업데이터 없는 판이 다운로드 안내를 못 받음: {s} {w} {win}");
+            };
+            assert!(why.contains("업데이터가 없어요"));
+        }
+        assert!(RELEASES.starts_with("https://github.com/2rami/kasaterm/releases"));
+    }
+}

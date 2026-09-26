@@ -78,8 +78,14 @@ pub(crate) fn version_newer(a: &str, b: &str) -> bool {
 #[cfg(not(windows))]
 pub(crate) fn install() {}
 
+/// 이 실행에 WinSparkle 이 얹혔나 — MSI 로 설치한 판만 DLL 이 곁에 있다.
+#[cfg(not(windows))]
+pub(crate) fn available() -> bool {
+    false
+}
+
 #[cfg(windows)]
-pub(crate) use ffi::{init, install};
+pub(crate) use ffi::{available, init, install};
 
 #[cfg(windows)]
 mod ffi {
@@ -192,6 +198,10 @@ mod ffi {
         out.status
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    pub(crate) fn available() -> bool {
+        INSTALL_FN.load(Ordering::SeqCst) != 0
     }
 
     /// 토스트 [설치] 칩 → WinSparkle 에 다운로드·설치 위임. "업데이트 있음"

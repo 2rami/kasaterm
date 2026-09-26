@@ -11310,6 +11310,15 @@ impl App {
                 g.rect(mx + pad, ry + 2.0, mw - pad * 2.0, 1.0, theme::border());
                 ry += rule;
                 {
+                    // 누르면 이 기기의 업데이터가 확인·받기·설치를 묻는다 — 설정을 뒤지지 않고
+                    // 번호를 본 자리에서 바로 받게. 설치·재실행은 업데이터 창에서 사람이 고른다.
+                    let ver_hover = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + ver_h;
+                    g.hover_pointer |= ver_hover;
+                    if ver_hover {
+                        round_rect(g, mx + pad, ry, mw - pad * 2.0, ver_h, theme::radius_sm(), theme::surface_active());
+                    }
+                    self.account_menu_hits
+                        .push((AccountMenuItem::CheckUpdates, (mx, ry, mw, ver_h)));
                     let vf = f - 2.0;
                     let left = format!("카사텀 {}", crate::version::label());
                     g.draw_text(

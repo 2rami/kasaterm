@@ -255,6 +255,10 @@ impl App {
                 self.close_account_menu();
                 self.use_claude_limit_reset();
             }
+            AccountMenuItem::CheckUpdates => {
+                self.close_account_menu();
+                self.check_for_updates_now();
+            }
             AccountMenuItem::Forget(provider, id) => {
                 self.close_account_menu();
                 self.settings_apply(match provider {
