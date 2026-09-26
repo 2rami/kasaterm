@@ -44,6 +44,7 @@ kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자�
 - 부팅 명령은 `kasaterm-cli send --surface <새 창> '<부팅 명령>'`으로 한 번만 넣는다. 명령 끝에는 실제 줄바꿈을 포함한다.
 - board에서 실행·신원·주소 확인 후 tell로 브리프를 보낸다. 부팅 명령과 섞지 않는다.
 - 남의 변경을 덮지 않는다. 결과를 검증·커밋한 뒤 완료를 보고한다.
+- 고친 파일은 커밋·되돌리기 전까지 그 학생이 잡는다. 남이 고치려 하면 겹침 가드가 막는다. 넘겨줄 때는 `python3 <collab-hooks>/kasaterm-conflict-guard.py release <파일>`로 놓는다.
 
 ## 카사텀 화면 만들기
 

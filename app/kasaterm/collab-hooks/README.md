@@ -11,7 +11,7 @@ hook 경로 해석(`locate_collab_hooks_dir`): env `KASATERM_COLLAB_HOOKS_DIR` �
 | 파일 | 이벤트 | 역할 |
 |---|---|---|
 | `kasaterm-bind-transcript.sh` | SessionStart/PreToolUse | claude transcript 경로 등록(**board 데이터 소스**) + agent-roster 영속 기록(재시작 후 `claude --resume` 복원용) |
-| `kasaterm-conflict-guard.py` | PreToolUse(Edit/Write/MultiEdit) | 같은 파일 동시편집 차단 + 최신 board 주소로 담당 조율 안내 |
+| `kasaterm-conflict-guard.py` | PreToolUse(Edit/Write/MultiEdit) | 같은 파일 동시편집 차단 + 커밋 전까지 고친 학생이 잡기(`claims.json`, `release`·`list`) + 최신 board 주소로 담당 조율 안내 |
 | `kasaterm-stop-drain.sh` | Stop | 미읽 협업 메시지 있으면 멈춤 차단(inbox drain) + 작업 완료 알림 |
 | `kasaterm-notify-attention.sh` | Notification | 권한/입력 대기 alert |
 | `auto-imgopen.sh` | PostToolUse(SendUserFile) | 보낸 이미지를 image pane 으로 자동 표시 |
@@ -36,3 +36,4 @@ hook 경로 해석(`locate_collab_hooks_dir`): env `KASATERM_COLLAB_HOOKS_DIR` �
 - **추적과 전달 구분** — 변경 기록은 제한된 메타데이터만 보관한다. 메시지는 최신 수신자 신원과 입력 상태를 검증하며, 같은 ID의 재시도는 기존 접수 기록을 반환한다.
 - **개인 설정 무오염** — hook 은 `--settings` 세션 스코프로만 주입. `~/.claude` 에 아무것도 설치하지 않는다.
 - **`conflict-guard` 는 transcript 직접판정** — `~/.claude/projects/<cwd>/*.jsonl` 직접 읽어 PreToolUse 동기 차단. 백엔드 무관하게 살아있는 안전망.
+- **잡기는 git 과 보드로 푼다** — 편집을 허락할 때 `claims.json` 에 세션을 적고, 그 파일이 git 에서 더럽고 · 잡은 뒤 커밋이 없고 · 잡은 세션이 `board --local` 에 살아 있을 때만 막는다. 셋 중 하나라도 못 가르면 연다.
