@@ -247,6 +247,14 @@ Future<({Future<void> Function(WidgetTester) close})> _pumpDemoBoard(
     ),
   );
   await tester.pump();
+  // 번들 그림(캐릭터·학생 얼굴)은 실제 파일 읽기·디코드라 가짜 시간 펌프 안에서 끝날 때도, 안 끝날
+  // 때도 있다 — 골든이 실행마다 갈렸다. 진짜 시간에서 다 풀어 두고 그린다.
+  await tester.runAsync(() async {
+    for (final e in find.byType(Image).evaluate()) {
+      await precacheImage((e.widget as Image).image, e, onError: (_, _) {});
+    }
+  });
+  await tester.pumpAndSettle();
   return (
     close: (WidgetTester t) async {
       await t.pumpWidget(const SizedBox());

@@ -348,11 +348,12 @@ class WorkModeDesk extends ChangeNotifier {
 }
 
 /// 예시 판의 모드·권한 — 나쵸 고정 자료(capabilities.implemented.json)의 모양을 따른다.
+/// 바꾼 때는 지금에서 40분 전 — 고정 시각이면 날마다 「몇 분 전」 글이 달라져 화면이 흔들린다.
 WorkModeDesk demoModes() => WorkModeDesk.demo(
-  state: const ModeState(
+  state: ModeState(
     mode: WorkMode.coordinate,
     rev: 3,
-    changedAtMs: 1790449200000,
+    changedAtMs: DateTime.now().millisecondsSinceEpoch - 40 * 60 * 1000,
     changedBy: 'app:desktop',
   ),
   caps: const Capabilities(
