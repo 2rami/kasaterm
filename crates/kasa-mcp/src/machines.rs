@@ -147,8 +147,9 @@ fn build_slot() -> &'static OnceLock<String> {
     &B
 }
 
-/// 상대가 알려 온 기계. `at` 이 GUEST_STALE 을 넘으면 목록에서 빠진다 — 알림은 상대의
-/// 폴링(5초)마다 오므로, 터널이 죽으면 반 분 안에 사라진다.
+/// 상대가 알려 온 기계. `at` 이 GUEST_FORGET 을 넘어야 목록에서 빠진다. 켜짐·꺼짐은
+/// 이 표가 아니라 폴링 캐시가 가른다 — 여기서 30초 만에 지우던 때는 망이 잠깐 흔들릴
+/// 때마다 그 기기가 목록·보드에서 통째로 사라졌다가 돌아왔다(2026-09-27, 한 부팅에 수십 번).
 #[derive(Clone)]
 struct Guest {
     base: String,
@@ -157,7 +158,7 @@ struct Guest {
     build: String,
     at: Instant,
 }
-const GUEST_STALE: Duration = Duration::from_secs(30);
+const GUEST_FORGET: Duration = Duration::from_secs(600);
 fn guests() -> &'static Mutex<HashMap<String, Guest>> {
     static G: OnceLock<Mutex<HashMap<String, Guest>>> = OnceLock::new();
     G.get_or_init(|| Mutex::new(HashMap::new()))
@@ -192,7 +193,7 @@ pub fn announce_guest(label: &str, port: u16, host: &str, home: &str, build: &st
 /// 손으로 적은 ssh·roots 가 더 많은 것을 안다.
 fn guest_machines(taken: &[String]) -> Vec<Machine> {
     let Ok(mut g) = guests().lock() else { return Vec::new() };
-    g.retain(|_, v| v.at.elapsed() < GUEST_STALE);
+    g.retain(|_, v| v.at.elapsed() < GUEST_FORGET);
     let my_home = kasa_socket::home_var().unwrap_or_default();
     g.iter()
         .filter(|(label, _)| !taken.contains(label))
@@ -510,8 +511,17 @@ struct Tunnel {
     port: u16,
     /// 띄운 시각 — 금방 죽었으면(30초 안) 「안 닿는 기계」로 보고 재시도를 늦춘다.
     spawned: Instant,
+    /// ssh 의 stderr — 죽었을 때 사유를 여기서 읽는다.
+    err: std::path::PathBuf,
 }
 fn tunnels() -> &'static Mutex<HashMap<String, Tunnel>> {
+    static T: OnceLock<Mutex<HashMap<String, Tunnel>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(HashMap::new()))
+}
+/// 되돌아오는 길(`-R`)은 앞쪽(`-L`)과 다른 ssh 로 든다. 한 ssh 에 같이 실으면, 망이 흔들린
+/// 뒤 저쪽 sshd 가 옛 세션으로 그 포트를 아직 쥐고 있을 때 새 ssh 가 `remote port forwarding
+/// failed` 로 곧장 죽어 이쪽에서 저쪽을 보는 길까지 같이 끊겼다(2026-09-27 재현).
+fn reverse_tunnels() -> &'static Mutex<HashMap<String, Tunnel>> {
     static T: OnceLock<Mutex<HashMap<String, Tunnel>>> = OnceLock::new();
     T.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -691,6 +701,22 @@ fn ensure_meta(target: &str, key: Option<&str>) {
 /// 감시꾼(sh)을 걷는다 — **TERM 으로**. `Child::kill` 은 SIGKILL 이라 trap 이 못 돌아
 /// 밑의 ssh 가 고아로 남는다(2026-09-09 실측: 앱을 곱게 끝냈는데 크롬 포워드 ssh 가
 /// 살아 있었다). TERM 뒤 잠깐 기다리고, 그래도 남으면 그때 KILL.
+/// ssh 의 stderr 를 받아 두는 곳 — 로컬 포트(와 갈래)마다 하나라 터널끼리 안 겹친다.
+fn tunnel_err_path(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("kasaterm-tunnel-{tag}.err"))
+}
+
+/// 죽은 터널의 사유 한 줄. ssh 는 거절·포워드 실패를 stderr 에만 남기는데 그걸 버리던
+/// 때는 「끊김」만 보여 원인을 가를 수 없었다. 양자내성 경고(`**` 줄)는 사유가 아니다.
+fn tunnel_death_reason(err: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(err).ok()?;
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("**"))
+        .last()
+        .map(|l| l.chars().take(160).collect())
+}
+
 fn stop_watched(tun: &mut Tunnel) {
     let pid = tun.child.id();
     let _ = std::process::Command::new("kill")
@@ -718,6 +744,7 @@ fn spawn_watched_ssh(
     kargs: &[String],
     forwards: &[String],
     target: &str,
+    err_log: &std::path::Path,
 ) -> std::io::Result<std::process::Child> {
     std::process::Command::new("sh")
         .arg("-c")
@@ -725,7 +752,7 @@ fn spawn_watched_ssh(
             // `sleep 3 & wait $!` — 그냥 `sleep 3` 이면 TERM 이 와도 sleep 이 끝나야
             // trap 이 돌아, 3초 안에 KILL 폴백이 먼저 오면 ssh 가 고아로 남는다.
             "p=\"\"; trap 'kill $p 2>/dev/null; exit 0' TERM INT\n\
-ssh \"$@\" & p=$!\n\
+ssh \"$@\" 2>\"$KASA_TUNNEL_ERR\" & p=$!\n\
 while kill -0 $PPID 2>/dev/null && kill -0 $p 2>/dev/null; do sleep 3 & wait $!; done\n\
 kill $p 2>/dev/null; wait $p 2>/dev/null",
         )
@@ -737,8 +764,10 @@ kill $p 2>/dev/null; wait $p 2>/dev/null",
             "BatchMode=yes",
             "-o",
             "ExitOnForwardFailure=yes",
+            // 끊긴 터널을 알아채는 데 20초×3 이면 1분이다 — 그동안 프로세스는 살아 있어 다시
+            // 열지도 않고 기기만 「안 닿음」으로 남았다. 5초×3 이면 15초.
             "-o",
-            "ServerAliveInterval=20",
+            "ServerAliveInterval=5",
             "-o",
             "ServerAliveCountMax=3",
             "-o",
@@ -746,6 +775,7 @@ kill $p 2>/dev/null; wait $p 2>/dev/null",
         ])
         .args(forwards)
         .arg(target)
+        .env("KASA_TUNNEL_ERR", err_log)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -786,7 +816,10 @@ fn chrome_tunnel_tick() {
         match tun.child.try_wait() {
             Ok(None) => return,
             _ => {
-                eprintln!("[machines] {label} 크롬 포워드 끊김 — 다시 연다");
+                eprintln!(
+                    "[machines] {label} 크롬 포워드 끊김 — 다시 연다{}",
+                    tunnel_death_reason(&tun.err).map(|r| format!(" · {r}")).unwrap_or_default()
+                );
                 t.remove(&label);
             }
         }
@@ -807,10 +840,11 @@ fn chrome_tunnel_tick() {
         return;
     }
     let forwards = vec!["-L".to_string(), format!("{port}:127.0.0.1:{KASACHROME_PORT}")];
-    match spawn_watched_ssh(&kargs, &forwards, &target) {
+    let err = tunnel_err_path(&port.to_string());
+    match spawn_watched_ssh(&kargs, &forwards, &target, &err) {
         Ok(child) => {
             eprintln!("[machines] {label} 크롬 포워드 염: 127.0.0.1:{port} → {target}:{KASACHROME_PORT}");
-            t.insert(label, Tunnel { child, target, port, spawned: Instant::now() });
+            t.insert(label, Tunnel { child, target, port, spawned: Instant::now(), err });
         }
         Err(e) => eprintln!("[machines] {label} 크롬 포워드 스폰 실패: {e}"),
     }
@@ -821,6 +855,48 @@ fn chrome_tunnels() -> &'static Mutex<HashMap<String, Tunnel>> {
     T.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 살아 있으면 true. 죽었으면 `key` 의 연속 단명 횟수를 올리고 사유와 함께 한 줄 남긴 뒤
+/// 표에서 뺀다 — 첫 끊김은 바로, 연속 단명은 8번마다 한 줄만.
+fn reap_tunnel(map: &mut HashMap<String, Tunnel>, label: &str, key: &str, what: &str) -> bool {
+    let Some(tun) = map.get_mut(label) else { return false };
+    if matches!(tun.child.try_wait(), Ok(None)) {
+        return true;
+    }
+    let short = tun.spawned.elapsed() < TUNNEL_SHORT_LIFE;
+    let streak = fail_streak()
+        .lock()
+        .map(|mut f| {
+            let e = f.entry(key.to_string()).or_default();
+            *e = if short { e.saturating_add(1) } else { 0 };
+            *e
+        })
+        .unwrap_or(0);
+    if streak <= 1 || streak % 8 == 0 {
+        eprintln!(
+            "[machines] {label} {what} 끊김 — {}초 뒤 다시 연다{}{}",
+            retry_after(streak).as_secs(),
+            if streak > 1 { format!(" (연속 {streak}번째)") } else { String::new() },
+            tunnel_death_reason(&tun.err).map(|r| format!(" · {r}")).unwrap_or_default()
+        );
+    }
+    map.remove(label);
+    false
+}
+
+/// 연속 단명에 맞춘 대기가 지났으면 이번 시도 시각을 적고 true.
+fn spawn_due(key: &str) -> bool {
+    let wait = fail_streak()
+        .lock()
+        .map(|f| retry_after(f.get(key).copied().unwrap_or(0)))
+        .unwrap_or(TUNNEL_RETRY);
+    let Ok(mut l) = last_spawn().lock() else { return true };
+    if l.get(key).is_some_and(|at| at.elapsed() < wait) {
+        return false;
+    }
+    l.insert(key.to_string(), Instant::now());
+    true
+}
+
 fn tunnel_tick() {
     let want: Vec<(String, String, u16, Option<String>)> = listed_machines()
         .into_iter()
@@ -828,15 +904,18 @@ fn tunnel_tick() {
         .filter_map(|m| Some((m.label.clone(), m.ssh.clone()?, tunnel_port(&m.label), m.key.clone())))
         .collect();
     let Ok(mut t) = tunnels().lock() else { return };
+    let Ok(mut r) = reverse_tunnels().lock() else { return };
     // 명부에서 빠졌거나 대상이 바뀐 터널은 걷는다.
-    t.retain(|label, tun| {
-        let keep = want.iter().any(|(l, tg, p, _)| l == label && *tg == tun.target && *p == tun.port);
-        if !keep {
-            stop_watched(tun);
-            eprintln!("[machines] {label} 터널 걷음(명부에서 빠짐)");
-        }
-        keep
-    });
+    for map in [&mut *t, &mut *r] {
+        map.retain(|label, tun| {
+            let keep = want.iter().any(|(l, tg, p, _)| l == label && *tg == tun.target && *p == tun.port);
+            if !keep {
+                stop_watched(tun);
+                eprintln!("[machines] {label} 터널 걷음(명부에서 빠짐)");
+            }
+            keep
+        });
+    }
     for (label, target, port, key) in want {
         ensure_meta(&target, key.as_deref());
         // 열쇠는 ensure_meta 가 방금 찾아 적었을 수 있다 — 파일에서 다시 읽는다.
@@ -847,73 +926,44 @@ fn tunnel_tick() {
                 .and_then(|e| e.get("key").and_then(|v| v.as_str()).map(str::to_string))
         });
         let kargs = key_args(key.as_deref());
-        if let Some(tun) = t.get_mut(&label) {
-            match tun.child.try_wait() {
-                Ok(None) => continue, // 살아 있다
-                _ => {
-                    let short = tun.spawned.elapsed() < TUNNEL_SHORT_LIFE;
-                    let streak = fail_streak()
-                        .lock()
-                        .map(|mut f| {
-                            let e = f.entry(label.clone()).or_default();
-                            *e = if short { e.saturating_add(1) } else { 0 };
-                            *e
-                        })
-                        .unwrap_or(0);
-                    // 첫 끊김은 바로, 연속 단명은 4번째부터 8번마다 한 줄만.
-                    if streak <= 1 || streak % 8 == 0 {
-                        eprintln!(
-                            "[machines] {label} 터널 끊김 — {}초 뒤 다시 연다{}",
-                            retry_after(streak).as_secs(),
-                            if streak > 1 { format!(" (연속 {streak}번째)") } else { String::new() }
-                        );
-                    }
-                    t.remove(&label);
-                }
-            }
-        }
-        let wait = fail_streak()
-            .lock()
-            .map(|f| retry_after(f.get(&label).copied().unwrap_or(0)))
-            .unwrap_or(TUNNEL_RETRY);
-        if let Ok(mut l) = last_spawn().lock() {
-            if l.get(&label).is_some_and(|at| at.elapsed() < wait) {
-                continue;
-            }
-            l.insert(label.clone(), Instant::now());
-        }
         // 그 포트를 이미 누가 듣고 있으면(앱이 죽으며 남긴 고아 ssh, 또는 같은 명부를
         // 든 다른 인스턴스) 그걸 그냥 쓴다 — ExitOnForwardFailure 로 새 ssh 는 곧장
         // 죽어 8초마다 헛스폰만 돌고, base 는 그 고아가 이미 살리고 있다.
-        if std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-            Duration::from_millis(300),
-        )
-        .is_ok()
+        if !reap_tunnel(&mut t, &label, &label, "터널")
+            && spawn_due(&label)
+            && std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                Duration::from_millis(300),
+            )
+            .is_err()
         {
-            continue;
-        }
-        let mut forwards = vec!["-L".to_string(), format!("{port}:127.0.0.1:8765")];
-        // 되돌아오는 길도 같이 연다 — 저쪽에서 이쪽 카사텀으로 오는 `-R`. 이 포트를
-        // 폴링이 `/machines/announce` 로 알려 주면 저쪽 명부에 손을 안 대도 그쪽
-        // `to` 에 이 기계가 뜬다(2026-09-07 지시 「안 넣어도 양방향」). 이쪽 MCP
-        // 포트를 아직 모르면(정본 포트를 못 잡은 검증 인스턴스 등) 앞쪽만 연다.
-        if let Some(lp) = local_mcp_port() {
-            forwards.push("-R".to_string());
-            forwards.push(format!("{}:127.0.0.1:{lp}", reverse_port(&self_label())));
-        }
-        let spawned = spawn_watched_ssh(&kargs, &forwards, &target);
-        match spawned {
-            Ok(child) => {
-                eprintln!(
-                    "[machines] {label} 터널 염: 127.0.0.1:{port} → {target}:8765{}",
-                    local_mcp_port()
-                        .map(|lp| format!(" · 되돌아옴 {}→{lp}", reverse_port(&self_label())))
-                        .unwrap_or_default()
-                );
-                t.insert(label, Tunnel { child, target, port, spawned: Instant::now() });
+            let err = tunnel_err_path(&port.to_string());
+            let forwards = ["-L".to_string(), format!("{port}:127.0.0.1:8765")];
+            match spawn_watched_ssh(&kargs, &forwards, &target, &err) {
+                Ok(child) => {
+                    eprintln!("[machines] {label} 터널 염: 127.0.0.1:{port} → {target}:8765");
+                    t.insert(label.clone(), Tunnel { child, target: target.clone(), port, spawned: Instant::now(), err });
+                }
+                Err(e) => eprintln!("[machines] {label} 터널 스폰 실패: {e}"),
             }
-            Err(e) => eprintln!("[machines] {label} 터널 스폰 실패: {e}"),
+        }
+        // 되돌아오는 길 — 저쪽에서 이쪽 카사텀으로 오는 `-R`. 이 포트를 폴링이
+        // `/machines/announce` 로 알려 주면 저쪽 명부에 손을 안 대도 그쪽 `to` 에 이
+        // 기계가 뜬다(2026-09-07 지시 「안 넣어도 양방향」). 이쪽 MCP 포트를 아직
+        // 모르면(정본 포트를 못 잡은 검증 인스턴스 등) 앞쪽만 연다.
+        let Some(lp) = local_mcp_port() else { continue };
+        let rkey = format!("rev:{label}");
+        if !reap_tunnel(&mut r, &label, &rkey, "되돌아오는 길") && spawn_due(&rkey) {
+            let rp = reverse_port(&self_label());
+            let err = tunnel_err_path(&format!("{port}-r"));
+            let forwards = ["-R".to_string(), format!("{rp}:127.0.0.1:{lp}")];
+            match spawn_watched_ssh(&kargs, &forwards, &target, &err) {
+                Ok(child) => {
+                    eprintln!("[machines] {label} 되돌아오는 길 염: {target}:{rp} → 여기 {lp}");
+                    r.insert(label, Tunnel { child, target, port, spawned: Instant::now(), err });
+                }
+                Err(e) => eprintln!("[machines] {label} 되돌아오는 길 스폰 실패: {e}"),
+            }
         }
     }
 }
@@ -935,7 +985,7 @@ pub async fn tunnel_loop() {
 
 /// 앱을 끌 때 — 자식 ssh 가 고아로 남지 않게.
 pub fn stop_tunnels() {
-    for map in [tunnels(), chrome_tunnels()] {
+    for map in [tunnels(), reverse_tunnels(), chrome_tunnels()] {
         if let Ok(mut t) = map.lock() {
             for (_, mut tun) in t.drain() {
                 stop_watched(&mut tun);
