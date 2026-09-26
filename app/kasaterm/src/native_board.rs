@@ -46,8 +46,8 @@ impl BoardTab {
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Work => "할 일",
-            Self::Overview => "보드",
+            Self::Work => "작업현황",
+            Self::Overview => "관측",
             Self::Agents => "에이전트",
             Self::Schedule => "스케줄",
             Self::Git => "소스 컨트롤",
@@ -58,8 +58,8 @@ impl BoardTab {
     /// 머리글 밑 한 줄 설명(목업 .sub).
     pub(crate) const fn desc(self) -> &'static str {
         match self {
-            Self::Work => "답할 것부터 · 진행·검증·완료와 기기·학생",
-            Self::Overview => "연결된 기기의 모든 방과 최근 변경",
+            Self::Work => "사람이 볼 것 — 답할 것부터 · 진행·검증·완료와 기기·학생",
+            Self::Overview => "에이전트 활동 관측 — 연결된 기기의 모든 방과 최근 변경",
             Self::Agents => "pane 밖에서도 계속 도는 대화",
             Self::Schedule => "지정한 때에 학생에게 지시를 보냅니다",
             Self::Git => "대상 pane의 저장소",
