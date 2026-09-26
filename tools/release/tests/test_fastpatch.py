@@ -833,9 +833,10 @@ class ResumeTests(Fixture):
 class DevicePlanTests(Fixture):
     """원격 받기·설치 예약은 dry-run 뿐 — 앱 재시작 사실을 다시 써서 기기마다 무엇이 막혔는지 정확히 말하는지 본다."""
 
-    def facts(self, mid, osname="macos", busy=(), capability=0, refusals=()):
-        return {"machine_id": mid, "facts": {"machine_id": mid, "os": osname, "app_path": f"/Users/x/Applications/kasaterm.app",
-                                            "busy": list(busy), "update_capability": capability},
+    def facts(self, mid, osname="macos", busy=(), capability=0, refusals=(), enabled=False):
+        return {"machine_id": mid, "hash": "t" + mid, "facts": {"machine_id": mid, "os": osname, "pid": 4242,
+                                                              "app_path": "/Users/x/Applications/kasaterm.app", "busy": list(busy),
+                                                              "update_capability": capability, "update_enabled": enabled},
                 "refusals": [{"code": c} for c in refusals]}
 
     def test_every_device_is_blocked_until_the_update_endpoint_exists(self):
@@ -874,17 +875,41 @@ class DevicePlanTests(Fixture):
         plan = self.plan([dev])
         state = {"stages": {"release": {"status": "done", "detail": {"assets": {
             "macos": {"name": "kasaterm-v0.2.1.dmg", "size": 10, "sha256": "sha256:" + "a" * 64}}}}}}
-        ready = fp.devices.plan_devices(plan, state, {"mac-1": self.facts("mac-1", capability=1)})
+        on = {"capability": 1, "enabled": True}
+        off = fp.devices.plan_devices(plan, state, {"mac-1": self.facts("mac-1", capability=1)})
+        self.assertEqual((off[0]["status"], [x["code"] for x in off[0]["reasons"]]), ("blocked", ["update_disabled"]))
+        ready = fp.devices.plan_devices(plan, state, {"mac-1": self.facts("mac-1", **on)})
         self.assertEqual(ready[0]["status"], "ready")
-        wait = fp.devices.plan_devices(plan, state, {"mac-1": self.facts("mac-1", capability=1, refusals=("unsaved_editors",))})
+        wait = fp.devices.plan_devices(plan, state, {"mac-1": self.facts("mac-1", refusals=("unsaved_editors",), **on)})
         self.assertEqual(wait[0]["status"], "deferred")
-        unverified = fp.devices.plan_devices(plan, {"stages": {}}, {"mac-1": self.facts("mac-1", capability=1)})
+        self.assertEqual(fp.devices.plan_devices(plan, state, {"mac-1": self.facts("mac-1", refusals=("capability_missing",), **on)})[0]["status"],
+                         "ready", "재시작 창구 판은 업데이트를 막지 않는다")
+        unverified = fp.devices.plan_devices(plan, {"stages": {}}, {"mac-1": self.facts("mac-1", **on)})
         self.assertEqual([x["code"] for x in unverified[0]["reasons"]], ["artifacts_unverified"])
         signed = {**plan, "live_blocks": ["mac 서명: 자체 서명"]}
-        self.assertEqual(fp.devices.plan_devices(signed, state, {"mac-1": self.facts("mac-1", capability=1)})[0]["status"], "blocked")
-        job = fp.devices.job_spec(plan, ready[0], fp.devices.artifact_for(plan, state, "macos"))
-        self.assertEqual((job["schema"], job["tag"], job["required_team"], job["asset"]["sha256"][:9]),
-                         ("kasaterm-update/1", "v0.2.1", "ABCDE12345", "sha256:aa"))
+        self.assertEqual(fp.devices.plan_devices(signed, state, {"mac-1": self.facts("mac-1", **on)})[0]["status"], "blocked")
+
+    def test_the_update_job_is_the_shape_the_device_accepts(self):
+        dev = self.device("맥", "0.2.0", sh(self.work, "git", "rev-parse", "v0.2.0")[:8], "mac-1")
+        plan = self.plan([dev])
+        release = {"status": "done", "detail": {"assets": {"macos": {"name": "kasaterm-v0.2.1.dmg", "size": 10, "sha256": "sha256:" + "a" * 64}}}}
+        target = self.facts("mac-1", capability=1, enabled=True)
+        job, why = fp.devices.update_job(plan, {"stages": {"release": release}}, target, 1000)
+        self.assertIsNone(job)
+        self.assertIn("EdDSA", why, "피드 단계가 서명을 확인하기 전엔 작업을 짓지 않는다")
+        state = {"stages": {"release": release, "feed": {"status": "done", "detail": {"signatures": {"macos": "c2ln"}}}}}
+        job, why = fp.devices.update_job(plan, state, target, 1000)
+        self.assertIsNone(why)
+        self.assertEqual(job["asset"]["url"], "https://github.com/2rami/kasaterm/releases/download/v0.2.1/kasaterm-v0.2.1.dmg")
+        self.assertEqual((job["schema"], job["tag"], job["version"], job["team"], job["old_pid"], job["target_hash"], job["build"]),
+                         ("kasaterm-update/1", "v0.2.1", "0.2.1", "ABCDE12345", 4242, "tmac-1", plan["commit"]))
+        self.assertEqual(job["job_id"], fp.devices.update_job_id(plan["plan_id"], "mac-1", "sha256:" + "a" * 64))
+        scope = fp.devices.update_scope(job, plan["controller"])
+        self.assertEqual((scope["action"], scope["targets"], scope["asset"]["sha256"]),
+                         ("kasaterm_update", [{"order": 1, "machine_id": "mac-1", "hash": "tmac-1"}], "sha256:" + "a" * 64))
+        self.assertIn("mac 만", fp.devices.update_job(plan, state, self.facts("win-1", "windows"), 1000)[1])
+        # 기기(kasa_socket::app_update `the_job_id_matches_the_controller_side`)와 같은 값.
+        self.assertEqual(fp.devices.update_job_id("abcdef0123456789", "mac-1", "sha256:" + "0" * 64), "upd4e7a732ffa7a1c8")
 
     def test_facts_come_from_the_app_restart_plan_read_only(self):
         answer = {"targets": [self.facts("mac-1")]}

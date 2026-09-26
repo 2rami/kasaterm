@@ -78,6 +78,10 @@ pub struct Facts {
     pub pet_alive: Option<bool>,
     pub active_job: Option<String>,
     pub observed_at_ms: u64,
+    /// 앱 업데이트 창구 판(`app_update::CAPABILITY`). 0 이면 이 앱엔 받기·설치 창구가 없다.
+    pub update_capability: u32,
+    /// 이 기기의 설치 실행 스위치(`app_update::install_enabled`). 꺼져 있으면 받기조차 하지 않는다.
+    pub update_enabled: bool,
 }
 
 impl Facts {
@@ -172,7 +176,7 @@ pub fn valid_app_path(path: &str) -> bool {
         && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
-fn fnv(parts: &[&str]) -> String {
+pub(crate) fn fnv(parts: &[&str]) -> String {
     let mut h = 0xcbf29ce484222325u64;
     for part in parts {
         for b in part.bytes() {

@@ -1,0 +1,1487 @@
+//! 앱 업데이트 창구 — 기기가 공식 릴리스 파일을 스스로 받아 확인하고, 곁에 두었다가, 승인된 한 번의 작업으로 갈아 끼운다.
+//!
+//! 앱 재시작(`app_restart`)의 틀을 그대로 쓴다: 기기 정체(`target_hash`)·나쵸 승인(`Authority`, 조종 기기가 한 번 소비한
+//! 것만)·원자적 작업 기록(`create_new`, 같은 작업은 한 번)·앞으로만 가는 상태·강제 종료 없는 도우미·부팅 표식.
+//! 여기서 더하는 것은 셋이다.
+//! - 받기: 공식 피드(`MAC_FEED`)와 공식 릴리스 주소(`RELEASE_PREFIX`)만. 요청은 URL·경로·명령을 싣지 못한다 — 태그와
+//!   파일 이름에서 주소를 여기서 짓고, 피드가 같은 주소·크기·서명을 말할 때만 받는다. 크기 상한, sha256(조종 쪽이 릴리스
+//!   단계에서 잰 값), EdDSA(설치본에 박힌 Sparkle 공개키), dmg 안 번들의 서명 팀이 설치본과 같은지, 공증.
+//! - 준비: 확인한 번들을 설치본 곁(`.kasaterm.app.next`)에 둔다. 설치본은 아직 안 건드린다.
+//! - 갈아 끼우기: 앱이 스스로 끈 뒤 도우미가 설치본을 `.kasaterm.app.previous` 로 옮기고 새 번들을 들인다. 새 앱이
+//!   부팅 표식(`mark_booted`)을 남기지 못하고 꺼지면 이전 판을 되돌려 다시 띄운다. 살아 있는데 표식이 없으면 끄지 않는다.
+//!
+//! 설치 실행은 기본 꺼짐이다(`install_enabled`, `KASATERM_APP_UPDATE=on`). 나쵸에 이 동작의 승인 계약이 아직 없어서다 —
+//! 켜지 않으면 받기조차 하지 않는다. 검사는 실제 효과(`Effects`)를 가짜로 바꿔 끼워 처음부터 끝까지 돈다.
+
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+
+use anyhow::{ensure, Context, Result};
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
+
+use crate::app_restart::{self, Authority, Facts};
+
+pub const SCHEMA: &str = "kasaterm-update/1";
+/// 이 창구가 든 판이 `Facts::update_capability` 로 알린다.
+pub const CAPABILITY: u32 = 1;
+/// 나쵸 승인의 `action` — 나쵸에 아직 없다. 생기기 전까지 이 창구는 꺼진 채로 둔다.
+pub const ACTION: &str = "kasaterm_update";
+pub const MAX_ASSET_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_FEED_BYTES: u64 = 256 * 1024;
+pub const MAC_FEED: &str = "https://2rami.github.io/kasaterm/appcast.xml";
+pub const RELEASE_PREFIX: &str = "https://github.com/2rami/kasaterm/releases/download/";
+/// Sparkle·WinSparkle 과 같은 EdDSA 공개키(scripts/build-app.sh `SUPublicEDKey`). 새 키가 아니다.
+pub const ED_PUBLIC_KEY: &str = "E4tFAb2UND+0QhgTSv2pFYKIC3ReT/dLia20KHfZxKw=";
+const JOB_TTL_MS: u64 = 60 * 60_000;
+
+/// 설치 실행 스위치 — 기본 꺼짐. 받기·확인·준비·갈아 끼우기가 전부 이 뒤에 있다.
+pub fn install_enabled(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get("KASATERM_APP_UPDATE").as_deref() == Some("on")
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Asset {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+    pub sha256: String,
+    pub ed_signature: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateJob {
+    pub schema: String,
+    pub job_id: String,
+    pub plan_hash: String,
+    pub machine_id: String,
+    /// 계획 때 이 기기의 정체(`app_restart::target_hash`). 승인 뒤 바뀌면 안 한다.
+    pub target_hash: String,
+    pub tag: String,
+    pub version: String,
+    pub commit: String,
+    /// 새 판이 부팅 때 댈 빌드 표식(태그 커밋 앞자리) — 이것으로 「새 판이 떴다」를 판정한다.
+    pub build: String,
+    pub asset: Asset,
+    /// 요구 서명 팀 — 설치본과 같아야 한다.
+    pub team: String,
+    pub require_notarized: bool,
+    pub old_pid: u32,
+    pub created_at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRequest {
+    pub job: UpdateJob,
+    pub approval_id: String,
+    pub authority: String,
+}
+
+pub fn asset_name(tag: &str) -> String {
+    format!("kasaterm-{tag}.dmg")
+}
+
+pub fn asset_url(tag: &str, name: &str) -> String {
+    format!("{RELEASE_PREFIX}{tag}/{name}")
+}
+
+/// 같은 계획·같은 기기·같은 파일이면 늘 같은 id — 다시 보내도 새 작업이 안 생긴다.
+pub fn job_id(plan_hash: &str, machine_id: &str, sha256: &str) -> String {
+    format!("up{}", app_restart::fnv(&[plan_hash, machine_id, sha256]))
+}
+
+fn hex(s: &str, lo: usize, hi: usize) -> bool {
+    (lo..=hi).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+pub fn version_parts(v: &str) -> Option<(u64, u64, u64)> {
+    let mut it = v.split('.').map(|p| p.parse::<u64>().ok());
+    let parts = (it.next()??, it.next()??, it.next()??);
+    it.next().is_none().then_some(parts)
+}
+
+/// 요청이 댈 수 있는 모양 — 주소는 태그·이름에서 지은 공식 주소와 같아야 하고, 이름은 그 태그의 dmg 뿐이다.
+pub fn check_job(job: &UpdateJob) -> std::result::Result<(), String> {
+    if job.schema != SCHEMA {
+        return Err("작업 모양(schema)이 다르다".into());
+    }
+    if version_parts(&job.version).is_none() || job.tag != format!("v{}", job.version) {
+        return Err("버전·태그가 모양이 아니다".into());
+    }
+    if !hex(&job.commit, 40, 40) || !hex(&job.build, 7, 40) {
+        return Err("커밋·빌드 표식이 소문자 hex 가 아니다".into());
+    }
+    if !hex(&job.plan_hash, 8, 64) || job.machine_id.is_empty() || job.target_hash.is_empty() {
+        return Err("계획·기기 정체가 비었다".into());
+    }
+    let a = &job.asset;
+    if a.name != asset_name(&job.tag) || a.url != asset_url(&job.tag, &a.name) {
+        return Err("공식 릴리스 주소가 아니다 — 받는 곳은 태그의 dmg 하나뿐이다".into());
+    }
+    if a.size == 0 || a.size > MAX_ASSET_BYTES {
+        return Err(format!("파일 크기가 상한 밖이다({} 바이트, 상한 {MAX_ASSET_BYTES})", a.size));
+    }
+    if !a.sha256.strip_prefix("sha256:").is_some_and(|h| hex(h, 64, 64)) {
+        return Err("sha256 모양이 아니다".into());
+    }
+    if base64::engine::general_purpose::STANDARD.decode(&a.ed_signature).map(|s| s.len()) != Ok(64) {
+        return Err("EdDSA 서명 모양이 아니다".into());
+    }
+    if job.team.len() != 10 || !job.team.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+        return Err("요구 서명 팀이 Apple 팀 id 모양이 아니다".into());
+    }
+    if job.job_id != job_id(&job.plan_hash, &job.machine_id, &a.sha256) {
+        return Err("작업 id 가 계획·기기·파일과 맞지 않는다".into());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FeedItem {
+    pub version: String,
+    pub url: String,
+    pub length: u64,
+    pub signature: String,
+}
+
+/// appcast 의 최신 항목(CI 는 한 건만 싣는다). 속성 순서와 무관하게 읽는다.
+pub fn parse_feed(xml: &str) -> Option<FeedItem> {
+    let tag = |open: &str, close: &str| -> Option<String> {
+        let i = xml.find(open)? + open.len();
+        Some(xml[i..i + xml[i..].find(close)?].trim().to_string())
+    };
+    let version = tag("<sparkle:version>", "</sparkle:version>")?;
+    let i = xml.find("<enclosure")?;
+    let enc = &xml[i..i + xml[i..].find('>')?];
+    let attr = |name: &str| -> Option<String> {
+        let key = format!("{name}=\"");
+        let j = enc.find(&key)? + key.len();
+        Some(enc[j..j + enc[j..].find('"')?].to_string())
+    };
+    Some(FeedItem { version, url: attr("url")?, length: attr("length")?.parse().ok()?, signature: attr("sparkle:edSignature")? })
+}
+
+/// 피드가 작업과 같은 파일을 말하는가 — 주소·크기·서명·버전 전부.
+pub fn check_feed(job: &UpdateJob, item: &FeedItem) -> std::result::Result<(), String> {
+    if item.version != job.version {
+        return Err(format!("공식 피드가 다른 판을 말한다({} ≠ {})", item.version, job.version));
+    }
+    if item.url != job.asset.url || item.length != job.asset.size || item.signature != job.asset.ed_signature {
+        return Err("공식 피드가 가리키는 파일이 작업의 파일과 다르다".into());
+    }
+    Ok(())
+}
+
+/// 이 기기에 도는 판과 견준 판정·나쵸 승인. 요청이 말하는 것을 믿지 않는다.
+pub fn authorize(
+    req: &UpdateRequest,
+    facts: &Facts,
+    current_version: &str,
+    authority: &dyn Authority,
+    enabled: bool,
+    now_ms: u64,
+) -> std::result::Result<(), String> {
+    if !enabled {
+        return Err("update_disabled — 이 기기의 설치 창구가 꺼져 있다(KASATERM_APP_UPDATE)".into());
+    }
+    if facts.os != "macos" {
+        return Err(format!("unsupported_os — {} 는 이 창구가 아니라 자기 업데이터(WinSparkle)로 받는다", facts.os));
+    }
+    let job = &req.job;
+    check_job(job)?;
+    if let Some(refusal) = blocking(facts, &job.job_id, now_ms, false).first() {
+        return Err(refusal.message());
+    }
+    if job.machine_id != facts.machine_id || job.target_hash != app_restart::target_hash(facts) || job.old_pid != facts.pid {
+        return Err("작업이 이 기기의 지금 정체와 맞지 않는다".into());
+    }
+    match (version_parts(&job.version), version_parts(current_version)) {
+        (Some(want), Some(have)) if want > have => {}
+        _ => return Err(format!("downgrade — 지금 판({current_version})보다 새 판이 아니다({})", job.version)),
+    }
+    if !app_restart::valid_approval_id(&req.approval_id) {
+        return Err("approval id 모양이 아니다".into());
+    }
+    let view = authority.get(&req.approval_id)?;
+    if view.id != req.approval_id {
+        return Err("요청한 승인이 아닌 승인이 돌아왔다".into());
+    }
+    if view.action != ACTION || view.state != "approved" {
+        return Err(format!("승인되지 않았다({} {})", view.action, view.state));
+    }
+    let controller = view.scope["controller"].as_str();
+    if controller.is_none() || view.consumed_at_ms.is_none() || view.consumed_by.as_deref() != controller {
+        return Err("조종 기기가 이 승인을 소비하지 않았다".into());
+    }
+    if now_ms >= view.expires_at_ms {
+        return Err("승인이 만료됐다".into());
+    }
+    let s = &view.scope;
+    let same = s["plan"].as_str() == Some(&job.plan_hash)
+        && s["tag"].as_str() == Some(&job.tag)
+        && s["version"].as_str() == Some(&job.version)
+        && s["commit"].as_str() == Some(&job.commit)
+        && s["asset"]["name"].as_str() == Some(&job.asset.name)
+        && s["asset"]["sha256"].as_str() == Some(&job.asset.sha256)
+        && s["asset"]["size"].as_u64() == Some(job.asset.size);
+    let mine = s["targets"].as_array().into_iter().flatten()
+        .any(|t| t["machine_id"].as_str() == Some(&facts.machine_id) && t["hash"].as_str() == Some(&job.target_hash));
+    if !same || !mine {
+        return Err("승인한 대상·판·파일에 이 작업이 없다".into());
+    }
+    Ok(())
+}
+
+/// 재시작 쪽 거부 중 이 작업을 막는 것. 받기·준비(`apply=false`)는 바쁜 학생·미저장 편집기·굽기를 기다리지 않는다 —
+/// 설치본을 안 건드리니까. 갈아 끼우기(`apply=true`)는 전부 막는다. 이 작업 자신이 「진행 중인 작업」으로 잡힌 것은 뺀다.
+pub fn blocking(facts: &Facts, job_id: &str, now_ms: u64, apply: bool) -> Vec<app_restart::Refusal> {
+    use app_restart::Refusal;
+    app_restart::refusals(&facts.machine_id, facts, now_ms).into_iter().filter(|r| match r {
+        Refusal::JobInFlight { job_id: other } => other != job_id,
+        Refusal::BusyStudents { .. } | Refusal::UnsavedEditors { .. } | Refusal::BakeInProgress => apply,
+        _ => true,
+    }).collect()
+}
+
+/// 나쵸가 승인할 범위 — 조종 기기가 만들고 한 번 소비한다(재시작 scope 와 같은 결).
+pub fn scope(job: &UpdateJob, controller: &str, order: u32) -> serde_json::Value {
+    serde_json::json!({
+        "action": ACTION, "plan": job.plan_hash, "controller": controller, "tag": job.tag, "version": job.version,
+        "commit": job.commit, "asset": {"name": job.asset.name, "sha256": job.asset.sha256, "size": job.asset.size},
+        "targets": [{"order": order, "machine_id": job.machine_id, "hash": job.target_hash}],
+    })
+}
+
+// ---------------------------------------------------------------- 작업 기록
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    Accepted,
+    Fetched,
+    Checked,
+    Staged,
+    Armed,
+    HelperStarted,
+    Exited,
+    Swapped,
+    Launched,
+    Booted,
+    Done,
+    Failed,
+    RolledBack,
+    Cancelled,
+}
+
+impl State {
+    pub fn parse(word: &str) -> Option<Self> {
+        serde_json::from_value(serde_json::json!(word)).ok()
+    }
+
+    pub fn word(self) -> String {
+        serde_json::to_value(self).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+    }
+
+    pub fn terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Failed | Self::RolledBack | Self::Cancelled)
+    }
+
+    /// 앞으로만 간다. 취소는 도우미에 넘기기 전(Staged 까지), 되돌림은 갈아 끼운 뒤에만.
+    fn allows(self, next: Self) -> bool {
+        if self.terminal() {
+            return false;
+        }
+        match next {
+            Self::Failed => true,
+            Self::Cancelled => self <= Self::Staged,
+            Self::RolledBack => self >= Self::Swapped,
+            _ => next > self,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Event {
+    pub at_s: u64,
+    pub state: State,
+    pub note: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Status {
+    pub job: UpdateJob,
+    pub state: State,
+    pub events: Vec<Event>,
+}
+
+pub fn jobs_dir() -> Result<PathBuf> {
+    if let Some(root) = crate::isolated_collab_root() {
+        return Ok(root.join("app-update"));
+    }
+    Ok(crate::home_dir().context("home directory unavailable")?.join(".config/kasaterm/app-update"))
+}
+
+fn record_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("{id}.json"))
+}
+
+fn events_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("{id}.events"))
+}
+
+/// 작업을 적는다. 같은 id 가 있으면 새로 만들지 않고(`false`), 내용이 다르면 충돌로 거부한다.
+pub fn create_job(dir: &Path, job: &UpdateJob) -> Result<(UpdateJob, bool)> {
+    ensure!(app_restart::valid_job_id(&job.job_id), "invalid job id");
+    std::fs::create_dir_all(dir)?;
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(record_path(dir, &job.job_id)) {
+        Ok(mut f) => {
+            f.write_all(serde_json::to_string_pretty(job)?.as_bytes())?;
+            f.sync_all()?;
+            append(dir, &job.job_id, State::Accepted, "")?;
+            Ok((job.clone(), true))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing: UpdateJob = serde_json::from_str(&std::fs::read_to_string(record_path(dir, &job.job_id))?)?;
+            ensure!(existing.asset == job.asset && existing.plan_hash == job.plan_hash && existing.machine_id == job.machine_id,
+                "job id collision: 같은 id 에 다른 작업이 있다");
+            Ok((existing, false))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn append(dir: &Path, id: &str, state: State, note: &str) -> Result<()> {
+    let note: String = note.chars().filter(|c| !c.is_control()).take(300).collect();
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(events_path(dir, id))?;
+    writeln!(f, "{at} {} {note}", state.word())?;
+    Ok(())
+}
+
+/// 상태는 그대로 두고 까닭만 남긴다 — 끊겨서 다시 할 일(받기 실패)·기다리는 일(바쁜 학생).
+pub fn note(dir: &Path, id: &str, text: &str) -> Result<()> {
+    let now = status(dir, id)?;
+    append(dir, id, now.state, text)
+}
+
+pub fn advance(dir: &Path, id: &str, next: State, note: &str) -> Result<State> {
+    let now = status(dir, id)?;
+    ensure!(now.state.allows(next), "{} → {} 는 갈 수 없다", now.state.word(), next.word());
+    append(dir, id, next, note)?;
+    Ok(next)
+}
+
+/// 기록을 접는다. 도우미는 줄만 덧붙이고, 순서를 어긴 줄은 상태를 못 바꾸고 기록에만 남는다.
+pub fn status(dir: &Path, id: &str) -> Result<Status> {
+    ensure!(app_restart::valid_job_id(id), "invalid job id");
+    let job: UpdateJob = serde_json::from_str(&std::fs::read_to_string(record_path(dir, id)).context("no such job")?)?;
+    let text = std::fs::read_to_string(events_path(dir, id)).unwrap_or_default();
+    let mut state = State::Accepted;
+    let mut events = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(3, ' ');
+        let (Some(at), Some(word)) = (parts.next(), parts.next()) else { continue };
+        let (Ok(at_s), Some(next)) = (at.parse::<u64>(), State::parse(word)) else { continue };
+        if !(next == State::Accepted && events.is_empty()) && state.allows(next) {
+            state = next;
+        }
+        events.push(Event { at_s, state: next, note: parts.next().unwrap_or("").to_string() });
+    }
+    Ok(Status { job, state, events })
+}
+
+/// 안 끝난 업데이트 작업(한 시간 안) — 두 번째 작업을 막고, 부팅 표식을 붙일 자리를 찾는다.
+pub fn active_job(dir: &Path, now_ms: u64) -> Option<Status> {
+    std::fs::read_dir(dir).ok()?.flatten().filter_map(|e| {
+        let id = e.file_name().to_string_lossy().strip_suffix(".json")?.to_string();
+        let s = status(dir, &id).ok()?;
+        (!s.state.terminal() && now_ms.saturating_sub(s.job.created_at_ms) < JOB_TTL_MS).then_some(s)
+    }).next()
+}
+
+/// 수락 — 판정을 통과하면 적는다. 같은 작업이 다시 오면 적힌 것을 돌려준다(끊긴 뒤 다시 보낸 경우).
+/// 다른 업데이트가 도는 중이면 거부한다.
+pub fn accept(
+    req: &UpdateRequest,
+    facts: &Facts,
+    current_version: &str,
+    authority: &dyn Authority,
+    enabled: bool,
+    dir: &Path,
+    now_ms: u64,
+) -> std::result::Result<(Status, bool), String> {
+    authorize(req, facts, current_version, authority, enabled, now_ms)?;
+    if let Some(other) = active_job(dir, now_ms).filter(|s| s.job.job_id != req.job.job_id) {
+        return Err(format!("job_in_flight — 다른 업데이트가 진행 중이다({})", other.job.job_id));
+    }
+    let (_, created) = create_job(dir, &req.job).map_err(|e| e.to_string())?;
+    Ok((status(dir, &req.job.job_id).map_err(|e| e.to_string())?, created))
+}
+
+// ---------------------------------------------------------------- 받기·확인·준비
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    pub verified: bool,
+    pub team: Option<String>,
+    pub notarized: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FetchError {
+    /// 닿지 못했거나 도중에 끊겼다 — 다시 하면 된다.
+    Cut(String),
+    /// 상한을 넘는 파일을 보냈다 — 작업의 파일이 아니다.
+    TooLarge,
+}
+
+/// 밖과 닿는 일 — 운영은 `SystemEffects`, 검사는 가짜. 주소는 늘 여기서 지은 공식 주소만 넘어온다.
+pub trait Effects {
+    fn feed(&self, url: &str, max: u64) -> std::result::Result<String, String>;
+    /// `dest` 에 받는다. `max` 바이트를 넘으면 `TooLarge` 로 멈춰야 한다.
+    fn fetch(&self, url: &str, max: u64, dest: &Path) -> std::result::Result<(), FetchError>;
+    fn mount(&self, dmg: &Path, at: &Path) -> std::result::Result<(), String>;
+    fn unmount(&self, at: &Path);
+    fn identity(&self, app: &Path) -> std::result::Result<Identity, String>;
+    fn copy_bundle(&self, from: &Path, to: &Path) -> std::result::Result<(), String>;
+}
+
+pub fn sha256_file(path: &Path) -> std::result::Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    Ok(format!("sha256:{:x}", sha2::Sha256::digest(&bytes)))
+}
+
+/// Sparkle EdDSA — 파일 원문에 대한 Ed25519 서명.
+pub fn ed25519_ok(public_b64: &str, signature_b64: &str, data: &[u8]) -> bool {
+    let engine = base64::engine::general_purpose::STANDARD;
+    let (Ok(key), Ok(sig)) = (engine.decode(public_b64), engine.decode(signature_b64)) else { return false };
+    key.len() == 32 && ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &key).verify(data, &sig).is_ok()
+}
+
+/// 번들의 판 문자열(Info.plist `CFBundleShortVersionString`).
+pub fn bundle_version(app: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(app.join("Contents/Info.plist")).ok()?;
+    let key = "<key>CFBundleShortVersionString</key>";
+    let rest = &text[text.find(key)? + key.len()..];
+    let s = rest.find("<string>")? + "<string>".len();
+    Some(rest[s..s + rest[s..].find("</string>")?].trim().to_string())
+}
+
+pub fn staged_path(installed: &Path) -> PathBuf {
+    installed.with_file_name(".kasaterm.app.next")
+}
+
+pub fn previous_path(installed: &Path) -> PathBuf {
+    installed.with_file_name(".kasaterm.app.previous")
+}
+
+pub fn failed_path(installed: &Path) -> PathBuf {
+    installed.with_file_name(".kasaterm.app.failed")
+}
+
+/// 받은 파일 자리 — 내용(sha256)으로 가른다. 쓰기 전에 늘 다시 잰다.
+pub fn work_dir(cache: &Path, job: &UpdateJob) -> PathBuf {
+    cache.join(job.asset.sha256.trim_start_matches("sha256:").get(..16).unwrap_or("unknown"))
+}
+
+fn identity_problem(ident: &Identity, job: &UpdateJob, what: &str) -> Option<String> {
+    if !ident.verified {
+        return Some(format!("{what} 서명이 깨졌다"));
+    }
+    if ident.team.as_deref() != Some(job.team.as_str()) {
+        return Some(format!("{what} 서명 팀이 설치본과 다르다({} ≠ {})", ident.team.as_deref().unwrap_or("없음"), job.team));
+    }
+    if job.require_notarized && !ident.notarized {
+        return Some(format!("{what} 가 공증되지 않았다"));
+    }
+    None
+}
+
+/// 받기 → 확인 → 준비. 단계마다 기록을 남긴다.
+/// - 닿지 못함(피드·받기가 끊김)은 끝이 아니다 — 반쯤 받은 것을 걷고 까닭만 적는다. 같은 작업을 다시 보내면 이어 한다.
+/// - 내용이 다름(피드가 다른 파일을 말함·해시·서명·팀·공증·판)은 끝이다 — 걷고 실패로 적는다.
+/// - 이미 확인해 둔 파일은 다시 받지 않는다.
+pub fn prepare(
+    dir: &Path,
+    job: &UpdateJob,
+    cache: &Path,
+    installed: &Path,
+    effects: &dyn Effects,
+    public_key: &str,
+) -> std::result::Result<PathBuf, String> {
+    let fail = |why: String| -> String {
+        let _ = advance(dir, &job.job_id, State::Failed, &why);
+        why
+    };
+    check_job(job).map_err(&fail)?;
+    let here = status(dir, &job.job_id).map_err(|e| e.to_string())?.state;
+    if here >= State::Staged && !here.terminal() && staged_path(installed).exists() {
+        return Ok(staged_path(installed));
+    }
+    if here.terminal() {
+        return Err(format!("이미 끝난 작업이다({})", here.word()));
+    }
+    let retry = |why: String| -> String {
+        let _ = note(dir, &job.job_id, &format!("retry: {why}"));
+        why
+    };
+    let item = effects.feed(MAC_FEED, MAX_FEED_BYTES).map_err(|e| retry(format!("공식 피드를 못 읽었다 — {e}")))?;
+    let item = parse_feed(&item).ok_or_else(|| fail("공식 피드를 읽지 못했다".into()))?;
+    check_feed(job, &item).map_err(&fail)?;
+
+    let work = work_dir(cache, job);
+    std::fs::create_dir_all(&work).map_err(|e| fail(e.to_string()))?;
+    let file = work.join(&job.asset.name);
+    if !(file.exists() && sha256_file(&file).ok().as_deref() == Some(job.asset.sha256.as_str())) {
+        let part = work.join(format!("{}.part", job.asset.name));
+        let _ = std::fs::remove_file(&part);
+        match effects.fetch(&job.asset.url, job.asset.size.min(MAX_ASSET_BYTES), &part) {
+            Ok(()) => {}
+            Err(FetchError::Cut(why)) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(retry(format!("받기가 끊겼다 — {why}")));
+            }
+            Err(FetchError::TooLarge) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(fail(format!("받은 파일이 작업의 파일이 아니다 — {} 바이트 상한을 넘었다", job.asset.size)));
+            }
+        }
+        let got = std::fs::metadata(&part).map(|m| m.len()).map_err(|e| e.to_string());
+        let checked = got.and_then(|n| {
+            if n != job.asset.size {
+                return Err(format!("받은 크기가 다르다({n} ≠ {})", job.asset.size));
+            }
+            let digest = sha256_file(&part)?;
+            if digest != job.asset.sha256 {
+                return Err("받은 파일의 sha256 이 작업과 다르다".into());
+            }
+            std::fs::rename(&part, &file).map_err(|e| e.to_string())
+        });
+        if let Err(why) = checked {
+            let _ = std::fs::remove_file(&part);
+            return Err(fail(format!("받은 파일이 작업의 파일이 아니다 — {why}")));
+        }
+    }
+    if here < State::Fetched {
+        let _ = advance(dir, &job.job_id, State::Fetched, &format!("{} 바이트", job.asset.size));
+    }
+    let bytes = std::fs::read(&file).map_err(|e| fail(e.to_string()))?;
+    if !ed25519_ok(public_key, &job.asset.ed_signature, &bytes) {
+        let _ = std::fs::remove_file(&file);
+        return Err(fail("EdDSA 서명이 받은 파일과 맞지 않는다".into()));
+    }
+    if status(dir, &job.job_id).map(|s| s.state < State::Checked).unwrap_or(true) {
+        let _ = advance(dir, &job.job_id, State::Checked, "sha256·EdDSA");
+    }
+
+    let mnt = work.join("mnt");
+    let _ = std::fs::remove_dir_all(&mnt);
+    std::fs::create_dir_all(&mnt).map_err(|e| fail(e.to_string()))?;
+    effects.mount(&file, &mnt).map_err(|e| fail(format!("dmg 를 열지 못했다 — {e}")))?;
+    let staged = staged_path(installed);
+    let result = (|| -> std::result::Result<(), String> {
+        let app = mnt.join("kasaterm.app");
+        let ident = effects.identity(&app)?;
+        if let Some(why) = identity_problem(&ident, job, "dmg 안 번들") {
+            return Err(why);
+        }
+        if bundle_version(&app).as_deref() != Some(job.version.as_str()) {
+            return Err("dmg 안 번들의 판이 작업의 판과 다르다".into());
+        }
+        let _ = std::fs::remove_dir_all(&staged);
+        effects.copy_bundle(&app, &staged)
+    })();
+    effects.unmount(&mnt);
+    if let Err(why) = result.and_then(|_| {
+        let ident = effects.identity(&staged)?;
+        identity_problem(&ident, job, "준비한 번들").map_or(Ok(()), Err)
+    }) {
+        let _ = std::fs::remove_dir_all(&staged);
+        return Err(fail(why));
+    }
+    let _ = advance(dir, &job.job_id, State::Staged, &staged.display().to_string());
+    Ok(staged)
+}
+
+/// 운영 효과 — 모두 시스템 경로의 도구다. 받기는 https 만, 넘겨주기(리다이렉트)도 https 만, 크기 상한을 건다.
+pub struct SystemEffects;
+
+fn run(argv: &[&str]) -> std::result::Result<std::process::Output, String> {
+    std::process::Command::new(argv[0]).args(&argv[1..]).output().map_err(|e| format!("{}: {e}", argv[0]))
+}
+
+impl Effects for SystemEffects {
+    fn feed(&self, url: &str, max: u64) -> std::result::Result<String, String> {
+        let out = run(&["/usr/bin/curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "20",
+                        "--max-filesize", &max.to_string(), url])?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+            .ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+
+    fn fetch(&self, url: &str, max: u64, dest: &Path) -> std::result::Result<(), FetchError> {
+        let out = run(&["/usr/bin/curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "900",
+                        "--max-filesize", &max.to_string(), "-o", &dest.display().to_string(), url]).map_err(FetchError::Cut)?;
+        match out.status.code() {
+            Some(0) => Ok(()),
+            // curl 63 = 받을 크기가 --max-filesize 를 넘었다.
+            Some(63) => Err(FetchError::TooLarge),
+            _ => Err(FetchError::Cut(String::from_utf8_lossy(&out.stderr).trim().to_string())),
+        }
+    }
+
+    fn mount(&self, dmg: &Path, at: &Path) -> std::result::Result<(), String> {
+        let out = run(&["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint",
+                        &at.display().to_string(), &dmg.display().to_string()])?;
+        out.status.success().then_some(()).ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+
+    fn unmount(&self, at: &Path) {
+        let _ = run(&["/usr/bin/hdiutil", "detach", &at.display().to_string()]);
+    }
+
+    fn identity(&self, app: &Path) -> std::result::Result<Identity, String> {
+        let path = app.display().to_string();
+        let verified = run(&["/usr/bin/codesign", "--verify", "--deep", "--strict", &path])?.status.success();
+        let shown = run(&["/usr/bin/codesign", "-dvv", &path])?;
+        let text = String::from_utf8_lossy(&shown.stderr);
+        let team = text.lines().find_map(|l| l.strip_prefix("TeamIdentifier=")).map(str::trim)
+            .filter(|t| *t != "not set").map(str::to_string);
+        let gate = run(&["/usr/sbin/spctl", "--assess", "--type", "execute", "-vv", &path])?;
+        let notarized = gate.status.success() && String::from_utf8_lossy(&gate.stderr).contains("Notarized");
+        Ok(Identity { verified, team, notarized })
+    }
+
+    fn copy_bundle(&self, from: &Path, to: &Path) -> std::result::Result<(), String> {
+        let out = run(&["/usr/bin/ditto", &from.display().to_string(), &to.display().to_string()])?;
+        out.status.success().then_some(()).ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+// ---------------------------------------------------------------- 갈아 끼우기
+
+#[derive(Clone, Debug)]
+pub struct SwapSpec {
+    pub dir: PathBuf,
+    pub job_id: String,
+    pub old_pid: u32,
+    pub installed: PathBuf,
+    /// 다시 띄우는 명령. 운영은 `app_restart::launch_command(installed)` 뿐이다.
+    pub launch: Vec<String>,
+    pub exit_timeout_s: u32,
+    pub boot_timeout_s: u32,
+}
+
+fn sq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// 도우미 셸. 강제 종료가 없고, 기다림엔 상한이 있고, 상태는 `<id>.events` 에 줄로만 남긴다.
+/// 새 앱이 부팅 표식을 남기지 못하고 꺼지면 이전 판을 되돌려 다시 띄운다. 살아 있는데 표식이 없으면 손대지 않는다.
+pub fn swap_script(spec: &SwapSpec) -> Result<String> {
+    ensure!(app_restart::valid_job_id(&spec.job_id), "invalid job id");
+    ensure!(!spec.launch.is_empty(), "launch command is empty");
+    let events = sq(&events_path(&spec.dir, &spec.job_id).display().to_string());
+    let inst = &spec.installed;
+    let exe = sq(&inst.join("Contents/MacOS/kasaterm").display().to_string());
+    let (inst_q, next, prev, failed) = (sq(&inst.display().to_string()), sq(&staged_path(inst).display().to_string()),
+        sq(&previous_path(inst).display().to_string()), sq(&failed_path(inst).display().to_string()));
+    let launch = spec.launch.iter().map(|a| sq(a)).collect::<Vec<_>>().join(" ");
+    let (pid, exit_ticks, boot_ticks) = (spec.old_pid, spec.exit_timeout_s * 5, spec.boot_timeout_s * 5);
+    Ok(format!(
+        r#"ev() {{ printf '%s %s %s\n' "$(/bin/date +%s)" "$1" "$2" >> {events}; }}
+running() {{ /bin/ps -Axww -o pid=,command= | /usr/bin/awk -v exe={exe} -v skip="$1" '{{ cmd = $0; sub(/^ *[0-9]+ /, "", cmd); if (index(cmd, exe) == 1 && $1 != skip) {{ print $1; exit }} }}'; }}
+booted() {{ /usr/bin/grep -q '^[0-9]* booted ' {events}; }}
+restore() {{ /bin/rm -rf {failed}; /bin/mv {inst_q} {failed} && /bin/mv {prev} {inst_q}; }}
+ev helper_started "pid $$"
+i=0
+while /bin/kill -0 {pid} 2>/dev/null; do
+  i=$((i+1)); [ "$i" -gt {exit_ticks} ] && {{ ev failed "app did not exit in time; not forcing"; exit 1; }}
+  /bin/sleep 0.2
+done
+ev exited ""
+other=$(running {pid})
+[ -n "$other" ] && {{ ev failed "another instance is already running (pid $other); not swapping"; exit 1; }}
+[ -d {next} ] || {{ ev failed "staged bundle is missing; installed untouched"; exit 1; }}
+/bin/rm -rf {prev}
+/bin/mv {inst_q} {prev} || {{ ev failed "could not move the installed app aside; installed untouched"; exit 1; }}
+if ! /bin/mv {next} {inst_q}; then /bin/mv {prev} {inst_q}; ev failed "swap failed; previous restored"; exit 1; fi
+ev swapped ""
+if ! {launch}; then
+  restore && {{ {launch}; ev rolled_back "launch failed; previous restored"; }} || ev failed "launch failed; restore failed — previous is at {prev}"
+  exit 1
+fi
+j=0
+new=""
+while [ -z "$new" ]; do
+  new=$(running {pid})
+  [ -n "$new" ] && break
+  booted && break
+  j=$((j+1)); [ "$j" -gt {boot_ticks} ] && break
+  /bin/sleep 0.2
+done
+[ -n "$new" ] && ev launched "pid $new"
+k=0
+until booted; do
+  k=$((k+1))
+  if [ "$k" -gt {boot_ticks} ] || [ -z "$(running {pid})" ]; then
+    booted && exit 0
+    if [ -n "$(running {pid})" ]; then ev failed "new app is running without a boot mark; not forcing — previous kept at {prev}"; exit 1; fi
+    restore && {{ {launch}; ev rolled_back "new app did not boot; previous restored and relaunched"; }} || ev failed "new app did not boot; restore failed — previous is at {prev}"
+    exit 1
+  fi
+  /bin/sleep 0.2
+done
+"#
+    ))
+}
+
+#[cfg(unix)]
+pub fn spawn_swap(spec: &SwapSpec) -> Result<u32> {
+    use std::os::unix::process::CommandExt;
+    let script = swap_script(spec)?;
+    std::fs::create_dir_all(&spec.dir)?;
+    let log = std::fs::File::create(spec.dir.join(format!("{}.helper.log", spec.job_id)))?;
+    let err = log.try_clone()?;
+    let child = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .env_clear()
+        .envs(app_restart::helper_env(&|k| std::env::var(k).ok()))
+        .stdin(std::process::Stdio::null())
+        .stdout(log)
+        .stderr(err)
+        .process_group(0)
+        .spawn()?;
+    Ok(child.id())
+}
+
+/// 준비된 작업을 도우미에 넘긴다 — 켜져 있고, 준비됐고, 곁의 번들이 있을 때만. 다음은 앱이 스스로 끄는 일이다.
+#[cfg(unix)]
+pub fn arm(dir: &Path, spec: &SwapSpec, enabled: bool) -> std::result::Result<u32, String> {
+    if !enabled {
+        return Err("update_disabled — 설치 창구가 꺼져 있다".into());
+    }
+    let s = status(dir, &spec.job_id).map_err(|e| e.to_string())?;
+    if s.state != State::Staged || !staged_path(&spec.installed).is_dir() {
+        return Err(format!("준비되지 않은 작업이다({})", s.state.word()));
+    }
+    advance(dir, &spec.job_id, State::Armed, "").map_err(|e| e.to_string())?;
+    spawn_swap(spec).map_err(|e| {
+        let _ = advance(dir, &spec.job_id, State::Failed, &format!("helper did not start: {e}"));
+        e.to_string()
+    })
+}
+
+/// 이 기기의 설치 자리와 도구. 앱은 `SystemEffects`·설치본 경로·`app_restart::launch_command` 로 만든다.
+pub struct Device<'a> {
+    pub dir: PathBuf,
+    pub cache: PathBuf,
+    pub installed: PathBuf,
+    pub effects: &'a dyn Effects,
+    pub public_key: &'a str,
+    pub enabled: bool,
+    pub launch: Vec<String>,
+    pub exit_timeout_s: u32,
+    pub boot_timeout_s: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Step {
+    /// 준비는 끝났고 적용을 기다린다(바쁜 학생·미저장 편집기·굽기). 같은 작업을 다시 보내면 다시 잰다.
+    Waiting(String),
+    /// 도우미가 떴다(그 pid) — 다음은 앱이 스스로 끄는 일.
+    Armed(u32),
+}
+
+/// 수락한 작업을 준비하고, **지금** 사실로 다시 재서 막힘이 없으면 도우미에 넘긴다. 받는 사이에 학생이 일을 시작했으면
+/// 준비한 채 기다린다. 승인 뒤 이 기기의 정체(pid·바이너리·자기설치 예정)가 바뀌었으면 실패로 끝낸다.
+#[cfg(unix)]
+pub fn drive(
+    dev: &Device,
+    job: &UpdateJob,
+    facts_now: &dyn Fn() -> std::result::Result<Facts, String>,
+    now_ms: &dyn Fn() -> u64,
+) -> std::result::Result<Step, String> {
+    if !dev.enabled {
+        return Err("update_disabled — 설치 창구가 꺼져 있다".into());
+    }
+    prepare(&dev.dir, job, &dev.cache, &dev.installed, dev.effects, dev.public_key)?;
+    let facts = facts_now()?;
+    if facts.pid != job.old_pid || app_restart::target_hash(&facts) != job.target_hash || Path::new(&facts.app_path) != dev.installed {
+        let why = "이 기기의 정체가 승인 뒤 바뀌었다 — 갈아 끼우지 않는다";
+        let _ = advance(&dev.dir, &job.job_id, State::Failed, why);
+        return Err(why.into());
+    }
+    // 부팅 표식은 한 시간 안의 작업에만 붙는다(`active_job`) — 오래 기다린 작업을 지금 갈아 끼우면 새 판의 도착을 못 적는다.
+    if now_ms().saturating_sub(job.created_at_ms) > JOB_TTL_MS / 2 {
+        let why = "작업이 30분 넘게 기다렸다 — 새 계획·승인으로 다시 한다";
+        let _ = advance(&dev.dir, &job.job_id, State::Failed, why);
+        return Err(why.into());
+    }
+    if let Some(refusal) = blocking(&facts, &job.job_id, now_ms(), true).first() {
+        let why = refusal.message();
+        let _ = note(&dev.dir, &job.job_id, &format!("waiting: {why}"));
+        return Ok(Step::Waiting(why));
+    }
+    let spec = SwapSpec {
+        dir: dev.dir.clone(),
+        job_id: job.job_id.clone(),
+        old_pid: facts.pid,
+        installed: dev.installed.clone(),
+        launch: dev.launch.clone(),
+        exit_timeout_s: dev.exit_timeout_s,
+        boot_timeout_s: dev.boot_timeout_s,
+    };
+    arm(&dev.dir, &spec, dev.enabled).map(Step::Armed)
+}
+
+/// 새로 뜬 앱이 부팅 때 부른다. 갈아 끼운 뒤 기다리던 작업이면 — 빌드 표식이 맞으면 끝, 다르면 실패로 적는다.
+pub fn mark_booted(dir: &Path, machine_id: &str, pid: u32, build: &str, now_ms: u64) -> Option<(String, State)> {
+    let s = active_job(dir, now_ms)?;
+    // 도우미가 `launched` 를 적기 전에 새 앱이 먼저 부팅할 수 있다 — 갈아 끼운 뒤면 받는다.
+    let waiting = matches!(s.state, State::Swapped | State::Launched);
+    if s.job.machine_id != machine_id || !waiting || pid == s.job.old_pid {
+        return None;
+    }
+    let build = build.trim_end_matches('+');
+    let same = build.len() >= 7 && (s.job.build.starts_with(build) || build.starts_with(&s.job.build));
+    let id = s.job.job_id.clone();
+    let _ = advance(dir, &id, State::Booted, &format!("pid {pid} build {build}"));
+    let end = if same { State::Done } else { State::Failed };
+    let _ = advance(dir, &id, end, &if same { "build matches".to_string() } else { format!("booted build {build} ≠ {}", s.job.build) });
+    Some((id, end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_restart::{target_hash, ApprovalView, BinaryId};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    const NOW: u64 = 1_790_000_000_000;
+    const AP: &str = "ap_0123456789abcdef0123456789abcdef";
+    const TEAM: &str = "L366799VND";
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("kasa-update-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn facts(installed: &Path) -> Facts {
+        Facts {
+            schema: app_restart::SCHEMA.into(),
+            machine_id: "mac-1".into(),
+            label: "미니".into(),
+            os: "macos".into(),
+            capability: app_restart::CAPABILITY,
+            app_path: installed.display().to_string(),
+            pid: 4242,
+            running_exe: installed.join("Contents/MacOS/kasaterm").display().to_string(),
+            binary: BinaryId { inode: 1, mtime_ms: 2, build: "8933a0ca".into() },
+            observed_at_ms: NOW,
+            ..Facts::default()
+        }
+    }
+
+    struct Key {
+        pair: ring::signature::Ed25519KeyPair,
+    }
+
+    impl Key {
+        fn new() -> Self {
+            let rng = ring::rand::SystemRandom::new();
+            let doc = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+            Self { pair: ring::signature::Ed25519KeyPair::from_pkcs8(doc.as_ref()).unwrap() }
+        }
+        fn public(&self) -> String {
+            use ring::signature::KeyPair;
+            base64::engine::general_purpose::STANDARD.encode(self.pair.public_key().as_ref())
+        }
+        fn sign(&self, data: &[u8]) -> String {
+            base64::engine::general_purpose::STANDARD.encode(self.pair.sign(data).as_ref())
+        }
+    }
+
+    const DMG: &[u8] = b"kasaterm v0.2.1 dmg body";
+
+    fn job_for(f: &Facts, key: &Key) -> UpdateJob {
+        let sha = format!("sha256:{:x}", sha2::Sha256::digest(DMG));
+        let tag = "v0.2.1";
+        UpdateJob {
+            schema: SCHEMA.into(),
+            job_id: job_id("abcdef0123456789", &f.machine_id, &sha),
+            plan_hash: "abcdef0123456789".into(),
+            machine_id: f.machine_id.clone(),
+            target_hash: target_hash(f),
+            tag: tag.into(),
+            version: "0.2.1".into(),
+            commit: "5e4d138684156c710831055f5b042688b335f617".into(),
+            build: "9f1c2b3a".into(),
+            asset: Asset { name: asset_name(tag), url: asset_url(tag, &asset_name(tag)), size: DMG.len() as u64, sha256: sha, ed_signature: key.sign(DMG) },
+            team: TEAM.into(),
+            require_notarized: true,
+            old_pid: f.pid,
+            created_at_ms: NOW,
+        }
+    }
+
+    fn feed_for(job: &UpdateJob) -> String {
+        format!(r#"<rss><channel><item><sparkle:version>{}</sparkle:version><enclosure url="{}" length="{}" type="application/octet-stream" sparkle:edSignature="{}"/></item></channel></rss>"#,
+            job.version, job.asset.url, job.asset.size, job.asset.ed_signature)
+    }
+
+    struct Nacho(ApprovalView);
+
+    impl Authority for Nacho {
+        fn get(&self, _: &str) -> std::result::Result<ApprovalView, String> {
+            Ok(self.0.clone())
+        }
+        fn consume(&self, _: &str, _: &serde_json::Value, _: &str) -> std::result::Result<ApprovalView, String> {
+            Err("대상은 소비하지 않는다".into())
+        }
+    }
+
+    fn approved(job: &UpdateJob) -> Nacho {
+        Nacho(ApprovalView {
+            id: AP.into(), action: ACTION.into(), scope: scope(job, "ctl", 1), scope_hash: "sha256:x".into(),
+            state: "approved".into(), expires_at_ms: NOW + 600_000, consumed_at_ms: Some(NOW), consumed_by: Some("ctl".into()),
+        })
+    }
+
+    fn req(job: &UpdateJob) -> UpdateRequest {
+        UpdateRequest { job: job.clone(), approval_id: AP.into(), authority: "ctl".into() }
+    }
+
+    #[test]
+    fn the_public_key_is_the_one_sparkle_already_trusts() {
+        let bake = include_str!("../../../scripts/build-app.sh");
+        assert!(bake.contains(&format!("<string>{ED_PUBLIC_KEY}</string>")));
+    }
+
+    #[test]
+    fn only_the_official_release_file_for_the_tag_can_be_named() {
+        let key = Key::new();
+        let f = facts(Path::new("/Users/x/Applications/kasaterm.app"));
+        let job = job_for(&f, &key);
+        assert_eq!(check_job(&job), Ok(()));
+        let cases: Vec<(UpdateJob, &str)> = vec![
+            (UpdateJob { asset: Asset { url: "https://evil.example/kasaterm-v0.2.1.dmg".into(), ..job.asset.clone() }, ..job.clone() }, "공식 릴리스 주소"),
+            (UpdateJob { asset: Asset { name: "../../etc/kasaterm.dmg".into(), ..job.asset.clone() }, ..job.clone() }, "공식 릴리스 주소"),
+            (UpdateJob { asset: Asset { size: MAX_ASSET_BYTES + 1, ..job.asset.clone() }, ..job.clone() }, "상한"),
+            (UpdateJob { asset: Asset { sha256: "md5:x".into(), ..job.asset.clone() }, ..job.clone() }, "sha256"),
+            (UpdateJob { tag: "v0.2.2".into(), ..job.clone() }, "태그"),
+            (UpdateJob { team: "".into(), ..job.clone() }, "팀"),
+            (UpdateJob { job_id: "up0000000000000000".into(), ..job.clone() }, "작업 id"),
+        ];
+        for (bad, word) in cases {
+            let why = check_job(&bad).unwrap_err();
+            assert!(why.contains(word), "{word}: {why}");
+        }
+    }
+
+    /// 조종 쪽(tools/release/devices.py `update_job_id`)도 같은 id 를 짓는다 — 양쪽 검사에 같은 값이 박혀 있다.
+    #[test]
+    fn the_job_id_matches_the_controller_side() {
+        assert_eq!(job_id("abcdef0123456789", "mac-1", &format!("sha256:{}", "0".repeat(64))), "upd4e7a732ffa7a1c8");
+    }
+
+    #[test]
+    fn the_feed_must_name_the_same_file() {
+        let key = Key::new();
+        let job = job_for(&facts(Path::new("/x/kasaterm.app")), &key);
+        let item = parse_feed(&feed_for(&job)).unwrap();
+        assert_eq!(check_feed(&job, &item), Ok(()));
+        assert!(check_feed(&job, &FeedItem { version: "0.2.2".into(), ..item.clone() }).unwrap_err().contains("다른 판"));
+        assert!(check_feed(&job, &FeedItem { length: 1, ..item.clone() }).unwrap_err().contains("다르다"));
+        assert!(check_feed(&job, &FeedItem { signature: key.sign(b"other"), ..item }).unwrap_err().contains("다르다"));
+        let real = parse_feed(include_str!("../../../docs/appcast.xml")).unwrap();
+        assert!(real.url.starts_with(RELEASE_PREFIX) && real.length > 0 && !real.signature.is_empty());
+    }
+
+    #[test]
+    fn authorize_needs_the_switch_the_machine_a_newer_version_and_a_consumed_approval() {
+        let key = Key::new();
+        let f = facts(Path::new("/Users/x/Applications/kasaterm.app"));
+        let job = job_for(&f, &key);
+        let ok = approved(&job);
+        assert_eq!(authorize(&req(&job), &f, "0.2.0", &ok, true, NOW), Ok(()));
+        let err = |f: &Facts, v: &str, n: &Nacho, on: bool, j: &UpdateJob| authorize(&req(j), f, v, n, on, NOW).unwrap_err();
+        assert!(err(&f, "0.2.0", &ok, false, &job).starts_with("update_disabled"));
+        assert!(err(&Facts { os: "windows".into(), ..f.clone() }, "0.2.0", &ok, true, &job).starts_with("unsupported_os"));
+        let busy = Facts { busy: vec![app_restart::BusyPane { surface: "%1".into(), character: "아리스".into(), state: "working".into() }], ..f.clone() };
+        // 바쁜 학생·미저장 편집기는 받기·준비를 막지 않는다 — 갈아 끼울 때(`blocking(apply)`) 막는다.
+        let dirty = Facts { dirty_editors: 1, ..f.clone() };
+        assert_eq!(authorize(&req(&job), &busy, "0.2.0", &ok, true, NOW), Ok(()));
+        assert!(blocking(&busy, &job.job_id, NOW, true)[0].message().contains("아리스"));
+        assert!(blocking(&dirty, &job.job_id, NOW, true)[0].message().contains("저장"));
+        assert!(blocking(&dirty, &job.job_id, NOW, false).is_empty());
+        assert!(err(&f, "0.2.1", &ok, true, &job).starts_with("downgrade"));
+        assert!(err(&f, "0.3.0", &ok, true, &job).starts_with("downgrade"));
+        assert!(err(&Facts { pid: 1, ..f.clone() }, "0.2.0", &ok, true, &job).contains("정체"));
+        let mut v = ok.0.clone();
+        v.consumed_at_ms = None;
+        assert!(err(&f, "0.2.0", &Nacho(v), true, &job).contains("소비하지 않았다"));
+        let mut v = ok.0.clone();
+        v.expires_at_ms = NOW;
+        assert!(err(&f, "0.2.0", &Nacho(v), true, &job).contains("만료"));
+        let mut v = ok.0.clone();
+        v.action = app_restart::ACTION.into();
+        assert!(err(&f, "0.2.0", &Nacho(v), true, &job).contains("승인되지"));
+        let mut v = ok.0.clone();
+        v.scope["asset"]["sha256"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+        assert!(err(&f, "0.2.0", &Nacho(v), true, &job).contains("승인한 대상"));
+    }
+
+    #[test]
+    fn one_job_per_plan_machine_and_file_and_only_forward() {
+        let dir = tmp("records");
+        let key = Key::new();
+        let f = facts(Path::new("/x/kasaterm.app"));
+        let job = job_for(&f, &key);
+        assert!(create_job(&dir, &job).unwrap().1);
+        assert!(!create_job(&dir, &job).unwrap().1, "다시 보내도 새 작업이 없다");
+        let other = UpdateJob { asset: Asset { size: 1, ..job.asset.clone() }, ..job.clone() };
+        assert!(create_job(&dir, &other).is_err(), "같은 id 다른 파일은 충돌");
+        advance(&dir, &job.job_id, State::Fetched, "").unwrap();
+        assert!(advance(&dir, &job.job_id, State::Accepted, "").is_err());
+        assert!(advance(&dir, &job.job_id, State::RolledBack, "").is_err(), "갈아 끼우기 전엔 되돌림이 없다");
+        advance(&dir, &job.job_id, State::Cancelled, "").unwrap();
+        assert!(advance(&dir, &job.job_id, State::Staged, "").is_err(), "끝난 작업은 안 움직인다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_update_is_refused_while_one_is_in_flight_and_a_resend_returns_the_first() {
+        let dir = tmp("accept");
+        let key = Key::new();
+        let f = facts(Path::new("/Users/x/Applications/kasaterm.app"));
+        let job = job_for(&f, &key);
+        let (s, created) = accept(&req(&job), &f, "0.2.0", &approved(&job), true, &dir, NOW).unwrap();
+        assert!(created && s.state == State::Accepted);
+        let (_, again) = accept(&req(&job), &f, "0.2.0", &approved(&job), true, &dir, NOW).unwrap();
+        assert!(!again);
+        let sig = key.sign(b"another file");
+        let mut other = job.clone();
+        other.asset.ed_signature = sig;
+        other.asset.sha256 = format!("sha256:{}", "a".repeat(64));
+        other.job_id = job_id(&other.plan_hash, &other.machine_id, &other.asset.sha256);
+        let why = accept(&req(&other), &f, "0.2.0", &approved(&other), true, &dir, NOW).unwrap_err();
+        assert!(why.starts_with("job_in_flight"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 받기·확인·준비의 가짜 — 공식 주소만 답하고, dmg 는 폴더로 흉내 낸다.
+    #[derive(Default)]
+    struct FakeWorld {
+        feed: RefCell<Option<String>>,
+        body: RefCell<Vec<u8>>,
+        fetches: RefCell<u32>,
+        /// 이만큼은 반쯤 받다가 끊긴다.
+        cuts: RefCell<u32>,
+        mounted: RefCell<Vec<PathBuf>>,
+        identities: RefCell<HashMap<String, Identity>>,
+        inner_version: RefCell<String>,
+        inner_identity: RefCell<Identity>,
+    }
+
+    impl Effects for FakeWorld {
+        fn feed(&self, url: &str, _: u64) -> std::result::Result<String, String> {
+            assert_eq!(url, MAC_FEED, "공식 피드만 읽는다");
+            self.feed.borrow().clone().ok_or_else(|| "끊김".to_string())
+        }
+        fn fetch(&self, url: &str, max: u64, dest: &Path) -> std::result::Result<(), FetchError> {
+            assert!(url.starts_with(RELEASE_PREFIX), "공식 릴리스만 받는다: {url}");
+            *self.fetches.borrow_mut() += 1;
+            let body = self.body.borrow();
+            if *self.cuts.borrow() > 0 {
+                *self.cuts.borrow_mut() -= 1;
+                std::fs::write(dest, &body[..body.len() / 2]).unwrap();
+                return Err(FetchError::Cut("curl: (18) transfer closed with outstanding read data remaining".into()));
+            }
+            if body.len() as u64 > max {
+                return Err(FetchError::TooLarge);
+            }
+            std::fs::write(dest, &*body).map_err(|e| FetchError::Cut(e.to_string()))
+        }
+        fn mount(&self, _: &Path, at: &Path) -> std::result::Result<(), String> {
+            let app = at.join("kasaterm.app/Contents");
+            std::fs::create_dir_all(&app).unwrap();
+            std::fs::write(app.join("Info.plist"), format!("<key>CFBundleShortVersionString</key>\n<string>{}</string>", self.inner_version.borrow())).unwrap();
+            std::fs::write(app.join("marker"), "new").unwrap();
+            self.identities.borrow_mut().insert(at.join("kasaterm.app").display().to_string(), self.inner_identity.borrow().clone());
+            self.mounted.borrow_mut().push(at.to_path_buf());
+            Ok(())
+        }
+        fn unmount(&self, at: &Path) {
+            self.mounted.borrow_mut().retain(|p| p != at);
+        }
+        fn identity(&self, app: &Path) -> std::result::Result<Identity, String> {
+            Ok(self.identities.borrow().get(&app.display().to_string()).cloned().unwrap_or_default())
+        }
+        fn copy_bundle(&self, from: &Path, to: &Path) -> std::result::Result<(), String> {
+            let status = std::process::Command::new("/bin/cp").args(["-R", &from.display().to_string(), &to.display().to_string()]).status().unwrap();
+            let ident = self.identities.borrow().get(&from.display().to_string()).cloned().unwrap_or_default();
+            self.identities.borrow_mut().insert(to.display().to_string(), ident);
+            status.success().then_some(()).ok_or_else(|| "cp 실패".into())
+        }
+    }
+
+    struct World {
+        dir: PathBuf,
+        cache: PathBuf,
+        installed: PathBuf,
+        key: Key,
+        job: UpdateJob,
+        fx: FakeWorld,
+    }
+
+    fn world(name: &str) -> World {
+        let root = tmp(name);
+        let installed = root.join("Applications/kasaterm.app");
+        std::fs::create_dir_all(installed.join("Contents")).unwrap();
+        std::fs::write(installed.join("Contents/marker"), "old").unwrap();
+        let key = Key::new();
+        let job = job_for(&facts(&installed), &key);
+        let fx = FakeWorld::default();
+        *fx.feed.borrow_mut() = Some(feed_for(&job));
+        *fx.body.borrow_mut() = DMG.to_vec();
+        *fx.inner_version.borrow_mut() = "0.2.1".into();
+        *fx.inner_identity.borrow_mut() = Identity { verified: true, team: Some(TEAM.into()), notarized: true };
+        let dir = root.join("jobs");
+        create_job(&dir, &job).unwrap();
+        World { dir, cache: root.join("cache"), installed, key, job, fx }
+    }
+
+    impl World {
+        fn prepare(&self) -> std::result::Result<PathBuf, String> {
+            prepare(&self.dir, &self.job, &self.cache, &self.installed, &self.fx, &self.key.public())
+        }
+        fn state(&self) -> State {
+            status(&self.dir, &self.job.job_id).unwrap().state
+        }
+    }
+
+    #[test]
+    fn a_verified_official_file_is_staged_beside_the_install_and_nothing_else_moves() {
+        let w = world("stage-ok");
+        let staged = w.prepare().unwrap();
+        assert_eq!(staged, staged_path(&w.installed));
+        assert_eq!(std::fs::read_to_string(staged.join("Contents/marker")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(w.installed.join("Contents/marker")).unwrap(), "old", "설치본은 안 건드린다");
+        assert_eq!(w.state(), State::Staged);
+        let words: Vec<String> = status(&w.dir, &w.job.job_id).unwrap().events.iter().map(|e| e.state.word()).collect();
+        assert_eq!(words, ["accepted", "fetched", "checked", "staged"]);
+        assert!(w.fx.mounted.borrow().is_empty(), "dmg 는 늘 닫는다");
+        assert!(!work_dir(&w.cache, &w.job).join(format!("{}.part", w.job.asset.name)).exists());
+        // 끊긴 뒤 다시 와도 다시 받지 않는다.
+        assert_eq!(w.prepare().unwrap(), staged);
+        assert_eq!(*w.fx.fetches.borrow(), 1);
+    }
+
+    #[test]
+    fn a_cut_connection_is_not_the_end_the_same_job_picks_up_where_it_stopped() {
+        let w = world("cut");
+        *w.fx.feed.borrow_mut() = None;
+        assert!(w.prepare().unwrap_err().contains("공식 피드를 못 읽었다"));
+        assert_eq!(w.state(), State::Accepted, "피드가 안 닿은 것은 실패가 아니다");
+        *w.fx.feed.borrow_mut() = Some(feed_for(&w.job));
+        *w.fx.cuts.borrow_mut() = 1;
+        assert!(w.prepare().unwrap_err().contains("끊겼다"));
+        assert_eq!(w.state(), State::Accepted);
+        assert!(!work_dir(&w.cache, &w.job).join(format!("{}.part", w.job.asset.name)).exists(), "반쯤 받은 것은 걷는다");
+        let notes: Vec<String> = status(&w.dir, &w.job.job_id).unwrap().events.iter().map(|e| e.note.clone()).collect();
+        assert_eq!(notes.iter().filter(|n| n.starts_with("retry: ")).count(), 2);
+        w.prepare().unwrap();
+        assert_eq!(w.state(), State::Staged);
+        assert_eq!(*w.fx.fetches.borrow(), 2);
+    }
+
+    #[test]
+    fn a_verified_file_from_an_interrupted_run_is_not_fetched_again() {
+        let w = world("interrupted");
+        // 받고 확인까지 한 뒤 앱이 꺼졌다 — 파일과 `fetched` 줄만 남았다.
+        std::fs::create_dir_all(work_dir(&w.cache, &w.job)).unwrap();
+        std::fs::write(work_dir(&w.cache, &w.job).join(&w.job.asset.name), DMG).unwrap();
+        advance(&w.dir, &w.job.job_id, State::Fetched, "").unwrap();
+        w.prepare().unwrap();
+        assert_eq!(*w.fx.fetches.borrow(), 0);
+        assert_eq!(w.state(), State::Staged);
+        // 남은 파일이 바꿔치기돼 있으면 해시가 달라 다시 받는다 — 옛 파일을 믿지 않는다.
+        let w = world("tampered");
+        std::fs::create_dir_all(work_dir(&w.cache, &w.job)).unwrap();
+        std::fs::write(work_dir(&w.cache, &w.job).join(&w.job.asset.name), b"kasaterm v0.2.1 dmg bodX").unwrap();
+        w.prepare().unwrap();
+        assert_eq!(*w.fx.fetches.borrow(), 1);
+    }
+
+    #[test]
+    fn every_verification_failure_leaves_nothing_staged() {
+        type Breaker = fn(&World);
+        let cases: Vec<(&str, Breaker, &str)> = vec![
+            ("feed-other", |w| *w.fx.feed.borrow_mut() = Some(feed_for(&UpdateJob { version: "0.2.2".into(), ..w.job.clone() })), "다른 판"),
+            ("sha", |w| *w.fx.body.borrow_mut() = b"kasaterm v0.2.1 dmg bodX".to_vec(), "sha256"),
+            ("oversize", |w| *w.fx.body.borrow_mut() = vec![0; DMG.len() + 5], "상한을 넘었다"),
+            ("short", |w| *w.fx.body.borrow_mut() = DMG[..DMG.len() - 3].to_vec(), "받은 크기가 다르다"),
+            ("team", |w| *w.fx.inner_identity.borrow_mut() = Identity { verified: true, team: Some("OTHERTEAM1".into()), notarized: true }, "팀"),
+            ("unsigned", |w| *w.fx.inner_identity.borrow_mut() = Identity::default(), "서명이 깨졌다"),
+            ("notarize", |w| *w.fx.inner_identity.borrow_mut() = Identity { verified: true, team: Some(TEAM.into()), notarized: false }, "공증"),
+            ("version", |w| *w.fx.inner_version.borrow_mut() = "0.2.0".into(), "판이 작업의 판과 다르다"),
+        ];
+        for (name, breaker, word) in cases {
+            let w = world(&format!("bad-{name}"));
+            breaker(&w);
+            let why = w.prepare().unwrap_err();
+            assert!(why.contains(word), "{name}: {why}");
+            assert_eq!(w.state(), State::Failed, "{name}");
+            assert!(!staged_path(&w.installed).exists(), "{name}: 반쯤 준비한 것이 남았다");
+            assert!(w.fx.mounted.borrow().is_empty(), "{name}: dmg 가 열린 채 남았다");
+            assert!(!work_dir(&w.cache, &w.job).join(format!("{}.part", w.job.asset.name)).exists(), "{name}");
+            assert_eq!(std::fs::read_to_string(w.installed.join("Contents/marker")).unwrap(), "old");
+        }
+        let w = world("bad-eddsa");
+        let other = Key::new();
+        let why = prepare(&w.dir, &w.job, &w.cache, &w.installed, &w.fx, &other.public()).unwrap_err();
+        assert!(why.contains("EdDSA"), "{why}");
+        assert!(!work_dir(&w.cache, &w.job).join(&w.job.asset.name).exists(), "서명이 안 맞는 파일은 지운다");
+    }
+
+    // ---------------------------------------------------------------- 도우미를 실제 sh 로
+
+    const FAKE_BODY: &str = "exec -a \"$0\" /bin/sleep 30";
+
+    fn start_fake(exe: &Path) -> std::process::Child {
+        std::process::Command::new("/bin/bash").args(["-c", FAKE_BODY, &exe.display().to_string()]).spawn().unwrap()
+    }
+
+    fn fake_launch(exe: &Path) -> Vec<String> {
+        vec!["/bin/bash".into(), "-c".into(), format!("({FAKE_BODY}) >/dev/null 2>&1 &"), exe.display().to_string()]
+    }
+
+    /// 새 판으로 떴다가 곧 꺼지는 앱 — 부팅 표식 없이 죽는 판을 흉내 낸다.
+    fn crashing_launch(exe: &Path) -> Vec<String> {
+        vec!["/bin/bash".into(), "-c".into(), "(exec -a \"$0\" /bin/sleep 0.5) >/dev/null 2>&1 &".into(), exe.display().to_string()]
+    }
+
+    fn wait_for(w: &World, want: &[State], secs: u64) -> State {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        loop {
+            let s = w.state();
+            if want.contains(&s) || s.terminal() || std::time::Instant::now() > until {
+                return s;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn marker(p: &Path) -> String {
+        std::fs::read_to_string(p.join("Contents/marker")).unwrap_or_default()
+    }
+
+    fn kill_all(exe: &Path) {
+        let out = std::process::Command::new("/bin/ps").args(["-Axww", "-o", "pid=,command="]).output().unwrap();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let line = line.trim_start();
+            if let Some((pid, cmd)) = line.split_once(' ') {
+                if cmd.starts_with(&exe.display().to_string()) {
+                    let _ = std::process::Command::new("/bin/kill").arg(pid).status();
+                }
+            }
+        }
+    }
+
+    fn armed(name: &str, launch: fn(&Path) -> Vec<String>, boot_s: u32) -> (World, std::process::Child, SwapSpec) {
+        let w = world(name);
+        w.prepare().unwrap();
+        let exe = w.installed.join("Contents/MacOS/kasaterm");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let old = start_fake(&exe);
+        let spec = SwapSpec { dir: w.dir.clone(), job_id: w.job.job_id.clone(), old_pid: old.id(), installed: w.installed.clone(),
+                              launch: launch(&exe), exit_timeout_s: 5, boot_timeout_s: boot_s };
+        (w, old, spec)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_armed_job_swaps_after_exit_and_finishes_on_the_new_boot_mark() {
+        let (w, mut old, spec) = armed("swap-ok", fake_launch, 6);
+        assert!(arm(&w.dir, &spec, false).unwrap_err().starts_with("update_disabled"));
+        arm(&w.dir, &spec, true).unwrap();
+        assert_eq!(wait_for(&w, &[State::HelperStarted], 5), State::HelperStarted);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(marker(&w.installed), "old", "앱이 살아 있는 동안은 안 갈아 끼운다");
+        old.kill().unwrap();
+        let _ = old.wait();
+        assert_eq!(wait_for(&w, &[State::Launched], 8), State::Launched);
+        assert_eq!(marker(&w.installed), "new");
+        assert_eq!(marker(&previous_path(&w.installed)), "old", "이전 판은 곁에 남는다");
+        // 새로 뜬 앱의 부팅 — 빌드 표식이 작업과 같으면 끝.
+        let new_pid = status(&w.dir, &w.job.job_id).unwrap().events.iter().rev()
+            .find(|e| e.state == State::Launched).unwrap().note.trim_start_matches("pid ").parse::<u32>().unwrap();
+        let (_, end) = mark_booted(&w.dir, "mac-1", new_pid, "9f1c2b3a", NOW).unwrap();
+        assert_eq!(end, State::Done);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert_eq!(w.state(), State::Done);
+        kill_all(&spec.installed.join("Contents/MacOS/kasaterm"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_app_that_dies_before_its_boot_mark_is_rolled_back_and_the_old_one_relaunched() {
+        let (w, mut old, spec) = armed("swap-crash", crashing_launch, 3);
+        arm(&w.dir, &spec, true).unwrap();
+        old.kill().unwrap();
+        let _ = old.wait();
+        assert_eq!(wait_for(&w, &[State::RolledBack], 15), State::RolledBack);
+        assert_eq!(marker(&w.installed), "old", "이전 판이 제자리로 돌아왔다");
+        assert_eq!(marker(&failed_path(&w.installed)), "new", "실패한 판은 곁에 남긴다");
+        kill_all(&spec.installed.join("Contents/MacOS/kasaterm"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_that_fails_restores_the_previous_bundle() {
+        let (w, mut old, spec) = armed("swap-launch-fail", |_| vec!["/usr/bin/false".into()], 2);
+        arm(&w.dir, &spec, true).unwrap();
+        old.kill().unwrap();
+        let _ = old.wait();
+        assert_eq!(wait_for(&w, &[State::RolledBack], 8), State::RolledBack);
+        assert_eq!(marker(&w.installed), "old");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_app_that_never_exits_is_never_forced_and_nothing_is_swapped() {
+        let (w, mut old, spec) = armed("swap-stuck", fake_launch, 2);
+        let spec = SwapSpec { exit_timeout_s: 1, ..spec };
+        arm(&w.dir, &spec, true).unwrap();
+        assert_eq!(wait_for(&w, &[State::Failed], 8), State::Failed);
+        assert!(old.try_wait().unwrap().is_none(), "안 꺼지는 앱을 죽이지 않았다");
+        assert_eq!(marker(&w.installed), "old");
+        assert!(staged_path(&w.installed).exists(), "준비한 번들은 그대로 남는다");
+        old.kill().unwrap();
+        let _ = old.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_staged_bundle_or_a_second_instance_stops_before_touching_the_install() {
+        let (w, mut old, spec) = armed("swap-missing", fake_launch, 2);
+        arm(&w.dir, &spec, true).unwrap();
+        std::fs::remove_dir_all(staged_path(&w.installed)).unwrap();
+        old.kill().unwrap();
+        let _ = old.wait();
+        assert_eq!(wait_for(&w, &[State::Failed], 8), State::Failed);
+        assert_eq!(marker(&w.installed), "old");
+
+        let (w, mut old, spec) = armed("swap-second", fake_launch, 2);
+        let exe = spec.installed.join("Contents/MacOS/kasaterm");
+        arm(&w.dir, &spec, true).unwrap();
+        let mut other = start_fake(&exe);
+        old.kill().unwrap();
+        let _ = old.wait();
+        assert_eq!(wait_for(&w, &[State::Failed], 8), State::Failed);
+        assert_eq!(marker(&w.installed), "old", "다른 인스턴스가 도는 동안은 안 갈아 끼운다");
+        other.kill().unwrap();
+        let _ = other.wait();
+    }
+
+    #[test]
+    fn a_boot_with_the_wrong_build_is_a_failure_not_a_success() {
+        let w = world("boot-wrong");
+        for s in [State::Fetched, State::Checked, State::Staged, State::Armed, State::HelperStarted, State::Exited, State::Swapped] {
+            advance(&w.dir, &w.job.job_id, s, "").unwrap();
+        }
+        assert!(mark_booted(&w.dir, "mac-1", w.job.old_pid, "9f1c2b3a", NOW).is_none(), "옛 pid 는 부팅이 아니다");
+        assert!(mark_booted(&w.dir, "mac-2", 7, "9f1c2b3a", NOW).is_none(), "다른 기기");
+        let (_, end) = mark_booted(&w.dir, "mac-1", 7, "deadbeef", NOW).unwrap();
+        assert_eq!(end, State::Failed);
+    }
+
+    #[test]
+    fn nothing_is_armed_before_it_is_staged_or_while_the_switch_is_off() {
+        let w = world("arm-early");
+        let spec = SwapSpec { dir: w.dir.clone(), job_id: w.job.job_id.clone(), old_pid: 1, installed: w.installed.clone(),
+                              launch: vec!["/usr/bin/true".into()], exit_timeout_s: 1, boot_timeout_s: 1 };
+        #[cfg(unix)]
+        {
+            assert!(arm(&w.dir, &spec, true).unwrap_err().contains("준비되지 않은"));
+            assert!(arm(&w.dir, &spec, false).unwrap_err().starts_with("update_disabled"));
+        }
+        assert!(!install_enabled(&|_| None));
+        assert!(!install_enabled(&|_| Some("1".into())), "켜는 값은 on 하나뿐");
+        assert!(install_enabled(&|k| (k == "KASATERM_APP_UPDATE").then(|| "on".to_string())));
+    }
+
+    fn device<'a>(w: &'a World, launch: Vec<String>, public: &'a str) -> Device<'a> {
+        Device { dir: w.dir.clone(), cache: w.cache.clone(), installed: w.installed.clone(), effects: &w.fx, public_key: public,
+                 enabled: true, launch, exit_timeout_s: 5, boot_timeout_s: 6 }
+    }
+
+    /// 받기부터 새 판 부팅까지 — 받는 사이 학생이 일을 시작하면 준비한 채 기다리고, 다시 보내면 이어서 갈아 끼운다.
+    #[cfg(unix)]
+    #[test]
+    fn drive_waits_for_busy_students_then_swaps_and_finishes_on_boot() {
+        let w = world("drive");
+        let exe = w.installed.join("Contents/MacOS/kasaterm");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let mut old = start_fake(&exe);
+        let mut f = facts(&w.installed);
+        f.pid = old.id();
+        let job = UpdateJob { old_pid: f.pid, target_hash: target_hash(&f), ..w.job.clone() };
+        let job = UpdateJob { job_id: job_id(&job.plan_hash, &job.machine_id, &job.asset.sha256), ..job };
+        create_job(&w.dir, &job).unwrap();
+        let w = World { job, ..w };
+        let public = w.key.public();
+        let dev = device(&w, fake_launch(&exe), &public);
+        let busy = Facts { busy: vec![app_restart::BusyPane { surface: "%2".into(), character: "모모이".into(), state: "working".into() }],
+                           dirty_editors: 1, ..f.clone() };
+        let step = drive(&dev, &w.job, &|| Ok(busy.clone()), &|| NOW).unwrap();
+        assert!(matches!(&step, Step::Waiting(why) if why.contains("모모이")), "{step:?}");
+        assert_eq!(w.state(), State::Staged);
+        assert_eq!(marker(&w.installed), "old");
+        let step = drive(&dev, &w.job, &|| Ok(f.clone()), &|| NOW).unwrap();
+        assert!(matches!(step, Step::Armed(_)), "{step:?}");
+        assert_eq!(*w.fx.fetches.borrow(), 1, "기다린 뒤에도 다시 받지 않는다");
+        assert!(drive(&dev, &w.job, &|| Ok(f.clone()), &|| NOW).is_err(), "도우미는 한 번만");
+        old.kill().unwrap();
+        let _ = old.wait();
+        assert_eq!(wait_for(&w, &[State::Launched], 8), State::Launched);
+        let new_pid = status(&w.dir, &w.job.job_id).unwrap().events.iter().rev()
+            .find(|e| e.state == State::Launched).unwrap().note.trim_start_matches("pid ").parse::<u32>().unwrap();
+        assert_eq!(mark_booted(&w.dir, "mac-1", new_pid, "9f1c2b3a+", NOW).unwrap().1, State::Done);
+        assert_eq!(marker(&w.installed), "new");
+        kill_all(&exe);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drive_refuses_when_the_machine_changed_or_the_switch_is_off() {
+        let w = world("drive-moved");
+        let public = w.key.public();
+        let off = Device { enabled: false, ..device(&w, vec!["/usr/bin/true".into()], &public) };
+        assert!(drive(&off, &w.job, &|| Ok(facts(&w.installed)), &|| NOW).unwrap_err().starts_with("update_disabled"));
+        assert_eq!(*w.fx.fetches.borrow(), 0, "꺼져 있으면 받지도 않는다");
+        let dev = device(&w, vec!["/usr/bin/true".into()], &public);
+        let stale = drive(&dev, &w.job, &|| Ok(facts(&w.installed)), &|| NOW + JOB_TTL_MS / 2 + 1).unwrap_err();
+        assert!(stale.contains("30분"), "{stale}");
+        assert_eq!(w.state(), State::Failed);
+        let w = world("drive-moved-2");
+        let public = w.key.public();
+        let dev = device(&w, vec!["/usr/bin/true".into()], &public);
+        let moved = Facts { pid: 999, ..facts(&w.installed) };
+        assert!(drive(&dev, &w.job, &|| Ok(moved.clone()), &|| NOW).unwrap_err().contains("정체"));
+        assert_eq!(w.state(), State::Failed);
+        assert_eq!(marker(&w.installed), "old");
+        let pending = Facts { install_pending: Some(app_restart::PendingInstall { dist_path: "/x/dist".into(), dist_mtime_ms: 1 }), ..facts(&w.installed) };
+        assert!(!blocking(&pending, &w.job.job_id, NOW, false).is_empty(), "자기설치 예정이면 받기부터 막는다");
+        let own = Facts { active_job: Some(w.job.job_id.clone()), ..facts(&w.installed) };
+        assert!(blocking(&own, &w.job.job_id, NOW, true).is_empty(), "자기 작업은 진행 중인 작업으로 안 친다");
+        let other = Facts { active_job: Some("rs0123456789abcdef".into()), ..facts(&w.installed) };
+        assert!(!blocking(&other, &w.job.job_id, NOW, false).is_empty(), "재시작이 도는 중이면 막는다");
+    }
+}

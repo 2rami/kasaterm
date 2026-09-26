@@ -586,9 +586,13 @@ def main(argv=None):
         targets, problem = devices.gather_facts(Runner("dry"), plan["device_ids"])
         rows = devices.plan_devices(plan, state, targets, problem)
         if a.json:
-            print(json.dumps({"plan_id": plan["plan_id"], "dry_run": True, "devices": [
-                {**r, "job": devices.job_spec(plan, r, devices.artifact_for(plan, state, r["os"]))} for r in rows]},
-                ensure_ascii=False, indent=2))
+            now = int(time.time() * 1000)
+            out = []
+            for r in rows:
+                job, why = devices.update_job(plan, state, targets.get(r["machine_id"]), now)
+                out.append({**r, "job": job, "job_problem": why,
+                            "scope": devices.update_scope(job, plan["controller"]) if job else None})
+            print(json.dumps({"plan_id": plan["plan_id"], "dry_run": True, "devices": out}, ensure_ascii=False, indent=2))
             return 0
         print(f"기기 받기·설치 예약 계획(dry-run) · {plan['tag']} · 기기 {len(rows)}대" + (f" · {problem}" if problem else ""))
         for r in rows:

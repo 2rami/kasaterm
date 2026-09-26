@@ -7775,6 +7775,29 @@ pub fn spawn_http_server_opts(
                             }
                         }
                     }).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)))
+                    // 앱 업데이트 — 요청은 URL·경로·명령을 싣지 못한다(`kasa_socket::app_update::check_job`). 받는 곳은 공식 피드와
+                    // 공식 릴리스뿐이고, 판정은 나쵸에서 읽은 승인과 이 기기의 지금 사실로만 한다. 설치 스위치가 꺼져 있으면 거부.
+                    .route("/app/update/jobs/{id}", get(|AxPath(id): AxPath<String>| async move {
+                        let status = kasa_socket::app_update::jobs_dir()
+                            .and_then(|dir| kasa_socket::app_update::status(&dir, &id));
+                        match status {
+                            Ok(status) => Json(serde_json::to_value(status).unwrap_or_default()).into_response(),
+                            Err(e) => (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),
+                        }
+                    }))
+                    .route("/app/update/jobs", post({
+                        let backend = restart_backend.clone();
+                        move |Json(request): Json<kasa_socket::app_update::UpdateRequest>| {
+                            let backend = backend.clone();
+                            async move {
+                                match tokio::task::spawn_blocking(move || backend.update_start(None, &request)).await {
+                                    Ok(Ok(value)) => Json(value).into_response(),
+                                    Ok(Err(e)) => (axum::http::StatusCode::CONFLICT, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),
+                                    Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                                }
+                            }
+                        }
+                    }).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)))
                     .route("/nacho/report", post(move |Json(params): Json<serde_json::Value>| {
                         let backend = nacho_report_backend.clone();
                         nacho_report_post(backend, Json(params))

@@ -909,6 +909,18 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
                 return;
             }
+            UserEvent::UpdateExit(job) => {
+                // 재시작과 같은 까닭 — 끄는 순간 자기설치가 끼면 도우미가 다른 번들을 갈아 끼운다.
+                if crate::install_pending_paths().is_some() {
+                    if let Ok(dir) = kasa_socket::app_update::jobs_dir() {
+                        let _ = kasa_socket::app_update::advance(&dir, &job, kasa_socket::app_update::State::Failed, "self install became pending before exit; not exiting");
+                    }
+                    return;
+                }
+                eprintln!("[app-update] exiting for job {job}");
+                event_loop.exit();
+                return;
+            }
             UserEvent::SocketRestartFacts(reply) => {
                 let _ = reply.send(self.restart_facts());
                 return;

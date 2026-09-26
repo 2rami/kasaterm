@@ -344,7 +344,7 @@ class RealBackend:
         ok, version, why = deps.probe_openssl(self.runner, openssl)
         if not ok:
             raise Refused(f"계획에 고정한 openssl({openssl}, {version or '판 모름'})이 지금은 {why} — 서명을 확인하지 않고 멈춘다")
-        seen = {}
+        seen, signatures = {}, {}
         for platform, src in (("macos", plan["feed"]["source"]), ("windows", plan["feed"]["windows"])):
             raw = fetch_feed(self.http, src)
             if raw is None:
@@ -365,10 +365,12 @@ class RealBackend:
             if not ed25519_ok(self.runner, openssl, key, item["signature"], asset["path"], self.workdir / "sig"):
                 raise Refused(f"{platform} 피드 EdDSA 서명이 산출물과 맞지 않는다")
             seen[platform] = sha256_bytes(raw)
+            signatures[platform] = item["signature"]
         before = (state["stages"].get("feed", {}).get("detail") or {}).get("hashes")
         if before and before != seen:
             raise Refused("한 번 확인한 피드가 그 뒤 바뀌었다 — 누가 다시 게시했는지 먼저 본다")
-        return {"hashes": seen, "version": plan["version"]}
+        # 기기 업데이트 작업이 이 서명을 싣는다 — 기기는 피드가 같은 서명을 말하는지 다시 대조하고, 받은 원문으로 다시 검증한다.
+        return {"hashes": seen, "signatures": signatures, "version": plan["version"]}
 
     def devices(self, plan, state):
         rows = self.tracker(plan, state)

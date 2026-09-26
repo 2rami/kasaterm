@@ -57,7 +57,7 @@ kasaterm-cli app-restart run                           # 지금은 계획을 보
 | `unsaved_editors` | 저장 안 한 편집기 |
 | `self_install_pending` | 끄면 자기설치가 새 빌드를 깐다 — 재시작이 업그레이드가 되므로 거부 |
 | `bake_in_progress` | `build-app.sh` 가 돈다 |
-| `job_in_flight` | 이미 진행 중인 재시작 작업이 있다 |
+| `job_in_flight` | 이미 진행 중인 재시작 작업이나 앱 업데이트 작업([app-update.md](app-update.md))이 있다 |
 | `stale_facts` | 사실이 30초보다 오래됐다 |
 
 ## 실행 절차

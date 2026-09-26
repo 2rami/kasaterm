@@ -1,17 +1,18 @@
-"""기기에서 받기·설치 예약·검증 — 앱 재시작의 사실·신뢰 계약을 다시 써서, 기기마다 무엇이 되고 무엇이 막혔는지 보인다.
+"""기기에서 받기·확인·준비·적용 — 기기 앱의 업데이트 창구(`kasa_socket::app_update`, docs/app-update.md)에 보낼 작업을
+짓고, 기기마다 무엇이 되고 무엇이 막혔는지 보인다. 사실은 `kasaterm-cli app-restart plan --json` 에서 읽는다 — 명부에 든
+기기만, 그 기기 앱이 스스로 잰 값이다.
 
-지금은 dry-run 뿐이다. 기기 앱에 「받기·설치 예약」 창구가 아직 없다 — 그 창구가 든 판을 사람이 한 번 설치해야 생긴다.
-그래서 모든 기기가 `update_endpoint_missing` 으로 막히고, 나머지 사유(바쁜 학생·미저장 편집기·서명·OS)는 그 창구가
-생긴 뒤에도 그대로 먹는 검사다. 사실은 `kasaterm-cli app-restart plan --json`(docs/app-restart.md)에서 읽는다 —
-명부에 든 기기만, 그 기기 앱이 스스로 잰 값이다.
+기기가 하는 일(여기서 보이는 여섯 단계):
+1 받기     공식 피드·공식 릴리스의 그 태그 dmg 하나만(https·넘겨주기도 https·크기 상한). 요청은 주소를 싣지 못한다.
+2 확인     sha256(릴리스 단계가 잰 값) · EdDSA(설치본의 Sparkle 공개키) · dmg 읽기 전용 · 서명 팀이 설치본과 같음 · 공증 · 판 번호.
+3 준비     확인한 번들을 곁(`.kasaterm.app.next`)에 둔다. 설치본은 아직 안 건드린다.
+4 적용     바쁜 학생·미저장 편집기가 없을 때만 — 앱이 스스로 끄고 도우미가 갈아 끼운다(이전 판은 `.kasaterm.app.previous`).
+5 재기동   도우미가 다시 띄운다. 새 판이 부팅 표식을 못 남기고 꺼지면 이전 판을 되돌려 다시 띄운다(강제 종료 없음).
+6 검증     부팅 표식의 빌드가 태그 커밋이면 끝, 아니면 실패로 적는다.
 
-창구가 생기면 기기가 할 일(여기서 보이는 여섯 단계):
-1 받기     릴리스 산출물을 그 기기 캐시로(`~/Library/Caches/kasaterm/updates/<tag>/`) — 소스·빌드 환경 없이.
-2 확인     크기·sha256(릴리스 단계가 잰 값) · EdDSA(저장소 공개키) · mac 은 dmg 를 읽기 전용으로 열어 서명이 설치본과 같은 팀인지.
-3 준비     mac 은 확인한 번들을 곁(`.kasaterm.app.next`)에 두고, 윈도는 확인한 msi 를 둔다. 설치본은 아직 안 건드린다.
-4 예약     종료할 때 바꾼다 — 자기설치와 같은 규칙(이전 판을 `.kasaterm.app.previous` 로, 실패하면 되돌림).
-5 재시작   앱 재시작 계약 그대로 — 별도 `kasaterm_restart` 승인, 바쁘거나 미저장이면 기다린다(강제 종료 없음).
-6 검증     `/version` 이 목표 버전·태그 커밋이면 끝, 아니면 이전 판을 둔 채 실패로 적는다.
+창구는 이 판부터 기기 앱에 있다(`update_capability`). 그래도 설치 실행은 기기마다 기본 꺼짐(`update_enabled`,
+`KASATERM_APP_UPDATE=on`)이고, 작업은 나쵸 `kasaterm_update` 승인을 조종 기기가 한 번 소비해야 받아들여진다 — 그 승인
+동작이 나쵸에 아직 없어서 지금은 작업을 **지어 보이기만** 한다.
 """
 
 import json
@@ -20,6 +21,10 @@ from pathlib import Path
 import shutil
 
 UPDATE_CAPABILITY = 1
+UPDATE_SCHEMA = "kasaterm-update/1"
+UPDATE_ACTION = "kasaterm_update"
+MAX_ASSET_BYTES = 512 * 1024 * 1024
+RELEASE_PREFIX = "https://github.com/2rami/kasaterm/releases/download/"
 CLI_CANDIDATES = (str(Path.home() / "Applications/kasaterm.app/Contents/MacOS/kasaterm-cli"),
                   "/Applications/kasaterm.app/Contents/MacOS/kasaterm-cli")
 # 재시작 쪽 사유 중 「기다리면 풀리는 것」 — 받기·준비는 해 둘 수 있고 적용만 미룬다.
@@ -31,7 +36,7 @@ def cli_path(which=shutil.which):
 
 
 def gather_facts(runner, ids, cli=None):
-    """{machine_id: target} — 앱 재시작 계획의 대상 칸(facts·refusals) 그대로. 읽기만."""
+    """{machine_id: target} — 앱 재시작 계획의 대상 칸(facts·refusals·hash) 그대로. 읽기만."""
     cli = cli or cli_path()
     if not cli:
         return {}, "kasaterm-cli 를 찾지 못했다"
@@ -47,6 +52,10 @@ def gather_facts(runner, ids, cli=None):
     return {t["machine_id"]: t for t in doc.get("targets", [])}, None
 
 
+def asset_url(tag, name):
+    return f"{RELEASE_PREFIX}{tag}/{name}"
+
+
 def artifact_for(plan, state, osname):
     platform = {"macos": "macos", "windows": "windows"}.get(osname)
     got = ((state.get("stages") or {}).get("release", {}).get("detail") or {}).get("assets") or {}
@@ -55,7 +64,7 @@ def artifact_for(plan, state, osname):
         return None
     from tools.release.backend import asset_names
     name = asset_names(plan["tag"])[platform]
-    url = f"https://github.com/2rami/kasaterm/releases/download/{plan['tag']}/{name}"
+    url = asset_url(plan["tag"], name)
     if not asset:
         return {"name": name, "url": url, "verified": False}
     return {"name": name, "url": url, "verified": True, "size": asset["size"], "sha256": asset["sha256"]}
@@ -75,13 +84,17 @@ def plan_devices(plan, state, targets, facts_problem=None):
         if not t or not facts:
             reasons.append(("unreachable", facts_problem or "앱 재시작 사실을 못 읽었다 — 명부에 없거나 닿지 않는다"))
         if facts and int(facts.get("update_capability") or 0) < UPDATE_CAPABILITY:
-            reasons.append(("update_endpoint_missing", "기기 앱에 받기·설치 예약 창구가 없다 — 창구가 든 판을 한 번 사람이 설치해야 한다"))
+            reasons.append(("update_endpoint_missing", "기기 앱에 받기·설치 창구가 없다 — 창구가 든 판을 한 번 사람이 설치해야 한다"))
+        elif facts and osname == "macos" and not facts.get("update_enabled"):
+            reasons.append(("update_disabled", "기기의 설치 스위치가 꺼져 있다(KASATERM_APP_UPDATE) — 켜는 것은 그 기기 사람의 결정"))
         if osname == "macos" and mac_block:
             reasons.append(("signing", mac_block))
         for r in (t or {}).get("refusals") or []:
             code = r.get("code")
             if code == "unsupported_os" and osname == "windows":
-                continue  # 윈도는 재시작 대신 WinSparkle 이 MSI 를 돌린다 — 적용은 사람이 [설치]
+                continue  # 윈도는 이 창구 대신 WinSparkle 이 MSI 를 돌린다 — 적용은 사람이 [설치]
+            if code == "capability_missing":
+                continue  # 재시작 창구 판 — 업데이트는 update_capability 로 따로 본다
             if code == "unreachable" and any(c == "unreachable" for c, _ in reasons):
                 reasons[:] = [(c, r.get("reason") or w) if c == "unreachable" else (c, w) for c, w in reasons]
                 continue
@@ -99,7 +112,7 @@ def plan_devices(plan, state, targets, facts_problem=None):
 
 
 def steps(plan, osname, art, team, facts):
-    target = f"{plan['version']} · {plan['tag']} 의 버전 커밋"
+    target = f"{plan['version']} · {plan['tag']} 의 커밋"
     if osname not in ("macos", "windows"):
         return ["OS 를 몰라 산출물·단계를 정하지 못했다 — 앱 재시작 사실이 닿으면 다시 본다"]
     name = art["name"] if art else "(이 OS 의 산출물 없음)"
@@ -108,20 +121,58 @@ def steps(plan, osname, art, team, facts):
         return [f"받기: {name} → %LOCALAPPDATA%\\kasaterm\\updates\\{plan['tag']}\\",
                 f"확인: {digest} · EdDSA(저장소 공개키)",
                 "준비: 확인한 msi 를 둔다(설치본 안 건드림)",
-                "예약: WinSparkle 토스트 [설치] — 사람이 누를 때 MSI 실행",
-                "재시작: MSI 가 앱을 닫고 다시 연다(도는 학생이 있으면 사람이 고른다)",
+                "적용: WinSparkle 토스트 [설치] — 사람이 누를 때 MSI 실행",
+                "재기동: MSI 가 앱을 닫고 다시 연다(도는 학생이 있으면 사람이 고른다)",
                 f"검증: /version 이 {target}"]
-    return [f"받기: {name} → ~/Library/Caches/kasaterm/updates/{plan['tag']}/",
-            f"확인: {digest} · EdDSA(저장소 공개키) · dmg 읽기 전용 · codesign --verify --deep --strict · 팀 {team or '미확인'} 과 같음 · 공증",
-            f"준비: 확인한 번들을 {Path(facts.get('app_path') or '~/Applications/kasaterm.app').with_name('.kasaterm.app.next')} 에",
-            "예약: 종료할 때 바꾼다 — 이전 판을 .kasaterm.app.previous 로, 실패하면 되돌림(자기설치 규칙)",
-            "재시작: 앱 재시작 계약 — 별도 kasaterm_restart 승인, 바쁘거나 미저장이면 기다림(강제 종료 없음)",
-            f"검증: /version 이 {target} — 아니면 이전 판을 둔 채 실패로 적는다"]
+    return [f"받기: {name} → ~/Library/Caches/kasaterm/updates/ — 공식 피드·공식 릴리스만, https, 크기 상한",
+            f"확인: {digest} · EdDSA(설치본 Sparkle 공개키) · dmg 읽기 전용 · codesign --verify --deep --strict · 팀 {team or '미확인'} 과 같음 · 공증 · 판 번호",
+            f"준비: 확인한 번들을 {Path(facts.get('app_path') or '~/Applications/kasaterm.app').with_name('.kasaterm.app.next')} 에(설치본 안 건드림)",
+            "적용: 바쁜 학생·미저장 편집기가 없을 때 앱이 스스로 끄고 도우미가 갈아 끼운다 — 이전 판은 .kasaterm.app.previous",
+            "재기동: 도우미가 다시 띄운다 — 새 판이 부팅 표식 없이 꺼지면 이전 판을 되돌려 다시 띄움(강제 종료 없음)",
+            f"검증: 부팅 표식의 빌드가 {target} — 아니면 실패로 적는다"]
 
 
-def job_spec(plan, row, art):
-    """창구가 생기면 기기에 보낼 작업 — 지금은 보이기만 한다. 기기는 이 값과 자기 사실·나쵸 승인으로만 판정한다."""
-    return {"schema": "kasaterm-update/1", "plan": plan["plan_id"], "machine_id": row["machine_id"], "tag": plan["tag"],
-            "version": plan["version"], "commit": plan["commit"], "asset": art,
-            "required_team": ((plan.get("signing") or {}).get("installed") or {}).get("team"),
-            "ed_public_key": plan["capabilities"]["macos"].get("ed_public_key")}
+def fnv(parts):
+    """`kasa_socket::app_restart::fnv` 와 같은 값 — 작업 id 를 기기와 조종 쪽이 따로 지어도 같아야 한다."""
+    h = 0xcbf29ce484222325
+    for part in parts:
+        for b in part.encode():
+            h = ((h ^ b) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+        h = ((h ^ 0x1f) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return f"{h:016x}"
+
+
+def update_job_id(plan_hash, machine_id, sha256):
+    return "up" + fnv([plan_hash, machine_id, sha256])
+
+
+def update_job(plan, state, target, now_ms):
+    """(작업, 못 짓는 까닭) — 기기의 `check_job` 이 받는 모양 그대로. 주소는 태그에서 지은 공식 주소뿐이다."""
+    facts = (target or {}).get("facts") or {}
+    if facts.get("os") != "macos":
+        return None, "mac 만 이 창구로 받는다 — 윈도는 WinSparkle"
+    art = artifact_for(plan, state, "macos")
+    if not art or not art["verified"]:
+        return None, "릴리스 단계가 mac 산출물을 확인하지 않았다"
+    signature = (((state.get("stages") or {}).get("feed", {}).get("detail") or {}).get("signatures") or {}).get("macos")
+    if not signature:
+        return None, "피드 단계가 mac EdDSA 서명을 확인하지 않았다"
+    team = ((plan.get("signing") or {}).get("installed") or {}).get("team")
+    if not team:
+        return None, "설치본 서명 팀을 모른다"
+    if not art["size"] or art["size"] > MAX_ASSET_BYTES:
+        return None, "산출물 크기가 상한 밖이다"
+    mid = target["machine_id"]
+    return {"schema": UPDATE_SCHEMA, "job_id": update_job_id(plan["plan_id"], mid, art["sha256"]), "plan_hash": plan["plan_id"],
+            "machine_id": mid, "target_hash": target.get("hash") or "", "tag": plan["tag"], "version": plan["version"],
+            "commit": plan["commit"], "build": plan["commit"],
+            "asset": {"name": art["name"], "url": art["url"], "size": art["size"], "sha256": art["sha256"], "ed_signature": signature},
+            "team": team, "require_notarized": True, "old_pid": int(facts.get("pid") or 0), "created_at_ms": now_ms}, None
+
+
+def update_scope(job, controller, order=1):
+    """나쵸가 승인할 범위 — `kasa_socket::app_update::scope` 와 같은 모양."""
+    return {"action": UPDATE_ACTION, "plan": job["plan_hash"], "controller": controller, "tag": job["tag"],
+            "version": job["version"], "commit": job["commit"],
+            "asset": {"name": job["asset"]["name"], "sha256": job["asset"]["sha256"], "size": job["asset"]["size"]},
+            "targets": [{"order": order, "machine_id": job["machine_id"], "hash": job["target_hash"]}]}

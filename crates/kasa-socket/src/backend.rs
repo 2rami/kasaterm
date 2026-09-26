@@ -1138,6 +1138,16 @@ pub trait Backend: Send + Sync {
     fn restart_start(&self, _machine: Option<&str>, _req: &crate::app_restart::JobRequest) -> Result<serde_json::Value> {
         anyhow::bail!("app restart is not supported by this backend")
     }
+    /// 업데이트 작업 걸기(`app_update`) — 이 기기면 판정 뒤 받기·준비·적용을 시작하고, 다른 기기면 명부 경유로 넘긴다.
+    /// 기본은 미지원.
+    fn update_start(&self, _machine: Option<&str>, _req: &crate::app_update::UpdateRequest) -> Result<serde_json::Value> {
+        anyhow::bail!("app update is not supported by this backend")
+    }
+    /// 업데이트 작업 상태. 이 기기 것은 작업 기록을 직접 읽는다.
+    fn update_job(&self, machine: Option<&str>, job_id: &str) -> Result<crate::app_update::Status> {
+        anyhow::ensure!(machine.is_none(), "remote update jobs are not supported by this backend");
+        crate::app_update::status(&crate::app_update::jobs_dir()?, job_id)
+    }
     /// Switch the visible session to index `idx`. Default unsupported.
     fn switch_session(&self, _idx: usize) -> Result<()> {
         anyhow::bail!("switch_session not supported")

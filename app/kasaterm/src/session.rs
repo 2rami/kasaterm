@@ -8406,6 +8406,8 @@ impl App {
                 kasa_mcp::machines::set_build_id(env!("KASATERM_GIT_REV"));
                 // 재시작 작업이 이 부팅을 기다리고 있었으면 도착을 적는다 — 빌드 표식이 선 뒤라야 맞는 값이 실린다.
                 crate::app_restart::mark_restart_booted();
+                #[cfg(unix)]
+                crate::app_update::mark_update_booted();
                 // No MCP auto-discovery: write our address into each AI
                 // client's config so any agent on this machine finds us.
                 kasa_mcp::register_clients(port, CANONICAL_MCP_PORT);

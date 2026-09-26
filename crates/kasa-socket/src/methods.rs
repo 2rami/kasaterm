@@ -194,6 +194,8 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "app.restart_approval" => app_restart_approval(backend, id, &req.params),
         "app.restart_consume" => app_restart_consume(backend, id, &req.params),
         "app.restart_start" => app_restart_start(backend, id, &req.params),
+        "app.update_start" => app_update_start(backend, id, &req.params),
+        "app.update_job" => app_update_job(backend, id, &req.params),
         "clipboard.set" => clipboard_set(backend, id, &req.params),
         "clipboard.get" => clipboard_get(backend, id),
         "clipboard.list" => clipboard_list(backend, id),
@@ -614,6 +616,27 @@ fn app_restart_job(backend: &dyn Backend, id: Value, params: &Value) -> Response
         return param_err(id, "app.restart_job requires `job_id`");
     };
     match backend.restart_job(params.get("machine_id").and_then(|v| v.as_str()), job_id) {
+        Ok(status) => Response::success(id, serde_json::to_value(status).unwrap_or_default()),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn app_update_start(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let request = match params.get("request").map(|v| serde_json::from_value::<crate::app_update::UpdateRequest>(v.clone())) {
+        Some(Ok(request)) => request,
+        _ => return param_err(id, "app.update_start requires `request` {job, approval_id, authority}"),
+    };
+    match backend.update_start(params.get("machine_id").and_then(|v| v.as_str()), &request) {
+        Ok(value) => Response::success(id, value),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn app_update_job(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let Some(job_id) = params.get("job_id").and_then(|v| v.as_str()) else {
+        return param_err(id, "app.update_job requires `job_id`");
+    };
+    match backend.update_job(params.get("machine_id").and_then(|v| v.as_str()), job_id) {
         Ok(status) => Response::success(id, serde_json::to_value(status).unwrap_or_default()),
         Err(e) => backend_err(id, e),
     }

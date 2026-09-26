@@ -29,13 +29,15 @@ status: 원격 태그·CI·피드 + 기기마다 지금 판(버전 · SHA) → �
 2. **나쵸 릴리스 승인 창구** — 나쵸 쪽 구현은 끝났다(나쵸 94a3033, 대조 자료
    `docs/development/api/fixtures/approval.kasaterm_release.implemented.json`). 창구는 `NACHO_APPROVAL_HTTP_ACTIONS` 에
    `kasaterm_release` 가 있어야 열리고 기본은 닫혀 있다 — 여는 것은 주인 확인 카드로 따로 한다.
-3. **원격 설치 창구** — 기기 앱에 받기·설치 예약 창구가 없다. `device-plan` 이 기기마다 무엇이 막혔는지 dry-run 으로
-   보인다(아래 「기기 받기·설치 예약」).
+3. **원격 설치 창구** — 기기 앱 창구는 붙었다([app-update.md](app-update.md)): 공식 릴리스만 받아 sha256·EdDSA·팀·
+   공증을 보고 곁에 둔 뒤, 바쁜 학생이 없을 때 스스로 꺼서 갈아 끼우고 새 판이 안 뜨면 되돌린다. 다만 설치 실행은 기기마다
+   기본 꺼짐이고(`KASATERM_APP_UPDATE`), 작업을 받아들일 나쵸 승인 동작 `kasaterm_update` 가 아직 없다. 창구가 든 판을
+   기기마다 한 번은 사람이 설치해야 한다.
 
 실행 주체는 나쵸 도구다(주인 결정). 학생·에이전트 창에서 live 를 치면 도구가 거절한다(아래 「누가 치나」).
 
 그 전에도 되는 것: `plan`·`dry-run`·`status`(읽기), `run`(검사·굽기를 격리 워크트리에서 실제로 하고 게시는 명령만),
-`device-plan`(읽기).
+`device-plan`(읽기 — 기기마다 보낼 업데이트 작업과 승인 범위를 지어 보인다).
 
 ## (A) 나쵸 입구 — 쓰는 명령
 
@@ -58,7 +60,7 @@ python3 -m tools.release.fastpatch run <plan_id> --live --approval ap_…
 # 5) 추적: 원격 사실 + 기기별 지금 판·목표·마지막 확인. 언제든(읽기만, 승인 불필요).
 python3 -m tools.release.fastpatch status <plan_id> [--json]
 
-# 6) 기기 받기·설치 예약 계획(dry-run 뿐): 앱 재시작 사실로 기기마다 막힘과 여섯 단계.
+# 6) 기기 업데이트 계획(읽기): 앱 재시작 사실로 기기마다 막힘·여섯 단계, --json 은 보낼 작업·나쵸 승인 범위까지.
 python3 -m tools.release.fastpatch device-plan <plan_id> [--json]
 ```
 
@@ -166,7 +168,8 @@ env 로 띄운다. **사고 방지 표식이지 보안 경계가 아니다** —
 | unscoped | machine_id 를 안 알려 승인 범위에 못 넣는다 |
 | offline | 안 닿는다 — 마지막으로 본 판과 그 시각을 남긴다 |
 
-원격 설치 창구는 아직 없어서, 대상 기기마다 「받는 길」(그 기기의 판 번호 줄·업데이터, 또는 릴리스 페이지)을 함께 싣는다.
+원격 설치는 기기 창구가 켜지고 승인 동작이 생긴 뒤의 일이라, 대상 기기마다 「받는 길」(그 기기의 판 번호 줄·업데이터,
+또는 릴리스 페이지)을 함께 싣는다.
 
 2026-09-27 실제 `plan`(원격 main 5e4d1386 기준): 미니 `0.2.0 · 8933a0ca+` → update, 맥북 `0.2.0 · 84190e33` → **hold**,
 windesktop `0.2.0 · 5e69f61f+` → update. 다음 판 v0.2.1, 커밋 843개, mac 서명 관문으로 live 막힘.
@@ -178,27 +181,29 @@ windesktop `0.2.0 · 5e69f61f+` → update. 다음 판 v0.2.1, 커밋 843개, ma
 자동 rebase·stash 는 하지 않는다. (2026-09-25 확인: 맥북 로컬 커밋은 원격 8933a0ca 와 같은 패치였다 — 같은
 패치면 합칠 때 빈 커밋이 되고, 그 뒤 계획은 update 로 바뀐다.)
 
-## 기기 받기·설치 예약 — dry-run (원격 설치 창구 계획)
+## 기기 업데이트 — 작업 짓기 (창구는 [app-update.md](app-update.md))
 
 `device-plan` 은 앱 재시작 계획(`kasaterm-cli app-restart plan --json`, [app-restart.md](app-restart.md))에서 기기마다의
-사실(OS·설치본·바쁜 학생·미저장 편집기·자기설치 대기·굽는 중·진행 중 작업)을 읽어, 창구가 생기면 기기가 할 여섯 단계와
-지금 막힌 까닭을 보인다. 실행 길은 없다(dry-run 뿐).
+사실(OS·설치본·업데이트 창구 판·설치 스위치·바쁜 학생·미저장 편집기·자기설치 대기·굽는 중·진행 중 작업)을 읽어, 기기가 할
+여섯 단계와 지금 막힌 까닭을 보인다.
 
-| 단계 | mac | 윈도 |
+| 단계 | mac(기기 창구) | 윈도 |
 |---|---|---|
-| 1 받기 | 릴리스 산출물 → `~/Library/Caches/kasaterm/updates/<tag>/` | msi → `%LOCALAPPDATA%\kasaterm\updates\<tag>\` |
-| 2 확인 | 크기·sha256(릴리스 단계 값) · EdDSA · dmg 읽기 전용 · `codesign --verify --deep --strict` · 설치본과 같은 팀 · 공증 | 크기·sha256 · EdDSA |
+| 1 받기 | 공식 피드·공식 릴리스의 그 태그 dmg 하나만(https·크기 상한) | msi → `%LOCALAPPDATA%\kasaterm\updates\<tag>\` |
+| 2 확인 | 크기·sha256(릴리스 단계 값) · EdDSA · dmg 읽기 전용 · `codesign --verify --deep --strict` · 설치본과 같은 팀 · 공증 · 판 번호 | 크기·sha256 · EdDSA |
 | 3 준비 | 확인한 번들을 `.kasaterm.app.next` 에(설치본 안 건드림) | 확인한 msi 를 둔다 |
-| 4 예약 | 종료할 때 교체 — 자기설치 규칙(이전 판 `.kasaterm.app.previous`, 실패하면 되돌림) | WinSparkle 토스트 [설치] |
-| 5 재시작 | 앱 재시작 계약 — 별도 `kasaterm_restart` 승인, 바쁘거나 미저장이면 기다림(강제 종료 없음) | MSI 가 닫고 연다(사람이 고름) |
-| 6 검증 | `/version` 이 목표 버전·태그 커밋 — 아니면 이전 판을 둔 채 실패 | 같음 |
+| 4 적용 | 바쁜 학생·미저장 편집기가 없을 때 앱이 스스로 끄고 도우미가 갈아 끼움(이전 판 `.kasaterm.app.previous`) | WinSparkle 토스트 [설치] |
+| 5 재기동 | 도우미가 다시 띄움 — 새 판이 부팅 표식 없이 꺼지면 이전 판 되돌림(강제 종료 없음) | MSI 가 닫고 연다(사람이 고름) |
+| 6 검증 | 부팅 표식의 빌드가 태그 커밋 — 아니면 실패 | `/version` |
 
-상태: `ready`(창구 있고 막힘 없음) · `deferred`(받기·준비는 되고 적용만 기다림 — 바쁜 학생·미저장 편집기 등) · `blocked`.
-지금은 모든 기기가 `update_endpoint_missing` 으로 막힌다. 창구가 생기면 보낼 작업(`kasaterm-update/1`: 계획·태그·커밋·
-산출물 해시·요구 팀·EdDSA 공개키)도 `--json` 에 싣는다 — 기기는 그 값과 자기 사실·나쵸 승인으로만 판정한다(재시작과 같다).
+상태: `ready`(창구 켜짐·막힘 없음) · `deferred`(받기·준비는 되고 적용만 기다림 — 바쁜 학생·미저장 편집기 등) · `blocked`.
+막힘 사유: `update_endpoint_missing`(창구가 든 판이 아직 안 깔림) · `update_disabled`(그 기기 설치 스위치 꺼짐) · `signing` ·
+`artifacts_unverified` · 재시작 쪽 사유. `--json` 은 기기마다 `job`(기기의 `check_job` 이 받는 모양)·`job_problem`·
+`scope`(나쵸 `kasaterm_update` 승인 범위)를 싣는다 — 작업은 릴리스 단계의 mac 산출물과 피드 단계가 확인한 EdDSA 서명이
+있어야 지어진다. 보내는 길(`kasaterm-cli app-update start`)은 있지만 승인 동작이 나쵸에 없어 운영에서는 통과하지 못한다.
 
-2026-09-27 실제 결과(나쵸 기본 PATH): 이 기기 → 창구 없음·서명 관문·바쁜 학생·산출물 미확인으로 blocked, windesktop →
-앱 재시작 사실이 안 닿아 blocked. 기기마다 「지금 받는 길」(판 번호 줄·릴리스 파일 주소)을 함께 싣는다.
+2026-09-27 실제 결과(나쵸 기본 PATH, 창구 전 판): 이 기기 → 창구 없음·서명 관문·바쁜 학생·산출물 미확인으로 blocked,
+windesktop → 앱 재시작 사실이 안 닿아 blocked. 기기마다 「지금 받는 길」(판 번호 줄·릴리스 파일 주소)을 함께 싣는다.
 
 ## (B) 기기 입구 — 이미 있는 것과 새로 붙인 것
 
@@ -248,13 +253,14 @@ windesktop `0.2.0 · 5e69f61f+` → update. 다음 판 v0.2.1, 커밋 843개, ma
 - 판 번호 줄 입구·자기설치 백업은 새 판이 한 번 설치돼야 생긴다(그 전 판에는 없는 코드다).
 - 윈도는 MSI 로 한 번 설치돼 있어야 업데이터가 있다(windesktop 은 2026-09-27 에 `5e69f61f+` 로 닿았다 — 로컬 굽기 판이면
   WinSparkle 이 없을 수 있다).
-- 원격 설치 창구(나쵸가 기기에 받기·설치 예약을 거는 것)는 없다. 붙이려면 기기 앱에 새 창구가 들어가야 하고, 그 판이
-  한 번 사람 손으로 설치돼야 한다 — 설치·재시작은 앱 재시작과 같은 사실 검사(바쁜 학생·미저장 편집기)를 따른다.
+- 원격 설치 창구([app-update.md](app-update.md))는 창구가 든 판이 기기마다 한 번 사람 손으로 설치돼야 생긴다. 그 뒤에도
+  설치 실행은 기기마다 `KASATERM_APP_UPDATE=on` 으로 켜야 하고, 나쵸 `kasaterm_update` 승인 동작이 있어야 작업이 통과한다.
 
 ## 검사
 
 ```sh
-python3 -m unittest tools.release.tests.test_fastpatch      # 52건 — 아래
+python3 -m unittest tools.release.tests.test_fastpatch      # 53건 — 아래
+cargo test -p kasa-socket app_update                         # 기기 업데이트 창구 20건(app-update.md 「검사」)
 bash scripts/nacho-release-interop.sh                        # 실제 나쵸 승인 서버(격리)와 왕복 17건
 cargo test -p kasaterm --release version::tests             # 판 번호 줄 입구 선택
 cargo test -p kasaterm --release self_install               # 자기설치 백업·되돌리기(실제 sh)
@@ -267,7 +273,7 @@ fastpatch 검사는 임시 저장소(원격은 bare 저장소)·임시 피드·�
 로컬 태그 안 만듦), 검사 실패·시간 초과, 나쵸 승인 거절 전부(대기·만료·범위 변경·다른 동작·창구 닫힘·로컬 파일),
 계획 뒤 피드 변경, 한 번 소비와 재개(다른 승인·7일·원격 불일치·미소비), push 시간 초과·거절·main 이동·남의 태그·잃은
 상태 파일, CI 대기·실패·산출물 모자람·해시·dmg 신원, 피드 EdDSA·더 새 판, 도구 고르기(LibreSSL·거짓 통과·지정 경로 고수·
-고정 openssl 변질·git-lfs 없음·PATH 폴더), 계약 키·위조 계획·live 준비 조건·창 안 실행 거부, 기기 받기 계획, 나쵸 대조 자료.
+고정 openssl 변질·git-lfs 없음·PATH 폴더), 계약 키·위조 계획·live 준비 조건·창 안 실행 거부, 기기 업데이트 계획·작업 모양·작업 id 대조, 나쵸 대조 자료.
 나쵸 기본 PATH(`/usr/bin` 먼저)로도 돌려 확인한다. `KASATERM_OPENSSL=/usr/bin/openssl` 처럼 쓸 수 없는 openssl 을 가리키면
 서명이 필요한 검사는 까닭을 밝히고 건너뛴다(오류가 아니다).
 

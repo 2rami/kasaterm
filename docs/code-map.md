@@ -27,6 +27,7 @@
 - `work_mode.rs` — 작업 모드(정리·조율)와 권한 표의 나쵸 클라이언트. 정본은 나쵸(`GET/POST /api/app/work-mode`·`GET /api/app/capabilities`, 나쵸 `desk-api.md`), 카사텀 설정의 `work_mode_cache` 는 마지막으로 확인한 값뿐. 쓰기는 탭을 누를 때만, 모드는 둘뿐. 나쵸 키 없는 기기는 사람이 고른 명부 기기(`nacho_read_via`)의 `/nacho/read/*` 로 읽기만 한다 — `docs/nacho-read-relay.md`
 - `version.rs` — 지금 판과 피드 최신판 견주기, 계정 메뉴 판 번호 줄의 업데이트 입구(`update_entry`: Sparkle·WinSparkle·없으면 릴리스 페이지). 여러 기기 패치 릴리스 계획·추적은 앱 밖 `tools/release/`(fastpatch=계획·CLI, backend=실제 단계, nacho=승인 소비·재개, deps=도구 고르기, devices=기기 받기 계획, proc=명령·HTTP 실행기) — `docs/fast-patch-release.md`
 - `app_restart.rs` — 앱 재시작 계획용 사실을 GUI 스레드에서 잰다(바쁜 학생·미저장 편집기·자기설치 예정). 계약·도우미는 `kasa_socket::app_restart`, 절차 `docs/app-restart.md`
+- `app_update.rs` — 앱 업데이트 창구의 이 기기 쪽: 수락(나쵸 승인·지금 사실), 받기·확인·준비·적용 스레드(한 번에 한 작업), 부팅 표식. 계약·검증·도우미는 `kasa_socket::app_update`, 절차 `docs/app-update.md`
 - `nacho_tasks.rs` — 나쵸 작업 장부의 타입 클라이언트(`/api/app/tasks`). 같은 id 는 큰 `rev` 하나, 끊기면 마지막 목록 유지, `done` 과 검증 통과를 가른다
 - `agent_transitions.rs` — 상태 전이 → 알림 이벤트(TurnDone/Waiting/Error/…) 순수 함수. 데스크톱 알림·토스트·펄스는 `chrome.rs apply_transition_event` 한 곳에서 낸다
 

@@ -83,6 +83,8 @@ mod mirror_focus_probe;
 mod character_assignment;
 mod agent_identity;
 mod app_restart;
+#[cfg(unix)]
+mod app_update;
 mod restore_progress;
 mod mirror_close;
 mod close_grace;
@@ -3843,6 +3845,8 @@ enum UserEvent {
     SocketRestartFacts(std::sync::mpsc::Sender<kasa_socket::app_restart::Facts>),
     /// 승인된 재시작 작업을 받아 도우미를 띄웠다 — 이제 정상 종료(`exiting`)로 끈다.
     RestartExit(String),
+    /// 확인·준비한 업데이트를 도우미에 넘겼다 — 이제 정상 종료로 끄면 도우미가 갈아 끼운다.
+    UpdateExit(String),
     /// `POST /session-switch?idx=N` 위임 — 보이는 윈도우를 idx 로 전환(사용자: GUI 에서
     /// 방=윈도우 클릭 시 그 터미널 윈도우로). `switch_window` 가 resize·redraw 자체 처리.
     SocketSwitchSession(usize),

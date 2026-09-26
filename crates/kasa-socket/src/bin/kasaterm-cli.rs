@@ -179,6 +179,10 @@ fn run() -> Result<Option<Response>> {
     if cmd == "app-restart" {
         return run_app_restart(&args);
     }
+    // `app-update` — 기기의 앱 업데이트 작업 걸기·상태. 승인은 조종 기기가 나쵸에서 이미 소비한 것만, 기기 앱이 다시 판정한다.
+    if cmd == "app-update" {
+        return run_app_update(&args);
+    }
     // `rooms` 는 board 를 방(창)별로 접어 사람이 읽는 표로 낸다 — 위임 상대를 고르는 자리.
     if cmd == "rooms" {
         let socket_path = resolve_socket_path()?;
@@ -1463,6 +1467,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli done [--surface <id>] <succeeded|failed> [한 줄 요약]  # 브리프 완료 보고 — board 가 idle 추정 대신 이걸 정본으로 싣는다");
     eprintln!("  kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> --summary <글> [--changed <파일,…>]… [--tests <글>] [--next <글>] [--dry-run]");
     eprintln!("                                            # 나쵸가 띄운 학생(KASATERM_ORIGIN=nacho)만. 나쵸 인박스에 원자적으로 넣고 살아 있으면 즉시 깨운다. 토큰·비밀은 거부");
+    eprintln!("  app-update start --machine ID --request FILE|- · status JOB [--machine ID] # 기기의 앱 업데이트(공식 릴리스만·나쵸 승인·기기 스위치 KASATERM_APP_UPDATE=on)");
     eprintln!("  app-restart plan [--machine ID]… [--json] # 등록된 기기의 앱 재시작 계획(읽기만). run --approval ap_… 는 나쵸 승인을 서버에서 한 번 소비한 뒤 한 대씩 · status JOB");
     eprintln!("  kasaterm-cli agent-status <start|end|clear> <subagent|background> [key] [라벨]  # 진행 표시 정본(PreToolUse/PostToolUse 훅)");
     eprintln!("  kasaterm-cli pet-say [--from <곳>] [--state busy|wait|error] <문안>  # 바탕화면 펫에게 한 줄(앱이 꺼져 있어도 쌓인다)");
@@ -2697,6 +2702,52 @@ fn run_app_restart(args: &[String]) -> Result<Option<Response>> {
             Ok(None)
         }
         _ => Err(anyhow!("app-restart plan [--machine ID]… [--json] | run --approval ap_… [--machine ID]… | status JOB [--machine ID]")),
+    }
+}
+
+/// `app-update start --machine ID --request FILE|-` · `status JOB [--machine ID]`.
+/// 요청(`kasa_socket::app_update::UpdateRequest`)은 조종 쪽이 계획·나쵸 승인으로 만든다. 이 CLI 는 모양만 보고 넘기며,
+/// 받을지·갈아 끼울지는 대상 기기 앱이 자기 사실과 나쵸 승인으로 다시 판정한다.
+fn run_app_update(args: &[String]) -> Result<Option<Response>> {
+    let sub = args.first().map(String::as_str).unwrap_or("");
+    let (mut machine, mut request, mut positional) = (None::<String>, None::<String>, Vec::new());
+    let mut i = 1;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "--machine" => { machine = Some(args.get(i + 1).ok_or_else(|| anyhow!("--machine needs a machine id"))?.clone()); i += 2; }
+            "--request" => { request = Some(args.get(i + 1).ok_or_else(|| anyhow!("--request needs a file or -"))?.clone()); i += 2; }
+            other if other.starts_with("--") => return Err(anyhow!("app-update: unknown option {other:?}")),
+            other => { positional.push(other.to_string()); i += 1; }
+        }
+    }
+    let socket = resolve_socket_path()?;
+    let ask = |method: &str, params: Value| -> Result<Value> {
+        let req = Request { id: json!(format!("cli-{}", std::process::id())), method: method.into(), params };
+        let response = roundtrip(&socket, &req)?;
+        anyhow::ensure!(response.ok, "{}", response.error.map(|e| e.message).unwrap_or_else(|| "request failed".into()));
+        Ok(response.result.unwrap_or(Value::Null))
+    };
+    match sub {
+        "start" => {
+            let machine = machine.ok_or_else(|| anyhow!("app-update start needs --machine ID"))?;
+            let text = match request.as_deref() {
+                Some("-") => { let mut s = String::new(); std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?; s }
+                Some(path) => std::fs::read_to_string(path)?,
+                None => return Err(anyhow!("app-update start needs --request FILE|-")),
+            };
+            let parsed: kasa_socket::app_update::UpdateRequest = serde_json::from_str(&text).map_err(|e| anyhow!("요청을 읽지 못했다: {e}"))?;
+            kasa_socket::app_update::check_job(&parsed.job).map_err(|e| anyhow!("요청 모양이 아니다: {e}"))?;
+            let value = ask("app.update_start", json!({"machine_id": machine, "request": parsed}))?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(None)
+        }
+        "status" => {
+            let job = positional.first().ok_or_else(|| anyhow!("app-update status needs a job id"))?;
+            let value = ask("app.update_job", json!({"job_id": job, "machine_id": machine}))?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(None)
+        }
+        _ => Err(anyhow!("app-update start --machine ID --request FILE|- | status JOB [--machine ID]")),
     }
 }
 

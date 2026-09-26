@@ -100,8 +100,14 @@ impl App {
             plain_shells: shells,
             registered_servers: server_panes.len() as u32,
             pet_alive: pet_alive(),
-            active_job: jobs.and_then(|dir| kasa_socket::app_restart::active_job(&dir, now)),
+            // 업데이트가 도는 중이면 재시작도 막는다 — 둘 다 이 앱을 끄고 갈아 끼우는 일이다.
+            active_job: jobs.and_then(|dir| kasa_socket::app_restart::active_job(&dir, now)).or_else(|| {
+                let dir = kasa_socket::app_update::jobs_dir().ok()?;
+                kasa_socket::app_update::active_job(&dir, now).map(|s| s.job.job_id)
+            }),
             observed_at_ms: now,
+            update_capability: if cfg!(unix) { kasa_socket::app_update::CAPABILITY } else { 0 },
+            update_enabled: cfg!(unix) && kasa_socket::app_update::install_enabled(&|k| std::env::var(k).ok()),
         }
     }
 }

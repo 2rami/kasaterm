@@ -952,6 +952,25 @@ impl Backend for PtyBackend {
         }
     }
 
+    #[cfg(unix)]
+    fn update_start(&self, machine: Option<&str>, req: &kasa_socket::app_update::UpdateRequest) -> Result<serde_json::Value> {
+        match restart_remote(machine)? {
+            Some(base) => kasa_mcp::remote::remote_post_json(&base, "/app/update/jobs", &serde_json::to_value(req)?),
+            None => {
+                let facts = self.restart_facts(None)?;
+                crate::app_update::accept_update(&facts, req, &self.proxy).map_err(anyhow::Error::msg)
+            }
+        }
+    }
+
+    fn update_job(&self, machine: Option<&str>, job_id: &str) -> Result<kasa_socket::app_update::Status> {
+        anyhow::ensure!(kasa_socket::app_restart::valid_job_id(job_id), "invalid job id");
+        match restart_remote(machine)? {
+            None => kasa_socket::app_update::status(&kasa_socket::app_update::jobs_dir()?, job_id),
+            Some(base) => Ok(serde_json::from_value(kasa_mcp::remote::remote_get_json(&base, &format!("/app/update/jobs/{job_id}"))?)?),
+        }
+    }
+
     fn restart_job(&self, machine: Option<&str>, job_id: &str) -> Result<kasa_socket::app_restart::JobStatus> {
         anyhow::ensure!(kasa_socket::app_restart::valid_job_id(job_id), "invalid job id");
         match restart_remote(machine)? {
