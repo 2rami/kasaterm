@@ -128,12 +128,24 @@ class NachoAuthority:
         return self._call("POST", f"/api/app/approvals/{aid}/consume",
                           {"scope": scope, "consumer_machine_id": consumer})["approval"]
 
+    def resume(self, aid, scope, consumer, stage, remote):
+        """이미 소비한 승인으로 게시 단계를 잇는다 — 나쵸가 소비 기기·해시·7일·원격 사실을 보고 기록만 남긴다(다시 소비 안 함)."""
+        if not _AID.match(aid or ""):
+            raise Denied("approval id 모양이 아니다")
+        return self._call("POST", f"/api/app/approvals/{aid}/resume",
+                          {"scope": scope, "consumer_machine_id": consumer, "stage": stage, "remote": remote})["approval"]
 
-def acquire(authority, aid, scope, controller, record, now_ms):
+
+RESUME_STAGES = ("tag", "release", "feed", "devices")
+
+
+def acquire(authority, aid, scope, controller, record, now_ms, stage=None, remote=None):
     """게시 전 한 번. [record] 는 카사텀 작업 기록에 남긴 소비(`{id, plan, scope_hash, consumed_at_ms}`) — 있으면 재개다.
 
     새 소비: 창구가 열렸나 → 승인됨·안 씀·안 지남·해시 같음을 먼저 보고 → consume(서버가 다시 잰다).
-    재개: 다시 소비하지 않는다. 서버 기록이 이 기기의 소비·같은 해시이고, 작업 기록의 id·계획과도 맞을 때만 잇는다.
+    재개: 다시 소비하지 않는다. 작업 기록의 id·계획·해시·7일을 여기서 보고, 나쵸 `resume` 에 이을 단계와 원격 사실
+    (`{main, tag_parent}`)을 실어 서버 기록과 대조한다 — 소비 안 된 승인·다른 기기·다른 해시·7일 초과·원격 불일치면
+    나쵸가 거절한다(만료된 미소비 승인은 절대 되살아나지 않는다).
     """
     problem = scope_problem(scope)
     if problem:
@@ -146,7 +158,9 @@ def acquire(authority, aid, scope, controller, record, now_ms):
             raise Denied("작업 기록의 계획·범위가 지금과 다르다 — 새 계획·새 승인이 필요하다")
         if now_ms - int(record.get("consumed_at_ms") or 0) > KEEP_MS:
             raise Denied("소비한 지 7일이 넘었다 — 나쵸 기록이 지워졌으니 새 승인이 필요하다")
-        view = authority.get(aid)
+        if stage not in RESUME_STAGES:
+            raise Denied(f"이을 수 없는 단계다({stage})")
+        view = authority.resume(aid, scope, controller, stage, remote or {})
         if view.get("consumed_by") != controller or view.get("scope_hash") != want or not view.get("consumed_at_ms"):
             raise Denied("나쵸 기록이 이 기기의 소비와 맞지 않는다")
         return record

@@ -22,12 +22,17 @@ import subprocess
 import sys
 import time
 
-from tools.release import nacho
+from tools.release import deps, devices, nacho
 from tools.release.backend import PUBLISH_STAGES, TESTS, RealBackend, identity_block, identity_of
 from tools.release.common import Pending, Refused, fetch_feed, feed_item, sha256_bytes, version_text, version_tuple
 from tools.release.proc import Http, Runner
 
 SCHEMA = "kasa-release-plan/2"
+# 나쵸가 plan_id 를 다시 재는 키 — 계약이다(docs/fast-patch-release.md 「나쵸와의 계약」). 바꾸면 SCHEMA 를 올린다.
+CORE_KEYS = ("schema", "commit", "branch", "remote", "version", "tag", "channel", "platforms", "ios_build", "devices",
+             "device_ids", "controller", "feed_base", "stages")
+# 창 안(학생·에이전트)에서 도는 표식. 나쵸 도구는 이것들을 걷은 env 로 부르고 KASATERM_RELEASE_INVOKER 를 단다.
+PANE_MARKERS = ("KASATERM_PANE_ID", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CODEX_SANDBOX", "KASATERM_ORIGIN")
 STAGES = ["verify", "build", "tag", "release", "feed", "devices"]
 STATE_DIR = Path(os.environ.get("KASATERM_RELEASE_DIR", Path.home() / ".config/kasaterm/releases"))
 MAC_FEED = "https://2rami.github.io/kasaterm/appcast.xml"
@@ -44,8 +49,8 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def git(repo, *args, check=True):
-    out = subprocess.run(["git", "--no-pager", "-C", str(repo), *args], check=check,
+def git(repo, *args, check=True, env=None):
+    out = subprocess.run(["git", "--no-pager", "-C", str(repo), *args], check=check, env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     return out.stdout.decode().strip()
 
@@ -230,12 +235,22 @@ def feed_base_of(http, mac, win):
 
 
 def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_FEED, feed_win=WIN_FEED, devices=None,
-              version=None, ios_build=None, http=None, runner=None, installed_app=INSTALLED_APP, controller=None):
+              version=None, ios_build=None, http=None, runner=None, installed_app=INSTALLED_APP, controller=None,
+              tools=None):
     repo = Path(repo)
     http, runner = http or Http(), runner or Runner("dry")
     errors, blocks = [], []
+    tools = tools if tools is not None else deps.check(runner)
+    blocks.extend(deps.blocks(tools))
+    genv = deps.git_env(tools)
+    if deps.uses_lfs(repo) and not (tools.get("git-lfs") or {}).get("path"):
+        errors.append("저장소가 git LFS 를 쓰는데 git-lfs 가 없다 — 격리 워크트리·검사·굽기가 깨진다(설치는 사람이, 또는 KASATERM_GIT_LFS)")
     commit = git(repo, "rev-parse", "HEAD")
-    if git(repo, "status", "--porcelain", "--untracked-files=no"):
+    status = subprocess.run(["git", "--no-pager", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+                            env=genv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+    if status.returncode != 0:
+        errors.append(f"git status 가 실패했다 — {status.stderr.decode(errors='replace').strip()[:160]}")
+    elif status.stdout.strip():
         errors.append("워킹트리에 커밋 안 된 변경이 있다 — 계획은 커밋만 싣는다")
     git(repo, "fetch", "-q", remote, check=False)
     remote_head = git(repo, "rev-parse", f"{remote}/{branch}", check=False)
@@ -277,7 +292,7 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
     if not desktop:
         blocks.append("데스크톱에 게시할 변경이 없다 — iOS 는 TestFlight 경로로 따로 간다")
 
-    installed = identity_of(runner, installed_app) if Path(installed_app).exists() else None
+    installed = identity_of(runner, installed_app, tools) if Path(installed_app).exists() else None
     signing = {"release": caps["macos"]["ci_identity"], "installed": installed, "installed_app": str(installed_app),
                "remote": "원격 기기의 설치본 신원은 /version 이 알려 주지 않아 모른다"}
     if "macos" in desktop:
@@ -316,6 +331,7 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
         "changes": {"commits": [{"sha": s, "subject": t} for s, t in log], "files": kinds,
                     "needs": {"desktop_update": bool(kinds["native"]), "ios_build": bool(kinds["mobile"])}},
         "capabilities": caps, "signing": signing, "baseline": scope_rows, "ready_builds": ready_builds(repo, commit),
+        "tools": tools,
         "tests": [" ".join(t) for t in TESTS],
     }
     if feed_base and controller and desktop:
@@ -327,6 +343,42 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
             plan["approval_scope"] = scope
             plan["approval_scope_hash"] = nacho.scope_hash(scope)
     return plan
+
+
+def core_of(plan):
+    return {k: plan[k] for k in CORE_KEYS}
+
+
+def plan_hash_ok(plan):
+    """계획 파일이 손대지 않은 것인가 — 나쵸도 같은 식으로 다시 잰다."""
+    return plan.get("schema") == SCHEMA and sha256_bytes(canonical(core_of(plan)))[7:23] == plan.get("plan_id")
+
+
+def invoker_problem(env):
+    """live 는 나쵸 도구만 — 학생·에이전트 창에서 임의로 치지 못하게 한다. 사고 방지 표식이고, 경계는 주인 승인이다."""
+    inside = [k for k in PANE_MARKERS if env.get(k)]
+    if inside:
+        return f"창 안에서는 live 게시를 못 한다({', '.join(inside)}) — 주인 승인 뒤 나쵸 도구가 친다"
+    if env.get("KASATERM_RELEASE_INVOKER") != "nacho-tool":
+        return "live 게시는 나쵸 도구만 친다(KASATERM_RELEASE_INVOKER=nacho-tool 이 없다)"
+    return None
+
+
+def live_ready(plan, state):
+    return (not plan["errors"] and not plan["live_blocks"] and plan_hash_ok(plan)
+            and all((state.get("stages") or {}).get(s, {}).get("status") == "done" for s in ("verify", "build")))
+
+
+def status_doc(plan, state):
+    """나쵸가 읽는 상태 — 단추는 verify·build 가 끝나고 live_ready 일 때만 띄운다(승인 10분이 굽기에 안 먹히게)."""
+    appr = state.get("approval")
+    return {"plan_id": plan["plan_id"], "plan_hash_ok": plan_hash_ok(plan), "tag": plan["tag"], "commit": plan["commit"],
+            "stages": {s: {"status": (state.get("stages") or {}).get(s, {}).get("status", "pending")} for s in plan["stages"]},
+            "approval": {"id": appr["id"], "consumed_at_ms": appr["consumed_at_ms"]} if appr else None,
+            "remote": state.get("remote"), "errors": plan["errors"], "live_blocks": plan["live_blocks"],
+            "live_ready": live_ready(plan, state),
+            "devices": {k: {x: v.get(x) for x in ("state", "version", "build", "checked_at_ms")}
+                        for k, v in (state.get("devices") or {}).items()}}
 
 
 def plan_dir(plan_id, state_dir=None):
@@ -374,12 +426,12 @@ def track_devices(repo, plan, state, devices, http):
     return rows
 
 
-def backend_for(repo, plan, mode, state_dir=None, devices=None, http=None, runner=None, gh="gh"):
+def backend_for(repo, plan, mode, state_dir=None, devices=None, http=None, runner=None):
     http = http or Http()
     runner = runner or Runner(mode)
     fleet = devices if devices is not None else [{"label": d["label"], "base": d["base"]} for d in plan["baseline"]]
     return RealBackend(repo, runner, http, plan_dir(plan["plan_id"], state_dir) / "work",
-                       lambda p, s: track_devices(repo, p, s, fleet, http), gh=gh)
+                       lambda p, s: track_devices(repo, p, s, fleet, http), plan["tools"])
 
 
 def run(plan_id, backend, state_dir=None, approval_id=None, authority=None, at_ms=None):
@@ -391,6 +443,10 @@ def run(plan_id, backend, state_dir=None, approval_id=None, authority=None, at_m
     live = mode == "live"
     if live and plan["live_blocks"]:
         raise Refused("live 게시가 막혀 있다 — " + "; ".join(plan["live_blocks"]))
+    if live and not plan_hash_ok(plan):
+        raise Refused("계획 파일이 계획 id 와 맞지 않는다 — 손댄 계획으로는 게시하지 않는다")
+    if live and not live_ready(plan, state):
+        raise Refused(f"먼저 run {plan_id} 로 검사·굽기를 끝내라 — 승인 10분이 굽기 중에 지나지 않게, 단추는 그 뒤에 띄운다")
     persist = mode != "dry"
 
     def save():
@@ -405,7 +461,7 @@ def run(plan_id, backend, state_dir=None, approval_id=None, authority=None, at_m
             state["stages"][stage] = {"status": "dry", "at_ms": now_ms(), "detail": backend.preview(stage, plan)}
             continue
         if stage in PUBLISH_STAGES and not approved:
-            state["approval"] = take_approval(plan, state, backend, authority, approval_id, at_ms or now_ms())
+            state["approval"] = take_approval(plan, state, backend, authority, approval_id, at_ms or now_ms(), stage)
             approved = True
             save()
         state["stages"][stage] = {"status": "running", "at_ms": now_ms()}
@@ -426,7 +482,7 @@ def run(plan_id, backend, state_dir=None, approval_id=None, authority=None, at_m
     return state
 
 
-def take_approval(plan, state, backend, authority, approval_id, at_ms):
+def take_approval(plan, state, backend, authority, approval_id, at_ms, stage):
     """처음이면 지금 피드로 범위를 다시 재서 소비하고, 재개면 작업 기록의 범위를 나쵸 기록과 대조한다."""
     if not authority or not approval_id:
         raise Refused("게시 단계는 나쵸 승인(--approval ap_…)이 있어야 한다 — 로컬 파일은 승인으로 치지 않는다")
@@ -441,7 +497,8 @@ def take_approval(plan, state, backend, authority, approval_id, at_ms):
             raise Refused("계획 뒤에 피드가 바뀌었다(다른 게시가 있었다) — 새 계획이 필요하다")
         scope = nacho.release_scope(plan, plan["controller"], now_base)
     try:
-        got = nacho.acquire(authority, approval_id, scope, plan["controller"], record, at_ms)
+        got = nacho.acquire(authority, approval_id, scope, plan["controller"], record, at_ms,
+                            stage=stage, remote=backend.resume_facts(plan) if record else None)
     except nacho.Denied as e:
         raise Refused(f"승인: {e}")
     return {**got, "scope": scope}
@@ -503,10 +560,12 @@ def main(argv=None):
     p.add_argument("--version", default=None)
     p.add_argument("--ios-build", default=None)
     p.add_argument("--json", action="store_true")
-    for name in ("dry-run", "status", "run"):
+    for name in ("dry-run", "status", "run", "device-plan"):
         s = sub.add_parser(name)
         s.add_argument("plan_id")
         s.add_argument("--repo", default=".")
+        if name in ("status", "device-plan"):
+            s.add_argument("--json", action="store_true")
         if name == "run":
             s.add_argument("--live", action="store_true", help="게시 단계까지 — 나쵸 승인을 한 번 소비한다")
             s.add_argument("--approval", default=None)
@@ -523,11 +582,31 @@ def main(argv=None):
             print(f"  계획 파일: {d / 'plan.json'}")
         return 1 if plan["errors"] else 0
     plan, state = load(a.plan_id, a.state_dir)
+    if a.cmd == "device-plan":
+        targets, problem = devices.gather_facts(Runner("dry"), plan["device_ids"])
+        rows = devices.plan_devices(plan, state, targets, problem)
+        if a.json:
+            print(json.dumps({"plan_id": plan["plan_id"], "dry_run": True, "devices": [
+                {**r, "job": devices.job_spec(plan, r, devices.artifact_for(plan, state, r["os"]))} for r in rows]},
+                ensure_ascii=False, indent=2))
+            return 0
+        print(f"기기 받기·설치 예약 계획(dry-run) · {plan['tag']} · 기기 {len(rows)}대" + (f" · {problem}" if problem else ""))
+        for r in rows:
+            print(f"  {r['label']} ({r['os'] or 'OS 모름'}) — {r['status']}")
+            for why in r["reasons"]:
+                print(f"      막힘 {why['code']}: {why['why']}")
+            for i, step in enumerate(r["steps"], 1):
+                print(f"      {i}. {step}")
+            print(f"      지금 받는 길: {r['fallback']}")
+        return 0
     if a.cmd == "status":
         backend = backend_for(a.repo, plan, "dry", a.state_dir)
         state["remote"] = backend.observe(plan)
         backend.tracker(plan, state)
         save_state(a.plan_id, state, a.state_dir)
+        if a.json:
+            print(json.dumps(status_doc(plan, state), ensure_ascii=False, indent=2))
+            return 0
         print(describe(plan, state))
         r = state["remote"]
         print(f"  원격: 태그 {(r.get('tag') or '없음')[:8]} · main {(r.get('main') or '?')[:8]} · CI {r.get('ci')} · 피드 mac {r.get('feed_macos')} / win {r.get('feed_windows')}")
@@ -536,6 +615,10 @@ def main(argv=None):
     backend = backend_for(a.repo, plan, mode, a.state_dir)
     authority = None
     if mode == "live":
+        why = invoker_problem(os.environ)
+        if why:
+            print(f"멈춤: {why}", file=sys.stderr)
+            return 2
         try:
             authority = nacho.NachoAuthority.from_env(backend.http)
         except nacho.Denied as e:

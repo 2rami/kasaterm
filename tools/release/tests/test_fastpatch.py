@@ -1,5 +1,7 @@
+import base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -7,6 +9,7 @@ import threading
 import time
 import unittest
 
+from tools.release import deps
 from tools.release import fastpatch as fp
 from tools.release import nacho
 from tools.release.backend import asset_names
@@ -16,6 +19,9 @@ from tools.release.proc import Http, Result, Runner
 # 이 검사는 진짜 원격·피드·기기·나쵸를 부르지 않는다. 원격은 임시 bare 저장소, 피드는 임시 파일, 기기는 이 프로세스가
 # 연 가짜 `/version` 서버, 나쵸는 같은 계약을 흉내 낸 가짜 창구다. `git` 과 `openssl` 은 진짜로 돈다 — 태그 push 의
 # 명령 구성·원격 대조와 Sparkle EdDSA 확인을 실제 도구로 본다. gh·codesign·hdiutil·cargo 만 가짜다.
+# openssl 은 PATH 의 것이 아니라 `deps.find_openssl` 이 RFC 8032 벡터로 고른 것이다 — 없으면 까닭을 말하고 건너뛴다.
+
+OPENSSL = deps.find_openssl(Runner("dry"))
 
 REPO = Path(__file__).resolve().parents[3]
 CONTROLLER = "mini-test"
@@ -58,7 +64,7 @@ class FakeNacho:
 
     def __init__(self, key="k-test", local=CONTROLLER, actions=("kasaterm_restart", "kasaterm_release")):
         self.key, self.local, self.actions = key, local, set(actions)
-        self.items, self.consumes, self.gets = {}, 0, 0
+        self.items, self.consumes, self.gets, self.resumes = {}, 0, 0, []
 
     def approve(self, scope, state="approved", ttl_ms=600_000, action=nacho.ACTION):
         aid = "ap_" + format(len(self.items) + 1, "032x")
@@ -86,6 +92,23 @@ class FakeNacho:
             self.gets += 1
             return out(200, {"ok": True, "approval": dict(a)})
         consumer = body.get("consumer_machine_id")
+        if parts[-1] == "resume":
+            # 아리스 계약: 소비된 것만, 같은 소비 기기·같은 해시, 7일 안, 이을 단계, 태그 부모 == 계획 커밋.
+            if not a["consumed_at_ms"]:
+                return out(409, {"error": "not_consumed"})
+            if consumer != self.local or consumer != a["consumed_by"]:
+                return out(409, {"error": "wrong_consumer"})
+            if nacho.scope_hash(body.get("scope")) != a["scope_hash"]:
+                return out(409, {"error": "scope_changed"})
+            if fp.now_ms() - a["consumed_at_ms"] > nacho.KEEP_MS:
+                return out(410, {"error": "resume_expired"})
+            if body.get("stage") not in ("tag", "release", "feed", "devices"):
+                return out(400, {"error": "bad_stage"})
+            parent = (body.get("remote") or {}).get("tag_parent")
+            if parent and parent != a["scope"]["commit"]:
+                return out(409, {"error": "remote_mismatch"})
+            self.resumes.append((body["stage"], body.get("remote")))
+            return out(200, {"ok": True, "approval": dict(a)})
         if consumer != self.local:
             return out(409, {"error": "wrong_consumer"})
         if a["state"] != "approved":
@@ -124,7 +147,7 @@ class FakeRunner(Runner):
         tool = argv[0]
         if tool == "git" and "push" in argv and self.fx.push_answer:
             return self.fx.push_answer(lambda: super(FakeRunner, self).execute(argv, cwd, timeout, env))
-        if tool in ("git", "openssl"):
+        if tool in ("git", OPENSSL["path"]):
             return super().execute(argv, cwd, timeout, env)
         return self.fx.fake(argv, cwd, env)
 
@@ -135,6 +158,11 @@ class Fixture(unittest.TestCase):
     ci_signing = "devid"
 
     def setUp(self):
+        if not OPENSSL["path"]:
+            raise unittest.SkipTest(OPENSSL["why"])
+        self.openssl = OPENSSL["path"]
+        self.tools = {"openssl": OPENSSL, "gh": {"path": "gh", "logged_in": True}, "cargo": {"path": "cargo"},
+                      "codesign": {"path": "codesign"}, "spctl": {"path": "spctl"}, "hdiutil": {"path": "hdiutil"}}
         self.tmp = Path(tempfile.mkdtemp(prefix="fastpatch-"))
         self.origin, self.work = self.tmp / "origin.git", self.tmp / "work"
         sh(self.tmp, "git", "init", "-q", "--bare", "-b", "main", str(self.origin))
@@ -142,10 +170,9 @@ class Fixture(unittest.TestCase):
         for k, v in (("user.name", "t"), ("user.email", "t@t"), ("commit.gpgsign", "false"), ("tag.gpgsign", "false")):
             sh(self.work, "git", "config", k, v)
         self.key = self.tmp / "ed.pem"
-        sh(self.tmp, "openssl", "genpkey", "-algorithm", "ed25519", "-out", str(self.key))
-        der = subprocess.run(["openssl", "pkey", "-in", str(self.key), "-pubout", "-outform", "DER"],
+        sh(self.tmp, self.openssl, "genpkey", "-algorithm", "ed25519", "-out", str(self.key))
+        der = subprocess.run([self.openssl, "pkey", "-in", str(self.key), "-pubout", "-outform", "DER"],
                              check=True, stdout=subprocess.PIPE).stdout
-        import base64
         self.pub = base64.b64encode(der[-32:]).decode()
         (self.work / "Cargo.toml").write_text('[workspace.package]\nversion = "0.1.19"\n')
         (self.work / "app/kasaterm/src").mkdir(parents=True)
@@ -212,9 +239,8 @@ class Fixture(unittest.TestCase):
     def sign(self, data):
         f = self.tmp / "tosign"
         f.write_bytes(data)
-        sig = subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", str(self.key), "-rawin", "-in", str(f)],
+        sig = subprocess.run([self.openssl, "pkeyutl", "-sign", "-inkey", str(self.key), "-rawin", "-in", str(f)],
                              check=True, stdout=subprocess.PIPE).stdout
-        import base64
         return base64.b64encode(sig).decode()
 
     def ci_publish(self, plan, conclusion="success", status="completed", drop=(), corrupt_sig=False, feed=True):
@@ -239,7 +265,7 @@ class Fixture(unittest.TestCase):
     # ── 가짜 도구 ──────────────────────────────────────────────────────────
     def fake(self, argv, cwd, env):
         self.calls.append(argv)
-        tool, rest = argv[0], argv[1:]
+        tool, rest = os.path.basename(argv[0]), argv[1:]
         if tool == "codesign" and rest[0] == "--verify":
             return Result(0 if rest[-1] in self.identities else 1, "", "code object is not signed")
         if tool == "codesign" and rest[0] == "-dvv":
@@ -283,7 +309,7 @@ class Fixture(unittest.TestCase):
 
     def plan(self, devices=(), **kw):
         plan = fp.make_plan(self.work, feed=str(self.feed), feed_win=str(self.feed_win), http=self.http,
-                            runner=FakeRunner("dry", self), installed_app=self.app, controller=CONTROLLER,
+                            runner=FakeRunner("dry", self), installed_app=self.app, controller=CONTROLLER, tools=kw.pop("tools", self.tools),
                             devices=[{"label": d["label"], "base": d["base"]} for d in devices], **kw)
         fp.save_plan(plan, self.state)
         return plan
@@ -292,7 +318,10 @@ class Fixture(unittest.TestCase):
         return fp.backend_for(self.work, plan, mode, self.state, http=self.http, runner=FakeRunner(mode, self),
                               devices=[{"label": d["label"], "base": d["base"]} for d in devices])
 
-    def go(self, plan, mode="local", approval=None, devices=()):
+    def go(self, plan, mode="local", approval=None, devices=(), prepare=True):
+        if mode == "live" and prepare and not fp.live_ready(plan, fp.load(plan["plan_id"], self.state)[1]) \
+                and not plan["live_blocks"]:
+            self.go(plan, "local", devices=devices)
         b = self.backend(plan, mode, devices)
         try:
             return fp.run(plan["plan_id"], b, self.state, approval_id=approval,
@@ -340,6 +369,13 @@ class PlanTests(Fixture):
 
     def test_a_channel_the_updater_does_not_have_is_refused(self):
         self.assertIn("채널 preview 은 이 앱의 업데이터에 없다", " ".join(self.plan(channel="preview")["errors"]))
+
+    def test_git_lfs_missing_in_an_lfs_repo_is_a_plan_error(self):
+        (self.work / ".gitattributes").write_text("*.bin filter=lfs diff=lfs merge=lfs -text\n")
+        self.commit("chore: lfs")
+        sh(self.work, "git", "push", "-q", "origin", "main")
+        plan = self.plan(tools={**self.tools, "git-lfs": {"path": None, "why": "git-lfs 을 찾지 못했다"}})
+        self.assertIn("git-lfs 가 없다", " ".join(plan["errors"]))
 
     def test_mobile_changes_ask_for_a_testflight_build_outside_the_desktop_stages(self):
         (self.work / "mobile/lib").mkdir(parents=True)
@@ -524,9 +560,11 @@ class LiveRunTests(Fixture):
         dev["fake"].answer.update(version="0.2.1", build=bump[:8])
         state = self.go(plan, "live", aid, [dev])
         self.assertEqual(state["devices"]["맥북"]["state"], "current")
-        # 한 번 소비하고(소비 전 GET 1), 게시 단계를 이을 때마다 나쵸 기록을 읽어 대조만 했다(3). 게시가 다 끝난 뒤의
-        # 기기 추적은 승인을 다시 읽지 않는다.
-        self.assertEqual((self.nacho.consumes, self.nacho.gets), (1, 4))
+        # 한 번 소비하고(소비 전 GET 1), 게시 단계를 이을 때마다 나쵸 resume 으로 대조만 했다(3) — 원격 사실을 싣는다.
+        # 게시가 다 끝난 뒤의 기기 추적은 승인을 다시 대조하지 않는다.
+        self.assertEqual((self.nacho.consumes, self.nacho.gets), (1, 1))
+        self.assertEqual([st for st, _ in self.nacho.resumes], ["release", "release", "feed"])
+        self.assertTrue(all(r["tag_parent"] == self.head and r["main"] == bump for _, r in self.nacho.resumes))
         self.assertEqual(self.remote_tags(), ["v0.2.0", "v0.2.1"])
 
     def test_resume_refuses_a_different_approval_or_a_stale_record(self):
@@ -633,6 +671,304 @@ class LiveRunTests(Fixture):
         self.write_feeds("0.3.0")
         with self.assertRaisesRegex(Refused, "더 새 판"):
             self.go(plan, "live", aid)
+
+
+def fake_bin(dir, name, body):
+    path = Path(dir) / name
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(0o755)
+    return str(path)
+
+
+LIBRE = 'case "$1" in version) echo "LibreSSL 3.3.6";; *) echo "unknown option -rawin" >&2; exit 1;; esac\n'
+LIAR = 'case "$1" in version) echo "OpenSSL 3.0.0";; *) echo "Signature Verified Successfully";; esac\n'
+
+
+class OpensslChoiceTests(unittest.TestCase):
+    """나쵸 기본 셸은 /usr/bin(LibreSSL)이 앞이라 같은 명령이 다른 openssl 을 잡았다 — 기능을 재서 고르는지 본다."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ossl-")
+        self.libre, self.liar = fake_bin(self.tmp, "libre", LIBRE), fake_bin(self.tmp, "liar", LIAR)
+
+    def tearDown(self):
+        subprocess.run(["rm", "-rf", self.tmp])
+
+    def test_libressl_and_a_yes_man_are_both_refused_with_the_reason(self):
+        got = deps.find_openssl(Runner("dry"), env={}, which=lambda _: self.libre, candidates=[self.liar])
+        self.assertIsNone(got["path"])
+        why = {r["path"]: r["why"] for r in got["rejected"]}
+        self.assertIn("LibreSSL", why[self.libre])
+        self.assertIn("틀린 서명도 통과", why[self.liar])
+        self.assertIn("자동 설치하지 않는다", got["why"])
+
+    @unittest.skipUnless(OPENSSL["path"], "Ed25519 를 검증하는 openssl 이 이 기기에 없다")
+    def test_a_capable_openssl_after_libressl_on_path_is_chosen_by_absolute_path(self):
+        got = deps.find_openssl(Runner("dry"), env={}, which=lambda _: self.libre, candidates=[OPENSSL["path"]])
+        self.assertEqual(got["path"], OPENSSL["path"])
+        self.assertTrue(os.path.isabs(got["path"]))
+        self.assertIn("LibreSSL", got["rejected"][0]["why"])
+
+    @unittest.skipUnless(OPENSSL["path"], "Ed25519 를 검증하는 openssl 이 이 기기에 없다")
+    def test_an_explicit_choice_is_never_silently_replaced(self):
+        got = deps.find_openssl(Runner("dry"), env={"KASATERM_OPENSSL": self.libre}, which=lambda _: OPENSSL["path"],
+                                candidates=[OPENSSL["path"]])
+        self.assertIsNone(got["path"])
+        self.assertIn("KASATERM_OPENSSL 이 가리킨 것만", got["why"])
+
+    def test_missing_publishing_tools_become_live_blocks(self):
+        tools = {"openssl": {"path": None, "why": "Ed25519 를 검증할 openssl 이 없다"}, "gh": {"path": "gh", "logged_in": False},
+                 "cargo": {"path": None, "why": "cargo 을 찾지 못했다"}, "codesign": {"path": "/usr/bin/codesign"},
+                 "spctl": {"path": "/usr/sbin/spctl"}, "hdiutil": {"path": "/usr/bin/hdiutil"}}
+        text = " ".join(deps.blocks(tools))
+        self.assertIn("openssl", text)
+        self.assertIn("gh 로그인이 없다", text)
+        self.assertNotIn("cargo", text)
+
+
+class ToolEnvTests(unittest.TestCase):
+    def test_found_tool_folders_go_first_on_path_only_for_absolute_paths(self):
+        tools = {"git-lfs": {"path": "/home/x/.local/bin/git-lfs"}, "cargo": {"path": "/home/x/.cargo/bin/cargo"},
+                 "gh": {"path": "gh"}}
+        env = deps.tool_env(tools, ("cargo", "git-lfs", "gh"), base={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(env["PATH"], "/home/x/.cargo/bin:/home/x/.local/bin:/usr/bin:/bin")
+        self.assertEqual(deps.git_env({}, base={"PATH": "/usr/bin"})["PATH"], "/usr/bin")
+
+    def test_a_lfs_repo_without_git_lfs_is_refused_by_the_plan(self):
+        tmp = Path(tempfile.mkdtemp(prefix="lfs-"))
+        try:
+            (tmp / ".gitattributes").write_text("*.png filter=lfs diff=lfs merge=lfs -text\n")
+            self.assertTrue(deps.uses_lfs(tmp))
+            self.assertFalse(deps.uses_lfs(tmp / "none"))
+        finally:
+            subprocess.run(["rm", "-rf", str(tmp)])
+
+
+class ContractTests(Fixture):
+    def test_plan_core_keys_and_id_are_the_contract_nacho_recomputes(self):
+        plan = self.plan()
+        self.assertEqual(fp.CORE_KEYS, ("schema", "commit", "branch", "remote", "version", "tag", "channel", "platforms",
+                                        "ios_build", "devices", "device_ids", "controller", "feed_base", "stages"))
+        self.assertEqual(plan["schema"], "kasa-release-plan/2")
+        raw = json.dumps({k: plan[k] for k in fp.CORE_KEYS}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        import hashlib
+        self.assertEqual(plan["plan_id"], hashlib.sha256(raw.encode()).hexdigest()[:16])
+        for key in ("base", "changes", "errors", "live_blocks", "approval_scope", "approval_scope_hash", "tools"):
+            self.assertIn(key, plan)
+        self.assertEqual(sorted(plan["changes"]["files"]), ["docs", "feed", "infra", "mobile", "native"])
+        self.assertEqual(plan["approval_scope"], nacho.release_scope(plan, CONTROLLER, plan["feed_base"]))
+
+    def test_a_tampered_plan_is_never_published(self):
+        plan = self.plan()
+        self.go(plan)
+        aid = self.nacho.approve(plan["approval_scope"])
+        forged = {**plan, "devices": ["아무 기기"]}
+        fp.save_plan(forged, self.state)
+        self.assertFalse(fp.plan_hash_ok(forged))
+        with self.assertRaisesRegex(Refused, "손댄 계획"):
+            self.go(forged, "live", aid, prepare=False)
+        self.assertEqual((self.remote_tags(), self.nacho.consumes), (["v0.2.0"], 0))
+
+    def test_live_waits_for_verify_and_build_so_the_ten_minutes_are_not_spent_baking(self):
+        plan = self.plan()
+        aid = self.nacho.approve(plan["approval_scope"])
+        with self.assertRaisesRegex(Refused, f"먼저 run {plan['plan_id']}"):
+            self.go(plan, "live", aid, prepare=False)
+        self.assertEqual(self.nacho.consumes, 0)
+        self.assertFalse(fp.status_doc(plan, fp.load(plan["plan_id"], self.state)[1])["live_ready"])
+        self.go(plan)
+        doc = fp.status_doc(plan, fp.load(plan["plan_id"], self.state)[1])
+        self.assertTrue(doc["live_ready"] and doc["plan_hash_ok"])
+        self.assertEqual({k: v["status"] for k, v in doc["stages"].items()},
+                         {"verify": "done", "build": "done", "tag": "dry", "release": "dry", "feed": "dry", "devices": "done"})
+        self.assertIsNone(doc["approval"])
+
+    def test_only_the_nacho_tool_may_run_live(self):
+        self.assertIn("창 안에서는", fp.invoker_problem({"KASATERM_PANE_ID": "%3", "KASATERM_RELEASE_INVOKER": "nacho-tool"}))
+        self.assertIn("CLAUDECODE", fp.invoker_problem({"CLAUDECODE": "1", "KASATERM_RELEASE_INVOKER": "nacho-tool"}))
+        self.assertIn("나쵸 도구만", fp.invoker_problem({}))
+        self.assertIsNone(fp.invoker_problem({"KASATERM_RELEASE_INVOKER": "nacho-tool"}))
+        plan = self.plan()
+        from unittest import mock
+        import contextlib
+        import io
+        with mock.patch.dict(os.environ, {"KASATERM_PANE_ID": "%9", "NACHO_ASK_URL": "http://127.0.0.1:9"}), \
+                contextlib.redirect_stderr(io.StringIO()):
+            code = fp.main(["--state-dir", str(self.state), "run", plan["plan_id"], "--live", "--approval", "ap_" + "0" * 32,
+                            "--repo", str(self.work)])
+        self.assertEqual((code, self.remote_tags()), (2, ["v0.2.0"]))
+
+
+class ResumeTests(Fixture):
+    def test_a_moved_remote_tag_is_refused_by_nacho_resume(self):
+        plan = self.plan()
+        aid = self.nacho.approve(plan["approval_scope"])
+        self.go(plan, "live", aid)
+        old = sh(self.work, "git", "rev-parse", "v0.2.0")
+        sh(self.work, "git", "push", "-q", "-f", "origin", f"{old}:refs/tags/{plan['tag']}")
+        with self.assertRaisesRegex(Refused, "remote_mismatch"):
+            self.go(plan, "live", aid)
+
+    def test_an_unconsumed_approval_is_never_resumed(self):
+        plan = self.plan()
+        aid = self.nacho.approve(plan["approval_scope"])
+        self.go(plan, "live", aid)
+        self.nacho.items[aid].update(consumed_at_ms=None, consumed_by=None)
+        with self.assertRaisesRegex(Refused, "not_consumed"):
+            self.go(plan, "live", aid)
+
+    def test_a_pinned_openssl_that_stops_working_stops_the_feed_check(self):
+        plan = self.plan()
+        aid = self.nacho.approve(plan["approval_scope"])
+        self.go(plan, "live", aid)
+        self.ci_publish(plan)
+        libre = fake_bin(self.tmp, "libre", LIBRE)
+        broken = {**plan, "tools": {**plan["tools"], "openssl": {"path": libre, "version": "OpenSSL 3"}}}
+        fp.save_plan(broken, self.state)
+        with self.assertRaisesRegex(Refused, "계획에 고정한 openssl"):
+            self.go(broken, "live", aid)
+        self.assertFalse(any(os.path.basename(c[0]) == "openssl" for c in self.calls))
+
+
+class DevicePlanTests(Fixture):
+    """원격 받기·설치 예약은 dry-run 뿐 — 앱 재시작 사실을 다시 써서 기기마다 무엇이 막혔는지 정확히 말하는지 본다."""
+
+    def facts(self, mid, osname="macos", busy=(), capability=0, refusals=()):
+        return {"machine_id": mid, "facts": {"machine_id": mid, "os": osname, "app_path": f"/Users/x/Applications/kasaterm.app",
+                                            "busy": list(busy), "update_capability": capability},
+                "refusals": [{"code": c} for c in refusals]}
+
+    def test_every_device_is_blocked_until_the_update_endpoint_exists(self):
+        old = sh(self.work, "git", "rev-parse", "v0.2.0")[:8]
+        devs = [self.device("미니", "0.2.0", old, "mac-1"), self.device("바쁜 맥", "0.2.0", old, "mac-2"),
+                self.device("윈도", "0.2.0", old, "win-1"), self.device("꺼진 뒤", "0.2.0", old, "gone")]
+        plan = self.plan(devs)
+        state = {"stages": {"release": {"status": "done", "detail": {"assets": {
+            "macos": {"name": "kasaterm-v0.2.1.dmg", "size": 10, "sha256": "sha256:" + "a" * 64},
+            "windows": {"name": "kasaterm-v0.2.1-windows-x86_64.msi", "size": 20, "sha256": "sha256:" + "b" * 64}}}}}}
+        targets = {"mac-1": self.facts("mac-1"),
+                   "mac-2": self.facts("mac-2", refusals=("busy_students",)),
+                   "win-1": self.facts("win-1", "windows", refusals=("unsupported_os",))}
+        rows = {r["label"]: r for r in fp.devices.plan_devices(plan, state, targets)}
+        self.assertTrue(all(r["status"] == "blocked" for r in rows.values()))
+        codes = {k: [x["code"] for x in r["reasons"]] for k, r in rows.items()}
+        self.assertEqual(codes["미니"], ["update_endpoint_missing"])
+        self.assertEqual(codes["바쁜 맥"], ["update_endpoint_missing", "busy_students"])
+        self.assertEqual(codes["윈도"], ["update_endpoint_missing"])
+        self.assertEqual(codes["꺼진 뒤"], ["unreachable"])
+        self.assertEqual(len(rows["꺼진 뒤"]["steps"]), 1)
+        gone = fp.devices.plan_devices(plan, state, {"gone": {"machine_id": "gone", "facts": None,
+                                                              "refusals": [{"code": "unreachable", "reason": "터널 없음"}]}})
+        self.assertEqual([(x["code"], x["why"]) for x in next(r for r in gone if r["machine_id"] == "gone")["reasons"]], [("unreachable", "터널 없음")])
+        mac = rows["미니"]["steps"]
+        self.assertEqual(len(mac), 6)
+        self.assertIn("10바이트 · sha256:aaaaaaaaaaaa", mac[1])
+        self.assertIn("팀 ABCDE12345", mac[1])
+        self.assertIn(".kasaterm.app.previous", mac[3])
+        self.assertIn("강제 종료 없음", mac[4])
+        self.assertIn("WinSparkle", rows["윈도"]["steps"][3])
+        self.assertIn("releases/download/v0.2.1/kasaterm-v0.2.1.dmg", rows["미니"]["fallback"])
+
+    def test_once_the_endpoint_exists_waits_defer_and_signing_blocks(self):
+        dev = self.device("맥", "0.2.0", sh(self.work, "git", "rev-parse", "v0.2.0")[:8], "mac-1")
+        plan = self.plan([dev])
+        state = {"stages": {"release": {"status": "done", "detail": {"assets": {
+            "macos": {"name": "kasaterm-v0.2.1.dmg", "size": 10, "sha256": "sha256:" + "a" * 64}}}}}}
+        ready = fp.devices.plan_devices(plan, state, {"mac-1": self.facts("mac-1", capability=1)})
+        self.assertEqual(ready[0]["status"], "ready")
+        wait = fp.devices.plan_devices(plan, state, {"mac-1": self.facts("mac-1", capability=1, refusals=("unsaved_editors",))})
+        self.assertEqual(wait[0]["status"], "deferred")
+        unverified = fp.devices.plan_devices(plan, {"stages": {}}, {"mac-1": self.facts("mac-1", capability=1)})
+        self.assertEqual([x["code"] for x in unverified[0]["reasons"]], ["artifacts_unverified"])
+        signed = {**plan, "live_blocks": ["mac 서명: 자체 서명"]}
+        self.assertEqual(fp.devices.plan_devices(signed, state, {"mac-1": self.facts("mac-1", capability=1)})[0]["status"], "blocked")
+        job = fp.devices.job_spec(plan, ready[0], fp.devices.artifact_for(plan, state, "macos"))
+        self.assertEqual((job["schema"], job["tag"], job["required_team"], job["asset"]["sha256"][:9]),
+                         ("kasaterm-update/1", "v0.2.1", "ABCDE12345", "sha256:aa"))
+
+    def test_facts_come_from_the_app_restart_plan_read_only(self):
+        answer = {"targets": [self.facts("mac-1")]}
+        runner = FakeRunner("dry", self)
+        self.fake_cli = answer
+        orig = self.fake
+
+        def fake(argv, cwd, env):
+            if os.path.basename(argv[0]) == "kasaterm-cli":
+                self.calls.append(argv)
+                return Result(0, json.dumps(answer))
+            return orig(argv, cwd, env)
+        self.fake = fake
+        got, problem = fp.devices.gather_facts(runner, ["mac-1", "win-1"], cli="/x/kasaterm-cli")
+        self.assertIsNone(problem)
+        self.assertEqual(list(got), ["mac-1"])
+        self.assertEqual(self.calls[-1], ["/x/kasaterm-cli", "app-restart", "plan", "--machine", "mac-1,win-1", "--json"])
+        self.assertEqual(runner.calls[-1]["kind"], "read")
+
+
+NACHO_FIXTURE = Path(os.environ.get("NACHO_REPO") or Path.home() / "Desktop/momewomo/nacho-neko") \
+    / "docs/development/api/fixtures/approval.kasaterm_release.implemented.json"
+
+
+class CaptureHttp(Http):
+    def __init__(self, answers):
+        self.answers, self.seen = answers, []
+
+    def request(self, method, url, headers=None, body=None, timeout=10):
+        self.seen.append((method, url, dict(headers or {}), body))
+        status, doc = self.answers(method, url)
+        return status, json.dumps(doc).encode()
+
+
+@unittest.skipUnless(NACHO_FIXTURE.exists(), "나쵸 저장소의 대조 자료(approval.kasaterm_release.implemented.json)가 없다")
+class NachoFixtureTests(unittest.TestCase):
+    """나쵸 쪽 구현(94a3033)이 낸 대조 자료에 이 카사텀 코드를 그대로 댄다 — 한쪽만 바뀌면 여기서 깨진다."""
+
+    def setUp(self):
+        self.fx = json.loads(NACHO_FIXTURE.read_text())
+        self.plan = self.fx["plan"]
+
+    def test_core_keys_plan_id_scope_and_hash_agree(self):
+        self.assertEqual(tuple(self.fx["plan_core_keys"]), fp.CORE_KEYS)
+        self.assertTrue(fp.plan_hash_ok(self.plan))
+        scope = nacho.release_scope(self.plan, self.plan["controller"], self.plan["feed_base"])
+        self.assertEqual(scope, self.plan["approval_scope"])
+        self.assertEqual(nacho.scope_hash(scope), self.plan["approval_scope_hash"])
+        self.assertIsNone(nacho.scope_problem(scope))
+
+    def test_status_json_carries_every_field_nacho_reads(self):
+        want = self.fx["status_json_ready"]
+        state = {"stages": {"verify": {"status": "done"}, "build": {"status": "done"}}, "remote": want["remote"]}
+        doc = fp.status_doc(self.plan, state)
+        self.assertTrue(set(want) <= set(doc))
+        self.assertEqual((doc["plan_id"], doc["plan_hash_ok"], doc["stages"], doc["approval"], doc["live_ready"], doc["live_blocks"]),
+                         (want["plan_id"], want["plan_hash_ok"], want["stages"], want["approval"], want["live_ready"], want["live_blocks"]))
+
+    def test_get_consume_and_resume_requests_are_what_nacho_expects(self):
+        fx = self.fx
+        answers = lambda method, url: (200, fx["resume" if url.endswith("/resume") else "consume" if url.endswith("/consume") else "get"]["200"])  # noqa: E731
+        http = CaptureHttp(answers)
+        auth = nacho.NachoAuthority("http://nacho.test", "k", http)
+        aid = fx["get"]["request"]["path"].rsplit("/", 1)[-1]
+        body_c, body_r = fx["consume"]["request"]["body"], fx["resume"]["request"]["body"]
+        auth.get(aid)
+        auth.consume(aid, body_c["scope"], body_c["consumer_machine_id"])
+        auth.resume(aid, body_r["scope"], body_r["consumer_machine_id"], body_r["stage"], body_r["remote"])
+        for (method, url, headers, body), key in zip(http.seen, ("get", "consume", "resume")):
+            req = fx[key]["request"]
+            self.assertEqual((method, url[len("http://nacho.test"):]), (req["method"], req["path"]))
+            self.assertEqual({k: v for k, v in headers.items() if k != "X-Nacho-Token"},
+                             {k: v for k, v in req["headers"].items() if k != "X-Nacho-Token"})
+            self.assertEqual(body, req.get("body"))
+        self.assertEqual(set(body_r["remote"]), {"main", "tag_parent"})
+
+    def test_every_nacho_error_word_reaches_the_person(self):
+        for key in ("get", "consume", "resume"):
+            for code, doc in self.fx[key].items():
+                if code in ("request", "200"):
+                    continue
+                auth = nacho.NachoAuthority("http://nacho.test", "k", CaptureHttp(lambda m, u, c=code, d=doc: (int(c[:3]), d)))
+                with self.subTest(key=key, code=code), self.assertRaisesRegex(nacho.Denied, doc["error"].split(":")[0]):
+                    auth._call("GET", "/api/app/approvals/x")
 
 
 class RealRepoTests(unittest.TestCase):

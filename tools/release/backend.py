@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 
+from tools.release import deps
 from tools.release.common import Pending, Refused, feed_item, fetch_feed, sha256_bytes, sha256_file, version_tuple
 
 REPO_SLUG = "2rami/kasaterm"
@@ -35,16 +36,19 @@ def parse_identity(text):
     return {"authority": auth.group(1).strip() if auth else None, "team": None if t in (None, "not set") else t}
 
 
-def identity_of(runner, app):
+def identity_of(runner, app, tools):
     """번들의 서명 신원 — 읽기만. 서명이 깨졌으면 신원을 말하지 않는다."""
-    verify = runner.run(["codesign", "--verify", "--deep", "--strict", str(app)], timeout=180)
+    codesign, spctl = tools["codesign"]["path"], tools["spctl"]["path"]
+    if not codesign or not spctl:
+        return {"verified": False, "authority": None, "team": None, "notarized": False, "why": "codesign·spctl 이 없다"}
+    verify = runner.run([codesign, "--verify", "--deep", "--strict", str(app)], timeout=180)
     if verify.skipped:
         return None
     if not verify.ok:
         return {"verified": False, "authority": None, "team": None, "notarized": False, "why": verify.tail(2)}
-    shown = runner.run(["codesign", "-dvv", str(app)], timeout=60)
+    shown = runner.run([codesign, "-dvv", str(app)], timeout=60)
     ident = parse_identity((shown.err or "") + "\n" + (shown.out or ""))
-    gate = runner.run(["spctl", "--assess", "--type", "execute", "-vv", str(app)], timeout=60)
+    gate = runner.run([spctl, "--assess", "--type", "execute", "-vv", str(app)], timeout=60)
     return {"verified": True, **ident, "notarized": gate.ok and "Notarized" in (gate.err + gate.out)}
 
 
@@ -61,7 +65,7 @@ def identity_block(release, installed):
     return None
 
 
-def ed25519_ok(runner, public_b64, signature_b64, path, scratch):
+def ed25519_ok(runner, openssl, public_b64, signature_b64, path, scratch):
     """Sparkle EdDSA 는 파일 원문에 대한 Ed25519 서명이다. 저장소에 박힌 공개키로 openssl 이 확인한다."""
     try:
         raw = base64.b64decode(public_b64, validate=True)
@@ -75,25 +79,37 @@ def ed25519_ok(runner, public_b64, signature_b64, path, scratch):
     pem.write_text("-----BEGIN PUBLIC KEY-----\n" + base64.b64encode(_ED25519_SPKI + raw).decode() + "\n-----END PUBLIC KEY-----\n")
     sig_path = scratch / (Path(path).name + ".sig")
     sig_path.write_bytes(sig)
-    r = runner.run(["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(pem), "-rawin",
+    r = runner.run([openssl, "pkeyutl", "-verify", "-pubin", "-inkey", str(pem), "-rawin",
                     "-in", str(path), "-sigfile", str(sig_path)], timeout=120, kind="local")
     return r.skipped or (r.ok and "Signature Verified Successfully" in r.out)
 
 
 class RealBackend:
-    def __init__(self, repo, runner, http, workdir, tracker, gh="gh", slug=REPO_SLUG, remote="origin"):
+    def __init__(self, repo, runner, http, workdir, tracker, tools, slug=REPO_SLUG, remote="origin"):
         self.repo, self.runner, self.http, self.workdir = Path(repo), runner, http, Path(workdir)
-        self.tracker, self.gh, self.slug, self.remote = tracker, gh, slug, remote
+        self.tracker, self.tools, self.slug, self.remote = tracker, tools, slug, remote
+
+    def tool(self, name):
+        """계획에 못 박힌 절대경로. 없으면 그 도구가 왜 없는지 그대로 말하고 멈춘다."""
+        t = self.tools.get(name) or {}
+        if not t.get("path"):
+            raise Refused(t.get("why") or f"{name} 이 계획의 도구 표에 없다")
+        return t["path"]
+
+    @property
+    def gh(self):
+        return self.tool("gh")
 
     @property
     def dry(self):
         return self.runner.mode == "dry"
 
     def git(self, *args, kind="read", timeout=120, cwd=None):
-        return self.runner.run(["git", "-C", str(cwd or self.repo), *args], timeout=timeout, kind=kind)
+        return self.runner.run(["git", "-C", str(cwd or self.repo), *args], timeout=timeout, kind=kind,
+                               env=deps.git_env(self.tools))
 
     def env(self):
-        return {**os.environ, "CARGO_TARGET_DIR": str(self.workdir / "target")}
+        return {**deps.tool_env(self.tools, ("cargo", "git-lfs", "gh")), "CARGO_TARGET_DIR": str(self.workdir / "target")}
 
     # ── 원격 상태 ─────────────────────────────────────────────────────────
     def remote_ref(self, ref):
@@ -110,6 +126,16 @@ class RealBackend:
         if mac is None or win is None:
             raise Refused("피드를 읽지 못해 기준 해시를 못 쟀다")
         return sha256_bytes(json.dumps({"macos": sha256_bytes(mac), "windows": sha256_bytes(win)}, sort_keys=True).encode())
+
+    def resume_facts(self, plan):
+        """나쵸 `resume` 에 싣는 원격 사실 — 지금 main, 태그가 섰으면 그 커밋의 부모(= 계획 커밋이어야 한다)."""
+        out = {"main": self.remote_ref("refs/heads/" + plan["branch"])}
+        tagged = self.remote_ref("refs/tags/" + plan["tag"])
+        if tagged:
+            self.git("fetch", "-q", self.remote, f"refs/tags/{plan['tag']}", timeout=120)
+            parent = self.git("rev-parse", f"{tagged}^")
+            out["tag_parent"] = parent.out.strip() if parent.ok else None
+        return out
 
     def observe(self, plan):
         """dry-run·status 가 보이는 원격 사실 — 전부 읽기."""
@@ -157,7 +183,9 @@ class RealBackend:
     def verify(self, plan, state):
         wt = self.worktree(plan)
         ran = []
+        cargo = self.tool("cargo")
         for argv in TESTS:
+            argv = [cargo, *argv[1:]]
             r = self.runner.run(argv, cwd=wt, timeout=3600, env=self.env(), kind="local")
             ran.append(" ".join(argv))
             if r.timed_out:
@@ -177,7 +205,7 @@ class RealBackend:
             binary = app / "Contents/MacOS/kasaterm"
             if not binary.exists() or not want or sha256_file(binary) != "sha256:" + want:
                 continue
-            ident = identity_of(self.runner, app)
+            ident = identity_of(self.runner, app, self.tools)
             if ident and not ident["verified"]:
                 continue
             return {"reused": str(app), "sha256": "sha256:" + want, "identity": ident}
@@ -191,7 +219,7 @@ class RealBackend:
         if not binary.exists():
             raise Refused("굽기는 끝났는데 번들이 없다")
         return {"built": str(wt / "dist/kasaterm.app"), "sha256": sha256_file(binary),
-                "identity": identity_of(self.runner, wt / "dist/kasaterm.app")}
+                "identity": identity_of(self.runner, wt / "dist/kasaterm.app", self.tools)}
 
     def tag_commands(self, plan):
         return [["git", "worktree", "add", "--detach", str(self.workdir / "wt"), plan["commit"]],
@@ -299,18 +327,23 @@ class RealBackend:
         mnt = self.workdir / "mnt"
         shutil.rmtree(mnt, ignore_errors=True)
         mnt.mkdir(parents=True)
-        a = self.runner.run(["hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", str(mnt), str(dmg)],
+        hdiutil = self.tool("hdiutil")
+        a = self.runner.run([hdiutil, "attach", "-readonly", "-nobrowse", "-mountpoint", str(mnt), str(dmg)],
                             timeout=180, kind="local")
         if not a.ok:
             raise Refused(f"dmg 를 열지 못했다 — {a.tail(2)}")
         try:
-            return identity_of(self.runner, mnt / "kasaterm.app")
+            return identity_of(self.runner, mnt / "kasaterm.app", self.tools)
         finally:
-            self.runner.run(["hdiutil", "detach", str(mnt)], timeout=120, kind="local")
+            self.runner.run([hdiutil, "detach", str(mnt)], timeout=120, kind="local")
 
     def feed(self, plan, state):
         assets = (state["stages"].get("release", {}).get("detail") or {}).get("assets") or {}
         key = plan["capabilities"]["macos"].get("ed_public_key")
+        openssl = self.tool("openssl")
+        ok, version, why = deps.probe_openssl(self.runner, openssl)
+        if not ok:
+            raise Refused(f"계획에 고정한 openssl({openssl}, {version or '판 모름'})이 지금은 {why} — 서명을 확인하지 않고 멈춘다")
         seen = {}
         for platform, src in (("macos", plan["feed"]["source"]), ("windows", plan["feed"]["windows"])):
             raw = fetch_feed(self.http, src)
@@ -329,7 +362,7 @@ class RealBackend:
                 raise Refused(f"{platform} 피드가 가리키는 파일이 릴리스 산출물과 다르다")
             if not key or not item["signature"]:
                 raise Refused(f"{platform} 피드 EdDSA 서명이나 저장소 공개키가 없다")
-            if not ed25519_ok(self.runner, key, item["signature"], asset["path"], self.workdir / "sig"):
+            if not ed25519_ok(self.runner, openssl, key, item["signature"], asset["path"], self.workdir / "sig"):
                 raise Refused(f"{platform} 피드 EdDSA 서명이 산출물과 맞지 않는다")
             seen[platform] = sha256_bytes(raw)
         before = (state["stages"].get("feed", {}).get("detail") or {}).get("hashes")

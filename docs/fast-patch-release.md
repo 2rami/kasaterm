@@ -26,12 +26,16 @@ status: 원격 태그·CI·피드 + 기기마다 지금 판(버전 · SHA) → �
 1. **mac 서명 관문** — CI mac 판은 `kasaterm-ci` 자체 서명·미공증, 설치본은 Developer ID(L366799VND)다. 태그를 올리면
    CI 가 mac appcast 까지 게시하므로 **태그 단계부터** 막는다(`live_blocks`). 풀려면 CI 가 설치본과 같은 Developer ID 로
    서명·공증해야 한다 — 새 키·신뢰 권한이라 사람 결정이고 이 도구 범위 밖이다. 보안 설정을 끄는 우회는 없다.
-2. **나쵸 릴리스 승인 창구** — 나쵸 HTTP 승인은 지금 `kasaterm_restart` 만 열려 있다. `kasaterm_release` 는 아리스와 계약을
-   맞췄고(아래) 나쵸 쪽 구현·켜기(주인 확인 카드)가 남았다. 그 전엔 `capabilities.approvals.http_actions` 에 없으므로
-   카사텀이 `no_approval` 로 거절한다.
-3. **정할 것** — 주인이 단추를 누른 뒤 `run --live` 를 나쵸 도구가 직접 칠지, 사람·학생이 칠지.
+2. **나쵸 릴리스 승인 창구** — 나쵸 쪽 구현은 끝났다(나쵸 94a3033, 대조 자료
+   `docs/development/api/fixtures/approval.kasaterm_release.implemented.json`). 창구는 `NACHO_APPROVAL_HTTP_ACTIONS` 에
+   `kasaterm_release` 가 있어야 열리고 기본은 닫혀 있다 — 여는 것은 주인 확인 카드로 따로 한다.
+3. **원격 설치 창구** — 기기 앱에 받기·설치 예약 창구가 없다. `device-plan` 이 기기마다 무엇이 막혔는지 dry-run 으로
+   보인다(아래 「기기 받기·설치 예약」).
 
-그 전에도 되는 것: `plan`·`dry-run`·`status`(읽기), `run`(검사·굽기를 격리 워크트리에서 실제로 하고 게시는 명령만).
+실행 주체는 나쵸 도구다(주인 결정). 학생·에이전트 창에서 live 를 치면 도구가 거절한다(아래 「누가 치나」).
+
+그 전에도 되는 것: `plan`·`dry-run`·`status`(읽기), `run`(검사·굽기를 격리 워크트리에서 실제로 하고 게시는 명령만),
+`device-plan`(읽기).
 
 ## (A) 나쵸 입구 — 쓰는 명령
 
@@ -52,10 +56,29 @@ python3 -m tools.release.fastpatch run <plan_id>
 python3 -m tools.release.fastpatch run <plan_id> --live --approval ap_…
 
 # 5) 추적: 원격 사실 + 기기별 지금 판·목표·마지막 확인. 언제든(읽기만, 승인 불필요).
-python3 -m tools.release.fastpatch status <plan_id>
+python3 -m tools.release.fastpatch status <plan_id> [--json]
+
+# 6) 기기 받기·설치 예약 계획(dry-run 뿐): 앱 재시작 사실로 기기마다 막힘과 여섯 단계.
+python3 -m tools.release.fastpatch device-plan <plan_id> [--json]
 ```
 
 상태 폴더는 `~/.config/kasaterm/releases/`(`KASATERM_RELEASE_DIR`·`--state-dir`).
+
+### 도구는 PATH 에 맡기지 않는다
+
+`tools/release/deps.py` 가 도구를 재서 고르고 계획의 `tools` 에 **절대경로**로 못 박는다. 나쵸 기본 셸은 `/usr/bin` 이
+PATH 앞이라, 사람 셸에서 멀쩡하던 같은 명령이 다른 도구를 잡았다(2026-09-27 나쵸 직접 검증: 검사 31건 중 27건 오류).
+
+| 도구 | 고르는 법 | 없으면 |
+|---|---|---|
+| openssl | `KASATERM_OPENSSL` 이 있으면 **그것만**(몰래 바꾸지 않는다), 없으면 PATH → openssl@3 알려진 자리. RFC 8032 시험 벡터로 맞는 서명 통과·틀린 서명 거부를 둘 다 확인한 것만. `/usr/bin/openssl`(LibreSSL 3.3.6)은 Ed25519 원문 검증이 안 돼 빠진다 | live 막힘 · 피드 단계 거절 |
+| git-lfs | PATH → `~/.local/bin` · homebrew. git 을 부를 때 그 폴더를 PATH 앞에 붙인다(git 이 LFS 필터를 이름으로 부른다 — 없으면 격리 워크트리가 「git-lfs: command not found」로 깨졌다) | LFS 저장소면 계획 오류 |
+| gh | PATH → `~/.local/bin` · homebrew, `gh auth status` 까지 | live 막힘(로그인은 사람이) |
+| cargo | PATH → `~/.cargo/bin` · homebrew. 검사·굽기 env 에 cargo·gh·git-lfs 폴더를 앞에 붙인다(build-app.sh 가 이름으로 부른다) | 검사·굽기 단계가 까닭을 말하고 멈춤 |
+| codesign · spctl · hdiutil | `/usr/bin`·`/usr/sbin` 고정 경로 | live 막힘 |
+
+게시 도중에도 피드 단계는 고정한 openssl 을 시험 벡터로 다시 잰다 — 그 사이 바뀌었으면 서명을 확인하지 않고 멈춘다.
+자동 설치는 하지 않는다.
 
 명령마다 종류가 있다(`tools/release/proc.py`): **read**(원격·서명 읽기, 늘 돈다) · **local**(격리 워크트리·검사·굽기·
 다운로드, `dry-run` 에선 적기만) · **publish**(태그 push, `--live` 에서만). 모든 명령은 시간 제한이 있고, 돈 것과 건너뛴
@@ -86,9 +109,34 @@ python3 -m tools.release.fastpatch status <plan_id>
 - 소비: `run --live` 가 게시 첫 단계 직전에 `GET /api/app/approvals/{id}` 로 읽고(동작·승인됨·안 씀·안 지남·해시 같음)
   `POST …/consume {scope, consumer_machine_id}` — 서버가 해시를 다시 재고, 소비 기기가 scope 의 조종 기기이면서 나쵸
   기기일 때만 한 번 성공한다. HTTP 창구는 동작마다 켠다(`NACHO_APPROVAL_HTTP_ACTIONS`, 기본 kasaterm_restart 만).
-- 재개: 다시 소비하지 않는다. 나쵸 기록이 `consumed_by == 이 기기`·같은 해시이고, 카사텀 작업 기록의 승인 id·계획
-  해시와도 맞을 때만 잇는다. 나쵸는 승인 기록을 7일 뒤 지우므로 그보다 오래된 재개는 새 승인이다.
+- 재개: 다시 소비하지 않는다. 작업 기록의 승인 id·계획·해시·7일을 먼저 보고, `POST …/{id}/resume {scope,
+  consumer_machine_id, stage, remote:{main, tag_parent}}` 로 나쵸 기록과 대조한다 — 소비 안 된 승인(409 not_consumed)·
+  안 쓴 채 지난 승인(410 expired, 절대 안 살아남)·소비 7일 초과(410 resume_expired)·다른 기기·다른 해시·태그 부모가
+  계획 커밋이 아님(409 remote_mismatch)이면 멈춘다. 재개마다 나쵸가 기록을 남긴다.
+- **승인 10분이 굽기에 먹히지 않게**: live 는 verify·build 가 done 이 아니면 「먼저 run」 으로 거절한다. 나쵸 도구는
+  `status --json` 의 `live_ready` 가 참일 때만 단추를 띄우고, 누르면 `run --live` 가 끝난 단계를 건너뛰어 몇 초 안에 소비한다.
+- 계획 파일을 손대면(core 해시가 plan_id 와 다르면) live 를 거절한다.
 - **로컬 `approval.json` 은 승인이 아니다** — 그런 파일이 있어도 도구는 보지 않는다.
+
+### 누가 치나
+
+`run --live` 는 나쵸 도구만 친다. 창 표식(`KASATERM_PANE_ID`·`CLAUDECODE`·`CLAUDE_CODE_SESSION_ID`·`KASATERM_ORIGIN`·
+`CODEX_SANDBOX`)이 있으면 거절하고, `KASATERM_RELEASE_INVOKER=nacho-tool` 이 없어도 거절한다. 나쵸 도구는 창 표식을 걷은
+env 로 띄운다. **사고 방지 표식이지 보안 경계가 아니다** — 경계는 주인 승인(정확한 범위·10분·한 번)이다.
+
+### 나쵸와의 계약 (고정 칸)
+
+- core 키: `schema`(kasa-release-plan/2) · `commit` · `branch` · `remote` · `version` · `tag` · `channel` · `platforms` ·
+  `ios_build` · `devices` · `device_ids` · `controller` · `feed_base` · `stages`. `plan_id = sha256(canonical(core))[:16]`
+  (canonical = 키 정렬·`ensure_ascii=False`·구분자 `,` `:`). 나쵸가 다시 잰다 — 키를 바꾸면 SCHEMA 를 올린다.
+- 고정 칸: `base{tag, commit}` · `changes.commits[{sha, subject}]` · `changes.files{native, mobile, feed, docs, infra}` ·
+  `errors[]` · `live_blocks[]` · `approval_scope` · `approval_scope_hash`. `tools` 는 core 밖이다.
+- `status --json`: `plan_id` · `plan_hash_ok` · `stages.<단계>.status` · `approval{id, consumed_at_ms}|null` · `remote{tag, main,
+  ci, feed_macos, feed_windows}` · `live_ready` · `live_blocks` (+ `tag`·`commit`·`errors`·`devices`).
+- 검사 `NachoFixtureTests` 가 나쵸 대조 자료에 이 코드를 그대로 대고(나쵸 저장소가 없으면 건너뜀),
+  `scripts/nacho-release-interop.sh` 는 나쵸 레포의 실제 승인 서버를 임시 폴더·가짜 키로 띄워 이 클라이언트로 왕복한다 —
+  창구 on(소비 1회·재소비 거절·resume·remote_mismatch·bad_remote·bad_stage·not_consumed·not_approved·scope_changed·
+  wrong_consumer·bad_token)과 창구 off(capabilities 에 없음·no_approval). 운영 키·저장소는 안 건드린다.
 
 ### 단계와 재실행
 
@@ -129,6 +177,28 @@ windesktop `0.2.0 · 5e69f61f+` → update. 다음 판 v0.2.1, 커밋 843개, ma
 통합은 릴리스와 따로 한다: 맥북에서 그 커밋을 브랜치로 push → main 에 합침 → 새 계획. 공유 워킹트리에서
 자동 rebase·stash 는 하지 않는다. (2026-09-25 확인: 맥북 로컬 커밋은 원격 8933a0ca 와 같은 패치였다 — 같은
 패치면 합칠 때 빈 커밋이 되고, 그 뒤 계획은 update 로 바뀐다.)
+
+## 기기 받기·설치 예약 — dry-run (원격 설치 창구 계획)
+
+`device-plan` 은 앱 재시작 계획(`kasaterm-cli app-restart plan --json`, [app-restart.md](app-restart.md))에서 기기마다의
+사실(OS·설치본·바쁜 학생·미저장 편집기·자기설치 대기·굽는 중·진행 중 작업)을 읽어, 창구가 생기면 기기가 할 여섯 단계와
+지금 막힌 까닭을 보인다. 실행 길은 없다(dry-run 뿐).
+
+| 단계 | mac | 윈도 |
+|---|---|---|
+| 1 받기 | 릴리스 산출물 → `~/Library/Caches/kasaterm/updates/<tag>/` | msi → `%LOCALAPPDATA%\kasaterm\updates\<tag>\` |
+| 2 확인 | 크기·sha256(릴리스 단계 값) · EdDSA · dmg 읽기 전용 · `codesign --verify --deep --strict` · 설치본과 같은 팀 · 공증 | 크기·sha256 · EdDSA |
+| 3 준비 | 확인한 번들을 `.kasaterm.app.next` 에(설치본 안 건드림) | 확인한 msi 를 둔다 |
+| 4 예약 | 종료할 때 교체 — 자기설치 규칙(이전 판 `.kasaterm.app.previous`, 실패하면 되돌림) | WinSparkle 토스트 [설치] |
+| 5 재시작 | 앱 재시작 계약 — 별도 `kasaterm_restart` 승인, 바쁘거나 미저장이면 기다림(강제 종료 없음) | MSI 가 닫고 연다(사람이 고름) |
+| 6 검증 | `/version` 이 목표 버전·태그 커밋 — 아니면 이전 판을 둔 채 실패 | 같음 |
+
+상태: `ready`(창구 있고 막힘 없음) · `deferred`(받기·준비는 되고 적용만 기다림 — 바쁜 학생·미저장 편집기 등) · `blocked`.
+지금은 모든 기기가 `update_endpoint_missing` 으로 막힌다. 창구가 생기면 보낼 작업(`kasaterm-update/1`: 계획·태그·커밋·
+산출물 해시·요구 팀·EdDSA 공개키)도 `--json` 에 싣는다 — 기기는 그 값과 자기 사실·나쵸 승인으로만 판정한다(재시작과 같다).
+
+2026-09-27 실제 결과(나쵸 기본 PATH): 이 기기 → 창구 없음·서명 관문·바쁜 학생·산출물 미확인으로 blocked, windesktop →
+앱 재시작 사실이 안 닿아 blocked. 기기마다 「지금 받는 길」(판 번호 줄·릴리스 파일 주소)을 함께 싣는다.
 
 ## (B) 기기 입구 — 이미 있는 것과 새로 붙인 것
 
@@ -184,7 +254,8 @@ windesktop `0.2.0 · 5e69f61f+` → update. 다음 판 v0.2.1, 커밋 843개, ma
 ## 검사
 
 ```sh
-python3 -m unittest tools.release.tests.test_fastpatch      # 31건 — 아래
+python3 -m unittest tools.release.tests.test_fastpatch      # 52건 — 아래
+bash scripts/nacho-release-interop.sh                        # 실제 나쵸 승인 서버(격리)와 왕복 17건
 cargo test -p kasaterm --release version::tests             # 판 번호 줄 입구 선택
 cargo test -p kasaterm --release self_install               # 자기설치 백업·되돌리기(실제 sh)
 ```
@@ -194,7 +265,10 @@ fastpatch 검사는 임시 저장소(원격은 bare 저장소)·임시 피드·�
 `hdiutil`·`cargo` 만 가짜다. 다루는 것: 다음 버전·원격 태그·피드 바닥, 중복 태그·다운그레이드·더러운 트리·미push, 채널,
 기기 버전+SHA 비교, 자체 서명 CI 의 live 차단·설치본 신원 미확인, dry-run 무기록, 로컬 실행(검사·굽기·ready 판 재검증,
 로컬 태그 안 만듦), 검사 실패·시간 초과, 나쵸 승인 거절 전부(대기·만료·범위 변경·다른 동작·창구 닫힘·로컬 파일),
-계획 뒤 피드 변경, 한 번 소비와 재개(다른 승인·7일), push 시간 초과·거절·main 이동·남의 태그·잃은 상태 파일, CI 대기·
-실패·산출물 모자람·해시·dmg 신원, 피드 EdDSA·더 새 판.
+계획 뒤 피드 변경, 한 번 소비와 재개(다른 승인·7일·원격 불일치·미소비), push 시간 초과·거절·main 이동·남의 태그·잃은
+상태 파일, CI 대기·실패·산출물 모자람·해시·dmg 신원, 피드 EdDSA·더 새 판, 도구 고르기(LibreSSL·거짓 통과·지정 경로 고수·
+고정 openssl 변질·git-lfs 없음·PATH 폴더), 계약 키·위조 계획·live 준비 조건·창 안 실행 거부, 기기 받기 계획, 나쵸 대조 자료.
+나쵸 기본 PATH(`/usr/bin` 먼저)로도 돌려 확인한다. `KASATERM_OPENSSL=/usr/bin/openssl` 처럼 쓸 수 없는 openssl 을 가리키면
+서명이 필요한 검사는 까닭을 밝히고 건너뛴다(오류가 아니다).
 
 Windows 쪽 러스트(`win_sparkle::available`)는 이 맥에 윈도 타깃이 없어 컴파일해 보지 않았다.
