@@ -585,7 +585,7 @@ def relay_poll(body: dict) -> tuple[int, dict]:
 def llm_client(provider_factory):
     """모델 통로 — 장부 채팅이 쓰는 provider 에 클라이언트가 있으면 그것, 없으면(이 기계는
     미니 터널로 요약을 시키는 구성이라 없다) 나쵸의 LLM 클라이언트를 이 자리에서 직접 연다.
-    키는 askimg 와 같은 `~/.config/opengateway.key`(600) 에서 읽고 이 프로세스 환경에만 둔다."""
+    키는 나쵸와 같은 `~/.config/opengateway.key`(600) 에서 읽고 이 프로세스 환경에만 둔다."""
     provider = provider_factory(threading.Event())
     client = getattr(provider, "client", None)
     if client is not None:
