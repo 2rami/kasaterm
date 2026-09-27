@@ -300,13 +300,40 @@ budget」로 멈췄다(실행 1회에 126 MB × 2).
 
 | job | 그림이 필요한가 | 받는 것 |
 |---|---|---|
-| build-msi | 필요 — 학생 그림을 실행 파일에 넣고(`sprites.rs`), arona-ui 빌드 결과·폰트를 설치본에 담는다 | `mobile/`·`web/arona-ui/character-src/`(vite 빌드가 안 읽는다)를 뺀 78 MB. 받아야 할 것이 포인터로 남으면 멈춘다(빈칸 그림 판 방지) |
+| build-msi | 필요 — 학생 그림을 실행 파일에 넣고(`sprites.rs`), arona-ui 빌드 결과·폰트를 설치본에 담는다 | **미니 LFS 창구에서**(아래) `mobile/`·`web/arona-ui/character-src/`(vite 빌드가 안 읽는다)를 뺀 78 MB. 받아야 할 것이 포인터로 남으면 멈춘다(빈칸 그림 판 방지) |
 | build-dmg (local) | 불필요 — Cargo.toml·릴리스 노트만 읽고 dmg 는 릴리스에서 받는다 | 없음(`lfs: false` → checkout 이 `GIT_LFS_SKIP_SMUDGE=1`) |
 | build-dmg (ci·빌드 검증) | 필요 | 전부 |
 | appcast | 불필요 — dmg·msi 는 릴리스에서 받는다 | 없음(뒤의 `git pull --rebase` 도 `GIT_LFS_SKIP_SMUDGE`) |
 
-예산이 막힌 동안에는 Windows 굽기가 어떤 방법으로도 그림을 못 받는다. 푸는 길은 저장소 소유 계정이 LFS 예산을 올리거나
-결제 주기가 넘어가는 것뿐이다(도구는 예산·결제를 건드리지 않고, 다른 곳에서 그림을 받아 오는 우회도 하지 않는다).
+build-dmg 의 ci·빌드 검증 길은 여전히 GitHub LFS 에서 받는다 — 예산이 막히면 그 길만 선다.
+
+### 미니 LFS 창구
+
+예산이 막혀도 Windows 판이 서게, build-msi 는 GitHub LFS 대신 **미니의 읽기 전용 LFS 창구**에서 그림을 받는다(2026-09-28,
+v0.2.1 Windows 판이 예산으로 막힌 뒤 소유자 결정). 사람들의 push/pull 은 GitHub LFS 그대로다 — 저장소 `.lfsconfig` 를 두지
+않고, 그 단계의 환경(`GIT_CONFIG_COUNT`)으로만 `lfs.url`·인증 머리를 준다.
+
+| 자리 | 무엇 |
+|---|---|
+| 서버 | `tools/release/mini_lfs.py`(표준 라이브러리만). batch API 의 download 만 — upload·잠금·PUT 은 403, 토큰 없으면 경로와 무관하게 401. `127.0.0.1:8794` |
+| 객체 | 미니 `~/.local/share/kasaterm-lfs/objects` — 미니 저장소의 LFS 객체를 복제해 둔다(launchd 의 파이썬은 `~/Desktop` 을 못 읽는다) |
+| 토큰 | 미니 `~/.config/kasaterm-lfs/token`(600)과 GitHub 비밀 `MINI_LFS_TOKEN` 에만. 주소는 저장소 변수 `MINI_LFS_URL` |
+| 바깥 길 | kasaterm 명명 터널의 `kasaterm.debimarlene.com` 에 경로 규칙 `^/lfs/` 하나(관문 규칙보다 앞) — 새 DNS 없이 |
+| 상주 | launchd `com.geono.kasaterm-lfs`. 지금은 LaunchAgent(로그인해야 뜬다). `sudo bash scripts/mini-lfs.sh daemon` 으로 LaunchDaemon 이 된다 — 다만 kasaterm 터널도 LaunchAgent 라, 로그인 없는 재부팅에서 바깥 길까지 살리려면 터널도 같이 옮겨야 한다 |
+
+```sh
+bash scripts/mini-lfs.sh status      # 상주·무토큰 401·토큰 200(토큰은 안 찍는다)
+bash scripts/mini-lfs.sh sync        # 새 그림이 든 판을 CI 가 굽기 전에 — 미니 저장소에 받아 둔 객체 중 창구에 없는 것만 복제
+bash scripts/mini-lfs.sh install     # 서버 파일을 고쳤을 때(토큰·주소는 유지)
+```
+
+- 창구에 없는 그림은 batch 가 객체별 404 로 답해 `git lfs pull` 이 그 이름을 대고 멈춘다 — 미니 저장소가 그 커밋의 LFS 를
+  받아 둔 뒤 `sync` 한다.
+- 미니가 꺼졌거나(터널 502·530) 토큰이 틀렸으면(401) build-msi 는 받기 전의 확인 요청에서 그 HTTP 코드를 대고 멈춘다. 조용히
+  건너뛰지 않는다.
+- 토큰을 바꾸려면 미니의 토큰 파일을 지우고 `install` → `gh secret set MINI_LFS_TOKEN -R 2rami/kasaterm < ~/.config/kasaterm-lfs/token`.
+- 터널 설정을 고치면 cloudflared 를 재시작해야 읽는다(관문 웹터미널·기기 ssh 입구가 한 번 끊긴다). 같은 터널로 연결을 하나 더
+  띄워 두고 상주 쪽을 재시작하면 새 연결은 끊기지 않는다(2026-09-28 이렇게 넣었다).
 
 ## 처음 한 번만 필요한 것
 
@@ -320,6 +347,7 @@ budget」로 멈췄다(실행 1회에 126 MB × 2).
 
 ```sh
 python3 -m unittest tools.release.tests.test_fastpatch      # 82건 — 아래
+python3 -m unittest tools.release.tests.test_mini_lfs       # 미니 LFS 창구 15건 — 진짜 HTTP·진짜 git-lfs 왕복
 cargo test -p kasa-socket app_update                         # 기기 업데이트 창구·러너 32건(app-update.md 「검사」)
 bash scripts/nacho-update-interop.sh                         # 실제 나쵸 update 승인 서버(격리)와 러너·기기 왕복
 bash scripts/nacho-release-interop.sh                        # 실제 나쵸 승인 서버(격리)와 왕복 17건

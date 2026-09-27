@@ -1588,6 +1588,9 @@ class LocalSigningRepoTests(unittest.TestCase):
         self.assertIn("EXCLUDE='mobile/**,web/arona-ui/character-src/**'", msi)
         self.assertIn("grep -vE '^(mobile/|web/arona-ui/character-src/)'", msi)
         self.assertLess(msi.index("Fetch LFS assets for the Windows build"), msi.index("Build and verify Windows packages"))
+        # 받는 곳은 GitHub LFS 가 아니라 미니 창구다(자세한 계약은 test_mini_lfs) — mac·appcast 는 미니를 안 부른다.
+        self.assertIn("MINI_LFS_TOKEN: ${{ secrets.MINI_LFS_TOKEN }}", msi)
+        self.assertNotIn("MINI_LFS", dmg + app)
         self.assertIn("lfs: ${{ env.MAC_ARTIFACT == 'ci' || env.RELEASE_TAG == '' }}", dmg)
         self.assertNotIn("lfs: true", msi + dmg + app)
         self.assertIn("GIT_LFS_SKIP_SMUDGE: '1'", app)

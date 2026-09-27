@@ -14,11 +14,13 @@ name: Release
 #
 # git LFS 는 실물 그림이 필요한 굽기에만 받는다 — Windows 굽기(학생 그림을 실행 파일에 넣고 arona-ui·폰트를 담는다)와
 # CI 가 mac 을 굽는 길. 로컬 dmg 를 검증만 하는 mac job 과 appcast 는 그림이 필요 없어 LFS 를 안 받는다(대역폭 예산,
-# 2026-09-27 v0.2.1 실행이 두 job 모두 체크아웃의 LFS 예산 초과로 멈췄다).
+# 2026-09-27 v0.2.1 실행이 두 job 모두 체크아웃의 LFS 예산 초과로 멈췄다). Windows 굽기는 GitHub LFS 대신 미니의 읽기 전용
+# 창구에서 받는다(scripts/mini-lfs.sh) — 미니가 꺼져 있으면 그 job 이 분명히 실패한다.
 #
 # Secrets:
 #   SPARKLE_ED_PRIVATE_KEY — Sparkle EdDSA 개인키(appcast 서명, mac/win 공용)
 #   MAC_SIGN_P12 / MAC_SIGN_P12_PASSWORD — kasaterm-ci self-signed codesign 인증서(MAC_ARTIFACT=ci 일 때만)
+#   MINI_LFS_TOKEN — 미니 LFS 창구 토큰(build-msi 만). 창구 주소는 저장소 변수 MINI_LFS_URL
 #
 # mac dmg 를 어디서 만드나(MAC_ARTIFACT):
 #   local — 조종 기기(미니)가 Developer ID·hardened runtime 으로 서명하고 애플 공증·staple 까지 한 dmg 를 태그 뒤 릴리스에
@@ -68,9 +70,27 @@ jobs:
           ref: ${{ inputs.tag || '' }}
           lfs: false
 
+      # 그림은 GitHub LFS 가 아니라 미니의 읽기 전용 창구(tools/release/mini_lfs.py)에서 받는다 — GitHub LFS 대역폭 예산이
+      # 막혀도 Windows 판이 서게(2026-09-27 v0.2.1). lfs.url·인증은 이 단계의 환경으로만 준다: 저장소 .lfsconfig 를 안 바꿔
+      # 사람들의 push/pull 은 GitHub LFS 그대로고, 토큰은 체크아웃의 .git/config 에도 안 남는다.
       - name: Fetch LFS assets for the Windows build
         shell: bash
+        env:
+          MINI_LFS_URL: ${{ vars.MINI_LFS_URL }}
+          MINI_LFS_TOKEN: ${{ secrets.MINI_LFS_TOKEN }}
+          GIT_TERMINAL_PROMPT: '0'
+          GCM_INTERACTIVE: never
         run: |
+          [[ -n "$MINI_LFS_URL" && -n "$MINI_LFS_TOKEN" ]] || { echo "::error::변수 MINI_LFS_URL·비밀 MINI_LFS_TOKEN 이 없다 — 미니 LFS 창구를 못 부른다"; exit 1; }
+          # 미니가 꺼졌거나(터널 530·502) 토큰이 틀렸으면(401) 받기 전에 멈춘다 — git lfs 의 재시도·자격 묻기로 흐려지지 않게.
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 30 -X POST -H 'Content-Type: application/vnd.git-lfs+json' \
+            -H "Authorization: Bearer $MINI_LFS_TOKEN" -d '{"operation":"download","transfers":["basic"],"objects":[]}' \
+            "$MINI_LFS_URL/objects/batch" || true)"
+          [[ "$CODE" == 200 ]] || { echo "::error::미니 LFS 창구가 받기를 거절했다(HTTP $CODE) — 미니·kasaterm 터널·토큰을 본다(scripts/mini-lfs.sh status)"; exit 1; }
+          export GIT_CONFIG_COUNT=3 \
+            GIT_CONFIG_KEY_0=lfs.url GIT_CONFIG_VALUE_0="$MINI_LFS_URL" \
+            GIT_CONFIG_KEY_1="http.$MINI_LFS_URL.extraheader" GIT_CONFIG_VALUE_1="Authorization: Bearer $MINI_LFS_TOKEN" \
+            GIT_CONFIG_KEY_2=credential.helper GIT_CONFIG_VALUE_2=''
           EXCLUDE='mobile/**,web/arona-ui/character-src/**'
           git lfs install --local
           git lfs pull --exclude="$EXCLUDE"
