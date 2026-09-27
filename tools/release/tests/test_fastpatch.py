@@ -656,6 +656,36 @@ class LiveRunTests(Fixture):
                 _, state = fp.load(plan["plan_id"], self.state)
                 self.assertNotIn("feed", {k for k, v in state["stages"].items() if v["status"] != "dry"})
 
+    def test_a_finish_run_from_main_continues_a_tag_run_that_stopped(self):
+        # 2026-09-27 v0.2.1: 태그 실행이 체크아웃의 LFS 예산 초과로 멈췄다. 태그의 워크플로는 못 고치니 main 의 워크플로로
+        # 그 태그를 마무리한다(`release vX (both|macos)`) — 가장 최근 것을 본다.
+        plan = self.plan()
+        aid = self.nacho.approve(plan["approval_scope"])
+        self.go(plan, "live", aid)
+        self.ci_publish(plan, conclusion="failure", feed=False)
+        failed = dict(self.ci_runs[0])
+        with self.assertRaisesRegex(Refused, "CI 실패"):
+            self.go(plan, "live", aid)
+        self.assets.pop("kasaterm-v0.2.1-windows-x86_64.msi")      # mac 만 마무리한 릴리스 — msi 가 없다
+        self.ci_runs = [{"databaseId": 43, "status": "completed", "conclusion": "success", "headBranch": "main",
+                         "event": "workflow_dispatch", "displayTitle": "release v0.2.1 (macos)"}, failed]
+        with self.assertRaisesRegex(Refused, "산출물이 모자라다\\(windows\\)"):
+            self.go(plan, "live", aid)
+        self.ci_publish(plan, feed=False)
+        self.ci_runs = [{"databaseId": 44, "status": "completed", "conclusion": "success", "headBranch": "main",
+                         "event": "workflow_dispatch", "displayTitle": "release v0.2.1 (both)"},
+                        {"databaseId": 45, "status": "completed", "conclusion": "success", "headBranch": "main",
+                         "event": "workflow_dispatch", "displayTitle": "release v0.2.10 (both)"}, failed]
+        state = self.go(plan, "live", aid)
+        self.assertEqual((state["stages"]["release"]["status"], state["stages"]["release"]["detail"]["run"]), ("done", 44))
+        # 이름이 비슷한 다른 태그·수동 빌드 검증 실행은 그 태그의 것으로 치지 않는다.
+        b = self.backend(plan, "dry")
+        self.ci_runs = [{"databaseId": 46, "status": "completed", "conclusion": "success", "headBranch": "main",
+                         "event": "workflow_dispatch", "displayTitle": "release v0.2.10 (both)"},
+                        {"databaseId": 47, "status": "completed", "conclusion": "success", "headBranch": "main",
+                         "event": "workflow_dispatch", "displayTitle": "Release main"}]
+        self.assertIsNone(b.ci_run("v0.2.1"))
+
     def test_artifact_digest_and_dmg_identity_are_checked(self):
         plan = self.plan()
         aid = self.nacho.approve(plan["approval_scope"])
@@ -1545,6 +1575,49 @@ class LocalSigningRepoTests(unittest.TestCase):
         self.assertIn('TARGET_DIR="${CARGO_TARGET_DIR:-target}"', self.bake)
         self.assertIn('BINDIR="$TARGET_DIR/release"', self.bake)
         self.assertNotIn('BINDIR="target/', self.bake)
+
+    def test_only_real_builds_fetch_lfs_and_an_existing_tag_can_be_finished_from_main(self):
+        wf = self.wf
+        msi = wf[wf.index("  build-msi:"):wf.index("  build-dmg:")]
+        dmg = wf[wf.index("  build-dmg:"):wf.index("  appcast:")]
+        app = wf[wf.index("  appcast:"):]
+        # Windows 굽기는 학생 그림을 실행 파일에 넣으니 LFS 가 필요하다 — 쓰는 것만 받고, 남은 포인터가 있으면 멈춘다.
+        # 로컬 dmg 검증·appcast 는 그림이 필요 없다.
+        self.assertIn("lfs: false", msi)
+        self.assertIn('git lfs pull --exclude="$EXCLUDE"', msi)
+        self.assertIn("EXCLUDE='mobile/**,web/arona-ui/character-src/**'", msi)
+        self.assertIn("grep -vE '^(mobile/|web/arona-ui/character-src/)'", msi)
+        self.assertLess(msi.index("Fetch LFS assets for the Windows build"), msi.index("Build and verify Windows packages"))
+        self.assertIn("lfs: ${{ env.MAC_ARTIFACT == 'ci' || env.RELEASE_TAG == '' }}", dmg)
+        self.assertNotIn("lfs: true", msi + dmg + app)
+        self.assertIn("GIT_LFS_SKIP_SMUDGE: '1'", app)
+        # 태그 마무리: 입력한 태그를 체크아웃하고 그 릴리스에 붙이며, 태그를 만들거나 옮기는 명령은 없다.
+        self.assertIn("RELEASE_TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}", wf)
+        self.assertEqual(wf.count("ref: ${{ inputs.tag || '' }}"), 2)
+        self.assertIn("tag_name: ${{ env.RELEASE_TAG }}", msi)
+        self.assertNotIn("GITHUB_REF_NAME", msi + dmg + app)
+        for forbidden in ("git tag", "git push --force", "git push -f", "refs/tags/"):
+            self.assertNotIn(forbidden, wf.replace("startsWith(github.ref, 'refs/tags/v')", ""))
+        self.assertIn("run-name: ${{ inputs.tag && format('release {0} ({1})', inputs.tag, inputs.platforms)", wf)
+        # mac 만 마무리: Windows job 을 건너뛰고, appcast 는 dmg 검증 성공 + (Windows 성공 또는 일부러 건너뜀)일 때만.
+        self.assertIn("if: inputs.platforms != 'macos'", msi)
+        self.assertIn("needs.build-dmg.result == 'success'", app)
+        self.assertIn("(inputs.platforms == 'macos' && needs.build-msi.result == 'skipped')", app)
+        both = app[app.index('if [[ "$PLATFORMS" == "both" ]]; then\n          gh release download'):app.index('rm -f "$KEYFILE"')]
+        self.assertIn("appcast-win.xml", both)
+        self.assertIn("git add docs/appcast.xml docs/.nojekyll\n", app)
+        self.assertIn("(mac 만 — Windows 는 그대로)", app)
+
+    def test_the_lfs_folders_the_windows_build_skips_are_really_unused_by_it(self):
+        # 빼는 폴더가 Windows 굽기에 쓰이면 그림이 포인터로 들어가 빈칸이 된다 — 굽기가 읽는 자리에서 그 이름을 찾는다.
+        for rel in ("scripts/windows/package.ps1", "web/arona-ui/package.json", "web/arona-ui/vite.config.ts"):
+            text = (REPO / rel).read_text()
+            self.assertNotIn("character-src", text, rel)
+            self.assertNotIn("mobile/", text, rel)
+        for path in list((REPO / "app").rglob("*.rs")) + list((REPO / "crates").rglob("*.rs")):
+            for m in re.finditer(r'include_bytes!\(\s*(?:concat!\(\s*)?"([^"]+)"', path.read_text(errors="ignore")):
+                target = os.path.normpath(os.path.join(path.parent.relative_to(REPO), m.group(1)))
+                self.assertFalse(target.startswith(("mobile/", "web/arona-ui/character-src/")), f"{path}: {target}")
 
     def test_the_hardened_bake_signs_every_listed_piece_with_runtime_and_timestamp(self):
         for rel in macsign.HARDENED_SIGNED:

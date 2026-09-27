@@ -166,11 +166,16 @@ class RealBackend:
         return out
 
     def ci_run(self, tag):
+        """그 태그의 가장 최근 release.yml 실행 — 태그 push 로 돈 것, 또는 main 의 워크플로로 그 태그를 마무리한 수동 실행
+        (`release vX.Y.Z (both|macos)`, release.yml run-name). 태그의 워크플로는 커밋에 박혀 고칠 수 없어, 태그 실행이
+        멈추면 마무리 실행이 뒤를 잇는다. mac 만 마무리한 실행이면 뒤의 산출물 검사가 msi 없음으로 멈춘다(성공으로 안 친다)."""
         r = self.runner.run([self.gh, "run", "list", "--repo", self.slug, "--workflow", "release.yml", "--json",
-                             "databaseId,status,conclusion,headBranch,headSha,event", "--limit", "30"], timeout=60)
+                             "databaseId,status,conclusion,headBranch,headSha,event,displayTitle", "--limit", "30"], timeout=60)
         if not r.ok:
             raise Refused(f"CI 상태를 읽지 못했다 — {r.tail(2) or '시간 초과'}")
-        runs = [x for x in json.loads(r.out or "[]") if x.get("headBranch") == tag]
+        finish = re.compile(rf"release {re.escape(tag)} \((both|macos)\)")
+        runs = [x for x in json.loads(r.out or "[]") if x.get("headBranch") == tag
+                or (x.get("event") == "workflow_dispatch" and finish.fullmatch(x.get("displayTitle") or ""))]
         return runs[0] if runs else None
 
     # ── 격리 워크트리 ──────────────────────────────────────────────────────

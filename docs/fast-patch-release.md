@@ -276,6 +276,38 @@ windesktop → 앱 재시작 사실이 안 닿아 blocked. 기기마다 「지�
   첫 굽기 때 확인한다(열쇠 없는 미리 굽기는 ad-hoc 이라 라이브러리 검증 조건이 달라 대신할 수 없다).
 - 새 키 발급·로그인·CI 비밀 추가는 이 흐름에 없다. CI 쪽 길(`MAC_ARTIFACT: ci`)로 되돌리면 예전 관문(태그부터 막힘)이 그대로 선다.
 
+### CI 가 멈춘 태그를 마무리하기 — 태그는 그대로 둔다
+
+태그 push 로 도는 release.yml 은 **그 태그 커밋에 박힌 판**이라, 거기서 막힌 것은 그 실행을 다시 돌려도 똑같이 막힌다.
+태그를 지우거나 옮기지 않고, 고친 main 의 워크플로를 수동으로 그 태그에 댄다:
+
+```sh
+gh workflow run release.yml --repo 2rami/kasaterm --ref main -f tag=vX.Y.Z -f platforms=both    # mac·Windows 둘 다
+gh workflow run release.yml --repo 2rami/kasaterm --ref main -f tag=vX.Y.Z -f platforms=macos   # 부분 게시 — 아래
+```
+
+- 실행 이름이 `release vX.Y.Z (both|macos)` 로 붙고, `tools/release` 의 release 단계가 그 태그의 실행으로 알아본다(가장 최근 것).
+  태그를 만들거나 옮기는 명령은 워크플로에 없다. 입력한 태그를 체크아웃하고 그 릴리스에만 붙인다.
+- `macos` 는 **부분 게시**다 — Windows job 을 건너뛰고 mac 피드만 갱신하며, Windows 피드는 손대지 않는다(msi 를 지어내지 않는다).
+  계획은 msi 가 없어 release 단계에서 멈춘다(성공으로 안 친다). 나중에 `both` 로 마무리하면 이어서 끝난다.
+- 워크플로 수동 실행은 게시다(appcast 가 나간다) — 나쵸 확인을 받은 흐름에서만.
+
+### git LFS 는 굽는 job 만
+
+그림 에셋(png·ttf 등, 릴리스 커밋 기준 3,364개·126 MB)은 git LFS 라 체크아웃이 받는 만큼 저장소 소유 계정의 LFS 대역폭
+예산을 쓴다. 2026-09-27 v0.2.1 태그 실행은 두 job 모두 체크아웃의 `git lfs fetch` 에서 「This repository exceeded its LFS
+budget」로 멈췄다(실행 1회에 126 MB × 2).
+
+| job | 그림이 필요한가 | 받는 것 |
+|---|---|---|
+| build-msi | 필요 — 학생 그림을 실행 파일에 넣고(`sprites.rs`), arona-ui 빌드 결과·폰트를 설치본에 담는다 | `mobile/`·`web/arona-ui/character-src/`(vite 빌드가 안 읽는다)를 뺀 78 MB. 받아야 할 것이 포인터로 남으면 멈춘다(빈칸 그림 판 방지) |
+| build-dmg (local) | 불필요 — Cargo.toml·릴리스 노트만 읽고 dmg 는 릴리스에서 받는다 | 없음(`lfs: false` → checkout 이 `GIT_LFS_SKIP_SMUDGE=1`) |
+| build-dmg (ci·빌드 검증) | 필요 | 전부 |
+| appcast | 불필요 — dmg·msi 는 릴리스에서 받는다 | 없음(뒤의 `git pull --rebase` 도 `GIT_LFS_SKIP_SMUDGE`) |
+
+예산이 막힌 동안에는 Windows 굽기가 어떤 방법으로도 그림을 못 받는다. 푸는 길은 저장소 소유 계정이 LFS 예산을 올리거나
+결제 주기가 넘어가는 것뿐이다(도구는 예산·결제를 건드리지 않고, 다른 곳에서 그림을 받아 오는 우회도 하지 않는다).
+
 ## 처음 한 번만 필요한 것
 
 - 판 번호 줄 입구·자기설치 백업은 새 판이 한 번 설치돼야 생긴다(그 전 판에는 없는 코드다).
@@ -287,7 +319,7 @@ windesktop → 앱 재시작 사실이 안 닿아 blocked. 기기마다 「지�
 ## 검사
 
 ```sh
-python3 -m unittest tools.release.tests.test_fastpatch      # 79건 — 아래
+python3 -m unittest tools.release.tests.test_fastpatch      # 82건 — 아래
 cargo test -p kasa-socket app_update                         # 기기 업데이트 창구·러너 32건(app-update.md 「검사」)
 bash scripts/nacho-update-interop.sh                         # 실제 나쵸 update 승인 서버(격리)와 러너·기기 왕복
 bash scripts/nacho-release-interop.sh                        # 실제 나쵸 승인 서버(격리)와 왕복 17건

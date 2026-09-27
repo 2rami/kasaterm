@@ -6,8 +6,15 @@ name: Release
 # 로컬은 scripts/tag-release.sh 로 버전 bump + 태그 push 만 하면 된다.
 # (scripts/release.sh 는 로컬 수동 폴백으로 유지.)
 #
-# 수동 실행(workflow_dispatch) → msi/dmg 빌드만 하고 artifact 로 올린다
-# (태그·릴리스·appcast 불변, CI 검증용).
+# 수동 실행(workflow_dispatch)
+#   tag 없이 → msi/dmg 빌드만 하고 artifact 로 올린다(태그·릴리스·appcast 불변, CI 검증용).
+#   tag=vX.Y.Z → 이미 선 태그의 릴리스를 마무리한다(태그를 새로 만들거나 옮기지 않는다). 태그 push 로 돈 실행이 중간에
+#     멈췄을 때 — 태그의 워크플로는 그 커밋에 박혀 고칠 수 없으니, 고친 main 의 워크플로로 같은 일을 그 태그에 대고 한다.
+#     platforms=macos 는 Windows 를 건드리지 않는 **부분 게시**(mac 피드만 갱신, Windows 피드는 그대로 — 성공으로 치지 않는다).
+#
+# git LFS 는 실물 그림이 필요한 굽기에만 받는다 — Windows 굽기(학생 그림을 실행 파일에 넣고 arona-ui·폰트를 담는다)와
+# CI 가 mac 을 굽는 길. 로컬 dmg 를 검증만 하는 mac job 과 appcast 는 그림이 필요 없어 LFS 를 안 받는다(대역폭 예산,
+# 2026-09-27 v0.2.1 실행이 두 job 모두 체크아웃의 LFS 예산 초과로 멈췄다).
 #
 # Secrets:
 #   SPARKLE_ED_PRIVATE_KEY — Sparkle EdDSA 개인키(appcast 서명, mac/win 공용)
@@ -21,25 +28,55 @@ name: Release
 env:
   MAC_ARTIFACT: local
   MAC_TEAM: L366799VND
+  # 이 실행이 다루는 릴리스 태그 — 태그 push 면 그 태그, 수동 마무리면 입력한 태그, 빌드 검증이면 빈 값.
+  RELEASE_TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
 on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '마무리할 기존 릴리스 태그(vX.Y.Z). 비우면 빌드 검증만'
+        required: false
+        default: ''
+      platforms:
+        description: 'both = mac·Windows 둘 다, macos = Windows 를 건드리지 않는 부분 게시'
+        required: false
+        default: both
+        type: choice
+        options:
+          - both
+          - macos
+# 태그 마무리 실행은 「release vX.Y.Z (both|macos)」로 이름이 붙는다 — tools/release 가 이 이름으로 그 태그의 실행을 찾는다.
+run-name: ${{ inputs.tag && format('release {0} ({1})', inputs.tag, inputs.platforms) || format('Release {0}', github.ref_name) }}
 
 permissions:
   contents: write
 
 jobs:
   build-msi:
+    if: inputs.platforms != 'macos'
     runs-on: windows-latest
     steps:
-      # 그림 에셋이 git-lfs 라 lfs:true 가 없으면 130바이트 포인터가 내려오고,
-      # build.rs 의 에셋 검사가 거기서 빌드를 세운다(의도된 loud failure).
+      # 그림 에셋이 git-lfs 라 안 받으면 130바이트 포인터가 내려오고, build.rs 의 에셋 검사가 거기서 빌드를 세운다
+      # (의도된 loud failure). 받는 것은 이 굽기가 쓰는 것만 — 폰 앱(mobile/)과 arona-ui 캐릭터 원본(character-src/,
+      # vite 빌드가 안 읽는다)은 뺀다(126 MB → 약 80 MB). 빼는 목록 밖은 새 폴더가 생겨도 기본으로 받는다.
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          lfs: true
+          ref: ${{ inputs.tag || '' }}
+          lfs: false
+
+      - name: Fetch LFS assets for the Windows build
+        shell: bash
+        run: |
+          EXCLUDE='mobile/**,web/arona-ui/character-src/**'
+          git lfs install --local
+          git lfs pull --exclude="$EXCLUDE"
+          # 받아야 할 그림이 하나라도 포인터로 남았으면 멈춘다 — 학생 그림 일부가 빈칸인 판을 내지 않는다.
+          LEFT="$(git lfs ls-files | awk '$2 == "-"' | cut -d' ' -f3- | grep -vE '^(mobile/|web/arona-ui/character-src/)' || true)"
+          [[ -z "$LEFT" ]] || { echo "::error::LFS 그림이 포인터로 남았다 ($(echo "$LEFT" | wc -l | tr -d ' ')개)"; echo "$LEFT" | head -20; exit 1; }
 
       - name: Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -60,8 +97,8 @@ jobs:
           # 해시테이블 splatting — 배열로 넘기면 "-ExpectedVersion" 이 이름이 아니라
           # 첫 위치 인자($Repo)로 들어가 경로 해석에서 선다.
           $arguments = @{}
-          if ($env:GITHUB_REF -like "refs/tags/v*") {
-            $arguments["ExpectedVersion"] = $env:GITHUB_REF_NAME
+          if ($env:RELEASE_TAG) {
+            $arguments["ExpectedVersion"] = $env:RELEASE_TAG
           }
           & .\scripts\windows\package.ps1 @arguments
 
@@ -79,11 +116,12 @@ jobs:
           "name=kasaterm-windows-x86_64" >> $env:GITHUB_OUTPUT
           Write-Host "built $($msi.Name) ($([math]::Round($msi.Length/1MB,1)) MB)"
 
-      # 태그 push → 해당 릴리스에 MSI 첨부(릴리스 없으면 생성. 노트는 dmg job 이 채운다).
+      # 태그 push·태그 마무리 → 해당 릴리스에 MSI 첨부(릴리스 없으면 생성. 노트는 dmg job 이 채운다).
       - name: Attach Windows packages to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             ${{ steps.windows_packages.outputs.msi }}
             ${{ steps.windows_packages.outputs.msi_hash }}
@@ -91,9 +129,9 @@ jobs:
             ${{ steps.windows_packages.outputs.zip_hash }}
           fail_on_unmatched_files: true
 
-      # 수동 실행 → artifact 로만(릴리스 불변, 빌드 검증용).
+      # 빌드 검증 실행 → artifact 로만(릴리스 불변).
       - name: Upload Windows package artifacts
-        if: github.event_name == 'workflow_dispatch'
+        if: env.RELEASE_TAG == ''
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.windows_packages.outputs.name }}
@@ -110,27 +148,29 @@ jobs:
     steps:
       # 그림 에셋이 git-lfs 라 lfs:true 가 없으면 130바이트 포인터가 내려오고,
       # build.rs 의 에셋 검사가 거기서 빌드를 세운다(의도된 loud failure).
+      # 그림은 CI 가 mac 을 구울 때만 받는다. 로컬 dmg 검증은 Cargo.toml·릴리스 노트만 읽는다.
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          lfs: true
+          ref: ${{ inputs.tag || '' }}
+          lfs: ${{ env.MAC_ARTIFACT == 'ci' || env.RELEASE_TAG == '' }}
 
       - name: Rust toolchain (stable)
-        if: env.MAC_ARTIFACT == 'ci' || github.event_name == 'workflow_dispatch'
+        if: env.MAC_ARTIFACT == 'ci' || env.RELEASE_TAG == ''
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cargo cache
-        if: env.MAC_ARTIFACT == 'ci' || github.event_name == 'workflow_dispatch'
+        if: env.MAC_ARTIFACT == 'ci' || env.RELEASE_TAG == ''
         uses: Swatinem/rust-cache@v2
 
       # 태그와 Cargo.toml 버전이 어긋나면 CFBundleVersion 이 어긋나 Sparkle 의
       # 새 버전 판정이 꼬인다 — 빌드 전에 즉시 실패시킨다.
       - name: Verify tag matches Cargo.toml version
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE_TAG != ''
         run: |
           CARGO_VER="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
-          if [[ "v$CARGO_VER" != "$GITHUB_REF_NAME" ]]; then
-            echo "::error::Cargo.toml version($CARGO_VER) != tag($GITHUB_REF_NAME) — scripts/tag-release.sh 로 릴리스할 것"
+          if [[ "v$CARGO_VER" != "$RELEASE_TAG" ]]; then
+            echo "::error::Cargo.toml version($CARGO_VER) != tag($RELEASE_TAG) — scripts/tag-release.sh 로 릴리스할 것"
             exit 1
           fi
 
@@ -138,7 +178,7 @@ jobs:
       # KASATERM_SIGN_ID 로 이 identity 를 찾아 서명한다. 고정 인증서라 업데이트를
       # 거듭해도 macOS TCC 권한이 유지된다(ad-hoc 은 빌드마다 재승인).
       - name: Import codesign certificate
-        if: env.MAC_ARTIFACT == 'ci' || github.event_name == 'workflow_dispatch'
+        if: env.MAC_ARTIFACT == 'ci' || env.RELEASE_TAG == ''
         env:
           P12_B64: ${{ secrets.MAC_SIGN_P12 }}
           P12_PASS: ${{ secrets.MAC_SIGN_P12_PASSWORD }}
@@ -156,13 +196,13 @@ jobs:
       # .app 번들(코드사인 + Sparkle.framework + arona-ui 포함) → dmg 스테이징.
       # Sparkle tarball 다운로드(build-app.sh 내부)가 gh 를 쓰므로 GH_TOKEN 필요.
       - name: Build .app + .dmg
-        if: env.MAC_ARTIFACT == 'ci' || github.event_name == 'workflow_dispatch'
+        if: env.MAC_ARTIFACT == 'ci' || env.RELEASE_TAG == ''
         env:
           GH_TOKEN: ${{ github.token }}
           KASATERM_SIGN_ID: kasaterm-ci
         run: |
           bash scripts/build-app.sh
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${RELEASE_TAG}"
           [[ "$VERSION" == v* ]] || VERSION="v$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')-dev"
           DMG="dist/kasaterm-$VERSION.dmg"
           STAGE="$(mktemp -d)"
@@ -178,11 +218,11 @@ jobs:
       # 팀이 다르거나 공증이 없거나 판 번호가 태그와 다르면 실패 → appcast job 이 안 돈다.
       - name: Verify locally signed DMG
         id: verify_local
-        if: env.MAC_ARTIFACT == 'local' && startsWith(github.ref, 'refs/tags/v')
+        if: env.MAC_ARTIFACT == 'local' && env.RELEASE_TAG != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${RELEASE_TAG}"
           DMG_NAME="kasaterm-$VERSION.dmg"
           DL="$(mktemp -d)"
           for i in $(seq 1 120); do
@@ -215,11 +255,11 @@ jobs:
 
       # 태그 push → 릴리스에 dmg 첨부 + 설치 안내 노트(없으면 생성, msi job 과 선착순). local 이면 올리지 않고 노트만.
       - name: Attach DMG to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE_TAG != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${RELEASE_TAG}"
           # docs/release-notes/<태그>.md 가 있으면 그 판의 변경사항을 맨 앞에 싣는다.
           # 없으면 아래 설치 안내만 — 태그마다 워크플로를 고칠 필요가 없다.
           HIGHLIGHTS=""
@@ -256,9 +296,9 @@ jobs:
             gh release create "$VERSION" "$DMG" --title "kasaterm $VERSION" --notes "$NOTES"
           fi
 
-      # 수동 실행 → artifact 로만(릴리스 불변, 빌드 검증용).
+      # 빌드 검증 실행 → artifact 로만(릴리스 불변).
       - name: Upload DMG artifact
-        if: github.event_name == 'workflow_dispatch'
+        if: env.RELEASE_TAG == ''
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.DMG_NAME }}
@@ -266,9 +306,14 @@ jobs:
 
   # msi + dmg 가 모두 릴리스에 올라온 뒤 appcast 2종을 서명·생성해 docs/ 로 커밋.
   # 설치된 앱들의 Sparkle(mac)/WinSparkle(win)이 이 Pages 피드를 보고 자동 업데이트한다.
+  # mac 만 마무리(platforms=macos)면 build-msi 가 건너뛰어지므로 always() 로 들어와 결과를 직접 본다 — dmg 검증이 성공했고,
+  # Windows 는 성공했거나(both) 일부러 건너뛴 경우(macos)에만 돈다. 실패·취소된 job 위로는 절대 안 돈다.
   appcast:
     needs: [build-msi, build-dmg]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      always() && (startsWith(github.ref, 'refs/tags/v') || inputs.tag != '')
+      && needs.build-dmg.result == 'success'
+      && (needs.build-msi.result == 'success' || (inputs.platforms == 'macos' && needs.build-msi.result == 'skipped'))
     runs-on: macos-latest
     steps:
       # docs/ 커밋은 main 에 올라가야 Pages 가 서빙한다(태그 detached 체크아웃 금지).
@@ -291,8 +336,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ED_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
           VERIFIED_SHA: ${{ needs.build-dmg.outputs.dmg_sha256 }}
+          PLATFORMS: ${{ inputs.platforms || 'both' }}
+          # 뒤의 git pull --rebase 가 LFS 그림을 받으려 들지 않게 — appcast 는 그림이 필요 없다.
+          GIT_LFS_SKIP_SMUDGE: '1'
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${RELEASE_TAG}"
           VER="${VERSION#v}"
           KEYFILE="$RUNNER_TEMP/ed.key"
           printf '%s' "$ED_KEY" > "$KEYFILE"
@@ -319,6 +367,8 @@ jobs:
 
           # Windows appcast — 같은 EdDSA 키로 msi 서명. sign_update 출력이 그대로
           # enclosure 속성: sparkle:edSignature="..." length="..."
+          # macos 부분 게시면 Windows 피드는 손대지 않는다(msi 가 없어도 지어내지 않는다).
+          if [[ "$PLATFORMS" == "both" ]]; then
           gh release download "$VERSION" -p '*.msi' -O "$RUNNER_TEMP/win.msi"
           MSI_NAME="$(gh release view "$VERSION" --json assets -q '.assets[].name' | grep -E '\.msi$' | head -1)"
           SIG_LINE="$(vendor/Sparkle/bin/sign_update --ed-key-file "$KEYFILE" "$RUNNER_TEMP/win.msi")"
@@ -339,12 +389,18 @@ jobs:
               </channel>
           </rss>
           XML
+          fi
           rm -f "$KEYFILE" "$RUNNER_TEMP/win.msi"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/appcast.xml docs/appcast-win.xml docs/.nojekyll
-          git commit -m "chore(release): appcast $VERSION"
+          if [[ "$PLATFORMS" == "both" ]]; then
+            git add docs/appcast.xml docs/appcast-win.xml docs/.nojekyll
+            git commit -m "chore(release): appcast $VERSION"
+          else
+            git add docs/appcast.xml docs/.nojekyll
+            git commit -m "chore(release): appcast $VERSION (mac 만 — Windows 는 그대로)"
+          fi
           # 태그 이후 main 이 움직였을 수 있다 — rebase 후 push.
           git pull --rebase origin main
           git push origin main
