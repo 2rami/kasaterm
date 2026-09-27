@@ -21,6 +21,8 @@ CARGO_CANDIDATES = (str(Path.home() / ".cargo/bin/cargo"), "/opt/homebrew/bin/ca
 GIT_LFS_CANDIDATES = (str(Path.home() / ".local/bin/git-lfs"), "/opt/homebrew/bin/git-lfs", "/usr/local/bin/git-lfs")
 # 시스템 도구는 자리가 정해져 있다 — 이름으로 부르면 PATH 앞의 다른 것이 끼어들 수 있다.
 SYSTEM = {"codesign": "/usr/bin/codesign", "spctl": "/usr/sbin/spctl", "hdiutil": "/usr/bin/hdiutil"}
+# 로컬 mac 판(release.yml MAC_ARTIFACT=local)에만 — 신원 보기·공증·staple·스테이징. 없으면 그 모드의 계획만 막는다.
+LOCAL_SIGNING = {"security": "/usr/bin/security", "xcrun": "/usr/bin/xcrun", "ditto": "/usr/bin/ditto"}
 
 # RFC 8032 7.1 TEST 2 — 한 바이트 메시지.
 _PUB = bytes.fromhex("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
@@ -98,7 +100,7 @@ def check(runner, env=None, which=shutil.which):
     if tools["gh"]["path"]:
         auth = runner.run([tools["gh"]["path"], "auth", "status"], timeout=30)
         tools["gh"]["logged_in"] = auth.ok
-    for name, path in SYSTEM.items():
+    for name, path in {**SYSTEM, **LOCAL_SIGNING}.items():
         tools[name] = {"path": path} if os.path.exists(path) else {"path": None, "why": f"{path} 가 없다"}
     return tools
 

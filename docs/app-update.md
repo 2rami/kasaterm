@@ -140,8 +140,9 @@
 2. 키 없는 기기(맥북)의 중계 위임 — 명부 파일에 `update_approvals: true` 를 어느 기기에 둘지. 없으면 맥북은 update 승인을 못 읽어
    「맥북 먼저」가 거기서 막힌다. 신뢰 설정이라 사람이 적는다.
 3. 기기 설치 스위치를 켤 기기와 시점 — 켜는 것은 그 기기 앱의 실행 환경(`KASATERM_APP_UPDATE=on`)이다.
-4. CI mac 판 서명 — 지금 CI 판은 자체 서명·미공증이라 이 창구가 **팀·공증 검사에서 거절한다**(의도한 것). Developer ID
-   서명·공증을 CI 에 넣을지는 [fast-patch-release.md](fast-patch-release.md) 「서명·공증」.
+4. mac 판 서명 — CI 가 굽는 판은 자체 서명·미공증이라 이 창구가 **팀·공증 검사에서 거절한다**(의도한 것). 릴리스는
+   조종 기기가 Developer ID 서명·공증한 dmg 를 올리고 CI 는 검증만 하는 길(`MAC_ARTIFACT: local`)로 간다 —
+   [fast-patch-release.md](fast-patch-release.md) 「서명·공증」.
 
 ## 검사
 

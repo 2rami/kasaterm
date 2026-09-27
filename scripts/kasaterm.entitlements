@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 공증 릴리스(hardened runtime) 서명에만 쓴다 — scripts/build-app.sh KASATERM_SIGN_HARDENED=1.
+     음성 입력(NSMicrophoneUsageDescription)과 osascript 로 여는 알림·폴더 고르기(Automation)가 hardened runtime 에서 막히지 않게. -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>

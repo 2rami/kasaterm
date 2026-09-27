@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 
-from tools.release import deps, devices, nacho
+from tools.release import deps, devices, macsign, nacho
 from tools.release.backend import PUBLISH_STAGES, TESTS, RealBackend, identity_block, identity_of
 from tools.release.common import Pending, Refused, fetch_feed, feed_item, sha256_bytes, version_text, version_tuple
 from tools.release.proc import Http, Runner
@@ -117,6 +117,8 @@ def capabilities(repo):
             # CI 가 쓸 서명 신원 — release.yml 에서 읽은 예상. 실제 신원은 release 단계가 dmg 를 열어 다시 잰다.
             "ci_identity": {"authority": sign_id, "notarized": "notarytool" in ci, "predicted": True,
                             "team": team.group(1) if team and (sign_id or "").startswith("Developer ID Application") else None},
+            # 누가 mac dmg 를 만드나 — ci(자체 서명) 또는 local(이 기기가 Developer ID·공증, CI 는 검증만).
+            "artifact": macsign.workflow_mode(ci),
             "apply": "업데이터가 받고 사람이 「설치 후 재실행」 — 강제 종료 없음",
         },
         "windows": {
@@ -295,6 +297,14 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
     installed = identity_of(runner, installed_app, tools) if Path(installed_app).exists() else None
     signing = {"release": caps["macos"]["ci_identity"], "installed": installed, "installed_app": str(installed_app),
                "remote": "원격 기기의 설치본 신원은 /version 이 알려 주지 않아 모른다"}
+    mac_artifact = None
+    if "macos" in desktop and caps["macos"]["artifact"]["mode"] == "local":
+        # 이 기기가 서명·공증한다 — 준비(신원·열쇠고리·굽기 스크립트·CI 검증)가 하나라도 빠지면 태그부터 막는다.
+        mac_artifact = macsign.local_signing(runner, tools)
+        mac_artifact["problems"] = macsign.plan_problems(mac_artifact, caps["macos"]["artifact"], installed) \
+            + macsign.repo_ready(repo)
+        signing["release"] = macsign.predicted_identity(mac_artifact)
+        blocks.extend(f"mac 서명(로컬): {p}" for p in mac_artifact["problems"])
     if "macos" in desktop:
         why = identity_block(signing["release"], installed)
         if why:
@@ -330,7 +340,8 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
         "feed": {"source": feed, "windows": feed_win, "version": fv, "windows_version": fv_win},
         "changes": {"commits": [{"sha": s, "subject": t} for s, t in log], "files": kinds,
                     "needs": {"desktop_update": bool(kinds["native"]), "ios_build": bool(kinds["mobile"])}},
-        "capabilities": caps, "signing": signing, "baseline": scope_rows, "ready_builds": ready_builds(repo, commit),
+        "capabilities": caps, "signing": signing, "mac_artifact": mac_artifact, "baseline": scope_rows,
+        "ready_builds": ready_builds(repo, commit),
         "tools": tools,
         "tests": [" ".join(t) for t in TESTS],
     }
@@ -449,6 +460,25 @@ def device_apply(plan_id, plan, state, rollout_id, approval_id, live, state_dir=
     return 0 if r.ok else 1
 
 
+def mac_preflight(repo, plan, state_dir=None, runner=None, http=None):
+    """로컬 mac 판을 열쇠 없이 미리 굽는다 — 계획 작업 폴더 안에서만(공유 dist·설치본 불변). 막힘이 있어도 돈다."""
+    backend = backend_for(repo, plan, "local", state_dir, devices=[], http=http, runner=runner)
+    try:
+        out = backend.preflight(plan)
+    except Refused as e:
+        print(f"멈춤: {e}", file=sys.stderr)
+        return 2
+    (plan_dir(plan["plan_id"], state_dir) / "preflight.json").write_text(json.dumps(out, ensure_ascii=False, indent=2))
+    print(f"미리 굽기 {plan['tag']} · 버전 커밋 {out['commit'][:8]} · 판 {out['version']} · dmg {out['dmg']}")
+    print(f"  dmg {out['dmg_sha256'][:19]} · Mach-O {len(out['machos'])}개 · hardened 서명 목록 밖 {len(out['uncovered'])}개")
+    for rel in out["uncovered"]:
+        print(f"      목록 밖: {rel}")
+    print(f"  실제 서명이 고칠 것(열쇠 없이 ad-hoc 이라 당연히 남는다) {len(out['signing_would_fix'])}건")
+    for why in out["signing_would_fix"][:12]:
+        print(f"      {why}")
+    return 0 if not out["uncovered"] else 1
+
+
 def load(plan_id, state_dir=None):
     d = plan_dir(plan_id, state_dir)
     plan = json.loads((d / "plan.json").read_text())
@@ -488,15 +518,17 @@ def backend_for(repo, plan, mode, state_dir=None, devices=None, http=None, runne
     runner = runner or Runner(mode)
     fleet = devices if devices is not None else [{"label": d["label"], "base": d["base"]} for d in plan["baseline"]]
     return RealBackend(repo, runner, http, plan_dir(plan["plan_id"], state_dir) / "work",
-                       lambda p, s: track_devices(repo, p, s, fleet, http), plan["tools"])
+                       lambda p, s: track_devices(repo, p, s, fleet, http), plan["tools"],
+                       unlock=os.environ.get("KASATERM_RELEASE_UNLOCK") == "1")
 
 
 def run(plan_id, backend, state_dir=None, approval_id=None, authority=None, at_ms=None):
     """검사·굽기는 실제로, 게시 단계는 live 일 때만. live 는 나쵸 승인을 게시 첫 단계 직전에 한 번 소비한다."""
     plan, state = load(plan_id, state_dir)
-    if plan["errors"]:
-        raise Refused("계획에 막힘이 있다 — " + "; ".join(plan["errors"]))
     mode = backend.runner.mode
+    # dry-run 은 아무것도 안 하니 막힘이 있어도 보인다 — 무엇이 막는지와 단계 명령을 함께 본다.
+    if plan["errors"] and mode != "dry":
+        raise Refused("계획에 막힘이 있다 — " + "; ".join(plan["errors"]))
     live = mode == "live"
     if live and plan["live_blocks"]:
         raise Refused("live 게시가 막혀 있다 — " + "; ".join(plan["live_blocks"]))
@@ -578,8 +610,13 @@ def describe(plan, state=None):
     for b in plan["live_blocks"]:
         lines.append(f"  게시 막힘: {b}")
     rel, ins = plan["signing"]["release"], plan["signing"]["installed"]
-    lines.append(f"  서명: CI {rel.get('authority') or '미확인'}(팀 {rel.get('team') or '없음'}, 공증 {'함' if rel.get('notarized') else '안 함'})"
+    who = "이 기기(로컬 서명·공증)" if rel.get("source") == "local" else "CI"
+    lines.append(f"  서명: {who} {rel.get('authority') or '미확인'}(팀 {rel.get('team') or '없음'}, 공증 {'함' if rel.get('notarized') else '안 함'})"
                  f" · 설치본 {(ins or {}).get('authority') or '미확인'}(팀 {(ins or {}).get('team') or '없음'})")
+    local = plan.get("mac_artifact")
+    if local and local.get("identity"):
+        lines.append(f"  로컬 서명: 열쇠고리 {local['keychain']} · 공증 프로필 {local['notary_profile']}"
+                     f" · 풀기 도우미 {local.get('unlock_helper') or '없음'}(이 도구는 풀지 않는다)")
     if plan.get("approval_scope"):
         lines.append(f"  승인 범위 해시 {plan['approval_scope_hash'][:19]} · 기기 {len(plan['device_ids'])}대 · 조종 기기 {plan['controller'][:12]}")
     appr = (state or {}).get("approval")
@@ -617,7 +654,7 @@ def main(argv=None):
     p.add_argument("--version", default=None)
     p.add_argument("--ios-build", default=None)
     p.add_argument("--json", action="store_true")
-    for name in ("dry-run", "status", "run", "device-plan", "device-apply"):
+    for name in ("dry-run", "status", "run", "device-plan", "device-apply", "mac-preflight"):
         s = sub.add_parser(name)
         s.add_argument("plan_id")
         s.add_argument("--repo", default=".")
@@ -672,6 +709,8 @@ def main(argv=None):
         return 0
     if a.cmd == "device-apply":
         return device_apply(a.plan_id, plan, state, a.rollout, a.approval, a.live, a.state_dir)
+    if a.cmd == "mac-preflight":
+        return mac_preflight(a.repo, plan, a.state_dir)
     if a.cmd == "status":
         backend = backend_for(a.repo, plan, "dry", a.state_dir)
         state["remote"] = backend.observe(plan)

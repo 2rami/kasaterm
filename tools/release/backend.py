@@ -4,6 +4,11 @@
 공유 워킹트리에서는 그 `main` 이 계획 커밋이라는 보장이 없다. 그래서 같은 일(같은 치환·같은 커밋 메시지·같은 태그)을
 계획 커밋의 격리 워크트리에서 하고, `HEAD:main` 과 태그를 `--atomic` 으로 한 번에 올린다 — 둘 중 하나만 올라가는
 반쪽 상태를 만들지 않는다. CI 는 태그 push 로 도는 release.yml 그대로다.
+
+release.yml 이 `MAC_ARTIFACT: local` 이면 mac dmg 는 이 기기가 만든다(tools/release/macsign.py): 굽기 단계가 버전 커밋으로
+Developer ID·hardened runtime 서명해 굽고, 태그 단계가 승인 뒤 공증·staple·재검증을 마친 다음에만 push 하며, 릴리스
+단계가 그 dmg 를 덮지 않고 올린다. CI 는 그 dmg 를 검증만 하고, 여기서는 받은 파일이 공증한 해시와 같은지 다시 본다.
+열쇠고리는 부르는 쪽이 `KASATERM_RELEASE_UNLOCK=1` 로 맡겼을 때만 기존 풀기 도우미로 서명·공증 바로 앞에서 푼다.
 """
 
 import base64
@@ -13,7 +18,7 @@ from pathlib import Path
 import re
 import shutil
 
-from tools.release import deps
+from tools.release import deps, macsign
 from tools.release.common import Pending, Refused, feed_item, fetch_feed, sha256_bytes, sha256_file, version_tuple
 
 REPO_SLUG = "2rami/kasaterm"
@@ -54,15 +59,22 @@ def identity_of(runner, app, tools):
 
 def identity_block(release, installed):
     """자동 배포해도 되는 같은 신원인가 — 아니면 정확한 까닭. 보안 설정을 끄는 길은 없다."""
+    who = "로컬 mac 판" if (release or {}).get("source") == "local" else "CI mac 판"
     if not release or not release.get("team"):
-        return "CI mac 판에 팀 서명 신원이 없다(자체 서명) — Developer ID 설치본에 자동 배포하지 않는다"
+        return f"{who}에 팀 서명 신원이 없다(자체 서명) — Developer ID 설치본에 자동 배포하지 않는다"
     if not release.get("notarized"):
-        return "CI mac 판이 공증되지 않았다 — Developer ID 설치본에 자동 배포하지 않는다"
+        return f"{who}이 공증되지 않았다 — Developer ID 설치본에 자동 배포하지 않는다"
     if not installed or not installed.get("verified") or not installed.get("team"):
         return "설치본 서명 신원을 확인하지 못했다"
     if release["team"] != installed["team"]:
-        return f"서명 팀이 다르다(CI {release['team']} ≠ 설치본 {installed['team']})"
+        return f"서명 팀이 다르다({who} {release['team']} ≠ 설치본 {installed['team']})"
     return None
+
+
+def mac_local(plan):
+    """이 계획이 mac dmg 를 이 기기에서 서명·공증하는가 — 계획 때 준비를 다 확인한 경우에만 설정을 돌려준다."""
+    cfg = plan.get("mac_artifact") or {}
+    return cfg if cfg.get("mode") == "local" and cfg.get("identity") and not cfg.get("problems") else None
 
 
 def ed25519_ok(runner, openssl, public_b64, signature_b64, path, scratch):
@@ -85,9 +97,10 @@ def ed25519_ok(runner, openssl, public_b64, signature_b64, path, scratch):
 
 
 class RealBackend:
-    def __init__(self, repo, runner, http, workdir, tracker, tools, slug=REPO_SLUG, remote="origin"):
+    def __init__(self, repo, runner, http, workdir, tracker, tools, slug=REPO_SLUG, remote="origin", unlock=False):
         self.repo, self.runner, self.http, self.workdir = Path(repo), runner, http, Path(workdir)
         self.tracker, self.tools, self.slug, self.remote = tracker, tools, slug, remote
+        self.unlock = unlock
 
     def tool(self, name):
         """계획에 못 박힌 절대경로. 없으면 그 도구가 왜 없는지 그대로 말하고 멈춘다."""
@@ -104,9 +117,9 @@ class RealBackend:
     def dry(self):
         return self.runner.mode == "dry"
 
-    def git(self, *args, kind="read", timeout=120, cwd=None):
+    def git(self, *args, kind="read", timeout=120, cwd=None, extra=None):
         return self.runner.run(["git", "-C", str(cwd or self.repo), *args], timeout=timeout, kind=kind,
-                               env=deps.git_env(self.tools))
+                               env={**deps.git_env(self.tools), **(extra or {})})
 
     def env(self):
         return {**deps.tool_env(self.tools, ("cargo", "git-lfs", "gh")), "CARGO_TARGET_DIR": str(self.workdir / "target")}
@@ -161,8 +174,8 @@ class RealBackend:
         return runs[0] if runs else None
 
     # ── 격리 워크트리 ──────────────────────────────────────────────────────
-    def worktree(self, plan):
-        wt = self.workdir / "wt"
+    def worktree(self, plan, name="wt"):
+        wt = self.workdir / name
         if (wt / ".git").exists():
             head = self.git("rev-parse", "HEAD", cwd=wt)
             if head.ok and head.out.strip() in (plan["commit"], self.bump_parent_ok(wt, plan)):
@@ -178,6 +191,26 @@ class RealBackend:
     def bump_parent_ok(self, wt, plan):
         parent = self.git("rev-parse", "HEAD^", cwd=wt)
         return self.git("rev-parse", "HEAD", cwd=wt).out.strip() if parent.ok and parent.out.strip() == plan["commit"] else None
+
+    def ensure_bump(self, wt, plan):
+        """버전 커밋 — tag-release.sh 와 같은 치환·메시지. 날짜를 계획 시각에 못 박아 몇 번을 다시 만들어도 같은 커밋이다.
+        굽기와 태그가 다른 실행이어도(그 사이 워크트리를 치운다) dmg 가 태그 커밋에서 구운 것임을 해시로 잇는다."""
+        if self.git("rev-parse", "HEAD", cwd=wt).out.strip() == plan["commit"]:
+            cargo = wt / "Cargo.toml"
+            text = cargo.read_text()
+            bumped = re.sub(r'^version = "[^"]*"', f'version = "{plan["version"]}"', text, count=1, flags=re.M)
+            if bumped == text:
+                raise Refused("Cargo.toml 의 워크스페이스 버전 줄을 못 찾았다")
+            cargo.write_text(bumped)
+            stamp = f"@{plan['created_at_ms'] // 1000} +0000"
+            c = self.git("commit", "-qam", f"chore(release): {plan['tag']}", kind="local", cwd=wt,
+                         extra={"GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp})
+            if not c.ok:
+                raise Refused(f"버전 커밋 실패 — {c.tail(3)}")
+        bump = self.git("rev-parse", "HEAD", cwd=wt).out.strip()
+        if self.bump_parent_ok(wt, plan) != bump:
+            raise Refused(f"격리 워크트리가 이 계획의 버전 커밋이 아니다({bump[:8] or '?'})")
+        return bump
 
     # ── 단계 ──────────────────────────────────────────────────────────────
     def verify(self, plan, state):
@@ -196,6 +229,9 @@ class RealBackend:
 
     def build(self, plan, state):
         """태그 전 굽기 확인. 같은 커밋의 ready 판이 있으면 그 판의 서명·바이너리 해시를 다시 재고 갈음한다."""
+        local = mac_local(plan)
+        if local:
+            return self.build_signed(plan, local)
         for b in plan.get("ready_builds", []):
             if not b["matches"]:
                 continue
@@ -221,6 +257,190 @@ class RealBackend:
         return {"built": str(wt / "dist/kasaterm.app"), "sha256": sha256_file(binary),
                 "identity": identity_of(self.runner, wt / "dist/kasaterm.app", self.tools)}
 
+    def build_signed(self, plan, local):
+        """공증에 낼 판 — 버전 커밋으로, Developer ID·hardened runtime·보안 타임스탬프로 굽고 dmg 까지 서명한다.
+
+        ready 판은 계획 커밋(버전을 안 올린 판)을 평소 서명으로 구운 것이라 쓰지 않는다. 열쇠고리는 풀지 않는다 —
+        잠겨 있으면 build-app.sh 의 서명이 실패하고, 그 까닭을 그대로 보인다.
+        """
+        wt = self.worktree(plan)
+        if self.dry:
+            return {"would": [f"격리 워크트리에 버전 커밋({plan['tag']}) → KASATERM_SIGN_HARDENED=1 KASATERM_SIGN_ID={local['identity']['name']}"
+                              f" KASATERM_SIGN_KEYCHAIN={local['keychain']} bash scripts/build-app.sh",
+                              f"dmg → {self.workdir / 'out' / asset_names(plan['tag'])['macos']} (공유 dist 안 씀) · dmg 서명",
+                              "번들 안 Mach-O 전부 Developer ID·팀·hardened runtime·타임스탬프 확인"], "dry": True}
+        bump = self.ensure_bump(wt, plan)
+        env = {**self.env(), "KASATERM_SIGN_ID": local["identity"]["sha1"], "KASATERM_SIGN_KEYCHAIN": local["keychain"],
+               "KASATERM_SIGN_HARDENED": "1"}
+        helper = self.unlock_helper(local)
+        if helper:
+            env["KASATERM_SIGN_UNLOCK"] = helper
+        else:
+            self.probe_key(local)
+        r = self.runner.run(["bash", "scripts/build-app.sh"], cwd=wt, timeout=3600, env=env, kind="local")
+        if not r.ok:
+            raise Refused(f"서명 굽기 실패 — {'시간 초과' if r.timed_out else r.tail(4)}"
+                          f" (열쇠고리가 잠겼으면 사람이 {local.get('unlock_helper') or '열쇠고리 풀기'} 를 먼저 — 이 도구는 풀지 않는다)")
+        app = wt / "dist/kasaterm.app"
+        facts = self.bundle_facts(wt, app, plan, bump)
+        dmg = self.make_dmg(app, plan, local)
+        rows, debuggable = macsign.scan(self.runner, self.tool("codesign"), app)
+        problems = macsign.readiness_problems(rows, local["identity"]["team"], debuggable)
+        if problems:
+            raise Refused("공증에 낼 수 없는 번들 — " + "; ".join(problems[:6]) + (f" 외 {len(problems) - 6}건" if len(problems) > 6 else ""))
+        return {"commit": bump, "built": str(app), "dmg": str(dmg), "dmg_sha256": sha256_file(dmg), **facts,
+                "machos": len(rows), "identity": identity_of(self.runner, app, self.tools), "signed_with": local["identity"]["name"]}
+
+    def unlock_helper(self, local):
+        """맡겼을 때만 쓰는 풀기 도우미 — 계획이 본 자리 그대로, 지금도 실행 파일일 때."""
+        helper = local.get("unlock_helper")
+        if not self.unlock:
+            return None
+        if not helper or not os.access(helper, os.X_OK):
+            raise Refused("KASATERM_RELEASE_UNLOCK=1 인데 계획이 본 풀기 도우미가 없다")
+        return helper
+
+    def probe_key(self, local):
+        target = self.workdir / "probe" / "true"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile("/usr/bin/true", target)
+        r = self.runner.run(macsign.probe_command(self.tool("codesign"), target, local), timeout=30, kind="local")
+        if not r.ok:
+            raise Refused(f"서명 열쇠를 지금 못 쓴다({'시간 초과 — 화면 암호창' if r.timed_out else r.tail(1)}) — 열쇠고리가 잠겼다면 사람이"
+                          f" {local.get('unlock_helper') or '열쇠고리 풀기'} 를 먼저 하거나, 나쵸 도구가 KASATERM_RELEASE_UNLOCK=1 로 맡긴다")
+
+    def bundle_facts(self, wt, app, plan, bump):
+        """굽힌 번들이 이 계획의 판인가 — 판 번호와, 굽기 증명서의 원본 커밋(깨끗한 버전 커밋)."""
+        binary = app / "Contents/MacOS/kasaterm"
+        if not binary.exists():
+            raise Refused("굽기는 끝났는데 번들이 없다")
+        version = macsign.bundle_version(app)
+        if version != plan["version"]:
+            raise Refused(f"번들 판 번호({version or '없음'})가 계획({plan['version']})과 다르다")
+        try:
+            source = json.loads((wt / "dist/kasaterm.build.json").read_text()).get("source") or {}
+        except (OSError, ValueError):
+            raise Refused("굽기 증명서(dist/kasaterm.build.json)가 없다 — 어느 커밋을 구웠는지 모르는 판은 내지 않는다")
+        if source.get("source_commit") != bump or source.get("dirty") is not False:
+            raise Refused(f"굽기 증명서의 커밋({(source.get('source_commit') or '불확실')[:8]})이 버전 커밋({bump[:8]})의 깨끗한 판이 아니다")
+        return {"version": version, "sha256": sha256_file(binary)}
+
+    def make_dmg(self, app, plan, local=None, out=None):
+        """release.yml(ci)과 같은 모양의 dmg — 앱과 /Applications 바로가기, UDZO. 계획 작업 폴더에만 만든다."""
+        out = Path(out or self.workdir / "out")
+        stage = out / "stage"
+        shutil.rmtree(stage, ignore_errors=True)
+        stage.mkdir(parents=True)
+        c = self.runner.run([self.tool("ditto"), str(app), str(stage / "kasaterm.app")], timeout=600, kind="local")
+        if not c.ok:
+            raise Refused(f"dmg 스테이징 실패 — {c.tail(2)}")
+        os.symlink("/Applications", stage / "Applications")
+        dmg = out / asset_names(plan["tag"])["macos"]
+        (out / "notary.json").unlink(missing_ok=True)
+        for argv in macsign.dmg_commands(self.tools, stage, dmg, local):
+            r = self.runner.run(argv, timeout=900, kind="local")
+            if not r.ok:
+                raise Refused(f"dmg 만들기 실패({os.path.basename(argv[0])}) — {r.tail(2)}")
+        shutil.rmtree(stage, ignore_errors=True)
+        return dmg
+
+    def notarize(self, plan, local, built):
+        """애플 공증 → staple → 공증 표·서명·판 번호 재확인. 이미 staple 한 같은 판이면 다시 내지 않는다(재개)."""
+        dmg = Path(built.get("dmg") or "")
+        if not built.get("dmg_sha256") or not dmg.is_file():
+            raise Refused("구운 dmg 가 없다 — run 으로 다시 굽는다")
+        record_path = dmg.parent / "notary.json"
+        try:
+            record = json.loads(record_path.read_text())
+        except (OSError, ValueError):
+            record = {}
+        now = sha256_file(dmg)
+        xcrun = self.tool("xcrun")
+        if now == built["dmg_sha256"]:
+            helper = self.unlock_helper(local)
+            if helper:
+                u = self.runner.run([helper], timeout=60, kind="publish")
+                if not u.ok:
+                    raise Refused(f"열쇠고리 풀기 실패 — {u.tail(2)}")
+            r = self.runner.run(macsign.notarize_command(xcrun, dmg, local), timeout=3600, kind="publish")
+            got = macsign.parse_notary(r.out)
+            if not r.ok or got["status"] != "Accepted":
+                log = f" · 기록: xcrun notarytool log {got['id']} --keychain-profile {local['notary_profile']}" if got["id"] else ""
+                raise Refused(f"공증 실패({got['status'] or ('시간 초과' if r.timed_out else r.tail(2))}){log}"
+                              f" — 열쇠고리가 잠겼으면 사람이 {local.get('unlock_helper') or '열쇠고리 풀기'} 를 먼저")
+            s = self.runner.run([xcrun, "stapler", "staple", str(dmg)], timeout=300, kind="local")
+            if not s.ok:
+                raise Refused(f"staple 실패 — {s.tail(2)}")
+            record = {"before": built["dmg_sha256"], "after": sha256_file(dmg), "id": got["id"]}
+            record_path.write_text(json.dumps(record))
+            now = record["after"]
+        elif not (record.get("before") == built["dmg_sha256"] and record.get("after") == now):
+            raise Refused("dmg 가 굽고 나서 바뀌었다(공증 기록과도 다르다) — run 으로 다시 굽는다")
+        return {"dmg": str(dmg), "dmg_sha256": now, "id": record.get("id"), **self.verify_notarized(plan, local, dmg)}
+
+    def verify_notarized(self, plan, local, dmg):
+        """올리기 전 마지막 확인 — CI 가 할 검증을 여기서 먼저 한다. 하나라도 어긋나면 태그를 올리지 않는다."""
+        seal = macsign.dmg_notarized(self.runner, self.tools, dmg)
+        if not (seal["notarized"] and seal["stapled"]):
+            raise Refused(f"dmg 공증 표가 확인되지 않는다(공증 {'됨' if seal['notarized'] else '안 됨'}, staple {'됨' if seal['stapled'] else '안 됨'})")
+
+        def inspect(app):
+            rows, debuggable = macsign.scan(self.runner, self.tool("codesign"), app)
+            return identity_of(self.runner, app, self.tools), macsign.bundle_version(app), \
+                macsign.readiness_problems(rows, local["identity"]["team"], debuggable)
+
+        ident, version, problems = self.mounted(dmg, inspect)
+        why = [w for w in (
+            None if ident and ident.get("verified") else "앱 서명이 깨졌다",
+            None if (ident or {}).get("team") == local["identity"]["team"] else f"앱 팀이 {(ident or {}).get('team') or '없음'}",
+            None if (ident or {}).get("notarized") else "앱이 공증되지 않았다",
+            None if version == plan["version"] else f"앱 판 번호가 {version or '없음'}",
+        ) if w] + problems
+        if why:
+            raise Refused("공증한 dmg 확인 실패 — " + "; ".join(why[:6]))
+        return {"notarized": True, "stapled": True, "team": ident["team"], "version": version}
+
+    def mounted(self, dmg, fn):
+        mnt = self.workdir / "mnt"
+        shutil.rmtree(mnt, ignore_errors=True)
+        mnt.mkdir(parents=True)
+        hdiutil = self.tool("hdiutil")
+        a = self.runner.run([hdiutil, "attach", "-readonly", "-nobrowse", "-mountpoint", str(mnt), str(dmg)],
+                            timeout=180, kind="local")
+        if not a.ok:
+            raise Refused(f"dmg 를 열지 못했다 — {a.tail(2)}")
+        try:
+            return fn(mnt / "kasaterm.app")
+        finally:
+            self.runner.run([hdiutil, "detach", str(mnt)], timeout=120, kind="local")
+
+    def upload_dmg(self, plan, notarized):
+        """공증한 dmg 를 릴리스에 올린다 — 같은 해시가 이미 있으면 두고, 다른 것이 있으면 덮지 않고 멈춘다."""
+        tag, name = plan["tag"], asset_names(plan["tag"])["macos"]
+        dmg = Path(notarized.get("dmg") or "")
+        if dmg.name != name or not dmg.is_file() or sha256_file(dmg) != notarized.get("dmg_sha256"):
+            raise Refused("공증한 dmg 가 그 자리에 없거나 바뀌었다 — 올리지 않는다")
+        last = None
+        for _ in range(2):
+            view = self.runner.run([self.gh, "release", "view", tag, "--repo", self.slug, "--json", "assets"], timeout=60)
+            if view.ok:
+                have = {a["name"]: a for a in json.loads(view.out or "{}").get("assets", [])}.get(name)
+                if have:
+                    if have.get("digest") == notarized["dmg_sha256"]:
+                        return "already"
+                    raise Refused(f"릴리스에 다른 {name} 이 이미 있다({(have.get('digest') or '해시 없음')[:19]}) — 덮지 않는다")
+                up = self.runner.run([self.gh, "release", "upload", tag, str(dmg), "--repo", self.slug],
+                                     timeout=1800, kind="publish")
+                if not up.ok:
+                    raise Refused(f"dmg 올리기 실패 — {'시간 초과' if up.timed_out else up.tail(2)}")
+                return "uploaded"
+            last = self.runner.run([self.gh, "release", "create", tag, str(dmg), "--repo", self.slug, "--verify-tag",
+                                    "--title", f"kasaterm {tag}", "--notes", f"kasaterm {tag}"], timeout=1800, kind="publish")
+            if last.ok:
+                return "created"
+            # Windows job 이 그 사이 릴리스를 먼저 만들었을 수 있다 — 다시 읽고 올린다.
+        raise Refused(f"릴리스를 만들지도 읽지도 못했다 — {last.tail(2) if last else '알 수 없음'}")
+
     def tag_commands(self, plan):
         return [["git", "worktree", "add", "--detach", str(self.workdir / "wt"), plan["commit"]],
                 ["(Cargo.toml", "워크스페이스", "버전", "→", plan["version"], "—", "tag-release.sh", "와", "같은", "치환)"],
@@ -230,43 +450,55 @@ class RealBackend:
     def preview(self, stage, plan):
         """live 가 아닐 때 게시 단계가 보이는 것 — 명령과 원격 사실. 로컬 저장소에도 흔적을 안 남긴다."""
         seen = self.observe(plan)
+        local = mac_local(plan)
+        dmg = self.workdir / "out" / asset_names(plan["tag"])["macos"]
         if stage == "tag":
-            return {"would": [" ".join(c) for c in self.tag_commands(plan)], "remote": seen}
+            first = [" ".join(macsign.notarize_command("xcrun", dmg, local)) + " (애플 공증 — 굽은 dmg 그대로)",
+                     f"xcrun stapler staple {dmg}",
+                     "spctl·stapler validate·codesign 으로 공증·팀·hardened runtime·판 번호 재확인 — 어긋나면 push 안 함"] if local else []
+            return {"would": first + [" ".join(c) for c in self.tag_commands(plan)], "remote": seen}
         if stage == "release":
+            if local:
+                return {"would": [f"gh release create {plan['tag']} {dmg} --verify-tag (있으면 upload, 다른 dmg 가 있으면 덮지 않고 멈춤)",
+                                  f"release.yml 이 그 dmg 를 검증(팀 {local['identity']['team']}·공증·staple·판 번호)하고 그 해시에만 EdDSA",
+                                  "완료 확인 → 산출물 받기 · 크기·해시 · dmg 가 공증한 그 파일인지"], "remote": seen}
             return {"would": f"release.yml(태그 push 로 돈다) 완료 확인 → {', '.join(asset_names(plan['tag']).values())} 받기 · 크기·해시 · dmg 서명 신원",
                     "remote": seen}
         return {"would": "두 피드가 목표 판·산출물 이름·크기를 가리키는지, EdDSA 서명이 산출물과 맞는지(저장소 공개키)",
                 "remote": seen}
 
     def tag(self, plan, state):
-        """버전 커밋 + 태그를 격리 워크트리에서 만들고 한 번에 올린다. 로컬 태그는 만들지 않는다(공유 저장소 refs 불변)."""
+        """버전 커밋 + 태그를 격리 워크트리에서 만들고 한 번에 올린다. 로컬 태그는 만들지 않는다(공유 저장소 refs 불변).
+        로컬 mac 판이면 push 전에 공증·staple·재검증을 끝낸다 — 공증이 안 되면 태그도 안 선다."""
         tag, main = plan["tag"], "refs/heads/" + plan["branch"]
+        local = mac_local(plan)
+        built = (state["stages"].get("build", {}).get("detail") or {}) if local else {}
         tagged = self.remote_ref("refs/tags/" + tag)
         if tagged:
-            return self.reconcile_tag(plan, tagged)
+            done = self.reconcile_tag(plan, tagged)
+            if local:
+                if tagged != built.get("commit"):
+                    raise Refused(f"원격 태그({tagged[:8]})가 이 기기에서 구운 판의 커밋({(built.get('commit') or '?')[:8]})이 아니다 — 올릴 dmg 가 태그와 안 맞는다")
+                done["notarized"] = self.notarize(plan, local, built)
+            return done
         head = self.remote_ref(main)
         if head != plan["commit"]:
             raise Refused(f"원격 {plan['branch']} 가 계획 커밋이 아니다({(head or '?')[:8]}) — 계획에 없는 변경이 섞이므로 새 계획이 필요하다")
         wt = self.worktree(plan)
-        if self.git("rev-parse", "HEAD", cwd=wt).out.strip() == plan["commit"]:
-            cargo = wt / "Cargo.toml"
-            text = cargo.read_text()
-            bumped = re.sub(r'^version = "[^"]*"', f'version = "{plan["version"]}"', text, count=1, flags=re.M)
-            if bumped == text:
-                raise Refused("Cargo.toml 의 워크스페이스 버전 줄을 못 찾았다")
-            cargo.write_text(bumped)
-            c = self.git("commit", "-qam", f"chore(release): {tag}", kind="local", cwd=wt)
-            if not c.ok:
-                raise Refused(f"버전 커밋 실패 — {c.tail(3)}")
-        bump = self.git("rev-parse", "HEAD", cwd=wt).out.strip()
+        bump = self.ensure_bump(wt, plan)
+        extra = {}
+        if local:
+            if bump != built.get("commit"):
+                raise Refused(f"구운 판의 커밋({(built.get('commit') or '?')[:8]})과 지금 버전 커밋({bump[:8]})이 다르다 — run 으로 다시 굽는다")
+            extra["notarized"] = self.notarize(plan, local, built)
         push = self.git("push", "--atomic", self.remote, f"HEAD:{main}", f"HEAD:refs/tags/{tag}",
                         kind="publish", timeout=180, cwd=wt)
         if push.ok:
-            return {"tag": tag, "commit": bump, "pushed": True}
+            return {"tag": tag, "commit": bump, "pushed": True, **extra}
         # 응답이 실패·시간 초과여도 원격에 반영됐을 수 있다 — 원격을 다시 읽어 맞춘다.
         now_tag, now_main = self.remote_ref("refs/tags/" + tag), self.remote_ref(main)
         if now_tag == bump and now_main == bump:
-            return {"tag": tag, "commit": bump, "pushed": True, "note": "push 응답은 실패였지만 원격에 반영돼 있었다"}
+            return {"tag": tag, "commit": bump, "pushed": True, "note": "push 응답은 실패였지만 원격에 반영돼 있었다", **extra}
         if not now_tag and now_main == plan["commit"]:
             raise Refused(f"push 실패 — 원격은 그대로다(다시 돌리면 이어서) · {'시간 초과' if push.timed_out else push.tail(2)}")
         raise Refused(f"push 뒤 원격이 반쪽이다(태그 {(now_tag or '없음')[:8]}, {plan['branch']} {(now_main or '?')[:8]}) — 손대지 않고 멈춘다")
@@ -283,6 +515,13 @@ class RealBackend:
 
     def release(self, plan, state):
         tag = plan["tag"]
+        local = mac_local(plan)
+        notarized = (state["stages"].get("tag", {}).get("detail") or {}).get("notarized") if local else None
+        uploaded = None
+        if local:
+            if not notarized:
+                raise Refused("이 계획의 공증 기록이 없다 — 로컬 mac 판은 태그 단계가 공증한 dmg 만 올린다")
+            uploaded = self.upload_dmg(plan, notarized)
         run = self.ci_run(tag)
         if not run:
             raise Pending("CI 가 아직 안 떴다")
@@ -316,26 +555,41 @@ class RealBackend:
                 raise Refused(f"{name} 해시가 릴리스 기록과 다르다")
             got[platform] = {"name": name, "size": path.stat().st_size, "sha256": digest, "path": str(path)}
         detail = {"run": run.get("databaseId"), "assets": got}
+        if local:
+            detail["dmg_upload"] = uploaded
+            if (got.get("macos") or {}).get("sha256") != notarized["dmg_sha256"]:
+                raise Refused("릴리스의 dmg 가 이 기기가 공증한 그 파일이 아니다 — appcast 를 확인하지 않는다")
         if "macos" in got:
-            detail["mac_identity"] = self.dmg_identity(Path(got["macos"]["path"]))
+            detail["mac_identity"] = {**self.dmg_identity(Path(got["macos"]["path"])), **({"source": "local"} if local else {})}
             why = identity_block(detail["mac_identity"], plan["signing"].get("installed"))
             if why:
                 raise Refused(f"mac 판 서명 확인 — {why}")
         return detail
 
     def dmg_identity(self, dmg):
-        mnt = self.workdir / "mnt"
-        shutil.rmtree(mnt, ignore_errors=True)
-        mnt.mkdir(parents=True)
-        hdiutil = self.tool("hdiutil")
-        a = self.runner.run([hdiutil, "attach", "-readonly", "-nobrowse", "-mountpoint", str(mnt), str(dmg)],
-                            timeout=180, kind="local")
-        if not a.ok:
-            raise Refused(f"dmg 를 열지 못했다 — {a.tail(2)}")
+        return self.mounted(dmg, lambda app: identity_of(self.runner, app, self.tools))
+
+    def preflight(self, plan):
+        """열쇠 없이 해 보는 로컬 판 굽기 — 같은 버전 커밋·같은 dmg 모양, 서명만 ad-hoc. 공유 dist·설치본·열쇠고리를 안 건드린다.
+        공증 전에 서명이 바꿔야 할 조각과, hardened 서명 목록 밖의 Mach-O 를 미리 센다."""
+        wt = self.worktree(plan, "wt-preflight")
         try:
-            return identity_of(self.runner, mnt / "kasaterm.app", self.tools)
+            bump = self.ensure_bump(wt, plan)
+            env = {**self.env(), "KASATERM_SIGN_KEYCHAIN": str(self.workdir / "no-keychain"),
+                   "KASATERM_SIGN_ID": "kasaterm-preflight-unsigned"}
+            r = self.runner.run(["bash", "scripts/build-app.sh"], cwd=wt, timeout=3600, env=env, kind="local")
+            if not r.ok:
+                raise Refused(f"굽기 실패 — {'시간 초과' if r.timed_out else r.tail(4)}")
+            app = wt / "dist/kasaterm.app"
+            facts = self.bundle_facts(wt, app, plan, bump)
+            dmg = self.make_dmg(app, plan, None, out=self.workdir / "preflight")
+            rows, debuggable = macsign.scan(self.runner, self.tool("codesign"), app)
+            team = ((plan.get("mac_artifact") or {}).get("identity") or {}).get("team")
+            return {"commit": bump, "dmg": str(dmg), "dmg_sha256": sha256_file(dmg), **facts,
+                    "machos": [r["path"] for r in rows], "uncovered": [r["path"] for r in rows if not r["covered"]],
+                    "signing_would_fix": macsign.readiness_problems(rows, team, debuggable)}
         finally:
-            self.runner.run([hdiutil, "detach", str(mnt)], timeout=120, kind="local")
+            self.git("worktree", "remove", "--force", str(wt), kind="local")
 
     def feed(self, plan, state):
         assets = (state["stages"].get("release", {}).get("detail") or {}).get("assets") or {}

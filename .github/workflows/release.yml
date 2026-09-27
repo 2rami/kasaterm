@@ -11,7 +11,16 @@ name: Release
 #
 # Secrets:
 #   SPARKLE_ED_PRIVATE_KEY — Sparkle EdDSA 개인키(appcast 서명, mac/win 공용)
-#   MAC_SIGN_P12 / MAC_SIGN_P12_PASSWORD — kasaterm-ci self-signed codesign 인증서
+#   MAC_SIGN_P12 / MAC_SIGN_P12_PASSWORD — kasaterm-ci self-signed codesign 인증서(MAC_ARTIFACT=ci 일 때만)
+#
+# mac dmg 를 어디서 만드나(MAC_ARTIFACT):
+#   local — 조종 기기(미니)가 Developer ID·hardened runtime 으로 서명하고 애플 공증·staple 까지 한 dmg 를 태그 뒤 릴리스에
+#           올린다(tools/release fastpatch). 이 job 은 굽지 않고 그 dmg 를 기다렸다가 팀·공증·판 번호를 검증만 한다.
+#           Developer ID 키는 미니 밖으로 안 나간다. 검증을 못 넘으면 job 이 실패해 appcast 가 안 나간다.
+#   ci    — 예전 길: CI 가 kasaterm-ci 자체 서명으로 굽는다(공증 없음 — Developer ID 설치본에는 자동 배포하지 않는다).
+env:
+  MAC_ARTIFACT: local
+  MAC_TEAM: L366799VND
 on:
   push:
     tags:
@@ -96,6 +105,8 @@ jobs:
 
   build-dmg:
     runs-on: macos-latest
+    outputs:
+      dmg_sha256: ${{ steps.verify_local.outputs.sha256 }}
     steps:
       # 그림 에셋이 git-lfs 라 lfs:true 가 없으면 130바이트 포인터가 내려오고,
       # build.rs 의 에셋 검사가 거기서 빌드를 세운다(의도된 loud failure).
@@ -105,9 +116,11 @@ jobs:
           lfs: true
 
       - name: Rust toolchain (stable)
+        if: env.MAC_ARTIFACT == 'ci' || github.event_name == 'workflow_dispatch'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cargo cache
+        if: env.MAC_ARTIFACT == 'ci' || github.event_name == 'workflow_dispatch'
         uses: Swatinem/rust-cache@v2
 
       # 태그와 Cargo.toml 버전이 어긋나면 CFBundleVersion 이 어긋나 Sparkle 의
@@ -125,6 +138,7 @@ jobs:
       # KASATERM_SIGN_ID 로 이 identity 를 찾아 서명한다. 고정 인증서라 업데이트를
       # 거듭해도 macOS TCC 권한이 유지된다(ad-hoc 은 빌드마다 재승인).
       - name: Import codesign certificate
+        if: env.MAC_ARTIFACT == 'ci' || github.event_name == 'workflow_dispatch'
         env:
           P12_B64: ${{ secrets.MAC_SIGN_P12 }}
           P12_PASS: ${{ secrets.MAC_SIGN_P12_PASSWORD }}
@@ -142,6 +156,7 @@ jobs:
       # .app 번들(코드사인 + Sparkle.framework + arona-ui 포함) → dmg 스테이징.
       # Sparkle tarball 다운로드(build-app.sh 내부)가 gh 를 쓰므로 GH_TOKEN 필요.
       - name: Build .app + .dmg
+        if: env.MAC_ARTIFACT == 'ci' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
           KASATERM_SIGN_ID: kasaterm-ci
@@ -159,7 +174,46 @@ jobs:
           echo "DMG=$DMG" >> "$GITHUB_ENV"
           echo "DMG_NAME=$(basename "$DMG")" >> "$GITHUB_ENV"
 
-      # 태그 push → 릴리스에 dmg 첨부 + 설치 안내 노트(없으면 생성, msi job 과 선착순).
+      # 미니가 올린 dmg 를 기다렸다가 검증한다 — 해시는 릴리스 기록과 받은 파일로, 신원은 codesign·spctl·stapler 로.
+      # 팀이 다르거나 공증이 없거나 판 번호가 태그와 다르면 실패 → appcast job 이 안 돈다.
+      - name: Verify locally signed DMG
+        id: verify_local
+        if: env.MAC_ARTIFACT == 'local' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          DMG_NAME="kasaterm-$VERSION.dmg"
+          DL="$(mktemp -d)"
+          for i in $(seq 1 120); do
+            if gh release download "$VERSION" -p "$DMG_NAME" -D "$DL" --clobber 2>/dev/null; then break; fi
+            [[ "$i" == 120 ]] && { echo "::error::60분 안에 $DMG_NAME 이 릴리스에 안 올라왔다 — 미니(tools/release)가 올린다"; exit 1; }
+            sleep 30
+          done
+          DMG="$DL/$DMG_NAME"
+          WANT="$(gh release view "$VERSION" --json assets -q ".assets[] | select(.name == \"$DMG_NAME\") | .digest")"
+          GOT="sha256:$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
+          [[ "$WANT" == "$GOT" ]] || { echo "::error::받은 dmg 해시($GOT)가 릴리스 기록(${WANT:-없음})과 다르다"; exit 1; }
+          spctl -a -t open --context context:primary-signature -vv "$DMG" > "$DL/dmg.spctl" 2>&1 || true
+          cat "$DL/dmg.spctl"
+          grep -q "source=Notarized Developer ID" "$DL/dmg.spctl" || { echo "::error::dmg 가 공증되지 않았다"; exit 1; }
+          xcrun stapler validate "$DMG"
+          MNT="$DL/mnt"; mkdir -p "$MNT"
+          hdiutil attach -readonly -nobrowse -mountpoint "$MNT" "$DMG" >/dev/null
+          APP="$MNT/kasaterm.app"
+          codesign --verify --deep --strict "$APP"
+          codesign -dvv "$APP" 2>&1 | tee "$DL/app.codesign"
+          grep -q "^TeamIdentifier=$MAC_TEAM$" "$DL/app.codesign" || { echo "::error::서명 팀이 $MAC_TEAM 이 아니다"; exit 1; }
+          grep -q "^Authority=Developer ID Application: " "$DL/app.codesign" || { echo "::error::Developer ID 서명이 아니다"; exit 1; }
+          grep -q "flags=.*runtime" "$DL/app.codesign" || { echo "::error::hardened runtime 이 아니다"; exit 1; }
+          spctl -a -t execute -vv "$APP" 2>&1 | grep -q "source=Notarized Developer ID" || { echo "::error::앱이 공증되지 않았다"; exit 1; }
+          PLIST_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          hdiutil detach "$MNT" >/dev/null
+          [[ "v$PLIST_VER" == "$VERSION" ]] || { echo "::error::dmg 안 앱 판($PLIST_VER)이 태그($VERSION)와 다르다"; exit 1; }
+          echo "verified $DMG_NAME — $GOT · 팀 $MAC_TEAM · 공증·staple"
+          echo "sha256=${GOT#sha256:}" >> "$GITHUB_OUTPUT"
+
+      # 태그 push → 릴리스에 dmg 첨부 + 설치 안내 노트(없으면 생성, msi job 과 선착순). local 이면 올리지 않고 노트만.
       - name: Attach DMG to release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -172,15 +226,18 @@ jobs:
           if [[ -f "docs/release-notes/$VERSION.md" ]]; then
             HIGHLIGHTS="$(cat "docs/release-notes/$VERSION.md")"$'\n\n---\n\n'
           fi
+          if [[ "$MAC_ARTIFACT" == "local" ]]; then
+            FIRST_RUN="3. 첫 실행 때 화면 녹화/접근 권한 물으면 허용"
+          else
+            FIRST_RUN=$'3. **처음 실행만**: Applications에서 kasaterm **우클릭 → 열기** → "열기" 확인\n   (직접 만든 앱이라 macOS가 한 번 확인받아요. 이후엔 그냥 더블클릭)\n4. 첫 실행 때 화면 녹화/접근 권한 물으면 허용'
+          fi
           NOTES="$HIGHLIGHTS$(cat <<EOF
           kasaterm $VERSION — 한글 특화 GUI 터미널 + Claude 런처
 
           ## 설치 (macOS)
           1. \`kasaterm-$VERSION.dmg\` 다운로드 → 열기
           2. kasaterm을 Applications 폴더로 드래그
-          3. **처음 실행만**: Applications에서 kasaterm **우클릭 → 열기** → "열기" 확인
-             (직접 만든 앱이라 macOS가 한 번 확인받아요. 이후엔 그냥 더블클릭)
-          4. 첫 실행 때 화면 녹화/접근 권한 물으면 허용
+          $FIRST_RUN
 
           ## 설치 (Windows)
           \`.msi\` 다운로드 → 실행 (SmartScreen 경고 시 "추가 정보 → 실행")
@@ -189,7 +246,10 @@ jobs:
           앱 열면 바로 터미널. \`claude\` 치면 Claude Code 실행돼요.
           EOF
           )"
-          if gh release view "$VERSION" >/dev/null 2>&1; then
+          if [[ "$MAC_ARTIFACT" == "local" ]]; then
+            # dmg 는 미니가 올린 그대로 둔다(덮지 않는다) — 노트만 채운다.
+            gh release edit "$VERSION" --title "kasaterm $VERSION" --notes "$NOTES"
+          elif gh release view "$VERSION" >/dev/null 2>&1; then
             gh release upload "$VERSION" "$DMG" --clobber
             gh release edit "$VERSION" --title "kasaterm $VERSION" --notes "$NOTES"
           else
@@ -230,6 +290,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ED_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          VERIFIED_SHA: ${{ needs.build-dmg.outputs.dmg_sha256 }}
         run: |
           VERSION="${GITHUB_REF_NAME}"
           VER="${VERSION#v}"
@@ -239,6 +300,14 @@ jobs:
           # mac appcast — 릴리스의 dmg 를 받아 generate_appcast 로 서명·생성.
           ASSETS="$(mktemp -d)"
           gh release download "$VERSION" -p '*.dmg' -D "$ASSETS"
+          # local 이면 build-dmg 가 검증한 바로 그 파일에만 EdDSA 를 단다 — 그 사이 바뀌었거나 dmg 가 둘이면 멈춘다.
+          if [[ "$MAC_ARTIFACT" == "local" ]]; then
+            [[ -n "$VERIFIED_SHA" ]] || { echo "::error::build-dmg 가 검증한 dmg 해시가 없다"; exit 1; }
+            COUNT="$(find "$ASSETS" -name '*.dmg' | wc -l | tr -d ' ')"
+            [[ "$COUNT" == 1 ]] || { echo "::error::릴리스에 dmg 가 $COUNT 개다"; exit 1; }
+            GOT="$(shasum -a 256 "$ASSETS"/*.dmg | cut -d' ' -f1)"
+            [[ "$GOT" == "$VERIFIED_SHA" ]] || { echo "::error::appcast 에 실을 dmg($GOT)가 검증한 것($VERIFIED_SHA)과 다르다"; exit 1; }
+          fi
           vendor/Sparkle/bin/generate_appcast \
             --ed-key-file "$KEYFILE" \
             --download-url-prefix "https://github.com/2rami/kasaterm/releases/download/$VERSION/" \

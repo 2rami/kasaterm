@@ -23,9 +23,12 @@ status: 원격 태그·CI·피드 + 기기마다 지금 판(버전 · SHA) → �
 
 ## 지금 막힌 것 (2026-09-27 실제 `plan` 읽기)
 
-1. **mac 서명 관문** — CI mac 판은 `kasaterm-ci` 자체 서명·미공증, 설치본은 Developer ID(L366799VND)다. 태그를 올리면
-   CI 가 mac appcast 까지 게시하므로 **태그 단계부터** 막는다(`live_blocks`). 풀려면 CI 가 설치본과 같은 Developer ID 로
-   서명·공증해야 한다 — 새 키·신뢰 권한이라 사람 결정이고 이 도구 범위 밖이다. 보안 설정을 끄는 우회는 없다.
+1. **mac 서명 — 키를 CI 로 옮기지 않고 푼다.** 설치본은 Developer ID(L366799VND)인데 CI 판은 `kasaterm-ci` 자체 서명·
+   미공증이라, 예전엔 태그 단계부터 막았다. 이제 release.yml 이 `MAC_ARTIFACT: local` 이면 **조종 기기(미니)가** 이미 있는
+   서명 열쇠고리로 Developer ID·hardened runtime 서명하고 애플 공증·staple 까지 한 dmg 를 올리고, CI 는 그 dmg 를 **검증만**
+   한다(아래 「서명·공증」). 남은 것은 사람 몫 셋 — 로컬 커밋 push, 서명·공증 때 열쇠고리 풀기(`~/bin/unlock-signing` 을
+   사람이 치거나 나쵸 도구가 `KASATERM_RELEASE_UNLOCK=1` 로 맡김), 공증 업로드·태그·릴리스를 포함한 게시 승인.
+   CI 쪽 길(`MAC_ARTIFACT: ci`)은 예전처럼 태그 단계부터 막힌다. 보안 설정을 끄는 우회는 없다.
 2. **나쵸 릴리스 승인 창구** — 나쵸 쪽 구현은 끝났다(나쵸 94a3033, 대조 자료
    `docs/development/api/fixtures/approval.kasaterm_release.implemented.json`). 창구는 `NACHO_APPROVAL_HTTP_ACTIONS` 에
    `kasaterm_release` 가 있어야 열리고 기본은 닫혀 있다 — 여는 것은 주인 확인 카드로 따로 한다.
@@ -52,7 +55,12 @@ python3 -m tools.release.fastpatch plan [--json]
 python3 -m tools.release.fastpatch dry-run <plan_id>
 
 # 3) 로컬 실행: 검사·굽기를 격리 워크트리에서 실제로(자동설치 dist 안 덮음), 게시 단계는 명령만.
+#    로컬 mac 판이면 굽기가 버전 커밋으로 Developer ID 서명까지 한다 — 열쇠고리가 풀려 있어야 한다(아래 「서명·공증」).
 python3 -m tools.release.fastpatch run <plan_id>
+
+# 3-1) 열쇠 없이 미리 굽기(로컬 mac 판): 같은 버전 커밋·같은 dmg 모양을 ad-hoc 서명으로. 계획 작업 폴더에만 만든다.
+#      hardened 서명 목록 밖 Mach-O 가 있으면 1 로 끝난다. 막힘이 있는 계획에도 돈다. 따뜻해진 target 을 실제 굽기가 쓴다.
+python3 -m tools.release.fastpatch mac-preflight <plan_id>
 
 # 4) 게시: 주인이 승인한 나쵸 승인 id 로. 게시 첫 단계 직전에 한 번 소비한다.
 python3 -m tools.release.fastpatch run <plan_id> --live --approval ap_…
@@ -96,8 +104,10 @@ PATH 앞이라, 사람 셸에서 멀쩡하던 같은 명령이 다른 도구를 
 - **기준 피드 해시(feed_base)** — 계획 때의 두 appcast 해시. 승인 뒤 소비 직전에 다시 재서 다르면(다른 게시가 끼었다)
   새 계획을 요구한다.
 - **포함 변경** — 네이티브(앱 업데이트 필요) · 모바일(TestFlight 판, 이 단계들 밖) · 문서·인프라(기기에 안 감).
-- **서명 관문** — CI 가 쓸 mac 서명 신원(release.yml 에서 예상)과 이 기기 설치본의 실제 신원(`codesign -dvv`·`spctl`).
-  같은 팀의 Developer ID·공증이 아니면 live 게시를 막는다.
+- **서명 관문** — mac 판을 누가 만드나(release.yml `MAC_ARTIFACT`)와 이 기기 설치본의 실제 신원(`codesign -dvv`·`spctl`).
+  `ci` 면 CI 가 쓸 신원(release.yml 에서 예상), `local` 이면 서명 열쇠고리의 Developer ID(`security find-identity`, 잠겨
+  있어도 보인다)·release.yml 의 검증 단계·`MAC_TEAM`·굽기 스크립트의 hardened 서명. 같은 팀·공증이 아니거나 준비가 하나라도
+  빠지면 live 게시를 막는다. 로컬 서명 설정(`mac_artifact`)은 core 밖이라 계획 id·나쵸 계약은 그대로다.
 - **기기 범위** — `/version` 의 버전 **과 SHA**, machine_id 를 댄 기기만. 보류·더 새 판·id 없는 기기는 빠진다.
 - **계획 id** — 위 범위의 해시. 승인 scope 는 이 id 와 커밋·버전·태그·채널·피드 해시·플랫폼·기기·조종 기기를 싣는다.
 
@@ -147,9 +157,9 @@ env 로 띄운다. **사고 방지 표식이지 보안 경계가 아니다** —
 | 단계 | 하는 일 | 다시 돌리면·실패하면 |
 |---|---|---|
 | verify | 계획 커밋의 격리 워크트리에서 cargo 검사 3종(격리 `CARGO_TARGET_DIR`) | 끝났으면 건너뜀. 실패·시간 초과는 그 명령과 끝 줄을 남기고 멈춤 |
-| build | 같은 커밋 ready 판이 있으면 바이너리 해시·서명을 다시 재 갈음, 없으면 격리 워크트리에서 `build-app.sh` | 〃 |
-| tag | 격리 워크트리에서 tag-release.sh 와 같은 버전 치환·같은 커밋 메시지 → `git push --atomic origin HEAD:main HEAD:refs/tags/vX`. 로컬 태그는 안 만든다 | 원격에 태그가 있으면 계획 커밋 위의 버전 커밋인지 보고 **다시 세우지 않는다**(아니면 손대지 않고 멈춤). push 가 실패·시간 초과여도 원격을 다시 읽어 반영됐으면 완료, 그대로면 재시도 가능, 반쪽이면 멈춤 |
-| release | `gh run list` 로 그 태그의 release.yml 실행 확인 → `gh release view`·`download` 로 dmg·msi 크기·해시 → dmg 를 읽기 전용으로 열어 서명 신원·공증 | CI 가 안 떴거나 도는 중이면 **기다림**(실패 아님). CI 실패·산출물 모자람·해시 불일치·신원 불일치면 멈추고 피드 확인으로 안 넘어감 |
+| build | 같은 커밋 ready 판이 있으면 바이너리 해시·서명을 다시 재 갈음, 없으면 격리 워크트리에서 `build-app.sh`. **로컬 mac 판**이면 ready 판을 안 쓰고(버전을 안 올린 평소 서명 판이다) 버전 커밋으로 `KASATERM_SIGN_HARDENED=1` 굽기 → 판 번호·굽기 증명서의 깨끗한 원본 커밋 → dmg(계획 작업 폴더, 공유 dist 안 씀)·dmg 서명 → 번들 안 Mach-O 전부 Developer ID·팀·runtime·보안 타임스탬프·hardened 목록 안 | 〃. 열쇠를 못 쓰면 긴 굽기 전에 작은 사본 서명으로 먼저 실패 |
+| tag | 격리 워크트리에서 tag-release.sh 와 같은 버전 치환·같은 커밋 메시지 → `git push --atomic origin HEAD:main HEAD:refs/tags/vX`. 로컬 태그는 안 만든다. 버전 커밋 날짜는 계획 시각에 못 박아 굽기 때와 같은 커밋이 된다. **로컬 mac 판**이면 push 전에 `xcrun notarytool submit --wait` → `stapler staple` → spctl·stapler validate·dmg 안 앱의 팀·공증·판 번호 재확인 | 원격에 태그가 있으면 계획 커밋 위의 버전 커밋인지 보고 **다시 세우지 않는다**(아니면 손대지 않고 멈춤). push 가 실패·시간 초과여도 원격을 다시 읽어 반영됐으면 완료, 그대로면 재시도 가능, 반쪽이면 멈춤. 공증 거절이면 태그를 안 세우고 기록 명령(`notarytool log <id>`)을 보인다. 이미 staple 한 같은 판이면 다시 내지 않는다. 굽은 뒤 dmg 가 바뀌었거나 버전 커밋이 굽은 커밋과 다르면 멈춤 |
+| release | `gh run list` 로 그 태그의 release.yml 실행 확인 → `gh release view`·`download` 로 dmg·msi 크기·해시 → dmg 를 읽기 전용으로 열어 서명 신원·공증. **로컬 mac 판**이면 먼저 공증한 dmg 를 올리고(`gh release create --verify-tag`, 있으면 `upload`) 받은 dmg 가 공증한 해시와 같은지 본다 | CI 가 안 떴거나 도는 중이면 **기다림**(실패 아님). CI 실패·산출물 모자람·해시 불일치·신원 불일치면 멈추고 피드 확인으로 안 넘어감. 릴리스에 다른 dmg 가 있으면 **덮지 않고** 멈춤 |
 | feed | 두 appcast 가 목표 판·산출물 이름·크기를 가리키는지, EdDSA 서명이 받은 파일과 맞는지(저장소의 Sparkle 공개키로 `openssl` 확인) | 아직 옛 판이면 기다림, 더 새 판이면 되돌리지 않고 멈춤, 확인한 피드가 그 뒤 바뀌면 멈춤 |
 | devices | 기기별 `/version` 추적 — 설치·재시작은 하지 않는다 | 매번 다시 잰다(승인 불필요) |
 
@@ -244,11 +254,27 @@ windesktop → 앱 재시작 사실이 안 닿아 blocked. 기기마다 「지�
 
 ## 서명·공증
 
-- 로컬 굽기 판은 Developer ID(L366799VND), CI 릴리스는 **kasaterm-ci 자체 서명**이고 **공증하지 않는다**.
-- Sparkle 문서(「Rotating signing keys」)는 Developer ID 로 서명하고 EdDSA 공개키를 넣은 앱이면, EdDSA 가 맞는 한 업데이트가
-  Apple 코드 서명 인증서를 바꿔도 받는다고 한다. 하지만 kasaterm-ci 는 Apple 인증서가 아니라 자체 서명이고 공증도 없다.
-  그래서 받아 주는지와 관계없이 **자동 배포하지 않는다** — 도구가 태그 단계 전에 막는다(위 「지금 막힌 것」 1).
-- 새 키 발급·로그인·권한 추가는 이 흐름에 없다. appcast 서명 키는 CI 비밀(`SPARKLE_ED_PRIVATE_KEY`) 그대로다.
+로컬 굽기 판은 Developer ID(L366799VND), CI 가 굽는 판은 **kasaterm-ci 자체 서명**이고 **공증하지 않는다**. Sparkle 은 EdDSA 가
+맞으면 받아 줄 수 있지만 자체 서명·미공증 판은 **자동 배포하지 않는다**(기기 업데이트 창구도 팀·공증 검사에서 거절한다).
+그래서 mac 판은 서명 키가 이미 있는 조종 기기(미니)가 만든다 — 키를 CI 비밀로 복사하지 않는다(`MAC_ARTIFACT: local`).
+
+| 누가 | 무엇을 | 무엇으로 막나 |
+|---|---|---|
+| 미니 build | 버전 커밋으로 `KASATERM_SIGN_HARDENED=1 KASATERM_SIGN_ID=<지문> KASATERM_SIGN_KEYCHAIN=codesign.keychain-db` 굽기 — 번들 안 모든 Mach-O(Sparkle 안쪽부터·`kasaterm-cli`·`kasa-serve-web`·`kasapet`·본체)를 `--options runtime --timestamp` 로, 본체에는 `scripts/kasaterm.entitlements`(마이크·Apple Events) | 한 조각이라도 서명 실패면 굽기 실패(평소 굽기는 예전처럼 삼킨다). Mach-O 전수 검사·get-task-allow 금지·판 번호·굽기 증명서 |
+| 미니 tag(승인 뒤) | `xcrun notarytool submit --keychain-profile AC_NOTARY --keychain … --wait` → `stapler staple` → 재확인 → 그 버전 커밋으로 태그 push | 공증이 안 되면 태그를 안 세운다 |
+| 미니 release | 공증한 dmg 를 릴리스에 올림(덮지 않음) | 다른 dmg 가 있으면 멈춤 |
+| CI build-dmg | 굽지 않고 60분까지 그 dmg 를 기다렸다 받아 릴리스 기록 해시 대조 → `spctl`(Notarized Developer ID)·`stapler validate`·앱 `codesign --verify --deep --strict`·`TeamIdentifier=$MAC_TEAM`·Developer ID·runtime·앱 공증·Info.plist 판 = 태그 | 하나라도 어긋나면 job 실패 → appcast 안 나감 |
+| CI appcast | build-dmg 가 검증한 **그 해시**의 dmg 가 릴리스에 딱 하나 있을 때만 `generate_appcast`(EdDSA 는 CI 비밀 그대로) | 그 사이 바뀌었거나 둘이면 멈춤 |
+| 미니 release·feed | 받은 dmg = 공증한 해시, 팀·공증 재확인, 피드 EdDSA 가 그 파일과 맞는지 | 기존 관문 그대로 |
+
+- **열쇠고리는 풀지 않는 것이 기본**이다. 잠겨 있으면 굽기 전 작은 사본 서명(`--timestamp=none`, 밖으로 안 나감)이 30초 안에
+  실패하고 까닭을 말한다. 사람이 `~/bin/unlock-signing` 을 먼저 치거나, 나쵸 도구가 `KASATERM_RELEASE_UNLOCK=1` 로 맡기면
+  그 도우미를 서명 바로 앞(`build-app.sh` 의 `KASATERM_SIGN_UNLOCK`, 긴 컴파일 뒤)과 공증 바로 앞에서 부른다. 암호는 도우미만
+  안다. `security show-keychain-info` 는 화면 암호창을 띄우고 멈출 수 있어 쓰지 않는다.
+- 공증 자격 증명은 열쇠고리 프로필(`AC_NOTARY`, `KASATERM_NOTARY_PROFILE`)로만 부른다 — 도구는 그 내용을 읽지 않는다.
+- hardened runtime 은 이 판에서 처음 켠다. 실제 서명 판을 격리 실행해 마이크·osascript·Sparkle 이 도는지는 열쇠고리를 푼
+  첫 굽기 때 확인한다(열쇠 없는 미리 굽기는 ad-hoc 이라 라이브러리 검증 조건이 달라 대신할 수 없다).
+- 새 키 발급·로그인·CI 비밀 추가는 이 흐름에 없다. CI 쪽 길(`MAC_ARTIFACT: ci`)로 되돌리면 예전 관문(태그부터 막힘)이 그대로 선다.
 
 ## 처음 한 번만 필요한 것
 
@@ -261,7 +287,7 @@ windesktop → 앱 재시작 사실이 안 닿아 blocked. 기기마다 「지�
 ## 검사
 
 ```sh
-python3 -m unittest tools.release.tests.test_fastpatch      # 55건 — 아래
+python3 -m unittest tools.release.tests.test_fastpatch      # 77건 — 아래
 cargo test -p kasa-socket app_update                         # 기기 업데이트 창구·러너 32건(app-update.md 「검사」)
 bash scripts/nacho-update-interop.sh                         # 실제 나쵸 update 승인 서버(격리)와 러너·기기 왕복
 bash scripts/nacho-release-interop.sh                        # 실제 나쵸 승인 서버(격리)와 왕복 17건
@@ -277,6 +303,11 @@ fastpatch 검사는 임시 저장소(원격은 bare 저장소)·임시 피드·�
 계획 뒤 피드 변경, 한 번 소비와 재개(다른 승인·7일·원격 불일치·미소비), push 시간 초과·거절·main 이동·남의 태그·잃은
 상태 파일, CI 대기·실패·산출물 모자람·해시·dmg 신원, 피드 EdDSA·더 새 판, 도구 고르기(LibreSSL·거짓 통과·지정 경로 고수·
 고정 openssl 변질·git-lfs 없음·PATH 폴더), 계약 키·위조 계획·live 준비 조건·창 안 실행 거부, 기기 업데이트 계획·작업 모양·작업 id 대조, 나쵸 대조 자료.
+로컬 mac 판: 계획이 로컬 신원을 쓰고 core 는 그대로, 준비 빠짐(검증 없는 워크플로·팀 불일치·굽기 스크립트·신원 없음·여럿·
+열쇠고리 없음·설치본 팀·xcrun) 각각의 막힘, 버전 커밋 굽기(서명 env·작업 폴더 dmg·공유 dist 불변), 같은 버전 커밋 재현,
+서명 안 된 조각·더러운 굽기·get-task-allow, ready 판 안 씀, 미리 굽기, 공증 뒤 push·그 dmg 올리기·피드까지, 공증 거절 시
+태그 없음·재제출, push 재시도 때 재공증 안 함, 굽은 뒤 바뀐 dmg, 릴리스의 다른 dmg 안 덮음, 잠긴 열쇠 빠른 실패·맡긴 풀기,
+이 저장소 release.yml·build-app.sh 의 실제 글자(검증 단계·검증 해시로만 appcast·hardened 목록·권한 파일).
 나쵸 기본 PATH(`/usr/bin` 먼저)로도 돌려 확인한다. `KASATERM_OPENSSL=/usr/bin/openssl` 처럼 쓸 수 없는 openssl 을 가리키면
 서명이 필요한 검사는 까닭을 밝히고 건너뛴다(오류가 아니다).
 

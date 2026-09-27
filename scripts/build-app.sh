@@ -495,6 +495,27 @@ SIGN_ARGS=(--force --sign "$SIGN")
 if [[ -f "$SIGN_KEYCHAIN" ]]; then
   SIGN_ARGS+=(--keychain "$SIGN_KEYCHAIN")
 fi
+# 공증 가능한 릴리스 서명(KASATERM_SIGN_HARDENED=1) — 애플 공증은 번들 안 모든 Mach-O 가 Developer ID·hardened runtime·
+# 보안 타임스탬프로 서명돼야 받는다. 평소 굽기(자기설치·TCC 유지)는 그대로 두고, 릴리스 도구(tools/release)만 켠다.
+# 이 모드에서는 서명 실패를 삼키지 않는다 — 한 조각이라도 빠지면 공증에서 통째로 거절된다.
+HARDENED="${KASATERM_SIGN_HARDENED:-0}"
+if [[ "$HARDENED" == "1" ]]; then
+  [[ "$APPLE_SIGN" == "Developer ID Application: "* ]] || {
+    echo "error: KASATERM_SIGN_HARDENED=1 needs a Developer ID Application identity (got '${APPLE_SIGN:-$SIGN}')" >&2; exit 1; }
+  SIGN_ARGS+=(--options runtime --timestamp)
+  # 릴리스 도구가 맡길 때만(KASATERM_SIGN_UNLOCK=실행 파일) 서명 바로 앞에서 열쇠고리를 푼다 — 긴 컴파일 동안
+  # 다시 잠기면 codesign 이 화면 암호창에서 멈춘다. 풀기는 그 파일이 하고, 이 스크립트는 암호를 모른다.
+  if [[ -n "${KASATERM_SIGN_UNLOCK:-}" ]]; then
+    "$KASATERM_SIGN_UNLOCK" || { echo "error: KASATERM_SIGN_UNLOCK ($KASATERM_SIGN_UNLOCK) failed" >&2; exit 1; }
+  fi
+fi
+sign_part() {
+  if [[ "$HARDENED" == "1" ]]; then
+    codesign "${SIGN_ARGS[@]}" "$1" || { echo "error: signing '$1' failed" >&2; exit 1; }
+  else
+    codesign "${SIGN_ARGS[@]}" "$1" 2>/dev/null || true
+  fi
+}
 # Sparkle.framework 는 nested(XPC·Updater·Autoupdate·dylib)부터 → framework → 마지막
 # app 순으로 서명한다. `--deep` 한 방은 nested XPC 의 서명 일관성을 보장 못 해 실행 시
 # XPC 로드가 실패하고 자동 업데이트가 깨질 수 있다(안쪽→바깥쪽이 정석).
@@ -505,13 +526,15 @@ if [[ -d "$FW" ]]; then
     "$FW/Versions/B/XPCServices/Installer.xpc" \
     "$FW/Versions/B/Updater.app" \
     "$FW/Versions/B/Autoupdate"; do
-    [[ -e "$nested" ]] && codesign "${SIGN_ARGS[@]}" "$nested" 2>/dev/null || true
+    [[ -e "$nested" ]] && sign_part "$nested"
   done
-  codesign "${SIGN_ARGS[@]}" "$FW" 2>/dev/null || true
+  sign_part "$FW"
 fi
 # kasaterm-cli 는 별도 실행 바이너리 — app 서명(--deep 제거)이 안 덮으므로 개별 서명.
-codesign "${SIGN_ARGS[@]}" "$APP/Contents/MacOS/kasaterm-cli" 2>/dev/null || true
-codesign "${SIGN_ARGS[@]}" "$APP/Contents/MacOS/kasa-serve-web" 2>/dev/null || true
+sign_part "$APP/Contents/MacOS/kasaterm-cli"
+sign_part "$APP/Contents/MacOS/kasa-serve-web"
+# 펫은 Resources 안의 Mach-O 라 app 서명이 봉인만 하고 서명은 안 한다(링커 ad-hoc 그대로) — 공증은 그것도 거절한다.
+[[ "$HARDENED" == "1" ]] && sign_part "$APP/Contents/Resources/kasapet"
 # 애플 인증서 표식 — 서명 봉인 안에 들어가야 하므로 app 서명 직전에 쓴다.
 if [[ -n "$APPLE_SIGN" ]]; then
   printf '%s\n' "$APPLE_SIGN" > "$APP/Contents/Resources/apple-signed"
@@ -519,6 +542,8 @@ else
   rm -f "$APP/Contents/Resources/apple-signed"
 fi
 APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
+# hardened runtime 은 마이크(음성 입력)·osascript 자동화를 권한 항목 없이는 막는다 — 번들 본체에만 싣는다.
+[[ "$HARDENED" == "1" ]] && APP_SIGN_ARGS+=(--entitlements "$ROOT/scripts/kasaterm.entitlements")
 # Communication Notifications is restricted: Apple Development signatures with
 # this entitlement are killed at launch without a matching macOS profile.
 # Native notification center + avatar provider work without it; keep the bundle

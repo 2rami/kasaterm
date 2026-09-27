@@ -12,8 +12,13 @@ import io
 import unittest
 from unittest import mock
 
+import plistlib
+import re
+import shutil
+
 from tools.release import deps
 from tools.release import fastpatch as fp
+from tools.release import macsign
 from tools.release import nacho
 from tools.release.backend import asset_names
 from tools.release.common import Refused, feed_item, sha256_bytes
@@ -246,7 +251,7 @@ class Fixture(unittest.TestCase):
                              check=True, stdout=subprocess.PIPE).stdout
         return base64.b64encode(sig).decode()
 
-    def ci_publish(self, plan, conclusion="success", status="completed", drop=(), corrupt_sig=False, feed=True):
+    def ci_publish(self, plan, conclusion="success", status="completed", drop=(), corrupt_sig=False, feed=True, keep=()):
         """태그가 선 뒤 release.yml 이 하는 일을 흉내 — 실행 기록, 릴리스 산출물, 서명된 두 피드."""
         tag = plan["tag"]
         bump = sh(self.work, "git", "ls-remote", "origin", f"refs/tags/{tag}").split()[0]
@@ -256,7 +261,8 @@ class Fixture(unittest.TestCase):
         for platform, name in asset_names(tag).items():
             if name in drop:
                 continue
-            data = f"{name} 몸통".encode()
+            # keep: 조종 기기가 이미 올린 산출물(로컬 mac 판) — CI 는 그것을 굽지 않고 그대로 싣는다.
+            data = self.asset_bytes[name] if name in keep else f"{name} 몸통".encode()
             self.asset_bytes[name] = data
             self.assets[name] = {"name": name, "size": len(data), "digest": sha256_bytes(data)}
             sig = self.sign(b"x" + data if corrupt_sig else data)
@@ -1100,6 +1106,443 @@ class RealRepoTests(unittest.TestCase):
         win = feed_item((REPO / "docs/appcast-win.xml").read_bytes())
         self.assertTrue(mac["url"].endswith(".dmg") and mac["length"] and mac["signature"])
         self.assertTrue(win["url"].endswith(".msi") and win["length"] and win["signature"])
+
+
+# ── 로컬 mac 판(release.yml MAC_ARTIFACT=local) ────────────────────────────────────────────────────────────────
+LOCAL_WORKFLOW = ("env:\n  MAC_ARTIFACT: local\n  MAC_TEAM: ABCDE12345\n"
+                  "# Verify locally signed DMG · source=Notarized Developer ID · xcrun stapler validate · VERIFIED_SHA\n"
+                  "          KASATERM_SIGN_ID: kasaterm-ci\n")
+MACHO_FILES = ("Contents/MacOS/kasaterm", "Contents/MacOS/kasaterm-cli", "Contents/MacOS/kasa-serve-web",
+               "Contents/Resources/kasapet", "Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle")
+DEVID_SHA = "A1" * 20
+SIG_DEVID = ("Identifier=x\nCodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1\n"
+             "Authority=Developer ID Application: Test Org (ABCDE12345)\nAuthority=Developer ID Certification Authority\n"
+             "Timestamp=Sep 27, 2026 at 10:00:00\nTeamIdentifier=ABCDE12345\n")
+SIG_ADHOC = "Identifier=x\nCodeDirectory v=20400 size=1 flags=0x20002(adhoc,linker-signed) hashes=1\nSignature=adhoc\nTeamIdentifier=not set\n"
+
+
+class LocalFixture(Fixture):
+    """mac dmg 를 이 기기가 Developer ID 로 서명·공증하는 저장소 — 굽기·공증·staple·릴리스 올리기를 가짜 도구로."""
+
+    ci_signing = "self"
+
+    def setUp(self):
+        super().setUp()
+        self.ci_signing = "local"
+        self.tools = {**self.tools, "security": {"path": "security"}, "xcrun": {"path": "xcrun"}, "ditto": {"path": "ditto"}}
+        (self.work / ".github/workflows/release.yml").write_text(LOCAL_WORKFLOW)
+        bake = self.work / "scripts/build-app.sh"
+        bake.write_text(bake.read_text() + "KASATERM_SIGN_HARDENED\n")
+        (self.work / "scripts/kasaterm.entitlements").write_text("<plist/>\n")
+        self.head = self.commit("build: 로컬 서명")
+        sh(self.work, "git", "push", "-q", "origin", "main")
+        self.keychain = self.tmp / "codesign.keychain-db"
+        self.keychain.write_text("keychain")
+        self.keychain_lines = [f'  1) {DEVID_SHA} "Developer ID Application: Test Org (ABCDE12345)"']
+        self.sigs, self.build_envs, self.notary_calls, self.uploads = {}, [], [], []
+        self.build_adhoc, self.build_dirty, self.debuggable, self.locked = (), False, False, False
+        self.unlocks = []
+        self.helper = fake_bin(self.tmp, "unlock-signing", "exit 0\n")
+        self.notary_answer = lambda: Result(0, json.dumps({"id": "sub-1", "status": "Accepted", "message": "ok"}))
+        self.env = {"KASATERM_SIGN_KEYCHAIN": str(self.keychain), "KASATERM_NOTARY_PROFILE": "", "KASATERM_SIGN_ID": ""}
+
+    def plan(self, devices=(), **kw):
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(macsign, "UNLOCK_HELPER", self.helper):
+            return super().plan(devices, **kw)
+
+    def fill_app(self, app, version, kind="devid", adhoc=()):
+        for rel in MACHO_FILES:
+            f = Path(app) / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"\xcf\xfa\xed\xfe" + rel.encode())
+            self.sigs[str(f)] = SIG_ADHOC if kind == "adhoc" or rel in adhoc else SIG_DEVID
+        with open(Path(app) / "Contents/Info.plist", "wb") as fh:
+            plistlib.dump({"CFBundleShortVersionString": version}, fh)
+
+    def fake(self, argv, cwd, env):
+        tool, rest = os.path.basename(argv[0]), argv[1:]
+        if tool == "security" and rest[:1] == ["find-identity"]:
+            self.calls.append(argv)
+            return Result(0, "\n".join(self.keychain_lines) + f"\n     {len(self.keychain_lines)} valid identities found\n")
+        if tool == "bash" and rest == ["scripts/build-app.sh"]:
+            self.calls.append(argv)
+            hardened = env.get("KASATERM_SIGN_HARDENED") == "1"
+            if hardened and env.get("KASATERM_SIGN_UNLOCK"):
+                self.fake([env["KASATERM_SIGN_UNLOCK"]], cwd, env)
+            self.build_envs.append({k: env.get(k) for k in ("KASATERM_SIGN_ID", "KASATERM_SIGN_KEYCHAIN", "KASATERM_SIGN_HARDENED")})
+            version = re.search(r'^version = "([^"]+)"', (Path(cwd) / "Cargo.toml").read_text(), re.M).group(1)
+            app = Path(cwd) / "dist/kasaterm.app"
+            self.fill_app(app, version, "devid" if hardened else "adhoc", self.build_adhoc)
+            self.identities[str(app)] = {**DEVID, "notarized": False} if hardened else {"verified": True, "authority": None, "team": None}
+            head = sh(cwd, "git", "rev-parse", "HEAD")
+            (Path(cwd) / "dist/kasaterm.build.json").write_text(json.dumps(
+                {"source": {"source_commit": None if self.build_dirty else head, "dirty": self.build_dirty}}))
+            return Result(0)
+        if tool == "codesign" and rest[0] == "-dvv" and rest[-1] in self.sigs:
+            return Result(0, "", self.sigs[rest[-1]])
+        if tool == "codesign" and rest[:2] == ["-d", "--entitlements"]:
+            return Result(0, "<plist><key>com.apple.security.get-task-allow</key></plist>" if self.debuggable else "<plist/>")
+        if tool == "codesign" and rest[0] == "--force":
+            self.calls.append(argv)
+            return Result(1, "", "errSecInternalComponent") if self.locked else Result(0)
+        if argv[0] == self.helper:
+            self.unlocks.append(len(self.notary_calls))
+            self.locked = False
+            return Result(0)
+        if tool == "ditto":
+            shutil.copytree(rest[0], rest[1], symlinks=True)
+            return Result(0)
+        if tool == "hdiutil" and rest[0] == "create":
+            self.calls.append(argv)
+            stage, dmg = Path(rest[rest.index("-srcfolder") + 1]), Path(rest[-1])
+            with open(stage / "kasaterm.app/Contents/Info.plist", "rb") as fh:
+                version = plistlib.load(fh)["CFBundleShortVersionString"]
+            dmg.write_bytes(f"dmg|{version}|{time.time_ns()}".encode())
+            return Result(0)
+        if tool == "hdiutil" and rest[0] == "attach":
+            mnt, data = Path(rest[rest.index("-mountpoint") + 1]), Path(rest[-1]).read_bytes()
+            version = data.split(b"|")[1].decode()
+            self.fill_app(mnt / "kasaterm.app", version)
+            self.identities[str(mnt / "kasaterm.app")] = {**DEVID, "notarized": data.endswith(b"+ticket")}
+            return Result(0)
+        if tool == "spctl" and "open" in rest:
+            data = Path(argv[-1]).read_bytes() if Path(argv[-1]).exists() else b""
+            return Result(0, "", "accepted\nsource=Notarized Developer ID") if data.endswith(b"+ticket") else Result(3, "", "rejected")
+        if tool == "xcrun" and rest[:2] == ["notarytool", "submit"]:
+            self.notary_calls.append(argv)
+            return self.notary_answer()
+        if tool == "xcrun" and rest[:2] == ["stapler", "staple"]:
+            with open(rest[-1], "ab") as fh:
+                fh.write(b"+ticket")
+            return Result(0)
+        if tool == "xcrun" and rest[:2] == ["stapler", "validate"]:
+            return Result(0 if Path(rest[-1]).read_bytes().endswith(b"+ticket") else 65, "", "")
+        if tool == "gh" and rest[:2] in (["release", "upload"], ["release", "create"]):
+            self.uploads.append(rest[:2] + [a for a in rest if a.startswith("--")])
+            f = Path(rest[3])
+            data = f.read_bytes()
+            self.asset_bytes[f.name] = data
+            self.assets[f.name] = {"name": f.name, "size": len(data), "digest": sha256_bytes(data)}
+            return Result(0)
+        return super().fake(argv, cwd, env)
+
+    def dmg_name(self, plan):
+        return asset_names(plan["tag"])["macos"]
+
+
+class LocalSigningPlanTests(LocalFixture):
+    def test_the_local_identity_replaces_the_ci_signature_without_moving_any_key(self):
+        plan = self.plan()
+        self.assertEqual((plan["errors"], plan["live_blocks"]), ([], []))
+        rel = plan["signing"]["release"]
+        self.assertEqual((rel["source"], rel["team"], rel["notarized"]), ("local", "ABCDE12345", True))
+        local = plan["mac_artifact"]
+        self.assertEqual((local["identity"]["sha1"], local["keychain"], local["notary_profile"]),
+                         (DEVID_SHA, str(self.keychain), "AC_NOTARY"))
+        self.assertIn("approval_scope", plan)
+        # 계획의 약속(나쵸가 다시 재는 core)은 그대로다 — 서명 길은 core 밖에 둔다.
+        self.assertEqual(tuple(fp.core_of(plan)), fp.CORE_KEYS)
+        self.assertIn("이 기기(로컬 서명·공증)", fp.describe(plan))
+
+    def test_every_missing_preparation_blocks_the_tag_with_its_reason(self):
+        cases = [
+            ("workflow", lambda: (self.work / ".github/workflows/release.yml").write_text(
+                "env:\n  MAC_ARTIFACT: local\n  MAC_TEAM: ABCDE12345\n"), "검증하지 않는다"),
+            ("team", lambda: (self.work / ".github/workflows/release.yml").write_text(
+                LOCAL_WORKFLOW.replace("ABCDE12345", "ZZZZZ99999")), "MAC_TEAM(ZZZZZ99999)"),
+            ("bake", lambda: (self.work / "scripts/build-app.sh").write_text("# Sparkle.framework\n"), "KASATERM_SIGN_HARDENED"),
+        ]
+        for name, change, word in cases:
+            with self.subTest(name):
+                self.tearDown()
+                self.setUp()
+                change()
+                self.commit(f"ci: {name}")
+                sh(self.work, "git", "push", "-q", "origin", "main")
+                plan = self.plan()
+                self.assertIn(word, " ".join(plan["live_blocks"]))
+                self.assertTrue(any(b.startswith("mac 서명") for b in plan["live_blocks"]))
+        for name, setup, word in (
+            ("no identity", lambda: setattr(self, "keychain_lines", []), "Developer ID Application 신원이 없다"),
+            ("two identities", lambda: self.keychain_lines.append(f'  2) {"B2" * 20} "Developer ID Application: Test Org (ABCDE12345)"'), "여럿이다"),
+            ("no keychain", lambda: self.keychain.unlink(), "열쇠고리"),
+            ("other team", lambda: self.identities.update({str(self.app): {**DEVID, "team": "QQQQQ11111"}}), "설치본 팀(QQQQQ11111)"),
+            ("no xcrun", lambda: self.tools.update(xcrun={"path": None, "why": "/usr/bin/xcrun 가 없다"}), "xcrun"),
+        ):
+            with self.subTest(name):
+                self.tearDown()
+                self.setUp()
+                setup()
+                self.assertIn(word, " ".join(self.plan()["live_blocks"]))
+
+    def test_a_ci_mode_workflow_keeps_the_ci_identity_gate(self):
+        (self.work / ".github/workflows/release.yml").write_text("          KASATERM_SIGN_ID: kasaterm-ci\n")
+        self.commit("ci: 예전 길")
+        sh(self.work, "git", "push", "-q", "origin", "main")
+        plan = self.plan()
+        self.assertIsNone(plan["mac_artifact"])
+        self.assertIn("CI mac 판에 팀 서명 신원이 없다", " ".join(plan["live_blocks"]))
+
+
+class LocalSigningUnlockTests(LocalFixture):
+    def test_a_locked_key_fails_fast_before_the_long_bake_and_is_never_unlocked_unasked(self):
+        plan = self.plan()
+        self.locked = True
+        with self.assertRaisesRegex(Refused, "서명 열쇠를 지금 못 쓴다.*errSecInternalComponent.*KASATERM_RELEASE_UNLOCK=1"):
+            self.go(plan)
+        self.assertEqual((self.build_envs, self.unlocks), ([], []))
+
+    def test_an_asked_unlock_runs_the_existing_helper_right_before_signing_and_notarizing(self):
+        plan = self.plan()
+        self.locked = True
+        with mock.patch.dict(os.environ, {"KASATERM_RELEASE_UNLOCK": "1"}):
+            aid = self.nacho.approve(plan["approval_scope"])
+            state = self.go(plan, "live", aid)
+        self.assertEqual(self.build_envs[0]["KASATERM_SIGN_ID"], DEVID_SHA)
+        self.assertEqual(state["stages"]["tag"]["status"], "done")
+        # 굽기는 build-app.sh 가 서명 직전에 도우미를 부르게 넘기고(가짜 굽기도 그 줄을 흉내), 공증 직전에 한 번 더 부른다.
+        self.assertEqual(self.build_envs[0].get("KASATERM_SIGN_HARDENED"), "1")
+        self.assertEqual(self.unlocks, [0, 0])
+        self.assertEqual(len(self.notary_calls), 1)
+
+    def test_the_bake_script_calls_the_unlock_hook_only_in_hardened_mode_and_just_before_signing(self):
+        bake = (REPO / "scripts/build-app.sh").read_text()
+        hook = bake.index('"$KASATERM_SIGN_UNLOCK" ||')
+        self.assertLess(bake.index('if [[ "$HARDENED" == "1" ]]; then'), hook)
+        self.assertLess(hook, bake.index('sign_part "$FW"'))
+        self.assertLess(bake.index("cargo build"), hook)
+
+
+class LocalSigningBuildTests(LocalFixture):
+    def test_the_signed_build_bakes_the_version_commit_in_the_plan_workdir(self):
+        plan = self.plan()
+        state = self.go(plan)
+        build = state["stages"]["build"]["detail"]
+        self.assertEqual([state["stages"][s]["status"] for s in fp.STAGES], ["done", "done", "dry", "dry", "dry", "done"])
+        self.assertEqual(sh(self.work, "git", "rev-parse", f"{build['commit']}^"), self.head)
+        self.assertIn('version = "0.2.1"', sh(self.work, "git", "show", f"{build['commit']}:Cargo.toml"))
+        self.assertEqual(sh(self.work, "git", "log", "-1", "--format=%s", build["commit"]), "chore(release): v0.2.1")
+        self.assertEqual(self.build_envs, [{"KASATERM_SIGN_ID": DEVID_SHA, "KASATERM_SIGN_KEYCHAIN": str(self.keychain),
+                                            "KASATERM_SIGN_HARDENED": "1"}])
+        dmg = Path(build["dmg"])
+        self.assertEqual((dmg.name, dmg.parent), (self.dmg_name(plan), fp.plan_dir(plan["plan_id"], self.state) / "work/out"))
+        self.assertEqual((build["version"], build["machos"]), ("0.2.1", len(MACHO_FILES)))
+        self.assertTrue(any(c[:2] == ["codesign", "--force"] and "--timestamp" in c and c[-1] == str(dmg) for c in self.calls))
+        # 공유 저장소에는 dist·태그·ref 가 안 생기고, 공증·올리기는 승인 전이라 명령만 보인다.
+        self.assertFalse((self.work / "dist").exists())
+        self.assertEqual((self.remote_tags(), self.notary_calls, self.uploads), (["v0.2.0"], [], []))
+        would = "\n".join(state["stages"]["tag"]["detail"]["would"])
+        self.assertIn("notarytool submit", would)
+        self.assertIn("--keychain-profile AC_NOTARY", would)
+        self.assertIn("덮지 않고 멈춤", "\n".join(state["stages"]["release"]["detail"]["would"]))
+
+    def test_the_version_commit_is_the_same_every_time_it_is_made(self):
+        plan = self.plan()
+        b = self.backend(plan, "local")
+        one = b.ensure_bump(b.worktree(plan, "a"), plan)
+        two = b.ensure_bump(b.worktree(plan, "b"), plan)
+        self.assertEqual(one, two)
+        for name in ("a", "b"):
+            b.git("worktree", "remove", "--force", str(b.workdir / name), kind="local")
+
+    def test_an_unsigned_piece_a_dirty_bake_or_a_debuggable_bundle_stops_the_build(self):
+        for name, setup, word in (
+            ("adhoc pet", lambda: setattr(self, "build_adhoc", ("Contents/Resources/kasapet",)), "kasapet: Developer ID 가 아님"),
+            ("dirty", lambda: setattr(self, "build_dirty", True), "깨끗한 판이 아니다"),
+            ("debuggable", lambda: setattr(self, "debuggable", True), "get-task-allow"),
+        ):
+            with self.subTest(name):
+                self.tearDown()
+                self.setUp()
+                setup()
+                plan = self.plan()
+                with self.assertRaisesRegex(Refused, word):
+                    self.go(plan)
+                self.assertFalse(fp.live_ready(plan, fp.load(plan["plan_id"], self.state)[1]))
+
+    def test_a_ready_build_is_never_used_for_the_local_signed_release(self):
+        dist = self.work / "dist"
+        app = dist / f"kasaterm.app.ready-{self.head[:8]}/Contents/MacOS"
+        app.mkdir(parents=True)
+        (app / "kasaterm").write_bytes(b"ready")
+        (dist / f"kasaterm.build.ready-{self.head[:8]}.json").write_text(json.dumps(
+            {"source": {"source_commit": self.head, "dirty": False},
+             "components": {"app": {"sha256": sha256_bytes(b"ready")[7:]}}}))
+        self.identities[str(dist / f"kasaterm.app.ready-{self.head[:8]}")] = dict(DEVID)
+        state = self.go(self.plan())
+        self.assertNotIn("reused", state["stages"]["build"]["detail"])
+        self.assertEqual(len(self.build_envs), 1)
+
+    def test_preflight_bakes_unsigned_in_the_plan_workdir_and_counts_what_signing_must_fix(self):
+        plan = self.plan()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = fp.mac_preflight(self.work, plan, self.state, runner=FakeRunner("local", self), http=self.http)
+        self.assertEqual(code, 0)
+        doc = json.loads((fp.plan_dir(plan["plan_id"], self.state) / "preflight.json").read_text())
+        self.assertEqual((doc["version"], doc["uncovered"], len(doc["machos"])), ("0.2.1", [], len(MACHO_FILES)))
+        self.assertEqual(len(doc["signing_would_fix"]), len(MACHO_FILES))
+        self.assertTrue(Path(doc["dmg"]).is_relative_to(fp.plan_dir(plan["plan_id"], self.state)))
+        self.assertEqual(self.build_envs[0]["KASATERM_SIGN_HARDENED"], None)
+        self.assertTrue(self.build_envs[0]["KASATERM_SIGN_KEYCHAIN"].endswith("no-keychain"))
+        self.assertFalse((self.work / "dist").exists())
+        self.assertNotIn("wt-preflight", sh(self.work, "git", "worktree", "list"))
+        # 미리 굽기의 버전 커밋은 실제 굽기가 만들 커밋과 같다(날짜를 계획 시각에 못 박았다).
+        state = self.go(plan)
+        self.assertEqual(state["stages"]["build"]["detail"]["commit"], doc["commit"])
+
+
+class LocalSigningLiveTests(LocalFixture):
+    def test_notarize_before_push_upload_that_exact_dmg_and_follow_it_to_the_feed(self):
+        dev = self.device("맥북", "0.2.0", sh(self.work, "git", "rev-parse", "v0.2.0")[:8], "dev-mac")
+        plan = self.plan([dev])
+        aid = self.nacho.approve(plan["approval_scope"])
+        state = self.go(plan, "live", aid, [dev])
+        built = state["stages"]["build"]["detail"]
+        tagged = state["stages"]["tag"]["detail"]
+        self.assertEqual((self.remote(f"refs/tags/{plan['tag']}"), tagged["commit"]), (built["commit"], built["commit"]))
+        self.assertEqual(len(self.notary_calls), 1)
+        submit = self.notary_calls[0]
+        self.assertEqual(submit[3], built["dmg"])
+        self.assertIn("--wait", submit)
+        self.assertEqual(submit[submit.index("--keychain") + 1], str(self.keychain))
+        seal = tagged["notarized"]
+        self.assertEqual((seal["notarized"], seal["stapled"], seal["team"], seal["version"]), (True, True, "ABCDE12345", "0.2.1"))
+        self.assertNotEqual(seal["dmg_sha256"], built["dmg_sha256"])  # staple 이 티켓을 붙였다
+        self.assertEqual(self.uploads, [["release", "create", "--repo", "--verify-tag", "--title", "--notes"]])
+        self.assertEqual(self.assets[self.dmg_name(plan)]["digest"], seal["dmg_sha256"])
+        self.assertIn("CI 가 아직 안 떴다", state["stages"]["release"]["detail"])
+
+        self.ci_publish(plan, feed=False, keep=(self.dmg_name(plan),))
+        state = self.go(plan, "live", aid, [dev])
+        rel = state["stages"]["release"]["detail"]
+        self.assertEqual((rel["dmg_upload"], rel["assets"]["macos"]["sha256"]), ("already", seal["dmg_sha256"]))
+        self.assertEqual((rel["mac_identity"]["team"], rel["mac_identity"]["source"]), ("ABCDE12345", "local"))
+
+        self.ci_publish(plan, keep=(self.dmg_name(plan),))
+        state = self.go(plan, "live", aid, [dev])
+        self.assertEqual([state["stages"][s]["status"] for s in fp.STAGES], ["done"] * 6)
+        self.assertEqual((len(self.notary_calls), len(self.uploads), self.nacho.consumes), (1, 1, 1))
+
+    def test_a_notary_rejection_raises_no_tag_and_a_rerun_submits_the_same_dmg(self):
+        plan = self.plan()
+        aid = self.nacho.approve(plan["approval_scope"])
+        self.notary_answer = lambda: Result(1, json.dumps({"id": "sub-bad", "status": "Invalid"}))
+        with self.assertRaisesRegex(Refused, r"공증 실패\(Invalid\).*notarytool log sub-bad"):
+            self.go(plan, "live", aid)
+        self.assertEqual((self.remote_tags(), self.remote("refs/heads/main"), self.uploads), (["v0.2.0"], self.head, []))
+        self.notary_answer = lambda: Result(0, json.dumps({"id": "sub-2", "status": "Accepted"}))
+        state = self.go(plan, "live", aid)
+        self.assertEqual(state["stages"]["tag"]["status"], "done")
+        self.assertEqual((len(self.notary_calls), self.nacho.consumes), (2, 1))
+
+    def test_a_failed_push_after_notarization_does_not_submit_again(self):
+        plan = self.plan()
+        aid = self.nacho.approve(plan["approval_scope"])
+        self.push_answer = lambda real: Result(1, "", "remote rejected")
+        with self.assertRaisesRegex(Refused, "원격은 그대로다"):
+            self.go(plan, "live", aid)
+        self.push_answer = None
+        state = self.go(plan, "live", aid)
+        self.assertEqual((state["stages"]["tag"]["status"], len(self.notary_calls)), ("done", 1))
+        self.assertEqual(state["stages"]["tag"]["detail"]["notarized"]["id"], "sub-1")
+
+    def test_a_dmg_changed_after_the_build_is_never_notarized_or_tagged(self):
+        plan = self.plan()
+        state = self.go(plan)
+        Path(state["stages"]["build"]["detail"]["dmg"]).write_bytes(b"dmg|0.2.1|swapped")
+        aid = self.nacho.approve(plan["approval_scope"])
+        with self.assertRaisesRegex(Refused, "굽고 나서 바뀌었다"):
+            self.go(plan, "live", aid)
+        self.assertEqual((self.notary_calls, self.remote_tags()), ([], ["v0.2.0"]))
+
+    def test_a_different_dmg_on_the_release_is_never_overwritten(self):
+        plan = self.plan()
+        self.assets[self.dmg_name(plan)] = {"name": self.dmg_name(plan), "size": 3, "digest": "sha256:" + "0" * 64}
+        aid = self.nacho.approve(plan["approval_scope"])
+        with self.assertRaisesRegex(Refused, "덮지 않는다"):
+            self.go(plan, "live", aid)
+        self.assertEqual(self.uploads, [])
+
+    def test_the_release_must_carry_the_file_this_machine_notarized(self):
+        plan = self.plan()
+        aid = self.nacho.approve(plan["approval_scope"])
+        self.go(plan, "live", aid)
+        self.ci_publish(plan, feed=False, keep=(self.dmg_name(plan),))
+        name = self.dmg_name(plan)
+        self.asset_bytes[name] = b"dmg|0.2.1|other+ticket"
+        self.assets[name] = {"name": name, "size": len(self.asset_bytes[name]), "digest": sha256_bytes(self.asset_bytes[name])}
+        with self.assertRaisesRegex(Refused, "덮지 않는다|공증한 그 파일이 아니다"):
+            self.go(plan, "live", aid)
+
+
+class MacsignUnitTests(unittest.TestCase):
+    def test_signature_fields_runtime_timestamp_and_adhoc(self):
+        dev, adhoc = macsign.parse_signature(SIG_DEVID), macsign.parse_signature(SIG_ADHOC)
+        self.assertEqual((dev["authority"], dev["team"], dev["runtime"], dev["timestamp"], dev["adhoc"]),
+                         ("Developer ID Application: Test Org (ABCDE12345)", "ABCDE12345", True, True, False))
+        self.assertEqual((adhoc["team"], adhoc["runtime"], adhoc["timestamp"], adhoc["adhoc"]), (None, False, False, True))
+        signed_time = SIG_DEVID.replace("Timestamp=", "Signed Time=")
+        self.assertFalse(macsign.parse_signature(signed_time)["timestamp"])
+
+    def test_identities_notary_json_and_workflow_mode(self):
+        text = f'  1) {DEVID_SHA} "Developer ID Application: A B (ABCDE12345)"\n  2) {"C3" * 20} "Apple Development: A (XYZ)"\n'
+        self.assertEqual(macsign.parse_identities(text), [{"sha1": DEVID_SHA, "name": "Developer ID Application: A B (ABCDE12345)",
+                                                           "team": "ABCDE12345"}])
+        self.assertEqual(macsign.parse_notary('{"id":"x","status":"Accepted"}')["status"], "Accepted")
+        self.assertEqual(macsign.parse_notary("not json")["status"], None)
+        self.assertEqual(macsign.workflow_mode(LOCAL_WORKFLOW), {"mode": "local", "team": "ABCDE12345", "verifies": True})
+        self.assertEqual(macsign.workflow_mode("KASATERM_SIGN_ID: kasaterm-ci\n")["mode"], "ci")
+
+    def test_machos_are_found_by_magic_and_checked_against_the_hardened_list(self):
+        with tempfile.TemporaryDirectory() as d:
+            app = Path(d) / "kasaterm.app"
+            for rel in MACHO_FILES + ("Contents/Helpers/stray",):
+                (app / rel).parent.mkdir(parents=True, exist_ok=True)
+                (app / rel).write_bytes(b"\xcf\xfa\xed\xfe")
+            (app / "Contents/Resources/readme.txt").write_text("text")
+            os.symlink("kasaterm", app / "Contents/MacOS/link")
+            found = [str(p.relative_to(app)) for p in macsign.machos(app)]
+            self.assertEqual(sorted(found), sorted(MACHO_FILES + ("Contents/Helpers/stray",)))
+            rows = [{"path": rel, "covered": macsign.covered(rel), **macsign.parse_signature(SIG_DEVID)} for rel in found]
+            self.assertEqual(macsign.readiness_problems(rows, "ABCDE12345"), ["Contents/Helpers/stray: build-app.sh 의 hardened 서명 목록 밖"])
+            self.assertIn("팀 ABCDE12345", macsign.readiness_problems(rows, "OTHER00000")[0])
+
+
+class LocalSigningRepoTests(unittest.TestCase):
+    """이 저장소의 실제 release.yml·build-app.sh 가 로컬 판 계약을 지키는가 — 글자로 본다(yaml 모듈 없이)."""
+
+    def setUp(self):
+        self.wf = (REPO / ".github/workflows/release.yml").read_text()
+        self.bake = (REPO / "scripts/build-app.sh").read_text()
+
+    def test_the_workflow_verifies_the_local_dmg_and_signs_only_that_hash(self):
+        self.assertEqual(macsign.workflow_mode(self.wf), {"mode": "local", "team": "L366799VND", "verifies": True})
+        self.assertEqual(fp.capabilities(REPO)["macos"]["artifact"]["mode"], "local")
+        self.assertEqual(macsign.repo_ready(REPO), [])
+        build = self.wf[self.wf.index("- name: Build .app + .dmg"):self.wf.index("- name: Verify locally signed DMG")]
+        self.assertIn("if: env.MAC_ARTIFACT == 'ci'", build)
+        verify = self.wf[self.wf.index("- name: Verify locally signed DMG"):self.wf.index("- name: Attach DMG to release")]
+        for must in ('[[ "$WANT" == "$GOT" ]]', "source=Notarized Developer ID", "xcrun stapler validate",
+                     "TeamIdentifier=$MAC_TEAM", "flags=.*runtime", "CFBundleShortVersionString", 'echo "sha256='):
+            self.assertIn(must, verify)
+        self.assertNotIn("--clobber\n", verify.split("gh release download")[0])
+        attach = self.wf[self.wf.index("- name: Attach DMG to release"):self.wf.index("- name: Upload DMG artifact")]
+        local_branch = attach[attach.index('if [[ "$MAC_ARTIFACT" == "local" ]]; then\n            # dmg'):attach.index("elif gh release view")]
+        self.assertNotIn("upload", local_branch)
+        appcast = self.wf[self.wf.index("  appcast:"):]
+        self.assertIn("VERIFIED_SHA: ${{ needs.build-dmg.outputs.dmg_sha256 }}", appcast)
+        self.assertLess(appcast.index('[[ "$GOT" == "$VERIFIED_SHA" ]]'), appcast.index("vendor/Sparkle/bin/generate_appcast \\\n"))
+
+    def test_the_hardened_bake_signs_every_listed_piece_with_runtime_and_timestamp(self):
+        for rel in macsign.HARDENED_SIGNED:
+            self.assertIn(rel.split("/")[-1], self.bake)
+        self.assertIn("SIGN_ARGS+=(--options runtime --timestamp)", self.bake)
+        self.assertIn('sign_part "$APP/Contents/Resources/kasapet"', self.bake)
+        self.assertIn("--entitlements \"$ROOT/scripts/kasaterm.entitlements\"", self.bake)
+        ent = plistlib.loads((REPO / "scripts/kasaterm.entitlements").read_bytes())
+        self.assertEqual(ent, {"com.apple.security.device.audio-input": True, "com.apple.security.automation.apple-events": True})
+        self.assertIn("NSMicrophoneUsageDescription", self.bake)
 
 
 if __name__ == "__main__":
