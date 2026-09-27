@@ -277,10 +277,7 @@ class RealBackend:
             env["KASATERM_SIGN_UNLOCK"] = helper
         else:
             self.probe_key(local)
-        r = self.runner.run(["bash", "scripts/build-app.sh"], cwd=wt, timeout=3600, env=env, kind="local")
-        if not r.ok:
-            raise Refused(f"서명 굽기 실패 — {'시간 초과' if r.timed_out else r.tail(4)}"
-                          f" (열쇠고리가 잠겼으면 사람이 {local.get('unlock_helper') or '열쇠고리 풀기'} 를 먼저 — 이 도구는 풀지 않는다)")
+        self.bake(wt, env, "build-signed", f" (열쇠고리가 잠겼으면 사람이 {local.get('unlock_helper') or '열쇠고리 풀기'} 를 먼저 — 이 도구는 풀지 않는다)")
         app = wt / "dist/kasaterm.app"
         facts = self.bundle_facts(wt, app, plan, bump)
         dmg = self.make_dmg(app, plan, local)
@@ -290,6 +287,17 @@ class RealBackend:
             raise Refused("공증에 낼 수 없는 번들 — " + "; ".join(problems[:6]) + (f" 외 {len(problems) - 6}건" if len(problems) > 6 else ""))
         return {"commit": bump, "built": str(app), "dmg": str(dmg), "dmg_sha256": sha256_file(dmg), **facts,
                 "machos": len(rows), "identity": identity_of(self.runner, app, self.tools), "signed_with": local["identity"]["name"]}
+
+    def bake(self, wt, env, label, hint=""):
+        """build-app.sh — 실패하면 전체 출력을 작업 폴더에 남긴다. 끝 몇 줄만으로는 npm 출력이 컴파일 오류를 가린다."""
+        r = self.runner.run(["bash", "scripts/build-app.sh"], cwd=wt, timeout=3600, env=env, kind="local")
+        if r.ok or r.skipped:
+            return r
+        log = self.workdir / f"{label}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(f"--- stderr ---\n{r.err or ''}\n--- stdout ---\n{r.out or ''}")
+        why = "시간 초과" if r.timed_out else "\n".join((r.err or r.out or "").strip().splitlines()[-4:])
+        raise Refused(f"굽기 실패 — {why} · 전체 기록 {log}{hint}")
 
     def unlock_helper(self, local):
         """맡겼을 때만 쓰는 풀기 도우미 — 계획이 본 자리 그대로, 지금도 실행 파일일 때."""
@@ -577,9 +585,7 @@ class RealBackend:
             bump = self.ensure_bump(wt, plan)
             env = {**self.env(), "KASATERM_SIGN_KEYCHAIN": str(self.workdir / "no-keychain"),
                    "KASATERM_SIGN_ID": "kasaterm-preflight-unsigned"}
-            r = self.runner.run(["bash", "scripts/build-app.sh"], cwd=wt, timeout=3600, env=env, kind="local")
-            if not r.ok:
-                raise Refused(f"굽기 실패 — {'시간 초과' if r.timed_out else r.tail(4)}")
+            self.bake(wt, env, "preflight")
             app = wt / "dist/kasaterm.app"
             facts = self.bundle_facts(wt, app, plan, bump)
             dmg = self.make_dmg(app, plan, None, out=self.workdir / "preflight")

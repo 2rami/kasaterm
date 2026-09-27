@@ -1534,6 +1534,12 @@ class LocalSigningRepoTests(unittest.TestCase):
         self.assertIn("VERIFIED_SHA: ${{ needs.build-dmg.outputs.dmg_sha256 }}", appcast)
         self.assertLess(appcast.index('[[ "$GOT" == "$VERIFIED_SHA" ]]'), appcast.index("vendor/Sparkle/bin/generate_appcast \\\n"))
 
+    def test_the_bake_takes_binaries_from_the_isolated_target_the_release_tool_passes(self):
+        # 2026-09-27 미리 굽기 실측: cargo 는 CARGO_TARGET_DIR 로 다 굽고, cp 가 고정 경로 target/release 에서 못 찾아 멈췄다.
+        self.assertIn('TARGET_DIR="${CARGO_TARGET_DIR:-target}"', self.bake)
+        self.assertIn('BINDIR="$TARGET_DIR/release"', self.bake)
+        self.assertNotIn('BINDIR="target/', self.bake)
+
     def test_the_hardened_bake_signs_every_listed_piece_with_runtime_and_timestamp(self):
         for rel in macsign.HARDENED_SIGNED:
             self.assertIn(rel.split("/")[-1], self.bake)

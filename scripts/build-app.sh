@@ -100,12 +100,14 @@ BUILD_PROVENANCE_STATE="$(mktemp /tmp/kasaterm-build-proof.XXXXXX)"
 if ! python3 "$ROOT/tools/request_journal/build_manifest.py" begin --project "$ROOT" --profile "$PROFILE" --output "$BUILD_PROVENANCE_STATE"; then
   echo "[build-app] source provenance unavailable; this build will not claim a source commit" >&2
 fi
+# 릴리스 도구(tools/release)는 격리 target(CARGO_TARGET_DIR)으로 굽는다 — 바이너리는 cargo 가 실제로 쓴 자리에서 가져온다.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [[ "$PROFILE" == "release" ]]; then
   cargo build --release -p kasaterm -p kasa-socket -p kasa-mcp -p kasapet --bins
-  BINDIR="target/release"
+  BINDIR="$TARGET_DIR/release"
 else
   cargo build -p kasaterm -p kasa-socket -p kasa-mcp -p kasapet --bins
-  BINDIR="target/debug"
+  BINDIR="$TARGET_DIR/debug"
 fi
 
 APP="dist/kasaterm.app"
