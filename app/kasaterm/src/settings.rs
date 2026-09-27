@@ -63,13 +63,22 @@ impl App {
         // 안 그려질 땐 hit 대상도 없어야 하므로 무효 rect 를 돌려준다 — 그때의
         // 설정 진입점은 우측 패널 Info 탭이 담당한다.
         self.sidebar_tray_rects(win_h_logical)
-            .map_or((0.0, 0.0, 0.0, 0.0), |(_, _, _, s)| s)
+            .map_or((0.0, 0.0, 0.0, 0.0), |t| t.settings)
     }
     /// 트레이의 피드백 버튼. 설정 바로 왼쪽 — 둘 다 "앱에 말을 거는" 쪽이라 묶어
     /// 두고, 새 세션(`+`)과는 트레이 양 끝으로 갈라 성격을 구분한다.
     pub(crate) fn feedback_btn_rect(&self, win_h_logical: f32) -> Rect {
         self.sidebar_tray_rects(win_h_logical)
-            .map_or((0.0, 0.0, 0.0, 0.0), |(_, _, f, _)| f)
+            .map_or((0.0, 0.0, 0.0, 0.0), |t| t.feedback)
+    }
+    /// 트레이의 보드·아로나 버튼. 설정처럼 본문 자리를 바꾸는 화면이라 그 옆 짝이다.
+    pub(crate) fn board_btn_rect(&self, win_h_logical: f32) -> Rect {
+        self.sidebar_tray_rects(win_h_logical)
+            .map_or((0.0, 0.0, 0.0, 0.0), |t| t.board)
+    }
+    pub(crate) fn arona_btn_rect(&self, win_h_logical: f32) -> Rect {
+        self.sidebar_tray_rects(win_h_logical)
+            .map_or((0.0, 0.0, 0.0, 0.0), |t| t.arona)
     }
 
     /// Re-emit the claude wrapper into the live shim dir so an already-open pane

@@ -1455,6 +1455,39 @@ fn overview_from_value(value: serde_json::Value) -> Result<OverviewData, String>
     Ok(data)
 }
 
+/// 사이드바 현황 줄의 세 수. 보드 목록과 **같은 판정**(`overview_status`)이어야 줄을 누르고
+/// 연 보드와 숫자가 맞는다. 거울 줄은 원본 기기 줄과 같은 학생이라 빼지 않으면 두 번 센다.
+pub(crate) fn pulse_counts(value: serde_json::Value) -> Result<crate::sidebar_pulse::PulseCounts, String> {
+    Ok(count_pulse(&overview_from_value(value)?))
+}
+
+fn count_pulse(data: &OverviewData) -> crate::sidebar_pulse::PulseCounts {
+    let mut counts = crate::sidebar_pulse::PulseCounts::default();
+    let rows = data.panes.iter()
+        .filter(|row| row.status_reason.as_deref() != Some(crate::socket::REMOTE_MIRROR_REASON));
+    for row in rows {
+        match overview_status(row).1 {
+            0 => counts.yours += 1,
+            3 => counts.working += 1,
+            5 => counts.done += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+/// 격리 검증 앱이면 보드와 같은 가상 판으로 센다 — 사람의 기기에 터널을 열지 않고도 수가 선다.
+#[cfg(debug_assertions)]
+pub(crate) fn pulse_fixture_counts() -> Option<Result<crate::sidebar_pulse::PulseCounts, String>> {
+    board_fixture_requested().then(|| {
+        let data = board_fixture();
+        match data.error {
+            Some(error) => Err(error),
+            None => Ok(count_pulse(&data)),
+        }
+    })
+}
+
 fn merge_overview_changes(current: &mut Vec<OverviewChange>, previous: &[OverviewChange], changes: Vec<OverviewChange>) {
     current.extend(previous.iter().cloned());
     current.extend(changes);
@@ -2123,7 +2156,7 @@ fn board_reason(reason: &str) -> String {
         "local observation unavailable" => "이 기기의 최근 상태를 확인하지 못했어요",
         "live place; supported agent activity unavailable" => "지원되는 에이전트의 활동을 아직 확인하지 못했어요",
         "supported agent observed; transcript activity unavailable" => "실행 중인 에이전트의 최근 내용을 아직 확인하지 못했어요",
-        "remote mirror; observe agent on its source machine" => "원격 화면을 보여주는 창이에요. 원래 기기에서 작업 상태를 확인해 주세요",
+        crate::socket::REMOTE_MIRROR_REASON => "원격 화면을 보여주는 창이에요. 원래 기기에서 작업 상태를 확인해 주세요",
         "pane attention signal observed" => "응답이나 선택을 기다리고 있어요",
         _ => reason,
     };
@@ -3563,6 +3596,32 @@ mod tests {
         let mut data = overview_from_value(board_probe_value()).unwrap();
         data.local_machine_id = Some("device-a".into());
         data
+    }
+
+    /// 현황 줄의 수는 보드 목록의 판정과 같아야 하고, 거울 줄은 상태가 무엇이든 안 센다.
+    /// 거울 필터를 빼면 마지막 단언이 깨진다(한 번 빼 보고 확인했다).
+    #[test]
+    fn pulse_counts_match_the_board_and_skip_remote_mirrors() {
+        let value = board_probe_value();
+        let data = overview_data();
+        let rank = |n: u8| data.panes.iter().filter(|row| overview_status(row).1 == n).count();
+        let counts = pulse_counts(value.clone()).unwrap();
+        assert_eq!((counts.yours, counts.working, counts.done), (rank(0), rank(3), rank(5)));
+        assert!(counts.yours > 0 && counts.working > 0 && counts.done > 0, "가상 판이 세 칸을 다 채워야 검사가 뜻이 있다");
+
+        let mut mirror = value["panes"][0].clone();
+        assert_eq!(mirror["status"], "working");
+        mirror["id"] = "mirror-of-first".into();
+        mirror["address"]["surface_key"] = "mirror-key".into();
+        mirror["status_reason"] = crate::socket::REMOTE_MIRROR_REASON.into();
+        let mut with_mirror = value.clone();
+        with_mirror["panes"].as_array_mut().unwrap().push(mirror.clone());
+        assert_eq!(pulse_counts(with_mirror).unwrap(), counts, "거울 줄을 세면 같은 학생이 두 번 선다");
+
+        mirror["status_reason"] = "hook turn open".into();
+        let mut plain = value;
+        plain["panes"].as_array_mut().unwrap().push(mirror);
+        assert_eq!(pulse_counts(plain).unwrap().working, counts.working + 1, "거울이 아닌 줄은 센다");
     }
 
     #[test]

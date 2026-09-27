@@ -449,7 +449,9 @@ impl StateHub {
                 self.compact.lock().unwrap().remove(surface);
             }
             "reset" => {
-                self.turn_hooks.lock().unwrap().remove(surface);
+                // 새 세션(SessionStart)은 입력을 기다리는 빈 창으로 뜬다 — 닫힌 턴이 근거다. 지우기만
+                // 하면 첫 메시지로 기록 파일이 생길 때까지 「근거 없음(unknown)」으로 남았다.
+                self.turn_hooks.lock().unwrap().insert(key.clone(), (HookTurn::Closed, now));
                 self.compact.lock().unwrap().remove(surface);
                 self.attention.lock().unwrap().remove(surface);
                 self.perm_mode.lock().unwrap().remove(surface);
@@ -914,6 +916,19 @@ mod tests {
         assert!(resolve(&e).0.needs_you());
         e.hook_turn = Some((HookTurn::Closed, Duration::ZERO));
         assert_eq!(resolve(&e).0, AgentState::Idle);
+    }
+
+    /// SessionStart(`reset`)는 옛 턴 표식을 비우되 「닫힌 턴」을 근거로 남긴다 — 기록 파일이 첫
+    /// 메시지 뒤에야 생기는 새 세션이 그 전까지 unknown 으로 남지 않게.
+    #[test]
+    fn session_start_leaves_a_closed_turn_as_evidence() {
+        let hub = StateHub::default();
+        hub.turn("%9", "start", None);
+        hub.turn("%9", "reset", None);
+        let turn = hub.turn_hooks.lock().unwrap().get("%9").map(|(turn, _)| *turn);
+        assert_eq!(turn, Some(HookTurn::Closed));
+        let fresh = Evidence { harness: Some(AgentKind::Claude), hook_turn: Some((HookTurn::Closed, Duration::ZERO)), ..Default::default() };
+        assert_eq!(resolve(&fresh), (AgentState::Idle, "turn closed"));
     }
 
     #[test]

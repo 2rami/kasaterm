@@ -2349,6 +2349,8 @@ impl App {
         let settings_btn = self.settings_btn_rect(win_h_logical);
         self.settings_btn_rect = settings_btn;
         self.feedback_btn_rect = self.feedback_btn_rect(win_h_logical);
+        self.board_btn_rect = self.board_btn_rect(win_h_logical);
+        self.arona_btn_rect = self.arona_btn_rect(win_h_logical);
         // 트레이 기하는 `&self` 메서드라 아래 `self.gpu.as_mut()` 빌림 안에서는
         // 못 부른다 — 다른 chrome rect 들과 같이 여기서 미리 읽는다.
         let sidebar_tray = self.sidebar_tray_rects(win_h_logical);
@@ -2480,6 +2482,10 @@ impl App {
             (ws.active_pane.clone(), chars, agents)
         };
         let settings_room_active = self.settings_room_active();
+        let board_room_active = self.board_room_active();
+        let pulse_h = self.sidebar_pulse_h();
+        let sb_head_top = self.sidebar_head_top();
+        let arona_open = self.inline_web.as_ref().is_some_and(|h| h.kind == crate::InlineWebKind::Arona);
         // 본진 계정 조작은 백그라운드 스레드에서 끝나므로 그 자리에서 말풍선을
         // 못 띄운다. 계정 화면이 떠 있는 동안 여기서 받아 올린다 — 실패가 조용히
         // 사라지면 「눌렀는데 아무 일도 안 남」이 되고, 그 상태로 같은 버튼을
@@ -2501,8 +2507,7 @@ impl App {
             })
             .flatten();
         let mut settings_paint = None;
-        let board_snapshot = self
-            .board_room_active()
+        let board_snapshot = board_room_active
             .then(|| {
                 let left = self.effective_sidebar_w();
                 // 설정과 같은 이유로 상태줄 자리를 남긴다.
@@ -2827,8 +2832,13 @@ impl App {
                 g.rect(0.0, 0.0, tab_strip_w, sb_win_h, theme::panel_bg());
                 g.rect(tab_strip_w - 1.0, 0.0, 1.0, sb_win_h, theme::border());
             }
+            if pulse_h > 0.0 {
+                crate::sidebar_pulse::draw(g, &mut self.pulse, sb_cursor, tab_strip_w, board_room_active);
+            } else {
+                self.pulse.rect = None;
+            }
             crate::sidebar_navigation::draw(g, &mut self.info, sb_cursor, tab_strip_w,
-                (0.0, sb_view.0, tab_strip_w, sb_full_h));
+                sb_head_top, (0.0, sb_view.0, tab_strip_w, sb_full_h));
             // 사이드바 토글. 자리는 `sidebar_toggle_rect` 가 정한다 — 접혔으면
             // 신호등 오른쪽, 폈으면 사이드바 오른쪽 위. 글리프는 그대로다(왼쪽
             // 칼럼이 찬 판 모양). 탭이 위로 가면 토글할 세로 스트립이 없다.
@@ -4586,13 +4596,14 @@ impl App {
                         g.rect(fr.0, by - 1.5, fr.2, 3.0, theme::accent());
                     }
                 }
-                // ── 하단 트레이 ── 새 세션 · 피드백 · 설정. 목록과 얇은 선으로
+                // ── 하단 트레이 ── 기기 추가 · 보드 · 아로나 · 피드백 · 설정. 목록과 얇은 선으로
                 // 갈라 "목록의 마지막 항목"이 아니라 별도 층으로 읽히게 한다.
                 // "+" 피커가 열려 있으면 스킵 — 팝업이 이 자리를 덮는데 아이콘
                 // 글리프는 rect 위 레이어라 비쳐 올라온다(가려지는 chrome 은 안
                 // 그린다는 관례).
                 if !menu_open {
-                    if let Some((line_y, _, fb, st)) = sidebar_tray {
+                    if let Some(tray) = sidebar_tray {
+                        let line_y = tray.line_y;
                         g.rect(
                             SIDEBAR_TAB_INSET,
                             line_y,
@@ -4602,8 +4613,10 @@ impl App {
                         );
                         let settings_on = settings_room_active;
                         for (r, icon, on) in [
-                            (fb, "message-square-warning", false),
-                            (st, "settings-2", settings_on),
+                            (tray.board, "rows-2", board_room_active),
+                            (tray.arona, "users", arona_open),
+                            (tray.feedback, "message-square-warning", false),
+                            (tray.settings, "settings-2", settings_on),
                         ] {
                             let (bx, by, bw, bh) = r;
                             let hover = sb_cursor.0 >= bx
@@ -4634,6 +4647,7 @@ impl App {
                 // pane 행 우클릭 메뉴 — 이 칼럼에서 **마지막**에 그린다(다른 것 위에
                 // 떠야 한다). 골격은 파일트리·Info 메뉴와 같은 것을 쓴다.
                 if let Some((mx0, my0, _, pane)) = self.sidebar_menu.clone() {
+                    let pulse_menu_label = crate::sidebar_pulse::menu_label(self.pulse.hidden);
                     // 이미 숨긴 줄이면 되돌리기 한 갈래만 낸다 — 같은 자리에서 같은
                     // 동작을 토글로 부르는 편이 항목 두 개를 늘 보여주는 것보다 낫다.
                     let hidden = self
@@ -4652,6 +4666,7 @@ impl App {
                             },
                             (SidebarMenuAction::RenameRoom, "이름 바꾸기"),
                             (SidebarMenuAction::CloseRoom, "방 닫기"),
+                            (SidebarMenuAction::TogglePulse, pulse_menu_label),
                         ]
                     } else if hidden {
                         // 숨긴 것은 「무엇이었나」부터 궁금하다 — 배치를 안 건드리고 보는
@@ -4711,7 +4726,8 @@ impl App {
                 }
             }
             // 다른 기기 방 카드의 우클릭 메뉴 — 본기기 방 메뉴와 같은 자리(칼럼의 맨 끝).
-            crate::sidebar_navigation::draw_menu(g, &mut self.info, sb_cursor, tab_strip_w, sb_win_h);
+            crate::sidebar_navigation::draw_menu(g, &mut self.info, sb_cursor, tab_strip_w, sb_win_h,
+                crate::sidebar_pulse::menu_label(self.pulse.hidden));
             // ── File-tree column ── independent of the tab strip, parked just
             // right of it (VSCode explorer). Root = active pane's cwd; folders
             // first — click a folder to expand, a file to preview. Rows laid
@@ -10512,6 +10528,21 @@ impl App {
             {
                 Self::draw_hover_tip(g, "기기 추가", sb_plus.0, sb_plus.1,
                     win_px.0 / scale, sb_win_h);
+            }
+            if !self.tabs_on_top && self.info.machine_menu.is_none() && tab_strip_w > 0.0 {
+                let over = |r: (f32, f32, f32, f32)| r.2 > 0.0
+                    && sb_cursor.0 >= r.0 && sb_cursor.0 <= r.0 + r.2
+                    && sb_cursor.1 >= r.1 && sb_cursor.1 <= r.1 + r.3;
+                let tip = [
+                    (self.board_btn_rect, "보드  ⇧⌘B"),
+                    (self.arona_btn_rect, "아로나  ⇧⌘A"),
+                    (self.pulse.rect.unwrap_or_default(), "모든 기기 현황 — 누르면 보드  ⇧⌘B"),
+                ]
+                .into_iter()
+                .find(|(r, _)| over(*r));
+                if let Some((r, label)) = tip {
+                    Self::draw_hover_tip(g, label, r.0, r.1, win_px.0 / scale, sb_win_h);
+                }
             }
             if self.info.machine_menu.is_some() {
                 info::draw_machine_menu(g, sb_cursor, &mut self.info, 0.0, tab_strip_w.max(240.0), TITLE_HEIGHT, sb_win_h - status_h);

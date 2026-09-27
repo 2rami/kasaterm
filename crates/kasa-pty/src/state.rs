@@ -1263,6 +1263,22 @@ impl PtySession {
         self.input_draft.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// 새 에이전트 세션이 섰다(claude SessionStart). 그 입력창은 빈 채로 뜨므로, 셸에 넣은 부팅
+    /// 줄이 남긴 초안 표시를 거둔다 — 부팅 줄은 `send` 로 LF 로 끝나 위의 「제출」 판정(CR)에
+    /// 안 걸리고, 사람이 Enter 를 칠 때까지 tell 이 「초안 있음」으로 영영 미뤄졌다(2026-09-28
+    /// 새로 띄운 학생에게 첫 브리프가 4분 넘게 안 들어감). 부팅 줄 **뒤에** 누가 또 쳤으면
+    /// (마지막 입력이 마지막 줄바꿈보다 늦다) 진짜 초안일 수 있어 그대로 둔다.
+    pub fn agent_session_started(&self) -> bool {
+        let _writer = self.writer.lock().unwrap();
+        let input = *self.last_input.lock().unwrap();
+        let submit = *self.last_submit.lock().unwrap();
+        if input.is_some_and(|input| submit.is_none_or(|submit| input > submit)) {
+            return false;
+        }
+        self.input_draft.store(false,std::sync::atomic::Ordering::Release);
+        true
+    }
+
     pub fn reserve_input_draft(&self) {
         let _writer = self.writer.lock().unwrap();
         self.input_draft.store(true,std::sync::atomic::Ordering::Release);

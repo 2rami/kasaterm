@@ -21,6 +21,31 @@ use crate::transcript::{snapshot_from_tail, CodexRolloutSnapshot};
 use crate::{PaneStatus, UserEvent, Workspace};
 use winit::event_loop::EventLoopProxy;
 
+/// 폰·웹에서 연 헤드리스 셸(`http.rs` 가 `web-<uuid>` 로 만든다). 창이 없고 `keep` 이 붙든다.
+fn is_web_shell(surface_id: &str) -> bool {
+    surface_id.starts_with("web-")
+}
+
+/// 웹 셸의 `keep` 을 놓고 셸이 실제로 사라질 때까지 본다. 창만 걷고 ok 를 주면 셸은 계속 돌고
+/// 부른 쪽(정리 기능)은 끝난 줄 알았다(2026-09-28). 열린 폰·웹 화면처럼 아직 누가 잡고 있으면
+/// 실패로 답한다 — 끝나지 않은 것을 끝났다고 하지 않는다. `keep` 은 그때도 놓으므로 마지막
+/// 화면이 닫히는 순간 셸이 끝난다.
+fn release_web_shell(surface_id: &str, wait: std::time::Duration) -> Result<()> {
+    kasa_pty::release_session(surface_id);
+    let deadline = std::time::Instant::now() + wait;
+    while kasa_pty::lookup_session(surface_id).is_some() {
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "{surface_id} 셸은 아직 살아 있다 — 열린 폰·웹 화면이 붙들고 있다. 붙들어 두기는 풀었으니 그 화면이 닫히면 함께 끝난다"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Ok(())
+}
+
+/// 원격 거울 pane 의 보드 판정 이유. 세는 쪽(사이드바 현황 줄)이 이것으로 거울을 빼야
+/// 원본 기기 줄과 같은 학생을 두 번 세지 않는다.
+pub(crate) const REMOTE_MIRROR_REASON: &str = "remote mirror; observe agent on its source machine";
 const FIXED_WORKSPACE_ID: &str = "local-0";
 const FIXED_SURFACE_ID: &str = "pane-0";
 
@@ -2171,12 +2196,18 @@ impl Backend for PtyBackend {
     }
 
     fn close_surface(&self, surface_id: &str) -> Result<()> {
+        let web_existed = is_web_shell(surface_id)
+            && (kasa_pty::lookup_session(surface_id).is_some() || kasa_pty::kept_sessions().iter().any(|id| id == surface_id));
         // 로컬 PTY 모드: close 도 split/focus 처럼 GUI 스레드에 위임(App.pty 는
         // 별도 스레드서 못 만짐). layout.rs close_pane 이 leaf 제거 + 다음 pane
         // 으로 포커스 이동까지 한다.
         let _ = self
             .proxy
             .send_event(UserEvent::SocketClose(surface_id.to_string()));
+        if is_web_shell(surface_id) {
+            anyhow::ensure!(web_existed, "{surface_id} 셸이 이 기기에 없다");
+            return release_web_shell(surface_id, std::time::Duration::from_secs(2));
+        }
         Ok(())
     }
 
@@ -3044,7 +3075,7 @@ impl Backend for PtyBackend {
             let resolved = self.hub.resolved(&id);
             let mirrored = kasa_mcp::remote::is_remote_pane(&id);
             let (status,reason): (&'static str,&'static str) = if mirrored {
-                ("unknown","remote mirror; observe agent on its source machine")
+                ("unknown",REMOTE_MIRROR_REASON)
             } else if !supported {
                 ("unknown","live place; supported agent activity unavailable")
             } else {
@@ -3860,6 +3891,11 @@ impl Backend for PtyBackend {
         self.hub.turn(surface_id, phase, (!permission_mode.is_empty()).then_some(permission_mode));
         if phase == "reset" {
             self.hook_activity.lock().unwrap().remove(surface_id);
+            // SessionStart — 새 세션의 입력창은 비어 있다. 부팅 줄이 남긴 초안 표시를 거둬야
+            // 첫 tell 이 사람의 Enter 없이 들어간다(`agent_session_started`).
+            if let Some(pty) = kasa_pty::lookup_session(surface_id) {
+                pty.agent_session_started();
+            }
         }
         // 턴 경계가 곧 보드의 status 다 — 관측 주기를 기다리지 않고 바로 긁게 한다.
         kasa_mcp::board_service::poke();
@@ -3911,6 +3947,34 @@ fn apply_remote_board_facts(row: &mut PaneActivity, facts: &serde_json::Value) {
         current.branch = text("branch");
     }
     *row = current;
+}
+
+#[cfg(test)]
+mod web_shell_close_tests {
+    use super::*;
+
+    /// 폰 화면이 열려 있는 동안 close 는 실패로 답하고, 화면이 닫히면 keep 까지 풀려 셸이 사라진다.
+    /// 이 확인을 빼고 옛날처럼 ok 만 주면 첫 단언이 깨진다.
+    #[test]
+    fn close_releases_a_kept_web_shell_and_fails_while_a_screen_holds_it() {
+        let id = format!("web-close-{}", uuid::Uuid::new_v4());
+        let (_events, receiver) = crossbeam_channel::unbounded();
+        let session = kasa_pty::PtySession::start_external(
+            kasa_pty::PtyOptions { pane_id: id.clone(), cols: 40, rows: 8, ..Default::default() },
+            kasa_pty::ExternalIo { events: receiver, writer: Box::new(std::io::sink()), on_resize: Arc::new(|_, _| {}) },
+        )
+        .unwrap();
+        let viewer = Arc::new(session);
+        kasa_pty::register_session(&id, &viewer);
+        kasa_pty::keep_session(&id, viewer.clone());
+
+        let held = release_web_shell(&id, std::time::Duration::from_millis(120));
+        assert!(held.is_err(), "열린 화면이 붙든 셸을 끝났다고 하면 안 된다");
+        drop(viewer);
+        assert!(release_web_shell(&id, std::time::Duration::from_millis(120)).is_ok());
+        assert!(kasa_pty::lookup_session(&id).is_none());
+        assert!(!kasa_pty::kept_sessions().contains(&id));
+    }
 }
 
 #[cfg(test)]

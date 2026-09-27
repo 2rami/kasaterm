@@ -60,6 +60,7 @@ enum RoomMenuAction {
     ClosePane,
     SplitBeside,
     NewTab,
+    TogglePulse,
 }
 
 #[derive(Clone)]
@@ -362,7 +363,7 @@ fn draw_list_row(
 
 /// 방 카드 우클릭 메뉴 — 본기기 방 메뉴와 같은 골격·치수·자리 규칙(사이드바 안에 가둔다).
 /// 렌더가 칼럼의 맨 끝에 부른다 — 카드 위에 떠야 한다.
-pub(crate) fn draw_menu(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor: (f32, f32), width: f32, bottom: f32) {
+pub(crate) fn draw_menu(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor: (f32, f32), width: f32, bottom: f32, pulse_label: &str) {
     let nav = &mut info.navigation;
     nav.room_menu_rects.clear();
     let Some(menu) = nav.room_menu.as_ref() else { return };
@@ -378,6 +379,7 @@ pub(crate) fn draw_menu(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, c
             if listed { (RoomMenuAction::MapBody, "배치도로 보기") } else { (RoomMenuAction::ListBody, "목록으로 보기") },
             (RoomMenuAction::Rename, "이름 바꾸기"),
             (RoomMenuAction::Close, "방 닫기"),
+            (RoomMenuAction::TogglePulse, pulse_label),
         ]
     };
     const MIH: f32 = 28.0;
@@ -541,7 +543,8 @@ fn draw_rows(
     g.pop_clip();
 }
 
-pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor: (f32, f32), width: f32, viewport: Rect) {
+/// `head_top` 은 이 기기 머리줄의 윗변 — 그 위에 현황 줄(`sidebar_pulse`)이 설 수 있다.
+pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor: (f32, f32), width: f32, head_top: f32, viewport: Rect) {
     let nav = &mut info.navigation;
     nav.hits.clear();
     nav.device_views.clear();
@@ -549,7 +552,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     let label = crate::info::local_machine_name();
     let label = if label.is_empty() { "이 기기" } else { label };
     let compact = width < 180.0;
-    let head = (8.0, TITLE_HEIGHT + 4.0, width - 16.0, HEADER_H - 8.0);
+    let head = (8.0, head_top + 4.0, width - 16.0, HEADER_H - 8.0);
     let plus = (width - 36.0, head.1, 28.0, head.3);
     let text_x = if compact { 12.0 } else { 38.0 };
     if !compact { g.queue_icon("monitor", 14.0, head.1 + 12.0, 16.0, theme::text_dim()); }
@@ -559,7 +562,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     g.hover_pointer |= hit(cursor, plus);
     g.queue_icon("plus", plus.0 + 7.0, plus.1 + 13.0, 14.0, theme::text_dim());
     nav.hits.push((Action::NewLocalRoom, plus));
-    g.rect(12.0, TITLE_HEIGHT + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
+    g.rect(12.0, head_top + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
 
     let NavigationState { collapsed_rooms, hits, viewing, viewing_cur, list_rooms, rename, cell_drag,
         local_content_h, shared_scroll, room_numbers, device_views, .. } = nav;
@@ -786,7 +789,10 @@ impl App {
         step.1 += 1;
     }
 
-    pub(crate) fn sidebar_content_top(&self) -> f32 { TITLE_HEIGHT + HEADER_H + 10.0 }
+    pub(crate) fn sidebar_content_top(&self) -> f32 { self.sidebar_head_top() + HEADER_H + 10.0 }
+
+    /// 이 기기 머리줄의 윗변. 현황 줄이 서 있으면 그만큼 내려간다.
+    pub(crate) fn sidebar_head_top(&self) -> f32 { TITLE_HEIGHT + self.sidebar_pulse_h() }
 
     pub(crate) fn sidebar_navigation_click(&mut self, cursor: (f32, f32)) -> bool {
         if self.tabs_on_top || self.tab_strip_w() <= 0.0 { return false; }
@@ -1130,6 +1136,7 @@ impl App {
             Some(RoomMenuAction::NewTab) => {
                 if let Some(pane) = menu.pane { self.spawn_beside_remote_cell(&menu.label, &pane, true); }
             }
+            Some(RoomMenuAction::TogglePulse) => self.toggle_sidebar_pulse(),
             None => {}
         }
     }

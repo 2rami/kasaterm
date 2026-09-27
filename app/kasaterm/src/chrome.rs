@@ -2150,6 +2150,7 @@ impl App {
             }
             SidebarMenuAction::RenameRoom => self.begin_room_rename(wi),
             SidebarMenuAction::CloseRoom => self.confirm_or_close_session(wi),
+            SidebarMenuAction::TogglePulse => self.toggle_sidebar_pulse(),
         }
     }
 
@@ -2401,21 +2402,16 @@ impl App {
         }
     }
 
-    /// 사이드바 하단에 붙박인 트레이 — 새 세션(`+`)과 앱 전역 버튼(피드백·설정).
-    /// 반환은 `(구분선 y, +, 피드백, 설정)`, 세로 사이드바가 없으면 `None`.
+    /// 사이드바 하단에 붙박인 트레이 — 기기 추가(`+`)와 앱 전역 버튼(보드·아로나·피드백·설정).
+    /// 세로 사이드바가 없으면 `None`.
     ///
     /// 셋 다 원래는 세션 목록 *뒤에* 줄줄이 붙어 있었다. 그러면 세션이 늘 때마다
     /// 아래로 밀려서, 늘 같은 버튼을 누르는데 자리가 매번 달라진다. 트레이는 목록
     /// 길이와 무관하게 바닥에 고정이라 근육기억이 선다.
-    pub(crate) fn sidebar_tray_rects(
-        &self,
-        win_h: f32,
-    ) -> Option<(
-        f32,
-        (f32, f32, f32, f32),
-        (f32, f32, f32, f32),
-        (f32, f32, f32, f32),
-    )> {
+    ///
+    /// 보드·아로나는 메뉴막대와 단축키에만 있어 찾을 길이 없었다(2026-09-28 지시 「왼쪽에서
+    /// 열리게」). 둘 다 설정처럼 본문 자리를 바꾸는 화면이라 같은 줄, 설정 쪽에 선다.
+    pub(crate) fn sidebar_tray_rects(&self, win_h: f32) -> Option<SidebarTray> {
         if self.tabs_on_top || !self.sidebar_visible {
             return None;
         }
@@ -2427,36 +2423,7 @@ impl App {
             DOCK_HEIGHT
         } + self.status_h();
         let line_y = (win_h - bottom_h - SIDEBAR_TRAY_H).max(TITLE_HEIGHT);
-        let strip = self.tab_strip_w();
-        let left = SIDEBAR_TAB_INSET + 4.0;
-        let gap = 4.0_f32;
-        let avail = (strip - left * 2.0).max(0.0);
-        // 셋이 「왼쪽 하나 · 오른쪽 둘」로 갈라서려면 28×3 에 여백까지 120px 은 있어야
-        // 한다. 그보다 좁으면 오른쪽 기준으로 잡던 가운데 버튼의 x 가 **음수**가 되어
-        // 세 아이콘이 왼쪽 구석에 포개졌다(64px 실측). 폭이 모자랄 때는 자리 배분을
-        // 포기하고 크기를 줄여 균등하게 늘어놓는다 — 뭉쳐 있으면 셋 다 못 누른다.
-        let roomy = avail >= 28.0 * 3.0 + gap * 2.0 + 12.0;
-        let b = if roomy {
-            28.0
-        } else {
-            ((avail - gap * 2.0) / 3.0).clamp(16.0, 28.0)
-        };
-        let y = line_y + (SIDEBAR_TRAY_H - b) / 2.0;
-        if roomy {
-            let right = (strip - SIDEBAR_TAB_INSET - 4.0 - b).max(left);
-            return Some((
-                line_y,
-                (left, y, (right - b - gap * 2.0 - left).max(b), b),
-                (right - 4.0 - b, y, b, b),
-                (right, y, b, b),
-            ));
-        }
-        Some((
-            line_y,
-            (left, y, b, b),
-            (left + b + gap, y, b, b),
-            (left + (b + gap) * 2.0, y, b, b),
-        ))
+        Some(sidebar_tray_layout(line_y, self.tab_strip_w()))
     }
     /// 사이드바 토글 버튼 rect(논리 px).
     ///
@@ -5078,6 +5045,97 @@ pub(crate) fn side_column_should_toggle(
     destination_already_selected: bool,
 ) -> bool {
     !replacing_inline && column_visible && destination_already_selected
+}
+
+/// 트레이 한 줄의 자리(논리 px). `plus` 가 남는 폭을 먹고 넷은 오른쪽에 붙는다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SidebarTray {
+    pub(crate) line_y: f32,
+    pub(crate) plus: (f32, f32, f32, f32),
+    pub(crate) board: (f32, f32, f32, f32),
+    pub(crate) arona: (f32, f32, f32, f32),
+    pub(crate) feedback: (f32, f32, f32, f32),
+    pub(crate) settings: (f32, f32, f32, f32),
+}
+
+pub(crate) fn sidebar_tray_layout(line_y: f32, strip: f32) -> SidebarTray {
+    let left = SIDEBAR_TAB_INSET + 4.0;
+    let gap = 4.0_f32;
+    let avail = (strip - left * 2.0).max(0.0);
+    // 넷이 오른쪽에 모이고 `+` 가 왼쪽을 먹으려면 28×5 에 틈까지 있어야 한다. 그보다
+    // 좁으면 오른쪽 기준으로 잡던 x 가 **음수**가 되어 아이콘이 왼쪽 구석에 포개졌다(64px
+    // 실측). 폭이 모자랄 때는 자리 배분을 포기하고 크기를 줄여 균등하게 늘어놓는다.
+    let roomy = avail >= 28.0 * 5.0 + gap * 5.0 + 12.0;
+    // 좁을 때는 여백과 틈을 줄여 아이콘(16)보다 작은 칸이 안 되게 한다 — 자동 최소 폭(104)에서도
+    // 다섯이 사이드바 안에 든다.
+    let (left, gap) = if roomy { (left, gap) } else { (SIDEBAR_TAB_INSET, 2.0) };
+    let b = if roomy {
+        28.0
+    } else {
+        ((strip - left * 2.0 - gap * 4.0) / 5.0).clamp(16.0, 28.0)
+    };
+    let y = line_y + (SIDEBAR_TRAY_H - b) / 2.0;
+    let sq = |x: f32| (x, y, b, b);
+    if roomy {
+        let settings = (strip - SIDEBAR_TAB_INSET - 4.0 - b).max(left);
+        let feedback = settings - gap - b;
+        // 화면을 바꾸는 짝(보드·아로나)과 앱에 말 거는 짝(피드백·설정)을 한 칸 더 띄운다.
+        let arona = feedback - gap * 2.0 - b;
+        let board = arona - gap - b;
+        return SidebarTray {
+            line_y,
+            plus: (left, y, (board - gap * 2.0 - left).max(b), b),
+            board: sq(board),
+            arona: sq(arona),
+            feedback: sq(feedback),
+            settings: sq(settings),
+        };
+    }
+    let at = |k: f32| sq(left + (b + gap) * k);
+    SidebarTray {
+        line_y,
+        plus: at(0.0),
+        board: at(1.0),
+        arona: at(2.0),
+        feedback: at(3.0),
+        settings: at(4.0),
+    }
+}
+
+#[cfg(test)]
+mod sidebar_tray_tests {
+    use super::*;
+
+    fn rects(t: &SidebarTray) -> [(f32, f32, f32, f32); 5] {
+        [t.plus, t.board, t.arona, t.feedback, t.settings]
+    }
+
+    /// 다섯 칸이 겹치지 않고 사이드바 안에 든다 — 기본 폭·자동 최소 폭·끌어 좁힌 폭 모두.
+    #[test]
+    fn tray_buttons_never_overlap_or_leave_the_strip() {
+        for strip in [SIDEBAR_W, 160.0, SIDEBAR_W_AUTO_MIN, 64.0] {
+            let t = sidebar_tray_layout(500.0, strip);
+            let r = rects(&t);
+            for (i, a) in r.iter().enumerate() {
+                assert!(a.0 >= 0.0, "{strip}px: {i}번 칸이 왼쪽 밖");
+                for b in &r[i + 1..] {
+                    assert!(a.0 + a.2 <= b.0 + 0.01, "{strip}px: 칸이 겹친다 {a:?} {b:?}");
+                }
+            }
+            if strip >= SIDEBAR_W_AUTO_MIN {
+                let last = r[4];
+                assert!(last.0 + last.2 <= strip, "{strip}px: 설정이 사이드바 밖");
+            }
+        }
+    }
+
+    #[test]
+    fn roomy_tray_keeps_settings_at_the_right_edge_and_board_arona_beside_it() {
+        let t = sidebar_tray_layout(500.0, SIDEBAR_W);
+        assert_eq!(t.settings.0 + t.settings.2, SIDEBAR_W - SIDEBAR_TAB_INSET - 4.0);
+        assert!(t.arona.0 + t.arona.2 < t.feedback.0 - 4.0, "화면 짝과 앱 짝 사이가 더 떠야 한다");
+        assert!(t.plus.2 >= t.board.2, "기기 추가는 적어도 아이콘 한 칸");
+    }
 }
 
 /// Wrap `s` in an AppleScript string literal, escaping `"` and `\` so a pane

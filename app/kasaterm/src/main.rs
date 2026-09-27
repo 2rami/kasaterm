@@ -77,6 +77,7 @@ mod links;
 mod lsp;
 mod machinescol;
 mod sidebar_navigation;
+mod sidebar_pulse;
 mod mirror_theme;
 mod mirror_view;
 mod mirror_focus_probe;
@@ -4298,6 +4299,8 @@ enum SidebarMenuAction {
     RenameRoom,
     /// 방 닫기 — × 와 같은 길(도는 claude 가 있으면 묻는다).
     CloseRoom,
+    /// 사이드바 맨 위 현황 줄 숨기기·보이기(모든 방 공통, settings.json `sidebar_pulse`).
+    TogglePulse,
 }
 
 /// 한글 조합기(`App::hangul`)를 쓰는 입력 문맥. 조합기는 App 에 **하나뿐인데**
@@ -5799,6 +5802,11 @@ struct App {
     settings_btn_rect: (f32, f32, f32, f32),
     /// 사이드바 트레이의 피드백 버튼 rect — 설정과 같은 짝.
     feedback_btn_rect: (f32, f32, f32, f32),
+    /// 사이드바 트레이의 보드·아로나 버튼 rect — 메뉴막대 밖의 입구.
+    board_btn_rect: (f32, f32, f32, f32),
+    arona_btn_rect: (f32, f32, f32, f32),
+    /// 사이드바 맨 위 현황 줄(`sidebar_pulse.rs`).
+    pulse: sidebar_pulse::Pulse,
     /// Cursor-blink phase captured at the last successful render.
     /// Used by `render_frame`'s early-return: a blink toggle counts
     /// as "something changed" and forces the GPU pass even when
@@ -6339,6 +6347,9 @@ impl App {
             feedback_diag: true,
             settings_btn_rect: (0.0, 0.0, 0.0, 0.0),
             feedback_btn_rect: (0.0, 0.0, 0.0, 0.0),
+            board_btn_rect: (0.0, 0.0, 0.0, 0.0),
+            arona_btn_rect: (0.0, 0.0, 0.0, 0.0),
+            pulse: sidebar_pulse::Pulse::from_settings(),
             last_blink_on: false,
             chrome_dirty: true,
             theme_fx: None,

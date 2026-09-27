@@ -9,6 +9,10 @@ use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering};
 const PROBE_CHARS: usize = 24;
 
 const PROOF_DEADLINE: Duration = Duration::from_secs(2);
+/// 붙여넣은 글이 화면에 그려지기를 기다리는 한도. 막 뜬 claude 는 첫 붙여넣기를 160ms 안에
+/// 못 그려, 한 번만 보고 Enter 를 보류하던 자리다(2026-09-28 실측: 입력 변화 없이 echoed=false).
+const ECHO_DEADLINE: Duration = Duration::from_secs(2);
+const ECHO_POLL: Duration = Duration::from_millis(160);
 const PROOF_FRESHNESS: Duration = Duration::from_millis(250);
 const WORKERS: usize = 4;
 
@@ -25,6 +29,8 @@ pub(crate) struct Commit {
     pty: Arc<kasa_pty::PtySession>,
     revision: u64,
     proof: std::result::Result<Proof,String>,
+    /// 붙여넣은 시각 — 반영을 기다릴 한도의 기준. 붙여넣기 전에는 `None`.
+    pasted_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -99,6 +105,46 @@ fn collect_proof(backend: Arc<crate::socket::PtyBackend>, record: Record, pty: A
     })
 }
 
+/// 지금 화면 한 장을 행 배열로.
+fn live_cells(pty: &kasa_pty::PtySession) -> (Vec<Vec<GridCell>>, kasa_bridge::screen::ScreenUpdate) {
+    let screen = pty.live_screen();
+    let mut cells = vec![Vec::new();screen.rows as usize];
+    for (index,row) in &screen.dirty {
+        if let Some(target) = cells.get_mut(*index as usize) { *target = row.clone(); }
+    }
+    (cells,screen)
+}
+
+/// 입력창 안의 글 — 붙여넣은 글이 거기 들어갔는지 보는 자리. 입력창을 못 찾으면 `None`.
+fn input_box_text(cells: &[Vec<GridCell>]) -> Option<String> {
+    let rows = crate::screenread::prompt_box(cells)?.rows();
+    Some(cells[rows].iter().map(|row|row.iter().map(|cell|cell.ch).filter(|ch|*ch != '\0').chain(['\n']).collect::<String>()).collect())
+}
+
+#[derive(Debug,PartialEq,Eq)]
+enum CommitStep { Enter, Wait, Withhold }
+
+/// 입력이 그대로인데 글만 아직 안 그려졌으면 조금 더 본다. 누가 끼어들면 `unchanged` 가 먼저
+/// 깨지므로, 기다림이 남의 입력 위에 Enter 를 치는 일은 없다.
+fn commit_step(unchanged: bool, echoed: bool, since_paste: Option<Duration>) -> CommitStep {
+    match (unchanged,echoed) {
+        (true,true) => CommitStep::Enter,
+        (true,false) if since_paste.is_some_and(|waited|waited < ECHO_DEADLINE) => CommitStep::Wait,
+        _ => CommitStep::Withhold,
+    }
+}
+
+/// 붙여넣은 뒤 잠시 두고 신원을 다시 증명해 GUI 에 Enter 판정을 맡긴다 — 반영을 기다리는 동안 되풀이된다.
+fn schedule_commit(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop::EventLoopProxy<UserEvent>, mut commit: Commit) {
+    std::thread::spawn(move || {
+        std::thread::sleep(ECHO_POLL);
+        commit.proof = collect_proof(backend,commit.record.clone(),commit.pty.clone());
+        if proxy.send_event(UserEvent::SafeTellCommit(commit.clone())).is_err() {
+            finish(&commit.record,State::Uncertain,"GUI stopped after paste; automatic retry prohibited");
+        }
+    });
+}
+
 fn begin_proof(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop::EventLoopProxy<UserEvent>, record: Record) {
     std::thread::spawn(move || {
         let Some(pty) = kasa_pty::lookup_session(&record.address.surface_id) else {
@@ -114,7 +160,7 @@ fn begin_proof(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_loop
         if kasa_mcp::tell_service::transition(&record.message_id,State::Dispatching,"identity proven; awaiting guarded first write").is_err() {
             release(&record.address.surface_id); return;
         }
-        let delivery = Commit {record,pty,revision,proof};
+        let delivery = Commit {record,pty,revision,proof,pasted_at:None};
         if proxy.send_event(UserEvent::SafeTellReady(delivery.clone())).is_err() {
             finish(&delivery.record,State::Failed,"GUI stopped before the first write");
         }
@@ -216,12 +262,8 @@ impl App {
 
     fn tell_ready(&self, record: &Record, pty: &kasa_pty::PtySession, harness: kasa_pty::AgentKind, empty: bool) -> bool {
         if pty.input_closed() || self.tell_composing(&record.address.surface_id) { return false; }
-        let screen = pty.live_screen();
+        let (cells,screen) = live_cells(pty);
         if !screen.bracketed_paste { return false; }
-        let mut cells = vec![Vec::new();screen.rows as usize];
-        for (index,row) in &screen.dirty {
-            if let Some(target) = cells.get_mut(*index as usize) { *target = row.clone(); }
-        }
         // 사람 차례(승인·질문)면 글을 안 넣는다 — 판정이 정본이고, 아래 화면 검사는 지금
         // 커서 아래에 승인 위젯이 그려져 있나 보는 기계적 보호막이다(배경 탭 포함).
         if self.collab.hub.state(&record.address.surface_id).needs_you() { return false; }
@@ -271,22 +313,18 @@ impl App {
         let Some(backend) = self.socket_backend.clone() else {
             finish(&delivery.record,State::Uncertain,"receiver disappeared after paste"); return;
         };
-        let proxy = self.proxy.clone();
-        let mut commit = delivery.clone(); commit.revision = revision;
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(160));
-            commit.proof = collect_proof(backend,commit.record.clone(),commit.pty.clone());
-            if proxy.send_event(UserEvent::SafeTellCommit(commit.clone())).is_err() {
-                finish(&commit.record,State::Uncertain,"GUI stopped after paste; automatic retry prohibited");
-            }
-        });
+        let mut commit = delivery.clone(); commit.revision = revision; commit.pasted_at = Some(Instant::now());
+        schedule_commit(backend,self.proxy.clone(),commit);
     }
 
     pub(crate) fn safe_tell_commit(&mut self, commit: &Commit) {
         let unchanged = self.tell_target_unchanged(commit)
             && self.tell_proof_current(commit)
             && commit.proof.as_ref().is_ok_and(|proof|self.tell_ready(&commit.record,&commit.pty,proof.harness,false));
-        let tail = commit.pty.visible_text(30);
+        // 입력창 안을 본다. 화면 맨 아래 30줄만 보면, 대화가 아직 없는 새 세션은 입력창이 화면
+        // **위쪽**에 있어 큰 창에서 그 범위 밖이었다 — 글은 들어갔는데 에코를 못 찾아 Enter 를
+        // 영영 보류했다(2026-09-28 실측: 44행 창, 입력창 9행). 입력창을 못 찾는 하네스만 옛 방식.
+        let tail = input_box_text(&live_cells(&commit.pty).0).unwrap_or_else(||commit.pty.visible_text(30));
         let compact = |text: &str|text.chars().filter(|c|!c.is_whitespace()).collect::<String>();
         // 붙여넣은 글이 화면에 **통째로** 보여야 한다고 요구하면, 입력창이 접히거나 긴 본문이
         // tail 밖으로 밀린 자리에서 Enter 가 영영 안 나간다 — 글은 들어갔는데 제출만 안 된
@@ -295,9 +333,16 @@ impl App {
         let probe: String = compact(&commit.record.body).chars().take(PROBE_CHARS).collect();
         let echoed = !probe.is_empty()
             && (compact(&tail).contains(&probe) || tail.contains("[Pasted text #"));
-        if !unchanged || !echoed {
-            finish(&commit.record,State::Uncertain,"input, session, prompt or paste confirmation changed; Enter withheld");
-            return;
+        match commit_step(unchanged,echoed,commit.pasted_at.map(|at|at.elapsed())) {
+            CommitStep::Enter => {}
+            CommitStep::Wait if self.socket_backend.is_some() => {
+                schedule_commit(self.socket_backend.clone().unwrap(),self.proxy.clone(),commit.clone());
+                return;
+            }
+            _ => {
+                finish(&commit.record,State::Uncertain,"input, session, prompt or paste confirmation changed; Enter withheld");
+                return;
+            }
         }
         let result = commit.pty.send_bytes_guarded(b"\r",Some(commit.revision));
         let (state,reason) = if result.is_ok() { (State::Submitted,"paste and Enter writes succeeded; model read is unconfirmed") }
@@ -491,5 +536,58 @@ mod tests {
         assert!(pty.input_draft_present());
         assert!(pty.send_bytes_guarded(b"message",Some(revision)).is_err());
         assert_eq!(capture.0.lock().unwrap().as_slice(),[b"\r".to_vec(),b"first\nsecond".to_vec(),b"\r".to_vec()]);
+    }
+
+    /// 새 학생: 부팅 줄은 `send` 로 LF 로 끝나 초안 표시가 선 채 claude 가 뜬다. SessionStart 가
+    /// 그 표시를 거둬야 첫 tell 이 들어간다 — 이 거둠을 빼면 첫 단언이 깨진다(한 번 빼 보고 확인했다).
+    /// 부팅 줄 뒤에 사람이 친 글은 진짜 초안이라 SessionStart 가 와도 지키고, PTY 가 막 떠 아무것도
+    /// 안 들어간 창(초기값 초안)도 빈 창으로 친다.
+    /// 막 뜬 claude 는 붙여넣기를 늦게 그린다 — 입력이 그대로면 한도까지 기다리고, 누가 끼어들었거나
+    /// 한도를 넘으면 보류한다. 기다림이 없으면 둘째 줄이 깨진다.
+    #[test]
+    fn slow_paste_echo_waits_but_interference_never_does() {
+        let ms = Duration::from_millis;
+        assert_eq!(commit_step(true,true,Some(ms(160))),CommitStep::Enter);
+        assert_eq!(commit_step(true,false,Some(ms(160))),CommitStep::Wait);
+        assert_eq!(commit_step(true,false,Some(ECHO_DEADLINE)),CommitStep::Withhold);
+        assert_eq!(commit_step(false,false,Some(ms(160))),CommitStep::Withhold);
+        assert_eq!(commit_step(false,true,Some(ms(160))),CommitStep::Withhold);
+        assert_eq!(commit_step(true,false,None),CommitStep::Withhold);
+    }
+
+    /// 새 세션 화면: 입력창이 맨 위에 있고 아래 40줄이 비었다 — 바닥 30줄만 보던 에코 확인이
+    /// 놓친 배치다. 넓은 글자의 빈칸(`\0`)도 글을 끊지 않는다.
+    #[test]
+    fn echo_is_read_from_the_input_box_wherever_it_sits() {
+        let rule = row(&"─".repeat(40));
+        let mut cells = vec![row("▐▛███▜▌ Claude Code"), row(""), rule.clone(),
+            row("❯ ⟦프\0라\0나\0⟧ 검\0증\0용"), rule, row("  footer")];
+        cells.extend(std::iter::repeat_with(||row("")).take(40));
+        let text = input_box_text(&cells).expect("입력창");
+        let compact: String = text.chars().filter(|c|!c.is_whitespace()).collect();
+        assert!(compact.contains("⟦프라나⟧검증용"), "{compact:?}");
+        assert!(!compact.contains("footer"), "입력창 밖은 안 본다");
+        assert!(input_box_text(&[row("plain shell $")]).is_none(), "입력창이 없으면 옛 방식으로 넘긴다");
+    }
+
+    #[test]
+    fn session_start_clears_the_boot_line_draft_but_keeps_later_typing() {
+        let (pty,_capture,_events) = fake_pty();
+        pty.send_bytes(b"claude --session-id x\n").unwrap();
+        assert!(pty.input_draft_present(), "LF 로 끝난 부팅 줄은 제출로 안 친다");
+        assert!(pty.agent_session_started());
+        assert!(!pty.input_draft_present(), "새 세션의 입력창은 비어 있다");
+
+        let (typed,_capture,_events) = fake_pty();
+        typed.send_bytes(b"claude\n").unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        typed.send_bytes(b"half typed").unwrap();
+        assert!(!typed.agent_session_started());
+        assert!(typed.input_draft_present(), "부팅 줄 뒤에 친 글은 지킨다");
+
+        let (fresh,_capture,_events) = fake_pty();
+        assert!(fresh.input_draft_present());
+        assert!(fresh.agent_session_started());
+        assert!(!fresh.input_draft_present());
     }
 }

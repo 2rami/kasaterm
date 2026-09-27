@@ -6400,7 +6400,7 @@ impl App {
         // 분기를 안 타므로 폴백은 목록 꼬리 그대로.
         let plus = self
             .sidebar_tray_rects(win_h)
-            .map_or_else(|| (tab_x, y, tab_w, 28.0), |(_, p, ..)| p);
+            .map_or_else(|| (tab_x, y, tab_w, 28.0), |t| t.plus);
         (tabs, closes, plus, rows, mini, undock)
     }
     pub(crate) fn start_pty(&mut self) -> Result<()> {

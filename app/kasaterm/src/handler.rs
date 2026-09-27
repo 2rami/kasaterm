@@ -4613,6 +4613,20 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    // 보드·아로나 — 메뉴막대 밖의 입구(트레이 버튼과 사이드바 맨 위 현황 줄).
+                    // 단축키와 같은 토글이라 열린 화면에서 누르면 작업 방으로 돌아온다.
+                    if hit(self.board_btn_rect) || self.sidebar_pulse_hit((cx, cy)) {
+                        self.toggle_board_room();
+                        self.session_touched = session_touched_before_event;
+                        window.request_redraw();
+                        return;
+                    }
+                    if hit(self.arona_btn_rect) {
+                        self.toggle_arona_panel(event_loop);
+                        self.session_touched = session_touched_before_event;
+                        window.request_redraw();
+                        return;
+                    }
                     // 대화 턴 헤더 클릭 — 바는 그 질문 자리로, ↑↓ 는 앞뒤 질문으로.
                     // SGR 전달보다 먼저 잡아 클릭이 pane 안 TUI 로 새지 않게 한다.
                     if self.turn_header_click(cx, cy) {
@@ -7469,6 +7483,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.native_settings_tick();
         self.safe_tell_tick();
         self.native_board_tick();
+        self.sidebar_pulse_tick();
         self.pump_native_onboarding();
         // 창 이동/리사이즈 1초 뒤 프레임 저장(디바운스) — exit 훅에만 맡기면
         // 크래시·강제종료 때 크기·위치가 유실된다. about_to_wait 는 블링크
@@ -7853,6 +7868,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoview();
         self.run_pending_autoinfo();
         self.run_pending_sidebar_navigation_probe(event_loop);
+        self.run_pending_pulse_probe(event_loop);
         self.run_pending_autonotify();
         // 커서 배치보다 **앞**이다 — 스크롤이 정해진 뒤라야 AUTOCURSOR 가 놓은
         // 자리가 「잘려 안 보이는 행」위인지가 의미를 갖는다.
