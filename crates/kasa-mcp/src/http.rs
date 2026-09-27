@@ -5898,6 +5898,9 @@ pub fn remote_token() -> Option<&'static str> {
 /// 않으니 로컬 경로는 그대로고, 로컬에서 굳이 위조해 붙여도 **토큰을 더 요구받을
 /// 뿐**이라 느슨해지는 방향이 없다.
 fn is_remote_peer(req: &axum::extract::Request) -> bool {
+    if req.extensions().get::<ViaUplink>().is_some() {
+        return true;
+    }
     let h = req.headers();
     if h.contains_key("cf-connecting-ip") || h.contains_key("x-forwarded-for") {
         return true;
@@ -5964,6 +5967,12 @@ async fn origin_guard_mw(
     // slug 를 이미 대조했고, 남의 사이트는 그 slug 를 모르니 교차출처 검사도 필요 없다.
     if req.extensions().get::<MobileAuth>().is_some() {
         return next.run(req).await;
+    }
+    // 업링크는 언제나 `/u/<slug>/` 를 붙여 되쏜다. 그런데도 유저 주소를 안 거쳤으면 경로를
+    // 비틀어 접두를 빠져나온 것이다 — 토큰이 실려 있어도 받지 않는다.
+    if req.extensions().get::<ViaUplink>().is_some() {
+        eprintln!("[http] 관문 경유 요청이 유저 주소 밖을 가리켜 거부했습니다: {}", req.uri().path());
+        return (axum::http::StatusCode::FORBIDDEN, "gateway requests must stay under /u/<slug>/").into_response();
     }
     // 원격(loopback 밖)은 **토큰이 유일한 관문**이다. 아래 로컬 규칙을 그대로
     // 물려주면 안 된다 — 「Origin 이 없으면 로컬 CLI 라 통과」의 근거가 "이미 같은
@@ -6050,6 +6059,23 @@ fn ws_origin_ok(h: &HeaderMap) -> bool {
 #[derive(Clone)]
 pub(crate) struct MobileAuth(pub crate::mobile::MobileUser);
 
+/// 관문(업링크)을 거쳐 들어온 요청이라는 표식 — 업링크 전용 입구 리스너가 심는다.
+/// 업링크의 되쏘기는 loopback 이라 peer 주소로는 로컬 CLI 와 구분이 안 된다.
+#[derive(Clone, Copy)]
+pub(crate) struct ViaUplink;
+
+async fn via_uplink_mw(mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    req.extensions_mut().insert(ViaUplink);
+    next.run(req).await
+}
+
+/// 유저 주소 응답에 원격 토큰 쿠키를 심을까. 절대경로(`/settings/…`)로 부르는 옛 fetch
+/// 를 위한 보조인데, 값이 이 기계의 원격 토큰(셸 전권)이라 **주인에게만**, 관문 경유로는
+/// 아예 안 준다 — 관문 너머 절대경로는 어차피 이 기계에 안 닿는다. 이미 물고 있으면 안 건드린다.
+fn wants_token_cookie(user: &crate::mobile::MobileUser, via_uplink: bool, h: &HeaderMap) -> bool {
+    user.owner && !via_uplink && !has_remote_token(h, None)
+}
+
 /// 라우팅 앞에 두르는 레이어. `/u/<slug>/term/grid` 를 `/term/grid` 로 고쳐 쓴다.
 /// ⚠️ `Router::layer` 로 걸면 안 된다 — 그건 라우팅 **뒤**라 경로가 이미 404 다.
 /// `spawn_http_server_opts` 가 ServiceBuilder 로 라우터 바깥에 건다.
@@ -6071,12 +6097,13 @@ async fn mobile_prefix_mw(
         ))
         .into_response(),
         Rewrite::Route { user, path } => {
+            if !crate::uplink::safe_path(&path) {
+                return (axum::http::StatusCode::BAD_REQUEST, "bad path").into_response();
+            }
             let Ok(uri) = format!("{path}{query}").parse::<axum::http::Uri>() else {
                 return (axum::http::StatusCode::BAD_REQUEST, "bad path").into_response();
             };
-            // 절대경로(`/settings/…`)로 부르는 옛 fetch 를 위해 쿠키도 심는다 — 주소가
-            // 자격이니 필수가 아니라 보조다. 이미 물고 있으면 안 건드린다.
-            let need_cookie = !has_remote_token(req.headers(), None);
+            let need_cookie = wants_token_cookie(&user, req.extensions().get::<ViaUplink>().is_some(), req.headers());
             *req.uri_mut() = uri;
             req.extensions_mut().insert(MobileAuth(user));
             let mut res = next.run(req).await;
@@ -6264,6 +6291,10 @@ async fn machine_proxy(
     AxPath((label, rest)): AxPath<(String, String)>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
+    // 대상 기계에는 이 기계의 터널로 닿아 **로컬 권한**이 된다 — 주인만 건너가게 한다.
+    if req.extensions().get::<MobileAuth>().is_some_and(|auth| !auth.0.owner) {
+        return (axum::http::StatusCode::FORBIDDEN, "owner only").into_response();
+    }
     let Some(m) = crate::machines::find_route(&label) else {
         return (axum::http::StatusCode::NOT_FOUND, "no such machine").into_response();
     };
@@ -6275,6 +6306,9 @@ async fn machine_proxy(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
     if is_ws {
+        if !ws_origin_ok(req.headers()) {
+            return (axum::http::StatusCode::FORBIDDEN, "cross-origin websocket refused").into_response();
+        }
         use axum::extract::FromRequestParts as _;
         let (mut parts, _body) = req.into_parts();
         let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
@@ -7387,6 +7421,16 @@ pub fn spawn_http_server_opts(
         .or_else(|_| std::net::TcpListener::bind((addr.as_str(), 0)))?;
     let port = listener.local_addr()?.port();
     listener.set_nonblocking(true)?;
+    // 업링크 전용 입구 — 관문을 거친 요청은 여기로만 들어와 `ViaUplink` 표식을 단다. 본체는
+    // 늘, standalone 은 리그가 `KASATERM_GATEWAY` 로 로컬 관문을 가리켰을 때만(사용자 관문에
+    // 가짜 기계를 올리지 않게).
+    let uplink_ingress = if run_scheduler || std::env::var_os("KASATERM_GATEWAY").is_some() {
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        l.set_nonblocking(true)?;
+        Some(l)
+    } else {
+        None
+    };
     let collab_collector = match crate::board_service::register(backend.clone(),port) {
         Ok(collector) => Some(collector),
         Err(_) => { eprintln!("[collaboration] observer unavailable"); None },
@@ -7457,12 +7501,12 @@ pub fn spawn_http_server_opts(
                     // 보므로 순환 이유로 본체 한정.
                     tokio::spawn(crate::push::push_loop());
                 }
-                // 업링크 — 관문에 붙어 폰 주소를 살린다(uplink.rs). 본체는 늘, standalone 은
-                // 리그가 `KASATERM_GATEWAY` 로 로컬 관문을 가리켰을 때만(사용자 관문에 가짜
-                // 기계를 올리지 않게).
-                if run_scheduler || std::env::var_os("KASATERM_GATEWAY").is_some() {
-                    crate::uplink::spawn(port);
-                }
+                // 업링크 — 관문에 붙어 폰 주소를 살린다(uplink.rs). 되쏘는 곳은 전용 입구다.
+                let uplink_ingress = uplink_ingress.and_then(|l| {
+                    let ingress_port = l.local_addr().ok()?.port();
+                    crate::uplink::spawn(ingress_port);
+                    tokio::net::TcpListener::from_std(l).ok()
+                });
                 // ccglass-style 캡처 프록시 — claude 의 Anthropic API 호출을 가로채
                 // pane 별 대화(messages[]+SSE)를 모은다. /conversation 으로 노출.
                 let conv_store: crate::proxy::ConvStore = Default::default();
@@ -8362,6 +8406,16 @@ pub fn spawn_http_server_opts(
                     .layer(axum::middleware::from_fn(mobile_prefix_mw))
                     .service(app);
                 use axum::ServiceExt as _;
+                if let Some(ingress) = uplink_ingress {
+                    let via = tower::ServiceBuilder::new()
+                        .layer(axum::middleware::from_fn(via_uplink_mw))
+                        .service(app.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = axum::serve(ingress, via.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {
+                            eprintln!("[kasaspace-mcp] uplink ingress serve error: {e}");
+                        }
+                    });
+                }
                 // ConnectInfo 를 붙여야 `origin_guard_mw` 가 peer 주소를 보고
                 // 로컬/원격을 가를 수 있다. 이게 없으면 원격도 로컬 규칙을 타서
                 // 토큰 없이 통과한다.
@@ -8423,6 +8477,46 @@ mod tests {
             assert_eq!(blocked.status(),StatusCode::FORBIDDEN);
         }
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn gateway_requests_must_stay_under_a_user_address() {
+        use super::*;
+        use axum::http::StatusCode;
+        let inner = axum::Router::new()
+            .route("/version", get(|| async { "local" }))
+            .layer(axum::middleware::from_fn(origin_guard_mw));
+        let via = tower::ServiceBuilder::new()
+            .layer(axum::middleware::from_fn(via_uplink_mw))
+            .service(inner.clone());
+        use axum::ServiceExt as _;
+        let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let direct = format!("http://{}", l1.local_addr().unwrap());
+        let t1 = tokio::spawn(async move {
+            axum::serve(l1, inner.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+        });
+        let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway = format!("http://{}", l2.local_addr().unwrap());
+        let t2 = tokio::spawn(async move {
+            axum::serve(l2, via.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        assert_eq!(client.get(format!("{direct}/version")).send().await.unwrap().status(), StatusCode::OK);
+        assert_eq!(client.get(format!("{gateway}/version")).send().await.unwrap().status(), StatusCode::FORBIDDEN);
+        // 토큰 값과 무관하게 막혀야 한다 — 관문 경유 판정이 토큰 검사보다 앞선다.
+        let with_token = client.get(format!("{gateway}/version")).header("x-kasa-token", "any").send().await.unwrap();
+        assert_eq!(with_token.status(), StatusCode::FORBIDDEN, "관문 경유에 토큰이 통했다");
+        t1.abort();
+        t2.abort();
+    }
+
+    #[test]
+    fn token_cookie_is_withheld_from_guests_and_gateway() {
+        let guest = crate::mobile::MobileUser { name: "손님".into(), slug: "abcdefghijklmnopqrstuvwxy".into(), created: 0, owner: false };
+        let owner = crate::mobile::MobileUser { owner: true, ..guest.clone() };
+        let h = axum::http::HeaderMap::new();
+        assert!(!super::wants_token_cookie(&guest, false, &h));
+        assert!(!super::wants_token_cookie(&owner, true, &h));
     }
 
     #[derive(Clone)]

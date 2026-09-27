@@ -1,15 +1,13 @@
-//! `kasa-relay` — 사내 세션 소통 중계 서버(2단계). 기계들이 여기 등록하면 세션
-//! 목록을 모아 주고 메시지를 대상 기계로 라우팅한다. 배포 위치(넷버드망·클러스터)와
-//! 무관 — 어디서 실행하든 코드는 같다.
+//! `kasa-relay` — 폰 관문 서버. 앱이 업링크로 붙고 폰은 `/u/<slug>/…` 로 들어온다.
+//! 배포 위치(넷버드망·클러스터)와 무관 — 어디서 실행하든 코드는 같다.
 //!
-//!   kasa-relay [--port <n>] [--state <파일>]   (기본 8790 · ~/.config/kasaterm/relay-state.json)
+//!   kasa-relay [--bind <주소>] [--port <n>] [--state <파일>]
+//!   (기본 127.0.0.1 · 8790 · ~/.config/kasaterm/relay-state.json)
 //!
-//! 관문(폰 주소 `/u/<slug>/`·앱 업링크 `/relay/uplink`)도 여기 얹힌다 — gateway.rs.
-//!
-//! 인증: `KASA_RELAY_TOKEN` 환경변수가 있으면 그 값을 `X-Relay-Token` 으로 요구한다.
-//! 없으면 인증 없이 뜬다(로컬 테스트용).
+//! 관문 자체는 인증하지 않는다 — 자격은 각 앱이 주소(slug)로 매긴다(`gateway.rs` 머리말).
 
 fn main() -> anyhow::Result<()> {
+    let mut bind = "127.0.0.1".to_string();
     let mut port: u16 = 8790;
     // 관문 slug 소유 기록. 기본 ~/.config/kasaterm/relay-state.json.
     let mut state: Option<std::path::PathBuf> = std::env::var_os("HOME")
@@ -20,14 +18,14 @@ fn main() -> anyhow::Result<()> {
             if let Some(p) = args.next().and_then(|s| s.parse().ok()) {
                 port = p;
             }
+        } else if a == "--bind" {
+            if let Some(b) = args.next() {
+                bind = b;
+            }
         } else if a == "--state" {
             state = args.next().map(std::path::PathBuf::from);
         }
     }
-    let token = std::env::var("KASA_RELAY_TOKEN").ok().filter(|s| !s.is_empty());
-    if token.is_none() {
-        eprintln!("[kasa-relay] ⚠️ KASA_RELAY_TOKEN 미설정 — 인증 없이 뜬다(로컬 테스트만).");
-    }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(kasa_mcp::relay::serve(port, token, state))
+    rt.block_on(kasa_mcp::relay::serve(&bind, port, state))
 }

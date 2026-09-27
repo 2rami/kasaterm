@@ -48,6 +48,10 @@ pub(crate) struct GatewayMachine {
 /// 바디 조각 상한 — 한 프레임에 너무 크게 실으면 다른 스트림이 그만큼 기다린다.
 pub const CHUNK: usize = 64 * 1024;
 
+/// 스트림 하나가 받는 쪽에서 밀릴 수 있는 프레임 수(최대 CHUNK × 이만큼). 넘치면 그
+/// 스트림만 끊는다 — 소켓 수신 루프가 한 스트림을 기다리면 나머지가 다 선다.
+pub(crate) const STREAM_QUEUE: usize = 256;
+
 pub fn encode(kind: u8, id: u32, payload: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(5 + payload.len());
     v.push(kind);
@@ -82,6 +86,39 @@ pub fn skip_header(name: &str) -> bool {
 
 pub(crate) fn is_internal_header(name: &str) -> bool {
     name.eq_ignore_ascii_case(CONTEXT_HEADER) || name.eq_ignore_ascii_case(MACHINES_HEADER)
+}
+
+/// 이 경로가 `/u/<slug>/` 밑에 머무는가. 조각마다 퍼센트 디코딩해 `.`·`..`·경로
+/// 구분자·제어문자가 나오면 거절한다.
+///
+/// 관문은 경로를 디코딩해 넘기고, 받는 쪽은 그것을 URL 로 다시 조립한다 — 그때
+/// reqwest(url crate)가 `..` 을 정규화해 `/u/<slug>/../../x` 가 `/x` 가 된다. 접두를
+/// 벗어난 loopback 요청은 로컬 권한이라, 손님 주소 하나로 기계 전체가 열렸다.
+pub(crate) fn safe_path(raw: &str) -> bool {
+    let path = raw.split(['?', '#']).next().unwrap_or("");
+    path.split('/').all(|seg| {
+        let d = percent_decode(seg);
+        d != b"." && d != b".." && !d.iter().any(|&b| b == b'/' || b == b'\\' || b < 0x20 || b == 0x7f)
+    })
+}
+
+fn percent_decode(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push(h << 4 | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
 }
 
 fn context_token() -> &'static str {
@@ -202,6 +239,8 @@ fn ws_url(gateway: &str) -> String {
 }
 
 /// 앱 부팅 때 한 번. 관문이 설정돼 있는 동안 붙고, 끊기면 백오프로 다시 붙는다.
+/// `local_port` 는 업링크 전용 입구(`http.rs` 의 `ViaUplink` 리스너)다 — 본 포트로
+/// 되쏘면 관문을 거친 요청이 로컬 CLI 와 구분되지 않는다.
 pub fn spawn(local_port: u16) {
     tokio::spawn(run(local_port));
 }
@@ -313,7 +352,7 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
                 Some(Ok(Message::Binary(b))) => {
                     let Some((kind, id, payload)) = decode(&b) else { continue };
                     if kind == OPEN {
-                        let (stx, srx) = mpsc::channel::<(u8, Vec<u8>)>(64);
+                        let (stx, srx) = mpsc::channel::<(u8, Vec<u8>)>(STREAM_QUEUE);
                         streams.lock().unwrap().insert(id, stx);
                         let open: serde_json::Value = match serde_json::from_slice(payload) {
                             Ok(v) => v,
@@ -331,14 +370,20 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
                         continue;
                     }
                     let tx = streams.lock().unwrap().get(&id).cloned();
-                    match tx {
-                        Some(tx) => {
-                            if tx.send((kind, payload.to_vec())).await.is_err() {
+                    // 모르는 스트림(이미 끝난 것)이면 조용히 버린다 — CLOSE 를 되쏘면 핑퐁이 된다.
+                    if let Some(tx) = tx {
+                        match tx.try_send((kind, payload.to_vec())) {
+                            Ok(()) => {}
+                            // 기다리지 않고 그 스트림만 끊는다 — 여기서 기다리면 같은 소켓의
+                            // 다른 스트림이 전부 선다.
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                streams.lock().unwrap().remove(&id);
+                                let _ = wtx.try_send(Message::Binary(encode(CLOSE, id, b"overflow").into()));
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
                                 streams.lock().unwrap().remove(&id);
                             }
                         }
-                        // 모르는 스트림(이미 끝난 것)이면 조용히 버린다 — CLOSE 를 되쏘면 핑퐁이 된다.
-                        None => {}
                     }
                 }
                 Some(Ok(Message::Text(t))) => {
@@ -410,6 +455,16 @@ async fn handle_stream(
         let wtx = wtx.clone();
         async move { wtx.send(Message::Binary(encode(kind, id, &payload).into())).await.is_ok() }
     };
+    // 옛 관문은 경로를 디코딩해 넘긴다 — 새 관문이 막더라도 여기서 한 번 더 본다.
+    let prefix = format!("{}{slug}/", crate::mobile::PREFIX);
+    let stays_under_slug = crate::mobile::valid_slug(slug)
+        && safe_path(path)
+        && reqwest::Url::parse(&format!("http://{local}")).is_ok_and(|u| u.path().starts_with(&prefix));
+    if !stays_under_slug {
+        send(HEAD, br#"{"status":400,"headers":[]}"#.to_vec()).await;
+        send(if is_ws { CLOSE } else { END }, Vec::new()).await;
+        return;
+    }
     if is_ws {
         let url = format!("ws://{local}");
         let mut req = match tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url.as_str()) {
@@ -433,6 +488,11 @@ async fn handle_stream(
                 axum::http::HeaderValue::from_str(v),
             ) {
                 req.headers_mut().insert(name, val);
+            }
+        }
+        for (k, v) in [(CONTEXT_HEADER, context_token().to_string()), (MACHINES_HEADER, encode_machines(&gateway_machines))] {
+            if let Ok(val) = axum::http::HeaderValue::from_str(&v) {
+                req.headers_mut().insert(k, val);
             }
         }
         let (local_ws, _) = match tokio_tungstenite::connect_async(req).await {
@@ -472,27 +532,28 @@ async fn handle_stream(
         send(CLOSE, Vec::new()).await;
         return;
     }
-    // HTTP — 요청 바디는 BODY…END 로 흘러오고, 그대로 로컬로 흘려 보낸다.
+    // HTTP — 요청 바디는 BODY…END 로 흘러오고, 그대로 로컬로 흘려 보낸다. END 뒤에도
+    // 스트림을 계속 들어 CLOSE(폰이 떠남)를 잡는다 — 안 그러면 끝없는 응답(SSE·롱폴)이
+    // 아무도 안 읽는 채로 계속 흐른다.
     let (btx, brx) = mpsc::channel::<Result<Vec<u8>, std::io::Error>>(32);
-    let mut srx_for_body = srx;
+    let (closed_tx, mut closed_rx) = tokio::sync::oneshot::channel::<()>();
     let feeder = tokio::spawn(async move {
-        let mut ended = false;
-        while let Some((kind, p)) = srx_for_body.recv().await {
+        let mut btx = Some(btx);
+        while let Some((kind, p)) = srx.recv().await {
             match kind {
                 BODY => {
-                    if btx.send(Ok(p)).await.is_err() {
-                        break;
+                    if let Some(b) = &btx {
+                        if b.send(Ok(p)).await.is_err() {
+                            btx = None;
+                        }
                     }
                 }
-                END => {
-                    ended = true;
-                    break;
-                }
+                END => btx = None,
                 CLOSE => break,
                 _ => {}
             }
         }
-        (ended, srx_for_body)
+        let _ = closed_tx.send(());
     });
     let body = reqwest::Body::wrap_stream(tokio_stream::wrappers::ReceiverStream::new(brx));
     let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
@@ -507,7 +568,14 @@ async fn handle_stream(
     rb = rb
         .header(CONTEXT_HEADER, context_token())
         .header(MACHINES_HEADER, encode_machines(&gateway_machines));
-    let resp = match rb.send().await {
+    let sent = tokio::select! {
+        r = rb.send() => r,
+        _ = &mut closed_rx => {
+            feeder.abort();
+            return;
+        }
+    };
+    let resp = match sent {
         Ok(r) => r,
         Err(e) => {
             let _ = send(HEAD, format!(r#"{{"status":502,"headers":[["x-kasa-error",{:?}]]}}"#, e.to_string()).into_bytes()).await;
@@ -528,9 +596,16 @@ async fn handle_stream(
         return;
     }
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = tokio::select! {
+            c = stream.next() => c,
+            _ = &mut closed_rx => {
+                feeder.abort();
+                return;
+            }
+        };
         match chunk {
-            Ok(b) => {
+            Some(Ok(b)) => {
                 for part in b.chunks(CHUNK) {
                     if !send(BODY, part.to_vec()).await {
                         feeder.abort();
@@ -538,7 +613,7 @@ async fn handle_stream(
                     }
                 }
             }
-            Err(_) => break,
+            Some(Err(_)) | None => break,
         }
     }
     send(END, Vec::new()).await;
@@ -577,6 +652,92 @@ mod tests {
         for h in ["content-type", "accept", "cookie", "x-kasa-token"] {
             assert!(!skip_header(h), "{h}");
         }
+    }
+
+    #[test]
+    fn safe_path_rejects_segments_that_climb_out() {
+        for ok in ["/", "/hub", "/term/ws", "/m/%EB%AF%B8%EB%8B%88/term/panes", "/a.b/c..d", "/x?y=../z"] {
+            assert!(safe_path(ok), "{ok}");
+        }
+        for bad in ["/../x", "/%2e%2e/x", "/%2E%2e/x", "/.%2e/x", "/./x", "/%2e/x", "/a%2f..%2fb", "/a%5cb", "/a%00b", "/a\\b"] {
+            assert!(!safe_path(bad), "{bad}");
+        }
+    }
+
+    const SLUG: &str = "abcdefghijklmnopqrstuvwxy";
+
+    async fn next_frame(wrx: &mut mpsc::Receiver<Message>) -> (u8, Vec<u8>) {
+        loop {
+            let m = tokio::time::timeout(Duration::from_secs(5), wrx.recv()).await.expect("frame").expect("open");
+            if let Message::Binary(b) = m {
+                let (k, _, p) = decode(&b).unwrap();
+                return (k, p.to_vec());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paths_that_leave_the_user_address_never_reach_the_app() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h2 = hits.clone();
+        let app = axum::Router::new().fallback(move || {
+            h2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { "local" }
+        });
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        for path in ["/%2e%2e/%2e%2e/version", "/../../version"] {
+            let (_stx, srx) = mpsc::channel(STREAM_QUEUE);
+            let (wtx, mut wrx) = mpsc::channel(STREAM_QUEUE);
+            let open = serde_json::json!({ "slug": SLUG, "path": path, "method": "GET", "headers": [] });
+            tokio::spawn(handle_stream(1, open, srx, wtx, port));
+            let (kind, head) = next_frame(&mut wrx).await;
+            assert_eq!(kind, HEAD);
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(&head).unwrap()["status"], 400, "{path}");
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn phone_leaving_stops_an_endless_response() {
+        struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d2 = dropped.clone();
+        let app = axum::Router::new().fallback(move || {
+            let flag = Dropped(d2.clone());
+            async move {
+                let s = futures_util::stream::unfold(flag, |flag| async move {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Some((Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"tick")), flag))
+                });
+                axum::body::Body::from_stream(s)
+            }
+        });
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let (stx, srx) = mpsc::channel(STREAM_QUEUE);
+        let (wtx, mut wrx) = mpsc::channel(STREAM_QUEUE);
+        let open = serde_json::json!({ "slug": SLUG, "path": "/events", "method": "GET", "headers": [] });
+        let task = tokio::spawn(handle_stream(7, open, srx, wtx, port));
+        stx.send((END, Vec::new())).await.unwrap();
+        assert_eq!(next_frame(&mut wrx).await.0, HEAD);
+        assert_eq!(next_frame(&mut wrx).await.0, BODY);
+        stx.send((CLOSE, Vec::new())).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task).await.expect("폰이 떠났는데 응답을 계속 흘렸다").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !dropped.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "로컬 서버의 끝없는 응답이 정리되지 않았다");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        server.abort();
     }
 
     #[test]
