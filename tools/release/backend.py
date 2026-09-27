@@ -246,11 +246,8 @@ class RealBackend:
                 continue
             return {"reused": str(app), "sha256": "sha256:" + want, "identity": ident}
         wt = self.worktree(plan)
-        r = self.runner.run(["bash", "scripts/build-app.sh"], cwd=wt, timeout=3600, env=self.env(), kind="local")
-        if r.skipped:
+        if self.bake(wt, self.env(), "build").skipped:
             return {"would": "격리 워크트리에서 scripts/build-app.sh", "dry": True}
-        if not r.ok:
-            raise Refused(f"굽기 실패 — {'시간 초과' if r.timed_out else r.tail(4)}")
         binary = wt / "dist/kasaterm.app/Contents/MacOS/kasaterm"
         if not binary.exists():
             raise Refused("굽기는 끝났는데 번들이 없다")
@@ -290,6 +287,13 @@ class RealBackend:
 
     def bake(self, wt, env, label, hint=""):
         """build-app.sh — 실패하면 전체 출력을 작업 폴더에 남긴다. 끝 몇 줄만으로는 npm 출력이 컴파일 오류를 가린다."""
+        # Cargo.lock 은 이 레포에서 무시 파일이라 새 워크트리엔 없다. cargo 가 굽는 중에 만들면 굽기 증명서가 「입력이 굽는
+        # 사이 바뀌었다」로 보고 원본 커밋을 불확실로 둔다(2026-09-27 미리 굽기 실측) — tag-release.sh 처럼 먼저 만든다.
+        if not self.dry and not (wt / "Cargo.lock").exists():
+            m = self.runner.run([self.tool("cargo"), "metadata", "--format-version", "1"], cwd=wt, timeout=900,
+                                env=self.env(), kind="local")
+            if not m.ok:
+                raise Refused(f"Cargo.lock 을 만들지 못했다 — {'시간 초과' if m.timed_out else m.tail(2)}")
         r = self.runner.run(["bash", "scripts/build-app.sh"], cwd=wt, timeout=3600, env=env, kind="local")
         if r.ok or r.skipped:
             return r
@@ -326,7 +330,10 @@ class RealBackend:
         if version != plan["version"]:
             raise Refused(f"번들 판 번호({version or '없음'})가 계획({plan['version']})과 다르다")
         try:
-            source = json.loads((wt / "dist/kasaterm.build.json").read_text()).get("source") or {}
+            raw = (wt / "dist/kasaterm.build.json").read_text()
+            # 워크트리는 끝나면 치운다 — 판정 근거인 증명서는 작업 폴더에 남긴다.
+            (self.workdir / "last-build.json").write_text(raw)
+            source = json.loads(raw).get("source") or {}
         except (OSError, ValueError):
             raise Refused("굽기 증명서(dist/kasaterm.build.json)가 없다 — 어느 커밋을 구웠는지 모르는 판은 내지 않는다")
         if source.get("source_commit") != bump or source.get("dirty") is not False:

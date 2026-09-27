@@ -157,7 +157,7 @@ env 로 띄운다. **사고 방지 표식이지 보안 경계가 아니다** —
 | 단계 | 하는 일 | 다시 돌리면·실패하면 |
 |---|---|---|
 | verify | 계획 커밋의 격리 워크트리에서 cargo 검사 3종(격리 `CARGO_TARGET_DIR`) | 끝났으면 건너뜀. 실패·시간 초과는 그 명령과 끝 줄을 남기고 멈춤 |
-| build | 같은 커밋 ready 판이 있으면 바이너리 해시·서명을 다시 재 갈음, 없으면 격리 워크트리에서 `build-app.sh`. **로컬 mac 판**이면 ready 판을 안 쓰고(버전을 안 올린 평소 서명 판이다) 버전 커밋으로 `KASATERM_SIGN_HARDENED=1` 굽기 → 판 번호·굽기 증명서의 깨끗한 원본 커밋 → dmg(계획 작업 폴더, 공유 dist 안 씀)·dmg 서명 → 번들 안 Mach-O 전부 Developer ID·팀·runtime·보안 타임스탬프·hardened 목록 안 | 〃. 열쇠를 못 쓰면 긴 굽기 전에 작은 사본 서명으로 먼저 실패 |
+| build | 같은 커밋 ready 판이 있으면 바이너리 해시·서명을 다시 재 갈음, 없으면 격리 워크트리에서 `build-app.sh`. **로컬 mac 판**이면 ready 판을 안 쓰고(버전을 안 올린 평소 서명 판이다) 버전 커밋으로 `KASATERM_SIGN_HARDENED=1` 굽기 → 판 번호·굽기 증명서의 깨끗한 원본 커밋 → dmg(계획 작업 폴더, 공유 dist 안 씀)·dmg 서명 → 번들 안 Mach-O 전부 Developer ID·팀·runtime·보안 타임스탬프·hardened 목록 안 | 〃. 열쇠를 못 쓰면 긴 굽기 전에 작은 사본 서명으로 먼저 실패. 굽기 실패는 stdout·stderr 전체를 작업 폴더(`build.log`·`build-signed.log`·`preflight.log`)에, 판정한 굽기 증명서는 `last-build.json` 에 남긴다. 새 워크트리엔 무시 파일인 `Cargo.lock` 이 없어 굽기 전에 `cargo metadata` 로 먼저 만든다(굽는 중에 생기면 증명서가 원본 커밋을 불확실로 둔다) |
 | tag | 격리 워크트리에서 tag-release.sh 와 같은 버전 치환·같은 커밋 메시지 → `git push --atomic origin HEAD:main HEAD:refs/tags/vX`. 로컬 태그는 안 만든다. 버전 커밋 날짜는 계획 시각에 못 박아 굽기 때와 같은 커밋이 된다. **로컬 mac 판**이면 push 전에 `xcrun notarytool submit --wait` → `stapler staple` → spctl·stapler validate·dmg 안 앱의 팀·공증·판 번호 재확인 | 원격에 태그가 있으면 계획 커밋 위의 버전 커밋인지 보고 **다시 세우지 않는다**(아니면 손대지 않고 멈춤). push 가 실패·시간 초과여도 원격을 다시 읽어 반영됐으면 완료, 그대로면 재시도 가능, 반쪽이면 멈춤. 공증 거절이면 태그를 안 세우고 기록 명령(`notarytool log <id>`)을 보인다. 이미 staple 한 같은 판이면 다시 내지 않는다. 굽은 뒤 dmg 가 바뀌었거나 버전 커밋이 굽은 커밋과 다르면 멈춤 |
 | release | `gh run list` 로 그 태그의 release.yml 실행 확인 → `gh release view`·`download` 로 dmg·msi 크기·해시 → dmg 를 읽기 전용으로 열어 서명 신원·공증. **로컬 mac 판**이면 먼저 공증한 dmg 를 올리고(`gh release create --verify-tag`, 있으면 `upload`) 받은 dmg 가 공증한 해시와 같은지 본다 | CI 가 안 떴거나 도는 중이면 **기다림**(실패 아님). CI 실패·산출물 모자람·해시 불일치·신원 불일치면 멈추고 피드 확인으로 안 넘어감. 릴리스에 다른 dmg 가 있으면 **덮지 않고** 멈춤 |
 | feed | 두 appcast 가 목표 판·산출물 이름·크기를 가리키는지, EdDSA 서명이 받은 파일과 맞는지(저장소의 Sparkle 공개키로 `openssl` 확인) | 아직 옛 판이면 기다림, 더 새 판이면 되돌리지 않고 멈춤, 확인한 피드가 그 뒤 바뀌면 멈춤 |
@@ -287,7 +287,7 @@ windesktop → 앱 재시작 사실이 안 닿아 blocked. 기기마다 「지�
 ## 검사
 
 ```sh
-python3 -m unittest tools.release.tests.test_fastpatch      # 77건 — 아래
+python3 -m unittest tools.release.tests.test_fastpatch      # 79건 — 아래
 cargo test -p kasa-socket app_update                         # 기기 업데이트 창구·러너 32건(app-update.md 「검사」)
 bash scripts/nacho-update-interop.sh                         # 실제 나쵸 update 승인 서버(격리)와 러너·기기 왕복
 bash scripts/nacho-release-interop.sh                        # 실제 나쵸 승인 서버(격리)와 왕복 17건

@@ -460,7 +460,7 @@ class LocalRunTests(Fixture):
         tags_before = sh(self.work, "git", "tag", "-l")
         state = self.go(self.plan())
         self.assertEqual([state["stages"][s]["status"] for s in fp.STAGES], ["done", "done", "dry", "dry", "dry", "done"])
-        cargo = [c for c in self.calls if c[0] == "cargo"]
+        cargo = [c for c in self.calls if c[0] == "cargo" and c[1] == "test"]
         self.assertEqual([c[3] for c in cargo], ["kasaterm", "kasa-mcp", "kasa-socket"])
         self.assertIn("built", state["stages"]["build"]["detail"])
         self.assertEqual(state["stages"]["build"]["detail"]["identity"]["team"], "ABCDE12345")
@@ -1335,6 +1335,12 @@ class LocalSigningBuildTests(LocalFixture):
         self.assertIn("notarytool submit", would)
         self.assertIn("--keychain-profile AC_NOTARY", would)
         self.assertIn("덮지 않고 멈춤", "\n".join(state["stages"]["release"]["detail"]["would"]))
+
+    def test_the_lockfile_exists_before_the_bake_so_the_build_proof_stays_certain(self):
+        state = self.go(self.plan())
+        self.assertEqual(state["stages"]["build"]["status"], "done")
+        names = [" ".join(c[:2]) for c in self.calls]
+        self.assertLess(names.index("cargo metadata"), names.index("bash scripts/build-app.sh"))
 
     def test_the_version_commit_is_the_same_every_time_it_is_made(self):
         plan = self.plan()
