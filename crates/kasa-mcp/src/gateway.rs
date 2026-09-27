@@ -53,6 +53,29 @@ struct Uplink {
     tx: mpsc::Sender<Message>,
     streams: Mutex<HashMap<u32, mpsc::Sender<Frame>>>,
     next: AtomicU32,
+    /// 기기 토큰으로 로그인한 연결이면 그 계정·기기. 토큰 없는 옛 앱은 None(주소만 쓴다).
+    account: Option<String>,
+    device_id: Option<String>,
+    /// 기기가 폐기되면 이 연결을 끊는다.
+    kick: tokio::sync::Notify,
+}
+
+/// 로그인한 기기 하나. 토큰은 sha256 만 남긴다.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct DeviceRec {
+    token_hash: String,
+    account: String,
+    /// `desktop` 은 업링크로 붙는 카사텀, `phone` 은 카사모바일.
+    kind: String,
+    #[serde(default)]
+    machine_id: Option<String>,
+    #[serde(default)]
+    label: String,
+    created: u64,
+    #[serde(default)]
+    last_seen: u64,
+    #[serde(default)]
+    revoked_at: Option<u64>,
 }
 
 const UPLINK_STALE_AFTER: Duration = Duration::from_secs(75);
@@ -175,8 +198,12 @@ pub struct Gate {
     by_slug: Arc<Mutex<HashMap<String, Vec<Arc<Uplink>>>>>,
     /// slug → 키 해시. 처음 온 키가 주인이다.
     keys: Arc<Mutex<HashMap<String, SlugRec>>>,
-    /// 살아 있는 업링크 연결 → 키 해시. 상한 판정용.
-    conns: Arc<Mutex<HashMap<u64, String>>>,
+    /// 살아 있는 업링크 전부(주소가 없는 연결 포함) → (키 해시, 연결). 상한 판정·기기 폐기용.
+    live: Arc<Mutex<HashMap<u64, (String, Arc<Uplink>)>>>,
+    /// 기기 id → 로그인 기록.
+    devices: Arc<Mutex<HashMap<String, DeviceRec>>>,
+    accounts: Arc<crate::relay_auth::Accounts>,
+    limiter: Arc<crate::relay_auth::Limiter>,
     state_path: Option<PathBuf>,
     seq: Arc<AtomicU64>,
 }
@@ -191,6 +218,8 @@ struct SlugRec {
 struct StateFile {
     version: u32,
     slugs: HashMap<String, SlugRec>,
+    #[serde(default)]
+    devices: HashMap<String, DeviceRec>,
 }
 
 fn now_secs() -> u64 {
@@ -202,38 +231,50 @@ fn now_secs() -> u64 {
 
 /// v2(`{version, slugs:{slug:{key_hash,last_seen}}}`) 와 v1(slug→키 해시 평면 맵)을 둘 다 읽는다.
 /// 읽을 수 없는 파일은 옆으로 치워 두고 빈 채로 뜬다 — 조용히 덮어쓰면 묶음이 흔적 없이 사라진다.
-fn load_state(p: &std::path::Path, now: u64) -> HashMap<String, SlugRec> {
+fn load_state(p: &std::path::Path, now: u64) -> (HashMap<String, SlugRec>, HashMap<String, DeviceRec>) {
     let Ok(raw) = std::fs::read_to_string(p) else {
-        return HashMap::new();
+        return Default::default();
     };
-    let slugs = if let Ok(v2) = serde_json::from_str::<StateFile>(&raw) {
-        v2.slugs
+    let (slugs, devices) = if let Ok(v2) = serde_json::from_str::<StateFile>(&raw) {
+        (v2.slugs, v2.devices)
     } else if let Ok(v1) = serde_json::from_str::<HashMap<String, String>>(&raw) {
-        v1.into_iter()
+        let slugs = v1
+            .into_iter()
             .map(|(slug, key_hash)| (slug, SlugRec { key_hash, last_seen: now }))
-            .collect()
+            .collect();
+        (slugs, HashMap::new())
     } else {
         let aside = p.with_extension(format!("json.corrupt-{now}"));
         let _ = std::fs::rename(p, &aside);
         eprintln!("[gateway] 상태 파일을 못 읽어 {} 로 치웠어요", aside.display());
-        return HashMap::new();
+        return Default::default();
     };
-    slugs
+    let slugs = slugs
         .into_iter()
         .filter(|(_, rec)| now.saturating_sub(rec.last_seen) < SLUG_RETENTION_SECS)
-        .collect()
+        .collect();
+    (slugs, devices)
 }
 
 impl Gate {
+    /// 계정 파일은 상태 파일 옆의 `relay-accounts.json` 이다(`kasa-relay account …` 가 같은 곳을 고친다).
     pub fn new(state_path: Option<PathBuf>) -> Self {
-        let keys = state_path
+        let accounts = state_path.as_ref().map(|p| p.with_file_name("relay-accounts.json"));
+        Self::with_accounts(state_path, accounts)
+    }
+
+    pub fn with_accounts(state_path: Option<PathBuf>, accounts_path: Option<PathBuf>) -> Self {
+        let (keys, devices) = state_path
             .as_deref()
             .map(|p| load_state(p, now_secs()))
             .unwrap_or_default();
         Self {
             by_slug: Arc::new(Mutex::new(HashMap::new())),
             keys: Arc::new(Mutex::new(keys)),
-            conns: Arc::new(Mutex::new(HashMap::new())),
+            live: Arc::new(Mutex::new(HashMap::new())),
+            devices: Arc::new(Mutex::new(devices)),
+            accounts: Arc::new(crate::relay_auth::Accounts::new(accounts_path)),
+            limiter: Arc::new(crate::relay_auth::Limiter::default()),
             state_path,
             seq: Arc::new(AtomicU64::new(1)),
         }
@@ -242,28 +283,62 @@ impl Gate {
     /// 임시 파일에 쓰고 fsync 뒤 이름을 바꾼다(0600) — 쓰다 죽어도 반쪽 파일이 남지 않는다.
     fn persist(&self) {
         let Some(p) = &self.state_path else { return };
-        let body = match self.keys.lock() {
-            Ok(k) => serde_json::to_string_pretty(&StateFile { version: 2, slugs: k.clone() }).unwrap_or_default(),
-            Err(_) => return,
-        };
-        if let Some(d) = p.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let tmp = p.with_extension("json.tmp");
-        let written = (|| -> std::io::Result<()> {
-            use std::io::Write as _;
-            let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-            let mut f = opts.open(&tmp)?;
-            f.write_all(body.as_bytes())?;
-            f.sync_all()?;
-            std::fs::rename(&tmp, p)
-        })();
-        if let Err(e) = written {
+        let slugs = self.keys.lock().map(|k| k.clone()).unwrap_or_default();
+        let devices = self.devices.lock().map(|d| d.clone()).unwrap_or_default();
+        let body = serde_json::to_string_pretty(&StateFile { version: 2, slugs, devices }).unwrap_or_default();
+        if let Err(e) = crate::relay_auth::write_private(p, &body) {
             eprintln!("[gateway] 상태 파일을 못 썼어요: {e}");
         }
+    }
+
+    /// `Authorization: Bearer <기기 토큰>` 의 주인. 폐기됐거나 계정이 막혔으면 None.
+    fn device_of(&self, headers: &axum::http::HeaderMap) -> Option<(String, DeviceRec)> {
+        let token = headers
+            .get(header::AUTHORIZATION)?
+            .to_str()
+            .ok()?
+            .strip_prefix("Bearer ")?
+            .trim();
+        self.device_by_token(token)
+    }
+
+    fn device_by_token(&self, token: &str) -> Option<(String, DeviceRec)> {
+        if !token.starts_with(crate::relay_auth::TOKEN_PREFIX) || token.len() > 200 {
+            return None;
+        }
+        let want = crate::relay_auth::token_hash(token);
+        let mut devices = self.devices.lock().unwrap();
+        let (id, rec) = devices
+            .iter_mut()
+            .find(|(_, d)| d.revoked_at.is_none() && d.token_hash == want)?;
+        if !self.accounts.active(&rec.account) {
+            return None;
+        }
+        rec.last_seen = now_secs();
+        Some((id.clone(), rec.clone()))
+    }
+
+    /// 기기를 폐기하고 그 기기의 업링크를 끊는다.
+    fn revoke(&self, device_id: &str) -> bool {
+        let done = {
+            let mut devices = self.devices.lock().unwrap();
+            match devices.get_mut(device_id) {
+                Some(d) if d.revoked_at.is_none() => {
+                    d.revoked_at = Some(now_secs());
+                    true
+                }
+                _ => false,
+            }
+        };
+        if done {
+            for (_, up) in self.live.lock().unwrap().values() {
+                if up.device_id.as_deref() == Some(device_id) {
+                    up.kick.notify_one();
+                }
+            }
+            self.persist();
+        }
+        done
     }
 
     /// 이 키가 이 slug 를 써도 되나 — 처음이면 묶고, 아니면 같은 키여야 한다.
@@ -283,17 +358,26 @@ impl Gate {
         }
     }
 
-    /// 새 업링크를 받아도 되나 — 전체·키당 상한을 넘으면 거절한다.
-    fn admit(&self, conn: u64, key_hash: &str) -> Result<(), &'static str> {
-        let mut conns = self.conns.lock().unwrap();
-        if conns.len() >= MAX_UPLINKS {
+    /// 새 업링크를 받아도 되나 — 전체·키당 상한을 넘으면 거절하고, 받으면 명단에 올린다.
+    fn admit(&self, key_hash: &str, up: Arc<Uplink>) -> Result<(), &'static str> {
+        let mut live = self.live.lock().unwrap();
+        if live.len() >= MAX_UPLINKS {
             return Err("관문에 붙은 기계가 너무 많아요");
         }
-        if conns.values().filter(|h| *h == key_hash).count() >= MAX_UPLINKS_PER_KEY {
+        if live.values().filter(|(h, _)| h == key_hash).count() >= MAX_UPLINKS_PER_KEY {
             return Err("같은 열쇠로 붙은 연결이 너무 많아요");
         }
-        conns.insert(conn, key_hash.to_string());
+        live.insert(up.conn, (key_hash.to_string(), up));
         Ok(())
+    }
+
+    /// 이 계정의 기기가 지금 붙어 있나.
+    fn device_online(&self, device_id: &str) -> bool {
+        self.live
+            .lock()
+            .unwrap()
+            .values()
+            .any(|(_, up)| up.device_id.as_deref() == Some(device_id) && up.fresh())
     }
 
     /// 지금 붙어 있는 주소 수 — 상태 창구용.
@@ -311,6 +395,11 @@ fn key_hash(key: &str) -> String {
 pub fn router(gate: Gate) -> Router {
     Router::new()
         .route("/relay/uplink", get(uplink_ws))
+        .route("/relay/login", axum::routing::post(login))
+        .route("/relay/whoami", get(whoami))
+        .route("/relay/devices", get(devices_list))
+        .route("/relay/logout", axum::routing::post(logout))
+        .route("/relay/devices/{id}/revoke", axum::routing::post(revoke_device))
         .route("/u/{slug}", any(need_slash))
         .route("/u/{slug}/", any(proxy_root))
         .route("/u/{slug}/{*rest}", any(proxy))
@@ -321,9 +410,191 @@ async fn uplink_ws(State(gate): State<Gate>, ws: WebSocketUpgrade) -> impl IntoR
     ws.on_upgrade(move |s| uplink_run(gate, s))
 }
 
-fn parse_hello(
-    v: &serde_json::Value,
-) -> Option<(String, Vec<String>, String, Option<String>, Vec<String>)> {
+// ── 계정 로그인과 기기 ──────────────────────────────────────────────────────────
+
+fn json_err(status: StatusCode, code: &str) -> axum::response::Response {
+    (status, axum::Json(serde_json::json!({ "ok": false, "error": code }))).into_response()
+}
+
+/// 시도 제한에 쓰는 출처. 관문은 cloudflared 뒤(loopback)에 있으니 그때만 CF 헤더를 믿는다 —
+/// 직접 붙은 연결이 헤더를 위조해 남의 몫을 깎지 못하게.
+fn client_ip(req: &axum::extract::Request) -> String {
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0);
+    match peer {
+        Some(p) if !p.ip().is_loopback() => p.ip().to_string(),
+        _ => req
+            .headers()
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .unwrap_or_else(|| "local".into()),
+    }
+}
+
+fn valid_machine_id(id: &str) -> bool {
+    (8..=128).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+}
+
+#[derive(serde::Deserialize)]
+struct LoginBody {
+    account: String,
+    password: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    machine_id: Option<String>,
+}
+
+/// `POST /relay/login` — 아이디·비밀번호로 기기 토큰 하나를 받는다. 같은 기계로 다시 로그인하면
+/// 그 기계의 옛 토큰은 폐기된다(기계 하나에 토큰 하나).
+async fn login(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    let ip = client_ip(&req);
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 16 * 1024).await else {
+        return json_err(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large");
+    };
+    let Ok(b) = serde_json::from_slice::<LoginBody>(&bytes) else {
+        return json_err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let account = b.account.trim().to_lowercase();
+    let kind = match b.kind.as_str() {
+        "" | "desktop" => "desktop",
+        "phone" => "phone",
+        _ => return json_err(StatusCode::BAD_REQUEST, "bad_kind"),
+    };
+    let machine_id = b.machine_id.filter(|m| valid_machine_id(m));
+    if kind == "desktop" && machine_id.is_none() {
+        return json_err(StatusCode::BAD_REQUEST, "machine_id_required");
+    }
+    let label: String = b.label.trim().chars().filter(|c| !c.is_control()).take(60).collect();
+    if let Err(wait) = gate.limiter.allow(&account, &ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(serde_json::json!({ "ok": false, "error": "rate_limited", "retry_after_secs": wait.as_secs().max(1) })),
+        )
+            .into_response();
+    }
+    let ok = crate::relay_auth::valid_account_name(&account) && !b.password.is_empty() && b.password.len() <= 1024 && {
+        let accounts = gate.accounts.clone();
+        let (name, pw) = (account.clone(), b.password);
+        tokio::task::spawn_blocking(move || accounts.check(&name, &pw)).await.unwrap_or(false)
+    };
+    gate.limiter.record(&account, ok);
+    if !ok {
+        eprintln!("[gateway] 로그인 실패 — 계정 {account:?}, 출처 {ip}");
+        return json_err(StatusCode::UNAUTHORIZED, "bad_credentials");
+    }
+    if kind == "desktop" {
+        let old: Vec<String> = gate
+            .devices
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, d)| d.revoked_at.is_none() && d.account == account && d.kind == "desktop" && d.machine_id == machine_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in old {
+            gate.revoke(&id);
+        }
+    }
+    let token = crate::relay_auth::new_token();
+    let device_id = crate::relay_auth::new_device_id();
+    let now = now_secs();
+    gate.devices.lock().unwrap().insert(
+        device_id.clone(),
+        DeviceRec {
+            token_hash: crate::relay_auth::token_hash(&token),
+            account: account.clone(),
+            kind: kind.to_string(),
+            machine_id,
+            label: label.clone(),
+            created: now,
+            last_seen: now,
+            revoked_at: None,
+        },
+    );
+    gate.persist();
+    eprintln!("[gateway] 로그인 — 계정 {account}, 기기 {device_id}({kind} {label:?})");
+    axum::Json(serde_json::json!({ "ok": true, "account": account, "device_id": device_id, "token": token }))
+        .into_response()
+}
+
+async fn whoami(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let Some((id, d)) = gate.device_of(&headers) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    axum::Json(serde_json::json!({
+        "ok": true, "account": d.account, "device_id": id, "kind": d.kind,
+        "label": d.label, "machine_id": d.machine_id,
+    }))
+    .into_response()
+}
+
+async fn devices_list(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let Some((me, d)) = gate.device_of(&headers) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let mut mine: Vec<(String, DeviceRec)> = gate
+        .devices
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, x)| x.account == d.account && x.revoked_at.is_none())
+        .map(|(id, x)| (id.clone(), x.clone()))
+        .collect();
+    mine.sort_by_key(|(_, x)| x.created);
+    let list: Vec<serde_json::Value> = mine
+        .into_iter()
+        .map(|(id, x)| {
+            serde_json::json!({
+                "device_id": id, "kind": x.kind, "label": x.label, "machine_id": x.machine_id,
+                "created": x.created, "last_seen": x.last_seen,
+                "online": gate.device_online(&id), "current": id == me,
+            })
+        })
+        .collect();
+    axum::Json(serde_json::json!({ "ok": true, "account": d.account, "devices": list })).into_response()
+}
+
+async fn logout(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let Some((id, _)) = gate.device_of(&headers) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    gate.revoke(&id);
+    axum::Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// 같은 계정의 다른 기기를 끊는다(분실·교체).
+async fn revoke_device(
+    State(gate): State<Gate>,
+    AxPath(target): AxPath<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some((_, d)) = gate.device_of(&headers) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let same_account = gate.devices.lock().unwrap().get(&target).is_some_and(|t| t.account == d.account);
+    if !same_account || !gate.revoke(&target) {
+        return json_err(StatusCode::NOT_FOUND, "no_such_device");
+    }
+    axum::Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+struct Hello {
+    key: String,
+    slugs: Vec<String>,
+    machine: String,
+    machine_id: Option<String>,
+    aliases: Vec<String>,
+    /// 로그인한 앱만 싣는다(proto 2).
+    device_token: Option<String>,
+}
+
+fn parse_hello(v: &serde_json::Value) -> Option<Hello> {
     if v.get("t")?.as_str()? != "hello" {
         return None;
     }
@@ -375,7 +646,12 @@ fn parse_hello(
     aliases.push(machine.clone());
     aliases.sort();
     aliases.dedup();
-    Some((key, slugs, machine, machine_id, aliases))
+    let device_token = v
+        .get("device_token")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty() && t.len() <= 200)
+        .map(str::to_string);
+    Some(Hello { key, slugs, machine, machine_id, aliases, device_token })
 }
 
 /// 연결 `conn` 만 그 slug 에서 뗀다 — 같은 slug 의 다른 살아 있는 연결은 남는다.
@@ -395,25 +671,39 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<serde_json::Value>(t.as_str()).ok(),
         _ => None,
     };
-    let Some((key, slugs, machine, machine_id, aliases)) = hello.as_ref().and_then(parse_hello)
+    let Some(Hello { key, slugs, machine, machine_id, aliases, device_token }) = hello.as_ref().and_then(parse_hello)
     else {
         let _ = tx
             .send(Message::Text(r#"{"t":"err","error":"hello 가 없거나 이상해요"}"#.into()))
             .await;
         return;
     };
+    // 기기 토큰은 그 기기의 기계에서만 쓴다 — 설정 폴더를 통째로 복사한 다른 기계가 같은
+    // 토큰으로 붙으면 거절한다. 거절돼도 앱은 토큰 없이 다시 붙어 주소(폰)는 산다.
+    let device = match device_token.as_deref() {
+        None => None,
+        Some(token) => match gate.device_by_token(token) {
+            Some((id, rec))
+                if rec.kind == "desktop"
+                    && rec.machine_id.as_deref().is_none_or(|m| Some(m) == machine_id.as_deref()) =>
+            {
+                Some((id, rec.account))
+            }
+            _ => {
+                let _ = tx
+                    .send(Message::Text(r#"{"t":"err","error":"device_token_invalid"}"#.into()))
+                    .await;
+                return;
+            }
+        },
+    };
     let hash = key_hash(&key);
     let conn = gate.seq.fetch_add(1, Ordering::Relaxed);
-    if let Err(why) = gate.admit(conn, &hash) {
-        let _ = tx
-            .send(Message::Text(serde_json::json!({ "t": "err", "error": why }).to_string().into()))
-            .await;
-        return;
-    }
     // 옛 앱은 stable id를 안 보낸다. 연결별 id로 두면 같은 표시 이름이 둘 뜬 순간
     // 모호함으로 닫히고, 이름만 보고 임의의 기계를 고르는 것보다 안전하다.
     let machine_id = machine_id.unwrap_or_else(|| format!("legacy-{conn}"));
     let (wtx, mut wrx) = mpsc::channel::<Message>(256);
+    let (device_id, account) = device.map_or((None, None), |(id, account)| (Some(id), Some(account)));
     let up = Arc::new(Uplink {
         conn,
         machine: machine.clone(),
@@ -423,7 +713,16 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         tx: wtx.clone(),
         streams: Mutex::new(HashMap::new()),
         next: AtomicU32::new(1),
+        account: account.clone(),
+        device_id: device_id.clone(),
+        kick: tokio::sync::Notify::new(),
     });
+    if let Err(why) = gate.admit(&hash, up.clone()) {
+        let _ = tx
+            .send(Message::Text(serde_json::json!({ "t": "err", "error": why }).to_string().into()))
+            .await;
+        return;
+    }
     let apply = |slugs: &[String]| -> (Vec<String>, Vec<String>) {
         let mut acc = Vec::new();
         let mut rej = Vec::new();
@@ -444,13 +743,19 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
     };
     let (acc, rej) = apply(&slugs);
     eprintln!(
-        "[gateway] {machine} 붙음(#{conn}) — 주소 {}개{}",
+        "[gateway] {machine} 붙음(#{conn}) — 주소 {}개{}{}",
         acc.len(),
-        if rej.is_empty() { String::new() } else { format!(", 거절 {}개(다른 기계 소유)", rej.len()) }
+        if rej.is_empty() { String::new() } else { format!(", 거절 {}개(다른 기계 소유)", rej.len()) },
+        account.as_deref().map(|a| format!(", 계정 {a}")).unwrap_or_default(),
     );
     let _ = tx
         .send(Message::Text(
-            serde_json::json!({ "t": "ok", "accepted": acc, "rejected": rej }).to_string().into(),
+            serde_json::json!({
+                "t": "ok", "accepted": acc, "rejected": rej,
+                "proto": 2, "account": account, "device_id": device_id,
+            })
+            .to_string()
+            .into(),
         ))
         .await;
     let writer = tokio::spawn(async move {
@@ -459,6 +764,8 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         loop {
             tokio::select! {
                 m = wrx.recv() => match m {
+                    // Close 를 보내고 나면 쓸 것이 없다 — 끝나야 폐기 통보가 버려지지 않고 나간다.
+                    Some(m @ Message::Close(_)) => { let _ = tx.send(m).await; break }
                     Some(m) => if tx.send(m).await.is_err() { break },
                     None => break,
                 },
@@ -466,8 +773,20 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
             }
         }
     });
+    let mut writer = writer;
     let mut mine: Vec<String> = acc;
-    while let Some(m) = rx.next().await {
+    loop {
+        let m = tokio::select! {
+            m = rx.next() => m,
+            _ = up.kick.notified() => {
+                eprintln!("[gateway] {machine} 기기가 폐기돼 끊음(#{conn})");
+                let _ = wtx.send(Message::Text(r#"{"t":"err","error":"device_revoked"}"#.into())).await;
+                let _ = wtx.send(Message::Close(None)).await;
+                let _ = tokio::time::timeout(Duration::from_secs(2), &mut writer).await;
+                break;
+            }
+        };
+        let Some(m) = m else { break };
         match m {
             Ok(Message::Binary(b)) => {
                 up.touch();
@@ -491,7 +810,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
             Ok(Message::Text(t)) => {
                 up.touch();
                 // hello 를 다시 보내면 slug 목록 갱신(유저가 늘었다).
-                if let Some((k2, slugs2, _, _, _)) = serde_json::from_str::<serde_json::Value>(t.as_str())
+                if let Some(Hello { key: k2, slugs: slugs2, .. }) = serde_json::from_str::<serde_json::Value>(t.as_str())
                     .ok()
                     .as_ref()
                     .and_then(parse_hello)
@@ -532,9 +851,12 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
             drop_conn(&mut map, s, conn);
         }
     }
-    gate.conns.lock().unwrap().remove(&conn);
+    gate.live.lock().unwrap().remove(&conn);
     up.streams.lock().unwrap().clear();
-    eprintln!("[gateway] {machine} 떨어짐(#{conn})");
+    eprintln!(
+        "[gateway] {machine} 떨어짐(#{conn}){}",
+        up.account.as_deref().map(|a| format!(" — 계정 {a}")).unwrap_or_default()
+    );
 }
 
 fn offline_page(slug_ok: bool) -> axum::response::Response {
@@ -829,6 +1151,9 @@ mod tests {
             tx,
             streams: Mutex::new(HashMap::new()),
             next: AtomicU32::new(1),
+            account: None,
+            device_id: None,
+            kick: tokio::sync::Notify::new(),
         })
     }
 
@@ -848,11 +1173,12 @@ mod tests {
             "slugs":["abcdefghijklmnopqrstuvwxy","BAD","short"],
             "machine":"맥북", "machine_id":"machine-macbook-1"
         });
-        let (_, slugs, m, id, aliases) = parse_hello(&v).unwrap();
-        assert_eq!(slugs, vec!["abcdefghijklmnopqrstuvwxy".to_string()]);
-        assert_eq!(m, "맥북");
-        assert_eq!(id.as_deref(), Some("machine-macbook-1"));
-        assert!(aliases.contains(&"맥북".to_string()));
+        let h = parse_hello(&v).unwrap();
+        assert_eq!(h.slugs, vec!["abcdefghijklmnopqrstuvwxy".to_string()]);
+        assert_eq!(h.machine, "맥북");
+        assert_eq!(h.machine_id.as_deref(), Some("machine-macbook-1"));
+        assert!(h.aliases.contains(&"맥북".to_string()));
+        assert!(h.device_token.is_none());
         assert!(parse_hello(&serde_json::json!({"t":"hello","key":"short","slugs":[]})).is_none());
         assert!(parse_hello(&serde_json::json!({"t":"nope"})).is_none());
     }
@@ -942,11 +1268,16 @@ mod tests {
     #[test]
     fn uplinks_are_capped_per_key() {
         let g = Gate::new(None);
+        let up = |conn: u64| {
+            let mut u = Arc::try_unwrap(mock_uplink("맥북", "book-1", Duration::ZERO)).ok().unwrap();
+            u.conn = conn;
+            Arc::new(u)
+        };
         for conn in 0..MAX_UPLINKS_PER_KEY as u64 {
-            assert!(g.admit(conn, "k1").is_ok());
+            assert!(g.admit("k1", up(conn)).is_ok());
         }
-        assert!(g.admit(100, "k1").is_err());
-        assert!(g.admit(101, "k2").is_ok());
+        assert!(g.admit("k1", up(100)).is_err());
+        assert!(g.admit("k2", up(101)).is_ok());
     }
 
     #[test]
@@ -997,23 +1328,39 @@ mod tests {
         closes: Arc<Mutex<Vec<(u32, Vec<u8>)>>>,
     }
 
+    async fn spawn_relay(gate: Gate) -> std::net::SocketAddr {
+        let app = crate::relay::router().merge(router(gate));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(l, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap()
+        });
+        addr
+    }
+
+    type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+    /// 업링크 하나를 붙이고 관문의 첫 답(JSON)을 돌려준다.
+    async fn hello_uplink(addr: std::net::SocketAddr, hello: serde_json::Value) -> (Ws, serde_json::Value) {
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/relay/uplink")).await.unwrap();
+        ws.send(TM::Text(hello.to_string().into())).await.unwrap();
+        let first = ws.next().await.unwrap().unwrap();
+        let v = serde_json::from_str(first.to_text().unwrap()).unwrap();
+        (ws, v)
+    }
+
     /// 관문을 띄우고 가짜 앱 하나를 업링크로 붙인다. `answer` 는 OPEN 마다 불려 답 프레임을 쓴다.
     async fn relay_with_uplink(
         answer: impl Fn(u32, &serde_json::Value, mpsc::UnboundedSender<Vec<u8>>) + Send + Sync + 'static,
     ) -> (std::net::SocketAddr, FakeUplink) {
-        let app = crate::relay::router().merge(router(Gate::new(None)));
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/relay/uplink")).await.unwrap();
-        let (mut tx, mut rx) = ws.split();
+        let addr = spawn_relay(Gate::new(None)).await;
         let hello = serde_json::json!({
             "t": "hello", "key": "0123456789abcdef0123", "slugs": [SLUG],
             "machine": "맥북", "machine_id": "machine-test-1",
         });
-        tx.send(TM::Text(hello.to_string().into())).await.unwrap();
-        let ok = rx.next().await.unwrap().unwrap();
-        assert!(ok.to_text().unwrap().contains("\"ok\""), "{ok:?}");
+        let (ws, ok) = hello_uplink(addr, hello).await;
+        assert_eq!(ok["t"], "ok", "{ok}");
+        let (mut tx, mut rx) = ws.split();
         let (out, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         tokio::spawn(async move {
             while let Some(frame) = out_rx.recv().await {
@@ -1127,6 +1474,111 @@ mod tests {
             assert!(Instant::now() < deadline, "밀린 스트림을 끊지 않았다");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    // ── 계정 로그인 ─────────────────────────────────────────────────────────────
+
+    fn account_gate(dir: &std::path::Path) -> Gate {
+        let accounts = dir.join("relay-accounts.json");
+        let mut f = crate::relay_auth::AccountsFile::default();
+        f.accounts.insert(
+            "geno".into(),
+            crate::relay_auth::Account {
+                pbkdf2_sha256: crate::relay_auth::hash_password_with("correct horse", 1000),
+                created: 1,
+                disabled: false,
+            },
+        );
+        crate::relay_auth::save_accounts(&accounts, &f).unwrap();
+        Gate::with_accounts(Some(dir.join("relay-state.json")), Some(accounts))
+    }
+
+    async fn post(addr: std::net::SocketAddr, path: &str, bearer: Option<&str>, body: serde_json::Value) -> (u16, serde_json::Value) {
+        let mut rb = reqwest::Client::new().post(format!("http://{addr}{path}")).json(&body);
+        if let Some(t) = bearer {
+            rb = rb.bearer_auth(t);
+        }
+        let r = rb.send().await.unwrap();
+        (r.status().as_u16(), r.json().await.unwrap_or_default())
+    }
+
+    async fn get_json(addr: std::net::SocketAddr, path: &str, bearer: &str) -> (u16, serde_json::Value) {
+        let r = reqwest::Client::new().get(format!("http://{addr}{path}")).bearer_auth(bearer).send().await.unwrap();
+        (r.status().as_u16(), r.json().await.unwrap_or_default())
+    }
+
+    fn desktop_hello(machine_id: &str, token: &str) -> serde_json::Value {
+        serde_json::json!({
+            "t": "hello", "key": "0123456789abcdef0123", "slugs": [], "machine": "맥북",
+            "machine_id": machine_id, "device_token": token, "proto": 2,
+        })
+    }
+
+    #[tokio::test]
+    async fn device_login_binds_one_machine_and_revocation_drops_its_uplink() {
+        let dir = std::env::temp_dir().join(format!("kasa-login-{}", uuid::Uuid::new_v4()));
+        let addr = spawn_relay(account_gate(&dir)).await;
+        let book = serde_json::json!({"account":"geno","password":"correct horse","machine_id":"machine-book-1","label":"맥북"});
+        let wrong = serde_json::json!({"account":"geno","password":"nope","machine_id":"machine-book-1"});
+        assert_eq!(post(addr, "/relay/login", None, wrong).await.0, 401);
+        assert_eq!(post(addr, "/relay/login", None, serde_json::json!({"account":"geno","password":"correct horse"})).await.0, 400, "기계 없는 데스크톱 로그인이 통했다");
+        let (status, v) = post(addr, "/relay/login", None, book.clone()).await;
+        assert_eq!(status, 200, "{v}");
+        let token = v["token"].as_str().unwrap().to_string();
+        let desktop_id = v["device_id"].as_str().unwrap().to_string();
+        assert_eq!(get_json(addr, "/relay/whoami", &token).await.1["account"], "geno");
+
+        let (_, other) = hello_uplink(addr, desktop_hello("machine-mini-1", &token)).await;
+        assert_eq!(other["error"], "device_token_invalid", "다른 기계가 이 기기 토큰으로 붙었다");
+        let (mut ws, ok) = hello_uplink(addr, desktop_hello("machine-book-1", &token)).await;
+        assert_eq!((ok["t"].as_str(), ok["account"].as_str()), (Some("ok"), Some("geno")), "{ok}");
+        let (_, list) = get_json(addr, "/relay/devices", &token).await;
+        let me = list["devices"].as_array().unwrap().iter().find(|d| d["device_id"] == desktop_id.as_str()).cloned().unwrap();
+        assert_eq!((me["online"].as_bool(), me["current"].as_bool()), (Some(true), Some(true)), "{list}");
+
+        let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({"account":"geno","password":"correct horse","kind":"phone","label":"폰"})).await;
+        let phone_token = phone["token"].as_str().unwrap();
+        let (status, _) = post(addr, &format!("/relay/devices/{desktop_id}/revoke"), Some(phone_token), serde_json::json!({})).await;
+        assert_eq!(status, 200);
+        let kicked = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(Ok(m)) = ws.next().await {
+                if m.to_text().is_ok_and(|t| t.contains("device_revoked")) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(kicked, "폐기한 기기의 업링크가 안 끊겼다");
+        assert_eq!(get_json(addr, "/relay/whoami", &token).await.0, 401);
+        let (_, again) = hello_uplink(addr, desktop_hello("machine-book-1", &token)).await;
+        assert_eq!(again["error"], "device_token_invalid", "폐기된 토큰으로 다시 붙었다");
+
+        let state = std::fs::read_to_string(dir.join("relay-state.json")).unwrap();
+        assert!(!state.contains(&token), "토큰 원문이 상태 파일에 남았다");
+        assert!(state.contains(&crate::relay_auth::token_hash(&token)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn logging_in_again_on_a_machine_retires_its_old_token_and_disabling_stops_all() {
+        let dir = std::env::temp_dir().join(format!("kasa-login-{}", uuid::Uuid::new_v4()));
+        let addr = spawn_relay(account_gate(&dir)).await;
+        let book = serde_json::json!({"account":"geno","password":"correct horse","machine_id":"machine-book-1"});
+        let first = post(addr, "/relay/login", None, book.clone()).await.1["token"].as_str().unwrap().to_string();
+        let second = post(addr, "/relay/login", None, book).await.1["token"].as_str().unwrap().to_string();
+        assert_eq!(get_json(addr, "/relay/whoami", &first).await.0, 401, "같은 기계의 옛 토큰이 살아 있다");
+        assert_eq!(get_json(addr, "/relay/whoami", &second).await.0, 200);
+
+        let p = dir.join("relay-accounts.json");
+        let mut f = crate::relay_auth::load_accounts(&p);
+        f.accounts.get_mut("geno").unwrap().disabled = true;
+        crate::relay_auth::save_accounts(&p, &f).unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(2);
+        let _ = std::fs::File::options().write(true).open(&p).and_then(|file| file.set_modified(later));
+        assert_eq!(get_json(addr, "/relay/whoami", &second).await.0, 401, "막은 계정의 토큰이 통했다");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

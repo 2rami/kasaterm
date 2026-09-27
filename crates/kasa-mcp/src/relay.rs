@@ -24,6 +24,7 @@ pub async fn serve(bind: &str, port: u16, state: Option<std::path::PathBuf>) -> 
     let listener = tokio::net::TcpListener::bind((bind, port)).await?;
     let addr = listener.local_addr()?;
     println!("[kasa-relay] listening on {addr}");
-    axum::serve(listener, app).await?;
+    // peer 주소가 있어야 로그인 시도 제한이 「직접 붙은 연결」과 「cloudflared 뒤」를 가른다.
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }
