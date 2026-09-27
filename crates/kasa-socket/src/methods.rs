@@ -150,6 +150,9 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "collab.tell_status" => match backend.collab_tell_status(&req.params) {
             Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
         },
+        "relay.account" => match backend.relay_account(&req.params) {
+            Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+        },
         "collab.board" => {
             // Opt-in screen capture: a plain board stays metadata-only (cheap,
             // what board-watch polling wants), but an orchestrator pane can

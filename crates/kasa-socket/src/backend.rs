@@ -1456,6 +1456,12 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("current tell session identity cannot be verified by this backend")
     }
 
+    /// 관문 계정 로그인(`relay.account`, `{op: login|logout|devices|revoke|status}`). 관문과
+    /// 말하는 코드는 kasa-mcp 에 있어 그걸 아는 백엔드만 덮어쓴다.
+    fn relay_account(&self, _params: &serde_json::Value) -> Result<serde_json::Value> {
+        Err(anyhow::anyhow!("이 백엔드는 관문 로그인을 못 해요"))
+    }
+
     /// 나쵸네코 인박스 보고(`nacho.report`). 기본은 **이 기계의 인박스**에 넣는다 —
     /// 라우팅(나쵸가 다른 기계에 살 때)은 kasa-mcp 를 아는 백엔드가 덮어쓴다.
     fn nacho_report(&self, params: &serde_json::Value) -> Result<serde_json::Value> {

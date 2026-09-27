@@ -1465,6 +1465,8 @@ fn print_help() {
     eprintln!("  kasaterm-cli notify [--surface <id>] <title> [body]  # fire a work-complete notification (Stop hook)");
     eprintln!("  kasaterm-cli attention [--surface <id>] [reason]     # flag a pane blocked on a permission/input prompt (Notification hook)");
     eprintln!("  kasaterm-cli done [--surface <id>] <succeeded|failed> [한 줄 요약]  # 브리프 완료 보고 — board 가 idle 추정 대신 이걸 정본으로 싣는다");
+    eprintln!("  kasaterm-cli login [<아이디>]                     # 관문 계정으로 이 기기를 붙인다(비밀번호는 화면에 안 찍힌다)");
+    eprintln!("  kasaterm-cli logout | devices [status | revoke <device_id>]");
     eprintln!("  kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> --summary <글> [--changed <파일,…>]… [--tests <글>] [--next <글>] [--dry-run]");
     eprintln!("                                            # 나쵸가 띄운 학생(KASATERM_ORIGIN=nacho)만. 나쵸 인박스에 원자적으로 넣고 살아 있으면 즉시 깨운다. 토큰·비밀은 거부");
     eprintln!("  app-update run --approval ap_… --rollout FILE [--record FILE] · start --machine ID --request FILE|- · status JOB [--machine ID] # 기기 앱 업데이트(공식 릴리스만·나쵸 승인 1회·차례로·조종 기기 마지막·기기 스위치 KASATERM_APP_UPDATE=on)");
@@ -1552,11 +1554,83 @@ fn server_params(args: &[String]) -> Result<Value> {
     Ok(params)
 }
 
+fn read_line_prompt(prompt: &str) -> Result<String> {
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+/// 화면에 안 찍히게 한 줄을 읽는다. 터미널이 아니면(파이프) 그냥 읽는다.
+fn read_secret(prompt: &str) -> Result<String> {
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    #[cfg(unix)]
+    let saved = unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        if libc::isatty(libc::STDIN_FILENO) == 1 && libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0 {
+            let old = t;
+            t.c_lflag &= !libc::ECHO;
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
+            Some(old)
+        } else {
+            None
+        }
+    };
+    #[cfg(windows)]
+    let saved = unsafe {
+        use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, STD_INPUT_HANDLE};
+        let h = GetStdHandle(STD_INPUT_HANDLE);
+        let mut mode = 0;
+        if GetConsoleMode(h, &mut mode) != 0 {
+            SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT);
+            Some((h, mode))
+        } else {
+            None
+        }
+    };
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line);
+    #[cfg(unix)]
+    if let Some(old) = saved {
+        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &old) };
+        eprintln!();
+    }
+    #[cfg(windows)]
+    if let Some((h, mode)) = saved {
+        unsafe { windows_sys::Win32::System::Console::SetConsoleMode(h, mode) };
+        eprintln!();
+    }
+    read?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
 fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
     // Caller-supplied id so async clients can correlate; we just stamp
     // a process-id-based string for the CLI path where nobody cares.
     let id = json!(format!("cli-{}", std::process::id()));
     let (method, params): (&str, Value) = match cmd {
+        // 관문 계정 — 화면 없는 기기(미니·윈도우)도 이것으로 로그인한다. 비밀번호는 앱이 관문에
+        // 한 번 건네고 버린다(기기에는 기기 토큰만 남는다).
+        "login" => {
+            let account = match args.first() {
+                Some(a) => a.clone(),
+                None => read_line_prompt("아이디: ")?,
+            };
+            let password = read_secret("비밀번호: ")?;
+            ("relay.account", json!({ "op": "login", "account": account, "password": password }))
+        }
+        "logout" => ("relay.account", json!({ "op": "logout" })),
+        "devices" => match args.first().map(String::as_str) {
+            None => ("relay.account", json!({ "op": "devices" })),
+            Some("status") => ("relay.account", json!({ "op": "status" })),
+            Some("revoke") => {
+                let id = args.get(1).ok_or_else(|| anyhow!("devices revoke <device_id>"))?;
+                ("relay.account", json!({ "op": "revoke", "device_id": id }))
+            }
+            Some(other) => return Err(anyhow!("devices [status | revoke <device_id>] — 모르는 것: {other}")),
+        },
         "ping" => ("system.ping", json!({})),
         "capabilities" => ("system.capabilities", json!({})),
         "identify" => ("system.identify", json!({})),

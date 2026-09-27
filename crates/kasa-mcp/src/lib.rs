@@ -31,6 +31,7 @@ mod register;
 pub mod relayconf;
 pub mod relay;
 pub mod relay_auth;
+pub mod device_auth;
 pub mod remote;
 pub mod remote_restore;
 pub mod surface_keys;

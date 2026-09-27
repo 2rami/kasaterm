@@ -178,6 +178,29 @@ pub struct Status {
     pub last_error: Option<String>,
     /// 관문이 받아 준 slug 수 — 0 이면 주소가 하나도 안 산다(키 충돌 등).
     pub accepted: usize,
+    /// 기기 토큰으로 붙었으면 관문이 확인해 준 계정.
+    pub account: Option<String>,
+    /// 관문이 기기 토큰을 거절했다(폐기·다른 기계) — 다시 로그인해야 한다.
+    pub auth_error: Option<String>,
+}
+
+/// 관문이 거절한 토큰. 같은 토큰으로 다시 붙으면 또 거절돼 주소(폰)까지 못 쓰게 되니,
+/// 새로 로그인할 때까지는 토큰 없이 붙는다.
+fn rejected_token() -> &'static Mutex<Option<String>> {
+    static R: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
+    R.get_or_init(|| Mutex::new(None))
+}
+
+/// 이번 연결에 실을 기기 토큰.
+fn usable_token(gateway: &str) -> Option<String> {
+    let token = crate::device_auth::for_gateway(gateway)?.token;
+    let rejected = rejected_token().lock().ok()?.clone();
+    (rejected.as_deref() != Some(token.as_str())).then_some(token)
+}
+
+/// 관문에 붙어 있을 까닭이 있나 — 폰 주소를 열었거나, 기기로 로그인했거나.
+fn wanted(gateway: &str) -> bool {
+    crate::mobile::published() || usable_token(gateway).is_some()
 }
 
 fn state() -> &'static Mutex<Status> {
@@ -205,25 +228,32 @@ fn set_status(f: impl FnOnce(&mut Status)) {
     }
 }
 
-fn hello_json() -> Option<String> {
+/// 폰 주소를 닫아 둔 채 로그인만 해 둔 기기는 주소 없이 붙는다 — 기기끼리의 길만 쓴다.
+fn hello_json(token: Option<&str>) -> Option<String> {
     let key = crate::mobile::machine_key()?;
     let machine_id = crate::mobile::machine_identity()?;
-    // 주인 주소는 여기서 생긴다 — 앱을 처음 켠 사람도 관문에 붙는 순간 주소 하나를 받는다.
-    // 안 만들고 빈 목록으로 hello 하면 「붙었는데 주소 0개」가 된다(리그에서 실제로 났다).
-    let _ = crate::mobile::owner();
-    let slugs: Vec<String> = crate::mobile::users().into_iter().map(|u| u.slug).collect();
-    Some(
-        serde_json::json!({
-            "t": "hello",
-            "key": key,
-            "slugs": slugs,
-            "machine": crate::mobile::machine_name(),
-            "machine_id": machine_id,
-            "machine_aliases": crate::mobile::machine_aliases(),
-            "version": env!("CARGO_PKG_VERSION"),
-        })
-        .to_string(),
-    )
+    let slugs: Vec<String> = if crate::mobile::published() {
+        // 주인 주소는 여기서 생긴다 — 앱을 처음 켠 사람도 관문에 붙는 순간 주소 하나를 받는다.
+        // 안 만들고 빈 목록으로 hello 하면 「붙었는데 주소 0개」가 된다(리그에서 실제로 났다).
+        let _ = crate::mobile::owner();
+        crate::mobile::users().into_iter().map(|u| u.slug).collect()
+    } else {
+        Vec::new()
+    };
+    let mut hello = serde_json::json!({
+        "t": "hello",
+        "key": key,
+        "slugs": slugs,
+        "machine": crate::mobile::machine_name(),
+        "machine_id": machine_id,
+        "machine_aliases": crate::mobile::machine_aliases(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "proto": 2,
+    });
+    if let Some(t) = token {
+        hello["device_token"] = t.into();
+    }
+    Some(hello.to_string())
 }
 
 fn ws_url(gateway: &str) -> String {
@@ -259,7 +289,7 @@ async fn run(local_port: u16) {
             poke_notify().notified().await;
             continue;
         };
-        if !crate::mobile::published() {
+        if !wanted(&gateway) {
             set_status(|s| {
                 s.connected = false;
                 s.gateway = Some(gateway.clone());
@@ -297,7 +327,8 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
         .await
         .map_err(|e| anyhow::anyhow!("관문 {url} 에 못 붙었어요: {e}"))?;
     let (mut tx, mut rx) = ws.split();
-    let hello = hello_json().ok_or_else(|| anyhow::anyhow!("machine_key 를 못 만들었어요"))?;
+    let token = usable_token(gateway);
+    let hello = hello_json(token.as_deref()).ok_or_else(|| anyhow::anyhow!("machine_key 를 못 만들었어요"))?;
     tx.send(Message::Text(hello.into())).await?;
     // 관문의 첫 답 — ok 가 아니면 이 키로는 못 쓴다(다른 기계가 같은 slug 를 쥐고 있다).
     let first = tokio::time::timeout(Duration::from_secs(15), rx.next())
@@ -307,16 +338,27 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
         Some(Ok(Message::Text(t))) => {
             let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap_or_default();
             if v.get("t").and_then(|x| x.as_str()) != Some("ok") {
+                if let Some(t) = &token {
+                    token_refused(t, v["error"].as_str().unwrap_or("?"));
+                }
                 anyhow::bail!("관문이 거절했어요: {t}");
             }
             let n = v.get("accepted").and_then(|a| a.as_array()).map_or(0, |a| a.len());
+            let account = v["account"].as_str().map(str::to_string);
             set_status(|s| {
                 s.connected = true;
                 s.since = Some(Instant::now());
                 s.last_error = None;
                 s.accepted = n;
+                s.account = account.clone();
+                if account.is_some() {
+                    s.auth_error = None;
+                }
             });
-            eprintln!("[uplink] {gateway} 에 붙었어요 — 주소 {n}개");
+            eprintln!(
+                "[uplink] {gateway} 에 붙었어요 — 주소 {n}개{}",
+                account.map(|a| format!(", 계정 {a}")).unwrap_or_default()
+            );
         }
         other => anyhow::bail!("관문의 첫 답이 이상해요: {other:?}"),
     }
@@ -341,10 +383,14 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
     let result: anyhow::Result<()> = loop {
         tokio::select! {
             _ = poke_notify().notified() => {
-                if !crate::mobile::published() || crate::mobile::gateway().as_deref() != Some(gateway) {
-                    break Ok(()); // 껐거나 관문이 바뀌었다 — 바깥 루프가 다시 정한다
+                // 껐거나·관문이 바뀌었거나·로그인이 바뀌었다 — 바깥 루프가 새로 붙는다.
+                if !wanted(gateway)
+                    || crate::mobile::gateway().as_deref() != Some(gateway)
+                    || usable_token(gateway) != token
+                {
+                    break Ok(());
                 }
-                if let Some(h) = hello_json() {
+                if let Some(h) = hello_json(token.as_deref()) {
                     let _ = wtx.send(Message::Text(h.into())).await; // 유저가 늘었다 — 다시 알린다
                 }
             }
@@ -395,6 +441,9 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
                         }
                         Some("err") => {
                             let why = v.get("error").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+                            if let Some(t) = &token {
+                                token_refused(t, &why);
+                            }
                             break Err(anyhow::anyhow!("관문 오류: {why}"));
                         }
                         _ => {}
@@ -411,9 +460,23 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
     set_status(|s| {
         s.connected = false;
         s.accepted = 0;
+        s.account = None;
     });
     writer.abort();
     result
+}
+
+/// 관문이 기기 토큰을 받지 않았다. 폐기·다른 기계 토큰이면 새로 로그인할 때까지 토큰 없이
+/// 붙는다 — 그래야 폰 주소는 계속 산다.
+fn token_refused(token: &str, why: &str) {
+    if !matches!(why, "device_token_invalid" | "device_revoked") {
+        return;
+    }
+    if let Ok(mut r) = rejected_token().lock() {
+        *r = Some(token.to_string());
+    }
+    set_status(|s| s.auth_error = Some("관문 로그인이 풀렸어요 — 다시 로그인해 주세요".into()));
+    eprintln!("[uplink] 관문이 이 기기의 로그인을 받지 않았어요({why}) — 토큰 없이 다시 붙어요");
 }
 
 /// 관문이 내려보낸 요청 하나. 로컬 서버에 `/u/<slug>/<경로>` 로 되쏘고 답을 올려보낸다.

@@ -22,6 +22,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_IO",
     "Win32_System_Threading",
     "Win32_Security",
+    # kasaterm-cli login 이 비밀번호를 화면에 안 찍히게 읽는다.
+    "Win32_System_Console",
 ] }
 
 # 터미널 가로 칸 수(TIOCGWINSZ)를 읽으려고. 상수도 구조체도 OS 마다 달라 손으로
