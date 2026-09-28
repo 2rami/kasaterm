@@ -170,7 +170,7 @@ fn status_from(cred: Option<&DeviceCred>, gateway: Option<&str>, up: &crate::upl
     })
 }
 
-/// 소켓 `relay.account` — `{op: login|logout|devices|revoke|status, …}`. 소켓 핸들러는 동기라
+/// 소켓 `relay.account` — `{op: login|logout|devices|revoke|status|agents, …}`. 소켓 핸들러는 동기라
 /// 따로 스레드를 세워 그 안에서만 런타임을 돌린다(`tell_service::remote` 와 같은 방식).
 pub fn handle(params: &Value) -> anyhow::Result<Value> {
     let op = params["op"].as_str().unwrap_or("status").to_string();
@@ -192,6 +192,11 @@ pub fn handle(params: &Value) -> anyhow::Result<Value> {
                 "revoke" => {
                     let id = params["device_id"].as_str().ok_or_else(|| anyhow::anyhow!("device_id 가 필요해요"))?;
                     revoke(id).await.map(|_| json!({ "ok": true }))
+                }
+                // 이 기기 슬롯을 관문에 올리고 합친 코딩 에이전트 계정 목록을 받는다.
+                "agents" => {
+                    let list = crate::agent_accounts::sync(&crate::agent_accounts::local_snapshot()).await?;
+                    Ok(json!({ "ok": true, "accounts": list }))
                 }
                 other => anyhow::bail!("모르는 동작이에요: {other}"),
             }

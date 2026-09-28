@@ -202,6 +202,8 @@ pub struct Gate {
     live: Arc<Mutex<HashMap<u64, (String, Arc<Uplink>)>>>,
     /// 기기 id → 로그인 기록.
     devices: Arc<Mutex<HashMap<String, DeviceRec>>>,
+    /// 관문 계정 → 그 계정 기기들이 올린 코딩 에이전트 계정 목록(`agent_accounts.rs`).
+    agents: Arc<Mutex<HashMap<String, crate::agent_accounts::Book>>>,
     accounts: Arc<crate::relay_auth::Accounts>,
     limiter: Arc<crate::relay_auth::Limiter>,
     state_path: Option<PathBuf>,
@@ -220,6 +222,8 @@ struct StateFile {
     slugs: HashMap<String, SlugRec>,
     #[serde(default)]
     devices: HashMap<String, DeviceRec>,
+    #[serde(default)]
+    agent_accounts: HashMap<String, crate::agent_accounts::Book>,
 }
 
 fn now_secs() -> u64 {
@@ -231,18 +235,24 @@ fn now_secs() -> u64 {
 
 /// v2(`{version, slugs:{slug:{key_hash,last_seen}}}`) 와 v1(slug→키 해시 평면 맵)을 둘 다 읽는다.
 /// 읽을 수 없는 파일은 옆으로 치워 두고 빈 채로 뜬다 — 조용히 덮어쓰면 묶음이 흔적 없이 사라진다.
-fn load_state(p: &std::path::Path, now: u64) -> (HashMap<String, SlugRec>, HashMap<String, DeviceRec>) {
+type Loaded = (
+    HashMap<String, SlugRec>,
+    HashMap<String, DeviceRec>,
+    HashMap<String, crate::agent_accounts::Book>,
+);
+
+fn load_state(p: &std::path::Path, now: u64) -> Loaded {
     let Ok(raw) = std::fs::read_to_string(p) else {
         return Default::default();
     };
-    let (slugs, devices) = if let Ok(v2) = serde_json::from_str::<StateFile>(&raw) {
-        (v2.slugs, v2.devices)
+    let (slugs, devices, agents) = if let Ok(v2) = serde_json::from_str::<StateFile>(&raw) {
+        (v2.slugs, v2.devices, v2.agent_accounts)
     } else if let Ok(v1) = serde_json::from_str::<HashMap<String, String>>(&raw) {
         let slugs = v1
             .into_iter()
             .map(|(slug, key_hash)| (slug, SlugRec { key_hash, last_seen: now }))
             .collect();
-        (slugs, HashMap::new())
+        (slugs, HashMap::new(), HashMap::new())
     } else {
         let aside = p.with_extension(format!("json.corrupt-{now}"));
         let _ = std::fs::rename(p, &aside);
@@ -253,7 +263,7 @@ fn load_state(p: &std::path::Path, now: u64) -> (HashMap<String, SlugRec>, HashM
         .into_iter()
         .filter(|(_, rec)| now.saturating_sub(rec.last_seen) < SLUG_RETENTION_SECS)
         .collect();
-    (slugs, devices)
+    (slugs, devices, agents)
 }
 
 impl Gate {
@@ -264,7 +274,7 @@ impl Gate {
     }
 
     pub fn with_accounts(state_path: Option<PathBuf>, accounts_path: Option<PathBuf>) -> Self {
-        let (keys, devices) = state_path
+        let (keys, devices, agents) = state_path
             .as_deref()
             .map(|p| load_state(p, now_secs()))
             .unwrap_or_default();
@@ -273,6 +283,7 @@ impl Gate {
             keys: Arc::new(Mutex::new(keys)),
             live: Arc::new(Mutex::new(HashMap::new())),
             devices: Arc::new(Mutex::new(devices)),
+            agents: Arc::new(Mutex::new(agents)),
             accounts: Arc::new(crate::relay_auth::Accounts::new(accounts_path)),
             limiter: Arc::new(crate::relay_auth::Limiter::default()),
             state_path,
@@ -285,7 +296,9 @@ impl Gate {
         let Some(p) = &self.state_path else { return };
         let slugs = self.keys.lock().map(|k| k.clone()).unwrap_or_default();
         let devices = self.devices.lock().map(|d| d.clone()).unwrap_or_default();
-        let body = serde_json::to_string_pretty(&StateFile { version: 2, slugs, devices }).unwrap_or_default();
+        let agent_accounts = self.agents.lock().map(|a| a.clone()).unwrap_or_default();
+        let body = serde_json::to_string_pretty(&StateFile { version: 2, slugs, devices, agent_accounts })
+            .unwrap_or_default();
         if let Err(e) = crate::relay_auth::write_private(p, &body) {
             eprintln!("[gateway] 상태 파일을 못 썼어요: {e}");
         }
@@ -400,6 +413,7 @@ pub fn router(gate: Gate) -> Router {
         .route("/relay/devices", get(devices_list))
         .route("/relay/logout", axum::routing::post(logout))
         .route("/relay/devices/{id}/revoke", axum::routing::post(revoke_device))
+        .route("/relay/agent-accounts", get(agent_accounts_get).post(agent_accounts_post))
         .route("/u/{slug}", any(need_slash))
         .route("/u/{slug}/", any(proxy_root))
         .route("/u/{slug}/{*rest}", any(proxy))
@@ -582,6 +596,66 @@ async fn revoke_device(
         return json_err(StatusCode::NOT_FOUND, "no_such_device");
     }
     axum::Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// 같은 관문 계정의 폐기 안 된 기기들(id → 이름).
+fn live_devices(gate: &Gate, account: &str) -> HashMap<String, String> {
+    gate.devices
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, d)| d.account == account && d.revoked_at.is_none())
+        .map(|(id, d)| (id.clone(), if d.label.is_empty() { id.clone() } else { d.label.clone() }))
+        .collect()
+}
+
+fn agent_accounts_reply(gate: &Gate, account: &str, me: &str) -> axum::response::Response {
+    let live = live_devices(gate, account);
+    let list = gate
+        .agents
+        .lock()
+        .unwrap()
+        .get(account)
+        .map(|book| crate::agent_accounts::view(book, &live, me))
+        .unwrap_or_default();
+    axum::Json(serde_json::json!({ "ok": true, "accounts": list })).into_response()
+}
+
+/// `GET /relay/agent-accounts` — 이 관문 계정의 기기들이 올린 코딩 에이전트 계정 목록.
+/// 자격증명은 없다 — 종류·신원·이름·어느 기기에 로그인돼 있나뿐.
+async fn agent_accounts_get(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let Some((me, d)) = gate.device_of(&headers) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    agent_accounts_reply(&gate, &d.account, &me)
+}
+
+/// `POST /relay/agent-accounts {accounts:[…]}` — 이 기기 몫을 갈아 끼우고 합친 목록을 돌려준다.
+async fn agent_accounts_post(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    let Some((me, d)) = gate.device_of(req.headers()) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024).await else {
+        return json_err(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large");
+    };
+    #[derive(serde::Deserialize)]
+    struct Body {
+        accounts: Vec<crate::agent_accounts::LocalAccount>,
+    }
+    let Ok(b) = serde_json::from_slice::<Body>(&bytes) else {
+        return json_err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let alive: std::collections::HashSet<String> = live_devices(&gate, &d.account).into_keys().collect();
+    {
+        let mut agents = gate.agents.lock().unwrap();
+        let book = agents.entry(d.account.clone()).or_default();
+        crate::agent_accounts::prune(book, &alive);
+        if let Err(code) = crate::agent_accounts::publish(book, &me, &b.accounts, now_secs()) {
+            return json_err(StatusCode::BAD_REQUEST, code);
+        }
+    }
+    gate.persist();
+    agent_accounts_reply(&gate, &d.account, &me)
 }
 
 struct Hello {
@@ -1578,6 +1652,50 @@ mod tests {
         let later = std::time::SystemTime::now() + Duration::from_secs(2);
         let _ = std::fs::File::options().write(true).open(&p).and_then(|file| file.set_modified(later));
         assert_eq!(get_json(addr, "/relay/whoami", &second).await.0, 401, "막은 계정의 토큰이 통했다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn agent_account_lists_are_shared_per_relay_account_and_follow_revocation() {
+        let dir = std::env::temp_dir().join(format!("kasa-agents-{}", uuid::Uuid::new_v4()));
+        let addr = spawn_relay(account_gate(&dir)).await;
+        let login = |machine: &str, label: &str| {
+            serde_json::json!({"account":"geno","password":"correct horse","machine_id":machine,"label":label})
+        };
+        let mini = post(addr, "/relay/login", None, login("machine-mini-1", "미니")).await.1;
+        let book = post(addr, "/relay/login", None, login("machine-book-1", "맥북")).await.1;
+        let (mini_token, mini_id) = (mini["token"].as_str().unwrap(), mini["device_id"].as_str().unwrap());
+        let book_token = book["token"].as_str().unwrap();
+
+        let slots = serde_json::json!({ "accounts": [
+            {"provider":"claude","slot":"acct-1","email":"g@gmail.com","org":"g@gmail.com's Organization","label":"지메일"},
+            {"provider":"codex","slot":"codex-1","email":"r@s.ai","workspace":"ws-team","plan":"team","label":"사이오닉팀"},
+        ]});
+        assert_eq!(post(addr, "/relay/agent-accounts", None, slots.clone()).await.0, 401, "토큰 없이 목록을 올렸다");
+        assert_eq!(get_json(addr, "/relay/agent-accounts", "kdt_nope").await.0, 401);
+        let (status, v) = post(addr, "/relay/agent-accounts", Some(mini_token), slots).await;
+        assert_eq!(status, 200, "{v}");
+
+        let (_, seen) = post(addr, "/relay/agent-accounts", Some(book_token), serde_json::json!({"accounts": []})).await;
+        let list = seen["accounts"].as_array().unwrap();
+        assert_eq!(list.len(), 2, "{seen}");
+        let gmail = list.iter().find(|a| a["key"] == "claude:g@gmail.com").unwrap();
+        assert_eq!(gmail["label"], "지메일");
+        assert_eq!(gmail["devices"][0]["label"], "미니");
+        assert_eq!(gmail["devices"][0]["current"], false);
+        assert!(!seen.to_string().contains("kdt_"), "기기 토큰이 목록에 섞였다");
+
+        let bad = serde_json::json!({"accounts": [{"provider":"gemini","email":"x@y.z"}]});
+        assert_eq!(post(addr, "/relay/agent-accounts", Some(book_token), bad).await.0, 400);
+
+        let state = std::fs::read_to_string(dir.join("relay-state.json")).unwrap();
+        assert!(state.contains("claude:g@gmail.com"), "목록이 상태 파일에 안 남았다");
+        drop(state);
+
+        let (status, _) = post(addr, &format!("/relay/devices/{mini_id}/revoke"), Some(book_token), serde_json::json!({})).await;
+        assert_eq!(status, 200);
+        let (_, after) = get_json(addr, "/relay/agent-accounts", book_token).await;
+        assert_eq!(after["accounts"].as_array().unwrap().len(), 0, "폐기한 기기의 계정이 남았다: {after}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

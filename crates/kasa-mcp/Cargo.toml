@@ -61,3 +61,8 @@ path = "src/bin/serve_web.rs"
 [[bin]]
 name = "kasa-relay"
 path = "src/bin/relay.rs"
+
+# 앱 없이 이 기계를 관문 계정에 붙이고 코딩 에이전트 계정 목록을 나눈다(옛 판 앱·화면 없는 기기).
+[[bin]]
+name = "kasa-device"
+path = "src/bin/device.rs"

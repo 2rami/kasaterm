@@ -103,57 +103,12 @@ fn account_cmd(mut args: Vec<String>) -> anyhow::Result<()> {
 }
 
 fn read_new_password() -> anyhow::Result<String> {
-    let pw = read_password("새 비밀번호: ")?;
+    let pw = relay_auth::read_secret("새 비밀번호: ")?;
     if pw.chars().count() < 8 {
         anyhow::bail!("비밀번호는 8자 이상이어야 해요");
     }
-    if is_tty() && read_password("한 번 더: ")? != pw {
+    if relay_auth::stdin_is_tty() && relay_auth::read_secret("한 번 더: ")? != pw {
         anyhow::bail!("두 번 친 비밀번호가 달라요");
     }
     Ok(pw)
-}
-
-fn is_tty() -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::isatty(libc::STDIN_FILENO) == 1 }
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}
-
-/// 화면에 안 찍히게 한 줄을 읽는다. 터미널이 아니면(파이프) 그냥 읽는다.
-fn read_password(prompt: &str) -> anyhow::Result<String> {
-    use std::io::Write as _;
-    eprint!("{prompt}");
-    let _ = std::io::stderr().flush();
-    #[cfg(unix)]
-    let saved = if is_tty() {
-        unsafe {
-            let mut t: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0 {
-                let old = t;
-                t.c_lflag &= !libc::ECHO;
-                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
-                Some(old)
-            } else {
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let mut line = String::new();
-    let read = std::io::stdin().read_line(&mut line);
-    #[cfg(unix)]
-    if let Some(old) = saved {
-        unsafe {
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &old);
-        }
-        eprintln!();
-    }
-    read?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }

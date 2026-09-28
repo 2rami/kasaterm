@@ -237,6 +237,51 @@ impl Limiter {
     }
 }
 
+pub fn stdin_is_tty() -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::isatty(libc::STDIN_FILENO) == 1 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// 화면에 안 찍히게 한 줄을 읽는다. 터미널이 아니면(파이프) 그냥 읽는다.
+pub fn read_secret(prompt: &str) -> anyhow::Result<String> {
+    use std::io::Write as _;
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    #[cfg(unix)]
+    let saved = if stdin_is_tty() {
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0 {
+                let old = t;
+                t.c_lflag &= !libc::ECHO;
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
+                Some(old)
+            } else {
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line);
+    #[cfg(unix)]
+    if let Some(old) = saved {
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &old);
+        }
+        eprintln!();
+    }
+    read?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

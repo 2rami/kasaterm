@@ -21,6 +21,7 @@ pub mod feedback;
 pub mod feedback_client;
 pub mod relay_auth;
 pub mod device_auth;
+pub mod agent_accounts;
 pub mod remote;
 pub mod remote_restore;
 pub mod surface_keys;
