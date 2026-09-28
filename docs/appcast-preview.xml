@@ -1,9 +1,16 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" standalone="yes"?>
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
-  <channel>
-    <title>kasaterm Preview (macOS)</title>
-    <link>https://github.com/2rami/kasaterm</link>
-    <description>Opt-in macOS preview updates.</description>
-    <language>ko</language>
-  </channel>
+    <channel>
+        <title>kasaterm</title>
+        <item>
+            <title>0.2.2</title>
+            <pubDate>Mon, 28 Sep 2026 07:26:25 +0000</pubDate>
+            <link>https://github.com/2rami/kasaterm</link>
+            <sparkle:version>0.2.2</sparkle:version>
+            <sparkle:shortVersionString>0.2.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/2rami/kasaterm/releases/download/v0.2.2/kasaterm-v0.2.2.dmg" length="93739266" type="application/octet-stream" sparkle:edSignature="eWkVPAAdjF2L4+vEaTJTA9Ll9ae06yZhpk4k/zEHZXlrYn4AFcGSx8jShcAidQNHnNn46WuvI4PjkUqwCmBSBA=="/>
+        </item>
+    </channel>
 </rss>
