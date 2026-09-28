@@ -7521,6 +7521,9 @@ pub fn spawn_http_server_opts(
                     // 폰 푸시 — 학생 상태 변화(대기·끝냄)를 보고 쏜다. 기계 캐시를 합쳐
                     // 보므로 순환 이유로 본체 한정.
                     tokio::spawn(crate::push::push_loop());
+                    // KASA-share — 결과물 폴더를 기기끼리 맞춘다. 두 벌이 같은 폴더를 돌리면
+                    // 서로의 판을 새 고침으로 읽으므로 본체 한정.
+                    tokio::spawn(crate::share::run());
                 }
                 // 업링크 — 관문에 붙어 폰 주소를 살린다(uplink.rs). 되쏘는 곳은 전용 입구다.
                 let uplink_ingress = uplink_ingress.and_then(|l| {
@@ -7762,6 +7765,9 @@ pub fn spawn_http_server_opts(
                     }))
                     .route("/term/tree", get(term_tree_get))
                     .route("/term/file", get(term_file_get))
+                    .route("/term/share/manifest", get(crate::share::serve::manifest))
+                    .route("/term/share/file", get(crate::share::serve::file))
+                    .route("/term/share/list", get(crate::share::serve::list))
                     .route(
                         "/term/shot",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {

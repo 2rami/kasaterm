@@ -169,6 +169,11 @@ fn run() -> Result<Option<Response>> {
         writeln!(f, "{line}")?;
         return Ok(None);
     }
+    // `share` — KASA-share 결과물 폴더. 앱을 안 거친다: 폴더를 만들고 상태 파일을 읽을
+    // 뿐이라 앱이 꺼져 있어도 되고, 옮기는 일은 앱이 다음 훑기에 한다.
+    if cmd == "share" {
+        return run_share(&args);
+    }
     // `nacho-report` — 나쵸가 띄운 학생의 구조화 보고. 나쵸가 이 기계에 살면 소켓을
     // 안 거치고 인박스 파일에 바로 놓는다(앱이 꺼져 있어도 남고, 옛 앱이라도 된다).
     // 나쵸가 다른 기계면 앱(소켓)이나 --api 로 그 기계까지 넘긴다.
@@ -1385,6 +1390,94 @@ fn draw_boxes(rects: &[(String, u16, u16, u16, u16)]) -> String {
         .join("\n")
 }
 
+fn share_local_date() -> String {
+    #[cfg(unix)]
+    {
+        let now = unsafe { libc::time(std::ptr::null_mut()) };
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::localtime_r(&now, &mut tm) };
+        format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+    }
+    #[cfg(windows)]
+    {
+        let t = unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime() };
+        format!("{:04}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay)
+    }
+}
+
+/// 폴더 이름에 못 쓰는 글자를 `-` 로. 윈도우에서도 같은 이름이어야 옮겨진다.
+fn share_topic(words: &[String]) -> String {
+    let raw = words.join(" ");
+    let clean: String = raw
+        .chars()
+        .map(|c| if c < ' ' || "/\\<>:\"|?*".contains(c) { '-' } else { c })
+        .collect();
+    clean.trim().trim_matches('.').trim().to_string()
+}
+
+fn run_share(args: &[String]) -> Result<Option<Response>> {
+    let root = kasa_socket::share_dir().ok_or_else(|| anyhow!("홈 폴더를 못 찾았다"))?;
+    let status: Value = std::fs::read_to_string(root.join(".kasaterm").join("status.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(Value::Null);
+    // 사람에게 보일 경로는 바탕화면 링크 쪽 — 파인더에서 그 이름으로 보인다.
+    let shown = status["desktop_link"]
+        .as_str()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| root.clone());
+    match args.first().map(String::as_str).unwrap_or("path") {
+        "path" => println!("{}", shown.display()),
+        "new" => {
+            let topic = share_topic(&args[1..]);
+            if topic.is_empty() {
+                return Err(anyhow!("share new <주제> — 주제가 필요하다"));
+            }
+            let name = format!("{}-{topic}", share_local_date());
+            std::fs::create_dir_all(root.join(&name))?;
+            println!("{}", shown.join(&name).display());
+        }
+        "status" => {
+            if status.is_null() {
+                println!("KASA-share: 아직 안 돌았다 — 새 판 카사텀이 켜져 있어야 한다 ({})", root.display());
+                return Ok(None);
+            }
+            let ago = kasa_socket::board::now_ms().saturating_sub(status["updated_ms"].as_u64().unwrap_or(0)) / 1000;
+            println!(
+                "KASA-share {} · 파일 {}개 · {}초 전 갱신",
+                shown.display(),
+                status["files"].as_u64().unwrap_or(0),
+                ago
+            );
+            for p in status["peers"].as_array().into_iter().flatten() {
+                let state = if p["ok"] == true {
+                    format!("맞춤 (이번에 {}개)", p["pulled"].as_u64().unwrap_or(0))
+                } else {
+                    p["error"].as_str().unwrap_or("실패").to_string()
+                };
+                println!("  {} — {state}", p["label"].as_str().unwrap_or("?"));
+            }
+            let paused = status["paused_deletes"].as_u64().unwrap_or(0);
+            if paused > 0 {
+                println!("  삭제 {paused}개를 멈췄다 — 한꺼번에 많이 사라졌다. 맞으면 `kasaterm-cli share accept-deletes`");
+            }
+            for (key, what) in [("too_big", "1GB 넘어 이 기기에만"), ("skipped", "이 기기에 둘 수 없는 이름")] {
+                for p in status[key].as_array().into_iter().flatten() {
+                    println!("  {what}: {}", p.as_str().unwrap_or(""));
+                }
+            }
+        }
+        "accept-deletes" => {
+            std::fs::create_dir_all(root.join(".kasaterm"))?;
+            std::fs::write(root.join(".kasaterm").join("accept-deletes"), b"")?;
+            println!("다음 훑기에 멈춘 삭제를 퍼뜨린다");
+        }
+        other => return Err(anyhow!("share {other}? — path | new <주제> | status | accept-deletes")),
+    }
+    Ok(None)
+}
+
 fn print_help() {
     eprintln!("cmux-compatible JSON-RPC CLI for kasaterm / agent-socket\n");
     eprintln!("Usage:");
@@ -1472,6 +1565,7 @@ fn print_help() {
     eprintln!("  app-update run --approval ap_… --rollout FILE [--record FILE] · start --machine ID --request FILE|- · status JOB [--machine ID] # 기기 앱 업데이트(공식 릴리스만·나쵸 승인 1회·차례로·조종 기기 마지막·기기 스위치 KASATERM_APP_UPDATE=on)");
     eprintln!("  app-restart plan [--machine ID]… [--json] # 등록된 기기의 앱 재시작 계획(읽기만). run --approval ap_… 는 나쵸 승인을 서버에서 한 번 소비한 뒤 한 대씩 · status JOB");
     eprintln!("  kasaterm-cli agent-status <start|end|clear> <subagent|background> [key] [라벨]  # 진행 표시 정본(PreToolUse/PostToolUse 훅)");
+    eprintln!("  kasaterm-cli share path|new <주제>|status|accept-deletes  # KASA-share 결과물 폴더. new 는 <날짜>-<주제>/ 를 만들고 경로를 찍는다");
     eprintln!("  kasaterm-cli pet-say [--from <곳>] [--state busy|wait|error] <문안>  # 바탕화면 펫에게 한 줄(앱이 꺼져 있어도 쌓인다)");
     eprintln!("  kasaterm-cli sessions [N]                 # 최근 claude 세션 목록(캐릭터색·캐릭터명, /resume 이 숨기는 팀 세션 포함)");
     eprintln!("  kasaterm-cli resume [N]                   # 위 목록에서 번호로 골라 그 자리에서 claude --resume");

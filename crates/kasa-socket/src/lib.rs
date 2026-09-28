@@ -60,6 +60,15 @@ pub fn home_dir() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// KASA-share 실폴더. 바탕화면 `KASA-share` 는 이곳을 가리키는 링크일 뿐이다 — 바탕화면을
+/// 실폴더로 두면 iCloud 바탕화면 동기화와 겹친다. 검증 리그는 `KASATERM_SHARE_DIR` 로 옮긴다.
+pub fn share_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("KASATERM_SHARE_DIR").filter(|v| !v.is_empty()) {
+        return Some(dir.into());
+    }
+    Some(home_dir()?.join(".config").join("kasaterm").join("share"))
+}
+
 /// collab 마커·메시지 루트. unix 는 `/tmp/kasaterm-collab` 리터럴 유지 — sh 훅·
 /// statusline 등 스크립트가 같은 리터럴을 참조한다. Windows 는 `%TEMP%` 기준 —
 /// Git bash 가 `/tmp` 를 `%TEMP%` 로 마운트하므로 스크립트와 같은 디렉토리로 만난다.

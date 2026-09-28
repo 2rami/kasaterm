@@ -50,6 +50,7 @@ pub mod uplink;
 pub mod gateway;
 pub mod remoteboard;
 pub mod reposync;
+pub mod share;
 mod resume_visibility;
 pub mod standalone;
 pub mod team;
