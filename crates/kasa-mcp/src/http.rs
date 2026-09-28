@@ -7786,6 +7786,7 @@ pub fn spawn_http_server_opts(
                     .route("/term/file", get(term_file_get))
                     .route("/term/share/manifest", get(crate::share::serve::manifest))
                     .route("/term/share/file", get(crate::share::serve::file))
+                    .route("/term/share/f/{*path}", get(crate::share::serve::file_at))
                     .route("/term/share/list", get(crate::share::serve::list))
                     .route(
                         "/term/shot",

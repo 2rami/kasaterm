@@ -81,7 +81,7 @@ pub fn kind(path: &str) -> &'static str {
         "md" | "markdown" => "markdown",
         "html" | "htm" => "html",
         "txt" | "log" | "json" | "csv" | "tsv" | "yaml" | "yml" | "toml" | "xml" | "rs" | "py"
-        | "js" | "ts" | "dart" | "sh" | "swift" | "kt" | "go" | "java" | "c" | "h" | "cpp" => "text",
+        | "js" | "ts" | "dart" | "sh" | "swift" | "kt" | "go" | "java" | "c" | "h" | "cpp" | "css" => "text",
         "pdf" => "pdf",
         "mp4" | "mov" | "webm" | "m4v" => "video",
         "mp3" | "wav" | "m4a" | "aac" | "ogg" | "flac" => "audio",
@@ -102,6 +102,9 @@ pub fn content_type(path: &str) -> &'static str {
         "md" | "markdown" => "text/markdown; charset=utf-8",
         "html" | "htm" => "text/html; charset=utf-8",
         "json" => "application/json",
+        // nosniff 를 달아 두었으니 형식이 틀리면 브라우저가 html 시안의 스타일을 버린다.
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
         "pdf" => "application/pdf",
         "mp4" | "m4v" => "video/mp4",
         "mov" => "video/quicktime",
@@ -166,5 +169,6 @@ mod tests {
         assert_eq!(kind("readme.md"), "markdown");
         assert_eq!(kind("x.svg"), "other");
         assert_eq!(content_type("x.rs"), "text/plain; charset=utf-8");
+        assert_eq!(content_type("a/style.CSS"), "text/css; charset=utf-8");
     }
 }
