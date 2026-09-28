@@ -5467,6 +5467,22 @@ impl App {
                 true
             };
 
+        if mode == "open" {
+            let summary = self.aux_probe_summary();
+            let Some(index) = index_for(&summary, &doc1) else { return };
+            let capture = cap_dir.join("opened-document.png");
+            if step == 0 {
+                if !self.aux_capture(index, capture.to_string_lossy().into_owned()) {
+                    return;
+                }
+                STEP.store(1, Ordering::Relaxed);
+            } else if capture.is_file() {
+                eprintln!("[viewere2e] OPEN {}", summary[index]);
+                event_loop.exit();
+            }
+            return;
+        }
+
         if mode == "design" {
             if self.aux_probe_ids().len() != 1 {
                 return;

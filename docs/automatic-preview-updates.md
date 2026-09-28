@@ -55,6 +55,10 @@ python3 -m tools.release.auto --state-dir /절대/상태폴더 observe
 
 이 동작을 지원하는 앱을 처음 한 번 전달해야 한다. 이후 정식 설치본은 시작할 때와 주기적으로 `https://2rami.github.io/kasaterm/appcast-preview.xml`을 확인한다. 다운로드·서명 검증이 끝난 새 판만 다음 정상 종료 때 설치된다. 다운로드가 끝나기 전에 종료하면 그 종료에서 적용된다고 보장할 수 없다.
 
+최초 전달은 `python3 -m tools.release.bootstrap stage --app <설치본> --source <검증한 새 번들> --expected-machine <기기 id> --expected-sha256 <실행파일 SHA-256> --expected-version <버전>`으로 준비한다. 이 단계는 실행 중인 설치본을 바꾸지 않는다. 반환된 id를 `arm --plan <id> --python <Desktop 밖의 절대 Python 경로>`에 주면 전용 LaunchAgent가 프로세스 종료를 기다린다.
+
+기기 id·bundle id·실행파일명·버전·서명 팀·해시를 다시 확인하고 macOS 원자 교환으로 두 번들을 바꾼다. 이전 번들은 전용 backup으로 보존하며 앱을 강제 종료하거나 재실행하지 않는다. `status --plan <id>`로 설치 여부를 확인한다. 등록 응답이 불확실하면 새 helper를 중복 등록하지 않고, `rollback_required`는 원본과 신규 번들을 보존한 채 운영자가 확인한다. Kasaterm의 정상 종료 후에만 위 두 설정을 기존 설정에 병합한다. Viewer만 갱신할 때는 공통 설정을 바꾸지 않는다.
+
 preview 자동 설치를 시작한 프로세스에서는 Sparkle이 설치를 전담한다. 로컬 dist 자기설치와 기존 원격 app-update 도우미를 함께 실행하지 않는다. 개발 실행·격리 검증·Lite는 이 자동 설치를 켜지 않는다. 기본 stable 사용자는 기존 업데이트 선택을 유지한다.
 
 ## 안정판 보호
