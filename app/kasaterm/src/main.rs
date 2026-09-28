@@ -7061,6 +7061,7 @@ fn install_pane_shims(lite: bool) {
     // pane 마다 rust-analyzer 가 하나씩 뜨던 것을 하나로 모은다(ra-multiplex 가
     // 있을 때만 — 없으면 shim 이 진짜를 그대로 exec 한다).
     install_rust_analyzer_shim(&shim_dir);
+    install_tmux_swarm_shim(&shim_dir);
     // 학생 이름 자체를 명령으로(`시로코`/`shiroko`) — 이 pane 을 그 학생으로
     // 재배정하고 하네스(claude 기본, `시로코 codex`)를 띄운다. characters.json
     // 기준 부팅 1회 생성.
@@ -7231,6 +7232,48 @@ exec "$MUX" client --server-path "$REAL" "$@"
     if let Err(e) = write_shim(&path, body) {
         eprintln!("[shim] write rust-analyzer failed: {e}");
     }
+}
+
+/// Claude Code 팀원 창을 이 앱의 pane 으로 세운다. teammateMode=tmux 인 claude 는 tmux 밖이면
+/// `tmux -L claude-swarm-<pid>` 로 전용 서버를 띄워 팀원을 거기 숨기고, 사람은 그 서버에 따로
+/// attach 해야 보였다(2026-09-28). 그 소켓 호출만 `kasaterm-tmux-swarm.py` 로 보내고 나머지는
+/// 진짜 tmux 로 넘긴다. `$TMUX` 는 여전히 안 건다 — 그게 truecolor 를 깨서 6월에 위장을 걷었다.
+fn install_tmux_swarm_shim(shim_dir: &std::path::Path) {
+    if cfg!(windows) {
+        return;
+    }
+    let Some(hooks) = locate_collab_hooks_dir() else {
+        return;
+    };
+    let body = tmux_swarm_shim(&hooks.join("kasaterm-tmux-swarm.py"));
+    if let Err(e) = write_shim(&shim_dir.join("tmux"), body) {
+        eprintln!("[shim] write tmux failed: {e}");
+    }
+}
+
+fn tmux_swarm_shim(script: &std::path::Path) -> String {
+    r#"#!/bin/sh
+# kasaterm tmux shim — Claude Code 팀원 서버(`-L claude-swarm-<pid>`)만 kasaterm pane 으로
+# 옮기고 나머지는 진짜 tmux 로 넘긴다. 번역기나 python3 가 없으면 예전처럼 숨은 서버로 간다.
+case "$1 $2" in
+"-L claude-swarm-"*) [ -f __SCRIPT__ ] && command -v python3 >/dev/null 2>&1 && exec python3 __SCRIPT__ "$@" ;;
+esac
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | grep -vE '(^|/)kasaterm-shim-[0-9]+/?$' | paste -sd: -)
+REAL=$(PATH="$CLEAN_PATH" command -v tmux 2>/dev/null)
+while [ -n "$REAL" ] && [ "$REAL" -ef "$0" ]; do
+  CLEAN_PATH=$(printf '%s' "$CLEAN_PATH" | tr ':' '\n' | grep -vxF "$(dirname -- "$REAL")" | paste -sd: -)
+  REAL=$(PATH="$CLEAN_PATH" command -v tmux 2>/dev/null)
+done
+if [ -z "$REAL" ]; then
+  # 진짜 tmux 가 없는 기계에서도 팀원이 pane 으로 선다 — claude 는 `tmux -V` 로 있는지만 본다.
+  [ "$1" = "-V" ] && { echo "tmux 3.5 (kasaterm)"; exit 0; }
+  echo "tmux: command not found" >&2
+  exit 127
+fi
+exec "$REAL" "$@"
+"#
+    .replace("__SCRIPT__", &shell_quote_path(&script.to_string_lossy()))
 }
 
 fn install_preview_shims(shim_dir: &std::path::Path) {
@@ -10941,5 +10984,44 @@ mod tests {
             write_shim(p, other).unwrap();
         });
         assert_eq!(atomic, "OK", "rename 으로 갈았는데도 실행 중 셰임이 깨졌다");
+    }
+
+    /// 팀원 소켓만 번역기로, 나머지 tmux 는 진짜로. 번역기로 새면 사람이 쓰는 tmux 가 망가지고,
+    /// 셰임이 자기를 진짜로 착각하면 자기를 끝없이 부른다.
+    #[cfg(unix)]
+    #[test]
+    fn tmux_shim_routes_only_the_teammate_socket() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-tmux-shim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (shim, bin) = (dir.join("kasaterm-shim-1"), dir.join("bin"));
+        std::fs::create_dir_all(&shim).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = dir.join("kasaterm-tmux-swarm.py");
+        write_shim(&shim.join("tmux"), tmux_swarm_shim(&script)).unwrap();
+        for (name, tag) in [("python3", "swarm"), ("tmux", "real")] {
+            write_shim(&bin.join(name), format!("#!/bin/sh\necho {tag} \"$@\"\n")).unwrap();
+        }
+        let path = format!("{}:{}:/usr/bin:/bin", shim.display(), bin.display());
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new(shim.join("tmux"))
+                .args(args)
+                .env("PATH", &path)
+                .output()
+                .unwrap();
+            (out.status.code(), String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        // 번역기가 없는 판(예: 스크립트 없이 구운 번들)이면 팀원이 깨지는 대신 예전 길로 간다.
+        assert_eq!(run(&["-L", "claude-swarm-42", "has-session"]).1, "real -L claude-swarm-42 has-session");
+        std::fs::write(&script, "").unwrap();
+        let (_, out) = run(&["-L", "claude-swarm-42", "has-session"]);
+        assert_eq!(out, format!("swarm {} -L claude-swarm-42 has-session", script.display()));
+        assert_eq!(run(&["-L", "mine", "ls"]).1, "real -L mine ls");
+        assert_eq!(run(&["-V"]).1, "real -V");
+        std::fs::remove_file(bin.join("tmux")).unwrap();
+        if !["/usr/bin/tmux", "/bin/tmux"].iter().any(|p| std::path::Path::new(p).exists()) {
+            assert_eq!(run(&["-V"]), (Some(0), "tmux 3.5 (kasaterm)".to_string()));
+            assert_eq!(run(&["ls"]).0, Some(127));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
