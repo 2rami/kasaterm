@@ -23,6 +23,8 @@ CI의 피드 push만으로는 GitHub Pages가 다시 빌드되지 않는다. app
 
 controller는 Mac 한 대다. 소스와 상태, LFS 캐시는 Desktop·Documents·Downloads 밖에 둔다. 상시 정책 파일은 저장소 밖의 소유자 전용 0600 파일이고 저장소·기계 id·preview 피드·Mac·현재 minor의 패치 증가·서명 팀·공증 프로필·LFS 경로에 결속된다.
 
+직렬 controller는 상태 폴더의 0700 `target/`에 컴파일 캐시를 재사용한다. 계획별 소스·검사 결과·서명 산출물은 계속 분리하며, 새 커밋의 검증을 캐시가 대신하지 않는다.
+
 ```sh
 python3 -m tools.release.auto --state-dir /절대/상태폴더 enable \
   --controller 기계_ID --minor 0.2 \

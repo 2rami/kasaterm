@@ -98,10 +98,11 @@ def ed25519_ok(runner, openssl, public_b64, signature_b64, path, scratch):
 
 
 class RealBackend:
-    def __init__(self, repo, runner, http, workdir, tracker, tools, slug=REPO_SLUG, remote="origin", unlock=False):
+    def __init__(self, repo, runner, http, workdir, tracker, tools, slug=REPO_SLUG, remote="origin", unlock=False, cargo_target=None):
         self.repo, self.runner, self.http, self.workdir = Path(repo), runner, http, Path(workdir)
         self.tracker, self.tools, self.slug, self.remote = tracker, tools, slug, remote
         self.unlock = unlock
+        self.cargo_target = Path(cargo_target) if cargo_target is not None else self.workdir / "target"
 
     def tool(self, name):
         """계획에 못 박힌 절대경로. 없으면 그 도구가 왜 없는지 그대로 말하고 멈춘다."""
@@ -123,7 +124,7 @@ class RealBackend:
                                env={**deps.git_env(self.tools), **(extra or {})})
 
     def env(self):
-        return {**deps.tool_env(self.tools, ("cargo", "git-lfs", "gh")), "CARGO_TARGET_DIR": str(self.workdir / "target")}
+        return {**deps.tool_env(self.tools, ("cargo", "git-lfs", "gh")), "CARGO_TARGET_DIR": str(self.cargo_target)}
 
     # ── 원격 상태 ─────────────────────────────────────────────────────────
     def remote_ref(self, ref):

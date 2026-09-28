@@ -158,6 +158,24 @@ class PolicyFixture(unittest.TestCase):
         self.assertEqual(set(self.config), policy.FIELDS)
         self.assertEqual(policy.load(self.root), self.config)
 
+    def test_serialized_plans_share_private_compile_cache_not_plan_artifacts(self):
+        engine = auto.Engine(self.root)
+        one = {**plan_for(self.config), "tools": {}}
+        two = {**plan_for(self.config, B), "tools": {}}
+        dry = engine.backend(one, "dry", self.config)
+        self.assertFalse((self.root / "target").exists())
+        first = engine.backend(one, "local", self.config)
+        second = engine.backend(two, "local", self.config)
+        self.assertEqual(first.env()["CARGO_TARGET_DIR"], second.env()["CARGO_TARGET_DIR"])
+        self.assertEqual(dry.env()["CARGO_TARGET_DIR"], first.env()["CARGO_TARGET_DIR"])
+        self.assertNotEqual(first.workdir, second.workdir)
+        self.assertEqual((self.root / "target").stat().st_mode & 0o777, 0o700)
+
+    def test_publisher_refuses_a_symlink_compile_cache(self):
+        (self.root / "target").symlink_to(self.lfs, target_is_directory=True)
+        with self.assertRaises(Refused):
+            auto.Engine(self.root).backend({**plan_for(self.config), "tools": {}}, "local", self.config)
+
     def test_controller_identity_ignores_inherited_home_and_pane_environment(self):
         account = mock.Mock(pw_dir=str(self.root))
         machine = self.root / ".config/kasaterm/machine-id"

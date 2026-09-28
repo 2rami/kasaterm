@@ -228,8 +228,13 @@ class Engine:
         return fastpatch.load(plan_id, self.plans)
 
     def backend(self, plan, mode, config):
+        # Publisher ticks are serialized; shared dependency outputs avoid a
+        # full cold rebuild for every patch without reusing verification evidence.
+        target = self.root / "target"
+        if mode != "dry" or target.exists():
+            target = policy.private_dir(target, create=mode != "dry")
         return RealBackend(self.repo, Runner(mode), Http(), fastpatch.plan_dir(plan["plan_id"], self.plans) / "work",
-                           lambda _plan, _state: {}, plan["tools"], unlock=config["unlock_signing"])
+                           lambda _plan, _state: {}, plan["tools"], unlock=config["unlock_signing"], cargo_target=target)
 
     def facts(self, plan, config):
         backend = self.backend(plan, "dry", config)
