@@ -7452,6 +7452,12 @@ pub(crate) fn codex_thread_names(sids: &[String]) -> HashMap<String, String> {
 /// `lsof`가 없는 플랫폼/환경의 보조 경로. fresh thread의 rollout_path에는 현재
 /// pane 전용 CODEX_HOME이 남으므로 같은 cwd의 다른 pane을 섞지 않는다. resume 뒤
 /// 이 열이 옛 shim 경로로 남는 경우가 있어 Unix에서는 반드시 lsof를 먼저 쓴다.
+///
+/// app-server 데몬을 거치는 TUI(codex 0.157 무렵부터)는 rollout 을 데몬이 쥐어 TUI
+/// pid 의 lsof 에 안 잡히고 thread 출처도 `vscode` 로 적힌다. 그래서 새로 띄운 codex
+/// pane 은 이 길로만 묶이는데 `cli` 만 보면 영영 못 묶는다(2026-09-28: 09-27 이후
+/// `cli` 행이 0 이라 codex pane 이 보드에 세션 없이 떠 tell 이 거부됐다). 다른 IDE 의
+/// `vscode` 행은 pane 홈 밖이라 아래 in_home 검사에서 빠진다.
 fn codex_rollout_from_state_db(pane_id: &str) -> Option<std::path::PathBuf> {
     let shim = std::env::var_os("KASATERM_TMUX_SHIM_DIR").map(std::path::PathBuf::from)?;
     codex_rollout_from_state_db_at(&codex_state_db_path()?, &shim, pane_id)
@@ -7473,7 +7479,7 @@ fn codex_rollout_from_state_db_at(
     let mut stmt = conn
         .prepare(
             "SELECT id, rollout_path, updated_at FROM threads \
-             WHERE source = 'cli' AND archived = 0 \
+             WHERE source IN ('cli', 'vscode') AND archived = 0 \
              ORDER BY updated_at DESC, id DESC",
         )
         .ok()?;
@@ -7866,7 +7872,8 @@ mod codex_session_lookup_tests {
         let child = "01900000-0000-7000-8000-000000000101";
         let stale = "01900000-0000-7000-8000-000000000099";
         let path_a = rollout(&home_a, sid_a, sid_a, serde_json::json!("cli"));
-        let path_b = rollout(&home_b, sid_b, sid_b, serde_json::json!("cli"));
+        // %2 는 app-server 데몬을 거친 TUI — thread 출처가 `vscode` 로 적힌다.
+        let path_b = rollout(&home_b, sid_b, sid_b, serde_json::json!("vscode"));
         let stale_path = rollout(&home_a, stale, stale, serde_json::json!("cli"));
         let child_path = rollout(
             &home_a,
@@ -7900,7 +7907,7 @@ mod codex_session_lookup_tests {
             .unwrap()
             .as_secs() as i64;
         insert(sid_a, &path_a, now - 2, "cli");
-        insert(sid_b, &path_b, now - 1, "cli");
+        insert(sid_b, &path_b, now - 1, "vscode");
         insert(child, &child_path, now, r#"{"subagent":{}}"#);
         insert(stale, &stale_path, now - 120, "cli");
         assert_eq!(
