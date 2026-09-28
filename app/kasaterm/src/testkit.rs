@@ -1535,6 +1535,205 @@ impl App {
         );
     }
 
+    pub(crate) fn run_button_focus_probe(&mut self, event_loop: &ActiveEventLoop) {
+        use crate::native_settings::Target;
+        use std::sync::{OnceLock, atomic::{AtomicBool, Ordering}};
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        use winit::keyboard::NamedKey;
+        if !crate::verification_run()
+            || std::env::var("KASATERM_BUTTON_FOCUS_PROBE").as_deref() != Ok("1") { return; }
+        static STARTED: OnceLock<Instant> = OnceLock::new();
+        static DONE: AtomicBool = AtomicBool::new(false);
+        if DONE.load(Ordering::Relaxed) || STARTED.get_or_init(Instant::now).elapsed().as_millis() < 2200 { return; }
+        DONE.store(true, Ordering::Relaxed);
+        let temporary = |key: &str| std::env::var_os(key)
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .is_some_and(|path| path.starts_with("/private/tmp") || path.starts_with("/tmp"));
+        if !["KASATERM_SETTINGS_FILE", "KASATERM_SESSION_FILE", "KASATERM_SOCKET_PATH", "TMPDIR"]
+            .iter().all(|key| temporary(key)) || std::env::var_os("KASATERM_AUTOQUIT_MS").is_none() {
+            eprintln!("[button-focus-probe] FAIL: scratch files/socket/tmp and automatic exit required");
+            return;
+        }
+        let Some(window_id) = self.window.as_ref().map(|window| window.id()) else { return };
+        let mut failures = 0;
+        let mut checks = 0;
+        let mut check = |ok: bool, label: &str| {
+            checks += 1;
+            if !ok { failures += 1; }
+            eprintln!("[button-focus-probe] {} {label}", if ok { "PASS" } else { "FAIL" });
+        };
+        let repaint = |app: &mut Self| { app.chrome_dirty = true; app.render_frame(); };
+        let center = |rect: (f32, f32, f32, f32)| (rect.0 + rect.2 * 0.5, rect.1 + rect.3 * 0.5);
+        let move_to = |app: &mut Self, point: (f32, f32)| {
+            let scale = app.effective_scale() as f64;
+            app.window_event(event_loop, window_id, WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: winit::dpi::PhysicalPosition::new(point.0 as f64 * scale, point.1 as f64 * scale),
+            });
+        };
+        let press = |app: &mut Self, button| {
+            for state in [ElementState::Pressed, ElementState::Released] {
+                app.window_event(event_loop, window_id, WindowEvent::MouseInput {
+                    device_id: DeviceId::dummy(), state, button,
+                });
+            }
+        };
+        let click = |app: &mut Self, point, button| {
+            move_to(app, point);
+            press(app, button);
+        };
+        let target_hit = |app: &Self, target: &Target| app.settings_scene.hits().iter()
+            .find(|hit| &hit.target == target).cloned();
+        let target = Target::Setting(SettingsAction::ToggleCharacterAppearance);
+        let appearance_before = theme::character_appearance();
+        let zoom_before = self.ui_zoom;
+        let autohover_before = self.autohover.take();
+        if self.settings_room_active() { self.return_from_settings_room(); }
+        let Some(source) = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone()) else {
+            eprintln!("[button-focus-probe] FAIL: scratch terminal missing");
+            return;
+        };
+        let source_state = |app: &Self| app.ws.lock().ok().and_then(|ws| ws.panes.get(&source).map(|pane| {
+            (pane.tabs.len(), pane.active_tab, pane.header_override)
+        }));
+        let background_before = source_state(self);
+        let ptys_before = self.pty.len();
+
+        check(self.open_settings_room(Some(SettingsCat::Students)), "settings room opens");
+        repaint(self);
+        if let Some(hit) = target_hit(self, &target) {
+            let r = hit.rect;
+            for point in [(r.0 + r.2 + 2.0, r.1 + r.3 * 0.5), (r.0 + r.2 * 0.5, r.1 - 2.0)] {
+                click(self, point, MouseButton::Left);
+                check(theme::character_appearance() == appearance_before, "outside toggle does not activate it");
+            }
+            click(self, center(r), MouseButton::Left);
+            check(theme::character_appearance() != appearance_before, "physical pointer center activates visible toggle");
+            repaint(self);
+            if let Some(hit) = target_hit(self, &target) {
+                click(self, (hit.rect.0 + hit.rect.2 - 1.0, hit.rect.1 + hit.rect.3 * 0.5), MouseButton::Left);
+                check(theme::character_appearance() == appearance_before, "inside toggle edge activates exactly once");
+            }
+        } else { check(false, "visible appearance toggle has a hit"); }
+
+        // 실제 CursorMoved를 한 번만 준 뒤 배율을 바꿔, 낡은 논리 좌표로 클릭하는 회귀를 잡는다.
+        let next_zoom = if zoom_before < 1.25 { 1.5 } else { 1.0 };
+        self.change_ui_zoom(next_zoom - self.ui_zoom);
+        repaint(self);
+        let destination = target_hit(self, &target).map(|hit| center(hit.rect));
+        let next_scale = self.effective_scale();
+        self.change_ui_zoom(zoom_before - self.ui_zoom);
+        repaint(self);
+        if let Some(point) = destination {
+            self.window_event(event_loop, window_id, WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: winit::dpi::PhysicalPosition::new(point.0 as f64 * next_scale as f64, point.1 as f64 * next_scale as f64),
+            });
+            self.change_ui_zoom(next_zoom - self.ui_zoom);
+            repaint(self);
+            check((self.cursor_px.0 - point.0).abs() < 0.1 && (self.cursor_px.1 - point.1).abs() < 0.1,
+                "stationary pointer is reprojected after zoom");
+            let before = theme::character_appearance();
+            press(self, MouseButton::Left);
+            check(theme::character_appearance() != before, "stationary pointer clicks the new visible position");
+        } else { check(false, "zoomed toggle has a hit"); }
+        self.change_ui_zoom(zoom_before - self.ui_zoom);
+        repaint(self);
+
+        if let Some(rect) = self.status_version_rect {
+            self.statusbar.popover = None;
+            click(self, center(rect), MouseButton::Left);
+            check(matches!(self.statusbar.popover, Some((state::StatusbarPopover::Build, _))), "settings does not swallow visible statusbar click");
+            self.statusbar.popover = None;
+        } else { check(false, "version statusbar control is visible"); }
+
+        let body_point = target_hit(self, &target).map(|hit| center(hit.rect));
+        if let Some(point) = body_point {
+            for button in [MouseButton::Right, MouseButton::Middle] {
+                click(self, point, button);
+                check(source_state(self) == background_before && self.pty.len() == ptys_before
+                    && self.handle_menu.is_none() && self.confirm_close.is_none(),
+                    "settings blocks background right and middle button actions");
+            }
+            self.confirm_close = Some(ConfirmClose {
+                why: CloseWhy::Busy("verification fixture".into()), action: PendingClose::Pane { pane: source.clone() },
+            });
+            repaint(self);
+            for button in [MouseButton::Right, MouseButton::Middle] {
+                click(self, point, button);
+                check(source_state(self) == background_before && self.pty.len() == ptys_before
+                    && self.handle_menu.is_none() && self.confirm_close.as_ref().is_some_and(|dialog|
+                        matches!(&dialog.action, PendingClose::Pane { pane } if pane == &source)),
+                    "modal blocks background right and middle button actions");
+            }
+            self.confirm_close = None;
+            self.confirm_btn_rects.clear();
+        } else { check(false, "settings body point available"); }
+        repaint(self);
+
+        self.settings_scene.set_keyboard_focus(None);
+        self.native_settings_control_key(NamedKey::Tab, false, false);
+        let first = self.settings_scene.keyboard_focus().cloned();
+        self.native_settings_control_key(NamedKey::Tab, false, false);
+        let second = self.settings_scene.keyboard_focus().cloned();
+        self.native_settings_control_key(NamedKey::Tab, true, false);
+        check(first.is_some() && first != second && self.settings_scene.keyboard_focus() == first.as_ref(),
+            "Tab and ShiftTab traverse and return to the same visible control");
+        for _ in 0..64 {
+            if self.settings_scene.keyboard_focus() == Some(&target) { break; }
+            self.native_settings_control_key(NamedKey::Tab, false, false);
+        }
+        check(self.settings_scene.keyboard_focus() == Some(&target) && self.settings_scene.keyboard_hit().is_some(),
+            "Tab reaches a real actionable appearance toggle");
+        let before_key = theme::character_appearance();
+        self.native_settings_control_key(NamedKey::Space, false, false);
+        check(theme::character_appearance() != before_key, "Space activates the focused control");
+        self.native_settings_control_key(NamedKey::Space, false, true);
+        check(theme::character_appearance() != before_key, "repeated Space does not double activate");
+        repaint(self);
+        self.native_settings_control_key(NamedKey::Enter, false, false);
+        check(theme::character_appearance() == before_key, "Enter activates the focused control");
+        self.native_settings_control_key(NamedKey::Enter, false, true);
+        check(theme::character_appearance() == before_key, "repeated Enter does not double activate");
+        self.settings_scene.set_category(SettingsCat::Appearance);
+        self.native_settings_control_key(NamedKey::Enter, false, false);
+        check(theme::character_appearance() == before_key && self.settings_scene.keyboard_hit().is_none(),
+            "category switch invalidates stale focus before the next paint");
+
+        self.settings_scene.toggle_disclosure("appearance");
+        repaint(self);
+        let palette_target = Target::Setting(SettingsAction::ThemeMode("graphite".into()));
+        if let Some(hit) = target_hit(self, &palette_target) {
+            let old_scroll = self.settings_scene.scroll();
+            let hidden_y = TITLE_HEIGHT + 16.0;
+            let delta = center(hit.layout_rect).1 - hidden_y;
+            self.settings_scene.scroll_by(delta);
+            repaint(self);
+            let actual_scroll = self.settings_scene.scroll() - old_scroll;
+            let hidden_point = (center(hit.layout_rect).0, center(hit.layout_rect).1 - actual_scroll);
+            let clipped = hidden_point.1 < TITLE_HEIGHT + 44.0 + 14.0;
+            check(clipped, "palette fixture actually moves beyond the content clip");
+            let before = theme::theme_name();
+            if clipped { click(self, hidden_point, MouseButton::Left); }
+            check(theme::theme_name() == before, "clicking clipped control geometry does not activate hidden palette");
+        } else { check(false, "palette fixture has a visible safe target"); }
+
+        self.open_settings_room(Some(SettingsCat::Students));
+        repaint(self);
+        self.native_settings_control_key(NamedKey::Tab, false, false);
+        self.native_settings_control_key(NamedKey::Escape, false, false);
+        check(self.settings_scene.keyboard_focus().is_none(), "Escape clears keyboard focus without touching terminal");
+        check(source_state(self) == background_before && self.pty.len() == ptys_before,
+            "background terminal structure remains unchanged throughout the probe");
+        if theme::character_appearance() != appearance_before {
+            self.settings_apply(SettingsAction::ToggleCharacterAppearance);
+        }
+        self.autohover = autohover_before;
+        repaint(self);
+        eprintln!("[button-focus-probe] {} checks={checks} failures={failures} ui_zoom={zoom_before}",
+            if failures == 0 { "PASS" } else { "FAIL" });
+    }
+
     /// 지금 설정 화면의 클릭 영역을 훑어 「눌릴 수 없는 것」을 세고 찍는다.
     /// 세는 것 셋은 `run_pending_autohitaudit` 머리말에 있다.
     fn audit_settings_hits(&mut self, label: &str) -> usize {

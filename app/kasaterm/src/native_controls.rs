@@ -40,6 +40,13 @@ fn contains(rect: Rect, cursor: (f32, f32)) -> bool {
         && cursor.1 < rect.1 + rect.3
 }
 
+pub(crate) fn focus_ring(g: &mut gpu::GpuRenderer, rect: Rect) {
+    if rect.2 > 0.0 && rect.3 > 0.0 {
+        g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, theme::radius_sm(),
+            theme::border_w().max(2.0), theme::accent());
+    }
+}
+
 fn colors(style: Style, hover: bool) -> ([u8; 4], [u8; 4]) {
     if !style.enabled {
         (theme::border(), theme::text_mute())

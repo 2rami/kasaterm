@@ -2498,11 +2498,8 @@ impl App {
                 let left = self.effective_sidebar_w();
                 // 패널 아래로 상태줄 자리를 남긴다 — 창 끝까지 차지하면 그 위에
                 // 그려지는 상태줄이 패널 배경에 먹히거나 창 밖으로 밀린다.
-                self.native_settings_snapshot((
-                    left,
-                    TITLE_HEIGHT,
-                    (win_px.0 / scale - left).max(1.0),
-                    (win_px.1 / scale - TITLE_HEIGHT - status_h).max(1.0),
+                self.native_settings_snapshot(crate::native_settings::content_area(
+                    (win_px.0 / scale, win_px.1 / scale), left, status_h,
                 ))
             })
             .flatten();

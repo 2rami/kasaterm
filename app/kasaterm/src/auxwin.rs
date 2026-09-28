@@ -18,7 +18,7 @@ const AUX_FONT_SCALE_MIN: f32 = 0.75;
 const AUX_FONT_SCALE_MAX: f32 = 1.60;
 const AUX_FONT_SCALE_STEP: f32 = 0.10;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HeaderButton {
     Open,
     View,
@@ -30,6 +30,26 @@ enum HeaderButton {
     ZoomIn,
     Save,
     More,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolbarActivation { Enter, Space }
+
+fn toolbar_activation(key: &Key) -> Option<ToolbarActivation> {
+    match key {
+        Key::Named(winit::keyboard::NamedKey::Enter) => Some(ToolbarActivation::Enter),
+        Key::Named(winit::keyboard::NamedKey::Space) => Some(ToolbarActivation::Space),
+        Key::Character(value) if value.as_str() == " " => Some(ToolbarActivation::Space),
+        _ => None,
+    }
+}
+
+fn consume_toolbar_activation(held: &mut Option<ToolbarActivation>, key: &Key, state: ElementState, repeat: bool) -> bool {
+    if held.is_none() || *held != toolbar_activation(key) { return false; }
+    if state == ElementState::Released { *held = None; return true; }
+    if repeat { return true; }
+    *held = None;
+    false
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -252,6 +272,9 @@ pub(crate) struct AuxWindow {
     md_content_h: f32,
     font_scale: f32,
     header_hits: Vec<(HeaderButton, (f32, f32, f32, f32))>,
+    header_focus: Option<HeaderButton>,
+    toolbar_keyboard: bool,
+    toolbar_activation: Option<ToolbarActivation>,
     toolbar_menu_open: bool,
     toolbar_menu_rect: Option<(f32, f32, f32, f32)>,
     find_hits: Vec<(FindBtn, (f32, f32, f32, f32))>,
@@ -545,6 +568,15 @@ impl AuxWindow {
         self.draw_outline(x, y, bw, bh, outline_scrollbar);
         self.draw_document_feedback(w, h);
         self.draw_toolbar_menu(w);
+        if self.viewer_prompt.is_none() {
+            if let Some(button) = self.header_focus {
+                match toolbar_focus_rect(&self.header_hits, self.toolbar_menu_rect.filter(|_| self.toolbar_menu_open), (w, h), button) {
+                    Some(rect) if self.focused => crate::native_controls::focus_ring(&mut self.gpu, rect),
+                    None => self.header_focus = None,
+                    _ => {}
+                }
+            }
+        }
         if self.viewer_prompt.is_some() {
             self.draw_viewer_prompt(w, h);
         } else {
@@ -2422,6 +2454,9 @@ impl App {
             md_content_h: 0.0,
             font_scale: 1.0,
             header_hits: Vec::new(),
+            header_focus: None,
+            toolbar_keyboard: false,
+            toolbar_activation: None,
             toolbar_menu_open: false,
             toolbar_menu_rect: None,
             find_hits: Vec::new(),
@@ -2528,6 +2563,11 @@ impl App {
         event: WindowEvent,
         event_loop: &ActiveEventLoop,
     ) -> bool {
+        if let WindowEvent::KeyboardInput { event, .. } = &event {
+            if let Some(aux) = self.aux.windows.iter_mut().find(|aux| aux.window.id() == id || aux.rich.as_ref().is_some_and(|host| host.owns(id))) {
+                if consume_toolbar_activation(&mut aux.toolbar_activation, &event.logical_key, event.state, event.repeat) { return true; }
+            }
+        }
         if let WindowEvent::ModifiersChanged(modifiers) = &event {
             self.modifiers = modifiers.state();
         }
@@ -2580,15 +2620,23 @@ impl App {
                 aux.focused = focused;
                 if !focused {
                     aux.toolbar_menu_open = false;
+                    aux.header_focus = None;
+                    aux.toolbar_keyboard = false;
+                    aux.selecting = false;
+                    aux.scrollbar_drag_offset = None;
+                    aux.outline_scrollbar_drag_offset = None;
                 }
                 aux.dirty = true;
                 aux.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
+                let previous_point = self.aux.windows[index].cursor_px;
+                let previous_hover = self.aux.windows[index].header_hits.iter().any(|(_, rect)| hit(previous_point, *rect));
                 let scale = self.aux.windows[index].gpu.scale().max(0.5);
                 self.aux.windows[index].cursor_seen = true;
                 self.aux.windows[index].cursor_px =
                     (position.x as f32 / scale, position.y as f32 / scale);
+                if self.aux.windows[index].dirty { self.aux_render(index); }
                 let chrome_h = self.aux.windows[index].chrome_height();
                 let hover_chrome = self.aux.windows[index].cursor_px.1 <= chrome_h
                     || self.aux.windows[index].toolbar_menu_open
@@ -2651,10 +2699,18 @@ impl App {
                 if !self.aux_outline_scrollbar_drag(index) && !self.aux_scrollbar_drag(index) {
                     self.aux_drag_selection(index);
                 }
-                if hover_chrome {
+                if hover_chrome || previous_hover {
                     self.aux.windows[index].dirty = true;
                     self.aux.windows[index].window.request_redraw();
                 }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                let aux = &mut self.aux.windows[index];
+                aux.cursor_seen = false;
+                if !aux.selecting && aux.scrollbar_drag_offset.is_none() && aux.outline_scrollbar_drag_offset.is_none() {
+                    aux.cursor_px = (-1.0, -1.0);
+                }
+                self.aux_redraw(index);
             }
             WindowEvent::MouseInput {
                 state,
@@ -3247,6 +3303,64 @@ impl App {
             .map(|aux| &mut aux.editor)
     }
 
+    fn aux_toolbar_key(&mut self, index: usize, key: &Key, repeat: bool, event_loop: &ActiveEventLoop) -> bool {
+        use winit::keyboard::NamedKey;
+        if self.aux.windows[index].viewer_prompt.is_some() || self.host_mod() || self.modifiers.alt_key() {
+            return false;
+        }
+        let enter_by_tab = !self.aux.windows[index].editor.raw_mode
+            && self.aux.windows[index].editor.find.is_none()
+            && matches!(key, Key::Named(NamedKey::Tab));
+        if matches!(key, Key::Named(NamedKey::F6)) || (!self.aux.windows[index].toolbar_keyboard && enter_by_tab) {
+            if repeat { return true; }
+            self.aux_flush_hangul(index);
+            self.aux_render(index);
+            let aux = &mut self.aux.windows[index];
+            aux.toolbar_keyboard = !aux.toolbar_keyboard;
+            if !aux.toolbar_keyboard { aux.toolbar_menu_open = false; }
+            let size = aux.window.inner_size();
+            let scale = aux.gpu.scale().max(0.5);
+            aux.header_focus = aux.toolbar_keyboard.then(|| next_toolbar_focus(&aux.header_hits, aux.toolbar_menu_rect.filter(|_| aux.toolbar_menu_open),
+                (size.width as f32 / scale, size.height as f32 / scale), None, self.modifiers.shift_key())).flatten();
+            self.ime_focus = None;
+            self.aux_redraw(index);
+            return true;
+        }
+        if !self.aux.windows[index].toolbar_keyboard { return false; }
+        self.aux_render(index);
+        let aux = &mut self.aux.windows[index];
+        let size = aux.window.inner_size();
+        let scale = aux.gpu.scale().max(0.5);
+        let size = (size.width as f32 / scale, size.height as f32 / scale);
+        let mut activate = None;
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                if aux.toolbar_menu_open {
+                    aux.toolbar_menu_open = false;
+                    aux.header_focus = Some(HeaderButton::More);
+                } else {
+                    aux.toolbar_keyboard = false;
+                    aux.header_focus = None;
+                }
+            }
+            Key::Named(NamedKey::Tab | NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::ArrowUp | NamedKey::ArrowDown) => {
+                let reverse = matches!(key, Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp))
+                    || (matches!(key, Key::Named(NamedKey::Tab)) && self.modifiers.shift_key());
+                aux.header_focus = next_toolbar_focus(&aux.header_hits, aux.toolbar_menu_rect.filter(|_| aux.toolbar_menu_open), size, aux.header_focus, reverse);
+            }
+            _ if toolbar_activation(key).is_some() && !repeat => {
+                activate = aux.header_focus.filter(|button| toolbar_focus_rect(&aux.header_hits, aux.toolbar_menu_rect.filter(|_| aux.toolbar_menu_open), size, *button).is_some());
+                if activate.is_some() { aux.toolbar_activation = toolbar_activation(key); }
+            }
+            _ => {}
+        }
+        if let Some(button) = activate {
+            self.aux_activate_header(index, button, event_loop);
+        }
+        self.aux_redraw(index);
+        true
+    }
+
     fn aux_key(&mut self, index: usize, event: &KeyEvent, event_loop: &ActiveEventLoop) {
         use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
         if event.state != ElementState::Pressed || crate::input::is_modifier_key(event) {
@@ -3254,6 +3368,9 @@ impl App {
         }
         self.last_input_at = Instant::now();
         let id = self.aux.windows[index].window.id();
+        if self.aux_toolbar_key(index, &event.logical_key, event.repeat, event_loop) {
+            return;
+        }
         self.ime_retarget(ImeFocus::AuxEditor(id));
         if self.viewer_only && self.aux.windows[index].viewer_prompt.is_some() {
             match event.logical_key {
@@ -3445,6 +3562,8 @@ impl App {
     }
 
     fn aux_shortcut(&mut self, index: usize, code: winit::keyboard::KeyCode) -> bool {
+        self.aux.windows[index].toolbar_keyboard = false;
+        self.aux.windows[index].header_focus = None;
         use winit::keyboard::KeyCode;
         let rich_command = match code {
             KeyCode::KeyZ => Some(if self.modifiers.shift_key() { "redo" } else { "undo" }),
@@ -3568,6 +3687,9 @@ impl App {
     }
 
     fn aux_ime(&mut self, index: usize, ime: Ime) {
+        if self.aux.windows[index].toolbar_keyboard {
+            return;
+        }
         let id = self.aux.windows[index].window.id();
         self.ime_retarget(ImeFocus::AuxEditor(id));
         match ime {
@@ -3616,6 +3738,8 @@ impl App {
     }
 
     fn aux_set_mode(&mut self, index: usize, want_raw: bool) {
+        self.aux.windows[index].toolbar_keyboard = false;
+        self.aux.windows[index].header_focus = None;
         if want_raw && self.aux_request_rich_flush(index, crate::rich_document::PendingAction::Raw) { return; }
         self.aux_set_mode_flushed(index, want_raw);
     }
@@ -3789,8 +3913,73 @@ impl App {
         true
     }
 
+    fn aux_activate_header(&mut self, index: usize, button: HeaderButton, event_loop: &ActiveEventLoop) {
+        #[cfg(not(target_os = "macos"))]
+        let menu_open = self.aux.windows[index].toolbar_menu_open;
+        if matches!(button, HeaderButton::Find | HeaderButton::Edit | HeaderButton::View) {
+            self.aux.windows[index].toolbar_keyboard = false;
+            self.aux.windows[index].header_focus = None;
+        }
+        if button != HeaderButton::More {
+            self.aux.windows[index].toolbar_menu_open = false;
+        }
+        match button {
+            HeaderButton::More => {
+                #[cfg(target_os = "macos")]
+                self.aux_native_document_menu(index);
+                #[cfg(not(target_os = "macos"))]
+                {
+                    self.aux.windows[index].toolbar_menu_open = !menu_open;
+                    self.aux_redraw(index);
+                }
+            }
+            HeaderButton::Open => self.viewer_choose_file(index),
+            HeaderButton::View => self.aux_set_mode(index, false),
+            HeaderButton::Edit => self.aux_set_mode(index, true),
+            HeaderButton::Find => {
+                if self.aux_rich_command(index, "find", serde_json::Value::Null) { return; }
+                if self.aux.windows[index].editor.find.is_some() {
+                    self.aux.windows[index].editor.find_close();
+                    self.aux.windows[index].view_find_targets.clear();
+                } else {
+                    self.aux.windows[index].editor.find_open(false);
+                    if !self.aux.windows[index].editor.raw_mode {
+                        self.aux_refresh_view_find(index, true);
+                    }
+                }
+                self.aux.windows[index].status = None;
+                self.aux_redraw(index);
+                self.save_aux_windows_state();
+            }
+            HeaderButton::Outline => self.aux_toggle_outline(index),
+            HeaderButton::Wrap => {
+                let editor = &mut self.aux.windows[index].editor;
+                editor.wrap = !editor.wrap;
+                if editor.wrap {
+                    editor.h_scroll = 0.0;
+                }
+                self.aux.windows[index].status = Some(if self.aux.windows[index].editor.wrap {
+                    "긴 줄 줄바꿈을 켰어요".to_string()
+                } else {
+                    "긴 줄 줄바꿈을 껐어요".to_string()
+                });
+                self.aux_redraw(index);
+                self.save_aux_windows_state();
+            }
+            HeaderButton::ZoomOut => self.aux_adjust_zoom(index, -AUX_FONT_SCALE_STEP),
+            HeaderButton::ZoomIn => self.aux_adjust_zoom(index, AUX_FONT_SCALE_STEP),
+            HeaderButton::Save => {
+                self.aux_save(index);
+            }
+        }
+    }
+
     fn aux_mouse_press(&mut self, index: usize, event_loop: &ActiveEventLoop) {
         self.aux_flush_hangul(index);
+        self.aux_render(index);
+        self.aux.windows[index].header_focus = None;
+        self.aux.windows[index].toolbar_keyboard = false;
+        self.aux_redraw(index);
         let cursor = self.aux.windows[index].cursor_px;
         if self.viewer_only && self.aux.windows[index].viewer_prompt.is_some() {
             if let Some(button) = self.aux.windows[index]
@@ -3814,58 +4003,7 @@ impl App {
             .find(|(_, rect)| hit(cursor, *rect))
             .map(|(button, _)| *button)
         {
-            if button != HeaderButton::More {
-                self.aux.windows[index].toolbar_menu_open = false;
-            }
-            match button {
-                HeaderButton::More => {
-                    #[cfg(target_os = "macos")]
-                    self.aux_native_document_menu(index);
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        self.aux.windows[index].toolbar_menu_open = !menu_open;
-                        self.aux_redraw(index);
-                    }
-                }
-                HeaderButton::Open => self.viewer_choose_file(index),
-                HeaderButton::View => self.aux_set_mode(index, false),
-                HeaderButton::Edit => self.aux_set_mode(index, true),
-                HeaderButton::Find => {
-                    if self.aux_rich_command(index, "find", serde_json::Value::Null) { return; }
-                    if self.aux.windows[index].editor.find.is_some() {
-                        self.aux.windows[index].editor.find_close();
-                        self.aux.windows[index].view_find_targets.clear();
-                    } else {
-                        self.aux.windows[index].editor.find_open(false);
-                        if !self.aux.windows[index].editor.raw_mode {
-                            self.aux_refresh_view_find(index, true);
-                        }
-                    }
-                    self.aux.windows[index].status = None;
-                    self.aux_redraw(index);
-                    self.save_aux_windows_state();
-                }
-                HeaderButton::Outline => self.aux_toggle_outline(index),
-                HeaderButton::Wrap => {
-                    let editor = &mut self.aux.windows[index].editor;
-                    editor.wrap = !editor.wrap;
-                    if editor.wrap {
-                        editor.h_scroll = 0.0;
-                    }
-                    self.aux.windows[index].status = Some(if self.aux.windows[index].editor.wrap {
-                        "긴 줄 줄바꿈을 켰어요".to_string()
-                    } else {
-                        "긴 줄 줄바꿈을 껐어요".to_string()
-                    });
-                    self.aux_redraw(index);
-                    self.save_aux_windows_state();
-                }
-                HeaderButton::ZoomOut => self.aux_adjust_zoom(index, -AUX_FONT_SCALE_STEP),
-                HeaderButton::ZoomIn => self.aux_adjust_zoom(index, AUX_FONT_SCALE_STEP),
-                HeaderButton::Save => {
-                    self.aux_save(index);
-                }
-            }
+            self.aux_activate_header(index, button, event_loop);
             return;
         }
         if menu_open {
@@ -4318,11 +4456,52 @@ impl App {
     }
 }
 
+fn toolbar_focus_items(
+    hits: &[(HeaderButton, (f32, f32, f32, f32))],
+    menu: Option<(f32, f32, f32, f32)>,
+    size: (f32, f32),
+) -> Vec<(HeaderButton, (f32, f32, f32, f32))> {
+    let mut items: Vec<_> = hits.iter().copied().filter(|(_, rect)| {
+        rect.0 >= 0.0 && rect.1 >= 0.0 && rect.2 > 0.0 && rect.3 > 0.0
+            && rect.0 + rect.2 <= size.0 && rect.1 + rect.3 <= size.1
+            && menu.map_or(rect.1 < DOCUMENT_BAR_H, |popup| rect.0 >= popup.0 && rect.1 >= popup.1
+                && rect.0 + rect.2 <= popup.0 + popup.2 && rect.1 + rect.3 <= popup.1 + popup.3)
+    }).collect();
+    items.sort_by(|a, b| a.1.1.total_cmp(&b.1.1).then(a.1.0.total_cmp(&b.1.0)));
+    let mut result = Vec::new();
+    for item in items {
+        if !result.iter().any(|(button, _)| *button == item.0) { result.push(item); }
+    }
+    result
+}
+
+fn toolbar_focus_rect(
+    hits: &[(HeaderButton, (f32, f32, f32, f32))], menu: Option<(f32, f32, f32, f32)>, size: (f32, f32), button: HeaderButton,
+) -> Option<(f32, f32, f32, f32)> {
+    toolbar_focus_items(hits, menu, size).into_iter().find(|(value, _)| *value == button).map(|(_, rect)| rect)
+}
+
+fn next_toolbar_focus(
+    hits: &[(HeaderButton, (f32, f32, f32, f32))], menu: Option<(f32, f32, f32, f32)>, size: (f32, f32),
+    current: Option<HeaderButton>, reverse: bool,
+) -> Option<HeaderButton> {
+    let items = toolbar_focus_items(hits, menu, size);
+    if items.is_empty() { return None; }
+    let index = current.and_then(|button| items.iter().position(|(value, _)| *value == button));
+    let next = match (index, reverse) {
+        (Some(index), true) => (index + items.len() - 1) % items.len(),
+        (Some(index), false) => (index + 1) % items.len(),
+        (None, true) => items.len() - 1,
+        (None, false) => 0,
+    };
+    Some(items[next].0)
+}
+
 fn hit(point: (f32, f32), rect: (f32, f32, f32, f32)) -> bool {
     point.0 >= rect.0
-        && point.0 <= rect.0 + rect.2
+        && point.0 < rect.0 + rect.2
         && point.1 >= rect.1
-        && point.1 <= rect.1 + rect.3
+        && point.1 < rect.1 + rect.3
 }
 
 pub(crate) fn clamped_document_scroll(
@@ -4337,6 +4516,52 @@ pub(crate) fn clamped_document_scroll(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolbar_focus_follows_visual_order_and_skips_clipped_buttons() {
+        let hits = vec![
+            (HeaderButton::More, (240.0, 9.0, 26.0, 26.0)),
+            (HeaderButton::Find, (120.0, 9.0, 50.0, 26.0)),
+            (HeaderButton::Save, (-20.0, 9.0, 50.0, 26.0)),
+        ];
+        assert_eq!(next_toolbar_focus(&hits, None, (300.0, 200.0), None, false), Some(HeaderButton::Find));
+        assert_eq!(next_toolbar_focus(&hits, None, (300.0, 200.0), Some(HeaderButton::Find), true), Some(HeaderButton::More));
+        assert_eq!(next_toolbar_focus(&hits, None, (300.0, 200.0), Some(HeaderButton::More), false), Some(HeaderButton::Find));
+        assert_eq!(toolbar_focus_rect(&hits, None, (300.0, 200.0), HeaderButton::Save), None);
+    }
+
+    #[test]
+    fn toolbar_focus_does_not_activate_an_obscured_toolbar_or_closed_menu() {
+        let hits = vec![
+            (HeaderButton::More, (240.0, 9.0, 26.0, 26.0)),
+            (HeaderButton::Wrap, (120.0, 80.0, 120.0, 26.0)),
+            (HeaderButton::Outline, (10.0, 80.0, 26.0, 26.0)),
+        ];
+        let menu = Some((100.0, 50.0, 160.0, 100.0));
+        assert_eq!(toolbar_focus_rect(&hits, None, (300.0, 200.0), HeaderButton::Wrap), None);
+        assert_eq!(toolbar_focus_rect(&hits, menu, (300.0, 200.0), HeaderButton::More), None);
+        assert_eq!(toolbar_focus_rect(&hits, menu, (300.0, 200.0), HeaderButton::Outline), None);
+        assert_eq!(next_toolbar_focus(&hits, menu, (300.0, 200.0), None, false), Some(HeaderButton::Wrap));
+    }
+
+    #[test]
+    fn toolbar_activation_repeat_cannot_type_into_the_new_editor_focus() {
+        let enter = Key::Named(winit::keyboard::NamedKey::Enter);
+        let mut held = Some(ToolbarActivation::Enter);
+        assert!(consume_toolbar_activation(&mut held, &enter, ElementState::Pressed, true));
+        assert!(!consume_toolbar_activation(&mut held, &Key::Character("a".into()), ElementState::Pressed, false));
+        assert!(consume_toolbar_activation(&mut held, &enter, ElementState::Released, false));
+        assert!(!consume_toolbar_activation(&mut held, &enter, ElementState::Pressed, false));
+        held = Some(ToolbarActivation::Enter);
+        assert!(!consume_toolbar_activation(&mut held, &enter, ElementState::Pressed, false));
+        assert_eq!(held, None);
+    }
+
+    #[test]
+    fn adjacent_button_edges_belong_to_only_one_target() {
+        assert!(!hit((36.0, 15.0), (10.0, 10.0, 26.0, 26.0)));
+        assert!(hit((36.0, 15.0), (36.0, 10.0, 26.0, 26.0)));
+    }
 
     struct StateDir(std::path::PathBuf);
 

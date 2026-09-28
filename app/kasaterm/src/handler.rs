@@ -2,6 +2,72 @@
 //! main.rs 에서 분리. impl App 메서드·타입은 crate root 그대로 참조.
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(crate) struct PointerSample {
+    physical: (f64, f64),
+    dpi: f64,
+}
+
+impl PointerSample {
+    fn new(position: winit::dpi::PhysicalPosition<f64>, dpi: f64) -> Option<Self> {
+        (position.x.is_finite() && position.y.is_finite() && dpi.is_finite() && dpi > 0.0)
+            .then_some(Self { physical: (position.x, position.y), dpi })
+    }
+
+    fn projected(self, dpi: f64, effective_scale: f32) -> (f32, f32) {
+        // A monitor change rescales native pixels; the last native point stays
+        // put until the OS provides a newer cursor sample.
+        let scale = dpi / self.dpi / effective_scale.max(f32::EPSILON) as f64;
+        ((self.physical.0 * scale) as f32, (self.physical.1 * scale) as f32)
+    }
+}
+
+fn blocks_obscured_button(button: MouseButton, modal: bool, workspace: Option<(f32, f32, f32, f32)>, cursor: (f32, f32)) -> bool {
+    matches!(button, MouseButton::Right | MouseButton::Middle)
+        && (modal || workspace.is_some_and(|(x, y, w, h)| {
+            cursor.0 >= x && cursor.0 < x + w && cursor.1 >= y && cursor.1 < y + h
+        }))
+}
+
+#[cfg(test)]
+mod main_pointer_tests {
+    use super::*;
+
+    #[test]
+    fn stationary_cursor_reprojects_when_ui_zoom_changes() {
+        let sample = PointerSample::new(winit::dpi::PhysicalPosition::new(800.0, 600.0), 2.0).unwrap();
+        assert_eq!(sample.projected(2.0, 2.0), (400.0, 300.0));
+        assert_eq!(sample.projected(2.0, 2.5), (320.0, 240.0));
+        assert_eq!(sample.projected(2.0, 1.0), (800.0, 600.0));
+    }
+
+    #[test]
+    fn dpi_change_preserves_native_point_until_a_new_sample_arrives() {
+        let sample = PointerSample::new(winit::dpi::PhysicalPosition::new(800.0, 600.0), 2.0).unwrap();
+        assert_eq!(sample.projected(1.0, 1.25), (320.0, 240.0));
+        let next = PointerSample::new(winit::dpi::PhysicalPosition::new(450.0, 350.0), 1.0).unwrap();
+        assert_eq!(next.projected(1.0, 1.25), (360.0, 280.0));
+        assert!(PointerSample::new(winit::dpi::PhysicalPosition::new(f64::NAN, 0.0), 2.0).is_none());
+        assert!(PointerSample::new(winit::dpi::PhysicalPosition::new(0.0, 0.0), 0.0).is_none());
+    }
+
+    #[test]
+    fn secondary_buttons_cannot_reach_obscured_workspace() {
+        let workspace = Some((200.0, 40.0, 800.0, 720.0));
+        for button in [MouseButton::Right, MouseButton::Middle] {
+            assert!(blocks_obscured_button(button, false, workspace, (400.0, 200.0)));
+            assert!(!blocks_obscured_button(button, false, workspace, (100.0, 200.0)));
+            assert!(!blocks_obscured_button(button, false, workspace, (400.0, 20.0)));
+            assert!(!blocks_obscured_button(button, false, workspace, (400.0, 760.0)));
+            assert!(!blocks_obscured_button(button, false, None, (400.0, 200.0)));
+            for point in [(100.0, 200.0), (400.0, 20.0), (400.0, 780.0)] {
+                assert!(blocks_obscured_button(button, true, workspace, point));
+            }
+        }
+        assert!(!blocks_obscured_button(MouseButton::Left, true, workspace, (400.0, 200.0)));
+    }
+}
+
 fn restore_rect_contains((x, y, w, h): (f32, f32, f32, f32), point: (f32, f32)) -> bool {
     w > 0.0 && h > 0.0 && point.0 >= x && point.0 <= x + w && point.1 >= y && point.1 <= y + h
 }
@@ -3035,7 +3101,29 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let WindowEvent::KeyboardInput { event, .. } = &event {
+            if self.consume_settings_activation_key(event) { return; }
+        }
         let main_window = self.window.as_ref().is_some_and(|window| window.id() == id);
+        if main_window {
+            if let WindowEvent::CursorMoved { position, .. } = &event {
+                let dpi = self.window.as_ref().map(|window| window.scale_factor()).unwrap_or(1.0);
+                self.cursor_sample = PointerSample::new(*position, dpi);
+                self.reproject_main_cursor();
+            }
+            if let WindowEvent::MouseInput { button, .. } = &event {
+                let workspace = (self.settings_room_active() || self.board_room_active()).then(|| {
+                    let size = self.window.as_ref().unwrap().inner_size();
+                    let scale = self.effective_scale();
+                    let left = self.effective_sidebar_w();
+                    (left, TITLE_HEIGHT, (size.width as f32 / scale - left).max(0.0),
+                        (size.height as f32 / scale - TITLE_HEIGHT - self.status_h()).max(0.0))
+                });
+                if blocks_obscured_button(*button, self.main_pointer_modal(), workspace, self.cursor_px) {
+                    return;
+                }
+            }
+        }
         if main_window && !self.lite && self.account_menu_event(event_loop, &event) {
             return;
         }
@@ -3283,17 +3371,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.handle_pinch(delta);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let scale = self.effective_scale();
-                if self.autohover.is_none() {
-                    self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
-                }
-                let main_modal = self.confirm_close.is_some()
-                    || self.restore_prompt.is_some()
-                    || self.character_swap_confirm.is_some()
-                    || self.account_switch_confirm.as_ref().is_some_and(|pending| {
-                        pending.surface == crate::session::ConfirmSurface::Main
-                    })
-                    || self.git.commit_modal_open;
+                let main_modal = self.main_pointer_modal();
                 if main_modal {
                     let (cx, cy) = self.cursor_px;
                     let inside = |r: &(f32, f32, f32, f32)| {
@@ -7881,6 +7959,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_close_grace_probe();
         self.run_pending_autolonestash();
         self.run_pending_autohitaudit();
+        self.run_button_focus_probe(event_loop);
         self.run_pending_autoghost();
         self.run_pending_autoview();
         self.run_pending_autoinfo();
@@ -8195,6 +8274,21 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
+    fn main_pointer_modal(&self) -> bool {
+        self.confirm_close.is_some() || self.restore_prompt.is_some()
+            || self.character_swap_confirm.is_some() || self.git.commit_modal_open
+            || self.account_switch_confirm.as_ref().is_some_and(|pending| {
+                pending.surface == crate::session::ConfirmSurface::Main
+            })
+    }
+
+    pub(crate) fn reproject_main_cursor(&mut self) {
+        if self.autohover.is_some() { return; }
+        if let (Some(sample), Some(window)) = (self.cursor_sample, self.window.as_ref()) {
+            self.cursor_px = sample.projected(window.scale_factor(), self.effective_scale());
+        }
+    }
+
     /// A drop onto progress UI is not a drop onto the terminal behind it.
     /// Disarm existing gestures so their next release cannot move files, type
     /// a path, open a link, or complete an old pane relocation unexpectedly.

@@ -13,6 +13,14 @@ mod appearance_preview;
 
 pub(crate) type Rect = (f32, f32, f32, f32);
 
+pub(crate) fn content_area(window: (f32, f32), sidebar: f32, status: f32) -> Rect {
+    (sidebar, TITLE_HEIGHT, (window.0 - sidebar).max(1.0), (window.1 - TITLE_HEIGHT - status).max(1.0))
+}
+
+fn ime_window_rect(rect: Rect, ui_zoom: f32) -> Rect {
+    (rect.0 * ui_zoom, rect.1 * ui_zoom, rect.2 * ui_zoom, rect.3 * ui_zoom)
+}
+
 /// 페이지 이름이 앉는 머리 칸. 이름은 `ay + 26` 에 20pt 로 그려지고 본문은 이
 /// 칸 아래 14px 에서 시작하므로, 이 값이 곧 **이름과 첫 묶음 제목 사이의 공백**을
 /// 정한다. 64 일 때 그 사이가 63px 로 벌어져 묶음 제목–첫 행 간격(25px)의 2.5배가
@@ -575,7 +583,52 @@ pub(crate) enum Target {
 pub(crate) struct Hit {
     pub(crate) target: Target,
     pub(crate) rect: Rect,
+    pub(crate) layout_rect: Rect,
     pub(crate) cursor: HitCursor,
+}
+
+pub(crate) fn same_keyboard_target(a: &Target, b: &Target) -> bool {
+    match (a, b) {
+        (Target::Setting(SettingsAction::AgentStatusline(a, _)), Target::Setting(SettingsAction::AgentStatusline(b, _))) => a == b,
+        (Target::Setting(SettingsAction::AgentStatuslineCustom(_)), Target::Setting(SettingsAction::AgentStatuslineCustom(_))) => true,
+        (Target::Setting(SettingsAction::CharacterPick(at, an, _)), Target::Setting(SettingsAction::CharacterPick(bt, bn, _))) => at == bt && an == bn,
+        (Target::Setting(SettingsAction::PetPreference(a)), Target::Setting(SettingsAction::PetPreference(b))) => {
+            use kasa_pet_config::PreferenceChange as P;
+            matches!((a, b), (P::FollowCursor(_), P::FollowCursor(_)) | (P::Animations(_), P::Animations(_))
+                | (P::Bubbles(_), P::Bubbles(_)) | (P::ActivityReactions(_), P::ActivityReactions(_))
+                | (P::AlwaysOnTop(_), P::AlwaysOnTop(_)) | (P::LockPosition(_), P::LockPosition(_))
+                | (P::AskAlways(_), P::AskAlways(_)) | (P::Chatter(_), P::Chatter(_))) || a == b
+        }
+        _ => a == b,
+    }
+}
+
+pub(crate) fn same_stepper_target(a: &Target, b: &Target) -> bool {
+    match (a, b) {
+        (Target::Setting(SettingsAction::StatusBarH(_)), Target::Setting(SettingsAction::StatusBarH(_)))
+        | (Target::Setting(SettingsAction::PaneFooterH(_)), Target::Setting(SettingsAction::PaneFooterH(_)))
+        | (Target::Setting(SettingsAction::AccountAutoswitchPct(_)), Target::Setting(SettingsAction::AccountAutoswitchPct(_))) => true,
+        (Target::Setting(SettingsAction::PetPreference(a)), Target::Setting(SettingsAction::PetPreference(b))) => {
+            std::mem::discriminant(a) == std::mem::discriminant(b)
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn keyboard_hits(hits: &[Hit]) -> Vec<&Hit> {
+    let mut visible = Vec::new();
+    for hit in hits {
+        if !matches!(hit.cursor, HitCursor::Pointer | HitCursor::Text)
+            || matches!(hit.target, Target::Setting(SettingsAction::PickerSV | SettingsAction::PickerHue))
+            || hit.rect.2 <= 0.0 || hit.rect.3 <= 0.0 { continue; }
+        let center = (hit.rect.0 + hit.rect.2 / 2.0, hit.rect.1 + hit.rect.3 / 2.0);
+        if !hits.iter().rev().find(|candidate| contains(candidate.rect, center))
+            .is_some_and(|top| top.target == hit.target) { continue; }
+        if !visible.iter().any(|prior: &&Hit| same_keyboard_target(&prior.target, &hit.target)) {
+            visible.push(hit);
+        }
+    }
+    visible
 }
 
 #[derive(Clone, Debug)]
@@ -664,6 +717,8 @@ pub(crate) struct Snapshot {
     pub(crate) agent_statusline_customized: bool,
     pub(crate) area: Rect,
     pub(crate) cat: SettingsCat,
+    pub(crate) keyboard_focus: Option<Target>,
+    pub(crate) keyboard_anchor: Option<Rect>,
     pub(crate) cursor: (f32, f32),
     pub(crate) scroll: f32,
     pub(crate) navigation_scroll: f32,
@@ -902,6 +957,8 @@ impl App {
             agent_statusline_customized: cache.agent_statusline_customized,
             area,
             cat: scene.category(),
+            keyboard_focus: scene.keyboard_focus().cloned(),
+            keyboard_anchor: scene.keyboard_anchor(),
             cursor: self.cursor_px,
             scroll: scene.scroll(),
             navigation_scroll: scene.navigation_scroll(),
@@ -1032,6 +1089,7 @@ impl App {
         if let (Some(window), Some((x, y, w, h))) =
             (self.window.as_ref(), self.settings_scene.caret_rect())
         {
+            let (x, y, w, h) = ime_window_rect((x, y, w, h), self.ui_zoom);
             window.set_ime_cursor_area(
                 winit::dpi::LogicalPosition::new(x as f64, y as f64),
                 winit::dpi::LogicalSize::new(w.max(1.0) as f64, h.max(1.0) as f64),
@@ -1044,10 +1102,8 @@ impl App {
             && self.window.as_ref().is_some_and(|w| {
                 let s = self.effective_scale();
                 let size = w.inner_size();
-                x >= self.effective_sidebar_w()
-                    && x <= size.width as f32 / s
-                    && y >= TITLE_HEIGHT
-                    && y <= size.height as f32 / s
+                contains(content_area((size.width as f32 / s, size.height as f32 / s),
+                    self.effective_sidebar_w(), self.status_h()), (x, y))
             })
     }
 
@@ -1064,6 +1120,7 @@ impl App {
             return false;
         }
         let hit = self.settings_scene.hit_at(x, y).cloned();
+        self.settings_scene.set_keyboard_focus(None);
         let target = hit.as_ref().map(|hit| hit.target.clone());
         // 어디를 눌러도 펼친 선택 상자는 닫힌다 — 머리를 다시 누른 것만 토글이다.
         if !matches!(target, Some(Target::Dropdown(_))) {
@@ -1095,7 +1152,7 @@ impl App {
                         self.settings_apply(SettingsAction::FocusPaletteHex(0));
                         self.native_settings_arm_backup(SettingsInput::PaletteHex(0));
                     }
-                    if let Some(rect) = hit.map(|hit| hit.rect) {
+                    if let Some(rect) = hit.map(|hit| hit.layout_rect) {
                         self.settings_scene.mark_field_dirty();
                         self.picker_preview(&action, rect, (x, y));
                         self.settings_scene.begin_picker_drag(action, rect);
@@ -1107,29 +1164,12 @@ impl App {
                 self.native_settings_apply(action);
                 if let Some(field) = self.settings_input {
                     self.native_settings_arm_backup(field);
+                    self.settings_scene.prepare_field_focus(field);
                 }
             }
             Some(Target::Focus(field)) => {
-                if let SettingsInput::PaletteHex(slot) = field {
-                    if self.settings_input != Some(field) {
-                        self.native_settings_blur();
-                        self.settings_apply(SettingsAction::FocusPaletteHex(slot));
-                        self.native_settings_arm_backup(field);
-                        self.ime_focus = Some(crate::ImeFocus::Settings(field));
-                    }
-                } else if let SettingsInput::DeviceHex(slot) = field {
-                    if self.settings_input != Some(field) {
-                        self.native_settings_blur();
-                        self.settings_apply(SettingsAction::FocusDeviceHex(slot));
-                        self.native_settings_arm_backup(field);
-                        self.ime_focus = Some(crate::ImeFocus::Settings(field));
-                    }
-                } else {
-                    self.native_settings_focus(field);
-                }
-                if let Some(rect) = hit.map(|hit| hit.rect) {
-                    self.native_settings_place_caret(field, rect, (x, y));
-                }
+                self.native_settings_focus(field);
+                self.native_settings_place_caret(field, (x, y));
             }
             Some(Target::AccountUsage(key)) => {
                 self.native_settings_blur();
@@ -1199,15 +1239,27 @@ impl App {
         if media {
             self.reload_native_settings_media_cache();
         }
+        self.settings_scene.invalidate_hits();
     }
 
     fn native_settings_focus(&mut self, field: SettingsInput) {
         if self.settings_input != Some(field) {
             self.native_settings_blur();
+            match field {
+                SettingsInput::PaletteHex(slot) => self.settings_apply(SettingsAction::FocusPaletteHex(slot)),
+                SettingsInput::DeviceHex(slot) => self.settings_apply(SettingsAction::FocusDeviceHex(slot)),
+                SettingsInput::CustomThemeLabel if self.custom_theme_label_edit.is_none() => {
+                    if let Some(slug) = theme::active_custom_slug() {
+                        self.settings_apply(SettingsAction::FocusCustomThemeLabel(slug));
+                    }
+                }
+                _ => {}
+            }
         }
         self.native_settings_arm_backup(field);
         self.settings_scene.clear_field_selection();
         self.settings_input = Some(field);
+        self.settings_scene.prepare_field_focus(field);
         match field {
             SettingsInput::DeviceAccountName => self.settings_caret = self.device_account.account.chars().count(),
             SettingsInput::DeviceAccountPassword => self.settings_caret = self.device_account.password.chars().count(),
@@ -1259,22 +1311,15 @@ impl App {
     fn native_settings_place_caret(
         &mut self,
         field: SettingsInput,
-        rect: Rect,
         point: (f32, f32),
     ) {
-        let multiline_caret = is_multiline(field)
-            .then(|| self.settings_scene.multiline_layout(field).cloned())
-            .flatten()
-            .map(|layout| multiline_caret_from_point(&layout, point));
+        let measured = self.settings_scene.multiline_layout(field).map(|layout| {
+            if is_multiline(field) { multiline_caret_from_point(layout, point) }
+            else { single_line_caret_from_point(layout, point.0) }
+        });
         if let Some((buffer, caret)) = field_buffer(self, field) {
-            if is_multiline(field) {
-                if let Some(next) = multiline_caret {
-                    *caret = next.min(buffer.chars().count());
-                }
-            } else {
-                let ratio =
-                    ((point.0 - rect.0 - 10.0) / (rect.2 - 20.0).max(1.0)).clamp(0.0, 1.0);
-                *caret = (buffer.chars().count() as f32 * ratio).round() as usize;
+            if let Some(next) = measured {
+                *caret = next.min(buffer.chars().count());
             }
         }
         self.settings_scene.clear_field_selection();
@@ -1580,21 +1625,123 @@ impl App {
         self.chrome_dirty = true;
     }
 
+    pub(crate) fn consume_settings_activation_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let key = match &event.logical_key {
+            Key::Named(key @ (NamedKey::Enter | NamedKey::Space)) => *key,
+            Key::Character(value) if value.as_str() == " " => NamedKey::Space,
+            _ => return false,
+        };
+        self.settings_scene.consume_activation_key(key, event.state == winit::event::ElementState::Pressed, event.repeat)
+    }
+
+    pub(crate) fn native_settings_control_key(&mut self, key: winit::keyboard::NamedKey, reverse: bool, repeat: bool) -> bool {
+        use winit::keyboard::NamedKey;
+        if self.settings_scene.consume_activation_key(key, true, repeat) { return true; }
+        if !self.settings_room_active() { return false; }
+        match key {
+            NamedKey::Tab => {
+                if self.settings_scene.keyboard_focus().is_none() {
+                    if let Some(field) = self.settings_input {
+                        self.settings_scene.set_keyboard_focus(Some(Target::Focus(field)));
+                    }
+                }
+                let next = self.settings_scene.advance_keyboard_focus(reverse);
+                self.native_settings_blur();
+                if let Some(hit) = next {
+                    if let Target::Focus(field) = hit.target { self.native_settings_focus(field); }
+                    self.settings_scene.set_keyboard_focus(Some(hit.target));
+                }
+            }
+            NamedKey::PageUp | NamedKey::PageDown => {
+                self.native_settings_blur();
+                self.settings_scene.set_keyboard_focus(None);
+                self.settings_scene.scroll_page(key == NamedKey::PageDown);
+            }
+            NamedKey::Enter | NamedKey::Space if self.settings_input.is_none() => {
+                if !repeat && self.settings_scene.keyboard_hit().is_some() {
+                    self.settings_scene.arm_activation_key(key);
+                    self.native_settings_activate_focus();
+                }
+            }
+            NamedKey::Escape if self.settings_scene.dropdown().is_some() => {
+                self.settings_scene.close_dropdown();
+            }
+            NamedKey::Escape if self.settings_input.is_some() => {
+                self.native_settings_cancel_field();
+                self.settings_scene.set_keyboard_focus(None);
+            }
+            NamedKey::Escape if self.settings_scene.keyboard_focus().is_some() => {
+                self.settings_scene.set_keyboard_focus(None);
+            }
+            _ => return false,
+        }
+        self.chrome_dirty = true;
+        if let Some(window) = self.window.as_ref() { window.request_redraw(); }
+        true
+    }
+
+    fn native_settings_activate_focus(&mut self) {
+        if let Some(hit) = self.settings_scene.keyboard_hit().cloned() {
+            let dropdown = self.settings_scene.dropdown();
+            self.native_settings_click(hit.rect.0 + hit.rect.2 / 2.0, hit.rect.1 + hit.rect.3 / 2.0);
+            if self.settings_room_active() {
+                self.settings_scene.set_keyboard_focus(Some(if let Some(field) = self.settings_input {
+                    Target::Focus(field)
+                } else if let Some(id) = dropdown {
+                    Target::Dropdown(id)
+                } else { hit.target }));
+            }
+        }
+    }
+
     pub(crate) fn native_settings_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::event::ElementState;
         use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+        if self.consume_settings_activation_key(event) { return true; }
         if !self.settings_room_active() {
             return false;
         }
         if event.state != ElementState::Pressed {
             return true;
         }
-        if self.settings_scene.dropdown().is_some()
-            && matches!(event.logical_key, Key::Named(NamedKey::Escape))
-        {
-            self.settings_scene.close_dropdown();
+        let modified = self.host_mod() || self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key();
+        if let Key::Named(key) = event.logical_key {
+            if matches!(key, NamedKey::Tab | NamedKey::PageUp | NamedKey::PageDown | NamedKey::Enter | NamedKey::Space | NamedKey::Escape) {
+                if modified { return false; }
+                if self.native_settings_control_key(key, self.modifiers.shift_key(), event.repeat) { return true; }
+            }
+        }
+        if self.settings_scene.dropdown().is_some() && matches!(event.logical_key, Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)) {
+            self.settings_scene.advance_keyboard_focus(matches!(event.logical_key, Key::Named(NamedKey::ArrowUp)));
             self.chrome_dirty = true;
             return true;
+        }
+        if let Some(field) = self.settings_input {
+            if !self.settings_scene.field_is_current(field) {
+                self.native_settings_blur();
+                self.chrome_dirty = true;
+                return true;
+            }
+        }
+        if self.settings_input.is_none() {
+            let activate = matches!(event.logical_key, Key::Named(NamedKey::Enter | NamedKey::Space))
+                || matches!(&event.logical_key, Key::Character(value) if value.as_str() == " ");
+            if activate {
+                if modified { return false; }
+                if !event.repeat && self.settings_scene.keyboard_hit().is_some() {
+                    self.settings_scene.arm_activation_key(NamedKey::Space);
+                    self.native_settings_activate_focus();
+                }
+                self.chrome_dirty = true;
+                return true;
+            }
+            if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                let focused = self.settings_scene.keyboard_focus().is_some();
+                self.settings_scene.set_keyboard_focus(None);
+                self.chrome_dirty = true;
+                return focused;
+            }
         }
         let Some(field) = self.settings_input else {
             if self.settings_scene.first_run() {
@@ -1608,7 +1755,7 @@ impl App {
             let next = match event.logical_key {
                 Key::Named(NamedKey::ArrowUp) => at.saturating_sub(1),
                 Key::Named(NamedKey::ArrowDown) => (at + 1).min(nav.len() - 1),
-                _ => return false,
+                _ => return true,
             };
             self.settings_scene.set_category(nav[next]);
             self.chrome_dirty = true;
@@ -1709,10 +1856,6 @@ impl App {
             self.in_preedit = false;
         }
 
-        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            self.native_settings_cancel_field();
-            return true;
-        }
 
         if self.settings_scene.field_select_all()
             && matches!(
@@ -1755,18 +1898,14 @@ impl App {
         }
 
         match event.logical_key {
-            Key::Named(NamedKey::Tab | NamedKey::Enter) if field == SettingsInput::DeviceAccountName => {
+            Key::Named(NamedKey::Enter) if field == SettingsInput::DeviceAccountName => {
                 self.native_settings_focus(SettingsInput::DeviceAccountPassword);
-                self.chrome_dirty = true;
-                return true;
-            }
-            Key::Named(NamedKey::Tab) if field == SettingsInput::DeviceAccountPassword => {
-                self.native_settings_focus(SettingsInput::DeviceAccountName);
+                self.settings_scene.set_keyboard_focus(Some(Target::Focus(SettingsInput::DeviceAccountPassword)));
                 self.chrome_dirty = true;
                 return true;
             }
             Key::Named(NamedKey::Enter) if field == SettingsInput::DeviceAccountPassword => {
-                self.device_account_action(device_account::Action::Login);
+                if !event.repeat { self.device_account_action(device_account::Action::Login); }
                 return true;
             }
             Key::Named(NamedKey::Enter) if is_multiline(field) => {
@@ -1823,6 +1962,10 @@ impl App {
 
     pub(crate) fn native_settings_ime(&mut self, ime: winit::event::Ime) {
         if !self.settings_room_active() {
+            return;
+        }
+        if self.settings_input.is_some_and(|field| !self.settings_scene.field_is_current(field)) {
+            self.native_settings_blur();
             return;
         }
         match ime {
@@ -2138,6 +2281,29 @@ fn multiline_caret_from_point(layout: &MultilineLayout, point: (f32, f32)) -> us
     row.start + nearest_caret_boundary(&row.caret_xs, x).min(row.len)
 }
 
+fn single_line_caret_from_point(layout: &MultilineLayout, x: f32) -> usize {
+    let Some(row) = layout.rows.first() else { return 0; };
+    row.start + nearest_caret_boundary(&row.caret_xs, (x - layout.rect.0 - 11.0).max(0.0)).min(row.len)
+}
+
+fn single_line_layout(
+    field: SettingsInput, rect: Rect, value: &str, shown: &str, start: usize,
+    mut measure: impl FnMut(&str) -> f32,
+) -> MultilineLayout {
+    let visible: String = value.chars().skip(start).zip(shown.chars())
+        .take_while(|(source, drawn)| source == drawn).map(|(source, _)| source).collect();
+    let mut caret_xs = vec![0.0];
+    let mut prefix = String::new();
+    for character in visible.chars() {
+        prefix.push(character);
+        caret_xs.push(measure(&prefix));
+    }
+    MultilineLayout {
+        field, rect, rows: vec![VisualRow { start, len: visible.chars().count(), caret_xs }],
+        first_line: 0, visible_lines: 1,
+    }
+}
+
 fn move_multiline_caret(layout: &MultilineLayout, caret: usize, down: bool) -> usize {
     if layout.rows.is_empty() {
         return caret;
@@ -2226,10 +2392,13 @@ fn navigation_row(layout: &NavigationLayout, index: usize, scroll: f32) -> Rect 
 
 pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutput {
     crate::native_strings::set_language(&snapshot.language);
-    if snapshot.first_run {
-        return crate::native_onboarding::paint(g, &snapshot.onboarding, snapshot);
-    }
     begin_paint_feedback();
+    if snapshot.first_run {
+        let mut output = crate::native_onboarding::paint(g, &snapshot.onboarding, snapshot);
+        output.multiline_layouts = take_paint_feedback().multiline_layouts;
+        paint_keyboard_focus(g, snapshot, &output.hits);
+        return output;
+    }
     let (ax, ay, aw, ah) = snapshot.area;
     let nav_w = if aw < 760.0 { 154.0 } else { 200.0 };
     let mut hits = Vec::new();
@@ -2462,6 +2631,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             dropdown_scroll_max = paint_dropdown_popup(g, snapshot, &mut hits, id, anchor);
         }
     }
+    paint_keyboard_focus(g, snapshot, &hits);
     PaintOutput {
         hits,
         dropdown_scroll_max,
@@ -2470,6 +2640,15 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         caret_rect,
         multiline_layouts: feedback.multiline_layouts,
         motion_preview_visible: feedback.motion_preview_visible,
+    }
+}
+
+fn paint_keyboard_focus(g: &mut gpu::GpuRenderer, snapshot: &Snapshot, hits: &[Hit]) {
+    if let Some(target) = snapshot.keyboard_focus.as_ref() {
+        if let Some(hit) = keyboard_hits(hits).into_iter().find(|hit| same_keyboard_target(&hit.target, target)
+            || (snapshot.keyboard_anchor == Some(hit.layout_rect) && same_stepper_target(&hit.target, target))) {
+            crate::native_controls::focus_ring(g, hit.rect);
+        }
     }
 }
 
@@ -2899,13 +3078,6 @@ fn paint_appearance(
             SettingsInput::CustomThemeLabel,
             s.settings_caret,
             false,
-        );
-        register_clipped(
-            g,
-            hits,
-            Target::Setting(SettingsAction::FocusCustomThemeLabel(s.custom_active.clone())),
-            (x, *y + 18.0, (w - 196.0).max(160.0), 36.0),
-            HitCursor::Text,
         );
         button(
             g,
@@ -7229,6 +7401,15 @@ fn stepper_row(
     *y += ROW_H;
 }
 
+fn text_field_bounds(x: f32, y: f32, w: f32, has_label: bool, multiline: bool) -> Rect {
+    if multiline { (x, y + if has_label { 20.0 } else { 0.0 }, w, 132.0) }
+    else if !has_label { (x, y, w, CTL_H) }
+    else {
+        let field_w = (w * 0.45).max(160.0).min(w);
+        (x + w - field_w, y + (ROW_H - CTL_H) / 2.0, field_w, CTL_H)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn text_field(
     g: &mut gpu::GpuRenderer,
@@ -7245,19 +7426,14 @@ fn text_field(
     multiline: bool,
 ) {
     // 목업(플랫): 한 줄 입력은 이름 왼쪽·칸 오른쪽의 한 행. 여러 줄은 이름 위, 칸 아래.
-    let rect = if multiline {
+    let rect = text_field_bounds(x, y, w, !label.is_empty(), multiline);
+    if multiline {
         if !label.is_empty() {
             draw_text(g, x, y, label, 12.0, theme::text_dim(), false);
         }
-        let top = y + if label.is_empty() { 0.0 } else { 20.0 };
-        (x, top, w, 132.0)
-    } else if label.is_empty() {
-        (x, y, w, CTL_H)
-    } else {
-        let fw = (w * 0.45).max(160.0).min(w);
-        flat_row(g, x, y, w, label, "", w - fw - 12.0);
-        (x + w - fw, y + (ROW_H - CTL_H) / 2.0, fw, CTL_H)
-    };
+    } else if !label.is_empty() {
+        flat_row(g, x, y, w, label, "", w - rect.2 - 12.0);
+    }
     let focused = s.input == Some(field);
     round_rect(
         g,
@@ -7349,6 +7525,8 @@ fn text_field(
         } else {
             (fit(g, value, rect.2 - 22.0, 12.0, false), 0)
         };
+        push_multiline_layout(single_line_layout(field, rect, value, &shown, visible_start,
+            |text| g.measure_chrome_text(text, 12.0, false)));
         draw_text(
             g,
             rect.0 + 11.0,
@@ -7699,6 +7877,7 @@ fn register(hits: &mut Vec<Hit>, target: Target, rect: Rect, cursor: HitCursor) 
     hits.push(Hit {
         target,
         rect,
+        layout_rect: rect,
         cursor,
     });
 }
@@ -7710,16 +7889,16 @@ fn register_clipped(
     rect: Rect,
     cursor: HitCursor,
 ) {
-    if let Some(rect) = g.clip_hit(rect) {
-        register(hits, target, rect, cursor);
+    if let Some(visible) = g.clip_hit(rect) {
+        hits.push(Hit { target, rect: visible, layout_rect: rect, cursor });
     }
 }
 
 fn contains(rect: Rect, point: (f32, f32)) -> bool {
     point.0 >= rect.0
-        && point.0 <= rect.0 + rect.2
+        && point.0 < rect.0 + rect.2
         && point.1 >= rect.1
-        && point.1 <= rect.1 + rect.3
+        && point.1 < rect.1 + rect.3
 }
 
 fn draw_text(
@@ -8008,10 +8187,71 @@ mod tests {
         let hit = Hit {
             target: Target::Close,
             rect: (10.0, 20.0, 30.0, 40.0),
+            layout_rect: (10.0, 20.0, 30.0, 40.0),
             cursor: HitCursor::Pointer,
         };
-        assert!(contains(hit.rect, (40.0, 60.0)));
+        assert!(contains(hit.rect, (39.9, 59.9)));
+        assert!(!contains(hit.rect, (40.0, 60.0)));
         assert!(!contains(hit.rect, (40.1, 60.1)));
+    }
+
+    #[test]
+    fn single_line_click_uses_glyph_width_and_the_visible_window() {
+        let field = SettingsInput::Shell;
+        let rect = (10.0, 20.0, 260.0, 26.0);
+        let measure = |text: &str| text.chars().map(|ch| match ch { 'i' => 2.0, 'W' => 10.0, _ => 12.0 }).sum();
+        let short = single_line_layout(field, rect, "iW가", "iW가", 0, measure);
+        assert_eq!(single_line_caret_from_point(&short, 23.0), 1);
+        assert_eq!(single_line_caret_from_point(&short, 33.0), 2);
+        assert_eq!(single_line_caret_from_point(&short, 45.0), 3);
+        let scrolled = single_line_layout(field, rect, "앞앞iW가", "iW가", 2, measure);
+        assert_eq!(single_line_caret_from_point(&scrolled, 21.0), 2);
+        assert_eq!(single_line_caret_from_point(&scrolled, 33.0), 4);
+        let truncated = single_line_layout(field, rect, "iW가", "iW…", 0, measure);
+        assert_eq!(single_line_caret_from_point(&truncated, 240.0), 2);
+    }
+
+    #[test]
+    fn custom_name_field_hit_does_not_extend_over_its_label_or_lower_gap() {
+        let rect = text_field_bounds(0.0, 0.0, 604.0, true, false);
+        assert_eq!(rect.1, 7.0);
+        assert_eq!(rect.3, 26.0);
+        assert!(contains(rect, (400.0, 12.0)));
+        assert!(contains(rect, (400.0, 28.0)));
+        assert!(!contains(rect, (40.0, 20.0)));
+        assert!(!contains(rect, (400.0, 45.0)));
+    }
+
+    #[test]
+    fn clipped_picker_keeps_the_original_color_coordinates() {
+        let hit = Hit { target: Target::Setting(SettingsAction::PickerSV), rect: (10.0, 86.0, 100.0, 66.0),
+            layout_rect: (10.0, 20.0, 100.0, 132.0), cursor: HitCursor::Pointer };
+        assert_eq!(crate::settings::picker_relative_position(hit.layout_rect, (60.0, 86.0)), (0.5, 0.5));
+        assert_eq!(crate::settings::picker_relative_position(hit.layout_rect, (60.0, 152.0)), (0.5, 1.0));
+        assert!(!contains(hit.rect, (60.0, 40.0)));
+    }
+
+    #[test]
+    fn settings_content_excludes_statusbar_and_ime_anchor_includes_ui_zoom() {
+        let area = content_area((1000.0, 800.0), 200.0, 30.0);
+        assert!(contains(area, (900.0, 769.0)));
+        assert!(!contains(area, (900.0, 770.0)));
+        assert!(!contains(area, (199.0, 200.0)));
+        assert_eq!(ime_window_rect((100.0, 80.0, 2.0, 16.0), 1.5), (150.0, 120.0, 3.0, 24.0));
+    }
+
+    #[test]
+    fn keyboard_candidates_skip_overlays_and_coordinate_only_pickers() {
+        let hit = |target, rect, cursor| Hit { target, rect, layout_rect: rect, cursor };
+        let hits = vec![
+            hit(Target::Close, (0.0, 0.0, 26.0, 26.0), HitCursor::Pointer),
+            hit(Target::DropdownDismiss, (0.0, 0.0, 100.0, 100.0), HitCursor::Arrow),
+            hit(Target::Setting(SettingsAction::UiFont("system".into())), (10.0, 30.0, 80.0, 26.0), HitCursor::Pointer),
+            hit(Target::Setting(SettingsAction::PickerSV), (0.0, 110.0, 100.0, 100.0), HitCursor::Pointer),
+        ];
+        let reachable = keyboard_hits(&hits);
+        assert_eq!(reachable.len(), 1);
+        assert_eq!(reachable[0].target, Target::Setting(SettingsAction::UiFont("system".into())));
     }
 
     #[test]

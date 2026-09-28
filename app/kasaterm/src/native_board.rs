@@ -3064,7 +3064,7 @@ impl App {
                 x >= self.effective_sidebar_w()
                     && x <= size.width as f32 / scale
                     && y >= TITLE_HEIGHT
-                    && y <= size.height as f32 / scale
+                    && y < size.height as f32 / scale - self.status_h()
             })
     }
 

@@ -5839,6 +5839,7 @@ struct App {
     /// 그래야 전환 중에도 새 화면이 계속 갱신된다(캡처를 덮으면 그동안 화면이 언다).
     theme_fx: Option<(std::time::Instant, [u8; 4])>,
     cursor_px: (f32, f32),
+    cursor_sample: Option<handler::PointerSample>,
     /// Headless hover testing: KASATERM_AUTOHOVER="x,y" (logical px) pins
     /// the cursor so a screenshot can capture a hover state without a real
     /// mouse (cliclick needs Accessibility perms). Real CursorMoved events
@@ -6369,6 +6370,7 @@ impl App {
             last_blink_on: false,
             chrome_dirty: true,
             theme_fx: None,
+            cursor_sample: None,
             cursor_px: std::env::var("KASATERM_AUTOHOVER")
                 .ok()
                 .and_then(|s| {

@@ -2119,6 +2119,7 @@ fn hit(
     hits.push(crate::native_settings::Hit {
         target,
         rect,
+        layout_rect: rect,
         cursor,
     });
 }

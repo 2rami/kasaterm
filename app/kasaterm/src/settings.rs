@@ -2983,8 +2983,7 @@ impl App {
             Some(SettingsInput::DeviceHex(i)) => PickerSlot::Device(i),
             _ => return,
         };
-        let rx = ((p.0 - r.0) / r.2.max(1.0)).clamp(0.0, 1.0);
-        let ry = ((p.1 - r.1) / r.3.max(1.0)).clamp(0.0, 1.0);
+        let (rx, ry) = picker_relative_position(r, p);
         let (h, s, v) = self.set_picker_hsv;
         self.set_picker_hsv = match action {
             // 360.0 은 0.0 과 같은 색이지만 마커가 왼쪽 끝으로 감겨 보인다.
@@ -3014,8 +3013,7 @@ impl App {
             Some(SettingsInput::DeviceHex(i)) => PickerSlot::Device(i),
             _ => return,
         };
-        let rx = ((p.0 - r.0) / r.2.max(1.0)).clamp(0.0, 1.0);
-        let ry = ((p.1 - r.1) / r.3.max(1.0)).clamp(0.0, 1.0);
+        let (rx, ry) = picker_relative_position(r, p);
         let (h, s, v) = self.set_picker_hsv;
         self.set_picker_hsv = match action {
             SettingsAction::PickerHue => ((rx * 360.0).min(359.9), s, v),
@@ -3682,6 +3680,11 @@ fn local_stamp() -> String {
     {
         secs.to_string()
     }
+}
+
+pub(crate) fn picker_relative_position(rect: (f32, f32, f32, f32), point: (f32, f32)) -> (f32, f32) {
+    (((point.0 - rect.0) / rect.2.max(1.0)).clamp(0.0, 1.0),
+        ((point.1 - rect.1) / rect.3.max(1.0)).clamp(0.0, 1.0))
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {

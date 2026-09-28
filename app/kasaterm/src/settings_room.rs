@@ -31,6 +31,11 @@ pub(crate) struct SettingsScene {
     scroll_max: f32,
     navigation_scroll: f32,
     hits: Vec<crate::native_settings::Hit>,
+    keyboard_focus: Option<crate::native_settings::Target>,
+    keyboard_anchor: Option<crate::native_settings::Rect>,
+    pending_field_focus: Option<SettingsInput>,
+    activation_keys: std::collections::HashSet<winit::keyboard::NamedKey>,
+    view_height: f32,
     caret_rect: Option<crate::native_settings::Rect>,
     first_run: bool,
     onboarding: crate::native_onboarding::State,
@@ -64,6 +69,11 @@ impl Default for SettingsScene {
             scroll_max: 0.0,
             navigation_scroll: 0.0,
             hits: Vec::new(),
+            keyboard_focus: None,
+            keyboard_anchor: None,
+            pending_field_focus: None,
+            activation_keys: std::collections::HashSet::new(),
+            view_height: 0.0,
             caret_rect: None,
             first_run: crate::onboarding::launch_pending(),
             onboarding: crate::native_onboarding::State::default(),
@@ -93,6 +103,7 @@ impl SettingsScene {
     }
 
     pub(crate) fn toggle_disclosure(&mut self, id: &'static str) {
+        self.invalidate_hits();
         if !self.disclosures.remove(id) {
             self.disclosures.insert(id);
         }
@@ -182,6 +193,7 @@ impl SettingsScene {
             self.category = category;
             self.scroll = 0.0;
             self.hits.clear();
+            self.keyboard_focus = None;
             self.caret_rect = None;
             self.close_dropdown();
         }
@@ -196,6 +208,7 @@ impl SettingsScene {
     }
 
     pub(crate) fn toggle_dropdown(&mut self, id: crate::native_settings::DropdownId) {
+        self.invalidate_hits();
         self.dropdown = if self.dropdown == Some(id) { None } else { Some(id) };
         self.dropdown_scroll = 0.0;
         self.dropdown_scroll_max = 0.0;
@@ -204,6 +217,7 @@ impl SettingsScene {
     /// 열려 있던 것을 닫았으면 `true`.
     pub(crate) fn close_dropdown(&mut self) -> bool {
         let was_open = self.dropdown.take().is_some();
+        if was_open { self.invalidate_hits(); }
         self.dropdown_scroll = 0.0;
         self.dropdown_scroll_max = 0.0;
         was_open
@@ -213,6 +227,7 @@ impl SettingsScene {
         let next = (self.dropdown_scroll + delta).clamp(0.0, self.dropdown_scroll_max);
         let changed = (next - self.dropdown_scroll).abs() > f32::EPSILON;
         self.dropdown_scroll = next;
+        if changed { self.invalidate_hits(); }
         changed
     }
 
@@ -228,6 +243,7 @@ impl SettingsScene {
         let next = (self.navigation_scroll + delta).clamp(0.0, max.max(0.0));
         let changed = (next - self.navigation_scroll).abs() > f32::EPSILON;
         self.navigation_scroll = next;
+        if changed { self.invalidate_hits(); }
         changed
     }
 
@@ -235,7 +251,74 @@ impl SettingsScene {
         let next = (self.scroll + delta).clamp(0.0, self.scroll_max);
         let changed = (next - self.scroll).abs() > f32::EPSILON;
         self.scroll = next;
+        if changed { self.invalidate_hits(); }
         changed
+    }
+
+    pub(crate) fn invalidate_hits(&mut self) {
+        self.hits.clear();
+        self.keyboard_focus = None;
+        self.caret_rect = None;
+    }
+
+    pub(crate) fn keyboard_focus(&self) -> Option<&crate::native_settings::Target> {
+        self.keyboard_focus.as_ref()
+    }
+
+    pub(crate) fn keyboard_anchor(&self) -> Option<crate::native_settings::Rect> { self.keyboard_anchor }
+
+    pub(crate) fn arm_activation_key(&mut self, key: winit::keyboard::NamedKey) {
+        self.activation_keys.insert(key);
+    }
+
+    pub(crate) fn consume_activation_key(&mut self, key: winit::keyboard::NamedKey, pressed: bool, repeat: bool) -> bool {
+        if !pressed { self.activation_keys.remove(&key) }
+        else if repeat { self.activation_keys.contains(&key) }
+        else { self.activation_keys.remove(&key); false }
+    }
+
+    pub(crate) fn prepare_field_focus(&mut self, field: SettingsInput) { self.pending_field_focus = Some(field); }
+
+    pub(crate) fn field_is_current(&self, field: SettingsInput) -> bool {
+        self.pending_field_focus == Some(field)
+            || self.hits.iter().any(|hit| hit.target == crate::native_settings::Target::Focus(field))
+    }
+
+    pub(crate) fn set_keyboard_focus(&mut self, target: Option<crate::native_settings::Target>) {
+        self.keyboard_focus = target;
+        if let Some(rect) = self.keyboard_hit().map(|hit| hit.layout_rect) {
+            self.keyboard_anchor = Some(rect);
+        }
+    }
+
+    pub(crate) fn keyboard_hit(&self) -> Option<&crate::native_settings::Hit> {
+        let target = self.keyboard_focus.as_ref()?;
+        crate::native_settings::keyboard_hits(&self.hits).into_iter()
+            .find(|hit| crate::native_settings::same_keyboard_target(&hit.target, target)
+                || (self.keyboard_anchor == Some(hit.layout_rect)
+                    && crate::native_settings::same_stepper_target(&hit.target, target)))
+    }
+
+    pub(crate) fn advance_keyboard_focus(&mut self, reverse: bool) -> Option<crate::native_settings::Hit> {
+        let choices = crate::native_settings::keyboard_hits(&self.hits);
+        if choices.is_empty() { self.keyboard_focus = None; return None; }
+        let current = self.keyboard_focus.as_ref().and_then(|target| choices.iter()
+            .position(|hit| crate::native_settings::same_keyboard_target(&hit.target, target)));
+        let index = match (current, reverse) {
+            (Some(index), true) => (index + choices.len() - 1) % choices.len(),
+            (Some(index), false) => (index + 1) % choices.len(),
+            (None, true) => choices.len() - 1,
+            (None, false) => 0,
+        };
+        let hit = (*choices[index]).clone();
+        self.keyboard_focus = Some(hit.target.clone());
+        self.keyboard_anchor = Some(hit.layout_rect);
+        Some(hit)
+    }
+
+    pub(crate) fn scroll_page(&mut self, forward: bool) -> bool {
+        let distance = self.view_height.max(40.0) * 0.8;
+        self.scroll_by(if forward { distance } else { -distance })
     }
 
     /// 등록된 클릭 영역 전부. 화면을 눌러 보지 않고도 「눌릴 수 없는 것」을 셀 수
@@ -247,7 +330,7 @@ impl SettingsScene {
     pub(crate) fn hit_at(&self, x: f32, y: f32) -> Option<&crate::native_settings::Hit> {
         self.hits.iter().rev().find(|hit| {
             let (rx, ry, rw, rh) = hit.rect;
-            x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+            x >= rx && x < rx + rw && y >= ry && y < ry + rh
         })
     }
 
@@ -279,6 +362,10 @@ impl SettingsScene {
         self.scroll_max = (content_h - view_h).max(0.0);
         self.scroll = self.scroll.clamp(0.0, self.scroll_max);
         self.hits = hits;
+        self.pending_field_focus = None;
+        self.view_height = view_h;
+        self.keyboard_focus = self.keyboard_hit().map(|hit| hit.target.clone());
+        self.keyboard_anchor = self.keyboard_hit().map(|hit| hit.layout_rect);
         self.caret_rect = caret_rect;
         self.multiline_layouts = multiline_layouts;
         self.motion_preview_visible = motion_preview_visible;
@@ -306,6 +393,7 @@ impl SettingsScene {
 
     pub(crate) fn reset_scroll(&mut self) {
         self.scroll = 0.0;
+        self.invalidate_hits();
     }
 
     pub(crate) fn inspected_theme(&self) -> Option<&str> {
@@ -882,11 +970,13 @@ mod tests {
         let bottom = Hit {
             target: Target::Category(SettingsCat::General),
             rect: (0.0, 0.0, 20.0, 20.0),
+            layout_rect: (0.0, 0.0, 20.0, 20.0),
             cursor: HitCursor::Pointer,
         };
         let top = Hit {
             target: Target::Category(SettingsCat::Claude),
             rect: (5.0, 5.0, 10.0, 10.0),
+            layout_rect: (5.0, 5.0, 10.0, 10.0),
             cursor: HitCursor::Pointer,
         };
         scene.finish_paint(
@@ -908,8 +998,6 @@ mod tests {
             }],
             true,
         );
-        assert!(scene.scroll_by(500.0));
-        assert_eq!(scene.scroll(), 200.0);
         assert_eq!(scene.category(), SettingsCat::Appearance);
         assert_eq!(scene.caret_rect(), Some((4.0, 5.0, 2.0, 12.0)));
         assert!(scene.motion_preview_visible());
@@ -918,6 +1006,10 @@ mod tests {
             scene.hit_at(8.0, 8.0).map(|hit| &hit.target),
             Some(Target::Category(SettingsCat::Claude))
         ));
+        assert!(scene.scroll_by(500.0));
+        assert_eq!(scene.scroll(), 200.0);
+        assert!(scene.hit_at(8.0, 8.0).is_none());
+        assert!(scene.caret_rect().is_none());
         assert!(!scene.first_run());
 
         scene.arm_field_backup(crate::native_settings::FieldBackup {
@@ -930,6 +1022,90 @@ mod tests {
         let (backup, dirty) = scene.take_field_backup();
         assert!(dirty);
         assert_eq!(backup.map(|value| value.value), Some("/bin/zsh".to_string()));
+    }
+
+    fn keyboard_test_hit(target: crate::native_settings::Target, x: f32) -> crate::native_settings::Hit {
+        let rect = (x, 10.0, 26.0, 26.0);
+        crate::native_settings::Hit { target, rect, layout_rect: rect, cursor: crate::native_settings::HitCursor::Pointer }
+    }
+
+    fn keyboard_test_paint(scene: &mut SettingsScene, hits: Vec<crate::native_settings::Hit>) {
+        scene.finish_paint(hits, 0.0, 500.0, 100.0, None, Vec::new(), false);
+    }
+
+    #[test]
+    fn keyboard_focus_cycles_forward_backward_and_rejects_stale_categories() {
+        use crate::native_settings::Target;
+        let mut scene = SettingsScene::default();
+        let first = Target::Setting(SettingsAction::ToggleCharacterAppearance);
+        let second = Target::Setting(SettingsAction::ToggleClaudePersona);
+        keyboard_test_paint(&mut scene, vec![keyboard_test_hit(first.clone(), 0.0), keyboard_test_hit(second.clone(), 40.0)]);
+        assert_eq!(scene.advance_keyboard_focus(false).unwrap().target, first);
+        assert_eq!(scene.advance_keyboard_focus(false).unwrap().target, second);
+        assert_eq!(scene.advance_keyboard_focus(true).unwrap().target, first);
+        assert_eq!(scene.advance_keyboard_focus(true).unwrap().target, second);
+        scene.set_category(SettingsCat::Appearance);
+        assert!(scene.keyboard_hit().is_none());
+        assert!(scene.advance_keyboard_focus(false).is_none());
+    }
+
+    #[test]
+    fn keyboard_focus_updates_toggle_and_stepper_values_without_changing_controls() {
+        use crate::native_settings::Target;
+        let mut scene = SettingsScene::default();
+        let before = Target::Setting(SettingsAction::AgentStatuslineCustom(true));
+        keyboard_test_paint(&mut scene, vec![keyboard_test_hit(before, 0.0)]);
+        scene.advance_keyboard_focus(false);
+        let after = Target::Setting(SettingsAction::AgentStatuslineCustom(false));
+        keyboard_test_paint(&mut scene, vec![keyboard_test_hit(after.clone(), 0.0)]);
+        assert_eq!(scene.keyboard_hit().unwrap().target, after);
+        keyboard_test_paint(&mut scene, vec![
+            keyboard_test_hit(Target::Setting(SettingsAction::StatusBarH(28)), 0.0),
+            keyboard_test_hit(Target::Setting(SettingsAction::StatusBarH(32)), 50.0),
+        ]);
+        scene.advance_keyboard_focus(true);
+        keyboard_test_paint(&mut scene, vec![
+            keyboard_test_hit(Target::Setting(SettingsAction::StatusBarH(30)), 0.0),
+            keyboard_test_hit(Target::Setting(SettingsAction::StatusBarH(34)), 50.0),
+        ]);
+        assert_eq!(scene.keyboard_hit().unwrap().target, Target::Setting(SettingsAction::StatusBarH(34)));
+        keyboard_test_paint(&mut scene, vec![]);
+        assert!(scene.keyboard_hit().is_none());
+    }
+
+    #[test]
+    fn keyboard_scroll_and_dropdown_changes_invalidate_unpainted_targets() {
+        use crate::native_settings::{DropdownId, Target};
+        let mut scene = SettingsScene::default();
+        keyboard_test_paint(&mut scene, vec![keyboard_test_hit(Target::Close, 0.0)]);
+        scene.advance_keyboard_focus(false);
+        assert!(scene.scroll_page(true));
+        assert!(scene.keyboard_hit().is_none());
+        keyboard_test_paint(&mut scene, vec![keyboard_test_hit(Target::Close, 0.0)]);
+        scene.advance_keyboard_focus(false);
+        scene.toggle_dropdown(DropdownId::UiFont);
+        assert!(scene.keyboard_hit().is_none());
+        scene.close_dropdown();
+        assert!(scene.keyboard_hit().is_none());
+    }
+
+    #[test]
+    fn activation_keys_remain_latched_across_focus_changes_until_key_up() {
+        use winit::keyboard::NamedKey;
+        let mut scene = SettingsScene::default();
+        scene.arm_activation_key(NamedKey::Enter);
+        scene.arm_activation_key(NamedKey::Space);
+        scene.set_category(SettingsCat::Appearance);
+        scene.prepare_field_focus(SettingsInput::Shell);
+        assert!(scene.consume_activation_key(NamedKey::Enter, true, true));
+        assert!(scene.consume_activation_key(NamedKey::Space, true, true));
+        assert!(scene.consume_activation_key(NamedKey::Enter, false, false));
+        assert!(!scene.consume_activation_key(NamedKey::Enter, true, true));
+        assert!(scene.consume_activation_key(NamedKey::Space, true, true));
+        assert!(scene.consume_activation_key(NamedKey::Space, false, false));
+        scene.arm_activation_key(NamedKey::Enter);
+        assert!(!scene.consume_activation_key(NamedKey::Enter, true, false));
+        assert!(!scene.consume_activation_key(NamedKey::Enter, true, true));
     }
 
     #[test]

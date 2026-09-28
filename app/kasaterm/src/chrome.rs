@@ -3396,6 +3396,7 @@ impl App {
     /// cell grid + PTY size. Shared by zoom changes and (future) DPI
     /// scale-factor changes when the window moves between monitors.
     pub(crate) fn apply_effective_scale(&mut self) {
+        self.reproject_main_cursor();
         let eff = self.effective_scale();
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_scale(eff);
