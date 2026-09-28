@@ -954,13 +954,13 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                                 bg_launch.push((id.to_string(), clip(desc, 40)));
                             }
                             // Monitor 도구도 백그라운드 작업(사용자: 유즈 "2 monitors" 누락) — 단
-                            // board-watch/wake-watch 는 협업 상시 감시(작업 아님)라 제외.
+                            // board-watch·학생 기다리기(wait)는 협업 감시(작업 아님)라 제외.
                             if name == "Monitor" {
                                 let cmd = b
                                     .pointer("/input/command")
                                     .and_then(|x| x.as_str())
                                     .unwrap_or("");
-                                if !cmd.contains("kasaterm-board-watch") && !cmd.contains("wake-watch") {
+                                if !cmd.contains("kasaterm-board-watch") && !cmd.contains("kasaterm-cli wait") {
                                     let id = b.get("id").and_then(|x| x.as_str()).unwrap_or("");
                                     let desc = b
                                         .pointer("/input/description")

@@ -119,7 +119,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 
 **협업 스트림 (blocking — 반드시 background로)**
 
-`board-watch [interval_s]`(변경된 pane 상태를 1줄/변경으로 스트림 → Claude Code Monitor에 먹임). §5. ⚠️ `wake-watch <id>` 는 **쓰지 마라** — 동료가 끝났는데 완료를 못 잡고 40분 타임아웃으로 죽은 실측이 있다(2026-08-10). board-watch로 갈음한다.
+`board-watch [interval_s]`(변경된 pane 상태를 1줄/변경으로 스트림 → Claude Code Monitor에 먹임). §5. 학생 하나의 완료만 기다릴 때는 `wait <이름> --since <값>` 을 background 로 — 그 학생의 done 보고에서 끝나고 깨운다(옛 `wake-watch` 는 완료를 못 잡아 지웠다).
 
 **결과물 띄우기 헬퍼** (CLI 서브명령 아님 — 별도 실행파일. 상세 패턴 D):
 `imgopen <절대경로.png>`(이미지 → 새 pane, 맞춤↔원본) · `mdopen <절대경로.md>`(마크다운 → 노션풍 렌더 pane).
@@ -317,6 +317,19 @@ echo '{"tool_name":"SendUserFile","tool_input":{"files":["/tmp/foo.png"]}}' \
 ### 패턴 F — 학생 pane 스폰 (오케스트레이터: 이름·색·모델·effort 지정 claude)
 
 오케스트레이터(작업 배분하는 pane — 아무 학생이나 가능)가 작업을 병렬 배분할 때 학생 claude pane을 만드는 표준 레시피. teammate 플래그로 이름·색이 **부팅 시점에 네이티브 표시**된다(입력박스 상단 `@이름` — v2.1.207 실측).
+
+**기본은 `summon` 한 줄이다(2026-09-28).** 아래 수동 레시피의 쪼개기·부팅·보드 신원 확인·브리프 tell 을 한 번에 한다:
+
+```bash
+kasaterm-cli summon --cwd /path/to/repo --name "<작업명>" "<배경·파일 포인터·검증 기준·완료 조건>"
+# → 미도리(%12) 소환 · 지시 들어갔다 · 영수증 kt1.…
+#   done 보고는 이 창 입력으로 들어와요. 막고 기다리려면: kasaterm-cli wait %12 --since 1790…
+kasaterm-cli summon --cwd /path/to/repo --cmd 'glm claude --dangerously-skip-permissions' "…"   # 가벼운 일은 glm 학생
+```
+
+브리프에 done 보고 줄이 없으면 summon 이 붙인다. pane 안에서 Agent 도구(general-purpose·fork)는 `kasaterm-subagent-guard.py` 가
+막는다 — Explore·Plan 은 통과, 사람이 서브에이전트를 직접 청했으면 description 에 `[subagent]`. 아래 수동 레시피는 summon 이
+못 하는 자리(다른 기계에 띄우기 등)용이다.
 
 **위임 기본값(거노 확정 2026-07-19): kasaterm 안에서 병렬·장시간 작업 위임은 학생 pane 스폰이 기본이다.** Agent 툴 백그라운드 서브에이전트는 board·statusline에 안 보여 거노가 진행을 지켜볼 수 없다 — Agent 툴은 kasaterm 셸 밖이거나 거노가 명시할 때만. 거노가 모델을 지정하면("오푸스로") 그 지시가 스킬의 기본 모델보다 우선하며, 이미 실행 중인 학생의 모델 전환은 `kasaterm-cli tell <id> "/model claude-opus-5[1m]"`(TUI 슬래시 명령 주입)로 컨텍스트 유지한 채 가능하다 — 반드시 풀네임+[1m] 변형으로.
 
@@ -840,7 +853,7 @@ kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|attention)|
 
 - **필터는 필수** — 안 걸면 매 도구 호출까지 흘러나와 12초에 8줄이 되고 알림 폭주로 Monitor가 자동 중지된다(실측).
 - **`idle`은 넣지 마라** — 「쉬는 중」일 뿐 완료가 아니고, board-watch는 **모든 pane**을 보므로 내가 안 기다리는 남의 턴 종료마다 깨운다. 완료의 정본은 `[done:`.
-- ⚠️ **`wake-watch`는 쓰지 마라** — 동료가 끝났는데 완료를 못 잡고 40분 타임아웃으로 죽은 실측이 있다(2026-08-10).
+- 한 학생의 완료만 기다리면 Monitor 대신 `kasaterm-cli wait <이름> --since <값>` 을 `run_in_background` 로 — done 보고에서 끝나고 깨운다. 종료 코드 0 성공·1 실패·3 시간 초과·4 사라짐.
 - 깨어나면 `board`/`peek %3`/`activity %3`로 결과를 확인하고 이어간다.
 
 빌드·CI·서버 로그처럼 **기계**를 지켜보는 것은 규칙이 다르다 — 한 번만 알면 되는 것(빌드 끝남)은 Bash `run_in_background`로 스스로 끝나는 명령을 던지고 턴을 놓고, 생길 때마다 알아야 하는 것(오류 발생)만 Monitor다. 자기 턴 안에서 `sleep`을 도는 것이 셋 중 가장 비싸다.

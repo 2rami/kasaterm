@@ -27,6 +27,8 @@ const TRACKED: &[&str] = &[
     "waiting_for",
     "done_outcome",
     "done_summary",
+    // 보고 시각(epoch ms) — `wait --since` 가 옛 브리프의 보고를 가른다.
+    "done_at_ms",
     "detached",
     "place_state",
     // 나쵸가 띄운 세션이면 bind 때 env 에 있던 일 id — 표시용 출처일 뿐 판정·등록 근거가 아니다
@@ -224,7 +226,7 @@ pub fn guard_observation(
     for key in ["title", "request", "progress"] {
         row[key] = json!("");
     }
-    for key in ["character", "harness", "done_outcome", "done_summary", "origin_task_env"] {
+    for key in ["character", "harness", "done_outcome", "done_summary", "done_at_ms", "origin_task_env"] {
         row[key] = Value::Null;
     }
     row["status"] = json!("unknown");
@@ -289,6 +291,8 @@ pub fn normalize_panes(machine: &str, label: &str, rows: &[Value], at: u64) -> R
                     clean[name] = json!(short(text, 512));
                 } else if let Some(flag) = row[name].as_bool() {
                     clean[name] = json!(flag);
+                } else if let Some(number) = row[name].as_u64() {
+                    clean[name] = json!(number);
                 }
             }
             if !matches!(

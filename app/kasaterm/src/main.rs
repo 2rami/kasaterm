@@ -7734,8 +7734,11 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // 학생이 멀쩡한 줄 알고 일을 시키고 그 작업이 사용자 눈 밖에서 돌았다
             // (사용자 2026-08-15). board 의 `detached` 로 이미 알 수 있지만 그건 보러
             // 가야 보이고, 안 보고 보내는 것이 사고의 형태다.
+            // 서브에이전트(Agent)는 보드·화면에 안 보여 사람이 진행을 못 지켜본다 — 막고
+            // `kasaterm-cli summon` 으로 학생을 세우게 한다(읽기 전용 탐색·설계는 통과).
             "PreToolUse": [
                 { "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] },
+                { "matcher": "Agent|Task", "hooks": [cmd("kasaterm-subagent-guard.py", 5)] },
                 { "hooks": [cmd("kasaterm-closed-pane-guard.py", 5000)] },
                 { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
             ],

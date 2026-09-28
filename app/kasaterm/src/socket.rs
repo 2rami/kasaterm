@@ -330,6 +330,8 @@ struct DoneReport {
     outcome: String,
     summary: String,
     at: std::time::Instant,
+    /// 보고 시각(epoch ms) — `wait --since` 가 옛 브리프의 보고와 새 보고를 가른다.
+    at_ms: u64,
     idle_seen: bool,
 }
 
@@ -3110,6 +3112,7 @@ impl Backend for PtyBackend {
                 if status == "idle" { report.idle_seen = true; }
                 row["done_outcome"] = json!(report.outcome);
                 row["done_summary"] = json!(report.summary);
+                row["done_at_ms"] = json!(report.at_ms);
             }
             drop(done);
             // 표시용 출처(`nacho_inbox::origin_tasks`). 거울 줄엔 안 싣는다 — 정본은 원본 기계 줄이다.
@@ -3811,6 +3814,8 @@ impl Backend for PtyBackend {
                 outcome: outcome.to_string(),
                 summary: summary.to_string(),
                 at: std::time::Instant::now(),
+                at_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64).unwrap_or_default(),
                 idle_seen: false,
             },
         );

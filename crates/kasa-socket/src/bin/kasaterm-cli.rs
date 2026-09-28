@@ -412,31 +412,17 @@ fn run() -> Result<Option<Response>> {
         );
         std::process::exit(if r.ok { 0 } else { 1 });
     }
-    // `wake-watch <surface>` blocks until ONE teammate finishes a turn, then
-    // exits — the inverse of board-watch (which streams forever). Meant to run
-    // as a Claude Code background task: its exit auto-re-invokes the idle pane
-    // that launched it, so a worker waiting on a teammate wakes the instant the
-    // teammate is done, without the input-line pollution `tell` causes.
-    if cmd == "wake-watch" {
-        let target = args
-            .iter()
-            .find(|a| a.starts_with('%'))
-            .cloned()
-            .ok_or_else(|| anyhow!("wake-watch needs <surface_id> (e.g. wake-watch %3)"))?;
-        let interval = args
-            .iter()
-            .skip(1)
-            .find_map(|s| s.parse::<u64>().ok())
-            .unwrap_or(3);
-        let timeout = args
-            .iter()
-            .position(|a| a == "--timeout")
-            .and_then(|i| args.get(i + 1))
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(1800);
+    // 학생 한 명을 서브에이전트처럼 부르고 기다리는 두 명령. 서브에이전트는 보드·화면에 안 보여
+    // 사람이 진행을 못 지켜본다 — 그런데 학생 소환은 쪼개기·부팅·보드 확인·tell 네 단계라 Claude 가
+    // 한 번에 끝나는 Agent 도구로 흘렀다(2026-09-28). `summon` 이 그 넷을, `wait` 가 완료 기다리기를 맡는다.
+    if cmd == "summon" {
         let socket_path = resolve_socket_path()?;
-        run_wake_watch(&socket_path, &target, interval, timeout)?;
+        run_summon(&socket_path, &args)?;
         return Ok(None);
+    }
+    if cmd == "wait" {
+        let socket_path = resolve_socket_path()?;
+        std::process::exit(run_wait(&socket_path, &args)?);
     }
     // `dismiss <id>…` — 일 끝난 학생 pane 을 한 번에 닫는다. 인사말·완료 보고를
     // 주고받는 대신 오케스트레이터가 그냥 닫는다(회수할 게 있으면 git 이 막는다).
@@ -937,97 +923,271 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
     }
 }
 
-/// Poll `collab.board` until `target` finishes one turn, then print a single
-/// line and RETURN (board-watch streams forever; this exits). Run as a Claude
-/// Code background task so its exit auto-wakes the launching pane.
-///
-/// "Finished" = we saw `target` go working/busy/waiting at least once (armed),
-/// then settle back to idle/success — or vanish from the board. If it never
-/// starts within `timeout_secs`, exit with a timeout line so the waiter still
-/// wakes and can decide. Transient socket failures are swallowed (keep polling).
-fn run_wake_watch(
-    socket_path: &str,
-    target: &str,
-    interval_secs: u64,
-    timeout_secs: u64,
-) -> Result<()> {
-    let req = Request {
-        id: "wake-watch".into(),
-        method: "collab.board".into(),
-        params: json!({}),
+/// 학생 소환 브리프 끝에 붙이는 한 줄 — 완료 보고가 없으면 `wait` 가 끝나지 않는다.
+const SUMMON_DONE_HINT: &str = "끝나면 `kasaterm-cli done succeeded '한 줄 요약'`(못 끝냈으면 failed)으로 보고해 주세요.";
+/// 부팅한 claude 가 보드에 설 때까지 기다리는 상한.
+const SUMMON_BOOT_SECS: u64 = 90;
+
+/// `summon [--cwd 폴더] [--cmd 부팅명령] [--name 제목] [--tab] [--stdin] [브리프…]` — 부른 pane 옆에 학생을
+/// 세우고, 그 claude 가 보드에 설 때까지 기다렸다가 브리프를 tell 로 건넨다. 학생의 `done` 은 부른 pane
+/// 입력창으로 들어온다(`spawned_by`). 창은 실패해도 닫지 않는다 — 사람이 무엇이 멎었는지 봐야 한다.
+fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
+    let (mut cwd, mut name, mut boot) = (None::<String>, None::<String>, "claude".to_string());
+    let (mut tab, mut stdin) = (false, false);
+    let mut words: Vec<String> = Vec::new();
+    let value = |i: usize| args.get(i + 1).cloned().ok_or_else(|| anyhow!("{} 뒤에 값이 필요해요", args[i]));
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "--cwd" => { cwd = Some(value(i)?); i += 2; }
+            "--cmd" => { boot = value(i)?; i += 2; }
+            "--name" => { name = Some(value(i)?); i += 2; }
+            "--tab" => { tab = true; i += 1; }
+            "--stdin" => { stdin = true; i += 1; }
+            "--" => { words.extend(args[i + 1..].iter().cloned()); break; }
+            a if a.starts_with("--") => return Err(anyhow!("모르는 옵션: {a}")),
+            _ => { words.push(arg.clone()); i += 1; }
+        }
+    }
+    let brief = if stdin {
+        if !words.is_empty() { return Err(anyhow!("--stdin 과 브리프 인자는 함께 못 써요")); }
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+        text
+    } else {
+        words.join(" ")
     };
-    let interval = interval_secs.max(1);
-    let max_ticks = (timeout_secs / interval).max(1);
-    let mut armed = false;
-    let mut ticks = 0u64;
-    loop {
-        let mut seen = false;
-        if let Ok(resp) = roundtrip(socket_path, &req) {
-            if let Some(board) = resp
-                .result
-                .as_ref()
-                .and_then(|v| v.get("board"))
-                .and_then(|v| v.as_array())
+    if brief.trim().is_empty() {
+        return Err(anyhow!("summon 은 브리프가 필요해요 — kasaterm-cli summon --cwd <레포> \"할 일\""));
+    }
+    let cwd = match cwd { Some(dir) => std::path::PathBuf::from(dir), None => std::env::current_dir()? };
+    let cwd = cwd.canonicalize().with_context(|| format!("{} 폴더가 없어요", cwd.display()))?;
+
+    let from = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty());
+    let since = epoch_ms();
+    let (method, params) = if tab {
+        ("surface.new_tab", json!({ "outer": from, "focus": false }))
+    } else {
+        ("surface.split", json!({ "direction": "auto", "focus": false, "from": from }))
+    };
+    let made = roundtrip(socket_path, &Request { id: json!("summon"), method: method.into(), params })?;
+    if !made.ok {
+        return Err(anyhow!(made.error.map(|e| e.message).unwrap_or_else(|| "pane 을 못 만들었어요".into())));
+    }
+    let surface = made.result.as_ref().and_then(|r| r.pointer("/surface/id")).and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("새 pane 번호를 못 받았어요"))?.to_string();
+    if let Some(title) = &name {
+        let _ = roundtrip(socket_path, &Request { id: json!("summon"), method: "surface.rename".into(),
+            params: json!({ "surface_id": surface, "title": title }) });
+    }
+
+    // 갓 만든 pane 은 번호 재사용 때문에 「pane 없음」 가드가 한두 번 헛걸린다(실측) — 잠깐 두고 다시 보낸다.
+    let line = format!("cd {} && {boot}\n", shell_quote(&cwd.to_string_lossy()));
+    let mut refused = None;
+    for attempt in 0..3 {
+        if attempt > 0 { std::thread::sleep(std::time::Duration::from_millis(1500)); }
+        let sent = roundtrip(socket_path, &Request { id: json!("summon"), method: "surface.send_text".into(),
+            params: json!({ "surface_id": surface, "text": line }) })?;
+        refused = (!sent.ok).then(|| sent.error.map(|e| e.message).unwrap_or_default());
+        if refused.is_none() { break; }
+    }
+    if let Some(why) = refused {
+        return Err(anyhow!("{surface} 에 부팅 명령을 못 넣었어요: {why}"));
+    }
+
+    // 브리프는 claude 가 뜬 뒤에만 tell 로 — 셸 명령줄에 섞이면 부팅이 깨진다(skills/kasapane).
+    let started = std::time::Instant::now();
+    let row = loop {
+        if let Ok(rows) = snapshot_rows(socket_path, true) {
+            if let Some(row) = rows.into_iter().find(|p| row_address(p, "surface_id") == surface
+                && !row_address(p, "session_id").is_empty())
             {
-                for e in board {
-                    if e.get("surface_id").and_then(|v| v.as_str()) != Some(target) {
-                        continue;
-                    }
-                    seen = true;
-                    let mut status = e
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    // 사용자가 닫아 화면에 없는 pane — 새 일을 시키면 안 보이는
-                    // 곳에서 돈다(2026-08-15). 상태에 못 박아 사람도 필터도 잡게.
-                    if e.get("detached").and_then(|v| v.as_bool()).unwrap_or(false) {
-                        status = format!("{status}·화면밖");
-                    }
-                    let intent = e.get("intent").and_then(|v| v.as_str()).unwrap_or("");
-                    let character = e.get("character").and_then(|v| v.as_str()).unwrap_or("");
-                    let who = if character.is_empty() {
-                        target.to_string()
-                    } else {
-                        format!("{character}({target})")
-                    };
-                    match status.as_str() {
-                        "working" | "busy" | "waiting" => armed = true,
-                        "idle" | "success" if armed => {
-                            let tail = if intent.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" — {intent}")
-                            };
-                            let mut out = std::io::stdout().lock();
-                            let _ = writeln!(out, "{who} 작업 끝남{tail}");
-                            let _ = out.flush();
-                            return Ok(());
-                        }
-                        _ => {}
-                    }
-                }
+                break row;
             }
         }
-        // Vanished after we saw it run → closed/done. Wake the waiter.
-        if armed && !seen {
-            let mut out = std::io::stdout().lock();
-            let _ = writeln!(out, "{target} 사라짐 (pane closed) — 끝난 걸로 본다");
-            let _ = out.flush();
-            return Ok(());
+        if started.elapsed() > std::time::Duration::from_secs(SUMMON_BOOT_SECS) {
+            return Err(anyhow!("{surface} 에 {SUMMON_BOOT_SECS}초 안에 학생이 안 떴어요 — `kasaterm-cli peek {surface}` 로 화면을 보세요(창은 그대로 뒀어요)"));
         }
-        ticks += 1;
-        if ticks >= max_ticks {
-            let mut out = std::io::stdout().lock();
-            let _ = writeln!(
-                out,
-                "{target} wake-watch {timeout_secs}s 타임아웃 — 아직 시작/완료 안 됨, 직접 확인 필요"
-            );
-            let _ = out.flush();
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_secs(interval));
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    };
+
+    let mut body = brief.trim().to_string();
+    if !body.contains("kasaterm-cli done") {
+        body.push_str("\n\n");
+        body.push_str(SUMMON_DONE_HINT);
     }
+    let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
+    let message_id = kasa_socket::tell::new_message_id();
+    let address = row.get("address").cloned().unwrap_or(Value::Null);
+    let told = roundtrip(socket_path, &Request { id: json!("summon"), method: "collab.tell".into(),
+        params: json!({ "message_id": message_id, "address": address, "body": kasa_socket::tell::normalize(&body)? }) })?;
+    if !told.ok {
+        return Err(anyhow!("{surface} 에 학생은 떴는데 지시를 못 넣었어요: {}",
+            told.error.map(|e| e.message).unwrap_or_default()));
+    }
+    let address = told.result.as_ref().and_then(|r| r.get("address")).filter(|a| a.is_object()).cloned().unwrap_or(address);
+    save_receipt(&message_id, &address);
+    let state = await_tell_settled(socket_path, &message_id, &address)
+        .map(|receipt| tell_state_line(&receipt)).unwrap_or_else(|| "접수".into());
+    let character = row_text(&row, "character");
+    let who = if character.is_empty() { surface.clone() } else { format!("{character}({surface})") };
+    println!("{who} 소환 · 지시 {state} · 영수증 {message_id}");
+    let wait = format!("kasaterm-cli wait {surface} --since {since}");
+    if from.is_some() {
+        println!("done 보고는 이 창 입력으로 들어와요. 막고 기다리려면: {wait}");
+    } else {
+        println!("기다리려면: {wait}");
+    }
+    Ok(())
+}
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or_default()
+}
+
+/// `--since` 값 — epoch ms 그대로, 또는 tell 영수증 ID(`kt1.<보낸 ms>.…`)에서 보낸 시각.
+fn since_ms(value: &str) -> Option<u64> {
+    value.parse().ok().or_else(|| value.strip_prefix("kt1.")?.split('.').next()?.parse().ok())
+}
+
+/// 셸에 그대로 넣을 수 있게 작은따옴표로 감싼다.
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// `wait <이름|%N|이름@기계>… [--since ms|영수증] [--timeout 초]` — 학생들이 `done` 을 보고할 때까지 막고
+/// 기다린다. 백그라운드로 돌리면 끝날 때 부른 claude 가 깨어난다. 종료 코드: 0 모두 성공 · 1 실패 보고 ·
+/// 3 시간 초과 · 4 보드에서 사라짐. 사람 차례(승인·질문)는 끝이 아니라 한 줄 알리고 계속 기다린다.
+///
+/// `--since`(summon 이 찍어 주는 시각, 또는 tell 영수증 ID)보다 앞선 보고는 옛 브리프의 것이라 안 믿는다.
+/// 없으면 건 순간 이미 쉬고 있던 학생의 보고를 옛 것으로 보고, 다시 일을 시작해 지워진 뒤의 보고만 믿는다.
+fn run_wait(socket_path: &str, args: &[String]) -> Result<i32> {
+    struct Watch { who: String, machine: String, key: String, stale: bool, asked: bool, missing: u32, outcome: Option<String> }
+    let mut timeout = 7200u64;
+    let mut since: Option<u64> = None;
+    let mut targets: Vec<String> = Vec::new();
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "--since" => {
+                since = Some(args.get(i + 1).and_then(|s| since_ms(s))
+                    .ok_or_else(|| anyhow!("--since 뒤에 ms 또는 tell 영수증 ID 가 필요해요"))?);
+                i += 2;
+            }
+            "--timeout" => {
+                timeout = args.get(i + 1).and_then(|s| s.parse().ok())
+                    .ok_or_else(|| anyhow!("--timeout 뒤에 초가 필요해요"))?;
+                i += 2;
+            }
+            a if a.starts_with("--") => return Err(anyhow!("모르는 옵션: {a}")),
+            _ => { targets.push(arg.clone()); i += 1; }
+        }
+    }
+    if targets.is_empty() {
+        return Err(anyhow!("wait 는 기다릴 학생이 필요해요 — kasaterm-cli wait 미도리"));
+    }
+    let local = targets.iter().all(|t| !t.contains('@'));
+    let rows = snapshot_rows(socket_path, local)?;
+    let mut watches = Vec::new();
+    for target in &targets {
+        let row = match board_matches(&rows, target).as_slice() {
+            [one] => *one,
+            [] => return Err(anyhow!("「{target}」 이(가) 보드에 없어요 — `kasaterm-cli rooms` 로 이름을 확인하세요")),
+            many => return Err(anyhow!("「{target}」 이(가) 여럿이에요 — 이름@기계 로 골라 주세요:\n{}",
+                many.iter().map(|p| format!("  {}", describe_row(p))).collect::<Vec<_>>().join("\n"))),
+        };
+        let character = row_text(row, "character");
+        let surface = row_address(row, "surface_id");
+        watches.push(Watch {
+            who: if character.is_empty() { surface.to_string() } else { format!("{character}({surface})") },
+            machine: row_address(row, "machine_id").to_string(),
+            key: row_address(row, "surface_key").to_string(),
+            stale: since.is_none() && row.get("done_outcome").is_some() && row_text(row, "status") != "working",
+            asked: false,
+            missing: 0,
+            outcome: None,
+        });
+    }
+    let started = std::time::Instant::now();
+    let gap = std::time::Duration::from_secs(if local { 2 } else { 5 });
+    while watches.iter().any(|w| w.outcome.is_none()) {
+        if started.elapsed() > std::time::Duration::from_secs(timeout) {
+            for w in watches.iter().filter(|w| w.outcome.is_none()) {
+                println!("{} {timeout}초 안에 done 보고 없음 — `kasaterm-cli activity` 로 확인하세요", w.who);
+            }
+            return Ok(3);
+        }
+        std::thread::sleep(gap);
+        let Ok(rows) = snapshot_rows(socket_path, local) else { continue };
+        for w in watches.iter_mut().filter(|w| w.outcome.is_none()) {
+            let Some(row) = rows.iter().find(|p| row_address(p, "machine_id") == w.machine
+                && row_address(p, "surface_key") == w.key) else {
+                // 보드가 한 번 비는 것은 재시작·연결 흔들림일 수 있다 — 한참 안 보일 때만 끝으로 본다.
+                w.missing += 1;
+                if w.missing >= 15 {
+                    println!("{} 보드에서 사라짐 — 닫혔거나 기기 연결이 끊겼어요", w.who);
+                    w.outcome = Some("gone".into());
+                }
+                continue;
+            };
+            w.missing = 0;
+            let status = row_text(row, "status");
+            let reported = row.get("done_at_ms").and_then(|v| v.as_u64());
+            let outcome = row.get("done_outcome").and_then(|v| v.as_str())
+                .filter(|_| since.is_none_or(|since| reported.is_none_or(|at| at >= since)));
+            if w.stale {
+                if outcome.is_some() && status != "working" { continue; }
+                w.stale = false;
+            }
+            if let Some(outcome) = outcome {
+                let summary = row_text(row, "done_summary");
+                println!("{} {outcome}{}", w.who, if summary.is_empty() { String::new() } else { format!(" — {summary}") });
+                w.outcome = Some(outcome.to_string());
+                continue;
+            }
+            let asking = status == "waiting" || row.get("attention_kind").is_some();
+            if asking && !w.asked {
+                println!("{} 사람 차례(승인·질문 대기) — 계속 기다려요", w.who);
+            }
+            w.asked = asking;
+        }
+    }
+    let ended = |kind: &str| watches.iter().any(|w| w.outcome.as_deref() == Some(kind));
+    Ok(if ended("gone") { 4 } else if ended("failed") { 1 } else { 0 })
+}
+
+/// 보드 스냅샷의 pane 줄. `local` 이면 이 기계만.
+fn snapshot_rows(socket_path: &str, local: bool) -> Result<Vec<Value>> {
+    let resp = roundtrip(socket_path, &Request {
+        id: json!("snapshot"),
+        method: "collab.snapshot".into(),
+        params: json!({ "scope": if local { "local" } else { "all" } }),
+    })?;
+    resp.result.as_ref().and_then(|r| r.get("panes")).and_then(|p| p.as_array()).cloned()
+        .ok_or_else(|| anyhow!("보드를 못 읽었어요 — 앱이 떠 있는지 확인"))
+}
+
+fn row_text<'a>(row: &'a Value, key: &str) -> &'a str {
+    row.get(key).and_then(|v| v.as_str()).unwrap_or("")
+}
+
+fn row_address<'a>(row: &'a Value, key: &str) -> &'a str {
+    row.get("address").and_then(|a| a.get(key)).and_then(|v| v.as_str()).unwrap_or("")
+}
+
+/// 사람이 부르는 이름(`미도리`·`미도리@맥미니`·`%12`)에 맞는 줄 — 세션이 붙은 pane 만.
+fn board_matches<'a>(rows: &'a [Value], target: &str) -> Vec<&'a Value> {
+    let (name, machine) = target.rsplit_once('@').map(|(n, m)| (n, Some(m))).unwrap_or((target, None));
+    rows.iter().filter(|p| {
+        let label = row_text(p, "machine_label");
+        (name == row_text(p, "character") || name == row_text(p, "title") || name == row_address(p, "surface_id"))
+            && machine.is_none_or(|m| m == label || label.starts_with(m))
+            && p.get("address").and_then(|a| a.get("session_id")).is_some()
+    }).collect()
+}
+
+fn describe_row(p: &Value) -> String {
+    format!("{}@{} · {} · {}", row_text(p, "character"), row_text(p, "machine_label"), row_text(p, "room_label"), row_text(p, "status"))
 }
 
 /// `dismiss <id>…` — 일이 끝난 학생 pane 을 한 번에 닫는다. 닫기 전에 각 pane 의
@@ -1440,7 +1600,8 @@ fn print_help() {
     eprintln!("  kasaterm-cli [--api BASE] board-watch --all --json [--since CURSOR]");
     eprintln!("  kasaterm-cli [--api BASE] activity --address '<JSON>' [limit]");
     eprintln!("  --api-token-file FILE may precede the command to reuse an existing API token");
-    eprintln!("  kasaterm-cli wake-watch <surface_id> [interval_s] [--timeout s]  # block until a teammate finishes one turn, then exit (run as a background task → auto-wakes you)");
+    eprintln!("  kasaterm-cli summon [--cwd 폴더] [--tab] [--name 제목] [--cmd 부팅명령] <브리프 | --stdin>  # 학생 하나를 옆에 세워 브리프까지 — 서브에이전트 대신. done 보고는 이 창 입력으로 온다");
+    eprintln!("  kasaterm-cli wait <이름|%N|이름@기계>… [--since ms|tell영수증] [--timeout 초]  # 그 학생들이 done 보고할 때까지 막고 기다림(백그라운드로 돌리면 끝날 때 깨운다). 종료 0 성공·1 실패·3 시간초과·4 사라짐");
     eprintln!(
         "  kasaterm-cli layout                       # where each pane sits (active window, %)"
     );
@@ -2574,34 +2735,17 @@ fn resolve_tell_target(args: &mut Vec<String>) -> Result<()> {
         }
     }
     let Some(target) = args.get(i).cloned() else { return Ok(()) };
-    let socket_path = resolve_socket_path()?;
-    let snapshot = roundtrip(&socket_path, &Request {
-        id: json!(format!("cli-{}", std::process::id())),
-        method: "collab.snapshot".into(),
-        params: json!({"scope": "all"}),
-    })?;
-    let panes = snapshot.result.as_ref().and_then(|r| r.get("panes")).and_then(|p| p.as_array()).cloned()
-        .ok_or_else(|| anyhow!("보드를 못 읽었어요 — 앱이 떠 있는지 확인"))?;
-    let (name, machine_wanted) = target.rsplit_once('@').map(|(n, m)| (n, Some(m))).unwrap_or((target.as_str(), None));
-    let text = |p: &Value, k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let hits: Vec<&Value> = panes.iter().filter(|p| {
-        let machine = text(p, "machine_label");
-        let surface = p.get("address").and_then(|a| a.get("surface_id")).and_then(|v| v.as_str()).unwrap_or("");
-        let name_ok = name == text(p, "character") || name == text(p, "title") || name == surface;
-        let machine_ok = machine_wanted.is_none_or(|m| m == machine || machine.starts_with(m));
-        name_ok && machine_ok && p.get("address").and_then(|a| a.get("session_id")).is_some()
-    }).collect();
-    let describe = |p: &Value| format!("{}@{} · {} · {}", text(p, "character"), text(p, "machine_label"), text(p, "room_label"), text(p, "status"));
-    match hits.as_slice() {
+    let panes = snapshot_rows(&resolve_socket_path()?, false)?;
+    match board_matches(&panes, &target).as_slice() {
         [] => Err(anyhow!("「{target}」 이(가) 보드에 없어요 — `kasaterm-cli rooms` 로 이름을 확인하세요")),
         [one] => {
             let address = one.get("address").cloned().unwrap_or(Value::Null);
-            eprintln!("→ {}", describe(one));
+            eprintln!("→ {}", describe_row(one));
             args.splice(i..i + 1, ["--address".to_string(), address.to_string()]);
             Ok(())
         }
         many => Err(anyhow!("「{target}」 이(가) 여럿이에요 — 이름@기계 로 골라 주세요:\n{}",
-            many.iter().map(|p| format!("  {}", describe(p))).collect::<Vec<_>>().join("\n"))),
+            many.iter().map(|p| format!("  {}", describe_row(p))).collect::<Vec<_>>().join("\n"))),
     }
 }
 
@@ -3960,5 +4104,31 @@ mod tests {
             })
             .collect();
         assert!(!draw_boxes(&rects).is_empty());
+    }
+
+    #[test]
+    fn wait_since_reads_epoch_ms_or_tell_receipt() {
+        assert_eq!(super::since_ms("1790589573069"), Some(1_790_589_573_069));
+        assert_eq!(super::since_ms("kt1.1790589573069.10336-18d973bad15450f0-0"), Some(1_790_589_573_069));
+        assert_eq!(super::since_ms("미도리"), None);
+    }
+
+    #[test]
+    fn summon_quotes_the_folder_for_the_shell() {
+        assert_eq!(super::shell_quote("/a b/c"), "'/a b/c'");
+        assert_eq!(super::shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn board_matches_by_name_machine_or_surface_with_a_session() {
+        let rows = vec![
+            serde_json::json!({"character":"미도리","machine_label":"맥미니","address":{"surface_id":"%3","session_id":"s1"}}),
+            serde_json::json!({"character":"미도리","machine_label":"맥북","address":{"surface_id":"%5","session_id":"s2"}}),
+            serde_json::json!({"character":"유즈","machine_label":"맥북","address":{"surface_id":"%6"}}),
+        ];
+        assert_eq!(super::board_matches(&rows, "미도리").len(), 2);
+        assert_eq!(super::board_matches(&rows, "미도리@맥미니").len(), 1);
+        assert_eq!(super::board_matches(&rows, "%5").len(), 1);
+        assert!(super::board_matches(&rows, "유즈").is_empty());
     }
 }
