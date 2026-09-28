@@ -505,6 +505,7 @@ class _ConversationViewState extends State<ConversationView>
       _ => const SizedBox.shrink(),
     };
   }
+}
 
   MarkdownStyleSheet _markdownStyle(ThemeData theme) => chatMarkdownStyle(
     theme,

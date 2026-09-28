@@ -1040,6 +1040,55 @@ class Server {
   Uri noteImage(int id, {String? machine}) =>
       uri('term/notes/$id.png', machine: machine);
 
+  /// 결과물 폴더 KASA-share — 모든 기기에 같은 내용으로 맞춰지니 주소의 기계 하나만 묻는다.
+  Future<ShareListing> shareList() async {
+    final Object? j;
+    try {
+      j = await _getJson('term/share/list');
+    } on ServerException catch (e) {
+      throw _shareProblem(e.status) ?? e;
+    }
+    if (j is! Map || j['ok'] != true) {
+      throw ServerException(
+        (j is Map ? j['error'] as String? : null) ?? 'KASA-share 목록을 못 읽었어요',
+      );
+    }
+    return ShareListing.fromJson(j.cast<String, Object?>());
+  }
+
+  Uri shareFileUri(String path) =>
+      uri('term/share/file', query: {'path': path});
+
+  /// 앱 안에서 글로 보는 파일(마크다운·텍스트)의 본문.
+  Future<String> shareText(String path) async {
+    final http.Response res;
+    try {
+      res = await _client.get(shareFileUri(path));
+    } catch (_) {
+      throw ServerException('${describe()} 에 닿지 못했다');
+    }
+    if (res.statusCode != 200) {
+      throw _shareProblem(res.statusCode) ??
+          ServerException(
+            '${describe()} 응답 ${res.statusCode} (term/share/file)',
+            status: res.statusCode,
+          );
+    }
+    return utf8.decode(res.bodyBytes, allowMalformed: true);
+  }
+
+  /// 서버가 영어 한 마디로 거절하는 까닭을 사람 말로.
+  static ServerException? _shareProblem(int? status) => switch (status) {
+    403 => const ServerException(
+      '주인 주소로 붙어야 KASA-share 를 볼 수 있어요',
+      status: 403,
+    ),
+    404 => const ServerException('그 파일이 이제 없어요', status: 404),
+    413 => const ServerException('32MB 가 넘어 폰에서 못 열어요', status: 413),
+    503 => const ServerException('이 기기의 KASA-share 가 꺼져 있어요', status: 503),
+    _ => null,
+  };
+
   /// 나쵸 앱 창구(`nacho/app/…`). 이 허브가 주인 주소로 확인한 신원으로 나쵸에 넘긴다 —
   /// 다른 기계로 건너가는 `m/` 는 안 붙인다(신원이 그 길에서 떨어진다).
   /// 4xx 도 던지지 않고 (상태, 본문)으로 돌려준다 — 거절 까닭(`error`)이 화면에 나가야 해서다.
@@ -1203,3 +1252,111 @@ class Note {
     url: j['url'] as String? ?? '',
   );
 }
+
+/// `term/share/list` 한 벌 — 날짜-주제 폴더(최신순)와 폴더 밖 낱장.
+class ShareListing {
+  const ShareListing({
+    required this.name,
+    required this.folders,
+    required this.files,
+  });
+
+  final String name;
+  final List<ShareFolder> folders;
+  final List<ShareFile> files;
+
+  bool get isEmpty => folders.isEmpty && files.isEmpty;
+
+  static ShareListing fromJson(Map<String, Object?> j) => ShareListing(
+    name: j['name'] as String? ?? 'KASA-share',
+    folders: [
+      for (final e in (j['folders'] as List?) ?? const [])
+        if (e is Map) ShareFolder.fromJson(e.cast<String, Object?>()),
+    ],
+    files: ShareFile.listOf(j['files']),
+  );
+}
+
+class ShareFolder {
+  const ShareFolder({
+    required this.name,
+    required this.modified,
+    required this.files,
+  });
+
+  /// `2026-09-28-카사텀-쌍둥이-시안` — `kasaterm-cli share new` 가 짓는 모양.
+  final String name;
+  final DateTime modified;
+  final List<ShareFile> files;
+
+  static final _dated = RegExp(r'^(\d{4})-(\d{2})-(\d{2})-(.+)$');
+
+  /// 날짜를 떼어 낸 주제. 모양이 다르면 이름 그대로.
+  String get topic => _dated.firstMatch(name)?.group(4) ?? name;
+
+  /// `09-28` — 날짜 접두가 없으면 null.
+  String? get day {
+    final m = _dated.firstMatch(name);
+    return m == null ? null : '${m.group(2)}-${m.group(3)}';
+  }
+
+  ShareFile? get firstImage {
+    for (final f in files) {
+      if (f.kind == ShareKind.image) return f;
+    }
+    return null;
+  }
+
+  static ShareFolder fromJson(Map<String, Object?> j) => ShareFolder(
+    name: j['name'] as String? ?? '',
+    modified: _msTime(j['modified_ms']),
+    files: ShareFile.listOf(j['files']),
+  );
+}
+
+enum ShareKind { image, markdown, html, text, pdf, video, audio, other }
+
+class ShareFile {
+  const ShareFile({
+    required this.path,
+    required this.name,
+    required this.size,
+    required this.modified,
+    required this.kind,
+    required this.origin,
+  });
+
+  /// 서버가 한 번에 내주는 상한(serve.rs `WHOLE_MAX`) — 넘으면 413 이라 누르기 전에 막는다.
+  static const maxBytes = 32 << 20;
+
+  /// KASA-share 루트 기준 — `share/file?path=` 에 그대로 넣는다.
+  final String path;
+
+  /// 폴더 안 상대 이름. 하위 폴더면 `sub/x.png` 처럼 슬래시가 든다.
+  final String name;
+  final int size;
+  final DateTime modified;
+  final ShareKind kind;
+
+  /// 이 파일을 처음 올린 기기 이름.
+  final String origin;
+
+  bool get tooLarge => size > maxBytes;
+
+  static List<ShareFile> listOf(Object? raw) => [
+    for (final e in (raw as List?) ?? const [])
+      if (e is Map) ShareFile.fromJson(e.cast<String, Object?>()),
+  ];
+
+  static ShareFile fromJson(Map<String, Object?> j) => ShareFile(
+    path: j['path'] as String? ?? '',
+    name: j['name'] as String? ?? '',
+    size: (j['size'] as num?)?.toInt() ?? 0,
+    modified: _msTime(j['modified_ms']),
+    kind: ShareKind.values.asNameMap()[j['kind']] ?? ShareKind.other,
+    origin: j['origin'] as String? ?? '',
+  );
+}
+
+DateTime _msTime(Object? v) =>
+    DateTime.fromMillisecondsSinceEpoch((v as num?)?.toInt() ?? 0);
