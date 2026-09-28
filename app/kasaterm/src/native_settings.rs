@@ -6961,13 +6961,14 @@ fn section_title(g: &mut gpu::GpuRenderer, x: f32, y: f32, title: &str, _desc: &
 /// 돌려주는 값은 행 사각형.
 fn flat_row(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, label: &str, hint: &str, text_w: f32) -> Rect {
     let rect = (x, y, w, ROW_H);
-    let label = fit(g, label, text_w.max(0.0), 12.0, false);
-    let hint = fit(g, hint, text_w.max(0.0), 10.5, false);
+    let inset = crate::native_controls::CONTROL_PADDING_X;
+    let label = fit(g, label, (text_w - inset).max(0.0), 12.0, false);
+    let hint = fit(g, hint, (text_w - inset).max(0.0), 10.5, false);
     if hint.is_empty() {
-        draw_text(g, x, y + 13.0, &label, 12.0, theme::text(), false);
+        draw_text(g, x + inset, y + 13.0, &label, 12.0, theme::text(), false);
     } else {
-        draw_text(g, x, y + 7.0, &label, 12.0, theme::text(), false);
-        draw_text(g, x, y + 24.0, &hint, 10.5, theme::text_dim(), false);
+        draw_text(g, x + inset, y + 7.0, &label, 12.0, theme::text(), false);
+        draw_text(g, x + inset, y + 24.0, &hint, 10.5, theme::text_dim(), false);
     }
     g.rect(x, y + ROW_H - 1.0, w, 1.0, theme::with_alpha(theme::border(), 140));
     rect
@@ -6984,7 +6985,8 @@ fn seg_row(
     label: &str,
     cells: &[(&str, bool, SettingsAction)],
 ) {
-    let label_w = g.measure_chrome_text(&crate::native_strings::text(label), 12.0, false).min(w * 0.4);
+    let label_w = (g.measure_chrome_text(&crate::native_strings::text(label), 12.0, false)
+        + crate::native_controls::CONTROL_PADDING_X).min(w * 0.4);
     flat_row(g, x, *y, w, label, "", label_w);
     let control_x = x + label_w + 12.0;
     segmented(g, s, hits, control_x, *y + (ROW_H - CTL_H) / 2.0, (x + w - control_x).max(0.0), cells);
@@ -7031,9 +7033,10 @@ fn toggle_row_hint(
     action: SettingsAction,
 ) {
     // 목업: 채움 없는 토글. 꺼짐은 회색 테두리+회색 점, 켜짐은 강조색 테두리+강조색 점.
-    let rect = flat_row(g, x, *y, w, label, hint, w - 44.0);
+    let inset = crate::native_controls::CONTROL_PADDING_X;
+    let rect = flat_row(g, x, *y, w, label, hint, w - 44.0 - inset);
     let hover = contains(rect, s.cursor);
-    let toggle = (rect.0 + rect.2 - 32.0, rect.1 + 11.0, 32.0, 18.0);
+    let toggle = (rect.0 + rect.2 - 32.0 - inset, rect.1 + 11.0, 32.0, 18.0);
     let line = if on {
         theme::accent()
     } else if hover {

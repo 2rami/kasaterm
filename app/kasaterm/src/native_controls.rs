@@ -3,6 +3,7 @@ use crate::{gpu, theme};
 type Rect = (f32, f32, f32, f32);
 
 pub(crate) const CONTROL_HEIGHT: f32 = 26.0;
+pub(crate) const CONTROL_PADDING_X: f32 = 10.0;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Style {
@@ -81,7 +82,7 @@ pub(crate) fn text_button(
         line,
     );
     let bold = style.primary || style.active;
-    let shown = crate::info::fit_text(g, label, (rect.2 - 20.0).max(0.0), 12.0, bold);
+    let shown = crate::info::fit_text(g, label, (rect.2 - 2.0 * CONTROL_PADDING_X).max(0.0), 12.0, bold);
     let width = g.measure_chrome_text(&shown, 12.0, bold);
     g.draw_text(
         rect.0 + (rect.2 - width) / 2.0,
