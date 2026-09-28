@@ -381,7 +381,7 @@ class _ConversationViewState extends State<ConversationView>
           : widget.server.avatar(pane.slug!, machine: pane.machine),
       size: 30,
     );
-    final md = _markdownStyle(theme);
+    final md = chatMarkdownStyle(theme);
     final typing = pane.isBusy;
     final extra = typing ? 1 : 0;
     return LayoutBuilder(
@@ -488,44 +488,45 @@ class _ConversationViewState extends State<ConversationView>
       _ => const SizedBox.shrink(),
     };
   }
+}
 
-  MarkdownStyleSheet _markdownStyle(ThemeData theme) {
-    final scheme = theme.colorScheme;
-    final body = theme.textTheme.bodyMedium?.copyWith(
-      fontSize: 15,
-      height: 1.5,
-      color: scheme.onSurface,
-    );
-    final mono = TextStyle(
-      fontFamily: 'TermMono',
-      fontSize: 13,
-      color: scheme.onSurface,
-      backgroundColor: scheme.surfaceContainerHighest,
-    );
-    return MarkdownStyleSheet.fromTheme(theme).copyWith(
-      p: body,
-      listBullet: body,
-      tableBody: body?.copyWith(fontSize: 13),
-      tableHead: body?.copyWith(fontSize: 13, fontWeight: FontWeight.w700),
-      h1: body?.copyWith(fontSize: 18, fontWeight: FontWeight.w700),
-      h2: body?.copyWith(fontSize: 17, fontWeight: FontWeight.w700),
-      h3: body?.copyWith(fontSize: 16, fontWeight: FontWeight.w700),
-      code: mono,
-      codeblockPadding: const EdgeInsets.all(10),
-      codeblockDecoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      blockquoteDecoration: BoxDecoration(
-        border: Border(left: BorderSide(color: scheme.outline, width: 3)),
-      ),
-      blockquotePadding: const EdgeInsets.fromLTRB(10, 2, 0, 2),
-      a: body?.copyWith(
-        color: scheme.primary,
-        decoration: TextDecoration.underline,
-      ),
-    );
-  }
+/// 학생 말풍선과 KASA-share 문서가 같이 쓰는 마크다운 글꼴 — 폰에서 읽는 글은 같은 크기로.
+MarkdownStyleSheet chatMarkdownStyle(ThemeData theme) {
+  final scheme = theme.colorScheme;
+  final body = theme.textTheme.bodyMedium?.copyWith(
+    fontSize: 15,
+    height: 1.5,
+    color: scheme.onSurface,
+  );
+  final mono = TextStyle(
+    fontFamily: 'TermMono',
+    fontSize: 13,
+    color: scheme.onSurface,
+    backgroundColor: scheme.surfaceContainerHighest,
+  );
+  return MarkdownStyleSheet.fromTheme(theme).copyWith(
+    p: body,
+    listBullet: body,
+    tableBody: body?.copyWith(fontSize: 13),
+    tableHead: body?.copyWith(fontSize: 13, fontWeight: FontWeight.w700),
+    h1: body?.copyWith(fontSize: 18, fontWeight: FontWeight.w700),
+    h2: body?.copyWith(fontSize: 17, fontWeight: FontWeight.w700),
+    h3: body?.copyWith(fontSize: 16, fontWeight: FontWeight.w700),
+    code: mono,
+    codeblockPadding: const EdgeInsets.all(10),
+    codeblockDecoration: BoxDecoration(
+      color: scheme.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(8),
+    ),
+    blockquoteDecoration: BoxDecoration(
+      border: Border(left: BorderSide(color: scheme.outline, width: 3)),
+    ),
+    blockquotePadding: const EdgeInsets.fromLTRB(10, 2, 0, 2),
+    a: body?.copyWith(
+      color: scheme.primary,
+      decoration: TextDecoration.underline,
+    ),
+  );
 }
 
 /// 모모톡의 선생님 말풍선 파랑 — 데스크톱 아로나와 같은 고정색이라 밝기와 무관하다.

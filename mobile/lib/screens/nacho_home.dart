@@ -12,6 +12,7 @@ import 'hub.dart';
 import 'nacho_reply_view.dart';
 import 'nacho_task.dart';
 import 'nacho_typing.dart';
+import 'share_screen.dart';
 import 'terminal.dart';
 import 'workboard_view.dart';
 
@@ -111,6 +112,11 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
                 icon: Icon(_desk.linkedPet == null ? Icons.link_off_rounded : Icons.link_rounded),
               ),
               IconButton(
+                tooltip: 'KASA-share',
+                onPressed: _openShare,
+                icon: const Icon(Icons.folder_outlined),
+              ),
+              IconButton(
                 tooltip: '학생 화면',
                 onPressed: _openStudents,
                 icon: const Icon(Icons.terminal_rounded),
@@ -166,6 +172,12 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
       },
     ),
   );
+
+  void _openShare() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => ShareScreen(server: widget.server)),
+    );
+  }
 
   void _openPets() {
     showModalBottomSheet<void>(

@@ -1,8 +1,8 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import '../lib/push.dart';
-import '../lib/server.dart';
+import 'package:kasaterm_mobile/push.dart';
+import 'package:kasaterm_mobile/server.dart';
 
 class PushServer extends Server {
   PushServer(this.label, this.events, {this.ready = true})
