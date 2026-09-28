@@ -117,6 +117,11 @@ struct Mailbox {
     observed: std::collections::HashMap<DragEndpoint, (SessionIdentity, Option<String>, Instant)>,
     pinned: std::collections::HashMap<DragEndpoint, SessionIdentity>,
     messages: Vec<String>,
+    refreshed_moves: Vec<Instant>,
+}
+
+fn confirmed_move_is_latest(pending: Option<Instant>, refreshed: &[Instant]) -> bool {
+    pending.is_some_and(|at| refreshed.contains(&at))
 }
 
 fn verify_drag_identity(
@@ -293,35 +298,24 @@ impl App {
                 }
                 let backend: Arc<dyn Backend> = backend;
                 let proxy = self.proxy.clone();
-                self.remote_view_push_at = Some(Instant::now());
+                let move_started = Instant::now();
+                self.remote_view_push_at = Some(move_started);
                 self.set_toast("원격 방으로 창을 옮기고 있어요".into());
                 std::thread::spawn(move || {
                     let mut submitted = false;
                     let result = (|| -> anyhow::Result<bool> {
                         let origin = source.snapshot(&backend)?;
                         verify_drag_identity(&origin, source.pane(), &expected)?;
-                        let target = destination.snapshot(&backend)?;
-                        verify_drag_identity(&target, destination.pane(), &target_expected)?;
+                        // Both endpoints are on one host; one snapshot validates a coherent pair.
+                        verify_drag_identity(&origin, destination.pane(), &target_expected)?;
                         let source_row = endpoint_row(&origin, source.pane())?;
-                        let target_row = endpoint_row(&target, destination.pane())?;
+                        let target_row = endpoint_row(&origin, destination.pane())?;
                         if target_row.room_id != target_room {
                             anyhow::bail!("도착 창의 방이 바뀌었어요. 다시 끌어 주세요");
                         }
                         let cross_room = source_row.room_id != target_room;
                         if cross_room && target_room.is_none() {
                             anyhow::bail!("도착 방을 확인하지 못했어요. 다시 골라 주세요");
-                        }
-                        if origin.machine_id != target.machine_id
-                            || origin.instance != target.instance
-                        {
-                            anyhow::bail!("원격 기계 정체가 바뀌었어요. 다시 골라 주세요");
-                        }
-                        if !target
-                            .sessions
-                            .iter()
-                            .any(|row| row.identity == source_row.identity)
-                        {
-                            anyhow::bail!("출발 창이 바뀌었어요. 다시 골라 주세요");
                         }
                         let DragEndpoint::RemotePane { base, .. } = &source else {
                             unreachable!()
@@ -352,12 +346,24 @@ impl App {
                         Ok(false)
                     })();
                     let unknown = submitted && result.is_err();
+                    let refreshed = if result.is_ok() {
+                        match &source {
+                            DragEndpoint::RemotePane { base, .. } => kasa_mcp::machines::refresh_panes_now(base).is_ok(),
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
                     let message = match result {
                         Ok(true) => "선택한 원격 방에 도착한 것을 확인했어요".into(),
-                        Ok(false) => "자리 이동 요청을 보냈어요".into(),
+                        Ok(false) if refreshed => "원격 자리 배치를 갱신했어요".into(),
+                        Ok(false) => "자리 이동 요청을 보냈어요. 배치를 확인하고 있어요".into(),
                         Err(error) => format!("창 이동 결과를 확인해 주세요: {error:#}"),
                     };
                     let mut state = mailbox().lock().unwrap();
+                    if refreshed {
+                        state.refreshed_moves.push(move_started);
+                    }
                     state.messages.push(message);
                     if !unknown {
                         state.pending.remove(&source);
@@ -446,7 +452,15 @@ impl App {
     }
 
     pub(crate) fn drain_drag_transfers(&mut self) {
-        let messages = std::mem::take(&mut mailbox().lock().unwrap().messages);
+        let (messages, refreshed_moves) = {
+            let mut state = mailbox().lock().unwrap();
+            (std::mem::take(&mut state.messages), std::mem::take(&mut state.refreshed_moves))
+        };
+        // Only a post-command read for the latest move can release the rollback guard.
+        if confirmed_move_is_latest(self.remote_view_push_at, &refreshed_moves) {
+            self.remote_view_push_at = None;
+            self.sync_remote_view_layouts();
+        }
         if let Some(message) = messages.into_iter().last() {
             self.set_toast(message);
         }
@@ -457,6 +471,16 @@ impl App {
 mod tests {
     use super::*;
     use crate::session_transfer::{RoomInfo, SessionIdentity};
+
+    #[test]
+    fn a_confirmed_move_releases_only_its_own_pending_guard() {
+        let earlier = Instant::now();
+        let latest = earlier + Duration::from_millis(1);
+        assert!(confirmed_move_is_latest(Some(latest), &[latest]));
+        assert!(!confirmed_move_is_latest(Some(latest), &[earlier]));
+        assert!(!confirmed_move_is_latest(Some(latest), &[]));
+        assert!(!confirmed_move_is_latest(None, &[latest]));
+    }
 
     fn snapshot(machine: &str, room: &str) -> MachineSnapshot {
         MachineSnapshot {

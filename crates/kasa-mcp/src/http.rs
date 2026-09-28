@@ -16,11 +16,7 @@ use axum::{
     routing::{any, get, post},
     Json,
 };
-use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpService,
-};
-
-use crate::{git, KasaspaceTools};
+use crate::git;
 
 /// `GET /git-status` — JSON snapshot of the host's current working dir for
 /// the webview panel to poll. The wildcard CORS header lets the webview
@@ -4209,10 +4205,6 @@ async fn schale_state_handler() -> impl IntoResponse {
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(s))
 }
 
-/// Bind an MCP-over-HTTP server at `127.0.0.1:<port>/mcp` and run it on a
-/// background thread. Tries `preferred_port` first, then falls back to an
-/// OS-assigned port. Returns the actual port bound so the host can write
-/// it into `.mcp.json` / an env var.
 // ── 웹 터미널 ────────────────────────────────────────────────────────────
 //
 // 브라우저(xterm.js)가 붙는 자리. 흘려보내는 건 우리가 파싱한 셀이 아니라 셸이
@@ -7395,6 +7387,9 @@ async fn relay_approval(backend: Arc<dyn Backend>, id: String, relay: kasa_socke
     }
 }
 
+/// Bind the host HTTP server at `127.0.0.1:<port>` and run it on a background
+/// thread. Tries `preferred_port` first, then falls back to an OS-assigned
+/// port. Returns the actual port bound so the host can export it as an env var.
 pub fn spawn_http_server(
     backend: Arc<dyn Backend>,
     preferred_port: u16,
@@ -7599,11 +7594,6 @@ pub fn spawn_http_server_opts(
                 let themegen_state_backend = backend.clone();
                 let themegen_ref_get_backend = backend.clone();
                 let themegen_ref_put_backend = backend.clone();
-                let service = StreamableHttpService::new(
-                    move || Ok(KasaspaceTools::new(backend.clone())),
-                    Arc::new(LocalSessionManager::default()),
-                    Default::default(),
-                );
                 let app = axum::Router::new()
                     .route(
                         "/git-status",
@@ -8395,7 +8385,6 @@ pub fn spawn_http_server_opts(
                         // 오판했다(2026-09-16 실측). 상류 한도는 상류가 판정하게 둔다.
                         .layer(axum::extract::DefaultBodyLimit::max(PROXY_BODY_LIMIT)),
                     )
-                    .nest_service("/mcp", service)
                     // 부작용 있는 요청에 두르는 마지막 한 겹. 라우트마다 손으로
                     // 거는 대신 레이어로 걸어야 **새로 추가될 라우트도 자동으로**
                     // 보호된다 — 31개 중 하나를 빠뜨리면 그게 곧 구멍이다.
