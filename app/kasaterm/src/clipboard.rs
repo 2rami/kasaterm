@@ -59,11 +59,17 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// 폴링이 「이건 이미 봤다」를 가리는 기준. 마지막으로 목록에 담긴 값이다 — 사람이
-/// 같은 것을 두 번 복사해도 목록이 늘지 않는다.
+/// 폴링이 「이건 이미 봤다」를 가리는 기준. 마지막으로 담은 값의 **클립보드 원문**이다 —
+/// 목록 칸은 다듬고 자르지만 이것까지 그러면, 4000자를 넘거나 줄바꿈으로 끝나는 글은
+/// 매 틱 새 복사로 보여 기계끼리 초당 몇 번씩 서로 되밀어 넣는다(2026-09-28, 25만 자 글이
+/// 맥북·맥미니 사이를 돌며 사람이 복사한 것을 계속 덮었다).
 fn last_seen() -> &'static Mutex<String> {
     static S: OnceLock<Mutex<String>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn already_seen(text: &str) -> bool {
+    *last_seen().lock().unwrap() == text
 }
 
 pub(crate) fn isolated_probe() -> bool {
@@ -121,6 +127,7 @@ pub(crate) fn looks_secret(text: &str) -> bool {
 /// 복사하면 그건 지금 쓰는 것이라, 목록 아래에 묻혀 있으면 안 된다. `secret` 이
 /// `None` 이면 생김새로 판정하고, 한 번 비밀이었던 것은 다시 담겨도 비밀로 남는다.
 pub(crate) fn remember_as(text: &str, secret: Option<bool>) -> Option<Item> {
+    *last_seen().lock().unwrap() = text.to_string();
     let text = text.trim_end_matches(['\n', '\r']);
     if text.trim().is_empty() {
         return None;
@@ -130,7 +137,6 @@ pub(crate) fn remember_as(text: &str, secret: Option<bool>) -> Option<Item> {
     } else {
         text.to_string()
     };
-    *last_seen().lock().unwrap() = text.clone();
     let mut v = store().lock().unwrap();
     let was_secret = v.iter().any(|i| i.text == text && i.secret);
     v.retain(|i| i.text != text);
@@ -183,7 +189,7 @@ pub(crate) fn poll() -> bool {
     let Ok(text) = cb.get_text() else {
         return false;
     };
-    if text.trim().is_empty() || *last_seen().lock().unwrap() == text {
+    if text.trim().is_empty() || already_seen(&text) {
         return false;
     }
     // 사람이 이 기계에서 복사한 것 — 다른 기계에도 나눠 준다. 다른 기계가 밀어 준
@@ -365,6 +371,20 @@ mod tests {
         assert!(!looks_secret("이건 그냥 문장이다 1234567890 abcdefg"));
         assert!(!looks_secret("git commit -m 'fix'"));
         assert!(!looks_secret("/Users/kasa/Desktop/momewomo/kasaterm/app/src/main.rs"));
+    }
+
+    /// 목록에는 자르고 다듬어 담아도, 폴링은 방금 담은 원문을 이미 본 것으로 안다 —
+    /// 아니면 긴 글·줄바꿈으로 끝나는 글이 매 틱 다시 담기고 다른 기계로 되밀린다.
+    #[test]
+    fn long_or_newline_ended_copies_are_seen_once() {
+        let _g = lock();
+        let long = "가".repeat(MAX_CHARS + 10);
+        let item = remember_as(&long, None).unwrap();
+        assert_eq!(item.text.chars().count(), MAX_CHARS);
+        assert!(already_seen(&long));
+        remember_as("끝에 줄바꿈\n", None);
+        assert!(already_seen("끝에 줄바꿈\n"));
+        assert!(!already_seen("끝에 줄바꿈"));
     }
 
     /// 비밀은 목록에서 꼬리만 보이고, 한 번 비밀이면 다시 담겨도 비밀이다.
