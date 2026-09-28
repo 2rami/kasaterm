@@ -39,6 +39,9 @@ mod transfer_endpoints;
 mod tell_delivery;
 mod native_onboarding;
 mod native_settings;
+mod device_icons;
+mod feedback_delivery;
+mod native_controls;
 mod native_strings;
 mod notify_banner;
 mod onboarding;
@@ -4230,6 +4233,8 @@ fn resets_in_label_at(resets_at: Option<u64>, now: u64) -> Option<String> {
 /// (which can't re-borrow `&self` to call helpers) paints straight from it.
 #[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct GitColView {
+    #[serde(default)]
+    remote: Option<(String, String)>,
     /// cwd this snapshot was computed for — so a stale repo's rows aren't
     /// shown after a pane switch until the poller catches the new cwd.
     cwd: Option<std::path::PathBuf>,
@@ -4501,6 +4506,8 @@ pub(crate) struct StudentRawEdit {
 /// has keyboard focus so keystrokes route to its buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsInput {
+    DeviceAccountName,
+    DeviceAccountPassword,
     CwdPath,
     /// 터미널 편집기 명령줄 필드("파일 열기"가 `terminal` 일 때만 보인다).
     FileOpenCmd,
@@ -4546,6 +4553,7 @@ pub(crate) enum SettingsInput {
 /// hit-testing. String-carrying variants (shell presets) keep this `Clone`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsAction {
+    DeviceAccount(native_settings::device_account::Action),
     PreferredAgent(&'static str),
     AgentPermission(&'static str, &'static str),
     AgentStatusline(&'static str, bool),
@@ -4607,6 +4615,8 @@ pub(crate) enum SettingsAction {
     ResetAllDeviceColors,
     /// 화면의 한 점에서 색을 집어 기기 칸에 넣는다.
     DeviceEyedropper(usize),
+    DeviceIcon(String, String),
+    ImportDeviceIcon(String),
     Accent(String),
     /// Silhouette preset: "rounded" · "sharp" · "pixel". Its own axis, so any
     /// palette can be worn with any corner treatment.
@@ -4632,6 +4642,7 @@ pub(crate) enum SettingsAction {
     /// 떠 있는 pane 보호·확인 카드를 포함한 계정 전환. 빈 id는 기본 로그인.
     SwitchAccount(AccountProvider, String),
     ToggleClaudePersona,
+    ToggleCharacterAppearance,
     ToggleShimInject,
     ClaudeModel(String),
     ClaudeEffort(String),
@@ -4745,6 +4756,7 @@ pub(crate) enum SettingsAction {
     ToggleFeedbackDiag,
     /// 피드백을 파일로 굳힌다. 보낼 곳이 아직 없어서, 나가는 게 아니라 쌓인다.
     SaveFeedback,
+    SendFeedback,
     /// 쌓인 피드백 폴더를 파일 관리자로 연다.
     OpenFeedbackDir,
     /// 그림 생성 엔진을 고른다 — `"opengateway"` · `"codex"` · `"nanobanana"`.
@@ -5779,6 +5791,7 @@ struct App {
     account_label_edit: Option<(AccountProvider, String, String)>,
     /// 기계 명부에서 지금 고치는 칸 — (줄 번호, ssh 칸인가, 버퍼).
     machine_edit: Option<(usize, bool, String)>,
+    device_account: native_settings::device_account::State,
     /// 마지막으로 화면에 반영한 신원 조회 세대. `settings::probe_generation`.
     probe_seen: u64,
     /// 로그인 중인 슬롯에 붙여넣는 OAuth 코드 버퍼. 진행 중인 로그인은 한 건뿐이라
@@ -5798,6 +5811,7 @@ struct App {
     feedback_caret: usize,
     /// 진단 정보 첨부 스위치.
     feedback_diag: bool,
+    feedback_delivery: feedback_delivery::State,
     /// Sidebar "Settings" entry rect (bottom-anchored), for hit-testing.
     settings_btn_rect: (f32, f32, f32, f32),
     /// 사이드바 트레이의 피드백 버튼 rect — 설정과 같은 짝.
@@ -6337,6 +6351,7 @@ impl App {
             custom_theme_label_edit: None,
             account_label_edit: None,
             machine_edit: None,
+            device_account: native_settings::device_account::State::default(),
             probe_seen: 0,
             login_code_edit: String::new(),
             settings_caret: 0,
@@ -6345,6 +6360,7 @@ impl App {
             feedback_body: socket::read_feedback_draft(),
             feedback_caret: 0,
             feedback_diag: true,
+            feedback_delivery: feedback_delivery::State::default(),
             settings_btn_rect: (0.0, 0.0, 0.0, 0.0),
             feedback_btn_rect: (0.0, 0.0, 0.0, 0.0),
             board_btn_rect: (0.0, 0.0, 0.0, 0.0),
@@ -6729,7 +6745,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Install pane shims before anything spawns a shell — every PtySession
     // reads KASATERM_TMUX_SHIM_DIR we set here (kasaterm-cli/preview/OSC133).
     // best-effort: failures just log and skip, the rest still works.
-        if !launch.lite {
+        if !launch.lite && !verification_run() {
             let _ = crate::claude_auth::recover_workbench_account(&socket::read_claude_accounts());
         }
         install_pane_shims(launch.lite);

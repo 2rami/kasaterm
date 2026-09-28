@@ -1,6 +1,106 @@
 //! 사이드바·git col·파일트리 토글·패널·줌/폰트·toast 등 chrome UI 메서드.
 use super::*;
 
+impl GitColView {
+    fn target(&self) -> Option<(std::path::PathBuf, Option<(String, String)>)> {
+        self.cwd.clone().map(|cwd| (cwd, self.remote.clone()))
+    }
+    fn local_cwd(&self, action: &str) -> Result<std::path::PathBuf, String> {
+        if let Some((label, _)) = &self.remote {
+            return Err(format!("{action}는 {label}에서 해 주세요. 원격 Git은 받기·올리기·스테이지된 커밋을 지원해요"));
+        }
+        self.cwd.clone().ok_or_else(|| "Git 폴더 정보를 읽는 중이에요".into())
+    }
+}
+
+pub(crate) fn git_operation_error(result: &serde_json::Value) -> Option<String> {
+    if result.get("ok").and_then(|value| value.as_bool()) == Some(true) { return None; }
+    Some(result.get("output").or_else(|| result.get("error"))
+        .and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty())
+        .unwrap_or("Git 작업을 완료하지 못했어요").to_string())
+}
+
+impl state::GitState {
+    pub(crate) fn use_panel_snapshot(&mut self, view: &GitColView) {
+        let target = view.target();
+        if self.col_displayed_target != target {
+            self.col_expanded.clear();
+            self.col_diff_cache.clear();
+            self.col_commit_expanded = None;
+            self.col_commit_files_cache.clear();
+            self.col_commit_file_expanded.clear();
+            self.col_commit_diff_cache.clear();
+            self.last_commit_click = None;
+        }
+        self.col_displayed_target = target;
+    }
+
+    pub(crate) fn clear_panel_hit_targets(&mut self) {
+        self.col_file_rects.clear();
+        self.col_btn_rects.clear();
+        self.col_stage_rects.clear();
+        self.col_discard_rects.clear();
+        self.col_open_rects.clear();
+        self.col_commit_rects.clear();
+        self.col_commit_file_rects.clear();
+        self.commit_menu_rects.clear();
+        self.commit_btn_rect = None;
+        self.commit_caret_rect = None;
+        self.commit_input_rect = None;
+        self.col_commits_grip = None;
+        self.path_hdr_rect = None;
+        self.branch_hdr_rect = None;
+        self.path_menu_rects.clear();
+        self.branch_menu_rects.clear();
+    }
+}
+
+#[cfg(test)]
+mod git_panel_safety_tests {
+    use super::*;
+
+    #[test]
+    fn remote_snapshot_never_resolves_to_a_local_repo_at_the_same_path() {
+        let path = std::path::PathBuf::from("/shared/project");
+        let mut view = GitColView { cwd: Some(path.clone()), ..Default::default() };
+        assert_eq!(view.local_cwd("변경 되돌리기").unwrap(), path);
+        view.remote = Some(("other device".into(), "https://other.invalid".into()));
+        assert!(view.local_cwd("변경 되돌리기").unwrap_err().contains("other device"));
+    }
+
+    #[test]
+    fn clearing_git_panel_removes_mutating_targets_but_keeps_shared_header() {
+        let rect = (0.0, 0.0, 26.0, 26.0);
+        let mut git = state::GitState {
+            commit_btn_rect: Some(rect), commit_caret_rect: Some(rect),
+            col_stage_rects: vec![(true, "file".into(), rect)],
+            col_discard_rects: vec![("file".into(), false, rect)],
+            col_commit_rects: vec![("commit".into(), rect)],
+            col_close_rect: Some(rect), col_expand_rect: Some(rect),
+            ..Default::default()
+        };
+        git.clear_panel_hit_targets();
+        assert!(git.commit_btn_rect.is_none() && git.commit_caret_rect.is_none());
+        assert!(git.col_stage_rects.is_empty() && git.col_discard_rects.is_empty() && git.col_commit_rects.is_empty());
+        assert_eq!(git.col_close_rect, Some(rect));
+        assert_eq!(git.col_expand_rect, Some(rect));
+    }
+
+    #[test]
+    fn changing_only_the_device_invalidates_the_displayed_diff_cache() {
+        let mut git = state::GitState::default();
+        let mut view = GitColView { cwd: Some("/shared/project".into()), ..Default::default() };
+        git.use_panel_snapshot(&view);
+        let shown_local = git.col_displayed_target.clone();
+        git.col_diff_cache.insert((false, "file".into()), Vec::new());
+        view.remote = Some(("other device".into(), "https://other.invalid".into()));
+        assert_ne!(shown_local, view.target());
+        git.use_panel_snapshot(&view);
+        assert!(git.col_diff_cache.is_empty());
+        assert_eq!(git.col_displayed_target, view.target());
+    }
+}
+
 /// 기둥 하나가 지금 폭에서 **무엇까지 보여 줄 수 있나**. 폭을 줄이는 것만으로는
 /// 반응형이 안 된다 — 넓을 때 쓰던 글자가 좁은 칼럼에 그대로 남으면 잘리거나
 /// 겹쳐서, 좁아진 게 아니라 고장난 것으로 보인다. 각 렌더가 이 단계를 물어보고
@@ -1480,6 +1580,7 @@ impl App {
     /// is parsed once on first expand and cached; `git diff` for a single file
     /// is cheap but not render-loop cheap, so it must not run per frame.
     pub(crate) fn toggle_git_diff(&mut self, staged: bool, path: String) {
+        let Some(cwd) = self.local_git_panel_cwd("변경 내용 보기") else { return };
         let key = (staged, path.clone());
         if self.git.col_expanded.remove(&key) {
             self.chrome_dirty = true;
@@ -1489,10 +1590,8 @@ impl App {
             return;
         }
         if !self.git.col_diff_cache.contains_key(&key) {
-            if let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) {
-                let rows = kasa_mcp::git::git_file_diff(&cwd, &path, staged);
-                self.git.col_diff_cache.insert(key.clone(), rows);
-            }
+            let rows = kasa_mcp::git::git_file_diff(&cwd, &path, staged);
+            self.git.col_diff_cache.insert(key.clone(), rows);
         }
         self.git.col_expanded.insert(key);
         self.chrome_dirty = true;
@@ -1504,14 +1603,13 @@ impl App {
     /// list inline (only one commit open at a time). On expand the file list is
     /// fetched once and cached.
     pub(crate) fn toggle_git_commit(&mut self, hash: String) {
+        let Some(cwd) = self.local_git_panel_cwd("커밋 파일 보기") else { return };
         if self.git.col_commit_expanded.as_deref() == Some(hash.as_str()) {
             self.git.col_commit_expanded = None;
         } else {
             if !self.git.col_commit_files_cache.contains_key(&hash) {
-                if let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) {
-                    let files = kasa_mcp::git::git_commit_files(&cwd, &hash);
-                    self.git.col_commit_files_cache.insert(hash.clone(), files);
-                }
+                let files = kasa_mcp::git::git_commit_files(&cwd, &hash);
+                self.git.col_commit_files_cache.insert(hash.clone(), files);
             }
             self.git.col_commit_expanded = Some(hash);
         }
@@ -1523,6 +1621,7 @@ impl App {
     /// Click a file row inside an expanded commit: expand/collapse that file's
     /// diff. The diff is fetched once and cached, like `toggle_git_diff`.
     pub(crate) fn toggle_git_commit_file(&mut self, hash: String, path: String) {
+        let Some(cwd) = self.local_git_panel_cwd("커밋 변경 내용 보기") else { return };
         let key = (hash.clone(), path.clone());
         if self.git.col_commit_file_expanded.remove(&key) {
             self.chrome_dirty = true;
@@ -1532,10 +1631,8 @@ impl App {
             return;
         }
         if !self.git.col_commit_diff_cache.contains_key(&key) {
-            if let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) {
-                let rows = kasa_mcp::git::git_commit_file_diff(&cwd, &hash, &path);
-                self.git.col_commit_diff_cache.insert(key.clone(), rows);
-            }
+            let rows = kasa_mcp::git::git_commit_file_diff(&cwd, &hash, &path);
+            self.git.col_commit_diff_cache.insert(key.clone(), rows);
         }
         self.git.col_commit_file_expanded.insert(key);
         self.chrome_dirty = true;
@@ -1552,6 +1649,23 @@ impl App {
         // 편집기 거터도 같은 HEAD 를 기준으로 삼는다 — 여기서 안 버리면 방금
         // 커밋한 변경이 거터에 그대로 남아, 고치지도 않은 줄이 파랗게 보인다.
         self.invalidate_editor_diffs();
+    }
+
+    pub(crate) fn local_git_panel_cwd(&mut self, action: &str) -> Option<std::path::PathBuf> {
+        match self.git_panel_snapshot()?.local_cwd(action) {
+            Ok(cwd) => Some(cwd),
+            Err(message) => { self.set_toast(message); None }
+        }
+    }
+
+    fn git_panel_snapshot(&mut self) -> Option<GitColView> {
+        let view = self.git.col_data.lock().ok().map(|view| view.clone());
+        if view.as_ref().is_some_and(|view| view.target().is_some() && view.target() == self.git.col_displayed_target) {
+            view
+        } else {
+            self.set_toast("Git 목록을 갱신 중이에요. 갱신 후 다시 눌러 주세요".into());
+            None
+        }
     }
     /// Open the git column for pane `id`'s repo (status-bar diff chip click).
     /// Focuses that pane so the column follows it (auto-track), then opens the
@@ -1638,20 +1752,16 @@ impl App {
             }
             return;
         }
-        let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
+        let active = self.ws.lock().ok().and_then(|w| w.active_pane.as_deref().map(|pane| w.active_tab_pid(pane)));
         // 다른 기기의 거울이면 패널은 **그 기계의** 레포를 본다 — 경로는 저쪽 것이고 읽기도
         // 저쪽 창구로 간다(2026-09-17 지시 「파일트리나 깃 패널 기기 달라도 뜨게」).
         let remote = active
             .as_ref()
             .and_then(|id| kasa_mcp::remote::remote_info(id))
-            .filter(|info| info.view)
-            .and_then(|info| {
-                kasa_mcp::machines::label_for_base(&info.base)
-                    .map(|label| (label, info.base.clone(), info.remote_cwd.clone()))
+            .map(|info| {
+                let label = kasa_mcp::machines::label_for_base(&info.base).unwrap_or_else(|| info.base.clone());
+                (label, info.base.clone(), info.remote_cwd.clone())
             });
-        if let Ok(mut guard) = self.git.col_remote.lock() {
-            *guard = remote.as_ref().map(|(label, base, _)| (label.clone(), base.clone()));
-        }
         let resolved = match &remote {
             Some((_, _, remote_cwd)) => active
                 .as_ref()
@@ -1661,7 +1771,10 @@ impl App {
                 .or_else(|| remote_cwd.as_deref().map(std::path::PathBuf::from)),
             None => active.as_ref().and_then(|id| self.pane_cwd_cache.get(id).cloned()),
         };
-        if let Ok(mut guard) = self.git.col_cwd.lock() {
+        if let (Ok(mut source), Ok(mut guard)) = (self.git.col_remote.lock(), self.git.col_cwd.lock()) {
+            let next_source = remote.as_ref().map(|(label, base, _)| (label.clone(), base.clone()));
+            if *source != next_source { *guard = None; }
+            *source = next_source;
             match resolved {
                 // A confidently-resolved pane cwd always wins.
                 Some(cwd) => *guard = Some(cwd),
@@ -1670,7 +1783,7 @@ impl App {
                 // flashing the launch dir — which is often a non-repo and
                 // would read as "not a repo". Seed from current_dir only on
                 // the very first frame, when nothing is known yet.
-                None if guard.is_none() => *guard = std::env::current_dir().ok(),
+                None if guard.is_none() && source.is_none() => *guard = std::env::current_dir().ok(),
                 None => {}
             }
         }
@@ -1681,13 +1794,12 @@ impl App {
     /// read the column's repo from the poller's snapshot so the action always
     /// targets what the user sees.
     pub(crate) fn run_git_col_action(&mut self, btn: GitColBtn) {
-        let cwd = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone());
-        let Some(cwd) = cwd else { return };
+        let Some(view) = self.git_panel_snapshot() else { return };
+        let Some(cwd) = view.cwd else { return };
         // 남의 기기 레포는 **그 기계에 시킨다** — 경로가 이 기계엔 없어 여기서 git 을 돌 수는
         // 없지만, 읽는 길(`/term/gitcol`)이 이미 그쪽 창구를 타고 있었다. 고치는 길만 막혀
         // 있어 남의 기기 레포를 보면서도 커밋·푸시는 그 기계로 건너가야 했다(2026-09-21 지시).
-        let remote = self.git.col_remote.lock().ok().and_then(|r| r.clone());
-        if let Some((label, base)) = remote {
+        if let Some((label, base)) = view.remote {
             let (op, message) = match btn {
                 GitColBtn::Pull => ("pull", String::new()),
                 GitColBtn::Push => ("push", String::new()),
@@ -1739,7 +1851,10 @@ impl App {
                 self.git.op = Some("Pulling");
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let _ = kasa_mcp::git::git_pull(&cwd);
+                    let result = kasa_mcp::git::git_pull(&cwd);
+                    if let Some(error) = git_operation_error(&result) {
+                        let _ = proxy.send_event(UserEvent::GitOpFailed(error));
+                    }
                     // GitOpDone clears the spinner; the poller's next tick
                     // repaints ahead/behind.
                     let _ = proxy.send_event(UserEvent::GitOpDone);
@@ -1749,7 +1864,10 @@ impl App {
                 self.git.op = Some("Pushing");
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let _ = kasa_mcp::git::git_push(&cwd);
+                    let result = kasa_mcp::git::git_push(&cwd);
+                    if let Some(error) = git_operation_error(&result) {
+                        let _ = proxy.send_event(UserEvent::GitOpFailed(error));
+                    }
                     let _ = proxy.send_event(UserEvent::GitOpDone);
                 });
             }
@@ -1766,7 +1884,10 @@ impl App {
                 self.git.op = Some("Committing");
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let _ = kasa_mcp::git::git_commit_staged(&cwd, &msg);
+                    let result = kasa_mcp::git::git_commit_staged(&cwd, &msg);
+                    if let Some(error) = git_operation_error(&result) {
+                        let _ = proxy.send_event(UserEvent::GitOpFailed(error));
+                    }
                     let _ = proxy.send_event(UserEvent::GitOpDone);
                 });
                 self.git.commit_msg.clear();
@@ -1779,6 +1900,11 @@ impl App {
     /// Open the cursor-style Commit modal: pre-fill nothing, focus the message
     /// box, default to including unstaged changes (the toggle in the modal).
     pub(crate) fn open_commit_modal(&mut self) {
+        let Some(view) = self.git_panel_snapshot() else { return };
+        if view.remote.is_some() {
+            self.git.commit_modal_include_unstaged = false;
+            self.set_toast("원격 기기는 스테이지된 변경만 커밋할 수 있어요".into());
+        }
         self.git.commit_menu_open = false;
         self.git.commit_modal_open = true;
         self.git.commit_focused = true;
@@ -1805,21 +1931,31 @@ impl App {
             self.chrome_dirty = true;
             return;
         }
-        let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) else {
-            return;
-        };
+        let Some(view) = self.git_panel_snapshot() else { return };
+        let Some(cwd) = view.cwd else { return };
+        let remote = view.remote;
         let include = self.git.commit_modal_include_unstaged;
+        if remote.is_some() && include {
+            self.set_toast("원격 기기에서는 변경 포함 옵션을 끄고 스테이지된 변경만 커밋해 주세요".into());
+            return;
+        }
         self.git.op = Some(if push { "Pushing" } else { "Committing" });
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            if include {
-                // Stage everything, then commit all staged.
-                let _ = kasa_mcp::git::git_commit_all(&cwd, &msg);
-            } else {
-                let _ = kasa_mcp::git::git_commit_staged(&cwd, &msg);
+            let invoke = |op: &str| match &remote {
+                Some((_, base)) => kasa_mcp::remote::remote_post_json(base, "/term/gitop", &serde_json::json!({
+                    "path": cwd.to_string_lossy(), "op": op, "message": msg,
+                })).unwrap_or_else(|error| serde_json::json!({"ok": false, "error": error.to_string()})),
+                None if op == "push" => kasa_mcp::git::git_push(&cwd),
+                None if include => kasa_mcp::git::git_commit_all(&cwd, &msg),
+                None => kasa_mcp::git::git_commit_staged(&cwd, &msg),
+            };
+            let mut result = invoke("commit");
+            if push && git_operation_error(&result).is_none() {
+                result = invoke("push");
             }
-            if push {
-                let _ = kasa_mcp::git::git_push(&cwd);
+            if let Some(error) = git_operation_error(&result) {
+                let _ = proxy.send_event(UserEvent::GitOpFailed(error));
             }
             let _ = proxy.send_event(UserEvent::GitOpDone);
         });
@@ -1833,9 +1969,7 @@ impl App {
     /// `gh pr create --web` for the column's repo (Commit-menu → Create PR).
     pub(crate) fn create_git_pr(&mut self) {
         self.git.commit_menu_open = false;
-        let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) else {
-            return;
-        };
+        let Some(cwd) = self.local_git_panel_cwd("PR 만들기") else { return };
         std::thread::spawn(move || {
             let _ = crate::proc::command("gh")
                 .args(["pr", "create", "--web"])
@@ -1937,11 +2071,13 @@ impl App {
     /// poller repaint whatever git did. Closes the branch dropdown.
     pub(crate) fn run_git_checkout(&mut self, branch: String) {
         self.git.branch_menu_open = false;
-        let cwd = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone());
-        let Some(cwd) = cwd else { return };
+        let Some(cwd) = self.local_git_panel_cwd("브랜치 전환") else { return };
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let _ = kasa_mcp::git::git_checkout(&cwd, &branch);
+            let result = kasa_mcp::git::git_checkout(&cwd, &branch);
+            if let Some(error) = git_operation_error(&result) {
+                let _ = proxy.send_event(UserEvent::GitOpFailed(error));
+            }
             let _ = proxy.send_event(UserEvent::Redraw);
         });
     }
@@ -2366,8 +2502,7 @@ impl App {
     /// pane instead of duplicating — same path as a file-tree double-click.
     /// A native diff view is still phase 2; opening the file is the useful v1.
     pub(crate) fn open_git_file(&mut self, rel: &str) {
-        let cwd = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone());
-        let Some(cwd) = cwd else { return };
+        let Some(cwd) = self.local_git_panel_cwd("파일 열기") else { return };
         self.open_file(cwd.join(rel), None, false);
     }
     /// 창 아래쪽이 pane 그리드에서 먹는 높이 — **접힘 dock + 상태줄**.
@@ -4765,15 +4900,15 @@ pub(crate) fn pet_current_character() -> Option<String> {
 }
 
 /// 캐릭터를 고른다. 켜져 있으면 껐다 켜야 바뀐다 — 펫은 뜰 때 모델을 읽는다.
-pub(crate) fn set_pet_character(name: &str) {
-    let Some(d) = pet_model_dir() else { return };
-    if std::fs::write(d.join("current"), name).is_err() {
-        return;
-    }
+pub(crate) fn set_pet_character(name: &str) -> Result<(), String> {
+    let d = pet_model_dir().ok_or("펫 설정 폴더를 찾지 못했어요")?;
+    std::fs::write(d.join("current"), name)
+        .map_err(|_| "펫 캐릭터를 저장하지 못했어요. 다시 선택해 주세요")?;
     if pet_pid().is_some() {
-        toggle_pet();
-        toggle_pet();
+        toggle_pet()?;
+        toggle_pet()?;
     }
+    Ok(())
 }
 
 pub(crate) fn pet_preferences() -> kasa_pet_config::PetPreferences {
@@ -4847,55 +4982,180 @@ fn terminate_process(pid: u32) {
     }
 }
 
-/// 펫을 켜고 끈다. 반환은 켠 쪽인가.
-pub(crate) fn toggle_pet() -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PetToggle {
+    Starting,
+    Downloading,
+    Stopped,
+}
+
+impl PetToggle {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::Starting => "펫을 시작하는 중이에요",
+            Self::Downloading => "펫 캐릭터를 받는 중이에요. 받으면 자동으로 시작해요",
+            Self::Stopped => "펫을 껐어요",
+        }
+    }
+}
+
+fn pet_failure() -> &'static std::sync::Mutex<Option<String>> {
+    static FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    &FAILURE
+}
+
+pub(crate) fn take_pet_failure() -> Option<String> {
+    pet_failure().lock().ok()?.take()
+}
+
+fn pet_download_command(
+    script: &std::path::Path,
+    dir: &std::path::Path,
+    bin: &std::path::Path,
+) -> std::process::Command {
+    // 모델은 캐릭터별 하위 폴더에 저장된다. 경로는 셸 코드에 끼우지 않고 인자로 넘긴다.
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c").arg(r#"
+bash "$1" "$2" >&2 || exit $?
+current=$(cat "$2/current" 2>/dev/null)
+if [ -n "$current" ]; then
+    for model in "$2/$current/"*.model3.json; do
+        [ ! -f "$model" ] || exec "$3" "$model"
+    done
+fi
+for model in "$2"/*/*.model3.json "$2"/*.model3.json; do
+    [ ! -f "$model" ] || exec "$3" "$model"
+done
+exit 1
+"#).arg("kasaterm-pet").arg(script).arg(dir).arg(bin);
+    cmd
+}
+
+#[cfg(all(test, unix))]
+mod pet_start_tests {
+    use super::pet_download_command;
+    use std::path::PathBuf;
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!("kasaterm-pet-start-{}-{} 'quoted'",
+                std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn first_download_starts_selected_nested_model_with_quoted_paths() {
+        let dir = Fixture::new();
+        let script = dir.0.join("fetch model.sh");
+        std::fs::write(&script, r#"
+mkdir -p "$1/Mao" "$1/Ren"
+touch "$1/Mao/Mao.model3.json" "$1/Ren/Ren.model3.json"
+printf Ren > "$1/current"
+"#).unwrap();
+        let output = pet_download_command(&script, &dir.0, std::path::Path::new("/bin/echo"))
+            .output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(),
+            dir.0.join("Ren/Ren.model3.json").to_str().unwrap());
+    }
+
+    #[test]
+    fn failed_download_does_not_start_pet() {
+        let dir = Fixture::new();
+        let script = dir.0.join("fetch.sh");
+        std::fs::write(&script, "exit 23\n").unwrap();
+        let output = pet_download_command(&script, &dir.0, std::path::Path::new("/bin/echo"))
+            .output().unwrap();
+        assert_eq!(output.status.code(), Some(23));
+        assert!(output.stdout.is_empty());
+    }
+
+    #[test]
+    fn missing_selection_uses_available_nested_or_legacy_model() {
+        for nested in [true, false] {
+            let dir = Fixture::new();
+            let script = dir.0.join("fetch.sh");
+            std::fs::write(&script, "exit 0\n").unwrap();
+            std::fs::write(dir.0.join("current"), "missing").unwrap();
+            let model_dir = if nested { dir.0.join("Mao") } else { dir.0.clone() };
+            std::fs::create_dir_all(&model_dir).unwrap();
+            let model = model_dir.join("Mao.model3.json");
+            std::fs::write(&model, "{}").unwrap();
+            let output = pet_download_command(&script, &dir.0, std::path::Path::new("/bin/echo"))
+                .output().unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), model.to_str().unwrap());
+        }
+    }
+}
+
+pub(crate) fn toggle_pet() -> Result<PetToggle, String> {
     if let Some(pid) = pet_pid() {
         terminate_process(pid);
         if let Some(p) = pet_pid_path() {
             let _ = std::fs::remove_file(p);
         }
-        return false;
+        return Ok(PetToggle::Stopped);
     }
-    let Some(bin) = pet_binary() else {
-        eprintln!("[pet] kasapet 실행 파일을 못 찾았다");
-        return false;
-    };
+    let bin = pet_binary().ok_or(if cfg!(target_os = "macos") {
+        "펫 실행 파일이 없어요. 카사텀 앱을 다시 설치해 주세요"
+    } else {
+        "바탕화면 펫은 현재 macOS에서 사용할 수 있어요"
+    })?;
     // 모델이 아직 없으면 받아 온 뒤 이어서 띄운다. `exec` 이라 pid 가 그대로 펫이 되어
     // 끄기(SIGTERM)가 평소와 같은 길로 통한다.
-    let mut cmd = match pet_model_path() {
+    let (mut cmd, state) = match pet_model_path() {
         Some(model) => {
             let mut c = std::process::Command::new(&bin);
             c.arg(model);
-            c
+            (c, PetToggle::Starting)
         }
         None => {
-            let Some(script) = pet_fetch_script() else {
-                eprintln!("[pet] 모델 내려받기 스크립트를 못 찾았다");
-                return false;
-            };
-            let dir = pet_model_dir().unwrap_or_default();
-            let mut c = std::process::Command::new("sh");
-            c.arg("-c").arg(format!(
-                r#"{s} {d} >&2 && exec {b} "$(ls {d}/*.model3.json | head -1)""#,
-                s = shell_quote(&script.to_string_lossy()),
-                d = shell_quote(&dir.to_string_lossy()),
-                b = shell_quote(&bin.to_string_lossy()),
-            ));
-            c
+            let script = pet_fetch_script()
+                .ok_or("캐릭터를 받는 파일이 없어요. 카사텀 앱을 다시 설치해 주세요")?;
+            let dir = pet_model_dir().ok_or("펫 설정 폴더를 찾지 못했어요")?;
+            (pet_download_command(&script, &dir, &bin), PetToggle::Downloading)
         }
     };
-    match cmd.spawn() {
-        Ok(child) => {
-            if let Some(p) = pet_pid_path() {
-                let _ = std::fs::write(p, child.id().to_string());
-            }
-            true
-        }
-        Err(e) => {
-            eprintln!("[pet] 못 띄웠다: {e}");
-            false
-        }
+    let pid_path = pet_pid_path().ok_or("펫 실행 상태를 저장할 폴더를 찾지 못했어요")?;
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|_| "펫 설정 폴더를 만들지 못했어요. 폴더 권한을 확인해 주세요")?;
     }
+    let mut child = cmd.spawn().map_err(|_| "펫을 시작하지 못했어요. 앱 설치 상태를 확인해 주세요")?;
+    let pid = child.id().to_string();
+    if std::fs::write(&pid_path, &pid).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("펫 실행 상태를 저장하지 못했어요. 폴더 권한을 확인해 주세요".into());
+    }
+    let _ = take_pet_failure();
+    std::thread::spawn(move || {
+        let status = child.wait();
+        // 껐다 다시 켠 새 펫의 PID와 실패 안내를 옛 프로세스가 덮어쓰지 않게 한다.
+        if std::fs::read_to_string(&pid_path).ok().as_deref() != Some(pid.as_str()) {
+            return;
+        }
+        let _ = std::fs::remove_file(pid_path);
+        if status.map(|s| !s.success() && s.code().is_some()).unwrap_or(true) {
+            let message = if state == PetToggle::Downloading {
+                "펫 캐릭터 받기 또는 시작에 실패했어요. 네트워크를 확인하고 다시 켜 주세요"
+            } else {
+                "펫이 시작되지 않았거나 종료됐어요. 설정에서 캐릭터를 확인하고 다시 켜 주세요"
+            };
+            if let Ok(mut failure) = pet_failure().lock() {
+                *failure = Some(message.into());
+            }
+        }
+    });
+    Ok(state)
 }
 
 /// 펫이 쓸 모델. 캐릭터마다 폴더가 하나이고, `current` 파일이 지금 띄울 이름을 쥔다.
@@ -4959,11 +5219,6 @@ fn pet_fetch_script() -> Option<std::path::PathBuf> {
         .find(|a| a.join("scripts/fetch-pet-model.sh").is_file())
         .map(|a| a.join("scripts/fetch-pet-model.sh"));
     bundled.into_iter().chain(dev).find(|p| p.is_file())
-}
-
-/// 셸에 넘길 경로를 홑따옴표로 감싼다 — 공백이 든 경로가 인자 둘로 갈리지 않게.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Set (or clear, when 0) the Dock tile badge to the unread-notification count.

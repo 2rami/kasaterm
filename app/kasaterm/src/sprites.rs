@@ -455,6 +455,9 @@ pub(crate) const SPRITE_README: &str = r#"# 학생 그림 폴더
 /// 존재만 본다. 디코딩까지 되는지는 안 본다 — 그건 번들 테스트가 잡는 문제고,
 /// 여기서 매 프레임 디코딩할 수는 없다.
 pub(crate) fn student_has_sprite(slug: &str, motion: &str) -> bool {
+    if !theme::character_appearance() {
+        return false;
+    }
     if slug.starts_with("mirror-") {
         return crate::mirror_theme::asset(slug, motion, 0).is_some();
     }
@@ -673,6 +676,9 @@ pub(crate) fn draw_student_face(
     y: f32,
     size: f32,
 ) -> bool {
+    if !theme::character_appearance() {
+        return false;
+    }
     let Some(slug) = theme::character_slug_any(name) else {
         return false;
     };
@@ -899,6 +905,9 @@ pub(crate) fn draw_student_face_anim(
     size: f32,
     phase: f32,
 ) -> bool {
+    if !theme::character_appearance() {
+        return false;
+    }
     let Some(slug) = theme::character_slug_any(name) else {
         return false;
     };
@@ -940,6 +949,9 @@ pub(crate) fn draw_student_walk(
     size: f32,
     phase: f32,
 ) -> bool {
+    if !theme::character_appearance() {
+        return false;
+    }
     let Some(slug) = theme::character_slug_any(name) else {
         return false;
     };

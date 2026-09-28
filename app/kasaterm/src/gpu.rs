@@ -4602,7 +4602,8 @@ impl GpuRenderer {
             None => format!("__icon:{name}:{px}"),
         };
         if !self.images.contains_key(&key) {
-            let Some(svg) = pixel.or_else(|| Self::icon_svg(name)) else { return };
+            let custom = crate::device_icons::custom_svg(name);
+            let Some(svg) = custom.as_deref().or(pixel).or_else(|| Self::icon_svg(name)) else { return };
             let Some(rgba) = Self::rasterize_icon(svg, draw_px) else { return };
             self.upload_image(&key, &rgba, draw_px, draw_px);
         }

@@ -140,8 +140,8 @@ impl App {
     /// 활성 pane 의 cwd. 「이 방」범위가 어느 프로젝트를 뜻하는지의 기준이다.
     /// MCP 탭도 같은 기준을 쓴다 — claude 쪽 꺼짐이 폴더마다 다르다.
     pub(crate) fn active_pane_cwd(&self) -> Option<std::path::PathBuf> {
-        let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone())?;
-        self.pane_cwd_cache.get(&active).cloned()
+        let active = self.ws.lock().ok().and_then(|w| w.active_pane.as_deref().map(|pane| w.active_tab_pid(pane)))?;
+        self.pane_view_cwd.get(&active).or_else(|| self.pane_cwd_cache.get(&active)).cloned()
     }
 
     /// 세션 기록 탭의 클릭. 처리했으면 `true` — 호출부가 거기서 멈춘다.

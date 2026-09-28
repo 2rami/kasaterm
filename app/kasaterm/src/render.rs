@@ -1448,7 +1448,7 @@ impl App {
                 // 사용자 2026-07-26: /resume 은 일반 배경으로 — 백그라운드 세션
                 // 목록(agents)과 같은 교실 배경을 쓰니 두 화면이 겹쳐 보였다.
                 // 교실 배경은 agents 목록의 시각 정체성으로만 남긴다.
-                if agents_view {
+                if agents_view && theme::character_appearance() {
                     classroom_slots.push((box_x, box_y, box_w, box_h));
                 }
                 // image/md pane만 헤더 띠 데이터 생성(전용 컨트롤 자리). 일반
@@ -2550,11 +2550,10 @@ impl App {
             for (id, x, y, w, h) in &footer_slots {
                 // Keep the existing classroom illustration in system pickers.
                 if classroom_slots.contains(&(*x, *y, *w, *h)) { continue; }
-                if let Some(background) = pane_identities.get(id)
-                    .and_then(|identity| identity.machine.pane_background(theme::bg()))
-                {
-                    g.rect(*x, *y, *w, *h, background);
-                }
+                let background = pane_identities.get(id)
+                    .and_then(|identity| identity.machine.pane_background(theme::pane_bg()))
+                    .unwrap_or_else(theme::pane_bg);
+                g.rect(*x, *y, *w, *h, background);
             }
             g.draw_cells(&slot_views);
             paint_status_model_icons(g, &status_model_icons);
@@ -2827,7 +2826,7 @@ impl App {
             // 사이드바 칼럼을 여기서(스트립과 같은 시점에) 칠하는 건 신호등 때문이다.
             // 칼럼이 y=0 까지 올라와야 신호등이 사이드바 위에 앉는데, 아래쪽에서 칠하면
             // 스트립에 이미 그린 토글 아이콘을 덮어 버린다.
-            g.rect(0.0, 0.0, win_px.0 / scale, TITLE_HEIGHT, theme::panel_bg());
+            g.rect(0.0, 0.0, win_px.0 / scale, TITLE_HEIGHT, theme::header_bg());
             if tab_strip_w > 0.0 {
                 g.rect(0.0, 0.0, tab_strip_w, sb_win_h, theme::panel_bg());
                 g.rect(tab_strip_w - 1.0, 0.0, 1.0, sb_win_h, theme::border());
@@ -5669,18 +5668,14 @@ impl App {
             // for the mouse handler. window_cells already reserved its width so
             // no pane overlaps it; it stops above the dock so the dock bar and
             // the action buttons never fight for the same strip.
-            self.git.col_file_rects.clear();
-            self.git.col_btn_rects.clear();
-            self.git.path_hdr_rect = None;
-            self.git.branch_hdr_rect = None;
-            self.git.path_menu_rects.clear();
-            self.git.branch_menu_rects.clear();
+            self.git.clear_panel_hit_targets();
             // 계정 칩 rect 는 Info 탭 블록에서만 채워진다 — 여기서 매 프레임 비우지
             // 않으면 다른 탭으로 옮기거나 칼럼을 닫아도 옛 좌표가 남아, 그 자리에
             // 무엇이 놓이든 클릭이 계정 드롭다운에 먼저 먹힌다(2026-08-11 지적:
             // 세션 탭의 「전체」칩이 안 눌리고 계정 메뉴가 열렸다).
             self.account_chip_rect = None;
             if git_col_w > 0.0 && self.info.tab == state::SideTab::Git {
+                self.git.use_panel_snapshot(&git_view);
                 // 상태줄은 늘 있으므로 dock 과 달리 조건 없이 함께 뺀다 — 안 빼면
                 // 칼럼 바닥(= 최근 커밋 목록의 마지막 줄)이 그 띠 뒤로 들어가 가려진다.
                 // 높이는 이제 설정에서 바뀌므로 상수가 아니라 `status_h` 를 쓴다.
@@ -7117,14 +7112,14 @@ impl App {
                 // notification has an in-window visual even when the desktop
                 // alert is suppressed (focused pane).
                 let hdr_bg = match header_flash[hi] {
-                    Some(k) => theme::lerp(theme::bg(), theme::success(), 0.7 * k),
+                    Some(k) => theme::lerp(theme::header_bg(), theme::success(), 0.7 * k),
                     // 원격 pane 은 헤더 바탕을 강조색으로 은은히 물들인다 — 칩 하나로는
                     // 여러 pane 이 깔린 화면에서 훑을 때 안 걸린다(어느 pane 이 저
                     // 기계 것인지는 바탕색이 먼저 말해야 한다).
                     None if pane_identities.get(&h.id).is_some_and(|p| p.machine.remote) => {
-                        pane_identities[&h.id].machine.background(theme::bg())
+                        pane_identities[&h.id].machine.background(theme::header_bg())
                     }
-                    None => theme::bg(),
+                    None => theme::header_bg(),
                 };
                 g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, hdr_bg);
                 // Working indicator: a ~32% segment sweeps the header bottom on

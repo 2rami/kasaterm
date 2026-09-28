@@ -615,14 +615,14 @@ impl AuxWindow {
                 self.paint_header_icon_button(kind, (right, 6.0, 32.0, 32.0), icon, active, true);
                 right -= 4.0;
             }
-            let find_w = self.gpu.measure_chrome_text("찾기", 12.0, self.editor.find.is_some()) + 16.0;
+            let find_w = self.gpu.measure_chrome_text("찾기", 12.0, self.editor.find.is_some()) + 20.0;
             right -= find_w;
             self.paint_header_button(HeaderButton::Find, (right, 6.0, find_w, 32.0),
                 "찾기", self.editor.find.is_some(), false, true);
             right -= 8.0;
             let failed = self.status.as_deref().is_some_and(|s| s.contains("실패"));
             let label = if failed { "다시 저장" } else if self.editor.modified { "저장" } else { "저장됨" };
-            let save_w = self.gpu.measure_chrome_text(label, 12.0, self.editor.modified) + 16.0;
+            let save_w = self.gpu.measure_chrome_text(label, 12.0, false) + 20.0;
             right -= save_w;
             self.paint_header_button(HeaderButton::Save, (right, 6.0, save_w, 32.0),
                 label, false, false, self.editor.modified);
@@ -718,58 +718,14 @@ impl AuxWindow {
         primary: bool,
         enabled: bool,
     ) -> bool {
-        let hot = enabled && hit(self.cursor_px, rect);
-        let fill = if primary {
-            crate::theme::accent()
-        } else if active {
-            crate::theme::surface_active()
-        } else if hot {
-            crate::theme::surface_hover()
-        } else {
-            crate::theme::surface()
-        };
-        if !self.viewer_style || primary || active || hot {
-            crate::round_rect(
-                &mut self.gpu,
-                rect.0,
-                rect.1,
-                rect.2,
-                rect.3,
-                crate::theme::radius_sm(),
-                fill,
-            );
-        }
-        let bold = primary || active || (kind == HeaderButton::Save && self.editor.modified);
         let failed = kind == HeaderButton::Save
             && self.status.as_deref().is_some_and(|status| status.contains("실패"));
-        let tw = self.gpu.measure_chrome_text(label, 12.0, bold);
-        self.gpu.draw_text(
-            rect.0 + (rect.2 - tw) * 0.5,
-            rect.1 + (rect.3 - 12.0) * 0.5,
-            label,
-            gpu::DrawOpts {
-                font_size: 12.0,
-                color: if primary {
-                    crate::theme::foreground_on(crate::theme::accent())
-                } else if failed {
-                    crate::theme::danger()
-                } else if !enabled && kind == HeaderButton::Save {
-                    crate::theme::text_dim()
-                } else if !enabled || !self.focused {
-                    crate::theme::text_mute()
-                } else if active || hot {
-                    crate::theme::text()
-                } else {
-                    crate::theme::text_dim()
-                },
-                bold,
-                italic: false,
-            },
-        );
+        let rect = crate::native_controls::text_button(&mut self.gpu, rect, self.cursor_px, label,
+            crate::native_controls::Style { primary, active, enabled, danger: failed });
         if enabled {
             self.header_hits.push((kind, rect));
         }
-        hot
+        enabled && hit(self.cursor_px, rect)
     }
 
     fn paint_header_icon_button(
@@ -780,41 +736,12 @@ impl AuxWindow {
         active: bool,
         enabled: bool,
     ) -> bool {
-        let hot = enabled && hit(self.cursor_px, rect);
-        if !self.viewer_style || active || hot {
-            crate::round_rect(
-                &mut self.gpu,
-                rect.0,
-                rect.1,
-                rect.2,
-                rect.3,
-                crate::theme::radius_sm(),
-                if active {
-                    crate::theme::surface_active()
-                } else if hot {
-                    crate::theme::surface_hover()
-                } else {
-                    crate::theme::surface()
-                },
-            );
-        }
-        self.gpu.queue_icon(
-            icon,
-            rect.0 + (rect.2 - 14.0) * 0.5,
-            rect.1 + (rect.3 - 14.0) * 0.5,
-            14.0,
-            if !enabled || !self.focused {
-                crate::theme::text_mute()
-            } else if active || hot {
-                crate::theme::text()
-            } else {
-                crate::theme::text_dim()
-            },
-        );
+        let rect = crate::native_controls::icon_button(&mut self.gpu, rect, self.cursor_px, icon,
+            crate::native_controls::Style { active, enabled, ..Default::default() });
         if enabled {
             self.header_hits.push((kind, rect));
         }
-        hot
+        enabled && hit(self.cursor_px, rect)
     }
 
     fn header_tooltip(&self, button: HeaderButton) -> &'static str {

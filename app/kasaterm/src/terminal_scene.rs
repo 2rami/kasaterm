@@ -193,7 +193,7 @@ impl TerminalComposition {
                 anchor: anchor.to_string(),
             });
         };
-        if self.agents_view {
+        if self.agents_view && theme::character_appearance() {
             if let Some((bytes, _, _)) =
                 cache.image("schale-classroom", || png_asset(schale_classroom_rgba()?))
             {
@@ -392,6 +392,10 @@ impl App {
         theme::theme_name().hash(&mut hash);
         theme::shape_name().hash(&mut hash);
         theme::bg().hash(&mut hash);
+        theme::pane_bg().hash(&mut hash);
+        theme::header_bg().hash(&mut hash);
+        theme::sidebar_bg().hash(&mut hash);
+        theme::character_appearance().hash(&mut hash);
         theme::text().hash(&mut hash);
         theme::accent_name().hash(&mut hash);
         // The full display gate may refresh argv with ps; idle invalidation only
@@ -1105,7 +1109,7 @@ impl App {
                 None => matches!(agent_kind, Some(kasa_pty::AgentKind::Codex | kasa_pty::AgentKind::Claude)) || codex_status,
             };
             if patch_live {
-                crate::mirror_diff::localize(&mut composed, theme::bg(), theme::success(), theme::danger());
+                crate::mirror_diff::localize(&mut composed, theme::pane_bg(), theme::success(), theme::danger());
             }
         }
         {
@@ -1331,7 +1335,7 @@ impl App {
                         )
                     })
                     .unwrap_or_else(|| theme::accent_color(theme::accent_name()));
-                let base = theme::bg();
+                let base = theme::pane_bg();
                 let light = base[0] as u16 + base[1] as u16 + base[2] as u16 > 380;
                 let amount = if light { 0.10 } else { 0.18 };
                 let fill = tint_toward([base[0], base[1], base[2]], accent, amount);
@@ -1477,6 +1481,8 @@ impl App {
                     .unwrap_or(false));
         if agents_view {
             agents_view_panes.insert(id.clone());
+        }
+        if agents_view && theme::character_appearance() {
             // 관리 화면 = SCHALE 조직 정체성. claude 캐릭터(Clawd) 자리에 SCHALE
             // 로고를 얹는다(사용자: 그 자리가 비어 보임). Clawd 블록아트가 있으면 그
             // 자리를 지우고 동일 위치에, 없으면(agents 목록) "Claude Code" 헤더
@@ -1519,10 +1525,12 @@ impl App {
         // 보다 먼저 그려지므로 비워진 셀 밑으로 도트가 보인다.
         // "터미널은 파싱만"(사용자): claude sessionId 바인딩 우선, 뷰 pane 은
         // 파싱 전 스폰 랜덤 미표시 — display_pane_char(chrome.rs)가 규칙 정본.
+        // 내부 자리표시는 그림이 꺼져 있어도 감추되, 앵커는 다음 합성에 넘긴다.
+        let statusline_face = runs_claude.then(|| clear_statusline_face(&mut composed)).flatten();
         let true_char = self.display_tab_char(&ws, &tab_pid);
         if let Some((name, slug)) = true_char
             .as_deref()
-            .filter(|_| !agents_view && runs_claude)
+            .filter(|_| theme::character_appearance() && !agents_view && runs_claude)
             // **활성 밖까지**(`_any`) — 이 `if let` 이 프사·테두리·스피너 색을
             // 통째로 지고 있어서, 좁은 조회로 None 이 되면 다른 테마 학생으로
             // 바꾼 pane 은 그 셋이 전부 안 그려진다(2026-08-25: star-rail 로
@@ -1582,10 +1590,7 @@ impl App {
             // 2026-08-11). 자리표시자를 아예 없애면 agents 뷰 판정·stale statusline 복구·
             // 이 앵커가 한꺼번에 죽는다.
             let mut stand_anchor: Option<(usize, f32)> = None;
-            if let Some((sr, sc, len)) = find_statusline_face(&composed) {
-                for cell in composed[sr].iter_mut().skip(sc).take(len) {
-                    *cell = GridCell::blank();
-                }
+            if let Some((sr, _, _)) = statusline_face {
                 stand_anchor = find_standing_anchor(&composed, sr, cols_now as usize);
                 // `KASATERM_STUDENT_DEBUG=1` — 왜 학생이 안 서는지 앱이 직접 말한다.
                 if std::env::var_os("KASATERM_STUDENT_DEBUG").is_some() {
@@ -1707,7 +1712,7 @@ impl App {
                     // accent 를 테마 배경에 눕힌 차분한 톤. claude 가 제 주황을
                     // 남겨 두면 학생색 줄 한가운데 남의 색이 선다(2026-08-16
                     // 「almost done thinking 같은 거도 색 바꿔줘」).
-                    let bg = theme::bg();
+                    let bg = theme::pane_bg();
                     let tail = crate::screenread::tint_toward(
                         [bg[0], bg[1], bg[2]],
                         [a[0], a[1], a[2], 255],
@@ -1923,7 +1928,7 @@ impl App {
         // 검색해 세션 행을 식별(그룹 헤더·빈 줄은 매칭 안 됨), 동명세션은 캐시
         // 에서 이미 드롭돼 스킵된다. 얼굴은 name 시작 셀 왼쪽(마커 자리)에 얹어
         // 세션명은 가리지 않는다. 긴 이름이 …로 잘린 행은 매칭 실패로 스킵.
-        if agents_view {
+        if agents_view && theme::character_appearance() {
             let name_sids = crate::socket::agents_name_sids_cached();
             if !name_sids.is_empty() {
                 let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
@@ -2360,7 +2365,7 @@ impl App {
         // (`❯`+배경) 오탐되므로 통째로 건너뛴다.
         if !(agents_view || resume_picker || ask_picker) {
             let accent = prompt_accent.unwrap_or_else(|| theme::accent_color(theme::accent_name()));
-            let base = theme::bg();
+            let base = theme::pane_bg();
             let light = base[0] as u16 + base[1] as u16 + base[2] as u16 > 380;
             let amount = if light { 0.10 } else { 0.18 };
             let fill = tint_toward([base[0], base[1], base[2]], accent, amount);

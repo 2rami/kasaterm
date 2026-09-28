@@ -2091,45 +2091,25 @@ pub(crate) fn draw_side_tabs(
     top: f32,
 ) -> f32 {
     let y = top + 10.0;
-    let bi = 15.0_f32;
+    let bi = crate::native_controls::CONTROL_HEIGHT;
     let close_x = x + w - 12.0 - bi;
     let expand_x = close_x - bi - 8.0;
-    let bhov = |cx: f32| {
-        cursor.0 >= cx - 3.0
-            && cursor.0 <= cx + bi + 3.0
-            && cursor.1 >= y - 3.0
-            && cursor.1 <= y + bi + 3.0
-    };
+    let button_y = top + 4.0;
     // 다시 읽기는 Info 본문의 머리줄이 들고 있었는데, 그 줄(요약 숫자)이 걷히면서
     // 탭 줄의 단추 자리로 올라왔다 — 확대·닫기와 한 벌이다.
     let refresh_x = expand_x - bi - 8.0;
     info.refresh_rect = None;
     if info.tab == state::SideTab::Info {
-        g.queue_icon(
-            "rotate-cw",
-            refresh_x,
-            y,
-            bi,
-            if bhov(refresh_x) { theme::text() } else { theme::text_mute() },
-        );
-        info.refresh_rect = Some((refresh_x - 3.0, y - 3.0, bi + 6.0, bi + 6.0));
+        info.refresh_rect = Some(crate::native_controls::icon_button(
+            g, (refresh_x, button_y, bi, bi), cursor, "rotate-cw", Default::default(),
+        ));
     }
-    g.queue_icon(
-        "maximize",
-        expand_x,
-        y,
-        bi,
-        if bhov(expand_x) { theme::text() } else { theme::text_mute() },
-    );
-    g.queue_icon(
-        "x",
-        close_x,
-        y,
-        bi,
-        if bhov(close_x) { theme::text() } else { theme::text_mute() },
-    );
-    git.col_expand_rect = Some((expand_x - 3.0, y - 3.0, bi + 6.0, bi + 6.0));
-    git.col_close_rect = Some((close_x - 3.0, y - 3.0, bi + 6.0, bi + 6.0));
+    git.col_expand_rect = Some(crate::native_controls::icon_button(
+        g, (expand_x, button_y, bi, bi), cursor, "maximize", Default::default(),
+    ));
+    git.col_close_rect = Some(crate::native_controls::icon_button(
+        g, (close_x, button_y, bi, bi), cursor, "x", Default::default(),
+    ));
     info.tab_rects.clear();
     // 탭 여섯은 넓을 때만 한 줄에 들어간다(라벨 합 ~143 + 사이 여백 80 + 우상단 버튼
     // 자리 45). 칼럼이 좁아지면 이 줄이 버튼 밑으로 파고들어 뒤쪽 탭이 잘렸는데,
@@ -2143,7 +2123,7 @@ pub(crate) fn draw_side_tabs(
         Density::Icon => 8.0,
     };
     let pad_l = if dens.is_icon() { 10.0 } else { 14.0 };
-    let line_h = 21.0_f32;
+    let line_h = 30.0_f32;
     let left = x + pad_l;
     let mut tx = left;
     let mut ty = y;

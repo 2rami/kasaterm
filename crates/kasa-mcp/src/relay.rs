@@ -20,7 +20,7 @@ pub fn router() -> Router {
 /// 붙는다. 0.0.0.0 으로 열면 랜·VPN 에서 TLS 없이 관문에 닿는 뒷문이 하나 더 생긴다.
 pub async fn serve(bind: &str, port: u16, state: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     let gate = crate::gateway::Gate::new(state);
-    let app = router().merge(crate::gateway::router(gate));
+    let app = router().merge(crate::gateway::router(gate)).merge(crate::feedback::router());
     let listener = tokio::net::TcpListener::bind((bind, port)).await?;
     let addr = listener.local_addr()?;
     println!("[kasa-relay] listening on {addr}");

@@ -54,7 +54,7 @@ pub fn default_fg() -> [u8; 4] {
 /// and body share one palette.
 #[inline]
 pub fn default_bg() -> [u8; 4] {
-    crate::theme::bg()
+    crate::theme::pane_bg()
 }
 
 /// Cursor + selection accents. Cursor uses the shared accent so it matches the

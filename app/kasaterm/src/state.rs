@@ -217,7 +217,8 @@ pub(crate) enum StatusbarHit {
     /// 새 판 팝오버 — 이 맥에서 굽기(build-app.sh) / 그 기계로 보내기(sync-mini.sh) /
     /// 기계 설정 열기. 스크립트는 새 탭에서 돌아 과정이 보인다.
     BuildBake,
-    BuildSend(String),
+    CheckUpdates,
+    BuildSend(String, String),
     OpenMachines,
     /// 예약 한 줄의 멈춤/켜기.
     ScheduleToggle(String),
@@ -233,6 +234,7 @@ pub(crate) enum StatusbarHit {
 /// header dropdowns; `op` labels the in-flight push/pull for the spinner.
 #[derive(Default)]
 pub(crate) struct GitState {
+    pub(crate) col_displayed_target: Option<(std::path::PathBuf, Option<(String, String)>)>,
     pub(crate) col_visible: bool,
     pub(crate) col_w_logical: f32,
     pub(crate) col_resize: Option<(f32, f32)>,

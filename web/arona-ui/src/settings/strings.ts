@@ -371,10 +371,10 @@ export const ko = {
     body: '무엇이 불편했나요',
     bodyHint: '버그 · 이상한 동작 · 있었으면 하는 것 — 아무 형식이나 괜찮아요',
     placeholder: '어떤 화면에서 무엇을 하려다 무엇이 벌어졌는지 적어 주세요.',
-    diag: '진단 정보 함께 남기기',
-    /// 보내는 게 아니라 쌓는 거라 「저장」이다. 받는 곳이 생기기 전에 「보내기」라고
-    /// 쓰면 안 간 걸 갔다고 말하는 셈이다.
-    save: '저장',
+    destination: '받는 곳: 개발자 Discord. 작성한 내용과 선택한 진단 정보만 보냅니다. 로그인 없이 보낼 수 있고, 사본은 이 기기에 남습니다.',
+    diag: '앱 버전·운영체제·프로세서 정보 함께 보내기',
+    save: '피드백 보내기',
+    sending: '보내는 중…',
     openFolder: '저장된 피드백 열기',
   },
 
@@ -715,8 +715,10 @@ export const en: Strings = {
     body: 'What got in your way?',
     bodyHint: 'Bugs, odd behavior, things you wish existed — any shape is fine',
     placeholder: 'Which screen, what you were trying to do, and what happened instead.',
-    diag: 'Include diagnostics',
-    save: 'Save',
+    destination: 'Sent to the developer’s Discord. Only your message and selected diagnostics are sent. No sign-in is required, and a local copy is kept.',
+    diag: 'Include app version, operating system, and processor architecture',
+    save: 'Send feedback',
+    sending: 'Sending…',
     openFolder: 'Open saved feedback',
   },
 

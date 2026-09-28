@@ -555,7 +555,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     let head = (8.0, head_top + 4.0, width - 16.0, HEADER_H - 8.0);
     let plus = (width - 36.0, head.1, 28.0, head.3);
     let text_x = if compact { 12.0 } else { 38.0 };
-    if !compact { g.queue_icon("monitor", 14.0, head.1 + 12.0, 16.0, theme::text_dim()); }
+    if !compact { g.queue_icon(&crate::device_icons::icon(label), 14.0, head.1 + 12.0, 16.0, theme::text_dim()); }
     text(g, label, text_x, head.1 + 4.0, plus.0 - text_x - 4.0, 12.0, theme::text(), true);
     text(g, "이 기기", text_x, head.1 + 22.0, plus.0 - text_x - 4.0, 10.0, theme::text_dim(), false);
     if hit(cursor, plus) { g.rect(plus.0, plus.1, plus.2, plus.3, theme::surface_hover()); }
@@ -585,7 +585,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         let plus = (width - 54.0, y + 7.0, 22.0, 22.0);
         let text_x = if compact { 12.0 } else { 36.0 };
         let text_right = plus.0 - 4.0;
-        if !compact { g.queue_icon("monitor", 14.0, y + 11.0, 14.0, crate::render::machine_tint(&machine.label)); }
+        if !compact { g.queue_icon(&crate::device_icons::icon(&machine.label), 14.0, y + 11.0, 14.0, crate::render::machine_tint(&machine.label)); }
         text(g, &machine.label, text_x, y + 4.0, text_right - text_x, 11.5, theme::text(), true);
         text(g, &status(machine), text_x, y + 20.0, text_right - text_x, 9.5, theme::text_dim(), false);
         g.hover_pointer |= clipped(menu, viewport).is_some_and(|r| hit(cursor, r))

@@ -1061,16 +1061,23 @@ fn remove_codex_mcp(home: &std::path::Path, name: &str) -> anyhow::Result<String
 /// 있다). 우리가 읽고-고쳐-쓰는 사이에 다른 세션이 쓰면 그쪽 기록이 통째로 날아간다.
 /// `claude mcp remove` 는 claude 자신이 제 파일을 제 방식으로 고치는 것이라 그 경합을
 /// 우리가 만들지 않는다. 대신 프로세스를 띄우는 일이라 워커에서 불러야 한다.
-fn remove_claude_mcp(name: &str, scope: &str) -> anyhow::Result<String> {
+fn claude_mcp_remove_command(name: &str, scope: &str, cwd: Option<&std::path::Path>) -> anyhow::Result<std::process::Command> {
     // `-s` 는 어느 자리에서 지울지다. 배지에 보이는 스코프가 그대로 여기로 온다.
     let s = match scope {
         "폴더" => "local",
         "레포" => "project",
         _ => "user",
     };
-    let out = std::process::Command::new("claude")
-        .args(["mcp", "remove", name, "-s", s])
-        .output()?;
+    let mut command = std::process::Command::new("claude");
+    command.args(["mcp", "remove", name, "-s", s]);
+    if matches!(s, "local" | "project") {
+        command.current_dir(cwd.ok_or_else(|| anyhow::anyhow!("선택한 폴더를 몰라 삭제하지 못했어요"))?);
+    }
+    Ok(command)
+}
+
+fn remove_claude_mcp(name: &str, scope: &str, cwd: Option<&std::path::Path>) -> anyhow::Result<String> {
+    let out = claude_mcp_remove_command(name, scope, cwd)?.output()?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let err = err.trim().lines().next().unwrap_or("이유 미상");
@@ -1403,18 +1410,54 @@ fn harness_icon(harness: &str) -> &'static str {
     }
 }
 
+impl state::McpColState {
+    fn ready_for(&self, cwd: Option<&std::path::Path>) -> bool {
+        !self.busy.load(Relaxed) && self.cwd.as_deref() == cwd
+    }
+
+    fn change_context(&mut self, cwd: Option<std::path::PathBuf>) -> bool {
+        if self.cwd == cwd { return false; }
+        self.cwd = cwd;
+        self.view.clear();
+        self.row_rects.clear();
+        self.del_rects.clear();
+        self.confirm_delete = None;
+        self.scroll = 0.0;
+        true
+    }
+}
+
 impl App {
+    fn mcp_context_ready(&mut self) -> bool {
+        let cwd = self.active_pane_cwd();
+        let remote = self.ws.lock().ok().and_then(|ws| {
+            ws.active_pane.as_deref().map(|pane| ws.active_tab_pid(pane))
+        }).is_some_and(|pane| kasa_mcp::remote::remote_info(&pane).is_some());
+        if remote {
+            self.set_toast("MCP 설정 변경은 해당 기기에서 해 주세요. 이 목록은 이 기기의 설정이에요".into());
+            return false;
+        }
+        if !self.mcp_col.ready_for(cwd.as_deref()) {
+            self.mcp_col.stale = true;
+            self.set_toast("선택한 폴더의 MCP 목록을 갱신 중이에요. 갱신 후 다시 눌러 주세요".into());
+            return false;
+        }
+        true
+    }
+
     /// 탭이 보일 때만 워커를 깨워 목록을 새로 고친다.
     pub(crate) fn pump_mcp_col(&mut self) {
         if self.info.tab != state::SideTab::Mcp || !self.git.col_visible {
             return;
         }
+        if self.mcp_col.busy.load(Relaxed) { return; }
         let rev = self.mcp_col.rev.load(Relaxed);
         if rev != self.mcp_col.seen_rev {
             if let Ok(g) = self.mcp_col.snap.lock() {
                 self.mcp_col.view = g.clone();
             }
             self.mcp_col.seen_rev = rev;
+            self.mcp_col.confirm_delete = None;
             self.chrome_dirty = true;
         }
         // 워커가 남긴 결과 한 줄(지우기처럼 시간이 걸리는 일)은 여기서 집어 간다.
@@ -1424,10 +1467,7 @@ impl App {
         // claude 쪽은 꺼짐도 `.mcp.json` 도 폴더마다 다르다 — pane 을 옮겨 cwd 가 바뀌면
         // 목록의 대상 자체가 달라지므로 주기를 기다리지 않는다.
         let cwd = self.active_pane_cwd();
-        let cwd_changed = cwd != self.mcp_col.cwd;
-        if cwd_changed {
-            self.mcp_col.cwd = cwd.clone();
-        }
+        let cwd_changed = self.mcp_col.change_context(cwd.clone());
         let due = self
             .mcp_col
             .last_refresh
@@ -1443,6 +1483,7 @@ impl App {
             self.mcp_col.rev.clone(),
             self.mcp_col.busy.clone(),
         );
+        let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let rows = collect(cwd.as_deref());
             if let Ok(mut g) = snap.lock() {
@@ -1450,6 +1491,7 @@ impl App {
             }
             rev.fetch_add(1, Relaxed);
             busy.store(false, Relaxed);
+            let _ = proxy.send_event(UserEvent::Redraw);
         });
     }
 
@@ -1544,6 +1586,7 @@ impl App {
     /// 칸의 내용을 설정에 더한다. 실패하면 칸을 닫지 않는다 — 닫으면 방금 친 주소를
     /// 다시 쳐야 한다.
     pub(crate) fn mcp_add_submit(&mut self) {
+        if !self.mcp_context_ready() { return; }
         let Some(f) = self.mcp_col.add.as_ref() else {
             return;
         };
@@ -1568,6 +1611,7 @@ impl App {
             self.mcp_col.add = None;
             self.set_toast(format!("{name} 더하는 중…"));
             self.mcp_col.busy.store(true, Relaxed);
+            let proxy = self.proxy.clone();
             std::thread::spawn(move || {
                 let msg = match add_claude_mcp(&name, &url) {
                     Ok(m) => m,
@@ -1581,6 +1625,7 @@ impl App {
                 }
                 rev.fetch_add(1, Relaxed);
                 busy.store(false, Relaxed);
+                let _ = proxy.send_event(UserEvent::Redraw);
             });
             return;
         }
@@ -1605,6 +1650,7 @@ impl App {
     /// 지우기 — 한 번은 확인, 두 번째에 실행. 되돌릴 수 없는 일이라 두 번 누르게
     /// 한다. 다이얼로그를 띄우지 않는 건 그 순간 목록에서 눈이 떠나기 때문이다.
     fn mcp_col_delete(&mut self, i: usize) {
+        if !self.mcp_context_ready() { return; }
         let Some(row) = self.mcp_col.view.get(i).cloned() else {
             return;
         };
@@ -1634,8 +1680,10 @@ impl App {
                 self.mcp_col.cwd.clone(),
             );
             self.set_toast(format!("{} 지우는 중…", row.name));
+            self.mcp_col.busy.store(true, Relaxed);
+            let proxy = self.proxy.clone();
             std::thread::spawn(move || {
-                let msg = match remove_claude_mcp(&row.name, row.scope) {
+                let msg = match remove_claude_mcp(&row.name, row.scope, cwd.as_deref()) {
                     Ok(m) => m,
                     Err(e) => format!("⚠ {} 못 지웠다: {e}", row.name),
                 };
@@ -1649,9 +1697,8 @@ impl App {
                 }
                 rev.fetch_add(1, Relaxed);
                 busy.store(false, Relaxed);
+                let _ = proxy.send_event(UserEvent::Redraw);
             });
-            // 워커가 스냅샷을 갈아 끼우므로 pump 의 수집과 겹치지 않게 잠근다.
-            self.mcp_col.busy.store(true, Relaxed);
             return;
         }
         let home = kasa_socket::home_dir();
@@ -1762,11 +1809,12 @@ impl App {
         let Some(row) = hit.and_then(|i| self.mcp_col.view.get(i)).cloned() else {
             return false;
         };
+        if !self.mcp_context_ready() { return true; }
         if !row.toggleable {
             self.set_toast(format!("{} 스킬은 폴더가 곧 목록이라 못 끈다", row.harness));
             return true;
         }
-        let cwd = self.active_pane_cwd();
+        let cwd = self.mcp_col.cwd.clone();
         match toggle_row(&row, cwd.as_deref()) {
             Ok(()) => {
                 // 낙관적으로 먼저 뒤집는다 — 재수집은 워커라 한 박자 늦게 오는데,
@@ -2289,6 +2337,40 @@ fn content_height(items: &[Item]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_mcp_removal_uses_the_selected_directory() {
+        let selected = std::path::Path::new("/selected/project");
+        for (scope, cli_scope) in [("레포", "project"), ("폴더", "local")] {
+            let command = claude_mcp_remove_command("shared-name", scope, Some(selected)).unwrap();
+            assert_eq!(command.get_current_dir(), Some(selected));
+            assert_eq!(command.get_args().collect::<Vec<_>>(), ["mcp", "remove", "shared-name", "-s", cli_scope]);
+            assert!(claude_mcp_remove_command("shared-name", scope, None).is_err());
+        }
+        assert!(claude_mcp_remove_command("shared-name", "전역", None).is_ok());
+    }
+
+    #[test]
+    fn switching_mcp_directory_disarms_old_rows_and_waits_for_collection() {
+        let first = std::path::PathBuf::from("/first/project");
+        let second = std::path::PathBuf::from("/second/project");
+        let mut state = state::McpColState {
+            cwd: Some(first.clone()), view: vec![row("claude", RowKind::Mcp, "shared-name")],
+            confirm_delete: Some((0, std::time::Instant::now())),
+            row_rects: vec![(0, (0.0, 0.0, 40.0, 40.0))],
+            del_rects: vec![(0, (30.0, 0.0, 10.0, 10.0))],
+            ..Default::default()
+        };
+        assert!(state.ready_for(Some(&first)));
+        assert!(!state.ready_for(Some(&second)));
+        assert!(state.change_context(Some(second.clone())));
+        assert!(state.view.is_empty() && state.row_rects.is_empty() && state.del_rects.is_empty());
+        assert!(state.confirm_delete.is_none());
+        state.busy.store(true, Relaxed);
+        assert!(!state.ready_for(Some(&second)));
+        state.busy.store(false, Relaxed);
+        assert!(state.ready_for(Some(&second)));
+    }
 
     fn row(h: &'static str, k: RowKind, n: &str) -> McpRow {
         scoped(h, k, "전역", n)

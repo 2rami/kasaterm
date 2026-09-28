@@ -2279,7 +2279,10 @@ impl ApplicationHandler<UserEvent> for App {
             let panel_remote = self.git.col_remote.clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_millis(1200));
-                let cwd = panel_cwd.lock().ok().and_then(|g| g.clone());
+                let (remote, cwd) = match (panel_remote.lock(), panel_cwd.lock()) {
+                    (Ok(remote), Ok(cwd)) => (remote.clone(), cwd.clone()),
+                    _ => break,
+                };
                 let Some(cwd) = cwd else { continue };
                 let want = panel_want.load(std::sync::atomic::Ordering::Relaxed);
                 // A transient git failure ('index.lock' contention while another
@@ -2287,14 +2290,14 @@ impl ApplicationHandler<UserEvent> for App {
                 // this tick and keep the last good snapshot so the column never
                 // flashes the notice mid-operation.
                 // 다른 기기의 레포면 그 기계 창구로 읽는다 — 여기 git 은 그 경로를 모른다.
-                let remote = panel_remote.lock().ok().and_then(|r| r.clone());
-                let view = match remote {
-                    Some((_, base)) => fetch_remote_git_col_view(&base, &cwd, want),
+                let view = match &remote {
+                    Some((_, base)) => fetch_remote_git_col_view(base, &cwd, want),
                     None => fetch_git_col_view(&cwd, want),
                 };
-                let Some(view) = view else {
+                let Some(mut view) = view else {
                     continue;
                 };
+                view.remote = remote;
                 let mut guard = match panel_data.lock() {
                     Ok(g) => g,
                     Err(_) => break,
@@ -2317,7 +2320,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 60초를 자서, 계정을 눌러도 숫자가 최대 1분(+서버 캐시 1분) 동안 옛 계정 것으로
         // 남았다 — 사용자: "누를때마다 바뀐다는 표시가 없고".
         // lite 는 HTTP 서버가 없어 칠 곳이 없고, 자동 계정 전환도 안 한다.
-        if !self.lite {
+        if !self.lite && !crate::verification_run() {
             let usage_proxy = self.proxy.clone();
             let usage_cache = self.claude_usage.clone();
             let usage_all = self.claude_usage_all.clone();
@@ -5200,6 +5203,12 @@ impl ApplicationHandler<UserEvent> for App {
                         let inside = |r: &(f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
+                        if self.info.tab != state::SideTab::Git {
+                            self.git.clear_panel_hit_targets();
+                            self.git.path_menu_open = false;
+                            self.git.branch_menu_open = false;
+                            self.git.commit_menu_open = false;
+                        }
                         // Open dropdowns overlay everything — resolve their items
                         // (and the header toggles) before the list/buttons under.
                         if self.git.path_menu_open {
@@ -5372,6 +5381,10 @@ impl ApplicationHandler<UserEvent> for App {
                         {
                             if self.info.tab != tab {
                                 self.info.tab = tab;
+                                self.git.clear_panel_hit_targets();
+                                self.git.path_menu_open = false;
+                                self.git.branch_menu_open = false;
+                                self.git.commit_menu_open = false;
                                 // Info 로 막 넘어왔으면 목록이 비어 있다 — 다음
                                 // 프레임의 pump_info 가 즉시 채우도록 놓아둔다.
                                 self.info.scroll = 0.0;
@@ -5604,6 +5617,9 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
+                        if self.info.tab != state::SideTab::Git {
+                            return;
+                        }
                         // Commit split button: main → modal, caret → dropdown.
                         if self
                             .git
@@ -5652,9 +5668,7 @@ impl ApplicationHandler<UserEvent> for App {
                             .find(|(_, _, r)| inside(r))
                             .map(|(s, p, _)| (*s, p.clone()))
                         {
-                            if let Some(cwd) =
-                                self.git.col_data.lock().ok().and_then(|g| g.cwd.clone())
-                            {
+                            if let Some(cwd) = self.local_git_panel_cwd("스테이지 변경") {
                                 let proxy = self.proxy.clone();
                                 let data = self.git.col_data.clone();
                                 let want = self
@@ -5662,17 +5676,20 @@ impl ApplicationHandler<UserEvent> for App {
                                     .col_commit_want
                                     .load(std::sync::atomic::Ordering::Relaxed);
                                 std::thread::spawn(move || {
-                                    if stage {
-                                        let _ = kasa_mcp::git::git_add_path(&cwd, &path);
+                                    let result = if stage {
+                                        kasa_mcp::git::git_add_path(&cwd, &path)
                                     } else {
-                                        let _ = kasa_mcp::git::git_unstage_path(&cwd, &path);
+                                        kasa_mcp::git::git_unstage_path(&cwd, &path)
+                                    };
+                                    if let Some(error) = crate::chrome::git_operation_error(&result) {
+                                        let _ = proxy.send_event(UserEvent::GitOpFailed(error));
                                     }
                                     // Re-read status right away so the row jumps
                                     // sections immediately instead of waiting for
                                     // the 1.2s poller tick.
                                     if let Some(view) = fetch_git_col_view(&cwd, want) {
                                         if let Ok(mut g) = data.lock() {
-                                            *g = view;
+                                            if g.cwd.as_ref() == Some(&cwd) && g.remote.is_none() { *g = view; }
                                         }
                                     }
                                     let _ = proxy.send_event(UserEvent::Redraw);
@@ -5692,9 +5709,7 @@ impl ApplicationHandler<UserEvent> for App {
                             .find(|(_, _, r)| inside(r))
                             .map(|(p, u, _)| (p.clone(), *u))
                         {
-                            if let Some(cwd) =
-                                self.git.col_data.lock().ok().and_then(|g| g.cwd.clone())
-                            {
+                            if let Some(cwd) = self.local_git_panel_cwd("변경 되돌리기") {
                                 let proxy = self.proxy.clone();
                                 let data = self.git.col_data.clone();
                                 let want = self
@@ -5702,10 +5717,13 @@ impl ApplicationHandler<UserEvent> for App {
                                     .col_commit_want
                                     .load(std::sync::atomic::Ordering::Relaxed);
                                 std::thread::spawn(move || {
-                                    let _ = kasa_mcp::git::git_discard_path(&cwd, &path, untracked);
+                                    let result = kasa_mcp::git::git_discard_path(&cwd, &path, untracked);
+                                    if let Some(error) = crate::chrome::git_operation_error(&result) {
+                                        let _ = proxy.send_event(UserEvent::GitOpFailed(error));
+                                    }
                                     if let Some(view) = fetch_git_col_view(&cwd, want) {
                                         if let Ok(mut g) = data.lock() {
-                                            *g = view;
+                                            if g.cwd.as_ref() == Some(&cwd) && g.remote.is_none() { *g = view; }
                                         }
                                     }
                                     let _ = proxy.send_event(UserEvent::Redraw);
@@ -6060,8 +6078,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     if let Some(r) = self.statusbar.pet_rect {
                         if sb_hit(&r) {
-                            let on = crate::chrome::toggle_pet();
-                            self.set_toast(if on { "펫을 띄웠습니다".into() } else { "펫을 껐습니다".to_string() });
+                            self.settings_apply(SettingsAction::TogglePet);
                             window.request_redraw();
                             return;
                         }
@@ -7647,11 +7664,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.copy_selection();
                 }
             } else if self.update_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
-                // "업데이트 확인" → Sparkle 표준 다이얼로그(.app 빌드에서만 active).
-                #[cfg(target_os = "macos")]
-                if let Some(c) = self.sparkle_updater.as_ref() {
-                    crate::macos_sparkle::check_for_updates(c);
-                }
+                self.check_for_updates_now();
             } else if self.quit_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 // ⌘Q 는 빨간 버튼(CloseRequested)과 같은 길이다 — 도는 작업이 있으면
                 // 앱 안 모달로 묻고, 없으면 바로 끈다. 전에는 NSAlert `runModal` 을
@@ -7795,6 +7808,10 @@ impl ApplicationHandler<UserEvent> for App {
         self.refresh_pane_activity();
         // 바탕화면 펫에게 지금 판을 넘긴다. 펫이 꺼져 있으면 즉시 나간다.
         self.pet_publish_board();
+        self.poll_device_icon_import();
+        if let Some(error) = crate::chrome::take_pet_failure() {
+            self.set_toast(error);
+        }
         // 이사 예약 — 턴 중이라 미뤄 둔 이사를, 스피너가 꺼진 것을 보고 실행한다.
         // 큐가 비어 있으면 즉시 나가므로 매 턴 불러도 공짜다.
         self.run_pending_migrations();

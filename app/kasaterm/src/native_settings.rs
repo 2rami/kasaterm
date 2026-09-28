@@ -5,6 +5,12 @@
 
 use super::*;
 
+#[path = "native_device_account.rs"]
+pub(crate) mod device_account;
+
+#[path = "native_appearance_preview.rs"]
+mod appearance_preview;
+
 pub(crate) type Rect = (f32, f32, f32, f32);
 
 /// 페이지 이름이 앉는 머리 칸. 이름은 `ay + 26` 에 20pt 로 그려지고 본문은 이
@@ -121,6 +127,7 @@ pub(crate) struct SettingsCache {
     custom_active: String,
     palette_hex: Arc<Vec<String>>,
     pub(crate) device_colors: Arc<Vec<crate::render::pane_identity::DeviceColorRow>>,
+    device_icons: Arc<Vec<crate::device_icons::Row>>,
     theme_rosters: Arc<std::collections::HashMap<String, Vec<CharacterChoice>>>,
     ordered_picks: Arc<Vec<(String, Vec<String>)>>,
     accounts: Arc<Vec<AccountChoice>>,
@@ -286,6 +293,8 @@ impl SettingsCache {
             (!self.custom_active.is_empty()).then_some(self.custom_active.as_str()),
         ));
         self.device_colors = Arc::new(crate::render::pane_identity::device_color_rows());
+        crate::device_icons::reload(&saved);
+        self.device_icons = Arc::new(crate::device_icons::rows(&self.device_colors));
     }
 
     pub(crate) fn refresh_palette(&mut self) {
@@ -646,6 +655,7 @@ fn take_paint_feedback() -> PaintFeedback {
 }
 
 pub(crate) struct Snapshot {
+    pub(crate) device_account: device_account::View,
     pub(crate) preferred_agent: String,
     pub(crate) disclosures: std::collections::HashSet<&'static str>,
     pub(crate) agent_permissions: [String; 2],
@@ -677,6 +687,7 @@ pub(crate) struct Snapshot {
     pub(crate) custom_theme_label_edit: Option<(String, String)>,
     pub(crate) palette_hex: Arc<Vec<String>>,
     pub(crate) device_colors: Arc<Vec<crate::render::pane_identity::DeviceColorRow>>,
+    pub(crate) device_icons: Arc<Vec<crate::device_icons::Row>>,
     pub(crate) palette_edit: String,
     pub(crate) picker_hsv: (f32, f32, f32),
     pub(crate) eyedropper: bool,
@@ -750,6 +761,8 @@ pub(crate) struct Snapshot {
     pub(crate) feedback_caret: usize,
     pub(crate) feedback_diag: bool,
     pub(crate) feedback_diag_line: String,
+    pub(crate) feedback_sending: bool,
+    pub(crate) feedback_delivery: Option<(String, bool)>,
     pub(crate) themegen_providers: Arc<Vec<crate::themegen::ProviderStatus>>,
     pub(crate) themegen_provider: String,
     pub(crate) themegen_key_masked: String,
@@ -839,10 +852,13 @@ impl App {
             return;
         }
         let accounts = account_choices(self);
+        self.device_account.refresh();
         self.settings_scene.set_account_cache(accounts);
     }
 
     pub(crate) fn native_settings_tick(&mut self) {
+        self.device_account_poll();
+        self.poll_feedback_delivery();
         if self.settings_room_active() {
             self.pump_autosettings_scroll();
         }
@@ -876,6 +892,7 @@ impl App {
             })
             .unwrap_or_else(theme::cursor);
         Some(Snapshot {
+            device_account: self.device_account.view(),
             preferred_agent: cache.preferred_agent.clone(),
             disclosures: scene.disclosures().clone(),
             agent_permissions: cache.agent_permissions.clone(),
@@ -888,7 +905,9 @@ impl App {
             caret_on: self.last_blink_on,
             input: self.settings_input,
             select_all: scene.field_select_all(),
-            preedit: self.preedit.clone(),
+            preedit: if self.settings_input == Some(SettingsInput::DeviceAccountPassword) {
+                device_account::mask(&self.preedit)
+            } else { self.preedit.clone() },
             first_run: scene.first_run(),
             language: cache.language.clone(),
             cwd_mode: self.set_cwd_mode.clone(),
@@ -907,6 +926,7 @@ impl App {
             custom_theme_label_edit: self.custom_theme_label_edit.clone(),
             palette_hex: cache.palette_hex.clone(),
             device_colors: cache.device_colors.clone(),
+            device_icons: cache.device_icons.clone(),
             palette_edit: self.set_palette_edit.clone(),
             picker_hsv: self.set_picker_hsv,
             eyedropper: crate::eyedropper::supported(),
@@ -974,6 +994,8 @@ impl App {
             feedback_caret: self.feedback_caret,
             feedback_diag: self.feedback_diag,
             feedback_diag_line: crate::settings::diag_line(),
+            feedback_sending: self.feedback_delivery.busy(),
+            feedback_delivery: self.feedback_delivery.message.clone(),
             themegen_providers: cache.themegen_providers.clone(),
             themegen_provider: cache.themegen_provider.clone(),
             themegen_key_masked: cache.themegen_key_masked.clone(),
@@ -1056,6 +1078,7 @@ impl App {
             Some(Target::DropdownDismiss) => {}
             Some(Target::Category(cat)) => {
                 self.native_settings_blur();
+                self.device_account.hide();
                 self.settings_scene.set_category(cat);
                 self.refresh_native_settings_media_cache();
             }
@@ -1182,6 +1205,8 @@ impl App {
         self.settings_scene.clear_field_selection();
         self.settings_input = Some(field);
         match field {
+            SettingsInput::DeviceAccountName => self.settings_caret = self.device_account.account.chars().count(),
+            SettingsInput::DeviceAccountPassword => self.settings_caret = self.device_account.password.chars().count(),
             SettingsInput::CwdPath => self.settings_caret = self.set_cwd_mode.chars().count(),
             SettingsInput::FileOpenCmd => {
                 self.settings_caret = self.set_file_open_cmd.chars().count()
@@ -1252,6 +1277,7 @@ impl App {
     }
 
     fn native_settings_arm_backup(&mut self, field: SettingsInput) {
+        if field == SettingsInput::DeviceAccountPassword { return; }
         if self.settings_scene.field_backup_matches(field) {
             return;
         }
@@ -1265,6 +1291,8 @@ impl App {
 
     fn native_settings_field_value(&self, field: SettingsInput) -> (String, usize) {
         match field {
+            SettingsInput::DeviceAccountName => (self.device_account.account.clone(), self.settings_caret),
+            SettingsInput::DeviceAccountPassword => (device_account::mask(&self.device_account.password), self.settings_caret),
             SettingsInput::CwdPath => (self.set_cwd_mode.clone(), self.settings_caret),
             SettingsInput::FileOpenCmd => (self.set_file_open_cmd.clone(), self.settings_caret),
             SettingsInput::Shell => (self.set_shell.clone(), self.settings_caret),
@@ -1321,6 +1349,12 @@ impl App {
             self.settings_scene.mark_field_dirty();
         }
         match field {
+            SettingsInput::DeviceAccountName => {
+                crate::lineedit::insert(&mut self.device_account.account, &mut self.settings_caret, text)
+            }
+            SettingsInput::DeviceAccountPassword => {
+                crate::lineedit::insert(&mut self.device_account.password, &mut self.settings_caret, text)
+            }
             SettingsInput::CwdPath => {
                 crate::lineedit::insert(&mut self.set_cwd_mode, &mut self.settings_caret, text)
             }
@@ -1454,6 +1488,8 @@ impl App {
 
     fn native_settings_restore_backup(&mut self, backup: FieldBackup) {
         match backup.field {
+            SettingsInput::DeviceAccountName => self.device_account.account = backup.value,
+            SettingsInput::DeviceAccountPassword => self.device_account.password.clear(),
             SettingsInput::CwdPath => self.set_cwd_mode = backup.value,
             SettingsInput::FileOpenCmd => self.set_file_open_cmd = backup.value,
             SettingsInput::Shell => self.set_shell = backup.value,
@@ -1525,6 +1561,7 @@ impl App {
         }
         self.settings_input = None;
         match field {
+            Some(SettingsInput::DeviceAccountPassword) => self.device_account.password.clear(),
             Some(SettingsInput::ThemeLabel) => self.theme_label_edit = None,
             Some(SettingsInput::CustomThemeLabel) => self.custom_theme_label_edit = None,
             Some(SettingsInput::AccountLabel) => self.account_label_edit = None,
@@ -1576,6 +1613,10 @@ impl App {
 
         self.ime_retarget(crate::ImeFocus::Settings(field));
         let host = self.host_mod();
+        if field == SettingsInput::DeviceAccountPassword && host
+            && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyC | KeyCode::KeyX | KeyCode::KeyZ)) {
+            return true;
+        }
         if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyA)) {
             self.settings_scene.select_all_field();
             if let Some((buffer, caret)) = field_buffer(self, field) {
@@ -1710,6 +1751,20 @@ impl App {
         }
 
         match event.logical_key {
+            Key::Named(NamedKey::Tab | NamedKey::Enter) if field == SettingsInput::DeviceAccountName => {
+                self.native_settings_focus(SettingsInput::DeviceAccountPassword);
+                self.chrome_dirty = true;
+                return true;
+            }
+            Key::Named(NamedKey::Tab) if field == SettingsInput::DeviceAccountPassword => {
+                self.native_settings_focus(SettingsInput::DeviceAccountName);
+                self.chrome_dirty = true;
+                return true;
+            }
+            Key::Named(NamedKey::Enter) if field == SettingsInput::DeviceAccountPassword => {
+                self.device_account_action(device_account::Action::Login);
+                return true;
+            }
             Key::Named(NamedKey::Enter) if is_multiline(field) => {
                 self.native_settings_insert_into(field, "\n");
                 return true;
@@ -2094,6 +2149,8 @@ fn is_jamo(ch: char) -> bool {
 
 fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mut usize)> {
     match field {
+        SettingsInput::DeviceAccountName => Some((&mut app.device_account.account, &mut app.settings_caret)),
+        SettingsInput::DeviceAccountPassword => Some((&mut app.device_account.password, &mut app.settings_caret)),
         SettingsInput::CwdPath => Some((&mut app.set_cwd_mode, &mut app.settings_caret)),
         SettingsInput::FileOpenCmd => Some((&mut app.set_file_open_cmd, &mut app.settings_caret)),
         SettingsInput::Shell => Some((&mut app.set_shell, &mut app.settings_caret)),
@@ -2653,6 +2710,12 @@ fn paint_appearance(
     w: f32,
 ) {
     paint_setup_section(g, s, hits, caret, x, y, w, 1);
+    section_title(g, x, *y, "앱 색 미리보기", "바꾸고 싶은 영역을 누르세요");
+    *y += 54.0;
+    *y += appearance_preview::paint(g, s, hits, x, *y, w);
+    if !s.custom_active.is_empty() {
+        paint_palette_editor(g, s, hits, caret, x, y, w);
+    }
     if !disclosure(g, s, hits, x, y, w, "appearance", "세부 모양 · 팔레트, 강조색, 글꼴과 배율") {
         return;
     }
@@ -2817,9 +2880,9 @@ fn paint_appearance(
             false,
         );
         *y += 72.0;
-        paint_palette_editor(g, s, hits, caret, x, y, w);
     }
     paint_device_colors(g, s, hits, caret, x, y, w);
+    paint_device_icons(g, s, hits, x, y, w);
     row_label(g, x, y, "강조색");
     let accents: Vec<(String, bool, SettingsAction)> = theme::ACCENT_PRESETS
         .iter()
@@ -3323,11 +3386,7 @@ fn paint_palette_editor(
         Some(SettingsInput::PaletteHex(index)) => index.min(s.palette_hex.len().saturating_sub(1)),
         _ => 0,
     };
-    let slot_label = if selected < theme::PALETTE_KEYS.len() {
-        theme::PALETTE_KEYS[selected].0.to_string()
-    } else {
-        format!("ANSI {}", selected.saturating_sub(theme::PALETTE_KEYS.len()))
-    };
+    let slot_label = theme::palette_slot_label(selected);
     let value = if s.input == Some(SettingsInput::PaletteHex(selected)) {
         s.palette_edit.clone()
     } else {
@@ -3494,6 +3553,41 @@ fn paint_color_picker(
 /// 기기별 색 — 이 기기와 명부의 기계 한 줄씩. 줄을 고르면 프리셋과 선택기가
 /// 그 밑에 펼쳐진다. 색은 pane 헤더 칩·배치도 칸·정보 탭·거울 pane 바탕이 함께
 /// 쓰므로, 여기서 바꾸면 그 넷이 한꺼번에 따라온다.
+fn paint_device_icons(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+) {
+    section_title(g, x, *y, "기기 아이콘", "기기마다 종류를 고르거나 SVG 그림을 가져옵니다");
+    *y += 54.0;
+    for row in s.device_icons.iter() {
+        g.queue_icon(&row.icon, x, *y + (ROW_H - theme::ICON_SIZE) / 2.0, theme::ICON_SIZE, theme::text());
+        let label = if row.local { format!("{} · 이 기기", row.label) } else { row.label.clone() };
+        let label = fit(g, &label, (w - theme::ICON_SIZE - 12.0).max(0.0), 12.0, false);
+        draw_text(g, x + theme::ICON_SIZE + 12.0, *y + 12.0, &label, 12.0, theme::text(), false);
+        *y += ROW_H;
+        let cells = crate::device_icons::PRESETS.iter().map(|(key, label)| (
+            label.to_string(), row.choice == *key,
+            SettingsAction::DeviceIcon(row.label.clone(), key.to_string()),
+        )).collect();
+        chips_owned(g, s, hits, x, y, w, cells);
+        let import_label = if row.choice == "custom" { "SVG 바꾸기" } else { "SVG 가져오기" };
+        button(g, s, hits, (x, *y, 110.0, CTL_H), import_label,
+            Target::Setting(SettingsAction::ImportDeviceIcon(row.label.clone())), row.choice == "custom");
+        button(g, s, hits, (x + 116.0, *y, 64.0, CTL_H), "초기화",
+            Target::Setting(SettingsAction::DeviceIcon(row.label.clone(), "auto".into())), false);
+        *y += ROW_H;
+        g.rect(x, *y - 1.0, w, 1.0, theme::with_alpha(theme::border(), 140));
+    }
+    if s.device_icons.is_empty() {
+        draw_text(g, x, *y, "연결된 기기가 있으면 여기에 표시됩니다", 10.5, theme::text_dim(), false);
+        *y += ROW_H;
+    }
+}
+
 fn paint_device_colors(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -3892,6 +3986,9 @@ pub(crate) fn paint_setup_section(
 ) {
     match section {
         0 => {
+            toggle_row(g, s, hits, x, y, w, "캐릭터 외형", theme::character_appearance(), SettingsAction::ToggleCharacterAppearance);
+            toggle_row(g, s, hits, x, y, w, "캐릭터 페르소나", s.claude_persona, SettingsAction::ToggleClaudePersona);
+            plain_hint(g, x, y, w, "외형은 그림과 장식에 즉시 적용됩니다. 페르소나는 새로 시작하는 에이전트의 말투에 적용됩니다.");
             row_label(g, x, y, "캐릭터 테마");
             let choices = s.themes.iter().map(|row| (
                 row.label.clone(), s.character_theme == row.id,
@@ -4526,6 +4623,7 @@ fn paint_machines(
     y: &mut f32,
     w: f32,
 ) {
+    device_account::paint(g, s, hits, caret, x, y, w);
     let rows = machines_view();
     draw_text(
         g,
@@ -4662,7 +4760,7 @@ fn machine_row(
         },
     );
     g.queue_icon(
-        "server",
+        &crate::device_icons::icon(&m.label),
         rect.0 + 12.0,
         rect.1 + 18.0,
         17.0,
@@ -5585,9 +5683,10 @@ fn paint_feedback(
         x,
         *y,
         "무엇이 불편했나요",
-        "보내지 않고 이 기기의 피드백 폴더에 한 장씩 저장합니다",
+        "개발자 Discord로 전달합니다",
     );
     *y += 56.0;
+    info_slab(g, x, y, w, "받는 곳: 개발자 Discord. 작성한 내용과 아래에서 선택한 진단 정보만 전송합니다. 로그인 없이 보낼 수 있습니다.");
     text_field(
         g,
         s,
@@ -5610,30 +5709,38 @@ fn paint_feedback(
         x,
         y,
         w,
-        "진단 정보 함께 남기기",
+        "앱 버전·운영체제·프로세서 정보 함께 보내기",
         s.feedback_diag,
         SettingsAction::ToggleFeedbackDiag,
     );
     info_slab(g, x, y, w, &s.feedback_diag_line);
-    button(
+    if !s.feedback_sending { button(
         g,
         s,
         hits,
-        (x, *y, 106.0, 36.0),
-        "피드백 저장",
-        Target::Setting(SettingsAction::SaveFeedback),
+        (x, *y, 120.0, 36.0),
+        "피드백 보내기",
+        Target::Setting(SettingsAction::SendFeedback),
         true,
-    );
+    ); } else {
+        draw_text(g, x, *y + 8.0, "보내는 중…", 12.0, theme::text_dim(), false);
+    }
     button(
         g,
         s,
         hits,
-        (x + 118.0, *y, 116.0, 36.0),
+        (x + 132.0, *y, 116.0, 36.0),
         "저장 폴더 열기",
         Target::Setting(SettingsAction::OpenFeedbackDir),
         false,
     );
     *y += 52.0;
+    if let Some((message, error)) = &s.feedback_delivery {
+        for line in wrap_words(g, &crate::native_strings::text(message), w, 10.5) {
+            draw_text(g, x, *y, &line, 10.5, if *error { theme::danger() } else { theme::text_dim() }, false);
+            *y += 18.0;
+        }
+    }
 }
 
 /// 본진 계정 칸을 화면이 쓰는 모양으로 바꾼다. 폴링도 여기서 태운다 — 계정
@@ -6598,14 +6705,14 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
         SettingsCat::Machines => (
             "연결 기기",
             "server",
-            "ssh 로 붙는 다른 컴퓨터를 등록합니다",
+            "기기 계정 로그인과 연결 상태를 확인합니다",
         ),
         SettingsCat::Theme => ("캐릭터 테마", "image", "캐릭터 명단과 그림을 한 벌로 갈아낍니다"),
         SettingsCat::Students => ("캐릭터", "users", "테마를 섞어 사용할 캐릭터를 고릅니다"),
         SettingsCat::Feedback => (
             "피드백",
             "message-square-warning",
-            "불편한 점을 이 기기에 기록합니다",
+            "불편한 점을 개발자 Discord로 보냅니다",
         ),
     }
 }
@@ -7391,41 +7498,10 @@ fn button(
     target: Target,
     primary: bool,
 ) {
-    let hover = contains(rect, s.cursor);
-    // 주 버튼은 강조색 그대로이고 호버에 한 톤만 밝아진다 — 예전엔 호버 순간
-    // 회색 `surface_active` 로 바뀌어 눌리는 게 아니라 꺼지는 것처럼 보였다.
-    // 보조 버튼은 입력칸·카드와 같은 채움+테두리 한 벌이라 한 화면 안에서
-    // 마감이 하나로 읽힌다(2026-09-10 지적 「버튼 마감이 이상하다」).
-    // 호출처가 준 높이가 30~36 으로 제각각이라, 보이는 몸통만 30 으로 맞추고
-    // 세로로 가운데 놓는다(누르는 자리는 준 사각형 그대로). 워프 버튼 높이.
-    // 목업(플랫, 2026-09-10 「버튼 아웃라인, 텍스트만 색 바꿔서. fill 은 x」):
-    // 채움 없이 테두리와 글자만. 보조는 회색→올리면 진해지고, 주 버튼은 강조색.
-    let vis = if rect.3 > CTL_H {
-        (rect.0, rect.1 + ((rect.3 - CTL_H) / 2.0).floor(), rect.2, CTL_H)
-    } else {
-        rect
-    };
-    let (line, ink) = if primary {
-        (theme::accent(), theme::accent())
-    } else if hover {
-        (theme::text_dim(), theme::text())
-    } else {
-        (theme::border(), theme::text_dim())
-    };
-    stroke_round(g, vis, ctrl_radius(), line);
-    let shown = fit(g, label, vis.2 - 20.0, 12.0, primary);
-    let tx = vis.0 + (vis.2 - g.measure_chrome_text(&shown, 12.0, primary)) / 2.0;
-    draw_text(
-        g,
-        tx,
-        vis.1 + (vis.3 - 12.0) / 2.0 - 0.5,
-        &shown,
-        12.0,
-        ink,
-        primary,
-    );
+    let label = crate::native_strings::text(label);
+    let rect = crate::native_controls::text_button(g, rect, s.cursor, &label,
+        crate::native_controls::Style { primary, ..Default::default() });
     register_clipped(g, hits, target, rect, HitCursor::Pointer);
-    g.hover_pointer |= hover;
 }
 
 fn mini_icon_button(
@@ -7436,29 +7512,7 @@ fn mini_icon_button(
     icon: &str,
     target: Target,
 ) {
-    let hover = contains(rect, s.cursor);
-    if hover {
-        round_rect(
-            g,
-            rect.0,
-            rect.1,
-            rect.2,
-            rect.3,
-            chip_radius(),
-            theme::surface_active(),
-        );
-    }
-    g.queue_icon(
-        icon,
-        rect.0 + 6.0,
-        rect.1 + 6.0,
-        14.0,
-        if hover {
-            theme::text()
-        } else {
-            theme::text_mute()
-        },
-    );
+    let rect = crate::native_controls::icon_button(g, rect, s.cursor, icon, Default::default());
     register_clipped(g, hits, target, rect, HitCursor::Pointer);
 }
 

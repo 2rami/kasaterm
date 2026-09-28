@@ -52,6 +52,36 @@ pub const CHUNK: usize = 64 * 1024;
 /// 스트림만 끊는다 — 소켓 수신 루프가 한 스트림을 기다리면 나머지가 다 선다.
 pub(crate) const STREAM_QUEUE: usize = 256;
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
+const PING_EVERY: Duration = Duration::from_secs(25);
+const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
+
+type GatewaySocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn connect_gateway(url: &str, timeout: Duration) -> anyhow::Result<GatewaySocket> {
+    let (ws, _) = tokio::time::timeout(timeout, tokio_tungstenite::connect_async(url))
+        .await.map_err(|_| anyhow::anyhow!("관문 연결 시간이 초과됐어요"))?
+        .map_err(|error| anyhow::anyhow!("관문에 못 붙었어요: {error}"))?;
+    Ok(ws)
+}
+
+async fn exchange_hello(ws: &mut GatewaySocket, hello: String, timeout: Duration) -> anyhow::Result<Option<Result<Message, tokio_tungstenite::tungstenite::Error>>> {
+    tokio::time::timeout(timeout, async {
+        ws.send(Message::Text(hello.into())).await?;
+        Ok(ws.next().await)
+    }).await.map_err(|_| anyhow::anyhow!("관문이 hello 에 답이 없어요"))?
+}
+
+async fn next_live_frame<S: futures_util::Stream + Unpin>(
+    stream: &mut S, last_received: &mut tokio::time::Instant, timeout: Duration,
+) -> Result<Option<S::Item>, tokio::time::error::Elapsed> {
+    // Settings changes cancel this wait, but only traffic may renew the deadline.
+    let frame = tokio::time::timeout_at(*last_received + timeout, stream.next()).await?;
+    if frame.is_some() { *last_received = tokio::time::Instant::now(); }
+    Ok(frame)
+}
+
 pub fn encode(kind: u8, id: u32, payload: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(5 + payload.len());
     v.push(kind);
@@ -323,17 +353,12 @@ async fn run(local_port: u16) {
 /// 연결 하나의 수명. Ok = 정상 종료(끄기·설정 변경), Err = 연결 실패·유실.
 async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Result<()> {
     let url = ws_url(connect);
-    let (ws, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .map_err(|e| anyhow::anyhow!("관문 {url} 에 못 붙었어요: {e}"))?;
-    let (mut tx, mut rx) = ws.split();
+    let mut ws = connect_gateway(&url, CONNECT_TIMEOUT).await?;
     let token = usable_token(gateway);
     let hello = hello_json(token.as_deref()).ok_or_else(|| anyhow::anyhow!("machine_key 를 못 만들었어요"))?;
-    tx.send(Message::Text(hello.into())).await?;
     // 관문의 첫 답 — ok 가 아니면 이 키로는 못 쓴다(다른 기계가 같은 slug 를 쥐고 있다).
-    let first = tokio::time::timeout(Duration::from_secs(15), rx.next())
-        .await
-        .map_err(|_| anyhow::anyhow!("관문이 hello 에 답이 없어요"))?;
+    let first = exchange_hello(&mut ws, hello, HELLO_TIMEOUT).await?;
+    let (mut tx, mut rx) = ws.split();
     match first {
         Some(Ok(Message::Text(t))) => {
             let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap_or_default();
@@ -364,24 +389,26 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
     }
     // 앱→관문 쓰기는 한 태스크로 — 스트림 여럿이 한 소켓을 나눠 쓴다.
     let (wtx, mut wrx) = mpsc::channel::<Message>(256);
-    let writer = tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(25));
+    let mut writer = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(PING_EVERY);
         tick.tick().await;
         loop {
             tokio::select! {
                 m = wrx.recv() => match m {
-                    Some(m) => if tx.send(m).await.is_err() { break },
+                    Some(m) => if !matches!(tokio::time::timeout(PEER_IDLE_TIMEOUT, tx.send(m)).await, Ok(Ok(()))) { break },
                     None => break,
                 },
                 // 터널·프록시의 유휴 끊김(~100초)을 앞질러 간다.
-                _ = tick.tick() => if tx.send(Message::Ping(Vec::new().into())).await.is_err() { break },
+                _ = tick.tick() => if !matches!(tokio::time::timeout(PEER_IDLE_TIMEOUT, tx.send(Message::Ping(Vec::new().into()))).await, Ok(Ok(()))) { break },
             }
         }
     });
     let streams: Arc<Mutex<std::collections::HashMap<u32, mpsc::Sender<(u8, Vec<u8>)>>>> =
         Arc::new(Mutex::new(Default::default()));
+    let mut last_received = tokio::time::Instant::now();
     let result: anyhow::Result<()> = loop {
         tokio::select! {
+            _ = &mut writer => break Err(anyhow::anyhow!("관문으로 보내는 연결이 끊겼어요")),
             _ = poke_notify().notified() => {
                 // 껐거나·관문이 바뀌었거나·로그인이 바뀌었다 — 바깥 루프가 새로 붙는다.
                 if !wanted(gateway)
@@ -391,10 +418,17 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
                     break Ok(());
                 }
                 if let Some(h) = hello_json(token.as_deref()) {
-                    let _ = wtx.send(Message::Text(h.into())).await; // 유저가 늘었다 — 다시 알린다
+                    if wtx.try_send(Message::Text(h.into())).is_err() {
+                        break Err(anyhow::anyhow!("관문으로 보내는 연결이 지연되고 있어요"));
+                    }
                 }
             }
-            m = rx.next() => match m {
+            received = next_live_frame(&mut rx, &mut last_received, PEER_IDLE_TIMEOUT) => {
+                let m = match received {
+                    Ok(frame) => frame,
+                    Err(_) => break Err(anyhow::anyhow!("관문 응답이 끊겼어요 — 다시 연결합니다")),
+                };
+                match m {
                 Some(Ok(Message::Binary(b))) => {
                     let Some((kind, id, payload)) = decode(&b) else { continue };
                     if kind == OPEN {
@@ -403,7 +437,8 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
                         let open: serde_json::Value = match serde_json::from_slice(payload) {
                             Ok(v) => v,
                             Err(_) => {
-                                let _ = wtx.send(Message::Binary(encode(CLOSE, id, b"bad open").into())).await;
+                                streams.lock().unwrap().remove(&id);
+                                let _ = wtx.try_send(Message::Binary(encode(CLOSE, id, b"bad open").into()));
                                 continue;
                             }
                         };
@@ -449,11 +484,16 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
                         _ => {}
                     }
                 }
-                Some(Ok(Message::Ping(p))) => { let _ = wtx.send(Message::Pong(p)).await; }
+                Some(Ok(Message::Ping(p))) => {
+                    if wtx.try_send(Message::Pong(p)).is_err() {
+                        break Err(anyhow::anyhow!("관문으로 보내는 연결이 지연되고 있어요"));
+                    }
+                }
                 Some(Ok(Message::Pong(_))) => {}
                 Some(Ok(Message::Close(_))) | None => break Err(anyhow::anyhow!("관문이 연결을 닫았어요")),
                 Some(Err(e)) => break Err(anyhow::anyhow!("관문 연결 유실: {e}")),
                 Some(Ok(_)) => {}
+                }
             }
         }
     };
@@ -462,6 +502,7 @@ async fn session(gateway: &str, connect: &str, local_port: u16) -> anyhow::Resul
         s.accepted = 0;
         s.account = None;
     });
+    streams.lock().unwrap().clear();
     writer.abort();
     result
 }
@@ -691,6 +732,68 @@ fn client() -> &'static reqwest::Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stalled_websocket_handshake_has_a_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let result = tokio::time::timeout(Duration::from_secs(2), connect_gateway(&url, Duration::from_millis(40))).await;
+        server.abort();
+        let error = result.expect("WebSocket handshake never timed out").unwrap_err();
+        assert!(error.to_string().contains("연결 시간이 초과"));
+    }
+
+    #[tokio::test]
+    async fn stalled_hello_response_has_a_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            assert!(matches!(ws.next().await, Some(Ok(Message::Text(_)))));
+            std::future::pending::<()>().await;
+        });
+        let mut ws = connect_gateway(&url, Duration::from_secs(2)).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2),
+            exchange_hello(&mut ws, "test hello".into(), Duration::from_millis(40))).await;
+        server.abort();
+        assert!(result.expect("hello never timed out").unwrap_err().to_string().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn inbound_frames_refresh_liveness_but_cancelled_waits_do_not() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (tx, mut commands) = mpsc::channel::<Message>(8);
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            while let Some(frame) = commands.recv().await { ws.send(frame).await.unwrap(); }
+        });
+        let mut ws = connect_gateway(&url, Duration::from_secs(2)).await.unwrap();
+        let mut received_at = tokio::time::Instant::now() - Duration::from_millis(1);
+        for frame in [Message::Text("ok".into()), Message::Binary(vec![1, 2].into()), Message::Ping(vec![3].into())] {
+            let before = received_at;
+            tx.send(frame.clone()).await.unwrap();
+            let received = next_live_frame(&mut ws, &mut received_at, Duration::from_secs(1)).await.unwrap().unwrap().unwrap();
+            assert_eq!(received, frame);
+            assert!(received_at > before);
+        }
+        let before = received_at;
+        let cancelled = tokio::time::timeout(Duration::from_millis(10),
+            next_live_frame(&mut ws, &mut received_at, Duration::from_secs(1))).await;
+        assert!(cancelled.is_err());
+        assert_eq!(received_at, before);
+        received_at = tokio::time::Instant::now() - Duration::from_secs(1);
+        let result = tokio::time::timeout(Duration::from_secs(2),
+            next_live_frame(&mut ws, &mut received_at, Duration::from_millis(40))).await;
+        server.abort();
+        assert!(result.expect("silent connection never timed out").is_err());
+    }
 
     #[test]
     fn frame_round_trip() {

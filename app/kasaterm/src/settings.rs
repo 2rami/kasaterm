@@ -738,6 +738,19 @@ impl App {
                     self.regen_pane_shims();
                 }
             }
+            SettingsAction::DeviceAccount(action) => self.device_account_action(action),
+            SettingsAction::DeviceIcon(label, preset) => {
+                match crate::device_icons::set_preset(&label, &preset) {
+                    Ok(()) => self.settings_scene.refresh_palette_cache(),
+                    Err(error) => self.set_toast(error),
+                }
+                self.chrome_dirty = true;
+            }
+            SettingsAction::ImportDeviceIcon(label) => {
+                if let Err(error) = crate::device_icons::begin_import(label) {
+                    self.set_toast(error);
+                }
+            }
             SettingsAction::AgentPermission(provider, mode) => {
                 if let Err(error) = agent_preferences::set_permission(provider, mode) {
                     self.collab.toast = Some((error, Instant::now()));
@@ -895,16 +908,14 @@ impl App {
                 }
             }
             SettingsAction::TogglePet => {
-                let on = crate::chrome::toggle_pet();
-                self.set_toast(if on {
-                    "펫을 띄웠습니다".into()
-                } else {
-                    "펫을 껐습니다".to_string()
-                });
+                self.set_toast(crate::chrome::toggle_pet()
+                    .map(|state| state.message().to_string()).unwrap_or_else(|error| error));
             }
             SettingsAction::PetCharacter(name) => {
-                crate::chrome::set_pet_character(&name);
-                self.set_toast(format!("펫 캐릭터: {name}"));
+                self.set_toast(match crate::chrome::set_pet_character(&name) {
+                    Ok(()) => format!("펫 캐릭터: {name}"),
+                    Err(error) => error,
+                });
             }
             SettingsAction::PetPreference(change) => {
                 if crate::chrome::set_pet_preference(change).is_err() {
@@ -1046,6 +1057,9 @@ impl App {
                 self.settings_input = Some(SettingsInput::CustomThemeLabel);
             }
             SettingsAction::FocusPaletteHex(i) => {
+                if theme::active_custom_slug().is_none() {
+                    self.settings_apply(SettingsAction::StartCustomTheme);
+                }
                 self.set_palette_edit = self.palette_hex_at(i);
                 self.settings_caret = self.set_palette_edit.chars().count();
                 // 피커 시드 — RGB→HSV 역산은 여기 한 번뿐이다. 매 픽마다
@@ -1222,6 +1236,13 @@ impl App {
             SettingsAction::ToggleClaudePersona => {
                 self.set_claude_persona = !self.set_claude_persona;
                 self.settings_save();
+                self.set_toast("페르소나는 새로 시작하는 에이전트부터 적용됩니다".to_string());
+            }
+            SettingsAction::ToggleCharacterAppearance => {
+                let enabled = !theme::character_appearance();
+                socket::write_setting("character_appearance", serde_json::json!(enabled));
+                theme::set_character_appearance(enabled);
+                self.set_toast(if enabled { "캐릭터 외형을 켰습니다" } else { "캐릭터 외형을 껐습니다" }.to_string());
             }
             SettingsAction::ToggleShimInject => {
                 self.set_shim_inject = !self.set_shim_inject;
@@ -1539,6 +1560,7 @@ impl App {
             }
             SettingsAction::ToggleFeedbackDiag => self.feedback_diag = !self.feedback_diag,
             SettingsAction::SaveFeedback => self.save_feedback(),
+            SettingsAction::SendFeedback => self.send_feedback(),
             SettingsAction::OpenFeedbackDir => {
                 let dir = feedback_dir();
                 let _ = std::fs::create_dir_all(&dir);
@@ -1955,7 +1977,7 @@ impl App {
             }
             "palette-hex" => {
                 let i: usize = id.parse().map_err(|_| unknown(id))?;
-                if i >= theme::PALETTE_KEYS.len() + 16 {
+                if i >= theme::PALETTE_SLOT_COUNT {
                     return Err(reject(
                         "palette_slot_missing",
                         "없는 색 칸이에요".to_string(),
@@ -1979,7 +2001,7 @@ impl App {
             // 집힌 색은 GUI 틱이 받아 칸에 넣는다.
             "palette-eyedropper" => {
                 let i: usize = id.parse().map_err(|_| unknown(id))?;
-                if i >= theme::PALETTE_KEYS.len() + 16 {
+                if i >= theme::PALETTE_SLOT_COUNT {
                     return Err(reject(
                         "palette_slot_missing",
                         "없는 색 칸이에요".to_string(),
@@ -1999,7 +2021,7 @@ impl App {
             // 짝을 지킨다(blur 에서 커밋).
             "palette-preview" => {
                 let i: usize = id.parse().map_err(|_| unknown(id))?;
-                if i >= theme::PALETTE_KEYS.len() + 16 {
+                if i >= theme::PALETTE_SLOT_COUNT {
                     return Err(reject(
                         "palette_slot_missing",
                         "없는 색 칸이에요".to_string(),
@@ -2353,6 +2375,15 @@ impl App {
                 self.feedback_caret = self.feedback_body.chars().count();
                 self.settings_apply(SettingsAction::SaveFeedback);
                 Ok(self.feedback_body.is_empty())
+            }
+            "send-feedback" => {
+                if arg.trim().is_empty() || self.feedback_delivery.busy() {
+                    return Err(reject("feedback_unavailable", "내용을 입력하고 이전 전송이 끝난 뒤 보내 주세요".into()));
+                }
+                self.feedback_body = arg;
+                self.feedback_caret = self.feedback_body.chars().count();
+                self.send_feedback();
+                Ok(self.feedback_delivery.busy())
             }
             "open-feedback-dir" => {
                 self.settings_apply(SettingsAction::OpenFeedbackDir);
@@ -2734,7 +2765,8 @@ impl App {
                     .map(|(n, c)| serde_json::json!({ "name": n, "hex": hex(*c) }))
                     .collect::<Vec<_>>(),
                 "palette_keys": theme::PALETTE_KEYS.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
-                "palette_hex": palette_hex_list(&s, theme::active_custom_slug().as_deref()),
+                "palette_hex": palette_hex_list(&s, theme::active_custom_slug().as_deref()).into_iter().take(theme::SURFACE_PALETTE_START).collect::<Vec<_>>(),
+                "palette_surface_keys": theme::SURFACE_PALETTE_KEYS.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
                 "accent": theme::accent_name(),
                 "accents": theme::ACCENT_PRESETS
                     .iter()
@@ -2797,6 +2829,9 @@ impl App {
             "feedback": {
                 "diag": diag_line(),
                 "diag_on": self.feedback_diag,
+                "sending": self.feedback_delivery.busy(),
+                "attempt": self.feedback_delivery.attempt,
+                "delivery": self.feedback_delivery.message.as_ref().map(|(message, error)| serde_json::json!({"message":message,"error":error})),
             },
         })
     }
@@ -3043,14 +3078,14 @@ impl App {
         // 안 적히는 편이 더 나쁘다.
         let want = theme::active_custom_slug().unwrap_or_default();
         let mut list = theme::custom_themes(&s);
-        let seeded = list.is_empty();
+        let seeded = want.is_empty() || list.is_empty();
         if seeded {
             list.push(theme::clone_current_custom(&s));
         }
         let idx = list
             .iter()
             .position(|e| !want.is_empty() && theme::custom_slug(e) == want)
-            .unwrap_or(0);
+            .unwrap_or(if seeded { list.len() - 1 } else { 0 });
         let mut obj = match list[idx].as_object() {
             Some(m) => m.clone(),
             None => serde_json::Map::new(),
@@ -3062,6 +3097,10 @@ impl App {
                 theme::PALETTE_KEYS[i].0.to_string(),
                 serde_json::Value::String(hex),
             );
+        } else if let Some((key, _)) = i.checked_sub(theme::SURFACE_PALETTE_START)
+            .and_then(|offset| theme::SURFACE_PALETTE_KEYS.get(offset))
+        {
+            obj.insert((*key).to_string(), serde_json::Value::String(hex));
         } else {
             // ansi 배열이 없거나 짧을 수 있다 — 지금 유효값으로 16칸을 다 채운
             // 뒤 한 칸만 바꾼다. 부분 배열을 그대로 두면 인덱스가 어긋난다.
@@ -3099,6 +3138,7 @@ impl App {
         let key = format!("custom:{}", theme::custom_slug(&list[idx]));
         write_custom_themes(list);
         theme::set_theme(&key);
+        socket::write_setting("theme", serde_json::Value::String(key));
         self.settings_scene.refresh_palette_cache();
         self.repaint_all();
     }
@@ -3238,20 +3278,25 @@ impl App {
         self.regen_pane_shims();
     }
 
-    /// 피드백 본문을 `~/.config/kasaterm/feedback/` 에 마크다운 한 장으로 굳힌다.
-    ///
-    /// 보낼 곳이 아직 없다 — 그래서 "전송"이 아니라 "저장"이고, 파일로 남기는
-    /// 것까지가 이 기능의 전부다. 나중에 받는 창구가 생기면 이 폴더를 그대로
-    /// 올리면 되도록 한 건=한 파일로 둔다.
     pub(crate) fn save_feedback(&mut self) {
+        if self.save_feedback_copy().is_some() {
+            self.feedback_body.clear();
+            self.feedback_caret = 0;
+            self.settings_input = None;
+            socket::write_setting("feedback_draft", serde_json::json!(""));
+            self.set_toast("피드백을 이 기기에 저장했어요".into());
+        }
+    }
+
+    pub(crate) fn save_feedback_copy(&mut self) -> Option<std::path::PathBuf> {
         let body = self.feedback_body.trim().to_string();
         if body.is_empty() {
-            return;
+            return None;
         }
         let dir = feedback_dir();
         if std::fs::create_dir_all(&dir).is_err() {
             self.set_toast("피드백 폴더를 못 만들었어요".to_string());
-            return;
+            return None;
         }
         let stamp = local_stamp();
         let mut doc = format!("# {stamp}\n\n{body}\n");
@@ -3267,76 +3312,13 @@ impl App {
             n += 1;
         }
         match std::fs::write(&path, &doc) {
-            Ok(()) => {
-                self.feedback_body.clear();
-                self.feedback_caret = 0;
-                self.settings_input = None;
-                socket::write_setting("feedback_draft", serde_json::Value::String(String::new()));
-                self.set_toast(if post_feedback_to_nacho(&doc) {
-                    "피드백을 저장하고 나쵸에게 보내는 중이에요".to_string()
-                } else {
-                    "피드백을 저장했어요".to_string()
-                });
-            }
-            Err(e) => self.set_toast(format!("저장 실패: {e}")),
-        }
-    }
-}
-
-/// 방금 굳힌 제보를 나쵸네코에게 넘긴다. 호스트 설정이 비어 있으면 아무 일도 하지
-/// 않고 `false` 를 낸다 — **기본은 「안 보냄」**이다.
-///
-/// 넘기는 곳은 그 기계의 `nacho-tell` 인박스다(`echo <본문> | ssh <host>
-/// 'python3 ~/nacho-neko/bin/nacho-tell.py <이름>'`). 나쵸가 몇 초 안에 집어 가고,
-/// **같은 대화가 사용자의 디스코드 DM 스레드에도 남는다** — 앱이 디스코드로 직접
-/// 보내려면 봇 토큰이 있어야 하는데 그건 설정 파일에 평문으로 둘 것이 못 되고,
-/// DM 채널에는 webhook 도 못 만든다.
-///
-/// 보내기는 백그라운드다. ssh 왕복 동안 GUI 가 멈추면 버튼을 누른 손이 먼저
-/// 눈치챈다. 그래서 토스트도 「보냈다」가 아니라 「보내는 중」이다 — 결과를 안
-/// 기다리고 하는 말이라 단정하면 거짓이 된다. 실패해도 파일은 이미 디스크에 있어
-/// 제보 자체는 안 잃는다.
-fn post_feedback_to_nacho(doc: &str) -> bool {
-    let host = socket::read_feedback_nacho_host();
-    if host.is_empty() {
-        return false;
-    }
-    let text = doc.to_string();
-    std::thread::spawn(move || {
-        use std::io::Write;
-        use std::process::Stdio;
-        // GUI 프로세스의 PATH 는 로그인 셸의 것이 아니다 — 절대경로로 부른다.
-        let spawned = crate::proc::command("/usr/bin/ssh")
-            .arg("-o")
-            .arg("ConnectTimeout=10")
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg(&host)
-            .arg("python3 ~/nacho-neko/bin/nacho-tell.py 카사텀")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn();
-        let mut child = match spawned {
-            Ok(child) => child,
+            Ok(()) => Some(path),
             Err(e) => {
-                eprintln!("[feedback] ssh 를 띄우지 못했다: {e}");
-                return;
+                self.set_toast(format!("저장 실패: {e}"));
+                None
             }
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
         }
-        match child.wait_with_output() {
-            Ok(out) if out.status.success() => {}
-            Ok(out) => eprintln!(
-                "[feedback] 나쵸 전달 실패: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-            Err(e) => eprintln!("[feedback] ssh 를 기다리지 못했다: {e}"),
-        }
-    });
-    true
+    }
 }
 
 /// 웹뷰가 가져갈 설정 값 스냅샷이 잠깐 놓이는 자리.
@@ -3795,16 +3777,18 @@ enum PickerSlot {
 
 pub(crate) fn palette_hex_list(s: &serde_json::Value, slug: Option<&str>) -> Vec<String> {
     let list = theme::custom_themes(s);
-    let obj = theme::find_custom(&list, slug.unwrap_or(""));
+    let obj = slug.and_then(|slug| theme::find_custom(&list, slug));
+    let current = theme::theme_name();
+    let current = if current == "system" { theme::system_slot_theme(theme::system_theme_key() == "light") } else { current };
     let base_key = obj
         .and_then(|o| o.get("base"))
         .and_then(|x| x.as_str())
-        .unwrap_or("dark");
+        .unwrap_or(current.as_str());
     let (_, _, base) = theme::THEME_PRESETS
         .iter()
         .find(|(k, _, _)| *k == base_key)
         .unwrap_or(&theme::THEME_PRESETS[0]);
-    let mut out = Vec::with_capacity(theme::PALETTE_KEYS.len() + 16);
+    let mut out = Vec::with_capacity(theme::PALETTE_SLOT_COUNT);
     for (key, get) in theme::PALETTE_KEYS {
         let c = obj
             .and_then(|o| o.get(*key))
@@ -3824,6 +3808,11 @@ pub(crate) fn palette_hex_list(s: &serde_json::Value, slug: Option<&str>) -> Vec
             .and_then(theme::parse_hex)
             .unwrap_or(base.ansi[j]);
         out.push(theme::hex_str(c));
+    }
+    let effective = obj.map(theme::custom_palette).unwrap_or(**base);
+    for (_, get) in theme::SURFACE_PALETTE_KEYS {
+        let color = get(&effective);
+        out.push(theme::hex_str([color[0], color[1], color[2]]));
     }
     out
 }

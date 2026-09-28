@@ -30,6 +30,8 @@ mod proxy;
 mod register;
 pub mod relayconf;
 pub mod relay;
+pub mod feedback;
+pub mod feedback_client;
 pub mod relay_auth;
 pub mod device_auth;
 pub mod remote;

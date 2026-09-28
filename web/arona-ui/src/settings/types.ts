@@ -72,7 +72,7 @@ export type SettingsValues = {
   appearance: AppearanceValues;
   shell: { shell: string };
   claude: ClaudeValues;
-  feedback: { diag: string; diag_on: boolean };
+  feedback: { diag: string; diag_on: boolean; sending?: boolean; attempt?: number; delivery?: { message: string; error: boolean } | null };
 };
 
 export type GeneralValues = {

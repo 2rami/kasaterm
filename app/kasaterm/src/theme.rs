@@ -35,6 +35,9 @@ macro_rules! color_slot {
 // read as raised. Border = muted hairline. Accent = selection ring / cursor /
 // links. SYN_* = markdown code-block syntax (One Dark-ish).
 color_slot!(S_BG, bg, [37, 44, 53, 255]);
+color_slot!(S_PANE_BG, pane_bg, [37, 44, 53, 255]);
+color_slot!(S_HEADER_BG, header_bg, [37, 44, 53, 255]);
+color_slot!(S_SIDEBAR_BG, sidebar_bg, [42, 50, 60, 255]);
 color_slot!(S_FG, fg, [255, 255, 255, 255]);
 color_slot!(S_SURFACE, surface, [26, 29, 35, 255]);
 color_slot!(S_SURFACE_HOVER, surface_hover, [48, 56, 67, 255]);
@@ -103,7 +106,15 @@ pub fn ansi16(i: usize) -> [u8; 3] {
 /// One base theme. Accent is stored separately (it layers on any base) so a
 /// theme swap never clobbers the user's accent choice.
 #[derive(Clone, Copy)]
+pub struct PaletteSurfaces {
+    pub pane: [u8; 4],
+    pub header: [u8; 4],
+    pub sidebar: [u8; 4],
+}
+
+#[derive(Clone, Copy)]
 pub struct Palette {
+    pub surfaces: Option<PaletteSurfaces>,
     pub bg: [u8; 4],
     pub fg: [u8; 4],
     pub surface: [u8; 4],
@@ -145,6 +156,7 @@ const ANSI_GITHUB_LIGHT: [[u8; 3]; 16] = [
 ];
 
 const DARK: Palette = Palette {
+    surfaces: None,
     bg: [37, 44, 53, 255],
     fg: [255, 255, 255, 255],
     surface: [26, 29, 35, 255],
@@ -166,6 +178,7 @@ const DARK: Palette = Palette {
 };
 
 const LIGHT: Palette = Palette {
+    surfaces: None,
     bg: [247, 248, 250, 255],
     fg: [38, 42, 50, 255],
     surface: [236, 238, 241, 255],
@@ -191,6 +204,7 @@ const LIGHT: Palette = Palette {
 // the schemes' published terminal palettes.
 
 const CATPPUCCIN_MOCHA: Palette = Palette {
+    surfaces: None,
     bg: [0x1E, 0x1E, 0x2E, 255],            // base
     fg: [0xCD, 0xD6, 0xF4, 255],            // text
     surface: [0x18, 0x18, 0x25, 255],       // mantle
@@ -217,6 +231,7 @@ const CATPPUCCIN_MOCHA: Palette = Palette {
 };
 
 const CATPPUCCIN_LATTE: Palette = Palette {
+    surfaces: None,
     bg: [0xEF, 0xF1, 0xF5, 255],            // base
     fg: [0x4C, 0x4F, 0x69, 255],            // text
     surface: [0xE6, 0xE9, 0xEF, 255],       // mantle
@@ -243,6 +258,7 @@ const CATPPUCCIN_LATTE: Palette = Palette {
 };
 
 const GRUVBOX_DARK: Palette = Palette {
+    surfaces: None,
     bg: [0x28, 0x28, 0x28, 255],
     fg: [0xEB, 0xDB, 0xB2, 255],
     surface: [0x1D, 0x20, 0x21, 255],       // bg0_h
@@ -269,6 +285,7 @@ const GRUVBOX_DARK: Palette = Palette {
 };
 
 const TOKYO_NIGHT: Palette = Palette {
+    surfaces: None,
     bg: [0x1A, 0x1B, 0x26, 255],
     fg: [0xC0, 0xCA, 0xF5, 255],
     surface: [0x16, 0x16, 0x1E, 255],
@@ -301,6 +318,7 @@ const TOKYO_NIGHT: Palette = Palette {
 // the same family re-rooted on the BA navy (#003153/#2a323e) since the game
 // itself has no dark mode.
 const SCHALE_LIGHT: Palette = Palette {
+    surfaces: None,
     bg: [0xEA, 0xEF, 0xF5, 255],            // general background
     fg: [0x2A, 0x32, 0x3E, 255],            // momotalk font-black
     surface: [0xFF, 0xFF, 0xFF, 255],       // white cards
@@ -327,6 +345,7 @@ const SCHALE_LIGHT: Palette = Palette {
 };
 
 const SCHALE_DARK: Palette = Palette {
+    surfaces: None,
     bg: [0x10, 0x17, 0x20, 255],
     fg: [0xDC, 0xE6, 0xF2, 255],
     surface: [0x18, 0x21, 0x2C, 255],
@@ -360,6 +379,7 @@ const SCHALE_DARK: Palette = Palette {
 /// 전부 같은 호박색이 되어 ls 도 diff 도 못 읽는다. 크롬만 호박으로 묶고
 /// 셀 색은 그 시절 하드웨어(CGA/EGA)의 채도로 가져와 구분을 남겼다.
 const AMBER_CRT: Palette = Palette {
+    surfaces: None,
     // 인광 화면의 검정은 순수 검정이 아니라 미열이 도는 갈색이다.
     bg: [0x1A, 0x13, 0x0C, 255],
     fg: [0xFF, 0xB0, 0x00, 255],
@@ -399,6 +419,7 @@ const AMBER_CRT: Palette = Palette {
 /// 피한 것과 같은 이유). 캐릭터가 은발에 청록 눈이라, 함수·링크 자리에는 원화에서
 /// 그대로 뽑은 눈 색(`#59AEC8`)을 두어 같은 계열 안에서 단차를 준다.
 const NACHO: Palette = Palette {
+    surfaces: None,
     bg: [0x15, 0x1B, 0x1D, 255],
     fg: [0xE4, 0xEC, 0xEC, 255],
     surface: [0x1C, 0x24, 0x26, 255],
@@ -426,9 +447,46 @@ const NACHO: Palette = Palette {
 
 /// Selectable themes: (settings.json key, display label, palette). "dark" /
 /// "light" keep their historical keys so existing settings files keep working.
+const GRAPHITE: Palette = Palette {
+    bg: [29, 31, 35, 255], fg: [230, 232, 236, 255], text: [230, 232, 236, 255],
+    surface: [23, 25, 29, 255], surface_hover: [43, 46, 52, 255], surface_active: [57, 61, 69, 255],
+    text_dim: [174, 181, 194, 255], text_mute: [147, 155, 170, 255], border: [93, 99, 111, 180],
+    ..DARK
+};
+const INK: Palette = Palette {
+    bg: [22, 32, 43, 255], fg: [220, 230, 239, 255], text: [220, 230, 239, 255],
+    surface: [16, 26, 37, 255], surface_hover: [35, 51, 64, 255], surface_active: [46, 66, 81, 255],
+    text_dim: [164, 187, 205, 255], text_mute: [144, 165, 181, 255], border: [76, 100, 117, 180],
+    ..DARK
+};
+const PAPER: Palette = Palette {
+    bg: [249, 246, 239, 255], fg: [48, 45, 39, 255], text: [48, 45, 39, 255],
+    surface: [240, 235, 224, 255], surface_hover: [231, 224, 210, 255], surface_active: [217, 207, 188, 255],
+    text_dim: [107, 100, 87, 255], text_mute: [113, 105, 91, 255], border: [181, 171, 153, 180],
+    ..LIGHT
+};
+const MIST: Palette = Palette {
+    bg: [240, 246, 243, 255], fg: [32, 49, 43, 255], text: [32, 49, 43, 255],
+    surface: [228, 239, 233, 255], surface_hover: [216, 230, 222, 255], surface_active: [199, 217, 206, 255],
+    text_dim: [81, 105, 94, 255], text_mute: [93, 111, 103, 255], border: [154, 178, 165, 180],
+    ..LIGHT
+};
+
+impl Palette {
+    pub fn surface_colors(&self) -> PaletteSurfaces {
+        self.surfaces.unwrap_or(PaletteSurfaces {
+            pane: self.bg, header: self.bg, sidebar: lerp(self.bg, self.surface_hover, 0.5),
+        })
+    }
+}
+
 pub const THEME_PRESETS: &[(&str, &str, &Palette)] = &[
     ("dark", "Dark", &DARK),
     ("light", "Light", &LIGHT),
+    ("graphite", "Graphite", &GRAPHITE),
+    ("ink", "Ink", &INK),
+    ("paper", "Paper", &PAPER),
+    ("mist", "Mist", &MIST),
     ("catppuccin-mocha", "Catppuccin Mocha", &CATPPUCCIN_MOCHA),
     ("catppuccin-latte", "Catppuccin Latte", &CATPPUCCIN_LATTE),
     ("gruvbox-dark", "Gruvbox Dark", &GRUVBOX_DARK),
@@ -447,6 +505,10 @@ static VIEWER_CHROME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 fn store_palette(p: &Palette) {
     S_BG.store(pack(p.bg), Ordering::Relaxed);
+    let surfaces = p.surface_colors();
+    S_PANE_BG.store(pack(surfaces.pane), Ordering::Relaxed);
+    S_HEADER_BG.store(pack(surfaces.header), Ordering::Relaxed);
+    S_SIDEBAR_BG.store(pack(surfaces.sidebar), Ordering::Relaxed);
     S_FG.store(pack(p.fg), Ordering::Relaxed);
     S_SURFACE.store(pack(p.surface), Ordering::Relaxed);
     S_SURFACE_HOVER.store(pack(p.surface_hover), Ordering::Relaxed);
@@ -473,7 +535,7 @@ fn store_palette(p: &Palette) {
     // 캐릭터가 없는 셸과 OSC 12 응답의 테마 폴백뿐이다. 예전 수동 커서색 키는
     // 남아 있어도 읽지 않아, 캐릭터를 바꿨는데 옛 색이 붙는 일을 막는다.
     let host_cursor = {
-        if is_light(p.bg) { [p.fg[0], p.fg[1], p.fg[2]] } else { p.ansi[7] }
+        if is_light(surfaces.pane) { [p.fg[0], p.fg[1], p.fg[2]] } else { p.ansi[7] }
     };
     let visible_cursor = {
         let c = accent();
@@ -484,7 +546,7 @@ fn store_palette(p: &Palette) {
         Ordering::Relaxed,
     );
     kasa_pty::set_host_colors(
-        (p.bg[0], p.bg[1], p.bg[2]),
+        (surfaces.pane[0], surfaces.pane[1], surfaces.pane[2]),
         (p.fg[0], p.fg[1], p.fg[2]),
         (host_cursor[0], host_cursor[1], host_cursor[2]),
     );
@@ -497,7 +559,7 @@ fn store_palette(p: &Palette) {
     // 미리보기(색 패널 드래그) 중에는 건너뛴다 — 이 한 줄이 claude 설정 파일과
     // 커스텀 테마 파일을 굽는다.
     if !PREVIEWING.load(Ordering::Relaxed) {
-        crate::socket::sync_claude_theme(is_light(p.bg));
+        crate::socket::sync_claude_theme(is_light(surfaces.pane));
     }
 }
 
@@ -512,7 +574,7 @@ fn is_light(bg: [u8; 4]) -> bool {
 /// 비교하는 값. `is_light` 판정과 같은 축을 쓰므로 `sync_claude_theme` 이 쓰는
 /// 명암과 절대 어긋나지 않는다.
 pub(crate) fn current_is_light() -> bool {
-    is_light(bg())
+    is_light(pane_bg())
 }
 
 /// 지금 팔레트가 서야 할 **창 테마**. OS 는 이 값 하나로 자기가 그리는 언저리를
@@ -522,7 +584,7 @@ pub(crate) fn current_is_light() -> bool {
 /// 판정을 `current_is_light` 와 같은 축(BT.601 휘도)에 걸어 두는 게 요점이다.
 /// 커스텀 팔레트도 프리셋도 따로 등록할 것 없이 배경색 하나로 갈린다.
 pub(crate) fn window_theme() -> winit::window::Theme {
-    if current_is_light() {
+    if is_light(header_bg()) {
         winit::window::Theme::Light
     } else {
         winit::window::Theme::Dark
@@ -840,6 +902,13 @@ pub fn custom_palette(e: &serde_json::Value) -> Palette {
     hex("text_mute", &mut p.text_mute);
     hex("success", &mut p.success);
     hex("danger", &mut p.danger);
+    if ["pane_bg", "header_bg", "sidebar_bg"].iter().any(|key| o.contains_key(*key)) {
+        let mut surfaces = p.surface_colors();
+        hex("pane_bg", &mut surfaces.pane);
+        hex("header_bg", &mut surfaces.header);
+        hex("sidebar_bg", &mut surfaces.sidebar);
+        p.surfaces = Some(surfaces);
+    }
     if let Some(arr) = o.get("ansi").and_then(|x| x.as_array()) {
         for (i, v) in arr.iter().take(16).enumerate() {
             if let Some(c) = v.as_str().and_then(parse_hex) {
@@ -944,6 +1013,25 @@ pub const PALETTE_KEYS: &[(&str, fn(&Palette) -> [u8; 4])] = &[
     ("danger", |p| p.danger),
 ];
 
+// ANSI 슬롯 번호는 외부 설정 화면에서도 쓰므로 새 역할은 기존 27칸 뒤에 둔다.
+pub const SURFACE_PALETTE_START: usize = 27;
+pub const SURFACE_PALETTE_KEYS: &[(&str, fn(&Palette) -> [u8; 4])] = &[
+    ("pane_bg", |p| p.surface_colors().pane),
+    ("header_bg", |p| p.surface_colors().header),
+    ("sidebar_bg", |p| p.surface_colors().sidebar),
+];
+pub const PALETTE_SLOT_COUNT: usize = SURFACE_PALETTE_START + 3;
+
+pub fn palette_slot_label(index: usize) -> String {
+    match index {
+        0 => "창 바탕".into(), 1 => "터미널 글자".into(), 2 => "입력칸과 메뉴".into(),
+        3 => "호버".into(), 4 => "선택".into(), 5 => "구분선".into(), 6 => "화면 글자".into(),
+        7 => "보조 글자".into(), 8 => "흐린 글자".into(), 9 => "성공".into(), 10 => "오류".into(),
+        27 => "터미널 바탕".into(), 28 => "탭과 헤더".into(), 29 => "사이드바와 패널".into(),
+        _ => format!("ANSI {}", index.saturating_sub(PALETTE_KEYS.len())),
+    }
+}
+
 /// 프리셋 하나를 커스텀 항목 JSON 으로 복제한다 — 팔레트 편집의 시작점.
 /// 부분 파일도 동작은 하지만(빠진 키는 base 값) 모든 키를 명시해 쓴다:
 /// 파일을 열었을 때 고칠 수 있는 키가 다 보여야 발견이 된다.
@@ -959,6 +1047,10 @@ pub fn custom_theme_seed(base_key: &str, slug: &str, label: &str) -> serde_json:
     for (k, get) in PALETTE_KEYS {
         let c = get(p);
         o.insert((*k).to_string(), serde_json::Value::String(hex_str([c[0], c[1], c[2]])));
+    }
+    for (key, get) in SURFACE_PALETTE_KEYS {
+        let c = get(p);
+        o.insert((*key).to_string(), serde_json::Value::String(hex_str([c[0], c[1], c[2]])));
     }
     o.insert(
         "ansi".to_string(),
@@ -980,7 +1072,7 @@ pub fn set_accent(name: &str) {
     // 강조색은 팔레트 적용 경로(`apply_palette`)를 안 지난다 — 그래서 claude 쪽
     // 커스텀 테마도 여기서 따로 다시 구워야 한다. 안 그러면 강조색만 바꿨을 때
     // 터미널은 새 색인데 claude 는 옛 색으로 남는다.
-    crate::socket::write_claude_custom_theme(is_light(bg()));
+    crate::socket::write_claude_custom_theme(is_light(pane_bg()));
 }
 
 /// Apply persisted theme + accent from settings.json at launch.
@@ -1011,8 +1103,24 @@ pub fn viewer_chrome() -> bool {
     VIEWER_CHROME.load(Ordering::Relaxed)
 }
 
+static CHARACTER_APPEARANCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+pub(crate) fn character_appearance() -> bool {
+    !crate::lite_mode() && CHARACTER_APPEARANCE.load(Ordering::Relaxed)
+}
+
+pub(crate) fn character_appearance_from(settings: &serde_json::Value) -> bool {
+    settings.get("character_appearance").and_then(|v| v.as_bool()).unwrap_or(true)
+}
+
+pub(crate) fn set_character_appearance(enabled: bool) {
+    CHARACTER_APPEARANCE.store(enabled, Ordering::Relaxed);
+}
+
 fn apply_from_settings_inner(sync_claude_theme: bool) {
     let s = crate::socket::read_settings();
+    set_character_appearance(character_appearance_from(&s));
     // 처음 켠 사람이 보는 팔레트. Windows 만 Catppuccin Latte 로 갈라진다 —
     // 밝은 바탕이 그쪽 시스템 팝업·창 그림자와 훨씬 덜 부딪힌다(2026-08-31 사용자:
     // "이게 윈도우에서 제일 이쁘게 보이네"). 이미 고른 사람은 안 건드린다:
@@ -1035,7 +1143,7 @@ fn apply_from_settings_inner(sync_claude_theme: bool) {
     let accent = s.get("accent").and_then(|x| x.as_str()).unwrap_or("blue");
     store_accent(accent);
     if sync_claude_theme {
-        crate::socket::write_claude_custom_theme(is_light(bg()));
+        crate::socket::write_claude_custom_theme(is_light(pane_bg()));
     }
     // KASATERM_SHAPE overrides the stored key so a silhouette can be previewed
     // (or screenshot-verified) without editing the live settings file — the
@@ -1435,7 +1543,7 @@ pub fn edge_on(fill: [u8; 4]) -> [u8; 4] {
 /// 방향이 테마마다 반대다(어두운 테마는 밝게, 밝은 테마는 어둡게). 팔레트가 이미
 /// 그 방향을 알고 있으니 절반만 따라가면 여덟 테마에서 전부 맞는다.
 pub fn panel_bg() -> [u8; 4] {
-    lerp(bg(), surface_hover(), 0.5)
+    sidebar_bg()
 }
 
 /// 판 위에 **올라온 부액션 버튼**의 채움 — `base` 는 그 버튼이 얹힌 배경색.
@@ -1912,6 +2020,9 @@ pub fn tokens_json() -> serde_json::Value {
         "min_contrast": min_contrast(),
         "palette": {
             "bg": css_hex(bg()),
+            "pane_bg": css_hex(pane_bg()),
+            "header_bg": css_hex(header_bg()),
+            "sidebar_bg": css_hex(sidebar_bg()),
             "fg": css_hex(fg()),
             "surface": css_hex(surface()),
             "surface_hover": css_hex(surface_hover()),
@@ -1972,6 +2083,18 @@ pub fn tokens_json() -> serde_json::Value {
 #[cfg(test)]
 mod roster_tests {
     use super::*;
+
+    #[test]
+    fn character_appearance_and_persona_are_independent() {
+        for appearance in [false, true] {
+            for persona in [false, true] {
+                assert_eq!(character_appearance_from(&serde_json::json!({
+                    "character_appearance": appearance, "claude_persona": persona,
+                })), appearance);
+            }
+        }
+        assert!(character_appearance_from(&serde_json::json!({"claude_persona": false})));
+    }
 
     #[test]
     fn document_colors_use_live_terminal_tokens() {
@@ -2214,6 +2337,33 @@ mod roster_tests {
 #[cfg(test)]
 mod custom_theme_tests {
     use super::*;
+    #[test]
+    fn custom_surfaces_are_independent_and_legacy_colors_keep_their_defaults() {
+        let legacy = custom_palette(&serde_json::json!({"base":"dark", "bg":"#102030"}));
+        assert_eq!(legacy.surface_colors().pane, legacy.bg);
+        assert_eq!(legacy.surface_colors().header, legacy.bg);
+        let custom = custom_palette(&serde_json::json!({
+            "base":"dark", "bg":"#102030", "pane_bg":"#203040",
+            "header_bg":"#304050", "sidebar_bg":"#405060"
+        }));
+        assert_eq!(custom.bg, [0x10, 0x20, 0x30, 255]);
+        assert_eq!(custom.surface_colors().pane, [0x20, 0x30, 0x40, 255]);
+        assert_eq!(custom.surface_colors().header, [0x30, 0x40, 0x50, 255]);
+        assert_eq!(custom.surface_colors().sidebar, [0x40, 0x50, 0x60, 255]);
+        assert_eq!(PALETTE_KEYS.len() + 16, SURFACE_PALETTE_START);
+    }
+
+    #[test]
+    fn new_neutral_palettes_keep_readable_text_on_every_default_surface() {
+        for palette in [&GRAPHITE, &INK, &PAPER, &MIST] {
+            let surfaces = palette.surface_colors();
+            for fill in [palette.bg, palette.surface, surfaces.pane, surfaces.header, surfaces.sidebar] {
+                for ink in [palette.fg, palette.text, palette.text_dim] {
+                    assert!(contrast_of(luminance(fill), luminance(ink)) >= 4.5);
+                }
+            }
+        }
+    }
     use serde_json::json;
 
     /// 하나뿐이던 시절의 `custom_theme` 오브젝트는 첫 항목으로 읽혀야 한다 —

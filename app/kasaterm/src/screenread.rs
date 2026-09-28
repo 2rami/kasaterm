@@ -1222,6 +1222,9 @@ pub(crate) fn restyle_peer_native_header(
 /// 피커는 `#이름` 태그를 통째로). 슬러그만 믿고 자리를 비웠는데 그림이 없으면
 /// 지운 자리에 아무것도 안 들어와 **빈 칸으로 남는다**.
 pub(crate) fn face_ready(slug: &str) -> bool {
+    if !theme::character_appearance() {
+        return false;
+    }
     theme::slug_character(slug).is_some()
         || crate::sprites::student_profile_png(slug).is_some()
         || crate::sprites::other_theme_has_profile(slug)
@@ -2108,6 +2111,19 @@ pub(crate) fn expand_teammate_message(
     body: Option<&str>,
     accent: [u8; 4],
 ) -> Option<usize> {
+    let has_face = teammate_sender_slug(sender).is_some_and(face_ready);
+    expand_teammate_message_with_face(rows, r, start, sender, body, accent, has_face)
+}
+
+fn expand_teammate_message_with_face(
+    rows: &mut [Vec<GridCell>],
+    r: usize,
+    start: usize,
+    sender: &str,
+    body: Option<&str>,
+    accent: [u8; 4],
+    has_face: bool,
+) -> Option<usize> {
     let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     let Some(body) = body else {
         for c in rows[r].iter_mut() {
@@ -2132,9 +2148,8 @@ pub(crate) fn expand_teammate_message(
     // 언어(사용자 2026-07-27: SendMessage 도 학생 테마로). 프사는 첫 줄 왼쪽 여백
     // 2칸에 얹으므로(호출측 이미지 패스) 헤더는 그만큼 비운다 — 그 폭이 곧 이어
     // 쓰는 줄의 들여쓰기(indent = start+2)라 본문 좌측이 한 줄로 선다.
-    let face_slug = teammate_sender_slug(sender);
     let head_start = start;
-    let header = if face_slug.is_some() {
+    let header = if has_face {
         "  ".to_string()
     } else {
         format!("@ {sender}❯ ")
@@ -2207,7 +2222,7 @@ pub(crate) fn expand_teammate_message(
             ellipsis(row, w);
         }
     }
-    face_slug.map(|_| start)
+    has_face.then_some(start)
 }
 
 
@@ -2335,6 +2350,9 @@ mod text_extraction_equivalence_tests {
 }
 
 pub(crate) fn picker_student_tag(row: &[GridCell]) -> Option<(usize, usize, &'static str)> {
+    if !theme::character_appearance() {
+        return None;
+    }
     for (c0, _) in row.iter().enumerate().filter(|(_, c)| c.ch == '#') {
         if c0 < 2 || row[c0 - 1].ch != ' ' || row[c0 - 2].ch != '·' {
             continue;
@@ -4062,6 +4080,9 @@ pub(crate) fn paint_student_overlays(
     slots: &StudentOverlays,
     anim_ms: u64,
 ) {
+    if !theme::character_appearance() {
+        return;
+    }
     let anim_idx = (anim_ms / STUDENT_ANIM_FRAME_MS) as usize % STUDENT_IDLE_FRAMES;
     let walk_idx = (anim_ms as f32 / STUDENT_WALK_FRAME_MS) as usize % STUDENT_WALK_FRAMES;
     let ensure_anim = |g: &mut gpu::GpuRenderer, slug: &str, motion: &str| {
@@ -4170,6 +4191,34 @@ pub(crate) fn find_statusline_face(rows: &[Vec<GridCell>]) -> Option<(usize, usi
             (r, c0, n)
         })
     })
+}
+
+pub(crate) fn clear_statusline_face(rows: &mut [Vec<GridCell>]) -> Option<(usize, usize, usize)> {
+    let anchor = find_statusline_face(rows)?;
+    let (row, col, len) = anchor;
+    for cell in rows[row].iter_mut().skip(col).take(len) {
+        cell.ch = ' ';
+    }
+    Some(anchor)
+}
+
+#[cfg(test)]
+mod statusline_marker_tests {
+    use super::*;
+
+    #[test]
+    fn hidden_face_marker_keeps_status_text_and_anchor() {
+        let mut rows = vec!["cost \u{fffc}\u{fffc} 42%".chars().map(|ch| {
+            let mut cell = GridCell::blank();
+            cell.ch = ch;
+            cell.bg = kasa_bridge::screen::Color::Rgb(12, 34, 56);
+            cell
+        }).collect::<Vec<_>>()];
+        assert_eq!(clear_statusline_face(&mut rows), Some((0, 5, 2)));
+        assert_eq!(rows[0].iter().map(|cell| cell.ch).collect::<String>(), "cost    42%");
+        assert_eq!(rows[0][5].bg, kasa_bridge::screen::Color::Rgb(12, 34, 56));
+        assert_eq!(clear_statusline_face(&mut rows), None);
+    }
 }
 
 /// 입력박스 위 standing 학생의 앵커 — `(앵커 행, 학생 왼쪽 열)`.
@@ -6762,6 +6811,17 @@ mod teammate_msg_tests {
             expand_teammate_message(&mut rows, 0, 0, "team-lead", Some("확인"), [255, 128, 0, 255]);
         assert_eq!(face, None, "프사 없음");
         assert!(row_text(&rows[0]).starts_with("@ team-lead❯"), "{}", row_text(&rows[0]));
+    }
+
+    #[test]
+    fn appearance_off_keeps_student_sender_and_message_visible() {
+        let mut rows = vec![row_from("› Message from @aru-9c88", 80)];
+        let face = expand_teammate_message_with_face(
+            &mut rows, 0, 0, "aru-9c88", Some("review completed"), [255, 128, 0, 255], false,
+        );
+        assert_eq!(face, None);
+        let text = row_text(&rows[0]);
+        assert!(text.starts_with("@ aru-9c88❯ review completed"), "{text}");
     }
 
     // 이어 쓸 blank 행이 없으면 말줄임으로 끝난다 — 다음 항목 침범 없음.

@@ -14,30 +14,43 @@ export function FeedbackTab({
   const { busy, notice, run } = useSettingsAction(reload);
   const draftKey = 'kasaterm.settings.feedback-draft';
   const [body, setBody] = useState(() => localStorage.getItem(draftKey) ?? '');
+  const [submitted, setSubmitted] = useState<{ body: string; attempt: number } | null>(null);
   useEffect(() => {
     if (body) localStorage.setItem(draftKey, body);
     else localStorage.removeItem(draftKey);
   }, [body]);
   const empty = body.trim() === '';
+  const sending = busy || !!data.sending;
+
+  useEffect(() => {
+    if (!data.sending) return;
+    const timer = window.setInterval(() => { void reload(); }, 1200);
+    return () => window.clearInterval(timer);
+  }, [data.sending, reload]);
+
+  useEffect(() => {
+    if (submitted === null || data.sending || !data.delivery || data.attempt !== submitted.attempt) return;
+    if (!data.delivery.error) setBody((current) => current === submitted.body ? '' : current);
+    setSubmitted(null);
+  }, [submitted, data.sending, data.delivery, data.attempt]);
 
   async function save() {
-    // **성공했을 때만** 비운다. 실패했는데 비우면 쓰던 글이 통째로 사라지고,
-    // 화면에는 「저장 실패」 문구만 남아 되돌릴 방법이 없다.
-    if (await run('save-feedback', { label: body })) {
-      localStorage.removeItem(draftKey);
-      setBody('');
-    }
+    const text = body;
+    const attempt = (data.attempt ?? 0) + 1;
+    if (await run('send-feedback', { label: text })) setSubmitted({ body: text, attempt });
   }
 
   return (
     <TabCard>
       <Notice notice={notice} />
+      <Notice notice={data.delivery ? { ok: !data.delivery.error, msg: data.delivery.message } : null} />
 
       <Section title={t.feedback.body} hint={t.feedback.bodyHint}>
+        <p className="mb-3 text-sm">{t.feedback.destination}</p>
         <textarea
           className="kt-field h-[200px] w-full max-w-[560px] resize-y"
           value={body}
-          disabled={busy}
+          disabled={sending}
           placeholder={t.feedback.placeholder}
           onChange={(e) => setBody(e.target.value)}
           onKeyDown={(e) => {
@@ -54,16 +67,16 @@ export function FeedbackTab({
         <Toggle
           label={t.feedback.diag}
           on={data.diag_on}
-          disabled={busy}
+          disabled={sending}
           onToggle={() => void run('toggle-feedback-diag')}
         />
       </Row>
 
       <div className="flex gap-2">
         <Button
-          label={t.feedback.save}
+          label={sending ? t.feedback.sending : t.feedback.save}
           primary
-          disabled={busy || empty}
+          disabled={sending || empty}
           onClick={() => void save()}
         />
         <Button

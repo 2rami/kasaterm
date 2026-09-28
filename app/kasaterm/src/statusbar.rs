@@ -710,7 +710,7 @@ fn paint_link_popover(
     let relayed = rows.iter().any(|(_, online, direct, _)| *online && !*direct);
     let w = 300.0_f32.min((win_w - 16.0).max(200.0));
     let row_h = 24.0_f32;
-    let h = 52.0 + row_h * rows.len().max(1) as f32 + if relayed { 34.0 } else { 12.0 };
+    let h = 92.0 + row_h * rows.len().max(1) as f32 + if relayed { 34.0 } else { 12.0 };
     let x = (anchor.0 + anchor.2 - w).clamp(8.0, (win_w - w - 8.0).max(8.0));
     let y = (anchor.1 - h - 6.0).max(8.0);
     sb.popover_rect = Some((x, y, w, h));
@@ -741,9 +741,13 @@ fn paint_link_popover(
         ry += row_h;
     }
     if relayed {
-        text(g, x + 16.0, ry + 8.0, "중계는 공용 관문을 거쳐요 — 넷버드를 다시 붙이면 직통이 될 수 있어요",
+        text(g, x + 16.0, ry + 8.0, "중계 연결 · 자세한 상태는 기기 설정에서 확인",
             10.0, theme::text_dim(), false);
     }
+    let action = (x + 12.0, y + h - 38.0, w - 24.0, 26.0);
+    panel_rect_outlined(g, action.0, action.1, action.2, action.3, theme::radius_sm(), theme::surface());
+    text(g, action.0 + 12.0, action.1 + 6.0, "기기 설정 · 로그인", 11.0, theme::accent(), false);
+    sb.popover_hits.push((state::StatusbarHit::OpenMachines, action));
 }
 
 fn paint_tunnel_popover(
@@ -966,12 +970,19 @@ fn paint_build_popover(
     const HEAD_H: f32 = 48.0;
     const ROW: f32 = 30.0;
     let mismatched = crate::statusbar_config::mismatched_machines();
+    let entries = kasa_mcp::machines::entries();
     let rows: Vec<(String, state::StatusbarHit)> = std::iter::once((
-        "이 맥에서 새 판 굽기".to_string(),
-        state::StatusbarHit::BuildBake,
+        "이 기기 업데이트 확인".to_string(),
+        state::StatusbarHit::CheckUpdates,
     ))
+    .chain(repo_root().join("scripts/build-app.sh").is_file().then(|| (
+        "소스에서 직접 빌드".to_string(), state::StatusbarHit::BuildBake,
+    )))
     .chain(mismatched.iter().map(|m| {
-        (format!("{m} 에 새 판 보내기"), state::StatusbarHit::BuildSend(m.clone()))
+        match build_send_target(m, &entries) {
+            Some(target) => (format!("{m} 업데이트 설치"), state::StatusbarHit::BuildSend(m.clone(), target)),
+            None => (format!("{m} 연결 설정 확인"), state::StatusbarHit::OpenMachines),
+        }
     }))
     .chain(std::iter::once(("기계 설정 열기".to_string(), state::StatusbarHit::OpenMachines)))
     .collect();
@@ -984,13 +995,13 @@ fn paint_build_popover(
     g.draw_text(
         x + 12.0,
         y + 10.0,
-        "새 판",
+        "업데이트",
         gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
     );
     // 미니는 굽지 못한다(cargo·node 없음) — 맥북이 구운 것을 부친다. 굽든 부치든
     // 새 탭에서 스크립트가 돌고, 이쪽 앱은 껐다 켜야 갈아입는다.
     let sub = if mismatched.is_empty() {
-        "새 탭에서 굽는다 · 끝나면 앱을 껐다 켜면 새 판".to_string()
+        format!("현재 v{} · 새 버전 확인과 기기별 설치", env!("CARGO_PKG_VERSION"))
     } else {
         format!("{} 판이 다르다 · 보내면 그쪽 앱이 잠깐 껐다 켜진다", mismatched.join("·"))
     };
@@ -1018,6 +1029,48 @@ fn paint_build_popover(
         );
         sb.popover_hits.push((hit_kind, r));
         oy += ROW;
+    }
+}
+
+fn build_send_target(label: &str, entries: &[serde_json::Value]) -> Option<String> {
+    let mut matching = entries.iter()
+        .filter(|entry| entry.get("label").and_then(|v| v.as_str()) == Some(label));
+    let entry = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    entry.get("ssh").or_else(|| entry.get("host"))
+        .and_then(|value| value.as_str())
+        .filter(|target| !target.trim().is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod build_send_tests {
+    use super::build_send_target;
+    use serde_json::json;
+
+    #[test]
+    fn clicked_machine_keeps_its_exact_target() {
+        let entries = vec![
+            json!({"label": "mini", "ssh": "nachoneko"}),
+            json!({"label": "laptop", "ssh": "owner@laptop.example"}),
+        ];
+        assert_eq!(build_send_target("laptop", &entries).as_deref(), Some("owner@laptop.example"));
+        assert!(build_send_target("unknown", &entries).is_none());
+    }
+
+    #[test]
+    fn ambiguous_or_unconfigured_machine_has_no_install_target() {
+        let entries = vec![
+            json!({"label": "duplicate", "ssh": "one"}),
+            json!({"label": "duplicate", "ssh": "two"}),
+            json!({"label": "guest"}),
+            json!({"label": "empty", "ssh": " "}),
+        ];
+        for label in ["duplicate", "guest", "empty"] {
+            assert!(build_send_target(label, &entries).is_none());
+        }
     }
 }
 
@@ -1702,10 +1755,14 @@ impl crate::App {
                 self.run_script_in_new_tab("scripts/build-app.sh", "새 탭에서 굽는 중 — 끝나면 앱을 껐다 켜면 된다");
                 return true;
             }
-            Some(state::StatusbarHit::BuildSend(machine)) => {
+            Some(state::StatusbarHit::CheckUpdates) => {
                 self.statusbar.popover = None;
-                let msg = format!("{machine} 에 새 판 보내는 중 — 새 탭에서 진행");
-                self.run_script_in_new_tab("scripts/sync-mini.sh", &msg);
+                self.check_for_updates_now();
+                return true;
+            }
+            Some(state::StatusbarHit::BuildSend(machine, target)) => {
+                self.statusbar.popover = None;
+                self.settings_apply(crate::SettingsAction::SyncMachine(machine, target));
                 return true;
             }
             Some(state::StatusbarHit::OpenMachines) => {

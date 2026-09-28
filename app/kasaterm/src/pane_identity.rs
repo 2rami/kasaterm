@@ -11,6 +11,7 @@ pub(super) struct MachineIdentity {
     pub detail: String,
     pub remote: bool,
     tint: [u8; 4],
+    icon: String,
 }
 
 pub(super) fn terminal_identity_pid(pane_id: &str, active_is_terminal: bool) -> Option<&str> {
@@ -52,23 +53,18 @@ impl MachineIdentity {
             ),
         };
         let tint = machine_tint(&label);
+        let icon = crate::device_icons::icon(&label);
         Self {
             label,
             detail,
             remote: is_remote,
             tint,
+            icon,
         }
     }
 
-    pub fn icon(&self) -> &'static str {
-        let name = self.label.to_lowercase();
-        if name.contains("macbook") || name.contains("맥북") || name.contains("laptop") {
-            "laptop"
-        } else if name.contains("mini") || name.contains("미니") || name.contains("server") {
-            "server"
-        } else {
-            "monitor"
-        }
+    pub fn icon(&self) -> &str {
+        &self.icon
     }
 
     pub fn background(&self, base: [u8; 4]) -> [u8; 4] {
@@ -725,6 +721,7 @@ mod tests {
             let mut machine = MachineIdentity {
                 label: "맥미니".into(), detail: "미러".into(), remote: false,
                 tint: machine_tint("맥미니"),
+                icon: "server".into(),
             };
             assert_eq!(machine.pane_background(base), None);
             machine.remote = true;

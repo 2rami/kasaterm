@@ -3685,6 +3685,11 @@ impl App {
         // 부른다 — 검증 때마다 Finder 창이 튀어나오면 그게 더 방해다.
         match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
             "" => {}
+            "device-login" if crate::verification_run() => {
+                self.settings_apply(SettingsAction::DeviceAccount(
+                    crate::native_settings::device_account::Action::OpenLogin,
+                ));
+            }
             "dropdown-ui-font" => {
                 self.settings_scene
                     .toggle_dropdown(crate::native_settings::DropdownId::UiFont);
