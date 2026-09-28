@@ -12,14 +12,33 @@ use serde_json::{json, Value};
 const PANEL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const PANEL_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const BRANCH_LIST_ARGS: &[&str] = &[
-    "for-each-ref", "--format=%(refname)%00%(HEAD)%00%(symref)", "refs/heads", "refs/remotes",
+    "for-each-ref", "--format=%(refname)%00%(HEAD)%00%(symref)%00%(objectname)%00%(upstream)%00%(upstream:track)",
+    "refs/heads", "refs/remotes",
 ];
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitBranch {
     pub name: String,
     pub remote: bool,
     pub current: bool,
+    #[serde(default)]
+    pub oid: String,
+    #[serde(default)]
+    pub upstream: Option<String>,
+    #[serde(default)]
+    pub ahead: Option<u32>,
+    #[serde(default)]
+    pub behind: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GitGraphCommit {
+    pub oid: String,
+    pub parents: Vec<String>,
+    pub subject: String,
+    pub author: String,
+    pub committed_at: i64,
+    pub refs: Vec<String>,
 }
 
 struct GitReadOutput {
@@ -151,7 +170,20 @@ fn parse_branch_list(text: &str) -> Vec<GitBranch> {
         } else {
             (reference.strip_prefix("refs/remotes/")?, true)
         };
-        (!name.is_empty()).then(|| GitBranch { name: name.into(), remote, current: current && !remote })
+        let oid = fields.next().unwrap_or_default().to_string();
+        let upstream = fields.next().filter(|name| !name.is_empty()).map(str::to_owned);
+        let track = fields.next().unwrap_or_default();
+        let (ahead, behind) = if upstream.is_some() && track != "[gone]" {
+            let mut counts = (0, 0);
+            for part in track.trim_matches(['[', ']']).split(", ") {
+                if let Some(value) = part.strip_prefix("ahead ") { counts.0 = value.parse().unwrap_or(0); }
+                if let Some(value) = part.strip_prefix("behind ") { counts.1 = value.parse().unwrap_or(0); }
+            }
+            (Some(counts.0), Some(counts.1))
+        } else { (None, None) };
+        (!name.is_empty()).then(|| GitBranch {
+            name: name.into(), remote, current: current && !remote, oid, upstream, ahead, behind,
+        })
     }).collect()
 }
 
@@ -214,6 +246,7 @@ fn parse_panel_status(repo: &Path, text: &str) -> Value {
         "insertions": 0, "deletions": 0, "clean": staged.is_empty() && unstaged.is_empty(),
         "staged": staged, "unstaged": unstaged, "branches": [], "branch_list": [],
         "numstat": {}, "recent_commits": [], "repo_root": null,
+        "commit_graph": [], "graph_supported": true, "graph_truncated": false,
     })
 }
 
@@ -245,6 +278,55 @@ fn parse_panel_log(text: &str) -> Vec<(String, String)> {
     }).collect()
 }
 
+fn valid_graph_oid(oid: &str) -> bool {
+    matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn graph_label(text: &str) -> String {
+    text.chars().map(|character| if character.is_control() { ' ' } else { character }).collect()
+}
+
+fn parse_graph_log(text: &str, branches: &[GitBranch], head: Option<&str>) -> Result<Vec<GitGraphCommit>, String> {
+    if text.is_empty() { return Ok(Vec::new()); }
+    let fields: Vec<_> = text.strip_suffix('\0').ok_or("unterminated git graph record")?.split('\0').collect();
+    if fields.len() % 5 != 0 { return Err("invalid git graph field count".into()); }
+    let mut seen = std::collections::HashSet::new();
+    fields.chunks_exact(5).map(|fields| {
+        let oid = fields[0];
+        let parents: Vec<_> = fields[1].split_whitespace().map(str::to_owned).collect();
+        if !valid_graph_oid(oid) || !parents.iter().all(|parent| valid_graph_oid(parent)) || !seen.insert(oid) {
+            return Err("invalid git graph object identity".into());
+        }
+        let mut refs = Vec::new();
+        if head == Some(oid) { refs.push("HEAD".into()); }
+        refs.extend(branches.iter().filter(|branch| branch.oid == oid).map(|branch| {
+            format!("refs/{}/{}", if branch.remote { "remotes" } else { "heads" }, branch.name)
+        }));
+        Ok(GitGraphCommit {
+            oid: oid.into(), parents, subject: graph_label(fields[4]), author: graph_label(fields[3]),
+            committed_at: fields[2].parse().map_err(|_| "invalid git graph timestamp")?, refs,
+        })
+    }).collect()
+}
+
+fn panel_commit_graph(repo: &Path, branches: &[GitBranch], head: Option<&str>, commits: usize,
+    deadline: std::time::Instant) -> Result<(Vec<GitGraphCommit>, bool), String> {
+    if head.is_none() && branches.is_empty() { return Ok((Vec::new(), false)); }
+    let limit = commits.clamp(1, 200);
+    let count = format!("--max-count={}", limit + 1);
+    let mut args = vec!["log", count.as_str(), "--topo-order", "--no-show-signature", "--no-decorate",
+        "--format=%H%x00%P%x00%ct%x00%an%x00%s", "-z", "--branches", "--remotes"];
+    if head.is_some() { args.push("HEAD"); }
+    args.push("--");
+    let output = run_panel_git(repo, &args, deadline)?.checked()?;
+    let mut graph = parse_graph_log(&output, branches, head)?;
+    let shallow = run_panel_git(repo, &["rev-parse", "--is-shallow-repository"], deadline)?.checked()?;
+    // A shallow repository can look like a root even though its ancestry is unavailable locally.
+    let truncated = graph.len() > limit || shallow.trim() == "true";
+    graph.truncate(limit);
+    Ok((graph, truncated))
+}
+
 pub fn git_panel_snapshot(repo: &Path, commits: usize) -> Result<Value, String> {
     let deadline = std::time::Instant::now() + PANEL_READ_TIMEOUT;
     let status = run_panel_git(repo, &[
@@ -259,7 +341,7 @@ pub fn git_panel_snapshot(repo: &Path, commits: usize) -> Result<Value, String> 
     let mut view = parse_panel_status(repo, &status.checked()?);
     let branches = parse_branch_list(&run_panel_git(repo, BRANCH_LIST_ARGS, deadline)?.checked()?);
     view["branches"] = json!(branches.iter().filter(|b| !b.remote).map(|b| &b.name).collect::<Vec<_>>());
-    view["branch_list"] = json!(branches);
+    view["branch_list"] = json!(&branches);
     let root = run_panel_git(repo, &["rev-parse", "--show-toplevel"], deadline)?;
     if root.success {
         view["repo_root"] = json!(root.stdout.strip_suffix('\n').unwrap_or(&root.stdout));
@@ -296,6 +378,10 @@ pub fn git_panel_snapshot(repo: &Path, commits: usize) -> Result<Value, String> 
         ], deadline)?.checked()?;
         view["recent_commits"] = json!(parse_panel_log(&log));
     }
+    let head = view["head_oid"].as_str();
+    let (graph, truncated) = panel_commit_graph(repo, &branches, head, commits, deadline)?;
+    view["commit_graph"] = json!(graph);
+    view["graph_truncated"] = json!(truncated);
     Ok(view)
 }
 
@@ -1107,11 +1193,12 @@ mod panel_snapshot_tests {
             "refs/tags/v1\0 \0\n",
         ));
         assert_eq!(branches, vec![
-            GitBranch { name: "main".into(), remote: false, current: true },
-            GitBranch { name: "origin/main".into(), remote: false, current: false },
-            GitBranch { name: "origin/main".into(), remote: true, current: false },
+            GitBranch { name: "main".into(), remote: false, current: true, ..Default::default() },
+            GitBranch { name: "origin/main".into(), remote: false, current: false, ..Default::default() },
+            GitBranch { name: "origin/main".into(), remote: true, current: false, ..Default::default() },
         ]);
-        assert_eq!(serde_json::to_value(&branches[0]).unwrap(), json!({"name": "main", "remote": false, "current": true}));
+        let legacy: GitBranch = serde_json::from_value(json!({"name": "main", "remote": false, "current": true})).unwrap();
+        assert_eq!(legacy, branches[0]);
     }
 
     #[test]
@@ -1130,6 +1217,168 @@ mod panel_snapshot_tests {
             ("a123".into(), "subject\x1fextra".into()), ("b456".into(), "next".into()),
         ]);
         assert!(parse_panel_log("").is_empty());
+    }
+
+    #[test]
+    fn branch_metadata_keeps_upstream_identity_and_unknown_tracking_distinct() {
+        let branches = parse_branch_list(concat!(
+            "refs/heads/한글\0*\0\0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0refs/remotes/origin/한글\0[ahead 3, behind 2]\n",
+            "refs/heads/gone\0 \0\0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\0refs/remotes/origin/gone\0[gone]\n",
+            "refs/heads/no-upstream\0 \0\0cccccccccccccccccccccccccccccccccccccccc\0\0\n",
+        ));
+        assert_eq!(branches[0].upstream.as_deref(), Some("refs/remotes/origin/한글"));
+        assert_eq!((branches[0].ahead, branches[0].behind), (Some(3), Some(2)));
+        assert_eq!((branches[1].ahead, branches[1].behind), (None, None));
+        assert!(branches[1].upstream.is_some());
+        assert!(branches[2].upstream.is_none());
+    }
+
+    #[test]
+    fn graph_fields_preserve_unicode_and_never_treat_display_controls_as_structure() {
+        let oid = "a".repeat(40);
+        let parent = "b".repeat(40);
+        let text = format!("{oid}\0{parent}\01700000000\0작성자\x1f이름\0한글\x1f제목\n둘째\t줄\0");
+        let branches = vec![
+            GitBranch { name: "origin/main".into(), oid: oid.clone(), ..Default::default() },
+            GitBranch { name: "origin/main".into(), oid: oid.clone(), remote: true, ..Default::default() },
+        ];
+        let graph = parse_graph_log(&text, &branches, Some(&oid)).unwrap();
+        assert_eq!(graph[0].parents, [parent]);
+        assert_eq!(graph[0].subject, "한글 제목 둘째 줄");
+        assert_eq!(graph[0].author, "작성자 이름");
+        assert_eq!(graph[0].refs, ["HEAD", "refs/heads/origin/main", "refs/remotes/origin/main"]);
+        assert!(parse_graph_log(&text.replace("1700000000", "bad"), &[], None).is_err());
+        assert!(parse_graph_log(&text.replace(&oid, "not-an-object"), &[], None).is_err());
+        assert!(parse_graph_log(&format!("{text}{text}"), &[], None).is_err());
+        assert!(parse_graph_log(&text.replace("제목", "제\0목"), &[], None).is_err());
+    }
+
+    struct GraphRepo(std::path::PathBuf);
+
+    impl GraphRepo {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let repo = Self(std::env::temp_dir().join(format!("kasa-git-graph-{}-{sequence}", std::process::id())));
+            std::fs::create_dir(&repo.0).unwrap();
+            repo.git(&["init", "-q", "--initial-branch=main"]);
+            repo
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = git_cmd().arg("-C").arg(&self.0).args([
+                "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+                "-c", "user.name=Graph Test", "-c", "user.email=graph@example.invalid",
+            ]).args(args).env("GIT_TERMINAL_PROMPT", "0").output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim_end_matches('\n').to_owned()
+        }
+
+        fn commit(&self, subject: &str) -> String {
+            self.git(&["commit", "-q", "--allow-empty", "-m", subject]);
+            self.git(&["rev-parse", "HEAD"])
+        }
+
+        fn snapshot(&self, limit: usize) -> (Value, Vec<GitGraphCommit>) {
+            let view = git_panel_snapshot(&self.0, limit).unwrap();
+            let graph = serde_json::from_value(view["commit_graph"].clone()).unwrap();
+            (view, graph)
+        }
+    }
+
+    impl Drop for GraphRepo {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn real_graph_preserves_fork_merge_edges_and_remote_heads_without_mutation() {
+        let repo = GraphRepo::new();
+        let base = repo.commit("처음");
+        repo.git(&["switch", "-q", "-c", "feature/한글"]);
+        let feature = repo.commit("가지\x1f제목");
+        repo.git(&["switch", "-q", "main"]);
+        let main = repo.commit("main line");
+        repo.git(&["merge", "--no-ff", "-q", "feature/한글", "-m", "merge"]);
+        let merge = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["update-ref", "refs/remotes/origin/main", &main]);
+        repo.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        let before = repo.git(&["show-ref"]);
+        let (view, graph) = repo.snapshot(200);
+        assert_eq!(repo.git(&["show-ref"]), before);
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), merge);
+        assert_eq!(view["graph_supported"], true);
+        assert_eq!(view["graph_truncated"], false);
+        assert_eq!(graph.len(), 4);
+        assert_eq!(graph[0].oid, merge);
+        assert_eq!(graph[0].parents, [main.clone(), feature.clone()]);
+        assert_eq!(graph.last().unwrap().oid, base);
+        assert!(graph.last().unwrap().parents.is_empty());
+        assert_eq!(graph.iter().find(|commit| commit.oid == main).unwrap().refs, ["refs/remotes/origin/main"]);
+        assert_eq!(graph.iter().find(|commit| commit.oid == feature).unwrap().subject, "가지 제목");
+        assert!(graph.iter().all(|commit| !commit.refs.iter().any(|reference| reference.ends_with("origin/HEAD"))));
+        for (index, commit) in graph.iter().enumerate() {
+            for parent in &commit.parents {
+                assert!(graph.iter().position(|candidate| &candidate.oid == parent).unwrap() > index);
+            }
+        }
+        assert!(view["recent_commits"].as_array().unwrap().iter().all(|row| row.as_array().unwrap().len() == 2));
+    }
+
+    #[test]
+    fn real_graph_includes_remote_only_and_detached_heads_but_not_tag_only_history() {
+        let repo = GraphRepo::new();
+        let base = repo.commit("base");
+        repo.git(&["switch", "-q", "--detach", &base]);
+        let remote = repo.commit("remote only");
+        repo.git(&["update-ref", "refs/remotes/origin/topic", &remote]);
+        repo.git(&["switch", "-q", "--detach", &base]);
+        let tagged = repo.commit("tag only");
+        repo.git(&["-c", "tag.gpgSign=false", "tag", "unrelated", &tagged]);
+        repo.git(&["switch", "-q", "--detach", &base]);
+        let detached = repo.commit("detached only");
+        let (view, graph) = repo.snapshot(200);
+        assert_eq!(view["detached"], true);
+        assert!(graph.iter().any(|commit| commit.oid == remote && commit.refs == ["refs/remotes/origin/topic"]));
+        assert!(graph.iter().any(|commit| commit.oid == detached && commit.refs == ["HEAD"]));
+        assert!(!graph.iter().any(|commit| commit.oid == tagged));
+    }
+
+    #[test]
+    fn real_graph_unborn_is_supported_and_truncation_keeps_boundary_parent_ids() {
+        let repo = GraphRepo::new();
+        let (view, graph) = repo.snapshot(200);
+        assert_eq!(view["unborn"], true);
+        assert_eq!(view["graph_supported"], true);
+        assert_eq!(view["graph_truncated"], false);
+        assert!(graph.is_empty());
+        let parent = repo.commit("root");
+        let head = repo.commit("second");
+        for limit in [0, 1] {
+            let (view, graph) = repo.snapshot(limit);
+            assert_eq!(view["graph_truncated"], true);
+            assert_eq!(graph.len(), 1);
+            assert_eq!(graph[0].oid, head);
+            assert_eq!(graph[0].parents, [parent.clone()]);
+        }
+    }
+
+    #[test]
+    fn real_shallow_graph_reports_incomplete_ancestry_without_fetching() {
+        let source = GraphRepo::new();
+        source.commit("root");
+        source.commit("second");
+        let clone_parent = GraphRepo::new();
+        let clone_path = clone_parent.0.join("shallow");
+        let source_path = source.0.to_string_lossy().replace('\\', "/");
+        let source_url = format!("file://{}{source_path}", if source_path.starts_with('/') { "" } else { "/" });
+        clone_parent.git(&["-c", "protocol.file.allow=always", "clone", "-q", "--depth=1",
+            &source_url, clone_path.to_str().unwrap()]);
+        let view = git_panel_snapshot(&clone_path, 200).unwrap();
+        assert_eq!(view["graph_supported"], true);
+        assert_eq!(view["graph_truncated"], true);
+        assert_eq!(view["commit_graph"].as_array().unwrap().len(), 1);
+        assert_eq!(git_cmd().arg("-C").arg(&clone_path).args(["rev-list", "--count", "HEAD"])
+            .output().unwrap().stdout, b"1\n");
     }
 }
 
