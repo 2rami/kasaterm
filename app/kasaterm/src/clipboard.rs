@@ -72,6 +72,19 @@ fn already_seen(text: &str) -> bool {
     *last_seen().lock().unwrap() == text
 }
 
+/// 다른 기계가 방금 담은 것을 또 밀어 준 것인가. 고치기 전 판(0.2.1 이하)은 긴 글·줄바꿈
+/// 끝 글을 틱마다 새 복사로 읽어 계속 되민다 — 그 판이 한 대라도 남아 있으면 받는 쪽은
+/// 초당 몇 번씩 「○○에서 복사됨」 토스트를 띄웠다(2026-09-28). 같은 글이면 조용히 받는다.
+pub(crate) fn is_repeat_push(text: &str) -> bool {
+    already_seen(text)
+}
+
+/// 시스템 클립보드에 넣기 **전에** 「본 것」으로 적는다. 넣은 뒤에 적으면 그 틈에 틱의
+/// `poll` 이 이 글을 사람의 새 복사로 읽어 다른 기계에 되퍼뜨린다.
+pub(crate) fn mark_seen(text: &str) {
+    *last_seen().lock().unwrap() = text.to_string();
+}
+
 pub(crate) fn isolated_probe() -> bool {
     cfg!(debug_assertions)
         && (std::env::var("KASATERM_CLIPBOARD_PROBE").as_deref() == Ok("1")
@@ -127,7 +140,7 @@ pub(crate) fn looks_secret(text: &str) -> bool {
 /// 복사하면 그건 지금 쓰는 것이라, 목록 아래에 묻혀 있으면 안 된다. `secret` 이
 /// `None` 이면 생김새로 판정하고, 한 번 비밀이었던 것은 다시 담겨도 비밀로 남는다.
 pub(crate) fn remember_as(text: &str, secret: Option<bool>) -> Option<Item> {
-    *last_seen().lock().unwrap() = text.to_string();
+    mark_seen(text);
     let text = text.trim_end_matches(['\n', '\r']);
     if text.trim().is_empty() {
         return None;
@@ -385,6 +398,18 @@ mod tests {
         remember_as("끝에 줄바꿈\n", None);
         assert!(already_seen("끝에 줄바꿈\n"));
         assert!(!already_seen("끝에 줄바꿈"));
+    }
+
+    /// 옛 판 기계가 같은 긴 글을 틱마다 되밀어도 두 번째부터는 되풀이로 읽힌다 — 받는
+    /// 쪽이 그때마다 토스트를 띄우면 화면이 「복사됨」으로 도배된다.
+    #[test]
+    fn a_peer_pushing_the_same_text_again_is_a_repeat() {
+        let _g = lock();
+        let long = format!("{}\n", "a b ".repeat(MAX_CHARS));
+        assert!(!is_repeat_push(&long));
+        remember_as(&long, None);
+        assert!(is_repeat_push(&long));
+        assert!(!is_repeat_push("사람이 새로 복사한 것"));
     }
 
     /// 비밀은 목록에서 꼬리만 보이고, 한 번 비밀이면 다시 담겨도 비밀이다.

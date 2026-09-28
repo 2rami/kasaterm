@@ -897,9 +897,13 @@ impl PtyBackend {
     /// 클립보드에 담고 하단바 목록·토스트에 알린다. `from` 이 없으면 이 기계에서 난
     /// 복사라 다른 기계에도 나눠 주고, 있으면 그 기계가 밀어 준 것이라 담기만 한다.
     fn clipboard_take(&self, text: &str, secret: bool, from: Option<&str>) -> Result<()> {
+        if from.is_some() && crate::clipboard::is_repeat_push(text) {
+            return Ok(());
+        }
         // 클립보드 쓰기 자체는 GUI 상태를 안 쓴다(NSPasteboard 는 스레드 무관) —
         // 소켓 스레드에서 바로 넣고, **보여 주는 일만** GUI 로 넘긴다.
         let mut cb = arboard::Clipboard::new().map_err(|e| anyhow::anyhow!("클립보드 열기 실패: {e}"))?;
+        crate::clipboard::mark_seen(text);
         cb.set_text(text.to_string())
             .map_err(|e| anyhow::anyhow!("클립보드 쓰기 실패: {e}"))?;
         // 무엇이 담겼는지 앞머리를 함께 띄운다 — 「복사됨」만 뜨면 맞는 것을 담았는지
