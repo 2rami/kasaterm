@@ -488,8 +488,7 @@ class BootstrapTests(unittest.TestCase):
 
     def test_event_wait_uses_process_exit_notifications_and_fails_closed_on_permission_error(self):
         runtime = b.Runtime()
-        queue = mock.MagicMock()
-        queue.__enter__.return_value = queue
+        queue = mock.Mock(spec=["control", "close"])
         queue.control.return_value = []
         values = {"kqueue":mock.Mock(return_value=queue), "kevent":mock.Mock(side_effect=lambda *a, **k:(a, k)),
                   "KQ_FILTER_PROC":1, "KQ_EV_ADD":2, "KQ_EV_ENABLE":4, "KQ_EV_ONESHOT":8,
@@ -500,9 +499,18 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(event[0], (22,))
             self.assertEqual(event[1]["fflags"], 16)
             self.assertEqual(queue.control.call_args.args[-1], 60)
+            queue.close.assert_called_once()
             queue.control.return_value = [SimpleNamespace(flags=32, data=b.errno.EPERM)]
             with self.assertRaises(b.Refused):
                 runtime.wait_for_exit({22:"fixture"}, 60)
+
+    @unittest.skipUnless(hasattr(b.select, "kqueue"), "macOS kqueue")
+    def test_event_wait_returns_when_a_real_process_exits(self):
+        child = b.subprocess.Popen(["/bin/sleep", "0.2"])
+        try:
+            b.Runtime().wait_for_exit([child.pid], 5)
+        finally:
+            child.wait()
 
     def test_lock_serializes_helpers_without_a_spin_poll(self):
         entered = threading.Event()

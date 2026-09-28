@@ -22,7 +22,7 @@ import sys
 import tempfile
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 
 TEAM = "L366799VND"
 SCHEMA = "kasaterm-receiver-bootstrap/1"
@@ -170,7 +170,8 @@ class Runtime:
                    flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
                    fflags=select.KQ_NOTE_EXIT) for pid in pids]
         try:
-            with select.kqueue() as queue:
+            # kqueue 는 with 를 모른다(3.9 AttributeError·3.12 TypeError) — 켜진 앱을 기다리던 도우미가 늘 여기서 죽었다.
+            with closing(select.kqueue()) as queue:
                 events = queue.control(changes, max(1, len(changes)), timeout)
                 if any(event.flags & select.KQ_EV_ERROR and event.data not in (0, errno.ESRCH) for event in events):
                     raise Refused("process-exit observation failed")
