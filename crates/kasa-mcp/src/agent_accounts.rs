@@ -228,8 +228,8 @@ fn settings_path() -> Option<PathBuf> {
 /// Claude 는 앱이 슬롯 토큰으로 확인해 적어 둔 이메일·조직(`claude_account_emails`·`_orgs`),
 /// Codex 는 슬롯의 `auth.json` id_token. 신원을 모르는 슬롯(아직 로그인 전)은 빠진다.
 ///
-/// Claude 기본 로그인(`""`)은 등록 슬롯이 없을 때만 넣는다 — 슬롯이 있으면 기본 자리는
-/// 활성 슬롯을 옮겨 담은 작업대라 그 슬롯과 같은 계정이다(`claude_auth.rs`).
+/// Claude 기본 로그인(`""`)은 고른 슬롯이 없을 때만 넣는다 — 슬롯을 고르면 기본 자리는
+/// 그 슬롯을 옮겨 담은 작업대라 같은 계정이고, 적어 둔 기본 신원은 옛 값일 수 있다(`claude_auth.rs`).
 pub fn local_snapshot() -> Vec<LocalAccount> {
     let Some(path) = settings_path() else { return Vec::new() };
     let settings: Value = std::fs::read_to_string(&path)
@@ -268,8 +268,9 @@ fn claude_slots(settings: &Value) -> Vec<LocalAccount> {
             .to_string()
     };
     let mut ids = slots(settings, "claude_accounts");
-    if ids.is_empty() {
-        ids.push((String::new(), String::new()));
+    let active = settings.get("claude_account").and_then(Value::as_str).unwrap_or_default();
+    if active.is_empty() {
+        ids.insert(0, (String::new(), String::new()));
     }
     ids.into_iter()
         .filter_map(|(id, label)| {
@@ -330,10 +331,15 @@ pub fn codex_auth_identity(path: &std::path::Path) -> Option<LocalAccount> {
 }
 
 /// 관문에 이 기기 몫을 올리고 합친 목록을 받는다. 관문 로그인이 없으면 에러.
+///
+/// 가는 곳은 **로그인한 관문**이다. 폰 업링크를 꺼 둔 기기(관문 설정 없음·검증 리그)도 목록은
+/// 나눈다 — 둘은 별개다. 관문 설정을 다른 곳으로 바꿨으면 옛 관문의 토큰은 안 쓴다.
 pub async fn sync(locals: &[LocalAccount]) -> anyhow::Result<Vec<Shared>> {
-    let gateway = crate::mobile::gateway().ok_or_else(|| anyhow::anyhow!("관문이 꺼져 있어요"))?;
-    let cred = crate::device_auth::for_gateway(&gateway)
-        .ok_or_else(|| anyhow::anyhow!("이 기기가 관문에 로그인돼 있지 않아요"))?;
+    let cred = crate::device_auth::current().ok_or_else(|| anyhow::anyhow!("이 기기가 관문에 로그인돼 있지 않아요"))?;
+    if crate::mobile::gateway().is_some_and(|g| g.trim_end_matches('/') != cred.relay.trim_end_matches('/')) {
+        anyhow::bail!("관문 설정이 로그인한 관문과 달라요 — 다시 로그인해 주세요");
+    }
+    let gateway = cred.relay.trim_end_matches('/').to_string();
     let res = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::none())
@@ -452,7 +458,8 @@ mod tests {
         )
         .unwrap();
         let settings = serde_json::json!({
-            "claude_accounts": [{"id": "acct-1", "label": "지메일"}, {"id": "acct-9", "label": "", "expect": "claude:n@naver.com"}],
+            "claude_accounts": [{"id": "acct-1", "label": "지메일"}, {"id": "acct-9", "label": ""}],
+            "claude_account": "acct-1",
             "claude_account_emails": {"": "r@s.ai", "acct-1": "g@gmail.com"},
             "claude_account_orgs": {"acct-1": "g@gmail.com's Organization"},
             "codex_accounts": [{"id": "codex-1", "label": "사이오닉팀"}],
@@ -465,8 +472,12 @@ mod tests {
         assert_eq!((slot.workspace.as_str(), slot.plan.as_str()), ("ws-team", "team"));
         assert!(!serde_json::to_string(&codex).unwrap().contains("secret"), "토큰이 새어 나왔다");
 
-        let bare = serde_json::json!({ "claude_account_emails": {"": "r@s.ai"} });
-        assert_eq!(claude_slots(&bare)[0].slot, "", "슬롯이 없으면 기본 로그인이 이 기기의 계정이다");
+        let bare = serde_json::json!({
+            "claude_accounts": [{"id": "acct-9", "label": ""}],
+            "claude_account_emails": {"": "r@s.ai"},
+        });
+        let bare = claude_slots(&bare);
+        assert_eq!((bare.len(), bare[0].slot.as_str()), (1, ""), "고른 슬롯이 없으면 기본 로그인이 이 기기의 계정이다");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
