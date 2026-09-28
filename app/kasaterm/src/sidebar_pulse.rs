@@ -293,11 +293,10 @@ impl App {
             7 => toggle_item(),
             8 => {
                 eprintln!("[pulse-probe] shown_again={} head_top={}", !self.pulse.hidden, self.sidebar_head_top());
-                Some(self.arona_btn_rect).filter(|r| r.2 > 0.0)
+                STEP.store(10, Ordering::Relaxed);
+                return;
             }
             _ => {
-                let arona = self.board_room_active() && self.board_scene.tab() == crate::native_board::BoardTab::Chat;
-                eprintln!("[pulse-probe] tray_arona_open={arona} toast={:?}", self.collab.toast.as_ref().map(|t| t.0.clone()));
                 STEP.store(10, Ordering::Relaxed);
                 return;
             }

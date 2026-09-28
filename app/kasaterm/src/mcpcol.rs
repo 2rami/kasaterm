@@ -1,4 +1,4 @@
-//! 우측 칼럼의 「MCP·Skill」 탭 — 어느 하네스에 무엇이 붙어 있는지 한 화면에.
+//! Addon groups keep configured extensions separate from observed runtime connections.
 //!
 //! 붙은 것을 확인하려면 지금까지 `claude mcp list` 와 `codex mcp list` 를 따로 치고,
 //! 끄고 켜려면 `~/.claude.json` 과 `~/.codex/config.toml` 을 손으로 열어야 했다. 형식도
@@ -20,7 +20,7 @@ const ROW_H: f32 = 40.0;
 /// 하네스 구분 머리(로고 + 이름 + 개수).
 const SECTION_H: f32 = 30.0;
 /// 종류 구분 머리(MCP / Skill).
-const GROUP_H: f32 = 22.0;
+const GROUP_H: f32 = 30.0;
 /// 목록이 비었을 때 안내가 차지하는 높이.
 const EMPTY_H: f32 = 44.0;
 /// 재수집 간격. 설정 파일은 사람이 고칠 때만 바뀌므로 성기게 본다 — 대신 우리가
@@ -43,7 +43,7 @@ impl RowKind {
     /// 그룹 머리에 적히는 이름.
     fn label(self) -> &'static str {
         match self {
-            RowKind::Mcp => "MCP",
+            RowKind::Mcp => "도구 서버",
             RowKind::Skill => "스킬",
             RowKind::Plugin => "플러그인",
             RowKind::Agent => "에이전트",
@@ -155,6 +155,23 @@ impl McpRow {
                 self.kind,
                 RowKind::Mcp | RowKind::Skill | RowKind::Agent | RowKind::Command
             )
+    }
+}
+
+fn seed_collapsed_groups(rows: &[McpRow], seen: &mut std::collections::HashSet<String>, collapsed: &mut std::collections::HashSet<String>) {
+    for row in rows {
+        let key = group_key(row.harness, row.kind, row.scope);
+        if seen.insert(key.clone()) { collapsed.insert(key); }
+    }
+}
+
+fn kind_icon(kind: RowKind) -> &'static str {
+    match kind {
+        RowKind::Mcp | RowKind::Plugin => "plug",
+        RowKind::Skill => "file-text",
+        RowKind::Agent => "users",
+        RowKind::Command => "terminal",
+        RowKind::Hook => "braces",
     }
 }
 
@@ -1457,7 +1474,11 @@ impl App {
                 self.mcp_col.view = g.clone();
             }
             self.mcp_col.seen_rev = rev;
+            seed_collapsed_groups(&self.mcp_col.view, &mut self.mcp_col.seen_groups, &mut self.mcp_col.collapsed);
             self.mcp_col.confirm_delete = None;
+            self.mcp_col.row_rects.clear();
+            self.mcp_col.del_rects.clear();
+            self.mcp_col.head_rects.clear();
             self.chrome_dirty = true;
         }
         // 워커가 남긴 결과 한 줄(지우기처럼 시간이 걸리는 일)은 여기서 집어 간다.
@@ -1780,6 +1801,10 @@ impl App {
             if !self.mcp_col.collapsed.remove(&key) {
                 self.mcp_col.collapsed.insert(key);
             }
+            self.mcp_col.row_rects.clear();
+            self.mcp_col.del_rects.clear();
+            self.mcp_col.head_rects.clear();
+            self.mcp_col.confirm_delete = None;
             // 접으면 목록이 짧아진다 — 스크롤이 끝을 넘어간 채 남으면 빈 화면이 된다.
             // 상한 clamp 는 다음 그리기가 하므로 여기선 되돌릴 자리만 만들어 준다.
             self.chrome_dirty = true;
@@ -1887,7 +1912,7 @@ pub(crate) fn draw_mcp_col(
             x0,
             head_y + 4.0,
             &format!(
-                "MCP {} · 스킬 {} · 총 {}",
+                "서버 {} · 스킬 {} · 전체 {}",
                 n(RowKind::Mcp),
                 n(RowKind::Skill),
                 mc.view.len()
@@ -2047,7 +2072,7 @@ pub(crate) fn draw_mcp_col(
         g.draw_text(
             x0,
             body_top + 12.0,
-            "설정을 아직 못 읽었다",
+            "등록된 Addon을 확인하고 있어요…",
             gpu::DrawOpts {
                 font_size: 12.0,
                 color: theme::text_mute(),
@@ -2177,7 +2202,7 @@ pub(crate) fn draw_mcp_col(
                             "chevron-right"
                         },
                         x + 18.0,
-                        y + 5.0,
+                        y + 9.0,
                         11.0,
                         if hov {
                             theme::text_dim()
@@ -2185,25 +2210,28 @@ pub(crate) fn draw_mcp_col(
                             theme::text_mute()
                         },
                     );
+                    g.queue_icon(kind_icon(*kind), text_x + 2.0, y + 8.0, 14.0, theme::text_dim());
                     let label = format!("{} · {scope}", kind.label());
+                    let label = crate::info::fit_text(g, &label, (right - text_x - 60.0).max(0.0), 10.5, false);
                     g.draw_text(
-                        text_x + 2.0,
-                        y + 5.0,
+                        text_x + 24.0,
+                        y + 9.0,
                         &label,
                         gpu::DrawOpts {
-                            font_size: 10.0,
+                            font_size: 10.5,
                             color: theme::text_dim(),
                             bold: false,
                             italic: false,
                         },
                     );
-                    let lw = g.measure_chrome_text(&label, 10.0, false);
+                    let count_label = count.to_string();
+                    let count_w = g.measure_chrome_text(&count_label, 10.5, false);
                     g.draw_text(
-                        text_x + 8.0 + lw,
-                        y + 5.0,
-                        &count.to_string(),
+                        right - count_w,
+                        y + 9.0,
+                        &count_label,
                         gpu::DrawOpts {
-                            font_size: 10.0,
+                            font_size: 10.5,
                             color: theme::text_mute(),
                             bold: false,
                             italic: false,

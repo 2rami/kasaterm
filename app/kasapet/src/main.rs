@@ -1242,11 +1242,11 @@ impl App {
         if !self.preferences.activity_reactions { return; }
         let f = d.join("board.json");
         let m = std::fs::metadata(&f).and_then(|m| m.modified()).ok();
-        if m == self.board_seen {
+        let (mood, workspace_text, pane, focus, account_scoped) = board::read(&f);
+        if m == self.board_seen && (!account_scoped || mood == self.mood) {
             return;
         }
         self.board_seen = m;
-        let (mood, _, pane, focus) = board::read(&f);
         self.subject = pane;
         self.focus = focus;
         self.stirred = std::time::Instant::now();
@@ -1254,7 +1254,16 @@ impl App {
         // 판의 글(「미도리 · crm」)은 말풍선에 안 띄운다 — 거기는 나쵸가 말하는 자리다
         // (2026-09-17 지시). 사람 손이 필요해지는 순간만 나쵸에게 한 줄 부탁하고, 그런 말이
         // 새로 뜰 땐 캐릭터가 한 번 튄다 — 자리를 비운 사이의 승인 요청을 놓치지 않게.
-        if urgent && !self.urgent_asked {
+        if account_scoped && self.say != workspace_text {
+            if workspace_text.is_empty() {
+                self.say.clear();
+                self.answer_shown = false;
+                self.rebuild_bubble_text();
+            } else if self.preferences.bubbles {
+                self.speak(workspace_text, false);
+            }
+        }
+        if board::legacy_auto_question(account_scoped, urgent, self.urgent_asked) {
             self.urgent_asked = true;
             if !self.resting && self.preferences.animations { self.start_bounce(); }
             self.ask_auto("사람 손이 필요한 학생 하나만, 누가 무엇을 기다리는지 한 줄로 알려줘");

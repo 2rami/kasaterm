@@ -38,6 +38,8 @@ color_slot!(S_BG, bg, [37, 44, 53, 255]);
 color_slot!(S_PANE_BG, pane_bg, [37, 44, 53, 255]);
 color_slot!(S_HEADER_BG, header_bg, [37, 44, 53, 255]);
 color_slot!(S_SIDEBAR_BG, sidebar_bg, [42, 50, 60, 255]);
+color_slot!(S_TITLEBAR_BG, titlebar_bg, [37, 44, 53, 255]);
+color_slot!(S_SIDE_PANEL_BG, side_panel_bg, [42, 50, 60, 255]);
 color_slot!(S_FG, fg, [255, 255, 255, 255]);
 color_slot!(S_SURFACE, surface, [26, 29, 35, 255]);
 color_slot!(S_SURFACE_HOVER, surface_hover, [48, 56, 67, 255]);
@@ -110,6 +112,13 @@ pub struct PaletteSurfaces {
     pub pane: [u8; 4],
     pub header: [u8; 4],
     pub sidebar: [u8; 4],
+    pub titlebar: Option<[u8; 4]>,
+    pub side_panel: Option<[u8; 4]>,
+}
+
+impl PaletteSurfaces {
+    pub fn titlebar(&self) -> [u8; 4] { self.titlebar.unwrap_or(self.header) }
+    pub fn side_panel(&self) -> [u8; 4] { self.side_panel.unwrap_or(self.sidebar) }
 }
 
 #[derive(Clone, Copy)]
@@ -476,6 +485,7 @@ impl Palette {
     pub fn surface_colors(&self) -> PaletteSurfaces {
         self.surfaces.unwrap_or(PaletteSurfaces {
             pane: self.bg, header: self.bg, sidebar: lerp(self.bg, self.surface_hover, 0.5),
+            titlebar: None, side_panel: None,
         })
     }
 }
@@ -509,6 +519,8 @@ fn store_palette(p: &Palette) {
     S_PANE_BG.store(pack(surfaces.pane), Ordering::Relaxed);
     S_HEADER_BG.store(pack(surfaces.header), Ordering::Relaxed);
     S_SIDEBAR_BG.store(pack(surfaces.sidebar), Ordering::Relaxed);
+    S_TITLEBAR_BG.store(pack(surfaces.titlebar()), Ordering::Relaxed);
+    S_SIDE_PANEL_BG.store(pack(surfaces.side_panel()), Ordering::Relaxed);
     S_FG.store(pack(p.fg), Ordering::Relaxed);
     S_SURFACE.store(pack(p.surface), Ordering::Relaxed);
     S_SURFACE_HOVER.store(pack(p.surface_hover), Ordering::Relaxed);
@@ -584,7 +596,7 @@ pub(crate) fn current_is_light() -> bool {
 /// 판정을 `current_is_light` 와 같은 축(BT.601 휘도)에 걸어 두는 게 요점이다.
 /// 커스텀 팔레트도 프리셋도 따로 등록할 것 없이 배경색 하나로 갈린다.
 pub(crate) fn window_theme() -> winit::window::Theme {
-    if is_light(header_bg()) {
+    if is_light(titlebar_bg()) {
         winit::window::Theme::Light
     } else {
         winit::window::Theme::Dark
@@ -902,11 +914,16 @@ pub fn custom_palette(e: &serde_json::Value) -> Palette {
     hex("text_mute", &mut p.text_mute);
     hex("success", &mut p.success);
     hex("danger", &mut p.danger);
-    if ["pane_bg", "header_bg", "sidebar_bg"].iter().any(|key| o.contains_key(*key)) {
+    if ["pane_bg", "header_bg", "sidebar_bg", "titlebar_bg", "side_panel_bg"].iter().any(|key| o.contains_key(*key)) {
         let mut surfaces = p.surface_colors();
         hex("pane_bg", &mut surfaces.pane);
         hex("header_bg", &mut surfaces.header);
         hex("sidebar_bg", &mut surfaces.sidebar);
+        for (key, target) in [("titlebar_bg", &mut surfaces.titlebar), ("side_panel_bg", &mut surfaces.side_panel)] {
+            if let Some(rgb) = o.get(key).and_then(|value| value.as_str()).and_then(parse_hex) {
+                *target = Some([rgb[0], rgb[1], rgb[2], 255]);
+            }
+        }
         p.surfaces = Some(surfaces);
     }
     if let Some(arr) = o.get("ansi").and_then(|x| x.as_array()) {
@@ -1019,15 +1036,18 @@ pub const SURFACE_PALETTE_KEYS: &[(&str, fn(&Palette) -> [u8; 4])] = &[
     ("pane_bg", |p| p.surface_colors().pane),
     ("header_bg", |p| p.surface_colors().header),
     ("sidebar_bg", |p| p.surface_colors().sidebar),
+    ("titlebar_bg", |p| p.surface_colors().titlebar()),
+    ("side_panel_bg", |p| p.surface_colors().side_panel()),
 ];
-pub const PALETTE_SLOT_COUNT: usize = SURFACE_PALETTE_START + 3;
+pub const PALETTE_SLOT_COUNT: usize = SURFACE_PALETTE_START + SURFACE_PALETTE_KEYS.len();
 
 pub fn palette_slot_label(index: usize) -> String {
     match index {
         0 => "창 바탕".into(), 1 => "터미널 글자".into(), 2 => "입력칸과 메뉴".into(),
         3 => "호버".into(), 4 => "선택".into(), 5 => "구분선".into(), 6 => "화면 글자".into(),
         7 => "보조 글자".into(), 8 => "흐린 글자".into(), 9 => "성공".into(), 10 => "오류".into(),
-        27 => "터미널 바탕".into(), 28 => "탭과 헤더".into(), 29 => "사이드바와 패널".into(),
+        27 => "터미널 바탕".into(), 28 => "pane 머리".into(), 29 => "사이드바".into(),
+        30 => "상단바".into(), 31 => "오른쪽 패널".into(),
         _ => format!("ANSI {}", index.saturating_sub(PALETTE_KEYS.len())),
     }
 }
@@ -2023,6 +2043,8 @@ pub fn tokens_json() -> serde_json::Value {
             "pane_bg": css_hex(pane_bg()),
             "header_bg": css_hex(header_bg()),
             "sidebar_bg": css_hex(sidebar_bg()),
+            "titlebar_bg": css_hex(titlebar_bg()),
+            "side_panel_bg": css_hex(side_panel_bg()),
             "fg": css_hex(fg()),
             "surface": css_hex(surface()),
             "surface_hover": css_hex(surface_hover()),
@@ -2342,6 +2364,8 @@ mod custom_theme_tests {
         let legacy = custom_palette(&serde_json::json!({"base":"dark", "bg":"#102030"}));
         assert_eq!(legacy.surface_colors().pane, legacy.bg);
         assert_eq!(legacy.surface_colors().header, legacy.bg);
+        assert_eq!(legacy.surface_colors().titlebar(), legacy.bg);
+        assert_eq!(legacy.surface_colors().side_panel(), legacy.surface_colors().sidebar);
         let custom = custom_palette(&serde_json::json!({
             "base":"dark", "bg":"#102030", "pane_bg":"#203040",
             "header_bg":"#304050", "sidebar_bg":"#405060"
@@ -2350,14 +2374,42 @@ mod custom_theme_tests {
         assert_eq!(custom.surface_colors().pane, [0x20, 0x30, 0x40, 255]);
         assert_eq!(custom.surface_colors().header, [0x30, 0x40, 0x50, 255]);
         assert_eq!(custom.surface_colors().sidebar, [0x40, 0x50, 0x60, 255]);
+        assert_eq!(custom.surface_colors().titlebar(), custom.surface_colors().header);
+        assert_eq!(custom.surface_colors().side_panel(), custom.surface_colors().sidebar);
         assert_eq!(PALETTE_KEYS.len() + 16, SURFACE_PALETTE_START);
+    }
+
+    #[test]
+    fn titlebar_and_right_panel_colors_round_trip_without_changing_legacy_slots() {
+        let mut entry = custom_theme_seed("graphite", "independent", "Independent");
+        entry["pane_bg"] = serde_json::json!("#112233");
+        entry["header_bg"] = serde_json::json!("#223344");
+        entry["sidebar_bg"] = serde_json::json!("#334455");
+        entry["titlebar_bg"] = serde_json::json!("#445566");
+        entry["side_panel_bg"] = serde_json::json!("#556677");
+        let encoded = serde_json::to_string(&entry).unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let colors = custom_palette(&decoded).surface_colors();
+        assert_eq!(colors.pane, [0x11, 0x22, 0x33, 255]);
+        assert_eq!(colors.header, [0x22, 0x33, 0x44, 255]);
+        assert_eq!(colors.sidebar, [0x33, 0x44, 0x55, 255]);
+        assert_eq!(colors.titlebar(), [0x44, 0x55, 0x66, 255]);
+        assert_eq!(colors.side_panel(), [0x55, 0x66, 0x77, 255]);
+        assert_eq!(SURFACE_PALETTE_START, 27);
+        assert_eq!(SURFACE_PALETTE_KEYS.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            ["pane_bg", "header_bg", "sidebar_bg", "titlebar_bg", "side_panel_bg"]);
+        assert_eq!(PALETTE_SLOT_COUNT, 32);
+        let saved = serde_json::json!({"custom_themes":[decoded]});
+        let slots = crate::settings::palette_hex_list(&saved, Some("independent"));
+        assert_eq!(&slots[27..], ["#112233", "#223344", "#334455", "#445566", "#556677"]);
     }
 
     #[test]
     fn new_neutral_palettes_keep_readable_text_on_every_default_surface() {
         for palette in [&GRAPHITE, &INK, &PAPER, &MIST] {
             let surfaces = palette.surface_colors();
-            for fill in [palette.bg, palette.surface, surfaces.pane, surfaces.header, surfaces.sidebar] {
+            for fill in [palette.bg, palette.surface, surfaces.pane, surfaces.header, surfaces.sidebar,
+                surfaces.titlebar(), surfaces.side_panel()] {
                 for ink in [palette.fg, palette.text, palette.text_dim] {
                     assert!(contrast_of(luminance(fill), luminance(ink)) >= 4.5);
                 }

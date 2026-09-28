@@ -222,6 +222,7 @@ pub(crate) struct PaneGroup {
     pub(crate) tabs: Vec<TabRow>,
     pub(crate) status: String,
     pub(crate) harness: String,
+    pub(crate) model: String,
     pub(crate) registered: Option<crate::server_restore::ServerOverview>,
 }
 
@@ -259,6 +260,7 @@ pub(crate) struct TabRow {
     pub(crate) rows: Vec<ProcRow>,
     pub(crate) status: String,
     pub(crate) harness: String,
+    pub(crate) model: String,
     pub(crate) registered: Option<crate::server_restore::ServerOverview>,
 }
 
@@ -273,7 +275,7 @@ pub(crate) struct ContextLines {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum InfoScope { #[default] AllRooms, CurrentRoom, SelectedPane }
+pub(crate) enum InfoScope { AllRooms, #[default] CurrentRoom, SelectedPane }
 
 fn in_scope(group: &PaneGroup, scope: InfoScope, room: usize, selected: Option<&str>) -> bool {
     match scope {
@@ -401,6 +403,9 @@ pub(crate) struct PaneTarget {
     pub(crate) machine: Option<String>,
     pub(crate) session_id: String,
     pub(crate) harness: String,
+    /// 하네스가 스스로 보고한 모델(claude 는 statusline, codex 는 rollout). 안 왔으면 빈 값 —
+    /// 로스터의 기본값으로 채우지 않는다: 사람이 창 안에서 바꾼 뒤엔 그것이 거짓이 된다.
+    pub(crate) model: String,
     pub(crate) registered: Option<crate::server_restore::ServerOverview>,
     pub(crate) remote_disconnected: bool,
 }
@@ -458,6 +463,7 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
             tabs: Vec::new(),
             status: if t.machine.is_some() { if t.remote_disconnected { "연결끊김" } else { "원격 실행 미확인" } } else if collection_error.is_some() { "수집실패" } else if !by_pid.contains_key(&t.shell_pid) { "종료" } else { "대기" }.into(),
             harness: t.harness.clone(),
+            model: t.model.clone(),
             registered: t.registered.clone(),
         })
         .collect();
@@ -669,7 +675,7 @@ fn fold_tabs(panes: &mut Vec<PaneGroup>, targets: &[PaneTarget]) {
                 index: t.tab_index,
                 cwd: g.cwd.clone(),
                 rows: std::mem::take(&mut g.rows),
-                status: g.status.clone(), harness: g.harness.clone(), registered: g.registered.take(),
+                status: g.status.clone(), harness: g.harness.clone(), model: g.model.clone(), registered: g.registered.take(),
             },
         ));
     }
@@ -1826,6 +1832,11 @@ impl App {
             return Vec::new();
         };
         let active = ws.active_pane.clone();
+        let agent_cfg = self
+            .socket_backend
+            .as_ref()
+            .map(|backend| backend.agent_cfg_snapshot())
+            .unwrap_or_default();
         let mut out: Vec<PaneTarget> = self
             .pty
             .iter()
@@ -1897,6 +1908,7 @@ impl App {
                     machine_identity: remote.as_ref().map(|remote| format!("{}:{}", remote.base, remote.remote_id)).unwrap_or_else(|| "local".into()),
                     session_id: self.pane_claude_sid.get(id).cloned().unwrap_or_default(),
                     harness: s.active_agent().map(|kind| kind.as_str().to_string()).or_else(|| remote_str("harness")).unwrap_or_else(|| if remote.is_some() { "unknown".into() } else { String::new() }),
+                    model: agent_cfg.get(id.as_str()).map(|(model, _)| model.clone()).or_else(|| remote_str("model")).unwrap_or_default(),
                     registered: ws.panes.get(host).and_then(|pane| pane.tabs.get(tab_index)).and_then(|tab| tab.server.as_ref()).map(crate::server_restore::RegisteredServer::overview),
                     remote_disconnected: remote_str("status").is_some_and(|status| matches!(status.as_str(), "offline" | "disconnected")),
                     // 셸만 도는 pane 엔 학생 이름을 안 붙인다. 배정은 spawn 때 **모든**
@@ -2132,8 +2144,7 @@ pub(crate) fn draw_side_tabs(
         (state::SideTab::Git, "Git"),
         (state::SideTab::Info, "Info"),
         (state::SideTab::Sessions, "세션"),
-        (state::SideTab::Mcp, "MCP"),
-        (state::SideTab::Work, "작업"),
+        (state::SideTab::Mcp, "Addon"),
     ] {
         let active = info.tab == tab;
         let tw = g.measure_chrome_text(label, 12.0, active);
@@ -2306,6 +2317,7 @@ mod execution_overview_tests {
     fn previous_tab_context_is_hidden_even_without_a_bound_session_id() {
         let mut info = state::InfoState::default(); info.selected_pane = Some("%1".into()); info.selected_pid = "%8".into(); info.selected_harness = "codex".into();
         let mut snap = InfoSnap { panes: vec![PaneGroup { pane: "%1".into(), ..Default::default() }], ..Default::default() };
+        info.pane_expanded.insert(execution_key(&snap.panes[0]));
         snap.contexts.insert("%7".into(), ContextLines { pane_id: "%7".into(), harness: "codex".into(), summary: vec!["old evidence".into()], ..Default::default() });
         assert!(!execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == "old evidence")));
         snap.contexts.get_mut("%7").unwrap().pane_id = "%8".into();
@@ -2318,10 +2330,30 @@ mod execution_overview_tests {
         let group = PaneGroup { pane: "%1".into(), ..Default::default() };
         let mut snap = InfoSnap { panes: vec![group], ..Default::default() };
         snap.contexts.insert("%1".into(), ContextLines { pane_id: "%1".into(), harness: "claude".into(), summary: vec!["one".into(), "two".into(), "three".into(), "extra".into()], ..Default::default() });
-        let info = state::InfoState { selected_pane: Some("%1".into()), selected_pid: "%1".into(), selected_harness: "claude".into(), ..Default::default() };
+        let mut info = state::InfoState { selected_pane: Some("%1".into()), selected_pid: "%1".into(), selected_harness: "claude".into(), ..Default::default() };
+        assert!(!execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(_))), "record evidence is diagnostics: folded until expanded");
+        info.pane_expanded.insert(execution_key(&snap.panes[0]));
         let lines = execution_lines(&snap, &info);
         assert_eq!(lines.iter().filter(|line| matches!(line, ExecutionLine::Context(_))).count(), 3);
         assert!(lines.iter().map(ExecutionLine::height).sum::<f32>().is_finite());
+    }
+    #[test]
+    fn current_window_summary_leads_with_machine_folder_agent_and_model() {
+        let local = PaneGroup { pane: "%1".into(), cwd: "~/Desktop/kasaterm".into(), harness: "claude".into(), model: "claude-fable-5-1".into(), window: 0, ..Default::default() };
+        let remote = PaneGroup { pane: "%2".into(), machine: Some("맥미니".into()), shell: "zsh".into(), window: 0, ..Default::default() };
+        let other_room = PaneGroup { pane: "%3".into(), window: 1, ..Default::default() };
+        let snap = InfoSnap { panes: vec![local, remote, other_room], ..Default::default() };
+        let info = state::InfoState::default();
+        assert_eq!(info.scope, InfoScope::CurrentRoom, "the panel is a summary of the current window");
+        let lines = execution_lines(&snap, &info);
+        assert!(!lines.iter().any(|line| matches!(line, ExecutionLine::Group(group, _) if group.pane == "%3")));
+        let texts: Vec<&str> = lines.iter().filter_map(|line| match line { ExecutionLine::Text(text, _) => Some(text.as_str()), _ => None }).collect();
+        let first = texts.iter().position(|text| text.starts_with("기기 ")).unwrap();
+        assert!(texts[first].ends_with("· 폴더 ~/Desktop/kasaterm"));
+        assert_eq!(texts[first + 1], "에이전트 claude · 모델 claude-fable-5-1");
+        assert!(texts.iter().any(|text| text.starts_with("기기 맥미니 · 폴더 미확인")), "{texts:?}");
+        assert!(texts.iter().any(|text| *text == "에이전트 zsh · 모델 미확인"));
+        assert!(texts.iter().position(|text| text.contains("대기 ·")).unwrap() > first + 1, "state follows the identity lines");
     }
 }
 
@@ -2345,6 +2377,20 @@ impl ExecutionLine<'_> {
     }
 }
 
+/// 「기기 · 폴더」 — 로컬 pane 은 이 기계 이름, 원격 거울은 그 기계 라벨.
+fn summary_place(group: &PaneGroup) -> String {
+    let machine = group.machine.clone().unwrap_or_else(|| local_machine_name().to_string());
+    let folder = if group.cwd.is_empty() { "미확인" } else { group.cwd.as_str() };
+    format!("기기 {machine} · 폴더 {folder}")
+}
+
+/// 「에이전트 · 모델」 — 하네스가 없으면 셸 이름, 모델은 보고된 값만(없으면 미확인).
+fn summary_agent(harness: &str, shell: &str, model: &str) -> String {
+    let agent = if !harness.is_empty() { harness } else if !shell.is_empty() { shell } else { "실행 대상 없음" };
+    let model = if model.is_empty() { "미확인" } else { model };
+    format!("에이전트 {agent} · 모델 {model}")
+}
+
 fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<ExecutionLine<'a>> {
     let mut lines = Vec::new();
     if let Some(error) = &snap.collection_error { lines.push(ExecutionLine::Text(format!("수집실패 · {error}"), true)); }
@@ -2358,6 +2404,10 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
         let key = execution_key(group);
         let expanded = info.pane_expanded.contains(&key);
         lines.push(ExecutionLine::Group(group, key));
+        // 현재 창 요약 — 기기·폴더·에이전트·모델이 먼저다. 프로세스·포트·기록 근거는 진단이라
+        // 「실행 상세」를 펼쳐야 나온다.
+        lines.push(ExecutionLine::Text(summary_place(group), false));
+        lines.push(ExecutionLine::Text(summary_agent(&group.harness, &group.shell, &group.model), false));
         if group.closed { lines.push(ExecutionLine::Text("접힌 pane에서 등록 서버 실행".into(), true)); }
         let task = snap.tasks.get(&group.pane);
         let mut runtime = if group.harness.is_empty() { group.rows.first().map(|row| row.name.as_str()).unwrap_or(if group.shell.is_empty() { "실행 대상 없음" } else { &group.shell }) } else { &group.harness }.to_string();
@@ -2374,18 +2424,19 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
             let name = if !tab.title.is_empty() { tab.title.as_str() } else if !tab.session.is_empty() { &tab.session } else if !tab.label.is_empty() { &tab.label } else { "셸" };
             let state = execution_state(&tab.status, group.machine.is_some(), &tab.rows, snap.execution_states.get(&tab.pane));
             lines.push(ExecutionLine::Text(format!("탭 {}{} · {} · {}", tab.index + 1, if tab.active { " (선택)" } else { "" }, state, name), false));
+            if !tab.harness.is_empty() { lines.push(ExecutionLine::Text(format!("  {}", summary_agent(&tab.harness, &tab.shell, &tab.model)), false)); }
             if let Some(task) = snap.tasks.get(&tab.pane).filter(|task| !task.label.is_empty()) { lines.push(ExecutionLine::Text(task.label.clone(), task.attention)); }
             if let Some(server) = &tab.registered { lines.push(ExecutionLine::Text(format!("{} · {} · 등록 실행", server.status, server.name), false)); }
         }
         let selected = info.selected_pane.as_deref().is_some_and(|selected| group.pane == selected || group.tabs.iter().any(|tab| tab.pane == selected));
         let context = selected.then(|| snap.contexts.values().find(|context| context.pane_id == info.selected_pid)).flatten();
         let context = context.filter(|context| context.session_id == info.selected_session_id && context.harness == info.selected_harness);
-        if let Some(context) = context {
-            for summary in context.summary.iter().take(3) { lines.push(ExecutionLine::Context(summary.clone())); }
-        } else if selected && !info.selected_harness.is_empty() {
-            lines.push(ExecutionLine::Context("미확인 · 선택 에이전트 정보 갱신 중".into()));
-        }
         if expanded {
+            if let Some(context) = context {
+                for summary in context.summary.iter().take(3) { lines.push(ExecutionLine::Context(summary.clone())); }
+            } else if selected && !info.selected_harness.is_empty() {
+                lines.push(ExecutionLine::Context("미확인 · 선택 에이전트 정보 갱신 중".into()));
+            }
             if let Some(title) = snap.full_titles.get(&group.pane) { lines.push(ExecutionLine::Context(format!("제목 · {title}"))); }
             else if !group.session.is_empty() { lines.push(ExecutionLine::Context(format!("전체 제목 미확인 · 기록된 제목 {}", group.session))); }
             if let Some(task) = task.filter(|task| !task.label.is_empty()) { lines.push(ExecutionLine::Context(task.label.clone())); }

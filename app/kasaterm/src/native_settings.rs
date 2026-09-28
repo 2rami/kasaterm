@@ -53,9 +53,6 @@ const THEMEGEN_DROP_MAX_BYTES: u64 = 32 << 20;
 pub(crate) struct PaletteChoice {
     pub(crate) key: String,
     pub(crate) label: String,
-    pub(crate) bg: [u8; 4],
-    pub(crate) text: [u8; 4],
-    ansi: [[u8; 3]; 6],
 }
 
 #[derive(Clone)]
@@ -300,27 +297,21 @@ impl SettingsCache {
     fn refresh_palette_from(&mut self, saved: &serde_json::Value) {
         let mut palettes = Vec::new();
         let system_key = theme::system_theme_key();
-        if let Some((_, label, palette)) = theme::THEME_PRESETS
+        if let Some((_, label, _)) = theme::THEME_PRESETS
             .iter()
             .find(|(key, _, _)| *key == system_key)
         {
-            palettes.push(palette_choice(
-                "system",
-                &format!("System · {label}"),
-                palette,
-            ));
+            palettes.push(palette_choice("system", &format!("System · {label}")));
         }
         palettes.extend(
             theme::THEME_PRESETS
                 .iter()
-                .map(|(key, label, palette)| palette_choice(key, label, palette)),
+                .map(|(key, label, _)| palette_choice(key, label)),
         );
         palettes.extend(theme::custom_themes(&saved).iter().map(|entry| {
-            let palette = theme::custom_palette(entry);
             palette_choice(
                 &format!("custom:{}", theme::custom_slug(entry)),
                 &theme::custom_label(entry),
-                &palette,
             )
         }));
 
@@ -362,16 +353,8 @@ impl SettingsCache {
     }
 }
 
-fn palette_choice(key: &str, label: &str, palette: &theme::Palette) -> PaletteChoice {
-    let mut ansi = [[0, 0, 0]; 6];
-    ansi.copy_from_slice(&palette.ansi[1..7]);
-    PaletteChoice {
-        key: key.to_string(),
-        label: label.to_string(),
-        bg: palette.bg,
-        text: palette.text,
-        ansi,
-    }
+fn palette_choice(key: &str, label: &str) -> PaletteChoice {
+    PaletteChoice { key: key.into(), label: label.into() }
 }
 
 fn account_usage_key(provider: AccountProvider, id: &str) -> String {
@@ -2989,83 +2972,36 @@ fn paint_appearance(
     y: &mut f32,
     w: f32,
 ) {
-    paint_setup_section(g, s, hits, caret, x, y, w, 1);
-    section_title(g, x, *y, "앱 색 미리보기", "바꾸고 싶은 영역을 누르세요");
-    *y += 54.0;
-    *y += appearance_preview::paint(g, s, hits, x, *y, w);
-    if !s.custom_active.is_empty() {
-        paint_palette_editor(g, s, hits, caret, x, y, w);
+    *y += appearance_preview::paint_palette_strip(g, s, hits, x, *y, w);
+    if !appearance_preview::FEATURED_PALETTES.contains(&s.theme.as_str()) {
+        if let Some(current) = s.palettes.iter().find(|palette| palette.key == s.theme) {
+            plain_hint(g, x, y, w, &format!("현재 · {}", current.label));
+        }
     }
-    if !disclosure(g, s, hits, x, y, w, "appearance", "세부 모양 · 팔레트, 강조색, 글꼴과 배율") {
+    if disclosure(g, s, hits, x, y, w, "other-palettes", "다른 팔레트") {
+        let choices = s.palettes.iter()
+            .filter(|palette| !appearance_preview::FEATURED_PALETTES.contains(&palette.key.as_str()))
+            .map(|palette| (palette.label.clone(), s.theme == palette.key,
+                SettingsAction::ThemeMode(palette.key.clone()))).collect();
+        chips_owned(g, s, hits, x, y, w, choices);
+    }
+    *y += 12.0;
+    *y += appearance_preview::paint(g, s, hits, x, *y, w);
+    paint_palette_editor(g, s, hits, caret, x, y, w);
+    button(g, s, hits, (x, *y, w.min(132.0), CTL_H), "현재 색으로 복제",
+        Target::Setting(SettingsAction::StartCustomTheme), false);
+    if !s.custom_active.is_empty() {
+        let reset_x = if w < 216.0 { *y += CTL_H + 8.0; x } else { x + 140.0 };
+        button(g, s, hits, (reset_x, *y, w.min(76.0), CTL_H), "색 초기화",
+            Target::Setting(SettingsAction::ResetCustomTheme), false);
+    }
+    *y += CTL_H + 12.0;
+    if disclosure(g, s, hits, x, y, w, "palette-advanced", "세부 색 · 기본색과 ANSI") {
+        paint_palette_slots(g, s, hits, x, y, w);
+    }
+    if !disclosure(g, s, hits, x, y, w, "appearance", "기타 모양 · 기기, 강조색, 글꼴과 배율") {
         return;
     }
-    section_title(
-        g,
-        x,
-        *y,
-        "색과 형태",
-        "현재 테마 토큰을 모든 네이티브 화면이 함께 씁니다",
-    );
-    *y += 54.0;
-    let gap = 10.0;
-    let grid_cols = if w >= 600.0 { 3 } else { 2 };
-    let pw = (w - gap * (grid_cols - 1) as f32) / grid_cols as f32;
-    let ph = 92.0;
-    for (i, palette) in s.palettes.iter().enumerate() {
-        let rect = (
-            x + (i % grid_cols) as f32 * (pw + gap),
-            *y + (i / grid_cols) as f32 * (ph + gap),
-            pw,
-            ph,
-        );
-        choice_card(
-            g,
-            s,
-            hits,
-            rect,
-            s.theme == palette.key,
-            Target::Setting(SettingsAction::ThemeMode(palette.key.clone())),
-        );
-        round_rect(
-            g,
-            rect.0 + 10.0,
-            rect.1 + 10.0,
-            rect.2 - 20.0,
-            42.0,
-            theme::radius_sm(),
-            palette.bg,
-        );
-        draw_text(
-            g,
-            rect.0 + 18.0,
-            rect.1 + 23.0,
-            "가 Aa",
-            13.0,
-            palette.text,
-            true,
-        );
-        for (j, color) in palette.ansi.iter().enumerate() {
-            g.rect(
-                rect.0 + 12.0 + j as f32 * 13.0,
-                rect.1 + 60.0,
-                9.0,
-                9.0,
-                [color[0], color[1], color[2], 255],
-            );
-        }
-        let label = fit(g, &palette.label, rect.2 - 105.0, 11.0, false);
-        draw_text(
-            g,
-            rect.0 + 94.0,
-            rect.1 + 59.0,
-            &label,
-            11.0,
-            theme::text_dim(),
-            false,
-        );
-    }
-    let palette_rows = (s.palettes.len() + grid_cols - 1) / grid_cols;
-    *y += palette_rows as f32 * (ph + gap) + 4.0;
     if s.theme == "system" {
         section_title(
             g,
@@ -3097,16 +3033,6 @@ fn paint_appearance(
         }
         *y += 8.0;
     }
-    button(
-        g,
-        s,
-        hits,
-        (x, *y, 150.0, 34.0),
-        "현재 색으로 복제",
-        Target::Setting(SettingsAction::StartCustomTheme),
-        false,
-    );
-    *y += 48.0;
     if !s.custom_active.is_empty() {
         let label = s
             .custom_themes
@@ -3127,7 +3053,7 @@ fn paint_appearance(
             caret,
             x,
             *y,
-            (w - 196.0).max(160.0),
+            (w - 100.0).max(120.0),
             "커스텀 팔레트 이름",
             edit_value,
             SettingsInput::CustomThemeLabel,
@@ -3138,21 +3064,12 @@ fn paint_appearance(
             g,
             s,
             hits,
-            (x + w - 184.0, *y + 18.0, 86.0, 36.0),
-            "초기화",
-            Target::Setting(SettingsAction::ResetCustomTheme),
-            false,
-        );
-        button(
-            g,
-            s,
-            hits,
-            (x + w - 92.0, *y + 18.0, 92.0, 36.0),
+            (x + w - 92.0, *y + 18.0, 92.0, CTL_H),
             "팔레트 치우기",
             Target::Setting(SettingsAction::DeleteCustomTheme(s.custom_active.clone())),
             false,
         );
-        *y += 72.0;
+        *y += 58.0;
     }
     paint_device_colors(g, s, hits, caret, x, y, w);
     paint_device_icons(g, s, hits, x, y, w);
@@ -3172,6 +3089,9 @@ fn paint_appearance(
     if crate::lite_mode() {
         return;
     }
+    let shapes: Vec<_> = theme::SHAPE_PRESETS.iter().map(|(key, label, _)|
+        (*label, s.shape == *key, SettingsAction::Shape(key))).collect();
+    seg_row(g, s, hits, x, y, w, "모서리 형태", &shapes);
     let contrast: Vec<(&str, bool, SettingsAction)> = theme::CONTRAST_PRESETS
         .iter()
         .map(|(label, value)| {
@@ -3647,24 +3567,14 @@ fn paint_palette_editor(
     y: &mut f32,
     w: f32,
 ) {
-    section_title(
-        g,
-        x,
-        *y,
-        "팔레트 색",
-        "색 칸을 고른 뒤 휠이나 #rrggbb 값으로 바꿉니다",
-    );
-    *y += 54.0;
     let selected = match s.input {
-        Some(SettingsInput::PaletteHex(index)) => index.min(s.palette_hex.len().saturating_sub(1)),
-        _ => 0,
+        Some(SettingsInput::PaletteHex(index)) if index < s.palette_hex.len() => index,
+        _ => {
+            plain_hint(g, x, y, w, "화면에서 바꿀 영역을 고르세요.");
+            return;
+        }
     };
     let slot_label = theme::palette_slot_label(selected);
-    let value = if s.input == Some(SettingsInput::PaletteHex(selected)) {
-        s.palette_edit.clone()
-    } else {
-        s.palette_hex.get(selected).cloned().unwrap_or_else(|| "#000000".to_string())
-    };
     *y += paint_color_picker(
         g,
         s,
@@ -3675,37 +3585,35 @@ fn paint_palette_editor(
         w,
         SettingsInput::PaletteHex(selected),
         &slot_label,
-        &value,
+        &s.palette_edit,
         s.eyedropper.then(|| SettingsAction::PaletteEyedropper(selected)),
     );
+}
 
-    let swatch_w = 31.0;
-    let gap = 7.0;
-    let cols = ((w + gap) / (swatch_w + gap)).floor().max(1.0) as usize;
-    for (index, hex) in s.palette_hex.iter().enumerate() {
+fn paint_palette_slots(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>,
+    x: f32, y: &mut f32, w: f32) {
+    let cols = ((w + 8.0) / 138.0).floor().max(1.0) as usize;
+    let slot_w = (w - (cols - 1) as f32 * 8.0) / cols as f32;
+    let selected = match s.input { Some(SettingsInput::PaletteHex(index)) => Some(index), _ => None };
+    for (index, hex) in s.palette_hex.iter().take(theme::SURFACE_PALETTE_START).enumerate() {
         let rect = (
-            x + (index % cols) as f32 * (swatch_w + gap),
-            *y + (index / cols) as f32 * 36.0,
-            swatch_w,
-            28.0,
+            x + (index % cols) as f32 * (slot_w + 8.0),
+            *y + (index / cols) as f32 * 34.0, slot_w, CTL_H,
         );
+        let color = theme::parse_hex(hex).map(|rgb| [rgb[0], rgb[1], rgb[2], 255]).unwrap_or(theme::bg());
+        let swatch = (rect.0 + 5.0, rect.1 + 5.0, 16.0, 16.0);
         round_rect(
-            g,
-            rect.0,
-            rect.1,
-            rect.2,
-            rect.3,
-            theme::radius_sm(),
-            theme::parse_hex(hex)
-                .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
-                .unwrap_or([0, 0, 0, 255]),
+            g, swatch.0, swatch.1, swatch.2, swatch.3, theme::radius_sm(), color,
         );
+        stroke_round(g, swatch, theme::radius_sm(), theme::edge_on(color));
+        let hot = contains(rect, s.cursor);
         stroke_round(
-            g,
-            rect,
-            theme::radius_sm(),
-            if index == selected { theme::accent() } else { theme::border() },
+            g, rect, theme::radius_sm(),
+            if selected == Some(index) { theme::accent() } else if hot { theme::text_dim() } else { theme::border() },
         );
+        let label = fit(g, &theme::palette_slot_label(index), (slot_w - 32.0).max(0.0), 10.5, false);
+        draw_text(g, rect.0 + 27.0, rect.1 + 7.0, &label, 10.5, theme::text(), false);
+        g.hover_pointer |= hot;
         register_clipped(
             g,
             hits,
@@ -3714,8 +3622,22 @@ fn paint_palette_editor(
             HitCursor::Pointer,
         );
     }
-    let rows = (s.palette_hex.len() + cols - 1) / cols;
-    *y += rows as f32 * 36.0 + 18.0;
+    let rows = s.palette_hex.len().min(theme::SURFACE_PALETTE_START).div_ceil(cols);
+    *y += rows as f32 * 34.0 + 8.0;
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ColorPickerLayout { sv: Rect, hue: Rect, field: Rect, eyedropper: Rect, height: f32 }
+
+fn color_picker_layout(x: f32, y: f32, w: f32) -> ColorPickerLayout {
+    let stacked = w < 440.0;
+    let wheel_w = if stacked { w } else { (w * 0.6).min(280.0) };
+    let sv = (x, y, wheel_w, 96.0);
+    let hue = (x, y + 104.0, wheel_w, 18.0);
+    let field = if stacked { (x, y + 134.0, w, 46.0) }
+        else { (x + wheel_w + 16.0, y, w - wheel_w - 16.0, 46.0) };
+    let eyedropper = (field.0, field.1 + 52.0, field.2.min(126.0), CTL_H);
+    ColorPickerLayout { sv, hue, field, eyedropper, height: if stacked { 224.0 } else { 134.0 } }
 }
 
 /// 색 선택기 한 벌 — 채도×명도 면·색상 띠·HEX 칸·스포이드. 팔레트 칸과 기기색이
@@ -3736,8 +3658,8 @@ fn paint_color_picker(
     eyedropper: Option<SettingsAction>,
 ) -> f32 {
     let (hue, sat, val) = s.picker_hsv;
-    let wheel_w = w.min(310.0).max(180.0);
-    let sv = (x, y, wheel_w, 132.0);
+    let layout = color_picker_layout(x, y, w);
+    let sv = layout.sv;
     let cells_x = 24;
     let cells_y = 12;
     for row in 0..cells_y {
@@ -3766,7 +3688,7 @@ fn paint_color_picker(
         HitCursor::Pointer,
     );
 
-    let hue_rect = (x, y + 141.0, wheel_w, 18.0);
+    let hue_rect = layout.hue;
     for col in 0..60 {
         let rgb = hsv_rgb(col as f32 * 6.0, 1.0, 1.0);
         g.rect(
@@ -3792,18 +3714,17 @@ fn paint_color_picker(
         hue_rect,
         HitCursor::Pointer,
     );
-    let field_x = x + wheel_w + 16.0;
-    let field_w = (w - wheel_w - 16.0).max(110.0);
-    draw_text(g, field_x, y + 4.0, slot_label, 12.0, theme::text(), true);
+    let label = fit(g, slot_label, layout.field.2, 12.0, false);
+    draw_text(g, layout.field.0, layout.field.1, &label, 12.0, theme::text(), false);
     text_field(
         g,
         s,
         hits,
         caret,
-        field_x,
-        y + 28.0,
-        field_w,
-        "HEX",
+        layout.field.0,
+        layout.field.1 + 20.0,
+        layout.field.2,
+        "",
         value,
         field,
         s.settings_caret,
@@ -3814,13 +3735,13 @@ fn paint_color_picker(
             g,
             s,
             hits,
-            (field_x, y + 91.0, field_w.min(126.0), 34.0),
+            layout.eyedropper,
             "화면에서 색 집기",
             Target::Setting(action),
             false,
         );
     }
-    178.0
+    layout.height
 }
 
 /// 기기별 색 — 이 기기와 명부의 기계 한 줄씩. 줄을 고르면 프리셋과 선택기가
@@ -8144,6 +8065,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compact_color_picker_stays_inside_narrow_and_wide_columns() {
+        for width in [240.0, 280.0, 360.0, 439.0, 440.0, 560.0, 800.0] {
+            let layout = color_picker_layout(20.0, 40.0, width);
+            let rects = [layout.sv, layout.hue, layout.field, layout.eyedropper];
+            for (index, rect) in rects.iter().enumerate() {
+                assert!(rect.0 >= 20.0 && rect.1 >= 40.0 && rect.2 > 0.0 && rect.3 > 0.0);
+                assert!(rect.0 + rect.2 <= 20.0 + width + 0.01);
+                assert!(rect.1 + rect.3 <= 40.0 + layout.height);
+                for other in rects.iter().skip(index + 1) {
+                    let overlap_w = (rect.0 + rect.2).min(other.0 + other.2) - rect.0.max(other.0);
+                    let overlap_h = (rect.1 + rect.3).min(other.1 + other.3) - rect.1.max(other.1);
+                    assert!(overlap_w <= 0.0 || overlap_h <= 0.0);
+                }
+            }
+            assert_eq!(layout.height, if width < 440.0 { 224.0 } else { 134.0 });
+        }
+    }
+
+    #[test]
     fn agent_preferences_refresh_the_visible_controls() {
         for action in [
             SettingsAction::PreferredAgent("codex"),
@@ -8514,7 +8454,7 @@ mod tests {
     fn main_modals_own_pointer_and_click_before_the_settings_view() {
         let handler = include_str!("handler.rs");
         let cursor = handler
-            .split_once("WindowEvent::CursorMoved { position, .. } => {")
+            .split_once("WindowEvent::CursorMoved { .. } => {")
             .unwrap()
             .1;
         assert!(

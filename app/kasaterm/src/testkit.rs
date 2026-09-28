@@ -3072,7 +3072,6 @@ impl App {
             // 옛 「원격」 탭은 Info 의 「다른 기계」 절이 됐다 — 이름은 그대로 받는다.
             "info" | "machines" => SideTab::Info,
             "git" => SideTab::Git,
-            "work" => SideTab::Work,
             other => {
                 eprintln!("[autocolscroll] 모르는 탭 {other:?} — sessions|mcp|info|git|machines");
                 return None;
@@ -3208,7 +3207,6 @@ impl App {
                 SideTab::Mcp => self.mcp_col.scroll = px,
                 SideTab::Info => self.info.scroll = px,
                 SideTab::Git => self.git.col_scroll = px,
-                SideTab::Work => self.work_side.scroll = px,
             }
         }
         self.chrome_dirty = true;
@@ -3233,7 +3231,6 @@ impl App {
             SideTab::Mcp => self.mcp_col.scroll,
             SideTab::Info => self.info.scroll,
             SideTab::Git => self.git.col_scroll,
-            SideTab::Work => self.work_side.scroll,
         };
         // 행 수를 함께 찍는 이유: 요청과 실제가 갈렸을 때 「clamp 이 먹었다」와
         // 「목록이 아직 안 찼다」를 구분하는 유일한 단서다.
@@ -3242,7 +3239,6 @@ impl App {
             SideTab::Mcp => self.mcp_col.row_rects.len(),
             SideTab::Info => self.info.proc_rects.len(),
             SideTab::Git => self.git.col_file_rects.len(),
-            SideTab::Work => 0,
         };
         let (vis_h, content_h) = self.git.col_list_extent;
         // 펼침·캐시를 함께 찍는다: 내용 높이가 안 자랐을 때 「diff 를 안 펼쳤다」와
@@ -3362,52 +3358,6 @@ impl App {
 
     /// `KASATERM_WORKMODE_PROBE=<organize|coordinate|via>` — 작업 탭의 모드 단추(또는 키 없는 기기의 첫 읽기 기기
     /// 단추)를 **진짜 클릭**(winit MouseInput)으로 한 번 누르고, 나쵸 모드와 경유 기기를 찍는다. 격리 리그(`verification_run`)에서만 돈다.
-    pub(crate) fn run_work_mode_probe(&mut self, event_loop: &ActiveEventLoop) {
-        use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
-        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
-        static START: OnceLock<Instant> = OnceLock::new();
-        static STEP: AtomicUsize = AtomicUsize::new(0);
-        if !crate::verification_run() {
-            return;
-        }
-        let Some(word) = std::env::var("KASATERM_WORKMODE_PROBE").ok().map(|w| w.trim().to_string()) else {
-            return;
-        };
-        let target = crate::work_mode::WorkMode::parse(&word);
-        if target.is_none() && word != "via" {
-            return;
-        }
-        let start = *START.get_or_init(Instant::now);
-        let after = std::env::var("KASATERM_WORKMODE_PROBE_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(6000);
-        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
-        match STEP.load(Ordering::Relaxed) {
-            0 if start.elapsed().as_millis() as u64 >= after => {
-                let button = match target {
-                    Some(mode) => self.work_side.mode_button(mode),
-                    None => self.work_side.via_button(),
-                };
-                let Some(r) = button else {
-                    if start.elapsed().as_millis() as u64 > after + 8000 {
-                        eprintln!("[workmode-probe] FAILED button_not_clickable target={word}");
-                        STEP.store(9, Ordering::Relaxed);
-                    }
-                    return;
-                };
-                eprintln!("[workmode-probe] before={:?} via={:?} click={word} at=({:.0},{:.0})", self.work_side.nacho_mode().map(|m| m.wire()), self.work_side.mode_via(), r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
-                STEP.store(1, Ordering::Relaxed);
-                self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
-                for state in [ElementState::Pressed, ElementState::Released] {
-                    self.window_event(event_loop, wid, WindowEvent::MouseInput { device_id: DeviceId::dummy(), state, button: MouseButton::Left });
-                }
-                self.chrome_dirty = true;
-            }
-            1 if start.elapsed().as_millis() as u64 >= after + 5000 => {
-                eprintln!("[workmode-probe] after={:?} via={:?} expected={word}", self.work_side.nacho_mode().map(|m| m.wire()), self.work_side.mode_via());
-                STEP.store(9, Ordering::Relaxed);
-            }
-            _ => {}
-        }
-    }
 
     pub(crate) fn run_clipboard_probe(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::{OnceLock, atomic::{AtomicBool, AtomicUsize, Ordering}};

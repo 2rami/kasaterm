@@ -55,7 +55,8 @@ fn palette(v: &Value) -> bool {
         "slug" | "base" => token(value),
         "label" => text(value, 80),
         "bg" | "fg" | "surface" | "surface_hover" | "surface_active" | "border" | "text"
-        | "text_dim" | "text_mute" | "success" | "danger" | "pane_bg" | "header_bg" | "sidebar_bg" => color(value),
+        | "text_dim" | "text_mute" | "success" | "danger" | "pane_bg" | "header_bg" | "sidebar_bg"
+        | "titlebar_bg" | "side_panel_bg" => color(value),
         "ansi" => value.as_array().is_some_and(|a| a.len() == 16 && a.iter().all(color)),
         _ => false,
     })
@@ -226,9 +227,13 @@ mod tests {
     fn custom_palette_and_explicit_safe_deletion_round_trip() {
         let patch = Patch { settings: [("theme".into(), Value::Null),
             ("custom_themes".into(), json!([{"slug":"my-palette", "label":"Custom", "base":"graphite",
-                "pane_bg":"#112233", "header_bg":"#223344", "sidebar_bg":"#334455"}]))].into(),
+                "pane_bg":"#112233", "header_bg":"#223344", "sidebar_bg":"#334455",
+                "titlebar_bg":"#445566", "side_panel_bg":"#556677"}]))].into(),
             ..Default::default() };
         assert_eq!(validate_patch(&patch), Ok(()));
+        let round_trip: Patch = serde_json::from_value(serde_json::to_value(&patch).unwrap()).unwrap();
+        assert_eq!(round_trip.settings["custom_themes"][0]["titlebar_bg"], "#445566");
+        assert_eq!(round_trip.settings["custom_themes"][0]["side_panel_bg"], "#556677");
         assert!(serde_json::from_value::<Patch>(json!({"expected_revision":0,"settings":{},"machines":{},"account":"other"})).is_err());
     }
 }

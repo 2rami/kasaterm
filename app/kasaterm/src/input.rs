@@ -2812,21 +2812,6 @@ impl App {
             return;
         }
         if self.git.col_visible
-            && self.info.tab == state::SideTab::Work
-            && self.cursor_px.1 > TITLE_HEIGHT
-            && self.cursor_px.0 >= self.git_col_x()
-        {
-            let next = (self.work_side.scroll - lines as f32 * 22.0).max(0.0);
-            if (next - self.work_side.scroll).abs() > 0.01 {
-                self.work_side.scroll = next;
-                self.chrome_dirty = true;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-            return;
-        }
-        if self.git.col_visible
             && self.info.tab == state::SideTab::Sessions
             && self.cursor_px.1 > TITLE_HEIGHT
             && self.cursor_px.0 >= self.git_col_x()
@@ -2842,6 +2827,22 @@ impl App {
             return;
         }
         // Git column: scroll the change list when the pointer is over it. Same
+        if self.git.col_visible && self.info.tab == state::SideTab::Git
+            && !self.git.branch_menu_open && !self.git.path_menu_open && !self.git.commit_menu_open
+            && self.git.graph_rect.is_some_and(|(x, y, w, h)| self.cursor_px.0 >= x
+                && self.cursor_px.0 < x + w && self.cursor_px.1 >= y && self.cursor_px.1 < y + h)
+        {
+            let (visible, content) = self.git.graph_extent;
+            let next = (self.git.graph_scroll - lines as f32 * 40.0).clamp(0.0, (content - visible).max(0.0));
+            if next != self.git.graph_scroll {
+                self.git.graph_scroll = next;
+                self.git.col_commit_rects.clear();
+                self.git.col_commit_file_rects.clear();
+                self.chrome_dirty = true;
+                if let Some(window) = &self.window { window.request_redraw(); }
+            }
+            return;
+        }
         // clamp idea as the file tree; the visible height is the band between
         // the header and the bottom button zone.
         if self.git.col_visible

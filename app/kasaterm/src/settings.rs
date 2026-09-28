@@ -52,33 +52,19 @@ impl App {
         claude_usage_state(logged_in, self.claude_account_usage(id).as_ref(), crate::handler::claude_usage_attempt(&dir))
     }
 
-    /// Sidebar "Settings" entry — same tab-box style as the session tabs, sat
-    /// just below the "+" new-window button so it reads as the last item in the
-    /// tab list (Warp-style). Logical px; mirrors `sidebar_layout`'s geometry.
-    pub(crate) fn settings_btn_rect(&self, win_h_logical: f32) -> Rect {
-        // 사이드바 하단 트레이의 오른쪽 끝. 사이드바가 없으면(top 모드 또는 접힘)
-        // 그려지지도 않는데 rect 는 매 프레임 저장돼(render) hit-test 에 남는다 —
-        // top 모드에서 이 유령 rect 가 설정 화면 좌측 카테고리 nav(같은 좌상단
-        // 영역)의 Appearance·Shell 클릭을 가로채 페이지 전환이 안 됐다(사용자).
-        // 안 그려질 땐 hit 대상도 없어야 하므로 무효 rect 를 돌려준다 — 그때의
-        // 설정 진입점은 우측 패널 Info 탭이 담당한다.
-        self.sidebar_tray_rects(win_h_logical)
-            .map_or((0.0, 0.0, 0.0, 0.0), |t| t.settings)
+    pub(crate) fn settings_btn_rect(&self, _win_h_logical: f32) -> Rect {
+        // Settings remains available from menus; an absent tray control must not retain a hit target.
+        (0.0, 0.0, 0.0, 0.0)
     }
-    /// 트레이의 피드백 버튼. 설정 바로 왼쪽 — 둘 다 "앱에 말을 거는" 쪽이라 묶어
-    /// 두고, 새 세션(`+`)과는 트레이 양 끝으로 갈라 성격을 구분한다.
-    pub(crate) fn feedback_btn_rect(&self, win_h_logical: f32) -> Rect {
-        self.sidebar_tray_rects(win_h_logical)
-            .map_or((0.0, 0.0, 0.0, 0.0), |t| t.feedback)
+    pub(crate) fn feedback_btn_rect(&self, _win_h_logical: f32) -> Rect {
+        (0.0, 0.0, 0.0, 0.0)
     }
-    /// 트레이의 보드·아로나 버튼. 설정처럼 본문 자리를 바꾸는 화면이라 그 옆 짝이다.
     pub(crate) fn board_btn_rect(&self, win_h_logical: f32) -> Rect {
         self.sidebar_tray_rects(win_h_logical)
             .map_or((0.0, 0.0, 0.0, 0.0), |t| t.board)
     }
-    pub(crate) fn arona_btn_rect(&self, win_h_logical: f32) -> Rect {
-        self.sidebar_tray_rects(win_h_logical)
-            .map_or((0.0, 0.0, 0.0, 0.0), |t| t.arona)
+    pub(crate) fn arona_btn_rect(&self, _win_h_logical: f32) -> Rect {
+        (0.0, 0.0, 0.0, 0.0)
     }
 
     /// Re-emit the claude wrapper into the live shim dir so an already-open pane

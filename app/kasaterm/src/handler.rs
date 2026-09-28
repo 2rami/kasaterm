@@ -3348,7 +3348,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::PinchGesture { delta, .. } => {
                 self.handle_pinch(delta);
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::CursorMoved { .. } => {
                 let main_modal = self.main_pointer_modal();
                 if main_modal {
                     let (cx, cy) = self.cursor_px;
@@ -3513,7 +3513,7 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     let (cx, cy) = self.cursor_px;
                     let hit = |r: (f32, f32, f32, f32)| {
-                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        r.2 > 0.0 && r.3 > 0.0 && cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
                     // I-beam over the file-tree text inputs (search box / inline
                     // new-entry name). The commit modal + settings screen are
@@ -5446,11 +5446,6 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.info.pane_menu = None;
                                 self.info.machine_menu = None;
                             }
-                            window.request_redraw();
-                            return;
-                        }
-                        if self.info.tab == state::SideTab::Work && self.work_side_click(cx, cy) {
-                            self.chrome_dirty = true;
                             window.request_redraw();
                             return;
                         }
@@ -7984,7 +7979,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_layergeom();
         self.run_pending_automenuclick(event_loop);
         self.run_clipboard_probe(event_loop);
-        self.run_work_mode_probe(event_loop);
         self.run_pending_autohdrmenu(event_loop);
         self.run_pending_autopillclick(event_loop);
         self.run_pending_autoinfodbl(event_loop);

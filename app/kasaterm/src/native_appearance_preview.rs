@@ -35,7 +35,7 @@ pub(super) fn paint_palette_strip(
         let selected = s.theme == key;
         let preview = (rect.0, rect.1, rect.2, 32.0);
         g.rect(preview.0, preview.1, preview.2, preview.3, colors.pane);
-        g.rect(preview.0, preview.1, preview.2, 8.0, colors.header);
+        g.rect(preview.0, preview.1, preview.2, 8.0, colors.titlebar());
         let sidebar = (preview.2 * 0.22).floor();
         g.rect(preview.0, preview.1 + 8.0, sidebar, 24.0, colors.sidebar);
         g.rect(
@@ -43,7 +43,7 @@ pub(super) fn paint_palette_strip(
             preview.1 + 8.0,
             sidebar,
             24.0,
-            colors.sidebar,
+            colors.side_panel(),
         );
         g.rect(preview.0, preview.1 + 8.0, preview.2, 1.0, palette.border);
         for (line, portion) in [0.40, 0.26].into_iter().enumerate() {
@@ -95,7 +95,7 @@ fn regions(x: f32, y: f32, w: f32) -> [(usize, Rect); 5] {
     let panel = (w * 0.24).floor();
     let center = w - sidebar - panel;
     [
-        (28, (x, y, w, header)),
+        (30, (x, y, w, header)),
         (29, (x, y + header, sidebar, PREVIEW_H - header)),
         (28, (x + sidebar, y + header, center, header)),
         (
@@ -107,7 +107,7 @@ fn regions(x: f32, y: f32, w: f32) -> [(usize, Rect); 5] {
                 PREVIEW_H - header * 2.0,
             ),
         ),
-        (29, (x + w - panel, y + header, panel, PREVIEW_H - header)),
+        (31, (x + w - panel, y + header, panel, PREVIEW_H - header)),
     ]
 }
 
@@ -133,7 +133,9 @@ pub(super) fn paint(
         let fill = match slot {
             27 => theme::pane_bg(),
             28 => theme::header_bg(),
-            _ => theme::sidebar_bg(),
+            29 => theme::sidebar_bg(),
+            30 => theme::titlebar_bg(),
+            _ => theme::side_panel_bg(),
         };
         g.rect(rect.0, rect.1, rect.2, rect.3, fill);
         register_clipped(
@@ -158,10 +160,12 @@ pub(super) fn paint(
             );
         }
     }
-    let header_ink = theme::text();
-    let side_ink = theme::text();
+    let header_ink = theme::enforce_contrast_at(theme::text(), theme::header_bg(), 4.5);
+    let title_ink = theme::enforce_contrast_at(theme::text(), theme::titlebar_bg(), 4.5);
+    let side_ink = theme::enforce_contrast_at(theme::text(), theme::sidebar_bg(), 4.5);
+    let panel_ink = theme::enforce_contrast_at(theme::text(), theme::side_panel_bg(), 4.5);
     let pane_ink = theme::enforce_min_contrast(theme::fg(), theme::pane_bg());
-    text(g, areas[0].1, "kasaterm · 탭과 헤더", header_ink, true);
+    text(g, areas[0].1, "KASA · 상단바", title_ink, true);
     let left = areas[1].1;
     for (line, label) in ["사이드바", "작업 방", "프로젝트", "터미널"]
         .iter()
@@ -203,7 +207,7 @@ pub(super) fn paint(
             g,
             (right.0, right.1 + line as f32 * 30.0, right.2, 26.0),
             label,
-            side_ink,
+            panel_ink,
             line == 0,
         );
     }
@@ -271,6 +275,17 @@ mod tests {
                     assert!(overlap_w <= 0.0 || overlap_h <= 0.0);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn each_surface_has_an_independent_editor_target() {
+        let areas = regions(20.0, 40.0, 600.0);
+        assert_eq!(areas.map(|(slot, _)| slot), [30, 29, 28, 27, 31]);
+        for (slot, rect) in areas {
+            let center = (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+            let matches: Vec<_> = areas.iter().filter(|(_, area)| contains(*area, center)).map(|(slot, _)| *slot).collect();
+            assert_eq!(matches, [slot]);
         }
     }
 }

@@ -261,6 +261,9 @@ pub(crate) struct GitState {
     pub(crate) col_commit_file_expanded: std::collections::HashSet<(String, String)>,
     pub(crate) col_commit_diff_cache: HashMap<(String, String), Vec<kasa_mcp::git::DiffLine>>,
     pub(crate) col_commit_rects: Vec<(String, (f32, f32, f32, f32))>,
+    pub(crate) graph_scroll: f32,
+    pub(crate) graph_extent: (f32, f32),
+    pub(crate) graph_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) col_commit_file_rects: Vec<(String, String, (f32, f32, f32, f32))>,
     pub(crate) last_commit_click: Option<(std::time::Instant, String)>,
     /// 「최근 커밋」 구역에 사용자가 잡아 준 높이(LOGICAL px). `None` 이면 가져온
@@ -320,8 +323,6 @@ pub(crate) enum SideTab {
     Sessions,
     /// 하네스별 MCP 서버와 스킬 — 무엇이 붙어 있고 무엇이 꺼져 있나.
     Mcp,
-    /// 정리(지금 창)·조율(모든 기기) 작업 모드와 권한 표 — `native_board::side`.
-    Work,
 }
 
 /// Info 탭 「다른 기계」 절의 재료 — 조립은 `refresh_machines_col`. 절에는 기계마다
@@ -581,12 +582,9 @@ pub(crate) struct McpColState {
     pub(crate) del_rects: Vec<(usize, (f32, f32, f32, f32))>,
     /// 섹션 머리의 더하기 버튼과 그게 여는 하네스.
     pub(crate) add_rects: Vec<(&'static str, (f32, f32, f32, f32))>,
-    /// 접힌 머리들. 하네스는 `"claude"`, 종류는 `"claude/skill"`.
-    ///
-    /// 접힌 쪽을 담는다(펼친 쪽이 아니라) — 기본이 「다 펼침」이라 빈 집합이 곧
-    /// 기본값이고, 새 종류가 늘어도 저절로 보인다. 2026-08-11 지시 "다 뜨게하고
-    /// 접기도 가능하게".
+    /// Fresh groups start folded without undoing the user's choices on later refreshes.
     pub(crate) collapsed: std::collections::HashSet<String>,
+    pub(crate) seen_groups: std::collections::HashSet<String>,
     /// 섹션·종류 머리의 클릭 자리와 그 접힘 키.
     pub(crate) head_rects: Vec<(String, (f32, f32, f32, f32))>,
     pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
@@ -613,6 +611,7 @@ impl Default for McpColState {
             del_rects: Vec::new(),
             add_rects: Vec::new(),
             collapsed: Default::default(),
+            seen_groups: Default::default(),
             head_rects: Vec::new(),
             refresh_rect: None,
             body_rect: (0.0, 0.0, 0.0, 0.0),
@@ -857,7 +856,7 @@ pub(crate) struct InfoState {
 impl Default for InfoState {
     fn default() -> Self {
         Self {
-            scope: crate::info::InfoScope::AllRooms,
+            scope: crate::info::InfoScope::CurrentRoom,
             active_room: 0,
             selected_pane: None,
             selected_pid: String::new(),

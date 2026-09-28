@@ -9,9 +9,10 @@ use crate::session_transfer::{SessionIdentity, SessionRow, TransferSnapshot, Tra
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(crate) mod side;
 mod work;
 mod chat;
+mod assistant;
+mod observe;
 
 pub(crate) type Rect = (f32, f32, f32, f32);
 
@@ -66,6 +67,8 @@ pub(crate) enum BoardInput {
     NachoMessage,
     GitMessage,
     TransferRoomName,
+    AssistantKey,
+    AssistantProject,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -331,6 +334,10 @@ pub(crate) enum Target {
     NachoRetry,
     NachoClearContext,
     NachoLogin,
+    AssistantKeyEdit,
+    AssistantKeySave,
+    AssistantProjectEdit,
+    AssistantProjectSave,
     WorkChat(work::WorkKey),
     Return,
     Refresh,
@@ -606,6 +613,12 @@ impl Scene {
         self.input
     }
 
+    pub(crate) fn assistant_pet_status(&self) -> serde_json::Value { self.chat.pet_status() }
+
+    pub(crate) fn assistant_notification_candidates(&self) -> Vec<(String, u64)> {
+        self.chat.notification_candidates()
+    }
+
     pub(crate) fn set_input(&mut self, input: Option<BoardInput>, value_len: usize) {
         self.input = input;
         self.caret = value_len;
@@ -649,7 +662,7 @@ impl Scene {
             git_selected: Arc::new(self.git_selected.clone()),
             input: self.input,
             caret: self.caret,
-            preedit,
+            preedit: if self.input == Some(BoardInput::AssistantKey) { "*".repeat(preedit.chars().count()) } else { preedit },
             caret_on,
             toast: self.toast.as_ref().map(|(ok, text, _)| (*ok, text.clone())),
             overview: self.overview.clone(),
@@ -733,6 +746,8 @@ impl Scene {
     pub(crate) fn field(&self, input: BoardInput) -> &str {
         match input {
             BoardInput::NachoMessage => &self.chat.draft,
+            BoardInput::AssistantKey => self.chat.key(),
+            BoardInput::AssistantProject => &self.chat.project_draft,
             BoardInput::GitMessage => &self.git_message,
             BoardInput::TransferRoomName => &self.transfer.room_name,
         }
@@ -741,6 +756,8 @@ impl Scene {
     pub(crate) fn edit_field(&mut self, input: BoardInput, mut edit: impl FnMut(&mut String, &mut usize)) {
         let (value, caret) = match input {
             BoardInput::NachoMessage => (&mut self.chat.draft, &mut self.caret),
+            BoardInput::AssistantKey => (self.chat.key_mut(), &mut self.caret),
+            BoardInput::AssistantProject => (&mut self.chat.project_draft, &mut self.caret),
             BoardInput::GitMessage => (&mut self.git_message, &mut self.caret),
             BoardInput::TransferRoomName => (&mut self.transfer.room_name, &mut self.caret),
         };
@@ -1299,11 +1316,7 @@ fn collect_data(
         let names = overview.panes.iter().filter_map(|row| row.character.as_deref()).collect::<HashSet<_>>();
         let faces = collect_overview_faces(names);
         // 장부는 할 일 판만 읽는다 — 방별 보드가 나쵸를 기다리며 늦어지지 않게.
-        let tasks = if matches!(tab, BoardTab::Work | BoardTab::Chat) {
-            Arc::new(crate::nacho_tasks::refresh(&previous.tasks))
-        } else {
-            previous.tasks.clone()
-        };
+        let tasks = previous.tasks.clone();
         return BoardData { overview: Arc::new(overview), faces: Arc::new(faces), tasks, error: None, ..previous.clone() };
     }
     let mut errors = Vec::new();
@@ -1777,7 +1790,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             notice(g, x, &mut y, width, error, false);
         }
         match snapshot.tab {
-            BoardTab::Work | BoardTab::Chat => work::paint_work(g, snapshot, &mut hits, x, &mut y, width),
+            BoardTab::Work | BoardTab::Chat => work::paint_work(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, width),
             BoardTab::Overview => paint_overview(g, snapshot, &mut hits, x, &mut y, width),
             BoardTab::Agents => paint_agents(g, snapshot, &mut hits, x, &mut y, width),
             BoardTab::Git => paint_git(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, width),
@@ -2869,7 +2882,9 @@ impl App {
 
     pub(crate) fn native_board_tick(&mut self) {
         let changed = self.board_scene.pump();
-        if self.board_room_active() && !board_fixture_requested() && self.board_scene.chat.refresh_due() {
+        self.board_scene.chat.claim_completions();
+        self.workspace_observe_tick();
+        if (self.board_room_active() || self.board_scene.chat.active()) && !board_fixture_requested() && self.board_scene.chat.refresh_due() {
             self.board_scene.chat.refresh();
         }
         if self.board_room_active() && self.board_scene.refresh_due() {
@@ -2997,6 +3012,23 @@ impl App {
             }
             Target::NachoRetry => self.board_scene.chat.retry(),
             Target::NachoClearContext => self.board_scene.chat.set_task(None),
+            Target::AssistantKeyEdit => {
+                self.native_board_blur();
+                self.board_scene.chat.toggle_key_editor();
+                self.board_scene.scroll = 0.0;
+            }
+            Target::AssistantKeySave => {
+                self.native_board_blur();
+                self.board_scene.chat.register_key();
+            }
+            Target::AssistantProjectEdit => {
+                self.native_board_blur();
+                self.board_scene.chat.toggle_project_editor();
+            }
+            Target::AssistantProjectSave => {
+                self.native_board_blur();
+                self.board_scene.chat.create_project();
+            }
             Target::NachoLogin => {
                 self.native_board_blur();
                 if self.open_settings_room(Some(SettingsCat::Machines)) {
@@ -3066,9 +3098,9 @@ impl App {
             Target::WorkSelect(key) => self.board_scene.select_work(key),
             Target::WorkChat(key) => {
                 self.native_board_blur();
-                if let Some(item) = work::work_items(&self.board_scene.data.overview, &self.board_scene.data.tasks).into_iter().find(|item| item.key == key) {
-                    let id = match &item.key { work::WorkKey::Task(id) => id.clone(), work::WorkKey::Pane(id) => format!("관측 {id}") };
-                    self.board_scene.chat.set_task(Some((id, item.title)));
+                let work::WorkKey::Task(id) = key;
+                if let Some(title) = self.board_scene.chat.task_title(&id) {
+                    self.board_scene.chat.set_task(Some((id, title)));
                     if self.board_scene.chat_rect.is_none() { self.board_scene.set_tab(BoardTab::Chat); }
                     let len = self.board_scene.chat.draft.chars().count();
                     self.board_scene.set_input(Some(BoardInput::NachoMessage), len);
@@ -3259,6 +3291,8 @@ impl App {
     }
 
     pub(crate) fn native_board_insert_into(&mut self, field: BoardInput, text: &str) {
+        if field == BoardInput::AssistantKey && (!text.bytes().all(|byte|byte.is_ascii_graphic())
+            || self.board_scene.chat.key().len().saturating_add(text.len()) > 4096) { return; }
         self.board_scene.edit_field(field, |value, caret| {
             let byte = char_to_byte(value, (*caret).min(value.chars().count()));
             value.insert_str(byte, text);
@@ -3340,6 +3374,10 @@ impl App {
                     let len = self.board_scene.chat.draft.chars().count();
                     self.board_scene.set_input(Some(field), len);
                     self.ime_retarget(crate::ImeFocus::Board(field));
+                } else if field == BoardInput::AssistantKey && !board_fixture_requested() {
+                    self.board_scene.chat.register_key();
+                } else if field == BoardInput::AssistantProject && !board_fixture_requested() {
+                    self.board_scene.chat.create_project();
                 }
                 return true;
             }
@@ -3453,6 +3491,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn assistant_key_and_ime_preedit_are_masked_before_rendering() {
+        let mut scene = Scene::default();
+        *scene.chat.key_mut() = "private-key-value".into();
+        scene.set_input(Some(BoardInput::AssistantKey), 17);
+        let snapshot = scene.snapshot((0.0,0.0,800.0,600.0),(0.0,0.0),true,"secret-preedit".into());
+        assert_eq!(snapshot.chat.key_mask, "*".repeat(17));
+        assert_eq!(snapshot.preedit, "*".repeat(14));
+        assert!(snapshot.chat.draft.is_empty());
+    }
 
     #[test]
     fn human_navigation_has_no_scheduler_and_keeps_tools_explicit() {

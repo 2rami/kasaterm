@@ -41,25 +41,60 @@ pub struct Focus {
 }
 
 /// 파일 한 장을 읽어 상태와 할 말로. 파일이 없거나 깨졌으면 조용한 것으로 친다.
-pub fn read(path: &std::path::Path) -> (Mood, String, String, Option<Focus>) {
+pub fn read(path: &std::path::Path) -> (Mood, String, String, Option<Focus>, bool) {
+    if std::fs::metadata(path).map_or(true, |metadata| metadata.len() > 64 * 1024) {
+        return (Mood::Idle, String::new(), String::new(), None, false);
+    }
     let Ok(t) = std::fs::read_to_string(path) else {
-        return (Mood::Idle, String::new(), String::new(), None);
+        return (Mood::Idle, String::new(), String::new(), None, false);
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
-        return (Mood::Idle, String::new(), String::new(), None);
+        return (Mood::Idle, String::new(), String::new(), None, false);
     };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    read_value(&v, now)
+}
+
+fn read_value(v: &serde_json::Value, now: u64) -> (Mood, String, String, Option<Focus>, bool) {
+    if let Some(schema) = v.get("schema") {
+        let observed = v
+            .get("observed_at")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        // A logged-out or stale work hub must not keep the previous account's task on the desktop.
+        if schema.as_str() != Some("kasa.workspace.pet.v1")
+            || v.get("account_current").and_then(|value| value.as_bool()) != Some(true)
+            || v.get("key_present").and_then(|value| value.as_bool()) != Some(true)
+            || observed > now.saturating_add(30)
+            || now.saturating_sub(observed) > 90
+        {
+            return (Mood::Idle, String::new(), String::new(), None, true);
+        }
+    }
     let mood = Mood::parse(v.get("state").and_then(|s| s.as_str()).unwrap_or(""));
-    let str_of = |k: &str| {
-        v.get(k)
+    let str_of = |k: &str| v.get(k).and_then(|s| s.as_str()).unwrap_or("").to_string();
+    let focus = v.get("focus").filter(|f| f.is_object()).map(|f| Focus {
+        pane: f
+            .get("pane")
             .and_then(|s| s.as_str())
             .unwrap_or("")
-            .to_string()
-    };
-    let focus = v.get("focus").filter(|f| f.is_object()).map(|f| Focus {
-        pane: f.get("pane").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+            .to_string(),
     });
     // 지금 누구 이야기인지 — 되받아 말할 때 그 pane 으로 보낸다.
-    (mood, str_of("text"), str_of("pane"), focus)
+    (
+        mood,
+        str_of("text"),
+        str_of("pane"),
+        focus,
+        v.get("schema").is_some(),
+    )
+}
+
+pub fn legacy_auto_question(account_scoped: bool, urgent: bool, already_asked: bool) -> bool {
+    !account_scoped && urgent && !already_asked
 }
 
 /// 급하지 않은 말이 떠 있는 시간. 계속 띄워 두면 바탕화면에 글자 판을 얹어 둔 꼴이 되고,
@@ -86,7 +121,7 @@ mod tests {
 
     #[test]
     fn missing_or_broken_file_reads_as_quiet() {
-        let (m, t, pane, focus) = read(std::path::Path::new("/그런/파일/없다.json"));
+        let (m, t, pane, focus, _) = read(std::path::Path::new("/그런/파일/없다.json"));
         assert!(focus.is_none());
         assert_eq!(m, Mood::Idle);
         assert!(t.is_empty());
@@ -115,6 +150,29 @@ mod tests {
         assert_eq!(Mood::parse("뭔지모를것"), Mood::Idle);
     }
 
+    #[test]
+    fn personal_workspace_requires_a_fresh_current_account_record() {
+        let record = serde_json::json!({"schema":"kasa.workspace.pet.v1","observed_at":1000,
+            "account_current":true,"key_present":true,"state":"busy","text":"기록된 작업 · 진행 중","pane":""});
+        assert_eq!(read_value(&record, 1050).0, Mood::Busy);
+        assert!(read_value(&record, 1050).4);
+        assert!(!legacy_auto_question(true, true, false));
+        assert!(legacy_auto_question(false, true, false));
+        assert_eq!(read_value(&record, 1091).0, Mood::Idle);
+        assert_eq!(read_value(&record, 900).0, Mood::Idle);
+        for key in ["account_current", "key_present"] {
+            let mut invalid = record.clone();
+            invalid[key] = serde_json::json!(false);
+            let result = read_value(&invalid, 1050);
+            assert_eq!(result.0, Mood::Idle);
+            assert!(result.1.is_empty());
+            assert!(result.4);
+        }
+        let mut claimed = record.clone();
+        claimed["state"] = serde_json::json!("done");
+        assert_eq!(read_value(&claimed, 1050).0, Mood::Idle);
+    }
+
     /// 포커스 pane 은 판에 실려 오고, 없으면(내부 방) None 이다.
     #[test]
     fn focus_rides_the_board() {
@@ -126,7 +184,7 @@ mod tests {
             r#"{"state":"busy","text":"코하루 · 나쵸","pane":"%1","focus":{"pane":"%3","who":"아즈사","task":"UI UX","state":"busy","what":"파일 고치는 중","mins":3}}"#,
         )
         .unwrap();
-        let (_, _, _, focus) = read(&f);
+        let (_, _, _, focus, _) = read(&f);
         assert_eq!(focus.expect("focus").pane, "%3");
         std::fs::write(&f, r#"{"state":"idle","text":"","pane":"","focus":null}"#).unwrap();
         assert!(read(&f).3.is_none());

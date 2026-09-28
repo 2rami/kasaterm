@@ -31,6 +31,7 @@ impl state::GitState {
             self.col_commit_file_expanded.clear();
             self.col_commit_diff_cache.clear();
             self.last_commit_click = None;
+            self.graph_scroll = 0.0;
         }
         self.col_displayed_target = target;
     }
@@ -42,6 +43,7 @@ impl state::GitState {
         self.col_discard_rects.clear();
         self.col_open_rects.clear();
         self.col_commit_rects.clear();
+        self.graph_rect = None;
         self.col_commit_file_rects.clear();
         self.commit_menu_rects.clear();
         self.commit_btn_rect = None;
@@ -3958,6 +3960,30 @@ impl App {
         let focus_key = focus.as_ref().map(|f| f.to_string()).unwrap_or_default();
         let focus_changed = *LAST_FOCUS.lock().unwrap() != focus_key;
 
+        // 계정 작업판이 살아 있으면(로그인·키·90초 안의 관측) 그것이 펫의 정본이다 — 화면
+        // 추정으로 만든 아랫줄은 쓰지 않는다. 판이 끊기면 아랫줄로 돌아가고 펫은 schema 의
+        // 신선도 검사로 지난 계정 작업을 내린다. 같은 글이라도 30초마다 다시 적어 관측
+        // 시각이 살아 있게 한다(펫은 같은 글이면 말풍선을 다시 띄우지 않는다).
+        let scoped = self.board_scene.assistant_pet_status();
+        if scoped["account_current"] == true && scoped["key_present"] == true {
+            let state = scoped["state"].as_str().unwrap_or("idle").to_string();
+            let text = scoped["text"].as_str().unwrap_or("").to_string();
+            let same = last.as_ref().is_some_and(|(_, st, tx)| *st == state && *tx == text);
+            let refreshed = last
+                .as_ref()
+                .is_none_or(|(t, _, _)| now.duration_since(*t) >= std::time::Duration::from_secs(30));
+            if same && !focus_changed && !refreshed {
+                return;
+            }
+            *last = Some((now, state, text));
+            *LAST_FOCUS.lock().unwrap() = focus_key;
+            let Some(dir) = pet_model_dir() else { return };
+            let mut record = scoped;
+            record["focus"] = focus.unwrap_or(serde_json::Value::Null);
+            let _ = std::fs::write(dir.join("board.json"), record.to_string());
+            return;
+        }
+
         // 급한 것부터. 막힌 사람이 있는데 「무엇을 하는 중」이라고 말하면 그 한 줄이
         // 정작 손이 필요한 곳을 덮는다.
         let urgent = !stalled.is_empty() || !waiting.is_empty();
@@ -5062,94 +5088,41 @@ pub(crate) fn side_column_should_toggle(
     !replacing_inline && column_visible && destination_already_selected
 }
 
-/// 트레이 한 줄의 자리(논리 px). `plus` 가 남는 폭을 먹고 넷은 오른쪽에 붙는다.
+// Keeping only device creation and the work hub makes the footer independent of settings and chat navigation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SidebarTray {
     pub(crate) line_y: f32,
     pub(crate) plus: (f32, f32, f32, f32),
     pub(crate) board: (f32, f32, f32, f32),
-    pub(crate) arona: (f32, f32, f32, f32),
-    pub(crate) feedback: (f32, f32, f32, f32),
-    pub(crate) settings: (f32, f32, f32, f32),
 }
 
 pub(crate) fn sidebar_tray_layout(line_y: f32, strip: f32) -> SidebarTray {
-    let left = SIDEBAR_TAB_INSET + 4.0;
-    let gap = 4.0_f32;
-    let avail = (strip - left * 2.0).max(0.0);
-    // 넷이 오른쪽에 모이고 `+` 가 왼쪽을 먹으려면 28×5 에 틈까지 있어야 한다. 그보다
-    // 좁으면 오른쪽 기준으로 잡던 x 가 **음수**가 되어 아이콘이 왼쪽 구석에 포개졌다(64px
-    // 실측). 폭이 모자랄 때는 자리 배분을 포기하고 크기를 줄여 균등하게 늘어놓는다.
-    let roomy = avail >= 28.0 * 5.0 + gap * 5.0 + 12.0;
-    // 좁을 때는 여백과 틈을 줄여 아이콘(16)보다 작은 칸이 안 되게 한다 — 자동 최소 폭(104)에서도
-    // 다섯이 사이드바 안에 든다.
-    let (left, gap) = if roomy { (left, gap) } else { (SIDEBAR_TAB_INSET, 2.0) };
-    let b = if roomy {
-        28.0
-    } else {
-        ((strip - left * 2.0 - gap * 4.0) / 5.0).clamp(16.0, 28.0)
-    };
-    let y = line_y + (SIDEBAR_TRAY_H - b) / 2.0;
-    let sq = |x: f32| (x, y, b, b);
-    if roomy {
-        let settings = (strip - SIDEBAR_TAB_INSET - 4.0 - b).max(left);
-        let feedback = settings - gap - b;
-        // 화면을 바꾸는 짝(보드·아로나)과 앱에 말 거는 짝(피드백·설정)을 한 칸 더 띄운다.
-        let arona = feedback - gap * 2.0 - b;
-        let board = arona - gap - b;
-        return SidebarTray {
-            line_y,
-            plus: (left, y, (board - gap * 2.0 - left).max(b), b),
-            board: sq(board),
-            arona: sq(arona),
-            feedback: sq(feedback),
-            settings: sq(settings),
-        };
-    }
-    let at = |k: f32| sq(left + (b + gap) * k);
-    SidebarTray {
-        line_y,
-        plus: at(0.0),
-        board: at(1.0),
-        arona: at(2.0),
-        feedback: at(3.0),
-        settings: at(4.0),
-    }
+    let strip = strip.max(0.0);
+    let inset = (SIDEBAR_TAB_INSET + 4.0).min(strip * 0.1);
+    let available = (strip - inset * 2.0).max(0.0);
+    let gap = 8.0_f32.min(available);
+    let button = ((available - gap) / 2.0).clamp(0.0, 28.0);
+    let plus_w = (available - gap - button).max(0.0);
+    let y = line_y + (SIDEBAR_TRAY_H - button) / 2.0;
+    SidebarTray { line_y, plus: (inset, y, plus_w, button),
+        board: (inset + plus_w + gap, y, button, button) }
 }
 
 #[cfg(test)]
 mod sidebar_tray_tests {
     use super::*;
 
-    fn rects(t: &SidebarTray) -> [(f32, f32, f32, f32); 5] {
-        [t.plus, t.board, t.arona, t.feedback, t.settings]
-    }
-
-    /// 다섯 칸이 겹치지 않고 사이드바 안에 든다 — 기본 폭·자동 최소 폭·끌어 좁힌 폭 모두.
     #[test]
-    fn tray_buttons_never_overlap_or_leave_the_strip() {
-        for strip in [SIDEBAR_W, 160.0, SIDEBAR_W_AUTO_MIN, 64.0] {
-            let t = sidebar_tray_layout(500.0, strip);
-            let r = rects(&t);
-            for (i, a) in r.iter().enumerate() {
-                assert!(a.0 >= 0.0, "{strip}px: {i}번 칸이 왼쪽 밖");
-                for b in &r[i + 1..] {
-                    assert!(a.0 + a.2 <= b.0 + 0.01, "{strip}px: 칸이 겹친다 {a:?} {b:?}");
-                }
+    fn only_device_and_work_hub_buttons_fit_even_a_narrow_sidebar() {
+        for width in [0.0, 32.0, 64.0, SIDEBAR_W_AUTO_MIN, 160.0, SIDEBAR_W, 380.0] {
+            let tray = sidebar_tray_layout(500.0, width);
+            for rect in [tray.plus, tray.board] {
+                assert!(rect.0 >= 0.0 && rect.2 >= 0.0);
+                assert!(rect.0 + rect.2 <= width + 0.01);
             }
-            if strip >= SIDEBAR_W_AUTO_MIN {
-                let last = r[4];
-                assert!(last.0 + last.2 <= strip, "{strip}px: 설정이 사이드바 밖");
-            }
+            assert!(tray.plus.0 + tray.plus.2 <= tray.board.0);
+            assert!(tray.plus.2 >= tray.board.2);
         }
-    }
-
-    #[test]
-    fn roomy_tray_keeps_settings_at_the_right_edge_and_board_arona_beside_it() {
-        let t = sidebar_tray_layout(500.0, SIDEBAR_W);
-        assert_eq!(t.settings.0 + t.settings.2, SIDEBAR_W - SIDEBAR_TAB_INSET - 4.0);
-        assert!(t.arona.0 + t.arona.2 < t.feedback.0 - 4.0, "화면 짝과 앱 짝 사이가 더 떠야 한다");
-        assert!(t.plus.2 >= t.board.2, "기기 추가는 적어도 아이콘 한 칸");
     }
 }
 

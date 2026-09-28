@@ -708,7 +708,6 @@ impl App {
         self.pump_info();
         self.pump_sessions_col();
         self.pump_mcp_col();
-        self.pump_work_side();
         // Every pane's status bar wants its own repo badge — feed all pane cwds
         // to the same poller.
         self.publish_pane_git_cwds();
@@ -837,8 +836,8 @@ impl App {
             .lock()
             .ok()
             .and_then(|r| r.as_ref().map(|(label, _)| label.clone()))
-            .map_or(theme::panel_bg(), |label| {
-                pane_identity::panel_background(theme::panel_bg(), Some(&label))
+            .map_or(theme::side_panel_bg(), |label| {
+                pane_identity::panel_background(theme::side_panel_bg(), Some(&label))
             });
         let tree_col_bg = self.file_tree.remote.as_ref().map_or(theme::panel_bg(), |(label, _)| {
             pane_identity::panel_background(theme::panel_bg(), Some(label))
@@ -2472,7 +2471,6 @@ impl App {
         let board_room_active = self.board_room_active();
         let pulse_h = self.sidebar_pulse_h();
         let sb_head_top = self.sidebar_head_top();
-        let arona_open = board_room_active && self.board_scene.tab() == crate::native_board::BoardTab::Chat;
         // 본진 계정 조작은 백그라운드 스레드에서 끝나므로 그 자리에서 말풍선을
         // 못 띄운다. 계정 화면이 떠 있는 동안 여기서 받아 올린다 — 실패가 조용히
         // 사라지면 「눌렀는데 아무 일도 안 남」이 되고, 그 상태로 같은 버튼을
@@ -2809,7 +2807,7 @@ impl App {
             // 사이드바 칼럼을 여기서(스트립과 같은 시점에) 칠하는 건 신호등 때문이다.
             // 칼럼이 y=0 까지 올라와야 신호등이 사이드바 위에 앉는데, 아래쪽에서 칠하면
             // 스트립에 이미 그린 토글 아이콘을 덮어 버린다.
-            g.rect(0.0, 0.0, win_px.0 / scale, TITLE_HEIGHT, theme::header_bg());
+            g.rect(0.0, 0.0, win_px.0 / scale, TITLE_HEIGHT, theme::titlebar_bg());
             if tab_strip_w > 0.0 {
                 g.rect(0.0, 0.0, tab_strip_w, sb_win_h, theme::panel_bg());
                 g.rect(tab_strip_w - 1.0, 0.0, 1.0, sb_win_h, theme::border());
@@ -4593,12 +4591,8 @@ impl App {
                             1.0,
                             theme::border(),
                         );
-                        let settings_on = settings_room_active;
                         for (r, icon, on) in [
                             (tray.board, "rows-2", board_room_active),
-                            (tray.arona, "message-circle", arona_open),
-                            (tray.feedback, "message-square-warning", false),
-                            (tray.settings, "settings-2", settings_on),
                         ] {
                             let (bx, by, bw, bh) = r;
                             let hover = sb_cursor.0 >= bx
@@ -5687,57 +5681,9 @@ impl App {
                 y = git_panel::header(g, &mut self.git, &git_view, self.cursor_px, gcx0, y, gcw);
                 // ── Row 2: ⎇ Uncommitted changes ···· [ ⎯o Commit | ▾ ]
                 let list_top;
-                // Reserve the column foot for the recent-commits preview; the
-                // change list clips to what's left above it.
-                // 구역이 변경 목록을 통째로 삼키지 못하게 하는 상한. 사용자가 잡아
-                // 둔 높이에도 같은 상한을 걸어야 한다 — 안 그러면 창을 줄였을 때
-                // 화면엔 안 들어가는 높이로 커밋 수백 개를 계속 가져온다.
                 let commits_cap = (bottom - TITLE_HEIGHT) * 0.72;
-                let pinned_h = self.git.col_commits_h.map(|h| h.min(commits_cap));
-                // 폴러에게 「몇 개까지」를 건넨다. 잡아 둔 높이에 들어가는 줄 수
-                // (머리 24px + 줄당 20px)가 곧 그 수다 — 5개 고정이던 자리라, 늘려
-                // 놓고도 빈 칸만 보이면 크기조절이 아무 일도 안 한 것처럼 읽힌다.
-                self.git.col_commit_want.store(
-                    match pinned_h {
-                        Some(h) => (((h - 24.0) / 20.0).floor() as i64).clamp(1, 200) as usize,
-                        None => GIT_RECENT_COMMITS_DEFAULT,
-                    },
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                let commits_h = if git_view.recent_commits.is_empty() {
-                    0.0
-                } else {
-                    // 잡아 둔 높이가 있으면 그게 정본이고, 없으면 가져온 커밋 수에
-                    // 맞춘다. 펼친 커밋의 파일 목록·diff 는 어느 쪽이든 그 위에
-                    // 더한다 — 펼침은 잠깐이라 잡아 둔 높이를 갈아치울 값이 아니고,
-                    // 안 더하면 펼치자마자 그 내용이 잘린다.
-                    let mut h = pinned_h
-                        .unwrap_or_else(|| 24.0 + git_view.recent_commits.len() as f32 * 20.0);
-                    // An expanded commit grows the foot by its file list (+ any
-                    // expanded file's diff), pushing the change list up.
-                    if let Some(eh) = self.git.col_commit_expanded.clone() {
-                        if let Some(files) = self.git.col_commit_files_cache.get(&eh) {
-                            h += files.len().max(1) as f32 * 18.0;
-                            for (path, _, _) in files {
-                                if self
-                                    .git
-                                    .col_commit_file_expanded
-                                    .contains(&(eh.clone(), path.clone()))
-                                {
-                                    if let Some(d) = self
-                                        .git
-                                        .col_commit_diff_cache
-                                        .get(&(eh.clone(), path.clone()))
-                                    {
-                                        h += d.len() as f32 * 13.0;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // Don't let the foot swallow the whole change list.
-                    h.min(commits_cap)
-                };
+                self.git.col_commit_want.store(git_panel::requested_history_count(commits_cap), std::sync::atomic::Ordering::Relaxed);
+                let commits_h = git_panel::history_height(&git_view, &self.git, commits_cap);
                 let input_top = bottom - commits_h;
                 if git_view.no_repo || git_view.loading || git_view.issue.is_some() {
                     let notice = git_view.issue.as_deref().unwrap_or(if git_view.loading { "Git 정보를 읽는 중이에요" } else { "Git 저장소가 아니에요" });
@@ -6383,253 +6329,7 @@ impl App {
                     self.git.col_discard_rects = discard_rects;
                     self.git.col_open_rects = open_rects;
                 }
-                // ── Recent commits, pinned to the column foot. Double-click a
-                // commit row to expand its changed-file list inline (GitLens-
-                // graph style); a file row then expands its diff.
-                self.git.col_commit_rects.clear();
-                self.git.col_commit_file_rects.clear();
-                self.git.col_commits_grip = None;
-                if !git_view.recent_commits.is_empty() && !self.git.branch_menu_open {
-                    let (curx, cury) = self.cursor_px;
-                    let foot = bottom - 2.0;
-                    let clip_r = git_col_x + git_col_w - 12.0;
-                    let mut cy2 = input_top + 6.0;
-                    // 구역 머리의 가로선이 곧 크기조절 손잡이다. 잡는 띠는 선보다
-                    // 두껍게(위아래 4px) 잡는다 — 1px 선을 정확히 맞춰 눌러야 하면
-                    // 손잡이가 있다는 걸 알아도 못 쓴다. 이 자리는 매 프레임
-                    // 변경 목록 길이·펼침에 따라 움직여서 handler 가 스스로는
-                    // 못 구한다.
-                    let grip = (git_col_x, cy2 - 6.0, git_col_w, 9.0);
-                    self.git.col_commits_grip = Some(grip);
-                    let grip_hot = self.git.col_commits_resize.is_some()
-                        || (curx >= grip.0
-                            && curx <= grip.0 + grip.2
-                            && cury >= grip.1
-                            && cury <= grip.1 + grip.3);
-                    let (line_col, line_h) = if grip_hot {
-                        (theme::accent(), 2.0)
-                    } else {
-                        (theme::with_alpha(theme::border(), 0x80), 1.0)
-                    };
-                    g.rect(gcx0, cy2 - 2.0, gcw, line_h, line_col);
-                    g.draw_text(
-                        gcx0,
-                        cy2 + 4.0,
-                        "최근 커밋",
-                        gpu::DrawOpts {
-                            font_size: 11.0,
-                            color: theme::text_mute(),
-                            bold: true,
-                            italic: false,
-                        },
-                    );
-                    cy2 += 22.0;
-                    for (hash, subj) in &git_view.recent_commits {
-                        if cy2 > foot {
-                            break;
-                        }
-                        let expanded =
-                            self.git.col_commit_expanded.as_deref() == Some(hash.as_str());
-                        let rowr = (gcx0 - 5.0, cy2 - 3.0, gcw + 10.0, 19.0);
-                        let hov = curx >= rowr.0
-                            && curx <= rowr.0 + rowr.2
-                            && cury >= rowr.1
-                            && cury <= rowr.1 + rowr.3;
-                        if expanded {
-                            g.rect(
-                                rowr.0,
-                                rowr.1,
-                                rowr.2,
-                                rowr.3,
-                                theme::with_alpha(theme::accent(), 0x18),
-                            );
-                        } else if hov {
-                            g.rect(rowr.0, rowr.1, rowr.2, rowr.3, theme::surface_hover());
-                        }
-                        let chev = if expanded {
-                            "chevron-down"
-                        } else {
-                            "chevron-right"
-                        };
-                        g.queue_icon(chev, gcx0, cy2 - 1.0, 11.0, theme::text_mute());
-                        let hxc = g.draw_text(
-                            gcx0 + 14.0,
-                            cy2,
-                            hash,
-                            gpu::DrawOpts {
-                                font_size: 11.0,
-                                color: theme::accent(),
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                        // 클립은 글자를 획 중간에서 끊는다 — 좁은 칼럼에서는 제목
-                        // 대부분이 그렇게 사라져 「더 있다」는 신호조차 없다. 말줄임
-                        // 으로 재단해 잘렸다는 것이 보이게 한다.
-                        let sj = crate::info::fit_text(
-                            g,
-                            subj,
-                            (clip_r - (hxc + 8.0)).max(0.0),
-                            11.0,
-                            false,
-                        );
-                        g.draw_text_clipped(
-                            hxc + 8.0,
-                            cy2,
-                            &sj,
-                            gpu::DrawOpts {
-                                font_size: 11.0,
-                                color: theme::text_dim(),
-                                bold: false,
-                                italic: false,
-                            },
-                            gcx0,
-                            clip_r,
-                        );
-                        self.git.col_commit_rects.push((hash.clone(), rowr));
-                        cy2 += 20.0;
-                        if !expanded {
-                            continue;
-                        }
-                        // Changed-file list for the expanded commit.
-                        let files = self
-                            .git
-                            .col_commit_files_cache
-                            .get(hash)
-                            .cloned()
-                            .unwrap_or_default();
-                        if files.is_empty() {
-                            g.draw_text(
-                                gcx0 + 20.0,
-                                cy2,
-                                "(변경 없음)",
-                                gpu::DrawOpts {
-                                    font_size: 10.0,
-                                    color: theme::text_mute(),
-                                    bold: false,
-                                    italic: true,
-                                },
-                            );
-                            cy2 += 16.0;
-                        }
-                        for (path, add, del) in &files {
-                            if cy2 > foot {
-                                break;
-                            }
-                            let fexp = self
-                                .git
-                                .col_commit_file_expanded
-                                .contains(&(hash.clone(), path.clone()));
-                            let fr = (gcx0 + 14.0, cy2 - 2.0, gcw - 14.0, 17.0);
-                            let fhov = curx >= fr.0
-                                && curx <= fr.0 + fr.2
-                                && cury >= fr.1
-                                && cury <= fr.1 + fr.3;
-                            if fexp {
-                                g.rect(
-                                    fr.0,
-                                    fr.1,
-                                    fr.2,
-                                    fr.3,
-                                    theme::with_alpha(theme::accent(), 0x10),
-                                );
-                            } else if fhov {
-                                g.rect(fr.0, fr.1, fr.2, fr.3, theme::surface_hover());
-                            }
-                            let fname = std::path::Path::new(path.as_str())
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| path.clone());
-                            let stat = format!("+{add} -{del}");
-                            let sw = g.measure_chrome_text(&stat, 10.0, false);
-                            g.draw_text_clipped(
-                                gcx0 + 20.0,
-                                cy2,
-                                &fname,
-                                gpu::DrawOpts {
-                                    font_size: 11.0,
-                                    color: if fexp {
-                                        theme::text()
-                                    } else {
-                                        theme::text_dim()
-                                    },
-                                    bold: false,
-                                    italic: false,
-                                },
-                                gcx0 + 20.0,
-                                clip_r - sw - 8.0,
-                            );
-                            g.draw_text(
-                                clip_r - sw,
-                                cy2,
-                                &stat,
-                                gpu::DrawOpts {
-                                    font_size: 10.0,
-                                    color: theme::text_mute(),
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                            self.git
-                                .col_commit_file_rects
-                                .push((hash.clone(), path.clone(), fr));
-                            cy2 += 18.0;
-                            if !fexp {
-                                continue;
-                            }
-                            // Inline diff for the expanded file (tinted +/- bands).
-                            let diff = self
-                                .git
-                                .col_commit_diff_cache
-                                .get(&(hash.clone(), path.clone()))
-                                .cloned()
-                                .unwrap_or_default();
-                            use kasa_mcp::git::DiffLineKind as K;
-                            for dl in diff.iter() {
-                                if cy2 > foot {
-                                    break;
-                                }
-                                let (bg, scol) = match dl.kind {
-                                    K::Add => (
-                                        theme::with_alpha(theme::success(), 0x22),
-                                        theme::success(),
-                                    ),
-                                    K::Del => {
-                                        (theme::with_alpha(theme::danger(), 0x22), theme::danger())
-                                    }
-                                    K::Hunk => (
-                                        theme::with_alpha(theme::accent(), 0x14),
-                                        theme::text_mute(),
-                                    ),
-                                    K::Context => ([0, 0, 0, 0], theme::text_mute()),
-                                };
-                                if bg[3] > 0 {
-                                    g.rect(gcx0 + 14.0, cy2 - 1.0, gcw - 14.0, 13.0, bg);
-                                }
-                                let prefix = match dl.kind {
-                                    K::Add => "+",
-                                    K::Del => "-",
-                                    _ => " ",
-                                };
-                                let txt = format!("{prefix}{}", dl.text.trim_end());
-                                g.draw_text_clipped(
-                                    gcx0 + 20.0,
-                                    cy2,
-                                    &txt,
-                                    gpu::DrawOpts {
-                                        font_size: 10.0,
-                                        color: scol,
-                                        bold: false,
-                                        italic: false,
-                                    },
-                                    gcx0 + 20.0,
-                                    clip_r,
-                                );
-                                cy2 += 13.0;
-                            }
-                        }
-                    }
-                }
+                git_panel::history(g, &mut self.git, &git_view, self.cursor_px, gcx0, input_top, gcw, bottom - 2.0);
                 // Dropdowns (path picker / branch switcher) paint last so they
                 // overlay the list + buttons. Built from the precomputed repo
                 // list and the poller's branch list.
@@ -6842,36 +6542,6 @@ impl App {
                     g,
                     self.cursor_px,
                     &mut self.mcp_col,
-                    git_col_x,
-                    git_col_w,
-                    body_top,
-                    bottom,
-                );
-            }
-            // 작업 탭 — 위 셋과 형제 블록.
-            if git_col_w > 0.0 && self.info.tab == state::SideTab::Work {
-                let bottom_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
-                    0.0
-                } else {
-                    DOCK_HEIGHT
-                } + status_h;
-                let top = TITLE_HEIGHT;
-                let bottom = (win_px.1 / scale - bottom_h).max(top);
-                g.rect(git_col_x, top, git_col_w, bottom - top, git_col_bg);
-                g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
-                let body_top = info::draw_side_tabs(
-                    g,
-                    self.cursor_px,
-                    &mut self.info,
-                    &mut self.git,
-                    git_col_x,
-                    git_col_w,
-                    top,
-                );
-                crate::native_board::side::paint_work_side(
-                    g,
-                    self.cursor_px,
-                    &mut self.work_side,
                     git_col_x,
                     git_col_w,
                     body_top,
