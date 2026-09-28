@@ -29,6 +29,7 @@ pub(crate) struct SettingsScene {
     cache: crate::native_settings::SettingsCache,
     scroll: f32,
     scroll_max: f32,
+    navigation_scroll: f32,
     hits: Vec<crate::native_settings::Hit>,
     caret_rect: Option<crate::native_settings::Rect>,
     first_run: bool,
@@ -61,6 +62,7 @@ impl Default for SettingsScene {
             cache: crate::native_settings::SettingsCache::default(),
             scroll: 0.0,
             scroll_max: 0.0,
+            navigation_scroll: 0.0,
             hits: Vec::new(),
             caret_rect: None,
             first_run: crate::onboarding::launch_pending(),
@@ -216,6 +218,17 @@ impl SettingsScene {
 
     pub(crate) fn scroll(&self) -> f32 {
         self.scroll
+    }
+
+    pub(crate) fn navigation_scroll(&self) -> f32 {
+        self.navigation_scroll
+    }
+
+    pub(crate) fn scroll_navigation(&mut self, delta: f32, max: f32) -> bool {
+        let next = (self.navigation_scroll + delta).clamp(0.0, max.max(0.0));
+        let changed = (next - self.navigation_scroll).abs() > f32::EPSILON;
+        self.navigation_scroll = next;
+        changed
     }
 
     pub(crate) fn scroll_by(&mut self, delta: f32) -> bool {

@@ -558,6 +558,7 @@ pub(crate) enum DropdownId {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Target {
     Category(SettingsCat),
+    NavigationScroll(u32),
     Disclosure(&'static str),
     /// 선택 상자 머리 — 누르면 펼치고, 다시 누르면 닫는다.
     Dropdown(DropdownId),
@@ -665,6 +666,7 @@ pub(crate) struct Snapshot {
     pub(crate) cat: SettingsCat,
     pub(crate) cursor: (f32, f32),
     pub(crate) scroll: f32,
+    pub(crate) navigation_scroll: f32,
     pub(crate) caret_on: bool,
     pub(crate) input: Option<SettingsInput>,
     pub(crate) select_all: bool,
@@ -902,6 +904,7 @@ impl App {
             cat: scene.category(),
             cursor: self.cursor_px,
             scroll: scene.scroll(),
+            navigation_scroll: scene.navigation_scroll(),
             caret_on: self.last_blink_on,
             input: self.settings_input,
             select_all: scene.field_select_all(),
@@ -1076,6 +1079,7 @@ impl App {
                 self.settings_scene.toggle_dropdown(id);
             }
             Some(Target::DropdownDismiss) => {}
+            Some(Target::NavigationScroll(_)) => {}
             Some(Target::Category(cat)) => {
                 self.native_settings_blur();
                 self.device_account.hide();
@@ -1857,6 +1861,13 @@ impl App {
         };
         let scrolled = if self.settings_scene.dropdown().is_some() {
             self.settings_scene.dropdown_scroll_by(-dy)
+        } else if let Some(max) = self.settings_scene.hits().iter().find_map(|hit| {
+            match hit.target {
+                Target::NavigationScroll(max) if contains(hit.rect, self.cursor_px) => Some(max),
+                _ => None,
+            }
+        }) {
+            self.settings_scene.scroll_navigation(-dy, max as f32)
         } else {
             self.settings_scene.scroll_by(-dy)
         };
@@ -2183,6 +2194,36 @@ fn field_buffer(app: &mut App, field: SettingsInput) -> Option<(&mut String, &mu
     }
 }
 
+struct NavigationLayout {
+    viewport: Rect,
+    close: Rect,
+    groups: bool,
+    row_height: f32,
+    row_step: f32,
+    content_height: f32,
+}
+
+fn navigation_layout(area: Rect, nav_width: f32, count: usize) -> NavigationLayout {
+    let (x, y, _, height) = area;
+    let close = (x + 12.0, y + (height - 46.0).max(0.0), nav_width - 24.0, 32.0_f32.min(height));
+    let top = (y + 56.0).min(close.1);
+    let viewport = (x, top, nav_width, (close.1 - 8.0 - top).max(0.0));
+    let groups_height = if count > 4 { 48.0 } else if count > 0 { 24.0 } else { 0.0 };
+    let groups = count as f32 * 36.0 + groups_height <= viewport.3;
+    let (row_height, row_step) = if groups { (32.0, 36.0) } else { (CTL_H, CTL_H + 4.0) };
+    NavigationLayout {
+        viewport, close, groups, row_height, row_step,
+        content_height: count as f32 * row_step + if groups { groups_height } else { 0.0 },
+    }
+}
+
+fn navigation_row(layout: &NavigationLayout, index: usize, scroll: f32) -> Rect {
+    let group_offset = if layout.groups { if index >= 4 { 48.0 } else { 24.0 } } else { 0.0 };
+    (layout.viewport.0 + 12.0,
+        layout.viewport.1 + index as f32 * layout.row_step + group_offset - scroll,
+        layout.viewport.2 - 24.0, layout.row_height)
+}
+
 pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutput {
     crate::native_strings::set_language(&snapshot.language);
     if snapshot.first_run {
@@ -2199,18 +2240,21 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     g.rect(ax, ay, nav_w, ah, theme::panel_bg());
     draw_text(g, ax + 20.0, ay + 24.0, "설정", 13.0, theme::text_dim(), false);
 
-    let mut ny = ay + 56.0;
+    let navigation = navigation_layout(snapshot.area, nav_w, SettingsCat::nav().len());
+    let navigation_max = (navigation.content_height - navigation.viewport.3).max(0.0);
+    let navigation_scroll = snapshot.navigation_scroll.clamp(0.0, navigation_max);
+    register(&mut hits, Target::NavigationScroll(navigation_max.ceil() as u32), navigation.viewport, HitCursor::Arrow);
+    g.push_clip(navigation.viewport.0, navigation.viewport.1, navigation.viewport.2, navigation.viewport.3);
     for (index, &cat) in SettingsCat::nav().iter().enumerate() {
-        if index == 0 || index == 4 {
-            draw_text(g, ax + 20.0, ny, if index == 0 { "내 작업 환경" } else { "연결과 앱" }, 10.5, theme::text_mute(), false);
-            ny += 24.0;
+        let rect = navigation_row(&navigation, index, navigation_scroll);
+        if navigation.groups && (index == 0 || index == 4) {
+            draw_text(g, ax + 20.0, rect.1 - 24.0, if index == 0 { "내 작업 환경" } else { "연결과 앱" }, 10.5, theme::text_mute(), false);
         }
         let (label, icon, _) = category_meta(cat);
-        let rect = (ax + 12.0, ny, nav_w - 24.0, 32.0);
         // 테마 페이지는 「캐릭터」 밑으로 들어갔다 — 거기 있는 동안도 캐릭터 칸이 켜진다.
         let selected = cat == snapshot.cat
             || (cat == SettingsCat::Students && snapshot.cat == SettingsCat::Theme);
-        let hover = contains(rect, snapshot.cursor);
+        let hover = contains(navigation.viewport, snapshot.cursor) && contains(rect, snapshot.cursor);
         if selected || hover {
             round_rect(
                 g,
@@ -2229,7 +2273,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         g.queue_icon(
             icon,
             rect.0 + 10.0,
-            rect.1 + 9.0,
+            rect.1 + (rect.3 - 14.0) / 2.0,
             14.0,
             if selected {
                 theme::text()
@@ -2240,7 +2284,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         draw_text(
             g,
             rect.0 + 32.0,
-            rect.1 + 9.0,
+            rect.1 + (rect.3 - 12.0) / 2.0 - 1.0,
             label,
             12.0,
             if selected {
@@ -2250,12 +2294,14 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             },
             selected,
         );
-        register(&mut hits, Target::Category(cat), rect, HitCursor::Pointer);
+        register_clipped(g, &mut hits, Target::Category(cat), rect, HitCursor::Pointer);
         g.hover_pointer |= hover;
-        ny += 36.0;
     }
+    g.pop_clip();
+    paint_scroll_affordance(g, navigation.viewport.0, navigation.viewport.1,
+        navigation.viewport.2, navigation.viewport.3, navigation.content_height, navigation_scroll);
 
-    let close = (ax + 12.0, ay + ah - 46.0, nav_w - 24.0, 32.0);
+    let close = navigation.close;
     let close_hover = contains(close, snapshot.cursor);
     if close_hover {
         round_rect(
@@ -3998,11 +4044,21 @@ pub(crate) fn paint_setup_section(
         }
         1 => {
             row_label(g, x, y, "색상 테마");
-            let choices = s.palettes.iter().map(|palette| (
-                palette.label.clone(), s.theme == palette.key,
-                SettingsAction::ThemeMode(palette.key.clone()),
-            )).collect();
-            chips_owned(g, s, hits, x, y, w, choices);
+            *y += appearance_preview::paint_palette_strip(g, s, hits, x, *y, w);
+            if !appearance_preview::FEATURED_PALETTES.contains(&s.theme.as_str()) {
+                if let Some(current) = s.palettes.iter().find(|palette| palette.key == s.theme) {
+                    plain_hint(g, x, y, w, &format!("현재 팔레트 · {}", current.label));
+                }
+            }
+            if disclosure(g, s, hits, x, y, w, "other-palettes", "다른 팔레트") {
+                let choices = s.palettes.iter()
+                    .filter(|palette| !appearance_preview::FEATURED_PALETTES.contains(&palette.key.as_str()))
+                    .map(|palette| (
+                        palette.label.clone(), s.theme == palette.key,
+                        SettingsAction::ThemeMode(palette.key.clone()),
+                    )).collect();
+                chips_owned(g, s, hits, x, y, w, choices);
+            }
             if !crate::lite_mode() {
                 let shapes: Vec<_> = theme::SHAPE_PRESETS.iter().map(|(key, label, _)|
                     (*label, s.shape == *key, SettingsAction::Shape(key))).collect();
@@ -6767,20 +6823,7 @@ fn row_label(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, label: &str) {
 }
 
 fn info_slab(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, text: &str) {
-    let rect = (x, *y, w, 48.0);
-    // 목업(플랫): 채움 없이 테두리만.
-    stroke_round(g, rect, ctrl_radius(), theme::border());
-    let shown = fit(g, text, rect.2 - 28.0, 12.0, false);
-    draw_text(
-        g,
-        rect.0 + 14.0,
-        rect.1 + 16.0,
-        &shown,
-        12.0,
-        theme::text_dim(),
-        false,
-    );
-    *y += rect.3 + 8.0;
+    plain_hint(g, x, y, w, text);
 }
 
 fn toggle_row(
@@ -7735,6 +7778,52 @@ fn color_for_word(word: &str) -> [u8; 4] {
         accent[2].saturating_add(((hash >> 10) & 17) as u8),
         255,
     ]
+}
+
+#[cfg(test)]
+mod navigation_layout_tests {
+    use super::{navigation_layout, navigation_row};
+
+    #[test]
+    fn every_category_fits_above_footer_at_640_by_720_with_zoom() {
+        let zoom = 1.5;
+        let area = (0.0, 36.0, 640.0 / zoom, 720.0 / zoom - 36.0 - 24.0);
+        let layout = navigation_layout(area, 154.0, 10);
+        for index in 0..10 {
+            let row = navigation_row(&layout, index, 0.0);
+            assert!(row.1 >= layout.viewport.1);
+            assert!(row.1 + row.3 <= layout.close.1 - 8.0, "category {index} overlaps the footer");
+            if index > 0 {
+                let previous = navigation_row(&layout, index - 1, 0.0);
+                assert!(previous.1 + previous.3 < row.1);
+            }
+        }
+    }
+
+    #[test]
+    fn shorter_navigation_can_scroll_every_category_fully_into_view() {
+        for height in [340.0, 280.0, 220.0] {
+            let layout = navigation_layout((0.0, 36.0, 427.0, height), 154.0, 10);
+            let max_scroll = (layout.content_height - layout.viewport.3).max(0.0);
+            assert!(max_scroll > 0.0);
+            for index in 0..10 {
+                let unscrolled = navigation_row(&layout, index, 0.0);
+                let scroll = (unscrolled.1 - layout.viewport.1).clamp(0.0, max_scroll);
+                let row = navigation_row(&layout, index, scroll);
+                assert!(row.1 >= layout.viewport.1, "height {height}, category {index}");
+                assert!(row.1 + row.3 <= layout.viewport.1 + layout.viewport.3);
+                assert!(row.1 + row.3 < layout.close.1);
+            }
+        }
+    }
+
+    #[test]
+    fn tall_navigation_preserves_group_labels() {
+        let layout = navigation_layout((0.0, 36.0, 1000.0, 700.0), 200.0, 10);
+        assert!(layout.groups);
+        assert_eq!(layout.row_height, 32.0);
+        assert_eq!(navigation_row(&layout, 4, 0.0).1 - navigation_row(&layout, 3, 0.0).1, 60.0);
+    }
 }
 
 #[cfg(test)]

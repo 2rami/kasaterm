@@ -1,6 +1,93 @@
 use super::*;
 
 const PREVIEW_H: f32 = 204.0;
+pub(super) const FEATURED_PALETTES: [&str; 4] = ["graphite", "ink", "paper", "mist"];
+
+fn palette_strip(x: f32, y: f32, w: f32) -> ([Rect; 4], f32) {
+    let columns = if w >= 560.0 { 4 } else { 2 };
+    let item_w = (w - (columns - 1) as f32 * 8.0) / columns as f32;
+    let rects = std::array::from_fn(|index| {
+        (
+            x + (index % columns) as f32 * (item_w + 8.0),
+            y + (index / columns) as f32 * 72.0,
+            item_w,
+            64.0,
+        )
+    });
+    (rects, (4 / columns) as f32 * 72.0)
+}
+
+pub(super) fn paint_palette_strip(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: f32,
+    w: f32,
+) -> f32 {
+    let (rects, height) = palette_strip(x, y, w);
+    for (key, rect) in FEATURED_PALETTES.into_iter().zip(rects) {
+        let Some((_, label, palette)) = theme::THEME_PRESETS.iter().find(|(id, _, _)| *id == key)
+        else {
+            continue;
+        };
+        let colors = palette.surface_colors();
+        let selected = s.theme == key;
+        let preview = (rect.0, rect.1, rect.2, 32.0);
+        g.rect(preview.0, preview.1, preview.2, preview.3, colors.pane);
+        g.rect(preview.0, preview.1, preview.2, 8.0, colors.header);
+        let sidebar = (preview.2 * 0.22).floor();
+        g.rect(preview.0, preview.1 + 8.0, sidebar, 24.0, colors.sidebar);
+        g.rect(
+            preview.0 + preview.2 - sidebar,
+            preview.1 + 8.0,
+            sidebar,
+            24.0,
+            colors.sidebar,
+        );
+        g.rect(preview.0, preview.1 + 8.0, preview.2, 1.0, palette.border);
+        for (line, portion) in [0.40, 0.26].into_iter().enumerate() {
+            g.rect(
+                preview.0 + sidebar + 8.0,
+                preview.1 + 15.0 + line as f32 * 7.0,
+                preview.2 * portion,
+                1.5,
+                palette.text_dim,
+            );
+        }
+        let hover = contains(preview, s.cursor);
+        stroke_round(
+            g,
+            preview,
+            theme::radius_sm(),
+            if selected {
+                theme::accent()
+            } else if hover {
+                theme::text_dim()
+            } else {
+                theme::border()
+            },
+        );
+        register_clipped(
+            g,
+            hits,
+            Target::Setting(SettingsAction::ThemeMode(key.into())),
+            preview,
+            HitCursor::Pointer,
+        );
+        g.hover_pointer |= hover;
+        button(
+            g,
+            s,
+            hits,
+            (rect.0, rect.1 + 38.0, rect.2, 26.0),
+            label,
+            Target::Setting(SettingsAction::ThemeMode(key.into())),
+            selected,
+        );
+    }
+    height
+}
 
 fn regions(x: f32, y: f32, w: f32) -> [(usize, Rect); 5] {
     let header = crate::native_controls::CONTROL_HEIGHT;
@@ -153,6 +240,23 @@ pub(super) fn paint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn featured_palettes_use_four_columns_or_two_compact_rows() {
+        for width in [280.0, 430.0, 560.0, 800.0] {
+            let (rects, height) = palette_strip(20.0, 40.0, width);
+            assert_eq!(height, if width >= 560.0 { 72.0 } else { 144.0 });
+            for (index, rect) in rects.iter().enumerate() {
+                assert!(rect.0 >= 20.0 && rect.0 + rect.2 <= 20.0 + width);
+                assert!(rect.1 >= 40.0 && rect.1 + rect.3 <= 40.0 + height);
+                for other in rects.iter().skip(index + 1) {
+                    let overlap_w = (rect.0 + rect.2).min(other.0 + other.2) - rect.0.max(other.0);
+                    let overlap_h = (rect.1 + rect.3).min(other.1 + other.3) - rect.1.max(other.1);
+                    assert!(overlap_w <= 0.0 || overlap_h <= 0.0);
+                }
+            }
+        }
+    }
 
     #[test]
     fn preview_regions_stay_inside_the_frame_without_overlapping() {
