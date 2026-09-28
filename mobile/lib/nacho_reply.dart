@@ -6,6 +6,8 @@
 /// 접힌 상세로 옮긴다. 원문은 [ReplyView.original] 로 늘 남아 상세에서 그대로 볼 수 있다.
 library;
 
+import 'package:markdown/markdown.dart' as md;
+
 /// 답 밑 사용량 꼬리 — 나쵸 `agent._footer` 가 만드는 `_12s · 3턴 · 모델 · 추론 x · 0k/350k (0%)_`.
 /// 나쵸의 `_FOOTER_LINE` 과 같은 문법만 잡는다.
 final _footer = RegExp(r'^_(\d+s\s*·\s*\d+턴\s*·\s.*)_$');
@@ -97,35 +99,69 @@ bool _isSeatLink(String line, Uri? root, String? seatPane) {
   return termLinkOf(m.group(1)!, root)?.pane == seatPane;
 }
 
-/// 본문 안의 한 조각 — 글, 굵은 글, 코드, 링크.
-class Inline {
-  const Inline(this.text, {this.url, this.bold = false, this.code = false});
+/// 나쵸 답의 마크다운 — GFM 에서 한국어 글과 카오모지를 먹는 규칙만 뺐다.
+///
+/// 빼는 것과 그 까닭(빠지는 글자가 없게):
+/// - `*기울임*`·`_기울임_`·`__굵게__` — `(*^▽^*)`·`(^_^) … (^_^)` 가 기울임으로 먹힌다. 한글엔 기울임 글꼴도 없다.
+/// - `~취소선~` — `3~5개 그리고 7~9개` 사이가 그어진다.
+/// - 인라인 HTML — `<pane-id>` 같은 글이 태그로 읽혀 통째로 사라진다.
+/// - `\_`·`\~` 의 역슬래시 — 둘 다 여기선 기호가 아니라 `¯\_(ツ)_/¯` 의 팔이다.
+///
+/// 굵게는 `**…**` 한 줄 안의 짝으로만 본다 — CommonMark 경계 규칙은 `**(선택)**은` 처럼 한글이
+/// 바로 붙으면 닫지 못해 별표가 그대로 남는다.
+final nachoInlineSyntaxes = <md.InlineSyntax>[
+  _PairedStrong(),
+  md.TextSyntax(r'\\[_~]'),
+  md.TextSyntax(r'[*_]'),
+  md.AutolinkExtensionSyntax(),
+];
 
-  final String text;
-  final String? url;
-  final bool bold;
-  final bool code;
+/// 블록은 GFM 그대로(울타리 코드·표·체크 목록). 인라인 HTML·취소선은 [nachoInlineSyntaxes] 설명대로 뺀다.
+final nachoMarkdown = md.ExtensionSet(
+  const [
+    md.FencedCodeBlockSyntax(),
+    md.TableSyntax(),
+    md.UnorderedListWithCheckboxSyntax(),
+    md.OrderedListWithCheckboxSyntax(),
+  ],
+  const [],
+);
+
+class _PairedStrong extends md.InlineSyntax {
+  _PairedStrong() : super(r'\*\*([^*\n]+)\*\*', startCharacter: 0x2A);
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    parser.addNode(md.Element('strong', parser.document.parseInline(match[1]!)));
+    return true;
+  }
 }
 
-final _inline = RegExp(r'\[([^\]\n]+)\]\(([^)\s]+)\)|\*\*([^*\n]+)\*\*|`([^`\n]+)`');
+final _fence = RegExp(r'^ {0,3}(`{3,}|~{3,})');
+final _faceQuote = RegExp(r'^( {0,3})(>+)(?=[^\s>])');
 
-/// 마크다운 링크·굵게·코드만 알아본다. 짝이 안 맞는 기호는 글자로 남긴다 — 빠지는 글자가 없다.
-List<Inline> parseInline(String text) {
-  final out = <Inline>[];
-  var at = 0;
-  for (final m in _inline.allMatches(text)) {
-    if (m.start > at) out.add(Inline(text.substring(at, m.start)));
-    if (m.group(1) != null) {
-      out.add(Inline(m.group(1)!, url: m.group(2)));
-    } else if (m.group(3) != null) {
-      out.add(Inline(m.group(3)!, bold: true));
+/// 줄머리 `>` 뒤에 빈칸이 없으면(`>_<`) 인용이 아니라 얼굴이다 — 글자로 두게 역슬래시를 붙인다.
+/// 코드 울타리 안은 건드리지 않는다.
+String guardMarkdown(String text) {
+  String? open;
+  final out = <String>[];
+  for (final line in text.split('\n')) {
+    final f = _fence.firstMatch(line);
+    if (f != null) {
+      final mark = f.group(1)!;
+      if (open == null) {
+        open = mark;
+      } else if (mark[0] == open[0] && mark.length >= open.length) {
+        open = null;
+      }
+      out.add(line);
+    } else if (open == null) {
+      out.add(line.replaceFirstMapped(_faceQuote, (m) => '${m[1]}\\${m[2]}'));
     } else {
-      out.add(Inline(m.group(4)!, code: true));
+      out.add(line);
     }
-    at = m.end;
   }
-  if (at < text.length) out.add(Inline(text.substring(at)));
-  return out;
+  return out.join('\n');
 }
 
 /// 이 서버의 학생 화면 링크(`<root>[m/<기계>/]term[/grid]?pane=…`)면 그 자리.

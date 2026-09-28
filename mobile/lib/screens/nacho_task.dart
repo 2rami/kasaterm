@@ -267,15 +267,16 @@ class _NachoTaskScreenState extends State<NachoTaskScreen> {
           for (final e in t.events)
             if (e.kind == 'reply')
               _ReplyEntry(event: e, root: widget.desk.server.root, onLink: widget.onLink)
-            else if (e.kind == 'message' || e.kind == 'notice')
+            else if (e.kind == 'message')
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
                 child: Text(
-                  '${e.kind == 'message' ? '나' : '알림'} · '
-                  '${e.kind == 'message' ? receiptLabel(widget.desk.stateOf(e.id ?? '')) : _clock(e.atMs)}\n${e.text}',
+                  '나 · ${receiptLabel(widget.desk.stateOf(e.id ?? ''))}\n${e.text}',
                   style: const TextStyle(fontSize: 13, height: 1.35),
                 ),
-              ),
+              )
+            else if (e.kind == 'notice')
+              _NoticeEntry(event: e, onLink: widget.onLink),
           if (!t.events.any((e) => e.kind == 'message' || e.kind == 'reply' || e.kind == 'notice'))
             Text('아직 이 작업에 오간 말이 없어요.', style: TextStyle(color: scheme.onSurfaceVariant)),
         ],
@@ -305,7 +306,7 @@ class _ReplyEntry extends StatelessWidget {
           if (view.body.isNotEmpty)
             ReplyText(
               text: view.body,
-              onLink: onLink ?? (url) => launchUrl(externalUri(url) ?? Uri(), mode: LaunchMode.externalApplication),
+              onLink: onLink ?? _openOutside,
               style: style,
             ),
           if (view.meta != null) ReplyMetaLine(meta: view.meta!),
@@ -315,6 +316,36 @@ class _ReplyEntry extends StatelessWidget {
     );
   }
 }
+
+/// 작업 대화 속 알림 — 채널 요약 같은 글도 나쵸 답처럼 링크는 라벨로, 굵게·목록은 모양으로.
+class _NoticeEntry extends StatelessWidget {
+  const _NoticeEntry({required this.event, this.onLink});
+
+  final NachoEvent event;
+  final ValueChanged<String>? onLink;
+
+  @override
+  Widget build(BuildContext context) {
+    const style = TextStyle(fontSize: 13, height: 1.35);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('알림 · ${_clock(event.atMs)}', style: style),
+          ReplyText(
+            text: event.text,
+            onLink: onLink ?? _openOutside,
+            style: style,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+void _openOutside(String url) =>
+    launchUrl(externalUri(url) ?? Uri(), mode: LaunchMode.externalApplication);
 
 bool _image(String name) {
   final n = name.toLowerCase();

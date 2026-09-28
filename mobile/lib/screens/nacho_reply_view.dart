@@ -1,85 +1,49 @@
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
+import '../chat_markdown.dart';
 import '../nacho.dart';
 import '../nacho_reply.dart';
 import '../nacho_student.dart';
 import '../server.dart';
 import '../student_art.dart';
 
-/// 본문 — 마크다운 링크는 글자(라벨)만 보이고 누르면 연다. 굵게·코드도 기호 없이.
-class ReplyText extends StatefulWidget {
+/// 본문 — 나쵸 답의 마크다운(목록·제목·인용·표·코드·링크·굵게). 링크는 라벨만 보이고 누르면 연다.
+class ReplyText extends StatelessWidget {
   const ReplyText({
     super.key,
     required this.text,
     required this.onLink,
     this.style,
+    this.selectable = true,
   });
 
   final String text;
   final ValueChanged<String> onLink;
   final TextStyle? style;
 
-  @override
-  State<ReplyText> createState() => _ReplyTextState();
-}
-
-class _ReplyTextState extends State<ReplyText> {
-  final List<TapGestureRecognizer> _taps = [];
-
-  @override
-  void dispose() {
-    _drop();
-    super.dispose();
-  }
-
-  void _drop() {
-    for (final t in _taps) {
-      t.dispose();
-    }
-    _taps.clear();
-  }
-
-  TapGestureRecognizer _tap(String url) {
-    final r = TapGestureRecognizer()..onTap = () => widget.onLink(url);
-    _taps.add(r);
-    return r;
-  }
+  /// 알림 줄처럼 줄 전체가 눌리는 자리는 끈다 — 선택 영역이 그 탭을 가져간다.
+  final bool selectable;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    _drop();
-    final spans = <InlineSpan>[
-      for (final part in parseInline(widget.text))
-        if (part.url != null)
-          TextSpan(
-            text: part.text,
-            style: TextStyle(
-              color: scheme.primary,
-              decoration: TextDecoration.underline,
-              decorationColor: scheme.primary,
-            ),
-            recognizer: _tap(part.url!),
-          )
-        else if (part.code)
-          TextSpan(
-            text: part.text,
-            style: TextStyle(
-              fontFamily: 'TermMono',
-              fontFamilyFallback: const ['TermHangul'],
-              backgroundColor: scheme.surfaceContainerHigh,
-            ),
-          )
-        else
-          TextSpan(
-            text: part.text,
-            style: part.bold ? const TextStyle(fontWeight: FontWeight.w700) : null,
-          ),
-    ];
-    return SelectionArea(
-      child: Text.rich(TextSpan(style: widget.style, children: spans)),
+    final theme = Theme.of(context);
+    final body = MarkdownBody(
+      data: guardMarkdown(text),
+      styleSheet: chatMarkdownStyle(
+        theme,
+        base: DefaultTextStyle.of(context).style.merge(style),
+        // 나쵸 글이 놓이는 말풍선·알림 줄·작업 상자는 모두 surfaceContainer 층이라 코드는 한 층 아래로 판다.
+        codeBg: theme.colorScheme.surface,
+      ),
+      extensionSet: nachoMarkdown,
+      inlineSyntaxes: nachoInlineSyntaxes,
+      softLineBreak: true,
+      onTapLink: (_, href, _) {
+        if (href != null) onLink(href);
+      },
     );
+    return selectable ? SelectionArea(child: body) : body;
   }
 }
 
