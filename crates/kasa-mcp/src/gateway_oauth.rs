@@ -1,0 +1,374 @@
+use super::*;
+use crate::oauth_accounts::{Device, Link, Poll, Provider, Ready};
+use axum::extract::Query;
+use serde::Deserialize;
+use serde_json::json;
+
+pub(super) fn routes() -> Router<Gate> {
+    Router::new()
+        .route("/relay/oauth/providers", get(providers))
+        .route("/relay/oauth/start", axum::routing::post(start))
+        .route("/relay/oauth/authorize/{id}", get(authorize).post(confirm))
+        .route("/relay/oauth/{provider}/callback", get(callback))
+        .route("/relay/oauth/poll", axum::routing::post(poll))
+        .route("/relay/oauth/cancel", axum::routing::post(cancel))
+        .layer(axum::middleware::map_response(secure_response))
+}
+
+async fn secure_response(mut response: axum::response::Response) -> axum::response::Response {
+    // no-referrer turns a navigation form's Origin into null; same-origin keeps CSRF checks usable without cross-origin leakage.
+    let referrer_policy = if response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"))
+    {
+        "same-origin"
+    } else {
+        "no-referrer"
+    };
+    for (key, value) in [
+        ("cache-control", "no-store"),
+        ("pragma", "no-cache"),
+        ("referrer-policy", referrer_policy),
+        ("x-content-type-options", "nosniff"),
+        (
+            "content-security-policy",
+            "default-src 'none'; frame-ancestors 'none'; form-action 'self' https://accounts.google.com https://github.com; base-uri 'none'",
+        ),
+    ] {
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static(key),
+            axum::http::HeaderValue::from_static(value),
+        );
+    }
+    response
+}
+
+async fn body<T: serde::de::DeserializeOwned>(
+    req: axum::extract::Request,
+) -> Result<T, axum::response::Response> {
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(10),
+        axum::body::to_bytes(req.into_body(), 8192),
+    )
+    .await
+    .map_err(|_| json_err(StatusCode::REQUEST_TIMEOUT, "request_timeout"))?
+    .map_err(|_| json_err(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"))?;
+    serde_json::from_slice(&bytes).map_err(|_| json_err(StatusCode::BAD_REQUEST, "bad_request"))
+}
+
+async fn providers(State(gate): State<Gate>) -> axum::response::Response {
+    axum::Json(gate.oauth.config.providers(gate.oauth.storage_ready())).into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Start {
+    provider: Provider,
+    kind: String,
+    label: String,
+    machine_id: String,
+    #[serde(default)]
+    link: bool,
+}
+
+async fn start(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    if gate.limiter.allow("oauth", &client_ip(&req)).is_err() {
+        return json_err(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+    }
+    let headers = req.headers().clone();
+    let input: Start = match body(req).await {
+        Ok(input) => input,
+        Err(error) => return error,
+    };
+    if !matches!(input.kind.as_str(), "desktop" | "phone") || !valid_machine_id(&input.machine_id) {
+        return json_err(StatusCode::BAD_REQUEST, "bad_device");
+    }
+    let link = if input.link {
+        let Some((device_id, device)) = gate.device_of(&headers) else {
+            return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+        };
+        if device.kind != input.kind
+            || device
+                .machine_id
+                .as_deref()
+                .is_some_and(|machine| machine != input.machine_id)
+            || (device.kind == "desktop" && device.machine_id.is_none())
+        {
+            return json_err(StatusCode::FORBIDDEN, "device_mismatch");
+        }
+        Some(Link {
+            device_id,
+            account: device.account,
+            token_hash: device.token_hash,
+        })
+    } else {
+        if headers.contains_key(header::AUTHORIZATION) {
+            return json_err(StatusCode::BAD_REQUEST, "explicit_link_required");
+        }
+        None
+    };
+    let device = Device {
+        provider: input.provider,
+        kind: input.kind,
+        machine_id: input.machine_id,
+    };
+    let label = input
+        .label
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(60)
+        .collect();
+    match gate.oauth.start(device, label, link) {
+        Ok(value) => axum::Json(value).into_response(),
+        Err(error) => json_err(StatusCode::SERVICE_UNAVAILABLE, error),
+    }
+}
+
+async fn authorize(
+    State(gate): State<Gate>,
+    AxPath(id): AxPath<String>,
+) -> axum::response::Response {
+    match gate.oauth.browser(&id) {
+        Ok(confirmation) => (
+            [(header::SET_COOKIE, confirmation.cookie.clone())],
+            axum::response::Html(device_confirmation(&id, &confirmation)),
+        )
+            .into_response(),
+        Err(error) => json_err(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+fn device_confirmation(
+    id: &str,
+    confirmation: &crate::oauth_accounts::BrowserConfirmation,
+) -> String {
+    let destination = confirmation.account.as_deref().map_or_else(
+        || "Sign in to KASA".into(),
+        |account| {
+            format!(
+                "Connect a login method to KASA account <strong>{}</strong>",
+                html_escape(account)
+            )
+        },
+    );
+    // A provider consent page does not identify the requesting KASA device, so every flow verifies it first.
+    format!(
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Verify KASA device</title><body><main><h1>Verify your KASA device</h1><p>{destination} using {}.</p><p>Requested device label: <strong>{}</strong><br>Device ID: <code>{}</code></p><p>Device names are supplied by the requester. Continue only if you started this from your own KASA app. Never use a code or link sent by another person.</p><form method=\"post\" action=\"/relay/oauth/authorize/{}\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><label for=\"user_code\">Enter the verification code shown in your KASA app</label><input id=\"user_code\" name=\"user_code\" autocomplete=\"off\" maxlength=\"9\" required><button type=\"submit\">Verify device and continue</button></form></main></body></html>",
+        confirmation.provider.name(),
+        html_escape(&confirmation.label),
+        html_escape(&confirmation.machine_id),
+        html_escape(id),
+        html_escape(&confirmation.csrf)
+    )
+}
+
+async fn confirm(
+    State(gate): State<Gate>,
+    AxPath(id): AxPath<String>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    if req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        != Some(gate.oauth.config.origin.as_str())
+    {
+        return json_err(StatusCode::FORBIDDEN, "invalid_confirmation");
+    }
+    if req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        != Some("application/x-www-form-urlencoded")
+    {
+        return json_err(StatusCode::UNSUPPORTED_MEDIA_TYPE, "bad_request");
+    }
+    let cookies = req
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let bytes = match tokio::time::timeout(
+        Duration::from_secs(10),
+        axum::body::to_bytes(req.into_body(), 8192),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        _ => return json_err(StatusCode::BAD_REQUEST, "bad_request"),
+    };
+    let Ok(raw) = std::str::from_utf8(&bytes) else {
+        return json_err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let mut form = reqwest::Url::parse("https://form.invalid/").unwrap();
+    form.set_query(Some(raw));
+    let mut fields = HashMap::new();
+    for (key, value) in form.query_pairs() {
+        if !matches!(key.as_ref(), "csrf" | "user_code")
+            || fields
+                .insert(key.into_owned(), value.into_owned())
+                .is_some()
+        {
+            return json_err(StatusCode::BAD_REQUEST, "bad_request");
+        }
+    }
+    let (Some(csrf), Some(code)) = (fields.get("csrf"), fields.get("user_code")) else {
+        return json_err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    match gate.oauth.confirm(&id, &cookies, csrf, code) {
+        Ok(url) => (StatusCode::SEE_OTHER, [(header::LOCATION, url)]).into_response(),
+        Err(error) => json_err(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+#[derive(Deserialize)]
+struct Callback {
+    state: String,
+    code: Option<String>,
+    error: Option<String>,
+}
+
+async fn callback(
+    State(gate): State<Gate>,
+    AxPath(provider): AxPath<Provider>,
+    Query(input): Query<Callback>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if input.state.len() > 128 {
+        return json_err(StatusCode::BAD_REQUEST, "invalid_state");
+    }
+    let cookies = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let (request, exchange) = match gate.oauth.callback(provider, &input.state, cookies) {
+        Ok(exchange) => exchange,
+        Err(error) => return json_err(StatusCode::BAD_REQUEST, error),
+    };
+    let result = if input.error.is_some() {
+        Err("cancelled")
+    } else if let Some(code) = input
+        .code
+        .filter(|code| !code.is_empty() && code.len() < 8192)
+    {
+        gate.oauth.exchange(&exchange, &code).await
+    } else {
+        Err("invalid_code")
+    };
+    let success = result.is_ok();
+    gate.oauth.finish(&request, result);
+    let message = if success {
+        "KASA sign-in verified. Return to KASA to finish. You can close this tab."
+    } else {
+        "KASA sign-in was not completed. Return to KASA and try again."
+    };
+    (
+        if success {
+            StatusCode::OK
+        } else {
+            StatusCode::BAD_REQUEST
+        },
+        message,
+    )
+        .into_response()
+}
+
+async fn poll(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    let input: Poll = match body(req).await {
+        Ok(input) => input,
+        Err(error) => return error,
+    };
+    match gate.oauth.poll(&input, false) {
+        Ok(None) => axum::Json(json!({"ok":true,"status":"pending"})).into_response(),
+        Ok(Some(ready)) => complete(&gate, ready),
+        Err(error) => json_err(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+async fn cancel(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    let input: Poll = match body(req).await {
+        Ok(input) => input,
+        Err(error) => return error,
+    };
+    match gate.oauth.poll(&input, true) {
+        Ok(_) => axum::Json(json!({"ok":true,"status":"cancelled"})).into_response(),
+        Err(error) => json_err(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+fn complete(gate: &Gate, ready: Ready) -> axum::response::Response {
+    if let Some(link) = &ready.link {
+        // Hold the device lock through identity persistence so revocation cannot race a link.
+        let devices = gate.devices.lock().unwrap();
+        if !devices.get(&link.device_id).is_some_and(|device| {
+            device.revoked_at.is_none()
+                && device.account == link.account
+                && device.token_hash == link.token_hash
+        }) || !gate.account_active(&link.account)
+        {
+            return json_err(StatusCode::UNAUTHORIZED, "link_expired");
+        }
+        return match gate
+            .oauth
+            .resolve(&ready.identity, Some(&link.account), |name| {
+                gate.accounts.exists(name)
+            }) {
+            Ok(account) => {
+                axum::Json(json!({"ok":true,"status":"linked","account":account})).into_response()
+            }
+            Err(error) => json_err(StatusCode::CONFLICT, error),
+        };
+    }
+    let account = match gate
+        .oauth
+        .resolve(&ready.identity, None, |name| gate.accounts.exists(name))
+    {
+        Ok(account) => account,
+        Err(error) => return json_err(StatusCode::FORBIDDEN, error),
+    };
+    if !gate.account_active(&account) {
+        return json_err(StatusCode::UNAUTHORIZED, "account_disabled");
+    }
+    let token = crate::relay_auth::new_token();
+    let device_id = crate::relay_auth::new_device_id();
+    let machine_id = Some(ready.device.machine_id);
+    let kind = ready.device.kind;
+    let now = now_secs();
+    gate.devices.lock().unwrap().insert(
+        device_id.clone(),
+        DeviceRec {
+            token_hash: crate::relay_auth::token_hash(&token),
+            account: account.clone(),
+            kind: kind.clone(),
+            machine_id: machine_id.clone(),
+            label: ready.label,
+            created: now,
+            last_seen: now,
+            revoked_at: None,
+        },
+    );
+    if gate.persist_result().is_err() {
+        gate.devices.lock().unwrap().remove(&device_id);
+        return json_err(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable");
+    }
+    // The requester may lose the response or fail to save it; existing credentials remain explicitly revocable.
+    axum::Json(json!({"ok":true,"status":"complete","account":account,"device_id":device_id,"token":token})).into_response()
+}
+
+#[cfg(test)]
+#[path = "gateway_oauth/tests.rs"]
+mod tests;

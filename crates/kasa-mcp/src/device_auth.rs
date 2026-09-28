@@ -13,6 +13,9 @@ use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+#[path = "device_oauth.rs"]
+mod oauth;
+
 static CREDENTIALS: Mutex<()> = Mutex::new(());
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 static REJECTED: Mutex<Option<String>> = Mutex::new(None);
@@ -20,6 +23,12 @@ static REJECTED: Mutex<Option<String>> = Mutex::new(None);
 // UI caches can discard old-account content without reading credentials on the render thread.
 pub fn change_epoch() -> u64 {
     EPOCH.load(Ordering::Acquire)
+}
+
+pub fn cancel_oauth() {
+    if let Ok(_guard) = CREDENTIALS.lock() {
+        EPOCH.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,6 +86,12 @@ pub(crate) fn with_current<T>(stamp: &Stamp, operation: impl FnOnce() -> Result<
         return Err("authentication expired".into());
     }
     operation()
+}
+
+/// Narrow check for other crates: the stamp still names the signed-in device account.
+/// Callers that need to act under the credential stay inside this crate via `with_current`.
+pub fn stamp_is_current(stamp: &Stamp) -> bool {
+    with_current(stamp, || Ok(())).is_ok()
 }
 
 pub(crate) fn reject(stamp: &Stamp) {
@@ -298,6 +313,10 @@ pub fn handle(params: &Value) -> anyhow::Result<Value> {
     std::thread::spawn(move || -> anyhow::Result<Value> {
         tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async move {
             match op.as_str() {
+                "oauth_providers" => oauth::providers().await,
+                "oauth_start" => oauth::start(&params).await,
+                "oauth_poll" => oauth::poll(&params).await,
+                "oauth_cancel" => oauth::cancel(&params).await,
                 "login" => {
                     let account = params["account"].as_str().unwrap_or("").trim().to_lowercase();
                     let password = params["password"].as_str().unwrap_or("");

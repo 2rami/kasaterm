@@ -169,6 +169,10 @@ impl Accounts {
         self.with(|f| f.accounts.get(name).is_some_and(|a| !a.disabled))
     }
 
+    pub(crate) fn exists(&self, name: &str) -> bool {
+        self.with(|f| f.accounts.contains_key(name))
+    }
+
     /// 비밀번호가 맞는가. 없는 계정·막힌 계정도 같은 계산을 거친다 — 걸린 시간으로 계정 유무를
     /// 가늠하지 못하게.
     pub fn check(&self, name: &str, pw: &str) -> bool {

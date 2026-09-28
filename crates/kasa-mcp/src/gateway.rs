@@ -29,6 +29,11 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
+#[path = "gateway_oauth.rs"]
+mod oauth;
+#[path = "gateway_workspace.rs"]
+mod workspace;
+
 use crate::uplink::{
     decode, encode, safe_path, skip_header, BODY, CLOSE, END, HEAD, OPEN, STREAM_QUEUE, WS_BIN, WS_PING, WS_PONG, WS_TEXT,
 };
@@ -207,8 +212,11 @@ pub struct Gate {
     /// 관문 계정 → 그 계정 기기들이 올린 코딩 에이전트 계정 목록(`agent_accounts.rs`).
     agents: Arc<Mutex<HashMap<String, crate::agent_accounts::Book>>>,
     accounts: Arc<crate::relay_auth::Accounts>,
+    oauth: Arc<crate::oauth_accounts::OAuth>,
     limiter: Arc<crate::relay_auth::Limiter>,
     account_sync: Arc<crate::account_sync::server::Store>,
+    /// 계정별 개인비서(키·작업·대화). 상태 폴더가 없으면 `None` — 메모리에만 키를 두지 않는다.
+    workspace: Option<Arc<workspace::Service>>,
     auth_changes: tokio::sync::watch::Sender<u64>,
     state_path: Option<PathBuf>,
     state_write: Arc<Mutex<()>>,
@@ -290,10 +298,15 @@ impl Gate {
             devices: Arc::new(Mutex::new(devices)),
             agents: Arc::new(Mutex::new(agents)),
             accounts: Arc::new(crate::relay_auth::Accounts::new(accounts_path)),
+            oauth: Arc::new(crate::oauth_accounts::OAuth::new(
+                state_path.as_ref().map(|p| p.with_file_name("relay-oauth-identities.json")),
+                crate::oauth_accounts::Config::from_env(),
+            )),
             limiter: Arc::new(crate::relay_auth::Limiter::default()),
             account_sync: Arc::new(crate::account_sync::server::Store::new(
                 state_path.as_ref().map(|p| p.with_file_name("account-sync")),
             )),
+            workspace: workspace::Service::open(state_path.as_deref()),
             auth_changes: tokio::sync::watch::channel(0).0,
             state_path,
             state_write: Arc::new(Mutex::new(())),
@@ -303,17 +316,26 @@ impl Gate {
 
     /// 임시 파일에 쓰고 fsync 뒤 이름을 바꾼다(0600) — 쓰다 죽어도 반쪽 파일이 남지 않는다.
     fn persist(&self) {
-        let Some(p) = &self.state_path else { return };
-        // Concurrent requests must not share a temporary file or overwrite a newer snapshot.
-        let Ok(_write) = self.state_write.lock() else { return };
-        let slugs = match self.keys.lock() { Ok(keys) => keys.clone(), Err(_) => return };
-        let devices = match self.devices.lock() { Ok(devices) => devices.clone(), Err(_) => return };
-        let agent_accounts = match self.agents.lock() { Ok(agents) => agents.clone(), Err(_) => return };
-        let body = serde_json::to_string_pretty(&StateFile { version: 2, slugs, devices, agent_accounts })
-            .unwrap_or_default();
-        if let Err(e) = crate::relay_auth::write_private(p, &body) {
-            eprintln!("[gateway] 상태 파일을 못 썼어요: {e}");
+        if let Err(error) = self.persist_result() {
+            eprintln!("[gateway] state persistence failed: {error}");
         }
+    }
+
+    fn persist_result(&self) -> std::io::Result<()> {
+        let Some(p) = &self.state_path else { return Ok(()) };
+        // Concurrent requests must not share a temporary file or overwrite a newer snapshot.
+        let unavailable = || std::io::Error::other("state lock unavailable");
+        let _write = self.state_write.lock().map_err(|_| unavailable())?;
+        let slugs = self.keys.lock().map_err(|_| unavailable())?.clone();
+        let devices = self.devices.lock().map_err(|_| unavailable())?.clone();
+        let agent_accounts = self.agents.lock().map_err(|_| unavailable())?.clone();
+        let body = serde_json::to_string_pretty(&StateFile { version: 2, slugs, devices, agent_accounts })
+            .map_err(std::io::Error::other)?;
+        crate::relay_auth::write_private(p, &body)
+    }
+
+    fn account_active(&self, account: &str) -> bool {
+        if self.accounts.exists(account) { self.accounts.active(account) } else { self.oauth.active(account) }
     }
 
     /// `Authorization: Bearer <기기 토큰>` 의 주인. 폐기됐거나 계정이 막혔으면 None.
@@ -336,7 +358,7 @@ impl Gate {
         let (id, rec) = devices
             .iter_mut()
             .find(|(_, d)| d.revoked_at.is_none() && d.token_hash == want)?;
-        if !self.accounts.active(&rec.account) {
+        if !self.account_active(&rec.account) {
             return None;
         }
         rec.last_seen = now_secs();
@@ -420,6 +442,8 @@ fn key_hash(key: &str) -> String {
 
 pub fn router(gate: Gate) -> Router {
     Router::new()
+        .merge(oauth::routes())
+        .merge(workspace::routes())
         .route("/relay/uplink", get(uplink_ws))
         .route("/relay/login", axum::routing::post(login))
         .route("/relay/whoami", get(whoami))
@@ -610,7 +634,7 @@ async fn account_sync_get(State(gate): State<Gate>, headers: axum::http::HeaderM
         return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
     };
     let devices = gate.devices.lock().unwrap();
-    if !devices.get(&id).is_some_and(|d| d.revoked_at.is_none()) || !gate.accounts.active(&device.account) {
+    if !devices.get(&id).is_some_and(|d| d.revoked_at.is_none()) || !gate.account_active(&device.account) {
         return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
     }
     account_sync_response(gate.account_sync.get(&device.account))
@@ -633,7 +657,7 @@ async fn account_sync_patch(State(gate): State<Gate>, req: axum::extract::Reques
         return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
     };
     let devices = gate.devices.lock().unwrap();
-    if !devices.get(&id).is_some_and(|d| d.revoked_at.is_none()) || !gate.accounts.active(&device.account) {
+    if !devices.get(&id).is_some_and(|d| d.revoked_at.is_none()) || !gate.account_active(&device.account) {
         return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
     }
     account_sync_response(gate.account_sync.patch(&device.account, &patch))
@@ -698,7 +722,7 @@ fn agent_accounts_reply(gate: &Gate, devices: &HashMap<String, DeviceRec>, accou
 fn catalog_device_active(gate: &Gate, devices: &HashMap<String, DeviceRec>, me: &str, device: &DeviceRec) -> bool {
     devices.get(me).is_some_and(|current| current.revoked_at.is_none()
         && current.account == device.account && current.token_hash == device.token_hash)
-        && gate.accounts.active(&device.account)
+        && gate.account_active(&device.account)
 }
 
 /// `GET /relay/agent-accounts` — 이 관문 계정의 기기들이 올린 코딩 에이전트 계정 목록.
@@ -1091,7 +1115,7 @@ impl AccountAccess {
         let devices = self.gate.devices.lock().unwrap();
         devices.get(&self.device_id).is_some_and(|d| d.revoked_at.is_none()
             && d.account == self.account && d.token_hash == self.token_hash)
-            && self.gate.accounts.active(&self.account)
+            && self.gate.account_active(&self.account)
     }
 }
 
