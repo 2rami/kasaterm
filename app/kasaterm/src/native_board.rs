@@ -1740,15 +1740,17 @@ struct HubLayout {
     chat: Option<Rect>,
 }
 
+/// `area` 는 이미 좌우 여백을 뺀 본문 칸이다. 여기서 또 빼면 본문이 머리글보다 안쪽에서
+/// 시작하고 600px 판에서 카드 폭이 406 → 366 으로 준다.
 fn hub_layout(area: Rect, tab: BoardTab, body_top: f32) -> HubLayout {
     let (ax, ay, aw, ah) = area;
-    let pad = if aw < 400.0 { 12.0 } else if aw < 760.0 { 20.0 } else { 28.0 };
-    let available = (aw - pad * 2.0).max(1.0);
+    let available = aw.max(1.0);
     let height = (ay + ah - 14.0 - body_top).max(0.0);
     if matches!(tab, BoardTab::Work | BoardTab::Chat) && available >= 960.0 {
-        let chat_w = (available * 0.36).clamp(340.0, 420.0);
-        let work_w = (available - chat_w - 24.0).min(800.0);
-        let x = ax + (aw - work_w - chat_w - 24.0) / 2.0;
+        // 정수로 내린다 — 경계 폭(960)에서 합이 부동소수 오차만큼 본문 칸을 넘는다.
+        let chat_w = (available * 0.36).clamp(340.0, 420.0).floor();
+        let work_w = (available - chat_w - 24.0).min(800.0).floor();
+        let x = ax + ((aw - work_w - chat_w - 24.0) / 2.0).max(0.0).floor();
         HubLayout {
             work: Some((x, body_top, work_w, height)),
             chat: Some((x + work_w + 24.0, body_top, chat_w, height)),
@@ -3563,7 +3565,7 @@ mod tests {
 
     #[test]
     fn human_layout_keeps_chat_and_work_inside_the_viewport_without_overlap() {
-        for width in [280.0, 320.0, 760.0, 1015.0, 1016.0, 1440.0, 2560.0] {
+        for width in [280.0, 320.0, 760.0, 959.0, 960.0, 1440.0, 2560.0] {
             for tab in [BoardTab::Work, BoardTab::Chat] {
                 let layout = hub_layout((200.0, 44.0, width, 700.0), tab, 102.0);
                 for rect in [layout.work, layout.chat].into_iter().flatten() {
@@ -3581,8 +3583,10 @@ mod tests {
                 }
             }
         }
-        assert!(hub_layout((0.0, 0.0, 1015.0, 600.0), BoardTab::Work, 58.0).chat.is_none());
-        assert!(hub_layout((0.0, 0.0, 1016.0, 600.0), BoardTab::Work, 58.0).chat.is_some());
+        assert!(hub_layout((0.0, 0.0, 959.0, 600.0), BoardTab::Work, 58.0).chat.is_none());
+        assert!(hub_layout((0.0, 0.0, 960.0, 600.0), BoardTab::Work, 58.0).chat.is_some());
+        let narrow = hub_layout((174.0, 0.0, 406.0, 600.0), BoardTab::Work, 58.0).work.unwrap();
+        assert_eq!((narrow.0, narrow.2), (174.0, 406.0), "본문은 머리글과 같은 왼쪽 줄·같은 폭");
     }
 
     #[test]

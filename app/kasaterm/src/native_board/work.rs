@@ -160,25 +160,64 @@ pub(super) fn paint_work(
         .iter()
         .filter(|task| !matches!(string(task, "state"), "verified" | "cancelled"))
         .count();
-    text(g, x, *y, "프로젝트", 20.0, theme::text(), true);
-    let status = format!("진행 {active}");
-    let status_x = x + w - g.measure_chrome_text(&status, 10.5, false);
-    text(
+    // 머리글은 판의 「작업현황」 하나다. 그 아래는 상태 한 줄과 조작만 — 큰 「프로젝트」 제목을
+    // 또 세우면 이름이 세 번 겹쳐 읽힌다.
+    let source = if s.chat.online {
+        "계정 기록"
+    } else {
+        "연결 확인 중 · 마지막 기록"
+    };
+    let status = format!("진행 {active} · {source}");
+    let project_action = if s.chat.project_editor {
+        "프로젝트 접기"
+    } else {
+        "새 프로젝트"
+    };
+    // 단추는 글자를 한 자씩 재어 합으로 자른다(`info::fit_text`). 통째로 잰 폭으로 단추를
+    // 만들면 그 합보다 좁아 「연결 설…」로 잘린다. 여백을 더했다 빼는 부동소수 오차도 있어 2px 를 더 둔다.
+    let control_w = |g: &mut gpu::GpuRenderer, label: &str| {
+        let mut buf = [0u8; 4];
+        let chars: f32 = label
+            .chars()
+            .map(|ch| g.measure_chrome_text(ch.encode_utf8(&mut buf), 12.0, false))
+            .sum();
+        chars.max(g.measure_chrome_text(label, 12.0, false))
+            + 2.0 * crate::native_controls::CONTROL_PADDING_X
+            + 2.0
+    };
+    let project_w = control_w(g, project_action);
+    let key_w = control_w(g, "연결 설정");
+    let controls_w = project_w + 6.0 + key_w;
+    let status_w = g.measure_chrome_text(&status, 11.0, false);
+    let (controls_x, status_room) = if status_w + 16.0 + controls_w <= w {
+        (x + w - controls_w, w - controls_w - 16.0)
+    } else {
+        (x, w)
+    };
+    let status = fit(g, &status, status_room, 11.0, false);
+    text(g, x, *y + 7.0, &status, 11.0, theme::text_dim(), false);
+    if controls_x == x {
+        *y += 30.0;
+    }
+    button(
         g,
-        status_x,
-        *y + 6.0,
-        &status,
-        10.5,
-        theme::text_dim(),
+        s,
+        hits,
+        (controls_x, *y, project_w, 26.0),
+        project_action,
+        Target::AssistantProjectEdit,
         false,
     );
-    *y += 34.0;
-    let source = if s.chat.online {
-        "계정 작업 기록 · 펫과 함께 보기"
-    } else {
-        "연결 확인 중 · 마지막으로 받은 기록"
-    };
-    overview_note(g, x, y, w, source, theme::text_dim());
+    button(
+        g,
+        s,
+        hits,
+        (controls_x + project_w + 6.0, *y, key_w, 26.0),
+        "연결 설정",
+        Target::AssistantKeyEdit,
+        false,
+    );
+    *y += 38.0;
     if let Some(error) = &s.chat.error {
         overview_note(g, x, y, w, error, theme::danger());
     }
@@ -223,30 +262,7 @@ pub(super) fn paint_work(
         }
         *y += 38.0;
     }
-    let first_w = (w * 0.52).min(128.0);
-    text_button(
-        g,
-        s,
-        hits,
-        (x, *y, first_w, 26.0),
-        if s.chat.project_editor {
-            "프로젝트 접기"
-        } else {
-            "새 프로젝트"
-        },
-        Target::AssistantProjectEdit,
-        false,
-    );
-    text_button(
-        g,
-        s,
-        hits,
-        (x + first_w + 8.0, *y, (w - first_w - 8.0).min(100.0), 26.0),
-        "연결 설정",
-        Target::AssistantKeyEdit,
-        false,
-    );
-    *y += 42.0;
+    *y += 6.0;
     let mut projects = rows(workspace, "projects")
         .iter()
         .map(|project| Some(string(project, "id").to_string()))
