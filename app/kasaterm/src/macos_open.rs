@@ -9,7 +9,7 @@
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass};
-use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager};
+use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSNotification, NSNotificationCenter};
 use winit::event_loop::EventLoopProxy;
 
 use crate::UserEvent;
@@ -36,6 +36,11 @@ define_class!(
     unsafe impl NSObjectProtocol for OpenDocHandler {}
 
     impl OpenDocHandler {
+        #[unsafe(method(applicationWillFinishLaunching:))]
+        fn application_will_finish_launching(&self, _notification: &NSNotification) {
+            install_open_doc_handler(self.ivars().proxy.clone());
+        }
+
         // NSAppleEventManager 규약 셀렉터. odoc 의 직접객체(keyDirectObject)는
         // 파일 리스트(AEList) — 각 항목을 파일 URL→경로로 풀어 GUI 에 위임한다.
         #[unsafe(method(handleAppleEvent:withReplyEvent:))]
@@ -78,9 +83,28 @@ impl OpenDocHandler {
     }
 }
 
-/// odoc Apple Event 핸들러를 1회 등록한다. `Once` 가드라 main() 1차 등록과
-/// resumed() 2차 등록이 중복되지 않는다. 핸들러 객체는 이벤트가 올 때마다
-/// 불리므로 NSApp 수명 동안 살아야 한다 → leak(`mem::forget`).
+/// Finder can deliver the launch document before winit's `resumed` callback.
+/// AppKit has installed its own handlers by willFinishLaunching, so register
+/// there rather than before `run_app` or after the first document was rejected.
+pub(crate) fn prepare_open_doc_handler(proxy: EventLoopProxy<UserEvent>) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let handler = OpenDocHandler::new(proxy);
+        unsafe {
+            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                &handler,
+                sel!(applicationWillFinishLaunching:),
+                Some(objc2_app_kit::NSApplicationWillFinishLaunchingNotification),
+                None,
+            );
+        }
+        std::mem::forget(handler);
+    });
+}
+
+/// The resumed fallback shares this guard with willFinishLaunching so the
+/// process retains only one Apple Event handler for its entire lifetime.
 pub(crate) fn install_open_doc_handler(proxy: EventLoopProxy<UserEvent>) {
     use std::sync::Once;
     static ONCE: Once = Once::new();

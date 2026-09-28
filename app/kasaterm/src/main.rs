@@ -6792,6 +6792,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let event_loop = builder.build()?;
     let proxy = event_loop.create_proxy();
+    #[cfg(target_os = "macos")]
+    macos_open::prepare_open_doc_handler(proxy.clone());
     // 원격 호스트의 `open-url` 되돌림을 GUI 이벤트로 — kasa-mcp 는 창을 모른다.
     if !launch.viewer_only {
         let p = std::sync::Mutex::new(proxy.clone());

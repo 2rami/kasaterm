@@ -7,9 +7,11 @@
 set -euo pipefail
 
 PROFILE=release
+VERIFY_OPEN=0
 for arg in "$@"; do
   case "$arg" in
     --debug) PROFILE=debug ;;
+    --verify-open) VERIFY_OPEN=1 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
@@ -25,14 +27,24 @@ NOTO_LICENSE="$ROOT/app/kasaterm/assets/fonts/OFL-NotoSansKR.txt"
 [[ -f "$NOTO_LICENSE" ]] || { echo "error: Noto Sans KR OFL missing" >&2; exit 1; }
 
 VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 npm --prefix document-editor ci --no-audit --no-fund
 npm --prefix document-editor run build
 if [[ "$PROFILE" == release ]]; then
   cargo build --release -p kasaterm --bin kasaterm
-  BINDIR="$ROOT/target/release"
+  BINDIR="$TARGET_DIR/release"
 else
   cargo build -p kasaterm --bin kasaterm
-  BINDIR="$ROOT/target/debug"
+  BINDIR="$TARGET_DIR/debug"
+fi
+
+if [[ "$VERIFY_OPEN" == 1 ]]; then
+  if [[ "$PROFILE" == release ]]; then
+    cargo build --release -p kasaterm --example macos_open_probe
+  else
+    cargo build -p kasaterm --example macos_open_probe
+  fi
+  python3 scripts/test-macos-document-open.py "$BINDIR/examples/macos_open_probe"
 fi
 
 SOURCE_BIN="$BINDIR/kasaterm"
@@ -92,6 +104,29 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
     <string>카사뷰어가 문서 폴더의 Markdown 문서를 엽니다.</string>
     <key>NSDownloadsFolderUsageDescription</key>
     <string>카사뷰어가 다운로드한 Markdown 문서를 엽니다.</string>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+      <dict>
+        <key>UTTypeIdentifier</key>
+        <string>net.daringfireball.markdown</string>
+        <key>UTTypeDescription</key>
+        <string>Markdown Document</string>
+        <key>UTTypeConformsTo</key>
+        <array><string>public.plain-text</string></array>
+        <key>UTTypeTagSpecification</key>
+        <dict>
+          <key>public.filename-extension</key>
+          <array>
+            <string>md</string>
+            <string>markdown</string>
+            <string>mdown</string>
+            <string>mkd</string>
+          </array>
+          <key>public.mime-type</key>
+          <array><string>text/markdown</string><string>text/x-markdown</string></array>
+        </dict>
+      </dict>
+    </array>
     <key>CFBundleDocumentTypes</key>
     <array>
       <dict>
@@ -120,15 +155,43 @@ PLIST
 
 plutil -lint "$STAGE/Contents/Info.plist" >/dev/null
 
-SIGN_ID="${KASATERM_SIGN_ID:-kasaterm-dev}"
-if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
+SIGN_ID="${KASATERM_SIGN_ID:-}"
+SIGN_KEYCHAIN="${KASATERM_SIGN_KEYCHAIN:-}"
+HARDENED="${KASATERM_SIGN_HARDENED:-0}"
+IDENTITY_ARGS=(-p codesigning)
+if [[ -n "$SIGN_KEYCHAIN" ]]; then
+  [[ -f "$SIGN_KEYCHAIN" ]] || { echo "error: signing keychain does not exist: $SIGN_KEYCHAIN" >&2; exit 1; }
+  IDENTITY_ARGS+=("$SIGN_KEYCHAIN")
+fi
+# A requested identity must reach codesign unchanged; falling back would
+# replace an installed Developer ID app with an unrelated signing identity.
+if [[ -n "$SIGN_ID" ]]; then
   SIGN="$SIGN_ID"
   SIGN_MSG="signed with '$SIGN_ID'"
+elif security find-identity "${IDENTITY_ARGS[@]}" 2>/dev/null | grep -Fq -- "kasaterm-dev"; then
+  SIGN="kasaterm-dev"
+  SIGN_MSG="signed with 'kasaterm-dev'"
 else
   SIGN="-"
   SIGN_MSG="signed ad-hoc"
 fi
-codesign --force --timestamp=none --sign "$SIGN" "$STAGE"
+SIGN_ARGS=(--force --sign "$SIGN")
+[[ -n "$SIGN_KEYCHAIN" ]] && SIGN_ARGS+=(--keychain "$SIGN_KEYCHAIN")
+if [[ "$HARDENED" == "1" ]]; then
+  APPLE_IDENTITY=$(security find-identity -v "${IDENTITY_ARGS[@]}" 2>/dev/null | grep -F -- "$SIGN" | head -1 || true)
+  [[ "$SIGN" != "-" && "$APPLE_IDENTITY" == *'"Developer ID Application: '* ]] || {
+    echo "error: KASATERM_SIGN_HARDENED=1 needs a Developer ID Application identity" >&2; exit 1; }
+  SIGN_ARGS+=(--options runtime --timestamp --entitlements "$ROOT/scripts/kasaterm.entitlements")
+  # Compilation may outlast the unlocked interval; only the explicitly
+  # supplied helper may reopen the keychain, immediately before signing.
+  if [[ -n "${KASATERM_SIGN_UNLOCK:-}" ]]; then
+    [[ -x "$KASATERM_SIGN_UNLOCK" ]] || { echo "error: KASATERM_SIGN_UNLOCK is not executable" >&2; exit 1; }
+    "$KASATERM_SIGN_UNLOCK" || { echo "error: KASATERM_SIGN_UNLOCK failed" >&2; exit 1; }
+  fi
+else
+  SIGN_ARGS+=(--timestamp=none)
+fi
+codesign "${SIGN_ARGS[@]}" "$STAGE"
 codesign --verify --strict --verbose=2 "$STAGE"
 
 [[ "$(plutil -extract CFBundleIdentifier raw -o - "$STAGE/Contents/Info.plist")" == \

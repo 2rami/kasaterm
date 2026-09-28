@@ -63,6 +63,23 @@ class BuildManifestTests(unittest.TestCase):
         self.assertIsNone(manifest["source"]["source_commit"])
         self.assertTrue(manifest["components"]["app"]["sha256"])
 
+    def test_an_ignored_lockfile_change_still_prevents_a_clean_source_claim(self):
+        (self.project / ".gitignore").write_text("/dist/\n/Cargo.lock\n")
+        self.command("add", ".gitignore")
+        self.command("commit", "-qm", "ignore generated lock")
+        lock = self.project / "Cargo.lock"
+        lock.write_text('version = "0.2.1"\n')
+        proof.begin(self.project, "release", self.snapshot)
+        lock.write_text('version = "0.2.2"\n')
+        source = self.finish()["source"]
+        self.assertFalse(source["before"]["dirty"])
+        self.assertFalse(source["after"]["dirty"])
+        self.assertEqual(source["before"]["head"], source["after"]["head"])
+        self.assertEqual(source["before"]["status_digest"], source["after"]["status_digest"])
+        self.assertNotEqual(source["before"]["input_digest"], source["after"]["input_digest"])
+        self.assertEqual(source["status"], "uncertain")
+        self.assertIsNone(source["source_commit"])
+
     def test_signature_failure_does_not_publish_ready_manifest(self):
         proof.begin(self.project, "release", self.snapshot)
         with self.assertRaises(ValueError):

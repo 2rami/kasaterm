@@ -15,6 +15,7 @@ from unittest import mock
 import plistlib
 import re
 import shutil
+import sys
 
 from tools.release import common, deps
 from tools.release import fastpatch as fp
@@ -23,6 +24,7 @@ from tools.release import nacho
 from tools.release.backend import asset_names
 from tools.release.common import Refused, feed_item, sha256_bytes
 from tools.release.proc import Http, Result, Runner
+from tools.request_journal import build_manifest as proof
 
 # 이 검사는 진짜 원격·피드·기기·나쵸를 부르지 않는다. 원격은 임시 bare 저장소, 피드는 임시 파일, 기기는 이 프로세스가
 # 연 가짜 `/version` 서버, 나쵸는 같은 계약을 흉내 낸 가짜 창구다. `git` 과 `openssl` 은 진짜로 돈다 — 태그 push 의
@@ -1386,6 +1388,73 @@ class LocalSigningBuildTests(LocalFixture):
         names = [" ".join(c[:2]) for c in self.calls]
         self.assertLess(names.index("cargo metadata"), names.index("bash scripts/build-app.sh"))
 
+    def test_an_existing_lock_from_verification_is_refreshed_after_the_version_bump(self):
+        cargo = shutil.which("cargo")
+        if not cargo:
+            self.skipTest("cargo is required for the lockfile regression")
+        (self.work / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["app/kasaterm", "crates/helper"]\nresolver = "2"\n'
+            '[workspace.package]\nversion = "0.2.0"\n')
+        (self.work / "app/kasaterm/Cargo.toml").write_text(
+            '[package]\nname = "kasaterm"\nversion.workspace = true\nedition = "2021"\n'
+            '[dependencies]\nhelper = { path = "../../crates/helper" }\n')
+        helper = self.work / "crates/helper"
+        (helper / "src").mkdir(parents=True)
+        (helper / "Cargo.toml").write_text('[package]\nname = "helper"\nversion.workspace = true\nedition = "2021"\n')
+        (helper / "src/lib.rs").write_text("pub fn value() -> u32 { 1 }\n")
+        (self.work / ".gitignore").write_text("/Cargo.lock\n/dist/\n")
+        self.head = self.commit("build: lockfile fixture")
+        sh(self.work, "git", "push", "-q", "origin", "main")
+        plan = self.plan()
+        backend = self.backend(plan, "local")
+        backend.tools["cargo"] = {"path": cargo}
+        wt = backend.worktree(plan)
+        env = {**backend.env(), "CARGO_NET_OFFLINE": "true"}
+        sh(wt, cargo, "metadata", "--offline", "--format-version", "1")
+        old_lock = (wt / "Cargo.lock").read_bytes()
+        bump = backend.ensure_bump(wt, plan)
+        self.assertEqual((wt / "Cargo.lock").read_bytes(), old_lock)
+        captured = {}
+
+        def execute(argv, cwd, timeout, env):
+            if argv[0] == cargo:
+                return Runner.execute(backend.runner, argv, cwd, timeout, env)
+            if argv == ["bash", "scripts/build-app.sh"]:
+                snapshot = backend.workdir / "lock-regression-before.json"
+                captured["before"] = proof.begin(wt, "release", snapshot)
+                # Exercise Cargo's real pre-fix lock update inside the proof
+                # interval; a stale lock must still make that proof uncertain.
+                result = Runner.execute(backend.runner, [cargo, "build", "--offline"], cwd, timeout, env)
+                if not result.ok:
+                    return result
+                self.fake(argv, cwd, env)
+                manifest = proof.finish(snapshot, wt / "dist/kasaterm.app", wt / "dist/kasaterm.build.json",
+                                        signature_verifier=lambda _: {"verified": True})
+                captured["source"] = manifest["source"]
+                return Result(0)
+            return self.fake(argv, cwd, env)
+
+        with mock.patch.object(backend.runner, "execute", side_effect=execute):
+            backend.bake(wt, env, "lock-regression")
+        self.assertNotEqual((wt / "Cargo.lock").read_bytes(), old_lock)
+        self.assertEqual(captured["source"]["status"], "stable_clean")
+        self.assertEqual(captured["source"]["source_commit"], bump)
+        self.assertEqual(captured["source"]["before"]["input_digest"], captured["source"]["after"]["input_digest"])
+
+    def test_a_failed_existing_lock_refresh_stops_before_the_bake(self):
+        plan = self.plan()
+        backend = self.backend(plan, "local")
+        wt = backend.worktree(plan)
+        (wt / "Cargo.lock").write_text("stale lock\n")
+        for answer, reason in ((Result(101, "", "resolution failed"), "resolution failed"),
+                               (Result(None, timed_out=True), "시간 초과")):
+            with self.subTest(reason=reason):
+                self.calls.clear()
+                self.cargo_answer = lambda _argv, result=answer: result
+                with self.assertRaisesRegex(Refused, "Cargo.lock.*" + reason):
+                    backend.bake(wt, backend.env(), "failed-lock")
+                self.assertFalse(any(c[:2] == ["bash", "scripts/build-app.sh"] for c in self.calls))
+
     def test_the_version_commit_is_the_same_every_time_it_is_made(self):
         plan = self.plan()
         b = self.backend(plan, "local")
@@ -1559,6 +1628,113 @@ class MacsignUnitTests(unittest.TestCase):
             self.assertIn("팀 ABCDE12345", macsign.readiness_problems(rows, "OTHER00000")[0])
 
 
+class ViewerSigningTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="viewer-signing-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        (self.root / "scripts").mkdir()
+        shutil.copy2(REPO / "scripts/build-viewer-app.sh", self.root / "scripts/build-viewer-app.sh")
+        shutil.copy2(REPO / "scripts/kasaterm.entitlements", self.root / "scripts/kasaterm.entitlements")
+        (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.2.2"\n')
+        for relative in ("assets/ViewerIcon.icns", "app/kasaterm/assets/fonts/NotoSansKR-Variable.ttf",
+                         "app/kasaterm/assets/fonts/OFL-NotoSansKR.txt", "target/debug/kasaterm"):
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"isolated signing fixture")
+        (self.root / "target/debug/kasaterm").chmod(0o755)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.log = self.root / "commands.jsonl"
+        stub = (f"#!{sys.executable}\n" + '''import json, os, pathlib, plistlib, sys
+tool = pathlib.Path(sys.argv[0]).name
+with open(os.environ["VIEWER_TEST_LOG"], "a") as out:
+    out.write(json.dumps([tool, *sys.argv[1:]]) + "\\n")
+if tool == "security":
+    print(os.environ.get("VIEWER_TEST_IDENTITIES", ""))
+elif tool == "codesign":
+    key = "VIEWER_TEST_VERIFY_STATUS" if "--verify" in sys.argv else "VIEWER_TEST_SIGN_STATUS"
+    sys.exit(int(os.environ.get(key, "0")))
+elif tool == "plutil":
+    with open(sys.argv[-1], "rb") as inp:
+        doc = plistlib.load(inp)
+    if sys.argv[1] == "-extract":
+        print(doc[sys.argv[2]])
+elif tool == "unlock-viewer":
+    sys.exit(int(os.environ.get("VIEWER_TEST_UNLOCK_STATUS", "0")))
+''')
+        for tool in ("cargo", "npm", "security", "codesign", "plutil", "unlock-viewer"):
+            path = self.bin / tool
+            path.write_text(stub)
+            path.chmod(0o755)
+        self.keychain = self.root / "signing keychain"
+        self.keychain.write_text("fixture; contains no credentials")
+
+    def build(self, **extra):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("KASATERM_SIGN_") and k != "CARGO_TARGET_DIR"}
+        env.update(PATH=str(self.bin) + os.pathsep + env.get("PATH", ""), VIEWER_TEST_LOG=str(self.log))
+        env.update(extra)
+        result = subprocess.run(["bash", "scripts/build-viewer-app.sh", "--debug"], cwd=self.root, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        return result, calls
+
+    def test_hardened_viewer_pins_identity_keychain_and_unlocks_only_before_signing(self):
+        identity = "A" * 40
+        result, calls = self.build(KASATERM_SIGN_ID=identity, KASATERM_SIGN_KEYCHAIN=str(self.keychain),
+                                  KASATERM_SIGN_HARDENED="1", KASATERM_SIGN_UNLOCK=str(self.bin / "unlock-viewer"),
+                                  VIEWER_TEST_IDENTITIES=f'1) {identity} "Developer ID Application: Test (ABCDE12345)"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sign = next(call for call in calls if call[:2] == ["codesign", "--force"])
+        self.assertEqual(sign[sign.index("--sign") + 1], identity)
+        self.assertEqual(sign[sign.index("--keychain") + 1], str(self.keychain))
+        self.assertEqual(sign[sign.index("--options") + 1], "runtime")
+        self.assertIn("--timestamp", sign)
+        self.assertNotIn("--timestamp=none", sign)
+        self.assertEqual(sign[sign.index("--entitlements") + 1], str(self.root / "scripts/kasaterm.entitlements"))
+        unlock = calls.index(["unlock-viewer"])
+        self.assertGreater(unlock, max(i for i, call in enumerate(calls) if call[0] == "cargo"))
+        self.assertEqual(calls[unlock + 1], sign)
+
+    def test_an_explicit_unavailable_identity_never_falls_back_to_adhoc(self):
+        result, calls = self.build(KASATERM_SIGN_ID="missing-identity", VIEWER_TEST_SIGN_STATUS="1")
+        self.assertNotEqual(result.returncode, 0)
+        signs = [call for call in calls if call[:2] == ["codesign", "--force"]]
+        self.assertEqual(len(signs), 1)
+        self.assertEqual(signs[0][signs[0].index("--sign") + 1], "missing-identity")
+        self.assertFalse((self.root / "dist/KasaViewer.app").exists())
+
+    def test_hardened_signing_rejects_a_development_identity_before_unlock(self):
+        result, calls = self.build(KASATERM_SIGN_ID="kasaterm-dev", KASATERM_SIGN_HARDENED="1",
+                                  KASATERM_SIGN_UNLOCK=str(self.bin / "unlock-viewer"),
+                                  VIEWER_TEST_IDENTITIES='1) BBB "kasaterm-dev"')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Developer ID Application", result.stderr)
+        self.assertFalse(any(call[0] in ("codesign", "unlock-viewer") for call in calls))
+
+    def test_a_failed_unlock_cannot_publish_a_bundle(self):
+        result, calls = self.build(KASATERM_SIGN_ID="explicit", KASATERM_SIGN_HARDENED="1",
+                                  KASATERM_SIGN_UNLOCK=str(self.bin / "unlock-viewer"), VIEWER_TEST_UNLOCK_STATUS="1",
+                                  VIEWER_TEST_IDENTITIES='1) explicit "Developer ID Application: Test (ABCDE12345)"')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call[0] == "codesign" for call in calls))
+        self.assertFalse((self.root / "dist/KasaViewer.app").exists())
+
+    def test_ordinary_development_builds_remain_separate_from_sparkle_updates(self):
+        result, calls = self.build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sign = next(call for call in calls if call[:2] == ["codesign", "--force"])
+        self.assertEqual(sign[sign.index("--sign") + 1], "-")
+        self.assertIn("--timestamp=none", sign)
+        self.assertFalse(any(call[0] == "unlock-viewer" for call in calls))
+        app = self.root / "dist/KasaViewer.app"
+        with (app / "Contents/Info.plist").open("rb") as inp:
+            info = plistlib.load(inp)
+        self.assertNotIn("SUFeedURL", info)
+        self.assertFalse((app / "Contents/Frameworks/Sparkle.framework").exists())
+        self.assertFalse((app / "Contents/Resources/Sparkle.framework").exists())
+
+
 class LocalSigningRepoTests(unittest.TestCase):
     """이 저장소의 실제 release.yml·build-app.sh 가 로컬 판 계약을 지키는가 — 글자로 본다(yaml 모듈 없이)."""
 
@@ -1589,6 +1765,14 @@ class LocalSigningRepoTests(unittest.TestCase):
         self.assertIn('TARGET_DIR="${CARGO_TARGET_DIR:-target}"', self.bake)
         self.assertIn('BINDIR="$TARGET_DIR/release"', self.bake)
         self.assertNotIn('BINDIR="target/', self.bake)
+
+    def test_direct_bakes_resolve_before_source_evidence_and_keep_the_lock_fixed(self):
+        resolve = self.bake.index("cargo metadata --format-version 1")
+        begin = self.bake.index('build_manifest.py" begin')
+        builds = [line.strip() for line in self.bake.splitlines() if line.strip().startswith("cargo build ")]
+        self.assertLess(resolve, begin)
+        self.assertEqual(len(builds), 2)
+        self.assertTrue(all("--locked" in line.split() for line in builds))
 
     def test_only_real_builds_fetch_lfs_and_an_existing_tag_can_be_finished_from_main(self):
         wf = self.wf

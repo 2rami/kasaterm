@@ -345,13 +345,13 @@ class RealBackend:
 
     def bake(self, wt, env, label, hint=""):
         """build-app.sh — 실패하면 전체 출력을 작업 폴더에 남긴다. 끝 몇 줄만으로는 npm 출력이 컴파일 오류를 가린다."""
-        # Cargo.lock 은 이 레포에서 무시 파일이라 새 워크트리엔 없다. cargo 가 굽는 중에 만들면 굽기 증명서가 「입력이 굽는
-        # 사이 바뀌었다」로 보고 원본 커밋을 불확실로 둔다(2026-09-27 미리 굽기 실측) — tag-release.sh 처럼 먼저 만든다.
-        if not self.dry and not (wt / "Cargo.lock").exists():
+        # verify가 만든 무시 파일 Cargo.lock은 버전 커밋 뒤에도 예전 버전이다.
+        # 존재해도 먼저 동기화해야 굽기 도중 입력이 바뀌어 증명서가 불확실해지지 않는다.
+        if not self.dry:
             m = self.runner.run([self.tool("cargo"), "metadata", "--format-version", "1"], cwd=wt, timeout=900,
-                                env=self.env(), kind="local")
+                                env=env, kind="local")
             if not m.ok:
-                raise Refused(f"Cargo.lock 을 만들지 못했다 — {'시간 초과' if m.timed_out else m.tail(2)}")
+                raise Refused(f"Cargo.lock 을 동기화하지 못했다 — {'시간 초과' if m.timed_out else m.tail(2)}")
         r = self.runner.run(["bash", "scripts/build-app.sh"], cwd=wt, timeout=3600, env=env, kind="local")
         if r.ok or r.skipped:
             return r

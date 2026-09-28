@@ -2010,12 +2010,8 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        // macOS `.md` 더블클릭(odoc) 핸들러 등록 — resumed = applicationDidFinishLaunching
-        // 시점이라, AppKit 이 launch 초기에 건 기본 odoc→`application:openURLs:` 라우팅
-        // (winit 미구현 → "못 연다" 에러)을 여기서 덮어쓴다. NSAppleEventManager 는 같은
-        // (class,id)에 마지막 등록이 이기므로 AppKit '후'인 여기가 정답 — main() 1차는
-        // AppKit 보다 일러 되덮여 무효였다. 큐된 cold-launch odoc 디스패치보다 먼저 걸려야
-        // 첫 파일도 잡으므로 resumed 최상단(window/GPU 생성 전).
+        // Cold-launch documents are handled from willFinishLaunching; keep a
+        // fallback for event loops embedded in an already-running NSApplication.
         #[cfg(target_os = "macos")]
         crate::macos_open::install_open_doc_handler(self.proxy.clone());
         // Ask for desktop-notification permission up front so the prompt
