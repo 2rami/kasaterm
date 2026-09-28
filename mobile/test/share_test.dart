@@ -83,12 +83,14 @@ void main() {
     expect(f.day, isNull);
   });
 
-  test('shareFileUri 는 한글·슬래시·공백을 path 하나로 인코딩한다', () {
+  test('shareFileUri 는 경로형이라 html 의 상대 자원이 같은 폴더로 풀린다', () {
     final s = Server(Uri.parse(root));
     final u = s.shareFileUri('2026-09-28-시안/sub/a b.png');
-    expect(u.path, '/u/$slug/term/share/file');
-    expect(u.queryParameters['path'], '2026-09-28-시안/sub/a b.png');
-    expect(u.query.contains('/'), isFalse);
+    expect(u.pathSegments.skip(2).join('/'), 'term/share/f/2026-09-28-시안/sub/a b.png');
+    expect(u.pathSegments.first, 'u');
+    final css = s.shareFileUri('2026-09-28-시안/index.html').resolve('style.css');
+    expect(css.pathSegments.last, 'style.css');
+    expect(css.pathSegments[css.pathSegments.length - 2], '2026-09-28-시안');
   });
 
   test('shareText 거절은 사람 말로, slug 없이', () async {

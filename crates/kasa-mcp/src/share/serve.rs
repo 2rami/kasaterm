@@ -64,13 +64,24 @@ fn percent(s: &str) -> String {
 }
 
 pub(crate) async fn file(q: Q, req: axum::extract::Request) -> Response {
+    let rel = q.get("path").cloned().unwrap_or_default();
+    serve_file(rel, q, req).await
+}
+
+/// 경로형(`/term/share/f/<경로>`) — 폰이 여는 html 안의 상대 경로 자원(`style.css`,
+/// `img/a.png`)이 같은 폴더로 풀리게. 쿼리형이면 `term/share/` 기준으로 풀려 깨진다.
+pub(crate) async fn file_at(axum::extract::Path(rel): axum::extract::Path<String>, q: Q, req: axum::extract::Request) -> Response {
+    serve_file(rel, q, req).await
+}
+
+async fn serve_file(rel: String, q: Q, req: axum::extract::Request) -> Response {
     if let Some(r) = guard(&req) {
         return r;
     }
     let Some(engine) = pick(&req) else { return off() };
-    let Some(rel) = q.get("path").filter(|p| path::safe(p)).cloned() else {
+    if !path::safe(&rel) {
         return (StatusCode::BAD_REQUEST, "bad path").into_response();
-    };
+    }
     let key = path::key(&rel);
     let Some((entry, stat)) = engine.with_index(|i| {
         let e = i.entries.get(&key).filter(|e| !e.deleted)?.clone();

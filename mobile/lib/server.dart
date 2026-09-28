@@ -1007,8 +1007,10 @@ class Server {
     return ShareListing.fromJson(j.cast<String, Object?>());
   }
 
-  Uri shareFileUri(String path) =>
-      uri('term/share/file', query: {'path': path});
+  /// 경로형 주소 — html 안의 상대 경로 자원(css·그림)이 같은 폴더로 풀린다.
+  Uri shareFileUri(String path) => uri(
+    'term/share/f/${path.split('/').map(Uri.encodeComponent).join('/')}',
+  );
 
   /// 앱 안에서 글로 보는 파일(마크다운·텍스트)의 본문.
   Future<String> shareText(String path) async {

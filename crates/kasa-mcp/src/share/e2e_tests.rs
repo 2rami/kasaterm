@@ -23,6 +23,7 @@ impl Machine {
             .route("/term/share/manifest", axum::routing::get(serve::manifest))
             .route("/term/share/file", axum::routing::get(serve::file))
             .route("/term/share/list", axum::routing::get(serve::list))
+            .route("/term/share/f/{*path}", axum::routing::get(serve::file_at))
             .layer(axum::Extension(engine.clone()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -116,6 +117,16 @@ async fn two_machines_over_http() {
     assert!(md.headers()["content-type"].to_str().unwrap().starts_with("text/markdown"));
     let stale = get("path=2026-09-28-%EC%8B%9C%EC%95%88/note.md&sha=00").await.unwrap();
     assert_eq!(stale.status(), 409);
+
+    // 경로형은 같은 파일을 내주고, 인코딩된 `..` 로 폴더를 못 빠져나간다.
+    let at = |p: &str| client.get(format!("{}/term/share/f/{p}", a.base)).send();
+    let same = at("2026-09-28-%EC%8B%9C%EC%95%88/note.md").await.unwrap();
+    assert_eq!(same.status(), 200);
+    assert_eq!(same.headers()["content-security-policy"], "sandbox");
+    // 클라이언트가 `%2E%2E` 를 먼저 접어 404 가 나기도 한다 — 어느 쪽이든 내주지만 않으면 된다.
+    let climb = at("2026-09-28-%EC%8B%9C%EC%95%88/%2E%2E/%2E%2E/x").await.unwrap().status();
+    assert!(climb == 400 || climb == 404, "{climb}");
+    assert_eq!(at("x%2F..%2F..%2Fetc%2Fhosts").await.unwrap().status(), 400);
 
     // 폰 목록 모양.
     let list: serde_json::Value = client.get(format!("{}/term/share/list", a.base)).send().await.unwrap().json().await.unwrap();
