@@ -334,6 +334,9 @@ pub(crate) struct MachinesColState {
     pub(crate) machines: Vec<MachinesColMachine>,
     /// 「이 맥북」 — 원격 링크가 없는 로컬 학생들.
     pub(crate) locals: Vec<MachinesColRow>,
+    /// 이 기기의 창 없는 웹 셸(`web-…`) — 폰·요약기가 띄운 것. 어느 방에도 안 서니
+    /// 사이드바가 따로 한 줄로 알린다.
+    pub(crate) local_web_shells: Vec<WebShell>,
     pub(crate) last_refresh: Option<std::time::Instant>,
     /// 마지막으로 읽은 machines 캐시 세대. 바뀌면 1초 스로틀을 건너뛴다.
     pub(crate) last_generation: u64,
@@ -420,6 +423,17 @@ pub(crate) struct MachinesColMachine {
     /// 그 기계에서 닫힌 pane 수 — 화면엔 없는데 목록에 서 있으면 「하나도 없는데
     /// 왜 뜨나」가 된다(2026-09-07 지적). 흐린 한 줄로 개수만 알린다.
     pub(crate) closed: usize,
+    /// 그 기계의 창 없는 웹 셸. 폰에는 보이는데 PC 에는 안 보여 22개가 쌓이도록
+    /// 몰랐다(2026-09-28 지적) — 보고 닫을 수 있게 따로 싣는다.
+    pub(crate) web_shells: Vec<WebShell>,
+}
+
+/// 창 없는 웹 셸 한 줄. `job` 이 없으면 프롬프트에서 쉬는 빈 셸이다.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct WebShell {
+    pub(crate) id: String,
+    pub(crate) cwd: String,
+    pub(crate) job: Option<String>,
 }
 
 #[derive(Clone)]

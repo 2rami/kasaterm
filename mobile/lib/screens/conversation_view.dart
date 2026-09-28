@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../chat_markdown.dart';
 import '../conversation.dart';
 import '../links.dart';
 import '../server.dart';
@@ -505,44 +506,15 @@ class _ConversationViewState extends State<ConversationView>
     };
   }
 
-  MarkdownStyleSheet _markdownStyle(ThemeData theme) {
-    final scheme = theme.colorScheme;
-    final body = theme.textTheme.bodyMedium?.copyWith(
+  MarkdownStyleSheet _markdownStyle(ThemeData theme) => chatMarkdownStyle(
+    theme,
+    base: theme.textTheme.bodyMedium!.copyWith(
       fontSize: 15,
       height: 1.5,
-      color: scheme.onSurface,
-    );
-    final mono = TextStyle(
-      fontFamily: 'TermMono',
-      fontFamilyFallback: const ['TermHangul', 'TermSymbol'],
-      fontSize: 13,
-      color: scheme.onSurface,
-      backgroundColor: scheme.surfaceContainerHighest,
-    );
-    return MarkdownStyleSheet.fromTheme(theme).copyWith(
-      p: body,
-      listBullet: body,
-      tableBody: body?.copyWith(fontSize: 13),
-      tableHead: body?.copyWith(fontSize: 13, fontWeight: FontWeight.w700),
-      h1: body?.copyWith(fontSize: 18, fontWeight: FontWeight.w700),
-      h2: body?.copyWith(fontSize: 17, fontWeight: FontWeight.w700),
-      h3: body?.copyWith(fontSize: 16, fontWeight: FontWeight.w700),
-      code: mono,
-      codeblockPadding: const EdgeInsets.all(10),
-      codeblockDecoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      blockquoteDecoration: BoxDecoration(
-        border: Border(left: BorderSide(color: scheme.outline, width: 3)),
-      ),
-      blockquotePadding: const EdgeInsets.fromLTRB(10, 2, 0, 2),
-      a: body?.copyWith(
-        color: scheme.primary,
-        decoration: TextDecoration.underline,
-      ),
-    );
-  }
+      color: theme.colorScheme.onSurface,
+    ),
+    codeBg: theme.colorScheme.surfaceContainerHighest,
+  );
 }
 
 /// 모모톡의 선생님 말풍선 파랑 — 데스크톱 아로나와 같은 고정색이라 밝기와 무관하다.

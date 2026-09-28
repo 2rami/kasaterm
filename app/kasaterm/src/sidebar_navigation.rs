@@ -19,6 +19,8 @@ pub(crate) struct NavigationState {
     collapsed_rooms: std::collections::HashSet<String>,
     /// 목록 본문으로 보는 방(키) — 본기기 카드의 「목록으로 보기」와 같다.
     list_rooms: std::collections::HashSet<String>,
+    /// 펼친 「창 밖 셸」 줄 — 기기 라벨, 이 기기는 빈 문자열.
+    web_open: std::collections::HashSet<String>,
     /// 방 카드 우클릭 메뉴. 본기기 방 메뉴와 같은 항목(본문 보기·이름·닫기).
     /// 칸(pane)에서 열면 칸 메뉴가 된다.
     pub(crate) room_menu: Option<RoomMenu>,
@@ -78,6 +80,12 @@ enum Action {
     Section(String),
     /// 카드 머리의 × — 그 기기의 방을 닫는다(확인은 본기기 방과 같은 모달).
     CloseRoom { label: String, window: Option<u64>, room: String },
+    /// 「창 밖 셸」 줄 접기·펴기. 라벨이 비면 이 기기.
+    WebShells(String),
+    /// 창 밖 셸 하나를 닫는다. 폰·웹 화면이 붙어 있으면 그쪽이 거절한다.
+    CloseWebShell { label: String, id: String },
+    /// 도는 명령이 없는 창 밖 셸만 한꺼번에 닫는다.
+    CloseIdleWebShells(String),
 }
 
 fn hit(p: (f32, f32), r: Rect) -> bool {
@@ -202,10 +210,100 @@ pub(crate) fn section_labels(info: &state::InfoState) -> Vec<String> {
     info.machines_col.machines.iter().map(|m| m.label.clone()).collect()
 }
 
+/// 이 기기 카드 아래와 원격 절 사이에 서는 몫까지 — 이 기기의 창 밖 셸 줄이 거기 선다.
 pub(crate) fn remote_content_h(info: &state::InfoState) -> f32 {
-    info.machines_col.machines.iter().map(|machine| {
-        SECTION_H + content_height(machine, &info.navigation.collapsed_rooms, &info.navigation.list_rooms)
-    }).sum()
+    let nav = &info.navigation;
+    let local = web_block_h(&info.machines_col.local_web_shells, nav.web_open.contains(""));
+    local + info.machines_col.machines.iter().map(|machine| {
+        SECTION_H + content_height(machine, &nav.collapsed_rooms, &nav.list_rooms)
+            + web_block_h(&machine.web_shells, nav.web_open.contains(&machine.label))
+    }).sum::<f32>()
+}
+
+/// 「창 밖 셸」 줄 높이 — 요약 한 줄, 펴면 셸마다 목록 줄.
+fn web_block_h(shells: &[state::WebShell], open: bool) -> f32 {
+    if shells.is_empty() { return 0.0; }
+    PANE_H + if open { shells.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD } else { 0.0 }
+}
+
+/// 목록 줄 이름 — 폴더 꼬리가 있으면 그것, 없으면 셸 id 앞 여덟 글자로 가른다. 「창 밖 셸」
+/// 머리 아래라 「셸」은 다시 안 붙인다(기본 폭 200 에서 이름이 잘렸다).
+fn web_shell_name(shell: &state::WebShell) -> String {
+    let tail = shell.cwd.trim_end_matches('/').rsplit('/').next().filter(|t| !t.is_empty());
+    match tail {
+        Some(tail) => tail.to_string(),
+        None => shell.id.trim_start_matches("web-").chars().take(8).collect(),
+    }
+}
+
+/// 창 없는 웹 셸 묶음을 `y` 에서부터 그리고 쓴 높이를 돌려준다. 방 카드와 같은 들여쓰기.
+#[allow(clippy::too_many_arguments)]
+fn draw_web_shells(
+    g: &mut gpu::GpuRenderer,
+    hits: &mut Vec<(Action, Rect)>,
+    label: &str,
+    shells: &[state::WebShell],
+    open: bool,
+    cursor: (f32, f32),
+    width: f32,
+    y: f32,
+    view: Rect,
+) -> f32 {
+    if shells.is_empty() { return 0.0; }
+    let x = SIDEBAR_TAB_INSET;
+    let w = (width - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
+    let idle = shells.iter().filter(|s| s.job.is_none()).count();
+    let busy = shells.len() - idle;
+    let row = (x, y, w, PANE_H);
+    let button_label = "빈 셸 닫기";
+    let bw = g.measure_chrome_text(button_label, 10.5, false) + 16.0;
+    let button = (x + w - bw - 4.0, y + ((PANE_H - 22.0) / 2.0).round(), bw, 22.0);
+    let row_hover = clipped(row, view).is_some_and(|r| hit(cursor, r));
+    if row_hover { panel_rect(g, row.0, row.1, row.2, row.3, theme::radius_md(), theme::surface_hover()); }
+    g.hover_pointer |= row_hover;
+    g.queue_icon(if open { "chevron-down" } else { "chevron-right" }, x + 6.0, y + 9.0, 12.0, theme::text_mute());
+    let text_right = if idle > 0 { button.0 - 6.0 } else { x + w - 8.0 };
+    text(g, &format!("창 밖 셸 {}", shells.len()), x + 24.0, y + 6.0, text_right - x - 24.0, 11.5, theme::text_dim(), false);
+    let sub = if busy == 0 { "모두 비어 있음".to_string() } else if idle == 0 { "모두 도는 중".to_string() } else { format!("도는 것 {busy}") };
+    text(g, &sub, x + 24.0, y + 23.0, text_right - x - 24.0, 9.5, theme::text_mute(), false);
+    if idle > 0 {
+        let hover = hit(cursor, button);
+        outline_rect(g, button.0, button.1, button.2, button.3, theme::radius_sm(),
+            if hover { theme::text_dim() } else { theme::border() }, 1.0,
+            if row_hover { theme::surface_hover() } else { theme::panel_bg() });
+        // 폭을 이 글자로 쟀으니 자르지 않는다 — `fit_text` 는 글자마다 재어 더해 통째 폭보다
+        // 조금 커서, 거기 맡기면 제 폭에 맞춘 단추 글자가 「닫…」으로 잘렸다.
+        g.draw_text(button.0 + 8.0, button.1 + 5.0, button_label, gpu::DrawOpts {
+            font_size: 10.5, color: if hover { theme::text() } else { theme::text_dim() }, bold: false, italic: false });
+        if let Some(r) = clipped(button, view) { hits.push((Action::CloseIdleWebShells(label.to_string()), r)); }
+    }
+    if let Some(r) = clipped(row, view) { hits.push((Action::WebShells(label.to_string()), r)); }
+    if !open { return PANE_H; }
+    for (k, shell) in shells.iter().enumerate() {
+        let line = (x + 8.0, y + PANE_H + SIDEBAR_ROW_PAD / 2.0 + k as f32 * SIDEBAR_ROW_H, w - 16.0, SIDEBAR_ROW_H);
+        let close = (line.0 + line.2 - 18.0, line.1 + (SIDEBAR_ROW_H - 16.0) / 2.0, 16.0, 16.0);
+        let x_hover = hit(cursor, close);
+        if x_hover { hover_rect(g, close.0, close.1, close.2, close.3, theme::radius_sm()); }
+        g.queue_icon("x", close.0 + 2.0, close.1 + 2.0, 12.0, if x_hover { theme::text() } else { theme::text_mute() });
+        let (state_text, state_color) = match &shell.job {
+            Some(job) => (job.clone(), theme::text()),
+            None => ("비어 있음".to_string(), theme::text_mute()),
+        };
+        let full = g.measure_chrome_text(&state_text, 10.5, false);
+        let sw = full.min(line.2 * 0.45);
+        if full <= sw {
+            g.draw_text(close.0 - 6.0 - sw, line.1 + 4.0, &state_text,
+                gpu::DrawOpts { font_size: 10.5, color: state_color, bold: false, italic: false });
+        } else {
+            text(g, &state_text, close.0 - 6.0 - sw, line.1 + 4.0, sw, 10.5, state_color, false);
+        }
+        text(g, &web_shell_name(shell), line.0 + 16.0, line.1 + 4.0, (close.0 - 12.0 - sw - line.0 - 16.0).max(0.0),
+            11.0, theme::text_dim(), false);
+        if let Some(r) = clipped(close, view) {
+            hits.push((Action::CloseWebShell { label: label.to_string(), id: shell.id.clone() }, r));
+        }
+    }
+    web_block_h(shells, true)
 }
 
 fn text(g: &mut gpu::GpuRenderer, value: &str, x: f32, y: f32, width: f32, size: f32, color: [u8; 4], bold: bool) {
@@ -411,6 +509,7 @@ struct RowsCtx<'a> {
     viewing: Option<&'a (String, Vec<String>)>,
     viewing_cur: Option<&'a str>,
     rename: Option<&'a (String, String)>,
+    web_open: &'a std::collections::HashSet<String>,
 }
 
 fn draw_rows(
@@ -539,7 +638,10 @@ fn draw_rows(
     }
     if machine.closed > 0 {
         text(g, &format!("닫힌 pane {} · 원본에서 되살리기", machine.closed), 16.0, y + 12.0, width - 32.0, 10.0, theme::text_dim(), false);
+        y += PANE_H;
     }
+    draw_web_shells(g, hits, &machine.label, &machine.web_shells, ctx.web_open.contains(&machine.label),
+        cursor, width, y, view);
     g.pop_clip();
 }
 
@@ -565,7 +667,7 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     g.rect(12.0, head_top + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
 
     let NavigationState { collapsed_rooms, hits, viewing, viewing_cur, list_rooms, rename, cell_drag,
-        local_content_h, shared_scroll, room_numbers, device_views, .. } = nav;
+        local_content_h, shared_scroll, room_numbers, device_views, web_open, .. } = nav;
     let ctx = RowsCtx {
         numbers: room_numbers,
         collapsed: collapsed_rooms,
@@ -574,11 +676,15 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
         viewing: viewing.as_ref(),
         viewing_cur: viewing_cur.as_deref(),
         rename: rename.as_ref(),
+        web_open,
     };
     let mut y = viewport.1 + *local_content_h - *shared_scroll;
     g.push_clip(viewport.0, viewport.1, viewport.2, viewport.3);
+    y += draw_web_shells(g, hits, "", &info.machines_col.local_web_shells, web_open.contains(""),
+        cursor, width, y, viewport);
     for machine in &info.machines_col.machines {
-        let body_h = content_height(machine, collapsed_rooms, list_rooms);
+        let body_h = content_height(machine, collapsed_rooms, list_rooms)
+            + web_block_h(&machine.web_shells, web_open.contains(&machine.label));
         g.rect(12.0, y, (width - 24.0).max(0.0), 1.0, theme::border());
         let head = (8.0, y + 2.0, width - 16.0, SECTION_H - 4.0);
         let menu = (width - 30.0, y + 7.0, 22.0, 22.0);
@@ -789,6 +895,66 @@ impl App {
         step.1 += 1;
     }
 
+    /// 격리 앱에서 「창 밖 셸」 줄을 눌러 보는 프로브 — 펴기 → 빈 셸 닫기 → 남은 수. 켜려면
+    /// `KASATERM_WINDOW_SIZE`(검증 실행)와 `KASATERM_AUTOWEBSHELL_DIR`. 셸은 부르는 쪽이 그 앱의
+    /// `/term/spawn` 으로 미리 띄운다. 결과는 그 폴더의 `web-shells.log` 와 단계별 png.
+    pub(crate) fn run_pending_web_shell_probe(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::{Mutex, OnceLock};
+        if !crate::verification_run() { return; }
+        let Ok(folder) = std::env::var("KASATERM_AUTOWEBSHELL_DIR") else { return; };
+        static STEP: OnceLock<Mutex<(Instant, usize)>> = OnceLock::new();
+        let mut step = STEP.get_or_init(|| Mutex::new((Instant::now(), 0))).lock().unwrap();
+        if step.1 >= 5 || step.0.elapsed().as_millis() < if step.1 == 0 { 12000 } else { 2500 } { return; }
+        let Some(window) = self.window.as_ref().map(|w| w.id()) else { return; };
+        let click = |app: &mut Self, r: Rect| {
+            app.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+            for state in [ElementState::Pressed, ElementState::Released] {
+                app.window_event(event_loop, window, WindowEvent::MouseInput {
+                    device_id: winit::event::DeviceId::dummy(), state, button: MouseButton::Left,
+                });
+            }
+        };
+        let find = |app: &Self, want: &dyn Fn(&Action) -> bool| {
+            app.info.navigation.hits.iter().find_map(|(a, r)| want(a).then_some(*r))
+        };
+        let local = &self.info.machines_col.local_web_shells;
+        let counts = format!("local={} idle={} remote={}", local.len(), local.iter().filter(|s| s.job.is_none()).count(),
+            self.info.machines_col.machines.iter().map(|m| format!("{}:{}", m.label, m.web_shells.len())).collect::<Vec<_>>().join(","));
+        let stage = step.1;
+        let report = match stage {
+            0 => counts,
+            1 => {
+                let row = find(self, &|a| matches!(a, Action::WebShells(l) if l.is_empty()));
+                if let Some(r) = row { click(self, r); }
+                format!("row_hit={} open={}", row.is_some(), self.info.navigation.web_open.contains(""))
+            }
+            2 => {
+                let rows = self.info.navigation.hits.iter().filter(|(a, _)| matches!(a, Action::CloseWebShell { label, .. } if label.is_empty())).count();
+                let button = find(self, &|a| matches!(a, Action::CloseIdleWebShells(l) if l.is_empty()));
+                if let Some(r) = button { click(self, r); }
+                format!("close_buttons={rows} idle_button={}", button.is_some())
+            }
+            3 => counts,
+            4 => {
+                let remote = find(self, &|a| matches!(a, Action::WebShells(l) if !l.is_empty()));
+                if let Some(r) = remote { click(self, r); }
+                format!("remote_row={}", remote.is_some())
+            }
+            _ => String::new(),
+        };
+        self.info.machines_col.last_refresh = None;
+        self.chrome_dirty = true;
+        if let Some(window) = &self.window { window.request_redraw(); }
+        if let Some(g) = &mut self.gpu { g.capture_next = Some(format!("{folder}/web-{stage}.png")); }
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true)
+            .open(std::path::Path::new(&folder).join("web-shells.log")) {
+            use std::io::Write;
+            let _ = writeln!(file, "stage={stage} {report}");
+        }
+        step.0 = Instant::now();
+        step.1 += 1;
+    }
+
     pub(crate) fn sidebar_content_top(&self) -> f32 { self.sidebar_head_top() + HEADER_H + 10.0 }
 
     /// 이 기기 머리줄의 윗변. 현황 줄이 서 있으면 그만큼 내려간다.
@@ -836,9 +1002,62 @@ impl App {
             Action::Room(key) => {
                 if !self.info.navigation.collapsed_rooms.remove(&key) { self.info.navigation.collapsed_rooms.insert(key); }
             }
+            Action::WebShells(label) => {
+                if !self.info.navigation.web_open.remove(&label) { self.info.navigation.web_open.insert(label); }
+            }
+            Action::CloseWebShell { label, id } => self.close_web_shells(&label, vec![id]),
+            Action::CloseIdleWebShells(label) => {
+                let shells = if label.is_empty() { &self.info.machines_col.local_web_shells } else {
+                    match self.info.machines_col.machines.iter().find(|m| m.label == label) {
+                        Some(m) => &m.web_shells,
+                        None => return true,
+                    }
+                };
+                let ids = shells.iter().filter(|s| s.job.is_none()).map(|s| s.id.clone()).collect();
+                self.close_web_shells(&label, ids);
+            }
         }
         self.chrome_dirty = true;
         true
+    }
+
+    /// 창 밖 셸을 닫는다 — 이 기기면 붙들기를 놓고 셸이 끝나는지 보고, 다른 기기면 그쪽
+    /// `DELETE /term/session` 으로 놓는다. 폰·웹 화면이 붙어 있는 셸은 그 화면이 닫힐 때 끝난다.
+    fn close_web_shells(&mut self, label: &str, ids: Vec<String>) {
+        if ids.is_empty() { return; }
+        let base = if label.is_empty() { None } else {
+            match kasa_mcp::machines::find(label) {
+                Some(m) => Some(m.base),
+                None => {
+                    self.set_toast(format!("{label} 가 명부(machines.json)에 없어요"));
+                    return;
+                }
+            }
+        };
+        let proxy = self.proxy.clone();
+        let (who, total) = (if label.is_empty() { "이 기기".to_string() } else { label.to_string() }, ids.len());
+        self.set_toast(format!("{who} 의 창 밖 셸 {total}개 닫는 중…"));
+        std::thread::spawn(move || {
+            let mut kept = 0usize;
+            for id in &ids {
+                let result = match &base {
+                    None => crate::socket::release_web_shell(id, std::time::Duration::from_secs(2)),
+                    Some(base) => kasa_mcp::remote::release_remote_web_shell(base, id).and_then(|released| {
+                        anyhow::ensure!(released, "{id} 은 이미 없거나 놓을 수 없다");
+                        Ok(())
+                    }),
+                };
+                if let Err(e) = result {
+                    kept += 1;
+                    eprintln!("[web-shell] {id} close failed: {e:#}");
+                }
+            }
+            kasa_mcp::machines::poke();
+            let note = if kept == 0 { format!("{who} 의 창 밖 셸 {total}개를 닫았어요") }
+                else { format!("{who} 의 창 밖 셸 {}개 닫음 · {kept}개는 못 닫았어요(열린 화면이 있거나 이미 없음)", total - kept) };
+            let _ = proxy.send_event(UserEvent::SocketToast(note));
+        });
+        self.info.machines_col.last_refresh = None;
     }
 
     /// 문턱을 넘은 칸 끌기는 다른 hover 처리가 가로채지 않게 한다.
@@ -929,10 +1148,21 @@ mod tests {
         };
         state::MachinesColMachine {
             label: "test".into(), online: true, ago_secs: None, outdated: false,
-            host: String::new(), kvm: None, closed: 2,
+            host: String::new(), kvm: None, closed: 2, web_shells: Vec::new(),
             remote: vec![row("", "%12", "A"), row("", "%2", "A"), row("", "%8", "B")],
             mirrored: vec![row("%99", "%7", "A")],
         }
+    }
+
+    #[test]
+    fn web_shell_block_height_and_names() {
+        let shell = |id: &str, cwd: &str| state::WebShell { id: id.into(), cwd: cwd.into(), job: None };
+        let shells = vec![shell("web-2e6442f1-aaaa", ""), shell("web-x", "/Users/kasa/Desktop/")];
+        assert_eq!(web_block_h(&[], true), 0.0, "셸이 없으면 줄도 없다");
+        assert_eq!(web_block_h(&shells, false), PANE_H);
+        assert_eq!(web_block_h(&shells, true), PANE_H + 2.0 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD);
+        assert_eq!(web_shell_name(&shells[0]), "2e6442f1");
+        assert_eq!(web_shell_name(&shells[1]), "Desktop");
     }
 
     /// 기다림 낱말은 하나인데 뜻은 셋이다. 주황(숨쉬는 점)은 사람을 부르는 둘에만

@@ -1453,7 +1453,7 @@ mod tests {
         };
         let mut machine = state::MachinesColMachine {
             label: "원본 기기".into(), online: true, ago_secs: Some(0), outdated: false,
-            host: String::new(), kvm: None, closed: 0,
+            host: String::new(), kvm: None, closed: 0, web_shells: Vec::new(),
             remote: vec![row("", "%12"), row("", "%2")],
             mirrored: vec![row("%99", "%7")],
         };

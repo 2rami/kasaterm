@@ -18,6 +18,8 @@ dependencies:
   url_launcher: ^6.3.2
   image_picker: ^1.2.3
   flutter_markdown_plus: ^1.0.12
+  # 나쵸 답의 문법을 고른다(nacho_reply.dart) — flutter_markdown_plus 가 쓰는 판 그대로.
+  markdown: ^7.3.1
 
 dev_dependencies:
   flutter_test:

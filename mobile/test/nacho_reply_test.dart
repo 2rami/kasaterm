@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kasaterm_mobile/nacho.dart';
 import 'package:kasaterm_mobile/nacho_reply.dart';
 import 'package:kasaterm_mobile/screens/nacho_home.dart';
 import 'package:kasaterm_mobile/screens/nacho_reply_view.dart';
+import 'package:kasaterm_mobile/screens/nacho_task.dart';
 import 'package:kasaterm_mobile/screens/terminal.dart';
 import 'package:kasaterm_mobile/server.dart';
 
@@ -64,6 +66,46 @@ Future<void> close(WidgetTester tester, NachoDesk d, FakeNacho s) async {
   await tester.pump(const Duration(seconds: 1));
 }
 
+
+/// 화면에 그려진 글 전부 — 기호가 먹혔거나 글자가 빠졌으면 여기서 드러난다.
+String shown(WidgetTester tester, [Finder? within]) => tester
+    .widgetList<RichText>(
+      within == null ? find.byType(RichText) : find.descendant(of: within, matching: find.byType(RichText)),
+    )
+    .map((r) => r.text.toPlainText())
+    .join('\n');
+
+TextStyle? styleOf(WidgetTester tester, String piece) {
+  TextStyle? found;
+  for (final r in tester.widgetList<RichText>(find.byType(RichText))) {
+    r.text.visitChildren((span) {
+      if (span is TextSpan && span.text == piece) found = span.style;
+      return found == null;
+    });
+    if (found != null) break;
+  }
+  return found;
+}
+
+Future<void> reply(WidgetTester tester, String text, {ValueChanged<String>? onLink, double width = 360}) =>
+    tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ListView(
+            children: [
+              Align(
+                alignment: Alignment.topLeft,
+                child: SizedBox(
+                  width: width,
+                  child: ReplyText(text: text, onLink: onLink ?? (_) {}, style: const TextStyle(fontSize: 15)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
 void main() {
   group('답 가르기', () {
     test('학생 띄운 보고 — 기기·실행 줄은 상세로, 사용량 꼬리는 잔글씨로, 원문은 그대로', () {
@@ -106,12 +148,12 @@ void main() {
       expect(v.details, ['- **실행**: `POST http://x`', '> 기기: 맥북']);
     });
 
-    test('인라인 — 링크는 라벨만, 굵게·코드는 기호 없이, 짝 없는 기호는 글자로', () {
-      final parts = parseInline('보기: [작업 화면](http://h/term?pane=%4) · **중요** `cmd` 끝 ** 남음');
-      expect(parts.map((p) => p.text).join(), '보기: 작업 화면 · 중요 cmd 끝 ** 남음');
-      expect(parts.firstWhere((p) => p.url != null).url, 'http://h/term?pane=%4');
-      expect(parts.firstWhere((p) => p.bold).text, '중요');
-      expect(parts.firstWhere((p) => p.code).text, 'cmd');
+    test('줄머리 >_< 는 얼굴로 두고 — 인용과 코드 울타리 안은 그대로', () {
+      expect(guardMarkdown('>_< 미안'), r'\>_< 미안');
+      expect(guardMarkdown('  >>_<< 헉'), r'  \>>_<< 헉');
+      expect(guardMarkdown('> 인용\n>> 겹 인용\n>'), '> 인용\n>> 겹 인용\n>');
+      expect(guardMarkdown('```\n>_<\n```\n>_<'), '```\n>_<\n```\n' r'\>_<');
+      expect(guardMarkdown('~~~~\n>_<\n~~~\n>_<'), '~~~~\n>_<\n~~~\n>_<', reason: '짧은 울타리로는 안 닫힌다');
     });
 
     test('학생 화면 링크 — 인코딩 안 된 %42 가 B 로 풀리지 않고, 기계 접두도 읽는다', () {
@@ -128,6 +170,95 @@ void main() {
       expect(Uri.parse('http://h/term?pane=%42').queryParameters['pane'], 'B', reason: '고치기 전의 함정');
       expect(externalUri('http://h/term?pane=%42')!.queryParameters['pane'], '%42');
       expect(externalUri('http://h/term?pane=%2542')!.queryParameters['pane'], '%42');
+    });
+  });
+
+
+  group('마크다운', () {
+    testWidgets('목록·제목·인용·코드 울타리·표 — 기호 대신 모양으로', (tester) async {
+      await reply(
+        tester,
+        '## 오늘 한 일\n'
+        '- 첫째\n'
+        '- 둘째\n'
+        '\n'
+        '1. 하나\n'
+        '2. 둘\n'
+        '\n'
+        '> 인용 한 줄\n'
+        '\n'
+        '```\n'
+        'code **x** >_<\n'
+        '```\n'
+        '\n'
+        '| 이름 | 상태 |\n'
+        '|---|---|\n'
+        '| 미도리 | 끝 |',
+      );
+      expect(find.text('•'), findsNWidgets(2));
+      expect(find.text('1.'), findsOneWidget);
+      expect(find.text('2.'), findsOneWidget);
+      expect(find.text('첫째'), findsOneWidget);
+      expect(find.text('하나'), findsOneWidget);
+      final head = tester.widget<Text>(find.text('오늘 한 일'));
+      expect((head.textSpan!.style!.fontSize, head.textSpan!.style!.fontWeight), (17, FontWeight.w700));
+      expect(find.text('인용 한 줄'), findsOneWidget);
+      expect(find.text('code **x** >_<'), findsOneWidget, reason: '코드 안은 글자 그대로');
+      expect(find.byType(Table), findsOneWidget);
+      expect(find.text('미도리'), findsOneWidget);
+      final all = shown(tester);
+      for (final mark in ['##', '- ', '> ', '```', '|']) {
+        expect(all.contains(mark), isFalse, reason: '「$mark」가 글자로 남았다');
+      }
+    });
+
+    testWidgets('인라인 — 링크는 라벨만, 굵게·코드는 기호 없이, 짝 없는 기호는 글자로', (tester) async {
+      final got = <String>[];
+      await reply(tester, '보기: [작업 화면](http://h/term?pane=%4) · **중요** `cmd` 끝 ** 남음', onLink: got.add);
+      expect(shown(tester), '보기: 작업 화면 · 중요 cmd 끝 ** 남음');
+      expect(styleOf(tester, '중요')?.fontWeight, FontWeight.w700);
+      expect(styleOf(tester, 'cmd')?.fontFamily, 'TermMono');
+      await tester.tapOnText(find.textRange.ofSubstring('작업 화면'));
+      expect(got, hasLength(1));
+      expect(termLinkOf(got.single, Uri.parse('http://h/'))?.pane, '%4');
+    });
+
+    testWidgets('한글이 바로 붙은 굵게도 닫힌다 — CommonMark 는 여기서 별표를 남긴다', (tester) async {
+      await reply(tester, '**(선택)**은 나중에, **「작업 열기」**를 눌러');
+      expect(shown(tester), '(선택)은 나중에, 「작업 열기」를 눌러');
+      expect(styleOf(tester, '(선택)')?.fontWeight, FontWeight.w700);
+    });
+
+    testWidgets('카오모지·물결·밑줄 — 빠지거나 기울어지는 글자가 없다', (tester) async {
+      for (final face in [
+        r'¯\_(ツ)_/¯',
+        '좋아 (*^▽^*) 그럼 (*^▽^*)',
+        '(^_^) 그리고 (^_^)',
+        '3~5개 그리고 7~9개, 좋아~~ 해볼게~~',
+        '>_< 미안',
+        '(｡•̀ᴗ-)✧ ฅ^•ﻌ•^ฅ (ㅠ_ㅠ) -_-',
+        'snake_case 와 __init__ 과 *별*',
+        '<pane-id> 는 태그가 아니다',
+      ]) {
+        await reply(tester, face);
+        expect(shown(tester), face, reason: face);
+      }
+    });
+
+    testWidgets('긴 줄 — 좁은 폭에서 넘치지 않고, 코드는 옆으로 민다', (tester) async {
+      final word = List.filled(40, '가나다라마바사아자차').join();
+      await reply(tester, '$word\n\nhttp://example.com/${'a' * 300}\n\n```\n${'x' * 400}\n```', width: 240);
+      expect(tester.takeException(), isNull);
+      expect(shown(tester), contains(word));
+      expect(
+        find.byWidgetPredicate((w) => w is SingleChildScrollView && w.scrollDirection == Axis.horizontal),
+        findsOneWidget,
+        reason: '코드 줄은 가로 스크롤',
+      );
+      for (final text in [find.text(word), find.textContaining('example.com')]) {
+        expect(tester.renderObject<RenderParagraph>(find.descendant(of: text, matching: find.byType(RichText))).size.width,
+            lessThanOrEqualTo(240));
+      }
     });
   });
 
@@ -216,6 +347,78 @@ void main() {
       expect(find.byType(StudentWorkCard), findsOneWidget);
       expect(find.textContaining('작업 보기 ·'), findsOneWidget);
       await close(tester, d, s);
+    });
+
+    testWidgets('답의 목록·굵게는 모양으로, 본문은 길게 눌러 고를 수 있다', (tester) async {
+      final s = FakeKasa()..add({'kind': 'reply', 'text': '끝낸 것:\n- **목록 속도** 고침\n- 알림 정리'});
+      final d = await open(tester, s);
+      expect(find.text('•'), findsNWidgets(2));
+      expect(find.text('목록 속도 고침'), findsOneWidget);
+      expect(styleOf(tester, '목록 속도')?.fontWeight, FontWeight.w700);
+      expect(find.textContaining('**'), findsNothing);
+      expect(find.ancestor(of: find.text('알림 정리'), matching: find.byType(SelectionArea)), findsOneWidget);
+      await close(tester, d, s);
+    });
+
+    testWidgets('알림 줄 — 링크·굵게가 글자 그대로 새지 않고, 링크는 앱 안에서 연다', (tester) async {
+      final s = FakeKasa()
+        ..panesOf[''] = [pane('%42', '미도리')]
+        ..add({
+          'kind': 'notice',
+          'notice': 'watch',
+          'text': '#알림 요약: [작업 화면](http://127.0.0.1:1/u/slug/term?pane=%42) 에 **새 글** 둘',
+        });
+      final d = await open(tester, s);
+      expect(find.text('#알림 요약: 작업 화면 에 새 글 둘'), findsOneWidget);
+      expect(find.textContaining('http'), findsNothing);
+      expect(styleOf(tester, '새 글')?.fontWeight, FontWeight.w700);
+      expect(
+        find.ancestor(of: find.text('#알림 요약: 작업 화면 에 새 글 둘'), matching: find.byType(SelectionArea)),
+        findsNothing,
+        reason: '줄 전체 누름(작업 상세)을 선택 영역이 가져가지 않게',
+      );
+      await tester.tapOnText(find.textRange.ofSubstring('작업 화면'));
+      await settle(tester);
+      expect(tester.widget<TerminalScreen>(find.byType(TerminalScreen)).pane.id, '%42');
+      await close(tester, d, s);
+    });
+
+    testWidgets('작업이 달린 알림 줄은 링크 밖을 누르면 작업 상세로', (tester) async {
+      final s = FakeKasa()
+        ..add({'kind': 'notice', 'notice': 'watch', 'task': 'w1', 'text': '**학생**이 끝났대'})
+        ..cards = [card('w1', '학생 목록 속도', 'done')];
+      final d = await open(tester, s);
+      expect(find.text('학생이 끝났대'), findsOneWidget);
+      await tester.tap(find.text('학생이 끝났대'));
+      await settle(tester);
+      expect(find.byType(NachoTaskScreen), findsOneWidget);
+      await close(tester, d, s);
+    });
+
+    testWidgets('작업 상세의 알림도 — 링크는 라벨, 굵게·목록은 모양, 내 말은 적은 그대로', (tester) async {
+      final s = FakeKasa()
+        ..details['w1'] = {
+          ...card('w1', '학생 목록 속도', 'active'),
+          'request': '학생 목록 속도',
+          'verify': null, 'report': null, 'approval': null, 'history': [], 'hops': [],
+          'preview': {'url': null, 'shot': false}, 'can_direct': true, 'remaining': [],
+          'events': [
+            {'seq': 1, 'kind': 'message', 'id': 'a', 'at_ms': 1, 'text': '**그대로** 보여줘'},
+            {'seq': 2, 'kind': 'notice', 'notice': 'watch', 'at_ms': 1,
+              'text': '[배포 스레드](https://example.com/x) 에 **새 글**\n- 하나\n- 둘'},
+          ],
+        };
+      final d = NachoDesk(s);
+      await tester.pumpWidget(MaterialApp(home: NachoTaskScreen(desk: d, taskId: 'w1', onOpenStudents: () {})));
+      await settle(tester);
+      expect(find.text('배포 스레드 에 새 글'), findsOneWidget);
+      expect(styleOf(tester, '새 글')?.fontWeight, FontWeight.w700);
+      expect(find.text('•'), findsNWidgets(2));
+      expect(find.textContaining('example.com'), findsNothing);
+      expect(find.textContaining('**그대로** 보여줘'), findsOneWidget, reason: '사람이 친 말은 해석하지 않는다');
+      d.stop();
+      s.hold?.complete();
+      await tester.pumpWidget(const SizedBox.shrink());
     });
 
     testWidgets('본문 링크는 라벨만 보이고, 이 서버 학생 링크를 누르면 앱 안에서 연다', (tester) async {

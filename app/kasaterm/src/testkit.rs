@@ -2876,7 +2876,7 @@ impl App {
                 self.info.machine_collapsed.clear();
                 self.info.machines_col.machines = vec![crate::state::MachinesColMachine {
                     label: "맥북".into(), online: true, ago_secs: Some(0), outdated: false,
-                    host: String::new(), kvm: None, closed: 0,
+                    host: String::new(), kvm: None, closed: 0, web_shells: Vec::new(),
                     mirrored: vec![crate::state::MachinesColRow {
                         pane: "%2".into(), remote_id: "%13".into(), name: "하치와레".into(),
                         title: "브라우저 연동".into(), status: "working".into(),

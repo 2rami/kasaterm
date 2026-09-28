@@ -102,6 +102,7 @@ class RemoteHelperTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     provider.summarize(PAYLOAD)
             self.assertEqual(provider.calls[-1][0], "DELETE")
+            self.assertIn("lease=", provider.calls[0][1], "a lost spawn reply must not leak the shell")
             for method, route, data in provider.calls:
                 if "pane=" in route:
                     self.assertIn("pane=web-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", route)

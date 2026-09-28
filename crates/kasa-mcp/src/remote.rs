@@ -1504,6 +1504,41 @@ pub fn close_remote_pane(base: &str, pane: &str, token: Option<&str>, kill: bool
     Ok(())
 }
 
+/// 그 기계의 창 없는 웹 셸(`web-…`)을 놓는다(`DELETE /term/session`). `close-pane` 이 아니라
+/// 이 창구를 쓰는 이유: 옛 판의 `close-pane` 은 웹 셸에 ok 를 주고도 셸을 안 풀었다 — 이 창구는
+/// 옛 판에서도 실제로 놓는다(2026-09-28 맥미니 실측 `released:true`). 누가 화면을 열어 두었으면
+/// 셸은 그 화면이 닫힐 때 끝난다.
+pub fn release_remote_web_shell(base: &str, id: &str) -> Result<bool> {
+    anyhow::ensure!(id.starts_with("web-"), "{id} 은 웹 셸이 아니다");
+    let token = connection_auth_token(base);
+    let u = format!("{}/term/session?pane={}", base.trim_end_matches('/'), urlencode(id));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("release runtime")?;
+    let v: serde_json::Value = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("http client")?;
+        let mut req = client.delete(&u);
+        if let Some(t) = token.as_deref() {
+            req = req.header("x-kasa-token", t);
+        }
+        let r = req.send().await.context("원격 웹 셸 놓기 요청")?;
+        let status = r.status();
+        let text = r.text().await.unwrap_or_default();
+        Ok::<_, anyhow::Error>(serde_json::from_str(&text).unwrap_or_else(
+            |_| serde_json::json!({ "ok": false, "error": format!("HTTP {status}: {text}") }),
+        ))
+    })?;
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        anyhow::bail!("{}", v.get("error").and_then(|x| x.as_str()).unwrap_or("알 수 없는 이유"));
+    }
+    Ok(v.get("released").and_then(|x| x.as_bool()) == Some(true))
+}
+
 /// 그 기계의 HTTP 창구를 GET 으로 읽는다 — 파일트리·깃 패널이 저쪽 것을 그대로 싣는다.
 pub fn remote_get_json(base: &str, path_and_query: &str) -> Result<serde_json::Value> {
     remote_get_json_bounded(base, path_and_query, 16 * 1024 * 1024)

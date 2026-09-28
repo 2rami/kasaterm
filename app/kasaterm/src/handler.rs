@@ -7957,6 +7957,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoview();
         self.run_pending_autoinfo();
         self.run_pending_sidebar_navigation_probe(event_loop);
+        self.run_pending_web_shell_probe(event_loop);
         self.run_pending_pulse_probe(event_loop);
         self.run_pending_autonotify();
         // 커서 배치보다 **앞**이다 — 스크롤이 정해진 뒤라야 AUTOCURSOR 가 놓은

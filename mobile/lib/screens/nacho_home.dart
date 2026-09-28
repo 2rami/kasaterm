@@ -441,6 +441,7 @@ class _NachoChatState extends State<NachoChat> {
           out.add(
             _NoticeRow(
               event: e,
+              onLink: widget.onLink,
               onOpenTask: desk.workOf(e.task) == null ? null : widget.onOpenTask,
             ),
           );
@@ -680,9 +681,10 @@ bool _isImage(String name) {
 }
 
 class _NoticeRow extends StatelessWidget {
-  const _NoticeRow({required this.event, this.onOpenTask});
+  const _NoticeRow({required this.event, required this.onLink, this.onOpenTask});
 
   final NachoEvent event;
+  final ValueChanged<String> onLink;
   final ValueChanged<String>? onOpenTask;
 
   @override
@@ -709,8 +711,10 @@ class _NoticeRow extends StatelessWidget {
           Icon(icon, size: 18, color: warn ? scheme.onErrorContainer : scheme.onSurfaceVariant),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
-              event.text,
+            child: ReplyText(
+              text: event.text,
+              onLink: onLink,
+              selectable: false,
               style: TextStyle(
                 fontSize: 13,
                 color: warn ? scheme.onErrorContainer : scheme.onSurfaceVariant,
