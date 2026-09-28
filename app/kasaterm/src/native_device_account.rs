@@ -71,6 +71,8 @@ impl State {
         match result {
             Ok(Action::Login) => {
                 self.form = false;
+                // 관문에 붙은 즉시 다른 기기의 에이전트 계정 목록을 받는다.
+                kasa_mcp::agent_accounts::poke();
                 self.message = Some((
                     "로그인을 저장했어요. 관문 연결을 확인하고 있어요".into(),
                     false,
