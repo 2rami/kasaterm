@@ -1718,16 +1718,99 @@ impl App {
             check(theme::theme_name() == before, "clicking clipped control geometry does not activate hidden palette");
         } else { check(false, "palette fixture has a visible safe target"); }
 
+        let ime_before = (
+            std::mem::replace(&mut self.hangul, kasa_ime::Composer::new()),
+            std::mem::take(&mut self.preedit), self.in_preedit, self.ime_active,
+            self.os_ime_surface.take(), self.ime_focus.take(),
+        );
+        self.in_preedit = false;
+        self.ime_active = false;
+        let feedback_before = std::mem::take(&mut self.feedback_body);
+        let feedback_caret_before = self.feedback_caret;
+        self.feedback_caret = 0;
+        self.open_settings_room(Some(SettingsCat::Feedback));
+        repaint(self);
+        if let Some(hit) = target_hit(self, &Target::Focus(SettingsInput::FeedbackBody)) {
+            click(self, center(hit.rect), MouseButton::Left);
+            self.window_event(event_loop, window_id, WindowEvent::Ime(winit::event::Ime::Commit("settings-sentinel".into())));
+            check(self.feedback_body == "settings-sentinel", "IME fixture focuses the real settings input");
+            let settings_text = self.feedback_body.clone();
+            let git_before = (
+                self.git.commit_modal_open, std::mem::take(&mut self.git.commit_msg),
+                self.git.commit_cursor, self.git.commit_focused, self.git.op,
+            );
+            self.git.commit_modal_open = true;
+            self.git.commit_cursor = 0;
+            self.git.commit_focused = false;
+            repaint(self);
+            self.window_event(event_loop, window_id, WindowEvent::Ime(winit::event::Ime::Commit("git-modal-input".into())));
+            check(self.git.commit_msg == "git-modal-input" && self.feedback_body == settings_text,
+                "window IME commit goes to Git modal instead of the settings underneath");
+            let commit_text = self.git.commit_msg.clone();
+            let confirmation_before = self.confirm_close.take();
+            self.confirm_close = Some(ConfirmClose {
+                why: CloseWhy::Busy("verification fixture".into()), action: PendingClose::Pane { pane: source.clone() },
+            });
+            repaint(self);
+            self.window_event(event_loop, window_id, WindowEvent::Ime(winit::event::Ime::Preedit("blocked".into(), None)));
+            self.window_event(event_loop, window_id, WindowEvent::Ime(winit::event::Ime::Commit("must-not-arrive".into())));
+            check(self.git.commit_msg == commit_text && self.feedback_body == settings_text
+                && self.preedit.is_empty() && !self.in_preedit,
+                "higher confirmation consumes IME without changing Git or settings text");
+            check(self.git.op == git_before.4, "IME probe never starts a Git operation");
+            self.confirm_close = confirmation_before;
+            self.confirm_btn_rects.clear();
+            self.git.commit_modal_open = git_before.0;
+            self.git.commit_msg = git_before.1;
+            self.git.commit_cursor = git_before.2;
+            self.git.commit_focused = git_before.3;
+        } else { check(false, "IME fixture has a visible settings text field"); }
+        self.native_settings_control_key(NamedKey::Escape, false, false);
+        self.feedback_body = feedback_before;
+        self.feedback_caret = feedback_caret_before;
+        socket::write_setting("feedback_draft", serde_json::json!(self.feedback_body));
+        self.hangul = ime_before.0;
+        self.preedit = ime_before.1;
+        self.in_preedit = ime_before.2;
+        self.ime_active = ime_before.3;
+        self.os_ime_surface = ime_before.4;
+        self.ime_focus = ime_before.5;
+
         self.open_settings_room(Some(SettingsCat::Students));
         repaint(self);
         self.native_settings_control_key(NamedKey::Tab, false, false);
         self.native_settings_control_key(NamedKey::Escape, false, false);
-        check(self.settings_scene.keyboard_focus().is_none(), "Escape clears keyboard focus without touching terminal");
+        check(self.settings_scene.keyboard_focus().is_none() && self.settings_room_active(),
+            "Escape clears keyboard focus without closing settings");
+        self.native_settings_control_key(NamedKey::Escape, false, true);
+        check(self.settings_room_active(), "held Escape cannot close settings after clearing focus");
+        self.native_settings_control_key(NamedKey::Escape, false, false);
+        check(!self.settings_room_active(), "a fresh Escape closes unfocused settings");
+        check(self.native_settings_control_key(NamedKey::Escape, false, true),
+            "held Escape remains consumed after settings closes");
+        self.open_settings_room(Some(SettingsCat::Students));
         check(source_state(self) == background_before && self.pty.len() == ptys_before,
             "background terminal structure remains unchanged throughout the probe");
         if theme::character_appearance() != appearance_before {
             self.settings_apply(SettingsAction::ToggleCharacterAppearance);
         }
+        repaint(self);
+        if let Some(hit) = target_hit(self, &Target::Category(SettingsCat::Students)) {
+            click(self, center(hit.rect), MouseButton::Left);
+            repaint(self);
+            for _ in 0..64 {
+                if self.settings_scene.keyboard_focus() == Some(&target) { break; }
+                self.native_settings_control_key(NamedKey::Tab, false, false);
+                repaint(self);
+            }
+            let focused = self.settings_scene.keyboard_hit();
+            check(focused.is_some_and(|hit| hit.target == target),
+                "final button focus is reached by category click and real Tab navigation");
+            if let Some(hit) = focused {
+                eprintln!("[button-focus-probe] capture focus={:?} visible={:?} layout={:?}",
+                    hit.target, hit.rect, hit.layout_rect);
+            }
+        } else { check(false, "final category pointer target is visible"); }
         self.autohover = autohover_before;
         repaint(self);
         eprintln!("[button-focus-probe] {} checks={checks} failures={failures} ui_zoom={zoom_before}",

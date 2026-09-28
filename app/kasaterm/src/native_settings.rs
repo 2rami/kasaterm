@@ -618,9 +618,16 @@ pub(crate) fn same_stepper_target(a: &Target, b: &Target) -> bool {
 pub(crate) fn keyboard_hits(hits: &[Hit]) -> Vec<&Hit> {
     let mut visible = Vec::new();
     for hit in hits {
+        // 잘린 단추는 이름을 읽기 어려워 키보드로 실행하지 않는다. 반 픽셀은 배율 반올림만 허용한다.
+        let fully_visible = [
+            hit.rect.0 - hit.layout_rect.0,
+            hit.rect.1 - hit.layout_rect.1,
+            (hit.rect.0 + hit.rect.2) - (hit.layout_rect.0 + hit.layout_rect.2),
+            (hit.rect.1 + hit.rect.3) - (hit.layout_rect.1 + hit.layout_rect.3),
+        ].into_iter().all(|difference| difference.abs() <= 0.5);
         if !matches!(hit.cursor, HitCursor::Pointer | HitCursor::Text)
             || matches!(hit.target, Target::Setting(SettingsAction::PickerSV | SettingsAction::PickerHue))
-            || hit.rect.2 <= 0.0 || hit.rect.3 <= 0.0 { continue; }
+            || hit.rect.2 <= 0.0 || hit.rect.3 <= 0.0 || !fully_visible { continue; }
         let center = (hit.rect.0 + hit.rect.2 / 2.0, hit.rect.1 + hit.rect.3 / 2.0);
         if !hits.iter().rev().find(|candidate| contains(candidate.rect, center))
             .is_some_and(|top| top.target == hit.target) { continue; }
@@ -1628,7 +1635,7 @@ impl App {
     pub(crate) fn consume_settings_activation_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
         let key = match &event.logical_key {
-            Key::Named(key @ (NamedKey::Enter | NamedKey::Space)) => *key,
+            Key::Named(key @ (NamedKey::Enter | NamedKey::Space | NamedKey::Escape)) => *key,
             Key::Character(value) if value.as_str() == " " => NamedKey::Space,
             _ => return false,
         };
@@ -1664,15 +1671,19 @@ impl App {
                     self.native_settings_activate_focus();
                 }
             }
-            NamedKey::Escape if self.settings_scene.dropdown().is_some() => {
-                self.settings_scene.close_dropdown();
-            }
-            NamedKey::Escape if self.settings_input.is_some() => {
-                self.native_settings_cancel_field();
-                self.settings_scene.set_keyboard_focus(None);
-            }
-            NamedKey::Escape if self.settings_scene.keyboard_focus().is_some() => {
-                self.settings_scene.set_keyboard_focus(None);
+            NamedKey::Escape => {
+                if repeat { return true; }
+                self.settings_scene.arm_activation_key(key);
+                if self.settings_scene.dropdown().is_some() {
+                    self.settings_scene.close_dropdown();
+                } else if self.settings_input.is_some() {
+                    self.native_settings_cancel_field();
+                    self.settings_scene.set_keyboard_focus(None);
+                } else if self.settings_scene.keyboard_focus().is_some() {
+                    self.settings_scene.set_keyboard_focus(None);
+                } else {
+                    self.close_settings_room();
+                }
             }
             _ => return false,
         }
@@ -1735,12 +1746,6 @@ impl App {
                 }
                 self.chrome_dirty = true;
                 return true;
-            }
-            if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-                let focused = self.settings_scene.keyboard_focus().is_some();
-                self.settings_scene.set_keyboard_focus(None);
-                self.chrome_dirty = true;
-                return focused;
             }
         }
         let Some(field) = self.settings_input else {
@@ -8252,6 +8257,27 @@ mod tests {
         let reachable = keyboard_hits(&hits);
         assert_eq!(reachable.len(), 1);
         assert_eq!(reachable[0].target, Target::Setting(SettingsAction::UiFont("system".into())));
+    }
+
+    #[test]
+    fn keyboard_candidates_require_the_entire_control_to_be_visible() {
+        let hits = vec![
+            Hit { target: Target::Setting(SettingsAction::ToggleFileTree), rect: (10.0, 35.0, 80.0, 1.0),
+                layout_rect: (10.0, 10.0, 80.0, 26.0), cursor: HitCursor::Pointer },
+            Hit { target: Target::Setting(SettingsAction::ToggleCharacterAppearance), rect: (10.0, 50.0, 80.0, 26.0),
+                layout_rect: (10.0, 50.0, 80.0, 26.0), cursor: HitCursor::Pointer },
+            Hit { target: Target::Setting(SettingsAction::ToggleFooter), rect: (100.0, 50.0, 1.0, 26.0),
+                layout_rect: (100.0, 50.0, 80.0, 26.0), cursor: HitCursor::Pointer },
+        ];
+        let reachable = keyboard_hits(&hits);
+        assert_eq!(reachable.len(), 1);
+        assert_eq!(reachable[0].target, Target::Setting(SettingsAction::ToggleCharacterAppearance));
+        assert!(contains(hits[0].rect, (50.0, 35.5)));
+        assert!(contains(hits[2].rect, (100.5, 60.0)));
+        let mut rounded = hits[1].clone();
+        rounded.rect.1 += 0.25;
+        rounded.rect.3 -= 0.25;
+        assert_eq!(keyboard_hits(&[rounded]).len(), 1);
     }
 
     #[test]

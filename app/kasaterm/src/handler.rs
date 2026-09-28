@@ -7125,6 +7125,15 @@ impl ApplicationHandler<UserEvent> for App {
                 if std::env::var_os("KASATERM_IME_DEBUG").is_some() {
                     eprintln!("[ime] event={ime:?}");
                 }
+                if self.main_confirmation_modal() {
+                    self.discard_modal_ime(&ime);
+                    window.request_redraw();
+                    return;
+                }
+                if self.git_commit_modal_ime(&ime) {
+                    window.request_redraw();
+                    return;
+                }
                 if self.settings_room_active() {
                     self.native_settings_ime(ime);
                     return;
@@ -7216,19 +7225,11 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if self.sidebar_navigation_key(&event) {
-                    window.request_redraw();
-                    return;
-                }
-                if matches!(event.state, ElementState::Pressed)
-                    && matches!(event.logical_key, Key::Named(NamedKey::Escape))
-                    && self.info.machine_menu.is_some()
-                {
-                    self.info.machine_menu = None;
-                    self.info.machines_col.btn_rects.clear();
-                    self.chrome_dirty = true;
-                    window.request_redraw();
-                    return;
+                if self.main_confirmation_modal() && event.state.is_pressed() {
+                    if let Key::Named(key @ (NamedKey::Enter | NamedKey::Escape)) = event.logical_key {
+                        if event.repeat { return; }
+                        self.settings_scene.arm_activation_key(key);
+                    }
                 }
                 // Confirm-close modal: Enter = 기본 버튼(저장 안 한 게 있으면
                 // 저장, 아니면 닫기), Esc = 취소. Swallow all other keys so
@@ -7311,6 +7312,24 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         window.request_redraw();
                     }
+                    return;
+                }
+                if self.git_commit_modal_key(&event) {
+                    window.request_redraw();
+                    return;
+                }
+                if self.sidebar_navigation_key(&event) {
+                    window.request_redraw();
+                    return;
+                }
+                if matches!(event.state, ElementState::Pressed)
+                    && matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                    && self.info.machine_menu.is_some()
+                {
+                    self.info.machine_menu = None;
+                    self.info.machines_col.btn_rects.clear();
+                    self.chrome_dirty = true;
+                    window.request_redraw();
                     return;
                 }
                 // KASATERM_KEY_DEBUG=1 → dump every key event with its
@@ -7436,15 +7455,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 if self.settings_room_active() {
-                    if matches!(event.state, ElementState::Pressed)
-                        && !event.repeat
-                        && matches!(event.logical_key, Key::Named(NamedKey::Escape))
-                        && self.settings_input.is_none()
-                    {
-                        self.close_settings_room();
-                    } else {
-                        self.native_settings_key(&event);
-                    }
+                    self.native_settings_key(&event);
                     window.request_redraw();
                     return;
                 }
@@ -8275,8 +8286,12 @@ impl ApplicationHandler<UserEvent> for App {
 
 impl App {
     fn main_pointer_modal(&self) -> bool {
+        self.main_confirmation_modal() || self.git.commit_modal_open
+    }
+
+    fn main_confirmation_modal(&self) -> bool {
         self.confirm_close.is_some() || self.restore_prompt.is_some()
-            || self.character_swap_confirm.is_some() || self.git.commit_modal_open
+            || self.character_swap_confirm.is_some()
             || self.account_switch_confirm.as_ref().is_some_and(|pending| {
                 pending.surface == crate::session::ConfirmSurface::Main
             })

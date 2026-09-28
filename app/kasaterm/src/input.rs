@@ -1,6 +1,99 @@
 //! 키/마우스/휠 입력 + 클립보드 + claude 상태 글리프/타이틀.
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommitModalKey {
+    Quit,
+    Close,
+    Commit,
+    Copy,
+    Paste,
+    Edit,
+    Consume,
+}
+
+fn platform_ime_owns_commit_key(key: &Key, modifiers: ModifiersState, macos: bool, active: bool, composing: bool) -> bool {
+    if macos || modifiers.super_key() || modifiers.control_key() { return false; }
+    composing || (active && matches!(key, Key::Character(text) if text.chars().any(is_hangul_codepoint)))
+}
+
+fn commit_modal_key_plan(
+    key: &winit::keyboard::Key, physical: Option<winit::keyboard::KeyCode>,
+    pressed: bool, repeat: bool, modifiers: ModifiersState, host: bool, macos: bool,
+) -> CommitModalKey {
+    use winit::keyboard::{Key, KeyCode, NamedKey};
+    if !pressed || is_modifier_logical(key) { return CommitModalKey::Consume; }
+    if matches!(key, Key::Named(NamedKey::Escape)) {
+        return if repeat { CommitModalKey::Consume } else { CommitModalKey::Close };
+    }
+    if host && !repeat {
+        match physical {
+            Some(KeyCode::KeyQ) => return CommitModalKey::Quit,
+            Some(KeyCode::KeyW) => return CommitModalKey::Close,
+            _ => {}
+        }
+    }
+    let clipboard = !modifiers.alt_key()
+        && if macos { modifiers.super_key() && !modifiers.control_key() }
+        else { modifiers.control_key() && !modifiers.super_key() };
+    if clipboard && !repeat {
+        match physical {
+            Some(KeyCode::KeyC) => return CommitModalKey::Copy,
+            Some(KeyCode::KeyV) => return CommitModalKey::Paste,
+            _ => {}
+        }
+    }
+    if host || modifiers.control_key() || modifiers.super_key() {
+        return CommitModalKey::Consume;
+    }
+    if matches!(key, Key::Named(NamedKey::Enter)) {
+        return if repeat || modifiers.alt_key() { CommitModalKey::Consume } else { CommitModalKey::Commit };
+    }
+    CommitModalKey::Edit
+}
+
+#[cfg(test)]
+mod commit_modal_key_tests {
+    use super::*;
+    use winit::keyboard::{Key, KeyCode, NamedKey};
+
+    #[test]
+    fn platform_composition_cannot_submit_or_duplicate_its_commit() {
+        let modifiers = ModifiersState::empty();
+        assert!(platform_ime_owns_commit_key(&Key::Named(NamedKey::Enter), modifiers, false, true, true));
+        assert!(platform_ime_owns_commit_key(&Key::Named(NamedKey::Backspace), modifiers, false, true, true));
+        assert!(platform_ime_owns_commit_key(&Key::Character("한".into()), modifiers, false, true, false));
+        assert!(!platform_ime_owns_commit_key(&Key::Character("a".into()), modifiers, false, true, false));
+        assert!(!platform_ime_owns_commit_key(&Key::Named(NamedKey::Enter), modifiers, true, true, true));
+        assert!(!platform_ime_owns_commit_key(&Key::Character("w".into()), ModifiersState::SUPER, false, true, true));
+    }
+
+    #[test]
+    fn modal_owns_submit_close_and_modified_application_chords() {
+        let plan = |key, code, modifiers, host, repeat| commit_modal_key_plan(&key, code, true, repeat, modifiers, host, true);
+        assert_eq!(plan(Key::Named(NamedKey::Enter), None, ModifiersState::empty(), false, false), CommitModalKey::Commit);
+        assert_eq!(plan(Key::Named(NamedKey::Enter), None, ModifiersState::empty(), false, true), CommitModalKey::Consume);
+        assert_eq!(plan(Key::Named(NamedKey::Enter), None, ModifiersState::SUPER, true, false), CommitModalKey::Consume);
+        assert_eq!(plan(Key::Named(NamedKey::Escape), None, ModifiersState::empty(), false, false), CommitModalKey::Close);
+        assert_eq!(plan(Key::Named(NamedKey::Escape), None, ModifiersState::empty(), false, true), CommitModalKey::Consume);
+        assert_eq!(plan(Key::Character(",".into()), Some(KeyCode::Comma), ModifiersState::SUPER, true, false), CommitModalKey::Consume);
+        assert_eq!(plan(Key::Character("w".into()), Some(KeyCode::KeyW), ModifiersState::SUPER, true, false), CommitModalKey::Close);
+        assert_eq!(plan(Key::Character("q".into()), Some(KeyCode::KeyQ), ModifiersState::SUPER, true, false), CommitModalKey::Quit);
+    }
+
+    #[test]
+    fn clipboard_and_edit_keys_never_need_the_background_input_path() {
+        for (macos, modifiers) in [(true, ModifiersState::SUPER), (false, ModifiersState::CONTROL)] {
+            assert_eq!(commit_modal_key_plan(&Key::Character("v".into()), Some(KeyCode::KeyV), true, false, modifiers, macos, macos), CommitModalKey::Paste);
+            assert_eq!(commit_modal_key_plan(&Key::Character("c".into()), Some(KeyCode::KeyC), true, false, modifiers, macos, macos), CommitModalKey::Copy);
+            assert_eq!(commit_modal_key_plan(&Key::Character("v".into()), Some(KeyCode::KeyV), true, true, modifiers, macos, macos), CommitModalKey::Consume);
+        }
+        assert_eq!(commit_modal_key_plan(&Key::Character("x".into()), Some(KeyCode::KeyX), true, false, ModifiersState::empty(), false, true), CommitModalKey::Edit);
+        assert_eq!(commit_modal_key_plan(&Key::Named(NamedKey::Backspace), None, true, true, ModifiersState::empty(), false, true), CommitModalKey::Edit);
+        assert_eq!(commit_modal_key_plan(&Key::Named(NamedKey::Enter), None, false, false, ModifiersState::empty(), false, true), CommitModalKey::Consume);
+    }
+}
+
 fn account_menu_contains(rect: Option<(f32, f32, f32, f32)>, point: (f32, f32)) -> bool {
     rect.is_some_and(|(x, y, w, h)| {
         w > 0.0 && h > 0.0 && point.0 >= x && point.0 < x + w && point.1 >= y && point.1 < y + h
@@ -67,6 +160,97 @@ fn account_menu_capture_button(
 }
 
 impl App {
+    pub(crate) fn discard_modal_ime(&mut self, ime: &Ime) {
+        match ime {
+            Ime::Enabled | Ime::Preedit(..) => self.ime_active = true,
+            Ime::Disabled => self.ime_active = false,
+            Ime::Commit(_) => {}
+        }
+        let _ = self.hangul.flush();
+        self.preedit.clear();
+        self.in_preedit = false;
+        self.os_ime_surface = None;
+        self.ime_focus = None;
+        self.chrome_dirty = true;
+    }
+
+    pub(crate) fn git_commit_modal_key(&mut self, event: &KeyEvent) -> bool {
+        use winit::keyboard::{Key, NamedKey, PhysicalKey};
+        if !self.git.commit_modal_open { return false; }
+        if platform_ime_owns_commit_key(&event.logical_key, self.modifiers, cfg!(target_os = "macos"), self.ime_active, self.in_preedit) {
+            return true;
+        }
+        let physical = match event.physical_key { PhysicalKey::Code(code) => Some(code), _ => None };
+        let action = commit_modal_key_plan(&event.logical_key, physical, event.state.is_pressed(),
+            event.repeat, self.modifiers, self.host_mod(), cfg!(target_os = "macos"));
+        if action == CommitModalKey::Quit { return false; }
+        if action == CommitModalKey::Consume { return true; }
+        self.ime_retarget(crate::ImeFocus::GitCommit);
+        self.git.commit_focused = true;
+        match action {
+            CommitModalKey::Edit => self.git_commit_input(event),
+            _ => {
+                if let Some(text) = self.hangul.flush() { self.git_commit_insert(&text); }
+                self.preedit.clear();
+                self.in_preedit = false;
+                match action {
+                    CommitModalKey::Commit => {
+                        self.settings_scene.arm_activation_key(NamedKey::Enter);
+                        self.run_commit_modal(false);
+                    }
+                    CommitModalKey::Close => {
+                        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                            self.settings_scene.arm_activation_key(NamedKey::Escape);
+                        }
+                        self.close_commit_modal();
+                    }
+                    CommitModalKey::Copy => {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let _ = clipboard.set_text(self.git.commit_msg.clone());
+                        }
+                    }
+                    CommitModalKey::Paste => {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            if let Ok(text) = clipboard.get_text() {
+                                self.git_commit_insert(&text.replace("\r\n", " ").replace(['\r', '\n'], " "));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.chrome_dirty = true;
+        self.last_input_at = Instant::now();
+        true
+    }
+
+    pub(crate) fn git_commit_modal_ime(&mut self, ime: &Ime) -> bool {
+        if !self.git.commit_modal_open { return false; }
+        self.ime_retarget(crate::ImeFocus::GitCommit);
+        self.git.commit_focused = true;
+        match ime {
+            Ime::Enabled => self.ime_active = true,
+            Ime::Disabled => {
+                self.ime_active = false;
+                self.preedit.clear();
+                self.in_preedit = false;
+            }
+            Ime::Preedit(text, _) => {
+                self.ime_active = true;
+                self.preedit = text.clone();
+                self.in_preedit = !text.is_empty();
+            }
+            Ime::Commit(text) => {
+                self.preedit.clear();
+                self.in_preedit = false;
+                self.git_commit_insert(text);
+            }
+        }
+        self.chrome_dirty = true;
+        true
+    }
+
     fn close_account_menu(&mut self) {
         self.account_menu = false;
         self.account_menu_provider = None;

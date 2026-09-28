@@ -1095,6 +1095,7 @@ mod tests {
         let mut scene = SettingsScene::default();
         scene.arm_activation_key(NamedKey::Enter);
         scene.arm_activation_key(NamedKey::Space);
+        scene.arm_activation_key(NamedKey::Escape);
         scene.set_category(SettingsCat::Appearance);
         scene.prepare_field_focus(SettingsInput::Shell);
         assert!(scene.consume_activation_key(NamedKey::Enter, true, true));
@@ -1103,6 +1104,9 @@ mod tests {
         assert!(!scene.consume_activation_key(NamedKey::Enter, true, true));
         assert!(scene.consume_activation_key(NamedKey::Space, true, true));
         assert!(scene.consume_activation_key(NamedKey::Space, false, false));
+        assert!(scene.consume_activation_key(NamedKey::Escape, true, true));
+        assert!(scene.consume_activation_key(NamedKey::Escape, false, false));
+        assert!(!scene.consume_activation_key(NamedKey::Escape, true, true));
         scene.arm_activation_key(NamedKey::Enter);
         assert!(!scene.consume_activation_key(NamedKey::Enter, true, false));
         assert!(!scene.consume_activation_key(NamedKey::Enter, true, true));
