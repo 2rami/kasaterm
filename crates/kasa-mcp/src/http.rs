@@ -4678,10 +4678,27 @@ async fn term_gitop_post(body: axum::body::Bytes) -> impl IntoResponse {
     }
 }
 
+/// 아무 절대경로나 읽는 창구라 주인만 — 손님 폰 주소로 `~/.config/kasaterm/remote-token`
+/// (셸 전권)까지 읽혔다. 기계 사이 터널·토큰 요청은 폰 주소를 안 달고 오므로 그대로 통과한다.
+fn guest_denied(req: &axum::extract::Request) -> Option<axum::response::Response> {
+    req.extensions()
+        .get::<MobileAuth>()
+        .is_some_and(|auth| !auth.0.owner)
+        .then(|| (axum::http::StatusCode::FORBIDDEN, "owner only").into_response())
+}
+
 /// 폴더 한 층 — 다른 기기의 파일트리가 이걸로 그린다. `.git` 은 빼고, 폴더 먼저.
 async fn term_tree_get(
     q: Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    if let Some(denied) = guest_denied(&req) {
+        return denied;
+    }
+    term_tree_list(q).into_response()
+}
+
+fn term_tree_list(q: Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let Some(path) = q.get("path").filter(|p| p.starts_with('/')).cloned() else {
         return Json(serde_json::json!({ "ok": false, "error": "`path`(절대경로) 가 필요해요" }));
     };
@@ -4708,8 +4725,12 @@ async fn term_tree_get(
 /// 파일 하나 — 다른 기기에서 열어 보기용. 4MB 까지만.
 async fn term_file_get(
     q: Query<std::collections::HashMap<String, String>>,
+    req: axum::extract::Request,
 ) -> axum::response::Response {
     use axum::response::IntoResponse as _;
+    if let Some(denied) = guest_denied(&req) {
+        return denied;
+    }
     let Some(path) = q.get("path").filter(|p| p.starts_with('/')).cloned() else {
         return (axum::http::StatusCode::BAD_REQUEST, "`path`(절대경로) 가 필요해요").into_response();
     };
@@ -8526,6 +8547,22 @@ mod tests {
         assert_eq!(with_token.status(), StatusCode::FORBIDDEN, "관문 경유에 토큰이 통했다");
         t1.abort();
         t2.abort();
+    }
+
+    #[test]
+    fn file_reads_are_owner_only_for_phone_addresses() {
+        let guest = crate::mobile::MobileUser { name: "손님".into(), slug: "abcdefghijklmnopqrstuvwxy".into(), created: 0, owner: false };
+        let owner = crate::mobile::MobileUser { owner: true, ..guest.clone() };
+        let req = |user: Option<crate::mobile::MobileUser>| {
+            let mut r = axum::extract::Request::new(axum::body::Body::empty());
+            if let Some(u) = user {
+                r.extensions_mut().insert(super::MobileAuth(u));
+            }
+            r
+        };
+        assert_eq!(super::guest_denied(&req(Some(guest))).map(|r| r.status()), Some(axum::http::StatusCode::FORBIDDEN));
+        assert!(super::guest_denied(&req(Some(owner))).is_none());
+        assert!(super::guest_denied(&req(None)).is_none(), "machine-to-machine tunnels carry no phone address");
     }
 
     #[test]
