@@ -15,6 +15,8 @@ kasa-pty = { path = "../kasa-pty" }
 kasa-bridge = { path = "../kasa-bridge" }
 # wide 글자(한글) 폭 판정 — 스페이서를 걸러내는 데 쓴다.
 unicode-width = "0.2"
+# KASA-share 는 맥(NFD 로 저장되기도 함)과 윈도우 사이에서 같은 이름을 같은 파일로 봐야 한다.
+unicode-normalization = "0.1"
 anyhow.workspace = true
 # remote 모듈의 ExtEvent 채널 — kasa-pty 의 start_external 과 같은 채널 타입.
 crossbeam-channel.workspace = true
