@@ -2830,8 +2830,15 @@ impl App {
                 ],
                 contexts: std::collections::HashMap::from([("%info-fixture".into(), ContextLines {
                     pane_id: "%info-fixture".into(), session_id: "fixture-session".into(),
-                    harness: "claude".into(), summary: evidence.summary_lines(), details: evidence.detail_sections(),
+                    harness: "claude".into(), note: evidence.detail_note(), details: evidence.detail_sections(),
                 })]),
+                // 보드가 주는 「지금 하는 일」과, 상태 칸과 같은 말이라 안 서야 하는 작업 한 줄.
+                now: std::collections::HashMap::from([("%info-fixture".into(), crate::info::NowLine {
+                    character: Some("아로나".into()),
+                    request: "문서 편집기에서 한글 줄바꿈이 어절 가운데서 끊기지 않는지 확인해 주세요".into(),
+                    reply: "입력창 폭을 세 가지로 바꿔 가며 확인했고, 긴 경로만 글자 단위로 넘어가요.".into(),
+                })]),
+                tasks: std::collections::HashMap::from([("%info-fixture".into(), crate::info::TaskLine { label: "대기 중".into(), ..Default::default() })]),
                 ..Default::default()
             };
             if !ACTED.swap(true, Ordering::Relaxed) {
@@ -7467,7 +7474,7 @@ impl App {
 
     pub(crate) fn run_pending_autoboard(&mut self) {
         #[cfg(debug_assertions)]
-        if self.board_room_active() {
+        if self.board_panel_open() {
             self.board_scene.apply_board_probe_view();
         }
         let Some(due) = self.autoboard_at else { return };
@@ -7475,8 +7482,8 @@ impl App {
             return;
         }
         self.autoboard_at = None;
-        self.toggle_board_room();
-        // A legacy schedule probe cannot bring back the retired user-facing screen.
+        self.toggle_board_panel();
+        // KASATERM_AUTOBOARD_TAB=work|overview|agents|schedule|git|machines — 캡처용 탭 선택.
         if let Ok(tab) = std::env::var("KASATERM_AUTOBOARD_TAB") {
             use crate::native_board::BoardTab;
             let tab = match tab.as_str() {
@@ -7492,7 +7499,7 @@ impl App {
                 self.board_scene.set_tab(tab);
             }
         }
-        eprintln!("[autoboard] toggled → open={}", self.board_room_active());
+        eprintln!("[autoboard] toggled → open={}", self.board_panel_open());
     }
     pub(crate) fn run_pending_autoarona(
         &mut self,

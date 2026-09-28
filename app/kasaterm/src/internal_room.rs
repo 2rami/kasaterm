@@ -1,7 +1,8 @@
 //! PTY 없는 네이티브 내부 방의 공통 수명 규칙.
 //!
-//! 설정과 보드는 사용자 작업 방과 같은 `windows` 목록에 앉지만 셸, cwd, 복원
-//! 기록을 갖지 않는다. 이 모듈은 내부 방의 marker와 변형 차단을 한 관문으로
+//! 설정은 사용자 작업 방과 같은 `windows` 목록에 앉지만 셸, cwd, 복원
+//! 기록을 갖지 않는다. 보드도 방이었다가 왼쪽 판으로 옮겨 갔다(`left_panel.rs`).
+//! 이 모듈은 내부 방의 marker와 변형 차단을 한 관문으로
 //! 묶어, 새 기능이 내부 화면을 터미널 pane으로 오인하지 않게 한다.
 
 use super::*;
@@ -9,30 +10,29 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum InternalRoomKind {
     Settings,
-    Board,
 }
 
+/// 보드가 방이던 때의 기록. 옛 세션 파일에 남아 있으면 사용자 방으로 되살리지 않고 건너뛴다.
+const LEGACY_BOARD: (&str, &str) = ("board", "\0kasaterm-board");
+
 impl InternalRoomKind {
-    pub(crate) const ALL: [Self; 2] = [Self::Settings, Self::Board];
+    pub(crate) const ALL: [Self; 1] = [Self::Settings];
 
     pub(crate) const fn pane_id(self) -> &'static str {
         match self {
             Self::Settings => "\0kasaterm-settings",
-            Self::Board => "\0kasaterm-board",
         }
     }
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Settings => "설정",
-            Self::Board => "작업현황",
         }
     }
 
     pub(crate) const fn saved_name(self) -> &'static str {
         match self {
             Self::Settings => "settings",
-            Self::Board => "board",
         }
     }
 
@@ -109,6 +109,8 @@ pub(crate) fn is_saved_window(node: &serde_json::Value) -> bool {
         InternalRoomKind::ALL
             .into_iter()
             .any(|kind| saved == Some(kind.saved_name()) || pane == Some(kind.pane_id()))
+            || saved == Some(LEGACY_BOARD.0)
+            || pane == Some(LEGACY_BOARD.1)
     })
 }
 
@@ -170,14 +172,12 @@ impl App {
     pub(crate) fn internal_return_pane(&self, kind: InternalRoomKind) -> Option<&str> {
         match kind {
             InternalRoomKind::Settings => self.settings_scene.return_pane(),
-            InternalRoomKind::Board => self.board_scene.return_pane(),
         }
     }
 
     pub(crate) fn return_from_active_internal_room(&mut self) -> bool {
         match self.internal_room_kind_at(self.active_window) {
             Some(InternalRoomKind::Settings) => self.return_from_settings_room(),
-            Some(InternalRoomKind::Board) => self.return_from_board_room(),
             None => false,
         }
     }
@@ -220,7 +220,7 @@ mod tests {
     /// (2026-09-05 지시). 옮겨도 안전한 근거는 둘이다: 인덱스를 키로 쓰는 필드가
     /// 하나도 빠짐없이 `reorder_window` 의 remap 을 지나고, 내부 방은 애초에 저장에서
     /// 빠져 바뀐 순서가 기록에 남지 않는다.
-    /// 내부 방(설정·보드)도 창 하단 상태줄에 자리를 남겨야 한다.
+    /// 내부 방(설정)과 왼쪽 판도 창 하단 상태줄에 자리를 남겨야 한다.
     ///
     /// 한때 `status_h()` 가 내부 방에서 0 을 냈다 — 패널이 창을 다 쓰게 하려던
     /// 것인데, 상태줄을 **그리는** 쪽은 그 0 을 그대로 받아 `win_h - 0` 에서 띠를
@@ -240,15 +240,15 @@ mod tests {
             "높이를 0 으로 내리면 상태줄이 창 밖에서 그려진다"
         );
         let render = include_str!("render.rs");
-        let compact: String = render.split_whitespace().collect();
-        assert!(compact.contains("native_settings_snapshot(crate::native_settings::content_area((win_px.0/scale,win_px.1/scale),left,status_h,"),
-            "설정 패널은 클릭 영역과 같은 상태줄 제외 함수를 사용해야 한다");
-        assert!(compact.contains("native_board_snapshot((left,TITLE_HEIGHT,(win_px.0/scale-left).max(1.0),(win_px.1/scale-TITLE_HEIGHT-status_h).max(1.0),"),
-            "보드 패널도 상태줄 높이를 제외해야 한다");
-        for height in [480.0, 720.0, 1000.0] {
-            let area = crate::native_settings::content_area((1000.0, height), 200.0, 30.0);
-            assert_eq!(area.1 + area.3, height - 30.0);
-        }
+        assert_eq!(
+            render.matches("- TITLE_HEIGHT - status_h").count(),
+            1,
+            "설정 화면은 상태줄 자리를 남겨야 한다"
+        );
+        assert!(
+            include_str!("left_panel.rs").contains("- TITLE_HEIGHT - self.status_h()"),
+            "왼쪽 판(보드·아로나)도 상태줄 자리를 남겨야 한다"
+        );
     }
 
     #[test]

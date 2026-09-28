@@ -830,6 +830,8 @@ pub(crate) struct InfoState {
     /// `(포트, 소유 pid, rect)` — 종료가 붙으면서 pid 없이는 행을 다룰 수 없다.
     /// pane 그룹 머리 — 클릭하면 그 그룹만 접힌다.
     pub(crate) group_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// 올리면 뜨는 말 — 「—」 값의 까닭·이름표 설명. 렌더가 칼럼을 그린 뒤 커서 아래 것을 띄운다.
+    pub(crate) tip_rects: Vec<(String, (f32, f32, f32, f32))>,
     pub(crate) proc_rects: Vec<(u32, (f32, f32, f32, f32))>,
     pub(crate) kill_rects: Vec<(u32, (f32, f32, f32, f32))>,
     pub(crate) sec_rects: Vec<(InfoSection, (f32, f32, f32, f32))>,
@@ -887,6 +889,7 @@ impl Default for InfoState {
             last_group_click: None,
             tab_rects: Vec::new(),
             group_rects: Vec::new(),
+            tip_rects: Vec::new(),
             proc_rects: Vec::new(),
             kill_rects: Vec::new(),
             sec_rects: Vec::new(),

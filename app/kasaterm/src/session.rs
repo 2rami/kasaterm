@@ -4207,10 +4207,6 @@ impl App {
                 self.commit_room_rename();
                 self.open_settings_room(None);
             }
-            Some(crate::internal_room::InternalRoomKind::Board) => {
-                self.commit_room_rename();
-                self.open_board_room();
-            }
             None => {
                 self.commit_room_rename();
                 self.switch_window(idx);
@@ -4727,7 +4723,6 @@ impl App {
         if let Some(kind) = self.internal_room_kind_at(idx) {
             let closed = match kind {
                 crate::internal_room::InternalRoomKind::Settings => self.close_settings_room(),
-                crate::internal_room::InternalRoomKind::Board => self.close_board_room(),
             };
             return closed
                 .then_some(())
@@ -7411,7 +7406,7 @@ impl App {
         self.pty_layout = None;
         self.windows.clear();
         self.settings_scene.leave();
-        self.board_scene.leave();
+        self.close_left_panel();
         // ── 저장된 배정 먼저 잡아 두기 ────────────────────────────────────
         // 복원은 leaf 를 하나씩 되살리는데, 저장된 학생을 **그 차례가 와야** 잡는다.
         // 그래서 앞 차례의 leaf 가 새로 배정받다가 뒤 leaf 의 학생을 집어가면, 뒤

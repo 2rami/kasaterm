@@ -50,133 +50,110 @@ pub(crate) struct ContextEvidence {
     pub(crate) request_size_error: bool,
 }
 
-impl ContextEvidence {
-    pub(crate) fn summary_lines(&self) -> Vec<String> {
-        if !self.available {
-            return vec![
-                "기록 미확인 · 이 세션의 대화 부담".into(),
-                "미확인 · 스킬·MCP 목록과 사용 기록".into(),
-                "미확인 · 이미지·전송 용량".into(),
-            ];
-        }
-        let usage = self.last_input_tokens.map_or_else(
-            || "미확인 · 마지막 입력 사용량".into(),
-            |n| format!("마지막 기록 · 입력 {n} 토큰"),
-        );
-        let tools = format!(
-            "{} · 스킬 읽기 {} · MCP 호출 {}종",
-            self.scope(),
-            self.skills_read.len(),
-            self.mcp_called.len()
-        );
-        let images = if self.request_size_error {
-            "원인 미확인 · 요청 크기 오류 기록".into()
-        } else {
-            format!(
-                "전송 미계측 · 이미지 읽기 {}회 · 첨부 기록 {}건",
-                self.image_read_calls, self.attachment_records
-            )
-        };
-        vec![usage, tools, images]
-    }
+/// 실행 상세 한 줄 — 「이름 · 값」 표 또는 이름 알약.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Detail {
+    /// 값이 `None` 이면 흐린 「—」 로 그리고 `tip`(올리면 뜨는 말)이 까닭을 댄다.
+    Value { name: String, value: Option<String>, tip: String, warn: bool },
+    /// 이름 목록 — 알약으로 늘어놓는다. `None` 은 미확인(—), 빈 목록은 「없음」.
+    Pills { name: String, items: Option<Vec<String>>, tip: String },
+}
 
-    pub(crate) fn detail_sections(&self) -> Vec<(String, Vec<String>)> {
+fn value(name: &str, value: Option<String>, tip: &str) -> Detail {
+    Detail::Value { name: name.into(), value, tip: tip.into(), warn: false }
+}
+
+fn pills(name: &str, items: Option<&[String]>, tip: &str) -> Detail {
+    Detail::Pills { name: name.into(), items: items.map(<[String]>::to_vec), tip: tip.into() }
+}
+
+/// 세 자리마다 쉼표 — 토큰·바이트는 자릿수가 커서 붙여 쓰면 한눈에 안 읽힌다.
+pub(crate) fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 { out.push(','); }
+        out.push(ch);
+    }
+    out
+}
+
+impl ContextEvidence {
+    /// 상세 머리의 안내 하나. 섹션마다 되풀이하던 해설(「관측값이지 확정이 아니다」「목록에 있다고 읽은 것은
+    /// 아니다」「연결은 그 당시 상태」)을 여기로 모았다(2026-09-28 지시).
+    pub(crate) fn detail_note(&self) -> String {
         if !self.available {
-            return vec![("확인 범위".into(), vec!["선택한 세션의 로컬 기록이 없거나 읽을 수 없어요. 원격 기록은 별도로 가져오지 않아요.".into()])];
+            return "이 세션의 로컬 기록이 없거나 읽을 수 없어요. 원격 기록은 따로 가져오지 않아요.".into();
         }
-        let mut range = vec![format!("{} · 중복을 제외한 기록 {}건", self.scope(), self.observed_records),
-            "기록에서 관측한 값이에요. 지금 모델에 남아 있는 내용 전체나 느려진 원인을 확정하지 않아요.".into()];
+        let mut note = String::from("기록에서 관측한 값이에요 — 모델에 남은 내용·느려진 원인·실제 전송 크기는 확정하지 않아요. 목록에 있다고 읽은 것은 아니고, 연결 기록은 그 당시 상태예요.");
+        if self.partial {
+            note.push_str(" 일부 구간만 셌어요 — 0건이어도 전체 대화에 없다는 뜻은 아니에요.");
+        }
         if self.incomplete_record {
-            range.push("아직 쓰는 중인 마지막 기록은 집계하지 않았어요.".into());
+            note.push_str(" 아직 쓰는 중인 마지막 기록은 빼고 셌어요.");
         }
         if self.limited {
-            range.push("기록 또는 목록이 수집 한도를 넘어 일부만 표시해요.".into());
+            note.push_str(" 기록이나 목록이 수집 한도를 넘어 일부만 보여요.");
         }
-        let mut tokens = vec![
-            self.last_input_tokens.map_or_else(
-                || "미확인 · 마지막으로 기록된 입력 사용량".into(),
-                |n| format!("마지막 사용량 기록: 입력 {n} 토큰 (캐시 포함)"),
-            ),
-            "오류가 난 요청의 사용량이 없으면 앞선 응답 기록이 남을 수 있어요.".into(),
-            "토큰은 전송 바이트와 다른 단위예요.".into(),
+        note
+    }
+
+    pub(crate) fn detail_sections(&self) -> Vec<(String, Vec<Detail>)> {
+        if !self.available {
+            return Vec::new();
+        }
+        let scope = if self.partial || self.limited { "확인한 일부 · 전체 미확인" } else { "저장된 기록 전체" };
+        let range = vec![
+            value("확인한 기록", Some(format!("{}건", grouped(self.observed_records))), "중복을 뺀 기록 수"),
+            value("기준", Some(scope.into()), ""),
         ];
+        let mut tokens = vec![value(
+            "마지막 입력",
+            self.last_input_tokens.map(|n| format!("{} 토큰 · 캐시 포함", grouped(n))),
+            "마지막으로 기록된 사용량이에요. 오류가 난 요청은 사용량을 안 남겨 앞선 응답 기록이 보일 수 있어요. 토큰은 전송 바이트와 다른 단위예요.",
+        )];
         if self.last_input_tokens.is_some() && self.cumulative_input_tokens.is_none() {
-            tokens.push(format!(
-                "확인한 응답 기록의 입력: {} 토큰 · 출력: {} 토큰",
-                self.observed_input_tokens, self.observed_output_tokens
-            ));
+            tokens.push(value("확인한 입출력", Some(format!("입력 {} · 출력 {}", grouped(self.observed_input_tokens), grouped(self.observed_output_tokens))), "확인한 응답 기록을 더한 값"));
         }
         if let (Some(i), Some(o)) = (self.cumulative_input_tokens, self.cumulative_output_tokens) {
-            tokens.push(format!(
-                "하네스가 보고한 세션 누적: 입력 {i} · 출력 {o} 토큰"
-            ));
+            tokens.push(value("세션 누적", Some(format!("입력 {} · 출력 {}", grouped(i), grouped(o))), "하네스가 보고한 값"));
         }
-        let mut skills = list(
-            "세션에 제시된 사용 가능 스킬",
-            self.skills_available.as_deref(),
-        );
-        skills.extend(list("읽기 응답이 확인된 스킬", Some(&self.skills_read)));
-        skills.extend(list("스킬 호출 기록", Some(&self.skills_invoked)));
-        skills.push(
-            "목록에 있다고 본문을 읽은 것은 아니에요. 셸로 읽은 스킬은 식별하지 못할 수 있어요."
-                .into(),
-        );
-        let mut mcp = list("세션에 보고된 MCP 설정", self.mcp_configured.as_deref());
-        mcp.extend(list("MCP 호출 기록", Some(&self.mcp_called)));
-        mcp.extend(list("연결 성공 기록", self.mcp_connected.as_deref()));
-        mcp.push("현재 연결 미확인 · 연결 기록은 기록 당시 상태예요.".into());
-        let mut images = vec![
-            format!("이미지 읽기 도구 호출: {}회", self.image_read_calls),
-            format!("이미지 첨부가 표시된 기록: {}건", self.attachment_records),
-            format!(
-                "본문 없이 참조만 표시된 이미지 블록: {}개",
-                self.image_reference_blocks
-            ),
-            format!(
-                "저장된 이미지 payload: {}블록 · 인코딩 문자열 {}바이트 · 가장 큰 블록 {}바이트",
-                self.image_payload_blocks,
-                self.stored_image_payload_bytes,
-                self.max_image_payload_bytes
-            ),
-            "위 값은 확인한 기록 안의 값이에요. 참조만 남은 이미지의 본문 크기는 미확인이에요."
-                .into(),
-            "미계측 · 실제 요청 전송 바이트. 파일 크기를 요청 크기로 보지 않아요.".into(),
+        let skills = vec![
+            pills("사용 가능", self.skills_available.as_deref(), "세션에 제시된 스킬"),
+            pills("읽음", Some(&self.skills_read), "읽기 응답이 확인된 스킬 — 셸로 읽은 것은 식별하지 못할 수 있어요"),
+            pills("호출", Some(&self.skills_invoked), "스킬 호출 기록"),
         ];
-        if self.partial {
-            images
-                .push("확인한 구간이 0건이어도 전체 대화에 이미지가 없다는 뜻은 아니에요.".into());
-        }
+        let mcp = vec![
+            pills("설정", self.mcp_configured.as_deref(), "세션에 보고된 MCP 설정"),
+            pills("호출", Some(&self.mcp_called), "MCP 호출 기록"),
+            pills("연결 기록", self.mcp_connected.as_deref(), "기록 당시 상태 — 지금 연결은 미확인이에요"),
+        ];
+        let mut images = vec![
+            value("이미지 읽기", Some(format!("{}회", self.image_read_calls)), "이미지 읽기 도구 호출"),
+            value("첨부 기록", Some(format!("{}건", self.attachment_records)), "이미지 첨부가 표시된 기록"),
+            value("참조만 남음", Some(format!("{}개", self.image_reference_blocks)), "본문 없이 참조만 남은 이미지 블록 — 본문 크기는 미확인이에요"),
+            value(
+                "저장된 이미지",
+                Some(format!("{}블록 · {}바이트 · 최대 {}", self.image_payload_blocks, grouped(self.stored_image_payload_bytes), grouped(self.max_image_payload_bytes))),
+                "기록 안에 인코딩된 문자열 크기",
+            ),
+        ];
         if self.request_size_error {
-            images.push(
-                "원인 미확인 · 요청 크기 오류 기록이 있어요. 이미지 때문이라고 단정하지 않아요."
-                    .into(),
-            );
+            images.push(Detail::Value {
+                name: "크기 오류".into(),
+                value: Some("기록 있음 · 원인 미확인".into()),
+                tip: "요청 크기 오류가 기록돼 있어요. 이미지 때문이라고 단정하지 않아요".into(),
+                warn: true,
+            });
         }
+        images.push(value("실제 전송 크기", None, "계측하지 않아요 — 파일 크기를 요청 크기로 보지 않아요"));
         vec![
-            ("확인 범위".into(), range),
+            ("범위".into(), range),
             ("토큰".into(), tokens),
             ("스킬".into(), skills),
             ("MCP".into(), mcp),
-            ("이미지·요청 용량".into(), images),
+            ("이미지·요청".into(), images),
         ]
-    }
-
-    fn scope(&self) -> &'static str {
-        if self.partial || self.limited {
-            "확인한 일부 기록 · 전체 미확인"
-        } else {
-            "저장된 기록 기준"
-        }
-    }
-}
-
-fn list(label: &str, names: Option<&[String]>) -> Vec<String> {
-    match names {
-        None => vec![format!("미확인 · {label}")],
-        Some([]) => vec![format!("기록 없음 · {label} (확인한 구간)")],
-        Some(names) => std::iter::once(format!("{label}: {}개", names.len()))
-            .chain(names.iter().map(|name| format!("  {name}")))
-            .collect(),
     }
 }
 
@@ -794,11 +771,7 @@ mod tests {
         let evidence = CachedSession::default().update(&path).unwrap();
         assert_eq!(evidence.observed_records, 1);
         assert!(evidence.partial);
-        assert!(evidence
-            .detail_sections()
-            .iter()
-            .flat_map(|(_, lines)| lines)
-            .any(|s| s.contains("전체 대화")));
+        assert!(evidence.detail_note().contains("전체 대화"), "일부만 셌다는 말은 머리 안내가 한 번 한다");
     }
 
     #[test]
@@ -860,26 +833,29 @@ mod tests {
             partial: true,
             ..Default::default()
         };
-        assert_eq!(partial.summary_lines().len(), 3);
-        assert!(partial.summary_lines()[1].contains("전체 미확인"));
+        let scope = partial.detail_sections().into_iter().find(|(title, _)| title == "범위").unwrap().1;
+        assert!(scope.iter().any(|row| matches!(row, Detail::Value { value: Some(v), .. } if v.contains("전체 미확인"))));
     }
 
+    /// 모르는 값은 값 칸을 비워(「—」) 까닭을 말에 싣고, 목록은 이름 하나하나를 알약으로 남긴다.
+    /// 되풀이 해설은 섹션이 아니라 머리 안내에 한 번만 선다.
     #[test]
-    fn uncertainty_precedes_values_and_lists_keep_each_item_visible() {
-        let mut evidence = ContextEvidence {
-            available: true,
-            partial: true,
-            ..Default::default()
-        };
-        assert!(evidence.summary_lines()[1].starts_with("확인한 일부 기록"));
-        assert!(evidence.summary_lines()[2].starts_with("전송 미계측"));
+    fn unknown_values_stay_empty_lists_keep_each_name_and_caveats_live_once() {
+        let mut evidence = ContextEvidence { available: true, skills_read: vec!["first".into(), "last".into()], ..Default::default() };
+        let sections = evidence.detail_sections();
+        let rows: Vec<&Detail> = sections.iter().flat_map(|(_, rows)| rows).collect();
+        assert!(rows.iter().any(|row| matches!(row, Detail::Value { name, value: None, tip, .. } if name == "실제 전송 크기" && !tip.is_empty())));
+        assert!(rows.iter().any(|row| matches!(row, Detail::Pills { name, items: Some(items), .. } if name == "읽음" && items.len() == 2)));
+        assert!(rows.iter().any(|row| matches!(row, Detail::Pills { name, items: None, .. } if name == "사용 가능")), "목록 자체를 모르면 미확인");
+        let caveat = "목록에 있다고 읽은 것은 아니";
+        assert!(evidence.detail_note().contains(caveat));
+        assert!(!rows.iter().any(|row| matches!(row, Detail::Value { value: Some(v), .. } if v.contains(caveat))));
         evidence.request_size_error = true;
-        assert!(evidence.summary_lines()[2].starts_with("원인 미확인"));
-        assert_eq!(
-            list("목록", Some(&["first".into(), "last".into()])),
-            ["목록: 2개", "  first", "  last"]
-        );
-        assert!(list("연결", None)[0].starts_with("미확인"));
+        assert!(evidence.detail_sections().iter().flat_map(|(_, rows)| rows)
+            .any(|row| matches!(row, Detail::Value { warn: true, .. })));
+        assert_eq!(grouped(12000), "12,000");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(1234567), "1,234,567");
     }
 
     #[test]
@@ -892,11 +868,7 @@ mod tests {
         assert_eq!(evidence.last_input_tokens, Some(1000));
         assert!(evidence.request_size_error);
         assert_eq!(evidence.request_bytes, None);
-        assert!(evidence.summary_lines()[0].starts_with("마지막 기록"));
-        assert!(evidence
-            .detail_sections()
-            .iter()
-            .flat_map(|(_, lines)| lines)
-            .any(|line| line.contains("앞선 응답 기록")));
+        let tokens = evidence.detail_sections().into_iter().find(|(title, _)| title == "토큰").unwrap().1;
+        assert!(matches!(&tokens[0], Detail::Value { value: Some(v), tip, .. } if v.starts_with("1,000 토큰") && tip.contains("앞선 응답 기록")));
     }
 }

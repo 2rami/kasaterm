@@ -1863,7 +1863,6 @@ impl App {
         let sb_icons: Vec<&'static str> = (0..sb_labels.len())
             .map(|i| match self.internal_room_kind_at(i) {
                 Some(crate::internal_room::InternalRoomKind::Settings) => "settings-2",
-                Some(crate::internal_room::InternalRoomKind::Board) => "rows-2",
                 None => tab_icon_glyph(&sb_labels[i].0),
             })
             .collect();
@@ -2136,7 +2135,6 @@ impl App {
                             PaneContent::Image(_) => "image",
                             PaneContent::Markdown(_) => "file-text",
                             PaneContent::Settings => "settings",
-                            PaneContent::Board => "rows-2",
                             _ => "terminal",
                         })
                         .unwrap_or("terminal");
@@ -2468,7 +2466,9 @@ impl App {
             (ws.active_pane.clone(), chars, agents)
         };
         let settings_room_active = self.settings_room_active();
-        let board_room_active = self.board_room_active();
+        let board_panel_open = self.board_panel_open();
+        let left_panel_frame = self.left_panel_rect();
+        let panel_slide = self.left_panel_slide_px();
         let pulse_h = self.sidebar_pulse_h();
         let sb_head_top = self.sidebar_head_top();
         // 본진 계정 조작은 백그라운드 스레드에서 끝나므로 그 자리에서 말풍선을
@@ -2489,18 +2489,11 @@ impl App {
             })
             .flatten();
         let mut settings_paint = None;
-        let board_snapshot = board_room_active
-            .then(|| {
-                let left = self.effective_sidebar_w();
-                // 설정과 같은 이유로 상태줄 자리를 남긴다.
-                self.native_board_snapshot((
-                    left,
-                    TITLE_HEIGHT,
-                    (win_px.0 / scale - left).max(1.0),
-                    (win_px.1 / scale - TITLE_HEIGHT - status_h).max(1.0),
-                ))
-            })
-            .flatten();
+        // 보드는 판 본문에 그린다(상태줄 자리는 `left_panel_rect` 가 남긴다). 밀려 나오는 동안은
+        // 왼쪽으로 민 자리에 그리고 판 사각으로 자른다.
+        let board_body = board_panel_open.then(|| self.left_panel_body_rect()).flatten();
+        let board_snapshot = board_body
+            .and_then(|(x, y, w, h)| self.native_board_snapshot((x - panel_slide, y, w, h)));
         let mut board_paint = None;
         // 원격 방 이름 편집칸 — GPU 를 빌리기 전에 읽어 둔다.
         self.info.navigation.rename = self.remote_rename_overlay();
@@ -2813,7 +2806,7 @@ impl App {
                 g.rect(tab_strip_w - 1.0, 0.0, 1.0, sb_win_h, theme::border());
             }
             if pulse_h > 0.0 {
-                crate::sidebar_pulse::draw(g, &mut self.pulse, sb_cursor, tab_strip_w, board_room_active);
+                crate::sidebar_pulse::draw(g, &mut self.pulse, sb_cursor, tab_strip_w, board_panel_open);
             } else {
                 self.pulse.rect = None;
             }
@@ -4592,7 +4585,7 @@ impl App {
                             theme::border(),
                         );
                         for (r, icon, on) in [
-                            (tray.board, "rows-2", board_room_active),
+                            (tray.board, "rows-2", board_panel_open),
                         ] {
                             let (bx, by, bw, bh) = r;
                             let hover = sb_cursor.0 >= bx
@@ -6478,6 +6471,15 @@ impl App {
                     body_top,
                     bottom,
                 );
+                // 「—」 의 까닭·잘린 값의 전문 — 표를 다 그린 뒤 커서 아래 것 하나만.
+                let (cx, cy) = self.cursor_px;
+                if self.info.ctx_menu.is_none() {
+                    if let Some((tip, r)) = self.info.tip_rects.iter()
+                        .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                    {
+                        Self::draw_hover_tip(g, tip, r.0, r.1 + r.3, win_px.0 / scale, win_px.1 / scale);
+                    }
+                }
             }
             // 세션 기록 탭 — git/Info 와 형제 블록. 같은 칼럼·같은 머리를 쓰고
             // 본문만 다르다.
@@ -8069,8 +8071,13 @@ impl App {
             if let Some(snapshot) = settings_snapshot.as_ref() {
                 settings_paint = Some(crate::native_settings::paint(g, snapshot));
             }
-            if let Some(snapshot) = board_snapshot.as_ref() {
+            if let Some(rect) = left_panel_frame {
+                crate::left_panel::draw_frame(g, &mut self.left_panel, rect, panel_slide, self.cursor_px);
+            }
+            if let (Some(snapshot), Some((bx, by, bw, bh))) = (board_snapshot.as_ref(), board_body) {
+                g.push_clip(bx, by, bw, bh);
                 board_paint = Some(crate::native_board::paint(g, snapshot));
+                g.pop_clip();
             }
             Self::paint_gpu_overlays(g, &overlay);
             // Status-bar dropdown (directory picker / branch switcher), drawn
@@ -13412,6 +13419,7 @@ impl App {
             || git_op_animating
             || banner_animating
             || walk_animating
+            || self.left_panel_sliding()
             // 혜성은 그리드에 얹히므로 `bar_animating` 처럼 bar-only 경로로 두면 안 된다
             // — 전체 프레임을 다시 그려야 위상이 반영된다.
             || comet_animating;

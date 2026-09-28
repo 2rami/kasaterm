@@ -1006,9 +1006,6 @@ impl ApplicationHandler<UserEvent> for App {
                     Some(crate::internal_room::InternalRoomKind::Settings) => {
                         self.open_settings_room(None);
                     }
-                    Some(crate::internal_room::InternalRoomKind::Board) => {
-                        self.open_board_room();
-                    }
                     None => self.switch_window(*idx),
                 }
                 return;
@@ -3338,7 +3335,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.settings_room_active() {
                     self.native_settings_wheel(delta);
-                } else if self.board_room_active() {
+                } else if self.board_panel_open() && self.left_panel_contains(self.cursor_px.0, self.cursor_px.1) {
                     self.native_board_wheel(delta);
                 } else {
                     self.handle_wheel(delta);
@@ -3389,6 +3386,23 @@ impl ApplicationHandler<UserEvent> for App {
                     let cursor = self.native_settings_cursor(self.cursor_px.0, self.cursor_px.1);
                     self.text_cursor_shown = cursor == CursorIcon::Text;
                     window.set_cursor(cursor);
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                    return;
+                }
+                if self.left_panel_drag() {
+                    window.set_cursor(CursorIcon::ColResize);
+                    window.request_redraw();
+                    return;
+                }
+                if self.left_panel_grip_hover(self.cursor_px.0, self.cursor_px.1) {
+                    window.set_cursor(CursorIcon::ColResize);
+                    return;
+                }
+                if self.left_panel_contains(self.cursor_px.0, self.cursor_px.1)
+                    && !self.native_board_contains(self.cursor_px.0, self.cursor_px.1)
+                {
+                    window.set_cursor(CursorIcon::Default);
                     self.chrome_dirty = true;
                     window.request_redraw();
                     return;
@@ -4624,11 +4638,21 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
-                if self.native_board_contains(self.cursor_px.0, self.cursor_px.1) {
-                    if matches!(state, ElementState::Pressed) {
-                        self.last_input_at = Instant::now();
-                        self.native_board_click(self.cursor_px.0, self.cursor_px.1);
-                    }
+                // 왼쪽 판 — ×·폭 손잡이·보드 본문. 판 밖을 누르면 초점만 터미널로 돌려주고
+                // 아래로 흘린다(판이 열린 채로 옆 pane 에 바로 칠 수 있어야 한다).
+                if matches!(state, ElementState::Released) && self.left_panel_release() {
+                    window.set_cursor(CursorIcon::Default);
+                    window.request_redraw();
+                    return;
+                }
+                if matches!(state, ElementState::Pressed)
+                    && self.left_panel_press(self.cursor_px.0, self.cursor_px.1)
+                {
+                    self.last_input_at = Instant::now();
+                    window.request_redraw();
+                    return;
+                }
+                if self.left_panel_contains(self.cursor_px.0, self.cursor_px.1) {
                     window.request_redraw();
                     return;
                 }
@@ -4675,7 +4699,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // 보드·아로나 — 메뉴막대 밖의 입구(트레이 버튼과 사이드바 맨 위 현황 줄).
                     // 단축키와 같은 토글이라 열린 화면에서 누르면 작업 방으로 돌아온다.
                     if hit(self.board_btn_rect) || self.sidebar_pulse_hit((cx, cy)) {
-                        self.toggle_board_room();
+                        self.toggle_board_panel();
                         self.session_touched = session_touched_before_event;
                         window.request_redraw();
                         return;
@@ -7111,7 +7135,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.native_settings_ime(ime);
                     return;
                 }
-                if self.board_room_active() {
+                if self.board_panel_focused() {
                     self.native_board_ime(ime);
                     return;
                 }
@@ -7351,12 +7375,13 @@ impl ApplicationHandler<UserEvent> for App {
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyW)
                     )
                 {
+                    // 판에 초점이 있으면 ⌘W 는 판을 닫는다 — 보드가 방이던 때 ⌘W 가 보드를 닫던 감각.
                     match self.internal_room_kind_at(self.active_window) {
                         Some(crate::internal_room::InternalRoomKind::Settings) => {
                             self.close_settings_room();
                         }
-                        Some(crate::internal_room::InternalRoomKind::Board) => {
-                            self.close_board_room();
+                        None if self.left_panel.focused && self.left_panel_kind().is_some() => {
+                            self.close_left_panel();
                         }
                         None => self.close_active_tab(),
                     }
@@ -7406,15 +7431,15 @@ impl ApplicationHandler<UserEvent> for App {
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyB)
                     )
                 {
-                    self.toggle_board_room();
+                    self.toggle_board_panel();
                     window.request_redraw();
                     return;
                 }
-                // 내부 방(설정·보드)에서도 방 단축키는 산다. 아래 두 갈래는 키를 전부
+                // 내부 방(설정)과 초점 잡은 보드 판에서도 방 단축키는 산다. 아래 두 갈래는 키를 전부
                 // 그 화면에 넘기므로, 사이드바 카드가 약속한 `⌘N` 이 설정 안에선
                 // 죽어 있었다(2026-09-07 지시 「커맨드 키 있으면 작동하게 하던가
                 // 아니면 빼버리던가」). 글자 입력 중이어도 ⌘숫자는 글자가 아니다.
-                if (self.settings_room_active() || self.board_room_active())
+                if (self.settings_room_active() || self.board_panel_focused())
                     && matches!(event.state, ElementState::Pressed)
                     && !event.repeat
                     && self.host_mod()
@@ -7432,13 +7457,14 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
-                if self.board_room_active() {
+                // 초점이 판에 있으면 키는 보드 몫이다. 터미널을 누르면 초점이 돌아간다.
+                if self.board_panel_focused() {
                     if matches!(event.state, ElementState::Pressed)
                         && !event.repeat
                         && matches!(event.logical_key, Key::Named(NamedKey::Escape))
                         && self.board_scene.input().is_none()
                     {
-                        self.close_board_room();
+                        self.close_left_panel();
                     } else {
                         self.native_board_key(&event);
                     }
@@ -7701,7 +7727,7 @@ impl ApplicationHandler<UserEvent> for App {
             } else if self.session_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.toggle_session_panel(event_loop);
             } else if self.board_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
-                self.toggle_board_panel(event_loop);
+                self.toggle_board_panel();
             } else if self.arona_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.toggle_arona_panel(event_loop);
             } else if self.paste_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
@@ -7950,6 +7976,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_sidebar_navigation_probe(event_loop);
         self.run_pending_web_shell_probe(event_loop);
         self.run_pending_pulse_probe(event_loop);
+        self.run_pending_panel_probe(event_loop);
         self.run_pending_autonotify();
         // 커서 배치보다 **앞**이다 — 스크롤이 정해진 뒤라야 AUTOCURSOR 가 놓은
         // 자리가 「잘려 안 보이는 행」위인지가 의미를 갖는다.

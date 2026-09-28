@@ -1,8 +1,9 @@
 //! 사이드바 맨 위 현황 줄 — 모든 기기 보드를 「사람 차례 N · 작업 N · 끝 N」 한 줄로.
 //!
 //! 보드는 보기 메뉴와 ⇧⌘B 로만 열려서 찾기 어려웠다(2026-09-28 지시). 이 줄이 늘 떠 있는
-//! 요약이자 보드 입구다. 수는 보드 목록과 같은 판정(`native_board::pulse_counts`)에서 나와야
-//! 누르고 연 보드와 어긋나지 않는다. 치수는 `docs/design.md` 「사이드바 현황 줄·트레이」.
+//! 요약이자 보드 입구다. 수는 보드 목록과 같은 판정(`native_board::pulse_digest`)에서 나와야
+//! 누르고 연 보드와 어긋나지 않는다. 같은 요약을 펫 현황판(`overlay.json`)에도 적는다 —
+//! 펫은 카사텀이 앞에 없어도 떠 있는 자리라, LLM 을 거치지 않은 숫자·목록을 거기서 바로 본다. 치수는 `docs/design.md` 「사이드바 현황 줄·트레이」.
 
 use super::*;
 use kasa_socket::backend::Backend;
@@ -24,7 +25,36 @@ pub(crate) struct PulseCounts {
     pub(crate) done: usize,
 }
 
-type Mailbox = Arc<Mutex<Option<Result<PulseCounts, String>>>>;
+/// 사람을 기다리는 학생 한 줄 — 보드의 「확인 필요」 칸 하나.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WaitingStudent {
+    pub(crate) name: String,
+    pub(crate) character: Option<String>,
+    /// 「승인 기다림 · 일감」 꼴.
+    pub(crate) line: String,
+    pub(crate) machine_label: String,
+    pub(crate) surface_id: String,
+    pub(crate) local: bool,
+    /// 다른 기기 학생을 비추는 이 기기의 거울 pane — 있으면 그리로 간다.
+    pub(crate) mirror: Option<String>,
+    pub(crate) since_ms: u64,
+}
+
+impl WaitingStudent {
+    /// 누르면 갈 이 기기의 pane. 다른 기기 학생인데 거울이 없으면 갈 곳이 없다.
+    fn jump_pane(&self) -> Option<&str> {
+        if self.local { Some(&self.surface_id) } else { self.mirror.as_deref() }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PulseDigest {
+    pub(crate) counts: PulseCounts,
+    /// 오래 기다린 순.
+    pub(crate) waiting: Vec<WaitingStudent>,
+}
+
+type Mailbox = Arc<Mutex<Option<Result<PulseDigest, String>>>>;
 
 #[derive(Default)]
 pub(crate) struct Pulse {
@@ -87,6 +117,49 @@ fn segments_w(g: &mut gpu::GpuRenderer, segs: &[(&str, usize, Tone); 3]) -> f32 
             + g.measure_chrome_text(&n.to_string(), PULSE_FONT, true);
     }
     w
+}
+
+/// 펫 현황판이 읽는 한 장. 얼굴은 펫이 앱 번들 그림을 못 보므로 `faces/<slug>.png` 로 한 번 내보낸다.
+fn overlay_json(digest: &PulseDigest, face: impl Fn(&WaitingStudent) -> Option<String>) -> serde_json::Value {
+    let waiting: Vec<serde_json::Value> = digest.waiting.iter().map(|student| serde_json::json!({
+        "name": student.name,
+        "line": student.line,
+        "machine": if student.local { String::new() } else { student.machine_label.clone() },
+        "pane": student.jump_pane().unwrap_or_default(),
+        "face": face(student).unwrap_or_default(),
+    })).collect();
+    serde_json::json!({
+        "counts": {"yours": digest.counts.yours, "working": digest.counts.working, "done": digest.counts.done},
+        "waiting": waiting,
+    })
+}
+
+/// 바뀐 때, 그리고 20초마다 쓴다 — 펫은 mtime 이 1분 넘게 멈추면 카사텀이 꺼진 것으로 보고 판을
+/// 내린다(옛 숫자를 떠 있게 두면 「사람 차례 0」을 믿고 자리를 비운다). 반쯤 쓴 파일을 읽지 않게
+/// 옆에 쓰고 옮긴다.
+fn write_pet_overlay(dir: &std::path::Path, digest: &PulseDigest) {
+    const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(20);
+    static LAST: Mutex<(String, Option<Instant>)> = Mutex::new((String::new(), None));
+    let faces = dir.join("faces");
+    let face = |student: &WaitingStudent| {
+        let slug = theme::character_slug_any(student.character.as_deref()?)?;
+        let path = faces.join(format!("{slug}.png"));
+        if !path.is_file() {
+            let (rgba, w, h) = sprites::student_profile_rgba(slug)?;
+            std::fs::create_dir_all(&faces).ok()?;
+            image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8).ok()?;
+        }
+        Some(path.to_string_lossy().into_owned())
+    };
+    let body = overlay_json(digest, face).to_string();
+    let mut last = LAST.lock().unwrap();
+    if last.0 == body && last.1.is_some_and(|at| at.elapsed() < KEEPALIVE) {
+        return;
+    }
+    let tmp = dir.join("overlay.json.tmp");
+    if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, dir.join("overlay.json")).is_ok() {
+        *last = (body, Some(Instant::now()));
+    }
 }
 
 /// 방 우클릭 메뉴의 한 줄 — 이 기기 방과 다른 기기 방 메뉴가 같은 말을 쓴다.
@@ -159,8 +232,8 @@ impl App {
             self.pulse.inflight = false;
             let before = (self.pulse.counts, self.pulse.failed);
             match result {
-                Ok(counts) => {
-                    self.pulse.counts = Some(counts);
+                Ok(digest) => {
+                    self.pulse.counts = Some(digest.counts);
                     self.pulse.failed = false;
                 }
                 Err(error) => {
@@ -177,10 +250,12 @@ impl App {
                 }
             }
         }
-        if self.sidebar_pulse_h() <= 0.0 || self.pulse.inflight {
+        if self.lite || self.pulse.inflight || self.pulse.last_poll.is_some_and(|at| at.elapsed() < POLL) {
             return;
         }
-        if self.pulse.last_poll.is_some_and(|at| at.elapsed() < POLL) {
+        // 펫이 떠 있으면 사이드바를 접어도 읽는다 — 현황판은 카사텀이 가려진 동안 보는 자리다.
+        let pet = crate::chrome::pet_pid().is_some();
+        if self.sidebar_pulse_h() <= 0.0 && !pet {
             return;
         }
         let Some(backend) = self.socket_backend.clone() else {
@@ -192,15 +267,18 @@ impl App {
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             #[cfg(debug_assertions)]
-            let fixture = crate::native_board::pulse_fixture_counts();
+            let fixture = crate::native_board::pulse_fixture_digest();
             #[cfg(not(debug_assertions))]
             let fixture = None;
             let result = fixture.unwrap_or_else(|| {
                 backend
                     .collab_snapshot(&serde_json::json!({"scope": "all"}))
                     .map_err(|e| e.to_string())
-                    .and_then(crate::native_board::pulse_counts)
+                    .and_then(crate::native_board::pulse_digest)
             });
+            if let (true, Ok(digest), Some(dir)) = (pet, result.as_ref(), crate::chrome::pet_model_dir()) {
+                write_pet_overlay(&dir, digest);
+            }
             *mailbox.lock().unwrap() = Some(result);
             let _ = proxy.send_event(UserEvent::Redraw);
         });
@@ -260,19 +338,19 @@ impl App {
                 self.pulse.rect
             }
             1 => {
-                eprintln!("[pulse-probe] line_opens_board={}", self.board_room_active());
+                eprintln!("[pulse-probe] line_opens_board={}", self.board_panel_open());
                 self.pulse.rect
             }
             2 => {
-                eprintln!("[pulse-probe] line_returns={}", !self.board_room_active());
+                eprintln!("[pulse-probe] line_returns={}", !self.board_panel_open());
                 Some(self.board_btn_rect).filter(|r| r.2 > 0.0)
             }
             3 => {
-                eprintln!("[pulse-probe] tray_opens_board={}", self.board_room_active());
+                eprintln!("[pulse-probe] tray_opens_board={}", self.board_panel_open());
                 Some(self.board_btn_rect).filter(|r| r.2 > 0.0)
             }
             4 => {
-                eprintln!("[pulse-probe] tray_returns={}", !self.board_room_active());
+                eprintln!("[pulse-probe] tray_returns={}", !self.board_panel_open());
                 button = MouseButton::Right;
                 room()
             }
@@ -321,6 +399,25 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 현황판 한 장: 이 기기 학생은 제 pane 으로, 다른 기기 학생은 거울이 있을 때만 갈 곳이 있다.
+    #[test]
+    fn overlay_carries_counts_and_where_each_waiting_student_lives() {
+        let student = |name: &str, local: bool, mirror: Option<&str>| WaitingStudent {
+            name: name.into(), character: None, line: "승인 기다림 · 일감".into(), machine_label: "나쵸네코".into(),
+            surface_id: "%3".into(), local, mirror: mirror.map(str::to_string), since_ms: 0,
+        };
+        let digest = PulseDigest {
+            counts: PulseCounts { yours: 3, working: 2, done: 1 },
+            waiting: vec![student("미도리", true, None), student("아리스", false, Some("%9")), student("유즈", false, None)],
+        };
+        let json = overlay_json(&digest, |_| None);
+        assert_eq!(json["counts"]["yours"], 3);
+        let rows = json["waiting"].as_array().unwrap();
+        assert_eq!((rows[0]["pane"].as_str(), rows[0]["machine"].as_str()), (Some("%3"), Some("")));
+        assert_eq!((rows[1]["pane"].as_str(), rows[1]["machine"].as_str()), (Some("%9"), Some("나쵸네코")), "거울로 간다");
+        assert_eq!(rows[2]["pane"].as_str(), Some(""), "갈 곳이 없으면 비운다 — 남의 기기 pane id 로 이 기기를 찾지 않는다");
+    }
 
     #[test]
     fn short_labels_keep_every_number() {

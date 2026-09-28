@@ -204,6 +204,7 @@ struct OverviewPane {
 struct OverviewSource {
     machine_id: String,
     label: String,
+    is_local: bool,
     state: String,
     observed_at_ms: u64,
     error: Option<String>,
@@ -427,7 +428,6 @@ pub(crate) struct PaintOutput {
 
 pub(crate) struct Scene {
     tab: BoardTab,
-    return_pane: Option<String>,
     target_pane: Option<String>,
     target_window: usize,
     target_cwd: String,
@@ -465,7 +465,6 @@ impl Default for Scene {
     fn default() -> Self {
         Self {
             tab: BoardTab::default(),
-            return_pane: None,
             target_pane: None,
             target_window: 0,
             target_cwd: String::new(),
@@ -504,23 +503,21 @@ impl Default for Scene {
 impl Scene {
     pub(crate) fn enter(
         &mut self,
-        return_pane: Option<String>,
+        target_pane: Option<String>,
         target_window: usize,
         target_cwd: String,
     ) {
-        if return_pane
+        if target_pane
             .as_deref()
             .is_some_and(|pane| crate::internal_room::InternalRoomKind::from_pane(pane).is_none())
         {
-            self.target_pane.clone_from(&return_pane);
-            self.return_pane = return_pane;
+            self.target_pane = target_pane;
             self.target_window = target_window;
             self.target_cwd = target_cwd;
         }
     }
 
     pub(crate) fn leave(&mut self) {
-        self.return_pane = None;
         self.target_pane = None;
         self.hits.clear();
         self.input = None;
@@ -532,10 +529,6 @@ impl Scene {
         self.pending_stop = None;
         self.overview.selection = None;
         self.overview.selection_generation += 1;
-    }
-
-    pub(crate) fn return_pane(&self) -> Option<&str> {
-        self.return_pane.as_deref()
     }
 
     pub(crate) fn target_pane(&self) -> Option<&str> {
@@ -1461,35 +1454,69 @@ fn overview_from_value(value: serde_json::Value) -> Result<OverviewData, String>
     Ok(data)
 }
 
-/// 사이드바 현황 줄의 세 수. 보드 목록과 **같은 판정**(`overview_status`)이어야 줄을 누르고
-/// 연 보드와 숫자가 맞는다. 거울 줄은 원본 기기 줄과 같은 학생이라 빼지 않으면 두 번 센다.
-pub(crate) fn pulse_counts(value: serde_json::Value) -> Result<crate::sidebar_pulse::PulseCounts, String> {
-    Ok(count_pulse(&overview_from_value(value)?))
+/// 사이드바 현황 줄과 펫 현황판이 함께 쓰는 요약 — 세 수와 사람을 기다리는 학생들.
+/// 보드 목록과 **같은 판정**(`overview_status`)이어야 줄을 누르고 연 보드와 숫자가 맞는다.
+/// 거울 줄은 원본 기기 줄과 같은 학생이라 빼지 않으면 두 번 선다.
+pub(crate) fn pulse_digest(value: serde_json::Value) -> Result<crate::sidebar_pulse::PulseDigest, String> {
+    Ok(digest_pulse(&overview_from_value(value)?))
 }
 
-fn count_pulse(data: &OverviewData) -> crate::sidebar_pulse::PulseCounts {
-    let mut counts = crate::sidebar_pulse::PulseCounts::default();
-    let rows = data.panes.iter()
-        .filter(|row| row.status_reason.as_deref() != Some(crate::socket::REMOTE_MIRROR_REASON));
-    for row in rows {
+fn digest_pulse(data: &OverviewData) -> crate::sidebar_pulse::PulseDigest {
+    use crate::sidebar_pulse::{PulseDigest, WaitingStudent};
+    let mirror = |row: &&OverviewPane| row.status_reason.as_deref() == Some(crate::socket::REMOTE_MIRROR_REASON);
+    let local = |machine_id: &str| data.sources.iter().any(|source| source.is_local && source.machine_id == machine_id);
+    let mut digest = PulseDigest::default();
+    for row in data.panes.iter().filter(|row| !mirror(row)) {
         match overview_status(row).1 {
-            0 => counts.yours += 1,
-            3 => counts.working += 1,
-            5 => counts.done += 1,
+            0 => {
+                digest.counts.yours += 1;
+                digest.waiting.push(WaitingStudent {
+                    name: overview_name(row).to_string(),
+                    character: row.character.clone().filter(|name| !name.is_empty()),
+                    line: waiting_line(row),
+                    machine_label: row.machine_label.clone(),
+                    surface_id: row.address.surface_id.clone(),
+                    local: local(&row.address.machine_id),
+                    mirror: None,
+                    since_ms: row.observed_at_ms,
+                });
+            }
+            3 => digest.counts.working += 1,
+            5 => digest.counts.done += 1,
             _ => {}
         }
     }
-    counts
+    // 다른 기기 학생은 이 기기의 거울 창이 있으면 그리로 간다 — 원본 pane id 는 여기서 못 연다.
+    let mirrors: Vec<&str> = data.panes.iter().filter(mirror).map(|row| row.address.surface_id.as_str()).collect();
+    for student in digest.waiting.iter_mut().filter(|student| !student.local) {
+        student.mirror = mirrors.iter().find(|pane| {
+            kasa_mcp::remote::remote_info(pane).is_some_and(|info| info.label == student.machine_label && info.remote_id == student.surface_id)
+        }).map(|pane| pane.to_string());
+    }
+    digest.waiting.sort_by(|a, b| a.since_ms.cmp(&b.since_ms).then_with(|| a.name.cmp(&b.name)));
+    digest
+}
+
+/// 기다리는 까닭 한 줄 — 종류가 앞, 무슨 일감인지가 뒤.
+fn waiting_line(row: &OverviewPane) -> String {
+    let kind = match (row.done_outcome.as_deref(), row.attention_kind.as_deref()) {
+        (Some("failed"), _) => "실패 보고",
+        (_, Some("permission")) => "승인 기다림",
+        (_, Some("question")) => "답 기다림",
+        _ => "확인 필요",
+    };
+    let task = board_plain(&row.title, 60);
+    if task.is_empty() { kind.to_string() } else { format!("{kind} · {task}") }
 }
 
 /// 격리 검증 앱이면 보드와 같은 가상 판으로 센다 — 사람의 기기에 터널을 열지 않고도 수가 선다.
 #[cfg(debug_assertions)]
-pub(crate) fn pulse_fixture_counts() -> Option<Result<crate::sidebar_pulse::PulseCounts, String>> {
+pub(crate) fn pulse_fixture_digest() -> Option<Result<crate::sidebar_pulse::PulseDigest, String>> {
     board_fixture_requested().then(|| {
         let data = board_fixture();
         match data.error {
             Some(error) => Err(error),
-            None => Ok(count_pulse(&data)),
+            None => Ok(digest_pulse(&data)),
         }
     })
 }
@@ -1744,20 +1771,66 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let mut hits = Vec::new();
     let mut caret_rect = None;
     g.rect(ax, ay, aw, ah, theme::bg());
-    g.push_clip(ax, ay, aw, ah);
-    let header_w = (aw - pad * 2.0).max(1.0);
-    let right = ax + aw - pad;
-    let tools_w = if aw >= 400.0 { 60.0 } else { 26.0 };
-    let controls_w = tools_w + 26.0 * 2.0 + 8.0 * 4.0;
-    let tabs_w = (header_w - controls_w).max(0.0);
-    let work_w = (tabs_w * 0.48).min(96.0);
-    let chat_w = (tabs_w - work_w).min(104.0);
-    button(g, snapshot, &mut hits, (ax + pad, ay + 9.0, work_w, 26.0),
-        "작업현황", Target::Tab(BoardTab::Work), snapshot.tab == BoardTab::Work);
-    button(g, snapshot, &mut hits, (ax + pad + work_w + 8.0, ay + 9.0, chat_w, 26.0),
-        "나쵸 대화", Target::Tab(BoardTab::Chat), snapshot.tab == BoardTab::Chat);
-    if aw >= 400.0 {
-        button(g, snapshot, &mut hits, (right - 68.0 - tools_w, ay + 9.0, tools_w, 26.0), "도구", Target::Tools, snapshot.tools_open);
+    // 목업(플랫): 옆 목록은 구분선 없이 배경만 다르고, 머리글은 작은 흐림 글자 —
+    // 설정창과 같은 틀. 아이콘·강조 막대는 걷었다.
+    g.rect(ax, ay, nav_w, ah, theme::panel_bg());
+    text(g, ax + 20.0, ay + 24.0, "운영 보드", 13.0, theme::text_dim(), false);
+
+    let mut ny = ay + 56.0;
+    for tab in BoardTab::ALL {
+        let rect = (ax + 12.0, ny, nav_w - 24.0, 32.0);
+        let selected = snapshot.tab == tab;
+        let hover = contains(rect, snapshot.cursor);
+        if selected || hover {
+            round_rect(
+                g,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+                theme::radius_md().min(5.0),
+                if selected { theme::surface_active() } else { theme::surface_hover() },
+            );
+        }
+        let label = fit(g, tab.label(), rect.2 - 24.0, 12.0, selected);
+        text(
+            g,
+            rect.0 + 12.0,
+            rect.1 + 9.0,
+            &label,
+            12.0,
+            if selected { theme::text() } else { theme::text_dim() },
+            selected,
+        );
+        hit(g, &mut hits, Target::Tab(tab), rect, false);
+        g.hover_pointer |= hover;
+        ny += 36.0;
+    }
+    let back = (ax + 12.0, ay + ah - 46.0, nav_w - 24.0, 32.0);
+    if contains(back, snapshot.cursor) {
+        round_rect(g, back.0, back.1, back.2, back.3, theme::radius_md().min(5.0), theme::surface_hover());
+        g.hover_pointer = true;
+    }
+    g.queue_icon("chevron-left", back.0 + 10.0, back.1 + 9.0, 15.0, theme::text_dim());
+    let back_label = fit(g, "보드 닫기", back.2 - 39.0, 12.0, false);
+    text(g, back.0 + 33.0, back.1 + 9.0, &back_label, 12.0, theme::text_dim(), false);
+    hit(g, &mut hits, Target::Return, back, false);
+
+    let content_x = ax + nav_w + if aw < 760.0 { 20.0 } else { 28.0 };
+    let avail_w = (aw - nav_w - if aw < 760.0 { 40.0 } else { 56.0 }).max(1.0);
+    let content_w = avail_w.min(800.0);
+    // 할 일 판만 옆 칸(기기·학생·상세)을 둔다. 읽기 열 800 은 그대로 두고 남는 폭이
+    // 옆 칸 최소(260)를 넘을 때만 세운다 — 좁으면 같은 내용이 열 아래로 내려간다.
+    let side = (snapshot.tab == BoardTab::Work && avail_w >= 800.0 + 24.0 + 260.0)
+        .then(|| (content_x + content_w + 24.0, (avail_w - content_w - 24.0).min(340.0)));
+    let head_w = side.map_or(content_w, |(sx, sw)| sx + sw - content_x);
+    text(g, content_x, ay + 22.0, snapshot.tab.label(), 20.0, theme::text(), true);
+    // 기준 pane 알약: 채움 없는 테두리, pane 이름만 강조색(목업 .head .pill).
+    let refresh = (content_x + head_w - 30.0, ay + 18.0, 30.0, 30.0);
+    let pane = if matches!(snapshot.tab, BoardTab::Overview | BoardTab::Work) {
+        "모든 방".into()
+    } else if snapshot.target_cwd.is_empty() {
+        snapshot.target_pane.clone()
     } else {
         icon_button(g, snapshot, &mut hits, (right - 94.0, ay + 9.0, 26.0, 26.0), "settings", Target::Tools);
     }
@@ -2884,10 +2957,10 @@ impl App {
         let changed = self.board_scene.pump();
         self.board_scene.chat.claim_completions();
         self.workspace_observe_tick();
-        if (self.board_room_active() || self.board_scene.chat.active()) && !board_fixture_requested() && self.board_scene.chat.refresh_due() {
+        if (self.board_panel_open() || self.board_scene.chat.active()) && !board_fixture_requested() && self.board_scene.chat.refresh_due() {
             self.board_scene.chat.refresh();
         }
-        if self.board_room_active() && self.board_scene.refresh_due() {
+        if self.board_panel_open() && self.board_scene.refresh_due() {
             self.request_native_board_refresh();
         }
         if changed {
@@ -2899,7 +2972,7 @@ impl App {
     }
 
     pub(crate) fn native_board_snapshot(&self, area: Rect) -> Option<Snapshot> {
-        self.board_room_active().then(|| {
+        self.board_panel_open().then(|| {
             self.board_scene.snapshot(
                 area,
                 self.cursor_px,
@@ -2922,15 +2995,9 @@ impl App {
     }
 
     pub(crate) fn native_board_contains(&self, x: f32, y: f32) -> bool {
-        self.board_room_active()
-            && self.window.as_ref().is_some_and(|window| {
-                let scale = self.effective_scale();
-                let size = window.inner_size();
-                x >= self.effective_sidebar_w()
-                    && x <= size.width as f32 / scale
-                    && y >= TITLE_HEIGHT
-                    && y < size.height as f32 / scale - self.status_h()
-            })
+        self.board_panel_open()
+            && self.left_panel_body_rect()
+                .is_some_and(|(bx, by, bw, bh)| x >= bx && x <= bx + bw && y >= by && y <= by + bh)
     }
 
     pub(crate) fn native_board_cursor(&self, x: f32, y: f32) -> winit::window::CursorIcon {
@@ -2989,7 +3056,7 @@ impl App {
             }
             Target::Return => {
                 self.native_board_blur();
-                self.return_from_board_room();
+                self.close_left_panel();
             }
             Target::Tools => {
                 self.native_board_blur();
@@ -3036,9 +3103,7 @@ impl App {
                 }
             }
             Target::FocusPane(pane) => {
-                self.native_board_blur();
-                self.return_from_board_room();
-                self.focus_surface(&pane);
+                self.focus_pane_beside_board(&pane);
             }
             Target::OverviewMachine(machine) => {
                 self.board_scene.overview.machine = machine;
@@ -3072,9 +3137,7 @@ impl App {
                     && self.window_of_pane(&address.surface_id).is_some()
                     && kasa_mcp::surface_keys::get(&address.surface_id).as_deref() == Some(&address.surface_key)
                 {
-                    self.native_board_blur();
-                    self.return_from_board_room();
-                    self.focus_surface(&address.surface_id);
+                    self.focus_pane_beside_board(&address.surface_id);
                 } else {
                     self.board_scene.report_error("이 창으로 이동할 수 없어요. 목록을 새로고침해 주세요");
                 }
@@ -3265,8 +3328,7 @@ impl App {
             self.board_scene.report_error("돌아갈 작업 pane이 없어요");
             return;
         };
-        self.native_board_blur();
-        if !self.return_from_board_room() || !self.focus_surface(&target) {
+        if !self.focus_pane_beside_board(&target) {
             self.board_scene
                 .report_error("대상 작업 방으로 돌아가지 못했어요");
             self.set_toast("대상 작업 방으로 돌아가지 못했어요".to_string());
@@ -3318,7 +3380,7 @@ impl App {
     pub(crate) fn native_board_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::event::ElementState;
         use winit::keyboard::{Key, NamedKey};
-        if !self.board_room_active() {
+        if !self.board_panel_open() {
             return false;
         }
         if event.state != ElementState::Pressed {
@@ -3407,7 +3469,7 @@ impl App {
     }
 
     pub(crate) fn native_board_ime(&mut self, ime: winit::event::Ime) {
-        if !self.board_room_active() {
+        if !self.board_panel_open() {
             return;
         }
         match ime {
@@ -3699,7 +3761,7 @@ mod tests {
         let value = board_probe_value();
         let data = overview_data();
         let rank = |n: u8| data.panes.iter().filter(|row| overview_status(row).1 == n).count();
-        let counts = pulse_counts(value.clone()).unwrap();
+        let counts = pulse_digest(value.clone()).unwrap().counts;
         assert_eq!((counts.yours, counts.working, counts.done), (rank(0), rank(3), rank(5)));
         assert!(counts.yours > 0 && counts.working > 0 && counts.done > 0, "가상 판이 세 칸을 다 채워야 검사가 뜻이 있다");
 
@@ -3710,12 +3772,26 @@ mod tests {
         mirror["status_reason"] = crate::socket::REMOTE_MIRROR_REASON.into();
         let mut with_mirror = value.clone();
         with_mirror["panes"].as_array_mut().unwrap().push(mirror.clone());
-        assert_eq!(pulse_counts(with_mirror).unwrap(), counts, "거울 줄을 세면 같은 학생이 두 번 선다");
+        assert_eq!(pulse_digest(with_mirror).unwrap().counts, counts, "거울 줄을 세면 같은 학생이 두 번 선다");
 
         mirror["status_reason"] = "hook turn open".into();
         let mut plain = value;
         plain["panes"].as_array_mut().unwrap().push(mirror);
-        assert_eq!(pulse_counts(plain).unwrap().working, counts.working + 1, "거울이 아닌 줄은 센다");
+        assert_eq!(pulse_digest(plain).unwrap().counts.working, counts.working + 1, "거울이 아닌 줄은 센다");
+    }
+
+    /// 기다리는 학생은 「확인 필요」 칸 그대로다 — 수와 목록 길이가 같고, 문구는 종류·일감 순,
+    /// 이 기기인지는 보드의 `is_local` 로 가른다.
+    #[test]
+    fn digest_lists_exactly_the_students_waiting_for_you() {
+        let mut value = board_probe_value();
+        value["sources"][0]["is_local"] = true.into();
+        let digest = pulse_digest(value).unwrap();
+        assert_eq!(digest.waiting.len(), digest.counts.yours);
+        let first = &digest.waiting[0];
+        assert_eq!(first.name, "모모이");
+        assert_eq!(first.line, "답 기다림 · 주문 내역 화면 점검");
+        assert!(first.local, "device-a 는 이 기기다");
     }
 
     #[test]
