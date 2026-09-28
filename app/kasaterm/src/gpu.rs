@@ -4407,6 +4407,7 @@ impl GpuRenderer {
             "triangle-alert" => include_str!("../assets/icons/triangle-alert.svg"),
             "octagon-alert" => include_str!("../assets/icons/octagon-alert.svg"),
             "message-square-warning" => include_str!("../assets/icons/message-square-warning.svg"),
+            "message-circle" => include_str!("../assets/icons/message-circle.svg"),
             // File-type set (assets/icons/ft): VSCode Material 계열의 브랜드컬러
             // filled SVG — 모노크롬 틴트가 아닌 `queue_icon_colored` 로 그린다.
             "ft/audio" => include_str!("../assets/icons/ft/audio.svg"),

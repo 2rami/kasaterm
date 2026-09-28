@@ -7526,13 +7526,13 @@ impl App {
         }
         self.autoboard_at = None;
         self.toggle_board_room();
-        // KASATERM_AUTOBOARD_TAB=work|overview|agents|schedule|git|machines — 캡처용 탭 선택.
+        // A legacy schedule probe cannot bring back the retired user-facing screen.
         if let Ok(tab) = std::env::var("KASATERM_AUTOBOARD_TAB") {
             use crate::native_board::BoardTab;
             let tab = match tab.as_str() {
                 "work" => Some(BoardTab::Work),
                 "agents" => Some(BoardTab::Agents),
-                "schedule" => Some(BoardTab::Schedule),
+                "chat" => Some(BoardTab::Chat),
                 "git" => Some(BoardTab::Git),
                 "machines" => Some(BoardTab::Machines),
                 "overview" => Some(BoardTab::Overview),
@@ -7556,9 +7556,7 @@ impl App {
         self.toggle_arona_panel(event_loop);
         eprintln!(
             "[autoarona] toggled → open={}",
-            self.inline_web
-                .as_ref()
-                .is_some_and(|h| h.kind == crate::InlineWebKind::Arona)
+            self.board_room_active() && self.board_scene.tab() == crate::native_board::BoardTab::Chat
         );
     }
     pub(crate) fn arm_autosplit(&mut self) {

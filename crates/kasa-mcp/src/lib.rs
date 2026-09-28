@@ -54,6 +54,7 @@ pub use http::{
 };
 pub use http::push_viewer_control;
 pub use nacho_relay::app_target as nacho_app_target;
+pub use nacho_relay::NachoDesktopSession;
 pub use register::unregister_clients;
 
 /// `Command` with the console window suppressed on Windows. kasaterm is a GUI

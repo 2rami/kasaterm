@@ -18,4 +18,6 @@ The surfaces are a Rust/wgpu desktop app and Flutter mobile app. Extend their ex
 
 ## Decisions and scope
 
+The human work hub combines task progress and Nacho conversation in one native room. Schedules and the all-session target grid are excluded; agent observation remains an explicit tool. A wide viewport pairs task rows with chat; narrow viewports switch between the two without discarding drafts. Dimensions are in `docs/design.md`. This is a task/communication surface, not an organizational chart or calendar.
+
 Project evidence is in `decisions.log`. The exact font and English title are agent choices pending visual review; the request to remove franchise branding and keep glass effects as future direction is explicit user input. No cross-project personal profile was changed.

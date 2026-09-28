@@ -2,7 +2,7 @@
 //!
 //! 정본은 나쵸의 `nacho/services/worklog.py` 이고, 여기서 읽는 창구는 앱용
 //! `GET /api/app/tasks` · `GET /api/app/tasks/{id}`(`nacho/services/appview.py`)다. 폰 중계
-//! (`kasa_mcp` 의 nacho_relay)와 **같은 서술자·키**를 써서 두 화면이 같은 장부를 본다.
+//! (`kasa_mcp` 의 nacho_relay)와 같은 계정 인증 경로를 써서 두 화면이 같은 장부를 본다.
 //!
 //! 이 파일이 지키는 것:
 //! - **끝남과 성공을 가른다.** `done` 은 장부가 닫혔다는 뜻일 뿐이다(직접 답한 일은 확인 없이
@@ -253,6 +253,7 @@ pub(crate) struct TaskList {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TaskBook {
+    account_stamp: Option<kasa_mcp::device_auth::Stamp>,
     source: BookSource,
     scope: String,
     hidden_count: u64,
@@ -367,13 +368,30 @@ const DETAIL_BUDGET: usize = 6;
 
 pub(crate) fn refresh(previous: &TaskBook) -> TaskBook {
     let now = kasa_socket::board::now_ms();
-    refresh_with(previous, now, &HttpLedger)
+    // Signing out must not reveal the legacy device owner's privileged task journal.
+    let Some(session) = kasa_mcp::NachoDesktopSession::capture() else {
+        return TaskBook { checked_at_ms: now, error: Some("다시 로그인해야 작업을 볼 수 있어요".into()), ..Default::default() };
+    };
+    let stamp = Some(session.stamp());
+    let ledger = HttpLedger { session: &session, denied: std::cell::Cell::new(false) };
+    let mut book = refresh_in_scope(previous, now, previous.account_stamp == stamp, &ledger);
+    if !session.is_current() {
+        return TaskBook { checked_at_ms: now, error: Some("계정이 바뀌어 이전 작업을 비웠어요".into()), ..Default::default() };
+    }
+    book.account_stamp = stamp;
+    book
+}
+
+fn refresh_in_scope(previous: &TaskBook, now: u64, same_identity: bool, ledger: &dyn Ledger) -> TaskBook {
+    let empty = TaskBook::default();
+    refresh_with(if same_identity { previous } else { &empty }, now, ledger)
 }
 
 /// 장부를 읽는 통로. 시험에서는 가짜로 갈아 끼운다.
 pub(crate) trait Ledger {
     fn list(&self) -> Result<TaskList, String>;
     fn detail(&self, id: &str) -> Result<TaskDetail, String>;
+    fn authorized(&self) -> bool { true }
 }
 
 pub(crate) fn refresh_with(previous: &TaskBook, now: u64, ledger: &dyn Ledger) -> TaskBook {
@@ -382,6 +400,9 @@ pub(crate) fn refresh_with(previous: &TaskBook, now: u64, ledger: &dyn Ledger) -
     let reply = match ledger.list() {
         Ok(reply) => reply,
         Err(error) => {
+            if !ledger.authorized() {
+                return TaskBook { checked_at_ms: now, error: Some(error), ..Default::default() };
+            }
             book.error = Some(error);
             if book.source == BookSource::Unasked {
                 book.source = BookSource::Live;
@@ -412,17 +433,41 @@ pub(crate) fn refresh_with(previous: &TaskBook, now: u64, ledger: &dyn Ledger) -
             // 상세 하나가 안 돼도 목록은 산다 — 그 줄은 「검증 안 됨」으로 남는다.
             Ok(_) | Err(_) => {}
         }
+        if !ledger.authorized() {
+            return TaskBook { checked_at_ms: now, error: Some("작업 접근 권한이 없어 이전 기록을 비웠어요".into()), ..Default::default() };
+        }
     }
     book
 }
 
-struct HttpLedger;
+struct HttpLedger<'a> {
+    session: &'a kasa_mcp::NachoDesktopSession,
+    denied: std::cell::Cell<bool>,
+}
 
-impl Ledger for HttpLedger {
+impl HttpLedger<'_> {
+    fn get(&self, path: &str) -> Result<Vec<u8>, String> {
+        let (status, body) = self.session.request("GET", path, None)
+            .map_err(|_| "계정 작업 목록에 연결하지 못했어요".to_string())?;
+        match status {
+            200 => Ok(body),
+            401 | 403 => {
+                self.denied.set(true);
+                Err("이 계정으로 작업을 볼 수 없어요. 로그인을 확인해 주세요".into())
+            }
+            404 => Err("연결 서버를 업데이트해야 작업을 볼 수 있어요".into()),
+            _ => Err(format!("작업 목록을 읽지 못했어요 (HTTP {status})")),
+        }
+    }
+}
+
+impl Ledger for HttpLedger<'_> {
+    fn authorized(&self) -> bool { !self.denied.get() }
+
     fn list(&self) -> Result<TaskList, String> {
         // 데스크 범위를 먼저 청한다. 옛 나쵸는 모르는 질의를 무시하고 폰 범위로 답하며,
         // 그 사실은 답의 `scope` 가 비는 것으로 드러난다.
-        let body = app_get("/api/app/tasks?scope=desk")?;
+        let body = self.get("/api/app/tasks?scope=desk")?;
         serde_json::from_slice::<TaskList>(&body).map_err(|_| "나쵸 장부 응답을 읽지 못했어요".into())
     }
 
@@ -434,16 +479,9 @@ impl Ledger for HttpLedger {
         struct One {
             task: TaskDetail,
         }
-        let body = app_get(&format!("/api/app/tasks/{id}"))?;
+        let body = self.get(&format!("/api/app/tasks/{id}"))?;
         serde_json::from_slice::<One>(&body).map(|o| o.task).map_err(|_| "작업 상세를 읽지 못했어요".into())
     }
-}
-
-/// 나쵸 앱 창구 GET 한 번. 창구는 루프백·메시의 평문 HTTP 라 의존성 없이 소켓으로 부른다 —
-/// 판 갱신 스레드가 비동기 런타임을 들고 있지 않다.
-fn app_get(path: &str) -> Result<Vec<u8>, String> {
-    let raw = app_exchange("GET", path, None)?;
-    split_response(&raw)
 }
 
 /// 나쵸 앱 창구 요청 한 번 — (상태 코드, 본문). 판정(409·410·503 의 뜻)은 부르는 쪽 몫이다.
@@ -499,18 +537,6 @@ fn exchange(url: &str, method: &str, path: &str, headers: &str, body: Option<&[u
     Ok(raw)
 }
 
-fn split_response(raw: &[u8]) -> Result<Vec<u8>, String> {
-    let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("나쵸 장부 응답이 잘렸어요")?;
-    let head = String::from_utf8_lossy(&raw[..head_end]);
-    let status = head.split_whitespace().nth(1).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
-    match status {
-        200 => Ok(raw[head_end + 4..].to_vec()),
-        401 | 403 => Err("나쵸 장부가 이 기기의 요청을 거절했어요".into()),
-        503 => Err("나쵸 장부가 앱 창구를 열지 않았어요".into()),
-        _ => Err(format!("나쵸 장부가 답하지 못했어요 ({status})")),
-    }
-}
-
 /// 검증용 가상 장부. 격리된 디버그 리그에서만 불리고, 화면은 출처로 가짜임을 표시한다.
 #[cfg(any(test, debug_assertions))]
 pub(crate) fn fixture_book(at: u64) -> TaskBook {
@@ -548,7 +574,7 @@ pub(crate) fn fixture_book(at: u64) -> TaskBook {
     for (card, verify) in tasks.iter().zip([None, None, None, Some(true), None, Some(false)]) {
         details.insert(card.id.clone(), detail(card, verify));
     }
-    TaskBook { source: BookSource::Fixture, scope: "desk".into(), hidden_count: 2, tasks, details, checked_at_ms: at, last_ok_ms: at, error: None }
+    TaskBook { account_stamp: None, source: BookSource::Fixture, scope: "desk".into(), hidden_count: 2, tasks, details, checked_at_ms: at, last_ok_ms: at, error: None }
 }
 
 #[cfg(test)]
@@ -600,6 +626,23 @@ mod tests {
         let late = merge_cards(&merged, vec![card("w1", "working", 5)]);
         assert_eq!(late[0].state, TaskState::Verifying, "늦게 온 옛 응답이 새 판을 덮지 않는다");
         assert_eq!(late.len(), 1, "새 목록에 없는 id 는 목록이 정본이라 빠진다");
+    }
+
+    #[test]
+    fn changed_account_never_inherits_higher_revisions_or_private_details() {
+        let mut previous = TaskBook { tasks: vec![card("sameid", "done", 99)], ..Default::default() };
+        previous.details.insert("sameid".into(), TaskDetail { id: "sameid".into(), rev: "99".into(), ..Default::default() });
+        let next = refresh_in_scope(&previous, 50, false, &fake(Ok(vec![card("sameid", "working", 1)]), vec![]));
+        assert_eq!(next.tasks[0].rev, "1");
+        assert!(next.details.is_empty());
+        let offline = refresh_in_scope(&previous, 51, false, &fake(Err("offline".into()), vec![]));
+        assert!(offline.tasks.is_empty());
+        assert!(offline.details.is_empty());
+        let unchanged = refresh_in_scope(&previous, 52, false, &Fake {
+            list: RefCell::new(Ok(TaskList { unchanged: true, ..Default::default() })),
+            details: HashMap::new(), asked: RefCell::new(vec![]),
+        });
+        assert!(unchanged.tasks.is_empty());
     }
 
     #[test]
@@ -739,23 +782,42 @@ mod tests {
     }
 
     #[test]
-    fn response_status_is_checked_before_the_body_is_trusted() {
-        assert_eq!(split_response(b"HTTP/1.0 200 OK\r\nA: b\r\n\r\n{}").unwrap(), b"{}");
-        assert!(split_response(b"HTTP/1.0 403 Forbidden\r\n\r\n{\"tasks\":[]}").is_err());
-        assert!(split_response(b"HTTP/1.0 200 OK").is_err(), "머리가 안 끝난 응답은 버린다");
+    fn permission_loss_clears_cached_work_but_offline_does_not() {
+        struct Denied { detail_only: bool, denied: std::cell::Cell<bool> }
+        impl Ledger for Denied {
+            fn list(&self) -> Result<TaskList, String> {
+                if self.detail_only {
+                    Ok(TaskList { tasks: vec![card("sameid", "done", 100)], ..Default::default() })
+                } else {
+                    self.denied.set(true);
+                    Err("forbidden".into())
+                }
+            }
+            fn detail(&self, _: &str) -> Result<TaskDetail, String> {
+                self.denied.set(true);
+                Err("forbidden".into())
+            }
+            fn authorized(&self) -> bool { !self.denied.get() }
+        }
+        let previous = TaskBook { tasks: vec![card("sameid", "working", 99)], ..Default::default() };
+        for detail_only in [false, true] {
+            let next = refresh_with(&previous, 20, &Denied { detail_only, denied: std::cell::Cell::new(false) });
+            assert!(next.tasks.is_empty());
+            assert!(next.details.is_empty());
+            assert!(next.error.is_some());
+        }
+        let offline = refresh_with(&previous, 21, &fake(Err("offline".into()), vec![]));
+        assert_eq!(offline.tasks.len(), 1);
+        assert!(offline.stale());
     }
 
-    /// 실기 확인 — 나쵸와 앱 키가 있는 기계에서 `--ignored` 로 돌린다. 창구의 헤더·응답 모양이
-    /// 이 파일과 어긋나면 여기서 먼저 걸린다.
     #[test]
-    #[ignore]
-    fn live_ledger_answers_with_cards() {
-        let book = refresh(&TaskBook::default());
-        assert_eq!(book.error(), None);
-        for card in book.tasks() {
-            assert!(!card.id.is_empty() && card.state != TaskState::Unknown, "{card:?}");
-        }
-        eprintln!("live tasks: {:?}", book.tasks().iter().map(|c| (&c.id, c.state, book.verdict(c))).collect::<Vec<_>>());
+    fn missing_account_cannot_fall_back_to_the_local_owner_journal() {
+        let previous = TaskBook { tasks: vec![card("private", "working", 9)], ..Default::default() };
+        let next = refresh(&previous);
+        assert!(next.tasks.is_empty());
+        assert!(next.details.is_empty());
+        assert!(next.error.is_some());
     }
 
     #[test]

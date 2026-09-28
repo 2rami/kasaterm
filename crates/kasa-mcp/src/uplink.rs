@@ -258,6 +258,13 @@ fn set_status(f: impl FnOnce(&mut Status)) {
     }
 }
 
+fn valid_nacho_app_target(url: &str, key: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some() && url.username().is_empty() && url.password().is_none()
+        && url.fragment().is_none() && url.query().is_none())
+        && !key.trim().is_empty() && axum::http::HeaderValue::from_str(key).is_ok()
+}
+
 /// 폰 주소를 닫아 둔 채 로그인만 해 둔 기기는 주소 없이 붙는다 — 기기끼리의 길만 쓴다.
 fn hello_json(token: Option<&str>) -> Option<String> {
     let key = crate::mobile::machine_key()?;
@@ -282,6 +289,9 @@ fn hello_json(token: Option<&str>) -> Option<String> {
     });
     if let Some(t) = token {
         hello["device_token"] = t.into();
+        let nacho_app = crate::nacho_relay::app_target().ok()
+            .is_some_and(|(url, key)| valid_nacho_app_target(&url, &key));
+        hello["capabilities"] = serde_json::json!({"nacho_app": nacho_app});
         if crate::mobile::published() {
             if let Some(owner) = crate::mobile::owner() {
                 if slugs.contains(&owner.slug) { hello["owner_slug"] = owner.slug.into(); }
@@ -823,6 +833,17 @@ mod tests {
         }
         for h in ["content-type", "accept", "cookie", "x-kasa-token"] {
             assert!(!skip_header(h), "{h}");
+        }
+    }
+
+    #[test]
+    fn nacho_capability_requires_a_valid_local_url_and_header_key() {
+        assert!(valid_nacho_app_target("http://127.0.0.1:8878", "synthetic-app-key"));
+        for url in ["http://", "file:///tmp/nacho", "https://user:password@hub.example", "https://hub.example/#key", "https://hub.example/?key=x"] {
+            assert!(!valid_nacho_app_target(url, "synthetic-app-key"));
+        }
+        for key in ["", "  ", "x\nX-Kasa-Owner: 1", "x\r\ny"] {
+            assert!(!valid_nacho_app_target("http://127.0.0.1:8878", key));
         }
     }
 

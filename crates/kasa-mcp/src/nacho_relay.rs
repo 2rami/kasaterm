@@ -74,6 +74,86 @@ pub fn app_target() -> Result<(String, String), &'static str> {
     target().map(|t| (t.url, t.key))
 }
 
+pub struct NachoDesktopSession {
+    credential: crate::device_auth::DeviceCred,
+    stamp: crate::device_auth::Stamp,
+}
+
+impl NachoDesktopSession {
+    pub fn capture() -> Option<Self> {
+        crate::device_auth::capture().map(|(credential, stamp)| Self { credential, stamp })
+    }
+
+    pub fn stamp(&self) -> crate::device_auth::Stamp { self.stamp.clone() }
+
+    pub fn is_current(&self) -> bool {
+        crate::device_auth::with_current(&self.stamp, || Ok(())).is_ok()
+    }
+
+    /// Must run on a worker; desktop credentials are neither exposed to rendering nor copied to another device.
+    pub fn request(&self, method: &str, path: &str, body: Option<&[u8]>) -> Result<(u16, Vec<u8>), &'static str> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| "unavailable")?;
+        let result = runtime.block_on(desktop_exchange(&self.credential, method, path, body,
+            &|| crate::device_auth::with_current(&self.stamp, || Ok(())).map_err(|_| "account_changed")));
+        if matches!(result, Ok((401, _))) { crate::device_auth::reject(&self.stamp); }
+        result
+    }
+}
+
+fn desktop_path(method: &str, path: &str, body: Option<&[u8]>) -> Result<String, &'static str> {
+    let rest = path.strip_prefix("/api/app/").ok_or("invalid_request")?;
+    let (name, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let allowed = match (method, name) {
+        ("GET", "events") => body.is_none() && query.split('&').filter(|s| !s.is_empty()).all(|part| {
+            part.split_once('=').is_some_and(|(key, value)|
+                matches!(key, "after" | "tail" | "limit" | "wait") && !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+                    && (key != "wait" || value == "0"))
+        }),
+        ("POST", "messages") => query.is_empty() && body.is_some_and(|body| body.len() <= BODY_LIMIT),
+        ("GET", "tasks") => body.is_none() && matches!(query, "" | "scope=desk"),
+        ("GET", name) if name.starts_with("tasks/") => body.is_none() && query.is_empty()
+            && name.strip_prefix("tasks/").is_some_and(|id| !id.is_empty() && id.len() <= 200 && id.bytes().all(|b| b.is_ascii_alphanumeric())),
+        _ => false,
+    };
+    if !allowed { return Err("invalid_request"); }
+    Ok(format!("/relay/account/nacho/app/{rest}"))
+}
+
+async fn desktop_exchange(
+    credential: &crate::device_auth::DeviceCred,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    authorize: &(dyn Fn() -> Result<(), &'static str> + Sync),
+) -> Result<(u16, Vec<u8>), &'static str> {
+    let path = desktop_path(method, path, body)?;
+    authorize()?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build().map_err(|_| "unavailable")?;
+    // The gateway derives owner and machine identity; clients cannot supply owner-assertion headers.
+    let mut request = client.request(reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| "invalid_request")?,
+        format!("{}{}", credential.relay.trim_end_matches('/'), path))
+        .bearer_auth(&credential.token)
+        .header(reqwest::header::ACCEPT, "application/json");
+    if let Some(body) = body {
+        request = request.header(reqwest::header::CONTENT_TYPE, "application/json").body(body.to_vec());
+    }
+    let mut response = request.send().await.map_err(|_| "unreachable")?;
+    authorize()?;
+    let status = response.status().as_u16();
+    if response.content_length().is_some_and(|length| length > 2 * 1024 * 1024) { return Err("response_too_large"); }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| "unreachable")? {
+        if bytes.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 { return Err("response_too_large"); }
+        bytes.extend_from_slice(&chunk);
+    }
+    authorize()?;
+    Ok((status, bytes))
+}
+
 /// `<rest>` 가 앱 창구 안의 경로인가. 점 조각(`..`)이나 이상한 글자로 `/api/app` 밖(`/api/ask`)을
 /// 가리키지 못하게 조각마다 본다.
 pub(crate) fn valid_rest(rest: &str) -> bool {
@@ -456,5 +536,79 @@ mod tests {
         let r = read_relay_to(Err("nacho_key_missing"), &Method::GET, "work-mode", false, false).await;
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(seen.lock().unwrap().is_empty(), "거절한 요청은 나쵸에 닿지 않는다");
+    }
+
+    #[test]
+    fn desktop_chat_route_is_narrow_and_longpoll_is_not_allowed() {
+        assert_eq!(desktop_path("GET", "/api/app/events?after=4&limit=500&wait=0", None).unwrap(), "/relay/account/nacho/app/events?after=4&limit=500&wait=0");
+        assert!(desktop_path("GET", "/api/app/tasks?scope=desk", None).is_ok());
+        assert!(desktop_path("GET", "/api/app/tasks/a123", None).is_ok());
+        for path in ["/api/app/approvals/ap_1", "/api/app/../ask", "/api/app/events?wait=25", "/api/app/events?token=123", "/api/app/tasks/../ask", "/api/app/messages"] {
+            assert!(desktop_path("GET", path, None).is_err(), "{path}");
+        }
+        assert!(desktop_path("POST", "/api/app/events", Some(b"{}")).is_err());
+        assert!(desktop_path("POST", "/api/app/messages?owner=1", Some(b"{}")).is_err());
+        assert!(NachoDesktopSession::capture().is_none(), "unit tests must not read real account credentials");
+    }
+
+    #[tokio::test]
+    async fn desktop_chat_uses_account_bearer_without_owner_assertions_and_preserves_retry_body() {
+        let seen: Arc<Mutex<Vec<(String, HeaderMap, Vec<u8>)>>> = Arc::default();
+        let log = seen.clone();
+        let app = axum::Router::new().route("/relay/account/nacho/app/{*rest}", axum::routing::any(
+            move |uri: axum::http::Uri, headers: HeaderMap, body: axum::body::Bytes| {
+                let log = log.clone();
+                async move {
+                    log.lock().unwrap().push((uri.to_string(), headers, body.to_vec()));
+                    axum::Json(serde_json::json!({"ok": true, "receipt": {"state":"accepted"}}))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let credential = crate::device_auth::DeviceCred {
+            relay: format!("http://{address}"), account: "fixture".into(), device_id: "fixture-device".into(), token: "fixture-token".into(),
+        };
+        let body = br#"{"id":"stable-id","text":"fixture","task":"a1","rev":"3"}"#;
+        for _ in 0..2 {
+            assert_eq!(desktop_exchange(&credential, "POST", "/api/app/messages", Some(body), &|| Ok(())).await.unwrap().0, 200);
+        }
+        let observed = seen.lock().unwrap();
+        assert_eq!(observed.len(), 2);
+        for (uri, headers, got) in observed.iter() {
+            assert_eq!(uri, "/relay/account/nacho/app/messages");
+            assert_eq!(headers.get("authorization").unwrap(), "Bearer fixture-token");
+            for name in ["x-kasa-owner", "x-kasa-user", "x-nacho-token", "x-kasa-read"] { assert!(headers.get(name).is_none(), "{name}"); }
+            assert_eq!(got, body);
+        }
+        drop(observed);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn desktop_chat_discards_responses_after_account_change_and_does_not_follow_redirects() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let app = axum::Router::new().route("/relay/account/nacho/app/events", axum::routing::get(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            async { (StatusCode::TEMPORARY_REDIRECT, [("location", "/other")], "redirect") }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let credential = crate::device_auth::DeviceCred {
+            relay: format!("http://{address}"), account: "fixture".into(), device_id: "fixture-device".into(), token: "fixture-token".into(),
+        };
+        let (status, _) = desktop_exchange(&credential, "GET", "/api/app/events?wait=0", None, &|| Ok(())).await.unwrap();
+        assert_eq!(status, 307);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let checks = AtomicUsize::new(0);
+        assert_eq!(desktop_exchange(&credential, "GET", "/api/app/events?wait=0", None,
+            &|| if checks.fetch_add(1, Ordering::SeqCst) == 0 { Ok(()) } else { Err("account_changed") }).await, Err("account_changed"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(desktop_exchange(&credential, "GET", "/api/app/events?wait=0", None, &|| Err("account_changed")).await, Err("account_changed"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "a stale identity cannot initiate a request");
+        server.abort();
     }
 }

@@ -8678,12 +8678,12 @@ mod tests {
     /// 설정과 보드가 같은 자리에서 같은 실수를 했으므로 둘 다 지킨다.
     #[test]
     fn the_scrollbar_hugs_the_panel_edge_not_the_text_column() {
-        for (label, source) in [
-            ("설정", include_str!("native_settings.rs")),
-            ("보드", include_str!("native_board.rs")),
+        for (label, source, marker) in [
+            ("설정", include_str!("native_settings.rs"), "paint_scroll_affordance(\n        g,\n        scroll_x,"),
+            ("작업 열", include_str!("native_board.rs"), "paint_scroll_affordance(g, x, top, width + 12.0,"),
         ] {
             assert!(
-                source.contains("paint_scroll_affordance(\n        g,\n        scroll_x,"),
+                source.contains(marker),
                 "{label} 스크롤바가 글자 칼럼 기준이면 패널 가장자리에서 떨어져 뜬다"
             );
         }

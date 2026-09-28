@@ -25,7 +25,7 @@ impl InternalRoomKind {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Settings => "설정",
-            Self::Board => "보드",
+            Self::Board => "작업현황",
         }
     }
 

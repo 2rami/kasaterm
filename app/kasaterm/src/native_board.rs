@@ -1,11 +1,4 @@
-//! WGPU 네이티브 운영 보드의 상태와 worker 스냅샷.
-//!
-//! THESIS: 터미널을 가리는 대시보드가 아니라, 작업 방 하나로 오가는 운영실이다.
-//! OWN-WORLD: 현재 터미널 팔레트, 얇은 경계, 상태색과 학생 스프라이트를 공유한다.
-//! STORY: 기기와 방을 따라 요청·진행·완료를 읽고, 선택한 창의 근거를 펼친다.
-//! FIRST VIEWPORT: 왼쪽 운영 탭, 오른쪽 전체 기기 필터와 방별 작업 행, 최근 변경.
-//! FORM: desktop workspace; seed native-board-room.
-//! FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+//! 사람용 작업현황과 나쵸 대화를 함께 보되 관측·세션 도구는 명시적으로 연다.
 //!
 //! paint는 이 파일의 `Snapshot`만 읽는다. transcript, 파일, git, 프로세스, 원격
 //! 캐시는 worker가 읽고 세대 번호가 붙은 `DataEnvelope`로만 GUI에 건넨다.
@@ -18,28 +11,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) mod side;
 mod work;
+mod chat;
 
 pub(crate) type Rect = (f32, f32, f32, f32);
 
-/// 보드를 열면 서는 탭은 `#[default]` 한 곳이 정한다. 할 일 판(B안)이 기본이고, 옛 방별
-/// 보드로 되돌리려면 이 표시를 `Overview` 로 옮기면 된다 — 두 탭 모두 그대로 남는다.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum BoardTab {
     #[default]
     Work,
+    Chat,
     Overview,
     Agents,
-    Schedule,
     Git,
     Machines,
 }
 
 impl BoardTab {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 6] = [
         Self::Work,
+        Self::Chat,
         Self::Overview,
         Self::Agents,
-        Self::Schedule,
         Self::Git,
         Self::Machines,
     ];
@@ -47,9 +40,9 @@ impl BoardTab {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Work => "작업현황",
+            Self::Chat => "나쵸 대화",
             Self::Overview => "관측",
             Self::Agents => "에이전트",
-            Self::Schedule => "스케줄",
             Self::Git => "소스 컨트롤",
             Self::Machines => "이사",
         }
@@ -58,10 +51,10 @@ impl BoardTab {
     /// 머리글 밑 한 줄 설명(목업 .sub).
     pub(crate) const fn desc(self) -> &'static str {
         match self {
-            Self::Work => "사람이 볼 것 — 답할 것부터 · 진행·검증·완료와 기기·학생",
+            Self::Work => "내 답변이 필요한 일과 진행 상황, 결과를 확인해요",
+            Self::Chat => "나쵸에게 맡길 일과 궁금한 내용을 이야기해요",
             Self::Overview => "에이전트 활동 관측 — 연결된 기기의 모든 방과 최근 변경",
             Self::Agents => "pane 밖에서도 계속 도는 대화",
-            Self::Schedule => "지정한 때에 학생에게 지시를 보냅니다",
             Self::Git => "대상 pane의 저장소",
             Self::Machines => "세션을 다른 기기·방으로 옮깁니다",
         }
@@ -70,9 +63,7 @@ impl BoardTab {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BoardInput {
-    ScheduleText,
-    ScheduleMinutes,
-    ScheduleAt,
+    NachoMessage,
     GitMessage,
     TransferRoomName,
 }
@@ -304,7 +295,6 @@ fn board_fixture_requested() -> bool {
 pub(crate) struct BoardData {
     pub(crate) agents: Arc<Vec<PaneActivity>>,
     pub(crate) background: Arc<Vec<BackgroundRow>>,
-    pub(crate) schedules: Arc<Vec<kasa_mcp::ScheduleItem>>,
     pub(crate) transfer: Arc<TransferSnapshot>,
     pub(crate) git: Arc<GitSnapshot>,
     pub(crate) faces: Arc<Vec<FaceAsset>>,
@@ -336,6 +326,12 @@ struct Mailbox {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Target {
     Tab(BoardTab),
+    Tools,
+    NachoSend,
+    NachoRetry,
+    NachoClearContext,
+    NachoLogin,
+    WorkChat(work::WorkKey),
     Return,
     Refresh,
     FocusPane(String),
@@ -348,17 +344,14 @@ pub(crate) enum Target {
     OverviewFocus(BoardAddress),
     OverviewSave(BoardAddress),
     WorkProject(Option<String>),
+    WorkFilters,
+    WorkMore(work::Lane),
     WorkSelect(work::WorkKey),
     ResumeBackground(String, String),
     StopBackground(LocalBackgroundProcess),
     ConfirmStopBackground(LocalBackgroundProcess),
     CancelStopBackground,
-    ScheduleKind(String),
-    ScheduleSurface(String),
     Input(BoardInput),
-    ScheduleAdd,
-    ScheduleToggle(String),
-    ScheduleDelete(String),
     GitFile(String),
     GitAll,
     GitClear,
@@ -386,6 +379,8 @@ pub(crate) struct Hit {
     pub(crate) target: Target,
     pub(crate) rect: Rect,
     pub(crate) text_cursor: bool,
+    keyboard: bool,
+    caret_boundaries: Vec<(f32, usize)>,
 }
 
 #[derive(Clone)]
@@ -398,11 +393,9 @@ pub(crate) struct Snapshot {
     pub(crate) target_pane: String,
     pub(crate) target_cwd: String,
     pub(crate) refreshing: bool,
-    pub(crate) schedule_kind: String,
-    pub(crate) schedule_surface: String,
-    pub(crate) schedule_text: String,
-    pub(crate) schedule_minutes: String,
-    pub(crate) schedule_at: String,
+    pub(crate) chat: chat::ChatSnapshot,
+    pub(crate) tools_open: bool,
+    pub(crate) focus: Option<Target>,
     pub(crate) git_message: String,
     pub(crate) git_selected: Arc<HashSet<String>>,
     pub(crate) input: Option<BoardInput>,
@@ -422,6 +415,7 @@ pub(crate) struct PaintOutput {
     pub(crate) content_h: f32,
     pub(crate) view_h: f32,
     pub(crate) caret_rect: Option<Rect>,
+    pub(crate) chat_rect: Option<Rect>,
 }
 
 pub(crate) struct Scene {
@@ -433,6 +427,7 @@ pub(crate) struct Scene {
     data: Arc<BoardData>,
     mailbox: Arc<Mutex<Mailbox>>,
     generation: Arc<AtomicU64>,
+    account_epoch: u64,
     requested_generation: u64,
     applied_generation: u64,
     action_generation: u64,
@@ -445,11 +440,10 @@ pub(crate) struct Scene {
     caret_rect: Option<Rect>,
     input: Option<BoardInput>,
     caret: usize,
-    schedule_kind: String,
-    schedule_surface: String,
-    schedule_text: String,
-    schedule_minutes: String,
-    schedule_at: String,
+    chat: chat::ChatState,
+    chat_rect: Option<Rect>,
+    tools_open: bool,
+    focus: Option<Target>,
     git_message: String,
     git_selected: HashSet<String>,
     toast: Option<(bool, String, Instant)>,
@@ -471,6 +465,7 @@ impl Default for Scene {
             data: Arc::new(BoardData::default()),
             mailbox: Arc::new(Mutex::new(Mailbox::default())),
             generation: Arc::new(AtomicU64::new(0)),
+            account_epoch: kasa_mcp::device_auth::change_epoch(),
             requested_generation: 0,
             applied_generation: 0,
             action_generation: 0,
@@ -483,11 +478,10 @@ impl Default for Scene {
             caret_rect: None,
             input: None,
             caret: 0,
-            schedule_kind: "loop".to_string(),
-            schedule_surface: String::new(),
-            schedule_text: String::new(),
-            schedule_minutes: "10".to_string(),
-            schedule_at: String::new(),
+            chat: chat::ChatState::default(),
+            chat_rect: None,
+            tools_open: false,
+            focus: None,
             git_message: String::new(),
             git_selected: HashSet::new(),
             toast: None,
@@ -524,6 +518,8 @@ impl Scene {
         self.hits.clear();
         self.input = None;
         self.caret_rect = None;
+        self.chat_rect = None;
+        self.focus = None;
         self.scroll = 0.0;
         self.scroll_max = 0.0;
         self.pending_stop = None;
@@ -550,8 +546,18 @@ impl Scene {
             self.scroll = 0.0;
             self.input = None;
             self.caret_rect = None;
+            self.hits.clear();
+            self.focus = None;
             self.last_refresh = None;
         }
+        if !matches!(tab, BoardTab::Work | BoardTab::Chat) {
+            self.tools_open = true;
+        }
+    }
+
+    pub(crate) fn show_work(&mut self) {
+        self.tools_open = false;
+        self.set_tab(BoardTab::Work);
     }
 
     pub(crate) fn tab(&self) -> BoardTab {
@@ -562,11 +568,38 @@ impl Scene {
         let next = (self.scroll + delta).clamp(0.0, self.scroll_max);
         let changed = (next - self.scroll).abs() > f32::EPSILON;
         self.scroll = next;
+        if changed { self.hits.clear(); self.focus = None; }
         changed
+    }
+
+    fn scroll_at(&mut self, cursor: (f32, f32), delta: f32) -> bool {
+        if self.chat_rect.is_some_and(|rect| contains(rect, cursor)) {
+            self.chat.scroll_by(-delta)
+        } else {
+            self.scroll_by(delta)
+        }
     }
 
     pub(crate) fn hit_at(&self, x: f32, y: f32) -> Option<&Hit> {
         self.hits.iter().rev().find(|hit| contains(hit.rect, (x, y)))
+    }
+
+    fn cycle_focus(&mut self, backwards: bool) -> Option<BoardInput> {
+        let current = self.input.map(Target::Input).or_else(|| self.focus.clone());
+        let mut targets = Vec::new();
+        for hit in &self.hits {
+            if hit.keyboard && !targets.contains(&hit.target) { targets.push(hit.target.clone()); }
+        }
+        if targets.is_empty() { self.focus = None; return None; }
+        let at = current.as_ref().and_then(|target| targets.iter().position(|candidate| candidate == target));
+        let next = match (at, backwards) {
+            (Some(at), true) => (at + targets.len() - 1) % targets.len(),
+            (Some(at), false) => (at + 1) % targets.len(),
+            (None, true) => targets.len() - 1,
+            (None, false) => 0,
+        };
+        self.focus = Some(targets[next].clone());
+        match targets[next] { Target::Input(input) => Some(input), _ => None }
     }
 
     pub(crate) fn input(&self) -> Option<BoardInput> {
@@ -583,6 +616,10 @@ impl Scene {
         self.scroll = self.scroll.clamp(0.0, self.scroll_max);
         self.hits = output.hits;
         self.caret_rect = output.caret_rect;
+        self.chat_rect = output.chat_rect;
+        if self.focus.as_ref().is_some_and(|target| !self.hits.iter().any(|hit| &hit.target == target)) {
+            self.focus = None;
+        }
     }
 
     pub(crate) fn caret_rect(&self) -> Option<Rect> {
@@ -605,11 +642,9 @@ impl Scene {
             target_pane: self.target_pane.clone().unwrap_or_default(),
             target_cwd: self.target_cwd.clone(),
             refreshing: self.refreshing,
-            schedule_kind: self.schedule_kind.clone(),
-            schedule_surface: self.schedule_surface.clone(),
-            schedule_text: self.schedule_text.clone(),
-            schedule_minutes: self.schedule_minutes.clone(),
-            schedule_at: self.schedule_at.clone(),
+            chat: self.chat.snapshot(),
+            tools_open: self.tools_open,
+            focus: self.focus.clone(),
             git_message: self.git_message.clone(),
             git_selected: Arc::new(self.git_selected.clone()),
             input: self.input,
@@ -697,9 +732,7 @@ impl Scene {
 
     pub(crate) fn field(&self, input: BoardInput) -> &str {
         match input {
-            BoardInput::ScheduleText => &self.schedule_text,
-            BoardInput::ScheduleMinutes => &self.schedule_minutes,
-            BoardInput::ScheduleAt => &self.schedule_at,
+            BoardInput::NachoMessage => &self.chat.draft,
             BoardInput::GitMessage => &self.git_message,
             BoardInput::TransferRoomName => &self.transfer.room_name,
         }
@@ -707,29 +740,11 @@ impl Scene {
 
     pub(crate) fn edit_field(&mut self, input: BoardInput, mut edit: impl FnMut(&mut String, &mut usize)) {
         let (value, caret) = match input {
-            BoardInput::ScheduleText => (&mut self.schedule_text, &mut self.caret),
-            BoardInput::ScheduleMinutes => (&mut self.schedule_minutes, &mut self.caret),
-            BoardInput::ScheduleAt => (&mut self.schedule_at, &mut self.caret),
+            BoardInput::NachoMessage => (&mut self.chat.draft, &mut self.caret),
             BoardInput::GitMessage => (&mut self.git_message, &mut self.caret),
             BoardInput::TransferRoomName => (&mut self.transfer.room_name, &mut self.caret),
         };
         edit(value, caret);
-    }
-
-    pub(crate) fn schedule_kind(&self) -> &str {
-        &self.schedule_kind
-    }
-
-    pub(crate) fn set_schedule_kind(&mut self, kind: String) {
-        self.schedule_kind = kind;
-    }
-
-    pub(crate) fn schedule_surface(&self) -> &str {
-        &self.schedule_surface
-    }
-
-    pub(crate) fn set_schedule_surface(&mut self, surface: String) {
-        self.schedule_surface = surface;
     }
 
     pub(crate) fn git_message(&self) -> &str {
@@ -772,6 +787,7 @@ impl Scene {
             let first = self.applied_generation == 0;
             let mut overview = board_fixture();
             if first {
+                self.chat.set_fixture();
                 self.tab = BoardTab::Overview;
                 self.overview.show_changes = std::env::var("KASATERM_TEST_BOARD_CHANGES").as_deref() == Ok("1");
             }
@@ -846,7 +862,7 @@ impl Scene {
         let target_cwd = self.target_cwd.clone();
         let previous = self.data.clone();
         let tab = self.tab;
-        let selection = matches!(self.tab, BoardTab::Overview | BoardTab::Work).then(|| self.overview.selection.clone()).flatten();
+        let selection = matches!(self.tab, BoardTab::Overview | BoardTab::Work | BoardTab::Chat).then(|| self.overview.selection.clone()).flatten();
         std::thread::spawn(move || {
             let data = collect_data(&backend, target_window, &target_cwd, tab, &previous, selection);
             let mut mailbox = mailbox.lock().unwrap();
@@ -862,12 +878,31 @@ impl Scene {
         });
     }
 
+    fn sync_account_epoch(&mut self, epoch: u64) -> bool {
+        if epoch == self.account_epoch { return false; }
+        self.account_epoch = epoch;
+        Arc::make_mut(&mut self.data).tasks = Arc::new(crate::nacho_tasks::TaskBook::default());
+        self.work = work::WorkUi::default();
+        self.chat.reset();
+        self.generation.fetch_max(self.requested_generation.max(self.applied_generation), Ordering::SeqCst);
+        self.requested_generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.refreshing = false;
+        self.last_refresh = None;
+        self.hits.clear();
+        self.focus = None;
+        self.input = None;
+        self.caret_rect = None;
+        true
+    }
+
     pub(crate) fn pump(&mut self) -> bool {
+        let account_changed = !board_fixture_requested()
+            && self.sync_account_epoch(kasa_mcp::device_auth::change_epoch());
         let (data, actions, transfers) = {
             let mut mailbox = self.mailbox.lock().unwrap();
             (mailbox.data.take(), std::mem::take(&mut mailbox.actions), std::mem::take(&mut mailbox.transfers))
         };
-        let mut changed = false;
+        let mut changed = self.chat.pump() | account_changed;
         if let Some(envelope) = data {
             if envelope.generation >= self.requested_generation
                 && envelope.generation >= self.applied_generation
@@ -875,14 +910,6 @@ impl Scene {
                 self.applied_generation = envelope.generation;
                 self.data = Arc::new(envelope.data);
                 self.refreshing = false;
-                if self.schedule_surface.is_empty() {
-                    self.schedule_surface = self
-                        .data
-                        .agents
-                        .first()
-                        .map(|row| row.surface_id.clone())
-                        .unwrap_or_default();
-                }
                 self.git_selected
                     .retain(|path| self.data.git.rows.iter().any(|row| &row.path == path));
                 self.revalidate_transfer_selection();
@@ -1107,15 +1134,6 @@ pub(crate) fn confirmed_resume_pane(
 #[derive(Clone, Debug)]
 pub(crate) enum WorkerAction {
     StopBackground(LocalBackgroundProcess),
-    ScheduleAdd {
-        kind: String,
-        surface: String,
-        text: String,
-        minutes: u64,
-        at_ts: f64,
-    },
-    ScheduleToggle(String),
-    ScheduleDelete(String),
     GitCommit {
         cwd: String,
         files: Vec<String>,
@@ -1140,29 +1158,6 @@ fn execute_action(backend: &Arc<dyn Backend>, action: WorkerAction) -> anyhow::R
                 anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
             }
             Ok("백그라운드 세션을 종료했어요".to_string())
-        }
-        WorkerAction::ScheduleAdd {
-            kind,
-            surface,
-            text,
-            minutes,
-            at_ts,
-        } => {
-            let interval = minutes.max(1) * 60;
-            kasa_mcp::schedule_add(&kind, &surface, &text, interval, at_ts, "")?;
-            Ok("스케줄을 등록했어요".to_string())
-        }
-        WorkerAction::ScheduleToggle(id) => {
-            if !kasa_mcp::schedule_toggle(&id) {
-                anyhow::bail!("스케줄을 찾지 못했어요");
-            }
-            Ok("스케줄 상태를 바꿨어요".to_string())
-        }
-        WorkerAction::ScheduleDelete(id) => {
-            if !kasa_mcp::schedule_delete(&id) {
-                anyhow::bail!("스케줄을 찾지 못했어요");
-            }
-            Ok("스케줄을 지웠어요".to_string())
         }
         WorkerAction::GitCommit {
             cwd,
@@ -1299,12 +1294,12 @@ fn collect_data(
     previous: &BoardData,
     selection: Option<OverviewSelection>,
 ) -> BoardData {
-    if matches!(tab, BoardTab::Overview | BoardTab::Work) {
+    if matches!(tab, BoardTab::Overview | BoardTab::Work | BoardTab::Chat) {
         let overview = collect_overview(backend, &previous.overview, selection);
         let names = overview.panes.iter().filter_map(|row| row.character.as_deref()).collect::<HashSet<_>>();
         let faces = collect_overview_faces(names);
         // 장부는 할 일 판만 읽는다 — 방별 보드가 나쵸를 기다리며 늦어지지 않게.
-        let tasks = if tab == BoardTab::Work {
+        let tasks = if matches!(tab, BoardTab::Work | BoardTab::Chat) {
             Arc::new(crate::nacho_tasks::refresh(&previous.tasks))
         } else {
             previous.tasks.clone()
@@ -1348,12 +1343,10 @@ fn collect_data(
         errors.push(error.to_string());
         Vec::new()
     });
-    let schedules = kasa_mcp::schedule_snapshot();
     let git = collect_git(target_cwd);
     BoardData {
         agents: Arc::new(agents),
         background: Arc::new(background),
-        schedules: Arc::new(schedules),
         transfer: Arc::new(transfer),
         git: Arc::new(git),
         faces: Arc::new(faces),
@@ -1702,147 +1695,113 @@ fn contains(rect: Rect, point: (f32, f32)) -> bool {
         && point.1 <= rect.1 + rect.3
 }
 
+#[derive(Clone, Copy, Debug)]
+struct HubLayout {
+    work: Option<Rect>,
+    chat: Option<Rect>,
+}
+
+fn hub_layout(area: Rect, tab: BoardTab, body_top: f32) -> HubLayout {
+    let (ax, ay, aw, ah) = area;
+    let pad = if aw < 400.0 { 12.0 } else if aw < 760.0 { 20.0 } else { 28.0 };
+    let available = (aw - pad * 2.0).max(1.0);
+    let height = (ay + ah - 14.0 - body_top).max(0.0);
+    if matches!(tab, BoardTab::Work | BoardTab::Chat) && available >= 960.0 {
+        let chat_w = (available * 0.36).clamp(340.0, 420.0);
+        let work_w = (available - chat_w - 24.0).min(800.0);
+        let x = ax + (aw - work_w - chat_w - 24.0) / 2.0;
+        HubLayout {
+            work: Some((x, body_top, work_w, height)),
+            chat: Some((x + work_w + 24.0, body_top, chat_w, height)),
+        }
+    } else {
+        let width = available.min(800.0);
+        let body = (ax + (aw - width) / 2.0, body_top, width, height);
+        if tab == BoardTab::Chat {
+            HubLayout { work: None, chat: Some(body) }
+        } else {
+            HubLayout { work: Some(body), chat: None }
+        }
+    }
+}
+
 pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutput {
     let (ax, ay, aw, ah) = snapshot.area;
-    let nav_w = if aw < 460.0 { 112.0 } else if aw < 760.0 { 154.0 } else { 190.0 };
+    let pad = if aw < 400.0 { 12.0 } else if aw < 760.0 { 20.0 } else { 28.0 };
     let mut hits = Vec::new();
     let mut caret_rect = None;
     g.rect(ax, ay, aw, ah, theme::bg());
-    // 목업(플랫): 옆 목록은 구분선 없이 배경만 다르고, 머리글은 작은 흐림 글자 —
-    // 설정창과 같은 틀. 아이콘·강조 막대는 걷었다.
-    g.rect(ax, ay, nav_w, ah, theme::panel_bg());
-    text(g, ax + 20.0, ay + 24.0, "운영 보드", 13.0, theme::text_dim(), false);
-
-    let mut ny = ay + 56.0;
-    for tab in BoardTab::ALL {
-        let rect = (ax + 12.0, ny, nav_w - 24.0, 32.0);
-        let selected = snapshot.tab == tab;
-        let hover = contains(rect, snapshot.cursor);
-        if selected || hover {
-            round_rect(
-                g,
-                rect.0,
-                rect.1,
-                rect.2,
-                rect.3,
-                theme::radius_md().min(5.0),
-                if selected { theme::surface_active() } else { theme::surface_hover() },
-            );
-        }
-        let label = fit(g, tab.label(), rect.2 - 24.0, 12.0, selected);
-        text(
-            g,
-            rect.0 + 12.0,
-            rect.1 + 9.0,
-            &label,
-            12.0,
-            if selected { theme::text() } else { theme::text_dim() },
-            selected,
-        );
-        hit(g, &mut hits, Target::Tab(tab), rect, false);
-        g.hover_pointer |= hover;
-        ny += 36.0;
-    }
-    let back = (ax + 12.0, ay + ah - 46.0, nav_w - 24.0, 32.0);
-    if contains(back, snapshot.cursor) {
-        round_rect(g, back.0, back.1, back.2, back.3, theme::radius_md().min(5.0), theme::surface_hover());
-        g.hover_pointer = true;
-    }
-    g.queue_icon("chevron-left", back.0 + 10.0, back.1 + 9.0, 15.0, theme::text_dim());
-    let back_label = fit(g, "작업 방으로", back.2 - 39.0, 12.0, false);
-    text(g, back.0 + 33.0, back.1 + 9.0, &back_label, 12.0, theme::text_dim(), false);
-    hit(g, &mut hits, Target::Return, back, false);
-
-    let content_x = ax + nav_w + if aw < 760.0 { 20.0 } else { 28.0 };
-    let avail_w = (aw - nav_w - if aw < 760.0 { 40.0 } else { 56.0 }).max(1.0);
-    let content_w = avail_w.min(800.0);
-    // 할 일 판만 옆 칸(기기·학생·상세)을 둔다. 읽기 열 800 은 그대로 두고 남는 폭이
-    // 옆 칸 최소(260)를 넘을 때만 세운다 — 좁으면 같은 내용이 열 아래로 내려간다.
-    let side = (snapshot.tab == BoardTab::Work && avail_w >= 800.0 + 24.0 + 260.0)
-        .then(|| (content_x + content_w + 24.0, (avail_w - content_w - 24.0).min(340.0)));
-    let head_w = side.map_or(content_w, |(sx, sw)| sx + sw - content_x);
-    text(g, content_x, ay + 22.0, snapshot.tab.label(), 20.0, theme::text(), true);
-    // 기준 pane 알약: 채움 없는 테두리, pane 이름만 강조색(목업 .head .pill).
-    let refresh = (content_x + head_w - 30.0, ay + 18.0, 30.0, 30.0);
-    let pane = if matches!(snapshot.tab, BoardTab::Overview | BoardTab::Work) {
-        "모든 방".into()
-    } else if snapshot.target_cwd.is_empty() {
-        snapshot.target_pane.clone()
+    g.push_clip(ax, ay, aw, ah);
+    let header_w = (aw - pad * 2.0).max(1.0);
+    let right = ax + aw - pad;
+    let tools_w = if aw >= 400.0 { 60.0 } else { 26.0 };
+    let controls_w = tools_w + 26.0 * 2.0 + 8.0 * 4.0;
+    let tabs_w = (header_w - controls_w).max(0.0);
+    let work_w = (tabs_w * 0.48).min(96.0);
+    let chat_w = (tabs_w - work_w).min(104.0);
+    button(g, snapshot, &mut hits, (ax + pad, ay + 9.0, work_w, 26.0),
+        "작업현황", Target::Tab(BoardTab::Work), snapshot.tab == BoardTab::Work);
+    button(g, snapshot, &mut hits, (ax + pad + work_w + 8.0, ay + 9.0, chat_w, 26.0),
+        "나쵸 대화", Target::Tab(BoardTab::Chat), snapshot.tab == BoardTab::Chat);
+    if aw >= 400.0 {
+        button(g, snapshot, &mut hits, (right - 68.0 - tools_w, ay + 9.0, tools_w, 26.0), "도구", Target::Tools, snapshot.tools_open);
     } else {
-        format!("{} {}", snapshot.target_pane, short_path(&snapshot.target_cwd))
-    };
-    let prefix = if matches!(snapshot.tab, BoardTab::Overview | BoardTab::Work) { "" } else { "기준 pane · " };
-    let prefix_w = g.measure_chrome_text(prefix, 11.0, false);
-    let pane = fit(g, &pane, content_w * 0.5 - prefix_w - 40.0, 11.0, false);
-    let pane_w = g.measure_chrome_text(&pane, 11.0, false);
-    let pill = (refresh.0 - 10.0 - (prefix_w + pane_w + 20.0), ay + 21.0, prefix_w + pane_w + 20.0, 24.0);
-    if content_w >= 300.0 {
-        g.round_rect_stroke(pill.0, pill.1, pill.2, pill.3, theme::radius_md().min(5.0), 1.0, theme::border());
-        text(g, pill.0 + 10.0, pill.1 + 6.0, prefix, 11.0, theme::text_dim(), false);
-        text(g, pill.0 + 10.0 + prefix_w, pill.1 + 6.0, &pane, 11.0, theme::accent(), false);
+        icon_button(g, snapshot, &mut hits, (right - 94.0, ay + 9.0, 26.0, 26.0), "settings", Target::Tools);
     }
-    icon_button(g, snapshot, &mut hits, refresh, "rotate-cw", Target::Refresh);
-    if snapshot.refreshing && content_w >= 430.0 {
-        text(g, pill.0 - 52.0, pill.1 + 6.0, "갱신 중", 10.5, theme::text_mute(), false);
-    }
-    let description = fit(g, snapshot.tab.desc(), content_w, 11.5, false);
-    text(g, content_x, ay + 52.0, &description, 11.5, theme::text_dim(), false);
-    divider(g, content_x, ay + 82.0, head_w);
+    icon_button(g, snapshot, &mut hits, (right - 60.0, ay + 9.0, 26.0, 26.0), "rotate-cw", Target::Refresh);
+    icon_button(g, snapshot, &mut hits, (right - 26.0, ay + 9.0, 26.0, 26.0), "x", Target::Return);
+    divider(g, ax + pad, ay + 44.0, header_w);
 
-    let body_top = ay + 97.0;
-    let body_bottom = ay + ah - 14.0;
-    let view_h = (body_bottom - body_top).max(0.0);
-    g.push_clip(content_x, body_top, head_w, view_h);
-    let mut y = body_top - snapshot.scroll;
-    if let Some((ok, message)) = &snapshot.toast {
-        notice(g, content_x, &mut y, content_w, message, *ok);
+    let mut body_top = ay + 58.0;
+    if snapshot.tools_open {
+        overview_choices(g, snapshot, &mut hits, ax + pad, &mut body_top, header_w,
+            [BoardTab::Overview, BoardTab::Agents, BoardTab::Git, BoardTab::Machines]
+                .into_iter().map(|tab| (tab.label().into(), Target::Tab(tab), tab == snapshot.tab, true)).collect());
+        body_top += 6.0;
     }
-    if let Some(error) = &snapshot.data.error {
-        notice(g, content_x, &mut y, content_w, error, false);
+    let layout = hub_layout(snapshot.area, snapshot.tab, body_top);
+    let mut content_h = 0.0;
+    let mut view_h = 0.0;
+    if let Some((x, top, width, height)) = layout.work {
+        g.push_clip(x, top, width, height);
+        let mut y = top - snapshot.scroll;
+        if !matches!(snapshot.tab, BoardTab::Work | BoardTab::Chat) {
+            text(g, x, y, snapshot.tab.label(), 20.0, theme::text(), true);
+            y += 30.0;
+            overview_note(g, x, &mut y, width, snapshot.tab.desc(), theme::text_dim());
+        }
+        if let Some((ok, message)) = &snapshot.toast {
+            notice(g, x, &mut y, width, message, *ok);
+        }
+        if let Some(error) = &snapshot.data.error {
+            notice(g, x, &mut y, width, error, false);
+        }
+        match snapshot.tab {
+            BoardTab::Work | BoardTab::Chat => work::paint_work(g, snapshot, &mut hits, x, &mut y, width),
+            BoardTab::Overview => paint_overview(g, snapshot, &mut hits, x, &mut y, width),
+            BoardTab::Agents => paint_agents(g, snapshot, &mut hits, x, &mut y, width),
+            BoardTab::Git => paint_git(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, width),
+            BoardTab::Machines => paint_machines(g, snapshot, &mut hits, &mut caret_rect, x, &mut y, width),
+        }
+        content_h = (y + snapshot.scroll - top + 18.0).max(height);
+        view_h = height;
+        g.pop_clip();
+        crate::native_settings::paint_scroll_affordance(g, x, top, width + 12.0, height, content_h, snapshot.scroll);
     }
-    match snapshot.tab {
-        BoardTab::Work => work::paint_work(g, snapshot, &mut hits, content_x, &mut y, content_w, side),
-        BoardTab::Overview => paint_overview(g, snapshot, &mut hits, content_x, &mut y, content_w),
-        BoardTab::Agents => paint_agents(g, snapshot, &mut hits, content_x, &mut y, content_w),
-        BoardTab::Schedule => paint_schedule(
-            g,
-            snapshot,
-            &mut hits,
-            &mut caret_rect,
-            content_x,
-            &mut y,
-            content_w,
-        ),
-        BoardTab::Git => paint_git(
-            g,
-            snapshot,
-            &mut hits,
-            &mut caret_rect,
-            content_x,
-            &mut y,
-            content_w,
-        ),
-        BoardTab::Machines => paint_machines(g, snapshot, &mut hits, &mut caret_rect, content_x, &mut y, content_w),
+    if let Some(area) = layout.chat {
+        if layout.work.is_some() {
+            g.rect(area.0 - 12.0, area.1, 1.0, area.3, theme::border());
+        }
+        chat::paint(g, snapshot, &mut hits, &mut caret_rect, area);
+    }
+    if let Some(target) = snapshot.focus.as_ref() {
+        if let Some(hit) = hits.iter().find(|hit| &hit.target == target) {
+            crate::native_controls::focus_ring(g, hit.rect);
+        }
     }
     g.pop_clip();
-    let content_h = (y + snapshot.scroll - body_top + 18.0).max(view_h);
-    // 설정 화면과 같은 자리의 같은 실수 — 글자가 앉는 `content_*` 를 주면 막대가
-    // 그 좌우 여백만큼 안으로 들어와 패널 가장자리에서 떨어져 뜬다(2026-09-05).
-    // 스크롤되는 영역은 좌측 nav 오른쪽부터 패널 끝까지다.
-    let scroll_x = ax + nav_w;
-    let scroll_w = (ax + aw - scroll_x).max(0.0);
-    crate::native_settings::paint_scroll_affordance(
-        g,
-        scroll_x,
-        body_top,
-        scroll_w,
-        view_h,
-        content_h,
-        snapshot.scroll,
-    );
-    PaintOutput { hits, content_h, view_h, caret_rect }
+    PaintOutput { hits, content_h, view_h, caret_rect, chat_rect: layout.chat }
 }
-
 fn paint_overview(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -2283,108 +2242,6 @@ fn paint_agents(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: 
     notice(g, x, y, w, "「멈추기」를 두 번 누르면 정말 멈춰요 — 첫 번째는 확인, 두 번째가 실행", true);
 }
 
-fn paint_schedule(
-    g: &mut gpu::GpuRenderer,
-    s: &Snapshot,
-    hits: &mut Vec<Hit>,
-    caret: &mut Option<Rect>,
-    x: f32,
-    y: &mut f32,
-    w: f32,
-) {
-    // 목업(플랫): 이름표 왼쪽 · 조작 오른쪽의 40px 행, 구분선으로 가른다.
-    section(g, x, y, "새 스케줄", "");
-    text(g, x, *y + 13.0, "방식", 12.0, theme::text(), false);
-    segmented(
-        g,
-        s,
-        hits,
-        x,
-        *y + 7.0,
-        w,
-        &[
-            ("반복 루프", s.schedule_kind == "loop", Target::ScheduleKind("loop".into())),
-            ("예약", s.schedule_kind == "cron", Target::ScheduleKind("cron".into())),
-            ("타이머", s.schedule_kind == "timer", Target::ScheduleKind("timer".into())),
-        ],
-    );
-    divider(g, x, *y + 39.0, w);
-    *y += 40.0;
-    let detail = if s.schedule_kind == "cron" {
-        (&s.schedule_at, BoardInput::ScheduleAt, "Unix 시각(초)")
-    } else {
-        (&s.schedule_minutes, BoardInput::ScheduleMinutes, if s.schedule_kind == "loop" { "간격(분)" } else { "몇 분 뒤" })
-    };
-    text(g, x, *y + 13.0, detail.2, 12.0, theme::text(), false);
-    field(g, s, hits, caret, (x + w - 120.0, *y + 5.0, 120.0, 30.0), "", detail.0, detail.1);
-    divider(g, x, *y + 39.0, w);
-    *y += 40.0;
-    text(g, x, *y + 13.0, "대상", 12.0, theme::text(), false);
-    *y += 40.0;
-    let mut sx = x;
-    let mut used = false;
-    for row in s.data.agents.iter() {
-        let label = agent_name(row);
-        let bw = (g.measure_chrome_text(&label, 11.5, false) + 22.0).clamp(64.0, 150.0);
-        if sx + bw > x + w {
-            sx = x;
-            *y += 34.0;
-        }
-        button(
-            g,
-            s,
-            hits,
-            (sx, *y - 6.0, bw, 26.0),
-            &label,
-            Target::ScheduleSurface(row.surface_id.clone()),
-            s.schedule_surface == row.surface_id,
-        );
-        sx += bw + 6.0;
-        used = true;
-    }
-    if !used {
-        text(g, x, *y - 2.0, "이 방에 학생이 없어요", 11.0, theme::text_mute(), false);
-    }
-    *y += 28.0;
-    divider(g, x, *y, w);
-    *y += 12.0;
-    text(g, x, *y + 6.0, "보낼 지시", 12.0, theme::text(), false);
-    *y += 30.0;
-    field(g, s, hits, caret, (x, *y, w, 36.0), "예: 테스트 돌리고 실패만 보고", &s.schedule_text, BoardInput::ScheduleText);
-    *y += 48.0;
-    divider(g, x, *y, w);
-    button(g, s, hits, (x + w - 72.0, *y + 12.0, 72.0, 30.0), "등록", Target::ScheduleAdd, true);
-    *y += 54.0;
-    divider(g, x, *y, w);
-    *y += 24.0;
-    section(g, x, y, "등록된 스케줄", "");
-    if s.data.schedules.is_empty() {
-        empty(g, x, y, w, "예약된 작업이 없어요");
-        return;
-    }
-    for item in s.data.schedules.iter() {
-        let rect = (x, *y, w, 58.0);
-        let kind = match item.kind.as_str() { "loop" => "반복", "cron" => "예약", _ => "타이머" };
-        let title = format!("{kind} · {}", schedule_when(item));
-        let title = fit(g, &title, w - 200.0, 12.5, true);
-        text(g, rect.0, rect.1 + 11.0, &title, 12.5, if item.enabled { theme::text() } else { theme::text_dim() }, true);
-        let sub = fit(g, &format!("{} · 「{}」", item.surface, item.text), w - 200.0, 10.5, false);
-        text(g, rect.0, rect.1 + 32.0, &sub, 10.5, theme::text_dim(), false);
-        text_button(g, s, hits, (rect.0 + rect.2 - 52.0, rect.1 + 15.0, 52.0, 28.0), "지우기", Target::ScheduleDelete(item.id.clone()), true);
-        text_button(
-            g,
-            s,
-            hits,
-            (rect.0 + rect.2 - 52.0 - 8.0 - 52.0, rect.1 + 15.0, 52.0, 28.0),
-            if item.enabled { "멈춤" } else { "켜기" },
-            Target::ScheduleToggle(item.id.clone()),
-            false,
-        );
-        divider(g, x, rect.1 + 57.0, w);
-        *y += 58.0;
-    }
-}
-
 fn paint_git(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -2697,6 +2554,37 @@ fn draw_face(g: &mut gpu::GpuRenderer, s: &Snapshot, row: &PaneActivity, x: f32,
     g.queue_icon("terminal", x + 8.0, y + 8.0, size - 16.0, theme::text_dim());
 }
 
+fn input_viewport(value: &str, caret: usize, width: f32, mut measure: impl FnMut(&str) -> f32) -> (usize, String, Vec<(f32, usize)>) {
+    let offsets: Vec<usize> = value.char_indices().map(|(offset, _)| offset).chain(std::iter::once(value.len())).collect();
+    let count = offsets.len() - 1;
+    let caret = caret.min(count);
+    // Zero-width input must not make shaping work grow with the whole draft.
+    let mut low = caret.saturating_sub(256);
+    let mut high = caret;
+    while low < high {
+        let middle = (low + high) / 2;
+        if measure(&value[offsets[middle]..offsets[caret]]) <= width {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    let start = low;
+    let mut end = start;
+    let mut boundaries = vec![(0.0, start)];
+    while end < count.min(start.saturating_add(512)) {
+        let next = measure(&value[offsets[start]..offsets[end + 1]]);
+        if next > width { break; }
+        end += 1;
+        boundaries.push((next, end));
+    }
+    (start, value[offsets[start]..offsets[end]].to_string(), boundaries)
+}
+
+fn nearest_input_caret(boundaries: &[(f32, usize)], x: f32) -> Option<usize> {
+    boundaries.iter().min_by(|(a, _), (b, _)| (a - x).abs().total_cmp(&(b - x).abs())).map(|(_, at)| *at)
+}
+
 fn field(
     g: &mut gpu::GpuRenderer,
     s: &Snapshot,
@@ -2709,28 +2597,38 @@ fn field(
 ) {
     let active = s.input == Some(input);
     outlined(g, rect, theme::surface());
-    if active {
-        stroke(g, rect, theme::accent());
-    }
-    let mut shown = value.to_string();
-    if active && !s.preedit.is_empty() {
-        let byte = char_to_byte(&shown, s.caret.min(shown.chars().count()));
-        shown.insert_str(byte, &s.preedit);
-    }
-    if shown.is_empty() {
-        text(g, rect.0 + 12.0, rect.1 + 12.0, placeholder, 11.5, theme::text_mute(), false);
+    if active { stroke(g, rect, theme::accent()); }
+    let position = s.caret.min(value.chars().count());
+    let preedit = if active { s.preedit.as_str() } else { "" };
+    let mut full: String = value.chars().map(|ch| if ch == '\n' { '↵' } else if ch == '\r' { ' ' } else { ch }).collect();
+    full.insert_str(char_to_byte(&full, position), preedit);
+    let display_caret = position + preedit.chars().count();
+    let width = (rect.2 - 24.0).max(0.0);
+    let (start, shown, boundaries) = input_viewport(&full, if active { display_caret } else { 0 }, width,
+        |text| g.measure_chrome_text(text, 11.5, false));
+    g.push_clip(rect.0 + 12.0, rect.1, width, rect.3);
+    if full.is_empty() {
+        let placeholder = fit(g, placeholder, width, 11.5, false);
+        text(g, rect.0 + 12.0, rect.1 + 12.0, &placeholder, 11.5, theme::text_mute(), false);
     } else {
-        let shown = fit(g, &shown, rect.2 - 24.0, 11.5, false);
         text(g, rect.0 + 12.0, rect.1 + 12.0, &shown, 11.5, theme::text(), false);
     }
     if active && s.caret_on {
-        let before: String = value.chars().take(s.caret).collect();
-        let cx = rect.0 + 12.0 + g.measure_chrome_text(&before, 11.5, false);
-        let cr = (cx.min(rect.0 + rect.2 - 10.0), rect.1 + 10.0, 1.5, 18.0);
+        let before: String = full.chars().skip(start).take(display_caret.saturating_sub(start)).collect();
+        let cx = rect.0 + 12.0 + g.measure_chrome_text(&before, 11.5, false).min(width);
+        let cr = (cx.min(rect.0 + rect.2 - 13.5), rect.1 + 10.0, 1.5, 18.0);
         g.rect(cr.0, cr.1, cr.2, cr.3, theme::accent());
         *caret = Some(cr);
     }
-    hit(g, hits, Target::Input(input), rect, true);
+    g.pop_clip();
+    if let Some(clipped) = g.clip_hit(rect) {
+        let preedit_len = preedit.chars().count();
+        let boundaries = boundaries.into_iter().map(|(x, at)| {
+            let source = if at <= position { at } else if at < display_caret { position } else { at - preedit_len };
+            (rect.0 + 12.0 + x, source)
+        }).collect();
+        hits.push(Hit { target: Target::Input(input), rect: clipped, text_cursor: true, keyboard: clipped == rect, caret_boundaries: boundaries });
+    }
 }
 
 fn section(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, title: &str, desc: &str) {
@@ -2793,18 +2691,9 @@ fn stroke(g: &mut gpu::GpuRenderer, rect: Rect, color: [u8; 4]) {
 }
 
 fn button(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, rect: Rect, label: &str, target: Target, primary: bool) {
-    // 목업(플랫): 채움 없는 아웃라인. 주 단추는 강조색 테두리+글자, 나머지는 회색 테두리.
-    let hover = contains(rect, s.cursor);
-    if hover {
-        round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_md().min(5.0), theme::surface_hover());
-    }
-    let line = if primary { theme::accent() } else if hover { theme::text_dim() } else { theme::border() };
-    g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, theme::radius_md().min(5.0), 1.0, line);
-    let shown = fit(g, label, rect.2 - 14.0, 11.5, false);
-    let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, false)) / 2.0;
-    text(g, tx, rect.1 + (rect.3 - 12.0) / 2.0 - 1.0, &shown, 11.5, if primary { theme::accent() } else { theme::text() }, false);
+    let rect = crate::native_controls::text_button(g, rect, s.cursor, label,
+        crate::native_controls::Style { primary, ..Default::default() });
     hit(g, hits, target, rect, false);
-    g.hover_pointer |= hover;
 }
 
 /// 테두리도 없는 글자 단추(목업 .btn.txt). 보조 동작 — 상세·해제·멈추기.
@@ -2818,45 +2707,16 @@ fn text_button(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, rect
     g.hover_pointer |= hover;
 }
 
-/// 목업의 구분 선택 — 테두리 하나, 고른 칸만 강조색 테두리+글자. 오른쪽 끝에 붙는다.
-fn segmented(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: f32, w: f32, cells: &[(&str, bool, Target)]) {
-    if cells.is_empty() || w <= 4.0 { return; }
-    let h = 26.0;
-    let inset = 2.0;
-    let pad = 10.0;
-    let widths: Vec<f32> = cells.iter().map(|(label, _, _)| g.measure_chrome_text(label, 11.5, false) + pad * 2.0).collect();
-    let total = widths.iter().sum::<f32>() + inset * 2.0;
-    let outer = (x + w - total.min(w), y, total.min(w), h);
-    let scale = ((outer.2 - inset * 2.0) / (total - inset * 2.0)).min(1.0);
-    g.round_rect_stroke(outer.0, outer.1, outer.2, outer.3, 4.0, 1.0, theme::border());
-    let mut cx = outer.0 + inset;
-    for (i, (label, selected, target)) in cells.iter().enumerate() {
-        let rect = (cx, y + inset, widths[i] * scale, h - inset * 2.0);
-        cx += rect.2;
-        let hover = contains(rect, s.cursor);
-        if *selected {
-            g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, 3.0, 1.0, theme::accent());
-        }
-        let shown = fit(g, label, rect.2 - 8.0, 11.5, false);
-        let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, false)) / 2.0;
-        text(g, tx, rect.1 + 4.0, &shown, 11.5, if *selected { theme::accent() } else if hover { theme::text() } else { theme::text_dim() }, false);
-        hit(g, hits, target.clone(), rect, false);
-        g.hover_pointer |= hover;
-    }
-}
-
 fn icon_button(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, rect: Rect, icon: &str, target: Target) {
-    let hover = contains(rect, s.cursor);
-    if hover { round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::radius_sm(), theme::surface_active()); }
-    let size = rect.2.min(rect.3).min(16.0);
-    g.queue_icon(icon, rect.0 + (rect.2 - size) / 2.0, rect.1 + (rect.3 - size) / 2.0, size, if hover { theme::text() } else { theme::text_dim() });
+    let active = target == Target::Tools && s.tools_open;
+    let rect = crate::native_controls::icon_button(g, rect, s.cursor, icon,
+        crate::native_controls::Style { active, ..Default::default() });
     hit(g, hits, target, rect, false);
-    g.hover_pointer |= hover;
 }
 
 fn hit(g: &gpu::GpuRenderer, hits: &mut Vec<Hit>, target: Target, rect: Rect, text_cursor: bool) {
-    if let Some(rect) = g.clip_hit(rect) {
-        hits.push(Hit { target, rect, text_cursor });
+    if let Some(clipped) = g.clip_hit(rect) {
+        hits.push(Hit { target, rect: clipped, text_cursor, keyboard: rect == clipped, caret_boundaries: Vec::new() });
     }
 }
 
@@ -2914,15 +2774,6 @@ pub(crate) fn agent_is_working(row: &PaneActivity) -> bool {
     )
 }
 
-fn agent_name(row: &PaneActivity) -> String {
-    row.character
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .or(row.peer_name.as_deref().filter(|value| !value.is_empty()))
-        .unwrap_or(&row.surface_id)
-        .to_string()
-}
-
 fn background_state(row: &BackgroundRow) -> &str {
     match row.state.as_str() {
         "done" => "완료",
@@ -2934,10 +2785,6 @@ fn background_state(row: &BackgroundRow) -> &str {
 
 fn background_stop_target(row: &BackgroundRow) -> Option<LocalBackgroundProcess> {
     (row.machine.is_none() && row.pid > 0).then_some(LocalBackgroundProcess { pid: row.pid })
-}
-
-fn schedule_when(item: &kasa_mcp::ScheduleItem) -> String {
-    if item.kind == "loop" { format!("{}분마다", item.interval_sec / 60) } else if item.enabled { "예약 대기".to_string() } else { "멈춤".to_string() }
 }
 
 fn short_path(path: &str) -> String {
@@ -3022,6 +2869,9 @@ impl App {
 
     pub(crate) fn native_board_tick(&mut self) {
         let changed = self.board_scene.pump();
+        if self.board_room_active() && !board_fixture_requested() && self.board_scene.chat.refresh_due() {
+            self.board_scene.chat.refresh();
+        }
         if self.board_room_active() && self.board_scene.refresh_due() {
             self.request_native_board_refresh();
         }
@@ -3086,7 +2936,7 @@ impl App {
             winit::event::MouseScrollDelta::LineDelta(_, y) => y * 42.0,
             winit::event::MouseScrollDelta::PixelDelta(position) => position.y as f32,
         };
-        if self.board_scene.scroll_by(-dy) {
+        if self.board_scene.scroll_at(self.cursor_px, -dy) {
             self.chrome_dirty = true;
         }
     }
@@ -3098,10 +2948,11 @@ impl App {
             return false;
         };
         if board_fixture_requested()
-            && !matches!(target, Target::Tab(_) | Target::Return | Target::Refresh
+            && !matches!(target, Target::Tab(_) | Target::Tools | Target::Return | Target::Refresh
                 | Target::OverviewMachine(_) | Target::OverviewRoom(_) | Target::OverviewSort(_)
                 | Target::OverviewDetail(_) | Target::OverviewChanges | Target::OverviewCopy(_)
-                | Target::WorkProject(_) | Target::WorkSelect(_))
+                | Target::WorkProject(_) | Target::WorkSelect(_) | Target::WorkFilters | Target::WorkMore(_)
+                | Target::WorkChat(_) | Target::Input(BoardInput::NachoMessage) | Target::NachoClearContext)
         {
             self.board_scene.report_error("검증용 보드에서는 실제 창을 조작하지 않아요");
             self.chrome_dirty = true;
@@ -3115,6 +2966,7 @@ impl App {
         ) {
             self.board_scene.clear_stop();
         }
+        self.board_scene.focus = None;
         match target {
             Target::Tab(tab) => {
                 self.native_board_blur();
@@ -3124,7 +2976,33 @@ impl App {
                 self.native_board_blur();
                 self.return_from_board_room();
             }
-            Target::Refresh => self.request_native_board_refresh(),
+            Target::Tools => {
+                self.native_board_blur();
+                self.board_scene.tools_open = !self.board_scene.tools_open;
+                if !self.board_scene.tools_open && !matches!(self.board_scene.tab, BoardTab::Work | BoardTab::Chat) {
+                    self.board_scene.set_tab(BoardTab::Work);
+                }
+                self.board_scene.hits.clear();
+            }
+            Target::Refresh => {
+                self.request_native_board_refresh();
+                if !board_fixture_requested() { self.board_scene.chat.refresh(); }
+            }
+            Target::NachoSend => {
+                self.native_board_blur();
+                self.board_scene.chat.send();
+                let len = self.board_scene.chat.draft.chars().count();
+                self.board_scene.set_input(Some(BoardInput::NachoMessage), len);
+                self.ime_retarget(crate::ImeFocus::Board(BoardInput::NachoMessage));
+            }
+            Target::NachoRetry => self.board_scene.chat.retry(),
+            Target::NachoClearContext => self.board_scene.chat.set_task(None),
+            Target::NachoLogin => {
+                self.native_board_blur();
+                if self.open_settings_room(Some(SettingsCat::Machines)) {
+                    self.device_account_action(crate::native_settings::device_account::Action::OpenLogin);
+                }
+            }
             Target::FocusPane(pane) => {
                 self.native_board_blur();
                 self.return_from_board_room();
@@ -3175,8 +3053,28 @@ impl App {
             Target::WorkProject(project) => {
                 self.board_scene.work.project = project;
                 self.board_scene.scroll = 0.0;
+                self.board_scene.hits.clear();
+            }
+            Target::WorkFilters => {
+                self.board_scene.work.filters_open = !self.board_scene.work.filters_open;
+                self.board_scene.hits.clear();
+            }
+            Target::WorkMore(lane) => {
+                if !self.board_scene.work.expanded.remove(&lane) { self.board_scene.work.expanded.insert(lane); }
+                self.board_scene.hits.clear();
             }
             Target::WorkSelect(key) => self.board_scene.select_work(key),
+            Target::WorkChat(key) => {
+                self.native_board_blur();
+                if let Some(item) = work::work_items(&self.board_scene.data.overview, &self.board_scene.data.tasks).into_iter().find(|item| item.key == key) {
+                    let id = match &item.key { work::WorkKey::Task(id) => id.clone(), work::WorkKey::Pane(id) => format!("관측 {id}") };
+                    self.board_scene.chat.set_task(Some((id, item.title)));
+                    if self.board_scene.chat_rect.is_none() { self.board_scene.set_tab(BoardTab::Chat); }
+                    let len = self.board_scene.chat.draft.chars().count();
+                    self.board_scene.set_input(Some(BoardInput::NachoMessage), len);
+                    self.ime_retarget(crate::ImeFocus::Board(BoardInput::NachoMessage));
+                }
+            }
             Target::ResumeBackground(id, cwd) => {
                 self.resume_background_in_target_room(id, cwd);
             }
@@ -3194,40 +3092,12 @@ impl App {
             Target::CancelStopBackground => {
                 self.board_scene.clear_stop();
             }
-            Target::ScheduleKind(kind) => self.board_scene.set_schedule_kind(kind),
-            Target::ScheduleSurface(surface) => self.board_scene.set_schedule_surface(surface),
             Target::Input(input) => {
                 let len = self.board_scene.field(input).chars().count();
-                self.board_scene.set_input(Some(input), len);
+                let caret = self.board_scene.hit_at(x, y).and_then(|hit| nearest_input_caret(&hit.caret_boundaries, x)).unwrap_or(len);
+                if self.board_scene.input() != Some(input) { self.native_board_blur(); }
+                self.board_scene.set_input(Some(input), caret.min(len));
                 self.ime_retarget(crate::ImeFocus::Board(input));
-            }
-            Target::ScheduleAdd => {
-                let kind = self.board_scene.schedule_kind().to_string();
-                let surface = self.board_scene.schedule_surface().to_string();
-                let text = self.board_scene.field(BoardInput::ScheduleText).to_string();
-                let minutes = self
-                    .board_scene
-                    .field(BoardInput::ScheduleMinutes)
-                    .parse::<u64>()
-                    .unwrap_or(10);
-                let at_ts = self
-                    .board_scene
-                    .field(BoardInput::ScheduleAt)
-                    .parse::<f64>()
-                    .unwrap_or(0.0);
-                self.run_native_board_action(WorkerAction::ScheduleAdd {
-                    kind,
-                    surface,
-                    text,
-                    minutes,
-                    at_ts,
-                });
-            }
-            Target::ScheduleToggle(id) => {
-                self.run_native_board_action(WorkerAction::ScheduleToggle(id));
-            }
-            Target::ScheduleDelete(id) => {
-                self.run_native_board_action(WorkerAction::ScheduleDelete(id));
             }
             Target::GitFile(path) => self.board_scene.toggle_git_file(path),
             Target::GitAll => self.board_scene.set_all_git(true),
@@ -3420,18 +3290,33 @@ impl App {
         if event.state != ElementState::Pressed {
             return true;
         }
+        if event.logical_key == Key::Named(NamedKey::Tab) && !self.in_preedit {
+            let input = self.board_scene.cycle_focus(self.modifiers.shift_key());
+            self.native_board_blur();
+            if let Some(input) = input {
+                let len = self.board_scene.field(input).chars().count();
+                self.board_scene.set_input(Some(input), len);
+                self.ime_retarget(crate::ImeFocus::Board(input));
+            }
+            self.chrome_dirty = true;
+            return true;
+        }
         let Some(field) = self.board_scene.input() else {
-            let at = BoardTab::ALL
-                .iter()
-                .position(|tab| *tab == self.board_scene.tab())
-                .unwrap_or(0);
-            let next = match event.logical_key {
-                Key::Named(NamedKey::ArrowUp) => at.saturating_sub(1),
-                Key::Named(NamedKey::ArrowDown) => (at + 1).min(BoardTab::ALL.len() - 1),
+            if matches!(event.logical_key, Key::Named(NamedKey::Enter | NamedKey::Space)) {
+                if event.repeat { return true; }
+                let rect = self.board_scene.focus.as_ref().and_then(|target| self.board_scene.hits.iter().find(|hit| &hit.target == target)).map(|hit| hit.rect);
+                if let Some(rect) = rect { return self.native_board_click(rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0); }
+            }
+            if event.logical_key == Key::Named(NamedKey::Escape) && self.board_scene.focus.take().is_some() {
+                self.chrome_dirty = true;
+                return true;
+            }
+            let delta = match event.logical_key {
+                Key::Named(NamedKey::ArrowUp) => -40.0,
+                Key::Named(NamedKey::ArrowDown) => 40.0,
                 _ => return false,
             };
-            self.board_scene.set_tab(BoardTab::ALL[next]);
-            self.chrome_dirty = true;
+            self.chrome_dirty |= self.board_scene.scroll_at(self.cursor_px, delta);
             return true;
         };
         self.ime_retarget(crate::ImeFocus::Board(field));
@@ -3444,7 +3329,18 @@ impl App {
                 return true;
             }
             Key::Named(NamedKey::Enter) => {
+                if event.repeat || self.in_preedit || !self.preedit.is_empty() { return true; }
+                if field == BoardInput::NachoMessage && self.modifiers.shift_key() {
+                    self.native_board_insert_into(field, "\n");
+                    return true;
+                }
                 self.native_board_blur();
+                if field == BoardInput::NachoMessage && !board_fixture_requested() {
+                    self.board_scene.chat.send();
+                    let len = self.board_scene.chat.draft.chars().count();
+                    self.board_scene.set_input(Some(field), len);
+                    self.ime_retarget(crate::ImeFocus::Board(field));
+                }
                 return true;
             }
             Key::Named(NamedKey::Space) => {
@@ -3557,6 +3453,155 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn human_navigation_has_no_scheduler_and_keeps_tools_explicit() {
+        assert_eq!(BoardTab::default(), BoardTab::Work);
+        assert_eq!(BoardTab::ALL.iter().map(|tab| tab.label()).collect::<Vec<_>>(),
+            ["작업현황", "나쵸 대화", "관측", "에이전트", "소스 컨트롤", "이사"]);
+        let mut scene = Scene::default();
+        assert!(!scene.tools_open);
+        scene.chat.draft = "이어 쓸 질문".into();
+        scene.set_tab(BoardTab::Overview);
+        assert!(scene.tools_open);
+        scene.show_work();
+        assert!(!scene.tools_open);
+        assert_eq!(scene.tab, BoardTab::Work);
+        assert_eq!(scene.chat.draft, "이어 쓸 질문");
+    }
+
+    #[test]
+    fn human_layout_keeps_chat_and_work_inside_the_viewport_without_overlap() {
+        for width in [280.0, 320.0, 760.0, 1015.0, 1016.0, 1440.0, 2560.0] {
+            for tab in [BoardTab::Work, BoardTab::Chat] {
+                let layout = hub_layout((200.0, 44.0, width, 700.0), tab, 102.0);
+                for rect in [layout.work, layout.chat].into_iter().flatten() {
+                    assert!(rect.0 >= 200.0 && rect.0 + rect.2 <= 200.0 + width);
+                    assert!(rect.1 >= 102.0 && rect.1 + rect.3 <= 744.0);
+                    assert!(rect.2 > 0.0 && rect.3 >= 0.0);
+                }
+                if let (Some(work), Some(chat)) = (layout.work, layout.chat) {
+                    assert!(work.0 + work.2 + 24.0 <= chat.0 + f32::EPSILON);
+                    assert!(chat.2 >= 340.0 && chat.2 <= 420.0);
+                } else if tab == BoardTab::Chat {
+                    assert!(layout.chat.is_some() && layout.work.is_none());
+                } else {
+                    assert!(layout.work.is_some() && layout.chat.is_none());
+                }
+            }
+        }
+        assert!(hub_layout((0.0, 0.0, 1015.0, 600.0), BoardTab::Work, 58.0).chat.is_none());
+        assert!(hub_layout((0.0, 0.0, 1016.0, 600.0), BoardTab::Work, 58.0).chat.is_some());
+    }
+
+    #[test]
+    fn human_focus_cycles_only_painted_targets_and_scroll_invalidates_old_hits() {
+        let mut scene = Scene::default();
+        scene.hits = vec![
+            Hit { target: Target::Tab(BoardTab::Work), rect: (0.0, 0.0, 80.0, 26.0), text_cursor: false, keyboard: true, caret_boundaries: Vec::new() },
+            Hit { target: Target::Input(BoardInput::NachoMessage), rect: (0.0, 40.0, 80.0, 26.0), text_cursor: true, keyboard: true, caret_boundaries: Vec::new() },
+            Hit { target: Target::NachoSend, rect: (0.0, 80.0, 80.0, 26.0), text_cursor: false, keyboard: true, caret_boundaries: Vec::new() },
+        ];
+        assert_eq!(scene.cycle_focus(false), None);
+        assert_eq!(scene.focus, Some(Target::Tab(BoardTab::Work)));
+        assert_eq!(scene.cycle_focus(false), Some(BoardInput::NachoMessage));
+        scene.set_input(Some(BoardInput::NachoMessage), 0);
+        assert_eq!(scene.cycle_focus(true), None);
+        assert_eq!(scene.focus, Some(Target::Tab(BoardTab::Work)));
+        scene.scroll_max = 100.0;
+        assert!(scene.scroll_by(40.0));
+        assert!(scene.hits.is_empty());
+        assert!(scene.focus.is_none());
+    }
+
+    #[test]
+    fn pointer_over_chat_does_not_scroll_the_work_list() {
+        let mut scene = Scene::default();
+        scene.scroll_max = 200.0;
+        scene.chat_rect = Some((500.0, 58.0, 340.0, 600.0));
+        scene.scroll_at((510.0, 100.0), 40.0);
+        assert_eq!(scene.scroll, 0.0);
+        assert!(scene.scroll_at((100.0, 100.0), 40.0));
+        assert_eq!(scene.scroll, 40.0);
+    }
+
+    #[test]
+    fn account_change_drops_task_cache_and_late_worker_but_keeps_observations() {
+        let mut scene = Scene::default();
+        scene.data = Arc::new(BoardData {
+            overview: Arc::new(overview_data()),
+            tasks: Arc::new(crate::nacho_tasks::fixture_book(10_000_000)),
+            ..Default::default()
+        });
+        let old = scene.data.clone();
+        scene.work.selected = Some(work::WorkKey::Task("old-account".into()));
+        scene.requested_generation = 7;
+        scene.refreshing = true;
+        let epoch = scene.account_epoch + 1;
+        assert!(scene.sync_account_epoch(epoch));
+        assert!(scene.data.tasks.tasks().is_empty());
+        assert!(scene.work.selected.is_none());
+        assert!(Arc::ptr_eq(&scene.data.overview, &old.overview));
+        assert!(!scene.refreshing);
+        assert!(scene.requested_generation > 7);
+        scene.account_epoch = kasa_mcp::device_auth::change_epoch();
+        scene.mailbox.lock().unwrap().data = Some(DataEnvelope { generation: 7, data: (*old).clone() });
+        scene.pump();
+        assert!(scene.data.tasks.tasks().is_empty());
+    }
+
+    #[test]
+    fn draft_viewport_follows_the_caret_and_clicks_use_visible_hangul_boundaries() {
+        let measure = |text: &str| text.chars().map(|ch| if ch.is_ascii() { 5.0 } else { 12.0 }).sum::<f32>();
+        let value = "abcdef가나다라마";
+        let (start, shown, boundaries) = input_viewport(value, value.chars().count(), 36.0, measure);
+        assert_eq!(shown, "다라마");
+        assert_eq!(start, 8);
+        assert_eq!(nearest_input_caret(&boundaries, 13.0), Some(9));
+        assert_eq!(nearest_input_caret(&boundaries, 35.0), Some(value.chars().count()));
+        let (start, shown, _) = input_viewport(value, 0, 36.0, measure);
+        assert_eq!(start, 0);
+        assert_eq!(shown, "abcdef");
+        for caret in 0..=value.chars().count() {
+            let (start, shown, points) = input_viewport(value, caret, 36.0, measure);
+            assert!(start <= caret && caret <= start + shown.chars().count());
+            assert!(points.iter().all(|(x, _)| *x <= 36.0));
+        }
+    }
+
+    #[test]
+    fn zero_width_draft_shaping_is_bounded_without_truncating_the_source() {
+        let value = "\u{200b}".repeat(65_536);
+        for caret in [0, 1, 256, 32_768, 65_535, 65_536] {
+            let mut calls = 0;
+            let mut measured_chars = 0;
+            let (start, shown, points) = input_viewport(&value, caret, 320.0, |text| {
+                calls += 1;
+                measured_chars += text.chars().count();
+                0.0
+            });
+            let visible = shown.chars().count();
+            assert!(visible <= 512);
+            assert!(start <= caret && caret <= start + visible);
+            assert!(points.iter().any(|(_, at)| *at == caret));
+            assert!(calls <= 521, "unbounded shaping calls: {calls}");
+            assert!(measured_chars <= 133_632, "unbounded shaping input: {measured_chars}");
+            assert_eq!(value.chars().count(), 65_536);
+        }
+    }
+
+    #[test]
+    fn keyboard_navigation_skips_partially_clipped_controls() {
+        let mut scene = Scene::default();
+        scene.hits = vec![
+            Hit { target: Target::NachoRetry, rect: (0.0, 0.0, 60.0, 4.0), text_cursor: false, keyboard: false, caret_boundaries: Vec::new() },
+            Hit { target: Target::NachoSend, rect: (0.0, 40.0, 60.0, 26.0), text_cursor: false, keyboard: true, caret_boundaries: Vec::new() },
+        ];
+        scene.cycle_focus(false);
+        assert_eq!(scene.focus, Some(Target::NachoSend));
+        scene.cycle_focus(true);
+        assert_eq!(scene.focus, Some(Target::NachoSend));
+    }
 
     #[test]
     fn stale_worker_snapshot_cannot_replace_the_requested_generation() {
@@ -3838,7 +3883,7 @@ mod tests {
         let source = include_str!("native_board.rs");
         let collection = source.split_once("fn collect_data(").unwrap().1;
         // 할 일 판도 같은 갈래를 탄다 — 구형 수집기를 부르면 판 갱신이 나쵸·git 을 기다린다.
-        let overview = collection.split_once("if matches!(tab, BoardTab::Overview | BoardTab::Work) {").unwrap().1
+        let overview = collection.split_once("if matches!(tab, BoardTab::Overview | BoardTab::Work | BoardTab::Chat) {").unwrap().1
             .split_once("let mut errors = Vec::new();").unwrap().0;
         assert!(overview.contains("collect_overview"));
         assert!(overview.contains("return BoardData"));
@@ -4016,9 +4061,6 @@ mod tests {
             .0;
         for action in [
             "WorkerAction::StopBackground",
-            "WorkerAction::ScheduleAdd",
-            "WorkerAction::ScheduleToggle",
-            "WorkerAction::ScheduleDelete",
             "WorkerAction::GitCommit",
             "WorkerAction::GitPush",
             "WorkerAction::ViewSession",

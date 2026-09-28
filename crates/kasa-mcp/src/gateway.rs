@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -57,6 +57,7 @@ struct Uplink {
     account: Option<String>,
     device_id: Option<String>,
     owner_slug: Option<String>,
+    nacho_app: AtomicBool,
     /// 기기가 폐기되면 이 연결을 끊는다.
     kick: tokio::sync::Notify,
 }
@@ -765,6 +766,7 @@ struct Hello {
     /// 로그인한 앱만 싣는다(proto 2).
     device_token: Option<String>,
     owner_slug: Option<String>,
+    nacho_app: bool,
 }
 
 fn parse_hello(v: &serde_json::Value) -> Option<Hello> {
@@ -827,7 +829,9 @@ fn parse_hello(v: &serde_json::Value) -> Option<Hello> {
     let owner_slug = v.get("owner_slug").and_then(|v| v.as_str())
         .filter(|s| crate::mobile::valid_slug(s) && slugs.iter().any(|slug| slug == s))
         .map(str::to_string);
-    Some(Hello { key, slugs, machine, machine_id, aliases, device_token, owner_slug })
+    let nacho_app = v.get("capabilities").and_then(|v| v.get("nacho_app"))
+        .and_then(|v| v.as_bool()).unwrap_or(false);
+    Some(Hello { key, slugs, machine, machine_id, aliases, device_token, owner_slug, nacho_app })
 }
 
 /// 연결 `conn` 만 그 slug 에서 뗀다 — 같은 slug 의 다른 살아 있는 연결은 남는다.
@@ -847,7 +851,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<serde_json::Value>(t.as_str()).ok(),
         _ => None,
     };
-    let Some(Hello { key, slugs, machine, machine_id, aliases, device_token, owner_slug }) = hello.as_ref().and_then(parse_hello)
+    let Some(Hello { key, slugs, machine, machine_id, aliases, device_token, owner_slug, nacho_app }) = hello.as_ref().and_then(parse_hello)
     else {
         let _ = tx
             .send(Message::Text(r#"{"t":"err","error":"hello 가 없거나 이상해요"}"#.into()))
@@ -892,6 +896,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         account: account.clone(),
         device_id: device_id.clone(),
         owner_slug: owner_slug.filter(|slug| gate.claim(slug, &hash)),
+        nacho_app: AtomicBool::new(nacho_app && account.is_some()),
         kick: tokio::sync::Notify::new(),
     });
     if let Err(why) = gate.admit(&hash, up.clone()) {
@@ -987,7 +992,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
             Ok(Message::Text(t)) => {
                 up.touch();
                 // hello 를 다시 보내면 slug 목록 갱신(유저가 늘었다).
-                if let Some(Hello { key: k2, slugs: slugs2, .. }) = serde_json::from_str::<serde_json::Value>(t.as_str())
+                if let Some(Hello { key: k2, slugs: slugs2, device_token, nacho_app, .. }) = serde_json::from_str::<serde_json::Value>(t.as_str())
                     .ok()
                     .as_ref()
                     .and_then(parse_hello)
@@ -995,6 +1000,11 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
                     if key_hash(&k2) != hash {
                         continue;
                     }
+                    let authenticated = device_token.as_deref().and_then(|token| gate.device_by_token(token))
+                        .is_some_and(|(id, rec)| rec.kind == "desktop"
+                            && up.device_id.as_deref() == Some(id.as_str())
+                            && up.account.as_deref() == Some(rec.account.as_str()));
+                    up.nacho_app.store(nacho_app && authenticated, Ordering::Relaxed);
                     let (acc2, rej2) = apply(&slugs2);
                     // 빠진 slug(유저 삭제)는 이 연결에서 뗀다. 잠금은 블록 안에서만 —
                     // 아래 await 를 넘기면 이 future 가 Send 가 아니게 된다.
@@ -1162,6 +1172,23 @@ async fn forward(gate: Gate, slug: String, rest: String, req: axum::extract::Req
     forward_scoped(gate, slug, rest, req, None).await
 }
 
+fn nacho_app_path(rest: &str) -> bool {
+    let rest = machine_route(rest).map_or(rest, |(_, rest)| rest);
+    rest == "nacho/app" || rest.starts_with("nacho/app/")
+}
+
+fn nacho_hub_available(gate: &Gate, up: &Uplink) -> bool {
+    if !up.nacho_app.load(Ordering::Relaxed) { return false; }
+    let (Some(account), Some(device_id), Some(owner)) = (&up.account, &up.device_id, &up.owner_slug) else {
+        return false;
+    };
+    let device_valid = gate.devices.lock().unwrap().get(device_id).is_some_and(|d|
+        d.revoked_at.is_none() && d.kind == "desktop" && d.account == *account
+            && d.machine_id.as_deref().is_none_or(|id| id == up.machine_id));
+    device_valid && gate.by_slug.lock().unwrap().get(owner)
+        .is_some_and(|owners| owners.iter().any(|owner| owner.conn == up.conn))
+}
+
 async fn forward_scoped(gate: Gate, slug: String, rest: String, req: axum::extract::Request,
     access: Option<AccountAccess>) -> axum::response::Response {
     if access.is_none() && !crate::mobile::valid_slug(&slug) {
@@ -1172,6 +1199,7 @@ async fn forward_scoped(gate: Gate, slug: String, rest: String, req: axum::extra
     if !safe_path(&raw) {
         return (StatusCode::BAD_REQUEST, "bad path").into_response();
     }
+    let needs_nacho = access.is_some() && nacho_app_path(&rest);
     let mut uplinks = if let Some(access) = &access {
         if !access.valid() { return json_err(StatusCode::UNAUTHORIZED, "unauthorized"); }
         gate.live.lock().unwrap().values().filter(|(_, up)| up.account.as_deref() == Some(&access.account)
@@ -1182,13 +1210,18 @@ async fn forward_scoped(gate: Gate, slug: String, rest: String, req: axum::extra
         .ok()
         .and_then(|map| map.get(&slug).cloned())
         .unwrap_or_default() };
+    if needs_nacho {
+        // Only a device-authenticated hub advertises local credentials; request headers cannot select one.
+        uplinks.retain(|up| nacho_hub_available(&gate, up));
+    }
     uplinks.sort_by_key(|up| up.conn);
     let candidates = candidates_of(&uplinks);
     let requested_machine = machine_route(&rest).map(|(machine, _)| machine);
     let route = pick_route(&candidates, requested_machine);
     if access.is_some() && (route == RoutePick::Missing
         || requested_machine.is_some() && matches!(route, RoutePick::Fallback(_))) {
-        return json_err(StatusCode::SERVICE_UNAVAILABLE, "account_device_unavailable");
+        return json_err(StatusCode::SERVICE_UNAVAILABLE,
+            if needs_nacho { "nacho_hub_unavailable" } else { "account_device_unavailable" });
     }
     if route == RoutePick::Ambiguous {
         return (
@@ -1414,6 +1447,7 @@ mod tests {
             account: None,
             device_id: None,
             owner_slug: None,
+            nacho_app: AtomicBool::new(false),
             kick: tokio::sync::Notify::new(),
         })
     }
@@ -1440,8 +1474,26 @@ mod tests {
         assert_eq!(h.machine_id.as_deref(), Some("machine-macbook-1"));
         assert!(h.aliases.contains(&"맥북".to_string()));
         assert!(h.device_token.is_none());
+        assert!(!h.nacho_app);
         assert!(parse_hello(&serde_json::json!({"t":"hello","key":"short","slugs":[]})).is_none());
         assert!(parse_hello(&serde_json::json!({"t":"nope"})).is_none());
+    }
+
+    #[test]
+    fn nacho_capability_requires_a_boolean_and_an_exact_route() {
+        let mut hello = serde_json::json!({"t":"hello","key":"0123456789abcdef0123","slugs":[]});
+        for value in [serde_json::json!(null), serde_json::json!("true"), serde_json::json!(1), serde_json::json!(false)] {
+            hello["capabilities"] = serde_json::json!({"nacho_app":value});
+            assert!(!parse_hello(&hello).unwrap().nacho_app);
+        }
+        hello["capabilities"]["nacho_app"] = true.into();
+        assert!(parse_hello(&hello).unwrap().nacho_app);
+        for path in ["nacho/app", "nacho/app/events", "m/~mini/nacho/app/messages"] {
+            assert!(nacho_app_path(path));
+        }
+        for path in ["nacho/application", "nacho/read/events", "term/me", "m/~mini/term/me"] {
+            assert!(!nacho_app_path(path));
+        }
     }
 
     #[test]
@@ -1880,6 +1932,106 @@ mod tests {
         let closed = tokio::time::timeout(Duration::from_secs(2), ws.next()).await.expect("revoked socket remained open");
         assert!(matches!(closed, Some(Ok(TM::Close(_))) | None));
         assert_eq!(get_json(addr, "/relay/account/term/me", token).await.0, 401);
+    }
+
+    #[tokio::test]
+    async fn account_nacho_selects_only_its_authenticated_capable_hub() {
+        let dir = std::env::temp_dir().join(format!("kasa-nacho-hub-{}", uuid::Uuid::new_v4()));
+        drop(account_gate(&dir));
+        let accounts_path = dir.join("relay-accounts.json");
+        let mut accounts = crate::relay_auth::load_accounts(&accounts_path);
+        accounts.accounts.insert("other".into(), accounts.accounts["geno"].clone());
+        crate::relay_auth::save_accounts(&accounts_path, &accounts).unwrap();
+        let gate = Gate::new(Some(dir.join("relay-state.json")));
+        let addr = spawn_relay(gate.clone()).await;
+        let mut credentials = Vec::new();
+        for (account, machine) in [("geno", "nacho-macbook"), ("geno", "nacho-mini"), ("other", "other-hub") ] {
+            let (status, device) = post(addr, "/relay/login", None, serde_json::json!({
+                "account":account,"password":"correct horse","machine_id":machine
+            })).await;
+            assert_eq!(status, 200);
+            credentials.push(device);
+        }
+        let token = credentials[0]["token"].as_str().unwrap();
+        let mut hello = desktop_hello("nacho-macbook", token);
+        hello["slugs"] = serde_json::json!([SLUG]);
+        hello["owner_slug"] = SLUG.into();
+        let book = fake_uplink_at(addr, hello, |id, _, out|
+            reply(&out, id, serde_json::json!({"status":200}), br#"{"hub":"book"}"#)).await;
+        let mut other_hello = desktop_hello("other-hub", credentials[2]["token"].as_str().unwrap());
+        other_hello["key"] = "different-machine-key-123".into();
+        other_hello["slugs"] = serde_json::json!(["zyxwvutsrqponmlkjihgfedcb"]);
+        other_hello["owner_slug"] = "zyxwvutsrqponmlkjihgfedcb".into();
+        other_hello["capabilities"] = serde_json::json!({"nacho_app":true});
+        let other = fake_uplink_at(addr, other_hello, |id, _, out|
+            reply(&out, id, serde_json::json!({"status":200}), br#"{"hub":"other"}"#)).await;
+        let legacy = fake_uplink_at(addr, serde_json::json!({
+            "t":"hello","key":"legacy-machine-key-123","machine_id":"legacy-hub",
+            "slugs":["qwertyuiopasdfghjklzxcvbnm"],"owner_slug":"qwertyuiopasdfghjklzxcvbnm",
+            "capabilities":{"nacho_app":true},"account":"geno"
+        }), |id, _, out| reply(&out, id, serde_json::json!({"status":200}), b"legacy")).await;
+        assert!(!gate.live.lock().unwrap().values().find(|(_, up)| up.machine_id == "legacy-hub")
+            .unwrap().1.nacho_app.load(Ordering::Relaxed));
+
+        let path = "/relay/account/nacho/app/events";
+        assert_eq!(get_json(addr, path, "invalid").await.0, 401);
+        let missing = reqwest::Client::new().get(format!("http://{addr}{path}?nacho_app=true"))
+            .bearer_auth(token).header("x-kasa-nacho-app", "true").send().await.unwrap();
+        assert_eq!(missing.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(missing.json::<serde_json::Value>().await.unwrap()["error"], "nacho_hub_unavailable");
+        assert!(book.opens.lock().unwrap().is_empty());
+        assert!(other.opens.lock().unwrap().is_empty());
+        assert!(legacy.opens.lock().unwrap().is_empty());
+        assert_eq!(get_json(addr, "/relay/account/term/me", token).await.1["hub"], "book");
+        assert_eq!(get_json(addr, &format!("/u/{SLUG}/nacho/app/events"), token).await.1["hub"], "book");
+        let book_opens = book.opens.lock().unwrap().len();
+
+        let mut mini_hello = desktop_hello("nacho-mini", credentials[1]["token"].as_str().unwrap());
+        mini_hello["slugs"] = serde_json::json!([SLUG]);
+        mini_hello["owner_slug"] = SLUG.into();
+        mini_hello["capabilities"] = serde_json::json!({"nacho_app":true});
+        let mini = fake_uplink_at(addr, mini_hello, |id, _, out|
+            reply(&out, id, serde_json::json!({"status":200}), br#"{"hub":"mini"}"#)).await;
+        assert_eq!(get_json(addr, path, token).await.1["hub"], "mini");
+        assert_eq!(get_json(addr, "/relay/account/m/~nacho-macbook/nacho/app/events", token).await.0, 503);
+        assert_eq!(get_json(addr, "/relay/account/m/~other-hub/nacho/app/events", token).await.0, 503);
+        let opens = mini.opens.lock().unwrap();
+        assert_eq!(opens.len(), 1);
+        assert_eq!(opens[0].1["slug"], SLUG);
+        assert_eq!(opens[0].1["path"], "/nacho/app/events");
+        assert!(opens[0].1["headers"].as_array().unwrap().iter().all(|h| h[0] != "authorization"));
+        drop(opens);
+        assert_eq!(book.opens.lock().unwrap().len(), book_opens);
+        assert!(other.opens.lock().unwrap().is_empty());
+        assert!(legacy.opens.lock().unwrap().is_empty());
+
+        gate.devices.lock().unwrap().get_mut(credentials[1]["device_id"].as_str().unwrap())
+            .unwrap().revoked_at = Some(now_secs());
+        assert_eq!(get_json(addr, path, token).await.0, 503);
+        assert_eq!(mini.opens.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn nacho_capability_refresh_cannot_authenticate_a_legacy_socket() {
+        let dir = std::env::temp_dir().join(format!("kasa-nacho-refresh-{}", uuid::Uuid::new_v4()));
+        let gate = account_gate(&dir);
+        let addr = spawn_relay(gate.clone()).await;
+        let (_, device) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"geno","password":"correct horse","machine_id":"refresh-hub"
+        })).await;
+        let mut hello = desktop_hello("refresh-hub", device["token"].as_str().unwrap());
+        hello["slugs"] = serde_json::json!([SLUG]);
+        hello["owner_slug"] = SLUG.into();
+        hello["capabilities"] = serde_json::json!({"nacho_app":true});
+        let mut anonymous = hello.clone();
+        anonymous.as_object_mut().unwrap().remove("device_token");
+        let (mut ws, ok) = hello_uplink(addr, anonymous).await;
+        assert_eq!(ok["t"], "ok");
+        ws.send(TM::Text(hello.to_string().into())).await.unwrap();
+        let refreshed = tokio::time::timeout(Duration::from_secs(2), ws.next()).await.unwrap().unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(refreshed.to_text().unwrap()).unwrap()["t"], "ok");
+        assert!(gate.live.lock().unwrap().values().all(|(_, up)| up.account.is_none()
+            && !up.nacho_app.load(Ordering::Relaxed)));
     }
 
     #[tokio::test]

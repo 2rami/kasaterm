@@ -2892,18 +2892,21 @@ impl App {
     pub(crate) fn toggle_board_panel(&mut self, _event_loop: &ActiveEventLoop) {
         self.toggle_board_room();
     }
-    pub(crate) fn open_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
-        if self.lite {
-            return;
+    pub(crate) fn open_arona_panel(&mut self, _event_loop: &ActiveEventLoop) {
+        if self.board_room_active() || self.open_board_room() {
+            self.board_scene.set_tab(crate::native_board::BoardTab::Chat);
+            self.prime_hit_areas();
+            self.handoff_ime_to_active_surface();
+            self.repaint_all();
         }
-        if !crate::socket::read_shim_inject() {
-            self.set_toast("아로나 화면은 Agent 연동을 켠 뒤 열 수 있어요".to_string());
-            return;
-        }
-        let _ = self.open_inline_web(event_loop, InlineWebKind::Arona);
     }
 
     pub(crate) fn close_arona_panel(&mut self) {
+        if self.board_room_active()
+            && self.board_scene.tab() == crate::native_board::BoardTab::Chat
+        {
+            self.return_from_board_room();
+        }
         if self
             .inline_web
             .as_ref()
@@ -2911,101 +2914,6 @@ impl App {
         {
             self.close_inline_web();
         }
-    }
-    fn open_inline_web(&mut self, event_loop: &ActiveEventLoop, kind: InlineWebKind) -> bool {
-        if self.inline_web.as_ref().is_some_and(|h| h.kind == kind) {
-            if let Some(host) = self.inline_web.as_ref() {
-                host.window
-                    .as_ref()
-                    .or(self.window.as_ref())
-                    .map(|w| w.focus_window());
-            }
-            return true;
-        }
-        self.close_inline_web();
-        let (port, _) = crate::mcp_panel_port_certain();
-        if !arona_web_reachable(&port) {
-            let label = "아로나";
-            self.set_toast(format!(
-                "{label} 화면을 열지 못했어요 — 잠시 뒤 다시 시도해 주세요"
-            ));
-            eprintln!("[inline-web] page unreachable: kind={kind:?} port={port}");
-            return false;
-        }
-        let restore_sidebar = !self.sidebar_visible;
-        if restore_sidebar {
-            self.toggle_sidebar();
-        }
-        let cb = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let url = format!("http://127.0.0.1:{port}/arona-ui/?v={cb}&view=classroom");
-        let _title = "아로나".to_string();
-        let background = (20, 22, 28, 255);
-        let builder = wry::WebViewBuilder::new()
-            .with_url(url.clone())
-            .with_background_color(background)
-            .with_visible(false)
-            .with_bounds(wry::Rect {
-                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                size: wry::dpi::LogicalSize::new(720.0, 560.0).into(),
-            });
-        #[cfg(target_os = "macos")]
-        let built = {
-            use winit::platform::macos::WindowAttributesExtMacOS;
-            let attrs = WindowAttributes::default()
-                .with_title(_title)
-                .with_theme(Some(Theme::Dark))
-                .with_decorations(false)
-                .with_resizable(false)
-                .with_visible(false)
-                .with_inner_size(LogicalSize::new(720.0, 560.0))
-                .with_has_shadow(false);
-            match event_loop.create_window(attrs) {
-                Ok(window) => {
-                    let window = Arc::new(window);
-                    builder
-                        .build_as_child(window.as_ref())
-                        .map(|webview| (webview, Some(window)))
-                        .map_err(|e| e.to_string())
-                }
-                Err(e) => Err(e.to_string()),
-            }
-        };
-        #[cfg(not(target_os = "macos"))]
-        let built = match self.window.as_ref() {
-            Some(main) => builder
-                .build_as_child(main.as_ref())
-                .map(|webview| (webview, None))
-                .map_err(|e| e.to_string()),
-            None => Err("메인 창이 아직 없어요".to_string()),
-        };
-        let (webview, window) = match built {
-            Ok(pair) => pair,
-            Err(e) => {
-                if restore_sidebar {
-                    self.toggle_sidebar();
-                }
-                self.set_toast(format!("웹 화면을 만들지 못했어요 — {e}"));
-                eprintln!("[inline-web] build failed: {e}");
-                return false;
-            }
-        };
-        self.inline_web = Some(InlineWebHost {
-            webview,
-            window,
-            kind,
-            last_frame: None,
-            visible: false,
-            restore_sidebar,
-        });
-        self.chrome_dirty = true;
-        if let Some(main) = &self.window {
-            main.request_redraw();
-        }
-        eprintln!("[inline-web] open kind={kind:?} url={url}");
-        true
     }
 
     pub(crate) fn toggle_settings_web(
@@ -3151,26 +3059,10 @@ impl App {
     }
 
     pub(crate) fn toggle_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
-        if !crate::socket::read_shim_inject() {
-            self.set_toast("아로나 화면은 Agent 연동을 켠 뒤 열 수 있어요".to_string());
-            return;
-        }
-        if self
-            .inline_web
-            .as_ref()
-            .is_some_and(|h| h.kind == InlineWebKind::Arona)
+        if self.board_room_active()
+            && self.board_scene.tab() == crate::native_board::BoardTab::Chat
         {
-            self.close_inline_web();
-            return;
-        }
-        // 아로나는 「지금 보는 pane」을 작업 대상으로 삼는다. 설정·보드는 셸 없는
-        // 표식 pane 이라, 그 방에서 열면 대상이 `\0kasaterm-board` 같은 내부 id 로
-        // 굳어 아래 작업이 엉뚱한 곳을 가리킨다. 열기 전에 원래 사용자 방으로
-        // 돌려보내고, 돌아갈 방이 없으면 아예 열지 않는다.
-        if self.internal_room_kind_at(self.active_window).is_some()
-            && !self.return_from_active_internal_room()
-        {
-            self.set_toast("아로나를 열 사용자 방이 없어요".to_string());
+            self.return_from_board_room();
             return;
         }
         self.open_arona_panel(event_loop);
@@ -5145,43 +5037,6 @@ fn set_dock_badge(_count: usize) {}
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn ensure_notification_authorization() {}
 
-/// 앱 내부 웹 화면이 지금 실제로 서빙되나 — 루프백에 300ms.
-///
-/// 웹뷰는 404 를 받아도 **빌드에 성공한다.** 그래서 빌드 성공만 보고 「열렸다」로
-/// 판단하면 `web/arona-ui/dist` 를 안 만든 체크아웃에서 오류 페이지가 작업공간을
-/// 차지한다. 그래서 자식 창을 만들기 전에 묻는다.
-///
-/// HTTP 클라이언트를 새로 들이지 않고 std 로만 한다. 같은 프로세스 안의 루프백이라
-/// 정상 경로는 1ms 도 안 걸리고, 서버가 죽어 있으면 connect 가 곧바로 거절된다.
-/// 타임아웃은 그 둘 다 아닌 경우(포트를 다른 프로세스가 물고 응답을 안 함) 대비다.
-fn arona_web_reachable(port: &str) -> bool {
-    use std::io::{Read, Write};
-    let Ok(addr) = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() else {
-        return false;
-    };
-    let to = std::time::Duration::from_millis(300);
-    let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, to) else {
-        return false;
-    };
-    let _ = s.set_read_timeout(Some(to));
-    let _ = s.set_write_timeout(Some(to));
-    // HTTP/1.0 이라 서버가 응답 뒤 알아서 닫는다 — keep-alive 를 안 다뤄도 된다.
-    if s.write_all(b"GET /arona-ui/ HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
-        .is_err()
-    {
-        return false;
-    }
-    // 상태줄만 본다. "HTTP/1.1 200 ..." 의 9..12 가 코드다.
-    let mut head = [0u8; 16];
-    let mut n = 0;
-    while n < head.len() {
-        match s.read(&mut head[n..]) {
-            Ok(0) | Err(_) => break,
-            Ok(k) => n += k,
-        }
-    }
-    n >= 12 && head.starts_with(b"HTTP/1.") && &head[9..12] == b"200"
-}
 
 fn inline_web_frame(
     origin_x: f64,
@@ -5448,43 +5303,6 @@ mod room_rename_tests {
         assert!(notify_dedup_passes("test:dedup-beta"));
     }
 
-    /// 설정 웹뷰의 폴백은 이 판정에 달려 있다 — 여기가 무조건 true 를 내면 페이지가
-    /// 없는 체크아웃에서 **오류 페이지가 뜬 창이 설정 자리를 차지한다**(설정을 아예
-    /// 못 여는 것과 같다). 그래서 200 만 통과시키는지, 그리고 서버가 아예 없을 때
-    /// 실패하는지를 못 박는다.
-    #[test]
-    fn 설정_페이지_판정은_200만_통과시킨다() {
-        use std::io::{Read, Write};
-        // 200 을 주는 서버 → 통과.
-        let ok = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let ok_port = ok.local_addr().unwrap().port().to_string();
-        let h = std::thread::spawn(move || {
-            for status in ["HTTP/1.1 200 OK", "HTTP/1.1 404 Not Found"] {
-                let Ok((mut s, _)) = ok.accept() else { return };
-                let mut buf = [0u8; 256];
-                let _ = s.read(&mut buf);
-                let _ = s.write_all(format!("{status}\r\nContent-Length: 0\r\n\r\n").as_bytes());
-            }
-        });
-        assert!(arona_web_reachable(&ok_port), "200 은 통과해야 한다");
-        // 같은 서버의 두 번째 응답은 404 — 페이지가 없는 체크아웃이 이 모양이다.
-        assert!(!arona_web_reachable(&ok_port), "404 는 막아야 한다");
-        let _ = h.join();
-
-        // 아무도 안 듣는 포트 → 실패. 방금 닫은 리스너의 포트를 재사용해 「누가
-        // 쓰고 있을지도 모르는 번호」를 찍지 않는다.
-        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let dead_port = dead.local_addr().unwrap().port().to_string();
-        drop(dead);
-        assert!(
-            !arona_web_reachable(&dead_port),
-            "서버가 없으면 실패해야 한다"
-        );
-        assert!(
-            !arona_web_reachable("포트아님"),
-            "숫자가 아니면 실패해야 한다"
-        );
-    }
 
     #[test]
     fn 인라인_웹은_제목줄과_왼쪽_사이드바만_남긴다() {

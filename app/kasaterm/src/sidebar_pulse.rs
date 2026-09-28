@@ -296,7 +296,7 @@ impl App {
                 Some(self.arona_btn_rect).filter(|r| r.2 > 0.0)
             }
             _ => {
-                let arona = self.inline_web.as_ref().is_some_and(|h| h.kind == crate::InlineWebKind::Arona);
+                let arona = self.board_room_active() && self.board_scene.tab() == crate::native_board::BoardTab::Chat;
                 eprintln!("[pulse-probe] tray_arona_open={arona} toast={:?}", self.collab.toast.as_ref().map(|t| t.0.clone()));
                 STEP.store(10, Ordering::Relaxed);
                 return;

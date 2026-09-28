@@ -2472,7 +2472,7 @@ impl App {
         let board_room_active = self.board_room_active();
         let pulse_h = self.sidebar_pulse_h();
         let sb_head_top = self.sidebar_head_top();
-        let arona_open = self.inline_web.as_ref().is_some_and(|h| h.kind == crate::InlineWebKind::Arona);
+        let arona_open = board_room_active && self.board_scene.tab() == crate::native_board::BoardTab::Chat;
         // 본진 계정 조작은 백그라운드 스레드에서 끝나므로 그 자리에서 말풍선을
         // 못 띄운다. 계정 화면이 떠 있는 동안 여기서 받아 올린다 — 실패가 조용히
         // 사라지면 「눌렀는데 아무 일도 안 남」이 되고, 그 상태로 같은 버튼을
@@ -4596,7 +4596,7 @@ impl App {
                         let settings_on = settings_room_active;
                         for (r, icon, on) in [
                             (tray.board, "rows-2", board_room_active),
-                            (tray.arona, "users", arona_open),
+                            (tray.arona, "message-circle", arona_open),
                             (tray.feedback, "message-square-warning", false),
                             (tray.settings, "settings-2", settings_on),
                         ] {
@@ -10332,7 +10332,7 @@ impl App {
                     && sb_cursor.1 >= r.1 && sb_cursor.1 <= r.1 + r.3;
                 let tip = [
                     (self.board_btn_rect, "보드  ⇧⌘B"),
-                    (self.arona_btn_rect, "아로나  ⇧⌘A"),
+                    (self.arona_btn_rect, "나쵸 대화  ⇧⌘A"),
                     (self.pulse.rect.unwrap_or_default(), "모든 기기 현황 — 누르면 보드  ⇧⌘B"),
                 ]
                 .into_iter()

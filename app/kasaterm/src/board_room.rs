@@ -117,6 +117,7 @@ impl App {
                 self.return_from_board_room();
             }
             BoardToggle::OpenOrFocus => {
+                self.board_scene.show_work();
                 self.open_board_room();
             }
         }
@@ -250,7 +251,7 @@ mod tests {
         let board = kasa_pty::PtyLayout::single(BOARD_PANE_ID);
         assert!(is_board_layout(&board));
         assert!(!crate::internal_room::should_persist_layout(&board));
-        assert_eq!(BOARD_LABEL, "보드");
+        assert_eq!(BOARD_LABEL, "작업현황");
     }
 
     #[test]
@@ -259,24 +260,20 @@ mod tests {
         assert_eq!(board_toggle(false), BoardToggle::OpenOrFocus);
     }
 
-    /// 아로나는 「지금 보는 pane」을 작업 대상으로 삼는다. 설정·보드는 셸 없는 표식
-    /// pane 이라 그 방에서 열면 대상이 내부 id 로 굳고, 아래 작업이 엉뚱한 곳을
-    /// 가리킨다. 그래서 여는 쪽이 사용자 방 복귀를 먼저 태운다.
-    ///
-    /// 단축키도 같은 사고의 다른 면이다 — 내부 방은 키를 잡으면 무조건 return 하므로,
-    /// 토글이 그 뒤에 있으면 그 화면들에서 영영 안 먹는다(`Cmd+,` 는 이미 앞에 있어 먹는다).
+    // The former Arona shortcut now switches native tabs, so it must keep the original return pane.
     #[test]
-    fn arona_leaves_internal_rooms_and_its_shortcut_outranks_them() {
+    fn nacho_keeps_the_board_return_target_and_its_shortcut_outranks_internal_rooms() {
         let chrome = include_str!("chrome.rs");
         let after = chrome
             .split_once("fn toggle_arona_panel")
             .expect("toggle_arona_panel")
             .1;
         let body = &after[..after.find("\n    }\n").expect("함수 끝")];
-        assert!(
-            body.contains("return_from_active_internal_room"),
-            "내부 방에서 열면 작업 대상이 표식 pane 으로 굳는다"
-        );
+        assert!(body.contains("BoardTab::Chat"));
+        assert!(!body.contains("return_from_active_internal_room"));
+        let open = chrome.split_once("pub(crate) fn open_arona_panel").unwrap().1
+            .split_once("pub(crate) fn close_arona_panel").unwrap().0;
+        assert!(open.contains("self.board_room_active() || self.open_board_room()"));
 
         let handler = include_str!("handler.rs");
         // 단축키가 첫 등장 — 메뉴 항목의 같은 호출은 파일 뒤쪽에 있다.
@@ -314,16 +311,20 @@ mod tests {
         for marker in ["self.native_settings_key(&event);", "self.native_board_key(&event);"] {
             assert!(at < handler.find(marker).expect(marker), "내부 방이 키를 삼키기 전에 잡아야 한다");
         }
-        assert!(handler.contains("보드 켜기/끄기  ⇧⌘B"), "메뉴가 단축키를 알려 줘야 사람이 찾는다");
+        assert!(handler.contains("작업현황 켜기/끄기  ⇧⌘B"), "메뉴가 단축키를 알려 줘야 사람이 찾는다");
     }
 
     #[test]
-    fn desktop_board_has_no_wry_route_and_arona_keeps_its_route() {
+    fn desktop_board_and_nacho_share_the_native_room() {
         let chrome = include_str!("chrome.rs");
         assert!(!chrome.contains("InlineWebKind::Board"));
         assert!(!chrome.contains("panel=board"));
         assert!(chrome.contains("self.toggle_board_room()"));
-        assert!(chrome.contains("InlineWebKind::Arona"));
-        assert!(chrome.contains("view=classroom"));
+        let entry = chrome.split("pub(crate) fn open_arona_panel").nth(1).unwrap()
+            .split("pub(crate) fn close_arona_panel").next().unwrap();
+        assert!(entry.contains("self.open_board_room()"));
+        assert!(entry.contains("BoardTab::Chat"));
+        assert!(!entry.contains("open_inline_web"));
+        assert!(!entry.contains("read_shim_inject"));
     }
 }

@@ -1,15 +1,14 @@
-//! 할 일 판 — 통합 작업판 B안(할 일 먼저)의 네이티브 화면.
+//! 사람용 작업현황은 에이전트 관측을 작업 장부로 가장하지 않는다.
 //!
 //! 두 정본을 한 줄기로 모은다. 창·학생·기기는 보드 스냅샷(`OverviewData`)이고, 작업의
 //! 단계·승인·증거는 나쵸 작업 장부(`crate::nacho_tasks`)다. 둘은 서로를 대신하지 않는다 —
 //! 장부가 끊겨도 창 관측은 그대로 보이고, 창이 오래돼도 장부의 단계는 장부 것이다.
 //!
-//! 순서는 「답이 필요한 것 → 진행 · 검증 · 완료」, 옆(좁으면 아래)에 기기·학생이다.
+//! 순서는 「내 답변 필요 → 진행 중 → 결과」이며 기기 명부는 관측 도구에만 남긴다.
 //! 완료 줄기는 **끝남과 성공을 가른다** — 종료 신호나 자기 보고만 있는 일은 「검증 안 됨」
 //! 이고, 같은 판의 검증 기록이 통과를 말할 때만 「성공 확인」이다.
 //!
-//! 승인은 보여 주기만 한다. 서버에 1회용·범위·만료를 담은 승인 계약이 없어서, 단추 자리는
-//! 비우지 않고 꺼 둔 채 이유를 적는다(`docs/design.md` 「없는 동작의 자리」).
+//! 승인 실행은 서버의 1회용·범위·만료 확인을 우회하지 않도록 대화와 구분한다.
 
 use super::*;
 use crate::nacho_tasks::{BookSource, TaskBook, TaskCard, TaskState, Verdict};
@@ -23,14 +22,12 @@ pub(crate) enum Lane {
 }
 
 impl Lane {
-    const STREAMS: [Self; 3] = [Self::Progress, Self::Verify, Self::Done];
-
     const fn label(self) -> &'static str {
         match self {
-            Self::Answer => "답이 필요한 것",
-            Self::Progress => "진행",
+            Self::Answer => "내 답변 필요",
+            Self::Progress => "진행 중",
             Self::Verify => "검증",
-            Self::Done => "완료",
+            Self::Done => "결과",
         }
     }
 }
@@ -74,6 +71,8 @@ pub(crate) enum WorkKey {
 pub(crate) struct WorkUi {
     pub(crate) project: Option<String>,
     pub(crate) selected: Option<WorkKey>,
+    pub(crate) filters_open: bool,
+    pub(crate) expanded: HashSet<Lane>,
 }
 
 #[derive(Clone, Debug)]
@@ -213,14 +212,13 @@ fn project_choices(items: &[WorkItem]) -> Vec<String> {
     projects
 }
 
-/// 줄기 셋을 나란히 세울 폭. 이보다 좁으면 한 열로 쌓는다 — 한 줄기가 200px 밑이면
-/// 제목 두 줄에 글자 여섯 자도 안 들어간다.
-fn stream_columns(w: f32) -> usize {
-    if w >= 640.0 { 3 } else { 1 }
+fn human_group(lane: Lane) -> Lane {
+    if lane == Lane::Verify { Lane::Progress } else { lane }
 }
 
 impl Scene {
     pub(crate) fn select_work(&mut self, key: WorkKey) {
+        self.hits.clear();
         if self.work.selected.as_ref() == Some(&key) {
             self.work.selected = None;
             self.overview.selection = None;
@@ -282,96 +280,75 @@ pub(super) fn paint_work(
     x: f32,
     y: &mut f32,
     w: f32,
-    side: Option<(f32, f32)>,
 ) {
     let data = &s.data.overview;
     let book = &s.data.tasks;
-    let top = *y;
     if s.fixture {
-        overview_note(g, x, y, w, "검증용 가상 보드", theme::text_dim());
+        overview_note(g, x, y, w, "검증용 가상 작업현황", theme::text_dim());
     }
+    let all = work_items(data, book);
+    let items: Vec<&WorkItem> = all.iter()
+        .filter(|item| s.work.project.as_ref().is_none_or(|p| &item.project == p)).collect();
+    let now = data.observed_at_ms.max(book.checked_at_ms());
+    let filter_label = s.work.project.as_deref().unwrap_or("모든 프로젝트");
+    let filter_width = (g.measure_chrome_text(filter_label, 12.0, false) + 20.0).min(w).min(260.0);
+    button(g, s, hits, (x, *y, filter_width, 26.0), filter_label, Target::WorkFilters, s.work.filters_open);
+    *y += 40.0;
+    if s.work.filters_open {
+        let mut choices = vec![("전체".to_string(), Target::WorkProject(None), s.work.project.is_none(), true)];
+        for project in project_choices(&all) {
+            let selected = s.work.project.as_deref() == Some(project.as_str());
+            choices.push((project.clone(), Target::WorkProject(Some(project)), selected, true));
+        }
+        overview_choices(g, s, hits, x, y, w, choices);
+    }
+
     if let Some(error) = &data.error {
         overview_note(g, x, y, w, error, theme::danger());
     }
-    if data.schema_version == 0 && data.error.is_none() {
-        overview_note(g, x, y, w, "연결된 기기와 방을 확인하고 있어요", theme::text_dim());
+    let (line, color) = book_line(book, now);
+    if book.error().is_some() || book.stale() || book.hidden_count() > 0 || !book.desk_scope() {
+        overview_note(g, x, y, w, &line, color);
+    }
+    if items.is_empty() && data.schema_version == 0 && data.error.is_none() {
+        overview_note(g, x, y, w, "작업을 확인하고 있어요…", theme::text_dim());
         return;
     }
-    let now = data.observed_at_ms.max(book.checked_at_ms());
-    let (line, color) = book_line(book, now);
-    overview_note(g, x, y, w, &line, color);
-
-    let all = work_items(data, book);
-    let mut choices = vec![("전체".to_string(), Target::WorkProject(None), s.work.project.is_none(), true)];
-    for project in project_choices(&all) {
-        let selected = s.work.project.as_deref() == Some(project.as_str());
-        choices.push((project.clone(), Target::WorkProject(Some(project)), selected, true));
+    if s.work.project.as_ref().is_some_and(|p| !all.iter().any(|item| &item.project == p)) {
+        overview_note(g, x, y, w, "이 프로젝트의 현재 작업이 없어요. 모든 프로젝트에서 다시 확인할 수 있어요.", theme::text_dim());
     }
-    if let Some(missing) = s.work.project.as_ref().filter(|p| !all.iter().any(|item| &item.project == *p)) {
-        choices.push((format!("{missing} · 현재 목록에 없음"), Target::WorkProject(Some(missing.clone())), true, false));
-    }
-    overview_choices(g, s, hits, x, y, w, choices);
-    let items: Vec<&WorkItem> = all.iter().filter(|item| s.work.project.as_ref().is_none_or(|p| &item.project == p)).collect();
-    let count = |lane| items.iter().filter(|item| item.lane == lane).count();
-    let summary = format!(
-        "답 {} · 진행 {} · 검증 {} · 완료 {}",
-        count(Lane::Answer), count(Lane::Progress), count(Lane::Verify), count(Lane::Done)
-    );
-    overview_note(g, x, y, w, &summary, theme::text_dim());
-
-    let answers: Vec<&WorkItem> = items.iter().copied().filter(|item| item.lane == Lane::Answer).collect();
-    group_title(g, x, y, w, &format!("{} {}", Lane::Answer.label(), answers.len()));
-    if answers.is_empty() {
-        overview_note(g, x, y, w, "지금 답할 것이 없어요", theme::text_dim());
-    }
-    for item in answers {
-        paint_answer(g, s, hits, x, y, w, item);
-    }
-    *y += 12.0;
-
-    let columns = stream_columns(w);
-    let gap = 16.0;
-    let col_w = (w - gap * (columns as f32 - 1.0)) / columns as f32;
-    let stream_top = *y;
-    let mut bottom = *y;
-    for (index, lane) in Lane::STREAMS.into_iter().enumerate() {
-        let (cx, mut cy) = if columns == 3 { (x + index as f32 * (col_w + gap), stream_top) } else { (x, bottom) };
-        let lane_items: Vec<&WorkItem> = items.iter().copied().filter(|item| item.lane == lane).collect();
-        group_title(g, cx, &mut cy, col_w, &format!("{} {}", lane.label(), lane_items.len()));
-        if lane_items.is_empty() {
-            overview_note(g, cx, &mut cy, col_w, "없음", theme::text_mute());
+    for lane in [Lane::Answer, Lane::Progress, Lane::Done] {
+        let rows: Vec<&WorkItem> = items.iter().copied().filter(|item| human_group(item.lane) == lane).collect();
+        group_title(g, x, y, w, &format!("{}  {}", lane.label(), rows.len()));
+        if rows.is_empty() {
+            let note = match lane {
+                Lane::Answer => "지금 답할 일이 없어요",
+                Lane::Progress => "진행 중인 일이 없어요. 나쵸에게 새 일을 맡겨 보세요.",
+                _ => "작업이 끝나면 검사 결과와 함께 여기에 남아요",
+            };
+            overview_note(g, x, y, w, note, theme::text_dim());
         }
-        for item in lane_items.iter().take(8) {
-            paint_stream_item(g, s, hits, cx, &mut cy, col_w, item);
-        }
-        if lane_items.len() > 8 {
-            overview_note(g, cx, &mut cy, col_w, &format!("외 {}개 · 프로젝트를 골라 좁혀 보세요", lane_items.len() - 8), theme::text_dim());
-        }
-        bottom = bottom.max(cy + if columns == 1 { 12.0 } else { 0.0 });
-    }
-    *y = bottom + 12.0;
-
-    let selected = s.work.selected.as_ref().and_then(|key| all.iter().find(|item| &item.key == key));
-    match side {
-        Some((sx, sw)) => {
-            let mut sy = top;
-            if let Some(item) = selected {
-                paint_detail(g, s, hits, sx, &mut sy, sw, item);
-                sy += 12.0;
-            }
-            paint_machines(g, s, sx, &mut sy, sw);
-            *y = y.max(sy);
-        }
-        None => {
-            if let Some(item) = selected {
-                paint_detail(g, s, hits, x, y, w, item);
+        let visible = if s.work.expanded.contains(&lane) { rows.len() } else { 8 };
+        for item in rows.iter().take(visible) {
+            paint_task_row(g, s, hits, x, y, w, item);
+            if s.work.selected.as_ref() == Some(&item.key) {
+                paint_detail(g, s, hits, x + 10.0, y, (w - 20.0).max(1.0), item);
                 *y += 12.0;
             }
-            paint_machines(g, s, x, y, w);
         }
+        if rows.len() > 8 {
+            let label = if s.work.expanded.contains(&lane) { "접기".into() } else { format!("{}개 더 보기", rows.len() - 8) };
+            text_button(g, s, hits, (x, *y, 128.0_f32.min(w), 26.0), &label, Target::WorkMore(lane), false);
+            *y += 34.0;
+        }
+        *y += 24.0;
     }
-    if s.work.selected.is_some() && selected.is_none() {
-        overview_note(g, x, y, w, "고른 일이 현재 목록에 없어요. 다시 골라 주세요", theme::text_dim());
+    if s.work.selected.as_ref().is_some_and(|key| !all.iter().any(|item| &item.key == key)) {
+        overview_note(g, x, y, w, "고른 일이 현재 목록에 없어요. 다른 일을 골라 주세요.", theme::text_dim());
+    }
+    if book.error().is_none() && book.desk_scope() && book.hidden_count() == 0 {
+        let checked = format!("{} 확인 · 완료 보고와 검증 통과는 따로 표시해요", board_relative_time(now, book.checked_at_ms()));
+        overview_note(g, x, y, w, &checked, theme::text_dim());
     }
 }
 
@@ -383,15 +360,6 @@ fn group_title(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, w: f32, label: &st
     *y += 10.0;
 }
 
-fn face(g: &mut gpu::GpuRenderer, s: &Snapshot, name: Option<&str>, x: f32, y: f32, size: f32) {
-    if let Some(face) = name.and_then(|name| s.data.faces.iter().find(|face| face.name == name)) {
-        if !g.has_image(&face.key) { g.upload_image(&face.key, &face.rgba, face.width, face.height); }
-        g.queue_image_above(&face.key, x, y, size, size);
-    } else {
-        round_rect(g, x, y, size, size, theme::radius_md(), theme::surface_hover());
-        g.queue_icon("terminal", x + size * 0.22, y + size * 0.22, size * 0.56, theme::text_dim());
-    }
-}
 
 /// 카드 한 줄 설명. 모르는 칸은 빼고 아는 것만 — 「미확인」 두 개가 좁은 카드의 폭을 다 먹는다.
 /// 모른다는 사실은 상세의 「맡음」「연결」이 말한다.
@@ -421,103 +389,45 @@ fn pane_of<'a>(s: &'a Snapshot, item: &WorkItem) -> Option<&'a OverviewPane> {
     item.pane_id.as_ref().and_then(|id| s.data.overview.panes.iter().find(|row| &row.id == id))
 }
 
-fn paint_answer(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32, item: &WorkItem) {
+fn task_status(item: &WorkItem) -> (String, [u8; 4]) {
+    let (label, color) = match item.finish {
+        Some(Finish::Unverified) if matches!(item.key, WorkKey::Pane(_)) =>
+            ("완료 보고 · 검증 안 됨".to_string(), theme::text_dim()),
+        Some(finish) => (finish.label().to_string(), finish.color()),
+        None => (item.state_label.clone(), if item.lane == Lane::Answer { theme::danger() } else { theme::accent() }),
+    };
+    (if item.stale { format!("{label} · 오래된 정보") } else { label }, color)
+}
+
+fn paint_task_row(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32, item: &WorkItem) {
     let start = *y;
+    let inset = 10.0;
+    let inner = (w - inset * 2.0).max(1.0);
+    let title = board_wrap(&board_plain(&item.title, 400), inner, 2, |line| g.measure_chrome_text(line, 12.0, false));
     let task = task_of(s, item);
-    let pane = pane_of(s, item);
+    let (status, color) = task_status(item);
+    let detail = task.map(|t| t.step.as_str()).filter(|step| !step.is_empty()).unwrap_or("");
+    let meta = meta_line(s, item, None);
+    let status_line = if detail.is_empty() { status } else { format!("{status} · {detail}") };
+    let mut cy = start + 10.0;
+    let height = title.len().max(1) as f32 * 18.0 + 58.0;
+    let rect = (x, start, w, height);
     let selected = s.work.selected.as_ref() == Some(&item.key);
-    let tx = if w >= 260.0 { x + 44.0 } else { x };
-    let tw = w - (tx - x);
-    if w >= 260.0 { face(g, s, item.student.as_deref(), x, start + 2.0, 32.0); }
-    let status_w = g.measure_chrome_text(&item.state_label, 11.0, false);
-    // 제목은 사람이 쓴 긴 문장이라 보통 굵기다 — 굵은 한글은 글자마다 굵기가 갈려 보이는 자리가 있다.
-    let title = fit(g, &board_plain(&item.title, 200), (tw - status_w - 26.0).max(40.0), 13.0, false);
-    text(g, tx, start + 2.0, &title, 13.0, theme::text(), false);
-    circle_rect(g, x + w - status_w - 12.0, start + 6.0, 6.0, theme::danger());
-    text(g, x + w - status_w, start + 4.0, &item.state_label, 11.0, theme::danger(), false);
-    *y = start + 24.0;
-    let meta = fit(g, &meta_line(s, item, task.map(|t| t.place.as_str())), tw, 10.5, false);
-    text(g, tx, *y, &meta, 10.5, theme::text_dim(), false);
-    *y += 20.0;
-    let ask = task.map(|t| t.attention.clone()).filter(|a| !a.is_empty())
-        .or_else(|| pane.map(|row| row.progress.clone()).filter(|p| !p.is_empty()))
-        .unwrap_or_else(|| "무엇을 기다리는지 아직 확인하지 못했어요".into());
-    paint_overview_summary(g, tx, y, tw, "필요", &ask, 2);
-    if item.stale {
-        overview_note(g, tx, y, tw, "오래된 정보 · 마지막으로 확인한 상태예요", theme::text_dim());
+    if selected || contains(rect, s.cursor) {
+        round_rect(g, x, start, w, height, theme::radius_sm(),
+            if selected { theme::surface_active() } else { theme::surface_hover() });
     }
-    hit(g, hits, Target::WorkSelect(item.key.clone()), (x, start, w, *y - start), false);
-    let mut bx = tx;
-    let detail_label = if selected { "상세 접기" } else { "상세 보기" };
-    text_button(g, s, hits, (bx, *y, 76.0, 28.0), detail_label, Target::WorkSelect(item.key.clone()), false);
-    bx += 84.0;
-    if let Some(row) = pane.filter(|row| overview_is_local(&s.data.overview, &row.address)) {
-        button(g, s, hits, (bx, *y, 96.0, 26.0), "창으로 이동", Target::OverviewFocus(row.address.clone()), true);
-        bx += 104.0;
-    }
-    let mut below = None;
-    if task.is_some_and(|t| t.state == TaskState::ApprovalNeeded) {
-        disabled_button(g, (bx, *y, 64.0, 26.0), "승인");
-        bx += 72.0;
-        // 꺼 둔 이유가 잘리면 꺼 둔 단추만 남는다 — 옆에 안 들어가면 다음 줄로 내린다.
-        let note = "서버의 1회용·범위·만료 확인이 생기면 켭니다";
-        if g.measure_chrome_text(note, 10.5, false) <= x + w - bx {
-            text(g, bx, *y + 7.0, note, 10.5, theme::text_mute(), false);
-        } else {
-            below = Some(note);
-        }
-    }
-    *y += 36.0;
-    if let Some(note) = below {
-        overview_note(g, tx, y, tw, note, theme::text_mute());
-    }
-    divider(g, x, *y, w);
-    *y += 12.0;
-}
-
-/// 누를 수 없는 단추 — 자리는 지키고 흐리게. 클릭 영역을 만들지 않는다.
-fn disabled_button(g: &mut gpu::GpuRenderer, rect: Rect, label: &str) {
-    g.round_rect_stroke(rect.0, rect.1, rect.2, rect.3, theme::radius_md().min(5.0), 1.0, theme::with_alpha(theme::border(), 140));
-    let shown = fit(g, label, rect.2 - 14.0, 11.5, false);
-    let tx = rect.0 + (rect.2 - g.measure_chrome_text(&shown, 11.5, false)) / 2.0;
-    text(g, tx, rect.1 + (rect.3 - 12.0) / 2.0 - 1.0, &shown, 11.5, theme::text_mute(), false);
-}
-
-fn paint_stream_item(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32, item: &WorkItem) {
-    let start = *y;
-    let selected = s.work.selected.as_ref() == Some(&item.key);
-    let rect_h_guess = 86.0;
-    let hover = contains((x, start, w, rect_h_guess), s.cursor);
-    let pad = 10.0;
-    let inner = w - pad * 2.0;
-    let mut cy = start + pad;
-    let lines = board_wrap(&board_plain(&item.title, 400), inner, 2, |line| g.measure_chrome_text(line, 12.0, false));
-    let title_h = lines.len().max(1) as f32 * 18.0;
-    let meta = fit(g, &meta_line(s, item, task_of(s, item).map(|t| t.place.as_str())), inner, 10.5, false);
-    let height = pad + title_h + 4.0 + 18.0 + 20.0 + pad;
-    if selected || hover {
-        round_rect(g, x, start, w, height, theme::radius_md().min(5.0), if selected { theme::surface_active() } else { theme::surface_hover() });
-    }
-    for line in &lines {
-        text(g, x + pad, cy, line, 12.0, theme::text(), false);
+    for line in title {
+        text(g, x + inset, cy, &line, 12.0, theme::text(), false);
         cy += 18.0;
     }
-    if lines.is_empty() { cy += 18.0; }
-    cy += 4.0;
-    text(g, x + pad, cy, &meta, 10.5, theme::text_dim(), false);
-    cy += 18.0;
-    let (label, color) = match item.finish {
-        // 창의 완료 보고는 학생 자신의 말이다 — 장부의 「끝남」과 같은 낱말로 부르지 않는다.
-        Some(Finish::Unverified) if matches!(item.key, WorkKey::Pane(_)) => ("완료 보고 · 검증 안 됨".to_string(), Finish::Unverified.color()),
-        Some(finish) => (finish.label().to_string(), finish.color()),
-        None => (item.state_label.clone(), if item.lane == Lane::Progress { theme::accent() } else { theme::text_dim() }),
-    };
-    let label = if item.stale { format!("{label} · 오래된 정보") } else { label };
-    let label = fit(g, &label, inner - 14.0, 10.5, false);
-    circle_rect(g, x + pad, cy + 4.0, 6.0, color);
-    text(g, x + pad + 12.0, cy + 1.0, &label, 10.5, color, false);
-    hit(g, hits, Target::WorkSelect(item.key.clone()), (x, start, w, height), false);
-    g.hover_pointer |= hover;
+    let status_line = fit(g, &status_line, inner, 10.5, false);
+    text(g, x + inset, cy + 4.0, &status_line, 10.5, color, false);
+    let meta = fit(g, &meta, inner, 10.5, false);
+    text(g, x + inset, cy + 22.0, &meta, 10.5, theme::text_dim(), false);
+    hit(g, hits, Target::WorkSelect(item.key.clone()), rect, false);
+    g.hover_pointer |= contains(rect, s.cursor);
+    divider(g, x, start + height, w);
     *y = start + height + 6.0;
 }
 
@@ -527,7 +437,14 @@ fn paint_detail(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: 
     let task = task_of(s, item);
     let detail = task.and_then(|t| book.detail(&t.id).filter(|d| d.rev == t.rev));
     let pane = pane_of(s, item);
-    group_title(g, x, y, w, "고른 일");
+    button(g, s, hits, (x, *y, 160.0_f32.min(w), 26.0), "이 일 나쵸에게 물어보기", Target::WorkChat(item.key.clone()), true);
+    *y += 40.0;
+    if item.lane == Lane::Answer {
+        let ask = task.map(|t| t.attention.as_str()).filter(|v| !v.is_empty())
+            .or_else(|| pane.map(|row| row.progress.as_str()).filter(|v| !v.is_empty()))
+            .unwrap_or("무엇을 기다리는지 아직 확인하지 못했어요");
+        paint_overview_summary(g, x, y, w, "필요한 답", ask, 4);
+    }
     let lines = board_wrap(&board_plain(&item.title, 400), w, 3, |line| g.measure_chrome_text(line, 13.0, false));
     for line in lines {
         text(g, x, *y, &line, 13.0, theme::text(), false);
@@ -647,45 +564,6 @@ fn origin_hint_line(hint: &str, task: Option<&str>) -> String {
     }
 }
 
-fn paint_machines(g: &mut gpu::GpuRenderer, s: &Snapshot, x: f32, y: &mut f32, w: f32) {
-    let data = &s.data.overview;
-    group_title(g, x, y, w, "기기 · 학생");
-    let mut sources: Vec<_> = data.sources.iter().collect();
-    sources.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.machine_id.cmp(&b.machine_id)));
-    if sources.is_empty() {
-        overview_note(g, x, y, w, "아직 확인한 기기가 없어요", theme::text_dim());
-    }
-    for source in sources {
-        let state = match source.state.as_str() {
-            "online" if source.complete => "연결됨",
-            "offline" | "disconnected" => "연결 끊김",
-            _ => "미확인",
-        };
-        let students: Vec<&OverviewPane> = data.panes.iter()
-            .filter(|row| row.address.machine_id == source.machine_id && pane_is_agent(row) && !row.detached)
-            .collect();
-        let head = format!("{} · {} · {} · 학생 {}", source.label, state, board_relative_time(data.observed_at_ms, source.observed_at_ms), students.len());
-        let head = fit(g, &board_plain(&head, 200), w, 12.0, true);
-        text(g, x, *y, &head, 12.0, theme::text(), true);
-        *y += 22.0;
-        for row in students.iter().take(8) {
-            let (label, rank) = overview_status(row);
-            let color = overview_status_color(rank);
-            face(g, s, row.character.as_deref(), x, *y, 20.0);
-            let name = row.character.as_deref().filter(|n| !n.is_empty()).unwrap_or(&row.address.surface_id);
-            let label_w = g.measure_chrome_text(label, 10.5, false);
-            let line = fit(g, &format!("{name} · {}", pane_project(&row.room_label)), (w - 28.0 - label_w - 22.0).max(0.0), 11.0, false);
-            text(g, x + 28.0, *y + 3.0, &line, 11.0, theme::text(), false);
-            circle_rect(g, x + w - label_w - 12.0, *y + 7.0, 6.0, color);
-            text(g, x + w - label_w, *y + 4.0, label, 10.5, color, false);
-            *y += 26.0;
-        }
-        if students.len() > 8 {
-            overview_note(g, x, y, w, &format!("외 {}명", students.len() - 8), theme::text_dim());
-        }
-        *y += 10.0;
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -816,8 +694,10 @@ mod tests {
     }
 
     #[test]
-    fn narrow_boards_stack_the_streams() {
-        assert_eq!(stream_columns(639.0), 1);
-        assert_eq!(stream_columns(640.0), 3);
+    fn human_groups_keep_verification_in_progress_and_results_distinct() {
+        assert_eq!(human_group(Lane::Answer), Lane::Answer);
+        assert_eq!(human_group(Lane::Progress), Lane::Progress);
+        assert_eq!(human_group(Lane::Verify), Lane::Progress);
+        assert_eq!(human_group(Lane::Done), Lane::Done);
     }
 }

@@ -17,6 +17,11 @@ static CREDENTIALS: Mutex<()> = Mutex::new(());
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 static REJECTED: Mutex<Option<String>> = Mutex::new(None);
 
+// UI caches can discard old-account content without reading credentials on the render thread.
+pub fn change_epoch() -> u64 {
+    EPOCH.load(Ordering::Acquire)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stamp {
     epoch: u64,
@@ -82,6 +87,7 @@ pub(crate) fn reject_if(stamp: &Stamp, relevant: impl FnOnce() -> bool) {
     let _ = with_current(stamp, || {
         if !relevant() { return Ok(()); }
         if let Ok(mut rejected) = REJECTED.lock() { *rejected = Some(stamp.identity.clone()); }
+        EPOCH.fetch_add(1, Ordering::AcqRel);
         crate::agent_accounts::clear_cache();
         Ok(())
     });

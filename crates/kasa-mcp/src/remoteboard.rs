@@ -187,6 +187,22 @@ fn tag_agent(mut a: Value, label: &str) -> Value {
     a
 }
 
+fn import_rows(rows: &[Value], label: &str, decorate: fn(Value, &str) -> Value) -> Vec<Value> {
+    rows.iter()
+        // Peer endpoints also include their remote cache. Retagging those rows erases
+        // provenance and circulates them indefinitely when two peers poll each other.
+        .filter(|row| {
+            row.is_object() && match row.get("machine") {
+                None | Some(Value::Null) => true,
+                Some(Value::String(machine)) => machine.is_empty(),
+                Some(_) => false,
+            }
+        })
+        .cloned()
+        .map(|row| decorate(row, label))
+        .collect()
+}
+
 /// 한 주소를 GET 해서 JSON 으로. `reqwest` 가 `json` feature 없이 들어와 있어
 /// (`default-features = false`) `.json()` 이 없다 — 그것 하나 때문에 의존성을 늘리는
 /// 대신 본문을 받아 직접 판다.
@@ -196,23 +212,14 @@ async fn get_json(client: &reqwest::Client, url: String) -> Option<Value> {
 }
 
 async fn fetch_one(client: &reqwest::Client, r: &Remote) -> Option<(Vec<Value>, Vec<Value>)> {
-    let board: Vec<Value> = get_json(client, format!("{}/board", r.base))
-        .await?
-        .get("board")?
-        .as_array()?
-        .iter()
-        .map(|row| tag(row.clone(), &r.label))
-        .collect();
-    let board = trim_done(board);
+    let reply = get_json(client, format!("{}/board", r.base)).await?;
+    let board = trim_done(import_rows(reply.get("board")?.as_array()?, &r.label, tag));
     // background 는 없어도 board 는 살린다 — 둘을 한 실패로 묶으면 한쪽 실패가
     // 멀쩡한 다른 쪽까지 지운다.
     let agents = get_json(client, format!("{}/background-agents", r.base))
         .await
-        .and_then(|v| v.get("agents")?.as_array().cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|a| tag_agent(a, &r.label))
-        .collect();
+        .and_then(|v| v.get("agents")?.as_array().map(|rows| import_rows(rows, &r.label, tag_agent)))
+        .unwrap_or_default();
     Some((board, agents))
 }
 
@@ -262,6 +269,85 @@ pub fn background_agents() -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn peer_cycle_counts(decorate: fn(Value, &str) -> Value, filter_forwarded: bool) -> Vec<(usize, usize)> {
+        let local_a = serde_json::json!({"surface_id":"%1", "sessionId":"a-session", "status":"working", "machine":null});
+        let local_b = serde_json::json!({"surface_id":"%2", "sessionId":"b-session", "status":"idle"});
+        let mut a = vec![local_a.clone()];
+        let mut b = vec![local_b.clone()];
+        let mut counts = Vec::new();
+        for _ in 0..8 {
+            let import = |rows: &[Value], label: &str| {
+                if filter_forwarded {
+                    import_rows(rows, label, decorate)
+                } else {
+                    rows.iter().cloned().map(|row| decorate(row, label)).collect()
+                }
+            };
+            let from_b = import(&b, "peer-b");
+            let from_a = import(&a, "peer-a");
+            a = std::iter::once(local_a.clone()).chain(from_b).collect();
+            b = std::iter::once(local_b.clone()).chain(from_a).collect();
+            counts.push((a.len(), b.len()));
+        }
+        counts
+    }
+
+    #[test]
+    fn peer_board_cycles_stop_at_direct_observations() {
+        assert_eq!(peer_cycle_counts(tag, false), (2..=9).map(|n| (n, n)).collect::<Vec<_>>());
+        assert_eq!(peer_cycle_counts(tag, true), vec![(2, 2); 8]);
+    }
+
+    #[test]
+    fn peer_background_cycles_stop_at_direct_observations() {
+        assert_eq!(peer_cycle_counts(tag_agent, false), (2..=9).map(|n| (n, n)).collect::<Vec<_>>());
+        assert_eq!(peer_cycle_counts(tag_agent, true), vec![(2, 2); 8]);
+    }
+
+    #[test]
+    fn forwarded_rows_are_rejected_before_provenance_is_replaced() {
+        let rows = vec![
+            serde_json::json!({"surface_id":"direct-absent", "sessionId":"direct-absent"}),
+            serde_json::json!({"surface_id":"direct-null", "sessionId":"direct-null", "machine":null}),
+            serde_json::json!({"surface_id":"direct-empty", "sessionId":"direct-empty", "machine":""}),
+            serde_json::json!({"surface_id":"peer-a:%4", "sessionId":"forwarded", "machine":"peer-a"}),
+            serde_json::json!({"surface_id":"%5", "sessionId":"mirror", "machine":"peer-b"}),
+            serde_json::json!({"surface_id":"bad", "machine":false}),
+            Value::Null,
+        ];
+        for decorate in [tag as fn(Value, &str) -> Value, tag_agent] {
+            let out = import_rows(&rows, "peer-b", decorate);
+            assert_eq!(out.len(), 3);
+            assert_eq!(out.iter().map(|row| row["surface_id"].as_str().unwrap()).collect::<Vec<_>>(),
+                ["direct-absent", "direct-null", "direct-empty"]);
+            assert!(out.iter().all(|row| row["machine"] == "peer-b"));
+        }
+    }
+
+    #[test]
+    fn same_named_direct_sessions_keep_distinct_ids_and_remote_labels() {
+        let rows = vec![
+            serde_json::json!({"surface_id":"session-a", "sessionId":"session-a", "character":"same", "peer_name":"same", "title":"first", "parentSurface":"%1"}),
+            serde_json::json!({"surface_id":"session-b", "sessionId":"session-b", "character":"same", "peer_name":"same", "title":"second", "parentSurface":"%2"}),
+        ];
+        let board = import_rows(&rows, "peer-b", tag);
+        assert_eq!(board.len(), 2);
+        for (got, original) in board.iter().zip(&rows) {
+            assert_eq!(got["surface_id"], original["surface_id"]);
+            assert_eq!(got["sessionId"], original["sessionId"]);
+            assert_eq!(got["title"], original["title"]);
+            assert_eq!(got["peer_name"], "same");
+            assert_eq!(got["character"], "peer-b");
+            assert_eq!(got["reach"], "tell");
+        }
+        let background = import_rows(&rows, "peer-b", tag_agent);
+        assert_eq!(background.len(), 2);
+        assert_eq!(background[0]["sessionId"], "session-a");
+        assert_eq!(background[1]["sessionId"], "session-b");
+        assert_eq!(background[0]["parentSurface"], "peer-b:%1");
+        assert_eq!(background[1]["parentSurface"], "peer-b:%2");
+    }
 
     #[test]
     fn env_형식을_읽고_빈_항목은_버린다() {

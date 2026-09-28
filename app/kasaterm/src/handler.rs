@@ -2053,8 +2053,8 @@ impl ApplicationHandler<UserEvent> for App {
             let view_m = Submenu::new("보기", true);
             let git_item = MenuItem::new("Git 패널 켜기/끄기", true, None);
             let session_item = MenuItem::new("세션 패널 켜기/끄기", true, None);
-            let board_item = MenuItem::new("보드 켜기/끄기  ⇧⌘B", true, None);
-            let arona_item = MenuItem::new("캐릭터 보기 켜기/끄기", true, None);
+            let board_item = MenuItem::new("작업현황 켜기/끄기  ⇧⌘B", true, None);
+            let arona_item = MenuItem::new("나쵸 대화 켜기/끄기  ⇧⌘A", true, None);
             let _ = view_m.append(&git_item);
             let _ = view_m.append(&session_item);
             let _ = view_m.append(&board_item);
