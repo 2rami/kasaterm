@@ -1018,64 +1018,7 @@ impl App {
                 })
             });
         let runs_claude = agent_kind.is_some();
-        // classic claude 의 입력창은 **늘 바닥에** 둔다. 대체화면을 끈 claude 는 입력창이
-        // 대화의 마지막 줄일 뿐이라, 대화가 짧으면 화면 한가운데 떠 있고 스크롤을 올리면
-        // 화면 밖으로 나간다(2026-08-30 "노플리커 끄니까 하단 채팅창 고정되는게 안된다",
-        // 2026-09-25 "tui 풀스크린 끄고 … 하단바 고정안되고"). 노플리커처럼 대화는 위에
-        // 그대로 두고 입력창부터만 내린다.
-        //
-        // - 맨 아래를 보고 있으면: 화면 끝의 빈 줄을 입력창 **위로** 옮긴다. 그 여백을
-        //   스크롤백에서 당겨 메우던 길은 걷었다(2026-09-22) — claude 가 다시 그릴 때
-        //   스크롤백에 남은 옛 배너가 위에서 되살아나 「복제」로 보였다.
-        // - 스크롤을 올렸으면: 살아 있는 화면에서 입력창을 떠다 뷰포트 바닥에 덮는다.
-        //   위쪽 sticky 띠가 지나간 질문을 붙잡는 것과 같은 원리다. 두 경우 모두 입력창의
-        //   **마지막 글자 줄**이 바닥에 닿으므로 스크롤을 올리는 순간 자리가 안 뛴다.
-        //
-        // 대체화면 앱(vim·helix)과 노플리커 claude 는 여기 안 온다 — claude 가 아니거나
-        // 화면 끝까지 직접 그려 옮길 여백이 없다.
-        let mut view_shift = crate::PaneViewShift { projection: projection.clone(), ..Default::default() };
-        if desktop_view && projection.is_none() && runs_claude && !composed.is_empty() {
-            if let Some(sess) = self.pty.get(tab_pid.as_str()) {
-                if sess.view_state().0 > 0 {
-                    let live: Vec<Vec<GridCell>> = sess
-                        .live_tail_rows(PINNED_INPUT_SCAN_ROWS)
-                        .iter()
-                        .map(normalise)
-                        .collect();
-                    if let Some(band) = crate::screenread::input_band(&live) {
-                        let h = band.len().min(composed.len());
-                        let base = composed.len() - h;
-                        composed[base..].clone_from_slice(&live[band.end - h..band.end]);
-                        view_shift.pinned = composed[base..].to_vec();
-                    }
-                } else if let Some(band) = crate::screenread::input_band(&composed) {
-                    let gap = composed.len() - band.end;
-                    composed[band.start..].rotate_right(gap);
-                    view_shift.gap = band.start..band.start + gap;
-                }
-            }
-        }
-        view_shift.rows = composed.len();
-        // 「하단바 위치가 이상하다」를 잡는 계측(2026-09-05). 화면이 몇 줄
-        // 당겨졌는지는 프레임마다 다시 재는 값이라, 그 값이 흔들리면 입력창과
-        // 상태줄이 함께 오르내린다. **바뀔 때만** 찍는다 — 매 프레임 찍으면
-        // 초당 수십 줄이라 로그가 못 쓰게 된다.
-        if desktop_view && std::env::var_os("KASATERM_VIEWSHIFT_DEBUG").is_some() {
-            let prev = self.pane_view_shift.get(id.as_str());
-            let changed = prev.map_or(true, |p| {
-                p.gap != view_shift.gap
-                    || p.pinned.len() != view_shift.pinned.len()
-                    || p.rows != view_shift.rows
-            });
-            if changed {
-                eprintln!(
-                    "[viewshift] pane={id} gap={:?} pinned={} rows={} claude={runs_claude}",
-                    view_shift.gap,
-                    view_shift.pinned.len(),
-                    view_shift.rows,
-                );
-            }
-        }
+        let view_shift = crate::PaneViewShift { projection: projection.clone() };
         view_shifts.push((id.clone(), view_shift));
         // Codex 프로세스 판정은 부팅 직후 statusline보다 한두 프레임 늦을 수
         // 있다. 엄격한 `model effort · … · Context N%` 문법을

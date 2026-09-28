@@ -643,16 +643,12 @@ mod mirror_input_tests {
             ch, ..crate::GridCell::blank()
         }).collect()];
         let projection = crate::mirror_view::project(&source, (0, 7), 4, 3, None, None);
-        let shift = crate::PaneViewShift {
-            projection: Some(std::sync::Arc::new(projection)), rows: 3,
-            ..Default::default()
-        };
+        let shift = crate::PaneViewShift { projection: Some(std::sync::Arc::new(projection)) };
         assert_eq!(shift.term_pos(1, 3), Some((0, 7)));
         assert_eq!(shift.display_pos(0, 7), Some((1, 3)));
         assert_eq!(shift.term_pos(2, 0), None, "viewer-only padding is not a source cell");
         let clipped = crate::PaneViewShift {
             projection: Some(std::sync::Arc::new(crate::mirror_view::project(&source, (0, 7), 4, 1, None, Some(1)))),
-            rows: 1, ..Default::default()
         };
         assert_eq!(clipped.display_pos(0, 7), None, "offscreen cursor/IME must stay hidden");
     }

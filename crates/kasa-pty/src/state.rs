@@ -1521,15 +1521,6 @@ impl PtySession {
         read_row_at_abs(&self.term.lock().unwrap(), abs)
     }
 
-    /// 살아 있는 화면의 마지막 `n` 행 — 스크롤을 올려 둔 상태에서도 같은 값이다.
-    ///
-    /// 대체화면을 안 쓰는 claude 는 입력창이 대화의 마지막 줄일 뿐이라, 스크롤을
-    /// 올리면 함께 위로 밀려난다. 렌더러가 이 행들을 떠다 뷰포트 맨 아래에 덮어
-    /// 입력창을 붙잡아 둔다.
-    pub fn live_tail_rows(&self, n: usize) -> Vec<Row> {
-        read_live_tail(&self.term.lock().unwrap(), n)
-    }
-
     /// 스크롤백에 남은 **사용자 프롬프트 줄**을 절대 줄 번호와 함께 모은다.
     ///
     /// claude 는 확정된 프롬프트를 `❯ <내용>` 한 줄로 남기고, 화면 하단 입력창은

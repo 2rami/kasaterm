@@ -1148,65 +1148,35 @@ fn term_scrollback_lines(t: &TerminalPane) -> Vec<String> {
 
 /// Pull the selected text out of the visible row grid. Joined with `\n`,
 /// trailing spaces trimmed per row. Mirrors kasaterm::extract_selection.
-/// 렌더가 뷰포트 원본(`term.cells`) 위에 얹는 **자리 옮김**. 화면에서 고른 글자와
-/// 클립보드에 담기는 글자가 같으려면 복사도 이 옮김을 되짚어야 한다 — 원본만 보면
-/// 당긴 줄 수만큼 어긋난 글자가 담긴다(2026-09-05 지적: "복사가 이상하게 되고").
+/// 렌더가 뷰포트 원본(`term.cells`) 대신 그리는 **보기 배치** — 거울 pane 을 이 창
+/// 폭에 맞춰 다시 접은 것(`projection`). 화면에서 고른 글자와 클립보드에 담기는 글자가
+/// 같으려면 복사·링크·마우스도 이걸 되짚어야 한다(2026-09-05 "복사가 이상하게 되고").
 ///
-/// classic claude 가 기본이 되면서(2026-09-04) 이 옮김이 **모든 claude pane** 에서
-/// 돌게 됐다. 전에는 손으로 classic 을 켠 창에서만 깨어나 눈에 안 띄었다.
-///
-/// 화면 한 장을 통째로 캐시하지 않고 **옮긴 조각만** 담는다: pane 하나가 수천 셀이라
-/// 프레임마다 복사하면 값이 크고, 어긋나는 자리는 위아래 끝 몇 줄뿐이다.
+/// classic claude 의 입력창을 바닥에 붙이던 옮김(여백 끼우기·입력창 붙잡기)도 여기
+/// 살았는데, claude·codex 를 대체화면으로 돌리며 걷었다(2026-09-28).
 #[derive(Default, Clone)]
 struct PaneViewShift {
     /// Independent viewer layout with exact display-to-source cell mapping.
     projection: Option<Arc<crate::mirror_view::Projection>>,
-    /// classic claude 가 화면 끝에 남긴 여백을 **입력창 위로** 옮겨 끼운 빈 행.
-    /// 이 화면 행들엔 원본이 없고, 그 아래부터 원본이 `gap.len()` 만큼 밀린다.
-    gap: std::ops::Range<usize>,
-    /// 스크롤 중 바닥에 붙잡아 둔 입력창 — 화면 맨 아래 `pinned.len()` 행.
-    /// 살아 있는 화면에서 떠 온 것이라 지나간 대화를 담은 뷰포트에는 없다.
-    pinned: Vec<Vec<GridCell>>,
-    /// 재구성 뒤 화면 행 수. 바닥에서 몇 번째 행인지 세는 기준이라 원본 길이로
-    /// 대신하면 안 된다 — 원본이 화면보다 길 수 있다(`take(rows_now)`).
-    rows: usize,
 }
 
 impl PaneViewShift {
-    /// 옮김이 아예 없나 — 평범한 pane, 그리고 **대체화면 claude**(노플리커)가 그렇다.
-    /// 그쪽은 claude 가 화면 끝까지 직접 그려 메울 여백이 없다.
-    fn is_identity(&self) -> bool {
-        self.projection.is_none() && (self.rows == 0 || (self.gap.is_empty() && self.pinned.is_empty()))
-    }
-
     /// 화면 행 `r` 에 **실제로 그려진** 줄. 화면 좌표를 쓰는 모든 판독(복사·링크
     /// 집기)이 이걸 거쳐야 고른 자리와 집히는 글자가 같다.
     fn row<'a>(&'a self, r: usize, base: &'a [Vec<GridCell>]) -> Option<&'a Vec<GridCell>> {
-        if let Some(projection) = &self.projection { return projection.rows.get(r); }
-        if self.is_identity() {
-            return base.get(r);
+        match &self.projection {
+            Some(projection) => projection.rows.get(r),
+            None => base.get(r),
         }
-        let pin_start = self.rows.saturating_sub(self.pinned.len());
-        if r >= pin_start {
-            return self.pinned.get(r - pin_start);
-        }
-        base.get(self.term_row(r)?)
     }
 
     /// 화면 행을 **앱이 아는 행**으로 되돌린다 — 마우스 이벤트를 TUI 로 넘길 때
-    /// 쓴다. 우리가 화면을 옮겨 그렸으므로 그대로 보내면 그 앱은 다른 줄을 눌린
-    /// 것으로 안다. 끼워 넣은 빈 행은 앱 화면에 없으니 `None`.
+    /// 쓴다. 보기 전용으로 다시 접은 칸은 앱 화면에 없으니 `None`.
     fn term_row(&self, r: usize) -> Option<usize> {
-        if let Some(projection) = &self.projection {
-            return projection.source_map.get(r)?.iter().flatten().next().map(|&(row, _)| row);
+        match &self.projection {
+            Some(projection) => projection.source_map.get(r)?.iter().flatten().next().map(|&(row, _)| row),
+            None => Some(r),
         }
-        if self.is_identity() {
-            return Some(r);
-        }
-        if self.gap.contains(&r) {
-            return None;
-        }
-        Some(if r < self.gap.start { r } else { r - self.gap.len() })
     }
 
     fn term_pos(&self, row: usize, col: usize) -> Option<(usize, usize)> {
@@ -1222,21 +1192,15 @@ impl PaneViewShift {
                 cells.iter().position(|cell| *cell == Some((row, col))).map(|c| (r, c))
             });
         }
-        let row = if row < self.gap.start { row } else { row + self.gap.len() };
-        // 입력창 밑 빈 줄(꼬리)은 입력창 위로 옮겨 갔다 — 거기 있던 커서는 화면 밖이다.
-        (self.rows == 0 || row < self.rows).then_some((row, col))
+        Some((row, col))
     }
 
     /// 화면에 실제로 그려진 그대로의 행들. 복사는 원본이 아니라 이걸 봐야 한다.
-    ///
-    /// 옮김이 없으면 원본을 그대로 돌려주므로, 이 경로가 붙기 전과 동작이 같다.
     fn compose(&self, base: &[Vec<GridCell>]) -> Vec<Vec<GridCell>> {
-        if self.is_identity() {
-            return base.to_vec();
+        match &self.projection {
+            Some(projection) => projection.rows.clone(),
+            None => base.to_vec(),
         }
-        (0..self.rows)
-            .map(|r| self.row(r, base).cloned().unwrap_or_default())
-            .collect()
     }
 }
 
@@ -9290,56 +9254,7 @@ mod tests {
         row
     }
 
-    /// 화면 행 하나를 통째로 고르는 선택.
-    fn whole_row(r: u16, width: usize) -> Selection {
-        Selection {
-            anchor: (0, r),
-            end: (width as u16 - 1, r),
-        }
-    }
-
-    /// 입력창을 바닥으로 내려 그린 pane 에서, 복사·마우스·커서가 **화면에 보이는
-    /// 그 줄**을 가리킨다.
-    ///
-    /// classic claude 는 화면 끝에 여백을 남기고, 렌더는 그 여백을 입력창 위로 옮겨
-    /// 입력창을 바닥에 붙인다. 원본 글자판을 그대로 보면 끼운 빈 줄 수만큼 **아래
-    /// 글자**를 집는다(2026-09-05: "복사가 이상하게 되고").
-    #[test]
-    fn view_follows_gap_above_input() {
-        const W: usize = 8;
-        let base: Vec<Vec<GridCell>> = (0..5).map(|i| grid_row(&format!("b{i}"), W)).collect();
-        let shift = PaneViewShift { gap: 2..4, rows: 5, ..Default::default() };
-        let view = shift.compose(&base);
-        // 화면 = [b0, b1, 빈, 빈, b2] — 원본 꼬리의 빈 줄(b3·b4 자리)이 위로 갔다.
-        assert_eq!(extract_selection(&view, whole_row(1, W)), "b1");
-        assert_eq!(extract_selection(&view, whole_row(2, W)), "");
-        assert_eq!(extract_selection(&view, whole_row(4, W)), "b2");
-        assert_eq!(shift.term_row(3), None, "끼운 빈 줄은 앱 화면에 없다");
-        assert_eq!(shift.term_row(4), Some(2));
-        assert_eq!(shift.display_pos(2, 5), Some((4, 5)), "입력창 커서도 함께 내려간다");
-        assert_eq!(shift.display_pos(1, 5), Some((1, 5)));
-    }
-
-    /// 스크롤 중 바닥에 붙잡아 둔 입력창을 복사하면 **붙잡힌 그 글자**가 담긴다.
-    ///
-    /// 뷰포트 꼬리는 지나간 대화라, 원본을 보면 화면에 없는 옛 줄이 복사된다.
-    #[test]
-    fn copy_follows_pinned_input() {
-        const W: usize = 8;
-        let base: Vec<Vec<GridCell>> = (0..5).map(|i| grid_row(&format!("b{i}"), W)).collect();
-        let shift = PaneViewShift {
-            pinned: vec![grid_row("p0", W), grid_row("p1", W)],
-            rows: 5,
-            ..Default::default()
-        };
-        let view = shift.compose(&base);
-        // 화면 = [b0, b1, b2, p0, p1]
-        assert_eq!(extract_selection(&view, whole_row(2, W)), "b2");
-        assert_eq!(extract_selection(&view, whole_row(4, W)), "p1");
-    }
-
-    /// 옮김이 없는 pane(평범한 셸·대체화면 claude)은 원본 그대로 — 이 경로가
-    /// 붙기 전과 한 글자도 다르지 않아야 한다.
+    /// 보기 배치가 없는 pane(거울이 아닌 모든 pane)은 원본 그대로.
     #[test]
     fn copy_without_shift_is_untouched() {
         const W: usize = 8;

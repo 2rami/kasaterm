@@ -93,50 +93,13 @@ impl PromptBox {
     }
 }
 
-/// 바닥에 붙일 입력 띠의 **첫 행** — 입력박스의 위 테두리(codex 는 테두리가 없어
-/// 입력행 자신).
-///
-/// 살아 있는 화면(`live_tail_rows`)을 받는다 — 뷰포트가 아니라. 뷰포트에는
-/// 스크롤을 올린 순간 입력창이 이미 없다.
+/// 입력 띠의 **첫 행** — 입력박스의 위 테두리(codex 는 테두리가 없어 입력행 자신).
+/// 거울 보기를 이 창 폭으로 다시 접을 때 입력창을 바닥에 두는 기준이다.
 pub(crate) fn pinned_input_top(rows: &[Vec<GridCell>]) -> Option<usize> {
     Some(match prompt_box(rows)? {
         PromptBox::Bordered { top, .. } => top,
         PromptBox::Filled { rows } => rows.start,
     })
-}
-
-/// pane 바닥에 붙일 **입력 띠** — 입력박스 위 테두리부터 마지막 글자 줄까지.
-///
-/// 박스 **아래**까지 함께 옮기는 이유: claude 는 테두리 밑에 상태줄·모드 힌트를 한두
-/// 줄 더 그린다. 박스만 옮기면 그 줄들이 따로 놀아, 스크롤 중엔 붙잡아 둔 입력창
-/// 밑으로 지나간 대화가 비친다.
-///
-/// 끝을 **마지막 글자 줄**에서 끊는 이유: classic claude 는 화면 맨 아래 한두 줄을
-/// 비워 두는데, 그 빈 줄까지 띠에 넣으면 입력창이 바닥에서 그만큼 뜬다. 맨 아래를 볼
-/// 때와 스크롤을 올렸을 때 모두 이 띠의 끝을 바닥에 맞추므로, 스크롤을 올리는 순간
-/// 입력창이 한 칸 내려앉는 일이 없다(2026-09-03 지적: "프롬프트 입력하는거 움직여
-/// 하단바").
-pub(crate) fn input_band(rows: &[Vec<GridCell>]) -> Option<std::ops::Range<usize>> {
-    let band = pinned_input_top(rows)?..rows.len() - blank_tail(rows);
-    (!band.is_empty()).then_some(band)
-}
-
-/// 화면 **꼬리의 빈 줄 수** — 글자도 배경색도 없는 행이 바닥에서 몇 개 이어지나.
-///
-/// classic claude 는 입력창·상태줄을 그린 뒤 화면 맨 아래 한두 줄을 안 쓴 채 남긴다.
-/// 대체화면 claude 는 화면 끝까지 그리므로 두 창을 나란히 놓으면 이쪽만 pane 바닥에
-/// 빈 띠가 생겨 보인다(2026-09-03 지적: "하단공간이 넓잖아" / "이게 지금"). 렌더는
-/// 이 빈 줄을 입력창 위로 옮겨 입력창을 바닥에 붙인다(`input_band`).
-///
-/// 배경색까지 보는 이유: codex 입력창은 채움색 행이라 글자가 없어도 빈 줄이 아니다.
-pub(crate) fn blank_tail(rows: &[Vec<GridCell>]) -> usize {
-    rows.iter()
-        .rev()
-        .take_while(|r| {
-            r.iter()
-                .all(|c| matches!(c.ch, ' ' | '\0') && c.bg == kasa_bridge::screen::Color::Default)
-        })
-        .count()
 }
 
 /// ultracode 턴의 입력박스 accent — 보라 숨쉬기. 학생 배정과 무관하게 모든
@@ -8392,8 +8355,7 @@ mod pinned_input_tests {
     }
 
     #[test]
-    fn 입력_띠는_위테두리부터_마지막_글자줄까지다() {
-        // claude 화면 꼬리 — 지나간 대화, 입력박스, 그 아래 모드 힌트.
+    fn 입력박스_위테두리를_찾는다() {
         let border = "─".repeat(20);
         let rows: Vec<Vec<GridCell>> = [
             "지나간 답변 한 줄",
@@ -8401,14 +8363,11 @@ mod pinned_input_tests {
             "❯ 여기에 친다",
             &border,
             "⏵⏵ accept edits on",
-            "",
         ]
         .iter()
         .map(|s| row(s))
         .collect();
-        // 테두리(1)부터 모드 힌트(4)까지 — 꼬리의 빈 줄은 빼야 입력창이 바닥에 닿는다.
         assert_eq!(pinned_input_top(&rows), Some(1));
-        assert_eq!(input_band(&rows), Some(1..5));
     }
 
     #[test]
@@ -8416,28 +8375,6 @@ mod pinned_input_tests {
         let rows: Vec<Vec<GridCell>> =
             ["빌드 로그 한 줄", "또 한 줄"].iter().map(|s| row(s)).collect();
         assert_eq!(pinned_input_top(&rows), None);
-        assert_eq!(input_band(&rows), None);
-    }
-
-    #[test]
-    fn 화면_밑에_남은_빈_줄을_센다() {
-        let rows: Vec<Vec<GridCell>> = ["⏵⏵ accept edits on", "", "   "]
-            .iter()
-            .map(|s| row(s))
-            .collect();
-        // 글자가 없는 두 줄 — 그만큼 입력창을 내려 바닥에 붙인다.
-        assert_eq!(blank_tail(&rows), 2);
-    }
-
-    #[test]
-    fn 채움색_행은_빈_줄이_아니다() {
-        // codex 입력창은 글자 없이 배경만 칠한 행이 있다 — 걷어내면 상자가 잘린다.
-        let mut filled = row("   ");
-        for c in filled.iter_mut() {
-            c.bg = kasa_bridge::screen::Color::Idx(8);
-        }
-        let rows = vec![row("지나간 답변"), filled];
-        assert_eq!(blank_tail(&rows), 0);
     }
 
     /// 띠에 뜬 글을 갈아 끼운다 — 렌더가 매 프레임 하는 일의 시험용 대역.
