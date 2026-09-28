@@ -353,6 +353,7 @@ fn parse(v: &Value) -> Vec<Machine> {
     };
     arr.iter()
         .filter_map(|m| {
+            if m.get("account_sync_unresolved").and_then(Value::as_bool) == Some(true) { return None; }
             let label = m.get("label")?.as_str()?.trim().to_string();
             if label.is_empty() {
                 return None;
@@ -602,21 +603,17 @@ fn candidate_keys() -> Vec<String> {
 
 /// 찾아낸 열쇠를 명부에 적는다 — 다음 터널·다음 실행이 그걸로 간다.
 fn remember_key(target: &str, key: &str) {
-    let mut list = entries();
-    let mut changed = false;
-    for e in list.iter_mut() {
-        if e.get("ssh").and_then(|v| v.as_str()) == Some(target) {
-            if let Some(o) = e.as_object_mut() {
-                o.insert("key".into(), Value::String(key.to_string()));
-                changed = true;
+    let Some(path) = machines_path() else { return };
+    let _ = crate::account_sync::local::edit_json(&path, serde_json::json!([]), |value| {
+        for entry in value.as_array_mut().ok_or("machine list invalid")? {
+            if entry.get("ssh").and_then(Value::as_str) == Some(target) {
+                if let Some(object) = entry.as_object_mut() {
+                    object.insert("key".into(), Value::String(key.into()));
+                }
             }
         }
-    }
-    if changed {
-        if let Err(e) = save_entries(&list) {
-            eprintln!("[machines] {target} 열쇠를 명부에 못 적음: {e}");
-        }
-    }
+        Ok(())
+    });
 }
 
 /// 그 ssh 대상의 hostname(화면공유 주소)과 홈을 한 번 물어 둔다. 실패는 60초에

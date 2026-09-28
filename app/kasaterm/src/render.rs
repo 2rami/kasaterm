@@ -854,19 +854,12 @@ impl App {
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default();
-        // Distinct repos to offer in the path dropdown. Union of every cwd we
-        // can see — the badge cache (`window_git` keys), the pane-cwd cache,
-        // and the column's current repo — so the list isn't empty when one
-        // source is sparse (the daemon-mode pane-cwd cache often is). Deduped
-        // + sorted for a stable order.
+        // Remote paths must never become local repository picker targets.
         let git_repo_list: Vec<std::path::PathBuf> = {
-            let mut set: std::collections::BTreeSet<std::path::PathBuf> = self
-                .window_git
-                .lock()
-                .map(|m| m.keys().cloned().collect())
-                .unwrap_or_default();
-            set.extend(self.pane_cwd_cache.values().cloned());
-            if let Some(cur) = git_view.cwd.clone() {
+            let mut set: std::collections::BTreeSet<std::path::PathBuf> = self.pane_cwd_cache.iter()
+                .filter(|(id, _)| !kasa_mcp::remote::is_remote_pane(id))
+                .map(|(_, cwd)| cwd.clone()).collect();
+            if let Some(cur) = git_view.cwd.clone().filter(|_| git_view.remote.is_none()) {
                 set.insert(cur);
             }
             set.into_iter().collect()
@@ -1441,13 +1434,7 @@ impl App {
                     }
                 };
                 footer_slots.push((id.clone(), box_x, box_y, box_w, box_h));
-                // claude agents 목록·resume 피커 화면에만 샬레 교실 배경을 셀 뒤에
-                // 깐다(사용자: 세션 선택 화면만). default-bg 셀은 fill 을 안 뿜어
-                // (gpu.draw_cells) 이미지가 그 자리로 비치고, 메뉴 글리프는 위 패스에
-                // 또렷이 얹힌다. 로더가 이미지를 어둡게 낮춰 텍스트 대비를 확보한다.
-                // 사용자 2026-07-26: /resume 은 일반 배경으로 — 백그라운드 세션
-                // 목록(agents)과 같은 교실 배경을 쓰니 두 화면이 겹쳐 보였다.
-                // 교실 배경은 agents 목록의 시각 정체성으로만 남긴다.
+                // 기존 사용자 배경은 목록에서만 유지해 대화 화면을 가리지 않는다.
                 if agents_view && theme::character_appearance() {
                     classroom_slots.push((box_x, box_y, box_w, box_h));
                 }
@@ -1459,15 +1446,15 @@ impl App {
                     // =OSC title). BA GUI board 라벨과 통일(사용자: 터미널 탭도 학생 이름).
                     // 비배정 pane 만 기존 "%N · 프로세스" 폴백.
                     let label = if agents_view {
-                        // 관리 화면 — 개별 학생 대신 SCHALE. 작업명(OSC title)은 유지.
+                        // 목록 화면은 세션에 배정된 캐릭터와 구별되어야 한다.
                         match pane
                             .title
                             .clone()
                             .map(|t| crate::strip_activity_prefix(&t).to_string())
                             .filter(|t| !t.is_empty())
                         {
-                            Some(t) => format!("샬레 · {t}"),
-                            None => "샬레".to_string(),
+                            Some(t) => format!("KASA · {t}"),
+                            None => "KASA".to_string(),
                         }
                     } else if let Some(c) = true_char.as_ref().filter(|_| runs_claude) {
                         // 헤더 학생명은 `display_pane_char`(=true_char) 정본을 쓴다 —
@@ -2540,13 +2527,19 @@ impl App {
                     g.upload_image(&key, &rgba, w, h);
                 }
             }
+            if !classroom_slots.is_empty() && !g.has_image("schale:classroom") {
+                if let Some((rgba, w, h)) = schale_classroom_rgba() {
+                    g.upload_image("schale:classroom", &rgba, w, h);
+                }
+            }
             // Device identity belongs to the whole terminal, not only a header
             // that disappears for a single pane. Default terminal cells are
             // transparent, so paint below them; explicit syntax/diff/prompt
             // fills and character accents remain above this local-mode tint.
             for (id, x, y, w, h) in &footer_slots {
-                // Keep the existing classroom illustration in system pickers.
-                if classroom_slots.contains(&(*x, *y, *w, *h)) { continue; }
+                // Only a decoded user background replaces the themed surface.
+                if g.has_image("schale:classroom")
+                    && classroom_slots.contains(&(*x, *y, *w, *h)) { continue; }
                 let background = pane_identities.get(id)
                     .and_then(|identity| identity.machine.pane_background(theme::pane_bg()))
                     .unwrap_or_else(theme::pane_bg);
@@ -2633,14 +2626,7 @@ impl App {
                     }
                 });
             }
-            // agents 뷰 SCHALE 로고 — Clawd 자리(또는 헤더 왼쪽 여백)에 정적 1프레임.
-            // 교실 배경 — 셀 뒤(이미지 패스, cover-fit). agents/resume 피커 pane 만.
-            if !classroom_slots.is_empty() {
-                if !g.has_image("schale:classroom") {
-                    if let Some((rgba, w, h)) = schale_classroom_rgba() {
-                        g.upload_image("schale:classroom", &rgba, w, h);
-                    }
-                }
+            if g.has_image("schale:classroom") {
                 for (bx, by, bw, bh) in &classroom_slots {
                     g.queue_image_cover("schale:classroom", *bx, *by, *bw, *bh);
                 }
@@ -3062,7 +3048,7 @@ impl App {
                     // 실제 sessionId 가 주입값과 어긋나 깨졌다(사용자) → foreground 프로세스명
                     // ("claude")으로 판정해 resume·--session-id 무관하게 견고하다.
                     let claude_char = titlebar_character.clone();
-                    // active pane 이 claude agents 목록 뷰면 타이틀바도 SCHALE(작업명 유지).
+                    // 목록 화면은 세션에 배정된 캐릭터와 구별되어야 한다.
                     let agents_active = active
                         .as_deref()
                         .map_or(false, |id| agents_view_panes.contains(id));
@@ -3073,8 +3059,8 @@ impl App {
                             .map(|t| crate::strip_activity_prefix(&t).to_string())
                             .filter(|s| !s.is_empty());
                         match work {
-                            Some(w) => format!("샬레  ·  {w}"),
-                            None => "샬레".to_string(),
+                            Some(w) => format!("KASA  ·  {w}"),
+                            None => "KASA".to_string(),
                         }
                     } else if let Some(c) = claude_char {
                         let work = active
@@ -5698,193 +5684,7 @@ impl App {
                     git_col_w,
                     top,
                 );
-                // ── Row 1: ~path : branch  ····  N · +ins -del
-                // Path click → repo picker, branch click → switcher (rects below).
-                {
-                    let path_disp = git_view
-                        .cwd
-                        .as_ref()
-                        .map(|p| crate::session::tilde_home(&p.to_string_lossy()))
-                        .unwrap_or_else(|| "—".to_string());
-                    let pcol = if self.git.col_pinned_cwd.is_some() {
-                        theme::accent()
-                    } else {
-                        theme::text_dim()
-                    };
-                    // 브랜치 자리를 먼저 떼고 경로를 그 안에 맞춘다. 안 맞추면 좁은
-                    // 칼럼에서 경로가 브랜치와 변경 통계를 통째로 칼럼 밖으로 밀어낸다
-                    // (216px 실측). 앞이 아니라 **뒤**를 남기는 건 지금 어느 폴더냐가
-                    // 알아야 할 쪽이라서다.
-                    let path_disp = {
-                        let branch_w = if git_view.no_repo {
-                            0.0
-                        } else {
-                            let b = if git_view.branch.is_empty() {
-                                "—"
-                            } else {
-                                git_view.branch.as_str()
-                            };
-                            // ahead/behind 배지도 브랜치 바로 뒤에 붙는다 — 이 폭을
-                            // 빼지 않으면 경로가 그만큼 배지를 칼럼 밖으로 민다
-                            // (640px 실측: `↑1` 이 창 오른쪽에서 잘렸다).
-                            let mut badge = 0.0_f32;
-                            if git_view.ahead > 0 {
-                                badge += g.measure_chrome_text(
-                                    &format!("↑{}", git_view.ahead),
-                                    12.0,
-                                    false,
-                                ) + 8.0;
-                            }
-                            if git_view.behind > 0 {
-                                badge += g.measure_chrome_text(
-                                    &format!("↓{}", git_view.behind),
-                                    12.0,
-                                    false,
-                                ) + 8.0;
-                            }
-                            g.measure_chrome_text(" : ", 12.0, false)
-                                + g.measure_chrome_text(b, 12.0, true)
-                                + 10.0
-                                + badge
-                        };
-                        let room = (git_col_x + git_col_w - 12.0 - gcx0 - branch_w).max(0.0);
-                        crate::info::fit_text_tail(g, &path_disp, room, 12.0, false)
-                    };
-                    let px = g.draw_text(
-                        gcx0,
-                        y,
-                        &path_disp,
-                        gpu::DrawOpts {
-                            font_size: 12.0,
-                            color: pcol,
-                            bold: false,
-                            italic: false,
-                        },
-                    );
-                    self.git.path_hdr_rect = Some((gcx0 - 3.0, y - 3.0, (px - gcx0) + 6.0, 19.0));
-                    if !git_view.no_repo {
-                        let branch = if git_view.branch.is_empty() {
-                            "—"
-                        } else {
-                            git_view.branch.as_str()
-                        };
-                        let cx2 = g.draw_text(
-                            px,
-                            y,
-                            " : ",
-                            gpu::DrawOpts {
-                                font_size: 12.0,
-                                color: theme::text_mute(),
-                                bold: false,
-                                italic: false,
-                            },
-                        );
-                        let bend = g.draw_text(
-                            cx2,
-                            y,
-                            branch,
-                            gpu::DrawOpts {
-                                font_size: 12.0,
-                                color: theme::text(),
-                                bold: true,
-                                italic: false,
-                            },
-                        );
-                        self.git.branch_hdr_rect =
-                            Some((cx2 - 3.0, y - 3.0, (bend - cx2) + 6.0, 19.0));
-                        // ahead/behind counts vs origin, as plain text right after
-                        // the branch (↑ unpushed, ↓ unpulled). Push/pull actions
-                        // live in the Commit split-button dropdown, not here.
-                        let mut hx = bend + 10.0;
-                        if git_view.ahead > 0 {
-                            hx = g.draw_text(
-                                hx,
-                                y,
-                                &format!("↑{}", git_view.ahead),
-                                gpu::DrawOpts {
-                                    font_size: 12.0,
-                                    color: theme::accent(),
-                                    bold: false,
-                                    italic: false,
-                                },
-                            ) + 8.0;
-                        }
-                        if git_view.behind > 0 {
-                            g.draw_text(
-                                hx,
-                                y,
-                                &format!("↓{}", git_view.behind),
-                                gpu::DrawOpts {
-                                    font_size: 12.0,
-                                    color: theme::text_dim(),
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                        }
-                        // N · +ins -del, right-aligned just left of the buttons.
-                        let files = git_view.staged.len() + git_view.unstaged.len();
-                        let fnum = files.to_string();
-                        let plus = format!("+{}", git_view.insertions);
-                        let minus = format!("-{}", git_view.deletions);
-                        let total = 16.0
-                            + g.measure_chrome_text(&fnum, 12.0, false)
-                            + 8.0
-                            + g.measure_chrome_text(&plus, 12.0, false)
-                            + 5.0
-                            + g.measure_chrome_text(&minus, 12.0, false);
-                        let sx0 = git_col_x + git_col_w - 12.0 - total;
-                        if sx0 > bend + 14.0 {
-                            g.queue_icon("file-text", sx0, y, 12.0, theme::text_mute());
-                            let mut sx = sx0 + 16.0;
-                            sx = g.draw_text(
-                                sx,
-                                y,
-                                &fnum,
-                                gpu::DrawOpts {
-                                    font_size: 12.0,
-                                    color: theme::text_dim(),
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                            sx = g.draw_text(
-                                sx + 4.0,
-                                y,
-                                "·",
-                                gpu::DrawOpts {
-                                    font_size: 12.0,
-                                    color: theme::text_mute(),
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                            sx = g.draw_text(
-                                sx + 4.0,
-                                y,
-                                &plus,
-                                gpu::DrawOpts {
-                                    font_size: 12.0,
-                                    color: theme::success(),
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                            g.draw_text(
-                                sx + 4.0,
-                                y,
-                                &minus,
-                                gpu::DrawOpts {
-                                    font_size: 12.0,
-                                    color: DIFF_RED,
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                        }
-                    }
-                }
-                y += 27.0;
+                y = git_panel::header(g, &mut self.git, &git_view, self.cursor_px, gcx0, y, gcw);
                 // ── Row 2: ⎇ Uncommitted changes ···· [ ⎯o Commit | ▾ ]
                 let list_top;
                 // Reserve the column foot for the recent-commits preview; the
@@ -5939,11 +5739,13 @@ impl App {
                     h.min(commits_cap)
                 };
                 let input_top = bottom - commits_h;
-                if git_view.no_repo {
+                if git_view.no_repo || git_view.loading || git_view.issue.is_some() {
+                    let notice = git_view.issue.as_deref().unwrap_or(if git_view.loading { "Git 정보를 읽는 중이에요" } else { "Git 저장소가 아니에요" });
+                    let notice = info::fit_text(g, notice, gcw, 12.0, false);
                     g.draw_text(
                         gcx0,
                         y,
-                        "git 저장소가 아닙니다",
+                        &notice,
                         gpu::DrawOpts {
                             font_size: 12.0,
                             color: theme::text_mute(),
@@ -5954,6 +5756,13 @@ impl App {
                     self.git.commit_btn_rect = None;
                     self.git.commit_caret_rect = None;
                     list_top = y + 8.0;
+                } else if self.git.branch_menu_open {
+                    list_top = y;
+                } else if git_view.remote.is_some() {
+                    g.draw_text(gcx0, y, "원격 Git · 읽기 전용", gpu::DrawOpts {
+                        font_size: 10.5, color: theme::text_dim(), bold: false, italic: false,
+                    });
+                    list_top = y + native_controls::CONTROL_HEIGHT;
                 } else {
                     let bh = 24.0_f32;
                     let by = y - 4.0;
@@ -6127,7 +5936,7 @@ impl App {
                 // 안 쓰면 직전 프레임의 값이 남아, 변경이 사라진 뒤에도 휠이
                 // 없는 목록을 스크롤한다.
                 self.git.col_list_extent = ((input_top - list_top).max(0.0), 0.0);
-                if git_view.clean {
+                if git_view.clean && !self.git.branch_menu_open {
                     circle_rect(g, gcx0, list_top + 4.0, 8.0, theme::success());
                     g.draw_text(
                         gcx0 + 15.0,
@@ -6256,7 +6065,7 @@ impl App {
                                 // 로 뭉개진다(216px 실측). 이 폭에서는 이름이 내용이고
                                 // 버튼은 손이 갈 때만 필요하니, 가리킨 행에서만 꺼낸다.
                                 let narrow = git_col_w < GIT_DENSE_COMPACT;
-                                let show_acts = !narrow || hovered;
+                                let show_acts = git_view.remote.is_none() && (!narrow || hovered);
                                 let mut ax =
                                     git_col_x + git_col_w - 12.0 - if show_acts { aw } else { 0.0 };
                                 let icon_dim = if hovered {
@@ -6580,7 +6389,7 @@ impl App {
                 self.git.col_commit_rects.clear();
                 self.git.col_commit_file_rects.clear();
                 self.git.col_commits_grip = None;
-                if !git_view.recent_commits.is_empty() {
+                if !git_view.recent_commits.is_empty() && !self.git.branch_menu_open {
                     let (curx, cury) = self.cursor_px;
                     let foot = bottom - 2.0;
                     let clip_r = git_col_x + git_col_w - 12.0;
@@ -6830,16 +6639,12 @@ impl App {
                     git_col_w,
                     TITLE_HEIGHT,
                     self.git.path_hdr_rect,
-                    self.git.branch_hdr_rect,
                     self.git.path_menu_open,
-                    self.git.branch_menu_open,
                     &git_repo_list,
                     &self.git.col_pinned_cwd,
-                    &git_view.branches,
-                    &git_view.branch,
                     &mut self.git.path_menu_rects,
-                    &mut self.git.branch_menu_rects,
                 );
+                git_panel::branches(g, &mut self.git, &git_view, self.cursor_px, gcx0, gcw, bottom);
                 // ── Commit-button dropdown (Commit / Push / Create PR)
                 self.git.commit_menu_rects.clear();
                 if self.git.commit_menu_open {
@@ -7863,9 +7668,9 @@ impl App {
                             && active_pane.as_deref() == Some(fid.as_str())
                             && claude_panes.contains(fid.as_str()))
                     {
-                        // agents 목록 뷰는 SCHALE 블루 고정, 그 외엔 배정 학생색.
+                        // 목록의 포커스는 앱 강조색을 따라야 한다.
                         let border_col = if agents_view_panes.contains(fid.as_str()) {
-                            theme::character_accent("샬레")
+                            Some(theme::accent())
                         } else {
                             pane_chars
                                 .get(fid.as_str())

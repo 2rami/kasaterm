@@ -8,9 +8,63 @@
 //! 윈도우는 파일 권한을 따로 좁히지 않는다 — 사용자 프로필 폴더의 ACL 을 물려받는다.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+static CREDENTIALS: Mutex<()> = Mutex::new(());
+static EPOCH: AtomicU64 = AtomicU64::new(0);
+static REJECTED: Mutex<Option<String>> = Mutex::new(None);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    epoch: u64,
+    identity: String,
+}
+
+#[cfg(test)]
+impl Stamp {
+    pub(crate) fn fixture() -> Self { Self { epoch: 0, identity: "fixture".into() } }
+}
+
+fn identity(credential: &DeviceCred) -> String {
+    crate::relay_auth::token_hash(&format!("{}\0{}\0{}\0{}", credential.relay, credential.account, credential.device_id, credential.token))
+}
+
+pub(crate) fn capture() -> Option<(DeviceCred, Stamp)> {
+    let _guard = CREDENTIALS.lock().ok()?;
+    let gateway = crate::mobile::gateway()?;
+    let credential = for_gateway(&gateway)?;
+    let identity = identity(&credential);
+    if REJECTED.lock().ok()?.as_deref() == Some(identity.as_str()) { return None; }
+    Some((credential, Stamp { epoch: EPOCH.load(Ordering::Acquire), identity }))
+}
+
+pub(crate) fn with_current<T>(stamp: &Stamp, operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let _guard = CREDENTIALS.lock().map_err(|_| "credential lock unavailable")?;
+    let credential = current().ok_or("account changed")?;
+    let gateway_matches = crate::mobile::gateway().is_some_and(|gateway| gateway.trim_end_matches('/') == credential.relay.trim_end_matches('/'));
+    if EPOCH.load(Ordering::Acquire) != stamp.epoch || identity(&credential) != stamp.identity || !gateway_matches {
+        return Err("account changed".into());
+    }
+    if REJECTED.lock().map_err(|_| "credential lock unavailable")?.as_deref() == Some(stamp.identity.as_str()) {
+        return Err("authentication expired".into());
+    }
+    operation()
+}
+
+pub(crate) fn reject(stamp: &Stamp) {
+    if with_current(stamp, || Ok(())).is_ok() {
+        if let Ok(mut rejected) = REJECTED.lock() { *rejected = Some(stamp.identity.clone()); }
+    }
+}
+
+pub(crate) fn reject_token(token: &str) {
+    if let Some((credential, stamp)) = capture() {
+        if credential.token == token { reject(&stamp); }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct DeviceCred {
@@ -64,6 +118,10 @@ fn client() -> anyhow::Result<reqwest::Client> {
 }
 
 async fn login(account: &str, password: &str) -> anyhow::Result<DeviceCred> {
+    let (epoch, previous) = {
+        let _guard = CREDENTIALS.lock().map_err(|_| anyhow::anyhow!("credential lock unavailable"))?;
+        (EPOCH.fetch_add(1, Ordering::AcqRel) + 1, current())
+    };
     let gateway = crate::mobile::gateway().ok_or_else(|| anyhow::anyhow!("관문이 꺼져 있어요"))?;
     let machine_id = crate::mobile::machine_identity().ok_or_else(|| anyhow::anyhow!("이 기계의 id 를 못 만들었어요"))?;
     let res = client()?
@@ -92,18 +150,34 @@ async fn login(account: &str, password: &str) -> anyhow::Result<DeviceCred> {
         device_id: v["device_id"].as_str().unwrap_or_default().to_string(),
         token: v["token"].as_str().ok_or_else(|| anyhow::anyhow!("관문이 토큰을 안 줬어요"))?.to_string(),
     };
-    save(&cred)?;
+    {
+        let _guard = CREDENTIALS.lock().map_err(|_| anyhow::anyhow!("credential lock unavailable"))?;
+        anyhow::ensure!(EPOCH.load(Ordering::Acquire) == epoch, "login superseded by another account change");
+        save(&cred)?;
+        if let Ok(mut rejected) = REJECTED.lock() { *rejected = None; }
+        crate::account_sync::credentials_changed(previous.as_ref(), Some(&cred));
+    }
     crate::uplink::poke();
+    crate::account_sync::spawn();
+    crate::account_sync::poke();
     Ok(cred)
 }
 
 async fn logout() -> anyhow::Result<()> {
-    if let Some(c) = current() {
+    let previous = {
+        let _guard = CREDENTIALS.lock().map_err(|_| anyhow::anyhow!("credential lock unavailable"))?;
+        EPOCH.fetch_add(1, Ordering::AcqRel);
+        let previous = current();
+        clear()?;
+        crate::account_sync::credentials_changed(previous.as_ref(), None);
+        previous
+    };
+    crate::uplink::poke();
+    crate::account_sync::poke();
+    if let Some(c) = previous {
         // 관문이 안 받아도 이 기기에서는 지운다 — 남은 토큰은 다른 기기에서 끊을 수 있다.
         let _ = client()?.post(format!("{}/relay/logout", c.relay)).bearer_auth(&c.token).send().await;
     }
-    clear()?;
-    crate::uplink::poke();
     Ok(())
 }
 
@@ -111,6 +185,7 @@ async fn devices() -> anyhow::Result<Value> {
     let c = current().ok_or_else(|| anyhow::anyhow!("로그인돼 있지 않아요"))?;
     let res = client()?.get(format!("{}/relay/devices", c.relay)).bearer_auth(&c.token).send().await?;
     if res.status().as_u16() == 401 {
+        reject_token(&c.token);
         anyhow::bail!("로그인이 풀렸어요 — 다시 로그인해 주세요");
     }
     Ok(res.json().await?)
@@ -126,6 +201,7 @@ async fn revoke(device_id: &str) -> anyhow::Result<()> {
     if !res.status().is_success() {
         anyhow::bail!("그 기기를 끊지 못했어요({})", res.status());
     }
+    if device_id == c.device_id { reject_token(&c.token); }
     Ok(())
 }
 
@@ -133,14 +209,20 @@ async fn revoke(device_id: &str) -> anyhow::Result<()> {
 pub fn status() -> Value {
     let up = crate::uplink::status();
     let cred = current();
-    status_from(cred.as_ref(), crate::mobile::gateway().as_deref(), &up)
+    let rejected = REJECTED.lock().map(|rejected| {
+        cred.as_ref().is_some_and(|cred| rejected.as_deref() == Some(identity(cred).as_str()))
+    }).unwrap_or(true);
+    let mut status = status_from(cred.as_ref(), crate::mobile::gateway().as_deref(), &up, rejected);
+    status["sync"] = crate::account_sync::status();
+    status
 }
 
-fn status_from(cred: Option<&DeviceCred>, gateway: Option<&str>, up: &crate::uplink::Status) -> Value {
+fn status_from(cred: Option<&DeviceCred>, gateway: Option<&str>, up: &crate::uplink::Status, rejected: bool) -> Value {
     let matching = cred.zip(gateway).is_some_and(|(c, gateway)| {
         c.relay.trim_end_matches('/') == gateway.trim_end_matches('/')
     });
-    let authenticated = matching && up.connected && up.auth_error.is_none()
+    let auth_error = up.auth_error.as_deref().or(rejected.then_some("authentication_expired"));
+    let authenticated = matching && up.connected && auth_error.is_none()
         && cred.is_some_and(|c| up.account.as_deref() == Some(c.account.as_str()));
     let state = if gateway.is_none() {
         "gateway_off"
@@ -148,7 +230,7 @@ fn status_from(cred: Option<&DeviceCred>, gateway: Option<&str>, up: &crate::upl
         "signed_out"
     } else if !matching {
         "gateway_changed"
-    } else if up.auth_error.is_some() {
+    } else if auth_error.is_some() {
         "reauth_required"
     } else if authenticated {
         "connected"
@@ -158,14 +240,14 @@ fn status_from(cred: Option<&DeviceCred>, gateway: Option<&str>, up: &crate::upl
     json!({
         "gateway": gateway,
         "credential_saved": cred.is_some(),
-        "logged_in": matching && up.auth_error.is_none(),
+        "logged_in": matching && auth_error.is_none(),
         "authenticated": authenticated,
         "state": state,
         "account": cred.as_ref().map(|c| c.account.clone()),
         "device_id": cred.as_ref().map(|c| c.device_id.clone()),
         "connected": up.connected,
         "connected_as": up.account,
-        "auth_error": up.auth_error,
+        "auth_error": auth_error,
         "connection_error": up.last_error,
     })
 }
@@ -210,21 +292,26 @@ mod tests {
         let cred = DeviceCred { relay: "https://relay.example".into(), account: "sample".into(),
             device_id: "device-one".into(), token: "never-render-this-token".into() };
         let mut up = crate::uplink::Status::default();
-        let state = status_from(Some(&cred), Some("https://relay.example/"), &up);
+        let state = status_from(Some(&cred), Some("https://relay.example/"), &up, false);
         assert_eq!(state["state"], "connecting");
         assert_eq!(state["credential_saved"], true);
         assert_eq!(state["authenticated"], false);
         up.connected = true;
-        assert_eq!(status_from(Some(&cred), Some(&cred.relay), &up)["authenticated"], false);
+        assert_eq!(status_from(Some(&cred), Some(&cred.relay), &up, false)["authenticated"], false);
         up.account = Some(cred.account.clone());
-        assert_eq!(status_from(Some(&cred), Some(&cred.relay), &up)["state"], "connected");
+        assert_eq!(status_from(Some(&cred), Some(&cred.relay), &up, false)["state"], "connected");
+        let rejected_http = status_from(Some(&cred), Some(&cred.relay), &up, true);
+        assert_eq!(rejected_http["state"], "reauth_required");
+        assert_eq!(rejected_http["logged_in"], false);
+        assert_eq!(rejected_http["authenticated"], false);
+        assert_eq!(rejected_http["auth_error"], "authentication_expired");
         up.auth_error = Some("rejected".into());
-        let rejected = status_from(Some(&cred), Some(&cred.relay), &up);
+        let rejected = status_from(Some(&cred), Some(&cred.relay), &up, false);
         assert_eq!(rejected["logged_in"], false);
         assert_eq!(rejected["state"], "reauth_required");
         assert!(!rejected.to_string().contains(&cred.token));
-        assert_eq!(status_from(Some(&cred), Some("https://other.example"), &up)["state"], "gateway_changed");
-        assert_eq!(status_from(None, Some(&cred.relay), &up)["state"], "signed_out");
+        assert_eq!(status_from(Some(&cred), Some("https://other.example"), &up, false)["state"], "gateway_changed");
+        assert_eq!(status_from(None, Some(&cred.relay), &up, false)["state"], "signed_out");
     }
 
     #[test]

@@ -234,7 +234,8 @@ pub(crate) enum StatusbarHit {
 /// header dropdowns; `op` labels the in-flight push/pull for the spinner.
 #[derive(Default)]
 pub(crate) struct GitState {
-    pub(crate) col_displayed_target: Option<(std::path::PathBuf, Option<(String, String)>)>,
+    pub(crate) col_displayed_target: Option<(std::path::PathBuf, Option<(String, String)>, u64)>,
+    pub(crate) col_context: std::sync::Arc<std::sync::Mutex<crate::git_panel::Context>>,
     pub(crate) col_visible: bool,
     pub(crate) col_w_logical: f32,
     pub(crate) col_resize: Option<(f32, f32)>,
@@ -301,10 +302,11 @@ pub(crate) struct GitState {
     pub(crate) col_pinned_cwd: Option<std::path::PathBuf>,
     pub(crate) path_menu_open: bool,
     pub(crate) branch_menu_open: bool,
+    pub(crate) branch_page: usize,
+    pub(crate) branch_page_rects: Vec<(bool, (f32, f32, f32, f32))>,
     pub(crate) path_hdr_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) branch_hdr_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) path_menu_rects: Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
-    pub(crate) branch_menu_rects: Vec<(String, (f32, f32, f32, f32))>,
 }
 
 /// 우측 칼럼의 활성 탭. 칼럼은 원래 git 전용이었고 Info·Sessions 가 나중에

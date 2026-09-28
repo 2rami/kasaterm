@@ -409,6 +409,10 @@ impl App {
                 );
             }
             "menu" => self.git.commit_menu_open = true,
+            "branches" | "branches-last" => {
+                self.git.branch_menu_open = self.git.branch_hdr_rect.is_some();
+                self.git.branch_page = if action == "branches-last" { usize::MAX } else { 0 };
+            }
             "spin" => self.git.op = Some("Pushing"),
             "hover" => {
                 // Park the cursor over the first file row so its action cluster

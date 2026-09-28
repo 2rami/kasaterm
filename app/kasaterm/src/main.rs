@@ -41,6 +41,7 @@ mod native_onboarding;
 mod native_settings;
 mod device_icons;
 mod feedback_delivery;
+mod account_sync_ui;
 mod native_controls;
 mod native_strings;
 mod notify_banner;
@@ -73,6 +74,7 @@ mod webpane;
 /// 다른 모듈이라 루트에서 재수출한다(`use super::*` 하나로 닿게).
 pub(crate) use chrome::Density;
 mod gitdiff;
+mod git_panel;
 mod info;
 mod context_info;
 mod internal_room;
@@ -354,15 +356,10 @@ fn git_paint_dropdowns(
     col_w: f32,
     _title_h: f32,
     path_hdr: Option<(f32, f32, f32, f32)>,
-    branch_hdr: Option<(f32, f32, f32, f32)>,
     path_open: bool,
-    branch_open: bool,
     repos: &[std::path::PathBuf],
     pinned: &Option<std::path::PathBuf>,
-    branches: &[String],
-    current_branch: &str,
     path_rects: &mut Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
-    branch_rects: &mut Vec<(String, (f32, f32, f32, f32))>,
 ) {
     let item_h = 28.0_f32;
     let pad = 6.0_f32;
@@ -422,23 +419,6 @@ fn git_paint_dropdowns(
                 let sel = pinned.as_ref() == Some(r);
                 row(g, iy, name, sel);
                 path_rects.push((Some(r.clone()), (px, iy, pw, item_h)));
-                iy += item_h;
-            }
-        }
-    }
-    if branch_open {
-        if let Some((_hx, hy, _hw, hh)) = branch_hdr {
-            let n = branches.len().max(1);
-            let menu_h = n as f32 * item_h + pad * 2.0;
-            let my = hy + hh + 2.0;
-            panel(g, my, menu_h);
-            let mut iy = my + pad;
-            if branches.is_empty() {
-                row(g, iy, "(브랜치 없음)", false);
-            }
-            for b in branches {
-                row(g, iy, b, b == current_branch);
-                branch_rects.push((b.clone(), (px, iy, pw, item_h)));
                 iy += item_h;
             }
         }
@@ -3637,6 +3617,7 @@ impl Workspace {
 /// without the ~0.5s blink-cadence lag.
 #[derive(Debug, Clone)]
 enum UserEvent {
+    AccountSyncApply(kasa_mcp::account_sync::PendingApply, std::sync::mpsc::Sender<Result<(), String>>),
     VaultPicked { owner: WindowId, root: String },
     VaultGraph { owner: WindowId, generation: u64, request_generation: u64, request_id: String, graph: vault_graph::Graph },
     VaultListings { owner: WindowId, generation: u64, listings: Vec<vault::Listing> },
@@ -4233,6 +4214,22 @@ fn resets_in_label_at(resets_at: Option<u64>, now: u64) -> Option<String> {
 /// (which can't re-borrow `&self` to call helpers) paints straight from it.
 #[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct GitColView {
+    #[serde(skip)]
+    generation: u64,
+    #[serde(skip)]
+    loading: bool,
+    #[serde(skip)]
+    issue: Option<String>,
+    #[serde(default)]
+    repo_root: Option<std::path::PathBuf>,
+    #[serde(default)]
+    branch_list: Vec<kasa_mcp::git::GitBranch>,
+    #[serde(default)]
+    detached: bool,
+    #[serde(default)]
+    unborn: bool,
+    #[serde(default)]
+    head_oid: Option<String>,
     #[serde(default)]
     remote: Option<(String, String)>,
     /// cwd this snapshot was computed for — so a stale repo's rows aren't
@@ -5926,7 +5923,7 @@ struct App {
     quit_menu_item: Option<muda::MenuItem>,
     /// Sparkle SPUStandardUpdaterController — 보관해야 백그라운드 자동 체크가 유지된다(드롭=정지).
     #[cfg(target_os = "macos")]
-    sparkle_updater: Option<objc2::rc::Retained<objc2::runtime::AnyObject>>,
+    sparkle_updater: Option<macos_sparkle::Updater>,
     /// History store for inline autosuggestion. See autosuggest.rs.
     autosuggest: autosuggest::History,
     /// What the user has typed at the current shell prompt since the last
@@ -6468,6 +6465,8 @@ impl App {
 ///
 /// 반환은 (설치본 번들, 새로 구운 번들). `None` 이면 움직일 이유가 없다.
 fn install_pending_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    #[cfg(target_os = "macos")]
+    if macos_sparkle::owns_installation() { return None; }
     let installed =
         std::path::PathBuf::from(kasa_socket::home_var().ok()?).join("Applications/kasaterm.app");
     let running = installed.join("Contents/MacOS/kasaterm");
@@ -6494,6 +6493,8 @@ fn install_pending_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
 
 /// 위 판정의 캐시판 — 상태줄은 프레임마다 도는 자리라 stat 두 번도 매번은 아깝다.
 pub(crate) fn install_pending() -> bool {
+    #[cfg(target_os = "macos")]
+    if macos_sparkle::install_on_quit_ready() { return true; }
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
     static CACHE: OnceLock<Mutex<Option<(Instant, bool)>>> = OnceLock::new();

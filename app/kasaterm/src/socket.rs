@@ -4743,23 +4743,13 @@ pub fn read_settings() -> serde_json::Value {
 /// existing object first so writing `default_shell` never clobbers
 /// `default_cwd`. Silently no-ops if the path/dir can't be resolved.
 pub fn write_setting(key: &str, value: serde_json::Value) {
-    use std::io::Write;
     let Some(path) = settings_file_path() else {
         return;
     };
-    let mut obj = match read_settings() {
-        serde_json::Value::Object(m) => m,
-        _ => serde_json::Map::new(),
-    };
-    obj.insert(key.to_string(), value);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(txt) = serde_json::to_string_pretty(&serde_json::Value::Object(obj)) {
-        if let Ok(mut f) = std::fs::File::create(&path) {
-            let _ = f.write_all(txt.as_bytes());
-        }
-    }
+    let _ = kasa_mcp::account_sync::local::edit_json(&path, serde_json::json!({}), |settings| {
+        settings.as_object_mut().ok_or("settings is not an object")?.insert(key.into(), value);
+        Ok(())
+    });
 }
 
 /// Replace the whole settings object with one sibling-temp + rename. A terminal
@@ -5324,7 +5314,7 @@ fn build_theme_rows() -> Vec<ThemeRow> {
     // 쓰는가」는 목록에 보여야 되돌아갈 수 있다.
     let bundled = ThemeRow {
         id: String::new(),
-        label: "블루 아카이브 (기본)".into(),
+        label: "기본 캐릭터".into(),
         count: crate::theme::CHARACTER_SLUGS.len(),
         faces: crate::theme::CHARACTER_SLUGS
             .iter()

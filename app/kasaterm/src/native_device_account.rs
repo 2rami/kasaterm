@@ -334,6 +334,7 @@ pub(super) fn paint(
         w,
         "계정 로그인은 이 기기를 등록합니다. 다른 기기와의 실제 연결은 아래 목록에서 확인하세요.",
     );
+    if let Some(message) = v.status["sync"]["message"].as_str() { info_slab(g, x, y, w, message); }
     *y += 24.0;
 }
 

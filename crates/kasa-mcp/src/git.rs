@@ -9,6 +9,296 @@ use std::process::Command;
 
 use serde_json::{json, Value};
 
+const PANEL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const PANEL_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
+const BRANCH_LIST_ARGS: &[&str] = &[
+    "for-each-ref", "--format=%(refname)%00%(HEAD)%00%(symref)", "refs/heads", "refs/remotes",
+];
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GitBranch {
+    pub name: String,
+    pub remote: bool,
+    pub current: bool,
+}
+
+struct GitReadOutput {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+impl GitReadOutput {
+    fn checked(self) -> Result<String, String> {
+        if self.success {
+            Ok(self.stdout)
+        } else {
+            Err(format!("git failed: {}", self.stderr.trim()))
+        }
+    }
+}
+
+fn run_panel_git(
+    repo: &Path,
+    args: &[&str],
+    deadline: std::time::Instant,
+) -> Result<GitReadOutput, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    if Instant::now() >= deadline {
+        return Err("git panel snapshot timed out".into());
+    }
+    let mut command = git_cmd();
+    // Inherited Git state must not redirect a pane's cwd to another repository.
+    for variable in [
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_NAMESPACE",
+    ] {
+        command.env_remove(variable);
+    }
+    command.args([
+            "--no-optional-locks", "--no-pager", "-c", "core.fsmonitor=false",
+            "-c", "core.hooksPath=/dev/null", "-c", "color.ui=false",
+            "-c", "diff.relative=false", "-c", "maintenance.auto=false",
+        ])
+        .arg("-C").arg(repo).args(args)
+        .env("LC_ALL", "C")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Submodule status may spawn git children that must share the deadline.
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|e| format!("git spawn failed: {e}"))?;
+    let (tx, rx) = mpsc::channel();
+    let pipes: [(Box<dyn Read + Send>, usize); 2] = [
+        (Box::new(child.stdout.take().unwrap()), PANEL_OUTPUT_LIMIT),
+        (Box::new(child.stderr.take().unwrap()), 64 * 1024),
+    ];
+    for (index, (pipe, limit)) in pipes.into_iter().enumerate() {
+        let tx = tx.clone();
+        // Both pipes must drain together or a full stderr pipe can block stdout.
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = pipe.take((limit + 1) as u64).read_to_end(&mut bytes)
+                .map_err(|e| format!("git output read failed: {e}"))
+                .and_then(|_| {
+                    if bytes.len() > limit {
+                        Err("git panel output exceeded its limit".to_string())
+                    } else {
+                        Ok(String::from_utf8_lossy(&bytes).into_owned())
+                    }
+                });
+            let _ = tx.send((index, result));
+        });
+    }
+    drop(tx);
+    let result = (|| {
+        let mut output: [Option<String>; 2] = [None, None];
+        let mut status = None;
+        loop {
+            if Instant::now() >= deadline {
+                return Err("git panel snapshot timed out".into());
+            }
+            while let Ok((index, result)) = rx.try_recv() {
+                output[index] = Some(result?);
+            }
+            if status.is_none() {
+                status = child.try_wait().map_err(|e| format!("git wait failed: {e}"))?;
+            }
+            if let Some(status) = status {
+                if output.iter().all(Option::is_some) {
+                    return Ok(GitReadOutput {
+                        success: status.success(),
+                        stdout: output[0].take().unwrap(),
+                        stderr: output[1].take().unwrap(),
+                    });
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())));
+        }
+    })();
+    if result.is_err() {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+        let _ = child.kill();
+        // Reaping a killed process must not extend the request's deadline.
+        std::thread::spawn(move || { let _ = child.wait(); });
+    }
+    result
+}
+
+fn parse_branch_list(text: &str) -> Vec<GitBranch> {
+    text.lines().filter_map(|line| {
+        let mut fields = line.split('\0');
+        let reference = fields.next()?;
+        let current = fields.next()? == "*";
+        if !fields.next()?.is_empty() {
+            return None;
+        }
+        let (name, remote) = if let Some(name) = reference.strip_prefix("refs/heads/") {
+            (name, false)
+        } else {
+            (reference.strip_prefix("refs/remotes/")?, true)
+        };
+        (!name.is_empty()).then(|| GitBranch { name: name.into(), remote, current: current && !remote })
+    }).collect()
+}
+
+pub fn git_branch_list(repo: &Path) -> Vec<GitBranch> {
+    run_panel_git(repo, BRANCH_LIST_ARGS, std::time::Instant::now() + PANEL_READ_TIMEOUT)
+        .and_then(GitReadOutput::checked)
+        .map(|out| parse_branch_list(&out))
+        .unwrap_or_default()
+}
+
+fn parse_panel_status(repo: &Path, text: &str) -> Value {
+    let mut branch = String::new();
+    let mut head_oid = None;
+    let mut ahead = 0u32;
+    let mut behind = 0u32;
+    let mut unborn = false;
+    let mut staged = Vec::<(char, String)>::new();
+    let mut unstaged = Vec::<(char, String)>::new();
+    let mut records = text.split('\0');
+    while let Some(record) = records.next() {
+        if let Some(name) = record.strip_prefix("# branch.head ") {
+            branch = name.to_string();
+        } else if let Some(oid) = record.strip_prefix("# branch.oid ") {
+            unborn = oid == "(initial)";
+            head_oid = (!unborn).then(|| oid.to_string());
+        } else if let Some(ab) = record.strip_prefix("# branch.ab ") {
+            for count in ab.split_whitespace() {
+                if let Some(n) = count.strip_prefix('+') {
+                    ahead = n.parse().unwrap_or(0);
+                } else if let Some(n) = count.strip_prefix('-') {
+                    behind = n.parse().unwrap_or(0);
+                }
+            }
+        } else if let Some(path) = record.strip_prefix("? ") {
+            unstaged.push(('U', path.into()));
+        } else {
+            let skip = match record.as_bytes().first() {
+                Some(b'1') => 8,
+                Some(b'2') => { records.next(); 9 },
+                Some(b'u') => 10,
+                _ => continue,
+            };
+            let Some(path) = record.splitn(skip + 1, ' ').nth(skip) else { continue };
+            let xy = record.split(' ').nth(1).unwrap_or("..").as_bytes();
+            if xy.len() != 2 || path.is_empty() {
+                continue;
+            }
+            if xy[0] != b'.' {
+                staged.push((xy[0] as char, path.into()));
+            }
+            if xy[1] != b'.' {
+                unstaged.push((xy[1] as char, path.into()));
+            }
+        }
+    }
+    json!({
+        "cwd": repo.to_string_lossy(), "no_repo": false,
+        "detached": branch == "(detached)", "unborn": unborn, "head_oid": head_oid,
+        "branch": branch, "ahead": ahead, "behind": behind,
+        "insertions": 0, "deletions": 0, "clean": staged.is_empty() && unstaged.is_empty(),
+        "staged": staged, "unstaged": unstaged, "branches": [], "branch_list": [],
+        "numstat": {}, "recent_commits": [], "repo_root": null,
+    })
+}
+
+fn parse_panel_numstat(text: &str) -> std::collections::HashMap<String, (u32, u32)> {
+    let mut result = std::collections::HashMap::new();
+    let mut records = text.split('\0');
+    while let Some(record) = records.next() {
+        let mut fields = record.splitn(3, '\t');
+        let Some(ins) = fields.next() else { continue };
+        let Some(del) = fields.next() else { continue };
+        let Some(mut path) = fields.next() else { continue };
+        if path.is_empty() {
+            // A renamed path occupies two extra NUL records; the second is current.
+            records.next();
+            let Some(destination) = records.next() else { break };
+            path = destination;
+        }
+        if !path.is_empty() {
+            result.insert(path.to_string(), (ins.parse().unwrap_or(0), del.parse().unwrap_or(0)));
+        }
+    }
+    result
+}
+
+fn parse_panel_log(text: &str) -> Vec<(String, String)> {
+    text.split('\0').filter_map(|record| {
+        let (hash, subject) = record.split_once('\x1f')?;
+        (!hash.is_empty()).then(|| (hash.to_string(), subject.to_string()))
+    }).collect()
+}
+
+pub fn git_panel_snapshot(repo: &Path, commits: usize) -> Result<Value, String> {
+    let deadline = std::time::Instant::now() + PANEL_READ_TIMEOUT;
+    let status = run_panel_git(repo, &[
+        "status", "--porcelain=v2", "--branch", "-z", "--ignore-submodules=none",
+    ], deadline)?;
+    if !status.success && status.stderr.contains("not a git repository") {
+        let mut view = parse_panel_status(repo, "");
+        view["no_repo"] = json!(true);
+        view["clean"] = json!(false);
+        return Ok(view);
+    }
+    let mut view = parse_panel_status(repo, &status.checked()?);
+    let branches = parse_branch_list(&run_panel_git(repo, BRANCH_LIST_ARGS, deadline)?.checked()?);
+    view["branches"] = json!(branches.iter().filter(|b| !b.remote).map(|b| &b.name).collect::<Vec<_>>());
+    view["branch_list"] = json!(branches);
+    let root = run_panel_git(repo, &["rev-parse", "--show-toplevel"], deadline)?;
+    if root.success {
+        view["repo_root"] = json!(root.stdout.strip_suffix('\n').unwrap_or(&root.stdout));
+    }
+    let diff_args = ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--numstat", "-z"];
+    let mut numstat = parse_panel_numstat(&run_panel_git(repo, &diff_args, deadline)?.checked()?);
+    let mut staged_args = diff_args.to_vec();
+    staged_args.push("--cached");
+    let staged = parse_panel_numstat(&run_panel_git(repo, &staged_args, deadline)?.checked()?);
+    for (path, (ins, del)) in &staged {
+        let entry = numstat.entry(path.clone()).or_insert((0, 0));
+        entry.0 = entry.0.max(*ins);
+        entry.1 = entry.1.max(*del);
+    }
+    let unborn = view["unborn"].as_bool().unwrap_or(false);
+    let totals = if unborn {
+        staged
+    } else {
+        let mut head_args = diff_args.to_vec();
+        head_args.push("HEAD");
+        parse_panel_numstat(&run_panel_git(repo, &head_args, deadline)?.checked()?)
+    };
+    let (insertions, deletions) = totals.values().fold((0u32, 0u32), |(a, d), (ins, del)| {
+        (a.saturating_add(*ins), d.saturating_add(*del))
+    });
+    view["insertions"] = json!(insertions);
+    view["deletions"] = json!(deletions);
+    view["numstat"] = json!(numstat);
+    if !unborn {
+        let count = if commits == 0 { 5 } else { commits.min(100) };
+        let count = format!("-{count}");
+        let log = run_panel_git(repo, &[
+            "log", &count, "--no-show-signature", "--format=%h%x1f%s", "-z",
+        ], deadline)?.checked()?;
+        view["recent_commits"] = json!(parse_panel_log(&log));
+    }
+    Ok(view)
+}
+
 /// `git` invocation with the console window suppressed on Windows. kasaterm
 /// is a GUI (non-console) process, so spawning a console program like git
 /// flashes a fresh console window — and a Defender-throttled call (~5s) leaves
@@ -738,6 +1028,109 @@ pub fn status_marks<'a>(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod panel_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn porcelain_preserves_paths_and_both_status_columns() {
+        let text = concat!(
+            "# branch.oid abc123\0# branch.head topic\0# branch.ab +4 -2\0",
+            "1 MM N... 100644 100644 100644 aaa bbb dir/a b\t\"한글\"\n.rs\0",
+            "2 R. N... 100644 100644 100644 aaa bbb R100 moved\tfile.rs\0",
+            "? old name\0",
+            "1 .D N... 100644 100644 000000 aaa aaa deleted.rs\0",
+            "? new\nfile.rs\0",
+        );
+        let view = parse_panel_status(Path::new("/repo/sub"), text);
+        assert_eq!(view["cwd"], "/repo/sub");
+        assert_eq!(view["branch"], "topic");
+        assert_eq!(view["ahead"], 4);
+        assert_eq!(view["behind"], 2);
+        assert_eq!(view["staged"], json!([
+            ["M", "dir/a b\t\"한글\"\n.rs"], ["R", "moved\tfile.rs"],
+        ]));
+        assert_eq!(view["unstaged"], json!([
+            ["M", "dir/a b\t\"한글\"\n.rs"], ["D", "deleted.rs"], ["U", "new\nfile.rs"],
+        ]));
+        assert_eq!(view["clean"], false);
+        assert_eq!(view["detached"], false);
+        assert_eq!(view["unborn"], false);
+        assert_eq!(view["head_oid"], "abc123");
+    }
+
+    #[test]
+    fn conflicts_are_not_misreported_as_clean() {
+        let text = "# branch.head main\0u UU N... 100644 100644 100644 100644 aaa bbb ccc conflicted file\0";
+        let view = parse_panel_status(Path::new("/repo"), text);
+        assert_eq!(view["staged"], json!([["U", "conflicted file"]]));
+        assert_eq!(view["unstaged"], json!([["U", "conflicted file"]]));
+        assert_eq!(view["clean"], false);
+    }
+
+    #[test]
+    fn submodule_head_and_worktree_changes_remain_visible() {
+        let view = parse_panel_status(Path::new("/repo"), concat!(
+            "# branch.head main\0",
+            "1 .M S.MU 160000 160000 160000 aaa aaa nested worktree\0",
+            "1 M. SC.. 160000 160000 160000 aaa bbb nested head\0",
+        ));
+        assert_eq!(view["staged"], json!([["M", "nested head"]]));
+        assert_eq!(view["unstaged"], json!([["M", "nested worktree"]]));
+        assert_eq!(view["clean"], false);
+    }
+
+    #[test]
+    fn detached_and_unborn_have_distinct_head_metadata() {
+        let detached = parse_panel_status(Path::new("/repo"), "# branch.oid abc123\0# branch.head (detached)\0");
+        assert_eq!(detached["detached"], true);
+        assert_eq!(detached["unborn"], false);
+        assert_eq!(detached["clean"], true);
+        assert_eq!(detached["head_oid"], "abc123");
+        let unborn = parse_panel_status(Path::new("/repo"), "# branch.oid (initial)\0# branch.head new-main\0");
+        assert_eq!(unborn["detached"], false);
+        assert_eq!(unborn["unborn"], true);
+        assert_eq!(unborn["head_oid"], Value::Null);
+        assert_eq!(unborn["branch"], "new-main");
+        assert_eq!(unborn["branch_list"], json!([]));
+    }
+
+    #[test]
+    fn branches_include_remotes_but_exclude_symbolic_aliases() {
+        let branches = parse_branch_list(concat!(
+            "refs/heads/main\0*\0\n",
+            "refs/heads/origin/main\0 \0\n",
+            "refs/remotes/origin/main\0 \0\n",
+            "refs/remotes/origin/HEAD\0 \0refs/remotes/origin/main\n",
+            "refs/tags/v1\0 \0\n",
+        ));
+        assert_eq!(branches, vec![
+            GitBranch { name: "main".into(), remote: false, current: true },
+            GitBranch { name: "origin/main".into(), remote: false, current: false },
+            GitBranch { name: "origin/main".into(), remote: true, current: false },
+        ]);
+        assert_eq!(serde_json::to_value(&branches[0]).unwrap(), json!({"name": "main", "remote": false, "current": true}));
+    }
+
+    #[test]
+    fn numstat_preserves_rename_destination_and_binary_paths() {
+        let stats = parse_panel_numstat("3\t2\tfile\twith\nspaces\0-\t-\timage.png\01\t0\t\0old\nname\0new\tname\0");
+        assert_eq!(stats.get("file\twith\nspaces"), Some(&(3, 2)));
+        assert_eq!(stats.get("image.png"), Some(&(0, 0)));
+        assert_eq!(stats.get("new\tname"), Some(&(1, 0)));
+        assert!(!stats.contains_key("old\nname"));
+        assert_eq!(stats.len(), 3);
+    }
+
+    #[test]
+    fn log_subject_can_contain_the_field_separator() {
+        assert_eq!(parse_panel_log("a123\x1fsubject\x1fextra\0b456\x1fnext\0"), vec![
+            ("a123".into(), "subject\x1fextra".into()), ("b456".into(), "next".into()),
+        ]);
+        assert!(parse_panel_log("").is_empty());
+    }
 }
 
 #[cfg(test)]

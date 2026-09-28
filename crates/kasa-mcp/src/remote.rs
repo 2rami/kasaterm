@@ -1506,6 +1506,10 @@ pub fn close_remote_pane(base: &str, pane: &str, token: Option<&str>, kill: bool
 
 /// 그 기계의 HTTP 창구를 GET 으로 읽는다 — 파일트리·깃 패널이 저쪽 것을 그대로 싣는다.
 pub fn remote_get_json(base: &str, path_and_query: &str) -> Result<serde_json::Value> {
+    remote_get_json_bounded(base, path_and_query, 16 * 1024 * 1024)
+}
+
+pub fn remote_get_json_bounded(base: &str, path_and_query: &str, max_bytes: usize) -> Result<serde_json::Value> {
     let token = connection_auth_token(base);
     let u = format!("{}{}", base.trim_end_matches('/'), path_and_query);
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1522,13 +1526,18 @@ pub fn remote_get_json(base: &str, path_and_query: &str) -> Result<serde_json::V
         if let Some(t) = token.as_deref() {
             req = req.header("x-kasa-token", t);
         }
-        let r = req.send().await.context("원격 GET 요청")?;
+        let mut r = req.send().await.context("원격 GET 요청")?;
         let status = r.status();
-        let text = r.text().await.unwrap_or_default();
         if !status.is_success() {
-            anyhow::bail!("HTTP {status}: {text}");
+            anyhow::bail!("HTTP {status}");
         }
-        serde_json::from_str(&text).context("원격 답 해석")
+        anyhow::ensure!(r.content_length().is_none_or(|n| n <= max_bytes as u64), "원격 응답 크기 초과");
+        let mut bytes = Vec::new();
+        while let Some(chunk) = r.chunk().await.context("원격 응답 읽기")? {
+            anyhow::ensure!(bytes.len().saturating_add(chunk.len()) <= max_bytes, "원격 응답 크기 초과");
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).context("원격 답 해석")
     })
 }
 

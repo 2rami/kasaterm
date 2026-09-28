@@ -491,8 +491,8 @@ pub const THEME_PRESETS: &[(&str, &str, &Palette)] = &[
     ("catppuccin-latte", "Catppuccin Latte", &CATPPUCCIN_LATTE),
     ("gruvbox-dark", "Gruvbox Dark", &GRUVBOX_DARK),
     ("tokyo-night", "Tokyo Night", &TOKYO_NIGHT),
-    ("schale-light", "Schale Light", &SCHALE_LIGHT),
-    ("schale-dark", "Schale Dark", &SCHALE_DARK),
+    ("schale-light", "Sky Light", &SCHALE_LIGHT),
+    ("schale-dark", "Sky Dark", &SCHALE_DARK),
     ("amber-crt", "Amber CRT", &AMBER_CRT),
     ("nacho", "Nachoneko", &NACHO),
 ];

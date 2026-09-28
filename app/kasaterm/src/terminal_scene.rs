@@ -1483,16 +1483,13 @@ impl App {
             agents_view_panes.insert(id.clone());
         }
         if agents_view && theme::character_appearance() {
-            // 관리 화면 = SCHALE 조직 정체성. claude 캐릭터(Clawd) 자리에 SCHALE
-            // 로고를 얹는다(사용자: 그 자리가 비어 보임). Clawd 블록아트가 있으면 그
-            // 자리를 지우고 동일 위치에, 없으면(agents 목록) "Claude Code" 헤더
-            // 왼쪽 여백에 앵커한다. 로고는 정사각이라 폭을 셀 비율로 맞춘다.
+            // 목록의 앱 로고는 세션에 배정된 캐릭터와 구별되어야 한다.
             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
             let scw = self.cell.w * fs;
             let sch = self.cell.h * fs;
             let logo_rows = CLAWD_ROWS;
             let logo_cols = ((logo_rows as f32 * sch / scw).round() as usize).max(3);
-            // SCHALE 로고는 클립 경로가 없어 완전 노출 배너만 쓴다 —
+            // 로고는 클립 경로가 없어 완전 노출 배너만 쓴다 —
             // 스크롤로 잘린 배너는 헤더 앵커 폴백(원본 글리프 유지).
             let clawd = find_clawd_banners(&composed);
             let anchor = clawd

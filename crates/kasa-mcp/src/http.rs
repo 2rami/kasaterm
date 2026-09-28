@@ -4625,6 +4625,12 @@ async fn term_gitcol_get(
     backend: Arc<dyn Backend>,
     q: Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
+    if q.contains_key("schema") || q.contains_key("pane") {
+        let query = q.0;
+        let result = tokio::task::spawn_blocking(move || crate::git_panel::read(backend.as_ref(), &query))
+            .await.unwrap_or_else(|_| serde_json::json!({"schema": crate::git_panel::SCHEMA, "ok": false, "error": "git_unavailable"}));
+        return Json(result);
+    }
     let Some(path) = q.get("path").filter(|p| p.starts_with('/')).cloned() else {
         return Json(serde_json::json!({ "ok": false, "error": "`path`(절대경로) 가 필요해요" }));
     };

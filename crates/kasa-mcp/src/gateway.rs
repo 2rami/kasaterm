@@ -56,6 +56,7 @@ struct Uplink {
     /// 기기 토큰으로 로그인한 연결이면 그 계정·기기. 토큰 없는 옛 앱은 None(주소만 쓴다).
     account: Option<String>,
     device_id: Option<String>,
+    owner_slug: Option<String>,
     /// 기기가 폐기되면 이 연결을 끊는다.
     kick: tokio::sync::Notify,
 }
@@ -204,6 +205,8 @@ pub struct Gate {
     devices: Arc<Mutex<HashMap<String, DeviceRec>>>,
     accounts: Arc<crate::relay_auth::Accounts>,
     limiter: Arc<crate::relay_auth::Limiter>,
+    account_sync: Arc<crate::account_sync::server::Store>,
+    auth_changes: tokio::sync::watch::Sender<u64>,
     state_path: Option<PathBuf>,
     seq: Arc<AtomicU64>,
 }
@@ -275,6 +278,10 @@ impl Gate {
             devices: Arc::new(Mutex::new(devices)),
             accounts: Arc::new(crate::relay_auth::Accounts::new(accounts_path)),
             limiter: Arc::new(crate::relay_auth::Limiter::default()),
+            account_sync: Arc::new(crate::account_sync::server::Store::new(
+                state_path.as_ref().map(|p| p.with_file_name("account-sync")),
+            )),
+            auth_changes: tokio::sync::watch::channel(0).0,
             state_path,
             seq: Arc::new(AtomicU64::new(1)),
         }
@@ -331,6 +338,7 @@ impl Gate {
             }
         };
         if done {
+            self.auth_changes.send_modify(|n| *n = n.wrapping_add(1));
             for (_, up) in self.live.lock().unwrap().values() {
                 if up.device_id.as_deref() == Some(device_id) {
                     up.kick.notify_one();
@@ -398,6 +406,9 @@ pub fn router(gate: Gate) -> Router {
         .route("/relay/login", axum::routing::post(login))
         .route("/relay/whoami", get(whoami))
         .route("/relay/devices", get(devices_list))
+        .route("/relay/account-sync", get(account_sync_get).patch(account_sync_patch))
+        .route("/relay/account/", any(account_proxy_root))
+        .route("/relay/account/{*rest}", any(account_proxy))
         .route("/relay/logout", axum::routing::post(logout))
         .route("/relay/devices/{id}/revoke", axum::routing::post(revoke_device))
         .route("/u/{slug}", any(need_slash))
@@ -560,6 +571,55 @@ async fn devices_list(State(gate): State<Gate>, headers: axum::http::HeaderMap) 
     axum::Json(serde_json::json!({ "ok": true, "account": d.account, "devices": list })).into_response()
 }
 
+fn account_sync_response(result: Result<crate::account_sync::schema::Snapshot, crate::account_sync::server::Error>) -> axum::response::Response {
+    use crate::account_sync::server::Error;
+    match result {
+        Ok(snapshot) => (
+            [(header::CACHE_CONTROL, "no-store")], axum::Json(snapshot),
+        ).into_response(),
+        Err(Error::Conflict(snapshot)) => (
+            StatusCode::CONFLICT, [(header::CACHE_CONTROL, "no-store")],
+            axum::Json(serde_json::json!({"error":"revision_conflict", "current":snapshot})),
+        ).into_response(),
+        Err(Error::Invalid(code)) => json_err(StatusCode::BAD_REQUEST, &code),
+        Err(Error::Storage) => json_err(StatusCode::INTERNAL_SERVER_ERROR, "sync_storage_unavailable"),
+    }
+}
+
+async fn account_sync_get(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let Some((id, device)) = gate.device_of(&headers) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let devices = gate.devices.lock().unwrap();
+    if !devices.get(&id).is_some_and(|d| d.revoked_at.is_none()) || !gate.accounts.active(&device.account) {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    account_sync_response(gate.account_sync.get(&device.account))
+}
+
+async fn account_sync_patch(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    let headers = req.headers().clone();
+    if gate.device_of(&headers).is_none() { return json_err(StatusCode::UNAUTHORIZED, "unauthorized"); }
+    let bytes = match tokio::time::timeout(Duration::from_secs(10),
+        axum::body::to_bytes(req.into_body(), crate::account_sync::schema::MAX_BODY)).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => return json_err(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
+        Err(_) => return json_err(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
+    };
+    let Ok(patch) = serde_json::from_slice::<crate::account_sync::schema::Patch>(&bytes) else {
+        return json_err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    // Authentication is repeated after receiving the body so revocation cannot race a slow upload.
+    let Some((id, device)) = gate.device_of(&headers) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let devices = gate.devices.lock().unwrap();
+    if !devices.get(&id).is_some_and(|d| d.revoked_at.is_none()) || !gate.accounts.active(&device.account) {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    account_sync_response(gate.account_sync.patch(&device.account, &patch))
+}
+
 async fn logout(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
     let Some((id, _)) = gate.device_of(&headers) else {
         return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
@@ -592,6 +652,7 @@ struct Hello {
     aliases: Vec<String>,
     /// 로그인한 앱만 싣는다(proto 2).
     device_token: Option<String>,
+    owner_slug: Option<String>,
 }
 
 fn parse_hello(v: &serde_json::Value) -> Option<Hello> {
@@ -651,7 +712,10 @@ fn parse_hello(v: &serde_json::Value) -> Option<Hello> {
         .and_then(|t| t.as_str())
         .filter(|t| !t.is_empty() && t.len() <= 200)
         .map(str::to_string);
-    Some(Hello { key, slugs, machine, machine_id, aliases, device_token })
+    let owner_slug = v.get("owner_slug").and_then(|v| v.as_str())
+        .filter(|s| crate::mobile::valid_slug(s) && slugs.iter().any(|slug| slug == s))
+        .map(str::to_string);
+    Some(Hello { key, slugs, machine, machine_id, aliases, device_token, owner_slug })
 }
 
 /// 연결 `conn` 만 그 slug 에서 뗀다 — 같은 slug 의 다른 살아 있는 연결은 남는다.
@@ -671,7 +735,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<serde_json::Value>(t.as_str()).ok(),
         _ => None,
     };
-    let Some(Hello { key, slugs, machine, machine_id, aliases, device_token }) = hello.as_ref().and_then(parse_hello)
+    let Some(Hello { key, slugs, machine, machine_id, aliases, device_token, owner_slug }) = hello.as_ref().and_then(parse_hello)
     else {
         let _ = tx
             .send(Message::Text(r#"{"t":"err","error":"hello 가 없거나 이상해요"}"#.into()))
@@ -715,6 +779,7 @@ async fn uplink_run(gate: Gate, socket: WebSocket) {
         next: AtomicU32::new(1),
         account: account.clone(),
         device_id: device_id.clone(),
+        owner_slug: owner_slug.filter(|slug| gate.claim(slug, &hash)),
         kick: tokio::sync::Notify::new(),
     });
     if let Err(why) = gate.admit(&hash, up.clone()) {
@@ -891,6 +956,51 @@ async fn proxy(State(gate): State<Gate>, AxPath((slug, rest)): AxPath<(String, S
     forward(gate, slug, rest, req).await
 }
 
+#[derive(Clone)]
+struct AccountAccess {
+    gate: Gate,
+    account: String,
+    device_id: String,
+    token_hash: String,
+}
+
+impl AccountAccess {
+    fn valid(&self) -> bool {
+        let devices = self.gate.devices.lock().unwrap();
+        devices.get(&self.device_id).is_some_and(|d| d.revoked_at.is_none()
+            && d.account == self.account && d.token_hash == self.token_hash)
+            && self.gate.accounts.active(&self.account)
+    }
+}
+
+fn account_access(gate: &Gate, headers: &axum::http::HeaderMap) -> Option<AccountAccess> {
+    let device = if headers.contains_key(header::AUTHORIZATION) {
+        gate.device_of(headers)
+    } else if headers.get(header::UPGRADE).and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket")) {
+        let protocols = headers.get(header::SEC_WEBSOCKET_PROTOCOL)?.to_str().ok()?;
+        let token = protocols.split(',').map(str::trim).find_map(|s| s.strip_prefix("kasa-auth."))?;
+        gate.device_by_token(token)
+    } else { None }?;
+    Some(AccountAccess { gate: gate.clone(), account: device.1.account,
+        device_id: device.0, token_hash: device.1.token_hash })
+}
+
+async fn account_proxy_root(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    account_forward(gate, String::new(), req).await
+}
+
+async fn account_proxy(State(gate): State<Gate>, AxPath(rest): AxPath<String>, req: axum::extract::Request) -> axum::response::Response {
+    account_forward(gate, rest, req).await
+}
+
+async fn account_forward(gate: Gate, rest: String, req: axum::extract::Request) -> axum::response::Response {
+    let Some(access) = account_access(&gate, req.headers()) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    forward_scoped(gate, String::new(), rest, req, Some(access)).await
+}
+
 /// 스트림 하나의 수명 — 떨어질 때 관문 표에서 빠지고 앱에 CLOSE 를 알린다.
 struct StreamGuard {
     up: Arc<Uplink>,
@@ -937,22 +1047,37 @@ fn drop_request_header(k: &str) -> bool {
 }
 
 async fn forward(gate: Gate, slug: String, rest: String, req: axum::extract::Request) -> axum::response::Response {
-    if !crate::mobile::valid_slug(&slug) {
+    forward_scoped(gate, slug, rest, req, None).await
+}
+
+async fn forward_scoped(gate: Gate, slug: String, rest: String, req: axum::extract::Request,
+    access: Option<AccountAccess>) -> axum::response::Response {
+    if access.is_none() && !crate::mobile::valid_slug(&slug) {
         return offline_page(false);
     }
-    let raw = raw_rest(req.uri().path(), &slug).to_string();
+    let raw = if access.is_some() { req.uri().path().strip_prefix("/relay/account/").unwrap_or("") }
+        else { raw_rest(req.uri().path(), &slug) }.to_string();
     if !safe_path(&raw) {
         return (StatusCode::BAD_REQUEST, "bad path").into_response();
     }
-    let uplinks = gate
+    let mut uplinks = if let Some(access) = &access {
+        if !access.valid() { return json_err(StatusCode::UNAUTHORIZED, "unauthorized"); }
+        gate.live.lock().unwrap().values().filter(|(_, up)| up.account.as_deref() == Some(&access.account)
+            && up.owner_slug.is_some()).map(|(_, up)| up.clone()).collect::<Vec<_>>()
+    } else { gate
         .by_slug
         .lock()
         .ok()
         .and_then(|map| map.get(&slug).cloned())
-        .unwrap_or_default();
+        .unwrap_or_default() };
+    uplinks.sort_by_key(|up| up.conn);
     let candidates = candidates_of(&uplinks);
     let requested_machine = machine_route(&rest).map(|(machine, _)| machine);
     let route = pick_route(&candidates, requested_machine);
+    if access.is_some() && (route == RoutePick::Missing
+        || requested_machine.is_some() && matches!(route, RoutePick::Fallback(_))) {
+        return json_err(StatusCode::SERVICE_UNAVAILABLE, "account_device_unavailable");
+    }
     if route == RoutePick::Ambiguous {
         return (
             StatusCode::CONFLICT,
@@ -970,6 +1095,7 @@ async fn forward(gate: Gate, slug: String, rest: String, req: axum::extract::Req
         }
     };
     let up = uplinks[index].clone();
+    let slug = if access.is_some() { up.owner_slug.clone().unwrap_or_default() } else { slug };
     // 기계 고르기는 디코딩된 이름으로 하고, 넘기는 건 원문 — `m/<기계>/` 두 조각만 벗긴다.
     let routed_rest = if matches!(route, RoutePick::Machine(_)) {
         raw.splitn(3, '/').nth(2).unwrap_or("")
@@ -1012,7 +1138,8 @@ async fn forward(gate: Gate, slug: String, rest: String, req: axum::extract::Req
             Ok(w) => w,
             Err(e) => return e.into_response(),
         };
-        return ws.on_upgrade(move |sock| ws_pipe(guard, srx, sock)).into_response();
+        let ws = if access.is_some() { ws.protocols(["kasa-relay-account"]) } else { ws };
+        return ws.on_upgrade(move |sock| ws_pipe(guard, srx, sock, access)).into_response();
     }
     // HTTP 바디는 받는 대로 흘려 보낸다 — 통째 모으면 요청 하나가 관문 메모리를 64MB 씩 문다.
     // 상한은 흘린 바이트로 센다. 넘으면 guard 가 떨어지며 앱에 CLOSE 가 간다.
@@ -1020,6 +1147,9 @@ async fn forward(gate: Gate, slug: String, rest: String, req: axum::extract::Req
     let mut body = body.into_data_stream();
     let mut sent = 0usize;
     while let Some(chunk) = body.next().await {
+        if access.as_ref().is_some_and(|a| !a.valid()) {
+            return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+        }
         let Ok(chunk) = chunk else {
             return (StatusCode::BAD_REQUEST, "body read failed").into_response();
         };
@@ -1060,24 +1190,33 @@ async fn forward(gate: Gate, slug: String, rest: String, req: axum::extract::Req
             }
         }
     }
-    let stream = async_stream(srx, guard);
-    out.body(axum::body::Body::from_stream(stream))
-        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+    let authenticated = access.is_some();
+    let stream = async_stream(srx, guard, access);
+    let mut response = out.body(axum::body::Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response());
+    if authenticated {
+        response.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+        response.headers_mut().insert(header::VARY, "Authorization".parse().unwrap());
+    }
+    response
 }
 
 /// BODY 조각을 응답 스트림으로 — END·CLOSE 에서 끝난다. guard 는 스트림과 수명을 같이한다.
 fn async_stream(
     srx: mpsc::Receiver<Frame>,
     guard: StreamGuard,
+    access: Option<AccountAccess>,
 ) -> impl futures_util::Stream<Item = Result<Vec<u8>, std::io::Error>> {
-    futures_util::stream::unfold((srx, guard, false), |(mut srx, guard, done)| async move {
+    futures_util::stream::unfold((srx, guard, false, access), |(mut srx, guard, done, access)| async move {
         if done {
             return None;
         }
         // 이 스트림이 버려지면 guard 도 같이 떨어져 CLOSE 가 나간다.
         loop {
-            match srx.recv().await {
-                Some((BODY, p)) => return Some((Ok(p), (srx, guard, false))),
+            let next = srx.recv().await;
+            if access.as_ref().is_some_and(|a| !a.valid()) { return None; }
+            match next {
+                Some((BODY, p)) => return Some((Ok(p), (srx, guard, false, access))),
                 Some((END, _)) | Some((CLOSE, _)) | None => return None,
                 Some(_) => continue,
             }
@@ -1085,7 +1224,7 @@ fn async_stream(
     })
 }
 
-async fn ws_pipe(guard: StreamGuard, mut srx: mpsc::Receiver<Frame>, sock: WebSocket) {
+async fn ws_pipe(guard: StreamGuard, mut srx: mpsc::Receiver<Frame>, sock: WebSocket, access: Option<AccountAccess>) {
     let up = guard.up.clone();
     let id = guard.id;
     let (mut ctx, mut crx) = sock.split();
@@ -1110,8 +1249,17 @@ async fn ws_pipe(guard: StreamGuard, mut srx: mpsc::Receiver<Frame>, sock: WebSo
         let tx = up.tx.clone();
         async move { tx.send(Message::Binary(encode(kind, id, &payload).into())).await.is_ok() }
     };
+    let mut auth_tick = tokio::time::interval(Duration::from_secs(5));
+    let mut auth_changes = access.as_ref().map(|a| a.gate.auth_changes.subscribe());
     loop {
+        if access.as_ref().is_some_and(|a| !a.valid()) { break; }
         tokio::select! {
+            biased;
+            _ = auth_tick.tick(), if access.is_some() => {},
+            _ = async { match auth_changes.as_mut() {
+                Some(changes) => { let _ = changes.changed().await; },
+                None => std::future::pending::<()>().await,
+            } }, if access.is_some() => {},
             m = crx.next() => match m {
                 Some(Ok(Message::Text(t))) => if !send(WS_TEXT, t.as_str().as_bytes().to_vec()).await { break },
                 Some(Ok(Message::Binary(b))) => if !send(WS_BIN, b.to_vec()).await { break },
@@ -1153,6 +1301,7 @@ mod tests {
             next: AtomicU32::new(1),
             account: None,
             device_id: None,
+            owner_slug: None,
             kick: tokio::sync::Notify::new(),
         })
     }
@@ -1358,6 +1507,14 @@ mod tests {
             "t": "hello", "key": "0123456789abcdef0123", "slugs": [SLUG],
             "machine": "맥북", "machine_id": "machine-test-1",
         });
+        let fake = fake_uplink_at(addr, hello, answer).await;
+        (addr, fake)
+    }
+
+    async fn fake_uplink_at(
+        addr: std::net::SocketAddr, hello: serde_json::Value,
+        answer: impl Fn(u32, &serde_json::Value, mpsc::UnboundedSender<Vec<u8>>) + Send + Sync + 'static,
+    ) -> FakeUplink {
         let (ws, ok) = hello_uplink(addr, hello).await;
         assert_eq!(ok["t"], "ok", "{ok}");
         let (mut tx, mut rx) = ws.split();
@@ -1386,7 +1543,7 @@ mod tests {
                 }
             }
         });
-        (addr, fake)
+        fake
     }
 
     fn reply(out: &mpsc::UnboundedSender<Vec<u8>>, id: u32, head: serde_json::Value, body: &[u8]) {
@@ -1512,6 +1669,105 @@ mod tests {
             "t": "hello", "key": "0123456789abcdef0123", "slugs": [], "machine": "맥북",
             "machine_id": machine_id, "device_token": token, "proto": 2,
         })
+    }
+
+    #[tokio::test]
+    async fn account_sync_isolated_cas_validated_and_revoked_for_desktop_and_phone() {
+        let dir = std::env::temp_dir().join(format!("kasa-sync-http-{}", uuid::Uuid::new_v4()));
+        drop(account_gate(&dir));
+        let accounts_path = dir.join("relay-accounts.json");
+        let mut accounts = crate::relay_auth::load_accounts(&accounts_path);
+        let other = accounts.accounts["geno"].clone();
+        accounts.accounts.insert("other".into(), other);
+        crate::relay_auth::save_accounts(&accounts_path, &accounts).unwrap();
+        let addr = spawn_relay(Gate::new(Some(dir.join("relay-state.json")))).await;
+        let (_, desktop) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"geno","password":"correct horse","machine_id":"sync-desktop","kind":"desktop"
+        })).await;
+        let token = desktop["token"].as_str().unwrap();
+        let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"geno","password":"correct horse","kind":"phone"
+        })).await;
+        let phone_token = phone["token"].as_str().unwrap();
+        let (_, other) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"other","password":"correct horse","kind":"phone"
+        })).await;
+        assert_eq!(get_json(addr, "/relay/account-sync", "invalid").await.0, 401);
+        let patch = |token: String, value: serde_json::Value| async move {
+            let reply = reqwest::Client::new().patch(format!("http://{addr}/relay/account-sync"))
+                .bearer_auth(token).json(&value).send().await.unwrap();
+            (reply.status().as_u16(), reply.json::<serde_json::Value>().await.unwrap())
+        };
+        let first = serde_json::json!({"expected_revision":0,"settings":{"theme":"graphite"},
+            "machines":{"mini":{"label":"Mini","ssh":"user@example.com"}}});
+        assert_eq!(patch(token.into(), first.clone()).await.0, 200);
+        let shared = get_json(addr, "/relay/account-sync", phone_token).await;
+        assert_eq!(shared.0, 200);
+        assert_eq!(shared.1["settings"]["theme"], "graphite");
+        assert_eq!(get_json(addr, "/relay/account-sync", other["token"].as_str().unwrap()).await.1["revision"], 0);
+        assert_eq!(patch(phone_token.into(), first).await.0, 409);
+        assert_eq!(patch(phone_token.into(), serde_json::json!({"expected_revision":1,
+            "settings":{"password":"do-not-store"},"machines":{}})).await.0, 400);
+        assert_eq!(patch(phone_token.into(), serde_json::json!({"expected_revision":1,
+            "settings":{},"machines":{},"account":"other"})).await.0, 400);
+        assert_eq!(patch(phone_token.into(), serde_json::json!({"expected_revision":1,
+            "settings":{"font_size":14},"machines":{}})).await.0, 200);
+        assert_eq!(get_json(addr, "/relay/account-sync", token).await.1["settings"],
+            serde_json::json!({"theme":"graphite","font_size":14}));
+        assert_eq!(post(addr, "/relay/logout", Some(phone_token), serde_json::json!({})).await.0, 200);
+        assert_eq!(get_json(addr, "/relay/account-sync", phone_token).await.0, 401);
+        assert_eq!(patch(phone_token.into(), serde_json::json!({"expected_revision":2,"settings":{},"machines":{}})).await.0, 401);
+        assert_eq!(get_json(addr, "/relay/account-sync", token).await.1["revision"], 2);
+    }
+
+    #[tokio::test]
+    async fn account_phone_proxy_authenticates_http_ws_and_closes_on_revocation() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let dir = std::env::temp_dir().join(format!("kasa-account-proxy-{}", uuid::Uuid::new_v4()));
+        let gate = account_gate(&dir);
+        let addr = spawn_relay(gate).await;
+        let (_, desktop) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"geno","password":"correct horse","machine_id":"account-mac-a"
+        })).await;
+        let (_, phone) = post(addr, "/relay/login", None, serde_json::json!({
+            "account":"geno","password":"correct horse","kind":"phone"
+        })).await;
+        let token = phone["token"].as_str().unwrap();
+        let mut hello = desktop_hello("account-mac-a", desktop["token"].as_str().unwrap());
+        hello["slugs"] = serde_json::json!([SLUG]);
+        hello["owner_slug"] = SLUG.into();
+        let fake = fake_uplink_at(addr, hello, |id, open, out| {
+            if open["ws"] == true {
+                let _ = out.send(encode(HEAD, id, br#"{"status":101}"#));
+                let _ = out.send(encode(WS_TEXT, id, b"ready"));
+            } else {
+                reply(&out, id, serde_json::json!({"status":200,"headers":[["content-type","application/json"]]}),
+                    br#"{"account_view":true}"#);
+            }
+        }).await;
+        assert_eq!(get_json(addr, "/relay/account/term/me", "invalid").await.0, 401);
+        assert_eq!(reqwest::get(format!("http://{addr}/relay/account/term/me?token=not-a-credential"))
+            .await.unwrap().status().as_u16(), 401);
+        assert_eq!(get_json(addr, "/relay/account/term/me", token).await.1["account_view"], true);
+        let count = fake.opens.lock().unwrap().len();
+        assert_eq!(get_json(addr, "/relay/account/m/~another-account-machine/term/me", token).await.0, 503);
+        assert_eq!(fake.opens.lock().unwrap().len(), count);
+        {
+            let opens = fake.opens.lock().unwrap();
+            assert_eq!(opens[0].1["slug"], SLUG);
+            assert_eq!(opens[0].1["path"], "/term/me");
+            assert!(opens[0].1["headers"].as_array().unwrap().iter().all(|h| h[0] != "authorization"));
+        }
+        let mut request = format!("ws://{addr}/relay/account/term/ws").into_client_request().unwrap();
+        request.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL,
+            format!("kasa-relay-account, kasa-auth.{token}").parse().unwrap());
+        let (mut ws, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(response.headers()[header::SEC_WEBSOCKET_PROTOCOL], "kasa-relay-account");
+        assert_eq!(ws.next().await.unwrap().unwrap().into_text().unwrap(), "ready");
+        assert_eq!(post(addr, "/relay/logout", Some(token), serde_json::json!({})).await.0, 200);
+        let closed = tokio::time::timeout(Duration::from_secs(2), ws.next()).await.expect("revoked socket remained open");
+        assert!(matches!(closed, Some(Ok(TM::Close(_))) | None));
+        assert_eq!(get_json(addr, "/relay/account/term/me", token).await.0, 401);
     }
 
     #[tokio::test]

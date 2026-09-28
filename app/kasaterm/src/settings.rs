@@ -89,7 +89,7 @@ impl App {
     /// 학생 이름 셰임(`시로코`)까지 함께 굽는 것이 중요하다 — 그 스크립트에는
     /// 그 학생의 성격과 모델이 **구워져** 있어서, 클로드 셰임만 다시 만들면
     /// 설정에서 고친 값이 이름 명령으로 뜬 pane 에는 영영 안 붙는다.
-    fn regen_pane_shims(&self) {
+    pub(crate) fn regen_pane_shims(&self) {
         if let Ok(dir) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
             let dir = std::path::Path::new(&dir);
             install_claude_hook_shim(dir);
@@ -336,6 +336,7 @@ impl App {
             return;
         }
         entry.insert(key.to_string(), serde_json::Value::String(value));
+        if ssh { entry.remove("account_sync_unresolved"); }
         if kasa_mcp::machines::save_entries(&list).is_err() {
             self.set_toast("명부를 저장하지 못했어요".to_string());
         }

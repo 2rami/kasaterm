@@ -770,8 +770,8 @@ impl ApplicationHandler<UserEvent> for App {
                 let mut out = Vec::new();
                 for (id, sess) in self.pty.iter() {
                     let cwd = sess
-                        .shell_pid()
-                        .and_then(crate::socket::pid_cwd)
+                        .reported_cwd()
+                        .or_else(|| sess.shell_pid().and_then(crate::socket::pid_cwd))
                         .map(|p| p.to_string_lossy().into_owned())
                         .or_else(|| {
                             // 원격 pane 은 셸 pid 가 없다 — 마지막으로 안 cwd 라도.
@@ -1456,6 +1456,10 @@ impl ApplicationHandler<UserEvent> for App {
                 })));
                 return;
             }
+            UserEvent::AccountSyncApply(request, reply) => {
+                let _ = reply.send(self.apply_account_sync(request.clone()));
+                return;
+            }
             UserEvent::SocketSettingsAction(action, id, label, reply) => {
                 // 성공 판정을 토스트로 하지 않는다 — Step 5 의 캐릭터 저장과 다른
                 // 점이다. 거기선 토스트가 뜨는 것 자체가 거부였지만, 여기선
@@ -2054,7 +2058,7 @@ impl ApplicationHandler<UserEvent> for App {
             let git_item = MenuItem::new("Git 패널 켜기/끄기", true, None);
             let session_item = MenuItem::new("세션 패널 켜기/끄기", true, None);
             let board_item = MenuItem::new("보드 켜기/끄기  ⇧⌘B", true, None);
-            let arona_item = MenuItem::new("아로나 켜기/끄기", true, None);
+            let arona_item = MenuItem::new("캐릭터 보기 켜기/끄기", true, None);
             let _ = view_m.append(&git_item);
             let _ = view_m.append(&session_item);
             let _ = view_m.append(&board_item);
@@ -2330,50 +2334,28 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
-        // Right-hand git-column poller. The render publishes the active pane's
-        // cwd into `git_col_cwd`; this thread runs the full `git_status`
-        // (porcelain v2 + shortstat) off the main thread and wakes the loop
-        // only when the snapshot actually changes — so an unchanged repo costs
-        // one git call per interval with no repaint. Separate from the badge
-        // poller above because this one needs the file list, not just the
-        // branch/+/- summary.
         {
             let git_proxy = self.proxy.clone();
-            let panel_cwd = self.git.col_cwd.clone();
+            let panel_context = self.git.col_context.clone();
             let panel_data = self.git.col_data.clone();
             let panel_want = self.git.col_commit_want.clone();
-            let panel_remote = self.git.col_remote.clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_millis(1200));
-                let (remote, cwd) = match (panel_remote.lock(), panel_cwd.lock()) {
-                    (Ok(remote), Ok(cwd)) => (remote.clone(), cwd.clone()),
-                    _ => break,
-                };
-                let Some(cwd) = cwd else { continue };
-                let want = panel_want.load(std::sync::atomic::Ordering::Relaxed);
-                // A transient git failure ('index.lock' contention while another
-                // pane commits, a half-written index, …) returns None — skip
-                // this tick and keep the last good snapshot so the column never
-                // flashes the notice mid-operation.
-                // 다른 기기의 레포면 그 기계 창구로 읽는다 — 여기 git 은 그 경로를 모른다.
-                let view = match &remote {
-                    Some((_, base)) => fetch_remote_git_col_view(base, &cwd, want),
-                    None => fetch_git_col_view(&cwd, want),
-                };
-                let Some(mut view) = view else {
-                    continue;
-                };
-                view.remote = remote;
-                let mut guard = match panel_data.lock() {
-                    Ok(g) => g,
+                let request = match panel_context.lock() {
+                    Ok(mut context) => context.next_request(),
                     Err(_) => break,
                 };
-                if *guard != view {
-                    *guard = view;
-                    drop(guard);
-                    if git_proxy.send_event(UserEvent::Redraw).is_err() {
-                        break;
-                    }
+                let Some((generation, request, target)) = request else { continue };
+                let want = panel_want.load(std::sync::atomic::Ordering::Relaxed);
+                let view = crate::git_panel::fetch(&target, generation, want);
+                let Ok(context) = panel_context.lock() else { break };
+                if !context.accepts_request(generation, request, &target) { continue; }
+                let Ok(mut data) = panel_data.lock() else { break };
+                if *data != view {
+                    *data = view;
+                    drop(data);
+                    drop(context);
+                    if git_proxy.send_event(UserEvent::Redraw).is_err() { break; }
                 }
             });
         }
@@ -5306,14 +5288,10 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                         }
                         if self.git.branch_menu_open {
-                            if let Some(b) = self
-                                .git
-                                .branch_menu_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(b, _)| b.clone())
-                            {
-                                self.run_git_checkout(b);
+                            if let Some(back) = self.git.branch_page_rects.iter()
+                                .find(|(_, rect)| inside(rect)).map(|(back, _)| *back) {
+                                if back { self.git.branch_page = self.git.branch_page.saturating_sub(1); }
+                                else { self.git.branch_page += 1; }
                                 window.request_redraw();
                                 return;
                             }
@@ -5749,6 +5727,7 @@ impl ApplicationHandler<UserEvent> for App {
                             if let Some(cwd) = self.local_git_panel_cwd("스테이지 변경") {
                                 let proxy = self.proxy.clone();
                                 let data = self.git.col_data.clone();
+                                let generation = self.git.col_context.lock().map(|c| c.generation).unwrap_or_default();
                                 let want = self
                                     .git
                                     .col_commit_want
@@ -5765,9 +5744,10 @@ impl ApplicationHandler<UserEvent> for App {
                                     // Re-read status right away so the row jumps
                                     // sections immediately instead of waiting for
                                     // the 1.2s poller tick.
-                                    if let Some(view) = fetch_git_col_view(&cwd, want) {
+                                    if let Some(mut view) = fetch_git_col_view(&cwd, want) {
+                                        view.generation = generation;
                                         if let Ok(mut g) = data.lock() {
-                                            if g.cwd.as_ref() == Some(&cwd) && g.remote.is_none() { *g = view; }
+                                            if g.generation == generation && g.cwd.as_ref() == Some(&cwd) && g.remote.is_none() { *g = view; }
                                         }
                                     }
                                     let _ = proxy.send_event(UserEvent::Redraw);
@@ -5790,6 +5770,7 @@ impl ApplicationHandler<UserEvent> for App {
                             if let Some(cwd) = self.local_git_panel_cwd("변경 되돌리기") {
                                 let proxy = self.proxy.clone();
                                 let data = self.git.col_data.clone();
+                                let generation = self.git.col_context.lock().map(|c| c.generation).unwrap_or_default();
                                 let want = self
                                     .git
                                     .col_commit_want
@@ -5799,9 +5780,10 @@ impl ApplicationHandler<UserEvent> for App {
                                     if let Some(error) = crate::chrome::git_operation_error(&result) {
                                         let _ = proxy.send_event(UserEvent::GitOpFailed(error));
                                     }
-                                    if let Some(view) = fetch_git_col_view(&cwd, want) {
+                                    if let Some(mut view) = fetch_git_col_view(&cwd, want) {
+                                        view.generation = generation;
                                         if let Ok(mut g) = data.lock() {
-                                            if g.cwd.as_ref() == Some(&cwd) && g.remote.is_none() { *g = view; }
+                                            if g.generation == generation && g.cwd.as_ref() == Some(&cwd) && g.remote.is_none() { *g = view; }
                                         }
                                     }
                                     let _ = proxy.send_event(UserEvent::Redraw);
@@ -8646,80 +8628,9 @@ fn fetch_claude_usage(
     Some((v.get("usage")?.clone(), stale, dir))
 }
 
-/// `commits` = 발치 「최근 커밋」 구역에 지금 들어가는 줄 수. 0 이면 아직 그 구역을
-/// 한 번도 안 그린 것이라(첫 tick) 기본값을 쓴다.
-/// 다른 기기의 레포 — 그 기계가 `fetch_git_col_view` 를 돌려 준 것을 그대로 받는다.
-pub(crate) fn fetch_remote_git_col_view(base: &str, cwd: &std::path::Path, commits: usize) -> Option<GitColView> {
-    let query = format!(
-        "/term/gitcol?path={}&commits={commits}",
-        kasa_mcp::remote::urlencode(&cwd.to_string_lossy())
-    );
-    let v = kasa_mcp::remote::remote_get_json(base, &query).ok()?;
-    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
-        return Some(GitColView { cwd: Some(cwd.to_path_buf()), no_repo: true, ..Default::default() });
-    }
-    serde_json::from_value(v.get("view")?.clone()).ok()
-}
-
 pub(crate) fn fetch_git_col_view(cwd: &std::path::Path, commits: usize) -> Option<GitColView> {
-    let v = kasa_mcp::git::git_status(cwd);
-    if v.get("error").is_some() {
-        return None;
-    }
-    let mut view = GitColView {
-        cwd: Some(cwd.to_path_buf()),
-        ..Default::default()
-    };
-    if v.get("no_repo").and_then(|b| b.as_bool()).unwrap_or(false) {
-        view.no_repo = true;
-        return Some(view);
-    }
-    view.branch = v
-        .get("branch")
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
-    view.ahead = v.get("ahead").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-    view.behind = v.get("behind").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-    view.insertions = v.get("insertions").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-    view.deletions = v.get("deletions").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-    view.clean = v.get("clean").and_then(|b| b.as_bool()).unwrap_or(false);
-    if let Some(arr) = v.get("staged").and_then(|a| a.as_array()) {
-        for p in arr.iter().filter_map(|p| p.as_str()) {
-            view.staged.push(('A', p.to_string()));
-        }
-    }
-    for (key, marker) in [("modified", 'M'), ("untracked", 'U')] {
-        if let Some(arr) = v.get(key).and_then(|a| a.as_array()) {
-            for p in arr.iter().filter_map(|p| p.as_str()) {
-                view.unstaged.push((marker, p.to_string()));
-            }
-        }
-    }
-    view.branches = kasa_mcp::git::git_branches(cwd);
-    view.numstat = kasa_mcp::git::git_numstat(cwd);
-    let n = if commits == 0 {
-        crate::GIT_RECENT_COMMITS_DEFAULT
-    } else {
-        commits
-    };
-    view.recent_commits = kasa_mcp::git::git_log(cwd, n as u32)
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|c| {
-                    let h = c.get("hash")?.as_str()?.to_string();
-                    let s = c
-                        .get("subject")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    Some((h, s))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Some(view)
+    let commits = if commits == 0 { crate::GIT_RECENT_COMMITS_DEFAULT } else { commits };
+    serde_json::from_value(kasa_mcp::git::git_panel_snapshot(cwd, commits).ok()?).ok()
 }
 
 #[cfg(test)]

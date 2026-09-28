@@ -9,6 +9,8 @@ use kasa_socket::app_restart::Facts;
 use kasa_socket::app_update::{self as update, Device, State, Step, SystemEffects, UpdateRequest};
 
 pub(crate) fn enabled() -> bool {
+    #[cfg(target_os = "macos")]
+    if crate::macos_sparkle::owns_installation() { return false; }
     update::install_enabled(&|k| std::env::var(k).ok())
 }
 

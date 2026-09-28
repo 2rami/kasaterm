@@ -282,6 +282,11 @@ fn hello_json(token: Option<&str>) -> Option<String> {
     });
     if let Some(t) = token {
         hello["device_token"] = t.into();
+        if crate::mobile::published() {
+            if let Some(owner) = crate::mobile::owner() {
+                if slugs.contains(&owner.slug) { hello["owner_slug"] = owner.slug.into(); }
+            }
+        }
     }
     Some(hello.to_string())
 }
@@ -513,6 +518,7 @@ fn token_refused(token: &str, why: &str) {
     if !matches!(why, "device_token_invalid" | "device_revoked") {
         return;
     }
+    crate::device_auth::reject_token(token);
     if let Ok(mut r) = rejected_token().lock() {
         *r = Some(token.to_string());
     }

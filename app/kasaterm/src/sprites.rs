@@ -153,12 +153,6 @@ pub(crate) fn other_theme_has_profile(slug: &str) -> bool {
         .any(|d| [true, false].into_iter().any(|f| d.join(profile_rel(slug, f)).is_file()))
 }
 
-/// `~/.config/kasaterm/students/<filename>` 을 RGBA 로 읽는다(프사·로고처럼
-/// 단일 이미지용). 파일/디렉토리가 없으면 None → 호출측이 번들 기본으로 폴백.
-pub(crate) fn user_asset_rgba(filename: &str) -> Option<(Vec<u8>, u32, u32)> {
-    user_asset_rgba_in(&crate::socket::students_dir()?, filename)
-}
-
 /// dir 주입 버전(테스트용) — students_dir 해석과 분리해 env 없이 검증한다.
 pub(crate) fn user_asset_rgba_in(dir: &std::path::Path, filename: &str) -> Option<(Vec<u8>, u32, u32)> {
     let img = downscale_student(image::open(dir.join(filename)).ok()?);
@@ -371,7 +365,7 @@ pub(crate) fn export_student_sprites(dir: &std::path::Path) -> std::io::Result<u
             n += 1;
         }
     }
-    let logo: &'static [u8] = include_bytes!("../assets/students/schale-logo.png");
+    let logo: &'static [u8] = include_bytes!("../../../assets/AppIcon.png");
     if copy(["schale-logo.png".to_string(), "schale-logo.png".to_string()], Some(logo))? {
         n += 1;
     }
@@ -985,31 +979,24 @@ pub(crate) fn app_logo_rgba() -> Option<(Vec<u8>, u32, u32)> {
     Some((img.into_raw(), w, h))
 }
 
-/// SCHALE 로고 PNG → RGBA. agents 뷰 캐시 미스 시 1회 디코딩. 사용자
-/// override(students_dir/schale-logo.png) 우선, 없으면 include_bytes 번들.
+// 기존 테마의 로고 파일명은 보존하되 제품 기본 로고는 앱 아이콘과 같아야 한다.
 pub(crate) fn schale_logo_rgba() -> Option<(Vec<u8>, u32, u32)> {
-    if let Some(r) = user_asset_rgba("schale-logo.png") {
-        return Some(r);
-    }
-    let img = image::load_from_memory(include_bytes!("../assets/students/schale-logo.png"))
-        .ok()?
-        .to_rgba8();
-    let (w, h) = img.dimensions();
-    Some((img.into_raw(), w, h))
+    schale_logo_rgba_in(crate::socket::students_dir().as_deref())
 }
 
-/// agents/resume 피커 배경(교실). 셀 뒤에 깔리므로 텍스트 대비 확보를 위해 로드
-/// 시 밝기를 낮춘다 — 원본 에셋은 보존, 여기서만 RGB × DIM. user override
-/// (students_dir/schale-classroom.png) 우선, 없으면 include_bytes 번들.
+fn schale_logo_rgba_in(dir: Option<&std::path::Path>) -> Option<(Vec<u8>, u32, u32)> {
+    dir.and_then(|d| user_asset_rgba_in(d, "schale-logo.png")).or_else(app_logo_rgba)
+}
+
+// 사용자 배경은 유지하고, 자체 배경이 없는 기본 화면은 팔레트 표면을 쓴다.
 pub(crate) fn schale_classroom_rgba() -> Option<(Vec<u8>, u32, u32)> {
+    schale_classroom_rgba_in(crate::socket::students_dir().as_deref())
+}
+
+fn schale_classroom_rgba_in(dir: Option<&std::path::Path>) -> Option<(Vec<u8>, u32, u32)> {
     const DIM: f32 = 0.40;
-    let mut img = user_asset_rgba("schale-classroom.png")
-        .and_then(|(rgba, w, h)| image::RgbaImage::from_raw(w, h, rgba))
-        .or_else(|| {
-            image::load_from_memory(include_bytes!("../assets/schale-classroom.png"))
-                .ok()
-                .map(|i| i.to_rgba8())
-        })?;
+    let (rgba, w, h) = user_asset_rgba_in(dir?, "schale-classroom.png")?;
+    let mut img = image::RgbaImage::from_raw(w, h, rgba)?;
     for px in img.pixels_mut() {
         px[0] = (px[0] as f32 * DIM) as u8;
         px[1] = (px[1] as f32 * DIM) as u8;
@@ -1168,6 +1155,29 @@ mod theme_sprite_dir_tests {
 #[cfg(test)]
 mod student_asset_tests {
     use super::*;
+
+    #[test]
+    fn default_brand_uses_app_icon_without_classroom_background() {
+        let logo = schale_logo_rgba_in(None).expect("bundled app icon");
+        assert_eq!(Some(logo), app_logo_rgba());
+        assert!(schale_classroom_rgba_in(None).is_none());
+    }
+
+    #[test]
+    fn legacy_user_brand_assets_keep_their_paths() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("kt-user-brand-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let art = image::RgbaImage::from_pixel(2, 2, image::Rgba([100, 150, 200, 255]));
+        art.save(dir.join("schale-logo.png")).unwrap();
+        art.save(dir.join("schale-classroom.png")).unwrap();
+        assert_eq!(schale_logo_rgba_in(Some(&dir)), Some((art.into_raw(), 2, 2)));
+        let (background, w, h) = schale_classroom_rgba_in(Some(&dir)).unwrap();
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(&background[..4], &[40, 60, 80, 255]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// 번들 내장 프레임이 **모든 학생 × 모든 모션**에서 실제로 디코딩되는지.
     ///

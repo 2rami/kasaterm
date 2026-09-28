@@ -8384,6 +8384,7 @@ impl App {
     /// modes — the caller decides which concrete `Backend` impl to plug
     /// in (TmuxBackend in tmux mode, PtyBackend in PTY mode).
     pub(crate) fn start_socket_with(&self, backend: Arc<dyn kasa_socket::Backend>) {
+        if !self.lite { self.register_account_sync(); }
         // 정본 포트. 이미 물려 있으면 spawn_http_server 가 임시 포트로 떨어진다.
         const CANONICAL_MCP_PORT: u16 = 8765;
         // lite 는 HTTP 서버를 안 띄운다 — 포트 파일이 본판 것과 섞인다.

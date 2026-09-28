@@ -2,14 +2,14 @@
 use super::*;
 
 impl GitColView {
-    fn target(&self) -> Option<(std::path::PathBuf, Option<(String, String)>)> {
-        self.cwd.clone().map(|cwd| (cwd, self.remote.clone()))
+    fn target(&self) -> Option<(std::path::PathBuf, Option<(String, String)>, u64)> {
+        self.cwd.clone().map(|cwd| (cwd, self.remote.clone(), self.generation))
     }
     fn local_cwd(&self, action: &str) -> Result<std::path::PathBuf, String> {
         if let Some((label, _)) = &self.remote {
-            return Err(format!("{action}는 {label}에서 해 주세요. 원격 Git은 받기·올리기·스테이지된 커밋을 지원해요"));
+            return Err(format!("{action}는 {label}에서 해 주세요. 원격 Git은 읽기 전용이에요"));
         }
-        self.cwd.clone().ok_or_else(|| "Git 폴더 정보를 읽는 중이에요".into())
+        self.repo_root.clone().or_else(|| self.cwd.clone()).ok_or_else(|| "Git 폴더 정보를 읽는 중이에요".into())
     }
 }
 
@@ -51,7 +51,7 @@ impl state::GitState {
         self.path_hdr_rect = None;
         self.branch_hdr_rect = None;
         self.path_menu_rects.clear();
-        self.branch_menu_rects.clear();
+        self.branch_page_rects.clear();
     }
 }
 
@@ -66,6 +66,12 @@ mod git_panel_safety_tests {
         assert_eq!(view.local_cwd("변경 되돌리기").unwrap(), path);
         view.remote = Some(("other device".into(), "https://other.invalid".into()));
         assert!(view.local_cwd("변경 되돌리기").unwrap_err().contains("other device"));
+    }
+
+    #[test]
+    fn file_actions_resolve_repository_root_when_the_shell_is_in_a_subdirectory() {
+        let view = GitColView { cwd: Some("/repo/subdirectory".into()), repo_root: Some("/repo".into()), ..Default::default() };
+        assert_eq!(view.local_cwd("파일 열기").unwrap(), std::path::PathBuf::from("/repo"));
     }
 
     #[test]
@@ -1659,8 +1665,10 @@ impl App {
     }
 
     fn git_panel_snapshot(&mut self) -> Option<GitColView> {
+        self.publish_git_col_cwd();
         let view = self.git.col_data.lock().ok().map(|view| view.clone());
-        if view.as_ref().is_some_and(|view| view.target().is_some() && view.target() == self.git.col_displayed_target) {
+        if view.as_ref().is_some_and(|view| !view.loading && view.issue.is_none() && !view.no_repo
+            && view.target().is_some() && view.target() == self.git.col_displayed_target) {
             view
         } else {
             self.set_toast("Git 목록을 갱신 중이에요. 갱신 후 다시 눌러 주세요".into());
@@ -1706,7 +1714,9 @@ impl App {
         // through `/layout`, and the GUI can't tell whether that tab is open. The
         // poller dedups by cwd and only wakes on a change, so an idle feed is one
         // cheap git call per distinct repo per interval (no repaint).
-        let cwds: Vec<std::path::PathBuf> = self.pane_cwd_cache.values().cloned().collect();
+        let cwds: Vec<std::path::PathBuf> = self.pane_cwd_cache.iter()
+            .filter(|(id, _)| !kasa_mcp::remote::is_remote_pane(id))
+            .map(|(_, cwd)| cwd.clone()).collect();
         if let Ok(mut guard) = self.git_poll_cwds.lock() {
             *guard = cwds;
         }
@@ -1740,52 +1750,31 @@ impl App {
     /// Push the active pane's cwd into the shared `git_col_cwd` so the git
     /// poller refreshes the right repo. Cheap string clone; called from the
     /// render right before the column paints (mirrors `git_poll_cwds`).
-    pub(crate) fn publish_git_col_cwd(&self) {
-        if !self.git.col_visible {
-            return;
-        }
-        // A user-pinned repo (picked from the path dropdown) overrides the
-        // active-pane follow — the column stays on that repo until unpinned.
-        if let Some(pinned) = self.git.col_pinned_cwd.clone() {
-            if let Ok(mut guard) = self.git.col_cwd.lock() {
-                *guard = Some(pinned);
-            }
-            return;
-        }
-        let active = self.ws.lock().ok().and_then(|w| w.active_pane.as_deref().map(|pane| w.active_tab_pid(pane)));
-        // 다른 기기의 거울이면 패널은 **그 기계의** 레포를 본다 — 경로는 저쪽 것이고 읽기도
-        // 저쪽 창구로 간다(2026-09-17 지시 「파일트리나 깃 패널 기기 달라도 뜨게」).
-        let remote = active
-            .as_ref()
-            .and_then(|id| kasa_mcp::remote::remote_info(id))
-            .map(|info| {
-                let label = kasa_mcp::machines::label_for_base(&info.base).unwrap_or_else(|| info.base.clone());
-                (label, info.base.clone(), info.remote_cwd.clone())
-            });
-        let resolved = match &remote {
-            Some((_, _, remote_cwd)) => active
-                .as_ref()
-                .and_then(|id| {
-                    self.pane_view_cwd.get(id).cloned().or_else(|| self.pane_cwd_cache.get(id).cloned())
-                })
-                .or_else(|| remote_cwd.as_deref().map(std::path::PathBuf::from)),
-            None => active.as_ref().and_then(|id| self.pane_cwd_cache.get(id).cloned()),
+    pub(crate) fn publish_git_col_cwd(&mut self) {
+        let target = self.git.col_visible.then(|| self.current_git_target()).flatten();
+        let changed = {
+            let Ok(mut context) = self.git.col_context.lock() else { return };
+            if !context.select(target.clone()) { return; }
+            let view = target.as_ref().map(|target| git_panel::placeholder(target, context.generation, target.issue.clone()))
+                .unwrap_or_else(|| GitColView { generation: context.generation,
+                    issue: Some("현재 터미널 창을 선택해 주세요".into()), ..Default::default() });
+            if let Ok(mut remote) = self.git.col_remote.lock() { *remote = view.remote.clone(); }
+            if let Ok(mut cwd) = self.git.col_cwd.lock() { *cwd = view.cwd.clone(); }
+            if let Ok(mut data) = self.git.col_data.lock() { *data = view; }
+            true
         };
-        if let (Ok(mut source), Ok(mut guard)) = (self.git.col_remote.lock(), self.git.col_cwd.lock()) {
-            let next_source = remote.as_ref().map(|(label, base, _)| (label.clone(), base.clone()));
-            if *source != next_source { *guard = None; }
-            *source = next_source;
-            match resolved {
-                // A confidently-resolved pane cwd always wins.
-                Some(cwd) => *guard = Some(cwd),
-                // Cache miss (e.g. right after a pane switch, before the cwd
-                // sniffer catches up): keep the last good cwd instead of
-                // flashing the launch dir — which is often a non-repo and
-                // would read as "not a repo". Seed from current_dir only on
-                // the very first frame, when nothing is known yet.
-                None if guard.is_none() && source.is_none() => *guard = std::env::current_dir().ok(),
-                None => {}
-            }
+        if changed {
+            self.git.clear_panel_hit_targets();
+            self.git.path_menu_open = false;
+            self.git.branch_menu_open = false;
+            self.git.branch_page = 0;
+            self.git.commit_menu_open = false;
+            self.git.commit_modal_open = false;
+            self.git.commit_focused = false;
+            self.git.commit_msg.clear();
+            self.git.commit_cursor = 0;
+            self.git.col_scroll = 0.0;
+            self.git.use_panel_snapshot(&GitColView::default());
         }
     }
     /// Run a git-column button off a worker thread so the UI never blocks on
@@ -1795,55 +1784,9 @@ impl App {
     /// targets what the user sees.
     pub(crate) fn run_git_col_action(&mut self, btn: GitColBtn) {
         let Some(view) = self.git_panel_snapshot() else { return };
-        let Some(cwd) = view.cwd else { return };
-        // 남의 기기 레포는 **그 기계에 시킨다** — 경로가 이 기계엔 없어 여기서 git 을 돌 수는
-        // 없지만, 읽는 길(`/term/gitcol`)이 이미 그쪽 창구를 타고 있었다. 고치는 길만 막혀
-        // 있어 남의 기기 레포를 보면서도 커밋·푸시는 그 기계로 건너가야 했다(2026-09-21 지시).
-        if let Some((label, base)) = view.remote {
-            let (op, message) = match btn {
-                GitColBtn::Pull => ("pull", String::new()),
-                GitColBtn::Push => ("push", String::new()),
-                GitColBtn::Commit => {
-                    let msg = self.git.commit_msg.trim().to_string();
-                    if msg.is_empty() {
-                        self.git.commit_focused = true;
-                        self.chrome_dirty = true;
-                        return;
-                    }
-                    ("commit", msg)
-                }
-                _ => {
-                    self.set_toast(format!("그건 {label} 에서 해야 해요 — 여기서는 받기·올리기·커밋만 돼요"));
-                    return;
-                }
-            };
-            self.git.op = Some(match op {
-                "pull" => "Pulling",
-                "push" => "Pushing",
-                _ => "Committing",
-            });
-            if op == "commit" {
-                self.git.commit_msg.clear();
-                self.git.commit_cursor = 0;
-            }
-            let proxy = self.proxy.clone();
-            std::thread::spawn(move || {
-                let body = serde_json::json!({
-                    "path": cwd.to_string_lossy(), "op": op, "message": message,
-                });
-                let said = match kasa_mcp::remote::remote_post_json(&base, "/term/gitop", &body) {
-                    Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => None,
-                    Ok(v) => Some(v.get("output").or_else(|| v.get("error"))
-                        .and_then(|o| o.as_str()).unwrap_or("실패했어요").to_string()),
-                    Err(e) => Some(e.to_string()),
-                };
-                let _ = proxy.send_event(UserEvent::GitOpDone);
-                if let Some(why) = said {
-                    // 실패는 조용히 지나가면 안 된다 — 단추를 눌렀는데 아무 일도 없던 것과
-                    // 구분이 안 된다. 사유를 그대로 띄운다(충돌·인증이 대부분이다).
-                    let _ = proxy.send_event(UserEvent::GitOpFailed(format!("{label}: {why}")));
-                }
-            });
+        let Some(cwd) = view.repo_root.or(view.cwd) else { return };
+        if let Some((label, _)) = view.remote {
+            self.set_toast(format!("{label}의 Git은 읽기 전용이에요"));
             return;
         }
         match btn {
@@ -1900,11 +1843,7 @@ impl App {
     /// Open the cursor-style Commit modal: pre-fill nothing, focus the message
     /// box, default to including unstaged changes (the toggle in the modal).
     pub(crate) fn open_commit_modal(&mut self) {
-        let Some(view) = self.git_panel_snapshot() else { return };
-        if view.remote.is_some() {
-            self.git.commit_modal_include_unstaged = false;
-            self.set_toast("원격 기기는 스테이지된 변경만 커밋할 수 있어요".into());
-        }
+        if self.local_git_panel_cwd("커밋").is_none() { return; }
         self.git.commit_menu_open = false;
         self.git.commit_modal_open = true;
         self.git.commit_focused = true;
@@ -1931,28 +1870,15 @@ impl App {
             self.chrome_dirty = true;
             return;
         }
-        let Some(view) = self.git_panel_snapshot() else { return };
-        let Some(cwd) = view.cwd else { return };
-        let remote = view.remote;
+        let Some(cwd) = self.local_git_panel_cwd("커밋") else { return };
         let include = self.git.commit_modal_include_unstaged;
-        if remote.is_some() && include {
-            self.set_toast("원격 기기에서는 변경 포함 옵션을 끄고 스테이지된 변경만 커밋해 주세요".into());
-            return;
-        }
         self.git.op = Some(if push { "Pushing" } else { "Committing" });
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let invoke = |op: &str| match &remote {
-                Some((_, base)) => kasa_mcp::remote::remote_post_json(base, "/term/gitop", &serde_json::json!({
-                    "path": cwd.to_string_lossy(), "op": op, "message": msg,
-                })).unwrap_or_else(|error| serde_json::json!({"ok": false, "error": error.to_string()})),
-                None if op == "push" => kasa_mcp::git::git_push(&cwd),
-                None if include => kasa_mcp::git::git_commit_all(&cwd, &msg),
-                None => kasa_mcp::git::git_commit_staged(&cwd, &msg),
-            };
-            let mut result = invoke("commit");
+            let mut result = if include { kasa_mcp::git::git_commit_all(&cwd, &msg) }
+                else { kasa_mcp::git::git_commit_staged(&cwd, &msg) };
             if push && git_operation_error(&result).is_none() {
-                result = invoke("push");
+                result = kasa_mcp::git::git_push(&cwd);
             }
             if let Some(error) = git_operation_error(&result) {
                 let _ = proxy.send_event(UserEvent::GitOpFailed(error));
@@ -2041,45 +1967,23 @@ impl App {
         }
         Some(moved)
     }
-    /// 끄는 중이었으면 참. 늘어난 자리를 폴러 tick(1.2초)까지 빈칸으로 두면 「늘려도
-    /// 안 늘어난다」로 읽히므로 여기서 한 번 바로 읽어 온다.
     pub(crate) fn commits_grip_release(&mut self) -> bool {
-        if self.git.col_commits_resize.take().is_none() {
-            return false;
-        }
-        let cwd = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone());
-        if let Some(cwd) = cwd {
+        if self.git.col_commits_resize.take().is_none() { return false; }
+        let context = self.git.col_context.clone();
+        let request = context.lock().ok().and_then(|mut c| c.next_request());
+        if let Some((generation, request, target)) = request {
             let proxy = self.proxy.clone();
             let data = self.git.col_data.clone();
-            let want = self
-                .git
-                .col_commit_want
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let want = self.git.col_commit_want.load(std::sync::atomic::Ordering::Relaxed);
             std::thread::spawn(move || {
-                if let Some(view) = crate::handler::fetch_git_col_view(&cwd, want) {
-                    if let Ok(mut g) = data.lock() {
-                        *g = view;
-                    }
-                }
+                let view = crate::git_panel::fetch(&target, generation, want);
+                let Ok(context) = context.lock() else { return };
+                if !context.accepts_request(generation, request, &target) { return; }
+                if let Ok(mut data) = data.lock() { *data = view; }
                 let _ = proxy.send_event(crate::UserEvent::Redraw);
             });
         }
         true
-    }
-    /// Check out `branch` in the column's repo (off-thread). A dirty tree makes
-    /// git refuse with a clear message — we don't stash/force, just let the
-    /// poller repaint whatever git did. Closes the branch dropdown.
-    pub(crate) fn run_git_checkout(&mut self, branch: String) {
-        self.git.branch_menu_open = false;
-        let Some(cwd) = self.local_git_panel_cwd("브랜치 전환") else { return };
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            let result = kasa_mcp::git::git_checkout(&cwd, &branch);
-            if let Some(error) = git_operation_error(&result) {
-                let _ = proxy.send_event(UserEvent::GitOpFailed(error));
-            }
-            let _ = proxy.send_event(UserEvent::Redraw);
-        });
     }
     /// Persist the current window frame (logical size + physical position).
     /// Called from `exiting` and from the Moved/Resized debounce in

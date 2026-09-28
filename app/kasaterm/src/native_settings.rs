@@ -4612,7 +4612,9 @@ fn machines_view() -> Vec<MachineRow> {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
             let build = hit.and_then(|m| m.get("build")).and_then(|v| v.as_str());
-            let status = machine_status(online, build_match, build, ago);
+            let status = if e.get("account_sync_unresolved").and_then(serde_json::Value::as_bool) == Some(true) {
+                "로컬 SSH 연결 설정 필요".to_string()
+            } else { machine_status(online, build_match, build, ago) };
             let key = e
                 .get("key")
                 .and_then(|v| v.as_str())
