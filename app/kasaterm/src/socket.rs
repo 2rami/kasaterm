@@ -30,7 +30,7 @@ fn is_web_shell(surface_id: &str) -> bool {
 /// 부른 쪽(정리 기능)은 끝난 줄 알았다(2026-09-28). 열린 폰·웹 화면처럼 아직 누가 잡고 있으면
 /// 실패로 답한다 — 끝나지 않은 것을 끝났다고 하지 않는다. `keep` 은 그때도 놓으므로 마지막
 /// 화면이 닫히는 순간 셸이 끝난다.
-fn release_web_shell(surface_id: &str, wait: std::time::Duration) -> Result<()> {
+pub(crate) fn release_web_shell(surface_id: &str, wait: std::time::Duration) -> Result<()> {
     kasa_pty::release_session(surface_id);
     let deadline = std::time::Instant::now() + wait;
     while kasa_pty::lookup_session(surface_id).is_some() {

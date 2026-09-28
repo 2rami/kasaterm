@@ -22,9 +22,53 @@ pub(crate) fn remote_pane_closed(row: &serde_json::Value) -> bool {
         || row.get("detached").and_then(serde_json::Value::as_bool) == Some(true)
 }
 
+/// 그 기기 목록에서 창 없는 웹 셸만 추린다. 도는 명령이 있는 것을 앞에 세운다 —
+/// 빈 셸은 한꺼번에 닫는 대상이라 뒤로 모인다.
+pub(crate) fn web_shells_of(panes: &[serde_json::Value]) -> Vec<state::WebShell> {
+    let text = |p: &serde_json::Value, k: &str| p.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+    let mut out: Vec<state::WebShell> = panes
+        .iter()
+        .filter(|p| p.get("mirror_of").and_then(|v| v.as_str()).is_none())
+        .filter_map(|p| {
+            let id = text(p, "id").filter(|id| id.starts_with("web-"))?;
+            Some(state::WebShell { id, cwd: text(p, "cwd").unwrap_or_default(), job: text(p, "job") })
+        })
+        .collect();
+    out.sort_by(|a, b| a.job.is_none().cmp(&b.job.is_none()).then_with(|| a.id.cmp(&b.id)));
+    out
+}
+
+/// 이 기기가 붙들고 있는 웹 셸 — `/term/panes` 가 남에게 주는 것과 같은 재료로 만든다.
+fn local_web_shells() -> Vec<state::WebShell> {
+    let rows: Vec<serde_json::Value> = kasa_pty::kept_sessions()
+        .into_iter()
+        .filter(|id| id.starts_with("web-"))
+        .filter_map(|id| {
+            let s = kasa_pty::lookup_session(&id)?;
+            let cwd = s.reported_cwd().map(|p| p.display().to_string());
+            Some(serde_json::json!({ "id": id, "cwd": cwd, "job": s.running_job() }))
+        })
+        .collect();
+    web_shells_of(&rows)
+}
+
 #[cfg(test)]
 mod visibility_tests {
     use super::*;
+
+    #[test]
+    fn web_shells_keep_only_windowless_shells_with_busy_first() {
+        let rows = vec![
+            serde_json::json!({ "id": "%3", "name": "유즈" }),
+            serde_json::json!({ "id": "web-b", "cwd": null, "job": null }),
+            serde_json::json!({ "id": "web-a", "cwd": "/tmp", "job": "cargo" }),
+            serde_json::json!({ "id": "web-c", "mirror_of": "맥미니" }),
+        ];
+        let shells = web_shells_of(&rows);
+        assert_eq!(shells.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["web-a", "web-b"]);
+        assert_eq!(shells[0].job.as_deref(), Some("cargo"));
+        assert_eq!(shells[1].cwd, "");
+    }
 
     #[test]
     fn closed_and_legacy_detached_sources_are_not_active() {
@@ -556,6 +600,7 @@ impl App {
                 let closed = panes
                     .map(|arr| arr.iter().filter(|p| remote_pane_closed(p)).count())
                     .unwrap_or(0);
+                let web_shells = panes.map(|arr| web_shells_of(arr)).unwrap_or_default();
                 let remote = panes
                     .map(|arr| {
                         // (원격 방 인덱스, 행) — 로컬과 같은 이유로 방 순서로 이어 앉힌다.
@@ -641,10 +686,12 @@ impl App {
                     mirrored: mirror_rows,
                     remote,
                     closed,
+                    web_shells,
                 })
             })
             .collect();
         self.info.machines_col.locals = locals;
+        self.info.machines_col.local_web_shells = local_web_shells();
         self.info.machines_col.machines = machines;
     }
 

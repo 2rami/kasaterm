@@ -75,6 +75,10 @@ class SSHNachoProvider:
             raise ProviderFailure(diagnostic("transport_parse" if isinstance(exc,json.JSONDecodeError) else "transport",exc,encoded)) from None
 
 
+# Longest summary: 8s setup + 120s answer + 5s cleanup, with room for a slow tunnel.
+SHELL_LEASE_SECS = 600
+
+
 class HTTPNachoProvider:
     """A private, short-lived web terminal; never addresses an existing student."""
     name = "nacho-http"
@@ -128,7 +132,9 @@ class HTTPNachoProvider:
         marker = "RJ_" + uuid.uuid4().hex
         cleanup_error = False
         try:
-            spawned = self._call("POST", "/term/spawn?cwd=%2Ftmp&cols=120&rows=32")
+            # If this response is lost on the tunnel the id is unknown and DELETE can never
+            # run; the lease makes the host release the shell on its own.
+            spawned = self._call("POST", f"/term/spawn?cwd=%2Ftmp&cols=120&rows=32&lease={SHELL_LEASE_SECS}")
             pane = spawned.get("id")
             if not spawned.get("ok") or not isinstance(pane, str) or not re.fullmatch(r"web-[0-9a-f-]{36}", pane):
                 pane = None

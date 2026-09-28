@@ -4825,6 +4825,7 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 }
             }
             let b = raw.filter(|p| p.harness.is_some() && remote.is_none());
+            let web = id.starts_with("web-").then(|| kasa_pty::lookup_session(&id)).flatten();
             serde_json::json!({
                 "id": id,
                 "surface_key": crate::surface_keys::get(&id),
@@ -4884,7 +4885,11 @@ async fn term_panes_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
                 "cwd": raw
                     .map(|p| p.cwd.clone())
                     .filter(|s| !s.is_empty())
-                    .or_else(|| pane_cwds.get(&id).cloned()),
+                    .or_else(|| pane_cwds.get(&id).cloned())
+                    .or_else(|| web.as_ref().and_then(|s| s.reported_cwd()).map(|p| p.display().to_string())),
+                // 창 없는 웹 셸에서 지금 도는 명령(없으면 프롬프트에서 쉬는 빈 셸). 사이드바가
+                // 빈 셸만 한꺼번에 닫고, 일하는 셸은 이름을 보여 주고 남긴다.
+                "job": web.as_ref().and_then(|s| s.running_job()),
                 "color": b
                     .and_then(|p| p.character.as_deref())
                     .and_then(crate::character::header_color_any),
@@ -5080,7 +5085,14 @@ fn preseed_claude_trust(path: &str) {
     }
 }
 
-/// `POST /term/spawn?cwd=<dir>&cols=&rows=` → `{ok, id}` — 새 셸 세션.
+const TERM_SPAWN_LEASE_MIN: u64 = 30;
+const TERM_SPAWN_LEASE_MAX: u64 = 6 * 60 * 60;
+
+/// `POST /term/spawn?cwd=<dir>&cols=&rows=[&lease=<초>]` → `{ok, id[, lease]}` — 새 셸 세션.
+///
+/// `lease` 는 잠깐 쓰고 버릴 셸(요청 장부 요약 등)용이다. 띄운 쪽이 응답을 못 받으면
+/// id 를 몰라 닫을 수가 없다 — 불안정한 터널 너머에서 그렇게 셸이 한 시간에 하나꼴로
+/// 쌓였다(2026-09-28, 맥미니 22개). 수명이 다하면 서버가 스스로 놓는다.
 async fn term_spawn_post(
     q: Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -5101,7 +5113,18 @@ async fn term_spawn_post(
             kasa_pty::register_session(&id, &sess);
             // 연결 없이도 살려 둔다 — 이 창구의 존재 이유가 「부착자 없는 세션」이다.
             kasa_pty::keep_session(&id, sess);
-            Json(serde_json::json!({ "ok": true, "id": id }))
+            let lease = q
+                .get("lease")
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|s| s.clamp(TERM_SPAWN_LEASE_MIN, TERM_SPAWN_LEASE_MAX));
+            if let Some(secs) = lease {
+                let id = id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                    kasa_pty::release_session(&id);
+                });
+            }
+            Json(serde_json::json!({ "ok": true, "id": id, "lease": lease }))
         }
         Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("{e:#}") })),
     }

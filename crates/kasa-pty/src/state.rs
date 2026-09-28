@@ -1098,6 +1098,20 @@ impl PtySession {
         self.cwd_handle.lock().ok().and_then(|c| c.clone())
     }
 
+    /// The command running under the shell right now, or None when it sits at
+    /// its prompt. Unlike `active_process_name` it never falls back to the
+    /// shell itself — a window-less web shell is only safe to close when idle.
+    pub fn running_job(&self) -> Option<String> {
+        let table = process_table_shared();
+        let pid = effective_shell_pid(&table, self.shell_pid?);
+        let child = table
+            .iter()
+            .filter(|(_, ppid, _)| *ppid == pid)
+            .max_by_key(|(p, _, _)| *p)
+            .map(|(p, _, n)| (*p, n.clone()));
+        descend_launchers(&table, child).map(|(_, n)| strip_exe_suffix(n))
+    }
+
     pub fn active_process_name(&self) -> Option<String> {
         let pid = self.shell_pid?;
         let now = Instant::now();
