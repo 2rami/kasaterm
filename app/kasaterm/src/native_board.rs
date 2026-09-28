@@ -1769,6 +1769,8 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     let mut hits = Vec::new();
     let mut caret_rect = None;
     g.rect(ax, ay, aw, ah, theme::bg());
+    // 판 전체를 한 번 자른다 — 끝의 pop_clip 과 짝이다(짝이 안 맞으면 바깥 상태줄 아이콘까지 잘린다).
+    g.push_clip(ax, ay, aw, ah);
     // 왼쪽 목록은 프라나의 판(사이드바 옆 슬라이드)과 같은 틀, 내용은 계정 작업현황·나쵸 대화.
     let nav_w = if aw < 460.0 { 112.0 } else if aw < 760.0 { 154.0 } else { 190.0 };
     // 목업(플랫): 옆 목록은 구분선 없이 배경만 다르고, 머리글은 작은 흐림 글자 —
