@@ -183,6 +183,19 @@ enum PendingAuxOpen {
     },
 }
 
+fn viewer_document_owner(
+    current: Option<WindowId>,
+    windows: impl IntoIterator<Item = (WindowId, bool)>,
+) -> Option<WindowId> {
+    let mut first = None;
+    for (id, welcome) in windows {
+        if welcome { continue; }
+        if current == Some(id) { return current; }
+        if first.is_none() { first = Some(id); }
+    }
+    first
+}
+
 /// All detached-document state lives behind this one App field. The launch
 /// queue is included so an odoc/socket event received before `resumed` cannot
 /// lose the file merely because winit has not supplied an ActiveEventLoop yet.
@@ -2227,9 +2240,6 @@ impl App {
                             continue;
                         }
                     };
-                    if self.viewer_only {
-                        self.aux.windows.retain(|aux| !aux.welcome);
-                    }
                     let is_md = is_markdown_path(&path);
                     let lines = Arc::new(raw.split('\n').map(String::from).collect());
                     let editor = make_editor(&path, &raw, lines, is_md, !is_md, false);
@@ -2243,10 +2253,11 @@ impl App {
                     let restored_baseline = disk.clone();
                     let Some((text, lines, missing_source)) = source_for_restore(&record, disk)
                     else {
-                        self.set_toast(format!(
+                        let message = format!(
                             "{} 원본을 찾지 못해 문서창을 복원하지 않았어요",
                             path.file_name().and_then(|s| s.to_str()).unwrap_or("문서")
-                        ));
+                        );
+                        if self.viewer_only { self.viewer_status(message); } else { self.set_toast(message); }
                         continue;
                     };
                     let mut editor = make_editor(
@@ -2305,6 +2316,18 @@ impl App {
                     home_window,
                     frame,
                 } => self.open_restored_aux_terminal(pane_id, home_window, frame, event_loop),
+            }
+            // Finder can open either a new file or a saved record after the
+            // welcome window exists. Dismiss it only once a document survives,
+            // and never leave the vault attached to the discarded window.
+            if self.viewer_only {
+                if let Some(owner) = viewer_document_owner(
+                    self.aux.vault_owner,
+                    self.aux.windows.iter().map(|aux| (aux.window.id(), aux.welcome)),
+                ) {
+                    self.aux.windows.retain(|aux| !aux.welcome);
+                    self.aux.vault_owner = Some(owner);
+                }
             }
         }
         if had_pending {
@@ -4516,6 +4539,31 @@ pub(crate) fn clamped_document_scroll(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn viewer_document_open_replaces_the_welcome_vault_owner() {
+        let welcome = WindowId::from(1);
+        let document = WindowId::from(2);
+        assert_eq!(viewer_document_owner(None, [(document, false)]), Some(document));
+        assert_eq!(viewer_document_owner(Some(welcome), [(welcome, true), (document, false)]), Some(document));
+        assert_eq!(viewer_document_owner(Some(welcome), [(document, false)]), Some(document));
+    }
+
+    #[test]
+    fn failed_viewer_opens_preserve_the_only_welcome_window() {
+        let welcome = WindowId::from(1);
+        assert_eq!(viewer_document_owner(Some(welcome), [(welcome, true)]), None);
+        assert_eq!(viewer_document_owner(None, []), None);
+    }
+
+    #[test]
+    fn additional_viewer_documents_keep_a_living_vault_owner() {
+        let first = WindowId::from(1);
+        let current = WindowId::from(2);
+        let opened = WindowId::from(3);
+        assert_eq!(viewer_document_owner(Some(current), [(first, false), (current, false), (opened, false)]), Some(current));
+        assert_eq!(viewer_document_owner(Some(current), [(first, false), (opened, false)]), Some(first));
+    }
 
     #[test]
     fn toolbar_focus_follows_visual_order_and_skips_clipped_buttons() {
