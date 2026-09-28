@@ -42,7 +42,8 @@
 
 ## 창구 (`serve.rs`)
 
-`GET /term/share/manifest?since=&epoch=`, `GET /term/share/file?path=&sha=&offset=&len=`, `GET /term/share/list`(폰).
+`GET /term/share/manifest?since=&epoch=`, `GET /term/share/file?path=&sha=&offset=&len=`(기기 사이 조각 받기),
+`GET /term/share/f/<경로>`(폰이 여는 주소 — html 안의 상대 자원이 같은 폴더로 풀린다), `GET /term/share/list`(폰).
 읽기 전용·폴더 밖 불가(조상에 링크가 끼면 거부)·주인 아닌 폰 주소 403. 파일 응답에는
 `Content-Security-Policy: sandbox` — 학생이 만든 html 이 관문 주소에서 스크립트를 돌려 `/send` 로 셸에 치지 못하게.
 
