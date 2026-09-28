@@ -98,18 +98,27 @@ fn shared_choices(seen: Option<&kasa_mcp::agent_accounts::Seen>) -> (Vec<SharedC
             let mut who = a.email.clone();
             if !a.org.is_empty() && !a.org.to_lowercase().contains(&a.email.to_lowercase()) {
                 who = format!("{who} · {}", a.org);
-            } else if !a.plan.is_empty() {
-                who = format!("{who} · {}", a.plan);
+            } else if let Some(plan) = plan_label(&a.plan) {
+                who = format!("{who} · {plan}");
             }
             out.push(SharedChoice {
                 provider,
                 key: a.key.clone(),
                 name: if a.label.is_empty() { a.email.clone() } else { a.label.clone() },
-                sub: format!("{who} · {} 에 로그인돼 있어요", a.elsewhere().join("·")),
+                sub: format!("{who} · {}에 로그인돼 있어요", a.elsewhere().join("·")),
             });
         }
     }
     (out, seen.error.clone())
+}
+
+/// ChatGPT 요금제 원문(`self_serve_business_prolite` 따위)을 사람이 아는 이름으로.
+fn plan_label(plan: &str) -> Option<&'static str> {
+    let p = plan.to_ascii_lowercase();
+    [("enterprise", "Enterprise"), ("business", "Business"), ("team", "Team"), ("edu", "Edu"), ("pro", "Pro"), ("plus", "Plus")]
+        .into_iter()
+        .find(|(k, _)| p.contains(k))
+        .map(|(_, v)| v)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5958,7 +5967,9 @@ fn account_group(
     // 보낸 문자열. 화면은 같은 모양으로 그린다. 머리에서 미리 재는 것은 로그인이
     // 도는 동안 「계정 추가」를 감추기 위해서다 — 시작 단추와 진행 안내가 한
     // 화면에 함께 서면 어느 쪽이 지금인지 읽히지 않는다.
-    let local_state = s.login_job.as_ref().map(|job| &job.state);
+    // 로그인은 한 번에 하나라 다른 칸(Claude·Codex)의 것까지 여기서 그리면 두 칸이 함께
+    // 「진행 중」이 된다.
+    let local_state = s.login_job.as_ref().filter(|job| job.provider == provider).map(|job| &job.state);
     let needs_code = match home {
         Some(h) => h.login.as_ref().is_some_and(|(_, st, _)| st == "need_code"),
         None => local_state == Some(&crate::settings::LoginState::NeedCode),
@@ -6085,7 +6096,8 @@ fn account_group(
             *y += 3.0;
         }
     }
-    if rows.is_empty() && home.is_none_or(|h| h.error.is_none()) {
+    let has_shared = home.is_none() && s.shared_accounts.iter().any(|a| a.provider == provider);
+    if rows.is_empty() && !has_shared && home.is_none_or(|h| h.error.is_none()) {
         for line in wrap_words(g, "등록된 계정이 없어요. 위의 ‘계정 추가’로 시작하세요.", w - 4.0, 11.0) {
             draw_text(g, x + 2.0, *y, &line, 11.0, theme::text_dim(), false);
             *y += 16.0;
@@ -6193,7 +6205,12 @@ fn shared_rows(
     provider: AccountProvider,
     busy: bool,
 ) {
-    let rows: Vec<&SharedChoice> = s.shared_accounts.iter().filter(|a| a.provider == provider).collect();
+    let adopting = s.login_job.as_ref().and_then(|job| job.adopting.as_deref());
+    let rows: Vec<&SharedChoice> = s
+        .shared_accounts
+        .iter()
+        .filter(|a| a.provider == provider && adopting != Some(a.key.as_str()))
+        .collect();
     if rows.is_empty() && s.shared_error.is_none() {
         return;
     }

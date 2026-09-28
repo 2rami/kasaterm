@@ -474,7 +474,25 @@ impl App {
             return;
         };
         let name = if acct.label.is_empty() { acct.email.clone() } else { acct.label.clone() };
-        let Some((id, dir)) = self.new_account_slot(provider, &acct.label) else {
+        // 앞서 실패한(아직 아무도 로그인 안 한) 같은 이름 자리가 있으면 그 자리에 다시 한다 —
+        // 누를 때마다 빈 슬롯이 늘면 목록이 껍데기로 찬다(2026-09-05 「등록만 100번」).
+        let unused = match provider {
+            AccountProvider::Claude => self
+                .set_claude_accounts
+                .iter()
+                .find(|a| !acct.label.is_empty() && a.label == acct.label && remembered_identity(&a.id).0.is_empty())
+                .map(|a| a.id.clone()),
+            AccountProvider::Codex => self
+                .set_codex_accounts
+                .iter()
+                .find(|a| !acct.label.is_empty() && a.label == acct.label && !codex_logged_in(&a.id))
+                .map(|a| a.id.clone()),
+        };
+        let slot = match unused {
+            Some(id) => account_login_home(provider, &id).map(|dir| (id, dir)),
+            None => self.new_account_slot(provider, &acct.label),
+        };
+        let Some((id, dir)) = slot else {
             return;
         };
         let opts = LoginOpts {
@@ -3871,6 +3889,8 @@ pub(crate) struct LoginJob {
     pub(crate) state: LoginState,
     /// 기기 코드 로그인이면 `(주소, 코드)` — 화면이 크게 보여 주고 폰에서도 넣을 수 있다.
     pub(crate) device: Option<(String, String)>,
+    /// 다른 기기 계정을 붙이는 중이면 그 계정 열쇠 — 화면이 「다른 기기」 줄에서 뺀다.
+    pub(crate) adopting: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -4057,6 +4077,7 @@ pub(crate) fn seed_login_state_for_probe(id: &str, state: LoginState) -> bool {
         id: id.to_string(),
         state,
         device: None,
+        adopting: None,
     });
     true
 }
@@ -4243,6 +4264,7 @@ fn spawn_hidden_login(
         id: id.clone(),
         state: LoginState::Running,
         device: None,
+        adopting: opts.expect.as_ref().map(|(key, _)| key.clone()),
     });
     cell.1 = None;
     drop(cell);

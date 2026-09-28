@@ -3685,6 +3685,14 @@ impl App {
         // 부른다 — 검증 때마다 Finder 창이 튀어나오면 그게 더 방해다.
         match std::env::var("KASATERM_AUTOSETTINGS_ACTION").unwrap_or_default().as_str() {
             "" => {}
+            // 다른 기기 계정 줄의 「로그인」과 같은 길. 열쇠는 KASATERM_AUTOSETTINGS_ADOPT
+            // (`claude:<조직|이메일>` · `codex:<이메일>/<작업 공간>`). 목록은 부팅 때 받아 둔다.
+            "adopt-shared" if crate::verification_run() => {
+                let key = std::env::var("KASATERM_AUTOSETTINGS_ADOPT").unwrap_or_default();
+                let provider = if key.starts_with("codex:") { AccountProvider::Codex } else { AccountProvider::Claude };
+                eprintln!("[autosettings] 다른 기기 계정 로그인 {key}");
+                self.settings_apply(SettingsAction::AdoptSharedAccount(provider, key));
+            }
             "device-login" if crate::verification_run() => {
                 self.settings_apply(SettingsAction::DeviceAccount(
                     crate::native_settings::device_account::Action::OpenLogin,
