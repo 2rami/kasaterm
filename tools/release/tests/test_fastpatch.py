@@ -16,7 +16,7 @@ import plistlib
 import re
 import shutil
 
-from tools.release import deps
+from tools.release import common, deps
 from tools.release import fastpatch as fp
 from tools.release import macsign
 from tools.release import nacho
@@ -39,6 +39,14 @@ SELF = {"verified": True, "authority": "kasaterm-ci", "team": None, "notarized":
 
 def sh(cwd, *args):
     return subprocess.run(args, cwd=cwd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().strip()
+
+
+def feed_xml(version, item=None):
+    item = item or {}
+    return ('<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><item>'
+            f'<sparkle:version>{version}</sparkle:version>'
+            f'<enclosure url="{item.get("url", "https://x/old")}" length="{item.get("length", 1)}" '
+            f'sparkle:edSignature="{item.get("sig", "")}"/></item></channel></rss>')
 
 
 class FakeDevice:
@@ -212,6 +220,7 @@ class Fixture(unittest.TestCase):
         self.cargo_answer = lambda argv: Result(0, "test result: ok")
         self.push_answer = None
         self.ci_runs, self.assets, self.asset_bytes = [], {}, {}
+        self.release_prerelease = False
         self.nacho = FakeNacho()
         self.http = RoutedHttp(self.nacho)
         self.devices, self.calls = [], []
@@ -238,11 +247,7 @@ class Fixture(unittest.TestCase):
         items = items or {}
         for path, platform in ((self.feed, "macos"), (self.feed_win, "windows")):
             i = items.get(platform, {})
-            path.write_text(
-                '<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><item>'
-                f'<sparkle:version>{version}</sparkle:version>'
-                f'<enclosure url="{i.get("url", "https://x/old")}" length="{i.get("length", 1)}" type="application/octet-stream" '
-                f'sparkle:edSignature="{i.get("sig", "")}"/></item></channel></rss>')
+            path.write_text(feed_xml(version, i))
 
     def sign(self, data):
         f = self.tmp / "tosign"
@@ -258,7 +263,10 @@ class Fixture(unittest.TestCase):
         self.ci_runs = [{"databaseId": 42, "status": status, "conclusion": conclusion if status == "completed" else None,
                          "headBranch": tag, "headSha": bump, "event": "push"}]
         items = {}
+        self.release_prerelease = plan["channel"] == "preview"
         for platform, name in asset_names(tag).items():
+            if platform not in plan["platforms"]:
+                continue
             if name in drop:
                 continue
             # keep: 조종 기기가 이미 올린 산출물(로컬 mac 판) — CI 는 그것을 굽지 않고 그대로 싣는다.
@@ -269,7 +277,10 @@ class Fixture(unittest.TestCase):
             items[platform] = {"url": f"https://github.com/2rami/kasaterm/releases/download/{tag}/{name}",
                                "length": len(data), "sig": sig}
         if feed:
-            self.write_feeds(plan["version"], items)
+            if plan["channel"] == "preview":
+                Path(plan["feed"]["source"]).write_text(feed_xml(plan["version"], items["macos"]))
+            else:
+                self.write_feeds(plan["version"], items)
 
     # ── 가짜 도구 ──────────────────────────────────────────────────────────
     def fake(self, argv, cwd, env):
@@ -295,7 +306,8 @@ class Fixture(unittest.TestCase):
         if tool == "gh" and rest[:2] == ["run", "list"]:
             return Result(0, json.dumps(self.ci_runs))
         if tool == "gh" and rest[:2] == ["release", "view"]:
-            return Result(0, json.dumps({"assets": list(self.assets.values()), "isDraft": False})) if self.assets \
+            return Result(0, json.dumps({"assets": list(self.assets.values()), "isDraft": False,
+                                        "isPrerelease": self.release_prerelease})) if self.assets \
                 else Result(1, "", "release not found")
         if tool == "gh" and rest[:2] == ["release", "download"]:
             name, out = rest[rest.index("--pattern") + 1], Path(rest[rest.index("--dir") + 1])
@@ -317,7 +329,7 @@ class Fixture(unittest.TestCase):
         return {"label": label, "base": d.base, "fake": d}
 
     def plan(self, devices=(), **kw):
-        plan = fp.make_plan(self.work, feed=str(self.feed), feed_win=str(self.feed_win), http=self.http,
+        plan = fp.make_plan(self.work, feed=kw.pop("feed", str(self.feed)), feed_win=kw.pop("feed_win", str(self.feed_win)), http=self.http,
                             runner=FakeRunner("dry", self), installed_app=self.app, controller=CONTROLLER, tools=kw.pop("tools", self.tools),
                             devices=[{"label": d["label"], "base": d["base"]} for d in devices], **kw)
         fp.save_plan(plan, self.state)
@@ -1111,7 +1123,7 @@ class NachoFixtureTests(unittest.TestCase):
 class RealRepoTests(unittest.TestCase):
     def test_capabilities_match_the_updaters_in_this_repo(self):
         caps = fp.capabilities(REPO)
-        self.assertEqual(caps["macos"]["channels"], ["stable"])
+        self.assertEqual(caps["macos"]["channels"], ["stable", "preview"])
         self.assertEqual(caps["macos"]["feed"], fp.MAC_FEED)
         ci = caps["macos"]["ci_identity"]
         self.assertEqual((ci["authority"], ci["team"], ci["notarized"]), ("kasaterm-ci", None, False))
@@ -1248,6 +1260,8 @@ class LocalFixture(Fixture):
         if tool == "xcrun" and rest[:2] == ["stapler", "validate"]:
             return Result(0 if Path(rest[-1]).read_bytes().endswith(b"+ticket") else 65, "", "")
         if tool == "gh" and rest[:2] in (["release", "upload"], ["release", "create"]):
+            if rest[1] == "create":
+                self.release_prerelease = "--prerelease" in rest
             self.uploads.append(rest[:2] + [a for a in rest if a.startswith("--")])
             f = Path(rest[3])
             data = f.read_bytes()
@@ -1596,20 +1610,28 @@ class LocalSigningRepoTests(unittest.TestCase):
         self.assertIn("GIT_LFS_SKIP_SMUDGE: '1'", app)
         # 태그 마무리: 입력한 태그를 체크아웃하고 그 릴리스에 붙이며, 태그를 만들거나 옮기는 명령은 없다.
         self.assertIn("RELEASE_TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}", wf)
-        self.assertEqual(wf.count("ref: ${{ inputs.tag || '' }}"), 2)
+        self.assertEqual(wf.count("ref: ${{ inputs.tag || '' }}"), 1)
+        self.assertEqual(wf.count("ref: ${{ needs.resolve.outputs.commit }}"), 2)
         self.assertIn("tag_name: ${{ env.RELEASE_TAG }}", msi)
         self.assertNotIn("GITHUB_REF_NAME", msi + dmg + app)
-        for forbidden in ("git tag", "git push --force", "git push -f", "refs/tags/"):
+        for forbidden in ("git tag", "git push --force", "git push -f"):
             self.assertNotIn(forbidden, wf.replace("startsWith(github.ref, 'refs/tags/v')", ""))
         self.assertIn("run-name: ${{ inputs.tag && format('release {0} ({1})', inputs.tag, inputs.platforms)", wf)
         # mac 만 마무리: Windows job 을 건너뛰고, appcast 는 dmg 검증 성공 + (Windows 성공 또는 일부러 건너뜀)일 때만.
-        self.assertIn("if: inputs.platforms != 'macos'", msi)
+        self.assertIn("if: needs.resolve.outputs.platforms == 'both'", msi)
         self.assertIn("needs.build-dmg.result == 'success'", app)
-        self.assertIn("(inputs.platforms == 'macos' && needs.build-msi.result == 'skipped')", app)
-        both = app[app.index('if [[ "$PLATFORMS" == "both" ]]; then\n          gh release download'):app.index('rm -f "$KEYFILE"')]
+        self.assertIn("(needs.resolve.outputs.platforms == 'macos' && needs.build-msi.result == 'skipped')", app)
+        both_start = app.index('if [[ "$PLATFORMS" == "both" ]]; then')
+        both = app[both_start:app.index('echo "directory=', both_start)]
         self.assertIn("appcast-win.xml", both)
-        self.assertIn("git add docs/appcast.xml docs/.nojekyll\n", app)
-        self.assertIn("(mac 만 — Windows 는 그대로)", app)
+        publish = app[app.index("- name: Publish verified appcasts"):]
+        self.assertIn('python3 -m tools.release.feed_publish "${FEED_ARGS[@]}" --attempts 5', publish)
+        self.assertIn('--commit "$RELEASE_COMMIT"', publish)
+        self.assertIn('--dmg-sha256 "$DMG_SHA"', publish)
+        self.assertIn('if [[ "$PLATFORMS" == "both" ]]; then\n            FEED_ARGS+=(--windows', publish)
+        self.assertNotIn("git pull --rebase", app)
+        self.assertNotIn("git pull --ff-only", app)
+        self.assertLess(app.index("- name: Generate signed appcasts"), app.index("- name: Publish verified appcasts"))
 
     def test_the_lfs_folders_the_windows_build_skips_are_really_unused_by_it(self):
         # 빼는 폴더가 Windows 굽기에 쓰이면 그림이 포인터로 들어가 빈칸이 된다 — 굽기가 읽는 자리에서 그 이름을 찾는다.
@@ -1631,6 +1653,230 @@ class LocalSigningRepoTests(unittest.TestCase):
         ent = plistlib.loads((REPO / "scripts/kasaterm.entitlements").read_bytes())
         self.assertEqual(ent, {"com.apple.security.device.audio-input": True, "com.apple.security.automation.apple-events": True})
         self.assertIn("NSMicrophoneUsageDescription", self.bake)
+
+
+class PreviewReleaseTests(LocalFixture):
+    def setUp(self):
+        super().setUp()
+        (self.work / "app/kasaterm/src/macos_sparkle.rs").write_text(f'const PREVIEW_FEED: &str = "{fp.PREVIEW_FEED}";\n')
+        self.head = self.commit("preview feed support")
+        sh(self.work, "git", "push", "-q", "origin", "main")
+        self.preview_feed = self.tmp / "appcast-preview.xml"
+        self.preview_feed.write_bytes((REPO / "docs/appcast-preview.xml").read_bytes())
+
+    def preview_plan(self, **kwargs):
+        return self.plan(channel="preview", feed=str(self.preview_feed), feed_win=None,
+                         stable_feed=str(self.feed), **kwargs)
+
+    def publish(self, plan, authorizer):
+        backend = self.backend(plan, "live")
+        try:
+            return fp.run(plan["plan_id"], backend, self.state, publisher_authorizer=authorizer)
+        finally:
+            fp.cleanup(backend, plan)
+
+    def test_preview_defaults_to_its_feed_and_empty_channel_uses_stable_base(self):
+        plan = self.preview_plan()
+        self.assertEqual((plan["errors"], plan["live_blocks"]), ([], []))
+        self.assertEqual((plan["platforms"], plan["feed"]["windows"], plan["feed"]["version"]), (["macos"], None, None))
+        self.assertEqual(plan["base"]["tag"], "v0.2.0")
+        self.assertNotIn("approval_scope", plan)
+        self.assertEqual(self.backend(plan, "dry").feed_base(plan), plan["feed_base"])
+        response = {fp.PREVIEW_FEED: (404, b""), fp.MAC_FEED: (200, self.feed.read_bytes())}
+        with mock.patch.object(self.http, "get", side_effect=lambda url, **_: response[url]):
+            default = self.plan(channel="preview", feed=None, feed_win=None)
+        self.assertEqual(default["feed"]["source"], fp.PREVIEW_FEED)
+        self.assertEqual(default["base"]["tag"], "v0.2.0")
+
+    def test_channel_base_does_not_skip_changes_just_because_a_preview_tag_exists(self):
+        source = self.head
+        (self.work / common.CHANNEL_MANIFEST).write_text(json.dumps(common.channel_manifest("preview", "v0.2.1", source)))
+        self.release_tag("0.2.1")
+        self.preview_feed.write_text(feed_xml("0.2.1"))
+        (self.work / "app/kasaterm/src/main.rs").write_text("fn main() { loop {} }\n")
+        self.head = self.commit("next native change")
+        sh(self.work, "git", "push", "-q", "origin", "main")
+        preview, stable = self.preview_plan(), self.plan()
+        self.assertEqual((preview["base"]["tag"], stable["base"]["tag"]), ("v0.2.1", "v0.2.0"))
+        self.assertEqual((preview["tag"], stable["tag"]), ("v0.2.2", "v0.2.2"))
+        self.assertGreater(len(stable["changes"]["commits"]), len(preview["changes"]["commits"]))
+        backend = self.backend(stable, "local")
+        try:
+            wt = backend.worktree(stable)
+            backend.ensure_bump(wt, stable)
+            manifest = json.loads((wt / common.CHANNEL_MANIFEST).read_text())
+            self.assertEqual(manifest, common.channel_manifest("stable", "v0.2.2", self.head))
+            self.assertEqual(common.ci_release_context(wt, "v0.2.2")["channel"], "stable")
+        finally:
+            fp.cleanup(backend, stable)
+
+    def test_preview_publishes_only_signed_macos_prerelease_and_reauthorizes_each_stage(self):
+        before = (self.feed.read_bytes(), self.feed_win.read_bytes())
+        plan = self.preview_plan()
+        self.go(plan, "local")
+        calls = []
+
+        def authorize(current, state, backend, stage):
+            calls.append(stage)
+            self.assertNotIn("approval", state)
+            return {"policy": "test", "plan_id": current["plan_id"], "stage": stage}
+
+        state = self.publish(plan, authorize)
+        self.assertEqual(calls, ["tag", "release"])
+        self.assertEqual(state["stages"]["release"]["status"], "waiting")
+        self.assertIn("--prerelease", self.uploads[0])
+        self.assertIn("--latest=false", self.uploads[0])
+        self.ci_publish(plan, keep=[self.dmg_name(plan)])
+        state = self.publish(plan, authorize)
+        self.assertEqual(calls, ["tag", "release", "release", "feed"])
+        self.assertEqual(set(state["stages"]["release"]["detail"]["assets"]), {"macos"})
+        self.assertEqual(set(state["stages"]["feed"]["detail"]["hashes"]), {"macos"})
+        self.assertEqual((self.feed.read_bytes(), self.feed_win.read_bytes()), before)
+        self.assertEqual(self.nacho.consumes, 0)
+        self.assertEqual(state["authorization"]["stage"], "feed")
+
+    def test_authorizer_is_not_an_optional_approval_bypass_and_can_stop_after_tag(self):
+        plan = self.preview_plan()
+        backend = self.backend(plan, "live")
+        called = []
+        authorizer = lambda *args: called.append(args[-1]) or {"stage": args[-1]}
+        with self.assertRaisesRegex(Refused, "먼저 run"):
+            fp.run(plan["plan_id"], backend, self.state, publisher_authorizer=authorizer)
+        self.assertEqual(called, [])
+        self.go(plan, "local")
+        with self.assertRaisesRegex(Refused, "나쵸 승인"):
+            fp.run(plan["plan_id"], backend, self.state)
+        with self.assertRaisesRegex(Refused, "혼용"):
+            fp.run(plan["plan_id"], backend, self.state, authority=object(), publisher_authorizer=authorizer)
+        _, state = fp.load(plan["plan_id"], self.state)
+        state["approval"] = {"id": "existing-nacho-approval"}
+        fp.save_state(plan["plan_id"], state, self.state)
+        with self.assertRaisesRegex(Refused, "혼용"):
+            fp.run(plan["plan_id"], backend, self.state, publisher_authorizer=authorizer)
+        state.pop("approval")
+        fp.save_state(plan["plan_id"], state, self.state)
+        with self.assertRaisesRegex(Refused, "기록"):
+            fp.run(plan["plan_id"], backend, self.state, publisher_authorizer=lambda *args: None)
+
+        def revoked(current, state, backend, stage):
+            if stage == "release":
+                raise Refused("policy revoked")
+            return {"stage": stage}
+
+        with self.assertRaisesRegex(Refused, "policy revoked"):
+            self.publish(plan, revoked)
+        self.assertEqual(self.uploads, [])
+        with self.assertRaisesRegex(Refused, "재사용"):
+            fp.run(plan["plan_id"], backend, self.state, approval_id="ap_x", authority=object())
+
+    def test_preview_ci_context_is_pinned_and_refuses_stale_or_cross_platform_manifest(self):
+        plan = self.preview_plan()
+        backend = self.backend(plan, "local")
+        try:
+            wt = backend.worktree(plan)
+            bump = backend.ensure_bump(wt, plan)
+            context = common.ci_release_context(wt, plan["tag"], "both")
+            self.assertEqual((context["platforms"], context["prerelease"], context["commit"], context["feed_path"]),
+                             ("macos", "true", bump, "docs/appcast-preview.xml"))
+            expected = json.loads((wt / common.CHANNEL_MANIFEST).read_text())
+            for change in ({"tag": "v0.2.0"}, {"source_commit": "a" * 40}, {"platforms": ["macos", "windows"]}):
+                (wt / common.CHANNEL_MANIFEST).write_text(json.dumps({**expected, **change}))
+                with self.assertRaises(Refused):
+                    common.ci_release_context(wt, plan["tag"])
+            (wt / common.CHANNEL_MANIFEST).write_text(json.dumps(expected))
+            workflow = (REPO / ".github/workflows/release.yml").read_text()
+            section = workflow.split("- name: Resolve release channel", 1)[1].split("\n  build-msi:", 1)[0]
+            script = "\n".join(line[10:] for line in section.split("run: |\n", 1)[1].splitlines())
+            output = self.tmp / "context.out"
+            result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], cwd=wt,
+                                    env={**os.environ, "RELEASE_TAG": plan["tag"], "REQUESTED_PLATFORMS": "both",
+                                         "GITHUB_OUTPUT": str(output), "PYTHONPATH": str(REPO)}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("platforms=macos\n", output.read_text())
+            self.assertIn("if: needs.resolve.outputs.platforms == 'both'", workflow)
+        finally:
+            fp.cleanup(backend, plan)
+
+    def test_manifestless_legacy_tags_remain_stable(self):
+        context = common.ci_release_context(self.work, "v0.2.0")
+        self.assertEqual((context["channel"], context["platforms"], context["feed_path"]),
+                         ("stable", "both", "docs/appcast.xml"))
+
+    def test_manual_stable_script_overwrites_previous_preview_manifest(self):
+        shutil.copyfile(REPO / "scripts/tag-release.sh", self.work / "scripts/tag-release.sh")
+        (self.work / common.CHANNEL_MANIFEST).write_text(json.dumps(common.channel_manifest("preview", "v0.2.0", self.head)))
+        source = self.commit("previous preview marker and stable script")
+        sh(self.work, "git", "push", "-q", "origin", "main")
+        binaries = self.tmp / "bin"
+        binaries.mkdir()
+        fake_bin(binaries, "cargo", "exit 0\n")
+        result = subprocess.run(["bash", "scripts/tag-release.sh", "v0.2.1"], cwd=self.work, capture_output=True, text=True,
+                                env={**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"], "PYTHONPATH": str(REPO)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((self.work / common.CHANNEL_MANIFEST).read_text()),
+                         common.channel_manifest("stable", "v0.2.1", source))
+        self.assertEqual(self.remote("refs/heads/main"), self.remote("refs/tags/v0.2.1"))
+
+    def test_a_moved_tag_cannot_receive_the_previously_signed_preview_asset(self):
+        plan = self.preview_plan()
+        self.go(plan, "local")
+        self.publish(plan, lambda *args: {"stage": args[-1]})
+        self.uploads.clear()
+        sh(self.work, "git", "push", "-q", "-f", "origin", f"{self.head}:refs/tags/{plan['tag']}")
+        with self.assertRaisesRegex(Refused, "태그 커밋"):
+            self.publish(plan, lambda *args: {"stage": args[-1]})
+        self.assertEqual(self.uploads, [])
+
+
+class ChannelFeedTests(unittest.TestCase):
+    def test_preview_stages_only_its_feed_and_rejects_changed_identity_or_downgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "docs").mkdir()
+            stable, windows = repo / "docs/appcast.xml", repo / "docs/appcast-win.xml"
+            stable.write_bytes(b"stable unchanged")
+            windows.write_bytes(b"Windows unchanged")
+            candidate = repo / "candidate.xml"
+            item = {"url": "https://github.com/2rami/kasaterm/releases/download/v0.2.2/kasaterm-v0.2.2.dmg", "length": 100, "sig": "signed"}
+            candidate.write_text(feed_xml("0.2.2", item))
+            self.assertEqual(common.stage_appcasts(repo, "v0.2.2", "preview", candidate), ["docs/appcast-preview.xml"])
+            self.assertEqual(common.stage_appcasts(repo, "v0.2.2", "preview", candidate), [])
+            for altered in ({**item, "sig": "different"}, {**item, "url": "https://other.invalid/kasaterm-v0.2.2.dmg"}):
+                candidate.write_text(feed_xml("0.2.2", altered))
+                with self.assertRaises(Refused):
+                    common.stage_appcasts(repo, "v0.2.2", "preview", candidate)
+            candidate.write_text(feed_xml("0.2.1", {**item, "url": item["url"].replace("0.2.2", "0.2.1")}))
+            with self.assertRaisesRegex(Refused, "이전 판"):
+                common.stage_appcasts(repo, "v0.2.1", "preview", candidate)
+            with self.assertRaisesRegex(Refused, "Windows"):
+                common.stage_appcasts(repo, "v0.2.1", "preview", candidate, windows)
+            self.assertEqual((stable.read_bytes(), windows.read_bytes()), (b"stable unchanged", b"Windows unchanged"))
+
+    def test_invalid_second_feed_cannot_partially_stage_the_first(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "docs").mkdir()
+            original = repo / "docs/appcast.xml"
+            original.write_text(feed_xml("0.2.0"))
+            before = original.read_bytes()
+            mac, windows = repo / "mac.xml", repo / "windows.xml"
+            mac.write_text(feed_xml("0.2.1", {"url": "https://github.com/2rami/kasaterm/releases/download/v0.2.1/kasaterm-v0.2.1.dmg", "length": 10, "sig": "ok"}))
+            windows.write_text(feed_xml("0.2.0"))
+            with self.assertRaises(Refused):
+                common.stage_appcasts(repo, "v0.2.1", "stable", mac, windows)
+            self.assertEqual(original.read_bytes(), before)
+            self.assertFalse((repo / "docs/appcast-win.xml").exists())
+
+    def test_checkpoint_replacement_is_atomic_and_private(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            common.save_json_atomic(path, {"old": True})
+            with mock.patch.object(common.os, "replace", side_effect=OSError("interrupted")):
+                with self.assertRaises(OSError):
+                    common.save_json_atomic(path, {"new": True})
+            self.assertEqual(json.loads(path.read_text()), {"old": True})
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(list(Path(directory).iterdir()), [path])
 
 
 if __name__ == "__main__":

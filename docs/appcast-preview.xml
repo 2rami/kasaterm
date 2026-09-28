@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+  <channel>
+    <title>kasaterm Preview (macOS)</title>
+    <link>https://github.com/2rami/kasaterm</link>
+    <description>Opt-in macOS preview updates.</description>
+    <language>ko</language>
+  </channel>
+</rss>

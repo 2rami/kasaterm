@@ -1,0 +1,64 @@
+# 개인 기기의 빠른 업데이트
+
+일반 사용자는 기존 안정판을 받는다. 빠른 업데이트에 참여한 Mac만 별도 preview 피드를 받아 두고 사용자가 정상 종료할 때 설치한다. 실행 중인 앱을 강제로 종료하거나 다시 열지 않는다.
+
+## 작업 완료와 발행
+
+1. 에이전트는 수정·검사·커밋을 끝내고 정확한 커밋을 `origin/main`에 올린다. 다른 작업자의 미완성 변경은 포함하지 않는다.
+2. 같은 저장소에서 `python3 -m tools.release.auto enqueue <40자리 커밋 SHA>`를 실행한다. 이것은 `preview-ready/<SHA>` 원격 태그 하나만 멱등 등록한다. 임의 브랜치나 아직 main에 없는 커밋은 발행하지 않는다.
+3. 전용 controller가 대기열을 직렬 처리한다. 깨끗한 별도 checkout에서 검사 → 패치 버전 증가 → Developer ID 서명 → 공증 → 태그·prerelease → CI 검증·EdDSA → preview 피드 순서다.
+4. 완료는 명령 종료 코드가 아니라 `feed` 단계까지 검증된 상태다. CI 대기 중인 작업을 성공으로 보고하지 않는다. 실패·대기는 상태와 원인을 남긴다.
+
+CI의 피드 push만으로는 GitHub Pages가 다시 빌드되지 않는다. appcast job에만 `pages: write`를 주고,
+검증된 피드 커밋 뒤 기존 `main:/docs` 사이트에 빌드를 한 번 요청한다. 게시 커밋을 포함한 Pages 빌드 성공과
+공개 피드의 버전·주소·서명·크기를 최대 60회(확인 사이 10초) 대조한다. 실패·시간 초과는 CI 실패이며,
+이미 올라간 피드 커밋·태그·산출물을 되돌리거나 새 릴리스를 만들지 않는다. 사이트 설정도 자동 변경하지 않는다.
+원인을 해결한 뒤 해당 appcast job만 명시적으로 재실행하면 같은 검증 피드를 확인하고 Pages 게시를 재시도한다.
+근거: [Pages의 GITHUB_TOKEN 제한](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site#troubleshooting-publishing-from-a-branch),
+[Pages 빌드 요청과 권한](https://docs.github.com/en/rest/pages/pages#request-a-github-pages-build).
+
+일반적인 `build-app.sh` 실행이나 자유문구 `done`만으로 공개 발행을 승인하지 않는다. 새 커밋을 검증하고 위 대기열에 등록하는 것까지가 빠른 업데이트 작업의 완료 기준이다.
+
+## 처음 한 번: controller
+
+controller는 Mac 한 대다. 소스와 상태, LFS 캐시는 Desktop·Documents·Downloads 밖에 둔다. 상시 정책 파일은 저장소 밖의 소유자 전용 0600 파일이고 저장소·기계 id·preview 피드·Mac·현재 minor의 패치 증가·서명 팀·공증 프로필·LFS 경로에 결속된다.
+
+```sh
+python3 -m tools.release.auto --state-dir /절대/상태폴더 enable \
+  --controller 기계_ID --minor 0.2 \
+  --lfs-storage /절대/LFS저장소 --unlock-signing
+python3 -m tools.release.auto --state-dir /절대/상태폴더 install \
+  --source /절대/controller소스 --python /절대/python3 --apply
+```
+
+`install`은 `--apply`가 없으면 LaunchAgent 내용을 보여줄 뿐이다. 서명 키·비밀번호·공증 자격 내용은 정책이나 로그에 넣지 않는다. 기존 키체인과 이름 있는 공증 프로필을 쓴다.
+
+```sh
+python3 -m tools.release.auto --state-dir /절대/상태폴더 status
+python3 -m tools.release.auto --state-dir /절대/상태폴더 disable
+python3 -m tools.release.auto --state-dir /절대/상태폴더 observe
+```
+
+`disable`은 미착수 controller 작업을 막는다. 이미 외부 태그·DMG 업로드가 시작된 트랜잭션은 CI가 검증 후 피드 게시를 마무리할 수 있다. 이미 시작한 외부 작업을 취소했다고 보고하지 않는다. 이 경계는 `publication.commit_point`와 `ci_may_finish_after_disable`에 기록한다.
+
+정책을 껐다 다시 켠 뒤에는 같은 범위의 정확한 계획만 `reauthorize <plan_id>`로 재허가한다. 태그가 없는 계획만 `replan <plan_id>`로 새 검사·계획을 요청할 수 있다. 이미 태그가 있는 계획을 버리고 다른 릴리스를 만들어 우회하지 않는다.
+
+## 처음 한 번: 받는 Mac
+
+기기별 `settings.json`에서 다음 두 항목을 명시한다. 계정 공통 설정 동기화에는 포함하지 않는다.
+
+```json
+{"update_channel":"preview","automatic_update_on_quit":true}
+```
+
+이 동작을 지원하는 앱을 처음 한 번 전달해야 한다. 이후 정식 설치본은 시작할 때와 주기적으로 `https://2rami.github.io/kasaterm/appcast-preview.xml`을 확인한다. 다운로드·서명 검증이 끝난 새 판만 다음 정상 종료 때 설치된다. 다운로드가 끝나기 전에 종료하면 그 종료에서 적용된다고 보장할 수 없다.
+
+preview 자동 설치를 시작한 프로세스에서는 Sparkle이 설치를 전담한다. 로컬 dist 자기설치와 기존 원격 app-update 도우미를 함께 실행하지 않는다. 개발 실행·격리 검증·Lite는 이 자동 설치를 켜지 않는다. 기본 stable 사용자는 기존 업데이트 선택을 유지한다.
+
+## 안정판 보호
+
+- `.github/release-channel.json`은 버전 커밋의 채널·태그·부모 SHA·플랫폼을 고정한다. CI는 그 태그의 파일을 검증하고 분기한다.
+- preview는 Mac DMG 하나, GitHub prerelease, `latest=false`, `appcast-preview.xml`만 사용한다. 안정판 피드·Windows 피드·일반 latest는 바꾸지 않는다.
+- 기존 나쵸 단발 승인 방식은 그대로다. 자동 publisher는 별도 정책 허가이며 두 허가를 같은 작업에서 섞지 않는다.
+- 버전·태그·파일 해시·서명·공증 검사를 낮추지 않는다. main이 움직이면 재계획하거나 검증한 피드 커밋을 비교 후 다시 제출한다. 강제 push는 하지 않는다.
+- 모바일 바이너리는 이 Mac 경로의 대상이 아니다. 모바일 업데이트는 TestFlight/App Store의 정상 배포 경로를 사용한다.

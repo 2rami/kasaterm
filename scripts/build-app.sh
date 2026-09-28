@@ -220,6 +220,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>E4tFAb2UND+0QhgTSv2pFYKIC3ReT/dLia20KHfZxKw=</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
     <key>SUScheduledCheckInterval</key>
     <integer>86400</integer>
     <key>UTImportedTypeDeclarations</key>

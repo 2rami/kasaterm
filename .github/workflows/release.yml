@@ -57,8 +57,49 @@ permissions:
   contents: write
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.context.outputs.channel }}
+      platforms: ${{ steps.context.outputs.platforms }}
+      commit: ${{ steps.context.outputs.commit }}
+      prerelease: ${{ steps.context.outputs.prerelease }}
+      feed_path: ${{ steps.context.outputs.feed_path }}
+    steps:
+      - name: Checkout release identity
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || '' }}
+          fetch-depth: 2
+          lfs: false
+      - name: Resolve release channel
+        id: context
+        env:
+          REQUESTED_PLATFORMS: ${{ inputs.platforms || 'both' }}
+        run: |
+          if [[ -f .github/release-channel.json ]]; then
+            python3 -m tools.release.common ci-context --tag "$RELEASE_TAG" --platforms "$REQUESTED_PLATFORMS" >> "$GITHUB_OUTPUT"
+          else
+            # manifest 도입 전 태그는 stable이다. 예전 태그에는 새 Python 도구가 없을 수 있다.
+            python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os, re, subprocess
+          from pathlib import Path
+          tag = os.environ['RELEASE_TAG']
+          platforms = os.environ['REQUESTED_PLATFORMS']
+          version = re.search(r'^version = "([^"]+)"', Path('Cargo.toml').read_text(), re.M)
+          if platforms not in ('both', 'macos') or (tag and (not re.fullmatch(r'v\d+\.\d+\.\d+', tag) or not version or tag != 'v' + version[1])):
+              raise SystemExit('태그·플랫폼·Cargo 버전이 다릅니다')
+          print('channel=stable')
+          print('platforms=' + platforms)
+          print('commit=' + subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
+          print('prerelease=false')
+          print('feed_path=docs/appcast.xml')
+          PY
+          fi
+
   build-msi:
-    if: inputs.platforms != 'macos'
+    needs: resolve
+    if: needs.resolve.outputs.platforms == 'both'
     runs-on: windows-latest
     steps:
       # 그림 에셋이 git-lfs 라 안 받으면 130바이트 포인터가 내려오고, build.rs 의 에셋 검사가 거기서 빌드를 세운다
@@ -67,7 +108,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || '' }}
+          ref: ${{ needs.resolve.outputs.commit }}
           lfs: false
 
       # 그림은 GitHub LFS 가 아니라 미니의 읽기 전용 창구(tools/release/mini_lfs.py)에서 받는다 — GitHub LFS 대역폭 예산이
@@ -162,7 +203,12 @@ jobs:
             ${{ steps.windows_packages.outputs.zip_hash }}
 
   build-dmg:
+    needs: resolve
     runs-on: macos-latest
+    env:
+      RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+      RELEASE_PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+      RELEASE_PLATFORMS: ${{ needs.resolve.outputs.platforms }}
     outputs:
       dmg_sha256: ${{ steps.verify_local.outputs.sha256 }}
     steps:
@@ -172,7 +218,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || '' }}
+          ref: ${{ needs.resolve.outputs.commit }}
           lfs: ${{ env.MAC_ARTIFACT == 'ci' || env.RELEASE_TAG == '' }}
 
       - name: Rust toolchain (stable)
@@ -251,6 +297,8 @@ jobs:
             sleep 30
           done
           DMG="$DL/$DMG_NAME"
+          ACTUAL_PRERELEASE="$(gh release view "$VERSION" --json isPrerelease -q .isPrerelease)"
+          [[ "$ACTUAL_PRERELEASE" == "$RELEASE_PRERELEASE" ]] || { echo "::error::릴리스 채널이 태그 manifest와 다르다"; exit 1; }
           WANT="$(gh release view "$VERSION" --json assets -q ".assets[] | select(.name == \"$DMG_NAME\") | .digest")"
           GOT="sha256:$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
           [[ "$WANT" == "$GOT" ]] || { echo "::error::받은 dmg 해시($GOT)가 릴리스 기록(${WANT:-없음})과 다르다"; exit 1; }
@@ -280,6 +328,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${RELEASE_TAG}"
+          RELEASE_FLAGS=()
+          if [[ "$RELEASE_CHANNEL" == "preview" ]]; then
+            RELEASE_FLAGS+=(--prerelease --latest=false)
+          fi
+          if ACTUAL_PRERELEASE="$(gh release view "$VERSION" --json isPrerelease -q .isPrerelease 2>/dev/null)"; then
+            [[ "$ACTUAL_PRERELEASE" == "$RELEASE_PRERELEASE" ]] || { echo "::error::기존 릴리스 채널을 바꾸지 않는다"; exit 1; }
+          fi
           # docs/release-notes/<태그>.md 가 있으면 그 판의 변경사항을 맨 앞에 싣는다.
           # 없으면 아래 설치 안내만 — 태그마다 워크플로를 고칠 필요가 없다.
           HIGHLIGHTS=""
@@ -291,6 +346,10 @@ jobs:
           else
             FIRST_RUN=$'3. **처음 실행만**: Applications에서 kasaterm **우클릭 → 열기** → "열기" 확인\n   (직접 만든 앱이라 macOS가 한 번 확인받아요. 이후엔 그냥 더블클릭)\n4. 첫 실행 때 화면 녹화/접근 권한 물으면 허용'
           fi
+          WINDOWS_NOTES=""
+          if [[ "$RELEASE_PLATFORMS" == "both" ]]; then
+            WINDOWS_NOTES=$'## 설치 (Windows)\n`.msi` 다운로드 → 실행 (SmartScreen 경고 시 "추가 정보 → 실행")'
+          fi
           NOTES="$HIGHLIGHTS$(cat <<EOF
           kasaterm $VERSION — 한글 특화 GUI 터미널 + Claude 런처
 
@@ -299,8 +358,7 @@ jobs:
           2. kasaterm을 Applications 폴더로 드래그
           $FIRST_RUN
 
-          ## 설치 (Windows)
-          \`.msi\` 다운로드 → 실행 (SmartScreen 경고 시 "추가 정보 → 실행")
+          $WINDOWS_NOTES
 
           ## 쓰는 법
           앱 열면 바로 터미널. \`claude\` 치면 Claude Code 실행돼요.
@@ -308,12 +366,12 @@ jobs:
           )"
           if [[ "$MAC_ARTIFACT" == "local" ]]; then
             # dmg 는 미니가 올린 그대로 둔다(덮지 않는다) — 노트만 채운다.
-            gh release edit "$VERSION" --title "kasaterm $VERSION" --notes "$NOTES"
+            gh release edit "$VERSION" --title "kasaterm $VERSION" --notes "$NOTES" "${RELEASE_FLAGS[@]}"
           elif gh release view "$VERSION" >/dev/null 2>&1; then
             gh release upload "$VERSION" "$DMG" --clobber
-            gh release edit "$VERSION" --title "kasaterm $VERSION" --notes "$NOTES"
+            gh release edit "$VERSION" --title "kasaterm $VERSION" --notes "$NOTES" "${RELEASE_FLAGS[@]}"
           else
-            gh release create "$VERSION" "$DMG" --title "kasaterm $VERSION" --notes "$NOTES"
+            gh release create "$VERSION" "$DMG" --title "kasaterm $VERSION" --notes "$NOTES" "${RELEASE_FLAGS[@]}"
           fi
 
       # 빌드 검증 실행 → artifact 로만(릴리스 불변).
@@ -329,14 +387,20 @@ jobs:
   # mac 만 마무리(platforms=macos)면 build-msi 가 건너뛰어지므로 always() 로 들어와 결과를 직접 본다 — dmg 검증이 성공했고,
   # Windows 는 성공했거나(both) 일부러 건너뛴 경우(macos)에만 돈다. 실패·취소된 job 위로는 절대 안 돈다.
   appcast:
-    needs: [build-msi, build-dmg]
+    needs: [resolve, build-msi, build-dmg]
+    permissions:
+      contents: write
+      pages: write
     if: >-
       always() && (startsWith(github.ref, 'refs/tags/v') || inputs.tag != '')
-      && needs.build-dmg.result == 'success'
-      && (needs.build-msi.result == 'success' || (inputs.platforms == 'macos' && needs.build-msi.result == 'skipped'))
+      && needs.resolve.result == 'success' && needs.build-dmg.result == 'success'
+      && (needs.build-msi.result == 'success' || (needs.resolve.outputs.platforms == 'macos' && needs.build-msi.result == 'skipped'))
     runs-on: macos-latest
+    concurrency:
+      group: appcast-${{ needs.resolve.outputs.channel }}
+      cancel-in-progress: false
     steps:
-      # docs/ 커밋은 main 에 올라가야 Pages 가 서빙한다(태그 detached 체크아웃 금지).
+      # 실행 코드는 main에서 읽되 게시 커밋은 별도 index로 만든다 — checkout 뒤 main이 움직여도 사람 변경을 보존한다.
       - name: Checkout main
         uses: actions/checkout@v4
         with:
@@ -351,29 +415,40 @@ jobs:
           gh release download "$SPARKLE_VER" --repo sparkle-project/Sparkle -p "Sparkle-$SPARKLE_VER.tar.xz" -D vendor --clobber
           tar -xJf "vendor/Sparkle-$SPARKLE_VER.tar.xz" -C vendor/Sparkle/
 
-      - name: Generate + commit appcasts
+      - name: Generate signed appcasts
+        id: signed_appcasts
         env:
           GH_TOKEN: ${{ github.token }}
           ED_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
           VERIFIED_SHA: ${{ needs.build-dmg.outputs.dmg_sha256 }}
-          PLATFORMS: ${{ inputs.platforms || 'both' }}
-          # 뒤의 git pull --rebase 가 LFS 그림을 받으려 들지 않게 — appcast 는 그림이 필요 없다.
+          PLATFORMS: ${{ needs.resolve.outputs.platforms }}
+          RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+          RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
+          RELEASE_PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+          # 피드만 다루는 작업이 LFS 그림을 받지 않게 한다.
           GIT_LFS_SKIP_SMUDGE: '1'
         run: |
           VERSION="${RELEASE_TAG}"
           VER="${VERSION#v}"
+          git fetch --no-tags origin "refs/tags/$VERSION"
+          [[ "$(git rev-parse 'FETCH_HEAD^{commit}')" == "$RELEASE_COMMIT" ]] || { echo "::error::검증 뒤 태그 커밋이 바뀌었다"; exit 1; }
+          [[ "$(gh release view "$VERSION" --json isPrerelease -q .isPrerelease)" == "$RELEASE_PRERELEASE" ]] || { echo "::error::릴리스 채널이 다르다"; exit 1; }
+          if [[ "$RELEASE_CHANNEL" == "preview" && "$PLATFORMS" != "macos" ]]; then
+            echo "::error::preview가 Windows 피드를 바꿀 수 없다"; exit 1
+          fi
           KEYFILE="$RUNNER_TEMP/ed.key"
           printf '%s' "$ED_KEY" > "$KEYFILE"
+          trap 'rm -f "$KEYFILE"' EXIT
 
           # mac appcast — 릴리스의 dmg 를 받아 generate_appcast 로 서명·생성.
           ASSETS="$(mktemp -d)"
           gh release download "$VERSION" -p '*.dmg' -D "$ASSETS"
+          COUNT="$(find "$ASSETS" -name '*.dmg' | wc -l | tr -d ' ')"
+          [[ "$COUNT" == 1 && -f "$ASSETS/kasaterm-$VERSION.dmg" ]] || { echo "::error::릴리스 dmg 이름·개수가 다르다"; exit 1; }
+          GOT="$(shasum -a 256 "$ASSETS/kasaterm-$VERSION.dmg" | cut -d' ' -f1)"
           # local 이면 build-dmg 가 검증한 바로 그 파일에만 EdDSA 를 단다 — 그 사이 바뀌었거나 dmg 가 둘이면 멈춘다.
           if [[ "$MAC_ARTIFACT" == "local" ]]; then
             [[ -n "$VERIFIED_SHA" ]] || { echo "::error::build-dmg 가 검증한 dmg 해시가 없다"; exit 1; }
-            COUNT="$(find "$ASSETS" -name '*.dmg' | wc -l | tr -d ' ')"
-            [[ "$COUNT" == 1 ]] || { echo "::error::릴리스에 dmg 가 $COUNT 개다"; exit 1; }
-            GOT="$(shasum -a 256 "$ASSETS"/*.dmg | cut -d' ' -f1)"
             [[ "$GOT" == "$VERIFIED_SHA" ]] || { echo "::error::appcast 에 실을 dmg($GOT)가 검증한 것($VERIFIED_SHA)과 다르다"; exit 1; }
           fi
           vendor/Sparkle/bin/generate_appcast \
@@ -381,18 +456,15 @@ jobs:
             --download-url-prefix "https://github.com/2rami/kasaterm/releases/download/$VERSION/" \
             --link "https://github.com/2rami/kasaterm" \
             "$ASSETS"
-          mkdir -p docs
-          cp "$ASSETS/appcast.xml" docs/appcast.xml
-          touch docs/.nojekyll
 
           # Windows appcast — 같은 EdDSA 키로 msi 서명. sign_update 출력이 그대로
           # enclosure 속성: sparkle:edSignature="..." length="..."
           # macos 부분 게시면 Windows 피드는 손대지 않는다(msi 가 없어도 지어내지 않는다).
           if [[ "$PLATFORMS" == "both" ]]; then
-          gh release download "$VERSION" -p '*.msi' -O "$RUNNER_TEMP/win.msi"
-          MSI_NAME="$(gh release view "$VERSION" --json assets -q '.assets[].name' | grep -E '\.msi$' | head -1)"
-          SIG_LINE="$(vendor/Sparkle/bin/sign_update --ed-key-file "$KEYFILE" "$RUNNER_TEMP/win.msi")"
-          cat > docs/appcast-win.xml <<XML
+          MSI_NAME="kasaterm-$VERSION-windows-x86_64.msi"
+          gh release download "$VERSION" -p "$MSI_NAME" -O "$ASSETS/$MSI_NAME"
+          SIG_LINE="$(vendor/Sparkle/bin/sign_update --ed-key-file "$KEYFILE" "$ASSETS/$MSI_NAME")"
+          cat > "$ASSETS/appcast-win.xml" <<XML
           <?xml version="1.0" standalone="yes"?>
           <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
               <channel>
@@ -409,20 +481,26 @@ jobs:
               </channel>
           </rss>
           XML
+          echo "msi_sha256=$(shasum -a 256 "$ASSETS/$MSI_NAME" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           fi
-          rm -f "$KEYFILE" "$RUNNER_TEMP/win.msi"
+          echo "directory=$ASSETS" >> "$GITHUB_OUTPUT"
+          echo "dmg_sha256=$GOT" >> "$GITHUB_OUTPUT"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Publish verified appcasts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLATFORMS: ${{ needs.resolve.outputs.platforms }}
+          RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+          RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
+          ASSETS: ${{ steps.signed_appcasts.outputs.directory }}
+          DMG_SHA: ${{ steps.signed_appcasts.outputs.dmg_sha256 }}
+          MSI_SHA: ${{ steps.signed_appcasts.outputs.msi_sha256 }}
+          GIT_LFS_SKIP_SMUDGE: '1'
+        run: |
+          VERSION="$RELEASE_TAG"
+          FEED_ARGS=(--repo . --tag "$VERSION" --channel "$RELEASE_CHANNEL" --commit "$RELEASE_COMMIT"
+                     --mac "$ASSETS/appcast.xml" --dmg "$ASSETS/kasaterm-$VERSION.dmg" --dmg-sha256 "$DMG_SHA")
           if [[ "$PLATFORMS" == "both" ]]; then
-            git add docs/appcast.xml docs/appcast-win.xml docs/.nojekyll
-            git commit -m "chore(release): appcast $VERSION"
-          else
-            git add docs/appcast.xml docs/.nojekyll
-            git commit -m "chore(release): appcast $VERSION (mac 만 — Windows 는 그대로)"
+            FEED_ARGS+=(--windows "$ASSETS/appcast-win.xml" --msi "$ASSETS/kasaterm-$VERSION-windows-x86_64.msi" --msi-sha256 "$MSI_SHA")
           fi
-          # 태그 이후 main 이 움직였을 수 있다 — rebase 후 push.
-          git pull --rebase origin main
-          git push origin main
-          echo "appcast → https://2rami.github.io/kasaterm/appcast.xml"
-          echo "appcast-win → https://2rami.github.io/kasaterm/appcast-win.xml"
+          python3 -m tools.release.feed_publish "${FEED_ARGS[@]}" --attempts 5 --deploy-pages

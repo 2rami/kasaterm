@@ -1,12 +1,19 @@
-# 굽기와 설치 — 거노 앱에 반영하기
+# 굽기와 설치
 
-프로젝트 지침(`CLAUDE.md`)의 「거노 앱에 반영하기」가 여기를 가리킨다.
+프로젝트 지침(`CLAUDE.md`)의 「앱 변경 완료 기준」이 여기를 가리킨다.
 
-## 거노 앱에 반영하기 — 굽고, 껐다 켜면 끝
+## 기본 완료 경로 — 빠른 업데이트 등록
+
+작은 앱 수정도 검사·커밋·main 푸시 뒤 `python3 -m tools.release.auto enqueue <40자리 SHA>`까지 실행한다.
+기기별 원격 빌드를 매번 요청받는 방식 대신, 선택된 Mac이 preview 피드를 받아 다음 정상 종료에 설치한다.
+등록·controller 처리·피드 검증·기기 적용은 서로 다른 상태다. stable 배포 승인은 별도로 유지한다.
+상시 정책과 처음 한 번의 준비는 [자동 preview 업데이트](automatic-preview-updates.md)를 따른다.
+
+## 로컬 검증과 기존 설치본의 최초 전환
 
 거노가 쓰는 건 `~/Applications/kasaterm.app` 이고, 그건 `dist/kasaterm.app` 의 **복사본**이다. `cargo build` 도 `build-app.sh` 도 그 복사를 하지 않으니, **빌드했다고 반영된 게 아니다**(설치본 mtime 을 확인하면 바로 보인다).
 
-너는 여기까지만 한다:
+로컬 검증·최초 설치용 번들은 다음으로 만든다. 이것만으로 빠른 업데이트 작업이 완료되는 것은 아니다:
 
 ```bash
 bash scripts/build-app.sh      # dist/kasaterm.app 을 새로 굽는다
@@ -38,4 +45,3 @@ scripts/macbook-bake.sh app       # pull → build-app.sh (다른 pane 이 Rust 
 - **`scripts/relaunch.sh` 는 이제 선택**이다(quit→설치→재실행→inode 검증까지 한 번에 하고 싶을 때). ⚠️ **pane 안에서 돌리지 마라** — 앱을 quit 하는 순간 네 PTY 째 죽는다. 거노가 `! scripts/relaunch.sh --no-build` 로 돌린다.
 - 자기 설치는 **그 설치본으로 도는 앱**에서만, **빌드 트리의 번들이 더 새로울 때만** 움직인다. `cargo run` 개발 실행과 배포된 남의 머신에서는 아무 일도 안 한다.
 - ⚠️ **앱을 claude 세션 안에서 띄우지 마라**(pane 에서 `open`·relaunch). 그 앱이 claude 의 `CLAUDE_CODE_CHILD_SESSION`·`TEAMMATE_MODE`·`SESSION_ID` 를 물려받고, 그러면 그 앱이 낳는 **모든 pane** 의 claude 가 transcript 저장을 끈다. `scrub_inherited_claude_markers`(main.rs, 부팅 첫 줄)가 이제 그걸 지우지만, 애초에 안 물리는 게 낫다.
-

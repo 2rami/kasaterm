@@ -19,7 +19,8 @@ import re
 import shutil
 
 from tools.release import deps, macsign
-from tools.release.common import Pending, Refused, feed_item, fetch_feed, sha256_bytes, sha256_file, version_tuple
+from tools.release.common import (CHANNEL_MANIFEST, Pending, Refused, channel_manifest, feed_fingerprint,
+                                  feed_item, fetch_feed, sha256_bytes, sha256_file, validate_channel_manifest, version_tuple)
 
 REPO_SLUG = "2rami/kasaterm"
 TESTS = (["cargo", "test", "-p", "kasaterm", "--release"],
@@ -134,11 +135,11 @@ class RealBackend:
         return rows.get(ref + "^{}") or rows.get(ref)
 
     def feed_base(self, plan):
-        mac = fetch_feed(self.http, plan["feed"]["source"])
-        win = fetch_feed(self.http, plan["feed"]["windows"])
-        if mac is None or win is None:
+        fingerprint, _, _ = feed_fingerprint(self.http, plan["feed"]["source"],
+                                           plan["feed"].get("windows") if plan["channel"] == "stable" else None)
+        if fingerprint is None:
             raise Refused("피드를 읽지 못해 기준 해시를 못 쟀다")
-        return sha256_bytes(json.dumps({"macos": sha256_bytes(mac), "windows": sha256_bytes(win)}, sort_keys=True).encode())
+        return fingerprint
 
     def resume_facts(self, plan):
         """나쵸 `resume` 에 싣는 원격 사실 — 지금 main, 태그가 섰으면 그 커밋의 부모(= 계획 커밋이어야 한다)."""
@@ -160,7 +161,9 @@ class RealBackend:
             out["error"] = str(e)
         run = self.ci_run(plan["tag"]) if out.get("tag") else None
         out["ci"] = {k: run.get(k) for k in ("databaseId", "status", "conclusion")} if run else None
-        for key, src in (("feed_macos", plan["feed"]["source"]), ("feed_windows", plan["feed"]["windows"])):
+        for key, src in (("feed_macos", plan["feed"]["source"]), ("feed_windows", plan["feed"].get("windows"))):
+            if src is None:
+                continue
             raw = fetch_feed(self.http, src)
             out[key] = feed_item(raw)["version"] if raw is not None else None
         return out
@@ -177,6 +180,41 @@ class RealBackend:
         runs = [x for x in json.loads(r.out or "[]") if x.get("headBranch") == tag
                 or (x.get("event") == "workflow_dispatch" and finish.fullmatch(x.get("displayTitle") or ""))]
         return runs[0] if runs else None
+
+    def appcast_retry_hint(self, run, plan):
+        # 검사·공증 실패를 재실행으로 가리지 않도록 게시 job의 CAS 소진만 복구 안내한다.
+        run_id = run.get("databaseId")
+        if run.get("conclusion") != "failure" or type(run_id) is not int or run_id <= 0:
+            return ""
+        view = self.runner.run([self.gh, "run", "view", str(run_id), "--repo", self.slug, "--json", "jobs"], timeout=60)
+        if not view.ok:
+            return ""
+        try:
+            rows = json.loads(view.out).get("jobs", [])
+            jobs = {job["name"]: job for job in rows}
+            expected = {"resolve": "success", "build-dmg": "success", "appcast": "failure",
+                        "build-msi": "success" if "windows" in plan["platforms"] else "skipped"}
+            if len(rows) != 4 or set(jobs) != set(expected):
+                return ""
+            if any(jobs[name].get("status") != "completed" or jobs[name].get("conclusion") != conclusion
+                   for name, conclusion in expected.items()):
+                return ""
+            appcast = jobs["appcast"]
+            job_id = appcast.get("databaseId")
+            steps = appcast.get("steps", [])
+            failed = [step.get("name") for step in steps if step.get("conclusion") not in ("success", "skipped")]
+            completed = {step.get("name") for step in steps if step.get("conclusion") == "success"}
+            if (type(job_id) is not int or job_id <= 0 or failed != ["Publish verified appcasts"]
+                    or not {"Checkout main", "Sparkle signing tools", "Generate signed appcasts"} <= completed):
+                return ""
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return ""
+        logs = self.runner.run([self.gh, "run", "view", str(run_id), "--repo", self.slug,
+                                "--job", str(job_id), "--log-failed"], timeout=60)
+        if not logs.ok or not any(line.split()[-1:] == ["KASATERM_APPCAST_CAS_EXHAUSTED"] for line in logs.out.splitlines()):
+            return ""
+        return (f" — main 경합 재시도 소진. 명시적 게시 job 재실행: gh run rerun {run_id} --job {job_id} --repo {self.slug}"
+                " (검사·굽기·공증 job은 다시 실행하지 않음)")
 
     # ── 격리 워크트리 ──────────────────────────────────────────────────────
     def worktree(self, plan, name="wt"):
@@ -207,14 +245,29 @@ class RealBackend:
             if bumped == text:
                 raise Refused("Cargo.toml 의 워크스페이스 버전 줄을 못 찾았다")
             cargo.write_text(bumped)
+            manifest_path = wt / CHANNEL_MANIFEST
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps(channel_manifest(plan["channel"], plan["tag"], plan["commit"], plan["platforms"]),
+                                               sort_keys=True, indent=2) + "\n")
+            added = self.git("add", "--", "Cargo.toml", CHANNEL_MANIFEST, kind="local", cwd=wt)
+            if not added.ok:
+                raise Refused(f"버전·채널 manifest를 준비하지 못했다 — {added.tail(2)}")
             stamp = f"@{plan['created_at_ms'] // 1000} +0000"
-            c = self.git("commit", "-qam", f"chore(release): {plan['tag']}", kind="local", cwd=wt,
+            c = self.git("commit", "-qm", f"chore(release): {plan['tag']}", kind="local", cwd=wt,
                          extra={"GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp})
             if not c.ok:
                 raise Refused(f"버전 커밋 실패 — {c.tail(3)}")
         bump = self.git("rev-parse", "HEAD", cwd=wt).out.strip()
         if self.bump_parent_ok(wt, plan) != bump:
             raise Refused(f"격리 워크트리가 이 계획의 버전 커밋이 아니다({bump[:8] or '?'})")
+        manifest_path = wt / CHANNEL_MANIFEST
+        try:
+            manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
+        except (OSError, ValueError) as error:
+            raise Refused("버전 커밋의 release channel manifest를 읽지 못했다") from error
+        channel, platforms = validate_channel_manifest(manifest, plan["tag"], plan["commit"])
+        if channel != plan["channel"] or platforms != plan["platforms"]:
+            raise Refused("버전 커밋의 채널·플랫폼이 계획과 다르다")
         return bump
 
     # ── 단계 ──────────────────────────────────────────────────────────────
@@ -442,9 +495,12 @@ class RealBackend:
             raise Refused("공증한 dmg 가 그 자리에 없거나 바뀌었다 — 올리지 않는다")
         last = None
         for _ in range(2):
-            view = self.runner.run([self.gh, "release", "view", tag, "--repo", self.slug, "--json", "assets"], timeout=60)
+            view = self.runner.run([self.gh, "release", "view", tag, "--repo", self.slug, "--json", "assets,isPrerelease,isDraft"], timeout=60)
             if view.ok:
-                have = {a["name"]: a for a in json.loads(view.out or "{}").get("assets", [])}.get(name)
+                release = json.loads(view.out or "{}")
+                if bool(release.get("isPrerelease")) != (plan["channel"] == "preview") or release.get("isDraft"):
+                    raise Refused("기존 GitHub Release의 채널·공개 상태가 계획과 다르다 — 변경하지 않는다")
+                have = {a["name"]: a for a in release.get("assets", [])}.get(name)
                 if have:
                     if have.get("digest") == notarized["dmg_sha256"]:
                         return "already"
@@ -454,8 +510,9 @@ class RealBackend:
                 if not up.ok:
                     raise Refused(f"dmg 올리기 실패 — {'시간 초과' if up.timed_out else up.tail(2)}")
                 return "uploaded"
+            flags = ["--prerelease", "--latest=false"] if plan["channel"] == "preview" else []
             last = self.runner.run([self.gh, "release", "create", tag, str(dmg), "--repo", self.slug, "--verify-tag",
-                                    "--title", f"kasaterm {tag}", "--notes", f"kasaterm {tag}"], timeout=1800, kind="publish")
+                                    "--title", f"kasaterm {tag}", "--notes", f"kasaterm {tag}", *flags], timeout=1800, kind="publish")
             if last.ok:
                 return "created"
             # Windows job 이 그 사이 릴리스를 먼저 만들었을 수 있다 — 다시 읽고 올린다.
@@ -463,8 +520,8 @@ class RealBackend:
 
     def tag_commands(self, plan):
         return [["git", "worktree", "add", "--detach", str(self.workdir / "wt"), plan["commit"]],
-                ["(Cargo.toml", "워크스페이스", "버전", "→", plan["version"], "—", "tag-release.sh", "와", "같은", "치환)"],
-                ["git", "commit", "-qam", f"chore(release): {plan['tag']}"],
+                ["(Cargo.toml", "버전", "→", plan["version"], "채널", "→", plan["channel"], CHANNEL_MANIFEST + ")"],
+                ["git", "commit", "-qm", f"chore(release): {plan['tag']}"],
                 ["git", "push", "--atomic", self.remote, f"HEAD:refs/heads/{plan['branch']}", f"HEAD:refs/tags/{plan['tag']}"]]
 
     def preview(self, stage, plan):
@@ -484,7 +541,7 @@ class RealBackend:
                                   "완료 확인 → 산출물 받기 · 크기·해시 · dmg 가 공증한 그 파일인지"], "remote": seen}
             return {"would": f"release.yml(태그 push 로 돈다) 완료 확인 → {', '.join(asset_names(plan['tag']).values())} 받기 · 크기·해시 · dmg 서명 신원",
                     "remote": seen}
-        return {"would": "두 피드가 목표 판·산출물 이름·크기를 가리키는지, EdDSA 서명이 산출물과 맞는지(저장소 공개키)",
+        return {"would": f"{plan['channel']} 피드가 목표 판·산출물 이름·크기를 가리키는지, EdDSA 서명이 산출물과 맞는지(저장소 공개키)",
                 "remote": seen}
 
     def tag(self, plan, state):
@@ -531,10 +588,21 @@ class RealBackend:
         m = re.search(r'^version = "([^"]*)"', cargo.out or "", re.M)
         if not (parent.ok and parent.out.strip() == plan["commit"] and m and m.group(1) == plan["version"]):
             raise Refused(f"태그 {plan['tag']} 가 이미 있는데 이 계획의 버전 커밋이 아니다 — 손대지 않는다")
+        raw = self.git("show", f"{tagged}:{CHANNEL_MANIFEST}")
+        try:
+            manifest = json.loads(raw.out) if raw.ok else None
+        except ValueError as error:
+            raise Refused("원격 태그의 release channel manifest를 읽지 못했다") from error
+        channel, platforms = validate_channel_manifest(manifest, plan["tag"], plan["commit"])
+        if channel != plan["channel"] or platforms != plan["platforms"]:
+            raise Refused("원격 태그의 채널·플랫폼이 계획과 다르다")
         return {"tag": plan["tag"], "commit": tagged, "result": "이미 선 태그 — 다시 세우지 않음"}
 
     def release(self, plan, state):
         tag = plan["tag"]
+        expected_commit = (state["stages"].get("tag", {}).get("detail") or {}).get("commit")
+        if expected_commit and self.remote_ref("refs/tags/" + tag) != expected_commit:
+            raise Refused("게시할 태그 커밋이 검증한 버전 커밋에서 바뀌었다")
         local = mac_local(plan)
         notarized = (state["stages"].get("tag", {}).get("detail") or {}).get("notarized") if local else None
         uploaded = None
@@ -547,13 +615,19 @@ class RealBackend:
             raise Pending("CI 가 아직 안 떴다")
         if run.get("status") != "completed":
             raise Pending(f"CI 진행 중({run.get('status')}) · run {run.get('databaseId')}")
+        if run.get("event") == "push" and expected_commit and run.get("headSha") != expected_commit:
+            raise Refused("CI가 검증한 커밋이 이 계획의 태그 커밋과 다르다")
         if run.get("conclusion") != "success":
-            raise Refused(f"CI 실패({run.get('conclusion')}) · run {run.get('databaseId')} — 산출물·appcast 를 확인하지 않는다")
-        view = self.runner.run([self.gh, "release", "view", tag, "--repo", self.slug, "--json", "assets,isDraft"], timeout=60)
+            raise Refused(f"CI 실패({run.get('conclusion')}) · run {run.get('databaseId')} — 산출물·appcast 를 확인하지 않는다"
+                          + self.appcast_retry_hint(run, plan))
+        view = self.runner.run([self.gh, "release", "view", tag, "--repo", self.slug, "--json", "assets,isDraft,isPrerelease"], timeout=60)
         if not view.ok:
             raise Refused(f"릴리스를 읽지 못했다 — {view.tail(2)}")
-        assets = {a["name"]: a for a in json.loads(view.out).get("assets", [])}
-        want = asset_names(tag)
+        release = json.loads(view.out)
+        if release.get("isDraft") or bool(release.get("isPrerelease")) != (plan["channel"] == "preview"):
+            raise Refused("릴리스의 공개 상태·채널이 계획과 다르다")
+        assets = {a["name"]: a for a in release.get("assets", [])}
+        want = {platform: name for platform, name in asset_names(tag).items() if platform in plan["platforms"]}
         missing = [p for p, name in want.items() if name not in assets]
         if missing:
             raise Refused(f"릴리스 산출물이 모자라다({', '.join(missing)}) — appcast 로 넘어가지 않는다")
@@ -618,6 +692,8 @@ class RealBackend:
             raise Refused(f"계획에 고정한 openssl({openssl}, {version or '판 모름'})이 지금은 {why} — 서명을 확인하지 않고 멈춘다")
         seen, signatures = {}, {}
         for platform, src in (("macos", plan["feed"]["source"]), ("windows", plan["feed"]["windows"])):
+            if platform not in plan["platforms"]:
+                continue
             raw = fetch_feed(self.http, src)
             if raw is None:
                 raise Pending(f"{platform} 피드를 읽지 못했다")
@@ -630,7 +706,8 @@ class RealBackend:
             asset = assets.get(platform)
             if not asset:
                 raise Refused(f"검증된 {platform} 산출물 없이 피드를 확인하지 않는다")
-            if (item["url"] or "").rsplit("/", 1)[-1] != asset["name"] or item["length"] != asset["size"]:
+            expected_url = f"https://github.com/{self.slug}/releases/download/{plan['tag']}/{asset['name']}"
+            if item["url"] != expected_url or item["length"] != asset["size"]:
                 raise Refused(f"{platform} 피드가 가리키는 파일이 릴리스 산출물과 다르다")
             if not key or not item["signature"]:
                 raise Refused(f"{platform} 피드 EdDSA 서명이나 저장소 공개키가 없다")

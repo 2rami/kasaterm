@@ -24,7 +24,8 @@ import time
 
 from tools.release import deps, devices, macsign, nacho
 from tools.release.backend import PUBLISH_STAGES, TESTS, RealBackend, identity_block, identity_of
-from tools.release.common import Pending, Refused, fetch_feed, feed_item, sha256_bytes, version_text, version_tuple
+from tools.release.common import (MAC_FEED, PREVIEW_FEED, WIN_FEED, Pending, Refused, fetch_feed, feed_fingerprint,
+                                  feed_item, save_json_atomic, sha256_bytes, version_text, version_tuple)
 from tools.release.proc import Http, Runner
 
 SCHEMA = "kasa-release-plan/2"
@@ -35,8 +36,6 @@ CORE_KEYS = ("schema", "commit", "branch", "remote", "version", "tag", "channel"
 PANE_MARKERS = ("KASATERM_PANE_ID", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CODEX_SANDBOX", "KASATERM_ORIGIN")
 STAGES = ["verify", "build", "tag", "release", "feed", "devices"]
 STATE_DIR = Path(os.environ.get("KASATERM_RELEASE_DIR", Path.home() / ".config/kasaterm/releases"))
-MAC_FEED = "https://2rami.github.io/kasaterm/appcast.xml"
-WIN_FEED = "https://2rami.github.io/kasaterm/appcast-win.xml"
 RELEASES = "https://github.com/2rami/kasaterm/releases/latest"
 INSTALLED_APP = Path.home() / "Applications/kasaterm.app"
 
@@ -113,7 +112,7 @@ def capabilities(repo):
             "updater": "sparkle" if "Sparkle.framework" in bake else None,
             "feed": feed.group(1) if feed else None,
             "ed_public_key": edkey.group(1).strip() if edkey else None,
-            "channels": ["stable", "preview"] if "allowedChannels" in mac_src else ["stable"],
+            "channels": ["stable", "preview"] if PREVIEW_FEED in mac_src else ["stable"],
             # CI 가 쓸 서명 신원 — release.yml 에서 읽은 예상. 실제 신원은 release 단계가 dmg 를 열어 다시 잰다.
             "ci_identity": {"authority": sign_id, "notarized": "notarytool" in ci, "predicted": True,
                             "team": team.group(1) if team and (sign_id or "").startswith("Developer ID Application") else None},
@@ -228,20 +227,21 @@ def load_devices(path):
     return json.loads(Path(path).read_text()) if path else roster_devices()
 
 
-def feed_base_of(http, mac, win):
-    a, b = fetch_feed(http, mac), fetch_feed(http, win)
-    if a is None or b is None:
-        return None, None, None
-    base = sha256_bytes(json.dumps({"macos": sha256_bytes(a), "windows": sha256_bytes(b)}, sort_keys=True).encode())
-    return base, feed_item(a)["version"], feed_item(b)["version"]
+def feed_base_of(http, mac, win=None):
+    return feed_fingerprint(http, mac, win)
 
 
-def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_FEED, feed_win=WIN_FEED, devices=None,
+def make_plan(repo, remote="origin", branch="main", channel="stable", feed=None, feed_win=WIN_FEED, devices=None,
               version=None, ios_build=None, http=None, runner=None, installed_app=INSTALLED_APP, controller=None,
-              tools=None):
+              tools=None, signing_env=None, stable_feed=MAC_FEED):
     repo = Path(repo)
     http, runner = http or Http(), runner or Runner("dry")
     errors, blocks = [], []
+    feed = feed or (PREVIEW_FEED if channel == "preview" else MAC_FEED)
+    if channel == "preview":
+        feed_win = None
+        if feed in (MAC_FEED, WIN_FEED):
+            errors.append("preview 계획은 stable 피드를 게시 대상으로 쓸 수 없다")
     tools = tools if tools is not None else deps.check(runner)
     blocks.extend(deps.blocks(tools))
     genv = deps.git_env(tools)
@@ -262,7 +262,15 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
     feed_base, fv, fv_win = feed_base_of(http, feed, feed_win)
     if not feed_base:
         blocks.append("피드를 읽지 못해 기준 해시를 못 쟀다")
-    known = [t for t in tags] + [p for p in (version_tuple(fv), version_tuple(fv_win), version_tuple(cargo_version(repo))) if p]
+    base_version = max([p for p in (version_tuple(fv), version_tuple(fv_win)) if p], default=None)
+    base_source = feed
+    if channel == "preview" and base_version is None:
+        raw_stable = fetch_feed(http, stable_feed)
+        if raw_stable is None:
+            blocks.append("빈 preview 채널의 기준 stable 피드를 읽지 못했다")
+        base_version = version_tuple(feed_item(raw_stable)["version"])
+        base_source = stable_feed
+    known = [t for t in tags] + [p for p in (version_tuple(fv), version_tuple(fv_win), base_version, version_tuple(cargo_version(repo))) if p]
     floor = max(known or [(0, 0, 0)])
     if version:
         want = version_tuple(version)
@@ -275,7 +283,7 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
             errors.append(f"v{version_text(want)} 는 이미 나간 판(v{version_text(floor)}) 보다 낮거나 같다 — 다운그레이드")
     else:
         want = (floor[0], floor[1], floor[2] + 1)
-    base_tag = f"v{version_text(max(tags))}" if tags else None
+    base_tag = f"v{version_text(base_version)}" if base_version else None
     base_commit = git(repo, "rev-parse", f"{base_tag}^{{commit}}", check=False) if base_tag else ""
     if base_tag and not re.fullmatch(r"[0-9a-f]{40}", base_commit or ""):
         git(repo, "fetch", "-q", remote, f"refs/tags/{base_tag}", check=False)
@@ -290,7 +298,7 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
     if channel not in caps["macos"]["channels"]:
         errors.append(f"채널 {channel} 은 이 앱의 업데이터에 없다 — 있는 것: {', '.join(caps['macos']['channels'])}")
     platforms = (["macos", "windows"] if kinds["native"] else []) + (["ios"] if kinds["mobile"] else [])
-    desktop = [p for p in platforms if p != "ios"]
+    desktop = (["macos"] if kinds["native"] else []) if channel == "preview" else [p for p in platforms if p != "ios"]
     if not desktop:
         blocks.append("데스크톱에 게시할 변경이 없다 — iOS 는 TestFlight 경로로 따로 간다")
 
@@ -300,7 +308,7 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
     mac_artifact = None
     if "macos" in desktop and caps["macos"]["artifact"]["mode"] == "local":
         # 이 기기가 서명·공증한다 — 준비(신원·열쇠고리·굽기 스크립트·CI 검증)가 하나라도 빠지면 태그부터 막는다.
-        mac_artifact = macsign.local_signing(runner, tools)
+        mac_artifact = macsign.local_signing(runner, tools, env=signing_env)
         mac_artifact["problems"] = macsign.plan_problems(mac_artifact, caps["macos"]["artifact"], installed) \
             + macsign.repo_ready(repo)
         signing["release"] = macsign.predicted_identity(mac_artifact)
@@ -316,6 +324,8 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
         state, why = compare(repo, seen, version_text(want), [commit])
         if state in ("update", "current") and not seen.get("machine_id"):
             state, why = "unscoped", "기기가 machine_id 를 안 알려 승인 범위에 못 넣는다"
+        if channel == "preview" and state in ("update", "current") and seen.get("os") != "macos":
+            state, why = "unscoped", "preview 채널은 macOS 기기만 대상으로 삼는다"
         scope_rows.append({**d, **seen, "state": state, "why": why, "how": how_to_apply(seen),
                            "checked_at_ms": now_ms() if seen["reachable"] else None})
     in_scope = [d for d in scope_rows if d["state"] in ("update", "current")]
@@ -327,7 +337,7 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
         "version": version_text(want), "tag": f"v{version_text(want)}", "channel": channel,
         "platforms": desktop,
         # TestFlight 는 같은 빌드 번호를 두 번 받지 않는다 — testflight.sh 와 같은 yymmddHHMM 이라 단조롭다.
-        "ios_build": (ios_build or time.strftime("%y%m%d%H%M")) if "ios" in platforms else None,
+        "ios_build": (ios_build or time.strftime("%y%m%d%H%M")) if "ios" in platforms and channel == "stable" else None,
         "devices": sorted(d["label"] for d in in_scope),
         "device_ids": sorted(d["machine_id"] for d in in_scope),
         "controller": controller, "feed_base": feed_base, "stages": STAGES,
@@ -335,7 +345,7 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
     plan = {
         **core, "plan_id": sha256_bytes(canonical(core))[7:23], "created_at_ms": now_ms(), "errors": errors,
         "live_blocks": blocks,
-        "base": {"tag": base_tag, "commit": base_commit or None},
+        "base": {"tag": base_tag, "commit": base_commit or None, "source": base_source},
         "remote_head": remote_head,
         "feed": {"source": feed, "windows": feed_win, "version": fv, "windows_version": fv_win},
         "changes": {"commits": [{"sha": s, "subject": t} for s, t in log], "files": kinds,
@@ -345,7 +355,7 @@ def make_plan(repo, remote="origin", branch="main", channel="stable", feed=MAC_F
         "tools": tools,
         "tests": [" ".join(t) for t in TESTS],
     }
-    if feed_base and controller and desktop:
+    if channel == "stable" and feed_base and controller and desktop:
         scope = nacho.release_scope(plan, controller, feed_base)
         problem = nacho.scope_problem(scope)
         if problem:
@@ -399,7 +409,7 @@ def plan_dir(plan_id, state_dir=None):
 def save_plan(plan, state_dir=None):
     d = plan_dir(plan["plan_id"], state_dir)
     d.mkdir(parents=True, exist_ok=True)
-    (d / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2))
+    save_json_atomic(d / "plan.json", plan)
     return d
 
 
@@ -488,7 +498,7 @@ def load(plan_id, state_dir=None):
 
 
 def save_state(plan_id, state, state_dir=None):
-    (plan_dir(plan_id, state_dir) / "state.json").write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    save_json_atomic(plan_dir(plan_id, state_dir) / "state.json", state)
 
 
 def track_devices(repo, plan, state, devices, http):
@@ -522,7 +532,7 @@ def backend_for(repo, plan, mode, state_dir=None, devices=None, http=None, runne
                        unlock=os.environ.get("KASATERM_RELEASE_UNLOCK") == "1")
 
 
-def run(plan_id, backend, state_dir=None, approval_id=None, authority=None, at_ms=None):
+def run(plan_id, backend, state_dir=None, approval_id=None, authority=None, at_ms=None, publisher_authorizer=None):
     """검사·굽기는 실제로, 게시 단계는 live 일 때만. live 는 나쵸 승인을 게시 첫 단계 직전에 한 번 소비한다."""
     plan, state = load(plan_id, state_dir)
     mode = backend.runner.mode
@@ -530,6 +540,10 @@ def run(plan_id, backend, state_dir=None, approval_id=None, authority=None, at_m
     if plan["errors"] and mode != "dry":
         raise Refused("계획에 막힘이 있다 — " + "; ".join(plan["errors"]))
     live = mode == "live"
+    if live and publisher_authorizer is not None and (approval_id is not None or authority is not None or state.get("approval")):
+        raise Refused("publisher authorization과 기존 나쵸 승인을 혼용할 수 없다")
+    if live and publisher_authorizer is None and state.get("authorization"):
+        raise Refused("publisher authorization 기록은 나쵸 승인으로 재사용할 수 없다")
     if live and plan["live_blocks"]:
         raise Refused("live 게시가 막혀 있다 — " + "; ".join(plan["live_blocks"]))
     if live and not plan_hash_ok(plan):
@@ -549,7 +563,13 @@ def run(plan_id, backend, state_dir=None, approval_id=None, authority=None, at_m
         if stage in PUBLISH_STAGES and not live:
             state["stages"][stage] = {"status": "dry", "at_ms": now_ms(), "detail": backend.preview(stage, plan)}
             continue
-        if stage in PUBLISH_STAGES and not approved:
+        if stage in PUBLISH_STAGES and publisher_authorizer is not None:
+            record = publisher_authorizer(plan, state, backend, stage)
+            if not isinstance(record, dict) or not record:
+                raise Refused("publisher authorizer가 승인 기록을 반환하지 않았다")
+            state["authorization"] = record
+            save()
+        elif stage in PUBLISH_STAGES and not approved:
             state["approval"] = take_approval(plan, state, backend, authority, approval_id, at_ms or now_ms(), stage)
             approved = True
             save()
@@ -648,7 +668,7 @@ def main(argv=None):
     p = sub.add_parser("plan")
     p.add_argument("--repo", default=".")
     p.add_argument("--channel", default="stable")
-    p.add_argument("--feed", default=MAC_FEED)
+    p.add_argument("--feed", default=None)
     p.add_argument("--feed-win", default=WIN_FEED)
     p.add_argument("--devices", default=None, help="[{label, base}] JSON. 없으면 이 기기와 명부")
     p.add_argument("--version", default=None)

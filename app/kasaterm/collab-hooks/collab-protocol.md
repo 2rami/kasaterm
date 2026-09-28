@@ -1,7 +1,6 @@
 # 캐릭터 협업
 
-상태 확인 → 상세 읽기 → 전달 → 추적·완료 확인 순서로 진행한다.
-상세는 [조회 계약](../../../docs/board-collaboration.md)과 [전달 계약](../../../docs/tell-protocol.md)을 따른다.
+상태 확인 → 상세 읽기 → 전달 → 완료 확인 순서다. [조회](../../../docs/board-collaboration.md)·[전달 계약](../../../docs/tell-protocol.md)을 따른다.
 
 ## 상태 확인
 
@@ -60,8 +59,8 @@ kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자�
 - 맡긴 작업·막힘·실패를 추적한다. `reset_required`면 새 snapshot과 커서를 받고 빠진 구간은 미확인으로 남긴다.
 - `idle`과 침묵은 완료가 아니다. done 보고와 결과 확인 후 맡겼던 창을 정리한다.
 - 본인 작업이 끝나면 `kasaterm-cli done succeeded '완료·미확인·남은 것'`으로 보고한다. 실패는 `failed`로 남긴다.
-- 빌드·검사는 성공·실패 때 끝나는 별도 잡으로 돌린다. 현재 턴에서 sleep을 반복하지 않는다.
-- 계속 지켜볼 일은 변경분만 감시하고 진행·실패·끊김을 함께 받는다.
+- 카사텀 앱 수정은 검사·커밋·main 푸시 후 `python3 -m tools.release.auto enqueue <40자리 SHA>`까지 한다. 등록·배포·설치는 구분한다. stable은 별도 승인이다([절차](../../../docs/automatic-preview-updates.md)).
+- 빌드·검사는 성공·실패 때 끝나는 별도 잡으로 돌린다. sleep을 반복하지 않고, 계속 지켜볼 일은 변경분·진행·실패·끊김만 받는다.
 
 ## 나쵸네코가 띄운 일
 

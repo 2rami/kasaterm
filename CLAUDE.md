@@ -30,17 +30,23 @@ claude 가 전부 죽는다(2026-08-15 에 pane 9개가 날아갔다). 거둘 �
 - 스크린샷은 `Read` 로 직접 본다. 먼저 줄여서 연다(`sips -s format jpeg -s formatOptions 60 -Z 1200 a.png --out a.jpg`) — 이미지는 대화에 박혀 빼는 수단이 없고 한 세션에 스무 장쯤 쌓이면 32MB 벽에 걸려 그 세션은 못 살린다. 볼 것을 정한 뒤 한 장씩.
 - 한글 IME 조합 버그는 자동 입력으로 재현 못 한다 — 사용자가 직접 타이핑해야 한다.
 
-## 거노 앱에 반영하기
+## 앱 변경 완료 기준
 
-`bash scripts/build-app.sh` 로 `dist/kasaterm.app` 을 굽는 데까지가 네 몫이고, **거노가 앱을 껐다
-켜면 반영된다**(종료 시 자기설치). 다시 띄워 주지 않으니 「구웠다, 껐다 켜면 반영」까지만 보고해라.
-맥미니에서 작업 중이어도 네가 굽는다 — `scripts/macbook-bake.sh app|pet|journal`(먼저 push 해야 받는다).
+앱 동작에 영향을 주는 수정은 크기와 관계없이 **검사 → 커밋·main 푸시 → 빠른 업데이트 등록**까지 한다.
+정확한 커밋을 `origin/main`에 올린 뒤 `python3 -m tools.release.auto enqueue <40자리 SHA>`로 등록한다.
+남의 미완성 변경·미검증 커밋은 포함하지 않고, 갈라진 main을 강제 push하지 않는다. 문서만 바뀐 경우는 등록하지 않는다.
+등록은 배포 완료가 아니다. controller가 검사·서명·공증·preview 피드 검증을 끝냈는지 따로 보고하며,
+실패·대기는 이유와 함께 남긴다. 일반 사용자 stable 게시는 별도 승인을 유지한다.
+앱을 직접 종료·재실행하지 않는다. 선택된 Mac은 preview를 받아 두고 사용자의 정상 종료 때 설치한다.
+절차·최초 설정·중단 범위는 [`docs/automatic-preview-updates.md`](docs/automatic-preview-updates.md).
+
+`bash scripts/build-app.sh`의 `dist/kasaterm.app`은 로컬 검증·최초 설치용이다. 로컬 빌드만으로 다른 기기에 배포됐다고 보고하지 않는다.
 
 ⚠️ 다른 pane 이 Rust 를 고치는 중이면 스크립트가 거부한다. 기다렸다 다시 불러라.
 ⚠️ claude 세션 안에서 앱을 띄우지 마라(pane 에서 `open`·relaunch) — 그 앱이 낳는 **모든 pane** 의
 transcript 저장이 꺼진다.
 
-상세(무엇을 언제 굽나·자기설치·`relaunch.sh`) → [`docs/bake-and-install.md`](docs/bake-and-install.md)
+로컬 굽기·기존 자기설치 경로 → [`docs/bake-and-install.md`](docs/bake-and-install.md)
 
 ## 디자인 정본
 
