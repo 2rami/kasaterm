@@ -7971,6 +7971,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autohitaudit();
         self.run_button_focus_probe(event_loop);
         self.run_pending_autoghost();
+        self.run_pending_autotoast();
         self.run_pending_autoview();
         self.run_pending_autoinfo();
         self.run_pending_sidebar_navigation_probe(event_loop);
@@ -8057,10 +8058,7 @@ impl ApplicationHandler<UserEvent> for App {
             if self.version_alpha() > 0.0 {
                 why.push("version");
             }
-            if self.copy_toast_alpha() > 0.0 {
-                why.push("copy_toast");
-            }
-            if self.collab_toast_alpha() > 0.0 && self.collab.toast_action.is_none() {
+            if self.collab_toast_animating() {
                 why.push("collab_toast");
             }
             if self.any_notify_flash() {
@@ -8148,15 +8146,13 @@ impl ApplicationHandler<UserEvent> for App {
         // need a timer, since nothing else is producing frames. Re-arm a
         // ~30fps WaitUntil until the fade finishes, then fall back to the
         // idle Wait. (new_events → request_redraw on the timer fire.)
-        // The copy toast fade needs the same treatment as the launch banner.
-        // (echo-stale 격리) busy 30fps 펌프 임시 제거 — version/copy 토스트만
+        // The toast fade needs the same treatment as the launch banner.
+        // (echo-stale 격리) busy 30fps 펌프 임시 제거 — version 배너·토스트만
         // WaitUntil, 나머지는 Wait. ws lock 경합이 echo stream을 막는지 확인.
         if self.version_alpha() > 0.0
-            || self.copy_toast_alpha() > 0.0
-            // Sticky approval toast doesn't animate — only a *fading* collab
-            // toast needs the timer pump. (A blocked pane can sit for minutes;
-            // pumping 30fps the whole time would burn battery for nothing.)
-            || (self.collab_toast_alpha() > 0.0 && self.collab.toast_action.is_none())
+            // Sticky approval toast stands still once it has slid in — pumping
+            // 30fps while a blocked pane sits for minutes would burn battery.
+            || self.collab_toast_animating()
             || self.any_notify_flash()
             // 계정 전환 반짝임(0.9초). 끝나면 factor 가 None 이 되어 저절로 멎는다.
             || self.account_flash_factor().is_some()

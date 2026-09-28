@@ -63,6 +63,7 @@ mod sprites;
 mod stream;
 mod testkit;
 mod theme;
+mod toast;
 mod themegen;
 mod transcript;
 mod webpane;
@@ -5148,9 +5149,6 @@ struct App {
     dock_chip_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// Dock chip × hit rects: (pane id, logical rect). Click kills the pane.
     dock_chip_close_rects: Vec<(String, (f32, f32, f32, f32))>,
-    /// When the "복사됨" copy toast started animating. Drives its fade in the
-    /// overlay pass; `None` once faded out. Set on a successful block copy.
-    copy_toast_at: Option<Instant>,
     /// Throttle for `refresh_pane_activity`: the working-bar/completion-toast
     /// busy scan walks every pane's grid, so it runs at most a few times a
     /// second rather than per frame. `None` until the first scan.
@@ -6088,7 +6086,6 @@ impl App {
             docked: Vec::new(),
             dock_chip_rects: Vec::new(),
             dock_chip_close_rects: Vec::new(),
-            copy_toast_at: None,
             pane_busy_check: None,
             pane_account_quiet_since: HashMap::new(),
             pane_bg_mtime: HashMap::new(),

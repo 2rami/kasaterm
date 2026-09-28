@@ -1312,6 +1312,32 @@ impl App {
         );
     }
 
+    /// `KASATERM_AUTOTOAST="제목 · 설명"` 을 `KASATERM_AUTOTOAST_MS` 뒤에 띄운다 — 알림은
+    /// 복사·완료·권한 같은 바깥 일이 있어야 서는데 격리 창엔 그 일이 없다.
+    /// `KASATERM_AUTOTOAST_ACTION=1` 이면 승인 칩이 붙은 서 있는 알림.
+    pub(crate) fn run_pending_autotoast(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOTOAST").ok()?;
+            let ms = std::env::var("KASATERM_AUTOTOAST_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(3000);
+            Some(Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let msg = std::env::var("KASATERM_AUTOTOAST").unwrap_or_default();
+        self.set_toast(msg.clone());
+        if std::env::var("KASATERM_AUTOTOAST_ACTION").as_deref() == Ok("1") {
+            self.collab.toast_action = self.ws.lock().unwrap().active_pane.clone();
+        }
+        eprintln!("[autotoast] {msg:?} action={}", self.collab.toast_action.is_some());
+    }
+
     /// Headless 유령 pane repro: `KASATERM_AUTOGHOST_MS` 뒤에, 숨긴 pane 의 셸이
     /// 스스로 끝난 상황을 만들어 **낡은 되살리기 레코드가 산 pane 을 죽이는지**와
     /// **자원 없는 leaf 가 검은 사각형으로 남는지**를 잰다.

@@ -1441,7 +1441,9 @@ impl App {
     /// Surface a transient top-right toast (reuses the collab toast slot).
     pub(crate) fn set_toast(&mut self, msg: String) {
         // lite 는 토스트가 없다 — 그리는 쪽(render)도 같이 막혀 있어 직접 세운 것도 안 뜬다.
-        if self.lite {
+        // 승인 알림이 서 있으면 그 자리를 안 뺏는다 — 글만 바뀌고 칩은 남아, 「복사됨」
+        // 옆의 [승인] 이 엉뚱한 pane 에 답을 보내게 된다.
+        if self.lite || self.collab.toast_action.is_some() {
             return;
         }
         self.collab.toast = Some((msg, std::time::Instant::now()));
@@ -2812,25 +2814,8 @@ impl App {
             0.0
         }
     }
-    /// 0.0..1.0 opacity for the "복사됨" copy toast: solid for a brief hold
-    /// after a block copy, then a quick fade. Mirrors `version_alpha`.
-    pub(crate) fn copy_toast_alpha(&self) -> f32 {
-        const HOLD: u128 = 900;
-        const FADE: u128 = 500;
-        let Some(at) = self.copy_toast_at else {
-            return 0.0;
-        };
-        let e = at.elapsed().as_millis();
-        if e < HOLD {
-            1.0
-        } else if e < HOLD + FADE {
-            1.0 - (e - HOLD) as f32 / FADE as f32
-        } else {
-            0.0
-        }
-    }
-    /// 0.0..1.0 opacity for a collab completion toast: a longer hold than the
-    /// copy toast (a sibling finishing is worth a real glance) then a fade.
+    /// 0.0..1.0 opacity for a collab completion toast: a hold long enough for a
+    /// real glance, then a fade.
     /// Returns 0 with no active toast, so callers gate paint + frame-loop wake.
     pub(crate) fn collab_toast_alpha(&self) -> f32 {
         const HOLD: u128 = 2400;
@@ -2852,9 +2837,22 @@ impl App {
             0.0
         }
     }
-    /// Copy a detected code block's text to the clipboard and arm the
-    /// toast. Reuses arboard like `copy_selection`. Best-effort: a
-    /// clipboard failure just logs (the toast still fires on success).
+    /// 알림이 선 뒤 흐른 시간 — 들어오는 움직임이 이것으로 그려진다.
+    pub(crate) fn collab_toast_elapsed_ms(&self) -> f32 {
+        self.collab
+            .toast
+            .as_ref()
+            .map_or(f32::MAX, |(_, at)| at.elapsed().as_secs_f32() * 1000.0)
+    }
+    /// 알림이 아직 움직이는 중인가. 승인 알림은 서 있는 동안 멈춰 있지만 **들어오는
+    /// 0.18초**는 움직인다 — 그 동안 프레임을 안 돌리면 반쯤 투명한 첫 장에서 멈춘다.
+    pub(crate) fn collab_toast_animating(&self) -> bool {
+        self.collab_toast_alpha() > 0.0
+            && (self.collab.toast_action.is_none()
+                || crate::toast::enter_progress(self.collab_toast_elapsed_ms()) < 1.0)
+    }
+    /// Copy a detected code block's text to the clipboard and say so. Reuses
+    /// arboard like `copy_selection`. Best-effort: a clipboard failure just logs.
     pub(crate) fn copy_block_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
@@ -2871,9 +2869,12 @@ impl App {
                 return;
             }
         }
-        if !self.lite {
-            self.copy_toast_at = Some(Instant::now());
-        }
+        let head = if crate::clipboard::looks_secret(text) {
+            format!("비밀값 {}", crate::clipboard::masked(text))
+        } else {
+            crate::clipboard::preview(text, 36)
+        };
+        self.set_toast(format!("복사됨 · {head}"));
     }
     pub(crate) fn toggle_session_panel(&mut self, _event_loop: &ActiveEventLoop) {
         let replacing_inline = self.inline_web.is_some();

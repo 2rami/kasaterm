@@ -1615,12 +1615,12 @@ impl App {
                 })
             })
             .unwrap_or_default();
-        let toast_alpha = self.copy_toast_alpha();
-        // Collab completion toast (top-right). Pre-read here like toast_alpha so
-        // the render block below never re-borrows self while g is held.
+        // Top-right toast. Pre-read here so the render block below never
+        // re-borrows self while g is held.
         let collab_toast_alpha = self.collab_toast_alpha();
         let collab_toast_msg = if self.lite { None } else { self.collab.toast.as_ref().map(|(m, _)| m.clone()) };
         let collab_toast_action_on = self.collab.toast_action.is_some();
+        let collab_toast_elapsed_ms = self.collab_toast_elapsed_ms();
         // 업데이트 토스트(win_sparkle 센티널)면 칩 라벨이 승인/거부 대신 설치/나중에.
         let update_toast_on =
             self.collab.toast_action.as_deref() == Some(crate::win_sparkle::UPDATE_TOAST_ACTION);
@@ -8349,196 +8349,30 @@ impl App {
             } else {
                 self.statusbar.menu_rect = None;
             }
-            // "복사됨" toast, bottom-center, brief fade after a block copy.
-            if toast_alpha > 0.0 {
-                let msg = "복사됨";
-                let t_font = 13.0_f32;
-                let win_w = win_px.0 / scale;
-                let win_h = win_px.1 / scale;
-                let text_w = g.measure_chrome_text(msg, t_font, false);
-                let (px, py) = (14.0_f32, 8.0_f32);
-                let box_w = text_w + px * 2.0;
-                let box_h = t_font + py * 2.0;
-                let bx = (win_w - box_w) / 2.0;
-                let by = win_h - box_h - 24.0;
-                let a = (235.0 * toast_alpha).round() as u8;
-                round_rect(
-                    g,
-                    bx,
-                    by,
-                    box_w,
-                    box_h,
-                    theme::radius_md(),
-                    theme::with_alpha(theme::surface_active(), a),
-                );
-                let ta = (255.0 * toast_alpha).round() as u8;
-                g.draw_text(
-                    bx + px,
-                    by + py,
-                    msg,
-                    gpu::DrawOpts {
-                        font_size: t_font,
-                        color: theme::with_alpha(theme::success(), ta),
-                        bold: true,
-                        italic: false,
-                    },
-                );
-            }
-            // Collab completion toast, top-right: a sibling pane flipped
-            // working→idle. Top-right so it never collides with the
-            // bottom-center copy pill; longer hold (a sibling finishing is worth
-            // a glance). Tap the board button to clear the unread badge.
+            // 오른쪽 위 알림. 승인 알림은 답할 때까지 서 있고, 나머지는 잠깐 섰다가 흐려진다.
             self.collab.toast_rect = None;
             self.collab.toast_approve_rect = None;
             self.collab.toast_deny_rect = None;
             if collab_toast_alpha > 0.0 {
                 if let Some(msg) = collab_toast_msg.as_ref() {
-                    let t_font = 13.0_f32;
-                    let win_w = win_px.0 / scale;
-                    let px = 14.0_f32;
-                    let icon_size = 16.0_f32;
-                    let icon_gap = 8.0_f32;
-                    // 승인 모드(sticky)면 텍스트 뒤에 [승인][거부] 칩이 붙는다 —
-                    // 박스 폭에 미리 반영. (munder 승인 카드 축소판)
-                    let chip_f = 12.0_f32;
-                    let chip_pad = 10.0_f32;
-                    let chip_gap = 8.0_f32;
-                    let (ok_label, no_label) = if update_toast_on {
-                        ("설치", "나중에")
-                    } else {
-                        ("승인", "거부")
-                    };
-                    let (ok_w, no_w) = if collab_toast_action_on {
-                        (
-                            g.measure_chrome_text(ok_label, chip_f, true) + chip_pad * 2.0,
-                            g.measure_chrome_text(no_label, chip_f, true) + chip_pad * 2.0,
-                        )
-                    } else {
-                        (0.0, 0.0)
-                    };
-                    let chips_w = if collab_toast_action_on {
-                        chip_gap + ok_w + chip_gap + no_w
-                    } else {
-                        0.0
-                    };
-                    let max_text_w = (win_w
-                        - 32.0
-                        - px * 2.0
-                        - chips_w
-                        - icon_size
-                        - icon_gap)
-                        .min(480.0)
-                        .max(40.0);
-                    let tone = theme::notice_tone(msg, collab_toast_action_on);
-                    let clean = theme::clean_notice_text(msg);
-                    let lines = crate::info::fit_text_lines(
+                    let actions = collab_toast_action_on.then(|| {
+                        if update_toast_on { ("설치", "나중에") } else { ("승인", "거부") }
+                    });
+                    let hits = toast::paint_notice(
                         g,
-                        clean,
-                        max_text_w,
-                        t_font,
-                        true,
-                        theme::notice_line_limit(tone),
-                        theme::notice_keeps_tail(tone),
+                        win_px.0 / scale,
+                        (self.cursor_px.0 / scale, self.cursor_px.1 / scale),
+                        &toast::Notice {
+                            message: msg,
+                            alpha: collab_toast_alpha,
+                            elapsed_ms: collab_toast_elapsed_ms,
+                            actions,
+                            decline_is_danger: !update_toast_on,
+                        },
                     );
-                    let text_w = lines
-                        .iter()
-                        .map(|line| g.measure_chrome_text(line, t_font, true))
-                        .fold(0.0_f32, f32::max);
-                    let box_w = text_w + px * 2.0 + chips_w + icon_size + icon_gap;
-                    let box_h = 44.0 + lines.len().saturating_sub(1) as f32 * 16.0;
-                    let bx = (win_w - box_w - 16.0).max(16.0);
-                    let by = TITLE_HEIGHT + 12.0;
-                    self.collab.toast_rect = Some((bx, by, box_w, box_h));
-                    let a = (235.0 * collab_toast_alpha).round() as u8;
-                    round_rect(
-                        g,
-                        bx,
-                        by,
-                        box_w,
-                        box_h,
-                        theme::radius_md(),
-                        theme::with_alpha(theme::surface_active(), a),
-                    );
-                    let ta = (255.0 * collab_toast_alpha).round() as u8;
-                    let tone_color = theme::enforce_contrast_at(
-                        theme::notice_tone_color(tone),
-                        theme::surface_active(),
-                        4.5,
-                    );
-                    let tone_color = theme::with_alpha(tone_color, ta);
-                    let icon_x = bx + px;
-                    g.queue_icon(
-                        theme::notice_tone_icon(tone),
-                        icon_x,
-                        by + (box_h - icon_size) / 2.0,
-                        icon_size,
-                        tone_color,
-                    );
-                    let text_x = icon_x + icon_size + icon_gap;
-                    let line_h = 18.0;
-                    let text_top = by + (box_h - lines.len() as f32 * line_h) / 2.0 + 1.0;
-                    for (i, line) in lines.iter().enumerate() {
-                        g.draw_text(
-                            text_x,
-                            text_top + i as f32 * line_h,
-                            line,
-                            gpu::DrawOpts {
-                                font_size: t_font,
-                                color: tone_color,
-                                bold: true,
-                                italic: false,
-                            },
-                        );
-                    }
-                    if collab_toast_action_on {
-                        let ch = 36.0;
-                        let cy = by + (box_h - ch) / 2.0;
-                        let ty = cy + (ch - chip_f) / 2.0;
-                        let ox = text_x + text_w + chip_gap;
-                        round_rect(
-                            g,
-                            ox,
-                            cy,
-                            ok_w,
-                            ch,
-                            theme::radius_sm(),
-                            theme::with_alpha(theme::success(), a),
-                        );
-                        g.draw_text(
-                            ox + chip_pad,
-                            ty,
-                            ok_label,
-                            gpu::DrawOpts {
-                                font_size: chip_f,
-                                color: theme::with_alpha(theme::foreground_on(theme::success()), ta),
-                                bold: true,
-                                italic: false,
-                            },
-                        );
-                        self.collab.toast_approve_rect = Some((ox, cy, ok_w, ch));
-                        let nx = ox + ok_w + chip_gap;
-                        round_rect(
-                            g,
-                            nx,
-                            cy,
-                            no_w,
-                            ch,
-                            theme::radius_sm(),
-                            theme::with_alpha(theme::danger(), a),
-                        );
-                        g.draw_text(
-                            nx + chip_pad,
-                            ty,
-                            no_label,
-                            gpu::DrawOpts {
-                                font_size: chip_f,
-                                color: theme::with_alpha(theme::foreground_on(theme::danger()), ta),
-                                bold: true,
-                                italic: false,
-                            },
-                        );
-                        self.collab.toast_deny_rect = Some((nx, cy, no_w, ch));
-                    }
+                    self.collab.toast_rect = Some(hits.card);
+                    self.collab.toast_approve_rect = hits.approve;
+                    self.collab.toast_deny_rect = hits.deny;
                 }
             }
             if self.show_pane_numbers {
@@ -13350,9 +13184,8 @@ impl App {
         // pass even when panes are clean (about_to_wait re-arms WaitUntil
         // to keep waking us through the fade).
         let version_animating = self.version_alpha() > 0.0;
-        // Same for the copy toast + collab completion toast: their fade changes
-        // the picture every frame.
-        let toast_animating = self.copy_toast_alpha() > 0.0 || self.collab_toast_alpha() > 0.0;
+        // Same for the toast: its slide and fade change the picture every frame.
+        let toast_animating = self.collab_toast_animating();
         // A busy pane's header bar sweeps every frame, so it's an animation
         // source too — keep painting while any pane is working.
         //
