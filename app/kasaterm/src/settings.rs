@@ -369,87 +369,127 @@ impl App {
             self.set_toast("다른 로그인이 끝난 뒤 다시 시도해 주세요".to_string());
             return;
         }
-        // dir 이름이 곧 Keychain 서비스명 해시의 입력이라 계정마다 유일하고 그 뒤로
-        // 안 변해야 한다 — 재사용하면 지운 계정의 토큰을 새 계정이 물려받는다.
-        // 목록에 없어도 **폴더가 남아 있으면 쓰지 않는다.** 슬롯을 지울 때 키체인
-        // 항목과 폴더는 일부러 두는데(자격은 되돌릴 수 없다), 번호만 보고 고르면
-        // 지운 계정의 토큰을 새 계정이 그대로 물려받아 「새로 만들었는데 옛 계정으로
-        // 로그인돼 있는」 상태가 된다.
-        let id = (1..)
-            .map(|n| format!("acct-{n}"))
-            .find(|c| {
-                self.set_claude_accounts.iter().all(|a| &a.id != c)
-                    && socket::claude_account_dir(c).is_none_or(|d| !d.exists())
-            })
-            .expect("1.. is infinite");
-        let Some(dir) = socket::claude_account_dir(&id) else {
-            self.set_toast("계정 폴더 경로를 만들 수 없습니다".to_string());
+        let Some((id, dir)) = self.new_account_slot(AccountProvider::Claude, "") else {
             return;
         };
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.set_toast(format!("계정 폴더 생성 실패: {e}"));
-            return;
-        }
-        // 라벨은 비워 둔다 — 이름을 안 붙인 슬롯은 `account_display` 가 그 슬롯의
-        // 진짜 이메일로 부른다. "계정 3" 을 미리 박아 두면 사용자가 직접 친 별명과
-        // 구별이 안 돼 이메일로 대체할 수가 없다.
-        self.set_claude_accounts.push(socket::ClaudeAccount {
-            id: id.clone(),
-            label: String::new(),
-        });
-        self.settings_save();
-
         // 로그인은 **터미널 없이** 돈다(`spawn_hidden_login` 주석). 그래서 설정창을
         // 닫지도, pane 을 띄우지도 않는다 — 이 자리에 「로그인 중… / 취소」가 뜬다.
         spawn_hidden_login(
             AccountProvider::Claude,
-            id.clone(),
+            id,
             Some(dir),
             login_browser_default(),
+            LoginOpts::default(),
         );
         self.set_toast(add_account_toast());
     }
 
-    /// 같은 것의 codex 판 — 슬롯을 만들고 그 홈을 얹은 `codex login` 을 새 pane 에
-    /// 띄운다. claude 와 마찬가지로 **추가만 하고 활성 전환은 안 한다**(아직 아무도
-    /// 로그인 안 한 슬롯으로 갈아타면 그 뒤 codex 가 전부 로그아웃 상태로 뜬다).
+    /// 빈 계정 슬롯을 하나 만들어 목록에 올린다 — `(id, 인증 저장소 폴더)`.
     ///
-    /// id 접두사를 `codex-` 로 갈라 두는 건 OAuth 브라우저 프로필 때문이다 —
+    /// dir 이름이 곧 Keychain 서비스명 해시의 입력이라 계정마다 유일하고 그 뒤로
+    /// 안 변해야 한다 — 재사용하면 지운 계정의 토큰을 새 계정이 물려받는다.
+    /// 목록에 없어도 **폴더가 남아 있으면 쓰지 않는다.** 슬롯을 지울 때 키체인
+    /// 항목과 폴더는 일부러 두는데(자격은 되돌릴 수 없다), 번호만 보고 고르면
+    /// 지운 계정의 토큰을 새 계정이 그대로 물려받아 「새로 만들었는데 옛 계정으로
+    /// 로그인돼 있는」 상태가 된다.
+    ///
+    /// codex id 접두사를 `codex-` 로 갈라 두는 건 OAuth 브라우저 프로필 때문이다 —
     /// `oauth_profile_dir` 은 id 하나로 자리를 잡으므로 claude 의 `acct-1` 과 겹치면
     /// 두 서비스가 같은 브라우저 프로필을 나눠 쓰게 된다.
+    ///
+    /// 라벨을 비워 두면 `account_display` 가 그 슬롯의 진짜 이메일로 부른다. "계정 3" 을
+    /// 미리 박아 두면 사용자가 직접 친 별명과 구별이 안 돼 이메일로 대체할 수가 없다.
+    ///
+    /// **추가만 하고 활성 전환은 하지 않는다** — 아직 아무도 로그인하지 않은 저장소로
+    /// 즉시 갈아타면 그 뒤에 뜨는 모든 claude·codex 가 로그아웃 상태로 뜬다.
+    fn new_account_slot(
+        &mut self,
+        provider: AccountProvider,
+        label: &str,
+    ) -> Option<(String, std::path::PathBuf)> {
+        let (prefix, taken): (&str, Vec<&str>) = match provider {
+            AccountProvider::Claude => ("acct", self.set_claude_accounts.iter().map(|a| a.id.as_str()).collect()),
+            AccountProvider::Codex => ("codex", self.set_codex_accounts.iter().map(|a| a.id.as_str()).collect()),
+        };
+        let id = (1..)
+            .map(|n| format!("{prefix}-{n}"))
+            .find(|c| {
+                !taken.contains(&c.as_str())
+                    && account_login_home(provider, c).is_none_or(|d| !d.exists())
+            })
+            .expect("1.. is infinite");
+        let Some(dir) = account_login_home(provider, &id) else {
+            self.set_toast("계정 폴더 경로를 만들 수 없습니다".to_string());
+            return None;
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.set_toast(format!("계정 폴더 생성 실패: {e}"));
+            return None;
+        }
+        let label = label.trim().to_string();
+        match provider {
+            AccountProvider::Claude => self.set_claude_accounts.push(socket::ClaudeAccount { id: id.clone(), label }),
+            AccountProvider::Codex => self.set_codex_accounts.push(socket::CodexAccount { id: id.clone(), label }),
+        }
+        self.settings_save();
+        Some((id, dir))
+    }
+
+    /// 같은 codex 판. `login` 은 shim 이 **순정으로 통과**시키는 관리 서브커맨드라(우리
+    /// 홈을 씌우면 엉뚱한 자리를 본다), 여기서 준 CODEX_HOME 이 그대로 진짜 codex 에 닿아
+    /// 이 슬롯에 auth.json 을 쓴다.
     fn add_codex_account(&mut self) {
         if hidden_login_running() {
             self.set_toast("다른 로그인이 끝난 뒤 다시 시도해 주세요".to_string());
             return;
         }
-        let id = (1..)
-            .map(|n| format!("codex-{n}"))
-            .find(|c| self.set_codex_accounts.iter().all(|a| &a.id != c))
-            .expect("1.. is infinite");
-        let Some(dir) = socket::codex_account_dir(&id) else {
-            self.set_toast("계정 폴더 경로를 만들 수 없습니다".to_string());
+        let Some((id, dir)) = self.new_account_slot(AccountProvider::Codex, "") else {
             return;
         };
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.set_toast(format!("계정 폴더 생성 실패: {e}"));
-            return;
-        }
-        self.set_codex_accounts.push(socket::CodexAccount {
-            id: id.clone(),
-            label: String::new(),
-        });
-        self.settings_save();
-
-        // claude 와 같은 숨은 로그인. `login` 은 shim 이 **순정으로 통과**시키는 관리
-        // 서브커맨드라(우리 홈을 씌우면 엉뚱한 자리를 본다), 여기서 준 CODEX_HOME 이
-        // 그대로 진짜 codex 에 닿아 이 슬롯에 auth.json 을 쓴다.
         spawn_hidden_login(
             AccountProvider::Codex,
-            id.clone(),
+            id,
             Some(dir),
             login_browser_default(),
+            LoginOpts::default(),
         );
         self.set_toast(add_account_toast());
+    }
+
+    /// 다른 기기에 로그인된 계정을 이 기기에도 붙인다. 목록은 관문에서 왔고(`agent_accounts`)
+    /// 자격증명은 안 옮긴다 — 이 기기에서 새로 로그인한다. 갱신 토큰을 기기끼리 나누면
+    /// 먼저 갱신한 쪽이 나머지를 로그아웃시킨다.
+    ///
+    /// Claude 는 쓰던 브라우저의 승인 한 번(이메일을 미리 채운다), Codex 는 기기 코드 —
+    /// 코드를 폰에서 넣어도 된다. 끝나면 신원을 대조해 다른 계정으로 붙었으면 알린다.
+    fn adopt_shared_account(&mut self, provider: AccountProvider, key: &str) {
+        if hidden_login_running() {
+            self.set_toast("다른 로그인이 끝난 뒤 다시 시도해 주세요".to_string());
+            return;
+        }
+        let Some(acct) = kasa_mcp::agent_accounts::cached()
+            .and_then(|seen| seen.shared.into_iter().find(|a| a.key == key))
+        else {
+            self.set_toast("그 계정이 목록에서 사라졌어요 — 잠시 뒤 다시 봐 주세요".to_string());
+            return;
+        };
+        let name = if acct.label.is_empty() { acct.email.clone() } else { acct.label.clone() };
+        let Some((id, dir)) = self.new_account_slot(provider, &acct.label) else {
+            return;
+        };
+        let opts = LoginOpts {
+            email: (provider == AccountProvider::Claude).then(|| acct.email.clone()),
+            device_code: provider == AccountProvider::Codex,
+            expect: Some((acct.key.clone(), name.clone())),
+        };
+        spawn_hidden_login(provider, id, Some(dir), LoginBrowser::Default, opts);
+        let team = (!acct.org.is_empty() && !acct.org.to_lowercase().contains(&acct.email.to_lowercase()))
+            .then(|| format!(" — 조직은 「{}」", acct.org))
+            .unwrap_or_default();
+        self.set_toast(match provider {
+            AccountProvider::Claude => format!("브라우저에서 {} 로 승인하세요{team}", acct.email),
+            AccountProvider::Codex => "코드가 뜨면 그 주소에 입력하세요 — 폰에서 해도 돼요".to_string(),
+        });
     }
 
     /// 학생 이미지 override 폴더(`~/.config/kasaterm/students/`)를 OS 파일
@@ -694,6 +734,7 @@ impl App {
         };
         if found {
             self.settings_save();
+            kasa_mcp::agent_accounts::poke();
             self.account_label_edit = None;
         } else {
             self.set_toast("그 계정 슬롯이 더는 없어요".to_string());
@@ -1355,7 +1396,7 @@ impl App {
                 if let Some(path) = dir.as_ref() {
                     let _ = std::fs::create_dir_all(path);
                 }
-                spawn_hidden_login(p, id, dir, browser);
+                spawn_hidden_login(p, id, dir, browser, LoginOpts::default());
                 self.set_toast(
                     match browser {
                         LoginBrowser::Isolated => "빈 브라우저 창에서 로그인하세요",
@@ -1514,11 +1555,13 @@ impl App {
                 // 남의 토큰을 물려받는 사고를 없앴다.
                 forget_account_email(&id);
                 socket::forget_account_cooldown(&id);
+                kasa_mcp::agent_accounts::poke();
                 // 라벨 포커스는 행 인덱스라 목록이 줄면 다른 행을 가리킨다.
                 self.settings_input = None;
                 self.settings_save();
             }
             SettingsAction::AddCodexAccount => self.add_codex_account(),
+            SettingsAction::AdoptSharedAccount(provider, key) => self.adopt_shared_account(provider, &key),
             SettingsAction::RemoveCodexAccount(id) => {
                 self.set_codex_accounts.retain(|a| a.id != id);
                 // claude 판과 같은 이유 — 사라진 슬롯을 가리키면 codex 가 아무도
@@ -1529,6 +1572,7 @@ impl App {
                 }
                 self.settings_input = None;
                 self.settings_save();
+                kasa_mcp::agent_accounts::poke();
             }
             SettingsAction::OpenStudentsDir => self.open_students_dir(),
             SettingsAction::OpenCharactersJson => self.open_characters_json(),
@@ -3825,6 +3869,8 @@ pub(crate) struct LoginJob {
     /// 로그인 중인 슬롯 id(`acct-2` · `codex-1`).
     pub(crate) id: String,
     pub(crate) state: LoginState,
+    /// 기기 코드 로그인이면 `(주소, 코드)` — 화면이 크게 보여 주고 폰에서도 넣을 수 있다.
+    pub(crate) device: Option<(String, String)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -3910,6 +3956,34 @@ pub(crate) fn looks_like_login_code(s: &str) -> bool {
 }
 
 #[cfg(test)]
+mod device_login_tests {
+    use super::{device_code_in, device_login_error, strip_ansi};
+
+    /// codex 0.157 `login --device-auth` 가 실제로 찍는 줄(색 코드 포함, 코드만 바꿈).
+    #[test]
+    fn picks_the_url_and_code_out_of_colored_lines() {
+        let url = "   \u{1b}[94mhttps://auth.openai.com/codex/device\u{1b}[0m\n";
+        assert_eq!(strip_ansi(url).trim(), "https://auth.openai.com/codex/device");
+        assert_eq!(device_code_in(&strip_ansi("   \u{1b}[94mAB12-CD345\u{1b}[0m\n")).as_deref(), Some("AB12-CD345"));
+        for line in [
+            "2. Enter this one-time code \u{1b}[90m(expires in 15 minutes)\u{1b}[0m",
+            "Welcome to Codex [v0.157.0]",
+            "Follow these steps to sign in with ChatGPT using device code authorization:",
+            "a-b",
+            "ab12-cd345",
+        ] {
+            assert_eq!(device_code_in(&strip_ansi(line)), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_disabled_device_flow_tells_where_to_turn_it_on() {
+        assert!(device_login_error("Error: device code login is disabled for this workspace").contains("보안"));
+        assert_eq!(device_login_error("\u{1b}[31mError: network down\u{1b}[0m\n"), "Error: network down");
+    }
+}
+
+#[cfg(test)]
 mod login_code_shape_tests {
     use super::looks_like_login_code;
 
@@ -3982,6 +4056,7 @@ pub(crate) fn seed_login_state_for_probe(id: &str, state: LoginState) -> bool {
         provider: AccountProvider::Claude,
         id: id.to_string(),
         state,
+        device: None,
     });
     true
 }
@@ -4145,11 +4220,14 @@ fn spawn_hidden_login(
     id: String,
     dir: Option<std::path::PathBuf>,
     browser: LoginBrowser,
+    opts: LoginOpts,
 ) {
     use std::io::Read;
     use std::process::Stdio;
     let profile = login_profile(browser, &id);
-    let intercept_browser = intercept_login_browser(provider, browser);
+    let device_code = opts.device_code && provider == AccountProvider::Codex;
+    // 기기 코드 흐름은 앱이 주소를 연다 — 코드를 먼저 화면에 세워야 하니 CLI 에 안 맡긴다.
+    let intercept_browser = device_code || intercept_login_browser(provider, browser);
     let Ok(mut cell) = login_cell().lock() else {
         return;
     };
@@ -4164,15 +4242,23 @@ fn spawn_hidden_login(
         provider,
         id: id.clone(),
         state: LoginState::Running,
+        device: None,
     });
     cell.1 = None;
     drop(cell);
     std::thread::spawn(move || {
         // Finder에서 띄운 GUI의 PATH에는 npm 전역 폴더가 없다. 로그인 셸도 그
         // 설치 위치를 복구하지 못하므로, 공급자별로 찾은 실제 실행 파일을 직접 부른다.
-        let (program, args) = account_login_invocation(provider);
+        let (program, base) = account_login_invocation(provider);
+        let mut args: Vec<String> = base.into_iter().map(str::to_string).collect();
+        if let (AccountProvider::Claude, Some(email)) = (provider, opts.email.as_ref()) {
+            args.extend(["--email".to_string(), email.clone()]);
+        }
+        if device_code {
+            args.push("--device-auth".to_string());
+        }
         let mut cmd = crate::proc::command(program);
-        cmd.args(args)
+        cmd.args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -4236,6 +4322,7 @@ fn spawn_hidden_login(
             let buf = buf.clone();
             let profile = profile.clone();
             let browser_opened = browser_opened.clone();
+            let job_id = id.clone();
             readers.push(std::thread::spawn(move || {
                 // **줄 단위로 읽으면 안 된다.** 코드를 묻는 `Paste code here if
                 // prompted >` 는 개행 없이 오므로 `lines()` 는 그 줄을 EOF 까지
@@ -4258,6 +4345,10 @@ fn spawn_hidden_login(
                     // 열면 끊긴 주소가 뜬다.
                     while let Some(pos) = tail.find('\n') {
                         let line: String = tail.drain(..=pos).collect();
+                        if device_code {
+                            note_device_login(provider, &job_id, &line, &browser_opened);
+                            continue;
+                        }
                         if !intercept_browser
                             || browser_opened.load(std::sync::atomic::Ordering::Relaxed)
                         {
@@ -4301,7 +4392,9 @@ fn spawn_hidden_login(
         //
         // **코드를 묻기 시작하면 10분으로 늘린다** — 그때부터는 사람이 브라우저에서
         // 승인하고 코드를 복사해 창을 옮겨 붙여넣는 시간이라, 3분은 실제로 모자란다.
-        let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        // 기기 코드는 CLI 가 15분짜리를 준다 — 폰을 꺼내 넣을 시간이다.
+        let first_wait = if device_code { 900 } else { 180 };
+        let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(first_wait);
         let mut extended = false;
         // 코드를 묻는 문구를 처음 본 시각과, 손 입력 칸을 이미 열었는지.
         let mut prompt_at: Option<std::time::Instant> = None;
@@ -4367,6 +4460,8 @@ fn spawn_hidden_login(
                 let _ = child.kill();
                 let why = if extended {
                     "코드를 기다리다 10분이 지났어요 — 다시 해 주세요"
+                } else if device_code {
+                    "코드를 15분 안에 못 받았어요 — 다시 해 주세요"
                 } else {
                     "로그인이 3분 안에 안 끝났어요"
                 };
@@ -4379,13 +4474,138 @@ fn spawn_hidden_login(
             let _ = r.join();
         }
         let out = buf.lock().map(|b| b.clone()).unwrap_or_default();
-        let state = if code {
-            LoginState::Ok
+        let state = if !code {
+            LoginState::Err(if device_code { device_login_error(&out) } else { login_error_line(&out) })
         } else {
-            LoginState::Err(login_error_line(&out))
+            match &opts.expect {
+                Some((want, name)) => verify_login_identity(provider, &id, dir.as_deref(), want, name),
+                None => LoginState::Ok,
+            }
         };
         finish_login(provider, &id, state);
     });
+}
+
+/// 로그인을 어떻게 돌릴지. 기본값은 지금까지의 「계정 추가·재인증」 그대로다.
+#[derive(Clone, Default)]
+pub(crate) struct LoginOpts {
+    /// 로그인 페이지에 미리 채울 이메일(Claude `--email`).
+    pub(crate) email: Option<String>,
+    /// Codex 기기 코드 흐름(`--device-auth`). 코드를 폰에서 넣어도 된다.
+    pub(crate) device_code: bool,
+    /// 끝난 뒤 이 계정이어야 한다 — `(agent_accounts 열쇠, 부를 이름)`.
+    pub(crate) expect: Option<(String, String)>,
+}
+
+/// 기기 코드 흐름의 출력 한 줄에서 주소와 코드를 줍는다. 둘 다 모이면 쓰던 브라우저로 한 번 연다.
+fn note_device_login(
+    provider: AccountProvider,
+    id: &str,
+    line: &str,
+    opened: &std::sync::atomic::AtomicBool,
+) {
+    let plain = strip_ansi(line);
+    let url = plain
+        .find("https://")
+        .and_then(|at| plain[at..].split_whitespace().next())
+        .map(str::to_string);
+    let code = device_code_in(&plain);
+    if url.is_none() && code.is_none() {
+        return;
+    }
+    let ready = {
+        let Ok(mut c) = login_cell().lock() else { return };
+        let Some(job) = c.0.as_mut().filter(|j| j.provider == provider && j.id == id) else {
+            return;
+        };
+        let (mut u, mut k) = job.device.clone().unwrap_or_default();
+        if let Some(url) = url {
+            u = url;
+        }
+        if let Some(code) = code {
+            k = code;
+        }
+        job.device = Some((u.clone(), k.clone()));
+        (!u.is_empty() && !k.is_empty()).then_some(u)
+    };
+    if let Some(url) = ready {
+        if !opened.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            open_default_browser(&url);
+        }
+    }
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `ABCD-12345` 모양의 한 번 쓰는 코드. 대문자·숫자 덩어리 둘 이상을 `-` 로 이은 것.
+fn device_code_in(line: &str) -> Option<String> {
+    line.split_whitespace().find_map(|w| {
+        let parts: Vec<&str> = w.split('-').collect();
+        let ok = parts.len() >= 2
+            && parts.iter().all(|p| (3..=6).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()))
+            && w.bytes().any(|b| b.is_ascii_digit() || b.is_ascii_uppercase());
+        ok.then(|| w.to_string())
+    })
+}
+
+/// 기기 코드 흐름이 실패한 이유. ChatGPT 가 이 흐름을 꺼 두면 CLI 가 거절하는데, 켜는 자리를
+/// 사람이 알 수 없으니 그 경우를 따로 말한다.
+fn device_login_error(out: &str) -> String {
+    let low = strip_ansi(out).to_ascii_lowercase();
+    if low.contains("device") && (low.contains("disabled") || low.contains("not enabled") || low.contains("not allowed")) {
+        return "ChatGPT 에서 기기 코드 로그인이 꺼져 있어요 — ChatGPT 설정 › 보안에서 켜 주세요".to_string();
+    }
+    login_error_line(&strip_ansi(out))
+}
+
+/// 로그인이 끝난 슬롯이 부탁한 그 계정인지 본다. 쓰던 브라우저는 붙어 있던 계정으로 승인되고,
+/// Claude 는 승인 화면에서 조직을 고르므로 다른 계정·조직으로 붙기 쉽다(2026-09-21 팀 슬롯이
+/// 개인 계정으로 덮인 사고). 신원을 못 읽었으면 막지 않는다 — 틀렸다는 증거가 없다.
+fn verify_login_identity(
+    provider: AccountProvider,
+    id: &str,
+    dir: Option<&std::path::Path>,
+    want: &str,
+    name: &str,
+) -> LoginState {
+    use kasa_mcp::agent_accounts::account_key;
+    let got = match provider {
+        AccountProvider::Claude => match slot_identity_full(dir) {
+            SlotIdentity::Known { email, org } => {
+                remember_account_identity(id, &email, &org);
+                Some((account_key("claude", &email, &org, ""), email))
+            }
+            SlotIdentity::NoToken => return LoginState::Err("로그인이 저장되지 않았어요 — 다시 해 주세요".to_string()),
+            SlotIdentity::Unavailable => None,
+        },
+        AccountProvider::Codex => dir
+            .and_then(|d| kasa_mcp::agent_accounts::codex_auth_identity(&d.join("auth.json")))
+            .map(|a| (a.key(), a.email)),
+    };
+    match got {
+        Some((key, email)) if key != want => LoginState::Err(format!(
+            "{name} 이 아니라 {email} 로 붙었어요 — 브라우저에서 계정·조직을 바꿔 「재인증」 해 주세요"
+        )),
+        _ => LoginState::Ok,
+    }
 }
 
 /// 결과를 기록한다 — 단, 그 사이 사용자가 취소했거나 다른 슬롯을 시작했으면
@@ -4401,6 +4621,7 @@ fn finish_login(provider: AccountProvider, id: &str, state: LoginState) {
         probe_cache().lock().unwrap().remove("");
         crate::handler::usage_poke().store(true, std::sync::atomic::Ordering::Relaxed);
         crate::codexlimits::invalidate();
+        kasa_mcp::agent_accounts::poke();
     }
     if let Ok(mut c) = login_cell().lock() {
         if c.0

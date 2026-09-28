@@ -81,6 +81,37 @@ pub(crate) struct AccountChoice {
     usage_state: AccountUsageState,
 }
 
+/// 다른 기기에만 로그인된 계정 한 줄(관문 목록, `agent_accounts`). 누르면 이 기기에도 로그인한다.
+#[derive(Clone)]
+pub(crate) struct SharedChoice {
+    provider: AccountProvider,
+    key: String,
+    name: String,
+    sub: String,
+}
+
+fn shared_choices(seen: Option<&kasa_mcp::agent_accounts::Seen>) -> (Vec<SharedChoice>, Option<String>) {
+    let Some(seen) = seen else { return (Vec::new(), None) };
+    let mut out = Vec::new();
+    for (provider, key) in [(AccountProvider::Claude, "claude"), (AccountProvider::Codex, "codex")] {
+        for a in seen.missing(key) {
+            let mut who = a.email.clone();
+            if !a.org.is_empty() && !a.org.to_lowercase().contains(&a.email.to_lowercase()) {
+                who = format!("{who} · {}", a.org);
+            } else if !a.plan.is_empty() {
+                who = format!("{who} · {}", a.plan);
+            }
+            out.push(SharedChoice {
+                provider,
+                key: a.key.clone(),
+                name: if a.label.is_empty() { a.email.clone() } else { a.label.clone() },
+                sub: format!("{who} · {} 에 로그인돼 있어요", a.elsewhere().join("·")),
+            });
+        }
+    }
+    (out, seen.error.clone())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AccountUsageState {
     Ready,
@@ -131,6 +162,8 @@ pub(crate) struct SettingsCache {
     theme_rosters: Arc<std::collections::HashMap<String, Vec<CharacterChoice>>>,
     ordered_picks: Arc<Vec<(String, Vec<String>)>>,
     accounts: Arc<Vec<AccountChoice>>,
+    shared_accounts: Arc<Vec<SharedChoice>>,
+    shared_error: Option<String>,
     themegen_providers: Arc<Vec<crate::themegen::ProviderStatus>>,
     themegen_provider: String,
     themegen_key_masked: String,
@@ -301,8 +334,10 @@ impl SettingsCache {
         self.refresh_palette_from(&socket::read_settings());
     }
 
-    pub(crate) fn set_accounts(&mut self, accounts: Vec<AccountChoice>) {
+    pub(crate) fn set_accounts(&mut self, accounts: Vec<AccountChoice>, shared: (Vec<SharedChoice>, Option<String>)) {
         self.accounts = Arc::new(accounts);
+        self.shared_accounts = Arc::new(shared.0);
+        self.shared_error = shared.1;
     }
 
     pub(crate) fn language(&self) -> &str {
@@ -726,6 +761,9 @@ pub(crate) struct Snapshot {
     pub(crate) account_autoswitch: bool,
     pub(crate) account_autoswitch_pct: f32,
     pub(crate) accounts: Arc<Vec<AccountChoice>>,
+    /// 다른 기기에만 있는 계정과 목록을 못 받은 이유.
+    pub(crate) shared_accounts: Arc<Vec<SharedChoice>>,
+    pub(crate) shared_error: Option<String>,
     pub(crate) account_usage_expanded: std::collections::HashSet<String>,
     pub(crate) account_label_edit: Option<(AccountProvider, String, String)>,
     pub(crate) machine_edit: Option<(usize, bool, String)>,
@@ -855,7 +893,8 @@ impl App {
         }
         let accounts = account_choices(self);
         self.device_account.refresh();
-        self.settings_scene.set_account_cache(accounts);
+        let shared = shared_choices(kasa_mcp::agent_accounts::cached().as_ref());
+        self.settings_scene.set_account_cache(accounts, shared);
     }
 
     pub(crate) fn native_settings_tick(&mut self) {
@@ -961,6 +1000,8 @@ impl App {
             account_autoswitch: self.set_account_autoswitch,
             account_autoswitch_pct: self.set_account_autoswitch_pct,
             accounts: cache.accounts.clone(),
+            shared_accounts: cache.shared_accounts.clone(),
+            shared_error: cache.shared_error.clone(),
             account_usage_expanded: scene.account_usage_expanded().clone(),
             dropdown: scene.dropdown(),
             dropdown_scroll: scene.dropdown_scroll(),
@@ -6054,6 +6095,26 @@ fn account_group(
     for row in rows {
         account_row(g, s, hits, caret, x, y, w, row);
     }
+    if home.is_none() {
+        shared_rows(g, s, hits, x, y, w, provider, needs_code || running);
+    }
+    let device = s
+        .login_job
+        .as_ref()
+        .filter(|job| job.provider == provider && job.state == crate::settings::LoginState::Running)
+        .and_then(|job| job.device.clone())
+        .filter(|(_, code)| !code.is_empty());
+    if let Some((url, code)) = device {
+        // 기기 코드는 폰에서도 넣으므로 옮겨 적기 쉽게 크게 세운다.
+        *y += 4.0;
+        draw_text(g, x, *y, "이 코드를 아래 주소에 입력하세요 — 폰에서 해도 돼요", 11.0, theme::attention(), false);
+        *y += 20.0;
+        draw_text(g, x, *y, &code, 20.0, theme::accent(), true);
+        *y += 30.0;
+        let shown = fit(g, &url, w, 10.5, false);
+        draw_text(g, x, *y, &shown, 10.5, theme::text_mute(), false);
+        *y += 20.0;
+    }
 
     if needs_code {
         // 브라우저가 승인해도 CLI 로 돌아오는 길이 없다 — 화면에 뜬 코드를 여기
@@ -6118,6 +6179,52 @@ fn account_group(
     } else {
         *y += 6.0;
     }
+}
+
+/// 다른 기기에만 로그인된 계정들. 줄마다 「로그인」 — 이 기기에 새 슬롯을 만들어 로그인한다.
+#[allow(clippy::too_many_arguments)]
+fn shared_rows(
+    g: &mut gpu::GpuRenderer,
+    s: &Snapshot,
+    hits: &mut Vec<Hit>,
+    x: f32,
+    y: &mut f32,
+    w: f32,
+    provider: AccountProvider,
+    busy: bool,
+) {
+    let rows: Vec<&SharedChoice> = s.shared_accounts.iter().filter(|a| a.provider == provider).collect();
+    if rows.is_empty() && s.shared_error.is_none() {
+        return;
+    }
+    *y += 6.0;
+    draw_text(g, x, *y, "다른 기기에 있는 계정", 11.0, theme::text_dim(), false);
+    *y += 18.0;
+    if rows.is_empty() {
+        if let Some(why) = s.shared_error.as_deref() {
+            let why = fit(g, &format!("목록을 못 받았어요 — {why}"), w, 10.5, false);
+            draw_text(g, x, *y, &why, 10.5, theme::text_mute(), false);
+            *y += 22.0;
+        }
+        return;
+    }
+    let bw = 72.0;
+    for a in rows {
+        flat_row(g, x, *y, w, &a.name, &a.sub, w - bw - 16.0);
+        if !busy {
+            button(
+                g,
+                s,
+                hits,
+                (x + w - bw, *y + (ROW_H - CTL_H) / 2.0, bw, CTL_H),
+                "로그인",
+                Target::Setting(SettingsAction::AdoptSharedAccount(provider, a.key.clone())),
+                false,
+            );
+        }
+        *y += ROW_H;
+    }
+    *y += 6.0;
 }
 
 #[allow(clippy::too_many_arguments)]

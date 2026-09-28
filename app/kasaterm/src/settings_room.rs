@@ -159,8 +159,9 @@ impl SettingsScene {
     pub(crate) fn set_account_cache(
         &mut self,
         accounts: Vec<crate::native_settings::AccountChoice>,
+        shared: (Vec<crate::native_settings::SharedChoice>, Option<String>),
     ) {
-        self.cache.set_accounts(accounts);
+        self.cache.set_accounts(accounts, shared);
     }
 
     pub(crate) fn account_usage_expanded(&self) -> &std::collections::HashSet<String> {

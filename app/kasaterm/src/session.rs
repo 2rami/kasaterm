@@ -8402,6 +8402,12 @@ impl App {
                 kasa_mcp::machines::set_build_id(env!("KASATERM_GIT_REV"));
                 // 재시작 작업이 이 부팅을 기다리고 있었으면 도착을 적는다 — 빌드 표식이 선 뒤라야 맞는 값이 실린다.
                 crate::app_restart::mark_restart_booted();
+                // 이 기기의 에이전트 계정을 관문에 알린다 — 설정창을 안 열어도 다른 기기가 볼 수 있게.
+                // 부르면 오래된 것만 백그라운드로 다시 받는다(`agent_accounts::cached`).
+                std::thread::spawn(|| loop {
+                    kasa_mcp::agent_accounts::cached();
+                    std::thread::sleep(std::time::Duration::from_secs(301));
+                });
                 #[cfg(unix)]
                 crate::app_update::mark_update_booted();
                 if !crate::verification_run() {

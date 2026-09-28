@@ -373,6 +373,77 @@ pub fn sync_blocking(locals: Vec<LocalAccount>) -> anyhow::Result<Vec<Shared>> {
     .map_err(|_| anyhow::anyhow!("계정 목록 동기화가 멈췄어요"))?
 }
 
+/// 기기 쪽 마지막 관측. 화면은 이것만 읽는다 — 네트워크는 백그라운드 스레드가 탄다.
+#[derive(Clone, Debug, Default)]
+pub struct Seen {
+    pub shared: Vec<Shared>,
+    /// 이 기기에 로그인이 확인된 계정 열쇠. 관문 쪽 표시보다 먼저 믿는다 — 방금 로그인한
+    /// 계정이 다음 동기화 전까지 「로그인 필요」로 남지 않게.
+    pub local_keys: HashSet<String>,
+    pub error: Option<String>,
+}
+
+impl Seen {
+    /// 이 기기에 없는 계정들.
+    pub fn missing<'a>(&'a self, provider: &'a str) -> impl Iterator<Item = &'a Shared> + 'a {
+        self.shared.iter().filter(move |a| {
+            a.provider == provider && !self.local_keys.contains(&a.key) && !a.devices.iter().any(|d| d.current)
+        })
+    }
+}
+
+#[derive(Default)]
+struct CacheCell {
+    at: Option<std::time::Instant>,
+    running: bool,
+    due: bool,
+    seen: Option<Seen>,
+}
+
+fn cache() -> &'static std::sync::Mutex<CacheCell> {
+    static C: std::sync::OnceLock<std::sync::Mutex<CacheCell>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// 이만큼 지나면 다시 받는다. 다른 기기에서 계정을 늘려도 몇 분 안에 보이면 된다.
+const REFRESH: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// 마지막으로 받은 목록. 오래됐거나 `poke` 됐으면 백그라운드로 다시 받는다(부른 자리는 안 기다린다).
+/// 관문에 로그인하지 않은 기기는 `None` — 올릴 데가 없다.
+///
+/// 파일 하나(`device.json`)를 읽으므로 프레임마다 부르지 말고 느린 틱에서 불러라.
+pub fn cached() -> Option<Seen> {
+    crate::device_auth::current()?;
+    let mut c = cache().lock().ok()?;
+    let stale = c.at.is_none_or(|at| at.elapsed() >= REFRESH);
+    if (stale || c.due) && !c.running {
+        c.running = true;
+        c.due = false;
+        std::thread::spawn(|| {
+            let locals = local_snapshot();
+            let local_keys = locals.iter().map(LocalAccount::key).collect();
+            let got = sync_blocking(locals);
+            if let Ok(mut c) = cache().lock() {
+                let prev = c.seen.take().unwrap_or_default();
+                c.seen = Some(match got {
+                    Ok(shared) => Seen { shared, local_keys, error: None },
+                    Err(e) => Seen { local_keys, error: Some(e.to_string()), ..prev },
+                });
+                c.at = Some(std::time::Instant::now());
+                c.running = false;
+            }
+        });
+    }
+    c.seen.clone()
+}
+
+/// 다음 `cached` 때 곧바로 다시 받게 한다 — 로그인·슬롯 추가·제거 뒤에 부른다.
+pub fn poke() {
+    if let Ok(mut c) = cache().lock() {
+        c.due = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
