@@ -161,7 +161,7 @@ class _WorkBoardViewState extends State<WorkBoardView>
       ];
       if (yours.isNotEmpty) {
         children.add(
-          _Section(text: '거노 차례 ${yours.length}', color: StatusStyle.attention),
+          _Section(text: '내 차례 ${yours.length}', color: StatusStyle.attention),
         );
         for (final i in yours) {
           children.add(_row(i, attention: true));
@@ -196,7 +196,7 @@ class _WorkBoardViewState extends State<WorkBoardView>
           const Padding(
             padding: EdgeInsets.fromLTRB(24, 40, 24, 24),
             child: Text(
-              '지금 거노 차례도, 도는 일도 없어요.\n대화에서 일을 맡기면 여기로 와요.',
+              '지금 확인할 일도, 진행 중인 일도 없어요.\n대화에서 일을 맡기면 여기로 와요.',
               textAlign: TextAlign.center,
             ),
           ),
@@ -365,13 +365,13 @@ class _Head extends StatelessWidget {
     final scheme = theme.colorScheme;
     final online = devices.where((d) => d.online).length;
     final line = yours > 0
-        ? '거노 차례 $yours · 진행 $running · 검증 $verifying'
-        : '거노 차례 없음 · 진행 $running · 검증 $verifying';
+        ? '내 차례 $yours · 진행 $running · 검증 $verifying'
+        : '내 차례 없음 · 진행 $running · 검증 $verifying';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 6, 12, 0),
       child: Row(
         children: [
-          const CharacterStage(slug: 'arona', size: 44),
+          const CharacterStage(slug: 'kasa_sky', size: 44),
           const SizedBox(width: 10),
           Expanded(
             child: Text(

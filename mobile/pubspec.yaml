@@ -28,16 +28,14 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  # Bundled portraits remain available while a remote custom image is loading.
+  # Historical artwork remains in source history, never in the application bundle.
   assets:
-    - assets/students/gif/
-    - assets/students/profile/
-    # 데스크톱이 claude 화면에 세우는 도트 그대로 — 작업 중엔 스피너 자리에서 걷고(walk 6장),
-    # 쉴 땐 입력상자 위에 선다(idle 4장). 파일명은 데스크톱과 같은 <slug>-N.png.
-    - assets/students/walk/
-    - assets/students/idle/
-    # 상태줄 모델 표식(U+E0C0·E0C1) 자리에 데스크톱과 같은 로고 — 알파만 쓰고 색은 입힌다.
-    - assets/icons/
+    - assets/original/sky.png
+    - assets/original/amber.png
+    - assets/original/twins.png
+    - assets/icons/kasa.png
+    - assets/icons/claude.png
+    - assets/icons/codex.png
   # 데스크톱 렌더러와 같은 짝: 라틴·아이콘은 JetBrains Mono Nerd, 한글은 D2Coding 으로
   # 떨어진다(한글이 정확히 두 칸). 터미널과 UI 글꼴을 분리해 셀 정렬을 보존한다.
   fonts:

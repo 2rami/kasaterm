@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'original_assets.dart';
 import 'server.dart';
 import 'server_image.dart';
 
@@ -34,11 +35,11 @@ class StudentFace extends StatelessWidget {
         color: scheme.onSurfaceVariant,
       ),
     );
-    final s = slug;
-    final bundled = s == null
+    final asset = originalCharacterAssets[slug];
+    final bundled = asset == null
         ? blank
         : Image.asset(
-            'assets/students/profile/$s.png',
+            asset,
             width: size,
             height: size,
             fit: BoxFit.cover,
@@ -63,7 +64,7 @@ class StudentFace extends StatelessWidget {
   }
 }
 
-/// 학생의 idle 애니메이션(데스크톱 사이드바에서 서 있는 그 그림). 없는 학생은 얼굴.
+/// 사용자 그림을 우선하고 연결이 늦으면 자체 정지 원화를 보인다.
 class StudentSprite extends StatelessWidget {
   const StudentSprite({
     super.key,
@@ -80,16 +81,21 @@ class StudentSprite extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final s = slug;
-    if (s == null) return StudentFace(slug: null, url: url, size: size, server: server);
-    return Image.asset(
-      'assets/students/gif/$s.gif',
+    final asset = originalCharacterAssets[slug];
+    if (asset == null) return StudentFace(slug: slug, url: url, size: size, server: server);
+    final bundled = Image.asset(
+      asset,
       width: size,
       height: size,
       fit: BoxFit.contain,
       filterQuality: FilterQuality.medium,
-      errorBuilder: (_, _, _) => StudentFace(slug: s, url: url, size: size, server: server),
+      errorBuilder: (_, _, _) => StudentFace(slug: null, url: url, size: size, server: server),
     );
+    if (url != null && server != null) {
+      return ServerImage(server: server!, uri: url!, width: size, height: size,
+          fit: BoxFit.contain, fallback: bundled);
+    }
+    return bundled;
   }
 }
 

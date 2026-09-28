@@ -358,12 +358,12 @@ WorkBoard demoBoard({int? nowMs}) {
     kind: kind,
     idleSecs: idle,
   );
-  final kei = pane('%5', '케이', 'kei', 'working');
-  final mashiro = pane('%0', '마시로', 'mashiro', 'working', cwd: '/w/nacho-neko');
-  final arona = pane(
+  final sky = pane('%5', 'Sky', 'kasa_sky', 'working');
+  final remoteSky = pane('%0', 'Sky', 'kasa_sky', 'working', cwd: '/w/nacho-neko');
+  final amber = pane(
     '%9',
-    '아로나',
-    'arona',
+    'Amber',
+    'kasa_amber',
     'waiting',
     kind: 'question',
     idle: 40,
@@ -382,7 +382,7 @@ WorkBoard demoBoard({int? nowMs}) {
         stateLabel: '승인 필요',
         updatedMs: ago(90),
         taskId: 'demo-approval',
-        pane: kei,
+        pane: sky,
         machine: '맥북',
       ),
       WorkItem(
@@ -395,7 +395,7 @@ WorkBoard demoBoard({int? nowMs}) {
         detail: '질문 기다림',
         stateLabel: '질문 기다림',
         updatedMs: ago(40),
-        pane: arona,
+        pane: amber,
         machine: '맥북',
       ),
       WorkItem(
@@ -407,7 +407,7 @@ WorkBoard demoBoard({int? nowMs}) {
         detail: 'Edit workboard_view.dart',
         stateLabel: '작업 중',
         updatedMs: ago(2),
-        pane: kei,
+        pane: sky,
         machine: '맥북',
       ),
       WorkItem(
@@ -419,7 +419,7 @@ WorkBoard demoBoard({int? nowMs}) {
         detail: 'Bash pytest tests/test_inbox.py',
         stateLabel: '작업 중',
         updatedMs: ago(240),
-        pane: mashiro,
+        pane: remoteSky,
         machine: '맥미니',
       ),
       WorkItem(
@@ -451,14 +451,14 @@ WorkBoard demoBoard({int? nowMs}) {
         online: true,
         agoSecs: 0,
         here: true,
-        students: [kei, arona],
+        students: [sky, amber],
       ),
       WorkDevice(
         label: '맥미니',
         online: true,
         agoSecs: 12,
         rttMs: 100,
-        students: [mashiro],
+        students: [remoteSky],
       ),
       const WorkDevice(label: '집컴', online: false, agoSecs: 10800),
     ],

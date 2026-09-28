@@ -340,7 +340,7 @@ void main() {
       await tester.tap(find.text('작업'));
       await settle(tester);
       await tester.pump(const Duration(milliseconds: 400));
-      expect(find.text('거노 차례 1'), findsOneWidget);
+      expect(find.text('내 차례 1'), findsOneWidget);
       expect(find.text('진행 1'), findsOneWidget);
       expect(find.text('완료 1'), findsOneWidget);
       await tester.tap(find.widgetWithText(FilterChip, 'mission-control'));

@@ -11,10 +11,10 @@ The surfaces are a Rust/wgpu desktop app and Flutter mobile app. Extend their ex
 ## Current direction
 
 - Keep terminal content and controls readable in both light and dark themes. Mobile login label contrast is checked by `mobile/test/mobile_account_layout_test.dart`; this is not a claim that every legacy color pairing was audited.
-- Remove default franchise branding without destroying users' character bindings, custom themes or stored identifiers. Full bundled-character replacement is still pending original asset production.
+- Remove default franchise branding without destroying users' character bindings, custom themes or stored identifiers. Original art is available in `assets/original/`; native and web bundled-character migration remains separate work.
 - Mobile UI uses bundled Pretendard regular/semibold; terminal cells retain the existing monospace and Korean fallback contract. `KASA Mobile` is the display name, not a new bundle identifier.
 - Rain-wet glass is a future visual direction, not a shipped shader. Repeated input and scrolling must not acquire decorative motion.
-- The existing original umbrella icon remains the application mark while new original assets are pending. No generated asset is claimed before a successful, recorded generation.
+- The existing original umbrella icon remains the application mark. Mobile includes only the new original Sky/Amber static art and twins illustration; generated assets and exact prompts are documented in `assets/original/README.md`.
 
 ## Decisions and scope
 

@@ -171,7 +171,7 @@ void main() {
   testWidgets('예시 판 — 띠·거노 차례·기기 단추, 승인 시트의 허용은 꺼짐', (tester) async {
     final board = await _pumpDemoBoard(tester);
     expect(find.text('예시 데이터 — 실제 작업이 아니에요'), findsOneWidget);
-    expect(find.text('거노 차례 2'), findsOneWidget);
+    expect(find.text('내 차례 2'), findsOneWidget);
     expect(find.text('기기 2/3'), findsOneWidget);
     expect(find.text('검토'), findsOneWidget);
 

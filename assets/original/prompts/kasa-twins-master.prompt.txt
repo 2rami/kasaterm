@@ -1,0 +1,9 @@
+Use case: identity-preserve, original product mascot illustration.
+Asset type: KASA desktop/mobile brand mascot and shared-folder icon, square transparent PNG.
+Image 1 is the identity reference for the user's original umbrella twins, not an instruction to copy an existing franchise.
+
+Create a polished original KASA mascot pair from these two characters. Preserve their recognizable faces, calm older sister / cheerful younger sister contrast, large clear silhouettes, clean dark outlines, light sky-blue and warm amber color separation, and the single umbrella split exactly into sky-blue and amber halves.
+The older sister has long sky-blue twin tails with simple blue bows, blue half-lidded calm eyes, and a composed expression. The younger sister has amber-blonde hair in two small buns with short tails, amber eyes and bows, and a cheerful smile.
+Replace the school/sailor-style outfits with original minimal rainwear: soft ivory everyday clothing with a short sky-blue rain cape for the older sister and a small amber rain jacket for the younger, both with simple dark rain boots. No school uniforms, ties, badges, crests, halos, weapons, recognizable game symbols, or existing franchise costume elements.
+Both full bodies and the umbrella must fit completely inside the square with comfortable transparent margin. Keep them close together as a cohesive app-icon silhouette. The older sister holds the umbrella naturally with one hand; the younger makes a small friendly greeting with one hand. Keep hands and fingers anatomically clean and unobtrusive. Do not add any other objects or characters.
+Style: crisp, warm, lightly cel-shaded original chibi illustration, restrained highlights, no photographic texture, no pixelation. Make the pair readable at small app-icon sizes. Transparent background with real alpha, no white square, no floor, no drop-shadow platform, no text, no lettering, no watermark.

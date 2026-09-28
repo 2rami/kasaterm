@@ -1,0 +1,4 @@
+Use case: background-extraction and identity-preserve.
+Input image 1 is the edit target: the user's original KASA umbrella twins in their new blue and amber rainwear.
+Change ONLY the background. Remove the gray checkerboard entirely and output the two characters and their umbrella on an actual transparent alpha channel. The checkerboard is printed artwork in the input, not transparency; it must be removed, including small gaps between hair, umbrella pole, arms and legs.
+Keep every character feature, their expressions, blue long twin tails, amber twin buns, clothing, hand poses, umbrella, colors, outlines, full-body framing and composition unchanged. Preserve fine hair edges and do not erase pale ivory clothing or highlights. No redrawing, no extra objects, no floor, no shadows, no white background, no pattern, no text. Genuine RGBA PNG transparency only.
