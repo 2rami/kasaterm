@@ -173,7 +173,7 @@ export function TitleBar({ usage, onToggleLeft, onToggleRight, leftOpen, rightOp
           떴다(거노 2026-08-05: "info에는 다 0퍼로뜨는데"). */}
       {pressure && <UsagePill label={pressure.label} pct={pressure.pct} resetsAt={pressure.resetsAt} stale={usage?.stale} />}
       <IconBtn title="업무·소스 컨트롤·스케줄" active={rightOpen} onClick={onToggleRight}><TasksIcon /></IconBtn>
-      <IconBtn title={classroom ? '대화 보기로' : '교실(캐릭터) 보기'} active={classroom} onClick={onToggleClassroom}><ClassroomIcon /></IconBtn>
+      <IconBtn title={classroom ? '대화 보기로' : '캐릭터 보기'} active={classroom} onClick={onToggleClassroom}><ClassroomIcon /></IconBtn>
       {divider}
       <IconBtn title="패널 전부 숨기기 (⌘\)" onClick={onFocus}><FocusIcon /></IconBtn>
     </div>

@@ -278,14 +278,10 @@ export function App() {
     return <div role="status" aria-live="polite" style={{ padding: 24, color: 'var(--cth-ink-500)' }}>팔레트를 불러오는 중…</div>;
   }
 
-  // 작업명 학생에게 게임개발부 외형(spriteChar) 폴백 배정(교실 스프라이트용).
   const sorted = assignSprites([...agents]);
   // 방 = kasaterm 윈도우. board(collab_board)는 활성 윈도우의 panes 만 주므로 보이는
   // 학생이 곧 그 방 학생 — 클라이언트 cwd 필터 없이 그대로 그린다(거노).
   const shown = sorted;
-  // 배경 = 기본 교실바닥 하나로(거노: 평면도/방별맵 실험 접고 처음꺼 하나만).
-  const roomBg = 'classroom-floor.png';
-
   // 우측 CommandCenter·교실 강조에 넘길 active 학생(과거 세션 보기 중이면 그걸 우선).
   const activeSelected: PeekItem | null = offlinePeek
     ?? (activeId ? { id: activeId, title: sorted.find((x) => x.id === activeId)?.name ?? activeId } : null);
@@ -496,7 +492,6 @@ export function App() {
             ) : (
               <ClassroomView
                 agents={shown}
-                background={roomBg}
                 onSelect={openStudent}
                 selectedId={activeId ?? undefined}
                 emptyState={boardStatus}

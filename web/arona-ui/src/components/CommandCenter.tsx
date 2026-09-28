@@ -84,7 +84,7 @@ export function CommandCenter({ onPickStudent, onOpenBackground, onSaved, openGi
             fontSize: 'var(--cth-text-display-sm)',
             color: 'var(--cth-ink-500)',
             lineHeight: 1
-          }}>선생님</div>
+          }}>작업 공간</div>
           <div style={{
             fontFamily: 'var(--cth-font-display)',
             fontSize: 'var(--cth-text-display-md)',
@@ -99,7 +99,7 @@ export function CommandCenter({ onPickStudent, onOpenBackground, onSaved, openGi
           fontFamily: 'var(--cth-font-ui)',
           fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
           borderRadius: 6
-        }}>SCHALE</div>
+        }}>KASA</div>
       </div>
 
       {/* 탭 */}
@@ -129,8 +129,7 @@ export function CommandCenter({ onPickStudent, onOpenBackground, onSaved, openGi
               cursor: 'grab',
               whiteSpace: 'nowrap',
               // 드래그 삽입선 — 이 탭 앞에 떨굴 위치면 좌측에 파란 선(거노: 위치 선으로).
-              boxShadow: dragOverTab === t ? 'inset 3px 0 0 0 var(--cth-sky)' : 'none',
-              transition: 'background 120ms ease, color 120ms ease'
+              boxShadow: dragOverTab === t ? 'inset 3px 0 0 0 var(--cth-sky)' : 'none'
             }}
           >
             {TAB_LABELS[t]}

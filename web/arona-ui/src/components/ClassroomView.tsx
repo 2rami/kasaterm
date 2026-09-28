@@ -10,6 +10,9 @@ import { isBuildCmd, BUILD_COLOR_BG, GearIcon, SpinIcon } from './activity';
 
 const ROOT = import.meta.env.BASE_URL || '/';
 const SPEED = 24; // 이동 속도(%/초) — 방 가로지르기 ≈ 3.5초
+const EMPTY_FURNITURE: Furniture[] = [];
+const DEFAULT_SEATS = deskSeats(CLASSROOM_FURNITURE);
+const DEFAULT_CAFE = cafeSpots(CLASSROOM_FURNITURE);
 
 function shortenAction(s?: string): string {
   if (!s) return '';
@@ -54,14 +57,27 @@ function SparkleGlyph() {
   );
 }
 // munder 식 상태 글리프 — 머리 위 한눈 표시.
-const GLYPH: Record<string, { t: React.ReactNode; c: string; pulse?: boolean }> = {
-  blocked: { t: '!', c: 'var(--cth-coral)', pulse: true },
-  waiting: { t: '?', c: 'var(--cth-sky)', pulse: true },
-  thinking: { t: '…', c: 'var(--cth-status-thinking)', pulse: true },
+const GLYPH: Record<string, { t: React.ReactNode; c: string }> = {
+  blocked: { t: '!', c: 'var(--cth-coral)' },
+  waiting: { t: '?', c: 'var(--cth-sky)' },
+  thinking: { t: '…', c: 'var(--cth-status-thinking)' },
   success: { t: <SparkleGlyph />, c: 'var(--cth-lemon)' },
 };
 
 type Pt = { x: number; y: number };
+
+function useReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  useEffect(() => {
+    const query = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const update = () => setReduced(query.matches);
+    update();
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+  return reduced;
+}
 
 // 카페 잡담 디렉터(munder) — idle 학생 2명+ 모이면 주기적으로 둘이 짝지어 2.6초
 // 간격으로 대사를 주고받는다. 반환 = { agentId: 지금 띄울 대사 }.
@@ -107,8 +123,8 @@ function useCafeChat(agents: Agent[]): Record<string, string> {
 // 카페 구역을 어슬렁(가구 피해 다님). 이동은 waypoint 단위 CSS transition + 워크
 // 애니메이션 + 진행방향 flip. 도착하면 멈춤. 머리 위 말풍선/글리프. 클릭 → 대화.
 function ClassroomCharacter(
-  { agent, seat, grid, cafe, chatLine, onSelect, index, selected, unconfirmed }:
-  { agent: Agent; seat?: { x: number; y: number; facing: string }; grid: boolean[][]; cafe: CafeSpot[]; chatLine?: string; onSelect?: (id: string, title: string) => void; index: number; selected?: boolean; unconfirmed?: boolean },
+  { agent, seat, grid, cafe, chatLine, onSelect, index, selected, unconfirmed, reducedMotion }:
+  { agent: Agent; seat?: { x: number; y: number; facing: string }; grid: boolean[][]; cafe: CafeSpot[]; chatLine?: string; onSelect?: (id: string, title: string) => void; index: number; selected?: boolean; unconfirmed?: boolean; reducedMotion: boolean },
 ) {
   // working/waiting/blocked = 자기 책상으로. idle 은 카페 배회 — god 개념 폐기
   // (거노 2026-07-13)로 전원 동일 규칙.
@@ -145,18 +161,26 @@ function ClassroomCharacter(
   }, []);
 
   const walkTo = useCallback((target: Pt) => {
+    window.clearTimeout(timer.current);
+    if (reducedMotion) {
+      pathRef.current = [];
+      posRef.current = target;
+      setPos(target);
+      setSegMs(0);
+      setMoving(false);
+      return;
+    }
     pathRef.current = findPath(grid, posRef.current, target);
     step();
-  }, [grid, step]);
+  }, [grid, step, reducedMotion]);
 
   useEffect(() => {
     // 자율 이동(거노: 방향키 수동조종 폐기) — 일하면 자기 책상, 쉬면 소파/카페 거점으로
     // 스스로 걸어가 정착. 상태(atDesk)가 바뀌면 책상↔소파 자동 전환. 도착하면 멈춤
     // (계속 배회하던 옛 wander 는 산만해서 폐기 — 거점은 인덱스로 결정적 분배).
-    if (atDesk && seat) { walkTo({ x: seat.x, y: seat.y }); return; }
     const home = cafe.length ? cafe[index % cafe.length] : null;
     const tier = cafe.length ? Math.floor(index / cafe.length) : 0;
-    const t: Pt = home
+    const t: Pt = atDesk && seat ? { x: seat.x, y: seat.y } : home
       ? { x: home.x + (tier ? (tier % 2 ? 7 : -7) : 0), y: home.y }
       : { x: 22 + (index % 5) * 13, y: 82 };
     walkTo(t);
@@ -168,23 +192,28 @@ function ClassroomCharacter(
   const glyph = GLYPH[agent.status];
 
   return (
+    <div className="cth-character-position" style={{
+      // Parent-sized translation keeps percentage coordinates without animating layout.
+      position: 'absolute', inset: 0, pointerEvents: 'none',
+      transform: `translate(${pos.x}%, ${pos.y}%)`,
+      transition: reducedMotion ? 'none' : `transform ${segMs}ms linear`,
+      zIndex: selected ? 9999 : Math.round(pos.y * 10),
+    }}>
     <button
       onClick={() => onSelect?.(agent.id, agent.character)}
       title={`${agent.character} — 클릭하면 대화`}
       style={{
-        position: 'absolute', left: `${pos.x}%`, top: `${pos.y}%`,
+        position: 'absolute', left: 0, top: 0, pointerEvents: 'auto',
         transform: 'translate(-50%, -100%)',
-        transition: `left ${segMs}ms linear, top ${segMs}ms linear`,
         display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3,
         border: 'none', background: 'transparent', cursor: 'pointer', padding: 0,
-        width: 132, zIndex: selected ? 9999 : Math.round(pos.y * 10),
+        width: 132,
         filter: selected ? 'drop-shadow(0 0 3px var(--cth-sky)) drop-shadow(0 0 7px var(--cth-sky))' : undefined,
       }}
     >
       {glyph && (
         <div style={{
           fontSize: 14, fontWeight: 900, color: glyph.c, lineHeight: 1, marginBottom: 1,
-          animation: glyph.pulse ? 'schale-glyph-pulse 1s ease-in-out infinite' : undefined,
           textShadow: '0 1px 2px rgba(255,255,255,0.9)',
         }}>{glyph.t}</div>
       )}
@@ -202,7 +231,6 @@ function ClassroomCharacter(
           // 교실 바닥 위 고정 흰 말풍선 — 다크에서도 흰색이라 텍스트는 고정 어두운색으로.
           color: unconfirmed ? 'var(--cth-on-coral)' : 'var(--cth-ink-900)', textAlign: 'center',
           whiteSpace: 'normal', wordBreak: 'break-word',
-          animation: unconfirmed ? 'schale-glyph-pulse 1.1s ease-in-out infinite' : undefined,
         }}>
           {unconfirmed ? '확인 필요!' : agent.status === 'working' ? (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', justifyContent: 'center' }}>
@@ -218,10 +246,8 @@ function ClassroomCharacter(
         </div>
       )}
 
-      {/* 등장 모션 — 처음 교실에 나타날 때 아래서 통통 튀어오르며 페이드인(munder식, 거노).
-          mount 1회 재생. button 위치 transform 과 분리된 내부 레이어라 이동 transition 무간섭. */}
-      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', animation: 'schale-enter 0.5s ease-out both' }}>
-        <SpriteWalk character={agent.spriteChar ?? agent.character} walking={moving} flip={flip} facing={facing} width={72} height={100} />
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+        <SpriteWalk character={agent.spriteChar ?? agent.character} walking={moving && !reducedMotion} flip={flip} facing={facing} width={72} height={100} />
       </div>
 
       <div style={{
@@ -245,6 +271,7 @@ function ClassroomCharacter(
         }}>{shortCwd(agent.cwd)}</div>
       )}
     </button>
+    </div>
   );
 }
 
@@ -273,9 +300,9 @@ export interface ClassroomViewProps {
   onSelect?: (surfaceId: string, title: string) => void;
   /** 활성 워크스페이스 학생만(장소이동). 없으면 store 전체. */
   agents?: Agent[];
-  /** 바닥 배경 파일명(워크스페이스별). 없으면 빈 교실 바닥. */
+  /** 배경 파일명. 지정하지 않으면 현재 테마 표면을 쓴다. */
   background?: string;
-  /** 배치 가구. 기본 교실 세트. 가구 그림이 박힌 배경(카페/오피스)이면 [] 로 끔. */
+  /** 배경에 맞게 명시적으로 선택한 가구만 그린다. */
   furniture?: Furniture[];
   /** 자리 override — 가구 없이 배경 이미지의 책상에 직접 앉힐 때(SCHALE 교실 이미지). */
   seats?: { x: number; y: number; facing: string }[];
@@ -290,7 +317,6 @@ export interface ClassroomViewProps {
 }
 
 // 빈 책상 자리 — 학생 없을 때 그 자리에 '+ 부르기' 버튼. 클릭 → 학생 부르기 모달.
-// 밝은 SCHALE 바닥에서도 보이게 솔리드 하늘색 + 가벼운 펄스.
 function EmptySeat({ seat, onAdd }: { seat: { x: number; y: number }; onAdd?: () => void }) {
   return (
     <button
@@ -309,7 +335,6 @@ function EmptySeat({ seat, onAdd }: { seat: { x: number; y: number }; onAdd?: ()
         background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: 'var(--cth-on-color)',
         border: '2px solid #fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
         boxShadow: '0 3px 10px rgba(74,144,226,0.5)',
-        animation: 'schale-glyph-pulse 1.6s ease-in-out infinite',
       }}>
         <svg width="18" height="18" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" /></svg>
       </span>
@@ -322,21 +347,20 @@ function EmptySeat({ seat, onAdd }: { seat: { x: number; y: number }; onAdd?: ()
   );
 }
 
-// 샬레 교실 — 빈 바닥 배경 위에 가구를 개별 배치(munder 식). 학생은 가구를 피해
-// 책상(working)이나 카페(idle)로 BFS 경로 이동. 가구·학생이 한 z-레이어라 앞뒤가림.
-export function ClassroomView({ onSelect, agents: agentsProp, background, furniture = CLASSROOM_FURNITURE, seats: seatsProp, cafe: cafeProp, onAdd, onRefresh, emptyState = 'ready', selectedId }: ClassroomViewProps) {
+export function ClassroomView({ onSelect, agents: agentsProp, background, furniture = EMPTY_FURNITURE, seats: seatsProp, cafe: cafeProp, onAdd, onRefresh, emptyState = 'ready', selectedId }: ClassroomViewProps) {
+  const reducedMotion = useReducedMotion();
   const storeAgents = useStore((s) => s.agents);
   const acked = useStore((s) => s.acked);
   const agents = agentsProp ?? storeAgents;
   const sorted = [...agents];
 
   const grid = useMemo(() => buildGrid(furniture), [furniture]);
-  const seats = useMemo(() => seatsProp ?? deskSeats(furniture), [furniture, seatsProp]);
-  const cafe = useMemo(() => cafeProp ?? cafeSpots(furniture), [furniture, cafeProp]);
+  const seats = useMemo(() => seatsProp ?? (furniture.length ? deskSeats(furniture) : DEFAULT_SEATS), [furniture, seatsProp]);
+  const cafe = useMemo(() => cafeProp ?? (furniture.length ? cafeSpots(furniture) : DEFAULT_CAFE), [furniture, cafeProp]);
   const chat = useCafeChat(agents);
 
   return (
-    <div style={{
+    <div className="cth-classroom-view" style={{
       // 부모(메인 컬럼)를 꽉 채운다 — 옛 maxWidth:960 + aspectRatio 고정이 좌우
       // 여백을 만들던 것 제거(거노: 꽉차게). 캐릭터는 % 좌표라 비율 따라 분포.
       position: 'relative', width: '100%', height: '100%',
@@ -344,12 +368,17 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
       // 가구/캐릭터 zIndex(발밑 y*10, 최대 ~960)를 교실 안에 가둔다 — 안 그러면
       // 문서 레벨에서 모달(z 낮음) 위로 책상이 뚫고 올라온다(거노 학생부르기 버그).
       isolation: 'isolate',
-      backgroundImage: `url(${ROOT}assets/${background ?? 'classroom-floor.png'})`,
+      backgroundColor: 'var(--cth-cream-100)',
+      backgroundImage: background ? `url(${ROOT}assets/${background})` : undefined,
       backgroundSize: 'cover', backgroundPosition: 'center',
       imageRendering: 'pixelated',
-      transition: 'background-image 0.3s ease',
       boxShadow: '0 6px 20px rgba(21, 41, 74, 0.12), inset 0 0 0 1px var(--cth-cream-200)',
     }}>
+      <style>{`
+        @media (prefers-reduced-motion: reduce) {
+          .cth-classroom-view * { animation: none !important; transition: none !important; }
+        }
+      `}</style>
       {furniture.map((f) => <FurnitureSprite key={f.id} f={f} />)}
 
       {/* 빈 교실은 로딩·정상 빈값·오류를 가른다. 빈 배열 하나로 합치면 영구 spinner다. */}
@@ -382,7 +411,7 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
       )}
 
       {sorted.slice(0, Math.max(seats.length, 6)).map((a, i) => (
-        <ClassroomCharacter key={a.id} agent={a} seat={seats[i] ?? undefined} grid={grid} cafe={cafe} chatLine={chat[a.id]} onSelect={onSelect} index={i} selected={!!selectedId && a.id === selectedId} unconfirmed={isUnconfirmed(a, acked)} />
+        <ClassroomCharacter key={a.id} agent={a} seat={seats[i] ?? undefined} grid={grid} cafe={cafe} chatLine={chat[a.id]} onSelect={onSelect} index={i} selected={!!selectedId && a.id === selectedId} unconfirmed={isUnconfirmed(a, acked)} reducedMotion={reducedMotion} />
       ))}
 
       {/* 빈 자리마다 '부르기' 버튼 — 학생 없는 책상에서 바로 소환(멀리 있는 버튼 대신) */}

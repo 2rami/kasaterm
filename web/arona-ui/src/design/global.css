@@ -137,12 +137,6 @@ canvas { image-rendering: pixelated; }
   font-feature-settings: "liga" 0, "clig" 0, "calt" 0 !important;
 }
 
-/* 교실 상태 글리프 펄스(blocked=! / waiting=?) — ClassroomView */
-@keyframes schale-glyph-pulse {
-  0%, 100% { transform: scale(1); opacity: 0.85; }
-  50% { transform: scale(1.25); opacity: 1; }
-}
-
 /* 걷는 느낌 — 픽셀 스프라이트 수직 통통(워크프레임 없이 이동감, 시트 없을 때 폴백). */
 @keyframes schale-bob {
   0%, 100% { transform: translateY(0); }
@@ -197,14 +191,6 @@ canvas { image-rendering: pixelated; }
 .cth-command-center { container-type: inline-size; }
 @media (prefers-reduced-motion: reduce) {
   .cth-spinner { animation: none; border-color: rgba(255,255,255,0.55); }
-}
-
-/* 캐릭터 등장 모션(munder 식) — 아래서 통통 튀어오르며 페이드인. 캐릭터 내부 래퍼에 적용
-   (button 의 translate(-50%,-100%) 위치 transform 과 충돌 안 하게 별도 레이어). */
-@keyframes schale-enter {
-  0% { opacity: 0; transform: translateY(20px) scale(0.55); }
-  55% { opacity: 1; transform: translateY(-5px) scale(1.08); }
-  100% { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 /* 폰 위생 — 인라인 스타일이 없는 것들만 여기서 잡는다(레이아웃은 useIsPhone 이 맡는다).
