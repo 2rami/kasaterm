@@ -1,12 +1,20 @@
 import 'package:flutter/material.dart';
 
 import '../server.dart';
+import '../relay_account.dart';
 
-/// 카사텀 허브의 「폰 주소」를 붙여 넣는 화면. 주소가 곧 자격이라 다른 로그인은 없다.
 class ConnectScreen extends StatefulWidget {
-  const ConnectScreen({super.key, required this.onConnected});
+  const ConnectScreen({
+    super.key,
+    required this.onConnected,
+    required this.onLogin,
+    this.message,
+  });
 
   final Future<void> Function(Server server) onConnected;
+  final Future<void> Function(Uri origin, String account, String password)
+  onLogin;
+  final String? message;
 
   @override
   State<ConnectScreen> createState() => _ConnectScreenState();
@@ -14,19 +22,25 @@ class ConnectScreen extends StatefulWidget {
 
 class _ConnectScreenState extends State<ConnectScreen> {
   final _controller = TextEditingController();
+  final _account = TextEditingController();
+  final _password = TextEditingController();
+  final _gateway = TextEditingController(text: defaultGateway);
   String? _error;
   bool _busy = false;
 
   @override
   void dispose() {
     _controller.dispose();
+    _account.dispose();
+    _password.dispose();
+    _gateway.dispose();
     super.dispose();
   }
 
   Future<void> _connect() async {
     final root = Server.parse(_controller.text);
     if (root == null) {
-      setState(() => _error = '주소 모양이 아니다 — https://… 로 시작하는 폰 주소를 붙여 넣어라');
+      setState(() => _error = 'https://로 시작하는 폰 주소를 입력해 주세요.');
       return;
     }
     setState(() {
@@ -45,12 +59,40 @@ class _ConnectScreenState extends State<ConnectScreen> {
     }
   }
 
+  Future<void> _login() async {
+    if (_busy) return;
+    final origin = parseGateway(_gateway.text);
+    if (origin == null ||
+        _account.text.trim().isEmpty ||
+        _password.text.isEmpty) {
+      setState(
+        () => _error = origin == null
+            ? 'https://로 시작하는 서버 주소를 확인해 주세요.'
+            : '아이디와 비밀번호를 입력해 주세요.',
+      );
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.onLogin(origin, _account.text, _password.text);
+      if (mounted) _password.clear();
+    } on AccountException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(
       body: SafeArea(
-        child: Center(
+        child: Align(
+          alignment: Alignment.topCenter,
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(24),
             child: ConstrainedBox(
@@ -58,45 +100,106 @@ class _ConnectScreenState extends State<ConnectScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text('카사모바일', style: theme.textTheme.headlineMedium),
+                  Text('KASA Mobile', style: theme.textTheme.headlineSmall),
                   const SizedBox(height: 8),
                   Text(
-                    '데스크톱 카사텀 허브에서 「폰 주소」를 복사해 여기 붙여 넣어라. 그 주소가 곧 열쇠다.',
+                    '데스크톱과 같은 계정으로 로그인하세요.',
                     style: theme.textTheme.bodyMedium?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
                   const SizedBox(height: 24),
                   TextField(
-                    controller: _controller,
+                    key: const Key('account-input'),
+                    controller: _account,
+                    enabled: !_busy,
+                    style: const TextStyle(fontSize: 16),
+                    autofillHints: const [AutofillHints.username],
                     autocorrect: false,
                     enableSuggestions: false,
-                    keyboardType: TextInputType.url,
-                    textInputAction: TextInputAction.go,
-                    onSubmitted: (_) => _busy ? null : _connect(),
-                    decoration: InputDecoration(
-                      hintText: 'https://kasaterm.debimarlene.com/u/…/',
-                      errorText: _error,
-                      errorMaxLines: 3,
-                    ),
+                    textInputAction: TextInputAction.next,
+                    decoration: const InputDecoration(labelText: '아이디'),
                   ),
                   const SizedBox(height: 12),
+                  TextField(
+                    key: const Key('password-input'),
+                    controller: _password,
+                    enabled: !_busy,
+                    style: const TextStyle(fontSize: 16),
+                    obscureText: true,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    autofillHints: const [AutofillHints.password],
+                    textInputAction: TextInputAction.go,
+                    onSubmitted: (_) => _login(),
+                    decoration: const InputDecoration(labelText: '비밀번호'),
+                  ),
+                  if (_error ?? widget.message case final message?) ...[
+                    const SizedBox(height: 12),
+                    Semantics(
+                      liveRegion: true,
+                      child: Text(
+                        message,
+                        style: TextStyle(color: theme.colorScheme.error),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
                   FilledButton(
-                    onPressed: _busy ? null : _connect,
+                    key: const Key('account-login'),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(44, 48),
+                    ),
+                    onPressed: _busy ? null : _login,
                     child: _busy
                         ? const SizedBox(
                             width: 18,
                             height: 18,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Text('연결'),
+                        : const Text('로그인'),
                   ),
                   const SizedBox(height: 8),
-                  TextButton(
-                    onPressed: _busy
-                        ? null
-                        : () => _controller.text = 'http://127.0.0.1:8765/',
-                    child: const Text('이 컴퓨터에서 개발 중이면 127.0.0.1:8765'),
+                  ExpansionTile(
+                    title: const Text('고급 설정'),
+                    tilePadding: EdgeInsets.zero,
+                    children: [
+                      TextField(
+                        controller: _gateway,
+                        enabled: !_busy,
+                        style: const TextStyle(fontSize: 16),
+                        autocorrect: false,
+                        keyboardType: TextInputType.url,
+                        decoration: const InputDecoration(
+                          labelText: '계정 서버 주소',
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      TextField(
+                        controller: _controller,
+                        enabled: !_busy,
+                        style: const TextStyle(fontSize: 16),
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        keyboardType: TextInputType.url,
+                        decoration: const InputDecoration(
+                          labelText: '기존 폰 주소',
+                          hintText: 'https://…/u/…/',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton(
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: const Size(44, 48),
+                          ),
+                          onPressed: _busy ? null : _connect,
+                          child: const Text('폰 주소로 연결'),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
                   ),
                 ],
               ),

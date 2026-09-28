@@ -168,14 +168,17 @@ class _TerminalScreenState extends State<TerminalScreen>
       } else {
         await _session.reply(text);
       }
+      if (!mounted || widget.server.isClosed) return;
       _input.clear();
       _ctrl = false;
       _pendingAttachment = false;
     } on ServerException catch (e) {
-      _toast(e.message);
+      if (mounted) _toast(e.message);
     } finally {
-      if (mounted) setState(() => _sending = false);
-      _inputFocus.requestFocus();
+      if (mounted) {
+        setState(() => _sending = false);
+        _inputFocus.requestFocus();
+      }
     }
   }
 
@@ -204,6 +207,7 @@ class _TerminalScreenState extends State<TerminalScreen>
     setState(() => _composing = '');
     final gap = DateTime.now().difference(_lastLiveSend);
     if (gap < _enterGap) await Future<void>.delayed(_enterGap - gap);
+    if (!mounted || widget.server.isClosed) return;
     _session.sendText('\r');
     _pendingAttachment = false;
     _toBottom();
@@ -301,6 +305,7 @@ class _TerminalScreenState extends State<TerminalScreen>
                   tag: 'face-${pane.machine}-${pane.id}',
                   // 화면의 주인공은 프사(사진) — 목록의 도트가 여기로 날아와 얼굴이 된다.
                   child: StudentFace(
+                    server: widget.server,
                     slug: slug,
                     url: slug == null
                         ? null
@@ -336,8 +341,9 @@ class _TerminalScreenState extends State<TerminalScreen>
                       Row(
                         children: [
                           // 열 때의 상태 — 허브 칩과 같은 색·말. 연결 상태는 그 뒤에.
-                          Builder(
-                            builder: (context) {
+                          Flexible(
+                            child: Builder(
+                              builder: (context) {
                               final st = StatusStyle.of(pane, scheme);
                               return Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -361,7 +367,8 @@ class _TerminalScreenState extends State<TerminalScreen>
                                   ),
                                 ],
                               );
-                            },
+                              },
+                            ),
                           ),
                           Flexible(
                             child: Text(
@@ -553,7 +560,8 @@ class _TerminalScreenState extends State<TerminalScreen>
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
                 child: SelectableText(
                   text.isEmpty ? '(빈 화면)' : text,
-                  style: const TextStyle(fontFamily: 'TermMono', fontSize: 12),
+                  style: const TextStyle(fontFamily: 'TermMono',
+                    fontFamilyFallback: ['TermHangul', 'TermSymbol'], fontSize: 14),
                 ),
               ),
             ),
@@ -676,12 +684,12 @@ class _KeyBar extends StatelessWidget {
       ),
     ];
     return SizedBox(
-      height: 44,
+      height: 56,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         itemCount: keys.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 6),
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
         itemBuilder: (_, i) => keys[i],
       ),
     );
@@ -714,7 +722,7 @@ class _Key extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(7),
         child: Container(
-          constraints: const BoxConstraints(minWidth: 40),
+          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
           padding: const EdgeInsets.symmetric(horizontal: 10),
           alignment: Alignment.center,
           child: icon != null

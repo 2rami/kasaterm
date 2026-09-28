@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'server.dart';
+import 'server_image.dart';
 
 /// 학생 얼굴. 번들 프로필이 먼저 뜨고, 서버 프사(사용자가 바꾼 그림)가 오면 덮는다 —
 /// 터널 너머라 서버 것은 늦고, 끊기면 아예 없다.
@@ -11,12 +12,14 @@ class StudentFace extends StatelessWidget {
     this.url,
     this.size = 40,
     this.shell = false,
+    this.server,
   });
 
   final String? slug;
   final Uri? url;
   final double size;
   final bool shell;
+  final Server? server;
 
   @override
   Widget build(BuildContext context) {
@@ -45,6 +48,8 @@ class StudentFace extends StatelessWidget {
     return ClipOval(
       child: u == null
           ? bundled
+          : server != null ? ServerImage(server: server!, uri: u,
+              width: size, height: size, fit: BoxFit.cover, fallback: bundled)
           : Image.network(
               u.toString(),
               width: size,
@@ -65,23 +70,25 @@ class StudentSprite extends StatelessWidget {
     required this.slug,
     this.url,
     this.size = 40,
+    this.server,
   });
 
   final String? slug;
   final Uri? url;
   final double size;
+  final Server? server;
 
   @override
   Widget build(BuildContext context) {
     final s = slug;
-    if (s == null) return StudentFace(slug: null, url: url, size: size);
+    if (s == null) return StudentFace(slug: null, url: url, size: size, server: server);
     return Image.asset(
       'assets/students/gif/$s.gif',
       width: size,
       height: size,
       fit: BoxFit.contain,
       filterQuality: FilterQuality.medium,
-      errorBuilder: (_, _, _) => StudentFace(slug: s, url: url, size: size),
+      errorBuilder: (_, _, _) => StudentFace(slug: s, url: url, size: size, server: server),
     );
   }
 }

@@ -1,8 +1,34 @@
-# 카사모바일 — 나쵸와 얘기하고 맡긴 일을 보는 아이폰 앱 (Flutter)
+# KASA Mobile — 원격 작업을 확인하는 Flutter 앱
 
 카사텀 서버가 폰 웹 화면에 내주는 통로(`term/panes` · `term/ws?grid=1` · `send` · `term/shot`)에
 그대로 붙는 네이티브 앱이다. 학생 목록을 보고, 한 학생의 화면을 격자로 보고, 답장을 보내고,
 허락 대기가 생기면 배지·햅틱으로 알린다. 서버 규약은 `docs/webterm-handoff.md`.
+
+## 계정 로그인과 연결 대기
+
+첫 화면에서 데스크톱과 같은 아이디·비밀번호로 로그인한다. 계정 서버 기본값은
+`https://kasaterm.debimarlene.com`이며 「고급 설정」에서 바꿀 수 있다. 기존 `/u/<slug>/`
+폰 주소 연결도 고급 설정에 남아 있다. 로그인 성공과 데스크톱 연결은 별도 상태다.
+온라인 기기가 없거나 구형 데스크톱이면 로그인은 유지하고 연결 대기·업데이트 안내를 보인다.
+
+- 비밀번호는 저장하지 않는다. origin·account·device_id·device token은 Keychain의 단일 항목에 저장한다.
+- HTTP Bearer와 WebSocket subprotocol 인증은 저장된 origin에서만 쓰고 redirect는 따르지 않는다.
+  토큰은 URL·쿼리·오류 메시지에 넣지 않는다. 앱 링크는 현재 세션의 화면만 열며 자격을 바꾸지 않는다.
+- 복원 시 whoami를 검증한다. 401이면 재로그인하며, 로그아웃·계정 전환은 이전 HTTP/WS와 캐시·데스크톱 색을 폐기한다.
+- 「밝게/어둡게/데스크톱 따라감」은 계정별로 보관하며 `/relay/account-sync`의 `mobile_theme_mode`로 동기화한다.
+  revision 충돌 시 최신 revision에 그 키만 다시 적용한다. 저장 실패는 로컬 적용과 계정 저장을 구분해 알린다.
+- 계정 연결의 APNs 등록은 기기별 서버 lease가 마련될 때까지 보류한다. 기존 폰 주소의 푸시는 유지한다.
+  전환 시 native 등록을 중지하고 이전 등록 해제를 3초 내 시도한다. 실패는 세션 중 기억하고 재연결·복귀 때 재시도한다.
+  앱 종료 뒤의 원격 해제 재시도와 이미 전달된 OS 알림 철회까지 보장하지 않는다.
+
+UI는 Pretendard 400/600(OFL)을 사용하고 터미널은 TermMono/TermHangul/TermSymbol을 유지한다.
+기본 로고는 자체 우산 이미지이며 이전 로고·교실 배경은 표시·번들 목록에서 제외했다.
+기존 캐릭터 sprite 번들은 별도 전환 작업이 남아 있다.
+
+시뮬레이터 검증은 `flutter build ios --simulator --debug`를 사용한다. `--no-codesign`은
+Keychain 접근이 거부될 수 있어 로그인 저장소 검증용으로 쓰지 않는다.
+`mobile_terminal_qa_test.dart`의 320/390/430px 위젯 검사는 합성 Codex/Claude fixture이며 실계정 메시지를 보내지 않는다.
+물리 iPhone의 OS 한글 키보드·푸시 수신은 별도 실기 검증이 필요하다.
 
 ## 학생 목록이 빨리 뜨고 바로 바뀌는 길
 
@@ -34,9 +60,11 @@ Codex에도 같은 방식으로 붙는다. 변환 뒤 32 MiB를 넘는 사진은
 
 ```
 lib/
-  main.dart            테마(SCHALE 흰/연하늘 표면·네이비 잉크) · 첫 화면 분기
+  main.dart            Pretendard UI 테마 · 첫 화면 분기
   server.dart          Server(root) — uri/wsUri/me/panes/sessions/machines/shot/send · describe() 는 slug 를 가린다
-  address_store.dart   주소(slug 포함) → Keychain(flutter_secure_storage)
+  connection.dart     로그인·복원·기기 연결 대기·로그아웃 상태
+  connection_store.dart 계정/기존 주소 → 단일 Keychain 항목
+  relay_account.dart  origin 고정 계정 API · 인증 전송 · 테마 revision CAS
   nacho.dart           나쵸 창구 — 대화 원장 이어 받기(순번) · 같은 id 재전송 · 작업 장부 읽기
   nacho_reply.dart     나쵸 답 가르기 — 실행·진단 줄과 사용량 꼬리를 접힌 상세로(원문 보존) · 학생 링크 읽기
   nacho_student.dart   장부의 맡은 학생(surface·host·machine_id) → 실제 pane. 기계를 못 정하면 짐작 안 함

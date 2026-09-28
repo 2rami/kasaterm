@@ -7,6 +7,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'grid.dart';
 import 'server.dart';
+import 'term_socket.dart';
 
 enum TermState { connecting, connected, reconnecting, gone }
 
@@ -15,7 +16,9 @@ enum TermState { connecting, connected, reconnecting, gone }
 /// 규약: binary 프레임이 키 입력, text 프레임이 제어 JSON 이다. 키를 text 로
 /// 보내면 서버가 JSON 으로 읽고 조용히 버린다.
 class TermSession extends ChangeNotifier {
-  TermSession(this.server, this.pane);
+  TermSession(this.server, this.pane) {
+    server.addCloseListener(_serverClosed);
+  }
 
   final Server server;
   final Pane pane;
@@ -41,34 +44,44 @@ class TermSession extends ChangeNotifier {
   int _backoffSec = 1;
   bool _paused = false;
   bool _disposed = false;
+  int _generation = 0;
+
+  void _serverClosed() {
+    pause();
+    state = TermState.gone;
+    note = '로그인 연결이 종료되었어요.';
+    if (!_disposed) notifyListeners();
+  }
 
   void connect() {
     _retry?.cancel();
     _retry = null;
     _closeChannel();
-    if (_paused || _disposed || state == TermState.gone) return;
+    if (_paused || _disposed || server.isClosed || state == TermState.gone) return;
+    final generation = _generation;
     if (tokens == null) {
       server.designTokens(machine: pane.machine).then((t) {
-        if (t == null || _disposed) return;
+        if (t == null || _disposed || server.isClosed || generation != _generation) return;
         tokens = t;
         notifyListeners();
       });
     }
-    final ch = WebSocketChannel.connect(
+    final ch = connectTermSocket(
       server.wsUri(
         'term/ws',
         query: {'pane': pane.id, 'grid': '1'},
         machine: pane.machine,
       ),
+      protocols: server.wsProtocols,
     );
     _channel = ch;
     _sub = ch.stream.listen(
-      _onData,
-      onError: (Object _) => _lost(),
-      onDone: _lost,
+      (data) { if (generation == _generation) _onData(data); },
+      onError: (Object _) { if (generation == _generation) _lost(); },
+      onDone: () { if (generation == _generation) _lost(); },
       cancelOnError: true,
     );
-    ch.ready.catchError((Object _) => _lost());
+    ch.ready.catchError((Object _) { if (generation == _generation) _lost(); });
   }
 
   void _onData(Object? data) {
@@ -123,11 +136,11 @@ class TermSession extends ChangeNotifier {
     _backoffSec = math.min(_backoffSec * 2, 10);
   }
 
-  bool get canSend => state == TermState.connected && _channel != null;
+  bool get canSend => !server.isClosed && state == TermState.connected && _channel != null;
 
   void sendBytes(List<int> bytes) {
     final ch = _channel;
-    if (ch == null || state != TermState.connected) return;
+    if (ch == null || !canSend) return;
     ch.sink.add(Uint8List.fromList(bytes));
   }
 
@@ -187,6 +200,7 @@ class TermSession extends ChangeNotifier {
   ];
 
   void _closeChannel() {
+    _generation++;
     _sub?.cancel();
     _sub = null;
     _channel?.sink.close();
@@ -196,6 +210,7 @@ class TermSession extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    server.removeCloseListener(_serverClosed);
     _retry?.cancel();
     _closeChannel();
     super.dispose();

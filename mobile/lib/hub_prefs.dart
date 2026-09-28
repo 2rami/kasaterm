@@ -43,7 +43,10 @@ class HubView {
 }
 
 class HubPrefs {
-  const HubPrefs();
+  const HubPrefs({this.scope = ''});
+
+  final String scope;
+  String _key(String key) => scope.isEmpty ? key : '$key/$scope';
 
   static const _machineKey = 'hub.machine';
   static const _shapeKey = 'hub.shape';
@@ -53,9 +56,9 @@ class HubPrefs {
 
   Future<HubView> load() async {
     try {
-      final m = await _storage.read(key: _machineKey);
+      final m = await _storage.read(key: _key(_machineKey));
       final s = await _storage.read(key: _shapeKey);
-      final f = await _storage.read(key: _foldedKey);
+      final f = await _storage.read(key: _key(_foldedKey));
       return HubView(
         machine: m == null || m == _all ? null : m,
         shape: HubShape.values.firstWhere(
@@ -71,9 +74,9 @@ class HubPrefs {
 
   Future<void> save(HubView v) async {
     try {
-      await _storage.write(key: _machineKey, value: v.machine ?? _all);
+      await _storage.write(key: _key(_machineKey), value: v.machine ?? _all);
       await _storage.write(key: _shapeKey, value: v.shape.name);
-      await _storage.write(key: _foldedKey, value: encodeFolded(v.folded));
+      await _storage.write(key: _key(_foldedKey), value: encodeFolded(v.folded));
     } catch (_) {
       // 저장소가 막혀도 이번 화면은 고른 대로 보인다 — 다음에 다시 고르면 된다.
     }

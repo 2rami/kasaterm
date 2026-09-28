@@ -1,5 +1,8 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
+
+import 'relay_account.dart';
 
 /// 사용자에게 보여도 되는 오류 — 주소(slug)가 들어 있지 않다.
 class ServerException implements Exception {
@@ -170,9 +173,14 @@ class Pane {
   bool get isBusy => status.isNotEmpty && !isIdle && !isWaiting;
   bool get isWebShell => id.startsWith('web-');
 
-  /// 학생이 없는 pane 은 「셸」, 둘째 줄은 제목이나 폴더 이름 — 웹 허브와 같다.
-  bool get isShell => name.isEmpty;
-  String get displayName => isShell ? '셸' : name;
+  /// Character assignment is optional, so the live harness also identifies an agent.
+  bool get isShell => name.isEmpty && (harness?.isEmpty ?? true);
+  String get displayName => name.isNotEmpty ? name : switch (harness) {
+    'codex' => 'Codex',
+    'claude' => 'Claude',
+    null || '' => '셸',
+    final value => value,
+  };
   String get subtitle {
     // 목록엔 /rename 으로 붙인 이름(session)만 — 에이전트가 제 대화를 요약한 제목은
     // 안 보인다(2026-09-08 지시). 이름 없는 셸만 어느 폴더인지 한 마디.
@@ -457,10 +465,28 @@ class DesignTokens {
 class Server {
   Server(Uri root, {http.Client? client})
     : root = normalize(root),
-      _client = client ?? http.Client();
+      account = null {
+    _client = OriginClient(this.root, client: client);
+  }
+
+  Server.account(AccountSession session, {http.Client? client})
+    : root = session.root, account = session {
+    _client = OriginClient(session.origin, client: client, token: session.token,
+      onUnauthorized: () => onUnauthorized?.call());
+  }
 
   final Uri root;
-  final http.Client _client;
+  final AccountSession? account;
+  late final http.Client _client;
+  final Object _accountCacheIdentity = Object();
+  Object get cacheIdentity => account == null ? root.toString() : _accountCacheIdentity;
+  final Set<void Function()> _closeListeners = {};
+  void Function()? onUnauthorized;
+  bool get isClosed => _closed;
+  bool _closed = false;
+  List<String>? get wsProtocols => account?.protocols;
+  void addCloseListener(void Function() listener) => _closeListeners.add(listener);
+  void removeCloseListener(void Function() listener) => _closeListeners.remove(listener);
 
   static Uri normalize(Uri u) =>
       u.path.endsWith('/') ? u : u.replace(path: '${u.path}/');
@@ -471,7 +497,10 @@ class Server {
     if (t.isEmpty) return null;
     if (!t.contains('://')) t = 'https://$t';
     final u = Uri.tryParse(t);
-    if (u == null || u.host.isEmpty) return null;
+    if (u == null || u.host.isEmpty || u.userInfo.isNotEmpty ||
+        !const ['http', 'https'].contains(u.scheme)) {
+      return null;
+    }
     return normalize(
       Uri(
         scheme: u.scheme,
@@ -489,7 +518,27 @@ class Server {
   /// 인코딩해야 서버가 제 id 로 읽는다.
   Uri uri(String path, {Map<String, String>? query, String? machine}) {
     final u = root.resolve('${_prefix(machine)}$path');
+    if (!sameOrigin(root, u) || !u.path.startsWith(root.path)) {
+      throw const ServerException('연결 범위를 벗어난 주소예요.');
+    }
     return query == null ? u : u.replace(queryParameters: query);
+  }
+
+  Future<Uint8List> imageBytes(Uri uri) async {
+    if (!sameOrigin(root, uri) || !uri.path.startsWith(root.path)) {
+      throw const ServerException('이미지 주소를 확인하지 못했어요.');
+    }
+    try {
+      final response = await _client.get(uri).timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) {
+        throw ServerException('이미지를 불러오지 못했어요.', status: response.statusCode);
+      }
+      return response.bodyBytes;
+    } on ServerException {
+      rethrow;
+    } catch (_) {
+      throw const ServerException('이미지를 불러오지 못했어요.');
+    }
   }
 
   Uri wsUri(
@@ -1027,7 +1076,16 @@ class Server {
   Uri nachoUri(String path, {Map<String, String>? query}) =>
       uri('nacho/app/$path', query: query);
 
-  void close() => _client.close();
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    onUnauthorized = null;
+    _client.close();
+    for (final listener in List.of(_closeListeners)) {
+      listener();
+    }
+    _closeListeners.clear();
+  }
 }
 
 /// 나쵸가 남긴 학생 쪽지 한 장(서버 notes.rs).

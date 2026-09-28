@@ -54,7 +54,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       await server.settingsAction(action, id: id);
       final t = await server.designTokens();
-      if (t != null) designTokens.value = t;
+      if (t != null && mounted && !server.isClosed) designTokens.value = t;
     } on ServerException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -67,17 +67,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _setMode(ThemeMode m) async {
-    phoneThemeMode.value = m;
-    await const ThemePrefs().save(m);
-    if (mounted) setState(() {});
+    final problem = await phoneThemeSync.setMode(m);
+    if (!mounted) return;
+    setState(() {});
+    if (problem != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(problem)));
+    }
   }
 
   Future<void> _forget(BuildContext context) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('주소를 지울까'),
-        content: const Text('이 폰에서 저장한 주소를 지운다. 데스크톱 허브에서 다시 복사해 넣으면 된다.'),
+        title: Text(server.account == null ? '폰 주소 지우기' : '로그아웃'),
+        content: Text(server.account == null ? '이 폰에 저장한 주소를 지웁니다.' :
+          '이 폰의 로그인과 연결을 종료합니다. 다른 기기의 로그인은 유지됩니다.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -85,7 +89,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('지우기'),
+            child: Text(server.account == null ? '지우기' : '로그아웃'),
           ),
         ],
       ),
@@ -108,17 +112,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
               children: [
                 ListTile(
                   leading: const Icon(Icons.link),
-                  title: const Text('연결된 주소'),
+                  title: Text(server.account?.account ?? '연결된 주소'),
                   subtitle: Text(server.describe()),
                 ),
                 const Divider(height: 1),
+                if (server.account != null)
+                  const ListTile(leading: Icon(Icons.notifications_off_outlined),
+                    title: Text('계정 알림은 준비 중'),
+                    subtitle: Text('로그아웃 뒤 다른 계정의 알림이 오지 않도록, 계정 연결에서는 푸시 알림을 아직 등록하지 않습니다.')),
                 ListTile(
                   leading: Icon(
                     Icons.delete_outline,
                     color: theme.colorScheme.error,
                   ),
-                  title: const Text('주소 바꾸기 · 지우기'),
-                  subtitle: const Text('지우면 연결 화면으로 돌아간다'),
+                  title: Text(server.account == null ? '주소 바꾸기 · 지우기' : '로그아웃'),
+                  subtitle: const Text('연결을 종료하고 로그인 화면으로 돌아갑니다'),
                   onTap: () => _forget(context),
                 ),
               ],

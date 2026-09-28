@@ -7,6 +7,7 @@ import '../nacho.dart';
 import '../nacho_reply.dart';
 import '../nacho_student.dart';
 import '../server.dart';
+import '../server_image.dart';
 import 'nacho_home.dart';
 import 'nacho_reply_view.dart';
 
@@ -221,9 +222,9 @@ class _NachoTaskScreenState extends State<NachoTaskScreen> {
                 icon: const Icon(Icons.open_in_new_rounded, size: 18),
                 label: Text(t.previewUrl!, overflow: TextOverflow.ellipsis),
               ),
-            if (t.hasShot) _Shot(url: widget.desk.shotUri(t.id).toString(), label: '웹 결과 사진'),
+            if (t.hasShot) _Shot(server: widget.desk.server, url: widget.desk.shotUri(t.id), label: '웹 결과 사진'),
             for (final (seq, i, name) in shots)
-              _Shot(url: widget.desk.fileUri(seq, i, task: t.id).toString(), label: name),
+              _Shot(server: widget.desk.server, url: widget.desk.fileUri(seq, i, task: t.id), label: name),
           ],
         ),
       if (student != null && widget.students != null && widget.onOpenPane != null)
@@ -365,9 +366,10 @@ class _Box extends StatelessWidget {
 }
 
 class _Shot extends StatelessWidget {
-  const _Shot({required this.url, required this.label});
+  const _Shot({required this.server, required this.url, required this.label});
 
-  final String url;
+  final Server server;
+  final Uri url;
   final String label;
 
   @override
@@ -375,11 +377,11 @@ class _Shot extends StatelessWidget {
     padding: const EdgeInsets.only(top: 8),
     child: ClipRRect(
       borderRadius: BorderRadius.circular(10),
-      child: Image.network(
-        url,
+      child: ServerImage(
+        server: server, uri: url,
         fit: BoxFit.fitWidth,
         semanticLabel: label,
-        errorBuilder: (_, _, _) => Text('$label — 지금은 불러오지 못했다', style: const TextStyle(fontSize: 13)),
+        fallback: Text('$label — 지금은 불러오지 못했다', style: const TextStyle(fontSize: 13)),
       ),
     ),
   );

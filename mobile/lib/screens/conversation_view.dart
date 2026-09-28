@@ -301,6 +301,11 @@ class _ConversationViewState extends State<ConversationView>
   /// 번호 단축키는 AskUserQuestion 의 다중 선택에서 뜻이 달라 쓰지 않는다.
   void _pick(PromptMenu menu, int i) {
     final s = widget.session;
+    final current = _menu;
+    if (!s.canSend || current == null || !_sameMenu(menu, current) ||
+        i < 0 || i >= current.options.length) {
+      return;
+    }
     final delta = i - (menu.cursor < 0 ? 0 : menu.cursor);
     for (var k = 0; k < delta.abs(); k++) {
       s.arrow(delta > 0 ? 'B' : 'A');
@@ -312,12 +317,22 @@ class _ConversationViewState extends State<ConversationView>
   }
 
   void _dismiss() {
+    if (!widget.session.canSend || _menu == null) return;
     widget.session.sendText('\x1b');
     setState(() => _menuHold = DateTime.now().add(_menuHoldFor));
   }
 
   /// 고른 직후엔 화면이 아직 옛 메뉴를 그리고 있다 — 두 번 누르지 않게 잠깐 접는다.
   static const _menuHoldFor = Duration(milliseconds: 1200);
+
+  bool _sameMenu(PromptMenu a, PromptMenu b) => a.title == b.title &&
+    a.options.length == b.options.length &&
+    a.options.indexed.every((entry) {
+      final other = b.options[entry.$1];
+      final option = entry.$2;
+      return option.index == other.index && option.label == other.label &&
+        option.current == other.current;
+    });
 
   PromptMenu? get _menu {
     if (DateTime.now().isBefore(_menuHold)) return null;
@@ -375,6 +390,7 @@ class _ConversationViewState extends State<ConversationView>
     }
     final pane = widget.pane;
     final face = StudentFace(
+      server: widget.server,
       slug: pane.slug,
       url: pane.slug == null
           ? null
@@ -498,6 +514,7 @@ class _ConversationViewState extends State<ConversationView>
     );
     final mono = TextStyle(
       fontFamily: 'TermMono',
+      fontFamilyFallback: const ['TermHangul', 'TermSymbol'],
       fontSize: 13,
       color: scheme.onSurface,
       backgroundColor: scheme.surfaceContainerHighest,
@@ -883,6 +900,7 @@ class _ToolRow extends StatelessWidget {
                   toolLabel(tool.name),
                   style: const TextStyle(
                     fontFamily: 'TermMono',
+                    fontFamilyFallback: ['TermHangul', 'TermSymbol'],
                     fontSize: 12,
                     fontWeight: FontWeight.w700,
                   ),
@@ -907,6 +925,7 @@ class _ToolRow extends StatelessWidget {
                   _clip(stripAnsi(result).trim()),
                   style: TextStyle(
                     fontFamily: 'TermMono',
+                    fontFamilyFallback: const ['TermHangul', 'TermSymbol'],
                     fontSize: 11.5,
                     height: 1.35,
                     color: tool.error ? scheme.error : scheme.onSurface,
@@ -997,6 +1016,7 @@ class _Fold extends StatelessWidget {
                       style: mono
                           ? TextStyle(
                               fontFamily: 'TermMono',
+                              fontFamilyFallback: const ['TermHangul', 'TermSymbol'],
                               fontSize: 11.5,
                               height: 1.35,
                               color: dim,
@@ -1042,6 +1062,7 @@ class _CommandChip extends StatelessWidget {
             text,
             style: TextStyle(
               fontFamily: 'TermMono',
+              fontFamilyFallback: const ['TermHangul', 'TermSymbol'],
               fontSize: 12.5,
               color: scheme.onSurface,
             ),

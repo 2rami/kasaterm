@@ -10,7 +10,7 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
-  # 웹(크롬 개발 루프)과 iOS 를 한 코드로 — lib/ 에서 dart:io 를 쓰지 않는다.
+  # Native account sockets enforce redirect boundaries; web keeps the legacy path.
   http: ^1.2.2
   web_socket_channel: ^3.0.1
   # 주소에 든 slug 가 곧 자격이라 평문 저장소가 아니라 Keychain 에 둔다.
@@ -26,11 +26,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  # 데스크톱과 같은 학생 그림(idle 애니메이션·프로필)·SCHALE 로고·교실 배경. 서버 프사는
-  # 터널 너머라 늦고 끊기면 없다 — 번들이 먼저 뜨고 서버 것이 오면 덮는다.
+  # Bundled portraits remain available while a remote custom image is loading.
   assets:
-    - assets/schale-classroom.png
-    - assets/students/schale-logo.png
     - assets/students/gif/
     - assets/students/profile/
     # 데스크톱이 claude 화면에 세우는 도트 그대로 — 작업 중엔 스피너 자리에서 걷고(walk 6장),
@@ -40,8 +37,14 @@ flutter:
     # 상태줄 모델 표식(U+E0C0·E0C1) 자리에 데스크톱과 같은 로고 — 알파만 쓰고 색은 입힌다.
     - assets/icons/
   # 데스크톱 렌더러와 같은 짝: 라틴·아이콘은 JetBrains Mono Nerd, 한글은 D2Coding 으로
-  # 떨어진다(한글이 정확히 두 칸). 같은 글꼴이라야 같은 화면으로 보인다. UI 글은 시스템 글꼴.
+  # 떨어진다(한글이 정확히 두 칸). 터미널과 UI 글꼴을 분리해 셀 정렬을 보존한다.
   fonts:
+    - family: Pretendard
+      fonts:
+        - asset: assets/fonts/Pretendard-Regular.otf
+          weight: 400
+        - asset: assets/fonts/Pretendard-SemiBold.otf
+          weight: 600
     - family: TermMono
       fonts:
         - asset: assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf

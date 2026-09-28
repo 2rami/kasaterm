@@ -678,12 +678,15 @@ class PromptMenu {
   int get cursor => options.indexWhere((o) => o.current);
 }
 
-/// claude 의 선택 메뉴(권한·질문·`/model`)를 화면 글에서 찾는다. ❯ 커서가 실제로 찍힌
-/// 줄이 있어야만 메뉴로 친다 — 답변 속 번호 목록을 선택지로 오인하지 않게.
+/// A selected chevron distinguishes live choices from numbered response text.
 PromptMenu? parsePromptMenu(List<String> lines) {
   final opts = <(PromptOption, int)>[];
-  final re = RegExp(r'^\s*[│|]?\s*([❯●]?)\s*(\d+)\.\s+(.+?)\s*[│|]?\s*$');
-  for (var i = 0; i < lines.length; i++) {
+  final re = RegExp(r'^\s*[│|]?\s*([❯›●]?)\s*(\d+)\.\s+(.+?)\s*[│|]?\s*$');
+  // Match the native bottom-anchored approval scan, not old choices in history.
+  final last = lines.lastIndexWhere((line) => line.trim().isNotEmpty);
+  if (last < 0) return null;
+  final start = (last - 13).clamp(0, last);
+  for (var i = start; i <= last; i++) {
     final m = re.firstMatch(lines[i]);
     if (m == null) continue;
     final label = m[3]!.replaceFirst(RegExp(r'\s{2,}.*$'), '').trim();
@@ -693,6 +696,10 @@ PromptMenu? parsePromptMenu(List<String> lines) {
     ));
   }
   if (opts.length < 2 || !opts.any((o) => o.$1.current)) return null;
+  if (lines.skip(opts.last.$2 + 1).any((line) =>
+      RegExp(r'^\s*[│|]?\s*[❯›]').hasMatch(line) && !re.hasMatch(line))) {
+    return null;
+  }
   // 흩어진 번호 줄은 메뉴가 아니다. 다만 AskUserQuestion 은 선택지마다 설명 줄이 딸려
   // 벌어지므로, 번호가 1부터 빈틈없이 이어지면 선택지당 서너 줄까지 봐준다.
   final ordered = [
@@ -704,7 +711,7 @@ PromptMenu? parsePromptMenu(List<String> lines) {
   var title = '';
   for (var i = first - 1; i >= 0 && i >= first - 6; i--) {
     final t = lines[i].replaceAll(RegExp(r'^[\s│|]+|[\s│|]+$'), '');
-    if (t.isEmpty || RegExp(r'^[─—\-╭╰╮╯>❯●]').hasMatch(t)) continue;
+    if (t.isEmpty || RegExp(r'^[─—\-╭╰╮╯>❯›●]').hasMatch(t)) continue;
     title = t;
     break;
   }

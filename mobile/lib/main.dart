@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import 'address_store.dart';
+import 'connection.dart';
 import 'app_link.dart';
 import 'hub_model.dart';
 import 'push.dart';
@@ -23,19 +23,15 @@ final designTokens = ValueNotifier<DesignTokens?>(null);
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   AppLinkObserver.instance.install();
-  const ThemePrefs().load().then((m) => phoneThemeMode.value = m);
   const PaneViewPrefs().load().then((v) => paneView.value = v);
   runApp(const KasatermApp());
 }
 
-/// DESIGN.md 의 「SCHALE 작업대」— 흰색·연하늘 표면 위 네이비 잉크, 강조는 하늘색
-/// 하나. 다크는 같은 역할을 깊은 네이비 층으로 뒤집는다. 그림자 없이 톤과 한 줄
-/// 경계로만 층을 만든다. 데스크톱 색을 못 받았을 때의 기본 얼굴이다.
 ThemeData buildTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;
   return buildThemeFrom(
     brightness: brightness,
-    primary: dark ? const Color(0xff7ab8ff) : const Color(0xff4a90e2),
+    primary: dark ? const Color(0xff7ab8ff) : const Color(0xff326fb8),
     onPrimary: dark ? const Color(0xff0f1b2d) : Colors.white,
     error: dark ? const Color(0xffff7a93) : const Color(0xffc4304f),
     surface: dark ? const Color(0xff16243a) : Colors.white,
@@ -88,6 +84,7 @@ ThemeData buildThemeFrom({
     outline: outline,
   );
   return ThemeData(
+    fontFamily: 'Pretendard',
     useMaterial3: true,
     colorScheme: scheme,
     scaffoldBackgroundColor: background,
@@ -131,6 +128,7 @@ ThemeData buildThemeFrom({
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
+        minimumSize: const Size(44, 48),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       ),
@@ -154,7 +152,7 @@ class KasatermApp extends StatelessWidget {
         return MaterialApp(
           navigatorKey: navigatorKey,
           debugShowCheckedModeBanner: false,
-          title: '카사모바일',
+          title: 'KASA Mobile',
           themeMode: mode,
           theme: desktop == null
               ? buildTheme(Brightness.light)
@@ -178,8 +176,10 @@ class RootScreen extends StatefulWidget {
   State<RootScreen> createState() => _RootScreenState();
 }
 
-class _RootScreenState extends State<RootScreen> {
-  static const _store = AddressStore();
+class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
+  final _connection = ConnectionController();
+  Server? _boundServer;
+  AppLink? _pendingLink;
 
   /// 검증용: 빌드 때 `KASA_OPEN_PANE`(과 `KASA_OPEN_MACHINE`)을 주면 켜자마자 그 학생
   /// 화면을 연다 — 시뮬레이터는 탭을 못 보내니 링크와 같은 길로 화면을 꺼내 본다.
@@ -189,6 +189,12 @@ class _RootScreenState extends State<RootScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    phoneThemeSync.bind(null);
+    _connection.addListener(_changed);
+    _connection.beforeDisconnect = PushBridge.instance.unbind;
+    unawaited(PushBridge.instance.unbind());
+    _connection.restore(bakedRoot: _baked);
     AppLinkObserver.instance.attach(_openLink);
     if (_openPane.isNotEmpty) {
       _openLink(
@@ -203,24 +209,29 @@ class _RootScreenState extends State<RootScreen> {
   @override
   void dispose() {
     AppLinkObserver.instance.detach();
+    _connection.removeListener(_changed);
+    _connection.dispose();
+    phoneThemeSync.unbind();
+    WidgetsBinding.instance.removeObserver(this);
+    PushBridge.instance.unbind();
     super.dispose();
   }
 
-  /// 웹에서 건너뛴 링크. root 는 **주소가 하나도 없을 때만** 받는다 — 링크 한 줄로
-  /// 저장된 주소를 갈아치우게 두면 남이 보낸 링크가 자격을 바꾸는 문이 된다.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(PushBridge.instance.retryCleanup());
+      unawaited(phoneThemeSync.refresh());
+      if (_connection.server == null) unawaited(_connection.retry());
+    }
+  }
+
   Future<void> _openLink(AppLink link) async {
-    var server = _server ?? await _initial;
-    if (server == null) {
-      final root = Server.parse(link.root ?? '');
-      if (root == null) return;
-      final candidate = Server(root);
-      try {
-        await candidate.me();
-      } on ServerException {
-        return;
-      }
-      await _connected(candidate);
-      server = candidate;
+    final server = _connection.server;
+    // Links navigate the current session; they cannot install credentials.
+    if (server == null || server.isClosed) {
+      if (_connection.phase == ConnectionPhase.restoring) _pendingLink = link;
+      return;
     }
     final pane = link.pane;
     if (pane == null) return;
@@ -232,7 +243,13 @@ class _RootScreenState extends State<RootScreen> {
     }
     final found = panes.where((p) => p.id == pane).firstOrNull;
     final nav = navigatorKey.currentState;
-    if (found == null || nav == null || !mounted) return;
+    if (found == null ||
+        nav == null ||
+        !mounted ||
+        server.isClosed ||
+        _connection.server != server) {
+      return;
+    }
     final s = server;
     nav.popUntil((r) => r.isFirst);
     nav.push(
@@ -243,22 +260,8 @@ class _RootScreenState extends State<RootScreen> {
     );
   }
 
-  late Future<Server?> _initial = _load();
-  Server? _server;
-
-  /// 빌드 때 `KASA_ROOT` 로 구워 넣은 주소(tool/phone.sh). 자기 맥에서 만들어 자기
-  /// 폰에 넣는 판은 주소를 처음부터 알고 있어 연결 화면을 안 거친다. 저장된 주소가
-  /// 있으면 그쪽이 우선이고, 「주소 지우기」는 그 자리에서 연결 화면을 보이되 다음
-  /// 실행에는 다시 이 값으로 돌아온다.
+  // An explicit logout record takes precedence over development launch defaults.
   static const _baked = String.fromEnvironment('KASA_ROOT');
-
-  Future<Server?> _load() async {
-    final root = await _store.load() ?? Uri.tryParse(_baked);
-    if (root == null || !root.hasScheme) return null;
-    final server = Server(root);
-    _loadTokens(server);
-    return server;
-  }
 
   void _loadTokens(Server server) {
     // 서버가 정해지는 자리가 여기 하나라 푸시 등록도 같이 건다.
@@ -266,49 +269,124 @@ class _RootScreenState extends State<RootScreen> {
     // 첫 화면은 나쵸 창구다 — 그동안 학생 목록을 받아 두면 허브가 빈 채로 안 열린다.
     unawaited(HubModel.warm(server));
     server.designTokens().then((t) {
-      if (t == null || !mounted || (_server != null && _server != server)) {
+      if (t == null ||
+          !mounted ||
+          server.isClosed ||
+          _connection.server != server) {
         return;
       }
       designTokens.value = t;
     });
   }
 
-  Future<void> _connected(Server server) async {
-    await _store.save(server.root);
+  void _changed() {
     if (!mounted) return;
-    setState(() {
-      _server = server;
-      _initial = Future.value(server);
-    });
-    designTokens.value = null;
-    _loadTokens(server);
-  }
-
-  Future<void> _disconnected() async {
-    await _store.clear();
-    if (!mounted) return;
-    setState(() {
-      _server = null;
-      _initial = Future.value(null);
-    });
-    designTokens.value = null;
-    PushBridge.instance.unbind();
+    final server = _connection.server;
+    if (phoneThemeSync.account != _connection.account) {
+      if (_connection.account != null) unawaited(PushBridge.instance.unbind());
+      phoneThemeSync.bind(_connection.account);
+      final account = _connection.account;
+      phoneThemeSync.onUnauthorized = () {
+        if (_connection.account == account) {
+          unawaited(_connection.logout(revoke: false));
+        }
+      };
+    }
+    if (_boundServer != server) {
+      _boundServer = server;
+      designTokens.value = null;
+      HubModel.clearCache();
+      PaintingBinding.instance.imageCache.clear();
+      PaintingBinding.instance.imageCache.clearLiveImages();
+      PushBridge.instance.unbind();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _connection.server == server) {
+          navigatorKey.currentState?.popUntil((route) => route.isFirst);
+          final pending = _pendingLink;
+          _pendingLink = null;
+          if (server != null && pending != null) unawaited(_openLink(pending));
+        }
+      });
+      if (server != null) _loadTokens(server);
+    }
+    if (_connection.phase == ConnectionPhase.signedOut) _pendingLink = null;
+    setState(() {});
   }
 
   @override
-  Widget build(BuildContext context) => FutureBuilder<Server?>(
-    future: _initial,
-    builder: (context, snap) {
-      if (snap.connectionState != ConnectionState.done) {
-        return const Scaffold(body: Center(child: CircularProgressIndicator()));
-      }
-      final server = _server ?? snap.data;
-      if (server == null) return ConnectScreen(onConnected: _connected);
-      return NachoHome(
-        key: ValueKey(server.root),
-        server: server,
-        onChangeAddress: _disconnected,
+  Widget build(BuildContext context) {
+    if (_connection.phase == ConnectionPhase.restoring) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    final server = _connection.server;
+    if (server == null && _connection.account == null) {
+      return ConnectScreen(
+        onConnected: _connection.connectLegacy,
+        onLogin: _connection.login,
+        message: _connection.message,
       );
-    },
-  );
+    }
+    if (server == null) return AccountWaitingScreen(connection: _connection);
+    return NachoHome(
+      key: ObjectKey(server),
+      server: server,
+      onChangeAddress: _connection.logout,
+    );
+  }
+}
+
+class AccountWaitingScreen extends StatelessWidget {
+  const AccountWaitingScreen({super.key, required this.connection});
+  final ConnectionController connection;
+
+  @override
+  Widget build(BuildContext context) {
+    final checking = connection.phase == ConnectionPhase.checking;
+    return Scaffold(
+      appBar: AppBar(title: const Text('기기 연결')),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            Text(
+              '${connection.account!.account} 계정',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              checking
+                  ? '로그인과 기기 상태를 확인하고 있어요.'
+                  : connection.message ?? '연결할 데스크톱을 기다리고 있어요.',
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              '데스크톱 카사텀을 켜고 같은 계정으로 로그인해 주세요. 이미 켜져 있다면 최신 버전인지 확인해 주세요.',
+            ),
+            for (final device in connection.devices.where(
+              (d) => d['kind'] != 'phone',
+            ))
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.computer_outlined),
+                title: Text('${device['label'] ?? device['device_id']}'),
+                subtitle: Text(
+                  device['online'] == true ? '온라인 · 연결 준비 확인 중' : '오프라인',
+                ),
+              ),
+            const SizedBox(height: 20),
+            FilledButton(
+              onPressed: checking ? null : connection.retry,
+              child: Text(checking ? '확인 중' : '연결 다시 확인'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton(
+              style: OutlinedButton.styleFrom(minimumSize: const Size(44, 48)),
+              onPressed: connection.logout,
+              child: const Text('로그아웃'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

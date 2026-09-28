@@ -7,6 +7,7 @@ import '../hub_model.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
+import '../server_image.dart';
 
 /// 종 아이콘을 누르면 뜨는 학생 쪽지 목록 — 나쵸가 알림마다 남긴 「시킨 것 → 한 것」
 /// 한 줄(2026-09-08 지시). 안 읽은 것만 선다: 누르면 그 학생 화면으로 가며 읽음,
@@ -268,6 +269,7 @@ class _NoteRow extends StatelessWidget {
             },
       trailing: hasLink ? const Icon(Icons.open_in_new, size: 18) : null,
       leading: StudentFace(
+        server: server,
         slug: p?.slug,
         url: p?.slug == null
             ? null
@@ -335,23 +337,22 @@ class _NoteRow extends StatelessWidget {
                   context: context,
                   builder: (_) => Dialog(
                     child: InteractiveViewer(
-                      child: Image.network(
-                        server
-                            .noteImage(note.id, machine: note.machine)
-                            .toString(),
+                      child: ServerImage(
+                        server: server,
+                        uri: server.noteImage(note.id, machine: note.machine),
                       ),
                     ),
                   ),
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(6),
-                  child: Image.network(
-                    server.noteImage(note.id, machine: note.machine).toString(),
+                  child: ServerImage(
+                    server: server,
+                    uri: server.noteImage(note.id, machine: note.machine),
                     height: 72,
                     width: 128,
                     fit: BoxFit.cover,
                     alignment: Alignment.topLeft,
-                    errorBuilder: (_, _, _) => const SizedBox.shrink(),
                   ),
                 ),
               ),

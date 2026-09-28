@@ -30,6 +30,7 @@ Future<void> showPaneSheet(
         children: [
           ListTile(
             leading: StudentFace(
+              server: server,
               slug: pane.slug,
               url: pane.slug == null
                   ? null
@@ -206,6 +207,7 @@ Future<Pane?> _pickPane(
           if (p.id != me.id)
             ListTile(
               leading: StudentFace(
+                server: server,
                 slug: p.slug,
                 url: p.slug == null
                     ? null

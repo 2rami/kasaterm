@@ -8,6 +8,7 @@ import '../nacho.dart';
 import '../nacho_reply.dart';
 import '../nacho_student.dart';
 import '../server.dart';
+import '../server_image.dart';
 import 'hub.dart';
 import 'nacho_reply_view.dart';
 import 'nacho_task.dart';
@@ -76,7 +77,8 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
         builder: (_) => HubScreen(
           server: widget.server,
           onChangeAddress: widget.onChangeAddress,
-          prefs: const HubPrefs(),
+          prefs: HubPrefs(scope: widget.server.account == null ? '' :
+            '${widget.server.account!.origin}|${widget.server.account!.account}'),
         ),
       ),
     );
@@ -94,12 +96,13 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
             title: Row(
               children: [
                 Image.asset(
-                  'assets/students/schale-logo.png',
+                  'assets/icons/kasa.png',
+                  width: 22,
                   height: 22,
                   errorBuilder: (_, _, _) => const SizedBox.shrink(),
                 ),
                 const SizedBox(width: 8),
-                const Text('카사모바일'),
+                const Text('KASA Mobile'),
               ],
             ),
             actions: [
@@ -629,12 +632,13 @@ class _NachoBubble extends StatelessWidget {
                   padding: const EdgeInsets.only(top: 6),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(12),
-                    child: Image.network(
-                      desk.fileUri(event.seq, i, task: event.task).toString(),
+                    child: ServerImage(
+                      server: desk.server,
+                      uri: desk.fileUri(event.seq, i, task: event.task),
                       width: 240,
                       fit: BoxFit.cover,
                       semanticLabel: event.files[i],
-                      errorBuilder: (_, _, _) => Text(
+                      fallback: Text(
                         '${event.files[i]} (지금은 못 불러온다)',
                         style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
                       ),

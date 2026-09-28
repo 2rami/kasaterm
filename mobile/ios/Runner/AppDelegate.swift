@@ -11,6 +11,7 @@ import UserNotifications
   private var channel: FlutterMethodChannel?
   private var pendingTap: [String: Any]?
   private var lastToken: String?
+  private var pushEnabled = UserDefaults.standard.bool(forKey: "kasaLegacyPushEnabled")
 
   override func application(
     _ application: UIApplication,
@@ -32,7 +33,15 @@ import UserNotifications
       guard let self else { return }
       switch call.method {
       case "request":
+        self.pushEnabled = true
+        UserDefaults.standard.set(true, forKey: "kasaLegacyPushEnabled")
         self.requestPush()
+        result(nil)
+      case "suspend":
+        self.pushEnabled = false
+        UserDefaults.standard.set(false, forKey: "kasaLegacyPushEnabled")
+        self.pendingTap = nil
+        UIApplication.shared.unregisterForRemoteNotifications()
         result(nil)
       case "pending":
         let tap = self.pendingTap
@@ -51,6 +60,7 @@ import UserNotifications
     center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
       guard granted else { return }
       DispatchQueue.main.async {
+        guard self.pushEnabled else { return }
         UIApplication.shared.registerForRemoteNotifications()
       }
     }
@@ -77,6 +87,7 @@ import UserNotifications
     _ application: UIApplication,
     didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
   ) {
+    guard pushEnabled else { return }
     let token = deviceToken.map { String(format: "%02x", $0) }.joined()
     lastToken = token
     channel?.invokeMethod("onToken", arguments: ["token": token, "env": Self.env])
@@ -103,7 +114,7 @@ import UserNotifications
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
-    completionHandler([.banner, .list, .sound])
+    completionHandler(pushEnabled ? [.banner, .list, .sound] : [])
   }
 
   override func userNotificationCenter(
@@ -111,6 +122,7 @@ import UserNotifications
     didReceive response: UNNotificationResponse,
     withCompletionHandler completionHandler: @escaping () -> Void
   ) {
+    guard pushEnabled else { completionHandler(); return }
     let tap = Self.payload(response.notification.request.content.userInfo)
     if let ch = channel {
       ch.invokeMethod("onTap", arguments: tap)

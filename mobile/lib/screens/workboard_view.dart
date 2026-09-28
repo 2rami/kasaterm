@@ -674,6 +674,7 @@ class _WorkRow extends StatelessWidget {
     final Widget lead = pane == null
         ? _LaneIcon(item: i)
         : StudentFace(
+            server: server,
             slug: pane.slug,
             url: pane.slug == null || i.source == WorkSource.demo
                 ? null

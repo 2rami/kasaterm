@@ -689,7 +689,13 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
       _scaled = null;
     }
     if (old.bottomTick != widget.bottomTick && _scroll.hasClients) {
-      _scroll.jumpTo(0);
+      final tick = widget.bottomTick;
+      // Scroll notifications also rebuild AppBar, outside this subtree's build.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && widget.bottomTick == tick && _scroll.hasClients) {
+          _scroll.jumpTo(0);
+        }
+      });
     }
   }
 
@@ -760,7 +766,8 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
           : math.max(20, (constraints.maxWidth / metrics.width).floor());
       final st = widget.student;
       final slug = st?.slug;
-      final t = _seconds;
+      final animate = TickerMode.valuesOf(context).enabled && !MediaQuery.disableAnimationsOf(context);
+      final t = animate ? _seconds : 0.0;
       final live = st == null
           ? widget.grid
           : restyleClaude(
@@ -783,7 +790,8 @@ class _WrappedCanvasState extends State<WrappedCanvas> {
             );
       final animated = live is StyledGrid && live.animated;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _setAnimating(animated);
+        if (!mounted) return;
+        _setAnimating(animated && animate);
         final want = _pendingScroll;
         if (want != null && _scroll.hasClients) {
           final max = _scroll.position.maxScrollExtent;

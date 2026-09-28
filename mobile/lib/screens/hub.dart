@@ -117,7 +117,8 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
           title: Row(
             children: [
               Image.asset(
-                'assets/students/schale-logo.png',
+                'assets/icons/kasa.png',
+                width: 22,
                 height: 22,
                 errorBuilder: (_, _, _) => const SizedBox.shrink(),
               ),
@@ -178,25 +179,7 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
         body: Stack(
           fit: StackFit.expand,
           children: [
-            // 데스크톱이 학생을 고르는 화면 뒤에 까는 교실. 목록이 읽히게 배경색으로 덮는다.
-            Image.asset(
-              'assets/schale-classroom.png',
-              fit: BoxFit.cover,
-              alignment: Alignment.topCenter,
-              errorBuilder: (_, _, _) => const SizedBox.shrink(),
-            ),
-            DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    theme.scaffoldBackgroundColor.withValues(alpha: 0.72),
-                    theme.scaffoldBackgroundColor.withValues(alpha: 0.96),
-                  ],
-                ),
-              ),
-            ),
+            ColoredBox(color: theme.scaffoldBackgroundColor),
             RefreshIndicator(onRefresh: _model.refresh, child: _body(theme)),
             // 지난번 목록을 먼저 그렸다 — 새 목록이 닿을 때까지 위에 얇게 「확인 중」.
             if (_model.showingCached)
@@ -821,6 +804,7 @@ class _MiniCellState extends State<_MiniCell> {
                 ),
               if (q != null && face >= 14)
                 StudentFace(
+                  server: widget.server,
                   slug: q.slug,
                   url: q.slug == null
                       ? null
@@ -1027,6 +1011,7 @@ class _MiniTabRow extends StatelessWidget {
                         ),
                       )
                     : StudentFace(
+                        server: server,
                         slug: tabs[i]!.slug,
                         url: tabs[i]!.slug == null
                             ? null
@@ -1125,6 +1110,7 @@ class _PaneTile extends StatelessWidget {
                       style: st,
                       size: 40,
                       child: StudentFace(
+                        server: server,
                         slug: slug,
                         url: slug == null
                             ? null

@@ -242,6 +242,7 @@ class StudentWorkCard extends StatelessWidget {
             Row(
               children: [
                 StudentFace(
+                  server: lookup.server,
                   slug: pane?.slug,
                   url: pane?.slug == null
                       ? null

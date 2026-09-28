@@ -103,9 +103,8 @@ class HubModel extends ChangeNotifier {
   /// 목록 요청 하나의 상한. 관문 왕복이 1초 안팎이라 넉넉하고, 넘으면 그 기계만 직전 것을 둔다.
   static const listTimeout = Duration(seconds: 10);
 
-  static final Map<String, _Snapshot> _cache = {};
+  static final Map<Object, _Snapshot> _cache = {};
 
-  @visibleForTesting
   static void clearCache() => _cache.clear();
 
   /// 첫 화면에서 미리 한 바퀴 받아 둔다 — 학생 목록을 여는 순간 이미 그려져 있게.
@@ -209,7 +208,7 @@ class HubModel extends ChangeNotifier {
   final Map<Timer, Completer<void>> _sleeps = {};
 
   void _seed() {
-    final c = _cache[server.root.toString()];
+    final c = _cache[server.cacheIdentity];
     if (c == null) return;
     _rootPanes = c.rootPanes;
     _rootLabels = c.rootLabels;
@@ -548,7 +547,8 @@ class HubModel extends ChangeNotifier {
   }
 
   void _save() {
-    _cache[server.root.toString()] = _Snapshot()
+    if (_disposed || server.isClosed) return;
+    _cache[server.cacheIdentity] = _Snapshot()
       ..rootPanes = _rootPanes
       ..rootLabels = _rootLabels
       ..rootLayouts = _rootLayouts
