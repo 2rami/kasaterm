@@ -13,6 +13,11 @@ A mirror owns its layout and reading position, not the source workspace.
   on a neighbour when the mirrored source pane is no longer in any room.
 - A newly created source pane follows into an existing matching mirror room.
   The initial snapshot is a baseline, not a request to open historical panes.
+  Only view mirrors (device card, new remote room, unfold) inside a view window
+  anchor this. A local pane handed over in place (`to`, migrate — it carries
+  `origin_cwd`) or a mirror sharing a room with local panes never pulls source
+  panes or rooms in: `to` lands in the source's active room, so it used to drag
+  every new student there into the viewer's own room.
   Locally dismissed mirrors stay dismissed; mirrors are never mirrored again.
 - Explicit source closure sends `source-closed` immediately, including when the
   source PTY is retained for undo. A fresh `closed: true` snapshot is a fallback.

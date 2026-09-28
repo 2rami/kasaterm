@@ -126,7 +126,7 @@ impl App {
         }
         for machine in &machines {
             let Some(base) = machine.get("base").and_then(|v| v.as_str()) else { continue };
-            let mirrors = self.mirror_sync_views(base);
+            let mirrors = self.mirror_sync_anchors(base);
             let rows = source_rows(machine);
             let occupied: HashSet<u64> = rows.iter()
                 .filter(|row| mirrors.iter().any(|(_, id)| id == &row.id))
@@ -163,8 +163,11 @@ impl App {
             if candidate.after > Instant::now() {
                 self.mirror_sync.queue.push_back(candidate); continue;
             }
-            let views = self.mirror_sync_views(&candidate.base);
-            if views.is_empty() || views.iter().any(|(_, id)| id == &candidate.source) { continue; }
+            if self.mirror_sync_anchors(&candidate.base).is_empty()
+                || self.mirror_sync_views(&candidate.base).iter().any(|(_, id)| id == &candidate.source)
+            {
+                continue;
+            }
             match self.mirror_sync_source_alive(&candidate, &machines) {
                 Some(true) => {},
                 Some(false) => continue,
@@ -204,6 +207,17 @@ impl App {
         }).collect()
     }
 
+    /// 따라 붙기의 닻 — 보기로 연 거울(기기 카드·새 방·펼치기)이 그 기계 pane 만 앉은 보기 창에 있을 때.
+    /// 로컬 pane 을 그 자리에서 넘긴 거울(`to`·이사, origin_cwd 가 있다)과 로컬 pane 과 섞인 방의 거울은 닻이
+    /// 아니다: `to` 는 저쪽 **활성 방**에 셸을 세우므로 닻으로 삼으면 그 방에 학생이 생길 때마다 이 방에 끼어들고,
+    /// 저쪽 새 방은 여기 새 창으로 열렸다(2026-09-28 「가끔 다른 기기 pane 이 이 방에 뜨면 헷갈린다」).
+    fn mirror_sync_anchors(&self, base: &str) -> Vec<(String, String)> {
+        self.mirror_sync_views(base).into_iter()
+            .filter(|(local, _)| kasa_mcp::remote::remote_info(local).is_some_and(|info| info.origin_cwd.is_none())
+                && self.window_of_pane(local).is_some_and(|window| self.remote_view_of_window(window).is_some()))
+            .collect()
+    }
+
     fn mirror_sync_source_alive(&self, candidate: &Candidate, machines: &[serde_json::Value]) -> Option<bool> {
         machines.iter().find(|m| m["base"].as_str() == Some(candidate.base.as_str()))
             .filter(|m| m["online_via"].as_str() == Some("direct"))
@@ -217,8 +231,9 @@ impl App {
         let machines = kasa_mcp::machines::snapshot();
         for mut ready in ready {
             self.mirror_sync.pending.remove(&ready.local);
-            let views = self.mirror_sync_views(&ready.candidate.base);
-            if views.is_empty() || views.iter().any(|(_, id)| id == &ready.candidate.source)
+            let views = self.mirror_sync_anchors(&ready.candidate.base);
+            if views.is_empty()
+                || self.mirror_sync_views(&ready.candidate.base).iter().any(|(_, id)| id == &ready.candidate.source)
                 || self.mirror_sync_source_alive(&ready.candidate, &machines) == Some(false)
             {
                 continue;
