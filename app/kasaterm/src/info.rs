@@ -2236,7 +2236,7 @@ mod execution_overview_tests {
         info.pane_expanded.insert(key);
         let lines = execution_lines(&snap, &info);
         assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Kv { name, value: None, tip, .. } if name == "제목" && tip.contains(title))));
-        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Kv { name, value: Some(v), .. } if name == "작업 폴더" && v == path)));
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Kv { name, value: Some(v), .. } if name == "폴더" && v == path)));
         assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == &format!("node {args}"))));
     }
     #[test]
@@ -2383,13 +2383,15 @@ mod execution_overview_tests {
         assert_eq!(info.scope, InfoScope::CurrentRoom, "the panel is a summary of the current window");
         let lines = execution_lines(&snap, &info);
         assert!(!lines.iter().any(|line| matches!(line, ExecutionLine::Group(group, _) if group.pane == "%3")));
-        let texts: Vec<&str> = lines.iter().filter_map(|line| match line { ExecutionLine::Text(text, _) => Some(text.as_str()), _ => None }).collect();
-        let first = texts.iter().position(|text| text.starts_with("기기 ")).unwrap();
-        assert!(texts[first].ends_with("· 폴더 ~/Desktop/kasaterm"));
-        assert_eq!(texts[first + 1], "에이전트 claude · 모델 claude-fable-5-1");
-        assert!(texts.iter().any(|text| text.starts_with("기기 맥미니 · 폴더 미확인")), "{texts:?}");
-        assert!(texts.iter().any(|text| *text == "에이전트 zsh · 모델 미확인"));
-        assert!(texts.iter().position(|text| text.contains("대기 ·")).unwrap() > first + 1, "state follows the identity lines");
+        let rows: Vec<(&str, Option<&str>)> = lines.iter().filter_map(|line| match line { ExecutionLine::Kv { name, value, .. } => Some((name.as_str(), value.as_deref())), _ => None }).collect();
+        let first = rows.iter().position(|(name, _)| *name == "기기").unwrap();
+        assert_eq!(&rows[first..first + 5], &[("기기", Some(local_machine_name())), ("폴더", Some("~/Desktop/kasaterm")), ("에이전트", Some("claude")), ("모델", Some("claude-fable-5-1")), ("상태", Some("대기 · claude"))]);
+        let remote_at = rows.iter().rposition(|(name, _)| *name == "기기").unwrap();
+        assert_eq!(&rows[remote_at..remote_at + 2], &[("기기", Some("맥미니")), ("에이전트", Some("zsh"))], "unknown folder and model stay out of the folded row");
+        let mut expanded = state::InfoState::default();
+        expanded.pane_expanded.insert(execution_key(&snap.panes[1]));
+        let lines = execution_lines(&snap, &expanded);
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Kv { name, value: None, tip, .. } if name == "모델" && !tip.is_empty())), "expanded rows say why a value is unknown");
     }
 }
 
@@ -2458,6 +2460,13 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
         if let Some(now) = active_tab.and_then(|pane| snap.now.get(pane)).or_else(|| snap.now.get(&group.pane)) {
             lines.push(ExecutionLine::Now(now));
         }
+        // 현재 창 요약 — 기기·폴더·에이전트·모델이 상태보다 먼저. 모델은 하네스가 보고한 값만.
+        // 모르는 값(「—」)은 접힌 줄에 안 세운다 — 실행 상세를 펼치면 까닭과 함께 보인다.
+        lines.push(kv("기기", group.machine.clone().unwrap_or_else(|| local_machine_name().to_string()), "", false));
+        if expanded || !group.cwd.is_empty() { lines.push(kv("폴더", group.cwd.clone(), "작업 폴더를 아직 못 읽었어요", false)); }
+        let agent = if group.harness.is_empty() { group.shell.clone() } else { group.harness.clone() };
+        if expanded || !agent.is_empty() { lines.push(kv("에이전트", agent, "실행 대상이 없어요", false)); }
+        if expanded || !group.model.is_empty() { lines.push(kv("모델", group.model.clone(), "하네스가 아직 모델을 보고하지 않았어요", false)); }
         if group.closed { lines.push(ExecutionLine::Text("접힌 pane에서 등록 서버 실행".into(), true)); }
         let task = snap.tasks.get(&group.pane);
         let mut runtime = if group.harness.is_empty() { group.rows.first().map(|row| row.name.as_str()).unwrap_or(if group.shell.is_empty() { "실행 대상 없음" } else { &group.shell }) } else { &group.harness }.to_string();
@@ -2489,7 +2498,6 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
             None if !group.session.is_empty() => lines.push(kv("제목", None, &format!("전체 제목을 기록에서 못 읽었어요 — 짧은 제목은 「{}」", group.session), false)),
             None => {}
         }
-        if !group.cwd.is_empty() { lines.push(kv("작업 폴더", group.cwd.clone(), "", false)); }
         if let Some(server) = &group.registered { lines.push(ExecutionLine::Context(server.command.clone())); }
         for process in &group.rows {
             lines.push(ExecutionLine::Process(process));

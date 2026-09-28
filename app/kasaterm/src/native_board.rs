@@ -28,7 +28,6 @@ pub(crate) enum BoardTab {
 }
 
 impl BoardTab {
-    #[cfg(test)]
     pub(crate) const ALL: [Self; 6] = [
         Self::Work,
         Self::Chat,
@@ -1767,10 +1766,11 @@ fn hub_layout(area: Rect, tab: BoardTab, body_top: f32) -> HubLayout {
 
 pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutput {
     let (ax, ay, aw, ah) = snapshot.area;
-    let pad = if aw < 400.0 { 12.0 } else if aw < 760.0 { 20.0 } else { 28.0 };
     let mut hits = Vec::new();
     let mut caret_rect = None;
     g.rect(ax, ay, aw, ah, theme::bg());
+    // 왼쪽 목록은 프라나의 판(사이드바 옆 슬라이드)과 같은 틀, 내용은 계정 작업현황·나쵸 대화.
+    let nav_w = if aw < 460.0 { 112.0 } else if aw < 760.0 { 154.0 } else { 190.0 };
     // 목업(플랫): 옆 목록은 구분선 없이 배경만 다르고, 머리글은 작은 흐림 글자 —
     // 설정창과 같은 틀. 아이콘·강조 막대는 걷었다.
     g.rect(ax, ay, nav_w, ah, theme::panel_bg());
@@ -1818,42 +1818,20 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
 
     let content_x = ax + nav_w + if aw < 760.0 { 20.0 } else { 28.0 };
     let avail_w = (aw - nav_w - if aw < 760.0 { 40.0 } else { 56.0 }).max(1.0);
-    let content_w = avail_w.min(800.0);
-    // 할 일 판만 옆 칸(기기·학생·상세)을 둔다. 읽기 열 800 은 그대로 두고 남는 폭이
-    // 옆 칸 최소(260)를 넘을 때만 세운다 — 좁으면 같은 내용이 열 아래로 내려간다.
-    let side = (snapshot.tab == BoardTab::Work && avail_w >= 800.0 + 24.0 + 260.0)
-        .then(|| (content_x + content_w + 24.0, (avail_w - content_w - 24.0).min(340.0)));
-    let head_w = side.map_or(content_w, |(sx, sw)| sx + sw - content_x);
     text(g, content_x, ay + 22.0, snapshot.tab.label(), 20.0, theme::text(), true);
-    // 기준 pane 알약: 채움 없는 테두리, pane 이름만 강조색(목업 .head .pill).
-    let refresh = (content_x + head_w - 30.0, ay + 18.0, 30.0, 30.0);
-    let pane = if matches!(snapshot.tab, BoardTab::Overview | BoardTab::Work) {
-        "모든 방".into()
-    } else if snapshot.target_cwd.is_empty() {
-        snapshot.target_pane.clone()
-    } else {
-        icon_button(g, snapshot, &mut hits, (right - 94.0, ay + 9.0, 26.0, 26.0), "settings", Target::Tools);
+    icon_button(g, snapshot, &mut hits, (content_x + avail_w - 30.0, ay + 18.0, 30.0, 30.0), "rotate-cw", Target::Refresh);
+    if snapshot.refreshing && avail_w >= 300.0 {
+        text(g, content_x + avail_w - 92.0, ay + 27.0, "갱신 중", 10.5, theme::text_mute(), false);
     }
-    icon_button(g, snapshot, &mut hits, (right - 60.0, ay + 9.0, 26.0, 26.0), "rotate-cw", Target::Refresh);
-    icon_button(g, snapshot, &mut hits, (right - 26.0, ay + 9.0, 26.0, 26.0), "x", Target::Return);
-    divider(g, ax + pad, ay + 44.0, header_w);
-
-    let mut body_top = ay + 58.0;
-    if snapshot.tools_open {
-        overview_choices(g, snapshot, &mut hits, ax + pad, &mut body_top, header_w,
-            [BoardTab::Overview, BoardTab::Agents, BoardTab::Git, BoardTab::Machines]
-                .into_iter().map(|tab| (tab.label().into(), Target::Tab(tab), tab == snapshot.tab, true)).collect());
-        body_top += 6.0;
-    }
-    let layout = hub_layout(snapshot.area, snapshot.tab, body_top);
+    divider(g, content_x, ay + 56.0, avail_w);
+    let body_top = ay + 66.0;
+    let layout = hub_layout((content_x, ay, avail_w, ah), snapshot.tab, body_top);
     let mut content_h = 0.0;
     let mut view_h = 0.0;
     if let Some((x, top, width, height)) = layout.work {
         g.push_clip(x, top, width, height);
         let mut y = top - snapshot.scroll;
         if !matches!(snapshot.tab, BoardTab::Work | BoardTab::Chat) {
-            text(g, x, y, snapshot.tab.label(), 20.0, theme::text(), true);
-            y += 30.0;
             overview_note(g, x, &mut y, width, snapshot.tab.desc(), theme::text_dim());
         }
         if let Some((ok, message)) = &snapshot.toast {

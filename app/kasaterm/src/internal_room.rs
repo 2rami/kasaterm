@@ -240,11 +240,13 @@ mod tests {
             "높이를 0 으로 내리면 상태줄이 창 밖에서 그려진다"
         );
         let render = include_str!("render.rs");
-        assert_eq!(
-            render.matches("- TITLE_HEIGHT - status_h").count(),
-            1,
-            "설정 화면은 상태줄 자리를 남겨야 한다"
-        );
+        let compact: String = render.split_whitespace().collect();
+        assert!(compact.contains("native_settings_snapshot(crate::native_settings::content_area((win_px.0/scale,win_px.1/scale),left,status_h,"),
+            "설정 패널은 클릭 영역과 같은 상태줄 제외 함수를 사용해야 한다");
+        for height in [480.0, 720.0, 1000.0] {
+            let area = crate::native_settings::content_area((1000.0, height), 200.0, 30.0);
+            assert_eq!(area.1 + area.3, height - 30.0);
+        }
         assert!(
             include_str!("left_panel.rs").contains("- TITLE_HEIGHT - self.status_h()"),
             "왼쪽 판(보드·아로나)도 상태줄 자리를 남겨야 한다"

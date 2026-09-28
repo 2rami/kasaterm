@@ -7513,7 +7513,7 @@ impl App {
         self.toggle_arona_panel(event_loop);
         eprintln!(
             "[autoarona] toggled → open={}",
-            self.board_room_active() && self.board_scene.tab() == crate::native_board::BoardTab::Chat
+            self.board_panel_open() && self.board_scene.tab() == crate::native_board::BoardTab::Chat
         );
     }
     pub(crate) fn arm_autosplit(&mut self) {

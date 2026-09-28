@@ -3087,7 +3087,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.reproject_main_cursor();
             }
             if let WindowEvent::MouseInput { button, .. } = &event {
-                let workspace = (self.settings_room_active() || self.board_room_active()).then(|| {
+                let workspace = (self.settings_room_active() || self.board_panel_open()).then(|| {
                     let size = self.window.as_ref().unwrap().inner_size();
                     let scale = self.effective_scale();
                     let left = self.effective_sidebar_w();

@@ -2897,26 +2897,21 @@ impl App {
             self.toggle_git_col();
         }
     }
-    pub(crate) fn open_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
+    /// 아로나(나쵸 대화)는 계정 작업현황 판의 「나쵸 대화」 탭이다 — 왼쪽 판을 열고 그 탭으로.
+    pub(crate) fn open_arona_panel(&mut self, _event_loop: &ActiveEventLoop) {
         if self.lite {
             return;
         }
-        if !crate::socket::read_shim_inject() {
-            self.set_toast("아로나 화면은 Agent 연동을 켠 뒤 열 수 있어요".to_string());
-            return;
-        }
-        // 판 자리는 하나다 — 보드가 떠 있으면 아로나가 넘겨받는다.
-        if self.left_panel.kind == Some(crate::left_panel::LeftPanelKind::Board) {
-            self.native_board_blur();
-            self.board_scene.leave();
-        }
-        if self.open_inline_web(event_loop, InlineWebKind::Arona) {
-            self.show_left_panel(crate::left_panel::LeftPanelKind::Arona);
+        if self.board_panel_open() || self.open_board_panel() {
+            self.board_scene.set_tab(crate::native_board::BoardTab::Chat);
+            self.prime_hit_areas();
+            self.handoff_ime_to_active_surface();
+            self.repaint_all();
         }
     }
 
     pub(crate) fn close_arona_panel(&mut self) {
-        if self.left_panel.kind == Some(crate::left_panel::LeftPanelKind::Arona) {
+        if self.board_panel_open() && self.board_scene.tab() == crate::native_board::BoardTab::Chat {
             self.close_left_panel();
         }
     }
@@ -3080,22 +3075,16 @@ impl App {
     }
 
     pub(crate) fn toggle_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
-        if !crate::socket::read_shim_inject() {
-            self.set_toast("아로나 화면은 Agent 연동을 켠 뒤 열 수 있어요".to_string());
-            return;
-        }
-        if self.left_panel.kind == Some(crate::left_panel::LeftPanelKind::Arona) {
+        if self.board_panel_open() && self.board_scene.tab() == crate::native_board::BoardTab::Chat {
             self.close_left_panel();
             return;
         }
-        // 아로나는 「지금 보는 pane」을 작업 대상으로 삼는다. 설정은 셸 없는
-        // 표식 pane 이라, 그 방에서 열면 대상이 `\0kasaterm-settings` 같은 내부 id 로
-        // 굳어 아래 작업이 엉뚱한 곳을 가리킨다. 열기 전에 원래 사용자 방으로
-        // 돌려보내고, 돌아갈 방이 없으면 아예 열지 않는다.
+        // 나쵸는 「지금 보는 pane」을 작업 대상으로 삼는다. 설정은 셸 없는 표식 pane 이라 그 방에서
+        // 열면 대상이 내부 id 로 굳는다 — 먼저 사용자 방으로 돌아가고, 돌아갈 방이 없으면 안 연다.
         if self.internal_room_kind_at(self.active_window).is_some()
             && !self.return_from_active_internal_room()
         {
-            self.set_toast("아로나를 열 사용자 방이 없어요".to_string());
+            self.set_toast("나쵸 대화를 열 사용자 방이 없어요".to_string());
             return;
         }
         self.open_arona_panel(event_loop);
