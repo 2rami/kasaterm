@@ -20,6 +20,18 @@ impl Drop for Temp {
 fn ctx(account: &str, device: &str) -> AuthContext {
     AuthContext::authenticated(account, device).unwrap()
 }
+/// 닫은 저장소를 다시 연다. 같은 검사 바이너리의 다른 검사가 PTY 를 fork 하면 자식이 exec 전까지
+/// 잠금 fd 를 물고 있어 flock 이 잠깐 안 풀린다(병렬 전체 실행에서 5번 중 4번 재현) — 그 틈만 기다린다.
+fn reopen(dir: &Temp) -> Store {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match Store::open(dir.0.clone()) {
+            Ok(store) => return store,
+            Err(error) if std::time::Instant::now() >= deadline => panic!("reopen failed: {error:?}"),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+}
 pub(super) fn ready() -> (Temp, Store, AuthContext) {
     let dir = Temp::new();
     let store = Store::open(dir.0.clone()).unwrap();
@@ -101,7 +113,7 @@ fn vault_is_private_single_writer_and_survives_restart() {
         0o700
     );
     drop(store);
-    let reopened = Store::open(dir.0.clone()).unwrap();
+    let reopened = reopen(&dir);
     assert_eq!(
         reopened.snapshot(&alice).unwrap().tasks[0].original_prompt,
         task.original_prompt
@@ -125,7 +137,7 @@ fn corrupt_cross_account_envelopes_and_missing_master_fail_closed() {
         serde_json::to_vec(&corrupt).unwrap(),
     )
     .unwrap();
-    let reopened = Store::open(dir.0.clone()).unwrap();
+    let reopened = reopen(&dir);
     assert!(matches!(reopened.snapshot(&alice), Err(Error::Storage)));
     drop(reopened);
     std::fs::remove_file(dir.0.join("master.key")).unwrap();
@@ -375,7 +387,7 @@ fn verified_completion_claim_is_durable_once_across_devices_and_replays() {
         .claim_notification(&ctx("bob", "device-other"), &task.id, task.rev, 104)
         .is_err());
     drop(store);
-    let store = Store::open(dir.0.clone()).unwrap();
+    let store = reopen(&dir);
     assert!(store
         .claim_notification(&alice, &task.id, task.rev, 105)
         .unwrap()
