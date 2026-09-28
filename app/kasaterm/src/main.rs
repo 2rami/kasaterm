@@ -4653,6 +4653,8 @@ pub(crate) enum SettingsAction {
     /// 마지막 칸은 승인을 **어느 브라우저**에서 받을지다. 되살리려는 계정이 이미
     /// 브라우저에 로그인돼 있으면 쓰던 창이 훨씬 짧다(`settings::LoginBrowser`).
     ReauthAccount(AccountProvider, String, settings::LoginBrowser),
+    /// 다른 기기에 로그인된 계정(관문 목록의 열쇠)을 이 기기에도 새 슬롯으로 로그인한다.
+    AdoptSharedAccount(AccountProvider, String),
     /// 진행 중인 숨은 OAuth 로그인과 그 브라우저 자식을 함께 멈춘다.
     CancelLogin,
     /// 계정 칸이 다룰 기계를 고른다(`true` = 본진).

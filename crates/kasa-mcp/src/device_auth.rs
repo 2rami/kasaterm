@@ -23,16 +23,36 @@ pub struct Stamp {
     identity: String,
 }
 
+impl Stamp {
+    fn accepts(&self, credential: &DeviceCred, gateway: Option<&str>, epoch: u64) -> bool {
+        self.epoch == epoch && self.identity == identity(credential)
+            && gateway.is_some_and(|gateway| gateway.trim_end_matches('/') == credential.relay.trim_end_matches('/'))
+    }
+}
+
 #[cfg(test)]
 impl Stamp {
     pub(crate) fn fixture() -> Self { Self { epoch: 0, identity: "fixture".into() } }
+    pub(crate) fn fixture_at(epoch: u64) -> Self { Self { epoch, identity: "fixture".into() } }
 }
 
 fn identity(credential: &DeviceCred) -> String {
     crate::relay_auth::token_hash(&format!("{}\0{}\0{}\0{}", credential.relay, credential.account, credential.device_id, credential.token))
 }
 
+fn sync_isolated(has_env: impl Fn(&str) -> bool) -> bool {
+    ["KASATERM_WINDOW_SIZE", "KASATERM_WINDOW_POS", "KASATERM_AUTOQUIT_MS",
+        "KASATERM_SETTINGS_FILE", "KASATERM_DEVICE_FILE", "KASATERM_MACHINES_FILE"]
+        .iter().any(|name| has_env(name))
+}
+
+pub(crate) fn sync_environment_allowed() -> bool {
+    // A fixture must never fall back to the user's saved account or provider identities.
+    !cfg!(test) && !sync_isolated(|name| std::env::var_os(name).is_some())
+}
+
 pub(crate) fn capture() -> Option<(DeviceCred, Stamp)> {
+    if !sync_environment_allowed() { return None; }
     let _guard = CREDENTIALS.lock().ok()?;
     let gateway = crate::mobile::gateway()?;
     let credential = for_gateway(&gateway)?;
@@ -42,10 +62,10 @@ pub(crate) fn capture() -> Option<(DeviceCred, Stamp)> {
 }
 
 pub(crate) fn with_current<T>(stamp: &Stamp, operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    if !sync_environment_allowed() { return Err("account synchronization disabled in isolated run".into()); }
     let _guard = CREDENTIALS.lock().map_err(|_| "credential lock unavailable")?;
     let credential = current().ok_or("account changed")?;
-    let gateway_matches = crate::mobile::gateway().is_some_and(|gateway| gateway.trim_end_matches('/') == credential.relay.trim_end_matches('/'));
-    if EPOCH.load(Ordering::Acquire) != stamp.epoch || identity(&credential) != stamp.identity || !gateway_matches {
+    if !stamp.accepts(&credential, crate::mobile::gateway().as_deref(), EPOCH.load(Ordering::Acquire)) {
         return Err("account changed".into());
     }
     if REJECTED.lock().map_err(|_| "credential lock unavailable")?.as_deref() == Some(stamp.identity.as_str()) {
@@ -55,9 +75,16 @@ pub(crate) fn with_current<T>(stamp: &Stamp, operation: impl FnOnce() -> Result<
 }
 
 pub(crate) fn reject(stamp: &Stamp) {
-    if with_current(stamp, || Ok(())).is_ok() {
+    reject_if(stamp, || true);
+}
+
+pub(crate) fn reject_if(stamp: &Stamp, relevant: impl FnOnce() -> bool) {
+    let _ = with_current(stamp, || {
+        if !relevant() { return Ok(()); }
         if let Ok(mut rejected) = REJECTED.lock() { *rejected = Some(stamp.identity.clone()); }
-    }
+        crate::agent_accounts::clear_cache();
+        Ok(())
+    });
 }
 
 pub(crate) fn reject_token(token: &str) {
@@ -120,6 +147,7 @@ fn client() -> anyhow::Result<reqwest::Client> {
 async fn login(account: &str, password: &str) -> anyhow::Result<DeviceCred> {
     let (epoch, previous) = {
         let _guard = CREDENTIALS.lock().map_err(|_| anyhow::anyhow!("credential lock unavailable"))?;
+        crate::agent_accounts::clear_cache();
         (EPOCH.fetch_add(1, Ordering::AcqRel) + 1, current())
     };
     let gateway = crate::mobile::gateway().ok_or_else(|| anyhow::anyhow!("관문이 꺼져 있어요"))?;
@@ -167,6 +195,7 @@ async fn logout() -> anyhow::Result<()> {
     let previous = {
         let _guard = CREDENTIALS.lock().map_err(|_| anyhow::anyhow!("credential lock unavailable"))?;
         EPOCH.fetch_add(1, Ordering::AcqRel);
+        crate::agent_accounts::clear_cache();
         let previous = current();
         clear()?;
         crate::account_sync::credentials_changed(previous.as_ref(), None);
@@ -252,7 +281,7 @@ fn status_from(cred: Option<&DeviceCred>, gateway: Option<&str>, up: &crate::upl
     })
 }
 
-/// 소켓 `relay.account` — `{op: login|logout|devices|revoke|status, …}`. 소켓 핸들러는 동기라
+/// 소켓 `relay.account` — `{op: login|logout|devices|revoke|status|agents, …}`. 소켓 핸들러는 동기라
 /// 따로 스레드를 세워 그 안에서만 런타임을 돌린다(`tell_service::remote` 와 같은 방식).
 pub fn handle(params: &Value) -> anyhow::Result<Value> {
     let op = params["op"].as_str().unwrap_or("status").to_string();
@@ -275,6 +304,11 @@ pub fn handle(params: &Value) -> anyhow::Result<Value> {
                     let id = params["device_id"].as_str().ok_or_else(|| anyhow::anyhow!("device_id 가 필요해요"))?;
                     revoke(id).await.map(|_| json!({ "ok": true }))
                 }
+                // 이 기기 슬롯을 관문에 올리고 합친 코딩 에이전트 계정 목록을 받는다.
+                "agents" => {
+                    let list = crate::agent_accounts::sync(&crate::agent_accounts::local_snapshot()).await?;
+                    Ok(json!({ "ok": true, "accounts": list }))
+                }
                 other => anyhow::bail!("모르는 동작이에요: {other}"),
             }
         })
@@ -286,6 +320,35 @@ pub fn handle(params: &Value) -> anyhow::Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_stamp_rejects_gateway_account_token_and_login_epoch_changes() {
+        let cred = DeviceCred { relay:"https://relay.example".into(), account:"one".into(),
+            device_id:"fixture-device".into(), token:"fixture-token".into() };
+        let stamp = Stamp { epoch: 3, identity: identity(&cred) };
+        assert!(stamp.accepts(&cred, Some("https://relay.example/"), 3));
+        assert!(!stamp.accepts(&cred, None, 3));
+        assert!(!stamp.accepts(&cred, Some("https://other.example"), 3));
+        assert!(!stamp.accepts(&cred, Some(&cred.relay), 4));
+        for changed in [
+            DeviceCred { account:"two".into(), ..cred.clone() },
+            DeviceCred { token:"rotated-fixture".into(), ..cred.clone() },
+            DeviceCred { device_id:"replacement-device".into(), ..cred.clone() },
+            DeviceCred { relay:"https://other.example".into(), ..cred.clone() },
+        ] {
+            assert!(!stamp.accepts(&changed, Some(&changed.relay), 3));
+        }
+    }
+
+    #[test]
+    fn every_qa_entry_point_disables_implicit_account_sync() {
+        assert!(!sync_isolated(|_| false));
+        for variable in ["KASATERM_WINDOW_SIZE", "KASATERM_WINDOW_POS", "KASATERM_AUTOQUIT_MS",
+            "KASATERM_SETTINGS_FILE", "KASATERM_DEVICE_FILE", "KASATERM_MACHINES_FILE"] {
+            assert!(sync_isolated(|name| name == variable), "{variable}");
+        }
+        assert!(capture().is_none());
+    }
 
     #[test]
     fn saved_credentials_are_not_a_confirmed_connection() {

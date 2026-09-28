@@ -1467,6 +1467,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli done [--surface <id>] <succeeded|failed> [한 줄 요약]  # 브리프 완료 보고 — board 가 idle 추정 대신 이걸 정본으로 싣는다");
     eprintln!("  kasaterm-cli login [<아이디>]                     # 관문 계정으로 이 기기를 붙인다(비밀번호는 화면에 안 찍힌다)");
     eprintln!("  kasaterm-cli logout | devices [status | revoke <device_id>]");
+    eprintln!("  kasaterm-cli agents                               # 다른 기기에 로그인된 Claude·Codex 계정 목록");
     eprintln!("  kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> --summary <글> [--changed <파일,…>]… [--tests <글>] [--next <글>] [--dry-run]");
     eprintln!("                                            # 나쵸가 띄운 학생(KASATERM_ORIGIN=nacho)만. 나쵸 인박스에 원자적으로 넣고 살아 있으면 즉시 깨운다. 토큰·비밀은 거부");
     eprintln!("  app-update run --approval ap_… --rollout FILE [--record FILE] · start --machine ID --request FILE|- · status JOB [--machine ID] # 기기 앱 업데이트(공식 릴리스만·나쵸 승인 1회·차례로·조종 기기 마지막·기기 스위치 KASATERM_APP_UPDATE=on)");
@@ -1631,6 +1632,8 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             }
             Some(other) => return Err(anyhow!("devices [status | revoke <device_id>] — 모르는 것: {other}")),
         },
+        // 이 기기 슬롯을 관문에 올리고 같은 계정 기기들의 코딩 에이전트 계정 목록을 받는다.
+        "agents" => ("relay.account", json!({ "op": "agents" })),
         "ping" => ("system.ping", json!({})),
         "capabilities" => ("system.capabilities", json!({})),
         "identify" => ("system.identify", json!({})),

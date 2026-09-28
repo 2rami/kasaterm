@@ -203,11 +203,14 @@ pub struct Gate {
     live: Arc<Mutex<HashMap<u64, (String, Arc<Uplink>)>>>,
     /// 기기 id → 로그인 기록.
     devices: Arc<Mutex<HashMap<String, DeviceRec>>>,
+    /// 관문 계정 → 그 계정 기기들이 올린 코딩 에이전트 계정 목록(`agent_accounts.rs`).
+    agents: Arc<Mutex<HashMap<String, crate::agent_accounts::Book>>>,
     accounts: Arc<crate::relay_auth::Accounts>,
     limiter: Arc<crate::relay_auth::Limiter>,
     account_sync: Arc<crate::account_sync::server::Store>,
     auth_changes: tokio::sync::watch::Sender<u64>,
     state_path: Option<PathBuf>,
+    state_write: Arc<Mutex<()>>,
     seq: Arc<AtomicU64>,
 }
 
@@ -223,6 +226,8 @@ struct StateFile {
     slugs: HashMap<String, SlugRec>,
     #[serde(default)]
     devices: HashMap<String, DeviceRec>,
+    #[serde(default)]
+    agent_accounts: HashMap<String, crate::agent_accounts::Book>,
 }
 
 fn now_secs() -> u64 {
@@ -234,18 +239,24 @@ fn now_secs() -> u64 {
 
 /// v2(`{version, slugs:{slug:{key_hash,last_seen}}}`) 와 v1(slug→키 해시 평면 맵)을 둘 다 읽는다.
 /// 읽을 수 없는 파일은 옆으로 치워 두고 빈 채로 뜬다 — 조용히 덮어쓰면 묶음이 흔적 없이 사라진다.
-fn load_state(p: &std::path::Path, now: u64) -> (HashMap<String, SlugRec>, HashMap<String, DeviceRec>) {
+type Loaded = (
+    HashMap<String, SlugRec>,
+    HashMap<String, DeviceRec>,
+    HashMap<String, crate::agent_accounts::Book>,
+);
+
+fn load_state(p: &std::path::Path, now: u64) -> Loaded {
     let Ok(raw) = std::fs::read_to_string(p) else {
         return Default::default();
     };
-    let (slugs, devices) = if let Ok(v2) = serde_json::from_str::<StateFile>(&raw) {
-        (v2.slugs, v2.devices)
+    let (slugs, devices, agents) = if let Ok(v2) = serde_json::from_str::<StateFile>(&raw) {
+        (v2.slugs, v2.devices, v2.agent_accounts)
     } else if let Ok(v1) = serde_json::from_str::<HashMap<String, String>>(&raw) {
         let slugs = v1
             .into_iter()
             .map(|(slug, key_hash)| (slug, SlugRec { key_hash, last_seen: now }))
             .collect();
-        (slugs, HashMap::new())
+        (slugs, HashMap::new(), HashMap::new())
     } else {
         let aside = p.with_extension(format!("json.corrupt-{now}"));
         let _ = std::fs::rename(p, &aside);
@@ -256,7 +267,7 @@ fn load_state(p: &std::path::Path, now: u64) -> (HashMap<String, SlugRec>, HashM
         .into_iter()
         .filter(|(_, rec)| now.saturating_sub(rec.last_seen) < SLUG_RETENTION_SECS)
         .collect();
-    (slugs, devices)
+    (slugs, devices, agents)
 }
 
 impl Gate {
@@ -267,7 +278,7 @@ impl Gate {
     }
 
     pub fn with_accounts(state_path: Option<PathBuf>, accounts_path: Option<PathBuf>) -> Self {
-        let (keys, devices) = state_path
+        let (keys, devices, agents) = state_path
             .as_deref()
             .map(|p| load_state(p, now_secs()))
             .unwrap_or_default();
@@ -276,6 +287,7 @@ impl Gate {
             keys: Arc::new(Mutex::new(keys)),
             live: Arc::new(Mutex::new(HashMap::new())),
             devices: Arc::new(Mutex::new(devices)),
+            agents: Arc::new(Mutex::new(agents)),
             accounts: Arc::new(crate::relay_auth::Accounts::new(accounts_path)),
             limiter: Arc::new(crate::relay_auth::Limiter::default()),
             account_sync: Arc::new(crate::account_sync::server::Store::new(
@@ -283,6 +295,7 @@ impl Gate {
             )),
             auth_changes: tokio::sync::watch::channel(0).0,
             state_path,
+            state_write: Arc::new(Mutex::new(())),
             seq: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -290,9 +303,13 @@ impl Gate {
     /// 임시 파일에 쓰고 fsync 뒤 이름을 바꾼다(0600) — 쓰다 죽어도 반쪽 파일이 남지 않는다.
     fn persist(&self) {
         let Some(p) = &self.state_path else { return };
-        let slugs = self.keys.lock().map(|k| k.clone()).unwrap_or_default();
-        let devices = self.devices.lock().map(|d| d.clone()).unwrap_or_default();
-        let body = serde_json::to_string_pretty(&StateFile { version: 2, slugs, devices }).unwrap_or_default();
+        // Concurrent requests must not share a temporary file or overwrite a newer snapshot.
+        let Ok(_write) = self.state_write.lock() else { return };
+        let slugs = match self.keys.lock() { Ok(keys) => keys.clone(), Err(_) => return };
+        let devices = match self.devices.lock() { Ok(devices) => devices.clone(), Err(_) => return };
+        let agent_accounts = match self.agents.lock() { Ok(agents) => agents.clone(), Err(_) => return };
+        let body = serde_json::to_string_pretty(&StateFile { version: 2, slugs, devices, agent_accounts })
+            .unwrap_or_default();
         if let Err(e) = crate::relay_auth::write_private(p, &body) {
             eprintln!("[gateway] 상태 파일을 못 썼어요: {e}");
         }
@@ -411,6 +428,7 @@ pub fn router(gate: Gate) -> Router {
         .route("/relay/account/{*rest}", any(account_proxy))
         .route("/relay/logout", axum::routing::post(logout))
         .route("/relay/devices/{id}/revoke", axum::routing::post(revoke_device))
+        .route("/relay/agent-accounts", get(agent_accounts_get).post(agent_accounts_post))
         .route("/u/{slug}", any(need_slash))
         .route("/u/{slug}/", any(proxy_root))
         .route("/u/{slug}/{*rest}", any(proxy))
@@ -642,6 +660,100 @@ async fn revoke_device(
         return json_err(StatusCode::NOT_FOUND, "no_such_device");
     }
     axum::Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// 같은 관문 계정의 폐기 안 된 기기들(id → 이름).
+fn live_devices(devices: &HashMap<String, DeviceRec>, account: &str) -> HashMap<String, String> {
+    devices
+        .iter()
+        .filter(|(_, d)| d.account == account && d.revoked_at.is_none())
+        .map(|(id, d)| (id.clone(), if d.label.is_empty() { id.clone() } else { d.label.clone() }))
+        .collect()
+}
+
+fn agent_accounts_response(response: impl IntoResponse) -> axum::response::Response {
+    let mut response = response.into_response();
+    response.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    response.headers_mut().insert(header::VARY, "Authorization".parse().unwrap());
+    response
+}
+
+fn agent_accounts_error(status: StatusCode, code: &str) -> axum::response::Response {
+    agent_accounts_response(json_err(status, code))
+}
+
+fn agent_accounts_reply(gate: &Gate, devices: &HashMap<String, DeviceRec>, account: &str, me: &str) -> axum::response::Response {
+    let live = live_devices(devices, account);
+    let list = gate
+        .agents
+        .lock()
+        .unwrap()
+        .get(account)
+        .map(|book| crate::agent_accounts::view(book, &live, me))
+        .unwrap_or_default();
+    agent_accounts_response(axum::Json(serde_json::json!({ "ok": true, "accounts": list })))
+}
+
+fn catalog_device_active(gate: &Gate, devices: &HashMap<String, DeviceRec>, me: &str, device: &DeviceRec) -> bool {
+    devices.get(me).is_some_and(|current| current.revoked_at.is_none()
+        && current.account == device.account && current.token_hash == device.token_hash)
+        && gate.accounts.active(&device.account)
+}
+
+/// `GET /relay/agent-accounts` — 이 관문 계정의 기기들이 올린 코딩 에이전트 계정 목록.
+/// 자격증명은 없다 — 종류·신원·이름·어느 기기에 로그인돼 있나뿐.
+async fn agent_accounts_get(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {
+    let Some((me, d)) = gate.device_of(&headers) else {
+        return agent_accounts_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let devices = gate.devices.lock().unwrap();
+    if !catalog_device_active(&gate, &devices, &me, &d) {
+        return agent_accounts_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    agent_accounts_reply(&gate, &devices, &d.account, &me)
+}
+
+/// `POST /relay/agent-accounts {accounts:[…]}` — 이 기기 몫을 갈아 끼우고 합친 목록을 돌려준다.
+async fn agent_accounts_post(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    let headers = req.headers().clone();
+    if gate.device_of(&headers).is_none() {
+        return agent_accounts_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let bytes = match tokio::time::timeout(Duration::from_secs(10),
+        axum::body::to_bytes(req.into_body(), 64 * 1024)).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => return agent_accounts_error(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
+        Err(_) => return agent_accounts_error(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
+    };
+    #[derive(serde::Deserialize)]
+    struct Body {
+        accounts: Vec<crate::agent_accounts::LocalAccount>,
+    }
+    let Ok(b) = serde_json::from_slice::<Body>(&bytes) else {
+        return agent_accounts_error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let Some((me, d)) = gate.device_of(&headers) else {
+        return agent_accounts_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let response = {
+        // Revocation shares this lock; a slow upload cannot publish after its device was retired.
+        let devices = gate.devices.lock().unwrap();
+        if !catalog_device_active(&gate, &devices, &me, &d) {
+            return agent_accounts_error(StatusCode::UNAUTHORIZED, "unauthorized");
+        }
+        let alive: std::collections::HashSet<String> = live_devices(&devices, &d.account).into_keys().collect();
+        {
+            let mut agents = gate.agents.lock().unwrap();
+            let book = agents.entry(d.account.clone()).or_default();
+            crate::agent_accounts::prune(book, &alive);
+            if let Err(code) = crate::agent_accounts::publish(book, &me, &b.accounts, now_secs()) {
+                return agent_accounts_error(StatusCode::BAD_REQUEST, code);
+            }
+        }
+        agent_accounts_reply(&gate, &devices, &d.account, &me)
+    };
+    gate.persist();
+    response
 }
 
 struct Hello {
@@ -1837,6 +1949,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn agent_account_lists_are_shared_per_relay_account_and_follow_revocation() {
+        let dir = std::env::temp_dir().join(format!("kasa-agents-{}", uuid::Uuid::new_v4()));
+        let addr = spawn_relay(account_gate(&dir)).await;
+        let login = |machine: &str, label: &str| {
+            serde_json::json!({"account":"geno","password":"correct horse","machine_id":machine,"label":label})
+        };
+        let mini = post(addr, "/relay/login", None, login("machine-mini-1", "미니")).await.1;
+        let book = post(addr, "/relay/login", None, login("machine-book-1", "맥북")).await.1;
+        let (mini_token, mini_id) = (mini["token"].as_str().unwrap(), mini["device_id"].as_str().unwrap());
+        let book_token = book["token"].as_str().unwrap();
+
+        let slots = serde_json::json!({ "accounts": [
+            {"provider":"claude","slot":"acct-1","email":"g@gmail.com","org":"g@gmail.com's Organization","label":"지메일"},
+            {"provider":"codex","slot":"codex-1","email":"r@s.ai","workspace":"ws-team","plan":"team","label":"사이오닉팀"},
+        ]});
+        assert_eq!(post(addr, "/relay/agent-accounts", None, slots.clone()).await.0, 401, "토큰 없이 목록을 올렸다");
+        assert_eq!(get_json(addr, "/relay/agent-accounts", "kdt_nope").await.0, 401);
+        let (status, v) = post(addr, "/relay/agent-accounts", Some(mini_token), slots).await;
+        assert_eq!(status, 200, "{v}");
+
+        let (_, seen) = post(addr, "/relay/agent-accounts", Some(book_token), serde_json::json!({"accounts": []})).await;
+        let list = seen["accounts"].as_array().unwrap();
+        assert_eq!(list.len(), 2, "{seen}");
+        let gmail = list.iter().find(|a| a["key"] == "claude:g@gmail.com").unwrap();
+        assert_eq!(gmail["label"], "지메일");
+        assert_eq!(gmail["devices"][0]["label"], "미니");
+        assert_eq!(gmail["devices"][0]["current"], false);
+        assert!(!seen.to_string().contains("kdt_"), "기기 토큰이 목록에 섞였다");
+
+        let bad = serde_json::json!({"accounts": [{"provider":"gemini","email":"x@y.z"}]});
+        assert_eq!(post(addr, "/relay/agent-accounts", Some(book_token), bad).await.0, 400);
+
+        let state = std::fs::read_to_string(dir.join("relay-state.json")).unwrap();
+        assert!(state.contains("claude:g@gmail.com"), "목록이 상태 파일에 안 남았다");
+        drop(state);
+
+        let (status, _) = post(addr, &format!("/relay/devices/{mini_id}/revoke"), Some(book_token), serde_json::json!({})).await;
+        assert_eq!(status, 200);
+        let (_, after) = get_json(addr, "/relay/agent-accounts", book_token).await;
+        assert_eq!(after["accounts"].as_array().unwrap().len(), 0, "폐기한 기기의 계정이 남았다: {after}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn state_round_trip() {
         let dir = std::env::temp_dir().join(format!("kasa-gate-{}", uuid::Uuid::new_v4()));
@@ -1847,6 +2003,202 @@ mod tests {
         let g2 = Gate::new(Some(p));
         assert!(!g2.claim("abcdefghijklmnopqrstuvwxy", "h2"));
         assert!(g2.claim("abcdefghijklmnopqrstuvwxy", "h1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn operational_state_preserves_agent_catalogs_devices_and_slugs_with_separate_settings_sync() {
+        let dir = std::env::temp_dir().join(format!("kasa-state-merge-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("relay-state.json");
+        let fixture = serde_json::json!({
+            "version": 2,
+            "slugs": {SLUG: {"key_hash":"synthetic-uplink-hash", "last_seen":now_secs()}},
+            "devices": {
+                "dev_fixture": {"token_hash":"synthetic-token-hash", "account":"fixture", "kind":"desktop",
+                    "machine_id":"fixture-machine", "label":"Fixture desktop", "created":1, "last_seen":2, "revoked_at":null},
+                "dev_retired": {"token_hash":"retired-token-hash", "account":"fixture", "kind":"phone",
+                    "machine_id":null, "label":"Retired phone", "created":1, "last_seen":2, "revoked_at":3}
+            },
+            "agent_accounts": {"fixture": {"codex:person@example.test/fixture-workspace": {
+                "provider":"codex", "email":"person@example.test", "org":"", "workspace":"fixture-workspace",
+                "plan":"team", "label":"Fixture login", "devices":{"dev_fixture":{"slot":"codex-fixture", "seen":4}}
+            }}}
+        });
+        crate::relay_auth::write_private(&path, &fixture.to_string()).unwrap();
+        let gate = Gate::new(Some(path.clone()));
+        let patch = serde_json::from_value(serde_json::json!({
+            "expected_revision":0, "settings":{"theme":"graphite", "mobile_theme_mode":"dark"},
+            "machines":{"fixture":{"label":"Fixture desktop", "ssh":"person@example.test"}}
+        })).unwrap();
+        let snapshot = gate.account_sync.patch("fixture", &patch).unwrap();
+        gate.persist();
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, fixture, "saving the merged relay discarded operational state");
+        assert!(saved.get("settings").is_none(), "settings leaked into the operational state format");
+        let reloaded = Gate::new(Some(path.clone()));
+        assert_eq!(serde_json::to_value(reloaded.account_sync.get("fixture").unwrap()).unwrap(),
+            serde_json::to_value(snapshot).unwrap());
+        assert_eq!(reloaded.account_sync.get("another-account").unwrap().revision, 0);
+        reloaded.persist();
+        let twice: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(twice, fixture, "reloading and saving discarded an agent catalog or device");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_catalog_persistence_keeps_every_completed_mutation() {
+        let dir = std::env::temp_dir().join(format!("kasa-state-writers-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("relay-state.json");
+        let gate = Gate::new(Some(path.clone()));
+        let barrier = Arc::new(std::sync::Barrier::new(12));
+        let workers: Vec<_> = (0..12).map(|index| {
+            let gate = gate.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let name = format!("fixture-{index}");
+                gate.agents.lock().unwrap().insert(name.clone(), Default::default());
+                gate.keys.lock().unwrap().insert(name, SlugRec { key_hash:"fixture".into(), last_seen:now_secs() });
+                barrier.wait();
+                gate.persist();
+            })
+        }).collect();
+        for worker in workers { worker.join().unwrap(); }
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["agent_accounts"].as_object().unwrap().len(), 12);
+        assert_eq!(saved["slugs"].as_object().unwrap().len(), 12);
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn catalog_fixture_device(gate: &Gate) -> (String, axum::http::HeaderMap) {
+        let token = crate::relay_auth::new_token();
+        gate.devices.lock().unwrap().insert("dev_catalog_fixture".into(), DeviceRec {
+            token_hash: crate::relay_auth::token_hash(&token), account: "geno".into(), kind: "desktop".into(),
+            machine_id: Some("catalog-fixture-machine".into()), label: "Fixture".into(),
+            created: 1, last_seen: 1, revoked_at: None,
+        });
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        (token, headers)
+    }
+
+    fn assert_catalog_no_store(response: &axum::response::Response) {
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()[header::VARY], "Authorization");
+    }
+
+    async fn catalog_upload_after_auth_change(disable_account: bool) {
+        let dir = std::env::temp_dir().join(format!("kasa-catalog-race-{}", uuid::Uuid::new_v4()));
+        let gate = account_gate(&dir);
+        let (_, headers) = catalog_fixture_device(&gate);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let body = axum::body::Body::from_stream(futures_util::stream::once(async move {
+            let _ = started_tx.send(());
+            resume_rx.await.unwrap();
+            Ok::<_, std::io::Error>(axum::body::Bytes::from_static(
+                br#"{"accounts":[{"provider":"codex","email":"person@example.test","slot":"fixture"}]}"#))
+        }));
+        let mut request = axum::extract::Request::new(body);
+        *request.headers_mut() = headers.clone();
+        let task = tokio::spawn(agent_accounts_post(State(gate.clone()), request));
+        tokio::time::timeout(Duration::from_secs(2), started_rx).await.unwrap().unwrap();
+        if disable_account {
+            let path = dir.join("relay-accounts.json");
+            let mut accounts = crate::relay_auth::load_accounts(&path);
+            accounts.accounts.get_mut("geno").unwrap().disabled = true;
+            crate::relay_auth::save_accounts(&path, &accounts).unwrap();
+            std::fs::File::options().write(true).open(&path).unwrap()
+                .set_modified(std::time::SystemTime::now() + Duration::from_secs(2)).unwrap();
+        } else {
+            assert!(gate.revoke("dev_catalog_fixture"));
+        }
+        resume_tx.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_catalog_no_store(&response);
+        assert!(gate.agents.lock().unwrap().is_empty(), "retired credentials mutated the catalog");
+        let response = agent_accounts_get(State(gate), headers).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_catalog_no_store(&response);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn agent_catalog_rejects_device_revoked_while_receiving_body() {
+        catalog_upload_after_auth_change(false).await;
+    }
+
+    #[tokio::test]
+    async fn agent_catalog_rejects_account_disabled_while_receiving_body() {
+        catalog_upload_after_auth_change(true).await;
+    }
+
+    #[tokio::test]
+    async fn agent_catalog_bounds_upload_size_and_duration_without_caching_errors() {
+        let dir = std::env::temp_dir().join(format!("kasa-catalog-limits-{}", uuid::Uuid::new_v4()));
+        let gate = account_gate(&dir);
+        let (_, headers) = catalog_fixture_device(&gate);
+        let bodies = [
+            (axum::body::Body::from(vec![b'x'; 64 * 1024 + 1]), StatusCode::PAYLOAD_TOO_LARGE),
+            (axum::body::Body::from("not-json"), StatusCode::BAD_REQUEST),
+            (axum::body::Body::from_stream(futures_util::stream::pending::<Result<axum::body::Bytes, std::io::Error>>()),
+                StatusCode::REQUEST_TIMEOUT),
+        ];
+        for (body, expected) in bodies {
+            let mut request = axum::extract::Request::new(body);
+            *request.headers_mut() = headers.clone();
+            let response = tokio::time::timeout(Duration::from_secs(12), agent_accounts_post(State(gate.clone()), request))
+                .await.expect("an idle catalog upload did not time out");
+            assert_eq!(response.status(), expected);
+            assert_catalog_no_store(&response);
+        }
+        assert!(gate.agents.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn agent_catalog_http_isolates_accounts_and_disables_response_caching() {
+        let dir = std::env::temp_dir().join(format!("kasa-catalog-scope-{}", uuid::Uuid::new_v4()));
+        drop(account_gate(&dir));
+        let accounts_path = dir.join("relay-accounts.json");
+        let mut accounts = crate::relay_auth::load_accounts(&accounts_path);
+        accounts.accounts.insert("other".into(), accounts.accounts["geno"].clone());
+        crate::relay_auth::save_accounts(&accounts_path, &accounts).unwrap();
+        let addr = spawn_relay(Gate::new(Some(dir.join("relay-state.json")))).await;
+        let mut tokens = Vec::new();
+        for account in ["geno", "other"] {
+            let (status, login) = post(addr, "/relay/login", None, serde_json::json!({
+                "account":account, "password":"correct horse", "kind":"phone"
+            })).await;
+            assert_eq!(status, 200);
+            tokens.push(login["token"].as_str().unwrap().to_string());
+        }
+        let client = reqwest::Client::new();
+        for (token, label) in tokens.iter().zip(["First catalog", "Second catalog"]) {
+            let response = client.post(format!("http://{addr}/relay/agent-accounts")).bearer_auth(token)
+                .json(&serde_json::json!({"accounts":[{"provider":"codex", "email":"shared@example.test", "label":label}]}))
+                .send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(response.headers()[header::VARY], "Authorization");
+            assert_eq!(response.json::<serde_json::Value>().await.unwrap()["accounts"][0]["label"], label);
+        }
+        for (token, label) in tokens.iter().zip(["First catalog", "Second catalog"]) {
+            let response = client.get(format!("http://{addr}/relay/agent-accounts")).bearer_auth(token)
+                .send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let value = response.json::<serde_json::Value>().await.unwrap();
+            assert_eq!(value["accounts"].as_array().unwrap().len(), 1);
+            assert_eq!(value["accounts"][0]["label"], label);
+        }
+        for method in [reqwest::Method::GET, reqwest::Method::POST] {
+            let response = client.request(method, format!("http://{addr}/relay/agent-accounts"))
+                .json(&serde_json::json!({"accounts":[]})).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
