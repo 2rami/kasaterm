@@ -778,13 +778,13 @@ impl App {
     /// origin_x / window_cells / hit-test calc routes through here so a
     /// single `sidebar_visible` flip reflows the whole grid.
     pub(crate) fn effective_sidebar_w(&self) -> f32 {
-        self.tab_strip_w() + self.file_tree_col_w()
+        self.tab_strip_w() + self.left_panel_col_w() + self.file_tree_col_w()
     }
 
-    /// 세 기둥이 **원하는** 폭(사용자가 드래그로 정한 값). 접혀 있으면 0.
-    /// `chrome_widths` 만 이걸 쓴다 — 바깥에서 이 값을 그리기에 쓰면 창이 좁을 때
-    /// 예산을 건너뛰고 겹쳐 그리게 된다.
-    fn chrome_wants(&self) -> (f32, f32, f32) {
+    /// 네 기둥이 **원하는** 폭 `(탭 스트립, 왼쪽 판, 파일트리, 우측 칼럼)`(사용자가 드래그로
+    /// 정한 값). 접혀 있으면 0. `chrome_widths` 만 이걸 쓴다 — 바깥에서 이 값을 그리기에 쓰면
+    /// 창이 좁을 때 예산을 건너뛰고 겹쳐 그리게 된다.
+    fn chrome_wants(&self) -> (f32, f32, f32, f32) {
         if self.internal_room_active_any() {
             return (
                 if self.sidebar_visible && !self.tabs_on_top {
@@ -792,6 +792,7 @@ impl App {
                 } else {
                     0.0
                 },
+                0.0,
                 0.0,
                 0.0,
             );
@@ -802,6 +803,7 @@ impl App {
             } else {
                 0.0
             },
+            self.left_panel_want_w(),
             if self.file_tree.visible {
                 self.file_tree.w_logical
             } else {
@@ -815,11 +817,12 @@ impl App {
         )
     }
 
-    /// 이번 프레임에 세 기둥이 **실제로** 차지할 폭 `(탭 스트립, 파일트리, 우측 칼럼)`.
+    /// 이번 프레임에 네 기둥이 **실제로** 차지할 폭 `(탭 스트립, 왼쪽 판, 파일트리, 우측 칼럼)`.
     ///
     /// 원하는 폭의 합이 창에 들어가면 그대로 준다. 넘치면 터미널 몫(`GRID_KEEP_COLS`)을
-    /// 먼저 떼어 두고, 남는 것을 **우선순위 역순**(우측 칼럼 → 파일트리 → 탭 스트립)으로
-    /// 하한까지 깎는다. 그래도 넘치는 창이면 같은 순서로 접는다.
+    /// 먼저 떼어 두고, 남는 것을 **우선순위 역순**(우측 칼럼 → 파일트리 → 왼쪽 판 → 탭 스트립)으로
+    /// 하한까지 깎는다. 그래도 넘치는 창이면 같은 순서로 접는다. 왼쪽 판이 파일트리보다 늦게
+    /// 깎이는 것은 사람이 방금 보려고 연 것이라서다.
     ///
     /// 깎는 것은 **여기서 돌려주는 값뿐이고 `*_w_logical` 은 안 건드린다** — 그래서 창을
     /// 도로 넓히면 사용자가 정한 폭이 그대로 돌아온다. 예산을 필드에 써 버리면 창을 한 번
@@ -827,23 +830,24 @@ impl App {
     ///
     /// 순서가 우측 칼럼부터인 이유: 셋 중 가장 넓고(420) 참조용이라, 같은 픽셀을 내놓을 때
     /// 잃는 것이 가장 적다. 탭 스트립이 마지막인 건 그게 방을 오가는 유일한 손잡이여서다.
-    pub(crate) fn chrome_widths(&self) -> (f32, f32, f32) {
-        let (mut tab, mut tree, mut git) = self.chrome_wants();
+    pub(crate) fn chrome_widths(&self) -> (f32, f32, f32, f32) {
+        let (mut tab, mut panel, mut tree, mut git) = self.chrome_wants();
         let Some(win) = self.window.as_ref() else {
-            return (tab, tree, git);
+            return (tab, panel, tree, git);
         };
         let win_w = win.inner_size().width as f32 / self.effective_scale();
         if win_w <= 1.0 {
-            return (tab, tree, git);
+            return (tab, panel, tree, git);
         }
         let keep = GRID_KEEP_COLS * self.cell.w + 2.0 * WINDOW_PADDING;
-        let mut over = tab + tree + git - (win_w - keep);
+        let mut over = tab + panel + tree + git - (win_w - keep);
         if over <= 0.0 {
-            return (tab, tree, git);
+            return (tab, panel, tree, git);
         }
         for (w, floor) in [
             (&mut git, GIT_COL_W_AUTO_MIN),
             (&mut tree, FILE_TREE_W_AUTO_MIN),
+            (&mut panel, crate::left_panel::LEFT_PANEL_W_AUTO_MIN),
             (&mut tab, SIDEBAR_W_AUTO_MIN),
         ] {
             if over <= 0.0 {
@@ -858,7 +862,7 @@ impl App {
         }
         // 하한까지 밀고도 안 들어가는 창 — 여기서는 뭔가를 지워야 터미널이 성립한다.
         // 하한 폭의 기둥을 억지로 남기면 셋 다 읽을 수 없는 채로 그리드만 죽는다.
-        for w in [&mut git, &mut tree, &mut tab] {
+        for w in [&mut git, &mut tree, &mut panel, &mut tab] {
             if over <= 0.0 {
                 break;
             }
@@ -868,7 +872,7 @@ impl App {
             over -= *w;
             *w = 0.0;
         }
-        (tab, tree, git)
+        (tab, panel, tree, git)
     }
 
     /// Width of the session-tab strip alone (0 when collapsed). With top tabs
@@ -998,12 +1002,16 @@ impl App {
     }
     /// File-tree column width (0 when hidden). Independent of the tab strip.
     pub(crate) fn file_tree_col_w(&self) -> f32 {
+        self.chrome_widths().2
+    }
+    /// 왼쪽 판 폭(닫혔으면 0) — 사이드바 바로 오른쪽에 붙는다(`left_panel.rs`).
+    pub(crate) fn left_panel_col_w(&self) -> f32 {
         self.chrome_widths().1
     }
     /// Left edge (logical x) of the file-tree column — right after the tab
-    /// strip. The column sits between the tabs and the cell grid.
+    /// strip and the left panel. The column sits between them and the cell grid.
     pub(crate) fn file_tree_col_x(&self) -> f32 {
-        self.tab_strip_w()
+        self.tab_strip_w() + self.left_panel_col_w()
     }
     /// Right-hand chrome width (the git column), mirroring `effective_sidebar_w`
     /// on the left. Folded into `window_cells` so the cell grid reflows and no
@@ -1019,7 +1027,7 @@ impl App {
     }
     /// Git-column width (0 when hidden).
     pub(crate) fn git_col_w(&self) -> f32 {
-        self.chrome_widths().2
+        self.chrome_widths().3
     }
     /// Left edge (logical x) of the git column — flush against the window's
     /// right edge. 0 before the window exists (no paint yet).
@@ -1980,6 +1988,7 @@ impl App {
             file_tree_w: Some(self.file_tree.w_logical),
             git_col_visible: Some(self.git.col_visible),
             git_col_w: Some(self.git.col_w_logical),
+            left_panel_w: Some(self.left_panel.w_logical),
         });
     }
 
@@ -2277,7 +2286,7 @@ impl App {
             .find(|(_, r)| inside(r))
             .map(|(i, _)| *i)
         {
-            // 설정·보드는 고정 이름의 내부 방이다. 이름 편집은 여전히 막는다 —
+            // 설정은 고정 이름의 내부 방이다. 이름 편집은 여전히 막는다 —
             // 라벨이 방 종류 그 자체라 고칠 것이 없다. 다만 **자리 옮기기는 다른 방과
             // 같게 장전한다**(2026-09-05 지시): 사이드바에서는 똑같이 생긴 탭이라,
             // 잡히지도 않으면 사람 눈에는 고장으로 보인다. 문턱을 못 넘은 드래그는
@@ -2287,9 +2296,6 @@ impl App {
                 match kind {
                     crate::internal_room::InternalRoomKind::Settings => {
                         self.open_settings_room(None);
-                    }
-                    crate::internal_room::InternalRoomKind::Board => {
-                        self.open_board_room();
                     }
                 }
                 self.win_tab_drag = Some(WinTabDrag {
@@ -2850,9 +2856,6 @@ impl App {
             self.toggle_git_col();
         }
     }
-    pub(crate) fn toggle_board_panel(&mut self, _event_loop: &ActiveEventLoop) {
-        self.toggle_board_room();
-    }
     pub(crate) fn open_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
         if self.lite {
             return;
@@ -2861,16 +2864,19 @@ impl App {
             self.set_toast("아로나 화면은 Agent 연동을 켠 뒤 열 수 있어요".to_string());
             return;
         }
-        let _ = self.open_inline_web(event_loop, InlineWebKind::Arona);
+        // 판 자리는 하나다 — 보드가 떠 있으면 아로나가 넘겨받는다.
+        if self.left_panel.kind == Some(crate::left_panel::LeftPanelKind::Board) {
+            self.native_board_blur();
+            self.board_scene.leave();
+        }
+        if self.open_inline_web(event_loop, InlineWebKind::Arona) {
+            self.show_left_panel(crate::left_panel::LeftPanelKind::Arona);
+        }
     }
 
     pub(crate) fn close_arona_panel(&mut self) {
-        if self
-            .inline_web
-            .as_ref()
-            .is_some_and(|h| h.kind == InlineWebKind::Arona)
-        {
-            self.close_inline_web();
+        if self.left_panel.kind == Some(crate::left_panel::LeftPanelKind::Arona) {
+            self.close_left_panel();
         }
     }
     fn open_inline_web(&mut self, event_loop: &ActiveEventLoop, kind: InlineWebKind) -> bool {
@@ -3008,6 +3014,10 @@ impl App {
             main.request_redraw();
         }
         eprintln!("[inline-web] closed kind={kind:?}");
+        // 웹뷰가 판 밖의 길(자식 창 닫기·보드 열기)로 닫혀도 판 자리를 거둔다.
+        if self.left_panel.kind == Some(crate::left_panel::LeftPanelKind::Arona) {
+            self.close_left_panel();
+        }
     }
 
     pub(crate) fn sync_inline_web(&mut self) {
@@ -3019,27 +3029,39 @@ impl App {
         };
         let origin = origin.to_logical::<f64>(main.scale_factor());
         let zoom = (self.ui_zoom as f64).max(0.1);
-        let inner = main.inner_size().to_logical::<f64>(main.scale_factor());
-        let left = self.tab_strip_w() as f64 * zoom;
-        let top = TITLE_HEIGHT as f64 * zoom;
-        let width = (inner.width - left).max(1.0);
-        let height = (inner.height - top).max(1.0);
+        // 웹뷰는 판 본문 자리에 앉는다. 자식 창은 잘라 그릴 수 없어, 밀려 나오는 동안 왼쪽으로
+        // 밀면 사이드바를 덮는다 — 대신 폭을 키워 나오게 한다.
+        let slide = self.left_panel_slide_px();
+        let body = self.left_panel_body_rect().map(|(x, y, w, h)| {
+            (x as f64 * zoom, y as f64 * zoom, (w - slide).max(1.0) as f64 * zoom, h as f64 * zoom)
+        });
         let Some(host) = self.inline_web.as_mut() else {
             return;
         };
-        let frame = inline_web_frame(origin.x, origin.y, inner.width, inner.height, left, top);
+        let Some(body) = body else {
+            // 설정 방이 앞에 오면 판 자리가 없다. 닫지 않고 숨겨 두면 돌아올 때 대화가 남는다.
+            if host.visible {
+                if let Some(child) = host.window.as_ref() {
+                    crate::webpane::detach_child(&main, child);
+                    child.set_visible(false);
+                }
+                let _ = host.webview.set_visible(false);
+                host.visible = false;
+                host.last_frame = None;
+            }
+            return;
+        };
+        let frame = inline_web_frame(origin.x, origin.y, body);
         if host.last_frame != Some(frame) {
+            let (x, y, width, height) = body;
             if let Some(child) = host.window.as_ref() {
                 let _ = child.request_inner_size(winit::dpi::LogicalSize::new(width, height));
-                child.set_outer_position(winit::dpi::LogicalPosition::new(
-                    origin.x + left,
-                    origin.y + top,
-                ));
+                child.set_outer_position(winit::dpi::LogicalPosition::new(origin.x + x, origin.y + y));
             }
             let _ = host.webview.set_bounds(wry::Rect {
                 position: wry::dpi::LogicalPosition::new(
-                    if host.window.is_some() { 0.0 } else { left },
-                    if host.window.is_some() { 0.0 } else { top },
+                    if host.window.is_some() { 0.0 } else { x },
+                    if host.window.is_some() { 0.0 } else { y },
                 )
                 .into(),
                 size: wry::dpi::LogicalSize::new(width, height).into(),
@@ -3116,16 +3138,12 @@ impl App {
             self.set_toast("아로나 화면은 Agent 연동을 켠 뒤 열 수 있어요".to_string());
             return;
         }
-        if self
-            .inline_web
-            .as_ref()
-            .is_some_and(|h| h.kind == InlineWebKind::Arona)
-        {
-            self.close_inline_web();
+        if self.left_panel.kind == Some(crate::left_panel::LeftPanelKind::Arona) {
+            self.close_left_panel();
             return;
         }
-        // 아로나는 「지금 보는 pane」을 작업 대상으로 삼는다. 설정·보드는 셸 없는
-        // 표식 pane 이라, 그 방에서 열면 대상이 `\0kasaterm-board` 같은 내부 id 로
+        // 아로나는 「지금 보는 pane」을 작업 대상으로 삼는다. 설정은 셸 없는
+        // 표식 pane 이라, 그 방에서 열면 대상이 `\0kasaterm-settings` 같은 내부 id 로
         // 굳어 아래 작업이 엉뚱한 곳을 가리킨다. 열기 전에 원래 사용자 방으로
         // 돌려보내고, 돌아갈 방이 없으면 아예 열지 않는다.
         if self.internal_room_kind_at(self.active_window).is_some()
@@ -3596,9 +3614,6 @@ impl App {
             match kind {
                 crate::internal_room::InternalRoomKind::Settings => {
                     self.close_settings_room();
-                }
-                crate::internal_room::InternalRoomKind::Board => {
-                    self.close_board_room();
                 }
             }
             return;
@@ -4940,7 +4955,7 @@ fn model3_in(dir: &std::path::Path) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
-fn pet_model_dir() -> Option<std::path::PathBuf> {
+pub(crate) fn pet_model_dir() -> Option<std::path::PathBuf> {
     if let Some(dir) = std::env::var_os("KASATERM_PET_DIR").filter(|dir| !dir.is_empty()) {
         return Some(dir.into());
     }
@@ -5023,19 +5038,13 @@ fn arona_web_reachable(port: &str) -> bool {
     n >= 12 && head.starts_with(b"HTTP/1.") && &head[9..12] == b"200"
 }
 
-fn inline_web_frame(
-    origin_x: f64,
-    origin_y: f64,
-    inner_w: f64,
-    inner_h: f64,
-    left: f64,
-    top: f64,
-) -> (i32, i32, u32, u32) {
+fn inline_web_frame(origin_x: f64, origin_y: f64, body: (f64, f64, f64, f64)) -> (i32, i32, u32, u32) {
+    let (x, y, w, h) = body;
     (
-        (origin_x + left).round() as i32,
-        (origin_y + top).round() as i32,
-        (inner_w - left).round().max(1.0) as u32,
-        (inner_h - top).round().max(1.0) as u32,
+        (origin_x + x).round() as i32,
+        (origin_y + y).round() as i32,
+        w.round().max(1.0) as u32,
+        h.round().max(1.0) as u32,
     )
 }
 
@@ -5327,14 +5336,15 @@ mod room_rename_tests {
     }
 
     #[test]
-    fn 인라인_웹은_제목줄과_왼쪽_사이드바만_남긴다() {
+    fn 인라인_웹은_판_본문_자리에_앉는다() {
         assert_eq!(
-            inline_web_frame(100.0, 200.0, 1200.0, 800.0, 244.0, 36.0),
-            (344, 236, 956, 764)
+            inline_web_frame(100.0, 200.0, (200.0, 68.0, 599.0, 700.0)),
+            (300, 268, 599, 700)
         );
         assert_eq!(
-            inline_web_frame(-300.0, 40.0, 100.0, 20.0, 200.0, 36.0),
-            (-100, 76, 1, 1)
+            inline_web_frame(-300.0, 40.0, (200.0, 68.0, 0.2, 0.0)),
+            (-100, 108, 1, 1),
+            "밀려 나오기 첫 프레임에도 0 폭 창을 만들지 않는다"
         );
     }
 

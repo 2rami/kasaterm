@@ -27,6 +27,7 @@ mod journal;
 mod chat;
 mod ask;
 mod postbox;
+mod overlay;
 #[cfg(target_os = "macos")]
 mod chat_panel;
 #[cfg(target_os = "macos")]
@@ -153,6 +154,13 @@ struct App {
     ask_bar: Option<ask_bar::Bar>,
     #[cfg(target_os = "macos")]
     popup: Option<menu::Popup>,
+    /// 떠 있는 현황판(`overlay.rs`). 카사텀이 `overlay.json` 을 적어 둔 때만 선다.
+    #[cfg(target_os = "macos")]
+    overlay: Option<overlay::Panel>,
+    overlay_data: Option<overlay::Data>,
+    overlay_seen: Option<std::time::SystemTime>,
+    /// 나쵸가 건 한 줄 — 현황판 맨 아래. 판이 없으면 예전처럼 말풍선으로 간다.
+    nacho_line: String,
     menu_probe_started: Option<std::time::Instant>,
     menu_probe_phase: u8,
     menu_probe_frames: u32,
@@ -1165,8 +1173,13 @@ impl App {
         let Some(path) = self.journal_path() else { return };
         let pane = self.ask_pane();
         if let Some(line) = self.chatter.poll(&path, &pane, gap, quiet) {
-            self.speak(line, false);
-            self.perform(Some("Talk".into()), None);
+            if self.overlay_data.is_some() {
+                // 요약은 현황판의 몫이다 — 말풍선은 사람과 나누는 대화 자리로 남긴다.
+                self.nacho_line = line;
+            } else {
+                self.speak(line, false);
+                self.perform(Some("Talk".into()), None);
+            }
         }
     }
 
@@ -1257,12 +1270,57 @@ impl App {
         if urgent && !self.urgent_asked {
             self.urgent_asked = true;
             if !self.resting && self.preferences.animations { self.start_bounce(); }
-            self.ask_auto("사람 손이 필요한 학생 하나만, 누가 무엇을 기다리는지 한 줄로 알려줘");
+            // 현황판이 떠 있으면 누가 무엇을 기다리는지가 이미 거기 있다 — 나쵸에게 문장을 부탁할 까닭이 없다.
+            if self.overlay_data.is_none() {
+                self.ask_auto("사람 손이 필요한 학생 하나만, 누가 무엇을 기다리는지 한 줄로 알려줘");
+            }
         }
         if !urgent { self.urgent_asked = false; }
         self.urgent = urgent;
         if mood != self.mood {
             self.apply_mood(mood);
+        }
+    }
+
+    /// 현황판 — 카사텀이 적은 `overlay.json` 을 읽어 판을 세우고, 누른 줄의 창으로 간다.
+    fn poll_overlay(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            let opened: Vec<usize> = self.overlay.as_ref().map(|panel| panel.events()).unwrap_or_default()
+                .into_iter().map(|overlay::Event::Open(i)| i).collect();
+            for i in opened {
+                let pane = self.overlay_data.as_ref().and_then(|data| data.waiting.get(i)).map(|row| row.pane.clone());
+                self.touch();
+                if let (Some(cli), Some(pane)) = (cli_path(), pane.filter(|pane| !pane.is_empty())) {
+                    let _ = std::process::Command::new(cli).arg("focus").arg(&pane).status();
+                }
+                raise_kasaterm();
+            }
+        }
+        let Some(dir) = self.pet_dir.clone() else { return };
+        let path = dir.join("overlay.json");
+        let seen = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if seen != self.overlay_seen {
+            self.overlay_seen = seen;
+            self.overlay_data = overlay::read(&path);
+        }
+        if !overlay::fresh(self.overlay_seen, std::time::SystemTime::now()) {
+            self.overlay_data = None;
+        }
+        #[cfg(target_os = "macos")]
+        match self.overlay_data.as_ref() {
+            Some(data) => {
+                if self.overlay.is_none() {
+                    self.overlay = self.win.as_ref().and_then(|win| overlay::Panel::new(win));
+                }
+                if let Some(panel) = &self.overlay {
+                    panel.render(data, &self.nacho_line);
+                    panel.sync();
+                }
+            }
+            None => {
+                if let Some(panel) = &self.overlay { panel.hide(); }
+            }
         }
     }
 
@@ -1553,6 +1611,7 @@ impl App {
         if self.frames==10&&self.pet_dir.is_none()&&std::env::var_os("KASAPET_MENU_PROBE").is_some(){self.show_menu();self.menu_probe_started=Some(std::time::Instant::now());self.menu_probe_motion=self.motion.as_ref().map(|m|m.time()).unwrap_or(0.0);self.menu_probe_mesh=self.probe_mesh_signature();if let Some(popup)=&self.popup{eprintln!("MENU_PROBE_WINDOW_ID:{}",popup.probe_window_number());}}
         self.poll_cursor();
         self.poll_board();
+        self.poll_overlay();
         self.poll_journal();
         self.poll_chat();
         self.poll_ask();
@@ -2110,6 +2169,11 @@ fn main() {
     if std::env::args().any(|arg| arg == "--chat-panel-probe") { chat_panel::probe(); return; }
     #[cfg(all(target_os = "macos", debug_assertions))]
     if std::env::args().any(|arg| arg == "--ask-bar-probe") { ask_bar::probe(); return; }
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if let Some(i) = std::env::args().position(|arg| arg == "--overlay-probe") {
+        overlay::probe(std::env::args().nth(i + 1).as_deref());
+        return;
+    }
     let (model_arg, motion_arg) = positional_arguments(std::env::args());
     let path = model_arg.unwrap();
     let model = mocari::assets::load_model_runtime(&path).expect("모델");
@@ -2186,6 +2250,11 @@ fn main() {
         ask_bar: None,
         #[cfg(target_os = "macos")]
         popup: None,
+        #[cfg(target_os = "macos")]
+        overlay: None,
+        overlay_data: None,
+        overlay_seen: None,
+        nacho_line: String::new(),
         menu_probe_started:None,menu_probe_phase:0,menu_probe_frames:0,
         menu_probe_motion:0.0,menu_probe_mesh:0,menu_probe_motion_checked:false,
         said_at: std::time::Instant::now(), urgent: false, bounce: None, reaction_once: false, nacho: Nacho::Idle, ask_auto: false, greeted: false, ask_offset, nacho_group: None, nacho_expression: None, typing: None, typed_tex: None, preedit: String::new(), head: (0.0, 0.0), bbox: None,

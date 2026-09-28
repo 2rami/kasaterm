@@ -12,7 +12,6 @@
 mod autosuggest;
 mod auxterm;
 mod auxwin;
-mod board_room;
 mod agent_state;
 mod agent_transitions;
 mod bridge;
@@ -78,6 +77,7 @@ mod lsp;
 mod machinescol;
 mod sidebar_navigation;
 mod sidebar_pulse;
+mod left_panel;
 mod mirror_theme;
 mod mirror_view;
 mod mirror_focus_probe;
@@ -2014,8 +2014,6 @@ enum PaneContent {
     Web(WebPane),
     /// PTY 없는 네이티브 설정 방. 화면 상태는 `App.settings_scene`가 소유한다.
     Settings,
-    /// PTY 없는 네이티브 보드 방. 화면 상태는 `App.board_scene`가 소유한다.
-    Board,
 }
 
 /// 웹(브라우저) pane 의 그리드 쪽 상태 — 주소뿐이다. 실제 브라우저는 이 pane
@@ -5807,6 +5805,8 @@ struct App {
     arona_btn_rect: (f32, f32, f32, f32),
     /// 사이드바 맨 위 현황 줄(`sidebar_pulse.rs`).
     pulse: sidebar_pulse::Pulse,
+    /// 사이드바 옆에서 밀려 나오는 보드·아로나 판(`left_panel.rs`).
+    left_panel: left_panel::LeftPanel,
     /// Cursor-blink phase captured at the last successful render.
     /// Used by `render_frame`'s early-return: a blink toggle counts
     /// as "something changed" and forces the GPU pass even when
@@ -6350,6 +6350,7 @@ impl App {
             board_btn_rect: (0.0, 0.0, 0.0, 0.0),
             arona_btn_rect: (0.0, 0.0, 0.0, 0.0),
             pulse: sidebar_pulse::Pulse::from_settings(),
+            left_panel: left_panel::LeftPanel::new(ui.left_panel_w),
             last_blink_on: false,
             chrome_dirty: true,
             theme_fx: None,

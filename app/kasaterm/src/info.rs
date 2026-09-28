@@ -268,8 +268,16 @@ pub(crate) struct ContextLines {
     pub pane_id: String,
     pub session_id: String,
     pub harness: String,
-    pub summary: Vec<String>,
-    pub details: Vec<(String, Vec<String>)>,
+    pub note: String,
+    pub details: Vec<(String, Vec<crate::context_info::Detail>)>,
+}
+
+/// pane 이 「지금 하는 일」 — 보드가 이미 들고 있는 요청·마지막 답 한 줄씩과 학생 얼굴.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct NowLine {
+    pub(crate) character: Option<String>,
+    pub(crate) request: String,
+    pub(crate) reply: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -299,6 +307,7 @@ pub(crate) struct InfoSnap {
     /// 예약(반복·타이머) — 하단바 「예약」 칩과 팝오버가 읽는다.
     pub(crate) schedules: Vec<kasa_mcp::ScheduleItem>,
     pub(crate) contexts: HashMap<String, ContextLines>,
+    pub(crate) now: HashMap<String, NowLine>,
     pub(crate) execution_states: HashMap<String, String>,
     pub(crate) collection_error: Option<String>,
     pub(crate) board_error: bool,
@@ -329,6 +338,11 @@ fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>
                     match r.status.as_str() { "working" => "실행", "waiting" | "idle" | "attention" => "대기", "ended" | "done" => "종료", "offline" | "disconnected" | "stale" => "연결끊김", _ => "미확인" }
                 };
                 snap.execution_states.insert(r.surface_id.clone(), state.into());
+                let plain = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let now = NowLine { character: r.character.clone().filter(|name| !name.is_empty()), request: plain(&r.last_prompt), reply: plain(&r.last_reply) };
+                if !now.request.is_empty() || !now.reply.is_empty() {
+                    snap.now.insert(r.surface_id.clone(), now);
+                }
                 snap.tasks.insert(
                     r.surface_id.clone(),
                     TaskLine {
@@ -353,7 +367,7 @@ fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>
         let evidence = crate::context_info::snapshot(&crate::context_info::ContextRequest {
             session_id: format!("{}:{}", target.machine_identity, target.session_id), harness: target.harness.clone(), path,
         });
-        snap.contexts.insert(target.id.clone(), ContextLines { pane_id: format!("{}:{}", target.machine_identity, target.pty_id), session_id: target.session_id.clone(), harness: target.harness.clone(), summary: evidence.summary_lines(), details: evidence.detail_sections() });
+        snap.contexts.insert(target.id.clone(), ContextLines { pane_id: format!("{}:{}", target.machine_identity, target.pty_id), session_id: target.session_id.clone(), harness: target.harness.clone(), note: evidence.detail_note(), details: evidence.detail_sections() });
     }
     snap.schedules = kasa_mcp::schedule_snapshot();
     snap
@@ -2230,9 +2244,9 @@ mod execution_overview_tests {
         assert!(!execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(_))));
         info.pane_expanded.insert(key);
         let lines = execution_lines(&snap, &info);
-        for full in [format!("전체 제목 미확인 · 기록된 제목 {title}"), format!("작업 폴더 · {path}"), format!("node {args}")] {
-            assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == &full)));
-        }
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Kv { name, value: None, tip, .. } if name == "제목" && tip.contains(title))));
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Kv { name, value: Some(v), .. } if name == "작업 폴더" && v == path)));
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == &format!("node {args}"))));
     }
     #[test]
     fn raw_process_and_explicit_title_reach_expanded_view_without_label_caps() {
@@ -2254,7 +2268,7 @@ mod execution_overview_tests {
         let mut info = state::InfoState::default(); info.pane_expanded.insert(key);
         let lines = execution_lines(&snap, &info);
         assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == &command)));
-        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == &format!("제목 · {title}"))));
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Kv { name, value: Some(v), .. } if name == "제목" && v == &title)));
         assert_eq!(explicit_title_records(r#"{"type":"user","message":{"customTitle":"본문을제목으로쓰지않음"}}"#), (None, None));
     }
     #[test]
@@ -2277,6 +2291,14 @@ mod execution_overview_tests {
             assert!(narrow.len() as f32 * ROW_H > wide.len() as f32 * ROW_H);
         }
         assert!(wrap_measured_text("한글", 0.0, measure).is_empty());
+    }
+    /// 어절 가운데서 끊지 않는다 — 「남아 있 / 는」 이 이 개편의 이유였다.
+    #[test]
+    fn korean_wraps_between_words_not_inside_them() {
+        let measure = |text: &str| text.chars().map(|ch| if ch.is_ascii() { 1.0 } else { 2.0 }).sum::<f32>();
+        let lines = wrap_measured_text("지금 모델에 남아 있는 내용", 12.0, measure);
+        assert_eq!(lines, ["지금 모델에", "남아 있는", "내용"]);
+        assert!(lines.iter().all(|line| measure(line) <= 12.0));
     }
     #[test]
     fn menu_and_remote_place_budgets_never_go_negative_or_exceed_visible_height() {
@@ -2324,24 +2346,41 @@ mod execution_overview_tests {
     }
     #[test]
     fn previous_tab_context_is_hidden_even_without_a_bound_session_id() {
+        let group = PaneGroup { pane: "%1".into(), ..Default::default() };
         let mut info = state::InfoState::default(); info.selected_pane = Some("%1".into()); info.selected_pid = "%8".into(); info.selected_harness = "codex".into();
-        let mut snap = InfoSnap { panes: vec![PaneGroup { pane: "%1".into(), ..Default::default() }], ..Default::default() };
-        snap.contexts.insert("%7".into(), ContextLines { pane_id: "%7".into(), harness: "codex".into(), summary: vec!["old evidence".into()], ..Default::default() });
+        info.pane_expanded.insert(execution_key(&group));
+        let mut snap = InfoSnap { panes: vec![group], ..Default::default() };
+        snap.contexts.insert("%7".into(), ContextLines { pane_id: "%7".into(), harness: "codex".into(), note: "old evidence".into(), ..Default::default() });
         assert!(!execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == "old evidence")));
         snap.contexts.get_mut("%7").unwrap().pane_id = "%8".into();
         assert!(execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == "old evidence")));
         info.selected_pid = "remote-base:remote-source:%8".into();
         assert!(!execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == "old evidence")));
     }
+    /// 접힌 줄: 지금 하는 일이 머리 바로 아래, 상태는 「이름 · 값」 한 줄, 상태와 같은 말인 작업 줄은 안 서고,
+    /// 토큰·스킬·MCP 기록은 실행 상세를 열어야 보인다.
     #[test]
-    fn compact_layout_has_finite_height_and_one_summary_per_selected_agent() {
-        let group = PaneGroup { pane: "%1".into(), ..Default::default() };
+    fn collapsed_row_leads_with_now_and_keeps_evidence_in_details() {
+        let group = PaneGroup { pane: "%1".into(), harness: "claude".into(), ..Default::default() };
+        let key = execution_key(&group);
         let mut snap = InfoSnap { panes: vec![group], ..Default::default() };
-        snap.contexts.insert("%1".into(), ContextLines { pane_id: "%1".into(), harness: "claude".into(), summary: vec!["one".into(), "two".into(), "three".into(), "extra".into()], ..Default::default() });
-        let info = state::InfoState { selected_pane: Some("%1".into()), selected_pid: "%1".into(), selected_harness: "claude".into(), ..Default::default() };
+        snap.contexts.insert("%1".into(), ContextLines { pane_id: "%1".into(), harness: "claude".into(), note: "머리 안내".into(), details: vec![("토큰".into(), vec![crate::context_info::Detail::Value { name: "마지막 입력".into(), value: None, tip: "까닭".into(), warn: false }])], ..Default::default() });
+        snap.now.insert("%1".into(), NowLine { character: Some("미도리".into()), request: "요청".into(), reply: "답".into() });
+        snap.tasks.insert("%1".into(), TaskLine { label: "대기 중".into(), ..Default::default() });
+        snap.execution_states.insert("%1".into(), "대기".into());
+        let mut info = state::InfoState { selected_pane: Some("%1".into()), selected_pid: "%1".into(), selected_harness: "claude".into(), ..Default::default() };
         let lines = execution_lines(&snap, &info);
-        assert_eq!(lines.iter().filter(|line| matches!(line, ExecutionLine::Context(_))).count(), 3);
+        let group_at = lines.iter().position(|line| matches!(line, ExecutionLine::Group(..))).unwrap();
+        assert!(matches!(lines[group_at + 1], ExecutionLine::Now(now) if now.request == "요청"));
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Kv { name, value: Some(v), .. } if name == "상태" && v == "대기 · claude")));
+        assert!(!lines.iter().any(|line| matches!(line, ExecutionLine::Kv { name, .. } if name == "작업")), "「대기 중」은 상태 칸과 같은 말");
+        assert!(!lines.iter().any(|line| matches!(line, ExecutionLine::Context(_) | ExecutionLine::Kv { value: None, .. })), "접힌 줄에 기록 요약은 없다");
+        info.pane_expanded.insert(key);
+        let lines = execution_lines(&snap, &info);
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == "머리 안내")));
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Kv { name, value: None, tip, .. } if name == "마지막 입력" && tip == "까닭")));
         assert!(lines.iter().map(ExecutionLine::height).sum::<f32>().is_finite());
+        assert!(task_repeats_state("작업 중", "실행") && !task_repeats_state("확인 필요", "대기"));
     }
 }
 
@@ -2355,14 +2394,41 @@ enum ExecutionLine<'a> {
     Section(String),
     Group(&'a PaneGroup, String),
     Text(String, bool),
+    /// 「이름 · 값」 표 한 줄. 값이 없으면 흐린 「—」 에 `tip` 이 까닭을 단다.
+    Kv { name: String, value: Option<String>, tip: String, warn: bool },
+    /// 지금 하는 일 — 얼굴 · 요청 한 줄 · 마지막 답 한 줄.
+    Now(&'a NowLine),
+    /// 이름 목록. 그리기 직전에 폭에 맞춰 `PillRow` 로 접는다.
+    Pills { name: String, items: Option<Vec<String>>, tip: String },
+    PillRow { name: String, items: Vec<String>, tip: String },
     Context(String),
     Process(&'a ProcRow),
     Schedule(&'a kasa_mcp::ScheduleItem),
 }
 impl ExecutionLine<'_> {
     fn height(&self) -> f32 {
-        match self { Self::Section(_) => DEV_H, Self::Group(..) => GROUP_H, Self::Schedule(_) => GROUP_H, _ => ROW_H }
+        match self {
+            Self::Section(_) => DEV_H,
+            Self::Group(..) | Self::Schedule(_) => GROUP_H,
+            Self::Now(_) => NOW_H,
+            Self::PillRow { .. } => PILL_ROW_H,
+            _ => ROW_H,
+        }
     }
+}
+
+/// 「지금 하는 일」 줄 — 28px 얼굴 옆에 요청·답 두 줄.
+const NOW_H: f32 = 44.0;
+const PILL_ROW_H: f32 = 24.0;
+
+fn kv<'a>(name: &str, value: impl Into<Option<String>>, tip: &str, warn: bool) -> ExecutionLine<'a> {
+    ExecutionLine::Kv { name: name.into(), value: value.into().filter(|v| !v.is_empty()), tip: tip.into(), warn }
+}
+
+/// 작업 한 줄이 상태 칸과 같은 말인가 — 「대기 · claude」 아래 「대기 중」 을 또 세우지 않는다.
+fn task_repeats_state(label: &str, state: &str) -> bool {
+    let label = label.trim().trim_end_matches(" 중");
+    label == state || (state == "실행" && label == "작업") || (state == "대기" && label == "대기")
 }
 
 fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<ExecutionLine<'a>> {
@@ -2378,6 +2444,11 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
         let key = execution_key(group);
         let expanded = info.pane_expanded.contains(&key);
         lines.push(ExecutionLine::Group(group, key));
+        // 지금 하는 일이 맨 위 — 보고 있는 탭이 먼저, 없으면 바깥 pane.
+        let active_tab = group.tabs.iter().find(|tab| tab.active).map(|tab| tab.pane.as_str());
+        if let Some(now) = active_tab.and_then(|pane| snap.now.get(pane)).or_else(|| snap.now.get(&group.pane)) {
+            lines.push(ExecutionLine::Now(now));
+        }
         if group.closed { lines.push(ExecutionLine::Text("접힌 pane에서 등록 서버 실행".into(), true)); }
         let task = snap.tasks.get(&group.pane);
         let mut runtime = if group.harness.is_empty() { group.rows.first().map(|row| row.name.as_str()).unwrap_or(if group.shell.is_empty() { "실행 대상 없음" } else { &group.shell }) } else { &group.harness }.to_string();
@@ -2387,54 +2458,66 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
             state = ["실패", "수집실패", "연결끊김", "실행", "원격 실행 미확인"].into_iter().find(|candidate| states.iter().any(|state| state == candidate)).unwrap_or(if states.iter().all(|state| state == "종료") { "종료" } else { "대기" }).into();
             runtime = format!("탭 {}개 · 프로세스 {}개", group.tabs.len(), group.tabs.iter().map(|tab| tab.rows.len()).sum::<usize>());
         }
-        lines.push(ExecutionLine::Text(format!("{state} · {runtime}"), state == "실패" || state == "수집실패"));
-        if let Some(task) = task.filter(|task| !task.label.is_empty()) { lines.push(ExecutionLine::Text(task.label.clone(), task.attention)); }
-        if let Some(server) = &group.registered { lines.push(ExecutionLine::Text(format!("{} · {} · 등록 실행", server.status, server.name), false)); }
+        lines.push(kv("상태", format!("{state} · {runtime}"), "", state == "실패" || state == "수집실패"));
+        if let Some(task) = task.filter(|task| !task.label.is_empty() && !task_repeats_state(&task.label, &state)) {
+            lines.push(kv("작업", task.label.clone(), "", task.attention));
+        }
+        if let Some(server) = &group.registered { lines.push(kv("서버", format!("{} · {}", server.status, server.name), "등록해 둔 실행", false)); }
         for tab in &group.tabs {
             let name = if !tab.title.is_empty() { tab.title.as_str() } else if !tab.session.is_empty() { &tab.session } else if !tab.label.is_empty() { &tab.label } else { "셸" };
             let state = execution_state(&tab.status, group.machine.is_some(), &tab.rows, snap.execution_states.get(&tab.pane));
-            lines.push(ExecutionLine::Text(format!("탭 {}{} · {} · {}", tab.index + 1, if tab.active { " (선택)" } else { "" }, state, name), false));
-            if let Some(task) = snap.tasks.get(&tab.pane).filter(|task| !task.label.is_empty()) { lines.push(ExecutionLine::Text(task.label.clone(), task.attention)); }
-            if let Some(server) = &tab.registered { lines.push(ExecutionLine::Text(format!("{} · {} · 등록 실행", server.status, server.name), false)); }
+            lines.push(kv(&format!("탭 {}{}", tab.index + 1, if tab.active { " ·" } else { "" }), format!("{state} · {name}"), if tab.active { "보고 있는 탭" } else { "" }, false));
+            if let Some(task) = snap.tasks.get(&tab.pane).filter(|task| !task.label.is_empty() && !task_repeats_state(&task.label, &state)) {
+                lines.push(kv("작업", task.label.clone(), "", task.attention));
+            }
+            if let Some(server) = &tab.registered { lines.push(kv("서버", format!("{} · {}", server.status, server.name), "등록해 둔 실행", false)); }
+        }
+        if !expanded { continue; }
+        // ── 실행 상세 ── 토큰·스킬·MCP 는 여기로 접혔다(2026-09-28 지시). 요약을 늘 띄우면 학생
+        // 줄마다 「미확인」 세 줄이 붙어 정작 무슨 일을 하는지가 밀려났다.
+        match snap.full_titles.get(&group.pane) {
+            Some(title) => lines.push(kv("제목", title.clone(), "", false)),
+            None if !group.session.is_empty() => lines.push(kv("제목", None, &format!("전체 제목을 기록에서 못 읽었어요 — 짧은 제목은 「{}」", group.session), false)),
+            None => {}
+        }
+        if !group.cwd.is_empty() { lines.push(kv("작업 폴더", group.cwd.clone(), "", false)); }
+        if let Some(server) = &group.registered { lines.push(ExecutionLine::Context(server.command.clone())); }
+        for process in &group.rows {
+            lines.push(ExecutionLine::Process(process));
+            lines.push(ExecutionLine::Context(process.command_text()));
+        }
+        for tab in &group.tabs {
+            if let Some(title) = snap.full_titles.get(&tab.pane) { lines.push(kv(&format!("탭 {} 제목", tab.index + 1), title.clone(), "", false)); }
+            if !tab.cwd.is_empty() { lines.push(kv(&format!("탭 {} 폴더", tab.index + 1), tab.cwd.clone(), "", false)); }
+            if let Some(server) = &tab.registered { lines.push(ExecutionLine::Context(server.command.clone())); }
+            for process in &tab.rows {
+                lines.push(ExecutionLine::Process(process));
+                lines.push(ExecutionLine::Context(process.command_text()));
+            }
+        }
+        if group.rows.is_empty() && group.tabs.iter().all(|tab| tab.rows.is_empty()) {
+            let why = if group.machine.is_some() { "원격 프로세스·포트는 로컬에서 확인하지 못해요" } else if group.status == "수집실패" { "실행 상세를 모으지 못했어요" } else { "셸 말고 도는 프로세스가 없어요" };
+            lines.push(kv("프로세스", None, why, false));
         }
         let selected = info.selected_pane.as_deref().is_some_and(|selected| group.pane == selected || group.tabs.iter().any(|tab| tab.pane == selected));
         let context = selected.then(|| snap.contexts.values().find(|context| context.pane_id == info.selected_pid)).flatten();
         let context = context.filter(|context| context.session_id == info.selected_session_id && context.harness == info.selected_harness);
         if let Some(context) = context {
-            for summary in context.summary.iter().take(3) { lines.push(ExecutionLine::Context(summary.clone())); }
+            lines.push(ExecutionLine::Section("실행 기록".into()));
+            lines.push(ExecutionLine::Context(context.note.clone()));
+            for (title, details) in &context.details {
+                lines.push(ExecutionLine::Section(title.clone()));
+                for detail in details {
+                    lines.push(match detail {
+                        crate::context_info::Detail::Value { name, value, tip, warn } => kv(name, value.clone(), tip, *warn),
+                        crate::context_info::Detail::Pills { name, items, tip } => ExecutionLine::Pills { name: name.clone(), items: items.clone(), tip: tip.clone() },
+                    });
+                }
+            }
         } else if selected && !info.selected_harness.is_empty() {
-            lines.push(ExecutionLine::Context("미확인 · 선택 에이전트 정보 갱신 중".into()));
-        }
-        if expanded {
-            if let Some(title) = snap.full_titles.get(&group.pane) { lines.push(ExecutionLine::Context(format!("제목 · {title}"))); }
-            else if !group.session.is_empty() { lines.push(ExecutionLine::Context(format!("전체 제목 미확인 · 기록된 제목 {}", group.session))); }
-            if let Some(task) = task.filter(|task| !task.label.is_empty()) { lines.push(ExecutionLine::Context(task.label.clone())); }
-            if !group.cwd.is_empty() { lines.push(ExecutionLine::Context(format!("작업 폴더 · {}", group.cwd))); }
-            if let Some(server) = &group.registered { lines.push(ExecutionLine::Context(server.command.clone())); }
-            for process in &group.rows {
-                lines.push(ExecutionLine::Process(process));
-                lines.push(ExecutionLine::Context(process.command_text()));
-            }
-            for tab in &group.tabs {
-                if let Some(title) = snap.full_titles.get(&tab.pane) { lines.push(ExecutionLine::Context(format!("제목 · {title}"))); }
-                else if !tab.session.is_empty() { lines.push(ExecutionLine::Context(format!("전체 제목 미확인 · 기록된 제목 {}", tab.session))); }
-                if !tab.title.is_empty() { lines.push(ExecutionLine::Context(format!("탭 이름 · {}", tab.title))); }
-                if !tab.cwd.is_empty() { lines.push(ExecutionLine::Context(format!("작업 폴더 · {}", tab.cwd))); }
-                if let Some(server) = &tab.registered { lines.push(ExecutionLine::Context(server.command.clone())); }
-                for process in &tab.rows {
-                    lines.push(ExecutionLine::Process(process));
-                    lines.push(ExecutionLine::Context(process.command_text()));
-                }
-            }
-            if group.rows.is_empty() && group.tabs.iter().all(|tab| tab.rows.is_empty()) {
-                lines.push(ExecutionLine::Text(if group.machine.is_some() { "원격 프로세스·포트는 로컬에서 확인하지 못함" } else if group.status == "수집실패" { "실행 상세 수집실패" } else { "추가 실행 프로세스 없음" }.into(), false));
-            }
-            if let Some(context) = context {
-                for (title, details) in &context.details {
-                    lines.push(ExecutionLine::Section(title.clone()));
-                    for detail in details { lines.push(ExecutionLine::Context(detail.clone())); }
-                }
-            }
+            lines.push(kv("실행 기록", None, "선택한 에이전트의 기록을 읽는 중이에요", false));
+        } else if !group.harness.is_empty() {
+            lines.push(kv("실행 기록", None, "이 pane 을 누르면 토큰·스킬·MCP 기록을 읽어요", false));
         }
     }
     if room.is_none() { lines.push(ExecutionLine::Text("열린 pane 없음".into(), false)); }
@@ -2445,23 +2528,66 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
     lines
 }
 
+/// 어절 단위 줄바꿈 — 한글 문장이 「남아 있 / 는」 처럼 어절 가운데서 끊기지 않게 공백에서 가른다.
+/// 한 어절이 한 줄보다 길면(공백 없는 경로·URL) 그 어절만 글자 단위로 자른다 — 글자는 하나도 안 잃는다.
 fn wrap_measured_text(text: &str, width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
     if !width.is_finite() || width <= 0.0 { return Vec::new(); }
-    let mut result = Vec::new(); let mut line = String::new();
-    for character in text.chars() {
-        let candidate = format!("{line}{character}");
-        if character == '\n' || (!line.is_empty() && measure(&candidate) > width) {
-            result.push(std::mem::take(&mut line));
+    let mut result = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for word in paragraph.split_inclusive(' ') {
+            let candidate = format!("{line}{word}");
+            if measure(candidate.trim_end()) <= width {
+                line = candidate;
+                continue;
+            }
+            if !line.is_empty() {
+                result.push(std::mem::take(&mut line).trim_end().to_string());
+            }
+            if measure(word.trim_end()) <= width {
+                line = word.to_string();
+                continue;
+            }
+            for character in word.chars() {
+                let candidate = format!("{line}{character}");
+                if !line.is_empty() && measure(candidate.trim_end()) > width {
+                    result.push(std::mem::take(&mut line));
+                }
+                line.push(character);
+            }
         }
-        if character != '\n' { line.push(character); }
+        let tail = line.trim_end();
+        if !tail.is_empty() { result.push(tail.to_string()); }
     }
-    if !line.is_empty() { result.push(line); }
     result
 }
 
 fn wrap_context_line(g: &mut gpu::GpuRenderer, text: &str, width: f32) -> Vec<String> {
     wrap_measured_text(text, width, |line| g.measure_chrome_text(line, 10.5, false))
 }
+
+/// 표 이름 칸 폭 — 좁은 칼럼에서 값 칸을 먹지 않게 폭의 36% 에서 멈춘다.
+fn kv_name_w(w: f32) -> f32 {
+    (w * 0.36).clamp(0.0, 84.0)
+}
+
+/// 알약을 폭에 맞춰 줄로 접는다. 첫 줄만 이름을 달고 이어지는 줄은 이름 칸을 비운다.
+fn pill_rows(names: &[String], avail: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<Vec<String>> {
+    let mut rows: Vec<Vec<String>> = vec![Vec::new()];
+    let mut used = 0.0;
+    for name in names {
+        let w = measure(name) + PILL_PAD * 2.0;
+        if used > 0.0 && used + w > avail {
+            rows.push(Vec::new());
+            used = 0.0;
+        }
+        rows.last_mut().unwrap().push(name.clone());
+        used += w + PILL_GAP;
+    }
+    rows
+}
+const PILL_PAD: f32 = 6.0;
+const PILL_GAP: f32 = 4.0;
 
 pub(crate) fn draw_info_col(
     g: &mut gpu::GpuRenderer,
@@ -2476,8 +2602,18 @@ pub(crate) fn draw_info_col(
     let snap = std::mem::take(&mut info.view);
     info.group_rects.clear(); info.proc_rects.clear(); info.kill_rects.clear();
     info.machine_rects.clear(); info.machine_pane_rects.clear(); info.sec_rects.clear(); info.dir_btn_rects.clear();
+    info.tip_rects.clear();
+    let value_w = (w - 26.0 - kv_name_w(w - 26.0)).max(0.0);
     let lines: Vec<_> = execution_lines(&snap, info).into_iter().flat_map(|line| match line {
         ExecutionLine::Context(text) => wrap_context_line(g, &text, (w - 26.0).max(0.0)).into_iter().map(ExecutionLine::Context).collect(),
+        ExecutionLine::Pills { name, items: None, tip } => vec![ExecutionLine::Kv { name, value: None, tip, warn: false }],
+        ExecutionLine::Pills { name, items: Some(items), tip } if items.is_empty() => {
+            vec![ExecutionLine::Kv { name, value: Some("없음".into()), tip: format!("{tip} — 확인한 구간에는 없어요"), warn: false }]
+        }
+        ExecutionLine::Pills { name, items: Some(items), tip } => pill_rows(&items, value_w, |text| g.measure_chrome_text(text, 10.5, false))
+            .into_iter().enumerate()
+            .map(|(i, items)| ExecutionLine::PillRow { name: if i == 0 { name.clone() } else { String::new() }, items, tip: tip.clone() })
+            .collect(),
         line => vec![line],
     }).collect();
     let height: f32 = lines.iter().map(ExecutionLine::height).sum();
@@ -2507,6 +2643,74 @@ pub(crate) fn draw_info_col(
                     let text = fit_text(g, text, (right - x0).max(0.0), 11.0, false);
                     g.draw_text(x0, y + 5.0, &text, gpu::DrawOpts { font_size: 11.0, color: if *attention { theme::attention() } else { theme::text_dim() }, bold: false, italic: false });
                 }
+                ExecutionLine::Kv { name, value, tip, warn } => {
+                    let name_w = kv_name_w(right - x0);
+                    let vx = x0 + name_w;
+                    let name_text = fit_text(g, name, (name_w - 8.0).max(0.0), 11.0, false);
+                    g.draw_text(x0, y + 5.0, &name_text, gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false });
+                    let (text, color) = match value {
+                        Some(value) => (fit_text(g, value, (right - vx).max(0.0), 11.0, false), if *warn { theme::attention() } else { theme::text() }),
+                        None => ("—".to_string(), theme::text_mute()),
+                    };
+                    g.draw_text(vx, y + 5.0, &text, gpu::DrawOpts { font_size: 11.0, color, bold: false, italic: false });
+                    // 잘린 값은 올리면 전문이, 모르는 값은 까닭이 뜬다.
+                    let tip = match value {
+                        Some(value) if text != *value => if tip.is_empty() { value.clone() } else { format!("{value}\n{tip}") },
+                        _ => tip.clone(),
+                    };
+                    if !tip.is_empty() {
+                        if let Some(rect) = g.clip_hit((x0, y, right - x0, row_h)) { info.tip_rects.push((tip, rect)); }
+                    }
+                }
+                ExecutionLine::Now(now) => {
+                    let face = 28.0;
+                    let slug = now.character.as_deref().and_then(theme::character_slug_any);
+                    let key = slug.map(|slug| format!("board:{slug}:profile"));
+                    let drawn = match (slug, key.as_deref()) {
+                        (Some(slug), Some(key)) => {
+                            if !g.has_image(key) {
+                                if let Some((rgba, fw, fh)) = crate::sprites::student_profile_rgba(slug) { g.upload_image(key, &rgba, fw, fh); }
+                            }
+                            g.has_image(key).then(|| g.queue_image_above(key, x0, y + 6.0, face, face)).is_some()
+                        }
+                        _ => false,
+                    };
+                    let tx = if drawn { x0 + face + 8.0 } else { x0 };
+                    let avail = (right - tx).max(0.0);
+                    for (i, (label, text)) in [("요청", &now.request), ("답", &now.reply)].into_iter().enumerate() {
+                        let ly = y + 4.0 + i as f32 * 18.0;
+                        let lw = g.measure_chrome_text(label, 10.0, false) + 6.0;
+                        g.draw_text(tx, ly + 1.0, label, gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false });
+                        let shown = if text.is_empty() { "—".to_string() } else { fit_text(g, text, (avail - lw).max(0.0), 11.0, false) };
+                        g.draw_text(tx + lw, ly, &shown, gpu::DrawOpts { font_size: 11.0, color: if text.is_empty() { theme::text_mute() } else { theme::text() }, bold: false, italic: false });
+                        if !text.is_empty() && shown != **text {
+                            if let Some(rect) = g.clip_hit((tx, ly, avail, 18.0)) { info.tip_rects.push(((*text).clone(), rect)); }
+                        }
+                    }
+                }
+                ExecutionLine::PillRow { name, items, tip } => {
+                    let name_w = kv_name_w(right - x0);
+                    if !name.is_empty() {
+                        let name_text = fit_text(g, name, (name_w - 8.0).max(0.0), 11.0, false);
+                        g.draw_text(x0, y + 6.0, &name_text, gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false });
+                        if !tip.is_empty() {
+                            if let Some(rect) = g.clip_hit((x0, y, name_w, row_h)) { info.tip_rects.push((tip.clone(), rect)); }
+                        }
+                    }
+                    let mut px = x0 + name_w;
+                    for item in items {
+                        let text = fit_text(g, item, (right - px - PILL_PAD * 2.0).max(0.0), 10.5, false);
+                        let pw = g.measure_chrome_text(&text, 10.5, false) + PILL_PAD * 2.0;
+                        // 플랫 문법 — 채움 없이 테두리만(docs/design.md 4절).
+                        g.round_rect_stroke(px, y + 3.0, pw, 18.0, 9.0 * theme::roundness(), theme::border_w().max(1.0), theme::border());
+                        g.draw_text(px + PILL_PAD, y + 6.0, &text, gpu::DrawOpts { font_size: 10.5, color: theme::text(), bold: false, italic: false });
+                        if text != *item {
+                            if let Some(rect) = g.clip_hit((px, y + 3.0, pw, 18.0)) { info.tip_rects.push((item.clone(), rect)); }
+                        }
+                        px += pw + PILL_GAP;
+                    }
+                }
+                ExecutionLine::Pills { .. } => {}
                 ExecutionLine::Context(text) => {
                     let available = (right - x0).max(0.0);
                     let fitted = if g.measure_chrome_text(text, 10.5, false) <= available { text.clone() } else { fit_text(g, text, available, 10.5, false) };

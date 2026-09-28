@@ -460,14 +460,30 @@ if [[ -f "$SIGN_KEYCHAIN" ]]; then
   fi
   IDENTITY_ARGS+=("$SIGN_KEYCHAIN")
 fi
+# 애플 인증서는 **개인 팀**(KASATERM_SIGN_TEAM, 기본 L366799VND) 것만 쓴다. 회사 맥북 로그인 키체인에는
+# 회사 팀(8MYW6TGL4B)의 Developer ID·Apple Development 가 함께 있어서, 「첫 줄」을 고르던 옛 방식은
+# 목록 순서에 따라 개인 앱을 회사 인증서로 서명할 수 있었다(2026-09-28). 이름의 괄호 안 값은 팀이
+# 아닐 수 있어(Apple Development 는 사람 id) 인증서의 OU 로 가른다.
+SIGN_TEAM="${KASATERM_SIGN_TEAM:-L366799VND}"
+identity_team() {
+  local cert
+  if [[ -f "$SIGN_KEYCHAIN" ]]; then
+    cert=$(security find-certificate -c "$1" -p "$SIGN_KEYCHAIN" 2>/dev/null)
+  else
+    cert=$(security find-certificate -c "$1" -p 2>/dev/null)
+  fi
+  echo "$cert" | openssl x509 -noout -subject 2>/dev/null | sed -nE 's/.*OU *= *([A-Z0-9]+).*/\1/p'
+}
 if [[ -z "$SIGN_ID" ]]; then
   for kind in "Developer ID Application" "Apple Development"; do
-    line=$(security find-identity -v "${IDENTITY_ARGS[@]}" 2>/dev/null | grep "\"$kind: " | head -1 || true)
-    if [[ -n "$line" ]]; then
-      SIGN_ID=$(echo "$line" | awk '{print $2}')
-      APPLE_SIGN=$(echo "$line" | sed -E 's/^[^"]*"([^"]*)".*$/\1/')
-      break
-    fi
+    while IFS= read -r line; do
+      name=$(echo "$line" | sed -E 's/^[^"]*"([^"]*)".*$/\1/')
+      if [[ "$(identity_team "$name")" == "$SIGN_TEAM" ]]; then
+        SIGN_ID=$(echo "$line" | awk '{print $2}')
+        APPLE_SIGN="$name"
+        break 2
+      fi
+    done < <(security find-identity -v "${IDENTITY_ARGS[@]}" 2>/dev/null | grep "\"$kind: " || true)
   done
   SIGN_ID="${SIGN_ID:-kasaterm-dev}"
 fi
@@ -483,6 +499,10 @@ if security find-identity "${IDENTITY_ARGS[@]}" 2>/dev/null | grep -q "$SIGN_ID"
       *'"Developer ID Application: '*|*'"Apple Development: '*|*'"Apple Distribution: '*)
         APPLE_SIGN=$(echo "$line" | sed -E 's/^[^"]*"([^"]*)".*$/\1/') ;;
     esac
+  fi
+  if [[ -n "$APPLE_SIGN" && "$(identity_team "$APPLE_SIGN")" != "$SIGN_TEAM" ]]; then
+    echo "error: '$APPLE_SIGN' 는 팀 $SIGN_TEAM 인증서가 아니다 — 다른 팀(회사) 인증서로 이 앱을 서명하지 않는다" >&2
+    exit 1
   fi
   if [[ -n "$APPLE_SIGN" ]]; then
     SIGN_MSG="signed with '$APPLE_SIGN' — 알림센터를 쓴다"

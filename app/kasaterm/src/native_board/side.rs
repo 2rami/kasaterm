@@ -523,14 +523,14 @@ impl App {
                 self.focus_surface(&surface);
             }
             SideHit::Board(key) => {
-                if self.open_board_room() {
+                if self.open_board_panel() {
                     self.board_scene.set_tab(BoardTab::Work);
                     self.board_scene.select_work(key);
                     self.request_native_board_refresh();
                 }
             }
             SideHit::OpenBoard => {
-                if self.open_board_room() {
+                if self.open_board_panel() {
                     self.board_scene.set_tab(BoardTab::Work);
                     self.request_native_board_refresh();
                 }
