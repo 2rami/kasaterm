@@ -6,7 +6,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'server.dart';
 import 'term_socket.dart';
 
-/// 데스크톱의 `127.0.0.1:<port>`(개발 서버)를 이 폰의 `localhost:<localPort>` 로 끌어온다 — 앱 안 웹뷰가
+/// 데스크톱의 `127.0.0.1:<port>`(개발 서버)를 이 폰의 `localhost:<localPort>` 로 끌어온다 — 앱 안 Safari 화면이
 /// localhost 로 열어 개발 서버 bind·secure context·절대 주소가 그대로 돈다. 데스크톱과 같은 포트를 먼저 잡는다.
 ///
 /// 연결마다 데스크톱 `/net/tcp?port=N` 웹소켓 하나(`docs/kasanet.md` P3). 길은 [Server.wsUri] 가 고른다 — 직통이면
@@ -37,7 +37,7 @@ class NetTcpBridge {
       v4 = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
     }
     final listeners = [v4];
-    // 웹뷰가 localhost 를 ::1 로 먼저 풀 수 있다 — 같은 포트로 v6 도 들어 둔다(못 들면 v4 만).
+    // Safari 가 localhost 를 ::1 로 먼저 풀 수 있다 — 같은 포트로 v6 도 들어 둔다(못 들면 v4 만).
     try {
       listeners.add(
         await ServerSocket.bind(

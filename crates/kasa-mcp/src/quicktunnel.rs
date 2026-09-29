@@ -76,7 +76,7 @@ fn origin_of(url: &Url) -> Option<String> {
     Some(format!("{}://{host}:{port}", url.scheme()))
 }
 
-/// 폰 앱이 앱 안 웹뷰로 열 이 기계 localhost 주소면 그 주소(`0.0.0.0` 은 `localhost` 로) — 임시 터널 대신 폰이
+/// 폰 앱이 앱 안 Safari 화면으로 열 이 기계 localhost 주소면 그 주소(`0.0.0.0` 은 `localhost` 로) — 임시 터널 대신 폰이
 /// `/net/tcp` 로 이 기계 포트를 끌어간다(docs/kasanet.md P5). 새 판 폰 앱이 없거나 사설망 주소면 None(터널 그대로).
 pub fn in_app_url(raw: &str) -> Option<String> {
     let mut url = Url::parse(raw).ok()?;

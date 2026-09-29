@@ -1,12 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:webview_flutter/webview_flutter.dart';
 
 import '../net_tcp.dart';
 import '../server.dart';
 
-/// 데스크톱 개발 서버를 앱 안에서 본다 — 데스크톱 `127.0.0.1:port` 를 이 폰 localhost 로 끌어와 웹뷰로 연다.
-/// 길은 데스크톱 직통(카사넷)이면 그쪽, 아니면 관문. 머리 아래 한 줄이 지금 길이다.
+/// 데스크톱 개발 서버를 앱 안 Safari 화면(안드로이드는 크롬 커스텀 탭)으로 연다 — 데스크톱 `127.0.0.1:port` 를
+/// 이 폰 localhost 로 끌어와 그 주소를 연다. 임베디드 웹뷰가 아니라서 로그인이 앱별로 남고 비밀번호 자동 채우기·
+/// 구글 OAuth 가 된다.
+///
+/// 입구 수명은 이 화면에 건다 — Safari 화면은 닫혀도 알려 주지 않아서(url_launcher 는 첫 로드까지만 답한다), 이 화면이
+/// 스택에 있는 동안 입구가 산다. 길(직통·관문)은 Safari 화면에 못 넣으니 여기서 열기 전에 잠깐, 닫고 돌아와서도 보인다.
 class DevServerScreen extends StatefulWidget {
   const DevServerScreen({
     super.key,
@@ -27,9 +31,12 @@ class DevServerScreen extends StatefulWidget {
 
 class _DevServerScreenState extends State<DevServerScreen> {
   NetTcpBridge? _bridge;
-  WebViewController? _web;
   String? _error;
-  int _progress = 0;
+  // 첫 열기까지 단추 대신 도는 표시. launchUrl 은 첫 로드가 끝나야(또는 그 전에 닫아야) 답한다.
+  bool _launching = true;
+
+  /// 열기 전에 길 한 줄을 읽을 틈.
+  static const _showPath = Duration(milliseconds: 700);
 
   @override
   void initState() {
@@ -53,33 +60,42 @@ class _DevServerScreenState extends State<DevServerScreen> {
         await bridge.close();
         return;
       }
-      final path = widget.path.startsWith('/')
-          ? widget.path
-          : '/${widget.path}';
-      final web = WebViewController()
-        ..setJavaScriptMode(JavaScriptMode.unrestricted)
-        ..setNavigationDelegate(
-          NavigationDelegate(
-            onProgress: (p) {
-              if (mounted) setState(() => _progress = p);
-            },
-            onWebResourceError: (e) {
-              if (mounted && e.isForMainFrame != false) {
-                setState(
-                  () => _error =
-                      '데스크톱 localhost:${widget.port} 를 못 열었어요 — ${e.description}',
-                );
-              }
-            },
-          ),
-        )
-        ..loadRequest(Uri.parse('http://localhost:${bridge.localPort}$path'));
-      setState(() {
-        _bridge = bridge;
-        _web = web;
-      });
+      setState(() => _bridge = bridge);
     } catch (e) {
-      if (mounted) setState(() => _error = '이 폰에 localhost 를 열지 못했어요 — $e');
+      if (mounted) {
+        setState(() {
+          _error = '이 폰에 localhost 를 열지 못했어요 — $e';
+          _launching = false;
+        });
+      }
+      return;
+    }
+    await Future<void>.delayed(_showPath);
+    if (mounted) await _launch();
+  }
+
+  Uri get _uri {
+    final path = widget.path.startsWith('/') ? widget.path : '/${widget.path}';
+    return Uri.parse('http://localhost:${_bridge!.localPort}$path');
+  }
+
+  Future<void> _launch() async {
+    setState(() {
+      _error = null;
+      _launching = true;
+    });
+    String? error;
+    try {
+      // false 는 첫 로드 전에 닫은 것 — 사람이 닫았으니 알릴 것이 없다.
+      await launchUrl(_uri, mode: LaunchMode.inAppBrowserView);
+    } on PlatformException {
+      error = '데스크톱 localhost:${widget.port} 첫 화면을 못 받았어요 — 개발 서버가 떠 있는지 봐 주세요';
+    }
+    if (mounted) {
+      setState(() {
+        _error = error;
+        _launching = false;
+      });
     }
   }
 
@@ -102,59 +118,59 @@ class _DevServerScreenState extends State<DevServerScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final web = _web;
+    final scheme = theme.colorScheme;
     final local = _bridge?.localPort;
+    final direct = widget.server.pathOf(widget.machine)?.$1 ?? false;
     return Scaffold(
-      appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('localhost:${widget.port}'),
-            Text(
-              local == null || local == widget.port
-                  ? _pathLine
-                  : '$_pathLine · 이 폰 $local',
-              style: theme.textTheme.bodySmall,
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            tooltip: '다시 읽기',
-            icon: const Icon(Icons.refresh),
-            onPressed: web == null
-                ? null
-                : () {
-                    setState(() => _error = null);
-                    web.reload();
-                  },
-          ),
-        ],
-        bottom: _progress > 0 && _progress < 100
-            ? PreferredSize(
-                preferredSize: const Size.fromHeight(2),
-                child: LinearProgressIndicator(
-                  value: _progress / 100,
-                  minHeight: 2,
-                ),
-              )
-            : null,
-      ),
-      body: _error != null
-          ? Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text(_error!, textAlign: TextAlign.center),
+      appBar: AppBar(title: Text('localhost:${widget.port}')),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                direct ? Icons.bolt_rounded : Icons.cloud_outlined,
+                size: 40,
+                color: direct ? scheme.primary : scheme.onSurfaceVariant,
               ),
-            )
-          : web == null
-          ? const Center(child: CircularProgressIndicator())
-          : WebViewWidget(controller: web),
+              const SizedBox(height: 12),
+              Text(_pathLine, style: theme.textTheme.titleMedium),
+              if (local != null && local != widget.port) ...[
+                const SizedBox(height: 4),
+                Text(
+                  '이 폰 localhost:$local',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+              if (_error != null) ...[
+                const SizedBox(height: 16),
+                Text(
+                  _error!,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: scheme.error),
+                ),
+              ],
+              const SizedBox(height: 24),
+              if (_launching)
+                const CircularProgressIndicator()
+              else if (local != null)
+                FilledButton.icon(
+                  onPressed: _launch,
+                  icon: const Icon(Icons.open_in_new_rounded),
+                  label: const Text('다시 열기'),
+                ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
 
-/// 데스크톱이 보여 주기로 넘긴 그 기계의 localhost 주소면 (포트, 경로·쿼리) — 앱 안 웹뷰로 연다. 새 판 폰 앱이
+/// 데스크톱이 보여 주기로 넘긴 그 기계의 localhost 주소면 (포트, 경로·쿼리) — 입구를 세워 앱 안 Safari 화면으로 연다. 새 판 폰 앱이
 /// 등록한 데스크톱만 이런 주소를 쪽지에 넣는다(옛 판에는 임시 터널 주소). 폰에는 제 localhost 서버가 없으니
 /// 쪽지의 localhost 는 늘 그 쪽지를 낸 데스크톱이다.
 ({int port, String path})? desktopLocal(Uri u) {
@@ -168,7 +184,7 @@ class _DevServerScreenState extends State<DevServerScreen> {
   return (port: port, path: path);
 }
 
-/// 보여 주기 링크를 연다 — 데스크톱 localhost 면 앱 안 웹뷰, 아니면 밖(사파리).
+/// 보여 주기 링크를 앱 안 Safari 화면으로 연다 — 데스크톱 localhost 면 입구를 세워서.
 Future<void> openShownLink(
   NavigatorState nav,
   Server server,
@@ -177,7 +193,7 @@ Future<void> openShownLink(
 }) async {
   final local = desktopLocal(u);
   if (local == null) {
-    await launchUrl(u, mode: LaunchMode.externalApplication);
+    await launchUrl(u, mode: LaunchMode.inAppBrowserView);
     return;
   }
   await nav.push(

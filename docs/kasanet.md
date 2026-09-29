@@ -44,7 +44,7 @@ STUN 판정으로는 두 기기 모두 목적지 무관 매핑 NAT 라 구멍 �
 | P2 | 연결: `/version` 에 EndpointId 공개, `machines.rs` 길 선택, 기기 상태에 경로 표시 | 격리 앱 둘이 카사넷으로 거울 연결 |
 | P3 | 포트 공유: `kasaterm-cli net forward <기기> <port>`, 다른 데스크톱으로 페이지 보여 주기 | 개발 서버를 다른 기기 localhost 로 열기 |
 | P4 | 거울 화면 동기화를 QUIC datagram 으로(mosh 식) | 패킷 손실 중에도 입력 에코가 안 멈춤 |
-| P5 | 폰: 앱 안 웹뷰가 카사넷으로 페이지 받기 | 폰에서 맥북 개발 서버 보기 — 시뮬레이터 확인, 실기는 TestFlight 뒤 |
+| P5 | 폰: 앱 안 Safari 화면이 카사넷으로 페이지 받기 | 폰에서 맥북 개발 서버 보기 — 시뮬레이터 확인, 실기는 TestFlight 뒤 |
 
 ## P3~P5 계약 (2026-09-29)
 
@@ -59,7 +59,8 @@ STUN 판정으로는 두 기기 모두 목적지 무관 매핑 NAT 라 구멍 �
   손실 많은 길은 이미 ssh 로 보낸다. 실사용에서 끊김이 재지면 다시 연다.
 - **P5 폰**: `crates/kasa-net-ffi`(iOS 정적 라이브러리)로 폰 앱이 카사넷 엔드포인트를 든다. 폰 키는 앱 안에만.
   데스크톱은 폰 id 를 **관문 계정 채널**(이미 로그인된 폰)로만 배운다. 폰이 데스크톱에 가는 HTTP·웹소켓은 데스크톱과 같은
-  입구 규칙(직통이면 카사넷, 아니면 관문). 앱 안 웹뷰는 그 입구와 P3 `/net/tcp` 로 데스크톱 개발 서버를 연다.
+  입구 규칙(직통이면 카사넷, 아니면 관문). 데스크톱 개발 서버는 그 입구와 P3 `/net/tcp` 로 폰 localhost 에 끌어와 앱 안
+  Safari 화면(`SFSafariViewController`, 안드로이드는 크롬 커스텀 탭)으로 연다.
 
 ## P0 실측 (2026-09-29)
 
@@ -209,9 +210,20 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
   화면 소켓은 관문에 붙어 있다가 직통이 서면 다시 붙어 옮긴다. 앱이 깨어나면 `network_changed` 와 재등록. 데스크톱이 다시
   떠 폰을 잊었으면(403) 수명을 기다리지 않고 다시 등록하고, 재등록마다 `/version` 부터 다시 받아 포트가 바뀐 데스크톱에도
   입구가 따라간다.
-- **앱 안 웹뷰** 설정 「데스크톱 개발 서버 열기」(포트·경로) → `NetTcpBridge` 가 폰 `localhost:L`(v4·v6, 데스크톱과 같은
-  번호를 먼저)을 듣고 연결마다 P3 `/net/tcp?port=N` 웹소켓을 연다 — 길은 위 규칙 그대로(직통이면 입구, 아니면 관문). 틀은
-  P3 와 같다(바이너리·`eof`). 머리 아래 한 줄이 지금 길(「데스크톱 직통 · Nms」/「관문 경유」). 설정 계정 칸에 「데스크톱 길」.
+- **앱 안 Safari 화면** 설정 「데스크톱 개발 서버 열기」(포트·경로) → `NetTcpBridge` 가 폰 `localhost:L`(v4·v6, 데스크톱과
+  같은 번호를 먼저)을 듣고 연결마다 P3 `/net/tcp?port=N` 웹소켓을 연다 — 길은 위 규칙 그대로(직통이면 입구, 아니면 관문). 틀은
+  P3 와 같다(바이너리·`eof`). 그 주소를 `url_launcher` `LaunchMode.inAppBrowserView` 로 연다(iOS `SFSafariViewController`,
+  안드로이드는 같은 코드가 크롬 커스텀 탭). 설정 계정 칸에 「데스크톱 길」.
+  - **왜 임베디드 웹뷰가 아닌가**(2026-09-29 결정): Safari 화면은 카사텀이 앞에 있는 채로 떠서 카사넷 입구(앱 프로세스의
+    Dart 소켓)가 살아 있고, 로그인(쿠키·저장소)이 앱별로 남고, iCloud 비밀번호 자동 채우기가 되고, 구글 OAuth 가 막히지
+    않는다(구글은 임베디드 웹뷰 로그인을 거절한다). `webview_flutter` 는 뺐다.
+  - **입구 수명 = 받침 화면(`DevServerScreen`)**. `url_launcher` 는 Safari 화면이 닫혀도 알려 주지 않는다(첫 로드가 끝나거나
+    그 전에 닫혔을 때만 답한다). 그래서 입구를 세운 작은 Flutter 화면을 밑에 깔고 그 위에 Safari 화면을 띄운다 — 이 화면이
+    스택에 있는 동안 입구가 살고, 뒤로 나가면 닫는다. Safari 화면을 닫으면 이 화면으로 돌아와 「다시 열기」를 누를 수 있다.
+  - **길 표시**: Safari 화면에는 우리 글을 못 넣는다. 받침 화면이 열기 전 0.7초 동안 「데스크톱 직통 · Nms」/「관문 경유」를
+    보이고(번호가 다르면 「이 폰 localhost:L」), 닫고 돌아와서도 같은 줄이 보인다. 첫 로드가 실패하면 그 아래 한 줄.
+  - **같은 번호 먼저가 로그인 유지의 조건**: 쿠키는 호스트(`localhost`)에 묶여 포트가 바뀌어도 가지만, localStorage·
+    IndexedDB·OAuth 돌아올 주소는 출처(`localhost:포트`)에 묶인다. 폰 번호가 데스크톱과 같아야 앱을 껐다 켜도 같은 출처다.
 - 검사 `cargo test -p kasa-net`(돌리기: 원래 포트 안 닿음·표 밖 포트 막힘·잊으면 연결 끊김 / `direct_only` 가 못 실을 때
   닫음) · `cargo test -p kasa-net-ffi`(C ABI 를 앱 순서로: 루프백 데스크톱에 직통으로 싣고, 직통을 잃으면 닫음) ·
   `cargo test -p kasa-mcp --lib phone_ingress`(폰 입구 = 관문 자격·쿠키 걷기 / 카사넷·로컬로 온 등록 403 / 관문 주인 등록 통과)
@@ -243,13 +255,34 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
 - **옛 판 폰 가르기**: 새 판 폰 앱만 카사넷 등록을 하므로, 등록이 오면 그 시각을 키 옆 `kasanet-phone-app.json` 에 남기고
   30일 안에 등록한 적이 있을 때만 터널을 건너뛴다(`kasanet::phone_app_opens_localhost`). 등록 수명(15분)으로 가르면 폰 앱이
   잠든 사이의 보여 주기가 터널로 떨어진다. 격리 인스턴스가 이번 실행 전용 키로 떴으면 파일 없이 메모리에만.
-- **폰**: 쪽지·알림 링크가 localhost 면(`desktopLocal`) 사파리 대신 앱 안 웹뷰(`DevServerScreen`)로 그 쪽지를 낸 기계의 포트를
-  연다 — 폰에는 제 localhost 서버가 없으니 쪽지의 localhost 는 늘 그 데스크톱이다. 길은 위와 같다(직통이면 카사넷, 아니면 관문).
+- **폰**: 쪽지·알림 링크가 localhost 면(`desktopLocal`) 입구를 세운 받침 화면(`DevServerScreen`)에서 앱 안 Safari 화면으로 그
+  쪽지를 낸 기계의 포트를 연다(그 밖의 주소는 입구 없이 바로 앱 안 Safari 화면). 폰에는 제 localhost 서버가 없으니 쪽지의
+  localhost 는 늘 그 데스크톱이다. 길은 위와 같다(직통이면 카사넷, 아니면 관문).
 - 검사 `cargo test -p kasa-mcp --lib quicktunnel`(등록 전에는 터널, 뒤에는 localhost·`0.0.0.0`·`[::1]` 만 그대로, 사설망·
-  `.local`·바깥 주소·http 아닌 것은 터널) · `flutter test test/shown_link_test.dart`.
+  `.local`·바깥 주소·http 아닌 것은 터널) · `flutter test test/shown_link_test.dart test/dev_server_test.dart`(바깥 주소도 앱 안
+  Safari 모드, localhost 는 길 표시 뒤 데스크톱과 같은 번호로 열고 받침 화면을 닫으면 입구도 닫힘).
 - 검증(격리 리그, 브라우저 기기 = 폰): 폰 등록 뒤 `/open-url?url=http://localhost:4719/?from=show-http` → 답 `in_app: true`,
   CLI `open http://0.0.0.0:4719/?from=cli` → 쪽지 둘 다 `http://localhost:4719/…`(「폰 앱 안에서 연다」). 폰 쪽지를 누르자 웹뷰가
   「데스크톱 직통」으로 `?from=show-http` 를 열었다. 그동안 cloudflared 0개.
+
+### P5 앱 안 Safari 화면 검증 (2026-09-29, 로컬 관문 + 격리 데스크톱 + 전용 시뮬레이터)
+
+리그는 위 P5 검증과 같다(`kasa-relay --port 18793`, 시험 계정, 격리 앱 `KASATERM_KASANET_BIND=127.0.0.1:0`, 전용 시뮬레이터에
+`SIMCTL_CHILD_KASATERM_KASANET_BIND`). ⚠️ `kasa-relay account add` 는 `$HOME/.config/kasaterm/` 에 적지만 관문은 **`--state`
+파일 옆**의 `relay-accounts.json` 을 읽는다 — 리그는 계정 파일을 상태 파일 옆에 두어야 로그인이 된다.
+
+- 더미 개발 서버(맥 `127.0.0.1:4721`, 방문마다 `Max-Age` 쿠키를 심고 받은 쿠키·localStorage 를 보임) → 설정 「데스크톱 개발
+  서버 열기」: 받침 화면 「데스크톱 직통 · 1ms」 뒤 Safari 화면이 「NEW VISIT」. 느린 자원을 붙든 동안 더미에 붙은 쪽은 격리
+  데스크톱 프로세스, 그 `/net/tcp` 는 폰 입구 리스너(카사넷)로 들어왔고 관문 연결은 데스크톱 업링크 1개뿐(폰 → 관문 0).
+- Safari 화면을 닫으면 받침 화면(길 줄·「다시 열기」)으로 돌아옴. 앱을 끝내고(`simctl terminate`) 다시 켜 같은 서버를 열자
+  「COOKIE KEPT」 — 앱 안 Safari 화면의 쿠키는 앱을 껐다 켜도 남는다. localStorage 는 비었다: 시뮬레이터는 맥과 루프백을 같이
+  써 4721 이 맥 쪽에 잡혀 있어 폰 번호가 매번 빈 번호(52664 → 55220)였다 — 출처가 바뀐 것. 실기는 같은 번호가 된다.
+- 쪽지 경로: 격리 앱 `/open-url?url=http://localhost:4721/?from=note`(브라우저 기기 = 폰) → `in_app: true`, 폰 쪽지를 누르자
+  받침 화면 「데스크톱 직통 · 0ms」 뒤 Safari 화면이 `?from=note` 를 쿠키와 함께 열었다.
+- ⚠️ 시뮬레이터 착시: **빈 포트**를 열면 폰 입구가 그 번호를 잡고(맥에 비어 있으니), 데스크톱 `/net/tcp` 가 그 번호로 붙어 폰
+  입구로 되돌아가는 고리가 돈다(Safari 가 계속 로딩). 폰과 데스크톱이 루프백을 같이 쓰는 시뮬레이터에서만 생긴다. 받침
+  화면을 닫으면 입구가 닫혀 고리가 끝나고, 돌아온 화면에 「첫 화면을 못 받았어요」가 뜬다.
+- 남은 것: 실기 아이폰에서 같은 번호·iCloud 비밀번호 자동 채우기·구글 로그인 확인(TestFlight 판).
 
 ## 자체 중계 (2026-09-29, 맥미니)
 

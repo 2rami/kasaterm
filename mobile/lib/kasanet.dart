@@ -109,7 +109,7 @@ class KasanetRouter extends ChangeNotifier {
     return null;
   }
 
-  /// 기계 route → (직통인가, 왕복 ms). 모르는 기계면 null — 설정 화면·웹뷰 머리의 「직통/관문」 표시.
+  /// 기계 route → (직통인가, 왕복 ms). 모르는 기계면 null — 설정 화면·개발 서버 화면의 「직통/관문」 표시.
   (bool, int?)? pathOf(String? machine) {
     final key = _key(machine);
     final desk = key == null ? null : _desks[key];

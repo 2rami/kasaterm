@@ -315,7 +315,7 @@ pub fn allow_phone(id: &str) -> Result<Duration, &'static str> {
     Ok(PHONE_TTL)
 }
 
-/// 앱 안 웹뷰로 데스크톱 localhost 를 여는 폰 앱이 있다고 보는 기간. 그런 판만 카사넷 등록을 하므로 마지막 등록
+/// 앱 안에서(Safari 화면) 데스크톱 localhost 를 여는 폰 앱이 있다고 보는 기간. 그런 판만 카사넷 등록을 하므로 마지막 등록
 /// 시각으로 판을 가른다 — 등록 수명(15분)으로 가르면 폰 앱이 잠든 사이 보여 주기가 임시 터널로 떨어진다.
 const PHONE_APP_FRESH: Duration = Duration::from_secs(30 * 24 * 3600);
 const PHONE_APP_FILE: &str = "kasanet-phone-app.json";
@@ -349,7 +349,7 @@ pub(crate) fn note_phone_app() {
 }
 
 /// 폰 보여 주기에서 이 기기 localhost 주소를 임시 터널 없이 넘겨도 되나 — 새 판 폰 앱이 최근에 등록한 적이 있다.
-/// 그 앱은 쪽지의 localhost 주소를 앱 안 웹뷰로 연다(직통이면 카사넷, 아니면 관문 `/net/tcp`).
+/// 그 앱은 쪽지의 localhost 주소를 앱 안 Safari 화면으로 연다(직통이면 카사넷, 아니면 관문 `/net/tcp`).
 pub fn phone_app_opens_localhost() -> bool {
     let remembered = PHONE_APP_AT.lock().ok().and_then(|at| *at);
     let at = remembered.or_else(|| {

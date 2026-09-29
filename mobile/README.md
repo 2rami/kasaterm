@@ -83,7 +83,7 @@ lib/
   kasanet_native*.dart 앱에 링크된 kasa-net-ffi(ios/KasaNet) 바인딩. 웹·시험은 없음(늘 관문)
   net_tcp*.dart        데스크톱 개발 서버를 폰 localhost 로 끌어오는 다리(/net/tcp 웹소켓)
   conversation.dart    학생 대화 모델 — transcript-raw(claude)·rollout(codex) 줄 → 말풍선·도구 묶음 · 화면의 선택 메뉴 읽기
-  screens/             nacho_home(첫 화면: 대화·작업) · nacho_task · connect · hub · terminal(「터미널|대화」 전환) · conversation_view · settings · dev_server(앱 안 웹뷰)
+  screens/             nacho_home(첫 화면: 대화·작업) · nacho_task · connect · hub · terminal(「터미널|대화」 전환) · conversation_view · settings · dev_server(앱 안 Safari·크롬 커스텀 탭)
 tool/devproxy.dart     크롬 개발용 같은 출처 역프록시
 test/                  유닛 · 골든(goldens/) · live/(실서버, KASA_ROOT 있을 때만)
 ```

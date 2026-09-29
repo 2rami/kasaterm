@@ -988,7 +988,7 @@ async fn open_url_handler(
             let mut body = serde_json::json!({ "ok": true, "url": shown,
                 "target": if phone { "phone".to_string() } else { crate::machines::kasachrome_machine() } });
             if let Some(e) = tunnel_error { body["tunnel_error"] = serde_json::json!(e); }
-            // 폰 앱 안 웹뷰가 카사넷(아니면 관문)으로 연다 — 바깥 주소가 없으니 답장에 이 주소를 링크로 적지 않게.
+            // 폰 앱 안 Safari 화면이 카사넷(아니면 관문)으로 연다 — 바깥 주소가 없으니 답장에 이 주소를 링크로 적지 않게.
             if in_app.is_some() { body["in_app"] = serde_json::json!(true); }
             body
         }
