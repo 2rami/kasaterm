@@ -14,10 +14,18 @@ KASATERM_SETTINGS_FILE=/tmp/<네이름>-settings.json \
 KASATERM_WINDOW_FILE=/tmp/<네이름>-window.json \
 KASATERM_AUTORESTORE=fresh \
 KASATERM_STUDENTS_DIR=/tmp/<네이름>-students \
+KASATERM_KASANET_KEY=/tmp/<네이름>-kasanet.key \
 KASATERM_AUTOQUIT_MS=120000 \
 ./target/debug/kasaterm > /tmp/<네이름>-app.log 2>&1 &
 APP=$!                     # 거둘 때는 이 PID 만: kill $APP
 ```
+
+- **`KASATERM_KASANET_KEY`** — 카사넷 기기 키. 본판 키(`~/.config/kasaterm/kasanet.key`)로 뜨면 다른 기기가 리그와 본판을
+  한 기기로 본다. 빠뜨려도 위 격리 env 가 하나라도 걸려 있으면 이번 실행 전용 키로 뜨지만, 리그를 다시 띄워도 같은 id 여야
+  하는 검증이면 이 줄로 고정해라. 카사넷을 아예 끄려면 `KASATERM_KASANET=off`.
+- **리그 둘 사이 카사넷을 볼 때는 `KASATERM_KASANET_BIND=127.0.0.1:0` 도 걸어라.** 서명 안 된 디버그 앱이 `0.0.0.0` UDP 를
+  열면 macOS 방화벽이 사람 화면에 묻기 창을 띄우고, 답하기 전까지 들어오는 UDP 를 막아 직통 대신 중계만 잡힌다
+  (2026-09-29). 루프백에만 열면 창도 안 뜨고 직통이 선다.
 
 - **`KASATERM_SESSION_FILE`·`KASATERM_SETTINGS_FILE` 은 선택이 아니다.** 안 걸면 검증용 앱이 사용자의 `~/.config/kasaterm/session.json` 을 읽고, **실행 중 5초마다 자기 상태로 덮어쓴다**. 설정 파일 쪽은 사용자가 손수 적은 계정 라벨을 하네스 값으로 덮은 전례가 있다. 실데이터가 있어야 화면이 성립하면 원본을 스크래치로 **복사**해 그걸 가리켜라 — 빈 파일을 가리키면 검증하려던 UI 자체가 안 뜬다.
 - **`KASATERM_AUTORESTORE=fresh`** — 저장된 세션을 복원하지 않고 빈 창으로 뜬다. 사용자 pane 의 claude 세션과 같은 id 를 다툴 경로가 사라지고, 캡처가 복원 모달만 찍는 일도 없어진다.

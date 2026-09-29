@@ -11,6 +11,8 @@ kasa-socket = { path = "../kasa-socket" }
 # 웹 터미널: PTY 세션 레지스트리에 붙어 raw 바이트를 웹소켓으로 중계한다.
 # kasa-pty 는 kasa-mcp 를 모르므로 순환이 아니다.
 kasa-pty = { path = "../kasa-pty" }
+# 카사넷 — 다른 기기로 가는 길을 직통 QUIC 로(kasanet.rs, docs/kasanet.md).
+kasa-net = { path = "../kasa-net" }
 # 셀 그리드 타입(ScreenUpdate·Cell) — gridwire 인코더가 쓴다.
 kasa-bridge = { path = "../kasa-bridge" }
 # wide 글자(한글) 폭 판정 — 스페이서를 걸러내는 데 쓴다.

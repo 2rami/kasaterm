@@ -991,6 +991,7 @@ pub fn stop_tunnels() {
     }
     // 폰 쪽지용 임시 터널(quicktunnel)도 앱과 함께 — 잠깐 보여 주는 주소를 상시 노출로 남기지 않는다.
     crate::quicktunnel::shutdown();
+    crate::kasanet::shutdown();
 }
 
 fn raw_machines() -> Vec<Machine> {
@@ -1254,6 +1255,8 @@ async fn probe_sync(client: &reqwest::Client, base: &str) -> bool {
 struct VersionInfo {
     build: Option<String>,
     machine_id: Option<String>,
+    /// 새 판만 싣는다(`kasanet::info`). 옛 판 상대는 None 이라 ssh 길 그대로다.
+    kasanet: Option<Value>,
 }
 
 async fn fetch_version(client: &reqwest::Client, base: &str) -> Option<VersionInfo> {
@@ -1280,6 +1283,7 @@ async fn fetch_version(client: &reqwest::Client, base: &str) -> Option<VersionIn
                         .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
             })
             .map(str::to_string),
+        kasanet: v.get("kasanet").filter(|k| k.is_object()).cloned(),
     })
 }
 
@@ -1314,6 +1318,7 @@ pub fn share_clipboard(text: String, secret: bool) {
         rt.block_on(async {
             let client = reqwest::Client::new();
             for (label, base) in targets {
+                let base = crate::kasanet::route_base(&base);
                 let sent = client
                     .post(format!("{base}/term/clipboard"))
                     .timeout(FETCH_TIMEOUT)
@@ -1343,7 +1348,9 @@ async fn announce_to(client: &reqwest::Client, base: &str) {
             .unwrap_or_default(),
         "home": kasa_socket::home_var().unwrap_or_default(),
         "build": build_id(),
+        "kasanet": crate::kasanet::info(),
     });
+    let base = crate::kasanet::route_base(base);
     let _ = client
         .post(format!("{base}/machines/announce"))
         .timeout(FETCH_TIMEOUT)
@@ -1502,15 +1509,20 @@ pub async fn poll_loop() {
         let mut jobs: futures_util::stream::FuturesUnordered<_> = list.iter().map(|m| {
             let client = &client;
             async move {
+                // 요청은 카사넷 입구로 — 왕복(rtt_ms)도 그 순간 실제로 탄 길의 값이 된다.
+                let via = crate::kasanet::route_base(&m.base);
                 let asked = std::time::Instant::now();
-                let panes = fetch_panes(client, &m.base).await?;
+                let panes = fetch_panes(client, &via).await?;
                 let rtt_ms = Some(asked.elapsed().as_millis() as u64);
                 let (sync, version, device_colors) = tokio::join!(
-                    probe_sync(client, &m.base),
-                    fetch_version(client, &m.base),
-                    fetch_json(client, &m.base, "/term/device-colors"),
+                    probe_sync(client, &via),
+                    fetch_version(client, &via),
+                    fetch_json(client, &via, "/term/device-colors"),
                 );
                 let version = version.unwrap_or_default();
+                if let Some(kasanet) = &version.kasanet {
+                    crate::kasanet::learn(&m.base, kasanet);
+                }
                 let seen = Seen {
                     rtt_ms,
                     device_colors: device_colors.filter(|v| v.get("at").is_some()),
@@ -1592,8 +1604,9 @@ fn sync_watchers(
 async fn watch_changes(client: reqwest::Client, base: String) {
     let mut since = 0u64;
     loop {
+        let via = crate::kasanet::route_base(&base);
         let resp = client
-            .get(format!("{base}/term/changes?since={since}&wait={CHANGES_WAIT_SECS}"))
+            .get(format!("{via}/term/changes?since={since}&wait={CHANGES_WAIT_SECS}"))
             .timeout(Duration::from_secs(CHANGES_WAIT_SECS + 10))
             .send()
             .await;
@@ -1763,6 +1776,12 @@ fn snapshot_machine(
         .or(m.machine_id.as_deref())
         .or_else(|| hit.and_then(|seen| seen.machine_id.as_deref()));
     let route = route_id.map_or_else(|| m.label.clone(), |id| format!("~{id}"));
+    // 지금 새 연결이 타는 길 — 카사넷 직통이면 QUIC 경로 왕복도 함께. 끊긴 기기는 길이 없다.
+    let (path, path_rtt) = if direct_online {
+        crate::kasanet::path(&m.base).unwrap_or(("ssh", None))
+    } else {
+        ("", None)
+    };
     serde_json::json!({
         "label": m.label,
         "route": route,
@@ -1772,6 +1791,8 @@ fn snapshot_machine(
         "online": online,
         "online_via": via,
         "rtt_ms": rtt,
+        "path": (!path.is_empty()).then_some(path),
+        "path_rtt_ms": path_rtt,
         "ago_secs": age.map(|value| value.as_secs()),
         "sync_capable": hit.map(|seen| seen.sync).unwrap_or(true),
         // 빌드 대조 — 같다고 확인된 것만 true. 모르는 것(옛 판·아직 못 물음)은

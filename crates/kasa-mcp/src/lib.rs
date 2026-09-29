@@ -35,6 +35,7 @@ pub mod nacho_service;
 mod nacho_relay;
 #[cfg(unix)]
 pub mod adopt;
+pub mod kasanet;
 pub mod layout_feed;
 pub mod layout_watch;
 pub mod machines;

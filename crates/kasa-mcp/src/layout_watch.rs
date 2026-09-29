@@ -141,12 +141,14 @@ fn spawn(base: String) -> Watch {
 }
 
 fn url(base: &str) -> String {
-    let ws = if let Some(rest) = base.strip_prefix("https://") {
+    // 오래 사는 연결이라 카사넷 입구를 거쳐야 직통이 섰을 때 옮겨 갈 수 있다. 토큰은 원래 base 로 찾는다.
+    let routed = crate::kasanet::route_base(base);
+    let ws = if let Some(rest) = routed.strip_prefix("https://") {
         format!("wss://{rest}")
-    } else if let Some(rest) = base.strip_prefix("http://") {
+    } else if let Some(rest) = routed.strip_prefix("http://") {
         format!("ws://{rest}")
     } else {
-        format!("ws://{base}")
+        format!("ws://{routed}")
     };
     let mut url = format!("{}/term/layout/ws", ws.trim_end_matches('/'));
     if let Some(token) = crate::remote::connection_auth_token(base) {

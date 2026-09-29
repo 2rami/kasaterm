@@ -394,14 +394,17 @@ pub fn urlencode(s: &str) -> String {
 }
 
 fn build_url(spec: &RemoteSpec, pane: Option<&str>, view: bool) -> String {
-    let ws_base = if let Some(rest) = spec.base.strip_prefix("https://") {
+    // 붙을 때마다 카사넷 입구를 거친다 — spec.base 는 그대로라 거울이 기기를 잃지 않고, 재접속이 그 순간의
+    // 길(직통·ssh)을 탄다.
+    let base = crate::kasanet::route_base(&spec.base);
+    let ws_base = if let Some(rest) = base.strip_prefix("https://") {
         format!("wss://{rest}")
-    } else if let Some(rest) = spec.base.strip_prefix("http://") {
+    } else if let Some(rest) = base.strip_prefix("http://") {
         format!("ws://{rest}")
-    } else if spec.base.starts_with("ws://") || spec.base.starts_with("wss://") {
-        spec.base.clone()
+    } else if base.starts_with("ws://") || base.starts_with("wss://") {
+        base.clone()
     } else {
-        format!("ws://{}", spec.base)
+        format!("ws://{base}")
     };
     let mut url = format!("{}/term/ws?own={}", ws_base.trim_end_matches('/'), if view { 0 } else { 1 });
     if let Some(p) = pane {

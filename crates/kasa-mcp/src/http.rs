@@ -1067,11 +1067,13 @@ async fn version_handler() -> impl IntoResponse {
             "version": env!("CARGO_PKG_VERSION"),
             "build": crate::machines::build_id(),
             "machine_id": crate::mobile::machine_identity(),
+            // 카사넷 주소(id·주소·포트). 이것을 루프백 길로 받은 쪽만 이 기기를 허용 목록에 넣는다.
+            "kasanet": crate::kasanet::info(),
         })),
     )
 }
 
-/// `POST /machines/announce` body `{label, port, host?, home?, build?}` — 이쪽으로
+/// `POST /machines/announce` body `{label, port, host?, home?, build?, kasanet?}` — 이쪽으로
 /// 터널을 든 기계가 「나는 이 이름, 이 포트로 오면 된다」고 알려 온다. 포트는 그쪽
 /// ssh 가 이 기계에 열어 둔 되돌아오는 길(-R)이라 루프백으로 닿는다. 명부 파일엔
 /// 안 적고 메모리에만 — 알림이 끊기면 반 분 안에 빠진다.
@@ -1087,6 +1089,11 @@ async fn machines_announce_handler(body: axum::body::Bytes) -> impl IntoResponse
     }
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default();
     crate::machines::announce_guest(label, port, s("host"), s("home"), s("build"));
+    // 알림에 실린 카사넷 id 는 믿지 않는다 — 토큰만 가진 원격도 이 창구를 부를 수 있다. 대신 곧바로
+    // 한 바퀴 돌려 그 손님 길(루프백)로 /version 을 물어 배우게 한다.
+    if v.get("kasanet").is_some_and(|k| !k.is_null()) {
+        crate::machines::poke();
+    }
     Json(serde_json::json!({ "ok": true }))
 }
 
@@ -7539,6 +7546,8 @@ pub fn spawn_http_server_opts(
                     tokio::spawn(crate::remoteboard::poll_loop());
                     // 기계 명부(machines.json) 폴링 — 이사 탭이 기계별 학생 목록을
                     // 즉시 그리게 미리 받아 둔다. 같은 순환 이유로 본체 한정.
+                    // 카사넷 엔드포인트 — 폴링이 상대 id 를 배우기 전에 떠 있어야 입구가 선다.
+                    tokio::spawn(crate::kasanet::start(port));
                     tokio::spawn(crate::machines::poll_loop());
                     // ssh 만 적힌 기계의 8765 터널을 앱이 든다(설정 화면이 적는 항목).
                     tokio::spawn(crate::machines::tunnel_loop());
