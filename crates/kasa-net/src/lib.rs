@@ -4,6 +4,7 @@ pub mod allow;
 pub mod fwd;
 pub mod identity;
 pub mod link;
+pub mod peer;
 pub mod route;
 
 pub use iroh;

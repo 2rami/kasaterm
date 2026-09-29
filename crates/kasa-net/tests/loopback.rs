@@ -188,3 +188,50 @@ async fn only_allowed_ports_reach_localhost() {
     assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
     p.server.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redirected_peer_reaches_only_its_mapped_ports() {
+    let (plain_port, plain_hits) = echo_server().await;
+    let (ingress_port, ingress_hits) = echo_server().await;
+    let p = pair(true, [plain_port]).await;
+    let client_id = p.client.id();
+    // 폰: 데스크톱 HTTP 포트(여기선 plain_port)로 와도 입구(ingress_port)로 간다.
+    p.fwd.redirect(client_id, [(plain_port, ingress_port)]);
+    let conn = timeout(T, p.client.connect(p.server_addr.clone(), fwd::ALPN))
+        .await
+        .unwrap()
+        .unwrap();
+    let (mut send, mut recv) = timeout(T, fwd::open(&conn, plain_port))
+        .await
+        .unwrap()
+        .unwrap();
+    send.write_all(b"ping").await.unwrap();
+    send.finish().unwrap();
+    let mut back = Vec::new();
+    timeout(T, AsyncReadExt::read_to_end(&mut recv, &mut back))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(back, b"ping");
+    assert_eq!(ingress_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        plain_hits.load(Ordering::SeqCst),
+        0,
+        "돌린 상대는 원래 포트에 닿지 않는다"
+    );
+
+    // 기본 허용 포트라도 표에 없으면 막힌다.
+    let err = timeout(T, fwd::open(&conn, ingress_port))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+
+    // 잊으면 붙어 있던 연결이 끊긴다 — 기본 허용 포트로 새지 않는다.
+    assert!(p.fwd.forget(&client_id));
+    timeout(T, conn.closed())
+        .await
+        .expect("잊은 상대의 연결은 끊겨야 한다");
+    assert_eq!(plain_hits.load(Ordering::SeqCst), 0);
+    p.server.shutdown().await.unwrap();
+}

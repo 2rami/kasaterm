@@ -7,17 +7,21 @@
 //! 허용 목록: 루프백 base(앱이 든 ssh 터널·손으로 든 터널·손님의 되돌아오는 -R)로 물은 `/version` 이
 //! 알려 준 EndpointId 만 넣는다. 그 길은 ssh 인증을 거쳤다. 카사넷으로 들어온 연결은 받는 쪽에서
 //! `127.0.0.1` 로 이어져 ssh -L 과 같은 신뢰를 얻으므로, 이 목록이 ssh 문과 같은 무게의 문이다.
+//!
+//! 폰은 다르다(`allow_phone`): 관문을 거쳐 주인 폰 자격으로 온 등록만 받고, 들어온 연결은 HTTP 포트 대신
+//! 폰 입구로 돌린다 — 폰 입구는 관문 업링크와 같은 자격(`ViaUplink`, 주인 주소 아래)만 준다. 등록은 수명이
+//! 있어 폰이 관문으로 계속 다시 등록해야 산다. 관문에서 폐기된 폰은 다시 등록을 못 해 수명 안에 끊긴다.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kasa_net::iroh::endpoint::presets;
 use kasa_net::iroh::protocol::Router;
-use kasa_net::iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey};
-use kasa_net::{fwd, identity, AllowList, FwdServer, Link, LinkState, RelayTrust, Route};
+use kasa_net::iroh::{Endpoint, EndpointId, RelayMode, RelayUrl, SecretKey};
+use kasa_net::{fwd, identity, peer, AllowList, FwdServer, Link, LinkState, RelayTrust, Route};
 use serde_json::Value;
 
 /// 끄는 스위치. `0`·`off` 면 엔드포인트를 띄우지 않고 모든 길이 예전 그대로다.
@@ -35,12 +39,22 @@ struct Node {
     endpoint: Endpoint,
     router: Router,
     allow: AllowList,
+    fwd: FwdServer,
     trust: RelayTrust,
     mcp_port: u16,
     handle: tokio::runtime::Handle,
     links: Mutex<HashMap<EndpointId, Link>>,
     routes: Mutex<HashMap<String, Arc<Route>>>,
+    /// 등록된 폰 → 수명이 끝나는 때.
+    phones: Mutex<HashMap<EndpointId, Instant>>,
 }
+
+/// 폰 등록 수명. 폰은 이 3분의 1마다 관문으로 다시 등록한다.
+pub const PHONE_TTL: Duration = Duration::from_secs(15 * 60);
+const PHONE_SWEEP: Duration = Duration::from_secs(30);
+
+/// 폰 입구 포트 — HTTP 서버가 리스너를 열면 알린다. 없으면 폰을 받지 않는다(HTTP 포트로 돌릴 수 없다).
+static PHONE_INGRESS: OnceLock<u16> = OnceLock::new();
 
 static NODE: OnceLock<Node> = OnceLock::new();
 
@@ -109,7 +123,7 @@ pub async fn start(mcp_port: u16) {
     };
     let fwd_server = FwdServer::new([mcp_port, crate::machines::KASACHROME_PORT]);
     let router = Router::builder(endpoint.clone())
-        .accept(fwd::ALPN, fwd_server)
+        .accept(fwd::ALPN, fwd_server.clone())
         .spawn();
     eprintln!(
         "[kasanet] {} 준비 — 받는 포트 {mcp_port}·{}",
@@ -120,6 +134,7 @@ pub async fn start(mcp_port: u16) {
         endpoint,
         router,
         allow,
+        fwd: fwd_server,
         trust: RelayTrust::new(
             std::env::var(TRUSTED_RELAYS_ENV)
                 .unwrap_or_default()
@@ -130,10 +145,12 @@ pub async fn start(mcp_port: u16) {
         handle: tokio::runtime::Handle::current(),
         links: Mutex::new(HashMap::new()),
         routes: Mutex::new(HashMap::new()),
+        phones: Mutex::new(HashMap::new()),
     };
     if NODE.set(node).is_err() {
         return;
     }
+    tokio::spawn(sweep_phones());
     if let Some(ms) = std::env::var(STOP_AFTER_ENV)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
@@ -176,32 +193,6 @@ pub fn info() -> Option<Value> {
         "addrs": addr.ip_addrs().map(|a| a.to_string()).collect::<Vec<_>>(),
         "port": n.mcp_port,
     }))
-}
-
-fn parse_peer(v: &Value) -> Option<(EndpointAddr, u16)> {
-    let id = EndpointId::from_str(v.get("id")?.as_str()?).ok()?;
-    let port = u16::try_from(v.get("port")?.as_u64()?)
-        .ok()
-        .filter(|p| *p != 0)?;
-    let mut addr = EndpointAddr::new(id);
-    if let Some(relay) = v
-        .get("relay")
-        .and_then(Value::as_str)
-        .and_then(|r| RelayUrl::from_str(r).ok())
-    {
-        addr = addr.with_relay_url(relay);
-    }
-    for ip in v
-        .get("addrs")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if let Some(sock) = ip.as_str().and_then(|s| s.parse::<SocketAddr>().ok()) {
-            addr = addr.with_ip_addr(sock);
-        }
-    }
-    Some((addr, port))
 }
 
 /// base 가 이 기기 루프백을 가리키면 그 소켓 주소. 루프백이 아니면(LAN 주소를 손으로 적은 항목) None —
@@ -249,9 +240,12 @@ pub fn learn(base: &str, kasanet: &Value) {
     if loopback(base).is_none() {
         return;
     }
-    let Some((addr, port)) = parse_peer(kasanet) else {
+    let Some((addr, port)) = peer::from_json(kasanet) else {
         return;
     };
+    if n.phones.lock().is_ok_and(|p| p.contains_key(&addr.id)) {
+        return;
+    }
     if addr.id == n.endpoint.id() {
         static WARNED: OnceLock<()> = OnceLock::new();
         if WARNED.set(()).is_ok() {
@@ -287,6 +281,63 @@ pub fn learn(base: &str, kasanet: &Value) {
     if let Some(route) = route_for(n, base) {
         let _rt = n.handle.enter();
         route.set_link(link, port);
+    }
+}
+
+/// HTTP 서버가 폰 입구 리스너를 연 뒤 한 번.
+pub fn set_phone_ingress(port: u16) {
+    let _ = PHONE_INGRESS.set(port);
+}
+
+/// 관문을 거쳐 주인 폰 자격으로 온 등록(`POST /kasanet/phone`)만 부른다. 수명을 돌려준다.
+/// 폰 연결은 이 앱 HTTP 포트로 와도 폰 입구로 가고, 다른 포트(카사크롬 다리 등)는 못 연다.
+pub fn allow_phone(id: &str) -> Result<Duration, &'static str> {
+    let n = NODE.get().ok_or("kasanet_off")?;
+    let ingress = *PHONE_INGRESS.get().ok_or("phone_ingress_off")?;
+    let id = EndpointId::from_str(id.trim()).map_err(|_| "bad_id")?;
+    // 기기로 배운 id 를 폰으로 덮으면 그 기기의 거울 길이 폰 입구로 돌아가 버린다.
+    if id == n.endpoint.id() || n.links.lock().is_ok_and(|l| l.contains_key(&id)) {
+        return Err("id_taken");
+    }
+    // 돌리기를 먼저 건다 — 허용 목록에 먼저 들면 그 틈에 붙은 연결이 HTTP 포트로 샌다.
+    n.fwd.redirect(id, [(n.mcp_port, ingress)]);
+    n.allow.insert(id);
+    let fresh = n
+        .phones
+        .lock()
+        .map_err(|_| "busy")?
+        .insert(id, Instant::now() + PHONE_TTL)
+        .is_none();
+    if fresh {
+        eprintln!("[kasanet] 폰 {} 허용", id.fmt_short());
+    }
+    Ok(PHONE_TTL)
+}
+
+async fn sweep_phones() {
+    loop {
+        tokio::time::sleep(PHONE_SWEEP).await;
+        let Some(n) = NODE.get() else { return };
+        let now = Instant::now();
+        let expired: Vec<EndpointId> = match n.phones.lock() {
+            Ok(mut p) => {
+                let gone: Vec<_> = p
+                    .iter()
+                    .filter(|(_, t)| **t <= now)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in &gone {
+                    p.remove(id);
+                }
+                gone
+            }
+            Err(_) => continue,
+        };
+        for id in expired {
+            n.allow.remove(&id);
+            n.fwd.forget(&id);
+            eprintln!("[kasanet] 폰 {} 등록 만료 — 끊는다", id.fmt_short());
+        }
     }
 }
 
@@ -346,17 +397,5 @@ mod tests {
         assert_eq!(loopback("http://10.1.2.3:8765"), None);
         assert_eq!(loopback("https://127.0.0.1:8765"), None);
         assert_eq!(loopback("http://127.0.0.1"), None);
-    }
-
-    #[test]
-    fn peer_needs_id_and_port() {
-        let id = SecretKey::generate().public().to_string();
-        let v = serde_json::json!({"id": id, "port": 8765, "addrs": ["1.2.3.4:5", "bad"], "relay": "https://r.example./"});
-        let (addr, port) = parse_peer(&v).unwrap();
-        assert_eq!(port, 8765);
-        assert_eq!(addr.ip_addrs().count(), 1);
-        assert_eq!(addr.relay_urls().count(), 1);
-        assert!(parse_peer(&serde_json::json!({"id": id})).is_none());
-        assert!(parse_peer(&serde_json::json!({"id": "nope", "port": 1})).is_none());
     }
 }

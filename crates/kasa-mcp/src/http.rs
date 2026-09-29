@@ -6118,6 +6118,56 @@ async fn via_uplink_mw(mut req: axum::extract::Request, next: axum::middleware::
     next.run(req).await
 }
 
+/// 카사넷으로 들어온 폰 연결이라는 표식 — 폰 입구 리스너가 `ViaUplink` 와 함께 심는다(`kasanet::allow_phone`).
+#[derive(Clone, Copy)]
+pub(crate) struct ViaPhone;
+
+/// 폰 입구. 관문 업링크가 되쏘는 것과 똑같이 주인 주소(`/u/<주인>/`) 아래로 고쳐 쓰고 `ViaUplink` 를 단다 —
+/// 폰이 카사넷으로 와도 관문 경유보다 넓은 자격을 얻지 않는다. 관문이 걷는 자격류 헤더도 여기서 걷는다.
+async fn via_phone_mw(mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let Some(owner) = crate::mobile::owner() else {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "no owner address").into_response();
+    };
+    let pq = req.uri().path_and_query().map_or("/", |p| p.as_str()).to_string();
+    let Ok(uri) = format!("{}{}{pq}", crate::mobile::PREFIX, owner.slug).parse::<axum::http::Uri>() else {
+        return (axum::http::StatusCode::BAD_REQUEST, "bad path").into_response();
+    };
+    *req.uri_mut() = uri;
+    for h in ["cookie", "authorization", "x-kasa-token", "origin", "referer"] {
+        req.headers_mut().remove(h);
+    }
+    req.extensions_mut().insert(ViaUplink);
+    req.extensions_mut().insert(ViaPhone);
+    next.run(req).await
+}
+
+/// `POST /kasanet/phone` body `{id}` — 폰이 제 카사넷 id 를 등록한다(`kasanet::allow_phone`). 관문을 거쳐 주인 폰
+/// 자격으로 온 것만 받는다: 관문이 기기 토큰(또는 주인 주소)을 확인하고 업링크로 내려보낸 길이다. 카사넷으로 온
+/// 등록은 받지 않는다 — 관문에서 폐기된 폰이 직통으로 제 등록을 이어 가면 안 된다.
+async fn kasanet_phone_handler(req: axum::extract::Request) -> axum::response::Response {
+    let ext = req.extensions();
+    let owner_phone = ext.get::<ViaUplink>().is_some()
+        && ext.get::<ViaPhone>().is_none()
+        && ext.get::<MobileAuth>().is_some_and(|a| a.0.owner);
+    if !owner_phone {
+        return (axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({"ok": false, "error": "owner_phone_via_gateway_only"}))).into_response();
+    }
+    let Ok(body) = axum::body::to_bytes(req.into_body(), 4096).await else {
+        return (axum::http::StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
+    };
+    let id = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("id").and_then(|x| x.as_str()).map(str::to_string))
+        .unwrap_or_default();
+    match crate::kasanet::allow_phone(&id) {
+        Ok(ttl) => Json(serde_json::json!({"ok": true, "ttl_secs": ttl.as_secs()})).into_response(),
+        Err(code) => {
+            let status = if code == "bad_id" || code == "id_taken" { axum::http::StatusCode::BAD_REQUEST } else { axum::http::StatusCode::SERVICE_UNAVAILABLE };
+            (status, Json(serde_json::json!({"ok": false, "error": code}))).into_response()
+        }
+    }
+}
+
 /// 유저 주소 응답에 원격 토큰 쿠키를 심을까. 절대경로(`/settings/…`)로 부르는 옛 fetch
 /// 를 위한 보조인데, 값이 이 기계의 원격 토큰(셸 전권)이라 **주인에게만**, 관문 경유로는
 /// 아예 안 준다 — 관문 너머 절대경로는 어차피 이 기계에 안 닿는다. 이미 물고 있으면 안 건드린다.
@@ -7483,6 +7533,15 @@ pub fn spawn_http_server_opts(
     } else {
         None
     };
+    // 카사넷 폰 입구 — 폰 연결은 HTTP 포트 대신 여기로 돌려진다(`kasanet::allow_phone`). 카사넷과 같이 본체만.
+    let phone_ingress = if run_scheduler {
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        l.set_nonblocking(true)?;
+        crate::kasanet::set_phone_ingress(l.local_addr()?.port());
+        Some(l)
+    } else {
+        None
+    };
     let collab_collector = match crate::board_service::register(backend.clone(),port) {
         Ok(collector) => Some(collector),
         Err(_) => { eprintln!("[collaboration] observer unavailable"); None },
@@ -7805,6 +7864,7 @@ pub fn spawn_http_server_opts(
                     )
                     .route("/term/ws", get(term_ws_handler))
                     .route("/net/tcp", get(crate::netfwd::tcp_ws_handler))
+                    .route("/kasanet/phone", axum::routing::post(kasanet_phone_handler))
                     .route("/term/spawn", post(term_spawn_post))
                     .route("/term/repo", get(term_repo_get).post(term_repo_post))
                     .route("/term/path", get(term_path_get))
@@ -8472,6 +8532,16 @@ pub fn spawn_http_server_opts(
                         }
                     });
                 }
+                if let Some(ingress) = phone_ingress.and_then(|l| tokio::net::TcpListener::from_std(l).ok()) {
+                    let via = tower::ServiceBuilder::new()
+                        .layer(axum::middleware::from_fn(via_phone_mw))
+                        .service(app.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = axum::serve(ingress, via.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {
+                            eprintln!("[kasaspace-mcp] phone ingress serve error: {e}");
+                        }
+                    });
+                }
                 // ConnectInfo 를 붙여야 `origin_guard_mw` 가 peer 주소를 보고
                 // 로컬/원격을 가를 수 있다. 이게 없으면 원격도 로컬 규칙을 타서
                 // 토큰 없이 통과한다.
@@ -8564,6 +8634,56 @@ mod tests {
         assert_eq!(with_token.status(), StatusCode::FORBIDDEN, "관문 경유에 토큰이 통했다");
         t1.abort();
         t2.abort();
+    }
+
+    #[tokio::test]
+    async fn phone_ingress_gets_gateway_rights_and_cannot_renew_itself() {
+        use super::*;
+        use axum::http::StatusCode;
+        use axum::ServiceExt as _;
+        let dir = std::env::temp_dir().join(format!("kasa-phone-ingress-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("KASATERM_MOBILE_USERS", dir.join("mobile-users.json"));
+        let owner = crate::mobile::owner().unwrap();
+        let inner = axum::Router::new()
+            .route("/probe", get(|req: axum::extract::Request| async move {
+                let e = req.extensions();
+                let owner = e.get::<MobileAuth>().is_some_and(|a| a.0.owner);
+                let cookie = req.headers().contains_key("cookie");
+                format!("{} {} {owner} {cookie}", e.get::<ViaUplink>().is_some(), e.get::<ViaPhone>().is_some())
+            }))
+            .route("/kasanet/phone", axum::routing::post(kasanet_phone_handler))
+            .layer(axum::middleware::from_fn(origin_guard_mw));
+        let app = tower::ServiceBuilder::new().layer(axum::middleware::from_fn(mobile_prefix_mw)).service(inner);
+        let bind = || async { tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap() };
+        let (l_direct, l_phone, l_up) = (bind().await, bind().await, bind().await);
+        let at = |l: &tokio::net::TcpListener| format!("http://{}", l.local_addr().unwrap());
+        let (direct, phone, up) = (at(&l_direct), at(&l_phone), at(&l_up));
+        let via_phone = tower::ServiceBuilder::new().layer(axum::middleware::from_fn(via_phone_mw)).service(app.clone());
+        let via_up = tower::ServiceBuilder::new().layer(axum::middleware::from_fn(via_uplink_mw)).service(app.clone());
+        let tasks = [
+            tokio::spawn(async move { axum::serve(l_direct, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() }),
+            tokio::spawn(async move { axum::serve(l_phone, via_phone.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() }),
+            tokio::spawn(async move { axum::serve(l_up, via_up.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() }),
+        ];
+        let c = reqwest::Client::new();
+        // 폰 입구: 주소를 몰라도 주인 주소 아래 관문 자격으로 들어가고, 실어 온 쿠키는 걷힌다.
+        let probe = c.get(format!("{phone}/probe")).header("cookie", "kasa_token=x").send().await.unwrap();
+        assert_eq!(probe.text().await.unwrap(), "true true true false");
+        let reg = |base: String| {
+            let c = c.clone();
+            async move { c.post(format!("{base}/kasanet/phone")).body(r#"{"id":"x"}"#).send().await.unwrap() }
+        };
+        assert_eq!(reg(phone.clone()).await.status(), StatusCode::FORBIDDEN, "카사넷으로 온 등록은 받지 않는다");
+        assert_eq!(reg(direct.clone()).await.status(), StatusCode::FORBIDDEN, "관문을 안 거친 등록은 받지 않는다");
+        // 관문(주인 주소)으로 온 등록은 자격을 통과한다 — 시험에는 카사넷이 없어 503.
+        let ok = reg(format!("{up}{}{}", crate::mobile::PREFIX, owner.slug)).await;
+        assert_eq!(ok.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(ok.json::<serde_json::Value>().await.unwrap()["error"], "kasanet_off");
+        for t in tasks {
+            t.abort();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

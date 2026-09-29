@@ -1,4 +1,5 @@
 //! 로컬 TCP 입구 하나. 연결마다 그 순간의 길을 고른다 — 직통(또는 믿는 중계)이면 카사넷, 아니면 원래 길(ssh 터널 등).
+//! 원래 길이 TCP 가 아닌 쪽(폰 — 관문은 HTTPS 다)은 `direct_only` 로 열고, 길 고르기를 요청하는 자리가 한다.
 //!
 //! 기기 주소(base)를 바꿔 끼우지 않는 까닭: 거울은 붙을 때의 base 를 평생 들고 재접속하고, 세션 복원과
 //! 여러 판정이 그 base 로 기기를 찾는다. 길이 바뀔 때마다 base 가 바뀌면 거울이 기기를 잃는다.
@@ -48,7 +49,8 @@ pub struct Route {
 
 struct Inner {
     local_addr: SocketAddr,
-    fallback: SocketAddr,
+    /// 없으면 카사넷이 못 실을 때 연결을 그냥 닫는다.
+    fallback: Option<SocketAddr>,
     link: Mutex<Option<(Link, u16)>>,
     watcher: Mutex<Option<JoinHandle<()>>>,
     carried: Mutex<HashMap<u64, Carried>>,
@@ -66,6 +68,16 @@ struct Carried {
 impl Route {
     /// `127.0.0.1` 의 빈 포트에 입구를 연다. tokio 런타임 안에서 부른다.
     pub fn start(fallback: SocketAddr) -> io::Result<Self> {
+        Self::open(Some(fallback))
+    }
+
+    /// 원래 길 없이 여는 입구. 카사넷이 못 실을 때 들어온 연결은 바로 닫히고, 직통을 잃으면 실던 연결도 끊긴다 —
+    /// 요청하는 자리가 `via()` 를 보고 원래 길로 갔다가 끊긴 연결을 그쪽으로 다시 붙인다.
+    pub fn direct_only() -> io::Result<Self> {
+        Self::open(None)
+    }
+
+    fn open(fallback: Option<SocketAddr>) -> io::Result<Self> {
         let std_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         std_listener.set_nonblocking(true)?;
         let listener = TcpListener::from_std(std_listener)?;
@@ -228,7 +240,10 @@ async fn carry(
             Err(_) => inner.pin_to_fallback(id),
         }
     }
-    let mut up = TcpStream::connect(inner.fallback).await?;
+    let Some(fallback) = inner.fallback else {
+        return Ok(());
+    };
+    let mut up = TcpStream::connect(fallback).await?;
     tcp.set_nodelay(true)?;
     up.set_nodelay(true)?;
     tokio::io::copy_bidirectional(&mut tcp, &mut up).await?;
@@ -380,6 +395,48 @@ mod tests {
         );
         let mut back = TcpStream::connect(at).await.unwrap();
         assert_eq!(ask(&mut back, "e").await.unwrap(), "F:e");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn direct_only_closes_when_it_cannot_carry() {
+        let remote = tagged_echo("K").await;
+        let client_key = SecretKey::generate();
+        let server_ep = node(
+            SecretKey::generate(),
+            &AllowList::new([client_key.public()]),
+        )
+        .await;
+        let v4 = server_ep
+            .bound_sockets()
+            .into_iter()
+            .find(SocketAddr::is_ipv4)
+            .unwrap();
+        let server_addr = EndpointAddr::new(server_ep.id()).with_ip_addr(v4);
+        let server = Router::builder(server_ep)
+            .accept(fwd::ALPN, FwdServer::new([remote.port()]))
+            .spawn();
+        let client = node(client_key, &AllowList::default()).await;
+
+        let route = Route::direct_only().unwrap();
+        // 상대를 모르는 동안 들어온 연결은 어디에도 안 잇고 닫는다.
+        let mut early = TcpStream::connect(route.local_addr()).await.unwrap();
+        assert!(ask(&mut early, "a").await.is_err());
+        assert_eq!(route.via(), Via::Fallback);
+
+        let link = Link::start(client, server_addr, Default::default());
+        route.set_link(link.clone(), remote.port());
+        wait_until("직통", || link.state().is_direct()).await;
+        let mut s = TcpStream::connect(route.local_addr()).await.unwrap();
+        assert_eq!(ask(&mut s, "b").await.unwrap(), "K:b");
+
+        server.shutdown().await.unwrap();
+        wait_until("카사넷 연결 끊음", || route.carried().0 == 0).await;
+        assert!(ask(&mut s, "c").await.is_err());
+        let mut after = TcpStream::connect(route.local_addr()).await.unwrap();
+        assert!(
+            ask(&mut after, "d").await.is_err(),
+            "원래 길이 없으면 닫는다"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -3,14 +3,14 @@
 //! QUIC 스트림 하나가 TCP 연결 하나다. 여는 쪽이 포트 2바이트(BE)를 쓰고 받는 쪽이 상태 1바이트로
 //! 답한 뒤로는 날 바이트를 양방향으로 흘린다. 받는 쪽은 `127.0.0.1` 의 허용 포트로만 잇는다.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
 
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use iroh::{Endpoint, EndpointAddr};
+use iroh::{Endpoint, EndpointAddr, EndpointId};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -27,13 +27,68 @@ const CONNECT_FAILED: u8 = 2;
 #[derive(Clone, Debug)]
 pub struct FwdServer {
     ports: Arc<RwLock<BTreeSet<u16>>>,
+    /// 상대별 포트 돌리기. 여기 든 상대는 적힌 포트만 열 수 있고 적힌 로컬 포트로 이어진다 — 기본 허용 포트는
+    /// 안 본다. 폰이 데스크톱 HTTP 포트로 와도 관문 경유와 같은 자격의 입구로 가게 하는 자리다.
+    redirects: Arc<RwLock<HashMap<EndpointId, HashMap<u16, u16>>>>,
+    /// 돌리기에 든 상대의 살아 있는 연결 — 잊을 때 바로 끊는다.
+    held: Arc<std::sync::Mutex<HashMap<EndpointId, Vec<Connection>>>>,
 }
 
 impl FwdServer {
     pub fn new(ports: impl IntoIterator<Item = u16>) -> Self {
         Self {
             ports: Arc::new(RwLock::new(ports.into_iter().collect())),
+            redirects: Arc::default(),
+            held: Arc::default(),
         }
+    }
+
+    /// 이 상대는 `map` 의 포트만, 짝지은 로컬 포트로 잇는다. 다시 부르면 표를 갈아 끼운다.
+    pub fn redirect(&self, peer: EndpointId, map: impl IntoIterator<Item = (u16, u16)>) {
+        self.redirects
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(peer, map.into_iter().collect());
+    }
+
+    /// 돌리기를 거두고 그 상대의 연결을 끊는다. 끊지 않으면 이미 붙은 연결이 계속 스트림을 연다.
+    pub fn forget(&self, peer: &EndpointId) -> bool {
+        let had = self
+            .redirects
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(peer)
+            .is_some();
+        let conns = self
+            .held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(peer)
+            .unwrap_or_default();
+        for conn in conns {
+            conn.close(0u32.into(), b"kasanet: forgotten");
+        }
+        had
+    }
+
+    fn is_redirected(&self, peer: &EndpointId) -> bool {
+        self.redirects
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(peer)
+    }
+
+    /// `restricted` 는 연결을 받을 때 돌리기에 들어 있었나. 그 뒤 잊혔어도 기본 허용 포트로 새지 않는다.
+    fn target(&self, peer: &EndpointId, restricted: bool, port: u16) -> Option<u16> {
+        if let Some(map) = self
+            .redirects
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(peer)
+        {
+            return map.get(&port).copied();
+        }
+        (!restricted && self.is_allowed(port)).then_some(port)
     }
 
     pub fn allow_port(&self, port: u16) -> bool {
@@ -57,13 +112,18 @@ impl FwdServer {
             .contains(&port)
     }
 
-    async fn serve_stream(&self, mut send: SendStream, mut recv: RecvStream) -> io::Result<()> {
+    async fn serve_stream(
+        &self,
+        peer: EndpointId,
+        restricted: bool,
+        mut send: SendStream,
+        mut recv: RecvStream,
+    ) -> io::Result<()> {
         let mut hdr = [0u8; 2];
         AsyncReadExt::read_exact(&mut recv, &mut hdr).await?;
-        let port = u16::from_be_bytes(hdr);
-        if !self.is_allowed(port) {
+        let Some(port) = self.target(&peer, restricted, u16::from_be_bytes(hdr)) else {
             return refuse(send, PORT_NOT_ALLOWED).await;
-        }
+        };
         let tcp = match TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await {
             Ok(tcp) => tcp,
             Err(_) => return refuse(send, CONNECT_FAILED).await,
@@ -75,11 +135,31 @@ impl FwdServer {
 
 impl ProtocolHandler for FwdServer {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        let peer = conn.remote_id();
+        let restricted = self.is_redirected(&peer);
+        if restricted {
+            self.held
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(peer)
+                .or_default()
+                .push(conn.clone());
+        }
         while let Ok((send, recv)) = conn.accept_bi().await {
             let this = self.clone();
             tokio::spawn(async move {
-                let _ = this.serve_stream(send, recv).await;
+                let _ = this.serve_stream(peer, restricted, send, recv).await;
             });
+        }
+        if restricted {
+            if let Some(v) = self
+                .held
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_mut(&peer)
+            {
+                v.retain(|c| c.close_reason().is_none());
+            }
         }
         Ok(())
     }

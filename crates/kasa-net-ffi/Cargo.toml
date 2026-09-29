@@ -1,0 +1,17 @@
+[package]
+name = "kasa-net-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "카사넷을 폰 앱에 싣는 C ABI — iOS 정적 라이브러리"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+kasa-net = { path = "../kasa-net" }
+serde_json = "1"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "macros", "time", "io-util"] }
