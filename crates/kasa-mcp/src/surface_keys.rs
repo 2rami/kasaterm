@@ -22,6 +22,12 @@ pub fn get(id: &str) -> Option<String> {
     registry().lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
 }
 
+/// 그 키를 지금 쓰는 surface — 앱을 다시 켜면 번호는 바뀌어도 키는 복원된다.
+pub fn find(key: &str) -> Option<String> {
+    registry().lock().unwrap_or_else(|e| e.into_inner())
+        .iter().find(|(_, k)| k.as_str() == key).map(|(id, _)| id.clone())
+}
+
 pub fn remove(id: &str) {
     registry().lock().unwrap_or_else(|e| e.into_inner()).remove(id);
 }

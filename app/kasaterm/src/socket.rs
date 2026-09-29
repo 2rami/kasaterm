@@ -480,6 +480,29 @@ pub(crate) fn agents_error_sids_cached() -> HashSet<String> {
 }
 
 impl PtyBackend {
+    /// 소환 관계를 적는다 — 메모리와 함께 surface 키 짝으로 파일에도. 앱을 다시 켜면 번호가 바뀌고
+    /// 메모리가 비어, 재시작 뒤 학생의 done 이 갈 곳을 잃었다(새 판 설치마다 재시작한다).
+    pub(crate) fn remember_spawner(&self, child: &str, parent: &str) {
+        if let Ok(mut m) = self.spawned_by.lock() {
+            m.insert(child.to_string(), parent.to_string());
+        }
+        let pair = (kasa_mcp::surface_keys::ensure(child), kasa_mcp::surface_keys::ensure(parent));
+        let path = spawner_file();
+        let mut pairs = read_spawner_pairs(&path);
+        remember_spawner_pair(&mut pairs, pair);
+        write_spawner_pairs(&path, &pairs);
+    }
+
+    /// 그 칸을 부른 칸의 지금 번호. 메모리에 없으면(재시작 뒤) 파일의 키 짝으로 찾는다.
+    pub(crate) fn spawner_of(&self, child: &str) -> Option<String> {
+        if let Some(parent) = self.spawned_by.lock().ok().and_then(|m| m.get(child).cloned()) {
+            return Some(parent);
+        }
+        let key = kasa_mcp::surface_keys::get(child)?;
+        let parent_key = read_spawner_pairs(&spawner_file()).into_iter().rev().find(|(c, _)| *c == key)?.1;
+        kasa_mcp::surface_keys::find(&parent_key)
+    }
+
     /// 이 surface 에 결속된 기록 파일 — GUI 의 턴 판정(`refresh_turn_states`)이 보드와
     /// 같은 파일을 읽게 한다. `Ok(None)` 은 결속 없음(화면 폴백), `Err` 은 **지금 잠겨
     /// 있음** — GUI 스레드는 기다리지 않는다. 소켓 쪽이 이 맵을 쥔 채 pane 마다
@@ -1662,9 +1685,7 @@ impl Backend for PtyBackend {
         // 소환 관계를 남긴다 — 이 pane 이 나중에 `done` 으로 보고하면 여기 적힌
         // 주소로 전한다. 사람이 손으로 쪼갠 경우(`from` 없음)는 알릴 곳이 없다.
         if let Some(parent) = from.filter(|p| *p != id) {
-            if let Ok(mut m) = self.spawned_by.lock() {
-                m.insert(id.clone(), parent.to_string());
-            }
+            self.remember_spawner(&id, parent);
         }
         Ok(SurfaceInfo {
             id,
@@ -1703,9 +1724,7 @@ impl Backend for PtyBackend {
             Err(_) => anyhow::bail!("remote 응답 없음(30초) — GUI 스레드나 원격 호스트를 확인해라"),
         };
         if let Some(parent) = from.filter(|p| *p != id) {
-            if let Ok(mut m) = self.spawned_by.lock() {
-                m.insert(id.clone(), parent.to_string());
-            }
+            self.remember_spawner(&id, parent);
         }
         Ok(SurfaceInfo {
             id,
@@ -2171,9 +2190,7 @@ impl Backend for PtyBackend {
         // 소환 관계 — split 과 같다. 이게 없으면 탭으로 띄운 학생의 `done` 보고가
         // 갈 곳을 몰라 조용히 사라진다(탭의 부모 = 그 탭이 사는 pane 의 claude).
         if let Some(parent) = outer.filter(|p| *p != id) {
-            if let Ok(mut m) = self.spawned_by.lock() {
-                m.insert(id.clone(), parent.to_string());
-            }
+            self.remember_spawner(&id, parent);
         }
         Ok(SurfaceInfo {
             id,
@@ -3866,46 +3883,36 @@ impl Backend for PtyBackend {
         // **부모가 claude 일 때만 보낸다.** 판정은 transcript 바인딩 유무다 — 셸이
         // 도는 pane 에 글자를 밀어 넣으면 그건 명령줄에 섞여 들어간다. claude 는 턴
         // 중에 들어온 입력을 다음 턴으로 큐잉하므로 작업을 끊지 않는다.
-        let parent = self
-            .spawned_by
+        let Some(parent) = self.spawner_of(surface_id) else { return Ok(()) };
+        // 캐릭터는 `pane_character`(탭 pid 키)가 정본이다 — `ws.panes` 는 pane 컨테이너 키라
+        // 탭 학생이 안 걸려 보고가 `[완료] %4(%4)` 로 떴다(2026-08-20).
+        let who = self
+            .ws
             .lock()
             .ok()
-            .and_then(|m| m.get(surface_id).cloned());
-        if let Some(parent) = parent {
-            let is_claude = self.bound.lock().is_ok_and(|b| b.contains_key(&parent));
-            if is_claude {
-                // 캐릭터는 `pane_character`(탭 pid 키)가 정본이다 — `ws.panes` 는
-                // pane 컨테이너 키라 **탭 학생이 안 걸려** 보고가 `[완료] %4(%4)` 로
-                // 떴다(2026-08-20 사용자 스샷). 이름이 잡혀야 화면 색칠도 학생을 안다.
-                let who =
-                    self.ws
-                        .lock()
-                        .ok()
-                        .and_then(|ws| {
-                            ws.pane_character.get(surface_id).cloned().or_else(|| {
-                                ws.panes.get(surface_id).and_then(|p| p.character.clone())
-                            })
-                        })
-                        .unwrap_or_else(|| surface_id.to_string());
-                let mark = if outcome == "succeeded" {
-                    "완료"
-                } else {
-                    "실패"
-                };
-                let line = if summary.is_empty() {
-                    format!("[{mark}] {who}({surface_id})")
-                } else {
-                    format!("[{mark}] {who}({surface_id}) — {summary}")
-                };
-                // tell 과 같은 포장이어야 **제출까지 된다** — claude 의 Ink 입력은
-                // CR(0x0d)로만 제출되고 bare \n 은 줄삽입일 뿐이라, \n 으로 보낸
-                // 보고가 부모 입력창에 미제출로 앉아 있었다(2026-08-15 실측: 보고
-                // 두 건이 오케스트레이터 입력창에 쌓인 채 사용자 엔터에 딸려
-                // 들어감). \x15 는 반쯤 친 초안 제거, bracketed paste 는 메뉴
-                // 상태에서도 안전한 주입, 꼬리 \r 는 핸들러(split_trailing_submit)
-                // 가 140ms 뒤 별개 read 로 보내 Enter 로 읽히게 한다.
-                let _ = self.send_text(Some(&parent), &format!("\x15\x1b[200~{line}\x1b[201~\r"));
-            }
+            .and_then(|ws| {
+                ws.pane_character.get(surface_id).cloned().or_else(|| {
+                    ws.panes.get(surface_id).and_then(|p| p.character.clone())
+                })
+            })
+            .unwrap_or_else(|| surface_id.to_string());
+        let mark = if outcome == "succeeded" { "완료" } else { "실패" };
+        let line = if summary.is_empty() {
+            format!("[{mark}] {who}({surface_id})")
+        } else {
+            format!("[{mark}] {who}({surface_id}) — {summary}")
+        };
+        // 안전한 tell 로 보낸다. 옛 길은 칸 번호의 **앞 탭**에 Ctrl+U·붙여넣기·Enter 를 바로 썼다 —
+        // 학생을 내 칸의 탭으로 부르면 그 학생 탭이 앞일 때 보고가 학생 자신에게 들어갔고(2026-09-29
+        // 세이아), 사람이 치던 초안을 지웠다. tell 은 그 PTY 를 신원으로 확인하고 빈 입력창을 기다리며
+        // 치는 글을 붙들었다가 넣는다. 셸 칸이면 tell 이 거절한다(명령줄에 섞이지 않게).
+        let params = serde_json::json!({
+            "message_id": kasa_socket::tell::new_message_id(),
+            "surface_id": parent,
+            "body": line,
+        });
+        if let Err(e) = self.collab_tell(&params) {
+            eprintln!("[done] {surface_id} → {parent} 보고 전달 못 함: {e:#}");
         }
         Ok(())
     }
@@ -3995,6 +4002,24 @@ fn apply_remote_board_facts(row: &mut PaneActivity, facts: &serde_json::Value) {
 
 #[cfg(test)]
 mod web_shell_close_tests {
+    #[test]
+    fn spawner_pairs_keep_the_latest_parent_and_stay_bounded() {
+        let mut pairs = Vec::new();
+        super::remember_spawner_pair(&mut pairs, ("child".into(), "old".into()));
+        super::remember_spawner_pair(&mut pairs, ("child".into(), "new".into()));
+        assert_eq!(pairs, vec![("child".to_string(), "new".to_string())], "같은 자식은 새 부모로");
+        for n in 0..super::SPAWNER_PAIRS_MAX + 5 {
+            super::remember_spawner_pair(&mut pairs, (format!("c{n}"), "p".into()));
+        }
+        assert_eq!(pairs.len(), super::SPAWNER_PAIRS_MAX);
+        assert!(!pairs.iter().any(|(c, _)| c == "child"), "오래된 것부터 버린다");
+        let dir = std::env::temp_dir().join(format!("kasa-spawner-{}", std::process::id()));
+        let path = dir.join("spawned-by.json");
+        super::write_spawner_pairs(&path, &pairs);
+        assert_eq!(super::read_spawner_pairs(&path), pairs, "파일로 되읽는다(재시작 뒤)");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     use super::*;
 
     /// 폰 화면이 열려 있는 동안 close 는 실패로 답하고, 화면이 닫히면 keep 까지 풀려 셸이 사라진다.
@@ -8549,6 +8574,40 @@ fn window_member_rects(surfaces: &[String], rects: Vec<PaneRect>) -> Vec<PaneRec
 
 /// tmux 배치 트리의 leaf 들을 창 대비 백분율 사각형으로 — 미니맵·`layout` 명령이 같이 쓴다.
 /// 크기가 0 인 배치는 빈 목록.
+/// 소환 관계 짝(자식 키, 부모 키) 파일. 격리 앱은 collab 루트 아래로.
+fn spawner_file() -> std::path::PathBuf {
+    kasa_socket::isolated_collab_root()
+        .or_else(|| kasa_socket::home_dir().map(|h| h.join(".config/kasaterm")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("spawned-by.json")
+}
+
+const SPAWNER_PAIRS_MAX: usize = 512;
+
+fn read_spawner_pairs(path: &std::path::Path) -> Vec<(String, String)> {
+    std::fs::read_to_string(path).ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// 같은 자식은 새 부모로 덮고, 오래된 것부터 버려 `SPAWNER_PAIRS_MAX` 를 넘지 않는다.
+fn remember_spawner_pair(pairs: &mut Vec<(String, String)>, pair: (String, String)) {
+    pairs.retain(|(child, _)| *child != pair.0);
+    pairs.push(pair);
+    let over = pairs.len().saturating_sub(SPAWNER_PAIRS_MAX);
+    pairs.drain(..over);
+}
+
+fn write_spawner_pairs(path: &std::path::Path, pairs: &[(String, String)]) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("json.tmp");
+    if serde_json::to_vec(pairs).ok().is_some_and(|bytes| std::fs::write(&tmp, bytes).is_ok()) {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
 /// 칸에 사람이 읽는 행·열(1부터)을 단다 — 위 가장자리가 같은 칸끼리 한 행, 행 안에서는 왼쪽부터.
 fn where_cells(rects: &[PaneRect]) -> Vec<(PaneRect, usize, usize)> {
     let mut tops: Vec<u16> = rects.iter().map(|r| r.y).collect();
