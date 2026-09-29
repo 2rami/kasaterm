@@ -1055,6 +1055,9 @@ impl App {
                 crate::mirror_diff::localize(&mut composed, theme::pane_bg(), theme::success(), theme::danger());
             }
         }
+        // 표식은 모델 아이콘 자리를 잡기 전에 뺀다 — 뒤에서 빼면 줄만 당겨지고 아이콘은 옛 칸에 남는다.
+        // 내부 자리표시는 그림이 꺼져 있어도 감추되, 앵커는 뒤의 판정·서 있는 자리에 넘긴다.
+        let statusline_face = runs_claude.then(|| collapse_statusline_face(&mut composed)).flatten();
         {
             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
             if let Some(slot) = take_status_model_icon_slot(
@@ -1412,9 +1415,8 @@ impl App {
         // 폴백으로만 남는다. 이쪽엔 `!has_profile_slot` 이 여전히 필요하다 —
         // argv 는 목록에서 세션으로 **진입해도 그대로 agents** 라, 그 조건이
         // 없으면 대화 화면까지 관리 화면으로 오인해 학생 표시가 영영 안 돌아온다.
-        let has_profile_slot = composed
-            .iter()
-            .any(|row| row.iter().any(|c| c.ch == '\u{fffc}'));
+        let has_profile_slot = statusline_face.is_some()
+            || composed.iter().any(|row| row.iter().any(|c| c.ch == '\u{fffc}'));
         let agents_view = screen_is_agents_list(&composed)
             || (!has_profile_slot
                 && self
@@ -1465,8 +1467,6 @@ impl App {
         // 보다 먼저 그려지므로 비워진 셀 밑으로 도트가 보인다.
         // "터미널은 파싱만"(사용자): claude sessionId 바인딩 우선, 뷰 pane 은
         // 파싱 전 스폰 랜덤 미표시 — display_pane_char(chrome.rs)가 규칙 정본.
-        // 내부 자리표시는 그림이 꺼져 있어도 감추되, 앵커는 다음 합성에 넘긴다.
-        let statusline_face = runs_claude.then(|| clear_statusline_face(&mut composed)).flatten();
         let true_char = self.display_tab_char(&ws, &tab_pid);
         if let Some((name, slug)) = true_char
             .as_deref()

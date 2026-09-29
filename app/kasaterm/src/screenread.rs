@@ -4155,12 +4155,16 @@ pub(crate) fn find_statusline_face(rows: &[Vec<GridCell>]) -> Option<(usize, usi
     })
 }
 
-pub(crate) fn clear_statusline_face(rows: &mut [Vec<GridCell>]) -> Option<(usize, usize, usize)> {
+/// 표식 칸을 빼고 그 뒤를 당긴다. 빈칸으로만 지우면 풀스크린 claude 가 상태줄에 넣는 여백 2칸 뒤에
+/// 한 칸이 더 비어, 상태줄이 바로 아래 줄보다 한 칸 들어가 보였다(2026-09-29 「왼쪽 공간 왤케 남아」).
+pub(crate) fn collapse_statusline_face(rows: &mut [Vec<GridCell>]) -> Option<(usize, usize, usize)> {
     let anchor = find_statusline_face(rows)?;
     let (row, col, len) = anchor;
-    for cell in rows[row].iter_mut().skip(col).take(len) {
+    let mut removed: Vec<GridCell> = rows[row].drain(col..col + len).collect();
+    for cell in &mut removed {
         cell.ch = ' ';
     }
+    rows[row].extend(removed);
     Some(anchor)
 }
 
@@ -4169,17 +4173,27 @@ mod statusline_marker_tests {
     use super::*;
 
     #[test]
-    fn hidden_face_marker_keeps_status_text_and_anchor() {
+    fn hidden_face_marker_collapses_and_keeps_anchor() {
         let mut rows = vec!["cost \u{fffc}\u{fffc} 42%".chars().map(|ch| {
             let mut cell = GridCell::blank();
             cell.ch = ch;
             cell.bg = kasa_bridge::screen::Color::Rgb(12, 34, 56);
             cell
         }).collect::<Vec<_>>()];
-        assert_eq!(clear_statusline_face(&mut rows), Some((0, 5, 2)));
-        assert_eq!(rows[0].iter().map(|cell| cell.ch).collect::<String>(), "cost    42%");
-        assert_eq!(rows[0][5].bg, kasa_bridge::screen::Color::Rgb(12, 34, 56));
-        assert_eq!(clear_statusline_face(&mut rows), None);
+        assert_eq!(collapse_statusline_face(&mut rows), Some((0, 5, 2)));
+        assert_eq!(rows[0].iter().map(|cell| cell.ch).collect::<String>(), "cost  42%  ");
+        assert_eq!(rows[0].len(), 11, "줄 폭은 그대로");
+        assert_eq!(rows[0][10].bg, kasa_bridge::screen::Color::Rgb(12, 34, 56));
+        assert_eq!(collapse_statusline_face(&mut rows), None);
+    }
+
+    #[test]
+    fn fullscreen_statusline_starts_where_the_hint_line_starts() {
+        let row = |s: &str| s.chars().map(|ch| GridCell { ch, ..GridCell::blank() }).collect::<Vec<_>>();
+        let mut rows = vec![row("  \u{fffc}\u{e0c0} Opus 5.5 1M"), row("  ⏵⏵ bypass permissions on")];
+        collapse_statusline_face(&mut rows).unwrap();
+        let first = |r: &Vec<GridCell>| r.iter().position(|c| c.ch != ' ').unwrap();
+        assert_eq!(first(&rows[0]), first(&rows[1]));
     }
 }
 
