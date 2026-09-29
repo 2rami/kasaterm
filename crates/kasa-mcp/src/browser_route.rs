@@ -459,16 +459,27 @@ mod tests {
     #[test]
     fn fixture_prefers_same_port_when_unused() {
         let source = WebFixture::start();
-        // 임시 포트(49152~)에서 고르면 반납한 틈에 병렬로 도는 다른 검사의 `bind(0)` 이 같은 번호를
-        // 가져가 preview 발행 검사가 깨졌다. 임시 범위 밖에서 빈 번호를 고른다.
-        let preferred = (20_000u16..30_000)
-            .step_by(7)
-            .find(|port| TcpListener::bind((Ipv4Addr::LOCALHOST, *port)).is_ok())
-            .unwrap();
-        let local = parse_local_url(&format!("http://127.0.0.1:{preferred}/")).unwrap();
-        let mut pool = ForwardPool::default();
-        let response = pool.resolve(&local, fixture_target(), |port, _, _| fixture_child(port, source.port)).unwrap();
-        assert_eq!(response.local_port, preferred);
+        // 고른 번호가 비어 있는지 본 순간과 전달이 그 번호를 잡는 순간 사이에, 같은 모듈의 다른
+        // 전달 검사와 동시에 돌면 가끔 그 번호를 못 잡는다(단독 30회는 전부 통과, 모듈 8회 중 1회 실패 —
+        // preview 발행 검사를 두 번 막았다). 여기서 보려는 것은 「비어 있으면 같은 번호」이므로
+        // 경쟁에 진 시도만 다른 번호로 다시 해 본다. 임시 포트 범위(49152~)는 `bind(0)` 과 겹쳐 피한다.
+        let mut outcomes = Vec::new();
+        for preferred in (20_000u16..30_000).step_by(7) {
+            if TcpListener::bind((Ipv4Addr::LOCALHOST, preferred)).is_err() {
+                continue;
+            }
+            let local = parse_local_url(&format!("http://127.0.0.1:{preferred}/")).unwrap();
+            let mut pool = ForwardPool::default();
+            let result = pool.resolve(&local, fixture_target(), |port, _, _| fixture_child(port, source.port));
+            if result.as_ref().is_ok_and(|response| response.local_port == preferred) {
+                return;
+            }
+            outcomes.push((preferred, result.map(|response| response.local_port)));
+            if outcomes.len() == 5 {
+                break;
+            }
+        }
+        panic!("빈 번호를 다섯 번 골라도 같은 번호로 전달하지 않았다: {outcomes:?}");
     }
 
     #[cfg(unix)]
