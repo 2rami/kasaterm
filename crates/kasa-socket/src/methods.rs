@@ -153,6 +153,9 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "relay.account" => match backend.relay_account(&req.params) {
             Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
         },
+        "net.forward" => match backend.net_forward(&req.params) {
+            Ok(value) => Response::success(id, value), Err(error) => backend_err(id, error),
+        },
         "collab.board" => {
             // Opt-in screen capture: a plain board stays metadata-only (cheap,
             // what board-watch polling wants), but an orchestrator pane can
@@ -289,6 +292,7 @@ fn system_capabilities(id: Value) -> Response {
                 "machine.unfold",
                 "machine.home",
                 "machine.list",
+                "net.forward",
                 "surface.split_fleet",
                 "surface.closed",
                 "surface.send_text",

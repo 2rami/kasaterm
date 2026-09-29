@@ -2963,6 +2963,10 @@ impl Backend for PtyBackend {
         kasa_mcp::device_auth::handle(params)
     }
 
+    fn net_forward(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        kasa_mcp::netfwd::handle(params)
+    }
+
     fn collab_tell_identity(&self, surface: &str) -> Result<serde_json::Value> {
         let live = kasa_pty::lookup_session(surface).ok_or_else(||anyhow::anyhow!("live PTY unavailable"))?;
         let shell = live.shell_pid().ok_or_else(||anyhow::anyhow!("live process identity unavailable"))?;

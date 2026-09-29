@@ -1686,6 +1686,9 @@ fn print_help() {
   kasaterm-cli migrate [%surface] <기계이름|http://호스트:포트|local> [--cwd /레포] [--force]  # pane 의 claude 를 그 기계로 이사(대화·미커밋 변경까지 운반+같은 자리 재개). 기계이름(예: 맥미니)이면 주소·경로를 명부(machines.json)에서 알아서 정한다. %surface 를 빼면 **이 명령을 친 pane 자신**이 간다 — 학생이 자기 이사를 신청하는 길. `local` 이면 역이사: 원격 pane 을 이 기계로 데려온다
   kasaterm-cli unfold <라벨>                  # 기계의 캐릭터 pane 전부를 거울로 펼침
   kasaterm-cli machines [--names]             # 명부 기계 목록 — `to` 셰임의 ls. 이 pane 이 거울이면 그 기계 줄에 *. --names 는 라벨만(탭 완성용)
+  kasaterm-cli net forward <기기> <port> [--local L]  # 그 기기의 127.0.0.1:port 를 이 기기 http://localhost:L 로(카사넷 직통, 아니면 ssh 길). L 을 빼면 같은 번호, 쓰이면 빈 번호
+  kasaterm-cli net list                        # 끌어오는 포트 목록(길·연결 수)
+  kasaterm-cli net stop <L>                    # localhost:L 끌어오기 닫기
   kasaterm-cli home                           # 명부의 본진(home:true) 기계 — 살아 있으면 라벨만 출력(종료 0)·미설정은 조용히 1·설정됐는데 안 닿으면 3. 셰임의 순정 claude 디스패치용
   kasaterm-cli remote <http://호스트:포트> [--cwd /원격/경로] [--attach web-id] [%surface]  # 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 앱을 꺼도 원격 셸은 산다
   kasaterm-cli tab   [%surface] [--focus]    # 새 탭 생성. 부팅 후 board --all에서 실행·신원 확인 → 최신 address 전체로 tell --address. --focus만 앞으로
@@ -1889,6 +1892,40 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             ("relay.account", json!({ "op": "login", "account": account, "password": password }))
         }
         "logout" => ("relay.account", json!({ "op": "logout" })),
+        // 카사넷 포트 공유 — 다른 기기 개발 서버를 이 기기 localhost 로 끌어온다(docs/kasanet.md P3).
+        "net" => match args.first().map(String::as_str) {
+            Some("forward") => {
+                let positional: Vec<&String> = {
+                    let mut out = Vec::new();
+                    let mut i = 1;
+                    while i < args.len() {
+                        if args[i] == "--local" {
+                            i += 2;
+                            continue;
+                        }
+                        out.push(&args[i]);
+                        i += 1;
+                    }
+                    out
+                };
+                let (Some(machine), Some(port)) = (positional.first(), positional.get(1)) else {
+                    return Err(anyhow!("net forward <기기> <port> [--local L]"));
+                };
+                let port: u16 = port.parse().map_err(|_| anyhow!("포트는 1~65535 숫자: {port}"))?;
+                let local = match flag_value(args, "--local") {
+                    Some(l) => Some(l.parse::<u16>().map_err(|_| anyhow!("--local 은 1~65535 숫자: {l}"))?),
+                    None => None,
+                };
+                ("net.forward", json!({ "op": "forward", "machine": machine, "port": port, "local": local }))
+            }
+            Some("list") | None => ("net.forward", json!({ "op": "list" })),
+            Some("stop") => {
+                let local = args.get(1).ok_or_else(|| anyhow!("net stop <로컬 포트>"))?;
+                let local: u16 = local.parse().map_err(|_| anyhow!("포트는 1~65535 숫자: {local}"))?;
+                ("net.forward", json!({ "op": "stop", "local": local }))
+            }
+            Some(other) => return Err(anyhow!("net forward|list|stop — 모르는 것: {other}")),
+        },
         "devices" => match args.first().map(String::as_str) {
             None => ("relay.account", json!({ "op": "devices" })),
             Some("status") => ("relay.account", json!({ "op": "status" })),

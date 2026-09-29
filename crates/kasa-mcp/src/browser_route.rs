@@ -88,8 +88,8 @@ struct Target {
     key: Option<String>,
 }
 
-fn registered_target(request: &ResolveRequest) -> Result<Target> {
-    let machine = if let Some(id) = request.source_machine_id.as_deref() {
+fn registered_machine(request: &ResolveRequest) -> Result<crate::machines::Machine> {
+    if let Some(id) = request.source_machine_id.as_deref() {
         if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
             return Err(bad("원본 기기 ID가 잘못됐어요"));
         }
@@ -98,7 +98,10 @@ fn registered_target(request: &ResolveRequest) -> Result<Target> {
         let mut matches = crate::machines::machines().into_iter()
             .filter(|machine| machine.label == request.source_machine);
         matches.next().filter(|_| matches.next().is_none())
-    }.ok_or(RouteError(StatusCode::NOT_FOUND, "원본 기기를 이 기기의 명부에서 찾지 못했어요"))?;
+    }.ok_or(RouteError(StatusCode::NOT_FOUND, "원본 기기를 이 기기의 명부에서 찾지 못했어요"))
+}
+
+fn ssh_target(request: &ResolveRequest, machine: crate::machines::Machine) -> Result<Target> {
     let ssh = machine.ssh.filter(|ssh| !ssh.is_empty()
         && !ssh.starts_with('-') && !ssh.chars().any(|c| c.is_whitespace() || c.is_control()))
         .ok_or_else(|| unavailable("원본 기기로 가는 등록된 SSH 경로가 없어요"))?;
@@ -296,7 +299,21 @@ pub(crate) async fn resolve_handler(Json(request): Json<ResolveRequest>) -> impl
             return Ok(ResolveResponse { ok: true, url: request.url, forwarded: false,
                 local_port: local.port, source_port: local.port });
         }
-        let target = registered_target(&request)?;
+        let machine = registered_machine(&request)?;
+        // 원본 기기에 닿는 base 가 있으면 그 기기의 /net/tcp 로 끌어온다(카사넷 P3) — 이 기기에 원본으로 가는 ssh
+        // 설정이 없어도 되고(손님 -R 로만 닿는 기기), 직통이면 카사넷을 탄다. 옛 판 원본이면 아래 ssh -L 로.
+        let pulled = crate::netfwd::show_from_machine_blocking(&machine, &request.url);
+        match pulled {
+            Ok((url, local_port, source_port)) => {
+                return Ok(ResolveResponse { ok: true, url, forwarded: true, local_port, source_port });
+            }
+            Err(error) if machine.ssh.is_none() => {
+                eprintln!("[browser-route] {} 포트를 끌어오지 못했어요: {error}", machine.label);
+                return Err(unavailable("원본 기기에서 포트를 끌어오지 못했어요"));
+            }
+            Err(error) => eprintln!("[browser-route] {} 끌어오기 실패, ssh 로: {error}", machine.label),
+        }
+        let target = ssh_target(&request, machine)?;
         static POOL: OnceLock<Mutex<ForwardPool>> = OnceLock::new();
         let mut pool = POOL.get_or_init(Default::default).try_lock()
             .map_err(|_| RouteError(StatusCode::CONFLICT, "다른 브라우저 연결을 준비 중이에요. 잠시 뒤 다시 열어 주세요"))?;

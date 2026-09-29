@@ -777,7 +777,20 @@ async fn manager(
                                     // 되돌리는 길(http.rs push_viewer_control).
                                     Some("open-url") => {
                                         if let Some(u) = v.get("url").and_then(|x| x.as_str()) {
-                                            fire_open_url(&local, u);
+                                            // 원본의 localhost 는 이 기기에서 딴 곳이다 — 그 포트를 끌어와 이 기기
+                                            // localhost 로 연다(카사넷 P3). 공개 터널을 세우지 않는다.
+                                            let (local, url, base) = (local.clone(), u.to_string(), spec.base.clone());
+                                            tokio::spawn(async move {
+                                                let shown = match crate::netfwd::show_from_base(&base, &url).await {
+                                                    Some(Ok(pulled)) => pulled,
+                                                    Some(Err(e)) => {
+                                                        eprintln!("[remote] {url} 포트를 끌어오지 못해 그대로 연다: {e}");
+                                                        url
+                                                    }
+                                                    None => url,
+                                                };
+                                                fire_open_url(&local, &shown);
+                                            });
                                         }
                                     }
                                     Some("source-closed") => {
