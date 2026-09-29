@@ -752,7 +752,9 @@ mod tests {
         let again = open(target(&base, echo), None, "show").await.unwrap();
         assert!(again.reused && again.local == opened.local, "같은 기기·포트는 다시 쓴다");
         stop(opened.local).await.unwrap();
-        assert!(TcpStream::connect(("127.0.0.1", opened.local)).await.is_err());
+        // 닫힌 번호는 병렬로 도는 다른 검사가 곧바로 다시 받을 수 있어 connect 실패로는 못 가른다
+        // (2026-09-29 release 검사 3번 중 1번 실패). stop 은 듣던 소켓 작업이 끝난 뒤에야 답한다.
+        assert!(!forwards().lock().unwrap().contains_key(&opened.local));
         assert!(stop(opened.local).await.is_err());
     }
 
