@@ -261,6 +261,31 @@ pub(crate) fn pick_split_axis(px_w: f32, px_h: f32, cols: u16, rows: u16) -> kas
 pub(crate) const MIN_PANE_COLS: u16 = 80;
 pub(crate) const MIN_PANE_ROWS: u16 = 16;
 
+/// 벤토에 부을 칸 순서 — 화면에서 읽은 순서(`read`)에서 `added` 를 빼 `opener` 뒤에 다시
+/// 끼운다. `opener` 가 먼저 연 칸들이 바로 뒤에 잇대어 있으면 그 끝에 끼워 부른 순서를 지킨다.
+/// 트리에 없는 `added` 는 버리고, `opener` 를 못 찾으면 맨 뒤에 둔다.
+fn bento_order<'a>(
+    read: Vec<String>,
+    added: &[String],
+    opener: Option<&str>,
+    opener_of: impl Fn(&str) -> Option<&'a str>,
+) -> Vec<String> {
+    let added: Vec<String> = added.iter().filter(|id| read.contains(id)).cloned().collect();
+    let mut order: Vec<String> = read.into_iter().filter(|id| !added.contains(id)).collect();
+    let at = opener
+        .and_then(|o| order.iter().position(|id| id == o))
+        .map(|i| {
+            let mut j = i + 1;
+            while order.get(j).is_some_and(|id| opener_of(id) == Some(order[i].as_str())) {
+                j += 1;
+            }
+            j
+        })
+        .unwrap_or(order.len());
+    order.splice(at..at, added);
+    order
+}
+
 pub(crate) fn drop_zone_for_offsets(nx: f32, ny: f32) -> DropZone {
     if nx.abs() < DROP_CENTER_R && ny.abs() < DROP_CENTER_R {
         return DropZone::Center;
@@ -922,7 +947,9 @@ impl App {
         let surface = self.spawn_shell_pane(at.cwd.as_deref());
         SpawnShellReply { surface, window: Some(self.active_window), error: None }
     }
-    /// pane 여러 개를 **한 번에** 배치한다 — 부른 pane 이 크게 남고 학생들이 균등하게.
+    /// pane 여러 개를 **한 번에** 배치한다 — 방 전체가 크기가 같은 벤토 격자로 다시 짜이고
+    /// 학생들은 부른 pane 옆에 붙는다(`rebento_window`). 다른 기기 방의 보기 창만 옛 모양
+    /// (부른 pane 크게 + 학생 균등)을 쓴다.
     ///
     /// 옛 경로는 CLI 가 split 을 N 번 부르면서 **직전에 만든 pane 을 다음 대상으로**
     /// 삼았다. ⌘D 를 연달아 누른 것과 같은 모양이라 몫이 1/2 → 1/4 → 1/8 로
@@ -936,9 +963,10 @@ impl App {
     ///
     /// 창에 이미 다른 pane 이 있으면 그 자리는 건드리지 않는다(`replace_leaf`).
     ///
-    /// 반환값은 **실제로 앉힌** pane id 들이다. `fleet_capacity` 가 하한(80칸·16줄)
-    /// 으로 자르므로 요청보다 적을 수 있고, 부른 쪽이 그 차이를 사람에게 알려야
-    /// 한다 — 조용히 적게 만들면 「5명 불렀는데 3명」이 또 사고가 된다.
+    /// 반환값은 **실제로 앉힌** pane id 들이다. 벤토 방은 하한(80칸·16줄)을 넘는 인원을
+    /// 부른 pane 의 탭으로 앉혀 전원을 돌려준다. 보기 창은 `fleet_capacity` 로 잘라 요청보다
+    /// 적을 수 있고, 부른 쪽이 그 차이를 사람에게 알려야 한다 — 조용히 적게 만들면
+    /// 「5명 불렀는데 3명」이 또 사고가 된다.
     pub(crate) fn split_fleet(
         &mut self,
         count: usize,
@@ -998,7 +1026,17 @@ impl App {
                 host_rect.0, host_rect.1
             );
         }
-        let want = count.min(room.max(1));
+        // 벤토 방은 하한을 지키며 칸으로 앉힐 수만큼만 칸으로, 나머지는 호스트의 탭으로 —
+        // 혼자인 칸의 첫 분할은 늘 칸이다(`bento_full`).
+        let owned = self.bento_owns(owner);
+        let want = if owned {
+            let n = self.window_leaves(owner).len();
+            (1..=count)
+                .take_while(|&k| n + k <= 2 || self.bento_shape_for(owner, k).fits)
+                .count()
+        } else {
+            count.min(room.max(1))
+        };
 
         let mut made: Vec<String> = Vec::new();
         // 한 칸이면 모양이 「호스트 옆에 dir 로」라 원본에도 그대로 실린다(거울일 때).
@@ -1032,6 +1070,18 @@ impl App {
                 self.pty.remove(id);
             }
             anyhow::bail!("pane {host} 자리를 못 찾았다 — 종료·재시작으로 사라졌는지 확인해라");
+        }
+        if owned {
+            self.rebento_window(owner, &made, Some(&host));
+            for _ in want..count {
+                match self.spawn_new_tab(&host, false) {
+                    Ok(id) => made.push(id),
+                    Err(e) => {
+                        eprintln!("[split] {host} 탭으로 앉히다 실패: {e:#}");
+                        break;
+                    }
+                }
+            }
         }
         // 줌은 트리 밖 렌더 상태다 — 재배치하면 줌 대상이 화면과 어긋나므로 푼다.
         // 안 풀면 학생을 셋 띄웠는데 화면엔 옛 pane 하나만 크게 남는다.
@@ -1389,6 +1439,12 @@ impl App {
     }
 
     pub(crate) fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<String> {
+        self.split_active_pane_as(dir, false)
+    }
+
+    /// `focused` 는 사람이 누른 분할(⌘D 등)이다 — 칸이 모자라 탭으로 열 때 그 탭을 앞에 세우고
+    /// 알린다. 소켓 분할은 탭을 뒤에 둔다(`spawn_new_tab` 의 activate 와 같은 규칙).
+    fn split_active_pane_as(&mut self, dir: kasa_pty::SplitDir, focused: bool) -> Result<String> {
         if self.tmux.is_some() {
             anyhow::bail!("tmux 백엔드에선 로컬 split 을 쓰지 않는다");
         }
@@ -1413,6 +1469,18 @@ impl App {
         // 스폰은 오케스트레이터가 배경에서 하는 일이라 **사용자가 어느 방을 보고 있는지와
         // 무관해야** 한다.
         let owner = self.window_of_pane(&active);
+        if owner.is_some_and(|w| self.bento_full(w)) {
+            let id = self.spawn_new_tab(&active, focused)?;
+            if focused {
+                self.set_toast("칸이 좁아 탭으로 열었어요".into());
+            }
+            // 탭 셸은 칸 상자 크기로 태어난다 — 상태줄·여백을 뺀 격자로 맞춰 줘야 한다.
+            if owner == Some(self.active_window) {
+                let (cols, rows) = self.window_cells();
+                self.resize_backend(cols, rows);
+            }
+            return Ok(id);
+        }
         let new_id = self.spawn_split_session(&active, Some((dir, false)))?;
         let (win_cols, win_rows) = self.window_cells();
         let foreign = owner.filter(|w| *w != self.active_window);
@@ -1429,6 +1497,7 @@ impl App {
                 "pane {active} 을 어느 window 트리에서도 못 찾았다 — 종료·재시작으로 사라졌는지 확인해라"
             );
         }
+        self.rebento_window(owner.unwrap_or(self.active_window), std::slice::from_ref(&new_id), Some(&active));
         if foreign.is_some() {
             // 안 보이는 방을 쪼갠 것이라 포커스도 메인 그리드도 건드리지 않는다.
             // 그 방의 PTY 치수는 그 창을 앞으로 가져올 때(`aux_room_resize_pty`
@@ -1451,9 +1520,86 @@ impl App {
         &mut self,
         dir: kasa_pty::SplitDir,
     ) -> Result<String> {
-        let new_id = self.split_active_pane(dir)?;
+        let new_id = self.split_active_pane_as(dir, true)?;
         self.handoff_ime_to_active_surface();
         Ok(new_id)
+    }
+
+    /// 방 `window` 에 칸 `extra` 개를 더했을 때의 벤토 모양.
+    ///
+    /// 하한(80칸×16줄)은 **셸이 받는 격자**로 잰다. 칸 상자에서 상태줄·헤더 띠·안쪽 여백이
+    /// 빠지므로(`resize_backend`), 상자 기준으로 재면 19줄 상자가 15줄 셸이 된다(실측).
+    fn bento_shape_for(&self, window: usize, extra: usize) -> kasa_pty::Bento {
+        let leaves = self.window_leaves(window);
+        let (cw, ch) = (self.cell.w.max(1.0), self.cell.h.max(1.0));
+        let band_px = leaves
+            .iter()
+            .map(|id| self.statusbar_px(id) + self.pane_header_px(id))
+            .fold(if self.set_footer_default { self.pane_footer_h() } else { 0.0 }, f32::max);
+        let pad_cols = (2.0 * PANE_INNER_X / cw).ceil() as u16;
+        let pad_rows = ((band_px + 2.0 * PANE_INNER_Y) / ch).ceil() as u16;
+        let (cols, rows) = self.window_cells();
+        kasa_pty::bento_shape(
+            leaves.len() + extra,
+            cols as f32 * cw,
+            rows as f32 * ch,
+            cols,
+            rows,
+            MIN_PANE_COLS + pad_cols,
+            MIN_PANE_ROWS + pad_rows,
+        )
+    }
+
+    /// 벤토가 맡는 방인가. 다른 기기 방을 비추는 보기 창은 원본이 짠 배치를 그대로 받는다 —
+    /// 여기서 또 짜면 받은 배치와 번갈아 튄다. 원본이 짠 벤토가 채널로 건너온다.
+    fn bento_owns(&self, window: usize) -> bool {
+        self.tmux.is_none() && self.remote_view_of_window(window).is_none()
+    }
+
+    /// 칸 하나를 더하면 하한(80칸×16줄)을 못 지키는 방 — 새 칸은 탭으로 간다.
+    ///
+    /// 혼자인 칸의 분할은 늘 칸으로 연다. 마지막 칸을 닫을 때 옆에 새 셸을 세우고 원래 칸을
+    /// 숨기는 `close_pane` 이 그 분할에 기대고, 좁은 칸도 사람이 쪼개면 쪼개져야 한다
+    /// (2026-09-18 「거절 없이 그냥 되게」).
+    fn bento_full(&self, window: usize) -> bool {
+        self.bento_owns(window)
+            && self.window_leaves(window).len() >= 2
+            && !self.bento_shape_for(window, 1).fits
+    }
+
+    /// 방 하나를 크기가 같은 격자로 다시 짠다 — 칸이 열리거나 닫힐 때만 부른다. 사람이
+    /// 경계를 끌어 바꾼 비율은 다음 열기·닫기까지 그대로 남는다.
+    ///
+    /// 칸 순서는 지금 화면에서 읽는 순서를 지키고, `added`(방금 연 칸)는 `opener` 바로 뒤에
+    /// 끼운다 — 그 칸이 먼저 연 칸들이 뒤에 잇대어 있으면 그 끝에. 그래서 한 칸이 부른
+    /// 학생들이 부른 순서대로 그 옆에 붙는다.
+    pub(crate) fn rebento_window(&mut self, window: usize, added: &[String], opener: Option<&str>) {
+        if !self.bento_owns(window) {
+            return;
+        }
+        let shape = self.bento_shape_for(window, 0);
+        let tree = if window == self.active_window {
+            self.pty_layout.as_ref()
+        } else {
+            self.windows.get(window).and_then(|s| s.as_ref())
+        };
+        let Some(read) = tree.map(|t| t.reading_order(shape.stack)) else {
+            return;
+        };
+        let order = bento_order(read, added, opener, |id| self.pane_opener.get(id).map(String::as_str));
+        if let Some(o) = opener {
+            for id in added {
+                self.pane_opener.insert(id.clone(), o.to_string());
+            }
+        }
+        let Some(fresh) = kasa_pty::bento(&order, &shape) else {
+            return;
+        };
+        if window == self.active_window {
+            self.pty_layout = Some(fresh);
+        } else if let Some(slot) = self.windows.get_mut(window) {
+            *slot = Some(fresh);
+        }
     }
     /// Stage-3 in-pane tab spawn. Creates a fresh PtySession with its own
     /// pid, registers it in `pid_to_pane` so output streams find the right
@@ -2243,6 +2389,7 @@ impl App {
             if let Some(tree) = self.pty_layout.as_mut() {
                 tree.remove_leaf(target);
             }
+            self.rebento_window(self.active_window, &[], None);
         } else {
             self.pty_layout = None;
         }
@@ -2423,10 +2570,20 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// pane)가 남는 것 방지. 마지막 leaf 로 윈도우가 비면 그 윈도우도 닫는다.
     fn remove_pane_stashed(&mut self, target: &str) {
         let mut emptied_win: Option<usize> = None;
+        let mut shrunk: Vec<usize> = Vec::new();
         for (i, slot) in self.windows.iter_mut().enumerate() {
-            if Self::remove_stashed_leaf(slot, target) && slot.is_none() {
-                emptied_win = Some(i);
+            if Self::remove_stashed_leaf(slot, target) {
+                if slot.is_none() {
+                    emptied_win = Some(i);
+                } else {
+                    shrunk.push(i);
+                }
             }
+        }
+        // 활성 방의 슬롯은 옛 사본일 수 있다 — 그 방은 `pty_layout` 쪽이 이미 다시 짰다.
+        let active = self.active_window;
+        for i in shrunk.into_iter().filter(|&i| i != active) {
+            self.rebento_window(i, &[], None);
         }
         if let Some(i) = emptied_win {
             // close_window 가 인덱스·탭 스트립 보정까지 처리. 마지막 윈도우면
@@ -2612,6 +2769,8 @@ for p in glob.glob(os.path.join(d, '*.json')):
             if let Some(tree) = self.pty_layout.as_mut() {
                 tree.remove_leaf(target);
             }
+            self.pane_opener.remove(target);
+            self.rebento_window(self.active_window, &[], None);
         } else {
             self.pty_layout = None;
         }
@@ -2717,11 +2876,13 @@ for p in glob.glob(os.path.join(d, '*.json')):
         } else {
             None
         };
+        self.pane_opener.remove(target);
         if in_active {
             if leaves.len() > 1 {
                 if let Some(tree) = self.pty_layout.as_mut() {
                     tree.remove_leaf(target);
                 }
+                self.rebento_window(self.active_window, &[], None);
             } else {
                 // Last leaf — drop the tree entirely so single-pane
                 // fallback re-engages if a future split repopulates it.
@@ -3521,6 +3682,23 @@ mod auto_split_tests {
     // 테스트도 그 비율로 재야 의미가 있다.
     const CW: f32 = 7.0;
     const CH: f32 = 17.5;
+    #[test]
+    fn bento_order_seats_a_new_pane_after_its_opener_and_older_siblings() {
+        let v = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let openers: HashMap<&str, &str> = [("%1", "%0")].into_iter().collect();
+        let of = |id: &str| openers.get(id).copied();
+        // %0 이 %1 을 먼저 불렀고 이제 %3 을 부른다 — %2 앞, %1 뒤.
+        assert_eq!(
+            bento_order(v(&["%0", "%3", "%1", "%2"]), &v(&["%3"]), Some("%0"), of),
+            v(&["%0", "%1", "%3", "%2"])
+        );
+        // 여는 칸을 모르면 맨 뒤, 트리에 없는 새 칸은 버린다.
+        assert_eq!(bento_order(v(&["%0", "%1"]), &v(&["%1"]), Some("%9"), of), v(&["%0", "%1"]));
+        assert_eq!(bento_order(v(&["%0", "%1"]), &v(&["%7"]), Some("%0"), of), v(&["%0", "%1"]));
+        // 닫기는 읽은 순서 그대로.
+        assert_eq!(bento_order(v(&["%2", "%0"]), &[], None, of), v(&["%2", "%0"]));
+    }
+
     fn pick(cols: u16, rows: u16) -> kasa_pty::SplitDir {
         pick_split_axis(cols as f32 * CW, rows as f32 * CH, cols, rows)
     }

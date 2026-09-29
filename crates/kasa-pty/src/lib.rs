@@ -14,7 +14,7 @@ pub mod layout;
 mod state;
 
 pub use crossbeam_channel::Receiver as ScreenReceiver;
-pub use layout::{fleet, fleet_capacity, Divider, PtyLayout, SplitDir};
+pub use layout::{bento, bento_shape, fleet, fleet_capacity, Bento, Divider, PtyLayout, SplitDir};
 pub use state::{
     agent_for_shell, agent_pid_for_shell, keep_session, kept_sessions, live_sessions, lookup_session, process_cmdline,
     process_env_var, release_session, ExtEvent, ExternalIo,

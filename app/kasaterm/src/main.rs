@@ -5402,6 +5402,9 @@ struct App {
     /// area with the other panes hidden, until toggled off. GUI-local render
     /// state — the daemon's layout tree is untouched (like a divider ratio).
     zoomed_pane: Option<String>,
+    /// 새 칸 → 그 칸을 연 칸. 벤토로 다시 짤 때 한 칸이 연 형제들을 잇대어 세운다
+    /// (`rebento_window`). 재시작하면 비지만 트리 순서가 이미 그 줄을 담고 있다.
+    pane_opener: HashMap<String, String>,
     /// Pre-maximize window frame (Cocoa screen coords: x, y, w, h), stashed
     /// when a title-strip double-click maximizes so the next double-click can
     /// snap the window back instantly. `None` = currently un-maximized. See
@@ -6156,6 +6159,7 @@ impl App {
             cell_click: None,
             last_tree_click: None,
             zoomed_pane: None,
+            pane_opener: HashMap::new(),
             saved_window_frame: None,
             titlebar_drag_pending: None,
             last_window_title: None,

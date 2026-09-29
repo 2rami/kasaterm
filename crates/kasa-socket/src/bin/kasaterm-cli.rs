@@ -1680,7 +1680,7 @@ fn print_help() {
         "  kasaterm-cli human <명령…>                 # 사람이 쳐야 하는 명령(sudo·로그인)을 아래 pane 에 넣고 포커스를 넘긴다 — 사람은 비밀번호만"
     );
     eprintln!(
-        "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N] [--host-ratio 0.6]  # 기본 no-focus·이 pane 을 쪼갬. --count N 은 부른 쪽을 크게 두고 N 명을 균등하게 배치(몫이 반감하지 않는다). 창이 좁으면 앉힌 인원이 요청보다 적고 note 에 적힌다"
+        "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N] [--host-ratio 0.6]  # 기본 no-focus·이 pane 을 쪼갬. --count N 은 한 번에 N 명 — 방 전체가 크기가 같은 격자로 다시 짜이고 N 명이 부른 쪽 옆에 붙는다. 칸이 80칸×16줄 밑이 되면 나머지는 부른 쪽의 탭으로"
     );
     eprintln!("  kasaterm-cli window-new [--machine <기계>]  # 새 창. --machine 이면 그 기계에 새 방을 만들고 여기 보기 창으로 연다
   kasaterm-cli split <방향> %N@<기계> | tab %N@<기계>   # 그 기계의 그 pane 옆/탭에 세운다(축은 저쪽이 고름, --cwd 가능)

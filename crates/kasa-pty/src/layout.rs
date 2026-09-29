@@ -77,15 +77,112 @@ pub fn fleet(host: &str, students: &[String], dir: SplitDir, host_ratio: f32) ->
 /// 한 축을 정확히 균등하게 나누는 사슬. 첫 조각이 `1/남은개수` 를 갖고 나머지가
 /// 그 뒤를 같은 규칙으로 나눈다.
 fn even_chain(first: &String, rest: &[String], dir: SplitDir) -> PtyLayout {
-    let Some((next, tail)) = rest.split_first() else {
-        return PtyLayout::single(first.clone());
-    };
-    PtyLayout::Split {
-        dir,
-        ratio: 1.0 / (rest.len() + 1) as f32,
-        a: Box::new(PtyLayout::single(first.clone())),
-        b: Box::new(even_chain(next, tail, dir)),
+    let nodes = std::iter::once(first).chain(rest).map(|id| PtyLayout::single(id.clone()));
+    even_nodes(nodes.collect(), dir).unwrap_or_else(|| PtyLayout::single(first.clone()))
+}
+
+/// `even_chain` 의 몸통 — 조각이 leaf 가 아니어도 된다(벤토의 줄들).
+fn even_nodes(mut nodes: Vec<PtyLayout>, dir: SplitDir) -> Option<PtyLayout> {
+    let total = nodes.len();
+    let mut acc = nodes.pop()?;
+    for (i, node) in nodes.into_iter().enumerate().rev() {
+        acc = PtyLayout::Split {
+            dir,
+            ratio: 1.0 / (total - i) as f32,
+            a: Box::new(node),
+            b: Box::new(acc),
+        };
     }
+    Some(acc)
+}
+
+/// 벤토 격자 — 크기가 같은 칸을 줄(행 또는 열)로 쌓은 방 배치.
+///
+/// 칸 수가 줄 수로 안 나눠떨어지면 앞 줄이 하나씩 더 갖는다(5 → 3+2, 7 → 4+3). 줄끼리는
+/// 두께가 같고, 한 줄 안의 칸끼리는 폭이 같다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bento {
+    /// 줄이 쌓이는 방향. `Vertical` 은 행을 위→아래로(가로로 넓은 창), `Horizontal` 은
+    /// 열을 왼→오른쪽으로 쌓는다(세로로 긴 창).
+    pub stack: SplitDir,
+    /// 줄마다 칸 수, 앞 줄부터.
+    pub counts: Vec<usize>,
+    /// 모든 칸이 하한(`min_cols`×`min_rows`)을 지키는가.
+    pub fits: bool,
+}
+
+/// `n` 칸을 담을 벤토 모양을 고른다.
+///
+/// 줄 방향은 창의 긴 축을 따라 칸이 늘어서게 정하고(픽셀 기준 — 셀은 세로로 긴 직사각형이라
+/// 칸 수로 재면 정사각형 창이 세로로 길게 읽힌다), 줄 수는 하한을 지키는 것 중 칸이
+/// 정사각형에 가장 가까운 것으로 고른다. 어느 줄 수도 하한을 못 지키면 칸이 하한에 가장
+/// 가까운 것으로 고르고 `fits=false` 를 단다 — 새 칸을 탭으로 돌릴지는 부르는 쪽이 정한다.
+///
+/// 칸 크기는 **가장 붐비는 줄**(앞 줄)로 잰다. 뒤 줄은 칸이 하나 적어 늘 더 넓다.
+pub fn bento_shape(
+    n: usize,
+    px_w: f32,
+    px_h: f32,
+    cols: u16,
+    rows: u16,
+    min_cols: u16,
+    min_rows: u16,
+) -> Bento {
+    let stack = if px_w >= px_h { SplitDir::Vertical } else { SplitDir::Horizontal };
+    if n == 0 {
+        return Bento { stack, counts: Vec::new(), fits: true };
+    }
+    // (along, across): 한 줄 안에서 칸이 나눠 갖는 축, 줄끼리 나눠 갖는 축.
+    let (along_px, across_px, along_cells, across_cells, along_min, across_min) = match stack {
+        SplitDir::Vertical => (px_w, px_h, cols, rows, min_cols, min_rows),
+        SplitDir::Horizontal => (px_h, px_w, rows, cols, min_rows, min_cols),
+    };
+    let mut best: Option<(bool, f32, usize)> = None;
+    for lines in 1..=n {
+        let per = n.div_ceil(lines);
+        let cell_along = along_cells as usize / per;
+        let cell_across = across_cells as usize / lines;
+        let fits = cell_along >= along_min as usize && cell_across >= across_min as usize;
+        let score = if fits {
+            let (a, b) = (along_px / per as f32, across_px / lines as f32);
+            // 정사각형에서 벗어난 정도 — 작을수록 좋다.
+            (a / b.max(1.0)).max(b / a.max(1.0))
+        } else {
+            // 하한에 못 미친 정도 — 덜 모자랄수록 좋다.
+            let slack = (cell_along as f32 / along_min.max(1) as f32)
+                .min(cell_across as f32 / across_min.max(1) as f32);
+            -slack
+        };
+        let better = match best {
+            None => true,
+            Some((best_fits, best_score, _)) => (fits && !best_fits) || (fits == best_fits && score < best_score),
+        };
+        if better {
+            best = Some((fits, score, lines));
+        }
+    }
+    let (fits, _, lines) = best.unwrap_or((true, 0.0, 1));
+    let (base, extra) = (n / lines, n % lines);
+    let counts = (0..lines).map(|i| base + usize::from(i < extra)).collect();
+    Bento { stack, counts, fits }
+}
+
+/// `order` 순서대로 칸을 채운 벤토 트리. 줄 방향이 `Vertical` 이면 행 우선(왼→오른, 위→아래),
+/// `Horizontal` 이면 열 우선이다 — `PtyLayout::reading_order` 와 같은 순서라 다시 짜도
+/// 칸이 제자리에 선다. 칸 수가 모양과 안 맞으면 None.
+pub fn bento(order: &[String], shape: &Bento) -> Option<PtyLayout> {
+    if order.len() != shape.counts.iter().sum::<usize>() {
+        return None;
+    }
+    let mut rest = order;
+    let mut lines = Vec::with_capacity(shape.counts.len());
+    for &count in &shape.counts {
+        let (line, tail) = rest.split_at(count);
+        rest = tail;
+        let cells = line.iter().map(|id| PtyLayout::single(id.clone())).collect();
+        lines.push(even_nodes(cells, shape.stack.opposite())?);
+    }
+    even_nodes(lines, shape.stack)
 }
 
 /// `fleet` 로 앉힐 수 있는 **최대 인원**. 넘겨서 앉히면 쓸 수 없는 크기가 되므로
@@ -409,6 +506,19 @@ impl PtyLayout {
                     || b.insert_beside(target, dir, before, moving)
             }
         }
+    }
+
+    /// 화면에서 읽는 순서의 leaf — `stack` 이 `Vertical` 이면 위→아래·왼→오른, `Horizontal`
+    /// 이면 왼→오른·위→아래. 트리 순서(`leaves`)는 모양에 따라 열 우선일 수도 있어서
+    /// 그대로 벤토에 부으면 2×2 가 제자리에서 칸이 뒤섞인다.
+    pub fn reading_order(&self, stack: SplitDir) -> Vec<String> {
+        // 넉넉한 가상 격자로 잰다 — 작은 격자에서는 최소 크기 보정과 반올림이 모서리를 겹친다.
+        let mut rects = self.leaf_rects(10_000, 10_000);
+        match stack {
+            SplitDir::Vertical => rects.sort_by_key(|&(_, x, y, ..)| (y, x)),
+            SplitDir::Horizontal => rects.sort_by_key(|&(_, x, y, ..)| (x, y)),
+        }
+        rects.into_iter().map(|(id, ..)| id).collect()
     }
 
     /// Walks the tree and produces a list of leaf rectangles. Each entry
@@ -1424,5 +1534,90 @@ mod tests {
             b: Box::new(col(0.6, "%2", "%4")),
         };
         assert_eq!(t2.split_htov_at(&[]), None, "상단 정렬 안 됨 → 거부");
+    }
+
+    const CW: f32 = 8.4;
+    const CH: f32 = 17.0;
+
+    fn shape(n: usize, cols: u16, rows: u16) -> Bento {
+        bento_shape(n, cols as f32 * CW, rows as f32 * CH, cols, rows, 80, 16)
+    }
+
+    fn ids(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("%{i}")).collect()
+    }
+
+    #[test]
+    fn bento_on_a_wide_monitor_keeps_80_columns_per_cell() {
+        // 사이드바·파일트리·git 열을 뺀 큰 모니터 한 방 — 200칸이라 한 줄에 둘까지.
+        let want: [&[usize]; 8] = [&[1], &[2], &[2, 1], &[2, 2], &[2, 2, 1], &[2, 2, 2], &[2, 2, 2, 1], &[2, 2, 2, 2]];
+        for (i, counts) in want.iter().enumerate() {
+            let s = shape(i + 1, 200, 78);
+            assert_eq!(s.stack, SplitDir::Vertical, "n={}", i + 1);
+            assert_eq!(s.counts, *counts, "n={}", i + 1);
+            assert!(s.fits, "n={}", i + 1);
+        }
+        assert!(!shape(9, 200, 78).fits, "아홉째는 16줄을 못 지킨다");
+    }
+
+    #[test]
+    fn bento_splits_uneven_counts_front_heavy() {
+        assert_eq!(shape(5, 320, 80).counts, vec![3, 2]);
+        assert_eq!(shape(7, 320, 80).counts, vec![4, 3]);
+    }
+
+    #[test]
+    fn bento_stacks_columns_in_a_tall_window() {
+        let s = shape(3, 100, 120);
+        assert_eq!(s.stack, SplitDir::Horizontal);
+        assert_eq!(s.counts, vec![3], "한 열에 셋이 위아래로");
+    }
+
+    #[test]
+    fn bento_turns_to_rows_when_side_by_side_breaks_the_floor() {
+        // 노트북 한 방: 둘을 나란히 두면 75칸이라 위아래로.
+        assert_eq!(shape(2, 150, 50).counts, vec![1, 1]);
+        assert!(shape(3, 150, 50).fits);
+        assert!(!shape(4, 150, 50).fits);
+    }
+
+    #[test]
+    fn bento_tree_gives_equal_cells_in_reading_order() {
+        let order = ids(5);
+        let s = Bento { stack: SplitDir::Vertical, counts: vec![3, 2], fits: true };
+        let tree = bento(&order, &s).unwrap();
+        assert_eq!(tree.reading_order(SplitDir::Vertical), order, "다시 짜도 제자리");
+        let rects = tree.leaf_rects(300, 80);
+        let row1: Vec<_> = rects.iter().filter(|r| r.2 == 0).collect();
+        let row2: Vec<_> = rects.iter().filter(|r| r.2 != 0).collect();
+        assert_eq!(row1.len(), 3);
+        assert_eq!(row2.len(), 2);
+        assert!(row1.iter().all(|r| r.3 == 100 && r.4 == 40), "{row1:?}");
+        assert!(row2.iter().all(|r| r.3 == 150 && r.4 == 40), "{row2:?}");
+    }
+
+    #[test]
+    fn bento_rejects_a_count_mismatch() {
+        let s = Bento { stack: SplitDir::Vertical, counts: vec![2, 2], fits: true };
+        assert!(bento(&ids(3), &s).is_none());
+    }
+
+    #[test]
+    fn reading_order_reads_a_column_major_grid_row_by_row() {
+        let col = |top: &str, bot: &str| PtyLayout::Split {
+            dir: SplitDir::Vertical,
+            ratio: 0.5,
+            a: Box::new(PtyLayout::single(top)),
+            b: Box::new(PtyLayout::single(bot)),
+        };
+        let t = PtyLayout::Split {
+            dir: SplitDir::Horizontal,
+            ratio: 0.5,
+            a: Box::new(col("%4", "%3")),
+            b: Box::new(col("%5", "%8")),
+        };
+        assert_eq!(t.leaves(), vec!["%4", "%3", "%5", "%8"]);
+        assert_eq!(t.reading_order(SplitDir::Vertical), vec!["%4", "%5", "%3", "%8"]);
+        assert_eq!(t.reading_order(SplitDir::Horizontal), vec!["%4", "%3", "%5", "%8"]);
     }
 }
