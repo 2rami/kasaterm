@@ -2616,10 +2616,10 @@ struct Pill {
 }
 
 /// 같은 앞머리가 이만큼 모이면 한 알약으로 접는다.
-const PILL_FAMILY_MIN: usize = 3;
+pub(crate) const PILL_FAMILY_MIN: usize = 3;
 
 /// 스킬 이름의 앞머리 — `vercel:ai-sdk` 는 `vercel`, `gws-gmail-send` 는 `gws`. 가를 데가 없으면 이름 그대로.
-fn pill_family(name: &str) -> &str {
+pub(crate) fn pill_family(name: &str) -> &str {
     name.split_once(':').or_else(|| name.split_once('-')).map_or(name, |(head, _)| head)
 }
 

@@ -21,6 +21,8 @@ const ROW_H: f32 = 40.0;
 const SECTION_H: f32 = 30.0;
 /// 종류 구분 머리(MCP / Skill).
 const GROUP_H: f32 = 30.0;
+/// 묶음 안 줄의 들여쓰기 — 묶음 머리의 이름과 줄의 켜짐 점이 같은 세로줄에 선다.
+const NESTED_INDENT: f32 = 12.0;
 /// 목록이 비었을 때 안내가 차지하는 높이.
 const EMPTY_H: f32 = 44.0;
 /// 재수집 간격. 설정 파일은 사람이 고칠 때만 바뀌므로 성기게 본다 — 대신 우리가
@@ -163,6 +165,40 @@ fn seed_collapsed_groups(rows: &[McpRow], seen: &mut std::collections::HashSet<S
         let key = group_key(row.harness, row.kind, row.scope);
         if seen.insert(key.clone()) { collapsed.insert(key); }
     }
+    // 앞머리 묶음도 처음 볼 때 접어 둔다 — 그룹을 펼쳤는데 `gws-…` 가 또 한 줄씩 늘어서면 묶은 보람이 없다.
+    let mut i = 0;
+    while i < rows.len() {
+        let (harness, kind, scope) = (rows[i].harness, rows[i].kind, rows[i].scope);
+        let n = rows[i..].iter().take_while(|r| r.harness == harness && r.kind == kind && r.scope == scope).count();
+        for (family, _) in row_families(rows, i..i + n) {
+            let Some(family) = family else { continue };
+            let key = family_key(harness, kind, scope, &family);
+            if seen.insert(key.clone()) { collapsed.insert(key); }
+        }
+        i += n;
+    }
+}
+
+/// 한 그룹 안의 줄을 앞머리(`gws-…`·`vercel:…`)로 가른다 — 처음 나온 차례대로. 같은 앞머리가
+/// `PILL_FAMILY_MIN` 개 이상이면 `Some(앞머리)` 묶음, 아니면 줄마다 `None`. Info 알약과 같은 규칙이다.
+fn row_families(rows: &[McpRow], range: std::ops::Range<usize>) -> Vec<(Option<String>, Vec<usize>)> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut members: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+    for i in range {
+        let family = crate::info::pill_family(&rows[i].name);
+        if !members.contains_key(family) { order.push(family); }
+        members.entry(family).or_default().push(i);
+    }
+    let mut out = Vec::new();
+    for family in order {
+        let idx = members.remove(family).unwrap_or_default();
+        if idx.len() >= crate::info::PILL_FAMILY_MIN {
+            out.push((Some(family.to_string()), idx));
+        } else {
+            out.extend(idx.into_iter().map(|i| (None, vec![i])));
+        }
+    }
+    out
 }
 
 fn kind_icon(kind: RowKind) -> &'static str {
@@ -1347,22 +1383,37 @@ pub(crate) enum Item {
         open: bool,
         count: usize,
     },
+    /// 앞머리 묶음 머리(「gws 17」). 누르면 그 아래 줄이 펴진다.
+    Family {
+        harness: &'static str,
+        kind: RowKind,
+        scope: &'static str,
+        family: String,
+        open: bool,
+        count: usize,
+    },
     /// `view` 의 몇 번째 줄인가.
     Row(usize),
+    /// 묶음 안의 줄 — 한 칸 들여 그린다.
+    Nested(usize),
 }
 
 impl Item {
     fn height(&self) -> f32 {
         match self {
             Item::Section { .. } => SECTION_H,
-            Item::Group { .. } => GROUP_H,
-            Item::Row(_) => ROW_H,
+            Item::Group { .. } | Item::Family { .. } => GROUP_H,
+            Item::Row(_) | Item::Nested(_) => ROW_H,
         }
     }
 }
 
 fn group_key(harness: &str, kind: RowKind, scope: &str) -> String {
     format!("{harness}/{}/{}", kind.key(), scope_key(scope))
+}
+
+fn family_key(harness: &str, kind: RowKind, scope: &str, family: &str) -> String {
+    format!("{}/{family}", group_key(harness, kind, scope))
 }
 
 /// 목록을 화면 구조로 편다 — 머리와 줄이 나오는 차례 그대로.
@@ -1406,7 +1457,18 @@ pub(crate) fn layout(rows: &[McpRow], collapsed: &std::collections::HashSet<Stri
                 count: kn,
             });
             if kopen {
-                out.extend((i..i + kn).map(Item::Row));
+                for (family, rows_in) in row_families(rows, i..i + kn) {
+                    let Some(family) = family else {
+                        out.extend(rows_in.into_iter().map(Item::Row));
+                        continue;
+                    };
+                    let fopen = !collapsed.contains(&family_key(harness, kind, scope, &family));
+                    let count = rows_in.len();
+                    out.push(Item::Family { harness, kind, scope, family, open: fopen, count });
+                    if fopen {
+                        out.extend(rows_in.into_iter().map(Item::Nested));
+                    }
+                }
             }
             i += kn;
         }
@@ -2244,7 +2306,43 @@ pub(crate) fn draw_mcp_col(
                 y += GROUP_H;
                 continue;
             }
-            Item::Row(i) => match mc.view.get(*i) {
+            Item::Family {
+                harness,
+                kind,
+                scope,
+                family,
+                open,
+                count,
+            } => {
+                if visible {
+                    let hov = head_hit.is_some_and(|h| hit(&h));
+                    if hov {
+                        round_rect(g, x + 4.0, y, w - 8.0, GROUP_H - 2.0, theme::radius_sm(), theme::surface_hover());
+                    }
+                    g.hover_pointer |= hov;
+                    // 셰브런은 줄의 켜짐 점 자리에 선다 — 묶음 머리가 곧 그 줄들의 이름 칸이다.
+                    g.queue_icon(
+                        if *open { "chevron-down" } else { "chevron-right" },
+                        text_x - 3.0,
+                        y + 9.0,
+                        11.0,
+                        if hov { theme::text_dim() } else { theme::text_mute() },
+                    );
+                    let count_label = count.to_string();
+                    let count_w = g.measure_chrome_text(&count_label, 10.5, false);
+                    let name = crate::info::fit_text(g, family, (right - text_x - 12.0 - count_w - 8.0).max(0.0), 12.0, false);
+                    g.draw_text(text_x + 12.0, y + 7.0, &name,
+                        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: false, italic: false });
+                    g.draw_text(right - count_w, y + 9.0, &count_label,
+                        gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false });
+                    if let Some(hh) = head_hit {
+                        head_rects.push((family_key(harness, *kind, scope, family), hh));
+                    }
+                }
+                y += GROUP_H;
+                continue;
+            }
+            Item::Row(i) | Item::Nested(i) => match mc.view.get(*i) {
                 Some(r) => (*i, r),
                 None => {
                     y += ROW_H;
@@ -2252,6 +2350,9 @@ pub(crate) fn draw_mcp_col(
                 }
             },
         };
+        let indent = if matches!(item, Item::Nested(_)) { NESTED_INDENT } else { 0.0 };
+        let text_x = text_x + indent;
+        let avail = (avail - indent).max(0.0);
 
         let r = (x, y, w, ROW_H);
         // 완전히 밖인 행만 건너뛴다. 반쯤 걸친 행은 그리고 시저가 자르며, 눌리는
@@ -2445,6 +2546,29 @@ mod tests {
         let want = SECTION_H * 2.0 + GROUP_H * 3.0 + ROW_H * 4.0;
         assert_eq!(content_height(&layout(&rows, &open)), want);
         assert_eq!(content_height(&layout(&[], &open)), 0.0);
+    }
+
+    /// 앞머리가 같은 스킬 셋 이상은 한 묶음 머리로 — 처음 볼 때 접혀 있고, 펴면 줄이 들여 선다.
+    #[test]
+    fn same_prefix_skills_fold_into_one_family_row() {
+        let rows = vec![
+            row("claude", RowKind::Skill, "gws-chat"),
+            row("claude", RowKind::Skill, "gws-gmail-send"),
+            row("claude", RowKind::Skill, "gws-sheets"),
+            row("claude", RowKind::Skill, "jev"),
+            row("claude", RowKind::Skill, "learn-mcp"),
+            row("claude", RowKind::Skill, "learn"),
+        ];
+        let (mut seen, mut collapsed) = Default::default();
+        seed_collapsed_groups(&rows, &mut seen, &mut collapsed);
+        collapsed.remove("claude/skill/user");
+        let items = layout(&rows, &collapsed);
+        let family = |open| Item::Family { harness: "claude", kind: RowKind::Skill, scope: "전역", family: "gws".into(), open, count: 3 };
+        assert_eq!(items[2..], [family(false), Item::Row(3), Item::Row(4), Item::Row(5)], "셋 미만(learn 둘)은 제 줄: {items:?}");
+        collapsed.remove("claude/skill/user/gws");
+        let items = layout(&rows, &collapsed);
+        assert_eq!(items[2..6], [family(true), Item::Nested(0), Item::Nested(1), Item::Nested(2)]);
+        assert_eq!(content_height(&items), SECTION_H + GROUP_H * 2.0 + ROW_H * 6.0);
     }
 
     /// 접힌 것은 자리를 안 차지해야 한다. 화면 밖으로 밀어내는 식이면 스크롤 상한이
