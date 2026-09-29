@@ -3081,6 +3081,9 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let main_window = self.window.as_ref().is_some_and(|window| window.id() == id);
         if main_window {
+            if let WindowEvent::MouseInput { state, button: MouseButton::Left, .. } = &event {
+                self.weather.mouse_down = *state == ElementState::Pressed;
+            }
             if let WindowEvent::CursorMoved { position, .. } = &event {
                 let dpi = self.window.as_ref().map(|window| window.scale_factor()).unwrap_or(1.0);
                 self.cursor_sample = PointerSample::new(*position, dpi);
@@ -8213,6 +8216,8 @@ impl ApplicationHandler<UserEvent> for App {
             || (self.sidebar_visible && !self.tabs_on_top && !self.expanded_windows.is_empty())
             // 설정 상세의 모션 미리보기는 보일 때만 30fps 펌프를 탄다.
             || self.settings_media_animating()
+            // 비가 오는 동안(꺼져 있으면 여기서 끝난다 — 끈 사람은 깨우지 않는다).
+            || (self.weather.settings.enabled && self.weather_animating())
         {
             // 관성은 33ms(≈30fps)로 굴리면 그 자체가 계단으로 보인다 — 도는 동안만
             // 8ms 로 촘촘히. 테마 디졸브도 같은 이유로 촘촘한 쪽에 붙인다 —

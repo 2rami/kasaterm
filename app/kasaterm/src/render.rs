@@ -993,6 +993,9 @@ impl App {
         // pane 마다 화면을 어떻게 옮겨 그렸는지. 락 안에서는 `self` 가 불변이라
         // 여기 모아 두었다가 블록이 끝난 뒤 한 번에 옮긴다(body_rects 와 같은 이유).
         let mut view_shifts: Vec<(String, crate::PaneViewShift)> = Vec::new();
+        // 날씨: 초점 창과 그 입력줄(논리 px) — 물방울을 올리지 않는 자리. 같은 이유로 밖에 모은다.
+        let mut weather_focus: Option<String> = None;
+        let mut weather_guard: Option<[f32; 4]> = None;
         let (slots, headers, footer_slots, agents_view_panes, mirror_claude_panes): (
             Vec<PaneSlot>,
             Vec<HeaderInfo>,
@@ -1211,6 +1214,20 @@ impl App {
                     body_left, body_top, pane_font_scale, true, &turn_headers,
                 );
                 let composed = composition.rows;
+                if self.weather.settings.enabled && active_id.as_deref() == Some(id.as_str()) {
+                    weather_focus = Some(id.clone());
+                    let fs = pane_font_scale;
+                    let (ch, cw) = (self.cell.h * fs, self.cell.w * fs);
+                    let cols = composed.first().map_or(0, |r| r.len()) as f32;
+                    let rows = match crate::screenread::prompt_box(&composed) {
+                        Some(crate::screenread::PromptBox::Bordered { top, bottom, .. }) => Some(top..bottom + 1),
+                        Some(pb) => Some(pb.rows()),
+                        None => pane.term().map(|t| t.cursor_row as usize..t.cursor_row as usize + 1),
+                    };
+                    weather_guard = rows.map(|r| {
+                        [body_left, body_top + r.start as f32 * ch, cols * cw, (r.end - r.start) as f32 * ch]
+                    });
+                }
                 let agents_view = composition.agents_view;
                 let runs_claude = composition.runs_claude;
                 let true_char = composition.true_char;
@@ -2496,6 +2513,14 @@ impl App {
         let claude_observations: std::collections::HashMap<_, _> = self.set_claude_accounts.iter()
             .map(|account| (account.id.clone(), (self.claude_account_usage(&account.id), self.claude_account_status(&account.id))))
             .collect();
+        let weather_frame = self.weather_frame(
+            scale,
+            [win_px.0 / scale, win_px.1 / scale],
+            &footer_slots,
+            weather_focus.as_deref(),
+            weather_guard,
+        );
+        let mut weather_spots = Vec::new();
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -12594,10 +12619,16 @@ impl App {
                     self.chrome_dirty = true;
                 }
             }
+            weather_spots = std::mem::take(&mut g.weather_spots);
+            if weather_frame.is_none() {
+                g.weather = None;
+            }
+            g.weather_frame = weather_frame;
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");
             }
         }
+        self.weather_take_spots(weather_spots);
         if let Some(output) = settings_paint {
             self.finish_native_settings_paint(output);
         }
@@ -13275,6 +13306,7 @@ impl App {
             // — 전체 프레임을 다시 그려야 위상이 반영된다.
             || comet_animating;
         if !rebuild && !bar_animating {
+            self.weather_only_frame();
             return;
         }
         self.last_blink_on = blink_on;

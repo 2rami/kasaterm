@@ -19,6 +19,7 @@ kasa-socket = { path = "../../crates/kasa-socket" }
 kasa-ime = { path = "../../crates/kasa-ime" }
 kasa-cells = { path = "../../crates/kasa-cells" }
 wgpu = "28"
+bytemuck = { version = "1", features = ["derive"] }
 # Direct HAL access — needed to reach wgpu's actual CAMetalLayer for
 # Display P3 colorspace tagging. The high-level wgpu Surface API
 # doesn't expose this knob and macOS layer-walk from the NSView root

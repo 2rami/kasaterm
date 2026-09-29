@@ -221,6 +221,12 @@ pub struct GpuRenderer {
     /// 커서는 그대로"인 표면이 계속 새로 생기기 때문이다. 들림을 그리는
     /// 함수가 곧 이 플래그를 세우니 둘이 갈릴 수가 없다.
     pub hover_pointer: bool,
+    /// 날씨 패스. 본창 렌더러에서 날씨를 켰을 때만 생긴다(끄면 비용 0).
+    pub(crate) weather: Option<crate::weather::gpu::WeatherGpu>,
+    /// 이번 장에 얹을 날씨 — 앱이 `render` 직전에 넣는다.
+    pub(crate) weather_frame: Option<crate::weather::gpu::Frame>,
+    /// 이번 장에 그린 조작 단추(`native_controls`) — 날씨의 단추 물방울 자리.
+    pub(crate) weather_spots: Vec<crate::weather::sim::ButtonSpot>,
     /// Logical-px rects of link spans drawn in the most recent markdown
     /// frame: (x, y, w, h, dest). main.rs hit-tests a click against these to
     /// open a file (Finder) or URL (browser). Cleared at the start of every
@@ -775,6 +781,9 @@ impl GpuRenderer {
             clip_stack: Vec::new(),
             clip_runs: Vec::new(),
             hover_pointer: false,
+            weather: None,
+            weather_frame: None,
+            weather_spots: Vec::new(),
             md_link_rects: Vec::new(),
             md_copy_rects: Vec::new(),
             md_task_rects: Vec::new(),
@@ -4086,6 +4095,34 @@ impl GpuRenderer {
         self.clip_stack.clear();
         self.clip_runs.clear();
         self.hover_pointer = false;
+        self.weather_spots.clear();
+    }
+
+    /// 조작 단추 하나를 그렸다 — 날씨가 켜져 있으면 다음 장의 단추 물방울 자리가 된다.
+    pub(crate) fn note_control(&mut self, rect: (f32, f32, f32, f32), hover: bool, enabled: bool) {
+        if self.weather_frame.is_some() || self.weather.is_some() {
+            self.weather_spots.push(crate::weather::sim::ButtonSpot { rect: [rect.0, rect.1, rect.2, rect.3], hover, enabled });
+        }
+    }
+
+    /// 앱 프레임은 그대로 두고 날씨만 한 장 더 — 비만 움직이는 동안 화면 전체를 다시 짓지 않는다.
+    /// 마지막 전체 프레임의 복사본이 없으면(창 크기가 바뀐 직후 등) 아무것도 안 한다.
+    pub(crate) fn render_weather_only(&mut self, f: crate::weather::gpu::Frame) -> Result<bool> {
+        let (w, h) = (self.config.width, self.config.height);
+        if !self.weather.as_ref().is_some_and(|wg| wg.has_frame(w, h) && wg.format() == self.config.format) {
+            return Ok(false);
+        }
+        #[cfg(target_os = "macos")]
+        apply_p3_via_hal(&self.surface);
+        let frame = self.surface.get_current_texture()?;
+        let view = frame.texture.create_view(&Default::default());
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("weather only") });
+        if let Some(wg) = self.weather.as_mut() {
+            wg.encode(&self.device, &self.queue, &mut encoder, &frame.texture, &view, &f, false);
+        }
+        self.queue.submit(Some(encoder.finish()));
+        frame.present();
+        Ok(true)
     }
 
     /// 지금 유효한 클립을 PHYSICAL px `[x, y, w, h]` 로. 클립이 없으면 `None`.
@@ -5498,6 +5535,13 @@ impl GpuRenderer {
                     runs
                 );
             }
+        }
+        if let Some(f) = self.weather_frame.take() {
+            if self.weather.as_ref().is_some_and(|wg| wg.format() != self.config.format) {
+                self.weather = None;
+            }
+            let wg = self.weather.get_or_insert_with(|| crate::weather::gpu::WeatherGpu::new(&self.device, self.config.format));
+            wg.encode(&self.device, &self.queue, &mut encoder, &frame.texture, &view, &f, true);
         }
         // Self-capture: copy the just-rendered frame into a buffer before
         // present, then read it back to a PNG. No OS screen-record permission

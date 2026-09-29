@@ -67,6 +67,7 @@ mod toast;
 mod themegen;
 mod transcript;
 mod webpane;
+mod weather;
 // settings.rs 가 `use super::*` 로 받는 자유함수들 — 모듈 경로를 UI 쪽에 흘리지
 // 않으려고 여기서 한 번 재수출한다.
 /// 폭에 맞춘 정보 밀도 — chrome 이 정의하지만 그 판정을 읽어 그리는 쪽(render·info)이
@@ -5718,6 +5719,8 @@ struct App {
     set_usage_compact: bool,
     /// 창 하단바 표시 순서·숨김·색·사용량 세부 항목. 프레임마다 파일을 읽지 않는다.
     set_statusbar: statusbar_config::Prefs,
+    /// 날씨(리퀴드 비) 설정·창별 덮어쓰기·시뮬레이션 — `weather/`.
+    weather: weather::WeatherState,
     /// 하단바에 **활성 계정 말고 나머지 슬롯의 한도까지** 세운다. 활성 하나만
     /// 보이면 「지금 계정이 찼을 때 어디로 옮기나」에 답하려고 매번 드롭다운을
     /// 열어야 하는데, 그 손이 아까워 안 열다가 다 찬 계정을 계속 쓴다
@@ -6298,6 +6301,7 @@ impl App {
             set_codex_account: socket::read_codex_account(),
             set_usage_compact: socket::read_usage_compact(),
             set_statusbar: statusbar_config::Prefs::from_settings(&socket::read_settings()),
+            weather: weather::WeatherState::with_settings(weather::WeatherState::load(socket::read_settings().get("weather"))),
             account_menu_provider: None,
             set_account_autoswitch: socket::read_account_autoswitch(),
             set_account_autoswitch_pct: socket::read_account_autoswitch_pct(),

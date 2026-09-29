@@ -96,6 +96,7 @@ pub(crate) fn text_button(
         },
     );
     g.hover_pointer |= hover;
+    g.note_control(rect, hover, style.enabled);
     rect
 }
 
@@ -128,6 +129,7 @@ pub(crate) fn icon_button(
         ink,
     );
     g.hover_pointer |= hover;
+    g.note_control(rect, hover, style.enabled);
     rect
 }
 
