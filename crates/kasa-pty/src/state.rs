@@ -2964,6 +2964,7 @@ fn build_update(
         || mode.contains(alacritty_terminal::term::TermMode::MOUSE_DRAG)
         || mode.contains(alacritty_terminal::term::TermMode::MOUSE_MOTION);
     let mouse_sgr = mode.contains(alacritty_terminal::term::TermMode::SGR_MOUSE);
+    let mouse_motion = mode.contains(alacritty_terminal::term::TermMode::MOUSE_MOTION);
     let app_cursor = mode.contains(alacritty_terminal::term::TermMode::APP_CURSOR);
     let bracketed_paste =
         mode.contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE);
@@ -2985,6 +2986,7 @@ fn build_update(
         alt_screen,
         mouse_enabled,
         mouse_sgr,
+        mouse_motion,
         app_cursor,
         bracketed_paste,
         title,

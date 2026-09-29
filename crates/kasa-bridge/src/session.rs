@@ -456,6 +456,7 @@ fn spawn_flusher(
                 alt_screen: snap.alt_screen,
                 mouse_enabled: snap.mouse_enabled,
                 mouse_sgr: snap.mouse_sgr,
+                mouse_motion: snap.mouse_motion,
                 // tmux/vt100 backend doesn't surface DECCKM; PTY backend
                 // (the default) does the real work via TermMode::APP_CURSOR.
                 app_cursor: false,
@@ -489,6 +490,7 @@ struct Snapshot {
     alt_screen: bool,
     mouse_enabled: bool,
     mouse_sgr: bool,
+    mouse_motion: bool,
     title: Option<String>,
 }
 
@@ -524,6 +526,7 @@ fn snapshot_screen(_pane_id: &str, parser: &vt100::Parser) -> Snapshot {
     use vt100::MouseProtocolMode;
     let mouse_enabled = !matches!(s.mouse_protocol_mode(), MouseProtocolMode::None);
     let mouse_sgr = matches!(s.mouse_protocol_encoding(), MouseProtocolEncoding::Sgr);
+    let mouse_motion = matches!(s.mouse_protocol_mode(), MouseProtocolMode::AnyMotion);
     Snapshot {
         rows: h,
         cols: w,
@@ -534,6 +537,7 @@ fn snapshot_screen(_pane_id: &str, parser: &vt100::Parser) -> Snapshot {
         alt_screen: s.alternate_screen(),
         mouse_enabled,
         mouse_sgr,
+        mouse_motion,
         title,
     }
 }

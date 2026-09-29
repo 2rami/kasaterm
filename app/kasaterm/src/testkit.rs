@@ -1565,6 +1565,100 @@ impl App {
         );
     }
 
+    /// `KASATERM_TUI_MOUSE_PROBE=1` — 마우스를 켠 TUI(Claude Code 와 같은 1000·1002·1003·1006)가
+    /// 활성 pane 에 뜨면, 진짜 창 이벤트로 가운데 칸 → 오른쪽 위 칸으로 움직이고 거기를 누른다.
+    /// 호버 이동과 클릭이 앱까지 가는지는 앱 쪽 기록으로, 화면은 `_CAP` 캡처로 본다.
+    pub(crate) fn run_tui_mouse_probe(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        static DONE: AtomicBool = AtomicBool::new(false);
+        static STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        if !crate::verification_run()
+            || std::env::var("KASATERM_TUI_MOUSE_PROBE").as_deref() != Ok("1")
+            || DONE.load(Ordering::Relaxed)
+        {
+            return;
+        }
+        let wait_ms: u128 = std::env::var("KASATERM_TUI_MOUSE_PROBE_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        if STARTED.get_or_init(Instant::now).elapsed().as_millis() < wait_ms {
+            return;
+        }
+        let Some(pane) = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone()) else { return };
+        let Some((cols, rows)) = self.ws.lock().ok().and_then(|ws| {
+            ws.panes.get(&pane).and_then(|p| p.term()).filter(|t| t.mouse_motion && t.mouse_sgr).map(|t| (t.cols, t.rows))
+        }) else {
+            return;
+        };
+        DONE.store(true, Ordering::Relaxed);
+        let Some(window) = self.window.clone() else { return };
+        let window_id = window.id();
+        let scale = self.effective_scale();
+        let (ww, wh) = (window.inner_size().width as f32 / scale, window.inner_size().height as f32 / scale);
+        // 칸 좌표는 pane 밖(제목줄 등)에서도 가장자리 칸으로 눌러 붙어 나온다 — 첫 일치를 쓰면
+        // 제목줄을 누르게 된다. 세로·가로 한 줄씩 훑어 그 칸으로 읽히는 구간의 가운데를 쓴다.
+        let find = |app: &Self, col: u16, row: u16| {
+            let middle = |hits: Vec<f32>, span: f32| {
+                let last = *hits.last()?;
+                let run: Vec<f32> = hits.into_iter().filter(|v| *v > last - span).collect();
+                run.get(run.len() / 2).copied()
+            };
+            let mut ys = Vec::new();
+            let mut y = 0.0;
+            while y < wh {
+                if app.px_to_pane_cell(ww / 2.0, y).is_some_and(|(p, _, r)| p == pane && r == row) {
+                    ys.push(y);
+                }
+                y += 1.0;
+            }
+            let y = middle(ys, app.cell.h)?;
+            let mut xs = Vec::new();
+            let mut x = 0.0;
+            while x < ww {
+                if app.px_to_pane_cell(x, y).is_some_and(|(p, c, _)| p == pane && c == col) {
+                    xs.push(x);
+                }
+                x += 1.0;
+            }
+            Some((middle(xs, app.cell.w)?, y))
+        };
+        let move_to = |app: &mut Self, point: (f32, f32)| {
+            app.window_event(event_loop, window_id, WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: winit::dpi::PhysicalPosition::new((point.0 * scale) as f64, (point.1 * scale) as f64),
+            });
+        };
+        // `_AT=열,행` 이면 그 칸에 호버만 한다(누르지 않는다) — 앱이 호버에 무엇을 그리는지 보는 용도.
+        let hover_only = std::env::var("KASATERM_TUI_MOUSE_PROBE_AT").ok().and_then(|spec| {
+            let (c, r) = spec.split_once(',')?;
+            Some((c.trim().parse::<u16>().ok()?, r.trim().parse::<u16>().ok()?))
+        });
+        let click_at = std::env::var("KASATERM_TUI_MOUSE_PROBE_CLICK").ok().and_then(|spec| {
+            let (c, r) = spec.split_once(',')?;
+            Some((c.trim().parse::<u16>().ok()?, r.trim().parse::<u16>().ok()?))
+        }).unwrap_or((cols.saturating_sub(2), 0));
+        let targets: Vec<(&str, u16, u16)> = match hover_only {
+            Some((col, row)) => vec![("at", col, row)],
+            None => vec![("middle", 9, 1), ("close", click_at.0, click_at.1)],
+        };
+        for (name, col, row) in targets {
+            let Some(point) = find(self, col, row) else {
+                eprintln!("[tui-mouse-probe] {name} ({col},{row}) 자리를 못 찾음");
+                continue;
+            };
+            move_to(self, point);
+            eprintln!("[tui-mouse-probe] move {name} ({col},{row}) px=({:.0},{:.0}) hover_hot={}", point.0, point.1, self.hover_is_hot());
+        }
+        if hover_only.is_none() {
+            for state in [ElementState::Pressed, ElementState::Released] {
+                self.window_event(event_loop, window_id, WindowEvent::MouseInput { device_id: DeviceId::dummy(), state, button: MouseButton::Left });
+            }
+            eprintln!("[tui-mouse-probe] click close ({},{}) cols={cols} rows={rows}", click_at.0, click_at.1);
+        }
+        if let Ok(path) = std::env::var("KASATERM_TUI_MOUSE_PROBE_CAP") {
+            self.pending_capture.push((Instant::now() + std::time::Duration::from_millis(1200), path));
+        }
+    }
+
     pub(crate) fn run_button_focus_probe(&mut self, event_loop: &ActiveEventLoop) {
         use crate::native_settings::Target;
         use std::sync::{OnceLock, atomic::{AtomicBool, Ordering}};

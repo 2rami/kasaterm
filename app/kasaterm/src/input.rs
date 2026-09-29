@@ -159,6 +159,34 @@ fn account_menu_capture_button(
     open
 }
 
+/// 마지막으로 호버 이동을 보낸 칸. `before` 는 보내기 직전의 모양, `hot` 은 앱이 호버에 반응해
+/// 바꿔 그린 모양(있으면 그 칸은 누를 수 있는 것).
+pub(crate) struct HoverProbe {
+    pane: String,
+    col: u16,
+    row: u16,
+    before: Option<GridCell>,
+    hot: Option<GridCell>,
+}
+
+/// 같은 글자인데 모양이 바뀌었으면 호버에 반응한 것. 모양이 그대로면 옆 칸에서 물려받은
+/// 반응만 이어 간다. 글자가 바뀐 것은 출력이 흘러간 것이라 반응으로 치지 않는다.
+fn next_hover_hot(before: Option<&GridCell>, now: Option<&GridCell>, hot: Option<&GridCell>) -> Option<GridCell> {
+    let (before, now) = (before?, now?);
+    if before.ch != now.ch {
+        return None;
+    }
+    if !same_look(before, now) {
+        return Some(now.clone());
+    }
+    hot.filter(|look| same_look(look, now)).cloned()
+}
+
+fn same_look(a: &GridCell, b: &GridCell) -> bool {
+    a.fg == b.fg && a.bg == b.bg && a.bold == b.bold && a.italic == b.italic && a.underline == b.underline
+        && a.inverse == b.inverse && a.dim == b.dim
+}
+
 impl App {
     pub(crate) fn discard_modal_ime(&mut self, ime: &Ime) {
         match ime {
@@ -772,6 +800,82 @@ impl App {
             .and_then(|p| p.term())
             .map(|t| t.mouse_enabled && t.mouse_sgr)
             .unwrap_or(false)
+    }
+    /// 버튼 없는 움직임을 받겠다고 한 TUI(DECSET 1003)인가. Claude Code 의 호버 효과는
+    /// 이 이동을 받아야 그려진다 — 누른 채 끌 때만 보내던 동안엔 ×·목록 위에 올려도 반응이 없었다.
+    pub(crate) fn pane_takes_hover(&self, pane_id: &str) -> bool {
+        if self.modifiers.shift_key() {
+            return false;
+        }
+        let ws = self.ws.lock().unwrap();
+        ws.panes
+            .get(pane_id)
+            .and_then(|p| p.term())
+            .map(|t| t.mouse_motion && t.mouse_sgr)
+            .unwrap_or(false)
+    }
+    /// 버튼을 안 누른 채 움직이다 칸이 바뀌면 SGR 이동(버튼 3 + 이동 32 = 35)을 보낸다.
+    /// 칸마다 한 번 — 픽셀마다 보내면 앱이 다시 그리기를 따라가지 못한다.
+    pub(crate) fn forward_hover(&mut self) {
+        let hit = self
+            .px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
+            .filter(|(pane, _, _)| self.pane_takes_hover(pane));
+        let same = match (&hit, &self.hover_probe) {
+            (Some((pane, col, row)), Some(probe)) => probe.pane == *pane && probe.col == *col && probe.row == *row,
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        let carried = self.hover_probe.take().and_then(|probe| probe.hot);
+        let Some((pane, col, row)) = hit else { return };
+        let before = self.hover_cell(&pane, col, row);
+        // 이미 밝혀진 요소 안에서 옆 칸으로 옮긴 것 — 앱은 다시 그릴 게 없으니 그대로 누를 수 있는 것이다.
+        let hot = carried.filter(|look| before.as_ref().is_some_and(|cell| same_look(cell, look)));
+        self.send_mouse_sgr(&pane, 35, col, row, true);
+        self.hover_probe = Some(HoverProbe { pane, col, row, before, hot });
+    }
+    fn hover_cell(&self, pane: &str, col: u16, row: u16) -> Option<GridCell> {
+        let ws = self.ws.lock().ok()?;
+        ws.panes.get(pane)?.term()?.cells.get(row as usize)?.get(col as usize).cloned()
+    }
+    pub(crate) fn hover_is_hot(&self) -> bool {
+        self.hover_probe.as_ref().is_some_and(|probe| probe.hot.is_some())
+    }
+    /// 호버를 보낸 칸을 앱이 다시 그렸나 본다. 같은 글자인데 모양이 바뀌었으면 누를 수 있는 것 —
+    /// Claude Code 는 포인터 모양 신호(OSC 22)를 안 보내서, 호버에 반응한 칸만이 단서다.
+    pub(crate) fn refresh_hover_pointer(&mut self) {
+        if self.mouse_forward_pane.is_some() || self.drag_anchor.is_some() {
+            return;
+        }
+        let Some(probe) = self.hover_probe.as_ref() else { return };
+        let now = self.hover_cell(&probe.pane, probe.col, probe.row);
+        let hot = next_hover_hot(probe.before.as_ref(), now.as_ref(), probe.hot.as_ref());
+        if hot.is_some() == probe.hot.is_some() {
+            if let Some(probe) = self.hover_probe.as_mut() {
+                probe.hot = hot;
+            }
+            return;
+        }
+        let pointer = hot.is_some();
+        if std::env::var_os("KASATERM_HOVER_DEBUG").is_some() {
+            eprintln!("[hover] {} ({},{}) pointer={pointer}", probe.pane, probe.col, probe.row);
+        }
+        if let Some(probe) = self.hover_probe.as_mut() {
+            probe.hot = hot;
+        }
+        let icon = if pointer {
+            winit::window::CursorIcon::Pointer
+        } else if self.mouse_cursor == "ibeam" && self.over_terminal_text(self.cursor_px.0, self.cursor_px.1) {
+            winit::window::CursorIcon::Text
+        } else {
+            winit::window::CursorIcon::Default
+        };
+        self.text_cursor_shown = matches!(icon, winit::window::CursorIcon::Text);
+        if let Some(window) = self.window.as_ref() {
+            window.set_cursor(icon);
+        }
     }
     /// True if the pane shows a terminal (vs a markdown / image document
     /// view). Document panes are scrolled with the wheel, not dragged —
@@ -5850,5 +5954,26 @@ mod word_span_tests {
         let r = row("a (b)");
         assert_eq!(App::word_span(&r, 1), (1, 1));
         assert_eq!(App::word_span(&r, 2), (2, 2));
+    }
+}
+
+#[cfg(test)]
+mod hover_pointer_tests {
+    use super::*;
+
+    fn cell(ch: char, bold: bool) -> GridCell {
+        GridCell { ch, bold, ..GridCell::blank() }
+    }
+
+    #[test]
+    fn only_a_redraw_of_the_same_glyph_marks_it_clickable() {
+        let plain = cell('×', false);
+        let lit = cell('×', true);
+        assert_eq!(next_hover_hot(Some(&plain), Some(&lit), None), Some(lit.clone()), "호버에 밝아진 ×");
+        assert_eq!(next_hover_hot(Some(&plain), Some(&plain), None), None, "반응 없는 칸");
+        assert_eq!(next_hover_hot(Some(&plain), Some(&cell('a', true)), None), None, "출력이 흘러 바뀐 글자");
+        assert_eq!(next_hover_hot(Some(&lit), Some(&lit), Some(&lit)), Some(lit.clone()), "밝혀진 요소 안에서 옆 칸");
+        assert_eq!(next_hover_hot(Some(&plain), Some(&plain), Some(&lit)), None, "요소를 벗어나 다시 평범해짐");
+        assert_eq!(next_hover_hot(None, Some(&lit), None), None);
     }
 }

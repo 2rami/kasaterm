@@ -4010,6 +4010,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     window.request_redraw();
                 } else {
+                    self.forward_hover();
                     // Hover feedback: show a resize cursor over a seam or the
                     // sidebar's right edge so they read as draggable.
                     let (cx, cy) = self.cursor_px;
@@ -4114,6 +4115,12 @@ impl ApplicationHandler<UserEvent> for App {
                     let icon = if matches!(icon, CursorIcon::Default)
                         && self.gpu.as_ref().is_some_and(|g| g.hover_pointer)
                     {
+                        CursorIcon::Pointer
+                    } else {
+                        icon
+                    };
+                    // 마우스를 켠 TUI 가 호버에 반응해 바꿔 그린 칸 — 누를 수 있는 것.
+                    let icon = if matches!(icon, CursorIcon::Default) && self.hover_is_hot() {
                         CursorIcon::Pointer
                     } else {
                         icon
@@ -7970,6 +7977,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autolonestash();
         self.run_pending_autohitaudit();
         self.run_button_focus_probe(event_loop);
+        self.run_tui_mouse_probe(event_loop);
+        self.refresh_hover_pointer();
         self.run_pending_autoghost();
         self.run_pending_autotoast();
         self.run_pending_autoview();
@@ -8668,6 +8677,7 @@ mod ime_focus_tests {
             alt_screen: false,
             mouse_enabled: false,
             mouse_sgr: false,
+            mouse_motion: false,
             app_cursor: false,
             bracketed_paste: false,
             title: None,

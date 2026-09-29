@@ -260,6 +260,7 @@ impl App {
         tp.inline_images = update.inline_images;
         tp.mouse_enabled = update.mouse_enabled;
         tp.mouse_sgr = update.mouse_sgr;
+        tp.mouse_motion = update.mouse_motion;
         tp.app_cursor = update.app_cursor;
         tp.bracketed_paste = update.bracketed_paste;
         // Carry the OSC 133 prompt-end mark only on frames that
@@ -8227,6 +8228,7 @@ impl App {
                 alt_screen,
                 mouse_enabled,
                 mouse_sgr,
+                mouse_motion,
                 title,
                 ..
             }) = screens.recv()
@@ -8293,6 +8295,7 @@ impl App {
                 tp.alt_screen = alt_screen;
                 tp.mouse_enabled = mouse_enabled;
                 tp.mouse_sgr = mouse_sgr;
+                tp.mouse_motion = mouse_motion;
                 let new_title = title.filter(|t| !t.is_empty());
                 // Pinned panes (renamed via surface.rename / run_job) ignore
                 // OSC titles so the agent-set label stays put.

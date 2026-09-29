@@ -1729,6 +1729,7 @@ struct TerminalPane {
     alt_screen: bool,
     mouse_enabled: bool,
     mouse_sgr: bool,
+    mouse_motion: bool,
     /// DECCKM (application cursor keys). When true, plain arrows go out
     /// as SS3 (`ESC O A`) instead of CSI (`ESC [ A`) so claude code /
     /// vim line navigation works. See the arrow-key send path.
@@ -5383,6 +5384,8 @@ struct App {
     /// no mouse-reporting drag is active; selection logic owns the
     /// pointer.
     mouse_forward_pane: Option<String>,
+    /// 마지막으로 호버 이동을 보낸 칸과, 그 칸이 호버에 반응했는지(손가락 커서 판정).
+    hover_probe: Option<crate::input::HoverProbe>,
     /// Last left-click timestamp + position. Used only for the
     /// title-strip double-click → window-zoom shortcut. macOS handles
     /// this for us when the OS owns the titlebar, but our
@@ -6144,6 +6147,7 @@ impl App {
             last_resized_cells: (0, 0),
             pending_resize: None,
             mouse_forward_pane: None,
+            hover_probe: None,
             last_left_click: None,
             cell_click: None,
             last_tree_click: None,

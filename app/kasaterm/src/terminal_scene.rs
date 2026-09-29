@@ -947,7 +947,7 @@ impl App {
                 cells: view.rows.clone(), cursor_row: cursor.0 as u16, cursor_col: cursor.1 as u16,
                 cursor_visible: source.cursor_visible && view.cursor.is_some(),
                 alt_screen: source.alt_screen, mouse_enabled: source.mouse_enabled,
-                mouse_sgr: source.mouse_sgr, app_cursor: source.app_cursor,
+                mouse_sgr: source.mouse_sgr, mouse_motion: source.mouse_motion, app_cursor: source.app_cursor,
                 bracketed_paste: source.bracketed_paste, scroll_offset: source.scroll_offset,
                 prompt_end: source.prompt_end.and_then(|(r,c)| map_position(r as usize,c as usize)),
                 inline_images: source.inline_images.iter().filter_map(|image| {

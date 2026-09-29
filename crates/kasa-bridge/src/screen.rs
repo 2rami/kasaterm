@@ -107,6 +107,10 @@ pub struct ScreenUpdate {
     /// this we'd have to fall back to the legacy X10 encoding which
     /// claude doesn't parse reliably.
     pub mouse_sgr: bool,
+    /// DECSET 1003(any-event) — 버튼을 안 눌러도 움직임을 알려 달라는 앱. 호스트는 이때만
+    /// 호버 이동을 보낸다. 1000·1002 만 켠 앱에 이동을 흘리면 받을 준비가 없는 입력이 된다.
+    #[serde(default)]
+    pub mouse_motion: bool,
     /// True when the inner app enabled DECCKM (application cursor keys,
     /// DECSET 1). In this mode plain arrow keys must be sent as SS3
     /// (`ESC O A`) not CSI (`ESC [ A`) — claude code / vim / readline
