@@ -95,7 +95,7 @@ fn run() -> Result<Option<Response>> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(target) = parse_api_target(&mut args)? { let _ = API_TARGET.set(target); }
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
-        print_help();
+        print_help(args.get(1).is_some_and(|a| a == "all"));
         return Ok(None);
     }
     let cmd = args.remove(0);
@@ -1521,6 +1521,13 @@ fn render_where(resp: &Response, query: &str, me: Option<&str>) -> String {
         }
         if q.is_empty() {
             out.push(head);
+            let rects: Vec<(String, u16, u16, u16, u16)> = room["cells"].as_array().unwrap_or(&empty).iter()
+                .filter_map(|c| Some((c["cell"].as_str()?.to_string(), c["x"].as_u64()? as u16, c["y"].as_u64()? as u16,
+                    c["w"].as_u64()? as u16, c["h"].as_u64()? as u16)))
+                .collect();
+            if !rects.is_empty() {
+                out.extend(draw_boxes(&rects).lines().map(|l| format!("  {l}")));
+            }
             out.extend(lines);
         }
     }
@@ -1724,109 +1731,97 @@ fn run_share(args: &[String]) -> Result<Option<Response>> {
     Ok(None)
 }
 
-fn print_help() {
-    eprintln!("cmux-compatible JSON-RPC CLI for kasaterm / agent-socket\n");
-    eprintln!("Usage:");
-    eprintln!("  kasaterm-cli ping");
-    eprintln!("  kasaterm-cli capabilities");
-    eprintln!("  kasaterm-cli identify");
-    eprintln!("  kasaterm-cli list <workspaces|surfaces>");
-    eprintln!("  kasaterm-cli focus <surface_id>");
-    eprintln!("  kasaterm-cli close <surface_id>");
-    eprintln!(
-        "  kasaterm-cli dismiss <surface_id>… [--force]  # 일 끝난 캐릭터 pane 닫기(커밋 안 된 변경이 있으면 안 닫고 보고)
-  kasaterm-cli closed [%pane]                # 되살리기 목록(닫아도 안 죽은 pane 들). %pane 을 주면 그것만 진짜 끈다"
-    );
-    eprintln!("  kasaterm-cli rename <surface_id> <title>");
-    eprintln!("  kasaterm-cli rename-window <title>          # 이 pane 의 세션 이름");
-    eprintln!("  kasaterm-cli color <surface_id> <#rrggbb>");
-    eprintln!(
-        "  kasaterm-cli human <명령…>                 # 사람이 쳐야 하는 명령(sudo·로그인)을 아래 pane 에 넣고 포커스를 넘긴다 — 사람은 비밀번호만"
-    );
-    eprintln!(
-        "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N] [--host-ratio 0.6]  # 기본 no-focus·이 pane 을 쪼갬. --count N 은 한 번에 N 명 — 방 전체가 크기가 같은 격자로 다시 짜이고 N 명이 부른 쪽 옆에 붙는다. 칸이 80칸×16줄 밑이 되면 나머지는 부른 쪽의 탭으로"
-    );
-    eprintln!("  kasaterm-cli window-new [--machine <기계>]  # 새 창. --machine 이면 그 기계에 새 방을 만들고 여기 보기 창으로 연다
-  kasaterm-cli split <방향> %N@<기계> | tab %N@<기계>   # 그 기계의 그 pane 옆/탭에 세운다(축은 저쪽이 고름, --cwd 가능)
-  kasaterm-cli open  <url> [%surface]        # URL 을 사람이 보는 브라우저로 — 어느 기기로 갈지는 사람이 하단바·폰 허브 「브라우저 기기」에서 고른다(폰이면 쪽지+알림). 네가 기기를 바꾸지 마라
-  kasaterm-cli web   <url> [%surface]        # URL 을 그 pane 옆 웹(브라우저) pane 으로 (기본: 이 pane 옆)
-  kasaterm-cli web-text  [%surface]          # 웹 pane 본문 읽기 (innerText). %surface 생략 = 웹 pane 이 하나일 때
-  kasaterm-cli web-eval  '<js>' [%surface]   # 웹 pane 에서 JS 실행, 결과를 JSON 으로 (클릭·입력·검사 전부 이것으로)
-  kasaterm-cli web-shot  </abs/x.png> [%surface]  # 웹 pane 스크린샷을 파일로 (창에 이미지 안 실림)
-  kasaterm-cli web-url   [%surface]          # 웹 pane 의 현재 주소
-  kasaterm-cli promote <%surface>            # 도는 pane 을 로컬 상주 데몬으로 무중단 승격 — 앱을 굽고 껐다 켜도 그 캐릭터는 안 죽는다
-  kasaterm-cli server --surface <%pane> [--cwd <dir>] [--name <label>] [--register-only] '<command>'
-                                            # 로컬 서버 실행·복원 등록. 명령은 인자 하나로 인용하며 비밀값을 넣지 않는다
-  kasaterm-cli server --surface <%pane> --clear # 실행 중인 서버는 유지하고 복원 등록만 해제
-  kasaterm-cli migrate [%surface] <기계이름|http://호스트:포트|local> [--cwd /레포] [--force]  # pane 의 claude 를 그 기계로 이사(대화·미커밋 변경까지 운반+같은 자리 재개). 기계이름(예: 맥미니)이면 주소·경로를 명부(machines.json)에서 알아서 정한다. %surface 를 빼면 **이 명령을 친 pane 자신**이 간다 — 학생이 자기 이사를 신청하는 길. `local` 이면 역이사: 원격 pane 을 이 기계로 데려온다
-  kasaterm-cli unfold <라벨>                  # 기계의 캐릭터 pane 전부를 거울로 펼침
-  kasaterm-cli machines [--names]             # 명부 기계 목록 — `to` 셰임의 ls. 이 pane 이 거울이면 그 기계 줄에 *. --names 는 라벨만(탭 완성용)
-  kasaterm-cli net forward <기기> <port> [--local L]  # 그 기기의 127.0.0.1:port 를 이 기기 http://localhost:L 로(카사넷 직통, 아니면 ssh 길). L 을 빼면 같은 번호, 쓰이면 빈 번호
-  kasaterm-cli net list                        # 끌어오는 포트 목록(길·연결 수)
-  kasaterm-cli net stop <L>                    # localhost:L 끌어오기 닫기
-  kasaterm-cli home                           # 명부의 본진(home:true) 기계 — 살아 있으면 라벨만 출력(종료 0)·미설정은 조용히 1·설정됐는데 안 닿으면 3. 셰임의 순정 claude 디스패치용
-  kasaterm-cli remote <http://호스트:포트> [--cwd /원격/경로] [--attach web-id] [%surface]  # 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 앱을 꺼도 원격 셸은 산다
-  kasaterm-cli tab   [%surface] [--focus]    # 새 탭 생성. 부팅 후 board --all에서 실행·신원 확인 → 최신 address 전체로 tell --address. --focus만 앞으로
-  kasaterm-cli move  <surface> <target> [left|right|up|down]  # 대상이 다른 창이면 창을 건너뛴다(PTY 유지)
-  kasaterm-cli swap  <surface_a> <surface_b>");
-    eprintln!("  kasaterm-cli resize <surface_id> <ratio>   # 직계 split 에서 차지 비중 0..1 (오케스트레이터 크게)");
-    eprintln!("  kasaterm-cli send  <text>");
-    eprintln!("  kasaterm-cli send  --surface <id> <text>");
-    eprintln!("  kasaterm-cli key   [--surface <id>] <enter|tab|escape|up|down|left|right|...>  # 특정 pane에 키/선택");
-    eprintln!("  kasaterm-cli tell <이름 | 이름@기계 | %surface | --address JSON> <text>  # 이름만 치면 보드에서 주소를 찾는다; 영수증 ID 를 돌려준다");
-    eprintln!("  kasaterm-cli tell … --title \"지금 일\" <text>                 # 새 일을 맡길 때 — 전달되면 받는 창 이름(사이드바·창 머리·관측)이 이것으로 바뀐다");
-    eprintln!("  kasaterm-cli tell-status ID [--address JSON]                  # 이 기계에서 보낸 ID 는 주소 없이 조회된다");
-    eprintln!("  kasaterm-cli board [screen_lines]         # what every pane is doing (+ screen tail if N given)");
-    eprintln!("  kasaterm-cli [--api BASE] rooms           # 기기·방별 상태. 연락 주소는 board --all의 address 전체 사용");
-    eprintln!("  kasaterm-cli board-watch [interval_s]     # stream changed pane status (1 line/change) — feed a Claude Code Monitor");
-    eprintln!("  kasaterm-cli [--api BASE] board --all|--local");
-    eprintln!("  kasaterm-cli [--api BASE] board-watch --all --json [--since CURSOR]");
-    eprintln!("  kasaterm-cli [--api BASE] activity --address '<JSON>' [limit]");
-    eprintln!("  --api-token-file FILE may precede the command to reuse an existing API token");
-    eprintln!("  kasaterm-cli summon [--cwd 폴더] [--tab] [--name 제목] [--cmd 부팅명령] <브리프 | --stdin>  # 학생 하나를 옆에 세워 브리프까지 — 서브에이전트 대신. done 보고는 이 창 입력으로 온다");
-    eprintln!("  kasaterm-cli wait <이름|%N|이름@기계>… [--since ms|tell영수증] [--timeout 초]  # 그 학생들이 done 보고할 때까지 막고 기다림(백그라운드로 돌리면 끝날 때 깨운다). 종료 0 성공·1 실패·3 시간초과·4 사라짐");
-    eprintln!(
-        "  kasaterm-cli layout                       # where each pane sits (active window, %)"
-    );
-    eprintln!("  kasaterm-cli where [찾을 말] [--json]       # 방·행·열·탭으로 어디 있나 — 학생 이름·%N·제목·웹 주소·문서 경로로 찾는다. 격자가 다시 짜이고 웹·문서는 탭으로 열리니 번호 대신 이걸로");
-    eprintln!(
-        "  kasaterm-cli windows                      # every window (sidebar order) + its panes"
-    );
-    eprintln!("  kasaterm-cli copy  <텍스트>                # 클립보드에 넣는다 — 사람이 Cmd+V 로 쓴다
-  kasaterm-cli copy  --surface <id> [줄수]   # 그 pane 의 보이는 화면을 클립보드로(기본 200줄)
-  kasaterm-cli copy  --secret                # 표준입력의 값을 비밀로 — 목록·토스트·폰에 가려 보인다(ps·기록에 안 남는다)
-  kasaterm-cli paste                         # 지금 클립보드에 담긴 글 읽기 — 비밀값이면 거부한다(--show 로 강제)
-  kasaterm-cli paste --into [%surface]       # 클립보드를 그 pane 에 붙여넣는다 — 값을 안 보고 넘기는 길(기본 이 pane)
-  kasaterm-cli paste --env <VAR> -- <명령…>   # 클립보드를 환경변수로 준 채 명령을 돈다 — 키를 대화에 안 찍는 길
-  kasaterm-cli clips                         # 최근 복사 목록(하단바 「최근 복사」와 같다, 비밀은 가림)
-  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen
-  kasaterm-cli capture [surface_id] [path] [--max-width N]
-                                            # screenshot ONE pane to PNG (peek's picture twin)
-  kasaterm-cli capture --window [path] [--max-width N]
-                                            # the WHOLE window incl. sidebar/tabs/columns (main window only)");
-    eprintln!("  kasaterm-cli transcript [surface_id] [N]  # last N turns (prompts+replies) of a pane's claude");
-    eprintln!("  kasaterm-cli activity [surface_id] [N]    # 그 pane 이 실제로 한 일 — 도구·인자·결과를 시간순으로 (왜 저러나)");
-    eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
-    eprintln!("  kasaterm-cli notify [--surface <id>] <title> [body]  # fire a work-complete notification (Stop hook)");
-    eprintln!("  kasaterm-cli attention [--surface <id>] [reason]     # flag a pane blocked on a permission/input prompt (Notification hook)");
-    eprintln!("  kasaterm-cli done [--surface <id>] <succeeded|failed> [한 줄 요약]  # 브리프 완료 보고 — board 가 idle 추정 대신 이걸 정본으로 싣는다");
-    eprintln!("  kasaterm-cli login [<아이디>]                     # 관문 계정으로 이 기기를 붙인다(비밀번호는 화면에 안 찍힌다)");
-    eprintln!("  kasaterm-cli logout | devices [status | revoke <device_id>]");
-    eprintln!("  kasaterm-cli agents                               # 다른 기기에 로그인된 Claude·Codex 계정 목록");
-    eprintln!("  kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> --summary <글> [--changed <파일,…>]… [--tests <글>] [--next <글>] [--dry-run]");
-    eprintln!("                                            # 나쵸가 띄운 학생(KASATERM_ORIGIN=nacho)만. 나쵸 인박스에 원자적으로 넣고 살아 있으면 즉시 깨운다. 토큰·비밀은 거부");
-    eprintln!("  app-update run --approval ap_… --rollout FILE [--record FILE] · start --machine ID --request FILE|- · status JOB [--machine ID] # 기기 앱 업데이트(공식 릴리스만·나쵸 승인 1회·차례로·조종 기기 마지막·기기 스위치 KASATERM_APP_UPDATE=on)");
-    eprintln!("  app-restart plan [--machine ID]… [--json] # 등록된 기기의 앱 재시작 계획(읽기만). run --approval ap_… 는 나쵸 승인을 서버에서 한 번 소비한 뒤 한 대씩 · status JOB");
-    eprintln!("  kasaterm-cli agent-status <start|end|clear> <subagent|background> [key] [라벨]  # 진행 표시 정본(PreToolUse/PostToolUse 훅)");
-    eprintln!("  kasaterm-cli share path|new <주제>|status|accept-deletes  # KASA-share 결과물 폴더. new 는 <날짜>-<주제>/ 를 만들고 경로를 찍는다");
-    eprintln!("  kasaterm-cli pet-say [--from <곳>] [--state busy|wait|error] <문안>  # 바탕화면 펫에게 한 줄(앱이 꺼져 있어도 쌓인다)");
-    eprintln!("  kasaterm-cli sessions [N]                 # 최근 claude 세션 목록(캐릭터색·캐릭터명, /resume 이 숨기는 팀 세션 포함)");
-    eprintln!("  kasaterm-cli resume [N]                   # 위 목록에서 번호로 골라 그 자리에서 claude --resume");
-    eprintln!("  kasaterm-cli rename [sid|sid8] <이름>     # 세션 제목 변경(teammate 세션 /rename 차단 우회, sid 생략=이 pane)");
-    eprintln!();
-    eprintln!(
-        "Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default (Unix /tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)"
-    );
+fn print_help(all: bool) {
+    // 용도별로 묶는다 — 명령이 60개를 넘자 한 줄 목록에서는 무엇을 써야 할지 못 찾았다(2026-09-29 「cli 좀
+    // 정리해봐」). 훅·내부·옛 이름은 `help all` 에만 싣는다. 옛 이름도 그대로 동작한다.
+    let groups: &[(&str, &[&str])] = &[
+        ("보기 — 누가 무엇을 하나, 어디 있나", &[
+            "where [찾을 말] [--json]                  방마다 칸 배치도 + 칸·탭 목록. 학생 이름·%N·제목·웹 주소·문서 경로로 찾는다",
+            "board [--all|--local]                     학생 상태. 연락 주소(address)는 --all 에서",
+            "board-watch --all --json [--since CURSOR] 바뀐 것만 흘려보낸다(Monitor 용)",
+            "rooms                                     기기·방별 상태 요약",
+            "peek [%N] [줄수]                          pane 화면 글자",
+            "capture [%N] [경로] | --window [경로]      pane 또는 창 전체 스크린샷",
+            "transcript [%N] [N]                       claude 최근 대화 N 턴",
+            "activity [%N | --address JSON] [N]        실제로 한 도구·인자·결과(시간순)",
+        ]),
+        ("학생·협업", &[
+            "tell <이름|이름@기계|%N|--address JSON> [--title \"지금 일\"] <글|--stdin>   안전 전달, 영수증 ID 를 준다. 새 일이면 --title",
+            "tell-status ID                            전달 영수증 조회",
+            "summon [--cwd 폴더] [--tab] [--name 제목] <브리프|--stdin>   학생을 옆에 세우고 브리프까지",
+            "wait <이름|%N>… [--since ms|영수증] [--timeout 초]   done 보고까지 기다린다(0 성공·1 실패·3 시간초과·4 사라짐)",
+            "done <succeeded|failed> [요약]            내 일 완료 보고",
+            "nacho-report --status <done|blocked|needs_restart|needs_approval> --summary <글> [--changed …] [--tests …] [--next …]",
+            "                                          나쵸가 띄운 학생의 보고(토큰·비밀은 거부)",
+            "dismiss %N… [--force]                     일 끝난 학생 창 닫기(미커밋 변경이 있으면 안 닫는다)",
+            "sessions [N] · resume [N]                 최근 claude 세션 목록 · 번호로 그 자리에서 이어가기",
+            "pet-say [--from 곳] [--state busy|wait|error] <문안>   바탕화면 펫에게 한 줄",
+        ]),
+        ("창·칸 조작", &[
+            "split <left|right|up|down> [%N] [--focus] [--count N]   칸 나누기 — 방 전체가 같은 크기 격자로 다시 짜인다",
+            "tab [%N] [--focus]                        그 칸에 새 탭",
+            "window-new [--machine 기계]               새 방(그 기계에 만들고 여기서 보기)",
+            "move %N <대상> [방향] · swap %A %B · resize %N <0..1>",
+            "focus %N · close %N · closed [%N]         포커스 · 닫기 · 되살리기 목록(%N 을 주면 진짜 끈다)",
+            "rename %N <제목>                          창 이름(고정 — claude 가 붙이는 제목이 못 덮는다)",
+            "rename-window <이름> · rename [세션id] <이름>   방 이름 · claude 세션 제목",
+            "color %N <#rrggbb>",
+            "send [--surface %N] <글> · key [--surface %N] <enter|tab|escape|up|…>",
+            "human <명령…>                             사람이 쳐야 하는 명령(sudo·로그인)을 아래 칸에 넣고 포커스를 넘긴다",
+        ]),
+        ("웹·브라우저", &[
+            "web <url> [%N]                            연 칸의 탭으로 웹 pane",
+            "web-text · web-url · web-eval '<js>' · web-shot <경로>   [%N] 웹 pane 읽기·실행·스크린샷",
+            "open <url>                                사람이 보는 브라우저로(어느 기기인지는 사람이 고른다)",
+        ]),
+        ("클립보드·결과물", &[
+            "copy <글> | copy --surface %N [줄수] | copy --secret(표준입력)   클립보드에 넣기",
+            "paste [--show] | paste --into [%N] | paste --env VAR -- <명령…>   읽기 · 값을 안 보고 붙이기 · 환경변수로",
+            "clips                                     최근 복사 목록(비밀은 가림)",
+            "share path | new <주제> | status          KASA-share 결과물 폴더(new 는 경로를 찍는다)",
+        ]),
+        ("기기·계정·네트워크", &[
+            "machines [--names] · home                 명부 기계 목록 · 본진 기계",
+            "split <방향> %N@기계 · tab %N@기계        다른 기기 칸 옆·탭에 세우기",
+            "migrate [%N] <기계|local> [--cwd /레포] [--force]   claude 를 그 기계로 이사(대화·미커밋 변경까지)",
+            "unfold <라벨>                             그 기계의 학생 칸을 전부 거울로 펼치기",
+            "net forward <기기> <port> [--local L] · net list · net stop <L>   다른 기기 포트 끌어오기",
+            "login [아이디] · logout · devices [status | revoke ID] · agents(다른 기기의 Claude·Codex 계정)",
+            "server --surface %N [--cwd 폴더] [--name 라벨] '<명령>' | --clear   로컬 서버 실행·복원 등록(비밀값 금지)",
+        ]),
+        ("앱", &[
+            "app-update run|start|status …            기기 앱 업데이트(공식 릴리스·나쵸 승인)",
+            "app-restart plan|run|status …            기기 앱 재시작 계획·실행",
+        ]),
+    ];
+    let hidden: &[(&str, &[&str])] = &[
+        ("훅·내부 (사람이 칠 일 없음)", &[
+            "bind-transcript <path> · notify [--surface %N] <제목> [본문] · attention [--surface %N] [사유]",
+            "agent-status <start|end|clear> <subagent|background> [key] [라벨]",
+            "ping · capabilities · identify · list <workspaces|surfaces>",
+        ]),
+        ("옛 이름 (where 로 합쳤다 — 아직 동작한다)", &[
+            "layout                                    보는 방 배치도",
+            "windows                                   모든 방 배치도",
+        ]),
+        ("잘 안 쓰는 것", &[
+            "promote %N                                pane 을 상주 데몬으로 승격",
+            "remote <http://호스트:포트> [--cwd] [--attach id] [%N]   원격 PTY 호스트의 셸을 pane 으로",
+        ]),
+    ];
+    eprintln!("kasaterm-cli — 카사텀 조작 CLI. 대상은 %N(칸 번호)이나 학생 이름.\n");
+    for (title, lines) in groups.iter().chain(if all { hidden.iter() } else { [].iter() }) {
+        eprintln!("{title}");
+        for line in lines.iter() {
+            eprintln!("  {line}");
+        }
+        eprintln!();
+    }
+    eprintln!("앞에 붙이는 것: --api BASE [--api-token-file FILE] — 다른 기기 HTTP 로 보낸다");
+    eprintln!("소켓: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > 기본(/tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)");
+    if !all {
+        eprintln!("훅·옛 이름까지: kasaterm-cli help all");
+    }
 }
 
 /// `--flag 값` 꼴의 값.
@@ -4362,13 +4357,14 @@ mod tests {
     fn where_lists_cells_and_tabs_and_finds_by_any_name() {
         let resp: super::Response = serde_json::from_value(serde_json::json!({"id":"t","ok":true,"result":{"rooms":[
             {"window":0,"label":"kasaterm","active":true,"cells":[
-                {"cell":"%1","row":1,"col":1,"tabs":[
+                {"cell":"%1","row":1,"col":1,"x":0,"y":0,"w":50,"h":100,"tabs":[
                     {"n":1,"active":false,"kind":"terminal","surface":"%1","character":"유우카","title":"미러링"},
                     {"n":2,"active":true,"kind":"web","title":"Example","url":"https://example.com"}]},
-                {"cell":"%4","row":1,"col":2,"tabs":[{"n":1,"active":true,"kind":"terminal","surface":"%4","character":"시로코"}]}]}]}}))
+                {"cell":"%4","row":1,"col":2,"x":50,"y":0,"w":50,"h":100,"tabs":[{"n":1,"active":true,"kind":"terminal","surface":"%4","character":"시로코"}]}]}]}}))
             .unwrap();
         let all = super::render_where(&resp, "", Some("%4"));
         assert!(all.starts_with("방 1 「kasaterm」 (보는 중)"), "{all}");
+        assert!(all.contains("┌") && all.contains("%4"), "방마다 배치도를 먼저 그린다: {all}");
         assert!(all.contains("1행 1열(%1) · 탭 1/2(뒤) · 터미널 %1 · 유우카 · 미러링"), "{all}");
         assert!(all.contains("1행 2열(%4) · 터미널 %4 · 시로코  ← 나"), "{all}");
         let web = super::render_where(&resp, "example", None);
