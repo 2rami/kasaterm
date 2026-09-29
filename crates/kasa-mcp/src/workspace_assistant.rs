@@ -316,15 +316,47 @@ pub struct Notification {
     pub goal: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteStudent {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub latest: String,
+    #[serde(default)]
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteInput {
+    pub message: String,
+    pub students: Vec<RouteStudent>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RouteAdvice {
+    pub probabilities: BTreeMap<String, f64>,
+    pub latency_ms: u64,
+}
+
+const ROUTE_PER_MINUTE: u32 = 90;
+
 pub struct Store {
     vault: vault::Vault,
     accounts: Mutex<BTreeMap<String, Account>>,
+    /// Routing asks while the owner types, so it gets its own per-minute budget in memory
+    /// instead of spending the persisted hourly decision rate.
+    route_rate: Mutex<BTreeMap<String, (u64, u32)>>,
 }
 impl Store {
     pub fn open(directory: PathBuf) -> Result<Self> {
         Ok(Self {
             vault: vault::Vault::open(directory)?,
             accounts: Mutex::new(BTreeMap::new()),
+            route_rate: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -775,6 +807,54 @@ impl Store {
             .insert(task.id.clone(), StoredTask::from(&task));
         self.save(ctx, &mut account, &mut accounts)?;
         Ok(task)
+    }
+
+    /// Advisory routing for a message being typed. Nothing is stored and nothing is sent;
+    /// the desktop shows the probabilities and the owner decides.
+    pub fn route(
+        &self,
+        ctx: &AuthContext,
+        input: &RouteInput,
+        adapter: &JevAdapter,
+        now: u64,
+        authorized: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<RouteAdvice> {
+        let (request, choices) = jev::route_request(input)?;
+        {
+            let mut rates = self.route_rate.lock().map_err(|_| Error::Storage)?;
+            let minute = now / 60;
+            let entry = rates.entry(ctx.account.clone()).or_insert((minute, 0));
+            if entry.0 != minute {
+                *entry = (minute, 0);
+            }
+            if entry.1 >= ROUTE_PER_MINUTE {
+                return Err(Error::RateLimited);
+            }
+            entry.1 += 1;
+        }
+        let mut key = {
+            let mut accounts = self.accounts.lock().map_err(|_| Error::Storage)?;
+            let account = self.account(ctx, &mut accounts)?;
+            account.key.value.clone().ok_or(Error::Disabled)?
+        };
+        if !authorized() {
+            key.clear();
+            return Err(Error::Stale);
+        }
+        let started = std::time::Instant::now();
+        let advice = adapter.choose(&request, &key);
+        key.clear();
+        let advice = advice?;
+        if !authorized() {
+            return Err(Error::Stale);
+        }
+        if !advice.valid(&choices) {
+            return Err(Error::Unavailable);
+        }
+        Ok(RouteAdvice {
+            probabilities: advice.probabilities().clone(),
+            latency_ms: started.elapsed().as_millis() as u64,
+        })
     }
 
     /// Invoke on a bounded blocking worker. The adapter performs no retries or follow-up actions.

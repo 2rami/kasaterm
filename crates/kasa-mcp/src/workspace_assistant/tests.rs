@@ -704,3 +704,41 @@ fn decision_results_cannot_cross_account_or_initiating_device() {
     assert!(matches!(store.apply(&ctx("alice","device-b"),&job.id,Some(advice),101),Err(Error::Stale)));
     assert_eq!(store.snapshot(&alice).unwrap().tasks[0].rev,task.rev);
 }
+
+fn route_input(message: &str, ids: &[&str]) -> RouteInput {
+    RouteInput {
+        message: message.into(),
+        students: ids
+            .iter()
+            .map(|id| RouteStudent { id: (*id).into(), name: "유우카".into(), title: "미러링 방식 변경".into(), latest: "peek 는 글자만 넘긴다".into(), status: "waiting".into() })
+            .collect(),
+    }
+}
+
+#[test]
+fn route_request_uses_positional_ids_and_scrubs_credentials() {
+    let (request, choices) = jev::route_request(&route_input("Bearer abcdefghijklmnop 미러링 sk-abcdefghijklmnopqrst 다시 봐", &["s0", "s1"])).unwrap();
+    assert_eq!(choices.keys().cloned().collect::<Vec<_>>(), ["ask_nacho", "new_task", "s0", "s1"]);
+    let message = request["state"]["message"].as_str().unwrap();
+    assert!(!message.contains("abcdefghijklmnop"), "{message}");
+    assert!(message.contains("미러링") && message.contains("[REDACTED]"));
+    assert!(jev::route_request(&route_input("미러링", &["s1"])).is_err());
+    assert!(jev::route_request(&route_input("   ", &["s0"])).is_err());
+    let crowd: Vec<String> = (0..25).map(|i| format!("s{i}")).collect();
+    assert!(jev::route_request(&route_input("미러링", &crowd.iter().map(String::as_str).collect::<Vec<_>>())).is_err());
+}
+
+#[test]
+fn route_needs_a_key_and_keeps_its_own_minute_budget() {
+    let dir = Temp::new();
+    let store = reopen(&dir);
+    let context = ctx("alice", "device-1");
+    let adapter = JevAdapter::new("/bin/sh".into(), "/bin/sh".into()).unwrap();
+    let input = route_input("미러링 다시 봐", &["s0"]);
+    assert_eq!(store.route(&context, &input, &adapter, 60, &|| true).unwrap_err(), Error::Disabled);
+    for _ in 1..ROUTE_PER_MINUTE {
+        let _ = store.route(&context, &input, &adapter, 60, &|| true);
+    }
+    assert_eq!(store.route(&context, &input, &adapter, 61, &|| true).unwrap_err(), Error::RateLimited);
+    assert_eq!(store.route(&context, &input, &adapter, 120, &|| true).unwrap_err(), Error::Disabled);
+}

@@ -61,7 +61,7 @@ fn endpoint(
     let allowed = match (method, path) {
         ("GET", "/snapshot") => body.is_none(),
         ("PUT" | "DELETE", "/key")
-        | ("POST", "/messages" | "/projects" | "/tasks" | "/notifications/claim") => body.is_some(),
+        | ("POST", "/messages" | "/projects" | "/tasks" | "/notifications/claim" | "/route") => body.is_some(),
         _ => false,
     };
     if !allowed || body.is_some_and(|bytes| bytes.len() > 64 * 1024) {

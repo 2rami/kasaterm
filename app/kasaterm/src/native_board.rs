@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod work;
 mod chat;
 mod assistant;
+pub(crate) mod route;
 mod observe;
 
 pub(crate) type Rect = (f32, f32, f32, f32);
@@ -458,6 +459,7 @@ pub(crate) struct Scene {
     pending_stop: Option<LocalBackgroundProcess>,
     transfer: TransferUi,
     transfer_generation: u64,
+    route: route::Router,
 }
 
 impl Default for Scene {
@@ -495,6 +497,7 @@ impl Default for Scene {
             pending_stop: None,
             transfer: TransferUi::default(),
             transfer_generation: 0,
+            route: route::Router::default(),
         }
     }
 }
@@ -606,6 +609,9 @@ impl Scene {
     }
 
     pub(crate) fn assistant_pet_status(&self) -> serde_json::Value { self.chat.pet_status() }
+
+    /// 나쵸 판 입력칸이 지금 가리키는 학생 — 사이드바가 그 줄을 강조한다.
+    pub(crate) fn route_highlight(&self) -> Option<route::RouteHighlight> { self.route.highlight() }
 
     pub(crate) fn assistant_notification_candidates(&self) -> Vec<(String, u64)> {
         self.chat.notification_candidates()

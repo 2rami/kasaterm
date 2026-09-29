@@ -70,6 +70,7 @@ pub(super) fn routes() -> Router<Gate> {
         .route("/relay/workspace-assistant/projects", axum::routing::post(projects))
         .route("/relay/workspace-assistant/tasks", axum::routing::post(tasks))
         .route("/relay/workspace-assistant/notifications/claim", axum::routing::post(claim))
+        .route("/relay/workspace-assistant/route", axum::routing::post(route))
 }
 
 struct Call {
@@ -319,6 +320,34 @@ async fn classify(call: &Call, task: ws::Task) -> ws::Task {
     decided.unwrap_or(task)
 }
 
+/// Advisory recipient for a message the owner is still typing. Runs the same Jev subprocess
+/// as classification with the account's own key; a missing adapter answers unavailable.
+async fn route(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
+    let call = match open(gate, req).await {
+        Ok(call) => call,
+        Err(response) => return response,
+    };
+    let input: ws::RouteInput = match parse(&call.body) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+    if call.service.jev.is_none() {
+        return failure(ws::Error::Unavailable);
+    }
+    let authorized = call.authorized();
+    let (service, ctx) = (call.service.clone(), call.ctx);
+    let result = tokio::task::spawn_blocking(move || {
+        let jev = service.jev.as_ref().ok_or(ws::Error::Unavailable)?;
+        service.store.route(&ctx, &input, jev, now_secs(), &authorized)
+    })
+    .await
+    .unwrap_or(Err(ws::Error::Unavailable));
+    match result {
+        Ok(advice) => ok(json!({ "probabilities": advice.probabilities, "latency_ms": advice.latency_ms })),
+        Err(error) => failure(error),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClaimBody {
@@ -479,6 +508,21 @@ mod tests {
         assert_eq!(call(addr, "GET", "", Some(&token), None).await.0, 401);
         assert_eq!(call(addr, "PUT", "/key", Some(&token), Some(json!({"expected_key_revision":2,"key":"sk-test-0123456789"}))).await.0, 401);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn route_is_authenticated_bounded_and_unavailable_without_a_decision_adapter() {
+        let dir = std::env::temp_dir().join(format!("kasa-workspace-route-{}", uuid::Uuid::new_v4()));
+        let addr = serve(gate_in(&dir)).await;
+        let token = login(addr, "geno", "workspace-mac").await;
+        let body = json!({"message":"미러링 다시 봐","students":[{"id":"s0","name":"유우카","title":"미러링","latest":"","status":"waiting"}]});
+        assert_eq!(call(addr, "POST", "/route", None, Some(body.clone())).await.0, 401);
+        let (status, reply) = call(addr, "POST", "/route", Some(&token), Some(json!({"message":"x","students":[],"account":"other"}))).await;
+        assert_eq!((status, reply["error"].as_str()), (400, Some("invalid_request")));
+        // Without a decision adapter the gateway refuses instead of guessing; the desktop lets the owner pick.
+        let (status, reply) = call(addr, "POST", "/route", Some(&token), Some(body)).await;
+        assert_eq!((status, reply["error"].as_str()), (502, Some("decision_unavailable")));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
