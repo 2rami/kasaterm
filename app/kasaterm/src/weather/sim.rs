@@ -5,6 +5,7 @@
 //! 물방울 움직임은 raindrop-fx(SardineFish, MIT)의 RaindropSimulator/RainDrop 을 옮긴 것이다.
 
 use super::model::{RainAmount, WeatherSettings, WipeMode};
+
 use std::collections::HashMap;
 
 pub(crate) type V2 = [f32; 2];
@@ -82,6 +83,9 @@ pub(crate) struct ButtonSpot {
 
 pub(crate) struct PlaceState {
     pub kind: PlaceKind,
+    /// 비가 안 오는 자리: 맺힌 물이 몇 초 안에 마른다(대상에서 빠진 창이 계속 젖어 있으면
+    /// 설정이 안 먹는 것처럼 보인다).
+    pub dry: bool,
     pub rect: [f32; 4],
     pub guard: Option<[f32; 4]>,
     pub focused: bool,
@@ -287,6 +291,7 @@ impl World {
         for p in places {
             let st = self.places.entry(p.key).or_insert_with(|| PlaceState {
                 kind: p.kind,
+                dry: true,
                 rect: p.rect,
                 guard: None,
                 focused: false,
@@ -301,6 +306,7 @@ impl World {
                 unseen: 0.0,
             });
             st.kind = p.kind;
+            st.dry = p.amount == RainAmount::None;
             st.rect = p.rect;
             st.guard = p.guard;
             st.focused = p.focused;
@@ -335,7 +341,8 @@ impl World {
             p.idle += dt;
             p.since_wipe += dt;
             p.wave *= (-dt * 1.5).exp();
-            p.pool = (p.pool * (1.0 - 0.03 * dt)).min(POOL_MAX * p.rect[2] / (AREA_PER_MASS * 2.5));
+            let drain = if p.dry { 1.5 } else { 0.03 };
+            p.pool = (p.pool * (-drain * dt).exp()).min(POOL_MAX * p.rect[2] / (AREA_PER_MASS * 2.5));
             // The blade holds one frame at the bottom so everything it carried reaches the pool.
             if p.wiper == Some(1.0) {
                 p.wiper = None;
@@ -503,7 +510,7 @@ impl World {
             }
             let d = &mut self.drops[i];
             let Some(p) = self.places.get_mut(&d.place) else { continue };
-            d.mass -= EVAPORATE * dt;
+            d.mass -= EVAPORATE * if p.dry { 400.0 } else { 1.0 } * dt;
             if d.mass <= 0.0 {
                 d.dead = true;
                 continue;
@@ -747,7 +754,7 @@ impl World {
     /// 이 자리에서 비가 멈췄는지(모든 물이 걷혔는지) — 멈췄으면 다시 그릴 필요가 없다.
     pub(crate) fn settled(&self) -> bool {
         self.drops.is_empty()
-            && self.places.values().all(|p| p.cur[0] < 0.01 && p.wiper.is_none() && p.pool < 1.0)
+            && self.places.values().all(|p| p.cur[0] < 0.01 && p.wiper.is_none() && p.pool_h() < 0.3)
             && self.buttons.iter().all(|b| b.press.abs() < 0.01 && b.ring_t < 0.0)
     }
 }
@@ -809,6 +816,23 @@ mod tests {
         }
         let count = |k: u64| w.drops.iter().filter(|d| d.place == k).count();
         assert!(count(2) > count(1), "the unused pane should hold more water");
+    }
+
+    #[test]
+    fn a_pane_out_of_the_rain_dries_in_seconds() {
+        let mut w = World::default();
+        let s = settings();
+        let wet = [pane(1, 0.0, false, None)];
+        for _ in 0..600 {
+            w.step(1.0 / 60.0, &s, true, &wet, &[], &Events::default(), [400.0, 600.0]);
+        }
+        assert!(!w.drops.is_empty());
+        let dry = [Place { amount: RainAmount::None, ..pane(1, 0.0, false, None) }];
+        for _ in 0..(6 * 60) {
+            w.step(1.0 / 60.0, &s, true, &dry, &[], &Events::default(), [400.0, 600.0]);
+        }
+        assert!(w.drops.is_empty(), "{} drops left", w.drops.len());
+        assert!(w.places[&1].pool_h() < 0.3);
     }
 
     #[test]

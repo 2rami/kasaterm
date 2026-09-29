@@ -368,6 +368,9 @@ impl App {
         for p in st.world.places.values().filter(|p| p.kind == PlaceKind::Pane) {
             if let Some(y) = p.wiper_y() {
                 inst.push(gpu::Inst { pos: [p.rect[0], p.rect[1]], size: [p.rect[2], y - p.rect[1]], extra: [0.0; 4], clip: p.rect });
+            } else if p.dry {
+                // Out of the rain: condensation and mist go with the water.
+                inst.push(gpu::Inst { pos: [p.rect[0], p.rect[1]], size: [p.rect[2], p.rect[3]], extra: [0.0; 4], clip: p.rect });
             }
         }
         let n_wipes = inst.len() as u32 - n_drops - n_droplets;
