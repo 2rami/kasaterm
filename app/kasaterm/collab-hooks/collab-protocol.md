@@ -43,7 +43,7 @@ kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자�
 - 범위 안에서 기존 캐릭터의 담당을 확인한다. 적합한 상대가 없으면 새 캐릭터를 띄운다.
 - 새 캐릭터는 `kasaterm-cli summon --cwd <레포> "<목적·담당·완료 조건>"` 한 줄로 띄운다. 창 만들기·부팅·보드 신원 확인·브리프 tell까지 한다. 탭은 `--tab`, 제목은 `--name`.
 - 맡길 일을 서브에이전트(Agent 도구)로 돌리지 않는다. 보드에 안 보여 진행을 못 지켜본다. 읽기 전용 탐색·설계(Explore·Plan)만 예외다.
-- 학생의 done 보고는 부른 창 입력으로 들어온다. 막고 기다려야 하면 `kasaterm-cli board --wait <이름> --since <summon이 준 값>`을 별도 잡으로 돌린다. tell로 일을 더 맡겼으면 `--since <tell 영수증 ID>`.
+- 학생의 done 보고는 부른 창에 tell로 들어온다(탭으로 불렀어도, 앱을 다시 켰어도). 막고 기다려야 하면 `kasaterm-cli board --wait <이름> --since <summon이 준 값>`을 별도 잡으로 돌린다. tell로 일을 더 맡겼으면 `--since <tell 영수증 ID>`.
 - 남의 변경을 덮지 않는다. 결과를 검증·커밋한 뒤 완료를 보고한다.
 - 고친 파일은 커밋·되돌리기 전까지 그 학생이 잡는다. 남이 고치려 하면 겹침 가드가 막는다. 넘겨줄 때는 `python3 <collab-hooks>/kasaterm-conflict-guard.py release <파일>`로 놓는다.
 
@@ -60,7 +60,7 @@ kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자�
 - `kasaterm-cli board-watch --all --json --since CURSOR`를 별도 감시로 실행하고 변경분만 받는다.
 - 맡긴 작업·막힘·실패를 추적한다. `reset_required`면 새 snapshot과 커서를 받고 빠진 구간은 미확인으로 남긴다.
 - `idle`과 침묵은 완료가 아니다. done 보고와 결과 확인 후 맡겼던 창을 정리한다.
-- 본인 작업이 끝나면 `kasaterm-cli done succeeded '완료·미확인·남은 것'`으로 보고한다. 실패는 `failed`로 남긴다.
+- 본인 작업이 끝나면 `kasaterm-cli done succeeded '완료·미확인·남은 것'`으로 한 번 보고한다. 실패는 `failed`, 막힘·승인 필요는 `blocked`·`needs_approval`. 부른 창에는 done이 전하니 완료를 tell로 따로 알리지 않는다.
 - 카사텀 앱 수정은 검사·커밋·main 푸시 후 `python3 -m tools.release.auto enqueue <40자리 SHA>`까지 한다. 등록·배포·설치는 구분한다. stable은 별도 승인이다([절차](../../../docs/automatic-preview-updates.md)).
 - 빌드·검사는 성공·실패 때 끝나는 별도 잡으로 돌린다. sleep을 반복하지 않고, 계속 지켜볼 일은 변경분·진행·실패·끊김만 받는다.
 

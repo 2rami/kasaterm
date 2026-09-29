@@ -171,7 +171,7 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
   `localhost`·`127.0.0.1`·`[::1]` 셋 다 200. 붙들어 둔 연결 중 B HTTP 포트로 들어온 것의 여는 쪽이 **전부 B 자신**(카사넷
   수신기), A 에서 곧장 간 연결 0.
 - A 의 `/browser/resolve-localhost`(원본 kyb, ssh 설정 없음) → 기존 끌어오기를 다시 써서 `http://localhost:61285/…?q=1`.
-- A 에서 `window-new --machine kyb` 로 B 방을 거울로 열고 B pane 에서 `kasaterm-cli open 'http://localhost:47913/…'`(이 명령은 2026-09-29 CLI 정리로 빠졌다) →
+- A 에서 `window-new --machine kyb` 로 B 방을 거울로 열고 B pane 에서 `kasaterm-cli open 'http://localhost:47913/…'`(지금은 `kasaterm-cli share open`) →
   A 가 `http://localhost:61285/…` 를 열었다(B 는 아무것도 안 열었다). 새 포트 `http://127.0.0.1:47914/` 는 새 끌어오기
   `http://127.0.0.1:61900/` 로 — 호스트 모양 유지.
 - B HTTP 에 직접: 루프백 무토큰 101, `X-Forwarded-For` 무토큰·틀린 토큰 403, `Origin: https://evil.example.com` 403,
