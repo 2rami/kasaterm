@@ -201,7 +201,7 @@ void main() {
       expect(find.text('첫째'), findsOneWidget);
       expect(find.text('하나'), findsOneWidget);
       final head = tester.widget<Text>(find.text('오늘 한 일'));
-      expect((head.textSpan!.style!.fontSize, head.textSpan!.style!.fontWeight), (17, FontWeight.w700));
+      expect((head.textSpan!.style!.fontSize, head.textSpan!.style!.fontWeight), (16, FontWeight.w600));
       expect(find.text('인용 한 줄'), findsOneWidget);
       expect(find.text('code **x** >_<'), findsOneWidget, reason: '코드 안은 글자 그대로');
       expect(find.byType(Table), findsOneWidget);
@@ -216,7 +216,7 @@ void main() {
       final got = <String>[];
       await reply(tester, '보기: [작업 화면](http://h/term?pane=%4) · **중요** `cmd` 끝 ** 남음', onLink: got.add);
       expect(shown(tester), '보기: 작업 화면 · 중요 cmd 끝 ** 남음');
-      expect(styleOf(tester, '중요')?.fontWeight, FontWeight.w700);
+      expect(styleOf(tester, '중요')?.fontWeight, FontWeight.w600);
       expect(styleOf(tester, 'cmd')?.fontFamily, 'TermMono');
       await tester.tapOnText(find.textRange.ofSubstring('작업 화면'));
       expect(got, hasLength(1));
@@ -226,7 +226,7 @@ void main() {
     testWidgets('한글이 바로 붙은 굵게도 닫힌다 — CommonMark 는 여기서 별표를 남긴다', (tester) async {
       await reply(tester, '**(선택)**은 나중에, **「작업 열기」**를 눌러');
       expect(shown(tester), '(선택)은 나중에, 「작업 열기」를 눌러');
-      expect(styleOf(tester, '(선택)')?.fontWeight, FontWeight.w700);
+      expect(styleOf(tester, '(선택)')?.fontWeight, FontWeight.w600);
     });
 
     testWidgets('카오모지·물결·밑줄 — 빠지거나 기울어지는 글자가 없다', (tester) async {
@@ -354,7 +354,7 @@ void main() {
       final d = await open(tester, s);
       expect(find.text('•'), findsNWidgets(2));
       expect(find.text('목록 속도 고침'), findsOneWidget);
-      expect(styleOf(tester, '목록 속도')?.fontWeight, FontWeight.w700);
+      expect(styleOf(tester, '목록 속도')?.fontWeight, FontWeight.w600);
       expect(find.textContaining('**'), findsNothing);
       expect(find.ancestor(of: find.text('알림 정리'), matching: find.byType(SelectionArea)), findsOneWidget);
       await close(tester, d, s);
@@ -371,7 +371,7 @@ void main() {
       final d = await open(tester, s);
       expect(find.text('#알림 요약: 작업 화면 에 새 글 둘'), findsOneWidget);
       expect(find.textContaining('http'), findsNothing);
-      expect(styleOf(tester, '새 글')?.fontWeight, FontWeight.w700);
+      expect(styleOf(tester, '새 글')?.fontWeight, FontWeight.w600);
       expect(
         find.ancestor(of: find.text('#알림 요약: 작업 화면 에 새 글 둘'), matching: find.byType(SelectionArea)),
         findsNothing,
@@ -412,7 +412,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(home: NachoTaskScreen(desk: d, taskId: 'w1', onOpenStudents: () {})));
       await settle(tester);
       expect(find.text('배포 스레드 에 새 글'), findsOneWidget);
-      expect(styleOf(tester, '새 글')?.fontWeight, FontWeight.w700);
+      expect(styleOf(tester, '새 글')?.fontWeight, FontWeight.w600);
       expect(find.text('•'), findsNWidgets(2));
       expect(find.textContaining('example.com'), findsNothing);
       expect(find.textContaining('**그대로** 보여줘'), findsOneWidget, reason: '사람이 친 말은 해석하지 않는다');

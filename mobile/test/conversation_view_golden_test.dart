@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:kasaterm_mobile/main.dart';
 import 'package:kasaterm_mobile/grid.dart';
 import 'package:kasaterm_mobile/screens/conversation_view.dart';
 import 'package:kasaterm_mobile/server.dart';
@@ -87,7 +88,7 @@ void main() {
       ];
     await tester.pumpWidget(
       MaterialApp(
-        theme: ThemeData(colorSchemeSeed: const Color(0xff4a90e2)),
+        theme: buildTheme(Brightness.light),
         home: Scaffold(
           appBar: AppBar(
             title: const Text('아리스'),

@@ -244,6 +244,10 @@ void main() {
         ..add({'kind': 'reply', 'message': 'd', 'text': '답 넷'})
         ..add({'kind': 'deliver', 'reply': 12, 'state': 'expired', 'target': 'kasapet:맥북'});
       final d = NachoDesk(s);
+      // 기록형 대화는 줄마다 이름 머리가 붙어 길다 — 네 답이 한 화면에 다 들게 폰 높이로.
+      tester.view.physicalSize = const Size(402, 1000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
       await tester.pumpWidget(MaterialApp(home: NachoHome(server: s, onChangeAddress: () async {}, desk: d)));
       await settle(tester);
       expect(find.text('펫(미니)에도 표시됨'), findsOneWidget, reason: '받아 간 영수증이 있을 때만');

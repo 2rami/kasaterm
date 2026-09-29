@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../server.dart';
 import '../relay_account.dart';
+import '../look.dart';
+import 'controls.dart';
 
 class ConnectScreen extends StatefulWidget {
   const ConnectScreen({
@@ -100,7 +102,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text('KASA Mobile', style: theme.textTheme.headlineSmall),
+                  Text('KASA Mobile', style: theme.textTheme.titleLarge),
                   const SizedBox(height: 8),
                   Text(
                     '데스크톱과 같은 계정으로 로그인하세요.',
@@ -109,7 +111,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     ),
                   ),
                   const SizedBox(height: 24),
-                  TextField(
+                  LabeledField(
+                    label: '아이디',
+                    child: TextField(
                     key: const Key('account-input'),
                     controller: _account,
                     enabled: !_busy,
@@ -118,10 +122,13 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     autocorrect: false,
                     enableSuggestions: false,
                     textInputAction: TextInputAction.next,
-                    decoration: const InputDecoration(labelText: '아이디'),
+                    decoration: const InputDecoration(),
+                    ),
                   ),
                   const SizedBox(height: 12),
-                  TextField(
+                  LabeledField(
+                    label: '비밀번호',
+                    child: TextField(
                     key: const Key('password-input'),
                     controller: _password,
                     enabled: !_busy,
@@ -132,7 +139,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     autofillHints: const [AutofillHints.password],
                     textInputAction: TextInputAction.go,
                     onSubmitted: (_) => _login(),
-                    decoration: const InputDecoration(labelText: '비밀번호'),
+                    decoration: const InputDecoration(),
+                    ),
                   ),
                   if (_error ?? widget.message case final message?) ...[
                     const SizedBox(height: 12),
@@ -148,7 +156,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   FilledButton(
                     key: const Key('account-login'),
                     style: FilledButton.styleFrom(
-                      minimumSize: const Size(44, 48),
+                      minimumSize: const Size(Look.tap, Look.buttonH),
                     ),
                     onPressed: _busy ? null : _login,
                     child: _busy
@@ -164,27 +172,28 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     title: const Text('고급 설정'),
                     tilePadding: EdgeInsets.zero,
                     children: [
-                      TextField(
+                      LabeledField(
+                        label: '계정 서버 주소',
+                        child: TextField(
                         controller: _gateway,
                         enabled: !_busy,
                         style: const TextStyle(fontSize: 16),
                         autocorrect: false,
                         keyboardType: TextInputType.url,
-                        decoration: const InputDecoration(
-                          labelText: '계정 서버 주소',
+                        decoration: const InputDecoration(),
                         ),
                       ),
-                      const SizedBox(height: 20),
-                      TextField(
+                      const SizedBox(height: Look.fieldGap),
+                      LabeledField(
+                        label: '기존 폰 주소',
+                        child: TextField(
                         controller: _controller,
                         enabled: !_busy,
                         style: const TextStyle(fontSize: 16),
                         autocorrect: false,
                         enableSuggestions: false,
                         keyboardType: TextInputType.url,
-                        decoration: const InputDecoration(
-                          labelText: '기존 폰 주소',
-                          hintText: 'https://…/u/…/',
+                        decoration: const InputDecoration(hintText: 'https://…/u/…/'),
                         ),
                       ),
                       const SizedBox(height: 12),
@@ -192,7 +201,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                         width: double.infinity,
                         child: OutlinedButton(
                           style: OutlinedButton.styleFrom(
-                            minimumSize: const Size(44, 48),
+                            minimumSize: const Size(Look.tap, Look.buttonH),
                           ),
                           onPressed: _busy ? null : _connect,
                           child: const Text('폰 주소로 연결'),

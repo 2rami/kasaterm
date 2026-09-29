@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../hub_prefs.dart';
+import '../look.dart';
+import 'controls.dart';
 import '../nacho.dart';
 import '../nacho_reply.dart';
 import '../nacho_student.dart';
@@ -129,7 +131,7 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
                   errorBuilder: (_, _, _) => const SizedBox.shrink(),
                 ),
                 const SizedBox(width: 8),
-                const Text('KASA Mobile'),
+                const Flexible(child: Text('KASA Mobile', overflow: TextOverflow.ellipsis)),
               ],
             ),
             actions: [
@@ -145,11 +147,13 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
                 onPressed: _openShare,
                 icon: const Icon(Icons.folder_outlined),
               ),
-              IconButton(
-                tooltip: '학생 화면',
+              // 학생 목록 입구가 터미널 그림 하나라 무엇인지 안 읽혔다 — 이름을 붙인다.
+              TextButton.icon(
                 onPressed: _openStudents,
-                icon: const Icon(Icons.terminal_rounded),
+                icon: const Icon(Icons.people_outline_rounded, size: Look.iconSize),
+                label: const Text('학생'),
               ),
+              const SizedBox(width: 4),
             ],
             bottom: wide ? null : TabBar(
               tabs: [
@@ -302,7 +306,7 @@ class _NachoPetSheetState extends State<NachoPetSheet> {
           final data = snap.data;
           final children = <Widget>[
             const ListTile(
-              title: Text('펫과 이어 보기', style: TextStyle(fontWeight: FontWeight.w700)),
+              title: Text('펫과 이어 보기', style: TextStyle(fontWeight: FontWeight.w600)),
               subtitle: Text('고른 펫 한 대만 이 대화를 말풍선으로 받고, 그 펫에서 물으면 같은 대화로 이어져요.'),
             ),
           ];
@@ -348,10 +352,10 @@ class _Banner extends StatelessWidget {
       child: Container(
         width: double.infinity,
         color: scheme.errorContainer,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: Look.pagePad, vertical: 10),
         child: Text(
           text,
-          style: TextStyle(color: scheme.onErrorContainer, fontSize: 13),
+          style: TextStyle(color: scheme.onErrorContainer, fontSize: Look.sub, fontWeight: FontWeight.w600),
         ),
       ),
     );
@@ -551,40 +555,31 @@ class _UserBubble extends StatelessWidget {
       if (state != 'running') receiptLabel(state),
       if (note.isNotEmpty && bad) note,
     ].join(' · ');
-    return Align(
-      alignment: Alignment.centerRight,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(56, 4, 12, 4),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: scheme.primary,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: SelectableText(
-                text,
-                style: TextStyle(color: scheme.onPrimary, fontSize: 15, height: 1.35),
-              ),
-            ),
-            if (meta.isNotEmpty) ...[
-              const SizedBox(height: 3),
-              GestureDetector(
-                onTap: onRetry,
-                child: Text(
-                  meta,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: bad ? scheme.error : scheme.onSurfaceVariant,
-                    decoration: onRetry == null ? null : TextDecoration.underline,
-                  ),
+    // 말풍선 대신 「나」 머리 + 글 — 데스크톱 나쵸 판과 같은 기록형(카드·채움 금지).
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Look.pagePad, 10, Look.pagePad, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _speech(
+            context,
+            mine: true,
+            child: SelectableText(text, style: Theme.of(context).textTheme.bodyLarge),
+          ),
+          if (meta.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            GestureDetector(
+              onTap: onRetry,
+              child: Text(
+                meta,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: bad ? scheme.error : scheme.onSurfaceVariant,
+                  decoration: onRetry == null ? null : TextDecoration.underline,
                 ),
               ),
-            ],
+            ),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -626,21 +621,18 @@ class _NachoBubble extends StatelessWidget {
     return Align(
       alignment: Alignment.centerLeft,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 4, 40, 4),
+        padding: const EdgeInsets.fromLTRB(Look.pagePad, 10, Look.pagePad, 10),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (text.isNotEmpty)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(16),
-                ),
+              _speech(
+                context,
+                mine: false,
                 child: ReplyText(
                   text: text,
                   onLink: onLink,
-                  style: TextStyle(color: scheme.onSurface, fontSize: 15, height: 1.4),
+                  style: TextStyle(color: scheme.onSurface, fontSize: Look.body, height: 1.4),
                 ),
               ),
             if (view.meta != null) ReplyMetaLine(meta: view.meta!),
@@ -665,7 +657,7 @@ class _NachoBubble extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.only(top: 6),
                   child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(6),
                     child: ServerImage(
                       server: desk.server,
                       uri: desk.fileUri(event.seq, i, task: event.task),
@@ -708,6 +700,25 @@ class _NachoBubble extends StatelessWidget {
   }
 }
 
+/// 말 한 덩이 — 누가 한 말인지 13/600 머리(나 = 강조, 나쵸 = 흐림) 아래 글.
+Widget _speech(BuildContext context, {required bool mine, required Widget child}) {
+  final scheme = Theme.of(context).colorScheme;
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Text(
+        mine ? '나' : '나쵸',
+        style: Theme.of(context).textTheme.labelMedium?.copyWith(
+          color: mine ? scheme.primary : scheme.onSurfaceVariant,
+        ),
+      ),
+      const SizedBox(height: Look.rowGap),
+      child,
+    ],
+  );
+}
+
 bool _isImage(String name) {
   final n = name.toLowerCase();
   return n.endsWith('.png') || n.endsWith('.jpg') || n.endsWith('.jpeg') || n.endsWith('.gif') || n.endsWith('.webp');
@@ -733,11 +744,12 @@ class _NoticeRow extends StatelessWidget {
       _ => Icons.info_outline_rounded,
     };
     final row = Container(
-      margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 6),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      margin: const EdgeInsets.symmetric(horizontal: Look.pagePad, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: warn ? scheme.errorContainer : scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
+        color: warn ? scheme.errorContainer : null,
+        borderRadius: Look.corners,
+        border: warn ? null : Border.all(color: scheme.outline),
       ),
       child: Row(
         children: [
@@ -749,7 +761,7 @@ class _NoticeRow extends StatelessWidget {
               onLink: onLink,
               selectable: false,
               style: TextStyle(
-                fontSize: 13,
+                fontSize: Look.sub,
                 color: warn ? scheme.onErrorContainer : scheme.onSurfaceVariant,
               ),
             ),
@@ -780,7 +792,7 @@ class _Composer extends StatelessWidget {
   Widget build(BuildContext context) => SafeArea(
     top: false,
     child: Padding(
-      padding: const EdgeInsets.fromLTRB(12, 6, 8, 8),
+      padding: const EdgeInsets.fromLTRB(Look.pagePad, 8, Look.pagePad, 8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
@@ -788,20 +800,21 @@ class _Composer extends StatelessWidget {
             child: TextField(
               controller: controller,
               minLines: 1,
-              maxLines: 5,
+              maxLines: Look.inputMaxLines,
               // 16px 아래로 내리면 iOS 가 포커스 때 화면을 확대한다.
               style: const TextStyle(fontSize: 16),
               textInputAction: TextInputAction.newline,
-              decoration: InputDecoration(hintText: hint, isDense: true),
+              decoration: InputDecoration(hintText: hint),
             ),
           ),
-          const SizedBox(width: 6),
-          IconButton.filled(
-            tooltip: '보내기',
-            onPressed: sending ? null : onSend,
-            icon: sending
-                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.arrow_upward_rounded),
+          const SizedBox(width: 8),
+          ListenableBuilder(
+            listenable: controller,
+            builder: (context, _) => SendButton(
+              ready: controller.text.trim().isNotEmpty,
+              busy: sending,
+              onPressed: onSend,
+            ),
           ),
         ],
       ),
@@ -840,16 +853,17 @@ class _Pill extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: Look.chipPadX, vertical: 3),
       decoration: BoxDecoration(
-        color: strong ? scheme.errorContainer : scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: Look.corners,
+        border: Border.all(color: strong ? scheme.error : scheme.outline),
       ),
       child: Text(
         text,
         style: TextStyle(
-          fontSize: 12,
-          color: strong ? scheme.onErrorContainer : scheme.onSurfaceVariant,
+          fontSize: Look.chip,
+          fontWeight: FontWeight.w600,
+          color: strong ? scheme.error : scheme.onSurfaceVariant,
         ),
       ),
     );

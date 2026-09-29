@@ -61,7 +61,7 @@ class ReplyMetaLine extends StatelessWidget {
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
       style: TextStyle(
-        fontSize: 11.5,
+        fontSize: 12,
         color: Theme.of(context).colorScheme.onSurfaceVariant,
       ),
     ),
@@ -93,7 +93,7 @@ class _ReplyDetailsState extends State<ReplyDetails> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         InkWell(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(6),
           onTap: () => setState(() => _open = !_open),
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 4),
@@ -118,7 +118,7 @@ class _ReplyDetailsState extends State<ReplyDetails> {
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
               border: Border.all(color: scheme.outlineVariant),
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(6),
             ),
             child: SelectionArea(
               child: Column(
@@ -198,7 +198,7 @@ class StudentWorkCard extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(12, 10, 8, 6),
         decoration: BoxDecoration(
           border: Border.all(color: scheme.outlineVariant),
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(6),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -223,14 +223,14 @@ class StudentWorkCard extends StatelessWidget {
                         name,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
                       ),
                       Text(
                         [seat?.machine ?? '', live].where((s) => s.isNotEmpty).join(' · '),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 12.5,
+                          fontSize: 13,
                           color: pane?.isWaiting == true ? scheme.error : scheme.onSurfaceVariant,
                         ),
                       ),
@@ -246,7 +246,7 @@ class StudentWorkCard extends StatelessWidget {
                   step,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 12.5, color: scheme.onSurfaceVariant),
+                  style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
                 ),
               ),
             Row(

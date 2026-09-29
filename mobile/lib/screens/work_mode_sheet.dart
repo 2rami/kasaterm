@@ -136,7 +136,7 @@ class WorkModeSheet extends StatelessWidget {
         ..add(
           Text(
             tier.label,
-            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
           ),
         )
         ..add(
@@ -213,7 +213,7 @@ class _ModeCard extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(6),
         border: Border.all(
           color: on ? scheme.primary : scheme.outlineVariant,
           width: on ? 1.6 : 1,
@@ -228,7 +228,7 @@ class _ModeCard extends StatelessWidget {
                 desk.labelOf(mode),
                 style: TextStyle(
                   fontSize: 15,
-                  fontWeight: FontWeight.w700,
+                  fontWeight: FontWeight.w600,
                   color: on ? scheme.primary : scheme.onSurface,
                 ),
               ),
@@ -242,7 +242,7 @@ class _ModeCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 4),
-          Text(summary, style: const TextStyle(fontSize: 14, height: 1.45)),
+          Text(summary, style: const TextStyle(fontSize: 15, height: 1.45)),
           for (final e in info?.effects ?? const <String>[])
             Padding(
               padding: const EdgeInsets.only(top: 2),
@@ -278,7 +278,7 @@ class _ActionLine extends StatelessWidget {
           Expanded(
             child: Text(
               action.label.isEmpty ? action.id : action.label,
-              style: const TextStyle(fontSize: 14),
+              style: const TextStyle(fontSize: 15),
             ),
           ),
           const SizedBox(width: 12),
@@ -322,7 +322,7 @@ class _Fact extends StatelessWidget {
             child: Text(
               value,
               style: TextStyle(
-                fontSize: 14,
+                fontSize: 15,
                 height: 1.45,
                 color: warn ? scheme.error : scheme.onSurface,
               ),

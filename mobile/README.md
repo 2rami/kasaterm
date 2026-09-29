@@ -65,7 +65,8 @@ Codex에도 같은 방식으로 붙는다. 변환 뒤 32 MiB를 넘는 사진은
 
 ```
 lib/
-  main.dart            Pretendard UI 테마 · 첫 화면 분기
+  main.dart            Pretendard UI 테마(시안 A 「한 얼굴」 — 플랫·테만·모서리 6) · 첫 화면 분기
+  look.dart            단추·배치 값 한 곳(docs/design.md 「카사모바일 폰 — 단추·배치」)
   server.dart          Server(root) — uri/wsUri/me/panes/sessions/machines/shot/send · describe() 는 slug 를 가린다
   connection.dart     로그인·복원·기기 연결 대기·로그아웃 상태
   connection_store.dart 계정/기존 주소 → 단일 Keychain 항목

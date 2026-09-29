@@ -11,6 +11,7 @@ import '../status_style.dart';
 import '../student_art.dart';
 import '../work_mode.dart';
 import '../workboard.dart';
+import '../look.dart';
 import 'organize_sheet.dart';
 import 'work_mode_sheet.dart';
 
@@ -132,6 +133,7 @@ class _WorkBoardViewState extends State<WorkBoardView>
           const _Band(
             text: '예시 데이터 — 실제 작업이 아니에요',
             icon: Icons.science_outlined,
+            warn: false,
           ),
         // 원장이 끊긴 것은 나쵸 홈 머리가 이미 말한다 — 같은 말을 두 번 세우지 않는다.
         if (!board.demo &&
@@ -320,23 +322,36 @@ class _WorkBoardViewState extends State<WorkBoardView>
 }
 
 class _Band extends StatelessWidget {
-  const _Band({required this.text, this.icon = Icons.error_outline});
+  const _Band({required this.text, this.icon = Icons.error_outline, this.warn = true});
 
   final String text;
   final IconData icon;
 
+  /// 끊김·실패만 경고 띠. 안내(예시 데이터)는 흐린 글자와 아래 선.
+  final bool warn;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // 경고 띠 — danger 12% 바탕 + danger 글자(원색 채움 금지).
+    final ink = warn ? scheme.onErrorContainer : scheme.onSurfaceVariant;
     return Container(
       width: double.infinity,
-      color: scheme.surfaceContainerHighest,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: warn ? scheme.errorContainer : null,
+        border: warn ? null : Border(bottom: BorderSide(color: scheme.outline)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: Look.pagePad, vertical: 10),
       child: Row(
         children: [
-          Icon(icon, size: 16, color: scheme.onSurfaceVariant),
+          Icon(icon, size: 16, color: ink),
           const SizedBox(width: 8),
-          Expanded(child: Text(text, style: const TextStyle(fontSize: 13))),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(fontSize: Look.sub, fontWeight: warn ? FontWeight.w600 : null, color: ink),
+            ),
+          ),
         ],
       ),
     );
@@ -429,7 +444,7 @@ class _ModeRow extends StatelessWidget {
               Text(
                 label,
                 style: TextStyle(
-                  fontSize: 14,
+                  fontSize: 15,
                   fontWeight: FontWeight.w600,
                   color: state == null
                       ? scheme.onSurfaceVariant
@@ -534,7 +549,7 @@ class _ProjectChips extends StatelessWidget {
                 '$yours',
                 style: const TextStyle(
                   color: StatusStyle.attentionInk,
-                  fontWeight: FontWeight.w700,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ],
@@ -544,10 +559,10 @@ class _ProjectChips extends StatelessWidget {
     );
     final all = projects.fold(0, (n, p) => n + p.yours);
     return SizedBox(
-      height: 48,
+      height: Look.tap + 8,
       child: ListView(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: Look.pagePad, vertical: 4),
         children: [
           chip('전체', all, selected == null, () => onPick(null)),
           for (final p in projects)
@@ -575,7 +590,7 @@ class _Section extends StatelessWidget {
           color: color == null
               ? theme.colorScheme.onSurfaceVariant
               : StatusStyle.attentionInk,
-          fontWeight: FontWeight.w700,
+          fontWeight: FontWeight.w600,
         ),
       ),
     );
@@ -638,7 +653,7 @@ class _ActionButton extends StatelessWidget {
       foregroundColor: StatusStyle.attentionInk,
       side: const BorderSide(color: StatusStyle.attentionInk),
     ),
-    child: Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
+    child: Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
   );
 }
 
@@ -688,18 +703,23 @@ class _WorkRow extends StatelessWidget {
       freshLabel(i.updatedMs),
     ].join(' · ');
     final done = i.lane == WorkLane.done;
+    // 내 차례 줄은 채움 대신 왼쪽 2px 주황 띠 — 허브 학생 줄·데스크톱 사이드바와 같은 뜻.
     return Material(
-      color: attention
-          ? StatusStyle.attention.withValues(alpha: 0.08)
-          : Colors.transparent,
+      color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
         onLongPress: onLongPress,
         child: Container(
-          constraints: const BoxConstraints(minHeight: 64),
-          padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
+          constraints: const BoxConstraints(minHeight: Look.row2),
+          padding: const EdgeInsets.fromLTRB(Look.pagePad - Look.stripe, 8, 12, 8),
           decoration: BoxDecoration(
-            border: Border(bottom: BorderSide(color: scheme.outline)),
+            border: Border(
+              bottom: BorderSide(color: scheme.outline),
+              left: BorderSide(
+                color: attention ? StatusStyle.attention : Colors.transparent,
+                width: Look.stripe,
+              ),
+            ),
           ),
           child: Row(
             children: [
@@ -730,7 +750,7 @@ class _WorkRow extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 12.5,
+                          fontSize: 13,
                           color: scheme.onSurfaceVariant,
                         ),
                       ),
@@ -774,12 +794,12 @@ class _SourceTag extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(6),
         border: Border.all(color: scheme.outline),
       ),
       child: Text(
         text,
-        style: TextStyle(fontSize: 10.5, color: scheme.onSurfaceVariant),
+        style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
       ),
     );
   }
@@ -850,7 +870,7 @@ class DevicesSheet extends StatelessWidget {
                   Expanded(
                     child: Text(
                       d.here ? '${d.label} (이 주소)' : d.label,
-                      style: const TextStyle(fontWeight: FontWeight.w700),
+                      style: const TextStyle(fontWeight: FontWeight.w600),
                     ),
                   ),
                   Text(
@@ -873,7 +893,7 @@ class DevicesSheet extends StatelessWidget {
                 child: Text(
                   d.online ? '학생 없음' : '연결이 끊겨 학생을 못 봐요',
                   style: TextStyle(
-                    fontSize: 12.5,
+                    fontSize: 13,
                     color: scheme.onSurfaceVariant,
                   ),
                 ),
@@ -897,7 +917,7 @@ class DevicesSheet extends StatelessWidget {
                           return Text(
                             st.label,
                             style: TextStyle(
-                              fontSize: 12.5,
+                              fontSize: 13,
                               color: st.color,
                               fontWeight: FontWeight.w600,
                             ),
@@ -1046,7 +1066,7 @@ class ApprovalSheet extends StatelessWidget {
                   '서버가 이 요청의 범위·만료·1회용을 검증하는 창구가 생기면 켜져요. '
                   'Face ID 는 이 폰의 잠금 확인일 뿐 서버 권한을 만들지 않아요.',
                   style: TextStyle(
-                    fontSize: 12.5,
+                    fontSize: 13,
                     color: scheme.onSurfaceVariant,
                     height: 1.5,
                   ),

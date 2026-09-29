@@ -197,7 +197,7 @@ class _DeleteBackground extends StatelessWidget {
             '지우기',
             style: Theme.of(context).textTheme.labelSmall?.copyWith(
               color: scheme.onError,
-              fontWeight: FontWeight.w700,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ],
@@ -292,14 +292,14 @@ class _NoteRow extends StatelessWidget {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
             decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.14),
-              borderRadius: BorderRadius.circular(999),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: color),
             ),
             child: Text(
               label,
               style: theme.textTheme.labelSmall?.copyWith(
                 color: color,
-                fontWeight: FontWeight.w700,
+                fontWeight: FontWeight.w600,
               ),
             ),
           ),
@@ -319,7 +319,7 @@ class _NoteRow extends StatelessWidget {
           Text(
             note.summary,
             style: theme.textTheme.bodyMedium?.copyWith(
-              fontWeight: note.read ? FontWeight.w400 : FontWeight.w700,
+              fontWeight: note.read ? FontWeight.w400 : FontWeight.w600,
             ),
           ),
           if (detail.isNotEmpty)

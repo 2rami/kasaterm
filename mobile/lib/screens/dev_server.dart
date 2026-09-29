@@ -4,6 +4,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../net_tcp.dart';
 import '../server.dart';
+import '../look.dart';
+import 'controls.dart';
 
 /// 데스크톱 개발 서버를 앱 안 Safari 화면(안드로이드는 크롬 커스텀 탭)으로 연다 — 데스크톱 `127.0.0.1:port` 를
 /// 이 폰 localhost 로 끌어와 그 주소를 연다. 임베디드 웹뷰가 아니라서 로그인이 앱별로 남고 비밀번호 자동 채우기·
@@ -125,7 +127,7 @@ class _DevServerScreenState extends State<DevServerScreen> {
       appBar: AppBar(title: Text('localhost:${widget.port}')),
       body: Center(
         child: Padding(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(Look.groupGap),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -161,6 +163,19 @@ class _DevServerScreenState extends State<DevServerScreen> {
                   onPressed: _launch,
                   icon: const Icon(Icons.open_in_new_rounded),
                   label: const Text('다시 열기'),
+                )
+              // 다리를 못 세운 실패도 문장만 두지 않는다 — 다음 행동 단추를 단다.
+              else if (_error != null)
+                FilledButton.icon(
+                  onPressed: () {
+                    setState(() {
+                      _error = null;
+                      _launching = true;
+                    });
+                    _open();
+                  },
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('다시 시도'),
                 ),
             ],
           ),
@@ -222,20 +237,25 @@ Future<void> openDevServer(
       title: const Text('데스크톱 개발 서버'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          TextField(
-            controller: port,
-            autofocus: true,
-            keyboardType: TextInputType.number,
-            decoration: const InputDecoration(
-              labelText: '포트',
-              hintText: '3000',
+          LabeledField(
+            label: '포트',
+            child: TextField(
+              controller: port,
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(hintText: '3000'),
             ),
           ),
-          TextField(
-            controller: path,
-            keyboardType: TextInputType.url,
-            decoration: const InputDecoration(labelText: '경로'),
+          const SizedBox(height: Look.fieldGap),
+          LabeledField(
+            label: '경로',
+            child: TextField(
+              controller: path,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(),
+            ),
           ),
         ],
       ),

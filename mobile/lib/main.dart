@@ -6,6 +6,7 @@ import 'connection.dart';
 import 'app_link.dart';
 import 'hub_model.dart';
 import 'kasanet.dart';
+import 'look.dart';
 import 'push.dart';
 import 'screens/connect.dart';
 import 'screens/dev_server.dart';
@@ -71,6 +72,8 @@ ThemeData buildThemeFrom({
   required Color outline,
   required Color background,
 }) {
+  // 모든 토큰을 채운다 — 비워 두면 Material 이 글자색·원색으로 떨어뜨려 방 상자 테가 글자색 60%,
+  // 경고 띠가 원색 빨강으로 그려졌다(2026-09-29).
   final scheme = ColorScheme(
     brightness: brightness,
     primary: primary,
@@ -79,63 +82,195 @@ ThemeData buildThemeFrom({
     onSecondary: onPrimary,
     error: error,
     onError: Colors.white,
+    errorContainer: Color.alphaBlend(error.withValues(alpha: Look.dangerTint), background),
+    onErrorContainer: error,
     surface: surface,
     onSurface: onSurface,
+    surfaceContainerLowest: background,
+    surfaceContainerLow: Color.alphaBlend(surface.withValues(alpha: 0.5), background),
+    surfaceContainer: surface,
+    surfaceContainerHigh: surfaceHigh,
     surfaceContainerHighest: surfaceHigh,
     onSurfaceVariant: onSurfaceVariant,
     outline: outline,
+    outlineVariant: outline,
+  );
+  final base = ThemeData(brightness: brightness, fontFamily: 'Pretendard', useMaterial3: true).textTheme;
+  TextStyle? t(TextStyle? s, double size, FontWeight w, [double? height]) =>
+      s?.copyWith(fontSize: size, fontWeight: w, height: height, color: onSurface, letterSpacing: 0);
+  final text = base.copyWith(
+    titleLarge: t(base.titleLarge, Look.title, FontWeight.w600),
+    titleMedium: t(base.titleMedium, Look.group, FontWeight.w600),
+    titleSmall: t(base.titleSmall, Look.body, FontWeight.w600),
+    bodyLarge: t(base.bodyLarge, Look.body, FontWeight.w400, 1.4),
+    bodyMedium: t(base.bodyMedium, Look.body, FontWeight.w400, 1.4),
+    bodySmall: t(base.bodySmall, Look.sub, FontWeight.w400),
+    labelLarge: t(base.labelLarge, Look.body, FontWeight.w600),
+    labelMedium: t(base.labelMedium, Look.sub, FontWeight.w600),
+    labelSmall: t(base.labelSmall, Look.chip, FontWeight.w600),
+  );
+  final line = BorderSide(color: outline);
+  final corners = RoundedRectangleBorder(borderRadius: Look.corners);
+  final press = WidgetStatePropertyAll(onSurface.withValues(alpha: Look.pressTint));
+  // 채움 없이 테만 — 주 동작은 강조 테+글자, 일반은 기본 테 + 글자색(4장 형태 규칙).
+  ButtonStyle outlined(Color ink, Color edge) => ButtonStyle(
+    backgroundColor: const WidgetStatePropertyAll(Colors.transparent),
+    foregroundColor: WidgetStateProperty.resolveWith(
+      (s) => s.contains(WidgetState.disabled) ? onSurfaceVariant : ink,
+    ),
+    side: WidgetStateProperty.resolveWith(
+      (s) => BorderSide(color: s.contains(WidgetState.disabled) ? outline : edge),
+    ),
+    overlayColor: press,
+    shape: WidgetStatePropertyAll(corners),
+    minimumSize: const WidgetStatePropertyAll(Size(Look.tap, Look.buttonH)),
+    padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: Look.buttonPadX)),
+    textStyle: WidgetStatePropertyAll(text.labelLarge),
+    elevation: const WidgetStatePropertyAll(0),
   );
   return ThemeData(
     fontFamily: 'Pretendard',
     useMaterial3: true,
     colorScheme: scheme,
+    textTheme: text,
     scaffoldBackgroundColor: background,
+    canvasColor: background,
     appBarTheme: AppBarTheme(
       backgroundColor: background,
-      foregroundColor: scheme.onSurface,
+      foregroundColor: onSurface,
       elevation: 0,
       scrolledUnderElevation: 0,
       centerTitle: false,
+      toolbarHeight: Look.appBarH,
+      titleTextStyle: text.titleLarge,
+      shape: Border(bottom: line),
     ),
-    dividerTheme: DividerThemeData(
-      color: scheme.outline,
-      space: 1,
-      thickness: 1,
+    tabBarTheme: TabBarThemeData(
+      labelColor: primary,
+      unselectedLabelColor: onSurfaceVariant,
+      labelStyle: text.labelLarge,
+      unselectedLabelStyle: text.labelLarge?.copyWith(fontWeight: FontWeight.w400),
+      dividerColor: outline,
+      indicatorSize: TabBarIndicatorSize.label,
+      indicator: UnderlineTabIndicator(borderSide: BorderSide(color: primary, width: 2)),
+      splashFactory: NoSplash.splashFactory,
+      overlayColor: press,
     ),
+    dividerTheme: DividerThemeData(color: outline, space: 1, thickness: 1),
     cardTheme: CardThemeData(
       elevation: 0,
-      color: scheme.surface,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: BorderSide(color: scheme.outline),
-      ),
+      color: Colors.transparent,
+      shape: Border(bottom: line),
       margin: EdgeInsets.zero,
     ),
+    listTileTheme: ListTileThemeData(
+      minTileHeight: Look.row1,
+      minVerticalPadding: 8,
+      contentPadding: const EdgeInsets.symmetric(horizontal: Look.pagePad),
+      iconColor: onSurfaceVariant,
+      titleTextStyle: text.bodyLarge,
+      subtitleTextStyle: text.bodySmall?.copyWith(color: onSurfaceVariant),
+    ),
     inputDecorationTheme: InputDecorationTheme(
-      filled: true,
-      fillColor: scheme.surface,
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(8),
-        borderSide: BorderSide(color: scheme.outline),
-      ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(8),
-        borderSide: BorderSide(color: scheme.outline),
-      ),
+      filled: false,
+      hintStyle: TextStyle(color: onSurfaceVariant),
+      floatingLabelBehavior: FloatingLabelBehavior.never,
+      border: OutlineInputBorder(borderRadius: Look.corners, borderSide: line),
+      enabledBorder: OutlineInputBorder(borderRadius: Look.corners, borderSide: line),
       focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(8),
-        borderSide: BorderSide(color: scheme.primary, width: 1.5),
+        borderRadius: Look.corners,
+        borderSide: BorderSide(color: primary),
       ),
+      constraints: const BoxConstraints(minHeight: Look.tap),
       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
     ),
-    filledButtonTheme: FilledButtonThemeData(
-      style: FilledButton.styleFrom(
-        minimumSize: const Size(44, 48),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+    filledButtonTheme: FilledButtonThemeData(style: outlined(primary, primary)),
+    outlinedButtonTheme: OutlinedButtonThemeData(style: outlined(onSurface, outline)),
+    elevatedButtonTheme: ElevatedButtonThemeData(style: outlined(onSurface, outline)),
+    textButtonTheme: TextButtonThemeData(
+      style: ButtonStyle(
+        foregroundColor: WidgetStatePropertyAll(primary),
+        overlayColor: press,
+        shape: WidgetStatePropertyAll(corners),
+        minimumSize: const WidgetStatePropertyAll(Size(Look.tap, Look.buttonH)),
+        textStyle: WidgetStatePropertyAll(text.labelLarge),
       ),
     ),
-    snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
+    iconButtonTheme: IconButtonThemeData(
+      style: IconButton.styleFrom(
+        foregroundColor: onSurface,
+        minimumSize: const Size(Look.tap, Look.tap),
+        iconSize: Look.iconSize,
+        shape: corners,
+      ),
+    ),
+    segmentedButtonTheme: SegmentedButtonThemeData(
+      style: ButtonStyle(
+        backgroundColor: const WidgetStatePropertyAll(Colors.transparent),
+        foregroundColor: WidgetStateProperty.resolveWith(
+          (s) => s.contains(WidgetState.selected) ? primary : onSurfaceVariant,
+        ),
+        side: WidgetStateProperty.resolveWith(
+          (s) => BorderSide(color: s.contains(WidgetState.selected) ? primary : outline),
+        ),
+        overlayColor: press,
+        shape: WidgetStatePropertyAll(corners),
+        minimumSize: const WidgetStatePropertyAll(Size(Look.tap, Look.buttonH)),
+        textStyle: WidgetStatePropertyAll(text.labelLarge),
+      ),
+    ),
+    chipTheme: ChipThemeData(
+      backgroundColor: Colors.transparent,
+      selectedColor: Colors.transparent,
+      disabledColor: Colors.transparent,
+      checkmarkColor: primary,
+      side: WidgetStateBorderSide.resolveWith(
+        (s) => BorderSide(color: s.contains(WidgetState.selected) ? primary : outline),
+      ),
+      labelStyle: text.labelMedium?.copyWith(color: onSurface),
+      secondaryLabelStyle: text.labelMedium?.copyWith(color: primary),
+      shape: corners,
+      padding: const EdgeInsets.symmetric(horizontal: Look.chipPadX),
+    ),
+    checkboxTheme: CheckboxThemeData(
+      fillColor: const WidgetStatePropertyAll(Colors.transparent),
+      checkColor: WidgetStatePropertyAll(primary),
+      side: WidgetStateBorderSide.resolveWith(
+        (s) => BorderSide(color: s.contains(WidgetState.selected) ? primary : outline),
+      ),
+    ),
+    switchTheme: SwitchThemeData(
+      trackColor: const WidgetStatePropertyAll(Colors.transparent),
+      trackOutlineColor: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.selected) ? primary : outline,
+      ),
+      thumbColor: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.selected) ? primary : onSurfaceVariant,
+      ),
+    ),
+    dialogTheme: DialogThemeData(
+      backgroundColor: Color.alphaBlend(surfaceHigh, background),
+      shape: RoundedRectangleBorder(borderRadius: Look.corners, side: line),
+      titleTextStyle: text.titleLarge,
+      contentTextStyle: text.bodyMedium,
+    ),
+    bottomSheetTheme: BottomSheetThemeData(
+      backgroundColor: background,
+      shape: RoundedRectangleBorder(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(Look.radius)),
+        side: line,
+      ),
+    ),
+    popupMenuTheme: PopupMenuThemeData(
+      color: Color.alphaBlend(surfaceHigh, background),
+      shape: RoundedRectangleBorder(borderRadius: Look.corners, side: line),
+      textStyle: text.bodyMedium,
+    ),
+    progressIndicatorTheme: ProgressIndicatorThemeData(color: primary, linearTrackColor: Colors.transparent),
+    snackBarTheme: SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: Look.corners),
+    ),
   );
 }
 
@@ -388,7 +523,7 @@ class AccountWaitingScreen extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             OutlinedButton(
-              style: OutlinedButton.styleFrom(minimumSize: const Size(44, 48)),
+              style: OutlinedButton.styleFrom(minimumSize: const Size(Look.tap, Look.buttonH)),
               onPressed: connection.logout,
               child: const Text('로그아웃'),
             ),

@@ -252,7 +252,7 @@ class _ImageTile extends StatelessWidget {
     final scheme = theme.colorScheme;
     return InkWell(
       onTap: () => openShareFile(context, server, file),
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(6),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -260,7 +260,7 @@ class _ImageTile extends StatelessWidget {
             child: Container(
               decoration: BoxDecoration(
                 border: Border.all(color: scheme.outlineVariant),
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(6),
               ),
               clipBehavior: Clip.antiAlias,
               child: _NetImage(

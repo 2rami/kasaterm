@@ -157,7 +157,7 @@ class _NachoTaskScreenState extends State<NachoTaskScreen> {
             if (_image(e.files[i])) (e.seq, i, e.files[i]),
     ];
     return [
-      SelectableText(t.request, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600, height: 1.35)),
+      SelectableText(t.request, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, height: 1.35)),
       const SizedBox(height: 8),
       Wrap(
         spacing: 6,
@@ -374,18 +374,20 @@ class _Box extends StatelessWidget {
     return Container(
       margin: const EdgeInsets.only(top: 12),
       padding: const EdgeInsets.all(14),
+      // 카드 채움 없이 — 경고만 danger 12% 바탕, 나머지는 테 하나.
       decoration: BoxDecoration(
-        color: warn ? scheme.errorContainer : scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
+        color: warn ? scheme.errorContainer : null,
+        borderRadius: BorderRadius.circular(6),
+        border: warn ? null : Border.all(color: scheme.outline),
       ),
       child: DefaultTextStyle.merge(
-        style: TextStyle(color: warn ? scheme.onErrorContainer : scheme.onSurface, fontSize: 14, height: 1.35),
+        style: TextStyle(color: warn ? scheme.onErrorContainer : scheme.onSurface, fontSize: 15, height: 1.35),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Semantics(
               header: true,
-              child: Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
+              child: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
             ),
             const SizedBox(height: 6),
             ...children,
@@ -407,7 +409,7 @@ class _Shot extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.only(top: 8),
     child: ClipRRect(
-      borderRadius: BorderRadius.circular(10),
+      borderRadius: BorderRadius.circular(6),
       child: ServerImage(
         server: server, uri: url,
         fit: BoxFit.fitWidth,

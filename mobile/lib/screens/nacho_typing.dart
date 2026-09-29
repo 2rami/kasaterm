@@ -60,15 +60,15 @@ class _NachoTypingState extends State<NachoTyping>
       child: Align(
         alignment: Alignment.centerLeft,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 4, 40, 4),
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Container(
                 padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
                 decoration: BoxDecoration(
-                  color: scheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: scheme.outline),
                 ),
                 child: ExcludeSemantics(
                   child: AnimatedBuilder(

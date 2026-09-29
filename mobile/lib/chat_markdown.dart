@@ -20,18 +20,20 @@ MarkdownStyleSheet chatMarkdownStyle(
   );
   return MarkdownStyleSheet.fromTheme(theme).copyWith(
     p: base,
+    // 굵기는 400·600 두 가지 — 마크다운 굵게도 600.
+    strong: base.copyWith(fontWeight: FontWeight.w600),
     listBullet: base,
     tableBody: base.copyWith(fontSize: size - 2),
-    tableHead: base.copyWith(fontSize: size - 2, fontWeight: FontWeight.w700),
+    tableHead: base.copyWith(fontSize: size - 2, fontWeight: FontWeight.w600),
     tableHeadAlign: TextAlign.left,
-    h1: base.copyWith(fontSize: size + 3, fontWeight: FontWeight.w700),
-    h2: base.copyWith(fontSize: size + 2, fontWeight: FontWeight.w700),
-    h3: base.copyWith(fontSize: size + 1, fontWeight: FontWeight.w700),
+    h1: base.copyWith(fontSize: size + 3, fontWeight: FontWeight.w600),
+    h2: base.copyWith(fontSize: size + 1, fontWeight: FontWeight.w600),
+    h3: base.copyWith(fontSize: size, fontWeight: FontWeight.w600),
     code: mono,
     codeblockPadding: const EdgeInsets.all(10),
     codeblockDecoration: BoxDecoration(
       color: codeBg,
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(6),
     ),
     blockquoteDecoration: BoxDecoration(
       border: Border(left: BorderSide(color: scheme.outline, width: 3)),

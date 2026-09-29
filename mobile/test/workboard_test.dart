@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kasaterm_mobile/main.dart';
 import 'package:kasaterm_mobile/nacho.dart';
 import 'package:kasaterm_mobile/nacho_student.dart';
 import 'package:kasaterm_mobile/screens/workboard_view.dart';
@@ -226,7 +227,7 @@ Future<({Future<void> Function(WidgetTester) close})> _pumpDemoBoard(
   final students = StudentLookup(server);
   await tester.pumpWidget(
     MaterialApp(
-      theme: ThemeData(colorSchemeSeed: const Color(0xff4a90e2)),
+      theme: buildTheme(Brightness.light),
       home: MediaQuery(
         data: const MediaQueryData(
           size: Size(390, 844),

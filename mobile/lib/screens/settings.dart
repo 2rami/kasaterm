@@ -5,6 +5,7 @@ import '../server.dart';
 import 'browser_device.dart';
 import 'dev_server.dart';
 import '../theme_prefs.dart';
+import '../look.dart';
 import 'hub.dart' show parseHexColor;
 
 class SettingsScreen extends StatefulWidget {
@@ -106,7 +107,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('설정')),
       body: ListView(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.symmetric(vertical: 8),
         children: [
           Card(
             child: Column(
@@ -131,6 +132,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       }),
                     ),
                   ),
+                const Divider(height: 1),
                 if (server.account != null)
                   const ListTile(leading: Icon(Icons.notifications_off_outlined),
                     title: Text('계정 알림은 준비 중'),
@@ -147,7 +149,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: Look.groupGap),
           _SectionTitle('학생'),
           Card(
             child: ListTile(
@@ -167,7 +169,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onTap: () => openDevServer(context, server: server),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: Look.groupGap),
           _SectionTitle('이 폰'),
           Card(
             child: Padding(
@@ -212,7 +214,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: Look.groupGap),
           _SectionTitle('데스크톱 외형'),
           if (_loading)
             const Padding(
@@ -249,10 +251,10 @@ class _SectionTitle extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+      padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupTitleGap),
       child: Text(
         text,
-        style: theme.textTheme.labelLarge?.copyWith(
+        style: theme.textTheme.labelMedium?.copyWith(
           color: theme.colorScheme.onSurfaceVariant,
         ),
       ),

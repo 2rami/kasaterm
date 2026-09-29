@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../hub_model.dart';
 import '../hub_prefs.dart';
+import '../look.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
@@ -268,13 +269,13 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
             );
           }
         }
-        rooms.add(_RoomBox(accent: tint, children: inside));
+        rooms.add(_RoomBox(children: inside));
       }
       if (rooms.isNotEmpty) children.add(Masonry(children: rooms));
     }
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
+      padding: const EdgeInsets.fromLTRB(Look.pagePad, 0, Look.pagePad, Look.groupGap),
       children: children,
     );
   }
@@ -350,8 +351,8 @@ class _ViewMenu extends StatelessWidget {
   );
 }
 
-/// 기계 머리글 — 기계색 띠에 그 기계 모양 아이콘. 안 닿는 기계는 빨간 「연결 안 됨」
-/// 칩을 달아, 밖에서 열었을 때 어느 기계가 빠졌는지 한눈에 갈린다.
+/// 기계 머리글 — 묶음 제목(13/600 흐림) 한 줄. 기계색은 아이콘에만 둔다. 안 닿는 기계는
+/// 「연결 안 됨」을 위험색 글자로 달아, 밖에서 열었을 때 어느 기계가 빠졌는지 한눈에 갈린다.
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader({
     required this.title,
@@ -365,7 +366,7 @@ class _SectionHeader extends StatelessWidget {
 
   final String title;
 
-  /// 그 기계의 색 — 아래 방 상자의 왼쪽 줄과 같은 색.
+  /// 그 기계의 색 — 머리글 아이콘.
   final Color color;
   final bool online;
   final bool folded;
@@ -381,76 +382,39 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final ink = online ? scheme.onSurface : scheme.onSurfaceVariant;
-    final tint = online ? color : scheme.outline;
-    final radius = BorderRadius.circular(10);
-    return Container(
-      margin: EdgeInsets.fromLTRB(0, 14, 0, folded ? 0 : 8),
-      decoration: BoxDecoration(
-        color: tint.withValues(alpha: online ? 0.13 : 0.08),
-        borderRadius: radius,
-      ),
+    final dim = scheme.onSurfaceVariant;
+    final label = theme.textTheme.labelMedium;
+    return Padding(
+      padding: EdgeInsets.only(top: Look.groupGap - 8, bottom: folded ? 0 : Look.groupTitleGap - 8),
       child: InkWell(
         onTap: onTap,
-        borderRadius: radius,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(10, 7, 8, 7),
+        borderRadius: Look.corners,
+        child: SizedBox(
+          height: Look.tap,
           child: Row(
             children: [
-              Icon(machineIcon(title), size: 18, color: tint),
+              Icon(machineIcon(title), size: 16, color: online ? color : scheme.outline),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   title,
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    color: ink,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  style: label?.copyWith(color: dim),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
               if (!online)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 7,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: scheme.error.withValues(alpha: 0.14),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    '연결 안 됨',
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: scheme.error,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              if (trailing != null)
-                Text(
-                  trailing!,
-                  style: theme.textTheme.labelMedium?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
+                Text('연결 안 됨', style: label?.copyWith(color: scheme.error)),
+              if (trailing != null) Text(trailing!, style: label?.copyWith(color: dim)),
               if (onAdd != null)
-                // 줄 높이를 안 바꾸는 크기 — 기본 IconButton 은 48px 라 목록 전체가 밀린다.
-                SizedBox.square(
-                  dimension: 22,
-                  child: IconButton(
-                    tooltip: '새 방',
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                    onPressed: onAdd,
-                    icon: Icon(Icons.add_box_outlined, size: 20, color: ink),
-                  ),
+                IconButton(
+                  tooltip: '새 방',
+                  onPressed: onAdd,
+                  icon: Icon(Icons.add, color: dim),
                 ),
-              const SizedBox(width: 4),
               AnimatedRotation(
                 turns: folded ? -0.25 : 0,
                 duration: const Duration(milliseconds: 160),
-                child: Icon(Icons.expand_more, size: 20, color: ink),
+                child: Icon(Icons.expand_more, size: Look.iconSize, color: dim),
               ),
             ],
           ),
@@ -460,50 +424,23 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
-/// 방 하나를 한 판으로 묶는다 — 방이 여럿 펼쳐졌을 때 어디까지가 한 방인지 보이게.
+/// 방 하나 — 판 없이 제목 줄과 학생 줄, 아래 선 하나로 다음 방과 가른다(카드 금지).
 class _RoomBox extends StatelessWidget {
-  const _RoomBox({required this.children, this.accent});
+  const _RoomBox({required this.children});
 
   final List<Widget> children;
 
-  /// 기계색 — 왼쪽 줄로 「어느 기계의 방」인지 머리글과 잇는다.
-  final Color? accent;
-
   @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    // 색줄은 따로 얹는다 — 둥근 모서리 상자엔 변마다 다른 색의 테를 못 준다.
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow.withValues(alpha: 0.85),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.6)),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Stack(
-        children: [
-          if (accent != null)
-            Positioned(
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: 3,
-              child: ColoredBox(color: accent!.withValues(alpha: 0.9)),
-            ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: children,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.only(bottom: 8),
+    decoration: BoxDecoration(
+      border: Border(bottom: BorderSide(color: Theme.of(context).colorScheme.outline)),
+    ),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children),
+  );
 }
 
+/// 방 제목 줄 40 — 방 이름 15/600 과 경로 13 흐림. 서버는 「이름 · 경로」 한 줄로 준다.
 class _RoomHeader extends StatelessWidget {
   const _RoomHeader({required this.title, this.onMenu});
 
@@ -515,44 +452,32 @@ class _RoomHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    // 방 이름은 판의 제목이다 — 회색 한 줄로는 방이 여럿일 때 경계가 안 보였다.
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(2, 6, 2, 6),
+    final cut = title.indexOf(' · ');
+    final name = cut < 0 ? title : title.substring(0, cut);
+    final path = cut < 0 ? '' : title.substring(cut + 3);
+    return SizedBox(
+      height: Look.roomHeadH,
       child: Row(
         children: [
-          Container(
-            width: 3,
-            height: 14,
-            decoration: BoxDecoration(
-              color: theme.colorScheme.primary,
-              borderRadius: BorderRadius.circular(2),
-            ),
+          Flexible(
+            child: Text(name, style: theme.textTheme.titleSmall, overflow: TextOverflow.ellipsis),
           ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              title,
-              style: theme.textTheme.titleSmall?.copyWith(
-                color: theme.colorScheme.onSurface,
-                fontWeight: FontWeight.w700,
+          if (path.isNotEmpty) ...[
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                path,
+                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                overflow: TextOverflow.ellipsis,
               ),
-              overflow: TextOverflow.ellipsis,
             ),
-          ),
+          ] else
+            const Spacer(),
           if (onMenu != null)
-            SizedBox.square(
-              dimension: 20,
-              child: IconButton(
-                tooltip: '방 메뉴',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-                onPressed: onMenu,
-                icon: Icon(
-                  Icons.more_horiz,
-                  size: 18,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
+            IconButton(
+              tooltip: '방 메뉴',
+              onPressed: onMenu,
+              icon: Icon(Icons.more_horiz, color: theme.colorScheme.onSurfaceVariant),
             ),
         ],
       ),
@@ -617,13 +542,19 @@ class _MiniMap extends StatelessWidget {
     final hidden = room.unplaced;
     final undocked = room.undocked;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(2, 0, 2, 8),
+      padding: const EdgeInsets.only(bottom: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          AspectRatio(
-            aspectRatio: (room.aspect ?? _defaultAspect).clamp(1.0, 3.2),
-            child: _board(scheme),
+          // 지도가 첫 화면을 먹으면 학생 줄이 화면 절반 아래로 밀린다(475pt) — 높이에 상한.
+          LayoutBuilder(
+            builder: (context, box) => SizedBox(
+              height: math.min(
+                box.maxWidth / (room.aspect ?? _defaultAspect).clamp(1.0, 3.2),
+                Look.isPad(context) ? Look.mapMaxPad : Look.mapMaxPhone,
+              ),
+              child: _board(scheme),
+            ),
           ),
           if (hidden.isNotEmpty)
             Padding(
@@ -688,7 +619,7 @@ class _MiniMap extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: Look.corners,
       ),
       clipBehavior: Clip.antiAlias,
       child: LayoutBuilder(
@@ -837,12 +768,9 @@ class _MiniCellState extends State<_MiniCell> {
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeOut,
           decoration: BoxDecoration(
-            color: accent.withValues(alpha: waiting ? 0.26 : 0.12),
-            borderRadius: BorderRadius.circular(5),
-            border: Border.all(
-              color: edge.withValues(alpha: waiting ? 0.95 : 0.45),
-              width: waiting ? 1.5 : 0.8,
-            ),
+            color: accent.withValues(alpha: 0.12),
+            borderRadius: Look.corners,
+            border: waiting ? Border.all(color: edge, width: 1.5) : null,
           ),
           clipBehavior: Clip.antiAlias,
           child: Material(
@@ -1091,86 +1019,84 @@ class _PaneTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final accent = parseHexColor(pane.color) ?? scheme.primary;
     final slug = pane.slug;
     final st = StatusStyle.of(pane, scheme);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Card(
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          onLongPress: onLongPress,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
+    // 왼쪽 2px 띠는 데스크톱 사이드바와 같은 뜻 — 내 차례 주황, 하는 중 강조, 쉬는 중 없음.
+    final stripe = st.needsYou ? StatusStyle.attention : (st.live ? scheme.primary : null);
+    final second = pane.briefStatusParts.isNotEmpty
+        ? PaneStatusLine(pane: pane, brief: true)
+        : (pane.subtitle.isNotEmpty
+              ? Text(
+                  pane.subtitle,
+                  style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                )
+              : null);
+    return InkWell(
+      onTap: onTap,
+      onLongPress: onLongPress,
+      child: Container(
+        constraints: const BoxConstraints(minHeight: Look.row2),
+        decoration: BoxDecoration(
+          border: Border(
+            top: BorderSide(color: scheme.outline),
+            left: BorderSide(color: stripe ?? Colors.transparent, width: Look.stripe),
+          ),
+        ),
+        padding: const EdgeInsets.fromLTRB(10, 8, 0, 8),
+        child: Row(
+          children: [
+            Hero(
+              tag: 'face-${pane.machine}-${pane.id}',
+              child: StatusRing(
+                style: st,
+                size: Look.face,
+                child: StudentFace(
+                  server: server,
+                  slug: slug,
+                  url: slug == null ? null : server.avatar(slug, machine: pane.machine),
+                  shell: pane.isShell,
+                  size: Look.face,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              flex: Look.nameFlex,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Container(width: 4, height: 60, color: accent),
-                  const SizedBox(width: 10),
-                  // 프사에 상태를 얹는다 — 작업 중이면 테가 돌고, 기다리면 주황 테.
-                  Hero(
-                    tag: 'face-${pane.machine}-${pane.id}',
-                    child: StatusRing(
-                      style: st,
-                      size: 40,
-                      child: StudentFace(
-                        server: server,
-                        slug: slug,
-                        url: slug == null
-                            ? null
-                            : server.avatar(slug, machine: pane.machine),
-                        shell: pane.isShell,
-                        size: 40,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                pane.displayName,
-                                style: theme.textTheme.titleSmall,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            if ((pane.session ?? '').isNotEmpty) ...[
-                              const SizedBox(width: 6),
-                              Flexible(child: SessionTag(pane.session!)),
-                            ],
-                            if ((pane.mirrorOf ?? '').isNotEmpty) ...[
-                              const SizedBox(width: 6),
-                              MirrorTag(pane.mirrorOf!),
-                            ],
-                          ],
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          pane.displayName,
+                          style: theme.textTheme.titleSmall,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        if (pane.subtitle.isNotEmpty)
-                          Text(
-                            pane.subtitle,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: scheme.onSurfaceVariant,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        if (pane.briefStatusParts.isNotEmpty)
-                          PaneStatusLine(pane: pane, brief: true),
+                      ),
+                      if ((pane.session ?? '').isNotEmpty) ...[
+                        const SizedBox(width: 6),
+                        Flexible(child: SessionTag(pane.session!)),
                       ],
-                    ),
+                      if ((pane.mirrorOf ?? '').isNotEmpty) ...[
+                        const SizedBox(width: 6),
+                        MirrorTag(pane.mirrorOf!),
+                      ],
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  StatusChip(pane: pane),
-                  const SizedBox(width: 10),
+                  if (second != null) ...[const SizedBox(height: Look.rowGap), second],
                 ],
               ),
-            ],
-          ),
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              flex: Look.statusFlex,
+              child: Align(alignment: Alignment.centerRight, child: StatusChip(pane: pane)),
+            ),
+          ],
         ),
       ),
     );

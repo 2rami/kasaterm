@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'claude_style.dart';
+import 'look.dart';
 import 'server.dart';
 
 /// 학생 상태의 갈래 — 색·아이콘·말이 여기 하나로 묶인다.
@@ -184,12 +185,9 @@ class StatusChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final st = StatusStyle.of(pane, scheme);
-    final filled = st.needsYou;
-    final fg = filled ? Colors.white : st.color;
-    final bg = filled ? st.color : st.color.withValues(alpha: 0.13);
     final lead = st.live
         ? PulseDot(color: st.color, size: 7)
-        : Icon(st.icon, size: 13, color: fg);
+        : Icon(st.icon, size: 13, color: st.color);
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 260),
       switchInCurve: Curves.easeOutCubic,
@@ -201,12 +199,14 @@ class StatusChip extends StatelessWidget {
           child: child,
         ),
       ),
+      // 채움 없이 상태색 테와 글자 — 「내 차례」도 굵기로만 세운다(4장 형태 규칙).
       child: Container(
         key: ValueKey('${st.mood}-${st.label}'),
-        padding: EdgeInsets.symmetric(horizontal: compact ? 5 : 9, vertical: 4),
+        height: Look.chipH,
+        padding: EdgeInsets.symmetric(horizontal: compact ? 5 : Look.chipPadX),
         decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(999),
+          borderRadius: Look.corners,
+          border: Border.all(color: st.color.withValues(alpha: st.needsYou ? 1 : 0.55)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -214,16 +214,13 @@ class StatusChip extends StatelessWidget {
             lead,
             if (!compact) ...[
               const SizedBox(width: 5),
-              // 「백그라운드 · 설명」처럼 긴 말은 칩 폭에서 잘린다 — 줄을 늘리면 타일이 흔들린다.
+              // 「백그라운드 · 설명」처럼 긴 말은 칩 폭(줄의 40%)에서 잘린다 — 이름을 밀어내지 않는다.
               Flexible(
                 child: Text(
                   st.label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: fg,
-                    fontWeight: filled ? FontWeight.w700 : FontWeight.w600,
-                  ),
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(color: st.color),
                 ),
               ),
             ],
@@ -234,8 +231,6 @@ class StatusChip extends StatelessWidget {
   }
 }
 
-/// 처음 그려질 때 살짝 떠오르며 나타난다 — 목록이 한꺼번에 툭 박히지 않게.
-/// 다시 그려도 값이 그대로면 움직이지 않는다(5초 폴링마다 흔들리면 안 된다).
 class Appear extends StatelessWidget {
   const Appear({super.key, required this.child, this.delayIndex = 0});
 
@@ -490,7 +485,7 @@ class PaneStatusLine extends StatelessWidget {
                       style: pct != null && p == '$pct%' && pct >= 80
                           ? TextStyle(
                               color: StatusStyle.attention,
-                              fontWeight: FontWeight.w700,
+                              fontWeight: FontWeight.w600,
                             )
                           : null,
                     ),
@@ -548,8 +543,8 @@ class MirrorTag extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withValues(alpha: 0.6)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,

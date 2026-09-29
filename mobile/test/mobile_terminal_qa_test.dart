@@ -245,7 +245,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         tester.getRect(find.byKey(const Key('account-input'))).top,
-        closeTo(108, 0.5),
+        closeTo(123, 0.5),
       );
       await expectLater(
         find.byType(MaterialApp),

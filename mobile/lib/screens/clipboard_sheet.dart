@@ -177,7 +177,7 @@ class _ClipboardSheetState extends State<_ClipboardSheet> {
                             fontFamily: it.secret ? null : 'TermMono',
                             fontSize: 13,
                             fontWeight: i == 0
-                                ? FontWeight.w700
+                                ? FontWeight.w600
                                 : FontWeight.w400,
                           ),
                         ),

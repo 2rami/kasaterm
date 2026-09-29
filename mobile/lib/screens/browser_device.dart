@@ -207,7 +207,7 @@ class _BrowserDeviceSheetState extends State<_BrowserDeviceSheet> {
       title: Text(
         label,
         style: TextStyle(
-          fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
+          fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
         ),
       ),
       subtitle: hint == null ? null : Text(hint),

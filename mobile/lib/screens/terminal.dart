@@ -10,12 +10,14 @@ import '../live_input.dart';
 import '../image_attachment.dart';
 import '../photo_attachment_button.dart';
 import '../hub_model.dart';
+import '../look.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
 import '../term_session.dart';
 import '../theme_prefs.dart';
 import 'conversation_view.dart';
+import 'controls.dart';
 
 /// 학생 하나의 화면. 위는 격자(또는 그림), 아래는 키 줄과 답장 입력창.
 class TerminalScreen extends StatefulWidget {
@@ -330,11 +332,14 @@ class _TerminalScreenState extends State<TerminalScreen>
       final slug = pane.slug;
       final canChat = _canChat(pane);
       final chat = canChat && paneView.value == PaneView.chat;
+      // 자판이 뜨면 머리·전환 줄을 앱바 한 줄로 접는다 — 글 보이는 높이가 307pt(35%)까지 줄었다.
+      final typing = MediaQuery.viewInsetsOf(context).bottom > 0;
       return _StudentFrame(
         accent: accent,
         child: Scaffold(
           appBar: AppBar(
             titleSpacing: 0,
+            toolbarHeight: typing ? Look.tap : Look.appBarH,
             title: Row(
               children: [
                 Hero(
@@ -347,7 +352,7 @@ class _TerminalScreenState extends State<TerminalScreen>
                         ? null
                         : widget.server.avatar(slug, machine: pane.machine),
                     shell: pane.isShell,
-                    size: 40,
+                    size: typing ? 28 : 40,
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -422,7 +427,7 @@ class _TerminalScreenState extends State<TerminalScreen>
                 ),
               ],
             ),
-            bottom: canChat ? const PaneViewSwitch() : null,
+            bottom: canChat && !typing ? const PaneViewSwitch() : null,
             actions: [
               // 글자 선택·접기는 격자 얘기다 — 대화 보기에선 말풍선을 꾹 눌러 복사한다.
               if (!chat) ...[
@@ -663,8 +668,8 @@ class _NoteBar extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     return Container(
       width: double.infinity,
-      color: scheme.surfaceContainerHighest,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(border: Border(top: BorderSide(color: scheme.outline))),
+      padding: const EdgeInsets.symmetric(horizontal: Look.pagePad, vertical: 8),
       child: Text(text, style: Theme.of(context).textTheme.bodySmall),
     );
   }
@@ -748,31 +753,29 @@ class _Key extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // 채움 없이 테만 — 켜진 ctrl 은 강조 테·글자(4장 형태 규칙).
+    final ink = selected ? scheme.primary : scheme.onSurface;
     return Material(
-      color: selected ? scheme.primary : scheme.surface,
+      color: Colors.transparent,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(7),
+        borderRadius: Look.corners,
         side: BorderSide(color: selected ? scheme.primary : scheme.outline),
       ),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(7),
+        borderRadius: Look.corners,
         child: Container(
-          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+          constraints: const BoxConstraints(minWidth: Look.tap, minHeight: Look.tap),
           padding: const EdgeInsets.symmetric(horizontal: 10),
           alignment: Alignment.center,
           child: icon != null
-              ? Icon(
-                  icon,
-                  size: 18,
-                  color: selected ? scheme.onPrimary : scheme.onSurface,
-                )
+              ? Icon(icon, size: Look.iconSize, color: ink)
               : Text(
                   label!,
                   style: TextStyle(
                     fontFamily: 'TermMono',
-                    fontSize: 12,
-                    color: selected ? scheme.onPrimary : scheme.onSurface,
+                    fontSize: Look.sub,
+                    color: ink,
                   ),
                 ),
         ),
@@ -816,7 +819,7 @@ class _ReplyBar extends StatelessWidget {
             autocorrect: false,
             enableSuggestions: false,
             minLines: 1,
-            maxLines: 4,
+            maxLines: Look.inputMaxLines,
             textInputAction: TextInputAction.send,
             onSubmitted: (_) => onSend(),
             // 16px 아래로 내리면 iOS 가 포커스 때 화면을 확대한다.
@@ -824,11 +827,13 @@ class _ReplyBar extends StatelessWidget {
             decoration: const InputDecoration(hintText: '적어 두고 한 번에 보내기…'),
           ),
         ),
-        const SizedBox(width: 6),
-        IconButton.filled(
-          onPressed: enabled ? onSend : null,
-          icon: const Icon(Icons.send),
-          tooltip: '보내기',
+        const SizedBox(width: 8),
+        ListenableBuilder(
+          listenable: controller,
+          builder: (context, _) => SendButton(
+            ready: controller.text.trim().isNotEmpty,
+            onPressed: enabled ? onSend : null,
+          ),
         ),
       ],
     ),
@@ -889,7 +894,6 @@ class _LiveBar extends StatelessWidget {
               decoration: InputDecoration(
                 hintText: '치는 대로 화면에 붙는다',
                 hintStyle: TextStyle(color: scheme.onSurfaceVariant),
-                isDense: true,
               ),
             ),
           ),

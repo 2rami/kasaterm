@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:kasaterm_mobile/main.dart';
 import 'package:kasaterm_mobile/screens/hub.dart';
 import 'package:kasaterm_mobile/server.dart';
 
@@ -126,7 +127,7 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
-        theme: ThemeData(colorSchemeSeed: const Color(0xff3b82f6)),
+        theme: buildTheme(Brightness.light),
         home: HubScreen(server: server, onChangeAddress: () async {}),
       ),
     );

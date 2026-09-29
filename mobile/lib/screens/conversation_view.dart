@@ -12,6 +12,8 @@ import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
 import '../term_session.dart';
+import '../look.dart';
+import 'controls.dart';
 
 /// 학생 화면의 두 얼굴 — 격자 그대로(터미널)와 말풍선(대화). 웹이 「웹 터미널」과
 /// 「대화 보기」를 주소 둘로 가른 것(2026-08-25)을 한 화면 안의 전환으로 옮겼다.
@@ -110,7 +112,7 @@ class ChatComposer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(4, 4, 8, 8),
+    padding: const EdgeInsets.fromLTRB(4, 8, Look.pagePad, 8),
     child: Row(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
@@ -121,14 +123,11 @@ class ChatComposer extends StatelessWidget {
             focusNode: focusNode,
             enabled: enabled,
             minLines: 1,
-            maxLines: 5,
+            maxLines: Look.inputMaxLines,
             textInputAction: TextInputAction.newline,
             // 16px 아래로 내리면 iOS 가 포커스 때 화면을 확대한다.
             style: const TextStyle(fontSize: 16),
-            decoration: const InputDecoration(
-              hintText: '메시지 보내기',
-              isDense: true,
-            ),
+            decoration: const InputDecoration(hintText: '메시지 보내기'),
           ),
         ),
         if (onStop != null) ...[
@@ -139,11 +138,13 @@ class ChatComposer extends StatelessWidget {
             tooltip: '멈추기 (esc)',
           ),
         ],
-        const SizedBox(width: 4),
-        IconButton.filled(
-          onPressed: enabled ? onSend : null,
-          icon: const Icon(Icons.send),
-          tooltip: '보내기',
+        const SizedBox(width: 8),
+        ListenableBuilder(
+          listenable: controller,
+          builder: (context, _) => SendButton(
+            ready: controller.text.trim().isNotEmpty,
+            onPressed: enabled ? onSend : null,
+          ),
         ),
       ],
     ),
@@ -423,7 +424,11 @@ class _ConversationViewState extends State<ConversationView>
               Positioned(
                 right: 12,
                 bottom: 12,
-                child: IconButton.filledTonal(
+                child: IconButton.outlined(
+                  style: IconButton.styleFrom(
+                    backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+                    side: BorderSide(color: Theme.of(context).colorScheme.outline),
+                  ),
                   onPressed: _toBottom,
                   tooltip: '맨 아래로',
                   icon: const Icon(Icons.keyboard_arrow_down),
@@ -517,10 +522,6 @@ class _ConversationViewState extends State<ConversationView>
   );
 }
 
-/// 모모톡의 선생님 말풍선 파랑 — 데스크톱 아로나와 같은 고정색이라 밝기와 무관하다.
-const _teacherBlue = Color(0xff3493f9);
-const _queuedBg = Color(0xfffff3d6);
-const _queuedInk = Color(0xff5f5000);
 
 class _Bubble extends StatelessWidget {
   const _Bubble({
@@ -548,14 +549,8 @@ class _Bubble extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final mine = bubble.mine;
-    final bg = mine
-        ? (bubble.queued ? _queuedBg : _teacherBlue)
-        : scheme.surface;
-    final ink = mine
-        ? (bubble.queued ? _queuedInk : Colors.white)
-        : scheme.onSurface;
-    final r = const Radius.circular(16);
-    final corner = const Radius.circular(4);
+    // 말풍선 채움 없이 이름 머리 + 글 — 나쵸 대화와 같은 기록형(카드·채움 금지).
+    final ink = mine && bubble.queued ? scheme.onSurfaceVariant : scheme.onSurface;
     final text = bubble.text;
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -566,7 +561,7 @@ class _Bubble extends StatelessWidget {
           mine
               ? Text(
                   text,
-                  style: TextStyle(fontSize: 15, height: 1.45, color: ink),
+                  style: TextStyle(fontSize: Look.body, height: 1.45, color: ink),
                 )
               : MarkdownBody(
                   data: text,
@@ -582,17 +577,7 @@ class _Bubble extends StatelessWidget {
       onLongPress: text.isEmpty ? null : () => _copy(context, text),
       child: Container(
         constraints: BoxConstraints(maxWidth: maxWidth),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.only(
-            topLeft: r,
-            topRight: r,
-            bottomLeft: mine ? r : corner,
-            bottomRight: mine ? corner : r,
-          ),
-          border: mine ? null : Border.all(color: scheme.outline),
-        ),
+        padding: const EdgeInsets.symmetric(vertical: 2),
         child: content,
       ),
     );
@@ -600,70 +585,42 @@ class _Bubble extends StatelessWidget {
     final meta = theme.textTheme.labelSmall?.copyWith(
       color: scheme.onSurfaceVariant,
     );
-    if (mine) {
-      return Padding(
-        padding: EdgeInsets.only(top: head ? 10 : 3),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            if (bubble.queued && head)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 3, right: 3),
-                child: Text(
-                  '예약 · 대기 중',
-                  style: meta?.copyWith(
-                    color: const Color(0xffb58a00),
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                if (clock != null) ...[
-                  Text(clock, style: meta),
-                  const SizedBox(width: 5),
-                ],
-                Flexible(child: box),
-              ],
-            ),
-          ],
-        ),
-      );
-    }
+    final who = mine ? '나' : name;
     return Padding(
-      padding: EdgeInsets.only(top: head ? 10 : 3),
+      padding: EdgeInsets.only(top: head ? 14 : 3),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(width: 30, child: tail ? face ?? _Initial(name) : null),
+          SizedBox(width: 30, child: !mine && head ? face ?? _Initial(name) : null),
           const SizedBox(width: 8),
-          Flexible(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (head)
                   Padding(
-                    padding: const EdgeInsets.only(left: 3, bottom: 3),
-                    child: Text(
-                      name,
-                      style: theme.textTheme.labelMedium?.copyWith(
-                        color: accent,
-                        fontWeight: FontWeight.w800,
-                      ),
+                    padding: const EdgeInsets.only(bottom: Look.rowGap),
+                    child: Row(
+                      children: [
+                        Text(
+                          who,
+                          style: theme.textTheme.labelMedium?.copyWith(
+                            color: mine ? scheme.primary : accent,
+                          ),
+                        ),
+                        if (mine && bubble.queued) ...[
+                          const SizedBox(width: 6),
+                          Text(
+                            '예약 · 대기 중',
+                            style: theme.textTheme.labelMedium?.copyWith(color: StatusStyle.attention),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Flexible(child: box),
-                    if (clock != null) ...[
-                      const SizedBox(width: 5),
-                      Text(clock, style: meta),
-                    ],
-                  ],
-                ),
+                box,
+                if (clock != null)
+                  Padding(padding: const EdgeInsets.only(top: 2), child: Text(clock, style: meta)),
               ],
             ),
           ),
@@ -720,7 +677,7 @@ class _Photo extends StatelessWidget {
         ),
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: Look.corners,
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxHeight: 200),
           child: Image.memory(bytes, fit: BoxFit.contain),
@@ -760,8 +717,7 @@ class _ToolRunCard extends StatelessWidget {
       padding: const EdgeInsets.only(top: 8, left: 38),
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: Look.corners,
           border: Border.all(color: scheme.outline),
         ),
         child: Column(
@@ -771,7 +727,7 @@ class _ToolRunCard extends StatelessWidget {
               InkWell(
                 onTap: () => onToggle(key),
                 child: ConstrainedBox(
-                  constraints: const BoxConstraints(minHeight: 36),
+                  constraints: const BoxConstraints(minHeight: Look.tap),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                     child: Row(
@@ -873,8 +829,8 @@ class _ToolRow extends StatelessWidget {
                   style: const TextStyle(
                     fontFamily: 'TermMono',
                     fontFamilyFallback: ['TermHangul', 'TermSymbol'],
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
+                    fontSize: Look.chip,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -898,7 +854,7 @@ class _ToolRow extends StatelessWidget {
                   style: TextStyle(
                     fontFamily: 'TermMono',
                     fontFamilyFallback: const ['TermHangul', 'TermSymbol'],
-                    fontSize: 11.5,
+                    fontSize: Look.chip,
                     height: 1.35,
                     color: tool.error ? scheme.error : scheme.onSurface,
                   ),
@@ -947,9 +903,9 @@ class _Fold extends StatelessWidget {
       padding: const EdgeInsets.only(top: 8, left: 38),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: Look.corners,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 36),
+          constraints: const BoxConstraints(minHeight: Look.tap),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
             child: Column(
@@ -963,7 +919,7 @@ class _Fold extends StatelessWidget {
                       label,
                       style: theme.textTheme.labelMedium?.copyWith(
                         color: dim,
-                        fontWeight: FontWeight.w700,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                     const SizedBox(width: 8),
@@ -989,7 +945,7 @@ class _Fold extends StatelessWidget {
                           ? TextStyle(
                               fontFamily: 'TermMono',
                               fontFamilyFallback: const ['TermHangul', 'TermSymbol'],
-                              fontSize: 11.5,
+                              fontSize: Look.chip,
                               height: 1.35,
                               color: dim,
                             )
@@ -1027,15 +983,15 @@ class _CommandChip extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: _teacherBlue),
+            borderRadius: Look.corners,
+            border: Border.all(color: scheme.primary),
           ),
           child: Text(
             text,
             style: TextStyle(
               fontFamily: 'TermMono',
               fontFamilyFallback: const ['TermHangul', 'TermSymbol'],
-              fontSize: 12.5,
+              fontSize: Look.sub,
               color: scheme.onSurface,
             ),
           ),
@@ -1058,7 +1014,7 @@ class _AnsweredCard extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: Look.corners,
           border: Border.all(color: scheme.outline),
         ),
         child: Column(
@@ -1068,7 +1024,7 @@ class _AnsweredCard extends StatelessWidget {
               '질문에 답함',
               style: theme.textTheme.labelSmall?.copyWith(
                 color: scheme.onSurfaceVariant,
-                fontWeight: FontWeight.w700,
+                fontWeight: FontWeight.w600,
               ),
             ),
             for (final (q, a) in pairs) ...[
@@ -1078,8 +1034,8 @@ class _AnsweredCard extends StatelessWidget {
               Text(
                 a,
                 style: theme.textTheme.bodyMedium?.copyWith(
-                  color: _teacherBlue,
-                  fontWeight: FontWeight.w700,
+                  color: scheme.primary,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ],
@@ -1223,9 +1179,9 @@ class _MenuCard extends StatelessWidget {
       ),
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
       decoration: BoxDecoration(
-        color: scheme.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: accent, width: 1.5),
+        color: Theme.of(context).scaffoldBackgroundColor,
+        borderRadius: Look.corners,
+        border: Border.all(color: accent),
       ),
       child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
@@ -1238,7 +1194,7 @@ class _MenuCard extends StatelessWidget {
                 child: Text(
                   menu.title,
                   style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
               ),
@@ -1248,24 +1204,18 @@ class _MenuCard extends StatelessWidget {
                 child: OutlinedButton(
                   onPressed: () => onPick(i),
                   style: OutlinedButton.styleFrom(
-                    minimumSize: const Size.fromHeight(44),
+                    minimumSize: const Size.fromHeight(Look.buttonH),
                     alignment: Alignment.centerLeft,
-                    backgroundColor: o.current
-                        ? accent.withValues(alpha: 0.10)
-                        : null,
                     side: BorderSide(
                       color: o.current ? accent : scheme.outline,
-                    ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
                     ),
                   ),
                   child: Text(
                     '${o.index}. ${o.label}',
                     style: TextStyle(
-                      fontSize: 15,
-                      color: scheme.onSurface,
-                      fontWeight: o.current ? FontWeight.w700 : null,
+                      fontSize: Look.body,
+                      color: o.current ? accent : scheme.onSurface,
+                      fontWeight: o.current ? FontWeight.w600 : null,
                     ),
                   ),
                 ),
