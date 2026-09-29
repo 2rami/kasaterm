@@ -250,10 +250,6 @@ impl App {
         None
     }
 
-    fn tell_target_unchanged(&self, delivery: &Commit) -> bool {
-        self.tell_target_change(delivery).is_none()
-    }
-
     fn tell_proof_current(&self, delivery: &Commit) -> bool {
         delivery.proof.as_ref().is_ok_and(|proof|proof.completed.elapsed() <= PROOF_FRESHNESS)
             && delivery.pty.input_revision() == delivery.revision
@@ -318,9 +314,13 @@ impl App {
     }
 
     pub(crate) fn safe_tell_commit(&mut self, commit: &Commit) {
-        let unchanged = self.tell_target_unchanged(commit)
-            && self.tell_proof_current(commit)
-            && commit.proof.as_ref().is_ok_and(|proof|self.tell_ready(&commit.record,&commit.pty,proof.harness,false));
+        // 보류 사유를 하나로 뭉치면 영수증만 보고는 무엇이 막았는지 가를 수 없다(2026-09-29 두 건).
+        let blocked = self.tell_target_change(commit)
+            .or_else(||(commit.pty.input_revision() != commit.revision).then_some("input changed after paste"))
+            .or_else(||(!self.tell_proof_current(commit)).then_some("identity proof stale or tell expired"))
+            .or_else(||commit.proof.as_ref().ok().filter(|proof|!self.tell_ready(&commit.record,&commit.pty,proof.harness,false))
+                .map(|_|"approval, question, composition or closed input"));
+        let unchanged = blocked.is_none();
         // 입력창 안을 본다. 화면 맨 아래 30줄만 보면, 대화가 아직 없는 새 세션은 입력창이 화면
         // **위쪽**에 있어 큰 창에서 그 범위 밖이었다 — 글은 들어갔는데 에코를 못 찾아 Enter 를
         // 영영 보류했다(2026-09-28 실측: 44행 창, 입력창 9행). 입력창을 못 찾는 하네스만 옛 방식.
@@ -340,7 +340,9 @@ impl App {
                 return;
             }
             _ => {
-                finish(&commit.record,State::Uncertain,"input, session, prompt or paste confirmation changed; Enter withheld");
+                let why = blocked.unwrap_or("paste echo not seen");
+                eprintln!("[tell] {} → {} Enter 보류: {why}", commit.record.message_id, commit.record.address.surface_id);
+                finish(&commit.record,State::Uncertain,&format!("Enter withheld: {why}"));
                 return;
             }
         }

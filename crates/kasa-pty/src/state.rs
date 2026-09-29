@@ -1285,17 +1285,22 @@ impl PtySession {
         if bytes != b"\x1b[I" && bytes != b"\x1b[O" {
             *self.last_input.lock().unwrap() = Some(Instant::now());
         }
+        // 포커스·휠·호버 리포트는 입력창 글을 못 바꾼다. 이걸 입력으로 세면 학생 창을 스크롤하거나
+        // 마우스만 올려도 tell 이 붙여 넣은 뒤 Enter 를 보류해 글이 입력창에 남고(2026-09-29 두 건),
+        // 초안 표시가 서서 다음 tell 은 사람이 Enter 를 칠 때까지 줄만 섰다.
+        let passive = passive_report(bytes);
         let revision = {
             let mut w = self.writer.lock().unwrap();
             anyhow::ensure!(!self.input_closed(), "pane is closed — reopen it before sending input");
             anyhow::ensure!(expected.is_none_or(|revision|revision == self.input_revision()), "input changed during tell delivery");
-            if expected.is_none() && bytes != b"\x1b[I" && bytes != b"\x1b[O" {
+            if expected.is_none() && !passive {
                 // A separately submitted Enter proves a user draft is gone;
                 // editing, wrapped lines and attachment sequences do not.
                 let submitted = bytes == b"\r" || (bytes.ends_with(b"\r") && !bytes.contains(&0x1b));
                 self.input_draft.store(!submitted,std::sync::atomic::Ordering::Release);
             }
-            let revision = self.input_revision.fetch_add(1,std::sync::atomic::Ordering::AcqRel) + 1;
+            let revision = if passive { self.input_revision() }
+                else { self.input_revision.fetch_add(1,std::sync::atomic::Ordering::AcqRel) + 1 };
             w.write_all(bytes).context("pty write")?;
             // Flush immediately. Without this, a one-shot write that isn't
             // followed by another (a committed Hangul syllable — the next
@@ -3965,6 +3970,61 @@ fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
         leading_wide_spacer: cell
             .flags
             .contains(alacritty_terminal::term::cell::Flags::LEADING_WIDE_CHAR_SPACER),
+    }
+}
+
+/// 입력창 글을 바꿀 수 없는 리포트 — 포커스(CSI I/O), SGR 마우스 휠, 버튼 없는 이동(호버).
+/// 클릭·끌기는 TUI 의 선택지를 누를 수 있어 입력으로 친다.
+fn passive_report(bytes: &[u8]) -> bool {
+    if bytes == b"\x1b[I" || bytes == b"\x1b[O" {
+        return true;
+    }
+    let Some(body) = bytes.strip_prefix(b"\x1b[<")
+        .and_then(|rest| rest.strip_suffix(b"M").or_else(|| rest.strip_suffix(b"m")))
+    else {
+        return false;
+    };
+    let Some(button) = std::str::from_utf8(body).ok()
+        .and_then(|body| body.split(';').next())
+        .and_then(|button| button.parse::<u16>().ok())
+    else {
+        return false;
+    };
+    button & 64 != 0 || (button & 32 != 0 && button & 3 == 3)
+}
+
+#[cfg(test)]
+mod passive_report_tests {
+    #[test]
+    fn focus_wheel_and_hover_never_count_as_typing() {
+        for passive in [&b"\x1b[I"[..], b"\x1b[O", b"\x1b[<64;10;5M", b"\x1b[<65;10;5M", b"\x1b[<35;80;20M"] {
+            assert!(super::passive_report(passive), "{passive:?}");
+        }
+        for typing in [&b"\x1b[<0;10;5M"[..], b"\x1b[<0;10;5m", b"\x1b[<32;10;5M", b"\r", b"a", b"\x1b[A", b"\x1b[<64;10"] {
+            assert!(!super::passive_report(typing), "{typing:?}");
+        }
+    }
+
+    #[test]
+    fn wheel_and_hover_keep_the_tell_guard_and_draft_state() {
+        let (_events, erx) = crossbeam_channel::unbounded();
+        let pty = super::PtySession::start_external(
+            super::PtyOptions { pane_id: "passive-report".into(), ..Default::default() },
+            super::ExternalIo {
+                events: erx,
+                writer: Box::new(std::io::sink()),
+                on_resize: std::sync::Arc::new(|_, _| {}),
+            },
+        ).unwrap();
+        pty.send_bytes(b"\r").unwrap();
+        let pasted = pty.send_bytes_guarded(b"\x1b[200~tell\x1b[201~", Some(pty.input_revision())).unwrap();
+        pty.send_bytes(b"\x1b[<65;10;5M").unwrap();
+        pty.send_bytes(b"\x1b[<35;11;5M").unwrap();
+        pty.send_bytes(b"\x1b[I").unwrap();
+        assert_eq!(pty.input_revision(), pasted, "휠·호버·포커스가 붙여넣기 뒤 Enter 를 막으면 안 된다");
+        assert!(!pty.input_draft_present(), "휠·호버는 초안이 아니다");
+        pty.send_bytes(b"\x1b[<0;10;5M").unwrap();
+        assert_ne!(pty.input_revision(), pasted, "클릭은 여전히 입력으로 센다");
     }
 }
 
