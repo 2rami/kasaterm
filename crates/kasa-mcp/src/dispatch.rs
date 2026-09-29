@@ -911,6 +911,13 @@ pub async fn plan_tasks(instruction: &str, backend: &Arc<dyn Backend>) -> (Vec<Q
     }
 }
 
+/// `/dispatch` 와 같은 일을 런타임 없는 호출자(데스크톱 나쵸 판)에서 — 쪼개서 대기열에 넣고 id 를 준다.
+pub fn plan_and_push_blocking(instruction: &str, backend: &Arc<dyn Backend>) -> std::io::Result<Vec<String>> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let (tasks, _) = runtime.block_on(plan_tasks(instruction, backend));
+    Ok(push_tasks(tasks))
+}
+
 pub fn solo_task(instruction: &str, cwd: &str) -> QueueTask {
     QueueTask {
         id: String::new(),

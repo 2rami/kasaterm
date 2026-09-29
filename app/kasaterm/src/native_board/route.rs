@@ -55,6 +55,8 @@ pub(crate) enum RouteBasis {
     LastSent,
     NamedInText,
     Jev { probability: f32, latency_ms: u64 },
+    /// 후보 칩에서 사람이 골랐다.
+    Picked,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,6 +183,27 @@ pub(crate) fn code_route(text: &str, ctx: &RouteContext) -> Option<RouteState> {
     None
 }
 
+/// 보낼 본문 — 받는 곳을 가리키려고 친 머리(`@이름`·`/새`·`/나쵸`)는 떼고, 학생에게 가는 글이
+/// `/새`·`새 일:` 로 시작하면 새 일이라 창 이름이 될 제목을 함께 준다(답·후속 말에는 제목이 없다).
+pub(crate) fn outgoing(text: &str) -> (String, Option<String>) {
+    let mut body = text.trim();
+    if let Some(rest) = body.strip_prefix('@') {
+        body = rest.split_once(char::is_whitespace).map_or("", |(_, rest)| rest).trim_start();
+    }
+    if let Some(rest) = body.strip_prefix("/나쵸") {
+        return (rest.trim().to_owned(), None);
+    }
+    let fresh = body.strip_prefix("/새").or_else(|| body.strip_prefix("새 일:"));
+    match fresh {
+        Some(rest) => {
+            let rest = rest.trim();
+            let title: String = rest.lines().next().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect();
+            (rest.to_owned(), (!title.is_empty()).then_some(title))
+        }
+        None => (body.to_owned(), None),
+    }
+}
+
 /// 관문 판정 창구에 보낼 본문. 학생 id 는 목록 순번이라 답을 같은 목록으로 되돌려 읽는다.
 pub(crate) fn request_body(text: &str, candidates: &[Candidate]) -> Value {
     json!({
@@ -287,6 +310,15 @@ impl Router {
         self.pending = false;
         self.scheduled = None;
         self.state = RouteState::Empty;
+    }
+
+    /// 후보 칩을 눌렀다 — 다음 글자가 바뀌기 전까지 그 받는 곳으로 선다.
+    pub(crate) fn choose(&mut self, target: RouteTarget) {
+        self.seq += 1;
+        self.applied = self.seq;
+        self.pending = false;
+        self.scheduled = None;
+        self.state = RouteState::Decided { target, basis: RouteBasis::Picked, alternatives: Vec::new() };
     }
 
     /// 글이 바뀔 때마다. 코드가 정하면 바로 서고, 아니면 물을 때를 잡는다.
@@ -442,6 +474,16 @@ mod tests {
     }
 
     #[test]
+    fn outgoing_strips_routing_marks_and_titles_only_new_work() {
+        assert_eq!(outgoing("@유우 다시 봐줘"), ("다시 봐줘".into(), None));
+        assert_eq!(outgoing("@케이 /새 로그인 화면 정리\n세부는 이렇게"), ("로그인 화면 정리\n세부는 이렇게".into(), Some("로그인 화면 정리".into())));
+        assert_eq!(outgoing("/새 알림 소리 설정"), ("알림 소리 설정".into(), Some("알림 소리 설정".into())));
+        assert_eq!(outgoing("/나쵸 오늘 뭐 끝났어"), ("오늘 뭐 끝났어".into(), None));
+        assert_eq!(outgoing("미러링 다시 봐줘"), ("미러링 다시 봐줘".into(), None));
+        assert_eq!(outgoing("@케이").0, "");
+    }
+
+    #[test]
     fn ask_timing() {
         assert_eq!(ask_delay("투혼에서 ", Some(Duration::from_millis(100))), ASK_SOON);
         assert_eq!(ask_delay("투혼에서", Some(Duration::from_millis(100))), ASK_PAUSE);
@@ -471,6 +513,19 @@ mod tests {
         // 새 답이 선 뒤에 온 옛 답은 버린다.
         r.answer(&first, Ok(json!({"probabilities":{"s2":1.0}})));
         assert_eq!(r.highlight().unwrap().student.name, "케이");
+    }
+
+    #[test]
+    fn picked_chip_wins_over_an_answer_that_was_already_in_flight() {
+        let c = roster();
+        let t0 = Instant::now();
+        let mut r = Router::default();
+        r.update("슬랙 알림 소리 켜는 설정", &ctx(&c, None, None), t0);
+        let asked = r.due(t0 + Duration::from_secs(1)).unwrap();
+        r.choose(RouteTarget::NewTask);
+        r.answer(&asked, Ok(json!({"probabilities":{"s1":1.0}})));
+        assert!(matches!(r.state(), RouteState::Decided { target: RouteTarget::NewTask, basis: RouteBasis::Picked, .. }));
+        assert!(r.highlight().is_none());
     }
 
     #[test]

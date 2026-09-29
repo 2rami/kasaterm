@@ -13,6 +13,7 @@ mod work;
 mod chat;
 mod assistant;
 pub(crate) mod route;
+mod send;
 mod observe;
 
 pub(crate) type Rect = (f32, f32, f32, f32);
@@ -460,6 +461,11 @@ pub(crate) struct Scene {
     transfer: TransferUi,
     transfer_generation: u64,
     route: route::Router,
+    route_mail: send::RouteMail,
+    route_wake: Option<Instant>,
+    route_last_sent: Option<route::StudentRef>,
+    route_outbox: Option<send::Outbox>,
+    route_sent: Vec<send::SentNote>,
 }
 
 impl Default for Scene {
@@ -498,6 +504,11 @@ impl Default for Scene {
             transfer: TransferUi::default(),
             transfer_generation: 0,
             route: route::Router::default(),
+            route_mail: Arc::new(Mutex::new(Vec::new())),
+            route_wake: None,
+            route_last_sent: None,
+            route_outbox: None,
+            route_sent: Vec::new(),
         }
     }
 }
@@ -760,6 +771,9 @@ impl Scene {
             BoardInput::TransferRoomName => (&mut self.transfer.room_name, &mut self.caret),
         };
         edit(value, caret);
+        if input == BoardInput::NachoMessage {
+            self.route_refresh();
+        }
     }
 
     pub(crate) fn git_message(&self) -> &str {
@@ -918,6 +932,11 @@ impl Scene {
             (mailbox.data.take(), std::mem::take(&mut mailbox.actions), std::mem::take(&mut mailbox.transfers))
         };
         let mut changed = self.chat.pump() | account_changed;
+        // 나쵸 대화로 보낸 글이 접수돼 입력칸이 비었으면 받는 곳도 걷는다.
+        if self.chat.draft.is_empty() && !matches!(self.route.state(), route::RouteState::Empty) {
+            self.route.clear();
+            changed = true;
+        }
         if let Some(envelope) = data {
             if envelope.generation >= self.requested_generation
                 && envelope.generation >= self.applied_generation
@@ -933,6 +952,7 @@ impl Scene {
             }
         }
         for action in actions {
+            self.route_settle(action.generation, action.ok, &action.message);
             if action.generation >= self.applied_action_generation {
                 self.applied_action_generation = action.generation;
                 self.toast = Some((action.ok, action.message, Instant::now()));
@@ -1156,6 +1176,10 @@ pub(crate) enum WorkerAction {
     },
     GitPush { cwd: String },
     ViewSession(SessionIdentity),
+    /// 나쵸 판에서 학생에게 — `collab.tell` 그대로(주소·id·본문·새 일이면 제목).
+    Tell(serde_json::Value),
+    /// 나쵸 판의 「새 일 맡기기」 — 디스패처가 쪼개 빈 학생에게 준다.
+    Dispatch(String),
 }
 
 fn execute_action(backend: &Arc<dyn Backend>, action: WorkerAction) -> anyhow::Result<String> {
@@ -1208,6 +1232,8 @@ fn execute_action(backend: &Arc<dyn Backend>, action: WorkerAction) -> anyhow::R
             crate::session_transfer::focus_session(backend, &identity)?;
             Ok("선택한 세션을 열었어요".into())
         }
+        WorkerAction::Tell(params) => send::execute_tell(backend, params),
+        WorkerAction::Dispatch(instruction) => send::execute_dispatch(backend, instruction),
     }
 }
 
@@ -2942,7 +2968,7 @@ impl App {
     }
 
     pub(crate) fn native_board_tick(&mut self) {
-        let changed = self.board_scene.pump();
+        let changed = self.board_scene.pump() | self.board_scene.route_tick(&self.proxy);
         self.board_scene.chat.claim_completions();
         self.workspace_observe_tick();
         if (self.board_panel_open() || self.board_scene.chat.active()) && !board_fixture_requested() && self.board_scene.chat.refresh_due() {
@@ -3060,7 +3086,7 @@ impl App {
             }
             Target::NachoSend => {
                 self.native_board_blur();
-                self.board_scene.chat.send();
+                self.native_board_send();
                 let len = self.board_scene.chat.draft.chars().count();
                 self.board_scene.set_input(Some(BoardInput::NachoMessage), len);
                 self.ime_retarget(crate::ImeFocus::Board(BoardInput::NachoMessage));
@@ -3340,6 +3366,18 @@ impl App {
             .wait_for_gui_result(receiver, "세션을 이어받았어요", self.proxy.clone());
     }
 
+    /// 받는 곳 판정대로 보낸다 — 학생·새 일은 일꾼, 그 밖은 나쵸 대화.
+    fn native_board_send(&mut self) {
+        let sent = match self.native_board_backend() {
+            Some(backend) => self.board_scene.route_send(backend, self.proxy.clone()),
+            None => false,
+        };
+        if !sent {
+            self.board_scene.chat.send();
+        }
+        self.chrome_dirty = true;
+    }
+
     pub(crate) fn native_board_insert_into(&mut self, field: BoardInput, text: &str) {
         if field == BoardInput::AssistantKey && (!text.bytes().all(|byte|byte.is_ascii_graphic())
             || self.board_scene.chat.key().len().saturating_add(text.len()) > 4096) { return; }
@@ -3420,7 +3458,7 @@ impl App {
                 }
                 self.native_board_blur();
                 if field == BoardInput::NachoMessage && !board_fixture_requested() {
-                    self.board_scene.chat.send();
+                    self.native_board_send();
                     let len = self.board_scene.chat.draft.chars().count();
                     self.board_scene.set_input(Some(field), len);
                     self.ime_retarget(crate::ImeFocus::Board(field));

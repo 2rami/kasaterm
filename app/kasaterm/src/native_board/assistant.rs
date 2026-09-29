@@ -194,6 +194,16 @@ fn decoded(status: u16, bytes: &[u8]) -> Result<Value, &'static str> {
     Ok(value)
 }
 
+/// 받는 곳 판정 한 번 — 관문 `/route`. 부르는 쪽이 일꾼 스레드에서 부른다.
+pub(super) fn route_blocking(body: Vec<u8>) -> Result<Value, &'static str> {
+    let session = kasa_mcp::WorkspaceDesktopSession::capture().ok_or("signed_out")?;
+    let result = session.request("POST", "/route", Some(&body)).and_then(|(status, bytes)| decoded(status, &bytes));
+    if !session.is_current() {
+        return Err("account_changed");
+    }
+    result
+}
+
 fn wipe(value: &mut String) {
     let mut bytes = std::mem::take(value).into_bytes();
     bytes.fill(0);
