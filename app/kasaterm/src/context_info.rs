@@ -98,15 +98,24 @@ impl ContextEvidence {
         note
     }
 
+    /// 머리 안내 자리에 서는 한 줄 — 몇 건을 봤고 전체인지. 안내 전문은 이 줄에 올리면 뜬다.
+    /// 안내 다섯 줄과 「범위」 두 줄이 상세마다 표 위를 먹어 정작 값이 화면 밖으로 밀렸다(2026-09-29).
+    pub(crate) fn detail_scope(&self) -> String {
+        if !self.available {
+            return String::new();
+        }
+        let records = grouped(self.observed_records);
+        if self.partial || self.limited {
+            format!("기록 {records}건 · 일부만 확인")
+        } else {
+            format!("기록 {records}건 · 저장된 전체")
+        }
+    }
+
     pub(crate) fn detail_sections(&self) -> Vec<(String, Vec<Detail>)> {
         if !self.available {
             return Vec::new();
         }
-        let scope = if self.partial || self.limited { "확인한 일부 · 전체 미확인" } else { "저장된 기록 전체" };
-        let range = vec![
-            value("확인한 기록", Some(format!("{}건", grouped(self.observed_records))), "중복을 뺀 기록 수"),
-            value("기준", Some(scope.into()), ""),
-        ];
         let mut tokens = vec![value(
             "마지막 입력",
             self.last_input_tokens.map(|n| format!("{} 토큰 · 캐시 포함", grouped(n))),
@@ -129,13 +138,15 @@ impl ContextEvidence {
             pills("연결 기록", self.mcp_connected.as_deref(), "기록 당시 상태 — 지금 연결은 미확인이에요"),
         ];
         let mut images = vec![
-            value("이미지 읽기", Some(format!("{}회", self.image_read_calls)), "이미지 읽기 도구 호출"),
-            value("첨부 기록", Some(format!("{}건", self.attachment_records)), "이미지 첨부가 표시된 기록"),
-            value("참조만 남음", Some(format!("{}개", self.image_reference_blocks)), "본문 없이 참조만 남은 이미지 블록 — 본문 크기는 미확인이에요"),
+            value(
+                "이미지",
+                Some(format!("읽기 {}회 · 첨부 {}건 · 참조만 {}개", self.image_read_calls, self.attachment_records, self.image_reference_blocks)),
+                "읽기는 이미지 읽기 도구 호출, 첨부는 이미지 첨부가 표시된 기록, 참조만은 본문 없이 참조만 남은 블록이에요 — 그 본문 크기는 미확인",
+            ),
             value(
                 "저장된 이미지",
                 Some(format!("{}블록 · {}바이트 · 최대 {}", self.image_payload_blocks, grouped(self.stored_image_payload_bytes), grouped(self.max_image_payload_bytes))),
-                "기록 안에 인코딩된 문자열 크기",
+                "기록 안에 인코딩된 문자열 크기예요. 실제 전송 크기는 계측하지 않아요 — 파일 크기를 요청 크기로 보지 않아요",
             ),
         ];
         if self.request_size_error {
@@ -146,9 +157,7 @@ impl ContextEvidence {
                 warn: true,
             });
         }
-        images.push(value("실제 전송 크기", None, "계측하지 않아요 — 파일 크기를 요청 크기로 보지 않아요"));
         vec![
-            ("범위".into(), range),
             ("토큰".into(), tokens),
             ("스킬".into(), skills),
             ("MCP".into(), mcp),
@@ -833,8 +842,8 @@ mod tests {
             partial: true,
             ..Default::default()
         };
-        let scope = partial.detail_sections().into_iter().find(|(title, _)| title == "범위").unwrap().1;
-        assert!(scope.iter().any(|row| matches!(row, Detail::Value { value: Some(v), .. } if v.contains("전체 미확인"))));
+        assert!(partial.detail_scope().contains("일부만 확인"));
+        assert!(ContextEvidence { available: true, ..Default::default() }.detail_scope().contains("저장된 전체"));
     }
 
     /// 모르는 값은 값 칸을 비워(「—」) 까닭을 말에 싣고, 목록은 이름 하나하나를 알약으로 남긴다.
@@ -844,7 +853,7 @@ mod tests {
         let mut evidence = ContextEvidence { available: true, skills_read: vec!["first".into(), "last".into()], ..Default::default() };
         let sections = evidence.detail_sections();
         let rows: Vec<&Detail> = sections.iter().flat_map(|(_, rows)| rows).collect();
-        assert!(rows.iter().any(|row| matches!(row, Detail::Value { name, value: None, tip, .. } if name == "실제 전송 크기" && !tip.is_empty())));
+        assert!(rows.iter().any(|row| matches!(row, Detail::Value { name, tip, .. } if name == "저장된 이미지" && tip.contains("실제 전송 크기는 계측하지 않아요"))));
         assert!(rows.iter().any(|row| matches!(row, Detail::Pills { name, items: Some(items), .. } if name == "읽음" && items.len() == 2)));
         assert!(rows.iter().any(|row| matches!(row, Detail::Pills { name, items: None, .. } if name == "사용 가능")), "목록 자체를 모르면 미확인");
         let caveat = "목록에 있다고 읽은 것은 아니";

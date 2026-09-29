@@ -3080,7 +3080,7 @@ impl App {
             }
             Target::NachoLogin => {
                 self.native_board_blur();
-                if self.open_settings_room(Some(SettingsCat::Machines)) {
+                if self.open_settings_room(Some(SettingsCat::Accounts)) {
                     self.device_account_action(crate::native_settings::device_account::Action::OpenLogin);
                 }
             }

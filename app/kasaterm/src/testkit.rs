@@ -2906,7 +2906,7 @@ impl App {
         // Display-only fixture: never connect to or change a real source pane.
         // Reapply while active so process polling cannot replace the capture.
         let preview = std::env::var("KASATERM_AUTOINFO").unwrap_or_default();
-        if crate::verification_run() && matches!(preview.as_str(), "execution" | "execution-details" | "execution-scroll" | "execution-stale" | "execution-unknown") {
+        if crate::verification_run() && matches!(preview.as_str(), "execution" | "execution-details" | "execution-scroll" | "execution-stale" | "execution-unknown" | "execution-skills") {
             use crate::context_info::ContextEvidence;
             use crate::info::{ContextLines, InfoScope, InfoSnap, PaneGroup};
             let evidence = if preview == "execution-unknown" { ContextEvidence::default() } else {
@@ -2914,7 +2914,17 @@ impl App {
                     available: true, partial: true, observed_records: 18,
                     last_input_tokens: Some(12000), observed_input_tokens: 24000,
                     observed_output_tokens: 600,
-                    skills_available: Some(vec!["화면 구성과 버튼 배치를 점검하는 긴 이름의 스킬".into(), "문서 작성".into(), "코드 검토".into()]),
+                    // 「execution-skills」는 실제 세션처럼 앞머리가 같은 스킬이 수십 개 섞인 목록 — 묶음 알약 확인용.
+                    skills_available: Some(if preview == "execution-skills" {
+                        let mut v: Vec<String> = ["run", "loop", "simplify", "code-review", "learn", "learn-mcp", "learn-agent-skills", "claude-api", "jev"].iter().map(|s| s.to_string()).collect();
+                        v.extend(["admin-reports", "calendar-agenda", "calendar-insert", "chat", "chat-send", "docs-write", "drive-upload", "gmail-read", "gmail-send", "gmail-triage", "keep", "meet", "sheets", "sheets-read", "slides", "tasks", "workflow"].iter().map(|s| format!("gws-{s}")));
+                        v.extend(["backup-sheet-as-csv", "block-focus-time", "create-task-list", "find-free-time", "label-and-archive-emails", "plan-weekly-schedule", "post-mortem-setup", "share-doc-and-notify"].iter().map(|s| format!("recipe-{s}")));
+                        v.extend(["ai-sdk", "nextjs", "deploy", "env", "shadcn", "vercel-cli"].iter().map(|s| format!("vercel:{s}")));
+                        v.extend(["agent", "map", "scrape", "search"].iter().map(|s| format!("firecrawl-{s}")));
+                        v
+                    } else {
+                        vec!["화면 구성과 버튼 배치를 점검하는 긴 이름의 스킬".into(), "문서 작성".into(), "코드 검토".into()]
+                    }),
                     skills_read: vec!["문서 작성".into()],
                     mcp_configured: Some(vec!["문서 검색".into(), "브라우저".into()]),
                     mcp_called: vec!["문서 검색".into()],
@@ -2932,11 +2942,14 @@ impl App {
             self.info.selected_pid = if preview == "execution-stale" { "%new-fixture" } else { "%info-fixture" }.into();
             self.info.selected_session_id = "fixture-session".into();
             self.info.selected_harness = "claude".into();
-            self.info.pane_expanded.clear();
-            if matches!(preview.as_str(), "execution-details" | "execution-scroll") {
+            // 매 틱 다시 깔리므로 누른 스킬 묶음(`pills:`)만은 남겨 둔다 — 펼침을 눌러 확인할 수 있게.
+            self.info.pane_expanded.retain(|key| key.starts_with("pills:"));
+            if matches!(preview.as_str(), "execution-details" | "execution-scroll" | "execution-skills") {
                 self.info.pane_expanded.insert("runtime:local:%info-fixture".into());
             }
-            self.info.scroll = if preview == "execution-scroll" { 960.0 } else { 0.0 };
+            self.info.scroll = if preview == "execution-scroll" { 960.0 } else {
+                std::env::var("KASATERM_AUTOINFO_SCROLL").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0)
+            };
             self.info.view = InfoSnap {
                 panes: vec![
                     PaneGroup { pane: "%info-fixture".into(), label: "문서 담당".into(),
@@ -2950,7 +2963,7 @@ impl App {
                 ],
                 contexts: std::collections::HashMap::from([("%info-fixture".into(), ContextLines {
                     pane_id: "%info-fixture".into(), session_id: "fixture-session".into(),
-                    harness: "claude".into(), note: evidence.detail_note(), details: evidence.detail_sections(),
+                    harness: "claude".into(), note: evidence.detail_note(), scope: evidence.detail_scope(), details: evidence.detail_sections(),
                 })]),
                 // 보드가 주는 「지금 하는 일」과, 상태 칸과 같은 말이라 안 서야 하는 작업 한 줄.
                 now: std::collections::HashMap::from([("%info-fixture".into(), crate::info::NowLine {
@@ -3689,6 +3702,49 @@ impl App {
             }
         }
     }
+    /// `KASATERM_AUTOCLICKS="x,y;x,y"` — 논리 좌표를 차례로 진짜 클릭한다(첫 클릭은
+    /// `KASATERM_AUTOCLICKS_MS`, 기본 6000 뒤, 그다음은 `_GAP_MS` 기본 1200 간격). 팝오버마다 하네스를
+    /// 새로 만들지 않고 화면 어디든 열어 둔 채 `kasaterm-cli capture --window` 로 찍으려는 것.
+    pub(crate) fn run_pending_autoclicks(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        static PLAN: OnceLock<Option<(Instant, u64, Vec<(f32, f32)>)>> = OnceLock::new();
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let Some((due, gap, points)) = PLAN.get_or_init(|| {
+            let spec = std::env::var("KASATERM_AUTOCLICKS").ok()?;
+            let points = spec
+                .split(';')
+                .filter_map(|p| {
+                    let (x, y) = p.split_once(',')?;
+                    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+                })
+                .collect();
+            let ms = std::env::var("KASATERM_AUTOCLICKS_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(6000);
+            let gap = std::env::var("KASATERM_AUTOCLICKS_GAP_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(1200);
+            Some((Instant::now() + std::time::Duration::from_millis(ms), gap, points))
+        }) else {
+            return;
+        };
+        let i = NEXT.load(Ordering::Relaxed);
+        let Some(&(x, y)) = points.get(i) else { return };
+        if Instant::now() < *due + std::time::Duration::from_millis(gap * i as u64) {
+            return;
+        }
+        NEXT.store(i + 1, Ordering::Relaxed);
+        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
+        self.cursor_px = (x, y);
+        for state in [ElementState::Pressed, ElementState::Released] {
+            self.window_event(
+                event_loop,
+                wid,
+                WindowEvent::MouseInput { device_id: DeviceId::dummy(), state, button: MouseButton::Left },
+            );
+        }
+        self.chrome_dirty = true;
+        eprintln!("[autoclicks] {i}: ({x:.0},{y:.0}) scale={:.2}", self.effective_scale());
+    }
+
     /// `KASATERM_AUTOPILLCLICK_MS` 뒤에 타이틀바 사용량 pill 을 **진짜로 클릭**한다.
     /// 다른 probe 처럼 상태를 손으로 세팅하지 않고 winit `MouseInput` 을 그대로
     /// `window_event` 에 흘려보내 handler 디스패치까지 태운다 — "render 는 그렸는데

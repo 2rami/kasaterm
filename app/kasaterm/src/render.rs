@@ -8623,12 +8623,22 @@ impl App {
                     } else {
                         format!("{acct_name} · {note}")
                     };
-                    let label = crate::info::fit_text(g, &label, (account_right - x).max(0.0), fs, false);
+                    let state = match account_state {
+                        "logged_out" => Some(ChipState::Bad),
+                        "unselected" | "failed" => Some(ChipState::Warn),
+                        _ => None,
+                    };
+                    let dot = if state.is_some() { STATUS_DOT_GAP + STATUS_DOT } else { 0.0 };
+                    let label = crate::info::fit_text(g, &label, (account_right - x - dot).max(0.0), fs, false);
                     g.draw_text(x, ty, &label, gpu::DrawOpts {
-                        font_size: fs, color: if account_state == "logged_out" { theme::danger() } else { theme::text_dim() },
+                        font_size: fs, color: status_prefs.color("claude", theme::text_dim()),
                         bold: false, italic: false,
                     });
-                    x += g.measure_chrome_text(&label, fs, false) + 10.0;
+                    x += g.measure_chrome_text(&label, fs, false);
+                    if let Some(state) = state {
+                        x += status_dot(g, x, sy, status_h, state);
+                    }
+                    x += 10.0;
                 } else {
 
                 // 게이지 — Orca 처럼 **항상 중립색**이다. 하단바에서까지 빨갛게 하면
@@ -8961,23 +8971,23 @@ impl App {
                         if !codex_logged_in
                             || (status_prefs.wants_usage("codex") && codex_limits.is_none())
                         {
-                            let (status, color) = if codex_logged_in {
-                                ("—", theme::text_dim())
-                            } else {
-                                ("로그인 필요", theme::danger())
-                            };
+                            let status = if codex_logged_in { "—" } else { "로그인 필요" };
                             g.draw_text(
                                 x,
                                 ty,
                                 status,
                                 gpu::DrawOpts {
                                     font_size: fs,
-                                    color,
+                                    color: status_prefs.color("codex", theme::text_dim()),
                                     bold: false,
                                     italic: false,
                                 },
                             );
-                            x += g.measure_chrome_text(status, fs, false) + 8.0;
+                            x += g.measure_chrome_text(status, fs, false);
+                            if !codex_logged_in {
+                                x += status_dot(g, x, sy, status_h, ChipState::Bad);
+                            }
+                            x += 8.0;
                         } else if status_prefs.wants_usage("codex") {
                             for label in missing {
                                 let text = format!("{label} 미제공");
@@ -9150,22 +9160,22 @@ impl App {
                     let icon = tool_icon;
                     let gap = if compact_tools { 0.0 } else { 3.0_f32 };
                     if status_prefs.visible("link") && !links.is_empty() {
-                        // 한 칸에 요약만 — 이름은 아이콘의 기기색과 팝오버가 말한다.
+                        // 한 칸에 요약만 — 이름은 팝오버가 말한다.
                         let text = if compact_tools { String::new() } else { crate::machinescol::status_links_summary(&links) };
                         let worst = links.iter().map(|l| l.tone()).min().unwrap_or(2);
-                        let col = status_prefs.color("link", match worst {
-                            0 => theme::attention(),
-                            1 => theme::text(),
-                            _ => theme::text_dim(),
-                        });
-                        let icon_col = crate::machinescol::status_links_tint(&links).unwrap_or(col);
-                        let text = crate::info::fit_text(g, &text, (slot_w - 24.0).max(0.0), fs, false);
+                        let open = matches!(self.statusbar.popover, Some((state::StatusbarPopover::Link, _)));
+                        let col = chip_ink(&status_prefs, "link", open);
+                        let dot = if compact_tools { 0.0 } else { STATUS_DOT_GAP + STATUS_DOT };
+                        let text = crate::info::fit_text(g, &text, (slot_w - 24.0 - dot).max(0.0), fs, false);
                         let w = g.measure_chrome_text(&text, fs, false);
-                        rx -= w + icon + gap + chip;
-                        g.queue_icon("monitor", rx, sy + (status_h - icon) / 2.0, icon, icon_col);
+                        rx -= w + icon + gap + dot + chip;
+                        g.queue_icon("monitor", rx, sy + (status_h - icon) / 2.0, icon, col);
                         g.draw_text(rx + icon + gap, ty, &text,
                             gpu::DrawOpts { font_size: fs, color: col, bold: false, italic: false });
-                        let r = (rx - chip / 2.0, sy, w + icon + gap + chip, status_h);
+                        if !compact_tools {
+                            status_dot(g, rx + icon + gap + w, sy, status_h, link_state(worst));
+                        }
+                        let r = (rx - chip / 2.0, sy, w + icon + gap + dot + chip, status_h);
                         let (hx, hy) = self.cursor_px;
                         g.hover_pointer |= hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3;
                         self.statusbar.link_rect = Some(r);
@@ -9208,33 +9218,36 @@ impl App {
                                 s_ver.push_str(&format!(" · 기기 {}대 빌드 다름", mismatched.len()));
                             }
                         }
-                        let s_ver = crate::info::fit_text(g, &s_ver, (slot_w - 21.0).max(0.0), fs, false);
+                        let state = if !mismatched.is_empty() {
+                            Some(ChipState::Bad)
+                        } else if waiting {
+                            Some(ChipState::Todo)
+                        } else {
+                            None
+                        };
+                        let dot = if state.is_some() { STATUS_DOT_GAP + STATUS_DOT } else { 0.0 };
+                        let s_ver = crate::info::fit_text(g, &s_ver, (slot_w - 21.0 - dot).max(0.0), fs, false);
                         let w = g.measure_chrome_text(&s_ver, fs, true);
-                        rx -= w + chip;
+                        rx -= w + dot + chip;
+                        let open = matches!(self.statusbar.popover, Some((state::StatusbarPopover::Build, _)));
                         g.draw_text(
                             rx,
                             ty,
                             &s_ver,
                             gpu::DrawOpts {
                                 font_size: fs,
-                                color: if !mismatched.is_empty() {
-                                    theme::danger()
-                                } else if waiting {
-                                    theme::accent()
-                                } else {
-                                    status_prefs.color(
-                                        "version",
-                                        theme::with_alpha(theme::text_dim(), 150),
-                                    )
-                                },
+                                color: chip_ink(&status_prefs, "version", open),
                                 bold: false,
                                 italic: false,
                             },
                         );
+                        if let Some(state) = state {
+                            status_dot(g, rx + w, sy, status_h, state);
+                        }
                         // 눌러서 여는 곳은 그대로 계정 드롭다운이다 — 몇 커밋 앞인지는
                         // 거기 있고, 자리를 옮겼다고 그 동선까지 잃으면 판 번호는
                         // 읽을 수만 있고 캐물을 수 없는 글자가 된다.
-                        let vr = (rx - chip / 2.0, sy, w + chip, status_h);
+                        let vr = (rx - chip / 2.0, sy, w + dot + chip, status_h);
                         {
                             let (hx, hy) = self.cursor_px;
                             g.hover_pointer |=
@@ -9258,12 +9271,12 @@ impl App {
                     // 나머지 설명(QR·주소·다리)은 팝오버가 한다.
                     let label = if compact_tools { String::new() } else { crate::info::fit_text(g, "모바일", (slot_w - chip - 36.0).max(0.0), fs, false) };
                     let icon = tool_icon;
-                    let dot = if compact_tools { 0.0 } else { 4.0_f32 };
+                    let dot = if compact_tools { 0.0 } else { STATUS_DOT_GAP + STATUS_DOT };
                     let gap = if compact_tools { 0.0 } else { 3.0_f32 };
                     let on = self.statusbar.tunnel_on == Some(true);
                     // Browser connectivity now has its own chip and status dot.
                     let tw = g.measure_chrome_text(&label, fs, false);
-                    let seg_w = icon + gap + tw + gap + dot;
+                    let seg_w = icon + gap + tw + dot;
                     // 판 번호가 이미 오른쪽 끝을 먹었다 — 그 왼쪽에 선다
                     // (2026-09-06 지시: 버전 표시를 맨 오른쪽으로).
                     let tunnel_visible = status_prefs.visible("tunnel");
@@ -9272,9 +9285,10 @@ impl App {
                     } else {
                         rx
                     };
-                    let col = status_prefs.color(
+                    let col = chip_ink(
+                        &status_prefs,
                         "tunnel",
-                        if on { theme::text() } else { theme::text_dim() },
+                        matches!(self.statusbar.popover, Some((state::StatusbarPopover::Tunnel, _))),
                     );
                     if tunnel_visible {
                         g.queue_icon("smartphone", tx, sy + (status_h - icon) / 2.0, icon, col);
@@ -9293,19 +9307,10 @@ impl App {
                     // 점은 이름 뒤로 옮겼다 — 상태(열림/닫힘)는 이름을 읽은 **다음에**
                     // 궁금해지는 것이고, 앞에 두면 지구본과 나란히 서서 둘 다 뜻이 흐려진다.
                     if tunnel_visible {
-                        round_rect(
-                            g,
-                            tx + icon + gap + tw + gap,
-                            sy + (status_h - dot) / 2.0,
-                            dot,
-                            dot,
-                            dot / 2.0,
-                            if on {
-                                theme::success()
-                            } else {
-                                theme::with_alpha(theme::text_dim(), 140)
-                            },
-                        );
+                        if !compact_tools {
+                            status_dot(g, tx + icon + gap + tw, sy, status_h,
+                                if on { ChipState::Ok } else { ChipState::Off });
+                        }
                         let r = (tx - chip / 2.0, sy, seg_w + chip, status_h);
                         {
                             let (hx, hy) = self.cursor_px;
@@ -9330,20 +9335,25 @@ impl App {
                         } else { &self.statusbar.chrome_machine };
                         let name = if compact_tools { String::new() } else { crate::info::fit_text(g, machine, (slot_w - chip - 36.0).max(0.0), fs, false) };
                         let name_w = g.measure_chrome_text(&name, fs, false);
-                        let browser_w = icon + gap + name_w + gap + dot;
+                        let browser_w = icon + gap + name_w + dot;
                         let bx = rx - browser_w - chip;
-                        let col = theme::text_dim();
+                        let col = chip_ink(
+                            &status_prefs,
+                            "tunnel",
+                            matches!(self.statusbar.popover, Some((state::StatusbarPopover::Chrome, _))),
+                        );
                         g.queue_icon("globe", bx, sy + (status_h - icon) / 2.0, icon, col);
                         g.draw_text(bx + icon + gap, ty, &name, gpu::DrawOpts {
                             font_size: fs, color: col, bold: false, italic: false,
                         });
-                        round_rect(g, bx + icon + gap + name_w + gap,
-                            sy + (status_h - dot) / 2.0, dot, dot, dot / 2.0,
-                            match self.statusbar.chrome_reach {
-                                Some(true) => theme::success(),
-                                Some(false) => theme::attention(),
-                                None => theme::text_mute(),
-                            });
+                        if !compact_tools {
+                            status_dot(g, bx + icon + gap + name_w, sy, status_h,
+                                match self.statusbar.chrome_reach {
+                                    Some(true) => ChipState::Ok,
+                                    Some(false) => ChipState::Warn,
+                                    None => ChipState::Off,
+                                });
+                        }
                         let r = (bx - chip / 2.0, sy, browser_w + chip, status_h);
                         let (hx, hy) = self.cursor_px;
                         g.hover_pointer |= hx >= r.0 && hx <= r.0 + r.2 && hy >= r.1 && hy <= r.1 + r.3;
@@ -9384,10 +9394,7 @@ impl App {
                             &label,
                             gpu::DrawOpts {
                                 font_size: fs,
-                                color: status_prefs.color(
-                                    "resources",
-                                    if open { theme::text() } else { theme::text_dim() },
-                                ),
+                                color: chip_ink(&status_prefs, "resources", open),
                                 bold: false,
                                 italic: false,
                             },
@@ -9484,6 +9491,8 @@ impl App {
                                 icon,
                                 col,
                             );
+                            // 뜻 색은 삼각형만 진다 — 글까지 칠하면 이 칸만 글자색으로
+                            // 상태를 말하게 된다. 평소엔 없던 말이라 밝은 글자로 충분히 뜬다.
                             if let Some(t) = words {
                                 g.draw_text(
                                     seg_x + icon + 4.0,
@@ -9491,7 +9500,7 @@ impl App {
                                     &t,
                                     gpu::DrawOpts {
                                         font_size: fs,
-                                        color: col,
+                                        color: theme::text(),
                                         bold: false,
                                         italic: false,
                                     },
@@ -9642,10 +9651,7 @@ impl App {
                             self.statusbar.popover,
                             Some((state::StatusbarPopover::Schedules, _))
                         );
-                        let col = status_prefs.color(
-                            "schedules",
-                            if open || n > 0 { theme::text() } else { theme::text_dim() },
-                        );
+                        let col = chip_ink(&status_prefs, "schedules", open);
                         g.queue_icon("rotate-cw", rx, sy + (status_h - icon) / 2.0, icon, col);
                         g.draw_text(
                             rx + icon + gap,
@@ -9687,12 +9693,10 @@ impl App {
                         } else {
                             gap + g.measure_chrome_text(&name, fs, false)
                         };
-                        let seg = icon + lw;
+                        let dot = if compact_tools { 0.0 } else { STATUS_DOT_GAP + STATUS_DOT };
+                        let seg = icon + lw + dot;
                         rx -= seg + chip;
-                        let col = status_prefs.color(
-                            "pet",
-                            if on { theme::accent() } else { theme::text_dim() },
-                        );
+                        let col = chip_ink(&status_prefs, "pet", false);
                         g.queue_icon("sparkles", rx, sy + (status_h - icon) / 2.0, icon, col);
                         if !name.is_empty() {
                             g.draw_text(
@@ -9706,6 +9710,10 @@ impl App {
                                     italic: false,
                                 },
                             );
+                        }
+                        if !compact_tools {
+                            status_dot(g, rx + icon + lw, sy, status_h,
+                                if on { ChipState::Ok } else { ChipState::Off });
                         }
                         let pr = (rx - chip / 2.0, sy, seg + chip, status_h);
                         {
@@ -9737,10 +9745,7 @@ impl App {
                             self.statusbar.popover,
                             Some((state::StatusbarPopover::Ports, _))
                         );
-                        let col = status_prefs.color(
-                            "ports",
-                            if open || n > 0 { theme::text() } else { theme::text_dim() },
-                        );
+                        let col = chip_ink(&status_prefs, "ports", open);
                         g.queue_icon("plug", rx, sy + (status_h - icon) / 2.0, icon, col);
                         g.draw_text(
                             rx + icon + gap,
@@ -13476,6 +13481,48 @@ fn codex_statusbar_visible(win_w: f32, logged_in: bool, configured: bool) -> boo
 /// 값이 없어 아무것도 안 그린 칩은 자리를 먹지 않는다.
 fn statusbar_next_right(slot_right: f32, drawn_left: f32, allocated: f32) -> f32 {
     drawn_left.max(slot_right - allocated)
+}
+
+/// 하단바 칸의 상태. 글자색이 아니라 값 뒤의 점 하나가 말한다 — 칸마다 글자색·강조색·
+/// 점을 섞어 쓰니 같은 「연결됨」이 칸마다 다르게 보였다(2026-09-29 「통일이 안 된 느낌」).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChipState {
+    Ok,
+    Warn,
+    Bad,
+    Todo,
+    Off,
+}
+
+impl ChipState {
+    fn color(self) -> [u8; 4] {
+        match self {
+            Self::Ok => theme::success(),
+            Self::Warn => theme::attention(),
+            Self::Bad => theme::danger(),
+            Self::Todo => theme::accent(),
+            Self::Off => theme::text_mute(),
+        }
+    }
+}
+
+const STATUS_DOT: f32 = 4.0;
+const STATUS_DOT_GAP: f32 = 4.0;
+
+/// 값 오른쪽 `x` 에서 틈을 두고 점을 찍는다. 먹은 폭(틈 포함)을 돌려준다.
+fn status_dot(g: &mut gpu::GpuRenderer, x: f32, sy: f32, status_h: f32, state: ChipState) -> f32 {
+    circle_rect(g, x + STATUS_DOT_GAP, sy + (status_h - STATUS_DOT) / 2.0, STATUS_DOT, state.color());
+    STATUS_DOT_GAP + STATUS_DOT
+}
+
+/// 칸의 아이콘·글자색. 누른 칸(팝오버가 열린 칸)만 밝다 — 상태는 점이 따로 말한다.
+fn chip_ink(prefs: &crate::statusbar_config::Prefs, id: &str, open: bool) -> [u8; 4] {
+    prefs.color(id, if open { theme::text() } else { theme::text_dim() })
+}
+
+/// 직통 칸의 점 — 중계로 돌거나 느린(150ms↑) 기기가 하나라도 있으면 주의.
+fn link_state(worst_tone: u8) -> ChipState {
+    if worst_tone == 0 { ChipState::Warn } else { ChipState::Ok }
 }
 
 /// 하단바 도구 칩이 차지하는 칸 수. 도구가 아닌 것(계정)은 0.

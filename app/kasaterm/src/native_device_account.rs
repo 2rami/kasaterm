@@ -295,8 +295,10 @@ pub(super) fn paint(
     w: f32,
 ) {
     let v = &s.device_account;
-    draw_text(g, x, *y, "기기 연결 계정", 12.0, theme::text(), true);
-    *y += 24.0;
+    // 같은 「계정」 페이지의 Claude·Codex 머리와 같은 급 — 아이콘 17, 이름 14.5 굵게.
+    g.queue_icon("users", x, *y - 1.0, 17.0, theme::text());
+    draw_text(g, x + 24.0, *y, "KASA 계정", 14.5, theme::text(), true);
+    *y += 26.0;
     let (status, error) = status_label(&v.status);
     for line in wrap_words(g, &crate::native_strings::text(status), w, 12.0) {
         draw_text(
@@ -528,7 +530,7 @@ pub(super) fn paint(
         x,
         y,
         w,
-        "계정 로그인은 이 기기를 등록합니다. 다른 기기와의 실제 연결은 아래 목록에서 확인하세요.",
+        "로그인하면 이 기기를 등록하고, 모양·하단바 같은 공통 설정과 기기 목록을 이 계정의 다른 기기와 맞춥니다. 비밀·경로·업데이트 선택은 이 기기에만 남아요. 실제 연결은 「연결 기기」에서 확인하세요.",
     );
     if let Some(message) = v.status["sync"]["message"].as_str() {
         info_slab(g, x, y, w, message);

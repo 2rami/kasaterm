@@ -4393,6 +4393,9 @@ fn paint_accounts(
     y: &mut f32,
     w: f32,
 ) {
+    // KASA 계정이 맨 위 — 코딩 에이전트 계정과 따로 「연결 기기」에 있어서, 계정을 찾는 사람이
+    // 두 페이지를 오갔다(2026-09-29 「계정 설정이 여기저기 흩어졌다」).
+    device_account::paint(g, s, hits, caret, x, y, w);
     account_group(g, s, hits, caret, x, y, w, AccountProvider::Claude);
     *y += 14.0;
     let switch_home = s.home_accounts.as_ref().filter(|_| s.account_scope_home);
@@ -4829,7 +4832,6 @@ fn paint_machines(
     y: &mut f32,
     w: f32,
 ) {
-    device_account::paint(g, s, hits, caret, x, y, w);
     let rows = machines_view();
     draw_text(
         g,
@@ -6980,12 +6982,12 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
         SettingsCat::Accounts => (
             "계정",
             "users",
-            "로그인을 넣고, 한도가 차면 넘어갈 차례를 정합니다",
+            "KASA 계정과 코딩 에이전트 로그인, 한도가 차면 넘어갈 차례를 정합니다",
         ),
         SettingsCat::Machines => (
             "연결 기기",
             "server",
-            "기기 계정 로그인과 연결 상태를 확인합니다",
+            "다른 기기와의 연결과 카사크롬이 쓸 크롬을 정합니다",
         ),
         SettingsCat::Theme => ("캐릭터 테마", "image", "캐릭터 명단과 그림을 한 벌로 갈아낍니다"),
         SettingsCat::Students => ("캐릭터", "users", "테마를 섞어 사용할 캐릭터를 고릅니다"),

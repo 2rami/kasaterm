@@ -271,6 +271,8 @@ pub(crate) struct ContextLines {
     pub session_id: String,
     pub harness: String,
     pub note: String,
+    /// 「기록 N건 · 일부만 확인」 — 안내(`note`) 전문은 이 줄의 말풍선이 된다.
+    pub scope: String,
     pub details: Vec<(String, Vec<crate::context_info::Detail>)>,
 }
 
@@ -369,7 +371,7 @@ fn enrich(mut snap: InfoSnap, backend: Option<std::sync::Arc<socket::PtyBackend>
         let evidence = crate::context_info::snapshot(&crate::context_info::ContextRequest {
             session_id: format!("{}:{}", target.machine_identity, target.session_id), harness: target.harness.clone(), path,
         });
-        snap.contexts.insert(target.id.clone(), ContextLines { pane_id: format!("{}:{}", target.machine_identity, target.pty_id), session_id: target.session_id.clone(), harness: target.harness.clone(), note: evidence.detail_note(), details: evidence.detail_sections() });
+        snap.contexts.insert(target.id.clone(), ContextLines { pane_id: format!("{}:{}", target.machine_identity, target.pty_id), session_id: target.session_id.clone(), harness: target.harness.clone(), note: evidence.detail_note(), scope: evidence.detail_scope(), details: evidence.detail_sections() });
     }
     snap.schedules = kasa_mcp::schedule_snapshot();
     snap
@@ -1706,7 +1708,7 @@ impl App {
     /// 워커가 하나 도는 동안 다시 띄우지 않도록 `busy` 로 막는다.
     pub(crate) fn pump_info(&mut self) {
         use std::sync::atomic::Ordering::Relaxed;
-        if crate::verification_run() && std::env::var("KASATERM_AUTOINFO").is_ok_and(|value| matches!(value.as_str(), "execution" | "execution-details" | "execution-scroll" | "execution-stale" | "execution-unknown")) {
+        if crate::verification_run() && std::env::var("KASATERM_AUTOINFO").is_ok_and(|value| matches!(value.as_str(), "execution" | "execution-details" | "execution-scroll" | "execution-stale" | "execution-unknown" | "execution-skills")) {
             self.run_pending_autoinfo();
             return;
         }
@@ -2225,6 +2227,22 @@ fn execution_key(group: &PaneGroup) -> String {
 mod execution_overview_tests {
     use super::*;
     #[test]
+    fn skill_pills_fold_by_family_and_open_in_place() {
+        let names: Vec<String> = ["gws-gmail-send", "run", "gws-sheets", "vercel:ai-sdk", "gws-docs-write", "claude-api", "vercel:nextjs", "claude-certification"]
+            .iter().map(|s| s.to_string()).collect();
+        let closed = grouped_pills("사용 가능", &names, &Default::default());
+        let labels: Vec<&str> = closed.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["gws 3개", "run", "vercel:ai-sdk", "vercel:nextjs", "claude-api", "claude-certification"], "셋 미만은 이름 그대로 앞머리끼리 붙고, 묶음은 처음 나온 자리");
+        assert!(closed[0].tip.contains("gmail-send") && closed[0].tip.contains("docs-write"), "접힌 묶음은 올리면 이름이 다 보인다");
+        let open = std::collections::HashSet::from(["pills:사용 가능:gws".to_string()]);
+        let opened = grouped_pills("사용 가능", &names, &open);
+        assert_eq!(opened[0].label, "gws 접기");
+        assert_eq!(opened.iter().filter(|p| p.label.starts_with("gws-")).count(), 3, "펼치면 이름 하나도 안 잃는다");
+        assert_eq!(grouped_pills("호출", &names, &open)[0].label, "gws 3개", "목록마다 따로 편다");
+        assert_eq!(pill_family("hyperframes"), "hyperframes");
+        assert_eq!(pill_family("anthropic-skills:docx"), "anthropic-skills");
+    }
+    #[test]
     fn expanded_execution_keeps_full_titles_paths_and_commands_but_collapsed_stays_short() {
         let title = "긴한글제목이중간에잘리지않고끝까지표시되어야하는실행작업";
         let path = "/작업/공백없는아주긴디렉터리/하위폴더/끝까지보존";
@@ -2342,11 +2360,11 @@ mod execution_overview_tests {
         info.pane_expanded.insert(execution_key(&group));
         let mut snap = InfoSnap { panes: vec![group], ..Default::default() };
         snap.contexts.insert("%7".into(), ContextLines { pane_id: "%7".into(), harness: "codex".into(), note: "old evidence".into(), ..Default::default() });
-        assert!(!execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == "old evidence")));
+        assert!(!execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Kv { name, tip, .. } if name == "기준" && tip == "old evidence")));
         snap.contexts.get_mut("%7").unwrap().pane_id = "%8".into();
-        assert!(execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == "old evidence")));
+        assert!(execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Kv { name, tip, .. } if name == "기준" && tip == "old evidence")));
         info.selected_pid = "remote-base:remote-source:%8".into();
-        assert!(!execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == "old evidence")));
+        assert!(!execution_lines(&snap, &info).iter().any(|line| matches!(line, ExecutionLine::Kv { name, tip, .. } if name == "기준" && tip == "old evidence")));
     }
     /// 접힌 줄: 지금 하는 일이 머리 바로 아래, 상태는 「이름 · 값」 한 줄, 상태와 같은 말인 작업 줄은 안 서고,
     /// 토큰·스킬·MCP 기록은 실행 상세를 열어야 보인다.
@@ -2368,7 +2386,7 @@ mod execution_overview_tests {
         assert!(!lines.iter().any(|line| matches!(line, ExecutionLine::Context(_) | ExecutionLine::Kv { value: None, .. })), "접힌 줄에 기록 요약은 없다");
         info.pane_expanded.insert(key);
         let lines = execution_lines(&snap, &info);
-        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Context(text) if text == "머리 안내")));
+        assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Kv { name, tip, .. } if name == "기준" && tip == "머리 안내")), "안내 전문은 「기준」 한 줄의 말풍선");
         assert!(lines.iter().any(|line| matches!(line, ExecutionLine::Kv { name, value: None, tip, .. } if name == "마지막 입력" && tip == "까닭")));
         assert!(lines.iter().map(ExecutionLine::height).sum::<f32>().is_finite());
         assert!(task_repeats_state("작업 중", "실행") && !task_repeats_state("확인 필요", "대기"));
@@ -2411,7 +2429,7 @@ enum ExecutionLine<'a> {
     Now(&'a NowLine),
     /// 이름 목록. 그리기 직전에 폭에 맞춰 `PillRow` 로 접는다.
     Pills { name: String, items: Option<Vec<String>>, tip: String },
-    PillRow { name: String, items: Vec<String>, tip: String },
+    PillRow { name: String, items: Vec<Pill>, tip: String },
     Context(String),
     Process(&'a ProcRow),
     Schedule(&'a kasa_mcp::ScheduleItem),
@@ -2521,7 +2539,7 @@ fn execution_lines<'a>(snap: &'a InfoSnap, info: &state::InfoState) -> Vec<Execu
         let context = context.filter(|context| context.session_id == info.selected_session_id && context.harness == info.selected_harness);
         if let Some(context) = context {
             lines.push(ExecutionLine::Section("실행 기록".into()));
-            lines.push(ExecutionLine::Context(context.note.clone()));
+            lines.push(kv("기준", (!context.scope.is_empty()).then(|| context.scope.clone()), &context.note, false));
             for (title, details) in &context.details {
                 lines.push(ExecutionLine::Section(title.clone()));
                 for detail in details {
@@ -2589,16 +2607,69 @@ fn kv_name_w(w: f32) -> f32 {
 }
 
 /// 알약을 폭에 맞춰 줄로 접는다. 첫 줄만 이름을 달고 이어지는 줄은 이름 칸을 비운다.
-fn pill_rows(names: &[String], avail: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<Vec<String>> {
-    let mut rows: Vec<Vec<String>> = vec![Vec::new()];
-    let mut used = 0.0;
+/// 알약 하나. 묶음 알약은 `toggle` 열쇠를 들고, 누르면 그 자리에서 펼치거나 접는다.
+#[derive(Clone, Debug, PartialEq)]
+struct Pill {
+    label: String,
+    tip: String,
+    toggle: Option<String>,
+}
+
+/// 같은 앞머리가 이만큼 모이면 한 알약으로 접는다.
+const PILL_FAMILY_MIN: usize = 3;
+
+/// 스킬 이름의 앞머리 — `vercel:ai-sdk` 는 `vercel`, `gws-gmail-send` 는 `gws`. 가를 데가 없으면 이름 그대로.
+fn pill_family(name: &str) -> &str {
+    name.split_once(':').or_else(|| name.split_once('-')).map_or(name, |(head, _)| head)
+}
+
+/// 앞머리가 같은 이름을 한 알약으로 묶는다. 세션에 제시된 스킬이 이백 개 가까이 되면 `gws-…` 스물아홉
+/// 개가 한 줄씩 늘어서 표가 화면 몇 장을 먹었다(2026-09-29 「스킬 묶음으로 표시 못 하나」).
+/// 펼친 묶음은 접기 알약 뒤에 이름을 그대로 편다. 순서는 각 묶음이 처음 나온 자리를 따른다.
+fn grouped_pills(list: &str, names: &[String], open: &std::collections::HashSet<String>) -> Vec<Pill> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut members: std::collections::HashMap<&str, Vec<&String>> = std::collections::HashMap::new();
     for name in names {
-        let w = measure(name) + PILL_PAD * 2.0;
+        let family = pill_family(name);
+        if !members.contains_key(family) { order.push(family); }
+        members.entry(family).or_default().push(name);
+    }
+    let single = |name: &String| Pill { label: name.clone(), tip: name.clone(), toggle: None };
+    let mut pills = Vec::new();
+    for family in order {
+        let names = &members[family];
+        if names.len() < PILL_FAMILY_MIN {
+            pills.extend(names.iter().map(|name| single(name)));
+            continue;
+        }
+        let key = format!("pills:{list}:{family}");
+        if open.contains(&key) {
+            pills.push(Pill { label: format!("{family} 접기"), tip: String::new(), toggle: Some(key) });
+            pills.extend(names.iter().map(|name| single(name)));
+        } else {
+            let short: Vec<&str> = names.iter()
+                .map(|name| name.strip_prefix(family).map(|rest| rest.trim_start_matches([':', '-'])).filter(|rest| !rest.is_empty()).unwrap_or(name))
+                .collect();
+            pills.push(Pill {
+                label: format!("{family} {}개", names.len()),
+                tip: format!("{family} — {} · 누르면 펼쳐요", short.join(" · ")),
+                toggle: Some(key),
+            });
+        }
+    }
+    pills
+}
+
+fn pill_rows(pills: Vec<Pill>, avail: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<Vec<Pill>> {
+    let mut rows: Vec<Vec<Pill>> = vec![Vec::new()];
+    let mut used = 0.0;
+    for pill in pills {
+        let w = measure(&pill.label) + PILL_PAD * 2.0;
         if used > 0.0 && used + w > avail {
             rows.push(Vec::new());
             used = 0.0;
         }
-        rows.last_mut().unwrap().push(name.clone());
+        rows.last_mut().unwrap().push(pill);
         used += w + PILL_GAP;
     }
     rows
@@ -2627,7 +2698,7 @@ pub(crate) fn draw_info_col(
         ExecutionLine::Pills { name, items: Some(items), tip } if items.is_empty() => {
             vec![ExecutionLine::Kv { name, value: Some("없음".into()), tip: format!("{tip} — 확인한 구간에는 없어요"), warn: false }]
         }
-        ExecutionLine::Pills { name, items: Some(items), tip } => pill_rows(&items, value_w, |text| g.measure_chrome_text(text, 10.5, false))
+        ExecutionLine::Pills { name, items: Some(items), tip } => pill_rows(grouped_pills(&name, &items, &info.pane_expanded), value_w, |text| g.measure_chrome_text(text, 10.5, false))
             .into_iter().enumerate()
             .map(|(i, items)| ExecutionLine::PillRow { name: if i == 0 { name.clone() } else { String::new() }, items, tip: tip.clone() })
             .collect(),
@@ -2715,14 +2786,27 @@ pub(crate) fn draw_info_col(
                         }
                     }
                     let mut px = x0 + name_w;
-                    for item in items {
-                        let text = fit_text(g, item, (right - px - PILL_PAD * 2.0).max(0.0), 10.5, false);
+                    for pill in items {
+                        let text = fit_text(g, &pill.label, (right - px - PILL_PAD * 2.0).max(0.0), 10.5, false);
                         let pw = g.measure_chrome_text(&text, 10.5, false) + PILL_PAD * 2.0;
-                        // 플랫 문법 — 채움 없이 테두리만(docs/design.md 4절).
-                        g.round_rect_stroke(px, y + 3.0, pw, 18.0, 9.0 * theme::roundness(), theme::border_w().max(1.0), theme::border());
-                        g.draw_text(px + PILL_PAD, y + 6.0, &text, gpu::DrawOpts { font_size: 10.5, color: theme::text(), bold: false, italic: false });
-                        if text != *item {
-                            if let Some(rect) = g.clip_hit((px, y + 3.0, pw, 18.0)) { info.tip_rects.push((item.clone(), rect)); }
+                        let rect = (px, y + 3.0, pw, 18.0);
+                        // 플랫 문법 — 채움 없이 테두리만(docs/design.md 4절). 묶음은 누르는 것이라
+                        // 이름 알약과 글자색으로 가르고, 올리면 한 톤 밝아진다.
+                        let hot = pill.toggle.is_some() && hit(cursor, &rect);
+                        g.round_rect_stroke(px, y + 3.0, pw, 18.0, 9.0 * theme::roundness(), theme::border_w().max(1.0), if hot { theme::text_dim() } else { theme::border() });
+                        let ink = match (&pill.toggle, hot) {
+                            (None, _) | (Some(_), true) => theme::text(),
+                            (Some(_), false) => theme::text_dim(),
+                        };
+                        g.draw_text(px + PILL_PAD, y + 6.0, &text, gpu::DrawOpts { font_size: 10.5, color: ink, bold: false, italic: false });
+                        if let Some(rect) = g.clip_hit(rect) {
+                            if let Some(key) = &pill.toggle {
+                                g.hover_pointer |= hot;
+                                info.group_rects.push((key.clone(), rect));
+                            }
+                            if pill.toggle.is_some() && !pill.tip.is_empty() || text != pill.label {
+                                info.tip_rects.push((pill.tip.clone(), rect));
+                            }
                         }
                         px += pw + PILL_GAP;
                     }

@@ -5622,7 +5622,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 .find(|(_, r)| inside(r))
                                 .map(|(p, _)| p.clone())
                             {
-                                if pane.starts_with("runtime:") {
+                                if pane.starts_with("runtime:") || pane.starts_with("pills:") {
                                     if !self.info.pane_expanded.remove(&pane) {
                                         self.info.pane_expanded.insert(pane);
                                     }
@@ -8018,6 +8018,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_clipboard_probe(event_loop);
         self.run_pending_autohdrmenu(event_loop);
         self.run_pending_autopillclick(event_loop);
+        self.run_pending_autoclicks(event_loop);
         self.run_pending_autoinfodbl(event_loop);
         self.run_pending_autosettings(event_loop);
         self.run_character_pick_probe(event_loop);

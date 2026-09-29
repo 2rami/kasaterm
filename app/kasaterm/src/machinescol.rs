@@ -358,7 +358,7 @@ impl StatusLink {
 }
 
 /// 하단바 한 칸에 들어갈 요약 — 기기 하나면 「직통 10ms」, 여럿이면 「직통 2·중계 1」.
-/// 이름은 아이콘 색(기기색)과 팝오버가 말한다. 이름까지 쓰면 옆 위젯이 다 잘렸다(2026-09-17).
+/// 이름은 팝오버가 말한다. 이름까지 쓰면 옆 위젯이 다 잘렸다(2026-09-17).
 pub(crate) fn status_links_summary(links: &[StatusLink]) -> String {
     match links {
         [] => String::new(),
@@ -372,14 +372,6 @@ pub(crate) fn status_links_summary(links: &[StatusLink]) -> String {
                 (d, r) => format!("직통 {d}·중계 {r}"),
             }
         }
-    }
-}
-
-/// 기기 하나만 붙어 있으면 그 기기색 — 아이콘이 어느 기계인지 말한다.
-pub(crate) fn status_links_tint(links: &[StatusLink]) -> Option<[u8; 4]> {
-    match links {
-        [one] => Some(crate::render::machine_tint(&one.label)),
-        _ => None,
     }
 }
 
