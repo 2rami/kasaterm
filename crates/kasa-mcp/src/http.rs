@@ -4687,7 +4687,7 @@ async fn term_gitop_post(body: axum::body::Bytes) -> impl IntoResponse {
 
 /// 아무 절대경로나 읽는 창구라 주인만 — 손님 폰 주소로 `~/.config/kasaterm/remote-token`
 /// (셸 전권)까지 읽혔다. 기계 사이 터널·토큰 요청은 폰 주소를 안 달고 오므로 그대로 통과한다.
-fn guest_denied(req: &axum::extract::Request) -> Option<axum::response::Response> {
+pub(crate) fn guest_denied(req: &axum::extract::Request) -> Option<axum::response::Response> {
     req.extensions()
         .get::<MobileAuth>()
         .is_some_and(|auth| !auth.0.owner)
@@ -6008,7 +6008,7 @@ fn cross_site_request(h: &HeaderMap) -> bool {
 /// 죽는다. 부작용은 POST 에 모여 있다. 로컬 CLI·MCP 클라이언트는 Origin 을 아예
 /// 안 보내므로 그대로 통과한다(이미 같은 사용자 권한으로 도는 프로세스라 막아도
 /// 얻는 게 없다).
-async fn origin_guard_mw(
+pub(crate) async fn origin_guard_mw(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -6080,7 +6080,7 @@ async fn origin_guard_mw(
 /// 그래서 Origin 을 직접 본다. Origin 이 아예 없으면 브라우저가 아닌 로컬
 /// 클라이언트(curl·스크립트)이고, 그건 이미 같은 사용자 권한으로 도는 프로세스라
 /// 막아도 얻는 게 없다.
-fn ws_origin_ok(h: &HeaderMap) -> bool {
+pub(crate) fn ws_origin_ok(h: &HeaderMap) -> bool {
     let Some(origin) = h.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
         return true;
     };
@@ -7804,6 +7804,7 @@ pub fn spawn_http_server_opts(
                         }),
                     )
                     .route("/term/ws", get(term_ws_handler))
+                    .route("/net/tcp", get(crate::netfwd::tcp_ws_handler))
                     .route("/term/spawn", post(term_spawn_post))
                     .route("/term/repo", get(term_repo_get).post(term_repo_post))
                     .route("/term/path", get(term_path_get))
