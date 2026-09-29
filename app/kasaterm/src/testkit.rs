@@ -3446,6 +3446,103 @@ impl App {
         self.handle_menu = Some(id);
         self.chrome_dirty = true;
     }
+    /// `KASATERM_AUTOWEATHER="<ms>:<step>;…"` — 날씨 검증 대본. 단계는
+    /// `set:<json>`(날씨 설정에 합친다) · `menu:<pane>`(사이드바 창 줄 우클릭, 메뉴를 연 채 둔다) ·
+    /// `pick:<pane>:<follow|picked|clear|drizzle|rain|downpour>`(그 메뉴를 진짜로 눌러 고른다) ·
+    /// `type:<pane>`(그 창에 키 하나를 친 것으로 알린다 — 합성 키 이벤트는 못 만든다).
+    /// 메뉴는 사람이 누르는 것과 같은 좌표 판정을 지난다.
+    pub(crate) fn run_pending_autoweather(&mut self) {
+        use std::sync::{Mutex, OnceLock};
+        static STEPS: OnceLock<Mutex<Vec<(Instant, String)>>> = OnceLock::new();
+        let steps = STEPS.get_or_init(|| {
+            let start = Instant::now();
+            let raw = std::env::var("KASATERM_AUTOWEATHER").unwrap_or_default();
+            Mutex::new(
+                raw.split(';')
+                    .filter_map(|s| {
+                        let (ms, step) = s.trim().split_once(':')?;
+                        Some((start + std::time::Duration::from_millis(ms.parse().ok()?), step.to_string()))
+                    })
+                    .collect(),
+            )
+        });
+        let due: Vec<String> = {
+            let mut list = steps.lock().unwrap();
+            let now = Instant::now();
+            let (ready, wait): (Vec<_>, Vec<_>) = list.drain(..).partition(|(at, _)| *at <= now);
+            *list = wait;
+            ready.into_iter().map(|(_, s)| s).collect()
+        };
+        for step in due {
+            // `@k`: the k-th pane of this window by position (left to right, top to bottom).
+            let step = {
+                let (cols, rows) = self.window_cells();
+                let mut leaves = self.effective_leaf_rects(cols, rows);
+                leaves.sort_by_key(|(_, x, y, _, _)| (*x, *y));
+                let mut s = step;
+                for (k, (id, ..)) in leaves.iter().enumerate() {
+                    s = s.replace(&format!("@{k}"), id);
+                }
+                s
+            };
+            let row_of = |app: &App, pane: &str| {
+                app.sidebar_row_rects.iter().find(|(_, p, _)| p == pane).map(|(_, _, r)| *r)
+            };
+            if let Some(json) = step.strip_prefix("set:") {
+                let mut merged = serde_json::to_value(&self.weather.settings).unwrap_or_default();
+                if let (Some(base), Ok(serde_json::Value::Object(add))) =
+                    (merged.as_object_mut(), serde_json::from_str::<serde_json::Value>(json))
+                {
+                    base.extend(add);
+                }
+                self.weather.settings = crate::weather::WeatherState::load(Some(&merged));
+                eprintln!("[autoweather] set {json}");
+                self.weather_settings_changed();
+            } else if let Some(pane) = step.strip_prefix("menu:") {
+                match row_of(self, pane) {
+                    Some(r) => {
+                        let armed = self.sidebar_row_right_click(r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                        eprintln!("[autoweather] menu {pane} armed={armed}");
+                    }
+                    None => eprintln!("[autoweather] {pane} 줄을 사이드바에서 못 찾음"),
+                }
+                self.chrome_dirty = true;
+            } else if let Some(pane) = step.strip_prefix("type:") {
+                self.weather_note_typed(pane);
+            } else if let Some(rest) = step.strip_prefix("pick:") {
+                let Some((pane, pick)) = rest.split_once(':') else { continue };
+                use crate::weather::model::{PaneWeather as W, RainAmount as A};
+                let want = match pick {
+                    "picked" => W::Picked,
+                    "clear" => W::Clear,
+                    "drizzle" => W::Fixed(A::Drizzle),
+                    "rain" => W::Fixed(A::Rain),
+                    "downpour" => W::Fixed(A::Downpour),
+                    _ => W::Follow,
+                };
+                if self.sidebar_menu.is_none() {
+                    if let Some(r) = row_of(self, pane) {
+                        self.sidebar_row_right_click(r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                    }
+                }
+                self.render_frame();
+                let hit = self
+                    .sidebar_menu_rects
+                    .iter()
+                    .find(|(a, _)| *a == crate::SidebarMenuAction::Weather(want))
+                    .map(|(_, r)| *r);
+                match hit {
+                    Some(r) => {
+                        self.sidebar_menu_click(r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                        eprintln!("[autoweather] pick {pane} {want:?}");
+                    }
+                    None => eprintln!("[autoweather] 메뉴에 {want:?} 가 없음"),
+                }
+                self.chrome_dirty = true;
+            }
+        }
+    }
+
     /// `KASATERM_AUTOMENUPICK=<idx>` — 열려 있는 ⋮ 메뉴의 idx 번째 항목을
     /// **진짜 클릭**한다(`KASATERM_FORCE_HANDLE_MENU=*` 로 연 뒤). 화면
     /// 새로고침처럼 "깨진 화면을 고치는" 동작은 고쳐지는 걸 캡처로 봐야

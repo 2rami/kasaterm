@@ -94,7 +94,11 @@ impl WeatherState {
             return Verdict { active: false, moving: false };
         }
         if self.os_at.is_none_or(|t| t.elapsed() > Duration::from_secs(2)) {
-            self.os = os_motion();
+            let os = os_motion();
+            if self.os_at.is_none() || os != self.os {
+                eprintln!("[weather] macOS reduce_motion={} reduce_transparency={}", os.reduce_motion, os.reduce_transparency);
+            }
+            self.os = os;
             self.os_at = Some(Instant::now());
         }
         model::verdict(&self.settings, self.os)
