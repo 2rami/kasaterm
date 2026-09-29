@@ -6,6 +6,58 @@ use serde_json::Value;
 pub const MAX_BODY: usize = 128 * 1024;
 const MAX_MACHINES: usize = 128;
 
+/// Keys a client must ask for by name (header `KEYS_HEADER`, comma separated). Every
+/// validator here rejects a whole snapshot that holds a key it does not know, so a key
+/// added later is hidden from clients that did not name it, and those keep syncing.
+pub const OPT_IN_KEYS: &[&str] = &["weather"];
+pub const KEYS_HEADER: &str = "x-kasa-sync-keys";
+
+pub fn opt_in_header() -> String {
+    OPT_IN_KEYS.join(",")
+}
+
+/// The opt-in keys a request named.
+pub fn accepted_keys(header: Option<&str>) -> Vec<&'static str> {
+    let named: Vec<&str> = header.unwrap_or("").split(',').map(str::trim).collect();
+    OPT_IN_KEYS.iter().copied().filter(|k| named.contains(k)).collect()
+}
+
+/// What a client may see: opt-in keys it did not name are left out.
+pub fn visible(mut snapshot: Snapshot, accepted: &[&str]) -> Snapshot {
+    snapshot.settings.retain(|key, _| !OPT_IN_KEYS.contains(&key.as_str()) || accepted.contains(&key.as_str()));
+    snapshot
+}
+
+/// A client drops settings it does not know before validating, so the next key added
+/// on a newer device cannot stop this one from syncing the rest.
+pub fn known_only(mut snapshot: Snapshot) -> Snapshot {
+    snapshot.settings.retain(|key, _| known_setting(key));
+    snapshot
+}
+
+fn one_of(v: &Value, allowed: &[&str]) -> bool {
+    v.as_str().is_some_and(|s| allowed.contains(&s))
+}
+
+const RAIN: &[&str] = &["none", "drizzle", "rain", "downpour"];
+
+fn weather(v: &Value) -> bool {
+    let Some(o) = v.as_object() else { return false };
+    o.len() <= 16 && o.iter().all(|(key, value)| match key.as_str() {
+        "enabled" | "by_status" | "ignore_os" => value.is_boolean(),
+        "amount" | "busy" | "your_turn" | "resting" => one_of(value, RAIN),
+        "wind_dir" => number(value, -1.0, 1.0),
+        "wind_strength" => number(value, 0.0, 1.0),
+        "target" => one_of(value, &["all_windows", "focused_only", "unfocused_only", "picked_only", "background_only"]),
+        "wipe" => one_of(value, &["on_input", "on_focus", "never"]),
+        "rewet_secs" => number(value, 30.0, 600.0),
+        "effects" => value.as_object().is_some_and(|e| e.len() <= 8 && e.iter().all(|(k, b)| {
+            matches!(k.as_str(), "streaks" | "drops" | "mist" | "ripples" | "buttons") && b.is_boolean()
+        })),
+        _ => false,
+    })
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
@@ -84,6 +136,7 @@ pub fn valid_setting(key: &str, v: &Value) -> bool {
             && o.iter().all(|(k, v)| text(&Value::String(k.clone()), 80) && preset_icon(v))),
         "custom_themes" => v.as_array().is_some_and(|a| a.len() <= 24 && a.iter().all(palette)),
         "custom_theme" => palette(v),
+        "weather" => weather(v),
         _ => false,
     }
 }
@@ -171,7 +224,7 @@ pub fn known_setting(key: &str) -> bool {
         | "character_appearance" | "claude_persona" | "sidebar_persona" | "terminal_persona"
         | "file_tree_default" | "pane_footer_default" | "usage_compact" | "sidebar_pulse"
         | "statusbar_hidden" | "statusbar_order" | "statusbar_separators" | "statusbar_colors"
-        | "machine_colors" | "device_icons" | "custom_themes" | "custom_theme")
+        | "machine_colors" | "device_icons" | "custom_themes" | "custom_theme" | "weather")
 }
 
 pub fn validate_snapshot(snapshot: &Snapshot) -> Result<(), String> {
@@ -194,6 +247,34 @@ pub fn validate_patch(patch: &Patch) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn weather_syncs_only_to_clients_that_ask_for_it() {
+        let good = json!({"enabled":true,"amount":"rain","target":"focused_only","wind_dir":-0.5,"wind_strength":1,
+            "effects":{"streaks":false,"drops":true},"wipe":"on_input","rewet_secs":180,"by_status":true,
+            "busy":"drizzle","your_turn":"downpour","resting":"none","ignore_os":false});
+        assert!(valid_setting("weather", &good));
+        for bad in [json!({"amount":"hail"}), json!({"rewet_secs":5}), json!({"command":"rm"}), json!({"effects":{"x":true}}), json!("on")] {
+            assert!(!valid_setting("weather", &bad), "{bad}");
+        }
+        let mut snapshot = Snapshot::default();
+        snapshot.settings.insert("theme".into(), json!("graphite"));
+        snapshot.settings.insert("weather".into(), good);
+        let old = visible(snapshot.clone(), &accepted_keys(None));
+        assert!(!old.settings.contains_key("weather") && old.settings.contains_key("theme"));
+        let new = visible(snapshot, &accepted_keys(Some(&opt_in_header())));
+        assert!(new.settings.contains_key("weather"));
+    }
+
+    #[test]
+    fn a_client_ignores_settings_it_does_not_know() {
+        let mut snapshot = Snapshot::default();
+        snapshot.settings.insert("theme".into(), json!("graphite"));
+        snapshot.settings.insert("added_next_year".into(), json!(1));
+        let kept = known_only(snapshot);
+        assert!(validate_snapshot(&kept).is_ok());
+        assert_eq!(kept.settings.len(), 1);
+    }
 
     #[test]
     fn secrets_commands_paths_and_update_preferences_never_leave_local_settings() {

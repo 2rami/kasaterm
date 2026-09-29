@@ -614,8 +614,18 @@ async fn devices_list(State(gate): State<Gate>, headers: axum::http::HeaderMap) 
     axum::Json(serde_json::json!({ "ok": true, "account": d.account, "devices": list })).into_response()
 }
 
-fn account_sync_response(result: Result<crate::account_sync::schema::Snapshot, crate::account_sync::server::Error>) -> axum::response::Response {
+fn account_sync_response(
+    headers: &axum::http::HeaderMap,
+    result: Result<crate::account_sync::schema::Snapshot, crate::account_sync::server::Error>,
+) -> axum::response::Response {
+    use crate::account_sync::schema::{accepted_keys, visible, KEYS_HEADER};
     use crate::account_sync::server::Error;
+    let accepted = accepted_keys(headers.get(KEYS_HEADER).and_then(|v| v.to_str().ok()));
+    let result = match result {
+        Ok(snapshot) => Ok(visible(snapshot, &accepted)),
+        Err(Error::Conflict(snapshot)) => Err(Error::Conflict(visible(snapshot, &accepted))),
+        Err(e) => Err(e),
+    };
     match result {
         Ok(snapshot) => (
             [(header::CACHE_CONTROL, "no-store")], axum::Json(snapshot),
@@ -637,7 +647,7 @@ async fn account_sync_get(State(gate): State<Gate>, headers: axum::http::HeaderM
     if !devices.get(&id).is_some_and(|d| d.revoked_at.is_none()) || !gate.account_active(&device.account) {
         return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
     }
-    account_sync_response(gate.account_sync.get(&device.account))
+    account_sync_response(&headers, gate.account_sync.get(&device.account))
 }
 
 async fn account_sync_patch(State(gate): State<Gate>, req: axum::extract::Request) -> axum::response::Response {
@@ -660,7 +670,7 @@ async fn account_sync_patch(State(gate): State<Gate>, req: axum::extract::Reques
     if !devices.get(&id).is_some_and(|d| d.revoked_at.is_none()) || !gate.account_active(&device.account) {
         return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
     }
-    account_sync_response(gate.account_sync.patch(&device.account, &patch))
+    account_sync_response(&headers, gate.account_sync.patch(&device.account, &patch))
 }
 
 async fn logout(State(gate): State<Gate>, headers: axum::http::HeaderMap) -> axum::response::Response {

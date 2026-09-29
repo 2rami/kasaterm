@@ -140,11 +140,27 @@ fn response_status(status: u16) -> Result<(), SyncError> {
 
 async fn get_remote(client: &reqwest::Client, credential: &DeviceCred) -> Result<Snapshot, SyncError> {
     let response = client.get(format!("{}/relay/account-sync", credential.relay.trim_end_matches('/')))
+        .header(schema::KEYS_HEADER, schema::opt_in_header())
         .bearer_auth(&credential.token).send().await.map_err(|_| SyncError::Failed)?;
     response_status(response.status().as_u16())?;
     let snapshot: Snapshot = serde_json::from_value(response_json(response).await?).map_err(|_| SyncError::Failed)?;
+    let snapshot = schema::known_only(snapshot);
     validate_snapshot(&snapshot).map_err(|_| SyncError::Failed)?;
     Ok(snapshot)
+}
+
+/// Set when the relay refused a patch that carried an opt-in key: it predates that key.
+/// Those keys then stay local for a while instead of failing every sync pass.
+static LEGACY_RELAY_UNTIL: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+fn relay_lacks_opt_in() -> bool {
+    LEGACY_RELAY_UNTIL.lock().ok().and_then(|g| *g).is_some_and(|until| std::time::Instant::now() < until)
+}
+
+fn without_opt_in(changes: &mut local::Delta) -> bool {
+    let before = changes.settings.len();
+    changes.settings.retain(|key, _| !schema::OPT_IN_KEYS.contains(&key.as_str()));
+    changes.settings.len() != before
 }
 
 async fn synchronize(
@@ -165,9 +181,12 @@ async fn synchronize(
     }
     authorize().map_err(|_| SyncError::Changed)?;
     let seed = previous.is_none() && bindings.first_account.as_deref() == Some(account.as_str()) && remote.revision == 0;
-    let changes = if let Some(binding) = previous { local::delta(&binding.observed, &original) }
+    let mut changes = if let Some(binding) = previous { local::delta(&binding.observed, &original) }
         else if seed { local::delta(&Snapshot::default(), &original) }
         else { local::Delta::default() };
+    if relay_lacks_opt_in() {
+        without_opt_in(&mut changes);
+    }
     if !changes.settings.is_empty() || !changes.machines.is_empty() {
         let mut committed = false;
         for _ in 0..4 {
@@ -175,11 +194,20 @@ async fn synchronize(
             let patch = local::patch_on(&remote, &changes);
             validate_patch(&patch).map_err(|_| SyncError::Failed)?;
             let response = client.patch(format!("{}/relay/account-sync", credential.relay.trim_end_matches('/')))
+                .header(schema::KEYS_HEADER, schema::opt_in_header())
                 .bearer_auth(&credential.token).json(&patch).send().await.map_err(|_| SyncError::Failed)?;
             let status = response.status().as_u16();
+            if status == 400 && without_opt_in(&mut changes) {
+                if let Ok(mut until) = LEGACY_RELAY_UNTIL.lock() {
+                    *until = Some(std::time::Instant::now() + Duration::from_secs(600));
+                }
+                if changes.settings.is_empty() && changes.machines.is_empty() { committed = true; break; }
+                continue;
+            }
             response_status(status)?;
             let value = response_json(response).await?;
             remote = serde_json::from_value(if status == 409 { value.get("current").cloned().ok_or(SyncError::Failed)? } else { value })
+                .map(schema::known_only)
                 .map_err(|_| SyncError::Failed)?;
             validate_snapshot(&remote).map_err(|_| SyncError::Failed)?;
             authorize().map_err(|_| SyncError::Changed)?;
@@ -233,6 +261,7 @@ mod tests {
         conflict: Arc<AtomicBool>,
         after_get: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
         failure: Arc<AtomicBool>,
+        legacy: Arc<AtomicBool>,
     }
 
     async fn read(State(state): State<Mock>) -> axum::response::Response {
@@ -243,6 +272,9 @@ mod tests {
     }
 
     async fn patch(State(state): State<Mock>, Json(patch): Json<schema::Patch>) -> axum::response::Response {
+        if state.legacy.load(Ordering::Acquire) && patch.settings.contains_key("weather") {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
         if state.conflict.swap(false, Ordering::AcqRel) {
             let current = state.store.get("alice").unwrap();
             state.store.patch("alice", &schema::Patch { expected_revision: current.revision,
@@ -260,7 +292,8 @@ mod tests {
     }
 
     async fn fixture() -> (DeviceCred, Mock, tokio::task::JoinHandle<()>) {
-        let state = Mock { store: Arc::new(server::Store::new(None)), conflict: Default::default(), after_get: Default::default(), failure: Default::default() };
+        let state = Mock { store: Arc::new(server::Store::new(None)), conflict: Default::default(), after_get: Default::default(),
+            failure: Default::default(), legacy: Default::default() };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let relay = format!("http://{}", listener.local_addr().unwrap());
         let router = Router::new().route("/relay/account-sync", get(read).patch(patch)).with_state(state.clone());
@@ -300,6 +333,23 @@ mod tests {
         state.failure.store(true, Ordering::Release);
         assert_eq!(sync(b.clone()).await, Err(SyncError::Failed));
         assert_eq!(std::fs::read(&b.settings).unwrap(), before);
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_relay_older_than_a_key_keeps_it_local_and_syncs_the_rest() {
+        let (credential, state, server) = fixture().await;
+        state.legacy.store(true, Ordering::Release);
+        let root = std::env::temp_dir().join(format!("account-sync-legacy-{}", uuid::Uuid::new_v4()));
+        let paths = paths(&root, "device");
+        local::write_private(&paths.settings, &json!({"theme":"ink","weather":{"enabled":true,"amount":"rain"}})).unwrap();
+        synchronize(&reqwest::Client::new(), &credential, Stamp::fixture(), paths.clone(),
+            &|| Ok(()), &|request| apply_files(&request)).await.unwrap();
+        let remote = state.store.get("alice").unwrap();
+        assert_eq!(remote.settings.get("theme"), Some(&json!("ink")));
+        assert!(!remote.settings.contains_key("weather"));
+        assert_eq!(local::read_json(&paths.settings, json!({})).unwrap()["weather"]["amount"], "rain");
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
