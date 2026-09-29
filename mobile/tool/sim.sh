@@ -9,6 +9,7 @@
 #   tool/sim.sh key <코드>            키 하나(idb ui key 코드) — enter 는 40
 #   tool/sim.sh text                  화면의 접근성 트리(글자로 판정할 때 스샷 대신)
 #   tool/sim.sh reset                 시스템 알림이 화면을 덮었을 때 껐다 켠다
+#   tool/sim.sh turn landscape|portrait  가로·세로 돌리기. 돌려도 shot 은 세로로 찍히고 tap 좌표도 세로 기준이다
 #
 # 주소는 로컬 카사텀(KASA_ROOT, 기본 http://127.0.0.1:8765/). 탭·타이핑은 idb(brew idb-companion)가 필요하다.
 set -euo pipefail
@@ -54,6 +55,31 @@ for e in json.load(sys.stdin):
     f = e.get("frame", {})
     cx, cy = f.get("x", 0) + f.get("width", 0) / 2, f.get("y", 0) + f.get("height", 0) / 2
     print(f"{label}  @ {cx:.0f},{cy:.0f}")'
+    ;;
+  turn)
+    # simctl 에 회전 명령이 없어 Simulator 앱 메뉴를 누른다. 앱이 뒤에 있으면 메뉴가 안 먹어서
+    # 잠깐 앞으로 가져왔다가 원래 앞 앱으로 돌려놓는다. 창 이름은 「기기 이름 – iOS 26.5」.
+    case "${1:-landscape}" in
+      landscape) item="Landscape Left" ;;
+      portrait) item="Portrait" ;;
+      *) echo "turn landscape | portrait" >&2; exit 1 ;;
+    esac
+    name=$(xcrun simctl list devices | grep "$sim" | sed -E 's/^ *(.*) \([0-9A-F-]{36}\).*/\1/')
+    front=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true')
+    osascript - "$name" "$item" "$front" <<'OSA' >/dev/null
+on run argv
+  set {devName, itemName, frontName} to argv
+  tell application "Simulator" to activate
+  delay 0.4
+  tell application "System Events" to tell process "Simulator"
+    perform action "AXRaise" of (first window whose name starts with (devName & " –"))
+    delay 0.2
+    click menu item itemName of menu 1 of menu item "Orientation" of menu "Device" of menu bar 1
+  end tell
+  delay 0.3
+  tell application "System Events" to set frontmost of process frontName to true
+end run
+OSA
     ;;
   reset) xcrun simctl shutdown "$sim" >/dev/null 2>&1 || true; xcrun simctl boot "$sim"; xcrun simctl launch "$sim" "$app" >/dev/null ;;
   *) sed -n '2,14p' "$0"; exit 1 ;;
