@@ -620,6 +620,7 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
                     eprintln!("[dispatch] assign failed to {surface}: {e:#}");
                     continue; // 배정하지 않은 채로 남긴다 — 다음 tick 에 재시도
                 }
+                name_seat(backend, &surface, &q[idx].brief);
                 q[idx].character = character;
                 q[idx].status = "assigned".into();
                 q[idx].surface = surface;
@@ -633,6 +634,7 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
                 booted.brief = compose_brief(idx, &q, &board);
                 match spawn_with_brief(backend, &cfg, &character, &booted) {
                     Ok(sid) if !sid.is_empty() => {
+                        name_seat(backend, &sid, &q[idx].brief);
                         state.students.push(OwnedStudent {
                             surface: sid.clone(),
                             character: character.clone(),
@@ -659,6 +661,15 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
 }
 
 /// 인박스 카드에 뜰 한 줄 — 브리프 첫 줄을 자른다.
+/// 맡긴 일감의 첫 줄을 그 학생 창 이름(「지금 일」)으로 — 사이드바·창 머리·관측이 창 이름을 읽는다.
+/// 안 하면 새로 부른 학생 줄에 「Claude Code」나 claude 가 붙인 제목이 선다(docs/boards.md ④). 표시일 뿐이라 실패는 버린다.
+fn name_seat(backend: &Arc<dyn Backend>, surface: &str, brief: &str) {
+    let title = brief_summary(brief);
+    if !title.is_empty() {
+        let _ = backend.rename_surface(surface, &title);
+    }
+}
+
 fn brief_summary(brief: &str) -> String {
     let head = brief.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
     head.chars().take(60).collect()
