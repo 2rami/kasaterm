@@ -953,6 +953,14 @@ impl App {
                     self.resize_backend(cols, rows);
                 }
             }
+            SettingsAction::Weather(change) => {
+                self.weather.settings = crate::weather::model::apply(self.weather.settings.clone(), change);
+                if let Ok(value) = serde_json::to_value(&self.weather.settings) {
+                    socket::write_setting("weather", value);
+                }
+                kasa_mcp::account_sync::poke();
+                self.weather_settings_changed();
+            }
             SettingsAction::TogglePet => {
                 self.set_toast(crate::chrome::toggle_pet()
                     .map(|state| state.message().to_string()).unwrap_or_else(|error| error));

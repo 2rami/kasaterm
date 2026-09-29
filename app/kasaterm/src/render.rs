@@ -4687,11 +4687,16 @@ impl App {
                     } else {
                         // 다른 기기 pane 메뉴와 같은 두 줄이다 — 자리가 같으면 항목도 같아야
                         // 누른 사람이 기계마다 다른 것을 외우지 않는다.
-                        vec![
+                        let mut v = vec![
                             (SidebarMenuAction::ClosePane, "pane 닫기"),
                             (SidebarMenuAction::Hide, "pane 숨기기"),
-                        ]
+                        ];
+                        if self.weather.settings.enabled {
+                            v.extend(crate::weather::model::PaneWeather::MENU.iter().map(|&w| (SidebarMenuAction::Weather(w), w.menu_label())));
+                        }
+                        v
                     };
+                    let weather_now = self.weather.pane_override(&pane);
                     const MIH: f32 = 28.0;
                     let widest = items
                         .iter()
@@ -4718,14 +4723,15 @@ impl App {
                         if hov {
                             hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
                         }
+                        let chosen = *a == SidebarMenuAction::Weather(weather_now);
                         g.draw_text(
                             r.0 + 12.0,
                             r.1 + (MIH - 13.0) / 2.0,
                             label,
                             gpu::DrawOpts {
                                 font_size: 13.0,
-                                color: theme::text(),
-                                bold: false,
+                                color: if chosen { theme::accent() } else { theme::text() },
+                                bold: chosen,
                                 italic: false,
                             },
                         );

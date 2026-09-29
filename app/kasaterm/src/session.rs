@@ -6655,6 +6655,7 @@ impl App {
             "sessions": sessions_json,
             "stashed_panes": closed_json,
             "last_used_unix": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+            "pane_weather": self.weather_overrides_json(),
         });
         if let Some(progress) = &self.restore_progress { progress.preserve_snapshot(&mut state); }
         Some(state)
@@ -7618,6 +7619,7 @@ impl App {
             }
         }
         if let Some(progress) = self.restore_progress.as_mut() { progress.built = true; }
+        self.weather_restore_overrides(state);
         self.chrome_dirty = true;
         self.resize_backend(cols, rows);
         self.publish_pty_layout();

@@ -743,6 +743,8 @@ fn take_paint_feedback() -> PaintFeedback {
 }
 
 pub(crate) struct Snapshot {
+    pub(crate) weather: crate::weather::model::WeatherSettings,
+    pub(crate) weather_os: crate::weather::model::OsMotion,
     pub(crate) device_account: device_account::View,
     pub(crate) preferred_agent: String,
     pub(crate) disclosures: std::collections::HashSet<&'static str>,
@@ -987,6 +989,8 @@ impl App {
             })
             .unwrap_or_else(theme::cursor);
         Some(Snapshot {
+            weather: self.weather.settings.clone(),
+            weather_os: self.weather.os(),
             device_account: self.device_account.view(),
             preferred_agent: cache.preferred_agent.clone(),
             disclosures: scene.disclosures().clone(),
@@ -2633,6 +2637,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
             content_w,
         ),
         SettingsCat::Pet => paint_pet(g, snapshot, &mut hits, content_x, &mut y, content_w),
+        SettingsCat::Weather => paint_weather(g, snapshot, &mut hits, content_x, &mut y, content_w),
         SettingsCat::Feedback => paint_feedback(
             g,
             snapshot,
@@ -4733,6 +4738,91 @@ fn paint_pet(
         draw_text(g, x, *y, &text, 11.0, theme::text_dim(), false);
         *y += 22.0;
     }
+}
+
+/// 날씨 — docs/weather.md 표의 모든 항목. 켜고 끄는 줄이 맨 위, 나머지는 켜기 전에도
+/// 미리 골라 둘 수 있게 늘 선다.
+fn paint_weather(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, x: f32, y: &mut f32, w: f32) {
+    use crate::weather::model::{self as wm, Change, Effect, Mood, RainAmount, WeatherTarget, WipeMode};
+    let ws = &s.weather;
+    let act = SettingsAction::Weather;
+    let amounts = |current: RainAmount, make: &dyn Fn(RainAmount) -> Change| -> Vec<(&'static str, bool, SettingsAction)> {
+        RainAmount::ALL.iter().map(|&a| (a.label(), current == a, act(make(a)))).collect()
+    };
+
+    *y += 6.0;
+    toggle_row_hint(g, s, hits, x, y, w, "날씨", "창과 단추에 비를 내립니다. 끄면 그리는 비용이 없습니다",
+        ws.enabled, act(Change::Enabled(!ws.enabled)));
+    let os_off = !ws.ignore_os && ws.enabled && (s.weather_os.reduce_transparency || s.weather_os.reduce_motion);
+    if os_off {
+        *y += 8.0;
+        plain_hint(g, x, y, w, if s.weather_os.reduce_transparency {
+            "macOS 「투명도 줄이기」가 켜져 있어 날씨를 그리지 않습니다. 아래 「OS 설정 무시」로 바꿀 수 있습니다"
+        } else {
+            "macOS 「동작 줄이기」가 켜져 있어 비가 멈추고 맺힌 물방울만 남습니다"
+        });
+    }
+
+    *y += 8.0;
+    section_title(g, x, *y, "비", "");
+    *y += 54.0;
+    seg_row(g, s, hits, x, y, w, "비 양", &amounts(ws.amount, &|a| Change::Amount(a)));
+    let dir = wm::quarters(ws.wind_dir);
+    let dir_text = match dir {
+        0 => crate::native_strings::text("없음").into_owned(),
+        d if d < 0 => format!("{} {:.2}", crate::native_strings::text("왼쪽"), -d as f32 / 4.0),
+        d => format!("{} {:.2}", crate::native_strings::text("오른쪽"), d as f32 / 4.0),
+    };
+    stepper_row(g, s, hits, x, y, w, "바람 방향", &dir_text,
+        act(Change::WindDir((dir - 1).max(-4))), act(Change::WindDir((dir + 1).min(4))));
+    let strength = (ws.wind_strength * 4.0).round() as u8;
+    stepper_row(g, s, hits, x, y, w, "바람 세기", &format!("{}%", strength as u32 * 25),
+        act(Change::WindStrength(strength.saturating_sub(1))), act(Change::WindStrength((strength + 1).min(4))));
+
+    *y += 8.0;
+    section_title(g, x, *y, "어디에", "");
+    *y += 54.0;
+    let targets: Vec<(&str, bool, SettingsAction)> =
+        WeatherTarget::ALL.iter().map(|&t| (t.label(), ws.target == t, act(Change::Target(t)))).collect();
+    seg_row(g, s, hits, x, y, w, "비가 오는 곳", &targets);
+    *y += 4.0;
+    plain_hint(g, x, y, w, "창 우클릭 「이 창 날씨」로 창마다 따로 정할 수 있고, 그 값이 이 선택보다 먼저입니다. 「고른 창만」은 거기서 고른 창에만 비가 옵니다");
+
+    *y += 8.0;
+    section_title(g, x, *y, "효과", "");
+    *y += 54.0;
+    for e in Effect::ALL {
+        let on = e.get(&ws.effects);
+        toggle_row(g, s, hits, x, y, w, e.label(), on, act(Change::Effect(e, !on)));
+    }
+
+    *y += 8.0;
+    section_title(g, x, *y, "닦기", "");
+    *y += 54.0;
+    let wipes: Vec<(&str, bool, SettingsAction)> =
+        WipeMode::ALL.iter().map(|&m| (m.label(), ws.wipe == m, act(Change::Wipe(m)))).collect();
+    seg_row(g, s, hits, x, y, w, "창 닦기", &wipes);
+    let at = wm::REWET_STEPS.iter().position(|&v| v >= ws.rewet_secs).unwrap_or(wm::REWET_STEPS.len() - 1);
+    stepper_row(g, s, hits, x, y, w, "다시 젖는 시간", &wm::rewet_label(ws.rewet_secs),
+        act(Change::Rewet(wm::REWET_STEPS[at.saturating_sub(1)])),
+        act(Change::Rewet(wm::REWET_STEPS[(at + 1).min(wm::REWET_STEPS.len() - 1)])));
+
+    *y += 8.0;
+    section_title(g, x, *y, "학생 상태", "");
+    *y += 54.0;
+    toggle_row_hint(g, s, hits, x, y, w, "학생 상태 날씨", "학생이 하는 일에 따라 그 창의 비 양을 바꿉니다",
+        ws.by_status, act(Change::ByStatus(!ws.by_status)));
+    if ws.by_status {
+        for m in Mood::ALL {
+            seg_row(g, s, hits, x, y, w, m.label(), &amounts(m.get(ws), &|a| Change::Status(m, a)));
+        }
+    }
+
+    *y += 8.0;
+    section_title(g, x, *y, "접근성", "");
+    *y += 54.0;
+    toggle_row_hint(g, s, hits, x, y, w, "OS 설정 무시", "켜면 macOS 「동작 줄이기」「투명도 줄이기」를 따르지 않습니다",
+        ws.ignore_os, act(Change::IgnoreOs(!ws.ignore_os)));
 }
 
 fn pet_section(g: &mut gpu::GpuRenderer, x: f32, y: &mut f32, title: &str) {
@@ -6968,6 +7058,11 @@ fn category_meta(cat: SettingsCat) -> (&'static str, &'static str, &'static str)
             "터미널",
             "terminal",
             "새 pane의 셸과 커서를 정합니다",
+        ),
+        SettingsCat::Weather => (
+            "날씨",
+            "sparkles",
+            "창과 단추에 비를 내립니다. 끄면 그리는 비용이 없습니다",
         ),
         SettingsCat::Pet => (
             "펫",

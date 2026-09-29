@@ -545,7 +545,12 @@ impl GpuRenderer {
         );
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("kasaterm gpu device"),
-            required_features: wgpu::Features::empty(),
+            // 날씨 패스 GPU 시간 계측(`KASATERM_WEATHER_TIMING=1`)만 타임스탬프를 쓴다.
+            required_features: if crate::weather::gpu::timing_requested() {
+                adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+            } else {
+                wgpu::Features::empty()
+            },
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -4122,6 +4127,9 @@ impl GpuRenderer {
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+        if let Some(wg) = self.weather.as_mut() {
+            wg.read_timing(&self.device, true);
+        }
         Ok(true)
     }
 
@@ -5540,7 +5548,7 @@ impl GpuRenderer {
             if self.weather.as_ref().is_some_and(|wg| wg.format() != self.config.format) {
                 self.weather = None;
             }
-            let wg = self.weather.get_or_insert_with(|| crate::weather::gpu::WeatherGpu::new(&self.device, self.config.format));
+            let wg = self.weather.get_or_insert_with(|| crate::weather::gpu::WeatherGpu::new(&self.device, &self.queue, self.config.format));
             wg.encode(&self.device, &self.queue, &mut encoder, &frame.texture, &view, &f, true);
         }
         // Self-capture: copy the just-rendered frame into a buffer before
@@ -5580,6 +5588,9 @@ impl GpuRenderer {
         };
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+        if let Some(wg) = self.weather.as_mut() {
+            wg.read_timing(&self.device, false);
+        }
         if let (Some(path), Some((buf, w, h, bpr))) = (capture, cap) {
             buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
             let _ = self.device.poll(wgpu::PollType::Wait {

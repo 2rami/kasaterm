@@ -102,13 +102,10 @@ pub(crate) const VIS: f32 = 0.36;
 const AREA_PER_MASS: f32 = VIS * VIS * std::f32::consts::PI / 4.0;
 
 impl PlaceState {
+    // The focused pane is rained on like the rest (「초점 창만」 is the default target);
+    // using it is what dries it, through the wiper.
     fn stale(&self, rewet: f32) -> f32 {
-        let s = (self.idle / rewet).clamp(0.0, 1.0);
-        if self.focused {
-            0.15 + 0.25 * s
-        } else {
-            0.3 + 0.7 * s
-        }
+        0.4 + 0.6 * (self.idle / rewet).clamp(0.0, 1.0)
     }
     pub(crate) fn mist_target(&self, rewet: f32) -> f32 {
         let m = ((self.idle / rewet - 0.1) / 0.9).clamp(0.0, 1.0) * 0.6;
@@ -521,6 +518,11 @@ impl World {
             let size = d.size();
             let r = d.radii();
             d.pos[0] = d.pos[0].clamp(p.rect[0] + r[0], (p.rect[0] + p.rect[2] - r[0]).max(p.rect[0] + r[0]));
+            // Sliding into the input row: the row stays dry, the water is gone.
+            if p.guard.is_some_and(|g| inside(d.pos, g)) {
+                d.dead = true;
+                continue;
+            }
             if d.pos[1] + r[1] >= p.bottom() {
                 p.pool += d.mass;
                 p.wave = (p.wave + 0.5 * (d.mass / 3600.0).sqrt()).min(3.0);

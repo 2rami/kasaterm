@@ -2220,6 +2220,7 @@ impl App {
                     self.stash_pane(pane);
                 }
             }
+            SidebarMenuAction::Weather(choice) => self.weather_set_override(pane, choice),
             SidebarMenuAction::Unhide => {
                 if let Some(i) = self.closed_pane_index(pane) {
                     self.reopen_closed_pane_at(i);

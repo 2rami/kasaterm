@@ -26,6 +26,8 @@ impl App {
         self.set_status_h = socket::read_status_h();
         self.set_pane_footer_h = socket::read_pane_footer_h();
         self.set_statusbar = statusbar_config::Prefs::from_settings(&settings);
+        self.weather.settings = crate::weather::WeatherState::load(settings.get("weather"));
+        self.weather_settings_changed();
         self.tabs_on_top = socket::read_tab_position() == "top";
         self.cursor_shape = socket::read_cursor_shape();
         self.cursor_thickness = socket::read_cursor_thickness();

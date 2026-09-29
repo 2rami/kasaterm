@@ -4274,6 +4274,8 @@ enum SidebarMenuAction {
     CloseRoom,
     /// 사이드바 맨 위 현황 줄 숨기기·보이기(모든 방 공통, settings.json `sidebar_pulse`).
     TogglePulse,
+    /// 「이 창 날씨」 — 이 기기 세션에만 남는 창별 덮어쓰기(weather/).
+    Weather(weather::model::PaneWeather),
 }
 
 /// 한글 조합기(`App::hangul`)를 쓰는 입력 문맥. 조합기는 App 에 **하나뿐인데**
@@ -4382,6 +4384,8 @@ pub(crate) enum SettingsCat {
     /// 바탕화면 펫 — 창 밖에 서 있는 Live2D 캐릭터. 앱과 프로세스가 달라 kasaterm 을
     /// 내려도 남으므로, 켜고 끄는 자리와 「누가 나올까」를 여기 둔다(2026-09-07 지시).
     Pet,
+    /// 날씨(리퀴드 비) — 창·판·단추에 비를 내린다. 기본 끔, 모든 항목을 사람이 고른다(docs/weather.md).
+    Weather,
     /// 앱에 말을 거는 쪽 — 불편한 점을 적어 두는 곳. 다른 카테고리와 달리 설정을
     /// 바꾸지 않으므로 nav 맨 아래에 따로 떨어뜨린다.
     Feedback,
@@ -4390,6 +4394,7 @@ pub(crate) enum SettingsCat {
 impl SettingsCat {
     /// 웹과의 칸 이름 대조에만 쓴다 — 값을 새로 만들 때 여기 빠뜨리면 그 칸은
     /// 대조에서 통째로 빠지므로, 변형을 더하면 이 배열도 같이 늘려라.
+    /// `Weather` 만은 뺀다: 날씨는 GPU 패스라 웹 설정에 칸이 없는 네이티브 전용 칸이다.
     #[allow(dead_code)]
     pub(crate) const ALL: [SettingsCat; 11] = [
         Self::General,
@@ -4408,7 +4413,7 @@ impl SettingsCat {
     /// 옆 목록에 실제로 서는 칸 — `Theme` 은 「캐릭터」 밑으로 들어가 목록에서 빠졌다
     /// (2026-09-10 목업 IA: 셸+커서→터미널, 테마+캐릭터→캐릭터). 페이지 자체는
     /// 캐릭터 페이지의 「테마 관리」로 연다. 웹 대조는 그대로 `ALL` 이다.
-    pub(crate) const NAV: [SettingsCat; 10] = [
+    pub(crate) const NAV: [SettingsCat; 11] = [
         Self::Students,
         Self::Appearance,
         Self::Claude,
@@ -4417,6 +4422,7 @@ impl SettingsCat {
         Self::Machines,
         Self::General,
         Self::Statusbar,
+        Self::Weather,
         Self::Pet,
         Self::Feedback,
     ];
@@ -4446,6 +4452,7 @@ impl SettingsCat {
             Self::Theme => "theme",
             Self::Students => "students",
             Self::Pet => "pet",
+            Self::Weather => "weather",
             Self::Feedback => "feedback",
         }
     }
@@ -4542,6 +4549,8 @@ pub(crate) enum SettingsAction {
     ToggleFileTree,
     /// 바탕화면 펫을 켜고 끈다.
     TogglePet,
+    /// 날씨 페이지의 한 번 누름.
+    Weather(crate::weather::model::Change),
     /// 펫으로 띄울 캐릭터 폴더 이름(`~/.config/kasaterm/pet/<이름>`).
     PetCharacter(String),
     PetPreference(kasa_pet_config::PreferenceChange),

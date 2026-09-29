@@ -4088,6 +4088,7 @@ impl App {
             // 이 env 로 「캐릭터 목록」을 보던 밖의 스크립트는 그대로 맞는 화면에 온다.
             "students" => SettingsCat::Students,
             "pet" => SettingsCat::Pet,
+            "weather" => SettingsCat::Weather,
             "feedback" => SettingsCat::Feedback,
             _ => SettingsCat::General,
         };

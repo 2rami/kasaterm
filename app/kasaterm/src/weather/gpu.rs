@@ -15,6 +15,21 @@ pub(crate) const MAX_BUTTONS: usize = 64;
 pub(crate) const MAX_ROWS: usize = 32;
 pub(crate) const MAX_RIPPLES: usize = 64;
 
+/// `KASATERM_WEATHER_TIMING=1`: time the weather passes with GPU timestamps and log the
+/// average every 60 frames. Off by default — it blocks on the GPU after each frame.
+pub(crate) fn timing_requested() -> bool {
+    std::env::var_os("KASATERM_WEATHER_TIMING").is_some()
+}
+
+struct Timing {
+    set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    read: wgpu::Buffer,
+    period_ns: f32,
+    samples: Vec<f32>,
+    only: Vec<f32>,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
 pub(crate) struct Globals {
@@ -181,6 +196,15 @@ fn bind(device: &wgpu::Device, p: &wgpu::RenderPipeline, entries: &[(u32, Res)])
 }
 
 fn pass<'e>(enc: &'e mut wgpu::CommandEncoder, view: &'e wgpu::TextureView, clear: bool) -> wgpu::RenderPass<'e> {
+    pass_timed(enc, view, clear, None)
+}
+
+fn pass_timed<'e>(
+    enc: &'e mut wgpu::CommandEncoder,
+    view: &'e wgpu::TextureView,
+    clear: bool,
+    ts: Option<wgpu::RenderPassTimestampWrites<'e>>,
+) -> wgpu::RenderPass<'e> {
     enc.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("weather"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -193,7 +217,7 @@ fn pass<'e>(enc: &'e mut wgpu::CommandEncoder, view: &'e wgpu::TextureView, clea
             },
         })],
         depth_stencil_attachment: None,
-        timestamp_writes: None,
+        timestamp_writes: ts,
         occlusion_query_set: None,
         multiview_mask: None,
     })
@@ -284,11 +308,13 @@ pub(crate) struct WeatherGpu {
     buf: Buffers,
     s: Option<Sized>,
     ripple_cur: usize,
+    timing: Option<Timing>,
+    timed: bool,
 }
 
 impl WeatherGpu {
     /// `format` is the surface format; the app frame is copied from and written back to it.
-    pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let m_rain = shader(device, include_str!("shaders/rain.wgsl"), "weather rain", true);
         let m_panel = shader(device, include_str!("shaders/panel.wgsl"), "weather panel", true);
         let m_ripple = shader(device, include_str!("shaders/ripple.wgsl"), "weather ripple", true);
@@ -352,7 +378,25 @@ impl WeatherGpu {
             inst: vbuf(MAX_INST, "weather drops"),
             boxes: vbuf(MAX_ROWS, "weather button rows"),
         };
-        WeatherGpu { format, pipes, sampler, buf, s: None, ripple_cur: 0 }
+        let timing = (timing_requested() && device.features().contains(wgpu::Features::TIMESTAMP_QUERY)).then(|| Timing {
+            set: device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("weather timing"), ty: wgpu::QueryType::Timestamp, count: 2 }),
+            resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 16,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            read: device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 16,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            period_ns: queue.get_timestamp_period(),
+            samples: Vec::new(),
+            only: Vec::new(),
+        });
+        WeatherGpu { format, pipes, sampler, buf, s: None, ripple_cur: 0, timing, timed: false }
     }
 
     pub(crate) fn format(&self) -> wgpu::TextureFormat {
@@ -500,12 +544,25 @@ impl WeatherGpu {
             queue.write_buffer(&self.buf.boxes, 0, bytemuck::cast_slice(&f.boxes[..n_boxes]));
         }
         let p = &self.pipes;
-
+        let begin = self.timing.as_ref().map(|t| wgpu::RenderPassTimestampWrites {
+            query_set: &t.set,
+            beginning_of_pass_write_index: Some(0),
+            end_of_pass_write_index: None,
+        });
+        let end = self.timing.as_ref().map(|t| wgpu::RenderPassTimestampWrites {
+            query_set: &t.set,
+            beginning_of_pass_write_index: None,
+            end_of_pass_write_index: Some(1),
+        });
+        {
+            let (view, pipe, bg) = if f.rain { (&s.rain.view, &p.rain, &s.rain_bg) } else { (&s.scene[0].view, &p.copy, &s.copy_bg) };
+            let mut rp = pass_timed(enc, view, false, begin);
+            rp.set_pipeline(pipe);
+            rp.set_bind_group(0, bg, &[]);
+            rp.draw(0..3, 0..1);
+        }
         if f.rain {
-            full(enc, &s.rain.view, &p.rain, &s.rain_bg);
             full(enc, &s.scene[0].view, &p.scene, &s.scene_bg);
-        } else {
-            full(enc, &s.scene[0].view, &p.copy, &s.copy_bg);
         }
         let mut cur = 0usize;
 
@@ -556,10 +613,54 @@ impl WeatherGpu {
             cur = 1 - cur;
         }
 
-        let mut rp = pass(enc, out, false);
-        rp.set_pipeline(&p.fin);
-        rp.set_bind_group(0, &s.fin[cur], &[]);
-        rp.draw(0..3, 0..1);
-        draw(&mut rp, &self.buf.boxes, &p.group, &s.group[cur], 0, n_boxes as u32);
+        {
+            let mut rp = pass_timed(enc, out, false, end);
+            rp.set_pipeline(&p.fin);
+            rp.set_bind_group(0, &s.fin[cur], &[]);
+            rp.draw(0..3, 0..1);
+            draw(&mut rp, &self.buf.boxes, &p.group, &s.group[cur], 0, n_boxes as u32);
+        }
+        if let Some(t) = self.timing.as_ref() {
+            enc.resolve_query_set(&t.set, 0..2, &t.resolve, 0);
+            enc.copy_buffer_to_buffer(&t.resolve, 0, &t.read, 0, 16);
+            self.timed = true;
+        }
+    }
+
+    /// After submit, with timing on: wait for the GPU, keep the span, log averages.
+    pub(crate) fn read_timing(&mut self, device: &wgpu::Device, weather_only: bool) {
+        let Some(t) = self.timing.as_mut() else { return };
+        if !std::mem::take(&mut self.timed) {
+            return;
+        }
+        let slice = t.read.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        let v: [u64; 2] = {
+            let data = slice.get_mapped_range();
+            let mut v = [0u64; 2];
+            v.copy_from_slice(bytemuck::cast_slice(&data));
+            v
+        };
+        t.read.unmap();
+        if v[1] > v[0] {
+            let ms = (v[1] - v[0]) as f32 * t.period_ns / 1e6;
+            t.samples.push(ms);
+            if weather_only {
+                t.only.push(ms);
+            }
+        }
+        if t.samples.len() >= 60 {
+            let mut all = std::mem::take(&mut t.samples);
+            all.sort_by(|a, b| a.total_cmp(b));
+            let only = std::mem::take(&mut t.only);
+            eprintln!(
+                "[weather-gpu] {} frames: p50 {:.3}ms p95 {:.3}ms (weather-only frames {})",
+                all.len(),
+                all[all.len() / 2],
+                all[(all.len() * 95 / 100).min(all.len() - 1)],
+                only.len()
+            );
+        }
     }
 }

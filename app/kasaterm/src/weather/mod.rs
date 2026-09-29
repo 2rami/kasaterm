@@ -34,6 +34,8 @@ pub(crate) struct WeatherState {
     spots: Vec<ButtonSpot>,
     ripple_acc: f32,
     ripple_tail: f32,
+    /// 설정 화면처럼 창 자리를 다른 것이 덮을 때: 창 유리는 그리지 않는다(물은 그대로 남는다).
+    dry: bool,
     scale: f32,
     win: [f32; 2],
 }
@@ -98,6 +100,10 @@ impl WeatherState {
         model::verdict(&self.settings, self.os)
     }
 
+    pub(crate) fn os(&self) -> OsMotion {
+        self.os
+    }
+
     pub(crate) fn pane_override(&self, pane: &str) -> PaneWeather {
         self.overrides.get(pane).copied().unwrap_or_default()
     }
@@ -120,6 +126,40 @@ impl App {
         self.chrome_dirty = true;
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    /// 창 우클릭 「이 창 날씨」. 이 기기 세션에만 남는다(session.json `pane_weather`).
+    pub(crate) fn weather_set_override(&mut self, pane: &str, choice: PaneWeather) {
+        if choice == PaneWeather::Follow {
+            self.weather.overrides.remove(pane);
+        } else {
+            self.weather.overrides.insert(pane.to_owned(), choice);
+        }
+        self.session_touched = true;
+        self.weather_settings_changed();
+    }
+
+    /// session.json `pane_weather`: surface key → 값. 창 번호는 다시 켜면 바뀌어도 key 는 남는다.
+    pub(crate) fn weather_overrides_json(&self) -> serde_json::Value {
+        let map: serde_json::Map<String, serde_json::Value> = self
+            .weather
+            .overrides
+            .iter()
+            .filter_map(|(pane, w)| Some((kasa_mcp::surface_keys::ensure(pane), serde_json::to_value(w).ok()?)))
+            .collect();
+        serde_json::Value::Object(map)
+    }
+
+    pub(crate) fn weather_restore_overrides(&mut self, state: &serde_json::Value) {
+        let Some(map) = state.get("pane_weather").and_then(|v| v.as_object()) else { return };
+        for (key, value) in map {
+            let (Some(pane), Ok(w)) = (kasa_mcp::surface_keys::find(key), serde_json::from_value::<PaneWeather>(value.clone())) else {
+                continue;
+            };
+            if w != PaneWeather::Follow {
+                self.weather.overrides.insert(pane, w);
+            }
         }
     }
 
@@ -176,15 +216,18 @@ impl App {
         }
         let s = self.weather.settings.clone();
         let bg = model::background_amount(&s);
+        // The settings page stands where the panes are; keep it dry and readable.
+        let settings_open = self.settings_room_active();
         let mut places = Vec::new();
         for (id, x, y, w, h) in panes {
             let focused = active == Some(id.as_str());
             let m = if s.by_status { mood(&self.agent_state(id)) } else { PaneMood::Unknown };
+            let amount = if settings_open { RainAmount::None } else { model::pane_amount(&s, self.weather.pane_override(id), focused, m) };
             places.push(Place {
                 key: key_of(id),
                 kind: PlaceKind::Pane,
                 rect: [*x, *y, *w, *h],
-                amount: model::pane_amount(&s, self.weather.pane_override(id), focused, m),
+                amount,
                 focused,
                 guard: if focused { guard } else { None },
             });
@@ -215,6 +258,7 @@ impl App {
         }
         places.truncate(gpu::MAX_PLACES);
         self.weather.places = places;
+        self.weather.dry = settings_open;
         self.weather.scale = scale;
         self.weather.win = win;
         Some(self.weather_step(v))
@@ -379,7 +423,7 @@ impl App {
             canvas: win,
             rain: any_streak && v.moving,
             ripple: ripple_on,
-            glass: any_glass && (s.effects.drops || s.effects.mist),
+            glass: any_glass && !st.dry && (s.effects.drops || s.effects.mist),
         }
     }
 }
@@ -390,6 +434,11 @@ impl App {
     /// Nothing but the weather moved: redraw it over the last full frame.
     pub(crate) fn weather_only_frame(&mut self) {
         if !self.weather.settings.enabled || !self.weather_animating() {
+            return;
+        }
+        // A pending capture wants a full frame, not a weather-only one.
+        if self.gpu.as_ref().is_some_and(|g| g.capture_next.is_some()) {
+            self.chrome_dirty = true;
             return;
         }
         let Some(f) = self.weather_frame_cached() else { return };

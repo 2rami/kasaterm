@@ -176,6 +176,130 @@ impl WeatherSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Effect {
+    Streaks,
+    Drops,
+    Mist,
+    Ripples,
+    Buttons,
+}
+
+impl Effect {
+    pub(crate) const ALL: [Effect; 5] = [Effect::Streaks, Effect::Drops, Effect::Mist, Effect::Ripples, Effect::Buttons];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Effect::Streaks => "빗줄기",
+            Effect::Drops => "창 물방울",
+            Effect::Mist => "김서림",
+            Effect::Ripples => "파문",
+            Effect::Buttons => "단추 물방울",
+        }
+    }
+
+    pub(crate) fn get(self, e: &WeatherEffects) -> bool {
+        match self {
+            Effect::Streaks => e.streaks,
+            Effect::Drops => e.drops,
+            Effect::Mist => e.mist,
+            Effect::Ripples => e.ripples,
+            Effect::Buttons => e.buttons,
+        }
+    }
+
+    fn set(self, e: &mut WeatherEffects, on: bool) {
+        match self {
+            Effect::Streaks => e.streaks = on,
+            Effect::Drops => e.drops = on,
+            Effect::Mist => e.mist = on,
+            Effect::Ripples => e.ripples = on,
+            Effect::Buttons => e.buttons = on,
+        }
+    }
+}
+
+/// 학생 상태 날씨의 세 칸.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mood {
+    Busy,
+    YourTurn,
+    Resting,
+}
+
+impl Mood {
+    pub(crate) const ALL: [Mood; 3] = [Mood::Busy, Mood::YourTurn, Mood::Resting];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Mood::Busy => "하는 중",
+            Mood::YourTurn => "내 차례",
+            Mood::Resting => "쉬는 중",
+        }
+    }
+
+    pub(crate) fn get(self, s: &WeatherSettings) -> RainAmount {
+        match self {
+            Mood::Busy => s.busy,
+            Mood::YourTurn => s.your_turn,
+            Mood::Resting => s.resting,
+        }
+    }
+}
+
+/// 다시 젖는 시간의 칸들(초).
+pub(crate) const REWET_STEPS: [u32; 7] = [30, 60, 120, 180, 300, 450, 600];
+
+pub(crate) fn rewet_label(secs: u32) -> String {
+    if secs < 60 {
+        format!("{secs}초")
+    } else if secs % 60 == 0 {
+        format!("{}분", secs / 60)
+    } else {
+        format!("{}분 {}초", secs / 60, secs % 60)
+    }
+}
+
+/// 설정 화면의 한 번 누름. 바람은 4분의 1 단위 정수로 실어 `Eq` 를 지킨다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Change {
+    Enabled(bool),
+    Amount(RainAmount),
+    WindDir(i8),
+    WindStrength(u8),
+    Target(WeatherTarget),
+    Effect(Effect, bool),
+    Wipe(WipeMode),
+    Rewet(u32),
+    ByStatus(bool),
+    Status(Mood, RainAmount),
+    IgnoreOs(bool),
+}
+
+pub(crate) fn apply(mut s: WeatherSettings, c: Change) -> WeatherSettings {
+    match c {
+        Change::Enabled(on) => s.enabled = on,
+        Change::Amount(a) => s.amount = a,
+        Change::WindDir(q) => s.wind_dir = q as f32 / 4.0,
+        Change::WindStrength(q) => s.wind_strength = q as f32 / 4.0,
+        Change::Target(t) => s.target = t,
+        Change::Effect(e, on) => e.set(&mut s.effects, on),
+        Change::Wipe(w) => s.wipe = w,
+        Change::Rewet(secs) => s.rewet_secs = secs,
+        Change::ByStatus(on) => s.by_status = on,
+        Change::Status(Mood::Busy, a) => s.busy = a,
+        Change::Status(Mood::YourTurn, a) => s.your_turn = a,
+        Change::Status(Mood::Resting, a) => s.resting = a,
+        Change::IgnoreOs(on) => s.ignore_os = on,
+    }
+    s.sanitized()
+}
+
+/// 바람을 4분의 1 칸으로(스테퍼가 한 칸씩 옮긴다).
+pub(crate) fn quarters(v: f32) -> i8 {
+    (v * 4.0).round().clamp(-4.0, 4.0) as i8
+}
+
 /// 창 우클릭 「이 창 날씨」. 이 기기 세션에만 남는다.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "amount")]
@@ -189,6 +313,28 @@ pub(crate) enum PaneWeather {
 }
 
 impl PaneWeather {
+    pub(crate) const MENU: [PaneWeather; 6] = [
+        PaneWeather::Follow,
+        PaneWeather::Picked,
+        PaneWeather::Clear,
+        PaneWeather::Fixed(RainAmount::Drizzle),
+        PaneWeather::Fixed(RainAmount::Rain),
+        PaneWeather::Fixed(RainAmount::Downpour),
+    ];
+
+    /// 창 우클릭 메뉴 한 줄. 사이드바가 좁아 짧게.
+    pub(crate) fn menu_label(self) -> &'static str {
+        match self {
+            PaneWeather::Follow => "날씨 · 설정 따름",
+            PaneWeather::Picked => "날씨 · 이 창도 비",
+            PaneWeather::Clear => "날씨 · 맑음",
+            PaneWeather::Fixed(RainAmount::None) => "날씨 · 없음 고정",
+            PaneWeather::Fixed(RainAmount::Drizzle) => "날씨 · 이슬비 고정",
+            PaneWeather::Fixed(RainAmount::Rain) => "날씨 · 비 고정",
+            PaneWeather::Fixed(RainAmount::Downpour) => "날씨 · 폭우 고정",
+        }
+    }
+
     pub(crate) fn label(self) -> String {
         match self {
             PaneWeather::Follow => "설정 따름".into(),
@@ -342,6 +488,23 @@ mod tests {
         assert_eq!(verdict(&s, motion), Verdict { active: true, moving: false });
         let ignored = WeatherSettings { ignore_os: true, ..on() };
         assert_eq!(verdict(&ignored, OsMotion { reduce_motion: true, reduce_transparency: true }), Verdict { active: true, moving: true });
+    }
+
+    #[test]
+    fn every_page_change_lands_and_stays_in_range() {
+        let s = WeatherSettings::default();
+        assert!(apply(s.clone(), Change::Enabled(true)).enabled);
+        assert_eq!(apply(s.clone(), Change::WindDir(-2)).wind_dir, -0.5);
+        assert_eq!(apply(s.clone(), Change::WindDir(9)).wind_dir, 1.0);
+        assert_eq!(apply(s.clone(), Change::WindStrength(3)).wind_strength, 0.75);
+        assert!(!apply(s.clone(), Change::Effect(Effect::Mist, false)).effects.mist);
+        assert_eq!(apply(s.clone(), Change::Rewet(5)).rewet_secs, REWET_MIN);
+        assert_eq!(apply(s.clone(), Change::Status(Mood::Resting, RainAmount::Rain)).resting, RainAmount::Rain);
+        assert_eq!(apply(s.clone(), Change::Target(WeatherTarget::BackgroundOnly)).target, WeatherTarget::BackgroundOnly);
+        assert_eq!(quarters(0.49), 2);
+        assert_eq!(rewet_label(180), "3분");
+        assert_eq!(rewet_label(30), "30초");
+        assert!(REWET_STEPS.iter().all(|&v| (REWET_MIN..=REWET_MAX).contains(&v)));
     }
 
     #[test]
