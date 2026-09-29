@@ -17,8 +17,12 @@ pub(crate) struct NavigationState {
     pub(crate) viewing_cur: Option<String>,
     device_views: Vec<(String, Rect)>,
     collapsed_rooms: std::collections::HashSet<String>,
-    /// 목록 본문으로 보는 방(키) — 본기기 카드의 「목록으로 보기」와 같다.
-    list_rooms: std::collections::HashSet<String>,
+    /// 방마다 고른 본문 보기와 전체 기본 — 본기기 카드의 「목록으로 보기」와 같다.
+    pub(crate) list_rooms: RoomViews,
+    /// 보드가 본 학생 줄 사정(마지막 보고 등). 현황 틱이 채운다.
+    pub(crate) lines: crate::sidebar_pulse::SidebarLines,
+    /// 나쵸 판 입력칸이 가리키는 받는 곳. 렌더가 프레임마다 채운다.
+    pub(crate) route: Option<crate::native_board::route::RouteHighlight>,
     /// 펼친 「창 밖 셸」 줄 — 기기 라벨, 이 기기는 빈 문자열.
     web_open: std::collections::HashSet<String>,
     /// 방 카드 우클릭 메뉴. 본기기 방 메뉴와 같은 항목(본문 보기·이름·닫기).
@@ -41,6 +45,36 @@ pub(crate) struct RoomMenu {
     room: String,
     key: String,
     pane: Option<String>,
+}
+
+/// 다른 기기 방의 본문 보기 — 방마다 고른 것이 전체 기본(`sidebar_body`)을 이긴다.
+#[derive(Default)]
+pub(crate) struct RoomViews {
+    chosen: std::collections::HashMap<String, bool>,
+    pub(crate) default_list: bool,
+}
+
+impl RoomViews {
+    pub(crate) fn listed(&self, key: &str) -> bool {
+        self.chosen.get(key).copied().unwrap_or(self.default_list)
+    }
+}
+
+impl FromIterator<String> for RoomViews {
+    fn from_iter<I: IntoIterator<Item = String>>(keys: I) -> Self {
+        Self { chosen: keys.into_iter().map(|key| (key, true)).collect(), default_list: false }
+    }
+}
+
+/// 받는 곳 강조가 이 줄인가 — 주소가 맞으면 그것, 옛 판 기계라 주소가 어긋나면 이름으로.
+/// `Some(확신이 문턱 아래인가)`.
+pub(crate) fn route_mark(route: Option<&crate::native_board::route::RouteHighlight>, local: bool, machine_label: &str, surface_id: &str, name: &str) -> Option<bool> {
+    let route = route?;
+    let s = &route.student;
+    let by_address = !s.surface_id.is_empty() && s.surface_id == surface_id
+        && (if local { s.local } else { !s.local && s.machine_label == machine_label });
+    let by_name = !name.is_empty() && s.name == name && s.local == local;
+    (by_address || by_name).then_some(route.tentative)
 }
 
 /// 문턱을 넘어야 끌기가 되어 방을 여는 클릭과 pane 이동을 구분한다.
@@ -167,7 +201,7 @@ fn room_title(room: &str) -> (&str, &str) {
 /// 카드 본문 높이 — 본기기 `sidebar_card_metrics` 와 같은 식. 목록이면 줄 수만큼.
 fn room_body_h(panes: usize, listed: bool) -> f32 {
     if listed {
-        panes as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD
+        panes as f32 * crate::sidebar_pulse::LIST_ROW_H + crate::sidebar_pulse::LIST_TOP_GAP
     } else {
         (36.0 + 13.0 * panes as f32).clamp(46.0, 150.0)
     }
@@ -176,14 +210,14 @@ fn room_body_h(panes: usize, listed: bool) -> f32 {
 fn content_height(
     machine: &state::MachinesColMachine,
     collapsed: &std::collections::HashSet<String>,
-    listed: &std::collections::HashSet<String>,
+    listed: &RoomViews,
 ) -> f32 {
     let groups = rooms(machine);
     let mut height = 0.0;
     for (room, list) in &groups {
         height += SIDEBAR_TAB_H;
         let key = room_key(&machine.label, list[0].window, room);
-        if !collapsed.contains(&key) { height += room_body_h(decks(list).len(), listed.contains(&key)); }
+        if !collapsed.contains(&key) { height += room_body_h(decks(list).len(), listed.listed(&key)); }
         height += SIDEBAR_TAB_GAP;
     }
     if groups.is_empty() { height = PANE_H; }
@@ -410,51 +444,65 @@ fn draw_cell(
 
 /// 목록 본문의 한 줄 — 본기기 목록 줄(render.rs)과 같은 문법: 얼굴(도는 중이면 걷기)·
 /// 이름·줄 끝 상태 점(기다림이면 깜빡). 누르면 그 자리로 보기 창을 연다.
+/// 다른 기기 학생 한 줄의 글 — 이 기기 줄(`App::row_student`)과 같은 규칙.
+fn remote_student(machine: &state::MachinesColMachine, deck: &[&state::MachinesColRow], lines: &crate::sidebar_pulse::SidebarLines) -> crate::sidebar_pulse::RowStudent {
+    let head = deck.iter().find(|r| !r.name.is_empty()).copied().unwrap_or(deck[0]);
+    let line = lines.remote.get(&(machine.label.clone(), head.remote_id.clone()));
+    let busy = deck.iter().any(|r| matches!(r.status.as_str(), "working" | "compacting"));
+    let waiting = machine.online && deck.iter().any(|r| r.needs_you());
+    let (turn, word) = crate::sidebar_pulse::row_state(
+        waiting,
+        head.attention_kind.as_deref().or_else(|| line.and_then(|l| l.attention_kind.as_deref())),
+        false,
+        line.is_some_and(|l| l.failed),
+        busy,
+    );
+    let title = crate::sidebar_pulse::plain_title(&head.title).to_string();
+    if head.name.is_empty() {
+        let name = if title.is_empty() { head.remote_id.clone() } else { title };
+        return crate::sidebar_pulse::RowStudent { name, turn, word: if head.closed { "닫힘" } else { "" }, report: "터미널".into(), ..Default::default() };
+    }
+    crate::sidebar_pulse::RowStudent {
+        who: head.name.clone(),
+        name: head.name.clone(),
+        work: title,
+        turn,
+        word: if head.closed { "닫힘" } else { word },
+        report: line.map(|l| l.report.clone()).unwrap_or_default(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_list_row(
     g: &mut gpu::GpuRenderer,
     hits: &mut Vec<(Action, Rect)>,
     machine: &state::MachinesColMachine,
     room: &str,
     deck: &[&state::MachinesColRow],
+    student: &crate::sidebar_pulse::RowStudent,
+    route: Option<&crate::native_board::route::RouteHighlight>,
     cur: bool,
     row: Rect,
-    separator: bool,
     cursor: (f32, f32),
     view: Rect,
 ) {
-    let head = deck[0];
-    let (rx, ry, rw, rh) = row;
+    let head = deck.iter().find(|r| !r.name.is_empty()).copied().unwrap_or(deck[0]);
     let Some(visible) = clipped(row, view) else { return };
-    if separator {
-        g.rect(rx + 6.0, ry, rw - 12.0, 1.0, theme::with_alpha(theme::border(), 0x50));
-    }
     let hover = hit(cursor, visible);
     g.hover_pointer |= hover && !head.closed;
-    if hover { round_rect(g, rx, ry, rw, rh, theme::radius_sm(), theme::surface_hover()); }
-    if cur { g.rect(rx, ry + 3.0, 2.0, rh - 6.0, theme::accent()); }
-    let busy = deck.iter().any(|r| matches!(r.status.as_str(), "working" | "compacting"));
-    let waiting = machine.online && deck.iter().any(|r| r.needs_you());
-    let who = deck.iter().find(|r| !r.name.is_empty()).map_or("", |r| r.name.as_str());
-    let phase = crate::sprites::anim_phase_secs();
-    let face = rh - 6.0;
-    let walked = busy && crate::sprites::draw_student_walk(g, who, rx + 5.0, ry + 1.0, rh - 2.0, phase);
-    let has_face = walked || crate::sprites::draw_student_face_anim(g, who, rx + 7.0, ry + 3.0, face, phase);
-    let col = if head.closed { theme::text_mute() } else if busy { theme::accent() } else { theme::success() };
-    if !has_face { circle_rect(g, rx + 9.0, ry + rh / 2.0 - 3.0, 6.0, col); }
-    let name_x = rx + 7.0 + face + 6.0;
-    let label = if !who.is_empty() { who } else if !head.title.is_empty() { head.title.as_str() } else { head.remote_id.as_str() };
-    text(g, label, name_x, ry + (rh - 11.0) / 2.0, (rx + rw - 14.0 - name_x).max(0.0), 11.0,
-        if head.closed { theme::text_mute() } else if cur { theme::text() } else { theme::text_dim() }, false);
-    let (dot_x, dot_y) = (rx + rw - 6.0, ry + rh / 2.0 - 3.0);
-    if waiting {
-        crate::sprites::blink_dot(g, dot_x, dot_y, 6.0, theme::attention(), 0.9);
-    } else {
-        circle_rect(g, dot_x, dot_y, 6.0, col);
-    }
+    crate::sidebar_pulse::paint_row(g, row, &crate::sidebar_pulse::RowPaint {
+        student,
+        icon: "terminal",
+        cur,
+        hover,
+        route: route_mark(route, false, &machine.label, &head.remote_id, &student.who),
+        busy: student.turn == crate::sidebar_pulse::RowTurn::Working,
+        muted: head.closed,
+    });
     if !head.closed {
         hits.push((Action::Open {
             label: machine.label.clone(), window: head.window, room: room.to_string(),
-            focus: Some(deck.iter().find(|r| !r.name.is_empty()).unwrap_or(&head).remote_id.clone()),
+            focus: Some(head.remote_id.clone()),
         }, visible));
     }
 }
@@ -465,7 +513,7 @@ pub(crate) fn draw_menu(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, c
     let nav = &mut info.navigation;
     nav.room_menu_rects.clear();
     let Some(menu) = nav.room_menu.as_ref() else { return };
-    let listed = nav.list_rooms.contains(&menu.key);
+    let listed = nav.list_rooms.listed(&menu.key);
     // 칸에서 열었으면 칸 메뉴 — 본기기 pane 메뉴와 같은 자리에 같은 골격으로 뜬다.
     let items: Vec<(RoomMenuAction, &str)> = if menu.pane.is_some() {
         // 본기기 pane 메뉴와 **같은 항목**이어야 한다 — 자리가 같은데 줄이 다르면 누른
@@ -503,7 +551,9 @@ pub(crate) fn draw_menu(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, c
 struct RowsCtx<'a> {
     numbers: &'a [(String, Option<u64>, String, usize)],
     collapsed: &'a std::collections::HashSet<String>,
-    listed: &'a std::collections::HashSet<String>,
+    listed: &'a RoomViews,
+    lines: &'a crate::sidebar_pulse::SidebarLines,
+    route: Option<&'a crate::native_board::route::RouteHighlight>,
     /// 지금 끌고 있는 칸의 원격 pane id.
     drag: Option<&'a str>,
     viewing: Option<&'a (String, Vec<String>)>,
@@ -538,7 +588,7 @@ fn draw_rows(
     for (index, (room, list)) in groups.iter().enumerate() {
         let key = room_key(&machine.label, list[0].window, room);
         let collapsed = ctx.collapsed.contains(&key);
-        let listed = ctx.listed.contains(&key);
+        let listed = ctx.listed.listed(&key);
         let stacks = decks(list);
         let body_h = if collapsed { 0.0 } else { room_body_h(stacks.len(), listed) };
         let h = SIDEBAR_TAB_H + body_h;
@@ -619,12 +669,15 @@ fn draw_rows(
             }, head_visible));
         }
         if !collapsed && listed {
-            // 목록 보기 — 배치도 자리에 학생 줄(본기기 목록 줄과 같은 기하).
-            for (k, deck) in stacks.iter().enumerate() {
-                let row = (tab_x + 8.0, y + SIDEBAR_TAB_H + SIDEBAR_ROW_PAD / 2.0 + k as f32 * SIDEBAR_ROW_H,
-                    tab_w - 16.0, SIDEBAR_ROW_H);
+            // 목록 보기 — 배치도 자리에 학생 줄(본기기 목록 줄과 같은 기하·같은 순서).
+            let mut rows: Vec<(crate::sidebar_pulse::RowStudent, &Vec<&state::MachinesColRow>)> =
+                stacks.iter().map(|deck| (remote_student(machine, deck, ctx.lines), deck)).collect();
+            rows.sort_by_key(|(student, _)| student.turn);
+            for (k, (student, deck)) in rows.iter().enumerate() {
+                let row = (tab_x + 8.0, y + SIDEBAR_TAB_H + crate::sidebar_pulse::LIST_TOP_GAP + k as f32 * crate::sidebar_pulse::LIST_ROW_H,
+                    tab_w - 16.0, crate::sidebar_pulse::LIST_ROW_H);
                 let cur = active && ctx.viewing_cur.is_some_and(|c| deck.iter().any(|r| r.remote_id == c));
-                draw_list_row(g, hits, machine, room, deck, cur, row, k > 0, cursor, view);
+                draw_list_row(g, hits, machine, room, deck, student, ctx.route, cur, row, cursor, view);
             }
         } else if !collapsed {
             let ma = (tab_x + 10.0, y + SIDEBAR_TAB_H + 3.0, tab_w - 20.0, body_h - 8.0);
@@ -667,11 +720,13 @@ pub(crate) fn draw(g: &mut gpu::GpuRenderer, info: &mut state::InfoState, cursor
     g.rect(12.0, head_top + HEADER_H, (width - 24.0).max(0.0), 1.0, theme::border());
 
     let NavigationState { collapsed_rooms, hits, viewing, viewing_cur, list_rooms, rename, cell_drag,
-        local_content_h, shared_scroll, room_numbers, device_views, web_open, .. } = nav;
+        local_content_h, shared_scroll, room_numbers, device_views, web_open, lines, route, .. } = nav;
     let ctx = RowsCtx {
         numbers: room_numbers,
         collapsed: collapsed_rooms,
         listed: list_rooms,
+        lines,
+        route: route.as_ref(),
         drag: cell_drag.as_ref().filter(|d| d.active).map(|d| d.pane.as_str()),
         viewing: viewing.as_ref(),
         viewing_cur: viewing_cur.as_deref(),
@@ -824,7 +879,7 @@ impl App {
                 let item = self.info.navigation.room_menu_rects.first().map(|(_, r)| *r);
                 if let Some(r) = item { self.sidebar_navigation_menu_click((r.0 + r.2 / 2.0, r.1 + r.3 / 2.0)); }
                 let nav = &self.info.navigation;
-                report = format!("listed={} menu_closed={}", !nav.list_rooms.is_empty(), nav.room_menu.is_none());
+                report = format!("listed={} menu_closed={}", nav.list_rooms.chosen.values().any(|v| *v), nav.room_menu.is_none());
             }
             14 => {
                 // 다시 우클릭 — 항목 사각은 다음 프레임의 그리기가 채우므로 누르기는 다음 단계.
@@ -1193,12 +1248,19 @@ mod tests {
         let m = machine();
         let (room, list) = rooms(&m).into_iter().next().unwrap();
         let key = room_key(&m.label, list[0].window, &room);
-        let listed: std::collections::HashSet<String> = [key].into_iter().collect();
+        let listed: RoomViews = [key.clone()].into_iter().collect();
         let map = content_height(&m, &Default::default(), &Default::default());
         let as_list = content_height(&m, &Default::default(), &listed);
         let n = decks(&list).len();
         assert_eq!(as_list - map, room_body_h(n, true) - room_body_h(n, false));
-        assert_eq!(room_body_h(n, true), n as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD);
+        assert_eq!(room_body_h(n, true), n as f32 * crate::sidebar_pulse::LIST_ROW_H + crate::sidebar_pulse::LIST_TOP_GAP);
+        let every_key: RoomViews = rooms(&m).iter().map(|(room, list)| room_key(&m.label, list[0].window, room)).collect();
+        let everywhere = RoomViews { default_list: true, ..Default::default() };
+        assert_eq!(content_height(&m, &Default::default(), &everywhere), content_height(&m, &Default::default(), &every_key),
+            "전체 기본이 목록이면 고른 적 없는 방도 목록");
+        let mut one_map = RoomViews { default_list: true, ..Default::default() };
+        one_map.chosen.insert(key.clone(), false);
+        assert!(content_height(&m, &Default::default(), &one_map) < content_height(&m, &Default::default(), &everywhere), "방마다 고른 배치도가 전체 기본을 이긴다");
     }
 
     #[test]
@@ -1347,8 +1409,8 @@ impl App {
         self.info.navigation.room_menu_rects.clear();
         self.chrome_dirty = true;
         match action {
-            Some(RoomMenuAction::ListBody) => { self.info.navigation.list_rooms.insert(menu.key); }
-            Some(RoomMenuAction::MapBody) => { self.info.navigation.list_rooms.remove(&menu.key); }
+            Some(RoomMenuAction::ListBody) => { self.info.navigation.list_rooms.chosen.insert(menu.key, true); }
+            Some(RoomMenuAction::MapBody) => { self.info.navigation.list_rooms.chosen.insert(menu.key, false); }
             Some(RoomMenuAction::Rename) => match menu.window {
                 Some(window) => {
                     let name = room_title(&menu.room).0.to_string();

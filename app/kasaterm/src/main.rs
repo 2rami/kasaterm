@@ -622,7 +622,8 @@ const PANE_INNER_Y: f32 = 0.0;
 // in the current session. Logical px (the renderer multiplies by scale).
 // Every `col`/`origin_x` calc already adds `WINDOW_PADDING + SIDEBAR_W`,
 // so bumping this off 0 shifts the whole cell grid right automatically.
-const SIDEBAR_W: f32 = 200.0;
+// 240 — 목록 줄이 「이름 · 지금 일」과 사정 한 줄의 두 줄이라 200 에서는 지금 일이 거의 다 잘렸다.
+const SIDEBAR_W: f32 = 240.0;
 
 /// Sidebar layout (logical px), Warp-style. Non-selected tabs are flat
 /// (icon + two text lines, no box); the selected tab gets a subtle rounded
@@ -5921,9 +5922,9 @@ struct App {
     /// and `tab_strip_w()` pins the side strip to 0, so render + click routing
     /// follow automatically. Persisted as settings.json `tab_position`.
     tabs_on_top: bool,
-    /// 사이드바 방 카드 본문의 **기본** 보기 — 참이면 배치도 대신 학생 줄 목록
-    /// (2026-09-08 지시 「방 우클릭하면 목록·미니맵 전환」). settings.json
-    /// `sidebar_body` = "list". 방마다 따로 고른 것은 `room_list_body` 가 이긴다.
+    /// 사이드바 방 카드 본문의 **기본** 보기 — 참이면 배치도 대신 학생 줄 목록.
+    /// 사이드바 맨 위 「목록 | 배치도」가 바꾸고 settings.json `sidebar_body` 에 남는다.
+    /// 값이 없으면 목록(2026-09-29 합의). 방마다 따로 고른 것은 `room_list_body` 가 이긴다.
     sidebar_list_body: bool,
     /// **그 방만** 따로 고른 본문 보기 — 참이면 목록, 거짓이면 배치도. 없는 방은
     /// 위 기본값을 따른다.
@@ -6395,7 +6396,7 @@ impl App {
             sidebar_list_body: socket::read_settings()
                 .get("sidebar_body")
                 .and_then(|v| v.as_str())
-                == Some("list"),
+                != Some("map"),
             room_list_body: std::collections::HashMap::new(),
             // lite 는 Ghostty 프롬프트처럼 얇은 바 — 설정 화면이 색뿐이라 여기서 박는다.
             cursor_shape: if lite { cursor::CursorShape::Bar } else { socket::read_cursor_shape() },

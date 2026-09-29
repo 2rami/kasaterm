@@ -85,7 +85,7 @@
 
 | 묶음 | 하는 일 | 파일 |
 |---|---|---|
-| ① 사이드바 현황 | 현황 줄 → 목록·배치도 전환, 두 줄 목록 행, 차례 줄 먼저, 거울 줄 빼기, 기본 폭 240, 받는 곳 강조 | `sidebar_pulse.rs`(그리기만 걷고 펫용 요약은 유지) · `sidebar_navigation.rs` · `render.rs` 목록 줄 · `chrome.rs` |
+| ① 사이드바 현황 (구현됨) | 현황 줄 → 목록·배치도 전환, 두 줄 목록 행, 차례 줄 먼저, 거울 줄 빼기, 기본 폭 240, 받는 곳 강조 | `sidebar_pulse.rs`(그리기만 걷고 펫용 요약은 유지) · `sidebar_navigation.rs` · `render.rs` 목록 줄 · `chrome.rs` |
 | ② 나쵸 판 | 운영 보드 목록 → 도구 ▾, 대화 원장에 지시 영수증·학생 보고·답 단추, 받는 곳 줄·보내기 단추 이름 | `native_board.rs` · `native_board/chat.rs` · `left_panel.rs` |
 | ③ 받는 곳 판정 | 코드 규칙·부르는 때·늦은 답(순수 함수 + 테스트), 관문 판정 창구, tell·dispatch·나쵸로 보내기 | 새 `native_board/route.rs` · `crates/kasa-mcp` 의 `workspace_assistant.rs`·`gateway_workspace.rs` |
 | ④ 지금 일 = 세션 이름 | tell·brief 목적 → 세션 이름, 장부 goal 대체, 관측 `title` 같은 값 | `tell_delivery.rs` · `pane_identity.rs`(또는 세션 이름 정본이 있는 곳) |

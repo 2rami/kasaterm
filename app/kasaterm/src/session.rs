@@ -6099,8 +6099,9 @@ impl App {
         // 칸이 얼굴을 담아야 하므로 높이가 pane 수를 따라간다 — 여섯 칸을 46px
         // 안에 우겨넣으면 한 칸이 7px 이라 얼굴이 안 들어간다.
         // 목록 보기면 본문은 학생 줄이 pane 수만큼 — 배치도 대신이다(2026-09-08 지시).
+        // 목록 줄은 두 줄(40)이고 거울 줄을 뺀다 — 원본 기기 줄과 같은 학생이다.
         let body_h = if self.room_body_is_list(i) {
-            leaves.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD
+            self.sidebar_list_panes(i).len() as f32 * crate::sidebar_pulse::LIST_ROW_H + crate::sidebar_pulse::LIST_TOP_GAP
         } else {
             (36.0 + 13.0 * leaves.len() as f32).clamp(46.0, 150.0)
         };
@@ -6320,13 +6321,14 @@ impl App {
                     body_h - 8.0,
                 );
                 if self.room_body_is_list(i) {
-                    // 목록 보기 — 배치도 자리에 학생 줄. 숨긴 줄은 그 아래 이어진다.
-                    for (k, id) in self.window_leaves(i).into_iter().enumerate() {
-                        let ry = y + SIDEBAR_TAB_H + SIDEBAR_ROW_PAD / 2.0 + k as f32 * SIDEBAR_ROW_H;
-                        if ry + SIDEBAR_ROW_H > bottom {
+                    // 목록 보기 — 배치도 자리에 학생 줄(내 차례 → 하는 중 → 쉬는 중). 숨긴 줄은 그 아래 이어진다.
+                    let row_h = crate::sidebar_pulse::LIST_ROW_H;
+                    for (k, id) in self.sidebar_list_panes(i).into_iter().enumerate() {
+                        let ry = y + SIDEBAR_TAB_H + crate::sidebar_pulse::LIST_TOP_GAP + k as f32 * row_h;
+                        if ry + row_h > bottom {
                             break;
                         }
-                        rows.push((i, id, (tab_x + 8.0, ry, tab_w - 16.0, SIDEBAR_ROW_H)));
+                        rows.push((i, id, (tab_x + 8.0, ry, tab_w - 16.0, row_h)));
                     }
                 } else if ma.1 + ma.3 <= bottom && ma.2 > 0.0 {
                     // 활성 방의 트리는 `windows[i]` 가 아니라 `pty_layout` 에 있다

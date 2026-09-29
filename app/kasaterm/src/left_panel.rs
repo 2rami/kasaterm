@@ -460,7 +460,7 @@ mod tests {
         let at = handler.find("self.toggle_board_panel();").expect("보드 토글");
         assert!(at < handler.find("self.native_settings_key(&event);").expect("설정 키"));
         assert!(handler.contains("작업현황 켜기/끄기  ⇧⌘B"), "메뉴가 단축키를 알려 줘야 사람이 찾는다");
-        assert!(handler.contains("if hit(self.board_btn_rect) || self.sidebar_pulse_hit((cx, cy)) {\n                        self.toggle_board_panel();"));
+        assert!(handler.contains("if hit(self.board_btn_rect) {\n                        self.toggle_board_panel();"));
         for source in [handler, include_str!("chrome.rs"), include_str!("session.rs"), include_str!("native_board.rs")] {
             assert!(!source.contains("open_board_room") && !source.contains("return_from_board_room"));
         }

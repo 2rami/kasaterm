@@ -4703,9 +4703,15 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
-                    // 보드·아로나 — 메뉴막대 밖의 입구(트레이 버튼과 사이드바 맨 위 현황 줄).
-                    // 단축키와 같은 토글이라 열린 화면에서 누르면 작업 방으로 돌아온다.
-                    if hit(self.board_btn_rect) || self.sidebar_pulse_hit((cx, cy)) {
+                    // 사이드바 맨 위 「목록 | 배치도」 — 방 본문의 전체 기본을 바꾼다.
+                    if self.sidebar_switch_click((cx, cy)) {
+                        self.session_touched = session_touched_before_event;
+                        window.request_redraw();
+                        return;
+                    }
+                    // 보드·아로나 — 메뉴막대 밖의 입구(트레이 버튼). 단축키와 같은 토글이라
+                    // 열린 화면에서 누르면 작업 방으로 돌아온다.
+                    if hit(self.board_btn_rect) {
                         self.toggle_board_panel();
                         self.session_touched = session_touched_before_event;
                         window.request_redraw();

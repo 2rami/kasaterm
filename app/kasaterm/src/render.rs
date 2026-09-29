@@ -41,6 +41,10 @@ struct TabPeek {
 }
 
 struct SidebarRowInfo {
+    /// 목록 줄(두 줄)의 글 — 이름 · 지금 일 / 사정 한 줄.
+    student: crate::sidebar_pulse::RowStudent,
+    /// 받는 곳 강조 — `Some(확신이 문턱 아래인가)`.
+    route: Option<bool>,
     /// 배정 학생명(얼굴용). claude 가 안 붙은 pane 은 빈 문자열.
     who: String,
     /// 줄에 적는 것 — 그 pane 이 지금 무엇인가(claude · zsh · 편집기…).
@@ -2082,6 +2086,7 @@ impl App {
         // 배치도 칸에 쓸 활성 pane — 칸마다 락을 잡지 않게 여기서 한 번만 뜬다
         // (페인트 루프는 gpu 를 빌린 상태라 `&self` 메서드도 못 부른다).
         let sb_active_pane = self.ws.lock().unwrap().active_pane.clone();
+        let route_highlight = self.board_scene.route_highlight().or_else(crate::sidebar_pulse::fixture_route);
         // 배치도 칸과 꼬리 줄이 **같은 것**을 말한다 — 한쪽만 고치면 같은 pane 이
         // 자리마다 다른 얼굴을 갖는다. 그래서 계산은 한 벌이다.
         let pane_info = |id: &String| -> SidebarRowInfo {
@@ -2176,7 +2181,12 @@ impl App {
                 let busy_secs = act
                     .and_then(|a| a.busy_since)
                     .map(|t| t.elapsed().as_secs());
+                let student = self.row_student(id);
+                let route = crate::sidebar_navigation::route_mark(
+                    route_highlight.as_ref(), true, "", id, &student.who);
                 SidebarRowInfo {
+                    student,
+                    route,
                     who,
                     label,
                     color: self.pane_state_color(id),
@@ -2792,10 +2802,12 @@ impl App {
                 g.rect(tab_strip_w - 1.0, 0.0, 1.0, sb_win_h, theme::border());
             }
             if pulse_h > 0.0 {
-                crate::sidebar_pulse::draw(g, &mut self.pulse, sb_cursor, tab_strip_w, board_panel_open);
+                crate::sidebar_pulse::draw_view_switch(g, &mut self.pulse, sb_cursor, tab_strip_w, self.sidebar_list_body);
             } else {
-                self.pulse.rect = None;
+                self.pulse.switch = None;
             }
+            self.info.navigation.list_rooms.default_list = self.sidebar_list_body;
+            self.info.navigation.route = self.board_scene.route_highlight().or_else(crate::sidebar_pulse::fixture_route);
             crate::sidebar_navigation::draw(g, &mut self.info, sb_cursor, tab_strip_w,
                 sb_head_top, (0.0, sb_view.0, tab_strip_w, sb_full_h));
             // 사이드바 토글. 자리는 `sidebar_toggle_rect` 가 정한다 — 접혔으면
@@ -4244,6 +4256,22 @@ impl App {
                     let (who, label, col, is_cur) =
                         (&info.who, &info.label, &info.color, info.is_cur);
                     let (rx, ry, rw, rh) = *r;
+                    // 목록 보기의 두 줄 행 — 다른 기기 방과 같은 그림(`sidebar_pulse::paint_row`).
+                    // 아래 한 줄짜리 그림은 숨긴 pane 꼬리 줄만 쓴다.
+                    if !info.stashed && rh >= crate::sidebar_pulse::LIST_ROW_H {
+                        let hover = sb_cursor.0 >= rx && sb_cursor.0 <= rx + rw
+                            && sb_cursor.1 >= ry && sb_cursor.1 <= ry + rh;
+                        crate::sidebar_pulse::paint_row(g, *r, &crate::sidebar_pulse::RowPaint {
+                            student: &info.student,
+                            icon: info.icon,
+                            cur: is_cur,
+                            hover,
+                            route: info.route,
+                            busy: info.busy || info.student.turn == crate::sidebar_pulse::RowTurn::Working && crate::sidebar_pulse::fixture_on(),
+                            muted: false,
+                        });
+                        continue;
+                    }
                     // 줄 사이 실선 — 같은 방 안의 칸막이라 방과 방을 가르는
                     // 카드 테두리보다 옅어야 한다. 첫 줄 위에는 안 긋는다(카드
                     // 머리와 목록은 이미 여백으로 갈려 있다).
@@ -9835,7 +9863,6 @@ impl App {
                 let tip = [
                     (self.board_btn_rect, "보드  ⇧⌘B"),
                     (self.arona_btn_rect, "나쵸 대화  ⇧⌘A"),
-                    (self.pulse.rect.unwrap_or_default(), "모든 기기 현황 — 누르면 보드  ⇧⌘B"),
                 ]
                 .into_iter()
                 .find(|(r, _)| over(*r));

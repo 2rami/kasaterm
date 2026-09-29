@@ -2720,7 +2720,7 @@ impl App {
     /// 이걸 안 깨면 **타이핑이 1초씩 뭉쳐 나온다**(사용자: "버벅여"). 편집 중인 방의
     /// 라벨은 캐시 밖에서 버퍼로 덮으므로 재계산 자체는 안 돌지만, 편집을 끝낸 뒤
     /// 원래 이름으로 돌아가려면 캐시를 한 번 비워야 한다.
-    fn mark_room_label_dirty(&mut self) {
+    pub(crate) fn mark_room_label_dirty(&mut self) {
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
