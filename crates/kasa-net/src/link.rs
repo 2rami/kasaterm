@@ -1,10 +1,11 @@
-//! 한 상대와의 QUIC 연결을 들고, 지금 길이 직통인지 지켜본다.
+//! 한 상대와의 QUIC 연결을 들고, 지금 길이 데이터를 실어도 되는 길인지 지켜본다.
 
-use std::sync::{Arc, Mutex, Weak};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use iroh::endpoint::Connection;
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -23,8 +24,12 @@ const STABLE: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LinkState {
     Down,
-    /// 붙었지만 중계로만 간다. 데이터는 싣지 않는다 — n0 공용 중계는 ssh 길보다 느리다(docs/kasanet.md P0).
+    /// 믿지 않는 중계로만 간다. 데이터는 싣지 않는다 — n0 공용 중계는 ssh 길보다 느리다(docs/kasanet.md P0).
     Relay,
+    /// 믿는 중계(자체 중계)로 간다. 데이터를 싣는다.
+    TrustedRelay {
+        rtt: Duration,
+    },
     Direct {
         rtt: Duration,
     },
@@ -34,6 +39,49 @@ impl LinkState {
     pub fn is_direct(&self) -> bool {
         matches!(self, LinkState::Direct { .. })
     }
+
+    /// 이 길로 TCP 연결을 실어도 되나 — 직통이거나 믿는 중계.
+    pub fn carries_data(&self) -> bool {
+        matches!(
+            self,
+            LinkState::Direct { .. } | LinkState::TrustedRelay { .. }
+        )
+    }
+}
+
+/// 데이터를 실어도 되는 중계. 비어 있으면(기본) 어떤 중계로도 싣지 않는다. 자체 중계가 서면 그 주소를 넣는다.
+/// 직통과 믿는 중계 사이를 오가는 것은 한 QUIC 연결 안의 경로 바꿈이라 흐르던 연결을 끊지 않는다.
+#[derive(Clone, Debug, Default)]
+pub struct RelayTrust(Arc<RwLock<HashSet<String>>>);
+
+impl RelayTrust {
+    pub fn new(urls: impl IntoIterator<Item = RelayUrl>) -> Self {
+        let trust = Self::default();
+        trust.set(urls);
+        trust
+    }
+
+    pub fn set(&self, urls: impl IntoIterator<Item = RelayUrl>) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) =
+            urls.into_iter().map(|u| key(&u)).collect();
+    }
+
+    pub fn contains(&self, url: &RelayUrl) -> bool {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&key(url))
+    }
+}
+
+/// n0 기본 중계가 `host.` 꼴 FQDN 으로 오듯 같은 중계가 끝 점 유무로 갈리므로 호스트·포트로 맞춘다.
+fn key(url: &RelayUrl) -> String {
+    let host = url
+        .host_str()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    format!("{host}:{}", url.port_or_known_default().unwrap_or(0))
 }
 
 #[derive(Clone)]
@@ -43,6 +91,7 @@ pub struct Link {
 
 struct Inner {
     id: EndpointId,
+    trust: RelayTrust,
     addr: Mutex<EndpointAddr>,
     conn: Mutex<Option<Connection>>,
     state: watch::Sender<LinkState>,
@@ -63,9 +112,10 @@ impl Drop for Inner {
 
 impl Link {
     /// 붙기를 뒤에서 계속 시도한다. 끊기면 다시 건다. tokio 런타임 안에서 부른다.
-    pub fn start(endpoint: Endpoint, peer: EndpointAddr) -> Self {
+    pub fn start(endpoint: Endpoint, peer: EndpointAddr, trust: RelayTrust) -> Self {
         let inner = Arc::new(Inner {
             id: peer.id,
+            trust,
             addr: Mutex::new(peer),
             conn: Mutex::new(None),
             state: watch::channel(LinkState::Down).0,
@@ -106,9 +156,9 @@ impl Link {
             .clone()
     }
 
-    /// 직통일 때만 연결을 내준다.
-    pub fn direct(&self) -> Option<Connection> {
-        if !self.state().is_direct() {
+    /// 데이터를 실어도 되는 길(직통·믿는 중계)일 때만 연결을 내준다.
+    pub fn usable(&self) -> Option<Connection> {
+        if !self.state().carries_data() {
             return None;
         }
         self.inner
@@ -119,13 +169,19 @@ impl Link {
     }
 }
 
-fn observe(conn: &Connection) -> LinkState {
+fn observe(conn: &Connection, trust: &RelayTrust) -> LinkState {
     if conn.close_reason().is_some() {
         return LinkState::Down;
     }
     let paths = conn.paths();
-    match paths.iter().find(|p| p.is_selected()) {
-        Some(p) if p.is_ip() => LinkState::Direct { rtt: p.rtt() },
+    let Some(p) = paths.iter().find(|p| p.is_selected()) else {
+        return LinkState::Relay;
+    };
+    match p.remote_addr() {
+        TransportAddr::Ip(_) => LinkState::Direct { rtt: p.rtt() },
+        TransportAddr::Relay(url) if trust.contains(url) => {
+            LinkState::TrustedRelay { rtt: p.rtt() }
+        }
         _ => LinkState::Relay,
     }
 }
@@ -179,7 +235,7 @@ async fn maintain(endpoint: Endpoint, weak: Weak<Inner>) {
                 conn.close(0u32.into(), b"kasanet: link dropped");
                 return;
             };
-            let state = observe(&conn);
+            let state = observe(&conn, &inner.trust);
             if state == LinkState::Down {
                 *inner.conn.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 *inner.last_error.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -197,5 +253,24 @@ async fn maintain(endpoint: Endpoint, weak: Weak<Inner>) {
             (wait * 2).min(RETRY_MAX)
         };
         tokio::time::sleep(wait).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn relay_trust_ignores_trailing_dot_and_default_port() {
+        let trust = RelayTrust::new([RelayUrl::from_str("https://relay.example.com").unwrap()]);
+        assert!(trust.contains(&RelayUrl::from_str("https://relay.example.com./").unwrap()));
+        assert!(trust.contains(&RelayUrl::from_str("https://RELAY.example.com:443").unwrap()));
+        assert!(!trust.contains(&RelayUrl::from_str("https://relay.example.com:8443").unwrap()));
+        assert!(
+            !trust.contains(&RelayUrl::from_str("https://aps1-1.relay.n0.iroh.link./").unwrap())
+        );
+        assert!(!RelayTrust::default()
+            .contains(&RelayUrl::from_str("https://relay.example.com").unwrap()));
     }
 }

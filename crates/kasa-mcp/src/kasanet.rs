@@ -17,7 +17,7 @@ use std::time::Duration;
 use kasa_net::iroh::endpoint::presets;
 use kasa_net::iroh::protocol::Router;
 use kasa_net::iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey};
-use kasa_net::{fwd, identity, AllowList, FwdServer, Link, LinkState, Route};
+use kasa_net::{fwd, identity, AllowList, FwdServer, Link, LinkState, RelayTrust, Route};
 use serde_json::Value;
 
 /// 끄는 스위치. `0`·`off` 면 엔드포인트를 띄우지 않고 모든 길이 예전 그대로다.
@@ -27,11 +27,15 @@ const STOP_AFTER_ENV: &str = "KASATERM_KASANET_STOP_MS";
 /// 검증 리그용 — UDP 를 이 주소(예: `127.0.0.1:0`)에만 연다. 서명 안 된 디버그 앱이 0.0.0.0 을 열면 macOS 방화벽이
 /// 사람 화면에 묻기 창을 띄우고, 답하기 전까지 들어오는 UDP 를 막아 직통이 안 선다(2026-09-29 리그에서 중계만 잡힘).
 const BIND_ENV: &str = "KASATERM_KASANET_BIND";
+/// 데이터를 실어도 되는 중계 주소(쉼표로). 기본은 비어 있어 중계로는 싣지 않는다 — n0 공용 중계는 ssh 길보다
+/// 느렸다(P0). 자체 중계가 서면 그 주소를 넣거나 `trust_relays` 로 넘긴다.
+const TRUSTED_RELAYS_ENV: &str = "KASATERM_KASANET_TRUSTED_RELAYS";
 
 struct Node {
     endpoint: Endpoint,
     router: Router,
     allow: AllowList,
+    trust: RelayTrust,
     mcp_port: u16,
     handle: tokio::runtime::Handle,
     links: Mutex<HashMap<EndpointId, Link>>,
@@ -116,6 +120,12 @@ pub async fn start(mcp_port: u16) {
         endpoint,
         router,
         allow,
+        trust: RelayTrust::new(
+            std::env::var(TRUSTED_RELAYS_ENV)
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|u| RelayUrl::from_str(u.trim()).ok()),
+        ),
         mcp_port,
         handle: tokio::runtime::Handle::current(),
         links: Mutex::new(HashMap::new()),
@@ -135,6 +145,13 @@ pub async fn start(mcp_port: u16) {
                 let _ = n.router.shutdown().await;
             }
         });
+    }
+}
+
+/// 데이터를 실어도 되는 중계를 바꾼다(자체 중계 설정이 부른다). 이미 붙은 링크에도 다음 판정부터 든다.
+pub fn trust_relays(urls: impl IntoIterator<Item = RelayUrl>) {
+    if let Some(n) = NODE.get() {
+        n.trust.set(urls);
     }
 }
 
@@ -254,7 +271,7 @@ pub fn learn(base: &str, kasanet: &Value) {
             }
             None => {
                 let _rt = n.handle.enter();
-                let link = Link::start(n.endpoint.clone(), addr);
+                let link = Link::start(n.endpoint.clone(), addr, n.trust.clone());
                 links.insert(link.id(), link.clone());
                 tokio::spawn(log_changes(base.to_string(), link.clone()));
                 link
@@ -282,7 +299,7 @@ async fn log_changes(base: String, link: Link) {
             changed = rx.changed() => if changed.is_err() { return },
             _ = tokio::time::sleep(Duration::from_secs(10)) => {
                 let error = link.last_error();
-                if error.is_some() && error != said_error && !link.state().is_direct() {
+                if error.is_some() && error != said_error && !link.state().carries_data() {
                     eprintln!("[kasanet] {base} ({}) {}", link.id().fmt_short(), error.as_deref().unwrap_or_default());
                     said_error = error;
                 }
@@ -292,19 +309,22 @@ async fn log_changes(base: String, link: Link) {
         let state = *rx.borrow_and_update();
         let what = match state {
             LinkState::Direct { rtt } => format!("직통 {}ms", rtt.as_millis()),
-            LinkState::Relay => "중계만 — 원래 길로 보낸다".into(),
+            LinkState::TrustedRelay { rtt } => format!("자체 중계 {}ms", rtt.as_millis()),
+            LinkState::Relay => "공용 중계만 — 원래 길로 보낸다".into(),
             LinkState::Down => "끊김 — 원래 길로 보낸다".into(),
         };
         eprintln!("[kasanet] {base} ({}) {what}", link.id().fmt_short());
     }
 }
 
-/// 기기 상태에 싣는 길. 입구가 직통이면 ("kasanet", 왕복), 아니면 ("ssh", None). 입구가 없으면 None.
+/// 기기 상태에 싣는 길. 직통이면 ("kasanet", 왕복), 믿는 중계면 ("kasanet-relay", 왕복), 아니면 ("ssh", None).
+/// 입구가 없으면 None.
 pub fn path(base: &str) -> Option<(&'static str, Option<u64>)> {
     let n = NODE.get()?;
     let route = n.routes.lock().ok()?.get(&key(base))?.clone();
     Some(match route.link_state() {
         Some(LinkState::Direct { rtt }) => ("kasanet", Some(rtt.as_millis() as u64)),
+        Some(LinkState::TrustedRelay { rtt }) => ("kasanet-relay", Some(rtt.as_millis() as u64)),
         _ => ("ssh", None),
     })
 }

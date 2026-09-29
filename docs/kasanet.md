@@ -96,10 +96,14 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
 - **길 고르기** `kasa_net::Route` — base 마다 `127.0.0.1` 입구 하나. 요청하는 자리(기기 폴링·`/term/changes`·거울 ws·
   layout ws·클립보드·announce)가 `route_base(base)` 로 입구를 받는다. 입구는 연결마다 직통이면 카사넷, 아니면 원래 base.
   직통이 2초 버티면 원래 길에 남은 3초 넘은 연결을 1초마다 쓸어 끊어 옮기고(거울은 스스로 다시 붙는다), 직통을
-  잃으면(중계만·끊김) 카사넷 연결을 바로 끊어 원래 길로 보낸다. 한 번만 옮기면 그 순간 막 열린 HTTP 재사용 연결이
+  잃으면(공용 중계만·끊김) 카사넷 연결을 바로 끊어 원래 길로 보낸다. 한 번만 옮기면 그 순간 막 열린 HTTP 재사용 연결이
   끝까지 ssh 에 남았다.
-- **상태**: `/machines` 기기 줄에 `path`(`kasanet`·`ssh`)와 `path_rtt_ms`(QUIC 경로 왕복). 앱 로그에 길이 바뀔 때마다
-  `[kasanet] <base> (<id>) 직통 Nms / 중계만 / 끊김` 과 못 붙은 까닭.
+- **믿는 중계**: 데이터를 실어도 되는 중계는 `RelayTrust`(기본 비어 있음)로 정한다. `KASATERM_KASANET_TRUSTED_RELAYS`
+  (쉼표로 URL) 또는 `kasanet::trust_relays` 로 자체 중계 주소를 넣으면 그 중계로 가는 동안도 카사넷에 싣는다. 호스트·
+  포트로 맞추므로 끝 점(`host.`)·기본 포트 차이는 같게 본다. 직통↔믿는 중계는 한 QUIC 연결 안의 경로 바꿈이라 흐르던
+  연결을 끊지 않는다.
+- **상태**: `/machines` 기기 줄에 `path`(`kasanet`·`kasanet-relay`·`ssh`)와 `path_rtt_ms`(QUIC 경로 왕복). 앱 로그에
+  길이 바뀔 때마다 `[kasanet] <base> (<id>) 직통 Nms / 자체 중계 Nms / 공용 중계만 / 끊김` 과 못 붙은 까닭.
 - **격리**: 격리 env(`KASATERM_SESSION_FILE`·`_SETTINGS_FILE`·`_COLLAB_ROOT`)가 걸리면 키 경로를 안 줘도 이번 실행 전용
   키로 뜬다. 검증 전용 `KASATERM_KASANET_BIND=127.0.0.1:0`(UDP 를 루프백에만)·`KASATERM_KASANET_STOP_MS`(N ms 뒤 닫기).
 

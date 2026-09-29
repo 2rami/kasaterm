@@ -14,7 +14,7 @@ use iroh::{Endpoint, SecretKey};
 
 pub use allow::AllowList;
 pub use fwd::{Forward, FwdServer};
-pub use link::{Link, LinkState};
+pub use link::{Link, LinkState, RelayTrust};
 pub use route::{Route, Via};
 
 /// 모든 카사넷 엔드포인트가 거치는 틀. 허용 목록 훅이 빠진 엔드포인트가 생기지 않게 여기 한 곳에서 건다.

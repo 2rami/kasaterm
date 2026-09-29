@@ -1,4 +1,4 @@
-//! 로컬 TCP 입구 하나. 연결마다 그 순간의 길을 고른다 — 직통이면 카사넷, 아니면 원래 길(ssh 터널 등).
+//! 로컬 TCP 입구 하나. 연결마다 그 순간의 길을 고른다 — 직통(또는 믿는 중계)이면 카사넷, 아니면 원래 길(ssh 터널 등).
 //!
 //! 기기 주소(base)를 바꿔 끼우지 않는 까닭: 거울은 붙을 때의 base 를 평생 들고 재접속하고, 세션 복원과
 //! 여러 판정이 그 base 로 기기를 찾는다. 길이 바뀔 때마다 base 가 바뀌면 거울이 기기를 잃는다.
@@ -115,7 +115,7 @@ impl Route {
 
     /// 지금 들어오는 새 연결이 갈 길.
     pub fn via(&self) -> Via {
-        if self.inner.direct().is_some() {
+        if self.inner.usable().is_some() {
             Via::Kasanet
         } else {
             Via::Fallback
@@ -147,10 +147,10 @@ impl Drop for Route {
 }
 
 impl Inner {
-    fn direct(&self) -> Option<(Connection, u16)> {
+    fn usable(&self) -> Option<(Connection, u16)> {
         let slot = self.link.lock().unwrap_or_else(|e| e.into_inner());
         let (link, port) = slot.as_ref()?;
-        Some((link.direct()?, *port))
+        Some((link.usable()?, *port))
     }
 
     fn cut(&self, pick: impl Fn(&Carried) -> bool) -> usize {
@@ -183,7 +183,7 @@ async fn accept_loop(inner: Arc<Inner>, listener: TcpListener) {
             tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
         };
-        let direct = inner.direct();
+        let direct = inner.usable();
         let via = if direct.is_some() {
             Via::Kasanet
         } else {
@@ -236,24 +236,24 @@ async fn carry(
 }
 
 async fn follow(inner: Arc<Inner>, mut rx: watch::Receiver<LinkState>) {
-    let mut direct_since: Option<Instant> = None;
+    let mut usable_since: Option<Instant> = None;
     loop {
-        let now_direct = rx.borrow_and_update().is_direct();
-        match (now_direct, direct_since) {
-            (true, None) => direct_since = Some(Instant::now()),
+        let now_usable = rx.borrow_and_update().carries_data();
+        match (now_usable, usable_since) {
+            (true, None) => usable_since = Some(Instant::now()),
             (false, Some(_)) => {
-                direct_since = None;
-                // 중계로 떨어진 연결에 데이터를 더 싣지 않는다 — 끊어서 원래 길로 다시 붙게 한다.
+                usable_since = None;
+                // 믿지 않는 중계로 떨어진 연결에 데이터를 더 싣지 않는다 — 끊어서 원래 길로 다시 붙게 한다.
                 inner.cut(|c| c.via == Via::Kasanet);
             }
             _ => {}
         }
-        if direct_since.is_some_and(|t| t.elapsed() >= MIGRATE_AFTER) {
+        if usable_since.is_some_and(|t| t.elapsed() >= MIGRATE_AFTER) {
             inner.cut(|c| c.via == Via::Fallback && !c.pinned && c.since.elapsed() >= LONG_LIVED);
         }
         tokio::select! {
             changed = rx.changed() => if changed.is_err() { return },
-            _ = tokio::time::sleep(SWEEP), if direct_since.is_some() => {}
+            _ = tokio::time::sleep(SWEEP), if usable_since.is_some() => {}
         }
     }
 }
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(ask(&mut old, "a").await.unwrap(), "F:a");
         tokio::time::sleep(LONG_LIVED).await;
 
-        let link = Link::start(client.clone(), server_addr);
+        let link = Link::start(client.clone(), server_addr, Default::default());
         route.set_link(link.clone(), remote.port());
         wait_until("직통", || link.state().is_direct()).await;
         assert_eq!(route.via(), Via::Kasanet);
@@ -399,7 +399,10 @@ mod tests {
         let client = node(SecretKey::generate(), &AllowList::default()).await;
 
         let route = Route::start(fallback).unwrap();
-        route.set_link(Link::start(client, server_addr), remote.port());
+        route.set_link(
+            Link::start(client, server_addr, Default::default()),
+            remote.port(),
+        );
         // 거절은 핸드셰이크 뒤에 온다 — 그 사이에 직통으로 비쳐 연결을 싣는 일이 없어야 한다.
         for _ in 0..40 {
             assert!(!route.link_state().unwrap().is_direct());
