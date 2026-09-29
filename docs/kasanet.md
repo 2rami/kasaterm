@@ -17,7 +17,8 @@ STUN 판정으로는 두 기기 모두 목적지 무관 매핑 NAT 라 구멍 �
 ## 부품
 
 - `iroh` 1.x(MIT/Apache, MSRV 1.91) — 기기 주소 = 공개키(EndpointId), 구멍 뚫기·중계 폴백·QUIC 암호화를 한 번에.
-- 중계: 처음엔 iroh 기본 공용 중계. 내용은 종단 암호화라 중계는 메타데이터만 본다. 자체 중계는 P0 수치를 보고 정한다.
+- 중계: iroh 기본 공용 중계. 내용은 종단 암호화라 중계는 메타데이터만 본다. Cloudflare 터널 너머 자체 중계는 세워 재 봤으나
+  이득이 없어 앱에 넣지 않았다 — 아래 「자체 중계」.
 
 ## 계약
 
@@ -118,3 +119,57 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
 - B 가 카사넷을 닫자(`STOP_MS`) A 가 0.2초 안에 끊김을 보고 카사넷 연결을 끊었다. 5초 뒤 `path=ssh`, 연결 7개가 모두
   원래 길이었고, B pane 의 새 출력이 A 거울에 떴다.
 - 남은 것: 두 기기 **양쪽이 새 판**이어야 효과다. 이 맥북↔미니 실사용 측정은 두 기기에 새 판이 깔린 뒤.
+
+## 자체 중계 (2026-09-29, 맥미니)
+
+**결론: Cloudflare 터널 너머 중계는 동작하지만(웹소켓·허용 목록 확인) 국내 저지연 중계가 못 된다. 앱에 넣지 않는다** —
+릴레이 맵은 n0 기본 그대로, `KASATERM_KASANET_TRUSTED_RELAYS` 에도 넣지 않는다. 국내 중계는 공인 UDP·TCP 포트가 직접
+열린 자리(공유기 포트포워딩한 집 기기, 서울 VPS)에 TLS 와 QUIC 주소 찾기를 켜서 세워야 한다.
+
+### 구성
+
+- 주소 `https://relay.debimarlene.com/` — **끝 점 없이**. `relay.debimarlene.com.` 로 부르면 터널 호스트 규칙이 안 맞아 404.
+- 미니 launchd `com.geono.kasanet-relay` → `~/.cargo/bin/iroh-relay` 1.3.0(`cargo install iroh-relay --version 1.3.0
+  --features server --locked`), 설정 `~/.config/kasanet-relay/relay.toml`, `127.0.0.1:8796` 평문 HTTP, 로그 `/tmp/kasanet-relay.err`.
+  TLS 는 Cloudflare 가 끝낸다. QUIC 주소 찾기(UDP 7842)는 터널이 UDP 를 못 넘겨 끄고, metrics 도 끈다.
+- 미니 터널 `~/.cloudflared/kasaterm-gateway.yml` 의 404 줄 앞에 `relay.debimarlene.com → http://127.0.0.1:8796`
+  (백업 `.bak-20260929-relay`). 바꾼 뒤 `launchctl kickstart -k gui/$(id -u)/com.geono.kasaterm-gateway-tunnel` — 폰 관문·
+  ssh 입구가 5초쯤 끊긴다. DNS CNAME 은 `cert.pem` 이 있는 회사 맥북에서
+  `cloudflared tunnel --config /dev/null route dns 613e1da6-1ee5-4a78-ba55-90ad5b432875 relay.debimarlene.com`.
+- 걷을 때: `launchctl bootout gui/$(id -u)/com.geono.kasanet-relay`, 터널 ingress 두 줄 빼고 kickstart, DNS 레코드 삭제.
+
+### 허용 목록
+
+중계는 `[access] allowlist` 의 EndpointId 만 받는다. 중계 접속 때 비밀키로 서명하므로 id 를 흉내 낼 수 없다.
+
+1. 기기에서 `kasa-net-probe id --key ~/.config/kasaterm/kasanet.key` — 앱이 쓰는 기기 키의 공개키. 없으면 만든다(0600, 앱이 그대로 쓴다).
+2. 미니 `relay.toml` 의 `allowlist` 에 한 줄 + 기기 이름 주석, `launchctl kickstart -k gui/$(id -u)/com.geono.kasanet-relay`.
+
+지금 목록: 회사 맥북 `85ad3935…`, 맥미니 `4d0e17c0…`. 개인 맥북·윈도우는 아직 없다.
+실측: 모르는 키는 중계 로그에 `The relay denied our authentication`, 거는 쪽은 중계에 못 붙고 연결이 시간 초과로 끝났다.
+임시 키를 넣었다 빼고 kickstart 하자 다시 거부됐다.
+
+### 실측
+
+`kasa-net-probe … --relay https://relay.debimarlene.com/ [--n0]` — `--relay` 는 그 중계 하나만, `--n0` 은 n0 중계도 함께.
+같은 시각에 aps1 과 나란히 쟀다(회사 맥북, 20MB).
+
+| 길 | 성립 | datagram p50/p90 | 스트림 p50/p90 | 올리기/내리기 |
+|---|---|---|---|---|
+| 자체 중계 강제, 맥북→미니 | 3/3 | 454/564ms (유실 2/200) | 496/813ms | 6.1/6.3 Mbps |
+| aps1 강제, 맥북→미니 | 2/2 | 172/174ms | 173/181ms | 8.9/8.8 Mbps |
+| 자체 중계 강제, 맥북↔맥북 | 2/2 | 167/169ms | 167/170ms | 18.3/18.8 Mbps |
+| aps1 강제, 맥북↔맥북 | 2/2 | 182/184ms | 182/184ms | 8.9/8.7 Mbps |
+| 직통, 자체 중계만 | **0/3**(15초) | 계속 중계 691ms | | |
+| 직통, 자체 중계+n0 | 3/3, 380~1111ms | 8.7/9.8ms | 8.6/9.5ms | (5MB) 88/119 Mbps |
+
+- **Cloudflare 가 서울 edge 를 안 준다.** 터널 커넥터는 icn 인데, 들어오는 쪽 edge 는 회사 맥북이 HKG·NRT(요청 왕복 85ms),
+  미니(KT 백본 `112.174.x`)는 미국 ATL·MIA(traceroute 135ms, 요청 왕복 567ms)다. 중계 한 번은 양 끝이 각자 edge 를
+  왕복하므로, 미니가 끼면 aps1 의 세 배 가까이 느리다. 둘 다 아시아 edge 로 가는 기기 쌍만 aps1 과 비슷하고 처리량이 두 배.
+- **자체 중계만 두면 직통이 안 선다.** 공인 주소는 중계의 QUIC 주소 찾기로 배우는데 터널 너머라 그것이 없다 — 알리는
+  주소가 LAN 주소뿐이라 구멍 뚫기 후보가 없다(n0 를 섞으면 미니 알림에 `218.153.32.129` 가 붙고 직통이 섰다).
+- **섞으면 자체 중계는 홈 중계로 안 뽑힌다.** iroh 1.3 은 중계마다 잰 지연으로 홈을 고르는데(`net_report`
+  `add_report_history_and_set_preferred_relay`), 주소 찾기가 없는 중계는 HTTPS 탐침(매번 새 TLS 연결 + `/ping`)으로만 재
+  200ms 를 넘고 UDP 로 재는 aps1 을 못 이긴다. 맥북·미니 모두 3/3 aps1 을 홈으로 골랐다 — 자체 중계로는 아무것도 안 지난다.
+- 그래서 믿는 중계로 넣어도 쓰이지 않거나(섞을 때), 직통을 잃고 ssh 길보다 느린 중계에 묶인다(혼자 둘 때).
+  미니 중계는 허용 목록 기기만 받는 채로 켜 두었다(쓰는 앱 없음).

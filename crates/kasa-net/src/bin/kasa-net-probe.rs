@@ -1,18 +1,24 @@
 //! P0 시험 바이너리. 두 기기 사이 직통 성립 여부·성립까지 시간·왕복·처리량을 잰다.
 //!
-//!   kasa-net-probe serve [--key PATH] [--allow ID] [--for SECS]
-//!   kasa-net-probe dial <ADDR> [--mode direct|relay] [--trials N] [--pings N] [--bytes N] [--key PATH]
+//!   kasa-net-probe serve [--key PATH] [--allow ID] [--for SECS] [--relay URL [--n0]]
+//!   kasa-net-probe dial <ADDR> [--mode direct|relay] [--trials N] [--pings N] [--bytes N] [--key PATH] [--relay URL [--n0]]
 //!   kasa-net-probe id --key PATH
 //!
 //! serve 가 찍는 `KASANET_ADDR ...` 줄의 값을 dial 에 그대로 넘긴다.
 //! relay 모드는 거는 쪽의 IP 전송을 걷어 내 중계 말고는 길이 없게 만든다.
+//! `--relay` 는 n0 공용 중계 대신 그 중계 하나만 쓴다(자체 중계 측정). `--n0` 을 더하면 n0 중계도 함께 둔다.
 
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use iroh::defaults::prod::default_relay_map;
+use iroh::endpoint::Builder;
 use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr};
+use iroh::{
+    Endpoint, EndpointAddr, EndpointId, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey,
+    TransportAddr,
+};
 use kasa_net::{identity, AllowList};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
@@ -26,6 +32,7 @@ async fn main() -> Result<()> {
     let Some(cmd) = args.first() else {
         bail!("serve | dial <ADDR> | id --key PATH")
     };
+    let has = |name: &str| args.iter().any(|a| a == name);
     let opt = |name: &str| {
         args.iter()
             .position(|a| a == name)
@@ -44,6 +51,7 @@ async fn main() -> Result<()> {
                 key(opt("--key"))?,
                 opt("--allow"),
                 Duration::from_secs(secs),
+                relay_map(opt("--relay"), has("--n0"))?,
             )
             .await
         }
@@ -63,7 +71,17 @@ async fn main() -> Result<()> {
                 .map(|s| s.parse())
                 .transpose()?
                 .unwrap_or(20_000_000);
-            dial(parse_addr(addr)?, relay, trials, pings, bytes, opt("--key")).await
+            let own = relay_map(opt("--relay"), has("--n0"))?;
+            dial(
+                parse_addr(addr)?,
+                relay,
+                trials,
+                pings,
+                bytes,
+                opt("--key"),
+                own,
+            )
+            .await
         }
         other => bail!("모르는 명령 {other}"),
     }
@@ -76,7 +94,34 @@ fn key(path: Option<String>) -> Result<SecretKey> {
     })
 }
 
-async fn serve(secret: SecretKey, allow: Option<String>, life: Duration) -> Result<()> {
+/// 자체 중계는 Cloudflare 터널(HTTP 웹소켓) 너머라 UDP 로 가는 QUIC 주소 찾기가 없다 — 그 탐침을 끈다.
+/// 주소 찾기가 없으면 공인 주소를 몰라 구멍 뚫기가 안 선다. `n0` 은 그 몫을 n0 중계에 맡긴다.
+fn relay_map(url: Option<String>, n0: bool) -> Result<Option<RelayMap>> {
+    let Some(url) = url else { return Ok(None) };
+    let mut cfg = RelayConfig::from(RelayUrl::from_str(&url)?);
+    cfg.quic = None;
+    let map = if n0 {
+        default_relay_map()
+    } else {
+        RelayMap::empty()
+    };
+    map.insert(cfg.url.clone(), cfg.into());
+    Ok(Some(map))
+}
+
+fn with_relay(b: Builder, relay: Option<RelayMap>) -> Builder {
+    match relay {
+        Some(map) => b.relay_mode(RelayMode::Custom(map)),
+        None => b,
+    }
+}
+
+async fn serve(
+    secret: SecretKey,
+    allow: Option<String>,
+    life: Duration,
+    relay: Option<RelayMap>,
+) -> Result<()> {
     // 허용 목록을 안 주면 아무나 받는다 — 시험용 에코라 되돌려 주는 것 말고는 하는 일이 없다.
     let b = match allow {
         Some(id) => kasa_net::builder(
@@ -86,8 +131,13 @@ async fn serve(secret: SecretKey, allow: Option<String>, life: Duration) -> Resu
         ),
         None => Endpoint::builder(presets::N0).secret_key(secret),
     };
-    let ep = b.alpns(vec![ALPN.to_vec()]).bind().await?;
-    let _ = timeout(Duration::from_secs(10), ep.online()).await;
+    let ep = with_relay(b, relay)
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await?;
+    if timeout(Duration::from_secs(10), ep.online()).await.is_err() {
+        eprintln!("중계에 못 붙음(10초)");
+    }
     println!("KASANET_ADDR {}", format_addr(&ep.addr()));
     let deadline = tokio::time::sleep(life);
     tokio::pin!(deadline);
@@ -208,6 +258,7 @@ async fn dial(
     pings: usize,
     bytes: u64,
     key_path: Option<String>,
+    own_relay: Option<RelayMap>,
 ) -> Result<()> {
     let mode = if relay { "relay" } else { "direct" };
     let target = if relay { only_relay(&target) } else { target };
@@ -216,7 +267,10 @@ async fn dial(
         // 시도마다 새 엔드포인트 — 앞 시도의 길 기억 없이 처음 붙는 시간을 잰다.
         let secret = key(key_path.clone())?;
         let t_bind = Instant::now();
-        let mut b = Endpoint::builder(presets::N0).secret_key(secret);
+        let mut b = with_relay(
+            Endpoint::builder(presets::N0).secret_key(secret),
+            own_relay.clone(),
+        );
         if relay {
             b = b.clear_ip_transports();
         }
