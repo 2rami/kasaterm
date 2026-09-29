@@ -33,6 +33,11 @@ can point at an older task after a live pane is handed new work, so never use it
 to register or accept reports; the task↔pane source of truth is nacho's ledger
 `(machine_id, surface_key)`. Conversation IDs and bodies are not carried.
 
+Optional `background` and `subagents` list the pane's still-running background
+shells/monitors and subagents (short labels, at most 8, secret-looking labels
+become `[redacted]`). A pane whose turn closed (`waiting`/`idle`) but carries a
+non-empty list is still working in the background — do not hand it new work.
+
 `collab.changes {since:"epoch:sequence",limit:100,scope:"all"}` /
 `GET /collab/changes?since=...` returns `cursor`, `changes`, `reset_required`,
 `reset_reason`, `has_more`. Changes carry `cursor`, `at_ms`, `kind`, optional

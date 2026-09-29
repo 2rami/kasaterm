@@ -3110,6 +3110,10 @@ impl Backend for PtyBackend {
                 row["attention_kind"] = json!(kind.as_str());
                 if !reason.is_empty() { row["waiting_for"] = json!(reason); }
             }
+            if !mirrored {
+                if !meta.background.is_empty() { row["background"] = json!(meta.background); }
+                if !meta.subagents.is_empty() { row["subagents"] = json!(meta.subagents); }
+            }
             let mut done = self.done_reports.lock().unwrap();
             if done.get(&id).is_some_and(|report|report.idle_seen && status == "working") { done.remove(&id); }
             if let Some(report) = done.get_mut(&id) {

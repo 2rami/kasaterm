@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub const MAX_EVENTS: usize = 1000;
 pub const MAX_JOURNAL_BYTES: usize = 256 * 1024;
 pub const MAX_PANES: usize = 2048;
+pub const MAX_LIST_ITEMS: usize = 8;
 pub const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 const TRACKED: &[&str] = &[
     "address",
@@ -25,6 +26,10 @@ const TRACKED: &[&str] = &[
     // 마다 주황이 깜빡인다(2026-09-21 「waiting 이라기엔 idle인데」).
     "attention_kind",
     "waiting_for",
+    // 턴은 끝났어도 백그라운드 셸·감시·서브에이전트가 아직 돈다 — 이 칸이 없으면 읽는 쪽이
+    // 감시 중인 학생을 노는 학생으로 보고 새 일을 얹는다(2026-09-29 코유키·아로나).
+    "background",
+    "subagents",
     "done_outcome",
     "done_summary",
     // 보고 시각(epoch ms) — `wait --since` 가 옛 브리프의 보고를 가른다.
@@ -226,7 +231,7 @@ pub fn guard_observation(
     for key in ["title", "request", "progress"] {
         row[key] = json!("");
     }
-    for key in ["character", "harness", "done_outcome", "done_summary", "done_at_ms", "origin_task_env"] {
+    for key in ["character", "harness", "done_outcome", "done_summary", "done_at_ms", "origin_task_env", "background", "subagents"] {
         row[key] = Value::Null;
     }
     row["status"] = json!("unknown");
@@ -293,6 +298,22 @@ pub fn normalize_panes(machine: &str, label: &str, rows: &[Value], at: u64) -> R
                     clean[name] = json!(flag);
                 } else if let Some(number) = row[name].as_u64() {
                     clean[name] = json!(number);
+                } else if let Some(items) = row[name].as_array() {
+                    // 라벨이 설명이 없으면 명령 앞부분이라 비밀이 섞일 수 있다 — 판은 다른 기기와
+                    // 나쵸 프롬프트까지 간다.
+                    let list: Vec<String> = items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|s| !s.trim().is_empty())
+                        .take(MAX_LIST_ITEMS)
+                        .map(|s| match crate::nacho_inbox::secret_like(s) {
+                            Some(_) => "[redacted]".to_owned(),
+                            None => short(s, 128),
+                        })
+                        .collect();
+                    if !list.is_empty() {
+                        clean[name] = json!(list);
+                    }
                 }
             }
             if !matches!(
@@ -346,6 +367,25 @@ mod normalize_panes_tests {
         let moved = json!({"machine_id":"m","surface_key":"k2","surface_id":"%1"});
         assert!(!guard_observation(&mut row, &moved, true, true));
         assert!(row["origin_task_env"].is_null());
+    }
+
+    /// 감시 중인 학생은 턴이 닫혀도 판에서 감시 중으로 보인다. 목록은 짧게 잘리고, 비밀처럼
+    /// 보이는 라벨은 가려지며, 바인딩이 바뀌면 앞 학생의 목록이 남지 않는다.
+    #[test]
+    fn background_and_subagents_ride_the_board_bounded_and_redacted() {
+        let many: Vec<String> = (0..12).map(|i| format!("watch {i}")).collect();
+        let rows = vec![json!({"address":{"machine_id":"m","surface_key":"k1","surface_id":"%1"},"status":"waiting",
+            "background":["Follow controller log", "", 7, "OPENAI_KEY=sk-abcdefghijklmnopqrstu npm run"],
+            "subagents":many})];
+        let out = normalize_panes("m", "M", &rows, 1).unwrap();
+        assert_eq!(out[0]["background"], json!(["Follow controller log", "[redacted]"]));
+        assert_eq!(out[0]["subagents"].as_array().unwrap().len(), MAX_LIST_ITEMS);
+        let idle = vec![json!({"address":{"machine_id":"m","surface_key":"k1","surface_id":"%1"},"status":"idle","background":[]})];
+        assert!(normalize_panes("m", "M", &idle, 1).unwrap()[0]["background"].is_null(), "빈 목록은 칸을 안 만든다");
+        let mut row = out[0].clone();
+        let moved = json!({"machine_id":"m","surface_key":"k2","surface_id":"%1"});
+        assert!(!guard_observation(&mut row, &moved, true, true));
+        assert!(row["background"].is_null() && row["subagents"].is_null());
     }
 }
 
