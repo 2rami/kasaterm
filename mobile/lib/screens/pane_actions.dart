@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../hub_model.dart';
 import '../server.dart';
 import '../student_art.dart';
+import 'controls.dart';
 
 /// 허브에서 pane·방을 다루는 판들 — 닫기·옆에 추가·자리 바꾸기·방 만들기/이름/닫기.
 /// 데스크톱 없이 폰에서 배치를 만질 수 있게(2026-09-07 지시). 명령은 전부 서버의
@@ -233,18 +234,20 @@ Future<Pane?> _pickPane(
 Future<bool> _confirm(BuildContext context, String text) async {
   final r = await showDialog<bool>(
     context: context,
-    builder: (ctx) => AlertDialog(
-      content: Text(text),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx, false),
-          child: const Text('아니'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(ctx, true),
-          child: const Text('닫기'),
-        ),
-      ],
+    builder: (ctx) => ModalLook(
+      child: AlertDialog(
+        content: Text(text),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('아니'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('닫기'),
+          ),
+        ],
+      ),
     ),
   );
   return r ?? false;
@@ -254,23 +257,25 @@ Future<String?> _askText(BuildContext context, String label, String initial) {
   final ctl = TextEditingController(text: initial);
   return showDialog<String>(
     context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text(label),
-      content: TextField(
-        controller: ctl,
-        autofocus: true,
-        onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+    builder: (ctx) => ModalLook(
+      child: AlertDialog(
+        title: Text(label),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('그만'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, ctl.text.trim()),
+            child: const Text('바꾸기'),
+          ),
+        ],
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('그만'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(ctx, ctl.text.trim()),
-          child: const Text('바꾸기'),
-        ),
-      ],
     ),
   ).whenComplete(ctl.dispose);
 }

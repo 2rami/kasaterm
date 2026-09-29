@@ -49,6 +49,20 @@ abstract final class Look {
   /// 눌림 — 바탕에 `text` 8%.
   static const pressTint = 0.08;
 
+  // 대화와 모달은 A 이전 모습이다(design.md 「예외 — 대화와 모달」) — 플랫 규칙 밖의 값.
+  static const bubbleRadius = 16.0;
+
+  /// 말한 쪽 아래 모서리 — 누구 말인지 꼬리로 가리킨다.
+  static const bubbleTail = 4.0;
+  static const bubblePadX = 14.0;
+  static const bubblePadY = 10.0;
+
+  /// 말풍선 맞은편에 남기는 폭 — 내 말과 상대 말이 한 줄에 겹쳐 보이지 않게.
+  static const bubbleFar = 48.0;
+  static const dialogRadius = 28.0;
+  static const sheetRadius = 28.0;
+  static const modalButtonRadius = 8.0;
+
   static BorderRadius get corners => BorderRadius.circular(radius);
 
   /// 아이패드 판정은 device_shape 와 같다 — 짧은 변 600 이상이거나 긴 변 1000 이상.

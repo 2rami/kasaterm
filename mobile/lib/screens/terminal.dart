@@ -285,18 +285,20 @@ class _TerminalScreenState extends State<TerminalScreen>
   Future<void> _closePane(Pane pane) async {
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        content: Text('${pane.displayName} 을(를) 닫을까?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('아니'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('닫기'),
-          ),
-        ],
+      builder: (ctx) => ModalLook(
+        child: AlertDialog(
+          content: Text('${pane.displayName} 을(를) 닫을까?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('아니'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('닫기'),
+            ),
+          ],
+        ),
       ),
     );
     if (ok != true || !mounted) return;

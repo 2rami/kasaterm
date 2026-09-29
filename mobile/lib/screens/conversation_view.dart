@@ -144,6 +144,7 @@ class ChatComposer extends StatelessWidget {
           builder: (context, _) => SendButton(
             ready: controller.text.trim().isNotEmpty,
             onPressed: enabled ? onSend : null,
+            round: true,
           ),
         ),
       ],
@@ -518,7 +519,8 @@ class _ConversationViewState extends State<ConversationView>
       height: 1.5,
       color: theme.colorScheme.onSurface,
     ),
-    codeBg: theme.colorScheme.surfaceContainerHighest,
+    // 상대 말풍선이 올린 표면색이라 코드 칸은 바탕색으로 떼어 낸다.
+    codeBg: theme.scaffoldBackgroundColor,
   );
 }
 
@@ -549,8 +551,8 @@ class _Bubble extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final mine = bubble.mine;
-    // 말풍선 채움 없이 이름 머리 + 글 — 나쵸 대화와 같은 기록형(카드·채움 금지).
-    final ink = mine && bubble.queued ? scheme.onSurfaceVariant : scheme.onSurface;
+    final queued = mine && bubble.queued;
+    final ink = queued ? scheme.onSurface : SpeechBubble.ink(context, mine: mine);
     final text = bubble.text;
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -575,9 +577,16 @@ class _Bubble extends StatelessWidget {
     );
     final box = GestureDetector(
       onLongPress: text.isEmpty ? null : () => _copy(context, text),
-      child: Container(
-        constraints: BoxConstraints(maxWidth: maxWidth),
-        padding: const EdgeInsets.symmetric(vertical: 2),
+      child: SpeechBubble(
+        mine: mine,
+        maxWidth: maxWidth,
+        // 예약은 아직 안 간 말 — 강조색 대신 주의색 옅은 바탕(경고 띠와 같은 옅기).
+        fill: queued
+            ? Color.alphaBlend(
+                StatusStyle.attention.withValues(alpha: Look.dangerTint),
+                theme.scaffoldBackgroundColor,
+              )
+            : null,
         child: content,
       ),
     );
@@ -585,42 +594,64 @@ class _Bubble extends StatelessWidget {
     final meta = theme.textTheme.labelSmall?.copyWith(
       color: scheme.onSurfaceVariant,
     );
-    final who = mine ? '나' : name;
+    if (mine) {
+      return Padding(
+        padding: EdgeInsets.only(top: head ? 10 : 3),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            if (queued && head)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 3, right: 3),
+                child: Text(
+                  '예약 · 대기 중',
+                  style: theme.textTheme.labelMedium?.copyWith(color: StatusStyle.attention),
+                ),
+              ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (clock != null) ...[
+                  Text(clock, style: meta),
+                  const SizedBox(width: 5),
+                ],
+                Flexible(child: box),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
     return Padding(
-      padding: EdgeInsets.only(top: head ? 14 : 3),
+      padding: EdgeInsets.only(top: head ? 10 : 3),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          SizedBox(width: 30, child: !mine && head ? face ?? _Initial(name) : null),
+          SizedBox(width: 30, child: tail ? face ?? _Initial(name) : null),
           const SizedBox(width: 8),
-          Expanded(
+          Flexible(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (head)
                   Padding(
-                    padding: const EdgeInsets.only(bottom: Look.rowGap),
-                    child: Row(
-                      children: [
-                        Text(
-                          who,
-                          style: theme.textTheme.labelMedium?.copyWith(
-                            color: mine ? scheme.primary : accent,
-                          ),
-                        ),
-                        if (mine && bubble.queued) ...[
-                          const SizedBox(width: 6),
-                          Text(
-                            '예약 · 대기 중',
-                            style: theme.textTheme.labelMedium?.copyWith(color: StatusStyle.attention),
-                          ),
-                        ],
-                      ],
+                    padding: const EdgeInsets.only(left: 3, bottom: 3),
+                    child: Text(
+                      name,
+                      style: theme.textTheme.labelMedium?.copyWith(color: accent),
                     ),
                   ),
-                box,
-                if (clock != null)
-                  Padding(padding: const EdgeInsets.only(top: 2), child: Text(clock, style: meta)),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Flexible(child: box),
+                    if (clock != null) ...[
+                      const SizedBox(width: 5),
+                      Text(clock, style: meta),
+                    ],
+                  ],
+                ),
               ],
             ),
           ),

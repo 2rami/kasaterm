@@ -233,42 +233,44 @@ Future<void> openDevServer(
   final path = TextEditingController(text: '/');
   final ok = await showDialog<bool>(
     context: context,
-    builder: (context) => AlertDialog(
-      title: const Text('데스크톱 개발 서버'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          LabeledField(
-            label: '포트',
-            child: TextField(
-              controller: port,
-              autofocus: true,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(hintText: '3000'),
+    builder: (context) => ModalLook(
+      child: AlertDialog(
+        title: const Text('데스크톱 개발 서버'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            LabeledField(
+              label: '포트',
+              child: TextField(
+                controller: port,
+                autofocus: true,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(hintText: '3000'),
+              ),
             ),
+            const SizedBox(height: Look.fieldGap),
+            LabeledField(
+              label: '경로',
+              child: TextField(
+                controller: path,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
           ),
-          const SizedBox(height: Look.fieldGap),
-          LabeledField(
-            label: '경로',
-            child: TextField(
-              controller: path,
-              keyboardType: TextInputType.url,
-              decoration: const InputDecoration(),
-            ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('열기'),
           ),
         ],
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text('취소'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(context, true),
-          child: const Text('열기'),
-        ),
-      ],
     ),
   );
   final n = int.tryParse(port.text.trim());

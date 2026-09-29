@@ -2,6 +2,9 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../look.dart';
+import 'controls.dart';
+
 /// 나쵸가 답을 만드는 동안 나쵸 말풍선 자리에 서는 점 세 개. 차례로 통통 뛴다.
 ///
 /// 컨트롤러는 하나 — 세 점은 같은 시계의 위상만 다르게 읽는다. 동작 줄이기가 켜져 있으면
@@ -60,16 +63,12 @@ class _NachoTypingState extends State<NachoTyping>
       child: Align(
         alignment: Alignment.centerLeft,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+          padding: const EdgeInsets.fromLTRB(Look.pagePad, 4, Look.bubbleFar, 4),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: scheme.outline),
-                ),
+              SpeechBubble(
+                mine: false,
                 child: ExcludeSemantics(
                   child: AnimatedBuilder(
                     animation: _clock,

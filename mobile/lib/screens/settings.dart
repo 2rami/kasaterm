@@ -6,6 +6,7 @@ import 'browser_device.dart';
 import 'dev_server.dart';
 import '../theme_prefs.dart';
 import '../look.dart';
+import 'controls.dart';
 import 'hub.dart' show parseHexColor;
 
 class SettingsScreen extends StatefulWidget {
@@ -80,20 +81,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _forget(BuildContext context) async {
     final ok = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(server.account == null ? '폰 주소 지우기' : '로그아웃'),
-        content: Text(server.account == null ? '이 폰에 저장한 주소를 지웁니다.' :
-          '이 폰의 로그인과 연결을 종료합니다. 다른 기기의 로그인은 유지됩니다.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('취소'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text(server.account == null ? '지우기' : '로그아웃'),
-          ),
-        ],
+      builder: (context) => ModalLook(
+        child: AlertDialog(
+          title: Text(server.account == null ? '폰 주소 지우기' : '로그아웃'),
+          content: Text(server.account == null ? '이 폰에 저장한 주소를 지웁니다.' :
+            '이 폰의 로그인과 연결을 종료합니다. 다른 기기의 로그인은 유지됩니다.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text(server.account == null ? '지우기' : '로그아웃'),
+            ),
+          ],
+        ),
       ),
     );
     if (ok != true || !context.mounted) return;

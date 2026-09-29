@@ -211,7 +211,7 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
-      builder: (_) => NachoPetSheet(desk: _desk),
+      builder: (_) => ModalLook(child: NachoPetSheet(desk: _desk)),
     );
   }
 
@@ -555,31 +555,39 @@ class _UserBubble extends StatelessWidget {
       if (state != 'running') receiptLabel(state),
       if (note.isNotEmpty && bad) note,
     ].join(' · ');
-    // 말풍선 대신 「나」 머리 + 글 — 데스크톱 나쵸 판과 같은 기록형(카드·채움 금지).
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(Look.pagePad, 10, Look.pagePad, 10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _speech(
-            context,
-            mine: true,
-            child: SelectableText(text, style: Theme.of(context).textTheme.bodyLarge),
-          ),
-          if (meta.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            GestureDetector(
-              onTap: onRetry,
-              child: Text(
-                meta,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: bad ? scheme.error : scheme.onSurfaceVariant,
-                  decoration: onRetry == null ? null : TextDecoration.underline,
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(Look.bubbleFar, 4, Look.pagePad, 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            SpeechBubble(
+              mine: true,
+              child: SelectableText(
+                text,
+                style: TextStyle(
+                  color: SpeechBubble.ink(context, mine: true),
+                  fontSize: Look.body,
+                  height: 1.4,
                 ),
               ),
             ),
+            if (meta.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              GestureDetector(
+                onTap: onRetry,
+                child: Text(
+                  meta,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: bad ? scheme.error : scheme.onSurfaceVariant,
+                    decoration: onRetry == null ? null : TextDecoration.underline,
+                  ),
+                ),
+              ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }
@@ -621,13 +629,12 @@ class _NachoBubble extends StatelessWidget {
     return Align(
       alignment: Alignment.centerLeft,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(Look.pagePad, 10, Look.pagePad, 10),
+        padding: const EdgeInsets.fromLTRB(Look.pagePad, 4, Look.bubbleFar, 4),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (text.isNotEmpty)
-              _speech(
-                context,
+              SpeechBubble(
                 mine: false,
                 child: ReplyText(
                   text: text,
@@ -698,25 +705,6 @@ class _NachoBubble extends StatelessWidget {
       ),
     );
   }
-}
-
-/// 말 한 덩이 — 누가 한 말인지 13/600 머리(나 = 강조, 나쵸 = 흐림) 아래 글.
-Widget _speech(BuildContext context, {required bool mine, required Widget child}) {
-  final scheme = Theme.of(context).colorScheme;
-  return Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      Text(
-        mine ? '나' : '나쵸',
-        style: Theme.of(context).textTheme.labelMedium?.copyWith(
-          color: mine ? scheme.primary : scheme.onSurfaceVariant,
-        ),
-      ),
-      const SizedBox(height: Look.rowGap),
-      child,
-    ],
-  );
 }
 
 bool _isImage(String name) {
@@ -814,6 +802,7 @@ class _Composer extends StatelessWidget {
               ready: controller.text.trim().isNotEmpty,
               busy: sending,
               onPressed: onSend,
+              round: true,
             ),
           ),
         ],

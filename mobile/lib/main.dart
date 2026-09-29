@@ -250,17 +250,17 @@ ThemeData buildThemeFrom({
         (s) => s.contains(WidgetState.selected) ? primary : onSurfaceVariant,
       ),
     ),
+    // 대화상자·시트는 A 이전의 둥근 판이다 — 안의 주 동작 채움은 ModalLook 이 맡는다.
     dialogTheme: DialogThemeData(
       backgroundColor: Color.alphaBlend(surfaceHigh, background),
-      shape: RoundedRectangleBorder(borderRadius: Look.corners, side: line),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Look.dialogRadius)),
       titleTextStyle: text.titleLarge,
       contentTextStyle: text.bodyMedium,
     ),
     bottomSheetTheme: BottomSheetThemeData(
-      backgroundColor: background,
-      shape: RoundedRectangleBorder(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(Look.radius)),
-        side: line,
+      backgroundColor: Color.alphaBlend(surface, background),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(Look.sheetRadius)),
       ),
     ),
     popupMenuTheme: PopupMenuThemeData(
