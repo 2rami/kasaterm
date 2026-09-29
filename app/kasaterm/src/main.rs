@@ -7757,6 +7757,8 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             "PreToolUse": [
                 { "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] },
                 { "matcher": "Agent|Task", "hooks": [cmd("kasaterm-subagent-guard.py", 5)] },
+                // TestFlight 빌드 만료는 되돌릴 수 없고 깔아 둔 폰 앱이 멈춘다 — 학생은 못 하게(2026-09-28 사고).
+                { "matcher": "Bash", "hooks": [cmd("kasaterm-build-expiry-guard.py", 5)] },
                 { "hooks": [cmd("kasaterm-closed-pane-guard.py", 5000)] },
                 { "hooks": [cmd("kasaterm-agent-status.sh", 5)] }
             ],
