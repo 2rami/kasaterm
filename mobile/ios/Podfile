@@ -31,6 +31,8 @@ target 'Runner' do
   use_frameworks!
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+  # 카사넷 입구(tool/kasanet.sh 가 굽는 정적 라이브러리)
+  pod 'KasaNet', :path => 'KasaNet'
   target 'RunnerTests' do
     inherit! :search_paths
   end

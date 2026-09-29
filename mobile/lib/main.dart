@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'connection.dart';
 import 'app_link.dart';
 import 'hub_model.dart';
+import 'kasanet.dart';
 import 'push.dart';
 import 'screens/connect.dart';
 import 'screens/conversation_view.dart';
@@ -222,6 +223,7 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       unawaited(PushBridge.instance.retryCleanup());
       unawaited(phoneThemeSync.refresh());
+      KasanetRouter.resumed();
       if (_connection.server == null) unawaited(_connection.retry());
     }
   }

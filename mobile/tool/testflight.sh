@@ -30,6 +30,7 @@ if [ -f "$kc" ]; then
 fi
 
 build=$(date +%y%m%d%H%M)
+tool/kasanet.sh
 NO_PROXY='127.0.0.1,localhost' flutter build ios --release --no-codesign --build-number="$build"
 
 arch=build/ios/archive/Runner.xcarchive

@@ -27,6 +27,9 @@ UI는 Pretendard 400/600(OFL)을 사용하고 터미널은 TermMono/TermHangul/T
 소스 이력에 남기되 앱 에셋 목록에서는 제외한다. 사용자 프사는 기존 인증된 서버 경로로 읽으며,
 없는 그림은 중립 아이콘으로 표시한다. 새 애니메이션을 제공하는 것은 아니다.
 
+iOS 빌드 전에 `tool/kasanet.sh` 가 카사넷 정적 라이브러리(`ios/KasaNet/KasaNet.xcframework`, 커밋하지 않음)를 굽는다 —
+`sim.sh`·`phone.sh`·`testflight.sh` 는 먼저 부른다. 손으로 `flutter build ios` 할 때도 먼저 부른다.
+
 시뮬레이터 검증은 `flutter build ios --simulator --debug`를 사용한다. `--no-codesign`은
 Keychain 접근이 거부될 수 있어 로그인 저장소 검증용으로 쓰지 않는다.
 `mobile_terminal_qa_test.dart`의 320/390/430px 위젯 검사는 합성 Codex/Claude fixture이며 실계정 메시지를 보내지 않는다.
@@ -76,8 +79,11 @@ lib/
   grid_canvas.dart     CustomPainter 렌더러(행 캐시) + InteractiveViewer 폭 맞춤·핀치
   wide_layout.dart     아이패드·가로 화면 — 방 상자 여러 열(벽돌 쌓기)·대화와 작업 나란히. 값은 docs/design.md 「태블릿」
   hardware_keys.dart   하드웨어 키보드 → pane 바이트(Esc·⌘.·Ctrl·방향·Shift+Tab). 글자는 입력칸이 받는다
+  kasanet.dart         데스크톱 직통(카사넷) 길 고르기 — 직통이면 앱 안 입구, 아니면 관문. 등록은 관문으로만(docs/kasanet.md P5)
+  kasanet_native*.dart 앱에 링크된 kasa-net-ffi(ios/KasaNet) 바인딩. 웹·시험은 없음(늘 관문)
+  net_tcp*.dart        데스크톱 개발 서버를 폰 localhost 로 끌어오는 다리(/net/tcp 웹소켓)
   conversation.dart    학생 대화 모델 — transcript-raw(claude)·rollout(codex) 줄 → 말풍선·도구 묶음 · 화면의 선택 메뉴 읽기
-  screens/             nacho_home(첫 화면: 대화·작업) · nacho_task · connect · hub · terminal(「터미널|대화」 전환) · conversation_view · settings
+  screens/             nacho_home(첫 화면: 대화·작업) · nacho_task · connect · hub · terminal(「터미널|대화」 전환) · conversation_view · settings · dev_server(앱 안 웹뷰)
 tool/devproxy.dart     크롬 개발용 같은 출처 역프록시
 test/                  유닛 · 골든(goldens/) · live/(실서버, KASA_ROOT 있을 때만)
 ```

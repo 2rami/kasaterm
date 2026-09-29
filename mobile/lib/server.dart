@@ -1,7 +1,10 @@
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show Listenable;
 import 'package:http/http.dart' as http;
 
+import 'kasanet.dart';
+import 'kasanet_native.dart';
 import 'relay_account.dart';
 
 /// 사용자에게 보여도 되는 오류 — 주소(slug)가 들어 있지 않다.
@@ -469,10 +472,36 @@ class Server {
     _client = OriginClient(this.root, client: client);
   }
 
-  Server.account(AccountSession session, {http.Client? client})
+  Server.account(AccountSession session, {http.Client? client, KasanetNative? kasanet})
     : root = session.root, account = session {
+    final native = kasanet ?? startKasanet();
+    _kasanet = native == null ? null : KasanetRouter(native, _KasanetGateway(this));
     _client = OriginClient(session.origin, client: client, token: session.token,
-      onUnauthorized: () => onUnauthorized?.call());
+      onUnauthorized: () => onUnauthorized?.call(),
+      direct: isDirect, fallback: _gatewayOf);
+  }
+
+  /// 데스크톱 직통(카사넷) 길 고르기. 계정 연결에서만 — 옛 주소(`/u/<slug>/`)는 관문 그대로.
+  KasanetRouter? _kasanet;
+
+  /// 어느 기계의 길이 직통↔관문으로 바뀌면 깨운다. 오래 붙는 소켓이 새 길로 다시 붙을 때 쓴다.
+  Listenable? get routeChanges => _kasanet;
+
+  /// 이 주소가 앱 안 카사넷 입구(데스크톱 직통)로 가는가.
+  bool isDirect(Uri u) => _kasanet?.owns(u) ?? false;
+
+  /// (직통인가, 왕복 ms). 아직 모르는 기계·옛 주소면 null.
+  (bool, int?)? pathOf(String? machine) => _kasanet?.pathOf(machine);
+
+  /// 관문이 확인해 주는 값(`machines` 의 살아 있는 기계 목록, 나쵸 창구)과 카사넷 자체를 배우는 길은 늘 관문으로.
+  static bool _gatewayOnly(String path) =>
+      path == 'machines' || path == 'version' || path.startsWith('nacho/') || path.startsWith('kasanet/');
+
+  Uri? _gatewayOf(Uri u) {
+    final machine = _kasanet?.machineOf(u);
+    if (machine == null) return null;
+    final g = _gatewayUri(u.path.replaceFirst('/', ''), machine: machine.isEmpty ? null : machine);
+    return u.hasQuery ? g.replace(query: u.query) : g;
   }
 
   final Uri root;
@@ -516,7 +545,19 @@ class Server {
 
   /// `%N` 같은 pane id 는 문자열로 붙이지 않는다 — queryParameters 가 `%25N` 으로
   /// 인코딩해야 서버가 제 id 로 읽는다.
+  ///
+  /// 그 기계가 직통이면 앱 안 카사넷 입구로, 아니면 관문으로 — 요청마다 이 순간의 길을 고른다.
   Uri uri(String path, {Map<String, String>? query, String? machine}) {
+    final direct = _gatewayOnly(path) ? null : _kasanet?.base(machine);
+    if (direct != null) {
+      final u = direct.resolve(path);
+      if (!isDirect(u)) throw const ServerException('연결 범위를 벗어난 주소예요.');
+      return query == null ? u : u.replace(queryParameters: query);
+    }
+    return _gatewayUri(path, query: query, machine: machine);
+  }
+
+  Uri _gatewayUri(String path, {Map<String, String>? query, String? machine}) {
     final u = root.resolve('${_prefix(machine)}$path');
     if (!sameOrigin(root, u) || !u.path.startsWith(root.path)) {
       throw const ServerException('연결 범위를 벗어난 주소예요.');
@@ -525,7 +566,7 @@ class Server {
   }
 
   Future<Uint8List> imageBytes(Uri uri) async {
-    if (!sameOrigin(root, uri) || !uri.path.startsWith(root.path)) {
+    if (!isDirect(uri) && (!sameOrigin(root, uri) || !uri.path.startsWith(root.path))) {
       throw const ServerException('이미지 주소를 확인하지 못했어요.');
     }
     try {
@@ -549,6 +590,10 @@ class Server {
     final u = uri(path, query: query, machine: machine);
     return u.replace(scheme: u.scheme == 'https' ? 'wss' : 'ws');
   }
+
+  /// 소켓 인증 부프로토콜 — 관문 소켓에만. 카사넷 입구에는 자격을 싣지 않는다.
+  List<String>? wsProtocolsFor(Uri u) =>
+      isDirect(u.replace(scheme: u.scheme == 'wss' ? 'https' : 'http')) ? null : wsProtocols;
 
   /// 오류 문구·설정 화면용. slug 는 자격이라 가린다.
   String describe() {
@@ -1131,6 +1176,8 @@ class Server {
     if (_closed) return;
     _closed = true;
     onUnauthorized = null;
+    _kasanet?.dispose();
+    _kasanet = null;
     _client.close();
     for (final listener in List.of(_closeListeners)) {
       listener();
@@ -1362,3 +1409,36 @@ class ShareFile {
 
 DateTime _msTime(Object? v) =>
     DateTime.fromMillisecondsSinceEpoch((v as num?)?.toInt() ?? 0);
+
+/// 카사넷을 배우는 두 요청 — 늘 관문으로 간다(데스크톱은 관문을 거친 주인 폰 등록만 받는다).
+class _KasanetGateway implements KasanetGateway {
+  _KasanetGateway(this.server);
+  final Server server;
+
+  @override
+  Future<Map<String, Object?>?> version(String? machine) async {
+    final res = await server._client
+        .get(server._gatewayUri('version', machine: machine))
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode != 200) return null;
+    final j = jsonDecode(utf8.decode(res.bodyBytes));
+    return j is Map ? j.cast<String, Object?>() : null;
+  }
+
+  @override
+  Future<Duration?> register(String? machine, String phoneId) async {
+    final res = await server._client
+        .post(
+          server._gatewayUri('kasanet/phone', machine: machine),
+          headers: {'content-type': 'application/json'},
+          body: jsonEncode({'id': phoneId}),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 500 && res.statusCode != 503) {
+      throw ServerException('카사넷 등록 실패', status: res.statusCode);
+    }
+    if (res.statusCode != 200) return null;
+    final ttl = (jsonDecode(utf8.decode(res.bodyBytes)) as Map)['ttl_secs'];
+    return ttl is num && ttl > 0 ? Duration(seconds: ttl.toInt()) : null;
+  }
+}

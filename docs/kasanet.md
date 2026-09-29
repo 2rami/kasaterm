@@ -44,7 +44,7 @@ STUN 판정으로는 두 기기 모두 목적지 무관 매핑 NAT 라 구멍 �
 | P2 | 연결: `/version` 에 EndpointId 공개, `machines.rs` 길 선택, 기기 상태에 경로 표시 | 격리 앱 둘이 카사넷으로 거울 연결 |
 | P3 | 포트 공유: `kasaterm-cli net forward <기기> <port>`, 다른 데스크톱으로 페이지 보여 주기 | 개발 서버를 다른 기기 localhost 로 열기 |
 | P4 | 거울 화면 동기화를 QUIC datagram 으로(mosh 식) | 패킷 손실 중에도 입력 에코가 안 멈춤 |
-| P5 | 폰: 앱 안 웹뷰가 카사넷으로 페이지 받기 | 폰에서 맥북 개발 서버 보기 |
+| P5 | 폰: 앱 안 웹뷰가 카사넷으로 페이지 받기 | 폰에서 맥북 개발 서버 보기 — 시뮬레이터 확인, 실기는 TestFlight 뒤 |
 
 ## P3~P5 계약 (2026-09-29)
 
@@ -178,6 +178,62 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
 - `net stop 61900` 뒤 v4·v6 둘 다 연결 거부, 두 번째 stop 은 「끌어오는 것이 없어요」.
 - B 가 카사넷을 닫자(`STOP_MS`) `path=ssh`, 같은 끌어오기가 그대로 200 이고 B 포트로 들어온 연결의 여는 쪽이 전부 A
   (원래 base 길). `--local 47915` 로 못박은 번호도 그 번호로 열렸다.
+
+## P5 폰 (`crates/kasa-net-ffi` · `mobile/lib/kasanet.dart`)
+
+- **iOS 정적 라이브러리** `crates/kasa-net-ffi` — C ABI `kasanet_start(키 경로)`·`kasanet_id`·`kasanet_open(/version 의
+  kasanet JSON)` → 입구 로컬 포트·`kasanet_state(포트)` → `{path: direct|relay|down, rtt_ms, error}`·`kasanet_close`·
+  `kasanet_network_changed`·`kasanet_stop`. 폰은 거는 쪽뿐 — 허용 목록이 비어 들어오는 연결은 다 끊는다. 데스크톱마다
+  `127.0.0.1` 입구 하나(`Route::direct_only`): 직통일 때만 싣고, 직통을 잃으면 실던 연결을 끊는다. 관문은 HTTPS 라
+  TCP 폴백을 입구 안에 둘 수 없어 길 고르기는 앱이 한다. `mobile/tool/kasanet.sh` 가 기기(arm64)·시뮬레이터(arm64+x86_64
+  합본) 조각을 `ios/KasaNet/KasaNet.xcframework` 로 굽고(커밋하지 않는다) `sim.sh`·`phone.sh`·`testflight.sh` 가 먼저 부른다.
+  Dart 는 `DynamicLibrary.process()` 로 찾으므로 podspec 이 기호를 `-u` 로 묶고 `STRIP_STYLE=non-global` 로 둔다.
+- **키**: 앱 컨테이너 `Library/Application Support/kasanet/kasanet.key`(0600)에만. iOS 앱 환경에는 `HOME` 이 없어
+  `NSTemporaryDirectory` 의 위(컨테이너)에서 찾는다. 폰 id 는 데스크톱이 등록마다 새로 배우므로 키가 바뀌어도(백업
+  복원·재설치) 다시 등록하면 된다.
+- **데스크톱 주소**: 관문 계정 길로 받은 `/version` 의 `kasanet` 칸(기본 기계는 `version`, 다른 기계는 `m/~id/version`).
+- **등록(데스크톱이 폰 id 를 배우는 길)** `POST /kasanet/phone {id}` → `{ok, ttl_secs}`. 받는 조건은 셋 — 업링크 입구로 들어와
+  (`ViaUplink`, 관문을 거쳤다) 주인 폰 자격(`MobileAuth` owner)이고 카사넷 폰 입구로 온 것이 아닐 것. 관문은 계정 길에서
+  기기 토큰을 확인하고 주인 주소(`/u/<주인>/`)로 되쏘므로 이것이 「관문 계정 채널」이다(주인 주소 자체도 같은 무게의 자격 —
+  관문을 바꾸지 않고 여기까지 가른다). 로컬·원격 토큰·손님 주소·카사넷으로 온 등록은 403. 등록은 **메모리에만, 수명
+  15분**이고 폰이 그 3분의 1마다 관문으로 다시 등록한다 — 관문에서 폐기된 폰은 다시 등록을 못 해 수명 안에 허용 목록에서
+  빠지고, 그 폰의 연결은 그때 끊는다(`FwdServer::forget`). 기기(명부)로 배운 id 를 폰으로 덮지 않는다.
+- **폰 입구(데스크톱)**: 폰 id 는 `FwdServer::redirect` 로 **이 앱 HTTP 포트만, 폰 입구로** 돌린다 — 카사크롬 다리 등 다른
+  포트는 못 연다. 폰 입구 리스너(`via_phone_mw`)는 업링크 되쏘기와 똑같이 주인 주소 아래로 고쳐 쓰고 `ViaUplink` 를 달며
+  쿠키·Authorization·원격 토큰·Origin 을 걷는다. 그래서 카사넷으로 온 폰은 관문 경유와 **같은 자격**이다 — 루프백 peer 가
+  아니다. 연결을 받을 때 돌리기에 든 상대는 나중에 잊혀도 기본 허용 포트로 새지 않는다.
+- **길 고르기(폰)** `KasanetRouter` — 요청마다 `Server.uri` 가 그 기계 입구가 직통이면 `http://127.0.0.1:L/…`, 아니면 관문
+  (`relay/account/[m/~id/]…`). 관문이 확인해 주는 값(`machines` 의 살아 있는 기계 목록, `nacho/`)과 배우는 길(`version`·
+  `kasanet/`)은 늘 관문. 입구로는 관문 토큰·소켓 인증 부프로토콜을 싣지 않는다. 입구로 간 GET 이 길에서 끊기면 관문으로
+  한 번 더 간다(POST 는 다시 안 보낸다 — 키 입력이 두 번 간다). 1초마다 입구 상태를 읽어 직통↔관문이 바뀌면 알리고, 학생
+  화면 소켓은 관문에 붙어 있다가 직통이 서면 다시 붙어 옮긴다. 앱이 깨어나면 `network_changed` 와 재등록. 데스크톱이 다시
+  떠 폰을 잊었으면(403) 수명을 기다리지 않고 다시 등록하고, 재등록마다 `/version` 부터 다시 받아 포트가 바뀐 데스크톱에도
+  입구가 따라간다.
+- **앱 안 웹뷰** 설정 「데스크톱 개발 서버 열기」(포트·경로) → `NetTcpBridge` 가 폰 `localhost:L`(v4·v6, 데스크톱과 같은
+  번호를 먼저)을 듣고 연결마다 P3 `/net/tcp?port=N` 웹소켓을 연다 — 길은 위 규칙 그대로(직통이면 입구, 아니면 관문). 틀은
+  P3 와 같다(바이너리·`eof`). 머리 아래 한 줄이 지금 길(「데스크톱 직통 · Nms」/「관문 경유」). 설정 계정 칸에 「데스크톱 길」.
+- 검사 `cargo test -p kasa-net`(돌리기: 원래 포트 안 닿음·표 밖 포트 막힘·잊으면 연결 끊김 / `direct_only` 가 못 실을 때
+  닫음) · `cargo test -p kasa-net-ffi`(C ABI 를 앱 순서로: 루프백 데스크톱에 직통으로 싣고, 직통을 잃으면 닫음) ·
+  `cargo test -p kasa-mcp --lib phone_ingress`(폰 입구 = 관문 자격·쿠키 걷기 / 카사넷·로컬로 온 등록 403 / 관문 주인 등록 통과)
+  · `flutter test test/kasanet_test.dart test/net_tcp_test.dart`(길 고르기·토큰 안 싣기·GET 한 번 더·POST 안 다시·옛 판·거절·
+  다른 기계·깨어남·새 포트 따라가기 / 다리 반쯤 닫기·빈 포트).
+
+### P5 검증 (2026-09-29, 로컬 관문 + 격리 데스크톱 + 시뮬레이터, 같은 맥)
+
+`kasa-relay --port 18792`(시험 계정), 격리 앱 `KASATERM_GATEWAY=http://127.0.0.1:18792`·`KASATERM_KASANET_BIND=127.0.0.1:0`
+(계정 로그인), 전용 시뮬레이터에 `SIMCTL_CHILD_KASATERM_KASANET_BIND=127.0.0.1:0`(맥 방화벽 묻기 창을 안 띄우려고 — 폰 FFI 도
+같은 스위치를 읽는다)로 앱을 띄워 계정 로그인.
+
+- 폰이 관문으로 `/version`·등록 → 데스크톱 로그 `폰 95ff7bac4d 허용`, 설정 「카사넷 직통 · 1ms」. 폰에서 친 명령이 격리
+  데스크톱 셸에서 돌았고(`p5-via-kasanet 42`), 붙든 연결이 폰 입구 쪽 6개·업링크 입구 쪽 5개(관문 전용 길과 직통 전 요청).
+  같은 등록을 데스크톱 HTTP 에 직접 보내면 403.
+- 데스크톱이 카사넷을 닫자(`STOP_MS`) 폰 입구 연결 0, 학생 화면이 관문으로 다시 붙어 명령이 그대로 돌았다(`VIA-GATEWAY`),
+  설정 「관문 경유 — 직통을 찾는 중」. 데스크톱을 새 포트로 다시 띄우자 24초 뒤 스스로 다시 직통(403 → 재등록 → 새 포트).
+- 웹뷰: 격리 데스크톱 쪽 `127.0.0.1:4719`(더미 개발 서버, 200KB JSON fetch) → 「데스크톱 직통 · 1ms」로 열림. 데스크톱을
+  카사넷 끈 채로 다시 띄우자 같은 화면이 「관문 경유」로 열림. 시뮬레이터는 맥과 망을 같이 써 4719 가 이미 맥 쪽에 잡혀
+  폰 쪽 번호는 빈 번호였다 — 실기에서는 같은 번호가 된다.
+- 남은 것: 실기 아이폰(셀룰러·다른 망)에서 직통 성립·왕복 실측은 TestFlight 판으로. 폰 대상 「보여 주기」를 임시 터널
+  대신 이 웹뷰로 여는 것(데스크톱 쪽 보여 주기 경로가 폰 앱 링크를 내야 한다)은 아직.
 
 ## 자체 중계 (2026-09-29, 맥미니)
 

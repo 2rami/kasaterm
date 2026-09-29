@@ -28,6 +28,7 @@ d = {"KASA_ROOT": sys.argv[1]}
 if len(sys.argv) > 2 and sys.argv[2]: d["KASA_OPEN_PANE"] = sys.argv[2]
 if len(sys.argv) > 3 and sys.argv[3]: d["KASA_OPEN_MACHINE"] = sys.argv[3]
 print(json.dumps(d))' "${KASA_ROOT:-http://127.0.0.1:8765/}" "${1:-}" "${2:-}" > "$defines"
+    tool/kasanet.sh
     NO_PROXY='127.0.0.1,localhost' flutter build ios --simulator --debug --dart-define-from-file="$defines" \
       | grep -E "Built|Error|error:" || true
     xcrun simctl terminate "$sim" "$app" >/dev/null 2>&1 || true

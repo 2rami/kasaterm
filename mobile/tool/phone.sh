@@ -35,6 +35,7 @@ python3 -c 'import json, sys; print(json.dumps({"KASA_ROOT": sys.argv[1]}))' "$r
 # 빌드 번호는 시각 — 폰에 어느 판이 깔렸는지 `xcrun devicectl device info apps` 로 가른다.
 build=$(date +%y%m%d%H%M)
 NO_PROXY='127.0.0.1,localhost' FLUTTER_XCODE_DEVELOPMENT_TEAM="$team" \
+  tool/kasanet.sh
   flutter build ios --release --build-number="$build" --dart-define-from-file="$defines"
 
 # 네이티브 에셋 프레임워크(objective_c 등)는 flutter 가 Run Script 단계에서 서명하는데,

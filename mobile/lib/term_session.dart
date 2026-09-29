@@ -18,6 +18,7 @@ enum TermState { connecting, connected, reconnecting, gone }
 class TermSession extends ChangeNotifier {
   TermSession(this.server, this.pane) {
     server.addCloseListener(_serverClosed);
+    server.routeChanges?.addListener(_routeChanged);
   }
 
   final Server server;
@@ -39,6 +40,9 @@ class TermSession extends ChangeNotifier {
   DesignTokens? tokens;
 
   WebSocketChannel? _channel;
+
+  /// 지금 소켓이 카사넷 입구(직통)로 붙었나.
+  bool _direct = false;
   StreamSubscription<Object?>? _sub;
   Timer? _retry;
   int _backoffSec = 1;
@@ -66,14 +70,9 @@ class TermSession extends ChangeNotifier {
         notifyListeners();
       });
     }
-    final ch = connectTermSocket(
-      server.wsUri(
-        'term/ws',
-        query: {'pane': pane.id, 'grid': '1'},
-        machine: pane.machine,
-      ),
-      protocols: server.wsProtocols,
-    );
+    final uri = _wsUri();
+    _direct = server.isDirect(uri.replace(scheme: 'http'));
+    final ch = connectTermSocket(uri, protocols: server.wsProtocolsFor(uri));
     _channel = ch;
     _sub = ch.stream.listen(
       (data) { if (generation == _generation) _onData(data); },
@@ -82,6 +81,22 @@ class TermSession extends ChangeNotifier {
       cancelOnError: true,
     );
     ch.ready.catchError((Object _) { if (generation == _generation) _lost(); });
+  }
+
+  Uri _wsUri() => server.wsUri(
+    'term/ws',
+    query: {'pane': pane.id, 'grid': '1'},
+    machine: pane.machine,
+  );
+
+  /// 직통이 섰거나 잃었다. 잃은 쪽은 입구가 소켓을 끊어 [_lost] 로 관문에 다시 붙는다 — 여기서는 관문에 붙어 있던
+  /// 소켓을 직통으로 옮긴다. 붙은 채로 두면 화면이 끝까지 관문 왕복(100ms 대)으로 온다.
+  void _routeChanged() {
+    if (_channel == null || _paused || _disposed || state != TermState.connected) return;
+    final now = server.isDirect(_wsUri().replace(scheme: 'http'));
+    if (now == _direct) return;
+    _closeChannel();
+    connect();
   }
 
   void _onData(Object? data) {
@@ -211,6 +226,7 @@ class TermSession extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     server.removeCloseListener(_serverClosed);
+    server.routeChanges?.removeListener(_routeChanged);
     _retry?.cancel();
     _closeChannel();
     super.dispose();

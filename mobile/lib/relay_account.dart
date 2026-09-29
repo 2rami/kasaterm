@@ -96,35 +96,57 @@ class AccountSyncConflict implements Exception {
 }
 
 /// A credential belongs to one origin; redirects must never choose its recipient.
+///
+/// [direct] 가 참인 주소는 앱 안 카사넷 입구(데스크톱 직통)다 — 자격을 싣지 않는다(데스크톱 폰 입구가 관문과 같은
+/// 자격을 준다). 입구로 간 GET 이 길에서 끊기면 [fallback] 이 준 관문 주소로 한 번 더 간다. 다른 요청은 다시 보내지
+/// 않는다 — 데스크톱이 받았는데 답만 끊겼을 수 있다(키 입력이 두 번 간다).
 class OriginClient extends http.BaseClient {
   OriginClient(
     this.origin, {
     http.Client? client,
     this.token,
     this.onUnauthorized,
+    this.direct,
+    this.fallback,
   }) : _inner = client ?? http.Client();
   final Uri origin;
   final String? token;
   final void Function()? onUnauthorized;
+  final bool Function(Uri)? direct;
+  final Uri? Function(Uri)? fallback;
   final http.Client _inner;
   bool _closed = false;
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final viaDirect = direct?.call(request.url) ?? false;
+    if (!viaDirect) return _send(request, false);
+    try {
+      return await _send(request, true);
+    } on AccountException {
+      rethrow;
+    } catch (_) {
+      final back = fallback?.call(request.url);
+      if (back == null || request is! http.Request || request.method != 'GET') rethrow;
+      return _send(http.Request('GET', back)..headers.addAll(request.headers), false);
+    }
+  }
+
+  Future<http.StreamedResponse> _send(http.BaseRequest request, bool viaDirect) async {
     if (_closed ||
-        !sameOrigin(origin, request.url) ||
+        (!viaDirect && !sameOrigin(origin, request.url)) ||
         request.url.userInfo.isNotEmpty) {
       throw const AccountException('연결 대상이 바뀌었어요. 다시 연결해 주세요.');
     }
     request.followRedirects = false;
-    if (token != null) request.headers['authorization'] = 'Bearer $token';
+    if (token != null && !viaDirect) request.headers['authorization'] = 'Bearer $token';
     final response = await _inner.send(request);
     final bytes = await response.stream.toBytes();
     if (_closed) throw const AccountException('이전 연결이 종료되었어요.');
     if (response.statusCode >= 300 && response.statusCode < 400) {
       throw const AccountException('다른 주소로의 이동을 차단했어요. 서버 주소를 확인해 주세요.');
     }
-    if (response.statusCode == 401 && token != null) onUnauthorized?.call();
+    if (response.statusCode == 401 && token != null && !viaDirect) onUnauthorized?.call();
     return http.StreamedResponse(
       Stream.value(bytes),
       response.statusCode,

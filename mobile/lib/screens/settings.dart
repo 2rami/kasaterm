@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../main.dart' show designTokens;
 import '../server.dart';
 import 'browser_device.dart';
+import 'dev_server.dart';
 import '../theme_prefs.dart';
 import 'hub.dart' show parseHexColor;
 
@@ -116,6 +117,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   subtitle: Text(server.describe()),
                 ),
                 const Divider(height: 1),
+                if (server.routeChanges case final changes?)
+                  ListenableBuilder(
+                    listenable: changes,
+                    builder: (context, _) => ListTile(
+                      leading: const Icon(Icons.bolt_outlined),
+                      title: const Text('데스크톱 길'),
+                      subtitle: Text(switch (server.pathOf(null)) {
+                        (true, final int ms) => '카사넷 직통 · ${ms}ms',
+                        (true, null) => '카사넷 직통',
+                        (false, _) => '관문 경유 — 직통을 찾는 중',
+                        null => '관문 경유',
+                      }),
+                    ),
+                  ),
                 if (server.account != null)
                   const ListTile(leading: Icon(Icons.notifications_off_outlined),
                     title: Text('계정 알림은 준비 중'),
@@ -141,6 +156,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
               subtitle: const Text('학생이 보여 주려 여는 페이지가 갈 곳 — 이 폰이면 쪽지로'),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => showBrowserDeviceSheet(context, server: server),
+            ),
+          ),
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.web_outlined),
+              title: const Text('데스크톱 개발 서버 열기'),
+              subtitle: const Text('데스크톱 localhost 페이지를 이 앱 안에서 — 직통이면 카사넷으로'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => openDevServer(context, server: server),
             ),
           ),
           const SizedBox(height: 16),
