@@ -14,6 +14,9 @@ const PROOF_DEADLINE: Duration = Duration::from_secs(2);
 const ECHO_DEADLINE: Duration = Duration::from_secs(2);
 const ECHO_POLL: Duration = Duration::from_millis(160);
 const PROOF_FRESHNESS: Duration = Duration::from_millis(250);
+/// 붙여넣기부터 Enter 까지 사람 입력을 붙들어 두는 한도 — 반영 기다림과 매 회차 신원 증명을 덮는다.
+/// 보통은 그보다 훨씬 먼저 `release_input` 이 푼다.
+const HOLD_FOR: Duration = Duration::from_secs(4);
 const WORKERS: usize = 4;
 
 #[derive(Clone,Debug)]
@@ -140,6 +143,7 @@ fn schedule_commit(backend: Arc<crate::socket::PtyBackend>, proxy: winit::event_
         std::thread::sleep(ECHO_POLL);
         commit.proof = collect_proof(backend,commit.record.clone(),commit.pty.clone());
         if proxy.send_event(UserEvent::SafeTellCommit(commit.clone())).is_err() {
+            let _ = commit.pty.release_input();
             finish(&commit.record,State::Uncertain,"GUI stopped after paste; automatic retry prohibited");
         }
     });
@@ -257,7 +261,9 @@ impl App {
     }
 
     fn tell_ready(&self, record: &Record, pty: &kasa_pty::PtySession, harness: kasa_pty::AgentKind, empty: bool) -> bool {
-        if pty.input_closed() || self.tell_composing(&record.address.surface_id) { return false; }
+        // 붙여넣은 뒤(`empty` 가 거짓)에 시작된 한글 조합은 입력이 붙들려 있어 본문에 안 섞인다 — 그것 때문에
+        // Enter 를 보류하면 본문이 입력창에 남아 사람 글과 함께 제출된다.
+        if pty.input_closed() || (empty && self.tell_composing(&record.address.surface_id)) { return false; }
         let (cells,screen) = live_cells(pty);
         if !screen.bracketed_paste { return false; }
         // 사람 차례(승인·질문)면 글을 안 넣는다 — 판정이 정본이고, 아래 화면 검사는 지금
@@ -302,11 +308,18 @@ impl App {
             return;
         }
         let payload = format!("\x1b[200~{}\x1b[201~",delivery.record.body);
+        // 붙여넣기와 Enter 사이에 사람이 친 글이 본문 뒤에 붙어 함께 제출되던 자리다(2026-09-29 「빈 입력창에 뭐 치면
+        // 같이 전송」). 그 사이 입력은 붙들었다가 Enter 뒤(또는 보류 뒤) 친 순서대로 흘려보낸다.
+        delivery.pty.hold_input(HOLD_FOR);
         let revision = match delivery.pty.send_bytes_guarded(payload.as_bytes(),Some(delivery.revision)) {
             Ok(revision) => revision,
-            Err(_) => { finish(&delivery.record,State::Uncertain,"paste write failed or input changed; automatic retry prohibited"); return; }
+            Err(_) => {
+                let _ = delivery.pty.release_input();
+                finish(&delivery.record,State::Uncertain,"paste write failed or input changed; automatic retry prohibited"); return;
+            }
         };
         let Some(backend) = self.socket_backend.clone() else {
+            let _ = delivery.pty.release_input();
             finish(&delivery.record,State::Uncertain,"receiver disappeared after paste"); return;
         };
         let mut commit = delivery.clone(); commit.revision = revision; commit.pasted_at = Some(Instant::now());
@@ -342,11 +355,13 @@ impl App {
             _ => {
                 let why = blocked.unwrap_or("paste echo not seen");
                 eprintln!("[tell] {} → {} Enter 보류: {why}", commit.record.message_id, commit.record.address.surface_id);
+                let _ = commit.pty.release_input();
                 finish(&commit.record,State::Uncertain,&format!("Enter withheld: {why}"));
                 return;
             }
         }
         let result = commit.pty.send_bytes_guarded(b"\r",Some(commit.revision));
+        let _ = commit.pty.release_input();
         let (state,reason) = if result.is_ok() { (State::Submitted,"paste and Enter writes succeeded; model read is unconfirmed") }
             else { (State::Uncertain,"Enter write unconfirmed; automatic retry prohibited") };
         finish(&commit.record,state,reason);

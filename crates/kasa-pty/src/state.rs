@@ -500,6 +500,9 @@ pub struct PtySession {
     input_closed: std::sync::atomic::AtomicBool,
     input_revision: std::sync::atomic::AtomicU64,
     input_draft: std::sync::atomic::AtomicBool,
+    /// tell 이 붙여 넣고 Enter 를 칠 동안 사람 입력을 붙들어 두는 자리(기한, 모인 바이트). 그 틈에 친 글이
+    /// 붙여 넣은 본문 뒤에 붙어 함께 제출되던 자리다(2026-09-29). 기한이 지나면 다음 쓰기가 먼저 흘려보낸다.
+    input_hold: Mutex<Option<(Instant, Vec<u8>)>>,
     /// 마지막으로 CR/LF 가 이 PTY 로 들어간 시각 — 「방금 제출됐다」 신호.
     /// GUI 의 스피너 즉시-신뢰(턴 시작 첫 프레임부터 학생 테마)가 읽는다.
     /// 키보드·paste·소켓 send·하네스 autosend 모든 쓰기 경로가 `send_bytes`
@@ -791,6 +794,7 @@ impl PtySession {
             input_closed: std::sync::atomic::AtomicBool::new(false),
             input_revision: std::sync::atomic::AtomicU64::new(0),
             input_draft: std::sync::atomic::AtomicBool::new(true),
+            input_hold: Mutex::new(None),
             last_submit: Mutex::new(None),
             output_beats,
             last_input: Mutex::new(None),
@@ -888,6 +892,7 @@ impl PtySession {
             input_closed: std::sync::atomic::AtomicBool::new(false),
             input_revision: std::sync::atomic::AtomicU64::new(0),
             input_draft: std::sync::atomic::AtomicBool::new(true),
+            input_hold: Mutex::new(None),
             last_submit: Mutex::new(None),
             output_beats,
             last_input: Mutex::new(None),
@@ -996,6 +1001,7 @@ impl PtySession {
             input_closed: std::sync::atomic::AtomicBool::new(false),
             input_revision: std::sync::atomic::AtomicU64::new(0),
             input_draft: std::sync::atomic::AtomicBool::new(true),
+            input_hold: Mutex::new(None),
             last_submit: Mutex::new(None),
             output_beats,
             last_input: Mutex::new(None),
@@ -1277,6 +1283,23 @@ impl PtySession {
         self.input_revision.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
     }
 
+    /// tell 이 붙여 넣고 Enter 를 칠 동안 사람 입력(`expected` 없는 쓰기)을 붙들어 둔다. 풀리는 것은
+    /// `release_input` 이나 기한이다. 붙여넣기·Enter 는 `expected` 를 달고 오므로 그대로 지나간다.
+    pub fn hold_input(&self, for_: std::time::Duration) {
+        let mut hold = self.input_hold.lock().unwrap();
+        let held = hold.take().map(|(_, bytes)| bytes).unwrap_or_default();
+        *hold = Some((Instant::now() + for_, held));
+    }
+
+    /// 붙들어 둔 입력을 친 순서 그대로 흘려보낸다.
+    pub fn release_input(&self) -> Result<()> {
+        let held = self.input_hold.lock().unwrap().take().map(|(_, bytes)| bytes).unwrap_or_default();
+        if held.is_empty() {
+            return Ok(());
+        }
+        self.send_bytes_guarded(&held, None).map(|_| ())
+    }
+
     /// Compare and write under the same lock used by keyboard, web and socket input.
     pub fn send_bytes_guarded(&self, bytes: &[u8], expected: Option<u64>) -> Result<u64> {
         // 포커스 리포트(CSI I/O)는 pane 전환마다 앱이 자동으로 쏘는 것이라 사람
@@ -1289,6 +1312,25 @@ impl PtySession {
         // 마우스만 올려도 tell 이 붙여 넣은 뒤 Enter 를 보류해 글이 입력창에 남고(2026-09-29 두 건),
         // 초안 표시가 서서 다음 tell 은 사람이 Enter 를 칠 때까지 줄만 섰다.
         let passive = passive_report(bytes);
+        let merged;
+        let bytes = if expected.is_none() && !passive {
+            let mut hold = self.input_hold.lock().unwrap();
+            match hold.take() {
+                Some((until, mut held)) if Instant::now() < until => {
+                    held.extend_from_slice(bytes);
+                    *hold = Some((until, held));
+                    return Ok(self.input_revision());
+                }
+                Some((_, mut held)) if !held.is_empty() => {
+                    held.extend_from_slice(bytes);
+                    merged = held;
+                    &merged[..]
+                }
+                _ => bytes,
+            }
+        } else {
+            bytes
+        };
         let revision = {
             let mut w = self.writer.lock().unwrap();
             anyhow::ensure!(!self.input_closed(), "pane is closed — reopen it before sending input");
@@ -6615,6 +6657,41 @@ mod external_session_tests {
         assert_eq!(writer.recv().unwrap(),b"\x1b[200~hello\x1b[201~");
         assert_eq!(writer.recv().unwrap(),b"user draft");
         assert!(writer.try_recv().is_err());
+    }
+
+    /// 붙여넣기와 Enter 사이에 사람이 친 글은 본문에 안 섞이고, Enter 뒤 빈 입력창으로 들어간다.
+    #[test]
+    fn held_user_input_lands_after_the_tell_submits() {
+        let (session,_events,writer,_) = ext_session(20,5);
+        session.hold_input(std::time::Duration::from_secs(5));
+        let revision = session.send_bytes_guarded(b"\x1b[200~hello\x1b[201~",Some(session.input_revision())).unwrap();
+        session.send_bytes(b"\xec\x95\x88").unwrap();
+        session.send_bytes(b"\x1b[I").unwrap();
+        session.send_bytes(b"x").unwrap();
+        session.send_bytes_guarded(b"\r",Some(revision)).expect("held input must not break the tell guard");
+        session.release_input().unwrap();
+        assert_eq!(writer.recv().unwrap(),b"\x1b[200~hello\x1b[201~");
+        assert_eq!(writer.recv().unwrap(),b"\x1b[I", "포커스 리포트는 붙들지 않는다");
+        assert_eq!(writer.recv().unwrap(),b"\r");
+        assert_eq!(writer.recv().unwrap(),"안x".as_bytes(), "친 순서 그대로 한 번에");
+        assert!(session.input_draft_present(), "흘려보낸 글은 초안이다 — 다음 tell 이 기다린다");
+        session.release_input().unwrap();
+        assert!(writer.try_recv().is_err());
+    }
+
+    /// 기한이 지나면 푸는 쪽이 안 와도 다음 입력이 모인 것을 먼저 흘려보낸다.
+    #[test]
+    fn expired_hold_flushes_before_the_next_input() {
+        let (session,_events,writer,_) = ext_session(20,5);
+        session.hold_input(std::time::Duration::from_millis(0));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        session.send_bytes(b"a").unwrap();
+        assert_eq!(writer.recv().unwrap(),b"a");
+        session.hold_input(std::time::Duration::from_millis(30));
+        session.send_bytes(b"b").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        session.send_bytes(b"c").unwrap();
+        assert_eq!(writer.recv().unwrap(),b"bc");
     }
 
     #[test]
