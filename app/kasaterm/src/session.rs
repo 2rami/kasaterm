@@ -5557,7 +5557,9 @@ impl App {
         // push. 트리를 안 바꾸므로 split 과 달리 resize_backend/publish 가 필요 없다
         // (image/markdown 은 PTY-less, pane_cells 기반 렌더라 redraw 면 충분). 대상 pane
         // 이 panes 에 실재할 때만(contains_key) 탭 경로; 아니면 아래 split 폴백(tab 재사용).
-        let tab_outer = if as_tab && self.ws.lock().unwrap().panes.contains_key(&active) {
+        // 사람이 연 것도 탭이다 — 터미널이 아닌 것은 칸을 차지하지 않는다(칸은 벤토 격자의 몫, docs/design.md 5).
+        // 사람이 연 것만 앞 탭으로 세운다.
+        let tab_outer = if self.ws.lock().unwrap().panes.contains_key(&active) {
             Some(active.clone())
         } else {
             None
@@ -5566,6 +5568,9 @@ impl App {
             let mut ws = self.ws.lock().unwrap();
             if let Some(pane) = ws.panes.get_mut(&outer) {
                 pane.tabs.push(tab);
+                if !as_tab {
+                    pane.active_tab = pane.tabs.len() - 1;
+                }
                 // **백그라운드 탭이다** — 활성 탭도 활성 pane 도 안 건드린다(사용자
                 // 2026-08-13). 학생이 이미지를 보내면 그 pane 의 대화가 통째로 이미지에
                 // 덮이고, 키보드 포커스까지 그 pane 으로 끌려가 다른 데서 타이핑 중이면
@@ -5573,7 +5578,13 @@ impl App {
                 // (ad6c04d), 이 탭은 「크게 볼 때 누르는 자리」로 족하다.
                 pane.dirty = true;
             }
+            if !as_tab {
+                ws.active_pane = Some(outer);
+            }
             drop(ws);
+            if !as_tab {
+                self.handoff_ime_to_active_surface();
+            }
             self.chrome_dirty = true;
             if let Some(w) = &self.window {
                 w.request_redraw();

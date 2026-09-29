@@ -683,30 +683,26 @@ impl App {
             return;
         }
 
-        // 그리드 쪽 자리: PTY 없는 pane(이미지 split 과 같은 선례 — pid None,
-        // resize_backend/키 입력은 PTY miss 로 자동 skip).
-        let new_id = self.alloc_pane_id();
+        // 연 칸의 앞 탭으로 — 터미널이 아닌 것은 칸을 차지하지 않는다(칸은 벤토 격자의 몫, docs/design.md 5).
+        // 뒤 탭이 되면 `sync_web_hosts` 가 창을 숨긴다.
         let mut tab = PaneTab::default();
         tab.content = PaneContent::Web(WebPane { url: url.clone(), host_id });
         tab.title = Some(short_label(&url));
         tab.title_pinned = true;
-        let ps = PaneState { tabs: vec![tab], dirty: true, ..Default::default() };
-        self.ws.lock().unwrap().panes.insert(new_id.clone(), ps);
-        let Some(layout) = self.pty_layout.as_mut() else {
-            self.ws.lock().unwrap().panes.remove(&new_id);
-            self.web_hosts.remove(&host_id);
-            return;
-        };
-        if !layout.split_leaf(&anchor, kasa_pty::SplitDir::Horizontal, new_id.clone()) {
-            self.ws.lock().unwrap().panes.remove(&new_id);
-            self.web_hosts.remove(&host_id);
-            return;
+        {
+            let mut ws = self.ws.lock().unwrap();
+            let outer = ws.outer_for_pty(&anchor).unwrap_or_else(|| anchor.clone());
+            let Some(pane) = ws.panes.get_mut(&outer) else {
+                drop(ws);
+                self.web_hosts.remove(&host_id);
+                return;
+            };
+            pane.tabs.push(tab);
+            pane.active_tab = pane.tabs.len() - 1;
+            pane.dirty = true;
+            ws.active_pane = Some(outer);
         }
-        self.ws.lock().unwrap().active_pane = Some(new_id);
         self.handoff_ime_to_active_surface();
-        let (cols, rows) = self.window_cells();
-        self.resize_backend(cols, rows);
-        self.publish_pty_layout();
         self.chrome_dirty = true;
         if let Some(w) = &self.window {
             w.request_redraw();

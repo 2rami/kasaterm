@@ -260,6 +260,10 @@ pub(crate) fn pick_split_axis(px_w: f32, px_h: f32, cols: u16, rows: u16) -> kas
 /// (12로 뒀다가 표준 80×24 pane 이 12줄 두 장으로 갈렸다).
 pub(crate) const MIN_PANE_COLS: u16 = 80;
 pub(crate) const MIN_PANE_ROWS: u16 = 16;
+/// 벤토 격자의 칸 폭 하한 — 이보다 좁아질 때만 새 칸을 탭으로 보낸다. 80 이면 보통 창에서 다섯째 칸이
+/// 탭으로 밀려났고(2026-09-29 「5번째 탭으로 말고 너무 작아지면만」), 60 도 격리 앱 기본 창에서 다섯째를
+/// 탭으로 보냈다. 줄은 `MIN_PANE_ROWS` 그대로 — 입력박스 5줄 때문에 그 밑은 대화가 안 보인다.
+pub(crate) const BENTO_MIN_COLS: u16 = 40;
 
 /// 벤토에 부을 칸 순서 — 화면에서 읽은 순서(`read`)에서 `added` 를 빼 `opener` 뒤에 다시
 /// 끼운다. `opener` 가 먼저 연 칸들이 바로 뒤에 잇대어 있으면 그 끝에 끼워 부른 순서를 지킨다.
@@ -1545,7 +1549,7 @@ impl App {
             rows as f32 * ch,
             cols,
             rows,
-            MIN_PANE_COLS + pad_cols,
+            BENTO_MIN_COLS + pad_cols,
             MIN_PANE_ROWS + pad_rows,
         )
     }
