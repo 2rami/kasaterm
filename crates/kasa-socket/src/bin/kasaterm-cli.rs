@@ -933,6 +933,13 @@ const SUMMON_DONE_HINT: &str = "끝나면 `kasaterm-cli done succeeded '한 줄 
 /// 부팅한 claude 가 보드에 설 때까지 기다리는 상한.
 const SUMMON_BOOT_SECS: u64 = 90;
 
+/// 갓 부팅한 학생에게 보낸 tell 의 거절 중 기다리면 풀리는 것 — claude 판정이나 대화 번호가 아직 안 섰다.
+fn tell_target_booting(why: &str) -> bool {
+    ["shell or unsupported harness", "bound conversation differs", "tell withheld"]
+        .iter()
+        .any(|reason| why.contains(reason))
+}
+
 /// `summon [--cwd 폴더] [--cmd 부팅명령] [--name 제목] [--tab] [--stdin] [브리프…]` — 부른 pane 옆에 학생을
 /// 세우고, 그 claude 가 보드에 설 때까지 기다렸다가 브리프를 tell 로 건넨다. 학생의 `done` 은 부른 pane
 /// 입력창으로 들어온다(`spawned_by`). 창은 실패해도 닫지 않는다 — 사람이 무엇이 멎었는지 봐야 한다.
@@ -1000,36 +1007,40 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
         return Err(anyhow!("{surface} 에 부팅 명령을 못 넣었어요: {why}"));
     }
 
-    // 브리프는 claude 가 뜬 뒤에만 tell 로 — 셸 명령줄에 섞이면 부팅이 깨진다(skills/kasapane).
-    let started = std::time::Instant::now();
-    let row = loop {
-        if let Ok(rows) = snapshot_rows(socket_path, true) {
-            if let Some(row) = rows.into_iter().find(|p| row_address(p, "surface_id") == surface
-                && !row_address(p, "session_id").is_empty())
-            {
-                break row;
-            }
-        }
-        if started.elapsed() > std::time::Duration::from_secs(SUMMON_BOOT_SECS) {
-            return Err(anyhow!("{surface} 에 {SUMMON_BOOT_SECS}초 안에 학생이 안 떴어요 — `kasaterm-cli peek {surface}` 로 화면을 보세요(창은 그대로 뒀어요)"));
-        }
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    };
-
     let mut body = brief.trim().to_string();
     if !body.contains("kasaterm-cli done") {
         body.push_str("\n\n");
         body.push_str(SUMMON_DONE_HINT);
     }
     let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
-    let message_id = kasa_socket::tell::new_message_id();
-    let address = row.get("address").cloned().unwrap_or(Value::Null);
-    let told = roundtrip(socket_path, &Request { id: json!("summon"), method: "collab.tell".into(),
-        params: json!({ "message_id": message_id, "address": address, "body": kasa_socket::tell::normalize(&body)? }) })?;
-    if !told.ok {
-        return Err(anyhow!("{surface} 에 학생은 떴는데 지시를 못 넣었어요: {}",
-            told.error.map(|e| e.message).unwrap_or_default()));
-    }
+    let body = kasa_socket::tell::normalize(&body)?;
+
+    // 브리프는 claude 가 뜬 뒤에만 tell 로 — 셸 명령줄에 섞이면 부팅이 깨진다(skills/kasapane).
+    // 보드에 대화 번호가 서는 것과 tell 이 받는 조건(claude 판정·살아 있는 대화와 번호 일치)은 1~2초
+    // 어긋나 선다. 그 틈에 보낸 첫 tell 이 두 번 연속 거절됐다(2026-09-29). 거절은 접수 전이라 보드를
+    // 다시 읽어 새 주소·새 ID 로 보낸다.
+    let started = std::time::Instant::now();
+    let (row, message_id, address, told) = loop {
+        let row = snapshot_rows(socket_path, true).ok().and_then(|rows| rows.into_iter()
+            .find(|p| row_address(p, "surface_id") == surface && !row_address(p, "session_id").is_empty()));
+        let timed_out = started.elapsed() > std::time::Duration::from_secs(SUMMON_BOOT_SECS);
+        if let Some(row) = row {
+            let message_id = kasa_socket::tell::new_message_id();
+            let address = row.get("address").cloned().unwrap_or(Value::Null);
+            let told = roundtrip(socket_path, &Request { id: json!("summon"), method: "collab.tell".into(),
+                params: json!({ "message_id": message_id, "address": address, "body": body }) })?;
+            if told.ok {
+                break (row, message_id, address, told);
+            }
+            let why = told.error.map(|e| e.message).unwrap_or_default();
+            if timed_out || !tell_target_booting(&why) {
+                return Err(anyhow!("{surface} 에 학생은 떴는데 지시를 못 넣었어요: {why}"));
+            }
+        } else if timed_out {
+            return Err(anyhow!("{surface} 에 {SUMMON_BOOT_SECS}초 안에 학생이 안 떴어요 — `kasaterm-cli peek {surface}` 로 화면을 보세요(창은 그대로 뒀어요)"));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    };
     let address = told.result.as_ref().and_then(|r| r.get("address")).filter(|a| a.is_object()).cloned().unwrap_or(address);
     save_receipt(&message_id, &address);
     let state = await_tell_settled(socket_path, &message_id, &address)
@@ -3997,6 +4008,20 @@ fn run_statusline() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn summon_retries_only_while_the_student_is_booting() {
+        for booting in [
+            "shell or unsupported harness cannot receive tell",
+            "bound conversation differs from the live process; refresh before tell",
+            "full current Claude session unavailable; tell withheld",
+        ] {
+            assert!(super::tell_target_booting(booting), "{booting}");
+        }
+        for final_refusal in ["target pane is closed", "force cannot bypass tell protection", ""] {
+            assert!(!super::tell_target_booting(final_refusal), "{final_refusal}");
+        }
+    }
+
     #[test]
     fn tell_marks_sender_character_once() {
         assert_eq!(super::mark_tell_sender("본문".into(), Some("아로나")), "⟦아로나⟧ 본문");
