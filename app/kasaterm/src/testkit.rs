@@ -7675,6 +7675,11 @@ impl App {
                 self.board_scene.set_tab(tab);
             }
         }
+        // KASATERM_AUTOBOARD_DRAFT — 나쵸 판 입력칸에 글을 넣고 받는 곳 판정을 돌린다(캡처용).
+        if let Ok(draft) = std::env::var("KASATERM_AUTOBOARD_DRAFT") {
+            self.board_scene.verification_draft(&draft);
+            self.ime_retarget(crate::ImeFocus::Board(crate::native_board::BoardInput::NachoMessage));
+        }
         eprintln!("[autoboard] toggled → open={}", self.board_panel_open());
     }
     pub(crate) fn run_pending_autoarona(

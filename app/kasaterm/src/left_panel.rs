@@ -27,7 +27,7 @@ pub(crate) enum LeftPanelKind {
 impl LeftPanelKind {
     fn title(self) -> &'static str {
         match self {
-            Self::Board => "보드",
+            Self::Board => "나쵸",
             Self::Arona => "아로나",
         }
     }

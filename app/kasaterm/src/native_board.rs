@@ -20,8 +20,8 @@ pub(crate) type Rect = (f32, f32, f32, f32);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum BoardTab {
-    #[default]
     Work,
+    #[default]
     Chat,
     Overview,
     Agents,
@@ -30,6 +30,7 @@ pub(crate) enum BoardTab {
 }
 
 impl BoardTab {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 6] = [
         Self::Work,
         Self::Chat,
@@ -41,8 +42,8 @@ impl BoardTab {
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Work => "작업현황",
-            Self::Chat => "나쵸 대화",
+            Self::Work => "장부",
+            Self::Chat => "나쵸",
             Self::Overview => "관측",
             Self::Agents => "에이전트",
             Self::Git => "소스 컨트롤",
@@ -53,7 +54,7 @@ impl BoardTab {
     /// 머리글 밑 한 줄 설명(목업 .sub).
     pub(crate) const fn desc(self) -> &'static str {
         match self {
-            Self::Work => "내 답변이 필요한 일과 진행 상황, 결과를 확인해요",
+            Self::Work => "나쵸 장부의 작업과 진행·검증 기록",
             Self::Chat => "나쵸에게 맡길 일과 궁금한 내용을 이야기해요",
             Self::Overview => "에이전트 활동 관측 — 연결된 기기의 모든 방과 최근 변경",
             Self::Agents => "pane 밖에서도 계속 도는 대화",
@@ -332,6 +333,10 @@ struct Mailbox {
 pub(crate) enum Target {
     Tab(BoardTab),
     Tools,
+    /// 받는 곳 후보 칩(순번).
+    RouteChoose(usize),
+    /// 학생 보고의 「답하기」 — 입력칸에 `@이름 ` 을 채운다.
+    RouteReply(String),
     NachoSend,
     NachoRetry,
     NachoClearContext,
@@ -412,6 +417,10 @@ pub(crate) struct Snapshot {
     pub(crate) preedit: String,
     pub(crate) caret_on: bool,
     pub(crate) toast: Option<(bool, String)>,
+    pub(crate) route: route::RouteState,
+    pub(crate) route_pending: bool,
+    pub(crate) route_busy: bool,
+    pub(crate) sent: Arc<Vec<send::SentNote>>,
     overview: OverviewUi,
     work: work::WorkUi,
     pub(crate) pending_stop: Option<LocalBackgroundProcess>,
@@ -563,14 +572,7 @@ impl Scene {
             self.focus = None;
             self.last_refresh = None;
         }
-        if !matches!(tab, BoardTab::Work | BoardTab::Chat) {
-            self.tools_open = true;
-        }
-    }
-
-    pub(crate) fn show_work(&mut self) {
         self.tools_open = false;
-        self.set_tab(BoardTab::Work);
     }
 
     pub(crate) fn tab(&self) -> BoardTab {
@@ -674,6 +676,10 @@ impl Scene {
             preedit: if self.input == Some(BoardInput::AssistantKey) { "*".repeat(preedit.chars().count()) } else { preedit },
             caret_on,
             toast: self.toast.as_ref().map(|(ok, text, _)| (*ok, text.clone())),
+            route: self.route.state().clone(),
+            route_pending: self.route.pending(),
+            route_busy: self.route_busy(),
+            sent: Arc::new(self.route_sent.clone()),
             overview: self.overview.clone(),
             work: self.work.clone(),
             pending_stop: self.pending_stop.clone(),
@@ -1805,71 +1811,40 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     g.rect(ax, ay, aw, ah, theme::bg());
     // 판 전체를 한 번 자른다 — 끝의 pop_clip 과 짝이다(짝이 안 맞으면 바깥 상태줄 아이콘까지 잘린다).
     g.push_clip(ax, ay, aw, ah);
-    // 왼쪽 목록은 프라나의 판(사이드바 옆 슬라이드)과 같은 틀, 내용은 계정 작업현황·나쵸 대화.
-    let nav_w = if aw < 460.0 { 112.0 } else if aw < 760.0 { 154.0 } else { 190.0 };
-    // 목업(플랫): 옆 목록은 구분선 없이 배경만 다르고, 머리글은 작은 흐림 글자 —
-    // 설정창과 같은 틀. 아이콘·강조 막대는 걷었다.
-    g.rect(ax, ay, nav_w, ah, theme::panel_bg());
-    text(g, ax + 20.0, ay + 24.0, "운영 보드", 13.0, theme::text_dim(), false);
-
-    let mut ny = ay + 56.0;
-    for tab in BoardTab::ALL {
-        let rect = (ax + 12.0, ny, nav_w - 24.0, 32.0);
-        let selected = snapshot.tab == tab;
-        let hover = contains(rect, snapshot.cursor);
-        if selected || hover {
-            round_rect(
-                g,
-                rect.0,
-                rect.1,
-                rect.2,
-                rect.3,
-                theme::radius_md().min(5.0),
-                if selected { theme::surface_active() } else { theme::surface_hover() },
-            );
+    let pad = if aw < 760.0 { 20.0 } else { 28.0 };
+    let content_x = ax + pad;
+    let avail_w = (aw - pad * 2.0).max(1.0);
+    // 나쵸가 판 본문이다. 도구(관측·에이전트·소스 컨트롤·이사·장부)는 「도구 ▾」로 열고
+    // 머리 왼쪽 「‹ 나쵸」로 돌아온다 — 늘 서 있던 왼쪽 목록은 걷었다(docs/boards.md).
+    if snapshot.tab == BoardTab::Chat {
+        let area = (content_x, ay + 8.0, avail_w, (ah - 16.0).max(0.0));
+        let area = hub_layout(area, BoardTab::Chat, ay + 8.0).chat.unwrap_or(area);
+        chat::paint(g, snapshot, &mut hits, &mut caret_rect, area);
+        paint_tools_menu(g, snapshot, &mut hits, (area.0 + area.2, area.1 + 32.0));
+        if let Some(target) = snapshot.focus.as_ref() {
+            if let Some(hit) = hits.iter().find(|hit| &hit.target == target) {
+                crate::native_controls::focus_ring(g, hit.rect);
+            }
         }
-        let label = fit(g, tab.label(), rect.2 - 24.0, 12.0, selected);
-        text(
-            g,
-            rect.0 + 12.0,
-            rect.1 + 9.0,
-            &label,
-            12.0,
-            if selected { theme::text() } else { theme::text_dim() },
-            selected,
-        );
-        hit(g, &mut hits, Target::Tab(tab), rect, false);
-        g.hover_pointer |= hover;
-        ny += 36.0;
+        g.pop_clip();
+        return PaintOutput { hits, content_h: 0.0, view_h: 0.0, caret_rect, chat_rect: Some(area) };
     }
-    let back = (ax + 12.0, ay + ah - 46.0, nav_w - 24.0, 32.0);
-    if contains(back, snapshot.cursor) {
-        round_rect(g, back.0, back.1, back.2, back.3, theme::radius_md().min(5.0), theme::surface_hover());
-        g.hover_pointer = true;
+    text_button(g, snapshot, &mut hits, (content_x - 6.0, ay + 14.0, 64.0, 26.0), "‹ 나쵸", Target::Tab(BoardTab::Chat), false);
+    text(g, content_x + 66.0, ay + 19.0, snapshot.tab.label(), 14.0, theme::text(), true);
+    text_button(g, snapshot, &mut hits, (content_x + avail_w - 96.0, ay + 14.0, 56.0, 26.0), "도구 ▾", Target::Tools, false);
+    icon_button(g, snapshot, &mut hits, (content_x + avail_w - 30.0, ay + 12.0, 30.0, 30.0), "rotate-cw", Target::Refresh);
+    if snapshot.refreshing && avail_w >= 360.0 {
+        text(g, content_x + avail_w - 150.0, ay + 21.0, "갱신 중", 10.5, theme::text_mute(), false);
     }
-    g.queue_icon("chevron-left", back.0 + 10.0, back.1 + 9.0, 15.0, theme::text_dim());
-    let back_label = fit(g, "보드 닫기", back.2 - 39.0, 12.0, false);
-    text(g, back.0 + 33.0, back.1 + 9.0, &back_label, 12.0, theme::text_dim(), false);
-    hit(g, &mut hits, Target::Return, back, false);
-
-    let content_x = ax + nav_w + if aw < 760.0 { 20.0 } else { 28.0 };
-    let avail_w = (aw - nav_w - if aw < 760.0 { 40.0 } else { 56.0 }).max(1.0);
-    text(g, content_x, ay + 22.0, snapshot.tab.label(), 20.0, theme::text(), true);
-    icon_button(g, snapshot, &mut hits, (content_x + avail_w - 30.0, ay + 18.0, 30.0, 30.0), "rotate-cw", Target::Refresh);
-    if snapshot.refreshing && avail_w >= 300.0 {
-        text(g, content_x + avail_w - 92.0, ay + 27.0, "갱신 중", 10.5, theme::text_mute(), false);
-    }
-    divider(g, content_x, ay + 56.0, avail_w);
-    let body_top = ay + 66.0;
+    divider(g, content_x, ay + 50.0, avail_w);
+    let body_top = ay + 60.0;
     let layout = hub_layout((content_x, ay, avail_w, ah), snapshot.tab, body_top);
     let mut content_h = 0.0;
     let mut view_h = 0.0;
     if let Some((x, top, width, height)) = layout.work {
         g.push_clip(x, top, width, height);
         let mut y = top - snapshot.scroll;
-        if !matches!(snapshot.tab, BoardTab::Work | BoardTab::Chat) {
-            overview_note(g, x, &mut y, width, snapshot.tab.desc(), theme::text_dim());
-        }
+        overview_note(g, x, &mut y, width, snapshot.tab.desc(), theme::text_dim());
         if let Some((ok, message)) = &snapshot.toast {
             notice(g, x, &mut y, width, message, *ok);
         }
@@ -1894,6 +1869,7 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
         }
         chat::paint(g, snapshot, &mut hits, &mut caret_rect, area);
     }
+    paint_tools_menu(g, snapshot, &mut hits, (content_x + avail_w - 40.0, ay + 42.0));
     if let Some(target) = snapshot.focus.as_ref() {
         if let Some(hit) = hits.iter().find(|hit| &hit.target == target) {
             crate::native_controls::focus_ring(g, hit.rect);
@@ -1901,6 +1877,29 @@ pub(crate) fn paint(g: &mut gpu::GpuRenderer, snapshot: &Snapshot) -> PaintOutpu
     }
     g.pop_clip();
     PaintOutput { hits, content_h, view_h, caret_rect, chat_rect: layout.chat }
+}
+
+/// 「도구 ▾」 펼침 — 오른쪽 끝을 `anchor.0` 에, 위를 `anchor.1` 에 맞춘 행 32 목록.
+fn paint_tools_menu(g: &mut gpu::GpuRenderer, s: &Snapshot, hits: &mut Vec<Hit>, anchor: (f32, f32)) {
+    if !s.tools_open {
+        return;
+    }
+    const TOOLS: [BoardTab; 5] = [BoardTab::Overview, BoardTab::Agents, BoardTab::Git, BoardTab::Machines, BoardTab::Work];
+    let w = 150.0;
+    let (x, y) = (anchor.0 - w, anchor.1);
+    let h = TOOLS.len() as f32 * 32.0 + 8.0;
+    round_rect(g, x, y, w, h, theme::radius_md(), theme::panel_bg());
+    stroke(g, (x, y, w, h), theme::border());
+    for (index, tab) in TOOLS.into_iter().enumerate() {
+        let row = (x + 4.0, y + 4.0 + index as f32 * 32.0, w - 8.0, 32.0);
+        let hover = contains(row, s.cursor);
+        if hover || s.tab == tab {
+            round_rect(g, row.0, row.1, row.2, row.3, theme::radius_sm(), if s.tab == tab { theme::surface_active() } else { theme::surface_hover() });
+        }
+        text(g, row.0 + 10.0, row.1 + 9.0, tab.label(), 12.0, if s.tab == tab { theme::text() } else { theme::text_dim() }, false);
+        hit(g, hits, Target::Tab(tab), row, false);
+        g.hover_pointer |= hover;
+    }
 }
 fn paint_overview(
     g: &mut gpu::GpuRenderer,
@@ -3045,6 +3044,7 @@ impl App {
         };
         if board_fixture_requested()
             && !matches!(target, Target::Tab(_) | Target::Tools | Target::Return | Target::Refresh
+                | Target::RouteChoose(_) | Target::RouteReply(_) | Target::NachoSend
                 | Target::OverviewMachine(_) | Target::OverviewRoom(_) | Target::OverviewSort(_)
                 | Target::OverviewDetail(_) | Target::OverviewChanges | Target::OverviewCopy(_)
                 | Target::WorkProject(_) | Target::WorkSelect(_) | Target::WorkFilters | Target::WorkMore(_)
@@ -3068,6 +3068,17 @@ impl App {
                 self.native_board_blur();
                 self.board_scene.set_tab(tab);
             }
+            Target::RouteChoose(index) => {
+                self.board_scene.route_choose_index(index);
+            }
+            Target::RouteReply(name) => {
+                self.native_board_blur();
+                self.board_scene.chat.draft = format!("@{name} ");
+                self.board_scene.route_refresh();
+                let len = self.board_scene.chat.draft.chars().count();
+                self.board_scene.set_input(Some(BoardInput::NachoMessage), len);
+                self.ime_retarget(crate::ImeFocus::Board(BoardInput::NachoMessage));
+            }
             Target::Return => {
                 self.native_board_blur();
                 self.close_left_panel();
@@ -3075,9 +3086,6 @@ impl App {
             Target::Tools => {
                 self.native_board_blur();
                 self.board_scene.tools_open = !self.board_scene.tools_open;
-                if !self.board_scene.tools_open && !matches!(self.board_scene.tab, BoardTab::Work | BoardTab::Chat) {
-                    self.board_scene.set_tab(BoardTab::Work);
-                }
                 self.board_scene.hits.clear();
             }
             Target::Refresh => {
@@ -3592,18 +3600,18 @@ mod tests {
     }
 
     #[test]
-    fn human_navigation_has_no_scheduler_and_keeps_tools_explicit() {
-        assert_eq!(BoardTab::default(), BoardTab::Work);
+    fn nacho_is_the_board_and_tools_open_only_on_request() {
+        assert_eq!(BoardTab::default(), BoardTab::Chat);
         assert_eq!(BoardTab::ALL.iter().map(|tab| tab.label()).collect::<Vec<_>>(),
-            ["작업현황", "나쵸 대화", "관측", "에이전트", "소스 컨트롤", "이사"]);
+            ["장부", "나쵸", "관측", "에이전트", "소스 컨트롤", "이사"]);
         let mut scene = Scene::default();
         assert!(!scene.tools_open);
         scene.chat.draft = "이어 쓸 질문".into();
+        scene.tools_open = true;
         scene.set_tab(BoardTab::Overview);
-        assert!(scene.tools_open);
-        scene.show_work();
-        assert!(!scene.tools_open);
-        assert_eq!(scene.tab, BoardTab::Work);
+        assert!(!scene.tools_open, "도구를 고르면 펼침은 접힌다");
+        scene.set_tab(BoardTab::Chat);
+        assert_eq!(scene.tab, BoardTab::Chat);
         assert_eq!(scene.chat.draft, "이어 쓸 질문");
     }
 

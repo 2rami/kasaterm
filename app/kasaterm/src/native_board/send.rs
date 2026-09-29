@@ -116,20 +116,31 @@ impl Scene {
         self.route.update(&self.chat.draft, &ctx, Instant::now());
     }
 
-    pub(crate) fn route_state(&self) -> &route::RouteState {
-        self.route.state()
+    /// 후보 칩을 눌렀다 — 순번은 그린 그때의 `Pick` 목록 기준이다.
+    pub(crate) fn route_choose_index(&mut self, index: usize) {
+        let chosen = match self.route.state() {
+            route::RouteState::Pick { options, .. } => options.get(index).map(|(target, _)| target.clone()),
+            route::RouteState::Decided { target, alternatives, .. } => {
+                std::iter::once(target).chain(alternatives.iter().map(|(target, _)| target)).nth(index).cloned()
+            }
+            _ => None,
+        };
+        if let Some(target) = chosen {
+            self.route.choose(target);
+        }
     }
 
-    pub(crate) fn route_pending(&self) -> bool {
-        self.route.pending()
+    /// 검증 실행이 입력칸에 글을 넣는다 — 사람이 친 것과 같은 판정 길을 탄다.
+    pub(crate) fn verification_draft(&mut self, text: &str) {
+        self.chat.draft = text.to_owned();
+        self.route_refresh();
+        let len = self.chat.draft.chars().count();
+        self.set_input(Some(BoardInput::NachoMessage), len);
     }
 
-    pub(crate) fn route_choose(&mut self, target: RouteTarget) {
-        self.route.choose(target);
-    }
-
-    pub(crate) fn sent_notes(&self) -> &[SentNote] {
-        &self.route_sent
+    /// 보내기가 일꾼에게 가 있는 동안 — 단추를 흐리게 둔다.
+    pub(crate) fn route_busy(&self) -> bool {
+        self.route_outbox.as_ref().is_some_and(|outbox| outbox.generation > self.applied_action_generation)
     }
 
     /// 판정 답을 싣고, 물을 때가 된 판정을 보내고, 다음 물을 때에 루프를 깨운다.
@@ -199,7 +210,7 @@ impl Scene {
             self.toast = Some((false, "검증 화면에서는 학생에게 보내지 않아요".into(), Instant::now()));
             return true;
         }
-        if self.route_outbox.as_ref().is_some_and(|outbox| outbox.generation > self.applied_action_generation) {
+        if self.route_busy() {
             return true;
         }
         let (body, title) = route::outgoing(&self.chat.draft);
