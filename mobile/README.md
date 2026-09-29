@@ -74,6 +74,8 @@ lib/
   grid.dart            순수 Dart 격자 모델 — dirty 행 교체 · 글자 폭 표 · 256 팔레트
   term_session.dart    WS 수명(백오프·gone·pause/resume) · 키 바이트 · 답장 · 그림 폴링
   grid_canvas.dart     CustomPainter 렌더러(행 캐시) + InteractiveViewer 폭 맞춤·핀치
+  wide_layout.dart     아이패드·가로 화면 — 방 상자 여러 열(벽돌 쌓기)·대화와 작업 나란히. 값은 docs/design.md 「태블릿」
+  hardware_keys.dart   하드웨어 키보드 → pane 바이트(Esc·⌘.·Ctrl·방향·Shift+Tab). 글자는 입력칸이 받는다
   conversation.dart    학생 대화 모델 — transcript-raw(claude)·rollout(codex) 줄 → 말풍선·도구 묶음 · 화면의 선택 메뉴 읽기
   screens/             nacho_home(첫 화면: 대화·작업) · nacho_task · connect · hub · terminal(「터미널|대화」 전환) · conversation_view · settings
 tool/devproxy.dart     크롬 개발용 같은 출처 역프록시

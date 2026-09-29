@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../claude_style.dart';
 import '../grid_canvas.dart';
+import '../hardware_keys.dart';
 import '../live_input.dart';
 import '../image_attachment.dart';
 import '../photo_attachment_button.dart';
@@ -81,6 +82,7 @@ class _TerminalScreenState extends State<TerminalScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _inputFocus.onKeyEvent = _onHardwareKey;
     _session.connect();
     _startPaneRefresh();
   }
@@ -189,6 +191,48 @@ class _TerminalScreenState extends State<TerminalScreen>
     _bottomTick++;
   }
 
+  /// 하드웨어 키보드(아이패드) — 입력칸이 못 받는 키를 pane 으로. 대화 보기의 입력칸은
+  /// 말풍선을 쓰는 칸이라 넘기지 않는다.
+  KeyEventResult _onHardwareKey(FocusNode _, KeyEvent e) {
+    final s = _session;
+    if (e is KeyUpEvent || !s.canSend || _attaching) return KeyEventResult.ignored;
+    if (_canChat(_pane) && paneView.value == PaneView.chat) return KeyEventResult.ignored;
+    final keys = HardwareKeyboard.instance;
+    // Shift+Enter — 소프트 키 ⇧↵ 와 같은 줄바꿈. 칸의 글을 먼저 보내고 잇는다.
+    if (_live &&
+        keys.isShiftPressed &&
+        (e.logicalKey == LogicalKeyboardKey.enter ||
+            e.logicalKey == LogicalKeyboardKey.numpadEnter)) {
+      _liveSubmit('\n');
+      return KeyEventResult.handled;
+    }
+    final k = hardwareKey(
+      e.logicalKey,
+      e.physicalKey,
+      ctrl: keys.isControlPressed,
+      shift: keys.isShiftPressed,
+      alt: keys.isAltPressed,
+      meta: keys.isMetaPressed,
+      fieldEmpty: _input.text.isEmpty,
+      appCursor: s.grid.appCursor,
+    );
+    if (k == null) return KeyEventResult.ignored;
+    // 적어 두는 칸의 글은 pane 에 아직 없다 — pane 이 비워도 그대로 둔다.
+    if (_live && k.resetField) setState(_dropLive);
+    s.sendBytes(k.bytes);
+    _toBottom();
+    return KeyEventResult.handled;
+  }
+
+  /// 입력칸을 비운다 — 이미 pane 에 간 글을 지우기로 보내지 않고.
+  void _dropLive() {
+    _resetting = true;
+    _liveInput.reset();
+    _input.clear();
+    _resetting = false;
+    _composing = '';
+  }
+
   void _onLiveChanged(String _) {
     if (_resetting) return;
     _sendLive(_liveInput.update(_input.value));
@@ -196,20 +240,16 @@ class _TerminalScreenState extends State<TerminalScreen>
   }
 
   /// 엔터 — 글자 바로 뒤에 붙여 보내면 Ink 가 엔터를 먹는다(서버 `send` 가 140ms 를
-  /// 기다리는 이유와 같다). 마지막 글자에서 조금 떨어뜨려 보낸다.
-  Future<void> _liveSubmit() async {
+  /// 기다리는 이유와 같다). 마지막 글자에서 조금 떨어뜨려 보낸다. [enter] 가 LF 면 줄바꿈.
+  Future<void> _liveSubmit([String enter = '\r']) async {
     if (_sending || _attaching) return;
     _sendLive(_liveInput.flush(_input.value));
-    _resetting = true;
-    _liveInput.reset();
-    _input.clear();
-    _resetting = false;
-    setState(() => _composing = '');
+    setState(_dropLive);
     final gap = DateTime.now().difference(_lastLiveSend);
     if (gap < _enterGap) await Future<void>.delayed(_enterGap - gap);
     if (!mounted || widget.server.isClosed) return;
-    _session.sendText('\r');
-    _pendingAttachment = false;
+    _session.sendText(enter);
+    if (enter == '\r') _pendingAttachment = false;
     _toBottom();
     _inputFocus.requestFocus();
   }
@@ -219,11 +259,7 @@ class _TerminalScreenState extends State<TerminalScreen>
   void _toggleLive() {
     setState(() {
       _live = !_live;
-      _composing = '';
-      _liveInput.reset();
-      _resetting = true;
-      _input.clear();
-      _resetting = false;
+      _dropLive();
     });
     _inputFocus.requestFocus();
   }

@@ -9,6 +9,7 @@ import '../nacho_reply.dart';
 import '../nacho_student.dart';
 import '../server.dart';
 import '../server_image.dart';
+import '../wide_layout.dart';
 import 'hub.dart';
 import 'nacho_reply_view.dart';
 import 'nacho_task.dart';
@@ -85,6 +86,10 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
     );
   }
 
+  /// 가로로 돌리면 탭과 나란히 보기가 바뀐다 — 쓰던 글·스크롤이 날아가지 않게 같은 것을 옮겨 단다.
+  final _chatKey = GlobalKey();
+  final _boardKey = GlobalKey();
+
   @override
   Widget build(BuildContext context) => DefaultTabController(
     length: 2,
@@ -92,6 +97,27 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
       listenable: _desk,
       builder: (context, _) {
         final attention = _desk.groups['attention'] ?? 0;
+        // 아이패드 가로·큰 아이패드 세로는 대화와 작업을 한 화면에 — 탭을 오가며 맡긴 일을 확인하지 않게.
+        final wide = sideBySide(MediaQuery.sizeOf(context).width);
+        final chat = NachoChat(
+          key: _chatKey,
+          desk: _desk,
+          students: _students,
+          onOpenTask: _openTask,
+          onOpenPane: _openPane,
+          onLink: _openLink,
+        );
+        final board = Builder(
+          builder: (tabs) => WorkBoardView(
+            key: _boardKey,
+            desk: _desk,
+            server: widget.server,
+            students: _students,
+            onOpenTask: _openTask,
+            onOpenPane: _openPane,
+            onGoChat: () => DefaultTabController.of(tabs).animateTo(0),
+          ),
+        );
         return Scaffold(
           appBar: AppBar(
             title: Row(
@@ -125,7 +151,7 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
                 icon: const Icon(Icons.terminal_rounded),
               ),
             ],
-            bottom: TabBar(
+            bottom: wide ? null : TabBar(
               tabs: [
                 const Tab(text: '대화'),
                 Tab(
@@ -147,27 +173,22 @@ class _NachoHomeState extends State<NachoHome> with WidgetsBindingObserver {
             children: [
               if (_desk.problem != null) _Banner(text: _desk.problem!),
               Expanded(
-                child: TabBarView(
-                  children: [
-                    NachoChat(
-                      desk: _desk,
-                      students: _students,
-                      onOpenTask: _openTask,
-                      onOpenPane: _openPane,
-                      onLink: _openLink,
-                    ),
-                    Builder(
-                      builder: (tabs) => WorkBoardView(
-                        desk: _desk,
-                        server: widget.server,
-                        students: _students,
-                        onOpenTask: _openTask,
-                        onOpenPane: _openPane,
-                        onGoChat: () => DefaultTabController.of(tabs).animateTo(0),
-                      ),
-                    ),
-                  ],
-                ),
+                child: wide
+                    ? Row(
+                        children: [
+                          Expanded(
+                            child: Center(
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(maxWidth: readColumnMaxWidth),
+                                child: chat,
+                              ),
+                            ),
+                          ),
+                          const VerticalDivider(width: 1),
+                          SizedBox(width: workColumnWidth, child: board),
+                        ],
+                      )
+                    : TabBarView(children: [chat, board]),
               ),
             ],
           ),

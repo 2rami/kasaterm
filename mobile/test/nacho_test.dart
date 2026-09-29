@@ -352,6 +352,34 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('아이패드 가로: 대화와 작업이 탭 없이 나란히, 돌려도 쓰던 글이 남는다', (tester) async {
+      tester.view.physicalSize = const Size(1210 * 2, 834 * 2);
+      tester.view.devicePixelRatio = 2;
+      addTearDown(tester.view.reset);
+      final s = FakeNacho()
+        ..add({'kind': 'message', 'id': 'a', 'text': '카사텀 아이패드도'})
+        ..add({'kind': 'reply', 'message': 'a', 'text': '케이에게 맡겼어'})
+        ..cards = [card('w1', '크론 켜기', 'attention', state: 'approval_needed')];
+      final d = NachoDesk(s);
+      await tester.pumpWidget(MaterialApp(home: NachoHome(server: s, onChangeAddress: () async {}, desk: d)));
+      await settle(tester);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(TabBar), findsNothing);
+      expect(find.text('케이에게 맡겼어'), findsOneWidget);
+      expect(find.text('내 차례 1'), findsOneWidget, reason: '작업판이 대화 옆에 함께 선다');
+      final chat = tester.getRect(find.text('케이에게 맡겼어'));
+      final board = tester.getRect(find.text('내 차례 1'));
+      expect(chat.right, lessThan(board.left));
+      await tester.enterText(find.byType(TextField), '쓰던 글');
+      tester.view.physicalSize = const Size(834 * 2, 1210 * 2);
+      await settle(tester);
+      expect(find.byType(TabBar), findsOneWidget, reason: '세로 11인치는 폰처럼 탭');
+      expect(find.text('쓰던 글'), findsOneWidget);
+      d.stop();
+      s.hold?.complete();
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('상세: 승인은 기존 창구 확인 필요, 판이 바뀌면 알리고 다시 읽는다', (tester) async {
       final s = FakeNacho()
         ..details['w1'] = {...card('w1', '크론 켜기', 'attention', state: 'approval_needed'), 'request': '크론 켜기',

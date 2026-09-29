@@ -7,6 +7,7 @@ import '../hub_prefs.dart';
 import '../server.dart';
 import '../status_style.dart';
 import '../student_art.dart';
+import '../wide_layout.dart';
 import 'clipboard_sheet.dart';
 import 'notes_sheet.dart';
 import 'pane_actions.dart';
@@ -229,6 +230,9 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
       if (s.online && s.rooms.isEmpty) {
         children.add(const _Notice(text: '학생이 없다'));
       }
+      // 아이패드·가로 화면에선 방 상자가 여러 열로 선다 — 한 방이 화면 폭을 다 먹으면
+      // 한 칸짜리 방의 지도가 화면 반을 차지한다.
+      final rooms = <Widget>[];
       for (final room in s.rooms) {
         final inside = <Widget>[
           _RoomHeader(
@@ -264,8 +268,9 @@ class _HubScreenState extends State<HubScreen> with WidgetsBindingObserver {
             );
           }
         }
-        children.add(_RoomBox(accent: tint, children: inside));
+        rooms.add(_RoomBox(accent: tint, children: inside));
       }
+      if (rooms.isNotEmpty) children.add(Masonry(children: rooms));
     }
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),

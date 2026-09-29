@@ -3,7 +3,8 @@ import 'dart:ui';
 /// 화면 네 귀의 둥근 정도(논리 px). 화면 가장자리에 두르는 테(`_StudentFrame`)가 이
 /// 값과 다르면 귀퉁이가 비거나 테가 화면 밖으로 잘린다(2026-09-08 지적 「꼭짓점 쪽이
 /// 비어 있음」 — 46 으로 박아 뒀는데 iPhone 16 Pro 는 62). iOS 는 이 값을 안 알려 주므로
-/// 논리 크기로 기종을 가른다. 모르는 크기는 요즘 기종의 흔한 값 55.
+/// 논리 크기로 기종을 가른다. 모르는 크기는 요즘 기종의 흔한 값 55, 아이패드는 18.
+/// 스플릿 뷰의 아이패드 창은 폰만큼 좁아도 키는 1000 을 넘는다(가장 큰 폰이 956).
 double screenCornerRadius(Size logical) {
   final short = logical.shortestSide.round();
   final long = logical.longestSide.round();
@@ -14,6 +15,8 @@ double screenCornerRadius(Size logical) {
     (428, 926) => 53, // 12·13 Pro Max · 14 Plus
     (375, 812) => 44, // 12·13 mini (X·XS 는 39 — 지금 쓰는 기기가 아니다)
     (414, 896) => 41, // XR·11
+    (744, 1133) => 21.5, // iPad mini 6·7
+    _ when short >= 600 || long >= 1000 => 18, // 그 밖의 홈 버튼 없는 아이패드
     _ => 55,
   };
 }
