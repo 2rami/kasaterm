@@ -52,7 +52,7 @@ APP=$!                     # 거둘 때는 이 PID 만: kill $APP
 
 ```bash
 # session.json 의 leaf 를 훑어 pane 별로 한 줄씩 만든 뒤(내 pane 은 제외),
-kasaterm-cli send --surface "%N" "claude --resume <sid> --model '<model>' --effort '<effort>'"$'\n'
+kasaterm-cli tell --raw "%N" "claude --resume <sid> --model '<model>' --effort '<effort>'"$'\n'
 ```
 
 보내기 전에 `kasaterm-cli peek "%N"` 으로 그 pane 이 셸 프롬프트인지 확인해라 — claude 가 살아 있는 pane 에 보내면 그건 입력창에 글자를 밀어넣는 짓이 된다.

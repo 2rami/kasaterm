@@ -28,8 +28,8 @@
 | `KASATERM_ORIGIN_RUN` | (선택) 나쵸 오케스트레이터의 실행 세대 `<task>.r<n>`. 봉투의 `run_id` 로 간다 |
 
 브리프 첫 줄에도 같은 표식을 사람이 읽게 넣는다: `[origin=nacho task=<번호>]`.
-거노가 손수 띄운 학생에는 이 env 가 없다. `kasaterm-cli nacho-report` 는 env 가 없으면
-파라미터도 안 만들고 거부하고, 서버(`nacho.report`)도 `origin != "nacho"` 를 거부한다.
+사람이 손수 띄운 학생에는 이 env 가 없다. `kasaterm-cli done` 은 env 가 없으면 오케스트레이터
+보고를 안 만들고(판 완료만 적는다), 서버(`nacho.report`)도 `origin != "nacho"` 를 거부한다.
 새 학생을 `split`/`tab` 으로 띄우면 env 는 **물려지지 않는다**(pane env 는 앱이 새로
 만든다) — 나쵸 학생이 띄운 손자 학생은 나쵸 것이 아니다.
 
@@ -97,7 +97,7 @@ wake.sock                나쵸가 여는 깨우기 소켓(`NACHO_WAKE_SOCK` 으
 
 | 학생 자리 | 길 |
 |---|---|
-| 나쵸와 같은 기계(`KASATERM_ORIGIN_MACHINE` 비었거나 이 기계) | `kasaterm-cli nacho-report` 가 **소켓을 안 거치고** 인박스 파일에 바로 놓는다. 앱이 꺼져 있어도, 옛 앱이라도 된다 |
+| 나쵸와 같은 기계(`KASATERM_ORIGIN_MACHINE` 비었거나 이 기계) | `kasaterm-cli done` 이 **소켓을 안 거치고** 인박스 파일에 바로 놓는다. 앱이 꺼져 있어도, 옛 앱이라도 된다 |
 | 다른 기계 | CLI → 이 기계 앱 소켓 `nacho.report {machine_id,…}` → 앱이 명부(`known_route` → machines.json base → 관문 우회)로 그 기계의 `POST /nacho/report` 에 넘긴다. 넘기기 전에 `/collab/board?scope=local` 로 그 기계의 `machine_id`·online 을 확인한다(tell 과 같은 신원 검사). 넘어간 본문은 `local_only:true` 라 받는 쪽은 다음 홉이 없다 |
 | HTTP 전용 호스트 | `kasaterm-cli --api BASE nacho-report …` — 같은 메서드가 `/nacho/report` 로 간다 |
 
@@ -115,11 +115,10 @@ wake.sock                나쵸가 여는 깨우기 소켓(`NACHO_WAKE_SOCK` 으
 CLI:
 
 ```sh
-kasaterm-cli nacho-report --status <done|blocked|needs_restart|needs_approval> \
-  --summary "…" [--changed "a.py,b.py"]… [--tests "…"] [--next "…"] \
-  [--conv …] [--task …] [--machine …]   # env 를 덮는 용도, 보통 안 쓴다
-  [--stdin]                              # JSON 객체로 필드를 주는 자동화용(origin·conv·task 는 env 가 이긴다)
-  [--dry-run]                            # 봉투만 찍고 안 보낸다
+kasaterm-cli done <succeeded|failed|blocked|needs_restart|needs_approval> "…" \
+  [--changed "a.py,b.py"]… [--tests "…"] [--next "…"] \
+  [--conv …] [--task …] [--machine …] [--run …]   # env 를 덮는 용도, 보통 안 쓴다
+# succeeded → done, failed → blocked 로 보고한다. 판(board) 완료는 succeeded 만 성공이다.
 ```
 
 ## 나쵸가 받은 뒤 하는 일 (규약)

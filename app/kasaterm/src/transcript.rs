@@ -960,7 +960,7 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                                     .pointer("/input/command")
                                     .and_then(|x| x.as_str())
                                     .unwrap_or("");
-                                if !cmd.contains("kasaterm-board-watch") && !cmd.contains("kasaterm-cli wait") {
+                                if !cmd.contains("kasaterm-board-watch") && !cmd.contains("kasaterm-cli board --wait") {
                                     let id = b.get("id").and_then(|x| x.as_str()).unwrap_or("");
                                     let desc = b
                                         .pointer("/input/description")

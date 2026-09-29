@@ -101,7 +101,7 @@ print((((json.load(sys.stdin).get("result") or {}).get("surface") or {}).get("id
     echo "[pet] 파일은 갈아 끼웠다. ssh 세션이라 창을 못 열고 앱 탭도 못 빌렸다 — 앱 하단바 펫 칩으로 켜면 새 펫이다"
     exit 0
   fi
-  kasaterm-cli send --surface "$TAB" "'$ROOT/scripts/pet-reload.sh' --no-build; exit"$'\n' >/dev/null
+  kasaterm-cli tell --raw "$TAB" "'$ROOT/scripts/pet-reload.sh' --no-build; exit"$'\n' >/dev/null
   for _ in $(seq 1 60); do
     sleep 0.5
     PID=""; [[ -f "$PIDFILE" ]] && PID="$(tr -dc 0-9 < "$PIDFILE")"

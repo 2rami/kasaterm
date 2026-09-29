@@ -7004,7 +7004,7 @@ fn install_pane_shims(lite: bool) {
     }
     // Cross-pane RPC: stage kasaterm-cli on the child shell's PATH so it is
     // discoverable on the child shell's PATH. A pane can then run
-    // `kasaterm-cli send --surface %1 "..."` to drive a sibling pane
+    // `kasaterm-cli tell --raw %1 "..."` to drive a sibling pane
     // without needing to know the absolute target/debug path. Failure
     // is non-fatal — the shim already works without it.
     if let Some(cmux_src) = locate_cmux_compat_binary() {
@@ -8201,9 +8201,9 @@ case \"$1\" in\n\
 esac\n\
 M=$1; shift\n\
 if [ $# -eq 0 ]; then\n\
-  exec kasaterm-cli remote \"$M\" --here ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}}\n\
+  exec kasaterm-cli machines connect \"$M\" --here ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}}\n\
 fi\n\
-exec kasaterm-cli remote \"$M\" --here ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} --run \"$*\"\n",
+exec kasaterm-cli machines connect \"$M\" --here ${{KASATERM_PANE_ID:+\"$KASATERM_PANE_ID\"}} --run \"$*\"\n",
             crate::BRING_HOME_MARKER
         );
         if let Err(e) = write_shim(&shim_dir.join("to"), to) {

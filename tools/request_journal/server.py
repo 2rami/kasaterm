@@ -2,8 +2,7 @@
 
 import json
 import os
-import shutil
-import subprocess
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -75,11 +74,8 @@ def summary_payload(store, project, port, provider):
 
 
 def send_pet_summary(text):
-    root = Path(__file__).resolve().parents[2]
-    candidates = [Path.home() / "Applications/kasaterm.app/Contents/MacOS/kasaterm-cli", root / "target/release/kasaterm-cli"]
-    binary = next((str(path) for path in candidates if path.is_file() and os.access(path, os.X_OK)), None) or shutil.which("kasaterm-cli")
-    if not binary:
-        raise RuntimeError("pet transport unavailable")
+    # 펫 우편함 파일에 한 줄 덧붙인다 — 앱이 꺼져 있어도 쌓이고 다음에 켜질 때 읽는다(`chrome.rs` 의 펫 인박스).
+    inbox = Path.home() / ".config/kasaterm/pet/inbox.jsonl"
     running = False
     try:
         pid = int((Path.home() / ".config/kasaterm/pet.pid").read_text().strip())
@@ -88,9 +84,13 @@ def send_pet_summary(text):
             running = True
     except (OSError, ValueError):
         pass
-    result = subprocess.run([binary, "pet-say", "--from", "요청장부", "--state", "wait", text[:250]], capture_output=True, timeout=8)
-    if result.returncode:
-        raise RuntimeError("pet transport unavailable")
+    try:
+        inbox.parent.mkdir(parents=True, exist_ok=True)
+        line = {"from": "요청장부", "state": "wait", "text": text[:250], "at": int(time.time())}
+        with inbox.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except OSError as error:
+        raise RuntimeError("pet transport unavailable") from error
     return {"ok": True, "pet_running": running, "state": "sent" if running else "queued", "message": "곽향에 요약을 전달했습니다" if running else "펫이 꺼져 있어 요약을 알림 대기열에 넣었습니다"}
 
 

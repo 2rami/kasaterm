@@ -89,7 +89,7 @@ kasaterm-cli app-restart run                           # 지금은 계획을 보
 
 ## 다시 켜면 이어지는 것 / 아닌 것
 
-- 이어진다: 방·창 배치, 창마다 cwd, 세션 id 가 있는 claude·codex 대화(`--resume`), 등록 서버(`kasaterm-cli server`).
+- 이어진다: 방·창 배치, 창마다 cwd, 세션 id 가 있는 claude·codex 대화(`--resume`), 등록 서버(`kasaterm-cli tab --server`).
 - 이어지지 않는다: 일반 셸에서 돌던 명령·프로세스(새 셸로 돌아온다), 세션 id 없는 창, 화면 밖 상태.
 - 그래서 계획은 「이어지는 학생 대화」「새 셸로만 오는 창」「등록 서버」 수를 따로 보여 준다.
 

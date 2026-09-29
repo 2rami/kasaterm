@@ -1999,7 +1999,7 @@ impl Backend for PtyBackend {
     }
 
     /// 모든 창 + 그 창의 pane 들. `move`(창 간 이동)를 쓰려면 **어느 창에 뭐가 있는지**
-    /// 보여야 하는데, 이게 미구현이라 `kasaterm-cli windows` 가 늘 "(윈도우 없음)"을
+    /// 보여야 하는데, 이게 미구현이라 창 목록(`kasaterm-cli where`)이 늘 "(윈도우 없음)"을
     /// 냈다 — 이동 기능을 붙여 놓고 목적지를 못 찾는 상태였다.
     ///
     /// GUI RPC 없이 `ws.pane_window`(pane → 창 인덱스)로 짓는다. 그건 `publish_pty_layout`

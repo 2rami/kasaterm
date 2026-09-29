@@ -1548,7 +1548,7 @@ pub(crate) fn sender_roman_head(name: &str) -> &str {
 /// sessionId 를 얻는다.
 ///
 /// **왜 필요한가**: 라벨은 발신 세션의 이름인데, pane 은 저마다
-/// `kasaterm-cli rename` 으로 「diff」·「theme」 같은 일감 이름을 스스로 붙인다
+/// `kasaterm-cli rename-window %N` 으로 「diff」·「theme」 같은 일감 이름을 스스로 붙인다
 /// (그렇게 하라고 지침에 박혀 있다). 그러면 라벨이 `<슬러그>-p<번호>` 꼴을 잃어
 /// `label_is_roster_agent` 가 떨어뜨리고, 남의 메시지가 학생색도 프사도 없이 뜬다
 /// (2026-08-25 지시). 실측으로 그 순간 살아 있던 세션 13개 중 5개가 사람이 붙인

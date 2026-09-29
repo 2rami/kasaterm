@@ -4,15 +4,12 @@
 //!
 //! Subcommands map 1:1 to protocol methods:
 //!
-//!   kasaterm-cli ping
-//!   kasaterm-cli capabilities
 //!   kasaterm-cli identify
-//!   kasaterm-cli list workspaces|surfaces
-//!   kasaterm-cli focus  <surface_id>
+//!   kasaterm-cli where [query]
 //!   kasaterm-cli split  <left|right|up|down> [--focus]
-//!   kasaterm-cli send   <text>                  # writes to focused pane
-//!   kasaterm-cli send   <surface_id> <text>     # writes to specific pane
-//!   kasaterm-cli key    <enter|tab|...>
+//!   kasaterm-cli tell   <name|%N> <text>        # safe delivery to an agent
+//!   kasaterm-cli tell --raw [%N] <text>         # write to a pane without the tell guard
+//!   kasaterm-cli help                           # the full grouped list
 //!
 //! Socket path resolution mirrors what the host exports:
 //!   $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default
@@ -58,7 +55,7 @@ fn parse_api_target(args: &mut Vec<String>) -> Result<Option<ApiTarget>> {
 fn main() {
     match run() {
         Ok(Some(resp)) => {
-            // 사람이 터미널에서 직접 쳤으면(`to 나쵸네코` 같은 셰임) JSON 덩어리 대신
+            // 사람이 터미널에서 직접 쳤으면(`to 맥미니` 같은 셰임) JSON 덩어리 대신
             // 문장 한 줄 — 실패는 그 이유, 성공은 요약/원격 id. 파이프·스크립트엔
             // 종전대로 wire 응답을 준다(`| jq .result`).
             use std::io::IsTerminal;
@@ -95,13 +92,28 @@ fn run() -> Result<Option<Response>> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(target) = parse_api_target(&mut args)? { let _ = API_TARGET.set(target); }
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
-        print_help(args.get(1).is_some_and(|a| a == "all"));
+        print_help();
         return Ok(None);
     }
     let cmd = args.remove(0);
+    // 살린 명령 안의 하위 동작은 플래그로 고른다 — 안쪽 이름(`tell:status` 따위)은 사람이 칠 명령이 아니다
+    // (2026-09-29 CLI 정리: 명령 수를 줄이고 하던 일은 그대로).
+    let cmd = match (cmd.as_str(), args.first().map(String::as_str)) {
+        ("tell", Some("--status")) => { args.remove(0); "tell:status".to_string() }
+        ("tell", Some("--raw")) => { args.remove(0); "tell:raw".to_string() }
+        ("tell", Some("--key")) => { args.remove(0); "tell:key".to_string() }
+        ("board", Some("--wait")) => { args.remove(0); "board:wait".to_string() }
+        ("machines", Some("connect")) => { args.remove(0); "machines:connect".to_string() }
+        ("tab", _) if args.iter().any(|a| a == "--server") => {
+            args.retain(|a| a != "--server");
+            "tab:server".to_string()
+        }
+        _ if cmd.contains(':') => return Err(anyhow!("unknown command: {cmd}")),
+        _ => cmd,
+    };
     if API_TARGET.get().is_some() {
-        if !matches!(cmd.as_str(),"board"|"board-watch"|"activity"|"tell"|"tell-status"|"nacho-report") {
-            return Err(anyhow!("--api supports board, board-watch, activity, tell, tell-status and nacho-report"));
+        if !matches!(cmd.as_str(),"board"|"board-watch"|"activity"|"tell"|"tell:status") {
+            return Err(anyhow!("--api supports board, board-watch, activity and tell"));
         }
         if matches!(cmd.as_str(),"board"|"board-watch") && !args.iter().any(|s|matches!(s.as_str(),"--all"|"--local")) {
             args.push("--all".into());
@@ -125,66 +137,16 @@ fn run() -> Result<Option<Response>> {
         run_board_watch(&socket_path, interval)?;
         return Ok(None);
     }
-    // `pet-say` 는 바탕화면 펫에게 한 줄 건네는 문 — 소켓을 **안 거친다**.
-    //
-    // 펫은 kasaterm 이 꺼져 있어도 사는 프로세스이고, 이 줄을 넣는 쪽(나쵸네코)은
-    // 다른 기계에서 ssh 로 들어온다. 소켓을 거치면 앱이 내려간 동안 밀어 넣은 것이
-    // 그냥 사라지므로, 파일에 곧장 덧붙인다 — 그러면 앱이 다음에 켜질 때 읽는다.
-    //
-    //   pet-say [--from <곳>] [--state busy|wait|error] <문안>
-    if cmd == "pet-say" {
-        let mut from = "나쵸".to_string();
-        let mut state = "busy".to_string();
-        let mut rest: Vec<String> = Vec::new();
-        let mut it = args.into_iter();
-        while let Some(a) = it.next() {
-            match a.as_str() {
-                "--from" => from = it.next().unwrap_or_default(),
-                "--state" => state = it.next().unwrap_or_default(),
-                _ => rest.push(a),
-            }
-        }
-        let text = rest.join(" ");
-        if text.trim().is_empty() {
-            return Err(anyhow!("pet-say 는 건넬 문안이 필요하다"));
-        }
-        let dir = kasa_socket::home_dir()
-            .ok_or_else(|| anyhow!("홈 폴더를 못 찾았다"))?
-            .join(".config/kasaterm/pet");
-        std::fs::create_dir_all(&dir)?;
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let line = serde_json::json!({
-            "from": from,
-            "state": state,
-            "text": text,
-            "at": at,
-        });
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("inbox.jsonl"))?;
-        writeln!(f, "{line}")?;
-        return Ok(None);
-    }
     // `share` — KASA-share 결과물 폴더. 앱을 안 거친다: 폴더를 만들고 상태 파일을 읽을
     // 뿐이라 앱이 꺼져 있어도 되고, 옮기는 일은 앱이 다음 훑기에 한다.
     if cmd == "share" {
         return run_share(&args);
     }
-    // `nacho-report` — 나쵸가 띄운 학생의 구조화 보고. 나쵸가 이 기계에 살면 소켓을
-    // 안 거치고 인박스 파일에 바로 놓는다(앱이 꺼져 있어도 남고, 옛 앱이라도 된다).
-    // 나쵸가 다른 기계면 앱(소켓)이나 --api 로 그 기계까지 넘긴다.
-    if cmd == "nacho-report" {
-        return run_nacho_report(&args);
-    }
     // `app-restart` — 등록된 기기의 카사텀 앱 재시작 계획·상태. 실행은 사람 승인 흐름이 생기기 전까지 거부한다.
     if cmd == "app-restart" {
         return run_app_restart(&args);
     }
-    // `app-update` — 기기의 앱 업데이트 작업 걸기·상태. 승인은 조종 기기가 나쵸에서 이미 소비한 것만, 기기 앱이 다시 판정한다.
+    // `app-update` — 기기의 앱 업데이트 작업 걸기·상태. 승인은 조종 기기가 오케스트레이터에서 이미 소비한 것만, 기기 앱이 다시 판정한다.
     if cmd == "app-update" {
         return run_app_update(&args);
     }
@@ -351,27 +313,23 @@ fn run() -> Result<Option<Response>> {
     }
     // 학생 한 명을 서브에이전트처럼 부르고 기다리는 두 명령. 서브에이전트는 보드·화면에 안 보여
     // 사람이 진행을 못 지켜본다 — 그런데 학생 소환은 쪼개기·부팅·보드 확인·tell 네 단계라 Claude 가
-    // 한 번에 끝나는 Agent 도구로 흘렀다(2026-09-28). `summon` 이 그 넷을, `wait` 가 완료 기다리기를 맡는다.
+    // 한 번에 끝나는 Agent 도구로 흘렀다(2026-09-28). `summon` 이 그 넷을, `board --wait` 가 완료 기다리기를 맡는다.
     if cmd == "summon" {
         let socket_path = resolve_socket_path()?;
         run_summon(&socket_path, &args)?;
         return Ok(None);
     }
-    if cmd == "wait" {
+    if cmd == "board:wait" {
         let socket_path = resolve_socket_path()?;
         std::process::exit(run_wait(&socket_path, &args)?);
     }
-    // `dismiss <id>…` — 일 끝난 학생 pane 을 한 번에 닫는다. 인사말·완료 보고를
-    // 주고받는 대신 오케스트레이터가 그냥 닫는다(회수할 게 있으면 git 이 막는다).
-    if cmd == "dismiss" {
+    // `close <id>…` — pane 을 한 번에 닫는다. 일 끝난 학생은 인사말·완료 보고를 주고받는 대신
+    // 그냥 닫는다(회수할 게 있으면 git 이 막고, --force 로만 넘는다).
+    if cmd == "close" {
         let socket_path = resolve_socket_path()?;
         run_dismiss(&socket_path, &args)?;
         return Ok(None);
     }
-    // `home` — 명부의 본진(home:true) 기계. 셰임의 순정 `claude` 디스패치용이라
-    // 출력은 **라벨 한 줄**이고 상태는 종료코드로 가른다: 0=살아 있다(라벨 출력) ·
-    // 1=미설정(조용히 — 명부에 본진이 없는 기계가 대다수다) · 3=설정돼 있는데
-    // 지금 안 닿는다. 셰임은 0 에만 태생지를 바꾸고, 3 이면 한 줄 알리고 로컬로 연다.
     // `machines` — 명부 기계 목록을 사람 눈에 맞춰 찍는다(`to` 셰임의 `ls`). 이 pane
     // 이 어느 기계의 거울이면 그 줄에 `*`, 아니면 「이 기계」 줄에 `*`.
     if cmd == "machines" {
@@ -474,8 +432,7 @@ fn run() -> Result<Option<Response>> {
     // `sessions` — 터미널 안 세션 목록. claude 자체 /resume 은 teamName 이
     // 기록된 세션(=팀 트리플로 뜨는 kasaterm pane 세션 전부)을 무조건 숨기므로,
     // jsonl 직스캔으로 팀 세션까지 전부 보여주고 캐릭터색·캐릭터명으로 구분한다.
-    // 디스크만 읽어 GUI 가 죽어 있어도 동작. `resume` 은 번호를 받아 그 자리에서
-    // `claude --resume` 을 실행한다(pane 이면 shim 이 트리플·페르소나 재부착).
+    // 디스크만 읽어 GUI 가 죽어 있어도 동작.
     if cmd == "sessions" {
         run_sessions_picker(&args)?;
         return Ok(None);
@@ -489,21 +446,32 @@ fn run() -> Result<Option<Response>> {
     }
     let mut args = args;
     // 사람은 주소 JSON 을 안 친다(2026-09-16 지시 「몇 개 안 쳐도 바로 되게」) —
-    // `tell 이름 본문` 은 보드에서 주소를 찾고, `tell-status ID` 는 보낼 때 적어 둔 주소를 쓴다.
+    // `tell 이름 본문` 은 보드에서 주소를 찾고, `tell --status ID` 는 보낼 때 적어 둔 주소를 쓴다.
     if cmd == "tell" {
         resolve_tell_target(&mut args)?;
     }
-    if cmd == "tell-status" && args.len() == 1 && !args[0].starts_with("--") {
+    if cmd == "tell:status" && args.len() == 1 && !args[0].starts_with("--") {
         let address = load_receipt(&args[0]).ok_or_else(|| anyhow!(
             "이 ID 의 주소를 모르겠어요 — 이 기계에서 보낸 것이 아니면 --address 를 함께 주세요"
         ))?;
         args.push("--address".into());
         args.push(address.to_string());
     }
+    // 오케스트레이터가 띄운 창(KASATERM_ORIGIN)이면 done 이 그쪽 보고함에도 넣는다 — 보고 명령이 둘이면
+    // 한쪽만 하고 끝내는 일이 생긴다. 보고가 거부되면(비밀처럼 보이는 글·다음 할 일 빠짐) 판 완료도 안 적는다.
+    if cmd == "done" {
+        let (board_args, report) = split_done_args(&args)?;
+        if kasa_socket::nacho_inbox::origin_from_env().is_some() {
+            if let Some(failed) = run_orchestrator_report(&report)? {
+                return Ok(Some(failed));
+            }
+        }
+        args = board_args;
+    }
     let request = build_request(&cmd, &args)?;
     let socket_path = resolve_socket_path()?;
     let mut response = roundtrip(&socket_path, &request)?;
-    // 나쵸가 띄운 세션이면 세션 id(기록 파일 이름)에 표식을 남긴다 — 앱 재시작 복원이
+    // 오케스트레이터가 띄운 세션이면 세션 id(기록 파일 이름)에 표식을 남긴다 — 앱 재시작 복원이
     // `--resume` 할 때 되붙인다(`nacho_inbox::remember_origin`). 실패해도 bind 는 성공이다.
     if cmd == "bind-transcript" && response.ok {
         if let (Some(origin), Some(sid)) = (
@@ -520,7 +488,7 @@ fn run() -> Result<Option<Response>> {
         ) {
             let (id, address) = (id.to_string(), address.clone());
             save_receipt(&id, &address);
-            // 보관(`accepted`)만 보고 나가면 「갔나?」를 확인할 길이 tell-status 나 peek 뿐이다.
+            // 보관(`accepted`)만 보고 나가면 「갔나?」를 확인할 길이 `tell --status` 나 peek 뿐이다.
             // 붙여넣기와 Enter 는 1초 안에 끝나므로 여기서 그 결과까지 보고 나간다
             // (2026-09-21 지시 「전송됐는지 peek 말고 빠르게」).
             if let Some(settled) = await_tell_settled(&socket_path, &id, &address) {
@@ -529,18 +497,12 @@ fn run() -> Result<Option<Response>> {
             }
         }
     }
-    if cmd == "server" {
+    if cmd == "tab:server" {
         if let Some(error) = response.error.as_mut() {
             if error.code == kasa_socket::protocol::codes::METHOD_NOT_FOUND {
                 error.message = "이 앱은 서버 복원 등록을 지원하지 않아요. 앱을 업데이트한 뒤 다시 등록해주세요. 서버는 실행하지 않았어요.".into();
             }
         }
-    }
-    // `windows` lists every window (not just the visible one) so an agent can
-    // answer "what's in window 1" — each gets a header + its own box diagram.
-    if cmd == "windows" && response.ok {
-        println!("{}", render_windows(&response));
-        return Ok(None);
     }
     // 칸이 열리고 닫힐 때마다 격자가 다시 짜이고 웹·문서는 연 칸의 탭으로 열린다 — 번호만 들고는
     // 제 창도 남의 창도 못 찾으니, 방·행·열·탭으로 말해 준다. `--json` 이면 그대로.
@@ -889,7 +851,7 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
     let character = row_text(&row, "character");
     let who = if character.is_empty() { surface.clone() } else { format!("{character}({surface})") };
     println!("{who} 소환 · 지시 {state} · 영수증 {message_id}");
-    let wait = format!("kasaterm-cli wait {surface} --since {since}");
+    let wait = format!("kasaterm-cli board --wait {surface} --since {since}");
     if from.is_some() {
         println!("done 보고는 이 창 입력으로 들어와요. 막고 기다리려면: {wait}");
     } else {
@@ -949,7 +911,7 @@ fn run_wait(socket_path: &str, args: &[String]) -> Result<i32> {
         }
     }
     if targets.is_empty() {
-        return Err(anyhow!("wait 는 기다릴 학생이 필요해요 — kasaterm-cli wait 미도리"));
+        return Err(anyhow!("board --wait 는 기다릴 학생이 필요해요 — kasaterm-cli board --wait 미도리"));
     }
     let local = targets.iter().all(|t| !t.contains('@'));
     let rows = snapshot_rows(socket_path, local)?;
@@ -1076,13 +1038,13 @@ fn run_dismiss(socket_path: &str, args: &[String]) -> Result<()> {
         .collect();
     if targets.is_empty() {
         return Err(anyhow!(
-            "dismiss 는 닫을 pane 을 명시해야 한다 (예: dismiss %3 %4 [--force])"
+            "close 는 닫을 pane 을 명시해야 한다 (예: close %3 %4 [--force])"
         ));
     }
     let board = roundtrip(
         socket_path,
         &Request {
-            id: "dismiss".into(),
+            id: "close".into(),
             method: "collab.board".into(),
             params: json!({}),
         },
@@ -1098,7 +1060,7 @@ fn run_dismiss(socket_path: &str, args: &[String]) -> Result<()> {
     let surfaces = roundtrip(
         socket_path,
         &Request {
-            id: "dismiss".into(),
+            id: "close".into(),
             method: "surface.list".into(),
             params: json!({}),
         },
@@ -1146,7 +1108,7 @@ fn run_dismiss(socket_path: &str, args: &[String]) -> Result<()> {
         let resp = roundtrip(
             socket_path,
             &Request {
-                id: "dismiss".into(),
+                id: "close".into(),
                 method: "surface.close".into(),
                 params: json!({ "surface_id": id }),
             },
@@ -1194,71 +1156,6 @@ fn collab_messages_path() -> std::path::PathBuf {
         .map(|c| if c == '/' || c == '.' { '-' } else { c })
         .collect();
     kasa_socket::collab_root().join(enc).join("messages.jsonl")
-}
-
-/// Render `window.list`'s windows as a labelled stack of box diagrams, one
-/// per window, with the active one marked.
-fn render_windows(resp: &Response) -> String {
-    let windows = resp
-        .result
-        .as_ref()
-        .and_then(|v| v.get("windows"))
-        .and_then(|v| v.as_array());
-    let Some(arr) = windows else {
-        return "(윈도우 정보 없음)".to_string();
-    };
-    if arr.is_empty() {
-        return "(윈도우 없음)".to_string();
-    }
-    let mut out = String::new();
-    for w in arr {
-        let idx = w.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
-        let active = w.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-        let surfaces: Vec<String> = w
-            .get("surfaces")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|s| s.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mark = if active {
-            "  ← 현재 보이는 윈도우"
-        } else {
-            ""
-        };
-        out.push_str(&format!(
-            "■ 윈도우 {idx}{mark}\n  pane: {}\n",
-            surfaces.join(" ")
-        ));
-        let rects: Vec<(String, u16, u16, u16, u16)> = w
-            .get("panes")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|p| {
-                        Some((
-                            p.get("surface_id")?.as_str()?.to_string(),
-                            p.get("x")?.as_u64()? as u16,
-                            p.get("y")?.as_u64()? as u16,
-                            p.get("w")?.as_u64()? as u16,
-                            p.get("h")?.as_u64()? as u16,
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !rects.is_empty() {
-            for line in draw_boxes(&rects).lines() {
-                out.push_str("  ");
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-        out.push('\n');
-    }
-    out.trim_end().to_string()
 }
 
 /// Render `window.layout`'s pane rects (window-relative %) as a box diagram.
@@ -1534,13 +1431,13 @@ fn run_share(args: &[String]) -> Result<Option<Response>> {
     Ok(None)
 }
 
-fn print_help(all: bool) {
-    // 용도별로 묶는다 — 명령이 60개를 넘자 한 줄 목록에서는 무엇을 써야 할지 못 찾았다(2026-09-29 「cli 좀
-    // 정리해봐」). 훅·내부·옛 이름은 `help all` 에만 싣는다. 옛 이름도 그대로 동작한다.
+fn print_help() {
+    // 용도별로 묶는다 — 명령이 60개를 넘자 한 줄 목록에서는 무엇을 써야 할지 못 찾았다(2026-09-29 CLI 정리).
     let groups: &[(&str, &[&str])] = &[
         ("보기 — 누가 무엇을 하나, 어디 있나", &[
             "where [찾을 말] [--json]                  방마다 칸 배치도 + 칸·탭 목록. 학생 이름·%N·제목·웹 주소·문서 경로로 찾는다",
             "board [--all|--local]                     학생 상태. 연락 주소(address)는 --all 에서",
+            "board --wait <이름|%N>… [--since ms|영수증] [--timeout 초]   done 보고까지 기다린다(0 성공·1 실패·3 시간초과·4 사라짐)",
             "board-watch --all --json [--since CURSOR] 바뀐 것만 흘려보낸다(Monitor 용)",
             "peek [%N] [줄수]                          pane 화면 글자",
             "capture [%N] [경로] | --window [경로]      pane 또는 창 전체 스크린샷",
@@ -1549,30 +1446,36 @@ fn print_help(all: bool) {
         ]),
         ("학생·협업", &[
             "tell <이름|이름@기계|%N|--address JSON> [--title \"지금 일\"] <글|--stdin>   안전 전달, 영수증 ID 를 준다. 새 일이면 --title",
+            "tell --status ID                          전달 영수증 조회",
+            "tell --raw [%N] <글> · tell --key [%N] <enter|tab|escape|up|…>   안전장치 없이 바로 넣기(셸·승인 창용)",
             "summon [--cwd 폴더] [--tab] [--name 제목] <브리프|--stdin>   학생을 옆에 세우고 브리프까지",
-            "done <succeeded|failed> [요약]            내 일 완료 보고",
+            "done <succeeded|failed|blocked|needs_restart|needs_approval> [요약] [--changed 파일]… [--tests 글] [--next 글]",
+            "                                          내 일 보고. 오케스트레이터가 띄운 창이면 그쪽 보고함에도 넣는다",
             "sessions [N]                              최근 claude·codex 세션 목록",
         ]),
         ("창·칸 조작", &[
             "split <left|right|up|down> [%N] [--focus] [--count N]   칸 나누기 — 방 전체가 같은 크기 격자로 다시 짜인다",
             "split <방향> %N@기계 · tab %N@기계        다른 기기 칸 옆·탭에 세우기",
             "tab [%N] [--focus]                        그 칸에 새 탭",
+            "tab --server --surface %N [--cwd 폴더] [--name 라벨] '<명령>' | --clear   서버 실행·복원 등록(비밀값 금지)",
             "window-new [--machine 기계]               새 방(그 기계에 만들고 여기서 보기)",
             "move %N <대상> [방향] · resize %N <0..1>  칸 옮기기 · 비율",
-            "focus %N · close %N · closed [%N]         포커스 · 닫기 · 되살리기 목록(%N 을 주면 진짜 끈다)",
-            "rename-window <이름>                      방 이름",
+            "focus %N · closed [%N]                    포커스 · 되살리기 목록(%N 을 주면 진짜 끈다)",
+            "close %N… [--force]                       칸 닫기(미커밋 변경이 있으면 안 닫는다)",
+            "rename-window [%N] <이름> | rename-window [%N] --color #rrggbb   %N 이면 그 칸 이름·색, 없으면 방 이름",
         ]),
         ("클립보드·결과물", &[
             "copy <글> | copy --surface %N [줄수] | copy --secret(표준입력)   클립보드에 넣기",
             "paste [--show] | paste --into [%N] | paste --env VAR -- <명령…>   읽기 · 값을 안 보고 붙이기 · 환경변수로",
-            "share path | new <주제> | status          KASA-share 결과물 폴더(new 는 경로를 찍는다)",
+            "share path | new <주제> | status          결과물 폴더(new 는 경로를 찍는다)",
         ]),
         ("기기·네트워크", &[
             "machines [--names]                        명부 기계 목록",
+            "machines connect <기기|http://호스트:포트> [--here] [--cwd 경로] [--run 명령]   그 기기의 셸을 칸으로",
             "net forward <기기> <port> [--local L] · net list · net stop <L>   다른 기기 포트 끌어오기",
         ]),
         ("앱", &[
-            "app-update run|start|status …            기기 앱 업데이트(공식 릴리스·나쵸 승인)",
+            "app-update run|start|status …            기기 앱 업데이트(공식 릴리스·승인 필요)",
             "app-restart plan|run|status …            기기 앱 재시작 계획·실행",
         ]),
         ("훅 (claude 훅이 부른다)", &[
@@ -1580,19 +1483,8 @@ fn print_help(all: bool) {
             "agent-status <start|end|clear> <subagent|background> [key] [라벨] · identify(내 칸 번호)",
         ]),
     ];
-    // 목록에서는 뺐지만 학생 규약·나쵸·셰임이 실제로 부르는 것 — 지우면 그쪽이 멈춘다.
-    let hidden: &[(&str, &[&str])] = &[
-        ("목록에서 뺀 것 (규약·나쵸·셰임이 부르니 남겨 둔다)", &[
-            "tell-status ID · wait <이름|%N>… · nacho-report --status … --summary …   학생 규약",
-            "send [--surface %N] <글> · key [--surface %N] <키> · rename %N <제목> · color %N <#rrggbb> · ping · list surfaces   나쵸",
-            "dismiss %N… [--force] · server --surface %N '<명령>' | --clear   나쵸",
-            "windows                                   나쵸(「현재 보이는」 줄을 읽는다)",
-            "remote <http://호스트:포트> …             `to` 셰임",
-            "pet-say [--from 곳] [--state busy|wait|error] <문안>   요청장부 도구(tools/request_journal)",
-        ]),
-    ];
     eprintln!("kasaterm-cli — 카사텀 조작 CLI. 대상은 %N(칸 번호)이나 학생 이름.\n");
-    for (title, lines) in groups.iter().chain(if all { hidden.iter() } else { [].iter() }) {
+    for (title, lines) in groups.iter() {
         eprintln!("{title}");
         for line in lines.iter() {
             eprintln!("  {line}");
@@ -1601,9 +1493,6 @@ fn print_help(all: bool) {
     }
     eprintln!("앞에 붙이는 것: --api BASE [--api-token-file FILE] — 다른 기기 HTTP 로 보낸다");
     eprintln!("소켓: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > 기본(/tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)");
-    if !all {
-        eprintln!("목록에서 뺀 것까지: kasaterm-cli help all");
-    }
 }
 
 /// `--flag 값` 꼴의 값.
@@ -1678,6 +1567,49 @@ fn server_params(args: &[String]) -> Result<Value> {
     Ok(params)
 }
 
+/// `done` 인자를 판 완료(`surface.done`)용과 오케스트레이터 보고용으로 가른다. 판은 성공·실패 둘만 받으므로
+/// 막힘·재시작·승인은 실패로 적되 요약 앞에 사연을 붙인다.
+fn split_done_args(args: &[String]) -> Result<(Vec<String>, Vec<String>)> {
+    let (mut board, mut report, mut words) = (Vec::new(), Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        match flag {
+            // --task·--conv·--machine·--run 은 오케스트레이터 브리프가 첫 줄에 적어 주는 것이다.
+            "--surface" | "--changed" | "--tests" | "--next" | "--task" | "--conv" | "--machine" | "--run" => {
+                let value = args.get(i + 1).ok_or_else(|| anyhow!("{flag} needs a value"))?.clone();
+                let into = if flag == "--surface" { &mut board } else { &mut report };
+                into.extend([flag.to_string(), value]);
+                i += 2;
+            }
+            _ => {
+                words.push(args[i].clone());
+                i += 1;
+            }
+        }
+    }
+    let status = words.first().map(String::as_str).unwrap_or("");
+    let (outcome, reported, note) = match status {
+        "succeeded" | "success" | "ok" => ("succeeded", "done", ""),
+        "failed" | "fail" => ("failed", "blocked", ""),
+        "blocked" => ("failed", "blocked", "막힘: "),
+        "needs_restart" => ("failed", "needs_restart", "재시작 필요: "),
+        "needs_approval" => ("failed", "needs_approval", "승인 필요: "),
+        "" => return Err(anyhow!("done needs <succeeded|failed|blocked|needs_restart|needs_approval> [한 줄 요약]")),
+        other => return Err(anyhow!(
+            "done 상태는 succeeded|failed|blocked|needs_restart|needs_approval 중 하나, 받은 것 \"{other}\""
+        )),
+    };
+    let summary = words[1..].join(" ");
+    board.push(outcome.to_string());
+    if !note.is_empty() || !summary.is_empty() {
+        board.push(format!("{note}{summary}"));
+    }
+    let summary = if summary.is_empty() { reported.to_string() } else { summary };
+    report.extend(["--status".to_string(), reported.to_string(), "--summary".to_string(), summary]);
+    Ok((board, report))
+}
+
 fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
     // Caller-supplied id so async clients can correlate; we just stamp
     // a process-id-based string for the CLI path where nobody cares.
@@ -1717,86 +1649,47 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             }
             Some(other) => return Err(anyhow!("net forward|list|stop — 모르는 것: {other}")),
         },
-        "ping" => ("system.ping", json!({})),
         "identify" => ("system.identify", json!({})),
-        "list" => {
-            let what = args
-                .first()
-                .ok_or_else(|| anyhow!("list needs `workspaces` or `surfaces`"))?;
-            match what.as_str() {
-                "workspaces" => ("workspace.list", json!({})),
-                "surfaces" => ("surface.list", json!({})),
-                other => return Err(anyhow!("unknown list target: {other}")),
-            }
-        }
         "focus" => {
             let surface = args
                 .first()
                 .ok_or_else(|| anyhow!("focus needs a surface_id"))?;
             ("surface.focus", json!({ "surface_id": surface }))
         }
-        "close" => {
-            let surface = args
-                .first()
-                .ok_or_else(|| anyhow!("close needs a surface_id"))?;
-            ("surface.close", json!({ "surface_id": surface }))
-        }
-        "rename" => {
-            let surface = args
-                .first()
-                .ok_or_else(|| anyhow!("rename needs <surface_id> <title>"))?;
-            let title = args.get(1).ok_or_else(|| anyhow!("rename needs a title"))?;
-            (
-                "surface.rename",
-                json!({ "surface_id": surface, "title": title }),
-            )
-        }
+        // rename-window [%N] <이름> | rename-window [%N] --color #rrggbb — %N 을 주면 그 칸의 이름(고정 —
+        // claude 가 붙이는 제목이 못 덮는다)·색, 없으면 이 칸이 속한 방의 이름. 제목에 공백이 있으면 따옴표로.
         "rename-window" => {
-            // 윈도우/세션 이름 변경. surface.rename 과 달리 surface_id 를 받지 않고
-            // 호출한 pane($KASATERM_PANE_ID)이 속한 윈도우를 대상으로 한다 —
-            // 오케스트레이터 pane 이 윈도우 라벨을 덮어쓸 때 부른다.
-            // ⚠️ 남는 인자를 조용히 버리지 않는다. 이름이 `rename` 과 닮아
-            // `rename-window %21 "이름"` 처럼 pane 을 앞에 붙여 부르는 실수가 나는데,
-            // 그러면 첫 인자가 제목으로 먹혀 **방 이름이 `%21` 이 된다**(2026-08-25
-            // 실측: 방 4 가 그렇게 불리고 있었다). 따옴표를 빠뜨려 제목이 두 토막
-            // 난 경우도 여기 걸린다 — 앞 토막만 먹고 마는 것보다 알려주는 게 낫다.
             let pane_like = |s: &str| {
                 s.strip_prefix('%')
                     .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
             };
-            if args.len() > 1 || args.first().is_some_and(|t| pane_like(t)) {
-                return Err(anyhow!(
-                    "rename-window 는 제목 하나만 받는다(대상은 이 pane 이 속한 방)\n\
-                     - pane 제목을 바꾸려면: kasaterm-cli rename <surface_id> <title>\n\
-                     - 제목에 공백이 있으면 따옴표로 묶어라"
-                ));
+            let pane = args.first().filter(|a| pane_like(a)).cloned();
+            let rest = if pane.is_some() { &args[1..] } else { &args[..] };
+            if rest.first().is_some_and(|a| a == "--color") {
+                let surface = pane.or_else(|| std::env::var("KASATERM_PANE_ID").ok()).ok_or_else(|| {
+                    anyhow!("rename-window --color needs %N or $KASATERM_PANE_ID")
+                })?;
+                let color = rest.get(1).ok_or_else(|| anyhow!("--color needs a #rrggbb value"))?;
+                ("surface.set_color", json!({ "surface_id": surface, "color": color }))
+            } else {
+                // 남는 인자를 조용히 버리지 않는다 — 따옴표를 빠뜨려 두 토막 난 제목이 앞 토막만 먹힌다.
+                if rest.len() != 1 {
+                    return Err(anyhow!("rename-window [%N] <이름> — 이름은 하나(공백이 있으면 따옴표로)"));
+                }
+                match pane {
+                    Some(surface) => ("surface.rename", json!({ "surface_id": surface, "title": rest[0] })),
+                    None => {
+                        let surface = std::env::var("KASATERM_PANE_ID").map_err(|_| {
+                            anyhow!("rename-window needs %N or $KASATERM_PANE_ID (run inside a kasaterm pane)")
+                        })?;
+                        ("window.rename", json!({ "surface_id": surface, "title": rest[0] }))
+                    }
+                }
             }
-            let title = args
-                .first()
-                .ok_or_else(|| anyhow!("rename-window needs <title>"))?;
-            let surface = std::env::var("KASATERM_PANE_ID").map_err(|_| {
-                anyhow!("rename-window needs $KASATERM_PANE_ID (run inside a kasaterm pane)")
-            })?;
-            (
-                "window.rename",
-                json!({ "surface_id": surface, "title": title }),
-            )
-        }
-        "color" => {
-            let surface = args
-                .first()
-                .ok_or_else(|| anyhow!("color needs <surface_id> <#rrggbb>"))?;
-            let color = args
-                .get(1)
-                .ok_or_else(|| anyhow!("color needs a #rrggbb value"))?;
-            (
-                "surface.set_color",
-                json!({ "surface_id": surface, "color": color }),
-            )
         }
         "repersona" => {
             // 이 pane 의 다음 claude 가 쓸 캐릭터를 갈아끼운다(respawn 없음). 이름은
-            // 활성 테마 밖이어도 된다 — 설치 테마까지 합쳐 찾으므로, 나쵸 전용 테마를
+            // 활성 테마 밖이어도 된다 — 설치 테마까지 합쳐 찾으므로, 오케스트레이터 전용 테마를
             // 깔아 두고 그 pane 에서만 부르는 쓰임이 여기다.
             let surface = args
                 .first()
@@ -1888,11 +1781,11 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             }
             ("window.new", json!({}))
         }
-        "server" => ("surface.server", server_params(args)?),
+        "tab:server" => ("surface.server", server_params(args)?),
         // 원격 PTY 호스트(kasa-serve-web)의 셸을 pane 으로 — 학생을 맥미니에서
         // 돌리고 이 창은 미러다. 앱을 꺼도(detach) 원격 셸은 살아남고, 재시작하면
         // 같은 세션에 다시 붙는다.
-        "remote" => {
+        "machines:connect" => {
             // 플래그 값(--cwd /x)이 base 로 오인되지 않게 위치 인자만 걷는다.
             let mut positional: Vec<String> = Vec::new();
             let mut i = 0usize;
@@ -1910,7 +1803,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 i += 1;
             }
             let base = positional.first().cloned().ok_or_else(|| {
-                anyhow!("remote 는 호스트 주소나 기계 이름이 필요해요 (예: remote 나쵸네코 --here · remote 나쵸네코 --here --run codex · remote http://127.0.0.1:18766 --cwd /Users/miku)")
+                anyhow!("machines connect 는 호스트 주소나 기계 이름이 필요해요 (예: machines connect 맥미니 --here · machines connect 맥미니 --here --run codex · machines connect http://127.0.0.1:18766 --cwd /Users/me)")
             })?;
             // `--here` — 옆에 쪼개지 않고 기준 pane 자체를 거울로 갈아끼운다. 그 pane
             // 의 셸에서 부른 것이면 이 프로세스도 셸과 함께 걷히므로 회신은 안 온다.
@@ -2013,63 +1906,27 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 json!({ "surface_id": surface, "ratio": ratio }),
             )
         }
-        "send" => {
-            // Two argument shapes:
-            //   send <text>
-            //   send --surface <id> <text>
-            let (surface, text) = if args.first().is_some_and(|a| a == "--surface") {
-                let surface = args
-                    .get(1)
-                    .ok_or_else(|| anyhow!("--surface needs an id"))?
-                    .clone();
-                let text = args
-                    .get(2..)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow!("send needs a text payload"))?
-                    .join(" ");
-                (Some(surface), text)
-            } else {
-                let text = args
-                    .first()
-                    .ok_or_else(|| anyhow!("send needs a text payload"))?
-                    .clone();
-                (None, text)
+        // tell --raw / --key — 안전장치(빈 입력창 기다리기·신원 확인) 없이 글·키를 바로 넣는다. 셸이나
+        // 승인 창처럼 tell 이 못 받는 곳에 쓴다. 대상은 %N 이나 --surface %N, 없으면 보고 있는 칸.
+        "tell:raw" | "tell:key" => {
+            let (surface, rest) = match args.first().map(String::as_str) {
+                Some("--surface") => (
+                    Some(args.get(1).ok_or_else(|| anyhow!("--surface needs an id"))?.clone()),
+                    args.get(2..).unwrap_or(&[]),
+                ),
+                Some(a) if a.starts_with('%') => (Some(a.to_string()), args.get(1..).unwrap_or(&[])),
+                _ => (None, &args[..]),
             };
-            let mut params = json!({ "text": text });
+            let what = if cmd == "tell:raw" { "text" } else { "key" };
+            let value = rest.join(" ");
+            if value.is_empty() {
+                return Err(anyhow!("tell --{} needs a {what}", &cmd[5..]));
+            }
+            let mut params = json!({ what: value });
             if let Some(s) = surface {
                 params["surface_id"] = json!(s);
             }
-            ("surface.send_text", params)
-        }
-        "key" => {
-            // key [--surface <id>] <key-name> — send a key (enter/escape/up/
-            // down/left/right/tab/...) to a specific pane, e.g. to answer an
-            // AskUserQuestion from outside (arrow keys + enter). Without
-            // --surface it targets the focused pane.
-            let (surface, key) = if args.first().is_some_and(|a| a == "--surface") {
-                (
-                    Some(
-                        args.get(1)
-                            .ok_or_else(|| anyhow!("--surface needs an id"))?
-                            .clone(),
-                    ),
-                    args.get(2)
-                        .ok_or_else(|| anyhow!("key needs a key name"))?
-                        .clone(),
-                )
-            } else {
-                (
-                    None,
-                    args.first()
-                        .ok_or_else(|| anyhow!("key needs a key name"))?
-                        .clone(),
-                )
-            };
-            let mut params = json!({ "key": key });
-            if let Some(s) = surface {
-                params["surface_id"] = json!(s);
-            }
-            ("surface.send_key", params)
+            (if cmd == "tell:raw" { "surface.send_text" } else { "surface.send_key" }, params)
         }
         "tell" => {
             let mut index = 0;
@@ -2125,9 +1982,9 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             eprintln!("tell receipt ID: {}",params["message_id"].as_str().unwrap());
             ("collab.tell",params)
         }
-        "tell-status" => {
-            let id = args.first().ok_or_else(||anyhow!("tell-status needs message_id --address JSON"))?;
-            if args.get(1).is_none_or(|a|a != "--address") { return Err(anyhow!("tell-status requires the original --address JSON")); }
+        "tell:status" => {
+            let id = args.first().ok_or_else(||anyhow!("tell --status needs message_id [--address JSON]"))?;
+            if args.get(1).is_none_or(|a|a != "--address") { return Err(anyhow!("tell --status needs the original --address JSON")); }
             let address: Value = serde_json::from_str(args.get(2).ok_or_else(||anyhow!("missing receipt address"))?)?;
             ("collab.tell_status",json!({"message_id":id,"address":address}))
         }
@@ -2322,7 +2179,6 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             )
         }
         "where" => ("window.where", json!({})),
-        "windows" => ("window.list", json!({})),
         "bind-transcript" => {
             // The pane registers its own transcript: surface_id from the
             // host-injected env, path from the hook's stdin (passed as the
@@ -2515,7 +2371,7 @@ fn resolve_tell_target(args: &mut Vec<String>) -> Result<()> {
     }
 }
 
-/// 이 기계에서 보낸 tell 의 ID → 주소. `tell-status ID` 를 주소 없이 치게 해 준다.
+/// 이 기계에서 보낸 tell 의 ID → 주소. `tell --status ID` 를 주소 없이 치게 해 준다.
 fn receipts_path() -> Option<std::path::PathBuf> {
     Some(kasa_socket::home_dir()?.join(".config/kasaterm/tell-receipts.json"))
 }
@@ -2540,12 +2396,12 @@ fn save_receipt(id: &str, address: &Value) {
     let _ = std::fs::write(&path, serde_json::to_string(&Value::Object(map)).unwrap_or_default());
 }
 
-/// `nacho-report` 인자 + env → `nacho.report` 파라미터. env 를 함수로 받는 것은 테스트가
+/// 오케스트레이터 보고(`done` 이 싣는다) 인자 + env → `nacho.report` 파라미터. env 를 함수로 받는 것은 테스트가
 /// 프로세스 env 를 안 건드리고 origin 게이트를 재기 위해서다.
-fn nacho_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<String>) -> Result<Value> {
+fn orchestrator_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<String>) -> Result<Value> {
     use kasa_socket::nacho_inbox as inbox;
     let origin = inbox::origin_from(get_env).ok_or_else(|| anyhow!(
-        "nacho-report is only for panes nacho started ({}=nacho is not set here) — report to whoever gave you the brief instead",
+        "orchestrator report is only for panes an orchestrator started ({} is not set here) — report to whoever gave you the brief instead",
         inbox::ENV_ORIGIN))?;
     let mut params = json!({
         "origin": inbox::ORIGIN,
@@ -2577,7 +2433,7 @@ fn nacho_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<String>
             "--run" => { params["run_id"] = json!(value("--run")?); index += 2; }
             "--stdin" => { stdin = true; index += 1; }
             "--dry-run" => { dry_run = true; index += 1; }
-            other => return Err(anyhow!("nacho-report: unknown argument {other:?} (flags: --status --summary --changed --tests --next --conv --task --machine --run --stdin --dry-run)")),
+            other => return Err(anyhow!("done: unknown argument {other:?} (flags: --status --summary --changed --tests --next --conv --task --machine --run --stdin --dry-run)")),
         }
     }
     if stdin {
@@ -2610,7 +2466,7 @@ fn nacho_report_params(args: &[String], get_env: &dyn Fn(&str) -> Option<String>
 
 /// `app-restart plan [--machine ID]… [--json]` · `status JOB [--machine ID]` · `run --approval ap_… [--machine ID]…`.
 /// 기기는 명부의 안정 id 로만 고른다 — 이 기기는 소켓으로, 다른 기기는 이 앱이 명부 경유로 묻는다.
-/// 승인은 나쵸가 쥔다: 이 CLI 는 키를 모르고, 소비·조회는 이 기기 앱이 나쵸에 대신 한다.
+/// 승인은 오케스트레이터가 쥔다: 이 CLI 는 키를 모르고, 소비·조회는 이 기기 앱이 오케스트레이터에 대신 한다.
 fn run_app_restart(args: &[String]) -> Result<Option<Response>> {
     use kasa_socket::app_restart as restart;
     let sub = args.first().map(String::as_str).unwrap_or("");
@@ -2663,7 +2519,7 @@ fn run_app_restart(args: &[String]) -> Result<Option<Response>> {
             if sub == "plan" {
                 return Ok(None);
             }
-            anyhow::ensure!(!approval.is_empty(), "run 은 나쵸 대화에서 받은 --approval ap_… 가 있어야 한다");
+            anyhow::ensure!(!approval.is_empty(), "run 은 오케스트레이터 대화에서 받은 --approval ap_… 가 있어야 한다");
             let transport = CliRestartTransport { ask: &ask, facts: &facts };
             let authority = CliAuthority { ask: &ask };
             let policy = restart::RunPolicy {
@@ -2694,8 +2550,8 @@ fn run_app_restart(args: &[String]) -> Result<Option<Response>> {
 
 /// `app-update start --machine ID --request FILE|-` · `status JOB [--machine ID]` ·
 /// `run --approval ap_… --rollout FILE [--record FILE]` (조종 쪽 러너 — `kasa_socket::app_update::run`).
-/// 요청(`kasa_socket::app_update::UpdateRequest`)은 조종 쪽이 계획·나쵸 승인으로 만든다. 이 CLI 는 모양만 보고 넘기며,
-/// 받을지·갈아 끼울지는 대상 기기 앱이 자기 사실과 나쵸 승인으로 다시 판정한다.
+/// 요청(`kasa_socket::app_update::UpdateRequest`)은 조종 쪽이 계획·오케스트레이터 승인으로 만든다. 이 CLI 는 모양만 보고 넘기며,
+/// 받을지·갈아 끼울지는 대상 기기 앱이 자기 사실과 오케스트레이터 승인으로 다시 판정한다.
 fn run_app_update(args: &[String]) -> Result<Option<Response>> {
     let sub = args.first().map(String::as_str).unwrap_or("");
     let (mut machine, mut request, mut positional) = (None::<String>, None::<String>, Vec::new());
@@ -2742,7 +2598,7 @@ fn run_app_update(args: &[String]) -> Result<Option<Response>> {
         "run" => {
             use kasa_socket::app_update as update;
             let path = rollout_path.ok_or_else(|| anyhow!("app-update run needs --rollout FILE"))?;
-            anyhow::ensure!(!approval.is_empty(), "app-update run 은 나쵸 대화에서 받은 --approval ap_… 가 있어야 한다");
+            anyhow::ensure!(!approval.is_empty(), "app-update run 은 오케스트레이터 대화에서 받은 --approval ap_… 가 있어야 한다");
             let rollout: update::Rollout = serde_json::from_str(&std::fs::read_to_string(&path)?).map_err(|e| anyhow!("rollout 을 읽지 못했다: {e}"))?;
             let ask_s = |method: &str, params: Value| ask(method, params).map_err(|e| e.to_string());
             let local: kasa_socket::app_restart::Facts = serde_json::from_value(ask_s("app.restart_facts", json!({})).map_err(anyhow::Error::msg)?)?;
@@ -2815,7 +2671,7 @@ impl kasa_socket::app_restart::Transport for CliRestartTransport<'_> {
     }
 }
 
-/// 나쵸 승인 — 소비·조회는 이 기기 앱이 나쵸 앱 창구에 대신 한다(키는 앱 밖으로 안 나온다).
+/// 오케스트레이터 승인 — 소비·조회는 이 기기 앱이 오케스트레이터 앱 창구에 대신 한다(키는 앱 밖으로 안 나온다).
 struct CliAuthority<'a> {
     ask: Ask<'a>,
 }
@@ -2849,11 +2705,11 @@ fn render_restart_plan(plan: &kasa_socket::app_restart::Plan) -> String {
             out.push_str(&format!("   거부 · {}\n", refusal.message()));
         }
     }
-    out.push_str(if plan.runnable() { "모든 기기 가능 — 실행은 나쵸 대화의 주인 확인 단추로 받은 승인(--approval)이 있어야 한다\n" } else { "거부 사유가 있어 실행할 수 없다\n" });
+    out.push_str(if plan.runnable() { "모든 기기 가능 — 실행은 오케스트레이터 대화의 주인 확인 단추로 받은 승인(--approval)이 있어야 한다\n" } else { "거부 사유가 있어 실행할 수 없다\n" });
     out
 }
 
-/// 이 창의 판 주소 UUID. 창 번호(`%N`)는 재사용되므로 나쵸는 이것으로 등록 줄을 찾는다.
+/// 이 창의 판 주소 UUID. 창 번호(`%N`)는 재사용되므로 오케스트레이터는 이것으로 등록 줄을 찾는다.
 /// 이 기계의 판에서 번호로 찾고, 못 찾으면 빈 값 — 보고는 번호만으로도 간다.
 fn local_surface_key(surface: &str) -> String {
     if surface.is_empty() || API_TARGET.get().is_some() {
@@ -2876,10 +2732,10 @@ fn surface_key_in(snapshot: Option<&Value>, surface: &str) -> String {
     match keys.as_slice() { [one] => one.to_string(), _ => String::new() }
 }
 
-fn run_nacho_report(args: &[String]) -> Result<Option<Response>> {
+fn run_orchestrator_report(args: &[String]) -> Result<Option<Response>> {
     use kasa_socket::nacho_inbox as inbox;
     let get_env = |k: &str| std::env::var(k).ok();
-    let mut params = nacho_report_params(args, &get_env)?;
+    let mut params = orchestrator_report_params(args, &get_env)?;
     let key = local_surface_key(params["surface"].as_str().unwrap_or(""));
     if !key.is_empty() {
         params["surface_key"] = json!(key);
@@ -2909,11 +2765,11 @@ fn run_nacho_report(args: &[String]) -> Result<Option<Response>> {
     use std::io::IsTerminal;
     if std::io::stdout().is_terminal() {
         let wake = match receipt["wake"].as_str() {
-            Some("socket") => "나쵸가 지금 깼다".to_string(),
-            Some("queued") => format!("나쵸가 안 듣는다 — 파일은 남았고 다음 부팅·폴링에서 집는다 ({})", receipt["wake_note"].as_str().unwrap_or("")),
+            Some("socket") => "오케스트레이터가 지금 깼다".to_string(),
+            Some("queued") => format!("오케스트레이터가 안 듣는다 — 파일은 남았고 다음 부팅·폴링에서 집는다 ({})", receipt["wake_note"].as_str().unwrap_or("")),
             _ => "앞선 같은 보고가 이미 깨웠다".to_string(),
         };
-        println!("나쵸 인박스 {} · {} · {}", receipt["state"].as_str().unwrap_or("?"), wake, receipt["report_id"].as_str().unwrap_or(""));
+        println!("오케스트레이터 인박스 {} · {} · {}", receipt["state"].as_str().unwrap_or("?"), wake, receipt["report_id"].as_str().unwrap_or(""));
     } else {
         println!("{}", serde_json::to_string(&receipt)?);
     }
@@ -3675,13 +3531,13 @@ mod tests {
         assert!(api_roundtrip(&target,&Request{id:json!("test"),method:"surface.send".into(),params:json!({})}).is_err());
     }
 
-    /// nacho-report 는 origin env 가 없으면 파라미터도 못 만든다 — 거노가 손수 띄운
-    /// 학생이 쳐도 인박스 근처에 못 간다. 있으면 env 의 conv/task/machine 이 실린다.
+    /// 오케스트레이터 보고는 origin env 가 없으면 파라미터도 못 만든다 — 사람이 손수 띄운
+    /// 학생이 쳐도 보고함 근처에 못 간다. 있으면 env 의 conv/task/machine 이 실린다.
     #[test]
-    fn nacho_report_requires_origin_env_and_carries_it() {
+    fn orchestrator_report_requires_origin_env_and_carries_it() {
         let none = |_: &str| None::<String>;
-        let err = super::nacho_report_params(&["--status".into(),"done".into(),"--summary".into(),"x".into()], &none).unwrap_err().to_string();
-        assert!(err.contains("KASATERM_ORIGIN=nacho"), "{err}");
+        let err = super::orchestrator_report_params(&["--status".into(),"done".into(),"--summary".into(),"x".into()], &none).unwrap_err().to_string();
+        assert!(err.contains("KASATERM_ORIGIN"), "{err}");
         let env = |k: &str| match k {
             "KASATERM_ORIGIN" => Some("nacho".to_string()),
             "KASATERM_ORIGIN_CONV" => Some("discord:42".to_string()),
@@ -3695,22 +3551,22 @@ mod tests {
             _ => None,
         };
         let args: Vec<String> = ["--status","needs_restart","--summary","셀프케어 고침","--changed","selfcare.sh, main.py","--changed","worklog.py","--tests","pytest 3 ok","--next","재시작 뒤 E2E"].iter().map(|s|s.to_string()).collect();
-        let p = super::nacho_report_params(&args, &env).unwrap();
+        let p = super::orchestrator_report_params(&args, &env).unwrap();
         assert_eq!(p["origin"],"nacho"); assert_eq!(p["conv"],"discord:42"); assert_eq!(p["task_id"],"t-7");
         assert_eq!(p["machine_id"],"mini-id"); assert_eq!(p["surface"],"%9"); assert_eq!(p["character"],"와카모");
         assert_eq!(p["harness"],"claude"); assert_eq!(p["host"]["machine_id"],"student-id"); assert_eq!(p["host"]["label"],"맥북");
         assert_eq!(p["changed"],json!(["selfcare.sh","main.py","worklog.py"]));
         let envelope = kasa_socket::nacho_inbox::build(&p).unwrap();
         assert_eq!(envelope["status"],"needs_restart");
-        assert!(super::nacho_report_params(&["--bogus".into()], &env).is_err());
+        assert!(super::orchestrator_report_params(&["--bogus".into()], &env).is_err());
         assert_eq!(p["run_id"], "", "세대 env 가 없으면 빈 칸");
         let with_run = |k: &str| if k == "KASATERM_ORIGIN_RUN" { Some("t-7.r3".to_string()) } else { env(k) };
-        assert_eq!(super::nacho_report_params(&args, &with_run).unwrap()["run_id"], "t-7.r3");
+        assert_eq!(super::orchestrator_report_params(&args, &with_run).unwrap()["run_id"], "t-7.r3");
         let mut flagged = args.clone();
         flagged.extend(["--run".to_string(), "t-8.r1".to_string()]);
-        assert_eq!(super::nacho_report_params(&flagged, &with_run).unwrap()["run_id"], "t-8.r1", "브리프가 준 --run 이 env 를 이긴다");
+        assert_eq!(super::orchestrator_report_params(&flagged, &with_run).unwrap()["run_id"], "t-8.r1", "브리프가 준 --run 이 env 를 이긴다");
         // --api 매핑: 원격 기계로 갈 때 HTTP 로도 같은 메서드가 간다.
-        let mut args = vec!["--api".into(),"http://127.0.0.1:1".into(),"nacho-report".into()];
+        let mut args = vec!["--api".into(),"http://127.0.0.1:1".into(),"board".into()];
         assert!(super::parse_api_target(&mut args).unwrap().is_some());
     }
 
@@ -3845,6 +3701,40 @@ mod tests {
         let web = super::render_where(&resp, "example", None);
         assert_eq!(web, "방 1 「kasaterm」 (보는 중) · 1행 1열(%1) · 탭 2/2 · 웹 · Example · https://example.com");
         assert!(super::render_where(&resp, "없는학생", None).contains("맞는 칸·탭이 없어요"));
+    }
+
+    #[test]
+    fn merged_commands_map_to_the_same_socket_calls() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let raw = super::build_request("tell:raw", &v(&["%3", "cd", "/x"])).unwrap();
+        assert_eq!((raw.method.as_str(), raw.params["surface_id"].as_str(), raw.params["text"].as_str()),
+            ("surface.send_text", Some("%3"), Some("cd /x")));
+        let key = super::build_request("tell:key", &v(&["--surface", "%4", "enter"])).unwrap();
+        assert_eq!((key.method.as_str(), key.params["key"].as_str()), ("surface.send_key", Some("enter")));
+        assert!(super::build_request("tell:raw", &v(&["%3"])).is_err(), "넣을 글이 없으면 거부");
+        let title = super::build_request("rename-window", &v(&["%5", "지금 일"])).unwrap();
+        assert_eq!((title.method.as_str(), title.params["title"].as_str()), ("surface.rename", Some("지금 일")));
+        let color = super::build_request("rename-window", &v(&["%5", "--color", "#ff0000"])).unwrap();
+        assert_eq!((color.method.as_str(), color.params["color"].as_str()), ("surface.set_color", Some("#ff0000")));
+        assert!(super::build_request("rename-window", &v(&["%5", "두", "토막"])).is_err(), "따옴표 빠진 제목은 거부");
+        let server = super::build_request("tab:server", &v(&["--surface", "%2", "--clear"])).unwrap();
+        assert_eq!(server.method, "surface.server");
+    }
+
+    #[test]
+    fn done_splits_board_outcome_and_orchestrator_report() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (board, report) = super::split_done_args(&v(&["succeeded", "다", "했다", "--tests", "12 ok"])).unwrap();
+        assert_eq!(board, v(&["succeeded", "다 했다"]));
+        assert_eq!(report, v(&["--tests", "12 ok", "--status", "done", "--summary", "다 했다"]));
+        let (board, report) = super::split_done_args(&v(&["--surface", "%7", "needs_restart", "훅 고침", "--next", "재시작", "--task", "t-1"])).unwrap();
+        assert!(report.windows(2).any(|w| w == ["--task", "t-1"]), "브리프가 준 일 번호는 보고로");
+        assert_eq!(board, v(&["--surface", "%7", "failed", "재시작 필요: 훅 고침"]));
+        assert!(report.windows(2).any(|w| w == ["--status", "needs_restart"]));
+        let (_, report) = super::split_done_args(&v(&["failed"])).unwrap();
+        assert_eq!(&report[report.len() - 4..], &v(&["--status", "blocked", "--summary", "blocked"])[..]);
+        assert!(super::split_done_args(&v(&["maybe"])).is_err());
+        assert!(super::split_done_args(&v(&["--next"])).is_err());
     }
 
     #[test]

@@ -168,7 +168,7 @@ reported status, and a final answer never automatically confirms application.
 Request text is inserted through DOM `textContent`, never interpreted as HTML.
 The “곽향에 요약 표시” button explicitly posts an empty JSON object to
 `/api/pet-summary`. Only that user action sends the saved, source-labelled
-summary through the existing local `kasaterm-cli pet-say` path. Collection and
+summary by appending one line to the pet inbox (`~/.config/kasaterm/pet/inbox.jsonl`). Collection and
 summarization never send pet messages automatically. When the pet is stopped,
 the result says the summary is queued, not visible. It never starts or restarts
 the pet and never sends Slack messages. `text_source` in the summary response

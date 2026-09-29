@@ -89,7 +89,7 @@ print(b[0].get("surface_id","") if b else "")' 2>/dev/null || true)"
 print((((json.load(sys.stdin).get("result") or {}).get("surface") or {}).get("id")) or "")' 2>/dev/null || true)"
   [[ -n "$tab" ]] || { say "앱 탭을 못 열었다 — 맥북 앱이 꺼져 있나"; return 1; }
   say "앱 탭 $tab 에서 돌린다: $cmd"
-  kasaterm-cli send --surface "$tab" "cd '$REPO' && $cmd; echo $marker=\$?"$'\n' >/dev/null
+  kasaterm-cli tell --raw "$tab" "cd '$REPO' && $cmd; echo $marker=\$?"$'\n' >/dev/null
   for _ in $(seq 1 1440); do
     sleep 0.5
     text="$(kasaterm-cli peek "$tab" 2>/dev/null | python3 -c 'import json,sys
@@ -99,7 +99,7 @@ print(((json.load(sys.stdin).get("result") or {}).get("text")) or "")' 2>/dev/nu
     if printf '%s\n' "$text" | grep -qE "$marker=[0-9]+"; then
       printf '%s\n' "$text" | grep -vE '^\s*$' | tail -14
       rc="$(printf '%s\n' "$text" | grep -oE "$marker=[0-9]+" | tail -1 | cut -d= -f2)"
-      kasaterm-cli dismiss "$tab" >/dev/null 2>&1 || true
+      kasaterm-cli close "$tab" >/dev/null 2>&1 || true
       return "${rc:-1}"
     fi
   done

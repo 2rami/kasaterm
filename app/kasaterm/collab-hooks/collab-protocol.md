@@ -22,7 +22,7 @@
 
 ```sh
 kasaterm-cli tell 이름@기계 "본문"     # 같은 기기든 다른 기기든 이 한 줄. 이름이 하나뿐이면 @기계 생략
-kasaterm-cli tell-status ID            # 영수증. 이 기계에서 보낸 ID 는 주소 없이 된다
+kasaterm-cli tell --status ID          # 영수증. 이 기계에서 보낸 ID 는 주소 없이 된다
 kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자동화용 원형
 ```
 
@@ -31,7 +31,7 @@ kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자�
 - 목적·담당·완료 조건을 짧게 보낸다. 본문에 발신자 이름을 붙이지 않는다.
 - 새 일을 맡길 때는 `--title "지금 일"`을 붙인다. 전달되면 받는 창 이름이 그것으로 바뀐다. 답장·알림에는 붙이지 않는다.
 - `accepted`는 보관 접수, `submitted`는 입력 전달이다. 어느 쪽도 모델이 읽었다는 뜻은 아니다.
-- 결과가 불확실하면 `tell-status`로 확인한다. 재시도는 같은 ID·주소·본문만 사용한다.
+- 결과가 불확실하면 `tell --status`로 확인한다. 재시도는 같은 ID·주소·본문만 사용한다.
 - `uncertain`에서 새 ID로 반복 전송하지 않는다. 응답·완료 보고·작업 결과로 수행 여부를 확인한다.
 - 작업 중에도 보낸다. 승인·질문 화면은 대기하고, 초안·한글 조합은 보존하며 메시지를 보관한다.
 - 셸·닫힌 창·신원 미확인 대상에는 보내지 않는다. 보호 검사를 우회하지 않는다.
@@ -43,7 +43,7 @@ kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자�
 - 범위 안에서 기존 캐릭터의 담당을 확인한다. 적합한 상대가 없으면 새 캐릭터를 띄운다.
 - 새 캐릭터는 `kasaterm-cli summon --cwd <레포> "<목적·담당·완료 조건>"` 한 줄로 띄운다. 창 만들기·부팅·보드 신원 확인·브리프 tell까지 한다. 탭은 `--tab`, 제목은 `--name`.
 - 맡길 일을 서브에이전트(Agent 도구)로 돌리지 않는다. 보드에 안 보여 진행을 못 지켜본다. 읽기 전용 탐색·설계(Explore·Plan)만 예외다.
-- 학생의 done 보고는 부른 창 입력으로 들어온다. 막고 기다려야 하면 `kasaterm-cli wait <이름> --since <summon이 준 값>`을 별도 잡으로 돌린다. tell로 일을 더 맡겼으면 `--since <tell 영수증 ID>`.
+- 학생의 done 보고는 부른 창 입력으로 들어온다. 막고 기다려야 하면 `kasaterm-cli board --wait <이름> --since <summon이 준 값>`을 별도 잡으로 돌린다. tell로 일을 더 맡겼으면 `--since <tell 영수증 ID>`.
 - 남의 변경을 덮지 않는다. 결과를 검증·커밋한 뒤 완료를 보고한다.
 - 고친 파일은 커밋·되돌리기 전까지 그 학생이 잡는다. 남이 고치려 하면 겹침 가드가 막는다. 넘겨줄 때는 `python3 <collab-hooks>/kasaterm-conflict-guard.py release <파일>`로 놓는다.
 
@@ -64,14 +64,13 @@ kasaterm-cli tell --address '<주소 JSON>' --id ID --stdin   # 긴 본문·자�
 - 카사텀 앱 수정은 검사·커밋·main 푸시 후 `python3 -m tools.release.auto enqueue <40자리 SHA>`까지 한다. 등록·배포·설치는 구분한다. stable은 별도 승인이다([절차](../../../docs/automatic-preview-updates.md)).
 - 빌드·검사는 성공·실패 때 끝나는 별도 잡으로 돌린다. sleep을 반복하지 않고, 계속 지켜볼 일은 변경분·진행·실패·끊김만 받는다.
 
-## 나쵸네코가 띄운 일
+## 오케스트레이터가 띄운 일
 
-env `KASATERM_ORIGIN=nacho`(브리프 첫 줄 `[origin=nacho …]`)가 있는 창만 해당한다. 없으면 나쵸에게 보고하지 않는다. 상세는 [나쵸 계약](../../../docs/nacho-orchestrator.md).
+env `KASATERM_ORIGIN`(브리프 첫 줄 `[origin=… task=…]`)이 있는 창만 해당한다. 상세는 [오케스트레이터 계약](../../../docs/nacho-orchestrator.md).
 
-- 끝났을 때(done)·못 풀고 막혔을 때(blocked)·재시작이 있어야 이어질 때(needs_restart)·머지·배포처럼 승인이 필요할 때(needs_approval) **즉시** `kasaterm-cli nacho-report --status <상태> --summary "한 일" --changed "파일,파일" --tests "검사와 결과" --next "나쵸가 할 것"` 으로 보고한다. 재시작·머지·배포는 직접 하지 않는다.
+- 끝났을 때·못 풀고 막혔을 때(blocked)·재시작이 있어야 이어질 때(needs_restart)·머지·배포처럼 승인이 필요할 때(needs_approval) **즉시** `kasaterm-cli done <succeeded|blocked|needs_restart|needs_approval> "한 일" --changed "파일,파일" --tests "검사와 결과" --next "오케스트레이터가 할 것"` 으로 보고한다. 이 한 줄이 판 완료와 오케스트레이터 보고함에 함께 들어간다. 재시작·머지·배포는 직접 하지 않는다.
 - blocked·needs_restart 는 `--next` 를 채운다. 토큰·비밀이 들어가면 접수가 거부된다.
-- 상태가 바뀔 때 한 번씩만 보낸다. 같은 보고는 `duplicate` 로 한 번만 깨운다. 답이 없다고 다시 보내거나 tell 로 나쵸를 찾지 않는다 — 나쵸는 pane 이 아니다.
-- 영수증 `wake` 가 `socket` 이면 나쵸가 지금 깼고 `queued` 면 다음에 집는다. 어느 쪽이든 `kasaterm-cli done` 까지 하고 턴을 끝낸다. 나쵸의 후속 지시는 tell 로 온다.
+- 상태가 바뀔 때 한 번씩만 보낸다. 같은 보고는 `duplicate` 로 한 번만 깨운다. 답이 없다고 다시 보내거나 tell 로 오케스트레이터를 찾지 않는다 — pane 이 아니다. 후속 지시는 tell 로 온다.
 
 ## 선생님께 알리기
 

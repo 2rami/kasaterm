@@ -35,11 +35,11 @@ trap 'kill $APP 2>/dev/null; wait $APP 2>/dev/null' EXIT
 for _ in $(seq 1 80); do [ -S "$KASATERM_SOCKET_PATH" ] && break; sleep 0.25; done
 [ -S "$KASATERM_SOCKET_PATH" ] || { echo "소켓이 안 떴다"; tail -20 "$D/app.log"; exit 1; }
 sleep 2
-PANE="$("$CLI" list surfaces 2>/dev/null | grep -o '%[0-9]*' | head -n 1)"
-[ -n "$PANE" ] || { echo "pane 을 못 찾았다"; "$CLI" list surfaces; exit 1; }
+PANE="$("$CLI" where 2>/dev/null | grep -o '%[0-9]*' | head -n 1)"
+[ -n "$PANE" ] || { echo "pane 을 못 찾았다"; "$CLI" where; exit 1; }
 export KASATERM_PANE_ID="$PANE"
 echo "pane=$PANE"
-"$CLI" send --surface "$PANE" "$D/probe/claude"$'\n' >/dev/null
+"$CLI" tell --raw "$PANE" "$D/probe/claude"$'\n' >/dev/null
 sleep 3
 
 row() {
@@ -111,8 +111,8 @@ expect "turn start" working "hook turn open" "$CLI" turn start
 expect "attention idle(턴 열림→무시)" working "hook turn open" "$CLI" attention --kind idle "60초 방치"
 expect "turn reset" unknown "" "$CLI" turn reset
 # ── 화면이 둘째 눈 — 훅 없이 화면만으로, 그리고 훅과 어긋날 때 ──
-ctrlc() { "$CLI" send --surface "$PANE" $'\x03' >/dev/null 2>&1; }
-launch() { "$CLI" send --surface "$PANE" "clear; $1"$'\n' >/dev/null 2>&1; }
+ctrlc() { "$CLI" tell --raw "$PANE" $'\x03' >/dev/null 2>&1; }
+launch() { "$CLI" tell --raw "$PANE" "clear; $1"$'\n' >/dev/null 2>&1; }
 # 셸 pane 은 보드 계약상 「unknown / live place」다(학생이 아니다) — 판정의 Idle(shell) 은 GUI 용.
 expect "Ctrl-C → 셸" unknown "live place" ctrlc
 expect "승인 위젯만(훅 없음)" waiting "screen approval" launch "$D/approval/claude"
