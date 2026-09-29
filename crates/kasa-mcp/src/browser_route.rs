@@ -459,9 +459,12 @@ mod tests {
     #[test]
     fn fixture_prefers_same_port_when_unused() {
         let source = WebFixture::start();
-        let reservation = reserve_port(0).unwrap();
-        let preferred = reservation.local_addr().unwrap().port();
-        drop(reservation);
+        // 임시 포트(49152~)에서 고르면 반납한 틈에 병렬로 도는 다른 검사의 `bind(0)` 이 같은 번호를
+        // 가져가 preview 발행 검사가 깨졌다. 임시 범위 밖에서 빈 번호를 고른다.
+        let preferred = (20_000u16..30_000)
+            .step_by(7)
+            .find(|port| TcpListener::bind((Ipv4Addr::LOCALHOST, *port)).is_ok())
+            .unwrap();
         let local = parse_local_url(&format!("http://127.0.0.1:{preferred}/")).unwrap();
         let mut pool = ForwardPool::default();
         let response = pool.resolve(&local, fixture_target(), |port, _, _| fixture_child(port, source.port)).unwrap();
