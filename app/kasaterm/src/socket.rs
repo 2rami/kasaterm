@@ -2033,6 +2033,33 @@ impl Backend for PtyBackend {
         Ok(serde_json::to_value(view)?)
     }
 
+    fn where_map(&self) -> Result<serde_json::Value> {
+        use serde_json::json;
+        // ws 를 잠그기 전에 — 안에서 다시 잠근다.
+        let windows = self.windows_overview()?;
+        let labels = self.sessions().labels;
+        let ws = self.ws.lock().unwrap();
+        let rooms: Vec<_> = windows.iter().map(|room| {
+            let cells: Vec<_> = where_cells(&room.panes).into_iter().map(|(rect, row, col)| {
+                let tabs: Vec<_> = ws.panes.get(&rect.surface_id).map(|pane| pane.tabs.iter().enumerate().map(|(i, tab)| {
+                    let mut out = json!({"n": i + 1, "active": i == pane.active_tab,
+                        "kind": where_kind(&tab.content), "title": tab.title});
+                    if let Some(surface) = tab.pid.clone().or_else(|| (i == 0).then(|| rect.surface_id.clone())) {
+                        if let Some(who) = ws.pane_character.get(&surface) { out["character"] = json!(who); }
+                        out["surface"] = json!(surface);
+                    }
+                    if let Some(web) = tab.web() { out["url"] = json!(web.url); }
+                    if let Some(path) = &tab.preview_path { out["path"] = json!(path.to_string_lossy()); }
+                    out
+                }).collect()).unwrap_or_default();
+                json!({"cell": rect.surface_id, "row": row, "col": col,
+                    "x": rect.x, "y": rect.y, "w": rect.w, "h": rect.h, "tabs": tabs})
+            }).collect();
+            json!({"window": room.idx, "label": labels.get(room.idx), "active": room.active, "cells": cells})
+        }).collect();
+        Ok(json!({ "rooms": rooms }))
+    }
+
     fn windows_overview(&self) -> Result<Vec<kasa_socket::backend::WindowOverview>> {
         // ws 를 잠그기 **전에** 부른다 — std Mutex 는 재진입이 안 돼 안에서 부르면 멈춘다.
         let active_rects = self.window_layout().unwrap_or_default();
@@ -8522,6 +8549,30 @@ fn window_member_rects(surfaces: &[String], rects: Vec<PaneRect>) -> Vec<PaneRec
 
 /// tmux 배치 트리의 leaf 들을 창 대비 백분율 사각형으로 — 미니맵·`layout` 명령이 같이 쓴다.
 /// 크기가 0 인 배치는 빈 목록.
+/// 칸에 사람이 읽는 행·열(1부터)을 단다 — 위 가장자리가 같은 칸끼리 한 행, 행 안에서는 왼쪽부터.
+fn where_cells(rects: &[PaneRect]) -> Vec<(PaneRect, usize, usize)> {
+    let mut tops: Vec<u16> = rects.iter().map(|r| r.y).collect();
+    tops.sort_unstable();
+    tops.dedup();
+    let mut cells: Vec<_> = rects.iter().map(|r| {
+        let row = tops.iter().position(|y| *y == r.y).unwrap_or(0) + 1;
+        let col = rects.iter().filter(|o| o.y == r.y && o.x < r.x).count() + 1;
+        (r.clone(), row, col)
+    }).collect();
+    cells.sort_by_key(|(_, row, col)| (*row, *col));
+    cells
+}
+
+fn where_kind(content: &crate::PaneContent) -> &'static str {
+    match content {
+        crate::PaneContent::Terminal(_) => "terminal",
+        crate::PaneContent::Web(_) => "web",
+        crate::PaneContent::Markdown(_) => "doc",
+        crate::PaneContent::Image(_) => "image",
+        crate::PaneContent::Settings => "settings",
+    }
+}
+
 fn rects_of(layout: &Layout) -> Vec<PaneRect> {
     let (_, _, tw, th) = layout.rect();
     if tw == 0 || th == 0 {

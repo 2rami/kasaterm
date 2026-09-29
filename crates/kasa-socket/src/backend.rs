@@ -1491,6 +1491,12 @@ pub trait Backend: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// 방마다 칸(행·열·사각형)과 칸 안의 탭(터미널·웹·문서·이미지, 학생·제목·주소·경로) — `where` 가 읽는다.
+    /// 칸이 열리고 닫힐 때마다 격자가 다시 짜이고 웹·문서는 탭으로 열리므로, 번호만으로는 어디 있는지 모른다.
+    fn where_map(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({ "rooms": [] }))
+    }
+
     /// 깃 패널 재료(브랜치·변경·최근 커밋)를 그대로 준다 — 다른 기기가 자기 패널에 싣는다
     /// (2026-09-17: 다른 기기 pane 을 볼 때도 깃 패널이 뜨게). Default unsupported.
     fn git_col_view(&self, _path: &str, _commits: usize) -> Result<serde_json::Value> {

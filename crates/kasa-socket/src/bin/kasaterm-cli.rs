@@ -639,6 +639,14 @@ fn run() -> Result<Option<Response>> {
         println!("{}", render_windows(&response));
         return Ok(None);
     }
+    // 칸이 열리고 닫힐 때마다 격자가 다시 짜이고 웹·문서는 연 칸의 탭으로 열린다 — 번호만 들고는
+    // 제 창도 남의 창도 못 찾으니, 방·행·열·탭으로 말해 준다. `--json` 이면 그대로.
+    if cmd == "where" && response.ok && !args.iter().any(|a| a == "--json") {
+        let query: Vec<&str> = args.iter().map(String::as_str).filter(|a| !a.starts_with("--")).collect();
+        let me = std::env::var("KASATERM_PANE_ID").ok();
+        println!("{}", render_where(&response, &query.join(" "), me.as_deref()));
+        return Ok(None);
+    }
     // `activity` 는 사람(과 학생)이 읽는 자리다 — board 처럼 기계가 파싱하는 게
     // 아니라 「쟤 왜 저러나」를 눈으로 훑는 용도라, JSON 대신 시간순 목록으로 낸다.
     if cmd == "activity" && response.ok {
@@ -1467,6 +1475,62 @@ fn render_activity(resp: &Response) -> String {
     out
 }
 
+/// 방마다 칸을 행·열로, 칸 안의 탭을 한 줄씩. 찾을 말을 주면 맞는 탭만 「방 · 행·열(칸) · 탭 · 종류 · 누구·제목·주소」 한 줄로.
+fn render_where(resp: &Response, query: &str, me: Option<&str>) -> String {
+    let empty = Vec::new();
+    let rooms = resp.result.as_ref().and_then(|v| v.get("rooms")).and_then(Value::as_array).unwrap_or(&empty);
+    let kind = |k: &str| match k {
+        "terminal" => "터미널",
+        "web" => "웹",
+        "doc" => "문서",
+        "image" => "이미지",
+        "settings" => "설정",
+        _ => "기타",
+    };
+    let q = query.trim().to_lowercase();
+    let mut out = Vec::new();
+    for room in rooms {
+        let label = room["label"].as_str().filter(|s| !s.is_empty()).map(|s| format!(" 「{s}」")).unwrap_or_default();
+        let head = format!("방 {}{label}{}", room["window"].as_u64().unwrap_or(0) + 1,
+            if room["active"] == true { " (보는 중)" } else { "" });
+        let mut lines = Vec::new();
+        for cell in room["cells"].as_array().unwrap_or(&empty) {
+            let tabs = cell["tabs"].as_array().unwrap_or(&empty);
+            let at = format!("{}행 {}열({})", cell["row"], cell["col"], cell["cell"].as_str().unwrap_or("?"));
+            for tab in tabs {
+                let surface = tab["surface"].as_str().unwrap_or("");
+                let about = [tab["character"].as_str(), tab["title"].as_str(), tab["url"].as_str(), tab["path"].as_str()]
+                    .into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+                let tab_at = if tabs.len() > 1 {
+                    format!(" · 탭 {}/{}{}", tab["n"], tabs.len(), if tab["active"] == true { "" } else { "(뒤)" })
+                } else {
+                    String::new()
+                };
+                let mine = me.is_some_and(|m| !surface.is_empty() && m == surface);
+                let what = kind(tab["kind"].as_str().unwrap_or(""));
+                let what = if surface.is_empty() { what.to_string() } else { format!("{what} {surface}") };
+                let line = format!("{at}{tab_at} · {what}{}{}",
+                    if about.is_empty() { String::new() } else { format!(" · {about}") },
+                    if mine { "  ← 나" } else { "" });
+                if q.is_empty() {
+                    lines.push(format!("  {line}"));
+                } else if format!("{head} {line}").to_lowercase().contains(&q) {
+                    out.push(format!("{head} · {line}"));
+                }
+            }
+        }
+        if q.is_empty() {
+            out.push(head);
+            out.extend(lines);
+        }
+    }
+    match (out.is_empty(), q.is_empty()) {
+        (false, _) => out.join("\n"),
+        (true, true) => "(방이 없어요)".into(),
+        (true, false) => format!("「{query}」에 맞는 칸·탭이 없어요"),
+    }
+}
+
 fn render_layout(resp: &Response) -> String {
     let panes = resp
         .result
@@ -1724,6 +1788,7 @@ fn print_help() {
     eprintln!(
         "  kasaterm-cli layout                       # where each pane sits (active window, %)"
     );
+    eprintln!("  kasaterm-cli where [찾을 말] [--json]       # 방·행·열·탭으로 어디 있나 — 학생 이름·%N·제목·웹 주소·문서 경로로 찾는다. 격자가 다시 짜이고 웹·문서는 탭으로 열리니 번호 대신 이걸로");
     eprintln!(
         "  kasaterm-cli windows                      # every window (sidebar order) + its panes"
     );
@@ -2715,6 +2780,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             )
         }
         "layout" => ("window.layout", json!({})),
+        "where" => ("window.where", json!({})),
         "windows" => ("window.list", json!({})),
         "bind-transcript" => {
             // The pane registers its own transcript: surface_id from the
@@ -4290,6 +4356,24 @@ mod tests {
     fn summon_quotes_the_folder_for_the_shell() {
         assert_eq!(super::shell_quote("/a b/c"), "'/a b/c'");
         assert_eq!(super::shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn where_lists_cells_and_tabs_and_finds_by_any_name() {
+        let resp: super::Response = serde_json::from_value(serde_json::json!({"id":"t","ok":true,"result":{"rooms":[
+            {"window":0,"label":"kasaterm","active":true,"cells":[
+                {"cell":"%1","row":1,"col":1,"tabs":[
+                    {"n":1,"active":false,"kind":"terminal","surface":"%1","character":"유우카","title":"미러링"},
+                    {"n":2,"active":true,"kind":"web","title":"Example","url":"https://example.com"}]},
+                {"cell":"%4","row":1,"col":2,"tabs":[{"n":1,"active":true,"kind":"terminal","surface":"%4","character":"시로코"}]}]}]}}))
+            .unwrap();
+        let all = super::render_where(&resp, "", Some("%4"));
+        assert!(all.starts_with("방 1 「kasaterm」 (보는 중)"), "{all}");
+        assert!(all.contains("1행 1열(%1) · 탭 1/2(뒤) · 터미널 %1 · 유우카 · 미러링"), "{all}");
+        assert!(all.contains("1행 2열(%4) · 터미널 %4 · 시로코  ← 나"), "{all}");
+        let web = super::render_where(&resp, "example", None);
+        assert_eq!(web, "방 1 「kasaterm」 (보는 중) · 1행 1열(%1) · 탭 2/2 · 웹 · Example · https://example.com");
+        assert!(super::render_where(&resp, "없는학생", None).contains("맞는 칸·탭이 없어요"));
     }
 
     #[test]

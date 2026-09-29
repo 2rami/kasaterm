@@ -186,6 +186,10 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             Ok(windows) => Response::success(id, json!({ "windows": windows })),
             Err(e) => backend_err(id, e),
         },
+        "window.where" => match backend.where_map() {
+            Ok(map) => Response::success(id, map),
+            Err(e) => backend_err(id, e),
+        },
         "collab.bind_transcript" => collab_bind_transcript(backend, id, &req.params),
         "collab.transcript" => collab_transcript(backend, id, &req.params),
         "collab.activity" => collab_activity(backend, id, &req.params),
@@ -323,6 +327,7 @@ fn system_capabilities(id: Value) -> Response {
                 "collab.inspect",
                 "window.layout",
                 "window.list",
+                "window.where",
                 "collab.bind_transcript",
                 "collab.transcript",
                 "collab.activity",
