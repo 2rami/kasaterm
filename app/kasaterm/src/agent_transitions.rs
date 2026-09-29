@@ -21,6 +21,13 @@ pub(crate) enum Transition {
     CompactEnd,
 }
 
+/// 하네스가 스스로 다시 시도하는 오류(`screenread::connection_trouble_in` 의 연결·서버 쪽 라벨).
+/// 대개 몇 초 안에 풀리므로 바로 알리면 알림이 소음이 된다 — 부르는 쪽이 붙들었다가 오래
+/// 가면 그때 알린다. 한도·잔액처럼 사람이 손써야 풀리는 것은 여기 없다(바로 알린다).
+pub(crate) fn is_transient_trouble(label: &str) -> bool {
+    matches!(label, "연결 끊김" | "오프라인" | "응답 없음" | "재시도 중" | "서버 혼잡" | "API 오류")
+}
+
 /// `prev` 가 None 이면 이 pane 을 처음 본 것 — 아무것도 알리지 않는다(앱이 방금 켜졌다).
 pub(crate) fn transitions(prev: Option<&AgentState>, next: &AgentState) -> Vec<Transition> {
     let Some(prev) = prev else { return Vec::new() };
@@ -107,6 +114,16 @@ mod tests {
         assert!(transitions(Some(&e1), &e1).is_empty());
         assert_eq!(transitions(Some(&e1), &e2), vec![Transition::Error { label: "연결 끊김".into() }]);
         assert_eq!(transitions(Some(&e1), &AgentState::Idle), vec![Transition::Recovered]);
+    }
+
+    #[test]
+    fn only_self_retrying_troubles_are_held() {
+        for label in ["연결 끊김", "재시도 중", "서버 혼잡", "API 오류"] {
+            assert!(is_transient_trouble(label), "{label}");
+        }
+        for label in ["한도 소진", "잔액 부족", ""] {
+            assert!(!is_transient_trouble(label), "{label} 는 사람이 손써야 풀린다");
+        }
     }
 
     #[test]

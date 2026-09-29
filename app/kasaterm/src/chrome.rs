@@ -711,18 +711,68 @@ impl App {
                 let body = if reason.is_empty() { who.clone() } else { format!("{who} — {reason}") };
                 notify_desktop(title, &body, character.as_deref(), Some(&format!("approval:{id}")), Some((id, sid.as_deref())));
             }
-            Transition::Error { label } => {
-                if let Some(wi) = background_window {
-                    self.window_alert.insert(wi);
-                }
-                if !(self.window_focused && is_active_pane) {
-                    self.unread_panes.insert(id.to_string());
-                }
-                notify_desktop("⚠ 오류", &format!("{who} — {label}"), character.as_deref(), Some(&format!("error:{id}")), Some((id, sid.as_deref())));
+            // 스스로 다시 시도하는 오류는 붙들어 둔다 — 하루에도 몇 번 스쳐 가는 끊김마다 알림이
+            // 오면 진짜 멈춘 것까지 안 보게 된다(2026-09-29 「가끔 연결 끊기면 알림 오는 것」).
+            // 라벨만 바뀌면(연결 끊김 → 재시도 중) 처음 본 때를 그대로 둔다.
+            Transition::Error { label } if crate::agent_transitions::is_transient_trouble(&label) => {
+                let since = self.held_trouble.get(id).map_or(now, |(_, at)| *at);
+                self.held_trouble.insert(id.to_string(), (label, since));
             }
-            Transition::Recovered | Transition::CompactStart | Transition::CompactEnd => {}
+            Transition::Error { label } => {
+                self.held_trouble.remove(id);
+                self.notify_trouble(id, &label);
+            }
+            Transition::Recovered => {
+                self.held_trouble.remove(id);
+            }
+            Transition::CompactStart | Transition::CompactEnd => {}
         }
         self.chrome_dirty = true;
+    }
+
+    /// 스스로 다시 시도하는 오류를 이만큼 기다린 뒤에도 그대로면 알린다. 하네스의 재시도는
+    /// 대개 몇 초에서 1분 안에 풀린다.
+    const TROUBLE_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// 붙들어 둔 오류 중 `TROUBLE_GRACE` 를 넘기고도 여전히 오류인 것을 알린다. 그사이 풀렸거나
+    /// pane 이 사라졌으면 조용히 걷는다. 전이 펌프(300ms)가 전이가 없는 박자에도 부른다.
+    pub(crate) fn flush_held_trouble(&mut self) {
+        if self.held_trouble.is_empty() {
+            return;
+        }
+        let due: Vec<(String, String)> = self
+            .held_trouble
+            .iter()
+            .filter(|(_, (_, at))| at.elapsed() >= Self::TROUBLE_GRACE)
+            .map(|(id, (label, _))| (id.clone(), label.clone()))
+            .collect();
+        for (id, label) in due {
+            self.held_trouble.remove(&id);
+            let still = self
+                .collab
+                .hub
+                .resolved(&id)
+                .is_some_and(|r| matches!(r.state, crate::agent_state::AgentState::Error { .. }));
+            if still {
+                let mins = Self::TROUBLE_GRACE.as_secs() / 60;
+                self.notify_trouble(&id, &format!("{label} ({mins}분째)"));
+                self.chrome_dirty = true;
+            }
+        }
+    }
+
+    fn notify_trouble(&mut self, id: &str, label: &str) {
+        let character = self.pane_character_if_known(id);
+        let who = character.clone().unwrap_or_else(|| "pane".to_string());
+        let sid = self.pane_claude_sid.get(id).cloned();
+        let is_active_pane = self.ws.lock().unwrap().active_pane.as_deref() == Some(id);
+        if let Some(wi) = self.window_of_pane(id).filter(|wi| *wi != self.active_window) {
+            self.window_alert.insert(wi);
+        }
+        if !(self.window_focused && is_active_pane) {
+            self.unread_panes.insert(id.to_string());
+        }
+        notify_desktop("⚠ 오류", &format!("{who} — {label}"), character.as_deref(), Some(&format!("error:{id}")), Some((id, sid.as_deref())));
     }
 
     /// pane 이 현존하고 캐릭터가 배정됐으면 그 이름(고정값) — 토스트 "누가" 소스.

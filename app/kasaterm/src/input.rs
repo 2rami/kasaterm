@@ -1603,6 +1603,7 @@ impl App {
         if switched > 0 {
             self.set_toast(deferred_account_restart_toast(switched));
         }
+        self.flush_held_trouble();
 
         if events.is_empty() {
             return;

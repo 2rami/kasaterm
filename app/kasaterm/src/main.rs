@@ -5462,6 +5462,9 @@ struct App {
     /// Pane id → instant a completion notification flashed its header, so the
     /// render pass can pulse it for a beat then let it settle.
     notify_flash: HashMap<String, std::time::Instant>,
+    /// Pane id → 알리지 않고 붙들어 둔 일시적 오류(글자, 처음 본 때). `TROUBLE_GRACE` 가
+    /// 지나도 그대로면 그때 알린다.
+    held_trouble: HashMap<String, (String, std::time::Instant)>,
     /// 계정이 바뀐 순간 — 계정 칩 둘레가 잠깐 반짝인다. 끝나면 `None` 으로 걷어야
     /// 프레임 펌프가 멎는다(안 걷으면 창 하나가 상시 8ms 로 돈다).
     account_flash: Option<std::time::Instant>,
@@ -6163,6 +6166,7 @@ impl App {
             retheme_queue: HashMap::new(),
             window_focused: true,
             notify_flash: HashMap::new(),
+            held_trouble: HashMap::new(),
             account_flash: None,
             account_switch_from_peer: false,
             turn_done_panes: std::collections::HashSet::new(),
