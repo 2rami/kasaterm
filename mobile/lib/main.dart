@@ -220,6 +220,8 @@ ThemeData buildThemeFrom({
       ),
     ),
     chipTheme: ChipThemeData(
+      // M3 는 고른 칩을 color 로 채운다 — selectedColor 만으로는 안 막힌다.
+      color: const WidgetStatePropertyAll(Colors.transparent),
       backgroundColor: Colors.transparent,
       selectedColor: Colors.transparent,
       disabledColor: Colors.transparent,
