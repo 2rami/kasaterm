@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, io::Write, path::{Path, PathBuf}};
 
 pub const MAX_BODY: usize = 16 * 1024;
+pub const MAX_TITLE_CHARS: usize = 60;
 const MAX_RECORDS: usize = 1024;
 const MAX_STORAGE: usize = 4 * 1024 * 1024;
 pub const RECEIPT_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
@@ -46,6 +47,10 @@ pub struct Record {
     pub reject_if_busy: bool,
     #[serde(default)]
     pub receiver_agent_pid: u32,
+    /// 받는 학생의 「지금 일」. 비어 있지 않으면 전달이 끝난 순간 그 창 이름이 이것으로 바뀐다 —
+    /// 세션 이름이 처음 붙인 제목으로 남아 일이 바뀌어도 안 따라오던 자리다(docs/boards.md 「지금 일」).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
 }
 impl Record {
     pub fn receipt(&self) -> Value {
@@ -66,6 +71,13 @@ pub fn normalize(body: &str) -> Result<String> {
     ensure!(!body.chars().any(|c| c.is_control() && c != '\n' && c != '\t'), "tell body contains terminal control characters");
     Ok(body)
 }
+/// 「지금 일」 한 줄 — 공백을 하나로 접고 `MAX_TITLE_CHARS` 자에서 자른다. 창 머리·사이드바 한 줄에 들어간다.
+pub fn normalize_title(title: &str) -> Result<String> {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    ensure!(!title.chars().any(char::is_control), "title contains control characters");
+    Ok(title.chars().take(MAX_TITLE_CHARS).collect())
+}
+
 pub fn fingerprint(body: &str) -> String {
     let mut h = 0xcbf29ce484222325u64;
     for b in body.bytes() { h = (h ^ b as u64).wrapping_mul(0x100000001b3); }
@@ -150,9 +162,10 @@ impl Ledger {
         Ok(None)
     }
     pub fn accept(&mut self, id: &str, address: Address, body: String, ttl_seconds: u64) -> Result<Record> {
-        self.accept_with_policy(id,address,body,ttl_seconds,false,0)
+        self.accept_with_policy(id,address,body,ttl_seconds,false,0,String::new())
     }
-    pub fn accept_with_policy(&mut self, id: &str, address: Address, body: String, ttl_seconds: u64, reject_if_busy: bool, receiver_agent_pid: u32) -> Result<Record> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn accept_with_policy(&mut self, id: &str, address: Address, body: String, ttl_seconds: u64, reject_if_busy: bool, receiver_agent_pid: u32, title: String) -> Result<Record> {
         let body = normalize(&body)?;
         if let Some(record) = self.existing(id, &address, &body)? { return Ok(record); }
         self.prune_at(now_ms());
@@ -161,7 +174,7 @@ impl Ledger {
         let now = now_ms();
         let record = Record { message_id: id.into(), address, body_hash: fingerprint(&body), body,
             state: State::Accepted, reason: "stored; waiting for safe empty input".into(), accepted_at_ms: now,
-            updated_at_ms: now, expires_at_ms: (now + ttl_seconds * 1000).min(issued_at(id)? + RECEIPT_LIFETIME_MS), reject_if_busy, receiver_agent_pid };
+            updated_at_ms: now, expires_at_ms: (now + ttl_seconds * 1000).min(issued_at(id)? + RECEIPT_LIFETIME_MS), reject_if_busy, receiver_agent_pid, title: normalize_title(&title)? };
         self.records.insert(id.into(), record.clone());
         if let Err(error) = self.persist() { self.records.remove(id); return Err(error); }
         Ok(record)
@@ -250,6 +263,17 @@ mod tests {
         assert_eq!(normalize("hello\r\nworld\t!").unwrap(), "hello\nworld\t!");
         for body in ["hi\r", "\x15hi", "\x1b[201~", "\x00", "\u{85}"] { assert!(normalize(body).is_err()); }
         assert!(normalize(&"x".repeat(MAX_BODY+1)).is_err());
+    }
+    #[test] fn title_is_one_short_line_and_survives_the_ledger() {
+        assert_eq!(normalize_title("  작업현황 구현\n ④  지금 일 ").unwrap(), "작업현황 구현 ④ 지금 일");
+        assert_eq!(normalize_title(&"가".repeat(MAX_TITLE_CHARS + 9)).unwrap().chars().count(), MAX_TITLE_CHARS);
+        assert!(normalize_title("a\x1b[2Jb").is_err());
+        let mut ledger = ledger();
+        let id = new_message_id();
+        let record = ledger.accept_with_policy(&id,address(),"hello".into(),900,false,0,"  세션 이름\n바꾸기 ".into()).unwrap();
+        assert_eq!(record.title, "세션 이름 바꾸기");
+        let plain = ledger.accept(&new_message_id(),address(),"plain".into(),900).unwrap();
+        assert!(plain.title.is_empty() && !serde_json::to_string(&plain).unwrap().contains("\"title\""), "제목 없는 옛 꼴 그대로");
     }
     #[test] fn duplicate_id_does_not_reinject_or_retarget() {
         let mut ledger = ledger();

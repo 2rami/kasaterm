@@ -1012,6 +1012,8 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
         body.push_str("\n\n");
         body.push_str(SUMMON_DONE_HINT);
     }
+    let title = name.clone().or_else(|| brief_title(&brief)).map(|t| kasa_socket::tell::normalize_title(&t)).transpose()?
+        .filter(|t| !t.is_empty());
     let body = mark_tell_sender(body, std::env::var("KASATERM_CHARACTER").ok().as_deref());
     let body = kasa_socket::tell::normalize(&body)?;
 
@@ -1027,8 +1029,9 @@ fn run_summon(socket_path: &str, args: &[String]) -> Result<()> {
         if let Some(row) = row {
             let message_id = kasa_socket::tell::new_message_id();
             let address = row.get("address").cloned().unwrap_or(Value::Null);
-            let told = roundtrip(socket_path, &Request { id: json!("summon"), method: "collab.tell".into(),
-                params: json!({ "message_id": message_id, "address": address, "body": body }) })?;
+            let mut params = json!({ "message_id": message_id, "address": address, "body": body });
+            if let Some(title) = &title { params["title"] = json!(title); }
+            let told = roundtrip(socket_path, &Request { id: json!("summon"), method: "collab.tell".into(), params })?;
             if told.ok {
                 break (row, message_id, address, told);
             }
@@ -1067,6 +1070,14 @@ fn since_ms(value: &str) -> Option<u64> {
 }
 
 /// 셸에 그대로 넣을 수 있게 작은따옴표로 감싼다.
+/// 브리프의 「목적:」 줄 — 새로 부른 학생의 「지금 일」. 없으면 claude 가 붙이는 제목을 그대로 둔다.
+fn brief_title(brief: &str) -> Option<String> {
+    brief.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix("목적")?.trim_start().strip_prefix(':')?;
+        Some(rest.trim().to_string()).filter(|t| !t.is_empty())
+    })
+}
+
 fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
@@ -1699,6 +1710,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
     eprintln!("  kasaterm-cli key   [--surface <id>] <enter|tab|escape|up|down|left|right|...>  # 특정 pane에 키/선택");
     eprintln!("  kasaterm-cli tell <이름 | 이름@기계 | %surface | --address JSON> <text>  # 이름만 치면 보드에서 주소를 찾는다; 영수증 ID 를 돌려준다");
+    eprintln!("  kasaterm-cli tell … --title \"지금 일\" <text>                 # 새 일을 맡길 때 — 전달되면 받는 창 이름(사이드바·창 머리·관측)이 이것으로 바뀐다");
     eprintln!("  kasaterm-cli tell-status ID [--address JSON]                  # 이 기계에서 보낸 ID 는 주소 없이 조회된다");
     eprintln!("  kasaterm-cli board [screen_lines]         # what every pane is doing (+ screen tail if N given)");
     eprintln!("  kasaterm-cli [--api BASE] rooms           # 기기·방별 상태. 연락 주소는 board --all의 address 전체 사용");
@@ -2453,6 +2465,11 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                         index += 2;
                     }
                     "--stdin" => { stdin = true; index += 1; }
+                    "--title" => {
+                        let title = args.get(index+1).ok_or_else(||anyhow!("--title needs the receiver's current work"))?;
+                        params["title"] = json!(kasa_socket::tell::normalize_title(title)?);
+                        index += 2;
+                    }
                     "--force" => return Err(anyhow!("--force cannot bypass safe tell protection")),
                     "--" => { index += 1; break; }
                     _ if arg.starts_with('%') && params.get("address").is_none() && params.get("surface_id").is_none() => {
@@ -2868,7 +2885,7 @@ fn resolve_tell_target(args: &mut Vec<String>) -> Result<()> {
     let mut i = 0;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
-            "--id" => i += 2,
+            "--id" | "--title" => i += 2,
             "--stdin" | "--force" => i += 1,
             "--address" | "--" => return Ok(()),
             a if a.starts_with('%') && !a.contains('@') => return Ok(()),
@@ -4273,6 +4290,15 @@ mod tests {
     fn summon_quotes_the_folder_for_the_shell() {
         assert_eq!(super::shell_quote("/a b/c"), "'/a b/c'");
         assert_eq!(super::shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn summon_takes_the_purpose_line_as_current_work() {
+        let brief = "작업현황 구현을 맡아 줘.\n\n목적: 사이드바 현황 목록\n파일: render.rs";
+        assert_eq!(super::brief_title(brief).as_deref(), Some("사이드바 현황 목록"));
+        assert_eq!(super::brief_title("  목적 :  세션 이름\n").as_deref(), Some("세션 이름"));
+        assert_eq!(super::brief_title("목적이 뭔지 모르겠다"), None, "「목적:」 줄이 아니면 제목을 안 바꾼다");
+        assert_eq!(super::brief_title("목적:   \n"), None);
     }
 
     #[test]

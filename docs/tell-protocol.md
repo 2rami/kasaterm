@@ -2,7 +2,10 @@
 
 `collab.tell` / `POST /collab/tell` accepts
 `{message_id:"kt1.<unix-ms>.<unique-hex-nonce>", address:{machine_id,surface_key,surface_id,session_id,instance_id}, body,
-policy:"queue"|"reject", ttl_seconds:900}`. Local CLI `%N` is resolved once to
+policy:"queue"|"reject", ttl_seconds:900, title?}`. Optional `title` (one line, at most 60 characters) is the
+receiver's current work: once the message is `submitted`, the receiving machine renames that pane to it (pinned,
+so the sidebar, pane header and board `title` all follow). It is not part of the message identity. CLI:
+`tell … --title "지금 일"`; `summon` sends `--name` or the brief's `목적:` line as the title. Local CLI `%N` is resolved once to
 the current local address. Automated callers should supply the complete address
 from the collaboration board. The receiver validates every identity component;
 missing session or instance evidence never authorizes injection. Remote requests

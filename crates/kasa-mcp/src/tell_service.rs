@@ -59,7 +59,8 @@ pub fn submit(backend: &dyn Backend, params: &Value, wake: impl FnOnce() -> Resu
     ensure!(Address::parse(&identity)? == address,"target changed while accepting message");
     let receiver_pid = identity["agent_pid"].as_u64().context("current agent process evidence unavailable")? as u32;
     let record = ledger()?.lock().map_err(|_|anyhow::anyhow!("tell ledger lock failed"))?
-        .accept_with_policy(id,address,body,params["ttl_seconds"].as_u64().unwrap_or(900),params["policy"] == "reject",receiver_pid)?;
+        .accept_with_policy(id,address,body,params["ttl_seconds"].as_u64().unwrap_or(900),params["policy"] == "reject",receiver_pid,
+            params["title"].as_str().unwrap_or("").to_owned())?;
     if wake().is_err() {
         return Ok(transition(id,State::Failed,"GUI delivery event was not accepted")?.receipt());
     }

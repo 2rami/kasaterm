@@ -350,6 +350,10 @@ impl App {
         let (state,reason) = if result.is_ok() { (State::Submitted,"paste and Enter writes succeeded; model read is unconfirmed") }
             else { (State::Uncertain,"Enter write unconfirmed; automatic retry prohibited") };
         finish(&commit.record,state,reason);
+        // 새 일이 닿은 순간 그 창의 「지금 일」이 바뀐다 — 사이드바·창 머리·관측이 모두 창 이름을 읽는다.
+        if state == State::Submitted && !commit.record.title.is_empty() {
+            let _ = self.proxy.send_event(UserEvent::SocketRename(commit.record.address.surface_id.clone(),commit.record.title.clone()));
+        }
     }
 }
 
@@ -362,7 +366,7 @@ mod tests {
             machine_id:"fixture-local-machine".into(),surface_key:surface.into(),surface_id:surface.into(),
             session_id:"session".into(),instance_id:"instance".into()},body:"hello".into(),
             body_hash:kasa_socket::tell::fingerprint("hello"),state:State::Accepted,reason:String::new(),
-            accepted_at_ms:0,updated_at_ms:0,expires_at_ms:u64::MAX,reject_if_busy:false,receiver_agent_pid:1}
+            accepted_at_ms:0,updated_at_ms:0,expires_at_ms:u64::MAX,reject_if_busy:false,receiver_agent_pid:1,title:String::new()}
     }
 
     #[test]
