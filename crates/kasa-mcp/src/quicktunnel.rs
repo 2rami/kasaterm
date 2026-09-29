@@ -62,15 +62,35 @@ fn needs_tunnel(url: &Url) -> bool {
     }
 }
 
+fn is_this_machine(host: &str) -> bool {
+    matches!(host, "localhost" | "localhost.")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
+}
+
 /// 터널이 붙을 이쪽 원점 — 이 기계를 가리키는 호스트는 127.0.0.1 로, 다른 사설망
 /// 기계면 그대로(터널은 이 기계에서 그 기계로 프록시한다).
 fn origin_of(url: &Url) -> Option<String> {
     let host = url.host_str()?.trim_matches(['[', ']']).to_string();
     let port = url.port_or_known_default()?;
-    let this_machine = matches!(host.as_str(), "localhost" | "localhost.")
-        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified());
-    let host = if this_machine { "127.0.0.1".to_string() } else if host.contains(':') { format!("[{host}]") } else { host };
+    let host = if is_this_machine(&host) { "127.0.0.1".to_string() } else if host.contains(':') { format!("[{host}]") } else { host };
     Some(format!("{}://{host}:{port}", url.scheme()))
+}
+
+/// 폰 앱이 앱 안 웹뷰로 열 이 기계 localhost 주소면 그 주소(`0.0.0.0` 은 `localhost` 로) — 임시 터널 대신 폰이
+/// `/net/tcp` 로 이 기계 포트를 끌어간다(docs/kasanet.md P5). 새 판 폰 앱이 없거나 사설망 주소면 None(터널 그대로).
+pub fn in_app_url(raw: &str) -> Option<String> {
+    let mut url = Url::parse(raw).ok()?;
+    let host = url.host_str()?.trim_matches(['[', ']']).to_string();
+    if !matches!(url.scheme(), "http" | "https") || !is_this_machine(&host) || url.port_or_known_default().is_none() {
+        return None;
+    }
+    if !crate::kasanet::phone_app_opens_localhost() {
+        return None;
+    }
+    if host.parse::<IpAddr>().is_ok_and(|ip| ip.is_unspecified()) {
+        url.set_host(Some("localhost")).ok()?;
+    }
+    Some(url.to_string())
 }
 
 /// 터널 주소에 원래 주소의 경로·쿼리·조각을 그대로 얹는다.
@@ -239,6 +259,19 @@ mod tests {
     fn splice_keeps_path_query_fragment() {
         let out = splice("https://a-b-c.trycloudflare.com", &u("http://localhost:3000/deals/7?tab=notes#top")).unwrap();
         assert_eq!(out, "https://a-b-c.trycloudflare.com/deals/7?tab=notes#top");
+    }
+
+    #[test]
+    fn in_app_only_for_this_machine_once_a_new_phone_app_registered() {
+        assert!(in_app_url("http://localhost:3000/").is_none(), "새 판 폰 앱이 없으면 터널 그대로");
+        crate::kasanet::note_phone_app();
+        assert_eq!(in_app_url("http://localhost:3000/a?b=1#c").as_deref(), Some("http://localhost:3000/a?b=1#c"));
+        assert_eq!(in_app_url("http://0.0.0.0:5173/x").as_deref(), Some("http://localhost:5173/x"));
+        assert!(in_app_url("http://[::1]:3000/").is_some());
+        assert!(in_app_url("http://127.0.0.1:8080/").is_some());
+        for s in ["http://10.1.2.3:3000/", "http://mini.local:3000/", "https://example.com/", "ftp://localhost/", "nope"] {
+            assert!(in_app_url(s).is_none(), "{s}");
+        }
     }
 
     #[test]

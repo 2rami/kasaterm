@@ -232,8 +232,24 @@ iroh 1.3.0 release 빌드, n0 공용 중계(두 쪽 홈 중계 모두 `aps1`). �
 - 웹뷰: 격리 데스크톱 쪽 `127.0.0.1:4719`(더미 개발 서버, 200KB JSON fetch) → 「데스크톱 직통 · 1ms」로 열림. 데스크톱을
   카사넷 끈 채로 다시 띄우자 같은 화면이 「관문 경유」로 열림. 시뮬레이터는 맥과 망을 같이 써 4719 가 이미 맥 쪽에 잡혀
   폰 쪽 번호는 빈 번호였다 — 실기에서는 같은 번호가 된다.
-- 남은 것: 실기 아이폰(셀룰러·다른 망)에서 직통 성립·왕복 실측은 TestFlight 판으로. 폰 대상 「보여 주기」를 임시 터널
-  대신 이 웹뷰로 여는 것(데스크톱 쪽 보여 주기 경로가 폰 앱 링크를 내야 한다)은 아직.
+- 남은 것: 실기 아이폰(셀룰러·다른 망)에서 직통 성립·왕복 실측은 TestFlight 판으로.
+
+### P5 보여 주기 (폰 대상, 2026-09-29)
+
+- 브라우저 기기가 「폰」이고 주소가 **이 기기 localhost**(`localhost`·`127.x`·`[::1]`·`0.0.0.0` → `localhost`)면 임시 터널을
+  세우지 않고 주소를 그대로 쪽지(link)에 넣는다 — `quicktunnel::in_app_url`. HTTP `/open-url`(카사크롬 `browser_show_human`·
+  `open` 셰임, 답에 `in_app: true`)과 앱의 `open_url_to_phone`(CLI `open`) 둘 다 이것을 먼저 본다. 사설망 주소·다른 호스트는
+  예전처럼 임시 터널이다(P3 도 이 기기 localhost 만 끌어온다).
+- **옛 판 폰 가르기**: 새 판 폰 앱만 카사넷 등록을 하므로, 등록이 오면 그 시각을 키 옆 `kasanet-phone-app.json` 에 남기고
+  30일 안에 등록한 적이 있을 때만 터널을 건너뛴다(`kasanet::phone_app_opens_localhost`). 등록 수명(15분)으로 가르면 폰 앱이
+  잠든 사이의 보여 주기가 터널로 떨어진다. 격리 인스턴스가 이번 실행 전용 키로 떴으면 파일 없이 메모리에만.
+- **폰**: 쪽지·알림 링크가 localhost 면(`desktopLocal`) 사파리 대신 앱 안 웹뷰(`DevServerScreen`)로 그 쪽지를 낸 기계의 포트를
+  연다 — 폰에는 제 localhost 서버가 없으니 쪽지의 localhost 는 늘 그 데스크톱이다. 길은 위와 같다(직통이면 카사넷, 아니면 관문).
+- 검사 `cargo test -p kasa-mcp --lib quicktunnel`(등록 전에는 터널, 뒤에는 localhost·`0.0.0.0`·`[::1]` 만 그대로, 사설망·
+  `.local`·바깥 주소·http 아닌 것은 터널) · `flutter test test/shown_link_test.dart`.
+- 검증(격리 리그, 브라우저 기기 = 폰): 폰 등록 뒤 `/open-url?url=http://localhost:4719/?from=show-http` → 답 `in_app: true`,
+  CLI `open http://0.0.0.0:4719/?from=cli` → 쪽지 둘 다 `http://localhost:4719/…`(「폰 앱 안에서 연다」). 폰 쪽지를 누르자 웹뷰가
+  「데스크톱 직통」으로 `?from=show-http` 를 열었다. 그동안 cloudflared 0개.
 
 ## 자체 중계 (2026-09-29, 맥미니)
 

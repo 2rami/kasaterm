@@ -310,8 +310,56 @@ pub fn allow_phone(id: &str) -> Result<Duration, &'static str> {
         .is_none();
     if fresh {
         eprintln!("[kasanet] 폰 {} 허용", id.fmt_short());
+        note_phone_app();
     }
     Ok(PHONE_TTL)
+}
+
+/// 앱 안 웹뷰로 데스크톱 localhost 를 여는 폰 앱이 있다고 보는 기간. 그런 판만 카사넷 등록을 하므로 마지막 등록
+/// 시각으로 판을 가른다 — 등록 수명(15분)으로 가르면 폰 앱이 잠든 사이 보여 주기가 임시 터널로 떨어진다.
+const PHONE_APP_FRESH: Duration = Duration::from_secs(30 * 24 * 3600);
+const PHONE_APP_FILE: &str = "kasanet-phone-app.json";
+static PHONE_APP_AT: Mutex<Option<u64>> = Mutex::new(None);
+
+/// 키 옆. 격리 인스턴스가 이번 실행 전용 키로 떴으면(시험도) 파일 없이 메모리에만.
+fn phone_app_path() -> Option<std::path::PathBuf> {
+    if cfg!(test) || (std::env::var_os(identity::KEY_PATH_ENV).is_none() && isolated()) {
+        return None;
+    }
+    Some(identity::default_key_path()?.with_file_name(PHONE_APP_FILE))
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+pub(crate) fn note_phone_app() {
+    let now = unix_now();
+    if let Ok(mut at) = PHONE_APP_AT.lock() {
+        *at = Some(now);
+    }
+    if let Some(path) = phone_app_path() {
+        let _ = std::fs::write(
+            path,
+            serde_json::json!({ "registered_at": now }).to_string(),
+        );
+    }
+}
+
+/// 폰 보여 주기에서 이 기기 localhost 주소를 임시 터널 없이 넘겨도 되나 — 새 판 폰 앱이 최근에 등록한 적이 있다.
+/// 그 앱은 쪽지의 localhost 주소를 앱 안 웹뷰로 연다(직통이면 카사넷, 아니면 관문 `/net/tcp`).
+pub fn phone_app_opens_localhost() -> bool {
+    let remembered = PHONE_APP_AT.lock().ok().and_then(|at| *at);
+    let at = remembered.or_else(|| {
+        let text = std::fs::read_to_string(phone_app_path()?).ok()?;
+        serde_json::from_str::<Value>(&text)
+            .ok()?
+            .get("registered_at")?
+            .as_u64()
+    });
+    at.is_some_and(|at| unix_now().saturating_sub(at) < PHONE_APP_FRESH.as_secs())
 }
 
 async fn sweep_phones() {

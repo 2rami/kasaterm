@@ -8,6 +8,7 @@ import 'hub_model.dart';
 import 'kasanet.dart';
 import 'push.dart';
 import 'screens/connect.dart';
+import 'screens/dev_server.dart';
 import 'screens/conversation_view.dart';
 import 'screens/nacho_home.dart';
 import 'screens/terminal.dart';
@@ -235,6 +236,12 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       if (_connection.phase == ConnectionPhase.restoring) _pendingLink = link;
       return;
     }
+    final url = Uri.tryParse(link.url ?? '');
+    final nav = navigatorKey.currentState;
+    if (url != null && url.hasScheme && nav != null) {
+      await openShownLink(nav, server, url, machine: link.machine);
+      return;
+    }
     final pane = link.pane;
     if (pane == null) return;
     final List<Pane> panes;
@@ -244,7 +251,6 @@ class _RootScreenState extends State<RootScreen> with WidgetsBindingObserver {
       return;
     }
     final found = panes.where((p) => p.id == pane).firstOrNull;
-    final nav = navigatorKey.currentState;
     if (found == null ||
         nav == null ||
         !mounted ||

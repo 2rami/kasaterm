@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../net_tcp.dart';
@@ -151,6 +152,44 @@ class _DevServerScreenState extends State<DevServerScreen> {
           : WebViewWidget(controller: web),
     );
   }
+}
+
+/// 데스크톱이 보여 주기로 넘긴 그 기계의 localhost 주소면 (포트, 경로·쿼리) — 앱 안 웹뷰로 연다. 새 판 폰 앱이
+/// 등록한 데스크톱만 이런 주소를 쪽지에 넣는다(옛 판에는 임시 터널 주소). 폰에는 제 localhost 서버가 없으니
+/// 쪽지의 localhost 는 늘 그 쪽지를 낸 데스크톱이다.
+({int port, String path})? desktopLocal(Uri u) {
+  const hosts = {'localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0'};
+  if (!(u.scheme == 'http' || u.scheme == 'https') || !hosts.contains(u.host)) {
+    return null;
+  }
+  final port = u.hasPort ? u.port : (u.scheme == 'https' ? 443 : 80);
+  final path =
+      (u.path.isEmpty ? '/' : u.path) + (u.hasQuery ? '?${u.query}' : '');
+  return (port: port, path: path);
+}
+
+/// 보여 주기 링크를 연다 — 데스크톱 localhost 면 앱 안 웹뷰, 아니면 밖(사파리).
+Future<void> openShownLink(
+  NavigatorState nav,
+  Server server,
+  Uri u, {
+  String? machine,
+}) async {
+  final local = desktopLocal(u);
+  if (local == null) {
+    await launchUrl(u, mode: LaunchMode.externalApplication);
+    return;
+  }
+  await nav.push(
+    MaterialPageRoute<void>(
+      builder: (_) => DevServerScreen(
+        server: server,
+        port: local.port,
+        machine: machine,
+        path: local.path,
+      ),
+    ),
+  );
 }
 
 /// 포트(와 경로)를 물어 개발 서버 화면을 연다.

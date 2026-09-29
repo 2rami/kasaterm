@@ -959,7 +959,8 @@ async fn open_image_handler(
 /// `GET /open-url?url=<url>&pane=<pid>` — pane 셸의 `open` 셰임·`kasaterm-cli
 /// open`·카사크롬 `browser_show_human` 이 부른다. 호스트가 「그 pane 을 보는 거울」로
 /// 되돌리거나 직접 연다. 도착지가 「폰」이면 여기서 먼저 임시 터널로 바깥 주소를
-/// 만들어 `url` 로 돌려준다 — 부른 쪽(학생)이 그 링크를 답장에 적을 수 있게.
+/// 만들어 `url` 로 돌려준다 — 부른 쪽(학생)이 그 링크를 답장에 적을 수 있게. 이 기기
+/// localhost 이고 새 판 폰 앱이면 터널 없이 그대로 넘긴다(`quicktunnel::in_app_url`).
 /// GUI 의 폰 경로는 이미 바깥 주소면 그대로 쪽지에 넣으므로 두 번 세우지 않는다.
 async fn open_url_handler(
     backend: Arc<dyn Backend>,
@@ -971,7 +972,10 @@ async fn open_url_handler(
     } else { params.get("pane").map(|s| s.as_str()).filter(|s| !s.is_empty()) };
     let phone = crate::machines::opens_on_phone();
     let mut tunnel_error = None;
-    let shown = if phone && !url.is_empty() {
+    let in_app = if phone { crate::quicktunnel::in_app_url(&url) } else { None };
+    let shown = if let Some(local) = in_app.clone() {
+        local
+    } else if phone && !url.is_empty() {
         let raw = url.clone();
         match tokio::task::spawn_blocking(move || crate::quicktunnel::public_url(&raw)).await {
             Ok(Ok(public)) => public,
@@ -984,6 +988,8 @@ async fn open_url_handler(
             let mut body = serde_json::json!({ "ok": true, "url": shown,
                 "target": if phone { "phone".to_string() } else { crate::machines::kasachrome_machine() } });
             if let Some(e) = tunnel_error { body["tunnel_error"] = serde_json::json!(e); }
+            // 폰 앱 안 웹뷰가 카사넷(아니면 관문)으로 연다 — 바깥 주소가 없으니 답장에 이 주소를 링크로 적지 않게.
+            if in_app.is_some() { body["in_app"] = serde_json::json!(true); }
             body
         }
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),

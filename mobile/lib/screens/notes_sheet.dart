@@ -1,7 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'dev_server.dart';
 
 import '../hub_model.dart';
 import '../server.dart';
@@ -133,9 +133,11 @@ class _NotesSheetState extends State<NotesSheet> {
                                 },
                                 onLink: (u) {
                                   model.markRead(n);
-                                  launchUrl(
+                                  openShownLink(
+                                    Navigator.of(context),
+                                    widget.server,
                                     u,
-                                    mode: LaunchMode.externalApplication,
+                                    machine: n.machine,
                                   );
                                 },
                               ),
@@ -256,7 +258,7 @@ class _NoteRow extends StatelessWidget {
         link != null && (link.scheme == 'http' || link.scheme == 'https');
     return ListTile(
       // 페이지 쪽지는 학생 화면이 아니라 그 주소로 — 「폰」을 골라 둔 동안 학생이
-      // 보여 주려 연 것이라 사파리가 맞다.
+      // 보여 주려 연 것이다. 데스크톱 localhost 면 앱 안 웹뷰, 아니면 사파리.
       onTap: hasLink
           ? () => onLink(link)
           : p == null

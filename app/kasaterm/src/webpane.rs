@@ -548,11 +548,17 @@ impl App {
         let proxy = self.proxy.clone();
         let url_owned = url.to_string();
         std::thread::spawn(move || {
-            let (public, did) = match kasa_mcp::quicktunnel::public_url(&url_owned) {
-                Ok(p) if p != url_owned => (p, format!("원래 주소 {url_owned}")),
-                Ok(p) => (p, String::new()),
-                // 터널을 못 세워도 쪽지는 보낸다 — 같은 와이파이면 열릴 수 있고, 이유가 남아야 고친다.
-                Err(e) => (url_owned.clone(), format!("바깥 주소를 못 만들었어요: {e}")),
+            // 새 판 폰 앱은 이 기기 localhost 를 앱 안 웹뷰로 연다 — 임시 터널을 세우지 않는다.
+            let in_app = kasa_mcp::quicktunnel::in_app_url(&url_owned);
+            let (public, did) = if let Some(local) = in_app.clone() {
+                (local, "이 기기 localhost — 폰 앱 안에서 연다".to_string())
+            } else {
+                match kasa_mcp::quicktunnel::public_url(&url_owned) {
+                    Ok(p) if p != url_owned => (p, format!("원래 주소 {url_owned}")),
+                    Ok(p) => (p, String::new()),
+                    // 터널을 못 세워도 쪽지는 보낸다 — 같은 와이파이면 열릴 수 있고, 이유가 남아야 고친다.
+                    Err(e) => (url_owned.clone(), format!("바깥 주소를 못 만들었어요: {e}")),
+                }
             };
             let input = kasa_mcp::notes::NoteInput {
                 pane: if pane.is_empty() { "-".to_string() } else { pane.clone() },
@@ -568,7 +574,9 @@ impl App {
             if let Some(n) = kasa_mcp::notes::add(input) {
                 kasa_mcp::push::note_arrived_blocking(&n.character, &n.kind, &n.summary, &n.pane, Some(&public));
             }
-            let toast = if public == url_owned {
+            let toast = if in_app.is_some() {
+                "폰 쪽지로 보냈어요 · 앱 안에서 열림".to_string()
+            } else if public == url_owned {
                 "폰 쪽지로 보냈어요".to_string()
             } else {
                 format!("폰 쪽지로 보냈어요 · {}", public.trim_start_matches("https://"))
